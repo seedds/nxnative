@@ -96,6 +96,7 @@ class Labels(unittest.TestCase):
         self.assertEqual(self.names('Black screen', '### What happened\n\nIt is black.\n'), {'bug'})
         self.assertEqual(self.names('More', '### What is missing\n\nA thing.\n'), {'enhancement'})
         self.assertEqual(self.names('A game', '### Survey and what happened\n\n_No response_\n'), {'new game'})
+        self.assertEqual(self.names('Memory on an 8 GB M1', '### What to test\n\nPR #1234 against main\n'), {'test request'})
         self.assertEqual(self.names('Black screen', 'What happened: ### What happened in the text'), set())
         self.assertEqual(self.names('Proposal: more', '### What happened\n\nIt is black.\n'), {'bug'})   # the form beats the title
 
@@ -108,7 +109,7 @@ class Labels(unittest.TestCase):
             self.assertEqual(self.names(title), set(), title)
 
     def test_forms_have_their_headings(self):
-        for form, heading, name in (('bug_report.yml', 'What happened', 'bug'), ('feature_request.yml', 'What is missing', 'enhancement'), ('game_request.yml', 'Survey and what happened', 'new game')):
+        for form, heading, name in (('bug_report.yml', 'What happened', 'bug'), ('feature_request.yml', 'What is missing', 'enhancement'), ('game_request.yml', 'Survey and what happened', 'new game'), ('test_request.yml', 'What to test', 'test request')):
             self.assertIn(f'label: {heading}\n', (TEMPLATES / form).read_text(encoding='utf-8'))
             self.assertEqual(issue_areas.FORMS[heading], name)
         others = {f.name: f.read_text(encoding='utf-8') for f in TEMPLATES.glob('*_*.yml')}

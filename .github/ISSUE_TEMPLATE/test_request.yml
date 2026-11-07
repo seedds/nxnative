@@ -1,0 +1,76 @@
+name: Test request on a low-spec device
+description: Ask someone with a base Mac or another low-spec device to run a change or a build and report how it plays
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Most contributors measure on the device they have, often a fast Mac. No one has to own a base Mac ([charter](https://github.com/seedds/nxnative/blob/main/docs/charter.md#devices)); this form asks someone who owns one, and wants to help, to try a change: a quick played check, before and after. A pull request does not wait for an answer.
+        A tester needs their own copy of the game. Never attach or ask for game files, keys or anything extracted from a game.
+  - type: input
+    id: change
+    attributes:
+      label: What to test
+      description: The pull request, branch or commit, and the revision to compare it with (usually `main` or the merge base).
+      placeholder: "PR #1234 against main at 7bccfc88"
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why it needs a low-spec test
+      description: What the change does and what could get better or worse there (memory, CPU per frame, pacing, load time, power).
+    validations:
+      required: true
+  - type: dropdown
+    id: device
+    attributes:
+      label: Device needed
+      description: The device class the result matters on. Pick every one that applies.
+      multiple: true
+      options:
+        - Mac M1, 8 GB (Switch game reference)
+        - Mac M2, 16 GB, 10-core GPU (Switch 2 game reference)
+        - Another 8 GB or 16 GB base-chip Mac (M1 to M4)
+        - iPhone 15 Pro or Pro Max (8 GB)
+        - M1 iPad
+    validations:
+      required: true
+  - type: input
+    id: games
+    attributes:
+      label: Games, title IDs and versions
+      description: The games to try. Several are fine; say which matters most.
+      placeholder: "Splatoon Raiders, 0400380020056000, v65536"
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: What to do
+      description: Where in the game, for how long, and which settings. A save point or a smoke route (`dm/games/<id>/smoke.tsv`) makes the two runs comparable. Keep it under about 15 minutes.
+      placeholder: |
+        From the first boss fight's third stage, play 2 minutes, docked, MetalFX, render scale 1.0.
+        Once on main, once on the change, same place and settings.
+    validations:
+      required: true
+  - type: textarea
+    id: report
+    attributes:
+      label: What to report
+      description: The numbers that answer the question. Defaults are filled in; remove what does not apply.
+      value: |
+        - Device, chip, GPU cores, memory, macOS or iOS version:
+        - Commit of each build (`DMCommit` in the Mac app's Info.plist):
+        - How it played on each build (smooth, stutters, paging, crashes):
+        - The `[nvn] timing` and `power` lines of the scene from each log (`~/Library/Logs/nxnative/<title ID>.log`; `log.txt` on iOS):
+        - Memory: Activity Monitor's memory pressure and the game's Memory column, or a `DM_MEMSTAT` file:
+        - Screenshots where the picture differs:
+    validations:
+      required: true
+  - type: checkboxes
+    id: no-game-files
+    attributes:
+      label: No game files
+      options:
+        - label: Nothing here asks for or contains game files, keys or data extracted from a game.
+          required: true

@@ -4,7 +4,11 @@ Issues and pull requests are welcome. This page says how a change gets in; what 
 
 ## Reporting a problem
 
+**First, update to the latest `main`** (`git fetch origin` and rebuild from `origin/main`) and try again: the problem may already be fixed, and a report against an old commit is often traced to something that changed since. Then search the open and closed issues for the game and the symptom.
+
 Open an issue with the bug report form. It asks for what a problem is traced with: the nxnative commit, the shader chain version, the game's title ID and version, the device and OS, how the game was built and run, environment overrides, and the whole log of the run. [Playing](docs/playing.md) says where the iPhone app's log is; a Mac app writes `~/Library/Logs/nxnative/<title ID>.log`.
+
+**Tag it through its title.** Labels are added automatically from an issue's title (and a pull request's changed files): put the game's name and title ID in it, and the area in plain words (`Star Fox (0400E88025B1A000): black screen on Mac after the title`, `NVN: …`, `iOS: …`). Check the labels it gets, and fix the title if they are wrong; that is how others working on the same game or area find it.
 
 `python3 scripts/bug_report.py <title ID | path to the .app | NSP folder>` collects most of this into one zip to attach: `report.md` with the game, commit, chain version, device, settings and the list of files, plus the Mac app's logs, the NSP script's logs under `<title ID>_build/logs` and recent crash reports. Add `--ios-log log.txt` for an iPhone log. It reads only text logs and settings, never game files or keys; it writes your home folder as `~` and drops lines that look like key material. Look at the zip before you attach it.
 
@@ -14,6 +18,9 @@ Never commit or attach game files, keys, title keys or anything extracted from a
 
 ## Before you start
 
+- **Read the [charter](docs/charter.md)**, at least its five-line summary: what the project is for, the Macs a measurement should name, and what counts as a regression.
+- **Look for existing work first, every time**: open and merged pull requests and issues by the game's label (`game: <title ID>`) and area label, by the game's name and title ID in titles, and the active branches ([how, with or without `gh`](docs/agents/06-dev-loop.md#0-before-you-start-existing-work-then-a-branch)). Many people work on the same games, mostly through agents that don't see each other: build on what is there, or ask its author.
+- **Make your work findable**: open a draft pull request early, with the game's name and title ID in its title (`Star Fox (0400E88025B1A000): …`), and link the issue it belongs to.
 - Read [AGENTS.md](AGENTS.md): it lists where to start for each kind of task, and the rules for profiles, per-build knowledge and the shader translation chain.
 - A crash, a hang or a wrong picture: search the [symptom index](docs/agents/symptoms.md) for the text in the log first.
 - Another game: run `scripts/build_ipa_from_nsp.py` on its NSP folder and follow [Port another game](docs/development.md#port-another-game).
@@ -21,7 +28,8 @@ Never commit or attach game files, keys, title keys or anything extracted from a
 
 ## A pull request
 
-- **One change per PR, off `main`.** Rebase on `main` rather than merging it in.
+- **One change per PR, on its own branch off `main`** (in your fork if you have no write access), never on your local `main` ([the cycle](docs/agents/06-dev-loop.md#0-before-you-start-existing-work-then-a-branch)). Rebase on `main` rather than merging it in. A general fix found while bringing up a game is its own PR, opened as soon as it works.
+- **Its tier.** Say whether it is narrow, shared or wide, and show what that tier asks for ([charter](docs/charter.md#pull-requests), [which tier](docs/agents/06-dev-loop.md#which-tier)).
 - **Commits.** Each commit message says what changed and why, in plain English sentences, as the history does: the symptom, the cause, the fix, and what was measured or checked.
 - **Front ends.** A change a front end has to act on takes a `Front-ends:` line in the commit message and the PR text, unless git already shows it ([Following main](docs/frontends.md#following-main)). A change that makes the host read saves or other kept data differently also carries the old form forward.
 - **Where findings go.** A fact about one game goes in its note (`dm/games/<id>/README.md`). A general mechanism gets an entry in `docs/reference/<subsystem>.md` (Symptom, Cause, Fix, Found on), followed by `python3 dm/tools/docs_symptoms.py`. A new game takes its profile, its note and its row in the games table ([dm/games/README.md](dm/games/README.md)).

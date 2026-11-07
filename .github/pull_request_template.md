@@ -1,3 +1,4 @@
+<!-- Title: name the game and its title ID when it is about one game ("Star Fox (0400E88025B1A000): …"), so searches and labels find it. Open it as a draft early. -->
 <!-- Keep a PR to one change. AGENTS.md and CONTRIBUTING.md say where findings go; link to them instead of repeating them here. -->
 
 ## What and why
@@ -9,7 +10,9 @@
 <!-- Delete what does not apply. Say what was not checked too. -->
 - Tests: <!-- e.g. make -C dm/host/tests GAME=<id> run; make -C dm/gfx/tests GAME=<id> run (Apple silicon, Metal); the dm/tools/tests that apply -->
 - Games run, with title ID and version: <!-- what was played, for how long, and what was compared (log lines, frame times, screenshots) -->
-- Devices and OS: <!-- e.g. M2 Max, macOS 26.1; iPhone 17 Pro Max, iOS 26.1 -->
+- Existing work: <!-- the issues, pull requests and branches searched for the same area or game, and how this relates to them (docs/charter.md, Before starting work) -->
+- Devices and OS: <!-- e.g. M2 Max, macOS 26.1; iPhone 17 Pro Max, iOS 26.1. A cost you know of on other devices, the base Macs especially, goes here too (docs/charter.md, Devices) -->
+- Reach and risk: <!-- narrow, shared or wide (docs/charter.md, The bar rises with reach and risk), and what that tier asks for. For a default changed for every game: the devices it was measured on (a test request issue can ask for another), the switch that restores the old behaviour, and the docs/decisions.md entry -->
 - For a change to the shader chain, the host or a tool that every game uses: the `scripts/regress.py check --games` report on the games it most likely reaches (`regress.py impact` helps), or why none ([06-dev-loop.md](https://github.com/seedds/nxnative/blob/main/docs/agents/06-dev-loop.md))
 - Measurements before and after, where the change is about speed, memory or power
 

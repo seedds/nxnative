@@ -115,11 +115,13 @@ def split_params(text):   # commas inside template arguments (spvUnsafeArray<uin
         if ch == ',' and depth == 0: params.append(cur.strip()); cur = ''
         else: cur += ch
     return params
-def block_end(src, start):   # the index of the brace closing the block opened at src[start]
+BRACE = re.compile(r'[{}]')
+def block_end(src, start):   # the index of the brace closing the block opened at src[start] (start itself when it is no brace); the regular expression steps from brace to brace
+    if start < len(src) and src[start] not in '{}': return start
     depth = 0
-    for i in range(start, len(src)):
-        depth += {'{': 1, '}': -1}.get(src[i], 0)
-        if depth == 0: return i
+    for b in BRACE.finditer(src, start):
+        depth += 1 if b.group() == '{' else -1
+        if depth == 0: return b.start()
     raise ValueError('dmsh_hmma16816_f16: block not closed')
 def hmma_msl(msl):
     m = re.search(r'\n(\w+) dmsh_hmma16816_f16\(([^)]*)\)\n\{', msl)
@@ -135,15 +137,17 @@ def hmma_msl(msl):
     name = lambda x: group1(r'(\w+)$', x)
     v = dict(zip(HMMA_ARGS, [name(x) for x in plain]), scr=name(scr[0]), dt=group1(r'thread (\w+)&', plain[-1], re.match), rt=m.group(1))
     body_end = block_end(msl, m.end() - 1)
-    # The calls, and the functions they are in: where each opens its body (a brace at the start of a line), and the shared memory array it declares besides the scratch
-    calls, callers = [], {}
+    # The calls, and the functions they are in: where each opens its body (a brace at the start of a line), and the shared memory array it declares besides the scratch.
+    # A function's end is found once (ends): a network's function holds hundreds of calls in up to 1.8 MB of MSL, and a scan per call took Ocarina of Time's 71 HMMA shaders 578 s of one core
+    calls, callers, ends = [], {}, {}
     for c in HMMA_CALL.finditer(msl):
         if m.start() <= c.start() <= body_end: continue
         open_at = msl.rfind('\n{\n', 0, c.start()) + 1
-        if open_at <= 0 or block_end(msl, open_at) < c.start(): raise ValueError('dmsh_hmma16816_f16: a call outside a function body')
+        if open_at > 0 and open_at not in ends: ends[open_at] = block_end(msl, open_at)
+        if open_at <= 0 or ends[open_at] < c.start(): raise ValueError('dmsh_hmma16816_f16: a call outside a function body')
         if open_at not in callers:
             scratch = split_params(c.group(1))[-1]
-            arrays = [(t, n) for t, n in TG_ARRAY.findall(msl, open_at, block_end(msl, open_at)) if n != scratch]
+            arrays = [(t, n) for t, n in TG_ARRAY.findall(msl, open_at, ends[open_at]) if n != scratch]
             callers[open_at] = arrays[0] if len(arrays) == 1 else None
         calls.append((c, open_at))
     if not calls: return msl

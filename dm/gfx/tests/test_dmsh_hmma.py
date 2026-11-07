@@ -16,7 +16,7 @@ import tempfile
 import unittest
 
 TOOLS = Path(__file__).resolve().parents[1] / 'tools'
-NAMES = {'hmma_msl', 'split_params', 'block_end', 'HMMA_BODY', 'HMMA_ARGS', 'HMMA_CALL', 'TG_ARRAY'}
+NAMES = {'hmma_msl', 'split_params', 'block_end', 'BRACE', 'HMMA_BODY', 'HMMA_ARGS', 'HMMA_CALL', 'TG_ARRAY'}
 tree = ast.parse((TOOLS / 'dmsh_build.py').read_text())
 selected = [n for n in tree.body if (isinstance(n, ast.FunctionDef) and n.name in NAMES)
             or (isinstance(n, ast.Assign) and any(getattr(t, 'id', None) in NAMES for t in n.targets))]
@@ -294,6 +294,22 @@ class HmmaRewrite(unittest.TestCase):
     def test_unexpected_signature_refused(self):
         with self.assertRaises(ValueError):
             hmma_msl(HEAD + HELPER.replace('thread const int& _26, ', ''))
+
+    def test_block_end_as_a_scan_of_every_character(self):   # block_end steps from brace to brace; it gives what a scan of every character gives, a start past the end and an open block included
+        def scan(src, start):
+            depth = 0
+            for i in range(start, len(src)):
+                depth += {'{': 1, '}': -1}.get(src[i], 0)
+                if depth == 0: return i
+            return None
+        def found(src, start):
+            try: return scope['block_end'](src, start)
+            except ValueError: return None
+        for src in ('{a{b}c}d', '{{}', 'a{}', '}{}', '', '{'):
+            for start in range(len(src) + 2): self.assertEqual(found(src, start), scan(src, start), (src, start))
+        src = HEAD + HELPER + SEQ_KERNEL   # every brace of a shader, and some other characters
+        for start in [i for i, ch in enumerate(src) if ch in '{}'] + list(range(0, len(src), 97)):
+            self.assertEqual(found(src, start), scan(src, start), start)
 
 
 @unittest.skipUnless(shutil.which('xcrun') and shutil.which('clang'), 'needs Xcode')

@@ -57,7 +57,7 @@ static UILabel *front_ios_fps_label(void);
     CGFloat scale = screen ? screen.nativeScale : MAX(self.traitCollection.displayScale, 1);
     if (self.maxPixelWidth > 0) scale = MIN(scale, self.maxPixelWidth / MAX(self.bounds.size.width, 1));
     l.contentsScale = scale;
-    l.drawableSize = CGSizeMake(self.bounds.size.width * l.contentsScale, self.bounds.size.height * l.contentsScale);
+    l.drawableSize = CGSizeMake(round(self.bounds.size.width * l.contentsScale), round(self.bounds.size.height * l.contentsScale));
 }
 @end
 static void tv_attach(void);
@@ -187,7 +187,19 @@ static void launcher_done(void) { [g_root startGame]; }
     UIEdgeInsets gameInsets = dm_game_safe_insets(b, self.view.safeAreaInsets, duoPortrait);
     BOOL onTV = self.game.superview != self.view;   // the TV's view lays the picture out; the phone is all pad
     DmLayout layout = onTV ? dm_layout_pad_only(b) : dm_layout_picture(dm_layout(b, gameInsets, self.partiallyOpen, division, g_picture_aspect), b, self.fill, g_picture_aspect);
-    if (!onTV) self.game.frame = layout.game;
+    if (!onTV) {
+        // Keep the view and its drawable on the same physical-pixel grid. A fractional fit
+        // (782.222222 points at 3x) otherwise stretches a rounded 2346-pixel drawable.
+        CGFloat scale = self.view.window.windowScene.screen.nativeScale;
+        if (scale <= 0) scale = MAX(self.game.traitCollection.displayScale, 1);
+        CGRect r = layout.game; BOOL cover = self.fill && !layout.separated;
+        CGFloat x0 = cover ? floor(CGRectGetMinX(r) * scale) : ceil(CGRectGetMinX(r) * scale);
+        CGFloat y0 = cover ? floor(CGRectGetMinY(r) * scale) : ceil(CGRectGetMinY(r) * scale);
+        CGFloat x1 = cover ? ceil(CGRectGetMaxX(r) * scale) : floor(CGRectGetMaxX(r) * scale);
+        CGFloat y1 = cover ? ceil(CGRectGetMaxY(r) * scale) : floor(CGRectGetMaxY(r) * scale);
+        layout.game = CGRectMake(x0 / scale, y0 / scale, MAX(x1 - x0, 0) / scale, MAX(y1 - y0, 0) / scale);
+        self.game.frame = layout.game;   // touch mapping below uses this same snapped rectangle
+    }
     layout.topSafeOnly = duoPortrait;
     NSString *line = [NSString stringWithFormat:@"%@, hinge %ld%s, divisions %@, picture %@, controls %@", onTV ? @"pad only (picture on the TV)" : layout.separated ? @"split" : self.fill ? @"overlay, Fill" : @"overlay",
                       (long)self.hingeStatus, self.partiallyOpen ? " (half open)" : "", regionLog, NSStringFromCGRect(layout.game), NSStringFromCGRect(layout.controls)];

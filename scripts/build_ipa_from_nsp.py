@@ -87,6 +87,7 @@ PROVISIONAL = False                     # build from a provisional profile even 
 HEAP_CHECK = True                       # a provisional profile whose game has virtual address memory and sets a heap: boot it on the Mac until its heap request (a few seconds) to size the heap region; with virtual address memory, the address region check too (also for a derived profile)
 HEAP_CHECK_SECS = 30                    # the longest heap check (it stops at the first heap request, or HEAP_CHECK_NNMAIN_SECS into nnMain without one)
 HEAP_CHECK_NNMAIN_SECS = 5
+HEAP_CHECK_ROUNDS = 3                   # boots of the heap check: each fix of the heap region lets the next boot reach the checks behind it
 REGION_CHECK_NNMAIN_SECS = 15           # the address region check: the regions a game takes in nninitStartup and its first seconds in nnMain
 SWITCH_ALIAS = 0x1000000000             # the Switch's alias region (64 GB), which holds what a game reserves unchanged
 
@@ -1961,31 +1962,37 @@ def heap_check(repo, d, patched, work, env, logs, g):
     HEAP_CHECK_NNMAIN_SECS in nnMain without one (Engage sets none): a few seconds. The keys go into the profile (profile_guess.py heap_signals), which is stamped"""
     PROG.stage('heap check')
     host, rd, log = work / 'tools/dmhost', work / 'tmp/heap_run', logs / 'heap_check.log'
-    PROG.set(step='building the Mac host'); build_mac_host(repo, host, env, logs, g)
-    rmtree(rd)
-    for x in ('save', 'temp', 'msl'): (rd / x).mkdir(parents=True)
-    # a fresh save and temporary storage, no shader libraries (only the heap request matters), the profile's shader map, and the profile's alias region: the keys are for that layout, which is the iPhone's, not the Mac's 64 GB
-    henv = dict(env, DM_ROMFS=str(rfs.source(d)), DM_SAVE=str(rd / 'save'), DM_TEMP=str(rd / 'temp'), DM_MSL_DIR=str(rd / 'msl'), DM_NVN_SHMAP=str(g.table('shader_map.tsv')), DM_ALIAS_SIZE=g.get('mem_alias'))
-    PROG.set(step='booting the game')
-    t0, seen = time.time(), {}
-    def done():   # the first heap request answered (or refused for good), or nnMain running for a while without one
-        try: text = log.read_text(errors='replace')
-        except OSError: return False
-        if 'SetHeapSize OOM' in text or '[mem] heap ' in text: return True
-        if '>>> nnMain' in text: seen.setdefault('nnmain', time.time())
-        return time.time() - seen.get('nnmain', time.time()) > HEAP_CHECK_NNMAIN_SECS
-    rc = boot_mac(host, patched, henv, rd, log, HEAP_CHECK_SECS, done)
-    text = log.read_text(errors='replace'); rmtree(rd)
-    sig = {k: v for k, v in pg.heap_signals(text, g).items() if g.get(k, '') != v[0]} | pg.depth_signal(text, g)   # the boot often passes the game's depth mode call too
-    for k, (v, why) in sig.items(): say(f'heap check: {k} {v}: {why}')
-    m = re.search(r'\[mem\] heap ([0-9.]+ GB)', text)
-    how = ('the heap request did not fit' if 'SetHeapSize OOM' in text else f'heap {m.group(1)}' if m else 'no heap set' if '>>> nnMain' in text
-           else f'the host stopped before nnMain (exit {rc})' if rc is not None else 'no nnMain within the time limit')
-    if sig: g = set_keys(g, sig, 'Heap check on the Mac')
-    p = g.dir / 'game.tsv'; atomic_text(p, p.read_text(encoding='utf-8') + f'\n# heap check: {time.strftime("%Y-%m-%d")}, {how}' + (f'; set {", ".join(sig)}' if sig else '') + '\n')
-    if not m and '>>> nnMain' not in text and 'SetHeapSize OOM' not in text:   # stopped before any heap request: worth a look before the IPA is tried
+    # Up to HEAP_CHECK_ROUNDS boots: a heap request that did not fit the heap region stops the first one there (mem_alias / mem_reserve set), and only the next boot reaches the app pool
+    # check behind it (Pokémon FireRed / LeafGreen 2026: a 3.15 GB heap plus 102 MB of modules over the 3.2 GB pool, which mem_used then covers)
+    set_all = {}
+    for rnd in range(HEAP_CHECK_ROUNDS):
+        PROG.set(step='building the Mac host'); build_mac_host(repo, host, env, logs, g)
+        rmtree(rd)
+        for x in ('save', 'temp', 'msl'): (rd / x).mkdir(parents=True)
+        # a fresh save and temporary storage, no shader libraries (only the heap request matters), the profile's shader map, and the profile's alias region: the keys are for that layout, which is the iPhone's, not the Mac's 64 GB
+        henv = dict(env, DM_ROMFS=str(rfs.source(d)), DM_SAVE=str(rd / 'save'), DM_TEMP=str(rd / 'temp'), DM_MSL_DIR=str(rd / 'msl'), DM_NVN_SHMAP=str(g.table('shader_map.tsv')), DM_ALIAS_SIZE=g.get('mem_alias'))
+        PROG.set(step='booting the game')
+        t0, seen = time.time(), {}
+        def done():   # the first heap request answered (or refused for good), or nnMain running for a while without one
+            try: text = log.read_text(errors='replace')
+            except OSError: return False
+            if 'SetHeapSize OOM' in text or '[mem] heap ' in text: return True
+            if '>>> nnMain' in text: seen.setdefault('nnmain', time.time())
+            return time.time() - seen.get('nnmain', time.time()) > HEAP_CHECK_NNMAIN_SECS
+        rc = boot_mac(host, patched, henv, rd, log, HEAP_CHECK_SECS, done)
+        text = log.read_text(errors='replace'); rmtree(rd)
+        sig = {k: v for k, v in pg.heap_signals(text, g).items() if g.get(k, '') != v[0]} | pg.depth_signal(text, g)   # the boot often passes the game's depth mode call too
+        for k, (v, why) in sig.items(): say(f'heap check: {k} {v}: {why}')
+        m = re.search(r'\[mem\] heap ([0-9.]+ GB)', text)
+        how = ('the heap request did not fit' if 'SetHeapSize OOM' in text else 'the heap and the modules did not fit the app pool' if re.search(r'\[mem\] SetHeapSize \S+ \+ modules \S+ > app pool', text)
+               else f'heap {m.group(1)}' if m else 'no heap set' if '>>> nnMain' in text
+               else f'the host stopped before nnMain (exit {rc})' if rc is not None else 'no nnMain within the time limit')
+        if sig: g = set_keys(g, sig, 'Heap check on the Mac'); set_all.update(sig)
+        if not sig or 'SetHeapSize OOM' not in text: break
+    p = g.dir / 'game.tsv'; atomic_text(p, p.read_text(encoding='utf-8') + f'\n# heap check: {time.strftime("%Y-%m-%d")}, {how}' + (f'; set {", ".join(set_all)}' if set_all else '') + '\n')
+    if not m and '>>> nnMain' not in text and 'SetHeapSize OOM' not in text and 'mem_used' not in set_all:   # stopped before any heap request: worth a look before the IPA is tried
         PROG.say(f'[RED] heap check: {how}; ---- last lines of {log} ----\n' + ''.join(collections.deque(open(log, errors='replace'), maxlen=20)).rstrip('\n'))
-    PROG.end(f'{how} in {hms(time.time() - t0)}' + (f'; set {", ".join(sig)}' if sig else ''))
+    PROG.end(f'{how} in {hms(time.time() - t0)}' + (f'; set {", ".join(set_all)}' if set_all else ''))
     return type(g)(g.dir)
 
 

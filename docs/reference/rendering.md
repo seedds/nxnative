@@ -891,6 +891,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Found on:** [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md) and [MIO: Memories in Orbit, issue #941](https://github.com/seedds/nxnative/issues/941). The visibility-buffer shading issue in MIO is still open.
 - **Note:** the replay used to commit its work and wait for the GPU before the first such draw after each GPU write, then read the count on the CPU (`mdi_wait`; still used when a CPU count is needed, including quads, fans and 8-bit indices). In Kamura Village that wait held the submitting thread 14 of its 20 ms a frame on an iPhone (36–54 fps). On the Mac the same scene's submit took 20 ms of wall time for 6.1 ms of work, and now 5.1 ms, all of it work.
 
+### Indirect-count multi-draws split the pass an earlier draw opened
+
+- **Symptom:** in a pass dump (`DM_NVN_PASSDUMP`), `M … indirect-count multi-draw masking: render pass split here` inside scene passes, and the periodic `indirect-count multi-draw masking:` line counts `render pass split` times in the tens of thousands. Each split loads the pass's colour and depth again (Mario Kart World: 2048x1152, 20 MB).
+- **Cause:** `mdx_run` copies a multi-draw's records at its first draw, and the compute pass that copies them cannot run inside a render pass. When an ordinary draw had already opened the pass, the copy ended it.
+- **Fix:** general (`nvn_mtl.m` `mdx_prescan`): a draw that is not such a multi-draw and opens a pass first runs the same forward scan, once per `g_mdx_epoch` and submission, so the multi-draws after it are copied before the pass. Ranges replayed through `draw_multi` are not scanned ahead and behave as before.
+- **Result on Mario Kart World,** the Grand Prix route: at a race frame, masking splits 2 → 0 and mergeable splits 5 → 2 (`tbdr_pass_merge.py`: 118 → 47 MB a frame); on an iPad Pro (M5) over 10 minutes, 72,000 splits → 0; GPU time on an M4 Pro p50 13.0 ms against 13.65–14.1 ms in five runs without it; on the iPad unchanged within noise (race p50 about 14.3 ms).
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md).
+
 ### CPU reads after a drain wait only for later writes
 
 - **Symptom:** a hitch of a second or more as a level opens: a few frames of 330–540 ms whose submission takes 2–3 times its CPU time, and the wait ledger (`DM_NVN_WAITS=1`) shows thousands of indirect-count multi-draw waits for those frames only.

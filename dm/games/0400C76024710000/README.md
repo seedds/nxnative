@@ -19,6 +19,7 @@ The profile used for the runs (not in the repository yet) has these rows in its 
 
 ## Shaders
 
+- 36,779 in the shader map: 18,406 pixel, 10,829 vertex, 6,880 compute, 539 mesh, 62 domain, 33 hull, 30 geometry. They come from the Switch 2 form of the SDF definitions in the KPKA 4.2 PAKs ([SDF definitions in RE Engine PAKs](../../../docs/reference/shaders.md#sdf-definitions-in-re-engine-paks)), plus 139 in the OCIO colour management resources ([Colour management shaders in RE Engine OCIO resources](../../../docs/reference/shaders.md#colour-management-shaders-in-re-engine-ocio-resources)). A program's task and mesh shaders sit in its hull and domain slots.
 - The shader compiler is newer than Donkey Kong Bananza's (control +0x08 is 0x11, DKB's 0x0b): the per-stage storage buffer banks 25..29 and bindless constant buffers come with it.
 - Useful keys: `5aab38bb5ba67ef7` the title's lunar terrain (mesh) with fragment `6c47597348ba33c1` (writes the visibility buffer); `12a52b683eec95c1` the GPU culling queue that writes the mesh draw records; `5318516d206dba46` the instance cull; `95656724c5b02299` the occlusion pyramid; `f6658e3c09d9600a` with `5367453d98983dab` the tonemap.
 
@@ -46,5 +47,6 @@ Through `DM_CTL`, silent (`DM_AUDIO=0`) and with `DM_FOCUS_KEEP=1`: press `A` ab
 ## Found on this game
 
 - [SDF definitions in RE Engine PAKs](../../../docs/reference/shaders.md#sdf-definitions-in-re-engine-paks): KPKA 4.2 and the Switch 2 SDF form.
+- [Colour management shaders in RE Engine OCIO resources](../../../docs/reference/shaders.md#colour-management-shaders-in-re-engine-ocio-resources): every frame black under the UI.
 - [LDC with the bank in its address register (`.IS`)](../../../docs/reference/shaders.md#ldc-with-the-bank-in-its-address-register-is) and [A deferred write under a false guard](../../../docs/reference/shaders.md#a-deferred-write-under-a-false-guard): c1 read at a run-time index.
 - [Pixel `c0 + 0x620`: the sample index and GLSLC's sample position table](../../../docs/reference/shaders.md#pixel-c0--0x620-the-sample-index-and-glslcs-sample-position-table): signed offsets from the centre on an Ounce SDK.

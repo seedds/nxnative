@@ -206,6 +206,23 @@ class PackReuse(unittest.TestCase):
                 p = self.tmp / name; st = p.stat(); data = p.read_bytes(); p.write_bytes(bytes([data[0] ^ 1]) + data[1:])
                 os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns)); self.assert_repacked()
 
+    def test_optional_romfs_overlay_is_bundled_and_invalidates_cache(self):
+        overlay = self.tmp / 'resource-overlay'
+        (overlay / 'System/Resource').mkdir(parents=True)
+        table = overlay / 'System/Resource/test.rsizetable.zs'
+        table.write_bytes(b'patched-resource-table')
+        self.args.romfs_overlay = str(overlay)
+        self.pack()
+        packed = Path(self.args.out) / 'Contents/Resources/romfs_overlay/System/Resource/test.rsizetable.zs'
+        self.assertEqual(packed.read_bytes(), b'patched-resource-table')
+        self.assert_reused()
+        table.write_bytes(b'new-patch')
+        self.assert_repacked()
+        self.assertEqual(packed.read_bytes(), b'new-patch')
+        self.args.romfs_overlay = None
+        self.assert_repacked()
+        self.assertFalse((Path(self.args.out) / 'Contents/Resources/romfs_overlay').exists())
+
     def test_romfs_and_aoc_stat_trees_include_paths_modes_and_empty_directories(self):
         self.pack()
         for name in ('romfs/marker', 'aoc/1/data'):
@@ -597,6 +614,23 @@ class App(unittest.TestCase):
         p = self.launch(); p.communicate(timeout=30)
         self.assertIn('standin host output', (logs / f'{TID}.prev.log').read_text())
         self.assertEqual(self.host_run()['DM_LANG'], 'fr')   # Info.plist DMLanguage
+
+    def test_bundled_romfs_overlay_is_passed_to_host_and_can_be_overridden(self):
+        import argparse
+        overlay = self.tmp / 'test-overlay'
+        (overlay / 'System/Resource').mkdir(parents=True, exist_ok=True)
+        (overlay / 'System/Resource/Test.rsizetable.zs').write_bytes(b'diagnostic overlay')
+        a = argparse.Namespace(**vars(self.args))
+        a.out = str(self.tmp / 'Overlay Game.app')
+        a.romfs_overlay = str(overlay)
+        with contextlib.redirect_stdout(io.StringIO()): pack_app.pack(a)
+        app = Path(a.out); bundled = app / 'Contents/Resources/romfs_overlay'
+        self.assertEqual((bundled / 'System/Resource/Test.rsizetable.zs').read_bytes(), b'diagnostic overlay')
+        p = self.launch(app=app); p.communicate(timeout=30)
+        self.assertEqual(p.returncode, 7)
+        self.assertEqual(self.host_run()['DM_ROMFS_OVERLAY'], str(bundled))
+        p = self.launch(app=app, DM_ROMFS_OVERLAY='/external/explicit'); p.communicate(timeout=30)
+        self.assertEqual(self.host_run()['DM_ROMFS_OVERLAY'], '/external/explicit')
 
     def test_sigterm(self):   # forwarded to the host, whose exit code comes back
         p = self.launch(wait=True)

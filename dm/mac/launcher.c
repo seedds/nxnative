@@ -206,6 +206,13 @@ int main(int argc, char **argv) {
     if (shown == 2) saved_choices();
     cloud_saves_folder();
     setenv("DM_ROOT", sup, 0); setenv("DM_ROMFS", romfs, 0); setenv("DM_SAVE", save, 0); setenv("DM_TEMP", temp, 0);
+    // Optional bundled RomFS overlay is resolved relative to the app, not the
+    // user's home or developer's source tree. Explicit env/env.txt takes priority.
+    snprintf(p, sizeof p, "%s/romfs_overlay", res);
+    if (!stat(p, &st) && S_ISDIR(st.st_mode)) {
+        setenv("DM_ROMFS_OVERLAY", p, 0);
+        fprintf(stderr, "launcher: bundled RomFS overlay %s\n", getenv("DM_ROMFS_OVERLAY"));
+    }
     snprintf(p, sizeof p, "%s/msl", res); setenv("DM_MSL_DIR", p, 0);
     snprintf(p, sizeof p, "%s/font", dm); setenv("DM_FONT_DIR", p, 0);
     snprintf(p, sizeof p, "%s/shader_map.tsv", dm); if (!stat(p, &st)) setenv("DM_NVN_SHMAP", p, 0);

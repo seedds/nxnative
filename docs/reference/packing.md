@@ -398,3 +398,11 @@
 - **Cause:** the base game's HtmlDocument NCA can be sparse too (16 KB, beside the sparse Program NCA). `--html` reads the update's HtmlDocument NCAs, each over a base one when it is a patch, and then every base HtmlDocument NCA on its own; a sparse one read alone fails the hash check while its tables open.
 - **Fix:** `dm/tools/nx_extract/Program.cs` reads no sparse base HtmlDocument NCA on its own (`a sparse HtmlDocument NCA of the base game (… bytes): read only through the update's patch, not alone`), as Horizon mounts it only through its patch.
 - **Found on:** [Minecraft Dungeons II](../../dm/games/0100A7C01B792000/README.md), base v0 with update v131072: the update's patch (`accessible-urls`) and its full legal information NCA are read, the base's legal information NCA too.
+
+
+### A portable Mac app carrying a game-specific RomFS overlay
+
+- **Symptom:** An isolated Mac game build needed a small optional RomFS override (for example, a diagnostic resource-size table), but only ran on the developer's machine when `DM_ROMFS_OVERLAY` pointed to a separate absolute workspace path. The signed `.app` did not contain the override and a user launching it from Finder would not have it.
+- **Cause:** The Mac packer's inputs and reproducibility fingerprint omitted an optional overlay tree, and the launcher did not check the app bundle for one.
+- **Fix:** `dm/mac/pack_app.py --romfs-overlay <directory>` copies the optional tree into `Contents/Resources/romfs_overlay/`, includes it in the source tree's build fingerprint and free-space check and signs it as ordinary app resources. `dm/mac/launcher.c` selects the bundle-relative path when present, while an explicit `DM_ROMFS_OVERLAY` environment variable or `env.txt` remains authoritative. A repack removes stale bundled content if the option is removed. The overlay is an opt-in packing feature, **not** a claim that a specific game's diagnostic resource-size workaround is a correct fix.
+- **Found on:** Super Mario Bros. Wonder Nintendo Switch 2 Edition, where a temporary non-committed BFRES resource-budget overlay was used during new-game debugging. The generic packer never embeds any game data in the repository.

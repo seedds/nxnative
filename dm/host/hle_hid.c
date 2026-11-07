@@ -528,21 +528,33 @@ HLE_FORCE("_ZN2nn3hid30SetNpadJoyAssignmentModeSingleERKj", "Joy-Con single assi
 HLE_FORCE("_ZN2nn3hid18SwapNpadAssignmentERKjS2_", "swap controller ids; ignored by the host", void, h_hid_Swap, const uint32_t *a, const uint32_t *b) { (void)a; (void)b; }
 HLE_FORCE("_ZN2nn3hid21StartLrAssignmentModeEv", "L/R assignment mode; ignored by the host", void, h_hid_LrStart, void) {}
 HLE_FORCE("_ZN2nn3hid20StopLrAssignmentModeEv", "L/R assignment mode; ignored by the host", void, h_hid_LrStop, void) {}
-// Controller applet (system UI): report the connected players right away, with player 1's controller selected. ControllerSupportResultInfo = { int playerCount; uint32_t selectedId; };
+// Controller applet (system UI): report the connected players, with player 1's controller selected. ControllerSupportResultInfo = { int playerCount; uint32_t selectedId; };
 // ControllerSupportArg starts with { int8 playerCountMin, playerCountMax }: the count is capped at the maximum. Fewer players than the minimum: on a Switch the applet stays open
-// until enough controllers connect or the player closes it, and the SDK's ShowControllerSupportCore (Mario Kart 8 Deluxe 4.0.0 sdk+0x24eeb0) turns the applet's result into
-// 0 success, 2 → 2202-3102, anything else → ResultControllerSupportCanceled (2202-3101). The host has nothing to wait for, so it answers as the player closing it. An OK with
-// fewer players is an answer a Switch never gives: Mario Kart 8 Deluxe asks for two in 2P and opened the applet again every few frames on it (GitHub issue #550)
+// until enough controllers are there or the player closes it, and the SDK's ShowControllerSupportCore (Mario Kart 8 Deluxe 4.0.0 sdk+0x24eeb0) turns the applet's result into
+// 0 success, 2 → 2202-3102, anything else → ResultControllerSupportCanceled (2202-3101). With a window the front end does the same (front_ctrl_support, ctrl_prompt.h): its prompt
+// stays up on the game's thread while controllers join (a first button press with DM_PAD_PRESS_TO_JOIN, a connection without it) until enough are in or the player closes it
+// (GitHub issue #1640: Mario Kart World's player screen closed when the second controller had not pressed yet). Without a window, or with scripted input (DM_KEYS, DM_CTL), nobody
+// is at the controllers: the host answers at once, as the player closing it. An OK with fewer players is an answer a Switch never gives: Mario Kart 8 Deluxe asks for two in 2P
+// and opened the applet again every few frames on it (GitHub issue #550)
 #define RES_CTRL_CANCELED (202u | 3101u << 9)
+int dm_players_reported(void) { int n = 0; for (int p = 0; p < DM_PLAYERS; p++) n += reported(p); return n; }
 static Result ctrl_support(int32_t *info, const int8_t *arg) {
-    int count = 0; for (int p = 0; p < DM_PLAYERS; p++) count += reported(p);
-    int canceled = arg && arg[0] > count;
-    if (arg) LOG("hid controller applet: %d to %d players wanted, %d connected%s", arg[0], arg[1], count, canceled ? ": too few, closed as the player would (canceled)" : "");
+    int count = dm_players_reported(), canceled = 0;
+    if (arg && arg[0] > count) {
+        const char *keys = getenv("DM_KEYS"), *ctl = getenv("DM_CTL");
+        int r = (keys && *keys) || (ctl && *ctl) ? -1 : front_ctrl_support(arg[0], arg[1]);   // blocks until the prompt closes; -1: no window
+        if (r < 0) LOG("hid controller applet: %d to %d players wanted, %d connected: too few, closed as the player would (canceled)", arg[0], arg[1], count);
+        else {
+            int was = count; count = dm_players_reported();
+            LOG("hid controller applet: %d to %d players wanted, %d connected: the prompt waited, %d now (%s)", arg[0], arg[1], was, count, r && arg[0] <= count ? "OK" : "canceled");
+        }
+        canceled = r <= 0 || arg[0] > count;
+    } else if (arg) LOG("hid controller applet: %d to %d players wanted, %d connected", arg[0], arg[1], count);
     if (arg && arg[1] > 0 && count > arg[1]) count = arg[1];
     if (info) { info[0] = count; info[1] = (int32_t)connected_id(); }
     return canceled ? RES_CTRL_CANCELED : RES_OK;
 }
-HLE_FORCE("_ZN2nn3hid21ShowControllerSupportEPNS0_27ControllerSupportResultInfoERKNS0_20ControllerSupportArgE", "controller applet; the host reports the connected players right away (canceled with fewer than the minimum)",
+HLE_FORCE("_ZN2nn3hid21ShowControllerSupportEPNS0_27ControllerSupportResultInfoERKNS0_20ControllerSupportArgE", "controller applet; the host reports the connected players (fewer than the minimum: the front end's prompt waits for more, canceled without a window)",
           Result, h_hid_ShowCtrl, int32_t *info, const int8_t *arg) {
     DM_APPLET("controller support");
     return ctrl_support(info, arg);

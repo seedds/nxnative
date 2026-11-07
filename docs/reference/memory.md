@@ -498,6 +498,14 @@ The guest address space, heaps, pools, virtual address memory and the allocators
 - **Reading the numbers:** `currentAllocatedSize` ("GPU allocated") read 16 GB on this game while `vmmap` showed 3.9 GB of Metal textures and targets. Use `vmmap -summary` (`owned unmapped (graphics)`, `IOAccelerator (graphics)`) for what memory holds.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md).
 
+### Pools that hold shader code made resident to key the shaders
+
+- **Symptom:** memory pools that hold only shader code are in the residency set, though no shader reads them. In The Great Ace Attorney Chronicles, three shared buffers, about 5 MB: chunks of its 1,000 MB pool (`DM_CTL` `restop`: shared buffers 241 MB at 30 s, 236 MB with the fix).
+- **Cause:** `keys_hash` (`hle_nvn.c`) checks that a shader's code lies in a pool before it hashes it, and it asked `mtl_addr`, which also makes the pool resident (and, in a pool in chunks, makes the chunk that holds the code). The GPU never reads that code: the shaders run translated, and a shader's c1 constants are copied into the host's own buffers.
+- **Fix:** general: `keys_hash` asks `mtl_addr_known` (`nvn_mtl.m`), the pool lookup with no side effect that texture uploads already used: it makes no pool resident, and in a pool in chunks it makes no chunk (it answers from the pool's range). A pool the GPU does read through a binding or an address is made resident there, as before. Keys are unchanged. `t_addr_known` checks it.
+- **Where it does not help:** a game whose shaders read raw global memory has every pool it took an address in made resident by the raw pool table (`gmem_map`), shader code pools included. Ocarina of Time is one: on the village walk it kept 4,276 pools resident before the fix and 4,277 after, 2,324 on both at the title. The 222 pools and 334 MB first reported there came from a build with other changes.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) (reported), [The Great Ace Attorney Chronicles](../../dm/games/010036E00FB20000/README.md) (measured).
+
 ### Repeated GPU out-of-memory failures end the game
 
 - **Symptom:** the Mac grows unresponsive for hours, then panics, with the host still submitting work that fails.

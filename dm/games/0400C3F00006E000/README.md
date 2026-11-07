@@ -104,6 +104,7 @@ Update 1.8.0 (v917504, SDK 21.4.0) is not on this Mac. Pull request #1116 ported
 - [Uncompressed storage the CPU wrote, in a pool the GPU has not written](../../../docs/reference/nvn-objects.md#uncompressed-storage-the-cpu-wrote-in-a-pool-the-gpu-has-not-written)
 - [Comparisons with .FTZ](../../../docs/reference/shaders.md#comparisons-with-ftz)
 - [Variable rate shading ignored](../../../docs/reference/rendering.md#variable-rate-shading-ignored)
+- [Image views of the type a shader declares](../../../docs/reference/rendering.md#image-views-of-the-type-a-shader-declares) (the dark box around each kart's shadow, issue #1648)
 - [A DualShock 4 that connects after the first stays on Core Haptics](../../../docs/reference/services.md#a-dualshock-4-that-connects-after-the-first-stays-on-core-haptics)
 - [Identical controllers that GameController lists as one](../../../docs/reference/services.md#identical-controllers-that-gamecontroller-lists-as-one) (two Pro Controllers over USB, split-screen races)
 - [Scaled shared memory addresses](../../../docs/reference/shaders.md#scaled-shared-memory-addresses)
@@ -113,4 +114,5 @@ Update 1.8.0 (v917504, SDK 21.4.0) is not on this Mac. Pull request #1116 ported
 - [A control section's words read as a BAHS entry](../../../docs/reference/shaders.md#a-control-sections-words-read-as-a-bahs-entry) (resolved, [issue #1592](https://github.com/seedds/nxnative/issues/1592)): `cs_lib.bin` 74, `797e77c2ec4341c5` at `agl_common.sharcb#BAHS@0x5c778`, was no shader. Dropping it and its fact moved the 69 `cs_lib.bin` rows after it (`agl_common`, `agl_ndsr`, `agl_technique_pfx`, gsys `common`) down one index, as the reporter's split of the base game has them; not split again here, as the game's files are not on this Mac.
 - [SDK 19's decoder forms](../../../docs/reference/movies.md#sdk-19s-decoder-forms)
 - [A version without one of the profile's modules stops the host at boot](../../../docs/reference/packing.md#a-version-without-one-of-the-profiles-modules-stops-the-host-at-boot)
+- [The controller applet waits for players](../../../docs/reference/services.md#the-controller-applet-waits-for-players) (1.8.0, pull request #1596; GitHub issue #1640: the player screen closed when the second controller had not pressed yet)
 - 1.8.0, by pull request #1116: [The camera through the graphics system](../../../docs/reference/services.md#the-camera-through-the-graphics-system), [Layer HDR metadata](../../../docs/reference/services.md#layer-hdr-metadata), the SDK 21 forms in [The Joy-Con mouse pointer](../../../docs/reference/services.md#the-joy-con-mouse-pointer) and [GameChat at boot](../../../docs/reference/services.md#gamechat-at-boot)

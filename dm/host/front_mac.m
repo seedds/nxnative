@@ -48,6 +48,8 @@ int front_display_pixels(int *w, int *h) {
 }
 static _Atomic int g_screen_variable_refresh;
 int front_screen_variable_refresh(void) { return g_screen_variable_refresh; }
+static _Atomic int g_win_covered;   // the occlusion observer below
+int front_window_covered(void) { return g_win_covered; }   // nvn_mtl.m link_sync: no new display link while covered
 static void screen_refresh(NSScreen *screen) {   // main thread: refresh capabilities of the current screen and mode, including a mode change without moving the window
     if (!screen) return;
     g_screen_fps = (int)screen.maximumFramesPerSecond;
@@ -101,6 +103,22 @@ static void screen_match_apply(void) {   // main thread: on a new frame rate, on
         CGDisplayModeRef m = (CGDisplayModeRef)CFArrayGetValueAtIndex(modes, i); double r = mode_hz(m);
         if (CGDisplayModeGetWidth(m) != w || CGDisplayModeGetHeight(m) != h || CGDisplayModeGetPixelWidth(m) != pw || CGDisplayModeGetPixelHeight(m) != ph || !CGDisplayModeIsUsableForDesktopGUI(m)) continue;
         if (hz_multiple(r, want) && r > pick_hz) { pick = m; pick_hz = r; }
+    }
+    // A scaled (supersampled) mode is often offered only at the screen's top rate: a 1920x1080 75 Hz panel in "looks like 1920x1080" HiDPI renders 3840x2160 that the system scales
+    // down to the panel, and has 60 Hz only in its 1x mode. 60 fps on it is shown 1, 1, 1, 2 refreshes in turn (13.3 / 26.7 ms; Donkey Kong Bananza). No detail is lost in a mode of
+    // the same size in points whose pixels are at least the panel's (the largest pixel size of its native modes, IOGraphics kDisplayModeNativeFlag 0x02000000), so that mode is taken when the same pixels have no multiple of the game's rate
+    if (!pick) {
+        size_t nw = 0, nh = 0;
+        for (CFIndex i = 0; modes && i < CFArrayGetCount(modes); i++) {
+            CGDisplayModeRef m = (CGDisplayModeRef)CFArrayGetValueAtIndex(modes, i);
+            if ((CGDisplayModeGetIOFlags(m) & 0x02000000) && CGDisplayModeGetPixelWidth(m) * CGDisplayModeGetPixelHeight(m) > nw * nh) { nw = CGDisplayModeGetPixelWidth(m); nh = CGDisplayModeGetPixelHeight(m); }
+        }
+        for (CFIndex i = 0; nw && modes && i < CFArrayGetCount(modes); i++) {
+            CGDisplayModeRef m = (CGDisplayModeRef)CFArrayGetValueAtIndex(modes, i); double r = mode_hz(m);
+            if (CGDisplayModeGetWidth(m) != w || CGDisplayModeGetHeight(m) != h || CGDisplayModeGetPixelWidth(m) < nw || CGDisplayModeGetPixelHeight(m) < nh || !CGDisplayModeIsUsableForDesktopGUI(m)) continue;
+            if (hz_multiple(r, want) && (r > pick_hz || (r == pick_hz && CGDisplayModeGetPixelWidth(m) > CGDisplayModeGetPixelWidth(pick)))) { pick = m; pick_hz = r; }
+        }
+        if (pick) LOG("front end: screen %zux%zu px at %.0f Hz has no %d Hz multiple at these pixels: %zux%zu px (the panel's own %zux%zu or more) taken instead", pw, ph, hz, want, CGDisplayModeGetPixelWidth(pick), CGDisplayModeGetPixelHeight(pick), nw, nh);
     }
     if (!pick) LOG("front end: screen at %.0f Hz has no mode of this size at a multiple of %d Hz: frames are paced on the nearest refreshes", hz, want);
     else {
@@ -1455,6 +1473,12 @@ void front_run(void (*guest)(void)) {
         if (getenv("DM_METAL_HUD") && atoi(getenv("DM_METAL_HUD"))) LOG("front end: Metal performance HUD on (DM_METAL_HUD)");
         v.layer = g_layer; [(DmGameView *)v fitDrawable];
         [win center];
+        // DM_WINDOW_SMALL=<width> (tests on a machine someone is working on): a 16:9 window of that width in the screen's bottom-right corner. It must stay visible: behind
+        // another window macOS fires its display link about once a second (see the occlusion log below), so with DM_WINDOW_TOP it floats small instead of being hidden
+        { const char *ws = getenv("DM_WINDOW_SMALL"); int w = ws ? atoi(ws) : 0;
+          if (w > 0) { NSRect vf = (win.screen ?: NSScreen.mainScreen).visibleFrame; [win setContentSize:NSMakeSize(w, w * 9 / 16)];
+              [win setFrameOrigin:NSMakePoint(NSMaxX(vf) - win.frame.size.width, NSMinY(vf))]; [(DmGameView *)v fitDrawable];
+              LOG("front end: small window %dx%d in the bottom-right corner (DM_WINDOW_SMALL)", w, w * 9 / 16); } }
         [win makeKeyAndOrderFront:nil];
         screen_refresh(win.screen ?: NSScreen.mainScreen);
         g_win = win;
@@ -1464,7 +1488,7 @@ void front_run(void (*guest)(void)) {
         // DM_WINDOW_TOP=1 orders it in front without activation and keeps it above other apps' windows; the log names every change of the window's visibility either way
         if (getenv("DM_WINDOW_TOP") && atoi(getenv("DM_WINDOW_TOP"))) { win.level = NSFloatingWindowLevel; [win orderFrontRegardless]; LOG("front end: window kept in front (DM_WINDOW_TOP)"); }
         [[NSNotificationCenter defaultCenter] addObserverForName:NSWindowDidChangeOcclusionStateNotification object:win queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
-            (void)n; static int vis = -1; int v = (win.occlusionState & NSWindowOcclusionStateVisible) != 0; if (v == vis) return; vis = v;
+            (void)n; static int vis = -1; int v = (win.occlusionState & NSWindowOcclusionStateVisible) != 0; if (v == vis) return; vis = v; g_win_covered = !v;
             if (v) LOG("front end: window visible"); else LOG("front end: window covered (its display link fires about once a second: frame times measure nothing)"); }];
         // Main menu: AppKit runs ⌘ shortcuts only through menu items, so ⌘Q quits and ⌃⌘F toggles fullscreen from here (AppKit shows the item as Globe-F and keeps ⌃⌘F as a hidden twin)
         NSMenu *bar = [NSMenu new], *app = [NSMenu new], *wm = [[NSMenu alloc] initWithTitle:@"Window"];

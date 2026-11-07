@@ -70,7 +70,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             Operand src = GetSrcReg(context, op.SrcB);
 
-            EmitI2F(context, op.ISrcFmt, op.DstFmt, src, op.ByteSel, op.Dest, op.AbsB, op.NegB);
+            EmitI2F(context, op.ISrcFmt, op.DstFmt, src, op.ByteSel, op.Dest, op.AbsB, op.NegB, op.RoundMode);
         }
 
         public static void I2fI(EmitterContext context)
@@ -79,7 +79,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             Operand src = GetSrcImm(context, Imm20ToSInt(op.Imm20));
 
-            EmitI2F(context, op.ISrcFmt, op.DstFmt, src, op.ByteSel, op.Dest, op.AbsB, op.NegB);
+            EmitI2F(context, op.ISrcFmt, op.DstFmt, src, op.ByteSel, op.Dest, op.AbsB, op.NegB, op.RoundMode);
         }
 
         public static void I2fC(EmitterContext context)
@@ -88,7 +88,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             Operand src = GetSrcCbuf(context, op.CbufSlot, op.CbufOffset);
 
-            EmitI2F(context, op.ISrcFmt, op.DstFmt, src, op.ByteSel, op.Dest, op.AbsB, op.NegB);
+            EmitI2F(context, op.ISrcFmt, op.DstFmt, src, op.ByteSel, op.Dest, op.AbsB, op.NegB, op.RoundMode);
         }
 
         public static void I2iR(EmitterContext context)
@@ -179,8 +179,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             Instruction fpType = srcType.ToInstFPType();
 
-            bool isSignedInt = dstType is IDstFmt.S16 or IDstFmt.S32 or IDstFmt.S64;
-            bool isSmallInt = dstType is IDstFmt.U16 or IDstFmt.S16;
+            bool isSignedInt = dstType is IDstFmt.S8 or IDstFmt.S16 or IDstFmt.S32 or IDstFmt.S64;
+            bool isSmallInt = dstType is IDstFmt.U8 or IDstFmt.S8 or IDstFmt.U16 or IDstFmt.S16;   // nxnative: 8-bit destinations clamp to their range too
 
             Operand srcB = context.FPAbsNeg(src, absolute, negate, fpType);
 
@@ -239,7 +239,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
             ByteSel byteSelection,
             int rd,
             bool absolute,
-            bool negate)
+            bool negate,
+            RoundMode roundMode = RoundMode.Rn)
         {
             bool isSignedInt =
                 srcType is ISrcFmt.S8 or
@@ -271,6 +272,10 @@ namespace Ryujinx.Graphics.Shader.Instructions
                     ? context.IConvertS32ToFP64(srcB)
                     : context.IConvertU32ToFP64(srcB);
             }
+            else if (roundMode == RoundMode.Rz && !isSmallInt && dstType == DstFmt.F32)
+            {
+                srcB = EmitIConvertToFP32Rz(context, srcB, isSignedInt);
+            }
             else
             {
                 srcB = isSignedInt
@@ -281,6 +286,19 @@ namespace Ryujinx.Graphics.Shader.Instructions
             WriteFP(context, dstType, srcB, rd);
 
             // TODO: CC.
+        }
+
+        // nxnative: I2F.RZ (Maxwell I2F, Ampere I2F / I2FP): a 32-bit integer to F32 rounded toward zero (Eden ConvertUnsigned32ToFloatRZ). The plain conversion rounds to nearest, so e.g. a 32-bit
+        // hash >= 0xFFFFFF80 scaled by 2^-32 became exactly 1.0. Clearing the magnitude's bits below its 24 most significant ones makes the conversion
+        // exact, which equals the truncated result
+        internal static Operand EmitIConvertToFP32Rz(EmitterContext context, Operand value, bool isSigned)
+        {
+            Operand magnitude = isSigned ? context.IAbsolute(value) : value;
+            Operand shift = context.ISubtract(context.IMaximumS32(context.FindMSBU32(magnitude), Const(23)), Const(23));
+            Operand truncated = context.BitwiseAnd(magnitude, context.BitwiseNot(context.ISubtract(context.ShiftLeft(Const(1), shift), Const(1))));
+            Operand res = context.IConvertU32ToFP32(truncated);
+
+            return isSigned ? context.ConditionalSelect(context.ICompareLess(value, Const(0)), context.FPNegate(res), res) : res;
         }
 
         private static void EmitI2I(

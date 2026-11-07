@@ -401,6 +401,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix (resolved):** the handles no longer wait for a routed output: with rumble on and an output sink installed (`dm_haptics_enabled`), a connected npad style gets its two handles; `vib_send` checks for an output at each send (`hle_hid.c`). No sink, rumble off or a disconnected npad still get none, and `IsVibrationPermitted` still follows the routed outputs. `DM_RUMBLE_LOG=1` logs the handle requests and, once a second, the values sent, those with no routed output and the peak amplitude. Each input value is counted separately, including mixed batches; a mutex protects the diagnostic totals across game threads. `t_hid` covers cached startup handles delivering a nonzero value after routing, mixed-batch diagnostics and concurrent sends; `t_hid_tsan` checks those sends for data races.
 - **Found on:** [Unicorn Overlord](../../dm/games/010069401ADB8000/README.md) (the Asian release, `010054B01AD92000`), in the log only: the game has no rumble of its own (it sends amplitude 0 throughout), so nothing could be felt before or after. Not yet checked on a game that rumbles.
 
+### More controllers than the controller applet's maximum
+
+- **Symptom:** the game opens the controller applet again and again (Orbitals' lobby with a third controller connected).
+- **Cause:** the applet returned with more controllers connected than its maximum; a game checks the count and opens it again.
+- **Fix:** `hle_hid.c` disconnects the controllers past the applet's maximum when it returns.
+- **Found on:** [Orbitals](../../dm/games/040004F027560000/README.md#driving-it-on-the-mac).
+
 ### Controller haptic engines without advanced players
 
 - **Symptom:** a controller (an Xbox Wireless Controller, a GameSir Super Nova, a GameSir Cyclone) never vibrates in a game on the Mac or the iPhone, though iOS Settings' Identify buzzes it; the log repeats `[RED] haptics: controller left handle create player: Couldn’t communicate with a helper application. (NSCocoaErrorDomain 4097)`. The engine itself starts.
@@ -601,6 +608,19 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Note:** a passed TV latency calibration in this game is saved per TV panel identity, the host's all-zero one included ([TV latency calibration's late, beat-timed listening window](game-state.md#tv-latency-calibrations-late-beat-timed-listening-window)).
 - **Found on:** [Rhythm Heaven Groove](../../dm/games/0100D9F01D474000/README.md) (SDK 21.4.0, one boot).
 
+### Unreal Engine 5.6's Switch 2 platform layer at start
+
+- **Symptom:** an Unreal Engine 5.6 Switch 2 game stops before its first frame: `game called nn::diag abort` right after `nn::chat::Initialize`. Or it presents three frames and waits forever in `FFrameEndSync`.
+- **Cause:**
+  - `nn::chat::Initialize` returns a Result, and the host's hook was `void`, which left x0 as it was.
+  - UE's vsync thread calls `nn::vi::ListFrameHistory` each vsync and signals frame flips only for entries of kind 2 with a newer frame number.
+  - The RHI also reads NVN2's window builder back (present interval, native window, textures) and the queue builder's memory sizes.
+- **Fix:**
+  - `hle_misc.c`: `nn::chat::Initialize` answers success.
+  - `ListFrameHistory` reports the latest presented frame (kind 2, frame count, ticks; the layout read from its consumer's code).
+  - `hle_nvn.c`: the builder getters.
+- **Found on:** [Orbitals](../../dm/games/040004F027560000/README.md#found-on-this-game).
+
 ### oe calls answered without an applet proxy
 
 - **Symptom:** the first boot crashed in `oe::DisableAlbumImageTakenNotification`: a null read at `sdk+0x338070`, the first call in `nnMain` (`main+0x6b188c`); enabling those notifications also gives a null read at `sdk+0x33b0f0` (Xenoblade Chronicles 3); other `oe` calls that reach am, found in the imports before they were met.
@@ -736,6 +756,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** `internal::Initialize` is cut as the plain `Initialize` is, the C library's `poll` goes to the host's `Poll`, the overloads fail as the others do (`hle_net.c`), and `GetCurrentIpConfig` reports no configuration (`hle_offline.c`). `Poll` no longer fails on a descriptor the host never made, which only a garbage value can be: it reports nothing ready at the timeout, as a console's does for a socket with nothing to say. The game logs `socket: No error information` and goes on offline.
 - **Open:** the host refuses `nn::socket::EventFd`, so the HTTP thread polls without a wake-up, and with a garbage descriptor beside it. Harmless offline.
 - **Found on:** [Star Fox](../../dm/games/0400E88025B1A000/README.md).
+
+### Native play-report sessions and asynchronous completion
+
+- **Symptom:** `[RED] sf: the game connects to service prepo:u itself, which the host does not serve`, followed by an abort after a movie. Hooking `PlayReport::Save` does not cover the native asynchronous `Send` path.
+- **Cause:** the native client needs a typed report service, an input Pointer buffer, transfer-memory ownership and a child completion object. A zero-output service reply cannot supply these. `CreateTransferMemory` previously fell through to the generic SVC success placeholder.
+- **Fix:** `hle_prepo.c` serves the user and system submission commands with service permissions, authenticated process identity, name/UID checks and legacy or extended MessagePack validation. Asynchronous submissions validate the copied transfer-memory handle and mapping extent, then return a child whose event can be copied independently and whose result is the CMIF result. The event is signaled once local consumption completes; closing either session does not invalidate a copied event. The existing offline telemetry policy consumes reports without storing or uploading them. Transmission requests have no queued work; administrative report-store commands remain unsupported.
+- **Memory contract:** `hle_svc.c` implements transfer-memory creation, validates page alignment, backing, permissions and overlap, retains borrowed ranges across client-handle closure, and releases them after the last service mapping. QueryMemory exposes the owner permissions and borrowed attribute; conflicting unmaps, heap shrink and remapping fail. Host services access these pages in place. As with stack borrowing, guest 4 KiB permissions are logical on Apple 16 KiB pages: revoking a host page could also revoke adjacent allocations. Guest-process `MapTransferMemory`/`UnmapTransferMemory` are outside this host-service implementation. HIPC Pointer framing and kernel validation follow the public [libnx descriptors](https://github.com/switchbrew/libnx/blob/master/nx/include/switch/sf/hipc.h) and [Horizon transfer-memory contract](https://github.com/Atmosphere-NX/Atmosphere/blob/master/libraries/libmesosphere/source/svc/kern_svc_transfer_memory.cpp).
+- **Found on:** Ocarina (`0400486024DEC000`), with its provisional game note outside the repository at `<NSP folder>/0400486024DEC000_build/profile/0400486024DEC000/README.md`. `t_prepo` exercises native CMIF requests, malformed reports, permissions, domains and copied events; `t_svc_memory` covers transfer-memory lifetime and backing protection, including 16 KiB host pages. The changed C sources also compile for iPhone.
 
 ### Bluetooth LE at boot
 

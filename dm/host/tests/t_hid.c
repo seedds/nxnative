@@ -52,6 +52,9 @@ void dm_ctl_cvar_i32(uint64_t off, int32_t v) { (void)off; (void)v; }
 void dm_ctl_cvar_f32(uint64_t off, float v) { (void)off; (void)v; }
 void dm_gfx_texdump_next(const char *path) { (void)path; }
 void dm_gfx_passdump_next(long n) { (void)n; }
+void dm_gfx_dcap_arm(const char *pfx, const char *dir, int n, long pool_mb) { (void)pfx; (void)dir; (void)n; (void)pool_mb; }   // r9: DM_CTL dcap / dcapw / flightdump (hle_hid.c)
+void dm_gfx_dcap_watch(const char *pfx, const char *dir, int aid, int n, long pool_mb) { (void)pfx; (void)dir; (void)aid; (void)n; (void)pool_mb; }
+void dm_gfx_flight_dump(const char *tag) { (void)tag; }
 static int applet_depth, applet_opens, applet_closes_at_depth0;   // hle_oe.c: the applet stand-ins open and close their applet around the answer
 void dm_applet_enter(const char *name) { (void)name; applet_depth++; applet_opens++; }
 void dm_applet_leave(void) { applet_closes_at_depth0 += --applet_depth == 0; }

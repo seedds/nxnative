@@ -25,7 +25,8 @@ exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n, ast.Assign) 
 MAC_METAL = scope['MAC_METAL']
 
 LDG = (0x000ea200081e890f, 0x0000000405067981)   # LDG.E R6, [R5.64 + UR4]: R5 the thread index, an address the translator traces to no storage buffer
-HELPER = re.compile(r'(?m)^int (_\d+)\(thread const int& _\d+, thread const int& _\d+, const device (_\d+)& \w+, thread uint& (_\d+)\)\n\{\n')
+HELPER = re.compile(r'(?m)^int (_\d+)\(thread const int& _\d+, thread const int& _\d+, const device (_\d+)& \w+((?:, thread uint& _\d+)+)\)\n\{\n')
+CACHE_WORDS = 7   # the kept entry, its start, end and delta (GlobalToStorage.TryGenerateRawStorageOp)
 
 # The pool table as the host writes it (nvn_mtl.m gmem_map, dmsh_abi.h DMSH_GMEM_MAP_*): 8,192 entries of 8 words {start lo, start hi, end lo, end hi, delta lo, delta hi, hint, 0}, sorted by start,
 # entry 0 empty, unused entries starting at ~0. Pools A and B are adjacent, C lies past a gap and above 4 GiB, and its 2 MiB chunk has a hint naming it (the only pool there; the gap after it is in
@@ -77,15 +78,18 @@ class RawLast(Translated):
         msl = self.msl()
         m = HELPER.search(msl)
         self.assertTrue(m, msl[:3000])
-        name, last = m.group(1), m.group(3)
+        name, params = m.group(1), re.findall(r'thread uint& (_\d+)', m.group(3))
+        self.assertEqual(len(params), CACHE_WORDS)
         main = msl[msl.index('kernel void main0'):]
-        word = re.search(r'(?m)^    uint (_\d+) = 0u;$', main)
-        self.assertTrue(word, main[:600])
-        calls = re.findall(name + r'\([^;]*, (_\d+)\);', main)
-        self.assertEqual(calls, [word.group(1)] * 2)
+        words = re.findall(r'(?m)^    uint (_\d+) = 0u;$', main)
+        self.assertEqual(len(words), CACHE_WORDS, main[:900])
+        calls = [c.split(', ')[3:] for c in re.findall(name + r'\(([^;]*)\);', main)]
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0], calls[1])   # both loads share the words
+        self.assertEqual(sorted(calls[0]), sorted(words))
         helper = msl[m.end():msl.index('\n}\n', m.end())]
-        self.assertLess(helper.index(last), helper.index('>> uint(21)'))   # the last entry first, then the 2 MiB chunk's hint
-        self.assertRegex(helper, re.escape(last) + r' = uint\(_\d+\);')   # a hint or search records its choice
+        self.assertLess(min(helper.index(p) for p in params), helper.index('>> uint(21)'))   # the kept range first, then the 2 MiB chunk's hint
+        self.assertTrue(all(re.search(re.escape(p) + r' = ', helper) for p in params))   # a hint or search records the entry, its range and its delta
 
     @unittest.skipUnless(shutil.which('xcrun') and sys.platform == 'darwin', 'needs Metal')
     def test_reads_on_gpu(self):
@@ -93,8 +97,8 @@ class RawLast(Translated):
         m = HELPER.search(msl)
         kernel = (msl[:msl.index('kernel void main0')] +
                   f'kernel void k(const device {m.group(2)}& map [[buffer(0)]], const device uint2* addr [[buffer(1)]], device int* out [[buffer(2)]], uint id [[thread_position_in_grid]])\n'
-                  '{\n    uint last = 0u;\n    for (int s = 0; s < 16; s++)\n    {\n        int lo = int(addr[id * 16 + s].x), hi = int(addr[id * 16 + s].y);\n'
-                  f'        out[id * 16 + s] = {m.group(1)}(lo, hi, map, last);\n    }}\n}}\n')
+                  '{\n    uint c[%d] = {};\n    for (int s = 0; s < 16; s++)\n    {\n        int lo = int(addr[id * 16 + s].x), hi = int(addr[id * 16 + s].y);\n' % CACHE_WORDS +
+                  f'        out[id * 16 + s] = {m.group(1)}(lo, hi, map, ' + ', '.join(f'c[{k}]' for k in range(CACHE_WORDS)) + ');\n    }\n}\n')
         with tempfile.TemporaryDirectory() as w:
             w = Path(w)
             (w / 'k.metal').write_text(kernel)

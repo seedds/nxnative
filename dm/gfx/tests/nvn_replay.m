@@ -152,6 +152,7 @@ static void fill_tex(const uint8_t *d, size_t n) {
     const cap_tsub *subs = (const cap_tsub *)(d + sizeof h); const uint8_t *px = d + sizeof h + h.nsub * sizeof *subs;
     id<MTLTexture> t = tex_mtl(&h.t); if (t.parentTexture) t = t.parentTexture;
     if (t) { uint64_t k = (uint64_t)(uintptr_t)(__bridge void *)t; nvn_hm_put(&g_filled, &k, (void *)1); }
+    if (t) { void mtl_tex_zero_cancel(id<MTLTexture>); mtl_tex_zero_cancel(t); }   // its content comes from the capture: no deferred zeroing over it (tex_zero_fill)
     if (!t) RFAIL("texture ser=%llu %ux%u: the replay layer made no texture for it", (unsigned long long)h.t.serial, h.width, h.height);
     uint32_t slices = (uint32_t)(t.textureType == MTLTextureTypeCube || t.textureType == MTLTextureTypeCubeArray ? 6 * t.arrayLength : t.arrayLength);
     if (t.pixelFormat != h.pixfmt || t.width != h.width || t.height != h.height || t.mipmapLevelCount != h.levels || slices != h.slices)

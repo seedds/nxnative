@@ -134,7 +134,10 @@ namespace Ryujinx.Graphics.Shader.Instructions
         {
             InstRed op = context.GetOp<InstRed>();
 
-            (Operand addrLow, Operand addrHigh) = Get40BitsAddress(context, new Register(op.SrcA, RegisterType.Gpr), op.E, op.Imm20);
+            // nxnative: the 20-bit offset is signed, as for ATOM (Eden atomic_operations_global_memory.cpp AtomOffset: BitField<28, 20, s64>); upstream added it zero-extended
+            int sOffset = (op.Imm20 << 12) >> 12;
+
+            (Operand addrLow, Operand addrHigh) = Get40BitsAddress(context, new Register(op.SrcA, RegisterType.Gpr), op.E, sOffset);
 
             EmitAtomicOp(context, StorageKind.GlobalMemory, (AtomOp)op.RedOp, op.RedSize, addrLow, addrHigh, GetDest(op.SrcB));
         }
@@ -208,7 +211,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             Operand lblRetry = Label();
             context.MarkLabel(lblRetry);
 
-            Operand expected = context.Load(storageKind, e0, e1);
+            Operand expected = context.Load(storageKind, e0, e1);   // a plain reload each try: the main program's locals are single-assignment for the Optimizer (r9 review)
             Operand sum = context.FPAdd(expected, value);
             Operand found = context.AtomicCompareAndSwap(storageKind, e0, e1, expected, sum);
 

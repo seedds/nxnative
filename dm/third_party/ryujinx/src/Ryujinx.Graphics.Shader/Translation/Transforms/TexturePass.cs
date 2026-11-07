@@ -16,6 +16,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Transforms
         {
             if (node.Value is TextureOperation texOp)
             {
+                node = InsertArrayLayer(node, context.ResourceManager);
                 node = InsertTexelFetchScale(context.Hfm, node, context.ResourceManager, context.Stage);
                 node = InsertTextureSizeUnscale(context.Hfm, node, context.ResourceManager, context.Stage);
 
@@ -31,6 +32,28 @@ namespace Ryujinx.Graphics.Shader.Translation.Transforms
                     }
                 }
             }
+
+            return node;
+        }
+
+        // nxnative: a read that is not an array read of a binding declared as an array of its shape (ResourceManager.GetTextureOrImageBinding: the same handle is also read as an
+        // array) reads layer 0 of it, so that its coordinates fit the arrayed image. The layer goes after the coordinates, where an array read has it
+        private static LinkedListNode<INode> InsertArrayLayer(LinkedListNode<INode> node, ResourceManager resourceManager)
+        {
+            TextureOperation texOp = (TextureOperation)node.Value;
+
+            if (texOp.Inst != Instruction.TextureSample ||
+                (texOp.Flags & TextureFlags.Bindless) != 0 ||
+                (texOp.Type & SamplerType.Array) != 0 ||
+                resourceManager.IsArrayOfTexturesOrImages(texOp.Binding, isImage: false) ||
+                !resourceManager.TryGetDeclaredTextureType(texOp.Set, texOp.Binding, out SamplerType declared) ||
+                (declared ^ texOp.Type) != SamplerType.Array)
+            {
+                return node;
+            }
+
+            texOp.InsertSource(texOp.Type.Dimensions, Const(0));
+            texOp.Type |= SamplerType.Array;
 
             return node;
         }

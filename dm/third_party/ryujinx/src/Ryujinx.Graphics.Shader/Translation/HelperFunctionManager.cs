@@ -372,11 +372,14 @@ namespace Ryujinx.Graphics.Shader.Translation
             Operand index = Argument(1);
             Operand mask = Argument(2);
 
+            // nxnative: SHFL.UP is valid from maxLane = (lane & segMask) | (clamp & ~segMask) on (PTX shfl.up, Eden EmitShuffleUp); upstream ignored the clamp field
+            Operand clamp = context.BitwiseAnd(mask, Const(0x1f));
             Operand segMask = context.BitwiseAnd(context.ShiftRightU32(mask, Const(8)), Const(0x1f));
             Operand laneId = GenerateLoadSubgroupLaneId(context, subgroupSize);
             Operand minThreadId = context.BitwiseAnd(laneId, segMask);
+            Operand maxThreadId = context.BitwiseOr(context.BitwiseAnd(clamp, context.BitwiseNot(segMask)), minThreadId);
             Operand srcThreadId = context.ISubtract(laneId, index);
-            Operand valid = context.ICompareGreaterOrEqual(srcThreadId, minThreadId);
+            Operand valid = context.ICompareGreaterOrEqual(srcThreadId, maxThreadId);
 
             context.Copy(Argument(3), valid);
 
@@ -529,15 +532,17 @@ namespace Ryujinx.Graphics.Shader.Translation
         private static Operand GenerateSharedAtomicCasLoop(EmitterContext context, Operand wordOffset, int id, Func<Operand, Operand> opCallback)
         {
             Operand lblLoopHead = Label();
+            Operand oldValue = Local();
+            context.Copy(oldValue, context.Load(StorageKind.SharedMemory, id, wordOffset));
 
             context.MarkLabel(lblLoopHead);
 
-            Operand oldValue = context.Load(StorageKind.SharedMemory, id, wordOffset);
             Operand newValue = opCallback(oldValue);
 
             Operand casResult = context.AtomicCompareAndSwap(StorageKind.SharedMemory, id, wordOffset, oldValue, newValue);
 
             Operand casFail = context.ICompareNotEqual(casResult, oldValue);
+            context.Copy(oldValue, casResult);   // retried with the value the exchange returned, not a new plain load (nemyu 4fe22c860 + 942d01bd2: a plain reload can hit a stale line, the exchange never matches and the loop spins)
 
             context.BranchIfTrue(lblLoopHead, casFail);
 

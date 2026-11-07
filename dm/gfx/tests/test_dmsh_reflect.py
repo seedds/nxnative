@@ -14,7 +14,7 @@ import dmsh_geometry
 def builder_reflection():
     # Isolate pure reflection code from the builder's CLI/profile initialization.
     tree = ast.parse((TOOLS / 'dmsh_build.py').read_text())
-    names = {'reflect', 'decode_tex', 'decode_ubo_tex', 'decode_ubo_img', 'const_sampler', 'c2_array'}
+    names = {'reflect', 'decode_tex', 'ubo_bank', 'decode_ubo_tex', 'decode_ubo_img', 'const_sampler', 'c2_array'}
     selected = [n for n in tree.body if (isinstance(n, ast.FunctionDef) and n.name in names)
                 or (isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'SSBO' for t in n.targets))
                 or (isinstance(n, ast.Assign) and any(isinstance(t, ast.Tuple) and any(isinstance(e, ast.Name) and e.id == 'TEX_BASE' for e in t.elts) for t in n.targets))]
@@ -55,6 +55,12 @@ class StorageBuffers(unittest.TestCase):
             with self.subTest(stage=stage):
                 got = bindings(stage, [base, base + 15 * 16], [0, 0])
                 self.assertEqual([b['reg'] for b in got], [0, 15])
+
+    def test_mesh_tables_of_either_slot(self):   # a mesh shader compiled for the mesh stage's slot (0x710) or, as PRAGMATA's, for the hull stage's (0x210)
+        for base in (dmsh_abi.C0_SSBO_MS, dmsh_abi.C0_SSBO_MS_HULL):
+            with self.subTest(base=hex(base)):
+                got = bindings('ms', [base + 4 * 16, base], [0, 1])
+                self.assertEqual([b['reg'] for b in got], [4, 0])
 
     def test_unknown_or_unaligned_offsets_stay_unresolved(self):
         self.assertIsNone(bindings('gs', [0x414], [1])[0]['reg'])

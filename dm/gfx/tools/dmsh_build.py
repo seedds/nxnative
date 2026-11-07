@@ -13,7 +13,7 @@
 # Final summary: success / failure counts and the distribution of reasons; distribution of driver segment read offsets (those outside the range the replay layer can fill are listed separately);
 # a [RED] line per shader that built but lost something (shader_regressions.report_losses), which does not change the exit status
 import atexit, inspect, os, re, sys, json, mmap, struct, hashlib, shutil, subprocess, tempfile, time, collections, threading, concurrent.futures as cf
-import dmsh_geometry, dmsh_atomic, dmsh_wide, dmsh_meshstage, dmsh_abi as abi   # abi: the driver segment layout and the binding kinds the host shares (dm/gfx/nvn/dmsh_abi.h)
+import dmsh_geometry, dmsh_atomic, dmsh_wide, dmsh_meshstage, dmsh_loopdiag, dmsh_dsl, dmsh_metalwa, dmsh_abi as abi   # abi: the driver segment layout and the binding kinds the host shares (dm/gfx/nvn/dmsh_abi.h)
 DM_ROOT = os.environ.get('DM_ROOT') or os.path.expanduser('~/dm-work')   # Workspace root (game files, build outputs and run artifacts are all under it)
 HOME = os.path.expanduser('~')
 dm_dir, out = sys.argv[1:3]; want = set(sys.argv[3:]); cache_root = out
@@ -54,6 +54,74 @@ XC = ['--msl', '--msl-version', '20300', '--msl-argument-buffers', '--msl-textur
 # and its saturation gives 0, as Metal's precise:: functions (IEEE fmin / fmax) do on every GPU. The M4 Pro's fast ones happen to agree, an A20 Pro's do not: Super Mario Galaxy 2's
 # GX lighting takes max(0, NaN) from light directions left at zero, and the half of Mario its fill light faces came out white on the iPhone (GitHub issue 72; vk_shaders.py PRECISE)
 def precise(msl): return re.sub(r'\bfast::(min|max|clamp)\(', r'precise::\1(', msl)
+
+# Loop guard: every loop in a shader also ends once the function has run LOOP_CAP iterations in all, so a loop that never ends on the host (a wrong translation,
+# an uninitialized bound, a value the replay does not fill) cannot hang the GPU. On macOS a command buffer that never completes is not always reclaimed when the
+# process exits: PRAGMATA's first frames left one and the whole Mac stopped (WindowServer watchdog) minutes later, twice. One counter per function, so nested loops
+# cannot multiply past the cap; 2^18 iterations per invocation is far beyond what a frame's shader does (PRAGMATA's longest bounded loop: 255)
+# A loop whose body holds a barrier (threadgroup_barrier / simdgroup_barrier, at any depth) counts on a counter of its own instead (dm_lg1, dm_lg2, ..., declared with dm_lg at the
+# top of its function and never reset, so it still bounds every pass through that loop in all). The shared counter is per thread: the barrier-free loops in and before such a loop
+# run per-thread trip counts (a thread-strided copy loop over N items gives the threads up to one iteration more or less each), so once the cap was reached, threads of one
+# threadgroup left a barrier loop at different iterations and the others waited at its barrier for ever, which Metal does not recover from. A barrier loop's own trip count is the
+# same for every thread of the group (the shader's barriers would be wrong on the Switch otherwise), so its own counter ends it on the same iteration for all of them.
+# PRAGMATA's cloth solver 6f364b25e417234a: an outer do { ... } while (--iterations != 0) with a barrier in it and in the batch loop inside it, with stride-1024 / stride-256 copy
+# and constraint loops before and inside: if the iteration count it reads is 0 (data the host did not fill), the loop wraps and only the guard ends it, and the first
+# gameplay frame's compute submission never completed
+LOOP_CAP = 1 << 18
+_LOOP_HEAD = re.compile(r'(\s*)(?:do|for \(.*\)|while \(.*\))\s*')
+_BARRIER = re.compile(r'\b(?:threadgroup|simdgroup)_barrier\s*\(')
+_MEMBAR = 'threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup | mem_flags::mem_texture);'
+def membar_fence(msl):
+    """MEMBAR as a fence, not a barrier. The translator turns BAR.SYNC into OpControlBarrier (workgroup scope; SPIRV-Cross prints threadgroup_barrier(mem_flags::mem_threadgroup)) and
+    MEMBAR.GPU / .SYS into OpMemoryBarrier at device scope (Ryujinx CodeGen/Spirv/Instructions.cs GenerateMemoryBarrier), which SPIRV-Cross prints as a threadgroup_barrier with device,
+    threadgroup and texture memory: an execution barrier the Switch code does not have. Where the threads of a group are not converged it waits for threads that never come.
+    PRAGMATA's GPU culling queue 12a52b683eec95c1 has no BAR.SYNC at all, only MEMBAR.SC.GPU; ERRBAR (0x5f10), which became two such barriers inside its persistent work loop;
+    35 of the 62 kernels its boots skip had them (17 with no BAR.SYNC). Each becomes the fence it is, atomic_thread_fence at device scope, sequentially consistent; two in a row
+    (MEMBAR.SC and ERRBAR) become one. Runs before loop_guard, so a loop left with no barrier counts on the function's shared counter."""
+    if _MEMBAR not in msl: return msl
+    fence = 'atomic_thread_fence(mem_flags::mem_device | mem_flags::mem_threadgroup | mem_flags::mem_texture, memory_order_seq_cst, thread_scope_device);   // MEMBAR (membar_fence)'
+    msl = re.sub(r'^([ \t]*)' + re.escape(_MEMBAR) + r'\n\1' + re.escape(_MEMBAR) + r'$', lambda m: m[1] + _MEMBAR, msl, flags=re.M)
+    return msl.replace(_MEMBAR, fence)
+
+def loop_guard(msl):
+    lines, out = msl.split('\n'), []
+    fn_head = lambda i: lines[i] == '{' and i and lines[i - 1].rstrip().endswith(')')   # a function body (SPIRV-Cross puts its brace alone in column 0; a struct's header does not end in ')')
+    own, fn_own, fn = {}, {}, None   # own: the line rewritten (a do loop's closing line, else its header) -> its counter; fn_own: a function's brace line -> its loops' counters
+    for i, l in enumerate(lines):
+        if fn_head(i): fn = i; continue
+        if fn is None or not (m := _LOOP_HEAD.fullmatch(l)): continue
+        ind = len(m.group(1))
+        end = next((j for j in range(i + 1, len(lines)) if lines[j][ind:ind + 1] == '}' and not lines[j][:ind].strip()), None)   # SPIRV-Cross indents each block by 4: the body closes at the header's column
+        if end is None or not any(_BARRIER.search(x) for x in lines[i + 1:end]): continue
+        name = f'dm_lg{len(own) + 1}'; own[end if l.strip() == 'do' else i] = name; fn_own.setdefault(fn, []).append(name)
+    for i, l in enumerate(lines):
+        if fn_head(i):
+            out += [l, '    uint dm_lg = 0u; (void)dm_lg;' + ''.join(f' uint {n} = 0u; (void){n};' for n in fn_own.get(i, ()))]; continue
+        cap = f'++{own.get(i, "dm_lg")} < {LOOP_CAP}u'
+        if (m := re.fullmatch(r'(\s*)\} while \((.*)\);\s*', l)): l = f'{m.group(1)}}} while (({m.group(2)}) && {cap});'
+        elif (m := re.fullmatch(r'(\s*)for \(;;\)\s*', l)): l = f'{m.group(1)}for (; {cap};)'
+        elif (m := re.fullmatch(r'(\s*)while \((.*)\)\s*', l)): l = f'{m.group(1)}while (({m.group(2)}) && {cap})'
+        elif (m := re.fullmatch(r'(\s*)for \(([^;]*);([^;]*);([^;]*)\)\s*', l)): l = f'{m.group(1)}for ({m.group(2)}; ({m.group(3).strip() or "true"}) && {cap};{m.group(4)})'
+        out.append(l)
+    return '\n'.join(out)
+
+# Workaround for a translator bug we cannot fix at its source (the prebuilt Ryujinx shader DLL, dmsh_xlate_bin; only its driver Program.cs is in-tree): a SCALAR load of a
+# storage buffer whose byte offset is computed and bounds-checked, but then indexed at element 0 instead of offset>>2. The SPIR-V emits `OFF = idx*4; if (uint(OFF) < size) v = buf._m0[0];`
+# where the computed OFF is stored and bounds-checked against the buffer's size (cp_cN._m0[K].z) but the OpAccessChain uses a constant 0 (confirmed in <key>.spv: `OpAccessChain %cp_s0 %int_0 %int_0`),
+# while the SAME shader's vector loads index correctly (`... >> 2` then a dynamic index). Found on Orbitals (040004F027560000): the UE5.6 GPUScene upload compute shaders f0db173d46f9cdc5
+# (PrimitiveSceneData, 704-byte/44-float4 records) and da5435fda42d9fb1 (InstanceSceneData) read the destination PrimitiveId from PrimitiveUploadIndices[PrimitiveIndex]; with the index lost to 0,
+# every uploaded primitive scattered to PrimitiveId 0's slot, so the LocalToWorld for all other primitives stayed zero -> gl_Position.w = 0 -> degenerate quad -> black 3D backgrounds. Restoring the
+# index (buf._m0[int(uint(OFF) >> uint(2))]) refilled PrimitiveSceneData (dumped 2/93 -> 65/93 populated records, the background primitive's transform now correct). The signature (an offset computed
+# as X*4 AND bounds-checked against a buffer size, then an element-0 load of a storage buffer) is specific to the miscompile; a legitimate element-0 read never computes and bounds-checks an offset it
+# does not use, so the rewrite leaves ordinary cp_sN._m0[0] reads untouched (62 of 1273 shaders that read a storage buffer at [0] match, in this game's cache).
+SBUF_SCALAR_INDEX = re.compile(
+    r'(int (\w+) = [^;\n]*\* 4(?:u\))?;\s*'   # X * 4, or int(uint(X) * 4u) (wrapping multiply, 5eba12cf)
+    r'bool \w+ = uint\(\2\) >= as_type<uint>\(\(\*spvDescriptorSet0\.cp_c\d+\)\._m0\[\d+\]\.z\);\s*'
+    r'bool \w+ = !\w+;\s*'
+    r'int \w+ = 0;\s*'
+    r'if \(\w+\)\s*\{\s*'
+    r'\w+ \w+ = as_type<\w+>\(\(\*spvDescriptorSet0\.cp_s\d+\)\._m0\[)0(\]\);)', re.M)
+def sbuf_scalar_index(msl): return SBUF_SCALAR_INDEX.sub(r'\g<1>int(uint(\2) >> uint(2))\g<3>', msl)
 
 # Ampere HMMA.16816 with an f16 accumulator (agl's upscaler networks, the NDVE video networks) reaches the MSL as calls of dmsh_hmma16816_f16(lane, block, A0..A3, B0, B1, C0, C1,
 # flags, A's LDSM address, A0..A3's offsets, A's row stride, out D1) → D0, the subgroup's 256-word block of the scratch shared memory as the last argument (InstEmitAmpereTensor.AHmma,
@@ -166,12 +234,13 @@ def hmma_msl(msl):
 # Mario Kart World's scenery lists (2ce9071c2f22d74f, 5fea9b7ddb30e8a8: `int a = -local; if (first) a = 1; int b = a; if (first) x[0] = 0; if (first) x[2] = b; ...`): the race took a different
 # block of trees out of the list at each rebuild. A guarded store left over that is not understood leaves the whole shader as it is. Returns the shader and [(storage binding's MSL name, word, value)]
 FIRST_STORE = re.compile(r'float (\w+) = as_type<float>\(gl_WorkGroupID\.x\);\s*float (\w+) = as_type<float>\(gl_LocalInvocationID\.x\);\s*int (\w+) = as_type<int>\(\1\) << (\d+);\s*'
-                         r'int (\w+) = ~as_type<int>\(\2\);\s*int (\w+) = \5 \+ 1;\s*bool (\w+) = \6 != \3;\s*')
+                         r'int (\w+) = ~as_type<int>\(\2\);\s*int (\w+) = (?:\5 \+ 1|int\(uint\(\5\) \+ 1u\));\s*bool (\w+) = \6 != \3;\s*')
+# (the + 1 in either spelling: signed, or the wrapping int(uint(b) + 1u) of xcheck-fixes 5eba12cf)
 # A local size with rows: the same test on y and x, and workgroup z zero (Mario Kart World's 0823b08c2027a38d, local size 8x8)
 FIRST_STORE_2D = re.compile(r'float (\w+) = as_type<float>\(gl_WorkGroupID\.y\);\s*float (\w+) = as_type<float>\(gl_LocalInvocationID\.y\);\s*float (\w+) = as_type<float>\(gl_LocalInvocationID\.x\);\s*'
                             r'float (\w+) = as_type<float>\(gl_WorkGroupID\.x\);\s*float (\w+) = as_type<float>\(gl_WorkGroupID\.z\);\s*'
-                            r'int (\w+) = as_type<int>\(\1\) << (\d+);\s*int (\w+) = ~as_type<int>\(\2\);\s*int (\w+) = \8 \+ 1;\s*bool (\w+) = \9 != \6;\s*'
-                            r'int (\w+) = as_type<int>\(\4\) << (\d+);\s*int (\w+) = ~as_type<int>\(\3\);\s*int (\w+) = \13 \+ 1;\s*bool (\w+) = \14 == \11;\s*'
+                            r'int (\w+) = as_type<int>\(\1\) << (\d+);\s*int (\w+) = ~as_type<int>\(\2\);\s*int (\w+) = (?:\8 \+ 1|int\(uint\(\8\) \+ 1u\));\s*bool (\w+) = \9 != \6;\s*'
+                            r'int (\w+) = as_type<int>\(\4\) << (\d+);\s*int (\w+) = ~as_type<int>\(\3\);\s*int (\w+) = (?:\13 \+ 1|int\(uint\(\13\) \+ 1u\));\s*bool (\w+) = \14 == \11;\s*'
                             r'bool (\w+) = !\10;\s*bool (\w+) = \15 && \16;\s*bool (\w+) = (?:as_type<int>\(\5\) == 0|0 == as_type<int>\(\5\));\s*bool (\w+) = \18 && \17;\s*(?:bool (\w+) = !\19;\s*)?')
 def first_store(msl, local):
     if not local or local[2:] != [1]: return msl, []
@@ -326,6 +395,11 @@ template<typename V, typename T, typename... A> static inline __attribute__((alw
     return r;
 }}
 '''
+# The automatic loop guard (game.tsv shader_loopguard, or DMSH_LOOPGUARD for one build; dmsh_chain.loopguard): auto gives each data-sized loop of a compute kernel or task function
+# (bound or start from loaded data, dmsh_dsl.py) a reporting site on loop_guard's counter (dmsh_loopdiag.auto). With the host's DM_NVN_LOOPCAP off it ends where loop_guard ends
+# it, LOOP_CAP, and records nothing; on, a loop that reaches DM_NVN_LOOPCAP_AUTO names its key, site and bound and the abort word drains the GPU. Every other shader is left byte
+# for byte (PRAGMATA's lockups at the tower ring: 6a375022's N read from stale scratch, 26166d37's screen-sized triangles; OoT's agl task shaders on a pool-table miss)
+LOOPGUARD = dmsh_chain.loopguard(GAME)
 def border_emu(msl):
     """The samples of the argument buffer's textures through its sampler members, T.sample(S, args) → dm_bs(T.sample(S, args), block, bit, T, S_w, args) (see BORDER_HELPERS);
     the source unchanged when it samples through none. Only samples of float textures: an integer texture is not filtered, and its border colour is Maxwell's integer one, which
@@ -363,7 +437,33 @@ PRE_STATS = collections.Counter()
 # -O1: the front end's -O2 (CorrelatedValuePropagation, then SimplifyCFG) folds the translated shaders' repeated tests of one value into switches whose cases jump past their own join.
 # Apple's GPU backend then exceeds its control-flow ID budget ("Max Unstruct ID 758 ... exceeds supported limit", a note, not an error) and falls back to a slower lowering:
 # Odyssey's alRenderMaterialUber took 25 minutes and 17.3 MB of GPU code, 31 s and 1.3 MB at -O1. Ordinary shaders come out within a few percent either way (the backend optimizes again)
+# Profile shader_math (fast by default, relaxed, safe; p****6 oot2 5ab5b107): Metal's maths mode for this game's Mac libraries. Fast lets the compiler assume no NaN / infinity, so the
+# translated shaders' isnan selects (Maxwell's NaN semantics) can fold away, and it approximates and reorders. Ocarina of Time's grass showed single blades pure white for a frame with
+# fast and with relaxed, not with safe (-fno-fast-math). One mode for every library: [[invariant]] positions only agree between shaders compiled alike
+SHADER_MATH = {'fast': [], 'relaxed': ['-fmetal-math-mode=relaxed'], 'safe': ['-fno-fast-math']}
+_math = GAME.get('shader_math', 'fast') if GAME else 'fast'
+if _math not in SHADER_MATH: sys.exit(f'[RED] game.tsv shader_math: {_math} (fast, relaxed or safe)')
+# Profile shader_nofm <key> ...: those shaders' MSL starts with Metal's safe maths pragma (#pragma METAL fp math_mode(safe), what -fno-fast-math gives: x != x and ordered compares are
+# kept), every other shader keeps shader_math. Compute keys only by intent (positions of shaders compiled alike agree). PRAGMATA: its SDF-GI / voxel flare chain (41eaf0a7 ef4ad011
+# c08db9c9 bfc21183 08886f11 and the voxel keys), which the side libraries compiled with -fno-fast-math (eden-picks-2026-11-07.md, voxel-nan-2026-11-07.md)
+SHADER_NOFM = {k[:16] for row in (GAME.rows if GAME else []) if row[0] == 'shader_nofm' for v in row[1] for k in v.split()} if GAME else set()
+NOFM_PRAGMA = '#pragma METAL fp math_mode(safe)   // dmsh_build.py shader_nofm\n'
+def nofm_msl(key, src):
+    """src with the safe maths pragma after the first `using namespace metal;` for a key the profile's shader_nofm lists, else src"""
+    if key[:16] not in SHADER_NOFM or NOFM_PRAGMA in src: return src
+    i = src.find('using namespace metal;\n')
+    if i < 0: raise ValueError('shader_nofm: no `using namespace metal;` line')
+    i += len('using namespace metal;\n'); return src[:i] + NOFM_PRAGMA + src[i:]
+# Profile shader_metalwa <kk3|kk9|...> [<key prefix> ...] (dmsh_metalwa.py, dmsh_chain.metalwa): the macOS 26 Metal compiler workarounds after KosmicKrisp, on the listed shaders
+# (every shader when none is listed), as the last rewrite before the compile, static gate. KK3: a ballot under divergent control flow sees every lane (PRAGMATA's 965043fe ballot
+# waterfall never converged, ran to the loop cap and corrupted its append counter: exploded geometry, GPU page faults); KK9: a ballot before a loop's lone break likewise
+METALWA, METALWA_KEYS = dmsh_chain.metalwa(GAME)
+def metalwa_msl(key, src):
+    """src with the profile's shader_metalwa workarounds when they cover this key, else src"""
+    if not METALWA or METALWA_KEYS and not any(key.startswith(k) for k in METALWA_KEYS): return src
+    return dmsh_metalwa.apply(src, METALWA, 'static')[0]
 MAC_METAL = ['xcrun', '-sdk', 'macosx', 'metal', '-c', '-O1', '-fpreserve-invariance']
+MAC_METAL += SHADER_MATH[_math]   # its own statement: tests read the base line alone (test_dmsh_raw_last)
 MAC_RECORD = ' '.join(MAC_METAL) + '; xcrun -sdk macosx metallib'
 # The compiles run the tools xcrun names, found once: each xcrun launch looks them up again, about 4 ms of a compile's two launches (8 ms a shader). -isysroot is what xcrun -sdk passes
 # (as SDKROOT), and the outputs are the same bytes (.air and .metallib, checked on Odyssey's shaders); without it the driver targets the running macOS, not the SDK, and they differ.
@@ -391,6 +491,9 @@ def mac_compile(msl, air, lib):   # same interface as ios_metal.compile; the pre
 #   c0 base + 0x10 r: storage buffer r (64-bit address, 32-bit size), base C0_SSBO_<stage> (the hull / domain stages' bases were never seen)
 TEX_BASE, IMG_BASE, IMG_SLOTS, SEPTEX_BASE, SEPTEX_SLOT0, SAMP_BASE = abi.C2_TEX, abi.C2_IMG, abi.C2_IMG_SLOTS, abi.C2_SEPTEX, abi.SEPTEX_SLOT0, abi.C2_SAMP
 SSBO = {'vs': abi.C0_SSBO_VS, 'cs': abi.C0_SSBO_CS, 'gs': abi.C0_SSBO_GS, 'ps': abi.C0_SSBO_PS, 'ts': abi.C0_SSBO_TS, 'ms': abi.C0_SSBO_MS}
+# A mesh shader's table is where its compiler put it, by the slot the shader was compiled for: 0x710 for the mesh stage's own, 0x210 (C0_SSBO_MS_HULL) for the hull stage's, which
+# NVN2 gives a mesh shader in an RE Engine program (PRAGMATA's 539 mesh shaders: SDF hull slot, control +0x56 = 7, storage reads at 0x210..0x280; read at 0x710, all of them had no
+# slot on every storage buffer and the host bound slot 0 for each). reflect takes the one the shader reads; the host fills both for the mesh stage (nvn_mtl.m, the c0 fill)
 
 def record_index(path):   # → (an open descriptor, the offsets of the package's records and its end): record k is bytes offsets[k]..offsets[k + 1]
     # Scanned through a read-only mapping that is closed again, so no package stays in this process. Pokopia's ps_rdb.bin (4.25 GB) read and cut into its 105,118
@@ -722,8 +825,18 @@ def job_for(key, name, rec, w):
         extra['arch'] = 'sm86'
         # compute lays out its driver constants in c[0] per shader: the control section gives its push constants' words (+0xa9), counts its uniform buffer, storage
         # buffer, texture, separate texture and separate sampler entries (+0xb1, +0xb2, +0xb3, +0xb4, +0xb5; images, +0xb6, come last) and gives the size (+0xba);
-        # the translator maps them to c[24] and NVN's fixed tables (InstEmitAmpere.cs AMapC0). Graphics keeps NVN's tables
-        if stage == 'cs': extra['nvn2_cs'] = [rec[ci + 0xb1], rec[ci + 0xb2], rec[ci + 0xb3], struct.unpack_from('<H', rec, ci + 0xba)[0], rec[ci + 0xa9] * 4, rec[ci + 0xb4], rec[ci + 0xb5]]
+        # the translator maps them to c[24] and NVN's fixed tables (InstEmitAmpere.cs AMapC0). Graphics keeps NVN's tables.
+        # The push region is two blocks, each 16-byte aligned: +0xa9 words, then +0xaa words. Donkey Kong Bananza's compiler leaves +0xaa at 0 (its 138 layouts add up
+        # with +0xa9 alone), PRAGMATA's (control +0x08 = 0x11) uses both: all 6,856 of its compute layouts add up to the size at +0xba this way, none with either block
+        # alone. Both blocks are mapped to c[24] as one run (AMapC0); what the second holds is not known yet
+        if stage == 'cs':
+            al = lambda v: (v + 0xf) & ~0xf
+            ub, sb, tx, size = rec[ci + 0xb1], rec[ci + 0xb2], rec[ci + 0xb3], struct.unpack_from('<H', rec, ci + 0xba)[0]
+            st, sm, im = rec[ci + 0xb4], rec[ci + 0xb5], rec[ci + 0xb6]
+            push = al(rec[ci + 0xa9] * 4) + al(rec[ci + 0xaa] * 4)
+            if 0x10 + push + 0x10 * (ub + sb) + 8 * (tx + st + sm + im) != size:
+                print(f'[RED] {key}: NVN2 compute c0 layout does not add up to its size {size:#x}', file=sys.stderr)
+            extra['nvn2_cs'] = [ub, sb, tx, size, push, st, sm]
         if stage in ('ts', 'ms'):
             # A task or mesh shader: translated as compute, its SPH taken off and its stage memory in shared memory, then wrapped as the Metal stage function (dmsh_meshstage.py).
             # Graphics stages' c[0] and c[2] tables stay: the translator reads their addresses out of the code as for a vertex shader
@@ -906,6 +1019,13 @@ def const_sampler(name):
     h = int(m.group(2), 16)
     return (h >> 14) & 0x3fff if h >> 28 == 3 else None
 
+def ubo_bank(n):
+    """Whether handles read from constant bank n are words the host can read at bind time: the game's uniform buffers c[3]..c[16] (uniform slot n - 3), or NVN2's push constants c[24]
+    (DMSH_PUSH_BANK, uniform "slot" 21, which no game uniform slot reaches; nvn_mtl.m ubo_read reads it from the pushed bytes, as it reads storage buffer addresses there, sbufu_addr).
+    PRAGMATA pushes the handles of 15 shaders' textures and images: its SDF compute passes (cp_t_cb65560_3041000D: the texture word at push byte 0x34 with constant sampler 0x104;
+    cp_i_cb24_4_ .. _A_: images at push bytes 0x10..0x28) and pixel shaders (fp_t_cb24_7, fp_t_cb196632_10568007). Until then those bindings had no slot and the shaders did not load"""
+    return 3 <= n <= 16 or n == abi.PUSH_BANK
+
 def decode_ubo_tex(name):
     """Bindless texture: the handle is written by the game into its own uniform buffer (fp_t_cb7_2A = c[7] word 0x2A). Returns (texture: (uniform slot, byte offset), sampler: (slot, offset));
     handle type 0 = combined handle (one 32-bit word: low 20 bits texture ID, high 12 bits sampler ID), 1 = the sampler handle is in another word (its slot is the high 16 bits of slots − 1). This game's whole library uses only type 0 (1850 shaders)
@@ -917,13 +1037,16 @@ def decode_ubo_tex(name):
     slots, h = int(m.group(1)), int(m.group(2), 16)
     tb = slots & 0xffff; sb = (slots >> 16) - 1 if slots >> 16 else tb
     o0, o1, ty = h & 0x3fff, (h >> 14) & 0x3fff, h >> 28
-    if not 3 <= tb <= 16 or ty not in (0, 1, 3) or (ty == 1 and sb != 2 and not 3 <= sb <= 16): return None
+    if not ubo_bank(tb) or ty not in (0, 1, 3) or (ty == 1 and sb != 2 and not ubo_bank(sb)): return None
     return (tb - 3, o0 * 4), (('id', o1) if ty == 3 else ('c2', o1 * 4) if ty and sb == 2 else (sb - 3, o1 * 4) if ty else (tb - 3, o0 * 4))
 
 def decode_ubo_img(name):
-    """An image whose handle the game keeps in its own uniform buffer (<stage>_i_cb<n>_<word>_<format>: Unreal Engine 5.4 on the Switch 2 keeps every image in c[3]). Returns (uniform slot, byte offset)"""
+    """An image whose handle the game keeps in its own uniform buffer (<stage>_i_cb<n>_<word>_<format>: Unreal Engine 5.4 on the Switch 2 keeps every image in c[3]; Orbitals' Unreal Engine 5.6
+    compute shaders read their images' handles from uniform slot 0 this way). An image handle names one image ID (low 20 bits), no sampler, so only handle type 0 occurs. Returns (uniform slot, byte offset)"""
     m = re.match(r'[a-z]+_i\w*?_cb(\d+)_([0-9A-F]+)', name)
-    return (int(m.group(1)) - 3, int(m.group(2), 16) * 4) if m and 3 <= int(m.group(1)) <= 16 else None
+    if not m or not ubo_bank(int(m.group(1))): return None
+    h = int(m.group(2), 16)
+    return None if h >> 28 else (int(m.group(1)) - 3, (h & 0x3fff) * 4)
 
 def c2_array(name, ty):
     """An array of handles in the driver table c2 that the shader indexes at run time (Ryujinx's texture array from a buffer, here bank 2: <stage>_t<type>_cb<slots>_<handle>, declared
@@ -944,7 +1067,7 @@ POOL_MARK = """template<typename P> static inline __attribute__((always_inline))
 {
     device atomic_uint* w = reinterpret_cast<device atomic_uint*>(p->seen) + (i >> 5);
     uint b = 1u << (i & 31u);
-    if (!(atomic_load_explicit(w, memory_order_relaxed) & b)) atomic_fetch_or_explicit(w, b, memory_order_relaxed);
+    if (!(*reinterpret_cast<device const uint*>(w) & b)) atomic_fetch_or_explicit(w, b, memory_order_relaxed);   // a plain load of the bit: it is only ever set, a stale 0 costs one redundant atomic_or (r9; gm_memo.py measured the relaxed atomic load at about 5x a plain one)
     return i;
 }
 
@@ -965,7 +1088,9 @@ def pool_arrays(src):
     if not body: return src
     pools = {}
     def to_pointer(m):
-        if int(m.group(3)) < POOL_MIN or not (m.group(4).endswith('_cb0_40000000') or decode_ubo_tex(m.group(4).removesuffix('Smplr'))): return m.group(0)
+        ut = decode_ubo_tex(m.group(4).removesuffix('Smplr'))
+        if ut and ut[0][0] == abi.PUSH_BANK - 3: ut = None   # an array of pushed handles: the host's tables read uniform slots only (htab_gpu), so it stays as before
+        if int(m.group(3)) < POOL_MIN or not (m.group(4).endswith('_cb0_40000000') or ut): return m.group(0)
         pools[m.group(4)] = (m.group(2), int(m.group(3)))
         return f'{m.group(1)}constant spvPool_{m.group(4)}* {m.group(4)} [[id('
     members = re.sub(r'^(\s*)array<(.+), (\d+)> (\w+) \[\[id\(', to_pointer, body.group(1), flags=re.M)
@@ -1038,9 +1163,17 @@ def reflect(key, stage, msl, res):
             if nm.endswith('Smplr') and us[0] == 'c2': e.update(kind=abi.KIND_SAMP_UBO, reg=ut[0], off=ut[1], soff=us[1], sreg=abi.SREG_C2)
             elif nm.endswith('Smplr'): e.update(kind=abi.KIND_SAMP_ID, reg=us[1]) if us[0] == 'id' else e.update(kind=abi.KIND_SAMP_UBO, reg=us[0], off=us[1], **({'soff': ut[1], 'sreg': ut[0]} if other else {}))
             elif 'texture_buffer' in ty: e.update(kind=abi.KIND_TBUF_UBO, reg=ut[0], off=ut[1])
-            else: e.update(kind=abi.KIND_TEX_UBO, reg=ut[0], off=ut[1], **({'soff': us[1], 'sreg': us[0]} if other else {}))
+            else:
+                e.update(kind=abi.KIND_TEX_UBO, reg=ut[0], off=ut[1], **({'soff': us[1], 'sreg': us[0]} if other else {}))
+                # a bindless 1D integer fetch the translator read as 2D rows of 16384 texels (the Ampere TLD path, InstEmitAmpereMem, as the Maxwell path already does): the slot-based
+                # res['fetch1d'] cannot name a bindless handle, so a bindless texture2d read by a 2D integer fetch (never a sample) is taken as such a wrapped read. A buffer texture bound here
+                # is then bound as those rows (nvn_refl f1d, nvn_mtl.m tbuf_as_2d); flagging a genuine 2D bindless fetch is harmless, as the host uses f1d only for a buffer texture
+                if re.fullmatch(r'texture2d<[^>]+>', ty) and re.search(r'\b%s\.read\(uint2\(' % re.escape(nm), msl):
+                    e['fetch1d'] = True
+                    if re.search(r'\b%s\.get_width\(' % re.escape(nm), msl): e['fetch1d_size'] = True   # also size-queried: a buffer texture of more than 16384 elements reports 16384 there
         elif decode_ubo_img(nm):
-            e.update(kind=abi.KIND_IMG_UBO, reg=decode_ubo_img(nm)[0], off=decode_ubo_img(nm)[1])   # pyright: ignore[reportOptionalSubscript]  (not None: tested above)
+            if ty.startswith('array<'): e.update(kind=abi.KIND_UNKNOWN)   # an array of them: not implemented in the replay layer
+            else: e.update(kind=abi.KIND_IMG_UBO, reg=decode_ubo_img(nm)[0], off=decode_ubo_img(nm)[1])   # pyright: ignore[reportOptionalSubscript]  (not None: tested above)
             if has_word(msl, nm + '.atomic_'): e['atomic'] = True   # as KIND_IMG below
         elif c2_array(nm, ty) is not None:   # an array of the driver table's handles (c2_array): the replay fills element k from the slot whose c2 word is at off + 8k
             off, soff = c2_array(nm, ty)   # pyright: ignore[reportGeneralTypeIssues]  (not None: tested above)
@@ -1059,8 +1192,10 @@ def reflect(key, stage, msl, res):
                 if has_word(msl, nm + '.get_width('): e['fetch1d_size'] = True   # also size-queried: a texture buffer of more than 16384 elements reports 16384 there
         binds.append(e)
     # Storage buffers: SPIR-V binding number → c0 offset → NVN storage buffer slot (c0 base SSBO[stage], C0_ROW bytes per slot)
-    base = SSBO.get(stage)   # storage buffer base for the hull / domain stages has not been measured: a storage buffer there is reported with no slot
     sb_sorted = sorted(res['sbufs'], key=lambda b: b['binding'])
+    offs = [b['cb_offset'] * 4 for b in sb_sorted if b['cb_slot'] == 0]
+    hull = abi.C0_SSBO_MS_HULL; ms_hull = stage == 'ms' and offs and all(hull <= o < hull + abi.C0_ROW * abi.C0_SSBO_SLOTS for o in offs)
+    base = hull if ms_hull else SSBO.get(stage)   # storage buffer base for the hull / domain stages has not been measured: a storage buffer there is reported with no slot
     for e in binds:
         if e['kind'] == abi.KIND_SBUF:
             b = sb_sorted[e['index']] if e['index'] < len(sb_sorted) else None
@@ -1090,6 +1225,10 @@ def drv_reads(src):
             if idx.isdigit(): offs.add(int(idx) * 16)
             else: dyn = True
         if offs or dyn: out[str(bank)] = {'vec4_offsets': sorted(offs), 'dynamic': dyn}
+    # the sample position table read at the byte 0x620 + the sample index alone (Switch 2 GLSLC, one sample position per sample with no location grid: Orbitals' pixel shaders,
+    # PIXLD.MY_INDEX + 0x620, then the byte of that word), see unfillable. Both spellings of the add: signed (`as_type<int>(x) + 1568`) and the translator's wrapping one
+    # since xcheck-fixes 5eba12cf (`int(as_type<uint>(x) + 1568u)`); missing the second lost sample_table on 65 PRAGMATA pixel shaders
+    if out.get('0', {}).get('dynamic') and '[[sample_id]]' in src and re.search(r'= (?:as_type<int>\(\w+\) \+ %d|int\(as_type<uint>\(\w+\) \+ %du\));' % (abi.C0_SAMPLE_TABLE, abi.C0_SAMPLE_TABLE), src): out['0']['sample_table'] = True
     return out
 
 SAMPLE_ROWS = [(abi.C0_SAMPLE_TABLE, abi.C0_SAMPLE_TABLE + abi.C0_SAMPLE_BYTES), (abi.C0_SAMPLE_INFO, abi.C0_SAMPLE_INFO + abi.C0_ROW)]   # c0: the pixel stage's sample position rows
@@ -1097,12 +1236,13 @@ SAMPLE_ROWS = [(abi.C0_SAMPLE_TABLE, abi.C0_SAMPLE_TABLE + abi.C0_SAMPLE_BYTES),
 def unfillable(dr, stage):
     bad = []
     for bank, d in dr.items():
-        fill = DRV_FILL[int(bank)] + (SAMPLE_ROWS if bank == '0' and stage == 'ps' else []) + ([(SSBO[stage], SSBO[stage] + abi.C0_ROW * abi.C0_SSBO_SLOTS)] if bank == '0' and stage in ('ts', 'ms') else [])
+        fill = DRV_FILL[int(bank)] + (SAMPLE_ROWS if bank == '0' and stage == 'ps' else []) + ([(b, b + abi.C0_ROW * abi.C0_SSBO_SLOTS) for b in ((SSBO[stage], abi.C0_SSBO_MS_HULL) if stage == 'ms' else (SSBO[stage],))] if bank == '0' and stage in ('ts', 'ms') else [])
         # a computed index into c2 reads one of its handle tables, which the replay layer fills whole (nvn_mtl.m DRV2: EA SPORTS FC 27's lights read the separate texture words
         # at 0x168 + 8i to test each light's handle); c0 is filled only in its tables and words above, so a computed index there may read what the replay does not write.
         # The one computed c0 index known is GLSLC's sample position lookup in a pixel shader: a byte of the table at 0x620, at an index made of the sample index (PIXLD.MYINDEX)
         # and the pixel's place in the location grid masked by the words of the 0x630 row, at most 15 (Metroid Prime Remastered: 30 of its 438 shaders that read the sample index)
-        if d['dynamic'] and bank == '0' and not (stage == 'ps' and abi.C0_SAMPLE_INFO in d['vec4_offsets']): bad.append(f'c{bank} dynamic index')
+        # Switch 2's GLSLC reads the table at 0x620 + the sample index without the grid row (drv_reads sample_table): at most 16 bytes, within the table
+        if d['dynamic'] and bank == '0' and not (stage == 'ps' and (abi.C0_SAMPLE_INFO in d['vec4_offsets'] or d.get('sample_table'))): bad.append(f'c{bank} dynamic index')
         for o in d['vec4_offsets']:
             # a read is a 16-byte row: overlapping any table is enough (Engage reads the c2+0x160 row for texture slot 0 at 0x168 in it)
             if not any(o < b and a < o + 16 for a, b in fill): bad.append(f'c{bank}+{o:#x}')
@@ -1114,7 +1254,7 @@ RULES = []   # MSL rewrite rules attached by shader name (function, applicabilit
 # It covers what runs only when a shader misses the cache, since a hit restores the output and skips it. dmsh_side.py is in it: fs_uint and fs_dual write main0's shared body (shared_body).
 # dmsh_fetch.py is not, but for screen_varyings (raster_facts), nor are the other side libraries' modules: they are made again from the restored MSL on every build (ps_libraries;
 # test_dmsh_code_fp.py checks this list).
-CODE_FP = hashlib.sha256(source_without_rule_bodies() + b''.join(b'\0' + dmsh_chain.code_form(open(m.__file__, 'r').read()) for m in (dmsh_chain, dmsh_geometry, dmsh_atomic, dmsh_wide, dmsh_meshstage, dmsh_ampere, dmsh_side, abi) + ((ios_metal,) if IOSOUT else ()))
+CODE_FP = hashlib.sha256(source_without_rule_bodies() + b''.join(b'\0' + dmsh_chain.code_form(open(m.__file__, 'r').read()) for m in (dmsh_chain, dmsh_geometry, dmsh_atomic, dmsh_wide, dmsh_meshstage, dmsh_loopdiag, dmsh_dsl, dmsh_ampere, dmsh_side, dmsh_metalwa, abi) + ((ios_metal,) if IOSOUT else ()))
                          + b'\0' + inspect.getsource(dmsh_fetch.screen_varyings).encode()
                          + b'\0abi\0' + repr(sorted(abi.VALUES.items())).encode()).hexdigest()
 TOOL_FP = tool_fingerprint().encode()
@@ -1320,7 +1460,7 @@ def vs_depth(src):
     single = src[:m.start()] + gl
     return single, single + '\n' + re.sub(r'\bmain0\s*\(', 'main0_z(', body, count=1)
 
-def int_outputs(src, body, cols):
+def int_outputs(src, body, cols, follow=False):
     """The colour outputs that hold integers, not float bits. The translator keeps registers in integer locals, so a float colour also reaches its output as as_type<float>(_n), with _n =
     as_type<int>(<a float>) somewhere above; Kirby Star Allies' G-buffer shaders write all four of colour 0 to 2 that way, and only colour 2 goes to an integer target (RGBA8Uint, its material bits:
     constants, shifts and ORs). So each write is followed back through the locals: a value computed by an integer operation or a small integer constant counts as integer, the bits of a computed
@@ -1344,7 +1484,13 @@ def int_outputs(src, body, cols):
     for nm in cols:
         k = set()
         for w in re.findall(r'\bout\.%s(?:\.\w+)? = ([^;]+);' % nm, body):
-            w = w.strip(); a = re.fullmatch(r'as_type<float\d?>\((.*)\)', w)
+            w = w.strip()
+            # a float local with one definition stands for that definition: PRAGMATA's visibility-buffer pixel shaders (a9c1f9ea0c76a54c) write colour 0 into an RG32Uint target as
+            # float _604 = as_type<float>(int(gl_PrimitiveID)); out.m_52.x = _604; (and the depth's float bits in .y)
+            for _ in range(8 if follow else 0):
+                if not (re.fullmatch(r'_\d+', w) and types.get(w, '').startswith('float') and len(defs[w]) == 1): break
+                w = defs[w][0]
+            a = re.fullmatch(r'as_type<float\d?>\((.*)\)', w)
             if a: k |= kinds(a[1].strip(), set())
             elif re.fullmatch(r'-?[0-9.]+(?:e[-+]?\d+)?f?', w): k |= {'int'} if 0 < abs(float(w.rstrip('f'))) < 1.17549e-38 else set()
             else: k.add('float')
@@ -1376,9 +1522,14 @@ def fs_uint(src):
         w = w.strip(); d = re.fullmatch(r'\w+', w) and re.search(r'\bfloat\d? %s = (in\.\w+(?:\.\w+)?);' % w, src)
         i = re.fullmatch(r'in\.(\w+)(?:\.\w+)?', d[1] if d else w)
         return bool(i and i[1] in flat)
-    body = src[m.start():]; body = body[:body.find('return out;') + 1 or len(body)]
+    body = src[m.start():]; whole = body[:body.rfind('return out;') + 1 or len(body)]; body = body[:body.find('return out;') + 1 or len(body)]
     ints = int_outputs(src, body, cols)
-    if not from_int and not ints and not (writes and (all(re.fullmatch(r'-?[0-9.]+f?|float\d\([-0-9., ]*\)', w.strip()) for w in writes) or all(passed(w) for w in writes))): return None, 0
+    plain = writes and (all(re.fullmatch(r'-?[0-9.]+f?|float\d\([-0-9., ]*\)', w.strip()) for w in writes) or all(passed(w) for w in writes))
+    if not from_int and not ints and not plain:   # nothing found up to the first return: look again to the last one (an early discard return comes before the writes that matter) and through float locals
+        # (PRAGMATA's 403 visibility-buffer pixel shaders, a9c1f9ea0c76a54c: float _604 = as_type<float>(int(gl_PrimitiveID)); out.m_52.x = _604; into RG32Uint, after a discard's return).
+        # Only here, so every shader that had its entry points keeps them as they were
+        ints = int_outputs(src, whole, cols, follow=True)
+    if not from_int and not ints and not plain: return None, 0
     uty = lambda ty: 'u' + ty.replace('float', 'int')   # float4 → uint4, float → uint
     try: e = dmsh_side.entry(src, 'main0')
     except ValueError: e = None
@@ -1435,10 +1586,13 @@ def spv_single_lane(path):
     if any(op(x) in (65, 66) and len(x) > 3 and x[3] in bptr for x in ins): return False
     uint = next((x[1] for x in ins if op(x) == 21 and x[2:4] == [32, 0]), None); boolt = next((x[1] for x in ins if op(x) == 20), None)
     uvec4 = next((x[1] for x in ins if op(x) == 23 and x[2] == uint and x[3] == 4), None)
-    if uint is None or boolt is None or uvec4 is None: return False
+    if uint is None or boolt is None: return False
     bound = hdr[3]; c = {}
+    # a module with no uvec4 type gets one for the mask constants (PRAGMATA's domain shaders 859225c91a5fe2b2 and f1ad8f78c6c1551e read only the lane ID and have none)
+    vec = [] if uvec4 is not None else [[23 | 4 << 16, bound, uint, 4]]
+    if uvec4 is None: uvec4 = bound; bound += 1
     for nm in ('zero', 'one', 'zero4', 'one4', 'true'): c[nm] = bound; bound += 1
-    consts = [[43 | 4 << 16, uint, c['zero'], 0], [43 | 4 << 16, uint, c['one'], 1], [44 | 7 << 16, uvec4, c['zero4'], c['zero'], c['zero'], c['zero'], c['zero']],
+    consts = vec + [[43 | 4 << 16, uint, c['zero'], 0], [43 | 4 << 16, uint, c['one'], 1], [44 | 7 << 16, uvec4, c['zero4'], c['zero'], c['zero'], c['zero'], c['zero']],
               [44 | 7 << 16, uvec4, c['one4'], c['one'], c['zero'], c['zero'], c['zero']], [41 | 3 << 16, boolt, c['true']]]
     out, placed = [], False
     for x in ins:
@@ -1490,7 +1644,7 @@ def geometry_finish(key, w, j, c1):
         dmsh_geometry.flatten_sets(spv)
         r = subprocess.run([SPIRV_CROSS, *dmsh_atomic.cross_args(XC, spv), spv], capture_output=True, text=True)
         if r.returncode: return 'geometry MSL failed', r.stderr.strip()[:160], None
-        plain = dmsh_geometry.topology_pointer(pool_arrays(precise(dmsh_atomic.check_msl(r.stdout))))
+        plain = dmsh_geometry.topology_pointer(pool_arrays(loop_guard(precise(sbuf_scalar_index(dmsh_atomic.check_msl(r.stdout))))))
         src = dmsh_geometry.capture_input(plain)
         res = json.load(open(os.path.join(w, k + '.res.json')))
         refl = {'key': key + '_bg' + str(t), 'route': 'B', 'chain': CHAIN, 'dm_ctl': key,
@@ -1520,7 +1674,7 @@ def geometry_finish(key, w, j, c1):
             spv = os.path.join(w, k + '.reader.spv'); dmsh_geometry.flatten_sets(spv)
             r = subprocess.run([SPIRV_CROSS, *dmsh_atomic.cross_args(XC, spv), spv], capture_output=True, text=True)
             if r.returncode: return 'geometry reader failed', r.stderr.strip()[:160], None
-            reader = vs_layer(vs_init(dmsh_geometry.reader(pool_arrays(precise(dmsh_atomic.check_msl(r.stdout))))))
+            reader = vs_layer(vs_init(dmsh_geometry.reader(pool_arrays(loop_guard(precise(sbuf_scalar_index(dmsh_atomic.check_msl(r.stdout))))))))
             analysis, full = vs_depth(reader)
             meta = {'key': key + '_bgv', 'route': 'B', 'chain': CHAIN, 'dm_ctl': key,
                     'stage': 'vs', 'entry': 'main0', 'entry_z': 'main0_z', 'msl_entry_kind': 'vertex',
@@ -1532,6 +1686,24 @@ def geometry_finish(key, w, j, c1):
             save('_bgv', full, meta)
     return 'ok', '', base
 
+
+TG_FENCE_DECL = re.compile(r'\bthreadgroup\s+(?:spvUnsafeArray<[^;&]*?>|[A-Za-z_][\w<>, ]*?)\s*&?\s*(\w+)\s*(?:\[[^\]]*\])?\s*[;,)]')
+TG_FENCE = 'atomic_thread_fence(mem_flags::mem_threadgroup, memory_order_seq_cst, thread_scope_simdgroup);'
+def tg_fence(src):
+    """A store to threadgroup memory followed by a load of another lane's word, with no barrier between them (Ampere compilers rely on lockstep warps for small
+    scans, e.g. Unreal's GPU radix sort downsweep d032ce5090303e01 at 0x2eb0: STS / LDS [x-4] / STS / LDS [x-8]): for one thread the load and the earlier store do not
+    alias, so Metal moves the load above the store and reads another lane's old value (Orbitals: Niagara's sorted index list wrong every frame, beams and particles broken).
+    A simdgroup-scope memory fence after each threadgroup store keeps the order; it is not an execution barrier, so it is safe in divergent code. Only kernels with a
+    threadgroup array are touched"""
+    names = {m.group(1) for m in TG_FENCE_DECL.finditer(src) if m.group(1) not in ('operator',)}
+    if not names: return src
+    store = re.compile(r'^(\s*)(?:%s)\s*\[[^\n;]*\]\s*=(?!=)[^\n]*;\s*$' % '|'.join(map(re.escape, sorted(names))))
+    out = []
+    for ln in src.split('\n'):
+        out.append(ln)
+        m = store.match(ln)
+        if m: out.append(m.group(1) + TG_FENCE)
+    return '\n'.join(out)
 
 def finish(key, w, j, c1):
     name, k = loc[key]
@@ -1545,7 +1717,9 @@ def finish(key, w, j, c1):
             return 'ok', '', refl
         try: return geometry_finish(key, w, j, c1)
         except (ValueError, subprocess.CalledProcessError) as e: return 'geometry failed', str(e)[:160], None
-    if j['stage'] == 'vs': spv_single_lane(os.path.join(w, key + '.spv'))   # one-lane subgroups (see spv_single_lane)
+    # one-lane subgroups (see spv_single_lane): vertex functions, and the post-tessellation vertex functions domain shaders become, have no SIMD-group attributes in Metal
+    # (SPIRV-Cross: "Subgroup builtins are not available in this type of function"; PRAGMATA's domain shaders 859225c91a5fe2b2 and f1ad8f78c6c1551e read SR_LANEID)
+    if j['stage'] in ('vs', 'ds'): spv_single_lane(os.path.join(w, key + '.spv'))
     r = subprocess.run([SPIRV_CROSS, *dmsh_atomic.cross_args(XC, os.path.join(w, key + '.spv')), os.path.join(w, key + '.spv'), '--output', msl], capture_output=True, text=True)
     if r.returncode: return 'MSL failed', r.stderr.strip()[:160], None
     src = open(msl).read()
@@ -1561,9 +1735,11 @@ def finish(key, w, j, c1):
             src = open(msl).read()
     try: src = dmsh_atomic.check_msl(src)
     except ValueError as e: return 'image atomic MSL failed', str(e), None
+    src = sbuf_scalar_index(src)   # restore the index of scalar storage-buffer loads the translator emitted at element 0 (see sbuf_scalar_index)
     src = precise(src)   # min / max / clamp with Maxwell's NaN results (see precise)
     try: src = gather_offsets(src)   # four gathers instead of a wrapper's loop over their offsets (see gather_offsets)
     except ValueError as e: return 'gather offsets rewrite failed', str(e)[:160], None
+    src = loop_guard(membar_fence(src))   # MEMBAR as a fence (see membar_fence); no loop can run forever (see loop_guard)
     try: src = hmma_msl(src)   # Ampere HMMA through simdgroup_matrix (see hmma_msl)
     except ValueError as e: return 'HMMA rewrite failed', str(e)[:160], None
     try: src = shared_store_msl(src)   # shared memory byte and half-word stores as Metal byte stores (see shared_store_msl)
@@ -1571,6 +1747,7 @@ def finish(key, w, j, c1):
     try: src = pool_arrays(src)   # handles traced to no slot read the pools the replay keeps (see pool_arrays)
     except ValueError as e: return 'pool rewrite failed', str(e)[:160], None
     src = dmsh_wide.wide_loads(src)   # storage words the translator split, read whole again (see dmsh_wide.py)
+    src = tg_fence(src)   # warp-synchronous shared memory: a simdgroup-scope fence after each threadgroup store (see tg_fence)
     src = border_emu(src); open(msl, 'w').write(src)   # border colours Metal lacks (see border_emu)
     first, spill = [], 0
     mesh = j.get('mesh_stage')
@@ -1592,6 +1769,24 @@ def finish(key, w, j, c1):
         if pad: open(msl, 'w').write(src)
     lay = None; discard = False
     res = json.load(open(os.path.join(w, key + '.res.json')))
+    loopguard = []
+    lg_stage = 'task' if mesh and mesh.get('kind') == 'ts' else 'compute' if j['stage'] == 'cs' and not mesh else None
+    if LOOPGUARD == 'all' and lg_stage == 'compute':   # every loop and raw lookup of a compute kernel guarded on the host's debug buffer (see LOOPGUARD; the wedge rule: playbook golden rule 1)
+        try: src, sites = dmsh_loopdiag.all_loops(src, key, 'compute')
+        except (ValueError, AssertionError) as e: sites = []; print(f'{key}: loop guard all not applied ({str(e)[:120]}); loop_guard\'s own cap stays', flush=True)   # as 'off' (r9 review)
+        loopguard = [{'site': st, 'counter': c, 'fn': fn, 'line': ln} for st, c, fn, ln in sites]
+        if loopguard or 'dm_hg' in src: open(msl, 'w').write(src)
+        if not loopguard and 'dm_hg' in src: loopguard = [{'site': -1, 'counter': None, 'fn': None, 'line': None}]   # pool lookups only: the host still binds the buffer
+    elif LOOPGUARD in ('auto', 'all') and lg_stage:   # data-sized loops report through the host's debug buffer (see LOOPGUARD)
+        try: gb = tuple(b['msl_name'] for b in reflect(key, mesh['kind'] if mesh else j['stage'], src, res) if b.get('kind') == abi.KIND_GMEM_MAP)
+        except ValueError: gb = ()
+        try: src, loopguard = dmsh_loopdiag.auto(src, key, lg_stage, gb)
+        except ValueError as e: return 'loop guard failed', str(e)[:160], None
+        if loopguard: open(msl, 'w').write(src)
+    if key[:16] in SHADER_NOFM:   # profile shader_nofm: Metal's safe maths for this shader only
+        try: src = nofm_msl(key, src)
+        except ValueError as e: return 'shader_nofm failed', str(e)[:160], None
+        open(msl, 'w').write(src)
     if j['stage'] == 'vs':   # the two depth-convention entry points (see vs_depth); the analysis below uses the source with only main0
         capture = dmsh_geometry.capture(src)
         src, full = vs_depth(src)
@@ -1607,6 +1802,10 @@ def finish(key, w, j, c1):
     shared = dmsh_side.shared_body(src) if fu or fd else None   # they call main0's body; fs_uint and fs_dual give none for a main0 whose shape it does not know
     if shared: plain = src; open(msl, 'w').write(shared + (fu or '') + (fd or ''))
     else: fu = fd = None
+    if METALWA:   # profile shader_metalwa (see METALWA): on what is compiled, the extra entry points included; plain, the fallback without them, as well
+        t = open(msl).read(); t2 = metalwa_msl(key, t)
+        if t2 != t: open(msl, 'w').write(t2)
+        if shared: plain = metalwa_msl(key, plain)
     try: binds = reflect(key, mesh['kind'] if mesh else j['stage'], src, res)   # before the compile: a pixel shader's readable-tile version needs its texture slots (ps_libraries)
     except ValueError as e: return 'reflection failed', str(e)[:160], None
     side, lost = {}, []
@@ -1632,6 +1831,11 @@ def finish(key, w, j, c1):
             **({'entry_layer': 'main0_l', 'entry_layer_z': 'main0_lz', 'layer_from': lay} if lay else {}), **({'entry_u': 'main0_u'} if fu else {}), **({'entry_m': 'main0_m', 'uint_mask_m': fmask} if fu and fmask else {}), **({'entry_d': 'main0_d'} if fd else {}), **({'entries_lost': lost} if lost else {}),
             **({'first_store': [{'reg': next(b['reg'] for b in binds if b['msl_name'] == n), 'word': w, 'value': v} for n, w, v in first]} if first else {}),
             **({'tg_spill': spill} if spill else {}),
+            # a compute shader that reads texture or image handles the game pushed (c[24], uniform "slot" PUSH_BANK - 3, ubo_bank): the host reads them from the pushed bytes for it only
+            # (nvn_mtl.m ubo_read, push_handles; PRAGMATA's depth-pyramid kernels, c24regen-2026-11-07.md)
+            **({'push_handles': True} if j['stage'] == 'cs' and any(b.get('kind') in (abi.KIND_TEX_UBO, abi.KIND_IMG_UBO) and abi.PUSH_BANK - 3 in (b.get('reg'), b.get('sreg')) for b in binds) else {}),
+            **({'loopguard': {'buffer': dmsh_loopdiag.BUF_INDEX, 'cap_word': 1 if LOOPGUARD == 'all' and lg_stage == 'compute' else dmsh_loopdiag.AUTO_CAP_WORD, 'sites': loopguard,
+                              **({'mode': 'all'} if LOOPGUARD == 'all' and lg_stage == 'compute' else {})}} if loopguard else {}),   # see LOOPGUARD
             'threadgroup_size': j.get('local'), 'c1': c1.hex(), 'notes': res['notes'] + (['not in the answer table, queries use defaults'] if j.get('no_facts') else []), 'drv_reads': dr, 'drv_unfillable': unfillable(dr, mesh['kind'] if mesh else j['stage']),
             'bindings': binds,
             'vertex_inputs': [{'location': int(m.group(3)), 'msl_type': m.group(1)} for m in attributes(src)],

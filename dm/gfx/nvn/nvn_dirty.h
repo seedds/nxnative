@@ -9,6 +9,9 @@ void nvn_dirty_remove_range(const void *mem);                     // Pool destru
 void nvn_dirty_hold(const void *addr, size_t len);                 // Make the covered pages writable (counted as written) and hold off protection until nvn_dirty_unhold: around making a zero-copy buffer the GPU writes through
 void nvn_dirty_unhold(void);
 int nvn_dirty_tracked(const void *addr, size_t len);
+void nvn_dirty_protect_pieces(const void *addr, size_t len);   // nvn_dirty_protect over a span that crosses tracked ranges, range by range
+int nvn_dirty_since_pieces(const void *addr, size_t len, uint64_t stamp);   // nvn_dirty_since for such a span (a piece in no range counts as written)
+int nvn_dirty_page_protected(const void *addr);                  // This module holds the page write-protected or is changing it (atomic reads only; DM_NVN_WRITEWATCH)
 void nvn_dirty_protect(const void *addr, size_t len);              // Set the covered pages read-only
 void nvn_dirty_protect_sparse(const void *addr, size_t len);       // The same, for the pages behind a placement sparse tile: a later write to one moves nvn_dirty_sparse_writes
 uint64_t nvn_dirty_sparse_writes(void);                            // Writes so far to pages protected that way

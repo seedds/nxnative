@@ -29,6 +29,7 @@
 #define DMSH_C0_SSBO_PS 0x510            // pixel stage storage buffer table
 #define DMSH_C0_SSBO_TS 0x670            // NVN2 task stage storage buffer table: Mario Kart World's task shaders read c0 0x670 and 0x680, and the game binds their buffers at slots 0 and 1
 #define DMSH_C0_SSBO_MS 0x770            // NVN2 mesh stage storage buffer table: its mesh shaders read c0 0x770, 0x780, 0x790 and 0x7b0, and it binds slots from 0
+#define DMSH_C0_SSBO_MS_HULL 0x210       // the same for a mesh shader in the hull stage's slot, as NVN2 keeps one (SDF control +0x56 = 7): PRAGMATA's 539 mesh shaders read slots 0..7 at 0x210..0x280 (bank 26, InstEmitAmpere.cs AMapC0)
 #define DMSH_MESH_FIRST_SLOT 29          // a task or mesh function's buffer: the draw's first workgroup (dmsh_meshstage.py, nvn_geometry.inc mtk_encode)
 #define DMSH_C0_DISPATCH 0x200           // compute: the dispatch's workgroup counts x, y, z (32 bits each; Link's Awakening's light culling)
 #define DMSH_C0_DISPATCH_NVN2 4          // NVN2 compute keeps them here, below its per-shader layout at 0x10 (x and y read by Fire Emblem Fortune's Weave's light culling; z by their order)
@@ -103,6 +104,9 @@
 #define DMSH_LOGIC_BUFFER 29
 // Its function constants: bool, colour target n is attached (the variant reads it only then), at this index + n (nvn_mtl.m lo_fn specializes the entry point per pass's targets)
 #define DMSH_LOGIC_FC 200
+// Metal compiler workarounds (dm/gfx/tools/dmsh_metalwa.py, after KosmicKrisp's KK_WORKAROUND_n) in their function-constant form: bool constants at this index + slot (0 KK3 ballot,
+// 1 KK9 loop break, 3 KK10 select, 4 KK18 fence, 5 KK3v votes). The build emits the static form (profile shader_metalwa); no host sets these yet, so such a library keeps its defaults
+#define DMSH_MWA_FC 220
 // Compute shared memory past Metal's limit (dm/gfx/tools/dmsh_build.py tg_spill): a kernel whose threadgroup arrays exceed DMSH_TG_MAX bytes takes them from a device buffer at this compute
 // buffer index, one slice of the reflection's tg_spill bytes per workgroup, the workgroup's index in the dispatch modulo DMSH_TG_GROUPS (nvn_mtl.m dispatch binds DMSH_TG_GROUPS slices at most)
 #define DMSH_TG_SLOT 30

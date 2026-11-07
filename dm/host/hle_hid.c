@@ -222,6 +222,8 @@ void hid_keys_init(void) {
 //   saves a host texture's level 0 raw, every slice (a cube's six faces, a 3D texture's depth slices) (nvn_mtl.m dm_gfx_texraw), "drag <x0> <y0> <x1> <y1> [seconds=0.3]" moves one finger in a straight line between the two normalized picture
 //   points over that time and lifts it (the touch screen's pans and swipes, hle_touch.c gesture_sample), "dump" logs what each guest thread waits on and the graphics wait points
 //   (crash_dump_now, as the iOS app's DM_LOG_PORT dump; scripts/regress.py asks for it before stopping a hung game), "program <n>" makes oe::ExecuteProgram(n) with no parameters (a multi-program application's way between its programs, headless), "webshot <path>" saves the offline page shown as a PNG, "#…" is ignored.
+//   "p<n>:<keys>" (p2 … p8) presses on player n's controller instead, connecting it on its first press (local multiplayer without a second controller: Orbitals, two players).
+//   "both:<keys>" presses on players 1 and 2 together for the hold (Orbitals' "hold B to skip" wants both players: lines run one after another, so two lines never overlap).
 //   Look at a screen, decide, press, look again: menus whose timing moves from run to run (loading) need no blind timed script
 static void *ctl_main(void *arg) {
     const char *path = arg; long off = 0; char line[1100];
@@ -247,6 +249,29 @@ static void *ctl_main(void *arg) {
                                                      while (*e3 == ' ') e3++; dm_ctl_memdump(a, n, e3); continue; }
                 if (!strncmp(line, "cvari ", 6)) { void dm_ctl_cvar_i32(uint64_t off, int32_t v); char *e2; uint64_t off = strtoull(line + 6, &e2, 16); dm_ctl_cvar_i32(off, (int32_t)strtol(e2, NULL, 0)); continue; }
                 if (!strncmp(line, "cvarf ", 6)) { void dm_ctl_cvar_f32(uint64_t off, float v); char *e2; uint64_t off = strtoull(line + 6, &e2, 16); dm_ctl_cvar_f32(off, strtof(e2, NULL)); continue; }
+                // "replay <file> [from frame]": a DM_REC recording started now: its frame steps from <from frame> on (default the first) are moved so the first lands
+                // two frames from now, then applied at the game's reads as DM_KEYS=@file is. For replays whose start (title / load times) differs from the recording
+                if (!strncmp(line, "replay ", 7)) {
+                    char *path = line + 7, *sp = strchr(path, ' '); double from = 0; if (sp) { *sp = 0; from = atof(sp + 1); }
+                    char *text = keys_file(path); if (!text) { LOG("[RED] DM_CTL replay: cannot read %s", path); continue; }
+                    atomic_store(&g_sync_on, 0); pthread_mutex_lock(&g_sync_mu);
+                    g_nsteps = 0; keys_parse(text); free(text);
+                    int k = 0; for (int i = 0; i < g_nsteps; i++) if (g_steps[i].frame && g_steps[i].at >= from) g_steps[k++] = g_steps[i];
+                    g_nsteps = k; double d = k ? (double)dm_guest_frame() + 2 - g_steps[0].at : 0;
+                    for (int i = 0; i < k; i++) g_steps[i].at += d;
+                    g_sync_next = 0; g_sync_held = 0; script_set(0, 0, 0, 0, 0);
+                    pthread_mutex_unlock(&g_sync_mu);
+                    if (k && keys_framed()) { atomic_store(&g_sync_on, 1); LOG("DM_CTL: replay %s: %d frame steps from frame %.0f, shifted by %+.0f frames (now frame %llu)", path, k, from, d, (unsigned long long)dm_guest_frame()); }
+                    else LOG("[RED] DM_CTL replay %s: %d steps, not all frame steps held in frames", path, k);
+                    continue;
+                }
+                // "dcap <key prefix> <out dir> [n] [pool MB]": the next n dispatches of that compute key are captured for the side shader bench (nvn_mtl.m nvn_dcap.inc, sw2_tools/bench)
+                if (!strncmp(line, "dcapw ", 6)) { void dm_gfx_dcap_watch(const char *pfx, const char *dir, int aid, int n, long pool_mb); char pfx[32] = "", dir[1024] = ""; int aid = -1, n = 1; long mb = 0;
+                    if (sscanf(line + 6, "%31s %1023s %d %d %ld", pfx, dir, &aid, &n, &mb) >= 3) dm_gfx_dcap_watch(pfx, dir, aid, n, mb); else LOG("[RED] DM_CTL dcapw: usage dcapw <key prefix> <out dir> <aid> [n] [pool MB]"); continue; }
+                if (!strncmp(line, "dcap ", 5)) { void dm_gfx_dcap_arm(const char *pfx, const char *dir, int n, long pool_mb); char pfx[32] = "", dir[1024] = ""; int n = 1; long mb = 0;
+                    if (sscanf(line + 5, "%31s %1023s %d %ld", pfx, dir, &n, &mb) >= 2) dm_gfx_dcap_arm(pfx, dir, n, mb); else LOG("[RED] DM_CTL dcap: usage dcap <key prefix> <out dir> [n] [pool MB]"); continue; }
+                // "flightdump [tag]": the flight recorder's ring to <run>/flight/ now (DM_NVN_FLIGHTREC, nvn_flight.inc)
+                if (!strncmp(line, "flightdump", 10) && (!line[10] || line[10] == ' ' || line[10] == '\n')) { void dm_gfx_flight_dump(const char *tag); const char *t = line[10] == ' ' ? line + 11 : ""; dm_gfx_flight_dump(t); LOG("DM_CTL: flightdump %s", t); continue; }
                 if (!strncmp(line, "env ", 4)) { char *eq = strchr(line + 4, '='); if (eq) { *eq = 0; setenv(line + 4, eq + 1, 1); LOG("DM_CTL: env %s=%s", line + 4, eq + 1); } continue; }
                 if (!strncmp(line, "texdump ", 8)) { void dm_gfx_texdump_next(const char *path); dm_gfx_texdump_next(line + 8); LOG("DM_CTL: colour targets of the next frame → %s (as DM_NVN_TEXDUMP)", line + 8); continue; }
                 if (!strncmp(line, "passdump ", 9)) { void dm_gfx_passdump_next(long n); dm_gfx_passdump_next(atol(line + 9)); LOG("DM_CTL: passes of the next %ld frames (as DM_NVN_PASSDUMP)", atol(line + 9)); continue; }
@@ -257,8 +282,25 @@ static void *ctl_main(void *arg) {
                     for (int i = 0; i <= n; i++) { dm_touch t = {0, x0 + (x1 - x0) * (float)i / (float)n, y0 + (y1 - y0) * (float)i / (float)n}; dm_touch_script(&t, 1); usleep((useconds_t)(s * 1e6f / (float)n)); }
                     dm_touch_script(NULL, 0); continue;
                 }
-                key_step st = {0, 0.15, 0}; char *h = strchr(line, '~'); if (h) { *h = 0; st.hold = atof(h + 1); }
-                parse_keys(line, &st);
+                int pn = 0, both = 0; char *keys = line;   // "p<n>:<keys>": player n's controller (connected from its first press on), for scripted runs of local multiplayer
+                if (line[0] == 'p' && line[1] >= '2' && line[1] <= '8' && line[2] == ':') { pn = line[1] - '1'; keys = line + 3; }
+                else if (!strncmp(line, "both:", 5)) { both = 1; keys = line + 5; }   // players 1 and 2 at the same time (a press held on one pad blocks this thread, so two lines never overlap)
+                key_step st = {0, 0.15, 0}; char *h = strchr(keys, '~'); if (h) { *h = 0; st.hold = atof(h + 1); }
+                parse_keys(keys, &st);
+                if (both) {
+                    void dm_ctl_connect_player(int p); dm_ctl_connect_player(1);
+                    LOG("DM_CTL: players 1+2 press %#llx (hold %.2f s)", (unsigned long long)st.btn, st.hold);
+                    script_set(st.btn, st.lx, st.ly, st.rx, st.ry); dm_pad_set_player(1, st.btn, st.lx, st.ly, st.rx, st.ry);
+                    usleep((useconds_t)(st.hold * 1e6));
+                    script_set(0, 0, 0, 0, 0); dm_pad_set_player(1, 0, 0, 0, 0, 0);
+                    continue;
+                }
+                if (pn) {
+                    void dm_ctl_connect_player(int p); dm_ctl_connect_player(pn);
+                    LOG("DM_CTL: player %d press %#llx (hold %.2f s)", pn + 1, (unsigned long long)st.btn, st.hold);
+                    dm_pad_set_player(pn, st.btn, st.lx, st.ly, st.rx, st.ry); usleep((useconds_t)(st.hold * 1e6)); dm_pad_set_player(pn, 0, 0, 0, 0, 0);
+                    continue;
+                }
                 LOG("DM_CTL: press %#llx (hold %.2f s)", (unsigned long long)st.btn, st.hold);
                 if (st.tap) { dm_touch t = {0, st.tx, st.ty}; dm_touch_script(&t, 1); }
                 script_set(st.btn, st.lx, st.ly, st.rx, st.ry); usleep((useconds_t)(st.hold * 1e6)); script_set(0, 0, 0, 0, 0);
@@ -283,7 +325,9 @@ uint32_t dm_player_npad(int p) { return p <= 0 ? connected_id() : (uint32_t)p; }
 // Handheld, bit 9 Other: all of them until SetSupportedNpadIdType, as the hid service starts)
 static _Atomic uint32_t g_players = 1, g_ids_supported = 0x3ff;
 static uint32_t id_bit(uint32_t id) { return id < DM_PLAYERS ? 1u << id : id == NPAD_HANDHELD ? 1u << 8 : id == 0x10 ? 1u << 9 : 0; }
-static int reported(int p) { return p == 0 || (atomic_load(&g_players) >> p & 1 && atomic_load(&g_ids_supported) & id_bit((uint32_t)p)); }
+// Players past the last controller applet's maximum: a Switch disconnects the extra controllers when the applet closes with that many players (ctrl_support)
+static _Atomic int g_applet_cap = DM_PLAYERS;
+static int reported(int p) { return p == 0 || (p < atomic_load(&g_applet_cap) && atomic_load(&g_players) >> p & 1 && atomic_load(&g_ids_supported) & id_bit((uint32_t)p)); }
 // Players with a controller whose npad the game does not support. A one-player game (no npad past No1 supported) gets them as player 1, so any controller plays it; in a game for
 // fewer players than are connected (a fifth controller in a four-player game) they are not used, as on the Switch, where the system does not connect them
 static uint32_t unsupported_players(void) {
@@ -313,14 +357,22 @@ static void note_merged(void) {   // logs the players whose npad the game does n
         else LOG("hid: player %d's controller is not used: the game supports no npad %d", p + 1, p);
     }
 }
+static _Atomic uint32_t g_ctl_players, g_front_players = 1;   // players DM_CTL connected ("p2:…"), on top of the front end's controllers
 void dm_pad_players(uint32_t mask) {
-    mask = (mask | 1u) & ((1u << DM_PLAYERS) - 1);
+    atomic_store(&g_front_players, mask);
+    mask = (mask | 1u | atomic_load(&g_ctl_players)) & ((1u << DM_PLAYERS) - 1);
     uint32_t old = atomic_exchange(&g_players, mask);
     for (int p = 1; p < DM_PLAYERS; p++) if ((old ^ mask) >> p & 1) {
         if (!(mask >> p & 1)) dm_pad_set_player(p, 0, 0, 0, 0, 0);   // a controller that went away leaves nothing pressed
         if (atomic_load(&g_ids_supported) & id_bit((uint32_t)p)) style_changed((uint32_t)p);
     }
     note_merged();
+}
+
+void dm_ctl_connect_player(int p) {
+    if (p <= 0 || p >= DM_PLAYERS || atomic_fetch_or(&g_ctl_players, 1u << p) >> p & 1) return;
+    LOG("DM_CTL: player %d's controller connected (a full key controller on No%d)", p + 1, p + 1);
+    dm_pad_players(atomic_load(&g_front_players));
 }
 
 // DM_REC=<file>: player 1's physical input (keyboard / touch, its controller and the controllers merged into it, as fill reads them) written as DM_KEYS steps, so a run plays again
@@ -539,6 +591,9 @@ HLE_FORCE("_ZN2nn3hid20StopLrAssignmentModeEv", "L/R assignment mode; ignored by
 #define RES_CTRL_CANCELED (202u | 3101u << 9)
 int dm_players_reported(void) { int n = 0; for (int p = 0; p < DM_PLAYERS; p++) n += reported(p); return n; }
 static Result ctrl_support(int32_t *info, const int8_t *arg) {
+    // An applet that takes more players than the last one lets the controllers it disconnected join again (they connect in the applet on a Switch)
+    int hi = arg ? (int)(uint8_t)arg[1] : 0;   // the applet's maximum, a player count (0 = none given)
+    if (hi > atomic_load(&g_applet_cap)) { atomic_store(&g_applet_cap, hi); for (int p = 0; p < DM_PLAYERS; p++) style_changed((uint32_t)p); }
     int count = dm_players_reported(), canceled = 0;
     if (arg && arg[0] > count) {
         const char *keys = getenv("DM_KEYS"), *ctl = getenv("DM_CTL");
@@ -550,7 +605,13 @@ static Result ctrl_support(int32_t *info, const int8_t *arg) {
         }
         canceled = r <= 0 || arg[0] > count;
     } else if (arg) LOG("hid controller applet: %d to %d players wanted, %d connected", arg[0], arg[1], count);
-    if (arg && arg[1] > 0 && count > arg[1]) count = arg[1];
+    // More controllers than the maximum: on a Switch the applet keeps that many players and disconnects the others. Only capping the count left the extra ones connected,
+    // and PRAGMATA (1 to 1 players) opened the applet again every frame with a second controller connected
+    if (hi > 0 && count > hi) {
+        atomic_store(&g_applet_cap, hi); count = hi;
+        for (int p = hi; p < DM_PLAYERS; p++) style_changed((uint32_t)p);
+        LOG("hid controller applet: players %d and up disconnected, as the applet does for more controllers than its maximum", hi + 1);
+    }
     if (info) { info[0] = count; info[1] = (int32_t)connected_id(); }
     return canceled ? RES_CTRL_CANCELED : RES_OK;
 }
@@ -870,6 +931,8 @@ TOUCH(1) TOUCH(2) TOUCH(3) TOUCH(4) TOUCH(5) TOUCH(6) TOUCH(7) TOUCH(8) TOUCH(9)
 // Gestures: recognized from the same touch points (hle_touch.c gesture_fill), so only in handheld mode too
 int gesture_fill(void *out, int n, uint64_t now_ns);
 HLE_FORCE("_ZN2nn3hid17InitializeGestureEv", "connect to the hid gesture recognizer; the host recognizes gestures from the touch points", void, h_hid_InitGesture, void) {}
+// The two-argument version of newer SDKs (PRAGMATA, SDK 20), as InitializeTouchScreen(int, int): unhooked, the sdk connects to the hid service, which the host does not serve (sm 0xe15 abort)
+HLE_FORCE("_ZN2nn3hid17InitializeGestureEii", "connect to the hid gesture recognizer (two-argument version); the host recognizes gestures from the touch points", void, h_hid_InitGesture2, int a, int b) { (void)a; (void)b; }
 HLE_FORCE("_ZN2nn3hid16GetGestureStatesEPNS0_12GestureStateEi", "gesture states, newest first (handheld mode: recognized from the touch points; console mode: none)", int, h_hid_Gestures, void *out, int n) {
     keys_sync();
     return dm_opmode() == 0 ? gesture_fill(out, n, now_ns()) : 0;

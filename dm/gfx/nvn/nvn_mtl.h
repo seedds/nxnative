@@ -36,6 +36,25 @@ void mtl_res_snapshot(mtl_res_count *out);
 // One submit: begin -> several operations -> commit (returns the fence value at which this submit completes)
 void mtl_prepare(void);                                // the first submission's prepare step (prewarm, pipeline prebuild): no GPU work, called outside the graphics gate
 void mtl_sub_begin(void);
+void mtl_queue_seal(void);                         // own persistent target snapshots before record retirement
+void mtl_sub_resume(void);                         // continuation after a guest event boundary
+// Serialized by the submit lock. Event chunks append to one allocator lease;
+// pressure may revoke its completed prefix so blocked submissions cannot pin
+// the bounded allocator pool forever. Unencoded continuations reacquire it.
+typedef struct mtl_submit_alloc mtl_submit_alloc;
+mtl_submit_alloc *mtl_submit_alloc_new(void);
+void mtl_submit_alloc_close(mtl_submit_alloc *alloc); // last chunk committed, or owner released
+void mtl_submit_alloc_release(mtl_submit_alloc *alloc);
+void mtl_sub_begin_alloc(mtl_submit_alloc *alloc, int resume);
+// Submission-mode timestamps share one clock across host event chunks. The
+// logical submission owns the token; set_clock retains it until completion.
+// Segment-mode GPU timestamps and direct submits without a token are unchanged.
+typedef struct mtl_submit_clock mtl_submit_clock;
+mtl_submit_clock *mtl_submit_clock_new(void);
+void mtl_submit_clock_release(mtl_submit_clock *clock);
+void mtl_sub_set_clock(mtl_submit_clock *clock);    // after begin/resume, before encoding reports
+uint64_t mtl_completed_fence(void);                // post-operations are visible through this fence
+int mtl_xq_on(void);                               // DM_NVN_XQ_EVENTS (pragmata-r6-q1245)
 void mtl_queue_activate(uint64_t serial);              // submit lock held: restore this queue's persistent GPU state
 void mtl_queue_forget(uint64_t serial);                // finalize: discard its state, including guest object pointers
 void mtl_sub_copy(uint64_t src, uint64_t dst, uint64_t n);               // Buffer copy in GPU ordering
@@ -47,6 +66,16 @@ uint64_t mtl_last_fence(void);                       // Fence value of the most 
 int mtl_wait(uint64_t fence, uint64_t timeout_ns);   // Returns 1 when the GPU has completed up to fence, 0 on timeout
 int mtl_wait_acq(uint64_t fence, uint64_t timeout_ns);   // the same for a sync WindowAcquireTexture handed out (its own line in the wait ledger, DM_NVN_WAITS)
 void mtl_finish(void);                               // Wait for all submitted commands to complete
+uint64_t mtl_done_fence(void);                       // the newest fence the GPU has completed (and its CPU-visible effects published)
+int64_t mtl_up_seq_now(void); int mtl_up_busy_through(int64_t seq);   // upload batches: the newest begun; one begun at or before seq still open or running
+void mtl_pool_update_begin(void); void mtl_pool_update_end(void);   // around a sparse run update (vrun_set): lookups and the pool table see it whole
+int mtl_pool_extend(const void *mem, uint64_t size);  // a large pool grown at its end keeps its entry and buffers (0: not a large pool, delete and add it)
+int mtl_sparse_safe(void);                           // DM_NVN_SPARSE_SAFE (default on): zero-copy ranges checked before IOGPU wires them; sparse pools keep pages under live buffers (hle_nvn.c vpool_map)
+// expl2 (2026-11-07, nvn_expl2.inc; all off by default): DM_NVN_VA_AUDIT, DM_NVN_REMAP_REFRESH, DM_NVN_ALIAS_FENCE
+int mtl_remap_wanted(void);                          // DM_NVN_REMAP_REFRESH or DM_NVN_VA_AUDIT on: vpool_map counts the mapped pages a request replaces
+void mtl_remap_note(uint64_t lo, uint64_t n, int kind, uint64_t pages);   // a sparse request replaced `pages` mapped 4 KB pages in [lo, lo + n) (kind 'm' remap, 'u' unmap); any thread
+typedef struct { uint64_t first, expect, got, pgen; int kind, bad, pieces, desc, holes; } nvn_va_audit_t;   // kind: 0 fine, 'o' order (other host memory), 's' stale (remapped after its buffer), 'h' hole read through another range
+int nvn_sparse_va_audit(uint64_t a, uint64_t n, uint64_t h, uint64_t bgen, nvn_va_audit_t *r);   // hle_nvn.c: -1 outside sparse pools, else the bad pages (r: the first)
 void mtl_drain(void);                                // Wait for all commands on the queue (including presents) to complete: submit an empty command buffer and wait for it
 void mtl_xv_window_tex(uint64_t serial);   // Register a window (swapchain) texture: the cross-submit validity ledger never collects it
 // External producers (the Vulkan layer, dm/gfx/vk): the shared Metal device; a serial for one of their textures; present it once their event reaches ev_val (ticket for mtl_present_wait)

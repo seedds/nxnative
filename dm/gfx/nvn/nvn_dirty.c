@@ -116,6 +116,13 @@ static void release_pages(range_t *r, uintptr_t p, uintptr_t q, _Atomic uint64_t
         if (i <= q && st == PG_BUSY) release_page(r, i, count);   // another thread is changing it: wait, then unprotect it if it ended up protected
     }
 }
+// DM_NVN_WRITEWATCH (nvn_racediag.inc): whether this module holds the page of addr write-protected (or is changing it), so the write watch neither protects nor unprotects it.
+// Atomic reads only: usable in a signal handler
+int nvn_dirty_page_protected(const void *addr) {
+    uintptr_t a = (uintptr_t)addr; int n = atomic_load(&g_nr);
+    for (int i = 0; i < n; i++) { range_t *r = rg(i); if (live_at(i) && a >= r->base && a < r->end && atomic_load(&r->state[(a - r->base) >> g_shift]) != PG_NONE) return 1; }
+    return 0;
+}
 static void prep_write(void *addr, size_t len) {
     uintptr_t a = (uintptr_t)addr, e = a + len; int n = atomic_load(&g_nr);
     if (!len) return;
@@ -226,6 +233,22 @@ void nvn_dirty_protect_sparse(const void *addr, size_t len) {
     pthread_mutex_unlock(&g_slot_mu);
 }
 uint64_t nvn_dirty_sparse_writes(void) { return atomic_load(&g_sparse_writes); }
+// A span that crosses tracked ranges, piece by piece (perf 2026-11-05): a sparse texture's run of physical pages (hle_nvn.c vpt_walk merges contiguous host pages) can run from
+// one physical pool into the next one in host memory; as one span it is in no range, so nvn_dirty_protect left it writable and nvn_dirty_since called it written at every look:
+// PRAGMATA's 3840x2160 and 2048x2048 cube sparse textures were re-uploaded at every submission that followed any write or mapping (B1, perf/PERF_REPORT.md). A piece in no
+// range is still untracked (written)
+void nvn_dirty_protect_pieces(const void *addr, size_t len) {
+    uintptr_t a = (uintptr_t)addr, e = a + len;
+    while (a < e) { range_t *r = find_span(a, 1); if (!r) { a = (a | (g_pg - 1)) + 1; continue; }
+        uintptr_t end = e < r->end ? e : r->end; nvn_dirty_protect((const void *)a, end - a); a = end; }
+}
+int nvn_dirty_since_pieces(const void *addr, size_t len, uint64_t stamp) {
+    uintptr_t a = (uintptr_t)addr, e = a + len;
+    while (a < e) { range_t *r = find_span(a, 1); if (!r) return 1;
+        uintptr_t end = e < r->end ? e : r->end; const void *sp = r; if (nvn_dirty_since_cached(&sp, (const void *)a, end - a, stamp)) return 1; a = end; }
+    return 0;
+}
+
 uint64_t nvn_dirty_now(void) { return atomic_load(&g_now); }
 // As nvn_dirty_since, with the caller's last range kept in *span (rechecked, scanned again only if it no longer holds the span; a slot reused by another pool over the same memory is as
 // good): a packaged texture keeps its handle (the scan over every range ran twice per texture lookup), and a sparse texture's page-table walk (hle_nvn.c vpt_walk) asks once per run of

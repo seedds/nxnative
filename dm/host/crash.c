@@ -145,6 +145,9 @@ void dm_guest_write_prepare(void *addr, size_t len) { for (int i = 0; i < g_nwri
 static int (*g_trap_hook)(ucontext_t *uc);
 void crash_set_trap_hook(int (*fn)(ucontext_t *uc)) { g_trap_hook = fn; }
 void crash_set_dump_hook(void (*fn)(void)) { g_dump_hook = fn; }
+// DM_NVN_FLIGHTREC (nvn_flight.inc): a fatal signal writes the flight recorder's ring to <run>/flight/, after the crash state below is printed
+static void (*g_flight_hook)(int sig);
+void crash_set_flight_hook(void (*fn)(int sig)) { g_flight_hook = fn; }
 void crash_set_wait_dump(void (*fn)(void)) { g_wait_dump = fn; }
 // Dump the current state on demand (without exiting): the iOS app has no no-progress watchdog, so when the smoke test fails it sends dump through DM_LOG_PORT to trigger this -- what each guest thread is waiting on + the graphics-side wait points, the same thing the watchdog prints
 void crash_dump_now(const char *why) { fprintf(stderr, "[dm] state dump (%s): tick %u / stage %s\n", why, atomic_load(&g_watch_tick), g_watch_stage[atomic_load(&g_watch_stage_idx)]); if (g_dump_hook) g_dump_hook(); if (g_wait_dump) g_wait_dump(); }
@@ -175,6 +178,7 @@ static void on_crash(int sig, siginfo_t *si, void *uc_) {
             n += m ? snprintf(b + n, sizeof b - n, " %s=%s+%#llx", k ? "lr" : "pc", m->name, at[k] - (uint64_t)m->base) : snprintf(b + n, sizeof b - n, " %s=%#llx", k ? "lr" : "pc", at[k]); }
         n += snprintf(b + n, sizeof b - n, "\n");
         if (write(2, b, (size_t)n) < 0) {}
+        if (g_flight_hook) g_flight_hook(sig);
         _exit(128 + sig);
     }
     funlockfile(stderr);
@@ -207,6 +211,7 @@ static void on_crash(int sig, siginfo_t *si, void *uc_) {
             else if (dladdr((void *)v, &di) && di.dli_sname && di.dli_fname && strstr(di.dli_fname, "dmhost")) { fprintf(stderr, " [%+d]%s+%#llx", i * 8, di.dli_sname, (unsigned long long)(v - (uint64_t)di.dli_saddr)); n++; }
         }
         fputc('\n', stderr); }
+    if (g_flight_hook) { fflush(stderr); g_flight_hook(sig); }
     if (g_dump_hook) g_dump_hook();
     _exit(128 + sig);
 }

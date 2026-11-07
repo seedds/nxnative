@@ -626,6 +626,13 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                 }
             }
 
+            // nxnative: a phi source that is neither a storage buffer nor another phi (typically a pointer the shader loaded from memory). Ryujinx ignores it, so the helper
+            // checks only the buffers the other sources named and reads 0 for the loaded pointer. PRAGMATA's meshlet queue kernels (12a52b683eec95c1, 8c48c7ffd257c63d,
+            // 251426e9d44fd558) hit this case: "@P0 LDG.64 R0, [s5]; @!P0 LDG.64 R0, [s5 + i*16]" redefines the R0:R1 that held &s3[ticket], so the phi of the
+            // ptr+0x20 loads gets the old s3 address as a third source. The helper then checked only s3's window, the eight LOD offsets read 0, every instance got
+            // 0 clusters, and no mesh record was ever written
+            bool untraced = false;
+
             while (phis.TryDequeue(out phi))
             {
                 for (int srcIndex = 0; srcIndex < phi.SourcesCount; srcIndex++)
@@ -644,10 +651,34 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                             targetCbs.Add(targetCb);
                         }
                     }
-                    else if (phiSource.AsgOp is PhiNode phi2 && visited.Add(phi2))
+                    else if (phiSource.AsgOp is PhiNode phi2)
                     {
-                        phis.Enqueue(phi2);
+                        if (visited.Add(phi2))
+                        {
+                            phis.Enqueue(phi2);
+                        }
                     }
+                    else
+                    {
+                        untraced = true;
+                    }
+                }
+            }
+
+            // nxnative: with an untraced source, a load goes through the memory pool table, which also covers the named storage buffers (they live in the game's pools).
+            // Stores and atomics keep the old behaviour for now (only the traced buffers), logged so they can be found
+            if (untraced && targetCbs.Count != 0)
+            {
+                bool writes = operation.Inst == Instruction.Store || operation.Inst.IsAtomic();
+
+                if (!writes)
+                {
+                    gpuAccessor.Log($"Global memory operation \"{operation.Inst}\": an address source traced to no storage buffer next to {targetCbs.Count} that did; it goes through the memory pool table.");
+                    targetCbs.Clear();
+                }
+                else
+                {
+                    gpuAccessor.Log($"Global memory operation \"{operation.Inst}\": an address source traced to no storage buffer next to {targetCbs.Count} that did; only those are written.");
                 }
             }
 
@@ -864,17 +895,29 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             }
 
             Operand selected = Local();
+            Operand deltaLow = Local();
+            Operand deltaHigh = Local();
             Operand lblFound = Label();
             Operand lblChosen = Label();
 
             // The entry this helper chose last in this invocation, if it holds the address: a shader reads a structure word after word from one pool, so all but the first access of a run
             // choose the entry the first one chose (Ocarina of Time's foliage mesh shader 73dc0b90c4082e43, 135 reads, took 10.9 ms of a 683x384 frame). The table's ranges are disjoint
             // (nvn_mtl.m gmem_map), so the search below would choose the same entry, and the host binds one table for a whole draw or dispatch. The word starts at 0, the empty entry
-            int lastBinding = resourceManager.AddRawLastEntryMemory();
-            Operand last = context.Load(StorageKind.LocalMemory, lastBinding);
-            Operand lastEntry = context.IMultiply(last, Const(GmemMapEntryWords));
-            Operand lastHolds = context.BitwiseAnd(AtOrBelow(MapWord(lastEntry, 1), MapWord(lastEntry, 0)), Below(MapWord(lastEntry, 3), MapWord(lastEntry, 2)));
-            context.Copy(selected, last);
+            // The entry's range and delta are kept in private words beside its index (as p****6 oot2 6951110c, and as PR #1464 kept them in registers): a hit takes two compares
+            // and no read of the table. PRAGMATA's G-buffer vertex shader 53df0ac0 calls this about 110 times a vertex, its material pixel shaders up to 137 times a pixel; the
+            // side-library form of this (sw2_tools/pr/scratch/gm_memo.py, loads only) took 3.65 ms off its frame. Words: [0] the entry, [1..2] its start, [3..4] its end,
+            // [5..6] its delta; all 0 at the start: the range [0, 0) holds no address. The index stays for the write log
+            int[] cache = new int[7];
+            for (int k = 0; k < cache.Length; k++)
+            {
+                cache[k] = resourceManager.AddRawLastEntryMemory();
+            }
+
+            Operand CacheWord(int k) => context.Load(StorageKind.LocalMemory, cache[k]);
+            Operand lastHolds = context.BitwiseAnd(AtOrBelow(CacheWord(2), CacheWord(1)), Below(CacheWord(4), CacheWord(3)));
+            context.Copy(selected, CacheWord(0));
+            context.Copy(deltaLow, CacheWord(5));
+            context.Copy(deltaHigh, CacheWord(6));
             context.BranchIfTrue(lblChosen, lastHolds);
 
             // The hint of the address's 2 MiB chunk names an entry holding the whole chunk (dmsh_abi.h DMSH_GMEM_HINT_SHIFT). An address too high for the tag searches
@@ -900,14 +943,25 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
 
             context.Copy(selected, index);
             context.MarkLabel(lblFound);
-            context.Store(StorageKind.LocalMemory, lastBinding, selected);
             Operand found = context.IMultiply(selected, Const(GmemMapEntryWords));
+            Operand endLow = MapWord(found, 2);
+            Operand endHigh = MapWord(found, 3);
             Operand lblSkip = Label();
-            context.BranchIfFalse(lblSkip, Below(MapWord(found, 3), MapWord(found, 2)));   // an address in no pool: the entry below it ends below it
+            context.BranchIfFalse(lblSkip, Below(endHigh, endLow));   // an address in no pool: the entry below it ends below it
 
-            // The last entry's range held it, or the hint's or the search's entry does
+            // The hint's or the search's entry holds it: it becomes the one kept
+            context.Copy(deltaLow, MapWord(found, 4));
+            context.Copy(deltaHigh, MapWord(found, 5));
+            context.Store(StorageKind.LocalMemory, cache[0], selected);
+            context.Store(StorageKind.LocalMemory, cache[1], MapWord(found, 0));
+            context.Store(StorageKind.LocalMemory, cache[2], MapWord(found, 1));
+            context.Store(StorageKind.LocalMemory, cache[3], endLow);
+            context.Store(StorageKind.LocalMemory, cache[4], endHigh);
+            context.Store(StorageKind.LocalMemory, cache[5], deltaLow);
+            context.Store(StorageKind.LocalMemory, cache[6], deltaHigh);
+
+            // The kept entry's range held it, or the hint's or the search's entry does
             context.MarkLabel(lblChosen);
-            found = context.IMultiply(selected, Const(GmemMapEntryWords));
 
             if (writes)
             {
@@ -922,9 +976,9 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
 
             // A small integer is read or written in its 32-bit word
             Operand wordLow = isSmall ? context.BitwiseAnd(addrLow, Const(~3)) : addrLow;
-            Operand hostLow = context.IAdd(wordLow, MapWord(found, 4));
+            Operand hostLow = context.IAdd(wordLow, deltaLow);
             Operand carry = context.ConditionalSelect(context.ICompareLessUnsigned(hostLow, wordLow), Const(1), Const(0));
-            Operand hostHigh = context.IAdd(context.IAdd(addrHigh, MapWord(found, 5)), carry);
+            Operand hostHigh = context.IAdd(context.IAdd(addrHigh, deltaHigh), carry);
 
             Operand resultValue = null;
 
@@ -955,13 +1009,16 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                     Operand bitOffset = HelperFunctionManager.GetBitOffset(context, addrLow);
 
                     Operand lblLoopHead = Label();
+                    Operand oldValue = Local();
+                    context.Copy(oldValue, context.Load(StorageKind.GlobalMemory, hostLow, hostHigh));
                     context.MarkLabel(lblLoopHead);
 
-                    Operand oldValue = context.Load(StorageKind.GlobalMemory, hostLow, hostHigh);
                     Operand newValue = context.BitfieldInsert(oldValue, value, bitOffset, Const(bitSize));
                     Operand casResult = context.AtomicCompareAndSwap(StorageKind.GlobalMemory, hostLow, hostHigh, oldValue, newValue);
+                    Operand casFail = context.ICompareNotEqual(casResult, oldValue);
+                    context.Copy(oldValue, casResult);   // retried with the value the exchange returned, not a new plain load (nemyu 4fe22c860 + 942d01bd2: a plain reload can hit a stale line, the exchange never matches and the loop spins)
 
-                    context.BranchIfTrue(lblLoopHead, context.ICompareNotEqual(casResult, oldValue));
+                    context.BranchIfTrue(lblLoopHead, casFail);
                 }
                 else
                 {
@@ -1198,10 +1255,11 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
         private static Operand GenerateAtomicCasLoop(EmitterContext context, Operand wordOffset, int binding, Func<Operand, Operand> opCallback)
         {
             Operand lblLoopHead = Label();
+            Operand oldValue = Local();
+            context.Copy(oldValue, context.Load(StorageKind.StorageBuffer, binding, Const(0), wordOffset));
 
             context.MarkLabel(lblLoopHead);
 
-            Operand oldValue = context.Load(StorageKind.StorageBuffer, binding, Const(0), wordOffset);
             Operand newValue = opCallback(oldValue);
 
             Operand casResult = context.AtomicCompareAndSwap(
@@ -1213,6 +1271,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                 newValue);
 
             Operand casFail = context.ICompareNotEqual(casResult, oldValue);
+            context.Copy(oldValue, casResult);   // retried with the value the exchange returned, not a new plain load (nemyu 4fe22c860 + 942d01bd2: a plain reload can hit a stale line, the exchange never matches and the loop spins)
 
             context.BranchIfTrue(lblLoopHead, casFail);
 
@@ -1292,6 +1351,13 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                 return GetBaseAddressCbWithOffset(src1, src2, constOffset);
             }
 
+            // nxnative: c[1] holds the shader's immediates, never a buffer address (see GetBaseAddressCbWithOffset): when both operands are constant buffers and the second one is c[1],
+            // the base is the first one (Donkey Kong Bananza's lowered compute kernels: c0[ptr] + c1[0] + k). The rule above covers a c0 first operand; this one any other bank
+            if (src1.Type == OperandType.ConstantBuffer && src2.Type == OperandType.ConstantBuffer && src2.GetCbufSlot() == 1 && src1.GetCbufSlot() != 1)
+            {
+                return GetBaseAddressCbWithOffset(src1, src2, constOffset);
+            }
+
             if (src1.Type != OperandType.ConstantBuffer ||
                 (src1.Type == OperandType.ConstantBuffer && src2.Type == OperandType.ConstantBuffer) ||
                 (src2.Type == OperandType.ConstantBuffer && src2.GetCbufSlot() == DriverReservedCb))
@@ -1332,6 +1398,14 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             {
                 int sbCbSlot = baseAddress.GetCbufSlot();
                 int sbCbOffset = baseAddress.GetCbufOffset();
+
+                // nxnative: c[1] is the shader's own constants (GLSLC's immediates), never a buffer address. It is chosen here when the real base comes from memory (a pointer the
+                // shader loaded, Donkey Kong Bananza's particle compute programs: c[1][0] = 0x20 added to it); no slot can be decoded for it and the host refused the shader. Not found,
+                // the access reads 0 / is dropped, as Eden does for a constant whose live value is not a mapped address (IsCbufStorageBufferPointer)
+                if (sbCbSlot == 1)
+                {
+                    return SearchResult.NotFound;
+                }
 
                 // We require the offset to be aligned to 1 word (64 bits),
                 // since the address size is 64-bit and the GPU only supports aligned memory access.

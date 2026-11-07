@@ -5,8 +5,6 @@
 dm/gfx/gl/hle_gl.m	bugprone-signed-char-misuse	2
 dm/gfx/gl/hle_gl.m	bugprone-suspicious-memory-comparison	2
 dm/gfx/gl/hle_gl.m	bugprone-suspicious-realloc-usage	2
-dm/gfx/gl/hle_gl.m	clang-analyzer-nullability.NullablePassedToNonnull	1
-dm/gfx/gl/hle_gl.m	clang-analyzer-security.ArrayBound	1
 dm/gfx/gl/hle_gl.m	misc-redundant-expression	1
 dm/gfx/nvn/hle_nvn.c	bugprone-suspicious-memory-comparison	1
 dm/gfx/nvn/hle_nvn.c	bugprone-suspicious-realloc-usage	6

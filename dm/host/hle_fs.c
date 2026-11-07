@@ -602,6 +602,16 @@ HLE_FORCE("_ZN2nn2fs26GetUtf16EntryNameLengthMaxEPbPmPKc", "fsp-srv; host mounts
 HLE_FORCE("_ZN2nn2fs21MountTemporaryStorageEPKc", "fsp-srv; temporary storage → host directory", Result, h_fs_MountTemp, const char *name) {
     char b[1024]; return mount(name, envdir("DM_TEMP", "run/platform/temp", b, sizeof b), 0);
 }
+// RamDisk: the SDK's in-memory filesystem (nn::fs::RamDiskFileSystem) is replaced by a host directory under the temporary storage. Factorio calls GetRamDiskBufferSize,
+// allocates the buffer, MountRamDisk("ramdisk", ...), then creates ramdisk:/currently-playing and writes blueprint.dat there; without the mount every such open is ENOENT.
+HLE_FORCE("_ZN2nn2fs20GetRamDiskBufferSizeEPm", "fsp-srv; ramdisk buffer: a host directory needs none, report a single reasonable size", Result, h_fs_GetRamDiskSize, size_t *out) {
+    if (out) *out = 64 << 20; return RES_OK;
+}
+HLE_FORCE("_ZN2nn2fs12MountRamDiskEPKcPvm", "fsp-srv; ramdisk → host directory under temporary storage", Result, h_fs_MountRamDisk, const char *name, void *buf, size_t sz) {
+    (void)buf; (void)sz;
+    char t[1024], dir[1100]; snprintf(dir, sizeof dir, "%s/ramdisk", envdir("DM_TEMP", "run/platform/temp", t, sizeof t)); mkdir(dir, 0755);
+    return mount(name, dir, 0);
+}
 // Cache storage (Tears of the Kingdom; its first list call opened fsp-srv and aborted in sm::Initialize): storage <index> is the host folder <temporary storage>_cache<index>,
 // created when it is created or mounted. The list reports none (a fresh console), so the game creates its storage at every boot; creating an existing one succeeds
 static const char *cache_dir(int index, char *b, size_t n) { char t[1024]; snprintf(b, n, "%s_cache%d", envdir("DM_TEMP", "run/platform/temp", t, sizeof t), index); return b; }
@@ -1093,6 +1103,9 @@ HLE_FORCE("_ZN2nn2fs8MountRomEPKciPvm", "fsp-srv; rom → host RomFS directory (
     return h_fs_MountRom(name, cache, sz);
 }
 HLE_FORCE("_ZN2nn2fs22QueryMountRomCacheSizeEPmi", "fsp-srv; the cache gets only the minimum size (SDK 19 overload with an index)", Result, h_fs_QueryRomCacheIdx, size_t *out, int idx) { (void)idx; return h_fs_QueryRomCache(out); }
+// SDK 21's ApplicationId form of the same two calls: the host serves one RomFS for the running game, whatever the ID
+HLE_FORCE("_ZN2nn2fs22QueryMountRomCacheSizeEPmNS_13ApplicationIdE", "fsp-srv; the cache gets only the minimum size (ApplicationId overload)", Result, h_fs_QueryRomCacheApp, size_t *out, uint64_t appid) { (void)appid; return h_fs_QueryRomCache(out); }
+HLE_FORCE("_ZN2nn2fs8MountRomEPKcNS_13ApplicationIdEPvm", "fsp-srv; rom → host RomFS directory (ApplicationId overload)", Result, h_fs_MountRomApp, const char *name, uint64_t appid, void *cache, size_t sz) { (void)appid; return h_fs_MountRom(name, cache, sz); }
 // ReadFile without the bytes-read output: the read must be complete; a short read (past the end of file) is returned as a failure
 HLE_FORCE("_ZN2nn2fs8ReadFileENS0_10FileHandleElPvm", "fsp-srv → pread(2), must read in full", Result, h_fs_ReadFileExact, uint64_t h, int64_t off, void *buf, size_t sz) {
     size_t got = 0; Result r = h_fs_ReadFile(&got, h, off, buf, sz);

@@ -1,0 +1,40 @@
+# Factorio game profile: surveyed from the NSP, then brought up and checked on an iPhone (A16).
+# Factorio 2.0.77 (build 84539), SDK 21.4.2.
+
+# ---- Identity ----
+title_id	01004200189F4000
+program_id	01004200189F4000
+
+# ---- App ----
+name	Factorio
+ipa	Factorio.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v2097152	2.0.77	main=30bf431ee5105f84382808faf85eb420	sdk=a54aeb48bc09ad696a3eca7e7da37105
+package	v2097152
+shader_versions	v2097152
+
+# ---- Files ----
+# not loaded, main takes nothing from them the host does not supply: subsdk0 (NintendoSDK_OpenGL)
+modules	main sdk
+romfs_marker	data/core/fonts/NotoSansCJKsc-Bold.ttf
+zip_store	.dat:.ogg:.png:.ttf:.zip:.metallib
+
+# ---- Display / input ----
+# Handheld by default: Factorio's free cursor moves with the right stick and can be jumped by tapping, but the host sends touch points only in handheld mode
+# (the Switch's screen is out of reach when docked). The launcher's Console mode still overrides this per launch.
+op_mode	handheld
+
+# ---- Memory ----
+# main sets a heap of at most the pool − 64 MB: a 3328 MB heap region
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 0 MB of system resource: IsVirtualAddressMemoryEnabled is false, as on Horizon (Big Brain Academy: Brain vs. Brain sets a heap only then)
+sys_resource	0x0
+
+# ---- Shader split ----
+shader_groups	/data/=data
+shader_note	Factorio 2.0.77 shaders (GL 4.5 through the NintendoSDK OpenGL driver)

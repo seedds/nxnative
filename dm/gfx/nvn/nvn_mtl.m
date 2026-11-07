@@ -12426,6 +12426,15 @@ static int tex_storage_dst(const tex_t *t) {
     if (t->has_layout || tex_cpu_written(t->serial) || nvn_ft_tracked(t->serial)) return !mtl_tex_gpu_owned(t->serial);
     return [tex_get(t->serial) isKindOfClass:[NvPkg class]];
 }
+// A GPU block encoder's destination: a texture of 64- or 128-bit unsigned texels (one per 4x4 block) in a pool the CPU cannot access, whose storage a BC texture of the same block size
+// shares on NVN. Cricket 24 encodes each kit into an RGBA32Uint texture by compute, copies it level by level into a 128x128 RGBA32Uint texture at offset 0 of the kit's own 0x56000-byte
+// pool, and samples the 512x512 BC3 texture made over the same storage. The two are separate Metal textures here, so the copy is read back into the storage: the BC texture is filled
+// from there at its first use (tex_init_fill takes a CPU_NO_ACCESS pool's storage), as the Switch reads the same bytes (both block-linear with 16-byte elements)
+static int tex_block_alias_dst(const tex_t *t, id<MTLTexture> d) {
+    if (!t->mem || !t->pool || !(t->pool->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) || (t->pool->flags & NVN_MEMORY_POOL_FLAGS_VIRTUAL) || t->d.samples > 1
+        || t->d.target != NVN_TEXTURE_TARGET_2D || (t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET | NVN_TEXTURE_FLAGS_COMPRESSIBLE))) return 0;
+    return d.pixelFormat == MTLPixelFormatRGBA32Uint || d.pixelFormat == MTLPixelFormatRG32Uint || d.pixelFormat == MTLPixelFormatRGBA16Uint;
+}
 // Readbacks queued and not landed, by texture (mirror_readback / mirror_rb_land). Until one lands the texture's storage lacks the copied bytes: a copy from the texture is read back too, and
 // so is a copy into it, so that both land in the order they were recorded (a submission's post-ops run in order, and submissions complete in order). A full table counts the rest as
 // untracked, which makes every texture pending until they land
@@ -12746,7 +12755,7 @@ static void copy_t2t(const p_copy_t2t *c) {
     int s3 = c->src->d.target == 2, d3 = c->dst->d.target == 2, nz = c->sr.depth ? c->sr.depth : 1;
     // The copy's bytes belong in the destination's storage: written there now from the source's storage when that holds its content and the copy is a plain one (the same Metal format: a
     // format change is drawn below and converts the bytes), else read back after the copy (decided before the draw path gives the destination render-target use, which makes it GPU-owned from then on)
-    int rb = !d3 && tex_storage_dst(c->dst);
+    int rb = !d3 && (tex_storage_dst(c->dst) || tex_block_alias_dst(c->dst, d));
     if (rb && !s3 && c->sr.width == c->dr.width && c->sr.height == c->dr.height && !(c->flags & (NVN_COPY_FLAGS_MIRROR_X_BIT | NVN_COPY_FLAGS_MIRROR_Y_BIT)) && s.pixelFormat == d.pixelFormat
         && !mrb_pending(c->dst->serial) && tex_storage_src(c->src) && !nvn_tex_mirror_t2t(c->src, sl, sz0, &c->sr, c->dst, dl, dz0, &c->dr)) { mirror_note(0, c->dst, dl, "texture", 0); rb = 0; }
     // The draw path renders into the destination: one made without render-target use (packaged) gets it first, as a whole-level clear does (Paper Mario: The Thousand-Year Door copies a

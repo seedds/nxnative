@@ -23,6 +23,7 @@ Status: brought up on the Mac: the first-boot brightness screen, the title, a ne
 - **Current:** 60 fps (30 on the Switch). The engine's Switch device profile sets `rhi.syncinterval=2` (`BaseSwitchDeviceProfiles.ini`), so the game asks for present interval 2; the game sets no `t.MaxFPS`. The host writes `rhi.SyncInterval` 1 into its console variable (`hle_fpslock.c`) whenever the game sets it back (at level loads), so the game asks for present interval 1 itself.
 - Unreal steps the game by the time that really passed: `DM_NVN_REGLUM` traces of the same keys from the same save at 30 and 60 fps (59.8 fps, frame time p99 18 ms on the Mac) match from the load through a 3 s walk (thumbnail difference ≤ 0.006).
 - `DM_FPS_TARGET=30` (`Documents/env.txt` on the iPhone) keeps the game's 30 and saves power.
+- **Current:** dynamic resolution aims at the target's frame time. The game's Switch device profile turns it on (`r.DynamicRes.OperationMode` 2, 60-80 % of the 1728x972 view: `FFRS/Config/DefaultDeviceProfiles.ini`) with the engine's Switch budget of 33.33 ms, so at 60 it lowered the resolution only once a frame took 33 ms: at 40 fps on the AYN Odin 3 (nx2android) it stayed at 80 %. The host writes `r.DynamicRes.FrameTimeBudget` at the target too ([Unreal's dynamic resolution at the target's frame time](../../../docs/reference/frame-rate.md#unreals-dynamic-resolution-at-the-targets-frame-time)); 33.33, 60 and 80 read at `main+0x8be8118` and its neighbours on the Mac.
 
 ## Memory
 
@@ -68,6 +69,7 @@ General host changes first needed here; each applies to every game:
 - **IoStore shader libraries read through the game's own Oodle with no boot** (`uepak.py` `Toc`, `io_archive`, `OodleHost`, `DM_OODLE_SERVE`): [01, Compressed RomFS content](../../../docs/agents/01-extract.md#compressed-romfs-content), [Unreal Engine 5.6 IoStore shader libraries](../../../docs/reference/shaders.md#unreal-engine-56-iostore-shader-libraries).
 - **Rewriter:** text before the first FDE as one function (`func_of`) and long functions analysed in pieces (`pieces`): [Code before the first unwind entry is one function](../../../docs/reference/rewriter.md#code-before-the-first-unwind-entry-is-one-function), [Long functions analysed in pieces](../../../docs/reference/rewriter.md#long-functions-analysed-in-pieces).
 - **Bindless reads through a phi that also carries non-handle values** (the vendored translator's `TryTableHandle`): [Bindless reads whose handle phi also carries other values](../../../docs/reference/shaders.md#bindless-reads-whose-handle-phi-also-carries-other-values).
+- **Unreal's dynamic resolution at the target's frame time** (`ue_cvar.py`, `hle_fpslock.c`): [Unreal's dynamic resolution at the target's frame time](../../../docs/reference/frame-rate.md#unreals-dynamic-resolution-at-the-targets-frame-time).
 - **Buffer texture views below the 16-byte alignment read through an aligned copy** (`tbuf_shadow`): [Buffer textures at offsets below 16 bytes](../../../docs/reference/rendering.md#buffer-textures-at-offsets-below-16-bytes).
 
 ## Open

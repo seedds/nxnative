@@ -66,13 +66,15 @@ static void check(int which) {
     } else if (which == 7) {
         strcpy(g_mod[0].build_id, "79e5950ffa85acf63e28c9aec051eac2");
         f = (float *)(base + 0x13c94dc); *f = 1000.0f / 30;
-    } else if (which == 8) {   // Octopath Traveler 0: the frame limit and the present interval, and a variable the host does not write
+    } else if (which == 8) {   // Octopath Traveler 0: the frame limit and the present interval, and a variable the host does not write; FINAL FANTASY RESONANCE's dynamic-resolution budget
         strcpy(g_mod[0].build_id, "0123456789abcdef0123456789abcdef");
-        cvar("r.Streaming.PoolSize", 0x7c71608); cvar(DM_GAME_UE_FPS_CVAR, 0x7c738d0); cvar("rhi.SyncInterval", 0x7b32690);
+        cvar("r.Streaming.PoolSize", 0x7c71608); cvar(DM_GAME_UE_FPS_CVAR, 0x7c738d0); cvar("rhi.SyncInterval", 0x7b32690); cvar("r.DynamicRes.FrameTimeBudget", 0x8be8118);
         *(uintptr_t *)(base + 0x7c738d0 + 0x10) = (uintptr_t)object;
         *(uintptr_t *)(base + 0x7b32690 + 0x10) = (uintptr_t)(object + 16);
+        *(uintptr_t *)(base + 0x8be8118 + 0x10) = (uintptr_t)(object + 32);
         f = (float *)object; f[0] = f[1] = 30;
         sync = (int32_t *)(object + 16); sync[0] = sync[1] = 2;
+        float *budget = (float *)(object + 32); budget[0] = budget[1] = 33.33f;
     } else if (which == 14) {
         strcpy(g_mod[0].build_id, "a48c0de3bc353efa0e4d359bde05ef24");
         *(uintptr_t *)(base + 0xda20e38) = (uintptr_t)object;
@@ -128,7 +130,8 @@ static void check(int which) {
         assert(*unity == (which == 4 ? -1 : which == 5 ? 0 : 30));
     } else if (which == 6) assert(*f == 60 && writes == 1);
     else if (which == 7) assert(fabsf(*f - (1000.0f / 60 - 0.5f)) < 0.001f && writes == 1);
-    else if (which == 8) assert(f[0] == 60 && f[1] == 60 && sync[0] == 1 && sync[1] == 1 && writes == 4);
+    else if (which == 8) { float *budget = (float *)(object + 32);   // the budget at the target's frame time, less the 60 fps margin (ms_want)
+        assert(f[0] == 60 && f[1] == 60 && sync[0] == 1 && sync[1] == 1 && fabsf(budget[0] - (1000.0f / 60 - 0.5f)) < 0.001f && budget[1] == budget[0] && writes == 6); }
     else if (which == 9) {
         assert(sync[0] == 1 && sync[1] == 1 && writes == 2);
         dm_fps_lock_tick(); assert(writes == 2);

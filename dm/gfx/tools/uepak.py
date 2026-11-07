@@ -230,8 +230,26 @@ def find_key(img, lo, hi, pak):
         if len(set(w)) >= 20 and opens(w): return w
     return None
 
+KEY_ENV = 'DM_UE_PAK_KEY'   # main's AES key in hex (ensure_key), for the readers that get no key of their own: the inline check, the shader split and its worker processes
+def env_key():
+    k = os.environ.get(KEY_ENV); return bytes.fromhex(k) if k else None
+
+def ensure_key(romfs, main_nso):
+    """main's AES key into KEY_ENV when an Unreal pak under the RomFS has an encrypted index (DRAGON BALL Sparking! ZERO: the pak and its IoStore containers both encrypted with it) → the key or None"""
+    if env_key(): return env_key()
+    for p in paks(romfs):
+        try:
+            with open(p, 'rb') as f: enc = footer(f)[0]
+        except (OSError, ValueError, struct.error): continue
+        if not enc: continue
+        img, lo, hi = nso_image(main_nso); k = find_key(img, lo, hi, p)
+        if k: os.environ[KEY_ENV] = k.hex()
+        return k
+    return None
+
 class Pak:
     def __init__(self, path, key=None):
+        key = key or env_key()
         self.path, self.key = path, key; self.f = open(path, 'rb')
         enc, ioff, isz, self.methods, self.version = footer(self.f)
         if enc and not key: raise ValueError(f'{path}: the index is encrypted and no key was given')
@@ -357,7 +375,7 @@ class Toc:
     u64 partition size, u32 count of chunks without a perfect hash, then reserved words. After it: chunk IDs (12 bytes: u64 hash, u16 index, u8, u8 type), offsets and lengths
     (5 + 5 bytes, big-endian), the perfect hash seeds and overflow list (u32 each), the blocks (5-byte offset, 3-byte stored size, 3-byte raw size, u8 method; little-endian), the method names"""
     def __init__(self, path, key=None):
-        b = open(path, 'rb').read()
+        key = key or env_key(); b = open(path, 'rb').read()
         if b[:16] != TOC_MAGIC: raise ValueError(f'{path}: not an IoStore TOC')
         self.path, self.key, self.version = path, key, b[16]
         hsz, n, nblk, bsz, nmeth, mlen, self.block_size, dsz, nparts = struct.unpack_from('<9I', b, 20)
@@ -375,7 +393,8 @@ class Toc:
         o += 12 * nblk
         self.methods = [b[o + mlen * i:o + mlen * (i + 1)].rstrip(b'\0').decode('latin1') for i in range(nmeth)]
         o += mlen * nmeth
-        self.dir_index = b[o:o + dsz] if b[80] & 8 and not b[80] & 6 else b''   # the directory index follows unless a signature comes first (flag 4) or it is encrypted (flag 2)
+        self.dir_index = b[o:o + dsz] if b[80] & 8 and not b[80] & 4 and (key or not b[80] & 2) else b''   # the directory index follows unless a signature comes first (flag 4); encrypted (flag 2), it takes the key
+        if self.dir_index and b[80] & 2: self.dir_index = aes_decrypt(key, self.dir_index)
         self.index = {c: i for i, c in enumerate(self.ids)}; self.files = {}
     def of_type(self, t):
         """Indices of the chunks of one EIoChunkType (Unreal Engine 5 numbering: TOC version 4 and later)"""
@@ -513,11 +532,19 @@ def inline_shaders(path):
     """Whether a pak keeps its shaders inline in its cooked packages rather than in shader code archives: every legacy pak (DRAGON QUEST XI S), and a version 11 pak whose directory index
     names no .ushaderbytecode and either cooked packages (.uexp; OCTOPATH TRAVELER II: bShareMaterialShaderCode off) or the global shader cache with the cooked packages in the containers beside the pak
     (inline_in_containers; Mario & Luigi: Brothership and Yoshi and the Mysterious Book: the same setting with IoStore on). FINAL FANTASY RESONANCE's pak names the global shader cache too, but its
-    shaders are in its container's shader libraries, and Octopath Traveler 0's index is encrypted (reading it takes main's key; it holds the archives): neither counts"""
+    shaders are in its container's shader libraries, and Octopath Traveler 0's index is encrypted (reading it takes main's key; it holds the archives): neither counts.
+    An encrypted index is read with main's key from KEY_ENV (ensure_key; without it, False as before): DRAGON BALL Sparking! ZERO's pakchunk0-Switch.pak names only the global shader cache, its
+    cooked packages in encrypted containers beside it. A pak with no files (its other 17 pakchunk*-Switch.pak) is None, neither kind"""
     with open(path, 'rb') as f:
         enc, ioff, isz, _, ver = footer(f)
         if ver in LEGACY: return True
-        if enc: return False
+    if enc:
+        if not env_key(): return False
+        names = list(Pak(path).files)
+        if not names: return None
+        d = b'\0'.join(n.encode() for n in names) + b'\0'
+        return b'.ushaderbytecode\0' not in d and (b'.uexp\0' in d or (b'GlobalShaderCache-' in d and inline_in_containers(path)))
+    with open(path, 'rb') as f:
         r = R(read_range(f, ioff, isz, path), what=f'{path}: the index'); r.fstr(); r.take('<iQ')
         if r.take('<i'): r.take('<QQ'); r.raw(20)
         if not r.take('<i'): return False

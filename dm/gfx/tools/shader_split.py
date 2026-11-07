@@ -2183,7 +2183,7 @@ def ue_legacy_jobs(files, parts=64):
         except (OSError, ValueError, struct.error) as e: print(f'[RED] /{r}: the container cannot be read ({e}); its shaders are left out', flush=True); continue
         bundles = t.export_bundles()
         if not bundles: continue
-        if t.encrypted: print(f'[RED] /{r}: the container is encrypted, which is not read here; its shaders are left out', flush=True); continue
+        if t.encrypted and not t.key: print(f'[RED] /{r}: the container is encrypted and main gave no key (uepak.ensure_key); its shaders are left out', flush=True); continue
         taken.update([p, *t.ucas_paths()])
         chunks.update({(os.path.dirname(p), t.ids[i]): (p, r, i, t.ranges[i][1]) for i in bundles})
     jobs = []
@@ -2266,12 +2266,18 @@ def ue_inline_shaders(d, label, out):
     def proved(row):
         at, n, raw, _ = row
         s = d[at:at + n] if n == raw else oodle_supposed(bytes(d[at:at + n]), raw)
-        if s is None or (n == raw and not uepak.sage_record(s)): return False
+        if s is None or (n == raw and not (uepak.lslg(s) or uepak.sage_record(s))): return False
         first[at] = s
         return True
     for at, n, raw, f in uepak.shader_map_entries(d, proved):
         s = first.pop(at, None)
         if s is None: s = d[at:at + n] if n == raw else oodle(bytes(d[at:at + n]), raw)
+        if rec := uepak.lslg(s):   # a Switch LSLG record in Oodle rather than LZ4 (DRAGON BALL Sparking! ZERO, Unreal Engine 4, SP_GLSL_SWITCH)
+            tag, ctl, code = rec; st = UE_TAG.get(tag)
+            if not st: red(f'{label}: the shader record at {at:#x} has stage tag {tag}')
+            why = check(label, st, ctl, code)
+            if why: red(f'{label}: shader at {at:#x} ({st}): {why}')
+            out.append((f'{label}#UE{at:x}', st, bytes(ctl), bytes(code))); continue
         rec = uepak.sage_record(s)
         if not rec: red(f'{label}: the shader record at {at:#x} (frequency {f}) is not a record of the known layout')
         _, ctl, code = rec; st = nvn2_stage(ctl, code)
@@ -3092,6 +3098,7 @@ def main():
         files += sorted((os.path.join(dp, f), (tag + '/' if tag else '') + os.path.relpath(os.path.join(dp, f), romfs)) for dp, _, fs in os.walk(romfs) for f in fs)
         img = nso_image(mainnso)
         if not i:
+            uepak.ensure_key(romfs, mainnso)   # main's AES key for encrypted Unreal paks and containers, in the environment the worker processes inherit (DRAGON BALL Sparking! ZERO)
             import unityfs
             try: common = unityfs.common_strings(img)
             except ValueError: common = None   # not a Unity game

@@ -1,0 +1,28 @@
+# FIFA 23 Legacy Edition: SDK 13.3.5, EA proprietary engine, NVN.
+
+title_id	01001C8016B4E000
+program_id	01001C8016B4E000
+
+name	FIFA 23 Legacy Edition
+ipa	FIFA23.ipa
+app_category	public.app-category.games
+
+build	v196608	1.0.3	main=4b713267a882da35b4789a5e45823ac4	sdk=43211771ed39e7fcef03d88e27091831
+build	v0	1.0.0	main=da9da20e1649759ab2e3ebfbd6307c11	sdk=43211771ed39e7fcef03d88e27091831
+package	v196608
+shader_versions	v0
+
+modules	main sdk
+romfs_marker	data3.big
+zip_store	.big:.cbac:.vp6:.metallib
+
+# Startup heap needs about 2.91 GiB; retain 3 GiB heap space on iOS.
+# Mac gameplay does not prove iOS device addressing or resident-memory limits.
+mem_reserve	0x140000000
+mem_alias	0x60000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x800000
+
+shader_groups	/data/=data
+shader_note	FIFA 23 Legacy Edition NXSHADER programs

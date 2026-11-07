@@ -23,7 +23,7 @@ One [NUP container](../../../docs/development.md#the-packing-script-in-detail) o
 ## Shaders
 
 - About 42,850 in [`shader_map.tsv`](shader_map.tsv), including 500 mesh and 20 task shaders in the BNSH programs ([Task and mesh shaders in BNSH](../../../docs/reference/shaders.md#task-and-mesh-shaders-in-bnsh-and-indirect-mesh-draws)), and the movie library's in an NDVE pack ([`nn::ndve`](../../../docs/reference/shaders.md#nnndves-movie-enhancement-file)).
-- The runs here used a partial Mac library of the keys the playtests asked for, listed in [`shader_seen.tsv`](shader_seen.tsv) (7,276; building them took about 10 minutes when most came from the previous chain's libraries).
+- The runs here used a partial Mac library of the keys the playtests asked for, listed in [`shader_seen.tsv`](shader_seen.tsv) (7,276; building them took about 10 minutes when most came from the previous chain's libraries). A later Mac playtest of the same areas, about 20 minutes at 60 fps, asked for 150 more, which the list now holds (7,428).
 - Current: [`RED.F32.FTZ.RN`](../../../docs/reference/shaders.md#float-atomics-in-storage-memory) translates. The build's `Attribute offset 0x5C is not valid` (about 2,300 shaders) is a vertex shader's write to an output the translator drops, probably a shading rate, as `nvnCommandBufferBindShadingRateImage` and its family are no-ops: everything shades at full rate, which is right to look at and costs GPU time. Not verified against the hardware.
 
 ## Frame rate

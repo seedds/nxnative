@@ -1,16 +1,12 @@
 // NVN null device unit tests: look up addresses from nvnBootstrapLoader the way the game does and go all the way to present; all expected values are hand-calculated, without calling the implementation under test.
 // For build and run see dm/gfx/tests/Makefile (make -C dm/gfx/tests).
 #include "../nvn/hle_nvn.c"
-uint64_t g_t0_ns;   // process start time from host main.c (used by hle_nvn's per-frame @t_s); unit test stub
-_Atomic uint64_t dm_present_ns;   // when the last present was made (hle_thread.c, DM_HITCH_DUMP); unit test stub
 #include "../tex/nvn_deswizzle.h"
 #include <time.h>
 void *front_metal_layer(void) { return NULL; }   // no window in unit tests: present only counts
 module_t *module_of(const void *p) { (void)p; return NULL; }   // no guest modules in unit tests
 module_t *g_mod; int g_nmod;                            // host symbols that crash.c depends on
 void svc_thread_dump(void) {}
-int dm_guest_as_contains(uintptr_t address) { (void)address; return 0; } // Tests use host-thread stacks.
-void dm_vi_layer_crop(int c[4]) { c[0] = c[1] = c[2] = c[3] = 0; }   // no vi layer crop in unit tests (hle_vi.c)
 void crash_install(void);
 void nvn_present_config(int hz, int display_mode);
 #include <fcntl.h>

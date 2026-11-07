@@ -1,0 +1,40 @@
+# Game profile of Re:ZERO -Starting Life in Another World- The Prophecy of the Throne (Switch, base game 1.0.0 = v0, no update). On the Mac it plays from the title through its 2D story scenes and a 3D hallway scene (README.md); it needs the Vulkan layer's compute pipelines, argument buffers and DONT_CARE colour loads
+# Format: see dm/games/README.md
+# Own engine on The Forge renderer (application name ReZERO-TPT), SDK 9.5.0, on Vulkan: main imports only vkGetInstanceProcAddr from subsdk0 (the Vulkan loader, on NVIDIA's driver in subsdk1), and the host's Vulkan layer implements the rest on Metal (dm/gfx/vk/hle_vk.m).
+# The shaders are 41 SPIR-V files in fx/spirv (DXC-compiled HLSL), which dm/gfx/tools/vk_shaders.py translates; the NVN shader tables stay empty. subsdk2 is the movie module, which main imports from (the RomFS holds 3 WebM files)
+# Started from the provisional profile of build_ipa_from_nsp.py: the keys below are its static guesses, kept unchanged because the game boots and plays on them; the note and what is open: README.md
+
+# ---- Identity ----
+title_id	01000B20117B8000
+program_id	01000B20117B8000
+
+# ---- App ----
+# Game name: only a label for profile listings and the Mac window title; the iOS app name is the game name in the base NSP, and the bundle ID comes from the base game title ID (build_ipa.sh / NSP script)
+name	Re:ZERO -Starting Life in Another World- The Prophecy of the Throne
+ipa	ReZeroStartingLifeInAnotherWorldTheProphecyOfThe.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v0	1.0.0	main=1ef665d78f3de35c86c26f7b91d92784	subsdk2=7a5e537af42c5847f02410d81096ff0e	sdk=f93ce78898c2583ae08d87d3f2c2e4d6
+package	v0
+shader_versions	v0
+
+# ---- Graphics ----
+# main imports Vulkan, not NVN: the host's Vulkan layer (dm/gfx/vk/hle_vk.m); dm/gfx/tools/vk_shaders.py translates the SPIR-V shaders into <shader dir>/vk/
+
+# ---- Files ----
+# load order as on Horizon: main, subsdk*, sdk. Not loaded, replaced by the host's Vulkan layer or not needed by main: subsdk0 (NintendoSDK_Vulkan), subsdk1 (NintendoSDK_OpenGL)
+modules	main subsdk2 sdk
+romfs_marker	usound/nx/rezero.bfsar
+zip_store	.arc:.bfsar:.bfstm:.bft:.mo:.webm:.metallib
+
+# ---- Memory ----
+# The NPDM declares no system resource, so the game has no virtual address memory: main sets a heap of at most the pool − 64 MB, a 3328 MB heap region
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x0
+
+# ---- Shader split ----
+shader_note	Re:ZERO -Starting Life in Another World- The Prophecy of the Throne has no NVN shaders (its SPIR-V shaders go through the Vulkan layer)

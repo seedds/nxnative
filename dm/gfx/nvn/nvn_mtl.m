@@ -7680,6 +7680,10 @@ static _Atomic int g_pre_running; static _Atomic int g_pre_next, g_pre_done, g_p
 // GPU compiler) or another stamp tries them again. g_pre_known: those lines by pair ("vertex<TAB>pixel"); g_pre_fails: this run's new lines
 static NSDictionary<NSString *, NSString *> *g_pre_known; static NSMutableArray<NSString *> *g_pre_fails; static os_unfair_lock g_pre_fail_lock = OS_UNFAIR_LOCK_INIT;
 static _Atomic int g_pre_known_n;   // pairs left to the draws because they failed on an earlier start
+// Pairs whose pulling library the app does not carry (an IPA packed without _bp.metallib, then run with DM_PSO_MTL4=1): their bases cannot be made yet, so the stamp names one such
+// library (pre_device_stamp) and a later start builds them once it is there. g_pre_nolib_key: the first one seen in this run, under g_pre_fail_lock
+static _Atomic int g_pre_nolib; static NSString *g_pre_nolib_key;
+static void pre_note_nolib(NSString *vk) { g_pre_nolib++; os_unfair_lock_lock(&g_pre_fail_lock); if (!g_pre_nolib_key) g_pre_nolib_key = vk; os_unfair_lock_unlock(&g_pre_fail_lock); }
 static NSString *pre_fail_head(NSString *want) { return [arch_os_build() stringByAppendingString:want]; }   // what a failure list must have been written for
 // The failure list at path, by pair, when it was written for this system build and stamp (else empty). *other: a list written for another system build or stamp exists
 static NSDictionary<NSString *, NSString *> *pre_fail_load(NSString *path, NSString *want, int *other) {
@@ -7711,7 +7715,9 @@ static MTL4RenderPipelineDescriptor *pre_desc(NSString *vk, NSString *fk, int ze
     if (!pull && [vj[@"vertex_inputs"] count]) return nil;   // stage inputs and no pulling library: its pipelines need the draw's layout
     NSDictionary *fr = fj[@"raster"]; if ([fr isKindOfClass:[NSDictionary class]] && [fr[@"primitive_id"] intValue]) return nil;   // reads the primitive ID: its pipelines are built whole (pso_build_ex), no base
     NSError *e = nil;
-    id<MTLLibrary> vl = lib_from_file([NSString stringWithFormat:@"%@/%@%@.metallib", g_msl_dir, vk, pull ? @"_bp" : @"_b"], &e);
+    NSString *vp = [NSString stringWithFormat:@"%@/%@%@.metallib", g_msl_dir, vk, pull ? @"_bp" : @"_b"];
+    if (pull && access(vp.fileSystemRepresentation, F_OK)) { pre_note_nolib(vk); return nil; }
+    id<MTLLibrary> vl = lib_from_file(vp, &e);
     if (!vl || t_lib_layer) return nil;   // writes the layer: its pipelines take an input primitive class (pso_desc), no pulling pipeline
     id<MTLLibrary> fl = lib_from_file([NSString stringWithFormat:@"%@/%@_b.metallib", g_msl_dir, fk], &e);
     MTL4FunctionDescriptor *vf = pre_fn(vl, ventry), *ff = fl ? pre_fn(fl, fentry) : nil;
@@ -7747,6 +7753,17 @@ static NSString *pre_stamp(NSString *txt, int zero) {
     NSData *d = [txt dataUsingEncoding:NSUTF8StringEncoding]; uint8_t h[CC_SHA256_DIGEST_LENGTH]; CC_SHA256(d.bytes, (CC_LONG)d.length, h);
     return [NSString stringWithFormat:@"chain\t%s\ndepth\t%s\npairs\t%lu\t%02x%02x%02x%02x%02x%02x%02x%02x\n", DMSH_CHAIN, zero ? "near=0" : "near=-w", (unsigned long)d.length,
             h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]];
+}
+// The device's own prebuilt.tsv: that stamp, then whether the run could reach every pulling library. A stamp without this line was written before it existed and may hide pairs left out
+// for a missing library, so it does not count as done; the bases already in the archive make that one more run short
+static NSString *pre_device_stamp(NSString *want) { return g_pre_nolib_key ? [want stringByAppendingFormat:@"libs\tmissing\t%@\n", g_pre_nolib_key] : [want stringByAppendingString:@"libs\tall\n"]; }
+static int pre_stamp_done(NSString *have, NSString *want) {
+    if (![have hasPrefix:want]) return 0;
+    NSString *libs = [have substringFromIndex:want.length];
+    if ([libs isEqualToString:@"libs\tall\n"]) return 1;
+    if (![libs hasPrefix:@"libs\tmissing\t"] || ![libs hasSuffix:@"\n"]) return 0;
+    NSString *vk = [libs substringWithRange:NSMakeRange(13, libs.length - 14)];
+    return access([NSString stringWithFormat:@"%@/%@_bp.metallib", g_msl_dir, vk].fileSystemRepresentation, F_OK) != 0;   // still missing: the same app, nothing more to build
 }
 static NSArray<NSArray<NSString *> *> *pre_parse(NSString *txt) {   // (vertex key, pixel key) per line, without empty lines, comments and repeated lines
     NSMutableArray<NSArray<NSString *> *> *pairs = [NSMutableArray array]; NSMutableSet<NSString *> *seen = [NSMutableSet set];
@@ -7815,7 +7832,8 @@ static int pso_prebuild(int threads, int wait, dispatch_qos_class_t qos) {
     NSString *stamp = [g_arch_dir stringByAppendingPathComponent:@"prebuilt.tsv"], *failp = [g_arch_dir stringByAppendingPathComponent:@"prebuild_failed.tsv"];
     int other = 0; g_pre_known = pre_fail_load(failp, want, &other); g_pre_fails = [NSMutableArray array]; g_pre_known_n = 0;
     // done, unless its failures were found on another system build: then they are tried again (the rest are taken from the archive)
-    if ([[NSString stringWithContentsOfFile:stamp encoding:NSUTF8StringEncoding error:nil] isEqualToString:want] && !other) { g_pre_running = 0; return -1; }
+    if (pre_stamp_done([NSString stringWithContentsOfFile:stamp encoding:NSUTF8StringEncoding error:nil], want) && !other) { g_pre_running = 0; return -1; }
+    g_pre_nolib = 0; g_pre_nolib_key = nil;
     int n = (int)pairs.count; uint64_t t0 = bp_now();
     MLOG("pipeline prebuild: %d shader pairs of %s%s%s, %d workers (%s)", n, pp.UTF8String, txt2 ? " and " : "", txt2 ? pp2.UTF8String : "", threads, wait ? "tool" : prepare_on() ? "prepare step, before the first frame" : "background");
     atomic_store(&g_pre_next, 0);
@@ -7839,8 +7857,9 @@ static int pso_prebuild(int threads, int wait, dispatch_qos_class_t qos) {
         if (fails.count) [[NSString stringWithFormat:@"# pipeline prebuild: pairs whose base failed to build on this system build, left to the draws until it or the stamp changes (nvn_mtl.m, pre_fail_load)\n%@%@\n",
                             pre_fail_head(want), [fails componentsJoinedByString:@"\n"]] writeToFile:failp atomically:YES encoding:NSUTF8StringEncoding error:nil];
         else unlink(failp.fileSystemRepresentation);
-        [want writeToFile:stamp atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        [pre_device_stamp(want) writeToFile:stamp atomically:YES encoding:NSUTF8StringEncoding error:nil];
         MLOG("pipeline prebuild done: %d pairs, %d bases built, %d already archived, %d left to the draws, %d failed, %.1f s", n, (int)g_pre_built, (int)g_pre_archived, (int)g_pre_skipped, (int)g_pre_failed, (bp_now() - t0) / 1e9);
+        if (g_pre_nolib) MLOG("[RED] pipeline prebuild: %d pairs have no pulling library in this app (first: %s_bp.metallib): their draws wait for their pipelines until a package with them is installed (IOS_PULL=1 in build_ipa.sh)", (int)g_pre_nolib, g_pre_nolib_key.UTF8String);
         if (fails.count) MLOG("pipeline prebuild: %lu pairs whose base failed are left to the draws (%s; %d of them failed on an earlier start of this system build, not built again); another system build tries them again",
                               (unsigned long)fails.count, failp.UTF8String, (int)g_pre_known_n);
         g_pre_running = 0;

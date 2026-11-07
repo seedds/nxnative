@@ -597,27 +597,6 @@ enum { BIG_MIN = 128u << 20, BIG_S = 16u << 20, BIG_UNKNOWN = 64u << 20, BIG_MAX
 typedef struct { uintptr_t lo, hi, a, b; const void *mem; int *chunk, full; } big_pool;   // chunk: stride → g_pools index + 1; full: the whole pool's entry + 1
 static big_pool g_big[BIG_MAX]; static int g_nbig;
 static int big_of(uint64_t addr) { for (int i = 0; i < g_nbig; i++) if (addr >= g_big[i].lo && addr < g_big[i].hi) return i; return -1; }
-// A new pool over exactly the pages of a pool freed a moment ago takes back that pool's no-copy buffer while its deferred release still waits for the GPU. PRAGMATA's first
-// load frees large pools and makes new ones at the same addresses within a frame: each pair stayed in the residency set twice until the old one's fence completed (12 freed
-// pools, 3,380 MB), and the set reached 5,293 MB of Metal's 5,461 MB working set on an 8 GB Mac, where command buffers failed with kIOGPUCommandBufferCallbackErrorOutOfMemory.
-// The same range only: a longer old buffer would keep wiring pages the game may since have unmapped
-static id<MTLBuffer> pool_reuse_dead(uintptr_t a, uintptr_t len) {
-    id<MTLBuffer> hit = nil;
-    @autoreleasepool {
-    pthread_mutex_lock(&g_mu);
-    for (id<MTLBuffer> d in g_dead_pools) if ((uintptr_t)d.contents == a && d.length == len) { hit = d; break; }
-    if (hit) {   // only while its release is still queued: once defer_drain has taken it, it leaves the residency set whatever happens here
-        int cancelled = 0;
-        pthread_mutex_lock(&g_deferred_mu);
-        for (NSInteger i = (NSInteger)g_deferred.count - 1; i >= 0; i--) { NvDeferredRelease *d = g_deferred[(NSUInteger)i]; if (d->object == hit && !d->keep_resident) { [g_deferred removeObjectAtIndex:(NSUInteger)i]; cancelled = 1; } }
-        pthread_mutex_unlock(&g_deferred_mu);
-        if (cancelled) [g_dead_pools removeObject:hit]; else hit = nil;
-    }
-    pthread_mutex_unlock(&g_mu);
-    }
-    if (hit) { static int nl; if (nl++ < 8) MLOG("memory pool at %#lx+%#lx: takes back the buffer of a pool freed there before its release (one residency entry, not two)", (unsigned long)a, (unsigned long)len); }
-    return hit;
-}
 void mtl_pool_add(const void *mem, uint64_t size) {
     mtl_init(); g_reg_gen++;
     uintptr_t pg = (uintptr_t)getpagesize(), lo = (uintptr_t)mem, hi = lo + size;
@@ -630,8 +609,7 @@ void mtl_pool_add(const void *mem, uint64_t size) {
         pthread_mutex_unlock(&g_mu);
         if (k >= 0) { static int nl; if (nl++ < 8) MLOG("memory pool %p+%llu MB: in chunks, wired as far as lookups reach", mem, (unsigned long long)(size >> 20)); return; }
     }
-    id<MTLBuffer> buf = pool_reuse_dead(a, b - a);
-    if (!buf) buf = [g_dev newBufferWithBytesNoCopy:(void *)a length:b - a options:MTLResourceStorageModeShared deallocator:nil];
+    id<MTLBuffer> buf = [g_dev newBufferWithBytesNoCopy:(void *)a length:b - a options:MTLResourceStorageModeShared deallocator:nil];
     // Pokémon Legends: Z-A: twice on the Mac a small pool's buffer was refused although its pages were one read-write VM region, both times while another heavy job (a shader compile,
     // a second game instance) took the machine's memory; every run on an idle machine created all of them. Wiring the pages may fail under memory pressure: retry for up to about 2 s
     for (int t = 0; !buf && t < 12; t++) {

@@ -132,7 +132,12 @@ int main(void) { @autoreleasepool {
             CHECK("every later lookup takes it", big_lookup(b, (uint64_t)(uintptr_t)bp + 4096, 4) == iw);
             id<MTLBuffer> wb = g_pools[iw].buf; pthread_mutex_unlock(&g_mu); (void)gmem_map_gpu(); pthread_mutex_lock(&g_mu); b = &g_big[big_of((uint64_t)(uintptr_t)bp)];
             int on = 0; for (int q = 0; q < b->nseg; q++) on += b->seg[(NSUInteger)q] == wb && !b->segown[q];
-            CHECK("the table's segments take the whole-pool buffer", on == b->nseg); } }
+            CHECK("the table's segments take the whole-pool buffer", on == b->nseg);
+            // the pool grows at its end: the whole-pool buffer stays as the wide entry for the old range, with no new buffer
+            pthread_mutex_unlock(&g_mu); int ext = mtl_pool_extend(bp, blen + (4u << 20)); pthread_mutex_lock(&g_mu); b = &g_big[big_of((uint64_t)(uintptr_t)bp)];
+            CHECK("grown: the whole-pool buffer is kept as the wide entry", ext && !b->full && b->wide && g_pools[b->wide - 1].buf == wb);
+            uint64_t w1 = g_big_whole; int iw2 = big_lookup(b, (uint64_t)(uintptr_t)bp + (100u << 20), 0);
+            CHECK("a lookup in the old range takes it, no new whole buffer", iw2 == b->wide - 1 && g_big_whole == w1); } }
       pthread_mutex_unlock(&g_mu);
       CHECK("wired memory readable", sys_wired_bytes() > 0); }
     // 6. CPU upload staging is pooled: a buffer back from its batch is reused for the next upload of a similar size, and counted out of flight

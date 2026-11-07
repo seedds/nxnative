@@ -718,7 +718,7 @@ static void pool_res(int i) {
 // pools' buffers do at shared pages; GPU addresses are not contiguous across them, so a lookup must say how far it reads. One that does not know (length 1: an indirect draw's index buffer, a raw storage
 // address) gets BIG_UNKNOWN past its address. Raw global memory, whose pool table the shader walks by itself, takes the whole pool: big_full
 enum { BIG_MIN = 512u << 20, BIG_S = 16u << 20, BIG_UNKNOWN = 64u << 20, BIG_MAX = 32 };
-typedef struct { uintptr_t lo, hi, a, b; const void *mem; int *chunk, full; NSMutableArray *old; NSMutableArray *seg; uint64_t *segend; int nseg; uint8_t *segown; uintptr_t *segbase; } big_pool;   // seg: the pool table's own buffers over the pool, one per BIG_SEG (gmem_map_gpu, big_segments)   // chunk: stride → g_pools index + 1; full: the whole pool's entry + 1; old: buffers a longer chunk replaced, alive with the pool
+typedef struct { uintptr_t lo, hi, a, b; const void *mem; int *chunk, full; NSMutableArray *old; NSMutableArray *seg; uint64_t *segend; int nseg; uint8_t *segown; uintptr_t *segbase; int wide; } big_pool;   // wide: index + 1 of the whole-pool entry kept when the pool grew (mtl_pool_extend)   // seg: the pool table's own buffers over the pool, one per BIG_SEG (gmem_map_gpu, big_segments)   // chunk: stride → g_pools index + 1; full: the whole pool's entry + 1; old: buffers a longer chunk replaced, alive with the pool
 static big_pool g_big[BIG_MAX]; static int g_nbig;
 static int big_of(uint64_t addr) { for (int i = 0; i < g_nbig; i++) if (addr >= g_big[i].lo && addr < g_big[i].hi) return i; return -1; }
 // DM_NVN_SPARSE_SAFE (default on; 0 = off): never hand IOGPU a zero-copy range it cannot wire. PRAGMATA's tower-ring hang was a GPU page fault (BIF0, read) and one run ended in a
@@ -805,7 +805,7 @@ static void mtl_pool_add_(const void *mem, uint64_t size) {
 // PRAGMATA's title load held 3,295 MB of shared buffers over 2,506 MB of distinct pages, its 65 MB segments beside the 85-102 MB lookup chunks, and the GPU memory guard stopped the
 // game. Segments are made when the pool table is first built, before most chunks, so each table build looks again at the segments with buffers of their own. The chunk keeps its
 // buffer: retiring the chunk clears the segments on it, made again at the next table build (g_pool_gen). DM_NVN_SEG_SHARE=0: segments keep buffers of their own. Caller holds g_mu
-static uint64_t g_big_seg_taken, g_big_whole;   // segments on a chunk's or the whole pool's buffer; pools turned into one buffer (big_lookup)
+static uint64_t g_big_seg_taken, g_big_whole; static int g_big_wide_off;   // segments on a chunk's or the whole pool's buffer; pools turned into one buffer (big_lookup)
 static void big_chunk_retire(big_pool *b, id<MTLBuffer> ob) {
     [g_keep removeObject:ob];
     for (int q = 0; q < b->nseg; q++) if (!b->segown[q] && b->seg[(NSUInteger)q] == ob) { b->seg[(NSUInteger)q] = [NSNull null]; b->segend[q] = 0; atomic_fetch_add(&g_pool_gen, 1); }
@@ -814,7 +814,7 @@ static void big_chunk_retire(big_pool *b, id<MTLBuffer> ob) {
 static void big_moved(int i) {   // caller holds g_mu: entry i has a new index
     const pool_ent *e = &g_pools[i];
     for (int k = 0; k < g_nbig; k++) { big_pool *b = &g_big[k]; if (b->mem != e->key) continue;
-        if (e->unk == 0) b->full = i + 1; else b->chunk[(e->lo - b->a) >> 24] = i + 1;
+        if (e->unk == 0) b->full = i + 1; else if (e->hi - e->lo > BIG_S) b->wide = i + 1; else b->chunk[(e->lo - b->a) >> 24] = i + 1;
         return; }
 }
 void mtl_pool_del(const void *mem) {
@@ -876,7 +876,7 @@ static void big_drop_chunks(big_pool *b) {
         if (g_npool == full) full = i;   // the whole-pool entry moved into this place
         if (i < g_npool) big_moved(i);
     }
-    memset(b->chunk, 0, (((b->b - b->a) >> 24) + 1) * sizeof *b->chunk); b->full = full + 1;
+    memset(b->chunk, 0, (((b->b - b->a) >> 24) + 1) * sizeof *b->chunk); b->full = full + 1; b->wide = 0;
     for (id<MTLBuffer> o in b->old) defer_obj_release(o);
     [b->old removeAllObjects];
     atomic_fetch_add(&g_pool_gen, 1); g_reg_gen++;
@@ -918,6 +918,7 @@ int mtl_pool_extend(const void *mem, uint64_t size) {
     size_t on = ((b->b - b->a) >> 24) + 1, nn = ((nb - b->a) >> 24) + 1;
     if (nn > on) { b->chunk = realloc_or_die(b->chunk, nn * sizeof *b->chunk, "pool chunk table"); memset(b->chunk + on, 0, (nn - on) * sizeof *b->chunk); }
     b->hi = hi; b->b = nb;
+    if (b->full && !g_big_wide_off) { int f = b->full - 1; g_pools[f].unk = BIG_UNKNOWN; b->wide = f + 1; b->full = 0; }   // the old whole-pool buffer still serves the old range: no new buffer for each 4 MB a sparse run grows (PRAGMATA: 13 whole-pool buffers in one load, two at once over the same 700 MB)
     if (b->full) { int f = b->full - 1; id<MTLBuffer> ob = g_pools[f].buf; big_chunk_retire(b, ob); if (g_pools[f].res) g_pool_res_n--;   // an old whole-pool entry no longer covers it
         g_pools[f] = g_pools[--g_npool]; if (f < g_npool) big_moved(f); b->full = 0; }
     g_pidx_ok = 0; g_plast = -1; atomic_fetch_add(&g_pool_gen, 1); g_reg_gen++; g_pool_extends++;
@@ -928,6 +929,7 @@ static int big_lookup(big_pool *b, uint64_t addr, uint64_t len) {
     if (b->full) return b->full - 1;
     uintptr_t k = (addr - b->a) >> 24, lo = b->a + (k << 24);
     uint64_t want = len > 1 ? len : BIG_UNKNOWN; uintptr_t end = (addr + want + BIG_S - 1) & ~(uintptr_t)(BIG_S - 1); end += BIG_S; if (end > b->b || end < lo) end = b->b;
+    if (b->wide) { const pool_ent *w = &g_pools[b->wide - 1]; if (addr >= w->lo && addr < w->hi && w->end >= addr + want) return b->wide - 1; }
     int i = b->chunk[k] - 1;
     uintptr_t have = i >= 0 ? g_pools[i].end : 0;
     if (i >= 0 && (have >= b->hi || have >= addr + want)) return i;
@@ -939,7 +941,7 @@ static int big_lookup(big_pool *b, uint64_t addr, uint64_t len) {
         uint64_t held = end - lo;
         for (int q = 0; q < g_npool; q++) if (g_pools[q].key == b->mem && g_pools[q].unk) held += g_pools[q].buf.length;
         for (int q = 0; q < b->nseg; q++) if (b->segown[q] && b->seg[(NSUInteger)q] != (id)[NSNull null]) held += ((id<MTLBuffer>)b->seg[(NSUInteger)q]).length;
-        if (held > b->b - b->a) {
+        if (held > (b->wide ? (b->b - b->a) / 2 * 3 : b->b - b->a)) {   // with a wide entry, only once the pool has grown well past it
             int f = big_new(b, b->a, b->hi, b->b, 0);
             if (f >= 0) { b->full = f + 1; big_drop_chunks(b); g_big_whole++;
                 static int nl; if (nl++ < 8) MLOG("memory pool %p+%llu MB: one buffer over the whole pool, as its chunks and segments would hold %llu MB", b->mem, (unsigned long long)((b->b - b->a) >> 20), (unsigned long long)(held >> 20));

@@ -1,5 +1,5 @@
 """Unreal's FMallocBinned3 found without a build ID (dm/tools/ue_malloc.py) on synthetic images, no game files: the name, its getter, the vtable (in place or through
-relative relocations), the constructor and its one call; a broken link changes nothing, with a [RED] reason once the name is there."""
+relative relocations), the constructor and its one call, or the calls of one singleton; a broken link changes nothing, with a [RED] reason once the name is there."""
 import struct
 import sys
 import unittest
@@ -11,6 +11,7 @@ import ue_malloc
 
 RET = 0xd65f03c0
 TEXT, RO, DATA, END = 0x8000, 0x8000, 0xa000, 0xc000
+GLOBAL = 0xa800   # the singleton's pointer (GCreateMalloc's)
 NAME, VT, STUB = 0x8100, 0xa110, 0x1500   # the string, the vtable's address point, a trivial slot
 GETTER, DTOR0, DTOR1, CTOR, CALLER = 0x1000, 0x1100, 0x1200, 0x1300, 0x2000
 
@@ -20,13 +21,18 @@ def put(img, at, *words): struct.pack_into('<' + 'I' * len(words), img, at, *wor
 def store_vt(at): return [ADRP(8, at, VT), ADDI(8, 8, VT & 0xfff), STRX(8, 0), RET]   # the vtable into [x0]
 
 
-def image(slot=19, calls=1, relocated=False, name=True):
+def singleton(at, home=GLOBAL):   # adrp x20 of the global's page, mov x19, x0 (the malloc'd object), bl ctor, str x19, [x20, #lo]
+    return [ADRP(20, at, home), 0xAA0003F3, bl(at + 8, CTOR), STRX(19, 20, (home & 0xfff) // 8)]
+
+
+def image(slot=19, calls=1, relocated=False, name=True, homes=None):
     img = bytearray(END)
     if name: img[NAME:NAME + 16] = 'Binned3'.encode('utf-16-le') + b'\0\0'
     put(img, GETTER, ADRP(0, GETTER, NAME), ADDI(0, 0, NAME & 0xfff), RET)
     for f in (DTOR0, DTOR1, CTOR): put(img, f, *store_vt(f))
     put(img, STUB, RET)
-    for k in range(calls): put(img, CALLER + 8 * k, NOP, bl(CALLER + 8 * k + 4, CTOR))
+    if homes: [put(img, CALLER + 0x40 * k, *singleton(CALLER + 0x40 * k, h)) for k, h in enumerate(homes)]
+    else: [put(img, CALLER + 8 * k, NOP, bl(CALLER + 8 * k + 4, CTOR)) for k in range(calls)]
     slots = [DTOR0, DTOR1] + [STUB] * (slot - 2) + [GETTER] + [STUB] * 3
     if not relocated:
         for k, v in enumerate(slots): struct.pack_into('<Q', img, VT + 8 * k, v)
@@ -45,11 +51,11 @@ def find(img): return ue_malloc.find(bytes(img), TEXT, RO, DATA)
 class FindTest(unittest.TestCase):
     def test_found_in_place(self):
         call, vt, slot, why = find(image())
-        self.assertEqual((call, vt, slot), (CALLER + 4, VT, 19), why)
+        self.assertEqual((call, vt, slot), ((CALLER + 4,), VT, 19), why)
 
     def test_found_through_relocations(self):
         call, vt, slot, why = find(image(slot=26, relocated=True))
-        self.assertEqual((call, vt, slot), (CALLER + 4, VT, 26), why)
+        self.assertEqual((call, vt, slot), ((CALLER + 4,), VT, 26), why)
 
     def test_no_name_is_not_red(self):
         call, _, _, why = find(image(name=False))
@@ -63,6 +69,15 @@ class FindTest(unittest.TestCase):
 
     def test_two_calls_are_red(self):
         call, _, _, why = find(image(calls=2))
+        self.assertIsNone(call)
+        self.assertTrue(why.startswith('[RED] ') and '2 calls' in why, why)
+
+    def test_two_calls_of_one_singleton_are_both_cut(self):   # DRAGON BALL Sparking! ZERO: inlined in nninitStartup and in a getter
+        call, vt, slot, why = find(image(homes=(GLOBAL, GLOBAL)))
+        self.assertEqual((call, vt, slot), ((CALLER + 8, CALLER + 0x48), VT, 19), why)
+
+    def test_two_calls_into_two_globals_are_red(self):
+        call, _, _, why = find(image(homes=(GLOBAL, GLOBAL + 8)))
         self.assertIsNone(call)
         self.assertTrue(why.startswith('[RED] ') and '2 calls' in why, why)
 

@@ -46,6 +46,27 @@ class ScanFile(unittest.TestCase):
         with contextlib.redirect_stdout(out): r = ss.scan_file((str(path), rel))
         return r, out.getvalue()
 
+    def test_linkdata_jobs_keep_their_index(self):
+        for archive_name, index_name in [('DATA1.bin', 'DATA0.bin'), ('LD_C0_R.BIN', 'LI_C0_R.IDX')]:
+            with self.subTest(archive=archive_name):
+                archive = self.tmp / archive_name
+                companion = self.tmp / index_name
+                archive.write_bytes(b'abcdwxyz')
+                self.assertIsNone(ss.linkdata_jobs(str(archive), archive_name))
+                companion.write_bytes(struct.pack('<8Q', 0, 4, 0, 0, 4, 4, 0, 0))
+                jobs = ss.linkdata_jobs(str(archive), archive_name, parts=2)
+                if jobs is None: self.fail(f'no LINKDATA jobs for {archive_name}')
+                self.assertEqual(len(jobs), 2)
+                with mock.patch.object(ss, 'kt_shaders') as read:
+                    for job in jobs: ss.scan_file_in(job)
+                self.assertEqual([(data, label) for data, label, _ in (c.args for c in read.call_args_list)],
+                                 [(b'abcd', f'/{archive_name}#0'), (b'wxyz', f'/{archive_name}#1')])
+                companion.unlink()
+                with contextlib.redirect_stdout(io.StringIO()):
+                    _, _, _, extra = ss.scan_file(jobs[0])
+                self.assertEqual(extra[0], 'unreadable')
+                self.assertIn(index_name, extra[1])
+
     def test_red_line_of_a_reader(self):
         p = self.tmp / 'a.dict'; p.write_bytes(index(5, 2)[:0x28])
         (rel, keys, pairs, extra), out = self.scan(p, 'sub/a.dict')

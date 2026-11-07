@@ -155,5 +155,7 @@ int main(void) {
     h_oe_SetFocusMode(3); dm_applet_enter("test");
     CHECK(empty() && h_oe_GetFocus() == 2, "focus mode 3: an applet changes the state without a notification");
     dm_applet_leave(); CHECK(empty() && h_oe_GetFocus() == 1, "focus mode 3: back to 1 without a notification");
+    h_oe_EnableCrashReport(); h_oe_DisableCrashReport();
+    CHECK(empty() && h_oe_GetFocus() == 1, "crash-report switches need no application proxy and leave focus notifications alone");
     printf("== oe %d checks, %d failed ==\n", checks, fails); return fails != 0;
 }

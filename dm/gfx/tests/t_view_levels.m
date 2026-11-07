@@ -30,6 +30,25 @@ static void view_case(int tid, unsigned level, unsigned count, unsigned expected
     }
     os_unfair_lock_unlock(&g_rmu);
 }
+static void nested_registered_view(void) {
+    tex_t t = {.magic=MAGIC('T','E','X',0), .serial=99001};
+    t.d = (nvn_texdesc){.target=NVN_TEXTURE_TARGET_2D, .format=NVN_FORMAT_RGBA8, .width=64, .height=64, .depth=1, .levels=3, .samples=1};
+    MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:128 height:128 mipmapped:YES];
+    d.textureType = MTLTextureType2DArray; d.arrayLength = 4;
+    id<MTLTexture> root = [g_dev newTextureWithDescriptor:d]; res_add(root);
+    id<MTLTexture> base = [root newTextureViewWithPixelFormat:root.pixelFormat textureType:MTLTextureType2D levels:NSMakeRange(1, 3) slices:NSMakeRange(2, 1)];
+    if (!g_alias_set) g_alias_set = CFSetCreateMutable(NULL, 0, NULL);
+    CFSetAddValue(g_alias_set, (__bridge const void *)root);
+    serial_put(t.serial, base);
+    view_t range = {.set_levels=1, .base_level=1, .nlevels=1};
+    mtl_reg_tex(310, &t, &range);
+    os_unfair_lock_lock(&g_rmu);
+    id<MTLTexture> view = tex_by_id(310);
+    CHECK(view.parentTexture == root, "registered range is made from the resident root");
+    CHECK(view.parentRelativeLevel == 2 && view.parentRelativeSlice == 2 && view.width == 32, "base and registered range offsets are composed");
+    CHECK(tex_by_id(310) == view, "root view is retained by the registration");
+    os_unfair_lock_unlock(&g_rmu);
+}
 static MTLTextureDescriptor *desc_of(int target, unsigned w, unsigned h, unsigned depth, unsigned levels, unsigned samples) {
     tex_t t = {.magic=MAGIC('T','E','X',0), .serial=98000};
     t.d = (nvn_texdesc){.target=target, .format=NVN_FORMAT_RGBA8, .width=w, .height=h, .depth=depth, .levels=levels, .samples=samples};
@@ -59,6 +78,7 @@ static void desc_caps(void) {
 int main(void) { @autoreleasepool {
     mtl_init();
     desc_caps();
+    nested_registered_view();
     view_case(300, 0, 7, 7, 1);
     view_case(301, 1, 7, 6, 6);
     view_case(302, 1, 2, 2, 1);

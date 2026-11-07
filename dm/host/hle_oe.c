@@ -257,6 +257,12 @@ HLE_FORCE("_ZN2nn2oe13MuteRecordingEv", "mute the sound of system video recordin
 HLE_FORCE("_ZN2nn2oe15UnmuteRecordingEv", "unmute the sound of system video recording; the host has no system recording", void, h_oe_UnmuteRec, void) {}
 HLE_FORCE("_ZN2nn2oe16EnableScreenShotEv", "screenshot switch; the host has no system screenshot", void, h_oe_EnableShot, void) {}
 HLE_FORCE("_ZN2nn2oe17DisableScreenShotEv", "screenshot switch; the host has no system screenshot", void, h_oe_DisableShot, void) {}
+// The host does not initialize am's application proxy or provide its crash-report backend.
+// Letting these SDK wrappers run dereferences a null application-functions interface
+// (FIFA 23, SDK 13.3.5, DisableCrashReport +0x10). Like system recording, the switches
+// have no host-side effect. Adapted from Touchline23 (ohxiaoguang).
+HLE_FORCE("_ZN2nn2oe17EnableCrashReportEv", "application crash reporting; no host backend", void, h_oe_EnableCrashReport, void) {}
+HLE_FORCE("_ZN2nn2oe18DisableCrashReportEv", "application crash reporting; no host backend", void, h_oe_DisableCrashReport, void) {}
 // Super Mario Odyssey: HOME button blocking around its own menus, screenshot orientation, and the auto-sleep query (all through am)
 HLE_FORCE("_ZN2nn2oe23BeginBlockingHomeButtonEv", "temporarily block the HOME button (through am); the host has no HOME button", void, h_oe_BlockHome, void) {}
 HLE_FORCE("_ZN2nn2oe21EndBlockingHomeButtonEv", "restore the HOME button (through am)", void, h_oe_UnblockHome, void) {}

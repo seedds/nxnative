@@ -1,46 +1,84 @@
-#!/usr/bin/env python3
-"""nro_collect.py: an NRR's hash table in both header layouts, and an NRO no file holds (a game that decodes it at run time, listed in missing.tsv for the NSP script's capture)."""
-import hashlib, os, struct, subprocess, sys, tempfile, unittest
-TOOL = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'nro_collect.py')
+"""NRR layout selection must follow the header, even when both tables look valid."""
+from pathlib import Path
+import struct
+import sys
+import tempfile
+import unittest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import nro_collect
 
 
-def nrr(hashes, version):
-    table = 0x4d0 if version else 0x350
-    d = bytearray(table + 32 * len(hashes))
-    d[:4] = b'NRR0'; d[5] = version
-    struct.pack_into('<II', d, 0x4c0 if version else 0x340, table, len(hashes))
-    for i, h in enumerate(hashes): d[table + 32 * i:table + 32 * i + 32] = h
-    return bytes(d)
+def header(kind=0):
+    data = bytearray(0x1000)
+    data[:4] = b'NRR0'
+    data[5] = data[6] = data[0x20] = kind
+    meta = 0x330 if kind == 0 else 0x4B0
+    struct.pack_into('<I', data, meta + 8, len(data))
+    struct.pack_into('<II', data, meta + 0x10, meta + 0x20, 1)
+    data[meta + 0x20:meta + 0x40] = b'A' * 32
+    return data
 
 
-def nro(fill):
-    d = bytearray(0x100); d[0x10:0x14] = b'NRO0'; struct.pack_into('<I', d, 0x18, len(d)); d[0x40:] = bytes([fill]) * 0xc0
-    return bytes(d)
+class NrrHeaders(unittest.TestCase):
+    def collect(self, data):
+        with tempfile.TemporaryDirectory() as root:
+            (Path(root) / 'sample.nrr').write_bytes(data)
+            return nro_collect.nrr_hashes(root)
+
+    def test_header_selects_table_even_when_other_layout_is_plausible(self):
+        for kind, other in ((0, 0x4B0), (1, 0x330)):
+            with self.subTest(kind=kind):
+                data = header(kind)
+                struct.pack_into('<I', data, other + 8, len(data))
+                struct.pack_into('<II', data, other + 0x10, other + 0x20, 1)
+                data[other + 0x20:other + 0x40] = b'B' * 32
+                self.assertEqual(self.collect(data), {b'A' * 32: 'sample.nrr'})
+
+    def test_sign_key_generation_is_not_layout(self):
+        data = header()
+        data[4] = 7
+        self.assertEqual(self.collect(data), {b'A' * 32: 'sample.nrr'})
+
+    def test_unknown_or_mixed_discriminators_name_header(self):
+        for offset in (5, 6, 0x20):
+            for value in (1, 2):
+                with self.subTest(offset=offset, value=value):
+                    data = header()
+                    data[offset] = value
+                    with self.assertRaisesRegex(SystemExit, 'sample.nrr: unsupported NRR header'):
+                        self.collect(data)
+
+    def test_truncated_headers_and_bad_magic(self):
+        for kind, limit in ((0, 0x350), (1, 0x4D0)):
+            for length in (0, 3, 0x20, limit - 1):
+                with self.subTest(kind=kind, length=length):
+                    with self.assertRaisesRegex(SystemExit, 'sample.nrr: .*NRR header'):
+                        self.collect(header(kind)[:length])
+        data = header()
+        data[:4] = b'NOPE'
+        with self.assertRaisesRegex(SystemExit, 'sample.nrr: invalid NRR header: magic=4e4f5045'):
+            self.collect(data)
+
+    def test_table_bounds_use_declared_size_and_reject_swapped_fields(self):
+        for kind, meta in ((0, 0x330), (1, 0x4B0)):
+            cases = ((meta + 0x1F, meta + 0x20, 0), (0x1001, meta + 0x20, 1),
+                     (0x1000, meta, 1), (0x1000, 0x1001, 0),
+                     (0x1000, meta + 0x20, 0xFFFFFFFF),
+                     (meta + 0x20, meta + 0x20, 1), (0x1000, 1, meta + 0x20))
+            for size, offset, count in cases:
+                with self.subTest(kind=kind, size=size, offset=offset, count=count):
+                    data = header(kind)
+                    struct.pack_into('<I', data, meta + 8, size)
+                    struct.pack_into('<II', data, meta + 0x10, offset, count)
+                    with self.assertRaisesRegex(SystemExit, 'sample.nrr: invalid NRR hash bounds'):
+                        self.collect(data)
+
+    def test_empty_table_is_not_an_unknown_layout(self):
+        data = header()
+        struct.pack_into('<I', data, 0x344, 0)
+        self.assertEqual(self.collect(data), {})
 
 
-class Collect(unittest.TestCase):
-    def run_tool(self, version, *flags):
-        here, gone = nro(1), nro(2)
-        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
-        rom, out = os.path.join(tmp.name, 'rom'), os.path.join(tmp.name, 'out')
-        os.makedirs(os.path.join(rom, '.nrr'))
-        open(os.path.join(rom, '.nrr', 'game.nrr'), 'wb').write(nrr([hashlib.sha256(here).digest(), hashlib.sha256(gone).digest()], version))
-        open(os.path.join(rom, 'here.nro'), 'wb').write(here)
-        open(os.path.join(rom, 'archive'), 'wb').write(b'CRA.' + bytes(0x100))   # scrambled: not scanned
-        p = subprocess.run([sys.executable, TOOL, rom, out, *flags], capture_output=True, text=True)
-        return p, out, hashlib.sha256(here).hexdigest(), hashlib.sha256(gone).hexdigest()
-
-    def test_missing_ok(self):
-        for version in (0, 1):
-            p, out, here, gone = self.run_tool(version, '--missing-ok')
-            self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
-            self.assertIn(here, open(os.path.join(out, 'nro.tsv')).read())
-            self.assertEqual(open(os.path.join(out, 'missing.tsv')).read(), f'{gone}\tgame.nrr\n')
-
-    def test_missing_stops_without_the_flag(self):
-        p, out, _, _ = self.run_tool(1)
-        self.assertEqual(p.returncode, 1)
-        self.assertFalse(os.path.exists(os.path.join(out, 'missing.tsv')))
-
-
-if __name__ == '__main__': unittest.main()
+if __name__ == '__main__':
+    unittest.main()

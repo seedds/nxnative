@@ -58,6 +58,18 @@ class Json(unittest.TestCase):
         self.assertFalse(es[8]['ok'])
         self.assertIn('Pokémon', self.out.getvalue())   # not escaped
 
+    def test_pipeline_archive_batches(self):   # pso_offline.py's group lines count on the stage's line; compute groups finish in any order
+        self.prog.stage('Pipeline archive', step='applegpu_g16g (metal-tt)')
+        lines = nsp.PsoLines()
+        for line in ('pso_offline: 2 pairs: 2 bases', 'pso_offline: applegpu_g16g: batch 1/3: 1000 bases, compiling or checking cache',
+                     'pso_offline: applegpu_g16g: batch 1/3: ready (compiled)', 'pso_offline: applegpu_g16g: batch 3/3: ready (reused)'):
+            lines(line); self.now += 1
+        lines('pso_offline: applegpu_g16g: merging 3 batches')
+        es = [e for e in self.events() if e['ev'] in ('step', 'progress')]
+        self.assertEqual(es[1]['step'], 'applegpu_g16g: compiling')
+        self.assertEqual([(e['done'], e['total'], e['unit']) for e in es if e['ev'] == 'progress' and e['step'] == 'applegpu_g16g: compiling'][-1], (2, 3, 'batches'))
+        self.assertEqual(es[-1]['step'], 'applegpu_g16g: merging 3 batches (metal-pack)')
+
     def test_count_held_back(self):
         self.prog.stage('rewrite', done=0, total=3, unit='modules')
         self.now += 1; self.prog.set(done=1)

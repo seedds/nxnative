@@ -37,6 +37,19 @@ static int pad_slot_free(pad_slots *s, const void *owner) {
     int p = pad_slot_of(s, owner); if (p >= 0) s->owner[p] = NULL;
     return p;
 }
+// After a disconnect: player 1 free and exactly one controller left, in another slot → it moves to slot 0, its name with it, and the old slot is returned (-1 when nothing
+// moved). A Bluetooth pad that reconnects can show up again under another name (an Xbox Wireless Controller as "Controller") before its old connection is gone, so it took
+// player 2 while player 1 was still held, and then player 1 went free: a game that reads player 1 only (Star Fox) saw no input until a restart. With two or more controllers
+// left nobody moves, so the players of a multiplayer game keep their places
+static int pad_slot_settle(pad_slots *s) {
+    if (s->owner[0]) return -1;
+    int held = -1;
+    for (int i = 1; i < DM_PLAYERS; i++) if (s->owner[i]) { if (held >= 0) return -1; held = i; }
+    if (held < 0) return -1;
+    s->owner[0] = s->owner[held]; s->owner[held] = NULL;
+    memcpy(s->last[0], s->last[held], sizeof s->last[0]); s->last[held][0] = 0;
+    return held;
+}
 static uint32_t pad_slot_mask(const pad_slots *s) {   // bit p: slot p is held
     uint32_t m = 0; for (int i = 0; i < DM_PLAYERS; i++) if (s->owner[i]) m |= 1u << i;
     return m;

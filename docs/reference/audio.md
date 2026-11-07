@@ -345,6 +345,16 @@ For a replaced DSP renderer the size query keeps the service's work-buffer contr
 
 ## Codecs
 
+### Sound held back for the picture
+
+- **Symptom:** sound effects come before what makes them (gunfire, engines), most in 30 fps scenes.
+- **Cause:** a console's TV shows picture and sound together (HDMI carries them, and the TV delays its sound by its picture's lag). Here the picture is shown the display link's lead after the game presents it: one link period in fullscreen, about 50 ms in a window, 57-80 ms (p50) from present to screen in Star Fox's 30 fps cutscenes. The sound plays about 20 ms after the game writes it.
+- **Fix:** each output's device frames go through a delay line (`hle_audio.c` `sync_delay`) of the display link's measured enqueue-to-display time (`nvn_mtl.m` `dm_present_e2e_us`, p50 over 300 presents) less the guest frames still queued ahead, at most 150 ms. The delay changes only when the input has been quiet over the old delay, the new one and the block, so nothing replayed or skipped is heard; the 2000-callback stats line gives it (`held … ms for the picture`). With no display link (headless, the classic present path, a rescue) the measure is 0 and so is the delay. `DM_AUDIO_SYNC=0` turns it off, `=<ms>` fixes it.
+- **Found on:** [Star Fox](../../dm/games/0400E88025B1A000/README.md).
+- **Check:** `t_audio` (`test_sync_delay`: a fixed 10 ms delay settles in silence, an impulse comes out 480 frames late, the delay holds while sound plays and moves in the next quiet stretch). **Not checked:** the delay in a window or fullscreen in front (a covered window's link stalls, and the run measured nothing), or by ear.
+
+## Codecs
+
 ### Hardware Opus decoders built on the SDK's software decoders
 
 - **Symptom:** an abort in `sm::Initialize` under the hardware Opus decoder's C interface; for the multi-stream one, under `nn::codec::GetHardwareOpusMultiStreamDecoderWorkBufferSize(int, int, int, int, int)` (at `nnMain`, CRI's Opus streams). An abort in `sf::hipc::InitializeHipcServiceResolution` under `codec::GetHardwareOpusDecoderWorkBufferSize(int, int)` (`main+0x31f8e8`, early in `nnMain`). A game that builds `HardwareOpusMultiStreamDecoder` with the imported constructor and then calls it through its vtable.

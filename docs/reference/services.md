@@ -240,6 +240,16 @@ Most service calls can be found before they crash, before the first boot or the 
 
 ## Add-on content
 
+### Files the profile serves in the RomFS
+
+- **Symptom:** a game reads a setting from its own RomFS files (an engine's config file) that the port wants different, with no way to ship the change but a modified copy of the RomFS or `DM_ROMFS_OVERLAY` on every run.
+- **Cause:** RomFS overlays came only from `DM_ROMFS_OVERLAY`, a folder the player has to set up.
+- **Fix:** the profile key `romfs_file <path> <content>` (repeatable, one line of content with `\n` / `\t` escapes) is compiled into the host (`game_profile.h` `DM_GAME_ROMFS_FILES`). At the rom mount `hle_fs.c` (`profile_romfs_dir`) writes the files to a private folder under the host's temporary directory and makes it the last overlay root, after `DM_ROMFS_OVERLAY`'s folders, so a player's overlay still wins; `DM_ROMFS_FILES=0` leaves them out. Nothing is packed: the Mac app and the IPA carry the files in the host.
+- **Found on:** [Star Fox](../../dm/games/0400E88025B1A000/README.md): its engine's `veclipse_build.cvar` with `render.resolution_scale_console` at 1.0.
+- **Check:** `t_fs` sets `DM_ROMFS_FILES=0` so its RomFS checks do not depend on the profile it is built with; Star Fox's log names the file it serves (`romfs: the profile's veclipse_build.cvar (79 bytes) is served in place of the game's`) and its scene renders at 1536x864 instead of 768x432.
+
+## Add-on content
+
 ### Add-on content from `DM_AOC_DIR`
 
 - **Symptom:** DLC the player owns is not unlocked.
@@ -473,6 +483,16 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Cause:** Bezel Engine's input layer makes one (an IR camera) per controller and asks its status (`main+0x497f84`).
 - **Fix:** the IR camera (`irsensor`) answers every camera unconnected, and processors cannot run.
 - **Found on:** [Big Brain Academy: Brain vs. Brain](../../dm/games/0100620012D6E000/README.md) (SDK 11.4.3, NintendoWare Bezel Engine).
+
+## Software keyboard and applets
+
+### A controller that reconnects under another name
+
+- **Symptom:** after a controller drops and comes back, the game ignores it; the log shows `controller 'Controller' connected: player 2`, then `controller 'Xbox Wireless Controller' disconnected: player 1 (npad 0) is free`.
+- **Cause:** a Bluetooth pad can come back under another name (an Xbox Wireless Controller as "Controller") before its old connection is gone. Player 1 was still held, and the name was not the one player 1 last had, so it took player 2 ([`pad_slots.h`](../../dm/host/pad_slots.h)); then player 1 went free. A one-player game reads player 1 only.
+- **Fix:** after a disconnect, when player 1 is free and exactly one controller is left in another slot, it moves to player 1 with its name (`pad_slot_settle`; `front_mac.m` `pads_settle` moves its handlers, motion and haptics, or a raw HID pad's slot). With two or more controllers left nobody moves, so a multiplayer game's players keep their places.
+- **Found on:** [Star Fox](../../dm/games/0400E88025B1A000/README.md) with an Xbox Wireless Controller.
+- **Check:** `make -C dm/host/tests GAME=<id> build/t_hid` and `build/t_hid`: the reconnection takes player 2, moves to player 1 when it is free, keeps its name, and two controllers left keep their players.
 
 ## Software keyboard and applets
 

@@ -191,6 +191,27 @@ static int img_path(const char *p, int *mi, int64_t *k) {
     return 0;
 }
 static void save_old_names(const char *from, const char *to);
+// The profile's RomFS files (game.tsv romfs_file, DM_GAME_ROMFS_FILES): written once, at the rom mount, to a private folder under the host's temporary directory, which is the
+// last RomFS overlay root (DM_ROMFS_OVERLAY's folders come first). DM_ROMFS_FILES=0 leaves them out. NULL when there are none or they cannot be written (red line)
+static const char *profile_romfs_dir(void) {
+    static const struct { const char *path, *text; } files[] = { DM_GAME_ROMFS_FILES };
+    static char dir[1024];
+    if (!DM_GAME_ROMFS_FILES_N) return NULL;
+    const char *e = getenv("DM_ROMFS_FILES");
+    if (e && !strcmp(e, "0")) { LOG("romfs: the profile's %d file(s) left out (DM_ROMFS_FILES=0)", DM_GAME_ROMFS_FILES_N); return NULL; }
+    const char *t = getenv("TMPDIR");
+    snprintf(dir, sizeof dir, "%s/dm-romfs-%d", t && *t ? t : "/tmp", (int)getpid());
+    for (int i = 0; i < DM_GAME_ROMFS_FILES_N; i++) {
+        char path[1100]; snprintf(path, sizeof path, "%s/%s", dir, files[i].path);
+        mkdir(dir, 0700);
+        for (char *q = path + strlen(dir) + 1; (q = strchr(q, '/')); q++) { *q = 0; mkdir(path, 0700); *q = '/'; }   // the file's folders inside the RomFS
+        FILE *f = fopen(path, "wb");
+        if (!f || fwrite(files[i].text, 1, strlen(files[i].text), f) != strlen(files[i].text)) { if (f) fclose(f); LOG("[RED] romfs: cannot write the profile's %s to %s", files[i].path, path); return NULL; }
+        fclose(f);
+        LOG("romfs: the profile's %s (%zu bytes) is served in place of the game's", files[i].path, strlen(files[i].text));
+    }
+    return dir;
+}
 static Result mount_ex(const char *name, const char *dir, int ro, int txn) {
     pthread_once(&g_txn_lock_once, txn_locks_init);
     PATH_LOCK(); pthread_mutex_lock(&g_lock);
@@ -204,6 +225,8 @@ static Result mount_ex(const char *name, const char *dir, int ro, int txn) {
     atomic_store(&g_mnt[g_nmnt].first_write_ns, 0);
     const char *overlay = !strcmp(name, "rom") ? getenv("DM_ROMFS_OVERLAY") : NULL;
     if (overlay) strlcpy(g_mnt[g_nmnt].overlay, overlay, sizeof g_mnt[0].overlay);
+    const char *pf = !strcmp(name, "rom") ? profile_romfs_dir() : NULL;
+    if (pf) { if (g_mnt[g_nmnt].overlay[0]) strlcat(g_mnt[g_nmnt].overlay, ":", sizeof g_mnt[0].overlay); strlcat(g_mnt[g_nmnt].overlay, pf, sizeof g_mnt[0].overlay); }
     // The transaction directory cannot be set up (leftovers cannot be cleared / clone failed, which really happens on a full disk): do not exit; mount the committed directory read-only -- saves still read, every write fails, commits are no-ops, the committed version is untouched, and the front end is told
     // (each of these three failures used to call die: with the phone's storage full the game exited as soon as it mounted its saves)
     int txn_err = 0, k = 0;

@@ -12,6 +12,8 @@ A Switch 2 game: update v131072, SDK 21.4.4 built for the Switch 2 (`Ounce`), NV
 | `romfs_marker data.zip` | `game.tsv` | the RomFS has two files, and this is the game |
 | `zip_store .zip:.metallib` | `game.tsv` | the archive's members are LZ4-compressed already |
 | `shader_groups /data.zip=shader` | `game.tsv` | every shader is a member of the archive |
+| `romfs_file veclipse_build.cvar …` | `game.tsv` | the engine's cvar file with `render.resolution_scale_console` at 1.0, so the scene renders 1536x864 instead of 768x432 ([The picture](#the-picture)); [Files the profile serves in the RomFS](../../../docs/reference/services.md#files-the-profile-serves-in-the-romfs) |
+| [`pso_manifest.tsv`](pso_manifest.tsv) | profile | the pipelines the first Mac sessions built (boot, the title, the opening cutscene, the training and about half an hour after it): the cutscene's first-use stalls went from 36 frames (12.5 s in all) to 1 (54 ms) |
 
 There is no game-specific patch, and only v131072's build row: the base game, v0, has not been run.
 
@@ -27,7 +29,14 @@ There is no game-specific patch, and only v131072's build row: the base game, v0
 
 ## The picture
 
-Every 3D target is 768x432 from the first frame of the title to the tutorial: MetalFX stands in for DLSS at 768x432 to 768x432, the game's NDSR compute networks take that to 1536x864, and the result reaches the 3840x2160 swap chain, whose top-left 1920x1080 holds the picture. The game's own defaults give the reason for the figure, not the cause: `render.dynres_min_scale_x` is 0.5 and `max` 1.0, so 768x432 is the minimum of a 1536x864 base, at 6 to 11 ms of GPU time a frame on the M4 Pro. `gpu_timestamps segment` changes nothing. Whether a console stays there too is not known.
+- Resolution (current): the engine renders the scene at `render.resolution_scale_console` of the 1920x1080 it presents, and its default docked is 0.4: 768x432, which MetalFX stands in for DLSS at (768x432 to 768x432, the network resized to the scene's size) and the game's NDSR compute networks then stretch to 1536x864 and the swap chain to 1920x1080 (the top-left of its 3840x2160), soft on a large screen. `render.dynres_enabled` false changed nothing: the size is the scale, not dynamic resolution. The profile serves the engine's cvar file with 1.0, and the engine renders 1536x864 (its own cap); the cutscene's GPU time went from 6.7 to 7.3 ms (p50) on an M-series Mac. Whether a console renders 0.4 too is not known. `DM_ROMFS_FILES=0` gives the game's own scale back.
+- DLSS's bias mask (R8Unorm) goes to MetalFX as its reactive mask ([NVN2's DLSS on MetalFX](../../../docs/reference/rendering.md#nvn2s-dlss-on-metalfx)).
+- Lighting is clustered: a grid of light cells in `c8` and 80-byte light records in `c16`. Two guarded loads of one cell word on two write barriers once hung the GPU about 190 s into the opening cutscene ([A deferred write under a false guard](../../../docs/reference/shaders.md#a-deferred-write-under-a-false-guard), resolved).
+
+## Frame rate and sound timing
+
+- The cutscenes run at 30 fps (present interval 2) and gameplay at 60.
+- In variable-refresh fullscreen a frame of the 30 fps cutscenes was shown 128 ms (p50) after the game queued it, and the gunfire and engines were heard before they were seen; with frame latency 1 for a 30 Hz link it is 57-80 ms ([Frame latency 2 for the display link in fullscreen](../../../docs/reference/frame-rate.md#frame-latency-2-for-the-display-link-in-fullscreen)), and the sound is held back by that measured delay ([Sound held back for the picture](../../../docs/reference/audio.md#sound-held-back-for-the-picture)). The delay has not been heard or measured with the window in front.
 
 ## Driving it on the Mac
 
@@ -35,6 +44,11 @@ Every 3D target is 768x432 from the first frame of the title to the tutorial: Me
 
 ## Found on this game
 
+- [A deferred write under a false guard](../../../docs/reference/shaders.md#a-deferred-write-under-a-false-guard): the GPU hang in the opening cutscene (resolved).
+- [Frame latency 2 for the display link in fullscreen](../../../docs/reference/frame-rate.md#frame-latency-2-for-the-display-link-in-fullscreen) and [Sound held back for the picture](../../../docs/reference/audio.md#sound-held-back-for-the-picture): sound ahead of the picture in the 30 fps cutscenes.
+- [A controller that reconnects under another name](../../../docs/reference/services.md#a-controller-that-reconnects-under-another-name): the game ignored an Xbox controller that came back as player 2 (resolved).
+- [Files the profile serves in the RomFS](../../../docs/reference/services.md#files-the-profile-serves-in-the-romfs): the console resolution scale.
+- [NVN2's DLSS on MetalFX](../../../docs/reference/rendering.md#nvn2s-dlss-on-metalfx): the bias mask.
 - [SDK 21 socket initialization and overloads](../../../docs/reference/services.md#sdk-21-socket-initialization-and-overloads) and [Socket `Poll` and `Select` with nothing to wait on](../../../docs/reference/services.md#socket-poll-and-select-with-nothing-to-wait-on): the game's HTTP thread aborted on a failed `poll`.
 - [SDK 21's OutputStream on a virtual output device](../../../docs/reference/audio.md#sdk-21s-outputstream-on-a-virtual-output-device) and [SDK 21's hardware Opus decoder manager](../../../docs/reference/audio.md#sdk-21s-hardware-opus-decoder-manager): its voice and music.
 - [GameChat queries from the title screen (SDK 21)](../../../docs/reference/services.md#gamechat-queries-from-the-title-screen-sdk-21): a null read in `nn::chat::GetChattingUid`.
@@ -49,8 +63,6 @@ Every 3D target is 768x432 from the first frame of the title to the tutorial: Me
 
 ## Open
 
-- [The picture](#the-picture): why the 3D stays at 768x432.
-- `[RED] DLSS: the game's bias mask (a reactive mask for MetalFX) is not passed on`.
 - The game's wake-up eventfd fails (the host refuses `nn::socket::EventFd`), so its HTTP thread polls without a wake-up; harmless offline.
-- A `pso_manifest.tsv` has not been recorded; `render_cond` not tried; the later levels and combat, and iOS, not tested.
+- `pso_manifest.tsv` covers what was played (boot to about half an hour past the training); later levels still build their pipelines on first use. `render_cond` not tried; the later levels and combat, and iOS, not tested.
 - Mario Kart World 1.8.0 has not been run with the camera answers changed for this game.

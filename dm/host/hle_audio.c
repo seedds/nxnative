@@ -16,7 +16,7 @@ enum { AU_IDLE, AU_STARTING, AU_CANCELED, AU_WAIT_CALLBACK };
 typedef struct { void *ptr; uint64_t cap, size; } gbuf;     // The first 24 bytes written into the guest AudioOutBuffer
 #define QMAX 64
 #define RELMAX QMAX                    // Released max = number of in-flight buffers (the game must take a buffer back before it can append again), same limit as pending
-typedef struct { uint64_t calls, count, qsum, underruns, zero_bytes; uint32_t fmin, fmax; } audio_stats;
+typedef struct { uint64_t calls, count, qsum, underruns, zero_bytes; uint32_t fmin, fmax, delay; } audio_stats;
 typedef struct {
     pthread_mutex_t m;
     void *event;                       // Guest SystemEvent: signaled whenever a buffer is released
@@ -43,6 +43,7 @@ typedef struct {
     _Atomic uint64_t cb_n;             // device callbacks of this output (the watchdog's evidence that the device still plays it)
     uint64_t wd_n, wd_t;               // watchdog: callback count last seen and when it last moved (under g_aos_lock)
     int stalled, retry_ms; uint64_t retry_at;   // the device stopped calling back (or would not start): the silent sink stands in and the watchdog retries the AudioUnit at retry_at, backing off
+    int16_t *dl; uint32_t dl_cap, dl_w, dl_d, dl_quiet; int dl_fixed;   // the picture delay line (sync_delay), callback-owned: ring of device frames, write index, delay, quiet input frames in a row, DM_AUDIO_SYNC
 } aout;
 
 // Registry of open outputs: suspended / resumed all at once by the front-end lifecycle (going to background).
@@ -150,6 +151,46 @@ static void pull_device(aout *a, uint8_t *dst, uint64_t bytes) {
     }
 }
 
+// Sound with its picture: a console's TV shows the two together (HDMI carries them, and the TV delays its sound by its own picture's lag), but here the picture is shown
+// the display link's lead after the game queues it (nvn_mtl.m: one link period in fullscreen, about 50 ms in a window; Star Fox's 30 fps cutscenes 57-80 ms from the game's
+// present to the screen) and the sound about 20 ms after the game writes it, so gunfire and engines were heard before they were seen. Each output's device frames go through
+// a delay line of the measured enqueue-to-display time (dm_present_e2e_us, p50 over 300 presents) less what is still queued ahead of them, at most SYNC_MAX_MS. The delay
+// moves only while the input has been quiet for the old and the new delay and this block (nothing replayed or skipped can be heard). DM_AUDIO_SYNC=0 turns it off, =<ms> fixes
+// it; with no display link (headless, the classic present path) the measure is 0 and so is the delay
+enum { SYNC_MAX_MS = 150, SYNC_QUIET = 64 };
+__attribute__((weak)) int dm_present_e2e_us(void) { return 0; }   // nvn_mtl.m; graphics-free tests have none
+static void sync_init(aout *a) {
+    const char *e = getenv("DM_AUDIO_SYNC");
+    a->dl_fixed = !e || !*e || !strcmp(e, "auto") ? -1 : atoi(e) <= 0 ? 0 : atoi(e) > SYNC_MAX_MS ? SYNC_MAX_MS : atoi(e);
+    if (!a->dl_fixed) return;
+    a->dl_cap = RATE * SYNC_MAX_MS / 1000 + 8192;   // the delay and a device buffer of up to 8192 frames
+    a->dl = calloc((size_t)a->dl_cap * device_channels(a), sizeof *a->dl);
+    a->dl_quiet = a->dl_cap;   // the ring starts silent
+}
+static uint32_t queued_frames(aout *a) {   // guest frames still queued ahead of what the callback takes (the producer publishes a block before its tail)
+    uint32_t qh = atomic_load_explicit(&a->q_head, memory_order_relaxed), qt = atomic_load_explicit(&a->q_tail, memory_order_acquire); uint64_t b = 0;
+    for (uint32_t i = qh; i != qt; i++) b += a->q[i & (QMAX - 1)]->size;
+    b = b > a->pos ? b - a->pos : 0;
+    return (uint32_t)(b / (2 * a->ch));
+}
+static void sync_delay(aout *a, int16_t *s, uint32_t n, int ch) {
+    if (!a->dl || n + 1 >= a->dl_cap) return;
+    uint32_t want;
+    if (a->dl_fixed > 0) want = (uint32_t)a->dl_fixed * RATE / 1000;
+    else { int64_t f = (int64_t)dm_present_e2e_us() * RATE / 1000000 - queued_frames(a); want = f > 0 ? (uint32_t)f : 0; }
+    if (want > a->dl_cap - n - 1) want = a->dl_cap - n - 1;
+    int peak = 0;
+    for (uint32_t i = 0; i < n * ch; i++) { int v = s[i] < 0 ? -s[i] : s[i]; if (v > peak) peak = v; }
+    a->dl_quiet = peak < SYNC_QUIET ? (a->dl_quiet + n > a->dl_cap ? a->dl_cap : a->dl_quiet + n) : 0;
+    uint32_t far = (want > a->dl_d ? want : a->dl_d) + n, gap = want > a->dl_d ? want - a->dl_d : a->dl_d - want;
+    if (gap > RATE / 500 && a->dl_quiet >= far) a->dl_d = want;   // more than 2 ms off, and all of it quiet
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t w = a->dl_w, r = (w + a->dl_cap - a->dl_d) % a->dl_cap;
+        for (int c = 0; c < ch; c++) { a->dl[w * ch + c] = s[i * ch + c]; s[i * ch + c] = a->dl[r * ch + c]; }
+        a->dl_w = (w + 1) % a->dl_cap;
+    }
+}
+
 static _Atomic uint64_t g_render_calls;   // Cumulative sound card callbacks (lifecycle verification: must keep growing after resume)
 uint64_t dm_audio_render_calls(void) { return atomic_load_explicit(&g_render_calls, memory_order_relaxed); }
 static OSStatus au_render(void *ctx, AudioUnitRenderActionFlags *f, const AudioTimeStamp *ts, UInt32 bus, UInt32 frames, AudioBufferList *bl) {
@@ -164,7 +205,7 @@ static OSStatus au_render(void *ctx, AudioUnitRenderActionFlags *f, const AudioT
         a->st_count++;
         if (++a->st_calls % 2000 == 0 && !atomic_load_explicit(&a->st_pending, memory_order_acquire)) {
             uint64_t un = atomic_load(&a->under_n), ubb = atomic_load(&a->under_b);
-            a->st_report = (audio_stats){a->st_calls, a->st_count, a->st_qsum, un - a->st_u0, ubb - a->st_ub0, a->st_fmin, a->st_fmax};
+            a->st_report = (audio_stats){a->st_calls, a->st_count, a->st_qsum, un - a->st_u0, ubb - a->st_ub0, a->st_fmin, a->st_fmax, a->dl_d};
             atomic_store_explicit(&a->st_pending, 1, memory_order_release);
             a->st_fmin = ~0u; a->st_fmax = 0; a->st_qsum = a->st_count = 0; a->st_u0 = un; a->st_ub0 = ubb;
         } }
@@ -172,6 +213,8 @@ static OSStatus au_render(void *ctx, AudioUnitRenderActionFlags *f, const AudioT
         memset(bl->mBuffers[0].mData, 0, bl->mBuffers[0].mDataByteSize);
     } else {
         pull_device(a, bl->mBuffers[0].mData, bl->mBuffers[0].mDataByteSize);
+        int dch = device_channels(a);
+        sync_delay(a, bl->mBuffers[0].mData, bl->mBuffers[0].mDataByteSize / (2 * dch), dch);
         if (a->mute) memset(bl->mBuffers[0].mData, 0, bl->mBuffers[0].mDataByteSize);
     }
     return noErr;
@@ -293,7 +336,7 @@ static void aout_free(aout *a) {
     if (a->au) au_dispose(a->au);
     dispatch_release(a->notify_sem);
     if (a->rel_sem) dispatch_release(a->rel_sem);
-    pthread_mutex_destroy(&a->m); free(a);
+    pthread_mutex_destroy(&a->m); free(a->dl); free(a);
 }
 // A HAL start can block for seconds. Each output keeps consuming on the silent sink while its
 // own start is in flight. Stop/suspend cancel it without waiting; Close leaves the unit and the output to this worker.
@@ -341,9 +384,9 @@ static int stats_take(aout *a, audio_report *r) {
 }
 static void stats_log(const audio_report *r) {
     const audio_stats *s = &r->stats;
-    LOG("audio #%d device callbacks %llu: %u–%u frames each, %.1f blocks queued on average at callback; in these %llu, %llu underruns, %.1f ms zero-padded", r->id,
-        (unsigned long long)s->calls, s->fmin, s->fmax, (double)s->qsum / s->count, (unsigned long long)s->count,
-        (unsigned long long)s->underruns, s->zero_bytes / (2.0 * r->ch) / (RATE / 1000.0));
+    LOG("audio #%d device callbacks %llu: %u–%u frames each, %.1f blocks queued on average at callback; in these %llu, %llu underruns, %.1f ms zero-padded; held %.1f ms for the picture",
+        r->id, (unsigned long long)s->calls, s->fmin, s->fmax, (double)s->qsum / s->count, (unsigned long long)s->count,
+        (unsigned long long)s->underruns, s->zero_bytes / (2.0 * r->ch) / (RATE / 1000.0), s->delay / (RATE / 1000.0));
 }
 static void stats_drain(void) {
     audio_report reports[AOMAX]; int n = 0;
@@ -413,7 +456,7 @@ static Result au_open_at(void *g, void *ev, const char *name, const uint8_t *par
     if (rate && rate != RATE) die("AudioOut sample rate %d not supported (48 kHz only)", rate);
     aout *a = calloc(1, sizeof *a);
     const char *mute = getenv("DM_AUDIO_MUTE"); a->mute = mute && atoi(mute);
-    pthread_mutex_init(&a->m, NULL); a->event = ev; a->ch = ch;
+    pthread_mutex_init(&a->m, NULL); a->event = ev; a->ch = ch; sync_init(a);
     atomic_init(&a->state, STATE_STOPPED); atomic_init(&a->vol, 0x3f800000u);
     atomic_init(&a->q_head, 0); atomic_init(&a->q_tail, 0);
     atomic_init(&a->rel_head, 0); atomic_init(&a->rel_tail, 0);

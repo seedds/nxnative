@@ -37,3 +37,9 @@ sys_resource	0x1000000
 # every shader is a member of /data.zip
 shader_groups	/data.zip=shader
 shader_note	Star Fox shaders
+
+# ---- RomFS files ----
+# The engine's cvar file with its console resolution scale at 1.0: docked it rendered the scene at 768x432 (0.4 of the 1920x1080 it presents) and upscaled it 2.5 times with
+# NDSR, soft on a large screen; at 1.0 it renders 1536x864 (the engine's own cap), for a cutscene's GPU time of 7.3 ms against 6.7 on an M-series Mac. The game's own file
+# sets only system.is_shipping_build, kept here
+romfs_file	veclipse_build.cvar	{\n\t"system.is_shipping_build": true,\n\t"render.resolution_scale_console": 1.0\n}\n

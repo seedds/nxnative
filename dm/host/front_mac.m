@@ -268,6 +268,22 @@ static void pads_reread(void) {
     else for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p].extendedGamepad) pad_read(g_held[p].extendedGamepad);
     for (hid_pad *d = g_hidpads; d; d = d->next) hidpad_read(d);
 }
+// What holds the game while its window is put away: minimized, or not key with DM_FOCUS_PAUSE. The first hold puts the game in the background (focus 2 then 3, sound and graphics
+// suspended), the last one released brings it back to OutOfFocus (the window becoming key then sets InFocus). The pause also freezes the guest clock (reason 1, as an iPhone app in
+// the background: hle_os.c holds the guest's clock reads, so its threads stop at the next one); minimizing alone keeps the clock running, as before. Main thread only
+enum { HOLD_MINIMIZED = 1, HOLD_UNFOCUSED = 2 };
+static void window_hold(unsigned why, int on) {
+    static unsigned held;
+    unsigned was = held, now = on ? was | why : was & ~why; if (now == was) return; held = now;
+    int freeze_was = (was & HOLD_UNFOCUSED) != 0, freeze_now = (now & HOLD_UNFOCUSED) != 0;
+    if (!was) { dm_focus_set(2); dm_focus_set(3); dm_audio_suspend(1); }
+    if (freeze_now && !freeze_was) guest_clock_freeze_for(1, 1);
+    if (!was) dm_gfx_suspend(1);
+    if (!now) dm_gfx_suspend(0);
+    if (freeze_was && !freeze_now) guest_clock_freeze_for(1, 0);
+    if (!now) { dm_audio_suspend(0); dm_focus_set(2); }
+    if (freeze_now != freeze_was) LOG("front end: game %s (DM_FOCUS_PAUSE)", freeze_now ? "paused, the window is not key" : "resumed");
+}
 static void hq_close(void);
 static void input_release(void) {
     hq_close();   // the prompt or the hold indicator, if one is up: the Games app the system opens for Home takes the focus too
@@ -1412,7 +1428,7 @@ void front_run(void (*guest)(void)) {
         }];
         [[NSNotificationCenter defaultCenter] addObserverForName:NSWindowWillCloseNotification object:win queue:nil
                                                       usingBlock:^(NSNotification *n) { (void)n; exit(0); }];
-        // Lifecycle (hle.h / dm.h): focus lost → 2, focus regained → 1; minimized → 3 + audio paused + GPU suspended, restored → resume (followed by focus regained → 1).
+        // Lifecycle (hle.h / dm.h): focus lost → 2 (or the pause, DM_FOCUS_PAUSE), focus regained → 1; minimized → 3 + audio paused + GPU suspended, restored → resume (followed by focus regained → 1).
         // Input is released when the window stops being key (and when it is minimized) and taken up again when it is key again
         NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
         [nc addObserverForName:NSWindowDidChangeScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; screen_refresh(win.screen); if (win.screen) g_layer.contentsScale = win.backingScaleFactor; screen_match_apply(); }];
@@ -1424,10 +1440,15 @@ void front_run(void (*guest)(void)) {
         // DM_FOCUS_KEEP=1 (scripts/regress.py): the game stays in focus while its window is up, whichever app is active. Tears of the Kingdom stops presenting out of focus, so
         // another app taking the key window during an unattended run read as a hang (no frame after the last focus change)
         static int keep = -1; if (keep < 0) keep = getenv("DM_FOCUS_KEEP") && atoi(getenv("DM_FOCUS_KEEP"));
-        [nc addObserverForName:NSWindowDidResignKeyNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; input_release(); if (!win.miniaturized && !g_text_box && !keep) dm_focus_set(2); }];
-        [nc addObserverForName:NSWindowDidBecomeKeyNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; input_resume(); dm_focus_set(1); }];
-        [nc addObserverForName:NSWindowDidMiniaturizeNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; input_release(); dm_focus_set(3); dm_audio_suspend(1); dm_gfx_suspend(1); }];
-        [nc addObserverForName:NSWindowDidDeminiaturizeNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; dm_gfx_suspend(0); dm_audio_suspend(0); dm_focus_set(2); }];
+        // DM_FOCUS_PAUSE=1: losing focus pauses the game, as an iPhone app in the background is (window_hold: OutOfFocus then Background, sound and graphics suspended, the guest clock
+        // frozen and its reads held), until the window is key again. Off, an unfocused game runs on as told OutOfFocus, and some stop presenting then (Tears of the Kingdom).
+        // DM_FOCUS_KEEP wins over it: a game kept in focus is not paused
+        static int pause = -1; if (pause < 0) pause = getenv("DM_FOCUS_PAUSE") && atoi(getenv("DM_FOCUS_PAUSE"));
+        [nc addObserverForName:NSWindowDidResignKeyNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; input_release(); if (!win.miniaturized && !g_text_box && !keep) { if (pause) window_hold(HOLD_UNFOCUSED, 1); else dm_focus_set(2); } }];
+        [nc addObserverForName:NSWindowDidBecomeKeyNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; input_resume(); window_hold(HOLD_UNFOCUSED, 0); dm_focus_set(1); }];
+        [nc addObserverForName:NSWindowDidMiniaturizeNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; input_release(); window_hold(HOLD_MINIMIZED, 1); }];
+        [nc addObserverForName:NSWindowDidDeminiaturizeNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; window_hold(HOLD_MINIMIZED, 0); }];
+        if (pause && !keep) LOG("front end: the game pauses while its window is not key (DM_FOCUS_PAUSE)");
         display_awake(win.isKeyWindow);   // the window may have become key (makeKeyAndOrderFront above) before these observers were installed
         // Guest thread: 64 MiB stack (the Switch main thread stack is specified by npdm; the host gives plenty)
         static guest_arg ga; ga.fn = guest;

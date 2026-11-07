@@ -3,7 +3,7 @@
 The screen before the game starts shows the settings the game supports. A setting that only matters while another is on appears under it and disappears when that one is turned off. Tap **Play** to start; the app remembers your choices for the next start. All settings are on one scrollable screen, under **Game**, **Controls** and **Performance**. Tap a menu or move a slider there; no settings page needs opening. **Upscaling** is in **Game**, beside **Console mode**. A Mac app shows the same settings in a [window of its own](#the-mac-settings-window).
 
 - [Tested defaults](#tested-defaults)
-- [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Game's upscaler](#games-upscaler), [Game language](#game-language), [Picture](#picture), [Frame-rate counter](#frame-rate-counter)
+- [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [High quality](#high-quality), [Console mode](#console-mode), [Upscaling](#upscaling), [Game's upscaler](#games-upscaler), [Game language](#game-language), [Picture](#picture), [Frame-rate counter](#frame-rate-counter)
 - [Controls](#controls): [Touch feedback](#touch-feedback), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff)
 - [Performance](#performance): [Frame buffering](#frame-buffering), [Metal 4 pipelines](#metal-4-pipelines), [Pipeline prebuild](#pipeline-prebuild), [Encode thread](#encode-thread), [Hold frames when late](#hold-frames-when-late), [Performance HUD](#performance-hud), [Reset to tested defaults](#reset-to-tested-defaults)
 - [The Mac settings window](#the-mac-settings-window): [Display mode](#display-mode)
@@ -30,6 +30,12 @@ On a Mac, a game checked at that speed (Fire Emblem Fortune's Weave, Mario & Lui
 ### Render scale
 
 The size of the 3D picture, from 50 to 100 %. Below 100 % the size is fixed there and the game's own dynamic resolution is off; 100 % keeps the game's own. Lower can be lighter on the GPU but is blurrier; the HUD and text keep their sharpness. Only games the app can scale offer it.
+
+### High quality
+
+Lifts limits an Unreal Engine game sets for the Switch's hardware, such as the size of its 3D picture and the detail of its shadows. The picture is sharper and shows more, for more GPU time. Turn it off to go back to the Switch's settings if a scene struggles or looks wrong. Only games with values chosen for it offer it. It is on by default on the Mac and off on the iPhone, where it has not been tested.
+
+While it is on, Advanced settings show what it raises, each of which can be set back to the Switch's on its own: **3D resolution** (**Full** or **Switch**), **Shadows** (**High** or **Switch**) and **Scene detail** (**High** or **Switch**: ambient shading, reflections and how far the scene is drawn). If a scene struggles, setting one of them back can keep the rest.
 
 ### Console mode
 
@@ -253,6 +259,8 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 |---|---|---|
 | Frame rate | `DM_FPS_TARGET` | `30`, `60`, `120` (Mac, games with `fps_max 120`) |
 | Render scale | `DM_RENDER_SCALE` | `0.5` to `1.0` |
+| High quality | `DM_UE_QUALITY` | `1`, `0` |
+| 3D resolution, Shadows, Scene detail | `DM_UE_RES`, `DM_UE_SHADOWS`, `DM_UE_DETAIL` | `1` raised, `0` the Switch's |
 | Console mode | `DM_OPMODE` | `1` docked, `0` handheld |
 | Game language | `DM_LANG` | a language code, such as `ja` |
 | Display mode (Mac) | `DM_FULLSCREEN` | `1` fullscreen, `0` a window |

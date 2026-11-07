@@ -30,6 +30,12 @@ zip_store	.pak:.ttf:.txt:.ucas:.utoc:.metallib
 # the game by the time that really passed: DM_NVN_REGLUM traces of the same keys from the same save at 30 and 60 fps (59.8 fps, frame time p99 18 ms on the Mac) match from the load
 # through a 3 s walk (thumbnail difference ≤ 0.006). DM_FPS_TARGET=30 (Documents/env.txt on the iPhone) keeps the game's 30 and saves power
 fps_target	60
+# the NVN depth mode the game sets (nvnDeviceSetDepthMode near = 0, "depth mode near=0" in the log): the NSP script's prebuild and the pipeline archive made offline hold the main0_z
+# vertex entries. Without the key the app's archive was built for near = -w, and the host passed over all of it (668 MB) and built its own
+depth_mode	zero
+# High quality (DM_UE_QUALITY), on the Mac: the Switch profile renders the 3D at 1384x780, scaled to 1728x972 and then 1920x1080. r.DynamicRes.OperationMode 0 with both percentages at 100 gives
+# 1920x1080 (raising r.DynamicRes.MaxScreenPercentage does nothing); shadows, ambient occlusion, reflections and view distance as tried on the Mac, see the note's Open
+ue_quality	res:r.DynamicRes.OperationMode=0 res:r.ScreenPercentage=100.0 res:r.SecondaryScreenPercentage.GameViewport=100.0 shadows:r.Shadow.MaxCSMResolution=2048 shadows:r.Shadow.MaxResolution=2048 shadows:r.Shadow.CSM.MaxCascades=4 shadows:r.Shadow.DistanceScale=1.0 detail:r.AmbientOcclusionLevels=3 detail:r.SSR.Quality=3 detail:r.ViewDistanceScale=1.5
 
 # ---- Memory ----
 # Unreal Engine 5.6.1: nninitStartup (main+0x13370) reserves one 62 GB region for the engine, and its FMallocBinned3

@@ -15,8 +15,22 @@ void dm_guest_write_prepare(void *p, size_t n) { (void)p; assert(n == 4); writes
 enum { SIZE = 0x30000 };
 static void cvar(const char *name, uint64_t off) { strcpy(g_mod[0].ue_cvar[g_mod[0].n_ue_cvar].name, name); g_mod[0].ue_cvar[g_mod[0].n_ue_cvar++].off = off; }
 
+// ue_quality: a float and an int written to both copies, kept once right, written back when the game changes one copy, and a variable not created yet left for a later pass
+static void check_quality(void) {
+    uint8_t *base = mmap(NULL, SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0); assert(base != MAP_FAILED);
+    float f[2] = {80, 80}; int32_t i[2] = {1024, 1024};
+    ue_quality_row r[3] = {{"r.Float", 1, 0, 100.0f, 0x20100, 0}, {"r.Int", 0, 2048, 0, 0x20200, 1}, {"r.Later", 0, 1, 0, 0x20300, 2}};
+    *(uintptr_t *)(base + 0x20110) = (uintptr_t)f; *(uintptr_t *)(base + 0x20210) = (uintptr_t)i;
+    writes = 0;
+    ue_quality_write(r, 3, base); assert(f[0] == 100 && f[1] == 100 && i[0] == 2048 && i[1] == 2048 && writes == 4);
+    ue_quality_write(r, 3, base); assert(writes == 4);
+    f[1] = 80; ue_quality_write(r, 3, base); assert(f[1] == 100 && writes == 5);
+    writes = 0; munmap(base, SIZE);
+}
+
 static void check(int which) {
     uint8_t *base = mmap(NULL, SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0); assert(base != MAP_FAILED);
+    setenv("DM_UE_QUALITY", "0", 1);
     g_nmod = 1; strcpy(g_mod[0].name, "main"); g_mod[0].base = base; g_mod[0].size = SIZE;
     uint64_t obj = 0x205c8;
     cvar("t.MaxFPS", 0x20100);
@@ -36,6 +50,7 @@ static void check(int which) {
 }
 
 int main(void) {
+    check_quality();
     // Each process starts the one-time lookup with fresh state
     for (int i = 0; i < 3; i++) {
         pid_t p = fork(); assert(p >= 0);

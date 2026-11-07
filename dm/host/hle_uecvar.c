@@ -1,4 +1,4 @@
-// Unreal console variables found by their registered names, and the texture streaming pool the profile's ue_texture_pool raises.
+// Unreal console variables found by their registered names, the texture streaming pool the profile's ue_texture_pool raises, and the quality variables its ue_quality sets.
 // The rewriter finds each TAutoConsoleVariable the host may write in main (dm/tools/ue_cvar.py: its static constructor's registration, in any Unreal 4 / 5 build) and names it in main's
 // fixups (UE_CVAR:<name>); the object holds at +0x10 the pointer to the variable's value, the game thread's copy, then the render thread's. Called on every present (hle_nvn.c)
 #include "hle.h"
@@ -18,7 +18,7 @@ uint64_t dm_ue_cvar(const char *name) {
 // device profile sets it (DRAGON QUEST VII Reimagined: 200 on the Switch, 1000 on Windows) and the streaming manager reads it again whenever it changes. The host raises a smaller
 // value the game sets to the target, whenever the game sets it back; a larger one, or -1 (no pool size: the engine sizes its pool otherwise), stays. The profile key applies on the
 // Mac; on iOS only DM_UE_TEXTURE_POOL turns it on (Documents/env.txt), until an iPhone run shows the memory fits. DM_UE_TEXTURE_POOL=0 leaves the game's value
-void dm_ue_cvar_tick(void) {
+static void ue_pool_tick(void) {
     static int state = -1, target, nlog; static uint64_t obj_off; static const char *src;
     if (!state) return;
     if (state < 0) {
@@ -42,3 +42,51 @@ void dm_ue_cvar_tick(void) {
         if (nlog < 8) { nlog++; LOG("main: Unreal r.Streaming.PoolSize (%s thread) %d → %d MB (%s)", c ? "render" : "game", cur, target, src); }
     }
 }
+
+// ue_quality: variables the game's Switch device profile holds down for the Switch's GPU (the 3D resolution, shadows and the like). The profile names what they become; the game's device
+// profile and scalability groups set them, again at level loads, so the host writes them back whenever they differ, both copies, as a console command would. The player's High quality
+// setting is DM_UE_QUALITY: on by default on the Mac, off on iOS, until an iPhone run shows the GPU and the memory fit. Each row is in a group the player can leave at the game's values
+// under it (game.py's order): 3D resolution, Shadows and Scene detail
+typedef struct { const char *name; int is_float; int32_t i; float f; uint64_t off; int group; } ue_quality_row;
+static const char *const k_quality_group[] = {"DM_UE_RES", "DM_UE_SHADOWS", "DM_UE_DETAIL"};
+static void ue_quality_write(ue_quality_row *r, int n, uint8_t *base) {
+    static int nlog;
+    for (int k = 0; k < n; k++) {
+        uint64_t val; uint32_t want;
+        if (!rd((uint64_t)(uintptr_t)(base + r[k].off + 0x10), &val, sizeof val) || !val) continue;   // not created yet
+        if (r[k].is_float) memcpy(&want, &r[k].f, sizeof want); else memcpy(&want, &r[k].i, sizeof want);
+        for (int c = 0; c < 2; c++) {
+            uint32_t cur, *p = (uint32_t *)(uintptr_t)(val + 4 * (uint64_t)c);
+            if (!rd((uint64_t)(uintptr_t)p, &cur, sizeof cur) || cur == want) continue;
+            dm_guest_write_prepare(p, sizeof *p); __atomic_store_n(p, want, __ATOMIC_RELAXED);
+            if (nlog < 32) { nlog++; LOG("main: Unreal %s (%s thread) set to the profile's ue_quality value", r[k].name, c ? "render" : "game"); }
+        }
+    }
+}
+static void ue_quality_tick(void) {
+    static ue_quality_row rows[] = DM_GAME_UE_QUALITY;
+    static int state = -1, n; static unsigned tick; static uint8_t *base;
+    if (!state) return;
+    if (state < 0) {
+        state = 0;
+        if (!DM_GAME_UE_QUALITY_N) return;
+        const char *e = getenv("DM_UE_QUALITY");
+        if (e ? !atoi(e) : TARGET_OS_IPHONE) { LOG("main: Unreal quality variables left as the game sets them (%s)", e ? "DM_UE_QUALITY" : "iOS without DM_UE_QUALITY"); return; }
+        int left[3] = {0};
+        for (int k = 0; k < DM_GAME_UE_QUALITY_N; k++) {
+            const char *ge = getenv(k_quality_group[rows[k].group]);
+            if (ge && !atoi(ge)) { if (!left[rows[k].group]++) LOG("main: Unreal quality group %s left as the game sets it", k_quality_group[rows[k].group]); continue; }
+            uint64_t off = dm_ue_cvar(rows[k].name);
+            if (!off) { LOG("[RED] main: Unreal %s not found in main by the rewriter (ue_cvar.py NAMES; game profile ue_quality): left as the game sets it", rows[k].name); continue; }
+            rows[n] = rows[k]; rows[n++].off = off;
+        }
+        for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) base = g_mod[i].base;
+        if (!n || !base) return;
+        LOG("main: Unreal quality variables: %d of %d from the profile's ue_quality", n, DM_GAME_UE_QUALITY_N);
+        state = 1;
+    }
+    if (tick++ & 15) return;   // the game sets them at level loads, not every frame
+    ue_quality_write(rows, n, base);
+}
+
+void dm_ue_cvar_tick(void) { ue_pool_tick(); ue_quality_tick(); }

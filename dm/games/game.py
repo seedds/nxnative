@@ -167,6 +167,11 @@ def header_one(g):
     if fh not in ('on', 'off'): sys.exit(f'{g.id}: fps_hold must be on or off: {fh}')
     utp = g.get('ue_texture_pool', '0')   # Unreal's r.Streaming.PoolSize in MB, raised to this on the Mac (hle_uecvar.c; DM_UE_TEXTURE_POOL overrides, and turns it on for iOS): 0 = the game's own pool
     if not utp.isdigit(): sys.exit(f"{g.id}: ue_texture_pool must be megabytes (0 = the game's own pool): {utp}")
+    uq = g.get('ue_quality', '').split()   # Unreal console variables the host sets on the Mac (hle_uecvar.c; found by name by the rewriter, ue_cvar.py NAMES), group:name=value: a value with a point is a float, the rest ints
+    uqg = ('res', 'shadows', 'detail')   # the groups, in hle_uecvar.c's order: the player's 3D resolution, Shadows and Scene detail settings (DM_UE_RES, DM_UE_SHADOWS, DM_UE_DETAIL)
+    for kv in uq:
+        if not re.fullmatch(r'(res|shadows|detail):[A-Za-z][A-Za-z0-9_.]{0,46}=-?[0-9]+(\.[0-9]+)?', kv): sys.exit(f'{g.id}: ue_quality takes group:name=value entries (res, shadows or detail; a float with a point): {kv}')
+    uqr = [(kv.split(':')[0], *kv.split(':')[1].split('=')) for kv in uq]   # (group, name, value)
     ufc = g.get('ue_fps_cvar', 't.MaxFPS')   # the Unreal console variable the host writes fps_target into (hle_fpslock.c; found by name by the rewriter, ue_cvar.py NAMES): a game's own frame limit its settings apply to t.MaxFPS
     if not re.fullmatch(r'[A-Za-z][A-Za-z0-9_.]{0,30}', ufc): sys.exit(f'{g.id}: ue_fps_cvar must be a console variable name: {ufc}')
     ps = g.get('present_snap', 'off')   # present snapshots by default (nvn_mtl.m mtl_snap_on; DM_PRESENT_SNAP and the iOS launcher's Frame buffering override it): on / off
@@ -249,6 +254,9 @@ def header_one(g):
          f'#define DM_GAME_FPS_HOLD {int(fh == "on")}',
          f'#define DM_GAME_UE_TEXTURE_POOL {int(utp)}',
          f'#define DM_GAME_UE_FPS_CVAR {q(ufc)}',
+         f'#define DM_GAME_UE_QUALITY_N {len(uq)}',
+         *(f'#define DM_GAME_UE_QUALITY_{gr.upper()}_N {sum(r[0] == gr for r in uqr)}' for gr in uqg),
+         '#define DM_GAME_UE_QUALITY {' + (', '.join('{' + q(n) + (f', 1, 0, {v}f' if '.' in v else f', 0, {v}, 0') + f', 0, {uqg.index(gr)}}}' for gr, n, v in uqr) or '{0}') + '}',
          f'#define DM_GAME_PRESENT_SNAP {int(ps == "on")}',
          f'#define DM_GAME_PSO_MTL4 {int(p4 == "on")}',
          f'#define DM_GAME_ENC_THREAD {int(et == "on")}',

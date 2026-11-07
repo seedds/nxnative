@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Unreal console variables in main found by their registered names, without a build ID: patch_nso.py writes each one's TAutoConsoleVariable offset into main's fixups (UE_CVAR:<name>),
 and the host writes the variables the profile decides on (hle_fpslock.c: the frame limit and the present interval, fps_target and ue_fps_cvar; hle_uecvar.c: the texture streaming pool,
-ue_texture_pool).
+ue_texture_pool, and the quality variables, ue_quality).
 A TAutoConsoleVariable is a global in main's data: its static constructor loads the name (adrp + add), registers it through IConsoleManager (a blr), takes the object's address (adrp + add)
 and stores the variable's value pointer at +0x10 (str x0, [xN, #0x10]); the value holds the game thread's copy, then the render thread's. The same sequence registers every variable in the
 Unreal games here: OCTOPATH TRAVELER and Yoshi's Crafted World (UE 4.1x, UTF-32 names), Pikmin 4 (4.26), OCTOPATH TRAVELER II and DRAGON QUEST VII Reimagined (4.27, UTF-16), OCTOPATH
@@ -10,8 +10,11 @@ Usage on its own: ue_cvar.py <module>... (the objects of NAMES in each)"""
 import re, struct, sys, os
 
 # The variables the host may write: the engine's frame limit, its present interval (rhi., or nvn. in the Switch RHI of UE 4.18), the texture streaming pool, and a game's own frame-limit
-# variable a profile names with ue_fps_cvar (SHIN MEGAMI TENSEI V: Vengeance's Project.FrameRateLimit, which its settings apply to t.MaxFPS). A name a profile names must be listed here
-NAMES = ('t.MaxFPS', 'rhi.SyncInterval', 'nvn.SyncInterval', 'r.Streaming.PoolSize', 'Project.FrameRateLimit')
+# variable a profile names with ue_fps_cvar (SHIN MEGAMI TENSEI V: Vengeance's Project.FrameRateLimit, which its settings apply to t.MaxFPS), and the quality variables a profile's ue_quality
+# sets. A name a profile names must be listed here
+NAMES = ('t.MaxFPS', 'rhi.SyncInterval', 'nvn.SyncInterval', 'r.Streaming.PoolSize', 'Project.FrameRateLimit',
+         'r.DynamicRes.OperationMode', 'r.ScreenPercentage', 'r.SecondaryScreenPercentage.GameViewport', 'r.Shadow.MaxCSMResolution', 'r.Shadow.MaxResolution',
+         'r.Shadow.CSM.MaxCascades', 'r.Shadow.DistanceScale', 'r.AmbientOcclusionLevels', 'r.SSR.Quality', 'r.ViewDistanceScale')
 RET = 0xD65F03C0
 
 def adrp_page(w, pc):

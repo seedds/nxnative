@@ -285,6 +285,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Found on:** [DRAGON QUEST VII Reimagined](../../dm/games/0100A9D01C446000/README.md) (GitHub issue #589). The rewriter finds the pool in every Unreal main on the drive: OCTOPATH TRAVELER and Yoshi's Crafted World (UE 4.1x, UTF-32), Pikmin 4 (4.26), OCTOPATH TRAVELER II and DRAGON QUEST VII Reimagined (4.27), Octopath Traveler 0 (UE 5) and FINAL FANTASY RESONANCE (5.6).
 - **Check:** `t_uecvar` (the variable named in main's table, or not; the value raised, kept and left); the search itself, `test_ue_cvar.py`. On a Mac run, `DM_CTL` `cvari <main offset> <MB>` sets the pool while the game runs, for an A/B at one spot.
 
+### Unreal's Switch quality limits
+
+- **Symptom:** an Unreal Engine game looks soft on a fast Mac, with low-detail shadows, at a full frame rate; no red line.
+- **Cause:** not the host: the game's own Switch device profile, which sets its 3D resolution, shadows and scene detail for the Switch's GPU (FINAL FANTASY RESONANCE: 3D at 1384x780, scaled twice to 1920x1080).
+- **Fix (an improvement over the Switch):** the profile key `ue_quality` names console variables and their values, tried per game. The rewriter finds them by name (`ue_cvar.py` `NAMES`), and the host writes them back every 16 presents whenever they differ, as the game sets them again at level loads (`hle_uecvar.c`). The player's High quality setting (`DM_UE_QUALITY`) turns it off; on iOS it is off unless set. Each entry is in a group (`res`, `shadows`, `detail`) the player can leave at the game's values on its own (`DM_UE_RES`, `DM_UE_SHADOWS`, `DM_UE_DETAIL`). With dynamic resolution on, `r.DynamicRes.MaxScreenPercentage` above the game's own value did nothing on FINAL FANTASY RESONANCE: `r.DynamicRes.OperationMode` 0 with `r.ScreenPercentage` 100 did it.
+- **Found on:** [FINAL FANTASY RESONANCE](../../dm/games/0100606026F12000/README.md#open).
+- **Check:** `t_uecvar` (floats and ints written, kept, written back, a variable not created yet); the names, `test_ue_cvar.py`. On a Mac run, `DM_CTL` `cvari` / `cvarf <main offset> <value>` set a variable while the game runs, for an A/B at one spot; the offsets are in `ue_cvar.py`'s output for the module.
+
 ## Render targets, passes and clears
 
 ### Transient render targets shared by storage

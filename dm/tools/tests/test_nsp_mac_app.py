@@ -733,6 +733,21 @@ class Script(unittest.TestCase):
         self.assertEqual(nsp.build_bundle_id(edition, 'org.example.custom', saved, selected_extracted_mac_program=True), 'org.example.custom')
         self.assertEqual(nsp.build_bundle_id(edition, 'org.example.custom', saved), 'org.example.custom')
 
+    def test_program1_ios_nsp_nup_and_bundle_override_precedence(self):
+        app, edition = 0x010015100B514000, 0x040015100B514001
+        g = types.SimpleNamespace(title_id=edition)
+        saved = {'PRODUCT_BUNDLE_IDENTIFIER': 'org.nxnative.010015100b514000'}
+        for platform in ('ios', 'mac-app'):
+            for source in ('folder', 'nup', None):
+                with self.subTest(platform=platform, source=source):
+                    launch = nsp.mac_app_title_id(app, g, source) if platform == 'mac-app' else app
+                    other = platform == 'mac-app' and source == 'folder' and launch != app
+                    self.assertEqual(launch, edition if other else app)
+                    self.assertEqual(nsp.build_bundle_id(launch, None, saved, other),
+                                     f'org.nxnative.{edition:016x}' if other else saved['PRODUCT_BUNDLE_IDENTIFIER'])
+                    self.assertEqual(nsp.build_bundle_id(launch, 'org.example.user', saved, other), 'org.example.user')
+                    self.assertEqual(nsp.build_bundle_id(launch, None, {}, other), f'org.nxnative.{launch:016x}')
+
     def pack_cmd(self, gfx, **kw):
         ran, tmp = [], Path(tempfile.mkdtemp(dir=TEST_ROOT)); self.addCleanup(shutil.rmtree, tmp); self.said = []; self.settings_env = {}
         if kw.get('work'): tmp = kw['work']

@@ -1,5 +1,6 @@
 // NVN raw timestamp ABI: known vectors, long uptimes and an independent game's inline conversion.
 #include "../nvn/nvn_timestamp.h"
+uint64_t nvn_ts_profile_hz = 0;   // the default rate (nvn_mtl.m defines it from the profile)
 #include <stdio.h>
 
 static int checks, fails;

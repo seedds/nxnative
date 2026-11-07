@@ -2,7 +2,9 @@
 // Each device takes a player slot as a GameController controller does; front_mac.m defines the slot side (hidpad_attach / hidpad_detach / hidpad_read / hidpad_motion).
 // Skipped, so no controller is read twice: GameController's synthetic devices, and a device GameController lists itself. +[GCController supportsHIDDevice:] is only a hint for
 // that: it answers YES for the 8BitDo Ultimate 2C (2dc8:301b), which GameController then never lists (GitHub issue #965). So a device it says YES for waits HIDPAD_GC_WAIT
-// seconds for a GCController of its name; without one it is read as HID, and given back if that GCController connects later. Microsoft's, Sony's and Nintendo's pads
+// seconds for a GCController of its name; without one it is read as HID, and given back if that GCController connects later. Such a device takes a player only from its
+// first button press (idle until then): a keyboard and mouse receiver that declares a GamePad or Joystick collection (a Keychron Link, 3434:d030, GitHub issue #1657) gets the
+// same YES and is never listed either, but it sends no buttons, so it no longer takes player 1 from the real controller. Microsoft's, Sony's and Nintendo's pads
 // (hidpad_gc_native) are trusted without the wait: GameController supports them itself, under names that need not be their HID product strings. DM_HID_PADS=0 turns this off.
 // Identical pads (GitHub issue #1218): GameController can list fewer pads of one model than IOKit has; two Switch Pro Controllers over USB are listed as one (their USB serial
 // numbers match, which may be why; over Bluetooth both are listed). So a device GameController reads is kept, unread, in g_hidpads_gc, to count each model's pads. When IOKit
@@ -25,12 +27,13 @@
 
 typedef struct hid_pad {
     IOHIDDeviceRef hid; pad_hid st; char name[64]; int vid, pid, gc_hint; struct hid_pad *next;
+    int idle;   // in g_hidpads_waiting after HIDPAD_GC_WAIT: read as HID, but given a player only at its first button press (hidpad_value_idle)
     int twin, twin_want;   // twin: read here although GameController lists its model; twin_want: hidpad_twins_eval's choice for it
     pad_pro pro; uint64_t pro_m; int32_t pro_s[4]; pro_motion motion; uint8_t pro_counter; int pro_logged;   // a twin Pro Controller, from its report 0x30, not from st
     uint8_t report[512];   // its report buffer
 } hid_pad;
 static IOHIDManagerRef g_hidpad_manager;
-static hid_pad *g_hidpads, *g_hidpads_waiting;   // waiting: GameController says it lists the device (gc_hint); read as HID if it has not after HIDPAD_GC_WAIT
+static hid_pad *g_hidpads, *g_hidpads_waiting;   // waiting: GameController says it lists the device (gc_hint); read as HID if it has not after HIDPAD_GC_WAIT, from its first button press
 static hid_pad *g_hidpads_gc;                    // GameController reads them: kept, unread, to count identical pads
 #define HIDPAD_GC_WAIT 2.0
 #define HIDPAD_TWIN_WAIT 3.0
@@ -104,6 +107,17 @@ static void hidpad_use(hid_pad *d) {
     if (d->vid != PAD_HID_DEFAULT_VENDOR && !getenv("DM_HID_MAP"))
         LOG("controller '%s' (HID, %04x:%04x): buttons use 8BitDo's numbering; if they are in the wrong places, DM_HID_LOG=1 logs each button's number for a DM_HID_MAP", d->name, d->vid, d->pid);
 }
+// An idle device (d->idle, still in g_hidpads_waiting): its first button press makes it a player. Only buttons count: a receiver's collection may report axes or a hat at rest
+static void hidpad_value_idle(void *ctx, IOReturn result, void *sender, IOHIDValueRef v) {
+    (void)sender;
+    hid_pad *d = ctx; if (result != kIOReturnSuccess) return;
+    IOHIDElementRef e = IOHIDValueGetElement(v);
+    if (IOHIDElementGetUsagePage(e) != kHIDPage_Button || !IOHIDValueGetIntegerValue(v)) return;
+    if (hidpad_unlink(&g_hidpads_waiting, d->hid) != d) return;
+    d->idle = 0;
+    LOG("controller '%s' (HID, %04x:%04x): first button press: read as HID", d->name, d->vid, d->pid);
+    hidpad_use(d);   // replaces this callback with hidpad_value; the press itself is not passed on
+}
 static void hidpad_found(void *ctx, IOReturn result, void *sender, IOHIDDeviceRef hid) {
     (void)ctx; (void)sender;
     if (result != kIOReturnSuccess || IOHIDDeviceGetProperty(hid, CFSTR(kIOHIDGCSyntheticDeviceKey)) == kCFBooleanTrue) return;
@@ -124,10 +138,11 @@ static void hidpad_found(void *ctx, IOReturn result, void *sender, IOHIDDeviceRe
     if (hidpad_gc_native(d->vid) || hidpad_gc_listed(d->name)) { hidpad_keep_gc(d); hidpad_models_changed(); return; }   // front_mac.m reads it through its GCController
     d->next = g_hidpads_waiting; g_hidpads_waiting = d;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(HIDPAD_GC_WAIT * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        hid_pad *w = hidpad_unlink(&g_hidpads_waiting, hid); if (!w) return;   // removed meanwhile
-        if (hidpad_gc_listed(w->name)) { hidpad_keep_gc(w); hidpad_models_changed(); return; }
-        LOG("controller '%s' (HID, %04x:%04x): GameController says it lists it but has not after %g s, so it is read as HID", w->name, w->vid, w->pid, HIDPAD_GC_WAIT);
-        hidpad_use(w);
+        hid_pad *w = g_hidpads_waiting; while (w && w->hid != hid) w = w->next;
+        if (!w) return;   // removed meanwhile
+        if (hidpad_gc_listed(w->name)) { hidpad_unlink(&g_hidpads_waiting, hid); hidpad_keep_gc(w); hidpad_models_changed(); return; }
+        LOG("controller '%s' (HID, %04x:%04x): GameController says it lists it but has not after %g s, so it is read as HID from its first button press", w->name, w->vid, w->pid, HIDPAD_GC_WAIT);
+        w->idle = 1; IOHIDDeviceRegisterInputValueCallback(w->hid, hidpad_value_idle, w);   // stays in g_hidpads_waiting, without a player, until then
     });
 }
 static void hidpad_removed(void *ctx, IOReturn result, void *sender, IOHIDDeviceRef hid) {
@@ -146,6 +161,10 @@ static void hidpad_gc_connected(GCController *c) {
     for (hid_pad **link = &g_hidpads; *link;) {
         hid_pad *d = *link; if (!d->gc_hint || d->twin || strcmp(d->name, name)) { link = &d->next; continue; }
         *link = d->next; LOG("controller '%s' (HID) is now a GameController controller: read through it", d->name); hidpad_detach(d); hidpad_keep_gc(d);
+    }
+    for (hid_pad **link = &g_hidpads_waiting; *link;) {   // an idle one has no player to give back
+        hid_pad *d = *link; if (!d->idle || strcmp(d->name, name)) { link = &d->next; continue; }
+        *link = d->next; d->idle = 0; LOG("controller '%s' (HID) is now a GameController controller: read through it", d->name); hidpad_keep_gc(d);
     }
 }
 

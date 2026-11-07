@@ -6,6 +6,7 @@
 #   mrs tpidrro_el0     → read thread slot KTLR (Horizon ThreadLocalRegion pointer)
 #   svc #n, mrs cntpct_el0 → host gate (gate address taken from thread slot KGATE; once in C, gates.tsv is looked up by return point)
 #   sub sp, sp, xN      → xN rounded up to 16 first (Apple's kernel faults on a misaligned sp, Horizon does not; site_sp_align)
+#   sub/add sp, sp, #imm with an odd imm → the imm rounded up to 16, in place (the same fault; site 'sp_imm')
 #   ldxr rt,[rn]; cbnz rt,<it>; stxr ws,rk,[rn]; cbnz ws,<it> with no dmb after it (a test-and-set lock acquire with no acquire ordering) → ldaxr (acquire_lock_sites; the games ran on the Switch's Cortex-A57 without the ordering, Apple cores need it)
 #   the completer of Trinity's per-frame rendezvous: dmb ish between its flag store and its load of the state word (trinity_completer_sites; exactly one such function in a module, or no change)
 #   spin wait loops     → a copy whose back-edges pass a spin gate (the host yields there; a busy poll costs nothing on the Switch, see "Spin waits")
@@ -746,6 +747,11 @@ for o in (o for s, e in CODE_RANGES for o in range(s, e, 4)):
     if w & 0xFFFFFFE0 == 0xD53B0020: kinds[o] = ('ctr', w & 31); continue
     # sub sp, sp, xN (extended register, LSL #0): sp may end up misaligned, which Horizon allows and Apple's kernel does not (site_sp_align); with x18 it is an x18 site (site_sp)
     if w & 0xFFE0FFFF == 0xCB2063FF and (w >> 16) & 31 != 18: kinds[o] = ('sp_align', (w >> 16) & 31); continue
+    # sub/add sp, sp, #imm (shift 0) with a size no multiple of 16: a hand-written call bridge reserves odd sizes, which leaves sp misaligned for its callee (Horizon allows that,
+    # Apple's kernel faults on the first sp-based access); rounded up to the next multiple in place, the matching sub and add of the pair the same, so sp leaves the function where it
+    # entered and every sp-relative slot moves together. Compiled code keeps sizes 16-aligned, so only such bridges change
+    if not w & 0x400000 and w & 0xFF0003FF in (0xD10003FF, 0x910003FF) and ((w >> 10) & 0xFFF) % 16:
+        kinds[o] = ('sp_imm', (((w >> 10) & 0xFFF) + 15) & ~15); continue
     if o in x18: kinds[o] = ('x18', None)
 
 # Take the instruction table per function, find the windows and jump tables
@@ -1442,6 +1448,8 @@ for a in sorted(kinds):
     elif k == 'ctr':   # replaced in place by a constant: DminLine = 4 (64-byte lines); movz xN, #4, lsl #16
         assert arg != 18, f'{a:x} mrs x18, ctr_el0'
         struct.pack_into('<I', IMG, a, 0xD2A00080 | arg); stat(k); continue
+    elif k == 'sp_imm':   # the odd stack size rounded up in place; its matching sub/add rounds the same way (Civ VII's script call bridges: sub/add sp, sp, #0x98, four copies)
+        struct.pack_into('<I', IMG, a, (struct.unpack_from('<I', IMG, a)[0] & 0xFFC003FF) | (arg << 10)); stat(k); continue
     put_branch(a, st)
 
 obs = list(PATCHES['OBS'].get(BUILD_ID, []))

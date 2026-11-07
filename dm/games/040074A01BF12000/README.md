@@ -1,6 +1,6 @@
 # Donkey Kong Bananza (`040074A01BF12000`)
 
-A Switch 2 game: update v458752 over the base game, SDK 20.5.19 built for the Switch 2 (`sdk` names its spec `Ounce`), NVN2. Nintendo EPD's engine (sead / agl / gsys, Phive), modules `main` + `sdk`. **Plays on the Mac** (M4 Pro): three play sessions of about 5 minutes each and scripted runs of up to 15,900 frames, through the opening, the mining tunnel and the areas after it, with the guide movies in their panel, at 60 fps; in busy scenes the game drops itself to 30 fps for a few seconds ([Open](#open)). The first start with no pipeline archive builds the pipelines for about 4 minutes, once. Nothing past the first level's opening areas is tested; iOS is untested.
+A Switch 2 game: update v458752 over the base game, SDK 20.5.19 built for the Switch 2 (`sdk` names its spec `Ounce`), NVN2. Nintendo EPD's engine (sead / agl / gsys, Phive), modules `main` + `sdk`. **Plays on the Mac** (M4 Pro): three play sessions of about 5 minutes each and scripted runs of up to 15,900 frames, through the opening, the mining tunnel and the areas after it, with the guide movies in their panel, at 60 fps; in busy scenes the game drops itself to 30 fps for a few seconds ([Open](#open)). The first start with no pipeline archive builds the pipelines for about 4 minutes, once. Nothing past the first level's opening areas is tested on the Mac. On an iPhone the game was played for about 30 minutes, through obtaining the Odd rock ([iOS](#ios)).
 
 ## What it needs
 
@@ -40,6 +40,10 @@ The scene renders into 1676×943 targets (R11G11B10F colour), agl's upscaler tak
    - **What was wrong:** the records held instance count 0, and their counts grew frame after frame. Every frame gsys's vertex shader `c9a56f796ea4a4cd` (96 points or more) writes {count 0, one instance} into each record whose address its storage buffer lists. The translator had dropped those stores ([Global memory at an address loaded from memory](../../../docs/reference/shaders.md#global-memory-at-an-address-loaded-from-memory)).
    - **What NVN2 does:** decoding NVN2's indirect draw macro showed that instance count 0 draws nothing and the draw never resets the record.
    - **Now:** the walls, floor and lit passage draw as in the capture, at 60 fps.
+
+## iOS
+
+Plays on an iPhone 17 Pro Max (iOS 27.0.1): about 30 minutes of play, through obtaining the Odd rock, at 30 fps in normal scenes; busy scenes drop to 15 fps, and a switch to the game menu and back restores 30 fps. Built from the dump folder with the NSP script at `cd859c38` (v1.0.1's engine) and sideloaded as an unsigned IPA by the player (@LNPANDY). Only the Normal mode was played, with the Chinese and English languages; the rest of the game past the Odd rock, the other modes and the other languages are untested.
 
 ## Boot (Mac)
 

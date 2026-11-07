@@ -78,6 +78,7 @@ From an empty save: at about 45 s `A` (title), `A` (New Game), then the movie. F
 
 ## Found on this game
 
+- [An old NUP cache stamp makes the build unpack again](../../../docs/reference/packing.md#an-old-nup-cache-stamp-makes-the-build-unpack-again): after a packer update the v131072 image is checked against the NUP in 21.6 s and kept, instead of unpacked again.
 - [Uncompressed storage beside storage the GPU writes](../../../docs/reference/nvn-objects.md#uncompressed-storage-beside-storage-the-gpu-writes): resolved, the ground opening in holes after walking out of a cave and back (the terrain's height and blend maps came out as zeros once the first normal map had been drawn into their pool); a reload had hidden it.
 - [A damaged file in a NUP or a dump has no hash to fail](../../../docs/reference/packing.md#a-damaged-file-in-a-nup-or-a-dump-has-no-hash-to-fail): a contributor's NUP held three `.zs` textures beginning with zeros, and the background loader reloaded the fairy fountain model for ever (412% CPU); this repository's copy has none.
 - [A control section's words read as a BAHS entry](../../../docs/reference/shaders.md#a-control-sections-words-read-as-a-bahs-entry): six map rows that were no shaders, one of them failing the build; `tera_common` gave its variation pairs once its row was gone.

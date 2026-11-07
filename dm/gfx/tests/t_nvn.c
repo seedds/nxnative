@@ -135,9 +135,10 @@ static int ticket_registry_reuse(void) {
     return g_fail ? 1 : 0;
 }
 
-// A small but real guest grant still supersedes overlapping command handles,
-// even if the host cannot fit its canonical records and lends a host segment.
-// The guest grant's size must not exempt it from ticket retirement.
+// Defensive host fallback, NOT a hardware-valid guest allocation:
+// NVN_DEVICE_INFO_COMMAND_BUFFER_MIN_COMMAND_SIZE is 512 for NVN and NVN2.
+// A non-null 32-byte grant still enters our host-segment fallback; its old
+// overlapping ticket must not remain resolvable if those guest bytes change.
 static int ticket_small_guest_regrant(void) {
     _Alignas(16) uint8_t command[128] = {0}, control[64] = {0};
     pool_t pool = {0}; pool.mem = command;
@@ -154,8 +155,8 @@ static int ticket_small_guest_regrant(void) {
     uint32_t id = token & ~NVN_CTL_DRAW_TAG4;
     EXPECT("small grant: initial 4-byte ticket resolves", 1,
            (token & NVN_CTL_DRAW_TAG4) && nvn_ctl_draw_resolve(command, id) && g_ctl_ticket_n == 1);
-    // Both grants are real, non-null and 32 bytes long; only the second
-    // overlaps the four-byte token at command[0..4).
+    // Both grants are non-null but *below the advertised native minimum*;
+    // only the second overlaps the four-byte token at command[0..4).
     h_nvnCommandBufferAddCommandMemory(&cb, (NVNmemoryPool *)&pool, 64, 32);
     EXPECT("small grant: nonoverlap retains ticket", 1, nvn_ctl_draw_resolve(command, id) != NULL);
     h_nvnCommandBufferAddCommandMemory(&cb, (NVNmemoryPool *)&pool, 0, 32);

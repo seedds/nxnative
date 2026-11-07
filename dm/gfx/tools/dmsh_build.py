@@ -1216,12 +1216,27 @@ def build_keys(want, locations, pairs):
     return sorted(set(want) | {ps for vs in want for ps in pairs.get(vs, ()) if ps in locations}) if want else sorted(locations)
 
 def partner_inputs(key):
-    """The user(locnN) locations the pixel shaders paired with a vertex or mesh shader read (vs_pad, dmsh_meshstage.to_stage's pad); pairs whose pixel MSL cannot be read are skipped."""
+    """The user(locnN) locations the pixel shaders paired with a vertex shader read (vs_pad); pairs whose pixel MSL cannot be read are skipped."""
     want = set()
     for ps in PAIRS.get(key, ()):
         data = output('mac', ps + '_b.metal')   # finished before this shader (fin's phases), so staged in the cache by now
         if data is not None: want |= {int(x) for x in re.findall(r'\[\[user\(locn(\d+)\)', data.decode())}
     return want
+
+def partner_reads(key):
+    """{location: component mask} the pixel shaders paired with a mesh shader read (dmsh_meshstage.to_stage's reads), from their SPH input maps (dmsh_meshstage.pixel_reads), None without
+    pairs. A location a partner's MSL declares that its input map does not name (a record not found, a fixed-function input the translator moved to a user location) counts as all four."""
+    if not PAIRS.get(key): return None
+    reads = collections.defaultdict(int)
+    for ps in PAIRS[key]:
+        got = {}
+        if ps in loc:
+            rec = rec_of(ps)[1]; ci = rec.find(bytes.fromhex('34127698')); code = rec[0x38:ci]
+            got = dmsh_meshstage.pixel_reads(code[:0x80] if dmsh_ampere.is_nvn2(rec[ci:]) else code[0x30:0x80])   # an Ampere SPH leads the code, a Maxwell one follows its 0x30 header
+        data = output('mac', ps + '_b.metal')
+        for n in ({int(x) for x in re.findall(r'\[\[user\(locn(\d+)\)', data.decode())} if data is not None else set()) - got.keys(): got[n] = 0xf
+        for n, m in got.items(): reads[n] |= m
+    return dict(reads)
 
 def vs_pad(key, src):
     """Give a vertex shader the outputs its paired pixel shaders read but it does not write, with the value (0,0,0,1).
@@ -1604,8 +1619,8 @@ def finish(key, w, j, c1):
     mesh = j.get('mesh_stage')
     if mesh:   # the kernel as the Metal object or mesh function (dmsh_meshstage.py)
         if mesh.get('refused'): return 'mesh stage failed', mesh['refused'], None
-        # outputs its paired pixel shaders read but its SPHs do not enable get (0,0,0,1), as vs_pad gives a vertex shader's (Ocarina of Time's foliage meshes)
-        try: src = dmsh_meshstage.to_stage(src, mesh, partner_inputs(key) if PAIRS.get(key) else ()); open(msl, 'w').write(src)
+        # outputs its paired pixel shaders read but its SPHs do not enable get (0,0,0,1), as vs_pad gives a vertex shader's (Ocarina of Time's foliage meshes); each output as wide as they read
+        try: src = dmsh_meshstage.to_stage(src, mesh, partner_reads(key)); open(msl, 'w').write(src)
         except ValueError as e: return 'mesh stage failed', str(e)[:160], None
     elif j['stage'] == 'cs':
         src, first = first_store(src, j.get('local')); open(msl, 'w').write(src)   # the first invocation's store, for the host (see first_store)

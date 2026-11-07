@@ -84,6 +84,11 @@ typedef struct {
 } cap_ops;
 // Walks one record (op, payload of size - 8 bytes); 0 = an op the walk does not know (the capture fails rather than write host pointers)
 int cap_rec_fields(uint32_t op, uint8_t *payload, uint32_t size, const cap_ops *ops, void *ctx);
+// Expand an experimental guest 8-byte terminal draw token into a canonical
+// 16-byte JUMP record in the capture file (never in the guest's memory).
+// The destination is the guest-owned control memory with the original draw
+// record and END, which is then captured as a normal relocatable segment.
+int cap_ctl_draw_expand(const void *src, uint8_t out[16]);
 // The pointers inside a tex_t snapshot: mem (an address) and pool (a pool object)
 int cap_tex_fields(tex_t *t, const cap_ops *ops, void *ctx);
 // Layout fingerprint of every payload struct the walk knows (text): stored in the capture, compared by the replayer

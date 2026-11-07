@@ -12,6 +12,8 @@ static int checks, failed;
 
 // ---- the "live" side: two pools, a heap word list, objects, three segments ----
 static uint8_t *pool_a, *pool_b; static uint64_t heap_handles[4] = {0x100001, 0x200002, 0x300003, 0x400004};
+static const uint8_t *test_draw_control;
+const uint8_t *nvn_ctl_draw_resolve(const void *handle, uint32_t id) { (void)handle; return id == 42 ? test_draw_control : NULL; }
 static tex_t game_tex; static prog_t game_prog; static dpool_t game_dpool; static sync_t game_sync; static pool_t game_pool;
 typedef struct { uint8_t p[4096]; size_t n; } seg;
 static void *emit(seg *s, uint32_t op, size_t payload) {   // as hle_nvn.c rec(): header, zeroed payload, 8-byte aligned
@@ -104,6 +106,35 @@ int main(void) {
 
     // capture: regions (pool a, pool b; the heap words join as a blob region), encoded copies of the segments, the objects
     regs[0] = (rg){(uint64_t)(uintptr_t)pool_a, 65536}; regs[1] = (rg){(uint64_t)(uintptr_t)pool_b, 16384}; nregs = 2;
+    {
+        // Host 4-byte ticket is *normalized on capture* into ordinary JUMP
+        // plus a second segment, so old capture format/replay stays intact.
+        seg side __attribute__((aligned(16))) = {{0}, 0};
+        p_draw_idx *dx = emit(&side, OP_DRAW_IDX, offsetof(p_draw_idx, ind));
+        dx->prim = 4; dx->instances = 1; dx->count = 17; dx->ibuf = (uint64_t)(uintptr_t)pool_a + 0x4800;
+        emit(&side, OP_END, 0);
+        test_draw_control = side.p;
+        uint32_t token = NVN_CTL_DRAW_TAG4 | 42;
+        uint8_t canonical[16] = {0};
+        CHECK(side.n == 48 && cap_ctl_draw_expand(&token, canonical), "4-byte sidecar ticket expands to a relocatable 16-byte JUMP");
+        CHECK(!cap_ctl_draw_expand(&(uint32_t){NVN_CTL_DRAW_TAG4 | 41}, canonical), "unresolved ticket is not accepted");
+        CHECK(cap_ctl_draw_expand(&token, canonical), "resolved guest control ticket still expands");
+        op_hdr j; memcpy(&j, canonical, 8);
+        CHECK(j.op == OP_JUMP && j.size == 16, "capture gets canonical jump, not an unknown command opcode");
+        seg *saved = segs_by_addr[1]; segs_by_addr[1] = &side;
+        CHECK(cap_rec_fields(OP_JUMP, canonical + 8, 16, &enc, NULL), "sidecar jump target captures as a segment object");
+        uint64_t ref; memcpy(&ref, canonical + 8, 8);
+        CHECK(cap_obj_kind(ref) == CAP_K_SEG && cap_obj_index(ref) == 1, "control draw sidecar becomes a normal captured command segment");
+        uint8_t clone[48]; memcpy(clone, side.p, side.n);
+        CHECK(cap_rec_fields(OP_DRAW_IDX, clone + 8, 40, &enc, NULL), "sidecar indexed draw gets normal relocation walk");
+        uint64_t gpu; memcpy(&gpu, clone + 8 + offsetof(p_draw_idx, ibuf), 8);
+        CHECK(cap_is_addr(gpu) && cap_addr_region(gpu) == 0 && cap_addr_off(gpu) == 0x4800, "index buffer address relocates through the normal region scheme");
+        new_seg[1] = side.p; CHECK(cap_rec_fields(OP_JUMP, canonical + 8, 16, &dec, NULL), "old replay jump field decoder accepts normalized sidecar");
+        memcpy(&ref, canonical + 8, 8);
+        CHECK(ref == (uint64_t)(uintptr_t)side.p, "normalized capture jump round-trips to the relocated sidecar");
+        segs_by_addr[1] = saved;
+        test_draw_control = NULL;
+    }
     seg *all[3] = {&s0, &s1, &s2}; uint8_t enc_bytes[3][4096];
     for (int i = 0; i < 3; i++) { memcpy(enc_bytes[i], all[i]->p, all[i]->n); walk(all[i], enc_bytes[i], &enc, all[i]->p); }
     CHECK(nregs == 3, "the deferred handles outside the pools became a region of their own");

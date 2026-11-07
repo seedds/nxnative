@@ -186,6 +186,26 @@ static uint64_t cap_seg_get(uint64_t addr) {   // a segment's index in this subm
 }
 static void cap_seg_write(uint32_t idx) {   // copy the records from the segment start to its END or JUMP, then encode them in the copy
     const uint8_t *p = (const uint8_t *)(uintptr_t)g_cap_segq[idx]; size_t n = 0;
+    uint8_t jump[16];
+    if (cap_ctl_draw_expand(p, jump)) {
+        // Capture representation, not guest command memory: a canonical JUMP
+        // to the control-memory draw+END. The ordinary CAP_K_SEG relocation
+        // queues that sidecar, whose draw index-buffer address is relocated
+        // by the ordinary OP_DRAW_IDX walk.
+        uint8_t b[24]; uint32_t hd[2] = {idx, 16};
+        memcpy(b, hd, 8); memcpy(b + 8, jump, 16);
+        g_cap_orig = p;
+        CAP_WHERE(b + 16, "control-draw jump at segment %u", idx);
+        if (!cap_rec_fields(OP_JUMP, b + 16, 16, &g_cap_enc, NULL)) cap_fail("control draw target relocation failed");
+        g_cap_orig = NULL; CAP_WHERE(NULL, "-");
+        cap_put(&g_cap_w, CAP_SEGM, g_cap_cur_submit, b, sizeof b, 1);
+        g_cap_segs++;
+        return;
+    }
+    if (nvn_ctl_draw_is_ticket(p)) {
+        cap_fail("orphan 4-byte command ticket: guest command memory was overwritten or re-granted before capture");
+        return;
+    }
     for (;;) {
         op_hdr h; memcpy(&h, p + n, 8);
         if (h.size < 8 || (h.size & 7) || h.size > (64u << 20) || h.op >= OP_COUNT_) { cap_fail("a corrupt record in a submitted segment"); MLOG("[RED] DM_NVN_CAPTURE: segment %p offset %zu: op %u size %u", p, n, h.op, h.size); break; }

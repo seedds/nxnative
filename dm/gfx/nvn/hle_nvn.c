@@ -858,12 +858,19 @@ static void cs_dump(void) {   // Called once per frame (at present)
     int on = g_cs.on; memset(&g_cs, 0, sizeof g_cs); g_cs.on = on; g_cs.frame0 = f; pthread_mutex_unlock(&g_cs_mu);
 }
 static void put_hdr(uint8_t *p, uint32_t op, uint32_t size) { op_hdr h = {op, size}; memcpy(p, &h, sizeof h); if (op) cs_op(op, size); }
+static void cmd_align8(cmd_t *o);
+static void ctl_ticket_regrant_cmd(uintptr_t lo, uintptr_t hi);
+static int nvn_draw_ctl_on(void);
 // New segment: if the recording in progress has records, write a JUMP at the end of the old segment to link it. A recording with none yet starts in the new segment
 // (its first record is its handle), and the bytes at the old write position are not its own: after an END that took the last bytes there is no room there at all
 static void cmd_new_segment(cmd_t *o, uint8_t *mem, size_t n) {
     uint8_t *start = align8(mem), *end = mem + n;
+    // An unfinished four-aligned direct draw needs canonical alignment before
+    // a link is written. Its staging allocation reserves room for this move.
+    if (o->recording == 1 && o->cur && ((uintptr_t)o->cur & 7)) cmd_align8(o);
     if (o->recording == 1 && o->cur) { if (cs_on() && o->end > o->cur) { pthread_mutex_lock(&g_cs_mu); g_cs.waste += (uint64_t)(o->end - o->cur); pthread_mutex_unlock(&g_cs_mu); } put_hdr(o->cur, OP_JUMP, 16); memcpy(o->cur + 8, &start, 8);
         o->used += 16; }   // the JUMP also occupies guest memory of this recording: count it in used, so the game packing the next recording right behind by used does not overwrite it
+    if (nvn_draw_ctl_on()) ctl_ticket_regrant_cmd((uintptr_t)mem, (uintptr_t)end);
     o->cur = start; o->end = end;
 }
 // Host-supplied segment when the game's own command memory runs out: when the game's out-of-memory callback cannot allocate from its command memory pool, it calls AddCommandMemory with an empty pool (p = NULL, n = 0)
@@ -919,6 +926,76 @@ static void hostseg_release(uintptr_t lo, uintptr_t hi) {
     for (int i = 0; i < g_nhostseg; i++) if (g_hostseg[i].busy && g_hostseg[i].org_hi > lo && g_hostseg[i].org_lo < hi) g_hostseg[i].busy = 0;
     pthread_mutex_unlock(&g_hostseg_mu);
 }
+// Only *live* exact guest command addresses are indexed. A 31-bit generation
+// prevents a token copied from a retired address from resolving after reuse.
+// Handles may survive command-buffer finalization; only a game memory regrant
+// retires them. This is independent of the distance to the control grant (>4GB
+// on some titles), and has no arbitrary 4M-lifetime allocation cliff.
+typedef struct { uintptr_t handle; uint8_t *snapshot; uint32_t generation; } ctl_ticket_t;
+static pthread_mutex_t g_ctl_ticket_mu = PTHREAD_MUTEX_INITIALIZER;
+// Readers hold this across one entire submit (capture, preindex and replay).
+// A guest command-memory regrant waits for that CPU walk before retiring its
+// snapshots; mutex-only lookup would allow use-after-free after unlock.
+static pthread_rwlock_t g_ctl_ticket_life = PTHREAD_RWLOCK_INITIALIZER;
+static void ctl_ticket_read_begin(void) { pthread_rwlock_rdlock(&g_ctl_ticket_life); }
+static void ctl_ticket_read_end(void) { pthread_rwlock_unlock(&g_ctl_ticket_life); }
+static ctl_ticket_t *g_ctl_tickets;
+static size_t g_ctl_ticket_n, g_ctl_ticket_cap;
+static uint32_t g_ctl_ticket_next = 1;
+static size_t ctl_ticket_lower(uintptr_t handle) {
+    size_t lo = 0, hi = g_ctl_ticket_n;
+    while (lo < hi) { size_t mid = lo + (hi - lo) / 2; if (g_ctl_tickets[mid].handle < handle) lo = mid + 1; else hi = mid; }
+    return lo;
+}
+static void ctl_ticket_regrant_cmd(uintptr_t lo, uintptr_t hi) {
+    pthread_rwlock_wrlock(&g_ctl_ticket_life);
+    pthread_mutex_lock(&g_ctl_ticket_mu);
+    // A four-byte ticket can cross a grant boundary; retire it on any
+    // overlapping byte, including a grant beginning at handle+1/2/3.
+    size_t first = ctl_ticket_lower(lo >= 3 ? lo - 3 : 0), last = ctl_ticket_lower(hi);
+    while (first < last && g_ctl_tickets[first].handle + 4 <= lo) first++;
+    if (last > first) {
+        for (size_t i = first; i < last; i++) free(g_ctl_tickets[i].snapshot);
+        memmove(g_ctl_tickets + first, g_ctl_tickets + last, (g_ctl_ticket_n - last) * sizeof *g_ctl_tickets);
+        g_ctl_ticket_n -= last - first;
+    }
+    pthread_mutex_unlock(&g_ctl_ticket_mu);
+    pthread_rwlock_unlock(&g_ctl_ticket_life);
+}
+static uint32_t ctl_ticket_add(const uint8_t *handle, const uint8_t *target) {
+    pthread_mutex_lock(&g_ctl_ticket_mu);
+    if (g_ctl_ticket_next >= NVN_CTL_DRAW_TAG4) die("NVN control draw: 31-bit generation exhausted");
+    if (g_ctl_ticket_n == g_ctl_ticket_cap) {
+        size_t nc = g_ctl_ticket_cap ? g_ctl_ticket_cap * 2 : 1024;
+        ctl_ticket_t *p = realloc(g_ctl_tickets, nc * sizeof *p);
+        if (!p) die("NVN control draw: cannot grow live-ticket registry");
+        g_ctl_tickets = p; g_ctl_ticket_cap = nc;
+    }
+    size_t pos = ctl_ticket_lower((uintptr_t)handle);
+    if (pos < g_ctl_ticket_n && g_ctl_tickets[pos].handle == (uintptr_t)handle)
+        die("NVN control draw: duplicate live guest handle without a regrant");
+    // A cached caller may retain the handle even after its NVN command buffer
+    // receives new control storage. Snapshot the *real* 48 bytes that were
+    // written and charged to the guest; replay never dereferences stale control.
+    uint8_t *snapshot = malloc(48);
+    if (!snapshot) die("NVN control draw: cannot snapshot guest control record");
+    memcpy(snapshot, target, 48);
+    memmove(g_ctl_tickets + pos + 1, g_ctl_tickets + pos, (g_ctl_ticket_n - pos) * sizeof *g_ctl_tickets);
+    uint32_t id = g_ctl_ticket_next++;
+    g_ctl_tickets[pos] = (ctl_ticket_t){ (uintptr_t)handle, snapshot, id };
+    g_ctl_ticket_n++;
+    pthread_mutex_unlock(&g_ctl_ticket_mu);
+    return id;
+}
+const uint8_t *nvn_ctl_draw_resolve(const void *handle, uint32_t id) {
+    const uint8_t *p = NULL;
+    pthread_mutex_lock(&g_ctl_ticket_mu);
+    size_t pos = ctl_ticket_lower((uintptr_t)handle);
+    if (pos < g_ctl_ticket_n && g_ctl_tickets[pos].handle == (uintptr_t)handle &&
+        g_ctl_tickets[pos].generation == id) p = g_ctl_tickets[pos].snapshot;
+    pthread_mutex_unlock(&g_ctl_ticket_mu);
+    return p;
+}
 NVN(nvnCommandBufferAddCommandMemory, void, NVNcommandBuffer *c, const NVNmemoryPool *p, ptrdiff_t off, size_t n) {
     const pool_t *pl = (const pool_t *)p;
     if (!pl || n < 64) { if (cs_on()) { pthread_mutex_lock(&g_cs_mu); g_cs.hostseg++; pthread_mutex_unlock(&g_cs_mu); } size_t sz = hostseg_size(CB(c), !pl, n); cmd_new_segment(CB(c), hostseg_take(CB(c), sz), sz); return; }
@@ -930,12 +1007,43 @@ NVN(nvnCommandBufferAddCommandMemory, void, NVNcommandBuffer *c, const NVNmemory
     CB(c)->used = 0;   // GetCommandMemoryUsed counts from the start of the memory the game last added, across recordings (see there)
 }
 NVN(nvnCommandBufferAddControlMemory, void, NVNcommandBuffer *c, void *m, size_t n) {
-    (void)m;
-    CB(c)->ctl_size = n;   // The host's recordings contain no control-memory entries; the entire last block remains free.
+    cmd_t *o = CB(c);
+    o->ctl_mem = m; o->ctl_size = n; o->ctl_used = 0;
 }
-// Get space for one record and keep `keep` bytes after it (OP_RESERVE, 0 for the END); if not enough, call back into the game per the NVN convention to add command memory
-static uint8_t *cmd_alloc_keep(cmd_t *o, uint32_t size, uint32_t keep) {
+// The *guest* NVN/NVN2 command alignment is four, but our canonical record
+// payloads need eight. A 4-byte terminal draw ticket leaves cur+4; if the
+// next recording is not another standalone direct draw, reserve four actual
+// padding bytes before its first canonical record. An unfinished single draw
+// at cur%8==4 is still unobserved (its handle is not returned until END), so
+// move those 40 bytes forward by four before a second operation or a GetUsed
+// query. No four-byte padding becomes part of a replay/capture segment.
+static void cmd_align8(cmd_t *o) {
+    if (!o->cur || !((uintptr_t)o->cur & 7)) return;
+    if (((uintptr_t)o->cur & 7) != 4) die("NVN control-draw: invalid command record alignment");
+    // A previous terminal ticket may have ended the grant. Preserve its exact
+    // 4-byte charge; the next allocation will request a fresh segment.
+    if (o->end - o->cur < 4) {
+        if (o->recording == 1) die("NVN control-draw: scratch record has no reserved alignment space");
+        return;
+    }
+    if (o->recording == 1) {
+        if (!o->begin || ((uintptr_t)o->begin & 7) != 4 || o->cur != o->begin + 40)
+            die("NVN control-draw: cannot realign previously published command bytes");
+        memmove(o->begin + 4, o->begin, 40);
+        memset(o->begin, 0, 4);
+        o->begin += 4;
+    } else memset(o->cur, 0, 4);
+    o->cur += 4;
+    o->used += 4;
+}
+// Get space for a canonical record and keep `keep` bytes after it. For a
+// transient, single direct indexed draw only, allow a 4-aligned but not
+// 8-aligned *scratch* record: rec_draw_idx writes it with memcpy, and the
+// terminal token either shrinks it to four bytes or cmd_align8 restores
+// canonical alignment before any subsequent operation.
+static uint8_t *cmd_alloc_keep_ex(cmd_t *o, uint32_t size, uint32_t keep, int direct4) {
     size = (size + 7) & ~7u;
+    if (!direct4) cmd_align8(o);
     for (int tries = 0; !o->cur || o->cur + size + keep > o->end; tries++) {
         // The game's callback cannot supply enough (newer-SDK games hand out small chunks sized for real-device commands, or disable the callback and manage memory themselves): continue recording in a host segment instead of aborting
         if (!o->cb || tries == 2) {
@@ -952,6 +1060,7 @@ static uint8_t *cmd_alloc_keep(cmd_t *o, uint32_t size, uint32_t keep) {
     if (o->recording == 2) { o->begin = p; o->recording = 1; }   // The recording's first record is its handle
     return p;
 }
+static uint8_t *cmd_alloc_keep(cmd_t *o, uint32_t size, uint32_t keep) { return cmd_alloc_keep_ex(o, size, keep, 0); }
 static uint8_t *cmd_alloc(cmd_t *o, uint32_t size) { return cmd_alloc_keep(o, size, OP_RESERVE); }
 // A recording starts with its first command, as in NVN: no BEGIN record, so an empty recording takes only its END. Games size command memory by GetCommandMemoryUsed
 // (nvn_obj.h draw_rec): Breath of the Wild sums one scratch recording per mesh and per shape and render pass into each model's prerecorded commands, and with an
@@ -960,16 +1069,83 @@ NVN(nvnCommandBufferBeginRecording, void, NVNcommandBuffer *c) {
     cmd_t *o = CB(c);
     if (o->recording) LOG("[RED] BeginRecording re-entered");
     o->recording = 2;   // 2: recording, no command yet (cmd_alloc sets begin)
+    o->used_queried = 0;
 }
+static pthread_once_t g_draw_ctl_once = PTHREAD_ONCE_INIT;
+static int g_draw_ctl_enabled;
+static void nvn_draw_ctl_init(void) {
+    const char *e = getenv("DM_NVN_DRAW_CTL");
+    // One thread-safe environment read, with explicit override of the profile.
+    g_draw_ctl_enabled = e ? (e[0] == '1' && e[1] == 0) : DM_GAME_NVN_DRAW_CTL;
+}
+static int nvn_draw_ctl_on(void) {
+    pthread_once(&g_draw_ctl_once, nvn_draw_ctl_init);
+    return g_draw_ctl_enabled;
+}
+
 NVN(nvnCommandBufferEndRecording, NVNcommandHandle, NVNcommandBuffer *c) {
     cmd_t *o = CB(c);
+    // Opt-in: for one plain indexed draw only, keep the full
+    // draw+END (48 real bytes) in the CONTROL memory the guest supplied and
+    // replace the original 40 command bytes with one 4-byte terminal token.
+    // This changes no guest-visible offset already queried during recording.
+    // Empty/multi-command, indirect, no-control and insufficient-control
+    // cases all retain the original in-place command stream.
+    if (nvn_draw_ctl_on() && o->recording == 1 && !o->used_queried &&
+        o->begin && o->cur == o->begin + 40 && o->ctl_mem && o->ctl_used <= o->ctl_size &&
+        o->ctl_size - o->ctl_used >= 48) {
+        op_hdr h; memcpy(&h, o->begin, sizeof h);
+        uint8_t *a = (uint8_t *)(((uintptr_t)o->ctl_mem + o->ctl_used + 7) & ~(uintptr_t)7);
+        size_t pad = (size_t)(a - (o->ctl_mem + o->ctl_used));
+        if (h.op == OP_DRAW_IDX && h.size == 40 && pad + 48 <= o->ctl_size - o->ctl_used &&
+            (uintptr_t)a > 4096) {
+            p_draw_idx d = {0};
+            memcpy(&d, o->begin + 8, 32); // transient record can be only 4-aligned
+            // h.size == 40 proves the indirect/multi-draw tail is ABSENT.
+            // Never inspect d->ind/d->mdi_cnt here: those fields start at
+            // record offsets 40/48 and may contain arbitrary bytes from the
+            // next, not-yet-written part of the guest command pool.
+            if (d.instances == 1 && !d.base_instance) {
+                memcpy(a, o->begin, 40);
+                put_hdr(a + 40, OP_END, 8);
+                uint32_t id = ctl_ticket_add(o->begin, a);
+                if (id) {
+                    uint32_t ticket = NVN_CTL_DRAW_TAG4 | id;
+                    memcpy(o->begin, &ticket, 4);
+                    o->cur = o->begin + 4;
+                    o->used -= 36;
+                    o->ctl_used += pad + 48;
+                    o->recording = 0;
+                    return (NVNcommandHandle)o->begin;
+                }
+            }
+        }
+    }
     uint8_t *p = cmd_alloc_keep(o, 8, 0); put_hdr(p, OP_END, 8);   // nothing follows: the END may take the segment's last bytes
     o->recording = 0;
     return (NVNcommandHandle)o->begin;
 }
 NVN(nvnCommandBufferIsRecording, NVNboolean, const NVNcommandBuffer *c) { return ((const cmd_t *)c)->recording != 0; }
 NVN(nvnCommandBufferCopyCommands, void, NVNcommandBuffer *c, int n, const NVNcommandHandle *h) {
-    for (int i = 0; i < n; i++) { uint8_t *p = cmd_alloc(CB(c), 16); put_hdr(p, OP_CALL, 16); memcpy(p + 8, &h[i], 8); }
+    // Preserve the legacy path and its cost for every game that has not opted
+    // into four-byte direct-draw tickets. It need not dereference each handle.
+    if (!nvn_draw_ctl_on()) {
+        for (int i = 0; i < n; i++) { uint8_t *p = cmd_alloc(CB(c), 16); put_hdr(p, OP_CALL, 16); memcpy(p + 8, &h[i], 8); }
+        return;
+    }
+    for (int i = 0; i < n; i++) {
+        // CopyCommands snapshots a terminal draw into the destination stream,
+        // so its replay does not depend on the originating handle remaining
+        // valid after the source command memory is re-granted. Each physical
+        // 40-byte copy is charged to the destination guest command grant.
+        uint8_t copy[40];
+        ctl_ticket_read_begin();
+        const uint8_t *draw = h[i] ? nvn_ctl_draw_target((const void *)(uintptr_t)h[i]) : NULL;
+        if (draw) memcpy(copy, draw, sizeof copy);
+        ctl_ticket_read_end();
+        if (draw) { uint8_t *p = cmd_alloc(CB(c), 40); memcpy(p, copy, sizeof copy); continue; }
+        uint8_t *p = cmd_alloc(CB(c), 16); put_hdr(p, OP_CALL, 16); memcpy(p + 8, &h[i], 8);
+    }
 }
 NVN(nvnCommandBufferSignalEvent, void, NVNcommandBuffer *c, const NVNevent *e, NVNeventSignalMode m, NVNeventSignalLocation loc, int flags, uint32_t v) {
     (void)loc; (void)flags;
@@ -1014,7 +1190,20 @@ static void *rec(NVNcommandBuffer *c, uint32_t op, size_t payload) {
 #define RECN(c, OP, T, ARR, N) ((T *)rec((c), (OP), offsetof(T, ARR) + sizeof(((T *)0)->ARR[0]) * (size_t)(N)))
 // Draws carry the indirect / multi-draw fields (ind onwards) only when they use them: a plain indexed draw record is 0x28 bytes instead of 0x40 (nvn_obj.h draw_rec)
 static void rec_draw(NVNcommandBuffer *c, p_draw d) { size_t n = d.ind || d.mdi_cnt ? sizeof d : offsetof(p_draw, ind); memcpy(rec(c, OP_DRAW, n), &d, n); }
-static void rec_draw_idx(NVNcommandBuffer *c, p_draw_idx d) { size_t n = d.ind || d.mdi_cnt ? sizeof d : offsetof(p_draw_idx, ind); memcpy(rec(c, OP_DRAW_IDX, n), &d, n); }
+static void rec_draw_idx(NVNcommandBuffer *c, p_draw_idx d) {
+    size_t n = d.ind || d.mdi_cnt ? sizeof d : offsetof(p_draw_idx, ind);
+    cmd_t *o = CB(c);
+    // For a new, one-draw recording, stage its canonical 40-byte form at
+    // 4-byte alignment (only memcpy accesses). EndRecording can then reduce
+    // it to an actual 4-byte token. If a second op or offset query arrives,
+    // cmd_align8 shifts the still-unpublished record into 8-byte alignment.
+    if (n == offsetof(p_draw_idx, ind) && nvn_draw_ctl_on() && o->recording == 2 &&
+        o->cur && ((uintptr_t)o->cur & 7) == 4) {
+        uint8_t *p = cmd_alloc_keep_ex(o, 40, OP_RESERVE + 4, 1);
+        put_hdr(p, OP_DRAW_IDX, 40);
+        memcpy(p + 8, &d, n);
+    } else memcpy(rec(c, OP_DRAW_IDX, n), &d, n);
+}
 static void copy_view(view_t *dst, uint8_t *has, const NVNtextureView *v) { *has = v != NULL; if (v) *dst = *(const view_t *)v; }
 // Records with textures snapshot the texture objects (0x80 bytes each, after the record struct) and replay reads the snapshots: an NVN command no longer depends on the API object once recorded, and the game may finalize, free or reuse it before submitting.
 // Unity (Engage) does so when it changes scenes; only the object pointer used to be recorded, and replay read other data (a texture 1869367126 high, a Metal assertion abort).
@@ -1346,6 +1535,7 @@ NVN(nvnQueueSubmitCommands, void, NVNqueue *q, int n, const NVNcommandHandle *h)
     ((queue_t *)q)->submits++;
     mtl_queue_activate(((const queue_t *)q)->serial);
     mtl_set_queue_origin_lower_left(((const queue_t *)q)->origin_ll);
+    if (nvn_draw_ctl_on()) ctl_ticket_read_begin();
     nvn_cap_submit(n, (const uint64_t *)h);   // DM_NVN_CAPTURE (nvn_capture.inc)
     mtl_sub_begin();
     nvn_ft_poll();
@@ -1353,6 +1543,7 @@ NVN(nvnQueueSubmitCommands, void, NVNqueue *q, int n, const NVNcommandHandle *h)
     for (int i = 0; i < n; i++) { mtl_exec_rest((const uint64_t *)h + i + 1, n - i - 1); mtl_exec((const uint8_t *)h[i]); }
     mtl_exec_rest(NULL, 0);
     mtl_sub_commit();
+    if (nvn_draw_ctl_on()) ctl_ticket_read_end();
     pthread_mutex_unlock(&g_sub_mu);
     uint64_t dw = now_ns() - t0;
     atomic_fetch_add(&g_nvn_ns, dw); atomic_fetch_add(&g_sub_wall_ns, dw);
@@ -2519,17 +2710,20 @@ NVN(nvnDeviceSetIntermediateShaderCache, void, NVNdevice *d, int n) { (void)d; (
 NVN_NOPROTO(nvnWindowBuilderSetNumActiveTextures, void, NVNwindowBuilder *b, int n) { (void)b; ONCE_LOG("WindowBuilderSetNumActiveTextures %d (the host rotates through the SetTextures count)", n); }
 NVN_NOPROTO(nvnWindowSetNumActiveTextures, void, NVNwindow *w, int n) { (void)w; ONCE_LOG("WindowSetNumActiveTextures %d (the host rotates through the SetTextures count)", n); }
 
-// Command buffer memory usage: record bytes written in this recording (accumulated across segments; the host does not use control memory, always 0); the memory callback switch is ignored.
+// Command-buffer usage: real command bytes accumulated across segments. With
+// nvn_draw_ctl on, control used/free also account for actual 48-byte guest-
+// owned draw sidecars (not fabricated command bytes). The callback switch is ignored.
 // It used to be cur - begin: once a recording overflowed into a host segment, cur is in host memory (an address below the guest begin) and it returned 0. SMBW asks for this value after recording each material setup handle,
 // and on 0 (with control memory also 0) treats the recording as empty and marks the handle invalid (from main+0x4bb6c it clears bit 0 of the material entry +0x50); later draws no longer CALL it and inherit the previous object's vertex buffers / textures:
 // on the iPhone a batch of draws on odd frames of the opening course fetched vertices out of bounds, giving huge triangles and NaN (black band, black-edged glow, grey stripes). Without overflow the accumulated value equals cur - begin.
 // As in NVN, the count runs from the start of the command memory the game last added (AddCommandMemory), not from BeginRecording: Fire Emblem: Three Houses adds one 16 MB chunk of a ring to its main
 // command buffer and records every frame into it; its memory callback (main+0x9ca960) takes chunk start + used as the position the GPU has reached and frees the ring up to there when the frame's fence
 // signals. Counted per recording, the position stayed at one frame's size (about 18 KB), the ring never freed past it, and after the first 16 MB (about 15 s) the callback waited for ring space forever
-NVN(nvnCommandBufferGetCommandMemoryUsed, size_t, const NVNcommandBuffer *c) { const cmd_t *m = (const cmd_t *)c;
+NVN(nvnCommandBufferGetCommandMemoryUsed, size_t, const NVNcommandBuffer *c) { cmd_t *m = (cmd_t *)c;
+    if (m->recording) { cmd_align8(m); m->used_queried = 1; }
     return m->begin ? (size_t)m->used : 0; }
-NVN(nvnCommandBufferGetControlMemoryUsed, size_t, const NVNcommandBuffer *c) { (void)c; return 0; }
-NVN(nvnCommandBufferGetControlMemoryFree, size_t, const NVNcommandBuffer *c) { return ((const cmd_t *)c)->ctl_size; }
+NVN(nvnCommandBufferGetControlMemoryUsed, size_t, const NVNcommandBuffer *c) { return ((const cmd_t *)c)->ctl_used; }
+NVN(nvnCommandBufferGetControlMemoryFree, size_t, const NVNcommandBuffer *c) { const cmd_t *o = (const cmd_t *)c; return o->ctl_size - o->ctl_used; }
 NVN(nvnCommandBufferGetControlMemorySize, size_t, const NVNcommandBuffer *c) { return ((const cmd_t *)c)->ctl_size; }
 // Size and free bytes of the command memory the game last added (DRAGON QUEST XI S, Unreal Engine 4.18): as in NVN, size = used + free; free is what is left in the current segment
 NVN(nvnCommandBufferGetCommandMemoryFree, size_t, const NVNcommandBuffer *c) { const cmd_t *m = (const cmd_t *)c; return m->cur && m->end > m->cur ? (size_t)(m->end - m->cur) : 0; }
@@ -2701,7 +2895,11 @@ NVN_NOPROTO(nvnProgramSetSampleShading, NVNboolean, NVNprogram *p, int mode) { (
 // Singular / combined forms → plural / separate forms; state the replay layer does not have yet (conditional render, depth bounds, ...) is logged once and drawing continues (better to over-draw than to drop).
 #include "../tex/nvn_deswizzle.h"
 
-NVN(nvnCommandBufferCallCommands, void, NVNcommandBuffer *c, int n, const NVNcommandHandle *h) { h_nvnCommandBufferCopyCommands(c, n, h); }   // the replay layer treats CALL and COPY alike
+NVN(nvnCommandBufferCallCommands, void, NVNcommandBuffer *c, int n, const NVNcommandHandle *h) {
+    // A call retains its reference to the source command handle. In contrast,
+    // CopyCommands above may make an independent copy of a control draw.
+    for (int i = 0; i < n; i++) { uint8_t *p = cmd_alloc(CB(c), 16); put_hdr(p, OP_CALL, 16); memcpy(p + 8, &h[i], 8); }
+}
 // Combined texture handle (texture id | sampler id << 20) is recorded into the texture slot as is: the replay layer takes the texture from the low 20 bits and the sampler from the high bits (nvn_mtl.m NVN_RB_SAMPT)
 // One combined handle: recorded as the hardware lays the command out, the handle 16 bytes in, where Luigi's Mansion 3 patches it after recording (nvn_obj.h p_bind_tex1)
 NVN(nvnCommandBufferBindTexture, void, NVNcommandBuffer *c, NVNshaderStage st, int i, NVNtextureHandle h) { st = st_host(st);

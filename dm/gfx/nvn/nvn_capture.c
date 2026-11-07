@@ -35,6 +35,23 @@ CAP_OFF(p_multi_draw, stride, 24); CAP_OFF(p_multi_draw, max, 32); CAP_OFF(p_mul
 _Static_assert(OP_MULTI_DRAW == 55, "keep existing capture op numbers stable");
 _Static_assert(OP_COUNT_ == 56, "nvn_capture.c: a record op was added or removed: give it a case in cap_rec_fields");
 
+// The capture-format unit test links only this translation unit, without the
+// live NVN recorder/registry. In the host the strong implementation in
+// hle_nvn.c resolves four-byte tickets to guest-owned control sidecars.
+__attribute__((weak)) const uint8_t *nvn_ctl_draw_resolve(const void *handle, uint32_t id) { (void)handle; (void)id; return NULL; }
+
+int cap_ctl_draw_expand(const void *src, uint8_t out[16]) {
+    const uint8_t *p = nvn_ctl_draw_target(src);
+    if (!p) return 0;
+    op_hdr draw, end, jump = {OP_JUMP, 16};
+    memcpy(&draw, p, sizeof draw);
+    memcpy(&end, p + 40, sizeof end);
+    if (draw.op != OP_DRAW_IDX || draw.size != 40 || end.op != OP_END || end.size != 8) return 0;
+    memcpy(out, &jump, sizeof jump);
+    memcpy(out + 8, &p, sizeof p);
+    return 1;
+}
+
 #define MULTI_DRAW_LAYOUT "op 55 p_multi_draw 48 ind 0 cnt 8 ibuf 16 stride 24 max 32 prim 36 itype 40\n"
 // Copy strides travel after a copy's texture snapshot (p_copy_strides) instead of as OP_COPY_STRIDE records; the replay still takes OP_COPY_STRIDE from older captures
 #define COPY_STRIDES_LAYOUT "p_copy_strides 16 at 192\n"

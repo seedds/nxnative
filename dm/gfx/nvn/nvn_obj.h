@@ -3,6 +3,8 @@
 // State objects (Blend / Color / ... 4–0x18 bytes) are small structs the game copies by value; their layout is packed in place with bit-fields.
 #pragma once
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "nvn.h"
 #include "nvn_tex.h"
@@ -79,8 +81,11 @@ typedef struct {
     NVNdevice *dev;
     uint64_t used;                       // Bytes written since the game last added command memory, across recordings and host segments, including segment-switch JUMPs (returned by GetCommandMemoryUsed)
     int32_t tex_base, samp_base;         // Host-table bases of the texture / sampler pool this command buffer last bound (hle_nvn.c dpool_add; 0 = the first pool of its kind)
-    size_t ctl_size;                     // Bytes in the last control memory block supplied by the game (the host records no control commands)
+    size_t ctl_size;                     // Bytes in the last control-memory grant supplied by the game
     int64_t copy_row, copy_image;        // SetCopyRowStride / SetCopyImageStride: state of the command buffer, written into each buffer <-> texture copy (p_copy_strides), not recorded
+    uint8_t *ctl_mem;                    // Guest-provided control storage for opt-in self-contained indexed draw+END sidecars
+    size_t ctl_used;                     // Actual bytes written in the current guest control memory grant
+    uint32_t used_queried;               // A guest command offset was observed during recording: never rewrite its existing bytes
 } cmd_t;                                                                                   FITS(cmd_t, NVNcommandBuffer);
 
 // ---------- State objects (defaults follow the NVN / GL defaults) ----------
@@ -101,6 +106,36 @@ typedef struct { uint32_t stride, divisor; } vs_st;                             
 
 // ---------- Command records: {op, size (including header, aligned to 8)} + payload ----------
 typedef struct { uint32_t op, size; } op_hdr;
+// Four physical guest command bytes (NVN2's advertised command alignment is
+// four) encode a generation for an exact command-handle address. The *actual* DRAW_IDX + END
+// payload remains 48 physical bytes in guest-provided control memory and is
+// counted by GetControlMemoryUsed; no guest command bytes are hidden. IDs
+// are never reused while the process lives. Live handles are registered by
+// their actual guest command address and retired when that address is re-granted.
+// Replay uses a stable host snapshot; regranting control memory does not make
+// a previously returned command handle unreadable.
+// The high bit is disjoint from all valid OP_ values. The command handle
+// remains the guest command-memory pointer, and the four bytes may be copied.
+#define NVN_CTL_DRAW_TAG4 UINT32_C(0x80000000)
+const uint8_t *nvn_ctl_draw_resolve(const void *handle, uint32_t id);
+static inline int nvn_ctl_draw_is_ticket(const void *p) {
+    uint32_t v; memcpy(&v, p, sizeof v); return !!(v & NVN_CTL_DRAW_TAG4);
+}
+static inline const uint8_t *nvn_ctl_draw_target(const void *p) {
+    uint32_t v; memcpy(&v, p, sizeof v);
+    return (v & NVN_CTL_DRAW_TAG4) ? nvn_ctl_draw_resolve(p, v & ~NVN_CTL_DRAW_TAG4) : NULL;
+}
+static inline const uint8_t *nvn_ctl_draw_follow(const uint8_t *p) {
+    if (!nvn_ctl_draw_is_ticket(p)) return p;
+    const uint8_t *t = nvn_ctl_draw_target(p);
+    if (!t) {
+        // A tagged token occupies only four physical bytes; reading an 8-byte
+        // op header from it can cross the end of its guest memory grant.
+        fprintf(stderr, "[RED] NVN stale 4-byte command handle %p (overwritten or re-granted)\n", (const void *)p);
+        abort();
+    }
+    return t;
+}
 enum {
     OP_END, OP_JUMP, OP_BEGIN, OP_CALL,                                             // OP_BEGIN is no longer recorded (hle_nvn.c BeginRecording)
     OP_SIGNAL_EVENT, OP_REPORT_COUNTER, OP_COPY_B2B, OP_UPDATE_UB,                 // CPU-visible side effects

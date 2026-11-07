@@ -1,7 +1,7 @@
 // DM_NVN_CAPTURE end to end on the GPU, without game files: two frames of synthetic records through the capture hooks, the second one captured; `make check_t_capture_live`
 // then replays the file with nvn_replay, which must give the same digest. The captured frame depends on everything a capture has to carry: a render target's content
 // from the frame before (texture readback), pool bytes the CPU wrote before the first submit and between the two submits (regions, block changes), a copy from a pool
-// into the target and a buffer fill (relocated addresses), a call into a second segment, a texture object outside the records, a combined program the replay
+// into the target and a buffer fill (relocated addresses), a call into a second segment, a four-byte indexed-draw ticket with a real 48-byte sidecar, a texture object outside the records, a combined program the replay
 // layer makes for itself (its serial must not be a captured one) and a registered texture whose memory pool was finalized.
 //   ./t_capture_live <capture path>
 #import <Foundation/Foundation.h>
@@ -63,6 +63,19 @@ int main(int argc, char **argv) { @autoreleasepool {
     mtl_pool_del(mem2); mtl_alias_drop_pool(&p2); p2 = (pool_t){0, 0x24924924, (uint8_t *)0x2492492492497f80ull, 0x2492492492497f80ull, NULL, 2};
     // frame 2: two submits; the CPU writes the pool before each, the second copy reads what was written between them
     for (int i = 0; i < 16 * 16; i++) { pool[0x10000 + 4 * i] = 200; pool[0x10000 + 4 * i + 1] = (uint8_t)(3 * i); pool[0x10000 + 4 * i + 2] = 90; pool[0x10000 + 4 * i + 3] = 255; }
+    // Exercise the actual four-byte ticket through nested OP_CALL, capture's
+    // canonical JUMP relocation, preindex, recursive Metal replay and the
+    // standalone replayer. Zero indices mean no shader is needed here.
+    uint8_t token[4], sidecar[48] = {0};
+    const op_hdr draw_header = {OP_DRAW_IDX, 40}, end_header = {OP_END, 8};
+    const p_draw_idx draw_data = {.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,
+        .itype=NVN_INDEX_TYPE_UNSIGNED_SHORT, .instances=1,
+        .ibuf=(uint64_t)(uintptr_t)(pool + 0x1000)};
+    memcpy(sidecar, &draw_header, sizeof draw_header);
+    memcpy(sidecar + 8, &draw_data, 32);
+    memcpy(sidecar + 40, &end_header, sizeof end_header);
+    uint32_t ticket = NVN_CTL_DRAW_TAG4 | ctl_ticket_add(token, sidecar);
+    memcpy(token, &ticket, sizeof ticket);
     chain a = {{0}, 0};
     // two programs bound to the vertex and fragment stages apart: the replay layer makes a combined program and gives it a serial of its own (bind_stages). The target
     // above keeps serial 1 in the capture, so a replay counting from 1 gave that serial to the combined program and the target resolved to it (Pokemon Scarlet)
@@ -72,6 +85,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     { p_set_rt *r = emit(&a, OP_SET_RT, sizeof *r); r->n = 1; r->color[0] = &rt; }
     copy_block(&a, &rt, (uint64_t)(uintptr_t)pool + 0x10000, 32, 8);
     { uint64_t *c = emit(&a, OP_CALL, 8); *c = (uint64_t)(uintptr_t)sub.p; }
+    { uint64_t *c = emit(&a, OP_CALL, 8); *c = (uint64_t)(uintptr_t)token; }
     emit(&a, OP_END, 0);
     submit(a.p);
     for (int i = 0; i < 16 * 16; i++) { pool[0x20000 + 4 * i] = (uint8_t)(i * 5); pool[0x20000 + 4 * i + 1] = 40; pool[0x20000 + 4 * i + 2] = (uint8_t)(255 - i); pool[0x20000 + 4 * i + 3] = 255; }

@@ -376,6 +376,20 @@ int main(void) { @autoreleasepool {
     send_pair(0.3, 0.4); send_pair(0.3, 0.4); drain();
     assert([split3.haptics.requestedLocalities.lastObject isEqual:GCHapticsLocalityHandles]);   // the handles' own group when the controller lists it
     send_pair(0, 0); drain();
+    // DualSense voice coils do not override each other: plain players run on separate LeftHandle and RightHandle channels
+    TestController *dsense = [TestController new]; dsense.haptics = [TestHaptics new];
+    dsense.productCategory = GCProductCategoryDualSense;
+    dsense.haptics.supportedLocalities = [NSSet setWithObjects:GCHapticsLocalityDefault, GCHapticsLocalityLeftHandle, GCHapticsLocalityRightHandle, nil];
+    dm_haptics_apple_controller(0, (id)dsense); drain();
+    assert(channels[0].count == 2 && channels[0][0].simple && channels[0][1].simple);
+    send_pair(0.3, 0.4); drain();
+    assert(dsense.haptics.requestedLocalities.count == 2);
+    assert([dsense.haptics.requestedLocalities[0] isEqual:GCHapticsLocalityLeftHandle]);
+    assert([dsense.haptics.requestedLocalities[1] isEqual:GCHapticsLocalityRightHandle]);
+    assert(dsense.haptics.engines[0].plainPlayers == 1 && dsense.haptics.engines[1].plainPlayers == 1);
+    assert(fabsf(dsense.haptics.engines[0].testPlayer.levels.lastObject.floatValue - 0.3f) < 1e-6f);
+    assert(fabsf(dsense.haptics.engines[1].testPlayer.levels.lastObject.floatValue - 0.4f) < 1e-6f);
+    send_pair(0, 0); drain();
     dm_haptics_apple_controller(0, nil); drain();   // disconnect discards the controller factory and its old callbacks
     assert(!(dm_haptics_available() & 1));
     TestController *unsupported = [TestController new]; unsupported.haptics = [TestHaptics new];
@@ -442,5 +456,5 @@ int main(void) { @autoreleasepool {
     assert(back.closes == 1 && second.closes == 1 && objects == 0);   // every iterator and service released
     assert(ds4_crc((const uint8_t *)"123456789", 9) == 0xCBF43926u);   // the report's CRC32 (IEEE, reflected)
     dm_haptics_apple_shutdown();
-    puts("Apple haptics: channels, pulses, idle release, startup handlers, engine replacement, backoff, stale callbacks, plain players, level cutoff and the DualShock 4 route passed");
+    puts("Apple haptics: channels, pulses, idle release, startup handlers, engine replacement, backoff, stale callbacks, plain players, DualSense stereo, level cutoff and the DualShock 4 route passed");
 } }

@@ -19,9 +19,15 @@ int nvn_deswizzle_from(const nvn_texdesc *d, unsigned level, unsigned layer, con
 // row_bytes: the row as laid out, which a sparse texture's tiled levels pad to whole tiles (nvn_tex_level_gobs × 64)
 // The GOB's inner order: 0 the Tegra X1's (Switch), 1 the Switch 2's, whose 16-byte pieces go x5 y2 x4 y1 y0 from the GOB's start where the X1's go x5 y2 y1 x4 y0 (bits 5 and 6 of the
 // offset exchanged). Measured on Donkey Kong Bananza's BNTX textures (BC4, BC7; level 0 decoded both ways): with the X1's order every 16-byte piece kept its GOB but not its place in it,
-// which left the rocks' normal maps a weave of misplaced 4x4 blocks along every edge. The NVN layer sets it for games built for the Switch 2 (hle_nvn.c)
+// which left the rocks' normal maps a weave of misplaced 4x4 blocks along every edge. The NVN layer sets it for games built for the Switch 2 (hle_nvn.c).
+// It is the order only of textures made with flag 0x4 (NVN's IMAGE bit; nvn_gob_order): Bananza's and Fire Emblem Fortune's Weave's textures from their files all have it. Textures without it
+// keep the X1's order on the Switch 2 too: Xenoblade Chronicles 2's Switch 2 program makes its file textures with flags 0, and its 16x16x16 grading LUTs and its R8 font atlas read
+// right only in the X1's order (in the Switch 2's, every picture came out green and red and the text in shifted row pairs). nvn_bl_offset takes the order as given here; the
+// texture paths take nvn_gob_order of their texture
 extern int nvn_gob_switch2;
+static inline int nvn_gob_order(const nvn_texdesc *d) { return nvn_gob_switch2 && (d->flags & 0x4); }
 uint64_t nvn_bl_offset(uint32_t x, uint32_t y, uint32_t z, uint32_t row_bytes, uint32_t rows, unsigned tileH, unsigned tileD);
+uint64_t nvn_bl_offset_o(uint32_t x, uint32_t y, uint32_t z, uint32_t row_bytes, uint32_t rows, unsigned tileH, unsigned tileD, int switch2);
 
 int nvn_deswizzle_geom(const nvn_texdesc *d, unsigned level, unsigned layer,
                        uint32_t *row_bytes, uint32_t *rows, uint32_t *slices,

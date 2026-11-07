@@ -1790,6 +1790,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Pokémon Legends: Z-A](../../dm/games/0100F43008C44000/README.md#rendering) ([PR #178](https://github.com/seedds/nxnative/pull/178)); [SHIN MEGAMI TENSEI V: Vengeance](../../dm/games/010069C01AB82000/README.md), whose two buffer-image counter shaders dispatched at boot consume their returned values.
 - **Check:** `dm/tools/tests/test_image_atomic_bounds.py`. Portable tests check the MSL version choice and the rejection of the pointer form. With `DMSH_TEST_XLATE` set to a rebuilt translator (and `spirv-val` on `PATH`; spirv-cross is the in-repo build) the synthetic shaders are translated, the guard's dataflow is checked in the SPIR-V (the size query and comparison dominate the atomic, the phi carries zero on the invalid edge), and the MSL is produced; `DMSH_TEST_METAL=1` compiles and links it (`DMSH_TEST_METAL_SDKS=macosx,iphoneos` for both SDKs) and `DMSH_TEST_GPU=1` runs the returning fixtures (above). Changing this path changes the chain version: rebuild the translator and update the lock before building shaders.
 
+### 64-bit image atomic max and min
+
+- **Symptom:** `SURED form …` or a refused 64-bit `SURED` in the build; those shaders are left out. Here the visibility buffer's writers, so nothing drew into it.
+- **Cause:** `SURED.D.2D.MAX.U64` on an RG32UI image (depth << 32 | id, the nearest wins) has no 32-bit equivalent, and main refused every 64-bit form ([Ampere forms with a handle in a register, and SURED's other operations](#ampere-forms-with-a-handle-in-a-register-and-sureds-other-operations)).
+- **Fix:** a 64-bit unsigned max or min whose result is discarded, on a 2D, 2D array or 3D image, becomes Metal's 64-bit texture atomic (MSL 3.1 `texture2d<ulong>::atomic_max` / `atomic_min`, rewritten by `dmsh_atomic.py` with the bounds check of [Bounds of image atomics](#bounds-of-image-atomics)); the host binds such an image as a 64-bit view of an RG32Uint texture with the shader-atomic usage (`nvn_refl` atom 2), on Apple GPU family 9. R is the low word, G the high one. Metal has no 64-bit add, bitwise or returning texture atomic, so those forms stay refused.
+- **Found on:** [PRAGMATA](../../dm/games/0400C76024710000/README.md): 336 shaders.
+- **Check:** `test_dmsh_ampere_mem.py` (`Sured64`); `t_image_atomic64` (GPU, `DMSH_TEST_ATOMIC64`) checks that the whole 64-bit texel is compared on the GPU.
+
 ## Shaders compiled at run time
 
 ### A GLSL language preamble is not a complete shader

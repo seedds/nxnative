@@ -655,8 +655,9 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 throw AFail(context, $"SURED operation {op}");
             }
 
-            // 64-bit reductions (Nanite's visibility buffer, SURED.MAX.U64) are refused, not faked as 32-bit ones
-            if ((SuatomSize)x.Bits(73, 76) is not (SuatomSize.U32 or SuatomSize.S32))
+            // 64-bit reductions: only U64 MAX / MIN, which EmitSuatom writes as Metal's 64-bit texture atomics (it refuses the rest); other sizes are refused, not faked
+            // as 32-bit ones
+            if ((SuatomSize)x.Bits(73, 76) is not (SuatomSize.U32 or SuatomSize.S32 or SuatomSize.U64))
             {
                 throw AFail(context, $"SURED form {x.Bits(64, 96):x8} (size {(SuatomSize)x.Bits(73, 76)})");
             }
@@ -839,7 +840,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             AmpereOp x = new(context.CurrOp);
             bool urHandle = (x.Opcode & 0x400) != 0;
             bool regHandle = x.Opcode is 0x361 or 0x364 or 0x367 or 0x36a or 0x36d;
-            int opcode = regHandle ? x.Opcode + 0x7ff : x.Opcode & ~0x400;   // 0x361 → TEX 0xb60, 0x364 → TLD4 0xb63, 0x367 → TLD 0xb66, 0x36a → TMML 0xb69, 0x36d → TXD 0xb6c (NAK sm70_encode.rs OpTld / OpTxd, .B bit 59)
+            int opcode = regHandle ? x.Opcode + 0x7ff : x.Opcode & ~0x400;   // 0x361 → TEX 0xb60, 0x364 → TLD4 0xb63, 0x367 → TLD 0xb66, 0x36d → TXD 0xb6c (NAK sm70_encode.rs OpTld / OpTxd, .B bit 59)
             // 0xf69 and 0x36a are TMML the same way (0xb69's other fields; Kirby Air Riders: 4,776 pixel shaders)
 
             if (urHandle && (!x.Bit(91) || x.Bits(40, 46) >= RegisterConsts.UniformZeroIndex))

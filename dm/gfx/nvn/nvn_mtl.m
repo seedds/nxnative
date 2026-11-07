@@ -28,6 +28,7 @@
 #include "nvn_dirty.h"
 #include "nvn_depth_clear.h"
 #include "nvn_refl.h"
+#include "nvn_maxmetal.h"   // the shaders the split missed, translated at run time
 #include "nvn_cover.h"
 #include "nvn_border.h"
 #include "nvn_primitive.h"
@@ -84,6 +85,7 @@ static void *realloc_or_die(void *p, size_t bytes, const char *what) {   // for 
 
 static void warm_start(void);
 static void shmap_load(void);
+static NSString *pso_user_path(void);
 static int prepare_on(void);
 static int g_warm_started;
 static void warm_claim(void);
@@ -5056,6 +5058,10 @@ static void shmap_read(void) {
     const char *m = getenv("DM_MSL_DIR");
     // Library directory = <DM_MSL_DIR or default cache>/b-<translation chain version>: the version comes from dm/gfx/nvn/dmsh_chain.h (tools/dmsh_chain.py), one for every game; a host built from an old source tree only accepts libraries of the old version
     g_msl_dir = [NSString stringWithFormat:@"%@/b-%s", m ? @(m) : [NSString stringWithFormat:@"%s%s/build/cache/metal_shader_cache", getenv("DM_ROOT") ?: getenv("HOME"), getenv("DM_ROOT") ? "" : "/dm-work"], DMSH_CHAIN];
+    {   // the run-time translations of shaders the map lacks (nvn_maxmetal.h): DM_SHADER_RT, else beside pso_user.tsv (on iOS in Documents), one directory per chain; none without a save directory
+        const char *rt = getenv("DM_SHADER_RT"); NSString *user = pso_user_path();
+        nvn_mm_init(rt && *rt ? [NSString stringWithFormat:@"%s/b-%s", rt, DMSH_CHAIN] : user ? [user.stringByDeletingLastPathComponent stringByAppendingFormat:@"/shader_rt/b-%s", DMSH_CHAIN] : nil);
+    }
     if (![NSFileManager.defaultManager fileExistsAtPath:g_msl_dir]) {
         NSString *image = [g_msl_dir stringByAppendingString:@".img"];
         if ([NSFileManager.defaultManager fileExistsAtPath:image]) MLOG("shader libraries: one file, %s", image.UTF8String);
@@ -5096,7 +5102,7 @@ static void shmap_read(void) {
 }
 
 @interface NvShader : NSObject { @public id<MTLFunction> fn, tf_fn, discard_fn, fn_u, fn_m, fn_d, geo_fn; uint8_t mask_m;   // fn_u: the integer-output entry point (dmsh_build.py fs_uint), for pipelines whose colour attachments are all unsigned integer (pso_desc); fn_m: the mixed one, its outputs in mask_m unsigned integer; fn_d: the dual-source one (dmsh_build.py fs_dual)
-    uint16_t tf_stride[4]; uint32_t cb_ext[16], sb_ro; nvn_refl rf; id<MTLArgumentEncoder> ae; NSUInteger arg_len; int stage, range_ro, layer_out; const char *builtin; uint64_t logged; char key[24]; id<MTLBuffer> c1buf; uint64_t c1_gpu; size_t c1off;
+    uint16_t tf_stride[4]; uint32_t cb_ext[16], sb_ro; nvn_refl rf; uint8_t rt; id<MTLArgumentEncoder> ae; NSUInteger arg_len; int stage, range_ro, layer_out; const char *builtin; uint64_t logged; char key[24]; id<MTLBuffer> c1buf; uint64_t c1_gpu; size_t c1off;
     uint32_t geo_vertices, geo_invocations, geo_output, geo_stride, geo_index_stride;
     uint8_t mesh_kind, mesh_notask; uint16_t mesh_threads, mesh_payload;   // an NVN2 task (1) or mesh (2) shader, a mesh shader with no task, its workgroup's threads, its payload's bytes (dmsh_meshstage.py)
     id<MTLComputePipelineState> geo_pso; int geo_pso_failed, cps_failed;   // cps_failed: Metal refused this compute shader's pipeline (dispatch): its dispatches are skipped without asking again
@@ -5158,7 +5164,7 @@ static void c1_store(NvShader *o) {
     // shader gets one, and one buffer each put about 10,000 allocations into the queue's residency set on Hyrule Warriors: Age of Imprisonment's way to its first field; every
     // commit then spent its time in the kernel (the Metal 4 submission queue busy about 75% of the time, almost all system time), command allocators stayed in flight while the
     // GPU sat idle, and the game ran at about 10 fps. Slices of 4 MiB banks are 64 to a buffer
-    int dedicated = o->geo_vertices || !g_c1_full_valid || [g_c1_full containsObject:guardKey];   // Geometry topology variants have independent control flow; only the base shader is in the guard table.
+    int dedicated = o->geo_vertices || o->rt || !g_c1_full_valid || [g_c1_full containsObject:guardKey];   // Geometry topology variants have independent control flow; only the base shader is in the guard table. A run-time translation (rt) is in none
     size_t need = (len + 255u) & ~((size_t)255u);
     id<MTLBuffer> b = c1_bank(dedicated ? C1_DECL_SIZE : need + 256u + C1_DECL_SIZE);
     if (!b) { os_unfair_lock_unlock(&g_c1_lock); MDIE("c1 buffer block allocation failed"); }
@@ -5326,6 +5332,7 @@ static NvShader *shader_load(NSString *pc, int stage, int layer) {
     NSError *e = nil;
     NSData *jd = msl_data([NSString stringWithFormat:@"%@/%@.json", g_msl_dir, pc]);
     NSDictionary *j = jd ? [NSJSONSerialization JSONObjectWithData:jd options:0 error:nil] : nil;
+    int rt = !j && (j = nvn_mm_json(pc)) != nil;   // a shader the split missed, translated at run time (nvn_maxmetal.h): its library is compiled from the MSL
     if (j && stage == 2 && [j[@"gs_slice"] isKindOfClass:[NSDictionary class]] && [j[@"chain"] isEqual:@DMSH_CHAIN]) {   // a slice-writing geometry shader has no library: a stub prog_fold_gs replaces
         NvShader *o = [NvShader new]; o->stage = 2; o->lay_loc = -1; strlcpy(o->key, pc.UTF8String, sizeof o->key);
         o->gs_loc = [j[@"gs_slice"][@"loc"] intValue]; o->gs_comp = [[j[@"gs_slice"][@"comp"] description] UTF8String][0];
@@ -5333,11 +5340,11 @@ static NvShader *shader_load(NSString *pc, int stage, int layer) {
     }
     if (stage == 2 && !j) return nil;   // missing geometry translation: the caller's red line says so
     NSString *lp = [NSString stringWithFormat:@"%@/%@.metallib", g_msl_dir, pc];
-    id<MTLLibrary> lib = lib_from_file(lp, &e);
+    id<MTLLibrary> lib = rt ? nvn_mm_library(g_dev, pc, &t_lib_layer, &e) : lib_from_file(lp, &e);
     if (!lib || !j) { MLOG("[RED] failed to load shader %s: %s", pc.UTF8String, e ? e.localizedDescription.UTF8String : "no reflection json"); return nil; }
     if (![j[@"chain"] isEqual:@DMSH_CHAIN]) { MLOG("[RED] shader %s has translation chain version %s, but this host expects %s", pc.UTF8String, [[j[@"chain"] description] UTF8String], DMSH_CHAIN); return nil; }
     if (layer && !j[@"entry_layer"]) { MLOG("[RED] vertex shader %s has no layer entry points", pc.UTF8String); return nil; }
-    NvShader *o = [NvShader new]; o->gs_loc = o->lay_loc = -1;
+    NvShader *o = [NvShader new]; o->gs_loc = o->lay_loc = -1; o->rt = (uint8_t)rt;
     if (stage == 0 && [j[@"layer_from"] isKindOfClass:[NSDictionary class]]) { o->lay_loc = [j[@"layer_from"][@"loc"] intValue]; o->lay_comp = [[j[@"layer_from"][@"comp"] description] UTF8String][0]; }
     char err[160];
     if (nvn_refl_from_json(j, &o->rf, err, sizeof err)) { MLOG("[RED] shader %s reflection conversion failed: %s", pc.UTF8String, err); return nil; }
@@ -5518,6 +5525,26 @@ static NvShader *builtin_get(const char *ctl) {
     }
     return nil;
 }
+// A stage whose key the shader map lacks: the split missed it (dm/gfx/tools/shader_split.py; DM_NVN_SHDUMP=directory saves its control section and code area to find where it lives).
+// maxmetal translates it on the spot (nvn_maxmetal.h), from the code area and the control fields SetShaders kept; nil when it cannot (the stage is dropped, as it was before)
+static NvShader *prog_rt(const prog_t *p, unsigned i, NSString *k) {
+    const prog_ctl_t *c = prog_ctl(p, i); void *mb; uint64_t mo; char why[256] = "";
+    int st = nvn_mm_stage(k);   // translated already, this run or an earlier one
+    if (st < 0 && !nvn_mm_on()) snprintf(why, sizeof why, "run-time translation is off (DM_NVN_MAXMETAL=0)");
+    else if (st < 0 && !c) snprintf(why, sizeof why, "SetShaders saw no control section");
+    else if (st < 0 && c->ampere) snprintf(why, sizeof why, "a Switch 2 (Ampere) shader: maxmetal translates Maxwell code only");
+    else if (st < 0 && !(p->sd[i].data && c->ncode && mtl_addr(p->sd[i].data, c->ncode, &mb, &mo))) snprintf(why, sizeof why, "its code area is not in a memory pool");
+    else if (st < 0) {
+        uint64_t t0 = bp_now();
+        st = nvn_mm_translate(k, (const uint8_t *)(uintptr_t)p->sd[i].data, c->ncode, c->c1_off, c->local, c->early_z, why, sizeof why);
+        if (st >= 0) MLOG("[RED] shader %s is not in the shader map: maxmetal translated it at run time (%s, %.1f ms)%s%s", k.UTF8String, st == 0 ? "vertex" : st == 1 ? "pixel" : "compute",
+                          (bp_now() - t0) / 1e6, why[0] ? "; " : "", why);
+    }
+    else MLOG("[RED] shader %s is not in the shader map: taking maxmetal's translation from an earlier run", k.UTF8String);
+    NvShader *sh = st >= 0 ? shader_get([k stringByAppendingString:@"_b"], st) : nil;
+    if (!sh) MLOG("[RED] shader %s is not in the shader map, and maxmetal could not translate it: %s (DM_NVN_SHDUMP=directory saves its control section and code area)", k.UTF8String, why[0] ? why : "its library did not load");
+    return sh;
+}
 static void up_mfx_read_color(NvShader *cs, const NVNshaderData *sd);
 static __unsafe_unretained NvProg *prog_get(const prog_t *cp) {   // Called only on the submit thread
     prog_t *p = (prog_t *)cp;
@@ -5536,13 +5563,14 @@ static __unsafe_unretained NvProg *prog_get(const prog_t *cp) {   // Called only
         if (!stage) {   // Not in the package: look up the compute kernels embedded in the main body (nvn_builtin.h)
             NvShader *b = builtin_get(k.UTF8String);
             if (b) { o->sh[5] = b; continue; }
-            MLOG("[RED] shader %s is not in the shader map (DM_NVN_SHDUMP=directory saves its control section and code area)", k.UTF8String);
-            // DM_NVN_SHDUMP=directory: shaders missing from the map are saved as <key>.ctl (the control section's key bytes) and <key>.code (code area, nvn_ctl_lens), to trace their source / add them to the map offline
+            // DM_NVN_SHDUMP=directory: shaders missing from the map (translated at run time or not) are saved as <key>.ctl (the control section's key bytes) and <key>.code (code area, nvn_ctl_lens), to trace their source / add them to the map offline
             static const char *shd; static int shd_init; if (!shd_init) { shd = getenv("DM_NVN_SHDUMP"); shd_init = 1; if (shd && *shd) mkdir(shd, 0777); }   // create the dump folder: a missing one made every fopen fail silently
             if (shd) { char path[1024]; FILE *f; uint32_t ncode, nctl; nvn_ctl_lens(p->sd[i].control, &nctl, &ncode);   // with SHDUMP set the control section is the host's copy
                 snprintf(path, sizeof path, "%s/%s.ctl", shd, k.UTF8String); if ((f = fopen(path, "wb"))) { fwrite(p->sd[i].control, 1, nctl, f); fclose(f); }
                 snprintf(path, sizeof path, "%s/%s.code", shd, k.UTF8String);
                 if (p->sd[i].data && ncode && ncode < (1u << 24) && (f = fopen(path, "wb"))) { fwrite((const void *)(uintptr_t)p->sd[i].data, 1, ncode, f); fclose(f); } }
+            NvShader *rs = prog_rt(p, i, k);
+            if (rs) o->sh[rs->stage] = rs;
             continue;
         }
         int st = stage_of(stage);
@@ -8295,7 +8323,7 @@ static _Atomic long g_warm_done;   // lines done (the prepare screen's count)
 // A line with a key the shader map does not have is dropped quietly (the keys are counted in the "prewarm done" line); the game never draws with it
 static int warm_stale(NSString *key, NSMutableSet<NSString *> *stale) {
     NSString *mk = [key hasSuffix:@"_b"] ? [key substringToIndex:key.length - 2] : key;   // library names are <map key>_b
-    if (g_shmap[mk]) return 0;
+    if (g_shmap[mk] || nvn_mm_stage(mk) >= 0) return 0;   // or translated at run time, this run or an earlier one (nvn_maxmetal.h)
     if (![stale containsObject:key]) { [stale addObject:key]; g_warm_skip_stale++; }
     return 1;
 }
@@ -14893,7 +14921,7 @@ static uint64_t snap_take(const tex_t *t) {
 }
 static uint64_t present_enqueue(const tex_t *t, double period, const int crop[4], uint64_t ev_val) {
     atomic_store(&dm_present_ns, now_ns());
-    if (g_classic || atomic_load(&g_present_discard)) return 0;   // Ticket number 0 = no pending present; the swapchain texture acquire does not wait (g_classic: no Metal 4 queue to present on)
+    if (g_classic || atomic_load(&g_present_discard) || !t) return 0;   // Ticket number 0 = no pending present; the swapchain texture acquire does not wait (g_classic: no Metal 4 queue to present on; no texture: nothing to queue)
     if (t) { xv_check(t->serial, 0, 0, "present"); if (g_xv_npresent < 128) g_xv_present[g_xv_npresent++] = t->serial; }
     // A texture whose content comes from its storage is uploaded when it is first resolved (and again when its pages change), in an upload batch only the submit thread may open.
     // Bastion fills both window textures with WriteTexels at boot (main+0x9374) and presents one before drawing into it: resolved on the present thread, the upload aborted the host.

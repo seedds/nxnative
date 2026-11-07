@@ -9,7 +9,8 @@ The chain, each link unique or nothing is cut:
 - the one data word holding the getter (the module's relative relocations applied), a slot of the vtable: the slots run back to two words of 0 (offset to top, no RTTI). The getter's
   slot number names the slot layout: 19 for Unreal Engine 4.26 and 4.27, 22 for UE 5, 26 for UE 5.6 (hle_uemalloc.c); any other stops the chain with a [RED] line;
 - the constructor: the one function other than the vtable's two destructors that stores the vtable's address (adrp + add, then str to [xN]);
-- its one call site, a bl (no b to it): x0 there is the object, already made (GCreateMalloc mallocs it, or a bss object in nninitStartup).
+- its one call site, a bl (no b to it): x0 there is the object, already made (GCreateMalloc mallocs it, or a bss object in nninitStartup); or several, when each makes the same
+  singleton (one_singleton), and every one is cut.
 Checked on the five Unreal 4 / 5 mains on the game drive (OCTOPATH TRAVELER 0 and II, DRAGON QUEST VII Reimagined, Pikmin 4, FINAL FANTASY RESONANCE), which gave the call sites of their
 registered cuts. Unreal Engine 3 (Batman: Arkham Knight) inlines the constructor; its cut stays its build's (its patches.py).
 Usage on its own: ue_malloc.py <module>... (what the chain finds in each)"""
@@ -91,8 +92,25 @@ def find(img, text_end, ro_off, data_off):
         if start not in dtors: ctors.add(start)
     if len(ctors) != 1: return None, None, None, f'[RED] FMallocBinned3 vtable at {vt:#x}: {len(ctors)} constructors (' + ', '.join(f'{x:#x}' for x in sorted(ctors)) + ')'
     c = ctors.pop()
-    if len(bl.get(c, [])) != 1 or b.get(c): return None, None, None, f'[RED] FMallocBinned3 constructor at {c:#x}: {len(bl.get(c, []))} calls and {len(b.get(c, []))} jumps, not one call'
-    return bl[c][0], vt, slot, f'FMallocBinned3 ({LAYOUTS[slot]}): its constructor at {c:#x}, called at {bl[c][0]:#x}; its vtable {vt:#x}, the name getter slot {slot}'
+    calls = bl.get(c, [])
+    if not calls or b.get(c) or (len(calls) > 1 and not one_singleton(img, calls, word)):
+        return None, None, None, f'[RED] FMallocBinned3 constructor at {c:#x}: {len(calls)} calls and {len(b.get(c, []))} jumps, not one call or the calls of one singleton'
+    return tuple(calls), vt, slot, f'FMallocBinned3 ({LAYOUTS[slot]}): its constructor at {c:#x}, called at {", ".join(f"{a:#x}" for a in calls)}; its vtable {vt:#x}, the name getter slot {slot}'
+
+def one_singleton(img, calls, word):
+    """Whether several calls of the constructor all make the one allocator object, so that cutting each of them gives the object to the host whichever runs first: each is
+    `mov xR, x0` (the object malloc returned), `bl ctor`, then `str xR, [xB, #off]` into the same global, xB from an adrp of the same page in the 64 bytes before the call.
+    DRAGON BALL Sparking! ZERO (UE 4): GCreateMalloc's `if (!G) { G = malloc(0x1c38); new (G) FMallocBinned3; }`, inlined in nninitStartup and in a getter of its own"""
+    homes = set()
+    for a in calls:
+        before, after = word(a - 4), word(a + 4)
+        r = after & 31
+        if before != 0xAA0003E0 | r or (after & 0xFFC00000) != 0xF9000000: return False   # mov xR, x0 / str xR, [xB, #imm]
+        base, off = (after >> 5) & 31, ((after >> 10) & 0xFFF) * 8
+        pages = {adrp_page(word(p), p) for p in range(max(0, a - 64), a, 4) if is_adrp(word(p), base)}
+        if len(pages) != 1: return False
+        homes.add(pages.pop() + off)
+    return len(homes) == 1
 
 if __name__ == '__main__':
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))

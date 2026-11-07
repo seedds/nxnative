@@ -324,6 +324,7 @@ def build_sources(exefs, romfs, modules):
     if any(re.match(r'vk[A-Z]', s) for s in imports):   # only a Vulkan game's RomFS is read
         spirv = sum(1 for _, _, head in romfs_files(romfs) if head.startswith(bytes.fromhex('03022307')))
     sys.path.insert(0, str(HERE.parent / 'gfx/tools')); import uepak
+    uepak.ensure_key(str(romfs), str(exefs / 'main'))   # an encrypted pak index is told inline or not with main's key (DRAGON BALL Sparking! ZERO)
     trinity = 0
     for d, _, names in os.walk(romfs):
         for n in names:

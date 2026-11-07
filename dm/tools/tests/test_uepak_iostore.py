@@ -7,6 +7,7 @@ from pathlib import Path
 import struct
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 import zlib
@@ -78,11 +79,11 @@ def directory(paths):
     return b + struct.pack('<i', len(strs)) + b''.join(fstr(x) for x in strs)
 
 
-def pak11(path, names):
-    """A version 11 pak's footer and encoded index, as far as uepak.inline_shaders reads them: only the directory index's names"""
+def pak11(path, names, encrypted=False):
+    """A version 11 pak's footer and encoded index, as far as uepak.inline_shaders reads them: only the directory index's names (an encrypted one is read through uepak.Pak)"""
     d = b''.join(n.encode() + b'\0' for n in names)
     index = fstr('../../../') + struct.pack('<iQ', len(names), 0) + struct.pack('<i', 0) + struct.pack('<iQQ', 1, 0, len(d)) + bytes(20)
-    path.write_bytes(d + index + bytes(16) + b'\0' + struct.pack('<IIQQ', uepak.PAK_MAGIC, 11, len(d), len(index)) + bytes(20) + bytes(32 * 5))
+    path.write_bytes(d + index + bytes(16) + bytes([encrypted]) + struct.pack('<IIQQ', uepak.PAK_MAGIC, 11, len(d), len(index)) + bytes(20) + bytes(32 * 5))
 
 
 class IoStore(unittest.TestCase):
@@ -265,6 +266,38 @@ class IoStore(unittest.TestCase):
         container(self.romfs, 'Game.utoc', [(chunk_id(4, 5), b's')], version=8)
         self.assertFalse(uepak.inline_shaders(pak))   # one without export bundles
 
+    def test_an_encrypted_pak_index_is_read_with_mains_key(self):
+        """DRAGON BALL Sparking! ZERO: the pak's index and the containers beside it are encrypted with main's key, the pak names only the global shader cache, and 17 more paks are empty"""
+        container(self.romfs, 'Game.utoc', [(chunk_id(1, uepak.IO_EXPORT_BUNDLE), b'b')], encrypted=True, version=5)
+        pak, empty = self.romfs / 'Game.pak', self.romfs / 'Game1.pak'
+        pak11(pak, [], encrypted=True); pak11(empty, [], encrypted=True)
+        files = {str(pak): {'Engine/GlobalShaderCache-SP_GLSL_SWITCH.bin': 0}, str(empty): {}}
+        with patch.dict(os.environ, {uepak.KEY_ENV: ''}), patch.object(uepak, 'Pak', side_effect=lambda p: SimpleNamespace(files=files[p])):
+            self.assertFalse(uepak.inline_shaders(str(pak)))   # no key: not inline, as before
+            os.environ[uepak.KEY_ENV] = '00' * 32
+            self.assertTrue(uepak.inline_shaders(str(pak)))
+            self.assertIsNone(uepak.inline_shaders(str(empty)))   # no files: neither kind
+            self.assertEqual(uepak.unreal_paks(str(self.romfs), inline=True), [str(pak)])
+            self.assertEqual(uepak.unreal_paks(str(self.romfs), inline=False), [])   # so the NSP script's decode step does not run
+
+    def test_ensure_key_takes_mains_key_once_for_an_encrypted_pak(self):
+        pak11(self.romfs / 'Game.pak', [])
+        with patch.dict(os.environ, {uepak.KEY_ENV: ''}), patch.object(uepak, 'nso_image', return_value=(b'', 0, 0)) as img, \
+                patch.object(uepak, 'find_key', return_value=b'k' * 32) as fk:
+            self.assertIsNone(uepak.ensure_key(str(self.romfs), 'main')); img.assert_not_called()   # no encrypted index: main is not read
+            pak11(self.romfs / 'Game.pak', [], encrypted=True)
+            self.assertEqual(uepak.ensure_key(str(self.romfs), 'main'), b'k' * 32)
+            self.assertEqual(os.environ[uepak.KEY_ENV], (b'k' * 32).hex())   # for the split's worker processes
+            uepak.ensure_key(str(self.romfs), 'main'); fk.assert_called_once()
+
+    def test_an_encrypted_directory_index_is_read_with_the_key(self):
+        d = directory({0: 'Game/M_A.uasset'}); d += bytes(-len(d) % 16)
+        flip = lambda k, b: bytes(x ^ 0x5a for x in b)   # AES's stand-in
+        toc = container(self.romfs, 'Game.utoc', [(chunk_id(1, uepak.IO_EXPORT_BUNDLE), b'b')], encrypted=True, version=5, directory=flip(None, d))
+        with patch.dict(os.environ, {uepak.KEY_ENV: ''}), patch.object(uepak, 'aes_decrypt', side_effect=flip):
+            self.assertEqual(uepak.Toc(str(toc)).names(), {})   # no key: no names, as before
+            self.assertEqual(uepak.Toc(str(toc), b'k' * 32).names(), {0: 'Game/M_A.uasset'})
+
     def test_a_pak_with_an_archive_or_only_configs_is_not_inline(self):
         self.assertFalse(uepak.inline_shaders(self.inline_pak(('Engine/GlobalShaderCache-X.bin', 'ShaderArchive-Global-X.ushaderbytecode'))))
         self.assertFalse(uepak.inline_shaders(self.inline_pak(('Engine/Config/a.ini',))))
@@ -368,6 +401,17 @@ class OodleTables(unittest.TestCase):
     def test_a_refused_table_hides_nothing_inside_it(self):
         inner = self.table([self.real()])
         self.assertEqual(len(self.scan(bytes(16) + self.table([(b'\x8c\x0b' + inner, 1 << 20, 0)]))), 1)
+
+    @staticmethod
+    def lslg_record():
+        code = bytes(0x80)   # a compute code area with no header
+        ctl = bytearray(0x880); ctl[:4] = ss.CTL_MAGIC; ctl[4] = 1; struct.pack_into('<I', ctl, 0x704, len(code))
+        return b'LSLGSC' + bytes(10) + struct.pack('<I', len(code)) + code + struct.pack('<I', len(ctl)) + bytes(ctl) + bytes(24)
+
+    def test_a_switch_lslg_record_in_oodle_is_read(self):   # DRAGON BALL Sparking! ZERO (Unreal Engine 4, SP_GLSL_SWITCH): LSLG records, each an Oodle stream
+        rec = self.lslg_record()
+        out = self.scan(bytes(16) + self.table([(b'\x8c\x0a' + zlib.compress(rec), len(rec), 5)]))
+        self.assertEqual([st for _, st, _, _ in out], ['cs'])
 
     def test_a_stored_stream_that_is_no_record_is_no_table(self):
         self.assertEqual(self.scan(bytes(16) + self.table([(b'\x8c\x0a' + bytes(10), 12, 0)])), [])

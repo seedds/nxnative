@@ -24,6 +24,13 @@
 - **Fix:** each source leaves the same files for the survey: `survey_nup` reads the newest version from the container (its ExeFS, a RomFS manifest in `nx_extract`'s format: path, size, first 32 bytes, `Nup.head` inflating only those; the NROs whole and the control data), and `survey_dump` from the folder, whose name names the game, as a dump has no control data. `same_build` reads main from the container or the folder. A dump may have no `base/` when an update's folder holds code and a RomFS, and `exefs/` and `romfs/` directly in the folder, as `nup extract` writes them, count as `base/`: version 0, so a profile that registers another version packs them from a derived profile.
 - **Found on:** Star Fox (`0400E88025B1A000`, update v131072; no profile in the repository then), The Legend of Zelda: Ocarina of Time (`0400486024DEC000`, issue #1265) and [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md), whose dump holds `updates/131072/` alone.
 
+### A damaged file in a NUP or a dump has no hash to fail
+
+- **Symptom:** the game reloads one asset for ever: a background loader takes about a core and the process several (Ocarina of Time: 412% CPU on the Mac, `OptimizeChangeBanc` and `ParallelDecompThread` busy all session, one model and its texture opened about 22 times a second). Or, from the NSP script: `vN: K file(s) whose bytes do not start as their names promise (a .zs file that is not a zstd stream), so the game files are damaged`, then the files.
+- **Cause:** the game files themselves. An NSP's files are checked against the NCA's hashes at extraction, so a damaged one stops the build ([`--allow-damaged`](../development.md#the-packing-script-in-detail)). A NUP or a dump folder carries no such hashes: whatever bytes it holds are packed. On one NUP of Ocarina of Time three `.zs` textures began with 12,288 zero bytes, so no zstd frame: the game could not decompress them, and its loader asked for them again on every pass ([PR #1530](https://github.com/seedds/nxnative/pull/1530)). The container's own SHA-256 of each file matched, so the bytes were like this when the NUP was packed. Another NUP of the same version holds all three as zstd streams, and none of its 102,185 `.zs` files fails the check.
+- **Fix:** the NSP script reads the first bytes of every file whose name promises a format (`romfs_image.FORMAT_HEADS`: `.zs` starts with a zstd frame or a skippable frame) once per extracted image (`check_formats`, after extraction; the result is kept in `RomFS.img.formats` beside the image until the image changes: Ocarina of Time 16 s from a USB SSD) and stops naming the damaged files: pack again from a good copy of the game. `--allow-damaged` lists them and packs them as they are. The host serves a game's files as they are: substituting other files for damaged ones would hide the damage and change what the game draws.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md), a contributor's NUP of v131072.
+
 ### A provisional profile of a Switch 2 game shows no SDK and a Switch 1 memory pool
 
 - **Symptom:** the survey of a Switch 2 game says `SDK: ?` and `no SDK version string found`, and its provisional profile has `app_pool 0xCD500000`.
@@ -166,6 +173,13 @@
 - **Fix:** `unzs` feeds the command the bytes it read (`input=`). No other tool hands an external command a path inside the image. Test: `test_romfs_read.py` `test_zstd_file_inside_an_image`.
 - **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md#shaders): every file of its RomFS is zstd-compressed, 13,744 left out in both versions; the first image-backed build after the folder extraction.
 
+### Under `--work-dir` the programs of one game overwrote each other's RomFS
+
+- **Symptom:** an iPhone build of Super Mario 3D All-Stars with `--work-dir` (as NX2Apple runs the script) builds every program, then stops at the app build with `[RED] missing RomFS marker 'MovieData/BgMovieGalaxy.mp4' in <work dir>/extract/v393216/RomFS.img` and `FAIL: no RomFS at …`.
+- **Cause:** the first program's build packs each of the others from its own profile ([`oe::ExecuteProgram`](services.md#multi-program-applications-oeexecuteprogram)), each in its own build folder, `<NSP folder>/<id>_build`. `--work-dir` named one folder for all of them, so each program's `extract/<version>/RomFS.img` replaced the one before, and the package found Sunshine's image where the launcher's should be. Without `--work-dir` the folders were already apart.
+- **Fix:** `build_folder` in `scripts/build_ipa_from_nsp.py` gives a program packed with the first `<work dir>/programs/<id>_build` under `--work-dir`; the first program, a game of one program and `--program N` alone keep the folder as named. Test: `test_nsp_build_folder.py`.
+- **Found on:** [Super Mario 3D All-Stars](../../dm/games/010049900F546000/README.md#found-on-this-game), 1.1.4, built by NX2Apple 1.2.1 as one IPA.
+
 ## Add-on content
 
 ### DLC in Documents is ignored or removed DLC remains installed
@@ -176,6 +190,14 @@
 - **Found on:** synthetic startup and transfer fixtures while reviewing [PR #486](https://github.com/seedds/nxnative/pull/486), part of [issue #388](https://github.com/seedds/nxnative/issues/388). The Foundation fixture runs the actual iOS locator; the push-helper fixture models devicectl's documented merge and replacement behavior, including smaller and empty DLC sets and transfer failure. Applies to every game; no device gameplay validation was performed.
 
 ## Launcher metadata
+
+### A game packed from a NUP or a dump shows "Ver. ?" for a build its profile registers
+
+- **Symptom:** the game shows `?` where it shows its version (Super Mario Bros. Wonder's title screen: `Ver. ?`), and the build's lines name the version as `v327680 (?)`.
+- **Cause:** a package with no control data (a NUP update, a dump) packed from a derived profile, here because the folder had no base game for the shader tables. `derive_profile` took the display version of the build row it writes from the package's `control.nacp` alone and wrote `?` without one, and the host answers `nn::oe::GetDisplayVersion` from that row by `main`'s build ID (`hle_sdk16.c`). The profile it derives from registered that very build, with its display version.
+- **Fix:** `derive_profile` takes the package's control data first, then the display version the profile registers for this `main` build, and `?` only for a build no row names.
+- **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md) (1.2.1, v327680, an update-only NUP; `main` ff773e90…, the registered build): `Ver. ?` before, `Ver. 1.2.1` after, one Mac boot each to the title screen.
+- **Check:** `dm/tools/tests/test_nsp_alias.py` `test_derived_profile_keeps_the_display_version_the_profile_registers_for_the_build`.
 
 ### No Game language row in an app packed from a NUP or a dump
 

@@ -675,6 +675,7 @@ static void pool_res(int i) {
 enum { BIG_MIN = 512u << 20, BIG_S = 16u << 20, BIG_UNKNOWN = 64u << 20, BIG_MAX = 32 };
 typedef struct { uintptr_t lo, hi, a, b; const void *mem; int *chunk, full; NSMutableArray *old; } big_pool;   // chunk: stride → g_pools index + 1; full: the whole pool's entry + 1; old: buffers a longer chunk replaced, alive with the pool
 static big_pool g_big[BIG_MAX]; static int g_nbig;
+static id<MTLBuffer> pool_buf(uintptr_t a, uintptr_t b);   // a pool's zero-copy buffer over [a, b), made over writable pages (beside the GPU-written storage spans below)
 static int big_of(uint64_t addr) { for (int i = 0; i < g_nbig; i++) if (addr >= g_big[i].lo && addr < g_big[i].hi) return i; return -1; }
 void mtl_pool_add(const void *mem, uint64_t size) {
     mtl_init();   // the change is recorded once the pool can be found (reg_bump below): a reader that sees the new generation sees the pool
@@ -688,12 +689,12 @@ void mtl_pool_add(const void *mem, uint64_t size) {
         pthread_mutex_unlock(&g_mu);
         if (k >= 0) { reg_bump(-1, REG_POOL); static int nl; if (nl++ < 8) MLOG("memory pool %p+%llu MB: in chunks, wired as far as lookups reach", mem, (unsigned long long)(size >> 20)); return; }
     }
-    id<MTLBuffer> buf = [g_dev newBufferWithBytesNoCopy:(void *)a length:b - a options:MTLResourceStorageModeShared deallocator:nil];
+    id<MTLBuffer> buf = pool_buf(a, b);
     // Pokémon Legends: Z-A: twice on the Mac a small pool's buffer was refused although its pages were one read-write VM region, both times while another heavy job (a shader compile,
     // a second game instance) took the machine's memory; every run on an idle machine created all of them. Wiring the pages may fail under memory pressure: retry for up to about 2 s
     for (int t = 0; !buf && t < 12; t++) {
         usleep(10000u << (t < 4 ? t : 4));
-        buf = [g_dev newBufferWithBytesNoCopy:(void *)a length:b - a options:MTLResourceStorageModeShared deallocator:nil];
+        buf = pool_buf(a, b);
         if (buf) MLOG("[RED] memory pool %p+%#llx: the zero-copy buffer was refused, created at retry %d", mem, (unsigned long long)size, t + 1);
     }
     if (!buf) {   // say what the pages looked like: every VM region over the range, with its protection (an unmapped page in the range is the usual cause)
@@ -756,7 +757,7 @@ static void pidx_sort(void) {
     qsort(g_pidx, (size_t)g_npool, sizeof *g_pidx, pidx_cmp); g_pidx_ok = 1;
 }
 static int big_new(big_pool *b, uintptr_t lo, uintptr_t hi, uintptr_t end, uint64_t unk) {   // caller holds g_mu: a new entry for [lo, end) of the pool, looked up for addresses in [lo, hi)
-    id<MTLBuffer> buf = [g_dev newBufferWithBytesNoCopy:(void *)lo length:end - lo options:MTLResourceStorageModeShared deallocator:nil];
+    id<MTLBuffer> buf = pool_buf(lo, end);
     if (!buf) { MLOG("[RED] memory pool %p: the zero-copy buffer over %#lx..%#lx was refused", b->mem, (unsigned long)lo, (unsigned long)end); return -1; }
     if (g_npool == g_cap) { g_cap = g_cap ? g_cap * 2 : 64; g_pools = realloc_or_die(g_pools, g_cap * sizeof *g_pools, "the memory pool table"); }
     g_pidx_ok = 0; atomic_fetch_add(&g_pool_gen, 1);
@@ -2755,7 +2756,8 @@ static void rb_swap_rows(uint8_t *p, size_t wb, size_t rows, size_t nz, size_t r
 }
 // A zero-copy buffer over [addr, addr + len) for the open upload batch, which retires it with its staging, for a large pool, or a pool no address was given out in and that is not resident: a
 // one-time read must not leave that memory wired. In Ocarina of Time's first scene, pools that hold only textures took 4.6 GB of the working set against 1.6 GB for the textures made from them.
-// nil elsewhere (or if it is refused: the caller looks the address up as usual)
+// nil elsewhere (or if it is refused: the caller looks the address up as usual). The GPU only reads it, so it is made over the pages the upload has just protected, not through pool_buf,
+// which would make them writable again and the texture count as written at once
 static id<MTLBuffer> up_big_src(uint64_t addr, uint64_t len, uint64_t *off) {
     // Not once the raw memory table holds the whole pool (big_full): the lookup finds that buffer. Ocarina of Time's first scene made 4,664 of these in one batch, 2.1 GB counted against the working set for pages already wired
     pthread_mutex_lock(&g_mu); int k = big_of(addr), in = k >= 0 && !g_big[k].full;
@@ -3387,8 +3389,8 @@ static void cpu_tex_drop_pool(const void *pool) {
 // part of one cuts it, and the parts outside keep their own stamp, so a CPU write there since stays seen (merging them made the whole merged span the GPU's again). Storage the CPU
 // cannot write (a CPU_NO_ACCESS or virtual pool) has no span: tex_cpu_content takes no texture there, and most render targets lie there. GPU writes are stamped when recorded, so a
 // command buffer submitted again does not stamp its writes again (open: storage the CPU wrote since counts as the CPU's until the next recorded GPU write there)
-typedef struct { uintptr_t lo, hi; uint64_t stamp, seen; const void *rg; int taken; } gws_span;   // seen: dirty generation at the last look; rg: the dirty-page range holding its whole pages
-                                                                                                 // (NULL: none, or untracked); taken: tex_cpu_content took a texture over it since its stamp
+typedef struct { uintptr_t lo, hi; uint64_t stamp, seen; const void *rg; int taken, gpu; } gws_span;   // seen: dirty generation at the last look; rg: the dirty-page range holding its whole pages
+                                                                                                      // (NULL: none, or untracked); taken: tex_cpu_content took a texture over it since its stamp; gpu: pool_buf's note
 static gws_span *g_gws; static size_t g_ngws, g_cgws; static pthread_mutex_t g_gws_mu = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic int g_gws_new;   // the GPU wrote storage anew, or wrote storage a texture was taken from, since cpu_unc_drop last looked
 static void whole_pages(uintptr_t lo, uintptr_t hi, uintptr_t *a, uintptr_t *e) {
@@ -3514,6 +3516,28 @@ static void gws_take(uintptr_t lo, uintptr_t hi) {   // a texture over [lo, hi) 
         g_gws[i].taken = 1;
     }
     pthread_mutex_unlock(&g_gws_mu);
+}
+// A pool's zero-copy buffer, which the GPU writes through. One made while any of its pages is read-only drops every GPU write through it, silently (nvn_dirty_hold), so it is made over
+// writable pages with protection held off meanwhile. A chunk of a large pool is made long after the pool, by when uploads and GPU writes have protected pages in it; a small pool's first or
+// last page may be a neighbour's, protected by that pool's texture (issue #1591). The hold counts the pages it makes writable as written, which a packaged texture takes as a reason to be read
+// again; storage the GPU wrote would instead count as the CPU's and be taken from guest memory the GPU never wrote. So a span the CPU had not written since its stamp gets its stamp and
+// protection back once the buffer is made (open: a CPU write into such a span while the buffer is being made is not seen)
+static id<MTLBuffer> pool_buf(uintptr_t a, uintptr_t b) {
+    pthread_mutex_lock(&g_gws_mu);
+    size_t i0 = gws_find(a);
+    for (size_t i = i0; i < g_ngws && g_gws[i].lo < b; i++) {
+        g_gws[i].gpu = !gws_cpu_since(&g_gws[i], g_gws[i].lo, g_gws[i].hi);
+    }
+    nvn_dirty_hold((void *)a, b - a);
+    id<MTLBuffer> buf = [g_dev newBufferWithBytesNoCopy:(void *)a length:b - a options:MTLResourceStorageModeShared deallocator:nil];
+    nvn_dirty_unhold();
+    for (size_t i = i0; i < g_ngws && g_gws[i].lo < b; i++) {
+        if (g_gws[i].gpu) {
+            gws_stamp(&g_gws[i]);
+        }
+    }
+    pthread_mutex_unlock(&g_gws_mu);
+    return buf;
 }
 static void gws_drop_pool(const pool_t *p) {   // the pool goes: its spans with it
     if (!p->mem || (p->flags & NVN_MEMORY_POOL_FLAGS_VIRTUAL)) {

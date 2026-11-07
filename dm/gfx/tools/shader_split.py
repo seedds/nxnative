@@ -2221,6 +2221,30 @@ def ue_io_shaders(path, rel, chunks, out):
     t, names = _PAKS.get(path) or _PAKS.setdefault(path, (lambda k: (k, k.names()))(uepak.Toc(path)))
     return ue_packages(((f'/{rel}#{names.get(i) or t.ids[i].hex()}', lambda i=i: t.read(i, decode=oodle)) for i in chunks), out)
 
+def io_inline_shaders(romfs, mainnso, tag=''):
+    """Unreal Engine 4.27 IoStore containers whose packages keep their shaders inline (uepak.io_inline_tocs; Tetris Effect: Connected): every chunk scanned for the inline shader records as a
+    legacy pak's files are (ue_inline_shaders), then the engine's global shaders, Engine/GlobalShaderCache-*.bin in the paks beside them, which hold no package (Tetris Effect: 1,588 records in
+    2.0.2; its pak index is AES-encrypted with the key in main, uepak.find_key). ue_legacy_jobs does not reach these: it scans containers only beside a pak it can read without a key.
+    → [(where, stage, control, code)]"""
+    upstream = {os.path.dirname(q) for q in uepak.unreal_paks(romfs, inline=True)}   # containers beside a pak ue_legacy_jobs reads are scanned there (UE_IO)
+    tocs, out, pre = [t for t in uepak.io_inline_tocs(romfs) if os.path.dirname(t) not in upstream], [], (tag + '/') if tag else ''
+    if not tocs: return out
+    for path in tocs:
+        t, rel = uepak.Toc(path), pre + os.path.relpath(path, romfs)
+        for i in range(len(t.ids)):
+            d = t.read(i)
+            if b'LSLG' in d: ue_inline_shaders(d, f'/{rel}#{t.ids[i].hex()}', out)
+    img = None
+    for p in uepak.unreal_paks(romfs, inline=False):
+        try:
+            with open(p, 'rb') as f: enc = uepak.footer(f)[0]
+            if enc and img is None: img = uepak.nso_image(mainnso)
+            pk = uepak.Pak(p, uepak.find_key(*img, p) if enc else None)
+            for name in sorted(n for n in pk.files if re.search(r'(^|/)GlobalShaderCache-[^/]*\.bin$', n)):
+                ue_inline_shaders(pk.read(name), f'/{pre}{os.path.relpath(p, romfs)}#{name}', out)
+        except (OSError, ValueError, struct.error) as e: print(f'[RED] /{pre}{os.path.relpath(p, romfs)}: the global shader cache cannot be read ({e}); its shaders are left out', flush=True)
+    return out
+
 ZLIB_HEAD = re.compile(b'\x78[\x01\x5e\x9c\xda]')
 def ue_inline_shaders(d, label, out):
     """Shaders kept inline in cooked Unreal packages (UE 4.18, DRAGON QUEST XI S: each material's shader map in its .uexp, 38 to 87 shaders in the ones looked at, and the engine's global shaders in
@@ -3111,10 +3135,14 @@ def main():
         if not names and glsl_sources(img) and 'glslcCompile' in main_imports(img) and glslc_module(os.path.dirname(os.path.abspath(mainnso))):
             print(f'[RED] main holds GLSL sources and imports glslcCompile, but there are no captured GLSLC outputs in {cap}: the shaders the game compiles at run time will have no translation (the NSP script checks an empty capture against the offline split)', flush=True)
         for nm in names: found += glslc_shaders(open(os.path.join(cap, nm), 'rb').read(), f'/glslc_capture/{nm}')
-        # Unreal Engine shader code archives decoded on the Mac (uepak.py): <version dir>/ue_shaders, or DM_UE_SHADERS; needed when the RomFS has Unreal paks
+        # Unreal Engine 4.27 IoStore packages with their shaders inline, and the global shader cache beside them (io_inline_shaders): these stand in for shader code archives
+        io = io_inline_shaders(romfs, mainnso, tag)
+        if io: print(f'{len(io):,} shader records inline in IoStore packages and the global shader cache', flush=True)
+        found += io
+        # Unreal Engine shader code archives decoded on the Mac (uepak.py): <version dir>/ue_shaders, or DM_UE_SHADERS; needed when the RomFS has Unreal paks and no IoStore inline shaders
         ued = os.environ.get('DM_UE_SHADERS') or os.path.join(os.path.dirname(os.path.abspath(romfs)), 'ue_shaders')
         names = sorted(f for f in os.listdir(ued) if f.endswith('.ushaderbytecode') and not f.startswith('._')) if os.path.isdir(ued) else []   # AppleDouble metadata, not decoded shader archives
-        if not names and uepak.unreal_paks(romfs, inline=False): red(f'the RomFS has Unreal paks, but there are no decoded shader code archives in {ued} (the NSP script writes them)')
+        if not names and not io and uepak.unreal_paks(romfs, inline=False): red(f'the RomFS has Unreal paks, but there are no decoded shader code archives in {ued} (the NSP script writes them)')
         for nm in names: found += ue_shaders(open(os.path.join(ued, nm), 'rb').read(), f'/ue_shaders/{nm}')
         results.append(('main', {skey(c, k): (w, s, c, k) for w, s, c, k in found}, var_pairs(found), {}))
     for romfs in dlc_v:

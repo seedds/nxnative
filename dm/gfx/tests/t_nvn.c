@@ -98,6 +98,43 @@ static int ticket_lifetime_race(void) {
     return g_fail ? 1 : 0;
 }
 
+// Reusing one guest command grant must retire each previous immutable snapshot
+// and never revalidate its generation. A long-lived model-cache workload may
+// cycle the same 4 bytes thousands of times without growing the live registry.
+static int ticket_registry_reuse(void) {
+    _Alignas(16) uint8_t command[128] = {0}, control[64] = {0};
+    pool_t pool = {0}; pool.mem = command;
+    setenv("DM_NVN_DRAW_CTL", "1", 1); nvn_draw_ctl_init();
+    NVNcommandBuffer cb;
+    h_nvnCommandBufferInitialize(&cb, NULL);
+    uint32_t previous_id = 0;
+    int healthy = 1, stale_rejected = 1, stable_size = 1, ids_advance = 1;
+    for (int i = 0; i < 1024; i++) {
+        h_nvnCommandBufferAddCommandMemory(&cb, (NVNmemoryPool *)&pool, 0, sizeof command);
+        h_nvnCommandBufferAddControlMemory(&cb, control, sizeof control);
+        if (previous_id && nvn_ctl_draw_resolve(command, previous_id)) stale_rejected = 0;
+        h_nvnCommandBufferBeginRecording(&cb);
+        h_nvnCommandBufferDrawElementsBaseVertex(&cb, NVN_DRAW_PRIMITIVE_TRIANGLES,
+                                                 NVN_INDEX_TYPE_UNSIGNED_SHORT, 12, 0x123400, 2);
+        NVNcommandHandle ticket = h_nvnCommandBufferEndRecording(&cb);
+        uint32_t value; memcpy(&value, (const void *)(uintptr_t)ticket, sizeof value);
+        uint32_t id = value & ~NVN_CTL_DRAW_TAG4;
+        if (!(value & NVN_CTL_DRAW_TAG4) || !nvn_ctl_draw_resolve((void *)(uintptr_t)ticket, id)) healthy = 0;
+        if (previous_id && id <= previous_id) ids_advance = 0;
+        if (g_ctl_ticket_n != 1) stable_size = 0;
+        previous_id = id;
+    }
+    EXPECT("reuse: 1024 four-byte draws recorded and resolved", 1, healthy);
+    EXPECT("reuse: retired generation never resolves", 1, stale_rejected);
+    EXPECT("reuse: live ticket registry stays at one entry", 1, stable_size);
+    EXPECT("reuse: ticket generations increase on each regrant", 1, ids_advance);
+    h_nvnCommandBufferAddCommandMemory(&cb, (NVNmemoryPool *)&pool, 0, sizeof command);
+    EXPECT("reuse: final regrant retires ticket", 1,
+           !nvn_ctl_draw_resolve(command, previous_id) && g_ctl_ticket_n == 0);
+    h_nvnCommandBufferFinalize(&cb);
+    return g_fail ? 1 : 0;
+}
+
 static size_t tex_size3(int target, int fmt, int w, int h, int depth) {   // a layered or 3D texture's storage size
     NVNtextureBuilder tb;
     P(nvnTextureBuilderSetDevice)(&tb, &dev); P(nvnTextureBuilderSetDefaults)(&tb); P(nvnTextureBuilderSetTarget)(&tb, target);
@@ -115,6 +152,7 @@ static size_t tex_size(int fmt, int w, int h, int flags, size_t *align) {
 
 int main(void) {
     if (getenv("DM_TEST_CTL_TICKET_RACE")) return ticket_lifetime_race(); // headless; never opens Metal or submits GPU work
+    if (getenv("DM_TEST_CTL_TICKET_REUSE")) return ticket_registry_reuse(); // headless: bounded 1024-generation lifetime test
     setenv("DM_NVN_COUNT", "1", 1);   // the call-count checks below need the counting trampolines (off by default)
     // Engine-native limiters have no FPS state page. Their launcher cap must
     // still pace presents and select the display-link rate in display mode.

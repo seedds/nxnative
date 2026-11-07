@@ -151,6 +151,14 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Found on:** [NieR:Automata The End of YoRHa Edition](../../dm/games/010056B015FE8000/README.md), whose dynamic-resolution controller subtracts two raw report timestamps and converts the difference inline.
 - **Check:** `t_timestamp` checks known vectors, long uptimes, round-trip precision and the game's exact inline arithmetic. `t_nvn` checks the API's known units and bounds a completed report between submit and fence wait.
 
+### A game that reads raw timestamp reports at another rate
+
+- **Symptom:** a Switch 2 game's wind, foliage and particles move about 20 times too fast although the frame rate is right. The Legend of Zelda: Ocarina of Time (Switch 2): foliage, falling leaves and hanging plants.
+- **Cause:** the game turns the difference of two raw counter reports into its wind and particle time step with the Switch 2's system counter rate (31.25 MHz, [next entry](#the-switch-2s-system-tick-is-3125-mhz)), not NVN's 614.4 MHz ([Raw NVN timestamp units](#raw-nvn-timestamp-units)). An agl pass's time input advanced 0.3456 in a 17.88 ms frame: 17.58 ms of GPU time read at 31.25 MHz (614.4 / 31.25 = 19.66 times too many).
+- **Fix:** the profile key `gpu_ts_hz` (default `614400000`, which leaves every game as it was) sets the tick rate of the reports (`nvn_timestamp.h`; `nvn_ts_profile_hz` is defined in `nvn_mtl.m` from the profile); `nvnDeviceGetTimestampInNanoseconds` converts at the same rate. `DM_NVN_TS_HZ=<Hz>` overrides the key for a test. A game that converts its reports at NVN's rate keeps the default.
+- **Found on:** The Legend of Zelda: Ocarina of Time (Switch 2, `0400486024DEC000`, v131072, profile in PR #1299): after the key, a falling leaf moves 5 to 8 px a frame at 2048 px wide (before, about 20 times that).
+- **Check:** `t_timestamp` checks the default vectors as before.
+
 ### The Switch 2's system tick is 31.25 MHz
 
 - **Symptom:** a Switch 2 game holds 20 or 30 fps on the Mac although its frame work fits in one vsync: its frame-rate controller raises the present interval (`the game sets present interval 1 → 3` in the log) and never steps back down.

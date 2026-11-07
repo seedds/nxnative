@@ -181,9 +181,9 @@ class PixelCovered(unittest.TestCase):
     OTHER = (0x040e0200000e8000, 0x0000000000007925)   # bits 78..80 = 2, not seen
     SPH = struct.pack('<32I', *([0x000c5482] + [0] * 4 + [0xb0000000] + [0] * 12 + [0xf] + [0] * 13))   # the game's: writes colour 0
 
-    def run_job(self, op):
+    def run_job(self, *ops):
         with tempfile.TemporaryDirectory(prefix='ampere_px_') as d:
-            work = Path(d); (work / 'k.bin').write_bytes(self.SPH + inst(*op) + inst(*EXIT))
+            work = Path(d); (work / 'k.bin').write_bytes(self.SPH + b''.join(inst(*op) for op in ops) + inst(*EXIT))
             (work / 'jobs.json').write_text(json.dumps([dict(key='k', stage='ps', arch='sm86', code=str(work / 'k.bin'), tex={}, img={}, attr={}, fout={}, debug=True)]))
             r = subprocess.run([os.environ['DMSH_TEST_XLATE'], str(work / 'jobs.json'), d], capture_output=True, text=True)
             if not (work / 'k.spv').exists(): return None, r.stdout + r.stderr
@@ -203,6 +203,22 @@ class PixelCovered(unittest.TestCase):
         msl, log = self.run_job(self.OTHER)
         self.assertIsNone(msl)
         self.assertIn('0x925 form 2', log)
+
+
+@unittest.skipUnless(os.environ.get('DMSH_TEST_XLATE'), 'set DMSH_TEST_XLATE to the offline translator')
+class DepthRegister(unittest.TestCase):
+    """A pixel shader's depth output follows its colours at four registers per enabled render target, then the sample mask register. Ocarina of Time's agl_common depth pass
+    (ps_lib 519, OmapTargets 0x10f: RT0 RGBA in R0..R3, RT2 R in R4) writes its depth to R9; the component count put it in R6, which holds a step before"""
+    run_job = PixelCovered.run_job
+    SPH = struct.pack('<32I', *([0x000c5482] + [0] * 4 + [0xb0000000] + [0] * 12 + [0x10f, 0x2] + [0] * 12))   # colours 0x10f, depth written (+0x4c bit 1)
+
+    @staticmethod
+    def mov(reg, value): return (0x000fe20000000f00, value << 32 | reg << 16 | 0x7802)   # MOV Rd, imm32
+
+    def test_depth_comes_after_the_last_target_block(self):
+        msl, log = self.run_job(self.mov(6, 0x3e800000), self.mov(9, 0x3f400000))   # R6 = 0.25, R9 = 0.75
+        self.assertIsNotNone(msl, log)
+        self.assertRegex(msl, r'gl_FragDepth = 0\.75')
 
 
 class MufuF16(Translated):
@@ -270,7 +286,7 @@ class StageMemory(Translated):
         with_zero = self.msl(self.COUNT_ZERO, self.COUNT)
         self.assertEqual(without.count('atomic_compare_exchange'), with_zero.count('atomic_compare_exchange'))
 
-    def test_a_byte_goes_through_its_word_atomically(self):   # neighbouring threads write neighbouring bytes
+    def test_a_byte_goes_through_its_word_atomically(self):   # neighbouring threads write neighbouring bytes; the shader build makes the helper's loop one byte store (test_dmsh_shared_store.py)
         self.assertIn('atomic_compare_exchange', self.msl(self.INDEX))
 
     def test_outside_a_task_or_mesh_shader_it_is_refused(self):

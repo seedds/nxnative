@@ -87,8 +87,9 @@ class Coverage(unittest.TestCase):
         self.assertEqual({m for m in self.imported if m + '.py' not in chain} - NO_OUTPUT, set())
 
     def test_in_the_shader_key(self):
-        # made again from the restored MSL on every build, a hit too: dmsh_fetch (but for screen_varyings), dmsh_vin, dmsh_pull, dmsh_side (with dmsh_alpha, dmsh_logic), dmsh_mesh. dmsh_facts: its row is in the key
-        self.assertEqual(self.imported - self.keyed - NO_OUTPUT - {'dmsh_fetch', 'dmsh_vin', 'dmsh_pull', 'dmsh_side', 'dmsh_mesh', 'dmsh_facts'}, set())
+        # made again from the restored MSL on every build, a hit too: dmsh_fetch (but for screen_varyings), dmsh_vin, dmsh_pull, dmsh_mesh (and dmsh_side's dmsh_alpha, dmsh_logic, which
+        # only its unit calls). dmsh_side is keyed: fs_uint and fs_dual write main0's shared body. dmsh_facts: its row is in the key
+        self.assertEqual(self.imported - self.keyed - NO_OUTPUT - {'dmsh_fetch', 'dmsh_vin', 'dmsh_pull', 'dmsh_mesh', 'dmsh_facts'}, set())
 
     def test_screen_varyings_in_the_shader_key(self):   # raster_facts takes it when a shader misses the cache, and a hit restores what it gave from the reflection
         self.assertIn('screen_varyings', {n.attr for n in ast.walk(self.code_fp) if isinstance(n, ast.Attribute)})

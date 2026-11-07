@@ -23,12 +23,15 @@
 - (void)invalidate { self.invalidated = YES; }
 @end
 #define CAMetalDisplayLink SilentDisplayLink
+#define nvn_game_fps test_game_fps_now   // hle_nvn.c, linked here, has the strong nvn_game_fps; t_present_rescue_focus.c sets the rate
 #include "../nvn/nvn_mtl.m"
+#undef nvn_game_fps
 #undef CAMetalDisplayLink
 static uint64_t test_now;
 int test_focus = 1;
 int test_fullscreen;
 int test_variable_refresh;
+int test_game_fps = 60;
 uint64_t test_focus_since;
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
@@ -129,6 +132,17 @@ static void latency(void) {   // Only variable-refresh fullscreen needs the late
     }
     g_present_latency = 0; test_fullscreen = test_variable_refresh = 0; link_sync(); g_link = nil; g_link_started = 0;
 }
+static void thirty(void) {   // A 30 fps target runs the link at 30 Hz, except in fullscreen on a fixed-rate screen, where it stays at 60 Hz and the present interval paces the 30.
+    reset(); test_fullscreen = 0; test_variable_refresh = 0; test_game_fps = 30;
+    SilentDisplayLink *link = [SilentDisplayLink new]; g_link = link; g_link_started = 1;
+    link_sync(); CHECK("a window at 30 fps takes the 30 Hz link", g_link_mode == 3 && link.preferredFrameRateRange.preferred == 30 && mtl_link_rate() == 30);
+    test_fullscreen = 1; link_sync(); CHECK("fullscreen on a fixed-rate screen at 30 fps keeps the 60 Hz link", g_link_mode == 1 && link.preferredFrameRateRange.preferred == 60 && mtl_link_rate() == 60);
+    test_variable_refresh = 1; link_sync(); CHECK("fullscreen on a variable-refresh screen at 30 fps takes the 30 Hz link", g_link_mode == 3 && link.preferredFrameRateRange.preferred == 30);
+    test_variable_refresh = 0; link_sync(); CHECK("back on a fixed-rate screen: the 60 Hz link again", g_link_mode == 1 && link.preferredFrameRateRange.preferred == 60);
+    test_fullscreen = 0; link_sync(); CHECK("leaving fullscreen: the 30 Hz link again", g_link_mode == 3 && link.preferredFrameRateRange.preferred == 30);
+    test_game_fps = 60; link_sync(); CHECK("60 fps in a window: the 60 Hz link", g_link_mode == 1 && link.preferredFrameRateRange.preferred == 60);
+    g_link = nil; g_link_started = 0;
+}
 static void metal_lifecycle(void) {
     id<MTLDevice> device = MTLCreateSystemDefaultDevice();
     CHECK("Metal device available", device != nil); if (!device) return;
@@ -147,7 +161,7 @@ static void metal_lifecycle(void) {
 int main(int argc, char **argv) { @autoreleasepool {
     alarm(10); setbuf(stdout, NULL);
     if (argc > 2 || (argc == 2 && strcmp(argv[1], "--metal"))) return 2;
-    thresholds(); backoff(); settings(); lifecycle(); latency();
+    thresholds(); backoff(); settings(); lifecycle(); latency(); thirty();
     if (argc == 2) metal_lifecycle();
     printf("present rescue: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

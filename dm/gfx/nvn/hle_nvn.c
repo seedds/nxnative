@@ -3698,11 +3698,28 @@ static int write_region_linear(const tex_t *t, unsigned level, unsigned layer, c
 static int write_region_mirror(const tex_t *t, unsigned level, unsigned layer, const NVNcopyRegion *r, const uint8_t *src, size_t row, int bw, int bh, int bpb) {
     return (t->d.flags & NVN_TEXTURE_FLAGS_LINEAR ? write_region_linear : write_region_bl)(t, level, layer, r, src, row, bw, bh, bpb);
 }
+int mtl_tgtfix_on(void);   // nvn_mtl.m: DM_NVN_TGTFIX
+static void write_texels_at(const tex_t *t, unsigned level, unsigned layer0, const NVNcopyRegion *r, const uint8_t *src, size_t row, size_t img);
 static void write_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r, const uint8_t *src, size_t row, size_t img) {
     if (!t->mem) { LOG("[RED] WriteTexels: texture has no storage"); return; }
+    unsigned level = v && v->set_levels ? (unsigned)v->base_level : 0, layer0 = v && v->set_layers ? (unsigned)v->min_layer : 0;
+    // A 1D array's region counts layers in y / height: row k of the source is layer y + k's one row. Taken as rows, the block-linear write refused it (one row a layer) and the
+    // whole-level path wrote the first layer's row alone, the region's other rows into its level buffer past that row (DM_NVN_TGTFIX)
+    if (t->d.target == 3 && mtl_tgtfix_on() && (r->height > 1 || r->yoffset)) {
+        int bw, bh, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh);
+        if (!bpb) { ONCE_LOG("[RED] WriteTexels: unknown format %#x", t->d.format); return; }
+        size_t rp = row ? row : (size_t)((r->width + bw - 1) / bw) * bpb;
+        for (int k = 0; k < (r->height > 0 ? r->height : 1); k++) {
+            NVNcopyRegion one = *r; one.yoffset = 0; one.height = 1; one.zoffset = 0; one.depth = 1;
+            write_texels_at(t, level, layer0 + (unsigned)(r->zoffset + r->yoffset + k), &one, src + (size_t)k * rp, rp, rp);
+        }
+        return;
+    }
+    write_texels_at(t, level, layer0, r, src, row, img);
+}
+static void write_texels_at(const tex_t *t, unsigned level, unsigned layer0, const NVNcopyRegion *r, const uint8_t *src, size_t row, size_t img) {
     int bw, bh, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh);
     if (!bpb) { ONCE_LOG("[RED] WriteTexels: unknown format %#x", t->d.format); return; }
-    unsigned level = v && v->set_levels ? (unsigned)v->base_level : 0, layer0 = v && v->set_layers ? (unsigned)v->min_layer : 0;
     int is3d = t->d.target == NVN_TEXTURE_TARGET_3D, nz = r->depth ? r->depth : 1;
     if (!is3d) {
         size_t wb0 = (size_t)((r->width + bw - 1) / bw) * bpb, row0 = row ? row : wb0, img0 = img ? img : row0 * (size_t)((r->height + bh - 1) / bh);
@@ -3711,7 +3728,7 @@ static void write_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r
         for (int z = 0; z < nz && ok; z++) ok = !write_region_bl(t, level, layer0 + (unsigned)(r->zoffset + z), r, src + (size_t)z * img0, row0, bw, bh, bpb);
         if (ok) { mtl_tex_cpu_written(t); return; }
     }
-    uint32_t lw = t->d.width >> level ? t->d.width >> level : 1, lh = t->d.height >> level ? t->d.height >> level : 1, lz = is3d ? (t->d.depth >> level ? t->d.depth >> level : 1) : 1;
+    uint32_t lw = t->d.width >> level ? t->d.width >> level : 1, lh = t->d.target == 3 && mtl_tgtfix_on() ? 1 : t->d.height >> level ? t->d.height >> level : 1, lz = is3d ? (t->d.depth >> level ? t->d.depth >> level : 1) : 1;
     size_t lp = (size_t)((lw + bw - 1) / bw) * bpb, lr = (lh + bh - 1) / bh;
     size_t wb = (size_t)((r->width + bw - 1) / bw) * bpb, hb = (size_t)(r->height + bh - 1) / bh;
     if (!row) row = wb;
@@ -3750,6 +3767,14 @@ static int mirror_prepare(const tex_t *t, unsigned level, unsigned layer) {   //
 int nvn_tex_mirror_b2t(const tex_t *t, unsigned level, unsigned layer0, const NVNcopyRegion *r, const uint8_t *src, size_t row, size_t img) {
     int bw, bh, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh);
     if (!t->mem || !bpb || t->d.target == NVN_TEXTURE_TARGET_3D || level >= t->d.levels) return -1;
+    if (t->d.target == 3 && mtl_tgtfix_on()) {   // a 1D array: row k of the copy is layer y + k's one row (see write_texels)
+        for (int k = 0; k < (r->height > 0 ? r->height : 1); k++) {
+            NVNcopyRegion one = *r; one.yoffset = 0; one.height = 1; one.zoffset = 0; one.depth = 1;
+            unsigned layer = layer0 + (unsigned)(r->zoffset + r->yoffset + k);
+            if (mirror_prepare(t, level, layer) || write_region_mirror(t, level, layer, &one, src + (size_t)k * row, row, bw, bh, bpb)) return -1;
+        }
+        return 0;
+    }
     int nz = r->depth ? r->depth : 1;
     for (int z = 0; z < nz; z++) {
         unsigned layer = layer0 + (unsigned)(r->zoffset + z);
@@ -3761,6 +3786,20 @@ int nvn_tex_mirror_t2t(const tex_t *s, unsigned sl, unsigned ss, const NVNcopyRe
     int bw, bh, bpb = nvn_fmt_bpb(s->d.format, &bw, &bh), dbw, dbh, dbpb = nvn_fmt_bpb(d->d.format, &dbw, &dbh);
     if (!s->mem || !d->mem || !bpb || bpb != dbpb || bw != dbw || bh != dbh || s->d.target == NVN_TEXTURE_TARGET_3D || d->d.target == NVN_TEXTURE_TARGET_3D) return -1;
     if (sl >= s->d.levels || dl >= d->d.levels || sr->width != dr->width || sr->height != dr->height || sr->xoffset < 0 || sr->yoffset < 0) return -1;
+    if ((s->d.target == 3 || d->d.target == 3) && mtl_tgtfix_on()) {   // a 1D array: layer by layer, one row each (see write_texels); with another target, not mirrored
+        if (s->d.target != 3 || d->d.target != 3 || dr->yoffset < 0) return -1;
+        uint32_t lw = s->d.width >> sl ? s->d.width >> sl : 1; size_t lp = (size_t)((lw + bw - 1) / bw) * bpb, x0 = (size_t)(sr->xoffset / bw) * bpb;
+        if (x0 + (size_t)((sr->width + bw - 1) / bw) * bpb > lp) return -1;
+        uint8_t *lin = malloc(lp); if (!lin) die("texture copy mirror allocation failed");
+        int ok = 1;
+        for (int k = 0; k < (sr->height > 0 ? sr->height : 1) && ok; k++) {
+            NVNcopyRegion one = *dr; one.yoffset = 0; one.height = 1; one.zoffset = 0; one.depth = 1;
+            unsigned layer = ds + (unsigned)(dr->zoffset + dr->yoffset + k);
+            ok = !nvn_deswizzle(&s->d, sl, ss + (unsigned)(sr->zoffset + sr->yoffset + k), s->mem, lin, lp) && !mirror_prepare(d, dl, layer) && !write_region_mirror(d, dl, layer, &one, lin + x0, lp, bw, bh, bpb);
+        }
+        free(lin);
+        return ok ? 0 : -1;
+    }
     uint32_t lw = s->d.width >> sl ? s->d.width >> sl : 1, lh = s->d.height >> sl ? s->d.height >> sl : 1;
     size_t lp = (size_t)((lw + bw - 1) / bw) * bpb, lr = (lh + bh - 1) / bh, x0 = (size_t)(sr->xoffset / bw) * bpb, y0 = (size_t)(sr->yoffset / bh);
     if (x0 + (size_t)((sr->width + bw - 1) / bw) * bpb > lp || y0 + (size_t)((sr->height + bh - 1) / bh) > lr) return -1;

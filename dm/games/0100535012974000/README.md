@@ -1,6 +1,6 @@
 # Hades (`0100535012974000`)
 
-Update 1.0.38233 (v589824), SDK 9.3.0. Supergiant Games' engine on The Forge renderer, on **Vulkan**, not NVN: `main` imports 100 `vk*` functions from `subsdk0` (the Vulkan loader), which sits on NVIDIA's driver in `subsdk1` (NVN, OpenGL, Vulkan). The host implements those functions on Metal itself (`dm/gfx/vk/hle_vk.m`), so only `main` and `sdk` are loaded. Plays on the iPhone.
+Update 1.0.38233 (v589824), SDK 9.3.0. Supergiant Games' engine on The Forge renderer, on **Vulkan**, not NVN: `main` imports 100 `vk*` functions from `subsdk0` (the Vulkan loader), which sits on NVIDIA's driver in `subsdk1` (NVN, OpenGL, Vulkan). The host implements those functions on Metal itself (`dm/gfx/vk/hle_vk.m`), so only `main` and `sdk` are loaded. Plays on the iPhone, and on the Mac (reported on macOS 26.7.3 (25G416) on an M1 Pro, 2026-11-07).
 
 ## What it needs
 

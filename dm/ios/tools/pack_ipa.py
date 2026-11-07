@@ -24,6 +24,7 @@ BIG = 256 << 20      # files above this are streamed by the writer; smaller ones
 WINDOW = 2 << 30     # input bytes in the pool at once
 QUEUE = 4096         # entries in the pool at once (folders of tiny files)
 CHUNK = 16 << 20
+IOS_FILE_LIMIT = 1 << 31   # AltServer cannot install a single file this large.
 L32, L16 = 0xFFFFFFFF, 0xFFFF
 DIR_MODE = stat.S_IFDIR | 0o755   # a parent folder no source folder stands for (Payload/, msl/); its time is 1980-01-01, so it is the same in every pack
 Entry = collections.namedtuple('Entry', 'name path st root')   # st None: a synthetic parent; root: the mapping's source folder
@@ -231,16 +232,27 @@ def prefix(es, files, infos, old, idx, apfs):
 def library_map(arc, src, skip_suffix, out):
     """An NVN game's libraries, mapped as <app>/msl/[p<N>/]b-<chain>, when they are the one file b-<chain>.img (dm/tools/shader_lib.py): that file at <archive path>.img. The NSP script's image already leaves
     out what its app does not read. A build by hand that wants less than the image holds gets a copy, beside the IPA until the end of the pack (deflated again each time: a new file is never reused),
-    and one that wants the pulling libraries from an image without them stops here, as they would only fail on the device. Anything else goes as mapped"""
+    and one that wants the pulling libraries from an image without them stops here, as they would only fail on the device. Images of at least 2 GiB become a temporary folder beside the IPA,
+    so AltServer installs the individual libraries. The source image stays available to other builds. Anything else goes as mapped"""
     if not re.fullmatch(r'.*/msl/(p\d+/)?b-[^/]+', arc) or not str(shader_lib.view(src)).endswith('.img'): return arc, src
     if shader_lib.PULLING not in skip_suffix and shader_lib.left_out_pulling(src):
         sys.exit(f'[RED] pack_ipa: {shader_lib.image_of(src)} has no pulling vertex libraries, and this app needs them: run the NSP script again, which builds them')
     image = shader_lib.image_of(src)
-    if any(p.name.endswith(skip_suffix) for p in shader_lib.view(src).iterdir()) if skip_suffix else False:
+    subset = bool(skip_suffix) and any(p.name.endswith(skip_suffix) for p in shader_lib.view(src).iterdir())
+    if subset or os.path.getsize(image) >= IOS_FILE_LIMIT:
         work = tempfile.mkdtemp(prefix=os.path.basename(out) + '.msl-', dir=os.path.dirname(os.path.abspath(out)))
         atexit.register(shutil.rmtree, work, True)
-        image = os.path.join(work, os.path.basename(image))
-        shader_lib.subset(src, image, skip_suffix)
+        if subset:
+            image = os.path.join(work, os.path.basename(image))
+            shader_lib.subset(src, image, skip_suffix)
+        if os.path.getsize(image) >= IOS_FILE_LIMIT:
+            folder = os.path.join(work, shader_lib.name_of(src))
+            os.mkdir(folder)
+            for member in shader_lib.view(image).iterdir():
+                with member.open('rb') as source, open(os.path.join(folder, member.name), 'wb') as target:
+                    shutil.copyfileobj(source, target, CHUNK)
+            print(f'pack: {arc} uses individual shader files (image is at least 2 GiB)', flush=True)
+            return arc, folder
     return arc + '.img', image
 
 

@@ -77,6 +77,13 @@
 
 ## IPA archives
 
+### AltServer refuses a shader image of 2 GiB or more
+
+- **Symptom:** AltServer reports that a `b-<chain>.img` file could not be saved in `msl` while installing an IPA.
+- **Cause:** The shader image exceeds AltServer's single-file size limit even when the RomFS is supplied separately.
+- **Fix:** After applying shader exclusions, `pack_ipa.py` expands an image of at least 2 GiB into temporary files beside the output IPA and packs its individual libraries and metadata. The source image stays available for other builds. The pack needs temporary space for the expanded files until it exits.
+- **Found on:** [Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md#found-on-this-game), version 1.4.3, with a reported 2.10 GiB image in [issue #1688](https://github.com/seedds/nxnative/issues/1688). Automatic fallback installation on a device remains unverified.
+
 ### A streamed file changes size and the IPA fails its CRC check
 
 - **Symptom:** packing succeeds, but `unzip -t` or Python's `ZipFile.testzip()` reports a bad CRC for a large deflated file.

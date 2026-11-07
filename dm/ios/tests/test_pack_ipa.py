@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import stat
+import subprocess
 import sys
 import tempfile
 import time
@@ -83,6 +84,109 @@ class PackIpa(unittest.TestCase):
 
     def offset(self, name):
         with zipfile.ZipFile(self.out) as z: return z.getinfo('Payload/DmIOS.app/' + name).header_offset
+
+    def shader_image(self, name='b-test', size=None):
+        lib = self.tmp / name
+        image = Path(str(lib) + '.img')
+        files = {'k_b.metallib': b'compiled shader', 'k_b.json': b'{"chain":"test"}',
+                 'k_bp.metallib': b'pulling shader', 'inputs.tsv': b'inputs\tfixture\n'}
+        pack.shader_lib.write(files, str(image))
+        if size is not None:
+            # Move the index beyond a sparse gap so its recorded end is still the image's end.
+            header = pack.shader_lib.romfs.HEAD
+            with image.open('r+b') as stream:
+                magic, offset, length, count = header.unpack(stream.read(header.size))
+                stream.seek(offset); index = stream.read(length)
+                stream.seek(size - length); stream.write(index)
+                stream.seek(0); stream.write(header.pack(magic, size - length, length, count))
+        return lib, image, files
+
+    def test_shader_image_install_limit(self):
+        for size in ((1 << 31) - 1, 1 << 31, (1 << 31) + 1):
+            with self.subTest(size=size):
+                lib, image, files = self.shader_image(f'b-{size}', size)
+                before = image.stat()
+                arc = 'Payload/DmIOS.app/msl/' + lib.name
+                mapped, source = pack.library_map(arc, str(lib), (), str(self.out))
+                if size < 1 << 31:
+                    self.assertEqual((mapped, source), (arc + '.img', str(image)))
+                else:
+                    self.assertEqual(mapped, arc)
+                    self.assertEqual(Path(source).parent.parent, self.out.parent)
+                    self.assertEqual({f.name: f.read_bytes() for f in Path(source).iterdir()}, files)
+                self.assertFalse(lib.exists())
+                self.assertEqual((image.stat().st_size, image.stat().st_mtime_ns), (before.st_size, before.st_mtime_ns))
+
+    def test_large_shader_folder_replaces_image_in_repacked_ipa(self):
+        for program in ('', 'p1/'):
+            with self.subTest(program=program):
+                lib, image, files = self.shader_image()
+                original = image.read_bytes()
+                arc = 'Payload/DmIOS.app/msl/' + program + lib.name
+                self.maps = [f'{arc}={lib}', f'Payload/DmIOS.app={self.app}']
+                self.run_pack()
+                with zipfile.ZipFile(self.out) as z: self.assertEqual(z.read(arc + '.img'), original)
+                with patch.object(pack, 'IOS_FILE_LIMIT', 1, create=True):
+                    self.run_pack()
+                with zipfile.ZipFile(self.out) as z:
+                    self.assertIsNone(z.testzip())
+                    self.assertNotIn(arc + '.img', z.namelist())
+                    self.assertEqual({n[len(arc) + 1:]: z.read(n) for n in z.namelist() if n.startswith(arc + '/') and not n.endswith('/')}, files)
+                self.assertEqual(image.read_bytes(), original)
+                self.assertFalse(lib.exists())
+                self.run_pack()
+                with zipfile.ZipFile(self.out) as z:
+                    self.assertEqual(z.read(arc + '.img'), original)
+                    self.assertFalse(any(n.startswith(arc + '/') for n in z.namelist()))
+
+    def test_filtering_shader_image_can_avoid_folder_fallback(self):
+        lib, image, files = self.shader_image(size=1 << 31)
+        arc = 'Payload/DmIOS.app/msl/' + lib.name
+        mapped, source = pack.library_map(arc, str(lib), ('_bp.metallib',), str(self.out))
+        self.assertEqual(mapped, arc + '.img')
+        self.assertLess(Path(source).stat().st_size, 1 << 31)
+        self.assertEqual({f.name: f.read_bytes() for f in pack.shader_lib.view(source).iterdir()},
+                         {name: data for name, data in files.items() if not name.endswith('_bp.metallib')})
+        self.assertEqual(image.stat().st_size, 1 << 31)
+
+    def test_large_shader_cli_removes_its_temporary_folder(self):
+        lib, image, files = self.shader_image(size=1 << 31)
+        arc = 'Payload/DmIOS.app/msl/' + lib.name
+        result = subprocess.run([sys.executable, str(REPO / 'dm/ios/tools/pack_ipa.py'),
+                                 str(self.out), f'{arc}={lib}'], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        with zipfile.ZipFile(self.out) as z:
+            self.assertIsNone(z.testzip())
+            self.assertEqual({n[len(arc) + 1:]: z.read(n) for n in z.namelist() if n.startswith(arc + '/') and not n.endswith('/')}, files)
+        self.assertEqual(list(self.tmp.glob('a.ipa.msl-*')), [])
+        self.assertEqual(image.stat().st_size, 1 << 31)
+        self.assertFalse(lib.exists())
+
+    def test_large_filtered_shader_folder_omits_pulling_libraries(self):
+        lib, image, files = self.shader_image()
+        original = image.read_bytes()
+        arc = 'Payload/DmIOS.app/msl/' + lib.name
+        self.maps = [f'{arc}={lib}']
+        with patch.object(pack, 'IOS_FILE_LIMIT', 1):
+            self.run_pack(None, '--skip-suffix', '_bp.metallib')
+        with zipfile.ZipFile(self.out) as z:
+            self.assertEqual({n[len(arc) + 1:]: z.read(n) for n in z.namelist() if n.startswith(arc + '/') and not n.endswith('/')},
+                             {name: data for name, data in files.items() if not name.endswith('_bp.metallib')})
+        self.assertEqual(image.read_bytes(), original)
+
+    def test_failed_shader_expansion_preserves_the_previous_ipa(self):
+        lib, image, _ = self.shader_image()
+        self.maps = [f'Payload/DmIOS.app/msl/{lib.name}={lib}']
+        self.run_pack()
+        original = image.read_bytes()
+        before, index = self.out.read_bytes(), Path(str(self.out) + '.idx').read_bytes()
+        with patch.object(pack, 'IOS_FILE_LIMIT', 1), patch.object(pack.shutil, 'copyfileobj', side_effect=OSError('disk full')), \
+                self.assertRaisesRegex(OSError, 'disk full'):
+            self.run_pack()
+        self.assertEqual(image.read_bytes(), original)
+        self.assertEqual(self.out.read_bytes(), before)
+        self.assertEqual(Path(str(self.out) + '.idx').read_bytes(), index)
+        self.assertFalse(Path(str(self.out) + '.partial').exists())
 
     def test_unchanged_clone(self):
         self.run_pack()

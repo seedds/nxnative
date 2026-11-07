@@ -1,6 +1,7 @@
 // NVN2's DLSS on MetalFX (nvn_mtl.m dlss_eval) with Metal encoding on its own thread and without: MetalFX's temporal scaler encodes into the replay's real command buffer
 // (rec_cb_block), never the recording's stand-in, and fills a 1920x1080 output from a flat 960x540 colour; two evaluations through the same scaler before the submission ends
-// keep each one's own output
+// keep each one's own output; an input between the network's optimal size and its output (Xenoblade Chronicles 2's Switch 2 program: 1024x576 into its 1536x864 network, inside the range
+// GetOptimalSettings reports) is scaled by a scaler of its own
 #include "../nvn/nvn_mtl.m"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
@@ -49,6 +50,16 @@ int main(void) { @autoreleasepool {
     CHECK(g_dlss[0].sc != nil, "MetalFX made a temporal scaler for these formats");
     CHECK(flat(tex_mtl(&out), a), "the first evaluation's output holds its own colour");
     CHECK(flat(tex_mtl(&out2), b), "the second evaluation through the same scaler holds its own");
+    tex_t col3 = texture(96, 1024, 576, NVN_FORMAT_RGBA16F), dep3 = texture(97, 1024, 576, NVN_FORMAT_DEPTH32F), mot3 = texture(98, 1024, 576, NVN_FORMAT_RG16F), out3 = texture(99, 1536, 864, NVN_FORMAT_RGBA16F);
+    fill(tex_mtl(&col3), MTLClearColorMake(b[0], b[1], b[2], 1), 0); fill(tex_mtl(&dep3), MTLClearColorMake(0, 0, 0, 0), 1); fill(tex_mtl(&mot3), MTLClearColorMake(0, 0, 0, 0), 0);
+    p_dlss c3 = {.tex = {&col3, &dep3, &mot3, &out3}, .net = 2, .iw = 1024, .ih = 576, .ow = 1536, .oh = 864, .mv = {1, 1}, .pre_exposure = 1, .flags = DLSS_F_DEPTH_INVERTED, .reset = 1};
+    for (int frame = 0; frame < 4; frame++) {
+        mtl_sub_begin(); dlss_eval(&c3);
+        CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "the 1.5x submission completes");
+        c3.reset = 0;
+    }
+    CHECK(g_dlss[1].net == 2 && g_dlss[1].sc != nil, "MetalFX made a temporal scaler for 1024x576 into 1536x864");
+    CHECK(flat(tex_mtl(&out3), b), "the 1.5x evaluation fills its output");
     printf("t_dlss_mfx (encoding thread %s): %d checks, %d failed\n", rec_on() ? "on" : "off", checks, failed);
     return failed != 0;
 }}

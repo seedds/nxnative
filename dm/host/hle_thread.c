@@ -84,6 +84,7 @@ typedef struct thr {
     // Pausing (SetThreadActivity, used by IL2CPP's garbage collector to stop the world): pause_req = requested, paused = stopped; when stopped inside an SVC the context comes from the gate frame svc_regs (registered on SVC entry),
     // when stopped in guest code the signal handler saves it into ctx_*; pcv lets the requester wait for "stopped" and the paused thread wait for "resume"
     _Atomic int pause_req; int paused;
+    int ext_pause;   // paused by dm_guest_pause_others (DM_NVN_SERIALIZE=2), not by the game: only those are resumed by it
     uint64_t *_Atomic svc_regs; uint64_t svc_pc, svc_x18;   // svc_x18: the guest's x18 at SVC entry (its thread slot; the gate frame holds the Apple platform register)
     // SVC exit without G: bit 0 = inside an SVC, bit 1 = a pause was requested. The exit clears bit 0 with one compare-and-swap when bit 1 is clear, and takes G only otherwise;
     // the requester sets bit 1 and treats the thread as stopped only if bit 0 was set, so a thread it counts as stopped in an SVC cannot leave the SVC without G (svc_regs stays valid for GetThreadContext3)
@@ -409,6 +410,35 @@ static void on_pause_sig(int sig, siginfo_t *si, void *uc_) {
         t->paused = 0; t->ctx_ok = 0;
     }
     pthread_mutex_unlock(&G);
+}
+// DM_NVN_SERIALIZE=2 (race-diag, 2026-11-07; hle_nvn.c): every other guest thread paused like SetThreadActivity pauses one (in guest code: SIGUSR2 and the handler waits; in an SVC:
+// at once, it waits at the exit), so no guest code writes memory while the GPU runs a submission. A thread in host code is asked again every 100 us until budget_ns has passed,
+// then left running (counted in *missed): host code may hold locks the submission needs. Threads the game paused itself are not touched. on=0 resumes those paused here.
+// Returns how many were paused
+int dm_guest_pause_others(int on, uint64_t budget_ns, int *missed) {
+    thr_t *me = pthread_getspecific(g_keythr); int n = 0, miss = 0;
+    pthread_mutex_lock(&G);
+    for (thr_t *t = g_all; t; t = t->all) {
+        if (t == me) continue;
+        if (!on) { if (t->ext_pause) { t->ext_pause = 0; atomic_store(&t->pause_req, 0); atomic_fetch_and(&t->svc_state, ~2); pthread_cond_broadcast(&t->pcv); } continue; }
+        if (!t->started || t->exited || atomic_load(&t->pause_req) || t->host_owned) continue;
+        atomic_store(&t->pause_req, 1); t->ext_pause = 1;
+        int st = atomic_fetch_or(&t->svc_state, 2);
+        if (st & 1) t->paused = 1;
+        uint64_t t0 = now_ns();
+        while (!t->paused && !t->exited) {
+            pthread_mutex_unlock(&G); pthread_kill(t->pt, SIGUSR2); pthread_mutex_lock(&G);
+            if (t->paused || t->exited) break;
+            if (now_ns() - t0 > budget_ns) break;
+            struct timespec dl; clock_gettime(CLOCK_REALTIME, &dl); dl.tv_nsec += 100000; if (dl.tv_nsec >= 1000000000) { dl.tv_sec++; dl.tv_nsec -= 1000000000; }
+            pthread_cond_timedwait(&t->pcv, &G, &dl);
+        }
+        if (t->paused) n++;
+        else { miss++; t->ext_pause = 0; atomic_store(&t->pause_req, 0); atomic_fetch_and(&t->svc_state, ~2); pthread_cond_broadcast(&t->pcv); }
+    }
+    pthread_mutex_unlock(&G);
+    if (missed) *missed = miss;
+    return n;
 }
 // called by the gate on SVC entry / exit (gate_dispatch in hle.c)
 void thr_svc_enter(uint64_t *regs, uint64_t pc) {

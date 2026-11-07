@@ -120,7 +120,8 @@ static void report(NSError *e, NSString *target, const char *stage) {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(wait * NSEC_PER_SEC)), queue, ^{
         DmRumbleChannel *c = weak; NSError *e = nil;
         if (!c || c.generation != generation || c.pattern != next || c.level.intensity == 0) return;   // stopped, replaced or silent
-        if (![c pulse:&e]) [c failed:e stage:"pulse"];
+        @try { if (![c pulse:&e]) [c failed:e stage:"pulse"]; }
+        @catch (NSException *x) { [c stoppedEngine:x stage:"pulse"]; }
     });
     return YES;
 }
@@ -159,7 +160,22 @@ static void report(NSError *e, NSString *target, const char *stage) {
     if (![self.engine startAndReturnError:&error]) { [self engineFailed:error stage:"start engine"]; return NO; }
     return YES;
 }
+// Core Haptics raises an NSException, not an NSError, when a player or parameter call reaches an engine that is not running, and the engine stops
+// on its own at any time (an audio interruption, a focus change, the helper's exit) while its stopped handler is still queued: the call can win
+// that race. Seen on Mario Kart World on the iPhone (play 2, 2026-11-06): "CHHapticEngine checkEngineRunning: self.running" killed the app
+// after an interruption. Treat it as an engine failure, the same as a failed start, so the next effect rebuilds the engine after the backoff.
+- (void)stoppedEngine:(NSException *)x stage:(const char *)stage {
+    fprintf(stderr, "[RED] haptics: %s on a stopped engine (%s: %s)\n", stage, x.name.UTF8String, x.reason.UTF8String ?: "no reason");
+    [self stop]; self.engine = nil;
+    self.failures = MIN(self.failures + 1, 4u);
+    self.retryAfter = now() + (1u << (self.failures - 1));
+    dm_haptics_clear(self.player);
+}
 - (void)apply:(dm_haptic_level)level {
+    @try { [self applyLevel:level]; }
+    @catch (NSException *x) { [self stoppedEngine:x stage:"apply"]; }
+}
+- (void)applyLevel:(dm_haptic_level)level {
     if ([self.target hasPrefix:@"controller"]) level.intensity = controller_level(level.intensity);
     uint64_t silence = ++self.silenceGeneration;
     NSError *error = nil;

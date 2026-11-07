@@ -1409,6 +1409,12 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** `dmsh_build.py` `tg_fence` puts a simdgroup-scope memory fence (`atomic_thread_fence(mem_threadgroup, seq_cst, thread_scope_simdgroup)`), not an execution barrier, after each store to a threadgroup array, so it is safe in divergent code. Only kernels with a threadgroup array are touched (about 7.5% of Orbitals' shaders). `tg_spill` runs after it, so a fence on an array moved to device memory orders device memory too.
 - **Found on:** Orbitals (`040004F027560000`): the GPU sort downsweep `d032ce5090303e01` (181 fences): 100 of 100 keys sorted with the fence. With only the fenced downsweep swapped into the library the beams were right (by eye); with the fence in every shader, three 80-frame samples of stage 2 had 0 flash views, against 22 in 80 on the build before (which also lacked the split texture / sampler handle fix).
 - **Check:** `python3 dm/gfx/tests/test_dmsh_tg_fence.py` (the rewrite, the fence's scope after `tg_spill`, and, with the Metal compiler, that both compile).
+### NVN2 compute `c0` with two push blocks
+
+- **Symptom:** NVN2 compute shaders read their uniform, storage or handle words, or the second block of their push constants, from the wrong place in `c0`; `[RED] <key>: NVN2 compute c0 layout does not add up to its size` in the build.
+- **Cause:** the push region in front of the entries is two 16-byte aligned blocks, the +0xa9 words then the +0xaa words. Newer GLSLC (control +0x08 = 0x11) fills both; Donkey Kong Bananza's leaves +0xaa at 0. Read as +0xa9 alone, every entry after the push constants is looked for the second block's size too early. The handle runs after them are [NVN2 compute's separate handles in c[0]](#nvn2-computes-separate-handles-in-c0); their places also follow p\*\*\*\*6's ddc8629.
+- **Fix:** `dmsh_build.py` (job `nvn2_cs`) adds up the two blocks, and reports a layout whose push blocks, entries and four handle runs (images, +0xb6, included) do not add up to the size at +0xba. On the host, a storage buffer whose address is kept in the push constants (`c[24]`, `NVN_RB_SBUFU` at `DMSH_PUSH_BANK - 3`) is read from the pushed bytes.
+- **Found on:** PRAGMATA's 6,856 compute layouts (not in the games table) add up only this way; Orbitals (`040004F027560000`)' compute shaders take the same layout.
 
 ### Barrier moves around warp shuffles
 
@@ -1594,6 +1600,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Cause:** the replay reads handles on the CPU, and a write queued earlier in the submission has not landed yet.
 - **Fix:** inline uniform updates keep where their data sits, so the handle is read from the newest one covering it (`pend_read`). The old limit of 256 writes per submission, after which every address counted as written, is gone: pending writes are now indexed by 4 KB page (8,192 per submission).
 - **Found on:** [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md) (it queues more than 256 writes per submission).
+
+### A scalar storage-buffer load that lost its index
+
+- **Symptom:** a 3D background or scene drawn black, every instance at the same place: GPUScene's upload scattered every primitive to slot 0.
+- **Cause:** the translated MSL of a scalar storage-buffer load computes and bounds-checks its offset, but indexes element 0.
+- **Fix:** `dmsh_build.py` `sbuf_scalar_index` gives such a load its index back.
+- **Found on:** Orbitals (`040004F027560000`): the GPUScene upload compute shaders; the title's 3D background.
+- **Check:** `python3 dm/gfx/tests/test_dmsh_sbuf_index.py`.
 
 ### Storage buffer addresses in the game's own uniform buffer
 

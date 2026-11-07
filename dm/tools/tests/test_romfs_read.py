@@ -61,6 +61,27 @@ class ReadImage(unittest.TestCase):
         with romfs.open(self.virtual / 'data/game.zip', 'rb') as f, zipfile.ZipFile(f) as z:
             self.assertEqual(z.read('member'), b'archive member')
 
+    def test_binary_contents_are_preserved_across_partial_reads(self):
+        # Text-mode reads on Windows translate CRLF and treat 0x1a as EOF.
+        data = b'\r\n\x1a\x00\xff' * 1024
+        (self.src / 'data/binary').write_bytes(data)
+        romfs_image.pack(self.src, self.image)
+        with romfs.open(self.virtual / 'data/binary', 'rb') as f:
+            self.assertEqual(f.read(7), data[:7])
+            f.seek(5)
+            self.assertEqual(f.read(), data[5:])
+
+    def test_shader_sources_use_portable_labels_for_images_and_dlc(self):
+        # Profile shader_groups and output tables use '/' even on Windows.
+        with patch.dict(os.environ, DM_GAME='010020D01AD24000'):
+            import shader_split
+        for tag in ('', 'aoc/0'):
+            folder = [label for _, label in shader_split.source_files(str(self.src), tag)]
+            image = [label for _, label in shader_split.source_files(str(self.virtual), tag)]
+            self.assertEqual(folder, image)
+            self.assertIn((tag + '/' if tag else '') + 'data/archive', image)
+            self.assertTrue(all('\\' not in label for label in image))
+
     def test_build_scanners_discover_the_same_inputs_from_image_and_folder(self):
         import gl_shaders
         import vk_shaders

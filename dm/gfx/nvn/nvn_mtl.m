@@ -12176,7 +12176,7 @@ void ms_after(void) {
 // snapshots a frame, each a pass end and full-size copies (GitHub #737). A draw that samples the attachment at its own pixel reads the tile instead (fb_tile_plan): no pass end, no copy.
 // DM_NVN_FB_SNAP=0 none, all a fresh snapshot for every draw sampling an attachment of its pass (diagnostic); DM_NVN_FB_TILE=0 no tile reads
 static int g_fb_mode = -1;   // 0 none, 1 writers with reuse until a barrier, 2 every sampling draw, fresh
-static uint64_t g_fb_bar, g_fb_reuse, g_fb_split;   // game barriers so far (OP_BARRIER with bits); draws that reused a snapshot; passes ended before a write to an attachment an earlier draw read
+static uint64_t g_fb_bar, g_fb_reuse, g_fb_split, g_fb_pool_skip;   // game barriers so far (OP_BARRIER with bits); draws that reused a snapshot; passes ended before a write to an attachment an earlier draw read; draws not taken as depth readers (fb_pool_dread off)
 static uint64_t g_fb_pass = UINT64_MAX; static uint32_t g_fb_wmask, g_fb_rmask, g_fb_dread;   // the current Metal render pass: color attachments written so far, sampled directly; a draw has read its depth attachment (or could have: bindless)
 typedef struct { uint64_t ser, bar, sub, use; int lv, sl; __strong id<MTLTexture> snap; __strong NSArray *lvviews; } fb_cache_t;   // lvviews: one view per level of a mip-chain snapshot (fb_chain_copy); use: when it was last taken or reused (g_fbc_use)
 static fb_cache_t g_fbc[8]; static uint64_t g_fbc_use;
@@ -12379,7 +12379,17 @@ static void fb_prepare(NvProg *pr) {
     int dsw = R.rt.depth && ((S.ds.dt && S.ds.dw) || (S.ds.st && (S.st_wmask[0] || S.st_wmask[1]) && (S.ds.fail_f != NVN_STENCIL_OP_KEEP || S.ds.zfail_f != NVN_STENCIL_OP_KEEP || S.ds.zpass_f != NVN_STENCIL_OP_KEEP
         || S.ds.fail_b != NVN_STENCIL_OP_KEEP || S.ds.zfail_b != NVN_STENCIL_OP_KEEP || S.ds.zpass_b != NVN_STENCIL_OP_KEEP)));
     if (g_enc && dsw && g_fb_dread && (!rt_dsample_on() || (S.ds.dt && S.ds.dw))) { g_fb_split++; g_fb_split_pool += g_fb_dread_pool; g_fb_dread_pool = 0; rp_end(); fb_pass_sync(); }   // the same for its depth and stencil (see rtc_on); a stencil-only write leaves the sampled depth plane as it was
-    if (R.rt.depth && !g_fb_dread && ((fs->rf.pool && pool_ds_read(R.rt.depth) && (g_fb_dread_pool = 1)) || fs->rf.dyn || (fs->rf.bindless && fb_texu_reads(fs, R.rt.depth->serial)))) g_fb_dread = 1;
+    // Profile key fb_pool_dread (games/game.py; DM_NVN_FB_POOL_DREAD=0|1 overrides). On (the default): a fragment shader that reaches the texture pool as an array (TEXP / SAMPP) counts
+    // as reading the pass's depth attachment once a pool shader was seen reading that texture (pool_ds_read), and one with a dynamic slot (TEXD) always, so a later depth-writing draw ends
+    // the pass. Off: only handles that resolve to the depth (above, and fb_texu_reads) count. PRAGMATA's RE Engine G-buffer materials are all texture-pool shaders that write depth: with
+    // every one taken as a reader each material draw was a pass of its own (237 passes a frame in the crew cabin, ~0.95 GB of attachment loads and stores); off, 113 passes and 27 % less
+    // GPU time. Off is wrong for a pool shader that does sample the depth it writes (it would read the pass's start); NVN defines that read only after a texture barrier, which ends no
+    // pass here unless the pass has shader writes
+    static int pool_dread = -1; if (pool_dread < 0) { const char *e = getenv("DM_NVN_FB_POOL_DREAD"); pool_dread = e ? strcmp(e, "0") != 0 : DM_GAME_FB_POOL_DREAD;
+        if (!pool_dread) MLOG("fb_pool_dread off: texture-pool and dynamic-slot fragment shaders are not taken as readers of their pass's depth attachment"); }
+    if (!pool_dread && R.rt.depth && !g_fb_dread && (fs->rf.pool || fs->rf.dyn) && !(++g_fb_pool_skip % 100000))
+        MLOG("fb_pool_dread off: %llu draws of texture-pool / dynamic-slot fragment shaders not taken as depth readers (frame %llu)", (unsigned long long)g_fb_pool_skip, (unsigned long long)atomic_load(&g_cur_frame));
+    if (R.rt.depth && !g_fb_dread && ((pool_dread && ((fs->rf.pool && pool_ds_read(R.rt.depth) && (g_fb_dread_pool = 1)) || fs->rf.dyn)) || (fs->rf.bindless && fb_texu_reads(fs, R.rt.depth->serial)))) g_fb_dread = 1;
     uint64_t tile[4]; int ntile = fb_tile_plan(pr, wm, tile);
     for (int i = 0; i < fs->rf.nb && g_fb_n < 4; i++) {
         const nvn_rbind *b = &fs->rf.b[i];

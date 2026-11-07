@@ -993,6 +993,13 @@ def const_sampler(name):
     h = int(m.group(2), 16)
     return (h >> 14) & 0x3fff if h >> 28 == 3 else None
 
+def ubo_bank(n):
+    """Whether handles read from constant bank n are words the host can read at bind time: the game's uniform buffers c[3]..c[16] (uniform slot n - 3), or NVN2's push constants c[24]
+    (DMSH_PUSH_BANK, uniform "slot" 21, which no game uniform slot reaches; nvn_mtl.m ubo_read reads it from the pushed bytes, as it reads storage buffer addresses there, sbufu_addr).
+    PRAGMATA pushes the handles of 15 shaders' textures and images: its SDF compute passes (cp_t_cb65560_3041000D: the texture word at push byte 0x34 with constant sampler 0x104;
+    cp_i_cb24_4_ .. _A_: images at push bytes 0x10..0x28) and pixel shaders (fp_t_cb24_7, fp_t_cb196632_10568007). Until then those bindings had no slot and the shaders did not load"""
+    return 3 <= n <= 16 or n == abi.PUSH_BANK
+
 def decode_ubo_tex(name):
     """Bindless texture: the handle is written by the game into its own uniform buffer (fp_t_cb7_2A = c[7] word 0x2A). Returns (texture: (uniform slot, byte offset), sampler: (slot, offset));
     handle type 0 = combined handle (one 32-bit word: low 20 bits texture ID, high 12 bits sampler ID), 1 = the sampler handle is in another word (its slot is the high 16 bits of slots − 1). This game's whole library uses only type 0 (1850 shaders)
@@ -1004,14 +1011,14 @@ def decode_ubo_tex(name):
     slots, h = int(m.group(1)), int(m.group(2), 16)
     tb = slots & 0xffff; sb = (slots >> 16) - 1 if slots >> 16 else tb
     o0, o1, ty = h & 0x3fff, (h >> 14) & 0x3fff, h >> 28
-    if not 3 <= tb <= 16 or ty not in (0, 1, 3) or (ty == 1 and sb != 2 and not 3 <= sb <= 16): return None
+    if not ubo_bank(tb) or ty not in (0, 1, 3) or (ty == 1 and sb != 2 and not ubo_bank(sb)): return None
     return (tb - 3, o0 * 4), (('id', o1) if ty == 3 else ('c2', o1 * 4) if ty and sb == 2 else (sb - 3, o1 * 4) if ty else (tb - 3, o0 * 4))
 
 def decode_ubo_img(name):
     """An image whose handle the game keeps in its own uniform buffer (<stage>_i_cb<n>_<word>_<format>: Unreal Engine 5.4 on the Switch 2 keeps every image in c[3]; Orbitals' Unreal Engine 5.6
     compute shaders read their images' handles from uniform slot 0 this way). An image handle names one image ID (low 20 bits), no sampler, so only handle type 0 occurs. Returns (uniform slot, byte offset)"""
     m = re.match(r'[a-z]+_i\w*?_cb(\d+)_([0-9A-F]+)', name)
-    if not m or not 3 <= int(m.group(1)) <= 16: return None
+    if not m or not ubo_bank(int(m.group(1))): return None
     h = int(m.group(2), 16)
     return None if h >> 28 else (int(m.group(1)) - 3, (h & 0x3fff) * 4)
 
@@ -1055,7 +1062,9 @@ def pool_arrays(src):
     if not body: return src
     pools = {}
     def to_pointer(m):
-        if int(m.group(3)) < POOL_MIN or not (m.group(4).endswith('_cb0_40000000') or decode_ubo_tex(m.group(4).removesuffix('Smplr'))): return m.group(0)
+        ut = decode_ubo_tex(m.group(4).removesuffix('Smplr'))
+        if ut and ut[0][0] == abi.PUSH_BANK - 3: ut = None   # an array of pushed handles: the host's tables read uniform slots only (htab_gpu), so it stays as before
+        if int(m.group(3)) < POOL_MIN or not (m.group(4).endswith('_cb0_40000000') or ut): return m.group(0)
         pools[m.group(4)] = (m.group(2), int(m.group(3)))
         return f'{m.group(1)}constant spvPool_{m.group(4)}* {m.group(4)} [[id('
     members = re.sub(r'^(\s*)array<(.+), (\d+)> (\w+) \[\[id\(', to_pointer, body.group(1), flags=re.M)

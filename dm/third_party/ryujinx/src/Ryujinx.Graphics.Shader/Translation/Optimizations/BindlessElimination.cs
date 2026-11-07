@@ -111,6 +111,20 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                 return TableHandle.None;   // GenerateBindlessAccess takes it, as before (a choice among c[2] words: the dynamic handle arrays of tex_dyn_slots)
             }
 
+            // nxnative: a handle built from memory on one of the phi's paths is the read's real handle there, and the constant buffer words among the other inputs are what the
+            // register held before (a stale value on a path where the predicated read does not run). PRAGMATA's SDF compute and pixel shaders read their handle from a uniform buffer
+            // they address at run time (cx[URn][off], ABindlessLoad: a global memory load) and keep it only under a guard (@P2 SEL R13, (R | 0x10400000), 0x10400100); the register
+            // held a push constant before: the high word of a storage buffer address (c24 + 0x34) or a float (c24 + 0x1c). Taken as the handle, that word named no texture the host
+            // could bind (cp_t_cb65560_3041000D, fp_t_cb24_7: no resolved slot, the shaders did not load), and would have named a wrong one. GenerateBindlessAccess indexes the pools by
+            // the value at run time instead, which is the loaded handle wherever the read runs
+            foreach (Operand leaf in PhiLeaves(handle))
+            {
+                if (!IsHandleWord(leaf, true) && BuiltFromMemory(leaf, 0))
+                {
+                    return TableHandle.None;
+                }
+            }
+
             List<(Operand Texture, Operand Sampler)> found = new();
 
             // The rules above first: a c[2] word alone, or a texture word ORed with a sampler word of its bank or a constant sampler. Only when they find none, a second pass takes a word
@@ -327,6 +341,34 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                 return $"{op.Inst}{kind}(" + string.Join(", ", parts) + ")";
             }
             return o.Type.ToString();
+        }
+
+        // nxnative: whether a value is (a choice among, or an OR into) a value loaded from memory: a load or a raw global memory helper (GlobalToStorage), through copies, ORs,
+        // selects (not their condition) and phis, a few levels deep. Arithmetic stops the walk: a float computed from loaded data is no handle (FINAL FANTASY RESONANCE's stale inputs)
+        private static bool BuiltFromMemory(Operand operand, int depth)
+        {
+            if (depth > 8 || operand == null) return false;
+            if (operand.AsgOp is PhiNode phi)
+            {
+                for (int i = 0; i < phi.SourcesCount; i++) if (BuiltFromMemory(phi.GetSource(i), depth + 1)) return true;
+                return false;
+            }
+            if (operand.AsgOp is not Operation op) return false;
+            switch (op.Inst)
+            {
+                case Instruction.Load:
+                case Instruction.Call:
+                    return true;
+                case Instruction.Copy:
+                case Instruction.BitwiseOr:
+                    for (int i = 0; i < op.SourcesCount; i++) if (BuiltFromMemory(op.GetSource(i), depth + 1)) return true;
+                    return false;
+                case Instruction.ConditionalSelect:
+                    for (int i = 1; i < op.SourcesCount; i++) if (BuiltFromMemory(op.GetSource(i), depth + 1)) return true;
+                    return false;
+                default:
+                    return false;
+            }
         }
 
         // The values a phi can take, through the phis it merges (each visited once).

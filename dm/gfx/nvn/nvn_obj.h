@@ -16,7 +16,7 @@ typedef struct { uint32_t magic, flags, origin, depth_mode; void *dbg_cb, *dbg_d
 
 typedef struct { NVNdevice *dev; uint32_t flags; uint64_t cmd_sz, comp_sz, ctl_sz, flush; void *mem; uint64_t mem_sz; } queue_builder_t;
 FITS(queue_builder_t, NVNqueueBuilder);
-typedef struct { uint32_t magic; NVNdevice *dev; uint64_t submits; int origin_ll; uint64_t serial; } queue_t;  FITS(queue_t, NVNqueue);
+typedef struct { uint32_t magic; NVNdevice *dev; uint64_t submits; int origin_ll; uint64_t serial; uint64_t lastf; } queue_t;  FITS(queue_t, NVNqueue);
 
 typedef struct { NVNdevice *dev; void *mem; uint64_t size; uint32_t flags; } pool_builder_t;  FITS(pool_builder_t, NVNmemoryPoolBuilder);
 // A virtual pool (flags 0x200) keeps its sparse state in vp (hle_nvn.c struct vpool, NULL for an aliased one); vmode: 0 not mapped yet, 1 aliased onto one physical pool, 2 sparse
@@ -54,15 +54,40 @@ typedef struct { uint32_t magic; samp_par p; } samp_t;                          
 
 // The per-stage shader keys are not kept in prog_t: the game's real NVNprogram may be smaller than the header's 0xC0 (growing prog_t corrupted the adjacent object in Mario); see prog_keys in hle_nvn.c
 typedef struct { uint32_t magic, nstage; NVNshaderData sd[6]; uint64_t serial; } prog_t;     FITS(prog_t, NVNprogram);   // serial: table key for the replay layer's resolved result
+// NVN2 (Switch 2) keeps programs in 0xa0 bytes: Donkey Kong Bananza initializes them 0xa0 apart (main+0x8aa1cc: programs at +0x18, +0xb8, +0x158)
+_Static_assert(sizeof(prog_t) <= 0xa0, "prog_t exceeds an NVN2 program");
 
-typedef struct { uint32_t magic, fenced; uint64_t fence; } sync_t;   /* fenced 2: by WindowAcquireTexture */                           FITS(sync_t, NVNsync);
+enum {
+    NVN_SYNC_FENCE_NONE = 0,
+    NVN_SYNC_FENCE_GPU = 1,
+    NVN_SYNC_FENCE_ACQUIRE = 2,
+    NVN_SYNC_FENCE_SAF_PENDING = 3,      // DM_NVN_SUBMIT_AT_FLUSH: fenced when the held submissions replay
+    NVN_SYNC_FENCE_QUEUE_PREFIX = 5,     // DM_NVN_XQ_EVENTS (PR #1245 used 3 and 4; 3 is SAF's here)
+    NVN_SYNC_FENCE_RECORDED_PENDING = 6,
+};
+typedef struct {
+    uint32_t magic, fenced;
+    uint64_t fence; // GPU fence, or logical sequence for NVN_SYNC_FENCE_QUEUE_PREFIX
+    uint64_t queue; // queue serial for a logical sequence
+} sync_t;
+FITS(sync_t, NVNsync);
 typedef struct { const pool_t *pool; int64_t off; } ev_builder_t;                             FITS(ev_builder_t, NVNeventBuilder);
 typedef struct { uint32_t magic; volatile uint32_t *val; const pool_t *pool; int64_t off; } ev_t; FITS(ev_t, NVNevent);   // pool / off: EventGetMemoryPool / Offset
 
 typedef struct { NVNdevice *dev; void *native; int32_t ntex, interval; NVNtexture *tex[4]; } win_builder_t;
 FITS(win_builder_t, NVNwindowBuilder);
 // avail[i]: time at which swapchain image i can be acquired again (ns, monotonic clock) = its display time + one present period; pace: target time of this window's present pacer
-typedef struct { uint32_t magic; void *native; int32_t ntex, interval, next, crop[4]; NVNtexture *tex[4]; uint64_t presents, avail[4], pace, ticket[4]; } win_t;   // ticket[i]: ticket of the most recent present of image i
+typedef struct {
+    uint32_t magic;
+    void *native;
+    int32_t ntex, interval, next, crop[4];
+    NVNtexture *tex[4];
+    uint64_t presents, avail[4], pace;
+    uint64_t ticket[4];       // most recent present ticket for each image
+    uint64_t pfence[4];       // the fence of the commits before that present (NVN2 acquire syncs)
+    uint64_t submit_queue[4]; // DM_NVN_XQ_EVENTS: logical queue and sequence that schedule that present (0: not scheduled)
+    uint64_t submit_seq[4];
+} win_t;
 FITS(win_t, NVNwindow);
 
 // Command buffer: commands are written into the command memory given by the game (AddCommandMemory), handle = segment start address; when it runs out, the game is called back for more memory
@@ -107,7 +132,7 @@ enum {
     OP_BIND_PROGRAM, OP_BIND_STATE, OP_BIND_VATTR, OP_BIND_VSTREAM, OP_BIND_VBUF,
     OP_BIND_UBO, OP_BIND_SSBO, OP_BIND_TEX, OP_BIND_SAMP,
     OP_STENCIL, OP_POLY_OFFSET, OP_DRAW, OP_DRAW_IDX, OP_DISPATCH, OP_BARRIER,
-    OP_SET_TEX_POOL, OP_SET_SAMP_POOL, OP_COPY_B2T, OP_COPY_STRIDE, OP_BLEND_COLOR, OP_COPY_T2B, OP_BIND_IMG, OP_COPY_T2T, OP_RESET_COUNTER, OP_CLEAR_TEX, OP_CLEAR_BUF, OP_DEPTH_CLAMP, OP_RENDER_COND, OP_FENCE_SYNC, OP_TF_BIND, OP_TF_STATE, OP_RAST_DISCARD, OP_VP_SWIZZLE, OP_BIND_TEX1, OP_PRIM_RESTART, OP_BIND_UBO_SMALL, OP_BIND_VBUF1, OP_DRAW_TEX, OP_ALPHA_REF, OP_PUSH_CONST, OP_DLSS, OP_MULTI_DRAW, OP_COUNT_
+    OP_SET_TEX_POOL, OP_SET_SAMP_POOL, OP_COPY_B2T, OP_COPY_STRIDE, OP_BLEND_COLOR, OP_COPY_T2B, OP_BIND_IMG, OP_COPY_T2T, OP_RESET_COUNTER, OP_CLEAR_TEX, OP_CLEAR_BUF, OP_DEPTH_CLAMP, OP_RENDER_COND, OP_FENCE_SYNC, OP_TF_BIND, OP_TF_STATE, OP_RAST_DISCARD, OP_VP_SWIZZLE, OP_BIND_TEX1, OP_PRIM_RESTART, OP_BIND_UBO_SMALL, OP_BIND_VBUF1, OP_DRAW_TEX, OP_ALPHA_REF, OP_PUSH_CONST, OP_DLSS, OP_MULTI_DRAW, OP_WAIT_EVENT, OP_WAIT_SYNC, OP_COUNT_
 };
 // Payload (immediately follows op_hdr)
 typedef struct {
@@ -204,7 +229,7 @@ typedef struct { const tex_t *tex[DLSS_TEXTURES]; uint64_t net; int32_t iw, ih, 
 typedef struct { uint64_t addr, size; uint32_t value, _pad; } p_clear_buf;   // buffer filled with a 32-bit value (ClearBuffer)
 typedef struct { float rgba[4]; } p_blend_color;
 typedef struct { float ref; } p_alpha_ref;
-typedef struct { uint16_t compute, offset; uint32_t size; uint8_t data[]; } p_push_const;   // NVN2 push constants: the bytes at offset in the graphics or compute block (DMSH_PUSH_*)   // SetAlphaRef: the reference of the alpha test (ColorStateSetAlphaTest; nvn_mtl.m at_bind)
+typedef struct { uint8_t compute, block; uint16_t offset; uint32_t size; uint8_t data[]; } p_push_const;   // NVN2 push constants: the bytes at offset in the graphics or compute block (DMSH_PUSH_*)   // SetAlphaRef: the reference of the alpha test (ColorStateSetAlphaTest; nvn_mtl.m at_bind)
 typedef struct { int32_t index, pad; uint64_t addr, size; } p_tf_bind;   // BindTransformFeedbackBuffer(s): one record per buffer (index 0-3)
 typedef struct { int32_t what, pad; uint64_t ctl; } p_tf_state;          // what: 0 begin, 1 end, 2 pause, 3 resume; ctl = the game's 32-byte control buffer
 typedef struct { int32_t on; } p_rast_discard;
@@ -278,6 +303,7 @@ int nvn_tex_mirror_t2t(const tex_t *s, unsigned sl, unsigned ss, const NVNcopyRe
 // a stage whose code area was not yet in any memory pool then is computed the first time it is asked for, from the host's copy of its control section. The keys belong to
 // the program's serial, so a copy of the NVNprogram the game made after SetShaders finds them. Returns 0 = no such stage
 int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]);
+int prog_push0(const prog_t *p, unsigned stage);   // NVN2 compute: bytes of the first push-constant block (control +0xa9 words, 16-byte aligned), where the second starts; -1 unknown
 void nvn_ctl_lens(const void *control, uint32_t *nctl, uint32_t *ncode);   // a control section's bytes in the shader key and its code area's length (NVN or NVN2), hle_nvn.c
 void mtl_reg_samp(int id, const samp_par *p);
 void mtl_prog_release(prog_t *p);

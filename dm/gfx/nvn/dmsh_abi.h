@@ -29,6 +29,7 @@
 #define DMSH_C0_SSBO_PS 0x510            // pixel stage storage buffer table
 #define DMSH_C0_SSBO_TS 0x670            // NVN2 task stage storage buffer table: Mario Kart World's task shaders read c0 0x670 and 0x680, and the game binds their buffers at slots 0 and 1
 #define DMSH_C0_SSBO_MS 0x770            // NVN2 mesh stage storage buffer table: its mesh shaders read c0 0x770, 0x780, 0x790 and 0x7b0, and it binds slots from 0
+#define DMSH_C0_SSBO_MS_HULL 0x210       // the same for a mesh shader in the hull stage's slot, as NVN2 keeps one (SDF control +0x56 = 7): PRAGMATA's 539 mesh shaders read slots 0..7 at 0x210..0x280 (bank 26, InstEmitAmpere.cs AMapC0)
 #define DMSH_MESH_FIRST_SLOT 29          // a task or mesh function's buffer: the draw's first workgroup (dmsh_meshstage.py, nvn_geometry.inc mtk_encode)
 #define DMSH_C0_DISPATCH 0x200           // compute: the dispatch's workgroup counts x, y, z (32 bits each; Link's Awakening's light culling)
 #define DMSH_C0_DISPATCH_NVN2 4          // NVN2 compute keeps them here, below its per-shader layout at 0x10 (x and y read by Fire Emblem Fortune's Weave's light culling; z by their order)

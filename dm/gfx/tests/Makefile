@@ -53,6 +53,8 @@ t_nvn: t_nvn.c ../nvn/hle_nvn.c ../../host/crash.c ../../host/hle_bigstack.c t_h
 	clang $(CFLAGS) -fobjc-arc -o $@ t_nvn.c ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(GFX) $(FW)
 t_dirty_slots: t_dirty_slots.c ../nvn/nvn_dirty.c ../../host/crash.c ../nvn/nvn_dirty.h $(GAME_H)
 	clang $(CFLAGS) -o $@ t_dirty_slots.c ../../host/crash.c ../nvn/nvn_dirty.c
+t_dirty_pieces: t_dirty_pieces.c ../nvn/nvn_dirty.c ../../host/crash.c ../nvn/nvn_dirty.h $(GAME_H)
+	clang $(CFLAGS) -o $@ t_dirty_pieces.c ../../host/crash.c ../nvn/nvn_dirty.c
 t_dirty_race: t_dirty_race.c ../nvn/nvn_dirty.c ../../host/crash.c ../nvn/nvn_dirty.h $(GAME_H)
 	clang $(CFLAGS) -o $@ t_dirty_race.c ../../host/crash.c
 t_dirty_retire_race: t_dirty_retire_race.c ../nvn/nvn_dirty.c ../../host/crash.c ../nvn/nvn_dirty.h $(GAME_H)
@@ -81,6 +83,9 @@ t_cover: t_cover.c ../nvn/nvn_cover.h
 	clang -O1 -Wall -o $@ t_cover.c
 t_pace: t_pace.c ../nvn/nvn_pace.h
 	clang -O1 -Wall -o $@ t_pace.c
+
+t_lag: t_lag.c ../nvn/nvn_lag.h
+	clang -O1 -Wall -o $@ t_lag.c
 t_timestamp: t_timestamp.c ../nvn/nvn_timestamp.h
 	$(CC) -std=c11 -O2 -g -Wall -Wextra -Werror -o $@ $<
 t_counter_clock: t_counter_clock.m ../../host/hle_os.c ../../host/dm.h $(MTL_T_DEP)
@@ -177,6 +182,34 @@ t_pool_notes: t_pool_notes.m $(MTL_T_DEP)
 check_t_pool_notes: RUN_ENV = MTL_DEBUG_LAYER=1
 t_sparse_tiles: t_sparse_tiles.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_sparse_tiles.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
+t_sparse_buf: t_sparse_buf.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_sparse_buf.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
+t_sparse_span: t_sparse_span.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_sparse_span.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
+t_sparse_span2: t_sparse_span2.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_sparse_span2.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
+t_sparse_span3: t_sparse_span3.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_sparse_span3.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
+.PHONY: check_t_sparse_span3
+check_t_sparse_span3: t_sparse_span3
+	MTL_DEBUG_LAYER=1 ./t_sparse_span3 && MTL_DEBUG_LAYER=1 DM_NVN_SPARSE_SPAN_ALL=0 DM_NVN_REDIR_RETRY=0 DM_NVN_BIND_CLAMP=0 ./t_sparse_span3 || true
+t_flightrec: t_flightrec.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_flightrec.m $(MTL_T_SRC) $(FW)
+check_t_flightrec: RUN_ENV = MTL_DEBUG_LAYER=1
+.PHONY: check_t_sparse_span2
+check_t_sparse_span2: t_sparse_span2
+	MTL_DEBUG_LAYER=1 ./t_sparse_span2 && MTL_DEBUG_LAYER=1 DM_NVN_SPARSE_SPAN_SIZED=0 ./t_sparse_span2
+# expl2 (nvn_expl2.inc): DM_NVN_VA_AUDIT / DM_NVN_REMAP_REFRESH / DM_NVN_ALIAS_FENCE rules, CPU only
+t_expl2: t_expl2.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_expl2.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
+# race-diag (nvn_racediag.inc): DM_NVN_WRITEWATCH, DM_NVN_SUBMIT_AT_FLUSH=3 (+ _KEYS), DM_NVN_SERIALIZE=1 bookkeeping, CPU only
+t_racediag: t_racediag.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_racediag.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
+# lightfix (DM_NVN_SB_FREEZE_WW: nvn_racediag.inc + sbf_read), CPU only
+t_lfix: t_lfix.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_lfix.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
+t_sparse_safe: t_sparse_safe.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_sparse_safe.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
 t_readback: t_readback.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_readback.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
 .PHONY: check_t_readback
@@ -255,6 +288,9 @@ check_t_cpu_storage: RUN_ENV = MTL_DEBUG_LAYER=1
 t_initial_uncached: t_initial_uncached.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_initial_uncached.m $(MTL_T_SRC) $(FW)
 check_t_initial_uncached: RUN_ENV = MTL_DEBUG_LAYER=1
+t_block_alias: t_block_alias.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_block_alias.m $(MTL_T_SRC) $(FW)
+check_t_block_alias: RUN_ENV = MTL_DEBUG_LAYER=1
 t_upload_slots: t_upload_slots.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_upload_slots.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_upload_slots
@@ -430,6 +466,11 @@ t_image_attachment_store: t_image_attachment_store.m $(MTL_T_DEP)
 check_t_image_attachment_store: RUN_ENV = MTL_DEBUG_LAYER=1
 t_image_primitive_id: t_image_primitive_id.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_image_primitive_id.m $(MTL_T_SRC) $(FW)
+t_tbuf_pfv: t_tbuf_pfv.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_tbuf_pfv.m $(MTL_T_SRC) $(FW)
+check_t_tbuf_pfv: RUN_ENV = MTL_DEBUG_LAYER=1
+t_pso_intbits: t_pso_intbits.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_intbits.m $(MTL_T_SRC) $(FW)
 t_unwritten_store: t_unwritten_store.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_unwritten_store.m $(MTL_T_SRC) $(FW)
 check_t_unwritten_store: RUN_ENV = MTL_DEBUG_LAYER=1
@@ -470,6 +511,9 @@ check_t_image_usage: RUN_ENV = MTL_DEBUG_LAYER=1
 t_image_type: t_image_type.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_image_type.m $(MTL_T_SRC) $(FW)
 check_t_image_type: RUN_ENV = MTL_DEBUG_LAYER=1
+t_image_atomic64: t_image_atomic64.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_image_atomic64.m $(MTL_T_SRC) $(FW)
+check_t_image_atomic64: RUN_ENV = MTL_DEBUG_LAYER=1
 t_stencil_view: t_stencil_view.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_stencil_view.m $(MTL_T_SRC) $(FW)
 check_t_stencil_view: RUN_ENV = MTL_DEBUG_LAYER=1
@@ -501,3 +545,20 @@ check_t_logic: t_logic
 # MUFU.SIN / COS lowered from turns through the fraction (InstEmitAmpereAlu.cs ATurnsToRadians), on the GPU against a double-precision reference
 t_mufu_turns: t_mufu_turns.m
 	clang -O1 -g -Wall -fobjc-arc -o $@ t_mufu_turns.m -framework Metal -framework Foundation
+
+# DM_NVN_GPUTIME (nvn_gputime.inc) on the GPU: a slow kernel (calibrated to about 150 ms, at most about 250 ms) named among fast ones, a slow draw pass, a slow draw (DM_NVN_GPUTIME_DRAWS)
+t_gputime: t_gputime.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_gputime.m $(MTL_T_SRC) $(FW)
+check_t_gputime: RUN_ENV = MTL_DEBUG_LAYER=1
+
+# Cross-submission write-after-read through the replay's encoders: a dispatch committed after a draw pass never changes what the pass read (buffer and 3D image), with a no-barrier control
+t_xsub_war: t_xsub_war.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_xsub_war.m $(MTL_T_SRC) $(FW)
+t_queue_vis: t_queue_vis.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_queue_vis.m $(MTL_T_SRC) $(FW)
+check_t_queue_vis: RUN_ENV = MTL_DEBUG_LAYER=1
+t_queue_alloc: t_queue_alloc.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_queue_alloc.m $(MTL_T_SRC) $(FW)
+check_t_queue_alloc: RUN_ENV = MTL_DEBUG_LAYER=1
+t_queue_schedule: t_queue_schedule.c ../nvn/nvn_queue_schedule.c ../nvn/nvn_queue_schedule.h
+	clang -std=c11 -O2 -g -Wall -Wextra -Werror -o $@ t_queue_schedule.c ../nvn/nvn_queue_schedule.c

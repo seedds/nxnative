@@ -57,6 +57,38 @@ OpFunctionEnd
 '''
 
 
+# A domain shader (a post-tessellation vertex function in Metal, which has no SIMD-group attributes) that reads only the lane ID and has no uvec4 type
+# (PRAGMATA's 859225c91a5fe2b2 and f1ad8f78c6c1551e): the rewrite declares the type its mask constants need
+DOMAIN = '''OpCapability Shader
+OpCapability Tessellation
+OpCapability GroupNonUniform
+OpMemoryModel Logical GLSL450
+OpEntryPoint TessellationEvaluation %main "main" %lane %position
+OpExecutionMode %main Triangles
+OpExecutionMode %main SpacingEqual
+OpExecutionMode %main VertexOrderCcw
+OpDecorate %lane BuiltIn SubgroupLocalInvocationId
+OpDecorate %position BuiltIn Position
+%void = OpTypeVoid
+%fn = OpTypeFunction %void
+%bool = OpTypeBool
+%uint = OpTypeInt 32 0
+%float = OpTypeFloat 32
+%v4float = OpTypeVector %float 4
+%pu = OpTypePointer Input %uint
+%po = OpTypePointer Output %v4float
+%lane = OpVariable %pu Input
+%position = OpVariable %po Output
+%main = OpFunction %void None %fn
+%entry = OpLabel
+%value = OpLoad %uint %lane
+%f = OpConvertUToF %float %value
+%p = OpCompositeConstruct %v4float %f %f %f %f
+OpStore %position %p
+OpReturn
+OpFunctionEnd
+'''
+
 @unittest.skipUnless(shutil.which('spirv-as') and shutil.which('spirv-val') and shutil.which(SPIRV_CROSS), 'requires SPIR-V tools')
 class SubgroupTests(unittest.TestCase):
     def test_mask_component_pointer_becomes_valid_constant_extraction(self):
@@ -73,6 +105,21 @@ class SubgroupTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertNotIn('simd_', result.stdout)
                 self.assertFalse(scope['spv_single_lane'](spv))
+
+
+    def test_domain_shader_lane_id_without_a_uvec4_type(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            src, spv = root / 'domain.spvasm', root / 'domain.spv'
+            src.write_text(DOMAIN)
+            subprocess.run(['spirv-as', '--target-env', 'spv1.3', str(src), '-o', str(spv)], check=True, capture_output=True)
+            self.assertTrue(scope['spv_single_lane'](spv))
+            result = subprocess.run(['spirv-val', '--target-env', 'spv1.3', str(spv)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            result = subprocess.run([SPIRV_CROSS, '--msl', str(spv)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn('simdgroup', result.stdout)
+            self.assertIn('= 0u;', result.stdout)   # the lane ID of a one-lane subgroup
 
 
 if __name__ == '__main__':

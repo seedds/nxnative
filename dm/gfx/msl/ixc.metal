@@ -12,3 +12,24 @@ kernel void ixc_expand(constant ejob &j [[buffer(0)]], uint i [[thread_position_
   if (i >= m) return;
   uint t = i / 3, c = i % 3, p = j.prim == 7 ? t / 2 * 4 + (c ? c + (t & 1) : 0) : j.prim == 6 ? (c ? t + c : 0) : i, x = j.rec[2] + p;
   j.out[i] = (ulong)x * j.isz + j.isz > j.ilen ? 0u : j.isz == 1 ? uint(j.ib[x]) : j.isz == 2 ? uint(((device const ushort *)j.ib)[x]) : ((device const uint *)j.ib)[x]; }
+// Indirect dispatch arguments clamped before the dispatch reads them (nvn_mtl.m dispatch): a group count the GPU wrote from bad data (billions of threadgroups) runs
+// for ever on the GPU and is not reclaimed when the process exits (PRAGMATA's first real frame, twice followed by the Mac's WindowServer stopping)
+struct djob { device const uint *rec; device uint *out; uint maxdim; uint maxtotal; };
+kernel void dpc_clamp(device const djob *j [[buffer(0)]]) {
+  uint x = min(j->rec[0], j->maxdim), y = min(j->rec[1], j->maxdim), z = min(j->rec[2], j->maxdim);
+  bool ok = (ulong)x * y * z <= j->maxtotal;
+  j->out[0] = ok ? x : 0u; j->out[1] = ok ? y : 0u; j->out[2] = ok ? z : 0u; }
+// DrawMeshTasksIndirect (nvn_geometry.inc mti_run): the guest record becomes {first, w1, w2, w3} for the mesh stage's first-workgroup buffer (the shader reads word 0), then
+// MTLDispatchThreadgroupsIndirectArguments {count, 1, 1} 16 bytes on, and the raw count at word 7. first_word ~2 (auto, the default): a record {c, 1, 1, .} or {c, 0, 1, .} is
+// c workgroups from 0 (PRAGMATA's title terrain and near-scene records, proven by captures); any other record keeps the reading below (first = word 2) until its meaning is proven.
+// Otherwise first is word first_word: 2 for {count, instances, first, base instance} (DM_NVN_MESH_INDIRECT=draw), 1 for {count, first} (nv). The count is capped: a count the GPU
+// wrote from bad data would otherwise draw for ever
+struct mjob { device const uint *rec; device uint *out; uint first_word, cap; };
+kernel void mti_args(device const mjob *j [[buffer(0)]], uint i [[threadgroup_position_in_grid]]) {
+  device const uint *s = j[i].rec; device uint *d = j[i].out; uint n = s[0];
+  if (j[i].first_word == 0xfffffffdu) {   // auto
+    bool z = s[2] == 1u && (s[1] == 1u || s[1] == 0u);
+    d[0] = z ? 0u : s[2]; d[1] = s[1]; d[2] = s[2]; d[3] = s[3];
+    d[4] = n <= j[i].cap ? n : 0u; d[5] = 1u; d[6] = 1u; d[7] = n; return; }
+  d[0] = s[j[i].first_word]; d[1] = 0u; d[2] = 0u; d[3] = 0u;
+  d[4] = n <= j[i].cap ? n : 0u; d[5] = 1u; d[6] = 1u; d[7] = n; }

@@ -147,9 +147,15 @@ static void x360_start(void) {
     const char *e = getenv("DM_X360"); if (e && !atoi(e)) return;
     g_x360 = [NSMutableArray new];
     atexit(x360_quiet);
-    CFMutableDictionaryRef m = [IOUSBHostInterface createMatchingDictionaryWithVendorID:@0x045e productID:nil bcdDevice:nil interfaceNumber:nil configurationValue:nil
-                                                                         interfaceClass:@0xff interfaceSubclass:@0x5d interfaceProtocol:@0x81 speed:nil productIDArray:@[@0x0291, @0x0719, @0x02a9]];
-    g_x360_port = IONotificationPortCreate(kIOMainPortDefault); if (!g_x360_port || !m) return;
+    // IOServiceMatching (a Create function: owned, consumed below) rather than IOUSBHostInterface's createMatchingDictionary..., which hands over an owned dictionary from an
+    // Objective-C method the static analyzer takes as not owned by its name
+    CFMutableDictionaryRef m = IOServiceMatching(kIOUSBHostInterfaceClassName);
+    if (m) {
+        NSMutableDictionary *md = (__bridge NSMutableDictionary *)m;
+        md[@kUSBHostMatchingPropertyVendorID] = @0x045e; md[@kUSBHostMatchingPropertyProductIDArray] = @[@0x0291, @0x0719, @0x02a9];
+        md[@kUSBHostMatchingPropertyInterfaceClass] = @0xff; md[@kUSBHostMatchingPropertyInterfaceSubClass] = @0x5d; md[@kUSBHostMatchingPropertyInterfaceProtocol] = @0x81;
+    }
+    g_x360_port = IONotificationPortCreate(kIOMainPortDefault); if (!g_x360_port || !m) { if (m) CFRelease(m); return; }
     IONotificationPortSetDispatchQueue(g_x360_port, dispatch_get_main_queue());
     if (IOServiceAddMatchingNotification(g_x360_port, kIOFirstMatchNotification, m, x360_matched, NULL, &g_x360_iter) != KERN_SUCCESS) return;   // takes m
     x360_matched(NULL, g_x360_iter);   // the receivers already plugged in; this also arms the notification for later ones

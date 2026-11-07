@@ -798,6 +798,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - `image atomics on a texture Metal cannot run them on` when a shader's R32Uint image view is backed by an RGBA8 color texture. → [Atomic reinterpretation of RGBA8](../reference/rendering.md#atomic-reinterpretation-of-rgba8)
 - expensive texture creation can repeatedly scan all live serials when deciding which old shared storage to retire. → [A storage takeover walked the serial table for each entry](../reference/rendering.md#a-storage-takeover-walked-the-serial-table-for-each-entry-1)
 - many small render passes end before successive depth-writing draws even when their material textures do not contain the depth attachment. → [Uniform-addressed material handles cause depth-pass splits](../reference/rendering.md#uniform-addressed-material-handles-cause-depth-pass-splits)
+- with `DM_NVN_BARRIER=game`, draw passes still receive full consumer barriers after game barriers that order only fragments, limiting overlap of later geometry with earlier fragment work. → [Fragment-only game barriers unnecessarily serialize geometry](../reference/rendering.md#fragment-only-game-barriers-unnecessarily-serialize-geometry)
 
 ## Shaders
 
@@ -1057,6 +1058,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - a raw global memory read of a memory pool made after the shader's arguments were encoded gets 0, though the pool exists when the GPU runs it; a task shader that reads both ends of a range this way loops `(0 - 1) >> 5` times and hangs the GPU. The memory report's `raw pool table words at commit` line counts the words that were out of date. → [Raw pool table words that predate the pools](../reference/shaders.md#raw-pool-table-words-that-predate-the-pools)
 - the translated primitive-index helper repeatedly compares and swaps a packed shared-memory word when neighboring lanes write different index bytes. This suggested a possible cost in foliage mesh passes, but the whole-game improvement was not established. → [Packed mesh primitive indices contend on byte-store atomics](../reference/shaders.md#packed-mesh-primitive-indices-contend-on-byte-store-atomics)
 - a shader reading consecutive fields through raw guest addresses repeats the GMEM hint and binary search for every word. Foliage programs can issue more than a hundred such reads per invocation. → [Repeated raw address lookups search the same range](../reference/shaders.md#repeated-raw-address-lookups-search-the-same-range)
+- translated particle kernels contain dozens of calls to `spvMulExtended` even when only the high word of an unsigned multiplication by a constant power of two is used. → [Unsigned multiply-high by a power of two keeps an unoptimized helper](../reference/shaders.md#unsigned-multiply-high-by-a-power-of-two-keeps-an-unoptimized-helper)
 
 ## Game state
 

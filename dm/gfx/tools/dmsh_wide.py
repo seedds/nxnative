@@ -507,3 +507,29 @@ def _cache_raw_quads(msl, tables, entries, entry_bytes):
         for at, text in sorted(edits, reverse=True): after = after[:at] + text + after[at:]
         return before + '\nstruct dm_raw_quad_range { ulong s; ulong e; uint i; };\n' + changed + after
     return msl
+
+
+# SPIRV-Cross keeps spvMulExtended optnone to avoid a Metal compiler error.
+# For an unsigned high word with a constant 2**p operand, the exact identity
+# high32(x * 2**p) = x >> (32-p) avoids that helper entirely. Preserve the
+# helper and its compiler workaround for every unproved form. The zero case
+# uses x & 0 to preserve evaluation rather than introducing a shift by 32.
+_MULHI_HELPER = re.compile(r'template<typename T, typename U, typename V>\s*\[\[clang::optnone\]\] T spvMulExtended\(V l, V r\)\s*\{\s*return T\{U\(l \* r\), U\(mulhi\(l, r\)\)\};\s*\}')
+_MULHI_CALL = re.compile(r'\(spvMulExtended<(_\d+), uint>\(uint\((_[0-9]+)\), ([0-9]+)u\)\)\._m1')
+
+
+def power_of_two_mulhi(msl):
+    if not _MULHI_HELPER.search(msl): return msl
+    # Do not reinterpret a different helper or an ambiguous result structure.
+    if len(_MULHI_HELPER.findall(msl)) != len(re.findall(r'\bT spvMulExtended\(', msl)): return msl
+    valid = set()
+    for name in {m[1] for m in _MULHI_CALL.finditer(msl)}:
+        bodies = re.findall(r'\bstruct ' + name + r'\s*\{([^{}]*)\};', msl)
+        if bodies and all(re.fullmatch(r'\s*uint _m0;\s*uint _m1;\s*', b) for b in bodies): valid.add(name)
+
+    def sub(match):
+        n = int(match[3])
+        if match[1] not in valid or n < 1 or n >= 2**32 or n & (n - 1): return match[0]
+        return f'(uint({match[2]}) & 0u)' if n == 1 else f'(uint({match[2]}) >> {33 - n.bit_length()}u)'
+
+    return _MULHI_CALL.sub(sub, msl)

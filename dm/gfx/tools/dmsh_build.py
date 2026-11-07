@@ -1577,6 +1577,7 @@ def finish(key, w, j, c1):
     try: src = raw_log_opt(key, j['stage'], src, res)
     except ValueError as e: return 'reflection failed', str(e)[:160], None
     src = dmsh_wide.wide_loads(src)   # storage words the translator split, read whole again (see dmsh_wide.py)
+    src = dmsh_wide.power_of_two_mulhi(src)   # exact uint high-word power-of-two identity
     # Reuse the raw address lookup only for read-only ordinary Ampere compute.
     # A second synthetic binding is the write log: keep those kernels scalar.
     if dmsh_chain.raw_load_quads() and j['stage'] == 'cs' and j.get('arch') == 'sm86' and not j.get('mesh_stage'):

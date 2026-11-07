@@ -394,6 +394,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** `hle_hid.c` answers it. On Horizon a device is mounted when the npad's connected controller has the handle's style and an actuator on that side; the host reports it mounted when the channel has an output, as `GetVibrationDeviceInfo` reports the device.
 - **Found on:** [Super Mario Odyssey](../../dm/games/0100000000010000/README.md) 1.4.1, entering a Sand Kingdom pipe (`main+0x5d3150` asks for each handle of a controller whether any is mounted; GitHub issue #715). No other local game imports it. [Kirby Air Riders](../../dm/games/040077201BE50000/README.md) calls the Switch 2's form, `IsOunceVibrationDeviceMounted`, for its handles soon after boot, answered the same way. It crashed a run with a window, and no headless run; why only that one was not checked.
 
+The SDK 22 Ounce query has its own exported name, `nn::hid::IsOunceVibrationDeviceMounted`.
+Ocarina of Time v131072 calls it when playing an ocarina note: both local November 7 logs abort
+with Result `0xe15` at `sdk+0x6c8e54`, through `sdk+0x6c9390` and `sdk+0x6cd610`.
+The hook from upstream commit `8feddfee` answers through `vib_targets`, just like the existing
+query. This branch imports that implementation unchanged (issue #1433), rather than adding
+another service stub. Found on [Ocarina of Time](../../dm/games/0400486024DEC000/README.md#ocarina-note-abort-november-7).
+
 ### Vibration handles before a controller is reported
 
 - **Symptom:** `DM_RUMBLE_LOG=1` shows the game's startup handle request answered with none, then every vibration value sent to handle 0 and reaching no output for the whole session, although a controller with haptics (a DualSense on the Mac) is connected. A game that rumbles would stay silent.

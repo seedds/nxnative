@@ -102,10 +102,17 @@ static void atomic_alias_case(void) { @autoreleasepool {
     id<MTLComputePipelineState> pipeline = lib ? [g_dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"stamp"] error:&error] : nil;
     CHECK(pipeline != nil, "native atomic shader compiled"); if (!pipeline) return;
     id<MTLBuffer> result = [g_dev newBufferWithLength:4 options:MTLResourceStorageModeShared];
+    id<MTLFence> stamped = [g_dev newFence];
     id<MTLCommandBuffer> cb = q_cb(); id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
     [enc setComputePipelineState:pipeline]; [enc setTexture:atomic atIndex:0];
-    [enc dispatchThreadgroups:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)]; [enc endEncoding];
+    [enc dispatchThreadgroups:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)];
+    // This standalone Metal 3 probe writes the integer view and reads the color
+    // view. Explicitly order those aliases: without the fence, its readback can
+    // contain the pre-atomic clear even though the command buffer completes.
+    // The loop below separately checks the production Metal 4 alias barriers.
+    [enc updateFence:stamped]; [enc endEncoding];
     id<MTLBlitCommandEncoder> copy = [cb blitCommandEncoder];
+    [copy waitForFence:stamped];
     [copy copyFromTexture:rgba sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(1,1,1)
                   toBuffer:result destinationOffset:0 destinationBytesPerRow:4 destinationBytesPerImage:4];
     [copy endEncoding]; [cb commit]; [cb waitUntilCompleted];
@@ -134,6 +141,9 @@ static void atomic_alias_case(void) { @autoreleasepool {
     for (unsigned i = 0; i < N; i++) CHECK(((uint32_t *)outputs.contents)[i] == (seeds[i] | 0x10203040u), "Metal 4 barriers preserve each color-write/atomic-write/color-read result");
     res_remove(inputs); res_remove(outputs);
     mtl_sub_begin(); mtl_alias_drop_pool(&pool); mtl_sub_commit(); mtl_drain();
+    // GPU completion publishes the fence before feedback retires allocations.
+    // Match t_image_alias: wait for that handler before checking CPU residency.
+    dispatch_sync(g_feedback_q, ^{}); defer_drain();
     CHECK(![g_res_objects containsObject:rgba] && ![g_res_objects containsObject:rgba.parentTexture], "retiring the pool removes atomic storage from residency");
 } }
 int main(void) { @autoreleasepool {

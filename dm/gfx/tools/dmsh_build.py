@@ -1772,17 +1772,25 @@ def fin(key, wb):
                 if e.name.startswith((key, 'job1_' + key)) and e.is_file(): os.unlink(e.path)
         with _prog['lock']: DONE['n'] += 1; n = DONE['n']
         progress('compiling', n, len(keys), cached=len(cache_hits), misses=NMISS)
-# Two phases: paired vertex shaders read their pixel shaders' MSL (vs_pad), so they go last, in batches of their own. The next batch is translated while this one is finished
-batches = [b[i:i + BATCH] for b in ([k for k in keys if k not in PAIRS], [k for k in keys if k in PAIRS]) for i in range(0, len(b), BATCH)]
-res = []
+# Two phases: paired vertex shaders read their pixel shaders' MSL (vs_pad), so they go last, in batches of their own. The next batch is translated while this one is finished, and its
+# shaders are queued before this batch's last ones are done (settle): a batch waited for whole kept the workers idle behind its slowest compile (one uber shader of a batch of 72 held the rest)
+batches = [(n, b[i:i + BATCH]) for n, b in enumerate(([k for k in keys if k not in PAIRS], [k for k in keys if k in PAIRS])) for i in range(0, len(b), BATCH)]
+res, queued = [], collections.deque()
+def settle(left):   # waits for the oldest queued batches until `left` remain, collecting their results in order; a batch's working folder goes with it
+    while len(queued) > left:
+        wb, futures = queued.popleft()
+        res.extend(f.result() for f in futures)
+        shutil.rmtree(wb, ignore_errors=True)
 with cf.ThreadPoolExecutor(1) as tx, cf.ThreadPoolExecutor(NJ) as ex:
-    nxt = tx.submit(translate, batches[0]) if batches else None
-    for i, batch in enumerate(batches):
+    nxt = tx.submit(translate, batches[0][1]) if batches else None
+    for i, (phase, batch) in enumerate(batches):
         assert nxt is not None
         wb = nxt.result()
-        nxt = tx.submit(translate, batches[i + 1]) if i + 1 < len(batches) else None
-        res += list(ex.map(lambda k, wb=wb: fin(k, wb), batch))
-        shutil.rmtree(wb, ignore_errors=True)
+        nxt = tx.submit(translate, batches[i + 1][1]) if i + 1 < len(batches) else None
+        if i and phase != batches[i - 1][0]: settle(0)
+        queued.append((wb, [ex.submit(fin, k, wb) for k in batch]))
+        settle(1)
+    settle(0)
 # Passthrough geometry as mesh shaders (dmsh_mesh.py): <vertex key>_<geometry key>_m3 for each pair in the profile's geo_mesh.tsv whose two libraries exist; the host
 # draws a lean triangle-list geometry draw with it when its pair has one, and through the compute path otherwise (nvn_geometry.inc geo_mesh_draw)
 MESH_STATS = collections.Counter()

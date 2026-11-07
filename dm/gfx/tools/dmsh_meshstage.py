@@ -58,7 +58,10 @@ def memory(i):
         return [WORKGROUP, INPUT, out, out + i['payload']], out + (i['payload'] + 3 & ~3)
     blocks = max(max(i['max_v'], i['max_p'], 1) + BLOCK - 1, 0) // BLOCK
     prim = out + blocks * max(len(i['vertex']) + len(i['primitive']), 1) * BLOCK * 4
-    return [WORKGROUP, INPUT, out, prim], prim + (4 + 3 * max(i['max_p'], 1) + 3 & ~3)
+    # The guest writes the index bytes of primitive min(count - 1, lane + 32k) in each of its primitive blocks, and a meshlet count of 0 wraps count - 1, so every lane of every primitive
+    # block writes: the bytes are reserved for whole blocks of 32 primitives (a mesh with max_p 126 wrote past 4 + 3 * 126, into the next workgroup's memory)
+    prim_blocks = (max(i['max_p'], 1) + BLOCK - 1) // BLOCK
+    return [WORKGROUP, INPUT, out, prim], prim + (4 + 3 * prim_blocks * BLOCK + 3 & ~3)
 
 
 def own_shared(code):

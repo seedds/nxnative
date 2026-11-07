@@ -107,9 +107,10 @@ def _members(comps):
     return {n: [comps.index((n, c)) if (n, c) in comps else None for c in range(4)] for n in dict.fromkeys(n for n, _ in comps)}
 
 
-def to_stage(msl, i):
+def to_stage(msl, i, pad=()):
     """The translated kernel as the object function main0 (kind 'ts'), or the mesh functions main0 and main0_z (kind 'ms': the two depth conventions, as dmsh_build.py vs_depth gives a
-    vertex shader, near = -w and near = 0)."""
+    vertex shader, near = -w and near = 0). pad: the user(locnN) locations a mesh shader's paired pixel shaders read; those its SPHs do not enable become vertex outputs of (0,0,0,1),
+    what the hardware gives a pixel shader input no stage wrote (dmsh_build.py vs_pad does the same for a vertex shader), since Metal links no pixel input the mesh stage does not write."""
     kind = i['kind']
     m = _KERNEL.search(msl)
     if not m: raise ValueError(f'{kind}: no kernel main0 starting with its stage memory')
@@ -151,15 +152,18 @@ def to_stage(msl, i):
     p_out = out + v_blocks * len(vertex) * BLOCK   # per-primitive blocks follow all vertex blocks
     word = lambda comps: [f'{mem}[b + {comps[k] * BLOCK}u]' if comps[k] is not None else None for k in range(4)]
     vm, pm = _members(vertex), _members(primitive)
+    miss = sorted(set(pad) - {n for n in vm if isinstance(n, int)} - set(pm))
     head += ('struct dm_vertex_t {\n    float4 position [[position]];\n' +
              ('    float point_size [[point_size]];\n' if 'psiz' in vm else '') +
-             ''.join(f'    float4 a{n} [[user(locn{n})]];\n' for n in vm if isinstance(n, int)) + '};\n' +
+             ''.join(f'    float4 a{n} [[user(locn{n})]];\n' for n in vm if isinstance(n, int)) +
+             ''.join(f'    float4 dm_pad{n} [[user(locn{n})]];\n' for n in miss) + '};\n' +
              ('struct dm_prim_t {\n' + ''.join(f'    float4 p{n} [[user(locn{n})]];\n' for n in pm) + '};\n' if pm else '') +
              f'using dm_mesh_t = metal::mesh<dm_vertex_t, {"dm_prim_t" if pm else "void"}, {max_v}, {max_p}, metal::topology::{TOPOLOGY[verts]}>;\n')
     v_block = lambda v: f'{out}u + ({v} / {BLOCK}u) * {v_stride}u + {v} % {BLOCK}u'
     p_block = lambda p: f'{p_out}u + ({p} / {BLOCK}u) * {p_stride}u + {p} % {BLOCK}u'
     sets = ''.join(f'        v.point_size = as_type<float>({word(c)[0]});\n' if n == 'psiz' else
-                   f'        v.{"position" if n is None else f"a{n}"} = {_component(True, word(c))};\n' for n, c in vm.items())
+                   f'        v.{"position" if n is None else f"a{n}"} = {_component(True, word(c))};\n' for n, c in vm.items()) + \
+        ''.join(f'        v.dm_pad{n} = float4(0.0, 0.0, 0.0, 1.0);\n' for n in miss)
     psets = ''.join(f'        p.p{n} = {_component(True, word(c))};\n' for n, c in pm.items())
     if None not in vm: raise ValueError('ms: its SPH enables no position component')
 

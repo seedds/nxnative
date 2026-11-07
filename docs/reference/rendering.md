@@ -604,6 +604,20 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Found on:** [DRAGON QUEST XI S](../../dm/games/01006C300E9F0000/README.md) 1.0.4 on an iPad mini 7 (A17 Pro), which presents three times before its first submission ([GitHub issue #626](https://github.com/seedds/nxnative/issues/626)). The reporter's Apple M4 test did not fault without the fix.
 - **Not checked:** the iPad with the fix.
 
+### A GPU whose access macOS revoked stops the game
+
+- **Symptom:** after a GPU hang or GPU page faults, every upload, segment, submission and display command buffer comes back `kIOGPUCommandBufferCallbackErrorSubmissionsIgnored` ("Ignored (for causing prior/excessive GPU errors)"). Nothing is drawn again while the game's sound and logic go on, until the game aborts itself (`game called nn::diag abort`, about 70 s later); in full screen, WindowServer froze for 40 s and its watchdog killed it. With the fix the log has `[RED] GPU access revoked: the … command buffer was ignored`, and a Mac app shows an alert and quits.
+- **Cause:** macOS revokes a process's GPU access after GPU errors it caused, and from then on runs none of its command buffers: they come back at once with `MTL4CommandQueueErrorAccessRevoked`. The host logged them and went on. Their feedback still came, but the GPU no longer signalled the shared event a game's SyncWait waits on (for up to an hour, `mtl_wait_at`), and each present took a drawable that no command buffer drew. Metal 4 reports a commit's error as `MTL4CommandQueueErrorTimeout` with no text, with the command buffer's own error under `NSUnderlyingErrorKey` and `NSMultipleUnderlyingErrorsKey`, so the top-level code alone never shows it.
+- **Fix:** `gpu_lost_check` (`nvn_mtl.m`) looks for `MTL4CommandQueueErrorAccessRevoked` in each command buffer's error and the errors under it; the first one stops the game, for every game:
+  - presents stop (`present_now`);
+  - the shared event is raised from the CPU to the last fence whose feedback has come back, then again at each later submission's feedback (`gpu_lost_release`), so no SyncWait waits for a signal that will not come, and no command allocator is reset before Metal hands its command buffer back;
+  - the front end is told once (`front_gpu_lost`, `dm/host/front.h`). A Mac app leaves full screen, says why in an alert that points to the log and `scripts/bug_report.py`, and quits with exit status 70 (⌘Q's is 0). Without a window, and on the iPhone, the run ends with a FATAL line and an abort.
+
+  A hang or a page fault alone does not stop the game: the GPU recovers from those, and command buffers discarded as innocent victims (`kIOGPUCommandBufferCallbackErrorInnocentVictim`, also a timeout) come back while the game goes on. `DM_TEST_GPU_LOST=<n>` imitates the revoked access from the nth submission on, and `t_gpu_lost` checks the error's shape, the single call, the released waits and the stopped presents.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) (v131072) on a Mac ([GitHub issue #1326](https://github.com/seedds/nxnative/issues/1326)). Its first run hung in full screen and every command buffer after the hang was ignored. Its second run, in a window, recovered from several innocent-victim timeouts, page-faulted at fences 110102 and 110108, and had every command buffer ignored from fence 110114, two frames later.
+- **Open:** the hang and the page faults that made macOS revoke the access.
+- **Not checked:** a real revoked access with the fix; only the imitation (`t_gpu_lost`).
+
 ### A CPU-written window texture resolved where the present is queued
 
 - **Symptom:** an abort at the first present: `[RED] upload batches belong to the submit thread only: up_begin called on thread 'nvn-present-link'`, with `pkg_upload`, `tex_mtl` and `present_now` in the backtrace.

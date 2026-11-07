@@ -7,6 +7,9 @@ static struct { uint32_t magic; } g_display = {0x50534944}, g_layer = {0x5259414
 static struct { uint32_t magic; void *layer; } g_native = {0x4e49574e, 0};
 
 HLE_FORCE("_ZN2nn2vi10InitializeEv", "display service init; the host has no vi service", void, h_vi_Init, void) {}
+// Switch 2 SDKs: the same start with VRR low-framerate compensation allowed (Nintendo Switch 2 Welcome Tour). Run as the SDK has it, it initializes vi2 over the display service and
+// takes a mutex the service never set up (null in os::SdkMutexType::Lock); the host has no VRR (QueryDisplayVrrSupported), so it is the plain Initialize
+HLE_FORCE("_ZN2nn2vi27InitializeWithVrrLfcEnabledEv", "display service init with VRR LFC allowed; the host has no vi service and no VRR", void, h_vi_InitVrrLfc, void) {}
 HLE_FORCE("_ZN2nn2vi18OpenDefaultDisplayEPPNS0_7DisplayE", "open default display; the host returns a static object", Result, h_vi_OpenDisp, void **out) {
     *out = &g_display; return RES_OK;
 }

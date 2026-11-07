@@ -2,6 +2,8 @@
 
 Base game 1.0.0 (v0), SDK 21.4.0, the newest SDK so far. Nintendo's own 2D engine on NVN; audio is the SDK's AudioRenderer (`sound/sm/**/*.cwv`). Modules `main` and `sdk`. Plays on the iPhone, handheld with Boost.
 
+On the Mac: first brought up from boot through the setup and its TV latency calibration into the first rhythm game, Hoop Trundling, with sound. Then played by hand with a controller (2026-11-01, about an hour, Apple M1 Pro, 16 GB, macOS 27.2, built with NX Play from `cd859c38`): the first 10 levels, at 60 fps on the Metal HUD throughout. No crash, and by eye and ear (the laptop's speakers) no graphical problems, visible frame drops or sound problems; the notes stayed in time with the music. The levels after the first 10 were not played.
+
 ## What it needs
 
 | Setting | Where | Why |
@@ -50,4 +52,4 @@ General host changes first needed here; each applies to every game:
 
 ## Open
 
-- `game.tsv` still describes the game as "In bring-up" (on the Mac it plays from boot through the setup and its TV latency calibration into the first rhythm game, Hoop Trundling, with sound), while AGENTS.md lists it as playable on the iPhone.
+- On the Mac, the levels after the first 10.

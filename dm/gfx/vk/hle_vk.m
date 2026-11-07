@@ -1330,10 +1330,11 @@ static void resume_rp_clear(rs_t *s, const c_cleara *x) {
     occ_start(s);
 }
 // vkCmdBlitImage: a region of the same size and format is a copy; one that scales, flips or converts is drawn, sampling the source over the destination rectangle
-// (Minecraft's bgfx blits its 1920x1080 frame into the swapchain image). 2D colour images of float or normalized formats only
+// (Minecraft's bgfx blits its 1920x1080 frame into the swapchain image). One layer of 2D (array or cube) colour images; a drawn one takes float or normalized formats and
+// samples a 2D view of the source's layer and level, so a layer other than 0 of an array is read and the shader's texture2d gets a 2D texture
 static const char k_blit_msl[] = "#include <metal_stdlib>\nusing namespace metal;\nstruct V { float4 p [[position]]; float2 uv; };\n"
     "vertex V vk_blit_vs(uint vid [[vertex_id]], constant float4 &uv [[buffer(0)]]) { float2 t = float2(vid & 1, vid >> 1); V o; o.p = float4(t.x * 2 - 1, 1 - t.y * 2, 0, 1); o.uv = mix(uv.xy, uv.zw, t); return o; }\n"
-    "fragment float4 vk_blit_fs(V i [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]], constant float &lod [[buffer(0)]]) { return t.sample(s, i.uv, level(lod)); }\n";
+    "fragment float4 vk_blit_fs(V i [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]]) { return t.sample(s, i.uv); }\n";
 static id<MTLRenderPipelineState> blit_pso(MTLPixelFormat pf) {
     static id<MTLLibrary> lib; static NSMutableDictionary<NSNumber *, id<MTLRenderPipelineState>> *cache; static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
     pthread_mutex_lock(&mu);
@@ -1358,7 +1359,10 @@ static void blit_image(rs_t *s, const c_blit *x, uint32_t op) {
         const VkImageBlit *r = &x->r[i];
         int sx0 = r->srcOffsets[0].x, sy0 = r->srcOffsets[0].y, sx1 = r->srcOffsets[1].x, sy1 = r->srcOffsets[1].y, dx0 = r->dstOffsets[0].x, dy0 = r->dstOffsets[0].y, dx1 = r->dstOffsets[1].x, dy1 = r->dstOffsets[1].y;
         uint32_t sl = r->srcSubresource.mipLevel, dl = r->dstSubresource.mipLevel;
-        if (a->type != VK_IMAGE_TYPE_2D || b->type != VK_IMAGE_TYPE_2D || r->srcSubresource.layerCount != 1 || !(r->srcSubresource.aspectMask & VK_IMAGE_ASPECT_COLOR_BIT)) { RED1("vkCmdBlitImage of other than one layer of 2D colour images not implemented"); continue; }
+        if (a->type != VK_IMAGE_TYPE_2D || b->type != VK_IMAGE_TYPE_2D || r->srcSubresource.layerCount != 1 || r->dstSubresource.layerCount != 1 || !(r->srcSubresource.aspectMask & VK_IMAGE_ASPECT_COLOR_BIT)
+            || a->tex.sampleCount > 1 || b->tex.sampleCount > 1 || r->srcSubresource.baseArrayLayer >= a->layers || r->dstSubresource.baseArrayLayer >= b->layers || sl >= a->mips || dl >= b->mips) {
+            RED1("vkCmdBlitImage of other than one layer and level of single-sampled 2D colour images not implemented: not copied"); continue;
+        }
         if (dx1 - dx0 == sx1 - sx0 && dy1 - dy0 == sy1 - sy0 && sx1 > sx0 && sy1 > sy0 && a->tex.pixelFormat == b->tex.pixelFormat) {
             [blit(s, op) copyFromTexture:a->tex sourceSlice:r->srcSubresource.baseArrayLayer sourceLevel:sl sourceOrigin:MTLOriginMake(sx0, sy0, 0) sourceSize:MTLSizeMake(sx1 - sx0, sy1 - sy0, 1)
                                toTexture:b->tex destinationSlice:r->dstSubresource.baseArrayLayer destinationLevel:dl destinationOrigin:MTLOriginMake(dx0, dy0, 0)];
@@ -1368,7 +1372,12 @@ static void blit_image(rs_t *s, const c_blit *x, uint32_t op) {
         id<MTLRenderPipelineState> pso = blit_pso(b->tex.pixelFormat); if (!pso) continue;
         if (s->re) { end_rp(s, 0); s->cut = 1; }
         end_blit(s);
-        float sw = (float)umax(a->w >> sl, 1), sh = (float)umax(a->h >> sl, 1), uv[4], lod = (float)sl;
+        // a 2D view of the source's layer and level (same format: no pixel-format-view usage needed), in place of the whole texture
+        id<MTLTexture> src = a->tex;
+        if (src.textureType != MTLTextureType2D || src.mipmapLevelCount > 1)
+            src = [a->tex newTextureViewWithPixelFormat:a->tex.pixelFormat textureType:MTLTextureType2D levels:NSMakeRange(sl, 1) slices:NSMakeRange(r->srcSubresource.baseArrayLayer, 1)];
+        if (!src) { RED1("vkCmdBlitImage: no 2D view of the source layer (texture type %lu): not copied", (unsigned long)a->tex.textureType); continue; }
+        float sw = (float)umax(a->w >> sl, 1), sh = (float)umax(a->h >> sl, 1), uv[4];
         // a reversed destination range flips: the quad covers the destination rectangle in increasing order and takes the source ends swapped
         int fx = dx1 < dx0, fy = dy1 < dy0;
         uv[0] = (fx ? sx1 : sx0) / sw; uv[2] = (fx ? sx0 : sx1) / sw; uv[1] = (fy ? sy1 : sy0) / sh; uv[3] = (fy ? sy0 : sy1) / sh;
@@ -1381,8 +1390,8 @@ static void blit_image(rs_t *s, const c_blit *x, uint32_t op) {
         sd.sAddressMode = sd.tAddressMode = MTLSamplerAddressModeClampToEdge;
         [e setRenderPipelineState:pso];
         [e setViewport:(MTLViewport){(double)umin(dx0, dx1), (double)umin(dy0, dy1), (double)abs(dx1 - dx0), (double)abs(dy1 - dy0), 0, 1}];
-        [e setVertexBytes:uv length:sizeof uv atIndex:0]; [e setFragmentBytes:&lod length:sizeof lod atIndex:0];
-        [e setFragmentTexture:a->tex atIndex:0]; [e setFragmentSamplerState:[g_dev newSamplerStateWithDescriptor:sd] atIndex:0];
+        [e setVertexBytes:uv length:sizeof uv atIndex:0];
+        [e setFragmentTexture:src atIndex:0]; [e setFragmentSamplerState:[g_dev newSamplerStateWithDescriptor:sd] atIndex:0];
         [e drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
         [e endEncoding];
         g_n_copy++;

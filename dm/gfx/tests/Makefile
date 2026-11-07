@@ -474,6 +474,10 @@ check_t_gl_imports: t_gl_imports
 	./t_gl_imports --stubs
 gl-imports: check_t_gl_imports
 check_t_vk_desc: RUN_ENV = MTL_DEBUG_LAYER=1
+# vkCmdBlitImage of one layer of an array, copied and scaled (hle_vk.m blit_image), under Metal's validation: a texture of the wrong type stops it
+t_vk_blit: t_vk_blit.m ../vk/hle_vk.m $(MTL_T_DEP)
+	clang $(CFLAGS) -I../../third_party/vulkan-headers/include -fobjc-arc -o $@ t_vk_blit.m $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
+check_t_vk_blit: RUN_ENV = MTL_DEBUG_LAYER=1
 # Float32 missing components retain float padding through integer shader inputs.
 t_float_pad: t_float_pad.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_float_pad.m $(MTL_T_SRC) $(FW)

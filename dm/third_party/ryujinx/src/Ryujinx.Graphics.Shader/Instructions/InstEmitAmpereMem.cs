@@ -403,7 +403,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
         {
             Operand loop = Label();
             context.MarkLabel(loop);
-            Operand cur = context.Load(StorageKind.GlobalMemory, lo, hi);
+            Operand cur = context.Load(StorageKind.GlobalMemory, lo, hi);   // a plain reload each try: in the main program a local is single-assignment for the Optimizer (PropagateCopy), so the exchange's value cannot be carried here (r9 review)
             Operand next = op == AtomOp.Inc
                 ? context.ConditionalSelect(context.ICompareGreaterOrEqualUnsigned(cur, value), Const(0), context.IAdd(cur, Const(1)))
                 : context.ConditionalSelect(context.BitwiseOr(context.ICompareEqual(cur, Const(0)), context.ICompareGreaterUnsigned(cur, value)), value, context.IAdd(cur, Const(-1)));
@@ -532,7 +532,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             {
                 Operand loop = Label();
                 context.MarkLabel(loop);
-                Operand cur = context.Load(StorageKind.SharedMemory, id, offset);
+                Operand cur = context.Load(StorageKind.SharedMemory, id, offset);   // a plain reload each try: in the main program a local is single-assignment for the Optimizer (PropagateCopy), so the exchange's value cannot be carried here (r9 review)
                 Operand next = op == AtomOp.Inc
                     ? context.ConditionalSelect(context.ICompareGreaterOrEqualUnsigned(cur, value), Const(0), context.IAdd(cur, Const(1)))
                     : context.ConditionalSelect(context.BitwiseOr(context.ICompareEqual(cur, Const(0)), context.ICompareGreaterUnsigned(cur, value)), value, context.IAdd(cur, Const(-1)));

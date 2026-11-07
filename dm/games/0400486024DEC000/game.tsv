@@ -35,6 +35,8 @@ sys_resource	0x3000000
 # ---- Shader split (shader_split.py) ----
 shader_groups	/Shader/=shader /Effect/=effect /Lib/=lib /UI/=layout
 shader_note	Ocarina of Time shaders
+# Mac shader libraries without fast math (dmsh_build.py SHADER_MATH; penis6 oot2 5ab5b107): with fast or relaxed maths single grass blades went pure white for a frame (Hyrule Field, the castle moat)
+shader_math	safe
 
 # ---- Graphics ----
 # agl wraps its clears in render conditions on Donkey Kong Bananza and Splatoon Raiders; the same library here

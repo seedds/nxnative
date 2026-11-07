@@ -44,7 +44,8 @@ BUF_INDEX = 28
 FRAG_BUF_INDEX = 30   # fragment entries (the host binds the same buffer there with DM_NVN_LOOPCAP; 28 is the blame mesh fragment's, 29 the logic-op state)
 _SITE = re.compile(r'\+\+(dm_lg\d*) < (\d+)u')
 _DEREF = re.compile(r'\s*\w+ (_\d+) = \*\(reinterpret_cast<(?:const )?device \w+\*>\(as_type<ulong>\(uint2\(uint\((_\d+)\), uint\((_\d+)\)\)\)\)\);')
-_GMEM_SIG = re.compile(r'(?:static inline __attribute__\(\(always_inline\)\) )?int \w+\(thread const int& (_\d+), thread const int& (_\d+), (?:const )?device \w+& (?:cp|fp|vp)_s\d+\)')
+_GMEM_SIG = re.compile(r'(?:static inline __attribute__\(\(always_inline\)\) )?int \w+\(thread const int& (_\d+), thread const int& (_\d+), (?:const )?device \w+& (?:cp|fp|vp)_s\d+(?:, thread uint& _\d+)*\)')   # chain 916e8d674d87+: a last-entry cache parameter; r9: seven (the entry, its start, end and delta: GlobalToStorage's memo)
+_GMEM_SEARCH = ('+ 2048u)', '+ 4096u)')   # the binary search's first step: 4096-entry tables, and 8192-entry tables (xrun pool table, 2026-11-06)
 _ENTRY = re.compile(r'^(?:kernel|vertex|fragment|\[\[mesh\]\]|\[\[object\]\])\s')
 
 PRELUDE_CORE = '''
@@ -169,7 +170,7 @@ def _functions(lines):
     return out
 
 
-def transform(msl, key, stage='compute', only=None, values=None):
+def transform(msl, key, stage='compute', only=None, values=None, default_cap=None):
     """MSL with loop_guard sites -> MSL with reporting sites; returns (msl, sites) where sites = [(site, counter, function, line in the new MSL)].
     only: None = every site and every raw global-memory lookup (the diagnostic side libraries); else the automatic mode (see auto()): only the sites on these 0-based lines
     of the input, no lookup rewrite, the cap from AUTO_CAP_WORD with off = LOOP_CAP, values = {line: MSL expression of the record's value}"""
@@ -186,7 +187,7 @@ def transform(msl, key, stage='compute', only=None, values=None):
     for f in fns:
         if is_auto or not f[0] or f[4]: continue
         m = _GMEM_SIG.fullmatch(lines[f[1]].strip())
-        if m and '+ 2048u)' in body[f[0]] and ('reinterpret_cast<device uint*>(as_type<ulong>(uint2(' in body[f[0]] or 'reinterpret_cast<const device uint*>(as_type<ulong>(uint2(' in body[f[0]]): gmem[f[0]] = (m.group(1), m.group(2), f)
+        if m and any(s in body[f[0]] for s in _GMEM_SEARCH) and ('reinterpret_cast<device uint*>(as_type<ulong>(uint2(' in body[f[0]] or 'reinterpret_cast<const device uint*>(as_type<ulong>(uint2(' in body[f[0]]): gmem[f[0]] = (m.group(1), m.group(2), f)
     chosen = (lambda i: True) if not is_auto else (lambda i: i in only)
     if is_auto:
         only = {i for i in only if 0 <= i < len(lines) and _SITE.search(lines[i])}
@@ -209,8 +210,9 @@ def transform(msl, key, stage='compute', only=None, values=None):
     else:
         with_buf = stage in ('compute', 'fragment')
         param = f', device atomic_uint* dm_hg [[buffer({BUF_INDEX if stage == "compute" else FRAG_BUF_INDEX})]]'
-        entry_decl = (f'    uint dm_hgcap = atomic_load_explicit(&dm_hg[1], memory_order_relaxed); if (dm_hgcap == 0u) dm_hgcap = {DEFAULT_CAP}u;' if with_buf else
-                      f'    device atomic_uint* dm_hg = nullptr; uint dm_hgcap = {DEFAULT_CAP}u;')
+        dc = default_cap or DEFAULT_CAP   # the cap while the host's buffer holds none (word 1 = 0): DEFAULT_CAP for side libraries, LOOP_CAP for the library (all_loops)
+        entry_decl = (f'    uint dm_hgcap = atomic_load_explicit(&dm_hg[1], memory_order_relaxed); if (dm_hgcap == 0u) dm_hgcap = {dc}u;' if with_buf else
+                      f'    device atomic_uint* dm_hg = nullptr; uint dm_hgcap = {dc}u;')
     head_of = {f[1]: f for f in fns}
     out, sites, n = [], [], 0
     sites_miss = []
@@ -342,6 +344,14 @@ def auto(msl, key, stage, gmem_bufs=()):
     return new, table
 
 
+def all_loops(msl, key, stage):
+    """The generic guard in the library (dmsh_build.py shader_loopguard all, r9 2026-11-07; the allloops side libraries' v1 rewrite, --all-loops): every loop of a COMPUTE kernel, spin and
+    flag waits included, on the cap of word 1 (LOOP_CAP while the host binds its zeroed buffer, DM_NVN_LOOPCAP off) and the abort word, plus the raw global-memory lookups' miss and
+    below-4 GB guard (log-only, never the strict address window). Other stages are left as built. Returns (msl, sites) as transform"""
+    if stage != 'compute': return msl, []
+    return transform(msl, key, 'compute', default_cap=LOOP_CAP)
+
+
 def stage_of(msl):
     if re.search(r'^kernel\s', msl, re.M): return 'compute'
     if re.search(r'^\[\[mesh\]\]', msl, re.M): return 'mesh'
@@ -356,39 +366,65 @@ MAC_METAL = ['xcrun', '-sdk', 'macosx', 'metal', '-c', '-O1', '-fpreserve-invari
 def main(argv):
     """dmsh_loopdiag.py [--auto] <library dir b-<chain>> <out dir> <key|keys file|all> ...: <out>/<key>_b.{metal,metallib} and <key>_b.sites.tsv for DM_MSL_OVERRIDE=<out>.
     --auto: the automatic guard (auto(): the data-sized loops of compute kernels and task functions only, cap word 13, else 1); `all` takes every shader of the library.
+    --all-loops: the generic guard (2026-11-06, PRAGMATA hangar wedge): the full diagnostic rewrite (every loop site, spin and flag waits included, on the cap of word 1
+    and the abort word, plus the raw global-memory lookups' miss / below-4 GB guard) of COMPUTE kernels only; other stages are left as built (a fragment side library reads
+    buffer 30, which the host binds only with DM_NVN_LOOPCAP_FRAG=1). `all` takes every compute kernel of the library. --jobs N (default 8) compiles in parallel.
     A side library needs DM_NVN_LOOPCAP set on the host (its shaders read buffer 28 at once); task functions need a host that binds it in the object stage (branch loopguard)"""
     import os, subprocess, sys, json
-    use_auto = '--auto' in argv; argv = [a for a in argv if a != '--auto']
+    use_auto = '--auto' in argv; all_loops = '--all-loops' in argv; jobs = 8
+    if '--jobs' in argv: i = argv.index('--jobs'); jobs = int(argv[i + 1]); del argv[i:i + 2]
+    argv = [a for a in argv if a not in ('--auto', '--all-loops')]
+    if use_auto and all_loops: sys.exit('dmsh_loopdiag.py: --auto and --all-loops exclude each other')
     if len(argv) < 3: sys.exit(main.__doc__)
     lib, out, rest = argv[0], argv[1], argv[2:]
     keys = []
-    if use_auto and rest == ['all']: rest = []; keys = [f[:16] for f in os.listdir(lib) if f.endswith('_b.metal')]
+    if (use_auto or all_loops) and rest == ['all']: rest = []; keys = [f[:16] for f in os.listdir(lib) if f.endswith('_b.metal')]
     for r in rest:
         keys += [x.strip().split(':')[-1] for x in open(r) if x.strip() and not x.startswith('#')] if os.path.isfile(r) else [r.split(':')[-1]]
     keys = sorted({k[:16] for k in keys if re.fullmatch(r'[0-9a-f]{16}', k[:16])})
     if not keys: sys.exit('dmsh_loopdiag.py: no keys; refusing (side builds never run on an empty list)')
     os.makedirs(out, exist_ok=True)
-    ok = bad = plain = 0
-    for k in keys:
+    ok = bad = plain = other = 0
+    # xcrun runs `xcodebuild -find` on every call (~8 s each on 2026-11-06 with the downloaded Metal toolchain): resolve metal / metallib once, same flags, SDKROOT as xcrun sets it
+    metal_cmd, metallib_cmd, env = MAC_METAL, ['xcrun', '-sdk', 'macosx', 'metallib'], None
+    try:
+        fm = subprocess.run(['xcrun', '-sdk', 'macosx', '-f', 'metal'], capture_output=True, text=True, check=True).stdout.strip()
+        fl = subprocess.run(['xcrun', '-sdk', 'macosx', '-f', 'metallib'], capture_output=True, text=True, check=True).stdout.strip()
+        sdk = subprocess.run(['xcrun', '-sdk', 'macosx', '--show-sdk-path'], capture_output=True, text=True, check=True).stdout.strip()
+        if fm and fl and sdk: metal_cmd, metallib_cmd, env = [fm] + MAC_METAL[4:], [fl], dict(os.environ, SDKROOT=sdk)
+    except (OSError, subprocess.CalledProcessError): pass
+
+    def one(k):   # -> (status, line): status 'ok' | 'bad' | 'plain' | 'other'
         src = os.path.join(lib, k + '_b.metal')
-        if not os.path.exists(src): print(f'{k}: no {src}'); bad += 1; continue
+        if not os.path.exists(src): return 'bad', f'{k}: no {src}'
         msl = open(src).read(); st = stage_of(msl)
+        if all_loops and st != 'compute': return 'other', None
         if use_auto:
             try: gb = tuple(b['msl_name'] for b in json.load(open(os.path.join(lib, k + '_b.json'))).get('bindings', []) if b.get('kind') == 'gmem_map')
             except (OSError, ValueError): gb = ()
             new, table = auto(msl, k, st, gb); sites = [(t['site'], t['counter'], t['fn'], t['line']) for t in table]
         else: new, sites = transform(msl, k, st)
-        if new == msl: plain += 1; continue   # no loop and no raw global-memory lookup: the cache's library stays
+        if new == msl: return 'plain', None   # no loop and no raw global-memory lookup: the cache's library stays
         m = os.path.join(out, k + '_b.metal'); open(m, 'w').write(new)
         with open(os.path.join(out, k + '_b.sites.tsv'), 'w') as f:
             f.write('site\tcounter\tfunction\tline\tstage\n' + ''.join(f'{s}\t{c}\t{fn}\t{ln}\t{st}\n' for s, c, fn, ln in sites))
         air = m[:-6] + '.air'
-        r = subprocess.run(MAC_METAL + ['-w', m, '-o', air], capture_output=True, text=True)
-        if r.returncode == 0: r = subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', air, '-o', m[:-6] + '.metallib'], capture_output=True, text=True)
+        r = subprocess.run(metal_cmd + ['-w', m, '-o', air], capture_output=True, text=True, env=env)
+        if r.returncode == 0: r = subprocess.run(metallib_cmd + [air, '-o', m[:-6] + '.metallib'], capture_output=True, text=True, env=env)
         if os.path.exists(air): os.remove(air)
-        if r.returncode: print(f'{k}: compile failed\n{r.stderr[-2000:]}'); bad += 1; continue
-        ok += 1; print(f'{k} {st}: {len(sites)} sites')
-    print(f'built {ok}, without loops {plain}, failed {bad}')
+        if r.returncode:   # never leave a .metal without its .metallib: the override would point at a missing library
+            os.rename(m, m + '.failed'); return 'bad', f'{k}: compile failed\n{r.stderr[-2000:]}'
+        return 'ok', f'{k} {st}: {len(sites)} sites'
+
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=max(1, jobs)) as ex:
+        for st, line in ex.map(one, keys):
+            if line: print(line, flush=True)
+            if st == 'ok': ok += 1
+            elif st == 'bad': bad += 1
+            elif st == 'plain': plain += 1
+            else: other += 1
+    print(f'built {ok}, without loops {plain}, other stages left as built {other}, failed {bad}')
     return 1 if bad else 0
 
 

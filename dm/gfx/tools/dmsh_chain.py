@@ -58,7 +58,7 @@ def load_game():   # the current game profile (DM_GAME), only for what needs one
     sys.path.insert(0, os.path.join(GFX, '../games')); import game
     return game.load()
 
-LOOPGUARD_MODES = ('off', 'auto')
+LOOPGUARD_MODES = ('off', 'auto', 'all')   # all (r9): every loop of every compute kernel (dmsh_loopdiag.all_loops), task functions as auto
 def loopguard(g):
     """The automatic loop guard of a game's build (dmsh_loopdiag.py auto): DMSH_LOOPGUARD, else the profile's shader_loopguard, else off. auto: the data-sized loops of compute
     kernels and task functions report through the host's debug buffer (DM_NVN_LOOPCAP) and behave as before while it is off"""

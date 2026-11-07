@@ -437,7 +437,25 @@ PRE_STATS = collections.Counter()
 # -O1: the front end's -O2 (CorrelatedValuePropagation, then SimplifyCFG) folds the translated shaders' repeated tests of one value into switches whose cases jump past their own join.
 # Apple's GPU backend then exceeds its control-flow ID budget ("Max Unstruct ID 758 ... exceeds supported limit", a note, not an error) and falls back to a slower lowering:
 # Odyssey's alRenderMaterialUber took 25 minutes and 17.3 MB of GPU code, 31 s and 1.3 MB at -O1. Ordinary shaders come out within a few percent either way (the backend optimizes again)
+# Profile shader_math (fast by default, relaxed, safe; penis6 oot2 5ab5b107): Metal's maths mode for this game's Mac libraries. Fast lets the compiler assume no NaN / infinity, so the
+# translated shaders' isnan selects (Maxwell's NaN semantics) can fold away, and it approximates and reorders. Ocarina of Time's grass showed single blades pure white for a frame with
+# fast and with relaxed, not with safe (-fno-fast-math). One mode for every library: [[invariant]] positions only agree between shaders compiled alike
+SHADER_MATH = {'fast': [], 'relaxed': ['-fmetal-math-mode=relaxed'], 'safe': ['-fno-fast-math']}
+_math = GAME.get('shader_math', 'fast') if GAME else 'fast'
+if _math not in SHADER_MATH: sys.exit(f'[RED] game.tsv shader_math: {_math} (fast, relaxed or safe)')
+# Profile shader_nofm <key> ...: those shaders' MSL starts with Metal's safe maths pragma (#pragma METAL fp math_mode(safe), what -fno-fast-math gives: x != x and ordered compares are
+# kept), every other shader keeps shader_math. Compute keys only by intent (positions of shaders compiled alike agree). PRAGMATA: its SDF-GI / voxel flare chain (41eaf0a7 ef4ad011
+# c08db9c9 bfc21183 08886f11 and the voxel keys), which the side libraries compiled with -fno-fast-math (eden-picks-2026-11-07.md, voxel-nan-2026-11-07.md)
+SHADER_NOFM = {k[:16] for row in (GAME.rows if GAME else []) if row[0] == 'shader_nofm' for v in row[1] for k in v.split()} if GAME else set()
+NOFM_PRAGMA = '#pragma METAL fp math_mode(safe)   // dmsh_build.py shader_nofm\n'
+def nofm_msl(key, src):
+    """src with the safe maths pragma after the first `using namespace metal;` for a key the profile's shader_nofm lists, else src"""
+    if key[:16] not in SHADER_NOFM or NOFM_PRAGMA in src: return src
+    i = src.find('using namespace metal;\n')
+    if i < 0: raise ValueError('shader_nofm: no `using namespace metal;` line')
+    i += len('using namespace metal;\n'); return src[:i] + NOFM_PRAGMA + src[i:]
 MAC_METAL = ['xcrun', '-sdk', 'macosx', 'metal', '-c', '-O1', '-fpreserve-invariance']
+MAC_METAL += SHADER_MATH[_math]   # its own statement: tests read the base line alone (test_dmsh_raw_last)
 MAC_RECORD = ' '.join(MAC_METAL) + '; xcrun -sdk macosx metallib'
 # The compiles run the tools xcrun names, found once: each xcrun launch looks them up again, about 4 ms of a compile's two launches (8 ms a shader). -isysroot is what xcrun -sdk passes
 # (as SDKROOT), and the outputs are the same bytes (.air and .metallib, checked on Odyssey's shaders); without it the driver targets the running macOS, not the SDK, and they differ.
@@ -1041,7 +1059,7 @@ POOL_MARK = """template<typename P> static inline __attribute__((always_inline))
 {
     device atomic_uint* w = reinterpret_cast<device atomic_uint*>(p->seen) + (i >> 5);
     uint b = 1u << (i & 31u);
-    if (!(atomic_load_explicit(w, memory_order_relaxed) & b)) atomic_fetch_or_explicit(w, b, memory_order_relaxed);
+    if (!(*reinterpret_cast<device const uint*>(w) & b)) atomic_fetch_or_explicit(w, b, memory_order_relaxed);   // a plain load of the bit: it is only ever set, a stale 0 costs one redundant atomic_or (r9; gm_memo.py measured the relaxed atomic load at about 5x a plain one)
     return i;
 }
 
@@ -1745,12 +1763,22 @@ def finish(key, w, j, c1):
     res = json.load(open(os.path.join(w, key + '.res.json')))
     loopguard = []
     lg_stage = 'task' if mesh and mesh.get('kind') == 'ts' else 'compute' if j['stage'] == 'cs' and not mesh else None
-    if LOOPGUARD == 'auto' and lg_stage:   # data-sized loops report through the host's debug buffer (see LOOPGUARD)
+    if LOOPGUARD == 'all' and lg_stage == 'compute':   # every loop and raw lookup of a compute kernel guarded on the host's debug buffer (see LOOPGUARD; the wedge rule: playbook golden rule 1)
+        try: src, sites = dmsh_loopdiag.all_loops(src, key, 'compute')
+        except (ValueError, AssertionError) as e: return 'loop guard failed', str(e)[:160], None
+        loopguard = [{'site': st, 'counter': c, 'fn': fn, 'line': ln} for st, c, fn, ln in sites]
+        if loopguard or 'dm_hg' in src: open(msl, 'w').write(src)
+        if not loopguard and 'dm_hg' in src: loopguard = [{'site': -1, 'counter': None, 'fn': None, 'line': None}]   # pool lookups only: the host still binds the buffer
+    elif LOOPGUARD in ('auto', 'all') and lg_stage:   # data-sized loops report through the host's debug buffer (see LOOPGUARD)
         try: gb = tuple(b['msl_name'] for b in reflect(key, mesh['kind'] if mesh else j['stage'], src, res) if b.get('kind') == abi.KIND_GMEM_MAP)
         except ValueError: gb = ()
         try: src, loopguard = dmsh_loopdiag.auto(src, key, lg_stage, gb)
         except ValueError as e: return 'loop guard failed', str(e)[:160], None
         if loopguard: open(msl, 'w').write(src)
+    if key[:16] in SHADER_NOFM:   # profile shader_nofm: Metal's safe maths for this shader only
+        try: src = nofm_msl(key, src)
+        except ValueError as e: return 'shader_nofm failed', str(e)[:160], None
+        open(msl, 'w').write(src)
     if j['stage'] == 'vs':   # the two depth-convention entry points (see vs_depth); the analysis below uses the source with only main0
         capture = dmsh_geometry.capture(src)
         src, full = vs_depth(src)
@@ -1791,7 +1819,11 @@ def finish(key, w, j, c1):
             **({'entry_layer': 'main0_l', 'entry_layer_z': 'main0_lz', 'layer_from': lay} if lay else {}), **({'entry_u': 'main0_u'} if fu else {}), **({'entry_m': 'main0_m', 'uint_mask_m': fmask} if fu and fmask else {}), **({'entry_d': 'main0_d'} if fd else {}), **({'entries_lost': lost} if lost else {}),
             **({'first_store': [{'reg': next(b['reg'] for b in binds if b['msl_name'] == n), 'word': w, 'value': v} for n, w, v in first]} if first else {}),
             **({'tg_spill': spill} if spill else {}),
-            **({'loopguard': {'buffer': dmsh_loopdiag.BUF_INDEX, 'cap_word': dmsh_loopdiag.AUTO_CAP_WORD, 'sites': loopguard}} if loopguard else {}),   # see LOOPGUARD
+            # a compute shader that reads texture or image handles the game pushed (c[24], uniform "slot" PUSH_BANK - 3, ubo_bank): the host reads them from the pushed bytes for it only
+            # (nvn_mtl.m ubo_read, push_handles; PRAGMATA's depth-pyramid kernels, c24regen-2026-11-07.md)
+            **({'push_handles': True} if j['stage'] == 'cs' and any(b.get('kind') in (abi.KIND_TEX_UBO, abi.KIND_IMG_UBO) and b.get('reg') == abi.PUSH_BANK - 3 for b in binds) else {}),
+            **({'loopguard': {'buffer': dmsh_loopdiag.BUF_INDEX, 'cap_word': 1 if LOOPGUARD == 'all' and lg_stage == 'compute' else dmsh_loopdiag.AUTO_CAP_WORD, 'sites': loopguard,
+                              **({'mode': 'all'} if LOOPGUARD == 'all' and lg_stage == 'compute' else {})}} if loopguard else {}),   # see LOOPGUARD
             'threadgroup_size': j.get('local'), 'c1': c1.hex(), 'notes': res['notes'] + (['not in the answer table, queries use defaults'] if j.get('no_facts') else []), 'drv_reads': dr, 'drv_unfillable': unfillable(dr, mesh['kind'] if mesh else j['stage']),
             'bindings': binds,
             'vertex_inputs': [{'location': int(m.group(3)), 'msl_type': m.group(1)} for m in attributes(src)],

@@ -12,7 +12,7 @@ TOOLS = Path(__file__).resolve().parents[2] / 'gfx/tools'
 sys.path.insert(0, str(TOOLS))
 import dmsh_abi as abi   # noqa: E402
 
-FUNCS = {'decode_tex', 'const_sampler', 'decode_ubo_tex', 'decode_ubo_img', 'c2_array', 'pool_arrays', 'reflect', 'has_word', 'in_word'}
+FUNCS = {'decode_tex', 'const_sampler', 'ubo_bank', 'decode_ubo_tex', 'decode_ubo_img', 'c2_array', 'pool_arrays', 'reflect', 'has_word', 'in_word'}
 NAMES = {'POOL_MIN', 'POOL_MARK', 'TEX_BASE', 'SSBO'}
 
 

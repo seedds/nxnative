@@ -52,12 +52,13 @@ static void check(int which) {
     assert(base != MAP_FAILED);
     g_nmod = 1; strcpy(g_mod[0].name, "main"); g_mod[0].base = base;
     strcpy(g_mod[0].build_id, "94ceae325c205c4b9d6f7235552f28fd");
-    setenv("DM_FPS_TARGET", which >= 19 ? "120" : which == 1 || which == 10 || which == 18 ? "30" : which == 2 || which == 11 ? "0" : "60", 1);
+    setenv("DM_FPS_TARGET", which >= 19 && which <= 21 ? "120" : which == 1 || which == 10 || which == 18 || which == 23 ? "30" : which == 2 || which == 11 ? "0" : "60", 1);
     if (which == 20) test_fps_max = 60;
     int32_t *unity = (int32_t *)(base + 0x4afc868);
     *unity = which == 1 ? 60 : which == 4 ? -1 : which == 5 ? 0 : 30;
     uint8_t object[0x500] = {0};
     float *f = NULL; int32_t *sync = NULL;
+    static uint8_t chain[4][0x200];   // Kirby's dynamic resolution: [[[[main+0xa767b0]+0x140]+0x1b0]+0x20]+0x34
     if (which == 3) g_mod[0].build_id[0] = '0';
     if (which == 6) {
         strcpy(g_mod[0].build_id, "c9a3dd7702075ecd90101f4555389582");
@@ -77,6 +78,12 @@ static void check(int which) {
         strcpy(g_mod[0].build_id, "a48c0de3bc353efa0e4d359bde05ef24");
         *(uintptr_t *)(base + 0xda20e38) = (uintptr_t)object;
         double *d = (double *)(object + 8); d[0] = d[1] = 30;
+    } else if (which == 22 || which == 23) {   // Kirby and the Forgotten Land 1.1.0: HAL's frame interval (the game sets 2) and the dynamic resolution's bounds
+        strcpy(g_mod[0].build_id, "a6ce40dc3aedb1becacd2f1ff4515307");
+        *(uintptr_t *)(base + 0xa76728) = (uintptr_t)object; sync = (int32_t *)(object + 0x50); *sync = 2;
+        *(uintptr_t *)(base + 0xa767b0) = (uintptr_t)chain[0]; *(uintptr_t *)(chain[0] + 0x140) = (uintptr_t)chain[1];
+        *(uintptr_t *)(chain[1] + 0x1b0) = (uintptr_t)chain[2]; *(uintptr_t *)(chain[2] + 0x20) = (uintptr_t)chain[3];
+        f = (float *)(chain[3] + 0x34); f[0] = 1.95f; f[1] = 1.7f;
     } else if (which == 15 || which == 16) {
         strcpy(g_mod[0].build_id, "0123456789abcdef0123456789abcdef");
         frostbite(base, object);
@@ -146,6 +153,11 @@ static void check(int which) {
         dm_fps_lock_tick(); assert(writes == 1);
         *t = 30; dm_fps_lock_tick(); assert(*t == 60 && writes == 2);   // the game sets 30 again where gameplay starts
     } else if (which == 18) assert(*(int32_t *)(object + 0x1dc) == 30 && writes == 1);
+    else if (which == 22) {
+        assert(*sync == 0 && f[0] == 1.95f * 30 / 60 && f[1] == 1.7f * 30 / 60 && writes == 3);
+        dm_fps_lock_tick(); assert(writes == 3);
+        *sync = 2; dm_fps_lock_tick(); assert(*sync == 0 && writes == 4);   // the game sets its interval again: freed again
+    } else if (which == 23) assert(*sync == 2 && f[0] == 1.95f && f[1] == 1.7f && writes == 0);   // at 30 the game keeps its own limit
     else if (which == 16) assert(*(float *)(object + 0x34) == 30 && *(int32_t *)(object + 0x38) == 30 && writes == 0);
     else if (which == 13) {
         assert(sync[0] == 2 && sync[1] == 2 && writes == 0);
@@ -159,10 +171,10 @@ static void check(int which) {
 
 int main(void) {
     // Each process starts the production one-time initialization with a fresh build and target.
-    for (int i = 0; i < 22; i++) {
+    for (int i = 0; i < 24; i++) {
         pid_t p = fork(); assert(p >= 0);
         if (!p) { check(i); _exit(0); }
         int status; assert(waitpid(p, &status, 0) == p); assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
     }
-    puts("Frame limits: integer/float FPS, milliseconds, vsync copies, build gates, found fields and overrides passed");
+    puts("Frame limits: integer/float FPS, milliseconds, vsync copies, a freed vsync interval, build gates, found fields and overrides passed");
 }

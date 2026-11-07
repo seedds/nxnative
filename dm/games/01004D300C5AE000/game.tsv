@@ -25,6 +25,11 @@ modules	main subsdk0 sdk
 romfs_marker	mov/EventMovie/Ending.webm
 zip_store	.bfstm:.cmpbin:.opus:.webm:.metallib
 
+# ---- Frame rate ----
+# 30 is the game's own limit. At 60 the host frees HAL's frame interval and halves the dynamic resolution's frame-time bounds (hle_fpslock.c, from masagrator's FPSLocker config
+# for 1.1.0), and the game steps by the time that really passed. 60 is the ceiling: the game counts its steps in whole 60 Hz vsyncs (hle_fpslock.c, HAL frame interval)
+fps_target	60
+
 # ---- Memory ----
 # The NPDM declares no system resource, so there is no virtual address memory: the game sets a heap of the pool less 64 MB of used memory (3.14 GB, measured), which fits the
 # 3.25 GB heap region of this 4 GB block (256 MB in front + 256 MB alias region + 256 MB stack region + heap region). The application pool is the Switch's 3285 MB

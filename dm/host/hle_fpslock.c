@@ -17,8 +17,9 @@
 // (the acquire waits): Luigi's Mansion 3's display interval p99 18.69 → 16.67 ms, 60.0 fps. Not at 30: with present_interval display the presents follow every vsync and hold no
 // frame for two, so a shorter time showed some frames for one (30.4 fps); 30 writes the game's own 33.333 ms
 // Also: a frame time in ticks as a uint32 (scale / frame rate: 19,200,000 for the Switch's 19.2 MHz system tick), a frame step in seconds as a float (1 / frame rate), and a mode
-// switch an engine reads before it takes those fields at all (written 1 at any target)
-enum { FPS_F32, VSYNCS_I32, MS_F32, FPS_I32, TICKS_U32, SECS_F32, MODE_U32, FPS_F64 };
+// switch an engine reads before it takes those fields at all (written 1 at any target), and a vsync interval an engine also accepts as 0, for no limit with a step of the time that really
+// passed (written 0 above 30; at 30 the game keeps its own)
+enum { FPS_F32, VSYNCS_I32, MS_F32, FPS_I32, TICKS_U32, SECS_F32, MODE_U32, FPS_F64, FREE_I32 };
 #define MS_MARGIN 0.5f
 static float ms_want(int fps) { return 1000.0f / (float)fps - (fps == 60 ? MS_MARGIN : 0); }
 typedef struct { const char *build, *what; uint64_t ptr_off; uint32_t field; uint8_t kind, copies; uint32_t scale; } lock_t;
@@ -50,6 +51,13 @@ static const lock_t k_locks[] = {
     // this row the game keeps 30 fps at the right speed (the simulation at 60 and the regulator at 30: match clock as at 30). The game asks for present interval 2
     // (BaseDisplaySettings.PresentInterval), which the profile's present_interval display ignores
     { "a48c0de3bc353efa0e4d359bde05ef24", "FIFA frame regulator", 0xda20e38, 0x8, FPS_F64, 2, 0 },
+    // Kirby and the Forgotten Land 1.1.0: HAL's frame interval, an int32 at [main+0xa76728]+0x50 (the constructor at main+0x526560 stores the object there and clears the field; the
+    // game then sets its vsyncs per frame). The game asks for present interval 1 and paces itself by this field; 0 lifts its limit and steps the game by the time that really passed,
+    // so the host's present cap sets the frame rate. 60 is the ceiling: the frame manager (main+0x532eb0) counts each frame's step in whole 60 Hz vsyncs, at least one, so
+    // frames shorter than 16.7 ms would run the game fast (on a 120 Hz display link an iPhone 17 Pro Max still made 60, at 3.5 times the CPU energy).
+    // From masagrator's FPSLocker config for this build (FPSLocker-Warehouse,
+    // SaltySD/plugins/FPSLocker/patches/01004D300C5AE000/A6CE40DC3AEDB1BE.yaml; the offsets found by Hazerou). Its dynamic resolution is below (kirby_dr_tick)
+    { "a6ce40dc3aedb1becacd2f1ff4515307", "HAL frame interval", 0xa76728, 0x50, FREE_I32, 1, 0 },
 };
 #define NLOCKS ((int)(sizeof k_locks / sizeof k_locks[0]))
 
@@ -204,14 +212,33 @@ static int ue_rows(const module_t *m, lock_t *out, int *missing) {
     return n;
 }
 
+// Kirby and the Forgotten Land 1.1.0: the dynamic resolution's GPU frame-time bounds, two floats (max, min) at [[[[main+0xa767b0]+0x140]+0x1b0]+0x20]+0x34, set for 30 fps
+// (1.95 and 1.7). Above 30 they are scaled by 30 / target, or the game keeps its full resolution at frame times too long for the target. From the same FPSLocker config
+static const struct { const char *build; uint32_t root, hops[3], field; float max, min; } k_kirby_dr[] = { { "a6ce40dc3aedb1becacd2f1ff4515307", 0xa767b0, {0x140, 0x1b0, 0x20}, 0x34, 1.95f, 1.7f } };
+static void kirby_dr_tick(uint8_t *base, int target, const char *src) {
+    static int nlog; const __typeof__(k_kirby_dr[0]) *K = &k_kirby_dr[0];
+    uint64_t p = 0;
+    if (!rd((uint64_t)(uintptr_t)(base + K->root), &p, sizeof p) || !p) return;   // not created yet
+    for (int h = 0; h < 3; h++) if (!rd(p + K->hops[h], &p, sizeof p) || !p) return;
+    float cur[2], want[2] = { K->max * 30 / target, K->min * 30 / target };
+    if (!rd(p + K->field, cur, sizeof cur)) return;
+    for (int c = 0; c < 2; c++) {
+        if (cur[c] == want[c] || !(cur[c] > 0.1f && cur[c] < 5.0f)) continue;   // already set, or not set yet
+        uint32_t *dst = (uint32_t *)(uintptr_t)(p + K->field + 4 * (uint64_t)c), w; memcpy(&w, &want[c], sizeof w);
+        dm_guest_write_prepare(dst, sizeof *dst); __atomic_store_n(dst, w, __ATOMIC_RELAXED);
+        if (nlog < 8) { nlog++; LOG("main: HAL dynamic resolution GPU frame time %s %g → %g (%d fps; %s)", c ? "min" : "max", cur[c], want[c], target, src); }
+    }
+}
+
 // The running main's engine limiters, found once: by the first present (dm_fps_lock_tick) or by the graphics layer's present cap, which may ask first (dm_fps_lock_engine, from the acquire)
-static lock_t ue[3], target_lock; static const lock_t *rows[NLOCKS + 4]; static int nrow, nier, ue_missing; static uint8_t *base; static uint32_t display;
+static lock_t ue[3], target_lock; static const lock_t *rows[NLOCKS + 4]; static int nrow, nier, kirby, ue_missing; static uint8_t *base; static uint32_t display;
 static pthread_once_t g_found = PTHREAD_ONCE_INIT;
 static void lock_find(void) {
     for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) {
         for (int k = 0; k < (int)(sizeof k_nier_dr / sizeof *k_nier_dr); k++) if (!strcmp(g_mod[i].build_id, k_nier_dr[k].build)) { base = g_mod[i].base; nier = 1; display = k_nier_dr[k].display; }
         for (int k = 0; k < NLOCKS; k++) if (!strcmp(g_mod[i].build_id, k_locks[k].build)) { rows[nrow++] = &k_locks[k]; base = g_mod[i].base; }
         if (target_row(&g_mod[i], &target_lock)) { rows[nrow++] = &target_lock; base = g_mod[i].base; }
+        kirby |= !strcmp(g_mod[i].build_id, k_kirby_dr[0].build);
         int nue = ue_rows(&g_mod[i], ue, &ue_missing);
         for (int k = 0; k < nue; k++) { rows[nrow++] = &ue[k]; base = g_mod[i].base; }
     }
@@ -264,6 +291,7 @@ void dm_fps_lock_tick(void) {
         }
     }
     if (fb.n) fb_tick(target, src);
+    if (kirby && target > 30) kirby_dr_tick(base, target, src);
     for (int r = 0; r < nrow; r++) {
         const lock_t *L = rows[r]; uint64_t obj = (uint64_t)(uintptr_t)base;
         if (L->ptr_off && (!rd((uint64_t)(uintptr_t)(base + L->ptr_off), &obj, sizeof obj) || !obj)) continue;   // not created yet
@@ -297,6 +325,10 @@ void dm_fps_lock_tick(void) {
                 want = 1;
                 if (cur) continue;   // already 1, or not this switch: 0 is the engine's default
                 snprintf(was, sizeof was, "%u", cur);
+            } else if (L->kind == FREE_I32) {
+                want = 0;
+                if (target <= 30 || !cur || cur > 4) continue;   // the game's own limit at 30; already free, or not set yet (0 from the constructor until the game sets it)
+                snprintf(was, sizeof was, "%u", cur);
             } else {
                 int fps = L->kind == FPS_I32;
                 want = fps ? (uint32_t)target : target > 60 ? 1 : 60 / (uint32_t)target;   // above 60 the display link paces it: a vsync count stays 1
@@ -310,6 +342,7 @@ void dm_fps_lock_tick(void) {
                 else if (L->kind == SECS_F32) snprintf(now, sizeof now, "%.5f s (%d fps)", 1.0 / target, target);
                 else if (L->kind == TICKS_U32) snprintf(now, sizeof now, "%u (%d fps)", want, target);
                 else if (L->kind == MODE_U32) snprintf(now, sizeof now, "1 (%d fps)", target);
+                else if (L->kind == FREE_I32) snprintf(now, sizeof now, "0 (%d fps)", target);
                 else snprintf(now, sizeof now, "%u%s", L->kind == FPS_F32 ? (unsigned)target : want, L->kind == FPS_F32 || L->kind == FPS_I32 ? " fps" : " vsyncs");
                 LOG("main: %s%s %s → %s (%s)", L->what, L->copies > 1 ? (c ? " (render thread)" : " (game thread)") : "", was, now, src); }
         }

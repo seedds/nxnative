@@ -16713,7 +16713,7 @@ static link_ent g_link_ring[PRING];
 // before their deadline, and the link thread sits idle 20.7 ms before each late one (run 9). That costs 56 fps on the 60 Hz link and 58.6 on the 120 Hz link, at frame latency
 // 2 and 1 alike, and a link made again keeps the offset. Without the link (mode 0: the present thread takes drawables and presents each frame for its period) the game held
 // 60.03 fps for 15 minutes (run 10). So once LINK_SHIFT_N presents in a row were shown LINK_SHIFT_MS or more after their targets (three quarters of them; a frame a whole refresh
-// late is a miss of its own; half of them, as when run 6's offset flipped each second at 60 fps, is not the steady shift), a 60 fps game leaves the link for mode 0, where it
+// late is a miss of its own; half of them, as when run 6's offset flipped each second at 60 fps, is not the steady shift), the game leaves the link for mode 0 (at 60 or 30 fps), where it
 // fits (link_leave_ok): fullscreen on a variable-refresh screen, which shows a frame when it is presented, at any rate. Fixed-rate screens (frame latency 1, where the shift was
 // not seen) and windows keep the link; leaving those conditions takes pacing back to it. What the system changes at the shift is open (docs/reference/frame-rate.md)
 #define LINK_SHIFT_N 120
@@ -16769,13 +16769,13 @@ static void link_late_note(uint64_t pn, double presented) {   // a frame's actua
     }
     // Mode 1 only: 1 is the default; 2 (120 Hz link) is a DM_PRESENT_LINK choice, which keeps the link though it also loses frames after the shift (58.6 fps)
     if (!link_resync_on() || g_link_moved || g_link_leave || g_dm_present_link != 1 || !link_shift_judge(&g_link_shift, late_ms)) return;
-    if (link_leave_ok(fs, vrr) && mtl_fps_target() == 60) {
+    if (link_leave_ok(fs, vrr)) {   // at 60 and 30 fps alike: mode 0 presents each frame for its period (Donkey Kong Bananza on the 30 Hz link after the shift: 33 and 58 ms frames, 26-27 fps)
         // Only a request: link_sync, on the game's present thread, sets the mode and invalidates the link in one step. Setting the mode here would stop the callback taking frames
         // while the link still owns the layer, and a game waiting in mtl_present_wait for an untaken frame would wait forever (the ticking link keeps the stall drop from firing)
         g_link_leave = 1;
         MLOG("display link: %d presents shown %.2f ms after their targets: pacing leaves the link at the next present, the present thread presents each frame (DM_PRESENT_LINK=0)", LINK_SHIFT_N, g_link_offset.level);
     } else {
-        static int said; if (!said++) MLOG("display link: %d presents shown %.2f ms after their targets; pacing stays on the link (screen %d Hz %s, %s: leaving it needs fullscreen on a variable-refresh screen and a 60 fps game)",
+        static int said; if (!said++) MLOG("display link: %d presents shown %.2f ms after their targets; pacing stays on the link (screen %d Hz %s, %s: leaving it needs fullscreen on a variable-refresh screen)",
                                           LINK_SHIFT_N, late_ms, hz, vrr ? "variable refresh" : "fixed refresh", fs ? "fullscreen" : "window");
     }
 }
@@ -17668,7 +17668,7 @@ static void link_sync(void) {   // Called every frame by the game's present thre
     }
     if (g_link_leave) { g_link_leave = 0; if (want == 1 && !g_rescue_mode) { g_dm_present_link = want = 0; g_link_moved = 1; } }   // asked by link_late_note; a mode set meanwhile wins
     else if (g_link_moved && want) { g_link_moved = 0; g_link_shift = (link_shift_t){0}; }   // a runtime setting (DM_AB, the settings) put pacing back on a link: it wins, and the shift is judged afresh
-    if (g_link_moved && (!link_leave_ok(front_fullscreen(), front_screen_variable_refresh()) || mtl_fps_target() != 60)) {   // left for the shift (link_late_note), and the screen, window or rate no longer fits it
+    if (g_link_moved && !link_leave_ok(front_fullscreen(), front_screen_variable_refresh())) {   // left for the shift (link_late_note), and the screen or window no longer fits it (a change of rate does not: mode 0 paces 30 and 60)
         g_link_moved = 0; g_dm_present_link = want = 1; g_link_shift = (link_shift_t){0};
         MLOG("display link: pacing back on the link (screen %d Hz %s, %s)", front_screen_max_fps(), front_screen_variable_refresh() ? "variable refresh" : "fixed refresh", front_fullscreen() ? "fullscreen" : "window");
     }

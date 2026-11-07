@@ -235,6 +235,20 @@ static int watch_decode(ucontext_t *uc, uint32_t in, uint64_t *ea, unsigned *len
 #undef XN
 #undef XT
 }
+// DM_PROBE_WATCH_REGS (set): a watch hit also prints the guest frame number, x0–x28 and the four float lanes of v0–v31, so the stored value can be
+// traced back through the registers that computed it without a debugger (a NaN position: which operand was NaN or zero first)
+static void watch_regs(ucontext_t *uc) {
+    static int on = -1; if (on < 0) on = getenv("DM_PROBE_WATCH_REGS") != NULL;
+    if (!on) return;
+    _STRUCT_ARM_THREAD_STATE64 *ss = &uc->uc_mcontext->__ss; _STRUCT_ARM_NEON_STATE64 *ns = &uc->uc_mcontext->__ns;
+    fprintf(stderr, "[dm]   F=%llu", (unsigned long long)dm_guest_frame());
+    for (int r = 0; r < 29; r++) fprintf(stderr, "%s x%d=%#llx", r % 8 ? "" : "\n[dm]  ", r, (unsigned long long)ss->__x[r]);
+    for (int r = 0; r < 32; r++) {
+        float f[4]; memcpy(f, &ns->__v[r], sizeof f);
+        fprintf(stderr, "%s v%d=(%g %g %g %g)", r % 4 ? "" : "\n[dm]  ", r, f[0], f[1], f[2], f[3]);
+    }
+    fputc('\n', stderr);
+}
 static int watch_fault(void *addr, int is_write, void *ucv) {
     uint64_t a = (uint64_t)addr;
     if (!is_write || !g_wat || a < g_wpg || a >= g_wpg + g_wpsz) return 0;
@@ -252,6 +266,7 @@ static int watch_fault(void *addr, int is_write, void *ucv) {
             { extern uint64_t g_t0_ns; uint64_t now_ns(void); uint32_t thr_cur_handle(void);
               fprintf(stderr, "[dm] WATCH %#llx [%.4fs] T=%x store of %u bytes at %#llx: %#llx → %#llx", (unsigned long long)g_wat, (now_ns() - g_t0_ns) / 1e9, thr_cur_handle(), len, (unsigned long long)ea, (unsigned long long)old, (unsigned long long)watch_val()); }
             watch_where("pc", pc); watch_where("lr", uc->uc_mcontext->__ss.__lr); fputc('\n', stderr);
+            watch_regs(uc);
             dm_backtrace(uc->uc_mcontext->__ss.__fp);
             funlockfile(stderr);
         }
@@ -351,6 +366,29 @@ static void *poll_run(void *p) {
     }
     return NULL;
 }
+// DM_CTL "watch <address> <length>" (hex, host address = guest address): arms the write watch above while the game runs, for memory whose address is
+// only known once the game has allocated it (a heap block found by a memdump scan), and without the fault traffic of a watch armed from boot moving
+// the game's later allocations. One armed watch per run: once its page is protected (the "armed" line), a second command is refused (the fault hook
+// and the alias mapping are set up once). A watch that never armed (its address is not mapped writable, e.g. the guest address space sat at another
+// base this run) can be moved by a new command.
+void dm_ctl_watch(uint64_t at, uint64_t len) {
+    static int done;
+    if (g_wheap || atomic_load(&g_warmed) || g_walias) { LOG("[RED] DM_CTL watch: a watch is already armed"); return; }
+    if (!len) len = 8;
+    g_wpsz = (uint64_t)getpagesize();
+    if (!at || (at & (g_wpsz - 1)) + len > g_wpsz) { LOG("[RED] DM_CTL watch: the watched bytes must lie in one host page"); return; }
+    if (done) {   // move the unarmed watch: hide it from watch_arm, let an iteration in flight finish, then check it did not arm meanwhile
+        g_wat = 0; usleep(20000);
+        if (atomic_load(&g_warmed) || g_walias) { LOG("[RED] DM_CTL watch: the previous watch armed meanwhile; not moved"); return; }
+        g_wlen = len; g_wpg = at & ~(g_wpsz - 1); g_wat = at;   // watch_arm (already running) arms the new page
+        LOG("DM_CTL: unarmed write watch moved to %#llx + %#llx (host page %#llx)", (unsigned long long)at, (unsigned long long)len, (unsigned long long)g_wpg);
+        return;
+    }
+    done = 1; g_wlen = len; g_wpg = at & ~(g_wpsz - 1); g_wat = at;   // g_wat last: watch_fault reads it first
+    dm_fault_hook_register(watch_fault);
+    pthread_t t; pthread_create(&t, NULL, watch_arm, NULL); pthread_detach(t);
+    LOG("DM_CTL: write watch on %#llx + %#llx (host page %#llx)", (unsigned long long)at, (unsigned long long)len, (unsigned long long)g_wpg);
+}
 static void watch_install(void) {
     { const char *e = getenv("DM_PROBE_POLL");
       if (e) { char *end; g_pheap = !strncmp(e, "heap+", 5); if (g_pheap) e += 5; g_poll = strtoull(e, &end, 16); g_plen = *end == '+' ? strtoull(end + 1, &end, 16) : 4;
@@ -370,6 +408,9 @@ static void watch_install(void) {
     else LOG("write watch on %#llx + %#llx (host page %#llx)", (unsigned long long)g_wat, (unsigned long long)g_wlen, (unsigned long long)g_wpg);
 }
 
+#else
+// iOS has no write watch (no mach_vm.h): the DM_CTL command only says so
+void dm_ctl_watch(uint64_t at, uint64_t len) { (void)at; (void)len; LOG("[RED] DM_CTL watch: not available on this platform"); }
 #endif
 
 void probe_install(void) {

@@ -11,6 +11,7 @@ The profile used for the runs (not in the repository yet) has these rows in its 
 | `mem_reserve 0x270000000`, `app_pool 0x240000000`, `mem_alias 0x10000000`, `mem_stack 0x10000000` | RE Engine's GPU heap is one 64 GB virtual pool built from separate physical pools ([Sparse virtual pools built from separate physical pools](../../../docs/reference/nvn-objects.md#sparse-virtual-pools-built-from-separate-physical-pools)) |
 | `romfs_marker re_chunk_000.pak`, `zip_store .pak:.metallib` | the game's PAKs are compressed already |
 | `tex_flush_upload on`, `tex_dirty_upload on` | streamed textures written by the CPU |
+| `shader_metalwa kk3 kk9 965043fe128ef98f` | the culling queue's ballot waterfall never converges under the macOS 26 compiler: exploded geometry and GPU page faults when enemies appear ([A ballot under divergent control flow sees every lane](../../../docs/reference/shaders.md#a-ballot-under-divergent-control-flow-sees-every-lane-macos-26)) |
 
 ## Files
 
@@ -65,6 +66,7 @@ Through `DM_CTL`, silent (`DM_AUDIO=0`) and with `DM_FOCUS_KEEP=1`: press `A` ab
 - [Swizzled uploads deswizzled on the CPU by default](../../../docs/reference/nvn-objects.md#swizzled-uploads-deswizzled-on-the-cpu-by-default): GPU hangs in the host's own upload batches at the tower ring.
 - [A residency-set member released before its removal is committed](../../../docs/reference/rendering.md#a-residency-set-member-released-before-its-removal-is-committed): crashes under Metal's shader validation.
 - [Integer add, subtract and multiply wrap](../../../docs/reference/shaders.md#integer-add-subtract-and-multiply-wrap): snorm8 bytes read with the next byte in them.
+- [A ballot under divergent control flow sees every lane (macOS 26)](../../../docs/reference/shaders.md#a-ballot-under-divergent-control-flow-sees-every-lane-macos-26): exploded geometry and GPU page faults when enemies appear.
 - [A loop exit's subgroup block runs in the iteration that left](../../../docs/reference/shaders.md#a-loop-exits-subgroup-block-runs-in-the-iteration-that-left).
 - [64-bit image atomic max and min](../../../docs/reference/shaders.md#64-bit-image-atomic-max-and-min): the visibility buffer's 336 shaders.
 - [Ampere forms of PRAGMATA's shaders](../../../docs/reference/shaders.md#ampere-forms-of-pragmatas-shaders).

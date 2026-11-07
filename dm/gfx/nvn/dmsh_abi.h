@@ -104,6 +104,9 @@
 #define DMSH_LOGIC_BUFFER 29
 // Its function constants: bool, colour target n is attached (the variant reads it only then), at this index + n (nvn_mtl.m lo_fn specializes the entry point per pass's targets)
 #define DMSH_LOGIC_FC 200
+// Metal compiler workarounds (dm/gfx/tools/dmsh_metalwa.py, after KosmicKrisp's KK_WORKAROUND_n) in their function-constant form: bool constants at this index + slot (0 KK3 ballot,
+// 1 KK9 loop break, 3 KK10 select, 4 KK18 fence, 5 KK3v votes). The build emits the static form (profile shader_metalwa); no host sets these yet, so such a library keeps its defaults
+#define DMSH_MWA_FC 220
 // Compute shared memory past Metal's limit (dm/gfx/tools/dmsh_build.py tg_spill): a kernel whose threadgroup arrays exceed DMSH_TG_MAX bytes takes them from a device buffer at this compute
 // buffer index, one slice of the reflection's tg_spill bytes per workgroup, the workgroup's index in the dispatch modulo DMSH_TG_GROUPS (nvn_mtl.m dispatch binds DMSH_TG_GROUPS slices at most)
 #define DMSH_TG_SLOT 30

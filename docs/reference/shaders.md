@@ -1549,6 +1549,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [PRAGMATA](../../dm/games/0400C76024710000/README.md): the tower-ring lockups of 2026-11-05.
 - **Check:** `DMSH_TEST_METAL=1 python3 dm/gfx/tests/test_dmsh_loopdiag.py` (`AutoGuard`).
 
+### A ballot under divergent control flow sees every lane (macOS 26)
+
+- **Symptom:** a ballot waterfall (a loop that ballots its lanes, takes one key per iteration and lets the matching lanes leave) runs to the loop guard's cap whenever a SIMD group holds two or more keys; a warp-aggregated count or append under a branch sees 32 lanes. PRAGMATA: exploded geometry and GPU page faults when an enemy comes on screen, `[RED] loop cap hit: 965043fe128ef98f loop 1`.
+- **Cause:** the Metal compiler of macOS 26 (seen on 26.6.2, M4 Pro) if-converts a branch whose ballot result merges after it, and evaluates `simd_ballot` with every lane active: `if (c) m = ballot(true);` gives `0xffffffff` instead of the lanes with `c`. KosmicKrisp (Mesa's Vulkan on Metal) lists it as `KK_WORKAROUND_3` (FB20113490) and reports it fixed in macOS 27. The same source is right at `-O0`. 965043fe's waterfall then never converges; after the cap it adds the iteration count (about 262,144) to its append counter, and the culling queue's consumers read past their lists.
+- **Fix:** `dmsh_metalwa.py`, after KosmicKrisp: KK3 rewrites each ballot as `simd_or` of the lane bit (the lane id brought to the function that needs it), KK9 puts a loop's lone break after a subgroup operation behind a run-time condition. A profile key turns it on for the shaders it lists: `shader_metalwa kk3 kk9 965043fe128ef98f` (every shader when no key prefix is listed). The rewritten forms are right on any OS, so the build emits them unconditionally; a function-constant form (`DMSH_MWA_FC`) is there for a host that would choose by OS version, none does yet. KK6, KK10, KK18 and KK3v (votes) are options; they did not reproduce here.
+- **Found on:** [PRAGMATA](../../dm/games/0400C76024710000/README.md): `965043fe128ef98f`, the record / culling queue's ballot waterfall (1045 cap records in one session before, 0 after).
+- **Check:** `test_dmsh_metalwa.py`; `DMSH_TEST_METAL=1` compiles the results and runs the waterfall (`t_kk3_waterfall.metal`, 965043fe's loop) on the GPU: the rewritten kernel must converge on every lane pattern, as `-O0` does, and the test prints whether the OS's `-O1` build still spins.
+
 ### NVN2 compute `c0` with two push blocks
 
 - **Symptom:** NVN2 compute shaders read their uniform, storage or handle words, or the second block of their push constants, from the wrong place in `c0`; `[RED] <key>: NVN2 compute c0 layout does not add up to its size` in the build.

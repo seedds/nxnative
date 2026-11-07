@@ -15,7 +15,7 @@
 import os, sys, ast, hashlib
 DM_ROOT = os.environ.get('DM_ROOT') or os.path.expanduser('~/dm-work')   # Workspace root (game files, build outputs and run artifacts are all under it)
 HERE = os.path.dirname(os.path.abspath(__file__)); GFX = os.path.dirname(HERE); HOME = os.path.expanduser('~')
-FILES = ['tools/dmsh_chain.py', 'tools/dmsh_build.py', 'tools/dmsh_atomic.py', 'tools/dmsh_wide.py', 'tools/dmsh_fetch.py', 'tools/dmsh_vin.py', 'tools/dmsh_pull.py', 'tools/dmsh_pull.metal', 'tools/dmsh_alpha.py', 'tools/dmsh_logic.py', 'tools/dmsh_side.py', 'tools/dmsh_geometry.py', 'tools/dmsh_mesh.py', 'tools/dmsh_meshstage.py', 'tools/dmsh_facts.py', 'tools/dmsh_ampere.py', 'tools/dmsh_loopdiag.py', 'tools/dmsh_dsl.py', 'nvn/dmsh_abi.h', 'tools/dmsh_abi.py', 'tools/dmsh_xlate/Program.cs', 'tools/dmsh_xlate/dmsh_xlate.csproj', '../ios/tools/ios_metal.py', 'tools/dmsh_chain.lock']
+FILES = ['tools/dmsh_chain.py', 'tools/dmsh_build.py', 'tools/dmsh_atomic.py', 'tools/dmsh_wide.py', 'tools/dmsh_fetch.py', 'tools/dmsh_vin.py', 'tools/dmsh_pull.py', 'tools/dmsh_pull.metal', 'tools/dmsh_alpha.py', 'tools/dmsh_logic.py', 'tools/dmsh_side.py', 'tools/dmsh_geometry.py', 'tools/dmsh_mesh.py', 'tools/dmsh_meshstage.py', 'tools/dmsh_facts.py', 'tools/dmsh_ampere.py', 'tools/dmsh_loopdiag.py', 'tools/dmsh_dsl.py', 'tools/dmsh_metalwa.py', 'nvn/dmsh_abi.h', 'tools/dmsh_abi.py', 'tools/dmsh_xlate/Program.cs', 'tools/dmsh_xlate/dmsh_xlate.csproj', '../ios/tools/ios_metal.py', 'tools/dmsh_chain.lock']
 # This target-specific lowering lives in the vendored translator. Include its
 # sources as well as the rebuilt DLL fingerprint; no old shader cache can bypass it.
 FILES += ['../third_party/ryujinx/src/Ryujinx.Graphics.Shader/' + f for f in (
@@ -65,6 +65,17 @@ def loopguard(g):
     v = os.environ.get('DMSH_LOOPGUARD') or g.get('shader_loopguard', 'off')
     if v not in LOOPGUARD_MODES: sys.exit(f'[RED] DMSH_LOOPGUARD / shader_loopguard takes {" or ".join(LOOPGUARD_MODES)}, not {v!r}')
     return v
+
+def metalwa(g):
+    """The profile's shader_metalwa row (dmsh_metalwa.py): (the KosmicKrisp workarounds it names, as numbers; the shader key prefixes it lists, empty for every shader).
+    `shader_metalwa kk3 kk9 965043fe128ef98f`: KK3 and KK9 on that shader only. No row: (frozenset(), frozenset()), the pass does not run. A shader input like every shader_* key"""
+    import dmsh_metalwa
+    words = [w for k, v in (g.rows if g else []) if k == 'shader_metalwa' for x in v for w in x.split()]   # every row, as shader_nofm
+    kk = frozenset(dmsh_metalwa.NAMES[w.lower()] for w in words if w.lower() in dmsh_metalwa.NAMES)
+    keys = frozenset(w.lower() for w in words if w.lower() not in dmsh_metalwa.NAMES)
+    bad = [k for k in keys if not all(c in '0123456789abcdef' for c in k) or not 4 <= len(k) <= 16]
+    if bad or (words and not kk): sys.exit(f'[RED] shader_metalwa takes {", ".join(dmsh_metalwa.NAMES)} and shader key prefixes (4 to 16 hex digits), not {" ".join(words)!r}')
+    return kk, keys
 
 def profile_rows(g):   # the profile keys that change how a shader is built (nvn_*, shader_*); DMSH_LOOPGUARD stands in for shader_loopguard when it differs from the profile's
     env = os.environ.get('DMSH_LOOPGUARD'); over = env and env != g.get('shader_loopguard', 'off')

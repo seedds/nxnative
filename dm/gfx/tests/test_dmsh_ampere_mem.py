@@ -270,7 +270,7 @@ class StageMemory(Translated):
         with_zero = self.msl(self.COUNT_ZERO, self.COUNT)
         self.assertEqual(without.count('atomic_compare_exchange'), with_zero.count('atomic_compare_exchange'))
 
-    def test_a_byte_goes_through_its_word_atomically(self):   # neighbouring threads write neighbouring bytes
+    def test_a_byte_goes_through_its_word_atomically(self):   # neighbouring threads write neighbouring bytes; the shader build makes the helper's loop one byte store (test_dmsh_shared_store.py)
         self.assertIn('atomic_compare_exchange', self.msl(self.INDEX))
 
     def test_outside_a_task_or_mesh_shader_it_is_refused(self):

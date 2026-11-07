@@ -99,6 +99,7 @@ From an empty save: at about 45 s `A` (title), `A` (New Game), then the movie. F
 - [An HMMA outside a chain overwrote the chain's accumulator](../../../docs/reference/shaders.md#an-hmma-outside-a-chain-overwrote-the-chains-accumulator): dotted rows across fog and light in play.
 - [LDSM reads rows other lanes stored](../../../docs/reference/shaders.md#ldsm-reads-rows-other-lanes-stored): white blotches over Kokiri Forest through agl's upscaler on an M4 Pro.
 - [A shader that writes a whole frame through raw global memory](../../../docs/reference/frame-rate.md#a-shader-that-writes-a-whole-frame-through-raw-global-memory)
+- [Stage memory byte stores through a compare-and-swap loop](../../../docs/reference/shaders.md#stage-memory-byte-stores-through-a-compare-and-swap-loop): 515 shaders, the foliage mesh shaders among them; pull request #1503 measured the foliage pass at 8.3-8.6 ms on an M3 Pro with the loop, while on an M6 the loop, the store and AND / OR measure the same.
 - [Memory pools nothing gave an address to stay out of the raw pool table](../../../docs/reference/memory.md#memory-pools-nothing-gave-an-address-to-stay-out-of-the-raw-pool-table)
 - [Shaders report which textures they read through a pool](../../../docs/reference/memory.md#shaders-report-which-textures-they-read-through-a-pool)
 - [Repeated GPU out-of-memory failures end the game](../../../docs/reference/memory.md#repeated-gpu-out-of-memory-failures-end-the-game)

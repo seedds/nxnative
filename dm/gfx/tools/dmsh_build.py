@@ -203,6 +203,38 @@ def first_store(msl, local):
     rest = msl[at:]
     if not stores or len(stores) > 4 or re.search(r'if \(%s\)' % guard, rest): return msl, []
     return out + rest, stores
+# Shared memory byte and half-word stores (STS.U8 / STS.U16, and the bytes a task or mesh shader writes to its stage memory: its primitive indices and count) reach the MSL as calls of
+# dmsh_shared_store8_<id> / dmsh_shared_store16_<id>(byte offset, value, the shared memory array) (HelperFunctionManager.GenerateSharedStore). The translator's body is upstream Ryujinx's
+# compare-and-swap loop on the word, as SPIR-V has no narrower store into a uint array; Metal's threadgroup memory takes byte stores, so the body becomes one store of the byte or half-word.
+# That is the console's store: no atomic, and two lanes writing the same byte leave one of their values. In the loop, the 32 lanes of a mesh shader writing neighbouring bytes contended four
+# to a word and retried; Ocarina of Time's foliage mesh shaders (ten such stores a lane) took 8.3-8.6 ms of GPU a frame on an M3 Pro (shaders.md, Stage memory byte stores through a
+# compare-and-swap loop). The narrow pointer aliases the uint array for the compiler's type-based alias analysis (uchar, and the may_alias ushort, are "omnipotent char"), so the word loads
+# around the store keep their order. tg_spill later turns the address space to device with the rest of the function
+SHARED_STORE = re.compile(r'\nvoid (dmsh_shared_store(8|16)_\d+)\(([^)]*)\)\n\{')
+SHARED_ALIAS = 'typedef ushort __attribute__((may_alias)) dm_ushort_alias;   // a half-word that may alias the shared memory\'s words (see shared_store_msl)\n'
+def shared_store_msl(msl):
+    if 'dmsh_shared_store' not in msl: return msl
+    found = list(SHARED_STORE.finditer(msl))
+    if not found: raise ValueError('dmsh_shared_store: no definition of the expected form')
+    out, at = [], 0
+    for m in found:
+        params = split_params(m.group(3))
+        scalar = [re.fullmatch(r'thread const u?int& (\w+)', p) for p in params[:2]]
+        arr = re.fullmatch(r'(threadgroup|device) spvUnsafeArray<uint, \d+>& (\w+)', params[2]) if len(params) == 3 else None
+        if not arr or not all(scalar): raise ValueError('dmsh_shared_store: unexpected parameters ' + m.group(3)[:160])
+        off, val = scalar[0].group(1), scalar[1].group(1)
+        space, mem = arr.groups()
+        store = (f'(({space} uchar*)&{mem}[0])[uint({off})] = uchar(uint({val}));' if m.group(2) == '8' else
+                 f'(({space} dm_ushort_alias*)&{mem}[0])[uint({off}) >> 1u] = ushort(uint({val}));')   # a half-word store is aligned (Maxwell faults on a misaligned one)
+        out.append(msl[at:m.end()] + '\n    ' + store + '\n')
+        at = block_end(msl, m.end() - 1)
+    out.append(msl[at:])
+    src = ''.join(out)
+    if any(m.group(2) == '16' for m in found):
+        u = src.find('using namespace metal;\n')
+        if u < 0: raise ValueError('dmsh_shared_store: no using namespace metal')
+        u += len('using namespace metal;\n'); src = src[:u] + SHARED_ALIAS + src[u:]
+    return src
 # Compute shared memory past Metal's limit: Apple's GPUs give a kernel 32 KB of threadgroup memory (maxThreadgroupMemoryLength), and Metal refuses a pipeline that declares more, while Ampere
 # gives up to 100 KB. Mario Kart World's DrivePassShaderDefault has 168 compute shaders of 48 KB (spvUnsafeArray<uint, 12288>), seven of them run on the way to the first race; refused, their
 # dispatches were skipped. Such a kernel takes its threadgroup arrays from a device buffer the host binds (abi.TG_SLOT): one slice of the arrays' total per workgroup, at the workgroup's index in
@@ -1562,6 +1594,8 @@ def finish(key, w, j, c1):
     except ValueError as e: return 'gather offsets rewrite failed', str(e)[:160], None
     try: src = hmma_msl(src)   # Ampere HMMA through simdgroup_matrix (see hmma_msl)
     except ValueError as e: return 'HMMA rewrite failed', str(e)[:160], None
+    try: src = shared_store_msl(src)   # shared memory byte and half-word stores as Metal byte stores (see shared_store_msl)
+    except ValueError as e: return 'shared store rewrite failed', str(e)[:160], None
     try: src = pool_arrays(src)   # handles traced to no slot read the pools the replay keeps (see pool_arrays)
     except ValueError as e: return 'pool rewrite failed', str(e)[:160], None
     src = dmsh_wide.wide_loads(src)   # storage words the translator split, read whole again (see dmsh_wide.py)

@@ -5,7 +5,9 @@
 // Unreal Engine needs no row: the rewriter finds its console variables by their registered names in any build (dm/tools/ue_cvar.py, main's fixups UE_CVAR:<name>), and the host writes
 // the frame limit, the profile's ue_fps_cvar (t.MaxFPS, or a game's own variable its settings apply to t.MaxFPS: SHIN MEGAMI TENSEI V: Vengeance's Project.FrameRateLimit), and the
 // present interval, rhi.SyncInterval (nvn.SyncInterval in UE 4.18's Switch RHI: DRAGON QUEST XI S). Each is a TAutoConsoleVariable whose +0x10 points to its value, the game thread's
-// copy then the render thread's. The games' configs set the limit to 30 and the interval to 2 (their notes name the .ini files)
+// copy then the render thread's. The games' configs set the limit to 30 and the interval to 2 (their notes name the .ini files). An engine with a fixed frame rate (bUseFixedFrameRate) steps
+// by and holds to UEngine::FixedFrameRate instead, which the rewriter finds through its reflection entry and GEngine (dm/tools/ue_fixed_rate.py, main's fixups UE_FIXED_RATE_PTR / _FIELD):
+// DRAGON BALL: Sparking! ZERO's battles, which Unreal's Switch frame pace sets to 30. The engine reads it only while the fixed frame rate is on, so writing it changes nothing on the others
 #include "hle.h"
 #include <mach/mach.h>
 
@@ -190,11 +192,12 @@ static int target_row(const module_t *m, lock_t *out) {
     return 1;
 }
 
-// The Unreal rows of this main: the profile's frame-limit variable and the present intervals, at the objects the rewriter found (0 rows: not an Unreal main). *missing: an Unreal main
-// (the rewriter found some of its variables) without the profile's frame-limit variable
+// The Unreal rows of this main: the profile's frame-limit variable and the present intervals, at the objects the rewriter found, and the engine's fixed frame rate on GEngine (0 rows:
+// not an Unreal main). *missing: an Unreal main (the rewriter found some of its variables) without the profile's frame-limit variable
 static int ue_rows(const module_t *m, lock_t *out, int *missing) {
-    static char what[3][48]; int n = 0, have = 0;
-    for (int k = 0; k < m->n_ue_cvar && n < 3; k++) {
+    static char what[4][48]; int n = 0, have = 0;
+    if (m->ue_fixed_ptr) out[n++] = (lock_t){ "", "Unreal fixed frame rate (GEngine->FixedFrameRate)", m->ue_fixed_ptr, m->ue_fixed_field, FPS_F32, 1, 0 };
+    for (int k = 0; k < m->n_ue_cvar && n < 4; k++) {
         const char *name = m->ue_cvar[k].name; int fps = !strcmp(name, DM_GAME_UE_FPS_CVAR);
         if (!fps && strcmp(name, "rhi.SyncInterval") && strcmp(name, "nvn.SyncInterval")) continue;
         have |= fps; snprintf(what[n], sizeof what[n], "Unreal %s", name);
@@ -205,7 +208,7 @@ static int ue_rows(const module_t *m, lock_t *out, int *missing) {
 }
 
 // The running main's engine limiters, found once: by the first present (dm_fps_lock_tick) or by the graphics layer's present cap, which may ask first (dm_fps_lock_engine, from the acquire)
-static lock_t ue[3], target_lock; static const lock_t *rows[NLOCKS + 4]; static int nrow, nier, ue_missing; static uint8_t *base; static uint32_t display;
+static lock_t ue[4], target_lock; static const lock_t *rows[NLOCKS + 5]; static int nrow, nier, ue_missing; static uint8_t *base; static uint32_t display;
 static pthread_once_t g_found = PTHREAD_ONCE_INIT;
 static void lock_find(void) {
     for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) {
@@ -225,7 +228,7 @@ int dm_fps_lock_engine(void) { pthread_once(&g_found, lock_find); return nrow ||
 int nvn_fps_high_now(void);   // hle_nvn.c
 void dm_fps_lock_tick(void) {
     dynamic_resolution_tick();   // separate from the FPS cap
-    static int state = -2, nlog[NLOCKS + 4], target, high; static const char *src;
+    static int state = -2, nlog[NLOCKS + 5], target, high; static const char *src;
     if (state == -1) return;
     if (state == -2) {
         state = -1; pthread_once(&g_found, lock_find);

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Unreal Engine 4 / 5's FMallocBinned3 in any module, found by what the engine itself holds, without a build ID: patch_nso.py cuts the call of its constructor and puts observation
-gate OBS_UE_MALLOC on that call, and the host gives the object its own allocator's vtable there (dm/host/hle_uemalloc.c). The constructor reserves 37 GB of address space for its
+"""Unreal Engine 4 / 5's FMallocBinned3 in any module, found by what the engine itself holds, without a build ID: patch_nso.py cuts the calls of its constructor and puts observation
+gate OBS_UE_MALLOC on each, and the host gives the object its own allocator's vtable there (dm/host/hle_uemalloc.c). The constructor reserves 37 GB of address space for its
 pools (74 of 512 MB), which an iPhone cannot give.
 
 The chain, each link unique or nothing is cut:
@@ -9,7 +9,9 @@ The chain, each link unique or nothing is cut:
 - the one data word holding the getter (the module's relative relocations applied), a slot of the vtable: the slots run back to two words of 0 (offset to top, no RTTI). The getter's
   slot number names the slot layout: 19 for Unreal Engine 4.26 and 4.27, 22 for UE 5, 26 for UE 5.6 (hle_uemalloc.c); any other stops the chain with a [RED] line;
 - the constructor: the one function other than the vtable's two destructors that stores the vtable's address (adrp + add, then str to [xN]);
-- its one call site, a bl (no b to it): x0 there is the object, already made (GCreateMalloc mallocs it, or a bss object in nninitStartup).
+- its call sites, each a bl (no b to it): x0 there is the object, already made (GCreateMalloc mallocs it, or a bss object in nninitStartup). DRAGON BALL Sparking! ZERO (UE 5.1) has two,
+  one lazy construction inlined twice (in nninitStartup and in a getter): if the global is null, malloc 0x1c38 bytes, construct, store; a b to it (a tail call) stops the chain, as a nop there
+  would fall through into the next function.
 Checked on the five Unreal 4 / 5 mains on the game drive (OCTOPATH TRAVELER 0 and II, DRAGON QUEST VII Reimagined, Pikmin 4, FINAL FANTASY RESONANCE), which gave the call sites of their
 registered cuts. Unreal Engine 3 (Batman: Arkham Knight) inlines the constructor; its cut stays its build's (its patches.py).
 Usage on its own: ue_malloc.py <module>... (what the chain finds in each)"""
@@ -32,7 +34,7 @@ def adrp_page(w, pc):
 def is_adrp(w, rd=None): return (w & 0x9F000000) == 0x90000000 and (rd is None or w & 31 == rd)
 
 def find(img, text_end, ro_off, data_off):
-    """(call site, vtable, the getter's slot, reason) when the chain holds; (None, None, None, why not) otherwise, with why starting '[RED] ' when the allocator is there but cannot
+    """(call sites, vtable, the getter's slot, reason) when the chain holds; (None, None, None, why not) otherwise, with why starting '[RED] ' when the allocator is there but cannot
     be replaced (its pools would take the address space)"""
     word = lambda a: struct.unpack_from('<I', img, a)[0]
     s = -1; names = []
@@ -91,8 +93,9 @@ def find(img, text_end, ro_off, data_off):
         if start not in dtors: ctors.add(start)
     if len(ctors) != 1: return None, None, None, f'[RED] FMallocBinned3 vtable at {vt:#x}: {len(ctors)} constructors (' + ', '.join(f'{x:#x}' for x in sorted(ctors)) + ')'
     c = ctors.pop()
-    if len(bl.get(c, [])) != 1 or b.get(c): return None, None, None, f'[RED] FMallocBinned3 constructor at {c:#x}: {len(bl.get(c, []))} calls and {len(b.get(c, []))} jumps, not one call'
-    return bl[c][0], vt, slot, f'FMallocBinned3 ({LAYOUTS[slot]}): its constructor at {c:#x}, called at {bl[c][0]:#x}; its vtable {vt:#x}, the name getter slot {slot}'
+    calls = sorted(bl.get(c, []))
+    if not calls or b.get(c): return None, None, None, f'[RED] FMallocBinned3 constructor at {c:#x}: {len(calls)} calls and {len(b.get(c, []))} jumps, not calls alone'
+    return tuple(calls), vt, slot, f'FMallocBinned3 ({LAYOUTS[slot]}): its constructor at {c:#x}, called at {", ".join(f"{x:#x}" for x in calls)}; its vtable {vt:#x}, the name getter slot {slot}'
 
 if __name__ == '__main__':
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))

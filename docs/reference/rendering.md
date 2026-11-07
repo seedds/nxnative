@@ -1393,6 +1393,29 @@ The Vulkan layer (`dm/gfx/vk/hle_vk.m`) was written for Hades; Super Mario Galax
 - **Cause:** two geometry shaders (GX points and lines expanded to quads) are not translated (Metal has no geometry stage).
 - **Found on:** [Super Mario Galaxy](../../dm/games/010099C022B96000/README.md).
 
+### A Vulkan game that looks its functions up by name
+
+- **Symptom:** the NSP script takes the game for an NVN one and stops at the shader split with `the shader split found no shaders in main or the RomFS`; built as a Vulkan game, the log has `[RED] ro::LookupSymbol cannot find vkGetInstanceProcAddr`.
+- **Cause:** RenderDragon (Mojang's bgfx fork) imports no Vulkan function and no `nvnBootstrapLoader`: it gets `vkGetInstanceProcAddr` from NVIDIA's driver (`subsdk0`, never loaded here) with `nn::ro::LookupSymbol`, and the rest through it. `profile_guess.py` counted only imported Vulkan functions, and `h_ro_LookupSymbol` searched only the loaded modules.
+- **Fix:** `profile_guess.py` (`vk_lookups`) decides `graphics vulkan` when `main` imports `nn::ro::LookupSymbol`, no Vulkan function, and names `vkGetInstanceProcAddr` as a string (141 Vulkan names in Minecraft 1.21.120). `h_ro_LookupSymbol` (`dm/host/hle_ro.c`) gives the host's implementation of a `vk*` name no module defines, as the host stands in for that driver.
+- **Check:** `dm/tools/tests/test_vk_renderdragon.py`, `dm/host/tests/t_nro.c`.
+- **Found on:** Minecraft (Bedrock Edition, title ID 0100D71004694000, 1.21.120).
+
+### A null core device function ends bgfx's device
+
+- **Symptom:** right after `vkCreateDevice` the game calls `vkDestroyDevice` and `vkDestroyInstance`, creates no surface, and from then on destroys and recreates its `vi` layer every frame (`vi::CreateLayer` hundreds of times in the log); nothing is presented.
+- **Cause:** bgfx loads every core device function with `vkGetDeviceProcAddr` and gives up on the device when one is null; the layer had no `vkCmdSetBlendConstants`, `vkCmdUpdateBuffer`, `vkCmdClearAttachments`, `vkCmdBlitImage`, `vkCmdResolveImage`, `vkCmdDrawIndirect`, `vkCmdDrawIndexedIndirect`, `vkCmdDispatch`, `vkCmdDispatchIndirect`, `vkCmdCopyQueryPoolResults` or `vkCreateComputePipelines`. RenderDragon's main loop then retries its renderer each frame.
+- **Fix:** the layer has them all. Implemented: dynamic blend constants (`C_BLENDC`), `vkCmdUpdateBuffer` (a staging buffer copied in order, `C_UPDB`), `vkCmdClearAttachments` of whole render targets (the pass's encoder ends and resumes with clearing load actions, `C_CLEARA`), `vkCmdBlitImage` (a copy for a region of the same size and format, otherwise a quad that samples the source with the blit's filter, `blit_image`), `vkCmdResolveImage` (a pass that loads the multisampled image and resolves it, `resolve_image`). Minecraft renders its frame into its own target and blits it into the swapchain image: without the blit the screen kept the swapchain's magenta.
+- **Not implemented (open):** compute pipelines and dispatches, indirect draws, `vkCmdCopyQueryPoolResults`, clears of part of a render target. Each exists and logs a `[RED]` line once when a game records it.
+- **Found on:** Minecraft (Bedrock Edition, 1.21.120): with these the game draws its panorama and first dialog. Its 35 compute shaders (FSR 1, volumetrics, light clustering) are not translated.
+
+### Integer vertex inputs of the other sign
+
+- **Symptom:** `[RED] cannot build the pipeline (…): Vertex attribute a_indices(1) of type int cannot be read using MTLAttributeFormatUShort`; every animal and mob missing, their shadows drawn.
+- **Cause:** RenderDragon's skinned actor shaders declare their bone indices as `int` and the game feeds them `R16_UINT`. Vulkan wants the numeric types to match, NVIDIA's driver reads the bits, Metal refuses the pipeline.
+- **Fix:** `pipe_make` reads the vertex function's attribute types (`MTLFunction.vertexAttributes`) and reads an integer input through the format of the shader's sign and the same width (`vfmt_sign`): the same bits, only a value with its top bit set would be sign-extended instead of zero-extended.
+- **Found on:** Minecraft (Bedrock Edition, 1.21.120).
+
 ## OpenGL layer
 
 Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.4.0) and Balatro (LÖVE 11.4, "love-nx", with SDL and LuaJIT) render with **NVIDIA's desktop OpenGL 4.5 core profile through EGL**, not NVN. The host implements GL itself on Metal (`dm/gfx/gl/hle_gl.m`), as it does Vulkan for Hades; NVIDIA's GL driver (`subsdk0`) is not loaded. Balatro's graphics module is LÖVE's own OpenGL backend, so its choices follow what the context reports.

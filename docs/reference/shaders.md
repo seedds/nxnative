@@ -4,6 +4,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 
 ## Containers by engine
 
+### SPIR-V inside RenderDragon materials and main
+
+- **Symptom:** a Vulkan game with no SPIR-V file in its RomFS (the NSP script would capture its shaders at run time), whose `renderer/materials/*.material.bin` files start with `1a da 11 0a` and name `RenderDragon.CompiledMaterialDefinition`.
+- **Cause:** Minecraft's RenderDragon (Mojang's bgfx fork) keeps each pass variant's shader as a bgfx shader binary (`VSH`, `FSH` or `CSH`, version 5: magic, hash, uniforms, the code's size as a u32, the code) inside its compiled materials; bgfx's own shaders (`fs_clear0`-`7`, `vs_clear`, the debug text) are bgfx binaries compiled into `main`. bgfx hands the code to `vkCreateShaderModule` unchanged, so the keys match: the host found every module the game created.
+- **Fix:** `vk_shaders.py` (`material_modules`) takes every SPIR-V magic whose size prefix covers exactly one module (its instructions end at that size) in a material, and in an NSO given as input (the NSP script passes `ExeFS/main` for a Vulkan game). The same module recurs across variants and materials, so it is translated once per key. bgfx's clear shaders declare their uniform block with a descriptor set and no binding: `default_bindings` gives it binding 0, the decoration's default (bgfx clears with `vkCmdClearAttachments` and only creates them).
+- **Check:** `dm/tools/tests/test_vk_renderdragon.py`.
+- **Found on:** Minecraft (Bedrock Edition, 1.21.120): 12,286 modules in 145 materials, 1,323 different (1,288 vertex and fragment, 35 compute), and 11 in `main`.
+
 ### One scrambled archive indexed by the NRO
 
 - **Symptom:** the split finds no shaders, and the RomFS is one huge file with a short name (`42`) whose bytes look random past a table at its start (magic `CRA.`).

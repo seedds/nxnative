@@ -13,7 +13,7 @@ void hlecount_seal(void) {}
 void *hlecount_wrap(const char *kind, const char *name, void *fn) { (void)kind; (void)name; return fn; }
 static uint64_t missing;
 uint64_t resolve_import(module_t *m, const char *name) { (void)m; (void)name; return (uint64_t)&missing; }
-int hle_implements(const char *name) { (void)name; return 0; }
+int hle_implements(const char *name) { return !strcmp(name, "vkGetInstanceProcAddr") || !strcmp(name, "nvnBootstrapLoader"); }   // the host's own functions in this fixture
 int svc_nro_deactivate(module_t *m) { m->loaded = 0; return 1; }   // no memory mappings in this fixture
 
 typedef struct {
@@ -75,6 +75,9 @@ int main(void) {
     assert(images[0].slots[1] == first && images[2].slots[1] == first);
     assert(images[0].slots[2] == 0);
     uintptr_t p; assert(h_ro_LookupModuleSymbol(&p, &handles[0], "shared") == 0 && p == first);
+    // a Vulkan function no module defines is the host's (Minecraft looks up vkGetInstanceProcAddr); other host functions and names it lacks still fail
+    p = 0; assert(h_ro_LookupSymbol(&p, "vkGetInstanceProcAddr") == 0 && p == (uintptr_t)&missing);
+    assert(h_ro_LookupSymbol(&p, "vkNotAFunction") != 0 && h_ro_LookupSymbol(&p, "nvnBootstrapLoader") != 0);
     assert(h_ro_LoadModule(&handles[0], raw[0], NULL, 32, 1) != 0);
 
     unload(2);

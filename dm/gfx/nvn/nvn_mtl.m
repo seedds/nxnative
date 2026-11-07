@@ -718,7 +718,7 @@ static void pool_res(int i) {
 // pools' buffers do at shared pages; GPU addresses are not contiguous across them, so a lookup must say how far it reads. One that does not know (length 1: an indirect draw's index buffer, a raw storage
 // address) gets BIG_UNKNOWN past its address. Raw global memory, whose pool table the shader walks by itself, takes the whole pool: big_full
 enum { BIG_MIN = 512u << 20, BIG_S = 16u << 20, BIG_UNKNOWN = 64u << 20, BIG_MAX = 32 };
-typedef struct { uintptr_t lo, hi, a, b; const void *mem; int *chunk, full; NSMutableArray *old; NSMutableArray *seg; uint64_t *segend; int nseg; } big_pool;   // seg: the pool table's own buffers over the pool, one per BIG_SEG (gmem_map_gpu, big_segments)   // chunk: stride → g_pools index + 1; full: the whole pool's entry + 1; old: buffers a longer chunk replaced, alive with the pool
+typedef struct { uintptr_t lo, hi, a, b; const void *mem; int *chunk, full; NSMutableArray *old; NSMutableArray *seg; uint64_t *segend; int nseg; uint8_t *segown; uintptr_t *segbase; } big_pool;   // seg: the pool table's own buffers over the pool, one per BIG_SEG (gmem_map_gpu, big_segments)   // chunk: stride → g_pools index + 1; full: the whole pool's entry + 1; old: buffers a longer chunk replaced, alive with the pool
 static big_pool g_big[BIG_MAX]; static int g_nbig;
 static int big_of(uint64_t addr) { for (int i = 0; i < g_nbig; i++) if (addr >= g_big[i].lo && addr < g_big[i].hi) return i; return -1; }
 // DM_NVN_SPARSE_SAFE (default on; 0 = off): never hand IOGPU a zero-copy range it cannot wire. PRAGMATA's tower-ring hang was a GPU page fault (BIF0, read) and one run ended in a
@@ -801,6 +801,16 @@ static void mtl_pool_add_(const void *mem, uint64_t size) {
     pthread_mutex_unlock(&g_mu);
 }
 
+// A pool-table segment takes the buffer of a lookup chunk that covers it (big_segments), instead of a no-copy buffer of its own over the same pages, both resident: on an 8 GB Mac
+// PRAGMATA's title load held 3,295 MB of shared buffers over 2,506 MB of distinct pages, its 65 MB segments beside the 85-102 MB lookup chunks, and the GPU memory guard stopped the
+// game. Segments are made when the pool table is first built, before most chunks, so each table build looks again at the segments with buffers of their own. The chunk keeps its
+// buffer: retiring the chunk clears the segments on it, made again at the next table build (g_pool_gen). DM_NVN_SEG_SHARE=0: segments keep buffers of their own. Caller holds g_mu
+static uint64_t g_big_seg_taken;
+static void big_chunk_retire(big_pool *b, id<MTLBuffer> ob) {
+    [g_keep removeObject:ob];
+    for (int q = 0; q < b->nseg; q++) if (!b->segown[q] && b->seg[(NSUInteger)q] == ob) { b->seg[(NSUInteger)q] = [NSNull null]; b->segend[q] = 0; atomic_fetch_add(&g_pool_gen, 1); }
+    defer_obj_release(ob);
+}
 static void big_moved(int i) {   // caller holds g_mu: entry i has a new index
     const pool_ent *e = &g_pools[i];
     for (int k = 0; k < g_nbig; k++) { big_pool *b = &g_big[k]; if (b->mem != e->key) continue;
@@ -825,8 +835,8 @@ void mtl_pool_del(const void *mem) {
             i--; }
     if (bg >= 0) {
         for (id<MTLBuffer> b in g_big[bg].old) defer_obj_release(b);
-        for (id b in g_big[bg].seg) if (b != (id)[NSNull null]) defer_obj_release(b);
-        free(g_big[bg].segend);
+        for (int q = 0; q < g_big[bg].nseg; q++) { id sb = g_big[bg].seg[(NSUInteger)q]; if (sb != (id)[NSNull null] && g_big[bg].segown[q]) defer_obj_release(sb); }   // one on a chunk's buffer went with the chunk above
+        free(g_big[bg].segend); free(g_big[bg].segown); free(g_big[bg].segbase);
         free(g_big[bg].chunk); g_big[bg] = g_big[--g_nbig]; g_pidx_ok = 0; g_plast = -1; atomic_fetch_add(&g_pool_gen, 1); atomic_fetch_sub(&g_big_n, 1);
     }
     }
@@ -861,7 +871,7 @@ static void big_drop_chunks(big_pool *b) {
     int full = b->full - 1; if (full < 0) return;
     for (int i = 0; i < g_npool; ) {
         if (g_pools[i].key != b->mem || i == full) { i++; continue; }
-        id<MTLBuffer> ob = g_pools[i].buf; [g_keep removeObject:ob]; defer_obj_release(ob); if (g_pools[i].res) g_pool_res_n--; g_big_retired++;
+        id<MTLBuffer> ob = g_pools[i].buf; big_chunk_retire(b, ob); if (g_pools[i].res) g_pool_res_n--; g_big_retired++;
         g_pools[i] = g_pools[--g_npool]; g_pidx_ok = 0; g_plast = -1;
         if (g_npool == full) full = i;   // the whole-pool entry moved into this place
         if (i < g_npool) big_moved(i);
@@ -879,13 +889,24 @@ enum { BIG_SEG = 64u << 20, BIG_SEG_PAD = 1u << 20 };
 static uint64_t g_big_seg_made;
 static void big_segments(big_pool *b) {
     int need = (int)((b->b - b->a + BIG_SEG - 1) / BIG_SEG);
-    if (need > b->nseg) { b->segend = realloc_or_die(b->segend, (size_t)need * sizeof *b->segend, "the large-pool segment table"); for (int k = b->nseg; k < need; k++) { b->segend[k] = 0; [b->seg addObject:[NSNull null]]; } b->nseg = need; }
+    if (need > b->nseg) { b->segend = realloc_or_die(b->segend, (size_t)need * sizeof *b->segend, "the large-pool segment table");
+        b->segown = realloc_or_die(b->segown, (size_t)need, "the large-pool segment table"); b->segbase = realloc_or_die(b->segbase, (size_t)need * sizeof *b->segbase, "the large-pool segment table");
+        for (int k = b->nseg; k < need; k++) { b->segend[k] = 0; b->segown[k] = 0; b->segbase[k] = 0; [b->seg addObject:[NSNull null]]; } b->nseg = need; }
+    static int share = -1; if (share < 0) { const char *e = getenv("DM_NVN_SEG_SHARE"); share = !e || atoi(e); }
     for (int k = 0; k < need; k++) {
         uintptr_t lo = b->a + (uintptr_t)k * BIG_SEG, hi = MIN(lo + BIG_SEG, b->b), end = MIN(hi + BIG_SEG_PAD, b->b);
-        if (b->segend[k] >= end) continue;
-        id<MTLBuffer> nb = nocopy_buf(lo, end, "pool-table segment"); if (!nb) continue;
-        id ob = b->seg[(NSUInteger)k]; if (ob != (id)[NSNull null]) defer_obj_release(ob);
-        b->seg[(NSUInteger)k] = nb; b->segend[k] = end; res_add(nb); g_big_seg_made++;
+        int stale = b->segend[k] < end;
+        if (!stale && !(share && b->segown[k])) continue;
+        id<MTLBuffer> nb = nil; uintptr_t nbase = lo, nend = end; int own = 1;
+        if (share) for (int i = 0; i < g_npool; i++) {   // a lookup chunk that covers the segment
+            const pool_ent *e = &g_pools[i]; if (e->key != b->mem || e->unk == 0 || e->base > lo || e->base + e->buf.length < end) continue;
+            nb = e->buf; nbase = e->base; nend = e->base + e->buf.length; own = 0; break;
+        }
+        if (!nb && !stale) continue;   // its own buffer still covers it
+        if (!nb) { nb = nocopy_buf(lo, end, "pool-table segment"); if (!nb) continue; }
+        id ob = b->seg[(NSUInteger)k]; if (ob != (id)[NSNull null] && b->segown[k]) defer_obj_release(ob);
+        b->seg[(NSUInteger)k] = nb; b->segend[k] = nend; b->segbase[k] = nbase; b->segown[k] = (uint8_t)own; res_add(nb);
+        if (own) g_big_seg_made++; else g_big_seg_taken++;
     }
 }
 // A large pool's storage grew at its end (a sparse run joined by the mapping after it): the pool keeps its entry, chunks and table segments; lookups and the table reach the new part.
@@ -913,7 +934,7 @@ static int big_lookup(big_pool *b, uint64_t addr, uint64_t len) {
     int n = big_new(b, lo, lo + BIG_S, end, end >= b->b ? 1 : BIG_UNKNOWN); if (n < 0) return -1;
     if (i >= 0) {   // lengthened: the shorter chunk goes through deferred release (out of the residency set once the work encoded with it has completed; argument blocks holding its
         // address are rebuilt, g_reg_gen). It used to stay resident until the pool went: PRAGMATA's opening load stacked such buffers over the same pages (10.4 GB in the set)
-        id<MTLBuffer> ob = g_pools[i].buf; [g_keep removeObject:ob]; defer_obj_release(ob); g_reg_gen++; g_big_retired++; g_pools[n].res = 0; if (g_pools[i].res) g_pool_res_n--;
+        id<MTLBuffer> ob = g_pools[i].buf; big_chunk_retire(b, ob); g_reg_gen++; g_big_retired++; g_pools[n].res = 0; if (g_pools[i].res) g_pool_res_n--;
         g_pools[i] = g_pools[n]; g_npool--; n = i;
     }
     b->chunk[k] = n + 1;
@@ -4089,8 +4110,8 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long rss_mb) {
     uint64_t dq_n = 0, dq_b = 0; pthread_mutex_lock(&g_deferred_mu); for (NvDeferredRelease *d in g_deferred) { dq_n++; id o = d->object; if ([o respondsToSelector:@selector(allocatedSize)]) dq_b += [(id<MTLAllocation>)o allocatedSize]; } pthread_mutex_unlock(&g_deferred_mu);
     MLOG("memory safety up to frame %llu: deferred releases waiting %llu (%llu MB); re-uploads that waited for their spare %llu (%llu still made a new texture); CPU staging pooled %llu MB, reused %llu, waited %llu",
          frame, (unsigned long long)dq_n, (unsigned long long)(dq_b >> 20), (unsigned long long)g_reup_waited, (unsigned long long)g_reup_new, (unsigned long long)(g_cstg_free_bytes >> 20), (unsigned long long)g_cstg_reused, (unsigned long long)g_cstg_waits);
-    MLOG("memory safety up to frame %llu: residency set %lld MB (peak %lld MB); zero-copy buffers made %llu, refused %llu (DM_NVN_SPARSE_SAFE), over write-protected pages made writable first %llu; large-pool chunk buffers retired %llu, large pools extended in place %llu, pool-table segments made %llu, pool tables filled again at commit %llu, argument words pointed at a newer table %llu; system wired %llu MB",
-         frame, (long long)(g_res_bytes >> 20), (long long)(g_res_bytes_peak >> 20), (unsigned long long)atomic_load(&g_nc_made), (unsigned long long)atomic_load(&g_nc_refused), (unsigned long long)atomic_load(&g_nc_unprot), (unsigned long long)g_big_retired, (unsigned long long)g_pool_extends, (unsigned long long)g_big_seg_made, (unsigned long long)g_gmem_patched, (unsigned long long)gmem_repointed(), (unsigned long long)(sys_wired_bytes() >> 20));
+    MLOG("memory safety up to frame %llu: residency set %lld MB (peak %lld MB); zero-copy buffers made %llu, refused %llu (DM_NVN_SPARSE_SAFE), over write-protected pages made writable first %llu; large-pool chunk buffers retired %llu, large pools extended in place %llu, pool-table segments made %llu (on lookup chunks %llu), pool tables filled again at commit %llu, argument words pointed at a newer table %llu; system wired %llu MB",
+         frame, (long long)(g_res_bytes >> 20), (long long)(g_res_bytes_peak >> 20), (unsigned long long)atomic_load(&g_nc_made), (unsigned long long)atomic_load(&g_nc_refused), (unsigned long long)atomic_load(&g_nc_unprot), (unsigned long long)g_big_retired, (unsigned long long)g_pool_extends, (unsigned long long)g_big_seg_made, (unsigned long long)g_big_seg_taken, (unsigned long long)g_gmem_patched, (unsigned long long)gmem_repointed(), (unsigned long long)(sys_wired_bytes() >> 20));
     { void mtl_vc_stats(unsigned *, uint64_t *, uint64_t *), mtl_tb2_stats(uint64_t *, uint64_t *, uint64_t *, uint64_t *, uint64_t *); uint64_t mtl_tex_mis_count(void); unsigned vn; uint64_t vh, vm, tb, tm, tf, tc, tcb;
       mtl_vc_stats(&vn, &vh, &vm); mtl_tb2_stats(&tb, &tm, &tf, &tc, &tcb);
       MLOG("texture views by texture (vc_get): %u textures hold cached views; %llu views reused, %llu made in total; texture buffers bound as 2D rows for wrapped 1D fetches %llu times, %llu made, %llu failed, %llu copied into aligned rows (%llu MB) "
@@ -9049,7 +9070,7 @@ static uint64_t gmem_build(id<MTLBuffer> reuse) {   // reuse: fill that table ag
         for (int q = 0; q < bp->nseg; q++) { id sb = bp->seg[(NSUInteger)q]; if (sb == (id)[NSNull null]) continue;
             uint64_t lo = bp->a + (uint64_t)q * BIG_SEG, hi = MIN(lo + BIG_SEG, (uint64_t)bp->hi); if (lo < bp->lo) lo = bp->lo; if (lo >= hi) continue;
             if (ng == gcap) { gcap = gcap ? 2 * gcap : 1024; ge = realloc_or_die(ge, (size_t)gcap * sizeof *ge, "the pool table entries"); }
-            ge[ng++] = (gent){lo, hi, ((id<MTLBuffer>)sb).gpuAddress - (bp->a + (uint64_t)q * BIG_SEG)}; } }
+            ge[ng++] = (gent){lo, hi, ((id<MTLBuffer>)sb).gpuAddress - bp->segbase[q]}; } }
     qsort_b(ge, (size_t)ng, sizeof *ge, ^int(const void *x, const void *y) { uint64_t a = ((const gent *)x)->lo, b = ((const gent *)y)->lo; return a < b ? -1 : a > b; });
     for (int k = 0; k < ng; k++) {
         uint64_t lo = MAX(ge[k].lo, end), hi = ge[k].hi;

@@ -118,7 +118,13 @@ int main(void) { @autoreleasepool {
           CHECK("no whole-pool entry: the table has its own segments", b->full == 0 && b->nseg == 8);
           int nseg_ok = 1; for (int q = 0; q < b->nseg; q++) nseg_ok &= b->seg[(NSUInteger)q] != (id)[NSNull null];
           CHECK("every segment made", nseg_ok);
-          CHECK("the lookup chunks stay", g_big_retired == r1); }
+          CHECK("the lookup chunks stay", g_big_retired == r1);
+          { int c0 = b->chunk[0] - 1; id<MTLBuffer> cb = c0 >= 0 ? g_pools[c0].buf : nil;
+            CHECK("a segment a lookup chunk covers takes its buffer", cb && b->seg[0] == cb && !b->segown[0] && b->segbase[0] == g_pools[c0].base && g_big_seg_taken > 0);
+            int own = 0; for (int q = 0; q < b->nseg; q++) own += b->segown[q];
+            CHECK("the others keep their own", own > 0 && own < b->nseg);
+            uint64_t g0 = atomic_load(&g_pool_gen); big_chunk_retire(b, cb); [g_keep addObject:cb];   // as big_lookup's lengthening does (the entry stays here)
+            CHECK("retiring that chunk clears the segment", b->seg[0] == (id)[NSNull null] && b->segend[0] == 0 && atomic_load(&g_pool_gen) > g0); } }
       pthread_mutex_unlock(&g_mu);
       CHECK("wired memory readable", sys_wired_bytes() > 0); }
     // 6. CPU upload staging is pooled: a buffer back from its batch is reused for the next upload of a similar size, and counted out of flight

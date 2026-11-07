@@ -249,7 +249,7 @@ NVN(nvnMemoryPoolBuilderSetFlags, void, NVNmemoryPoolBuilder *b, int f) { ((pool
 static uint8_t *vpool_reserve(pool_t *o); static void vpool_release(pool_t *o);   // sparse virtual pools, see MapVirtual
 NVN(nvnMemoryPoolInitialize, NVNboolean, NVNmemoryPool *p, const NVNmemoryPoolBuilder *b) {
     const pool_builder_t *s = (const pool_builder_t *)b; pool_t *o = (pool_t *)p;
-    o->magic = MAGIC('P', 'O', 'O', 'L'); o->flags = s->flags; o->mem = s->mem; o->size = s->size; o->vp = NULL; o->vmode = 0; o->gpu_written = 0;
+    o->magic = MAGIC('P', 'O', 'O', 'L'); o->flags = s->flags; o->mem = s->mem; o->size = s->size; o->vp = NULL; o->vmode = 0;
     if (!o->mem && (o->flags & 0x200)) { uint8_t *vr = vpool_reserve(o); if (vr) o->mem = vr; }   // a virtual pool's own address range until its first mapping decides (see MapVirtual)
     else if (o->mem) { mtl_pool_add(o->mem, o->size); nvn_dirty_add_range(o->mem, o->size); }
     if (!o->mem && !(o->flags & 0x200)) LOG("[RED] MemoryPoolInitialize: non-virtual pool has no storage flags=%#x size=%#llx", o->flags, o->size);
@@ -1043,8 +1043,8 @@ NVN(nvnCommandBufferSetRenderTargets, void, NVNcommandBuffer *c, int n, const NV
     p_set_rt *r = REC_SNAP(c, OP_SET_RT, p_set_rt, n + 1); r->n = n;
     for (int i = 0; i < n; i++) { r->color[i] = ct ? tex_snap(r, SNAP_OFF(p_set_rt), i, ct[i], (uint64_t)__builtin_return_address(0)) : NULL; copy_view(&r->cview[i], &r->has_cview[i], cv ? cv[i] : NULL); }
     r->depth = tex_snap(r, SNAP_OFF(p_set_rt), n, dt, (uint64_t)__builtin_return_address(0)); copy_view(&r->dview, &r->has_dview, dv);
-    for (int i = 0; i < n; i++) if (r->color[i]) mtl_pool_gpu_written(r->color[i]->pool);
-    if (r->depth) mtl_pool_gpu_written(r->depth->pool);
+    for (int i = 0; i < n; i++) if (r->color[i]) mtl_tex_gpu_written(r->color[i]);
+    if (r->depth) mtl_tex_gpu_written(r->depth);
 }
 NVN(nvnCommandBufferClearColor, void, NVNcommandBuffer *c, int index, const float *rgba, int mask) {
     p_clear_color *r = REC(c, OP_CLEAR_COLOR, p_clear_color); r->index = index; r->mask = mask; memcpy(r->rgba, rgba, 16);
@@ -1182,27 +1182,34 @@ NVN(nvnCommandBufferBarrier, void, NVNcommandBuffer *c, int bits) { *(int32_t *)
 NVN(nvnCommandBufferSetTexturePool, void, NVNcommandBuffer *c, const NVNtexturePool *p) { REC(c, OP_SET_TEX_POOL, p_set_pool)->pool = (const dpool_t *)p; CB(c)->tex_base = dpool_base(g_tpb, g_ntpb, p); }
 NVN(nvnCommandBufferSetSamplerPool, void, NVNcommandBuffer *c, const NVNsamplerPool *p) { REC(c, OP_SET_SAMP_POOL, p_set_pool)->pool = (const dpool_t *)p; CB(c)->samp_base = dpool_base(g_spb, g_nspb, p); }
 
+// A buffer <-> texture copy: the record, its texture snapshot, and the command buffer's copy strides after them when one is set (p_copy_strides in nvn_obj.h)
+static p_copy_b2t *rec_copy(NVNcommandBuffer *c, uint32_t op) {
+    const cmd_t *o = CB(c); int st = o->copy_row || o->copy_image;
+    p_copy_b2t *r = (p_copy_b2t *)rec(c, op, COPY_STRIDES_OFF + (st ? sizeof(p_copy_strides) : 0));
+    if (st) { p_copy_strides cs = { o->copy_row, o->copy_image }; memcpy((uint8_t *)r + COPY_STRIDES_OFF, &cs, sizeof cs); }
+    return r;
+}
 NVN(nvnCommandBufferCopyBufferToTexture, void, NVNcommandBuffer *c, NVNbufferAddress src, const NVNtexture *t, const NVNtextureView *v,
     const NVNcopyRegion *r, int flags) {
-    p_copy_b2t *o = REC_SNAP(c, OP_COPY_B2T, p_copy_b2t, 1); o->src = src; o->tex = tex_snap(o, SNAP_OFF(p_copy_b2t), 0, t, (uint64_t)__builtin_return_address(0)); copy_view(&o->view, &o->has_view, v); o->r = *r; o->flags = flags;
-    if (o->tex) mtl_pool_gpu_written(o->tex->pool);
+    p_copy_b2t *o = rec_copy(c, OP_COPY_B2T); o->src = src; o->tex = tex_snap(o, SNAP_OFF(p_copy_b2t), 0, t, (uint64_t)__builtin_return_address(0)); copy_view(&o->view, &o->has_view, v); o->r = *r; o->flags = flags;
+    if (o->tex) mtl_tex_gpu_written(o->tex);
 }
 NVN(nvnCommandBufferCopyTextureToBuffer, void, NVNcommandBuffer *c, const NVNtexture *t, const NVNtextureView *v, const NVNcopyRegion *r,
     NVNbufferAddress dst, int flags) {
-    p_copy_b2t *o = REC_SNAP(c, OP_COPY_T2B, p_copy_b2t, 1); o->src = dst; o->tex = tex_snap(o, SNAP_OFF(p_copy_b2t), 0, t, (uint64_t)__builtin_return_address(0)); copy_view(&o->view, &o->has_view, v); o->r = *r; o->flags = flags;
+    p_copy_b2t *o = rec_copy(c, OP_COPY_T2B); o->src = dst; o->tex = tex_snap(o, SNAP_OFF(p_copy_b2t), 0, t, (uint64_t)__builtin_return_address(0)); copy_view(&o->view, &o->has_view, v); o->r = *r; o->flags = flags;
 }
 // Clear a texture region with the given value (float / unsigned integer versions; mask = channel write mask)
 NVN(nvnCommandBufferClearTexture, void, NVNcommandBuffer *c, const NVNtexture *t, const NVNtextureView *v, const NVNcopyRegion *r, const float *rgba, int mask) {
-    p_clear_tex *o = REC_SNAP(c, OP_CLEAR_TEX, p_clear_tex, 1); o->tex = tex_snap(o, SNAP_OFF(p_clear_tex), 0, t, (uint64_t)__builtin_return_address(0)); if (o->tex) mtl_pool_gpu_written(o->tex->pool); copy_view(&o->view, &o->has_view, v); o->r = *r; o->mask = mask; o->is_uint = 0; memcpy(o->c.f, rgba, 16);
+    p_clear_tex *o = REC_SNAP(c, OP_CLEAR_TEX, p_clear_tex, 1); o->tex = tex_snap(o, SNAP_OFF(p_clear_tex), 0, t, (uint64_t)__builtin_return_address(0)); if (o->tex) mtl_tex_gpu_written(o->tex); copy_view(&o->view, &o->has_view, v); o->r = *r; o->mask = mask; o->is_uint = 0; memcpy(o->c.f, rgba, 16);
 }
 NVN(nvnCommandBufferClearTextureui, void, NVNcommandBuffer *c, const NVNtexture *t, const NVNtextureView *v, const NVNcopyRegion *r, const uint32_t *rgba, int mask) {
-    p_clear_tex *o = REC_SNAP(c, OP_CLEAR_TEX, p_clear_tex, 1); o->tex = tex_snap(o, SNAP_OFF(p_clear_tex), 0, t, (uint64_t)__builtin_return_address(0)); if (o->tex) mtl_pool_gpu_written(o->tex->pool); copy_view(&o->view, &o->has_view, v); o->r = *r; o->mask = mask; o->is_uint = 1; memcpy(o->c.u, rgba, 16);
+    p_clear_tex *o = REC_SNAP(c, OP_CLEAR_TEX, p_clear_tex, 1); o->tex = tex_snap(o, SNAP_OFF(p_clear_tex), 0, t, (uint64_t)__builtin_return_address(0)); if (o->tex) mtl_tex_gpu_written(o->tex); copy_view(&o->view, &o->has_view, v); o->r = *r; o->mask = mask; o->is_uint = 1; memcpy(o->c.u, rgba, 16);
 }
 NVN(nvnCommandBufferCopyTextureToTexture, void, NVNcommandBuffer *c, const NVNtexture *s, const NVNtextureView *sv, const NVNcopyRegion *sr,
     const NVNtexture *d, const NVNtextureView *dv, const NVNcopyRegion *dr, int flags) {
     p_copy_t2t *o = REC_SNAP(c, OP_COPY_T2T, p_copy_t2t, 2); o->src = tex_snap(o, SNAP_OFF(p_copy_t2t), 0, s, (uint64_t)__builtin_return_address(0)); o->dst = tex_snap(o, SNAP_OFF(p_copy_t2t), 1, d, (uint64_t)__builtin_return_address(0));
     copy_view(&o->sv, &o->has_sv, sv); copy_view(&o->dv, &o->has_dv, dv); o->sr = *sr; o->dr = *dr; o->flags = flags;
-    if (o->dst) mtl_pool_gpu_written(o->dst->pool);
+    if (o->dst) mtl_tex_gpu_written(o->dst);
 }
 // A textured rectangle into the bound colour targets, replayed as draw_tex (nvn_mtl.m). The handle's IDs are moved to the pools this command buffer bound, as bind_handles does:
 // Streets of Rage 4 draws its movie frames into its scene target this way, from a second texture pool. Only the handle's lower 32 bits reach the GPU (bind_handles)
@@ -1212,8 +1219,11 @@ NVN(nvnCommandBufferDrawTexture, void, NVNcommandBuffer *c, NVNtextureHandle h, 
     if (sid) sid += (uint64_t)CB(c)->samp_base;
     *REC(c, OP_DRAW_TEX, p_draw_tex) = (p_draw_tex){tid | sid << 20, *d, *s};
 }
-NVN(nvnCommandBufferSetCopyRowStride, void, NVNcommandBuffer *c, ptrdiff_t st) { p_copy_stride *o = REC(c, OP_COPY_STRIDE, p_copy_stride); o->stride = st; o->image = 0; }
-NVN(nvnCommandBufferSetCopyImageStride, void, NVNcommandBuffer *c, ptrdiff_t st) { p_copy_stride *o = REC(c, OP_COPY_STRIDE, p_copy_stride); o->stride = st; o->image = 1; }   // Link's Awakening
+// Copy strides are command buffer state, as in NVN: they take no command memory, and each copy recorded after them carries them (rec_copy). Link's Awakening sets the image stride
+NVN(nvnCommandBufferSetCopyRowStride, void, NVNcommandBuffer *c, ptrdiff_t st) { CB(c)->copy_row = st; }
+NVN(nvnCommandBufferSetCopyImageStride, void, NVNcommandBuffer *c, ptrdiff_t st) { CB(c)->copy_image = st; }
+NVN(nvnCommandBufferGetCopyRowStride, ptrdiff_t, const NVNcommandBuffer *c) { return ((const cmd_t *)c)->copy_row; }
+NVN(nvnCommandBufferGetCopyImageStride, ptrdiff_t, const NVNcommandBuffer *c) { return ((const cmd_t *)c)->copy_image; }
 NVN(nvnCommandBufferSetBlendColor, void, NVNcommandBuffer *c, const float *v) { memcpy(REC(c, OP_BLEND_COLOR, p_blend_color)->rgba, v, 16); }
 
 // ---------- State objects: packed in place (nvn_obj.h) ----------
@@ -1612,6 +1622,10 @@ static void power_line(uint64_t frame) {
         if (fs_ != pfs || fr != pfr || ft != pft) LOG("[nvn] same-pass feedback up to frame %llu, per frame: %.1f snapshots taken, %.1f draws reused one, %.1f read the tile (%.1f waited for their pipeline)",
             frame, (fs_ - pfs) / nf, (fr - pfr) / nf, (ft - pft) / nf, (fw - pfw) / nf);
         pfs = fs_; pfr = fr; pft = ft; pfw = fw;
+        void mtl_pool_stats(uint64_t s[6]); static uint64_t pps[6]; uint64_t ps[6]; mtl_pool_stats(ps);   // the tables of handles traced to no slot (nvn_mtl.m pool_gpu)
+        if (ps[0] != pps[0] || ps[2] != pps[2] || ps[3] != pps[3]) LOG("[nvn] pool tables up to frame %llu, per frame: %.2f built whole (%.2f ms), %.2f patched, %.2f kept; of these two %.2f over memory pool changes, %.2f over a new submission",
+            frame, (ps[0] - pps[0]) / nf, (ps[1] - pps[1]) / 1e3 / nf, (ps[2] - pps[2]) / nf, (ps[3] - pps[3]) / nf, (ps[4] - pps[4]) / nf, (ps[5] - pps[5]) / nf);
+        memcpy(pps, ps, sizeof pps);
         char tc[400]; dm_thread_cpu(tc, sizeof tc, s);
         LOG("[nvn] threads up to frame %llu: CPU %s", frame, tc); }
     else { char yt[192], rs[400], tc[400]; dm_yield_top(yt, sizeof yt); mtl_res_stats(rs, sizeof rs); dm_thread_cpu(tc, sizeof tc, 1); }   // the first call only takes the baselines
@@ -2110,6 +2124,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
         uint64_t g0, g1; if (frame_rec() && mtl_gpu_span(f - 8, &g0, &g1)) { trow(f - 8, "@gpu_beg_ms", (g0 - g_t0_ns) / 1e6); trow(f - 8, "@gpu_end_ms", (g1 - g_t0_ns) / 1e6); } }
     prev_in = t0; prev_pass = ps; prev_draw = dr;
     dump_frame();
+    { void dm_vi_frame_queued(uint64_t); dm_vi_frame_queued(g_frame); }   // the layer's frame history (hle_vi.c), numbered as GetLatestFrameNumber
     if (g_frame % TWIN == 0) tsummary(g_frame);
     mtl_set_frame(g_frame);
     // Real-device semantics: present only enqueues and returns immediately; this frame's display time is scheduled by the pacer, and the texture can be acquired again only at "display time + one period" (blocking in AcquireTexture)
@@ -2902,7 +2917,7 @@ static void rec_downsample(NVNcommandBuffer *c, const NVNtexture *s, const NVNte
     p_copy_t2t *o = REC_SNAP(c, OP_COPY_T2T, p_copy_t2t, 2);
     o->src = tex_snap(o, SNAP_OFF(p_copy_t2t), 0, s, ra); o->dst = tex_snap(o, SNAP_OFF(p_copy_t2t), 1, d, ra);
     copy_view(&o->sv, &o->has_sv, sv); copy_view(&o->dv, &o->has_dv, dv);
-    if (o->dst) mtl_pool_gpu_written(o->dst->pool);
+    if (o->dst) mtl_tex_gpu_written(o->dst);
     if (o->src) o->sr = (NVNcopyRegion){0, 0, 0, (int)o->src->d.width, (int)o->src->d.height, 1};
     if (o->dst) o->dr = (NVNcopyRegion){0, 0, 0, (int)o->dst->d.width, (int)o->dst->d.height, 1};
     o->flags = DM_COPY_RESOLVE;
@@ -2929,6 +2944,17 @@ static int write_region_bl(const tex_t *t, unsigned level, unsigned layer, const
             memcpy(t->mem + base + nvn_bl_offset(bx, y0 + (uint32_t)y, 0, lb, rows, th, td), src + y * row + x, n); x += n;
         }
     return 0;
+}
+// A copy's region into linear storage (a LINEAR texture the host uploads from its storage, nvn_mtl.m linear_cpu_only): one 2D level, rows of its stride, as pkg_upload_ reads them
+static int write_region_linear(const tex_t *t, unsigned level, unsigned layer, const NVNcopyRegion *r, const uint8_t *src, size_t row, int bw, int bh, int bpb) {
+    if (t->d.target != NVN_TEXTURE_TARGET_2D || level || layer || bw != 1 || bh != 1 || r->xoffset < 0 || r->yoffset < 0) return -1;
+    size_t srow = t->L.layer_size / (t->d.height ? t->d.height : 1), x0 = (size_t)r->xoffset * (size_t)bpb, wb = (size_t)r->width * (size_t)bpb, y0 = (size_t)r->yoffset, hb = (size_t)r->height;
+    if (x0 + wb > srow || (y0 + hb) * srow > t->L.size) return -1;
+    for (size_t y = 0; y < hb; y++) memcpy(t->mem + (y0 + y) * srow + x0, src + y * row, wb);
+    return 0;
+}
+static int write_region_mirror(const tex_t *t, unsigned level, unsigned layer, const NVNcopyRegion *r, const uint8_t *src, size_t row, int bw, int bh, int bpb) {
+    return (t->d.flags & NVN_TEXTURE_FLAGS_LINEAR ? write_region_linear : write_region_bl)(t, level, layer, r, src, row, bw, bh, bpb);
 }
 static void write_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r, const uint8_t *src, size_t row, size_t img) {
     if (!t->mem) { LOG("[RED] WriteTexels: texture has no storage"); return; }
@@ -2985,7 +3011,7 @@ int nvn_tex_mirror_b2t(const tex_t *t, unsigned level, unsigned layer0, const NV
     int nz = r->depth ? r->depth : 1;
     for (int z = 0; z < nz; z++) {
         unsigned layer = layer0 + (unsigned)(r->zoffset + z);
-        if (mirror_prepare(t, level, layer) || write_region_bl(t, level, layer, r, src + (size_t)z * img, row, bw, bh, bpb)) return -1;
+        if (mirror_prepare(t, level, layer) || write_region_mirror(t, level, layer, r, src + (size_t)z * img, row, bw, bh, bpb)) return -1;
     }
     return 0;
 }
@@ -3000,7 +3026,7 @@ int nvn_tex_mirror_t2t(const tex_t *s, unsigned sl, unsigned ss, const NVNcopyRe
     int nz = sr->depth ? sr->depth : 1, ok = 1;
     for (int z = 0; z < nz && ok; z++) {
         unsigned layer = ds + (unsigned)(dr->zoffset + z);
-        ok = !nvn_deswizzle(&s->d, sl, ss + (unsigned)(sr->zoffset + z), s->mem, lin, lp) && !mirror_prepare(d, dl, layer) && !write_region_bl(d, dl, layer, dr, lin + y0 * lp + x0, lp, bw, bh, bpb);
+        ok = !nvn_deswizzle(&s->d, sl, ss + (unsigned)(sr->zoffset + z), s->mem, lin, lp) && !mirror_prepare(d, dl, layer) && !write_region_mirror(d, dl, layer, dr, lin + y0 * lp + x0, lp, bw, bh, bpb);
     }
     free(lin);
     return ok ? 0 : -1;

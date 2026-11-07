@@ -128,6 +128,14 @@ To enroll a cut for any game's own module:
 - **Found on:** [Blasphemous](../../dm/games/0100698009C6E000/README.md), `main+0xae95f8`, ten table-relative targets.
 - **Check:** `dm/tools/tests/test_jump_copies.py` covers the exact table extent, base clobbers, incoming edges, undecodable targets and out-of-image tables. The extracted function resolves to the ten targets read directly from its table.
 
+### A table base register that another loop holds a small constant in
+
+- **Symptom:** `AssertionError: jump table 59dc90` in `patch_nso.py` on Cuphead 1.3.7 `main`, a build its profile names, since e5620b1a.
+- **Cause:** the function interleaves four dispatch loops that share registers. `x12` is the base of one (`adrp x12` + `add x12,x12,#0xa54` at `+0x59dba4`) and the constant 1 of another (`mov w12,#1` at `+0x59dbdc`, in a block that leaves by `b` to its own dispatch); only the value of `w8` keeps the paths apart. `jump_offsets` walks the base's writers back in address order. Since e5620b1a it sees a write of `wN` as a write of the base (correctly), so the walk met the `mov` first and gave up, and no later form takes the site.
+- **Fix:** general (`patch_nso.py` `null_base`): before the walk has found the base's `add`, a write of a constant that puts the table inside page zero (`mov` of an immediate or of `wzr` / `xzr`, the constant plus 4 bytes an entry at most 0x1000) is passed. Horizon never maps page zero, so the load would fault through that value on the console too: no path of a working game carries it to the load. Any other writer still ends the chain, and a constant between the `adrp` and the `add` is the base's own input.
+- **Found on:** [Cuphead](../../dm/games/0100A5C00D162000/README.md) 1.3.7 `main+0x59dc90` (GitHub issue #1532). Its ten targets are instructions of the function, and three of them are the same as those of the two sibling tables in `x15` and `x17` that the rewriter already took.
+- **Check:** `dm/tools/tests/test_jump_copies.py` `NullPageBase` (fails on the rewriter before). The other modules on hand rewrite byte-identically.
+
 ### Offset tables relative to an adr
 
 - **Symptom:** `jump table <addr>` assertion, entries relative to an `adr`.
@@ -142,7 +150,7 @@ To enroll a cut for any game's own module:
 - **Fix:** accept either comparison width for the tracked index. When following a 32-bit index copy backward, replace the destination with its source, so an earlier check of the overwritten destination cannot justify the load. Other writes still invalidate the match; table and target validation are unchanged.
 - **Found on:** [DRAGON QUEST I & II HD-2D Remake](../../dm/games/0100D7C01F254000/README.md), `main+0x30ee50c` (five targets).
 - **Check:** `dm/tools/tests/test_jump_copies.py` exercises both comparison widths, unrelated checks, overwritten indices and a bounds check on the copied source with real AArch64 instructions.
-- **Open:** as in the existing 32-bit form, this recognizer assumes the comparison has an effective unsigned bounds guard; it does not prove guard/flag validity or that every incoming path passes the check. This game's actual dispatch has `b.hi` with unchanged flags. Validating those branches remains separate from this fix.
+- **Resolved:** the recognizer assumed the comparison had an effective unsigned bounds guard without checking the branch or the flags; it checks both now ([A compare that guards nothing taken as a jump table's bound](#a-compare-that-guards-nothing-taken-as-a-jump-tables-bound)). This game's actual dispatch has `b.hi` with unchanged flags. That every incoming path passes the check is still not proven.
 
 ### Vector registers read as writes of the jump-table index
 
@@ -159,6 +167,15 @@ To enroll a cut for any game's own module:
 - **Fix:** a copy replaces the index, as `jump_adr_offsets` already did. Those searches ask `writes_reg`, which sees either width and the `lr` / `fp` names and leaves compares out. `jump_offsets` also refuses a site whose index is written after its check, such as `add w18,w18,#1`, or a caller-saved index across a call. A write that keeps the value, such as `sxtw x0,w0`, is refused too: no game on the drive has one, and a refusal stops the rewrite with a `jump table` assertion instead of reading the table wrongly.
 - **Found on:** reading the code while fixing [Vector registers read as writes of the jump-table index](#vector-registers-read-as-writes-of-the-jump-table-index). Of the 51 `main`s that rewrote in a comparison of old and new, only [Absolum](../../dm/games/0100A83022A22000/README.md)'s changed: its four tables at `main+0x1ed2dc`, `+0x1ed4fc`, `+0x1ed71c` and `+0x1ed8cc`, based in x30, went from 65,536 pads to 445, 373, 301 and 257, each its table's largest entry + 1, and the patch area from 3.7 MB to 570 KB.
 - **Check:** `dm/tools/tests/test_jump_copies.py` `CopyAfterCheck`, `IndexChangedAfterCheck`, `HalfCount`, `test_table_base_sees_every_write_of_the_register` and `test_a_32_bit_write_after_the_adr_replaces_its_value`.
+
+### A compare that guards nothing taken as a jump table's bound
+
+- **Symptom:** no failure seen on a game. `jump_offsets` and `jump_adr_offsets` could read a table with the wrong size and report nothing: on a synthetic site with a second compare between the real check and the load (`cmp w18,#4; b.hi exit; cmp w18,#1; ldrsw x18,[x4,x18,lsl #2]`) they returned 2 targets where the check allows 5, so three cases had no landing pad.
+- **Cause:** the walk back from the table load took the nearest `cmp` of the index as the bounds check without looking at what acts on it. A compare bounds the index only through the branch that follows it.
+- **Fix:** `guarded_count` (`patch_nso.py`) takes a compare only when, between it and the load, the first branch on an unsigned condition comes with the compare's flags still in place (no instruction that sets them and no call in between; a store, or a `cbz`, changes nothing): `b.hi` out of the dispatch gives N + 1 entries and `b.hs` / `b.cs` gives N, which had been read as N + 1; `b.ls` or `b.lo` / `b.cc` into the dispatch counts the same way when the instruction before its target is a `b`, `br` or `ret`, so the failed check does not fall into it. A compare with no such branch only sets the flags, and the walk goes on to the check before it. With none the site is refused, goes on to the other recognizers and ends in the `jump table` assertion, as before for a site with no compare. `half_count` keeps its own form (`b.hi`, `b.hs` or `b.cs` right after the compare).
+- **Found on:** reading the code (GitHub issue #977). Of the 27 modules of 6 games rewritten before and after ([Super Smash Bros. Ultimate](../../dm/games/01006A800016E000/README.md) 13.0.5, [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md), [Pokémon Legends: Z-A](../../dm/games/0100F43008C44000/README.md), [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md), [Mario Kart World](../../dm/games/0400C3F00006E000/README.md), [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md)), 165 sites reach these recognizers with a compare, all in Smash's `main`, `rtld` and `subsdk0`: every one is `cmp; b.hi` on the way to the load, one with a store between the two (`main+0x39be740`), so none is refused or resized.
+- **Check:** `dm/tools/tests/test_jump_copies.py` `GuardedCheck` (7 of its 8 cases fail on the rewriter before).
+- **Open:** no module with `b.hs`, or with a branch into the dispatch, was on the drive, so those two forms are tested synthetically only. A game whose dispatch has another form of check stops at the `jump table` assertion, where it rewrote before with a size nothing had checked.
 
 ### Byte tables indexed by x30 (capstone register names)
 
@@ -215,6 +232,13 @@ To enroll a cut for any game's own module:
 - **Check:** `dm/tools/tests/test_tail_call.py` covers both forms and rejects each broken proof with synthetic AArch64 instructions; no game assets are required by the tests. The function form was measured on real framed tail calls through other registers in Unity mains, whose shapes it must accept.
 
 ## Exclusive windows
+
+### Branches within an exclusive window
+
+- **Symptom:** `AssertionError: retry block overlaps a window 34b790` while rewriting Trails in the Sky 2nd Chapter 1.0.4 `main`.
+- **Cause:** a conditional branch to the store inside its own exclusive window was mistaken for an out-of-line retry. The same window also contains an unconditional branch, which the window copier did not relocate.
+- **Fix:** branches within the same window stay in its copy. Unconditional branches are relocated to the copy or an exit stub; for windows containing one, a control-flow check rejects exits with a live reservation. Direct entries into newly accepted windows from another function are rejected. A retry copy cannot branch into the uncopied middle of a window. Indirect entries outside the existing jump-table checks are not proven absent.
+- **Found on:** Trails in the Sky 2nd Chapter 1.0.4 (01007A2027548000). Its `main` rewrites with the fix; gameplay remains unverified.
 
 ### Exit stub order in exclusive windows
 

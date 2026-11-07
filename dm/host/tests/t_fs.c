@@ -139,6 +139,20 @@ int main(void) {
         size_t cache = 0;
         CHECK(h_fs_QueryAocCache(&cache, 2) == RES_OK && cache == 176, "DLC image reports Horizon table size (176, got %zu)", cache);
         CHECK(h_fs_MountAoc("aoc", 2, NULL, 0) == RES_OK && read_fs("aoc:/data/a", got, sizeof got) && !strcmp(got, "hello"), "DLC mounts and reads directly from its image");
+        {   // one mount name for each add-on in turn, unmounted in between (Pokémon Friends' AocVersionCheker: "AVCtitle")
+            memcpy(img + 32, "HELLO", 5); snprintf(fn, sizeof fn, "%s/3.img", root); f = fopen(fn, "wb"); fwrite(img, 1, sizeof img, f); fclose(f); memcpy(img + 32, "hello", 5);
+            int before = g_nmnt;
+            CHECK(h_fs_MountAoc("AVC", 2, NULL, 0) == RES_OK && read_fs("AVC:/data/a", got, sizeof got) && !strcmp(got, "hello"), "the first add-on under a name");
+            h_fs_Unmount("AVC"); CHECK(!h_fs_IsMounted("AVC"), "Unmount releases an add-on's name");
+            CHECK(!h_fs_IsMounted("") && !read_fs(":/data/a", got, sizeof got), "a released entry answers to no name, the empty one included");
+            CHECK(h_fs_MountAoc("AVC", 3, NULL, 0) == RES_OK && read_fs("AVC:/data/a", got, sizeof got) && !strcmp(got, "HELLO"), "the next add-on under that name shows its own files (got %s)", got);
+            h_fs_Unmount("AVC");
+            CHECK(h_fs_MountAoc("AVC", 2, NULL, 0) == RES_OK && read_fs("AVC:/data/a", got, sizeof got) && !strcmp(got, "hello") && g_nmnt == before + 2,
+                  "the first add-on again takes its entry back (%d entries for two add-ons)", g_nmnt - before);
+            CHECK(h_fs_MountAoc("AVC", 3, NULL, 0) == RES_OK && read_fs("AVC:/data/a", got, sizeof got) && !strcmp(got, "hello"), "a name still in use keeps its target, as before");
+            CHECK(h_fs_MountRom("rom", NULL, 0) == RES_OK, "mount the RomFS"); h_fs_Unmount("rom");
+            CHECK(h_fs_IsMounted("rom") && read_fs("rom:/data/c", got, sizeof got) && !strcmp(got, "xy"), "Unmount leaves the RomFS mounted, as every mount but an add-on's");
+        }
         unsetenv("DM_AOC_DIR"); g_nmnt = 0;
         {   // a file written as read from a damaged NSP (nx_extract --allow-damaged) still reads, and the mount counts it and the first open names it once
             romfs_img *clean = img_open(ip); CHECK(clean && !clean->damaged, "a clean image has no damaged files"); romfs_image_close(clean);

@@ -1,16 +1,12 @@
 // NVN null device unit tests: look up addresses from nvnBootstrapLoader the way the game does and go all the way to present; all expected values are hand-calculated, without calling the implementation under test.
 // For build and run see dm/gfx/tests/Makefile (make -C dm/gfx/tests).
 #include "../nvn/hle_nvn.c"
-uint64_t g_t0_ns;   // process start time from host main.c (used by hle_nvn's per-frame @t_s); unit test stub
-_Atomic uint64_t dm_present_ns;   // when the last present was made (hle_thread.c, DM_HITCH_DUMP); unit test stub
 #include "../tex/nvn_deswizzle.h"
 #include <time.h>
 void *front_metal_layer(void) { return NULL; }   // no window in unit tests: present only counts
 module_t *module_of(const void *p) { (void)p; return NULL; }   // no guest modules in unit tests
 module_t *g_mod; int g_nmod;                            // host symbols that crash.c depends on
 void svc_thread_dump(void) {}
-int dm_guest_as_contains(uintptr_t address) { (void)address; return 0; } // Tests use host-thread stacks.
-void dm_vi_layer_crop(int c[4]) { c[0] = c[1] = c[2] = c[3] = 0; }   // no vi layer crop in unit tests (hle_vi.c)
 void crash_install(void);
 void nvn_present_config(int hz, int display_mode);
 #include <fcntl.h>
@@ -34,6 +30,10 @@ static void mem_cb(NVNcommandBuffer *c, NVNcommandBufferMemoryEvent ev, size_t m
     size_t n = minsz > 256 ? minsz : 256;
     P(nvnCommandBufferAddCommandMemory)(c, &g_cmdpool, (ptrdiff_t)g_cmdoff, n); g_cmdoff += n;
 }
+
+// Counts the out-of-memory callbacks of a command buffer that should need none (the copy strides test)
+static int g_nocb_calls;
+static void no_mem_cb(NVNcommandBuffer *c, NVNcommandBufferMemoryEvent ev, size_t minsz, void *data) { (void)c; (void)ev; (void)minsz; (void)data; g_nocb_calls++; }
 
 // Suspend unit test: do the submit on another thread
 static _Atomic int g_sstarted, g_sdone; static pthread_mutex_t g_smu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_scv = PTHREAD_COND_INITIALIZER;
@@ -345,6 +345,35 @@ int main(void) {
     NVNcounterData reported_counter; memcpy(&reported_counter, cnt, sizeof reported_counter);
     uint64_t counter_ns = P(nvnDeviceGetTimestampInNanoseconds)(&dev, &reported_counter);
     EXPECT("report converted to ns lies inside submit/wait", 1, counter_ns + 2 >= counter_before && counter_ns <= counter_after);
+
+    // 5c. Copy strides are command buffer state (NVN): setting them takes no command memory, Get reads them back, and a copy recorded after them carries them.
+    //     Super Smash Bros. Ultimate records one upload in 256 bytes (main+0x3664960): SetCopyRowStride, SetCopyImageStride, CopyBufferToTexture, END, on a command buffer whose
+    //     out-of-memory handler is null; recorded as two 24-byte records, the copy overflowed and the game's callback jumped to 0
+    {
+        static uint8_t m[256] __attribute__((aligned(4096))); NVNmemoryPoolBuilder mb; NVNmemoryPool mp; NVNcommandBuffer c3;
+        P(nvnMemoryPoolBuilderSetDefaults)(&mb); P(nvnMemoryPoolBuilderSetStorage)(&mb, m, sizeof m); P(nvnMemoryPoolInitialize)(&mp, &mb);
+        NVNtextureBuilder tb; NVNtexture tx = {0}; P(nvnTextureBuilderSetDevice)(&tb, &dev); P(nvnTextureBuilderSetDefaults)(&tb);
+        P(nvnTextureBuilderSetSize2D)(&tb, 8, 8); P(nvnTextureBuilderSetFormat)(&tb, NVN_FORMAT_RGBA8); P(nvnTextureBuilderSetStorage)(&tb, &pool, 0); P(nvnTextureInitialize)(&tx, &tb);
+        P(nvnCommandBufferInitialize)(&c3, &dev); P(nvnCommandBufferSetMemoryCallback)(&c3, no_mem_cb); P(nvnCommandBufferSetMemoryCallbackData)(&c3, NULL); g_nocb_calls = 0;
+        EXPECT("copy row stride starts at 0", 0, P(nvnCommandBufferGetCopyRowStride)(&c3));
+        P(nvnCommandBufferAddCommandMemory)(&c3, &mp, 0, sizeof m); P(nvnCommandBufferBeginRecording)(&c3);
+        P(nvnCommandBufferSetCopyRowStride)(&c3, 64); P(nvnCommandBufferSetCopyImageStride)(&c3, 512);
+        EXPECT("setting the copy strides takes no command memory", 0, P(nvnCommandBufferGetCommandMemoryUsed)(&c3));
+        EXPECT("GetCopyRowStride reads the row stride back", 64, P(nvnCommandBufferGetCopyRowStride)(&c3));
+        EXPECT("GetCopyImageStride reads the image stride back", 512, P(nvnCommandBufferGetCopyImageStride)(&c3));
+        NVNcopyRegion rg = {0, 0, 0, 8, 8, 1};
+        P(nvnCommandBufferCopyBufferToTexture)(&c3, 0x10000, &tx, NULL, &rg, 0);
+        P(nvnCommandBufferEndRecording)(&c3);
+        EXPECT("one upload with strides fits 256 bytes without the out-of-memory callback", 0, g_nocb_calls);
+        op_hdr rh; memcpy(&rh, m, sizeof rh); const p_copy_strides *cs = copy_strides(m + 8, rh.size);
+        EXPECT("the copy carries the strides: 64 per row, 512 per image", 1, rh.op == OP_COPY_B2T && cs && cs->row == 64 && cs->image == 512);
+        P(nvnCommandBufferSetCopyRowStride)(&c3, 0); P(nvnCommandBufferSetCopyImageStride)(&c3, 0);
+        P(nvnCommandBufferAddCommandMemory)(&c3, &mp, 0, sizeof m); P(nvnCommandBufferBeginRecording)(&c3);
+        P(nvnCommandBufferCopyBufferToTexture)(&c3, 0x10000, &tx, NULL, &rg, 0); P(nvnCommandBufferEndRecording)(&c3);
+        memcpy(&rh, m, sizeof rh);
+        EXPECT("a copy with the default strides keeps its size and has no strides", 1, rh.size == 8 + COPY_STRIDES_OFF && !copy_strides(m + 8, rh.size));
+        P(nvnTextureFinalize)(&tx); P(nvnCommandBufferFinalize)(&c3);
+    }
 
     // 5a. Command memory per recording, as GetCommandMemoryUsed reports it (games size prerecorded command blocks by it: Breath of the Wild records one scratch draw per mesh):
     //     no BEGIN record, a plain indexed draw without the indirect / multi-draw fields, and the handle is the first record; an indirect draw keeps its address

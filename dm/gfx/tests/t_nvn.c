@@ -12,6 +12,7 @@ void nvn_present_config(int hz, int display_mode);
 #include <fcntl.h>
 #include <errno.h>
 #include <unistd.h>
+#include <sched.h>
 uint64_t now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000ull + t.tv_nsec; }
 
 static int g_fail, g_n;
@@ -41,6 +42,62 @@ static NVNqueue *g_sq; static NVNcommandHandle g_sh; static NVNT_nvnQueueSubmitC
 static void *susp_thr(void *a) { (void)a; pthread_mutex_lock(&g_smu); atomic_store(&g_sstarted, 1); pthread_cond_broadcast(&g_scv); pthread_mutex_unlock(&g_smu); g_sub(g_sq, 1, &g_sh); atomic_store(&g_sdone, 1); return NULL; }
 static int wait_started(void) { struct timespec dl; clock_gettime(CLOCK_REALTIME, &dl); dl.tv_sec += 10; pthread_mutex_lock(&g_smu); while (!atomic_load(&g_sstarted) && pthread_cond_timedwait(&g_scv, &g_smu, &dl) == 0) {} int ok = atomic_load(&g_sstarted); pthread_mutex_unlock(&g_smu); return ok; }
 
+// CPU-only focused lifetime test. A different command buffer may regrant the
+// guest bytes of a cached ticket while submit/capture is still reading its
+// snapshot. The writer must wait until that complete CPU walk releases it.
+typedef struct { NVNcommandBuffer cb; pool_t *pool; _Atomic int entered, done; } ticket_race_t;
+static void *ticket_regrant_thread(void *arg) {
+    ticket_race_t *t = arg;
+    atomic_store(&t->entered, 1);
+    h_nvnCommandBufferAddCommandMemory(&t->cb, (NVNmemoryPool *)t->pool, 0, 128);
+    atomic_store(&t->done, 1);
+    return NULL;
+}
+static int ticket_lifetime_race(void) {
+    _Alignas(16) uint8_t command[256] = {0}, control[64] = {0};
+    pool_t pool = {0}; pool.mem = command;
+    setenv("DM_NVN_DRAW_CTL", "1", 1); nvn_draw_ctl_init();
+    NVNcommandBuffer source, copy;
+    h_nvnCommandBufferInitialize(&source, NULL);
+    h_nvnCommandBufferAddControlMemory(&source, control, sizeof control);
+    h_nvnCommandBufferAddCommandMemory(&source, (NVNmemoryPool *)&pool, 0, 128);
+    h_nvnCommandBufferBeginRecording(&source);
+    h_nvnCommandBufferDrawElementsBaseVertex(&source, NVN_DRAW_PRIMITIVE_TRIANGLES, NVN_INDEX_TYPE_UNSIGNED_SHORT, 12, 0x123400, 2);
+    NVNcommandHandle ticket = h_nvnCommandBufferEndRecording(&source);
+    EXPECT("race: source is a four-byte ticket", 4, h_nvnCommandBufferGetCommandMemoryUsed(&source));
+    h_nvnCommandBufferInitialize(&copy, NULL);
+    h_nvnCommandBufferAddCommandMemory(&copy, (NVNmemoryPool *)&pool, 128, 128);
+    h_nvnCommandBufferBeginRecording(&copy);
+    h_nvnCommandBufferCopyCommands(&copy, 1, &ticket);
+    NVNcommandHandle copied = h_nvnCommandBufferEndRecording(&copy);
+    op_hdr copied_hdr; memcpy(&copied_hdr, (const void *)(uintptr_t)copied, sizeof copied_hdr);
+    EXPECT("race: CopyCommands is an independent draw", 1, copied_hdr.op == OP_DRAW_IDX && copied_hdr.size == 40);
+    h_nvnCommandBufferFinalize(&source); // A cached handle outlives its recorder.
+    ctl_ticket_read_begin(); // What submit/capture/preindex hold across their CPU walk.
+    const uint8_t *snapshot = nvn_ctl_draw_target((const void *)(uintptr_t)ticket);
+    EXPECT("race: ticket survives source finalize", 1, snapshot != NULL);
+    ticket_race_t writer = {.pool = &pool};
+    h_nvnCommandBufferInitialize(&writer.cb, NULL);
+    pthread_t thread;
+    int started = pthread_create(&thread, NULL, ticket_regrant_thread, &writer) == 0;
+    EXPECT("race: concurrent command regrant starts", 1, started);
+    if (started) {
+        for (int i = 0; i < 1000000 && !atomic_load(&writer.entered); i++) sched_yield();
+        EXPECT("race: writer reached overlapping regrant", 1, atomic_load(&writer.entered));
+        usleep(10000);
+        EXPECT("race: regrant waits for active reader", 0, atomic_load(&writer.done));
+        EXPECT("race: snapshot remains readable during submit", 1, snapshot && ((const op_hdr *)snapshot)->op == OP_DRAW_IDX);
+    }
+    ctl_ticket_read_end();
+    if (started) pthread_join(thread, NULL);
+    EXPECT("race: overlapping regrant completes", 1, started && atomic_load(&writer.done));
+    EXPECT("race: old ticket retired after reader finishes", 1, !nvn_ctl_draw_target((const void *)(uintptr_t)ticket));
+    op_hdr after; memcpy(&after, (const void *)(uintptr_t)copied, sizeof after);
+    EXPECT("race: copied draw survives source regrant", 1, after.op == OP_DRAW_IDX && after.size == 40);
+    h_nvnCommandBufferFinalize(&copy);
+    return g_fail ? 1 : 0;
+}
+
 static size_t tex_size3(int target, int fmt, int w, int h, int depth) {   // a layered or 3D texture's storage size
     NVNtextureBuilder tb;
     P(nvnTextureBuilderSetDevice)(&tb, &dev); P(nvnTextureBuilderSetDefaults)(&tb); P(nvnTextureBuilderSetTarget)(&tb, target);
@@ -57,6 +114,7 @@ static size_t tex_size(int fmt, int w, int h, int flags, size_t *align) {
 }
 
 int main(void) {
+    if (getenv("DM_TEST_CTL_TICKET_RACE")) return ticket_lifetime_race(); // headless; never opens Metal or submits GPU work
     setenv("DM_NVN_COUNT", "1", 1);   // the call-count checks below need the counting trampolines (off by default)
     // Engine-native limiters have no FPS state page. Their launcher cap must
     // still pace presents and select the display-link rate in display mode.

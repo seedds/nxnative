@@ -124,7 +124,15 @@ int main(void) { @autoreleasepool {
             int own = 0; for (int q = 0; q < b->nseg; q++) own += b->segown[q];
             CHECK("the others keep their own", own > 0 && own < b->nseg);
             uint64_t g0 = atomic_load(&g_pool_gen); big_chunk_retire(b, cb); [g_keep addObject:cb];   // as big_lookup's lengthening does (the entry stays here)
-            CHECK("retiring that chunk clears the segment", b->seg[0] == (id)[NSNull null] && b->segend[0] == 0 && atomic_load(&g_pool_gen) > g0); } }
+            CHECK("retiring that chunk clears the segment", b->seg[0] == (id)[NSNull null] && b->segend[0] == 0 && atomic_load(&g_pool_gen) > g0); }
+          // the chunks and own segments now hold more than the pool: a new lookup gets one buffer over the whole pool, the chunks go, and the next table build moves the
+          // segments onto that buffer
+          { uint64_t w0 = g_big_whole, r2 = g_big_retired; int iw = big_lookup(b, (uint64_t)(uintptr_t)bp + (420u << 20), 0);
+            CHECK("a whole-pool buffer instead of another chunk", iw >= 0 && b->full == iw + 1 && g_big_whole == w0 + 1 && g_pools[iw].base == (uintptr_t)bp && g_pools[iw].buf.length >= blen && g_big_retired > r2);
+            CHECK("every later lookup takes it", big_lookup(b, (uint64_t)(uintptr_t)bp + 4096, 4) == iw);
+            id<MTLBuffer> wb = g_pools[iw].buf; pthread_mutex_unlock(&g_mu); (void)gmem_map_gpu(); pthread_mutex_lock(&g_mu); b = &g_big[big_of((uint64_t)(uintptr_t)bp)];
+            int on = 0; for (int q = 0; q < b->nseg; q++) on += b->seg[(NSUInteger)q] == wb && !b->segown[q];
+            CHECK("the table's segments take the whole-pool buffer", on == b->nseg); } }
       pthread_mutex_unlock(&g_mu);
       CHECK("wired memory readable", sys_wired_bytes() > 0); }
     // 6. CPU upload staging is pooled: a buffer back from its batch is reused for the next upload of a similar size, and counted out of flight

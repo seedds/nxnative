@@ -805,7 +805,7 @@ static void mtl_pool_add_(const void *mem, uint64_t size) {
 // PRAGMATA's title load held 3,295 MB of shared buffers over 2,506 MB of distinct pages, its 65 MB segments beside the 85-102 MB lookup chunks, and the GPU memory guard stopped the
 // game. Segments are made when the pool table is first built, before most chunks, so each table build looks again at the segments with buffers of their own. The chunk keeps its
 // buffer: retiring the chunk clears the segments on it, made again at the next table build (g_pool_gen). DM_NVN_SEG_SHARE=0: segments keep buffers of their own. Caller holds g_mu
-static uint64_t g_big_seg_taken;
+static uint64_t g_big_seg_taken, g_big_whole;   // segments on a chunk's or the whole pool's buffer; pools turned into one buffer (big_lookup)
 static void big_chunk_retire(big_pool *b, id<MTLBuffer> ob) {
     [g_keep removeObject:ob];
     for (int q = 0; q < b->nseg; q++) if (!b->segown[q] && b->seg[(NSUInteger)q] == ob) { b->seg[(NSUInteger)q] = [NSNull null]; b->segend[q] = 0; atomic_fetch_add(&g_pool_gen, 1); }
@@ -899,7 +899,7 @@ static void big_segments(big_pool *b) {
         if (!stale && !(share && b->segown[k])) continue;
         id<MTLBuffer> nb = nil; uintptr_t nbase = lo, nend = end; int own = 1;
         if (share) for (int i = 0; i < g_npool; i++) {   // a lookup chunk that covers the segment
-            const pool_ent *e = &g_pools[i]; if (e->key != b->mem || e->unk == 0 || e->base > lo || e->base + e->buf.length < end) continue;
+            const pool_ent *e = &g_pools[i]; if (e->key != b->mem || e->base > lo || e->base + e->buf.length < end) continue;   // a chunk, or the whole-pool entry
             nb = e->buf; nbase = e->base; nend = e->base + e->buf.length; own = 0; break;
         }
         if (!nb && !stale) continue;   // its own buffer still covers it
@@ -918,7 +918,7 @@ int mtl_pool_extend(const void *mem, uint64_t size) {
     size_t on = ((b->b - b->a) >> 24) + 1, nn = ((nb - b->a) >> 24) + 1;
     if (nn > on) { b->chunk = realloc_or_die(b->chunk, nn * sizeof *b->chunk, "pool chunk table"); memset(b->chunk + on, 0, (nn - on) * sizeof *b->chunk); }
     b->hi = hi; b->b = nb;
-    if (b->full) { int f = b->full - 1; id<MTLBuffer> ob = g_pools[f].buf; [g_keep removeObject:ob]; defer_obj_release(ob); if (g_pools[f].res) g_pool_res_n--;   // an old whole-pool entry no longer covers it
+    if (b->full) { int f = b->full - 1; id<MTLBuffer> ob = g_pools[f].buf; big_chunk_retire(b, ob); if (g_pools[f].res) g_pool_res_n--;   // an old whole-pool entry no longer covers it
         g_pools[f] = g_pools[--g_npool]; if (f < g_npool) big_moved(f); b->full = 0; }
     g_pidx_ok = 0; g_plast = -1; atomic_fetch_add(&g_pool_gen, 1); g_reg_gen++; g_pool_extends++;
     pthread_mutex_unlock(&g_mu); return 1;
@@ -931,6 +931,21 @@ static int big_lookup(big_pool *b, uint64_t addr, uint64_t len) {
     int i = b->chunk[k] - 1;
     uintptr_t have = i >= 0 ? g_pools[i].end : 0;
     if (i >= 0 && (have >= b->hi || have >= addr + want)) return i;
+    // When this pool's chunks and its own table segments would hold more than the pool itself, one buffer over the whole pool takes their place (big_drop_chunks), and the table's
+    // segments take it too (big_segments): the lookups of unknown length (BIG_UNKNOWN) made chunks over the same pages, lengthened in steps, each one resident. On an 8 GB Mac
+    // PRAGMATA's opening load held 5,501 MB of shared buffers over 2,738 MB of distinct pages, and the GPU memory guard stopped the game. DM_NVN_BIG_WHOLE=0: chunks only
+    static int whole = -1; if (whole < 0) { const char *e = getenv("DM_NVN_BIG_WHOLE"); whole = !e || atoi(e); }
+    if (whole) {
+        uint64_t held = end - lo;
+        for (int q = 0; q < g_npool; q++) if (g_pools[q].key == b->mem && g_pools[q].unk) held += g_pools[q].buf.length;
+        for (int q = 0; q < b->nseg; q++) if (b->segown[q] && b->seg[(NSUInteger)q] != (id)[NSNull null]) held += ((id<MTLBuffer>)b->seg[(NSUInteger)q]).length;
+        if (held > b->b - b->a) {
+            int f = big_new(b, b->a, b->hi, b->b, 0);
+            if (f >= 0) { b->full = f + 1; big_drop_chunks(b); g_big_whole++;
+                static int nl; if (nl++ < 8) MLOG("memory pool %p+%llu MB: one buffer over the whole pool, as its chunks and segments would hold %llu MB", b->mem, (unsigned long long)((b->b - b->a) >> 20), (unsigned long long)(held >> 20));
+                return b->full - 1; }
+        }
+    }
     int n = big_new(b, lo, lo + BIG_S, end, end >= b->b ? 1 : BIG_UNKNOWN); if (n < 0) return -1;
     if (i >= 0) {   // lengthened: the shorter chunk goes through deferred release (out of the residency set once the work encoded with it has completed; argument blocks holding its
         // address are rebuilt, g_reg_gen). It used to stay resident until the pool went: PRAGMATA's opening load stacked such buffers over the same pages (10.4 GB in the set)
@@ -4110,8 +4125,8 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long rss_mb) {
     uint64_t dq_n = 0, dq_b = 0; pthread_mutex_lock(&g_deferred_mu); for (NvDeferredRelease *d in g_deferred) { dq_n++; id o = d->object; if ([o respondsToSelector:@selector(allocatedSize)]) dq_b += [(id<MTLAllocation>)o allocatedSize]; } pthread_mutex_unlock(&g_deferred_mu);
     MLOG("memory safety up to frame %llu: deferred releases waiting %llu (%llu MB); re-uploads that waited for their spare %llu (%llu still made a new texture); CPU staging pooled %llu MB, reused %llu, waited %llu",
          frame, (unsigned long long)dq_n, (unsigned long long)(dq_b >> 20), (unsigned long long)g_reup_waited, (unsigned long long)g_reup_new, (unsigned long long)(g_cstg_free_bytes >> 20), (unsigned long long)g_cstg_reused, (unsigned long long)g_cstg_waits);
-    MLOG("memory safety up to frame %llu: residency set %lld MB (peak %lld MB); zero-copy buffers made %llu, refused %llu (DM_NVN_SPARSE_SAFE), over write-protected pages made writable first %llu; large-pool chunk buffers retired %llu, large pools extended in place %llu, pool-table segments made %llu (on lookup chunks %llu), pool tables filled again at commit %llu, argument words pointed at a newer table %llu; system wired %llu MB",
-         frame, (long long)(g_res_bytes >> 20), (long long)(g_res_bytes_peak >> 20), (unsigned long long)atomic_load(&g_nc_made), (unsigned long long)atomic_load(&g_nc_refused), (unsigned long long)atomic_load(&g_nc_unprot), (unsigned long long)g_big_retired, (unsigned long long)g_pool_extends, (unsigned long long)g_big_seg_made, (unsigned long long)g_big_seg_taken, (unsigned long long)g_gmem_patched, (unsigned long long)gmem_repointed(), (unsigned long long)(sys_wired_bytes() >> 20));
+    MLOG("memory safety up to frame %llu: residency set %lld MB (peak %lld MB); zero-copy buffers made %llu, refused %llu (DM_NVN_SPARSE_SAFE), over write-protected pages made writable first %llu; large-pool chunk buffers retired %llu, large pools extended in place %llu, pool-table segments made %llu (on lookup chunks %llu), large pools made one buffer %llu, pool tables filled again at commit %llu, argument words pointed at a newer table %llu; system wired %llu MB",
+         frame, (long long)(g_res_bytes >> 20), (long long)(g_res_bytes_peak >> 20), (unsigned long long)atomic_load(&g_nc_made), (unsigned long long)atomic_load(&g_nc_refused), (unsigned long long)atomic_load(&g_nc_unprot), (unsigned long long)g_big_retired, (unsigned long long)g_pool_extends, (unsigned long long)g_big_seg_made, (unsigned long long)g_big_seg_taken, (unsigned long long)g_big_whole, (unsigned long long)g_gmem_patched, (unsigned long long)gmem_repointed(), (unsigned long long)(sys_wired_bytes() >> 20));
     { void mtl_vc_stats(unsigned *, uint64_t *, uint64_t *), mtl_tb2_stats(uint64_t *, uint64_t *, uint64_t *, uint64_t *, uint64_t *); uint64_t mtl_tex_mis_count(void); unsigned vn; uint64_t vh, vm, tb, tm, tf, tc, tcb;
       mtl_vc_stats(&vn, &vh, &vm); mtl_tb2_stats(&tb, &tm, &tf, &tc, &tcb);
       MLOG("texture views by texture (vc_get): %u textures hold cached views; %llu views reused, %llu made in total; texture buffers bound as 2D rows for wrapped 1D fetches %llu times, %llu made, %llu failed, %llu copied into aligned rows (%llu MB) "

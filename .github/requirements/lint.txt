@@ -5,3 +5,5 @@ pyright==1.1.414
 lz4==4.4.5
 capstone==5.0.9
 fonttools==4.67.0
+
+pycryptodome==3.23.0

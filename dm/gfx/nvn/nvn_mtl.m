@@ -278,8 +278,13 @@ enum { RS_SITES = 16 }; static struct { int line; uint64_t n, bytes; } g_rs_site
 // autoreleased in the calling thread's pool (measured in a standalone test: the object outlived its last strong reference until the thread ended), so each has a pool of its own
 static void res_add_at(id<MTLAllocation> allocation, int line) { @autoreleasepool {
     if (!allocation) return;
-    // An indirectly addressed placed texture needs its heap resident. The heap owner below removes it only after the last texture/view has gone.
-    id<MTLAllocation> r = [(id)allocation conformsToProtocol:@protocol(MTLResource)] && ((id<MTLResource>)allocation).heap ? (id)((id<MTLResource>)allocation).heap : allocation;
+    // Heap residency covers placed storage; a view also needs its immediate
+    // parent texture resident (Metal 4 fragment sampling). Keep both allocations.
+    // The heap owner removes the heap after its last texture/view has gone;
+    // ordinary deferred retirement removes each texture descriptor.
+    if ([(id)allocation conformsToProtocol:@protocol(MTLResource)] && ((id<MTLResource>)allocation).heap)
+        res_add_at(((id<MTLResource>)allocation).heap, line);
+    id<MTLAllocation> r = allocation;
     pthread_mutex_lock(&g_res_mu);
     if (!g_res_objects) g_res_objects = [NSHashTable weakObjectsHashTable];
     if ([g_res_objects containsObject:r]) { pthread_mutex_unlock(&g_res_mu); return; }   // already resident (a shared texture resolved again): marking the set dirty would cost a commit that changes nothing
@@ -291,7 +296,6 @@ static void res_add_at(id<MTLAllocation> allocation, int line) { @autoreleasepoo
 } }
 static void res_remove(id<MTLAllocation> r) { @autoreleasepool {
     if (!r) return;
-    if ([(id)r conformsToProtocol:@protocol(MTLResource)] && ((id<MTLResource>)r).heap) return;
     pthread_mutex_lock(&g_res_mu);
     if (![g_res_objects containsObject:r]) { pthread_mutex_unlock(&g_res_mu); return; }
     [g_res removeAllocation:(id<MTLAllocation>)r];
@@ -299,9 +303,19 @@ static void res_remove(id<MTLAllocation> r) { @autoreleasepool {
     g_res_dirty = 1; g_rs_rm++;
     pthread_mutex_unlock(&g_res_mu);
 } }
+// Metal's debug commit may release the last placed texture under g_res_mu.
+// Its owner only queues the heap; res_commit removes it after that Metal call.
+static pthread_mutex_t g_heap_retire_mu = PTHREAD_MUTEX_INITIALIZER;
+static NSMutableArray *g_heap_retire;
+static void res_retire_heap(id<MTLHeap> heap) {
+    pthread_mutex_lock(&g_heap_retire_mu);
+    if (!g_heap_retire) g_heap_retire = [NSMutableArray array];
+    [g_heap_retire addObject:heap];
+    pthread_mutex_unlock(&g_heap_retire_mu);
+}
 @interface NvImageHeap : NSObject { @public id<MTLHeap> heap; } @end
 @implementation NvImageHeap
-- (void)dealloc { res_remove(heap); atomic_fetch_sub(&g_image_heap_n, 1); }
+- (void)dealloc { res_retire_heap(heap); atomic_fetch_sub(&g_image_heap_n, 1); }
 @end
 static char g_image_heap_owner_key;
 // The R32 storage under a 32-bit colour texture that takes image atomics (tex_upgrade): resident as long as the colour view over it lives, which is what the game's names hold
@@ -335,9 +349,20 @@ static void res_check(id r, const char *what, int reg) {
              t ? [NSString stringWithFormat:@" format %lu %lux%lu type %lu usage %#lx", (unsigned long)t.pixelFormat, (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.textureType, (unsigned long)t.usage].UTF8String : ""); }
 }
 static void res_commit(void) {
-    pthread_mutex_lock(&g_res_mu);
-    if (g_res_dirty) { uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW); [g_res commit]; g_res_dirty = 0; g_rs_commits++; g_rs_commit_ns += clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0; }
-    pthread_mutex_unlock(&g_res_mu);
+    // A commit can destroy a removed texture and enqueue its heap. Drain that
+    // queue outside g_res_mu, then apply a following commit, without re-entering
+    // Metal's set while it is enumerating the previous changes.
+    for (;;) { @autoreleasepool {
+        pthread_mutex_lock(&g_heap_retire_mu);
+        NSArray *heaps = g_heap_retire; g_heap_retire = nil;
+        pthread_mutex_unlock(&g_heap_retire_mu);
+        for (id<MTLHeap> heap in heaps) res_remove(heap);
+        pthread_mutex_lock(&g_res_mu);
+        if (g_res_dirty) { uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW); [g_res commit]; g_res_dirty = 0; g_rs_commits++; g_rs_commit_ns += clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0; }
+        pthread_mutex_unlock(&g_res_mu);
+        pthread_mutex_lock(&g_heap_retire_mu); int more = g_heap_retire.count != 0; pthread_mutex_unlock(&g_heap_retire_mu);
+        if (!more) break;
+    } }
 }
 // What the residency set holds: totals by kind and the largest objects. At the first GPU out-of-memory error (the error names none of them), and for DM_CTL "restop" (hle_hid.c). The set holds
 // the game's pools (shared buffers over guest memory), textures, heaps and staging alike
@@ -2592,6 +2617,11 @@ static NSMutableArray *g_up_texs, *g_up_views;   // Targets and temporary intege
 static id<MTLBuffer> g_up_block;
 static size_t g_up_block_off, g_up_block_size;
 static NSMutableArray *g_up_keep;
+// Upload-only buffers belong to the batch, not the queue-wide rendering set.
+// A still-open rendering command buffer must not snapshot staging that an upload
+// feedback handler can retire before that rendering command buffer is committed.
+static id<MTLResidencySet> g_up_res;
+static void up_res_add(id<MTLAllocation> resource) { if (resource) [g_up_res addAllocation:resource]; }
 // Limit overflow staging per batch. The three upload slots bound in-flight
 // batches; up_begin publishes queued commits before waiting for a slot. A single
 // texture larger than the budget gets its own block (uploads are not tiled here).
@@ -2624,6 +2654,7 @@ static void up_flush(void) {
     unsigned slot = (g_up_seq - 1) % 3;
     // Only this upload batch uses its overflow staging. Retire it on upload
     // completion, even when the main rendering submission is still being built.
+    id<MTLResidencySet> batch_res = g_up_res; g_up_res = nil;
     NSMutableArray *staging = g_up_keep;
     if (g_up_block && !up_retained(g_up_block, slot)) [staging addObject:g_up_block];
     NSMutableArray *views = g_up_views; g_up_views = nil;
@@ -2644,7 +2675,8 @@ static void up_flush(void) {
         double d = f.GPUEndTime - f.GPUStartTime;
         if (d > 0) atomic_fetch_add(&g_upload_gpu_ns, (uint64_t)(d * 1e9));
         @autoreleasepool {
-            for (id<MTLResource> obj in staging) res_remove(obj);
+            [batch_res removeAllAllocations];
+            [batch_res commit];
             [staging removeAllObjects];
             [views removeAllObjects];   // upload-only integer views share their targets' residency
             res_commit();
@@ -2653,6 +2685,7 @@ static void up_flush(void) {
         atomic_fetch_sub(&g_up_pending, 1);
         up_wake();
     }];
+    [batch_res commit];
     res_commit();
     [cb endCommandBuffer];
     rec_commit_upload(cb, o);
@@ -2680,6 +2713,10 @@ static void up_begin(void) {
     [g_up_alloc4[slot] reset];
     g_up_cb = [g_dev newCommandBuffer];
     [g_up_cb beginCommandBufferWithAllocator:g_up_alloc4[slot]];
+    MTLResidencySetDescriptor *rd = [MTLResidencySetDescriptor new]; rd.initialCapacity = 64;
+    NSError *error = nil; g_up_res = [g_dev newResidencySetWithDescriptor:rd error:&error];
+    if (!g_up_res) MDIE("upload residency set: %s", error.localizedDescription.UTF8String);
+    [g_up_cb useResidencySet:g_up_res];
     g_up_ce = [g_up_cb computeCommandEncoder];
     [g_up_ce barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:resource_vis()];
     [g_up_ce setArgumentTable:g_up_ct];
@@ -2719,7 +2756,7 @@ static id<MTLBuffer> up_alloc(size_t n, size_t *off) {
         size_t demand = up_reuse() ? MAX(need, g_up_slot_want[g_up_cur_slot]) : need;
         size_t want = UP_SLOT_BLOCK; while (want < demand) want <<= 1;
         if (*sb && (*sb).length < want) { defer_obj_release(*sb); *sb = nil; }   // the slot's previous batch has finished (up_begin waited for it)
-        if (!*sb) { *sb = [g_dev newBufferWithLength:want options:MTLResourceStorageModePrivate]; if (!*sb) MDIE("failed to create the swizzled-upload staging block %#zx", want); res_add(*sb); g_up_blocks_new++; }
+        if (!*sb) { *sb = [g_dev newBufferWithLength:want options:MTLResourceStorageModePrivate]; if (!*sb) MDIE("failed to create the swizzled-upload staging block %#zx", want); g_up_blocks_new++; }
         g_up_block = *sb; g_up_block_size = (*sb).length; g_up_block_off = 0;
         g_up_staging_bytes += (*sb).length;
     }
@@ -2731,17 +2768,18 @@ static id<MTLBuffer> up_alloc(size_t n, size_t *off) {
             if (!leak && !up_retained(g_up_block, g_up_cur_slot)) { if (!g_up_keep) g_up_keep = [NSMutableArray array]; [g_up_keep addObject:g_up_block]; } }
         if (up_reuse() && need <= UP_BLOCK_SIZE && !g_up_over_used) {
             __strong id<MTLBuffer> *sb = &g_up_slot_over[g_up_cur_slot];
-            if (!*sb) { *sb = [g_dev newBufferWithLength:UP_BLOCK_SIZE options:MTLResourceStorageModePrivate]; if (!*sb) MDIE("failed to create the overflow staging block"); res_add(*sb); g_up_blocks_new++; }
+            if (!*sb) { *sb = [g_dev newBufferWithLength:UP_BLOCK_SIZE options:MTLResourceStorageModePrivate]; if (!*sb) MDIE("failed to create the overflow staging block"); g_up_blocks_new++; }
             g_up_block = *sb; g_up_block_size = (*sb).length; g_up_over_used = 1;
         } else {
             g_up_block_size = n > UP_BLOCK_SIZE ? need : UP_BLOCK_SIZE;
             g_up_block = [g_dev newBufferWithLength:g_up_block_size options:MTLResourceStorageModePrivate];
-            res_add(g_up_block); g_up_blocks_new++;
+            g_up_blocks_new++;
         }
         if (!g_up_block) MDIE("failed to create the swizzled-upload staging block %#zx", g_up_block_size);
         g_up_staging_bytes += g_up_block_size;
         g_up_block_off = 0;
     }
+    up_res_add(g_up_block);
     *off = g_up_block_off;
     g_up_block_off += need;
     return g_up_block;
@@ -2849,7 +2887,7 @@ static id<MTLBuffer> up_big_src(uint64_t addr, uint64_t len, uint64_t *off) {
     uintptr_t pg = (uintptr_t)getpagesize(), a = (uintptr_t)addr & ~(pg - 1), b = ((uintptr_t)addr + len + pg - 1) & ~(pg - 1);
     id<MTLBuffer> buf = [g_dev newBufferWithBytesNoCopy:(void *)a length:b - a options:MTLResourceStorageModeShared deallocator:nil];
     if (!buf) return nil;
-    res_add(buf); [g_up_keep addObject:buf]; *off = (uint64_t)addr - a;
+    up_res_add(buf); [g_up_keep addObject:buf]; *off = (uint64_t)addr - a;
     return buf;
 }
 static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture> reuse, MTLTextureUsage keep) {
@@ -2940,7 +2978,7 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
     }
     up_begin();
     id<MTLBuffer> stg = [g_dev newBufferWithLength:total ? total : 16 options:MTLResourceStorageModeShared];
-    res_add(stg); [g_up_keep addObject:stg];
+    up_res_add(stg); [g_up_keep addObject:stg];
     size_t off = 0;
     int zb = zblock_on() && t->d.format >= 0x79 && t->d.format <= 0x94; if (zb) { g_zb_ser = t->serial; g_zb_n = (int)MIN(d.mipmapLevelCount, 16u); memset(g_zb, 0, sizeof g_zb); memset(g_zb_tot, 0, sizeof g_zb_tot); }
     for (unsigned l = 0; l < d.mipmapLevelCount; l++) {
@@ -5642,10 +5680,12 @@ static void vc_set_free(void *p) {
     free(s);
 }
 static id<MTLTexture> vc_get(uint64_t ser, const vc_key *k, id<MTLTexture> base) {
+    NSUInteger l0 = k->l0, s0 = k->s0; id<MTLTexture> root = base;
+    while (root.parentTexture) { l0 += root.parentRelativeLevel; s0 += root.parentRelativeSlice; root = root.parentTexture; }
     vc_set *s = nvn_hm_get(&g_vc, &ser); if (!s) return nil;
     for (int i = 0; i < VC_WAYS; i++) if (s->view[i] && !memcmp(&s->k[i], k, sizeof *k)) {
         id<MTLTexture> v = (__bridge id<MTLTexture>)s->view[i];
-        if (v.parentTexture == base) { g_vc_hit++; return v; }
+        if (v.parentTexture == root && v.parentRelativeLevel == l0 && v.parentRelativeSlice == s0) { g_vc_hit++; return v; }
         defer_obj_unref(v); CFRelease(s->view[i]); s->view[i] = NULL; return nil;   // made from a base texture since replaced
     }
     return nil;
@@ -5974,8 +6014,12 @@ static id<MTLTexture> tex_by_id(int tid) {   // Caller holds g_rmu
         }
         vc_key k; memset(&k, 0, sizeof k); k.pf = pf; k.tt = (uint8_t)tt; k.l0 = (uint32_t)l0; k.nl = (uint32_t)nl; k.s0 = (uint32_t)s0; k.ns = (uint32_t)ns; memcpy(k.sw, sw, 4);
         if (!(v = vc_get(rp->t.serial, &k, base))) {
-            v = need_sw ? [base newTextureViewWithPixelFormat:(MTLPixelFormat)pf textureType:tt levels:NSMakeRange(l0, nl) slices:NSMakeRange(s0, ns) swizzle:MTLTextureSwizzleChannelsMake(sw[0], sw[1], sw[2], sw[3])]
-                        : [base newTextureViewWithPixelFormat:(MTLPixelFormat)pf textureType:tt levels:NSMakeRange(l0, nl) slices:NSMakeRange(s0, ns)];
+            // The serial can already hold an sRGB/linear or sparse-level view.
+            // A view of that view has a nonresident immediate parent on Metal.
+            id<MTLTexture> root = base; NSUInteger rl = l0, rs = s0;
+            while (root.parentTexture) { rl += root.parentRelativeLevel; rs += root.parentRelativeSlice; root = root.parentTexture; }
+            v = need_sw ? [root newTextureViewWithPixelFormat:(MTLPixelFormat)pf textureType:tt levels:NSMakeRange(rl, nl) slices:NSMakeRange(rs, ns) swizzle:MTLTextureSwizzleChannelsMake(sw[0], sw[1], sw[2], sw[3])]
+                        : [root newTextureViewWithPixelFormat:(MTLPixelFormat)pf textureType:tt levels:NSMakeRange(rl, nl) slices:NSMakeRange(rs, ns)];
             if (!v) { RED_ONCE(11, "cannot create texture view id %d", tid); v = base; }
             else vc_put(rp->t.serial, rp->t.pool, &k, v);
         }
@@ -12522,6 +12566,10 @@ static id<MTL4ComputeCommandEncoder> dispatch_enc(void) {
     return e;
 }
 static void dispatch(const p_dispatch *dp) {
+    // NVN can submit an empty grid; there is no shader invocation or memory effect.
+    // Metal 4 rejects direct zero-sized grids (FIFA 23's arena compression path).
+    // Indirect counts remain GPU-owned and are not inspected on the CPU.
+    if (!dp->ind && (!dp->x || !dp->y || !dp->z)) return;
     zskip_clear();
     g_wr_epoch++; g_mdx_epoch++;
     if (!S.cprog) { RED_ONCE(27, "no program bound before the dispatch"); return; }
@@ -12716,7 +12764,12 @@ void mtl_read_texels(const tex_t *t, unsigned level, unsigned layer0, const NVNc
 // take): a view's copies land in the storage it is made on
 static int tex_storage_dst(const tex_t *t) {
     if (!t->mem || !t->pool || (t->pool->flags & (NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS | NVN_MEMORY_POOL_FLAGS_VIRTUAL)) || t->d.samples > 1 || t->d.target == NVN_TEXTURE_TARGET_BUFFER
-        || (t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET | NVN_TEXTURE_FLAGS_COMPRESSIBLE | NVN_TEXTURE_FLAGS_IMAGE))
+        || (t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET | NVN_TEXTURE_FLAGS_COMPRESSIBLE))
+        // IMAGE cannot make a block-compressed texture shader-writable. Such a
+        // texture is still uploaded from CPU storage (tex_cpu_content), so GPU
+        // copies must update that storage too. Otherwise making a pool chunk
+        // dirties its protected pages and re-uploads the old bytes over the copy.
+        || ((t->d.flags & NVN_TEXTURE_FLAGS_IMAGE) && !fmt_compressed(t->d.format))
         || ((t->d.flags & NVN_TEXTURE_FLAGS_LINEAR) && !tex_cpu_written(t->serial))) return 0;
     if (t->has_layout || tex_cpu_written(t->serial) || nvn_ft_tracked(t->serial)) return !mtl_tex_gpu_owned(t->serial);
     return [tex_get(t->serial) isKindOfClass:[NvPkg class]];
@@ -12882,8 +12935,13 @@ static int copy_t2t_draw(id<MTLTexture> s, id<MTLTexture> d, unsigned sl, unsign
         if (!vf || !ff || !fd || !fds || !dss || !dss_s || !at || !samp[0] || !samp[1]) { failed = 1; MLOG("[RED] cannot create the pipelines for format-converting / scaling texture copies: %s", e.localizedDescription.UTF8String); return 0; }
         pso = [NSMutableDictionary dictionary];
     }
+    // Metal takes residency from a view's immediate parent. The copy source may
+    // already be a registered view: create the per-level views from its resident
+    // root, preserving its level/slice offsets and colour mapping.
+    id<MTLTexture> root = s; NSUInteger rl = sl, rs = ss;
+    while (root.parentTexture) { rl += root.parentRelativeLevel; rs += root.parentRelativeSlice; root = root.parentTexture; }
     // Stencil: read through a stencil-only view of the source (one per layer below); without one it is cleared to 0
-    id<MTLTexture> stv0 = stencil && s.pixelFormat == MTLPixelFormatDepth32Float_Stencil8 ? [s newTextureViewWithPixelFormat:MTLPixelFormatX32_Stencil8 textureType:MTLTextureType2D levels:NSMakeRange(sl, 1) slices:NSMakeRange(ss + sr->zoffset, 1)] : nil;
+    id<MTLTexture> stv0 = stencil && s.pixelFormat == MTLPixelFormatDepth32Float_Stencil8 ? [root newTextureViewWithPixelFormat:MTLPixelFormatX32_Stencil8 textureType:MTLTextureType2D levels:NSMakeRange(rl, 1) slices:NSMakeRange(rs + sr->zoffset, 1)] : nil;
     int scopy = stv0 != nil;
     NSNumber *pk = @(d.pixelFormat * 2 + scopy);
     id<MTLRenderPipelineState> ps = pso[pk];
@@ -12899,7 +12957,7 @@ static int copy_t2t_draw(id<MTLTexture> s, id<MTLTexture> d, unsigned sl, unsign
     int nz = sr->depth ? sr->depth : 1;
     rp_end(); if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
     for (int z = 0; z < nz; z++) {
-        id<MTLTexture> sv = [s newTextureViewWithPixelFormat:s.pixelFormat textureType:MTLTextureType2D levels:NSMakeRange(sl, 1) slices:NSMakeRange(ss + sr->zoffset + z, 1)];
+        id<MTLTexture> sv = [root newTextureViewWithPixelFormat:s.pixelFormat textureType:MTLTextureType2D levels:NSMakeRange(rl, 1) slices:NSMakeRange(rs + sr->zoffset + z, 1) swizzle:s.swizzle];
         id<MTLBuffer> pb; size_t po = arena_alloc(32, &pb);   // parameters in the frame arena (resident already): a fresh 32-byte buffer per copy was a residency add, a commit and a release (Link's Awakening, about 11 a frame)
         if (!sv || !pb) { RED_ONCE(84, "format-converting / scaling texture copy: cannot create the source view / argument block"); return z > 0; }
         float *p = (float *)((uint8_t *)pb.contents + po); p[0] = sr->xoffset; p[1] = sr->yoffset; p[2] = (float)sr->width / dr->width; p[3] = (float)sr->height / dr->height;
@@ -12910,7 +12968,7 @@ static int copy_t2t_draw(id<MTLTexture> s, id<MTLTexture> d, unsigned sl, unsign
         MTLRenderPassAttachmentDescriptor *a = depth ? (MTLRenderPassAttachmentDescriptor *)rp.depthAttachment : (MTLRenderPassAttachmentDescriptor *)rp.colorAttachments[0];
         int whole = !dr->xoffset && !dr->yoffset && (unsigned)dr->width == dw && (unsigned)dr->height == dh;   // the copy draws every pixel of the level (no blending, no discard): its old content is not loaded (Link's Awakening copies its scene this way every frame)
         a.texture = d; a.level = dl; a.slice = ds + dr->zoffset + z; a.loadAction = whole ? MTLLoadActionDontCare : MTLLoadActionLoad; a.storeAction = MTLStoreActionStore;
-        id<MTLTexture> stv = scopy ? (z ? [s newTextureViewWithPixelFormat:MTLPixelFormatX32_Stencil8 textureType:MTLTextureType2D levels:NSMakeRange(sl, 1) slices:NSMakeRange(ss + sr->zoffset + z, 1)] : stv0) : nil;
+        id<MTLTexture> stv = scopy ? (z ? [root newTextureViewWithPixelFormat:MTLPixelFormatX32_Stencil8 textureType:MTLTextureType2D levels:NSMakeRange(rl, 1) slices:NSMakeRange(rs + sr->zoffset + z, 1)] : stv0) : nil;
         if (stencil) { MTLRenderPassStencilAttachmentDescriptor *st = rp.stencilAttachment; st.texture = d; st.level = dl; st.slice = a.slice; st.loadAction = scopy ? (whole ? MTLLoadActionDontCare : MTLLoadActionLoad) : MTLLoadActionClear; st.clearStencil = 0; st.storeAction = MTLStoreActionStore; }
         ser_gate(); id<MTL4RenderCommandEncoder> en = enc_r_begin(rp);
         if (depth) [en setDepthStencilState:scopy ? dss_s : dss];

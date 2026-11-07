@@ -375,9 +375,20 @@ t_upload_budget: t_upload_budget.m $(MTL_T_DEP)
 check_t_upload_budget: t_upload_budget
 	MTL_DEBUG_LAYER=1 ./t_upload_budget
 	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_upload_budget
+	MTL_SHADER_VALIDATION=1 MTL_SHADER_VALIDATION_REPORT_TO_STDERR=1 MTL_SHADER_VALIDATION_ABORT_ON_FAULT=1 ./t_upload_budget
+	DM_NVN_ENC_THREAD=1 MTL_SHADER_VALIDATION=1 MTL_SHADER_VALIDATION_REPORT_TO_STDERR=1 MTL_SHADER_VALIDATION_ABORT_ON_FAULT=1 ./t_upload_budget
 .PHONY: check_t_upload_budget
 t_linear_readback: t_linear_readback.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_linear_readback.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
+t_compressed_copy: t_compressed_copy.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_compressed_copy.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
+.PHONY: check_t_compressed_copy
+check_t_compressed_copy: t_compressed_copy
+	DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_compressed_copy
+	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_compressed_copy
+	DM_NVN_ENC_THREAD=0 MTL_SHADER_VALIDATION=1 MTL_SHADER_VALIDATION_REPORT_TO_STDERR=1 MTL_SHADER_VALIDATION_FAIL_MODE=abort ./t_compressed_copy
+	DM_NVN_ENC_THREAD=1 MTL_SHADER_VALIDATION=1 MTL_SHADER_VALIDATION_REPORT_TO_STDERR=1 MTL_SHADER_VALIDATION_FAIL_MODE=abort ./t_compressed_copy
+
 t_copy_alias: t_copy_alias.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_copy_alias.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
 .PHONY: check_t_copy_alias
@@ -470,7 +481,10 @@ t_image_type: t_image_type.m $(MTL_T_DEP)
 check_t_image_type: RUN_ENV = MTL_DEBUG_LAYER=1
 t_stencil_view: t_stencil_view.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_stencil_view.m $(MTL_T_SRC) $(FW)
-check_t_stencil_view: RUN_ENV = MTL_DEBUG_LAYER=1
+check_t_stencil_view: t_stencil_view
+	MTL_DEBUG_LAYER=1 ./t_stencil_view
+	MTL_SHADER_VALIDATION=1 MTL_SHADER_VALIDATION_REPORT_TO_STDERR=1 MTL_SHADER_VALIDATION_ABORT_ON_FAULT=1 ./t_stencil_view
+	DM_NVN_ENC_THREAD=1 MTL_SHADER_VALIDATION=1 MTL_SHADER_VALIDATION_REPORT_TO_STDERR=1 MTL_SHADER_VALIDATION_ABORT_ON_FAULT=1 ./t_stencil_view
 # The Vulkan layer (#included) over the whole NVN layer, whose device and present path it uses
 t_vk_desc: t_vk_desc.m ../vk/hle_vk.m $(MTL_T_DEP)
 	clang $(CFLAGS) -I../../third_party/vulkan-headers/include -fobjc-arc -o $@ t_vk_desc.m $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
@@ -499,3 +513,9 @@ check_t_logic: t_logic
 # MUFU.SIN / COS lowered from turns through the fraction (InstEmitAmpereAlu.cs ATurnsToRadians), on the GPU against a double-precision reference
 t_mufu_turns: t_mufu_turns.m
 	clang -O1 -g -Wall -fobjc-arc -o $@ t_mufu_turns.m -framework Metal -framework Foundation
+
+t_dispatch_zero: t_dispatch_zero.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_dispatch_zero.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_dispatch_zero
+check_t_dispatch_zero: t_dispatch_zero
+	MTL_DEBUG_LAYER=1 ./t_dispatch_zero

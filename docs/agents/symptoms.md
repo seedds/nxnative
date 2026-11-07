@@ -344,6 +344,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - a Switch 2 game presents at 720p, with its upscaler at the matching low size. → [The display's largest buffer](../reference/services.md#the-displays-largest-buffer)
 - `registered NROs not found` from `nro_collect.py` in a game whose RomFS has an NRR, or `[RED] ro::LoadModule: no rewritten NRO with SHA-256 …`. `main` is small (about 600 KB of code) beside a data segment of random-looking bytes. → [A game that decodes its code at run time](../reference/services.md#a-game-that-decodes-its-code-at-run-time)
 - a crash in `ro::RegisterModuleInfo`, or an NRR that seems to register millions of hashes: the words at +0x340 and +0x344 are random. → [NRR version 1](../reference/services.md#nrr-version-1)
+- a null read in `nn::oe::DisableCrashReport` at SDK +0x36ee40 during FIFA 23 startup. → [Application crash-report switches without an applet proxy](../reference/services.md#application-crash-report-switches-without-an-applet-proxy)
 
 ## Movies
 
@@ -591,6 +592,10 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 
 ## Rendering
 
+- Metal 4 API validation aborts in `dispatchThreadgroups:threadsPerThreadgroup:` because `threadsPerGrid.width(0) * threadsPerGrid.y(0) * threadsPerGrid.depth(1)` is zero. An early bring-up also had a separate arena GPU fault; the empty-grid check alone did not establish its cause. The final candidate reaches its opening scene with the other documented fixes. → [Direct compute dispatches with an empty grid](../reference/rendering.md#direct-compute-dispatches-with-an-empty-grid)
+- Shader Validation visits a freed `MTLGPUDebugBuffer` in `MTL4GPUDebugCommandBuffer::applyResidencySets`; `t_upload_budget` independently traps with a deallocated buffer while a render encoder stays open across upload completions. → [Upload-only residency stays with its upload batch](../reference/rendering.md#upload-only-residency-stays-with-its-upload-batch)
+- Metal Shader Validation reports `Texture is not resident` in the fragment pipeline for a scaling copy; initial FIFA arena loading then faults the GPU. `DM_RES_CHECK` found the heap and reported no missing residency. → [Views of placed textures need their parent resident too](../reference/rendering.md#views-of-placed-textures-need-their-parent-resident-too)
+- texture pictures become a repeated colour pattern and player kits become white after a new memory-pool chunk is created. A BC3 title poster holds repeated old grey bytes instead of its copied image. → [GPU copies into compressed IMAGE textures](../reference/rendering.md#gpu-copies-into-compressed-image-textures)
 - clang reports null dereferences in `nvnWindowInitialize` and `clear_tex`; clearing a null texture crashes with `DM_NVN_PASSDUMP=1`. → [Null textures in diagnostic logs](../reference/rendering.md#null-textures-in-diagnostic-logs)
 - Metal aborts on a texture descriptor with an absurd size (`height (1869367126) greater than … 16384`). → [Texture objects copied into command records](../reference/rendering.md#texture-objects-copied-into-command-records)
 - a decoded movie stays black even though its YUV textures contain the picture; disabling its depth test makes it visible. → [New textures start as zero](../reference/rendering.md#new-textures-start-as-zero)

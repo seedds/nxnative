@@ -1117,3 +1117,10 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Cause:** an NRR with 1 in the byte at +5 (the Switch 2's) has a header 0x180 bytes longer. The same fields follow it: program ID +0x4b0, size +0x4b8, hash table +0x4c0, its count +0x4c4.
 - **Fix:** `hle_ro.c` and `nro_collect.py` read the table by that byte.
 - **Found on:** [Mario Tennis Fever](../../dm/games/0400D4201C6EA000/README.md).
+
+### Application crash-report switches without an applet proxy
+
+- **Symptom:** a null read in `nn::oe::DisableCrashReport` at SDK +0x36ee40 during FIFA 23 startup.
+- **Cause:** the SDK wrapper obtains am's application-functions interface and calls its vtable. The host does not initialize that proxy; the returned pointer is null. This is unrelated to shader compilation or audio.
+- **Fix:** host hooks for `EnableCrashReport` and `DisableCrashReport`, like the system recording switches: no operation because the host provides no application crash-report service. This leaves native host crash diagnostics enabled.
+- **Found on:** [FIFA 23 Legacy Edition](../../dm/games/01001C8016B4E000/README.md), update 1.0.3, SDK 13.3.5.

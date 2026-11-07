@@ -4,6 +4,35 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 
 ## Textures and formats
 
+### Direct compute dispatches with an empty grid
+
+- **Symptom:** Metal 4 API validation aborts in `dispatchThreadgroups:threadsPerThreadgroup:` because `threadsPerGrid.width(0) * threadsPerGrid.y(0) * threadsPerGrid.depth(1)` is zero. An early bring-up also had a separate arena GPU fault; the empty-grid check alone did not establish its cause. The final candidate reaches its opening scene with the other documented fixes.
+- **Cause:** the guest submits a direct dispatch with zero groups in at least one dimension. The replay forwarded it to Metal, whose direct-dispatch API rejects an empty grid.
+- **Fix:** empty direct grids return before changing replay state or encoding work. Indirect dimensions remain GPU-owned. `t_dispatch_zero` checks each zero dimension and replay-state preservation.
+- **Found on:** [FIFA 23 Legacy Edition](../../dm/games/01001C8016B4E000/README.md), 1.0.3 arena load on Apple M1.
+
+### Upload-only residency stays with its upload batch
+
+- **Symptom:** Shader Validation visits a freed `MTLGPUDebugBuffer` in `MTL4GPUDebugCommandBuffer::applyResidencySets`; `t_upload_budget` independently traps with a deallocated buffer while a render encoder stays open across upload completions.
+- **Cause:** upload-only staging and zero-copy sources were registered in the queue-wide rendering residency set, then removed on upload completion while a rendering command buffer could still hold that set's earlier resource snapshot. Holding every buffer until the render fence defeats the bounded upload budget.
+- **Fix:** each upload command buffer uses a batch-local residency set for staging and zero-copy sources. Its completion clears that set before releasing the batch's buffers. Render targets and shared parameter blocks retain their existing residency. `check_t_upload_budget` checks both API and Shader Validation, with deferred encoding off and on; peak staging is 384 MiB and settled staging 192 MiB in the 64-upload test.
+- **Found on:** [FIFA 23 Legacy Edition](../../dm/games/01001C8016B4E000/README.md), its first uploads with Shader Validation. This fixes the independently reproduced validation-layer lifetime failure. The final candidate reaches its opening scene with the other documented fixes; this change alone was not a proof of the separate early arena fault.
+
+### Views of placed textures need their parent resident too
+
+- **Symptom:** Metal Shader Validation reports `Texture is not resident` in the fragment pipeline for a scaling copy; initial FIFA arena loading then faults the GPU. `DM_RES_CHECK` found the heap and reported no missing residency.
+- **Cause:** `res_add_at` replaced a placed texture with its heap. Heap residency supplies the physical storage and the existing indirect compute read succeeds, but a view sampled by the fragment pipeline needs its immediate parent texture resident as well. Flattening a view to the root does not help when only that root's heap was registered.
+- **Fix:** `res_add_at` registers the heap and the texture. Normal deferred retirement removes the texture. The heap owner queues its heap after its last texture/view goes; `res_commit` drains that queue outside the previous Metal call. Metal API validation releases removed parent textures inside `commit`, so calling `res_remove` directly from that owner re-entered `g_res_mu` and deadlocked (confirmed by a sampled stack). `t_image_alias` adds a fragment copy of a placed texture, verifies every texel, and retains its repeated-release checks. The new case aborts under Shader Validation before this fix and passes the sampling and lifetime checks after it. On the M1, the original test's allocation-delta threshold already fails before the new case; that separate threshold is not relaxed.
+- **Found on:** [FIFA 23 Legacy Edition](../../dm/games/01001C8016B4E000/README.md). The final combined candidate reaches the opening scene; this mechanism is independently covered by the fragment-copy fixture.
+
+### GPU copies into compressed IMAGE textures
+
+- **Symptom:** texture pictures become a repeated colour pattern and player kits become white after a new memory-pool chunk is created. A BC3 title poster holds repeated old grey bytes instead of its copied image.
+- **Cause:** `tex_cpu_content` uploads block-compressed textures from CPU-visible storage even with the IMAGE flag, since compressed formats cannot be shader-written. `tex_storage_dst` nevertheless excluded every IMAGE texture from GPU-copy mirroring. The host texture held a GPU copy while guest storage retained its initial bytes. Creating a pool chunk makes protected pages writable for the no-copy mapping and counts them as written; a later upload then replaced the copied image with those old bytes. Small textures within the dirty tracker's edge-content guard can mask this failure.
+- **Fix:** let compressed IMAGE textures use the same storage mirroring as other CPU-uploaded compressed textures. Uncompressed shader images keep their existing ownership rule. No game key or pool-chunk override is required.
+- **Check:** `t_compressed_copy` copies synthetic BC3 data with IMAGE off and on, checks both GPU content and deswizzled guest storage, creates a chunk over the protected storage, and verifies that resolving the texture preserves the copy. The cross-page IMAGE case loses the copied content before the fix. Metal API and Shader Validation both pass with encoding threads off and on (38 checks in each standalone run; the original combined copy-alias test passed 139 checks in each run).
+- **Found on:** [FIFA 23 Legacy Edition](../../dm/games/01001C8016B4E000/README.md), latest-main bring-up on Apple M1. The title poster and menu background recover with default pool chunks enabled; further short-scene graphics checks remain separate from match-end validation.
+
 ### Null textures in diagnostic logs
 
 - **Symptom:** clang reports null dereferences in `nvnWindowInitialize` and `clear_tex`; clearing a null texture crashes with `DM_NVN_PASSDUMP=1`.
@@ -85,8 +114,8 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 
 - **Symptom:** with `MTL_SHADER_VALIDATION=1`, `Invalid Metal usage: Texture is not resident` for a texture allocated in `tex_fit`; without validation those reads are undefined.
 - **Cause:** Metal takes a view's residency from the texture it was made from. `tex_fit` made its view of the texture the binding resolved to, which is often a view itself (the view cache's, a level and layer range or a swizzle), so the new view hung under a texture that is not in the residency set although the texture under both is.
-- **Fix:** `tex_fit` makes the view from the texture at the bottom of the chain, with the bound view's level and layer offsets, level count and swizzle (`t_tex_fit_root`).
-- **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md): a 64x64 environment cube read from a 2D-array view, 7 draws in the outdoors frame replayed with `nvn_replay` under shader validation.
+- **Fix:** `tex_fit` makes the view from the texture at the bottom of the chain, with the bound view's level and layer offsets, level count and swizzle (`t_tex_fit_root`). `tex_by_id` also flattens a serial that already holds an sRGB/linear or sparse-level view, and `vc_get` checks the root and composed offsets (`t_view_levels`). `copy_t2t_draw` does the same for the per-level colour and stencil views of a scaling / format-converting copy: its source can already be a registered view (`t_stencil_view`, including nonzero level and slice offsets).
+- **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md): a 64x64 environment cube read from a 2D-array view, 7 draws in the outdoors frame replayed with `nvn_replay` under shader validation. [FIFA 23 Legacy Edition](../../dm/games/01001C8016B4E000/README.md) exposed the copy path during initial arena loading; the nested-source synthetic test aborts under Shader Validation before the copy fix.
 
 ### 1D textures as one-row 2D textures
 

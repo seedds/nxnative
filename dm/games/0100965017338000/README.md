@@ -28,6 +28,29 @@ On the Mac (headless, docked): from a fresh save the opening movie with sound, t
 - One `SetRenderEnableConditional` (drawn unconditionally), one `stage 0 cb7 has no uniform buffer bound` and one `sampler ID 4095 not registered`, at boot.
 - Run headless while someone works at the Mac: in a covered window the display link stalled for a second at a time and screenshots were not taken.
 
+### Apple TV lazy-clear batching experiment
+
+**Current, opt-in; cross-game validation pending.** The Party Plaza's shadow arrays contain adjacent single-layer depth clears with identical values. In a fixed view facing Guide Toad, 48 eligible layer clears became 18 batches within the existing eight-group lazy-clear queue, removing 30 render passes per frame. The general mechanism is [adjacent lazy depth/stencil clears](../../../docs/reference/rendering.md#adjacent-lazy-depthstencil-clears-share-one-pass).
+
+The measurements below are from a prior TVPort prototype based on `0to101/TVPort` commit `cc137bd3a607`, on an A15 Apple TV 4K (3rd generation, 128 GB), tvOS 27.2, Jamboree 2.3.0. The build used `-O3`, a native 3840×2160 drawable, the game's handheld 1280×720 output and `DM_BC_MAX_DIM=512`. The prototype contained other work held constant between phases; these numbers do **not** measure this isolated upstream port. No depth-only companion-plane optimization or drawable cap is part of this change.
+
+`DM_NVN_LC_BATCH=ab DM_AB=600` alternated off/on in the same process. Each phase retained 450 frames after discarding its first 150. [clear-batching.tsv](clear-batching.tsv) contains all 29 recorded phase summaries (3258–3286); phases 3274–3286 are the final uninterrupted segment, with no screenshots or profiling requests between them. The segment contains seven off phases (3,150 retained frames) and six on phases (2,700). Values below are **medians of phase summaries**, not percentiles pooled across all frames.
+
+| Final uninterrupted segment | Off | On | Change |
+|---|---:|---:|---:|
+| Frame p50, ms | 22.600 | 20.945 | −7.3% |
+| GPU p50, ms | 20.800 | 18.515 | −11.0% |
+| Render passes per frame | 139.7 | 109.7 | −30 |
+| Attachment load/store, rounded MB per frame | 113 / 222 | 113 / 222 | unchanged |
+
+Across all 29 phases, frame p50 was 22.38 → 21.28 ms (−4.9%) and GPU p50 20.62 → 18.84 ms (−8.6%). The fixed alternating order, one scene/session and thermal/clock variation limit interpretation. The device reported thermal state 2 during the final segment; no heat reduction was measured. A separate moving-plaza run was inconsistent across pairs and does not establish a gameplay-wide improvement. Other boards, minigames and games remain unvalidated.
+
+For measurement provenance, the prototype's SHA-256 values were `4cef8d98125508689dfd87b001e1abcb0d55a3ab763fe48bc48f37c8fa22e15d` for `nvn_mtl.m`, `96f35189bbd9493e286c9e702de4ea4de44a9747b761a25b8ac604ad3ed89517` for `front_ios.m`, and `70084640af877e9ff5472cb963e64d167b0e5e5b3ba3145d20f574108ae9d2a4` for the app executable. The TSV is transcribed from the prototype's `[ab] phase` summaries; it contains no assets or keys.
+
+To repeat: use this build of the game, keep the display/game/texture settings fixed, reach the plaza and stand facing Guide Toad, then collect alternating phases with the two environment settings above. Keep screenshot/dump requests outside the measured segment; retain all phase summaries, compare adjacent off/on phases as well as aggregate results, and record thermal state. Repeat in reverse order and in other scenes/devices before enabling by default.
+
+The isolated port was developed against nxnative `b2d46b86d03f4b03afe11ea61c67cdf00d7a5345`. Its synthetic Metal tests run on M4 Pro, macOS 27.2, Xcode 27.2; they establish pixel preservation, fallback and encoder/accounting behavior, not an on-device speedup. `regress.py check --games 0100965017338000` could not run because this checkout's asset folder has no Mac build. No second game was available. Live-game validation of the upstream port remains open.
+
 ## Movies
 
 - The opening movie (`movie/flow/op/movie/bq_op.mp4`, H.264 1080p) and the mode previews in the island map are native-texture movies (output 3, mode 2). The opening movie is unskippable on the first start; later −/+ skips it.
@@ -47,6 +70,7 @@ On the Mac (headless, docked): from a fresh save the opening movie with sound, t
 
 General changes first needed here; each applies to every game:
 
+- **Adjacent shadow-array clears share a pass** (opt-in): [Adjacent lazy depth/stencil clears](../../../docs/reference/rendering.md#adjacent-lazy-depthstencil-clears-share-one-pass).
 - **Bezel Engine 2.9 archives** (`bea_members` reads inline entries): [Bezel Engine 2.9 archives keep their entries inline](../../../docs/reference/shaders.md#bezel-engine-29-archives-keep-their-entries-inline).
 - **Native-texture `GetOutputBuffer` returns the output index**, and a release of an index the client does not hold changes nothing (`hle_movie.c`): [`GetOutputBuffer` returns the output index in native-texture mode](../../../docs/reference/movies.md#getoutputbuffer-returns-the-output-index-in-native-texture-mode).
 - **The base instance of indirect draws from Metal** (`dmsh_build.py` `vs_base_instance`): [The base instance of indirect draws comes from Metal](../../../docs/reference/shaders.md#the-base-instance-of-indirect-draws-comes-from-metal).

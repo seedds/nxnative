@@ -4139,6 +4139,7 @@ static void ts_boundary(void) {   // the end of a segment and the start of the n
 static int enc_open(void) { return g_enc != nil; }
 // Target info of the current render pass: determined once from the attachments at rp_begin and shared by all draws in the pass (pipeline key, depth-stencil, viewport / scissor all depend only on it)
 static struct { uint32_t cfmt[8], dfmt, sfmt, samples; int hd, hs; NSUInteger tw, th; uint64_t serial, reg_gen, ser_gen, range_dirty; int range_external, range_depth_nonro, layered; __unsafe_unretained id<MTLTexture> range_color, range_depth; } g_pass;
+static NSUInteger g_lc_layers;   // layer count while lc_land opens a batched clear-only pass
 static int g_rp_layered;   // the pass about to open is for a vertex shader that writes the layer (draw → rp_begin_ex)
 // Slice-merged passes (DM_NVN_SLICE_MERGE, on by default; 0 off): consecutive passes that each draw into another layer of one level of the same array or cube texture,
 // with nothing between them but state, uniform updates and draws (no game barrier, clear, copy or dispatch: sm_scan), run as one layered pass. Each draw reaches its layer through a vertex
@@ -4804,13 +4805,14 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex_(int clear_only) {
     // The same holds for layers: NVN clears every layer of the target's view, a load action only the pass's layers (one, unless the pass is layered). Little Nightmares clears its point
     // lights' 6-face shadow cube in the pass that captures the one-pass geometry shader's vertices: only face 0 was cleared, faces 1-5 kept zero depth, every fragment failed the depth test
     // there and the light passed only through the +X face. A cleared attachment whose view has more layers than a pass that is not layered is cleared, every layer, in a pass of its own too
+    if (clear_only == 1 && g_lc_layers > 1) pd.renderTargetArrayLength = g_lc_layers;
     {   NSUInteger pw, ph; pass_dims(pd, (NSUInteger)R.rt.n, &pw, &ph);
         for (NSUInteger i = 0; i < (NSUInteger)R.rt.n + 1; i++) {
             MTLRenderPassAttachmentDescriptor *a = i < (NSUInteger)R.rt.n ? pd.colorAttachments[i] : pd.depthAttachment.texture ? pd.depthAttachment : pd.stencilAttachment;
             int ds = i == (NSUInteger)R.rt.n, cd = ds && pd.depthAttachment.texture && pd.depthAttachment.loadAction == MTLLoadActionClear, cs = ds && pd.stencilAttachment.texture && pd.stencilAttachment.loadAction == MTLLoadActionClear;
             if (!a.texture || (ds ? !cd && !cs : a.loadAction != MTLLoadActionClear)) continue;
             NSUInteger nl = g_rp_layered ? 1 : att_layers(a, ds ? &R.rt.dview : &R.rt.cview[i], ds ? R.rt.has_dview : R.rt.has_cview[i]);
-            if (nl < 2 && mip_extent(a.texture.width, a.level) <= pw && mip_extent(a.texture.height, a.level) <= ph) continue;
+            if (nl <= MAX(g_lc_layers, 1ul) && mip_extent(a.texture.width, a.level) <= pw && mip_extent(a.texture.height, a.level) <= ph) continue;
             MTL4RenderPassDescriptor *cp = [MTL4RenderPassDescriptor new];
             if (nl > 1) cp.renderTargetArrayLength = nl;
             if (!ds) { MTLRenderPassColorAttachmentDescriptor *c = cp.colorAttachments[0], *o = pd.colorAttachments[i];
@@ -4840,7 +4842,7 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex_(int clear_only) {
     }
     {   // Depth and stencil planes are counted separately (combined format 5 bytes = depth 4 + stencil 1; when only one is attached only that one is counted)
         id<MTLTexture> dt = pd.depthAttachment.texture, stt = pd.stencilAttachment.texture;
-        uint64_t whole = att_bytes(dt ? dt : stt, dt ? pd.depthAttachment.level : pd.stencilAttachment.level);
+        uint64_t whole = att_bytes(dt ? dt : stt, dt ? pd.depthAttachment.level : pd.stencilAttachment.level) * MAX(g_lc_layers, 1ul);
         int comb = (dt ? dt : stt).pixelFormat == MTLPixelFormatDepth32Float_Stencil8;
         uint64_t db = dt ? (comb ? whole / 5 * 4 : whole) : 0, sb = stt && stt != dt ? (comb ? whole / 5 : whole) : stt ? whole - db : 0;
         if (dt) { natt++; g_bw_store += db; if (pd.depthAttachment.loadAction == MTLLoadActionLoad) { g_bw_load += db; nload++; } }
@@ -4860,6 +4862,7 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex_(int clear_only) {
         id<MTLTexture> dt = pd.depthAttachment.texture, stt = pd.stencilAttachment.texture;
         uint64_t db = att_bytes(dt, pd.depthAttachment.level), sb = 0;
         if (stt) { int comb = stt.pixelFormat == MTLPixelFormatDepth32Float_Stencil8; sb = att_bytes(stt, pd.stencilAttachment.level) / (comb ? 5 : 1); if (stt == dt) db -= sb; }   // Combined format 5 bytes = depth 4 + stencil 1 (when only stencil is attached, only 1 is counted)
+        db *= MAX(g_lc_layers, 1ul); sb *= MAX(g_lc_layers, 1ul);
         if (dt) { g_sd[g_nsd] = (sd_att){0}; g_sd[g_nsd].ser = R.rt.depth->serial; g_sd[g_nsd].bytes = db; g_sd[g_nsd].lv = (uint32_t)pd.depthAttachment.level; g_sd[g_nsd].sl = (uint32_t)pd.depthAttachment.slice; g_sd[g_nsd].idx = -1; g_sd[g_nsd].depth = 1; g_sd[g_nsd].load = pd.depthAttachment.loadAction == MTLLoadActionLoad; g_sd[g_nsd].wrote = R.clear_d != 0; g_nsd++;
                   pd.depthAttachment.storeAction = MTLStoreActionUnknown; }
         if (stt) { g_sd[g_nsd] = (sd_att){0}; g_sd[g_nsd].ser = R.rt.depth->serial; g_sd[g_nsd].bytes = sb; g_sd[g_nsd].lv = (uint32_t)pd.stencilAttachment.level; g_sd[g_nsd].sl = (uint32_t)pd.stencilAttachment.slice; g_sd[g_nsd].idx = -1; g_sd[g_nsd].depth = 2; g_sd[g_nsd].load = pd.stencilAttachment.loadAction == MTLLoadActionLoad; g_sd[g_nsd].wrote = R.clear_s != 0; g_nsd++;
@@ -11805,7 +11808,33 @@ static int lc_same(const p_set_rt *a, int ka, const p_set_rt *b, int kb) {   // 
     int h1 = ka == 8 ? a->has_dview : a->has_cview[ka], h2 = kb == 8 ? b->has_dview : b->has_cview[kb];
     return h1 == h2 && (!h1 || !memcmp(ka == 8 ? &a->dview : &a->cview[ka], kb == 8 ? &b->dview : &b->cview[kb], sizeof(view_t)));
 }
-// Land every waiting clear, oldest first, each group in a pass of its own (rp_flush's way)
+static int lc_batch_on(void) { static int m = -1; if (m < 0) m = sw_mode("DM_NVN_LC_BATCH", 0); return sw_on(m); }
+// Only adjacent single-layer DS clears already in this flush: no observer or queue boundary is crossed.
+static int lc_batch_count(int at, int n) {
+    const lc_group *a = &g_lc[at]; const tex_t *t = a->rt.depth; const view_t *v = &a->rt.dview;
+    if (!lc_batch_on() || tbdr_on()) return 1;   // future-store lookahead tracks only one slice per attachment
+    if (!t || !t->serial || (!a->clear_d && !a->clear_s) || t->d.target != NVN_TEXTURE_TARGET_2D_ARRAY) return 1;
+    if (!a->rt.has_dview || !v->set_layers || v->nlayers != 1 || v->set_format || v->set_swizzle || v->set_dsmode ||
+        (v->set_target && v->target != t->d.target)) return 1;
+    for (int k = 0; k < 8; k++) if (a->clear_c[k]) return 1;
+    int end = at + 1;
+    for (; end < n; end++) {
+        const lc_group *b = &g_lc[end];
+        if (!b->rt.depth || memcmp(t, b->rt.depth, sizeof *t)) break; // NOLINT(bugprone-suspicious-memory-comparison): exact snapshot match; padding differences only reject a batch.
+        if (!b->rt.has_dview || b->clear_d != a->clear_d || b->clear_s != a->clear_s ||
+            (a->clear_d && memcmp(&a->cd, &b->cd, sizeof a->cd)) || (a->clear_s && a->cs != b->cs)) break; // NOLINT(bugprone-suspicious-memory-comparison): preserve exact clear bits, including signed zero and NaNs.
+        int color = 0; for (int k = 0; k < 8; k++) color |= b->clear_c[k]; if (color) break;
+        view_t next = b->rt.dview;
+        if ((NSUInteger)next.min_layer != (NSUInteger)v->min_layer + (NSUInteger)(end - at)) break;
+        next.min_layer = v->min_layer; if (memcmp(v, &next, sizeof next)) break;
+    }
+    if (end == at + 1) return 1;
+    id<MTLTexture> mt = tex_mtl(t);
+    if (!mt || mt.textureType != MTLTextureType2DArray || mt.pixelFormat != MTLPixelFormatDepth32Float_Stencil8 || mt.sampleCount != 1 ||
+        (NSUInteger)v->min_layer + (NSUInteger)(end - at) > mt.arrayLength) return 1;
+    return end - at;
+}
+// Land every waiting clear, oldest first; compatible adjacent layers may share one clear-only pass.
 static void lc_land(void) {
     if (!g_nlc) return;
     if (g_enc) rp_end();
@@ -11815,7 +11844,10 @@ static void lc_land(void) {
         if (!any || !g_cb) continue;
         R.rt = g->rt; R.has_rt = 1; memcpy(R.clear_c, g->clear_c, sizeof R.clear_c); memcpy(R.cc, g->cc, sizeof R.cc);
         R.clear_d = g->clear_d; R.clear_s = g->clear_s; R.cd = g->cd; R.cs = g->cs;
-        rp_begin_ex(1); rp_end(); g_lc_landed++; }
+        int layers = lc_batch_count(gi, n);
+        if (layers > 1) { R.rt.dview.nlayers = (uint16_t)layers; g_lc_layers = (NSUInteger)layers;
+            PD("L %llu lazy-clear batch: ser=%llu level=%u layers=%u+%d", g_stat_pass + 1, R.rt.depth->serial, R.rt.dview.set_levels ? R.rt.dview.base_level : 0, R.rt.dview.min_layer, layers); }
+        rp_begin_ex(1); g_lc_layers = 0; rp_end(); g_lc_landed++; gi += layers - 1; }
     R = save;
 }
 // SetRenderTargets with clears pending and no draw since: the clears wait instead of opening a pass

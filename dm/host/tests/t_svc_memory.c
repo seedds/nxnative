@@ -154,8 +154,9 @@ static void alias_lifecycle(void) {
     assert(!pages(1, alias + 6 * P, 4 * P));
     assert(g_alias_mapped == 6 * P);
     expect(alias + 7 * P, alias + 4 * P, 6 * P, 5, 0, 3);
-    expect((uintptr_t)g_as, (uintptr_t)g_as, alias + 4 * P - (uintptr_t)g_as, 0, 0, 0);
-    expect(stack, alias + 10 * P, heap - alias - 10 * P, 0, 0, 0);
+    expect((uintptr_t)g_as, (uintptr_t)g_as, heap - (uintptr_t)g_as, 0, 0, 0);
+    expect(stack, heap, alias + 4 * P - heap, 0, 0, 0);
+    expect(alias + 10 * P, alias + 10 * P, (uintptr_t)g_as + g_reserve - alias - 10 * P, 0, 0, 0);
     for (size_t i = 0; i < 4 * P; ++i) assert(((uint8_t *)alias)[4 * P + i] == 0x53);
     for (size_t i = 8 * P; i < 10 * P; ++i) assert(((uint8_t *)alias)[i] == 0);
     unsigned before = protects;
@@ -182,6 +183,33 @@ static void alias_lifecycle(void) {
     assert(pages(1, alias, P + 1) == BAD && pages(1, alias - P, P) == BAD);
     assert(pages(1, UINTPTR_MAX - P + 1, 2 * P) == BAD);
     assert(pages(1, alias + g_alias_cap - P, 2 * P) == BAD);
+}
+
+// Device-shared memory (an NVN memory pool's storage, hle_nvn.c) is not given back: UnmapPhysicalMemory or a shrinking SetHeapSize over any page of it fails with InvalidCurrentMemory and
+// leaves every page and byte as it was, as on Horizon; once the pool is gone (each registration removed) both work again (PR #1616, Monster Jam Steel Titans 2)
+static void device_shared_refused(void) {
+    assert(!pages(1, alias, 16 * P));
+    memset((void *)alias, 0x6d, 16 * P);
+    int64_t mapped = g_alias_mapped;
+    dm_device_share((void *)(alias + 4 * P), 4 * P, 1); dm_device_share((void *)(alias + 4 * P), 4 * P, 1);   // two pools over the same storage
+    assert(pages(0, alias + 7 * P, 2 * P) == BAD && pages(0, alias, 16 * P) == BAD && pages(0, alias + 4 * P, 4 * P) == BAD);
+    assert(g_alias_mapped == mapped);
+    for (size_t i = 0; i < 16 * P; ++i) assert(((uint8_t *)alias)[i] == 0x6d);
+    assert(!pages(0, alias + 12 * P, 4 * P) && !pages(0, alias, 2 * P));   // beside it: given back
+    assert(!pages(1, alias + 2 * P, 2 * P) && !pages(1, alias + 8 * P, 2 * P));   // touching it on either side: still allowed
+    dm_device_share((void *)(alias + 4 * P), 4 * P, 0);
+    assert(pages(0, alias + 4 * P, P) == BAD);   // the other pool still holds it
+    dm_device_share((void *)(alias + 4 * P), 4 * P, 0);
+    assert(!pages(0, alias, 16 * P) && !g_alias_mapped);
+    assert(!resize(4 * 1024 * 1024));
+    dm_device_share((void *)(heap + 3 * 1024 * 1024), P, 1);
+    assert(resize(2 * 1024 * 1024) == BAD && g_heap_cur == 4 * 1024 * 1024);
+    dm_device_share((void *)(heap + 3 * 1024 * 1024), P, 0);
+    dm_device_share((void *)(heap + 1024 * 1024), P, 1);
+    assert(!resize(2 * 1024 * 1024) && g_heap_cur == 2 * 1024 * 1024);   // below the new end: left alone
+    assert(resize(0) == BAD);
+    dm_device_share((void *)(heap + 1024 * 1024), P, 0);
+    assert(!resize(0));
 }
 
 static void ownership(void) {
@@ -354,8 +382,8 @@ static void fragmented_queries(void) {
             unsigned lo = i, hi = i + 1;
             while (lo && live[lo - 1] == live[i]) --lo;
             while (hi < N && live[hi] == live[i]) ++hi;
-            uintptr_t b = !live[i] && !lo ? (uintptr_t)g_as : alias + lo * P;
-            uintptr_t e = !live[i] && hi == N ? heap : alias + hi * P;
+            uintptr_t b = !live[i] && !lo ? heap : alias + lo * P;
+            uintptr_t e = !live[i] && hi == N ? (uintptr_t)g_as + g_reserve : alias + hi * P;
             expect(alias + i * P, b, e - b, live[i] ? 5 : 0, 0, live[i] ? 3 : 0);
         }
         assert(g_alias_mapped == total * P);
@@ -449,7 +477,7 @@ static void release_fallback(void) {
     fail_mmap = 1;
     assert(!pages(0, alias, pg));
     assert(!g_alias_mapped);
-    expect(alias, (uintptr_t)g_as, heap - (uintptr_t)g_as, 0, 0, 0);
+    expect(alias, heap, (uintptr_t)g_as + g_reserve - heap, 0, 0, 0);
     fail_mmap = 0;
     // The fallback retained the old backing: recommit must still clear it.
     assert(!pages(1, alias, pg));
@@ -459,6 +487,22 @@ static void release_fallback(void) {
     fail_mmap = 1;
     assert(!resize(0) && !g_heap_cur);
     fail_mmap = 0;
+}
+// A heap given back reads 0 when it grows again: a fresh mapping in anonymous memory, and SetHeapSize's zeroing with the guest in files (DM_GUEST_FILE), where the pages keep their bytes
+// The rule that puts the guest in files: the switch when it is set, otherwise a pool over a known room to the memory limit
+static void file_rule(void) {
+    const uint64_t G = 1ull << 30, pool9 = 9 * G, pool3 = 0xCD500000;
+    assert(guest_file_wanted(NULL, pool9, 8 * G) && guest_file_wanted("", pool9, 6 * G));   // Mario Kart World's pool on an 8 and a 6 GiB limit
+    assert(!guest_file_wanted(NULL, pool9, 12 * G) && !guest_file_wanted(NULL, pool3, 6 * G));   // it fits an iPad's 12 GiB; a Switch game's pool fits 6
+    assert(!guest_file_wanted(NULL, pool9, 0));   // no limit known: the Mac
+    assert(!guest_file_wanted("0", pool9, 8 * G) && guest_file_wanted("1", pool3, 12 * G) && guest_file_wanted("1", pool3, 0));
+}
+static void heap_regrow(void) {
+    assert(!resize(4 * 1024 * 1024));
+    memset((void *)(heap + 3 * 1024 * 1024), 0x5a, P);
+    assert(!resize(2 * 1024 * 1024) && !resize(4 * 1024 * 1024));
+    for (size_t i = 0; i < P; ++i) assert(((uint8_t *)heap)[3 * 1024 * 1024 + i] == 0);
+    assert(!resize(0));
 }
 // Exercise the real host helper through SDK-shaped test entry points. Its stack
 // allocation must reach MapMemory as guest backing and outlive SDK copyback.
@@ -504,6 +548,15 @@ static void guest_helper(void) {
     dm_guest_thread_join(tt); assert(helper_freed && !g_nmap && !g_heap_cur);
 }
 static void *init_worker(void *arg) { *(uint64_t *)arg = info(I_AliasAddr); return NULL; }
+// The block: 256 MB in front, the heap region, the stack region, the alias region up to its end. The heap and stack sizes are the profile's, whatever the alias region's size
+static void layout_order(void) {
+    assert(info(I_HeapAddr) == (uint64_t)(uintptr_t)g_as + 0x10000000);
+    assert(info(I_HeapSize) == DM_GAME_MEM_RESERVE - DM_GAME_MEM_ALIAS - DM_GAME_MEM_STACK - 0x10000000);
+    assert(info(I_StackAddr) == info(I_HeapAddr) + info(I_HeapSize) && info(I_StackSize) == DM_GAME_MEM_STACK);
+    assert(info(I_AliasAddr) == info(I_StackAddr) + info(I_StackSize));
+    assert(info(I_AliasAddr) + info(I_AliasSize) == info(I_AslrAddr) + info(I_AslrSize));
+    assert(info(I_AslrAddr) == (uint64_t)(uintptr_t)g_as && info(I_AslrSize) == g_reserve);
+}
 int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "--heap-probe")) {
         mem_init();
@@ -512,11 +565,21 @@ int main(int argc, char **argv) {
         assert(resize(0x800000) == LIMIT);
         return 0;
     }
+    if (argc == 2 && !strcmp(argv[1], "--alias-probe")) {   // DM_ALIAS_SIZE sets the alias region; the heap and stacks stay as the profile has them
+        mem_init();
+        assert(info(I_AliasSize) == 0x10000000);
+        layout_order();
+        return 0;
+    }
     pthread_t threads[8]; uint64_t addresses[8];
     for (unsigned i = 0; i < 8; ++i) assert(!pthread_create(&threads[i], NULL, init_worker, &addresses[i]));
     for (unsigned i = 0; i < 8; ++i) { assert(!pthread_join(threads[i], NULL)); assert(addresses[i] == addresses[0]); }
     alias = addresses[0]; stack = info(I_StackAddr); heap = info(I_HeapAddr);
-    lazy_commit(); alias_lifecycle(); ownership(); module_sources(); module_back_patch(); failures(); release_fallback(); concurrency(); fragmented_queries();
+#if !TARGET_OS_IPHONE
+    if (!getenv("DM_ALIAS_SIZE")) assert(info(I_AliasSize) == SWITCH_ALIAS);   // the Mac's alias region is a Switch's, whatever the profile can give an iPhone; DM_ALIAS_SIZE=<mem_alias> runs these tests on an iPhone's
+#endif
+    layout_order();
+    lazy_commit(); alias_lifecycle(); device_shared_refused(); ownership(); module_sources(); module_back_patch(); failures(); release_fallback(); file_rule(); heap_regrow(); concurrency(); fragmented_queries();
     guest_helper();
     if (!DM_GAME_MEM_MAP_LIMIT) metadata_limit();
 #ifdef TEST_REAL_DIRTY
@@ -535,7 +598,7 @@ int main(int argc, char **argv) {
     g_mod[0].back_len = 0;
     assert(image_bytes() == 0x10000000);
     g_nmod = 0;
-    free(g_alias_bits); free(g_alias_exposed); assert(!munmap(g_as, RESERVE));
-    printf("memory SVCs passed (map limit=%d, host page=%d)\n", DM_GAME_MEM_MAP_LIMIT, memory_getpagesize());
+    free(g_alias_bits); free(g_alias_exposed); assert(!munmap(g_as, g_reserve));
+    printf("memory SVCs passed (map limit=%d, host page=%d, guest files %d)\n", DM_GAME_MEM_MAP_LIMIT, memory_getpagesize(), g_gf_n);
     return 0;
 }

@@ -1,5 +1,5 @@
 // Feedback snapshots and their per-draw argument substitution include separate texture slots and read-only fragment images; a snapshot is reused until the game's next barrier,
-// and a draw that only samples an attachment nothing in its pass has written reads it directly. With the directory test_dmsh_fetch.py --fixture writes, a draw that samples the
+// and a draw that only samples an attachment nothing in its pass has written reads it directly. With the directory test_dmsh_fetch.py --fixture writes (folded readable-tile library, entry main0_f), a draw that samples the
 // attachment at its own pixel through a projective sample reads it from the tile (fb_tile_plan): a snapshot while its pipeline builds, then none after a barrier, the pass stays
 // open, and the GPU reads what an earlier draw of the pass wrote; not with a viewport smaller than the target. The same for a sample at the draw's pixel position times a uniform
 // 1 / the target's size, set by an inline update (Splatoon Raiders' ink stamps), on an RG8 attachment sampled through (red, green, zero, one): the tile read fills the missing
@@ -231,12 +231,15 @@ static id<MTLLibrary> lib_file(NSString *path) {
 // writes the sample's channels rotated (green from blue, blue from red, red from green): red where it read green, blue where it read red
 static void tile_case(const char *dir) {
     int before = failed, tid = 660; NSString *d = @(dir);
-    g_msl_dir = d;   // bf_fn loads <key>_bf.metallib from here
+    g_msl_dir = d;   // bf_fn loads <key>_bf.metallib from here and specializes @"main0_f"
     NSData *fj = [NSData dataWithContentsOfFile:[d stringByAppendingPathComponent:@"facts.json"]];
     NSDictionary *facts = fj ? [NSJSONSerialization JSONObjectWithData:fj options:0 error:nil] : nil;
     id<MTLLibrary> vl = lib_file([d stringByAppendingPathComponent:@"fb_vs.metal"]), fl = lib_file([d stringByAppendingPathComponent:@"fb_fs.metal"]);
     CHECK(facts && vl && fl, "the fixture's shaders compile");
     if (!facts || !vl || !fl) return;
+    NSError *bfe = nil;
+    id<MTLLibrary> bfl = lib_from_file([d stringByAppendingPathComponent:@"fedcba9876543210_bf.metallib"], &bfe);
+    CHECK(bfl && [bfl.functionNames containsObject:@"main0_f"], "the folded tile-read library exposes main0_f");
     NvProg *pr = [NvProg new]; NvShader *vs = [NvShader new], *fs = [NvShader new]; pr->sh[0] = vs; pr->sh[1] = fs;
     vs->stage = 0; strcpy(vs->key, "0123456789abcdef_b"); vs->fn = [vl newFunctionWithName:@"main0"]; vs->rf.pos_attr = -1;
     for (NSNumber *k in facts[@"screen"]) vs->rf.scr_locn |= 1u << k.intValue;
@@ -275,6 +278,11 @@ static void tile_case(const char *dir) {
     fb_prepare(pr);
     CHECK(g_enc == first && g_fb_n == 0 && g_fb_count == copies + 1 && g_fb_tseq == g_draw_seq && g_fb_tfn && g_fb_tile_draws == tiles + 1 && g_fb_tdesc.fbmask == 1 && g_fb_tdesc.fx[0] == 0,
           "after a barrier the draw reads the tile: no snapshot, the pass stays open");
+    {   // bf_fn's numeric memo: the same shader, redirections, mask and map give the function the draw got; another mask is another specialization, not the remembered one
+        int fx[32] = {0}; for (int i = 0; i < 32; i++) fx[i] = g_fb_tdesc.fx[i]; uint8_t lm[8]; memcpy(lm, g_fb_tlmap, 8);
+        id<MTLFunction> a = bf_fn(fs, fx, g_fb_tdesc.fbmask, lm), b = bf_fn(fs, fx, g_fb_tdesc.fbmask, lm), c = bf_fn(fs, fx, (uint8_t)(g_fb_tdesc.fbmask | 2), lm);
+        CHECK(a && a == g_fb_tfn && b == a && c != a, "the readable-tile function is remembered by its numbers, and a different attachment mask is not taken for it");
+    }
     g_pso_lmap = g_fb_tlmap; g_pso_fsfn = g_fb_tfn; g_pso_fz = g_fb_tdesc;
     id<MTLRenderPipelineState> ps = pso_get(pr, nil);
     g_pso_lmap = NULL; g_pso_fsfn = nil; memset(&g_pso_fz, 0, sizeof g_pso_fz);
@@ -324,6 +332,9 @@ static void fpos_case(const char *dir) {
     id<MTLLibrary> vl = lib_file([d stringByAppendingPathComponent:@"fb_vs.metal"]), fl = lib_file([d stringByAppendingPathComponent:@"fb_pos.metal"]);
     CHECK(facts && vl && fl, "the pixel-position fixture compiles");
     if (!facts || !vl || !fl) return;
+    NSError *bfe = nil;
+    id<MTLLibrary> bfl = lib_from_file([d stringByAppendingPathComponent:@"fedcba9876543211_bf.metallib"], &bfe);
+    CHECK(bfl && [bfl.functionNames containsObject:@"main0_f"], "the folded pixel-position library exposes main0_f");
     NvProg *pr = [NvProg new]; NvShader *vs = [NvShader new], *fs = [NvShader new]; pr->sh[0] = vs; pr->sh[1] = fs;
     vs->stage = 0; strcpy(vs->key, "0123456789abcdee_b"); vs->fn = [vl newFunctionWithName:@"main0"]; vs->rf.pos_attr = -1;
     fs->stage = 1; strcpy(fs->key, "fedcba9876543211_b"); fs->fn = [fl newFunctionWithName:@"main0"];
@@ -411,8 +422,146 @@ static void shape_case(void) {
     CHECK(a2 == a && !fresh, "the live snapshot is reused until the next barrier");
     for (int i = 0; i < 8; i++) { g_fbc[i] = (fb_cache_t){0}; } g_fbc_use = 0;
 }
+// A pool shader may name any registered texture, the depth attachment too, so it counts as reading the attachment (and a later draw writing depth ends the pass) only once a shader has read that
+// texture through a pool, under whichever object: Ocarina of Time keeps its depth textures in the pool every material shader reads, and read none of them there, at about 100 extra passes a frame
+static void pool_depth_case(void) {
+    tex_t colour, depth, same, other;
+    target(&colour, 99800);
+    depth = (tex_t){.magic=MAGIC('T','E','X',0), .serial=99801};
+    depth.d = (nvn_texdesc){.target=NVN_TEXTURE_TARGET_2D, .format=NVN_FORMAT_DEPTH32F, .width=4, .height=4, .depth=1, .levels=1, .samples=1};
+    id<MTLTexture> dt = [g_dev newTextureWithDescriptor:tex_desc(&depth, 0)]; res_add(dt); mtl_tex_init(&depth); serial_put(depth.serial, dt);
+    static pool_t pool; depth.pool = &pool; depth.off = 0x1000;
+    same = depth; same.serial = 99802; same.d.flags |= NVN_TEXTURE_FLAGS_IMAGE;   // a second object over the same storage, one Metal texture (alias_key)
+    other = depth; other.serial = 99803; other.off = 0x2000;
+    NvProg *pr = [NvProg new]; NvShader *fs = [NvShader new]; pr->sh[1] = fs; fs->rf.pool = 1; fs->rf.bindless = 1;
+    state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
+    R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &colour; R.rt.depth = &depth; S.ds.dt = S.ds.dw = 1;
+    clear(MTLClearColorMake(0, 0, 0, 1));
+    fb_prepare(pr); fb_prepare(pr);
+    CHECK(g_enc, "a pool shader that has read no depth texture leaves the pass open");
+    mtl_reg_tex(710, &other, NULL); pool_ds_note(710);
+    fb_prepare(pr); fb_prepare(pr);
+    CHECK(g_enc, "nor does reading another depth texture end it");
+    CHECK(pool_ds_read(&other) && !pool_ds_read(&depth), "the set answers for the texture read");
+    mtl_reg_tex(711, &same, NULL); pool_ds_note(711);
+    CHECK(pool_ds_read(&depth), "another object over the same storage counts as the attachment");
+    fb_prepare(pr);
+    CHECK(g_enc && g_fb_dread, "a draw that may read it marks the pass");
+    fb_prepare(pr);
+    CHECK(!g_enc, "and the next draw writing depth ends it, as a tile-based store would show it the write");
+    rp_end(); CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "that submission completed");
+}
+// A replaced pool table comes back only once the submission that may read it has completed, and only at its own size; the readback cache makes room with its oldest buffers instead of turning new sizes away
+static void reuse_tables_case(void) {
+    uint64_t done0 = g_done, fence0 = g_fence, made0 = g_pool_made, reused0 = g_pool_reused;
+    id<MTLBuffer> a = pool_table_take(1000);
+    CHECK(a && a.length == 0x10000 && g_pool_made == made0 + 1, "a new table, its size rounded up to 64 KB");
+    pool_table_give(a);
+    id<MTLBuffer> b = pool_table_take(1000);
+    CHECK(b != a && g_pool_made == made0 + 2, "not while the submission that may read it runs");
+    g_done = g_fence + 1;
+    id<MTLBuffer> c = pool_table_take(1000);
+    CHECK(c == a && g_pool_reused == reused0 + 1, "the same buffer once its fence has passed");
+    id<MTLBuffer> d = pool_table_take(0x10001);
+    CHECK(d != a && d.length == 0x20000, "a larger table is its own buffer");
+    pool_table_give(b); pool_table_give(c); pool_table_give(d);
+    g_done = done0; g_fence = fence0;
+    id<MTLBuffer> big[16]; for (int i = 0; i < 16; i++) big[i] = mrbuf_get(1u << 20);
+    for (int i = 0; i < 16; i++) mrbuf_put(big[i]);
+    CHECK(g_mrbuf_n == 16 && g_mrbuf_bytes == (size_t)16 << 20, "the cache is full of one size");
+    id<MTLBuffer> small = mrbuf_get(4096); mrbuf_put(small);
+    CHECK(g_mrbuf_n == 16 && g_mrbuf[15] == small, "a new size makes room with the oldest");
+    CHECK(mrbuf_get(4096) == small, "and is found again");
+}
+// A cut with earlier work still running stays a boundary for the game's timestamps, and commits only when the GPU has run out; a report after it takes that boundary's time
+static void cut_boundary_case(void) {
+    tex_t colour; target(&colour, 99810);
+    id<MTLBuffer> rep = [g_dev newBufferWithLength:64 options:MTLResourceStorageModeShared]; res_add(rep);
+    CHECK(ts_on(), "segment mode has a timestamp heap");
+    state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
+    R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &colour;
+    clear(MTLClearColorMake(0, 0, 0, 1)); rp_end();
+    id cb0 = g_cb;
+    mtl_sub_counter((uint64_t)rep.contents, 0x10);
+    atomic_fetch_add(&g_seg_inflight, 1);
+    g_stat_draw += (uint64_t)cut_draws(); sub_cut();
+    CHECK(g_cb == cb0 && g_seg == 1, "with work running: a boundary, no commit");
+    CHECK(g_sclk && g_sclk->nb == 2, "and its timestamp slot");
+    clear(MTLClearColorMake(0, 1, 0, 1)); rp_end();
+    mtl_sub_counter((uint64_t)rep.contents + 16, 0x10);
+    atomic_fetch_sub(&g_seg_inflight, 1);
+    g_stat_draw += (uint64_t)cut_draws(); sub_cut();
+    CHECK(g_cb != cb0 && g_seg == 2, "with nothing running: a commit");
+    clear(MTLClearColorMake(0, 0, 1, 1)); rp_end();
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "the segments completed");
+    uint64_t r0[2], r1[2]; memcpy(r0, rep.contents, 16); memcpy(r1, (uint8_t *)rep.contents + 16, 16);
+    CHECK(r0[1] && r1[1] > r0[1], "two reports in one command buffer read two times");
+}
+
+// Output-mapping-only fixture (no rewritable sample): main0 writes magenta to color(0); main0_f remaps
+// that output through OM_0_k. Specialized with OM_0_1, attachment 1 is magenta and attachment 0 stays the clear colour.
+static void om_case(const char *dir) {
+    int before = failed; NSString *d = @(dir);
+    NSData *oj = [NSData dataWithContentsOfFile:[d stringByAppendingPathComponent:@"om.json"]];
+    NSDictionary *facts = oj ? [NSJSONSerialization JSONObjectWithData:oj options:0 error:nil] : nil;
+    CHECK(facts && [facts[@"calls"] count] == 0 && [facts[@"outputs"] count] == 1, "the om-only fixture has no samples and one colour output");
+    NSError *e = nil;
+    id<MTLLibrary> bfl = lib_from_file([d stringByAppendingPathComponent:@"fedcba9876543212_bf.metallib"], &e);
+    CHECK(bfl && [bfl.functionNames containsObject:@"main0_f"], "the folded om-only library exposes main0_f");
+    if (!bfl) { printf("feedback output-mapping-only: %s\n", before == failed ? "PASS" : "FAIL"); return; }
+    MTLFunctionConstantValues *cv = [MTLFunctionConstantValues new];
+    bool no = false;
+    for (int k = 0; k < 8; k++) {
+        [cv setConstantValue:&no type:MTLDataTypeBool atIndex:32 + k];
+        bool om = (k == 1);
+        [cv setConstantValue:&om type:MTLDataTypeBool atIndex:64 + k];
+    }
+    id<MTLFunction> ff = [bfl newFunctionWithName:@"main0_f" constantValues:cv error:&e];
+    CHECK(ff != nil, "main0_f specializes with OM_0_1");
+    if (!ff) { fprintf(stderr, "om specialize: %s\n", e.localizedDescription.UTF8String); printf("feedback output-mapping-only: FAIL\n"); return; }
+    id<MTLLibrary> vl = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
+        "vertex float4 v(uint i[[vertex_id]]) { return float4(i == 1 ? 3.0 : -1.0, i == 2 ? 3.0 : -1.0, 0, 1); }\n"
+        options:nil error:&e];
+    CHECK(vl != nil, "the om-only vertex shader compiles");
+    MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
+    pd.vertexFunction = [vl newFunctionWithName:@"v"]; pd.fragmentFunction = ff;
+    pd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+    pd.colorAttachments[1].pixelFormat = MTLPixelFormatRGBA8Unorm;
+    id<MTLRenderPipelineState> ps = vl ? [g_dev newRenderPipelineStateWithDescriptor:pd error:&e] : nil;
+    CHECK(ps != nil, "the om-only remap pipeline compiles");
+    if (!ps) { fprintf(stderr, "om pipeline: %s\n", e.localizedDescription.UTF8String); printf("feedback output-mapping-only: FAIL\n"); return; }
+    MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:4 height:4 mipmapped:NO];
+    td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+    td.storageMode = MTLStorageModeShared;
+    id<MTLTexture> t0 = [g_dev newTextureWithDescriptor:td], t1 = [g_dev newTextureWithDescriptor:td];
+    id<MTLCommandQueue> q = [g_dev newCommandQueue];
+    id<MTLCommandBuffer> cb = [q commandBuffer];
+    MTLRenderPassDescriptor *rpd = [MTLRenderPassDescriptor renderPassDescriptor];
+    rpd.colorAttachments[0].texture = t0; rpd.colorAttachments[0].loadAction = MTLLoadActionClear; rpd.colorAttachments[0].storeAction = MTLStoreActionStore;
+    rpd.colorAttachments[0].clearColor = MTLClearColorMake(0, 1, 0, 1);
+    rpd.colorAttachments[1].texture = t1; rpd.colorAttachments[1].loadAction = MTLLoadActionClear; rpd.colorAttachments[1].storeAction = MTLStoreActionStore;
+    rpd.colorAttachments[1].clearColor = MTLClearColorMake(0, 1, 0, 1);
+    id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rpd];
+    [enc setRenderPipelineState:ps];
+    [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    [enc endEncoding];
+    [cb commit]; [cb waitUntilCompleted];
+    CHECK(cb.error == nil, "om-only GPU submission has no error");
+    uint8_t px0[64], px1[64];
+    [t0 getBytes:px0 bytesPerRow:16 fromRegion:MTLRegionMake2D(0, 0, 4, 4) mipmapLevel:0];
+    [t1 getBytes:px1 bytesPerRow:16 fromRegion:MTLRegionMake2D(0, 0, 4, 4) mipmapLevel:0];
+    int att0 = 1, att1 = 1;
+    for (int i = 0; i < 16; i++) {
+        const uint8_t *a = px0 + i * 4, *b = px1 + i * 4;
+        att0 &= a[0] == 0 && a[1] == 255 && a[2] == 0 && a[3] == 255;
+        att1 &= b[0] == 255 && b[1] == 0 && b[2] == 255 && b[3] == 255;
+    }
+    CHECK(att0, "attachment 0 stays the clear green; output 0 did not write there");
+    CHECK(att1, "attachment 1 is magenta: OM_0_1 moved colour 0");
+    printf("feedback output-mapping-only: %s\n", before == failed ? "PASS" : "FAIL");
+}
 int main(int argc, char **argv) { @autoreleasepool {
-    setenv("DM_NVN_TBDR", "0", 1);
+    setenv("DM_NVN_TBDR", "0", 1); setenv("DM_NVN_GPU_TS", "segment", 1);
     mtl_init(); NSError *error = nil;
     id<MTLLibrary> lib = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
         "vertex float4 v(uint i[[vertex_id]]) { return float4(i == 1 ? 3.0 : -1.0, i == 2 ? 3.0 : -1.0, 0, 1); }\n"
@@ -447,7 +596,10 @@ int main(int argc, char **argv) { @autoreleasepool {
     if (pipeline) slot_case(pr, pipeline, 3, 3);
     image_view_case(pr);
     swizzle_case();
-    if (argc == 2) { tile_case(argv[1]); fpos_case(argv[1]); }
+    if (argc == 2) { tile_case(argv[1]); fpos_case(argv[1]); om_case(argv[1]); }
+    pool_depth_case();
+    reuse_tables_case();
+    cut_boundary_case();
     printf("feedback snapshot: %d checks, %d failed\n", checks, failed);
     return failed != 0;
 } }

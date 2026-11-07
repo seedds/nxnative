@@ -110,6 +110,14 @@ class DriverTableArrays(unittest.TestCase):
         self.assertNotEqual(got[0]['kind'], 'tex_c2a')
 
 
+class UniformArraysWithDriverSampler(unittest.TestCase):
+    def test_sampler_word_in_c2(self):   # Kirby Air Riders' shadows: texture handles in c[6], the separate sampler word at c2 byte 0x570
+        source = 'struct spvDescriptorSetBuffer0\n{\n    array<depth2d<float>, 32> fp_t2ds_cb196614_10570000 [[id(0)]];\n    array<sampler, 32> fp_t2ds_cb196614_10570000Smplr [[id(32)]];\n};\n'
+        tex, samp = REFLECT('synthetic', 'ps', source, {'sbufs': []})
+        self.assertEqual((tex['kind'], tex['reg'], tex['off'], tex.get('soff')), ('tex_ubo', 3, 0, None))
+        self.assertEqual((samp['kind'], samp['reg'], samp['off'], samp['soff'], samp['sreg']), ('samp_ubo', 3, 0, 0x570, dmsh_abi.SREG_C2))
+
+
 def builder_unfillable():
     tree = ast.parse((TOOLS / 'dmsh_build.py').read_text())
     keep = lambda n: (isinstance(n, ast.FunctionDef) and n.name in ('drv_reads', 'unfillable')) or (isinstance(n, ast.Assign) and any(

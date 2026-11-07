@@ -79,7 +79,7 @@ static void readback_pool(void) { @autoreleasepool {
     mrbuf_put(again); mrbuf_put(next);
     id<MTLBuffer> big[3]; for (int i = 0; i < 3; i++) big[i] = mrbuf_get(8u << 20);
     for (int i = 0; i < 3; i++) mrbuf_put(big[i]);
-    EXPECT("at most 16 MB of readback buffers kept", 1, g_mrbuf_bytes <= (16u << 20) && g_mrbuf_n == 3);
+    EXPECT("at most 16 MB of readback buffers kept, the oldest making room", 1, g_mrbuf_bytes <= (16u << 20) && g_mrbuf_n == 2 && g_mrbuf[0] == big[1] && g_mrbuf[1] == big[2]);
     readback_pool_drop();
 } }
 static void *readback_guest_waiter(void *arg) {

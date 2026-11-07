@@ -176,6 +176,15 @@ void nvn_dirty_remove_range(const void *mem) {
     if (r) { prep_write((void *)r->base, r->end - r->base); atomic_store_explicit(&r->live, 0, memory_order_release); atomic_fetch_sub(&g_live, 1); }
     pthread_mutex_unlock(&g_slot_mu);
 }
+// A zero-copy Metal buffer made while any of its pages is read-only drops every GPU write through it, with no error, even to pages never protected and even once its pages are writable again;
+// one made over writable pages keeps working when they are protected later (M4 Pro probe; LEGO Star Wars: The Skywalker Saga's font copies inside its 1.4 GB pool, issue #1591). So every
+// protected page of [addr, addr + len) is made writable and counts as written (its textures are read again and protected again at their next use, as after a host write), and no protection
+// starts until nvn_dirty_unhold: hold, make the buffer, unhold. Protection and pool retirement wait meanwhile; the page-fault path takes no lock and is not held up
+void nvn_dirty_hold(const void *addr, size_t len) {
+    pthread_mutex_lock(&g_slot_mu);
+    prep_write((void *)addr, len);
+}
+void nvn_dirty_unhold(void) { pthread_mutex_unlock(&g_slot_mu); }
 int nvn_dirty_tracked(const void *addr, size_t len) {
     return find_span((uintptr_t)addr, len) != NULL;
 }

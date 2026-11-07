@@ -215,15 +215,15 @@ def code_keys(img, lo):
         if a is not None and b is not None and a + 16 <= len(img) and b + 16 <= len(img): out.append(img[a:a + 16] + img[b:b + 16])
     return out
 
-def find_key(img, lo, hi, pak):
-    """The AES key that decrypts the index start to a short mount point: one main's code stores from two 16-byte literals (code_keys), else one of main's 32-byte windows
-    (read-only and data segments, 4-aligned, at least 20 distinct bytes)"""
+def find_key(img, lo, hi, pak, first=()):
+    """The AES key that decrypts the index start to a short mount point: one of first (a key another pak of the game opened with), one main's code stores from two 16-byte literals
+    (code_keys), else one of main's 32-byte windows (read-only and data segments, 4-aligned, at least 20 distinct bytes)"""
     with open(pak, 'rb') as f:
         _, ioff, _, _, _ = footer(f); f.seek(ioff); blk = f.read(16)
     def opens(k):
         d = aes_decrypt(k, blk)
         return 0 < struct.unpack_from('<i', d)[0] < 512 and d[4:7] == b'../'
-    for k in code_keys(img, lo):
+    for k in (*first, *code_keys(img, lo)):
         if opens(k): return k
     for a in range(lo, hi - 32, 4):
         w = img[a:a + 32]

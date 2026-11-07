@@ -508,6 +508,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** `uepak.py` reads version 8 as a legacy pak: its footer as version 11's, its index as version 4's, each file's method named from the footer (`Zlib`, decoded in Python by `Pak.read`). The shaders are inline in the cooked packages and `Engine/GlobalShaderCache-GLSL_SWITCH.bin`, as in [Unreal Engine 4.18](#unreal-engine-418-shaders-inline-in-cooked-packages), so `shader_split.py` `ue_legacy_jobs` reads them unchanged. `dm/tools/tests/test_uepak_v8.py` builds a version 8 pak with a Zlib file and a stored one.
 - **Found on:** DRAGON BALL Z: KAKAROT + A NEW POWER AWAKENS SET (`010051C0134F8000`, 1.00, SDK 9.3.1): 43,113 shaders from 3,776 files in 38 s; it plays from the title through the opening fight.
 
+### An encrypted legacy Unreal pak with the shaders inline
+
+- **Symptom:** `[RED] the shader split found no shaders in main or the RomFS` for a game whose survey reports a legacy Unreal pak with the shaders inline in the cooked packages; the split reads its files and finds nothing.
+- **Cause:** the pak's index and its entries are AES-encrypted. `shader_split.py` `ue_legacy_jobs` opened legacy paks without a key, so the index did not parse and the pak was left out. The paks with archives already took their key from `main` ([An Unreal pak key split into two 16-byte literals](#an-unreal-pak-key-split-into-two-16-byte-literals)); the inline path did not.
+- **Fix:** when a legacy pak's footer says the index is encrypted, `ue_legacy_jobs` tries each `main` the split is given (base game and update) with `uepak.find_key`, and each job carries it, so `ue_legacy_shaders` decrypts the entries too. A key found once is tried first on the next pak (`find_key(..., first=)`). With no key in any main the pak is reported in red and skipped. Covered by `dm/tools/tests/test_uepak_legacy_key.py` (a synthetic encrypted version 4 pak and `main`, no game files).
+- **Found on:** Little Nightmares II (`010097100EDD6000`, 1.4, v262144; one version 8 pak): 20,170 shaders from 57 files in 9:38; it reaches the title screen and plays on the Mac.
+
 ### Unreal Engine 3 shader caches (Oodle packages)
 
 - **Symptom:** `the shader split found no shaders in main or the RomFS`; the survey lists the RomFS as cooked packages (`.xxx`) and `.usm` movies only.

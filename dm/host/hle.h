@@ -69,3 +69,14 @@ int dm_movie_playing(void);   // hle_movie.c: a video decoder of the SDK's movie
 void dm_audio_suspend(int on);
 uint64_t dm_audio_render_calls(void);   // Cumulative sound card callback count (the silent sink is not counted)
 void dm_audio_reset(void);   // iOS media services reset: recreate the AudioUnits (hle_audio.c)
+// The fold a 5.1 AudioOut goes through before the device hears it (hle_audio.c): 0 = the host's own Q15
+// coefficients (the tested default), 1 = the system's explicit downmix, 2 = the spatial mixer's bed with
+// kSpatializationAlgorithm_UseOutputType - the value AVFoundation calls Auto - so the mixer itself renders
+// for the output hardware it sees (an HRTF bed on headphones, panning on speakers). dm_audio_set_mode stops
+// each playing 5.1 output, rebuilds its device and starts it again - the restart runs on the host worker,
+// with the silent sink covering the gap, the way Start itself does; a device that does not build falls back
+// to mode 0, so nothing goes silent.
+enum { DM_AM_MATRIX = 0, DM_AM_SYSCONV = 1, DM_AM_SPATIAL = 2, DM_AM_N = 3 };
+void dm_audio_set_mode(int m);
+int dm_audio_mode(void);
+const char *dm_audio_mode_name(void);

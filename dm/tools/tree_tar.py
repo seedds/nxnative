@@ -98,7 +98,7 @@ def _quiet_size(folder, since):   # (files, bytes) under folder; None as soon as
     return n, size
 
 
-def pack_quiet(work, say=print, days: float = QUIET_DAYS, min_files=QUIET_MIN_FILES):
+def pack_quiet(work, say=print, days: float = QUIET_DAYS, min_files=QUIET_MIN_FILES):   # days takes fractions: a test asks for less than a moment
     """Each top-level folder of a game's work folder (<NSP folder>/<id>-work) untouched for days becomes <name>.tar, `tar --xattrs -xf <name>.tar -C <name>` in a new folder bringing it back:
     what agents and investigations leave there, hundreds of thousands of files nothing reads again. regress/ is regress.py's own, a folder of few files is left readable, and a Python virtual
     environment (pyvenv.cfg) stays, however long it goes unchanged: its files are read and not written, and scripts run it by its path.

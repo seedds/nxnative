@@ -5,7 +5,7 @@ The screen before the game starts shows the settings the game supports. A settin
 - [Tested defaults](#tested-defaults)
 - [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Game's upscaler](#games-upscaler), [Game language](#game-language), [Picture](#picture), [Frame-rate counter](#frame-rate-counter)
 - [Controls](#controls): [Touch feedback](#touch-feedback), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff)
-- [Performance](#performance): [Frame buffering](#frame-buffering), [Metal 4 pipelines](#metal-4-pipelines), [Pipeline prebuild](#pipeline-prebuild), [Encode thread](#encode-thread), [Hold frames when late](#hold-frames-when-late), [Performance HUD](#performance-hud), [Reset to tested defaults](#reset-to-tested-defaults)
+- [Performance](#performance): [Frame buffering](#frame-buffering), [Metal 4 pipelines](#metal-4-pipelines), [Pipeline prebuild](#pipeline-prebuild), [Encode thread](#encode-thread), [Hold frames when late](#hold-frames-when-late), [Performance HUD](#performance-hud), [Audio latency](#audio-latency), [Audio output](#audio-output), [Reset to tested defaults](#reset-to-tested-defaults)
 - [The Mac settings window](#the-mac-settings-window): [Display mode](#display-mode)
 - [In-game menu](#in-game-menu)
 - [TV](#tv)
@@ -205,6 +205,14 @@ flowchart LR
 
 Apple's performance overlay over the game: frame rate, frame and GPU times, memory. Useful to see what a setting changes; leave it off for play.
 
+### Audio latency
+
+How long the audio device's own buffer is. **Standard** keeps the tested request of about 5 ms; **Low** asks the device for 16-frame buffers (about 0.3 ms), so it calls back far more often. That trims a little latency off the sound, at the cost of a little more CPU spent on the extra callbacks, and a game that already clicks may click more. What the device granted shows in the log: the Mac's `audio device buffer:` line and the iOS `audio session:` line both print what was asked and what it granted. On the Mac, `DM_DBG_AU_FRAMES` in `Documents/env.txt` still overrides the setting for single-variable tests.
+
+### Audio output
+
+How a 5.1 game's sound reaches the stereo device. **Original matrix** folds the six channels with the host's own coefficients — the tested default. **System downmix** hands the fold to the system's converter. **Auto (system)** renders the six channels through one spatial-mixer bed with `kSpatializationAlgorithm_UseOutputType` — the value AVFoundation calls Auto: the mixer itself renders for the output hardware it sees, an HRTF bed on headphones and panning over the speakers, so there is no headphone watching and nothing to switch. A mode whose device the system does not offer (or that produces nothing) falls back to the original matrix, so a game never goes silent; the log's `audio #N device callbacks` line reports the mode in effect and any fallbacks. The choice composes with Audio latency: any mode works at either buffer size.
+
 ### Reset to tested defaults
 
 Sets every setting back to the game's tested default; **Play** then forgets your choices, so those defaults apply, and those of later builds too ([Tested defaults](#tested-defaults)). Settings fixed by `Documents/env.txt` stay as the file says.
@@ -272,5 +280,7 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 | Encode thread | `DM_NVN_ENC_THREAD` | `1`, `0` |
 | Hold frames when late | `DM_FPS_HOLD` | `on`, `off` |
 | Performance HUD | `DM_METAL_HUD` | `1`, `0` |
+| Audio latency | `DM_AUDIO_LATENCY` | `standard` about 5 ms, `low` 16-frame buffers |
+| Audio output | `DM_AUDIO_OUT` | `matrix`, `sys`, `spatial` |
 
 `DM_LAUNCHER=0` skips the settings screen; the choices you saved there still apply. `DM_SAVED_CHOICES=0` starts with the tested defaults and keeps your saved choices for later. How the settings are listed for each game: [dm/games/settings.tsv](../dm/games/settings.tsv).

@@ -1219,16 +1219,20 @@ def build_keys(want, locations, pairs):
     """A partial vertex build needs its available paired pixel shaders before padding; a full build keeps every shader."""
     return sorted(set(want) | {ps for vs in want for ps in pairs.get(vs, ()) if ps in locations}) if want else sorted(locations)
 
+def partner_inputs(key):
+    """The user(locnN) locations the pixel shaders paired with a vertex or mesh shader read (vs_pad, dmsh_meshstage.to_stage's pad); pairs whose pixel MSL cannot be read are skipped."""
+    want = set()
+    for ps in PAIRS.get(key, ()):
+        data = output('mac', ps + '_b.metal')   # finished before this shader (fin's phases), so staged in the cache by now
+        if data is not None: want |= {int(x) for x in re.findall(r'\[\[user\(locn(\d+)\)', data.decode())}
+    return want
+
 def vs_pad(key, src):
     """Give a vertex shader the outputs its paired pixel shaders read but it does not write, with the value (0,0,0,1).
     Maxwell attributes are untyped 32-bit slots, and a pixel shader reading a location the vertex shader did not write only gets a default; Ryujinx also fills them with (0,0,0,1) when it links stages. Here every shader is translated
     offline on its own without knowing what the next stage reads, and Metal requires every pixel shader input to be a vertex output: 331 of 9043 pairs failed to link and their draws were skipped
     (over 10,000 "Fragment input(s) user(locnN) ... not written by vertex shader" in one iPhone session after the opening course). Returns (new source, padded locations); pairs whose pixel MSL cannot be read are skipped."""
-    want = set()
-    for ps in PAIRS.get(key, ()):
-        data = output('mac', ps + '_b.metal')   # finished before this vertex shader (fin's phases), so staged in the cache by now
-        if data is not None: want |= {int(x) for x in re.findall(r'\[\[user\(locn(\d+)\)', data.decode())}
-    miss = sorted(want - {int(x) for x in re.findall(r'\[\[user\(locn(\d+)\)', src)})
+    miss = sorted(partner_inputs(key) - {int(x) for x in re.findall(r'\[\[user\(locn(\d+)\)', src)})
     i = src.find('struct main0_out\n{\n'); j = src.find('\n};', i); k = src.find('main0_out out = {};')
     if not miss or i < 0 or j < 0 or k < 0: return src, []
     src = src[:j] + ''.join(f'\n    float4 dm_pad{l} [[user(locn{l})]];' for l in miss) + src[j:]
@@ -1604,7 +1608,8 @@ def finish(key, w, j, c1):
     mesh = j.get('mesh_stage')
     if mesh:   # the kernel as the Metal object or mesh function (dmsh_meshstage.py)
         if mesh.get('refused'): return 'mesh stage failed', mesh['refused'], None
-        try: src = dmsh_meshstage.to_stage(src, mesh); open(msl, 'w').write(src)
+        # outputs its paired pixel shaders read but its SPHs do not enable get (0,0,0,1), as vs_pad gives a vertex shader's (Ocarina of Time's foliage meshes)
+        try: src = dmsh_meshstage.to_stage(src, mesh, partner_inputs(key) if PAIRS.get(key) else ()); open(msl, 'w').write(src)
         except ValueError as e: return 'mesh stage failed', str(e)[:160], None
     elif j['stage'] == 'cs':
         src, first = first_store(src, j.get('local')); open(msl, 'w').write(src)   # the first invocation's store, for the host (see first_store)

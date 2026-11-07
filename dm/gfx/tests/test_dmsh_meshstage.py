@@ -97,10 +97,10 @@ class Stage(unittest.TestCase):
         i = ms.info(control(6), bytes(0x80))
         return ms.to_stage(KERNEL % (ms.memory(i)[1] // 4, ms.memory(i)[0][2] // 4 + 1), i), i
 
-    def mesh(self, task=False, primitive=False, vertices=128, primitives=64, pos=0xf0, verts=0):
+    def mesh(self, task=False, primitive=False, vertices=128, primitives=64, pos=0xf0, verts=0, pad=()):
         area = sph(pos, b'\x30') + (sph(0, b'\x01') if primitive else b'')
         i = ms.info(control(7, payload=128, task=int(task), max_v=vertices, max_p=primitives, prim_at=0x80 if primitive else 0, verts=verts), area)
-        return ms.to_stage(KERNEL % (ms.memory(i)[1] // 4, ms.memory(i)[0][3] // 4), i), i
+        return ms.to_stage(KERNEL % (ms.memory(i)[1] // 4, ms.memory(i)[0][3] // 4), i, pad), i
 
     def test_task_launches_what_it_wrote(self):
         src, i = self.task(); out = ms.memory(i)[0][2] // 4
@@ -157,6 +157,13 @@ class Stage(unittest.TestCase):
         self.assertIn('v.position = float4(as_type<float>(_23[b + 32u]), as_type<float>(_23[b + 64u]), as_type<float>(_23[b + 96u]), as_type<float>(_23[b + 128u]));', src)
         self.assertIn('for (uint n = gl_LocalInvocationID.x; n < np * 1u; n += 32u)', src)
 
+    def test_pad_unwritten_pixel_inputs(self):   # Ocarina of Time's foliage point mesh 3a6340a04bf09797 writes no generic output, its pixel shader 2a7c48d595feaaeb reads locn5
+        src = self.mesh(primitive=True, pad={0, 1, 5})[0]   # 1 is a vertex output and 0 a primitive output: only 5 is padded, as (0,0,0,1)
+        self.assertIn('    float4 dm_pad5 [[user(locn5)]];\n};', src)
+        self.assertIn('        v.dm_pad5 = float4(0.0, 0.0, 0.0, 1.0);\n', src)
+        self.assertEqual(src.count('[[user(locn1)]]'), 1); self.assertEqual(src.count('[[user(locn0)]]'), 1)
+        self.assertNotIn('dm_pad', self.mesh(primitive=True)[0])
+
     def local_word(self):   # a private variable spirv-cross initializes ahead of the stage memory: the last entry of a raw global memory lookup (GlobalToStorage.TryGenerateRawStorageOp)
         i = ms.info(control(7, payload=128, max_v=128, max_p=64), sph(0xf0, b'\x30'))
         src = (KERNEL % (ms.memory(i)[1] // 4, ms.memory(i)[0][3] // 4)).replace('{\n    threadgroup', '{\n    uint _9 = 0u;\n    threadgroup', 1)
@@ -182,7 +189,7 @@ class Stage(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which('xcrun') and subprocess.run(['xcrun', '-sdk', 'macosx', '-f', 'metal'], capture_output=True).returncode == 0, 'no Metal compiler')
     def test_compiles(self):
-        cases = [self.task()[0], self.mesh()[0], self.mesh(task=True)[0], self.mesh(primitive=True)[0], self.mesh(vertices=32, primitives=32, pos=0xf8, verts=1)[0], self.local_word()]
+        cases = [self.task()[0], self.mesh()[0], self.mesh(task=True)[0], self.mesh(primitive=True)[0], self.mesh(vertices=32, primitives=32, pos=0xf8, verts=1, pad={5})[0], self.local_word()]
         with tempfile.TemporaryDirectory() as d:
             for n, src in enumerate(cases):
                 f = Path(d, f's{n}.metal'); f.write_text(src)

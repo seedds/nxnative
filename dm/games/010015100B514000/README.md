@@ -59,6 +59,19 @@ Game-specific findings; the general host changes they led to are listed under [F
 - It ships agl's BC4 block encoder `0544282c162305db` (the shader Tears of the Kingdom draws into a BC4 3D texture).
 - Mario keeps NVN's GL depth mode (near = −w).
 
+## Render resolution
+
+- **Current: render resolution above 1x (`DM_UPSCALE`, Mac, 1.2.1).** The scene colour has neither `COMPRESSIBLE` nor `DISPLAY`: without [the held textures' rule](../../../docs/reference/rendering.md#a-render-target-taken-for-data-at-a-render-resolution-above-1x) it stays at 1920x1080 beside the scaled depth and the mixed-pass rule demotes the scene (12 demotions). With it the scene is 3840x2160 at 2x, with no demotion. Measured on 2026-11-04 on the branch these rules come from (the same rules before they were applied to main), an M5 with 24 GB, fullscreen on a 4K screen, MetalFX on, the same save and scripted route (World 1 map and a course, about 100 s), one red line as at 1x (`SetRenderEnableConditional`):
+
+  | | 1x scene | 1.5x (2880x1620) | 2x (3840x2160) |
+  |---|---|---|---|
+  | Frame time p50 after loading | 16.7 ms | 16.8 ms | 27.5 ms: 30 fps in 6 windows of 9 |
+  | GPU p50 / worst p95 | 5.5–7.5 / 10.2 ms | 9.5 / 10.4 ms | 14 / 22 ms |
+  | Present interval 1 → 2 in the run | 10 | 142 | 195 |
+  | Footprint | 2,622 MiB | 2,730 MiB | 2,977 MiB |
+
+  At 2x a frame takes about 17 ms of GPU (`DM_NVN_GPUPROF`), about 14 of them in 3840x2160 passes, so it runs just past one vertical sync, and [the game's dynamic present interval](#frame-rate) then asks for 30 fps. On that Mac 1.5x is the factor that holds 60 fps. Not run: other worlds, multiplayer, long sessions.
+
 ## Shaders
 
 - 12,811 shaders in v0 and 16,268 across both versions; 16,266 compile. In v0 the main `bfsha` held only 4,888 of the 12,811.
@@ -100,6 +113,7 @@ Game-specific findings; the general host changes they led to are listed under [F
 
 ## Found on this game
 
+- **A render target taken for data, held until a pass draws into it** (`ups_promote`): [A render target taken for data at a render resolution above 1x](../../../docs/reference/rendering.md#a-render-target-taken-for-data-at-a-render-resolution-above-1x).
 - [Offline pipeline archive missing for the device GPU](../../../docs/reference/shaders.md#offline-pipeline-archive-missing-for-the-device-gpu): archive targets can follow profile metadata while iOS Metal 4 remains opt-in; [the probe above](#offline-pipeline-archive-probe) records the build evidence and open device checks.
 General host changes first needed here; each applies to every game:
 

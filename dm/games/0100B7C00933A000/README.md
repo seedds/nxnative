@@ -52,6 +52,20 @@ Status: on the Mac, the boot, the title (a VP9 movie behind the logo), the main 
 
 - The 3D pad layout (the camera is on the right stick); it plays with the controller, docked.
 
+## Render resolution
+
+- **Current: `DM_UPSCALE` 1.5 and 2 on the Mac (1.1.1, 2026-11-07).** At 2x the scene and the window are 3840x2160 and the half-size buffers 1920x1080; one buffer is demoted, a 640x360 one a shader writes as an image, and none of the scene. Four screen-sized textures whose storage in a CPU-visible pool holds bytes are [held](../../../docs/reference/rendering.md#a-render-target-taken-for-data-at-a-render-resolution-above-1x) and no pass draws into them, so they keep their data at the game's size. On the branch before that rule, which left such textures at 1x for good, Unreal's targets in those pools all stayed at 1x and the mixed-pass rule brought the scene back to 1920x1080 (9 demotions).
+- Measured on an M5 with 24 GB, in a window, from a Day 2 save into the base camp's dialogue (about 90 s of play), with the "HQ Graphics" RomFS mod below and the host's 60 fps ([Frame rate](#frame-rate)), no red line at any factor:
+
+  | | 1x | 1.5x | 2x |
+  |---|---|---|---|
+  | GPU p50 / p95 | 5.1 / 6.2–13.6 ms | 9.7–14.2 / 13.9–14.5 ms | 18.4–18.9 / 18.9–19.6 ms |
+  | Frames held a second vertical sync, of 300 | 0–2 | 0–2 | 35–47 |
+  | Footprint | 3,421 MiB | 3,538 MiB | 3,996 MiB |
+
+  1.5x holds 60 fps on that Mac; 2x needs more GPU time than one vertical sync and runs at about 52–55. Not run: outdoor missions with many Pikmin, caves, long sessions, fullscreen on a 4K screen.
+- **RomFS mods.** The community "HQ Graphics" mod is one file, `Carrot4/Content/Paks/Carrot4-Switch_0_P.pak`, which Unreal mounts over the game's paks: `DefaultEngine.ini` (shadows at 4096, `r.ViewDistanceScale=5`, ambient occlusion, no anti-aliasing; `bUseFixedFrameRate` stays `True`) and `SwitchDeviceProfiles.ini`. It loads with `DM_ROMFS_OVERLAY=<mod folder>/romfs` in the player's `env.txt` (the overlay merges directory listings, so a pak the game does not ship is found; update 1.1.1 ships none of that name). With the fixed frame rate kept, the host's writer steps the game at 60 fps (`Unreal fixed frame rate … 30 → 60 fps` in the log). The mod's "60 FPS" variants set `bUseFixedFrameRate=False`, so the host leaves the engine alone and it steps by the time that passed: with the host's rate they are not needed.
+
 ## Mac routes
 
 - The work folder's `run/ctlrun.sh <run>` starts a run with `DM_CTL`, `run/see.sh <shot> <wait> <presses…>` presses and takes a screenshot, `run/mash.sh` presses A in rounds.
@@ -62,6 +76,7 @@ Status: on the Mac, the boot, the title (a VP9 movie behind the logo), the main 
 
 General host changes first needed here; each applies to every game:
 
+- **A render target taken for data, held until a pass draws into it** (`ups_promote`): [A render target taken for data at a render resolution above 1x](../../../docs/reference/rendering.md#a-render-target-taken-for-data-at-a-render-resolution-above-1x).
 - **A network request kept on hold before it settles** (`hle_net.c`, `nn::nifm`): [Network requests stay on hold before they settle](../../../docs/reference/services.md#network-requests-stay-on-hold-before-they-settle).
 - **Rewriter:** an `adrp` re-encoded inside a copied exclusive window (`window_adrp`) and gates before a `ret` (`scratch_dead`): [`adrp` inside an exclusive window](../../../docs/reference/rewriter.md#adrp-inside-an-exclusive-window), [Observation gates on any relocatable instruction](../../../docs/reference/rewriter.md#observation-gates-on-any-relocatable-instruction) (the `scratch_dead` rule, removed on 2026-10-31). Spin waits that store (`patch_nso.py` "Spin waits"): [development.md, Power](../../../docs/development.md#power).
 - **An Unreal engine region that `-SwitchVirtualAddressSpaceSize=` cannot size**, given what the alias region has room for at its default path's store (`dm/tools/ue_region.py`; a cut in this build's `patches.py` until 2026-10-31): [Unreal's engine address region and its options](../../../docs/reference/memory.md#unreals-engine-address-region-and-its-options).

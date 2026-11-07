@@ -241,7 +241,8 @@ fragment main0_out main0(main0_in in [[stage_in]])
         import ast, re
         tools = Path(__file__).resolve().parents[1] / 'tools'
         tree = ast.parse((tools / 'dmsh_build.py').read_text())
-        scope = {'re': re, 'collections': __import__('collections')}
+        sys.path.insert(0, str(tools)); import dmsh_side   # fs_uint's entry points call main0's shared body
+        scope = {'re': re, 'collections': __import__('collections'), 'dmsh_side': dmsh_side}
         exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ('fs_uint', 'int_outputs', 'in_word')], type_ignores=[]), 'dmsh_build.py', 'exec'), scope)
         cls.fs_uint = staticmethod(scope['fs_uint'])
 

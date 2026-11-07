@@ -62,6 +62,10 @@ Run headless, `DM_CTL` at a control file. The work folder has `boot.sh <secs> <l
 
 From an empty save: at about 45 s `A` (title), `A` (New Game), then the movie. From `save_ref`: at about 58 s `A~0.2`, 5 s later `A~0.2` (Load), 30 s later three `A~0.1` 3 s apart, then 12 s to the bridge outside Link's house. There `LUp~3.5`, `A~0.2` (Climb Down) and `LDown~4` three or four times reach the village floor.
 
+## Ultrawide
+
+The game sizes its output from fixed 2560x1440 (docked) constants, so a 21:9 screen showed a 16:9 picture with bars. Building with `DM_ULTRAWIDE=<width>x<height>` (the screen, e.g. `3440x1440`) registers cuts for main e0f3ccfaf50065ae ([patches.py](patches.py)) that give the output size, the render sizes and the output resolution table widths from the screen's ratio at the game's own heights. The 3D view takes its aspect from the render size, so the view widens (Hor+) and nothing is stretched; the HUD and subtitles stay centred, movies stay 16:9 in the middle. Checked on a CB342CK at 3440x1440 (Mac mini M4 Pro, v131072): swap chain 3440x1440, WindowCrop 2752x1152 (2.389:1), title screen, the opening and Link's house fill the screen. Start it with `DM_FULLSCREEN=1` (and `DM_SCREEN=<name>` when the ultrawide is not the main screen).
+
 ## Open
 
 - Resolved: the build left 9 shaders out. Six foliage compute shaders used `ATOMG.CAS` ([Global memory: descriptors, ATOMG.CAS, INC / DEC](../../../docs/reference/shaders.md#global-memory-descriptors-atomgcas-inc--dec)); `1f78730053feb036` and `e172bd7ec218ab8e` nest 259 brackets ([Bracket nesting past the front end's 256](../../../docs/reference/shaders.md#bracket-nesting-past-the-front-ends-256)); `68bbe98b3bfd9876` (`Ampere instruction 481 at 0x0`) and five more map rows were no shaders at all ([A control section's words read as a BAHS entry](../../../docs/reference/shaders.md#a-control-sections-words-read-as-a-bahs-entry)), now gone from the map. None of the eight real ones was used on the walk to Kokiri Forest.

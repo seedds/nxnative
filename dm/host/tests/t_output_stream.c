@@ -24,8 +24,20 @@ int main(void) {
     if (!name[0]) FAIL("no default virtual device name");
     if (h_os_State(stream) != OS_NONE) FAIL("state of a stream never opened");
     int32_t fmt[3] = {OS_FLOAT, 2, 48000};
+    // The properties call writes only 0x10c bytes of its output struct.
+    uint8_t props[0x110];
+    memset(props, 0xa5, sizeof props);
+    if (h_os_Props(props, name) != RES_OK || memcmp(props, name, 0x100) || props[0x10c] != 0xa5)
+        FAIL("default virtual output device properties/name/size");
+    if (h_os_Props(props, "UnrecognizedDevice") == RES_OK) FAIL("unknown virtual output device succeeded");
     if (h_os_Open(stream, ev, NULL, 0, name, fmt, CAP, CAP - FRAMES, 0)) FAIL("open");
     if (h_os_State(stream) != OS_STOPPED || h_os_Free(stream) != CAP) FAIL("after open: state %d, free %d", h_os_State(stream), h_os_Free(stream));
+    // The test's object map can keep the passed key address; use stable
+    // storage so no local stack address escapes through that map.
+    static char noflags[0x350];
+    if (h_os_OpenEvent(noflags, ev, NULL, 0, name, fmt, CAP, CAP - FRAMES)) FAIL("open event/no-flags");
+    if (h_os_State(noflags) != OS_STOPPED || h_os_Free(noflags) != CAP) FAIL("event/no-flags stream state or capacity");
+    h_os_Close(noflags);
     int32_t bad[3] = {OS_FLOAT, 2, 44100};
     char other[0x350] = {0};
     if (!h_os_Open(other, NULL, NULL, 0, name, bad, CAP, 0, 0) || h_os_State(other) != OS_NONE) FAIL("a 44.1 kHz stream opened");

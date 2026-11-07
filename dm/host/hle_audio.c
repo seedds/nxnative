@@ -602,6 +602,19 @@ static void os_reclaim(ostream *o) {   // under o->m: the blocks the output play
 HLE_FORCE("_ZN2nn5audio29GetDefaultVirtualOutputDeviceEPNS0_15AudioDeviceNameE", "connect to auddmg:u; the host has one output: its name", void, h_os_DefaultDev, char *name) {
     memset(name, 0, 0x100); strlcpy(name, "AudioVirtualOutput", 0x100);
 }
+// SDK 21 exposes properties for the already-selected virtual output device.
+// Wonder's opening movie probes this before opening a stream. Without a hook
+// it connects to auddmg:u, which the host does not serve, and aborts (0xa99).
+// The SDK's output structure is a 0x100-byte name followed by 12 property bytes.
+HLE_FORCE("_ZN2nn5audio32GetVirtualOutputDevicePropertiesEPNS0_23VirtualDevicePropertiesERKNS0_15AudioDeviceNameE", "the host's virtual output properties", Result, h_os_Props, void *props, const char *dev) {
+    // The API's device name is a 0x100-byte field, but the known host name
+    // needs only its literal bytes (including NUL) compared. Reading farther
+    // is unnecessary and can be unsafe for other callers.
+    if (!props || !dev || memcmp(dev, "AudioVirtualOutput", sizeof "AudioVirtualOutput")) return RES_FAIL;
+    memset(props, 0, 0x10c);
+    memcpy(props, dev, 0x100);
+    return RES_OK;
+}
 static Result os_open(void *g, void *ev, const int32_t *fmt, int frames, void *lr) {
     int f = fmt[0], ch = fmt[1], rate = fmt[2];
     if (f != OS_FLOAT && f != OS_PCM16) { LOG("[RED] OutputStream sample format %d: not supported, the open fails", f); return RES_FAIL; }
@@ -618,6 +631,13 @@ static Result os_open(void *g, void *ev, const int32_t *fmt, int frames, void *l
 HLE_FORCE("_ZN2nn5audio16OpenOutputStreamEPNS0_16OutputStreamTypeEPNS_2os11SystemEventEPvmRKNS0_15AudioDeviceNameERKNS0_12StreamFormatEiiNS_4util10BitFlagSetILi32ENS0_16OutputStreamFlagEEE",
           "connect to auddmg:u; an AudioOut of the host's", Result, h_os_Open, void *g, void *ev, void *buf, size_t size, const char *dev, const int32_t *fmt, int frames, int threshold, uint32_t flags) {
     (void)buf; (void)size; (void)dev; (void)threshold; (void)flags;
+    return os_open(g, ev, fmt, frames, __builtin_return_address(0));
+}
+// SDK 21 also exports the event-taking overload without an OutputStreamFlag.
+// Wonder calls this after querying the properties (opening movie startup).
+HLE_FORCE("_ZN2nn5audio16OpenOutputStreamEPNS0_16OutputStreamTypeEPNS_2os11SystemEventEPvmRKNS0_15AudioDeviceNameERKNS0_12StreamFormatEii",
+          "the host's AudioOut (event, no flags)", Result, h_os_OpenEvent, void *g, void *ev, void *buf, size_t size, const char *dev, const int32_t *fmt, int frames, int threshold) {
+    (void)buf; (void)size; (void)dev; (void)threshold;
     return os_open(g, ev, fmt, frames, __builtin_return_address(0));
 }
 HLE_FORCE("_ZN2nn5audio16OpenOutputStreamEPNS0_16OutputStreamTypeEPvmRKNS0_15AudioDeviceNameERKNS0_12StreamFormatEiNS_4util10BitFlagSetILi32ENS0_16OutputStreamFlagEEE",

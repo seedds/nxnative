@@ -338,9 +338,15 @@ static void cap_head(void) {
     snprintf(line, sizeof line, "tex_pool_n\t%d\norigin_ll\t%d\nqueue_origin_ll\t%d\ndepth_zero\t%d\n", g_tpool_n, atomic_load(&g_origin_ll), g_queue_origin_ll, atomic_load(&g_depth_zero));
     cap_put(&g_cap_w, CAP_STAT, 0, line, strlen(line), 0);
 }
+// A large pool (BIG_MIN or more) has no entry of its own in g_pools, only the chunks lookups have made so far (big_lookup), and the whole pool's entry only once the raw pool table
+// listed it (big_full). The capture took its regions and its pool list from g_pools, so the rest of such a pool was in no region: a texture there was encoded as memory outside the
+// pools, a region only as long as the first record that named it, and the replay refused the capture (Ocarina of Time with DM_NVN_GMEM_RES=0: "1025 captured pointers name no
+// captured object or region", every one a texture reaching past such a region). The capture lists each large pool whole, in place of its chunks
 static void cap_pools(uint32_t submit) {   // regions for pools not covered yet (all of them at submit 1), and the replay layer's pool list
     pthread_mutex_lock(&g_mu);
-    int n = g_npool; pool_ent *ps = malloc((size_t)MAX(n, 1) * sizeof *ps); memcpy(ps, g_pools, (size_t)n * sizeof *ps);
+    int n0 = g_npool, nb = g_nbig; pool_ent *ps = malloc((size_t)MAX(n0 + nb, 1) * sizeof *ps); int n = 0;
+    for (int i = 0; i < n0; i++) { int in_big = 0; for (int k = 0; k < nb; k++) if (g_pools[i].lo >= g_big[k].lo && g_pools[i].hi <= g_big[k].hi) { in_big = 1; break; } if (!in_big) ps[n++] = g_pools[i]; }
+    for (int k = 0; k < nb; k++) { memset(&ps[n], 0, sizeof ps[n]); ps[n].lo = g_big[k].lo; ps[n].hi = g_big[k].hi; n++; }
     pthread_mutex_unlock(&g_mu);
     qsort_b(ps, (size_t)n, sizeof *ps, ^int(const void *a, const void *b) { uintptr_t x = ((const pool_ent *)a)->lo, y = ((const pool_ent *)b)->lo; return x < y ? -1 : x > y; });
     for (int i = 0; i < n;) {   // overlapping pools make one region

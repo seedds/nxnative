@@ -284,6 +284,17 @@ class DeriveProfile(Base):
             nsp.heap_check(REPO, self.ex, self.tmp / 'patched', self.tmp / 'work', {}, logs, g)
         self.assertEqual(seen['DM_ALIAS_SIZE'], '0x80000000')
 
+    def test_heap_check_boots_again_after_it_resizes_the_heap_region(self):   # Pokemon FireRed / LeafGreen: the app pool check behind the heap request sets mem_used on the second boot
+        with (self.src / 'game.tsv').open('a') as f: f.write('mem_alias\t0x80000000\nmem_reserve\t0x140000000\nmem_stack\t0x10000000\napp_pool\t0xc8000000\n')
+        self.derive(); logs = self.tmp / 'logs'; logs.mkdir(); aliases = []
+        runs = iter(['>>> nnMain\n[dm] SetHeapSize OOM: req 0xc9000000 > cap 0x8000000\n', '>>> nnMain\n[mem] SetHeapSize 0xc9000000 + modules 0x6600000 > app pool 0xc8000000\n'])
+        def boot(host, patched, henv, *args): aliases.append(henv['DM_ALIAS_SIZE']); (logs / 'heap_check.log').write_text(next(runs)); return 0
+        with mock.patch.object(nsp, 'build_mac_host'), mock.patch.object(nsp, 'boot_mac', side_effect=boot):
+            g = nsp.heap_check(REPO, self.ex, self.tmp / 'work/patched_v65536', self.tmp / 'work', {}, logs, game.Game(self.pdir))
+        self.assertEqual(aliases, ['0x80000000', '0x50000000'])   # the second boot runs on the resized layout, and there is no third
+        self.assertEqual((g.get('mem_alias'), g.get('mem_used')), ('0x50000000', '0x6a00000'))
+        self.assertIn('the heap request did not fit, then the heap and the modules did not fit the app pool; set mem_alias, mem_used', g.table('game.tsv').read_text())
+
     def check_boot(self, name, log):   # a check on the derived profile, whose boot writes this log; the profile after it
         logs = self.tmp / 'logs'; logs.mkdir(exist_ok=True); patched = self.tmp / 'work/patched_v65536'
         def boot(*args): (logs / f'{name}_check.log').write_text(log); return 0

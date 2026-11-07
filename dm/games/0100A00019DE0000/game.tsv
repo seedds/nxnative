@@ -1,4 +1,4 @@
-# Hades II (Supergiant Games' engine on NVN, SDK 19.3.9), base game v0 (the NACP's display version 0.0.126424).
+# Hades II (Supergiant Games' engine on NVN, SDK 19.3.9 base / 20.5.15 update), base game v0 (the NACP's display version 0.0.126424) and update v1 (1.0.137848).
 # Started from the NSP script's provisional profile; values marked "Mario's" are not measured for this game yet.
 # Unlike Hades (Vulkan), the Switch version renders with NVN: its 88 shaders are BNSH files in Shaders/NVN/bin (.vert / .frag; the .shader files list each program's pair).
 # The ExeFS has only main and sdk. main's EOS_* imports (Epic Online Services, from nro/EOSSDK-Switch-Shipping.nro, loaded through nn::ro) stay offline: the host
@@ -17,6 +17,8 @@ pad_layout	full
 
 # ---- Versions ----
 build	v0	0.0.126424	main=5219053e5eb156be80fbb2f303779531	sdk=d83a56a5558798414c78ec722867a7da
+# The update's build IDs come from its own ExeFS. Its shader tables are the base game's (not remade on it), so package and shader_versions stay v0.
+build	v1	1.0.137848	main=8ce1ac48e9fa74479051f3520e632df4	sdk=190030518b5d64e5d87b84bc54661af9
 package	v0
 shader_versions	v0
 

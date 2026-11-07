@@ -84,6 +84,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - `jump table <addr>` assertion on a `br x18` with no table in front of it. → [Indirect tail calls through x18 in IL2CPP thunks](../reference/rewriter.md#indirect-tail-calls-through-x18-in-il2cpp-thunks)
 - `AssertionError: jump table d29e68` while rewriting Moving Out 2 1.3.315. → [Unframed pointer tail calls followed by zero trap padding](../reference/rewriter.md#unframed-pointer-tail-calls-followed-by-zero-trap-padding)
 - `jump table 53e9c` while rewriting Warm Snow 2.1.4's Unity IL2CPP `main`, or `jump table 108bb70` on Ori and the Blind Forest: Definitive Edition. → [Loaded method-pointer tail call before an error block](../reference/rewriter.md#loaded-method-pointer-tail-call-before-an-error-block)
+- `AssertionError: retry block overlaps a window 34b790` while rewriting Trails in the Sky 2nd Chapter 1.0.4 `main`. → [Branches within an exclusive window](../reference/rewriter.md#branches-within-an-exclusive-window)
 - job system hangs; a queue claims thousands of tasks but every slot is empty. → [Exit stub order in exclusive windows](../reference/rewriter.md#exit-stub-order-in-exclusive-windows)
 - `branch into window <addr>` assertion. → [Out-of-line retry blocks of atomic updates](../reference/rewriter.md#out-of-line-retry-blocks-of-atomic-updates)
 - branches to an `ldxr … stxr` loop's head landed mid-window. → [A window never spans a second exclusive load](../reference/rewriter.md#a-window-never-spans-a-second-exclusive-load)

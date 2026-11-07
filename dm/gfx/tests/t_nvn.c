@@ -135,6 +135,36 @@ static int ticket_registry_reuse(void) {
     return g_fail ? 1 : 0;
 }
 
+// A small but real guest grant still supersedes overlapping command handles,
+// even if the host cannot fit its canonical records and lends a host segment.
+// The guest grant's size must not exempt it from ticket retirement.
+static int ticket_small_guest_regrant(void) {
+    _Alignas(16) uint8_t command[128] = {0}, control[64] = {0};
+    pool_t pool = {0}; pool.mem = command;
+    setenv("DM_NVN_DRAW_CTL", "1", 1); nvn_draw_ctl_init();
+    NVNcommandBuffer cb;
+    h_nvnCommandBufferInitialize(&cb, NULL);
+    h_nvnCommandBufferAddControlMemory(&cb, control, sizeof control);
+    h_nvnCommandBufferAddCommandMemory(&cb, (NVNmemoryPool *)&pool, 0, sizeof command);
+    h_nvnCommandBufferBeginRecording(&cb);
+    h_nvnCommandBufferDrawElementsBaseVertex(&cb, NVN_DRAW_PRIMITIVE_TRIANGLES,
+                                             NVN_INDEX_TYPE_UNSIGNED_SHORT, 12, 0x123400, 2);
+    NVNcommandHandle ticket = h_nvnCommandBufferEndRecording(&cb);
+    uint32_t token; memcpy(&token, (const void *)(uintptr_t)ticket, sizeof token);
+    uint32_t id = token & ~NVN_CTL_DRAW_TAG4;
+    EXPECT("small grant: initial 4-byte ticket resolves", 1,
+           (token & NVN_CTL_DRAW_TAG4) && nvn_ctl_draw_resolve(command, id) && g_ctl_ticket_n == 1);
+    // Both grants are real, non-null and 32 bytes long; only the second
+    // overlaps the four-byte token at command[0..4).
+    h_nvnCommandBufferAddCommandMemory(&cb, (NVNmemoryPool *)&pool, 64, 32);
+    EXPECT("small grant: nonoverlap retains ticket", 1, nvn_ctl_draw_resolve(command, id) != NULL);
+    h_nvnCommandBufferAddCommandMemory(&cb, (NVNmemoryPool *)&pool, 0, 32);
+    EXPECT("small grant: overlap retires stale ticket", 1,
+           nvn_ctl_draw_resolve(command, id) == NULL && g_ctl_ticket_n == 0);
+    h_nvnCommandBufferFinalize(&cb);
+    return g_fail ? 1 : 0;
+}
+
 static size_t tex_size3(int target, int fmt, int w, int h, int depth) {   // a layered or 3D texture's storage size
     NVNtextureBuilder tb;
     P(nvnTextureBuilderSetDevice)(&tb, &dev); P(nvnTextureBuilderSetDefaults)(&tb); P(nvnTextureBuilderSetTarget)(&tb, target);
@@ -153,6 +183,7 @@ static size_t tex_size(int fmt, int w, int h, int flags, size_t *align) {
 int main(void) {
     if (getenv("DM_TEST_CTL_TICKET_RACE")) return ticket_lifetime_race(); // headless; never opens Metal or submits GPU work
     if (getenv("DM_TEST_CTL_TICKET_REUSE")) return ticket_registry_reuse(); // headless: bounded 1024-generation lifetime test
+    if (getenv("DM_TEST_CTL_TICKET_SMALL_GRANT")) return ticket_small_guest_regrant(); // headless: tiny non-null guest grants
     setenv("DM_NVN_COUNT", "1", 1);   // the call-count checks below need the counting trampolines (off by default)
     // Engine-native limiters have no FPS state page. Their launcher cap must
     // still pace presents and select the display-link rate in display mode.

@@ -1068,7 +1068,17 @@ const uint8_t *nvn_ctl_draw_resolve(const void *handle, uint32_t id) {
 }
 NVN(nvnCommandBufferAddCommandMemory, void, NVNcommandBuffer *c, const NVNmemoryPool *p, ptrdiff_t off, size_t n) {
     const pool_t *pl = (const pool_t *)p;
-    if (!pl || n < 64) { if (cs_on()) { pthread_mutex_lock(&g_cs_mu); g_cs.hostseg++; pthread_mutex_unlock(&g_cs_mu); } size_t sz = hostseg_size(CB(c), !pl, n); cmd_new_segment(CB(c), hostseg_take(CB(c), sz), sz); return; }
+    if (!pl || n < 64) {
+        // The host cannot fit its records in a small guest grant, but even
+        // when lending host memory the guest's re-granted bytes retire any
+        // overlapping four-byte handle. Null/zero grants retire nothing.
+        if (nvn_draw_ctl_on() && pl && pl->mem && n)
+            ctl_ticket_regrant_cmd((uintptr_t)(pl->mem + off), (uintptr_t)(pl->mem + off + n));
+        if (cs_on()) { pthread_mutex_lock(&g_cs_mu); g_cs.hostseg++; pthread_mutex_unlock(&g_cs_mu); }
+        size_t sz = hostseg_size(CB(c), !pl, n);
+        cmd_new_segment(CB(c), hostseg_take(CB(c), sz), sz);
+        return;
+    }
     if (!pl->mem) { LOG("[RED] AddCommandMemory: pool has no CPU storage"); return; }
     hostseg_release((uintptr_t)(pl->mem + off), (uintptr_t)(pl->mem + off + n));
     if (cs_on()) { pthread_mutex_lock(&g_cs_mu); g_cs.grants++; g_cs.grant_bytes += n; if (!g_cs.grant_min || n < g_cs.grant_min) g_cs.grant_min = n; if (n > g_cs.grant_max) g_cs.grant_max = n; pthread_mutex_unlock(&g_cs_mu); }

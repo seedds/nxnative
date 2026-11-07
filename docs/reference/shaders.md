@@ -1231,6 +1231,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md): 25,726 of its shaders use those forms; `85446a6753300fc8` is the blur.
 - **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py` (`Pokopia`: constants, a negative immediate's sign) and `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_alu.py` (`HalfImmediate`: on a live register).
 
+### HFMA2 rounds twice to half
+
+- **Symptom:** none seen in a game. Against a Jetson Orin (sm_87, PTX `fma.rn.f16x2`, 1,048,576 random triples with denormals, Inf and NaN, plus 24,389 edge triples), 70 of 2,097,152 lanes differed by one half ULP (99.9967 percent identical), e.g. -3136 × -8.125 + 0.000124693: Orin 25488, Metal 25472.
+- **Cause:** the translator writes HFMA2 as `fma(a, b, c)` on the halves unpacked to float and packs with `half2(float2(..))`: one rounding to float, then another to half. The hardware rounds `a * b + c` once. When the float result lands on the midpoint of two halves and the exact one does not, the two roundings disagree.
+- **Fix:** `dmsh_build.py` `hfma_msl` rewrites an `fma` whose three operands are halves (unpacked, negated, or a literal a half holds) and whose every use ends in a pack to half (through `.SAT`'s clamp and `.RELU`'s max, also in the form that keeps a NaN: `isnan(v) ? v : max(v, 0)`) to `dmsh_hfma`: the float result rounded to odd, from a TwoSum of the exact product and the addend, so the conversion to half rounds the exact value once. The helper is compiled with `#pragma METAL fp math_mode(safe)` and contraction off, at the start of a compound statement of its own so a line another rewrite puts at the start of the body leaves them valid: fast math otherwise folds the TwoSum and 26 of the 70 lanes stay wrong. An FFMA then F2FP, and HFMA2.F32, are left alone (the hardware rounds twice there too).
+- **Check:** `test_dmsh_hfma.py`: the fixture is 1,500 of the Orin's edge triples and the 70 lanes; after the rewrite 0 of 2,097,152 differ, in default, fast, safe and relaxed math.
+
 ### HFMA2 .H0_NH1
 
 - **Symptom:** wrong shading where a shader needs a cross product or a 2D rotation of half pairs; on Eden-NS2, which first read the mode as a plain negation of the high lane, sun and cloud shadows were lost.

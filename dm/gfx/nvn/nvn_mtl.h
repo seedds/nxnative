@@ -21,6 +21,7 @@ void mtl_alias_drop_pool(const void *pool);
 // physical memory pool Finalize: the shared placement sparse tiles of its memory go back once no texture maps them (sp_release)
 void mtl_sp_phys_gone(const void *mem, uint64_t size);
 int mtl_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off);   // 1 on success; buf is a (__bridge) id<MTLBuffer>
+int mtl_addr_known(uint64_t addr, uint64_t len);   // 1 when the range lies in one memory pool (as mtl_addr finds it); does not make the pool resident
 
 typedef struct {
     uint32_t pso, cps, shaders, dss;

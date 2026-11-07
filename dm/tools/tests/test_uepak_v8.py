@@ -1,5 +1,5 @@
-"""Version 8 paks (Unreal Engine 4.22 to 4.25, DRAGON BALL Z: KAKAROT): version 4's per-file index with the compression method as an index into the footer's names, version 11's footer.
-A synthetic pak with one Zlib file and one stored file; no game files."""
+"""Version 8 and version 9 paks (Unreal Engine 4.22 to 4.25: DRAGON BALL Z: KAKAROT is version 8, DRAGON QUEST TREASURES is version 9 with a frozen FMemoryImage index).
+Synthetic paks with one Zlib file and one stored file; no game files."""
 from pathlib import Path
 import struct
 import sys
@@ -44,6 +44,44 @@ def pak(path, files):
     path.write_bytes(body + index + foot)
 
 
+def pak9(path, files):
+    """files: [(dir, name, data, compress)] → a version 9 frozen-index pak whose footer names Zlib as method 1"""
+    body = bytearray()
+    idx = bytearray(0x58)
+    def put_arr(at, elem_bytes, n):
+        off = len(idx)
+        idx.extend(elem_bytes)
+        struct.pack_into('<qII', idx, at, ((off - at) << 1) | 1, n, n)
+        return off
+    def put_str(at, s):
+        u = (s + '\0').encode('utf-16-le')
+        put_arr(at, u, len(s) + 1)
+    put_str(0, '../../../')
+    e_at = put_arr(0x10, bytes(0x50 * len(files)), len(files))
+    d_at = put_arr(0x20, bytes(0x50 * len(files)), len(files))
+    for i, (dn, fn, data, comp) in enumerate(files):
+        off = len(body)
+        if comp:
+            z = zlib.compress(data)
+            head = len(entry(0, 0, 0, 1, [(0, 0)], 0))
+            body += entry(off, len(z), len(data), 1, [(head, head + len(z))], 0x10000) + z
+            eoff = e_at + i * 0x50
+            struct.pack_into('<qqq', idx, eoff, off, len(z), len(data))
+            put_arr(eoff + 0x30, struct.pack('<qq', head, head + len(z)), 1)
+            struct.pack_into('<IIB', idx, eoff + 0x40, 0x10000, 1, 0)
+        else:
+            body += entry(off, len(data), len(data), 0, [], 0) + data
+            struct.pack_into('<qqq', idx, e_at + i * 0x50, off, len(data), len(data))
+        doff = d_at + i * 0x50
+        put_str(doff, dn)
+        foff = put_arr(doff + 0x10, bytes(0x20), 1)
+        put_str(foff, fn)
+        struct.pack_into('<i', idx, foff + 0x10, i)
+    names = b'Zlib'.ljust(32, b'\0') + bytes(32 * 4)
+    foot = bytes(16) + b'\0' + struct.pack('<IIQQ', uepak.PAK_MAGIC, 9, len(body), len(idx)) + bytes(20) + b'\x01' + names
+    path.write_bytes(bytes(body) + bytes(idx) + foot)
+
+
 class Version8(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
@@ -61,6 +99,24 @@ class Version8(unittest.TestCase):
         k = uepak.Pak(str(self.p))
         self.assertEqual(k.entry('AT/Content/M_Test.uexp')['method'], 'Zlib')
         self.assertEqual(k.read('AT/Content/M_Test.uexp'), self.shader)
+        self.assertEqual(k.read('Engine/Config/a.ini'), b'[x]\n')
+
+
+class Version9(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
+        self.p = Path(self.tmp.name) / 'pakchunk0-Switch.pak'
+        self.shader = b'LSLG' + bytes(range(256)) * 8
+        pak9(self.p, [('DarwinGame/Content/', 'M_Test.uexp', self.shader, True), ('Engine/Config/', 'a.ini', b'[x]\n', False)])
+
+    def test_footer_and_read(self):
+        with open(self.p, 'rb') as f: enc, _, _, methods, ver = uepak.footer(f)
+        self.assertEqual((enc, ver, methods[0]), (0, 9, 'Zlib'))
+        self.assertTrue(uepak.inline_shaders(str(self.p)))
+        self.assertEqual(uepak.unreal_paks(self.tmp.name, inline=True), [str(self.p)])
+        k = uepak.Pak(str(self.p))
+        self.assertEqual(k.entry('DarwinGame/Content/M_Test.uexp')['method'], 'Zlib')
+        self.assertEqual(k.read('DarwinGame/Content/M_Test.uexp'), self.shader)
         self.assertEqual(k.read('Engine/Config/a.ini'), b'[x]\n')
 
 

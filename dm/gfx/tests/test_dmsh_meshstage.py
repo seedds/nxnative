@@ -40,8 +40,8 @@ def sph(pos=0xf0, generics=b''):
     return bytes(s)
 
 
-def control(stage, threads=32, payload=256, task=0, max_v=0, max_p=0, prim_at=0):
-    c = bytearray(0x80); c[0x56] = stage; struct.pack_into('<2H', c, 0x58, threads, payload); c[0x5e] = task; struct.pack_into('<2H', c, 0x60, max_v, max_p)
+def control(stage, threads=32, payload=256, task=0, max_v=0, max_p=0, prim_at=0, verts=0):
+    c = bytearray(0x80); c[0x56] = stage; struct.pack_into('<2H', c, 0x58, threads, payload); c[0x5e] = task; c[0x5f] = verts; struct.pack_into('<2H', c, 0x60, max_v, max_p)
     if prim_at: struct.pack_into('<I', c, 0x64, prim_at); c[0x68] = 0x80
     return bytes(c)
 
@@ -50,9 +50,10 @@ class Facts(unittest.TestCase):
     def test_stage_byte(self):
         self.assertEqual([ms.is_stage(control(s)) for s in (1, 5, 6, 7)], [None, None, 'ts', 'ms'])
 
-    def test_outputs_follow_the_omap(self):   # 0x36: a nibble an attribute, low first. ddc034e8e009ebfc's 0x30: generic 1's x and y
+    def test_outputs_follow_the_omap(self):   # 0x36: a nibble an attribute, low first. ddc034e8e009ebfc's 0x30: generic 1's x and y; 0x35 bit 3: point size ahead of position
         self.assertEqual(ms.sph_outputs(sph(0xf0, b'\x30')), [(None, 0), (None, 1), (None, 2), (None, 3), (1, 0), (1, 1)])
         self.assertEqual(ms.sph_outputs(sph(0x30, b'\x01')), [(None, 0), (None, 1), (0, 0)])
+        self.assertEqual(ms.sph_outputs(sph(0xf8)), [('psiz', 0), (None, 0), (None, 1), (None, 2), (None, 3)])
 
     def test_per_primitive_sph(self):   # after the instructions, at control +0x64 where +0x68 bit 7 is set; the position is not a primitive's
         area = sph(0xf0, b'\x30') + bytes(0x100) + sph(0x00, b'\x01')
@@ -68,6 +69,9 @@ class Facts(unittest.TestCase):
         i = ms.info(control(7, payload=128, max_v=128, max_p=64), sph(0xf0, b'\x30'))
         lay, size = ms.memory(i)
         self.assertEqual(lay[2], 0x10 + 0x80); self.assertEqual(lay[3], lay[2] + 4 * 6 * 0x80); self.assertEqual(size, lay[3] + 4 + 3 * 64)
+        # With per-primitive attributes (Ocarina of Time's ee4ef51a4fddc28e: 128 vertices, 64 primitives, 4 primitive components): two primitive blocks follow the four vertex blocks
+        ip = ms.info(control(7, payload=128, max_v=128, max_p=64, prim_at=0x80), sph(0xf0, b'\x30') + sph(0, b'\x0f'))
+        self.assertEqual(ms.memory(ip)[0][3], lay[2] + (4 * 6 + 2 * 4) * 0x80)
 
     def test_largest_of_the_game_fits_metal(self):   # c34e01565dac1124: 256 vertices, 192 primitives
         i = ms.info(control(7, max_v=256, max_p=192), sph(0xf0, b'\x00\x0f'))
@@ -83,9 +87,9 @@ class Stage(unittest.TestCase):
         i = ms.info(control(6), bytes(0x80))
         return ms.to_stage(KERNEL % (ms.memory(i)[1] // 4, ms.memory(i)[0][2] // 4 + 1), i), i
 
-    def mesh(self, task=False, primitive=False, vertices=128, primitives=64):
-        area = sph(0xf0, b'\x30') + (sph(0, b'\x01') if primitive else b'')
-        i = ms.info(control(7, payload=128, task=int(task), max_v=vertices, max_p=primitives, prim_at=0x80 if primitive else 0), area)
+    def mesh(self, task=False, primitive=False, vertices=128, primitives=64, pos=0xf0, verts=0):
+        area = sph(pos, b'\x30') + (sph(0, b'\x01') if primitive else b'')
+        i = ms.info(control(7, payload=128, task=int(task), max_v=vertices, max_p=primitives, prim_at=0x80 if primitive else 0, verts=verts), area)
         return ms.to_stage(KERNEL % (ms.memory(i)[1] // 4, ms.memory(i)[0][3] // 4), i), i
 
     def test_task_launches_what_it_wrote(self):
@@ -128,10 +132,20 @@ class Stage(unittest.TestCase):
         self.assertIn('_23[0] = dm_first[0] + dm_tg;', src)
         self.assertNotIn('[[payload]]', src)
 
-    def test_per_primitive_outputs(self):
+    def test_per_primitive_outputs(self):   # four blocks of 6 vertex components (36 + 4 * 192 = 804 words), then the per-primitive blocks of 1 component (stride 32)
         src = self.mesh(primitive=True)[0]
         self.assertIn('metal::mesh<dm_vertex_t, dm_prim_t,', src)
-        self.assertRegex(src, r'p\.p0 = float4\(as_type<float>\(_23\[b \+ 192u\]\), 0\.0, 0\.0, 1\.0\);')   # after the six vertex components
+        self.assertIn('uint b = 36u + (n / 32u) * 192u + n % 32u;', src)
+        self.assertIn('uint b = 804u + (n / 32u) * 32u + n % 32u;', src)
+        self.assertRegex(src, r'p\.p0 = float4\(as_type<float>\(_23\[b \+ 0u\]\), 0\.0, 0\.0, 1\.0\);')
+
+    def test_point_mesh(self):   # Ocarina of Time's 2582bd7ea6490d33 / 28f82c129deea140: point size at +0 ahead of position, topology point (control +0x5f = 1)
+        src = self.mesh(vertices=32, primitives=32, pos=0xf8, verts=1)[0]
+        self.assertIn('float point_size [[point_size]];', src)
+        self.assertIn('metal::mesh<dm_vertex_t, void, 32, 32, metal::topology::point>', src)
+        self.assertIn('v.point_size = as_type<float>(_23[b + 0u]);', src)
+        self.assertIn('v.position = float4(as_type<float>(_23[b + 32u]), as_type<float>(_23[b + 64u]), as_type<float>(_23[b + 96u]), as_type<float>(_23[b + 128u]));', src)
+        self.assertIn('for (uint n = gl_LocalInvocationID.x; n < np * 1u; n += 32u)', src)
 
     def local_word(self):   # a private variable spirv-cross initializes ahead of the stage memory: the last entry of a raw global memory lookup (GlobalToStorage.TryGenerateRawStorageOp)
         i = ms.info(control(7, payload=128, max_v=128, max_p=64), sph(0xf0, b'\x30'))
@@ -158,7 +172,7 @@ class Stage(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which('xcrun') and subprocess.run(['xcrun', '-sdk', 'macosx', '-f', 'metal'], capture_output=True).returncode == 0, 'no Metal compiler')
     def test_compiles(self):
-        cases = [self.task()[0], self.mesh()[0], self.mesh(task=True)[0], self.mesh(primitive=True)[0], self.local_word()]
+        cases = [self.task()[0], self.mesh()[0], self.mesh(task=True)[0], self.mesh(primitive=True)[0], self.mesh(vertices=32, primitives=32, pos=0xf8, verts=1)[0], self.local_word()]
         with tempfile.TemporaryDirectory() as d:
             for n, src in enumerate(cases):
                 f = Path(d, f's{n}.metal'); f.write_text(src)

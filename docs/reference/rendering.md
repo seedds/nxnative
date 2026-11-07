@@ -88,6 +88,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** `tex_fit` makes the view from the texture at the bottom of the chain, with the bound view's level and layer offsets, level count and swizzle (`t_tex_fit_root`).
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md): a 64x64 environment cube read from a 2D-array view, 7 draws in the outdoors frame replayed with `nvn_replay` under shader validation.
 
+### Compatible views for a mismatched declared image type
+
+- **Symptom:** mip levels that a compute pass builds stay zero, with no red line; with `DM_NVN_PASSDUMP`, its `W` lines read `target=3 shader wants target 2`. Whatever samples those levels reads 0.
+- **Cause:** image slots took only a view of the shader's format class (`img_fit`), never of its declared type. A game that writes one layer of a 2D array through a one-layer array view, in a slot its shader declares as a 2D image, got that array view bound to a `texture2d` argument, and Metal dropped the stores. On Maxwell a non-array image store writes the view's first layer.
+- **Fix:** `img_binding` in `nvn_mtl.m` binds the view `tex_fit` makes for the declared type, as a sampled slot gets, when it is a writable view of the texture (a view keeps its parent's shader-write usage). `tex_fit`'s zero cube and zero 3D stand-ins are read-only, so those mismatches stay as they were.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md): the blob shadows under the karts are R8 arrays (64x64x128 and 128x128x64), one layer a character, copied at level 0 and given their mips by a compute pass that writes each layer's levels as 2D images. The mips stayed zero, and the box decal that projects them (`8206d20d0055515d`, which samples with implicit level of detail) drew a dark box around every kart and car. The decal only reached the ground once the 480x270 depth it reads was right ([A pixel shader's depth after a partly written target](shaders.md#a-pixel-shaders-depth-after-a-partly-written-target), main 473c9026); before that the depth read as far everywhere and the decal drew nothing.
+
 ### 1D textures as one-row 2D textures
 
 - **Symptom:** a type mismatch when a Metal 1D texture is bound to a shader's `texture2d` argument.

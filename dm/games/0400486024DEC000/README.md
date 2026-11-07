@@ -118,6 +118,7 @@ From an empty save: at about 45 s `A` (title), `A` (New Game), then the movie. F
 - [A texture shared by its packaged texture's serials left the residency set with one of them](../../../docs/reference/nvn-objects.md#a-texture-shared-by-its-packaged-textures-serials-left-the-residency-set-with-one-of-them): GPU page faults 15-45 minutes into play (issue #1326), on 260x260 terrain tiles made GPU textures at the GPU's first write.
 - [Finalizing a copy of a texture object](../../../docs/reference/nvn-objects.md#finalizing-a-copy-of-a-texture-object)
 - [Dynamic resolution that never moves, and draw passes that wait for each other](../../../docs/reference/frame-rate.md#dynamic-resolution-that-never-moves-and-draw-passes-that-wait-for-each-other)
+- [CPU scheduling delay in GPU timestamps](../../../docs/reference/frame-rate.md#cpu-scheduling-delay-in-gpu-timestamps)
 - [A full table of running GPU writes ends passes for nothing](../../../docs/reference/frame-rate.md#a-full-table-of-running-gpu-writes-ends-passes-for-nothing)
 - [Float atomics in storage memory](../../../docs/reference/shaders.md#float-atomics-in-storage-memory)
 - [textureGatherOffsets and a loop over its offsets](../../../docs/reference/shaders.md#texturegatheroffsets-and-a-loop-over-its-offsets)

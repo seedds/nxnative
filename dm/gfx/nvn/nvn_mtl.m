@@ -1717,18 +1717,18 @@ struct seg_clk { _Atomic int refs; _Atomic uint64_t t[SEG_CLK_N][2]; uint32_t nb
 static int seg_ts(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_GPU_TS"); v = e && *e ? !strcmp(e, "segment") : DM_GAME_GPU_TS_SEGMENT; MLOG("counter timestamps: %s (profile key gpu_timestamps; DM_NVN_GPU_TS=segment / submission)", v ? "GPU start / end time of their segment" : "one time for the whole submission"); } return v; }
 static void seg_clk_put(seg_clk *c) { if (c && atomic_fetch_sub(&c->refs, 1) == 1) free(c); }
 static uint64_t gpu_s_guest_ns(double s) {   // a feedback GPU time (seconds on the mach absolute time base) on the guest clock; 0 when unknown
-    static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb);
-    uint64_t g = guest_ns(), now = tb.denom ? mach_absolute_time() * tb.numer / tb.denom : 0, at = (uint64_t)(s * 1e9);
-    if (s <= 0 || !g || at > now || now - at > g) return 0;
-    return g - (now - at);
+    uint64_t now = now_ns();
+    uint64_t g = guest_ns_at_host_time(now);
+    double age = (double)now - s * 1e9;
+    return s > 0 && age >= 0 && age < (double)g ? g - (uint64_t)age : 0;
 }
 static uint64_t rep_ticks(const post_op *o, seg_clk *sc, uint32_t last, uint64_t c0, uint64_t c1) {   // the time a counter report records (614.4 MHz); c0 / c1: the last segment's GPU start / end on the guest clock
     int top = o->type == 0x10; uint64_t ns = 0;
     uint32_t bi = o->seg + !top;
-    if (sc && bi < sc->nb && g_ts_heap) {   // the boundary's own timestamp, on the guest clock through a pair of samples: how long ago it was on the GPU's clock, back from the guest clock now
+    if (sc && bi < sc->nb && g_ts_heap) {   // Map the GPU boundary through the paired CPU sample. Reading the guest clock later adds CPU scheduling delay to the timestamp.
         NSData *d = [g_ts_heap resolveCounterRange:NSMakeRange(sc->b[bi], 1)]; const MTL4TimestampHeapEntry *e = d.bytes; MTLTimestamp cpu = 0, gpu = 0; [g_dev sampleTimestamps:&cpu gpuTimestamp:&gpu];
         static double scale; if (!scale) { uint64_t hz = [g_dev queryTimestampFrequency]; scale = hz ? 1e9 / (double)hz : 1; }
-        uint64_t g = guest_ns();
+        uint64_t g = cpu ? guest_ns_at_host_time(cpu) : 0;
         if (e && d.length >= sizeof *e && e->timestamp && g) { double at = (double)e->timestamp * scale, ago = (double)gpu - at; if (ago >= 0 && ago < 2e9 && ago < (double)g) ns = g - (uint64_t)ago; }   // an entry counts at queryTimestampFrequency (24 MHz here), a sample in ns
         if (ns) return nvn_timestamp_from_ns(ns);
     }
@@ -4223,6 +4223,7 @@ __attribute__((weak)) void dm_guest_frame_tick(void) {}   // hle_os.c provides t
 __attribute__((weak)) void dm_cheats_present(void) {}   // hle_cheats.c provides the strong definition (the Atmosphère cheat pass per presented frame); a no-op when graphics unit tests do not link the host
 __attribute__((weak)) int dm_detclock_enabled(void) { return 0; }   // Same as above: the host's hle_os.c provides the strong definition; when graphics unit tests do not link the host, the deterministic clock is treated as off
 __attribute__((weak)) uint64_t guest_ns(void) { return 0; }          // Same as above: read only when the deterministic clock is on; never reached in graphics unit tests
+__attribute__((weak)) uint64_t guest_ns_at_host_time(uint64_t host_ns) { (void)host_ns; return guest_ns(); }
 static uint64_t att_bytes(id<MTLTexture> t, NSUInteger level) {
     if (!t) return 0;
     NSUInteger w = MAX(t.width >> level, 1), h = MAX(t.height >> level, 1);

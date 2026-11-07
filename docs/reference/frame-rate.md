@@ -109,6 +109,14 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Fix:** the profile key `gpu_timestamps segment` makes each report take the GPU start (`TIMESTAMP_TOP`) or end (other types) of the `sub_cut` segment ([Submissions handed to the GPU in segments](#submissions-handed-to-the-gpu-in-segments)) it was encoded in (`rep_ticks` in `nvn_mtl.m`: MTL4CommitFeedback times converted to the guest clock, written in the last segment's handler as before). `DM_NVN_GPU_TS=submission` gives the old timestamps.
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) (legacy frame-step method): BotW's frame has 5 reports in one submission (`main+0xe94584`, `main+0xe94664`); with two more cuts the controller always takes the GPU path, and the GPU time now reads the frame's GPU span, gaps where the GPU waits for the host's translation included. Measured on the Mac with two BotW runs sharing the GPU under a heavy CPU load (load average about 75, a shader rebuild running): GPU time p50 16–23 ms; the fixed run stayed at interval 2 (3 while the GPU time passed 1.9 vsyncs, 1 for under 2% of the frames) at 0.93–0.98 of real time, while a run with `DM_NVN_GPU_TS=submission` spent 10–70% of its frames at interval 1 and ran at 0.78–0.95. The same GPU time drives the game's dynamic resolution.
 
+### CPU scheduling delay in GPU timestamps
+
+- **Symptom:** a segment timestamp can shift when the CPU is delayed while reporting a GPU boundary.
+- **Cause:** `rep_ticks` used the sampled GPU clock and a later guest clock read. Delay between the samples became part of the report. Completion feedback conversion also sampled the host and guest clocks separately.
+- **Fix:** project Metal's paired CPU sample into the guest clock and subtract the GPU boundary's age. Completion feedback uses the same host sample to compute the age and project into the guest clock.
+- **Check:** `t_counter_clock` calls the production converters with a delayed sample pair and covers pause, resume and deterministic clock behavior. In a separate Metal test on an M3 Max, a 20 ms injected delay shifted the old report by 21.65 ms. The paired conversion returned the same tick.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md), where the player reported smoother pacing and faster response after the fix. Dynamic resolution still lowered the render size in some scenes.
+
 ### Raw NVN timestamp units
 
 - **Symptom:** GPU time reads 32 times too small when a game converts raw NVN counter timestamps itself.

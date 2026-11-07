@@ -9210,7 +9210,7 @@ typedef struct { const uint8_t *p, *ret[8]; int ret_n, rest_i, bad; } fz_cursor;
 static int fz_next(fz_cursor *c, const uint8_t **out, op_hdr *oh, const void **oa) {
     for (int guard = 0; guard < 1000000; guard++) {
         if (!c->p) return 0;
-        op_hdr h; memcpy(&h, c->p, sizeof h); const void *a = c->p + 8;
+        c->p = nvn_ctl_draw_follow(c->p); op_hdr h; memcpy(&h, c->p, sizeof h); const void *a = c->p + 8;
         switch (h.op) {
             // The live draws and their argument addresses are resolved at replay. A speculative scan cannot move work across this range.
             case OP_MULTI_DRAW: c->bad = 1; return 0;
@@ -9282,7 +9282,7 @@ enum { DS_FREE = 0, DS_USED = 1, DS_RET = 2 };
 static int g_ds_why; static int g_ds_scanned; static int g_ds_need;   // g_ds_need: need accumulated during the scan, 1 depth 2 stencil   // Diagnostics: the opcode that triggered the 'used' verdict (for a draw, records 1000 + dt*100 + dw*10 + st), and the number of ops scanned
 static int ds_scan(const uint8_t *p, ds_st *ds, int depth) {
     for (int guard = 0; guard < 1000000; guard++) {
-        op_hdr h; memcpy(&h, p, sizeof h);
+        p = nvn_ctl_draw_follow(p); op_hdr h; memcpy(&h, p, sizeof h);
         const void *a = p + 8; g_ds_scanned++;
         if (g_hoist_n && hoist_skipped(p)) { p += h.size; continue; }   // Clear pass already executed early
         switch (h.op) {
@@ -9578,7 +9578,7 @@ static void fz_probe_cov2(const p_set_rt *r2, const uint8_t *first, const int8_t
     static typeof(S) Ssave; memcpy(&Ssave, &S, sizeof S); typeof(R) Rsave = R;
     const p_draw *fdw = g_fd_dw; const p_draw_idx *fdi = g_fd_di; int fdwhy = g_fd_why;
     int pso_dirty = g_pso_dirty, dss_dirty = g_dss_dirty;
-    op_hdr fh; memcpy(&fh, first, sizeof fh); p_draw fdw_t; p_draw_idx fdi_t;
+    first = nvn_ctl_draw_follow(first); op_hdr fh; memcpy(&fh, first, sizeof fh); p_draw fdw_t; p_draw_idx fdi_t;
     g_fd_dw = fh.op == OP_DRAW ? draw_rec(first + 8, fh.size, &fdw_t) : NULL;
     g_fd_di = fh.op == OP_DRAW_IDX ? draw_idx_rec(first + 8, fh.size, &fdi_t) : NULL;
     R.rt = *r2; R.has_rt = 1;
@@ -9669,7 +9669,7 @@ static int sm_rt_slice(const p_set_rt *a, const p_set_rt *b, int *slice) {
 static int sm_scan(const uint8_t *p, const p_set_rt *rt, int cur, int *lo, int *hi, uint64_t *mask) {
     int n = 0; *lo = *hi = cur; *mask = cur < 64 ? 1ull << cur : 0;
     for (int guard = 0; guard < 4096 && p; guard++) {
-        op_hdr h; memcpy(&h, p, sizeof h); const void *a = p + 8;
+        p = nvn_ctl_draw_follow(p); op_hdr h; memcpy(&h, p, sizeof h); const void *a = p + 8;
         switch (h.op) {
             case OP_JUMP: { const uint8_t *t; memcpy(&t, a, 8); p = t; continue; }
             case OP_SET_RT: { int sl; if (!sm_rt_slice(rt, a, &sl) || sl >= 64) return n;
@@ -9821,7 +9821,7 @@ static void sdx_lvsl(const view_t *v, int hv, uint16_t *lv, uint16_t *sl) { *lv 
 static void sdx_walk(const uint8_t *p, int depth) {
     if (depth > 64) { g_sdx_ok = 0; return; }
     for (uint32_t guard = 0; guard < 4000000 && p && g_sdx_ok; guard++) {
-        op_hdr h; memcpy(&h, p, sizeof h); const void *a = p + 8;
+        p = nvn_ctl_draw_follow(p); op_hdr h; memcpy(&h, p, sizeof h); const void *a = p + 8;
         if (g_sdx_nop == g_sdx_opcap) { g_sdx_opcap = g_sdx_opcap ? g_sdx_opcap * 2 : 16384; g_sdx_op = realloc_or_die(g_sdx_op, g_sdx_opcap * sizeof *g_sdx_op, "the store lookahead index"); }
         uint32_t seq = g_sdx_nop; g_sdx_op[g_sdx_nop++] = p;
         switch (h.op) {
@@ -9947,7 +9947,7 @@ static void hoist_try(void) {
     uint64_t bh[512]; int nbh = 0;
     const uint8_t *p = g_exec_next;
     for (int guard = 0; guard < 200000; guard++) {
-        op_hdr h; memcpy(&h, p, sizeof h); const void *a = p + 8;
+        p = nvn_ctl_draw_follow(p); op_hdr h; memcpy(&h, p, sizeof h); const void *a = p + 8;
         switch (h.op) {
             case OP_END: case OP_CALL: case OP_COPY_T2T: case OP_DRAW_TEX: case OP_COPY_B2T: case OP_COPY_T2B: case OP_CLEAR_TEX: case OP_DLSS: case OP_DISPATCH: case OP_RENDER_COND: return;
             case OP_JUMP: { const uint8_t *t; memcpy(&t, a, 8); p = t; continue; }
@@ -10232,7 +10232,7 @@ static void defer_try(const p_draw *dw, const p_draw_idx *di) {
     uint64_t tex[6][NTEX], img[6][32]; memcpy(tex, S.tex, sizeof tex); memcpy(img, S.img, sizeof img); const prog_t *pg = S.prog; ds_st ds = S.ds;
     const uint8_t *p = g_exec_next, *p_end = NULL, *qop = NULL; const p_set_rt *q = NULL; p_set_rt scan_rt = R.rt; int srt_hit = -1, ci = 0, draws = 1, p_has_draw = 1; defer_collect_reads(&g_defer, pg, tex, img);   // The current draw is P's first
     for (int guard = 0; guard < 200000; guard++) {
-        op_hdr h; memcpy(&h, p, sizeof h); const void *a = p + 8;
+        p = nvn_ctl_draw_follow(p); op_hdr h; memcpy(&h, p, sizeof h); const void *a = p + 8;
         if (g_hoist_n && hoist_skipped(p)) { p += h.size; continue; }
         switch (h.op) {
             case OP_END: { const uint8_t *nx = defer_cont(&ci); if (!nx) { g_defer.reason = 1; goto fail; } p = nx; continue; }
@@ -10267,7 +10267,7 @@ static void defer_try(const p_draw *dw, const p_draw_idx *di) {
                 if (!p_end) p_end = p; int shared = 0; for (int i = 0; i < g_defer.p_rt.n; i++) for (int j = 0; j < r->n; j++) if (g_defer.p_rt.color[i] && r->color[j] && sub_eq(&g_defer.p_rt, i, r, j)) shared = 1;
                 if (shared) {   // An empty render pass (targets set, then changed again without drawing or clearing) touches no attachment: it is neither taken as Q nor counted as a conflict
                     const uint8_t *e = p + h.size; int ec = ci, empty = 0;
-                    for (int g2 = 0; g2 < 200000; g2++) { op_hdr he; memcpy(&he, e, sizeof he);
+                    for (int g2 = 0; g2 < 200000; g2++) { e = nvn_ctl_draw_follow(e); op_hdr he; memcpy(&he, e, sizeof he);
                         if (he.op == OP_JUMP) { memcpy(&e, e + 8, 8); continue; }
                         if (he.op == OP_END) { const uint8_t *nx = defer_cont(&ec); if (!nx) break; e = nx; continue; }
                         if (he.op == OP_SET_RT) { empty = 1; break; }
@@ -10283,8 +10283,8 @@ static void defer_try(const p_draw *dw, const p_draw_idx *di) {
 fail:
     if (g_defer.reason && passdump()) PD("G %llu rejected reason=%d op=%d", g_stat_pass + 1, g_defer.reason, g_defer.reason_op); memset(&g_defer, 0, sizeof g_defer); return;
 q_found:
-    p = qop; op_hdr qh; memcpy(&qh, p, sizeof qh); p += qh.size; int q_body = 0, q_clears = 0;   // Binding tracking continues from the main scan's state (does not go back to S at the start of P)
-    for (int guard = 0; guard < 200000; guard++) { op_hdr h; memcpy(&h, p, sizeof h); const void *a = p + 8; if (h.op == OP_JUMP) { memcpy(&p, a, 8); continue; }
+    p = qop; p = nvn_ctl_draw_follow(p); op_hdr qh; memcpy(&qh, p, sizeof qh); p += qh.size; int q_body = 0, q_clears = 0;   // Binding tracking continues from the main scan's state (does not go back to S at the start of P)
+    for (int guard = 0; guard < 200000; guard++) { p = nvn_ctl_draw_follow(p); op_hdr h; memcpy(&h, p, sizeof h); const void *a = p + 8; if (h.op == OP_JUMP) { memcpy(&p, a, 8); continue; }
         // The whole Q segment (up to the next SetRenderTargets / end of list): no draw may sample P's color attachments through a view covering P's level -- after deferral P's result is still in the tile and has not landed in main memory, so sampling would read old content
         if (h.op == OP_DRAW || h.op == OP_DRAW_IDX) { if (defer_prog_hits(pg, tex, img, &g_defer.p_rt, 1, 1)) { g_defer.reason = 14; goto fail; } q_body = 1; p += h.size; continue; }
         if (q_body && (h.op == OP_SET_RT || h.op == OP_END)) break;
@@ -10510,7 +10510,7 @@ static int zskip_view_zero(int tid) {
 static int zskip_vis_dead(void) {
     if (!g_vis_counting) return 1;
     const uint8_t *p = g_exec_next; int ci = 0; if (!p) return 0;
-    for (int guard = 0; guard < 200000; guard++) { op_hdr h; memcpy(&h, p, sizeof h); const void *a = p + 8;
+    for (int guard = 0; guard < 200000; guard++) { p = nvn_ctl_draw_follow(p); op_hdr h; memcpy(&h, p, sizeof h); const void *a = p + 8;
         if (h.op == OP_JUMP) { memcpy(&p, a, 8); continue; }
         if (h.op == OP_END) { p = defer_cont(&ci); if (!p) return 0; continue; }
         if (h.op == OP_CALL) return 0;
@@ -12992,7 +12992,7 @@ void mtl_exec(const uint8_t *p) {
     static int dump_all = -1; if (dump_all < 0) dump_all = getenv("DM_NVN_PASSDUMP_ALL") != NULL;
     int trace = dump_all && passdump();   // Normal mode does not check the frame range per operation; the full command position is only used for the designated diagnostic frames
     for (;;) {
-        op_hdr h; memcpy(&h, p, sizeof h);
+        p = nvn_ctl_draw_follow(p); op_hdr h; memcpy(&h, p, sizeof h);
         g_exec_cur = p;   // Scan start point of the store lookahead: the operation that ends the render pass (inclusive)
         if (p == g_defer_pend) { for (int gi = 0; gi < 4; gi++) if (g_defer_slots[gi].active && g_defer_slots[gi].p_end_op == p) g_defer_slots[gi].in_p = 0; g_defer_pend = NULL; }
         sdx_seq(p);

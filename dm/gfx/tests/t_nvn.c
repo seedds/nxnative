@@ -11,6 +11,7 @@ module_t *g_mod; int g_nmod;                            // host symbols that cra
 void svc_thread_dump(void) {}
 int dm_guest_as_contains(uintptr_t address) { (void)address; return 0; } // Tests use host-thread stacks.
 void dm_vi_layer_crop(int c[4]) { c[0] = c[1] = c[2] = c[3] = 0; }   // no vi layer crop in unit tests (hle_vi.c)
+void dm_vi_frame_queued(uint64_t frame) { (void)frame; }   // no VI frame history in headless tests
 void crash_install(void);
 void nvn_present_config(int hz, int display_mode);
 #include <fcntl.h>
@@ -377,6 +378,144 @@ int main(void) {
         memcpy(&rh, m, sizeof rh);
         EXPECT("a copy with the default strides keeps its size and has no strides", 1, rh.size == 8 + COPY_STRIDES_OFF && !copy_strides(m + 8, rh.size));
         P(nvnTextureFinalize)(&tx); P(nvnCommandBufferFinalize)(&c3);
+    }
+
+    // 5aa. Optional control-memory terminal draw token: all command bytes and
+    // all control bytes are counted against the *guest's* supplied grants.
+    {
+        static uint8_t memory[4096] __attribute__((aligned(4096)));
+        static uint8_t control[512] __attribute__((aligned(16)));
+        NVNmemoryPoolBuilder b; NVNmemoryPool pool; NVNcommandBuffer cb;
+        memset(memory, 0xa5, sizeof memory); // The unwritten indirect tail must not affect direct-draw eligibility.
+        P(nvnMemoryPoolBuilderSetDefaults)(&b); P(nvnMemoryPoolBuilderSetStorage)(&b, memory, sizeof memory);
+        P(nvnMemoryPoolInitialize)(&pool, &b); P(nvnCommandBufferInitialize)(&cb, &dev);
+        P(nvnCommandBufferAddControlMemory)(&cb, control, sizeof control);
+        P(nvnCommandBufferAddCommandMemory)(&cb, &pool, 0, sizeof memory);
+        setenv("DM_NVN_DRAW_CTL", "1", 1);
+        nvn_draw_ctl_init(); // Test toggles the startup-only environment setting.
+        P(nvnCommandBufferBeginRecording)(&cb);
+        P(nvnCommandBufferDrawElementsBaseVertex)(&cb, NVN_DRAW_PRIMITIVE_TRIANGLES, NVN_INDEX_TYPE_UNSIGNED_SHORT, 36, 0x123400, 5);
+        NVNcommandHandle h1 = P(nvnCommandBufferEndRecording)(&cb);
+        EXPECT("control draw: 4 actual guest command bytes", 4, P(nvnCommandBufferGetCommandMemoryUsed)(&cb));
+        EXPECT("control draw: 48 actual guest control bytes", 48, P(nvnCommandBufferGetControlMemoryUsed)(&cb));
+        EXPECT("control draw: control free reduced", sizeof control - 48, P(nvnCommandBufferGetControlMemoryFree)(&cb));
+        EXPECT("control draw: handle remains guest in-pool", 1, (const uint8_t *)h1 == memory);
+        const uint8_t *side = nvn_ctl_draw_target((const void *)(uintptr_t)h1);
+        op_hdr h = {0}, tail = {0};
+        if (side) { memcpy(&h, side, 8); memcpy(&tail, side + 40, 8); }
+        EXPECT("control draw: real control payload matches immutable replay snapshot", 1, side && side != control && !memcmp(side, control, 48) && h.op == OP_DRAW_IDX && h.size == 40 && tail.op == OP_END && tail.size == 8);
+        if (side) { p_draw_idx d; const p_draw_idx *di = draw_idx_rec(side + 8, h.size, &d);
+            EXPECT("control draw: index address/count/base retained", 1, di->ibuf == 0x123400 && di->count == 36 && di->base_vertex == 5); }
+        P(nvnCommandBufferBeginRecording)(&cb);
+        P(nvnCommandBufferDrawElementsBaseVertex)(&cb, NVN_DRAW_PRIMITIVE_TRIANGLES, NVN_INDEX_TYPE_UNSIGNED_SHORT, 3, 0x123800, 0);
+        NVNcommandHandle h2 = P(nvnCommandBufferEndRecording)(&cb);
+        EXPECT("second draw keeps first token and new 4-byte offset", 1, (const uint8_t *)h2 == memory + 4 && nvn_ctl_draw_target((const void *)(uintptr_t)h1) && nvn_ctl_draw_target((const void *)(uintptr_t)h2) && !memcmp(nvn_ctl_draw_target((const void *)(uintptr_t)h2), control + 48, 48));
+        EXPECT("two independent draws count actual 8 command bytes", 8, P(nvnCommandBufferGetCommandMemoryUsed)(&cb));
+        EXPECT("two independent draws count actual 96 control bytes", 96, P(nvnCommandBufferGetControlMemoryUsed)(&cb));
+        P(nvnCommandBufferBeginRecording)(&cb);
+        P(nvnCommandBufferDrawElementsBaseVertex)(&cb, NVN_DRAW_PRIMITIVE_TRIANGLES, NVN_INDEX_TYPE_UNSIGNED_SHORT, 3, 0x123800, 0);
+        (void)P(nvnCommandBufferGetCommandMemoryUsed)(&cb); // The guest may have cached a command offset.
+        NVNcommandHandle h3 = P(nvnCommandBufferEndRecording)(&cb);
+        EXPECT("published offset refuses sidecar rewrite", 1, !nvn_ctl_draw_target((const void *)(uintptr_t)h3));
+        EXPECT("published offset retains original 48-byte physical footprint", 56, P(nvnCommandBufferGetCommandMemoryUsed)(&cb));
+        P(nvnCommandBufferAddControlMemory)(&cb, control, 16);
+        P(nvnCommandBufferBeginRecording)(&cb);
+        P(nvnCommandBufferDrawElementsBaseVertex)(&cb, NVN_DRAW_PRIMITIVE_TRIANGLES, NVN_INDEX_TYPE_UNSIGNED_SHORT, 3, 0x123800, 0);
+        NVNcommandHandle h4 = P(nvnCommandBufferEndRecording)(&cb);
+        EXPECT("no control capacity uses old draw+END", 1, !nvn_ctl_draw_target((const void *)(uintptr_t)h4));
+        EXPECT("no control capacity charges no control bytes", 0, P(nvnCommandBufferGetControlMemoryUsed)(&cb));
+        // With a finite guest control grant the token format cannot steal
+        // bytes past the end. Exhaustion falls back to in-pool DRAW+END.
+        P(nvnCommandBufferAddControlMemory)(&cb, control, sizeof control);
+        P(nvnCommandBufferAddCommandMemory)(&cb, &pool, 0, sizeof memory);
+        int tickets = 0;
+        for (int i = 0; i < 12; i++) {
+            P(nvnCommandBufferBeginRecording)(&cb);
+            P(nvnCommandBufferDrawElementsBaseVertex)(&cb, NVN_DRAW_PRIMITIVE_TRIANGLES, NVN_INDEX_TYPE_UNSIGNED_SHORT, 3, 0x125000 + i * 2, 0);
+            NVNcommandHandle next = P(nvnCommandBufferEndRecording)(&cb);
+            tickets += nvn_ctl_draw_target((const void *)(uintptr_t)next) != NULL;
+        }
+        EXPECT("512 control bytes admit ten physical 48-byte draw sidecars", 10, tickets);
+        EXPECT("all twelve recordings charge actual command bytes", 10 * 4 + 2 * 48, P(nvnCommandBufferGetCommandMemoryUsed)(&cb));
+        EXPECT("control bytes charge only successful sidecars", 10 * 48, P(nvnCommandBufferGetControlMemoryUsed)(&cb));
+        EXPECT("falling back leaves control free accounting stable", sizeof control - 10 * 48, P(nvnCommandBufferGetControlMemoryFree)(&cb));
+        P(nvnCommandBufferAddControlMemory)(&cb, control, sizeof control);
+        P(nvnCommandBufferAddCommandMemory)(&cb, &pool, 0, sizeof memory);
+        P(nvnCommandBufferBeginRecording)(&cb);
+        P(nvnCommandBufferDrawElementsIndirect)(&cb, NVN_DRAW_PRIMITIVE_TRIANGLES, NVN_INDEX_TYPE_UNSIGNED_SHORT, 0x125000, 0x145000);
+        NVNcommandHandle indirect = P(nvnCommandBufferEndRecording)(&cb);
+        EXPECT("indirect draw does not enter control-memory token form", 1, !nvn_ctl_draw_target((const void *)(uintptr_t)indirect));
+        EXPECT("indirect draw does not consume control grant", 0, P(nvnCommandBufferGetControlMemoryUsed)(&cb));
+        // A queried offset at +4 cannot be silently shifted later: the host
+        // charges four actual alignment bytes, leaves the previous token
+        // intact, and refuses to convert this in-progress draw.
+        P(nvnCommandBufferAddCommandMemory)(&cb, &pool, 0, sizeof memory);
+        P(nvnCommandBufferAddControlMemory)(&cb, control, sizeof control);
+        P(nvnCommandBufferBeginRecording)(&cb);
+        P(nvnCommandBufferDrawElementsBaseVertex)(&cb, NVN_DRAW_PRIMITIVE_TRIANGLES, NVN_INDEX_TYPE_UNSIGNED_SHORT, 6, 0x126000, 0);
+        NVNcommandHandle first = P(nvnCommandBufferEndRecording)(&cb);
+        P(nvnCommandBufferBeginRecording)(&cb);
+        P(nvnCommandBufferDrawElementsBaseVertex)(&cb, NVN_DRAW_PRIMITIVE_TRIANGLES, NVN_INDEX_TYPE_UNSIGNED_SHORT, 7, 0x126100, 0);
+        EXPECT("mid-record query after a +4 token includes the physical alignment pad", 48, P(nvnCommandBufferGetCommandMemoryUsed)(&cb));
+        NVNcommandHandle queried = P(nvnCommandBufferEndRecording)(&cb);
+        EXPECT("mid-record query keeps previous 4-byte token intact", 1,
+               queried == (NVNcommandHandle)(memory + 8) && nvn_ctl_draw_target((const void *)(uintptr_t)first) != NULL &&
+               nvn_ctl_draw_target((const void *)(uintptr_t)queried) == NULL);
+        EXPECT("mid-record query keeps its canonical 48-byte draw+END", 56, P(nvnCommandBufferGetCommandMemoryUsed)(&cb));
+
+        // CopyCommands materializes a standalone draw in the destination,
+        // whereas CallCommands stores the original command handle.
+        P(nvnCommandBufferAddCommandMemory)(&cb, &pool, 0, sizeof memory);
+        P(nvnCommandBufferAddControlMemory)(&cb, control, sizeof control);
+        P(nvnCommandBufferBeginRecording)(&cb);
+        P(nvnCommandBufferDrawElementsBaseVertex)(&cb, NVN_DRAW_PRIMITIVE_TRIANGLES, NVN_INDEX_TYPE_UNSIGNED_SHORT, 8, 0x127000, 0);
+        NVNcommandHandle cached = P(nvnCommandBufferEndRecording)(&cb);
+        const uint8_t *snapshot = nvn_ctl_draw_target((const void *)(uintptr_t)cached);
+        EXPECT("4-byte cached handle resolves before memory regrant", 1, snapshot != NULL);
+        NVNcommandBuffer copy;
+        P(nvnCommandBufferInitialize)(&copy, &dev);
+        P(nvnCommandBufferAddCommandMemory)(&copy, &pool, 2048, 256);
+        P(nvnCommandBufferBeginRecording)(&copy);
+        P(nvnCommandBufferCopyCommands)(&copy, 1, &cached);
+        NVNcommandHandle copy_handle = P(nvnCommandBufferEndRecording)(&copy);
+        op_hdr copied_header; memcpy(&copied_header, (const void *)(uintptr_t)copy_handle, 8);
+        EXPECT("CopyCommands takes a charged 40-byte independent DRAW_IDX plus END", 1,
+               copied_header.op == OP_DRAW_IDX && copied_header.size == 40 && P(nvnCommandBufferGetCommandMemoryUsed)(&copy) == 48);
+        EXPECT("CopyCommands preserves draw bytes", 1, snapshot && !memcmp((const void *)(uintptr_t)copy_handle, snapshot, 40));
+        P(nvnCommandBufferAddCommandMemory)(&copy, &pool, 2560, 256);
+        P(nvnCommandBufferBeginRecording)(&copy);
+        P(nvnCommandBufferCallCommands)(&copy, 1, &cached);
+        NVNcommandHandle call_handle = P(nvnCommandBufferEndRecording)(&copy);
+        op_hdr called_header; memcpy(&called_header, (const void *)(uintptr_t)call_handle, 8);
+        uintptr_t called_target = 0; memcpy(&called_target, (const uint8_t *)(uintptr_t)call_handle + 8, 8);
+        EXPECT("CallCommands retains the source handle in a 16-byte OP_CALL", 1,
+               called_header.op == OP_CALL && called_header.size == 16 && called_target == (uintptr_t)cached);
+        // The guest is free to reuse control memory independently of a cached
+        // command handle. Replay still sees the original immutable snapshot.
+        memset(control, 0xcc, 48);
+        P(nvnCommandBufferAddControlMemory)(&cb, control, sizeof control);
+        EXPECT("control regrant cannot invalidate a previously returned draw", 1,
+               snapshot && nvn_ctl_draw_target((const void *)(uintptr_t)cached) == snapshot &&
+               ((const op_hdr *)snapshot)->op == OP_DRAW_IDX);
+        uint32_t old_token; memcpy(&old_token, (const void *)(uintptr_t)cached, 4);
+        uint8_t moved_token[4]; memcpy(moved_token, &old_token, 4);
+        EXPECT("a raw token at a different address cannot alias its source", 1, !nvn_ctl_draw_target(moved_token));
+        // The +1 offset forces a partial overlap of the token, exercising
+        // generation-aware retirement without altering its four stored bytes.
+        P(nvnCommandBufferAddCommandMemory)(&cb, &pool, 1, 64);
+        uint32_t token_after; memcpy(&token_after, (const void *)(uintptr_t)cached, 4);
+        EXPECT("partial overlapping command regrant retires a cached handle", 1,
+               token_after == old_token && nvn_ctl_draw_target((const void *)(uintptr_t)cached) == NULL);
+        P(nvnCommandBufferAddCommandMemory)(&cb, &pool, 0, sizeof memory);
+        P(nvnCommandBufferBeginRecording)(&cb);
+        P(nvnCommandBufferDrawElementsBaseVertex)(&cb, NVN_DRAW_PRIMITIVE_TRIANGLES, NVN_INDEX_TYPE_UNSIGNED_SHORT, 9, 0x128000, 0);
+        NVNcommandHandle reborn = P(nvnCommandBufferEndRecording)(&cb);
+        uint32_t new_token; memcpy(&new_token, (const void *)(uintptr_t)reborn, 4);
+        EXPECT("reused handle address gets a fresh generation", 1, reborn == cached && new_token != old_token && nvn_ctl_draw_target((const void *)(uintptr_t)reborn) != NULL);
+        P(nvnCommandBufferFinalize)(&copy);
+        unsetenv("DM_NVN_DRAW_CTL");
+        nvn_draw_ctl_init(); // Restore the default-off profile for remaining tests.
+        P(nvnCommandBufferFinalize)(&cb); P(nvnMemoryPoolFinalize)(&pool);
     }
 
     // 5a. Command memory per recording, as GetCommandMemoryUsed reports it (games size prerecorded command blocks by it: Breath of the Wild records one scratch draw per mesh):

@@ -107,7 +107,7 @@ A controller's vibration weaker than this stays off, and the rest is spread over
 
 ### Press a button to join
 
-Off by default: each controller is a player as soon as it connects, in the order the system lists them. On: a controller becomes a player only when you press one of its buttons, as the lowest player free, so the players choose their order and how many play. That press also reaches the game. Press a button on every controller before the game asks how many play: a game that wants two players and sees one closes its player screen.
+Off by default: each controller is a player as soon as it connects, in the order the system lists them. On: a controller becomes a player only when you press one of its buttons, as the lowest player free, so the players choose their order and how many play. That press also reaches the game. When a game asks for more players than have joined, a prompt over the game waits for the others to press a button; B closes it.
 
 ## Performance
 

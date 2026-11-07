@@ -227,7 +227,7 @@ class Survey(Base):
         with mock.patch.object(nsp, 'find_repo', return_value=REPO), mock.patch.object(nsp, 'configure_dotnet'), mock.patch.object(nsp, 'WORK_DIR', ''), mock.patch.object(nsp, 'PROD_KEYS', ''), \
              mock.patch.object(nsp, 'survey', side_effect=survey), mock.patch.object(nsp, 'check_capstone'), mock.patch.object(nsp.shutil, 'which', return_value='/usr/bin/dotnet'), \
              mock.patch.object(nsp, 'say'), mock.patch.object(nsp, 'build_nx_extract', side_effect=AssertionError('built nx_extract')), \
-             mock.patch.object(nsp, 'ask', side_effect=AssertionError('asked for something')), mock.patch.object(nsp, 'package_title_reader', side_effect=AssertionError('read a package')):
+             mock.patch.object(nsp, 'ask', side_effect=AssertionError('asked for something')), mock.patch.object(nsp, 'package_reader', side_effect=AssertionError('read a package')):
             with self.assertRaises(Stop): nsp.main(nsp.parse_args([str(self.path), '--survey-only']))
         self.assertEqual(seen['app'], NEW)
         self.assertIsNone(seen['base'])
@@ -350,7 +350,7 @@ class Pack(Base):
         self.assertIsNone(base)
         self.assertEqual((app, sorted(vers), sorted(dlc)), (TID, [VER, VER + 1], [TID + 0x1001]))
         app, fam = nsp.scan_nup(self.path); self.addCleanup(fam['nup'].close)
-        have = nsp.nsp_versions(fam, {})
+        have = nsp.nsp_versions(fam)
         self.assertEqual(set(have), {f'v{VER}', f'v{VER + 1}'})
         with mock.patch.object(nsp, 'say'):
             picks = nsp.pick_nsps(fam, have, sorted(have))
@@ -392,7 +392,7 @@ class Pack(Base):
                     app, base, vers, _ = pack_nup.scan(n)
                     self.assertIsNone(base)
                     self.assertEqual(app, TID)
-                    self.assertEqual(set(nsp.nsp_versions({'base': base, 'updates': sorted(vers.items())}, {})), {f'v{VER}'})
+                    self.assertEqual(set(nsp.nsp_versions({'base': base, 'updates': sorted(vers.items())})), {f'v{VER}'})
                     pack_nup.pack_version(n, vers[VER], base, app, self.out(), say=lambda s: None)
                     self.assertIn('dir/marker', romfs_image.read_index(self.out() / 'RomFS.img'))
                     self.assertEqual((self.out() / 'ExeFS/main').read_bytes(), b'code')
@@ -512,7 +512,7 @@ class Pack(Base):
         runs = []
         def extract(argv, log, **kw): runs.append(argv); Path(argv[4]).parent.mkdir(parents=True, exist_ok=True); Path(argv[4]).write_bytes(b'from the NSP')
         nsp_fam, nup_fam = {'dlc': [(TID + 0x1001, 0, p)]}, {'dlc': [(t, None, k) for t, k in dlc.items()], 'nup': n}
-        with mock.patch.object(nsp, 'run', side_effect=extract), mock.patch.object(nsp, 'is_merged', return_value=False):
+        with mock.patch.object(nsp, 'run', side_effect=extract):
             for fam in (nsp_fam, nsp_fam, nup_fam): aoc = nsp.extract_aoc('nx', 'keys', REPO, work, app, fam, logs)
             self.assertEqual(len(runs), 1)   # reused while the NSPs and aoc/ are unchanged
             self.assertIn('dlcfile', romfs_image.read_index(aoc / '1.img'))
@@ -552,7 +552,7 @@ class Main(Base):
         with mock.patch.object(nsp, 'find_repo', return_value=REPO), mock.patch.object(nsp, 'configure_dotnet'), mock.patch.object(nsp, 'WORK_DIR', ''), mock.patch.object(nsp, 'PROD_KEYS', ''), \
              mock.patch.object(nsp, 'check_prereqs', side_effect=stop), mock.patch.object(nsp, 'say', side_effect=said.append), \
              mock.patch.object(nsp, 'check_versions_aarch64', side_effect=Stop), \
-             mock.patch.object(nsp, 'ask', side_effect=AssertionError('asked for something')), mock.patch.object(nsp, 'package_title_reader', side_effect=AssertionError('read a package')):
+             mock.patch.object(nsp, 'ask', side_effect=AssertionError('asked for something')), mock.patch.object(nsp, 'package_reader', side_effect=AssertionError('read a package')):
             with self.assertRaises(Stop): nsp.main(nsp.parse_args([str(target)] + (['--package', package] if package else [])))
         return Path(seen['DM_ROOT']), said
 

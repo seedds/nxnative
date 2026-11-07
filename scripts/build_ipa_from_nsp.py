@@ -93,7 +93,7 @@ SWITCH_ALIAS = 0x1000000000             # the Switch's alias region (64 GB), whi
 
 PROGRESS = 'auto'                       # stage lines on the console: 'bar' (one line per stage, redrawn in place), 'lines' (a plain line every BEAT seconds), 'off' (only each stage's start and end); 'auto' = bar in a terminal or Spyder, lines when the output goes to a file; 'json' = one JSON event per line, for a program that shows the build
 BEAT = 30                               # seconds between progress lines in 'lines' mode
-TOOL_PATHS = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/local/share/dotnet', os.path.expanduser('~/.dotnet')]   # GUI apps such as Spyder do not get the shell's PATH
+TOOL_PATHS = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/local/share/dotnet', os.path.expanduser('~/.dotnet')]   # searched after the caller's PATH (tool_env): GUI apps such as Spyder do not get the shell's PATH
 
 
 class BuildError(Exception):
@@ -128,7 +128,7 @@ class Progress:
     """The console view of the build: one line per stage, "[k/n] stage · step", with a bar, done/total, percent, elapsed time and ETA when the work can be counted, else a spinner and the elapsed time.
     Modes: bar = the line is redrawn in place (a terminal, Spyder's console) and replaced by a ✓ line when the stage ends; lines = a plain line when a stage or step starts, every BEAT seconds and at the end
     (for output piped to a file); off = only each stage's start and end lines. Counters come from set(), or from a poll function that runs in a thread of its own (it may walk a big folder) and returns set()'s arguments.
-    Messages go through say(), which prints them above the live line. json (for a program that shows the build) = one JSON object per stdout line instead: the events stage, step, progress, stage_end, say and shaders_stale;
+    Messages go through say(), which prints them above the live line. json (for a program that shows the build) = one JSON object per stdout line instead: the events stage, step, progress, stage_end, say, shaders_stale and game;
     a count change goes out at most every JSON_INTERVAL seconds (the ticker sends one held back), any other change at once"""
     SPIN, BLOCKS, POLL, JSON_INTERVAL = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏', ' ▏▎▍▌▋▊▉', 1.0, 0.5
 
@@ -426,6 +426,12 @@ def free_gb(p):
     return shutil.disk_usage(p).free / 2**30
 
 
+def tool_env(environ=os.environ):
+    """The environment the build's tools run in: the caller's PATH first, so the tools it selects (a venv's python3, mise's zstd or dotnet) are the ones that run,
+    then TOOL_PATHS for the tools it lacks (a GUI app such as Spyder gets only the system PATH, or none)."""
+    return dict(environ, PATH=os.pathsep.join([environ.get('PATH') or '/usr/bin:/bin:/usr/sbin:/sbin'] + TOOL_PATHS))
+
+
 def configure_dotnet(env):
     """Let standalone .NET apphosts find the runtime used by dotnet (Homebrew installs it outside the registered locations)."""
     if env.get('DOTNET_ROOT'): return
@@ -444,101 +450,65 @@ def configure_dotnet(env):
 
 
 # ---- NSP identification ----
-def pfs0_names(path):   # NSP = PFS0: list the file names inside
-    with open(path, 'rb') as f:
-        h = f.read(16)
-        if h[:4] != b'PFS0': return []
-        if len(h) != 16: raise BuildError(f'truncated PFS0 header: {path.name}')
-        n, st = struct.unpack_from('<II', h, 4)
-        if n * 0x18 + st > os.fstat(f.fileno()).st_size - 16:
-            raise BuildError(f'truncated PFS0 file-name table: {path.name}')
-        ent, strs = f.read(n * 0x18), f.read(st)
-    names = []
-    for i in range(n):
-        o = struct.unpack_from('<I', ent, i * 0x18 + 0x10)[0]
-        if o >= len(strs): raise BuildError(f'PFS0 file-name offset outside the string table: {path.name}')
-        # Older NSZ writers omitted the final NUL: the string table itself still bounds the name.
-        end = strs.find(b'\0', o)
-        names.append(strs[o:end if end >= 0 else len(strs)].decode(errors='replace'))
-    return names
-
-
-def hfs0_names(f, off):   # an XCI's HFS0 partition at off: [(name, offset of its data from the file's start)]
-    f.seek(off); h = f.read(16)
-    if h[:4] != b'HFS0': return []
-    n, st = struct.unpack_from('<II', h, 4)
-    ent, strs = f.read(n * 0x40), f.read(st); data = off + 16 + n * 0x40 + st
-    return [(strs[no:strs.index(b'\0', no)].decode(errors='replace'), data + o) for o, no in (struct.unpack_from('<Q8xI', ent, i * 0x40) for i in range(n))]
-
-
-def package_names(path):   # the file names inside a package: an NSP's PFS0, or an XCI's secure partition (the NCAs nx_extract reads)
-    with open(path, 'rb') as f:
-        h = f.read(0x140)
-        if h[0x100:0x104] != b'HEAD': return pfs0_names(path)
-        secure = dict(hfs0_names(f, struct.unpack_from('<Q', h, 0x130)[0])).get('secure')
-        return [n for n, _ in hfs0_names(f, secure)] if secure else []
-
-
-def is_merged(path):   # several content metas in one package: base game + update (+ DLC) in one NSP, or a cartridge dump with its update (1G+1U)
-    try: return sum(n.lower().endswith('.cnmt.nca') for n in package_names(path)) > 1
-    except (OSError, ValueError, struct.error): return False
-
-
 def is_package(path):   # what nx_extract's OpenNsp opens: an XCI / XCZ by the card header's magic at 0x100, else a PFS0 (NSP, NSZ)
     with open(path, 'rb') as f: h = f.read(0x104)
     return h[:4] == b'PFS0' or h[0x100:] == b'HEAD'
 
 
-def title_of(path, from_package=None):   # the ticket name (the first 16 digits of the rights ID = title ID), else [title ID] in the file name, else what the package itself says
-    for n in pfs0_names(path):   # the ticket first: a file name's tag can be wrong (FFT's base NSP is tagged …0001, its ticket is …0000)
-        if re.match(r'[0-9A-Fa-f]{32}\.tik$', n): return int(n[:16], 16)
-    m = re.search(r'\[([0-9A-Fa-f]{16})\]', path.name)
-    if m: return int(m.group(1), 16)
-    return from_package(path) if from_package else None   # an NSP without a ticket (a standard-crypto dump, a repack) and without a tag (LNPANDY/NX2Apple#177)
+KEYS_RED = r'^\[RED\] (.*prod\.keys has no .*|.*no title key for rights ID .*)$'   # nx_extract's line for keys that cannot open a package (exit code 6)
 
 
 @contextlib.contextmanager
-def package_title_reader(repo, keys, env):
-    """Yield a function path -> title ID read from the package's meta NCA with the keys (`nx_extract <keys> --title <package>`, header_key; the same for an NSP, NSZ, XCI and XCZ), None when
-    it cannot be read. nx_extract is built on the first call into a temporary folder: the work folder is named after the title ID, which is what is being looked for"""
+def package_reader(repo, keys, env):
+    """Yield a reader of the packages under the keys, with nx_extract built on its first use into a temporary folder (the work folder is named after the title ID, which is what
+    is being looked for): reader.contents(paths) and reader.check_keys(fam)"""
     with tempfile.TemporaryDirectory(prefix='title_probe_') as t:
         work, nx = Path(t), []
-        def read(path):
-            if not nx:
-                if not shutil.which('dotnet', path=env.get('PATH')): raise BuildError(f'{path.name} has neither a ticket nor a [title ID] in its name, and reading it from the package needs dotnet (.NET SDK 10): install it or add the title ID to the name')
-                nx.append(build_nx_extract(repo, work, work / 'logs', env))
-            log = work / 'logs/title.log'
-            try: run([nx[0], keys, '--title', path], log, env=env, ok=(5,))
-            except BuildError: return None
-            m = re.search(r'^title ([0-9a-f]{16})$', log.read_text(errors='replace'), re.M)
-            return int(m.group(1), 16) if m else None
-        def contents(path):   # a merged package's content metas: [(type, title ID, version)] (`nx_extract <keys> --contents <package>`), None when they cannot be read
-            if not nx:
-                if not shutil.which('dotnet', path=env.get('PATH')): raise BuildError(f'{path.name} holds several titles (base game, update, DLC in one file): reading them needs dotnet (.NET SDK 10)')
-                nx.append(build_nx_extract(repo, work, work / 'logs', env))
-            log = work / 'logs/contents.log'
-            try: run([nx[0], keys, '--contents', path], log, env=env, ok=(5,))
-            except BuildError: return None
-            out = [(t, int(i, 16), int(v)) for t, i, v in re.findall(r'^content (\w+) ([0-9a-f]{16}) (\d+)$', log.read_text(errors='replace'), re.M)]
-            return out or None
-        def check_keys(fam):
-            """Stop when the keys cannot open the game's packages (`nx_extract <keys> --keys <package>...`: every NCA's header, an NSZ's too), before nsz -D, the survey and the
-            extraction, which need the same keys and would stop minutes later. Keys older than the game lack its master key: the message names that key and the firmware it came with.
-            Any other failure of the check is left to those steps, which report it themselves"""
-            if not nx:
-                if not shutil.which('dotnet', path=env.get('PATH')): return
-                nx.append(build_nx_extract(repo, work, work / 'logs', env))
-            log = work / 'logs/keys.log'
-            paths = list(dict.fromkeys([fam['base'], *(p for _, p in fam['updates']), *(p for _, _, p in fam['dlc'])]))   # a merged package is the base game, the update and DLC: checked once
-            try: run([nx[0], keys, '--keys', *paths], log, env=env, ok=(6,))
-            except BuildError: return
-            m = re.search(r'^\[RED\] (.*prod\.keys has no .*|.*no title key for rights ID .*)$', log.read_text(errors='replace'), re.M)
-            if m: raise BuildError(m.group(1))
-        read.contents, read.check_keys = contents, check_keys
-        yield read
+        class Reader:
+            @staticmethod
+            def contents(paths):
+                """Every package's content metas in one run (`nx_extract <keys> --contents <package>...`): {path: [(type, title ID, version)]}, or {path: why} for a package that cannot
+                be read or holds none. A package's title ID and version are what its content metas say, never its file name. Keys that cannot open the meta NCAs stop here, with
+                nx_extract's line; any other failure of the run stops with its output"""
+                paths = list(paths)
+                if not paths: return {}
+                if not nx:
+                    if not shutil.which('dotnet', path=env.get('PATH')): raise BuildError('reading the packages\' titles and versions needs dotnet (.NET SDK 10), which the extraction needs too')
+                    nx.append(build_nx_extract(repo, work, work / 'logs', env))
+                log = work / 'logs/contents.log'
+                try: run([nx[0], keys, '--contents', *paths], log, env=env, ok=(5,))
+                except BuildError as e:
+                    text = log.read_text(errors='replace') if log.exists() else ''
+                    m = re.search(KEYS_RED, text, re.M)
+                    if m: raise BuildError(m.group(1)) from e
+                    tail = '\n'.join(text.splitlines()[-20:])
+                    raise BuildError(f'the packages\' content metas could not be read ({e}):\n{tail}') from e
+                out, cur = {}, None
+                for line in log.read_text(errors='replace').splitlines():
+                    if m := re.match(r'package (\d+) ', line): cur = paths[int(m[1])]; out[cur] = []
+                    elif cur is not None and (m := re.match(r'content (\w+) ([0-9a-f]{16}) (\d+)$', line)): out[cur].append((m[1], int(m[2], 16), int(m[3])))
+                    elif cur is not None and line.startswith('[RED] '): out[cur] = line.split(': ', 1)[-1]
+                if len(out) != len(paths): raise BuildError(f'nx_extract --contents listed {len(out)} of {len(paths)} packages')
+                return out
+
+            @staticmethod
+            def check_keys(fam):
+                """Stop when the keys cannot open the game's packages (`nx_extract <keys> --keys <package>...`: every NCA's header, an NSZ's too), before nsz -D, the survey and the
+                extraction, which need the same keys and would stop minutes later. Keys older than the game lack its master key: the message names that key and the firmware it came with.
+                Any other failure of the check is left to those steps, which report it themselves"""
+                if not nx:
+                    if not shutil.which('dotnet', path=env.get('PATH')): return
+                    nx.append(build_nx_extract(repo, work, work / 'logs', env))
+                log = work / 'logs/keys.log'
+                paths = list(dict.fromkeys([fam['base'], *(p for _, p in fam['updates']), *(p for _, _, p in fam['dlc'])]))   # a merged package is the base game, the update and DLC: checked once
+                try: run([nx[0], keys, '--keys', *paths], log, env=env, ok=(6,))
+                except BuildError: return
+                m = re.search(KEYS_RED, log.read_text(errors='replace'), re.M)
+                if m: raise BuildError(m.group(1))
+        yield Reader
 
 
-def version_of(path):
+def name_version(path):   # the [v<N>] tag of a file name: only checked against the version the package's content meta gives (scan_nsps)
     m = re.search(r'\[v(\d+)\]', path.name)
     return int(m.group(1)) if m else None
 
@@ -560,41 +530,43 @@ def extract_flags(app):   # nx_extract's options shared by its extraction calls:
             + (['--allow-damaged'] if ALLOW_DAMAGED else []))
 
 
-def scan_nsps(nsp_dir, from_package=None, contents_of=None, want=None):
-    """Group by game: {application title ID: {'base': path, 'updates': [(version, path)], 'dlc': [(title ID, version, path)]}}. An NSZ / XCZ is listed as it is (its ticket names
-    the title as an NSP's does) and converted afterwards (decompress_nsz). A package with neither is asked for its title ID: from_package(path) (package_title_reader).
-    A merged package (several content metas: base game + update + DLC in one NSP) is asked for its contents, contents_of(path) -> [(type, title ID, version)], and the one file
-    counts as each of them: nx_extract takes the base game's, the update's or a DLC's NCAs from it by content meta type and title ID (--app). want: the game to pack when the
-    folder holds several (--title-id / TITLE_ID: a cartridge dump with two games, Super Mario Galaxy + Super Mario Galaxy 2)"""
-    fams, unknown = {}, []
+def scan_nsps(nsp_dir, contents_of, want=None):
+    """Group by game: {application title ID: {'base': path, 'base_version': N, 'updates': [(version, path)], 'dlc': [(title ID, version, path)]}}. Every package's title IDs and
+    versions are those of its content metas, contents_of(paths) -> {path: [(type, title ID, version)] or why it has none} (package_reader), never its file name: a [v<N>] tag that says otherwise is
+    reported and ignored (GitHub issue #1629). A merged package (several content metas: base game + update + DLC in one NSP, a cartridge dump with its update) counts as each of
+    them: nx_extract takes the base game's, the update's or a DLC's NCAs from it by content meta type and title ID (--app). An NSZ / XCZ is listed as it is (its meta NCAs are not
+    compressed) and converted afterwards (decompress_nsz). want: the game to pack when the folder holds several (--title-id / TITLE_ID: a cartridge dump with two games,
+    Super Mario Galaxy + Super Mario Galaxy 2)"""
+    fams = {}
     def add(p, tid, version):
         low = tid & 0xFFF   # base …000, update …800, DLC = base + 0x1000 + index
         app = tid if low == 0 else tid & ~0xFFF if low == 0x800 else (tid & ~0xFFF) - 0x1000
-        f = fams.setdefault(app, {'base': None, 'updates': [], 'dlc': []})
-        if low == 0: f['base'] = p
+        f = fams.setdefault(app, {'base': None, 'base_version': 0, 'updates': [], 'dlc': []})
+        if low == 0: f['base'], f['base_version'] = p, version
         elif low == 0x800: f['updates'].append((version, p))
         else: f['dlc'].append((tid, version, p))
-    packages = files_with_suffix(nsp_dir, *PACKAGE_SUFFIXES)   # a base game may be a cartridge dump (.xci: Monster Hunter Rise); nx_extract reads its secure partition
-    for p in packages:
+    packages, listing = [], files_with_suffix(nsp_dir, *PACKAGE_SUFFIXES)   # a base game may be a cartridge dump (.xci: Monster Hunter Rise); nx_extract reads its secure partition
+    for p in listing:
         if p.stat().st_size == 0:   # an empty file left by an incomplete download (the Zelda BotW folder holds a 0-byte DLC NSP next to the complete (1).nsp)
             say(f'skipping an empty file: {p.name}'); continue
-        if not is_package(p):   # title_of falls back to the name's [title ID]: without this, any file with a game's extension and tag counted as one of its packages
+        if not is_package(p):   # a failed download saved under the game's name, a file cut off before its header: nx_extract would stop on it
             say(f'skipping {p.name}: neither an NSP (PFS0) nor an XCI (HEAD at 0x100)'); continue
-        beside = next((q for q in packages if q.suffix.lower() == COMPRESSED.get(p.suffix.lower()) and q.stem.lower() == p.stem.lower()), None)   # from the listing: `Game.NSP` is beside `Game.nsz` on a case-sensitive volume too
+        beside = next((q for q in listing if q.suffix.lower() == COMPRESSED.get(p.suffix.lower()) and q.stem.lower() == p.stem.lower()), None)   # from the listing: `Game.NSP` is beside `Game.nsz` on a case-sensitive volume too
         if beside: say(f'skipping {p.name}: {beside.name} is beside it'); continue
-        if contents_of and is_merged(p):
-            cs = [(t, i, v) for t, i, v in contents_of(p) or () if t in ('Application', 'Patch', 'AddOnContent')]
-            if cs:
-                say(f'{p.name} holds several titles: ' + ', '.join(f'{"base game" if t == "Application" else "update" if t == "Patch" else "DLC"} {i:016X} v{v}' for t, i, v in cs))
-                for t, i, v in cs: add(p, i, v if t != 'Application' else None)
-                continue
-            say(f'[RED] {p.name} holds several content metas, which could not be read (logs/contents.log of the title probe): it counts as the one title its ticket or name gives')
-        tid = title_of(p, from_package)
-        if tid is None: unknown.append(p); continue
-        add(p, tid, version_of(p))
-    if len(fams) == 1 and len(unknown) == 1 and next(iter(fams.values()))['base'] is None:   # a base game converted from a cartridge may have neither tags nor a ticket; build IDs are checked afterwards
-        next(iter(fams.values()))['base'] = unknown[0]
-    if not fams: raise BuildError(f'no NSP with a readable title ID in {nsp_dir}')
+        packages.append(p)
+    metas = contents_of(packages)
+    kinds = {'Application': 'base game', 'Patch': 'update', 'AddOnContent': 'DLC'}
+    for p in packages:
+        m = metas.get(p, [])
+        cs = [] if isinstance(m, str) else [(t, i, v) for t, i, v in m if t in kinds]
+        if not cs:   # nx_extract could not read it (a damaged file), or it holds something else (a delta update): it cannot be packed either
+            why = f'its content meta could not be read: {m}' if isinstance(m, str) else 'no base game, update or DLC content meta' + (f' ({", ".join(t for t, _, _ in m)})' if m else '')
+            say(f'[RED] skipping {p.name}: {why}'); continue
+        if len(cs) > 1: say(f'{p.name} holds several titles: ' + ', '.join(f'{kinds[t]} {i:016X} v{v}' for t, i, v in cs))
+        elif (tag := name_version(p)) is not None and tag != cs[0][2]:
+            say(f'{p.name}: its name says v{tag}, its content meta v{cs[0][2]}, which is the version it is taken for')
+        for t, i, v in cs: add(p, i, v)
+    if not fams: raise BuildError(f'no game package with a readable content meta in {nsp_dir}')
     games = ', '.join(f'{t:016X}' for t in fams)
     if want is not None and want not in fams: raise BuildError(f'no game {want:016X} (--title-id / TITLE_ID) in {nsp_dir}, which holds {games}')
     if want is None and len(fams) > 1: raise BuildError(f'more than one game in the folder: {games}; keep one game per folder, or name the one to pack with --title-id / TITLE_ID (a cartridge dump that holds two games)')
@@ -672,29 +644,26 @@ def decompress_nsz(nsp_dir, app, fam, keys, env, work=None):
         conv[p] = dst
     PROG.end(f'{made} converted, {len(todo) - made} reused ({out})')
     c = lambda p: conv.get(p, p)
-    return {'base': c(fam['base']), 'updates': [(v, c(p)) for v, p in fam['updates']], 'dlc': [(t, v, c(p)) for t, v, p in fam['dlc']]}
+    return {'base': c(fam['base']), 'base_version': fam['base_version'], 'updates': [(v, c(p)) for v, p in fam['updates']], 'dlc': [(t, v, c(p)) for t, v, p in fam['dlc']]}
 
 
 def vnum(ver):   # 'v655360' → 655360
     return int(ver[1:])
 
 
-def nsp_versions(fam, builds):
-    """The versions the folder holds: {version: its update NSP, or None for v0 (the base game alone; a NUP may have no base game, then no v0)}. An update is known by the [v<N>] tag in its file name; a single update without one
-    is taken for the newest update the profile registers (its build IDs are checked once extracted), and is left out when the profile registers none or other updates are there"""
-    out = {'v0': None} if fam['base'] is not None else {}
-    for v, p in fam['updates']:
-        if v is not None: out[f'v{v}'] = p
-    loose = [p for v, p in fam['updates'] if v is None]
-    reg = sorted((b for b in builds if b != 'v0'), key=vnum)
-    if loose and len(fam['updates']) == 1 and reg: out[reg[-1]] = loose[0]
-    elif loose: say(f'[RED] leaving out update NSPs without a version tag ([v<N>]) in their name: {", ".join(p.name for p in loose)}')
+def nsp_versions(fam):
+    """The versions the folder holds: {version: its update package, or None for the base game alone}, each by the version its content meta gives (scan_nsps). The base game is
+    v<its own version>: v0 for most, v65536 for a base game the eShop serves at 1.1.0 (Castlevania: Belmont's Curse), which has the 1.1.0 builds. A NUP or a dump folder gives its
+    updates' versions itself and its base game as v0; a NUP may have no base game"""
+    out = {f'v{fam.get("base_version", 0)}': None} if fam['base'] is not None else {}
+    for v, p in fam['updates']: out[f'v{v}'] = p
     return out
 
 
 def pick_nsps(fam, have, versions):
-    """For each version to extract, (base game, update or None): v0 = the base game alone, v<N> = the base game + the update with version number N. A NUP may have no base game: (None, update)"""
-    if fam['base'] is not None: say(f'base: {fam["base"].name}')
+    """For each version to extract, (base game, update or None): the base game's own version (v0 for most) = the base game alone, v<N> = the base game + the update with version
+    number N (nsp_versions). A NUP may have no base game: (None, update)"""
+    if fam['base'] is not None: say(f'base: {fam["base"].name}' + (f' (v{fam["base_version"]})' if fam.get('base_version') else ''))
     out = {}
     for ver in versions:
         if ver not in have: raise BuildError(f'no NSP for update {ver} (the game profile needs these versions: {", ".join(versions)})')
@@ -704,7 +673,7 @@ def pick_nsps(fam, have, versions):
 
 
 def extract_bytes(picks, clones):
-    """What the extraction writes, estimated from the NSPs' sizes. Later versions clone the base game's RomFS when the base is extracted alone (v0) and the volume supports clones:
+    """What the extraction writes, estimated from the NSPs' sizes. Later versions clone the base game's RomFS when the base is extracted alone and the volume supports clones:
     then each NSP counts once (by path: two NSPs can have the same size). Otherwise every version is a full copy of the base game with its update"""
     if clones and any(u is None for _, u in picks.values()): return sum(p.stat().st_size for p in {p for b, u in picks.values() for p in (b, u) if p})
     return sum(b.stat().st_size + (u.stat().st_size if u and u != b else 0) for b, u in picks.values())   # a merged package is both: counted once
@@ -926,7 +895,7 @@ def survey(nsp_dir, app, fam, keys, repo, py, env):
     for n in notes: say(n)
     say(f'survey report: {work / "survey.md"}')
     upv = ups[-1][0] if ups else None
-    return {'F': F, 'name': title, 'display': dv or '?', 'version': 'v0' if upd is None else f'v{upv or 1}'}
+    return {'F': F, 'name': title, 'display': dv or '?', 'version': f'v{fam.get("base_version", 0)}' if upd is None else f'v{upv}'}   # the names nsp_versions gives
 
 
 # ---- Provisional profile (a game with no profile in dm/games) ----
@@ -1381,7 +1350,7 @@ def extract_aoc(nx, keys, repo, work, app, fam, logs):
         idx = tid - app - 0x1000
         PROG.set(step='extracting', done=i, total=len(best), unit='DLC')
         say(f'DLC index {idx}: {p.name}')
-        run([nx, keys, '--aoc', p, tmp / f'{idx}.img', '--romfs-image'] + ([f'{tid:016x}'] if is_merged(p) else []), logs / f'aoc_{idx}.log')   # a merged package: name the DLC
+        run([nx, keys, '--aoc', p, tmp / f'{idx}.img', '--romfs-image', f'{tid:016x}'], logs / f'aoc_{idx}.log')   # the DLC by its content meta's title ID: a merged package holds several
     swap_in(tmp, dst)
     kf.write_text(f'{fingerprint(key, ("stat", dst))}\n{len(best)} DLC\n')
     PROG.end(f'{len(best)} DLC')
@@ -2860,6 +2829,13 @@ def parse_args(argv):
     return ap.parse_args(argv)
 
 
+def say_game(app, name, version, bundle_id, out, icon):
+    """Which game the app is, once its name, version and bundle ID are settled (before the shader stages): the event game for a front end (json mode; the base game's title ID as DMTitleID has it,
+    out = the IPA or Mac app, None for an Xcode project; icon = the extracted icon.jpg the app is given, None without one), then the message for people"""
+    PROG.event('game', title_id=f'{app:016X}', name=name, version=version, bundle_id=bundle_id, out=str(out) if out else None, icon=str(icon) if icon else None)
+    say(f'app name: {name}; version: {version}; bundle ID: {bundle_id}' + (f'; app: {out}' if out and out.suffix == '.app' else ''))
+
+
 def say_push_romfs(image, bundle_id):
     """The command that puts a --romfs separate build's game files on the phone. The image is the extraction's RomFS.img, which stays where it is while the game files are unchanged (the extraction is reused),
     so the command is needed once per game and version, and again only when the image changed: the app compares its identity (size and a hash of the index) with the one it was built for and says so when it differs"""
@@ -2970,7 +2946,7 @@ def main(args=None):
     lang_in = args.language or LANGUAGE   # checked against the game's languages once its control data is extracted
     want_lang = language_code(lang_in) if lang_in else 'en-US'
     if not want_lang: raise BuildError(f'unknown game language {lang_in!r}; give one of {language_list([c for c, _ in nacp.LANGUAGES])}, by code or by name')
-    env = dict(os.environ, PATH=os.pathsep.join(TOOL_PATHS + [os.environ.get('PATH', '/usr/bin:/bin:/usr/sbin:/sbin')]))
+    env = tool_env()
     env.setdefault('USER', getpass.getuser())   # xcodegen fails without USER (Couldn't find current username)
     configure_dotnet(env)
     env.setdefault('J', str(os.cpu_count() or 8))   # shader_split.py's and dmsh_build.py's workers (their default is 8)
@@ -2987,9 +2963,9 @@ def main(args=None):
         app, fam = scan_dump(nsp_dir, int(want, 16) if want else None)
         say(f'a dump folder: {app:016X}, {len(fam["updates"])} update(s), {len(fam["dlc"])} DLC')
     else:
-        with package_title_reader(repo, keys, env) as from_package:
-            app, fam = scan_nsps(nsp_dir, from_package, from_package.contents, int(want, 16) if want else None)
-            from_package.check_keys(fam)
+        with package_reader(repo, keys, env) as packages:
+            app, fam = scan_nsps(nsp_dir, packages.contents, int(want, 16) if want else None)
+            packages.check_keys(fam)
         if PROGRAM_INDEX:   # one program of a multi-program application, packed as a game of its own: its title ID names the profile and the build folder
             app += PROGRAM_INDEX; say(f'program {PROGRAM_INDEX} of the application: title ID {app:016X}')
         fam = decompress_nsz(nsp_dir, app, fam, keys, env, work_dir(args))
@@ -3021,7 +2997,7 @@ def main(args=None):
     say(f'game profile: {g.id}{" (provisional: " + str(g.dir) + ")" if provisional else ""}')
     if seen_shaders and not g.table('shader_seen.tsv').is_file(): raise BuildError(f'--seen-shaders: game profile {g.id} has no list of the shaders its playtests used ({g.table("shader_seen.tsv")}): build the whole map, without this option')
     builds, need = g.builds(), g.words('shader_versions')
-    have, derived = nsp_versions(fam, builds), False
+    have, derived = nsp_versions(fam), False
     if provisional:   # Do not silently pin a cached survey to an older input version.
         pkg_ver = provisional_version(have, builds, args.package or PACKAGE, g.dir.parent)
     else:   # the newest version in the folder, or the one asked for. The profile is used as it is for a version it registers when every version its shader tables were made from is there;
@@ -3122,7 +3098,9 @@ def main(args=None):
     # the app version is the packed game's display version: the update's control data when an update is packed (nx_extract saves it next to the RomFS), else the base game's
     app_version = nacp.version(game / 'control.nacp') or nacp.version(base / 'control.nacp')
     if mac_pack and not (args.out or OUT_IPA): out_ipa = work.parent / f'{mac_app_name(app_name)}{"-provisional" if shadowed else ""}.app'
-    if not mac or mac_pack: say(f'app name: {app_name}; version: {app_version or "1.0"}; bundle ID: {bundle_id}' + (f'; app: {out_ipa}' if mac_pack else ''))
+    icon = next((d / 'icon.jpg' for d in (game, base) if (d / 'icon.jpg').exists()), None)   # the game icon nx_extract saved from the control data (English, icon.jpg); the packed version's first, then the base game's
+    if (not mac or mac_pack) and getattr(args, 'in_programs', None) is None:   # an app is made, once: a program packed with the application's first (in_programs) is part of its app
+        say_game(app, app_name, app_version or '1.0', bundle_id, None if prepare_xcode else out_ipa, icon)
     # the game language: Horizon gives the game one of the languages its control data lists (the packed version's, which an update may extend), so the one packed must be among them
     control = languages_control(game, base)
     have = nacp.languages(control)
@@ -3172,7 +3150,6 @@ def main(args=None):
         if observed_glslc is not None: check_glslc_coverage(observed_glslc, g)
         seen = seen_keys(g, sh, seen_logs(work, app)) if seen_shaders else None
         ios = build_shaders(py, repo, sh, xlate, env, logs, g, pkey, mac, seen, None if mac else ios_wants_pulling(g, ios_gpus((args.gpu or PSO_GPUS).strip(), g), prepare_xcode, env))
-    icon = next((d / 'icon.jpg' for d in (game, base) if (d / 'icon.jpg').exists()), None)   # the game icon nx_extract saved from the control data (English, icon.jpg); the packed version's first, then the base game's
     motion = MOTION if args.motion is None else args.motion
     jit = uses_jit(game / 'ExeFS')
     if jit and not mac and not mac_pack: capture_jit(py, repo, game, patched, work, env, logs, g)   # the iPhone runs no code made at run time: it serves the plugin's output from an image

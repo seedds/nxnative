@@ -54,6 +54,17 @@ XC = ['--msl', '--msl-version', '20300', '--msl-argument-buffers', '--msl-textur
 # and its saturation gives 0, as Metal's precise:: functions (IEEE fmin / fmax) do on every GPU. The M4 Pro's fast ones happen to agree, an A20 Pro's do not: Super Mario Galaxy 2's
 # GX lighting takes max(0, NaN) from light directions left at zero, and the half of Mario its fill light faces came out white on the iPhone (GitHub issue 72; vk_shaders.py PRECISE)
 def precise(msl): return re.sub(r'\bfast::(min|max|clamp)\(', r'precise::\1(', msl)
+# A float add to storage memory with no result read (RED.F32, InstEmitMemory EmitAtomicAddF32) reaches the MSL as a compare-and-swap loop on the word: MSL 2.3 has no float atomics.
+# Metal has had atomic_float on device memory since MSL 3.0, and the compile takes the default language version. agl's scene analysis adds every thread's luminance into the same
+# few words this way, so its loops retried for each other: Ocarina of Time's 6e28359aa3558f61 (one workgroup of 256 threads, four words) took 0.25 ms a frame and 1bba09ec4bc8ff67
+# 0.40 ms on a MacBook Air M4, under 0.13 ms each as one atomic_fetch_add; the picture's exposure the same. Only the exact loop the translator writes is replaced
+FLOAT_ADD = re.compile(r'(?m)^( *)bool (_\d+);\n\1do\n\1\{\n\1    float (_\d+) = as_type<float>\((?P<addr>[^\n]*?)\);\n\1    float (_\d+) = \3 \+ (?P<val>[^;\n]+);\n'
+                       r'\1    uint (_\d+) = as_type<uint>\(\3\);\n\1    uint (_\d+);\n\1    do\n\1    \{\n\1        \8 = \7;\n'
+                       r'\1    \} while \(!atomic_compare_exchange_weak_explicit\(\(device atomic_uint\*\)&(?P<addr2>[^\n]*?), &\8, as_type<uint>\(\5\), memory_order_relaxed, memory_order_relaxed\) && \8 == \7\);\n'
+                       r'\1    uint (_\d+) = \8;\n\1    \2 = int\(\10\) != as_type<int>\(\3\);\n\1\} while \(\2\);\n')
+def float_add_msl(msl):
+    return FLOAT_ADD.sub(lambda m: m.group(0) if m.group('addr') != m.group('addr2') else
+                         f"{m.group(1)}atomic_fetch_add_explicit((device atomic_float*)&{m.group('addr')}, {m.group('val')}, memory_order_relaxed);\n", msl)
 
 # spirv-cross writes OpUMulExtended / OpSMulExtended as calls of an optnone template, spvMulExtended, as Metal's compiler may fail on an inlined mulhi (spirv_msl.cpp,
 # SPVFuncImplMulExtended). The barrier keeps every product a call that is never folded: Switch 2 shaders divide by constants through the high word of a product (Ocarina of Time
@@ -1664,6 +1675,7 @@ def finish(key, w, j, c1):
     except ValueError as e: return 'image atomic MSL failed', str(e), None
     src = precise(src)   # min / max / clamp with Maxwell's NaN results (see precise)
     src = mul_extended(src)   # scalar extended products without the optnone wrapper (see mul_extended)
+    src = float_add_msl(src)   # a float add's compare-and-swap loop as one native atomic add (see float_add_msl)
     try: src = gather_offsets(src)   # four gathers instead of a wrapper's loop over their offsets (see gather_offsets)
     except ValueError as e: return 'gather offsets rewrite failed', str(e)[:160], None
     try: src = hmma_msl(src)   # Ampere HMMA through simdgroup_matrix (see hmma_msl)

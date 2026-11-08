@@ -106,6 +106,7 @@ int main(void) {
     uint64_t *call = emit(&s0, OP_CALL, 8); *call = (uint64_t)(uintptr_t)s1.p;
     uint64_t *jump = emit(&s0, OP_JUMP, 8); *jump = (uint64_t)(uintptr_t)s2.p;
     p_clear_buf *cb = emit(&s1, OP_CLEAR_BUF, sizeof *cb); *cb = (p_clear_buf){(uint64_t)(uintptr_t)pool_a + 0x8000, 0x100, 0xdeadbeef, 0};
+    p_viewports *vp = emit(&s1, OP_VIEWPORTS, sizeof *vp); vp->n = 1; vp->v[0][2] = 1280; vp->v[0][3] = 720; vp->origin = NVN_WINDOW_ORIGIN_MODE_LOWER_LEFT + 1;
     emit(&s1, OP_END, 0);
     uint64_t *fs = emit(&s2, OP_FENCE_SYNC, 8); *fs = (uint64_t)(uintptr_t)&game_sync;
     p_render_cond *rc = emit(&s2, OP_RENDER_COND, sizeof *rc); rc->mode = 1; rc->addr = (uint64_t)(uintptr_t)pool_b + 0x2000;
@@ -131,6 +132,8 @@ int main(void) {
     CHECK(multi_layout && cap_layout_matches(lay, (size_t)(multi_layout - lay)), "the complete legacy record layout remains readable");
     const char *strides_layout = strstr(lay, "p_copy_strides");
     CHECK(strides_layout && cap_layout_matches(lay, (size_t)(strides_layout - lay)), "the layout before the copy strides' tail remains readable");
+    const char *origin_layout = strstr(lay, "p_viewports 392");
+    CHECK(origin_layout && cap_layout_matches(lay, (size_t)(origin_layout - lay)), "captures before recorded viewport origins remain readable");
     CHECK(cap_layout_matches(lay, strlen(lay)) && !cap_layout_matches(lay, strlen(lay) - 1), "accept the current layout, reject a truncated extension");
     cap_put(&w, CAP_LAYT, 0, lay, strlen(lay), 0);
     for (int r = 0; r < nregs; r++) { uint8_t b[sizeof(cap_regn) + 65536]; cap_regn h = {(uint32_t)r, r == 2, regs[r].lo, regs[r].size};

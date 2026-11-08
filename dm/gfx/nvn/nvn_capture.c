@@ -22,6 +22,7 @@ CAP_SIZE(p_bind_tex1, 24); _Static_assert(BIND_TEX1_NOBASE == 0x100, "nvn_captur
 CAP_SIZE(p_draw, 48); CAP_OFF(p_draw, ind, 24); CAP_OFF(p_draw, mdi_cnt, 32);
 CAP_SIZE(p_draw_idx, 56); CAP_OFF(p_draw_idx, ibuf, 24); CAP_OFF(p_draw_idx, ind, 32); CAP_OFF(p_draw_idx, mdi_cnt, 40);
 CAP_SIZE(p_dispatch, 32); CAP_OFF(p_dispatch, ind, 24);
+CAP_SIZE(p_viewports, 392); CAP_OFF(p_viewports, v, 8); CAP_OFF(p_viewports, origin, 24);
 CAP_SIZE(p_set_pool, 8); CAP_OFF(p_set_pool, pool, 0);
 CAP_SIZE(p_copy_b2t, 64); CAP_OFF(p_copy_b2t, src, 0); CAP_OFF(p_copy_b2t, tex, 8);
 CAP_SIZE(p_copy_t2t, 104); CAP_OFF(p_copy_t2t, src, 0); CAP_OFF(p_copy_t2t, dst, 8);
@@ -39,6 +40,7 @@ _Static_assert(OP_COUNT_ == 59, "nvn_capture.c: a record op was added or removed
 // Copy strides travel after a copy's texture snapshot (p_copy_strides) instead of as OP_COPY_STRIDE records; the replay still takes OP_COPY_STRIDE from older captures
 #define COPY_STRIDES_LAYOUT "p_copy_strides 16 at 192\n"
 _Static_assert(sizeof(p_copy_strides) == 16 && COPY_STRIDES_OFF == 192, "nvn_capture.c: p_copy_strides moved: update COPY_STRIDES_LAYOUT");
+#define VIEWPORT_ORIGIN_LAYOUT "p_viewports 392 v 8 stride 24 origin 24 bias 1\n"
 const char *cap_layout(void) {
     // sizes and pointer offsets as the walk knows them (the asserts above hold them to nvn_obj.h); bump this text with any change to the walk
     return "format 1\nops 54\n"
@@ -47,14 +49,14 @@ const char *cap_layout(void) {
            "p_bind_handles 280 src 16\np_bind_tex1 24 nobase 0x100 short 16\np_bind_state short\np_draw 48 ind 24 mdi_cnt 32\np_draw_idx 56 ibuf 24 ind 32 mdi_cnt 40\np_dispatch 32 ind 24\np_set_pool 8\n"
            "p_copy_b2t 64 src 0 tex 8\np_copy_t2t 104 src 0 dst 8\np_clear_tex 72 tex 0\np_clear_buf 24 addr 0\np_tf_bind 24 addr 8\np_tf_state 16 ctl 8\np_render_cond 16 addr 8\n"
            "signal_event 16 val 0\nreport_counter 16 addr 8\ncopy_b2b 24 src 0 dst 8\nupdate_ub dst 0\nfence_sync 8 sync 0\njump 8\ncall 8\n"
-           MULTI_DRAW_LAYOUT COPY_STRIDES_LAYOUT;
+           MULTI_DRAW_LAYOUT COPY_STRIDES_LAYOUT VIEWPORT_ORIGIN_LAYOUT;
 }
 
 int cap_layout_matches(const char *layout, size_t n) {
-    // Each addition is appended. Captures with an earlier complete layout (before the copy strides' tail, before the multi-draw opcode) still use the same op numbers and payloads.
+    // Each addition is appended. Earlier complete layouts keep their op numbers and payloads; the reserved viewport origin is zero in old captures.
     const char *current = cap_layout();
-    size_t full = strlen(current), no_strides = full - (sizeof COPY_STRIDES_LAYOUT - 1), no_multi = no_strides - (sizeof MULTI_DRAW_LAYOUT - 1);
-    return (n == full || n == no_strides || n == no_multi) && !memcmp(layout, current, n);
+    size_t full = strlen(current), no_origin = full - (sizeof VIEWPORT_ORIGIN_LAYOUT - 1), no_strides = no_origin - (sizeof COPY_STRIDES_LAYOUT - 1), no_multi = no_strides - (sizeof MULTI_DRAW_LAYOUT - 1);
+    return (n == full || n == no_origin || n == no_strides || n == no_multi) && !memcmp(layout, current, n);
 }
 
 const char *cap_record_unsupported(uint32_t op) {

@@ -118,6 +118,32 @@ int main(void) {
         mtl_tex_release(&upper);
         teardown(&f);
 
+        // A streamed height tile reuses several GPU spans. Cutting a span leaves a
+        // 0xa00-byte remnant inside a page that was originally protected in full.
+        setup(&f, 7040, CACHED, NVN_FORMAT_RGBA8, 0);
+        tex_t terrain = texture_at(&f, 7041, 0xd000, 260, NVN_FORMAT_RGBA8, 0);
+        uintptr_t base = (uintptr_t)f.mem;
+        pthread_mutex_lock(&g_gws_mu);
+        gws_set(base + 0xd000, base + 0x80000);
+        gws_set(base + 0x2b000, base + 0x5f600);
+        gws_set(base + 0x60000, base + 0x94600);
+        pthread_mutex_unlock(&g_gws_mu);
+        CHECK("split storage still belongs to the GPU before a CPU rewrite", gws_owned((uintptr_t)terrain.mem, (uintptr_t)terrain.mem + terrain.L.size));
+        // Creating a shared pool buffer must re-protect the inherited page too.
+        id<MTLBuffer> terrain_pool = pool_buf(base, base + POOL);
+        CHECK("split terrain pool buffer is created", terrain_pool != nil);
+        tex_t edge = texture_at(&f, 7042, 0x5f600, SIZE, NVN_FORMAT_RGBA8, 0);
+        dm_guest_write_prepare((uint8_t *)f.mem + 0x5c000, 4);
+        memset((uint8_t *)f.mem + 0x5c000, 1, 4);
+        CHECK("a partial-page texture does not inherit a neighbour's CPU write", gws_owned((uintptr_t)edge.mem, (uintptr_t)edge.mem + edge.L.size));
+        dm_guest_write_prepare(terrain.mem, terrain.L.size); fill(&terrain, terrain.mem, 73);
+        CHECK("a CPU rewrite includes the sub-page remnant of a split GPU span", !gws_owned((uintptr_t)terrain.mem, (uintptr_t)terrain.mem + terrain.L.size));
+        CHECK("a streamed terrain tile over split GPU spans uploads", mtl_tex_cpu_rewritten(&terrain) == MTL_REWRITE_UPLOADED);
+        CHECK("the streamed tile reaches the GPU", first_red(resolve(&terrain)) == 73);
+        mtl_tex_release(&terrain);
+        terrain_pool = nil;
+        teardown(&f);
+
         // nvn_ft_poll's question of a registered texture the CPU wrote after its first use (mtl_tex_cpu_rewritten)
         setup(&f, 7030, CACHED, NVN_FORMAT_RGBA8, 0);
         large = texture_at(&f, 7031, 0x40000, LARGE, NVN_FORMAT_RGBA8, 0);

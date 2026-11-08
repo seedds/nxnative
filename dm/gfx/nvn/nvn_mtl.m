@@ -3792,7 +3792,7 @@ static void cpu_tex_drop_pool(const void *pool) {
 // part of one cuts it, and the parts outside keep their own stamp, so a CPU write there since stays seen (merging them made the whole merged span the GPU's again). Storage the CPU
 // cannot write (a CPU_NO_ACCESS or virtual pool) has no span: tex_cpu_content takes no texture there, and most render targets lie there. GPU writes are stamped when recorded, so a
 // command buffer submitted again does not stamp its writes again (open: storage the CPU wrote since counts as the CPU's until the next recorded GPU write there)
-typedef struct { uintptr_t lo, hi; uint64_t stamp, seen; const void *rg; int taken, gpu; } gws_span;   // seen: dirty generation at the last look; rg: the dirty-page range holding its whole pages
+typedef struct { uintptr_t lo, hi, page_lo, page_hi; uint64_t stamp, seen; const void *rg; int taken, gpu; } gws_span;   // seen: dirty generation at the last look; rg: the dirty-page range holding its whole pages
                                                                                                       // (NULL: none, or untracked); taken: tex_cpu_content took a texture over it since its stamp; gpu: pool_buf's note
 static gws_span *g_gws; static size_t g_ngws, g_cgws; static pthread_mutex_t g_gws_mu = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic int g_gws_new;   // the GPU wrote storage anew, or wrote storage a texture was taken from, since cpu_unc_drop last looked
@@ -3813,20 +3813,28 @@ static size_t gws_find(uintptr_t a) {   // the first span that ends after a; g_g
     }
     return l;
 }
-static void gws_stamp(gws_span *s) {   // the stamp first, then the protection (nvn_dirty_now); g_gws_mu held
-    uintptr_t a, e;
-    whole_pages(s->lo, s->hi, &a, &e);
+static void gws_reprotect(gws_span *s) {   // preserve a split span's original protected pages
     s->stamp = s->seen = nvn_dirty_now();
-    s->rg = e > a ? nvn_dirty_span((const void *)a, e - a) : NULL;
+    s->rg = s->page_hi > s->page_lo ? nvn_dirty_span((const void *)s->page_lo, s->page_hi - s->page_lo) : NULL;
     if (s->rg) {
-        nvn_dirty_protect((const void *)a, e - a);
+        nvn_dirty_protect((const void *)s->page_lo, s->page_hi - s->page_lo);
     }
+}
+static void gws_stamp(gws_span *s) {   // the stamp first, then the protection (nvn_dirty_now); g_gws_mu held
+    whole_pages(s->lo, s->hi, &s->page_lo, &s->page_hi);
+    gws_reprotect(s);
 }
 // The CPU wrote a whole page of [lo, hi) within the span after its stamp; g_gws_mu held. Through the span's kept range: a scan of every registered pool per look would be on the
 // recording thread, at every render target, clear and copy, whenever any page anywhere was written
 static int gws_cpu_since(gws_span *s, uintptr_t lo, uintptr_t hi) {
     uintptr_t a, e;
-    whole_pages(MAX(lo, s->lo), MIN(hi, s->hi), &a, &e);
+    // A split can leave less than one page of an originally protected span.
+    // Keep that page's write history, but only when the queried texture covers
+    // the whole page: writes to a neighbouring texture still do not count.
+    uintptr_t pg = (uintptr_t)getpagesize();
+    whole_pages(lo, hi, &a, &e);
+    a = MAX(a, MAX(s->page_lo, s->lo & ~(pg - 1)));
+    e = MIN(e, MIN(s->page_hi, (s->hi + pg - 1) & ~(pg - 1)));
     if (e <= a || !s->rg) {
         return 0;
     }
@@ -3839,7 +3847,7 @@ static void gws_rewritten(gws_span *s) {   // the GPU writes a span again: a CPU
     }
 
     s->seen = now;
-    if (!gws_cpu_since(s, s->lo, s->hi)) {
+    if (!gws_cpu_since(s, s->page_lo, s->page_hi)) {
         return;
     }
 
@@ -3929,14 +3937,14 @@ static id<MTLBuffer> pool_buf(uintptr_t a, uintptr_t b) {
     pthread_mutex_lock(&g_gws_mu);
     size_t i0 = gws_find(a);
     for (size_t i = i0; i < g_ngws && g_gws[i].lo < b; i++) {
-        g_gws[i].gpu = !gws_cpu_since(&g_gws[i], g_gws[i].lo, g_gws[i].hi);
+        g_gws[i].gpu = !gws_cpu_since(&g_gws[i], g_gws[i].page_lo, g_gws[i].page_hi);
     }
     nvn_dirty_hold((void *)a, b - a);
     id<MTLBuffer> buf = [g_dev newBufferWithBytesNoCopy:(void *)a length:b - a options:MTLResourceStorageModeShared deallocator:nil];
     nvn_dirty_unhold();
     for (size_t i = i0; i < g_ngws && g_gws[i].lo < b; i++) {
         if (g_gws[i].gpu) {
-            gws_stamp(&g_gws[i]);
+            gws_reprotect(&g_gws[i]);
         }
     }
     pthread_mutex_unlock(&g_gws_mu);

@@ -19,7 +19,7 @@ import romfs_image
 
 try: from compression import zstd   # Python 3.14
 except ImportError:
-    from backports import zstd
+    from backports import zstd   # pyright: ignore[reportMissingImports]  # an optional package, only Python before 3.14 needs it
 
 
 def rows(tsv):   # [(var, value, file, key, op, number)]
@@ -123,5 +123,5 @@ def build(tsv, romfs, out):
 
 
 if __name__ == '__main__':
-    if len(sys.argv) != 4: sys.exit(__doc__.split('\n\n')[2])
+    if len(sys.argv) != 4: sys.exit((__doc__ or '').split('\n\n')[2])
     build(*sys.argv[1:])

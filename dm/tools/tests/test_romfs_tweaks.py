@@ -10,6 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
 spec = importlib.util.spec_from_file_location('romfs_tweaks', ROOT / 'dm/tools/romfs_tweaks.py')
+assert spec and spec.loader
 tweaks = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(tweaks)
 zstd = tweaks.zstd

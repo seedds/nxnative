@@ -844,6 +844,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Cause / Fix:** Mario uses `RGB10A2SN` (0x69) → `MTLVertexFormatInt1010102Normalized`. Unmapped formats fall back to a 4-component read and print the line once. The integer-read-as-float formats (`*_UI2F` / `*_I2F`, 0x51–0x68), which Metal has no vertex format for, are converted on the CPU at replay like the other conversions (`vconv_i2f`).
 - **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md) (`RGB10A2SN`); [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) has an `RG8_UI2F` attribute.
 
+### Long vertex ranges in the CPU conversion
+
+- **Symptom:** `[RED] vertex attribute conversion: a range of 915138 vertices exceeds the per-frame staging (format 0x14)` and geometry stretched into streaks from the picture's centre (a stadium's stands and roof), while the pitch, the HUD and the characters draw right.
+- **Cause:** the CPU conversion (`vconv_bind`) converts a draw's range into the frame arena and refused a range above 4 MiB, 262,144 vertices of four 32-bit values. The attribute was then left unconverted: Maxwell's fetch gives the shader the integers as float32 bits, and the bytes were read as they were. 8- and 16-bit integer formats feeding float inputs always take this path (red line 99; [shadow vertex inputs](#shadow-vertex-inputs) cover integer inputs only).
+- **Fix:** the staging takes up to 64 MiB, 4,194,304 vertices (`arena_alloc` makes an arena of its own above 4 MiB, which `ARENA_IDLE` releases).
+- **Note:** the conversion is repeated every frame: the stadium's streams came to 7.65 million vertices a submission (`vertex conversion:` line), 26.8 ms of the submitting thread on an M4 with one core (frame time p50 26.2–27.4 ms, about 37 fps, GPU 12–14 ms). The draw-only conversion (`DM_NVN_VCONV_RANGE=1`) did not shorten it there: the draws read nearly the whole range. A GPU-side conversion for integer formats feeding float inputs would remove it.
+- **Found on:** [EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md): the Estadio da Luz (Benfica's ground) at the 1.8d.6523 update, one example of it: a stream of 915,138 `UI16 x2` vertices. Other grounds, or any mesh with a stream longer than 262,144 vertices, may be affected; none of them was checked.
+
 ### Null vertex buffers bound past stream 15
 
 - **Symptom:** `[RED] BindVertexBuffers first=16 n=1` … `first=31`, thousands of times a run and no visible fault.

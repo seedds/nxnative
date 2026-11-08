@@ -130,7 +130,8 @@ int dm_detclock_enabled(void);
 void dm_guest_clock_advanced(void);
 void guest_clock_freeze(int on);
 void guest_clock_freeze_for(int reason, int on);   // Freeze by reason (1 background, 2 system keyboard); see hle_os.c
-void guest_clock_read_wait(void);     // A guest read of the system counter: waits while the app is in the background (hle_os.c)
+void guest_clock_read_wait(void);     // A guest read of the system counter: counts it in dm_clock_reads and waits while the app is in the background (hle_os.c)
+extern __thread uint64_t dm_clock_reads;   // the calling thread's guest reads of the system counter (hle_os.c; thr_yield tells clock waits by them)
 void dm_guest_frame_tick(void);        // Called on every present (hle_nvn.c): when DM_DETCLOCK is on, advances the guest clock by one fixed step
 uint64_t dm_nvn_frame_count(void);
 uint64_t dm_nvn_sub_cpu_ns(void);     // Cumulative CPU nanoseconds of submit (excluding present)

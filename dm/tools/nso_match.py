@@ -220,7 +220,8 @@ def validate_function(rule):
 
 def validate_stub(rule):
     """A frame-step rule (patch_nso.py MATCH_FRAME_STEP): {name, size, fingerprints, stub[, others]}, stub(ctx) writing its sites at ctx.base + offsets inside the function;
-    others = {label: {size, fingerprints}} names more functions the stub patches, each found the same way (ctx.others[label], None when not exactly one matches)"""
+    others = {label: {size, fingerprints}} names more functions the stub patches or depends on (fields it reads), each found the same way (ctx.others[label], None when not
+    exactly one matches)"""
     if not {'name', 'size', 'fingerprints', 'stub'} <= set(rule) <= {'name', 'size', 'fingerprints', 'stub', 'others'}:
         raise ValueError('a frame-step rule needs name, size, fingerprints and stub (and may name others)')
     validate_function(rule)

@@ -2,7 +2,8 @@
 """Unity's frame-rate settings, found in main through the engine's internal-call table, without a build ID: patch_nso.py writes their places into main's fixups and the host writes
 the profile's fps_target there (hle_fpslock.c).
 IL2CPP registers the engine's internal calls from two parallel tables in main's data: one of name strings ("UnityEngine.Application::set_targetFrameRate"), and right after it one of
-the native functions, in the same order (relative relocations, so each entry is found through the module's relocations). From the functions:
+the native functions, in the same order (relative relocations, so each entry is found through the module's relocations). Unity 2019.4 and 2017.4 register them from code instead,
+one call per name with the function in x1 and the name in x0 (icall_code). From the functions:
 - Application.set_targetFrameRate stores its argument into a global int32 (adrp xN; str w0, [xN, #lo]), possibly behind a branch: UNITY_TARGET_FPS, that global's offset.
 - QualitySettings.get_vSyncCount reads the current quality level's count: the QualitySettings object from a global (adrp; ldr xQ, [xP, #lo]) or from the engine's managers array
   (bl to mov w0, #K; b to adrp; add; ldr x0, [x8, w0, sxtw #3]: GetManagerFromContext(K)), the level index (ldrsw xI, [xQ, #IDX]), the levels (ldr xA, [xQ, #ARR]), the level
@@ -10,8 +11,9 @@ the native functions, in the same order (relative relocations, so each entry is 
 Found on The Rogue Prince of Persia 1.1.0 (Unity 6000.0.64f1): targetFrameRate at main+0x8d33de8, vSyncCount at [[main+0x90957d8]+0x20] + [[main+0x90957d8]+0x64] * 0x100 + 0x88,
 which the game sets to 2 (present interval 2) and leaves targetFrameRate at -1. Checked on the Unity mains on the drives (2026-11-08): Donkey Kong Country Returns HD (6000.0.28f1)
 has the same layout; Super Mario RPG (2021.3.15f1) reaches QualitySettings through GetManagerFromContext(11) and has levels of 0xa8 bytes with the count at +0x68, its
-targetFrameRate setter behind a branch. Unity 2022.3 (SUPER ROBOT WARS Y, Super Monkey Ball Banana Rumble, Monster Train 2) and 2017.4 (Return of the Obra Dinn) keep no such
-table: nothing is found there.
+targetFrameRate setter behind a branch; Fire Emblem Engage (2020.3.18f1) the same as Super Mario RPG. Pokémon Brilliant Diamond (2019.4) registers from code and keeps a frame in
+the manager getter; Return of the Obra Dinn (2017.4) registers from code (get_vSyncCount only), its managers-array lookup adding the index before an offset load. Unity 2022.3 (SUPER
+ROBOT WARS Y, Super Monkey Ball Banana Rumble, Monster Train 2) keeps no table and registers no name from code that this reads: nothing is found there.
 Usage on its own: unity_fps.py <module>... (what it finds in each)"""
 import struct, sys, os
 
@@ -50,6 +52,30 @@ def icall_table(img, rel, ro_off, data_off):
     if not all(0 < rel.get(end + 8 * i, 0) < ro_off for i in range(n)): return {}   # the functions right after the names, one per name
     return {name_at(rel[start + 8 * i]): rel[end + 8 * i] for i in range(n)}
 
+def icall_code(img, rel, text_end, ro_off, data_off, names):
+    """{internal call name: native function offset} for those of names that main registers from code (Unity 2019.4, Pokémon Brilliant Diamond: adrp x1; ldr x1, [x1, #slot], the
+    function through a relocated GOT slot, or adrp x1; add x1, the function itself; then adrp x0; add x0, the name; then bl the register call), each registered exactly once"""
+    import re
+    w = lambda a: struct.unpack_from('<I', img, a)[0]
+    out = {}
+    for name in names:
+        s = img.find(b'\0' + name.encode() + b'\0', ro_off, data_off) + 1
+        if s <= 0: continue
+        lo, page, fns = s & 0xFFF, s & ~0xFFF, set()
+        word = 0x91000000 | lo << 10   # add x0, x0, #lo (Rd = Rn = 0)
+        for m in re.finditer(re.escape(struct.pack('<I', word)), img[:text_end]):
+            j = m.start()
+            if j % 4 or j < 16 or not is_adrp(w(j - 4)) or w(j - 4) & 31 or adrp_page(w(j - 4), j - 4) != page: continue
+            if (w(j + 4) & 0xFC000000) != 0x94000000: continue                                       # bl the register call
+            p, l = w(j - 12), w(j - 8)                                                                 # the function into x1, just before
+            if not is_adrp(p) or p & 31 != 1: continue
+            if (l & 0xFFC003FF) == 0xF9400021: f = rel.get(adrp_page(p, j - 12) + ((l >> 10) & 0xFFF) * 8)   # ldr x1, [x1, #slot]
+            elif (l & 0xFFC003FF) == 0x91000021: f = adrp_page(p, j - 12) + ((l >> 10) & 0xFFF)            # add x1, x1, #lo
+            else: continue
+            if f is not None and 0 <= f < text_end: fns.add(f)
+        if len(fns) == 1: out[name] = fns.pop()
+    return out
+
 def follow(img, f, text_end, hops=2):
     """f, or where the unconditional branches it starts with lead (up to hops of them: an internal call may be a thunk), or None outside the text"""
     for _ in range(hops):
@@ -74,18 +100,25 @@ def target_fps(img, f, text_end):
     return None
 
 def context_global(img, f, text_end):
-    """The managers-array slot a manager getter reads (mov w0, #K; b H, with H: adrp x8; add x8, x8, #lo; ldr x0, [x8, w0, sxtw #3]), or None"""
+    """The managers-array slot a manager getter reads (mov w0, #K; b H, with H: adrp x8; add x8, x8, #lo; ldr x0, [x8, w0, sxtw #3]), or None. Unity 2019.4 (Pokémon Brilliant
+    Diamond) keeps a frame: stp x29, x30, [sp, #-16]!; mov x29, sp; mov w0, #K; bl H; ldp x29, x30, [sp], #16; ret"""
     w = lambda a: struct.unpack_from('<I', img, a)[0]
+    framed = w(f) == 0xA9BF7BFD and w(f + 4) == 0x910003FD and w(f + 16) == 0xA8C17BFD and w(f + 20) == RET
+    if framed: f += 8
     u = w(f)
     if (u & 0xFFE0001F) != 0x52800000: return None   # mov w0, #K
     v = w(f + 4)
-    if (v & 0xFC000000) != 0x14000000: return None   # b H
+    if (v & 0xFC000000) != (0x94000000 if framed else 0x14000000): return None   # b H (bl H in the framed form)
     h = branch(v, f + 4)
     if not 0 <= h < text_end - 12: return None
-    a, b, c = w(h), w(h + 4), w(h + 8)
-    if not is_adrp(a) or (b & 0xFFC00000) != 0x91000000 or (b >> 5) & 31 != a & 31 or (c & 0xFFE0FC00) != 0xF860D800 or (c >> 5) & 31 != b & 31 or (c >> 16) & 31 != 0:
-        return None
-    return adrp_page(a, h) + ((b >> 10) & 0xFFF) + 8 * ((u >> 5) & 0xFFFF)
+    a, b, c, d = w(h), w(h + 4), w(h + 8), w(h + 12)
+    if not is_adrp(a) or (b & 0xFFC00000) != 0x91000000 or (b >> 5) & 31 != a & 31: return None
+    base, r = adrp_page(a, h) + ((b >> 10) & 0xFFF), b & 31
+    if (c & 0xFFE0FC00) == 0xF860D800 and (c >> 5) & 31 == r and (c >> 16) & 31 == 0: return base + 8 * ((u >> 5) & 0xFFFF)   # ldr x0, [xR, w0, sxtw #3]
+    # Unity 2017.4 (Return of the Obra Dinn): add xR, xR, w0, sxtw #3; ldr x0, [xR, #off]
+    if (c & 0xFFE0FC00) == 0x8B20CC00 and (c >> 16) & 31 == 0 and c & 31 == (c >> 5) & 31 == r and (d & 0xFFC003FF) == 0xF9400000 | r << 5:
+        return base + ((d >> 10) & 0xFFF) * 8 + 8 * ((u >> 5) & 0xFFFF)
+    return None
 
 def vsync_count(img, f, text_end):
     """(QualitySettings global, level index offset, levels offset, level size, count offset) from the vSyncCount getter, read straight-line, or None"""
@@ -129,7 +162,8 @@ def vsync_count(img, f, text_end):
 def find(img, text_end, ro_off, data_off):
     """({'target': global offset, 'qs': (global, idx, arr, size, vsync)} with what was found, reason); ({}, why) when main has no table. The reason has '[RED] ' when the table is
     there but a function's code was not read"""
-    calls = icall_table(img, relocated(img), ro_off, data_off)
+    rel = relocated(img)
+    calls = icall_table(img, rel, ro_off, data_off) or icall_code(img, rel, text_end, ro_off, data_off, (TFR, VSYNC))
     if not calls: return {}, 'no Unity internal-call table'
     out, why = {}, []
     if TFR in calls:

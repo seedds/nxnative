@@ -106,8 +106,7 @@ class Registry(unittest.TestCase):
                     sites, _, in_others, _ = docs_patches.frame_step_sites(rule['stub'], base=0x100000, others=rule.get('others', {}))
                     self.assertTrue(sites, f'{p}: {rule["name"]} writes no site')
                     for off, why in sites: self.assertTrue(0x100000 <= off < 0x100000 + rule['size'], f'{p}: {rule["name"]} site {off:#x} outside its function')
-                    for label, got in in_others.items():
-                        self.assertTrue(got, f'{p}: {rule["name"]} names {label} but writes no site in it')
+                    for label, got in in_others.items():   # a function named only as a precondition (its fields read) has no site
                         for off, why in got: self.assertTrue(0 <= off < rule['others'][label]['size'], f'{p}: {label} site {off:#x} outside its function')
                     if rule.get('others'):   # none found: the stub leaves those parts out
                         rest = []

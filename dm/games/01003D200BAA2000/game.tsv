@@ -1,0 +1,41 @@
+# Game profile of Pokémon Mystery Dungeon: Rescue Team DX (Switch, update 1.0.2 = v131072). Plays on the iPad
+# Format: see dm/games/README.md
+# Unity 2018.3.12f1 (IL2CPP) with FMOD, SDK 7.4.0; subsdk0 is the movie module. Made from the NSP script's provisional profile, which needed no change: the keys are the guesses of dm/games/profile_guess.py.
+# The game's assets are 2,670 Unity bundles (.ab) in Data/StreamingAssets, 1.92 of the RomFS's 2.05 GB.
+
+# ---- Identity ----
+title_id	01003D200BAA2000
+program_id	01003D200BAA2000
+
+# ---- App ----
+# Game name: only a label for profile listings and the Mac window title; the iOS app name is the game name in the base NSP, and the bundle ID comes from the base game title ID (build_ipa.sh / NSP script)
+name	Pokémon Mystery Dungeon: Rescue Team DX
+ipa	PokemonMysteryDungeonRescueTeamDX.ipa
+app_category	public.app-category.role-playing-games
+
+# ---- Versions ----
+build	v131072	1.0.2	main=3ab632dee82d59448599b2291f30994a	subsdk0=baee264d3658fc6b6b581e5cbb662e3a	sdk=e30d2170165e907aba457c79fd83383d
+package	v131072
+shader_versions	v131072
+
+# ---- Files ----
+# load order as on Horizon: main, subsdk*, sdk (subsdk0 = NintendoSDK_movie)
+modules	main subsdk0 sdk
+romfs_marker	Data/StreamingAssets/ab/se_ev.ab
+zip_store	.ab:.assets:.dat:.ress:.metallib
+
+# ---- Memory ----
+# The NPDM declares 16 MB of system resource, so IsVirtualAddressMemoryEnabled is true and nninitStartup hands the pool to StandardAllocator as one address region in the alias region.
+# The heap check on the Mac found no heap set, and in its first 15 s in nnMain the game's regions reached alias +3.21 GB of 4.38 GB, as Raging Loop's (Unity 2018.3): the hardware pool stays.
+# Engage's 5 GB block: 256 MB in front + 4.375 GB alias region + 256 MB stack region + 128 MB heap region
+sys_resource	0x1000000
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+
+# ---- Shader split (shader_split.py; Unity Shader objects in the bundles, read by unityfs.py) ----
+# The game calls nvnDeviceSetDepthMode with near = 0 (heap check boot, and the iPad log: "depth mode near=0"); offline pipeline bases use main0_z.
+depth_mode	zero
+shader_groups	/Data/=data
+shader_note	Pokémon Mystery Dungeon: Rescue Team DX shaders

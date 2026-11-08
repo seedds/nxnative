@@ -370,7 +370,7 @@ Games read this count as a position in their own command memory and size their h
   - a kernel that never ends.
 - **Fix:**
   - `DM_NVN_GPU_WATCHDOG` (seconds, default 4) ends the process when a command buffer has not completed, before more work queues behind it. A ring of (fence, kind, shader key) per draw and dispatch (`wk_note`) lets the watchdog and a failed command buffer name that submission's shaders (`wk_dump`).
-  - GPU-written dispatch counts are clamped (65535 per dimension, 2^22 threadgroups in all; `DM_NVN_DISPATCH_CLAMP=0` turns it off).
+  - A GPU-written dispatch count of more than 2^22 threadgroups in all dispatches nothing; any other passes unchanged (`DM_NVN_DISPATCH_CLAMP=0` turns it off).
   - A SyncWait of a second or more prints `[RED] SyncWait timed out on fence N: committed M, completed K` (fence ≤ committed: the GPU did not finish).
 - **Found on:** Orbitals (`040004F027560000`) and PRAGMATA (not in the games table).
 

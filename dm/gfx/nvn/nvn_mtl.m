@@ -13830,10 +13830,10 @@ static id<MTL4ComputeCommandEncoder> dispatch_enc(void) {
     args_dirty_all();
     return e;
 }
-// Indirect dispatch clamp (DM_NVN_DISPATCH_CLAMP, default on; =0 off): every dimension of a GPU-written {x, y, z} at most DPC_MAXDIM, and a record of more than
-// DPC_MAXTOTAL threadgroups in all dispatches nothing. Real frames stay far below (PRAGMATA's largest direct dispatch: 96 x 54); a group count the GPU wrote from bad
-// data would otherwise run for ever, and committed work is not reclaimed when the process exits
-#define DPC_MAXDIM 65535u
+// Indirect dispatch clamp (DM_NVN_DISPATCH_CLAMP, default on; =0 off): a GPU-written {x, y, z} of more than DPC_MAXTOTAL threadgroups in all dispatches nothing; any
+// other record passes unchanged. Real frames stay far below (PRAGMATA's largest direct dispatch: 96 x 54); a group count the GPU wrote from bad data would otherwise run
+// for ever, and committed work is not reclaimed when the process exits. No dimension is cut on its own: a 1D dispatch of more than 65535 groups is a real one, and cutting
+// it (as a first version did) left part of its work undone
 #define DPC_MAXTOTAL (1u << 22)
 static int dpc_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_DISPATCH_CLAMP"); v = !(e && !strcmp(e, "0")); } return v; }
 static int dpc_clamp_enc(id ce, uint64_t rec, __strong id<MTLBuffer> *ob, size_t *oo, uint64_t *og) {
@@ -13843,11 +13843,11 @@ static int dpc_clamp_enc(id ce, uint64_t rec, __strong id<MTLBuffer> *ob, size_t
         ps = f ? [g_dev newComputePipelineStateWithFunction:f error:&e] : nil;
         MTL4ArgumentTableDescriptor *ad = [MTL4ArgumentTableDescriptor new]; ad.maxBufferBindCount = 1; at = ps ? rec_table([g_dev newArgumentTableWithDescriptor:ad error:&e]) : nil;
         if (!at) { failed = 1; MLOG("[RED] indirect dispatch clamp: cannot create its pipeline: %s (indirect dispatches run unclamped)", e.localizedDescription.UTF8String); return 0; }
-        MLOG("indirect dispatch clamp on: GPU-written group counts are capped at %u per dimension and %u threadgroups in all (DM_NVN_DISPATCH_CLAMP=0 turns it off)", DPC_MAXDIM, DPC_MAXTOTAL); }
-    typedef struct { uint64_t rec, out; uint32_t maxdim, maxtotal; } djob;
+        MLOG("indirect dispatch clamp on: a GPU-written group count of more than %u threadgroups in all dispatches nothing (DM_NVN_DISPATCH_CLAMP=0 turns it off)", DPC_MAXTOTAL); }
+    typedef struct { uint64_t rec, out; uint32_t maxtotal; } djob;
     size_t off = arena_alloc(16 + sizeof(djob), ob); uint8_t *p = (uint8_t *)(*ob).contents + off;
     *oo = off; *og = (*ob).gpuAddress + off;
-    *(djob *)(p + 16) = (djob){rec, *og, DPC_MAXDIM, DPC_MAXTOTAL};
+    *(djob *)(p + 16) = (djob){rec, *og, DPC_MAXTOTAL};
     id<MTL4ComputeCommandEncoder> e = (id<MTL4ComputeCommandEncoder>)ce;
     [at setAddress:*og + 16 atIndex:0]; [e setArgumentTable:at]; [e setComputePipelineState:ps];
     [e dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];

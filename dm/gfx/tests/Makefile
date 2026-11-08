@@ -448,6 +448,9 @@ check_t_attachment_capacity: t_attachment_capacity
 	@for compiler in 0 1; do for td in 0 1; do for enc in 0 1; do \
 	    DM_PSO_MTL4=$$compiler DM_NVN_TBDR=$$td DM_NVN_ENC_THREAD=$$enc MTL_DEBUG_LAYER=1 ./t_attachment_capacity || exit $$?; \
 	done; done; done
+t_dispatch_clamp: t_dispatch_clamp.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_dispatch_clamp.m $(MTL_T_SRC) $(FW)
+check_t_dispatch_clamp: RUN_ENV = MTL_DEBUG_LAYER=1
 t_image_attachment_store: t_image_attachment_store.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_image_attachment_store.m $(MTL_T_SRC) $(FW)
 check_t_image_attachment_store: RUN_ENV = MTL_DEBUG_LAYER=1

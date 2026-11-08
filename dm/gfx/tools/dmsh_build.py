@@ -362,6 +362,60 @@ def border_emu(msl):
         twin = f'spvDescriptorSet0.{m.group(2)}{abi.BORDER_TWIN}'
         msl = msl[:m.start()] + f'dm_bs({msl[m.start():i]}, spvDescriptorSet0.{abi.BORDER_MEMBER}, {bit[m.group(2)]}u, spvDescriptorSet0.{m.group(1)}, {twin}, {args})' + msl[i:]
     return msl.replace('using namespace metal;\n', 'using namespace metal;\n' + BORDER_HELPERS, 1)
+# gl_FragCoord.z against a depth the shader read. NVIDIA stores a fragment's depth as the z its pixel shader reads, so a shader can test a fragment against a depth image of its own surface and
+# find them equal. Apple's GPU stores a value below the [[position]].z its fragment shader reads at some pixels: by up to one ulp of z plus a fraction of the depth's step across a pixel
+# (dm/gfx/tests/t_zsnap.m: 0.2% of a perspective triangle's pixels, 2% of flat ones, none above, the largest gap one ulp plus 2^-23 of fwidth(z)); writing [[position]].z as the depth would
+# keep them equal, but takes the depth test after the shader, and the depth a prepass stores would then fail an EQUAL pass on the same geometry (Metroid Dread's G-buffer).
+# Ocarina of Time's mist discards a fragment whose gl_FragCoord.z is above the depth its depth-only pass stored, and lost its own surface at scattered pixels: dark dots flickering in the mist.
+# So where gl_FragCoord.z and a value read from a texture meet in one comparison of main0, through any arithmetic on either side (the mist's z > d; z * k > d * k), the z read takes that value
+# when it lies in the window the stored depth of the fragment's own surface can take, [z - ulp(z) - 2^-20 fwidth(z), z): the comparison then sees the equality NVIDIA's does, whatever its
+# operator. A value outside the window, a read whose texture value comes after it or in a block it does not see, and z read in another function stay as they were
+ZSNAP = ('static inline __attribute__((always_inline)) float dm_zsnap(float z, float d, float zw)   // see frag_z_snap\n'
+         '{\n    float lo = as_type<float>(as_type<int>(z) - 1) - zw * 0x1p-20f;\n    return (z > 0.0f && d < z && d >= lo) ? d : z;\n}\n')
+ZSNAP_WIDTH = 'dm_zw'
+def frag_z_snap(msl):
+    """→ (msl with each paired gl_FragCoord.z read in main0 as dm_zsnap(gl_FragCoord.z, <texture value>, dm_zw) and dm_zw = fwidth(gl_FragCoord.z) first in main0's body, the number of reads).
+    main0's body is dm_body_main0's when it has one (dmsh_side.shared_body: a library's sources), the build's rewrite comes before that"""
+    if 'gl_FragCoord.z' not in msl: return msl, 0
+    shared = dmsh_side.body(msl)
+    try: e = None if shared else dmsh_side.entry(msl, 'main0')
+    except ValueError: return msl, 0
+    if shared: head, end = shared[1:]; params = re.findall(r'[^,]+', msl[shared[0]:head])
+    elif e: head, end, params = e['head'], e['end'], e['params']
+    else: return msl, 0
+    if not any(re.search(r'\bfloat4 gl_FragCoord( \[\[position\]\])?\)?$', p.strip()) for p in params): return msl, 0
+    first = msl.find('{', head) + 1
+    lines = msl[first:end - 1].split('\n')
+    zr, xr, scope, line_of = {}, {}, {}, {}   # each local's gl_FragCoord.z reads and texture values it is computed from; the blocks it is declared in; its line
+    stack, blocks, pairs = [0], 0, {}
+    for i, ln in enumerate(lines):
+        m = re.match(r'\s*(?:const )?(float|bool|int|uint)\s+(_\d+) = (.+);$', ln)
+        if m:
+            ty, v, ex = m.groups(); refs = re.findall(r'\b_\d+\b', ex)
+            z = set().union(*(zr.get(r, set()) for r in refs)); x = set().union(*(xr.get(r, set()) for r in refs))
+            if ex == 'gl_FragCoord.z': z = {v}
+            elif ty == 'float' and re.search(r'\.(sample|read)\(', ex) and not z: x = {v}   # a scalar read from a texture (a depth image); not sample_compare or gather
+            zr[v], xr[v], scope[v], line_of[v] = z, x, tuple(stack), i
+            c = re.fullmatch(r'(_\d+) (?:<=|>=|<|>|==|!=) (_\d+)', ex) if ty == 'bool' else None
+            if c:
+                a, b = c.groups()
+                for zs, xs in ((a, b), (b, a)):
+                    if zr.get(zs) and xr.get(xs) and not xr.get(zs) and not zr.get(xs):
+                        for zv in zr[zs]: pairs.setdefault(zv, set()).update(xs_ for xs_ in xr[xs])
+        for ch in re.findall(r'[{}]', ln):
+            if ch == '{': blocks += 1; stack.append(blocks)
+            elif len(stack) > 1: stack.pop()
+    n = 0
+    for zv in sorted(pairs, key=lambda v: line_of[v]):
+        xs = [x for x in sorted(pairs[zv], key=lambda v: line_of[v]) if line_of[x] < line_of[zv] and scope[zv][:len(scope[x])] == scope[x]]   # declared before the read, in a block it sees
+        if not xs: continue
+        expr = 'gl_FragCoord.z'
+        for x in xs: expr = f'dm_zsnap({expr}, {x}, {ZSNAP_WIDTH})'
+        i = line_of[zv]; lines[i] = lines[i].replace(f'{zv} = gl_FragCoord.z;', f'{zv} = {expr};'); n += 1
+    if not n: return msl, 0
+    body = f'\n    float {ZSNAP_WIDTH} = fwidth(gl_FragCoord.z);' + '\n'.join(lines)   # in uniform control flow, before anything the body does
+    msl = msl[:first] + body + msl[end - 1:]
+    return msl.replace('using namespace metal;\n', 'using namespace metal;\n\n' + ZSNAP, 1), n
 STORE = shader_cache.Store(os.environ.get('DMSH_CAS', os.path.join(cache_root, 'cas.db')))
 atexit.register(STORE.close)   # folds its log into the one file
 CAS_LOCKS, CAS_LOCKS_GUARD = {}, threading.Lock()
@@ -1589,7 +1643,9 @@ def finish(key, w, j, c1):
     try: src = pool_arrays(src)   # handles traced to no slot read the pools the replay keeps (see pool_arrays)
     except ValueError as e: return 'pool rewrite failed', str(e)[:160], None
     src = dmsh_wide.wide_loads(src)   # storage words the translator split, read whole again (see dmsh_wide.py)
-    src = border_emu(src); open(msl, 'w').write(src)   # border colours Metal lacks (see border_emu)
+    src = border_emu(src)   # border colours Metal lacks (see border_emu)
+    if j['stage'] == 'ps': src = frag_z_snap(src)[0]   # gl_FragCoord.z against a depth of its own surface (see frag_z_snap)
+    open(msl, 'w').write(src)
     first, spill = [], 0
     mesh = j.get('mesh_stage')
     if mesh:   # the kernel as the Metal object or mesh function (dmsh_meshstage.py)

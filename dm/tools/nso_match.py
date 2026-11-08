@@ -219,14 +219,21 @@ def validate_function(rule):
 
 
 def validate_stub(rule):
-    """A frame-step rule (patch_nso.py MATCH_FRAME_STEP): {name, size, fingerprints, stub}, stub(ctx) writing its sites at ctx.base + offsets inside the function"""
-    if set(rule) != {'name', 'size', 'fingerprints', 'stub'}: raise ValueError('a frame-step rule needs name, size, fingerprints and stub')
+    """A frame-step rule (patch_nso.py MATCH_FRAME_STEP): {name, size, fingerprints, stub[, others]}, stub(ctx) writing its sites at ctx.base + offsets inside the function;
+    others = {label: {size, fingerprints}} names more functions the stub patches, each found the same way (ctx.others[label], None when not exactly one matches)"""
+    if not {'name', 'size', 'fingerprints', 'stub'} <= set(rule) <= {'name', 'size', 'fingerprints', 'stub', 'others'}:
+        raise ValueError('a frame-step rule needs name, size, fingerprints and stub (and may name others)')
     validate_function(rule)
     if not callable(rule['stub']): raise ValueError('a frame-step rule\'s stub must be a function of the context')
+    if not isinstance(rule.get('others', {}), dict): raise ValueError('a frame-step rule\'s others are {label: {size, fingerprints}}')
+    for label, fn in rule.get('others', {}).items():
+        if not isinstance(fn, dict) or set(fn) != {'size', 'fingerprints'}: raise ValueError(f'another function of a frame-step rule ({label}) needs size and fingerprints')
+        validate_function(dict(fn, name=label))
 
 
 def locate_stub(image, text_end, rules, report=print):
-    """(rule, function start) of the one frame-step rule that matches, or None with a red line. Rules are one patch's reviewed implementations (one name): exactly one must match"""
+    """(rule, function start, others) of the one frame-step rule that matches, or None with a red line. Rules are one patch's reviewed implementations (one name): exactly one must
+    match. others maps each of the rule's other functions to its start, or to None with a red line when not exactly one matches: the stub leaves that part out, the rest still goes in"""
     if not rules: return None
     for rule in rules: validate_stub(rule)
     names = {rule['name'] for rule in rules}
@@ -244,7 +251,13 @@ def locate_stub(image, text_end, rules, report=print):
         return None
     (i, rule, start), = found
     report(f'frame step {name!r}: matched the function at {start:#x}' + (f' (implementation {i} of {len(rules)})' if len(rules) > 1 else ''))
-    return rule, start
+    others = {}
+    for label, fn in rule.get('others', {}).items():
+        try:
+            others[label] = module.locate(fn['size'], fn['fingerprints']); report(f'frame step {name!r}: {label} at {others[label]:#x}')
+        except MatchError as e:
+            others[label] = None; report(f'[RED] frame step {name!r}: {label} left out: {e}')
+    return rule, start, others
 
 
 def validate(rule):

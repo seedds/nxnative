@@ -169,8 +169,15 @@ class Matching(unittest.TestCase):
         stub = dict(name='step', size=self.rule['size'], fingerprints=self.rule['fingerprints'], stub=lambda ctx: None)
         moved = image({0x800: caller(0x800, 0x1200, 0x2980), 0x1200: [0xd2800020, RET]})
         messages = []
-        self.assertEqual(locate_stub(moved, 0x2000, [stub], messages.append), (stub, 0x800))
+        self.assertEqual(locate_stub(moved, 0x2000, [stub], messages.append), (stub, 0x800, {}))
         self.assertFalse([m for m in messages if m.startswith('[RED]')], messages)
+        # others: more functions the stub patches, found the same way; one that does not match is left out with a red line, the frame step itself still goes in
+        leaf = Image(moved, 0x2000).fingerprint(0x1200)
+        found = dict(stub, others={'leaf': dict(size=8, fingerprints=[leaf]), 'gone': dict(size=12, fingerprints=[leaf])})
+        messages = []
+        self.assertEqual(locate_stub(moved, 0x2000, [found], messages.append), (found, 0x800, {'leaf': 0x1200, 'gone': None}))
+        self.assertEqual([m for m in messages if m.startswith('[RED]')], ["[RED] frame step 'step': gone left out: 0 matching functions (need exactly one)"])
+        with self.assertRaisesRegex(ValueError, 'needs size and fingerprints'): locate_stub(moved, 0x2000, [dict(stub, others={'leaf': dict(size=8)})], messages.append)
         duplicate = image({0x100: caller(0x100, 0x500), 0x800: caller(0x800, 0x500), 0x500: [0xd2800020, RET]})
         for img in (duplicate, image({0x100: [RET]})):
             messages = []

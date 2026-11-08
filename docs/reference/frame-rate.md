@@ -502,6 +502,14 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Open:** the main pass at about 763x429 is a low resolution, and the GPU at about 17 ms is still a little over budget, so the frame rate is not locked.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md).
 
+### Dynamic resolution at its floor while the GPU has time to spare
+
+- **Symptom:** after a loading screen the game's resolution stays at its lowest (Ocarina of Time: 683x384) for minutes while it holds 60 fps with GPU time well under the frame, and climbs back only slowly or not at all.
+- **Cause:** two host errors made the game's frame timer read more GPU time than its frame took. (1) A segment report reads its time from the timestamp heap slot of its boundary. An encoder with no work writes no relaxed timestamp, so the slot kept the ring's value from a frame long ago: Ocarina's frame-start `TIMESTAMP_TOP`, alone in its submission, read 1.7 s early, and its controller saw a frame of 1.7 s. (2) A queue continuation that waited on an event parked until the signalling submission completed on the GPU. About 25 waits a frame each left the GPU idle while the host encoded the next submission, about 2 ms of a 14.5 ms frame, which the frame-start-to-end timestamps count as GPU work.
+- **Fix:** (1) `rep_ticks` (`nvn_mtl.m`) drops a heap time from before its submission began encoding (`g_ts_begin`, kept in the segment clock) and takes the segment's feedback time instead. (2) [A wait on a queued WRITE signal is released at encode](nvn-objects.md#gpu-event-waits-order-work-across-queues). The game then read a 13.8 ms span instead of 14.5 and climbed to full resolution in about 25 s instead of staying at its floor.
+- **Ruled out:** the GPU clock. With macOS's `mactop` sampling during play, the GPU held about 1,562 MHz at 94% active on the M4 Pro with and without moving presentation to its own Metal queue, which removed 6 ms of idle per frame but did not change GPU time.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#dynamic-resolution), M4 Pro. Its controller and the switch that holds it at full size are in the game note.
+
 ### A full table of running GPU writes ends passes for nothing
 
 - **Symptom:** many passes a frame on the same attachments, with the residency set line showing `passes ended to land them for a read` in the thousands and `refused …: earlier submission running` matching it. Ocarina of Time: 10,463 per 300 frames, each ending the pass over a uniform block no GPU write touched.

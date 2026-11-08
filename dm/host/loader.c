@@ -272,6 +272,12 @@ static void read_layout(module_t *m, const char *dir) {
         else if (!strcmp(key, "UE_FIXED_RATE_PTR")) m->ue_fixed_ptr = v;
         else if (!strcmp(key, "UE_FIXED_RATE_FIELD")) m->ue_fixed_field = (uint32_t)v;
         else if (!strcmp(key, "UE_FIXED_RATE_FLAG")) m->ue_fixed_flag = (uint32_t)v;
+        else if (!strcmp(key, "UNITY_TARGET_FPS")) m->unity_target_fps = v;
+        else if (!strcmp(key, "UNITY_QS_PTR")) m->unity_qs_ptr = v;
+        else if (!strcmp(key, "UNITY_QS_IDX")) m->unity_qs_idx = (uint32_t)v;
+        else if (!strcmp(key, "UNITY_QS_ARR")) m->unity_qs_arr = (uint32_t)v;
+        else if (!strcmp(key, "UNITY_QS_SIZE")) m->unity_qs_size = (uint32_t)v;
+        else if (!strcmp(key, "UNITY_QS_VSYNC")) m->unity_qs_vsync = (uint32_t)v;
         else if (!strncmp(key, "UE_CVAR:", 8)) {
             if (m->n_ue_cvar == (int)(sizeof m->ue_cvar / sizeof *m->ue_cvar) || strlen(key + 8) >= sizeof m->ue_cvar[0].name) die("%s: too many Unreal console variables, or too long a name: %s", path, key);
             strcpy(m->ue_cvar[m->n_ue_cvar].name, key + 8); m->ue_cvar[m->n_ue_cvar++].off = v;

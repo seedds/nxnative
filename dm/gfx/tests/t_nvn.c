@@ -64,6 +64,20 @@ static size_t tex_size(int fmt, int w, int h, int flags, size_t *align) {
 
 int main(void) {
     setenv("DM_NVN_COUNT", "1", 1);   // the call-count checks below need the counting trampolines (off by default)
+    {   // A missing control section must not publish uninitialized bytes or poison a serial's key cache.
+        uint8_t control[0x880] = {0}, key[8];
+        const uint8_t expected[8] = {0x56, 0x26, 0xd9, 0xa8, 0xf1, 0xd7, 0x36, 0x4b}; // SHA-256 of 0x880 zero bytes
+        prog_t p = {.nstage=1};
+        for (int cached = 0; cached < 2; cached++) {
+            p.serial = cached ? nvn_new_serial() : 0; p.sd[0].control = NULL;
+            memset(key, 0xa5, sizeof key);
+            EXPECT("missing shader control has no key", 0, prog_key(&p, 0, key));
+            EXPECT("a failed key leaves the output untouched", 0xa5, key[0]);
+            p.sd[0].control = control;
+            EXPECT("supplying control after failure hashes it", 1, prog_key(&p, 0, key));
+            EXPECT("a failed key was not cached as zero", 0, memcmp(key, expected, sizeof key));
+        }
+    }
     // Engine-native limiters have no FPS state page. Their launcher cap must
     // still pace presents and select the display-link rate in display mode.
     { win_t w={.interval=1};nvn_present_config(60,1);dm_fps_state=NULL;

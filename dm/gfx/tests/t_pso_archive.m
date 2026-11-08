@@ -134,7 +134,9 @@ static void compute_pipelines(void) {
     EXPECT("compute: a plain file, not a p file", 1, names.count == 1 && ![names[0] hasPrefix:@"p"]);
     EXPECT("compute: nothing left to write", 0, g_arch_new);
     LookupCountArchive *la = [LookupCountArchive new];
-    la->archive = names.count ? [g_dev newArchiveWithURL:[NSURL fileURLWithPath:[@(kdir) stringByAppendingPathComponent:names[0]]] error:&err] : nil;
+    NSString *path = names.count ? [@(kdir) stringByAppendingPathComponent:names[0]] : nil;
+    if (!path) abort();
+    la->archive = [g_dev newArchiveWithURL:[NSURL fileURLWithPath:path] error:&err];
     g_arch4 = @[(id<MTL4Archive>)la];   // as a new start with that file
     built = g_cps_built; pending = g_arch_new;
     id<MTLComputePipelineState> kp2 = cps_new(kf, &err);
@@ -252,6 +254,7 @@ static void depth_only(void) {
     MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float width:4 height:4 mipmapped:NO];
     td.usage = MTLTextureUsageRenderTarget; td.storageMode = MTLStorageModePrivate;
     id<MTLTexture> t = [g_dev newTextureWithDescriptor:td];
+    if (!t) abort();
     MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor new]; rp.depthAttachment.texture = t;
     rp.depthAttachment.loadAction = MTLLoadActionClear; rp.depthAttachment.clearDepth = 1; rp.depthAttachment.storeAction = MTLStoreActionStore;
     MTLDepthStencilDescriptor *ds = [MTLDepthStencilDescriptor new]; ds.depthWriteEnabled = YES; ds.depthCompareFunction = MTLCompareFunctionAlways;
@@ -386,7 +389,9 @@ static void spec_desc_ownership(void) {
 int main(int argc, char **argv) { @autoreleasepool {
     if (!mkdtemp(archive_cache_root)) abort();
     atexit(archive_cache_cleanup);
-    if (![NSFileManager.defaultManager createDirectoryAtPath:[@(archive_cache_root) stringByAppendingPathComponent:@"com.apple.gpuarchiver"]
+    NSString *cache_path = [@(archive_cache_root) stringByAppendingPathComponent:@"com.apple.gpuarchiver"];
+    if (!cache_path) abort();
+    if (![NSFileManager.defaultManager createDirectoryAtPath:cache_path
                                withIntermediateDirectories:NO attributes:nil error:nil]) abort();
     char dir[] = "/tmp/t_pso_archive.XXXXXX"; if (!mkdtemp(dir)) abort();
     setenv("DM_PSO_ARCHIVE", argc == 3 ? argv[2] : dir, 1);

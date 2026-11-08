@@ -77,6 +77,13 @@
 
 ## IPA archives
 
+### AltServer cannot install a file of 2 GiB or more
+
+- **Symptom:** AltServer stops installing an IPA with "The file “b-<chain>.img” couldn’t be saved in the folder “msl”", although the RomFS stays out of it (`--romfs separate`). Other install tools install the same IPA.
+- **Cause:** in AltServer, not here. Its `writeFile` (`AltServer/Devices/ALTDeviceManager.mm`) reads a file whole and hands it to one `afc_file_write`, which libimobiledevice sends with one `send()` and returns its result as an `int`, so a file of 2^31 bytes or more fails, and AltServer reports the short write as a file it could not save. A shader library is one file, `msl/b-<chain>.img` ([Shader libraries take a file per shader variant](#shader-libraries-take-a-file-per-shader-variant)); a bundled RomFS image or a DLC image that large fails the same way.
+- **Fix:** a workaround, as the limit is the install tool's, and opt-in: `SHADER_FILES = True` or `--shader-files` in the NSP script (`DM_SHADER_FILES=1` for `build_ipa.sh`, `pack_ipa.py --shader-files`) packs the shader library as its separate files, `msl/b-<chain>/`, whatever its size. What the app carries of the image (after the build's exclusions) is written into a folder beside the IPA for the length of the pack, and the host reads a library folder before an image (`nvn_mtl.m`, `msl_data`). The game files still need `--romfs separate` when their image is that large. It is off by default: other install tools take large files, and one file installs faster than tens of thousands. The folder is written and deflated again at every pack, as its files are new each time.
+- **Found on:** [Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md#found-on-this-game) 1.4.3, whose library is 2.10 GiB ([issue #1688](https://github.com/seedds/nxnative/issues/1688), [PR #1697](https://github.com/seedds/nxnative/pull/1697)). The cause is read from AltServer's and libimobiledevice's source; an install through AltServer with `--shader-files` has not been run.
+
 ### A streamed file changes size and the IPA fails its CRC check
 
 - **Symptom:** packing succeeds, but `unzip -t` or Python's `ZipFile.testzip()` reports a bad CRC for a large deflated file.

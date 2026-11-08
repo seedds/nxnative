@@ -235,6 +235,31 @@ static void event_stale_gpu_reset(void) {
     if(!done) _Exit(2);
     P(nvnSyncFinalize)(&reset); P(nvnSyncFinalize)(&consumed);
 }
+// A wait whose event a still-running WRITE signal satisfies is encoded without that writer's completion (the one Metal queue runs it after the writer, nq_event_write), and its GPU work
+// still sees the writer's payload; an ADD signal's result is not known before it lands, so a wait on it parks until then
+static void event_queued_write(int mode) {
+    printf("CASE wait on an in-flight %s signal\n",mode==NVN_EVENT_SIGNAL_MODE_WRITE?"WRITE":"ADD");
+    *source=before; *result=sentinel; P(nvnEventSignal)(&event,NVN_EVENT_SIGNAL_MODE_WRITE,0);
+    id<MTLSharedEvent> gate=[g_dev newSharedEvent];
+    pthread_mutex_lock(&g_sub_mu); pthread_mutex_lock(&g_res_mu); [g_q4 waitForEvent:gate value:1]; pthread_mutex_unlock(&g_res_mu); pthread_mutex_unlock(&g_sub_mu);
+    NVNsync produced,consumed; P(nvnSyncInitialize)(&produced,&device); P(nvnSyncInitialize)(&consumed,&device);
+    begin_cmd(1); uint32_t payload=after;
+    P(nvnCommandBufferUpdateUniformBuffer)(&commands[1],source_addr,4,0,4,&payload);
+    P(nvnCommandBufferSignalEvent)(&commands[1],&event,(NVNeventSignalMode)mode,NVN_EVENT_SIGNAL_LOCATION_BOTTOM,0,1);
+    P(nvnCommandBufferFenceSync)(&commands[1],&produced,NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE,0);
+    job pj,cj; enqueue(&pj,&queues[1],P(nvnCommandBufferEndRecording)(&commands[1])); int pr=returned(&pj,250000000ull);
+    CHECK(pr && receipt_encoded(&produced,1000000000ull),"producer encodes while its GPU work is held by a shared-event gate");
+    enqueue(&cj,&queues[0],consumer(NVN_EVENT_WAIT_MODE_EQUAL,1,&consumed,1)); int cr=returned(&cj,250000000ull);
+    int early=receipt_encoded(&consumed,mode==NVN_EVENT_SIGNAL_MODE_WRITE?1000000000ull:100000000ull);
+    CHECK(early==(mode==NVN_EVENT_SIGNAL_MODE_WRITE),mode==NVN_EVENT_SIGNAL_MODE_WRITE?"the consumer is encoded behind the in-flight WRITE before it completes"
+                                                                                 :"the consumer waits for an in-flight ADD to land");
+    CHECK(!landed(&produced,0) && !landed(&consumed,0) && *result==sentinel,"nothing has run while the gate holds the GPU");
+    gate.signaledValue=1;   // always release the GPU before cleanup, including assertion failures
+    require_returned(&pj,pr); require_returned(&cj,cr);
+    int done=landed(&produced,5000000000ull) && landed(&consumed,5000000000ull);
+    CHECK(done && *result==after,"the consumer's copy reads the producer's payload"); if(!done) { P(nvnEventSignal)(&event,NVN_EVENT_SIGNAL_MODE_WRITE,1); _Exit(2); }
+    P(nvnSyncFinalize)(&produced); P(nvnSyncFinalize)(&consumed);
+}
 static void receipt_tests(void) {
     receipt_unrelated_completion(); receipt_snapshot(0); receipt_snapshot(1); receipt_wait_only(0); receipt_wait_only(1);
 }
@@ -286,6 +311,8 @@ int main(void) { @autoreleasepool {
     case_wait("wrap rejects exactly half-range",1,0x80000000,0,0);
     case_cross_queue();
     event_stale_gpu_reset();
+    event_queued_write(NVN_EVENT_SIGNAL_MODE_WRITE);
+    event_queued_write(NVN_EVENT_SIGNAL_MODE_ADD);
     receipt_tests();
     event_mirror_publication();
     pthread_mutex_lock(&jobs_mu); jobs_stop=1; pthread_cond_signal(&jobs_cv); pthread_mutex_unlock(&jobs_mu); pthread_join(worker,NULL);

@@ -1636,6 +1636,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Check:** `test_dmsh_pool_arrays.py` checks the rewrite and the reflection.
 - **Found on:** [Kirby Air Riders](../../dm/games/040077201BE50000/README.md): most of its lit materials and light probes.
 
+### Reads of a handle table marked through a null address
+
+- **Symptom:** a pass that samples through [a table of a uniform buffer's handles](#a-table-of-handles-longer-than-the-array) takes hundreds of milliseconds on the GPU; nothing is red and the picture is right. In Fire Emblem Fortune's Weave on an M1 Pro, the lighting pass at Alcineus Bridge took 196.7 ms and the scene ran at 4 fps.
+- **Cause:** `dmsh_build.py` `pool_arrays` gave the table's texture reads the same mark as [the pool's](#texture-handles-from-game-memory-index-the-pools) (`dm_pool_mark`, an atomic load, and an OR when the bit is clear, at the bitmap address in the buffer's header). `htab_gpu` never set that address, so every read went to address 0. The mark had no use there anyway: a table's index is its element, not a texture ID, and the replay has made every texture the table names before the draw.
+- **Fix:** a chain change. `pool_arrays` marks only reads of the texture pool (`_cb0_40000000`); a table is read plainly, and a fragment shader with no other mark keeps its depth test where Metal puts it. The header keeps its layout, with the address 0 in a table. PR #1738 (HammerChain), which found the null address, pointed it at a premarked bitmap in the host instead; with that the bridge ran at 56.1 fps and the lighting pass took 2.35 ms (M1 Pro, 1080p output from 960x540). The chain change takes the mark away as well, which leaves every table read a plain load.
+- **Check:** `test_dmsh_pool_arrays.py` (`test_table_of_uniform_handles`).
+- **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md#rendering) at Alcineus Bridge.
+
 ### An array of uniform-buffer handles with its sampler word in c2
 
 - **Symptom:** `reflection conversion failed: B binding fp_t2ds_cb196614_10570000 has no resolved slot number`, then `failed to load`; those draws are skipped, and the scene is dark or black where it is lit by them.

@@ -8,7 +8,9 @@ namespace Ryujinx.Graphics.Shader.Decoders
         public const int UniformsCount = 63;
         public const int UniformPredsCount = 7;
         public const int ShadowsCount = 256;
-        public const int TotalCount = GprsCount + PredsCount + FlagsCount + UniformsCount + UniformPredsCount + ShadowsCount;
+        // nxnative: one shadow register past the deferred writes' range (Translator.DeferAmpereWrites hands out 0 .. ShadowsCount - 1), which no frontend writes: BarrierExits' "the thread has exited" flag
+        public const int BarrierExitedIndex = ShadowsCount;
+        public const int TotalCount = GprsCount + PredsCount + FlagsCount + UniformsCount + UniformPredsCount + ShadowsCount + 1;
 
         public const int RegisterZeroIndex = GprsCount;
         public const int PredicateTrueIndex = PredsCount;

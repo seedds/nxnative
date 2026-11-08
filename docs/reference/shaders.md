@@ -1399,7 +1399,7 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Symptom:** the GPU stays at 100% after a dispatch, and `[RED] SyncWait timed out on fence N` follows. The Mac's WindowServer stops minutes later, because a Metal command buffer that never completes is not reclaimed when the process exits.
 - **Cause:** Ampere lets a thread that has exited leave the workgroup's barriers; Metal requires every thread of a threadgroup at each `threadgroup_barrier`. Separately, a loop whose bound comes from GPU data that went wrong does not end.
 - **Fix:**
-  - `BarrierExits.cs`: a compute thread that returns before a barrier keeps arriving at the later barriers instead.
+  - `BarrierExits.cs`: a compute thread that returns before a barrier keeps arriving at the later barriers instead. It runs on every compute shader, Maxwell's too, so its "exited" flag is a register no frontend writes (`RegisterConsts.BarrierExitedIndex`): as Maxwell's overflow flag, which every `IADD.CC` writes, it turned live threads into exited ones.
   - `dmsh_build.py` `loop_guard`: every loop also ends once its function has run 2^18 iterations in all (the longest bounded loop seen: 255). A loop with a barrier in its body counts on a counter of its own, so the cap ends it on the same iteration for every thread of the threadgroup.
 - **Found on:** Orbitals (`040004F027560000`) and PRAGMATA (not in the games table): GPU hangs that needed a restart.
 - **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_barrier_exits.py` and `python3 dm/gfx/tests/test_dmsh_loop_guard.py`.

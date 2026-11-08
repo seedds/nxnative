@@ -1,8 +1,8 @@
 // A uniform (constant) buffer a shader declares that the replay cannot give it (pure; unit test tests/t_cbmiss.c). nvn_mtl.m encode_args_ binds the all-zero bank in its place in
 // every case, so the shader reads 0; what differs is whether that is the game's own state or a binding the host lost:
-//   CB_UNBOUND  the game left the slot unbound (address 0) on this queue. The Switch reads an unbound constant buffer as 0, so the zero bank is what the hardware does: a plain
-//               log line per shader, no [RED] (PRAGMATA: compute shaders that declare cb1 and read it only on paths the dispatch does not take)
-//   CB_LOST     the game bound an address that is in no memory pool the host knows: the shader reads 0 where the Switch reads data. [RED], with the shader and the address
+//   CB_UNBOUND  the game left the slot unbound (address 0) on this queue: its own state, the host missed no bind (docs/reference/rendering.md, "An unbound uniform slot reads
+//               the zero bank"). A plain log line for the first 8 shaders, no [RED]
+//   CB_LOST     the game bound an address that is in no memory pool the host knows: the shader reads 0 where the game bound data. [RED], with the shader and the address
 //   CB_SLOT     a slot past the 16 the replay keeps (a reflection the host cannot place). [RED]
 #pragma once
 #include <stdint.h>

@@ -43,9 +43,10 @@ namespace Ryujinx.Graphics.Shader.Translation
                 }
             }
 
-            // A register, not a Local(): locals are single-assignment temporaries the SSA pass does not merge across blocks (a Local here was folded to false). The
-            // Ampere frontend never uses Maxwell's condition flags, so flag register 3 is free
-            Operand dead = Register(3, RegisterType.Flag);
+            // A register, not a Local(): locals are single-assignment temporaries the SSA pass does not merge across blocks (a Local here was folded to false). One no
+            // frontend writes: this pass also runs on Maxwell compute shaders, where flag register 3 is the overflow flag every IADD.CC (and R2P / P2R .CC) writes, so a
+            // live thread that set it between an early exit and a barrier took itself for exited and skipped to the next barrier, or returned at the last one
+            Operand dead = Register(RegisterConsts.BarrierExitedIndex, RegisterType.Shadow);
             var before = new Operand[barriers.Count];
 
             for (int k = 0; k < before.Length; k++) before[k] = Label();

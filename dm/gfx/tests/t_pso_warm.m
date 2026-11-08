@@ -23,7 +23,8 @@ static int fixtures(NSString *dir) {
         "  out.set_vertex(0, MeshVertex{float4(-1, -1, 0.5, 1)}); out.set_index(0, 0);\n"
         "  out.set_vertex(1, MeshVertex{float4( 3, -1, 0.5, 1)}); out.set_index(1, 1);\n"
         "  out.set_vertex(2, MeshVertex{float4(-1,  3, 0.5, 1)}); out.set_index(2, 2);\n"
-        "}\n";
+        "}\n"
+        "[[mesh]] void ms_z(Triangle out) { out.set_primitive_count(0); }\n";
     NSString *metal = [dir stringByAppendingPathComponent:@"fixture.metal"];
     NSString *library = [dir stringByAppendingPathComponent:@"warm-vs.metallib"];
     if (![source writeToFile:metal atomically:YES encoding:NSUTF8StringEncoding error:nil]) return 0;
@@ -36,7 +37,7 @@ static int fixtures(NSString *dir) {
     if (![NSFileManager.defaultManager copyItemAtPath:library toPath:[dir stringByAppendingPathComponent:@"warm-ms.metallib"] error:nil]) return 0;
     for (NSString *stage in @[@"vs", @"fs", @"ms"]) {
         NSMutableDictionary *reflection = [@{@"chain": @DMSH_CHAIN, @"route": @"B", @"entry": stage, @"entry_z": stage, @"bindings": @[], @"vertex_inputs": @[]} mutableCopy];
-        if ([stage isEqualToString:@"ms"]) reflection[@"mesh_stage"] = @{@"kind": @"ms", @"threads": @1};
+        if ([stage isEqualToString:@"ms"]) { reflection[@"mesh_stage"] = @{@"kind": @"ms", @"threads": @1}; reflection[@"entry_z"] = @"ms_z"; }
         NSData *json = [NSJSONSerialization dataWithJSONObject:reflection options:0 error:nil];
         if (![json writeToFile:[dir stringByAppendingPathComponent:[NSString stringWithFormat:@"warm-%@.json", stage]] atomically:YES]) return 0;
     }
@@ -237,6 +238,7 @@ static void scenario(NSString *dir, int merged) {
 
 static void native_mesh(NSString *dir) {
     state_reset();
+    int old_depth = atomic_exchange(&g_depth_zero, 0);
     S.chmask.mask = 15;
     memset(g_pass.cfmt, 0, sizeof g_pass.cfmt);
     g_pass.cfmt[0] = MTLPixelFormatRGBA8Unorm; g_pass.dfmt = g_pass.sfmt = 0; g_pass.samples = 1;
@@ -264,28 +266,45 @@ static void native_mesh(NSString *dir) {
     // A live shader loaded while prewarm was in flight has a different object identity.
     g_shcache = @{@"warm-ms": live, @"warm-fs": fragment}.mutableCopy;
     warm_claim();
-    EXPECT("warm pipeline rejected for a different live shader", 0, g_pso_mtk.n);
+    EXPECT("duplicate live shader objects claim the warm pipeline", 1, g_pso_mtk.n);
     g_mtk.ms = live;
     NvProg *raster = [NvProg new]; raster->sh[1] = fragment;
     uint64_t before = g_bp_pso_n;
     id<MTLRenderPipelineState> demanded = mtk_pso(raster);
     EXPECT("first demand returns the required mesh pipeline", 1, demanded != nil);
-    EXPECT("first demand builds exactly once", before + 1, g_bp_pso_n);
+    EXPECT("duplicate live shader demand does not compile", before, g_bp_pso_n);
+    EXPECT("duplicate live shader uses the warmed pipeline", 1, demanded == item->object);
     EXPECT("second demand reuses the pipeline", 1, mtk_pso(raster) == demanded);
-    EXPECT("second demand does not compile", before + 1, g_bp_pso_n);
+    EXPECT("second demand does not compile", before, g_bp_pso_n);
 
     g_shcache = nil;
     warm_enqueue(item); warm_claim();
     g_mtk.ms = g_shcache[@"warm-ms"]; raster->sh[1] = g_shcache[@"warm-fs"];
     id<MTLRenderPipelineState> warmed = mtk_pso(raster);
     EXPECT("first demand with identical shaders uses the warm pipeline", 1, warmed == item->object);
-    EXPECT("warm hit does not compile", before + 1, g_bp_pso_n);
+    EXPECT("warm hit does not compile", before, g_bp_pso_n);
     if (demanded && warmed) {
         uint8_t a[4], b[4];
         pixels(demanded, 1, a); pixels(warmed, 1, b);
         EXPECT("required and warmed mesh draws match", 1, memcmp(a, b, sizeof a) == 0);
         EXPECT("native mesh draw writes the triangle", 1, a[0] == 128 && a[1] == 64 && a[2] == 255 && a[3] == 128);
     }
+    // A different depth entry must still miss: this fixture's ms_z emits no geometry.
+    atomic_store(&g_depth_zero, 1);
+    NvShader *other_depth = shader_load(@"warm-ms", 4, 0);
+    EXPECT("different depth entry loaded", 1, other_depth && ![other_depth->ventry isEqualToString:live->ventry]);
+    if (other_depth) {
+        g_shcache[@"warm-ms"] = other_depth;
+        unsigned count = g_pso_mtk.n;
+        warm_enqueue(item); warm_claim();
+        EXPECT("different depth entry is not claimed", count, g_pso_mtk.n);
+        g_mtk.ms = other_depth;
+        id<MTLRenderPipelineState> alternate = mtk_pso(raster);
+        EXPECT("different depth entry builds its own pipeline", before + 1, g_bp_pso_n);
+        EXPECT("different depth entry is not the warmed pipeline", 1, alternate && alternate != warmed);
+        if (alternate) { uint8_t pixel[4]; pixels(alternate, 1, pixel); EXPECT("alternate entry preserves the clear color", 1, pixel[0] == 255 && pixel[1] == 0 && pixel[2] == 0 && pixel[3] == 255); }
+    }
+    atomic_store(&g_depth_zero, old_depth);
     pso_key depth = {.dfmt = MTLPixelFormatDepth32Float, .samples = 1};
     NSError *error = nil;
     EXPECT("depth-only native mesh pipeline uses the empty fragment", 1, mtk_build(&depth, nil, live, nil, &error) != nil);

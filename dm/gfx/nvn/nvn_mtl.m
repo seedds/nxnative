@@ -12932,6 +12932,16 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     if (g_rt_range_pending) { PD("j rt_level_range pass=%llu vc=%u", g_stat_pass, (unsigned)(dw ? dw->count : di->count)); g_rt_range_pending=0; }
 }
 static nvn_hmap g_cps = {.klen = sizeof(void *)};
+// shader_load can return distinct objects for a prefetch and a warm task. The library key is
+// immutable during a run; the selected entry (including entry_z) distinguishes depth variants.
+// Both loaders use the library's default function constants. Never equate unnamed test/stub shaders.
+static int warm_mesh_shader_equal(NvShader *a, NvShader *b) {
+    if (a == b) return 1;
+    return a && b && a->fn && b->fn && a->key[0] && !strcmp(a->key, b->key) &&
+           a->stage == b->stage && a->ventry.length && [a->ventry isEqualToString:b->ventry] &&
+           [a->fn.name isEqualToString:b->fn.name] && a->mesh_kind == b->mesh_kind &&
+           a->mesh_threads == b->mesh_threads && a->mesh_payload == b->mesh_payload && a->mesh_notask == b->mesh_notask;
+}
 static void warm_claim(void) {
     if (!atomic_exchange_explicit(&g_warm_ready, 0, memory_order_acq_rel)) return;
     os_unfair_lock_lock(&g_warm_lock);
@@ -12951,8 +12961,8 @@ static void warm_claim(void) {
             if (item->kind == 3) {
                 NvShader *ts = item->ts_key ? g_shcache[item->ts_key] : nil;
                 if (item->ts_key && !ts) { ts = item->ts; g_shcache[item->ts_key] = ts; }
-                // Background warm-up can race a live shader load. Do not publish the PSO under functions it was not built with (for example the other depth entry).
-                if (vs == item->vs && fs == item->fs && ts == item->ts) mtk_claim(&item->pso, ts, vs, fs, item->object);
+                // Claim under the live objects, but only for the same library and selected entry.
+                if (warm_mesh_shader_equal(vs, item->vs) && warm_mesh_shader_equal(fs, item->fs) && warm_mesh_shader_equal(ts, item->ts)) mtk_claim(&item->pso, ts, vs, fs, item->object);
                 else MLOG("native mesh prewarm: live shader variant differs, recompile if required (%s)", vs->key);
             } else {
                 item->pso.vs = (__bridge void *)vs; item->pso.fs = (__bridge void *)fs;

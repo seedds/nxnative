@@ -24,6 +24,20 @@ class ArchiveRestartTests(unittest.TestCase):
                     self.assertEqual(len(list(Path(folder).glob('*.mtl4a'))), files, phase)
                     self.assertEqual((Path(folder) / 'compacting').exists(), phase == 'seed', phase)
 
+    def test_large_compacted_cache_is_reused(self):
+        with tempfile.TemporaryDirectory(prefix='pso-large-restart-') as folder:
+            env = dict(os.environ, DM_PSO_MTL4='1', MTL_DEBUG_LAYER='1', DM_TEST_ARCHIVE_LARGE='1')
+            for name in ('DM_GPU_CAPTURE', 'MTL_CAPTURE_ENABLED', 'DM_TEST_ARCHIVE_CONSTANTS', 'DM_TEST_ARCHIVE_MIXED'):
+                env.pop(name, None)
+            for phase, files in (('seed', 21), ('replay', 11), ('verify', 11)):
+                result = subprocess.run([executable, '--compact-' + phase, folder],
+                                        env=env, capture_output=True, text=True, timeout=60)
+                self.assertEqual(result.returncode, 0, phase + '\n' + result.stdout + result.stderr)
+                self.assertEqual(len(list(Path(folder).glob('*.mtl4a'))), files, phase)
+                self.assertFalse((Path(folder) / 'compacting').exists(), phase)
+                if phase != 'seed':
+                    self.assertTrue((Path(folder) / 'compacted-size').read_text().endswith('11\n'), phase)
+
 
 if __name__ == '__main__':
     executable = sys.argv.pop(1)

@@ -7713,6 +7713,26 @@ static int arch_compact_allowed(void) {
     unlink(arch_compact_marker().fileSystemRepresentation);   // another system build or capture method: try once more
     return 1;
 }
+// A bounded serializer can leave more than eight files even after a successful
+// compaction. Remember that compacted size, so a stable large warm list does not
+// recapture every pipeline on every launch. Compact again after real growth.
+static NSString *arch_compact_size_path(void) { return [g_arch_dir stringByAppendingPathComponent:@"compacted-size"]; }
+static NSUInteger arch_compact_limit(void) {
+    NSString *s = [NSString stringWithContentsOfFile:arch_compact_size_path() encoding:NSUTF8StringEncoding error:nil];
+    NSString *stamp = arch_compact_stamp();
+    if (![s hasPrefix:stamp]) return PSO_ARCH_COMPACT;
+    NSScanner *scan = [NSScanner scannerWithString:[s substringFromIndex:stamp.length]];
+    unsigned long long n = 0;
+    if (![scan scanUnsignedLongLong:&n] || !scan.isAtEnd || !n || n > 1000000) return PSO_ARCH_COMPACT;
+    return MAX((NSUInteger)PSO_ARCH_COMPACT, (NSUInteger)n * 2);
+}
+static void arch_compact_note_size(void) {
+    NSUInteger n = 0;
+    for (NSString *name in [NSFileManager.defaultManager contentsOfDirectoryAtPath:g_arch_dir error:nil])
+        if ([name.pathExtension isEqualToString:@"mtl4a"] && name.length && name.UTF8String[0] >= '0' && name.UTF8String[0] <= '9') n++;
+    if (n) [[arch_compact_stamp() stringByAppendingFormat:@"%lu\n", (unsigned long)n]
+        writeToFile:arch_compact_size_path() atomically:YES encoding:NSUTF8StringEncoding error:nil];
+}
 static dispatch_queue_t g_arch_q; static _Atomic int g_arch_new, g_arch_new_vd, g_arch_sched;   // bases captured and not written yet, those of them with a vertex layout
 // A flush period: a compiler of its own and the serializer it captures into. A compile the archive captures joins the current period (ep_enter) and leaves it when it returns; a
 // flush (arch_flush) hands the compiles after it to a new period and writes the old period's serializer once every compile in it has returned (arch_write), and that serializer is
@@ -7953,7 +7973,7 @@ static void pso4_init(void) {
                 g_arch_seq = MAX(g_arch_seq, [n substringFromIndex:pf].intValue + 1);
             }
             arch_open_end();
-            if (runf.count > PSO_ARCH_COMPACT && arch_compact_allowed()) { g_compact_enabled = 1; g_compact_files = runf; }
+            if (runf.count > arch_compact_limit() && arch_compact_allowed()) { g_compact_enabled = 1; g_compact_files = runf; }
             MLOG("pipeline archive %s: %lu files (%lu of bases without a vertex layout), %.1f MB, opened in %.1f ms", g_arch_dir.UTF8String, (unsigned long)(arch.count + archp.count - (g_arch_bundle != nil)),
                  (unsigned long)archp.count - (g_arch_bundle != nil), bytes / 1048576.0, (bp_now() - t0) / 1e6);
         }
@@ -8075,6 +8095,7 @@ static void arch_compact_finish(void) {   // after every period that may hold re
     if (!g_compact_files || !g_compacted) return;
     if (g_compact_bad) { MLOG("[RED] pipeline archive: compaction left the old files (a flush failed, or a base was not captured again)"); return; }
     for (NSString *f in g_compact_files) unlink(f.fileSystemRepresentation);
+    arch_compact_note_size();
     MLOG("pipeline archive compacted: %lu files of bases with a vertex layout gave %d bases to the files just written and were removed", (unsigned long)g_compact_files.count, (int)g_compacted);
     g_compact_files = nil;
 }

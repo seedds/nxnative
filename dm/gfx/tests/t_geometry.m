@@ -334,7 +334,7 @@ static void storage_buffers(void) {
         @{@"kind":@"sbuf",@"reg":@2,@"arg_id":@0,@"msl_name":@"gp_s1",@"msl_type":@"device uint*",@"rw":@NO}]};
     nvn_refl rr;EXPECT("explicit read-only reflection",0,nvn_refl_from_json(readonly,&rr,error,sizeof error));
     EXPECT("explicit read-only flag overrides device qualifier",0,rr.b[0].rw);
-    uint8_t *data;if(posix_memalign((void**)&data,getpagesize(),12288))abort();memset(data,0xcc,12288);mtl_pool_add(data,12288);
+    uint8_t *data;if(posix_memalign((void**)&data,getpagesize(),12288))abort();memset(data,0xcc,12288);uint64_t gpu=mtl_pool_add(data,12288);if(!mtl_gva_on())gpu=(uint64_t)data;   // the GPU address the game holds for data: its own, or Metal's under shader_raw_direct (mtl_gva_on)
     state_reset();S.ssbo[2][0]=(p_bind_buf){.stage=2,.index=0,.addr=(uint64_t)data,.size=123};
     S.ssbo[2][2]=(p_bind_buf){.stage=2,.index=2,.addr=(uint64_t)(data+4096),.size=64};
     S.ssbo[5][0]=(p_bind_buf){.stage=5,.index=0,.addr=(uint64_t)(data+8192),.size=99};
@@ -343,8 +343,8 @@ static void storage_buffers(void) {
     EXPECT("geometry storage write tracked",1,sbw_hits((uint64_t)(data+4096),(uint64_t)(data+4096)+24));
     enc_c_dispatch(en,MTLSizeMake(1,1,1),MTLSizeMake(1,1,1));enc_c_end(en);finish();
     uint64_t row0=0,row2=0;uint32_t *out=(uint32_t*)(data+4096);memcpy(&row0,out,8);memcpy(&row2,out+3,8);
-    EXPECT("geometry c0 row 0 guest address",(uint64_t)data,row0);EXPECT("geometry c0 row 0 size",123,out[2]);
-    EXPECT("geometry c0 row 2 guest address",(uint64_t)(data+4096),row2);EXPECT("geometry c0 row 2 size",64,out[5]);
+    EXPECT("geometry c0 row 0 game address",gpu,row0);EXPECT("geometry c0 row 0 size",123,out[2]);
+    EXPECT("geometry c0 row 2 game address",gpu+4096,row2);EXPECT("geometry c0 row 2 size",64,out[5]);
     mtl_pool_del(data);mtl_drain();free(data);
 }
 static void passthrough_kernels(const char *directory) {

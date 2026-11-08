@@ -150,13 +150,17 @@ int main(void) {
     EXPECT("signed integer border RGB is numeric", 1, ((samp_t *)&sampler)->p.border[0] == 1.f && ((samp_t *)&sampler)->p.border[2] == 1.f);
     P(nvnSamplerFinalize)(&sampler);
 
-    // 3. Memory pool: GPU address = the storage address given by the game
+    // 3. Memory pool: GPU address = the storage address given by the game; under the profile's shader_raw_direct (mtl_gva_on) Metal's own for the pool's buffer, which maps back to it
     static uint8_t poolmem[1 << 20] __attribute__((aligned(4096)));
     NVNmemoryPoolBuilder pb; NVNmemoryPool pool;
     P(nvnMemoryPoolBuilderSetDevice)(&pb, &dev); P(nvnMemoryPoolBuilderSetDefaults)(&pb);
     P(nvnMemoryPoolBuilderSetStorage)(&pb, poolmem, sizeof poolmem); P(nvnMemoryPoolBuilderSetFlags)(&pb, 0x24);
     EXPECT("MemoryPoolInitialize succeeds", 1, P(nvnMemoryPoolInitialize)(&pool, &pb));
-    EXPECT("pool GPU address = storage address", (long long)(uintptr_t)poolmem, P(nvnMemoryPoolGetBufferAddress)(&pool));
+    uint64_t pool_gpu = P(nvnMemoryPoolGetBufferAddress)(&pool), back = 0;
+    if (mtl_gva_on()) {
+        EXPECT("pool GPU address is Metal's, not the storage address", 1, pool_gpu && pool_gpu != (uintptr_t)poolmem);
+        EXPECT("pool GPU address maps back to the storage", (long long)(uintptr_t)poolmem, mtl_gva_back(pool_gpu, &back) ? (long long)back : 0);
+    } else EXPECT("pool GPU address = storage address", (long long)(uintptr_t)poolmem, pool_gpu);
 
     // Engines may retarget a ring buffer with raw stores instead of SetStorage.
     // These SDK offsets come from the guest writes reported in issue #723;
@@ -170,7 +174,7 @@ int main(void) {
         P(nvnBufferBuilderSetDevice)(&bb, &dev); P(nvnBufferBuilderSetDefaults)(&bb);
         P(nvnBufferBuilderSetStorage)(&bb, &pool, 0x100, 0x200);
         EXPECT("ring buffer initializes", 1, P(nvnBufferInitialize)(buffer, &bb));
-        EXPECT("initial buffer address", (uintptr_t)poolmem + 0x100, P(nvnBufferGetAddress)(buffer));
+        EXPECT("initial buffer address", pool_gpu + 0x100, P(nvnBufferGetAddress)(buffer));
         EXPECT("initial buffer size", 0x200, P(nvnBufferGetSize)(buffer));
         uint64_t initial_offset, initial_size;
         memcpy(&initial_offset, (uint8_t *)buffer + 0x18, 8);
@@ -181,7 +185,7 @@ int main(void) {
         for (unsigned i = 0; i < sizeof allocations / sizeof allocations[0]; i++) {
             memcpy((uint8_t *)buffer + 0x18, &allocations[i].offset, 8);
             memcpy((uint8_t *)buffer + 0x20, &allocations[i].size, 8);
-            EXPECT("guest ring store changes address", (uintptr_t)poolmem + allocations[i].offset, P(nvnBufferGetAddress)(buffer));
+            EXPECT("guest ring store changes address", pool_gpu + allocations[i].offset, P(nvnBufferGetAddress)(buffer));
             EXPECT("guest ring store changes map", (uintptr_t)poolmem + allocations[i].offset, (uintptr_t)P(nvnBufferMap)(buffer));
             EXPECT("guest ring store changes offset", allocations[i].offset, P(nvnBufferGetMemoryOffset)(buffer));
             EXPECT("guest ring store changes size", allocations[i].size, P(nvnBufferGetSize)(buffer));
@@ -203,7 +207,7 @@ int main(void) {
         EXPECT("GPU-only buffer initializes", 1, P(nvnBufferInitialize)(buffer, &bb));
         uint64_t offset = 0x400, size = 0x80;
         memcpy((uint8_t *)buffer + 0x18, &offset, 8); memcpy((uint8_t *)buffer + 0x20, &size, 8);
-        EXPECT("GPU-only retargeted address", (uintptr_t)private_mem + 0x400, P(nvnBufferGetAddress)(buffer));
+        EXPECT("GPU-only retargeted address", (mtl_gva_on() ? P(nvnMemoryPoolGetBufferAddress)(&private_pool) : (uintptr_t)private_mem) + 0x400, P(nvnBufferGetAddress)(buffer));
         EXPECT("GPU-only retargeted size", 0x80, P(nvnBufferGetSize)(buffer));
         EXPECT("GPU-only buffer stays unmappable", 0, (uintptr_t)P(nvnBufferMap)(buffer));
         P(nvnBufferFinalize)(buffer); P(nvnMemoryPoolFinalize)(&private_pool);

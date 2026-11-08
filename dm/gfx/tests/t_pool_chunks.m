@@ -31,6 +31,15 @@ static int gpu_fill_ok(uint64_t a, uint64_t n, uint8_t v) {
     const uint8_t *p = (const uint8_t *)(uintptr_t)a; for (uint64_t i = 0; i < n; i++) if (p[i] != v) return 0;
     return 1;
 }
+// A GPU fill of n bytes at offset off of buffer b, then whether the guest's memory at g holds it
+static int buf_fill_ok(id<MTLBuffer> b, uint64_t off, uint64_t n, uint8_t v, const uint8_t *g) {
+    id<MTLCommandBuffer> cb = q_cb(); id<MTLBlitCommandEncoder> ce = [cb blitCommandEncoder];
+    [ce fillBuffer:b range:NSMakeRange(off, n) value:v]; [ce endEncoding]; [cb commit]; [cb waitUntilCompleted];
+    for (uint64_t i = 0; i < n; i++) if (g[i] != v) return 0;
+    return 1;
+}
+// The GPU address the game holds for a guest address in large pool k under shader_raw_direct (mtl_gva_on): its address buffer's
+static uint64_t big_gpu(int k, uint64_t a) { return g_big[k].va.gpuAddress + (a - g_big[k].a); }
 int main(void) { @autoreleasepool {
     mtl_init();
     const uint64_t GB = 1ull << 30, MB = 1ull << 20;
@@ -85,20 +94,28 @@ int main(void) { @autoreleasepool {
     mtl_tex_release(&t);
     // Raw global memory: the driver has given out no address in the pool, so the table leaves it out and it stays in chunks
     mtl_sub_begin(); CHECK("pool table made", gmem_map_gpu() != 0); finish();
-    CHECK("a pool with no address given out stays out", g_big[0].full == 0);
+    CHECK("a pool with no address given out stays out", g_big[0].full == 0 && !g_big[0].va_res);
     // The address ranges merge and stay sorted
     mtl_pool_addressed((void *)0x1000, 0x1000); mtl_pool_addressed((void *)0x3000, 0x1000); mtl_pool_addressed((void *)0x2000, 0x1000); CHECK("touching ranges merge", g_naddr == 1 && g_addr[0].lo == 0x1000 && g_addr[0].hi == 0x4000);
     mtl_pool_addressed((void *)0x2000, 0x100); CHECK("a covered range adds nothing", g_naddr == 1);
     mtl_pool_addressed((void *)0x8000, 0x1000); CHECK("a separate range", g_naddr == 2 && addr_meets(0x8800, 0x8900) && !addr_meets(0x5000, 0x6000) && addr_meets(0x3fff, 0x5000) && !addr_meets(0x4000, 0x5000));
-    // Once one is given out, the table reaches all of it, and lookups then have the whole pool
+    // Once one is given out, the table reaches all of it, and lookups then have the whole pool. Under shader_raw_direct (mtl_gva_on) the table holds the pool's address buffer, its whole GPU
+    // range, resident from then on, and lookups for bindings keep their chunks
     mtl_pool_addressed((void *)(uintptr_t)(base + 900 * MB), 4096);
     mtl_sub_begin(); CHECK("pool table made again", gmem_map_gpu() != 0); finish();
-    CHECK("the whole pool has an entry", g_big[0].full > 0 && g_pools[g_big[0].full - 1].end == base + GB);
-    CHECK("lookups take it", look(base + 900 * MB, 4096).length == GB);
+    if (mtl_gva_on()) {
+        const uint8_t *map = (const uint8_t *)gmem_map().contents; int whole = 0;
+        for (int k = 1; k < DMSH_GMEM_MAP_ENTRIES && !whole; k++) { uint64_t r[2]; memcpy(r, map + (size_t)k * DMSH_GMEM_MAP_ENTRY, sizeof r); whole = r[0] == big_gpu(0, base) && r[1] == big_gpu(0, base + GB); }
+        CHECK("the whole pool has an entry: its GPU range", whole && g_big[0].va_res);
+        CHECK("lookups keep their chunks", look(base + 900 * MB, 4096).length < GB);
+    } else {
+        CHECK("the whole pool has an entry", g_big[0].full > 0 && g_pools[g_big[0].full - 1].end == base + GB);
+        CHECK("lookups take it", look(base + 900 * MB, 4096).length == GB);
+    }
     // The lookup hint of a 2 MiB chunk: tagged with the chunk, names the entry holding all of it, and a chunk only partly inside has none of its own
     {
         const uint8_t *map = (const uint8_t *)gmem_map().contents;
-        uint64_t chunk = (base + 900 * MB) >> DMSH_GMEM_HINT_SHIFT;
+        uint64_t chunk = (mtl_gva_on() ? big_gpu(0, base + 900 * MB) : base + 900 * MB) >> DMSH_GMEM_HINT_SHIFT;
         uint32_t hint; memcpy(&hint, map + (chunk % DMSH_GMEM_MAP_ENTRIES) * DMSH_GMEM_MAP_ENTRY + 24, sizeof hint);
         unsigned entry = hint % DMSH_GMEM_MAP_ENTRIES;
         CHECK("the hint names its chunk and an entry", entry && hint / DMSH_GMEM_MAP_ENTRIES == chunk);
@@ -134,14 +151,18 @@ int main(void) { @autoreleasepool {
         mtl_reg_tex(301, &un, NULL); CHECK("an ID given another texture has not been read", !pool_seen(301));
         mtl_reg_tex(301, NULL, NULL); mtl_reg_tex(302, NULL, NULL); mtl_reg_tex(303, NULL, NULL); mtl_tex_release(&rd); mtl_tex_release(&un); mtl_drain(); hog = nil;
     }
-    // The write log: one bit an entry, and the host learns the range of the entry the bit names, from the table the shader used
+    // The write log: one bit an entry, and the host learns the range of the entry the bit names, from the table the shader used. Under shader_raw_direct (mtl_gva_on) one bit a 2 MiB chunk of
+    // GPU addresses, modulo the log's bits, and the host learns the CPU range of the pools whose GPU addresses meet it
     {
         id<MTLBuffer> map = gmem_map();
         mtl_sub_begin(); uint64_t log = gml_take(map); CHECK("a log", log != 0);
         id<MTLBuffer> lb = g_gml_free.lastObject; (void)lb;
         const uint8_t *t = (const uint8_t *)map.contents; int n0 = g_gml_n, want = -1;
-        for (int k = 1; k < DMSH_GMEM_MAP_ENTRIES && want < 0; k++) { uint64_t r[2]; memcpy(r, t + (size_t)k * DMSH_GMEM_MAP_ENTRY, sizeof r); if (r[0] <= base + 900 * MB && base + 900 * MB < r[1]) want = k; }
-        CHECK("the pool has an entry to log", want > 0);
+        if (mtl_gva_on()) { want = (int)((big_gpu(0, base + 900 * MB) >> 21) % (GML_WORDS * 32)); CHECK("the pool has a GPU address to log", g_big[0].va != nil); }
+        else {
+            for (int k = 1; k < DMSH_GMEM_MAP_ENTRIES && want < 0; k++) { uint64_t r[2]; memcpy(r, t + (size_t)k * DMSH_GMEM_MAP_ENTRY, sizeof r); if (r[0] <= base + 900 * MB && base + 900 * MB < r[1]) want = k; }
+            CHECK("the pool has an entry to log", want > 0);
+        }
         id<MTLBuffer> w = [g_dev newBufferWithLength:GML_BYTES options:MTLResourceStorageModeShared];
         ((uint32_t *)w.contents)[want / 32] = 1u << (want % 32);
         gml_read(w, map, 0, 0);
@@ -191,7 +212,16 @@ int main(void) { @autoreleasepool {
         nvn_dirty_protect(wp + 600 * MB, 4096);
         mtl_pool_addressed(wp + 700 * MB, 4096);
         mtl_sub_begin(); CHECK("pool table over the protected pool", gmem_map_gpu() != 0); finish();
-        CHECK("the whole-pool buffer over a protected page takes GPU writes", look(wb + 700 * MB, 4096).length == GB && gpu_fill_ok(wb + 700 * MB, 4096, 0x7c));
+        if (!mtl_gva_on()) CHECK("the whole-pool buffer over a protected page takes GPU writes", look(wb + 700 * MB, 4096).length == GB && gpu_fill_ok(wb + 700 * MB, 4096, 0x7c));
+        // Under shader_raw_direct (mtl_gva_on) stores reach a pool through its address buffer, made with the pool: over a page already protected then, it must take the GPU's writes too
+        else {
+            CHECK("the pool's address buffer is resident", g_big[g_nbig - 1].mem == wp && g_big[g_nbig - 1].va_res);
+            uint8_t *wq = mmap(NULL, GB, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0); if (wq == MAP_FAILED) abort();
+            nvn_dirty_add_range(wq, GB); nvn_dirty_protect(wq + 700 * MB, 4096);
+            mtl_pool_add(wq, GB); int kq = g_nbig - 1;
+            CHECK("the whole-pool buffer over a protected page takes GPU writes", g_big[kq].mem == wq && g_big[kq].va && buf_fill_ok(g_big[kq].va, (uint64_t)(uintptr_t)wq + 700 * MB - g_big[kq].a, 4096, 0x7c, wq + 700 * MB));
+            mtl_pool_del(wq); mtl_drain();
+        }
         // Pools are 4 KB aligned and buffers whole host pages: a pool made after its neighbour's texture protected the page they share
         uint8_t *two = mmap(NULL, 4 * MB, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0); if (two == MAP_FAILED) abort();
         size_t pg = (size_t)getpagesize(), half = pg + 4096;

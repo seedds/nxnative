@@ -1692,9 +1692,9 @@ static void ubd_read(uint64_t lo, size_t n, void *out) {
 // Breath of the Wild updates part of a bound block about 226 times a frame outdoors and ended a pass for nearly every one (about 900 MB of attachment loads and stores a frame on an iPhone).
 // DM_NVN_UB_PARTIAL=0 turns it off
 static int ub_partial_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_UB_PARTIAL"); v = !(e && !strcmp(e, "0")); if (!v) MLOG("DM_NVN_UB_PARTIAL=0: a binding the deferred uniform updates cover only in part ends the pass as before"); } return v; }
-enum { GW_N = 1 << 16, GW_PAGES = 4096 };   // full at 4,096 (Ocarina of Time), every slot then a false hit for some page: 35 passes a frame ended over a block no GPU write touched
+enum { GW_N = 1 << 16, GW_PAGES = 4096, GW_PROBES = 16 };
 typedef struct { uint64_t page, fence; } gw_ent;
-static gw_ent g_gw[GW_N];   // page ~0: two live pages met in the slot, so any page there counts as written until fence completes
+static gw_ent g_gw[GW_N];   // colliding pages keep their own identities in the next GW_PROBES slots (wrapping), never a wildcard
 static gw_ent g_gwx[GW_N];  // the same without the inline updates the host remembers (um_ent): what a uniform shadow cannot read from memory
 static uint64_t g_gw_all;                            // every page counts as written until this fence completes (a submission whose writes could not all be listed)
 static uint64_t g_ubp_made, g_ubp_reused, g_ubp_refused;   // partial shadows made / taken from the cache / refused (the pass ended), for the residency set line
@@ -1714,16 +1714,26 @@ static void gw_put_in(gw_ent *t, uint64_t lo, uint64_t hi, uint64_t fence, uint6
     if (hi <= lo) return;
     uint64_t p0 = lo >> 12, p1 = (hi - 1) >> 12;
     if (p1 - p0 >= GW_PAGES) { gww_put(lo, hi, fence, done); return; }
-    for (uint64_t pg = p0; pg <= p1; pg++) { unsigned s = gw_slot(pg);
-        t[s].page = t[s].page == pg || t[s].fence <= done ? pg : ~0ull;
-        if (fence > t[s].fence) t[s].fence = fence; }
+    for (uint64_t pg = p0; pg <= p1; pg++) { unsigned s = gw_slot(pg); int free_slot = -1;
+        // A completed entry can be reused, but the same page may still be live
+        // farther along the probe range. Find it first so its newest fence survives.
+        for (unsigned i = 0; i < GW_PROBES; i++) { unsigned k = (s + i) & (GW_N - 1);
+            if (t[k].page == pg) { if (fence > t[k].fence) t[k].fence = fence; free_slot = -2; break; }
+            if (free_slot < 0 && t[k].fence <= done) free_slot = (int)k;
+        }
+        if (free_slot >= 0) t[free_slot] = (gw_ent){pg, fence};
+        else if (free_slot == -1 && fence > g_gw_all) g_gw_all = fence;   // bounded work even when crowded; no live hazard is lost
+    }
 }
 static void gw_put(uint64_t lo, uint64_t hi, uint64_t fence, uint64_t done) { gw_put_in(g_gw, lo, hi, fence, done); gw_put_in(g_gwx, lo, hi, fence, done); }
 static int gw_live_in(const gw_ent *t, uint64_t lo, uint64_t hi) {
     uint64_t done = g_done;   // read without the lock as elsewhere: a stale value only refuses more
     if (g_gw_all > done) return 1;
     for (int i = 0; i < GWW_N; i++) if (g_gww[i].fence > done && lo < g_gww[i].hi && g_gww[i].lo < hi) return 1;
-    for (uint64_t pg = lo >> 12; pg <= (hi - 1) >> 12; pg++) { unsigned s = gw_slot(pg); if ((t[s].page == pg || t[s].page == ~0ull) && t[s].fence > done) return 1; }
+    for (uint64_t pg = lo >> 12; pg <= (hi - 1) >> 12; pg++) { unsigned s = gw_slot(pg);
+        // Expired slots are holes, not the end: a colliding live page can follow.
+        for (unsigned i = 0; i < GW_PROBES; i++) { const gw_ent *e = &t[(s + i) & (GW_N - 1)]; if (e->page == pg && e->fence > done) return 1; }
+    }
     return 0;
 }
 static int gw_live(uint64_t lo, uint64_t hi) { return gw_live_in(g_gw, lo, hi); }

@@ -2520,7 +2520,7 @@ static void tex_put(uint64_t k, id o) {   // serials from 2^62 up are external t
 // Host record of a packaged texture: the current MTLTexture, the upload stamp, and the global write generation at the last check
 // spare: the texture the last re-upload replaced, kept resident and written by the next re-upload once the GPU has passed spare_fence (a texture the CPU rewrites every frame, a movie frame,
 // alternates between two textures instead of allocating one per frame: Link's Awakening's title movie made and freed an 8 MB texture a frame)
-@interface NvPkg : NSObject { @public id<MTLTexture> tex, spare, view; uint64_t stamp, seen, hash, spare_fence, vgen, vseen, sub; const void *span; int sparse, vbase; uint8_t *edge[2]; uint32_t edge_n[2]; id ps; } @end   // hash: full hash of the uploaded content under DM_NVN_DIRTYCHECK; span: its tracked range (nvn_dirty_span, NULL = untracked);
+@interface NvPkg : NSObject { @public id<MTLTexture> tex, spare, view; uint64_t used; uint64_t stamp, seen, hash, spare_fence, vgen, vseen, sub; const void *span; int sparse, vbase; uint8_t *edge[2]; uint32_t edge_n[2]; id ps; } @end   // hash: full hash of the uploaded content under DM_NVN_DIRTYCHECK; span: its tracked range (nvn_dirty_span, NULL = untracked);
 // sparse: in a sparse virtual pool, read through its page table (hle_nvn.c nvn_sparse_*), vgen the page table's generation at the upload and vseen at the last look; view: what it is bound as (sparse_view)
 // ps: its placement sparse texture (NvSparse, sparse_make), which tex is: mapped and uploaded tile by tile (sparse_sync)
 // edge: the uploaded bytes of the storage's first and last host pages where other data shares them (pkg_edges_take)
@@ -4148,6 +4148,7 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
         if (!pk) { id<MTLTexture> made = nil; NvSparse *ps = sparse_make(t, 0, &made);
             if (ps) { pk = [NvPkg new]; pk->ps = ps; pk->tex = made; pk->sparse = 1; sparse_sync(ps, t, 1); tex_put(t->serial, pk); return pk->tex; } }
         if (pk) {   // Already uploaded: check the covered pages only if there has been a guest write since the last check
+            pk->used = atomic_load(&g_cur_frame);   // texstat
             if (g_nabs) pkg_absorb_take(pk, t);
             if (g_nabsp && pkg_absorb_waits(t->serial)) return pk->view ? pk->view : pk->tex;
             uint64_t now = nvn_dirty_now();
@@ -14252,6 +14253,66 @@ void dm_gfx_texlist(int target) {
         MLOG("[texlist] tid=%d ser=%llu target %d %ux%ux%u format %#x levels %u flags %#x storage %p size %#llx block height/depth log2 %u/%u", i, (unsigned long long)t->serial, t->d.target,
              t->d.width, t->d.height, t->d.depth, t->d.format, t->d.levels, t->d.flags, (void *)t->mem, (unsigned long long)t->L.size, t->L.tileH, t->L.tileD); }
     os_unfair_lock_unlock(&g_rmu);
+}
+// The Mac's DM_CTL "poolstat" (hle_hid.c): how much of the resident memory pools is texture storage. Every texture the GPU samples has its own Metal copy, so the pool bytes under a
+// texture are resident twice; a pool that is almost all texture storage is GPU memory a raw access could still reach but no sampler reads
+static int ps_cmp(const void *a, const void *b) { const uint64_t *x = a, *y = b; return x[0] < y[0] ? -1 : x[0] > y[0]; }
+void dm_gfx_poolstat(void) {
+    int nt = 0, cap = 0; uint64_t (*tx)[2] = NULL;
+    os_unfair_lock_lock(&g_rmu);
+    for (int i = 1; i < g_ntreg; i++) { const tex_t *t = &g_treg[i].t; if (!g_treg[i].ok || !t->mem || !t->L.size) continue;
+        if (nt == cap) { cap = cap ? cap * 2 : 4096; tx = realloc_or_die(tx, cap * sizeof *tx, "the poolstat texture ranges"); }
+        tx[nt][0] = (uint64_t)t->mem; tx[nt][1] = (uint64_t)t->mem + t->L.size; nt++; }
+    os_unfair_lock_unlock(&g_rmu);
+    qsort(tx, nt, sizeof *tx, ps_cmp);
+    int m = 0; for (int i = 0; i < nt; i++) { if (m && tx[i][0] <= tx[m - 1][1]) { if (tx[i][1] > tx[m - 1][1]) tx[m - 1][1] = tx[i][1]; } else { tx[m][0] = tx[i][0]; tx[m][1] = tx[i][1]; m++; } }   // merged texture ranges
+    enum { TOP = 12 }; struct { uint64_t len, texb; uintptr_t lo; } top[TOP] = {{0}};
+    uint64_t res_n = 0, res_b = 0, tex_b = 0, b90 = 0, n90 = 0, b50 = 0, b0 = 0, n0 = 0;
+    pthread_mutex_lock(&g_mu);
+    for (int k = 0; k < g_npool; k++) { const pool_ent *p = &g_pools[k]; if (!p->res || !p->buf) continue;
+        uint64_t lo = p->base, hi = p->base + p->buf.length, cov = 0;
+        int a = 0, b = m; while (a < b) { int c = (a + b) / 2; if (tx[c][1] <= lo) a = c + 1; else b = c; }   // first texture range ending past lo
+        for (int i = a; i < m && tx[i][0] < hi; i++) cov += MIN(hi, tx[i][1]) - MAX(lo, tx[i][0]);
+        uint64_t len = hi - lo; res_n++; res_b += len; tex_b += cov;
+        if (cov * 10 >= len * 9) { b90 += len; n90++; } else if (cov * 2 >= len) b50 += len; else if (!cov) { b0 += len; n0++; }
+        for (int q = 0; q < TOP; q++) if (len > top[q].len) { memmove(&top[q + 1], &top[q], (TOP - q - 1) * sizeof top[0]); top[q].len = len; top[q].texb = cov; top[q].lo = lo; break; }
+    }
+    pthread_mutex_unlock(&g_mu);
+    const double M = 1048576.0;
+    MLOG("[poolstat] resident pool buffers %llu, %.0f MB; texture storage inside them %.0f MB (%llu merged texture ranges); pools >= 90%% texture %llu, %.0f MB; 50-90%% %.0f MB; no texture at all %llu, %.0f MB",
+         (unsigned long long)res_n, res_b / M, tex_b / M, (unsigned long long)m, (unsigned long long)n90, b90 / M, b50 / M, (unsigned long long)n0, b0 / M);
+    for (int q = 0; q < TOP && top[q].len; q++) MLOG("[poolstat]   %#lx: %.0f MB, texture storage %.0f MB (%.0f%%)", (unsigned long)top[q].lo, top[q].len / M, top[q].texb / M, 100.0 * top[q].texb / top[q].len);
+    free(tx);
+}
+// The Mac's DM_CTL "texstat" (hle_hid.c): the host textures by kind and, for those made from guest memory (NvPkg: they can be made again from it), by the frames since their last use
+static double ps_span(const uint64_t *a, int n) { uint64_t lo = ~0ull, hi = 0; for (int i = 0; i < n; i++) if (a[i]) { lo = MIN(lo, a[i]); hi = MAX(hi, a[i]); } return hi >= lo && hi ? (double)(hi - lo) : 0; }   // address span of a group's storage starts
+void dm_gfx_texstat(void) {
+    uint64_t now = atomic_load(&g_cur_frame), pk_n[4] = {0}, pk_b[4] = {0}, spare_b = 0, other_n = 0, other_b = 0, rt_b = 0, rt_n = 0;
+    static uint64_t gk[256], gn[256], gb[256]; int ng = 0;   // render targets grouped by width, height, format, layers
+    static uint64_t gd[256][64]; static int gdn[256]; memset(gdn, 0, sizeof gdn); static uint64_t glive[256]; memset(glive, 0, sizeof glive);   // distinct guest storage addresses per group (up to 64)
+    nvn_hmap smem = {.klen = 8};
+    os_unfair_lock_lock(&g_rmu);
+    for (int i = 1; i < g_ntreg; i++) if (g_treg[i].ok && g_treg[i].t.serial && g_treg[i].t.mem) nvn_hm_put(&smem, &g_treg[i].t.serial, (void *)g_treg[i].t.mem);
+    os_unfair_lock_unlock(&g_rmu);
+    pthread_mutex_lock(&g_smu);
+    CFMutableSetRef seen_objs = CFSetCreateMutable(NULL, 0, NULL);   // count each host texture once: serials sharing storage name the same one
+    for (uint32_t i = 0; i < g_by_serial.cap; i++) { void *v = g_by_serial.vals[i]; if (!v) continue; id o = (__bridge id)v; uint64_t ser; memcpy(&ser, g_by_serial.keys + (size_t)i * g_by_serial.klen, 8);
+        if (CFSetContainsValue(seen_objs, v)) continue; CFSetAddValue(seen_objs, v);
+        if ([o isKindOfClass:[NvPkg class]]) { NvPkg *pk = o; uint64_t b = pk->tex.allocatedSize, age = now - pk->used; int k = pk->used == 0 ? 3 : age < 60 ? 0 : age < 600 ? 1 : 2;
+            pk_n[k]++; pk_b[k] += b; spare_b += pk->spare.allocatedSize; }
+        else if ([o conformsToProtocol:@protocol(MTLTexture)]) { id<MTLTexture> t = o; if (t.parentTexture) continue; uint64_t b = t.allocatedSize;
+            if (t.usage & MTLTextureUsageRenderTarget) { rt_n++; rt_b += b;
+                uint64_t key = ((uint64_t)t.width << 40) | ((uint64_t)t.height << 20) | ((uint64_t)t.pixelFormat << 4) | (MIN(t.arrayLength * t.depth, 15u));
+                int q = 0; while (q < ng && gk[q] != key) q++; if (q == ng && ng < 256) { gk[ng] = key; gn[ng] = 0; gb[ng] = 0; ng++; } if (q < 256) { gn[q]++; gb[q] += b; if (nvn_hm_get(&g_tex_live, &ser)) glive[q]++; uint64_t mem = (uint64_t)nvn_hm_get(&smem, &ser); int seen = 0; for (int d = 0; d < gdn[q]; d++) seen |= gd[q][d] == mem; if (!seen && gdn[q] < 64) gd[q][gdn[q]++] = mem; } }
+            else { other_n++; other_b += b; } } }
+    pthread_mutex_unlock(&g_smu); CFRelease(seen_objs);
+    const double M = 1048576.0;
+    MLOG("[texstat] frame %llu: from guest memory (NvPkg) used in the last 1 s %llu / %.0f MB, 1-10 s ago %llu / %.0f MB, over 10 s ago %llu / %.0f MB, never stamped %llu / %.0f MB, their spares %.0f MB; render targets %llu / %.0f MB; other GPU textures %llu / %.0f MB",
+         (unsigned long long)now, (unsigned long long)pk_n[0], pk_b[0] / M, (unsigned long long)pk_n[1], pk_b[1] / M, (unsigned long long)pk_n[2], pk_b[2] / M, (unsigned long long)pk_n[3], pk_b[3] / M, spare_b / M,
+         (unsigned long long)rt_n, rt_b / M, (unsigned long long)other_n, other_b / M);
+    for (int r = 0; r < 14; r++) { int best = -1; for (int q = 0; q < ng; q++) if (gb[q] && (best < 0 || gb[q] > gb[best])) best = q; if (best < 0) break;
+        MLOG("[texstat]   render targets %llux%llu format %llu layers %llu: %llu, %.0f MB, %d%s distinct guest storage (span %.1f MB from %#llx), %llu with a live serial", (unsigned long long)(gk[best] >> 40), (unsigned long long)((gk[best] >> 20) & 0xfffff), (unsigned long long)((gk[best] >> 4) & 0xffff), (unsigned long long)(gk[best] & 15), (unsigned long long)gn[best], gb[best] / M, gdn[best], gdn[best] == 64 ? "+" : "", ps_span(gd[best], gdn[best]) / M, (unsigned long long)gd[best][0], (unsigned long long)glive[best]); gb[best] = 0; }
+    free(smem.keys); free(smem.vals);
 }
 void dm_gfx_texdump_next(const char *path) {
     if (g_td_frame == -2) td_note(nil, 0);   // read DM_NVN_TEXDUMP first, so it does not override the request

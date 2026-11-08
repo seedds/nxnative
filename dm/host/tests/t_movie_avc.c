@@ -53,11 +53,21 @@ static void queue_picture(mavc *a) {
 // Replace only decompression: the fixture's NAL headers are synthetic, not
 // encoded media. Production still parses the access unit, builds its sample,
 // passes its frame refcon, queues the callback and copies the output picture.
+static const uint8_t *packet_expected;
+static size_t packet_expected_size;
+static int packet_submissions, packet_failures, packet_checks;
 static OSStatus synthetic_decode(VTDecompressionSessionRef session, CMSampleBufferRef sample, VTDecodeFrameFlags flags,
                                 void *source, VTDecodeInfoFlags *info) {
     assert(!flags && !info);   // the production callback must remain synchronous
     uint8_t bytes[64]; CMBlockBufferRef block = CMSampleBufferGetDataBuffer(sample);
     size_t n = CMBlockBufferGetDataLength(block);
+    if (packet_expected) {
+        uint8_t *actual = malloc(n ? n : 1); assert(actual);
+        assert(!CMBlockBufferCopyDataBytes(block, 0, n, actual));
+        packet_submissions++;
+        if (n != packet_expected_size || memcmp(actual, packet_expected, n)) packet_failures++;
+        free(actual); return noErr;
+    }
     assert(n <= sizeof bytes && !CMBlockBufferCopyDataBytes(block, 0, n, bytes));
     int marker = -1;
     for (size_t i = 0; i + 4 <= n;) {
@@ -88,6 +98,111 @@ static mavc *synthetic_avc(void) {
     return a;
 }
 static void synthetic_free(mavc *a) { a->vs = NULL; mavc_free(a); }
+static size_t length_nal(uint8_t *out, unsigned width, const uint8_t *nal, size_t n) {
+    for (unsigned i = 0; i < width; i++) out[i] = (uint8_t)(n >> (8 * (width - i - 1)));
+    memcpy(out + width, nal, n); return width + n;
+}
+static void packet_check(mavc *a, const uint8_t *input, int n, const uint8_t *expected, size_t size, int valid) {
+    static const uint8_t sentinel;
+    int before = packet_failures;
+    packet_expected = expected ? expected : &sentinel; packet_expected_size = size; packet_submissions = 0;
+    int result = mavc_decode(a, input, n, 0);
+    if (result != (valid ? 0 : -1) || packet_submissions != (valid && size ? 1 : 0)) packet_failures++;
+    if (packet_failures != before) fprintf(stderr, "AVC packet check %d failed (input %d bytes, result %d, submissions %d)\n", packet_checks, n, result, packet_submissions);
+    packet_checks++; packet_expected = NULL;
+}
+static void packet_framing(void) {
+    uint8_t nal[512], input[1100], expected[1100];
+    memset(nal, 0x55, sizeof nal); nal[0] = 0x65;
+    const size_t sizes[] = {1, 2, 255, 256, 257, 269, 407, 511, 512};
+    for (unsigned width = 1; width <= 4; width++) {
+        if (width == 3) continue; // lengthSizeMinusOne == 2 is reserved
+        mavc *a = synthetic_avc();
+        const uint8_t avcc[] = {1, 100, 0, 41, (uint8_t)(0xfc | (width - 1)), 0xe0, 0};
+        mavc_avcc(a, avcc, sizeof avcc);
+        for (size_t i = 0; i < sizeof sizes / sizeof *sizes; i++) {
+            size_t len = sizes[i]; if (width == 1 && len > 255) continue;
+            // A zero at the end is payload in a length-delimited NAL, not Annex B padding.
+            uint8_t last = nal[len - 1]; if (len > 1) nal[len - 1] = 0;
+            size_t n = length_nal(input, width, nal, len), out = length_nal(expected, 4, nal, len);
+            packet_check(a, input, (int)n, expected, out, 1);
+            // A later NAL has its own prefix; selecting the format must consume the whole packet.
+            n += length_nal(input + n, width, nal, 2); out += length_nal(expected + out, 4, nal, 2);
+            packet_check(a, input, (int)n, expected, out, 1);
+            nal[len - 1] = last;
+        }
+        const uint8_t annex[] = {0, 0, 1, 0x65, 0x55, 0, 0, 0, 1, 0x41, 0x55};
+        size_t out = length_nal(expected, 4, annex + 3, 2); out += length_nal(expected + out, 4, annex + 9, 2);
+        packet_check(a, annex, sizeof annex, expected, out, 1);
+        // A valid first NAL must not be submitted when its second length/payload is truncated.
+        size_t n = length_nal(input, width, nal, 2);
+        memset(input + n, 0, width); input[n + width - 1] = 5; input[n + width] = 0x41;
+        packet_check(a, input, (int)(n + width + 1), NULL, 0, 0);
+        memset(input, 0, width); packet_check(a, input, (int)width, NULL, 0, 0);
+        if (width > 1) packet_check(a, input, (int)width - 1, NULL, 0, 0);
+        synthetic_free(a);
+    }
+    mavc *a = synthetic_avc(); // No avcC: retain the four-byte-length convention.
+    size_t n = length_nal(input, 4, nal, 269);
+    packet_check(a, input, (int)n, input, n, 1);
+    for (unsigned width = 3; width <= 4; width++) {
+        size_t used = 0, out = 0;
+        for (int i = 0; i < 2; i++) {
+            memset(input + used, 0, width); input[used + width - 1] = 1; used += width;
+            memcpy(input + used, nal, 2); used += 2;
+            out += length_nal(expected + out, 4, nal, 2);
+        }
+        input[used++] = 0; input[used++] = 0; // Annex B trailing_zero_8bits
+        packet_check(a, input, (int)used, expected, out, 1);
+    }
+    // Annex B is also accepted with avcC parameter sets: the SDK may normalize its MP4 samples.
+    const uint8_t avcc[] = {1, 100, 0, 41, 0xff, 0xe0, 0};
+    mavc_avcc(a, avcc, sizeof avcc);
+    const uint8_t annex[] = {0, 0, 0, 1, 0x65, 0x55, 0, 0, 1, 0x41, 0x55};
+    size_t out = length_nal(expected, 4, annex + 4, 2); out += length_nal(expected + out, 4, annex + 9, 2);
+    packet_check(a, annex, sizeof annex, expected, out, 1);
+    const uint8_t bad[] = {0, 0, 0, 9, 0x65, 0x55};
+    for (size_t cut = 1; cut <= sizeof bad; cut++) packet_check(a, bad, (int)cut, NULL, 0, 0);
+    const uint8_t empty_annex[] = {0, 0, 1, 0x65, 0x55, 0, 0, 1};
+    packet_check(a, empty_annex, sizeof empty_annex, NULL, 0, 0);
+    packet_check(a, bad, -1, NULL, 0, 0);
+    packet_check(a, NULL, 0, NULL, 0, 1);
+    synthetic_free(a);
+    fprintf(stderr, "AVC packet framing: %d checks, %d failures\n", packet_checks, packet_failures);
+    assert(!packet_failures);
+}
+static void parameter_framing(void) {
+    mavc *a = mavc_new();
+    uint8_t nal[269], packet[300]; memset(nal, 0x55, sizeof nal); nal[0] = 0x67;
+    size_t n = length_nal(packet, 4, nal, sizeof nal);
+    mavc_param_sets(a, packet, n);
+    assert(a->nsps == sizeof nal && !memcmp(a->sps, nal, sizeof nal));
+    a->au = malloc(8); assert(a->au); memset(a->au, 0xa5, 8); a->aucap = 8;
+    a->dirty = 0;
+    const uint8_t invalid[] = {0, 0, 0, 2, 0x67, 0x42, 0, 0, 0, 9, 0x68};
+    mavc_param_sets(a, invalid, sizeof invalid);
+    assert(!a->dirty && a->nsps == sizeof nal && !memcmp(a->sps, nal, sizeof nal));
+    assert(mavc_decode(a, invalid, sizeof invalid, 0) == -1);
+    assert(!a->dirty && a->nsps == sizeof nal && !a->npps);
+    assert(a->aucap == 8); for (int i = 0; i < 8; i++) assert(a->au[i] == 0xa5);
+    const uint8_t invalid_annex[] = {0, 0, 1, 0x67, 0x42, 0, 0, 1};
+    mavc_param_sets(a, invalid_annex, sizeof invalid_annex);
+    assert(!a->dirty && a->nsps == sizeof nal);
+    // Config carries 16-bit parameter-set lengths regardless of sample width.
+    const uint8_t avcc[] = {1, 100, 0, 41, 0xfd, 0xe1, 0, 2, 0x67, 0x42, 1, 0, 2, 0x68, 0x55};
+    for (size_t cut = 0; cut < sizeof avcc; cut++) {
+        mavc_avcc(a, avcc, cut);
+        assert(a->nal_length == 4 && !a->dirty && a->nsps == sizeof nal && !a->npps);
+    }
+    mavc_avcc(a, avcc, sizeof avcc);
+    assert(a->nal_length == 2 && a->nsps == 2 && a->npps == 2 && a->sps[1] == 0x42 && a->pps[1] == 0x55);
+    a->dirty = 0;
+    memcpy(packet, avcc, sizeof avcc); packet[4] = 0xfe; // reserved three-byte width
+    mavc_avcc(a, packet, sizeof avcc);
+    assert(a->nal_length == 2 && !a->dirty);
+    mavc_free(a);
+    puts("AVC parameter framing: ambiguous length preserves SPS; malformed packets/configuration have no partial side effects; reserved width is refused");
+}
 static void submit_picture(mavc *a, int annex_b, int idr, int marker, int64_t pts) {
     uint8_t au[12]; size_t n = 0;
     for (int slice = 0; slice < (idr ? 2 : 1); slice++) {
@@ -182,6 +297,8 @@ static void tex_slots(void) {
     take(&d, 1); md_reset(&d, 0); assert(!d.out[1].used && !d.out[1].rnd && d.tex_rel);
 }
 int main(void) {
+    packet_framing();
+    parameter_framing();
     loop_order(1); loop_order(0);
     puts("AVC loops: all 36 pictures ordered through packet parsing and callback refcons, with both NAL prefix formats");
     sequence_boundaries();

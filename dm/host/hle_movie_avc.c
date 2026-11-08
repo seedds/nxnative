@@ -18,6 +18,7 @@ struct mavc {
     uint64_t sequence; int saw_picture;
     uint8_t *au; size_t aucap;   // length-prefixed copy of the access unit being decoded
     int red, rgba;               // rgba: pictures as 4-byte RGBA (native texture mode, Monster Hunter Rise) instead of NV12
+    unsigned nal_length;         // avcC lengthSizeMinusOne + 1; four bytes without avcC
 };
 
 int mavc_bt709(const mavc *a, int h) {
@@ -25,7 +26,7 @@ int mavc_bt709(const mavc *a, int h) {
     if (m && CFGetTypeID(m) == CFStringGetTypeID()) return CFEqual(m, kCMFormatDescriptionYCbCrMatrix_ITU_R_709_2);
     return h >= 720;
 }
-mavc *mavc_new(void) { mavc *a = calloc(1, sizeof *a); if (!a) die("movie: AVC decoder allocation failed"); return a; }
+mavc *mavc_new(void) { mavc *a = calloc(1, sizeof *a); if (!a) die("movie: AVC decoder allocation failed"); a->nal_length = 4; return a; }
 static void close_session(mavc *a) {
     if (a->vs) { VTDecompressionSessionWaitForAsynchronousFrames(a->vs); VTDecompressionSessionInvalidate(a->vs); CFRelease(a->vs); a->vs = NULL; }
     if (a->fd) { CFRelease(a->fd); a->fd = NULL; }
@@ -92,34 +93,74 @@ static void keep_ps(mavc *a, const uint8_t *nal, size_t n) {   // a parameter se
     memcpy(dst, nal, n); *dn = (int)n; a->dirty = 1;
     if (t == 7) a->depth = avc_reorder_depth(nal, n);
 }
-// walk the NAL units of p (Annex B start codes, or else 4-byte lengths); fn gets each unit without its prefix. Zero bytes before a start code (the first byte of a 4-byte
-// start code, trailing_zero_8bits) are not part of the unit
-static size_t next_sc(const uint8_t *p, size_t n, size_t i) { for (; i + 3 <= n; i++) if (!p[i] && !p[i + 1] && p[i + 2] == 1) return i; return n; }
-static void each_nal(const uint8_t *p, size_t n, void (*fn)(void *, const uint8_t *, size_t), void *ctx) {
-    size_t s = next_sc(p, n, 0);
-    if (s < n && s <= 1) {
-        while (s < n) {
-            size_t b = s + 3, e = next_sc(p, n, b), end = e;
-            while (end > b && !p[end - 1]) end--;
-            if (end > b) fn(ctx, p + b, end - b);
-            s = e;
-        }
-    } else for (size_t i = 0; i + 4 <= n;) {
-        size_t len = (size_t)p[i] << 24 | (size_t)p[i + 1] << 16 | (size_t)p[i + 2] << 8 | p[i + 3]; i += 4;
-        if (!len || len > n - i) break;
-        fn(ctx, p + i, len); i += len;
+// A four-byte length from 256 through 511 begins 00 00 01, like Annex B. Prefer
+// lengths only when they consume the whole packet; otherwise try Annex B. The
+// SDK can normalize MP4 samples to Annex B even when Configure supplies avcC.
+// Validate every boundary before callbacks: a truncated later NAL must not
+// change parameter sets or submit the packet's valid prefix to VideoToolbox.
+static size_t nal_size(const uint8_t *p, unsigned width) {
+    size_t n = 0;
+    for (unsigned i = 0; i < width; i++) n = (n << 8) | p[i];
+    return n;
+}
+static int nal_lengths(const uint8_t *p, size_t n, unsigned width) {
+    for (size_t i = 0; i < n;) {
+        if (n - i < width) return 0;
+        size_t len = nal_size(p + i, width); i += width;
+        if (!len || len > n - i) return 0;
+        i += len;
     }
+    return n != 0;
+}
+// Zero bytes before a start code (the first byte of a four-byte code) and
+// after the last NAL are Annex B padding, but remain payload with lengths.
+static size_t next_sc(const uint8_t *p, size_t n, size_t i) { for (; i + 3 <= n; i++) if (!p[i] && !p[i + 1] && p[i + 2] == 1) return i; return n; }
+static int each_nal(const uint8_t *p, size_t n, unsigned width, void (*fn)(void *, const uint8_t *, size_t), void *ctx) {
+    if (!n) return 1;
+    if (nal_lengths(p, n, width)) {
+        for (size_t i = 0; i < n;) {
+            size_t len = nal_size(p + i, width); i += width;
+            fn(ctx, p + i, len); i += len;
+        }
+        return 1;
+    }
+    size_t s = next_sc(p, n, 0);
+    if (s == n || s > 1) return 0;
+    for (int pass = 0; pass < 2; pass++) {
+        for (size_t start = s; start < n;) {
+            size_t b = start + 3, e = next_sc(p, n, b), end = e;
+            while (end > b && !p[end - 1]) end--;
+            if (end == b) return 0;
+            if (pass) fn(ctx, p + b, end - b);
+            start = e;
+        }
+    }
+    return 1;
 }
 static void ps_only(void *ctx, const uint8_t *nal, size_t n) { int t = nal[0] & 31; if (t == 7 || t == 8) keep_ps(ctx, nal, n); }
-void mavc_param_sets(mavc *a, const uint8_t *p, size_t n) { each_nal(p, n, ps_only, a); }
+void mavc_param_sets(mavc *a, const uint8_t *p, size_t n) {
+    if (!each_nal(p, n, 4, ps_only, a) && !a->red++) LOG("[RED] movie: malformed AVC parameter-set packet");
+}
 // AVCDecoderConfigurationRecord: version, profile, compatibility, level, NAL length size - 1, SPS count (low 5 bits) and 16-bit-length SPS, PPS count and 16-bit-length PPS
 void mavc_avcc(mavc *a, const uint8_t *p, size_t n) {
     if (n < 7 || p[0] != 1) { if (!a->red++) LOG("[RED] movie: unrecognized avcC record (%zu bytes, version %d)", n, n ? p[0] : -1); return; }
-    size_t i = 5;
-    for (int set = 0; set < 2 && i < n; set++) {
-        int cnt = set ? p[i] : p[i] & 31; i++;
-        for (int k = 0; k < cnt && i + 2 <= n; k++) { size_t len = (size_t)p[i] << 8 | p[i + 1]; i += 2; if (len > n - i) return; if (len) keep_ps(a, p + i, len); i += len; }
+    unsigned width = (p[4] & 3) + 1;
+    if (width == 3) { if (!a->red++) LOG("[RED] movie: reserved avcC NAL length width 3"); return; }
+    for (int pass = 0; pass < 2; pass++) {
+        size_t i = 5;
+        for (int set = 0; set < 2; set++) {
+            if (i >= n) return;
+            int cnt = set ? p[i] : p[i] & 31; i++;
+            for (int k = 0; k < cnt; k++) {
+                if (n - i < 2) return;
+                size_t len = nal_size(p + i, 2); i += 2;
+                if (!len || len > n - i) return;
+                if (pass) keep_ps(a, p + i, len);
+                i += len;
+            }
+        }
     }
+    a->nal_length = width;
 }
 
 static void on_frame(void *ref, void *src, OSStatus st, VTDecodeInfoFlags fl, CVImageBufferRef img, CMTime pts, CMTime dur) {
@@ -171,7 +212,11 @@ static void avc_picture_sequence(mavc *a, int idr) {
     a->saw_picture = 1;
 }
 int mavc_decode(mavc *a, const uint8_t *p, int n, int64_t pts_us) {
-    au_ctx c = {a, 0}; each_nal(p, (size_t)n, au_add, &c);
+    au_ctx c = {a, 0};
+    if (n < 0 || !each_nal(p, (size_t)n, a->nal_length, au_add, &c)) {
+        if (!a->red++) LOG("[RED] movie: malformed AVC access unit (%d bytes)", n);
+        return -1;
+    }
     if (!c.len) return 0;
     if ((a->dirty || !a->vs) && !open_session(a)) return -1;
     if (c.picture) avc_picture_sequence(a, c.idr);

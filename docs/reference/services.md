@@ -352,6 +352,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Limits:** such pads have no rumble or player lights, and Home does not quit from them. Another model's buttons follow 8BitDo's numbering unless `DM_HID_MAP` says otherwise; only Pro Controllers were run, before the mechanism was folded into `pad_hid_mac.h` ([PR #1595](https://github.com/seedds/nxnative/pull/1595)), and the folded version awaits a run with two Pro Controllers over USB.
 - **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) 1.8.0, two Pro Controllers over USB, 33 minutes of two-player split-screen races.
 
+### One Pro Controller read as two players
+
+- **Symptom:** with one Pro Controller over Bluetooth, the log shows `GameController lists 1 of 2 pads of this model` twice for the same USB location, then players 1 and 2 for that pad; a one-player game opens the controller applet every few frames (`hid controller applet: 1 to 1 players wanted, 2 connected`, focus state 2 then 1, thousands of times). A game that suspends its music while an applet has focus plays none: sound effects and positional music still play, while area and cutscene music never start.
+- **Cause:** `IOHIDManager` hands a device over once per matching dictionary it meets, each time as a new `IOHIDDeviceRef` for the same I/O Registry entry. The Pro Controller meets both the GamePad usage dictionary and its own vendor / product one (added so identical pads are counted), and `hidpad_found` knew devices by reference only, so one pad counted as two pads of its model against GameController's one controller ([Identical controllers that GameController lists as one](#identical-controllers-that-gamecontroller-lists-as-one)).
+- **Fix:** `pad_hid_mac.h` knows a device by its registry entry ID (`hidpad_entry`): a second reference to a known entry is ignored in every list.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md), one Pro Controller over Bluetooth on the Mac: no music in Kokiri Forest gameplay or its cutscenes, back once the pad was read once.
+
 ### SDK 20 six-axis sensor and amiibo (`nfp`) calls
 
 - **Symptom:** SDK 20 calls that reach a service; `nfp`'s `AttachActivateEvent` / `AttachDeactivateEvent` crashed in the SDK at `sdk+0x3f2a78`.

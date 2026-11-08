@@ -5,7 +5,9 @@ sys.stdout.reconfigure(encoding='utf-8', errors='replace'); sys.stderr.reconfigu
 HERE = os.path.dirname(os.path.abspath(__file__))
 ap = argparse.ArgumentParser(); ap.add_argument('--game', default=os.path.join(HERE, 'game')); ap.add_argument('--keys', default=os.path.join(HERE, 'keys', 'prod.keys'))
 ap.add_argument('--ipa', help='also build the iPhone IPA here, after the Mac app (the Mac compiles its executable: queue.py)'); ap.add_argument('--metal-root'); ap.add_argument('--spirv'); ap.add_argument('--work', default=os.path.join(HERE, 'w')); ap.add_argument('--kit', default=os.path.join(HERE, 'kit')); ap.add_argument('--app-dir', dest='work_app', default=os.path.join(HERE, 'app'))
-ap.add_argument('--ipa-only', action='store_true', help='only the iPhone IPA (--ipa): no Mac app, for a game whose Mac app already exists'); a = ap.parse_args()
+ap.add_argument('--ipa-only', action='store_true', help='only the iPhone IPA (--ipa): no Mac app, for a game whose Mac app already exists')
+ap.add_argument('--out', help='where results/, results.zip and app.zip go (default this folder): one per game when two build at once')
+ap.add_argument('--jobs', help='shader workers (default DM_WIN_J, else twice the threads)'); a = ap.parse_args(); OUT = a.out or HERE; os.makedirs(OUT, exist_ok=True)
 if a.ipa_only and not a.ipa: print('--ipa-only needs --ipa'); sys.exit(2)
 def stop(m): print('\n' + m + '\n'); sys.exit(1)
 print('Checking what the test needs...')
@@ -31,11 +33,14 @@ if not have():
     subprocess.run([sys.executable, '-m', 'pip', 'install', '--only-binary=:all:', '--upgrade', '--target', deps, 'lz4', 'capstone>=5,<6', 'fonttools', 'pillow', 'zbic'] + (['backports.zstd'] if sys.version_info < (3, 14) else []), check=False)
     if not have(): stop('The Python modules could not be installed. The messages above say why; send them to Claude.')
 env = dict(os.environ, DM_WINSHIM='1', DM_WIN_METAL=metal, DM_WIN_METALLIB=os.path.join(os.path.dirname(metal), 'metallib.exe'), DM_WIN_SPIRV=spirv, PYTHONUTF8='1', DMSH_PCH='0', DM_REWRITE_J='1',
-           PYTHONPATH=os.pathsep.join([os.path.join(HERE, 'winshim'), deps]), DOTNET_CLI_TELEMETRY_OPTOUT='1', DOTNET_NOLOGO='1', MSBUILDDISABLENODEREUSE='1', DOTNET_CLI_USE_MSBUILD_SERVER='0', TEMP=os.path.join(HERE, 'tmp'), TMP=os.path.join(HERE, 'tmp'), TMPDIR=os.path.join(HERE, 'tmp'))
+           PYTHONPATH=os.pathsep.join([os.path.join(HERE, 'winshim'), deps]), DOTNET_CLI_TELEMETRY_OPTOUT='1', DOTNET_NOLOGO='1', MSBUILDDISABLENODEREUSE='1', DOTNET_CLI_USE_MSBUILD_SERVER='0', TEMP=os.path.join(OUT, 'tmp'), TMP=os.path.join(OUT, 'tmp'), TMPDIR=os.path.join(OUT, 'tmp'))
+# Shader workers (shader_split.py, dmsh_build.py): twice the threads. Each job is a short metal.exe / metallib.exe, and on Windows starting a process and writing its files
+# leaves the cores idle at one job per thread (about half the CPU on an i7-1165G7). DM_WIN_J overrides it
+env['J'] = a.jobs or os.environ.get('DM_WIN_J') or str(2 * (os.cpu_count() or 4))
 dll = sorted({os.path.dirname(p) for p in glob.glob(os.path.join(glob.escape(mroot), 'lib', '**', '*.dll'), recursive=True)})
 env['PATH'] = os.pathsep.join(dll + [env.get('PATH', '')])
 for d in (env['TEMP'], a.work): os.makedirs(d, exist_ok=True)
-res = os.path.join(HERE, 'results'); shutil.rmtree(res, ignore_errors=True); os.makedirs(res)
+res = os.path.join(OUT, 'results'); shutil.rmtree(res, ignore_errors=True); os.makedirs(res)
 log = os.path.join(res, 'build_console.log'); t0 = time.time(); print('Building. This takes several minutes; the last line shows the current step.\n')
 env['DM_WIN_KIT'] = a.kit; kit_info = json.load(open(os.path.join(a.kit, 'kit.json'), encoding='utf-8')); APP = os.path.join(a.work_app, kit_info.get('name', 'Devil May Cry 3 Special Edition') + '.app'); shutil.rmtree(a.work_app, ignore_errors=True); os.makedirs(a.work_app)
 cmd = [sys.executable, os.path.join(HERE, 'winshim', 'win_main.py'), a.game, '-k', a.keys, '--work-dir', a.work, '--platform', 'mac-app', '--allow-other-metal', '--no-heap-check', '--progress', 'lines', '-o', APP]
@@ -53,7 +58,7 @@ summary = {'app_made': reached, 'exit_code': code, 'seconds': round(time.time() 
 json.dump(summary, open(os.path.join(res, 'status.json'), 'w'), indent=1)
 # Every file's hash, to compare with the Mac's; the files themselves except the very large ones and anything holding keys
 print('Packing the results...')
-rows, z = [], zipfile.ZipFile(os.path.join(HERE, 'results.zip'), 'w', zipfile.ZIP_DEFLATED, allowZip64=True)
+rows, z = [], zipfile.ZipFile(os.path.join(OUT, 'results.zip'), 'w', zipfile.ZIP_DEFLATED, allowZip64=True)
 for r, ds, fs in os.walk(a.work):
     for n in fs:
         q = os.path.join(r, n); rel = os.path.relpath(q, a.work).replace('\\', '/')
@@ -70,7 +75,7 @@ z.close()
 # The app as a zip a Mac unpacks with its executable marks, which Windows files do not have
 if reached:
     print('Packing the Mac app...')
-    zp = os.path.join(HERE, 'app.zip'); rows2 = []
+    zp = os.path.join(OUT, 'app.zip'); rows2 = []
     with zipfile.ZipFile(zp, 'w', allowZip64=True) as az:
         for r, ds, fs in os.walk(APP):
             for n in sorted(fs):
@@ -81,7 +86,7 @@ if reached:
                 with open(q, 'rb') as g, az.open(zi, 'w', force_zip64=True) as w:
                     for b in iter(lambda: g.read(1 << 20), b''): h.update(b); w.write(b)
                 rows2.append(f'{h.hexdigest()}\t{os.path.getsize(q)}\t{rel}')
-    with zipfile.ZipFile(os.path.join(HERE, 'results.zip'), 'a', zipfile.ZIP_DEFLATED) as z2: z2.writestr('results/app_hashes.tsv', '\n'.join(rows2) + '\n')
+    with zipfile.ZipFile(os.path.join(OUT, 'results.zip'), 'a', zipfile.ZIP_DEFLATED) as z2: z2.writestr('results/app_hashes.tsv', '\n'.join(rows2) + '\n')
 if (reached or (a.ipa_only and code == 0)) and a.ipa:
     print('Building the iPhone app...'); shutil.rmtree(os.path.join(a.work, 'tmp'), ignore_errors=True)
     ic = [sys.executable, os.path.join(HERE, 'winshim', 'win_main.py'), a.game, '-k', a.keys, '--work-dir', a.work, '--platform', 'ios', '--allow-other-metal', '--no-heap-check', '--progress', 'lines', '--gpu', 'none', '-o', a.ipa]
@@ -92,6 +97,6 @@ if (reached or (a.ipa_only and code == 0)) and a.ipa:
             if re.search(r'\[\d/\d\]|error|RED|Traceback|iPhone app', l): print('ipa: ' + l.rstrip()[:150])
         ipa_code = p.wait()
     print(f'IPA_RESULT {ipa_code} {os.path.isfile(a.ipa)}')
-    with zipfile.ZipFile(os.path.join(HERE, 'results.zip'), 'a', zipfile.ZIP_DEFLATED) as z2: z2.write(os.path.join(res, 'ipa_console.log'), 'results/ipa_console.log')
+    with zipfile.ZipFile(os.path.join(OUT, 'results.zip'), 'a', zipfile.ZIP_DEFLATED) as z2: z2.write(os.path.join(res, 'ipa_console.log'), 'results/ipa_console.log')
 print('\nOnly the IPA was asked for.' if a.ipa_only else '\nThe Mac app was made.' if reached else f'\nThe build stopped early (exit code {code}). That is useful too: the reason is in the results.')
-print('Copy these back to the Mac (the shared folder is fine) and tell Claude:\n  ' + os.path.join(HERE, 'results.zip') + ('\n  ' + os.path.join(HERE, 'app.zip') if reached else ''))
+print('Copy these back to the Mac (the shared folder is fine) and tell Claude:\n  ' + os.path.join(OUT, 'results.zip') + ('\n  ' + os.path.join(OUT, 'app.zip') if reached else ''))

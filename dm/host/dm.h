@@ -203,6 +203,10 @@ const char *dm_cheats_skipped_why(int i);
 int dm_cheats_nsources(void);         // anchored sources (*.cheats.toml) in the cheats folder
 const char *dm_cheats_source(int i);
 void dm_cheats_exit(void);            // a clean exit (hle_lifecycle.c, atexit): removes the safe-mode flag
+// The game clock (hle_time.c): seconds from the system clock, 0 = the system clock (always 0 under DM_FIXED_TIME); the Mac's Clock menu sets it (front_mac.m)
+int64_t dm_time_offset(void);
+void dm_time_set_offset(int64_t seconds);
+int dm_time_fixed(void);              // DM_FIXED_TIME is set: the clock cannot be moved
 // Graphics lifecycle (hle_nvn.c): on=1 suspends (afterwards submit / present block, and in-flight GPU work is drained before returning), on=0 resumes; called by the iOS front end when entering and leaving the background
 void dm_gfx_suspend(int on);
 void dm_gfx_enter(void); void dm_gfx_leave(void);   // hle_nvn.c: the gate dm_gfx_suspend closes, for graphics layers other than NVN (dm/gfx/vk)

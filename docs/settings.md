@@ -8,6 +8,7 @@ The screen before the game starts shows the settings the game supports. A settin
 - [Performance](#performance): [Frame buffering](#frame-buffering), [Metal 4 pipelines](#metal-4-pipelines), [Pipeline prebuild](#pipeline-prebuild), [Encode thread](#encode-thread), [Hold frames when late](#hold-frames-when-late), [Performance HUD](#performance-hud), [Reset to tested defaults](#reset-to-tested-defaults)
 - [The Mac settings window](#the-mac-settings-window): [Display mode](#display-mode)
 - [In-game menu](#in-game-menu)
+- [Game clock (Mac)](#game-clock-mac)
 - [TV](#tv)
 - [Settings in a file](#settings-in-a-file)
 
@@ -249,6 +250,18 @@ On the iPhone and iPad the gear at the top centre of the touch controls opens a 
 
 Console mode changes as on a Switch put in or taken out of its dock. While a TV shows the game it stays **Docked**, and the mode you pick applies when the TV is disconnected. **Docked** removes the Tap layout, as a docked Switch reads no touch screen.
 
+## Game clock (Mac)
+
+The game's date and time follow the Mac's clock. The **Clock** menu in a Mac app's menu bar, changes them while the game runs:
+
+- **Match System Clock** (the default): the Mac's date and time.
+- **Set Date and Time…** opens a sheet on the game's window with the date and the time to set. Click **Set**: the clock keeps running from there, and the game keeps running behind the sheet.
+- The greyed-out last line shows the game's date and time now.
+
+The choice is kept for that game: the next start runs the clock on from where it was, until you choose **Match System Clock**. The game sees the change as a clock change by the user. Some games only read the date at certain moments, such as at the title screen or when a save loads. The game log says each change (lines starting with `time: game clock`).
+
+In an `env.txt`: `DM_TIME_OFFSET=<seconds>`, how far the game clock runs from the Mac's (negative: behind). It wins over the choice the menu keeps at the next start, and the menu can still change the clock while the game runs. `DM_FIXED_TIME`, for testing, holds the clock still and turns the menu off.
+
 ## TV
 
 Connect a TV or monitor by cable, or start Screen Mirroring to an Apple TV or AirPlay TV. The game fills it in 16:9 at up to 1080p and switches to **Docked**; the iPhone or iPad keeps the controls. Disconnect to bring the game back to the device in its earlier mode. AirPlay adds some delay; a cable has almost none.
@@ -265,6 +278,7 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 | Game language | `DM_LANG` | a language code, such as `ja` |
 | Display mode (Mac) | `DM_FULLSCREEN` | `1` fullscreen, `0` a window |
 | Cloud saves folder (Mac) | `DM_SAVE_SYNC` | a folder; `icloud`: iCloud Drive › nxnative Saves; `0`: off |
+| Game clock (Mac) | `DM_TIME_OFFSET` | seconds from the system clock, such as `86400` for a day ahead; `0` the system clock |
 | Picture (iPhone and iPad) | `DM_PICTURE_FIT` | `fit` 16:9 with black bars, `fill` covers the screen, cropped |
 | Picture shape | `DM_SCREEN_ASPECT` | `auto` the app window's own shape where it is taller than 16:9 (iPad 4:3, iPhone Duo 1.43:1), else 16:9 (iOS only); `1.43` the iPhone Duo's shape, `0` 16:9 |
 | Frame-rate counter | `DM_SHOW_FPS` | `1`, `0` |

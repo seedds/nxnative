@@ -146,6 +146,20 @@ static void cloud_saves_folder(void) {
     if (v) CFRelease(v);
 }
 
+// The game clock: the Clock menu (dm/host/front_mac.m) keeps its distance from the system clock in clock.offset (seconds, a string), which becomes DM_TIME_OFFSET (dm/host/hle_time.c),
+// with or without the window; a DM_TIME_OFFSET the launch environment or an env file set wins. A front end may write the key too (docs/frontends.md, The game clock)
+static void clock_offset(void) {
+    CFStringRef domain = CFBundleGetIdentifier(CFBundleGetMainBundle());
+    if (getenv("DM_TIME_OFFSET") || !domain) return;
+    CFPropertyListRef v = CFPreferencesCopyAppValue(CFSTR("clock.offset"), domain); char s[32], *end;
+    if (v && CFGetTypeID(v) == CFStringGetTypeID() && CFStringGetCString(v, s, sizeof s, kCFStringEncodingUTF8) && *s) {
+        (void)strtoll(s, &end, 10);
+        if (*end) fprintf(stderr, "launcher: clock.offset=%s ignored: not a whole number of seconds\n", s);
+        else { setenv("DM_TIME_OFFSET", s, 1); fprintf(stderr, "launcher: env DM_TIME_OFFSET=%s (the Clock menu's game clock)\n", s); }
+    }
+    if (v) CFRelease(v);
+}
+
 // A game of several programs (Super Mario 3D All-Stars): pack_app.py's table of them, with this app's paths filled in (it may move), for oe::ExecuteProgram (DM_PROGRAMS, hle_oe.c)
 static void programs_table(const char *contents, const char *res, const char *sup) {
     char in[PATH_MAX], out[PATH_MAX]; snprintf(in, sizeof in, "%s/dm/programs.tsv", res); snprintf(out, sizeof out, "%s/programs.tsv", sup);
@@ -204,7 +218,7 @@ int main(int argc, char **argv) {
     int shown = window ? dm_mac_launcher() : 2;
     if (!shown) return 0;   // Quit: no game
     if (shown == 2) saved_choices();
-    cloud_saves_folder();
+    cloud_saves_folder(); clock_offset();
     setenv("DM_ROOT", sup, 0); setenv("DM_ROMFS", romfs, 0); setenv("DM_SAVE", save, 0); setenv("DM_TEMP", temp, 0);
     snprintf(p, sizeof p, "%s/msl", res); setenv("DM_MSL_DIR", p, 0);
     snprintf(p, sizeof p, "%s/font", dm); setenv("DM_FONT_DIR", p, 0);

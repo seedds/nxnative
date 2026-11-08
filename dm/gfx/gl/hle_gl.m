@@ -880,7 +880,9 @@ static void enc_state(void) {
     if (S.stencil && ((int)(S.sref[0] & 0xff) != E.sref[0] || (int)(S.sref[1] & 0xff) != E.sref[1])) {
         E.sref[0] = S.sref[0] & 0xff; E.sref[1] = S.sref[1] & 0xff; [e setStencilFrontReferenceValue:E.sref[0] backReferenceValue:E.sref[1]];
     }
-    if (memcmp(S.bcolor, E.bcolor, sizeof E.bcolor)) { memcpy(E.bcolor, S.bcolor, sizeof E.bcolor); [e setBlendColorRed:S.bcolor[0] green:S.bcolor[1] blue:S.bcolor[2] alpha:S.bcolor[3]]; }
+    if (S.bcolor[0] != E.bcolor[0] || S.bcolor[1] != E.bcolor[1] || S.bcolor[2] != E.bcolor[2] || S.bcolor[3] != E.bcolor[3]) {   // E's NaN after enc_reset differs from any colour
+        memcpy(E.bcolor, S.bcolor, sizeof E.bcolor); [e setBlendColorRed:S.bcolor[0] green:S.bcolor[1] blue:S.bcolor[2] alpha:S.bcolor[3]];
+    }
     id<MTLDepthStencilState> ds = dss_get();
     if ((__bridge void *)ds != E.dss) { E.dss = (__bridge void *)ds; [e setDepthStencilState:ds]; }
 }
@@ -1725,7 +1727,7 @@ static id<MTLTexture> fb_color(GLuint fb, int *level, int *slice) {
 // glGetFramebufferAttachmentParameteriv: what an attachment is and its bits per component (FNA asks for the window's depth and stencil sizes to know its back buffer's
 // depth format). The window's are WIN_*_BITS; an attachment of a framebuffer the game made reports the bits of its Metal format
 static void pf_bits(MTLPixelFormat pf, int b[6]) {   // red, green, blue, alpha, depth, stencil
-    static const struct { MTLPixelFormat pf; int8_t b[6]; } t[] = {
+    static const struct { MTLPixelFormat pf; uint8_t b[6]; } t[] = {
         {MTLPixelFormatRGBA8Unorm, {8, 8, 8, 8}}, {MTLPixelFormatRGBA8Unorm_sRGB, {8, 8, 8, 8}}, {MTLPixelFormatBGRA8Unorm, {8, 8, 8, 8}}, {MTLPixelFormatR8Unorm, {8}},
         {MTLPixelFormatRG8Unorm, {8, 8}}, {MTLPixelFormatRGBA16Float, {16, 16, 16, 16}}, {MTLPixelFormatRGBA32Float, {32, 32, 32, 32}}, {MTLPixelFormatR16Float, {16}},
         {MTLPixelFormatRG16Float, {16, 16}}, {MTLPixelFormatR32Float, {32}}, {MTLPixelFormatRG32Float, {32, 32}}, {MTLPixelFormatRG11B10Float, {11, 11, 10}},
@@ -1914,7 +1916,8 @@ static void uni_from_source(prog_t *p, const shader_t *s) {
         int t = tcode(ty); if (t == T_OTHER) continue;
         int dup = 0; for (int j = 0; j < p->nu; j++) dup |= !strcmp(p->u[j].name, nm);
         if (dup) continue;
-        p->u = realloc(p->u, (p->nu + 1) * sizeof *p->u); puni_t *u = &p->u[p->nu++]; memset(u, 0, sizeof *u);
+        puni_t *grown = realloc(p->u, (p->nu + 1) * sizeof *p->u); if (!grown) return;   // the uniforms listed so far stay
+        p->u = grown; puni_t *u = &p->u[p->nu++]; memset(u, 0, sizeof *u);
         strlcpy(u->name, nm, sizeof u->name); u->type = (uint8_t)t; u->count = (uint16_t)n; u->off[0] = u->off[1] = -1; u->slot[0] = u->slot[1] = -1;
     }
 }

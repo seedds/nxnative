@@ -289,6 +289,14 @@ Games read this count as a position in their own command memory and size their h
 
 ## Queues and syncs
 
+### GPU event waits order work across queues
+
+- **Symptom:** intermittent scene-wide lighting flashes and a persistent pale outline around a character. Extra GPU readbacks or synchronous screenshots can make the flashes disappear temporarily.
+- **Cause:** `nvnCommandBufferWaitEvent` was registered as a no-op. Serializing NVN submissions onto one Metal queue only orders them by CPU arrival; a consumer can be submitted before its producer on another NVN queue. Its acquire must park that queue until the producer releases the event. The native SDK implements exact equality and wrapping greater-or-equal (`(uint32_t)(current - target) < 0x80000000`), and its CPU event signal publishes earlier writes with a store barrier. Ignoring either dependency lets a consumer read cleared or stale shared data.
+- **Fix:** `nvn_queue.inc` retains submitted command streams and replays ready continuations. An unresolved event or sync wait parks only its NVN queue; another queue can submit and execute its producer. GPU event signals end physical submission prefixes and publish after their completion writes, including render-target readback. CPU signals publish with release ordering. Logical queue receipts remain separate from physical Metal fences: a fence on parked work cannot accidentally inherit another queue's completion, and a queued sync wait retains its original target through later refencing. Presents remain in queue order. Descriptor snapshots and retained renderer objects survive deferred replay; the caller still owns backing-memory lifetime.
+- **Check:** `t_wait_event` exercises public NVN calls, CPU and GPU producers, wrapping predicates, a consumer submitted before its producer, and logical sync lifetime. `t_queue_lifetime` checks submitted program/texture descriptor reuse and inherited queue bindings. The focused event, receipt, descriptor and lifecycle checks pass; combined gameplay and performance validation are still pending.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#open), M4 Pro. Its traced lighting producer and ambient-cache consumer have an explicit event dependency; this is a general queue contract, with no shader-key or game check in the fix.
+
 ### Bindings belong to each queue
 
 - **Symptom:** choosing X-2 after the collection launcher crashes in `keys_hash`, reading control address `0x8000000000`; the program object now contains command-buffer data.
@@ -309,14 +317,14 @@ Games read this count as a position in their own command memory and size their h
 
 - **Symptom:** `nvnCommandBufferFenceSync` unimplemented, every `SyncWait` timed out at once.
 - **Cause:** Pokémon Legends: Z-A fences once per frame from a command buffer and waits on it; Unreal's RHI records the call in its command buffers too.
-- **Fix:** a record (`OP_FENCE_SYNC`) fences the sync at replay with the fence value of the submission segment being encoded, so it signals once everything before it has completed (the replay fences the sync with the submission that reaches it).
+- **Fix:** a record (`OP_FENCE_SYNC`) establishes a logical receipt when submitted. Replay publishes its physical fence only after the preceding queue commands have been encoded; `SyncWait` then waits for that fence and its CPU-visible completion writes. An earlier unresolved event keeps the receipt pending even if another queue completes newer physical submissions ([GPU event waits](#gpu-event-waits-order-work-across-queues)).
 - **Found on:** [Pokémon Legends: Z-A](../../dm/games/0100F43008C44000/README.md) (19.3.11; one boot); [Octopath Traveler 0](../../dm/games/01005270232F2000/README.md) (new with Unreal).
 
 ### Submissions from two queues on two threads
 
 - **Symptom:** `FATAL submit re-entered` in the first frames.
 - **Cause:** the game initializes two NVN queues and submits on both from two threads, while the Metal replay keeps one command buffer for the submission in progress.
-- **Fix:** `nvnQueueSubmitCommands` now holds a lock across the replay (`g_sub_mu` in `hle_nvn.c`). It takes the lock before the graphics gate ([Going to the background during the prepare step](#going-to-the-background-during-the-prepare-step)).
+- **Fix:** ready queue continuations replay under one lock (`g_sub_mu` in `hle_nvn.c`); submission copies its command stream and descriptors under the same lock. Queue dependencies determine which continuation can run ([GPU event waits](#gpu-event-waits-order-work-across-queues)). Replay takes the lock before the graphics gate ([Going to the background during the prepare step](#going-to-the-background-during-the-prepare-step)).
 - **Found on:** [Fire Emblem: Three Houses](../../dm/games/010055D009F78000/README.md).
 
 ### Going to the background during the prepare step
@@ -324,7 +332,7 @@ Games read this count as a position in their own command memory and size their h
 - **Symptom:** going to the background (iOS `sceneDidEnterBackground`, minimizing the Mac window) while the "Preparing shaders" or "Preparing pipelines" screen is up blocks the main thread until the step ends: minutes on a first start, long enough for iOS to end the app. The log's `[nvn] graphics suspended` line comes only after the `pipeline prepare:` line.
 - **Cause:** the prepare step (the prewarm and the pipeline prebuild, `mtl_prepare` in `nvn_mtl.m`) runs in the game's first `nvnQueueSubmitCommands`, which held the graphics gate across it. `dm_gfx_suspend(1)` closes the gate and waits for every submit and present inside it to leave. The step loads shaders and builds pipelines and submits no GPU work, so it never needed the gate.
 - **Fix:** the submit entry runs the prepare step under the submit lock (`g_sub_mu`) but before it enters the gate, marked as host work for the guest scheduler (`dm_host_work`). If the app went to the background meanwhile, the submission waits at the gate for the foreground like any other. The lock now comes before the gate, taken with `dm_host_mutex_lock`: with the gate first, a second submission waiting for the lock counted as in flight, so the suspend waited for it while the first, done preparing, waited at the closed gate holding the lock. `mtl_sub_begin` still calls `mtl_prepare`, a no-op by then, for the replay tool (`nvn_replay`), which has no gate.
-- **Check:** the CPU-only `t_gfx_suspend` runs the real submit entry on two threads with a prepare step held by semaphores. It checks that the step runs outside the gate as host work, that the queued second submission is not in flight, that the suspend returns while the step holds the lock, that nothing commits in the background, and that both submissions finish after resume. With the gate taken before the lock it fails before suspending.
+- **Check:** the CPU-only `t_gfx_suspend` runs the real submit entry on two threads with a prepare step held by semaphores. It checks that the step runs outside the gate as host work, that the queued second submission is not in flight, that the suspend returns while the step holds the lock, that nothing commits in the background, and that both queued submissions execute after resume. It also suspends with an unresolved event, releases that event in the background, and verifies that its continuation executes only after resume. With the gate taken before the lock it fails before suspending.
 - **Found on:** no game named in the source (general: every NVN game with a prewarm list; a first start without the Metal cache takes longest). **Open:** not yet run by going to the background during a real game's prepare step on an iPhone.
 
 ### A GPU command buffer that never completes

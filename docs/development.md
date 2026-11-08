@@ -546,6 +546,8 @@ The benchmark gives each frame's GPU time; these switches split it by pass, on t
 
 `DM_NVN_CAPTURE=<frame>:1:<path>` (an NVN game, Mac host) writes one frame to one file, at the boundary between recording and replay: from the frame's first `nvnQueueSubmitCommands` to its present (frames counted as `DM_NVN_SHOT` counts them). `dm/gfx/tests/nvn_replay` replays it against the replay layer of the tree it is built from (`nvn_mtl.m` and everything under it) and compares the presented frame with the live one:
 
+Format 1 supports a single logical NVN queue without event or sync waits. The capture refuses a run that has used multiple queues or either wait operation, with a `[RED]` diagnostic and a failure marker at the requested path: physical replay order cannot represent those dependencies. The standalone replayer rejects failure markers and wait records before starting Metal. Existing captures without waits remain readable; capturing logical queue dependencies is still open.
+
 ```sh
 DM_NVN_CAPTURE=900:1:<NSP folder>/<id>-work/capture/frame900.nvncap DM_PSO_HYBRID=0 … dm/host/dmhost <modules>
 make -C dm/gfx/tests GAME=<id> nvn_replay

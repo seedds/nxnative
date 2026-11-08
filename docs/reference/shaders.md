@@ -1636,6 +1636,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Check:** `test_dmsh_pool_arrays.py` checks the rewrite and the reflection.
 - **Found on:** [Kirby Air Riders](../../dm/games/040077201BE50000/README.md): most of its lit materials and light probes.
 
+### Reads of a handle table marked through a null address
+
+- **Symptom:** a pass that samples through [a table of a uniform buffer's handles](#a-table-of-handles-longer-than-the-array) takes hundreds of milliseconds on the GPU; nothing is red and the picture is right. In Fire Emblem Fortune's Weave on an M1 Pro, the lighting pass at Alcineus Bridge took 196.7 ms and the scene ran at 4 fps.
+- **Cause:** `dmsh_build.py` `pool_arrays` gave the table's texture reads the same mark as [the pool's](#texture-handles-from-game-memory-index-the-pools) (`dm_pool_mark`, an atomic load, and an OR when the bit is clear, at the bitmap address in the buffer's header). `htab_gpu` never set that address, so every read went to address 0. The mark had no use there anyway: a table's index is its element, not a texture ID, and the replay has made every texture the table names before the draw.
+- **Fix:** a chain change. `pool_arrays` marks only reads of the texture pool (`_cb0_40000000`); a table is read plainly, and a fragment shader with no other mark keeps its depth test where Metal puts it. The header keeps its layout, with the address 0 in a table. PR #1738 (HammerChain), which found the null address, pointed it at a premarked bitmap in the host instead; with that the bridge ran at 56.1 fps and the lighting pass took 2.35 ms (M1 Pro, 1080p output from 960x540). The chain change takes the mark away as well, which leaves every table read a plain load.
+- **Check:** `test_dmsh_pool_arrays.py` (`test_table_of_uniform_handles`).
+- **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md#rendering) at Alcineus Bridge.
+
 ### An array of uniform-buffer handles with its sampler word in c2
 
 - **Symptom:** `reflection conversion failed: B binding fp_t2ds_cb196614_10570000 has no resolved slot number`, then `failed to load`; those draws are skipped, and the scene is dark or black where it is lit by them.
@@ -2146,6 +2154,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Cause:** that run compiled its Metal libraries and pipelines on first use (cold cache). With a warm cache the title is up after about 15 s; what looked like a 40-second wait in the read log (`DM_FSLOG`) was the title screen itself, which reads nothing.
 - **Check:** screenshots every few seconds (`ctl.sh snap` from a script) told the two apart.
 - **Found on:** [Bayonetta 3](../../dm/games/01004A4010FEA000/README.md) (SDK 13.3.2).
+
+### Native mesh draws omitted while their pipeline compiles
+
+- **Symptom:** missing geometry or bright patches just after loading, which disappear as background pipeline compilation finishes.
+- **Cause:** `mtk_pso` started an asynchronous native task/mesh pipeline build and returned no pipeline; the draw was omitted until a later frame found the completed pipeline. This copied the geometry-mesh optimization's behavior without its equivalent compute fallback. Native mesh draws have no such replacement. Metal validation also rejected the helper descriptor assigning a mesh function to `vertexFunction` before copying its raster state.
+- **Fix:** compile the demanded native mesh pipeline before issuing its first draw, then reuse the cached pipeline. The shared descriptor helper leaves `vertexFunction` unset for a native mesh shader; the mesh descriptor receives it as `meshFunction`. A cold pipeline can delay the first frame but cannot silently remove its draw. `t_mesh_first_use` exercises real NVN submissions with mesh-only, task/mesh, depth-only and ordinary vertex shaders: the old host failed 10 of 42 pixel/state checks; the fixed host passes all 42 with Metal validation in both encoding modes.
+- **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md), M4 Pro startup white patches. The synthetic GPU regression verifies the missing-draw mechanism; the corrected game's startup remains to be checked with the queue fix.
 
 ### Geometry runs across occlusion query boundaries
 

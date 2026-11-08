@@ -503,6 +503,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 
 ## Frame rate
 
+- after a GPU address fault, a frame's diagnostic GPU time is trillions of milliseconds while adjacent frames report ordinary timings. → [Invalid GPU completion times inflate frame diagnostics](../reference/frame-rate.md#invalid-gpu-completion-times-inflate-frame-diagnostics)
 - clang reports division by zero in `fstep_tick` (`hle_nvn.c`). → [Frame cap checked and used from the same sample](../reference/frame-rate.md#frame-cap-checked-and-used-from-the-same-sample)
 - a 30 fps game to run at 60; after the floor was lowered, slow motion on a GPU-bound device (GitHub issue #9). → [sead's dynamic present interval, `ksys::VFR` and the host's frame step](../reference/frame-rate.md#seads-dynamic-present-interval-ksysvfr-and-the-hosts-frame-step)
 - on a Mac whose frames take longer than a vsync, the game runs in slow motion rather than at a lower frame rate: movement, animation and the game's clocks fall behind real time, while the frame counter shows 30-45 fps. → [A fixed frame step plays in slow motion on a slow Mac](../reference/frame-rate.md#a-fixed-frame-step-plays-in-slow-motion-on-a-slow-mac)

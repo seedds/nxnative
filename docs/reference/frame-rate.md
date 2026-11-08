@@ -4,6 +4,13 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 
 ## Frame step
 
+### Invalid GPU completion times inflate frame diagnostics
+
+- **Symptom:** after a GPU address fault, a frame's diagnostic GPU time is trillions of milliseconds while adjacent frames report ordinary timings.
+- **Cause:** the frame accumulator accepted any positive duration with a positive start. Missing or corrupt completion feedback could supply a non-finite or future endpoint, poisoning both the summed duration and the frame span.
+- **Fix:** accept only finite, positive, ordered endpoints that have elapsed on Metal's host clock. Invalid feedback still retires its pending completion, but adds neither a duration nor a span; valid work in the same frame remains counted. This changes diagnostic timing, not GPU execution or fault recovery.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game), [issue #1737](https://github.com/seedds/nxnative/issues/1737). The underlying intermittent GPU address fault remains open; gameplay and device validation of the timing correction are unavailable.
+
 ### Frame cap checked and used from the same sample
 
 - **Symptom:** clang reports division by zero in `fstep_tick` (`hle_nvn.c`).

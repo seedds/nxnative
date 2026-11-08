@@ -49,7 +49,7 @@ static AudioDeviceID default_input_device(void) {
 static int device_string(AudioDeviceID device, AudioObjectPropertySelector selector, char out[0x100]) {
     memset(out, 0, 0x100);
     AudioObjectPropertyAddress address = { selector, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
-    CFStringRef value = NULL; UInt32 size = sizeof value;
+    CFStringRef value = NULL; UInt32 size = sizeof(CFStringRef);
     if (AudioObjectGetPropertyData(device, &address, 0, NULL, &size, &value) != noErr || !value) return 0;
     int ok = CFStringGetCString(value, out, 0x100, kCFStringEncodingUTF8);
     CFRelease(value);

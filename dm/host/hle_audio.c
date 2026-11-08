@@ -711,7 +711,7 @@ HLE_FORCE("_ZN2nn5audio31GetVirtualInputDevicePropertiesEPNS0_23VirtualDevicePro
 HLE_FORCE("_ZN2nn5audio15OpenInputStreamEPNS0_15InputStreamTypeEPvmRKNS0_15AudioDeviceNameERKNS0_12StreamFormatEi", "open a polling queue; hardware start is deferred until StartInputStream", Result, h_is_Open,
           void *g, void *buf, size_t size, const char *dev, const void *fmt, int frames) {
     (void)buf; (void)size;
-    if (!g || !dev || !fmt || strncmp(dev, "AudioVirtualInput", 0x100) || objmap_get(g)) return RES_FAIL;
+    if (!g || !dev || !fmt || strncmp(dev, "AudioVirtualInput", sizeof "AudioVirtualInput") || objmap_get(g)) return RES_FAIL;
     os_format f; memcpy(&f, fmt, sizeof f);
     dm_audio_input_stream *s = dm_audio_input_open(f.format, f.channels, f.rate, frames);
     if (!s) { LOG("audio input: OpenInputStream failed (format=%d channels=%d rate=%d capacity=%d)", f.format, f.channels, f.rate, frames); return RES_FAIL; }

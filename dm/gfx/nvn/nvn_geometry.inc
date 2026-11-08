@@ -421,7 +421,7 @@ static id<MTLRenderPipelineState> geo_mesh_pso_for(NvProg *pr, id<MTLFunction> f
     k.fsfn = (__bridge void *)fn;
     // The last built pipeline's key: the draws of a depth prepass (Donkey Kong Bananza's map: 1900-8000 a frame) ask for the same one draw after draw, without the lock and the table
     static pso_key last_k; static __unsafe_unretained id<MTLRenderPipelineState> last_ps;
-    if (last_ps && !memcmp(&k, &last_k, sizeof k)) return last_ps;
+    if (last_ps && !memcmp(&k, &last_k, sizeof k)) return last_ps;   // NOLINT(bugprone-suspicious-memory-comparison): pso_key_fill zeroes the whole key first, padding included (as the table's own lookup compares it)
     os_unfair_lock_lock(&g_pso_mesh_lock); id ps = hm_get_id(&g_pso_mesh, &k);
     if (!ps) { if (!g_pso_mesh_building) g_pso_mesh_building = [NSObject new]; hm_put_id(&g_pso_mesh, &k, g_pso_mesh_building); }
     os_unfair_lock_unlock(&g_pso_mesh_lock);

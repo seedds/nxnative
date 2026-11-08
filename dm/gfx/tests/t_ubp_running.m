@@ -25,8 +25,71 @@ static void words(const uint32_t *got, const uint32_t *want, int n, const char *
     if (got) for (int i = 0; i < n; i++) if (got[i] != want[i]) fprintf(stderr, "  word %d: %#x, want %#x\n", i, got[i], want[i]);
 }
 
+// The ledger does not dereference these addresses. Choose collisions with the
+// production hash, but derive the expected hazards from the writes alone.
+static void colliders(uint64_t *pages, unsigned n, unsigned slot) {
+    for (uint64_t pg = 1; n; pg++) if (gw_slot(pg) == slot) { *pages++ = pg; n--; }
+}
+static void ledger_reset(uint64_t done) {
+    memset(g_gw, 0, sizeof g_gw); memset(g_gwx, 0, sizeof g_gwx);
+    memset(g_gww, 0, sizeof g_gww); g_gw_all = 0; g_done = done;
+}
+static void ledger_write(gw_ent *t, uint64_t pg, uint64_t fence) { gw_put_in(t, pg << 12, (pg << 12) + 4, fence, g_done); }
+static int ledger_live(const gw_ent *t, uint64_t pg) { return gw_live_in(t, pg << 12, (pg << 12) + 4); }
+static void ledger_cases(void) {
+    uint64_t p[4]; colliders(p, 4, GW_N - 1);   // displaced entries wrap past the end of the table
+    uint64_t crowded[17]; colliders(crowded, 17, GW_N - 1);
+    for (int which = 0; which < 2; which++) {
+        gw_ent *t = which ? g_gwx : g_gw;
+        ledger_reset(10);
+        ledger_write(t, p[0], 20); ledger_write(t, p[1], 30);
+        CHECK(ledger_live(t, p[0]) && ledger_live(t, p[1]), "both colliding live writes remain hazards");
+        CHECK(!ledger_live(t, p[2]), "an untouched colliding page is not a hazard");
+        CHECK(gw_live_in(t, (p[1] << 12) + 4095, (p[1] << 12) + 4096), "the whole written page stays protected");
+        g_done = 20;
+        CHECK(!ledger_live(t, p[0]) && ledger_live(t, p[1]), "one colliding writer completes independently");
+        ledger_write(t, p[1], 40); ledger_write(t, p[1], 25);
+        ledger_write(t, p[2], 35);   // reuse the completed entry before p[1], without hiding it
+        g_done = 35;
+        CHECK(ledger_live(t, p[1]) && !ledger_live(t, p[2]), "a displaced page keeps its newest fence across an expired hole");
+        CHECK(!ledger_live(t, p[3]), "reusing an expired collision does not poison another page");
+        g_done = 40;
+        CHECK(!ledger_live(t, p[1]), "the displaced writer expires at its newest fence");
+
+        ledger_reset(10);
+        for (int i = 0; i < 16; i++) ledger_write(t, crowded[i], 20);
+        int all_live = 1; for (int i = 0; i < 16; i++) all_live &= ledger_live(t, crowded[i]);
+        CHECK(all_live && !g_gw_all && !ledger_live(t, crowded[16]), "all sixteen probes retain separate identities");
+        ledger_write(t, crowded[15], 40); ledger_write(t, crowded[16], 30);
+        CHECK(g_gw_all == 30, "the seventeenth collider uses the conservative fallback");
+        g_done = 30;
+        CHECK(ledger_live(t, crowded[15]) && !ledger_live(t, crowded[16]), "the last probe remains visible after overflow completes");
+
+        // More distinct live writes than the ledger can hold: keep a global
+        // fallback fence, then prove its completion does not hide a newer writer.
+        ledger_reset(50);
+        uint64_t overflow = 0;
+        for (uint64_t pg = 1; pg <= GW_N + 1; pg++) { ledger_write(t, pg, 60); if (!overflow && g_gw_all) overflow = pg; }
+        CHECK(g_gw_all == 60 && ledger_live(t, GW_N + 2), "saturation conservatively protects unlisted pages");
+        if (overflow) { ledger_write(t, overflow, 70); ledger_write(t, overflow, 65); }
+        CHECK(g_gw_all == 70, "further saturation keeps the newest overflow fence");
+        ledger_write(t, 1, 80);
+        g_done = 60;
+        CHECK(ledger_live(t, GW_N + 2), "completing older overflow does not release newer overflow");
+        g_done = 70;
+        CHECK(ledger_live(t, 1), "overflow completion preserves a newer tracked writer");
+        CHECK(!ledger_live(t, GW_N + 2), "the global saturation fence expires");
+        ledger_write(t, GW_N + 2, 75);
+        CHECK(ledger_live(t, GW_N + 2) && !ledger_live(t, GW_N + 3), "completed capacity can be reused without another overflow");
+        g_done = 80;
+        CHECK(!ledger_live(t, 1) && !ledger_live(t, GW_N + 2), "all completed writes stop blocking");
+    }
+    ledger_reset(0);
+}
+
 int main(void) { @autoreleasepool {
     setenv("DM_NVN_TBDR", "0", 1);
+    ledger_cases();
     mtl_init();
     mem = mmap(NULL, LEN, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
     CHECK(mem != MAP_FAILED, "memory allocated"); if (mem == MAP_FAILED) return 1;
@@ -39,6 +102,18 @@ int main(void) { @autoreleasepool {
     update(0, 0xa0, 4); update(8, 0xa2, 4); commit_as_running();
     update(0, 0xb0, 4); update(8, 0xb2, 4);
     { const uint32_t want[] = {0xb0, 0x11111111, 0xb2}; words(made_shadow(0, 12), want, 3, "a hole beside fields updated by a running submission reads memory"); }
+    commit_as_running();
+
+    // Two real running writes elsewhere used to make this untouched page look
+    // GPU-written solely because all three hash alike. Its partial shadow must
+    // still contain memory plus the actual inline update.
+    uint64_t pg[3]; colliders(pg, 3, gw_slot(((uint64_t)mem + 0x14000) >> 12));
+    uint64_t own = ((uint64_t)mem + 0x14000) >> 12;
+    for (int i = 0, written = 0; i < 3 && written < 2; i++) if (pg[i] != own) { gw_put(pg[i] << 12, (pg[i] << 12) + 4, running, g_done); written++; }
+    update(0x14008, 0xabc, 4);
+    uint64_t refused = g_ubp_why[2];
+    { const uint32_t want[] = {0x11111111, 0x11111111, 0xabc}; words(made_shadow(0x14000, 12), want, 3, "colliding writes do not refuse a safe partial shadow"); }
+    CHECK(g_ubp_why[2] == refused, "collisions do not count as running-writer refusals");
     commit_as_running();
 
     // A field only the running submission updated: memory does not hold it yet
@@ -93,6 +168,15 @@ int main(void) { @autoreleasepool {
     CHECK(!g_pend_over, "a submission of 43,400 inline updates fits the pending list");
     { const uint32_t want[] = {6199}; words(made_shadow(0x1c000, 4), want, 1, "and a shadow in it shows the last one"); }
     commit_as_running();
+
+    // A saturated probe range must still refuse a shadow, report the running
+    // writer reason, and release it once the conservative fence completes.
+    uint64_t crowded[17]; colliders(crowded, 17, GW_N - 1);
+    for (int i = 0; i < 17; i++) gw_put(crowded[i] << 12, (crowded[i] << 12) + 4, running, g_done);
+    update(0x16004, 0xc5, 4); refused = g_ubp_why[2];
+    CHECK(!made_shadow(0x16000, 12) && g_ubp_why[2] == refused + 1, "saturation refuses a shadow and counts the running writer");
+    g_done = running;
+    { const uint32_t want[] = {0x22222222, 0xc5, 0x22222222}; words(made_shadow(0x16000, 12), want, 3, "completion releases the saturated shadow with its pending update"); }
 
     pend_reset(); g_nubd = 0;
     printf("t_ubp_running: %d checks, %d failed\n", checks, failed); fflush(stdout);

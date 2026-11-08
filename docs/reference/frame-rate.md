@@ -488,9 +488,9 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 
 ### A full table of running GPU writes ends passes for nothing
 
-- **Symptom:** many passes a frame on the same attachments, with the residency set line showing `passes ended to land them for a read` in the thousands and `refused …: earlier submission running` matching it. Ocarina of Time: 10,463 per 300 frames, each ending the pass over a uniform block no GPU write touched.
-- **Cause:** a uniform shadow asks a table of the pages GPU writes of running submissions touch (`gw_live_in`). It had 4,096 slots, a colliding slot meaning any page, and a game with this many writes kept all of them live, about 400 as wildcards, so a block whose page hashes onto a wildcard was refused.
-- **Fix:** general: 65,536 slots (`GW_N`, about 2 MB). The refusals fell to 291 per 300 frames, and the worst frames from about 45 to about 35 ms.
+- **Symptom:** many passes a frame on the same attachments, with the residency set line showing `passes ended to land them for a read` in the thousands and `refused …: earlier submission running` matching it, each ending the pass over a uniform block no GPU write touched.
+- **Cause:** a uniform shadow asks a table of the pages GPU writes of running submissions touch (`gw_live_in`). It had 4,096 slots, a colliding slot meaning any page, so a block whose page hashed onto a wildcard was refused.
+- **Fix:** enlarging the ledgers to 65,536 slots (`GW_N`, 2 MiB together) reduced collisions but did not resolve them. The ledgers now [retain colliding page identities](rendering.md#colliding-gpu-write-pages-refused-unrelated-uniform-shadows) within bounded probe ranges, with conservative overflow protection. The earlier capacity change's measurements are in the game's [frame-rate note](../../dm/games/0400486024DEC000/README.md#frame-rate).
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md).
 
 ### A host's own store in a fragment shader moves its depth test

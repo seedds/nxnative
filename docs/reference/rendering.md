@@ -1183,6 +1183,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md): its ink query block is updated at 0x00..0x14 and 0x18..0x70 while the shader reads 0x00..0x70, so one unused word leaves it partly covered, before each of about 150 queries a frame; `7866f36373e7` writes a 56 MB buffer each frame. 90,000 refusals every 300 frames became none. `DM_NVN_UBP_CHECK=1` on the first level: 592,000 shadows equal to the GPU's memory, 0 different.
 - **Check:** `make -C dm/gfx/tests GAME=<id> check_t_ubp_running` and `check_t_sbw` (fails with `DM_NVN_UBP_RUNNING=0`).
 
+### Colliding GPU-write pages refused unrelated uniform shadows
+
+- **Symptom:** a partly covered uniform shadow is refused as `earlier submission running`, even though no GPU write touched its page; the refusal ends the render pass.
+- **Cause:** the running-write ledgers (`g_gw` and `g_gwx`) kept one page identity per hash slot. Two live pages at the same slot replaced that identity with a wildcard, so every other page with that hash was considered written too. More slots reduced collisions without resolving them.
+- **Fix:** each page probes at most 16 consecutive slots, wrapping at the end, in the existing 65,536-entry ledgers. Colliding pages keep separate identities and monotonically updated fences. A completed slot is reused only after looking for the same page throughout its probe range; lookups also cross completed slots. If every probed slot holds another live page, the existing global fallback fence conservatively covers the unlisted write until it completes. No live entry is evicted. The two ledgers still occupy 2 MiB, with at most 16 slot comparisons per page and no allocation; wide-write intervals and remembered inline-update bytes keep their existing rules.
+- **Found on:** the source-only collision report for [Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game), [issue #1505](https://github.com/seedds/nxnative/issues/1505). This resolves the synthetic false hazard; current-main gameplay and iPhone performance remain unmeasured.
+
 ### A submission past 8,192 queued writes counted as writing everywhere
 
 - **Symptom:** one scene of a game drops to 1-2 fps and stays there, with the GPU busy 400-600 ms a frame and about ten times the render passes of the scenes before it, many of one draw each on the same target. The `residency set` line shows `passes ended to land them for a read` in the tens of thousands, nearly all `refused … earlier submission running`, with some `unreadable`. A pass dump (`DM_NVN_PASSDUMP`) names `draw_` → `ubd_conflict` as the end of those passes (`E <pass> pass ends in <function>:<line>`).

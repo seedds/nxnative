@@ -401,6 +401,9 @@ t_missing_src1: t_missing_src1.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_missing_src1.m $(MTL_T_SRC) $(FW)
 check_t_integer_blend: RUN_ENV = MTL_DEBUG_LAYER=1
 check_t_missing_src1: RUN_ENV = MTL_DEBUG_LAYER=1
+t_omap_mask: t_omap_mask.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_omap_mask.m $(MTL_T_SRC) $(FW)
+check_t_omap_mask: RUN_ENV = MTL_DEBUG_LAYER=1
 t_primitive_restart: t_primitive_restart.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_primitive_restart.m $(MTL_T_SRC) $(FW)
 check_t_primitive_restart: RUN_ENV = MTL_DEBUG_LAYER=1

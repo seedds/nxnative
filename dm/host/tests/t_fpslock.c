@@ -1,5 +1,6 @@
 // Exercise production build gates and frame-limit writes against sparse synthetic module memory; Unreal's rows come from the console variables the rewriter names in main's fixups,
-// a target frame rate the game steps by from the field it names there (FPS_TARGET_PTR, FPS_TARGET_FIELD), and Unreal's fixed frame rate on GEngine (UE_FIXED_RATE_PTR / _FIELD).
+// a target frame rate the game steps by from the field it names there (FPS_TARGET_PTR, FPS_TARGET_FIELD), Unreal's fixed frame rate on GEngine (UE_FIXED_RATE_PTR / _FIELD), and
+// Unity's targetFrameRate and vSyncCount from its internal-call table (UNITY_*).
 #include "../hle.h"
 #undef DM_GAME_FPS_MAX
 static int test_fps_max = 120;
@@ -52,7 +53,7 @@ static void check(int which) {
     assert(base != MAP_FAILED);
     g_nmod = 1; strcpy(g_mod[0].name, "main"); g_mod[0].base = base;
     strcpy(g_mod[0].build_id, "94ceae325c205c4b9d6f7235552f28fd");
-    setenv("DM_FPS_TARGET", which == 22 || which == 24 ? "60" : which >= 19 ? "120" : which == 1 || which == 10 || which == 18 ? "30" : which == 2 || which == 11 ? "0" : "60", 1);
+    setenv("DM_FPS_TARGET", which == 27 ? "0" : which == 26 ? "120" : which >= 25 ? "60" : which == 22 || which == 24 ? "60" : which >= 19 ? "120" : which == 1 || which == 10 || which == 18 ? "30" : which == 2 || which == 11 ? "0" : "60", 1);
     if (which == 20) test_fps_max = 60;
     int32_t *unity = (int32_t *)(base + 0x4afc868);
     *unity = which == 1 ? 60 : which == 4 ? -1 : which == 5 ? 0 : 30;
@@ -101,6 +102,16 @@ static void check(int which) {
         g_mod[0].ue_fixed_flag = 0x9c4 << 8 | 0x40;
         if (which != 24) object[0x100 - 4] = 0x47;   // the flag byte at +0x9c4, bit 0x40 set among others (Pikmin 4: 0x47)
         else object[0x100 - 4] = 0x07;
+    } else if (which >= 25 && which <= 29) {   // Unity, at the places the rewriter found through the internal-call table (The Rogue Prince of Persia 1.1.0): vSyncCount in quality
+        // level 1 of 0x100-byte levels, set to 2 (0 in 29, where the game paces by targetFrameRate), and targetFrameRate (-1; 60 in 26, 30 in 29); 28: Pokémon Brilliant Diamond's
+        // build, whose own row names the same targetFrameRate field
+        if (which != 28) strcpy(g_mod[0].build_id, "0123456789abcdef0123456789abcdef");
+        g_mod[0].unity_target_fps = which == 28 ? 0x4afc868 : 0x8d33de8;
+        g_mod[0].unity_qs_ptr = 0x90957d8; g_mod[0].unity_qs_idx = 0x64; g_mod[0].unity_qs_arr = 0x20; g_mod[0].unity_qs_size = 0x100; g_mod[0].unity_qs_vsync = 0x88;
+        *(uintptr_t *)(base + 0x90957d8) = (uintptr_t)object;
+        *(int32_t *)(object + 0x64) = 1; *(uintptr_t *)(object + 0x20) = (uintptr_t)(object + 0x100);   // two levels from object + 0x100: level 1's count at +0x288
+        sync = (int32_t *)(object + 0x100 + 0x100 + 0x88); *sync = which == 29 ? 0 : 2; sync[-0x40] = 3;   // and level 0's, which the host must not touch
+        if (which != 28) { int32_t *t = (int32_t *)(base + 0x8d33de8); *t = which == 26 ? 60 : which == 29 ? 30 : -1; }
     } else if (which == 17 || which == 18 || which == 19 || which == 20) {   // Fire Emblem Fortune's Weave: the target the rewriter found, 30 in gameplay (17) or 60 in a menu (18, at DM_FPS_TARGET=30)
         strcpy(g_mod[0].build_id, "0123456789abcdef0123456789abcdef");
         g_mod[0].fps_target_ptr = 0x21e60d8; g_mod[0].fps_target_field = 0x1dc;
@@ -135,6 +146,21 @@ static void check(int which) {
         assert(*f == 120 && sync[0] == 1 && sync[1] == 1);
         test_high = 60; dm_fps_lock_tick(); assert(*f == 60);
         test_high = 120; dm_fps_lock_tick(); assert(*f == 120);
+        munmap(base, len); return;
+    }
+    if (which >= 25 && which <= 29) {
+        int32_t *t = (int32_t *)(base + 0x8d33de8);
+        assert(sync[-0x40] == 3);
+        if (which == 25) {   // 60: one vsync; targetFrameRate unset (-1) stays; the game setting 2 again (a scene change) is undone
+            assert(*sync == 1 && *t == -1 && writes == 1);
+            dm_fps_lock_tick(); assert(writes == 1);
+            *sync = 2; dm_fps_lock_tick(); assert(*sync == 1 && writes == 2);
+        } else if (which == 26) {   // 120: still one vsync; the target follows the hold
+            assert(*sync == 1 && *t == 120);
+            test_high = 60; dm_fps_lock_tick(); assert(*sync == 1 && *t == 60);
+        } else if (which == 27) assert(*sync == 2 && *t == -1 && writes == 0);   // no target: left as the game sets them, though the engine limit is there
+        else if (which == 28) assert(*sync == 1 && *unity == 60 && writes == 2);   // the build's row and the found field are the same: written once
+        else assert(*sync == 0 && *t == 60 && writes == 1);   // 29: a count of 0 is the game's choice to pace by targetFrameRate, which is raised
         munmap(base, len); return;
     }
     if (which == 21) {
@@ -183,7 +209,7 @@ static void check(int which) {
 
 int main(void) {
     // Each process starts the production one-time initialization with a fresh build and target.
-    for (int i = 0; i < 25; i++) {
+    for (int i = 0; i < 30; i++) {
         pid_t p = fork(); assert(p >= 0);
         if (!p) { check(i); _exit(0); }
         int status; assert(waitpid(p, &status, 0) == p); assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);

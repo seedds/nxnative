@@ -104,12 +104,18 @@ static void hidpad_use(hid_pad *d) {
     if (d->vid != PAD_HID_DEFAULT_VENDOR && !getenv("DM_HID_MAP"))
         LOG("controller '%s' (HID, %04x:%04x): buttons use 8BitDo's numbering; if they are in the wrong places, DM_HID_LOG=1 logs each button's number for a DM_HID_MAP", d->name, d->vid, d->pid);
 }
+// The device's I/O Registry entry: IOHIDManager hands one device over once per matching dictionary it meets (a Pro Controller meets both the GamePad usage
+// and its vendor / product one), each time as a new IOHIDDeviceRef, so a pad is known by its entry, not by its reference
+static uint64_t hidpad_entry(IOHIDDeviceRef hid) { uint64_t id = 0; IORegistryEntryGetRegistryEntryID(IOHIDDeviceGetService(hid), &id); return id; }
+static int hidpad_known(const hid_pad *list, IOHIDDeviceRef hid, uint64_t entry) {
+    for (const hid_pad *d = list; d; d = d->next) if (d->hid == hid || (entry && hidpad_entry(d->hid) == entry)) return 1;
+    return 0;
+}
 static void hidpad_found(void *ctx, IOReturn result, void *sender, IOHIDDeviceRef hid) {
     (void)ctx; (void)sender;
     if (result != kIOReturnSuccess || IOHIDDeviceGetProperty(hid, CFSTR(kIOHIDGCSyntheticDeviceKey)) == kCFBooleanTrue) return;
-    for (hid_pad *d = g_hidpads; d; d = d->next) if (d->hid == hid) return;
-    for (hid_pad *d = g_hidpads_waiting; d; d = d->next) if (d->hid == hid) return;
-    for (hid_pad *d = g_hidpads_gc; d; d = d->next) if (d->hid == hid) return;
+    uint64_t entry = hidpad_entry(hid);
+    if (hidpad_known(g_hidpads, hid, entry) || hidpad_known(g_hidpads_waiting, hid, entry) || hidpad_known(g_hidpads_gc, hid, entry)) return;
     hid_pad *d = calloc(1, sizeof *d); if (!d) { LOG("[RED] HID gamepad: cannot allocate device state"); return; }
     pad_hid_init(&d->st, getenv("DM_HID_MAP"));
     NSString *name = (__bridge NSString *)IOHIDDeviceGetProperty(hid, CFSTR(kIOHIDProductKey));

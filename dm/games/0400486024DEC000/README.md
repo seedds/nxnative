@@ -90,6 +90,7 @@ From an empty save: at about 45 s `A` (title), `A` (New Game), then the movie. F
 
 ## Found on this game
 
+- [One Pro Controller read as two players](../../../docs/reference/services.md#one-pro-controller-read-as-two-players): resolved, no music in Kokiri Forest gameplay and its cutscenes; the controller applet opened over and over and the game kept its music suspended while it had focus.
 - [A fixed frame step plays in slow motion on a slow Mac](../../../docs/reference/frame-rate.md#a-fixed-frame-step-plays-in-slow-motion-on-a-slow-mac): the frame-ratio division.
 - [Frame-step stubs placed by their function](../../../docs/reference/rewriter.md#frame-step-stubs-placed-by-their-function)
 

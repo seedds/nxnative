@@ -37,6 +37,14 @@ sys_resource	0x1000000
 shader_groups	/Data/=data /.nrr/=nrr /Plugins/=plugins
 shader_note	The Rogue Prince of Persia shaders
 
+# ---- Frame rate ----
+# 60 fps (30 on the Switch), up to 120 on the Mac: the game sets Unity's QualitySettings.vSyncCount to 2, which Unity hands to NVN as present interval 2, and steps by the time that
+# really passed. The rewriter finds vSyncCount and Application.targetFrameRate through Unity's internal-call table in any build it reads (dm/tools/unity_fps.py), the host writes the
+# target there (hle_fpslock.c) and presents at it. 120 needs the display's vsync event at 120 too (hle_nvn.c nvn_vsync_hz): Unity's NVN device waits for each vblank.
+# The speed checked at 30, 60 (a timed walk) and 120 (the user's play test)
+fps_target	60
+fps_max	120
+
 # ---- Graphics ----
 # the game calls nvnDeviceSetDepthMode with near = 0: the pipeline bases made before it runs are made for that mode
 depth_mode	zero

@@ -2,6 +2,7 @@
 // fps_target (DM_FPS_TARGET overrides; 0 = leave the game's own limit), the same key that drives Tears of the Kingdom's frame step (loader.c install_fps_state). Called on every present
 // (hle_nvn.c); the game sets the values after boot and may set them again, so each is written whenever it differs. Fixed addresses: each row runs only on the main build it was found in (AGENTS.md).
 // A target frame rate the game steps by needs no row either: the rewriter finds it by its readers in any build (dm/tools/fps_target.py, main's fixups FPS_TARGET_PTR / FPS_TARGET_FIELD).
+// Nor do Unity's Application.targetFrameRate and QualitySettings.vSyncCount: the rewriter finds them through the engine's internal-call table (dm/tools/unity_fps.py, main's fixups UNITY_*).
 // Unreal Engine needs no row: the rewriter finds its console variables by their registered names in any build (dm/tools/ue_cvar.py, main's fixups UE_CVAR:<name>), and the host writes
 // the frame limit, the profile's ue_fps_cvar (t.MaxFPS, or a game's own variable its settings apply to t.MaxFPS: SHIN MEGAMI TENSEI V: Vengeance's Project.FrameRateLimit), and the
 // present interval, rhi.SyncInterval (nvn.SyncInterval in UE 4.18's Switch RHI: DRAGON QUEST XI S). Each is a TAutoConsoleVariable whose +0x10 points to its value, the game thread's
@@ -208,8 +209,24 @@ static int ue_rows(const module_t *m, lock_t *out, int *missing) {
     return n;
 }
 
+// Unity's frame rate, at the places the rewriter found through the engine's internal-call table (dm/tools/unity_fps.py; main's fixups UNITY_*), in any Unity build it reads:
+// Application.targetFrameRate, an int32 in main's bss (-1 until a game sets it: left so), and the current quality level's vSyncCount. On the Switch, Unity presents at
+// vSyncCount vsyncs a frame: QualitySettings.vSyncCount's setter hands the count to the graphics device, which calls nvnWindowSetPresentInterval when it changes, and Unity steps
+// the game by the time that really passed (The Rogue Prince of Persia: vSyncCount 2, targetFrameRate -1; the same walk covers the same ground at 30 and 60 fps). The device
+// takes the count only through the setter, so writing the level's count does not change the interval the game asks for: the host's present cap does (hle_nvn.c), as for
+// every engine limit here; the write keeps what the game reads back (QualitySettings.vSyncCount) the same as what it shows
+static struct { uint8_t *base; uint64_t ptr; uint32_t idx, arr, size, vsync; } uq;
+static void unity_vsync_tick(int target, const char *src) {
+    static int nlog; uint64_t obj = 0, arr = 0; int32_t lvl; uint32_t cur, want = target > 60 ? 1 : 60 / (uint32_t)target;
+    if (!rd((uint64_t)(uintptr_t)(uq.base + uq.ptr), &obj, sizeof obj) || !obj) return;   // not made yet
+    if (!rd(obj + uq.idx, &lvl, sizeof lvl) || lvl < 0 || lvl > 64 || !rd(obj + uq.arr, &arr, sizeof arr) || !arr) return;
+    uint64_t a = arr + (uint64_t)lvl * uq.size + uq.vsync;
+    if (!rd(a, &cur, sizeof cur) || cur == want || cur < 1 || cur > 4) return;   // already set, or 0: the game paces by targetFrameRate instead
+    uint32_t *p = (uint32_t *)(uintptr_t)a; dm_guest_write_prepare(p, sizeof *p); __atomic_store_n(p, want, __ATOMIC_RELAXED);
+    if (nlog < 8) { nlog++; LOG("main: Unity QualitySettings.vSyncCount (level %d) %u → %u vsyncs (%d fps; %s)", lvl, cur, want, target, src); }
+}
 // The running main's engine limiters, found once: by the first present (dm_fps_lock_tick) or by the graphics layer's present cap, which may ask first (dm_fps_lock_engine, from the acquire)
-static lock_t ue[4], target_lock; static const lock_t *rows[NLOCKS + 5]; static int nrow, nier, ue_missing; static uint8_t *base; static uint32_t display;
+static lock_t ue[4], target_lock, unity_tfr; static const lock_t *rows[NLOCKS + 6]; static int nrow, nier, ue_missing; static uint8_t *base; static uint32_t display;
 static pthread_once_t g_found = PTHREAD_ONCE_INIT;
 static void lock_find(void) {
     for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) {
@@ -218,6 +235,15 @@ static void lock_find(void) {
         if (target_row(&g_mod[i], &target_lock)) { rows[nrow++] = &target_lock; base = g_mod[i].base; }
         int nue = ue_rows(&g_mod[i], ue, &ue_missing);
         for (int k = 0; k < nue; k++) { rows[nrow++] = &ue[k]; base = g_mod[i].base; }
+        if (g_mod[i].unity_target_fps) {   // a build row for the same field (Pokémon Brilliant Diamond 1.3.0) already writes it
+            int dup = 0; for (int r = 0; r < nrow; r++) dup |= !rows[r]->ptr_off && rows[r]->field == (uint32_t)g_mod[i].unity_target_fps;
+            unity_tfr = (lock_t){ "", "Unity Application.targetFrameRate", 0, (uint32_t)g_mod[i].unity_target_fps, FPS_I32, 1, 0 };
+            if (!dup) { rows[nrow++] = &unity_tfr; base = g_mod[i].base; }
+        }
+        if (g_mod[i].unity_qs_ptr && g_mod[i].unity_qs_size) {
+            uq.base = g_mod[i].base; uq.ptr = g_mod[i].unity_qs_ptr; uq.idx = g_mod[i].unity_qs_idx; uq.arr = g_mod[i].unity_qs_arr; uq.size = g_mod[i].unity_qs_size; uq.vsync = g_mod[i].unity_qs_vsync;
+            LOG("main: Unity QualitySettings at [main+%#llx], vSyncCount at [+%#x] + [+%#x] * %#x + %#x", (unsigned long long)uq.ptr, uq.arr, uq.idx, uq.size, uq.vsync);
+        }
     }
     fb_find();
 }
@@ -225,7 +251,7 @@ static void lock_find(void) {
 // Frostbite's simulation rate, found by name).
 // Without one, and without a frame step state page, nothing makes the game follow the cap, so the graphics layer keeps the game's own present interval (hle_nvn.c fps_present_cap):
 // presenting at a cap the game does not step by runs a fixed-step game fast or slow (Tears of the Kingdom 1.4.2 at 2x with DM_FPS_TARGET=60)
-int dm_fps_lock_engine(void) { pthread_once(&g_found, lock_find); return nrow || nier || fb.n; }
+int dm_fps_lock_engine(void) { pthread_once(&g_found, lock_find); return nrow || nier || fb.n || uq.base; }
 int nvn_fps_high_now(void);   // hle_nvn.c
 void dm_fps_lock_tick(void) {
     dynamic_resolution_tick();   // separate from the FPS cap
@@ -233,15 +259,15 @@ void dm_fps_lock_tick(void) {
     if (state == -1) return;
     if (state == -2) {
         state = -1; pthread_once(&g_found, lock_find);
-        if (!nrow && !nier && !fb.n && !ue_missing) return;
+        if (!nrow && !nier && !fb.n && !uq.base && !ue_missing) return;
         const char *e = getenv("DM_FPS_TARGET"); int t = e ? atoi(e) : DM_GAME_FPS_TARGET; src = e ? "DM_FPS_TARGET" : "game profile fps_target";
         if (t != 0 && t != 30 && t != 60 && t != 120) { LOG("[RED] DM_FPS_TARGET=%s: must be 0, 30, 60 or 120; leaving the game's frame limit", e); t = 0; }
         if (t == 120 && DM_GAME_FPS_MAX < 120) { LOG("[RED] DM_FPS_TARGET=120: this game's speed at 120 fps is not checked (profile fps_max); running at 60"); t = 60; }
         high = t == 120;
         if (t && ue_missing) LOG("[RED] main: Unreal %s not found by the rewriter (ue_cvar.py NAMES; game profile ue_fps_cvar): the game's own frame limit stays", DM_GAME_UE_FPS_CVAR);
-        if (!nrow && !nier && !fb.n) return;
+        if (!nrow && !nier && !fb.n && !uq.base) return;
         if (!t) { for (int r = 0; r < nrow; r++) LOG("main: %s left as the game sets it (%s)", rows[r]->what, src); if (nier) LOG("main: NieR frame interval left as the game sets it (%s)", src);
-                  if (fb.n) LOG("main: Frostbite simulation rate left as the game sets it (%s)", src); return; }
+                  if (fb.n) LOG("main: Frostbite simulation rate left as the game sets it (%s)", src); if (uq.base) LOG("main: Unity vSyncCount left as the game sets it (%s)", src); return; }
         target = t; state = 0;
     }
     if (high) target = nvn_fps_high_now();   // 120 while frames fit, else 60: the game's step stays what the screen shows (hle_nvn.c fps_high)
@@ -268,6 +294,7 @@ void dm_fps_lock_tick(void) {
         }
     }
     if (fb.n) fb_tick(target, src);
+    if (uq.base) unity_vsync_tick(target, src);
     for (int r = 0; r < nrow; r++) {
         const lock_t *L = rows[r]; uint64_t obj = (uint64_t)(uintptr_t)base;
         if (L->ptr_off && (!rd((uint64_t)(uintptr_t)(base + L->ptr_off), &obj, sizeof obj) || !obj)) continue;   // not created yet

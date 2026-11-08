@@ -1,6 +1,6 @@
 # The Rogue Prince of Persia (`01008D9022462000`)
 
-Update 1.1.0 (v262144) over the base game, SDK 20.5.29. Evil Empire's game on Unity 6000.0.64f1 IL2CPP with FMOD (one AudioOut) on NVN. Modules `main`, `subsdk0` (the SDK's movie library) and `sdk`, plus one NRO plugin in the RomFS. It plays on the Mac from the NSP script's provisional profile with its keys unchanged: no game-specific rewriter cut and no host change of its own. Reached: the title, the first-run options, the save slots, the opening narration, the intro movie and the first level, with running, jumping, climbing, the weapon, the wall run and the pause menu. No enemy was met. Not run on an iPhone or iPad.
+Update 1.1.0 (v262144) over the base game, SDK 20.5.29. Evil Empire's game on Unity 6000.0.64f1 IL2CPP with FMOD (one AudioOut) on NVN. Modules `main`, `subsdk0` (the SDK's movie library) and `sdk`, plus one NRO plugin in the RomFS. It plays on the Mac at 60 fps (30 on the Switch), up to 120, with no game-specific rewriter cut and no host change of its own: the frame rate goes through Unity's settings, found by the engine's internal-call table. Reached: the title, the first-run options, the save slots, the opening narration, the intro movie and the first level, with running, jumping, climbing, the weapon, the wall run and the pause menu. No enemy was met. Not run on an iPhone or iPad.
 
 ## What it needs
 
@@ -13,7 +13,9 @@ Update 1.1.0 (v262144) over the base game, SDK 20.5.29. Evil Empire's game on Un
 
 ## Frame rate
 
-- 30 fps, as the game asks: it sets present interval 2 at the title, and frames stay at 33.3 ms from the title through the first level (gameplay windows: p50 33.32 ms, p99 frame interval 34.4 to 35.4 ms, windowless on the Mac). GPU time is about 2 ms a frame, so the cap is the game's and not the Mac's. 60 fps was not tried.
+- **60 fps (30 on the Switch), up to 120 on the Mac** (`fps_target 60`, `fps_max 120`; `DM_FPS_TARGET=30` gives the Switch's rate). The game sets Unity's `QualitySettings.vSyncCount` to 2 (present interval 2) and leaves `Application.targetFrameRate` at -1. The rewriter finds both through Unity's internal-call table, with no build ID, and the host writes the count and presents at the target ([Unity's vSyncCount and targetFrameRate](../../../docs/reference/frame-rate.md#unitys-vsynccount-and-targetframerate-found-through-the-internal-call-table)). GPU time is about 2 ms a frame at the first level.
+- **Speed:** Unity steps the game by the time that really passed. A timed walk from the same save (1 s, then 2 s of the stick) ends at the same place at 30 and 60, and the user found the speed right at 120 (2026-11-08).
+- **Measured** (headless, then windowed with a 120 Hz screen): 30 fps p50 33.33 ms; 60 fps p50 16.6 ms; 120 fps 8.33 ms in every window through the title, the opening and the first level, 60 while the intro movie plays (the frame step caps movies). 120 needed the display's vsync event at 120: Unity's NVN device waits for each vblank ([The display's vsync event follows 120 fps](../../../docs/reference/frame-rate.md#the-displays-vsync-event-follows-120-fps)).
 
 ## Memory
 
@@ -41,7 +43,7 @@ Update 1.1.0 (v262144) over the base game, SDK 20.5.29. Evil Empire's game on Un
 
 ## Open
 
-- No enemy was met, so combat, taking damage and death are not checked; nor are later biomes or a run's end.
+- No enemy was met, so combat, taking damage and death are not checked; nor are later biomes or a run's end, at any frame rate.
 - The title and the menus before the narration are silent in the audio dump.
 - iPhone and iPad runtime validation; no IPA has been built.
 - Input has gone only through `DM_CTL`, not a controller or the keyboard.
@@ -49,4 +51,5 @@ Update 1.1.0 (v262144) over the base game, SDK 20.5.29. Evil Empire's game on Un
 
 ## Found on this game
 
-Nothing new: the provisional profile needed no change, and no host or tool fix was needed.
+- [Unity's vSyncCount and targetFrameRate, found through the internal-call table](../../../docs/reference/frame-rate.md#unitys-vsynccount-and-targetframerate-found-through-the-internal-call-table).
+- [The display's vsync event follows 120 fps](../../../docs/reference/frame-rate.md#the-displays-vsync-event-follows-120-fps).

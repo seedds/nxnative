@@ -23,14 +23,13 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             x(0x981, InstName.Ldg, ALdg, N);
             x(0x381, InstName.Ldg, ALdg, N);
+            x(0xf8c, InstName.Atoms, AAtoms, N);
             x(0x986, InstName.Stg, AStg, N, writesRd: false);
             x(0x386, InstName.Stg, AStg, N, writesRd: false);
-            x(0xfae, InstName.Sts, ALdgsts, N, writesRd: false);   // LDGSTS, see ALdgsts
             x(0x98e, InstName.Red, ARed, N, writesRd: false);
             x(0x9a8, InstName.Atom, AAtomg, N);
             x(0x3a8, InstName.Atom, AAtomg, N);
             x(0x3a9, InstName.Atom, AAtomgCas, N);
-            x(0xf8c, InstName.Atoms, AAtoms, N);
             x(AmpereOpcodes.Ldl, InstName.Ldl, ALdLocalShared, N);
             x(0x984, InstName.Lds, ALdLocalShared, N);
             x(0x387, InstName.Stl, AStLocalShared, N, writesRd: false);
@@ -39,27 +38,25 @@ namespace Ryujinx.Graphics.Shader.Instructions
             x(0x988, InstName.Sts, AStLocalShared, N, writesRd: false);
             x(0x38c, InstName.Atoms, AAtoms, N);
             x(0x38d, InstName.Atoms, AAtomsCas, N);
+            x(0x992, InstName.Membar, AMembar, N, writesRd: false);
+            x(0x9ab, InstName.Membar, AErrbar, N, writesRd: false);
 
             x(0xb60, InstName.Tex, ATex, InstProps.Tex);
             x(0x361, InstName.Tex, ATex, InstProps.Tex);
+            x(0x364, InstName.Tld4, ATex, InstProps.Tex);
+            x(0x367, InstName.Tld, ATex, InstProps.Tex);
+            x(0x36d, InstName.Txd, ATex, InstProps.Tex);   // TXD with the handle in a register (.B, bit 59; NAK sm70_encode.rs OpTxd)
             x(0xf60, InstName.Tex, ATex, InstProps.Tex);
+            x(0xf63, InstName.Tld4, ATex, InstProps.Tex);
+            x(0xf66, InstName.Tld, ATex, InstProps.Tex);   // TLD with the handle in a uniform register (bit 91): Unreal Engine 5.6's Switch 2 shaders (Orbitals)
+            x(0xf6c, InstName.Txd, ATex, InstProps.Tex);
+            x(0xf69, InstName.Tmml, ATex, InstProps.Tex);
+            x(0x36a, InstName.Tmml, ATex, InstProps.Tex);
             x(0xb66, InstName.Tld, ATex, InstProps.Tex);
             x(0xb63, InstName.Tld4, ATex, InstProps.Tex);
             x(0xb69, InstName.Tmml, ATex, InstProps.Tex);
             x(0xb6c, InstName.Txd, ATex, InstProps.Tex);
             x(0xb6f, InstName.Txq, ATxq, InstProps.Tex);
-            // The same instructions with the handle in a uniform register (bit 91; 0x400 set in the opcode): Unreal Engine 5.6's Switch 2 shaders (Orbitals)
-            x(0xf60, InstName.Tex, ATex, InstProps.Tex);
-            x(0xf66, InstName.Tld, ATex, InstProps.Tex);
-            x(0xf63, InstName.Tld4, ATex, InstProps.Tex);
-            x(0xf6c, InstName.Txd, ATex, InstProps.Tex);
-            x(0xf69, InstName.Tmml, ATex, InstProps.Tex);
-            // TEX / TLD4 with the handle in a register (.B, bit 59): NAK's bindless form on SM70-SM90 (sm70_encode.rs OpTex / OpTld4)
-            x(0x361, InstName.Tex, ATex, InstProps.Tex);
-            x(0x364, InstName.Tld4, ATex, InstProps.Tex);
-            x(0x367, InstName.Tld, ATex, InstProps.Tex);
-            x(0x36d, InstName.Txd, ATex, InstProps.Tex);
-            x(0x36a, InstName.Tmml, ATex, InstProps.Tex);
             x(0x370, InstName.Txq, ATxq, InstProps.Tex);
             x(0xf6f, InstName.Txq, ATxq, InstProps.Tex);
             x(0xb97, InstName.Suld, ASurface, N);
@@ -73,8 +70,6 @@ namespace Ryujinx.Graphics.Shader.Instructions
             x(0x595, InstName.SuatomCas, ASuatomCas, N);
             x(0x396, InstName.SuatomCasB, ASuatomCas, N);
             x(0xb1d, InstName.Bar, ABar, N, writesRd: false);
-            x(0x992, InstName.Membar, AMembar, N, writesRd: false);
-            x(0x9ab, InstName.Membar, AErrbar, N, writesRd: false);
         }
 
         // ---- attributes ----
@@ -375,39 +370,6 @@ namespace Ryujinx.Graphics.Shader.Instructions
             if (lblSkip != null)
             {
                 context.MarkLabel(lblSkip);
-            }
-        }
-
-        // LDGSTS.E.BYPASS.128 [Rs + soff], [Rg.64 + goff], P (0xfae): the 16-byte asynchronous global → shared copy, done here as a synchronous LDG + STS, so
-        // LDGDEPBAR (0x9af) and the DEPBAR that waits on it have nothing left to wait for. Rs at 16..24, Rg (a 64-bit pair) at 24..32, goff signed 32..44,
-        // soff 44..64; P (87..90) false copies zeros (cp.async's source-size-zero form). Fields per MythosOfs' Eglantine 8f0db6749 (UE5 / RE compute)
-        public static void ALdgsts(EmitterContext context)
-        {
-            AmpereOp x = new(context.CurrOp);
-            int rs = x.Bits(16, 24), rg = x.Bits(24, 32);
-            int goff = (int)x.SignedField(32, 44), soff = x.Bits(44, 64);
-
-            Operand sbase = rs == RegisterConsts.RegisterZeroIndex ? Const(soff) : context.IAdd(Register(rs, RegisterType.Gpr), Const(soff));
-            Operand glo = rg == RegisterConsts.RegisterZeroIndex ? Const(0) : Register(rg, RegisterType.Gpr);
-            Operand ghi = rg == RegisterConsts.RegisterZeroIndex ? Const(0) : Register(rg + 1, RegisterType.Gpr);
-            Operand pred = APred(context, x, 87, 90);
-            Operand id = Const(context.ResourceManager.SharedMemoryId);
-
-            for (int i = 0; i < 4; i++)
-            {
-                int o = goff + 4 * i;
-                Operand lo = context.IAdd(glo, Const(o));
-                Operand carry = o >= 0
-                    ? context.ConditionalSelect(context.ICompareLessUnsigned(lo, glo), Const(1), Const(0))
-                    : context.ConditionalSelect(context.ICompareLessUnsigned(glo, Const(-o)), Const(-1), Const(0));
-                Operand value = Local();
-                Operand skip = Label();
-
-                context.Copy(value, Const(0));
-                context.BranchIfFalse(skip, pred);
-                context.Copy(value, context.Load(StorageKind.GlobalMemory, lo, context.IAdd(ghi, carry)));
-                context.MarkLabel(skip);
-                context.Store(StorageKind.SharedMemory, id, context.ShiftRightU32(context.IAdd(sbase, Const(4 * i)), Const(2)), value);
             }
         }
 

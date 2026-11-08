@@ -3084,7 +3084,10 @@ static void gpu_tag_done(uint64_t f, double g0, double g1) {
     unsigned k = f % GRING; uint64_t tag = f + 1;
     if (atomic_load_explicit(&g_gpu[k].frame, memory_order_acquire) != tag) return;
     double d = g1 - g0;
-    if (d > 0 && g0 > 0) {   // a command buffer can complete with no start time (0, while a movie's frames upload each frame in Big Brain Academy: Brain vs. Brain), and its span would be the whole clock
+    // Completion feedback can contain missing or corrupt times after a GPU fault.
+    // Both endpoints must be finite, ordered and already elapsed on Metal's clock;
+    // otherwise the duration/span (and a float-to-integer conversion) is invalid.
+    if (isfinite(g0) && isfinite(g1) && d > 0 && g0 > 0 && g1 <= CACurrentMediaTime()) {
         atomic_fetch_add_explicit(&g_gpu[k].ns, (uint64_t)(d * 1e9), memory_order_relaxed);
         uint64_t s0 = (uint64_t)(g0 * 1e9), s1 = (uint64_t)(g1 * 1e9), v;
         for (v = atomic_load_explicit(&g_gpu[k].t0, memory_order_relaxed); s0 < v && !atomic_compare_exchange_weak_explicit(&g_gpu[k].t0, &v, s0, memory_order_relaxed, memory_order_relaxed);) {}

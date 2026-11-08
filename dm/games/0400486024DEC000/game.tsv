@@ -40,6 +40,15 @@ shader_note	Ocarina of Time shaders
 # The game steps its time by a frame ratio, its base rate / its frame rate, whatever the frame took: frames longer than a vsync played in slow motion. The ratio takes the host's
 # frame step instead (MATCH_FRAME_STEP in patches.py, found by its function on any build that keeps it): 1 vsync at 60 fps, 2 when 60 does not hold, so game time = real time
 fps_target	60
+# At 30 fps an iPhone lowers the GPU clock until the work fills most of the frame (iPhone 18 Pro at render scale 0.25: GPU p50 12 ms at 60 fps, 29-30 ms at 30, p95 33-38 ms;
+# log 60: 195 of 300 frames over 33.3 ms, p99 64 ms, 109 payback steps of 3 in 40 s). Three things make the 30 steady:
+# present snapshots, so the game's swapchain texture is free at once and its CPU work overlaps the GPU's instead of starting on the link's tick (with them off: frame
+# p50 35.9 ms against GPU 29.7 ms, the two back to back; a build with them on held a p50 of 33.3 ms at the same GPU time). The launcher's Frame buffering row starts on
+present_snap	on
+# the display link's frame latency 2 at the 30 fps cap: 66 ms from submission to display instead of 33, so a 34-38 ms frame is absorbed while the mean fits
+link_latency30	2
+# no payback: a late frame's lost time is let go (the game slows by it, as on the console) instead of a step of 3 vsyncs shown for 2, a half-frame jump in motion on the next frame
+fps_payback	off
 
 # ---- Graphics ----
 # agl wraps its clears in render conditions on Donkey Kong Bananza and Splatoon Raiders; the same library here

@@ -44,6 +44,9 @@ typedef struct {
     double debt;              // real time the game is behind, in vsyncs
     int late_run, fit_run, trial;   // late frames in a row; frames in a row whose cost fits k − 1; frames left of a trial at k − 1 (0 = none)
     int probe, grace;         // 1: the trial in progress is a probe; 2: a probe held and its run at kmin has not ended yet; frames left of the probe's grace
+    int nopay;                // set by the caller (kept): 1 = real time a late frame lost is not paid back (profile fps_payback off, DM_FPS_PAYBACK=off): the step stays k and the
+                              // game runs that much behind, counted as dropped. A payback step hands the game k + 1 vsyncs of time for a frame shown k, so motion jumps by half
+                              // a frame at a 30 fps cap: Ocarina of Time (log 60, iPhone 18 Pro) paid back 109 times in 40 s, about three judders a second
     int ramp;                 // set by the caller (kept): 1 = a probe's grace is renewed while its frames keep getting cheaper (FSTEP_RAMP; the host's DM_FSTEP_PROBE_RAMP)
     double pa, pb; int plate, ptotal;   // the current grace window: the cost of its first and second halves (sums), its late frames; grace frames this probe has taken in all
     double hold, since;       // vsyncs a trial waits for after a step up; vsyncs since the last step up
@@ -129,6 +132,7 @@ static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int km
     else if ((slow || nvn_fstep_same(s)) && s->k > kmin && s->since >= s->hold && !s->trial) {   // probe: straight to kmin, so the controller sees the whole deadline
         s->k = kmin; s->downs++; s->probes++; s->trial = FSTEP_RUN; s->probe = 1; s->grace = FSTEP_GRACE; s->fit_run = s->late_run = 0; s->pa = s->pb = 0; s->plate = s->ptotal = 0;
     }
+    if (s->nopay && s->debt > 0) { s->dropped += s->debt; s->debt = 0; }   // no payback: the time lost is let go at once, as a console game slows down
     s->step = s->k + (s->debt >= 1 && s->k < FSTEP_MAX);
     s->paid += s->step > s->k;
     return s->step;

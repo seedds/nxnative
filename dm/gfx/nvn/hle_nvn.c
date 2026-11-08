@@ -2005,6 +2005,16 @@ static int fstep_hold(void) {
     }
     return h;
 }
+// Whether real time a late frame lost is paid back with a step of k + 1 vsyncs (profile fps_payback, DM_FPS_PAYBACK=on / off; nvn_fstep.h nopay). Off, game time follows
+// the frames shown: a late frame slows the game by its lateness instead of a half-frame jump in motion on the next frame
+static int fstep_payback(void) {
+    static int p = -1;
+    if (p < 0) {
+        const char *e = getenv("DM_FPS_PAYBACK"); p = e ? strcmp(e, "off") != 0 : DM_GAME_FPS_PAYBACK;
+        if (!p) LOG("[nvn] frame step: time a late frame lost is not paid back, the game slows by it instead (%s)", e ? "DM_FPS_PAYBACK" : "game profile fps_payback");
+    }
+    return p;
+}
 // Once per present, before this frame's period is taken: the time since the previous frame's start (shown) and the frame's cost decide this frame's hold and the next frame's step.
 // Cost = max(CPU: the time between the frames' starts without the pacing wait, GPU: the latest finished frame's GPU time), in vsyncs
 static void fstep_tick(const win_t *o, int c) {
@@ -2038,6 +2048,7 @@ static void fstep_tick(const win_t *o, int c) {
     // A probe's grace lasts while its frames keep getting cheaper (nvn_fstep.h FSTEP_RAMP): macOS raises the GPU clock for the shorter deadline over seconds, not the iPhone's 30 frames
     // (Breath of the Wild on an M5 Pro: the probe's 33 frames took the clock 338 → 432 MHz and its GPU time 24.8 → 18.5 ms, then it failed at 22 ms frames; hold 1 needed about 560 MHz)
     g_fs.ramp = mtl_probe_ramp_on();
+    g_fs.nopay = !fstep_payback();
     g_fs.per_vsync = fstep_hz() / 60;
     int n = nvn_fstep_next(&g_fs, shown, cost, kmin, kmax, fixed, cslow || gslow);
     if (dm_fps_state) __atomic_store_n((uint32_t *)(dm_fps_state + 0x20), (uint32_t)n, __ATOMIC_RELAXED);

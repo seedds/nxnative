@@ -33,6 +33,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | `build` → `engine` | Unity's Application.targetFrameRate at a fixed address | frame rate | gap | judgement | 1 | [Pokémon Brilliant Diamond](../../dm/games/0100000011D90000/README.md) | an IL2CPP player registers the setter by its icall name, so the field can be found in any Unity game; whether to raise it stays the profile's |
 | `build` → `game` | frame limiter 30 → 60 fps and the 1/60 update step | frame rate | gap | judgement | 1 | [DARK SOULS: REMASTERED](../../dm/games/01004AB00A260000/README.md) | the game's own limiter constant and fixed step |
 | `build` → `game` | frame limiter spin: its branch back cut | frame rate | gap | judgement | 1 | [Need For Speed™ Hot Pursuit Remastered](../../dm/games/010029B0118E8000/README.md) | the engine's own spin limiter; a function-matched rule could carry it over the game's updates |
+| `build` → `game` | frame step floor 2 → 1 vsync, and its frame step | frame rate | gap | judgement | 1 | [Paper Mario: The Thousand-Year Door](../../dm/games/0100ECD018EBE000/README.md) | the game's own clock floor and step; MATCH_CUTS and MATCH_FRAME_STEP could carry the cut and the stub, both near the step's function (main+0x2e7750; one function not checked yet) |
 | `build` → `game` | interval controller: the lower bound and the GPU-time path | frame rate | gap | judgement | 1 | [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) | sead::GameFrameworkNx's interval controller in this build; Tears of the Kingdom shares sead but not this code |
 | `build` → `game` | job pool wake-up | race | gap | judgement | 1 | [FINAL FANTASY TACTICS - The Ivalice Chronicles](../../dm/games/010038B015560000/README.md) | a lost wake-up in the game's own job pool, not a host or SDK difference |
 | `build` → `game` | malloc region 60 GB → 4 GB and its first arena | address space | gap | judgement | 1 | [Xenoblade Chronicles 3](../../dm/games/010074F013262000/README.md) | Monolith's own allocator; its constants span two functions (a multi-function rule). The cause, an iPhone's address space, is a platform limit |
@@ -50,11 +51,10 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | `build` → `engine` | Next Level Games' frame limiter target at a fixed address | frame rate | blocked: one game on that engine here | judgement | 1 | [Luigi's Mansion 3](../../dm/games/0100DCA0064A6000/README.md) | the studio's engine, which its other games ship |
 | `build` → `engine` | RE Engine's frame limit at a fixed pointer | frame rate | blocked: one RE Engine game here | judgement | 1 | [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md) | engine code other RE Engine games ship |
 | `build` → `engine` | ThreadedStreamBuffer load-acquires | race | blocked: no game files of those games on the drive to compare | judgement | 1 | [FINAL FANTASY CRYSTAL CHRONICLES Remastered Edition](../../dm/games/0100CE4010AAC000/README.md) | the race is in Unity 2018.4's ThreadedStreamBuffer, engine code other Unity games of that era ship (Cuphead, AI: THE SOMNIUM FILES, Raging Loop): a function-matched rule per Unity version |
-| `build` → `game` | 60 fps frame step (112 sites) | frame rate | blocked: frame-step stubs have no function-matched form yet | judgement | 1 | [ASTRAL CHAIN](../../dm/games/01007300020FA000/README.md) | the game's own clock and timers (a community 60 fps mod on the host's frame step) |
-| `build` → `game` | 60 fps frame step and render scale | frame rate | blocked: frame-step stubs have no function-matched form yet | judgement | 1 | [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md) | the game's own timing object |
-| `build` → `game` | 60 fps frame step and render scale (ksys::VFR) | frame rate | blocked: frame-step stubs have no function-matched form yet | judgement | 1 | [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) | the game's own frame code; the frame-step state page is general |
-| `build` → `game` | 60 fps frame step: the KIDS frame task, frame-rate block and event cutscene counters | frame rate | blocked: frame-step stubs have no function-matched form yet | judgement | 1 | [Hyrule Warriors: Age of Calamity](../../dm/games/01002B00111A2000/README.md) | the game's own frame code; only the host's frame-step state page is shared. Fire Emblem: Three Houses and Taiko Risshiden V DX run on KTGL too, with other frame code |
-| `build` → `game` | frame step floor 2 → 1 vsync, and its frame step | frame rate | blocked: frame-step stubs have no function-matched form yet | judgement | 1 | [Paper Mario: The Thousand-Year Door](../../dm/games/0100ECD018EBE000/README.md) | the game's own clock floor and step |
+| `build` → `game` | 60 fps frame step (112 sites) | frame rate | blocked: a function-matched frame step (MATCH_FRAME_STEP) covers one function; these stubs span several | judgement | 1 | [ASTRAL CHAIN](../../dm/games/01007300020FA000/README.md) | the game's own clock and timers (a community 60 fps mod on the host's frame step) |
+| `build` → `game` | 60 fps frame step and render scale | frame rate | blocked: a function-matched frame step (MATCH_FRAME_STEP) covers one function; these stubs span several | judgement | 1 | [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md) | the game's own timing object |
+| `build` → `game` | 60 fps frame step and render scale (ksys::VFR) | frame rate | blocked: a function-matched frame step (MATCH_FRAME_STEP) covers one function; these stubs span several | judgement | 1 | [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) | the game's own frame code; the frame-step state page is general |
+| `build` → `game` | 60 fps frame step: the KIDS frame task, frame-rate block and event cutscene counters | frame rate | blocked: a function-matched frame step (MATCH_FRAME_STEP) covers one function; these stubs span several | judgement | 1 | [Hyrule Warriors: Age of Calamity](../../dm/games/01002B00111A2000/README.md) | the game's own frame code; only the host's frame-step state page is shared. Fire Emblem: Three Houses and Taiko Risshiden V DX run on KTGL too, with other frame code |
 | `build` → `game` | screen shape: the sizes, the view, the layouts' projection and their edge widgets (DM_SCREEN_ASPECT) | rendering | blocked: the stubs have no function-matched form yet | judgement | 1 | [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md) | the output size is the host's, but where the game takes its sizes, its cameras and its layouts are this build's code |
 | `build` → `game` | Hagi coroutine stack region 1 GB → 64 MB | memory | kept: 1.1.4 is the last update; a match over Hagi would serve no other build of this game | checked: the final build 1.1.4 (the only one the profile packs), 2026-11-04 | 1 | [Super Mario 3D All-Stars: Super Mario Sunshine](../../dm/games/010049900F546002/README.md) | a size inside Hagi's own code: nothing the host sees tells a 1 GB reservation it can shrink from one it cannot |
 
@@ -74,6 +74,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [Hyrule Warriors: Age of Calamity](#hyrule-warriors-age-of-calamity) | 0 | 0 | 5 | 0 | 0 | `build` → `game` |
 | [Luigi's Mansion 3](#luigis-mansion-3) | 0 | 0 | 0 | 0 | 1 | `build` → `engine` |
 | [Mario + Rabbids® Sparks of Hope](#mario--rabbids-sparks-of-hope) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
+| [Mario Kart World](#mario-kart-world) | 0 | 0 | 1 | 0 | 0 | `game` |
 | [Monster Hunter Rise](#monster-hunter-rise) | 0 | 0 | 0 | 0 | 1 | `build` → `engine` |
 | [Need For Speed™ Hot Pursuit Remastered](#need-for-speed-hot-pursuit-remastered) | 1 | 0 | 0 | 0 | 5 | `build` → `game`, `build` → `engine` |
 | [NieR:Automata The End of YoRHa Edition (010056B015FE8000)](#nierautomata-the-end-of-yorha-edition-010056b015fe8000) | 8 | 0 | 0 | 0 | 1 | `build` → `game` ×2 |
@@ -88,6 +89,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [Taiko Risshiden V DX](#taiko-risshiden-v-dx) | 1 | 0 | 0 | 2 | 0 | `game` |
 | [The Legend of Zelda: Breath of the Wild](#the-legend-of-zelda-breath-of-the-wild) | 7 | 0 | 43 | 0 | 0 | `build` → `game` ×2 |
 | [The Legend of Zelda: Link's Awakening](#the-legend-of-zelda-links-awakening) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
+| [The Legend of Zelda: Ocarina of Time](#the-legend-of-zelda-ocarina-of-time) | 0 | 0 | 1 | 0 | 0 | `game` |
 | [The Legend of Zelda: Tears of the Kingdom](#the-legend-of-zelda-tears-of-the-kingdom) | 0 | 0 | 9 | 0 | 0 | `build` → `game` |
 | [Xenoblade Chronicles 3](#xenoblade-chronicles-3) | 6 | 0 | 0 | 0 | 0 | `build` → `game` |
 
@@ -124,7 +126,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 
 [ASTRAL CHAIN](../../dm/games/01007300020FA000/README.md), `01007300020FA000`, [patches.py](../../dm/games/01007300020FA000/patches.py).
 
-- **`build` → `game`**, frame rate, blocked: frame-step stubs have no function-matched form yet, judgement: 60 fps frame step (112 sites). The game's own clock and timers (a community 60 fps mod on the host's frame step)
+- **`build` → `game`**, frame rate, blocked: a function-matched frame step (MATCH_FRAME_STEP) covers one function; these stubs span several, judgement: 60 fps frame step (112 sites). The game's own clock and timers (a community 60 fps mod on the host's frame step)
 
 - **1.0.1 `main`** `4b159f0f…` ([patches.py:91](../../dm/games/01007300020FA000/patches.py#L91))
   <details><summary>112 frame-step sites</summary>
@@ -280,7 +282,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 - **`build` → `engine`**, frame rate, blocked: one Frostbite game here, judgement: Frostbite's frame regulator at a fixed pointer. Engine code other Frostbite games ship (the simulation's own rate is already set by name)
 
 - **1.8d.310c `main`** `a48c0de3…`
-  - host [hle_fpslock.c:54](../../dm/host/hle_fpslock.c#L54): engine frame limit set to fps_target: FIFA frame regulator
+  - host [hle_fpslock.c:55](../../dm/host/hle_fpslock.c#L55): engine frame limit set to fps_target: FIFA frame regulator
 
 ### FINAL FANTASY CRYSTAL CHRONICLES Remastered Edition
 
@@ -342,7 +344,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 
 [Hyrule Warriors: Age of Calamity](../../dm/games/01002B00111A2000/README.md), `01002B00111A2000`, [patches.py](../../dm/games/01002B00111A2000/patches.py).
 
-- **`build` → `game`**, frame rate, blocked: frame-step stubs have no function-matched form yet, judgement: 60 fps frame step: the KIDS frame task, frame-rate block and event cutscene counters. The game's own frame code; only the host's frame-step state page is shared. Fire Emblem: Three Houses and Taiko Risshiden V DX run on KTGL too, with other frame code
+- **`build` → `game`**, frame rate, blocked: a function-matched frame step (MATCH_FRAME_STEP) covers one function; these stubs span several, judgement: 60 fps frame step: the KIDS frame task, frame-rate block and event cutscene counters. The game's own frame code; only the host's frame-step state page is shared. Fire Emblem: Three Houses and Taiko Risshiden V DX run on KTGL too, with other frame code
 
 - **1.3.0 `main`** `c3cf52bf…` ([patches.py:113](../../dm/games/01002B00111A2000/patches.py#L113))
   - frame step `+0x857d7c`: event cutscene's frame: stepped on every other update at a 60 fps cap (state page vsyncs per update; 30 fps frames, as on the Switch)
@@ -358,7 +360,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 - **`build` → `engine`**, frame rate, blocked: one game on that engine here, judgement: Next Level Games' frame limiter target at a fixed address. The studio's engine, which its other games ship
 
 - **1.4.0 `main`** `79e5950f…`
-  - host [hle_fpslock.c:39](../../dm/host/hle_fpslock.c#L39): engine frame limit set to fps_target: NLG frame limiter target
+  - host [hle_fpslock.c:40](../../dm/host/hle_fpslock.c#L40): engine frame limit set to fps_target: NLG frame limiter target
 
 ### Mario + Rabbids® Sparks of Hope
 
@@ -369,6 +371,14 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 - **1.6.2225577 `main`** `5b76a43b…` ([patches.py:13](../../dm/games/0100317013770000/patches.py#L13))
   - cut `+0x94354`: Unused 272-byte slot pool: 4,194,304 -> 65,536 slots, 1.06 GB -> 17 MB of address space (mov w1,#0x10000)
 
+### Mario Kart World
+
+[Mario Kart World](../../dm/games/0400C3F00006E000/README.md), `0400C3F00006E000`, [patches.py](../../dm/games/0400C3F00006E000/patches.py).
+
+- **`game`**, frame rate, at goal, checked: v0 main: one function with this fingerprint, the site and its free registers read by disassembly (2026-11-08): frame interval from the host's step. The game's own interval choice, found by its function's fingerprint on any build that keeps the function
+
+- **function-matched frame step** (`main` of builds without FRAME_STEP): frame interval from the host's step: a function of 0x290 bytes, `+0xa0` in it
+
 ### Monster Hunter Rise
 
 [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md), `0100B04011742000`.
@@ -376,7 +386,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 - **`build` → `engine`**, frame rate, blocked: one RE Engine game here, judgement: RE Engine's frame limit at a fixed pointer. Engine code other RE Engine games ship
 
 - **16.0.2 `main`** `c9a3dd77…`
-  - host [hle_fpslock.c:35](../../dm/host/hle_fpslock.c#L35): engine frame limit set to fps_target: RE Engine frame limit
+  - host [hle_fpslock.c:36](../../dm/host/hle_fpslock.c#L36): engine frame limit set to fps_target: RE Engine frame limit
 
 ### Need For Speed™ Hot Pursuit Remastered
 
@@ -387,11 +397,11 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 
 - **1.0.3 `main`** `799d1061…` ([patches.py:7](../../dm/games/010029B0118E8000/patches.py#L7))
   - cut `+0x4835a4`: frame limiter spin: b.gt main+0x483588 → nop (the host paces the frames)
-  - host [hle_fpslock.c:44](../../dm/host/hle_fpslock.c#L44): engine frame limit set to fps_target: Criterion 60 fps mode
-  - host [hle_fpslock.c:45](../../dm/host/hle_fpslock.c#L45): engine frame limit set to fps_target: Criterion frame ticks
-  - host [hle_fpslock.c:46](../../dm/host/hle_fpslock.c#L46): engine frame limit set to fps_target: Criterion frame ticks / 10
-  - host [hle_fpslock.c:47](../../dm/host/hle_fpslock.c#L47): engine frame limit set to fps_target: Criterion 2D game step
-  - host [hle_fpslock.c:48](../../dm/host/hle_fpslock.c#L48): engine frame limit set to fps_target: Criterion 3D game step
+  - host [hle_fpslock.c:45](../../dm/host/hle_fpslock.c#L45): engine frame limit set to fps_target: Criterion 60 fps mode
+  - host [hle_fpslock.c:46](../../dm/host/hle_fpslock.c#L46): engine frame limit set to fps_target: Criterion frame ticks
+  - host [hle_fpslock.c:47](../../dm/host/hle_fpslock.c#L47): engine frame limit set to fps_target: Criterion frame ticks / 10
+  - host [hle_fpslock.c:48](../../dm/host/hle_fpslock.c#L48): engine frame limit set to fps_target: Criterion 2D game step
+  - host [hle_fpslock.c:49](../../dm/host/hle_fpslock.c#L49): engine frame limit set to fps_target: Criterion 3D game step
 
 ### NieR:Automata The End of YoRHa Edition (010056B015FE8000)
 
@@ -410,7 +420,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - cut `+0x9bf4d4`: dynamic resolution: optimal frame cost 32.01 -> 16.005 ms at 60 fps (second load)
   - cut `+0x9bf4f8`: dynamic resolution: good frame cost 30 -> 15 ms at 60 fps
   - launcher capabilities: DYNAMIC_RESOLUTION
-  - host [hle_fpslock.c:70](../../dm/host/hle_fpslock.c#L70): frame interval and dynamic-resolution floor
+  - host [hle_fpslock.c:71](../../dm/host/hle_fpslock.c#L71): frame interval and dynamic-resolution floor
 
 ### NieR:Automata The End of YoRHa Edition (0100B8E016F76000)
 
@@ -429,13 +439,13 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - cut `+0x9c08e8`: dynamic resolution lower bound follows the selected preset
   - cut `+0x9c08f4`: dynamic resolution lower bound follows the selected preset
   - launcher capabilities: DYNAMIC_RESOLUTION
-  - host [hle_fpslock.c:71](../../dm/host/hle_fpslock.c#L71): frame interval and dynamic-resolution floor
+  - host [hle_fpslock.c:72](../../dm/host/hle_fpslock.c#L72): frame interval and dynamic-resolution floor
 
 ### Paper Mario: The Thousand-Year Door
 
 [Paper Mario: The Thousand-Year Door](../../dm/games/0100ECD018EBE000/README.md), `0100ECD018EBE000`, [patches.py](../../dm/games/0100ECD018EBE000/patches.py).
 
-- **`build` → `game`**, frame rate, blocked: frame-step stubs have no function-matched form yet, judgement: frame step floor 2 → 1 vsync, and its frame step. The game's own clock floor and step
+- **`build` → `game`**, frame rate, gap, judgement: frame step floor 2 → 1 vsync, and its frame step. The game's own clock floor and step; MATCH_CUTS and MATCH_FRAME_STEP could carry the cut and the stub, both near the step's function (main+0x2e7750; one function not checked yet)
 
 - **1.0.1 `main`** `0effe4af…` ([patches.py:5](../../dm/games/0100ECD018EBE000/patches.py#L5))
   - cut `+0x2e77a4`: frame step floor in 60 Hz vsyncs: mov w9,#2 → mov w9,#1 (the game steps by the vsyncs that passed, down to one)
@@ -448,7 +458,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 - **`build` → `engine`**, frame rate, gap, judgement: Unity's Application.targetFrameRate at a fixed address. An IL2CPP player registers the setter by its icall name, so the field can be found in any Unity game; whether to raise it stays the profile's
 
 - **1.3.0 `main`** `94ceae32…`
-  - host [hle_fpslock.c:30](../../dm/host/hle_fpslock.c#L30): engine frame limit set to fps_target: Unity targetFrameRate
+  - host [hle_fpslock.c:31](../../dm/host/hle_fpslock.c#L31): engine frame limit set to fps_target: Unity targetFrameRate
 
 ### Pokémon Legends: Arceus
 
@@ -522,7 +532,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md), `01007EF00011E000`, [patches.py](../../dm/games/01007EF00011E000/patches.py).
 
 - **`build` → `game`**, frame rate, gap, judgement: interval controller: the lower bound and the GPU-time path. Sead::GameFrameworkNx's interval controller in this build; Tears of the Kingdom shares sead but not this code
-- **`build` → `game`**, frame rate, blocked: frame-step stubs have no function-matched form yet, judgement: 60 fps frame step and render scale (ksys::VFR). The game's own frame code; the frame-step state page is general
+- **`build` → `game`**, frame rate, blocked: a function-matched frame step (MATCH_FRAME_STEP) covers one function; these stubs span several, judgement: 60 fps frame step and render scale (ksys::VFR). The game's own frame code; the frame-step state page is general
 
 - **1.9.0 `main`** `cd57b23f…` ([patches.py:14](../../dm/games/01007EF00011E000/patches.py#L14))
   - cut `+0x112670c`: lower bound of the candidate interval: fmov s0,s11 (2.0) → fmov s0,s10 (1.0)
@@ -591,11 +601,19 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 - **1.1.0 `main`** `909e904a…` ([patches.py:12](../../dm/games/01006BB00C6F0000/patches.py#L12))
   - cut `+0x10cd070`: physics completion task release (calls its own destructor): ldr x8,[x0] → ret (no longer destroyed; the step function rebuilds it in place every step)
 
+### The Legend of Zelda: Ocarina of Time
+
+[The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md), `0400486024DEC000`, [patches.py](../../dm/games/0400486024DEC000/patches.py).
+
+- **`game`**, frame rate, at goal, checked: v131072 main: one function with this fingerprint, the site and its free registers read by disassembly (2026-11-08): frame ratio from the host's step. The game's own frame-ratio division, found by its function's fingerprint on any build that keeps the function
+
+- **function-matched frame step** (`main` of builds without FRAME_STEP): frame ratio from the host's step: a function of 0x9b4 bytes, `+0xe4` in it
+
 ### The Legend of Zelda: Tears of the Kingdom
 
 [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md), `0100F2C0115B6000`, [patches.py](../../dm/games/0100F2C0115B6000/patches.py).
 
-- **`build` → `game`**, frame rate, blocked: frame-step stubs have no function-matched form yet, judgement: 60 fps frame step and render scale. The game's own timing object
+- **`build` → `game`**, frame rate, blocked: a function-matched frame step (MATCH_FRAME_STEP) covers one function; these stubs span several, judgement: 60 fps frame step and render scale. The game's own timing object
 
 - **1.4.3 `main`** `277178b7…` ([patches.py:136](../../dm/games/0100F2C0115B6000/patches.py#L136))
   - frame step `+0xd5cc0`: view render size x the host render scale (1.0 = original)

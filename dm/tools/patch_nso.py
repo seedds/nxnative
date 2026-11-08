@@ -82,6 +82,9 @@ else:
 #   OBS = {build ID: [(offset, number, original instruction word, reason)]}: observation gates. Numbers match OBS_* in the host's hle.h; the original instruction must be position
 #     independent (no PC-relative / branch / anything involving x18 or tpidr), asserted offline; when the host has no callback attached the gate block goes in and out once and returns
 #   FRAME_STEP = {build ID: function(ctx)}: the frame step stubs of a main ("Frame step in whole vsyncs" below)
+#   MATCH_FRAME_STEP = {'main': [{name, size, fingerprints, stub}, ...]}: the frame step stubs of any main without FRAME_STEP, placed by the function they patch (nso_match.locate_stub:
+#     one complete unwind function of that size and fingerprint, or no stubs and a red line); stub(ctx) writes its sites at ctx.base + offsets inside that function. Rules are
+#     one patch's reviewed implementations (one name). Only the profile selected by DM_GAME participates, as for MATCH_CUTS
 #   MATCH_CUTS = {module name: [nso_match rule, ...]}: fallback for modules without registered CUTS. Only the profile selected by DM_GAME participates; a derived profile uses
 #     the repository's rules, an external-only provisional profile its own. Missing or ambiguous matches are reported and skipped; known builds retain their exact CUTS.
 #     A rule of several functions applies whole or not at all. For such a module <name>.match.tsv lists the cuts of the profile's registered builds of it and each patch's result,
@@ -99,7 +102,7 @@ patch_paths = {}
 for path in PATCH_FILES: patch_paths.setdefault(os.path.realpath(path), path)   # repeated roots and symlinks name the same file, not competing build claims
 PATCH_FILES = list(patch_paths.values())
 def load_patches():
-    tables, where = {'CUTS': {}, 'OBS': {}, 'FRAME_STEP': {}, 'MATCH_CUTS': {}, 'SDK_MATCH_CUTS': {}, 'CAPABILITIES': {}}, {}
+    tables, where = {'CUTS': {}, 'OBS': {}, 'FRAME_STEP': {}, 'MATCH_CUTS': {}, 'MATCH_FRAME_STEP': {}, 'SDK_MATCH_CUTS': {}, 'CAPABILITIES': {}}, {}
     for n, path in enumerate(PATCH_FILES):
         spec = importlib.util.spec_from_file_location(f'patches_{n}', path); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
         for kind, table in tables.items():
@@ -107,12 +110,13 @@ def load_patches():
             if kind == 'MATCH_CUTS' and os.path.basename(path) == 'sdk_patches.py':   # SDK-wide
                 tables['SDK_MATCH_CUTS'] = getattr(m, kind, {})
                 continue
-            if kind == 'MATCH_CUTS':
+            if kind in ('MATCH_CUTS', 'MATCH_FRAME_STEP'):
+                if os.path.basename(path) == 'sdk_patches.py': continue
                 profile = os.path.basename(os.path.dirname(path))
                 roots = [os.path.join(os.path.dirname(os.path.abspath(__file__)), '../games')] + [d for d in os.environ.get('DM_GAMES_DIR', '').split(os.pathsep) if d]
                 profile_dir = next((os.path.join(root, profile) for root in roots if os.path.isdir(os.path.join(root, profile))), None)
                 if profile_dir and os.path.realpath(os.path.dirname(path)) != os.path.realpath(profile_dir): continue
-                if getattr(m, kind, {}): table[profile] = m.MATCH_CUTS   # repository rules win for derived profiles; otherwise use the first external root
+                if getattr(m, kind, {}): table[profile] = getattr(m, kind)   # repository rules win for derived profiles; otherwise use the first external root
                 continue
             for bid, v in getattr(m, kind, {}).items():
                 assert bid not in table, f'{kind} of build {bid} in both {where[kind, bid]} and {path}'
@@ -146,6 +150,11 @@ if BUILD_ID not in PATCHES['CUTS']:
             for bid, disp, n in known: f.write(f'registered\t{bid}\t{disp}\t{n}\n')
             for kind, got in (('patch', outcomes), ('sdk', sdk_outcomes)):
                 for name, offs, why in got: f.write(f'{kind}\t{name}\t{",".join(f"{o:#x}" for o in offs) if offs else "-"}\t{why}\n')
+# the frame step of a main with no FRAME_STEP of its build, placed by the function it patches (MATCH_FRAME_STEP), found before any cut changes the image
+FS_MATCH = None
+if NAME == 'main' and BUILD_ID not in PATCHES['FRAME_STEP']:
+    from nso_match import locate_stub
+    FS_MATCH = locate_stub(IMG, TEXT_END, PATCHES['MATCH_FRAME_STEP'].get(os.path.basename(os.environ.get('DM_GAME', '').rstrip('/')), {}).get(NAME, []))
 for off, ob, nb, why in cuts:
     ob, nb = bytes.fromhex(ob), bytes.fromhex(nb)
     assert len(ob) == len(nb) and IMG[off:off + len(ob)] == ob, f'cut original bytes mismatch {off:#x}: {bytes(IMG[off:off + len(ob)]).hex()}'
@@ -169,10 +178,10 @@ FPS_TARGET_PTR, FPS_TARGET_FIELD, fps_target_why = fps_target.find(bytes(IMG), T
 if FPS_TARGET_PTR is not None: print(f'{NAME}: {fps_target_why} (fps_target.py)')
 elif fps_target_why.startswith('[RED] '): print(f'[RED] {NAME}: {fps_target_why[6:]}: the host cannot write it')
 
-# ---- Unreal's fixed frame rate (main: dm/tools/ue_fixed_rate.py finds UEngine::FixedFrameRate by its reflection entry and GEngine by the code that reaches it, without a build ID) ----
-# The fixups table names GEngine's offset and the property's (UE_FIXED_RATE_PTR, UE_FIXED_RATE_FIELD); the host writes the profile's fps_target there (hle_fpslock.c)
+# ---- Unreal's fixed frame rate (main: dm/tools/ue_fixed_rate.py finds UEngine::FixedFrameRate and bUseFixedFrameRate by their reflection entries and GEngine where the engine is made, without a build ID) ----
+# The fixups table names GEngine's offset, the property's and the flag's (UE_FIXED_RATE_PTR, UE_FIXED_RATE_FIELD, UE_FIXED_RATE_FLAG); the host writes the profile's fps_target there while the flag is set (hle_fpslock.c)
 import ue_fixed_rate
-UE_FIXED_PTR, UE_FIXED_FIELD, ue_fixed_why = ue_fixed_rate.find(bytes(IMG), TEXT_END, RO_OFF, DATA_OFF) if NAME == 'main' and UE_CVARS else (None, None, '')
+UE_FIXED_PTR, UE_FIXED_FIELD, UE_FIXED_FLAG, ue_fixed_why = ue_fixed_rate.find(bytes(IMG), TEXT_END, RO_OFF, DATA_OFF) if NAME == 'main' and UE_CVARS else (None, None, None, '')
 if UE_FIXED_PTR is not None: print(f'{NAME}: {ue_fixed_why} (ue_fixed_rate.py)')
 elif ue_fixed_why.startswith('[RED] '): print(f'[RED] {NAME}: {ue_fixed_why[6:]}: the host cannot write it')
 
@@ -1529,7 +1538,7 @@ obs += region_obs
 FRAME_STEP = PATCHES['FRAME_STEP']
 FS_STATE_OFF = 0
 RENDER_SCALE = 0   # 1 = the build has a render-scale stub (state +0x10): the fixups table says so (RENDER_SCALE), and the iOS launcher offers the setting (dm/games/settings.tsv)
-if BUILD_ID in FRAME_STEP and NAME == 'main':
+if (BUILD_ID in FRAME_STEP or FS_MATCH) and NAME == 'main':
     FS_STATE_OFF = KEY_PAGE_OFF + 0x4000
     if FAR:
         # The loader supplies zero-filled BSS/key pages for a front patch area.
@@ -1544,10 +1553,10 @@ if BUILD_ID in FRAME_STEP and NAME == 'main':
     def fs_put(off, words, why):
         old = bytes(IMG[off:off + 4 * len(words)])
         for i, w in enumerate(words): struct.pack_into('<I', IMG, off + 4 * i, w)
-        cuts.append((off, old.hex(), bytes(IMG[off:off + 4 * len(words)]).hex(), why)); stat('frame_step')
-if FS_STATE_OFF:   # the build's stubs (FRAME_STEP of its patches.py)
-    use_area(0); fs = types.SimpleNamespace(here=here, emit=emit, site=fs_site, put=fs_put, state=FS_STATE_OFF, render_scale=0)
-    FRAME_STEP[BUILD_ID](fs); RENDER_SCALE = fs.render_scale
+        cuts.append((off, old.hex(), bytes(IMG[off:off + 4 * len(words)]).hex(), why + (' [function match]' if FS_MATCH else ''))); stat('frame_step')
+if FS_STATE_OFF:   # the build's stubs (FRAME_STEP of its patches.py), or those placed by their function (MATCH_FRAME_STEP: ctx.base is its start)
+    use_area(0); fs = types.SimpleNamespace(here=here, emit=emit, site=fs_site, put=fs_put, state=FS_STATE_OFF, render_scale=0, base=FS_MATCH[1] if FS_MATCH else 0)
+    (FS_MATCH[0]['stub'] if FS_MATCH else FRAME_STEP[BUILD_ID])(fs); RENDER_SCALE = fs.render_scale
 
 # ---- Spin waits (every module) ----
 # A guest loop that polls memory until another thread changes it fills only its own core on the Switch, where any higher-priority thread pinned there preempts it, so the
@@ -1879,7 +1888,7 @@ with open(P('fixups.tsv'), 'w') as f:
     if FS_STATE_OFF: f.write(f'# FPS_STATE_OFF\t{FS_STATE_OFF:#x}\n')   # frame step state page (FRAME_STEP): the loader writes the target fps there
     if UE_CALLS: f.write(f'# UE_MALLOC_VT\t{UE_VT:#x}\n# UE_MALLOC_SLOT\t{UE_SLOT:#x}\n')   # Unreal's FMallocBinned3 (ue_malloc.py): its vtable and the slot of its name getter, which names the slot layout
     if FPS_TARGET_PTR is not None: f.write(f'# FPS_TARGET_PTR\t{FPS_TARGET_PTR:#x}\n# FPS_TARGET_FIELD\t{FPS_TARGET_FIELD:#x}\n')   # a target frame rate the game steps by (fps_target.py)
-    if UE_FIXED_PTR is not None: f.write(f'# UE_FIXED_RATE_PTR\t{UE_FIXED_PTR:#x}\n# UE_FIXED_RATE_FIELD\t{UE_FIXED_FIELD:#x}\n')   # Unreal's GEngine and UEngine::FixedFrameRate (ue_fixed_rate.py)
+    if UE_FIXED_PTR is not None: f.write(f'# UE_FIXED_RATE_PTR\t{UE_FIXED_PTR:#x}\n# UE_FIXED_RATE_FIELD\t{UE_FIXED_FIELD:#x}\n# UE_FIXED_RATE_FLAG\t{UE_FIXED_FLAG:#x}\n')   # Unreal's GEngine, UEngine::FixedFrameRate and bUseFixedFrameRate (ue_fixed_rate.py)
     for n, o in UE_CVARS.items(): f.write(f'# UE_CVAR:{n}\t{o:#x}\n')   # Unreal console variables (ue_cvar.py): the TAutoConsoleVariable registered under each name
     if RENDER_SCALE: f.write('# RENDER_SCALE\t1\n')   # a render-scale stub reads state +0x10 (the loader ignores the key; dm/games/settings.py offers the setting by it)
     if NAME == 'main':

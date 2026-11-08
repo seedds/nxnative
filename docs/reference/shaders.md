@@ -735,10 +735,11 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 
 ### Position invariance across shaders
 
-- **Symptom:** the ground kept stale 32×32 blocks where the G-buffer draw failed the depth test: blocks of a stale image where a depth pre-pass and a later pass with other vertex shaders meet (Odyssey: 32×32 blocks on every fourth frame).
+- **Symptom:** the ground kept stale 32×32 blocks where the G-buffer draw failed the depth test: blocks of a stale image where a depth pre-pass and a later pass with other vertex shaders meet (Odyssey: 32×32 blocks on every fourth frame). With mesh shaders: white shapes on plants for single frames, at other places each frame while the leaves move (Ocarina of Time).
 - **Cause:** a game may draw the same geometry with two programs and rely on identical depth, for example a depth pre-pass and then a less-or-equal G-buffer pass. Maxwell evaluates identical position math identically; Metal only does for outputs marked `[[invariant]]` (the translation marks `gl_Position`) when compiled with `-fpreserve-invariance`. Without it, Metal compiled two vertex shaders' identical position math to slightly different depths, so fragments of the second pass failed a less-or-equal depth test against the pre-pass and those pixels kept the previous content.
-- **Fix:** `dmsh_build.py` (Mac) and `ios_metal.py` (iOS) pass `-fpreserve-invariance` to every compile.
+- **Fix:** `dmsh_build.py` (Mac) and `ios_metal.py` (iOS) pass `-fpreserve-invariance` to every compile. A mesh shader's position is marked too: the mesh stage wrapper (`dmsh_meshstage.to_stage`) declares `[[position, invariant]]`, as the translation does for `gl_Position`.
 - **Found on:** [Super Mario Odyssey](../../dm/games/0100000000010000/README.md) (Mac): the Cap Kingdom ground. Presents 4k were brighter and blocky, 4k+1 and 4k+2 clean, 4k+3 partly blocked, repeating to the decimal across runs. The blocks were already in the HDR target when the G-buffer pass ended, and only with the ground's material (`b6384a85afd3ef94`) drawn. In some frames the game first draws a depth pre-pass (`alRenderDepthOnly`) for objects its occlusion queries report visible (the queries rotate through three slots, hence the cycle), then draws the G-buffer with other vertex shaders and depth test less-or-equal, without clearing the colour targets.
+  [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) (Mac): the foliage in Kokiri Forest is drawn twice by two different mesh shaders, a depth pre-pass (depth LESS, no colour) and a colour pass with depth EQUAL and no depth write. Pixels where the colour pass missed EQUAL showed white for one frame; how the white reaches the picture was not traced (the scene target's clear value, alpha 0, is the likely source). Without the mark the wrapper's position was a plain `[[position]]`. With it: no flashes in five 121-frame windows on an M4 Max (14 on main), none in 240 frames at a flashing flower on an M4 Pro.
 - **Note:** ruled out on the way: the TBDR optimizations, same-pass feedback, the present path. Evaluating the game's conditional rendering on the CPU from earlier frames' results made it worse (the condition belongs to the same frame on the GPU), so the host still ignores the condition there and draws.
 
 ### iOS math mode (relaxed)
@@ -2121,6 +2122,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Cause:** that run compiled its Metal libraries and pipelines on first use (cold cache). With a warm cache the title is up after about 15 s; what looked like a 40-second wait in the read log (`DM_FSLOG`) was the title screen itself, which reads nothing.
 - **Check:** screenshots every few seconds (`ctl.sh snap` from a script) told the two apart.
 - **Found on:** [Bayonetta 3](../../dm/games/01004A4010FEA000/README.md) (SDK 13.3.2).
+
+### Native mesh draws omitted while their pipeline compiles
+
+- **Symptom:** missing geometry or bright patches just after loading, which disappear as background pipeline compilation finishes.
+- **Cause:** `mtk_pso` started an asynchronous native task/mesh pipeline build and returned no pipeline; the draw was omitted until a later frame found the completed pipeline. This copied the geometry-mesh optimization's behavior without its equivalent compute fallback. Native mesh draws have no such replacement. Metal validation also rejected the helper descriptor assigning a mesh function to `vertexFunction` before copying its raster state.
+- **Fix:** compile the demanded native mesh pipeline before issuing its first draw, then reuse the cached pipeline. The shared descriptor helper leaves `vertexFunction` unset for a native mesh shader; the mesh descriptor receives it as `meshFunction`. A cold pipeline can delay the first frame but cannot silently remove its draw. `t_mesh_first_use` exercises real NVN submissions with mesh-only, task/mesh, depth-only and ordinary vertex shaders: the old host failed 10 of 42 pixel/state checks; the fixed host passes all 42 with Metal validation in both encoding modes.
+- **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md), M4 Pro startup white patches. The synthetic GPU regression verifies the missing-draw mechanism; the corrected game's startup remains to be checked with the queue fix.
 
 ### Geometry runs across occlusion query boundaries
 

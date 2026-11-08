@@ -6,8 +6,9 @@
 // the frame limit, the profile's ue_fps_cvar (t.MaxFPS, or a game's own variable its settings apply to t.MaxFPS: SHIN MEGAMI TENSEI V: Vengeance's Project.FrameRateLimit), and the
 // present interval, rhi.SyncInterval (nvn.SyncInterval in UE 4.18's Switch RHI: DRAGON QUEST XI S). Each is a TAutoConsoleVariable whose +0x10 points to its value, the game thread's
 // copy then the render thread's. The games' configs set the limit to 30 and the interval to 2 (their notes name the .ini files). An engine with a fixed frame rate (bUseFixedFrameRate) steps
-// by and holds to UEngine::FixedFrameRate instead, which the rewriter finds through its reflection entry and GEngine (dm/tools/ue_fixed_rate.py, main's fixups UE_FIXED_RATE_PTR / _FIELD):
-// DRAGON BALL: Sparking! ZERO's battles, which Unreal's Switch frame pace sets to 30. The engine reads it only while the fixed frame rate is on, so writing it changes nothing on the others
+// by and holds to UEngine::FixedFrameRate instead, which the rewriter finds through its reflection entry and GEngine where the engine is made (dm/tools/ue_fixed_rate.py, main's fixups
+// UE_FIXED_RATE_PTR / _FIELD / _FLAG): DRAGON BALL: Sparking! ZERO's battles and Pikmin 4. It is written only while the object's bUseFixedFrameRate is set (_FLAG), so an engine stepping by
+// the time that passed is left as it is
 #include "hle.h"
 #include <mach/mach.h>
 
@@ -23,7 +24,7 @@
 enum { FPS_F32, VSYNCS_I32, MS_F32, FPS_I32, TICKS_U32, SECS_F32, MODE_U32, FPS_F64 };
 #define MS_MARGIN 0.5f
 static float ms_want(int fps) { return 1000.0f / (float)fps - (fps == 60 ? MS_MARGIN : 0); }
-typedef struct { const char *build, *what; uint64_t ptr_off; uint32_t field; uint8_t kind, copies; uint32_t scale; } lock_t;
+typedef struct { const char *build, *what; uint64_t ptr_off; uint32_t field; uint8_t kind, copies; uint32_t scale; uint32_t flag; } lock_t;   // flag: byte offset << 8 | bit mask the object must have set for the write (0: none)
 static const lock_t k_locks[] = {
     // Pokemon Brilliant Diamond 1.3.0: Unity's Application.targetFrameRate. Its icall registration (main+0xe34e60) resolves to main+0xdc8e70 -> +0x5fa640,
     // which stores w0 at main+0x4afc868; the getter at +0x5fa630 reads the same int32. The game sets 30 when entering the field; display pacing alone does not remove that cap.
@@ -196,7 +197,7 @@ static int target_row(const module_t *m, lock_t *out) {
 // not an Unreal main). *missing: an Unreal main (the rewriter found some of its variables) without the profile's frame-limit variable
 static int ue_rows(const module_t *m, lock_t *out, int *missing) {
     static char what[4][48]; int n = 0, have = 0;
-    if (m->ue_fixed_ptr) out[n++] = (lock_t){ "", "Unreal fixed frame rate (GEngine->FixedFrameRate)", m->ue_fixed_ptr, m->ue_fixed_field, FPS_F32, 1, 0 };
+    if (m->ue_fixed_ptr && m->ue_fixed_flag) out[n++] = (lock_t){ "", "Unreal fixed frame rate (GEngine->FixedFrameRate)", m->ue_fixed_ptr, m->ue_fixed_field, FPS_F32, 1, 0, m->ue_fixed_flag };
     for (int k = 0; k < m->n_ue_cvar && n < 4; k++) {
         const char *name = m->ue_cvar[k].name; int fps = !strcmp(name, DM_GAME_UE_FPS_CVAR);
         if (!fps && strcmp(name, "rhi.SyncInterval") && strcmp(name, "nvn.SyncInterval")) continue;
@@ -270,6 +271,7 @@ void dm_fps_lock_tick(void) {
     for (int r = 0; r < nrow; r++) {
         const lock_t *L = rows[r]; uint64_t obj = (uint64_t)(uintptr_t)base;
         if (L->ptr_off && (!rd((uint64_t)(uintptr_t)(base + L->ptr_off), &obj, sizeof obj) || !obj)) continue;   // not created yet
+        if (L->flag) { uint8_t b; if (!rd(obj + (L->flag >> 8), &b, 1) || !(b & (L->flag & 0xff))) continue; }   // the object's flag is off (Unreal: no fixed frame rate in use)
         if (L->kind == FPS_F64) {
             for (int c = 0; c < L->copies; c++) {
                 uint64_t a = obj + L->field + 8 * (uint64_t)c; double cur, want = target;

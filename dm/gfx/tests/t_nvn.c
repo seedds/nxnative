@@ -166,6 +166,74 @@ static int ticket_small_guest_regrant(void) {
     return g_fail ? 1 : 0;
 }
 
+// A native-minimum 512-byte command grant can hold just a 4-byte terminal
+// ticket. The asynchronous upstream queue must snapshot its full canonical
+// DRAW_IDX+END *before* the guest regrants that memory. This directly tests
+// the queue's CPU-only flatten path, never starting its replay/GPU worker.
+static int ticket_queue_flatten(void) {
+    _Alignas(16) uint8_t command[512] = {0}, control[64] = {0};
+    pool_t pool = {0}; pool.mem = command; pool.size = sizeof command;
+    setenv("DM_NVN_DRAW_CTL", "1", 1); nvn_draw_ctl_init();
+    NVNcommandBuffer cb;
+    h_nvnCommandBufferInitialize(&cb, NULL);
+    h_nvnCommandBufferAddControlMemory(&cb, control, sizeof control);
+    h_nvnCommandBufferAddCommandMemory(&cb, (NVNmemoryPool *)&pool, 0, sizeof command);
+    h_nvnCommandBufferBeginRecording(&cb);
+    h_nvnCommandBufferDrawElementsBaseVertex(&cb, NVN_DRAW_PRIMITIVE_TRIANGLES,
+                                             NVN_INDEX_TYPE_UNSIGNED_SHORT, 12, 0x123400, 2);
+    NVNcommandHandle ticket = h_nvnCommandBufferEndRecording(&cb);
+    EXPECT("queue: real 512-byte grant records 4 guest bytes", 4,
+           h_nvnCommandBufferGetCommandMemoryUsed(&cb));
+    EXPECT("queue: ticket is tagged", 1,
+           nvn_ctl_draw_is_ticket((const void *)(uintptr_t)ticket));
+
+    // Queue copies command records from the guest on the submitting thread.
+    // Exercise both the primary handle and a nested cached OP_CALL handle.
+    _Alignas(8) uint8_t called[24] = {0};
+    op_hdr call = {OP_CALL, 16}, end = {OP_END, 8};
+    memcpy(called, &call, sizeof call);
+    memcpy(called + 8, &ticket, sizeof ticket);
+    memcpy(called + 16, &end, sizeof end);
+    nq_job *jobs[2] = {0};
+    for (int which = 0; which < 2; which++) {
+        nq_job *j = calloc(1, sizeof *j);
+        if (!j) die("queue test: allocation failed");
+        jobs[which] = j;
+        j->objects.klen = 16;
+        ctl_ticket_read_begin();
+        nq_flatten(j, which ? called : (const uint8_t *)(uintptr_t)ticket, 0);
+        nq_end(j);
+        ctl_ticket_read_end();
+        nq_node *n = j->first;
+        op_hdr h = {0}, term = {0};
+        if (n && n->length >= 48) {
+            memcpy(&h, n->bytes, sizeof h);
+            memcpy(&term, n->bytes + 40, sizeof term);
+        }
+        EXPECT(which ? "queue: nested ticket flattened to 48 bytes" : "queue: ticket flattened to 48 bytes",
+               48, n ? (long long)n->length : -1);
+        EXPECT(which ? "queue: nested ticket starts canonical draw" : "queue: direct ticket starts canonical draw",
+               1, h.op == OP_DRAW_IDX && h.size == 40);
+        EXPECT(which ? "queue: nested ticket ends canonical record" : "queue: direct ticket ends canonical record",
+               1, term.op == OP_END && term.size == 8);
+    }
+    // After copying, the guest may regrant the original handle. Both queued
+    // byte snapshots must remain readable without a live ticket registry.
+    h_nvnCommandBufferAddCommandMemory(&cb, (NVNmemoryPool *)&pool, 0, sizeof command);
+    EXPECT("queue: original ticket retired on overlapping regrant", 0, g_ctl_ticket_n);
+    for (int i = 0; i < 2; i++) {
+        op_hdr h = {0};
+        if (jobs[i]->first && jobs[i]->first->length >= sizeof h)
+            memcpy(&h, jobs[i]->first->bytes, sizeof h);
+        EXPECT("queue: independently copied draw survives regrant", OP_DRAW_IDX, h.op);
+        nq_node *n = jobs[i]->first;
+        while (n) { nq_node *next = n->next; free(n->bytes); free(n); n = next; }
+        nq_job_free(jobs[i]);
+    }
+    h_nvnCommandBufferFinalize(&cb);
+    return g_fail ? 1 : 0;
+}
+
 static size_t tex_size3(int target, int fmt, int w, int h, int depth) {   // a layered or 3D texture's storage size
     NVNtextureBuilder tb;
     P(nvnTextureBuilderSetDevice)(&tb, &dev); P(nvnTextureBuilderSetDefaults)(&tb); P(nvnTextureBuilderSetTarget)(&tb, target);
@@ -185,6 +253,7 @@ int main(void) {
     if (getenv("DM_TEST_CTL_TICKET_RACE")) return ticket_lifetime_race(); // headless; never opens Metal or submits GPU work
     if (getenv("DM_TEST_CTL_TICKET_REUSE")) return ticket_registry_reuse(); // headless: bounded 1024-generation lifetime test
     if (getenv("DM_TEST_CTL_TICKET_SMALL_GRANT")) return ticket_small_guest_regrant(); // headless: tiny non-null guest grants
+    if (getenv("DM_TEST_CTL_TICKET_QUEUE_FLATTEN")) return ticket_queue_flatten(); // native 512-byte grant, CPU-only deferred queue snapshot
     setenv("DM_NVN_COUNT", "1", 1);   // the call-count checks below need the counting trampolines (off by default)
     // Engine-native limiters have no FPS state page. Their launcher cap must
     // still pace presents and select the display-link rate in display mode.
@@ -1160,7 +1229,7 @@ int main(void) {
         P(nvnMemoryPoolFinalize)(&mp);
     }
 
-    // 6d. Lifecycle: in-flight GPU work is 0 when suspend returns; submits are blocked during suspend and let through after resume
+    // 6d. Lifecycle: in-flight GPU work is 0 when suspend returns; queued replay waits for resume.
     {
         size_t big = 64u << 20; uint8_t *heap; posix_memalign((void **)&heap, 16384, 2 * big); memset(heap, 0, 2 * big);
         NVNmemoryPoolBuilder hb; NVNmemoryPool hp; P(nvnMemoryPoolBuilderSetDefaults)(&hb); P(nvnMemoryPoolBuilderSetStorage)(&hb, heap, 2 * big);
@@ -1169,20 +1238,32 @@ int main(void) {
         for (int i = 0; i < 24; i++) P(nvnCommandBufferCopyBufferToBuffer)(&cb, (NVNbufferAddress)heap, (NVNbufferAddress)(heap + big), big, 0);
         NVNcommandHandle hbusy = P(nvnCommandBufferEndRecording)(&cb);
         P(nvnQueueSubmitCommands)(&q, 1, &hbusy);
-        uint64_t f = mtl_last_fence();
+        NVNsync busy_sync; P(nvnSyncInitialize)(&busy_sync, &dev);
+        P(nvnQueueFenceSync)(&q, &busy_sync, NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE, 0);
+        // Submit may return before the worker encodes anything. Observe this
+        // queue's receipt before checking its physical GPU completion.
+        uint64_t f = 0; int encoded = 0; struct timespec deadline;
+        clock_gettime(CLOCK_REALTIME, &deadline); deadline.tv_sec += 5;
+        pthread_mutex_lock(&nq_mu);
+        while (!(encoded = nq_sync_encoded((const sync_t *)&busy_sync, &f)))
+            if (pthread_cond_timedwait(&nq_cv, &nq_mu, &deadline)) break;
+        pthread_mutex_unlock(&nq_mu);
+        EXPECT("busy submission receives its own physical fence", 1, encoded);
         int busy_before = !mtl_wait(f, 0);
         dm_gfx_suspend(1);
         EXPECT("GPU really busy before suspend (zero-timeout wait not complete)", 1, busy_before);
         EXPECT("in-flight work complete when suspend returns", 1, mtl_wait(f, 0));
         P(nvnCommandBufferBeginRecording)(&cb); P(nvnCommandBufferBarrier)(&cb, 0); NVNcommandHandle hsmall = P(nvnCommandBufferEndRecording)(&cb);
+        uint64_t suspended_fence = mtl_last_fence();
         g_sq = &q; g_sh = hsmall; g_sub = P(nvnQueueSubmitCommands); atomic_store(&g_sstarted, 0); atomic_store(&g_sdone, 0);
         pthread_t th; pthread_create(&th, NULL, susp_thr, NULL);
         int started = wait_started();
-        EXPECT("during suspend another thread entered submit and has not returned", 1, started && !atomic_load(&g_sdone));
+        EXPECT("during suspend another thread enters submit", 1, started);
+        EXPECT("background submission has not reached the GPU", suspended_fence, mtl_last_fence());
         dm_gfx_suspend(0);
         pthread_join(th, NULL);
         EXPECT("that submit is let through and returns after resume", 1, atomic_load(&g_sdone));
-        P(nvnQueueFinish)(&q); P(nvnMemoryPoolFinalize)(&hp); free(heap);
+        P(nvnQueueFinish)(&q); P(nvnSyncFinalize)(&busy_sync); P(nvnMemoryPoolFinalize)(&hp); free(heap);
     }
 
     // 6e. Present pacing (real-device semantics): present returns immediately; blocking happens at acquire - swapchain of 3, interval 1, 60 Hz, the 4th acquire waits until texture 0 has been displayed for a full period

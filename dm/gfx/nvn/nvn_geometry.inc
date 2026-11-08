@@ -550,12 +550,11 @@ static void geo_mesh_encode(id<MTLRenderCommandEncoder> en_) {
 // A program's task and mesh shaders are Metal object and mesh functions (dmsh_meshstage.py), kept in the tessellation stages' places (sh[3], sh[4]). The draw goes through draw() with its
 // pixel stage alone, a program of its own as a geometry draw's raster stage is, so it takes the render pass and the pixel stage's state like any draw; mtk_pso gives its pipeline and
 // mtk_encode binds the two stages and draws. The mesh stage shares the vertex stage's table, as geo_mesh_encode's does, and a task shader has the object stage's; both read the
-// draw's first workgroup at buffer 29. A pipeline is built in the background and its draws are left out until it is ready, as for a geometry mesh pipeline
+// draw's first workgroup at buffer 29. Native mesh draws have no equivalent fallback: the demanded pipeline must finish compiling before its first draw
 static struct { int on, miss; NvShader *ts, *ms; uint32_t first, count; uint64_t ind, ind_first; } g_mtk;   // ind: an indirect draw's threadgroups, ind_first: where the GPU finds its first
 static void draw_(const p_draw *dw, const p_draw_idx *di);
 static uint64_t g_mtk_n, g_mtk_wait;
-static nvn_hmap g_pso_mtk = {.klen = sizeof(pso_key)}; static os_unfair_lock g_pso_mtk_lock = OS_UNFAIR_LOCK_INIT;
-static NSObject *g_pso_mtk_building;
+static nvn_hmap g_pso_mtk = {.klen = sizeof(pso_key)};   // only the submit thread creates and uses native mesh pipelines
 // A mesh pipeline must have a fragment function, where a vertex one need not (validateWithDevice). A task / mesh program with no pixel shader draws depth only (Ocarina of Time's foliage shadows)
 static id<MTLFunction> mtk_nop_fragment(void) {
     static id<MTLFunction> fn; static dispatch_once_t once;
@@ -568,10 +567,8 @@ static id<MTLRenderPipelineState> mtk_pso(NvProg *raster) {
     pso_key k; pso_key_fill(&k, ms, fs, g_pass.cfmt, g_pass.dfmt, g_pass.sfmt, g_pass.samples, 0);
     memset(k.attr, 0, sizeof k.attr); memset(k.attr_hi, 0, sizeof k.attr_hi); memset(k.stream, 0, sizeof k.stream);
     k.fsfn = (__bridge void *)(ts ? ts->fn : ms->fn);   // with ms in the key's vertex place: the task shader is the third of the pipeline's functions
-    os_unfair_lock_lock(&g_pso_mtk_lock); id ps = hm_get_id(&g_pso_mtk, &k);
-    if (!ps) { if (!g_pso_mtk_building) g_pso_mtk_building = [NSObject new]; hm_put_id(&g_pso_mtk, &k, g_pso_mtk_building); }
-    os_unfair_lock_unlock(&g_pso_mtk_lock);
-    if (ps) return ps == NSNull.null || ps == g_pso_mtk_building ? nil : ps;
+    id ps = hm_get_id(&g_pso_mtk, &k);
+    if (ps) return ps == NSNull.null ? nil : ps;
     MTLRenderPipelineDescriptor *d = pso_desc(&k, ms, fs, nil, 0);
     MTLMeshRenderPipelineDescriptor *m = [MTLMeshRenderPipelineDescriptor new];
     m.meshFunction = ms->fn; m.fragmentFunction = d.fragmentFunction ?: mtk_nop_fragment(); m.maxTotalThreadsPerMeshThreadgroup = ms->mesh_threads;
@@ -579,14 +576,11 @@ static id<MTLRenderPipelineState> mtk_pso(NvProg *raster) {
     m.rasterSampleCount = d.rasterSampleCount; m.alphaToCoverageEnabled = d.alphaToCoverageEnabled;
     for (int i = 0; i < 8; i++) m.colorAttachments[i] = d.colorAttachments[i];
     m.depthAttachmentPixelFormat = d.depthAttachmentPixelFormat; m.stencilAttachmentPixelFormat = d.stencilAttachmentPixelFormat;
-    const char *tk = ts ? ts->key : "-", *mk = ms->key, *fk = fs ? fs->key : "-"; pso_key kk = k;
-    dispatch_async(pp_bg_queue(), ^{
-        NSError *e = nil; uint64_t t0 = bp_now();
-        id<MTLRenderPipelineState> p = [g_dev newRenderPipelineStateWithMeshDescriptor:m options:MTLPipelineOptionNone reflection:nil error:&e];
-        MLOG("%stask / mesh pipeline: task %s mesh %s fragment %s, %.1f ms in the background%s%s", p ? "" : "[RED] ", tk, mk, fk, (bp_now() - t0) / 1e6, p ? "" : ": ", p ? "" : e.localizedDescription.UTF8String);
-        os_unfair_lock_lock(&g_pso_mtk_lock); hm_put_id(&g_pso_mtk, &kk, p ?: NSNull.null); os_unfair_lock_unlock(&g_pso_mtk_lock);
-    });
-    return nil;
+    NSError *e = nil; uint64_t t0 = bp_now();
+    id<MTLRenderPipelineState> p = [g_dev newRenderPipelineStateWithMeshDescriptor:m options:MTLPipelineOptionNone reflection:nil error:&e];
+    MLOG("%stask / mesh pipeline: task %s mesh %s fragment %s, %.1f ms%s%s", p ? "" : "[RED] ", ts ? ts->key : "-", ms->key, fs ? fs->key : "-", (bp_now() - t0) / 1e6, p ? "" : ": ", p ? "" : e.localizedDescription.UTF8String);
+    hm_put_id(&g_pso_mtk, &k, p ?: NSNull.null);
+    return p;
 }
 static void mtk_encode(id<MTLRenderCommandEncoder> en_) {
     id<MTL4RenderCommandEncoder> en = (id<MTL4RenderCommandEncoder>)en_; NvShader *ts = g_mtk.ts, *ms = g_mtk.ms;

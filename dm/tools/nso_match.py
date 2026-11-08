@@ -7,6 +7,8 @@ game still needs a workaround; enrolling a patch requires checking that assumpti
 A rule covers one function ({name, size, fingerprints, cuts}) or several that must change
 together ({name, functions: [{size, fingerprints, cuts}, ...]}): a multi-function rule
 applies only when every one of its functions matches, never in part.
+A frame-step rule ({name, size, fingerprints, stub}; patch_nso.py MATCH_FRAME_STEP) locates
+one function the same way and hands its start to the stub, which writes its sites there.
 No fuzzy matching, raw byte scanning or guessed function boundaries.
 """
 import hashlib
@@ -170,16 +172,20 @@ class Image:
         self.match_patch(rule)
         return rule
 
-    def match(self, rule):
-        validate(rule)
+    def locate(self, size, fingerprints):
+        """The start of the one function of this size with one of these fingerprints; MatchError unless exactly one matches"""
         matches = []
         for start, end in self.functions.items():
-            if end - start != rule['size']: continue
+            if end - start != size: continue
             try: digest = self.fingerprint(start)
             except MatchError: continue
-            if digest in rule['fingerprints']: matches.append(start)
+            if digest in fingerprints: matches.append(start)
         if len(matches) != 1: raise MatchError(f'{len(matches)} matching functions (need exactly one)')
-        start, = matches
+        return matches[0]
+
+    def match(self, rule):
+        validate(rule)
+        start = self.locate(rule['size'], rule['fingerprints'])
         cuts = []
         for delta, old, new, reason in rule['cuts']:
             off = start + delta
@@ -204,6 +210,43 @@ class Image:
         return cuts
 
 
+def validate_function(rule):
+    """The function part of a rule: a name, its size and its fingerprints"""
+    if not rule['name'] or not isinstance(rule['size'], int) or rule['size'] <= 0 or rule['size'] % 4: raise ValueError('invalid function size/name')
+    if not isinstance(rule['fingerprints'], (list, tuple)) or not rule['fingerprints']: raise ValueError('missing function fingerprints')
+    for digest in rule['fingerprints']:
+        if len(digest) != 64 or any(c not in '0123456789abcdef' for c in digest): raise ValueError('invalid function fingerprint')
+
+
+def validate_stub(rule):
+    """A frame-step rule (patch_nso.py MATCH_FRAME_STEP): {name, size, fingerprints, stub}, stub(ctx) writing its sites at ctx.base + offsets inside the function"""
+    if set(rule) != {'name', 'size', 'fingerprints', 'stub'}: raise ValueError('a frame-step rule needs name, size, fingerprints and stub')
+    validate_function(rule)
+    if not callable(rule['stub']): raise ValueError('a frame-step rule\'s stub must be a function of the context')
+
+
+def locate_stub(image, text_end, rules, report=print):
+    """(rule, function start) of the one frame-step rule that matches, or None with a red line. Rules are one patch's reviewed implementations (one name): exactly one must match"""
+    if not rules: return None
+    for rule in rules: validate_stub(rule)
+    names = {rule['name'] for rule in rules}
+    if len(names) != 1: raise ValueError(f'a module has one frame step: rules named {sorted(names)}')
+    name, = names
+    try: module = Image(image, text_end)
+    except MatchError as e:
+        report(f'[RED] frame step {name!r} skipped: {e}'); return None
+    found, misses = [], []
+    for i, rule in enumerate(rules, 1):
+        try: found.append((i, rule, module.locate(rule['size'], rule['fingerprints'])))
+        except MatchError as e: misses.append(str(e))
+    if len(found) != 1:
+        report(f'[RED] frame step {name!r} skipped: ' + (f'{len(found)} implementations match (need exactly one)' if found else '; '.join(misses)))
+        return None
+    (i, rule, start), = found
+    report(f'frame step {name!r}: matched the function at {start:#x}' + (f' (implementation {i} of {len(rules)})' if len(rules) > 1 else ''))
+    return rule, start
+
+
 def validate(rule):
     """Reject malformed rules and replacements whose meaning depends on an address."""
     if 'functions' in rule:
@@ -214,10 +257,7 @@ def validate(rule):
             validate(dict(fn, name=rule['name']))
         return
     if set(rule) != {'name', 'size', 'fingerprints', 'cuts'}: raise ValueError('function patch needs name, size, fingerprints and cuts')
-    if not rule['name'] or not isinstance(rule['size'], int) or rule['size'] <= 0 or rule['size'] % 4: raise ValueError('invalid function size/name')
-    if not isinstance(rule['fingerprints'], (list, tuple)) or not rule['fingerprints']: raise ValueError('missing function fingerprints')
-    for digest in rule['fingerprints']:
-        if len(digest) != 64 or any(c not in '0123456789abcdef' for c in digest): raise ValueError('invalid function fingerprint')
+    validate_function(rule)
     if not rule['cuts']: raise ValueError('function patch has no cuts')
     used = set()
     for delta, old, new, reason in rule['cuts']:

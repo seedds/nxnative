@@ -336,6 +336,7 @@ DM_TEST_ARCHIVE_CONSTANTS	test	Use optional function constants in the synthetic 
 DM_TEST_ARCHIVE_MIXED	test	Mix a newly compiled shader function with compacted bases in the archive restart fixture
 DM_TEST_BORDER	test	Path to the native t_border executable that test_dmsh_border.py runs a rewritten shader through on the GPU (`make check_t_border` sets it)
 DM_TEST_BUILD	test	Build folder of `dm/host/tests` whose `t_svc_memory` `test_memory_profile.py` runs (default `build`; `make asan` sets `build/asan`)
+DM_TEST_CTL_TICKET_QUEUE_FLATTEN	test	`=1` runs only the CPU-only deferred NVN queue flatten test for direct and nested four-byte tickets with a native-minimum **512-byte** command grant, canonical DRAW_IDX+END and regrant lifetime; no GPU submission or game launch
 DM_TEST_CTL_TICKET_RACE	test	`=1` runs only the headless NVN four-byte ticket cross-buffer immutable-reader/regrant and CopyCommands lifetime test in `t_nvn`; no GPU submission or gameplay
 DM_TEST_CTL_TICKET_REUSE	test	`=1` runs only the headless NVN four-byte ticket 1,024-generation regrant/live-registry-bounds test in `t_nvn`; synthetic grant sizes are not evidence of native-valid minimum-sized allocations
 DM_TEST_CTL_TICKET_SMALL_GRANT	test	`=1` runs only the headless four-byte ticket overlap-retirement fallback test in `t_nvn` with a non-null 32-byte guest grant, **below** NVN/NVN2's advertised 512-byte command-memory minimum; defensive coverage, not a conforming guest grant

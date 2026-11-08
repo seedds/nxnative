@@ -35,6 +35,16 @@ def bundle(resources, compressed=True, version=3):
 
 
 class Bnd2(unittest.TestCase):
+    def test_version_two_uses_three_blocks_and_64_byte_entries(self):
+        first, second = zlib.compress(b'header'), zlib.compress(b'gpu code')
+        head = struct.pack('<4sIIIII3II', b'bnd2', 2, 1, 0x30, 1, 0x30,
+                           0x70, 0x70 + len(first), 0x70 + len(first) + len(second), 0xf) + bytes(8)
+        entry = struct.pack('<QQ3I3I3IIII', 0x1234, 0, 6, 8, 0,
+                            len(first), len(second), 0, 0, 0, 0, 0, 8, 0)
+        self.assertEqual(len(entry), 0x40)
+        self.assertEqual(ss.bnd2_resources(head + entry + first + second, '/v2'),
+                         [(0x1234, 8, 0, b'header'), (0x1234, 8, 1, b'gpu code')])
+
     def test_resources_are_inflated_by_block(self):
         d = bundle([(0x888893, 4, [b'program']), (0xb281e6, 8, [b'header', b'gpu code' * 40])])
         got = ss.bnd2_resources(d, '/SHADERS.BNDL')

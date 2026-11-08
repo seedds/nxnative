@@ -463,6 +463,9 @@ static void res_top(const char *why) { @autoreleasepool {
 } }
 void mem_census(const char *why);
 void dm_gfx_restop(void) { res_top("DM_CTL restop"); mem_census("DM_CTL restop"); }
+static _Atomic uint64_t g_oom_ns;   // when a command buffer last failed for lack of memory (res_top_once)
+// A dropped upload is not redone within a second of such a failure: the redo goes to the queue that is failing, and each attempt asks the driver to wire more
+static int up_oom_recent(void) { uint64_t t = atomic_load(&g_oom_ns); return t && clock_gettime_nsec_np(CLOCK_MONOTONIC) - t < 1000000000ull; }
 // Going on helps nobody once command buffers keep failing: no frame reaches the window, and each attempt asks the driver to wire more. A host left running like that on a 16 GB Mac took the whole
 // system down, hung for hours and then a kernel panic in IOGPUGroupMemory at 14.7 GB wired. So 32 failures within a minute end the game
 static void res_top_once(NSError *err) {
@@ -470,6 +473,7 @@ static void res_top_once(NSError *err) {
     static _Atomic int done, fails; static _Atomic uint64_t since;
     if (!atomic_exchange(&done, 1)) res_top("[RED] GPU out of memory");
     uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC);
+    atomic_store(&g_oom_ns, now);
     if (now - atomic_load(&since) > 60000000000ull) { atomic_store(&since, now); atomic_store(&fails, 0); }
     if (atomic_fetch_add(&fails, 1) >= 32) MDIE("the GPU is out of memory: 32 command buffers failed within a minute (GPU allocated %llu MB, recommended working set %llu MB)", (unsigned long long)(g_dev.currentAllocatedSize >> 20), (unsigned long long)(g_dev.recommendedMaxWorkingSetSize >> 20));
 }
@@ -2764,7 +2768,7 @@ static void tex_put(uint64_t k, id o) {   // serials from 2^62 up are external t
 // Host record of a packaged texture: the current MTLTexture, the upload stamp, and the global write generation at the last check
 // spare: the texture the last re-upload replaced, kept resident and written by the next re-upload once the GPU has passed spare_fence (a texture the CPU rewrites every frame, a movie frame,
 // alternates between two textures instead of allocating one per frame: Link's Awakening's title movie made and freed an 8 MB texture a frame)
-@interface NvPkg : NSObject { @public id<MTLTexture> tex, spare, view; uint64_t stamp, seen, hash, spare_fence, vgen, vseen, sub; const void *span; int sparse, vbase; uint8_t *edge[2]; uint32_t edge_n[2], stored; id ps; id<MTLBuffer> eb; } @end   // hash: full hash of the uploaded content under DM_NVN_DIRTYCHECK; span: its tracked range (nvn_dirty_span, NULL = untracked);
+@interface NvPkg : NSObject { @public id<MTLTexture> tex, spare, view; uint64_t stamp, seen, hash, spare_fence, vgen, vseen, sub; const void *span; int sparse, vbase; uint8_t *edge[2]; uint32_t edge_n[2], stored; id ps; id<MTLBuffer> eb; uint8_t redo; } @end   // hash: full hash of the uploaded content under DM_NVN_DIRTYCHECK; span: its tracked range (nvn_dirty_span, NULL = untracked); redo: times its dropped upload was redone (at most 3: tex_mtl_)
 // sparse: in a sparse virtual pool, read through its page table (hle_nvn.c nvn_sparse_*), vgen the page table's generation at the upload and vseen at the last look; view: what it is bound as (sparse_view)
 // ps: its placement sparse texture (NvSparse, sparse_make), which tex is: mapped and uploaded tile by tile (sparse_sync)
 // edge: the uploaded bytes of the storage's first and last host pages where other data shares them (pkg_edges_take); in eb from the first GPU store into its storage on (pkg_edges_gpu),
@@ -3098,6 +3102,9 @@ static void up_flush(void) {
         if (f.error || fake_lost) {
             os_unfair_lock_lock(&g_up_lost_lk); if (!g_up_lost) g_up_lost = [NSHashTable weakObjectsHashTable]; for (id d in dsts) [g_up_lost addObject:d]; int n = (int)g_up_lost.allObjects.count; atomic_store(&g_up_lost_n, n); os_unfair_lock_unlock(&g_up_lost_lk);
             pthread_mutex_lock(&g_smu); g_ser_gen++; pthread_mutex_unlock(&g_smu);   // Make the view cache of every texture ID take the slow path once (on a cache hit tex_mtl is not passed through and this record is not seen)
+            // The redo waits a second after an out-of-memory failure (up_oom_recent), and the slow path above usually comes within it: sweep again once the wait is over, or a texture a
+            // static scene keeps drawing would stay unwritten until some unrelated change
+            if (f.error) dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1100 * NSEC_PER_MSEC), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ pthread_mutex_lock(&g_smu); g_ser_gen++; pthread_mutex_unlock(&g_smu); });
             MLOG("%supload command buffer dropped: the %lu textures of this batch are marked unwritten and re-uploaded on next use (%d awaiting re-upload)", fake_lost ? "DM_TEST_UP_LOST: " : "", (unsigned long)dsts.count, n);
         }
         double d = f.GPUEndTime - f.GPUStartTime;
@@ -3711,7 +3718,7 @@ static void sparse_sync(NvSparse *s, const tex_t *t, int whole) {
 // in Mario Kart World's first race): at most once a second, as the look goes over every mapped tile, so a rewritten tile can show its old content for that long
 static inline void sparse_look(NvSparse *s, const tex_t *t) {
     if (nvn_sparse_log_seq(t->pool) != s->seq) sparse_sync(s, t, 0);
-    if (atomic_load_explicit(&g_up_lost_n, memory_order_relaxed) && !s->gpu && up_lost_take(s->tex)) { sparse_sync(s, t, 3); return; }
+    if (atomic_load_explicit(&g_up_lost_n, memory_order_relaxed) && !s->gpu && !up_oom_recent() && up_lost_take(s->tex)) { sparse_sync(s, t, 3); return; }
     if (!s->gpu && nvn_dirty_sparse_writes() != s->wseen && atomic_load(&g_cur_frame) - s->wframe >= 60) sparse_sync(s, t, 2);
 }
 static char g_sp_key;   // a GPU texture's NvSparse, as its associated object
@@ -3773,6 +3780,12 @@ static id<MTLBuffer> zero_buf(size_t need) {
     return zb;
 }
 static uint64_t g_tex_zeroed;
+// A depth texture of ZF_BLIT_MIN bytes a slice or more is zeroed by copies from the zero buffer, ZF_PIECE of it at a time, not by a clear pass: a clear pass on a large depth attachment ends in
+// kIOGPUCommandBufferCallbackErrorOutOfMemory with plenty of memory free (M3 Pro, standalone Metal 4 test: Depth32Float 4096x4096 and Depth16Unorm from about 5000x5000 up fail by size and by the
+// minute, a copy of the same texture up to 16384x16384 never), and from then on every command buffer of the queue fails the same way until the texture is freed. Ocarina of Time makes a 12288x12288
+// Depth16Unorm (296 MB, only sampled) and a 4096x4096 Depth32Float at each save load, where its first command buffers failed this way and the 32-failures stop (res_top_once) followed in three of five runs
+#define ZF_BLIT_MIN (16u << 20)
+#define ZF_PIECE (4u << 20)
 static void tex_zero_fill(id<MTLTexture> mt) {
     static int warned;
     if (!atomic_load(&g_sub_thread_set) || !on_sub_thread()) return;   // the upload batch belongs to the submit thread only
@@ -3782,6 +3795,21 @@ static void tex_zero_fill(id<MTLTexture> mt) {
     int stencil = pf == MTLPixelFormatStencil8 || pf == MTLPixelFormatDepth32Float_Stencil8;
     int multisample = tt == MTLTextureType2DMultisample || tt == MTLTextureType2DMultisampleArray;
     if (multisample && !depth && !stencil && !(mt.usage & MTLTextureUsageRenderTarget)) return;   // no render pass can clear it (tex_desc gives every multisample texture the usage)
+    size_t dbpp = pf == MTLPixelFormatDepth16Unorm ? 2 : pf == MTLPixelFormatDepth32Float ? 4 : 0, row0 = (size_t)mt.width * dbpp;
+    if (dbpp && mt.sampleCount == 1 && row0 * mt.height >= ZF_BLIT_MIN) {   // a buffer copy cannot fill a multisample texture: those keep the clear pass
+        id<MTLBuffer> zb = zero_buf(row0 * MAX((size_t)1, MIN((size_t)mt.height, ZF_PIECE / row0))); if (!zb) return;
+        NSUInteger layers = mt.arrayLength * (tt == MTLTextureTypeCube || tt == MTLTextureTypeCubeArray ? 6 : 1);
+        up_begin();
+        for (NSUInteger l = 0; l < mt.mipmapLevelCount; l++) {
+            NSUInteger w = MAX(mt.width >> l, 1u), h = MAX(mt.height >> l, 1u); size_t row = (size_t)w * dbpp, step = MAX((size_t)1, MIN((size_t)zb.length, (size_t)ZF_PIECE) / row);   // the colour path may have grown zero_buf to 64 MB
+            for (NSUInteger y = 0; y < layers; y++) for (NSUInteger y0 = 0; y0 < h; y0 += step) { NSUInteger n = MIN(step, h - y0);
+                up_blit_add_at(zb, 0, row, row * n, MTLSizeMake(w, n, 1), mt, y, l, MTLOriginMake(0, y0, 0)); }
+        }
+        [g_up_texs addObject:mt];
+        if (!g_cb) up_flush();
+        static int once; if (!once++) MLOG("new-texture zeroing: depth texture %lux%lu format %lu (%llu MB) zeroed by copies, not a clear pass", (unsigned long)mt.width, (unsigned long)mt.height, (unsigned long)pf, (unsigned long long)(mt.allocatedSize >> 20));
+        return;
+    }
     if (depth || stencil || multisample) {
         up_begin();
         if (g_up_ce) { m4_end(g_up_ce); g_up_ce = nil; }
@@ -4418,7 +4446,8 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
             if (pk->sparse && sparse_checked(pk)) { clean = 1; now = pk->seen; }
             else if (pk->sparse) { uint64_t g = nvn_sparse_gen(); clean = (now == pk->seen && g == pk->vseen) || !nvn_sparse_since(t->pool, (uint64_t)(uintptr_t)t->mem, t->L.size, pk->vgen, pk->stamp); pk->vseen = g; pk->sub = g_sub_serial; }
             pk->seen = now;
-            if (clean && atomic_load_explicit(&g_up_lost_n, memory_order_relaxed) && up_lost_take(pk->tex)) { clean = 0; uint64_t k = atomic_load(&g_up_lost_redo); if (k <= 3 || !atomic_load(&g_up_lost_n)) MLOG("re-uploading a texture whose upload was dropped ser=%llu (%llu in total, %d left in the record)", (unsigned long long)t->serial, (unsigned long long)k, atomic_load(&g_up_lost_n)); }
+            int redo = 0;   // a re-upload for a dropped upload, at most 3 per texture until a content change uploads it again (that resets the count)
+            if (clean && atomic_load_explicit(&g_up_lost_n, memory_order_relaxed) && pk->redo < 3 && !up_oom_recent() && up_lost_take(pk->tex)) { clean = 0; redo = 1; pk->redo++; uint64_t k = atomic_load(&g_up_lost_redo); if (k <= 3 || !atomic_load(&g_up_lost_n)) MLOG("re-uploading a texture whose upload was dropped ser=%llu (%llu in total, %d left in the record)", (unsigned long long)t->serial, (unsigned long long)k, atomic_load(&g_up_lost_n)); }
             if (clean) {
                 if (dirtycheck() && !pk->sparse && !pk->stored && full_hash(t->mem, t->L.size) != pk->hash && !g_pkg_miss++)
                     MLOG("[RED] dirty-page miss: texture ser=%llu pool content changed but was not detected", t->serial);
@@ -4432,7 +4461,7 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
             if (reuse) { pthread_mutex_lock(&g_smu); if (entry_holds((__bridge void *)reuse)) reuse = nil; pthread_mutex_unlock(&g_smu); }   // serials that took it over (cpu_unc_drop) still draw it
             reup_note(pk, t);
             uint64_t st, vg = nvn_sparse_gen(); id<MTLTexture> nt = pkg_upload(t, &st, reuse, pk->tex.usage);
-            if (nt) { id<MTLTexture> old = pk->tex; pk->tex = nt; pk->stored = 0;
+            if (nt) { id<MTLTexture> old = pk->tex; pk->tex = nt; pk->stored = 0; if (!redo) pk->redo = 0;
                 if (pk->spare && pk->spare != nt) defer_obj_release(pk->spare);   // still in use, or of another shape: retired as before
                 if (pk->sparse) sparse_view(pk, t);
                 zb_report(t, pk->sparse ? (unsigned)pk->vbase : 0, "re-upload");

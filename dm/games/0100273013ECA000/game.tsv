@@ -1,0 +1,34 @@
+# Summer Pockets REFLECTION BLUE, SDK 10.8.2, survey /Users/leochiu/nxnative_games/Summer Pockets REFLECTION BLUE/0100273013ECA000_survey/survey.md
+
+# ---- Identity ----
+title_id	0100273013ECA000
+program_id	0100273013ECA000
+
+# ---- App ----
+name	Summer Pockets REFLECTION BLUE
+ipa	SummerPocketsRB.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v65536	1.0.1	main=c6bee3d172c62c21c9d3788d96542c8b	subsdk0=9fafcfc111ed558a5234bd724befef48	sdk=0617f669301f922a811886048dd7b41a
+package	v65536
+shader_versions	v65536
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 sdk
+romfs_marker	BGCG.PAK
+zip_store	.pak:.webm:.metallib
+
+# ---- Memory ----
+# main sets a heap of at most the pool − 64 MB − 528 MB of bss (counted as used memory): a 2816 MB heap region
+mem_reserve	0xe0000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 0 MB of system resource: IsVirtualAddressMemoryEnabled is false, as on Horizon
+sys_resource	0x0
+
+# ---- Shader split ----
+shader_groups	/=root /movie/=movie
+shader_note	Summer Pockets REFLECTION BLUE shaders

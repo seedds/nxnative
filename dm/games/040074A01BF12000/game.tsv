@@ -44,3 +44,7 @@ render_cond	on
 # Dynamic resolution and the present interval read the GPU time between the frame's timestamp reports (about 26 a frame): with one time for the whole submission they read about 0,
 # the game kept 2304x1296 at 46 ms of GPU a frame and fell to interval 3 (15 fps before the odd-interval fix of the display link, 20 after). Each report takes its segment's GPU start / end: in the slow areas it steps down to 1152x648 with its upscaler and holds 30 fps
 gpu_timestamps	segment
+# The game's VRR mode (main+0x204640, chosen per frame at main+0x2036b0 when vi::QueryDisplayVrrSupported says yes): it asks for 40-60 fps through vi::SetLayerExtendedSwapInterval(layer, 1, fps)
+# and below 40 turns VRR off and presents at interval 2. Without the key the host answers no VRR, and the fixed-refresh controller (main+0x204a18) can only pick 60, 30 or 20 fps.
+# Answered on the Mac when the window's screen runs at 120 Hz or more (ProMotion), docked too (the Switch 2 has VRR handheld only); never on iOS (untested). DM_VRR=0 turns it off, DM_VRR=1 on for any screen
+vrr	on

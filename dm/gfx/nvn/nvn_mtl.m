@@ -9002,26 +9002,24 @@ static void prepare_prebuild(void) {
     if (left > 0) MLOG("pipeline prepare: every shader pair handed out after %.1f s; %d compiles still under way finish in the background", (bp_now() - t0) / 1e9, left);
     if (shown) front_progress(NULL, n, n);
 }
-// The lines after the lists' WARM_LATER_MARK, built after the game's first frame: as the background prewarm builds without a prepare step, but on half the performance cores at
-// utility QoS, as pso_prebuild_bg builds, so the game keeps its frame rate meanwhile; a draw whose pipeline is not built yet draws with its shader pair's pulling pipeline (hybrid),
-// whose bases the prepare step's prebuild made. Only on a start that does not compact the archive (warm_start): the prewarm stays running (g_warm_running) until warm_finish at
-// the end, which matters to the archive only while compacting (the recapture and the held flushes), so what it builds is captured as any compile at run time is
 // The background list's order. Workers take the next task of the list, but a task a draw asked for (wl_bump: the draw has its shader pair's pulling stand-in because the pair's
 // pipelines are still queued here) goes first, so the area the player is in builds before the rest of the playthrough. A task is built once: wl_st goes to 2 by exchange, whoever
 // gets it from 0 or 1 builds it. The table of pairs is built once and only read afterwards (the draw thread takes no lock unless it bumps a task that was still queued)
 typedef struct { uint64_t h; __unsafe_unretained WarmTask *t; } wl_slot;
 static wl_slot *g_wl_tab; static size_t g_wl_mask; static NSArray<WarmTask *> *g_wl_rest; static _Atomic long g_wl_next; static _Atomic int g_wl_live, g_wl_nbump;
-static os_unfair_lock g_wl_lock = OS_UNFAIR_LOCK_INIT; static NSMutableArray<WarmTask *> *g_wl_bumps; static _Atomic uint64_t g_wl_bumped;
+static os_unfair_lock g_wl_lock = OS_UNFAIR_LOCK_INIT; static NSMutableArray<WarmTask *> *g_wl_bumps; static NSUInteger g_wl_bhead; static _Atomic uint64_t g_wl_bumped, g_wl_miss;
 static uint64_t wl_hash(const char *v, const char *f) { uint64_t h = 1469598103934665603ull; for (; *v; v++) h = (h ^ (uint8_t)*v) * 1099511628211ull; h = (h ^ 0xff) * 1099511628211ull; for (; f && *f; f++) h = (h ^ (uint8_t)*f) * 1099511628211ull; return h | 1; }
-static void wl_init(NSArray<WarmTask *> *rest) {
-    g_wl_rest = rest; atomic_store(&g_wl_next, 0); atomic_store(&g_wl_nbump, 0); atomic_store(&g_wl_bumped, 0); g_wl_bumps = [NSMutableArray array];
+static int wl_same(WarmTask *t, const char *v, const char *f) { return !strcmp(t->vkey.UTF8String, v) && !strcmp(t->fkey.UTF8String, f ? f : ""); }
+static void wl_init(NSArray<WarmTask *> *rest) {   // before any worker or bump; a table of a first list is cleared and reused
+    atomic_store(&g_wl_live, 0); g_wl_rest = rest; atomic_store(&g_wl_next, 0); atomic_store(&g_wl_nbump, 0); atomic_store(&g_wl_bumped, 0); atomic_store(&g_wl_miss, 0); g_wl_bumps = [NSMutableArray array]; g_wl_bhead = 0;
     size_t cap = 16; while (cap < rest.count * 2) cap <<= 1;
-    free(g_wl_tab); g_wl_tab = calloc(cap, sizeof *g_wl_tab); g_wl_mask = cap - 1;
+    if (!g_wl_tab || cap > g_wl_mask + 1) { g_wl_tab = calloc(cap, sizeof *g_wl_tab); g_wl_mask = cap - 1; }   // one list per process; an old table is not freed (a draw may be reading it)
+    else memset(g_wl_tab, 0, (g_wl_mask + 1) * sizeof *g_wl_tab);
     for (WarmTask *t in rest) {
         atomic_store(&t->wl_st, 0);
         if (t->kind != 1) continue;
         uint64_t h = wl_hash(t->vkey.UTF8String, t->fkey.UTF8String);
-        size_t i = h & g_wl_mask; while (g_wl_tab[i].h && g_wl_tab[i].h != h) i = (i + 1) & g_wl_mask;
+        size_t i = h & g_wl_mask; while (g_wl_tab[i].h && !(g_wl_tab[i].h == h && wl_same(g_wl_tab[i].t, t->vkey.UTF8String, t->fkey.UTF8String))) i = (i + 1) & g_wl_mask;
         if (!g_wl_tab[i].h) { g_wl_tab[i].h = h; g_wl_tab[i].t = t; }   // a pair named twice stays one task (warm_parse joins its rows)
     }
     atomic_store(&g_wl_live, 1);
@@ -9030,7 +9028,8 @@ static WarmTask *wl_next(void) {   // the next task to build, nil at the end of 
     for (;;) {
         if (atomic_load(&g_wl_nbump) > 0) {
             WarmTask *b = nil; os_unfair_lock_lock(&g_wl_lock);
-            if (g_wl_bumps.count) { b = g_wl_bumps.lastObject; [g_wl_bumps removeLastObject]; atomic_fetch_sub(&g_wl_nbump, 1); }   // the latest ask first: it is the player's current view
+            if (g_wl_bhead < g_wl_bumps.count) { b = g_wl_bumps[g_wl_bhead++]; atomic_fetch_sub(&g_wl_nbump, 1); }   // in the order the draws asked (the first ask is the nearest draw); no ask starves
+            if (g_wl_bhead == g_wl_bumps.count) { [g_wl_bumps removeAllObjects]; g_wl_bhead = 0; }
             os_unfair_lock_unlock(&g_wl_lock);
             if (b) { if (atomic_exchange(&b->wl_st, 2) == 2) continue; return b; }
         }
@@ -9043,12 +9042,16 @@ static WarmTask *wl_next(void) {   // the next task to build, nil at the end of 
 static int wl_bump(const char *vkey, const char *fkey) {
     if (!atomic_load(&g_wl_live)) return 0;
     uint64_t h = wl_hash(vkey, fkey); size_t i = h & g_wl_mask;
-    while (g_wl_tab[i].h && g_wl_tab[i].h != h) i = (i + 1) & g_wl_mask;
-    WarmTask *t = g_wl_tab[i].h ? g_wl_tab[i].t : nil; if (!t) return 0;
+    while (g_wl_tab[i].h && !(g_wl_tab[i].h == h && wl_same(g_wl_tab[i].t, vkey, fkey))) i = (i + 1) & g_wl_mask;
+    WarmTask *t = g_wl_tab[i].h ? g_wl_tab[i].t : nil; if (!t) { atomic_fetch_add(&g_wl_miss, 1); return 0; }   // a pair the list does not hold (built before the mark, or in no list)
     int z = 0; if (!atomic_compare_exchange_strong(&t->wl_st, &z, 1)) return 0;   // taken or bumped already
     os_unfair_lock_lock(&g_wl_lock); [g_wl_bumps addObject:t]; atomic_fetch_add(&g_wl_nbump, 1); os_unfair_lock_unlock(&g_wl_lock);
     atomic_fetch_add(&g_wl_bumped, 1); return 1;
 }
+// The lines after the lists' WARM_LATER_MARK, built after the game's first frame: as the background prewarm builds without a prepare step, but on half the performance cores at
+// utility QoS, as pso_prebuild_bg builds, so the game keeps its frame rate meanwhile; a draw whose pipeline is not built yet draws with its shader pair's pulling pipeline (hybrid),
+// whose bases the prepare step's prebuild made. Only on a start that does not compact the archive (warm_start): the prewarm stays running (g_warm_running) until warm_finish at
+// the end, which matters to the archive only while compacting (the recapture and the held flushes), so what it builds is captured as any compile at run time is
 static void warm_later(NSArray<WarmTask *> *rest, long rest_lines) {
     int pc = 0; size_t sz = sizeof pc; if (sysctlbyname("hw.perflevel0.physicalcpu", &pc, &sz, NULL, 0) || pc <= 1) pc = 4;
     int workers = pc > 4 ? pc / 2 : 2; uint64_t t0 = bp_now();
@@ -9060,7 +9063,7 @@ static void warm_later(NSArray<WarmTask *> *rest, long rest_lines) {
     });
     dispatch_group_notify(g, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ @autoreleasepool {
         atomic_store(&g_wl_live, 0);
-        MLOG("pipeline prewarm: the %ld lines after the first frame done in %.1f s (%llu pairs moved to the front by draws)", rest_lines, (bp_now() - t0) / 1e9, (unsigned long long)atomic_load(&g_wl_bumped));
+        MLOG("pipeline prewarm: the %ld lines after the first frame done in %.1f s (%llu pairs moved to the front by draws; %llu stand-in draws named a pair the list does not hold)", rest_lines, (bp_now() - t0) / 1e9, (unsigned long long)atomic_load(&g_wl_bumped), (unsigned long long)atomic_load(&g_wl_miss));
         warm_finish();
     } });
 }

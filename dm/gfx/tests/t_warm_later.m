@@ -101,6 +101,21 @@ int main(void) { @autoreleasepool {
     EXPECT_EQ("the bumped pair is not built twice", 1, wl_next() == rest[2]);
     EXPECT_EQ("the list ends", 1, wl_next() == nil);
 
+    // bumps are served in the order they were asked; a task is returned once even when workers take the list while a thread bumps (2000 pairs, 4 workers, a bumping thread)
+    wl_init(rest);
+    EXPECT_EQ("two bumps", 2, wl_bump("v3_b", "f3_b") + wl_bump("v2_b", "f2_b"));
+    EXPECT_EQ("the first ask first", 1, wl_next() == rest[3]);
+    EXPECT_EQ("then the second ask", 1, wl_next() == rest[1]);
+    { enum { N = 2000 }; NSMutableArray<WarmTask *> *many = [NSMutableArray array]; NSMutableArray<NSString *> *vk = [NSMutableArray array];
+      for (int i = 0; i < N; i++) { WarmTask *w = [WarmTask new]; w->kind = 1; w->vkey = [NSString stringWithFormat:@"v%d", i]; w->fkey = [NSString stringWithFormat:@"f%d", i % 7]; [many addObject:w]; [vk addObject:w->vkey]; }
+      wl_init(many); static _Atomic int seen[N]; __block _Atomic int total = 0; dispatch_group_t g = dispatch_group_create();
+      for (int w = 0; w < 4; w++) dispatch_group_async(g, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+          for (WarmTask *t; (t = wl_next()); ) { atomic_fetch_add(&seen[[many indexOfObjectIdenticalTo:t]], 1); atomic_fetch_add(&total, 1); } });
+      for (int i = N - 1; i >= 0; i -= 3) wl_bump(vk[(NSUInteger)i].UTF8String, [NSString stringWithFormat:@"f%d", i % 7].UTF8String);
+      dispatch_group_wait(g, DISPATCH_TIME_FOREVER);
+      int twice = 0, none = 0; for (int i = 0; i < N; i++) { int c = atomic_load(&seen[i]); if (c > 1) twice++; if (!c) none++; }
+      EXPECT_EQ("stress: every task returned", 0, none); EXPECT_EQ("stress: no task returned twice", 0, twice); EXPECT_EQ("stress: total", N, atomic_load(&total)); }
+
     [NSFileManager.defaultManager removeItemAtPath:dir error:nil];
     printf("t_warm_later: %d checks, %d failed\n", g_checks, g_failed);
     return g_failed != 0;

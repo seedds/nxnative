@@ -85,7 +85,7 @@
 // (Ryujinx GlobalToStorage.GmemLogCbOffset): a bitmap of the entries of the table bound beside it, bit i in 32-bit word i / 32. The host learns the pools from it
 #define DMSH_KIND_GMEM_LOG "gmem_log"    // that write log: the host gives each draw or dispatch its own, cleared (nvn_mtl.m gml_take)
 #define DMSH_GMEM_LOG_CB_OFFSET 1
-// Prototype (branch oot-gpuva-direct): the translator accesses raw global memory at the address itself, which the host makes Metal's own GPU address (nvn_mtl.m mtl_gva_on, DM_NVN_GPUVA_DIRECT).
+// The translator accesses raw global memory at the address itself, which the host makes Metal's own GPU address (nvn_mtl.m mtl_gva_on): no search, so the shaders keep their registers.
 // No pool table is read; the write log's bit i stands for the 2 MiB GPU address chunks whose number is i modulo the log's bits (Ryujinx GlobalToStorage.TryGenerateRawDirectOp)
 #define DMSH_RAW_DIRECT 1
 

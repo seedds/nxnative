@@ -13,8 +13,8 @@ void mtl_set_queue_origin_lower_left(int on); // Raster flip captured at NVN que
 void bf_want_note(const char *key);
 
 // Memory pool: [mem, mem+size) is expanded outward to page boundaries to build a zero-copy buffer; look up the buffer and offset by GPU address (= CPU address)
-uint64_t mtl_pool_add(const void *mem, uint64_t size);   // → the GPU address the game gets for mem under DM_NVN_GPUVA_DIRECT, else 0
-int mtl_gva_on(void);                                    // DM_NVN_GPUVA_DIRECT=1: NVN hands out Metal's GPU addresses
+uint64_t mtl_pool_add(const void *mem, uint64_t size);   // → the GPU address the game gets for mem when mtl_gva_on, else 0
+int mtl_gva_on(void);                                    // NVN hands out Metal's GPU addresses (the chain's DMSH_RAW_DIRECT)
 int mtl_gva_back(uint64_t gpu, uint64_t *cpu);           // such an address → the CPU address; 0 when no pool's
 void mtl_gva_stats(int *n, uint64_t *lo, uint64_t *hi);
 uint64_t mtl_pool_gva(const void *mem);                 // the GPU address of a pool's start (the pool registered at mem), 0 when none

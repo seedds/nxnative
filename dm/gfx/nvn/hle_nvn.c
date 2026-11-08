@@ -194,9 +194,9 @@ static void *gs_report(void *arg) {
     return NULL;
 }
 static void gs_init_once(void) {
-    if (mtl_gva_on()) {   // DM_NVN_GPUVA_DIRECT: the counts and the report only (Metal's addresses are not mapped on the CPU: a CPU access through one is a crash, whose report shows it)
+    if (mtl_gva_on()) {   // Metal's addresses (DMSH_RAW_DIRECT): the counts and the report only (Metal's addresses are not mapped on the CPU: a CPU access through one is a crash, whose report shows it)
         pthread_t th; if (!pthread_create(&th, NULL, gs_report, NULL)) pthread_detach(th);
-        LOG("[gpushift] DM_NVN_GPUVA_DIRECT: NVN hands out Metal's GPU addresses"); return;
+        LOG("[gpushift] NVN hands out Metal's GPU addresses (DMSH_RAW_DIRECT)"); return;
     }
     const char *e = getenv("DM_NVN_GPUVA_SHIFT"); if (!e || !atoi(e)) return;
     uint8_t *as = NULL; size_t n = 0; svc_guest_range(&as, &n);
@@ -233,7 +233,7 @@ static uint64_t pool_addr(const pool_t *p, uint64_t off) {   // the GPU address 
     if (!p->mem) return 0;
     uint64_t g = mtl_pool_gva(p->mem); if (g) return g + off;   // the pool's own buffer, so the game's offsets from it stay in it
     uint64_t c = (uint64_t)(uintptr_t)(p->mem + off); g = mtl_gva_fwd(c);   // a virtual pool aliased into a physical one, or a sparse one's run: the buffer holding that byte
-    if (g == c) { atomic_fetch_add(&g_gs_outside, 1); static int once; if (!once++) LOG("[RED] [gpushift] DM_NVN_GPUVA_DIRECT: pool %p at %p has no GPU address (a sparse virtual pool not mapped there?): its CPU address is handed out", (const void *)p, (void *)p->mem); }
+    if (g == c) { atomic_fetch_add(&g_gs_outside, 1); static int once; if (!once++) LOG("[RED] [gpushift] pool %p at %p has no GPU address (a sparse virtual pool not mapped there?): its CPU address is handed out", (const void *)p, (void *)p->mem); }
     return g;
 }
 #define GA(a) gs_in((a), __builtin_return_address(0))

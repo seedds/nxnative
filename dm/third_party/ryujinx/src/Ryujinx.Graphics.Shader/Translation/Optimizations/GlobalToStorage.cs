@@ -1072,7 +1072,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             return true;
         }
 
-        // nxnative (prototype, branch oot-gpuva-direct; dmsh_abi.h DMSH_RAW_DIRECT): the host hands the game Metal's own GPU addresses (nvn_mtl.m mtl_pool_add), so an address the shader
+        // nxnative (dmsh_abi.h DMSH_RAW_DIRECT): the host hands the game Metal's own GPU addresses (nvn_mtl.m mtl_pool_add), so an address the shader
         // loaded from memory is accessed as it is, with no pool table and no search: the search's registers held Ocarina of Time's raw-memory shaders at 384 threads a threadgroup on an M1 Pro,
         // a direct access lets them reach 576. A load has no check: an Apple GPU reads 0 at an address nothing is mapped at (null, a stray CPU address), as a lookup that found no pool
         // returned, and any branch around it (even one that only returns 0) took the 576 back to 384. A store or an atomic outside [0x10_0000_0000, 0x70_0000_0000), the range macOS

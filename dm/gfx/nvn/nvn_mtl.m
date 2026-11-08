@@ -709,23 +709,25 @@ static void pool_res(int i) {
 // pools' buffers do at shared pages; GPU addresses are not contiguous across them, so a lookup must say how far it reads. One that does not know (length 1: an indirect draw's index buffer, a raw storage
 // address) gets BIG_UNKNOWN past its address. Raw global memory, whose pool table the shader walks by itself, takes the whole pool: big_full
 enum { BIG_MIN = 512u << 20, BIG_S = 16u << 20, BIG_UNKNOWN = 64u << 20, BIG_MAX = 32 };
-typedef struct { uintptr_t lo, hi, a, b; const void *mem; int *chunk, full; NSMutableArray *old; id<MTLBuffer> va; int va_res; } big_pool;   // va, va_res: DM_NVN_GPUVA_DIRECT's buffer over the whole pool, resident only once raw global memory may reach it   // chunk: stride → g_pools index + 1; full: the whole pool's entry + 1; old: buffers a longer chunk replaced, alive with the pool
+typedef struct { uintptr_t lo, hi, a, b; const void *mem; int *chunk, full; NSMutableArray *old; id<MTLBuffer> va; int va_res; } big_pool;   // va, va_res: the buffer over the whole pool that gives its GPU addresses (DMSH_RAW_DIRECT), resident only once raw global memory may reach it   // chunk: stride → g_pools index + 1; full: the whole pool's entry + 1; old: buffers a longer chunk replaced, alive with the pool
 static big_pool g_big[BIG_MAX]; static int g_nbig;
 static id<MTLBuffer> pool_buf(uintptr_t a, uintptr_t b);   // a pool's zero-copy buffer over [a, b), made over writable pages (beside the GPU-written storage spans below)
 static int big_of(uint64_t addr) { for (int i = 0; i < g_nbig; i++) if (addr >= g_big[i].lo && addr < g_big[i].hi) return i; return -1; }
-// ---------- DM_NVN_GPUVA_DIRECT=1 (prototype): NVN hands the game Metal's own GPU addresses ----------
+// ---------- NVN hands the game Metal's own GPU addresses (DMSH_RAW_DIRECT) ----------
 // A pool's GPU address is its no-copy buffer's (a large pool's: a buffer over all of it that only gives the addresses, resident only once raw global memory may reach the pool, as big_full
-// did; its chunks still serve the bindings). An address the game hands back is mapped to the CPU through this table, sorted by GPU address (Metal's ranges never overlap). Meant for shaders
-// that read raw global memory through the address itself, without the pool table's search; with the old shaders the table holds GPU ranges with a delta of 0
+// did; its chunks still serve the bindings). An address the game hands back is mapped to the CPU through this table, sorted by GPU address (Metal's ranges never overlap). The chain's
+// shaders read raw global memory through the address itself, without a search; the pool table, which still says which pools raw global memory reaches, holds GPU ranges with a delta of 0
 typedef struct { uint64_t glo, ghi, cpu; const void *key; } gva_ent;
 static gva_ent *g_gva; static int g_ngva, g_gva_cap; static os_unfair_lock g_gva_lk = OS_UNFAIR_LOCK_INIT;
 static _Atomic uint64_t g_gva_min = ~0ull, g_gva_max;
 static nvn_hmap g_gva_key = {.klen = 8};   // pool start (mtl_pool_add's mem) → its GPU address, under g_gva_lk
-int mtl_gva_on(void) {
+int mtl_gva_on(void) {   // this chain's shaders access raw global memory at Metal's addresses: the host must hand them out
 #ifdef DMSH_RAW_DIRECT
-    return 1;   // this chain's shaders access raw global memory at Metal's addresses: the host must hand them out
+    return 1;
+#else
+    return 0;
 #endif
-    static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_GPUVA_DIRECT"); v = e && atoi(e) ? 1 : 0; } return v; }
+}
 static void gva_add(uint64_t glo, uint64_t len, uint64_t cpu, const void *key, uint64_t key_gpu) {
     os_unfair_lock_lock(&g_gva_lk);
     nvn_hm_put(&g_gva_key, &key, (void *)(uintptr_t)key_gpu);
@@ -760,7 +762,7 @@ static int gva_chunk_ranges(unsigned k, unsigned bits, uint64_t (*r)[2], int max
     os_unfair_lock_unlock(&g_gva_lk); return n;
 }
 static int big_key(const void *key) { for (int k = 0; k < g_nbig; k++) if (g_big[k].mem == key) return 1; return 0; }   // caller holds g_mu
-uint64_t mtl_pool_add(const void *mem, uint64_t size) {   // → the GPU address of mem under DM_NVN_GPUVA_DIRECT, else 0
+uint64_t mtl_pool_add(const void *mem, uint64_t size) {   // → the GPU address of mem when NVN hands out Metal's (mtl_gva_on), else 0
     mtl_init();   // the change is recorded once the pool can be found (reg_bump below): a reader that sees the new generation sees the pool
     uintptr_t pg = (uintptr_t)getpagesize(), lo = (uintptr_t)mem, hi = lo + size;
     uintptr_t a = lo & ~(pg - 1), b = (hi + pg - 1) & ~(pg - 1);
@@ -9470,7 +9472,7 @@ static id<MTLBuffer> g_gmem_buf; static uint64_t g_gmem_gen;
 uint64_t nvn_gs_lo, nvn_gs_len, nvn_gs_shift;   // set by hle_nvn.c gs_init; 0 = off
 int dm_guest_as_contains(uintptr_t a);   // hle_svc.c (hle_nvn.c has a weak stand-in for the graphics unit tests)
 static int gs_row_cmp(const void *a, const void *b) { uint64_t x, y; memcpy(&x, a, 8); memcpy(&y, b, 8); return x < y ? -1 : x > y; }
-uint64_t mtl_gva_fwd(uint64_t cpu) {   // DM_NVN_GPUVA_DIRECT: the GPU address the game holds for a CPU one (a large pool's from its address buffer)
+uint64_t mtl_gva_fwd(uint64_t cpu) {   // the GPU address the game holds for a CPU one (a large pool's from its address buffer)
     uint64_t g = 0; pthread_mutex_lock(&g_mu);
     int b = big_of(cpu);
     if (b >= 0) { if (g_big[b].va) g = g_big[b].va.gpuAddress + (cpu - g_big[b].a); }
@@ -9524,7 +9526,7 @@ static id<MTLBuffer> gmem_map(void) {
     int n = 1, over = 0; uint64_t end = 0;
     pthread_mutex_lock(&g_mu);
     const int gva = mtl_gva_on();
-    for (int k = 0; gva && k < g_nbig; k++) if (g_big[k].va && addr_meets(g_big[k].lo, g_big[k].hi)) {   // DM_NVN_GPUVA_DIRECT: its address buffer, resident from now on
+    for (int k = 0; gva && k < g_nbig; k++) if (g_big[k].va && addr_meets(g_big[k].lo, g_big[k].hi)) {   // its address buffer, resident from now on (mtl_gva_on)
         big_pool *bp = &g_big[k];
         if (!bp->va_res) { res_add(bp->va); bp->va_res = 1; g_pool_res_n++; }
         if (n == DMSH_GMEM_MAP_ENTRIES) { over++; continue; }

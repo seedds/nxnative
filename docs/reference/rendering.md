@@ -1306,6 +1306,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** the draw that needs a slot when none is left ends the pass, and the next begins with a new buffer.
 - **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md): at the first level's load, one submission with about 9,000 draws.
 
+### Samples-passed reports with no reset before them
+
+- **Symptom:** characters a few metres away drawn as their hats and props only, their bodies missing from the main view while their shadows are there; near characters draw fully. A log line or a probe shows every samples-passed report reading 0.
+- **Cause:** the host started counting samples passed only at `nvnCommandBufferResetCounter(SAMPLES_PASSED)`, and a report before any reset wrote 0. On the GPU the counter runs from the queue's creation, so a game that never resets it reads end − begin of two reports around each query, and gets the samples between them. Red Dead Redemption never resets it: every query read 0, every character counted as hidden.
+- **Fix:** `OP_REPORT_COUNTER` in `nvn_mtl.m`, for every game. A samples-passed report with no reset before it starts counting (the pass is split there if its encoder had no visibility buffer); from then each report holds the samples since the previous one, added to a running total (`g_vis_acc`) when its submission completes, which `post_run` does in submission order under `g_post_mu`. A reset returns to counting from the reset, as before. `DM_NVN_OCC_IMPLICIT=0` turns it off; the log says `occlusion queries: a samples-passed report came with no ResetCounter before it` once.
+- **Check:** Red Dead Redemption 1.0.4 (Apple M4, macOS 27.0.1), a recorded replay out of the saloon in Armadillo: the distant characters have their bodies at frames 2,280–2,340, frame time unchanged at 33.3 ms, no `[RED]`; played by hand, the same.
+- **Found on:** Red Dead Redemption (`01007820196A6000`): `rage::CharacterVisQueries::TestVisiblity` takes each character's result from `GetOcclusionQueryData`, end − begin of two reports around its box (about 35 queries and 324 reports a frame, no reset), and puts a character at or below its threshold in the occluded list, which `renDrawBucketContainer::AddToDrawList` uses to drop its low-detail body.
+
 ## Vulkan layer
 
 The Vulkan layer (`dm/gfx/vk/hle_vk.m`) was written for Hades; Super Mario Galaxy needed the additions below, each found from a red line or a screenshot on the route to the Star Festival.

@@ -1152,6 +1152,12 @@ static vis_buf g_vis_ring[VIS_RING]; static int g_vis_ring_n, g_vis_ring_i = -1;
 static id<MTLBuffer> g_vis; static uint32_t g_vis_n;   // This submission's visibility buffer and number of slots used
 static int vis_in_ring(id<MTLBuffer> b) { for (int i = 0; i < g_vis_ring_n; i++) if (g_vis_ring[i].buf == b) return 1; return 0; }
 static int g_vis_on, g_vis_counting, g_vis_cur = -1; static uint64_t g_vis_cur_pass;
+// A game that reports samples passed without ever calling ResetCounter reads a counter running since the queue was created: Red Dead Redemption's character occlusion queries
+// (rage::CharacterVisQueries::TestVisiblity) take end - begin of two reports around each character's box. Counting used to start only at a reset, so every report was 0, every
+// character counted as hidden, and the main view dropped the low-detail bodies of characters a few metres away (only their hats and props drew; shadows kept the bodies).
+// vis_implicit: counting starts at the first report; each report's slots are those since the previous report, added to g_vis_acc when it completes
+static int g_vis_implicit; static uint64_t g_vis_acc;
+static int occ_implicit_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_OCC_IMPLICIT"); v = !(e && !strcmp(e, "0")); } return v; }
 static vis_slot *g_vs; static int g_nvs, g_vscap;      // Slots since the last reset
 static uint64_t g_cnt_report[32], g_cnt_reset[32];       // Report / reset counts per counter type (diagnostics)
 static void vis_clear(void) { for (int i = 0; i < g_nvs; i++) CFRelease(g_vs[i].buf); g_nvs = 0; g_vis_cur = -1; }
@@ -2186,7 +2192,8 @@ static void post_run(post_rec *r, uint64_t c0, uint64_t c1) {
         else if (ops[i].kind == 3) {   // Samples passed: the sum of all slots since the reset
             vis_list *l = ops[i].vis; uint64_t sum = 0;
             for (int k = 0; k < l->n; k++) { sum += ((const uint64_t *)((__bridge id<MTLBuffer>)l->s[k].buf).contents)[l->s[k].slot]; CFRelease(l->s[k].buf); }
-            free(l); uint64_t rec[2] = {sum, gpu_ticks()}; memcpy((void *)ops[i].addr, rec, sizeof rec);
+            free(l); if (ops[i].mode == 1) sum = g_vis_acc += sum;   // vis_implicit: the running total (records complete in submission order, under g_post_mu)
+            uint64_t rec[2] = {sum, gpu_ticks()}; memcpy((void *)ops[i].addr, rec, sizeof rec);
         }
         else if (ops[i].kind == 4) mirror_rb_land(ops[i].vis);
         else { uint64_t t = rep_ticks(&ops[i], sc, seg_last, c0, c1), rec[2] = {(ops[i].type == 0 || ops[i].type == 0x10) && !DM_GAME_RENDER_COND ? t : 0, t}; memcpy((void *)ops[i].addr, rec, sizeof rec); }   // render_cond: a timestamp report's counter field is 0, as on the GPU (see rc_value)
@@ -13999,7 +14006,13 @@ void mtl_exec(const uint8_t *p) {
             case OP_REPORT_COUNTER: { uint64_t t, ad; memcpy(&t, a, 8); memcpy(&ad, (const uint8_t *)a + 8, 8); g_cnt_report[t & 31]++;
                 PD("Q report type=%llu cmd=%p dst=%#llx", (unsigned long long)t, p, (unsigned long long)ad);
                 if (DM_GAME_RENDER_COND) rc_note(ad, t == 0 || t == 0x10 ? 1 : t == NVN_COUNTER_TYPE_SAMPLES_PASSED ? 2 : 3);
-                if (t == NVN_COUNTER_TYPE_SAMPLES_PASSED) { post((post_op){3, NULL, 0, 0, ad, (uint32_t)t, vis_snapshot()}); g_vis_cur = -1; }
+                if (t == NVN_COUNTER_TYPE_SAMPLES_PASSED) {
+                    if (!g_vis_on && occ_implicit_on()) {   // a report with no reset before it: the counter runs from the queue's creation (vis_implicit)
+                        g_vis_on = 1; g_vis_counting = 1; g_vis_implicit = 1; vis_clear();
+                        MLOG("occlusion queries: a samples-passed report came with no ResetCounter before it: counting from here, each report adding the samples since the previous one to a running total (DM_NVN_OCC_IMPLICIT=0 turns it off)");
+                        if (g_enc && !g_enc_has_vis) { PD("M %llu occlusion query counting starts at a report: render pass split here", g_stat_pass); rp_end(); } }
+                    post((post_op){3, NULL, (uint32_t)g_vis_implicit, 0, ad, (uint32_t)t, vis_snapshot()}); g_vis_cur = -1;
+                    if (g_vis_implicit) vis_clear(); }   // the report's slots are in its snapshot: the next report counts from here
                 else mtl_sub_counter(ad, (uint32_t)t);
                 break; }
             case OP_RENDER_COND: { const p_render_cond *rc = a;   // recorded only with the profile key render_cond (hle_nvn.c)
@@ -14015,7 +14028,7 @@ void mtl_exec(const uint8_t *p) {
 #ifdef NVN_RT_RANGE_TEST
                     rr_reset();
 #endif
-                    g_vis_on = 1; g_vis_counting = 1; vis_clear();
+                    g_vis_on = 1; g_vis_counting = 1; g_vis_implicit = 0; vis_clear();
                     // The first reset can come inside a render pass that was begun without a visibility buffer (Octopath Traveler 0: Unreal's occlusion queries, once at boot): split the pass
                     // here, so the continuation is begun with the buffer and its samples are counted (they used not to be: RED "occlusion query counting began in a pass without a visibility buffer")
                     if (g_enc && !g_enc_has_vis) { PD("M %llu occlusion query counting starts: render pass split here", g_stat_pass); rp_end(); } }

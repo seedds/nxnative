@@ -33,7 +33,7 @@
 # unless ALLOW_OTHER_METAL / --allow-other-metal. Issue #242 reported corruption with another compiler; the cause is still unconfirmed.
 # Python 3.12+ is required for bounded archive mappings inside images. The Python running this file needs lz4, capstone 5.x, fonttools and zbic (and backports.zstd before Python 3.14); also needed: Xcode, xcodegen, .NET SDK 10, zstd. SPIRV-Cross is the in-repo build. A first run takes 2 (Metroid Dread) to 10 minutes (Breath of the Wild: 5 of them the shader split), longer when shader libraries must be compiled; a repeat run with unchanged inputs takes about 20 s (Metroid Dread), mostly packing the IPA. Key values are never printed.
 # The console shows one line per stage ([k/n] stage, with a bar, done/total, percent, elapsed time and ETA where the work can be counted); the tools' own output goes only to logs/ (PROGRESS / --progress). --progress json writes newline-delimited JSON events to stdout.
-import ast, collections, contextlib, ctypes, errno, getpass, hashlib, importlib.util, json, os, re, shlex, shutil, struct, subprocess, sys, tempfile, threading, time, types
+import ast, collections, contextlib, ctypes, errno, getpass, hashlib, importlib.util, json, mmap, os, re, shlex, shutil, struct, subprocess, sys, tempfile, threading, time, types
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "dm/tools"))
 import romfs as rfs
@@ -2378,6 +2378,44 @@ def ios_wants_pulling(g, gpus, prepare_xcode, env):
     return (env.get('IOS_PULL') or ('1' if g.get('pso_mtl4', 'off') == 'on' else '0')) == '1'
 
 
+def package_map_mismatch(pkg, smap, key_skip='0+0'):
+    """The shader map's rows whose package record is not the shader the row names, as (package, index, key, the record's key): a package and a map from different shader_split.py runs.
+    dmsh_build.py reads a shader's record by its map index alone (rec_of), so after a dropped or added row every later row of that package translates another shader's bytes (issue #1841:
+    Ocarina of Time's present pass ran a terrain pixel shader and showed black). A record is BTCDBTCD, 0x30 bytes with the control length and the code length at +0x28, the code, then the
+    control section; its key is shader_split.py's skey: sha256 of key_ctl(control) and the code, first 16 hex digits"""
+    smap = Path(smap)
+    if not smap.is_file(): return []   # dmsh_build.py reports a missing map itself
+    skip = tuple(int(x, 0) for x in key_skip.split('+')) if isinstance(key_skip, str) else (0, 0)
+    def key_ctl(ctl):   # shader_split.py key_ctl (test_package_map pins the two together)
+        if len(ctl) >= 0x48 and ctl[:8] == b'\x34\x12\x76\x98\xc9\0\0\0': c = ctl[:0x48]; return c[:0x30] + bytes(4) + c[0x34:]   # NVN2: its first 0x48 bytes, +0x30 as zero
+        n = struct.unpack_from('<I', ctl, 0x20)[0] if len(ctl) >= 0x24 else 0x880
+        c = ctl[:n if 0x760 <= n < 0x880 else 0x880]
+        return c[:skip[0]] + bytes(skip[1]) + c[skip[0] + skip[1]:] if skip[1] and skip[0] + skip[1] <= len(c) else c
+    offs, bad, seen = {}, [], set()
+    try:
+        for ln in smap.read_text(errors='replace').splitlines():
+            c = ln.split('\t')   # the rows dmsh_build.py reads: more than 4 columns, the first row of each key (its loc)
+            if ln.startswith('#') or len(c) <= 4 or not c[0].endswith('.bin') or not c[1].isdigit() or c[3] in seen: continue
+            name, k, key = c[0], int(c[1]), c[3]; seen.add(key)
+            if name not in offs:   # scanned through a mapping, records read one at a time, as dmsh_build.py record_index (a package can be 4 GB)
+                try: fd = os.open(pkg / name, os.O_RDONLY)
+                except OSError: offs[name] = None; continue   # a package that is not there: dmsh_build.py reports it
+                offs[name] = (fd, [0])
+                if n := os.fstat(fd).st_size:
+                    with mmap.mmap(fd, n, access=mmap.ACCESS_READ) as m: offs[name] = (fd, [x.start() for x in re.finditer(b'BTCDBTCD', m)] + [n])
+            if offs[name] is None: continue
+            fd, o = offs[name]
+            if k + 1 >= len(o): bad.append((name, k, key, 'no record')); continue
+            rec = os.pread(fd, o[k + 1] - o[k], o[k])
+            lc, lk = struct.unpack_from('<2I', rec, 0x28) if len(rec) >= 0x30 else (0, 0)
+            got = hashlib.sha256(key_ctl(rec[0x38 + lk:0x38 + lk + lc]) + rec[0x38:0x38 + lk]).hexdigest()[:16]
+            if got != key: bad.append((name, k, key, got))
+    finally:
+        for v in offs.values():
+            if v: os.close(v[0])
+    return bad
+
+
 def build_shaders(py, repo, sh, xlate, env, logs, g, pkg_key=None, mac=False, seen=None, pull=None):
     """The iOS shader libraries (dmsh_build.py, which also builds the Mac's into sh/cache when the build wants them), or with mac only the Mac's (a Mac-only build: no IOSOUT). Returns the folder the host takes
     them from. Reused when the shader package (pkg_key, its content; None never reuses) and the chain's tools, translator binaries, profile and compilers are as at the last successful build:
@@ -2392,6 +2430,11 @@ def build_shaders(py, repo, sh, xlate, env, logs, g, pkg_key=None, mac=False, se
     silence on a shader the partial build never saw as proof it is safe (no chain_tables, no shader_regressions, no pruning; the host logs the missing stamp in red at each start)
     pull: an iPhone build's ios_wants_pulling. False neither compiles the pulling libraries nor keeps them in its image; True does not reuse an image without them"""
     ios, log, cas = sh / 'ios', logs / 'dmsh_build.log', sh / 'cache/cas.db'
+    # first: libraries built from such a package are not reused, and nothing is removed before it stops
+    if bad := package_map_mismatch(sh / 'pkg', g.table('shader_map.tsv'), g.get('shader_key_skip', '0+0') if hasattr(g, 'get') else '0+0'):   # (a test's profile may have no get)
+        name, k, key, got = bad[0]
+        raise BuildError(f'the shader package and the shader map come from different shader_split.py runs: {len(bad):,} map rows do not name their record ({name} #{k} is {got}, the map says {key}); '
+                         f'remove {sh / "pkg"} and build again (the split runs again)')
     shader_cache.adopt(sh / 'cache/cas', cas, say)
     PROG.stage('Mac shaders' if mac else 'iOS shaders')
     chain = chain_of(repo)

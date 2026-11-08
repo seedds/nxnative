@@ -533,3 +533,130 @@ def power_of_two_mulhi(msl):
         return f'(uint({match[2]}) & 0u)' if n == 1 else f'(uint({match[2]}) >> {33 - n.bit_length()}u)'
 
     return _MULHI_CALL.sub(sub, msl)
+
+
+# GPTR quad experiment: exact current scalar helper, ordered scalar fallback.
+import re,hashlib
+_GPTR_ID=r'_\d+'
+_GPTR_HELPER=re.compile(r'static inline __attribute__\(\(always_inline\)\)\nint (?P<name>'+_GPTR_ID+r')\(thread const int& (?P<lo>'+_GPTR_ID+r'), thread const int& (?P<hi>'+_GPTR_ID+r'), thread const int& (?P<site>'+_GPTR_ID+r'), (?P<const>const )?device (?P<type>'+_GPTR_ID+r')& (?P<table>cp_s\d+), (?:const )?device '+_GPTR_ID+r'& (?P<sites>cp_s\d+), thread uint& (?P<cache>'+_GPTR_ID+r')\)\n\{.*?^}',re.S|re.M)
+_GPTR_FINGERPRINT='365788833e0fe7d3e4601552b7731424d7c0d427432f016072a0706ea8825c24'
+def _gptr_fingerprint(text):
+ names={}
+ def sub(m):return names.setdefault(m[0],f'v{len(names)}')
+ return hashlib.sha256(re.sub(r'\b_\d+\b|\bcp_s\d+\b',sub,text.replace('const device','device')).encode()).hexdigest()
+def _gptr_groups(source):
+ found=[]
+ for h in _GPTR_HELPER.finditer(source):
+  if _gptr_fingerprint(h[0])!=_GPTR_FINGERPRINT:continue
+  text=source[h.end():];lines=text.splitlines();defs={};changed=set();pure=[];calls=[]
+  call=re.compile(r'(?P<lo>'+_GPTR_ID+r'), (?P<hi>'+_GPTR_ID+r'), (?P<site>'+_GPTR_ID+r'), \(\*spvDescriptorSet0\.'+h['table']+r'\), \(\*spvDescriptorSet0\.'+h['sites']+r'\), (?P<cache>'+_GPTR_ID+r')')
+  for i,line in enumerate(lines):
+   d=re.fullmatch(r'\s*(int|uint|float|bool) ('+_GPTR_ID+r') = (.*);',line)
+   safe=False
+   if d:
+    typ,name,expr=d.groups()
+    if name in defs:changed.add(name)
+    defs[name]=(i,expr,typ)
+    c=re.fullmatch(re.escape(h['name'])+r'\('+call.pattern+r'\)',expr)
+    if c:calls.append(dict(c.groupdict(),line=i,out=name));safe=True
+    else:
+     rest=re.sub(r'\b(?:as_type<(?:int|uint|float)>|int|uint|float)\(', '(',expr)
+     safe=not re.search(r'\b\w+\s*\(|[{};]|(?<![=!<>])=(?!=)|\+\+|--',rest)
+     if re.search(r'\b\w+\s*\(',rest):changed.update(re.findall(_GPTR_ID,expr))
+   else:
+    if re.match(r'\s*\w+\s*\(',line):changed.update(re.findall(_GPTR_ID,line))
+    changed.update(re.findall(r'\b('+_GPTR_ID+r')\s*(?:[+*/%&|^-]?=(?!=)|\+\+|--)',line))
+   effect_expr=d[3] if d else line
+   changed.update(re.findall(r'(?<!&) &?\s*('+_GPTR_ID+r')\s*(?:[+*/%&|^-]?=(?!=)|\+\+|--)',effect_expr))
+   changed.update(re.findall(r'(?:\+\+|--)\s*('+_GPTR_ID+r')',effect_expr))
+   changed.update(re.findall(r'(?<!&) &\s*('+_GPTR_ID+r')\b',line))
+   pure.append(safe or not line.strip())
+  def resolve(s, defs=defs, changed=changed):
+   seen=set()
+   while re.fullmatch(_GPTR_ID,s) and s in defs and s not in changed:
+    if s in seen:return None
+    seen.add(s);n=defs[s][1]
+    if not re.fullmatch(_GPTR_ID,n):return n
+    s=n
+   return None if s in changed else s
+  def atom(s, changed=changed):
+   # A stable integer or a bitcast of a stable float; don't substitute memory reads.
+   if re.fullmatch(_GPTR_ID,s):return None if s in changed else s
+   m=re.fullmatch(r'as_type<int>\(('+_GPTR_ID+r')\)',s)
+   return s if m and m[1] not in changed else None
+  def alias(s, defs=defs, changed=changed):
+   seen=set()
+   while s in defs and s not in changed and re.fullmatch(_GPTR_ID,defs[s][1]):
+    if s in seen:return None
+    seen.add(s);s=defs[s][1]
+   return None if s in changed or s not in defs else s
+  def address(c):
+   lo=resolve(c['lo']);hi=resolve(c['hi'])
+   if lo is None or hi is None:return None
+   m=re.fullmatch(r'('+_GPTR_ID+r'|as_type<int>\('+_GPTR_ID+r'\)) \+ (\d+)',lo)
+   if not m:
+    low,high=alias(c['lo']),alias(c['hi'])
+    return (low,high,0) if low and high else None
+   base,off=m[1],int(m[2]);base=atom(base)
+   if base is None or off>0x7fffffff:return None
+   hm=re.fullmatch(r'('+_GPTR_ID+r'|as_type<int>\('+_GPTR_ID+r'\)) \+ ('+_GPTR_ID+r')',hi)
+   if not hm:return None
+   high=atom(hm[1]);carry=resolve(hm[2]);cm=re.fullmatch(r'int\(('+_GPTR_ID+r')\)',carry or '')
+   if not cm or high is None:return None
+   cond=resolve(cm[1]);bm=re.fullmatch(r'uint\(('+_GPTR_ID+r')\) < (uint\('+_GPTR_ID+r'\)|as_type<uint>\('+_GPTR_ID+r'\))',cond or '')
+   if not bm or resolve(bm[1])!=lo:return None
+   ub='as_type<uint>'+base[len('as_type<int>'):] if base.startswith('as_type<int>') else 'uint('+base+')'
+   if bm[2]!=ub:return None
+   return base,high,off
+  used=set()
+  for pos,c in enumerate(calls):
+   if pos in used or pos+3>=len(calls):continue
+   run=calls[pos:pos+4];a=[address(x) for x in run];site=[resolve(x['site']) for x in run]
+   valid=[x for x in a if x is not None]
+   if len(valid)!=4 or not all(x[:2]==valid[0][:2] and x[2]==valid[0][2]+4*j for j,x in enumerate(valid)):continue
+   if site[0] is None or not re.fullmatch(r'\d+',site[0]) or int(site[0])>=64 or len(set(site))!=1:continue
+   if len({x['cache'] for x in run})!=1 or not all(pure[run[0]['line']:run[-1]['line']+1]):continue
+   found.append({'helper':h['name'],'offset':valid[0][2],'site':int(site[0]),'calls':run,'helper_end':h.end()});used.update(range(pos,pos+4))
+ return found
+
+def gptr_load_quads(source):
+ """Experimental grouping; the scalar helper remains authoritative on misses."""
+ if 'dm_gptr_quad_' in source:return source
+ gs=_gptr_groups(source)
+ if not gs:return source
+ # A shader with several eligible raw helpers is left alone until independently covered.
+ ends={g['helper_end'] for g in gs}
+ if len(ends)!=1:return source
+ end=next(iter(ends));h=next(h for h in _GPTR_HELPER.finditer(source) if h.end()==end)
+ lines=source[end:].splitlines();quad='dm_gptr_quad'+h['name'];word='dm_gptr_scalar4'+h['name']
+ for g in gs:
+  first=g['calls'][0];name=first['out']+'_quad';line=lines[first['line']];indent=line[:len(line)-len(line.lstrip())]
+  expr=f"{quad}({first['lo']}, {first['hi']}, {first['site']}, (*spvDescriptorSet0.{h['table']}), (*spvDescriptorSet0.{h['sites']}), {first['cache']})"
+  for lane,c in enumerate(g['calls']):
+   pre=f'{indent}int4 {name} = {expr};\n' if lane==0 else ''
+   lines[c['line']]=pre+f"{indent}int {c['out']} = {name}.{'xyzw'[lane]};"
+ typ=h['type'];qual=(h['const'] or '')+'device';scalar=h['name']
+ helper=f'''
+static inline __attribute__((always_inline))
+int4 {word}(ulong address, int site, {qual} {typ}& table, {qual} {typ}& sites, thread uint& last) {{
+ int4 result;
+ for (uint k=0;k<4;k++) {{ ulong at=address+4ul*k; int lo=as_type<int>(uint(at)),hi=as_type<int>(uint(at>>32)); result[k]={scalar}(lo,hi,site,table,sites,last); }}
+ return result;
+}}
+static inline __attribute__((always_inline))
+int4 {quad}(int low, int high, int site, {qual} {typ}& table, {qual} {typ}& sites, thread uint& last) {{
+ ulong address=as_type<ulong>(uint2(uint(low),uint(high)));
+ if (site>=0 && !(address&3ul) && address<=~0ul-15ul) {{
+  uint w=uint(site)*8u;
+  ulong start=as_type<ulong>(uint2(sites._m0[w],sites._m0[w+1]));
+  ulong end=as_type<ulong>(uint2(sites._m0[w+2],sites._m0[w+3]));
+  if(address>=start && address<end && end-address>=16ul) {{
+   ulong delta=as_type<ulong>(uint2(sites._m0[w+4],sites._m0[w+5]));
+   ulong gpu=address+delta;
+   if(!(gpu&3ul)) return as_type<int4>(uint4(*(const device packed_uint4*)gpu));
+  }}
+ }}
+ return {word}(address,site,table,sites,last);
+}}
+'''
+ return source[:end]+helper+'\n'.join(lines)

@@ -1,4 +1,4 @@
-"""Quad reads against the actual translator's dynamic, hinted pool search."""
+"""Legacy quad lowering plus fail-closed handling of newer translator helper ABIs."""
 import ast
 import os
 import re
@@ -15,7 +15,9 @@ import dmsh_wide  # noqa: E402
 
 def quad_fixture():
     """Build four adjacent reads using a helper translated from synthetic instructions."""
-    translated = ampere.RawGlobal('test_the_search_takes_the_tables_count').msl()
+    # Quad lowering recognizes the pre-cache scalar helper. Keep its positive GPU
+    # oracle independent of newer native-cache and pointer-site signatures.
+    translated = (Path(__file__).parent / 'fixtures/raw_global_dynamic_52c623609245.metal').read_text()
     helper = next(dmsh_wide._RAW_FUNCTION.finditer(translated))
     typ, table, name = (helper[k] for k in ('type', 'table', 'name'))
     src = f'''#include <metal_stdlib>
@@ -43,6 +45,12 @@ class DynamicRawQuads(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.source, cls.slot = quad_fixture()
+
+    def test_current_unrecognized_helper_is_preserved(self):
+        translated = ampere.RawGlobal('test_the_search_takes_the_tables_count').msl()
+        self.assertIsNone(dmsh_wide._RAW_FUNCTION.search(translated))
+        self.assertEqual(dmsh_wide.raw_load_quads(translated, 1, 4096, 32), translated)
+        self.assertEqual(dmsh_wide.raw_ranges(translated, set(re.findall(r'cp_s\d+', translated)), 4096, 32), translated)
 
     def test_dynamic_search_and_hint_are_preserved(self):
         out = dmsh_wide.raw_load_quads(self.source, self.slot, 4096, 32)

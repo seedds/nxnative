@@ -13,24 +13,25 @@ static int checks, failed;
 int main(int argc, const char **argv) { @autoreleasepool {
     if (argc != 2) { fprintf(stderr, "usage: t_gmem_raw <metallib>\n"); return 2; }
     mtl_init();
-    enum { MANY = 5000, PG = 16384 };
+    enum { MANY = 9000, PG = 16384 };
     const uint64_t MB = 1ull << 20;
     uint8_t *many = mmap(NULL, (size_t)MANY * 2 * PG, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0), *large = mmap(NULL, 64 * MB, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
     if (many == MAP_FAILED || large == MAP_FAILED) abort();
     for (int i = 0; i < MANY; i++) { uint8_t *p = many + (size_t)i * 2 * PG; mtl_pool_add(p, PG); mtl_pool_buffer_addr(p, PG); uint32_t v = 0x10000u + (unsigned)i; memcpy(p + (size_t)(i * 8 % PG), &v, 4); }
     mtl_pool_add(large, 64 * MB); mtl_pool_buffer_addr(large, 64 * MB); { uint32_t v = 0xb16b00b5u; memcpy(large + 40 * MB + 12, &v, 4); }
     mtl_sub_begin(); id<MTLBuffer> map = gmem_map(); CHECK("submission completes", mtl_wait(mtl_sub_commit(), 5000000000ull));
-    CHECK("the table holds more than the least count", gmem_entries(map) > DMSH_GMEM_MAP_ENTRIES);
+    CHECK("the table exceeds upstream fixed 8192 entries", gmem_entries(map) > 8192);
     NSError *error = nil;
     id<MTLLibrary> lib = [g_dev newLibraryWithURL:[NSURL fileURLWithPath:@(argv[1])] error:&error]; if (!lib) { fprintf(stderr, "library: %s\n", error.description.UTF8String); return 1; }
     id<MTLComputePipelineState> pso = [g_dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"main0"] error:&error]; if (!pso) { fprintf(stderr, "pipeline: %s\n", error.description.UTF8String); return 1; }
-    id<MTLBuffer> slot = [g_dev newBufferWithLength:16 options:MTLResourceStorageModeShared], args = [g_dev newBufferWithLength:16 options:MTLResourceStorageModeShared];
-    uint64_t *a = args.contents; a[0] = slot.gpuAddress; a[1] = map.gpuAddress;   // the argument buffer: storage slot 0 [[id(0)]], the pool table [[id(1)]]
+    id<MTLBuffer> slot = [g_dev newBufferWithLength:16 options:MTLResourceStorageModeShared], args = [g_dev newBufferWithLength:24 options:MTLResourceStorageModeShared], sites = [g_dev newBufferWithLength:DMSH_GPTR_MAX * DMSH_GMEM_MAP_ENTRY options:MTLResourceStorageModeShared];
+    memset(sites.contents, 0, sites.length);
+    uint64_t *a = args.contents; a[0] = slot.gpuAddress; a[1] = map.gpuAddress; a[2] = sites.gpuAddress;   // the argument buffer: storage slot 0 [[id(0)]], the pool table [[id(1)]]
     uint32_t (^probe)(uint64_t) = ^uint32_t(uint64_t addr) {
         uint32_t *w = slot.contents; memcpy(w, &addr, 8); w[2] = 0xdeadbeefu;
         id<MTLCommandBuffer> cb = q_cb(); id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
         [ce setComputePipelineState:pso]; [ce setBuffer:args offset:0 atIndex:0];
-        [ce useResource:slot usage:MTLResourceUsageRead | MTLResourceUsageWrite]; [ce useResource:map usage:MTLResourceUsageRead];
+        [ce useResource:slot usage:MTLResourceUsageRead | MTLResourceUsageWrite]; [ce useResource:map usage:MTLResourceUsageRead]; [ce useResource:sites usage:MTLResourceUsageRead];
         [ce dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
         [ce endEncoding]; [cb commit]; [cb waitUntilCompleted];
         CHECK("the dispatch completes", cb.status == MTLCommandBufferStatusCompleted);

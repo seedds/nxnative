@@ -88,6 +88,8 @@ t_pace: t_pace.c ../nvn/nvn_pace.h
 	clang -O1 -Wall -o $@ t_pace.c
 t_timestamp: t_timestamp.c ../nvn/nvn_timestamp.h
 	$(CC) -std=c11 -O2 -g -Wall -Wextra -Werror -o $@ $<
+t_counter_clock: t_counter_clock.m ../../host/hle_os.c ../../host/dm.h $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_counter_clock.m ../../host/hle_os.c $(MTL_T_SRC) $(FW)
 t_fstep: t_fstep.c ../nvn/nvn_fstep.h
 	clang -O1 -Wall -o $@ t_fstep.c
 t_thermal: t_thermal.c $(MTL_T_DEP)
@@ -203,6 +205,9 @@ check_t_pool_notes: RUN_ENV = MTL_DEBUG_LAYER=1
 t_gmem_commit: t_gmem_commit.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_gmem_commit.m $(MTL_T_SRC) $(FW)
 check_t_gmem_commit: RUN_ENV = MTL_DEBUG_LAYER=1
+t_gptr: t_gptr.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_gptr.m $(MTL_T_SRC) $(FW)
+
 t_gmem_raw: t_gmem_raw.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_gmem_raw.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_gmem_raw
@@ -269,8 +274,8 @@ check_t_vbuf: t_vbuf
 t_geometry: t_geometry.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_geometry.m $(MTL_T_SRC) $(FW)
 check_t_geometry: RUN_ENV = MTL_DEBUG_LAYER=1
-t_feedback: t_feedback.m $(MTL_T_DEP)
-	clang $(CFLAGS) -fobjc-arc -o $@ t_feedback.m $(MTL_T_SRC) $(FW)
+t_feedback: t_feedback.m guest_clock.c $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_feedback.m guest_clock.c $(MTL_T_SRC) $(FW)
 t_rast_discard: t_rast_discard.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_rast_discard.m $(MTL_T_SRC) $(FW)
 t_queue_origin: t_queue_origin.m $(MTL_T_DEP)
@@ -585,3 +590,10 @@ check_t_cut_busy: t_cut_busy
 	DM_NVN_CUT_BUSY=0 DM_NVN_GPU_TS=submission MTL_DEBUG_LAYER=1 ./t_cut_busy
 	DM_NVN_CUT_BUSY=1 DM_NVN_GPU_TS=submission MTL_DEBUG_LAYER=1 ./t_cut_busy
 	DM_NVN_CUT_BUSY=1 DM_NVN_GPU_TS=segment MTL_DEBUG_LAYER=1 ./t_cut_busy
+
+# Synthetic pointer-site quad lowering: CPU range oracle and scalar cache parity.
+t_gptr_quads: t_gptr_quads.m
+	clang $(CFLAGS) -fobjc-arc -o $@ $< -framework Metal -framework Foundation
+.PHONY: check_t_gptr_quads
+check_t_gptr_quads: t_gptr_quads
+	@set -e; work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; python3 test_dmsh_gptr_quads.py --fixture "$$work"; MTL_DEBUG_LAYER=1 ./t_gptr_quads "$$work/synthetic-gpu.metallib"

@@ -14,8 +14,9 @@ import dmsh_geometry
 def builder_reflection():
     # Isolate pure reflection code from the builder's CLI/profile initialization.
     tree = ast.parse((TOOLS / 'dmsh_build.py').read_text())
-    names = {'reflect', 'decode_tex', 'decode_ubo_tex', 'decode_ubo_img', 'const_sampler', 'c2_array'}
+    names = {'reflect', 'decode_tex', 'decode_ubo_tex', 'decode_ubo_img', 'const_sampler', 'c2_array', 'gptr_sites'}
     selected = [n for n in tree.body if (isinstance(n, ast.FunctionDef) and n.name in names)
+                or (isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == '_GPTR_SITE' for t in n.targets))
                 or (isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'SSBO' for t in n.targets))
                 or (isinstance(n, ast.Assign) and any(isinstance(t, ast.Tuple) and any(isinstance(e, ast.Name) and e.id == 'TEX_BASE' for e in t.elts) for t in n.targets))]
     ns = {'re': re, 'dmsh_geometry': dmsh_geometry, 'abi': dmsh_abi}
@@ -90,6 +91,25 @@ class PoolTable(unittest.TestCase):
                'notes': ['Global memory operation "Store" traced to no storage buffer: it goes through the memory pool table.']}
         got = REFLECT('synthetic', 'vs', source, res)
         self.assertEqual([(b['kind'], b['rw']) for b in got], [('gmem_map', True), ('gmem_log', True)])
+
+    def gptr(self, stage, notes):   # bind-time pointer sites: the entries at offset DMSH_GPTR_CB_OFFSET of the sentinel slot, one per site the translator noted
+        source = 'struct spvDescriptorSetBuffer0\n{\n    device uint* fp_s0 [[id(0)]];\n    device uint* fp_s1 [[id(1)]];\n    device uint* fp_s2 [[id(2)]];\n};\n'
+        res = {'sbufs': [{'binding': 40, 'slot': 0, 'cb_slot': 0, 'cb_offset': (dmsh_abi.C0_SSBO_PS + dmsh_abi.C0_ROW) // 4, 'flags': 0},
+                         {'binding': 41, 'slot': 1, 'cb_slot': dmsh_abi.GMEM_MAP_CB_SLOT, 'cb_offset': 0, 'flags': 0},
+                         {'binding': 42, 'slot': 2, 'cb_slot': dmsh_abi.GMEM_MAP_CB_SLOT, 'cb_offset': dmsh_abi.GPTR_CB_OFFSET, 'flags': 0}],
+               'notes': ['Global memory operation "Load" traced to no storage buffer: it goes through the memory pool table.'] + notes}
+        return REFLECT('synthetic', stage, source, res)
+
+    def test_pointer_sites(self):   # Ocarina of Time's model pixel shaders: pointers at bytes 0x0-0x20 of storage slot 1 (c0 word 328 = 0x520 in the pixel stage's table)
+        w = (dmsh_abi.C0_SSBO_PS + dmsh_abi.C0_ROW) // 4
+        got = self.gptr('ps', [f'translator: gptr site 1: c0[{w}] +0', f'translator: gptr site 0: c0[{w}] +8', 'translator: gptr site 2: c3[14] +16'])
+        self.assertEqual([b['kind'] for b in got], ['sbuf', 'gmem_map', 'gptr'])
+        self.assertEqual(got[2]['sites'], [[1, 8], [1, 0], [-1, 16]])   # in site order; a pointer in a uniform buffer's storage buffer is not taken by slot
+        self.assertFalse(got[2]['rw'])
+
+    def test_pointer_sites_must_be_numbered_from_zero(self):
+        w = (dmsh_abi.C0_SSBO_PS + dmsh_abi.C0_ROW) // 4
+        with self.assertRaises(ValueError): self.gptr('ps', [f'translator: gptr site 1: c0[{w}] +0'])
 
 
 class DriverTableArrays(unittest.TestCase):

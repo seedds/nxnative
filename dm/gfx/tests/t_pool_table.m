@@ -41,9 +41,9 @@ int main(int argc, const char **argv) { @autoreleasepool {
 
     mtl_sub_begin();
     os_unfair_lock_lock(&g_rmu);
-    uint64_t made0 = g_stat_pool_new, reused0 = g_stat_pool_reused;
+    uint64_t made0 = g_pool_made, reused0 = g_pool_reused;
     id<MTLBuffer> t1 = table();
-    CHECK(t1 && g_stat_pool_new == made0 + 1, "the first table is a new buffer");
+    CHECK(t1 && g_pool_made == made0 + 1, "the first table is a new buffer");
     CHECK(entry(t1, 1) && entry(t1, 1) == g_treg[1].view_rid && entry(t1, 3) == g_treg[3].view_rid, "2D IDs hold their textures");
     uint64_t dummy = entry(t1, *(const uint32_t *)t1.contents);
     CHECK(entry(t1, 2) == dummy, "the 3D ID holds the dummy");
@@ -53,10 +53,9 @@ int main(int argc, const char **argv) { @autoreleasepool {
 
     mtl_reg_tex(4, (const tex_t *)&a, NULL);   // a registration: the next use rebuilds
     os_unfair_lock_lock(&g_rmu);
-    uint64_t skip0 = g_stat_pool_tt_skip;
     id<MTLBuffer> t2 = table();
     CHECK(t2 && t2 != t1, "a rebuild while the replaced table may still be read writes another buffer");
-    CHECK(g_stat_pool_tt_skip > skip0 && !g_treg[2].view, "the 3D ID is passed over without its view being made again");
+    CHECK(!g_treg[2].view, "the 3D ID is passed over without its view being made again");
     CHECK(entry(t2, 2) == dummy && entry(t2, 4) == g_treg[4].view_rid, "the rebuilt table holds the dummy for it and the new ID's texture");
     os_unfair_lock_unlock(&g_rmu);
     CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "the submission that could read the first table completes");
@@ -65,7 +64,7 @@ int main(int argc, const char **argv) { @autoreleasepool {
     mtl_reg_tex(5, (const tex_t *)&b, NULL);
     os_unfair_lock_lock(&g_rmu);
     id<MTLBuffer> t3 = table();
-    CHECK(t3 == t1 && g_stat_pool_reused == reused0 + 1, "the table replaced before the completed submission is written again");
+    CHECK(t3 == t1 && g_pool_reused == reused0 + 1, "the table replaced before the completed submission is written again");
     CHECK(entry(t3, 5) == g_treg[5].view_rid && entry(t3, 1) == g_treg[1].view_rid && entry(t3, 2) == dummy, "the reused table holds this rebuild's entries");
     os_unfair_lock_unlock(&g_rmu);
 

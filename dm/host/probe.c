@@ -16,13 +16,14 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <math.h>
 void crash_set_trap_hook(int (*fn)(ucontext_t *uc));
 #if !TARGET_OS_IPHONE
 // Syntax module:offset[@x0 offset]. Put a brk at the guest address; on hit print x0..x3 (and the readable strings they point to) and a backtrace, then execute the original instruction from a trampoline slot and jump back.
 // The trampoline borrows x16: place probes only at function entries or at points where x16 is dead; the original instruction must not be PC-relative (adr/adrp/b/bl/ldr literal/cbz...).
 #define MAX_PROBE 16
 typedef void (*probe_fn)(ucontext_t *uc);
-static struct { uint64_t at; uint32_t *slot; unsigned hits, seen; char name[40]; long dump, dpost; probe_fn fn; int freg; long foff; uint64_t fval; int hreg; } g_probe[MAX_PROBE];   // dpost: @*xN+off+dpost
+static struct { uint64_t at; uint32_t *slot; unsigned hits, seen; char name[40]; long dump, dpost; probe_fn fn; int freg; long foff; uint64_t fval; int hreg; _Atomic double fp_sum; _Atomic uint64_t fp_samples, fp_invalid; } g_probe[MAX_PROBE];   // dpost: @*xN+off+dpost
 
 // !xN: treat xN as a sead::ExpHeap and print its free and used blocks (block size at block +0x18, alignment pad at +0x12). Settings (docs/agents/05-debugging.md):
 // DM_PROBE_HEAP=<name>,<start>,<size>,<free list>,<used list> layout by sead version (hex; node offset at list +0x14), default SMBW 0,28,30,b0,c8 (no name), BotW 28,38,40,e0,f8;
@@ -107,11 +108,21 @@ static void probe_dump_once(void) {
     fwrite(m->base + strtoull(o, 0, 16), 1, strtoull(n, 0, 16), fp); fclose(fp);
     LOG("probe dump %s+%s length %s → %s", mod, o, n, f ? f : def);
 }
+// Optional diagnostic: accumulate scalar FP values on every hit in the selected frame window, even when printing only every Nth hit.
+static int g_probe_accum_s = -1;
 static int probe_hit(ucontext_t *uc) {   // Registered by probe_install with the SIGTRAP branch of crash.c
     uint64_t pc = uc->uc_mcontext->__ss.__pc;
     for (int i = 0; i < g_nprobe; i++) if (g_probe[i].at == pc) {
         if (g_probe[i].fn) { g_probe[i].hits++; g_probe[i].fn(uc); uc->uc_mcontext->__ss.__pc = (uint64_t)g_probe[i].slot; return 1; }
         uint64_t frame = dm_guest_frame();
+        if (g_probe_accum_s >= 0 && frame >= g_probe_frame_first && frame <= g_probe_frame_last) {
+            float value; memcpy(&value, &uc->uc_mcontext->__ns.__v[g_probe_accum_s], sizeof value);
+            if (isfinite(value)) {
+                double old = atomic_load(&g_probe[i].fp_sum);
+                while (!atomic_compare_exchange_weak(&g_probe[i].fp_sum, &old, old + value)) {}
+                atomic_fetch_add(&g_probe[i].fp_samples, 1);
+            } else atomic_fetch_add(&g_probe[i].fp_invalid, 1);
+        }
         if (g_probe_every && frame >= g_probe_frame_first && frame <= g_probe_frame_last && ++g_probe[i].seen % g_probe_every) { uc->uc_mcontext->__ss.__pc = (uint64_t)g_probe[i].slot; return 1; }
         if (frame < g_probe_frame_first || frame > g_probe_frame_last || (g_probe_limit && g_probe[i].hits >= g_probe_limit)) {
             uc->uc_mcontext->__ss.__pc = (uint64_t)g_probe[i].slot; return 1;
@@ -128,6 +139,7 @@ static int probe_hit(ucontext_t *uc) {   // Registered by probe_install with the
         probe_dump_once();
         flockfile(stderr);   // One block per hit when threads hit at once
         { extern uint64_t g_t0_ns; uint64_t now_ns(void); uint32_t thr_cur_handle(void); ++g_probe[i].hits; fprintf(stderr, "[dm] PROBE %s #%u [%.4fs] F=%llu T=%x", g_probe[i].name, g_probe_every ? g_probe[i].seen : g_probe[i].hits, (now_ns() - g_t0_ns) / 1e9, (unsigned long long)frame, thr_cur_handle()); }
+        if (g_probe_accum_s >= 0) fprintf(stderr, " fp_s%d_sum=%.9f fp_samples=%llu fp_invalid=%llu", g_probe_accum_s, atomic_load(&g_probe[i].fp_sum), (unsigned long long)atomic_load(&g_probe[i].fp_samples), (unsigned long long)atomic_load(&g_probe[i].fp_invalid));
         for (int r = 0; r < 8; r++) { uint64_t v = uc->uc_mcontext->__ss.__x[r]; fprintf(stderr, " x%d=%#llx", r, v); probe_str(v); }
         for (int r = 19; r < 24; r++) fprintf(stderr, " x%d=%#llx", r, uc->uc_mcontext->__ss.__x[r]);
         if (getenv("DM_PROBE_ALL")) for (int r = 8; r < 19; r++) fprintf(stderr, " x%d=%#llx", r, uc->uc_mcontext->__ss.__x[r]);   // also print x8–x18
@@ -375,6 +387,8 @@ static void watch_install(void) {
 void probe_install(void) {
 #if !TARGET_OS_IPHONE
     crash_set_trap_hook(probe_hit);
+    const char *accum = getenv("DM_PROBE_ACCUM_S");
+    if (accum) { char *end; long reg = strtol(accum, &end, 10); if (end == accum || *end || reg < 0 || reg > 31) die("DM_PROBE_ACCUM_S must name scalar register 0..31"); g_probe_accum_s = (int)reg; }
     const char *frames = getenv("DM_PROBE_FRAMES");
     if (frames) {
         char *end; g_probe_frame_first = strtoull(frames, &end, 10);

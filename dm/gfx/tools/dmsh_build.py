@@ -1062,6 +1062,7 @@ def reflect(key, stage, msl, res):
             off = b['cb_offset'] * 4 if b and b['cb_slot'] == 0 else None
             if b and b['cb_slot'] == abi.GMEM_MAP_CB_SLOT:   # not a game buffer: for addresses traced to no storage buffer, the host's pool table (offset 0) or the write log (DMSH_GMEM_LOG_CB_OFFSET)
                 if b['cb_offset'] == abi.GMEM_LOG_CB_OFFSET: e.update(kind=abi.KIND_GMEM_LOG, rw=True); continue
+                if b['cb_offset'] == abi.GPTR_CB_OFFSET: e.update(kind=abi.KIND_GPTR, rw=False, sites=gptr_sites(stage, res)); continue
                 # rw: one of those accesses writes (the translator notes each one with its operation: Load, Store or an atomic)
                 e.update(kind=abi.KIND_GMEM_MAP, rw=any(re.search(r'operation "(Store|Atomic\w*)" traced to no storage buffer', n) for n in res.get('notes', ()))); continue
             if stage == 'cs' and off is not None and abi.C0_CS_UBO <= off < abi.C0_CS_UBO + abi.C0_ROW * abi.C0_CS_UBO_SLOTS and (off - abi.C0_CS_UBO) % abi.C0_ROW == 0:
@@ -1079,6 +1080,23 @@ def raw_log_opt(key, stage, src, res):
         if b['kind'] == abi.KIND_GMEM_LOG:
             return dmsh_atomic.raw_log_or(src, b['msl_name'])
     return src
+
+_GPTR_SITE = re.compile(r'translator: gptr site (\d+): c(\d+)\[(\d+)\] \+(\d+)$')
+
+def gptr_sites(stage, res):
+    """The shader's bind-time pointer sites (dmsh_abi.h DMSH_GPTR_*), in site order: [NVN storage buffer slot, byte offset of the pointer word]. A site whose storage buffer
+    the host does not take by slot (its address in no c0 storage buffer row) gets slot -1: the host leaves its entry empty and the shader searches the table"""
+    sites = {}
+    base = SSBO.get(stage)
+    for n in res.get('notes', ()):
+        m = _GPTR_SITE.match(n)
+        if not m: continue
+        k, cb_slot, cb_word, byte = map(int, m.groups())
+        off = cb_word * 4
+        reg = (off - base) // abi.C0_ROW if cb_slot == 0 and base is not None and 0 <= off - base < abi.C0_ROW * abi.C0_SSBO_SLOTS and (off - base) % abi.C0_ROW == 0 else -1
+        sites[k] = [reg, byte]
+    if sorted(sites) != list(range(len(sites))) or len(sites) > abi.GPTR_MAX: raise ValueError(f'gptr sites {sorted(sites)} are not 0..n-1 within {abi.GPTR_MAX}')
+    return [sites[k] for k in range(len(sites))]
 
 DRV_FILL = {0: [(b, b + abi.C0_ROW * abi.C0_SSBO_SLOTS) for k, b in sorted(SSBO.items(), key=lambda kv: kv[1]) if k not in ('ts', 'ms')],   # c0: storage buffer address tables (vertex / compute / geometry / pixel; a task or mesh stage's: unfillable())
             2: [(TEX_BASE, SEPTEX_BASE), (IMG_BASE, IMG_BASE + abi.C2_ROW * IMG_SLOTS), (SEPTEX_BASE, SAMP_BASE), (SAMP_BASE, SAMP_BASE + abi.C2_ROW * abi.C2_SEP_SLOTS)]}   # c2: the handle tables above, all filled by the replay layer
@@ -1585,6 +1603,9 @@ def finish(key, w, j, c1):
         raw = [(i, b) for i, b in enumerate(sbufs) if b['cb_slot'] == abi.GMEM_MAP_CB_SLOT]
         if len(raw) == 1 and raw[0][1]['cb_offset'] == 0 and not raw[0][1]['flags'] & 1:
             src = dmsh_wide.raw_load_quads(src, raw[0][0], abi.GMEM_MAP_ENTRIES, abi.GMEM_MAP_ENTRY)
+    # The same pinned helper and contiguous-address proof apply to native mesh and ordinary compute.
+    if j.get('mesh_stage', {}).get('kind') == 'ms' or (j['stage'] == 'cs' and not j.get('mesh_stage')):
+        src = dmsh_wide.gptr_load_quads(src)
     src = border_emu(src); open(msl, 'w').write(src)   # border colours Metal lacks (see border_emu)
     first, spill = [], 0
     mesh = j.get('mesh_stage')

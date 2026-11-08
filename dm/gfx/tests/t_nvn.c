@@ -126,6 +126,29 @@ int main(void) {
       EXPECT("a frame step page needs no limiter",60,fps_present_cap());
       dm_fps_state=NULL;unsetenv("DM_FPS_TARGET");g_present_cap=-1;g_engine_stub=1;nvn_present_config(0,0);
     }
+#if DM_GAME_FPS_MAX >= 120
+    // Fractional timing admits 120 without quantizing simulation to whole 60 Hz vsyncs.
+    { win_t w={.interval=2}; _Alignas(8) uint8_t state[128]={0}; float cap=120;
+      memcpy(state,&cap,4); dm_fps_state=state; dm_fps_fractional=1;
+      setenv("DM_FPS_TARGET","120",1); unsetenv("DM_FRAME_DELTA"); g_fps_high=-1; g_fs_k=0;
+      EXPECT("fractional contract admits 120",1,fps_high());
+      EXPECT("fractional contract bypasses whole-vsync step",0,fstep_on());
+      g_high_cap=120; nvn_present_config(120,0);
+      EXPECT("fractional 120 cap",120,fps_present_cap());
+      EXPECT("fractional 120 period",8333333,present_period(&w));
+      EXPECT("fractional 120 link target",120,nvn_game_fps());
+      g_high_cap=60;
+      EXPECT("fractional screen fallback period",16666666,present_period(&w));
+      cap=30; memcpy(state,&cap,4);
+      EXPECT("fractional 30 period",33333333,present_period(&w));
+      cap=120; memcpy(state,&cap,4); dm_fps_fractional=0; g_fps_high=-1;
+      EXPECT("whole-vsync contract still rejects 120",0,fps_high());
+      dm_fps_fractional=1; g_fps_high=-1; setenv("DM_FRAME_DELTA","0",1);
+      EXPECT("120 requires elapsed-time correction",0,fps_high());
+      dm_fps_fractional=0; dm_fps_state=NULL; unsetenv("DM_FPS_TARGET"); unsetenv("DM_FRAME_DELTA");
+      g_fps_high=-1; g_present_cap=-1; g_high_cap=60; nvn_present_config(0,0);
+    }
+#endif
     crash_install();   // the same SIGSEGV / SIGBUS handling as production (the page-fault hook is dispatched from within it)
     // 1. Bootstrap address lookup: bootstrap gets GetProcAddress, then uses it to get all the names
     PFNNVNBOOTSTRAPLOADERPROC boot = (PFNNVNBOOTSTRAPLOADERPROC)h_nvnBootstrapLoader;

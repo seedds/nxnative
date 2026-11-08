@@ -20,8 +20,8 @@ static void scenario(int outstanding, int copy_cut, int enabled, int segment) {
     enc_b_copy_buffer(blit_buf(0x10000,0x10100,0x20000,0x20100),io,0,mid,0,256);
     g_stat_draw+=64; g_cut_copy=copy_cut;
     uint64_t cuts=g_cuts; sub_cut();
-    int skip=enabled && outstanding && !copy_cut && !segment;
-    CHECK(g_cuts-cuts==(uint64_t)!skip,"only non-copy busy submission mode defers the cut");
+    int skip=enabled && outstanding && !copy_cut && (!segment || ts_on());
+    CHECK(g_cuts-cuts==(uint64_t)!skip,"busy non-copy cuts defer when timestamps have boundary slots");
     CHECK(!skip || g_cut_draw0==g_stat_draw,"deferred cut advances its draw-count boundary");
     enc_b_copy_buffer(blit_buf(0x20000,0x20100,0x10200,0x10300),mid,0,io,512,256);
     uint64_t fence=mtl_sub_commit();

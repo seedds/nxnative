@@ -118,9 +118,9 @@ int main(void) { @autoreleasepool {
     {
         const uint8_t *map = (const uint8_t *)gmem_map().contents;
         uint64_t chunk = (base + 900 * MB) >> DMSH_GMEM_HINT_SHIFT;
-        uint32_t hint; memcpy(&hint, map + (chunk % DMSH_GMEM_MAP_ENTRIES) * DMSH_GMEM_MAP_ENTRY + 24, sizeof hint);
-        unsigned entry = hint % DMSH_GMEM_MAP_ENTRIES;
-        CHECK("the hint names its chunk and an entry", entry && hint / DMSH_GMEM_MAP_ENTRIES == chunk);
+        uint32_t hint[2]; memcpy(hint, map + (chunk % gmem_entries(gmem_map())) * DMSH_GMEM_MAP_ENTRY + 24, sizeof hint);
+        unsigned entry = hint[1];
+        CHECK("the hint names its chunk and an entry", entry && hint[0] == (uint32_t)chunk);
         uint64_t r[2]; memcpy(r, map + (size_t)entry * DMSH_GMEM_MAP_ENTRY, sizeof r);
         CHECK("the entry holds the whole chunk", r[0] <= chunk << DMSH_GMEM_HINT_SHIFT && r[1] >= (chunk + 1) << DMSH_GMEM_HINT_SHIFT);
     }
@@ -159,9 +159,9 @@ int main(void) { @autoreleasepool {
         mtl_sub_begin(); uint64_t log = gml_take(map); CHECK("a log", log != 0);
         id<MTLBuffer> lb = g_gml_free.lastObject; (void)lb;
         const uint8_t *t = (const uint8_t *)map.contents; int n0 = g_gml_n, want = -1;
-        for (int k = 1; k < DMSH_GMEM_MAP_ENTRIES && want < 0; k++) { uint64_t r[2]; memcpy(r, t + (size_t)k * DMSH_GMEM_MAP_ENTRY, sizeof r); if (r[0] <= base + 900 * MB && base + 900 * MB < r[1]) want = k; }
+        for (int k = 1; k < (int)gmem_entries(map) && want < 0; k++) { uint64_t r[2]; memcpy(r, t + (size_t)k * DMSH_GMEM_MAP_ENTRY, sizeof r); if (r[0] <= base + 900 * MB && base + 900 * MB < r[1]) want = k; }
         CHECK("the pool has an entry to log", want > 0);
-        id<MTLBuffer> w = [g_dev newBufferWithLength:GML_BYTES options:MTLResourceStorageModeShared];
+        id<MTLBuffer> w = [g_dev newBufferWithLength:gml_bytes(map) options:MTLResourceStorageModeShared];
         ((uint32_t *)w.contents)[want / 32] = 1u << (want % 32);
         gml_read(w, map, 0, 0);
         CHECK("the bit teaches its range", g_gml_n == n0 + 1 && g_gml_lo[n0] <= base + 900 * MB && base + 900 * MB < g_gml_hi[n0]);
@@ -244,7 +244,7 @@ int main(void) { @autoreleasepool {
         }
         nvn_dirty_protect(wp + 600 * MB, 4096);
         mtl_pool_addressed(wp + 700 * MB, 4096);
-        mtl_sub_begin(); CHECK("pool table over the protected pool", gmem_map_gpu() != 0); finish();
+        mtl_sub_begin(); CHECK("pool table over the protected pool", gmem_map().gpuAddress != 0); finish();
         CHECK("the whole-pool buffer over a protected page takes GPU writes", look(wb + 700 * MB, 4096).length == GB && gpu_fill_ok(wb + 700 * MB, 4096, 0x7c));
         // Pools are 4 KB aligned and buffers whole host pages: a pool made after its neighbour's texture protected the page they share
         uint8_t *two = mmap(NULL, 4 * MB, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0); if (two == MAP_FAILED) abort();

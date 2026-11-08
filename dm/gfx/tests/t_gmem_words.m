@@ -22,44 +22,41 @@ int main(void) { @autoreleasepool {
     uint64_t a = (uint64_t)(uintptr_t)mem;
     mtl_pool_add(mem, 4 * MB); mtl_pool_addressed(mem, 4 * MB);
     mtl_sub_begin();
-    uint64_t t0 = gmem_map_gpu();                    // the table two argument blocks were encoded with
+    uint64_t t0 = gmem_map().gpuAddress;                    // the table two argument blocks were encoded with
     uint64_t w0 = t0, w1 = t0, w2 = 0;
-    uint64_t words0, older0, behind0; mtl_gmem_words(&words0, &older0, &behind0);
-    gmem_slot_note(&w0, NULL); gmem_slot_note(&w1, NULL);
+    uint64_t words0 = g_gmem_words, repointed0 = g_gmem_repointed;
+    gmem_slot_note(&w0, NULL, nil); gmem_slot_note(&w1, NULL, nil);
     gmem_commit_patch();
-    uint64_t words, older, behind; mtl_gmem_words(&words, &older, &behind);
     CHECK("an unchanged table leaves the words alone", w0 == t0 && w1 == t0 && g_gmem_buf.gpuAddress == t0);
-    CHECK("two words counted, none out of date", words - words0 == 2 && older == older0 && behind == behind0);
+    CHECK("two words counted, none out of date", g_gmem_words - words0 == 2 && g_gmem_repointed == repointed0);
     mtl_pool_add(mem + 8 * MB, 4 * MB); mtl_pool_addressed(mem + 8 * MB, 4 * MB);              // a pool made after the blocks were encoded
     CHECK("the table the words hold lacks it", !table_has(t0, a + 8 * MB));
-    gmem_slot_note(&w0, NULL); gmem_slot_note(&w1, NULL);
+    gmem_slot_note(&w0, NULL, nil); gmem_slot_note(&w1, NULL, nil);
     gmem_commit_patch();
     uint64_t t1 = g_gmem_buf.gpuAddress;
     CHECK("a new table was built, not the old one refilled", t1 != t0);
     CHECK("both words point at it", w0 == t1 && w1 == t1);
     CHECK("it holds the pool made after they were encoded", table_has(t1, a + 8 * MB));
-    mtl_gmem_words(&words, &older, &behind);
-    CHECK("two words counted as behind the pools", behind - behind0 == 2 && older == older0);
+    CHECK("two words counted as behind the pools", g_gmem_repointed - repointed0 == 2);
     mtl_pool_add(mem + 16 * MB, 4 * MB); mtl_pool_addressed(mem + 16 * MB, 4 * MB);
-    uint64_t t2 = gmem_map_gpu();                    // another block is encoded with the newer table, then the pools change again
+    uint64_t t2 = gmem_map().gpuAddress;                    // another block is encoded with the newer table, then the pools change again
     mtl_pool_add(mem + 24 * MB, 4 * MB); mtl_pool_addressed(mem + 24 * MB, 4 * MB);
     w2 = t1;                                         // a block encoded with the older table
     uint64_t w3 = t2;                                // and one with the table that now lags the pools
-    gmem_slot_note(&w2, NULL); gmem_slot_note(&w3, NULL);
+    gmem_slot_note(&w2, NULL, nil); gmem_slot_note(&w3, NULL, nil);
     gmem_commit_patch();
     uint64_t t3 = g_gmem_buf.gpuAddress;
     CHECK("the words follow the last table", w2 == t3 && w3 == t3 && t3 != t2);
     CHECK("it holds all four added pools", table_has(t3, a + 8 * MB) && table_has(t3, a + 16 * MB) && table_has(t3, a + 24 * MB));
-    mtl_gmem_words(&words, &older, &behind);
-    CHECK("one word counted as older, one as behind", older - older0 == 1 && behind - behind0 == 3);
+    CHECK("older and behind words are both repointed", g_gmem_repointed - repointed0 == 4);
     gmem_commit_patch();                             // nothing noted since
     CHECK("a commit with no words changes nothing", g_gmem_buf.gpuAddress == t3);
     // a write log is read against the table the shader searched: when its block's word is repointed at a newer table, the log follows it
     id<MTLBuffer> t3buf = g_gmem_buf;
-    uint64_t w4 = t3; (void)gml_take(t3buf); NvGmlLog *lg = g_gml_last;
+    uint64_t w4 = t3; NvGmlReceipt *lg = nil; uint64_t log_word = gml_take_record(t3buf, &lg);
     CHECK("a log is taken with the table its block holds", lg && lg->map == t3buf);
     mtl_pool_add(mem + 32 * MB, 4 * MB); mtl_pool_addressed(mem + 32 * MB, 4 * MB);             // a pool the block's table lacks
-    gmem_slot_note(&w4, (__bridge void *)lg);
+    gmem_slot_note(&w4, &log_word, lg);
     gmem_commit_patch();
     CHECK("its word follows the newer table", w4 == g_gmem_buf.gpuAddress && w4 != t3);
     CHECK("and its log is read against that table, not the older one", lg->map == g_gmem_buf && lg->map != t3buf);

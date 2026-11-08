@@ -207,7 +207,11 @@ def bahs_shaders(d, label):
         code, ctl = d[region + off:region + off + n], d[c:c + csz]
         st = nvn2_stage(ctl, code) if nvn2 else 'cs' if code[:4] == CS_MAGIC else sph_stage(code) if code[:4] == GFX_MAGIC else None
         if not st or check(label, st, ctl, code): continue
-        out.append((f'{label}#BAHS@{a:#x}', st, ctl, code))
+        found.append((a, c, (f'{label}#BAHS@{a:#x}', st, ctl, code)))
+    # Keep upstream's control-section exclusion before validating our binary table:
+    # words inside a control section can otherwise masquerade as program entries.
+    spans = {(c, c + ctl_len(s[2])) for _, c, s in found}
+    out = [s for a, _, s in found if not any(lo <= a < hi for lo, hi in spans)]
     records = bahs_variations(d, label, [o[0] for o in out])
     # The scan can match words inside a control section. Once both arrays validate,
     # only their binary records name programs; a stray match can join unrelated code

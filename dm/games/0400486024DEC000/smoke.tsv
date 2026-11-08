@@ -1,0 +1,10 @@
+# Local fixed-save route: fixed Kokiri Forest vine save, stationary after entering gameplay.
+# Save files stay outside the repository; see the game note for fixture setup and coverage.
+save	0400486024DEC000-work/regress/fixtures/kokiri-vines
+keys	25:A,30:A,35:A,40:A
+secs	90
+quick	80
+reach	3000@70
+window	60	25
+shots	70,78
+hang	20

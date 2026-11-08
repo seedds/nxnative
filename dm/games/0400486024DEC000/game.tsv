@@ -40,3 +40,6 @@ render_cond	on
 # Terrain height tiles are filled by the CPU in mixed CPU/GPU pools without an NVN flush.
 tex_flush_upload	on
 tex_dirty_upload	on
+
+# Experimental high-rate support; default stays 60. See the game note for validation limits.
+fps_max	120

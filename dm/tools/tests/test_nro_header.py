@@ -15,8 +15,17 @@ TOOLS = Path(__file__).resolve().parents[1]
 
 class NroHeader(unittest.TestCase):
     def test_header_preserved_and_text_rewritten(self):
+        self.check_rewrite(0x80, 0x58ff0012)   # literal ldr x18, outside the module
+
+    def test_function_before_first_fde_cannot_reenter_header(self):
+        # The linear scans alone are not enough: func_of must also start after the header.
+        # Otherwise its br x18 looks like an unrecognized jump table during function analysis.
+        self.check_rewrite(0x100, 0xd61f0240)   # br x18
+
+    def check_rewrite(self, first_fde, header_word):
         # A real function starts immediately after the NRO header. Both it and the build ID name x18.
-        raw = image({0x80: [0xaa0003f2, RET]})   # mov x18, x0; ret
+        raw = image({first_fde: [0xaa0003f2, RET]})
+        struct.pack_into('<II', raw, 0x80, 0xaa0003f2, RET)   # mov x18, x0; ret, with or without an FDE
         raw[0x1100:0x111c] = raw[0x20:0x3c]
         struct.pack_into('<I', raw, 4, 0x1100)
         struct.pack_into('<ii', raw, 0x1110, 0x3000 - 0x1100, 0x3014 - 0x1100)
@@ -24,7 +33,7 @@ class NroHeader(unittest.TestCase):
         struct.pack_into('<I', raw, 0x18, len(raw))
         struct.pack_into('<6I', raw, 0x20, 0, 0x1000, 0x1000, 0x2000, 0x3000, 0x1000)
         struct.pack_into('<I', raw, 0x38, 0)
-        struct.pack_into('<I', raw, 0x44, 0x58ff0012)   # literal ldr x18, outside the module
+        struct.pack_into('<I', raw, 0x44, header_word)
         with tempfile.TemporaryDirectory() as tmp:
             src = Path(tmp) / 'input.nro'; src.write_bytes(raw)
             env = os.environ | {'DM_GAME': '010015100B514000'}

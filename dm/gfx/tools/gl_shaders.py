@@ -38,13 +38,11 @@ def text_of(b):
     return b[:z] if z >= 0 else b
 
 def nso_strings(path):
-    """'#version <number>' strings of an NSO's read-only segment (lz4 segments, as dm/tools/nso.py decompresses them); a main that links glslang (Balatro's LÖVE) also has its messages that
-    start with '#version:'"""
-    import lz4.block, struct
-    d = open(path, 'rb').read()
-    flags = struct.unpack_from('<I', d, 0xc)[0]; fo, mo, sz = struct.unpack_from('<III', d, 0x20); csz = struct.unpack_from('<I', d, 0x64)[0]
-    img = d[fo:fo + csz]
-    if flags >> 1 & 1: img = lz4.block.decompress(img, uncompressed_size=sz)
+    """'#version <number>' strings of an NSO's read-only segment (dm/tools/nso.py); a main that links glslang (Balatro's LÖVE) also has its messages that start with '#version:'.
+    nso.Error (a ValueError) on a damaged file"""
+    import nso
+    with open(path, 'rb') as f: m = nso.load(f.read(), path)
+    (mo, sz) = m.segments[1]; img = bytes(m.image[mo:mo + sz])
     return [text_of(img[m.start():m.start() + 0x10000]) for m in re.finditer(rb'(?:^|(?<=\0))#version [0-9]', img)]
 
 def sources(roots):
@@ -103,8 +101,41 @@ def fixups(t):
 def glsl_type(t, refl):
     return refl['types'][t]['name'] if t in refl.get('types', {}) else t
 
+def uni_members(refl, ms, prefix, base, f, bools):
+    """Table rows for default block members. A struct's members recurse with their dotted name, which is the name the game passes to GL (u_LightEnv.m_dirLights_dir[0]); the
+    reflection gives a nested member's offset relative to its parent, so the parent's offset is added"""
+    for mb in ms:
+        arr = mb.get('array', [])
+        name = prefix + mb['name']
+        if len(arr) > 1: return f'uniform {name}: arrays of arrays'
+        if 'members' in refl['types'].get(mb['type'], {}):
+            if arr: return f'uniform {name}: an array of structs is not implemented'
+            e = uni_members(refl, refl['types'][mb['type']]['members'], name + '.', base + mb['offset'], f, bools)
+            if e: return e
+            continue
+        ty = glsl_type(mb['type'], refl)
+        if ty == 'uint' and mb['name'] in bools: ty = 'bool'
+        if ty not in VEC_TYPES: return f'uniform {name}: type {ty} (structs are not implemented)'
+        f.append(f'u:{name}={base + mb["offset"]}:{ty}:{arr[0] if arr else 0}:{mb.get("array_stride", 0)}')
+
+# GLSL ES 1.00, with its version statement (#version 100) or, as GameMaker's runner writes it, without one (Well Dweller's 93 run-time shaders): `attribute`, `varying`, `texture2D`, `gl_FragColor`, precision statements and
+# lowp / mediump / highp qualifiers. SPIR-V needs ES 3.10 or newer, so the text is rewritten before preprocessing (glslang rejects those keywords in 310). Metal has no use for the precision qualifiers;
+# the texture functions stay for fixups(), which renames them after preprocessing (a macro could hide one)
+def es100(t, stage):
+    t = re.sub(r'^[ \t]*precision[ \t]+\w+[ \t]+\w+[ \t]*;\r?[ \t]*\r?\n', '', t, flags=re.M)
+    t = re.sub(r'\b(?:lowp|mediump|highp)\b[ \t]*', '', t)
+    t = re.sub(r'\battribute\b', 'in', t)
+    t = re.sub(r'\bvarying\b', 'out' if stage == 'vert' else 'in', t)
+    if stage == 'frag' and 'gl_FragColor' in t:
+        t = 'out vec4 gm_FragColor;\n' + t.replace('gl_FragColor', 'gm_FragColor')
+    t = re.sub(r'\bsample\b', 'gm_sample', t)   # `sample` became a reserved word after ES 1.00 (GameMaker's sprite shaders use it as a variable)
+    return '#version 310 es\nprecision highp float;\nprecision highp int;\n' + t
+
 def translate(src, stage, key, tmp):
     """GLSL → MSL; returns (msl path, table fields) or an error string"""
+    t = src.decode('latin1')
+    v = re.search(r'^[ \t]*#version[ \t]+(\d+)[^\n]*\n?', t, re.M)
+    if not v or v.group(1) == '100': src = es100(t.replace(v.group(0), '', 1) if v else t, stage).encode('latin1')
     g = os.path.join(tmp, f'{key}.{stage}'); spv = g + '.spv'; msl = os.path.join(tmp, f'{key}_{stage[0]}.metal')
     open(g + '.in', 'wb').write(src)
     r = subprocess.run(['glslangValidator', '-E', '-S', stage, g + '.in'], capture_output=True, text=True)
@@ -134,13 +165,8 @@ def translate(src, stage, key, tmp):
         t = refl['types'][u['type']]
         if t['name'] != 'gl_DefaultUniformBlock': return f'uniform block {t["name"]} is not the default block'
         f.append(f'b:{u["binding"]}:{u["block_size"]}')
-        for mb in t['members']:
-            arr = mb.get('array', [])
-            if len(arr) > 1: return f'uniform {mb["name"]}: arrays of arrays'
-            ty = glsl_type(mb['type'], refl)
-            if ty == 'uint' and mb['name'] in bools: ty = 'bool'
-            if ty not in VEC_TYPES: return f'uniform {mb["name"]}: type {ty} (structs are not implemented)'
-            f.append(f'u:{mb["name"]}={mb["offset"]}:{ty}:{arr[0] if arr else 0}:{mb.get("array_stride", 0)}')
+        e = uni_members(refl, t['members'], '', 0, f, bools)
+        if e: return e
     for t in refl.get('textures', []):
         if t.get('array'): return f'sampler array {t["name"]}'
         f.append(f't:{t["name"]}={t["binding"]}:{t["type"]}')
@@ -204,4 +230,7 @@ def main():
             open(os.path.join(d, 'gl_shaders.tsv'), 'w').write('\n'.join(tsv) + '\n')
             print(f'{sdk}: {len(seen)} shaders ({sum(1 for v in seen.values() if v[0] == "vert")} vertex) → {lib}' + (f'; {len(failed)} failed' if failed else ''))
 
-if __name__ == '__main__': main()
+if __name__ == '__main__':
+    import nso
+    try: main()
+    except nso.Error as e: red(str(e))   # a damaged main

@@ -786,3 +786,11 @@ sites = [
     (0x9abe8c, '2a050071', 0x14018c46, '[rumble] rumble channel count +0x90: b stub 0xa0efa4 -> rh_w9 (was subs w10, w9, #1)'),
     (0x9abf40, '29050011', 0x14018c02, '[up] pad auto-repeat count +0x30: b cave 0xa0ef48 (was add w9, w9, #1)'),
 ]
+
+# How general each patch is and could be (dm/tools/docs_patches.py "Binding", listed in docs/agents/game-patches.md): what, its binding now, the loosest it could have (goal),
+# purpose, why; blocked or kept: why the gap stays open (cannot close yet, or left open on purpose); checked: what was checked on game files (else a judgement)
+BINDING = [
+    {'what': '60 fps frame step (112 sites)', 'now': 'build', 'goal': 'game', 'purpose': 'frame rate',
+     'why': "the game's own clock and timers (a community 60 fps mod on the host's frame step)",
+     'blocked': 'a function-matched frame step (MATCH_FRAME_STEP) covers one function; these stubs span several'},
+]

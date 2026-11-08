@@ -31,3 +31,12 @@ MATCH_CUTS = {'main': [
     {'name': limiter, 'size': 172, 'fingerprints': ['8fda590c2f6df29ae21230a600452979e26c0972dcb738cec24130239aef1346'],
      'cuts': [(104, '087c149be9e301b2291191f2087dc99b14fd45d3', '087c149b890780520809c99a9f060071f403889a', limiter + ' (as v0 main+0x43e1a8)')]},
 ]}
+
+# How general each patch is and could be (dm/tools/docs_patches.py "Binding", listed in docs/agents/game-patches.md): what, its binding now, the loosest it could have (goal),
+# purpose, why; blocked or kept: why the gap stays open (cannot close yet, or left open on purpose); checked: what was checked on game files (else a judgement)
+BINDING = [
+    {'what': 'KTGL frame limiter threshold: 0 at one vsync a frame', 'now': 'game', 'goal': 'game', 'purpose': 'frame rate',
+     'checked': 'MATCH_CUTS enrolled on both builds',
+     'why': 'function-matched over its two builds (MATCH_CUTS); whether Age of Calamity, Three Houses or ROMANCE OF THE THREE KINGDOMS 8 REMAKE share the function is unchecked (an '
+            'engine rule if they do)'},
+]

@@ -14,8 +14,11 @@ import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from c1_guard import Interval, definitions_of, known   # noqa: E402
-import dmsh_chain   # noqa: E402
+from c1_guard import Interval, definitions_of, known, outputs   # noqa: E402
+import dmsh_abi as abi   # noqa: E402
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'tools'))
+import romfs   # noqa: E402
+import shader_lib   # noqa: E402
 
 MAX = 65536
 
@@ -24,7 +27,7 @@ def extents(source, bindings):
     """{reg: bytes} for the cbuf bindings whose every read is a proven index into _m0"""
     out, definitions = {}, None
     for b in bindings:
-        if b.get("kind") != "cbuf" or "reg" not in b: continue
+        if b.get("kind") != abi.KIND_CBUF or "reg" not in b: continue
         name = b["msl_name"]
         uses = len(re.findall(r"\b" + re.escape(name) + r"\b", source))
         reads = re.findall(r"\(\*spvDescriptorSet0\." + re.escape(name) + r"\)\._m0\[([^\]]+)\]", source)
@@ -50,7 +53,7 @@ def unwritten(source, bindings):
     writable (device, not const device), so the host takes a binding as written unless the table lists it"""
     out = []
     for b in bindings:
-        if b.get("kind") != "sbuf" or "reg" not in b: continue
+        if b.get("kind") != abi.KIND_SBUF or "reg" not in b: continue
         name = "spvDescriptorSet0." + b["msl_name"]; ok = True
         for m in re.finditer(r"\(\*" + re.escape(name) + r"\b", source):
             j = m.end()
@@ -71,9 +74,9 @@ def unwritten(source, bindings):
 def row(path):
     """The table line for one shader's reflection json, or None"""
     try:
-        with open(path, encoding="utf-8") as stream: bindings = json.load(stream).get("bindings") or []
-        if not any(b.get("kind") in ("cbuf", "sbuf") for b in bindings): return None
-        with open(path[:-5] + ".metal", encoding="utf-8") as stream: source = stream.read()
+        with romfs.open(path, encoding="utf-8") as stream: bindings = json.load(stream).get("bindings") or []
+        if not any(b.get("kind") in (abi.KIND_CBUF, abi.KIND_SBUF) for b in bindings): return None
+        with romfs.open(path[:-5] + ".metal", encoding="utf-8") as stream: source = stream.read()
     except (OSError, ValueError):
         return None
     toks = [f"{r}:{n}" for r, n in sorted(extents(source, bindings).items())] + [f"s{r}" for r in unwritten(source, bindings)]
@@ -83,14 +86,15 @@ def row(path):
 def main():
     if len(sys.argv) != 3:
         raise SystemExit(f"usage: {sys.argv[0]} <dmsh_b version dir> <output tsv>")
-    version_dir, output = map(os.path.abspath, sys.argv[1:])
-    paths = [os.path.join(version_dir, n) for n in sorted(os.listdir(version_dir)) if n.endswith("_b.json")]
+    lib, output = map(os.path.abspath, sys.argv[1:])
+    version_dir = str(shader_lib.view(lib))   # its folder or its one file, read in place
+    paths = [os.path.join(version_dir, n) for n in outputs(version_dir, "json") if n.endswith("_b.json")]
     with multiprocessing.Pool() as pool: rows = [r for r in pool.map(row, paths, chunksize=64) if r]
     slots, ro = sum(r.count(":") for r in rows), sum(len(re.findall(r"\bs\d+", r.split("\t", 1)[1])) for r in rows)
     os.makedirs(os.path.dirname(output), exist_ok=True)
     with open(output, "w", encoding="utf-8", newline="") as stream:
         stamp = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
-        stream.write(f"{dmsh_chain.table_head(version_dir)} {stamp}\n")   # the library's chain version and the profile inputs it was built from
+        stream.write(f"{shader_lib.table_head(lib)} {stamp}\n")   # the library's chain version and the profile inputs it was built from
         stream.write("# shader key, then reg:bytes for each uniform slot whose reads stay inside its first bytes, and s<reg> for each storage slot it never writes (cb_extent.py)\n")
         for line in rows: stream.write(line + "\n")
     print(f"bounded uniform reads: {slots} slots; storage slots never written: {ro}; {len(rows)} shaders")

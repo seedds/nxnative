@@ -5,6 +5,7 @@
 // app without the game. "Show this window at launch" off: no window unless Option is held at launch, and launcher.c applies the saved choices. The window never takes focus by itself: an app
 // opened in the background (open -g) keeps its window behind until the player switches to it
 import AppKit
+import QuartzCore
 import SwiftUI
 
 private func info(_ key: String) -> String? { Bundle.main.object(forInfoDictionaryKey: key) as? String }
@@ -29,6 +30,7 @@ struct LauncherView: View {
             .padding([.horizontal, .top], 20)
             Form {
                 settingSections(basic: true)
+                CloudSavesSection()
                 Section {
                     DisclosureGroup("Advanced settings", isExpanded: $advanced) {}
                 }
@@ -68,6 +70,51 @@ struct LauncherView: View {
                 }
             }
         }
+    }
+}
+
+/// Cloud saves: a folder the save is synced through (dm/host/save_sync.h), the one the iPhone app picks in its launcher's Cloud saves section. It is kept in this app's
+/// preferences as cloudSaves.folder, which launcher.c puts into DM_SAVE_SYNC before the host starts; a DM_SAVE_SYNC an env file or the launch environment set wins, and is shown here.
+struct CloudSavesSection: View {
+    @AppStorage("cloudSaves.folder") private var folder = ""
+    private let fixed: String? = {
+        let env = ProcessInfo.processInfo.environment
+        let keys = ((env["DM_ENV_FILE_KEYS"] ?? "") + " " + (env["DM_ENV_LAUNCH_KEYS"] ?? "")).split(separator: " ")
+        return keys.contains("DM_SAVE_SYNC") || env["DM_SAVE_SYNC"] != nil ? env["DM_SAVE_SYNC"] : nil
+    }()
+
+    var body: some View {
+        Section {
+            LabeledContent("Cloud saves") {
+                Text(fixed.map { "\(Self.shown($0)) (env.txt)" } ?? (folder.isEmpty ? "Off" : Self.shown(folder)))
+                    .foregroundStyle(.secondary).lineLimit(1).truncationMode(.head)
+            }
+            if fixed == nil {
+                HStack {
+                    Button(folder.isEmpty ? "Choose a folder…" : "Choose a different folder…", action: choose)
+                    if !folder.isEmpty { Button("Turn off") { folder = "" } }
+                }
+            }
+        } footer: {
+            Text("Choose the iCloud Drive folder the iPhone app uses for this game. The save comes in when the game starts and goes out after each save; a save that is replaced is kept in the save's -backups folder.")
+        }
+    }
+
+    private func choose() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.allowsMultipleSelection = false; panel.canCreateDirectories = true
+        panel.prompt = "Use for Cloud Saves"
+        panel.message = "The folder the iPhone app chose in its launcher's Cloud saves"
+        panel.directoryURL = URL(fileURLWithPath: folder.isEmpty ? Self.drive : folder)
+        if panel.runModal() == .OK, let url = panel.url { folder = url.path }
+    }
+
+    static let drive = NSHomeDirectory() + "/Library/Mobile Documents/com~apple~CloudDocs"   // iCloud Drive, as the Finder shows it
+
+    /// A path under iCloud Drive as the Finder and the Files app name it: iCloud Drive › Documents › dev › Zelda; any other path as it is
+    static func shown(_ path: String) -> String {
+        guard path == drive || path.hasPrefix(drive + "/") else { return path }
+        return (["iCloud Drive"] + path.dropFirst(drive.count).split(separator: "/").map(String.init)).joined(separator: " › ")
     }
 }
 
@@ -114,6 +161,9 @@ private final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate 
     func finish(_ play: Bool) {
         guard let w = window else { return }
         window = nil; self.play = play
+        // The main thread blocks in launcher.c's waitpid once run() returns, so the window must leave the screen now: no fade-out (it runs on later run-loop passes),
+        // and dmMacLauncher flushes the order-out (AppKit commits it at the end of a pass). Without both, the window stayed on screen, not responding, until the game ended
+        w.animationBehavior = .none
         w.delegate = nil; w.orderOut(nil)
         NSApp.stop(nil)
         NSApp.postEvent(NSEvent.otherEvent(with: .applicationDefined, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil, subtype: 0, data1: 0, data2: 0)!, atStart: true)   // run returns at the next event
@@ -143,6 +193,7 @@ public func dmMacLauncher() -> Int32 {
     app.delegate = launcher
     fputs("launcher: \(file.settings.count) settings shown\n", stderr)
     app.run()
+    CATransaction.flush()   // finish's order-out
     app.setActivationPolicy(.prohibited)   // the host is the game's app from here on
     guard launcher.play else { fputs("launcher: quit without starting the game\n", stderr); return 0 }
     model.apply()

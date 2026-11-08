@@ -65,6 +65,10 @@ static inline void m3_orthonormalize(float R[3][3]) {   // Gram-Schmidt on the c
 }
 // One sample: raw Apple acceleration (G) and rotation rate (rad/s), dt in seconds since the previous one (0 for the first). k = tilt correction gain (rad/s per unit error)
 static inline void motion_update(motion_state *s, const motion_map *m, const float acc_raw[3], const float rot_raw[3], float dt, float k) {
+    // A bad sensor sample must not prime or poison the persistent fusion state.
+    for (int i = 0; i < 3; i++) if (!isfinite(acc_raw[i]) || !isfinite(rot_raw[i])) return;
+    if (!isfinite(dt) || dt < 0) dt = 0;
+    if (!isfinite(k) || k < 0) k = 0;
     float a[3], w[3];
     motion_map_apply(m, acc_raw, a, m->acc_sign);
     motion_map_apply(m, rot_raw, w, m->det);           // rad/s in the Switch frame
@@ -96,7 +100,7 @@ static inline void motion_update(motion_state *s, const motion_map *m, const flo
             for (int i = 0; i < 3; i++) w[i] += k * e[i];
         }
         float th = sqrtf(w[0] * w[0] + w[1] * w[1] + w[2] * w[2]) * dt;
-        if (th > 1e-9f) {
+        if (isfinite(th) && th > 1e-9f) {
             float u[3] = {w[0] * dt / th, w[1] * dt / th, w[2] * dt / th}, c = cosf(th), sn = sinf(th), v = 1 - c;
             float E[3][3] = {
                 {c + u[0] * u[0] * v,        u[0] * u[1] * v - u[2] * sn, u[0] * u[2] * v + u[1] * sn},
@@ -110,7 +114,7 @@ static inline void motion_update(motion_state *s, const motion_map *m, const flo
     float wraw[3]; motion_map_apply(m, rot_raw, wraw, m->det / (2 * (float)M_PI));
     for (int i = 0; i < 3; i++) {
         s->gyro[i] = wraw[i]; s->acc[i] = a[i];
-        if (dt > 0 && dt <= 0.25f) s->angle[i] += wraw[i] * dt;
+        if (dt > 0 && dt <= 0.25f) { float angle = s->angle[i] + wraw[i] * dt; if (isfinite(angle)) s->angle[i] = angle; }
     }
 }
 // The SixAxisSensorState fields from the state: acc[3], gyro[3], angle[3], dir[9] (rows = the controller's x, y, z axes in the world)

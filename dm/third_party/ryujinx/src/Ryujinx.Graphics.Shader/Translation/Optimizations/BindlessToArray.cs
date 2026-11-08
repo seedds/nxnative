@@ -12,6 +12,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
 
         // 1 and 0 elements are not considered arrays anymore.
         public const int MinimumArrayLength = 2;
+        private const int NvnSlotArrayLength = 32;      // nxnative: as BindlessElimination's
 
         public static void RunPassOgl(BasicBlock block, ResourceManager resourceManager)
         {
@@ -205,6 +206,30 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
 
                 int length = Math.Max(MinimumArrayLength, gpuAccessor.QueryTextureArrayLengthFromBuffer(src0CbufSlot));
 
+                // nxnative: the replay binds images and buffer textures element by element, so these stay short; the game's sampled textures take a table the host builds (dmsh_build.py pool_arrays)
+                if (src0CbufSlot != NvnTextureBufferIndex && (texOp.Inst.IsImage() || (texOp.Type & SamplerType.Mask) == SamplerType.TextureBuffer))
+                {
+                    length = Math.Min(length, NvnSlotArrayLength);
+                }
+
+                // nxnative: handles at a computed index past a constant base, the base beyond the array's length: every read would clamp to its last element, which is no handle. Fire Emblem Fortune's
+                // Weave's character shaders read their cube maps as c[14][8 i + 0x340] (LDC after a shift of 3). The array starts at the base instead (the host fills element k from base + 8k), so
+                // the index is that of the handle within the table. A base inside the array keeps the array at 0, as before
+                if (!hasSecondaryHandle && TryArrayBase(ldcVecIndex, out Operand tableIndex, out int baseOffset) && baseOffset / 8 >= length)
+                {
+                    TurnIntoArray(resourceManager, texOp, cbufSlot, baseOffset / 4, length);
+
+                    Operand element = Local();
+                    Operand elementMin = Local();
+
+                    block.Operations.AddBefore(node, new Operation(Instruction.ShiftRightU32, element, tableIndex, Const(3)));
+                    block.Operations.AddBefore(node, new Operation(Instruction.MinimumU32, elementMin, element, Const(length - 1)));
+
+                    texOp.SetSource(0, elementMin);
+
+                    continue;
+                }
+
                 TurnIntoArray(resourceManager, texOp, cbufSlot, handleIndex, length);
 
                 Operand vecIndex = Local();
@@ -219,6 +244,47 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
 
                 texOp.SetSource(0, indexMin);
             }
+        }
+
+        // nxnative: the vector index of a constant buffer load whose address is (index + a constant byte offset) >> 2 >> 2: that index and offset
+        private static bool TryArrayBase(Operand vecIndex, out Operand index, out int byteOffset)
+        {
+            index = null;
+            byteOffset = 0;
+
+            static bool ShiftBy2(Operand o, out Operand source)
+            {
+                source = null;
+
+                if (o.AsgOp is Operation op && op.Inst == Instruction.ShiftRightU32 && op.GetSource(1).Type == OperandType.Constant && op.GetSource(1).Value == 2)
+                {
+                    source = op.GetSource(0);
+
+                    return true;
+                }
+
+                return false;
+            }
+
+            if (!ShiftBy2(vecIndex, out Operand word))
+            {
+                return false;
+            }
+
+            if (word.AsgOp is Operation plus0 && plus0.Inst == Instruction.Add && plus0.GetSource(1).Type == OperandType.Constant && plus0.GetSource(1).Value == 0)
+            {
+                word = plus0.GetSource(0);
+            }
+
+            if (!ShiftBy2(word, out Operand address) || address.AsgOp is not Operation add || add.Inst != Instruction.Add || add.GetSource(1).Type != OperandType.Constant)
+            {
+                return false;
+            }
+
+            index = add.GetSource(0);
+            byteOffset = add.GetSource(1).Value;
+
+            return byteOffset > 0 && (byteOffset & 7) == 0;
         }
 
         private static void TurnIntoArray(ResourceManager resourceManager, TextureOperation texOp, int cbufSlot, int handleIndex, int length)

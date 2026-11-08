@@ -12,3 +12,11 @@ CUTS = {
     (0x32f92d4, 'f303002a', '33008052', 'QualitySettings.set_vSyncCount wrapper: argument mov w19,w0 → mov w19,#1 (the 60 fps path of the game itself)'),
   ],
 }
+
+# How general each patch is and could be (dm/tools/docs_patches.py "Binding", listed in docs/agents/game-patches.md): what, its binding now, the loosest it could have (goal),
+# purpose, why; blocked or kept: why the gap stays open (cannot close yet, or left open on purpose); checked: what was checked on game files (else a judgement)
+BINDING = [
+    {'what': 'Unity QualitySettings.vSyncCount held at 1', 'now': 'build', 'goal': 'engine', 'purpose': 'frame rate',
+     'why': "an IL2CPP player registers the setter by its icall name, so the place can be found in any Unity game; holding it at 1 stays this profile's choice (its logic steps by the "
+            'count)'},
+]

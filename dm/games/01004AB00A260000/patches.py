@@ -12,3 +12,10 @@ CUTS = {
     (0x667904, '08ed46bd', '083548bd', 'frame update step: ldr s8,[x8,#0x6ec] (1/30) → ldr s8,[x8,#0x834] (1/60), passed to main+0x6a337c'),
   ],
 }
+
+# How general each patch is and could be (dm/tools/docs_patches.py "Binding", listed in docs/agents/game-patches.md): what, its binding now, the loosest it could have (goal),
+# purpose, why; blocked or kept: why the gap stays open (cannot close yet, or left open on purpose); checked: what was checked on game files (else a judgement)
+BINDING = [
+    {'what': 'frame limiter 30 → 60 fps and the 1/60 update step', 'now': 'build', 'goal': 'game', 'purpose': 'frame rate',
+     'why': "the game's own limiter constant and fixed step"},
+]

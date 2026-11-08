@@ -1,9 +1,10 @@
-# Configuration of the Python lint and type checks only (.github/workflows/lint-python.yml, dm/tools/lint_python.py); the repository is not a Python package.
+# Configuration of the Python lint and type checks (.github/workflows/lint-python.yml, dm/tools/lint_python.py) and of the tool tests' coverage (the coverage job of
+# .github/workflows/tests.yml); the repository is not a Python package.
 # Scope: scripts/ and the tools under dm/. extraPaths / extra-paths are the folders the tools put on sys.path to import each other.
 
 [tool.pyright]
 include = ["scripts", "dm/tools", "dm/gfx/tools", "dm/games/game.py", "dm/games/profile_guess.py", "dm/games/settings.py", "dm/ios/tools", "dm/mac"]
-extraPaths = ["dm/tools", "dm/gfx/tools", "dm/games", "dm/ios/tools", "dm/mac"]
+extraPaths = ["dm/tools", "dm/gfx/tools", "dm/games", "dm/ios/tools", "dm/mac", "dm/tools/fuzz"]
 typeCheckingMode = "basic"
 pythonVersion = "3.14"
 pythonPlatform = "Darwin"
@@ -17,3 +18,10 @@ include = ["scripts/**/*.py", "dm/tools/**/*.py", "dm/gfx/tools/**/*.py", "dm/ga
 [tool.ruff.lint]
 select = ["F", "E7", "E9", "B", "PLE", "PLW", "PIE", "ISC001", "T10", "RUF006", "RUF008", "RUF009", "RUF013", "RUF016", "RUF017", "RUF018", "RUF024", "RUF026"]
 ignore = ["F403", "F405", "E701", "E702", "E731", "E741", "B007", "B905", "PLW0603", "PLW1510", "PLW2901"]
+
+# coverage.py over the tool tests (docs/development.md, Continuous integration): the tools' folders, not their tests. Subprocesses are measured too (the tests run
+# many tools with sys.executable), each writing its own data file beside .coverage; `coverage combine` joins them. Run from the repository's root.
+[tool.coverage.run]
+source = ["dm/tools", "dm/gfx/tools", "dm/games", "scripts"]
+omit = ["*/tests/*"]
+patch = ["subprocess"]

@@ -42,40 +42,56 @@ HLE_FORCE_BIG("_ZN2nn3aoc16ListAddOnContentEPiii", "add-on content list: the own
 }
 // The event object is created on demand by the nn::os side table (not signaled), the game waiting on it only times out / gets not-signaled
 HLE_FORCE("_ZN2nn3aoc31GetAddOnContentListChangedEventEPNS_2os11SystemEventE", "add-on content change event, out of scope; bound to a kernel event, never signalled (the game polls it with TryWait and aborts if it is uninitialized)", void, h_aoc_GetEv, void *ev) { hle_bind_system_event(ev, 0); }
-HLE_FORCE("_ZN2nn2ec24ShowShopAddOnContentListEv", "shop applet, out of scope; cut: no-op", void, h_ec_ShowShop, void) { LOG("ec::ShowShopAddOnContentList (cut)"); }
+HLE_FORCE("_ZN2nn2ec24ShowShopAddOnContentListEv", "shop applet, out of scope; cut: no-op", void, h_ec_ShowShop, void) { DM_APPLET("shop"); LOG("ec::ShowShopAddOnContentList (cut)"); }
+// Super Kirby Clash waits on the purchased-item notification after account selection. The guest SDK's initializer
+// uses an AOC service session which the offline host does not open. There are no purchases to enqueue: give every
+// watcher the same borrowed, unsignalled SystemEvent for the life of the process, including after reinitialization.
+static _Alignas(16) uint8_t purchase_event[0x80];
+static pthread_once_t purchase_event_once = PTHREAD_ONCE_INIT;
+static void bind_purchase_event(void) { hle_bind_system_event(purchase_event, 0); }
+HLE_FORCE("_ZN2nn2ec24InitializePurchasedEventEv", "offline purchased-item queue is empty", void, h_ec_InitPurchased, void) {}
+HLE_FORCE("_ZN2nn2ec27InitializeAllPurchasedEventEv", "offline purchased-item queue is empty for every application", void, h_ec_InitAllPurchased, void) {}
+HLE_FORCE("_ZN2nn2ec27InitializeAllPurchasedEventERKNS_13ApplicationIdE", "offline purchased-item queue is empty for this application", void, h_ec_InitAppPurchased, const void *app) { (void)app; }
+HLE_FORCE("_ZN2nn2ec22FinalizePurchasedEventEv", "offline purchased-item queue has no service session to close", void, h_ec_FinalizePurchased, void) {}
+HLE_FORCE("_ZN2nn2ec17GetPurchasedEventEv", "borrow the offline queue's unsignalled event", void *, h_ec_GetPurchased, void) {
+    pthread_once(&purchase_event_once, bind_purchase_event);
+    return purchase_event;
+}
+HLE_FORCE("_ZN2nn2ec20PopPurchasedItemInfoEPNS0_17PurchasedItemInfoE", "no offline purchases to pop", unsigned, h_ec_PopPurchased, void *out) { (void)out; return 0; }
+HLE_FORCE("_ZN2nn2ec20PopPurchasedItemInfoEPNS0_27PurchasedItemInfoForPrivateE", "no private offline purchases to pop", unsigned, h_ec_PopPurchasedPrivate, void *out) { (void)out; return 0; }
 // The other shop entry points (Engage's title menu item "DLC" calls ShowShopAddOnContentList(ApplicationId, UserHandle)): the original starts the shop applet through applet::CreateLibraryApplet,
 // the host has no applet proxy (oe initialization is a no-op), and the SDK reads through the null proxy and crashes (sdk+0x38660). All return void: as if the player closed the shop at once, the game goes back to its menu.
-HLE_FORCE("_ZN2nn2ec24ShowShopAddOnContentListENS_13ApplicationIdE", "shop applet, out of scope; cut: no-op", void, h_ec_AocList1, void) { LOG("ec::ShowShopAddOnContentList (cut): the host has no shop"); }
-HLE_FORCE("_ZN2nn2ec24ShowShopAddOnContentListENS_13ApplicationIdERKNS_7account10UserHandleE", "shop applet, out of scope; cut: no-op", void, h_ec_AocList2, void) { LOG("ec::ShowShopAddOnContentList (cut): the host has no shop"); }
-HLE_FORCE("_ZN2nn2ec24ShowShopAddOnContentListERKNS_7account10UserHandleE", "shop applet, out of scope; cut: no-op", void, h_ec_AocList3, void) { LOG("ec::ShowShopAddOnContentList (cut): the host has no shop"); }
-HLE_FORCE("_ZN2nn2ec30ShowShopApplicationInformationENS_13ApplicationIdE", "shop applet, out of scope; cut: no-op", void, h_ec_AppInfo1, void) { LOG("ec::ShowShopApplicationInformation (cut): the host has no shop"); }
-HLE_FORCE("_ZN2nn2ec30ShowShopApplicationInformationENS_13ApplicationIdERKNS_7account10UserHandleE", "shop applet, out of scope; cut: no-op", void, h_ec_AppInfo2, void) { LOG("ec::ShowShopApplicationInformation (cut): the host has no shop"); }
-HLE_FORCE("_ZN2nn2ec24ShowShopSubscriptionListENS_13ApplicationIdE", "shop applet, out of scope; cut: no-op", void, h_ec_Sub1, void) { LOG("ec::ShowShopSubscriptionList (cut): the host has no shop"); }
-HLE_FORCE("_ZN2nn2ec24ShowShopSubscriptionListENS_13ApplicationIdERKNS_7account10UserHandleE", "shop applet, out of scope; cut: no-op", void, h_ec_Sub2, void) { LOG("ec::ShowShopSubscriptionList (cut): the host has no shop"); }
-HLE_FORCE("_ZN2nn2ec24ShowShopSubscriptionListENS_13ApplicationIdERKNS0_8CourseIdE", "shop applet, out of scope; cut: no-op", void, h_ec_Sub3, void) { LOG("ec::ShowShopSubscriptionList (cut): the host has no shop"); }
-HLE_FORCE("_ZN2nn2ec24ShowShopSubscriptionListENS_13ApplicationIdERKNS0_8CourseIdERKNS_7account10UserHandleE", "shop applet, out of scope; cut: no-op", void, h_ec_Sub4, void) { LOG("ec::ShowShopSubscriptionList (cut): the host has no shop"); }
-HLE_FORCE("_ZN2nn2ec26ShowShopConsumableItemListENS_13ApplicationIdE", "shop applet, out of scope; cut: no-op", void, h_ec_ConsList1, void) { LOG("ec::ShowShopConsumableItemList (cut): the host has no shop"); }
-HLE_FORCE("_ZN2nn2ec26ShowShopConsumableItemListENS_13ApplicationIdERKNS_7account10UserHandleE", "shop applet, out of scope; cut: no-op", void, h_ec_ConsList2, void) { LOG("ec::ShowShopConsumableItemList (cut): the host has no shop"); }
-HLE_FORCE("_ZN2nn2ec28ShowShopConsumableItemDetailENS_13ApplicationIdERKNS0_12ConsumableIdENS0_5NsUidE", "shop applet, out of scope; cut: no-op", void, h_ec_ConsDet1, void) { LOG("ec::ShowShopConsumableItemDetail (cut): the host has no shop"); }
-HLE_FORCE("_ZN2nn2ec28ShowShopConsumableItemDetailENS_13ApplicationIdERKNS0_12ConsumableIdENS0_5NsUidERKNS_7account10UserHandleE", "shop applet, out of scope; cut: no-op", void, h_ec_ConsDet2, void) { LOG("ec::ShowShopConsumableItemDetail (cut): the host has no shop"); }
-HLE_FORCE("_ZN2nn2ec22ShowShopEnterCodeSceneEv", "shop applet, out of scope; cut: no-op", void, h_ec_Code1, void) { LOG("ec::ShowShopEnterCodeScene (cut): the host has no shop"); }
-HLE_FORCE("_ZN2nn2ec22ShowShopEnterCodeSceneERKNS_7account10UserHandleE", "shop applet, out of scope; cut: no-op", void, h_ec_Code2, void) { LOG("ec::ShowShopEnterCodeScene (cut): the host has no shop"); }
-HLE_FORCE("_ZN2nn2ec22ShowShopProductDetailsENS0_5NsUidE", "shop applet, out of scope; cut: no-op", void, h_ec_Prod1, void) { LOG("ec::ShowShopProductDetails (cut): the host has no shop"); }
-HLE_FORCE("_ZN2nn2ec22ShowShopProductDetailsENS0_5NsUidERKNS_7account10UserHandleE", "shop applet, out of scope; cut: no-op", void, h_ec_Prod2, void) { LOG("ec::ShowShopProductDetails (cut): the host has no shop"); }
-HLE_FORCE("_ZN2nn2ec19ShowShopProductListEPKNS0_5NsUidEiPKc", "shop applet, out of scope; cut: no-op", void, h_ec_ProdList1, void) { LOG("ec::ShowShopProductList (cut): the host has no shop"); }
-HLE_FORCE("_ZN2nn2ec19ShowShopProductListEPKNS0_5NsUidEiPKcRKNS_7account10UserHandleE", "shop applet, out of scope; cut: no-op", void, h_ec_ProdList2, void) { LOG("ec::ShowShopProductList (cut): the host has no shop"); }
+HLE_FORCE("_ZN2nn2ec24ShowShopAddOnContentListENS_13ApplicationIdE", "shop applet, out of scope; cut: no-op", void, h_ec_AocList1, void) { DM_APPLET("shop"); LOG("ec::ShowShopAddOnContentList (cut): the host has no shop"); }
+HLE_FORCE("_ZN2nn2ec24ShowShopAddOnContentListENS_13ApplicationIdERKNS_7account10UserHandleE", "shop applet, out of scope; cut: no-op", void, h_ec_AocList2, void) { DM_APPLET("shop"); LOG("ec::ShowShopAddOnContentList (cut): the host has no shop"); }
+HLE_FORCE("_ZN2nn2ec24ShowShopAddOnContentListERKNS_7account10UserHandleE", "shop applet, out of scope; cut: no-op", void, h_ec_AocList3, void) { DM_APPLET("shop"); LOG("ec::ShowShopAddOnContentList (cut): the host has no shop"); }
+HLE_FORCE("_ZN2nn2ec30ShowShopApplicationInformationENS_13ApplicationIdE", "shop applet, out of scope; cut: no-op", void, h_ec_AppInfo1, void) { DM_APPLET("shop"); LOG("ec::ShowShopApplicationInformation (cut): the host has no shop"); }
+HLE_FORCE("_ZN2nn2ec30ShowShopApplicationInformationENS_13ApplicationIdERKNS_7account10UserHandleE", "shop applet, out of scope; cut: no-op", void, h_ec_AppInfo2, void) { DM_APPLET("shop"); LOG("ec::ShowShopApplicationInformation (cut): the host has no shop"); }
+HLE_FORCE("_ZN2nn2ec24ShowShopSubscriptionListENS_13ApplicationIdE", "shop applet, out of scope; cut: no-op", void, h_ec_Sub1, void) { DM_APPLET("shop"); LOG("ec::ShowShopSubscriptionList (cut): the host has no shop"); }
+HLE_FORCE("_ZN2nn2ec24ShowShopSubscriptionListENS_13ApplicationIdERKNS_7account10UserHandleE", "shop applet, out of scope; cut: no-op", void, h_ec_Sub2, void) { DM_APPLET("shop"); LOG("ec::ShowShopSubscriptionList (cut): the host has no shop"); }
+HLE_FORCE("_ZN2nn2ec24ShowShopSubscriptionListENS_13ApplicationIdERKNS0_8CourseIdE", "shop applet, out of scope; cut: no-op", void, h_ec_Sub3, void) { DM_APPLET("shop"); LOG("ec::ShowShopSubscriptionList (cut): the host has no shop"); }
+HLE_FORCE("_ZN2nn2ec24ShowShopSubscriptionListENS_13ApplicationIdERKNS0_8CourseIdERKNS_7account10UserHandleE", "shop applet, out of scope; cut: no-op", void, h_ec_Sub4, void) { DM_APPLET("shop"); LOG("ec::ShowShopSubscriptionList (cut): the host has no shop"); }
+HLE_FORCE("_ZN2nn2ec26ShowShopConsumableItemListENS_13ApplicationIdE", "shop applet, out of scope; cut: no-op", void, h_ec_ConsList1, void) { DM_APPLET("shop"); LOG("ec::ShowShopConsumableItemList (cut): the host has no shop"); }
+HLE_FORCE("_ZN2nn2ec26ShowShopConsumableItemListENS_13ApplicationIdERKNS_7account10UserHandleE", "shop applet, out of scope; cut: no-op", void, h_ec_ConsList2, void) { DM_APPLET("shop"); LOG("ec::ShowShopConsumableItemList (cut): the host has no shop"); }
+HLE_FORCE("_ZN2nn2ec28ShowShopConsumableItemDetailENS_13ApplicationIdERKNS0_12ConsumableIdENS0_5NsUidE", "shop applet, out of scope; cut: no-op", void, h_ec_ConsDet1, void) { DM_APPLET("shop"); LOG("ec::ShowShopConsumableItemDetail (cut): the host has no shop"); }
+HLE_FORCE("_ZN2nn2ec28ShowShopConsumableItemDetailENS_13ApplicationIdERKNS0_12ConsumableIdENS0_5NsUidERKNS_7account10UserHandleE", "shop applet, out of scope; cut: no-op", void, h_ec_ConsDet2, void) { DM_APPLET("shop"); LOG("ec::ShowShopConsumableItemDetail (cut): the host has no shop"); }
+HLE_FORCE("_ZN2nn2ec22ShowShopEnterCodeSceneEv", "shop applet, out of scope; cut: no-op", void, h_ec_Code1, void) { DM_APPLET("shop"); LOG("ec::ShowShopEnterCodeScene (cut): the host has no shop"); }
+HLE_FORCE("_ZN2nn2ec22ShowShopEnterCodeSceneERKNS_7account10UserHandleE", "shop applet, out of scope; cut: no-op", void, h_ec_Code2, void) { DM_APPLET("shop"); LOG("ec::ShowShopEnterCodeScene (cut): the host has no shop"); }
+HLE_FORCE("_ZN2nn2ec22ShowShopProductDetailsENS0_5NsUidE", "shop applet, out of scope; cut: no-op", void, h_ec_Prod1, void) { DM_APPLET("shop"); LOG("ec::ShowShopProductDetails (cut): the host has no shop"); }
+HLE_FORCE("_ZN2nn2ec22ShowShopProductDetailsENS0_5NsUidERKNS_7account10UserHandleE", "shop applet, out of scope; cut: no-op", void, h_ec_Prod2, void) { DM_APPLET("shop"); LOG("ec::ShowShopProductDetails (cut): the host has no shop"); }
+HLE_FORCE("_ZN2nn2ec19ShowShopProductListEPKNS0_5NsUidEiPKc", "shop applet, out of scope; cut: no-op", void, h_ec_ProdList1, void) { DM_APPLET("shop"); LOG("ec::ShowShopProductList (cut): the host has no shop"); }
+HLE_FORCE("_ZN2nn2ec19ShowShopProductListEPKNS0_5NsUidEiPKcRKNS_7account10UserHandleE", "shop applet, out of scope; cut: no-op", void, h_ec_ProdList2, void) { DM_APPLET("shop"); LOG("ec::ShowShopProductList (cut): the host has no shop"); }
 // The overloads without an ApplicationId (the calling application's own pages; The Great Ace Attorney Chronicles, SDK 10, imports these beside the ones above)
-HLE_FORCE("_ZN2nn2ec30ShowShopApplicationInformationEv", "shop applet, out of scope; cut: no-op", void, h_ec_AppInfo3, void) { LOG("ec::ShowShopApplicationInformation (cut): the host has no shop"); }
-HLE_FORCE("_ZN2nn2ec30ShowShopApplicationInformationERKNS_7account10UserHandleE", "shop applet, out of scope; cut: no-op", void, h_ec_AppInfo4, void) { LOG("ec::ShowShopApplicationInformation (cut): the host has no shop"); }
-HLE_FORCE("_ZN2nn2ec24ShowShopSubscriptionListEv", "shop applet, out of scope; cut: no-op", void, h_ec_Sub5, void) { LOG("ec::ShowShopSubscriptionList (cut): the host has no shop"); }
-HLE_FORCE("_ZN2nn2ec24ShowShopSubscriptionListERKNS_7account10UserHandleE", "shop applet, out of scope; cut: no-op", void, h_ec_Sub6, void) { LOG("ec::ShowShopSubscriptionList (cut): the host has no shop"); }
-HLE_FORCE("_ZN2nn2ec24ShowShopSubscriptionListERKNS0_8CourseIdE", "shop applet, out of scope; cut: no-op", void, h_ec_Sub7, void) { LOG("ec::ShowShopSubscriptionList (cut): the host has no shop"); }
-HLE_FORCE("_ZN2nn2ec24ShowShopSubscriptionListERKNS0_8CourseIdERKNS_7account10UserHandleE", "shop applet, out of scope; cut: no-op", void, h_ec_Sub8, void) { LOG("ec::ShowShopSubscriptionList (cut): the host has no shop"); }
-HLE_FORCE("_ZN2nn2ec26ShowShopConsumableItemListEv", "shop applet, out of scope; cut: no-op", void, h_ec_ConsList3, void) { LOG("ec::ShowShopConsumableItemList (cut): the host has no shop"); }
-HLE_FORCE("_ZN2nn2ec26ShowShopConsumableItemListERKNS_7account10UserHandleE", "shop applet, out of scope; cut: no-op", void, h_ec_ConsList4, void) { LOG("ec::ShowShopConsumableItemList (cut): the host has no shop"); }
-HLE_FORCE("_ZN2nn2ec28ShowShopConsumableItemDetailERKNS0_12ConsumableIdENS0_5NsUidE", "shop applet, out of scope; cut: no-op", void, h_ec_ConsDet3, void) { LOG("ec::ShowShopConsumableItemDetail (cut): the host has no shop"); }
-HLE_FORCE("_ZN2nn2ec28ShowShopConsumableItemDetailERKNS0_12ConsumableIdENS0_5NsUidERKNS_7account10UserHandleE", "shop applet, out of scope; cut: no-op", void, h_ec_ConsDet4, void) { LOG("ec::ShowShopConsumableItemDetail (cut): the host has no shop"); }
-HLE_FORCE("_ZN2nn2ec27ShowShopSubscriptionDetailsERKNS0_8CourseIdENS0_5NsUidERKNS_7account10UserHandleE", "shop applet, out of scope; cut: no-op", void, h_ec_SubDet, void) { LOG("ec::ShowShopSubscriptionDetails (cut): the host has no shop"); }
+HLE_FORCE("_ZN2nn2ec30ShowShopApplicationInformationEv", "shop applet, out of scope; cut: no-op", void, h_ec_AppInfo3, void) { DM_APPLET("shop"); LOG("ec::ShowShopApplicationInformation (cut): the host has no shop"); }
+HLE_FORCE("_ZN2nn2ec30ShowShopApplicationInformationERKNS_7account10UserHandleE", "shop applet, out of scope; cut: no-op", void, h_ec_AppInfo4, void) { DM_APPLET("shop"); LOG("ec::ShowShopApplicationInformation (cut): the host has no shop"); }
+HLE_FORCE("_ZN2nn2ec24ShowShopSubscriptionListEv", "shop applet, out of scope; cut: no-op", void, h_ec_Sub5, void) { DM_APPLET("shop"); LOG("ec::ShowShopSubscriptionList (cut): the host has no shop"); }
+HLE_FORCE("_ZN2nn2ec24ShowShopSubscriptionListERKNS_7account10UserHandleE", "shop applet, out of scope; cut: no-op", void, h_ec_Sub6, void) { DM_APPLET("shop"); LOG("ec::ShowShopSubscriptionList (cut): the host has no shop"); }
+HLE_FORCE("_ZN2nn2ec24ShowShopSubscriptionListERKNS0_8CourseIdE", "shop applet, out of scope; cut: no-op", void, h_ec_Sub7, void) { DM_APPLET("shop"); LOG("ec::ShowShopSubscriptionList (cut): the host has no shop"); }
+HLE_FORCE("_ZN2nn2ec24ShowShopSubscriptionListERKNS0_8CourseIdERKNS_7account10UserHandleE", "shop applet, out of scope; cut: no-op", void, h_ec_Sub8, void) { DM_APPLET("shop"); LOG("ec::ShowShopSubscriptionList (cut): the host has no shop"); }
+HLE_FORCE("_ZN2nn2ec26ShowShopConsumableItemListEv", "shop applet, out of scope; cut: no-op", void, h_ec_ConsList3, void) { DM_APPLET("shop"); LOG("ec::ShowShopConsumableItemList (cut): the host has no shop"); }
+HLE_FORCE("_ZN2nn2ec26ShowShopConsumableItemListERKNS_7account10UserHandleE", "shop applet, out of scope; cut: no-op", void, h_ec_ConsList4, void) { DM_APPLET("shop"); LOG("ec::ShowShopConsumableItemList (cut): the host has no shop"); }
+HLE_FORCE("_ZN2nn2ec28ShowShopConsumableItemDetailERKNS0_12ConsumableIdENS0_5NsUidE", "shop applet, out of scope; cut: no-op", void, h_ec_ConsDet3, void) { DM_APPLET("shop"); LOG("ec::ShowShopConsumableItemDetail (cut): the host has no shop"); }
+HLE_FORCE("_ZN2nn2ec28ShowShopConsumableItemDetailERKNS0_12ConsumableIdENS0_5NsUidERKNS_7account10UserHandleE", "shop applet, out of scope; cut: no-op", void, h_ec_ConsDet4, void) { DM_APPLET("shop"); LOG("ec::ShowShopConsumableItemDetail (cut): the host has no shop"); }
+HLE_FORCE("_ZN2nn2ec27ShowShopSubscriptionDetailsERKNS0_8CourseIdENS0_5NsUidERKNS_7account10UserHandleE", "shop applet, out of scope; cut: no-op", void, h_ec_SubDet, void) { DM_APPLET("shop"); LOG("ec::ShowShopSubscriptionDetails (cut): the host has no shop"); }
 // The shop service accessor (Unreal's online subsystem, DRAGON QUEST XI S: FOnlineSubsystemSwitch::Init calls InitializeForShopServiceAccessors, whose SDK version connects to the ec service:
 // an abort in sm::Initialize at the start of nnMain). The library init succeeds with nothing to set up; an accessor never initializes, so no request is ever sent. The accessor and its async
 // response are stubbed whole: the SDK's destructor calls Finalize and aborts unless it succeeds. A response is complete at once and holds nothing
@@ -97,10 +113,10 @@ HLE_FORCE("_ZN2nn2ec31FinalizeForShopServiceAccessorsEv", "shop service accessor
 HLE_FORCE("_ZN2nn2ec19ShopServiceAccessor13AsyncResponse6CancelEv", "shop async response: nothing to cancel (cut)", void, h_ec_ArCancel, void *self) { (void)self; }
 HLE_FORCE("_ZNK2nn2ec19ShopServiceAccessor13AsyncResponse12GetErrorCodeEv", "shop async response: no error code (cut)", uint64_t, h_ec_ArErr, const void *self) { (void)self; return 0; }
 // The "add-on content lost" error screen is an applet too: logged only
-HLE_FORCE("_ZN2nn3aoc25ShowAddOnContentLostErrorEPKii", "add-on content lost error applet; the host only logs it", void, h_aoc_LostErr, const int *idx, int n) { (void)idx; LOG("aoc::ShowAddOnContentLostError (%d entries) (cut)", n); }
+HLE_FORCE("_ZN2nn3aoc25ShowAddOnContentLostErrorEPKii", "add-on content lost error applet; the host only logs it", void, h_aoc_LostErr, const int *idx, int n) { DM_APPLET("error"); (void)idx; LOG("aoc::ShowAddOnContentLostError (%d entries) (cut)", n); }
 
 // ---------- err error applet: printed by the host ----------
-HLE_FORCE("_ZN2nn3err9ShowErrorENS_6ResultE", "error display applet; the host prints the module / description number", void, h_err_ShowError, Result r) {
+HLE_FORCE("_ZN2nn3err9ShowErrorENS_6ResultE", "error display applet; the host prints the module / description number", void, h_err_ShowError, Result r) { DM_APPLET("error");
     LOG("err::ShowError Result=%#x (module %u, description %u)", r, r & 0x1ff, (r >> 9) & 0x1fff);
 }
 
@@ -171,7 +187,136 @@ HLE_FORCE("_ZN2nn4pctl53RequestStereoVisionRestrictionConfigurationPermissionEv"
 HLE_FORCE("_ZN2nn4pctl20EndFreeCommunicationEv", "parental controls · communication with others", void, h_pctl_End, void) {}
 // Engage asks on entering a battle map (no UI); without this the SDK connects to the pctl service through sm, which the host does not have, and aborts
 HLE_FORCE("_ZN2nn4pctl28IsFreeCommunicationAvailableEv", "parental controls · whether communication with others is available, networking out of scope; never", unsigned, h_pctl_IsFree, void) { return 0; }
-// The Legend of Zelda: Breath of the Wild: checks the parental-control permission for stereoscopic 3D before VR-related screens (returns bool; the argument = whether to show UI, the game passes 0). The host has no parental controls: permitted
-HLE_FORCE("_ZN2nn4pctl27CheckStereoVisionPermissionEb", "parental controls · stereoscopic 3D permission; the host has no parental controls, allowed", unsigned, h_pctl_Stereo, unsigned show_ui) { (void)show_ui; return 1; }
+// The Legend of Zelda: Breath of the Wild: checks the parental-control permission for stereoscopic 3D before turning on the options' Labo VR mode (returns bool; the argument = whether to
+// show UI, the game passes 0). The host has no VR display (pl::BeginVrMode refuses, hle_sdk16.c): not permitted, so the game clears its VR flag and stays 2D (as MacNativeGames found on 1.6.0 and 1.9.0)
+HLE_FORCE("_ZN2nn4pctl33CheckAgcPermissionUnderMinimumAgeERKNS_7account3UidE", "parental controls · a user's permission under the minimum age (SDK 22), networking out of scope; never", unsigned, h_pctl_CheckAgc, const void *uid) { (void)uid; return 0; }
+HLE_FORCE("_ZN2nn4pctl27CheckStereoVisionPermissionEb", "parental controls · stereoscopic 3D permission; the host has no VR display, not permitted", unsigned, h_pctl_Stereo, unsigned show_ui) { (void)show_ui; return 0; }
 
 // swkbd software keyboard: see hle_swkbd.c
+
+// ---------- streamplay: GameShare / GameChat streaming (Switch 2 SDKs) ----------
+// Donkey Kong Bananza initializes it at boot (main+0x5471c0) through the stpl:u service, which the host does not serve. The host streams to nobody: the library is ready, no session is open
+// and no guest is connected, so every guest pad, sensor, vibration and mouse query has nothing to report. Opening a session (OpenSessionWithMatchmakeSupport, StartStreaming) is a player
+// action and stays unhooked: it would reach the service, open
+HLE_FORCE("_ZN2nn10streamplay21GetRequiredMemorySizeENS0_14StreamPlayTypeENS0_13StreamingModeEi", "streamplay work memory (stpl:u): one page, the host keeps no state in it",
+          uint32_t, h_stpl_MemSize, int type, int mode, int n) { (void)type; (void)mode; (void)n; return 0x1000; }
+HLE_FORCE("_ZN2nn10streamplay10InitializeENS0_14StreamPlayTypeENS0_13StreamingModeEPvm", "streamplay (stpl:u): ready, no session", Result, h_stpl_Init, int type, int mode, void *work, size_t size) {
+    (void)type; (void)mode; (void)work; (void)size; return RES_OK; }
+HLE_FORCE("_ZN2nn10streamplay8FinalizeEv", "streamplay (stpl:u): nothing to release", void, h_stpl_Fini, void) {}
+// Guest displays are per guest: CreateIndividualDisplays only starts vi2 and the guest device resources for them. Pokemon Pokopia creates one at boot (main+0x11321b8), before any session, and
+// keeps the window handle for the session it may open (main+0x1133660); with no guest there is no display, and the handle stays unused
+HLE_FORCE("_ZN2nn10streamplay24CreateIndividualDisplaysEi", "guest displays: none (no guest)", void, h_stpl_CreateDisplays, int n) { (void)n; }
+HLE_FORCE("_ZN2nn10streamplay25DestroyIndividualDisplaysEv", "guest displays: none (no guest)", void, h_stpl_DestroyDisplays, void) {}
+HLE_FORCE("_ZN2nn10streamplay21GetNativeWindowHandleENS0_7GuestIdE", "guest window: none (no guest)", void *, h_stpl_NativeWindow, int guest) { (void)guest; return NULL; }
+// The connection state change event: a host-owned SystemEvent, bound on first use and never signaled (the state never changes)
+static uint8_t g_stpl_ev[0x80] __attribute__((aligned(16)));
+HLE_FORCE("_ZN2nn10streamplay30GetConnectionStateChangedEventEv", "streamplay connection state event: bound, never signaled", void *, h_stpl_ConnEv, void) {
+    hle_bind_system_event(g_stpl_ev, 0); return g_stpl_ev; }
+HLE_FORCE("_ZN2nn10streamplay18GetConnectionStateEPNS0_15ConnectionStateE", "streamplay connection state: not connected (0)", void, h_stpl_ConnState, uint32_t *s) { *s = 0; }
+static _Atomic uint32_t g_stpl_styles, g_stpl_hold;
+HLE_FORCE("_ZN2nn10streamplay29SetSupportedGuestNpadStyleSetENS_4util10BitFlagSetILi32ENS_3hid12NpadStyleTagEEE", "guest pad styles: kept for the getter", void, h_stpl_SetStyles, uint32_t s) { g_stpl_styles = s; }
+HLE_FORCE("_ZN2nn10streamplay29GetSupportedGuestNpadStyleSetEv", "guest pad styles: what the game set", uint32_t, h_stpl_GetStyles, void) { return g_stpl_styles; }
+HLE_FORCE("_ZN2nn10streamplay23SetGuestNpadJoyHoldTypeENS_3hid15NpadJoyHoldTypeE", "guest Joy-Con hold type: kept for the getter", void, h_stpl_SetHold, uint32_t t) { g_stpl_hold = t; }
+HLE_FORCE("_ZN2nn10streamplay23GetGuestNpadJoyHoldTypeEv", "guest Joy-Con hold type: what the game set", uint32_t, h_stpl_GetHold, void) { return g_stpl_hold; }
+HLE_FORCE("_ZN2nn10streamplay25SetSupportedHidFeatureSetENS_4util10BitFlagSetILi32ENS0_13HidFeatureTagEEE", "guest hid features: no guest", void, h_stpl_HidFeat, uint32_t s) { (void)s; }
+HLE_FORCE("_ZN2nn10streamplay19GetGuestPadStyleSetERKNS0_10GuestPadIdE", "guest pad style: none (no guest)", uint32_t, h_stpl_PadStyle, const void *id) { (void)id; return 0; }
+#define STPL_PAD(mangled, cname) HLE_FORCE(mangled, "guest pad states: none (no guest)", int, cname, void *out, int n, const void *id) { (void)out; (void)n; (void)id; return 0; }
+STPL_PAD("_ZN2nn10streamplay17GetGuestPadStatesEPNS0_13GuestPadStateINS_3hid16NpadFullKeyStateEEEiRKNS0_10GuestPadIdE", h_stpl_PadFull)
+STPL_PAD("_ZN2nn10streamplay17GetGuestPadStatesEPNS0_13GuestPadStateINS_3hid17NpadHandheldStateEEEiRKNS0_10GuestPadIdE", h_stpl_PadHandheld)
+STPL_PAD("_ZN2nn10streamplay17GetGuestPadStatesEPNS0_13GuestPadStateINS_3hid16NpadJoyDualStateEEEiRKNS0_10GuestPadIdE", h_stpl_PadDual)
+STPL_PAD("_ZN2nn10streamplay17GetGuestPadStatesEPNS0_13GuestPadStateINS_3hid17NpadJoyRightStateEEEiRKNS0_10GuestPadIdE", h_stpl_PadRight)
+STPL_PAD("_ZN2nn10streamplay17GetGuestPadStatesEPNS0_13GuestPadStateINS_3hid16NpadJoyLeftStateEEEiRKNS0_10GuestPadIdE", h_stpl_PadLeft)
+HLE_FORCE("_ZN2nn10streamplay28GetGuestSixAxisSensorHandlesEPNS0_24GuestSixAxisSensorHandleEiRKNS0_10GuestPadIdENS_4util10BitFlagSetILi32ENS_3hid12NpadStyleTagEEE", "guest six-axis sensors: none (no guest)",
+          int, h_stpl_SixHandles, void *h, int n, const void *id, uint32_t style) { (void)h; (void)n; (void)id; (void)style; return 0; }
+HLE_FORCE("_ZN2nn10streamplay27GetGuestSixAxisSensorStatesEPNS0_23GuestSixAxisSensorStateEiRKNS0_24GuestSixAxisSensorHandleE", "guest six-axis states: none (no guest)",
+          int, h_stpl_SixStates, void *out, int n, const void *h) { (void)out; (void)n; (void)h; return 0; }
+HLE_FORCE("_ZN2nn10streamplay30GetGuestVibrationDeviceHandlesEPNS0_26GuestVibrationDeviceHandleEiRKNS0_10GuestPadIdENS_4util10BitFlagSetILi32ENS_3hid12NpadStyleTagEEE", "guest vibration devices: none (no guest)",
+          int, h_stpl_VibHandles, void *h, int n, const void *id, uint32_t style) { (void)h; (void)n; (void)id; (void)style; return 0; }
+HLE_FORCE("_ZN2nn10streamplay27GetGuestVibrationDeviceInfoEPNS_3hid19VibrationDeviceInfoERKNS0_26GuestVibrationDeviceHandleE", "guest vibration device info: none (no guest)",
+          void, h_stpl_VibInfo, uint64_t *info, const void *h) { (void)h; *info = 0; }
+HLE_FORCE("_ZN2nn10streamplay18GetGuestJcmsHandleERKNS0_10GuestPadIdERKNS_3hid8JcmsTypeE", "guest Joy-Con mouse handle: none (no guest)", uint32_t, h_stpl_JcmsHandle, const void *id, const void *type) { (void)id; (void)type; return 0; }
+HLE_FORCE("_ZN2nn10streamplay18GetGuestJcmsStatesEPNS0_14GuestJcmsStateEiRKNS0_15GuestJcmsHandleE", "guest Joy-Con mouse states: none (no guest)",
+          int, h_stpl_JcmsStates, void *out, int n, const void *h) { (void)out; (void)n; (void)h; return 0; }
+
+// ---------- chat: GameChat (Switch 2 SDKs) ----------
+// Hyrule Warriors: Age of Imprisonment initializes it at boot (main+0x14480b8); the SDK's Initialize connects to the chat:u service, which the host does not serve, and aborts (Result 0xe15).
+// The host has no GameChat: the library is ready and no chat is running, so the game's screen sharing has nobody to share with. The SDK's other calls go through the service object that
+// Initialize would have made, so each one a game imports needs a hook here
+HLE_FORCE("_ZN2nn4chat10InitializeEv", "GameChat (chat:u): ready, no chat", void, h_chat_Init, void) {}
+HLE_FORCE("_ZN2nn4chat10IsChattingEv", "GameChat: not chatting", unsigned, h_chat_IsChatting, void) { return 0; }
+HLE_FORCE("_ZN2nn4chat20SetScreenSharingModeENS0_17ScreenSharingModeE", "GameChat screen sharing mode: no chat to share with", void, h_chat_ShareMode, int mode) { (void)mode; }
+HLE_FORCE("_ZN2nn4chat28AttachToRoomInfoChangedEventEPNS_2os11SystemEventE", "GameChat room info event: bound, never signaled (no chat room)", Result, h_chat_RoomEvent, void *ev) {
+    hle_bind_system_event(ev, 0); return RES_OK;
+}
+// Camera video storage: the pictures of the player's own camera (local) and of the other members' cameras (remote), each a set of native images the game makes NVN textures on (Mario Kart
+// World 1.8.0 makes three local images of 384x216 at boot, by pull request #1116). SDK 22.2.0 (sdk+0x6b43c0) checks a width of 32 to 1920, a height of 32 to 1080, 1 to 4 images and a
+// page-aligned buffer and size, zeroes the 0xe0-byte storage type, and fills it from the chat service. The host has no camera: each image is a blank native image of the size
+// (hle_codec_video.c), whose handles the storage type keeps; the game's buffer is not used, so it needs only a page
+uint32_t dm_native_image_blank(uint32_t w, uint32_t h);
+void dm_native_image_blank_free(uint32_t handle);
+typedef struct { uint32_t magic, count, image[4]; } chat_video_t;
+_Static_assert(sizeof(chat_video_t) <= 0xe0, "nn::chat::LocalCameraVideoType / RemoteCameraVideoType");
+#define CHAT_VIDEO_MAGIC 0x6d436d44u   // "DmCm"
+static void chat_video_init(void *type, int w, int h, int n) {
+    chat_video_t *v = type; memset(type, 0, 0xe0);
+    if (w < 32 || w > 1920 || h < 32 || h > 1080 || n < 1 || n > 4) { LOG("[RED] chat: camera video storage %dx%d x%d is out of the SDK's range", w, h, n); return; }
+    v->magic = CHAT_VIDEO_MAGIC; v->count = (uint32_t)n;
+    for (int i = 0; i < n; i++) v->image[i] = dm_native_image_blank((uint32_t)w, (uint32_t)h);
+}
+static void chat_video_fini(void *type) {
+    chat_video_t *v = type;
+    if (v->magic == CHAT_VIDEO_MAGIC) for (uint32_t i = 0; i < v->count; i++) dm_native_image_blank_free(v->image[i]);
+    memset(type, 0, 0xe0);
+}
+static uint32_t chat_video_image(const void *type, int i) {
+    const chat_video_t *v = type;
+    return v->magic == CHAT_VIDEO_MAGIC && i >= 0 && (uint32_t)i < v->count ? v->image[i] : 0;
+}
+HLE_FORCE("_ZN2nn4chat35CalculateLocalCameraVideoBufferSizeEiii", "GameChat local camera storage: a page (the host keeps the images)", size_t, h_chat_LocalSize, int w, int h, int n) {
+    (void)w; (void)h; (void)n; return 0x1000; }
+HLE_FORCE("_ZN2nn4chat36CalculateRemoteCameraVideoBufferSizeEiii", "GameChat remote camera storage: a page (the host keeps the images)", size_t, h_chat_RemoteSize, int w, int h, int n) {
+    (void)w; (void)h; (void)n; return 0x1000; }
+HLE_FORCE("_ZN2nn4chat33InitializeLocalCameraVideoStorageEPNS0_20LocalCameraVideoTypeEiiiPvm", "GameChat local camera storage: blank native images (no camera)", void, h_chat_LocalInit,
+          void *type, int w, int h, int n, void *buf, size_t size) { (void)buf; (void)size; chat_video_init(type, w, h, n); }
+HLE_FORCE("_ZN2nn4chat34InitializeRemoteCameraVideoStorageEPNS0_21RemoteCameraVideoTypeEiiiPvm", "GameChat remote camera storage: blank native images (no chat members)", void, h_chat_RemoteInit,
+          void *type, int w, int h, int n, void *buf, size_t size) { (void)buf; (void)size; chat_video_init(type, w, h, n); }
+HLE_FORCE("_ZN2nn4chat31FinalizeLocalCameraVideoStorageEPNS0_20LocalCameraVideoTypeE", "GameChat local camera storage: its images released", void, h_chat_LocalFini, void *type) { chat_video_fini(type); }
+HLE_FORCE("_ZN2nn4chat32FinalizeRemoteCameraVideoStorageEPNS0_21RemoteCameraVideoTypeE", "GameChat remote camera storage: its images released", void, h_chat_RemoteFini, void *type) { chat_video_fini(type); }
+HLE_FORCE("_ZN2nn4chat25GetLocalCameraImageHandleEPKNS0_20LocalCameraVideoTypeEi", "GameChat local camera image: its blank native image", uint32_t, h_chat_LocalImage, const void *type, int i) {
+    return chat_video_image(type, i); }
+HLE_FORCE("_ZN2nn4chat26GetRemoteCameraImageHandleEPKNS0_21RemoteCameraVideoTypeEi", "GameChat remote camera image: its blank native image", uint32_t, h_chat_RemoteImage, const void *type, int i) {
+    return chat_video_image(type, i); }
+// Star Fox (SDK 21.4.4) asks after the chat from its title screen on: who is chatting, the room, the sharing key, the virtual camera (what the game shows the other members instead of its
+// screen), the members' audio levels, the camera streams and the full-screen sections. The SDK's versions go through the service object Initialize would have made: GetChattingUid read a null
+// (sdk+0x6be4d4, from main+0xb57a9d0). No chat here: nobody is chatting (a zero Uid), there is no room (GetRoomInfo fails), the camera and sharing calls succeed and do nothing
+typedef struct { uint64_t a, b; } chat_uid_t;   // nn::account::Uid, returned in two registers
+HLE_FORCE("_ZN2nn4chat14GetChattingUidEv", "GameChat: the chatting user; nobody (a zero Uid)", chat_uid_t, h_chat_ChattingUid, void) { return (chat_uid_t){0, 0}; }
+HLE_FORCE("_ZN2nn4chat11GetRoomInfoEPNS0_8RoomInfoE", "GameChat room: none (fails, the structure is left as it was)", Result, h_chat_RoomInfo, void *info) {
+    (void)info; static int once; if (!once++) LOG("chat: GetRoomInfo with no chat room: fails"); return RES_FAIL;   // the chat library's real result is not known; the game reads any failure as "not in a room"
+}
+HLE_FORCE("_ZN2nn4chat13SetSharingKeyERKNS0_10SharingKeyE", "GameChat sharing key: kept nowhere (no chat)", Result, h_chat_SetKey, const void *key) { (void)key; return RES_OK; }
+HLE_FORCE("_ZN2nn4chat15ClearSharingKeyEv", "GameChat sharing key cleared (no chat)", void, h_chat_ClearKey, void) {}
+HLE_FORCE("_ZN2nn4chat13ShowChatStartERKNS_7account3UidE", "GameChat start applet: not shown (no chat)", Result, h_chat_ShowStart, const void *uid) { (void)uid; return RES_OK; }
+HLE_FORCE("_ZN2nn4chat22ShowCameraSharingGuideEv", "GameChat camera sharing guide: not shown", Result, h_chat_ShowGuide, void) { return RES_OK; }
+HLE_FORCE("_ZN2nn4chat28ShowLocalCameraConfigurationENS0_25CameraImageProcessingModeE", "GameChat camera configuration applet: not shown", Result, h_chat_ShowCamCfg, int mode) { (void)mode; return RES_OK; }
+HLE_FORCE("_ZN2nn4chat44GetCameraImageProcessingModeForVirtualCameraEv", "GameChat camera image processing mode: the default", int, h_chat_CamMode, void) { return 0; }
+HLE_FORCE("_ZN2nn4chat22GetRealtimeAudioLevelsEPNS0_10AudioLevelEiPKNS_7account23NetworkServiceAccountIdEi", "GameChat members' audio levels: no members, none written", int, h_chat_AudioLevels,
+          void *levels, int n, const void *ids, int nids) { (void)levels; (void)n; (void)ids; (void)nids; return 0; }
+HLE_FORCE("_ZN2nn4chat23InitializeVirtualCameraEPNS0_17VirtualCameraTypeE", "GameChat virtual camera: nothing to show it to", Result, h_chat_VcamInit, void *cam) { (void)cam; return RES_OK; }
+HLE_FORCE("_ZN2nn4chat21FinalizeVirtualCameraEPNS0_17VirtualCameraTypeE", "GameChat virtual camera finalized", void, h_chat_VcamFini, void *cam) { (void)cam; }
+HLE_FORCE("_ZN2nn4chat19EnableVirtualCameraEPNS0_17VirtualCameraTypeE", "GameChat virtual camera enabled: nothing to show it to", Result, h_chat_VcamOn, void *cam) { (void)cam; return RES_OK; }
+HLE_FORCE("_ZN2nn4chat20DisableVirtualCameraEPNS0_17VirtualCameraTypeE", "GameChat virtual camera disabled", Result, h_chat_VcamOff, void *cam) { (void)cam; return RES_OK; }
+HLE_FORCE("_ZN2nn4chat43SetVirtualCameraContainPhotographedContentsEPNS0_17VirtualCameraTypeEb", "GameChat virtual camera flag: kept nowhere", void, h_chat_VcamPhoto, void *cam, unsigned on) { (void)cam; (void)on; }
+HLE_FORCE("_ZN2nn4chat34GetVirtualCameraNativeWindowHandleEPKNS0_17VirtualCameraTypeE", "GameChat virtual camera window: none", uint64_t, h_chat_VcamWindow, const void *cam) {
+    (void)cam; static int once; if (!once++) LOG("chat: GetVirtualCameraNativeWindowHandle: no window (0)"); return 0;
+}
+HLE_FORCE("_ZN2nn4chat25StartLocalCameraStreamingEv", "GameChat local camera streaming: no camera, nothing streams", Result, h_chat_LocalStart, void) { return RES_OK; }
+HLE_FORCE("_ZN2nn4chat24StopLocalCameraStreamingEv", "GameChat local camera streaming stopped", Result, h_chat_LocalStop, void) { return RES_OK; }
+HLE_FORCE("_ZN2nn4chat26StartRemoteCameraStreamingERKNS_7account23NetworkServiceAccountIdE", "GameChat remote camera streaming: no members", Result, h_chat_RemoteStart, const void *id) { (void)id; return RES_OK; }
+HLE_FORCE("_ZN2nn4chat25StopRemoteCameraStreamingERKNS_7account23NetworkServiceAccountIdE", "GameChat remote camera streaming stopped", Result, h_chat_RemoteStop, const void *id) { (void)id; return RES_OK; }
+HLE_FORCE("_ZN2nn4chat27RequestNextLocalCameraImageEPNS_2gs16NativeSyncHandleEPNS0_20LocalCameraVideoTypeEiS2_", "GameChat next local camera image: none comes (fails)", Result, h_chat_LocalNext,
+          void *sync, void *type, int i, void *sync2) { (void)sync; (void)type; (void)i; (void)sync2; return RES_FAIL; }
+HLE_FORCE("_ZN2nn4chat28RequestNextRemoteCameraImageEPNS_2gs16NativeSyncHandleEPNS0_21RemoteCameraVideoTypeEiS2_RKNS_7account23NetworkServiceAccountIdE", "GameChat next remote camera image: none comes (fails)",
+          Result, h_chat_RemoteNext, void *sync, void *type, int i, void *sync2, const void *id) { (void)sync; (void)type; (void)i; (void)sync2; (void)id; return RES_FAIL; }
+HLE_FORCE("_ZN2nn4chat46BeginFullScreenWithLocalCameraAvailableSectionEb", "GameChat full-screen section begun: no chat to tell", Result, h_chat_FullBegin, unsigned on) { (void)on; return RES_OK; }
+HLE_FORCE("_ZN2nn4chat44EndFullScreenWithLocalCameraAvailableSectionEv", "GameChat full-screen section ended", void, h_chat_FullEnd, void) {}

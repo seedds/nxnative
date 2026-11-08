@@ -33,3 +33,14 @@ CUTS = {
     (0x50f8f4, '08514bbd', '1f2003d5', 'render thread wait timeout: ldr s8,[x8,#0xb50] → nop (moved up)'),
   ],
 }
+
+# How general each patch is and could be (dm/tools/docs_patches.py "Binding", listed in docs/agents/game-patches.md): what, its binding now, the loosest it could have (goal),
+# purpose, why; blocked or kept: why the gap stays open (cannot close yet, or left open on purpose); checked: what was checked on game files (else a judgement)
+BINDING = [
+    {'what': 'render intervals, the forced-interval flag and the render-wait timeout', 'now': 'build', 'goal': 'game', 'purpose': 'frame rate',
+     'why': "the game's own tables, flag and timeout"},
+    {'what': 'frame limiter wait: yield → sleep', 'now': 'build', 'goal': 'host', 'purpose': 'power',
+     'checked': 'Mac runs with the cut undone, 2026-10-26 (the game note)',
+     'why': "without it the host's yield back-off (thr_yield) holds 59.7 to 59.8 fps, at 0.9 to 1.2 W of CPU against 0.14 to 0.42 W (2026-10-26): a back-off that reaches a yield-and-"
+            "tick loop's deadline sooner would make the cut unnecessary for every game"},
+]

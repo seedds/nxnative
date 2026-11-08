@@ -32,6 +32,10 @@ mem_alias	0x118000000
 mem_stack	0x10000000
 app_pool	0x40000000
 
+# ---- Graphics ----
+# The registered build selects near-zero NVN depth (the NSP script's heap check, 2026-10-28: one nvnDeviceSetDepthMode call, near = 0); offline pipeline bases use main0_z.
+depth_mode	zero
+
 # ---- Shader split ----
 # Unity Shader objects in the player's serialized files and Addressables bundles, plus
 # the player's eleven GLSLC outputs in main. All sources live under Data/.

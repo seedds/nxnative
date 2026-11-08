@@ -39,7 +39,7 @@ static uint64_t tf_prepare(NvShader *vs, uint64_t source_count, uint64_t order, 
         j.stride[b]=vs->tf_stride[b];j.capacity[b]=(uint32_t)S.tf[b].size;
     }
     if (!g_tf_prepare) {
-        NSError *e=nil; id<MTLLibrary> lib=[g_dev newLibraryWithSource:@(k_nvn_tf_msl) options:nil error:&e];
+        NSError *e=nil; id<MTLLibrary> lib=host_lib("tf",&e);
         if (lib) g_tf_prepare=[g_dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"tf_prepare"] error:&e];
         if (!g_tf_prepare) { MLOG("[RED] transform feedback prepare: %s",e.localizedDescription.UTF8String); return 0; }
     }
@@ -65,7 +65,7 @@ static void tf_draw(NvProg *pr,const p_draw *dw,const p_draw_idx *di) {
     id<MTLRenderPipelineState> ps=vs&&vs->tf_fn?tf_pso(vs):nil;if(!ps)return;
     uint64_t dst[4]={0};uint64_t job=tf_prepare(vs,0,0,(uint32_t)count,dw->prim==0?1:dw->prim==1?2:3,
                                               dw->first,dw->count,dw->base_instance,dst);if(!job)return;
-    vbuf_prepare();if(g_blit){enc_b_end(g_blit);g_blit=nil;}
+    vbuf_prepare(vs?&vs->rf:NULL,dw,NULL);if(g_blit){enc_b_end(g_blit);g_blit=nil;}
     MTL4RenderPassDescriptor *rd=[MTL4RenderPassDescriptor new];rd.renderTargetWidth=rd.renderTargetHeight=rd.defaultRasterSampleCount=1;
     id<MTL4RenderCommandEncoder> en=enc_r_begin(rd);enc_r_pso(en,ps);bind_vbufs(en);vconv_bind(en,vs,1,dw,NULL);
     args_dirty_all();encode_args(en,vs,0,1);enc_r_vbuf(en,14,job);

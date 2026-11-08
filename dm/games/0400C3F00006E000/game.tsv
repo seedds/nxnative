@@ -1,0 +1,49 @@
+# Mario Kart World (Switch 2). In bring-up: the base game (SDK 19.3.3 built for the Switch 2, Ounce); update 1.8.0 (SDK 21.4.0) is packed from a profile derived from this one
+# Nintendo EPD's engine (sead / agl / gsys, Phive, Havok, Pia), NVN2 (Ampere shaders).
+# Packed from a dump folder (base/, updates/<version>/) with scripts/pack_dump.py. Shaders: Shader/*.Nin_Ounce_NVN2.bfsha.zs (BNSH with Ampere code).
+
+# ---- Identity ----
+title_id	0400C3F00006E000
+program_id	0400C3F00006E000
+
+# ---- App ----
+name	Mario Kart World
+ipa	MarioKartWorld.ipa
+app_category	public.app-category.racing-games
+pad_layout	full
+
+# ---- Versions ----
+build	v0	v0	main=9e244438c3d8ef1c703a6a85ef99c4f0	subsdk0=d39a7a3d44530bb61b35690e5b0383d5	sdk=90ebba182862b9ecdc21fcb87b999012
+package	v0
+shader_versions	v0
+
+# ---- Files ----
+# The base game's subsdk0 is a Mono runtime (nn::ecli); 1.8.0's subsdk0 is the movie player and its subsdk1 a C library (build IDs from pull request #1116, not checked here).
+# Each build row names its own modules, and the host loads those of main's build (main.c profile_modules)
+modules	main subsdk0 subsdk1 sdk
+romfs_marker	Movie/StaffRoll_00.webm
+zip_store	.zs:.bwav:.webm:.metallib
+
+# ---- Memory ----
+# The Switch 2 leaves games 9 GB of its 12 GB (Donkey Kong Bananza's figure). The NPDM declares 64 MB of system resource, so virtual address memory is on:
+# nninitStartup still sets a heap of pool - used (SetHeapSize 0x1dbc00000, 7.43 GB, with the 9 GB pool; 1.8.0 asks 0x1de400000, 7.47 GB, by pull request #1116), and nnMain allocates a fixed
+# 7.04 GB block from it: 256 MB in front + 4 GB alias region + 256 MB stack region + 8 GB heap region
+mem_reserve	0x320000000
+mem_alias	0x100000000
+mem_stack	0x10000000
+app_pool	0x240000000
+sys_resource	0x4000000
+
+# ---- Shader split (shader_split.py) ----
+shader_groups	/Shader/=shader /Effect/=effect /Lib/=lib /Layout/=layout
+shader_note	Mario Kart World shaders
+
+# ---- Frame rate ----
+# The framework picks each frame's interval (1 or 2 vsyncs, which the game steps by) from the frame's CPU time alone, so frames that wait on the GPU kept interval 1 and played in
+# slow motion. The interval takes the host's frame step instead (MATCH_FRAME_STEP in patches.py, found by its function on any build that keeps it), at most 2; the game's own
+# 30 fps mode stays its own
+fps_target	60
+
+# ---- Graphics ----
+# agl wraps its clears in render conditions on Donkey Kong Bananza and Splatoon Raiders; the same library here, to be confirmed on this game
+render_cond	on

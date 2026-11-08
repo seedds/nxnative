@@ -22,3 +22,12 @@ CUTS = {
     (0x1e681d8, '080140b9', '08fddf88', 'stream reader: ldr w8,[x8] → ldar ("writer sleeping" after the store-release of the read position)'),
   ],
 }
+
+# How general each patch is and could be (dm/tools/docs_patches.py "Binding", listed in docs/agents/game-patches.md): what, its binding now, the loosest it could have (goal),
+# purpose, why; blocked or kept: why the gap stays open (cannot close yet, or left open on purpose); checked: what was checked on game files (else a judgement)
+BINDING = [
+    {'what': 'ThreadedStreamBuffer load-acquires', 'now': 'build', 'goal': 'engine', 'purpose': 'race',
+     'why': "the race is in Unity 2018.4's ThreadedStreamBuffer, engine code other Unity games of that era ship (Cuphead, AI: THE SOMNIUM FILES, Raging Loop): a function-matched rule "
+            'per Unity version',
+     'blocked': 'no game files of those games on the drive to compare'},
+]

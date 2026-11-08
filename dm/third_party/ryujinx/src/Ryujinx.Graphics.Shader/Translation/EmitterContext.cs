@@ -215,6 +215,11 @@ namespace Ryujinx.Graphics.Shader.Translation
             _operations.Add(operation);
         }
 
+        // The Ampere frontend's scoreboard model rewrites an instruction's operations after emitting them (Translator.EmitOpsAmpere)
+        internal Operation GetOperation(int index) => _operations[index];
+
+        internal void InsertOperation(int index, Operation operation) => _operations.Insert(index, operation);
+
         public void MarkLabel(Operand label)
         {
             Add(Instruction.MarkLabel, label);
@@ -422,14 +427,21 @@ namespace Ryujinx.Graphics.Shader.Translation
                         inputStep = 1;
                     }
 
+                    // A primitive whose viewport mask is 0 goes to no viewport: the hardware drops it (NieR:Automata's index-build shaders cull triangles this way)
+                    Operand lblCulled = null;
+
+                    if (TranslatorContext.UsesViewportMask && TranslatorContext.GpuAccessor.QueryHostSupportsViewportMask())
+                    {
+                        lblCulled = Label();
+                        this.BranchIfTrue(lblCulled, this.ICompareEqual(this.Load(StorageKind.Output, IoVariable.ViewportMask, null, Const(0)), Const(0)));
+                    }
+
                     for (int primIndex = inputStart; primIndex < inputEnd; primIndex += inputStep)
                     {
                         WritePositionOutput(primIndex);
 
-                        // Independently compiled fixed-input stages meet through
-                        // the complete Maxwell map, with no linked next-stage
-                        // usage to populate PassthroughAttributes. Preserve every
-                        // captured generic output the GS did not replace.
+                        // Fixed-input stages preserve the complete Maxwell attribute map.
+                        // The reader may consume generic slots above location 15.
                         int passthroughAttributes = TranslatorContext.GpuAccessor.QueryGeometryInputFixed()
                             ? ~TranslatorContext.AttributeUsage.UsedOutputAttributes
                             : TranslatorContext.AttributeUsage.PassthroughAttributes;
@@ -444,6 +456,11 @@ namespace Ryujinx.Graphics.Shader.Translation
                     }
 
                     this.EndPrimitive();
+
+                    if (lblCulled != null)
+                    {
+                        this.MarkLabel(lblCulled);
+                    }
                 }
             }
             else if (TranslatorContext.Definitions.Stage == ShaderStage.Fragment)

@@ -120,6 +120,8 @@ static int delayed_wake(unsigned delay, int kind, int exclusion) {
     if (exclusion == 4) worker.host_owned = 1;   // host helper, no guest core
     if (exclusion == 5) worker.pause_req = 1;   // guest suspension
     if (exclusion == 6) { worker_host_work = 1; worker.host_work = &worker_host_work; }   // host GPU work
+    thr_t *self = pthread_getspecific(g_keythr); uint64_t self_mask = self->mask;
+    if (exclusion == 7) self->mask = 5;   // the signaller can run on another guest core (Batman: Arkham Knight's job workers, mask 0x5)
     pthread_mutex_lock(&G);
     worker.handle = h_new(O_THREAD, &worker); worker.all = g_all; g_all = &worker;
     pthread_mutex_unlock(&G);
@@ -140,6 +142,7 @@ static int delayed_wake(unsigned delay, int kind, int exclusion) {
     else if (kind == 2) { r[0] = (uint64_t)&condition_key; r[1] = 1; svc_thread(0x1D, r); }
     else { r[0] = (uint64_t)&mutex_word; svc_thread(0x1B, r); }
     assert(r[0] == 0);
+    self->mask = self_mask;
     pthread_mutex_lock(&G); int ordered = atomic_load(&payload) == 2 && worker.exited; pthread_mutex_unlock(&G);
     pthread_join(d, NULL); pthread_join(w, NULL);
     pthread_mutex_lock(&G); g_all = worker.all;
@@ -301,6 +304,44 @@ static int native_join_handoff(void) {
     printf("%s: native join releases the signaller, returns the helper result and preserves nested host work\n", blocked && finished && nesting ? "PASS" : "FAIL");
     return blocked && finished && nesting;
 }
+// A started higher-priority worker whose first act is a service request (a file system call, a blocking IPC on Horizon) gives its core back, and its first request ends only after the
+// starter is back in guest code. Digimon Story Cyber Sleuth's save manager sets a busy flag right after StartThread returns, and the worker clears it as its last act: with the starter
+// held until the worker exited, the flag stayed set for good and every later slot read was refused. The worker reads the flag after its request, then clears it
+static _Atomic int request_busy, request_seen;
+static int request_calls;
+static void *request_work(void *arg) {
+    thr_t *t = arg; pthread_setspecific(g_keythr, t); t->host_work = &dm_host_work;
+    pthread_mutex_lock(&G); worker_ready = 1; while (!t->started) pthread_cond_wait(&t->cv, &G); pthread_mutex_unlock(&G);
+    for (int i = 0; i < request_calls; i++) dm_thread_service_request();
+    atomic_store(&request_seen, atomic_load(&request_busy));
+    atomic_store(&request_busy, 0);
+    atomic_store(&payload, 2);
+    thread_exit(t); return NULL;
+}
+static int service_request_start(int calls) {
+    static thr_t t; uint64_t r[32] = {0};
+    memset(&t, 0, sizeof t);
+    pthread_cond_init(&t.cv, NULL); pthread_cond_init(&t.pcv, NULL);
+    t.prio = 30; t.core = 0; t.mask = 1;
+    pthread_mutex_lock(&G); t.handle = h_new(O_THREAD, &t); t.all = g_all; g_all = &t; pthread_mutex_unlock(&G);
+    request_calls = calls; worker_ready = 0;
+    atomic_store(&request_busy, 0); atomic_store(&request_seen, 0); atomic_store(&payload, 0);
+    pthread_t w; assert(!pthread_create(&w, NULL, request_work, &t));
+    for (;;) { pthread_mutex_lock(&G); int ready = worker_ready; pthread_mutex_unlock(&G); if (ready) break; usleep(100); }
+    r[0] = t.handle; svc_thread(0x09, r); assert(r[0] == 0);
+    int held = atomic_load(&payload) == 2;   // the worker finished before the starter came back
+    atomic_store(&request_busy, 1);          // the store the game makes after StartThread
+    pthread_join(w, NULL);
+    int seen = atomic_load(&request_seen), busy = atomic_load(&request_busy);
+    pthread_mutex_lock(&G); g_all = t.all;
+    unsigned slot = t.handle - 0x1000; g_h[slot].type = O_FREE; g_h[slot].obj = NULL;
+    pthread_mutex_unlock(&G);
+    pthread_cond_destroy(&t.cv); pthread_cond_destroy(&t.pcv);
+    // Without a request the starter is held to the end, so the flag stays set (the old behaviour of every file system call); with one the worker sees the flag and clears it
+    int ok = calls ? !held && seen == 1 && busy == 0 : held && seen == 0 && busy == 1;
+    printf("%s: started worker with %d service requests: starter held to its end %d, worker saw the flag %d, flag afterwards %d\n", ok ? "PASS" : "FAIL", calls, held, seen, busy);
+    return ok;
+}
 int main(int argc, char **argv) {
     (void)argv;
     alarm(10);
@@ -311,12 +352,14 @@ int main(int argc, char **argv) {
     int ok = 1;
     ok &= native_wait_handoff();
     ok &= native_join_handoff();
+    ok &= service_request_start(0);
+    for (int i = 0; i < 20; i++) ok &= service_request_start(1 + i % 2);
     if (argc == 1) for (int kind = 0; kind <= 3; kind++) ok &= handoff_scope(kind);   // with every runnable peer checked (core_preempt), the busy peer holds the signaller by design
     for (int kind = 0; kind <= 4; kind++) if (kind != 3) {
         ok &= delayed_wake(1000, kind, 0);
         ok &= delayed_wake(20000, kind, 0);
     }
-    for (int exclusion = 1; exclusion <= 6; exclusion++) {
+    for (int exclusion = 1; exclusion <= 7; exclusion++) {
         ok &= delayed_wake(20000, 0, exclusion);
         ok &= delayed_wake(20000, 4, exclusion);
     }

@@ -4,6 +4,8 @@ Update 1.0.10 (v655360), SDK 20.5.7, on NVN (46 BNSH shaders). Modules `main` an
 
 On the Mac: the opening rooms at 60 fps with movement, jumping and audio; item pickup and pause menus work. One repeat run recovered from an AudioUnit startup timeout through the existing audio restart path.
 
+**Regression recording checked (2026-10-28):** a full `regress.py check --record` against `337186cf3ce7` passed on an Apple M4 Pro, macOS 27.2 / Xcode 27.1, and wrote the [last green record](validated.tsv). Both 100-second runs reached the opening room at 60 fps, all 46 shaders and their MSL stayed unchanged, screenshots matched within tolerance, and neither run logged a `[RED]` line. Both used `DM_PRESENT_LINK=0` to control the window-occlusion effect described below. One game covers the harness's recording path; this change does not alter the host or shader chain.
+
 ## What it needs
 
 | Setting | Where | Why |
@@ -38,6 +40,7 @@ On the Mac: the opening rooms at 60 fps with movement, jumping and audio; item p
 
 - **An empty RomFS for a program without a data section** (`nx_extract`; an empty `romfs_marker` checks the directory itself): [dm/games/README.md](../README.md).
 - **An empty RomFS image:** [RomFS images](../../../docs/reference/packing.md#romfs-folder-transfers-fail-or-leave-stale-game-files).
+- **One file for the compile cache and Xcode's data between builds, tested on this game's build folder (4,019 files to 323):** [Build folders of many small files](../../../docs/reference/packing.md#a-build-folder-holds-hundreds-of-thousands-of-small-files).
 - **Resolved:** `--platform mac-app` stopped at the pipeline archive (`pso_offline: no base to build`) because the profile's `shader_pairs.tsv` holds no pair; a pair list with no pair is now nothing to build and the app is packed without an archive: [Offline pipeline archive reuse and fallback](../../../docs/reference/shaders.md#offline-pipeline-archive-reuse-and-fallback) ([GitHub issue #338](https://github.com/seedds/nxnative/issues/338)).
 
 ## Open

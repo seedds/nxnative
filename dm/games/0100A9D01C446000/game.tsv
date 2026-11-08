@@ -30,15 +30,18 @@ zip_store	.pak:.ttf:.ucas:.usm:.utoc:.metallib
 # rhi.SyncInterval 1 into its console variables (hle_fpslock.c), so the game asks for present interval 1 itself. Unreal steps the game by the time that really passed.
 # DM_FPS_TARGET=30 (Documents/env.txt on the iPhone) keeps the game's 30 and saves power
 fps_target	60
+# Texture streaming pool: the Switch device profile sets r.Streaming.PoolSize=200 (SwitchDeviceProfiles.ini [Switch], docked and handheld; [WindowsNoEditor] in DefaultDeviceProfiles.ini
+# sets 1000), and past it the streamer drops the top mips of what is in view: textures and lightmaps blurry a second after an area loads (GitHub issue #589). The host raises it to the
+# game's own Windows value on the Mac (hle_uecvar.c); on iOS only DM_UE_TEXTURE_POOL turns it on
+ue_texture_pool	1000
 
 # ---- Memory ----
 # Unreal Engine 4.27: nninitStartup (main+0xe89fa4) needs virtual address memory, sets a 6 MB heap for the C library's malloc and reserves one address region for the engine
-# (-SwitchVirtualAddressSpaceSize= in MB, game_args below; 62 GB by default). Its allocator, an FMallocBinned3 made on the first allocation, cuts 37 GB of pools out of that region; the
-# constructor call is cut and the host runs Unreal's heap on a malloc zone outside the guest block (patches.py, hle_uemalloc.c), and the SDK's node area is cut to 62 MB, as for
+# (62 GB by default; the rewriter's engine-wide gate on the store of its size (dm/tools/ue_region.py; hle_svc.c) gives it what the alias region has room for, 2.81 GB; until 2026-10-31 -SwitchVirtualAddressSpaceSize=2048 in game_args). Its allocator, an FMallocBinned3 made on the first allocation, cuts 37 GB of pools out of that region; the
+# constructor call is cut and the host runs Unreal's heap on a malloc zone outside the guest block (the rewriter's engine-wide cut, dm/tools/ue_malloc.py; hle_uemalloc.c), and the SDK's node area is cut to 62 MB, as for
 # Octopath Traveler 0 on the same SDK. The region then holds what the engine maps itself: on the Mac up to +0.75 GB of the alias region with 0.5 GB mapped through the opening and
-# the new-game menus, beside an Unreal heap of 1 GB and 0.9 GB of Metal allocations (about 2.3 GB resident). Alias region = node area + up to 1 GB of alignment (regions of 1 GB and
-# more are 1 GB aligned) + the 2 GB region; 256 MB stacks, 384 MB heap region
-game_args	-SwitchVirtualAddressSpaceSize=2048
+# the new-game menus, beside an Unreal heap of 1 GB and 0.9 GB of Metal allocations (about 2.3 GB resident; a 2 GB region then). Alias region = node area + the region (this SDK build
+# aligns regions to 2 MB only) + 256 MB for regions made later; 256 MB stacks, 384 MB heap region
 mem_reserve	0xF0000000
 mem_alias	0xC8000000
 mem_stack	0x10000000

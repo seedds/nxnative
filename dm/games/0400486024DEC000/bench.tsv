@@ -1,0 +1,2 @@
+# Benchmark routes for scripts/bench.py
+kokiri-deck	35:A~0.2,40:A~0.2,43:A~0.2,105:RRight~4,111:LUp~3,116:RLeft~4,122:LUp~3	85	45	the Kokiri Forest deck save: standing 20 s, then the camera turns right, Link walks, the camera turns left, he walks again

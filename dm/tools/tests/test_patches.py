@@ -10,12 +10,14 @@ import re
 import shutil
 import sys
 import tempfile
+from typing import Any
 import unittest
 from unittest import mock
 
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO / 'dm/tools')); sys.path.insert(0, str(REPO / 'dm/games'))
 import game   # noqa: E402
+import docs_patches   # noqa: E402
 
 FILES = [REPO / 'dm/tools/sdk_patches.py'] + sorted((REPO / 'dm/games').glob('*/patches.py'))
 
@@ -41,7 +43,7 @@ def builds_of(g):   # {build ID: module name} of a profile's build rows (a profi
 
 class Registry(unittest.TestCase):
     def test_no_build_claimed_twice(self):
-        for kind in ('CUTS', 'OBS', 'FRAME_STEP'):
+        for kind in ('CUTS', 'OBS', 'FRAME_STEP', 'CAPABILITIES'):
             seen = {}
             for p, m in MODS.items():
                 for bid in getattr(m, kind, {}):
@@ -58,8 +60,25 @@ class Registry(unittest.TestCase):
                     self.assertTrue(isinstance(off, int) and isinstance(oid, int) and HEX.match(word) and len(word) == 8 and why, f'{p} {bid} {off:#x}')
             for bid, fn in getattr(m, 'FRAME_STEP', {}).items():
                 self.assertTrue(callable(fn), f'{p} {bid}')
-            self.assertFalse({k for k in vars(m) if k.isupper() and k not in ('CUTS', 'OBS', 'FRAME_STEP', 'MATCH_CUTS')} - set(dir(__import__('nso_asm'))),
+            for bid, names in getattr(m, 'CAPABILITIES', {}).items():
+                self.assertRegex(bid, r'^[0-9a-f]{32}$')
+                self.assertEqual(len(names), len(set(names)))
+                for name in names: self.assertRegex(name, r'^[A-Z][A-Z0-9_]*$')
+            self.assertFalse({k for k in vars(m) if k.isupper() and k not in ('CUTS', 'OBS', 'FRAME_STEP', 'CAPABILITIES', 'MATCH_CUTS', 'MATCH_FRAME_STEP', 'BINDING')} - set(dir(__import__('nso_asm'))),
                              f'{p}: a table patch_nso.py does not read')
+            # every patch file states each patch's binding (docs_patches.py "Binding"), and no goal is tighter than the binding now
+            self.assertTrue(getattr(m, 'BINDING', None), f'{p}: no BINDING (docs/agents/game-patches.md, "Binding")')
+            for e in m.BINDING: self.assertIsNone(docs_patches.binding_error(e, own=p.name == 'patches.py'), f'{p}')
+
+    def test_unreviewed_goals_stay_in_a_games_own_build_bound_patches(self):
+        e = {'what': 'a cut', 'now': 'build', 'goal': 'unreviewed', 'purpose': 'memory', 'why': 'found at bring-up'}
+        self.assertIsNone(docs_patches.binding_error(e, own=True))
+        self.assertIsNotNone(docs_patches.binding_error(e))   # sdk_patches.py, host rows, translator rules and switches review theirs
+        self.assertIsNotNone(docs_patches.binding_error(dict(e, now='game'), own=True))
+        self.assertIsNotNone(docs_patches.binding_error(dict(e, blocked='why'), own=True))
+        self.assertEqual(docs_patches.status(e), 'unreviewed')
+        reviewed = (dict(e, goal='sdk'), [], {'a', 'b'})
+        self.assertLess(docs_patches.payoff(reviewed), docs_patches.payoff((e, [], {'a', 'b', 'c'})))   # after every reviewed gap
 
     def test_function_match_rules(self):
         from nso_match import validate
@@ -74,19 +93,46 @@ class Registry(unittest.TestCase):
                 self.assertTrue(rules)
                 for rule in rules: validate(rule)
 
-    def test_sdk_wide_rules_restate_registered_cuts(self):
-        # every SDK-wide cut is one of the registered SDK cuts, the same bytes, at some build's function-relative offset (the rules were taken from them)
+    def test_function_matched_frame_steps(self):
+        # one frame step per main, in a game's own patches.py; its stub writes only inside the function it was matched by and the other functions it names (docs_patches.frame_step_sites
+        # with that base), and writes no site in another function it could not find (ctx.others[label] None)
+        from nso_match import validate_stub
+        for p, m in MODS.items():
+            for module, rules in getattr(m, 'MATCH_FRAME_STEP', {}).items():
+                self.assertEqual((p.name, module), ('patches.py', 'main'), f'{p}')
+                self.assertTrue(rules); self.assertEqual(len({r['name'] for r in rules}), 1, f'{p}: a main has one frame step')
+                for rule in rules:
+                    validate_stub(rule)
+                    sites, _, in_others, _ = docs_patches.frame_step_sites(rule['stub'], base=0x100000, others=rule.get('others', {}))
+                    self.assertTrue(sites, f'{p}: {rule["name"]} writes no site')
+                    for off, why in sites: self.assertTrue(0x100000 <= off < 0x100000 + rule['size'], f'{p}: {rule["name"]} site {off:#x} outside its function')
+                    for label, got in in_others.items():
+                        self.assertTrue(got, f'{p}: {rule["name"]} names {label} but writes no site in it')
+                        for off, why in got: self.assertTrue(0 <= off < rule['others'][label]['size'], f'{p}: {label} site {off:#x} outside its function')
+                    if rule.get('others'):   # none found: the stub leaves those parts out
+                        rest = []
+                        ctx = docs_patches.types.SimpleNamespace(here=lambda: 0x8000000, emit=lambda w: None, site=lambda off, orig: None, put=lambda off, words, why, rest=rest: rest.append(off),
+                                                                 state=0x9000000, render_scale=0, base=0x100000, others={label: None for label in rule['others']}, capabilities=set())
+                        rule['stub'](ctx)
+                        self.assertTrue(all(0x100000 <= off < 0x100000 + rule['size'] for off in rest), f'{p}: {rule["name"]} writes outside its function without its others')
+
+    def test_sdk_wide_rules_change_what_their_names_say(self):
+        # the rules were taken from registered SDK cuts, and the builds they reproduce exactly have no row any more: each cut replaces the constant its rule names (0x3fe00000, the node
+        # area; 0x400000, 0x2000000 and 0x40000000, the alignments of the 4 MB, 32 MB and 1 GB classes; as movz or orr from wzr) with the reviewed one (62 MB; SDK 20's 2 MB) in the same register
         m = MODS[REPO / 'dm/tools/sdk_patches.py']
-        registered = {(old, new) for cuts in m.CUTS.values() for _, old, new, _ in cuts}
+        words = {m.node_area: ({'08fca752', '09fca752', 'e8230b32', 'e9230b32'}, {'087ca052', '097ca052'}),
+                 m.alignment: ({'0808a052', 'e8030a32', '0b40a052', 'eb030732', '0a00a852', 'ea030232'}, {'0804a052', '0b04a052', '0a04a052'})}
         for rule in m.MATCH_CUTS['sdk']:
+            old_words, new_words = words[rule['name']]
             for delta, old, new, why in rule['cuts']:
-                self.assertIn((old, new), registered, why)
+                self.assertIn(old, old_words, why); self.assertIn(new, new_words, why)
+                self.assertEqual(int(old[:2], 16) & 31, int(new[:2], 16) & 31, why)
 
     def test_game_files_name_their_own_builds(self):
         for p, m in MODS.items():
-            if p.name != 'patches.py': continue
+            if p.name != 'patches.py' or not (p.parent / 'game.tsv').is_file(): continue
             own = builds_of(p.parent.name)
-            for kind in ('CUTS', 'OBS', 'FRAME_STEP'):
+            for kind in ('CUTS', 'OBS', 'FRAME_STEP', 'CAPABILITIES'):
                 for bid in getattr(m, kind, {}):
                     self.assertIn(bid, own, f'{p}: {kind} of {bid}, which is no build of profile {p.parent.name}')
                     self.assertNotEqual(own[bid], 'sdk', f'{p}: {bid} is an sdk build; its patches go in dm/tools/sdk_patches.py')
@@ -111,7 +157,7 @@ class ExternalRegistry(unittest.TestCase):
         return p
 
     def registry(self, roots=None):
-        ns = dict(__file__=str(self.tools / 'patch_nso.py'), os=os, glob=glob, importlib=importlib)
+        ns: dict[str, Any] = dict(__file__=str(self.tools / 'patch_nso.py'), os=os, glob=glob, importlib=importlib)   # exec adds the registry's tables to these globals
         with mock.patch.dict(os.environ, DM_GAMES_DIR=os.pathsep.join(map(str, roots or [self.external]))):
             exec(REGISTRY_CODE, ns)
         return ns['PATCHES'], ns['PATCH_WHERE']
@@ -128,6 +174,12 @@ class ExternalRegistry(unittest.TestCase):
         self.patch_file(self.external, "MATCH_CUTS = {'main': ['external']}\n")
         tables, _ = self.registry()
         self.assertEqual(tables['MATCH_CUTS'][self.gid], {'main': ['repository']})
+
+    def test_frame_step_rules_are_scoped_like_match_rules(self):
+        self.patch_file(self.tools.parent / 'games', "MATCH_FRAME_STEP = {'main': ['repository']}\n")
+        self.patch_file(self.external, "MATCH_FRAME_STEP = {'main': ['external']}\n")
+        tables, _ = self.registry()
+        self.assertEqual(tables['MATCH_FRAME_STEP'][self.gid], {'main': ['repository']})
 
     def test_external_rules_cannot_enroll_a_repository_profile(self):
         (self.tools.parent / 'games' / self.gid).mkdir(parents=True)
@@ -175,8 +227,9 @@ class RewriteKey(unittest.TestCase):
         got = nsp.patch_files(REPO, tmp, ['main', 'sdk'])
         self.assertEqual(got, [REPO / 'dm/tools/sdk_patches.py', REPO / 'dm/games' / gid / 'patches.py'])
         (tmp / 'main').write_bytes(b'NSO0' + bytes(0x3c) + bytes(16)); (tmp / 'sdk').write_bytes(b'NSO0' + bytes(0x3c) + bytes(16))
-        self.assertEqual(nsp.patch_files(REPO, tmp, ['main', 'sdk']), [])   # an unregistered build: no patch file counts
-        self.assertEqual(nsp.patch_files(REPO, tmp, ['main', 'sdk'], gid), [REPO / 'dm/games' / gid / 'patches.py'])
+        sdk_wide = REPO / 'dm/tools/sdk_patches.py'   # its SDK-wide MATCH_CUTS apply to any build, so it always counts
+        self.assertEqual(nsp.patch_files(REPO, tmp, ['main', 'sdk']), [sdk_wide])   # an unregistered build: no game's patch file counts
+        self.assertEqual(nsp.patch_files(REPO, tmp, ['main', 'sdk'], gid), [sdk_wide, REPO / 'dm/games' / gid / 'patches.py'])
         g = game.load(gid)
         self.assertNotIn(REPO / 'dm/games' / gid / 'patches.py', nsp.profile_files(g))   # only the rewrite step reads it
 
@@ -189,13 +242,14 @@ class RewriteKey(unittest.TestCase):
         mine, other = tmp / 'profiles/0100000000000000/patches.py', tmp / 'profiles/0100000000000001/patches.py'
         for f, text in ((mine, f"CUTS = {{'{bid}': []}}\n"), (other, "CUTS = {'" + '6f' * 16 + "': []}\n")):
             f.parent.mkdir(parents=True); f.write_text(text)
+        sdk_wide = REPO / 'dm/tools/sdk_patches.py'
         with mock.patch.dict(os.environ, {'DM_GAMES_DIR': str(tmp / 'profiles')}):
-            self.assertEqual(nsp.patch_files(REPO, tmp / 'exe', ['main']), [mine])   # only the file that names the module's build
-            self.assertEqual(nsp.patch_files(REPO, tmp / 'exe', ['main'], '0100000000000001'), [mine, other])   # the selected game's file counts for any build
+            self.assertEqual(nsp.patch_files(REPO, tmp / 'exe', ['main']), [sdk_wide, mine])   # of the games' files, only the one that names the module's build
+            self.assertEqual(nsp.patch_files(REPO, tmp / 'exe', ['main'], '0100000000000001'), [sdk_wide, mine, other])   # the selected game's file counts for any build
         with mock.patch.dict(os.environ, {'DM_GAMES_DIR': ''}):
-            self.assertEqual(nsp.patch_files(REPO, tmp / 'exe', ['main']), [])
+            self.assertEqual(nsp.patch_files(REPO, tmp / 'exe', ['main']), [sdk_wide])
         with mock.patch.dict(os.environ, {'DM_GAMES_DIR': os.pathsep.join([str(tmp / 'profiles')] * 2)}):
-            self.assertEqual(nsp.patch_files(REPO, tmp / 'exe', ['main']), [mine])
+            self.assertEqual(nsp.patch_files(REPO, tmp / 'exe', ['main']), [sdk_wide, mine])
 
 
 if __name__ == '__main__':

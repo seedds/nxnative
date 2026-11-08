@@ -31,6 +31,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Glsl.Instructions
                 IoVariable.FrontColorDiffuse => ("gl_FrontColor", AggregateType.Vector4 | AggregateType.FP32), // Deprecated.
                 IoVariable.FrontColorSpecular => ("gl_FrontSecondaryColor", AggregateType.Vector4 | AggregateType.FP32), // Deprecated.
                 IoVariable.FrontFacing => ("gl_FrontFacing", AggregateType.Bool),
+                IoVariable.HelperInvocation => ("gl_HelperInvocation", AggregateType.Bool),
                 IoVariable.GlobalId => ("gl_GlobalInvocationID", AggregateType.Vector3 | AggregateType.U32),
                 IoVariable.InstanceId => ("gl_InstanceID", AggregateType.S32),
                 IoVariable.InstanceIndex => ("gl_InstanceIndex", AggregateType.S32),
@@ -41,6 +42,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Glsl.Instructions
                 IoVariable.PointSize => ("gl_PointSize", AggregateType.FP32),
                 IoVariable.Position => ("gl_Position", AggregateType.Vector4 | AggregateType.FP32),
                 IoVariable.PrimitiveId => GetPrimitiveIdVariableName(definitions.Stage, isOutput),
+                IoVariable.SampleId => ("gl_SampleID", AggregateType.S32),
                 IoVariable.SubgroupEqMask => GetSubgroupMaskVariableName(hostCapabilities.SupportsShaderBallot, "Eq"),
                 IoVariable.SubgroupGeMask => GetSubgroupMaskVariableName(hostCapabilities.SupportsShaderBallot, "Ge"),
                 IoVariable.SubgroupGtMask => GetSubgroupMaskVariableName(hostCapabilities.SupportsShaderBallot, "Gt"),

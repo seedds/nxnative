@@ -2,7 +2,9 @@
 # A second make compiles the same test rules with SAN (the extra compiler flags) into a build folder of its own, so the plain build stays as it is.
 # Exceptions for test fixtures and uninstrumented framework synchronization are documented beside this file:
 # ignorelist.txt (ASan and UBSan, at compile time) and tsan.supp (TSan, at run time). New host findings are fixed.
-SAN_DIR := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
+# SAN_DIR is relative to the including Makefile's folder, where its make compiles and runs the tests (TSan reads tsan.supp relative to the working directory):
+# an absolute path would split at a space in the checkout's path, and quotes cannot go into ASAN_FLAGS, which recipes pass on inside quotes (SAN="...", san_fresh)
+SAN_DIR := $(patsubst %/,%,$(dir $(lastword $(MAKEFILE_LIST))))
 ASAN_FLAGS = -g -fsanitize=address,undefined -fno-omit-frame-pointer -fsanitize-ignorelist=$(SAN_DIR)/ignorelist.txt
 # use_sigaltstack=0: the host's crash.c gives every thread an alternate signal stack of its own, which ASan would unmap as its own at thread exit
 ASAN_ENV = ASAN_OPTIONS=halt_on_error=1:detect_stack_use_after_return=1:use_sigaltstack=0 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1

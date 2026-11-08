@@ -43,19 +43,21 @@ class Bench(unittest.TestCase):
             self.assertEqual(row, '| base | 3 | 60 (58–62) | 8 (7–9) | 1 | – |')
 
     def test_cli_relative_paths(self):
-        with tempfile.TemporaryDirectory() as d:
+        with mock.patch.dict(os.environ), tempfile.TemporaryDirectory() as d:
+            os.environ.pop('DM_PSO_BUNDLE', None)   # exercise the default regardless of the caller's archive override
             root = Path(d); gid = '01007EF00011E000'; build = root / f'{gid}_build'
             (build / 'run/save').mkdir(parents=True); (build / 'run/save/sentinel').write_text('original')
-            (build / 'extract/v0/RomFS').mkdir(parents=True)
+            (build / 'extract/v0/RomFS').mkdir(parents=True); (build / 'pso/mac').mkdir(parents=True)   # the offline archive the Mac app bundles
             (root / 'variant/patched_v0').mkdir(parents=True)
             (root / 'variant/msl').mkdir(); (root / 'variant/pso').mkdir(); (root / 'variant/shmap.tsv').write_text('# synthetic\n')
             host = root / 'variant/host'
             host.write_text('''#!/usr/bin/env python3
 import json, os, pathlib, sys
-paths = [sys.argv[1]] + [os.environ[k] for k in ('DM_ROOT', 'DM_ROMFS', 'DM_SAVE', 'DM_TEMP', 'DM_MSL_DIR', 'DM_NVN_SHMAP', 'DM_NVN_TSV', 'DM_CTL')]
+paths = [sys.argv[1]] + [os.environ[k] for k in ('DM_ROOT', 'DM_ROMFS', 'DM_SAVE', 'DM_TEMP', 'DM_MSL_DIR', 'DM_NVN_SHMAP', 'DM_NVN_TSV', 'DM_CTL', 'DM_PSO_BUNDLE')]
 assert all(pathlib.Path(p).is_absolute() for p in paths), paths
 assert pathlib.Path(sys.argv[1]).is_dir()
 assert pathlib.Path(os.environ['DM_MSL_DIR']).is_dir()
+assert pathlib.Path(os.environ['DM_PSO_BUNDLE']) == pathlib.Path(os.environ['DM_ROOT']) / 'pso/mac'
 assert pathlib.Path(os.environ['DM_NVN_SHMAP']).is_file()
 archive = os.environ['DM_PSO_ARCHIVE']
 assert archive == 'off' or pathlib.Path(archive).is_absolute() and pathlib.Path(archive).is_dir()

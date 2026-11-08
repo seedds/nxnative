@@ -12,7 +12,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
-import dmsh_geometry
+import dmsh_geometry, dmsh_mesh
 
 RASTER_CHECK = r'''#import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
@@ -158,6 +158,22 @@ def geometry_header(passthrough=True, vertices=1, topology=7, invocations=1):
     return struct.pack('<5I', int(passthrough) << 24, 0, invocations << 24, topology << 24, vertices)
 
 
+class TopologyPointer(unittest.TestCase):
+    def test_a_helper_function_gets_the_table_as_a_pointer(self):   # Kirby Air Riders: SPIRV-Cross makes a helper of a block the shader reaches from several places, and passes the table to it
+        src = ('struct spvDescriptorSetBuffer0 { texture_buffer<float> trb_data [[id(16)]]; };\n'
+               'void _97(texture_buffer<float> trb_data) { float a = trb_data.read(uint(1)).x; }\n'
+               'kernel void main0(constant spvDescriptorSetBuffer0& spvDescriptorSet0) { float b = spvDescriptorSet0.trb_data.read(uint(f(2))).x; _97(spvDescriptorSet0.trb_data); }\n')
+        out = dmsh_geometry.topology_pointer(src)
+        self.assertNotIn('texture_buffer', out)
+        self.assertIn('device const uint* trb_data [[id(16)]]', out)
+        self.assertIn('void _97(device const uint* trb_data)', out)
+        self.assertIn('as_type<float>(trb_data[uint(1)])', out)
+        self.assertIn('as_type<float>(spvDescriptorSet0.trb_data[uint(f(2))])', out)
+
+    def test_no_table_stops_the_shader(self):
+        with self.assertRaises(ValueError): dmsh_geometry.topology_pointer('struct spvDescriptorSetBuffer0 { };')
+
+
 class GeometryOutputLayout(unittest.TestCase):
     def test_passthrough_uses_input_primitive_vertex_count(self):
         layouts = [dmsh_geometry.output_layout(geometry_header(), t) for t in range(5)]
@@ -233,5 +249,363 @@ class PassthroughCompiler(unittest.TestCase):
                 self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
 
+
+LEAN_KERNEL = '''struct _22 { float _m0[1]; };
+struct spvDescriptorSetBuffer0
+{
+    device _22* vertex_output [[id(1)]];
+    device _22* geometry_vb_output [[id(2)]];
+    device uint* gp_s0 [[id(4)]];
+};
+kernel void main0(constant spvDescriptorSetBuffer0& spvDescriptorSet0 [[buffer(0)]], uint3 gl_GlobalInvocationID [[thread_position_in_grid]])
+{
+    spvUnsafeArray<float, 134> _41;
+    int _10 = int(gl_GlobalInvocationID.x);
+    int _12 = _10 * 144;
+    int _14 = _12 + 36;
+    float _16 = (*spvDescriptorSet0.vertex_output)._m0[_14];
+    int _18 = _10 * 144;
+    int _20 = _18 + 17;
+    float _22 = (*spvDescriptorSet0.vertex_output)._m0[_20];
+    _41[17] = _22;
+    int _24 = _10 * 144;
+    float _26 = (*spvDescriptorSet0.vertex_output)._m0[_24];
+    _41[0] = _26;
+    _41[5] = as_type<float>(as_type<uint>(_16) & 1u);
+    uint _28 = atomic_fetch_add_explicit((device atomic_uint*)spvDescriptorSet0.gp_s0, 1u, memory_order_relaxed);
+    int _30 = _10 * 134;
+    float _32 = _41[0];
+    (*spvDescriptorSet0.geometry_vb_output)._m0[_30] = _32;
+    int _34 = _30 + 5;
+    float _36 = _41[5];
+    (*spvDescriptorSet0.geometry_vb_output)._m0[_34] = _36;
+    int _38 = _30 + 17;
+    float _40 = _41[17];
+    (*spvDescriptorSet0.geometry_vb_output)._m0[_38] = _40;
+}
+'''
+
+
+class LeanPassthrough(unittest.TestCase):
+    def test_passthrough_bit(self):
+        self.assertTrue(dmsh_geometry.passthrough(geometry_header()))
+        self.assertFalse(dmsh_geometry.passthrough(geometry_header(False)))
+        self.assertFalse(dmsh_geometry.passthrough(b''))
+
+    def test_lean_keeps_mask_and_decision_reads(self):
+        src, reads = dmsh_geometry.lean(LEAN_KERNEL, 134)
+        self.assertEqual(reads, [36])   # word 17 and the position only fed the copy
+        self.assertIn('int _12 = _10 * 1;', src)
+        self.assertIn('int _14 = _12 + 0;', src)
+        self.assertIn('int _34 = _10;', src)   # one mask word per output vertex
+        self.assertEqual(src.count('geometry_vb_output)._m0['), 1)
+        self.assertNotIn('_m0[_20]', src)
+        self.assertNotIn('_m0[_24]', src)
+        self.assertIn('atomic_fetch_add_explicit', src)   # storage writes stay even when unused
+
+    def test_lean_rejects_unknown_shapes(self):
+        cases = [('(*spvDescriptorSet0.geometry_vb_output)._m0[_34] = _36;', '(*spvDescriptorSet0.geometry_vb_output)._m0[_10 + 5] = _36;', 'unknown output store'),
+                 ('int _14 = _12 + 36;', 'int _14 = _12 + _10;', 'computed capture read'),
+                 ('int _34 = _30 + 5;', 'int _34 = _30 + 6;', 'no viewport mask store')]
+        for old, new, message in cases:
+            with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                dmsh_geometry.lean(LEAN_KERNEL.replace(old, new), 134)
+
+    def test_capture_writes_each_word_once_through_its_slot(self):
+        src = '''struct main0_out
+{
+    float4 m_3 [[user(locn3)]];
+    float4 gl_Position [[position]];
+};
+vertex main0_out main0(uint vid [[vertex_id]])
+{
+    main0_out out = {};
+    return out;
+}
+'''
+        out = dmsh_geometry.capture(src)
+        self.assertIn('short slot[144]', out)
+        self.assertEqual(out.count('dm_cw(dm_gs, dm_p,'), 144)
+        self.assertIn('dm_cw(dm_gs, dm_p, 0, as_type<uint>(out.gl_Position.x));', out)
+        self.assertIn('dm_cw(dm_gs, dm_p, 28, as_type<uint>(out.m_3.x));', out)
+        self.assertIn('dm_cw(dm_gs, dm_p, 4, 0x3f800000u);', out)   # point size
+        self.assertIn('dm_cw(dm_gs, dm_p, 23, 0x3f800000u);', out)   # an unwritten attribute's w
+        self.assertIn('dm_cw(dm_gs, dm_p, 20, 0u);', out)
+        self.assertIn('* dm_gs.stride)', out)
+
+MESH_VS = """#include <metal_stdlib>
+using namespace metal;
+
+struct spvDescriptorSetBuffer0
+{
+    constant float4* c [[id(0)]];
+};
+
+struct main0_out
+{
+    float4 m_1 [[user(locn5)]];
+    float4 gl_Position [[position, invariant]];
+    float gl_PointSize [[point_size]];
+};
+
+struct main0_in
+{
+    float4 m_0 [[attribute(0)]];
+};
+
+vertex main0_out main0(main0_in in [[stage_in]], constant spvDescriptorSetBuffer0& spvDescriptorSet0 [[buffer(0)]])
+{
+    main0_out out = {};
+    out.m_1 = in.m_0;
+    out.gl_PointSize = 1.0;
+    out.gl_Position = in.m_0 * spvDescriptorSet0.c[0];
+    return out;
+}
+
+vertex main0_out main0_z(main0_in in [[stage_in]], constant spvDescriptorSetBuffer0& spvDescriptorSet0 [[buffer(0)]])
+{
+    main0_out out = {};
+    out.m_1 = in.m_0;
+    out.gl_PointSize = 1.0;
+    out.gl_Position = in.m_0;
+    return out;
+}
+"""
+MESH_HEAD = """#include <metal_stdlib>
+using namespace metal;
+template<typename T, size_t Num>
+struct spvUnsafeArray
+{
+    T elements[Num ? Num : 1];
+    thread T& operator [] (size_t pos) thread { return elements[pos]; }
+};
+"""
+
+
+class MeshPassthrough(unittest.TestCase):
+    def test_compose(self):
+        lean, reads = dmsh_geometry.lean(LEAN_KERNEL, 134)
+        src = dmsh_mesh.compose(MESH_VS, MESH_HEAD + '\n' + lean, reads)
+        self.assertIn('[[mesh]] void dm_mesh(', src)
+        self.assertIn('[[mesh]] void dm_mesh_z(', src)
+        self.assertIn('dm_rec[dm_t * 1u + 0u] = as_type<float>(dm_o.m_1.x);', src)   # word 36 = location 5 x
+        self.assertIn('dm_mask = as_type<uint>(_36);', src)
+        self.assertNotIn('spvDescriptorSet0.vertex_output', src)
+        self.assertNotIn('[[point_size]]', src)
+        self.assertIn('dm_ix + uint(dm_d.base_vertex)', src)
+        # the run twins: the table at the draw slot, the vertex set and the kernel's from the draw's record
+        self.assertIn('[[mesh]] void dm_mesh_run(', src)
+        self.assertIn('[[mesh]] void dm_mesh_run_z(', src)
+        self.assertIn('constant dm_mesh_rec* dm_run [[buffer(12)]]', src)
+        self.assertIn('constant spvDescriptorSetBuffer0& spvDescriptorSet0 = *(constant spvDescriptorSetBuffer0*)dm_r.slot[0];', src)
+        self.assertIn('constant dm_g::spvDescriptorSetBuffer0& dm_gset = *(constant dm_g::spvDescriptorSetBuffer0*)dm_r.slot[13];', src)
+        self.assertIn('uint dm_tg = dm_tgr - (dm_lo ? dm_run[dm_lo - 1u].group_end : 0u);', src)
+        self.assertEqual(src.count('dm_g::dm_gs(dm_gset,'), 4)   # the same body in all four entries
+        if shutil.which('xcrun') and sys.platform == 'darwin':
+            with tempfile.TemporaryDirectory() as d:
+                Path(d, 'm.metal').write_text(src)
+                r = subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-c', '-fmodules-cache-path=' + d + '/modules', str(Path(d, 'm.metal')), '-o', str(Path(d, 'm.air'))], capture_output=True, text=True)
+                self.assertEqual(r.returncode, 0, r.stderr[-2000:])
+
+    def test_large_vertices_take_fewer_triangles(self):
+        # Donkey Kong Bananza's vertex output: 24 float4 and the point size, 388 bytes; 32 triangles (37,248 bytes) exceed Metal's 32 KB
+        self.assertEqual(dmsh_mesh.out_bytes('struct main0_out\n{\n' + ''.join(f'    float4 m_{i} [[user(locn{i})]];\n' for i in range(23)) +
+                                             '    float4 gl_Position [[position, invariant]];\n    float gl_PointSize;\n};'), 388)
+        self.assertEqual(dmsh_mesh.prims_for(388), 16)
+        self.assertEqual(dmsh_mesh.prims_for(dmsh_mesh.out_bytes(MESH_VS)), 32)
+        self.assertEqual(dmsh_mesh.out_bytes('struct main0_out\n{\n    float gl_ClipDistance [8] [[clip_distance]];\n    half2 h;\n};'), 36)
+        with self.assertRaisesRegex(ValueError, 'member'): dmsh_mesh.out_bytes('struct main0_out\n{\n    float3x3 m;\n};')
+        with self.assertRaisesRegex(ValueError, 'limit'): dmsh_mesh.prims_for(11000)
+        lean, reads = dmsh_geometry.lean(LEAN_KERNEL, 134)
+        wide = MESH_VS.replace('    float4 m_1 [[user(locn5)]];\n', '    float4 m_1 [[user(locn5)]];\n' + ''.join(f'    float4 m_x{i} [[user(locn{i})]];\n' for i in [l for l in range(32) if l != 5][:23]), 1)
+        self.assertNotEqual(wide, MESH_VS)
+        src = dmsh_mesh.compose(wide, MESH_HEAD + '\n' + lean, reads)
+        self.assertIn('[[mesh]] void dm_mesh_p16(metal::mesh<main0_out, dm_mesh_prim, 48, 16,', src)
+        self.assertIn('[[mesh]] void dm_mesh_z_p16(', src)
+        self.assertIn('[[mesh]] void dm_mesh_run_z_p16(metal::mesh<main0_out, dm_mesh_prim, 48, 16,', src)
+        self.assertIn('uint dm_p0 = dm_tg * 16u, dm_np = min(16u,', src)
+        if shutil.which('xcrun') and sys.platform == 'darwin':
+            with tempfile.TemporaryDirectory() as d:
+                Path(d, 'm.metal').write_text(src)
+                r = subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-c', '-fmodules-cache-path=' + d + '/modules', str(Path(d, 'm.metal')), '-o', str(Path(d, 'm.air'))], capture_output=True, text=True)
+                self.assertEqual(r.returncode, 0, r.stderr[-2000:])
+
+    def test_run_needs_constant_resources(self):
+        # a vertex resource the record cannot hand over as a constant reference: no run twin, the single entries stay
+        lean, reads = dmsh_geometry.lean(LEAN_KERNEL, 134)
+        vs = MESH_VS.replace('constant spvDescriptorSetBuffer0& spvDescriptorSet0 [[buffer(0)]])', 'constant spvDescriptorSetBuffer0& spvDescriptorSet0 [[buffer(0)]], device uint* dm_w [[buffer(3)]])')
+        self.assertNotEqual(vs, MESH_VS)
+        src = dmsh_mesh.compose(vs, MESH_HEAD + '\n' + lean, reads)
+        self.assertIn('[[mesh]] void dm_mesh(', src)
+        self.assertNotIn('dm_mesh_run', src.replace('struct dm_mesh_rec', ''))
+
+    def test_compose_rejects_clip_z(self):
+        lean, _ = dmsh_geometry.lean(LEAN_KERNEL, 134)
+        with self.assertRaisesRegex(ValueError, 'clip z'):
+            dmsh_mesh.compose(MESH_VS, MESH_HEAD + lean, [2])
+
+    @unittest.skipUnless(os.environ.get('DMSH_TEST_XLATE') and shutil.which('xcrun'), 'requires the offline translator and Metal compiler')
+    def test_translated_primitive_id_crosses_mesh_groups(self):
+        root = Path(__file__).resolve().parents[3]
+        table = (root / 'dm/third_party/ryujinx/src/Ryujinx.Graphics.Shader/Decoders/InstTable.cs').read_text()
+        def instruction(name, emitter=''):
+            pattern = r'Add\("([01x]{64})",\s*InstName\.' + name + r'\s*,'
+            if emitter: pattern += r'\s*InstEmit\.' + emitter + r'\s*,'
+            return int(re.search(pattern, table)[1].replace('x', '0'), 2) | (7 << 16)
+        # ALD R0, PrimitiveId; SHR R0, R0, 5; ALD R1, loc5.x;
+        # IADD R0, R0, R1; AST ViewportMask, R0; EXIT.
+        # loc5.x holds the primitive parity as raw integer bits. Check every
+        # primitive's visibility: group parity plus captured vertex parity.
+        ops = [instruction('Ald') | (255 << 8) | (255 << 39) | (0x60 << 20),
+               instruction('Shr', 'ShrI') | (5 << 20),
+               instruction('Ald') | 1 | (255 << 8) | (255 << 39) | (0xd0 << 20),
+               instruction('Iadd', 'IaddR') | (1 << 20),
+               instruction('Ast') | (255 << 8) | (0x3a0 << 20), instruction('Exit') | 15]
+        header = bytearray(0x50)
+        struct.pack_into('<5I', header, 0, (1 << 24) | (4 << 10) | (3 << 5) | 1, 0, 1 << 24, 7 << 24, 1)
+        with tempfile.TemporaryDirectory(prefix='mesh_primitive_id_') as directory:
+            work = Path(directory); code = work / 'pid.bin'
+            code.write_bytes(header + struct.pack('<8Q', 0, *ops[:3], 0, *ops[3:]))
+            job = dict(key='pid', stage='gs', code=str(code), geometry_topology=3,
+                       tex={}, img={}, attr={}, fout={}, debug=True, reduced=True)
+            (work / 'jobs.json').write_text(json.dumps([job]))
+            subprocess.run([os.environ['DMSH_TEST_XLATE'], str(work / 'jobs.json'), directory], check=True, capture_output=True)
+            spv = work / 'pid.spv'; dmsh_geometry.flatten_sets(spv)
+            r = subprocess.run([str(root / 'dm/gfx/tools/spirv_cross_bin/spirv-cross'), '--msl', '--msl-version', '20300',
+                                '--msl-argument-buffers', '--msl-texture-buffer-native', str(spv)], check=True, capture_output=True, text=True)
+            full = dmsh_geometry.topology_pointer(r.stdout)
+            metadata = json.loads((work / 'pid.res.json').read_text())
+            lean, reads = dmsh_geometry.lean(full, metadata['geometry_stride'])
+            self.assertEqual(reads, [36])
+            vertex = MESH_VS.replace('out.m_1 = in.m_0;', 'out.m_1 = float4(as_type<float>(uint(in.m_0.z)), 0, 0, 0);')
+            vertex = vertex.replace('out.gl_Position = in.m_0', 'out.gl_Position = float4(in.m_0.xy, 0, 1)')
+            source = dmsh_mesh.compose(vertex, lean, reads) + '\nfragment float4 mesh_pixel() { return float4(1, 0, 0, 1); }\n'
+            metal = work / 'pid.metal'; metal.write_text(source)
+            for sdk in ('macosx', 'iphoneos'):
+                air = work / f'{sdk}.air'
+                r = subprocess.run(['xcrun', '-sdk', sdk, 'metal', '-c', '-fmodules-cache-path=' + directory + '/modules',
+                                    str(metal), '-o', str(air)], capture_output=True, text=True)
+                self.assertEqual(r.returncode, 0, r.stderr[-3000:])
+            if os.environ.get('DMSH_TEST_GPU') == '1':
+                library = work / 'pid.metallib'
+                subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', str(work / 'macosx.air'), '-o', str(library)], check=True, capture_output=True)
+                binary = work / 'mesh_check'
+                subprocess.run(['xcrun', 'clang', '-fobjc-arc', str(root / 'dm/gfx/tests/mesh_primitive_id.m'),
+                                '-framework', 'Foundation', '-framework', 'Metal', '-o', str(binary)], check=True, capture_output=True)
+                r = subprocess.run([str(binary), str(library)], capture_output=True, text=True)
+                if r.returncode == 77: self.skipTest('no Metal device')
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                self.assertIn('6 run cases passed', r.stdout)
+
+
+@unittest.skipUnless(os.environ.get('DMSH_TEST_XLATE'), 'requires the offline translator')
+class ComputeSplitPrimitiveId(unittest.TestCase):
+    def test_real_primitive_ids_survive_compute_splits(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from test_dmsh_reflect import REFLECT
+        root = Path(__file__).resolve().parents[3]
+        table = (root / 'dm/third_party/ryujinx/src/Ryujinx.Graphics.Shader/Decoders/InstTable.cs').read_text()
+        def instruction(name, emitter=''):
+            pattern = r'Add\("([01x]{64})",\s*InstName\.' + name + r'\s*,'
+            if emitter: pattern += r'\s*InstEmit\.' + emitter + r'\s*,'
+            return int(re.search(pattern, table)[1].replace('x', '0'), 2) | (7 << 16)
+        # Valid passthrough GS: every primitive emits with viewport mask PID+1.
+        # Feedback reads that mask and the captured vertex/instance attributes.
+        ops = [instruction('Ald') | (255 << 8) | (255 << 39) | (0x60 << 20),
+               instruction('Iadd', 'IaddI') | (1 << 20),
+               instruction('Ast') | (255 << 8) | (0x3a0 << 20), instruction('Exit') | 15]
+        with tempfile.TemporaryDirectory(prefix='compute_primitive_id_') as directory:
+            work = Path(directory); jobs = []
+            for t in range(5):
+                for inv in (1, 3):
+                    key = f'pid{t}_{inv}'; header = bytearray(0x50)
+                    struct.pack_into('<5I', header, 0, (1 << 24) | (4 << 10) | (3 << 5) | 1, 0, inv << 24, 7 << 24, 1)
+                    code = work / (key + '.bin')
+                    code.write_bytes(header + struct.pack('<8Q', 0, *ops[:3], 0, ops[3], 0, 0))
+                    jobs.append(dict(key=key, stage='gs', code=str(code), geometry_topology=t, tex={}, img={}, attr={}, fout={}, debug=True, reduced=True))
+            (work / 'jobs.json').write_text(json.dumps(jobs))
+            subprocess.run([os.environ['DMSH_TEST_XLATE'], str(work / 'jobs.json'), directory], check=True, capture_output=True)
+            sources = []
+            for job in jobs:
+                key = job['key']; spv = work / (key + '.spv'); dmsh_geometry.flatten_sets(spv)
+                result = subprocess.run([str(root / 'dm/gfx/tools/spirv_cross_bin/spirv-cross'), '--msl', '--msl-version', '20300', '--msl-argument-buffers', '--msl-texture-buffer-native', str(spv)], check=True, capture_output=True, text=True)
+                source = dmsh_geometry.capture_input(dmsh_geometry.topology_pointer(result.stdout))
+                # ABI check also runs on CI hosts without a Metal device and
+                # catches a stale translator DLL that omits the primitive base.
+                self.assertTrue('(*spvDescriptorSet0.vb_info)._m1.y' in source,
+                                'translated PrimitiveID must read the base from geometry_counts.y')
+                metadata = json.loads((work / (key + '.res.json')).read_text())
+                layout = dmsh_geometry.output_layout(Path(job['code']).read_bytes(), job['geometry_topology'])
+                (work / (key + '.json')).write_text(json.dumps(dict(route='B', bindings=REFLECT(key, 'gs', source, metadata), geometry=dict(layout, stride=metadata['geometry_stride']))))
+                path = work / (key + '.metal'); path.write_text(source); sources.append(path)
+            vertex = """#include <metal_stdlib>
+using namespace metal;
+struct main0_out
+{
+    float4 m_0 [[user(locn0)]];
+    float4 gl_Position [[position]];
+};
+vertex main0_out main0(uint v [[vertex_id]], uint i [[instance_id]])
+{
+    main0_out out = {};
+    out.m_0 = as_type<float4>(uint4(v, i, v ^ i, 1));
+    out.gl_Position = float4(0, 0, 0, 1);
+    return out;
+}
+"""
+            path = work / 'vertex.metal'; path.write_text(vertex + dmsh_geometry.capture(vertex)); sources.append(path)
+            for path in sources if os.environ.get('DMSH_TEST_METAL') == '1' or os.environ.get('DMSH_TEST_GPU') == '1' else []:
+                for sdk in ('macosx', 'iphoneos'):
+                    air = path.with_suffix('.' + sdk + '.air')
+                    result = subprocess.run(['xcrun', '-sdk', sdk, 'metal', '-c', '-fmodules-cache-path=' + directory + '/modules', str(path), '-o', str(air)], capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, result.stderr[-3000:])
+                    if sdk == 'macosx':
+                        subprocess.run(['xcrun', '-sdk', sdk, 'metallib', str(air), '-o', str(path.with_suffix('.metallib'))], check=True, capture_output=True)
+            if os.environ.get('DMSH_TEST_GPU') == '1':
+                binary = os.environ.get('DM_TEST_GEOMETRY_PRIMITIVE_ID')
+                self.assertTrue(binary, 'set DM_TEST_GEOMETRY_PRIMITIVE_ID to the native replay test')
+                result = subprocess.run([binary, directory], capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                print(result.stdout.strip())
+
+
+# t_geometry_mesh.m's shaders: a pulling vertex shader whose depth is its uniform's z, the test lean kernel (its storage counter
+# and its viewport mask from vertex t's position x bit 0), and their mesh library (dm_mesh, dm_mesh_run) under the keys the test uses
+MESH_RUN_VS = MESH_VS.replace('out.gl_Position = in.m_0 * spvDescriptorSet0.c[0];', 'out.gl_Position = float4(in.m_0.xy, spvDescriptorSet0.c[0].z, 1.0);') \
+                     .replace('    out.gl_Position = in.m_0;\n', '    out.gl_Position = float4(in.m_0.xy, spvDescriptorSet0.c[0].z, 1.0);\n')
+
+
+def mesh_fixture(out):
+    lean, reads = dmsh_geometry.lean(LEAN_KERNEL, 134)
+    files = {'vertex': MESH_RUN_VS + '\nfragment void depth_only() {}\n', 'lean': MESH_HEAD + '\n' + lean,
+             '7e57000000000a00_7e57000000000b00_m3': dmsh_mesh.compose(MESH_RUN_VS, MESH_HEAD + '\n' + lean, reads)}
+    for name, src in files.items():
+        path = Path(out, name + '.metal'); path.write_text(src)
+        subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-c', '-w', '-fmodules-cache-path=' + out + '/modules', str(path), '-o', str(path.with_suffix('.air'))], check=True)
+        subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', str(path.with_suffix('.air')), '-o', str(path.with_suffix('.metallib'))], check=True)
+    Path(out, 'reads.json').write_text(json.dumps(reads))
+
+
+class PointSize(unittest.TestCase):
+    def drop(self, src):
+        builder = Path(dmsh_geometry.__file__).with_name('dmsh_build.py').read_text()
+        node = next(n for n in ast.parse(builder).body if isinstance(n, ast.FunctionDef) and n.name == 'drop_point_size')
+        ns = {'re': re, 'sys': sys}
+        exec(ast.get_source_segment(builder, node), ns)
+        return ns['drop_point_size'](src)
+
+    def test_a_write_goes(self):
+        self.assertNotIn('PointSize', self.drop('vertex main0l_out main0_l(uint i [[vertex_id]])\n{\n    main0l_out out = {};\n    out.gl_PointSize = 1.0;\n    return out;\n}\n'))
+
+    def test_a_reference_takes_a_local(self):
+        # The translated body is a function of its own, which writes the output through its argument: that argument has no member to name in an entry point without the point size
+        out = self.drop('vertex main0l_out main0_l(uint i [[vertex_id]])\n{\n    main0l_out out = {};\n    _88(out.gl_Position, out.gl_PointSize);\n    return out;\n}\n'
+                        'vertex main0l_out main0_lz(uint i [[vertex_id]])\n{\n    main0l_out out = {};\n    _88(out.gl_Position, out.gl_PointSize);\n    return out;\n}\n')
+        self.assertNotIn('out.gl_PointSize', out)
+        self.assertEqual(out.count('float dmsh_point_size = 1.0;'), 2)
+        self.assertEqual(out.count('_88(out.gl_Position, dmsh_point_size);'), 2)
+
+
 if __name__ == '__main__':
+    if len(sys.argv) == 3 and sys.argv[1] == '--fixture': mesh_fixture(sys.argv[2]); sys.exit(0)
     unittest.main()

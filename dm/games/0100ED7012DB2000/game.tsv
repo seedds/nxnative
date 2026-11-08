@@ -1,0 +1,41 @@
+# Game profile of ROMANCE OF THE THREE KINGDOMS XIV: Diplomacy and Strategy Expansion Pack (Switch, update v458752 = 1.0.10, with its 43 DLC). Plays on the Mac
+# Format: see dm/games/README.md
+# Koei Tecmo's KTGL engine on NVN, SDK 10.4.1. Modules main + subsdk0 (NintendoSDK_movie: the MP4 logo, opening and event movies) + sdk.
+# RomFS: Age of Calamity's RDB layout (0002/*.rdb indexes over .rdb.bin* files and 0002/data/*.file), 7 GB; movies, scenarios (.s14) and messages in loose folders beside it.
+# Started from the NSP script's provisional profile, which booted to the strategy map with no change
+
+# ---- Identity ----
+title_id	0100ED7012DB2000
+program_id	0100ED7012DB2000
+
+# ---- App ----
+# Game name: only a label for profile listings and the Mac window title; the iOS app name is the game name in the base NSP, and the bundle ID comes from the base game title ID (build_ipa.sh / NSP script)
+name	ROMANCE OF THE THREE KINGDOMS XIV: Diplomacy and Strategy Expansion Pack
+ipa	RomanceOfTheThreeKingdomsXivDiplomacyAndStrategy.ipa
+app_category	public.app-category.strategy-games
+
+# ---- Versions ----
+build	v458752	1.0.10	main=1a971cc40b6d5b3f7cc3317856d822fe	subsdk0=84e50460493a12f26100e5150fbff271	sdk=d9add76fc264863d85fbbd1d70076c76
+package	v458752
+shader_versions	v458752
+
+# ---- Files ----
+# load order as on Horizon: main, subsdk*, sdk (subsdk0 = NintendoSDK_movie)
+modules	main subsdk0 sdk
+romfs_marker	0002/ScreenLayout.rdb.bin
+zip_store	.bin:.bin1:.bin10:.bin11:.bin14:.bin14_0:.bin15:.bin16:.bin18:.bin2:.bin20:.bin21:.bin3:.bin4:.bin5:.bin6:.bin7:.bin8:.file:.mp4:.metallib
+
+# ---- Memory ----
+# The NPDM declares no system resource (META +0x14 = 0): nninitStartup sets a heap of the pool − used memory. The 4 GB block of the other games without virtual address memory
+# (256 MB in front + 256 MB alias region + 256 MB stack region + 3.25 GB heap region)
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x0
+# The rewritten modules take more than the default 64 MB of used memory, which SetHeapSize checks the request against (the NSP script's measure: 70 MB)
+mem_used	0x4600000
+
+# ---- Shader split (shader_split.py; KTGL G2S containers in the RDB entries under 0002, GLSLC outputs in main; the other groups hold none) ----
+shader_groups	/0002/=0002 /DLC_PATCH/=dlcpatch /0003/=0003 /0010_EN/=0010en /0003_SC/=0003sc /0004/=0004 /0000/=0000 /0003_EN/=0003en /0001_EN/=0001en
+shader_note	ROMANCE OF THE THREE KINGDOMS XIV: Diplomacy and Strategy Expansion Pack shaders

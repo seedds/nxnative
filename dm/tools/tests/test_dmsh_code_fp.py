@@ -1,0 +1,99 @@
+"""dmsh_chain.code_form, the text dmsh_build.py's CODE_FP hashes: edits that cannot change what the build computes leave it alone, every other edit changes it. And the helpers of
+dmsh_build.py that CODE_FP and the chain version have to cover."""
+import ast
+from pathlib import Path
+import sys
+import unittest
+from unittest import mock
+
+REPO = Path(__file__).resolve().parents[3]
+TOOLS = REPO / 'dm/gfx/tools'
+sys.path.insert(0, str(TOOLS))
+import dmsh_chain  # noqa: E402
+
+BASE = '''"""module doc"""
+import re
+LIMIT = 8   # a limit
+def f(x, y=1):
+    """what f does"""
+    s = "text"
+    return x + y if x else len(s)
+class C:
+    """a class"""
+    def m(self): return LIMIT
+'''
+
+
+def form(src, blank=()): return dmsh_chain.code_form(src, blank)
+
+
+class CodeForm(unittest.TestCase):
+    def test_edits_that_cannot_change_output_keep_the_form(self):
+        for what, src in (
+                ('comment', BASE.replace('# a limit', '# another limit, longer').replace('s = "text"', '# note\n    s = "text"')),
+                ('docstring', BASE.replace('what f does', 'rewritten').replace('module doc', 'x').replace('"""a class"""', '"""b"""')),
+                ('docstring removed', BASE.replace('    """what f does"""\n', '')),
+                ('blank lines and layout', BASE.replace('def f(x, y=1):', '\n\ndef f( x,y = 1 ):').replace('LIMIT = 8', 'LIMIT=8').replace("'", '"'))):
+            with self.subTest(what):
+                self.assertEqual(form(src), form(BASE))
+
+    def test_edits_that_can_change_output_change_the_form(self):
+        for what, src in (
+                ('operator', BASE.replace('x + y', 'x - y')),
+                ('constant', BASE.replace('LIMIT = 8', 'LIMIT = 9')),
+                ('float constant', BASE.replace('LIMIT = 8', 'LIMIT = 8.0')),
+                ('string literal', BASE.replace('"text"', '"texts"')),
+                ('default argument', BASE.replace('y=1', 'y=2')),
+                ('statement', BASE.replace('    s = "text"\n', '    s = "text"\n    s += "!"\n')),
+                ('name', BASE.replace('def m(self)', 'def n(self)')),
+                ('bare string statement that is not a docstring', BASE.replace('    s = "text"\n', '    s = "text"\n    "not a docstring"\n')),
+                ('decorator', BASE.replace('def f(', '@staticmethod\ndef f('))):
+            with self.subTest(what):
+                self.assertNotEqual(form(src), form(BASE))
+
+    def test_blanked_function_bodies(self):
+        self.assertEqual(form(BASE.replace('x + y', 'x * y'), {'f'}), form(BASE, {'f'}))
+        self.assertNotEqual(form(BASE.replace('x + y', 'x * y'), {'m'}), form(BASE, {'m'}))
+        self.assertNotEqual(form(BASE.replace('def f(x, y=1)', 'def f(x, y=2)'), {'f'}), form(BASE, {'f'}))   # the signature stays
+
+    def test_python_version_is_part_of_the_form(self):
+        with mock.patch.object(sys, 'version_info', (3, 99, 0)):
+            other = form(BASE)
+        self.assertNotEqual(other, form(BASE))
+
+    def test_real_build_script(self):
+        src = (TOOLS / 'dmsh_build.py').read_text()
+        self.assertEqual(form(src + '\n# trailing comment\n'), form(src))
+        self.assertNotEqual(form(src + '\nX = 1\n'), form(src))
+        self.assertNotEqual(form(src.replace("'--msl-version', '20300'", "'--msl-version', '20400'")), form(src))
+
+
+NO_OUTPUT = {'dmsh_mtlcache', 'dmsh_pch'}   # they only make a compile cheaper, and never change an output
+
+
+class Coverage(unittest.TestCase):
+    """A helper of dmsh_build.py that decides what a shader's library holds has to change the chain version, and, if it runs only when a shader misses the cache, that shader's key:
+    a hit restores the old output and skips it."""
+    def setUp(self):
+        tree = ast.parse((TOOLS / 'dmsh_build.py').read_text())
+        names = {a.asname or a.name: a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
+        self.imported = {m for m in names.values() if m.startswith('dmsh_')}
+        self.code_fp = next(n for n in ast.walk(tree) if isinstance(n, ast.Assign) and getattr(n.targets[0], 'id', '') == 'CODE_FP')
+        whole = next(n for n in ast.walk(self.code_fp) if isinstance(n, ast.comprehension)).iter   # the modules it hashes whole
+        self.keyed = {names[n.id] for n in ast.walk(whole) if isinstance(n, ast.Name) and names.get(n.id, '').startswith('dmsh_')}
+
+    def test_in_the_chain_version(self):
+        chain = {Path(f).name for f in dmsh_chain.FILES}
+        self.assertEqual({m for m in self.imported if m + '.py' not in chain} - NO_OUTPUT, set())
+
+    def test_in_the_shader_key(self):
+        # made again from the restored MSL on every build, a hit too: dmsh_fetch (but for screen_varyings), dmsh_vin, dmsh_pull, dmsh_mesh (and dmsh_side's dmsh_alpha, dmsh_logic, which
+        # only its unit calls). dmsh_side is keyed: fs_uint and fs_dual write main0's shared body. dmsh_facts: its row is in the key
+        self.assertEqual(self.imported - self.keyed - NO_OUTPUT - {'dmsh_fetch', 'dmsh_vin', 'dmsh_pull', 'dmsh_mesh', 'dmsh_facts'}, set())
+
+    def test_screen_varyings_in_the_shader_key(self):   # raster_facts takes it when a shader misses the cache, and a hit restores what it gave from the reflection
+        self.assertIn('screen_varyings', {n.attr for n in ast.walk(self.code_fp) if isinstance(n, ast.Attribute)})
+
+
+if __name__ == '__main__':
+    unittest.main()

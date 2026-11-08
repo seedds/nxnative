@@ -116,6 +116,7 @@ class SnowdropTests(unittest.TestCase):
             nso = bytearray(0x1100)
             nso[:4] = b'NSO0'
             struct.pack_into('<3I', nso, 0x10, 0x100, 0, 0x1000)
+            struct.pack_into('<3I', nso, 0x20, 0x1100, 0x1000, 0)   # empty ro and data after the text, as Horizon's loader requires
             struct.pack_into('<3I', nso, 0x30, 0x1100, 0x1000, 0)
             struct.pack_into('<I', nso, 0x60, 0x1000)
             main = root / 'main'; main.write_bytes(nso)

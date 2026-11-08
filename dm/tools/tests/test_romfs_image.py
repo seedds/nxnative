@@ -7,6 +7,7 @@ import shlex
 import struct
 import subprocess
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -56,6 +57,21 @@ class Images(unittest.TestCase):
         self.assertEqual(self.content('data/z'), b'')
         self.assertTrue(image.read_index(self.dst)['data/empty'][0])
 
+    def test_format_mismatches_name_zs_files_that_are_not_zstd(self):
+        tex = self.src / 'Tex'; tex.mkdir()
+        (tex / 'ok.bntx.zs').write_bytes(b'\x28\xb5\x2f\xfd' + b'frame')
+        (tex / 'skip.bntx.zs').write_bytes(b'\x53\x2a\x4d\x18' + b'\0' * 8)   # a skippable frame (any of 0x184d2a50..5f)
+        (tex / 'UPPER.ZS').write_bytes(b'\x28\xb5\x2f\xfd')
+        (tex / 'zeros.bntx.zs').write_bytes(b'\0' * 12288 + b'\x28\xb5\x2f\xfd')   # as on a damaged NUP of Ocarina of Time
+        (tex / 'short.zs').write_bytes(b'\x28\xb5')
+        (tex / 'empty.zs').write_bytes(b'')   # no bytes, no promise broken: left out
+        (tex / 'plain.bntx').write_bytes(b'\0' * 16)   # no format promised by the name
+        image.pack(self.src, self.dst)
+        seen = []
+        bad = image.format_mismatches(self.dst, lambda done, total: seen.append((done, total)))
+        self.assertEqual(sorted((p, size, head) for p, size, head in bad), [('Tex/short.zs', 2, b'\x28\xb5'), ('Tex/zeros.bntx.zs', 12292, b'\0\0\0\0')])
+        self.assertEqual(seen, [(0, 5)])
+
     def test_reuse_rebuilds_changed_added_removed_and_renamed_files(self):
         (self.src / 'a').write_bytes(b'old')
         image.pack(self.src, self.dst, reuse=True)
@@ -82,6 +98,19 @@ class Images(unittest.TestCase):
         image.pack(self.src, self.dst)
         self.assertNotEqual(image.file_identity(self.dst), identity)
 
+    def test_reuse_survives_a_new_device_number(self):   # macOS numbers a volume at each mount: the Data volume went from 16777234 to 16777232 across a reboot, with the same inode, size and times
+        (self.src / 'a').write_bytes(b'data')
+        image.pack(self.src, self.dst, reuse=True)
+        digest, identity = image.source_digest(self.src, image.entries(self.src)), image.file_identity(self.dst)
+        real = os.stat
+        def remounted(path, *args, **kw):
+            s = real(path, *args, **kw)
+            return SimpleNamespace(st_dev=s.st_dev + 2, st_ino=s.st_ino, st_size=s.st_size, st_mtime_ns=s.st_mtime_ns, st_ctime_ns=s.st_ctime_ns)
+        with patch.object(image.os, 'stat', remounted):
+            self.assertEqual(image.file_identity(self.dst), identity)
+            self.assertEqual(image.source_digest(self.src, image.entries(self.src)), digest)
+            self.assertTrue(image.reusable(str(self.dst), digest))
+
     def test_changed_source_during_pack_preserves_previous_image(self):
         (self.src / 'a').write_bytes(b'old'); image.pack(self.src, self.dst)
         original = self.dst.read_bytes()
@@ -102,7 +131,7 @@ class Images(unittest.TestCase):
         resources.write_text('DM_RESOURCE_ROMFS=' + shlex.quote(str(self.src)) + '\n')
         bin_dir = self.root / 'bin'; bin_dir.mkdir()
         xcrun = bin_dir / 'xcrun'
-        xcrun.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$ROMFS_PUSH_ARGS"\nexit "${ROMFS_PUSH_RC:-0}"\n')
+        xcrun.write_text('#!/bin/sh\nprintf "%s\\n" "$@" >> "$ROMFS_PUSH_ARGS"\nexit "${ROMFS_PUSH_RC:-0}"\n')
         xcrun.chmod(0o755)
         args_file = self.root / 'copy-args'
         env = dict(os.environ, PATH=str(bin_dir) + os.pathsep + os.environ['PATH'], ROMFS_PUSH_ARGS=str(args_file))
@@ -153,6 +182,88 @@ class Images(unittest.TestCase):
                     off, fmt, value = change; struct.pack_into(fmt, raw, off, value)
                 else: raw = change
                 self.dst.write_bytes(raw); self.assertFalse(self.valid())
+
+
+class DlcTransfers(unittest.TestCase):
+    """Run the push helper against devicectl's directory merge/replacement semantics."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix='dlc push '); self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        source = self.root / 'RomFS'; source.mkdir(); (source / 'marker').write_text('base game')
+        self.img = self.root / 'RomFS.img'; image.pack(source, self.img)
+        self.aoc = self.root / 'add-on content'; self.aoc.mkdir()
+        self.device = self.root / 'device'; self.device.mkdir()
+        self.scratch = self.root / 'scratch'; self.scratch.mkdir()
+        bin_dir = self.root / 'bin'; bin_dir.mkdir()
+        xcrun = bin_dir / 'xcrun'
+        xcrun.write_text('''#!/usr/bin/env python3
+import os, shutil, sys
+from pathlib import Path
+args = sys.argv[1:]
+assert args[:4] == ['devicectl', 'device', 'copy', 'to']
+src = Path(args[args.index('--source') + 1])
+dst = Path(os.environ['DLC_PUSH_DEVICE']) / args[args.index('--destination') + 1]
+if dst.name == 'aoc' and os.environ.get('DLC_PUSH_FAIL'): sys.exit(int(os.environ['DLC_PUSH_FAIL']))
+dst.parent.mkdir(parents=True, exist_ok=True)
+if src.is_dir():
+    # devicectl defaults to merging; only an explicit true removes old content.
+    if '--remove-existing-content' in args and args[args.index('--remove-existing-content') + 1] == 'true' and dst.exists(): shutil.rmtree(dst)
+    shutil.copytree(src, dst, dirs_exist_ok=True)
+else: shutil.copyfile(src, dst)
+''')
+        xcrun.chmod(0o755)
+        self.env = dict(os.environ, PATH=str(bin_dir) + os.pathsep + os.environ['PATH'],
+                        DLC_PUSH_DEVICE=str(self.device), TMPDIR=str(self.scratch))
+
+    def push(self, aoc=None, *, image_only=False):
+        resources = self.root / 'resources.env'
+        resources.write_text('DM_RESOURCE_ROMFS=' + shlex.quote(str(self.img)) + '\n' +
+                             ('DM_RESOURCE_AOC=' + shlex.quote(str(aoc)) + '\n' if aoc is not None else ''))
+        return subprocess.run(['bash', str(REPO / 'scripts/push_romfs.sh'), 'fixture-device', 'fixture.bundle',
+                               str(self.img if image_only else resources)], env=self.env, capture_output=True, text=True)
+
+    def test_smaller_dlc_set_replaces_images_and_legacy_folders(self):
+        (self.aoc / '1.img').write_text('old')
+        (self.aoc / '2').mkdir(); (self.aoc / '2/marker').write_text('legacy DLC')
+        result = self.push(self.aoc); self.assertEqual(result.returncode, 0, result.stderr)
+        remote = self.device / 'Documents/aoc'
+        self.assertEqual({p.name for p in remote.iterdir()}, {'1.img', '2'})
+        (self.aoc / '1.img').write_text('updated'); shutil.rmtree(self.aoc / '2')
+        result = self.push(self.aoc); self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual({p.name for p in remote.iterdir()}, {'1.img'})
+        self.assertEqual((remote / '1.img').read_text(), 'updated')
+
+    def test_empty_dlc_set_clears_previous_content(self):
+        for aoc in ('', None, self.aoc):
+            with self.subTest(aoc=aoc):
+                remote = self.device / 'Documents/aoc'; remote.mkdir(parents=True, exist_ok=True)
+                (remote / '1.img').write_text('stale')
+                self.env['DM_RESOURCE_AOC'] = str(self.root / 'inherited-stale-path')
+                result = self.push(aoc); self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertTrue(remote.is_dir()); self.assertEqual(list(remote.iterdir()), [])
+                self.assertEqual(list(self.scratch.iterdir()), [])
+
+    def test_image_only_push_preserves_dlc(self):
+        remote = self.device / 'Documents/aoc'; remote.mkdir(parents=True)
+        (remote / '1.img').write_text('keep')
+        self.env['DM_RESOURCE_AOC'] = str(self.aoc)
+        result = self.push(image_only=True); self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((remote / '1.img').read_text(), 'keep')
+        self.assertEqual((self.device / 'Documents/romfs.img').read_bytes(), self.img.read_bytes())
+
+    def test_missing_dlc_stops_before_any_transfer(self):
+        result = self.push(self.root / 'missing')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Add-on content unavailable', result.stderr)
+        self.assertEqual(list(self.device.iterdir()), [])
+
+    def test_dlc_transfer_failure_is_reported(self):
+        self.env['DLC_PUSH_FAIL'] = '7'
+        result = self.push(self.aoc)
+        self.assertEqual(result.returncode, 7)
+        self.assertNotIn('DLC on the phone', result.stdout)
+        self.assertNotIn('game files on the phone', result.stdout)
 
 
 if __name__ == '__main__': unittest.main()

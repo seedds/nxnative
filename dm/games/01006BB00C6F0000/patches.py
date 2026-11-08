@@ -13,3 +13,10 @@ CUTS = {
     (0x10cd070, '080040f9', 'c0035fd6', 'physics completion task release (calls its own destructor): ldr x8,[x0] → ret (no longer destroyed; the step function rebuilds it in place every step)'),
   ],
 }
+
+# How general each patch is and could be (dm/tools/docs_patches.py "Binding", listed in docs/agents/game-patches.md): what, its binding now, the loosest it could have (goal),
+# purpose, why; blocked or kept: why the gap stays open (cannot close yet, or left open on purpose); checked: what was checked on game files (else a judgement)
+BINDING = [
+    {'what': 'PhysX completion task release', 'now': 'build', 'goal': 'game', 'purpose': 'race',
+     'why': "a lifetime race in the game's own completion task (its release slot serves this one vtable)"},
+]

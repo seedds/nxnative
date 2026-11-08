@@ -166,7 +166,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
             EmitStore(context, StorageKind.SharedMemory, op.LsSize, GetSrcReg(context, op.SrcA), op.Dest, Imm24ToSInt(op.Imm24));
         }
 
-        private static Operand EmitLoadConstant(EmitterContext context, Operand slot, Operand offset)
+        // banks: the banks a run-time slot can be, when the caller knows them (Ampere's LDC .IS, ARuntimeBanks); else the accessor's bound banks
+        private static Operand EmitLoadConstant(EmitterContext context, Operand slot, Operand offset, uint? banks = null)
         {
             Operand vecIndex = context.ShiftRightU32(offset, Const(2));
             Operand elemIndex = context.BitwiseAnd(offset, Const(3));
@@ -180,7 +181,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             {
                 Operand value = Const(0);
 
-                uint cbUseMask = context.TranslatorContext.GpuAccessor.QueryConstantBufferUse();
+                uint cbUseMask = banks ?? context.TranslatorContext.GpuAccessor.QueryConstantBufferUse();
 
                 while (cbUseMask != 0)
                 {
@@ -197,6 +198,23 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
                 return value;
             }
+        }
+
+        // nxnative: a float atomic add (RED.F32.FTZ.RN and ATOM's float form), as a compare-and-swap loop on the word: neither SPIR-V as the chain uses it nor Metal's texture atomics have one. It was
+        // dropped with a log line, so agl's scene analysis summed nothing: Ocarina of Time's probe_analyze reads the probes' luminance into a buffer the CPU turns into exposure, and at 0 the game took
+        // its full correction, several times too bright. Returns the value before the add
+        private static Operand EmitAtomicAddF32(EmitterContext context, StorageKind storageKind, Operand e0, Operand e1, Operand value)
+        {
+            Operand lblRetry = Label();
+            context.MarkLabel(lblRetry);
+
+            Operand expected = context.Load(storageKind, e0, e1);
+            Operand sum = context.FPAdd(expected, value);
+            Operand found = context.AtomicCompareAndSwap(storageKind, e0, e1, expected, sum);
+
+            context.BranchIfTrue(lblRetry, context.ICompareNotEqual(found, expected));
+
+            return found;
         }
 
         private static Operand EmitAtomicOp(
@@ -216,6 +234,10 @@ namespace Ryujinx.Graphics.Shader.Instructions
                     if (type is AtomSize.S32 or AtomSize.U32)
                     {
                         res = context.AtomicAdd(storageKind, e0, e1, value);
+                    }
+                    else if (type == AtomSize.F32FtzRn)
+                    {
+                        res = EmitAtomicAddF32(context, storageKind, e0, e1, value);
                     }
                     else
                     {
@@ -371,6 +393,9 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             Operand srcA = context.Copy(new Operand(new Register(ra, RegisterType.Gpr)));
 
+            // nxnative: the words of one LDG.64 / LDG.128 are marked as one access (Operation.GlobalVectorCount, as in InstEmitAmpereMem.ALdg)
+            bool vector = count > 1 && storageKind == StorageKind.GlobalMemory && rd + count <= RegisterConsts.RegisterZeroIndex;
+
             for (int index = 0; index < count; index++)
             {
                 Register dest = new(rd + index, RegisterType.Gpr);
@@ -381,6 +406,12 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 }
 
                 Operand value = context.Load(storageKind, context.IAdd(srcA, Const(offset + index * 4)), addrHigh);
+
+                if (vector && value.AsgOp is Operation load)
+                {
+                    load.GlobalVectorCount = count;
+                    load.GlobalVectorWord = index;
+                }
 
                 context.Copy(Register(dest), value);
             }

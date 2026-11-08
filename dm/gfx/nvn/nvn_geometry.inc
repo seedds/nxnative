@@ -472,7 +472,10 @@ static id<MTLRenderPipelineState> geo_mesh_pso(NvProg *pr) { return g_geo_mesh.p
 // any operation but bindings, a program bind and draws (geo_mesh_keeps, from mtl_exec), a draw that is not a mesh draw of the same pair (draw_, geo_mesh_draw), and the end of
 // the pass (rp_end). Bindings only change S and dirty flags, so nothing else reaches the encoder in between. The draws of a run then run in one dispatch, whose threadgroups the
 // GPU may rasterize in any order, so a run takes only draws whose result does not depend on their order: no colour writes, no stencil writes, depth written only with a test that
-// keeps the nearest (or the farthest), and a fragment shader with no resources (the fragment table is not in the record). Occlusion query counting may be on (it stays on for the rest
+// keeps the nearest (or the farthest), and a fragment shader that writes no memory. The fragment table is not in the record: the run is drawn with the table as it is then, so a
+// change to it while a run waits draws the run first (enc_r_args, geo_mesh_ft_change), and every draw of a run had the same fragment bindings. Before, a fragment shader with
+// any resource kept its draws single: Donkey Kong Bananza's alpha-tested prepass draws (fragment 7f7781d3621f0ce6, two uniform buffers and a discard) drew 1,700-2,800 mesh
+// draws a frame one by one, 14-23 fps in those areas. Occlusion query counting may be on (it stays on for the rest
 // of the game after the first samples-passed reset): a report ends the run (geo_mesh_keeps) and a pass keeps one slot, so a query's interval holds whole runs, and whether any of its
 // samples passed is the same in any order (the nearest fragment of each pixel passes whatever the order), which is what occlusion tests and conditional rendering ask. Only the exact
 // count can differ by fragments another order rejects. Donkey Kong Bananza resets that counter once and draws its depth prepass with counting on: refused, no draw ever joined a run.
@@ -481,7 +484,7 @@ typedef struct { uint64_t slot[31]; geo_mesh_args d; uint32_t group_end, n; } ge
 enum { GEO_MESH_RUN = 1024 };
 static struct { int n; uint32_t groups, prims; __unsafe_unretained id<MTL4RenderCommandEncoder> en; __unsafe_unretained id<MTLRenderPipelineState> ps, run_ps;
                 __unsafe_unretained NvShader *vs, *fs, *lean; __unsafe_unretained id<MTLFunction> fn; geo_mesh_rec r[GEO_MESH_RUN]; } g_mrun;
-static uint64_t g_mrun_draws, g_mrun_runs, g_mrun_ends[4];   // draws drawn in runs, runs; runs ended by an operation, another draw, the pass end, a full table
+static uint64_t g_mrun_draws, g_mrun_runs, g_mrun_ends[5];   // draws drawn in runs, runs; runs ended by an operation, another draw, the pass end, a full table, a change of the fragment table
 static int geo_mesh_run_on(void) {
     static int on = -1;
     if (on < 0) { const char *e = getenv("DM_NVN_GEO_MESH_RUN"); on = !(e && !strcmp(e, "0")); if (!on) MLOG("DM_NVN_GEO_MESH_RUN=0: every mesh draw is a dispatch of its own"); }
@@ -500,13 +503,14 @@ static void geo_mesh_flush_(int why) {
     [en setArgumentTable:g_vt atStages:MTLRenderStageMesh];
     enc_r_vbuf(en, GEO_MESH_DRAW_SLOT, b.gpuAddress + o);
     [en drawMeshThreadgroups:MTLSizeMake(g_mrun.groups, 1, 1) threadsPerObjectThreadgroup:MTLSizeMake(1, 1, 1) threadsPerMeshThreadgroup:MTLSizeMake(3 * g_mrun.prims, 1, 1)];
-    [en setRenderPipelineState:g_mrun.ps];   // as the draws left it
+    [en setRenderPipelineState:g_enc_pso ?: g_mrun.ps];   // as the draws left it (or the draw being encoded set it: a fragment table change, geo_mesh_ft_change)
     g_mrun_draws += (uint64_t)n; g_mrun_runs++;
     static int once; if (!once++) MLOG("geometry mesh run: first run, %d draws of vertex %s kernel %s in one dispatch of %u threadgroups", n, g_mrun.vs->key, g_mrun.lean->key, g_mrun.groups);
 }
 static void geo_mesh_flush(void) { geo_mesh_flush_(0); }
 static void geo_mesh_flush_draw(void) { geo_mesh_flush_(1); }
 static void geo_mesh_flush_pass(void) { geo_mesh_flush_(2); }
+static void geo_mesh_ft_change(void) { if (g_mrun.n) geo_mesh_flush_(4); }
 // The operations a waiting run can wait across (mtl_exec): they change bindings, the program or nothing, and draws decide for themselves
 static int geo_mesh_keeps(uint32_t op) {
     switch (op) {
@@ -517,11 +521,12 @@ static int geo_mesh_keeps(uint32_t op) {
 }
 // Whether the draw's result is the same in any order among the draws of a run (see above); the first refusal of each kind is logged
 static int geo_mesh_run_fits(NvProg *pr) {
-    static const char *const why[] = {"its fragment shader has resources", "it writes colour", "it writes stencil", "its depth test does not keep the nearest or the farthest"};
+    static const char *const why[] = {"its fragment shader writes memory", "it writes colour", "it writes stencil", "its depth test does not keep the nearest or the farthest"};
     static uint8_t logged;
     NvShader *fs = pr->sh[1]; int r = -1;
     uint32_t attached = 0; for (int i = 0; i < 8; i++) if (g_pass.cfmt[i]) attached |= 1u << i;
-    if (fs && (fs->rf.nb || fs->rf.bindless || fs->rf.dyn)) r = 0;
+    int fw = 0; if (fs) for (int i = 0; i < fs->rf.nb; i++) fw |= fs->rf.b[i].rw || fs->rf.b[i].atom || fs->rf.b[i].kind == NVN_RB_GMEML;   // its reads are the same for every draw (geo_mesh_ft_change)
+    if (fw) r = 0;
     else if (draw_color_writes(pr) & attached) r = 1;
     else if (g_pass.hs && S.ds.st && (S.st_wmask[0] || S.st_wmask[1])) r = 2;
     else if (g_pass.hd && S.ds.dw && !(S.ds.dt && (S.ds.df == 1 || S.ds.df == 2 || S.ds.df == 4 || S.ds.df == 5 || S.ds.df == 7))) r = 3;   // NVN NEVER, LESS, LEQUAL, GREATER, GEQUAL
@@ -734,7 +739,9 @@ static int geo_mesh_draw(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
     g_geo_omit_colors = geo_color_omit();
     draw(&synthetic, NULL);
     g_geo_omit_colors = 0;
-    g_geo_program = nil; g_geo_mesh.on = 0; args_dirty_all();
+    // The draw bound the geometry stage's arguments in the vertex table and the vertex stage's for its raster program: those stages encode again. The fragment stage's block is the one
+    // the raster program's fragment shader had, from the same bindings, so it stays: re-encoded at every mesh draw, it moved in the frame arena and its address split every run (geo_mesh_ft_change)
+    { uint8_t f = g_args_dirty[1]; g_geo_program = nil; g_geo_mesh.on = 0; args_dirty_all(); if (!g_geo_mesh.miss) g_args_dirty[1] = f; }
     if (g_geo_mesh.miss) { g_geo_mesh_wait++; return 0; }
     // the kernel's storage writes, noted as its arguments were encoded (always: geo_mesh_encode), so a drain's list of later writes holds them (g_wr_geo, drw_valid)
     swrite_note(pr); udc_note_draw(pr, 0); g_wr_epoch++; g_wr_geo++; g_mdx_epoch++;

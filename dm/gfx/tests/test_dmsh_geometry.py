@@ -573,7 +573,8 @@ MESH_RUN_VS = MESH_VS.replace('out.gl_Position = in.m_0 * spvDescriptorSet0.c[0]
 
 def mesh_fixture(out):
     lean, reads = dmsh_geometry.lean(LEAN_KERNEL, 134)
-    files = {'vertex': MESH_RUN_VS + '\nfragment void depth_only() {}\n', 'lean': MESH_HEAD + '\n' + lean,
+    keep = '\nfragment void depth_keep(constant spvDescriptorSetBuffer0& spvDescriptorSet0 [[buffer(0)]])\n{\n    if (spvDescriptorSet0.c[0].x > 0.5) discard_fragment();\n}\n'   # a fragment shader with a resource: its uniform discards
+    files = {'vertex': MESH_RUN_VS + '\nfragment void depth_only() {}\n' + keep, 'lean': MESH_HEAD + '\n' + lean,
              '7e57000000000a00_7e57000000000b00_m3': dmsh_mesh.compose(MESH_RUN_VS, MESH_HEAD + '\n' + lean, reads)}
     for name, src in files.items():
         path = Path(out, name + '.metal'); path.write_text(src)

@@ -234,6 +234,9 @@ if UE_RING is not None:
     print(f'{NAME}: {ue_ring_why}')
 elif ue_ring_why.startswith('[RED] '): print(f'[RED] {NAME}: {ue_ring_why[6:]}: its dynamic buffers keep 3 copies')
 
+# A main with frame step stubs takes the page after the key page as its state page ("Frame step in whole vsyncs"). The appended layout rounds the patch area up to 64 KB, which leaves
+# that page free unless the key page ends on a 64 KB boundary (Hades II 1.0.131248: key page 0x590c000, patch area 0x5910000); the patch area then starts 64 KB later
+if not FAR and NAME == 'main' and (BUILD_ID in PATCHES['FRAME_STEP'] or FS_MATCH) and KEY_PAGE_OFF + 0x8000 > PATCH_OFF: PATCH_OFF += 0x10000
 md = Cs(CS_ARCH_ARM64, CS_MODE_ARM); md.detail = True
 patch = bytearray(); fix = []; gates = []; stats = {}
 patch_front, patch_back, PATCH_BASE = patch, bytearray(), PATCH_OFF   # the area emit() writes into and its offset: the front one unless TWO puts a site in the back one

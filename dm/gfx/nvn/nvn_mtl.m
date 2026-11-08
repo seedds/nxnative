@@ -14277,12 +14277,34 @@ static void td_layer_count(id<MTLTexture> t, NSUInteger lv) { if (t && (t.textur
 static void td_dump(void);
 // DM_NVN_TEXDUMP=size=WxH:path instead picks the frame by content: the first frame that opens a render pass whose first color attachment level is WxH (for one-off work whose frame differs between runs)
 static unsigned g_td_w, g_td_h;
+// DM_NVN_TEXDUMP=first-last:path dumps every frame of that range (inclusive), each file name ending in _F<frame> before its extension (a serial that lives across frames would
+// otherwise be overwritten). DM_NVN_TEXDUMP_DEPTH=1 also saves the depth attachments of the dumped frames (any size, or only WxH with DM_NVN_TEXDUMP_DEPTH=WxH): the raw
+// depth (<name>_depth.raw, header line: width height Metal format bytes per row) and an 8-bit PGM stretched over the depths below 1 (<name>_depth.pgm).
+// For the shadow investigation: a per-actor shadow map is a depth-only pass whose texture is made anew each frame, so neither DM_NVN_TEXRAW (by serial) nor the colour dump reaches it
+static long g_td_last = -1; static int g_td_depth; static unsigned g_td_dw, g_td_dh; static NSMutableArray *g_td_dlist;
+static void td_name(char *path, size_t n, long idx, const char *suffix) {   // the dump path for idx, with _F<frame> (range mode) and then suffix, or else the extension, at the end
+    snprintf(path, n, g_td_path, (int)idx);
+    char *dot = strrchr(path, '.'), *slash = strrchr(path, '/'); char ext[16] = "";
+    if (dot && (!slash || dot > slash)) { strlcpy(ext, dot, sizeof ext); *dot = 0; }
+    if (g_td_last >= 0) { char fr[32]; snprintf(fr, sizeof fr, "_F%ld", g_td_frame); strlcat(path, fr, n); }
+    strlcat(path, suffix ? suffix : ext, n);
+}
+static void td_dump_depth(void);
 void td_note(MTL4RenderPassDescriptor *pd, NSUInteger nc) {
-    if (g_td_frame == -2) { const char *e = getenv("DM_NVN_TEXDUMP"), *c = e ? strchr(e, ':') : NULL; g_td_frame = c ? atol(e) : -1; g_td_path = c ? c + 1 : NULL; g_td_list = [NSMutableArray array];
+    if (g_td_frame == -2) { const char *e = getenv("DM_NVN_TEXDUMP"), *c = e ? strchr(e, ':') : NULL; g_td_frame = c ? atol(e) : -1; g_td_path = c ? c + 1 : NULL; g_td_list = [NSMutableArray array]; g_td_dlist = [NSMutableArray array];
         if (c && !strncmp(e, "size=", 5) && sscanf(e + 5, "%ux%u", &g_td_w, &g_td_h) == 2) g_td_frame = LONG_MAX;
-        if (c && !strncmp(e, "layers=", 7)) { g_td_layers = atoi(e + 7); g_td_frame = (long)atomic_load(&g_cur_frame); } }
+        if (c && !strncmp(e, "layers=", 7)) { g_td_layers = atoi(e + 7); g_td_frame = (long)atomic_load(&g_cur_frame); }
+        if (c && isdigit((unsigned char)*e)) { const char *m = strchr(e, '-'); if (m && m < c) { g_td_last = atol(m + 1); if (g_td_last < g_td_frame) g_td_last = -1; } }
+        const char *d = getenv("DM_NVN_TEXDUMP_DEPTH"); g_td_depth = d && *d && strcmp(d, "0");
+        if (g_td_depth && sscanf(d, "%ux%u", &g_td_dw, &g_td_dh) != 2) g_td_dw = g_td_dh = 0;
+        if (g_td_last >= 0 || g_td_depth) MLOG("[texdump] frames %ld-%ld%s", g_td_frame, g_td_last >= 0 ? g_td_last : g_td_frame, g_td_depth ? ", with depth attachments" : ""); }
     if (g_td_frame < 0 || g_td_done) return;
     long f = (long)atomic_load(&g_cur_frame);
+    if (g_td_last >= 0 && f > g_td_frame) {   // range: dump the frame that ended, then go on with this one while it is in the range
+        td_dump();
+        if (f > g_td_last) return;
+        g_td_frame = f; g_td_done = 0;
+    }
     if (g_td_layers) {
         if (f != g_td_lframe) { if (g_td_lframe >= 0 && g_td_lcount >= g_td_layers) { MLOG("[texdump] frame %ld: %d draws into small array / cube layers", g_td_lframe, g_td_lcount); g_td_frame = g_td_lframe; td_dump(); return; }
             g_td_lframe = f; g_td_frame = f; g_td_lcount = 0; [g_td_list removeAllObjects]; }
@@ -14298,6 +14320,43 @@ void td_note(MTL4RenderPassDescriptor *pd, NSUInteger nc) {
         BOOL seen = NO; for (NSArray *e in g_td_list) if (e.count < 5 && [e[1] unsignedLongLongValue] == ser && [e[2] unsignedIntegerValue] == lv && [e[3] unsignedIntegerValue] == sl) seen = YES;
         if (!seen) [g_td_list addObject:@[t, @(ser), @(lv), @(sl)]];
     }
+    id<MTLTexture> dt = pd ? pd.depthAttachment.texture : nil;
+    if (g_td_depth && dt && dt.textureType == MTLTextureType2D && R.rt.depth) {
+        uint64_t ser = R.rt.depth->serial; NSUInteger lv = pd.depthAttachment.level;
+        if (!g_td_dw || (MAX(dt.width >> lv, 1ul) == g_td_dw && MAX(dt.height >> lv, 1ul) == g_td_dh)) {
+            BOOL seen = NO; for (NSArray *e in g_td_dlist) if ([e[1] unsignedLongLongValue] == ser && [e[2] unsignedIntegerValue] == lv) seen = YES;
+            if (!seen) [g_td_dlist addObject:@[dt, @(ser), @(lv)]];
+        }
+    }
+}
+static void td_dump_depth(void) {   // after mtl_finish_gpu (td_dump): see DM_NVN_TEXDUMP_DEPTH
+    for (NSArray *e in g_td_dlist) {
+        id<MTLTexture> t = e[0]; uint64_t ser = [e[1] unsignedLongLongValue]; NSUInteger lv = [e[2] unsignedIntegerValue];
+        MTLPixelFormat pf = t.pixelFormat; size_t bpp = pf == MTLPixelFormatDepth16Unorm ? 2 : 4;
+        if (pf != MTLPixelFormatDepth16Unorm && pf != MTLPixelFormatDepth32Float && pf != MTLPixelFormatDepth32Float_Stencil8) { MLOG("[texdump] depth ser=%llu format %lu skipped", ser, (unsigned long)pf); continue; }
+        if (t.storageMode == MTLStorageModeMemoryless) continue;
+        NSUInteger w = MAX(t.width >> lv, 1ul), h = MAX(t.height >> lv, 1ul), row = w * bpp;
+        id<MTLBuffer> buf = [g_dev newBufferWithLength:row * h options:MTLResourceStorageModeShared];
+        id<MTLCommandBuffer> cb = q_cb(); id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
+        [b copyFromTexture:t sourceSlice:0 sourceLevel:lv sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(w, h, 1) toBuffer:buf destinationOffset:0 destinationBytesPerRow:row destinationBytesPerImage:row * h
+                   options:pf == MTLPixelFormatDepth32Float_Stencil8 ? MTLBlitOptionDepthFromDepthStencil : MTLBlitOptionNone];
+        [b endEncoding]; [cb commit]; [cb waitUntilCompleted];
+        float *z = malloc(w * h * sizeof *z); uint8_t *g = malloc(w * h);
+        if (!z || !g) { free(z); free(g); continue; }
+        for (size_t i = 0; i < w * h; i++) z[i] = bpp == 2 ? ((const uint16_t *)buf.contents)[i] / 65535.0f : ((const float *)buf.contents)[i];
+        float lo = INFINITY, hi = -INFINITY; size_t n1 = 0;
+        for (size_t i = 0; i < w * h; i++) { if (z[i] >= 1.0f) { n1++; continue; } lo = MIN(lo, z[i]); hi = MAX(hi, z[i]); }
+        for (size_t i = 0; i < w * h; i++) g[i] = z[i] >= 1.0f ? 255 : hi > lo ? (uint8_t)lrintf(254.0f * (z[i] - lo) / (hi - lo)) : 0;
+        char path[1024]; FILE *f;
+        td_name(path, sizeof path, (long)(ser * 100 + lv), "_depth.raw");
+        if ((f = fopen(path, "wb"))) { fprintf(f, "%lu %lu %lu %lu\n", (unsigned long)w, (unsigned long)h, (unsigned long)pf, (unsigned long)row); fwrite(buf.contents, 1, row * h, f); fclose(f); }
+        td_name(path, sizeof path, (long)(ser * 100 + lv), "_depth.pgm");
+        if ((f = fopen(path, "wb"))) { fprintf(f, "P5\n%lu %lu\n255\n", (unsigned long)w, (unsigned long)h); fwrite(g, 1, w * h, f); fclose(f); }
+        MLOG("[texdump] frame %ld depth ser=%llu lv=%lu format %lu %lux%lu: %zu texels at 1 (cleared), the rest %g..%g → %s", g_td_frame, ser, (unsigned long)lv, (unsigned long)pf, (unsigned long)w, (unsigned long)h, n1,
+             lo == INFINITY ? 0.0 : (double)lo, hi == -INFINITY ? 0.0 : (double)hi, path);
+        free(z); free(g);
+    }
+    [g_td_dlist removeAllObjects];
 }
 void td_note_layer(id<MTLTexture> t, uint64_t ser, NSUInteger lv, NSUInteger sl) {   // a slice-merged pass's other layers (see g_sm_plan)
     if (g_td_frame < 0 || g_td_done || g_td_frame == LONG_MAX || (long)atomic_load(&g_cur_frame) != g_td_frame || !t) return;
@@ -14359,7 +14418,8 @@ static void td_dump(void) {
         MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new]; sp = [g_dev newSamplerStateWithDescriptor:sd];
         if (!ps) { MLOG("[RED] TEXDUMP pipeline failed %s", e.localizedDescription.UTF8String); return; }
     }
-    MLOG("[texdump] frame %ld: %lu color targets", g_td_frame, (unsigned long)g_td_list.count);
+    MLOG("[texdump] frame %ld: %lu color targets, %lu depth targets", g_td_frame, (unsigned long)g_td_list.count, (unsigned long)g_td_dlist.count);
+    td_dump_depth();
     // DM_NVN_TEXRAW=index,...: save raw bytes by texture index (including 3D; file: %d in the path is replaced with the index, suffix .raw, first-line text header: width height depth format bytes-per-row)
     for (const char *q = getenv("DM_NVN_TEXRAW"); q && *q; q = strchr(q, ',') ? strchr(q, ',') + 1 : q + strlen(q)) {
         if (!strncmp(q, "info", 4)) {   // DM_NVN_TEXRAW=info: the textures remembered by DM_NVN_TEXINFO
@@ -14408,7 +14468,7 @@ static void td_dump(void) {
         id<MTLRenderCommandEncoder> en = [cb renderCommandEncoderWithDescriptor:rp];
         [en setRenderPipelineState:ps]; [en setFragmentTexture:v atIndex:0]; [en setFragmentSamplerState:sp atIndex:0];
         [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; [en endEncoding]; [cb commit]; [cb waitUntilCompleted];
-        char path[1024]; snprintf(path, sizeof path, g_td_path, (int)(ser * 100 + sl * 10 + lv));
+        char path[1024]; td_name(path, sizeof path, (long)(ser * 100 + sl * 10 + lv), NULL);
         if (e.count > 4) { snprintf(path, sizeof path, g_td_path, 0); char *dot = strrchr(path, '.'); char ext[16] = ""; if (dot) { strlcpy(ext, dot, sizeof ext); *dot = 0; }
             char tail[64]; snprintf(tail, sizeof tail, "_s%03d_%llu_%lu%s", [e[4] intValue], (unsigned long long)ser, (unsigned long)lv, ext); strlcat(path, tail, sizeof path); }   // TEXSNAP copy
         MLOG("[texdump] ser=%llu lv=%lu layer %lu format %lu %lux%lu", ser, (unsigned long)lv, (unsigned long)sl, (unsigned long)t.pixelFormat, (unsigned long)w, (unsigned long)h);

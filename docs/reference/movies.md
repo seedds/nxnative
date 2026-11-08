@@ -275,6 +275,13 @@ A decoder hands out as many outputs as it has slots, and while every slot is tak
 - **Fix:** a Flush closes the Vorbis decoder, and the next packet opens it again from the headers (`md_vorbis_open`), as at the start of a stream. `t_movie_vpx` builds a small Vorbis stream, flushes twice and checks that the same samples come again.
 - **Found on:** [Super Smash Bros. Ultimate](../../dm/games/01006A800016E000/README.md) (13.0.5, iPhone: the opening movie, after the app lost focus once. [#505](https://github.com/seedds/nxnative/issues/505) reported the same silence and was closed after a reinstall, with the app having been backgrounded once in the silent session).
 
+### AV1 movies stop an older iPhone or iPad with SIGILL in dav1d
+
+- **Symptom:** on an iPhone or iPad older than the A15 / M2, the app quits at the first AV1 movie (a title or opening movie): `[dm] CRASH sig=4 addr=put_8tap_neon_i8mm+0x… lr=dav1d_recon_b_inter_8bpc+0x…`, with a `dav1d_worker_task` thread beside it. The same build plays on newer devices and on the Mac.
+- **Cause:** the iOS project compiled everything with `-mcpu=apple-a18`, and dav1d's `src/cpu.h` adds every feature the compiler's target promises (`__ARM_FEATURE_MATMUL_INT8`, `__ARM_FEATURE_DOTPROD`) to the features it detects at run time (`sysctl hw.optional.arm.FEAT_I8MM`, which says no on an M1). Its I8MM motion compensation then ran on a CPU without those instructions. The A18 target had been chosen only for the LSE atomics of the host's assembly.
+- **Fix:** `dm/ios/project.yml` and `dm/ios/tools/compile_check.py` build for `-mcpu=apple-a12`, the oldest chip iOS / iPadOS 26 runs on, which has LSE; dav1d picks its dot-product and I8MM paths from the device at run time. `dm/ios/tests/test_cpu_target.py` asks clang what each build's target defines: LSE, and none of I8MM, dot-product, BF16 or SME.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) (its title movie, on an iPad Pro 11-inch 3rd generation, M1, iPadOS 27.0.1; 2026-11-08). Every iPhone and iPad from the A12 to the A14 / M1 that plays an AV1 movie was affected.
+
 ## The Switch 2's decoder API
 
 ### `nn::codec` video decoders taken over

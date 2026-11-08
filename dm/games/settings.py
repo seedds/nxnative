@@ -66,6 +66,8 @@ def build(gid, patched, control):
     macros = dict(re.findall(r'^#define (DM_GAME_\w+) (.*)$', game.header_one(g), re.M))   # the host's own defaults, as it is compiled for this game
     keys = fixups_keys(Path(patched) / 'main.fixups.tsv')
     have = nacp.languages(control)
+    tweaks = g.table('romfs_tweaks.tsv')   # RomFS tweaks (dm/tools/romfs_tweaks.py): the variables the profile rewrites game files for; only the Mac app carries them (pack_app.py --tweaks)
+    tweak_vars = {l.split('\t')[0] for l in tweaks.read_text(encoding='utf-8').splitlines() if l.strip() and not l.startswith('#')} if tweaks.is_file() else set()
     langs = [(c, n) for c, n in nacp.LANGUAGES if not have or c in have]   # no list (a dump or a NUP has no control data, none of its packages may): any language may be the game's, as DM_LANG and the NSP script's check take it
 
     def macro(name, n):
@@ -78,6 +80,7 @@ def build(gid, patched, control):
         if cond.startswith('fixups:'): return cond[7:] in keys
         if cond.startswith('gfxapi:'): return os.environ.get('GFXAPI', '') == cond[7:]
         if cond.startswith('platform:'): return platform == cond[9:]
+        if cond.startswith('tweaks:'): return platform == 'mac' and cond[7:] in tweak_vars
         m = re.fullmatch(r'(DM_GAME_\w+)(!=|==)(.*)', cond)
         if m: return (macro(m[1], n) == m[3]) == (m[2] == '==')
         sys.exit(f'settings.tsv:{n}: unknown condition {cond}')

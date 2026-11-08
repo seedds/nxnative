@@ -81,6 +81,16 @@ class LauncherSettingsTests(unittest.TestCase):
         s = mac['DM_FULLSCREEN']
         self.assertEqual((s['kind'], s['default'], s['options'], s['level']), ('choice', '0', [['0', 'Window'], ['1', 'Fullscreen']], 'basic'))
 
+    def test_decoration_distance_only_for_games_with_romfs_tweaks_on_the_mac(self):   # the Mac launcher picks Resources/dm/tweaks/<VAR>/<value> (launcher.c romfs_tweaks)
+        dk = '040074A01BF12000'
+        s = build(dk, 'nvn', 'mac')['DM_DECO_DISTANCE']
+        self.assertEqual((s['kind'], s['section'], s['default']), ('choice', 'Game', '1.0'))
+        tsv = ROOT / 'dm/games' / dk / 'romfs_tweaks.tsv'
+        values = {l.split('\t')[1] for l in tsv.read_text(encoding='utf-8').splitlines() if l.strip() and not l.startswith('#')}
+        self.assertEqual({v for v, _ in s['options']} - {s['default']}, values)   # every value but the default is a folder of rewritten files
+        self.assertNotIn('DM_DECO_DISTANCE', build(dk, 'nvn', 'ios'))   # the iPhone app carries no tweaks
+        self.assertNotIn('DM_DECO_DISTANCE', build(BOTW, 'nvn', 'mac'))   # no romfs_tweaks.tsv
+
     def test_defaults_follow_each_platform_host(self):
         # nvn_mtl.m pso4_on: Mac defaults on, iOS follows the profile. nvn_rec.h rec_on: iOS on, Mac off.
         for gid, ios_pso in ((BOTW, '1'), (WONDER, '0')):

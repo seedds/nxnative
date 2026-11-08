@@ -44,6 +44,10 @@ def scan():
         direct |= set(re.findall(READ, text))
         for n in set(found): reads.setdefault(n, set()).add(p)
     for n in macros - direct: reads.pop(n, None); docs.pop(n, None)
+    # RomFS tweaks: the Mac launcher reads each variable a profile's romfs_tweaks.tsv names, by the name of its folder in the app (launcher.c romfs_tweaks), so no literal name is in the code
+    for t in (REPO / 'dm/games').glob('*/romfs_tweaks.tsv'):
+        for l in t.read_text(encoding='utf-8').splitlines():
+            if l.startswith('DM_'): reads.setdefault(l.split('\t')[0], set()).add('dm/mac/launcher.c')
     return reads, docs
 
 

@@ -128,6 +128,8 @@ static int g_pq_inflight;   // Under g_pq_mu: number of presents committed to th
 int g_dm_present_link;   // Present pacing mode (runtime value of DM_PRESENT_LINK, modified directly during same-process alternating measurement): 0 = acquire the drawable itself; 1 = display link at 60 Hz; 2 = display link at 120 Hz, the game presents a frame every other display-link tick
 static int g_present_latency;   // DM_PRESENT_LATENCY: the display link's frame latency in a window and in fullscreen alike (0 = not set: link_latency picks it)
 static uint64_t g_pq_done;
+static uint64_t g_pq_gpu_done;   // Under g_pq_mu: the newest ticket whose display command buffer the GPU reported done (one queue runs them in ticket order, so every committed one before it is done too)
+static int g_pq_tex_waiters;   // Under g_pq_mu: finalizes that found a queued present of their texture and have not returned from waiting for it (mtl_present_test_waiters)
 static uint64_t g_pq_read;
 static id<MTLResidencySet> g_res;
 static int g_res_dirty;
@@ -4101,7 +4103,9 @@ void mtl_tex_release(tex_t *t) {
         tex_t seen; vm_size_t got = 0;
         if (vm_read_overwrite(mach_task_self(), (vm_address_t)(uintptr_t)own, sizeof seen, (vm_address_t)(uintptr_t)&seen, &got) == KERN_SUCCESS && got == sizeof seen && seen.magic == MAGIC('T', 'E', 'X', 0) && seen.serial == t->serial) { pthread_mutex_unlock(&g_smu); return; }
     }
-    int was_live = nvn_hm_del(&g_tex_live, &t->serial) != NULL; free(nvn_hm_del(&g_image_desc, &t->serial));
+    int live = own != NULL; pthread_mutex_unlock(&g_smu);
+    if (live) mtl_present_wait_tex(t->serial);   // its queued presents run first, with this texture (a copy's finalize after the first finds it not live)
+    pthread_mutex_lock(&g_smu); int was_live = nvn_hm_del(&g_tex_live, &t->serial) != NULL; free(nvn_hm_del(&g_image_desc, &t->serial));
     pthread_mutex_lock(&g_cpu_tex_mu);
     void *pool = nvn_hm_del(&g_cpu_tex, &t->serial);
     if (pool && t->pool && t->mem) nvn_hm_put(&g_cpu_tex_retired, &t->serial, pool);
@@ -14053,7 +14057,7 @@ int mtl_display_hz(void) {
     return s ? [[s valueForKey:@"maximumFramesPerSecond"] intValue] : 0;
 #endif
 }
-static _Atomic uint64_t g_present_stall_ns;   // For unit tests: an extra pause before each present on the present thread (simulating a drawable that stays unavailable)
+static _Atomic uint64_t g_present_stall_ns;   // For unit tests: an extra pause before each present on the present thread (simulating a drawable that stays unavailable); UINT64_MAX holds it there until the value is set again
 static CAMetalLayer *g_present_layer_resident;
 void mtl_present_test_stall(uint64_t ns) { g_present_stall_ns = ns; }
 static void present_pipeline(MTLPixelFormat format) {
@@ -14441,7 +14445,9 @@ static void present_gpu_note(double s, int fx) {
 }
 static double g_link_it_tin;   // Enqueue time of the frame the display-link callback is presenting (read and written only on the display-link thread)
 static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t ticket, const int crop[4], id<CAMetalDrawable> supplied, double target_ts) {
-    if (g_present_stall_ns) { struct timespec ts = {0, (long)g_present_stall_ns}; nanosleep(&ts, NULL); }
+    uint64_t stall = g_present_stall_ns;
+    while (stall == UINT64_MAX) { usleep(1000); stall = g_present_stall_ns; }
+    if (stall) { struct timespec ts = {0, (long)stall}; nanosleep(&ts, NULL); }
     g_present_n++;
     if (bootprof() && (g_present_n == 1 || g_present_n % 120 == 0)) {
         if (g_present_n == 1) g_bp_first_present = bp_now() - g_bp_t0;
@@ -14526,7 +14532,7 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     MTL4CommitOptions *o = [MTL4CommitOptions new];
     [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) {
         if (f.error) { MLOG("[RED] display command buffer error: %s", f.error.description.UTF8String); gpu_lost_check(f.error, "display"); }
-        pthread_mutex_lock(&g_pq_mu); if (ticket > g_pq_done) g_pq_done = ticket; if (ticket > g_present_alloc_done[alloc_i]) g_present_alloc_done[alloc_i] = ticket; g_pq_inflight--; pthread_cond_broadcast(&g_pq_cv);
+        pthread_mutex_lock(&g_pq_mu); if (ticket > g_pq_done) g_pq_done = ticket; if (ticket > g_pq_gpu_done) g_pq_gpu_done = ticket; if (ticket > g_present_alloc_done[alloc_i]) g_present_alloc_done[alloc_i] = ticket; g_pq_inflight--; pthread_cond_broadcast(&g_pq_cv);
         present_gpu_note(f.GPUEndTime - f.GPUStartTime, fx_kind); pthread_mutex_unlock(&g_pq_mu);
     }];
     id<MTL4CommandBuffer> buffers[] = {cb};
@@ -14571,7 +14577,15 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
 // Swapchain texture return: before AcquireTexture gets a texture it waits for the ticket of that texture's previous present to be processed (mtl_present_wait), after which the commands the game draws into it
 // are necessarily ordered after that blit on the GPU queue.
 #define PQ 8
-typedef struct { tex_t t; double period; uint64_t frame; int crop[4]; double t_in; uint64_t ev_val, snap_v; } pq_item;   // snap_v: the snapshot copy this present shows (snap_commit_wait)   // t_in: the time the game handed this frame into the present queue (CACurrentMediaTime); ev_val: see g_ext_ev
+typedef struct { tex_t t; double period; uint64_t frame; int crop[4]; double t_in; uint64_t ev_val, snap_v, init_v; } pq_item;   // snap_v: the snapshot copy this present shows (snap_commit_wait); init_v: the texture's first upload or zeroing, recorded at enqueue (present_init_note)   // t_in: the time the game handed this frame into the present queue (CACurrentMediaTime); ev_val: see g_ext_ev
+// With the encode thread, the upload batch present_enqueue commits for a texture it resolves is a record the encode thread commits later; a RO_NOTE behind it tells the present
+// when that commit is on the queue, so its display command buffer goes after it (the snapshot copy's pattern, snap_commit_wait)
+static _Atomic uint64_t g_init_cmt; static uint64_t g_init_v;   // g_init_v: the submit thread's counter
+static uint64_t present_init_note(void) {
+    if (!rec_on() || !g_rb_started) return 0;   // committed directly: already on the queue
+    rec_t *r = rec_put(RO_NOTE, 0); r->a[0] = (uint64_t)(uintptr_t)&g_init_cmt; r->a[1] = ++g_init_v; rec_publish();
+    return g_init_v;
+}
 // External producer (the Vulkan layer, dm/gfx/vk) renders on its own queue and signals this event when a frame's rendering is done: the present of that frame waits for the value on g_q4
 static id<MTLSharedEvent> g_ext_ev;
 static void ext_wait(uint64_t v) { if (v && g_ext_ev) [g_q4 waitForEvent:g_ext_ev value:v]; }
@@ -14643,7 +14657,7 @@ __attribute__((weak)) uint64_t dm_focus_in_since(void) { return 0; }
     pthread_cond_broadcast(&g_pq_cv);
     pthread_mutex_unlock(&g_pq_mu);
     int submitted;
-    ext_wait(it.ev_val); snap_commit_wait(it.snap_v);
+    ext_wait(it.ev_val); snap_commit_wait(it.snap_v); rec_note_wait(&g_init_cmt, it.init_v);
     @autoreleasepool { submitted = present_now(&it.t, it.period, it.frame, ticket, it.crop, update.drawable, update.targetPresentationTimestamp); }
     g_link_hold_until = submitted && it.period > 0.025 ? update.targetPresentationTimestamp + it.period : 0;
     if (!submitted) {
@@ -14772,7 +14786,7 @@ static void *present_main(void *arg) {
         uint64_t ticket = ++g_pq_read; g_classic_busy = 1;
         pthread_mutex_unlock(&g_pq_mu);
         int submitted;
-        ext_wait(it.ev_val); snap_commit_wait(it.snap_v);
+        ext_wait(it.ev_val); snap_commit_wait(it.snap_v); rec_note_wait(&g_init_cmt, it.init_v);
         @autoreleasepool { submitted = present_now(&it.t, it.period, it.frame, ticket, it.crop, nil, 0); }
         pthread_mutex_lock(&g_pq_mu); g_classic_busy = 0; pthread_cond_broadcast(&g_pq_cv); pthread_mutex_unlock(&g_pq_mu);
         if (!submitted) {
@@ -14918,10 +14932,14 @@ static uint64_t present_enqueue(const tex_t *t, double period, const int crop[4]
     atomic_store(&dm_present_ns, now_ns());
     if (g_classic || atomic_load(&g_present_discard)) return 0;   // Ticket number 0 = no pending present; the swapchain texture acquire does not wait (g_classic: no Metal 4 queue to present on)
     if (t) { xv_check(t->serial, 0, 0, "present"); if (g_xv_npresent < 128) g_xv_present[g_xv_npresent++] = t->serial; }
-    // A texture whose content comes from its storage is uploaded when it is first resolved (and again when its pages change), in an upload batch only the submit thread may open.
-    // Bastion fills both window textures with WriteTexels at boot (main+0x9374) and presents one before drawing into it: resolved on the present thread, the upload aborted the host.
-    // Resolve it here, where the game queues the present, and commit the batch, so the display command buffer comes after the upload on the queue and the present thread finds it uploaded
-    if (t && !ev_val && on_sub_thread() && tex_from_storage(t)) { tex_mtl(t); up_flush(); }
+    // A texture whose content comes from its storage is uploaded when it is first resolved (and again when its pages change), and a new GPU texture is zeroed then (tex_zero_fill), both
+    // in an upload batch only the submit thread may open. Bastion fills both window textures with WriteTexels at boot (main+0x9374) and presents one before drawing into it: resolved on
+    // the present thread, the upload aborted the host. Axiom Verge presents a new window texture before drawing into it: resolved on the present thread it was never zeroed, and its
+    // undefined content showed as a magenta window for a few frames (Mac and iOS; the console's new memory reads 0, a black frame). Resolve such a texture here, where the game queues the
+    // present, and commit the batch, so the display command buffer comes after the upload or the zeroing on the queue. One whose storage the CPU wrote (tex_cpu_content) is left to the
+    // present thread as before: resolved here it would become a CPU-written texture, which the present thread re-uploads, and may not, after the CPU's next write to its pages
+    uint64_t init_v = 0;
+    if (!ev_val && on_sub_thread() && (tex_from_storage(t) || (!tex_get(t->serial) && !tex_cpu_content(t)))) { tex_mtl(t); up_flush(); init_v = present_init_note(); }
     static pthread_once_t once = PTHREAD_ONCE_INIT; pthread_once(&once, present_start);
     link_sync();
     {   // Test switch DM_TEST_LINK_STALL=start seconds,duration seconds: counting from the first present, pause the display link at that point (imitating the display link not calling back while in the foreground) and release it when the duration is up. For verifying the fallback; not set in the product
@@ -14938,7 +14956,7 @@ static uint64_t present_enqueue(const tex_t *t, double period, const int crop[4]
     }
     pthread_mutex_lock(&g_pq_mu);
     while (g_pq_in - g_pq_done >= PQ) pthread_cond_wait(&g_pq_cv, &g_pq_mu);   // Wait only when the queue is full; normally AcquireTexture blocks first
-    pq_item *it = &g_pq[g_pq_in % PQ]; *it = (pq_item){*t, period, atomic_load(&g_cur_frame), {0}, CACurrentMediaTime(), ev_val, ss ? g_snap[slot].ev : 0};
+    pq_item *it = &g_pq[g_pq_in % PQ]; *it = (pq_item){*t, period, atomic_load(&g_cur_frame), {0}, CACurrentMediaTime(), ev_val, ss ? g_snap[slot].ev : 0, init_v};
     if (crop) memcpy(it->crop, crop, sizeof it->crop);   // The current frame's state is enqueued with the ticket number, rather than reading the mutable window late on the present thread
     uint64_t tk = ++g_pq_in;
     if (ss) { g_snap[slot].ticket = tk; atomic_fetch_add(&g_snap_next, 1); }
@@ -14948,6 +14966,25 @@ static uint64_t present_enqueue(const tex_t *t, double period, const int crop[4]
 }
 // For the layer's frame history (hle_vi.c): the ticket of the last present queued, and the last one the present queue has handed on (to the GPU and the display, or dropped)
 void mtl_present_progress(uint64_t *queued, uint64_t *done) { pthread_mutex_lock(&g_pq_mu); *queued = g_pq_in; *done = g_pq_done; pthread_mutex_unlock(&g_pq_mu); }
+// The game may finalize a texture whose present is still queued: the present thread resolves it later and the display command buffer samples it on the GPU after that.
+// Axiom Verge (MonoGame) presents its first window texture and then remakes its swap chain at boot, finalizing the textures it just presented. Resolved after that, the serial gave a
+// new texture of undefined content (not the one the game had cleared), shown as a magenta window for a few frames (Mac and iOS), or none ([RED] present texture could not get an
+// MTLTexture) once the pool was gone too. On the Switch the present has taken the picture by then. So a live texture's finalize waits for its queued presents, committed and run on the GPU
+void mtl_present_wait_tex(uint64_t serial) {
+    uint64_t tk = 0;
+    pthread_mutex_lock(&g_pq_mu);
+    for (uint64_t k = g_pq_done + 1; k <= g_pq_in; k++) if (g_pq[(k - 1) % PQ].t.serial == serial) tk = k;   // ticket k is in slot (k - 1) % PQ (present_enqueue)
+    if (tk) g_pq_tex_waiters++;
+    pthread_mutex_unlock(&g_pq_mu);
+    if (!tk) return;
+    mtl_present_wait(tk);   // committed (or dropped) by now
+    pthread_mutex_lock(&g_pq_mu);   // and run: until the GPU reports it or a later one done; nothing in flight means it was dropped or not submitted
+    while (g_pq_gpu_done < tk && g_pq_inflight && !atomic_load(&g_present_discard)) pthread_cond_wait(&g_pq_cv, &g_pq_mu);
+    g_pq_tex_waiters--;
+    pthread_mutex_unlock(&g_pq_mu);
+    static _Atomic uint64_t n; if (atomic_fetch_add(&n, 1) < 4) MLOG("texture ser=%llu finalized with a queued present (ticket %llu): waited until it ran", (unsigned long long)serial, (unsigned long long)tk);
+}
+int mtl_present_test_waiters(void) { pthread_mutex_lock(&g_pq_mu); int n = g_pq_tex_waiters; pthread_mutex_unlock(&g_pq_mu); return n; }
 // Do not wait during discard: the frame enqueued only after the flag was set (the present thread had just passed the flag check) has nobody to take it, and waiting for it would stall again; it is left for the following mtl_drain to clear
 // Do not wait indefinitely in display-link mode: see the note at STALL_NS. Only frames "not yet taken by the display link" are dropped; the one already on its way to the screen is waited for until handed to the GPU (same dropping as when entering the background)
 void mtl_present_wait(uint64_t tk) {

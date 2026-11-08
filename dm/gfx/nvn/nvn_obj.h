@@ -216,8 +216,10 @@ void mtl_exec_rest(const uint64_t *handles, int n);   // Tells which handles in 
 // Present: draw the swapchain texture to the front-end CAMetalLayer (only counts when there is no window)
 uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]);   // Enqueue a present and return the ticket immediately; period_s: minimum time this image is displayed (= present period, 0 = unlimited)
 void mtl_present_wait(uint64_t ticket);                    // Wait until the present with this ticket has been processed (blit committed to the GPU queue)
+void mtl_present_wait_tex(uint64_t serial);                // Wait until every queued present of this texture has run on the GPU (its finalize)
 void mtl_present_flush(void);                              // Wait until all enqueued presents have been processed
-void mtl_present_test_stall(uint64_t ns);                  // Unit test: extra pause in ns before each present on the present thread
+void mtl_present_test_stall(uint64_t ns);                  // Unit test: extra pause in ns before each present on the present thread; UINT64_MAX holds it until the next call
+int mtl_present_test_waiters(void);                        // Unit test: how many finalizes have found a queued present of their texture and are still waiting for it (mtl_present_wait_tex)
 int mtl_display_hz(void);                                   // Maximum refresh rate of the screen (Hz) when there is a window, 0 without a window
 void mtl_set_tex_pool_n(int n);                            // Texture descriptor pool capacity: texture IDs outside the pool are treated as 'empty slots' (read 0)
 // Timing instrumentation (shared by Mac / iOS): submissions are tagged with the frame number; GPU time = sum of GPUEnd−GPUStart over all of that frame's command buffers, readable only after all complete (otherwise −1)

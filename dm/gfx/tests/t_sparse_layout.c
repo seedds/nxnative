@@ -33,7 +33,7 @@ int main(void) {
     static const struct { int format; uint32_t w, h, layers, levels; } tc[] = {{0x50, 1024, 768, 2, 5}, {0x25, 512, 384, 1, 4}};
     for (int g2 = 0; g2 < 2; g2++) for (unsigned c = 0; c < 2; c++) {
         nvn_gob_switch2 = g2;
-        nvn_texdesc d = { .target = tc[c].layers > 1 ? 4 : 1, .format = tc[c].format, .flags = 0x20, .width = tc[c].w, .height = tc[c].h, .depth = tc[c].layers, .levels = tc[c].levels };
+        nvn_texdesc d = { .target = tc[c].layers > 1 ? 4 : 1, .format = tc[c].format, .flags = 0x20 | (g2 ? 0x4 : 0), .width = tc[c].w, .height = tc[c].h, .depth = tc[c].layers, .levels = tc[c].levels };
         nvn_texlayout L; nvn_tex_layout(&d, &L);
         uint32_t tw, th, td; int nt = nvn_tex_sparse_tiles(&d, &tw, &th, &td);
         uint8_t *st = malloc(L.size); for (uint64_t i = 0; i < L.size; i++) st[i] = (uint8_t)(i * 2654435761u >> 13);

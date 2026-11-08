@@ -917,14 +917,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             context.BranchIfTrue(lblFound, hintFits);
 
             // The last entry whose start is at or below the address (entry 0 starts at 0, so there always is one)
-            Operand index = Const(0);
-
-            for (int step = 1 << (GmemMapLog2 - 1); step != 0; step >>= 1)
-            {
-                Operand candidate = context.IAdd(index, Const(step));
-                Operand entry = context.IMultiply(candidate, Const(GmemMapEntryWords));
-                index = context.ConditionalSelect(AtOrBelow(MapWord(entry, 1), MapWord(entry, 0)), candidate, index);
-            }
+            Operand index = EmitTableSearch(context, entry => AtOrBelow(MapWord(entry, 1), MapWord(entry, 0)));
 
             context.Copy(selected, index);
             context.MarkLabel(lblFound);
@@ -1056,6 +1049,27 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                     context.Return();
                 }
             }
+        }
+
+        // nxnative: the binary search of the pool table as a loop of GmemMapLog2 steps: the last entry whose start passes startAtOrBelow (given an entry's first word). The search runs only
+        // when the last entry and the hint both missed, but unrolled it was 13 copies of the step at every call site once Metal inlines the helpers: Ocarina of Time's compute shaders
+        // 77e64b1d8200eac3 and d8abf8a34811f8c6 took 2.3 to 2.6 s each to become pipelines, and the 8 that its foliage's reaction to a sword needs froze the game for 11 s the first time
+        private static Operand EmitTableSearch(EmitterContext context, Func<Operand, Operand> startAtOrBelow)
+        {
+            Operand index = Local();
+            Operand step = Local();
+            Operand lblStep = Label();
+
+            context.Copy(index, Const(0));
+            context.Copy(step, Const(1 << (GmemMapLog2 - 1)));
+            context.MarkLabel(lblStep);
+
+            Operand candidate = context.IAdd(index, step);
+            context.Copy(index, context.ConditionalSelect(startAtOrBelow(context.IMultiply(candidate, Const(GmemMapEntryWords))), candidate, index));
+            context.Copy(step, context.ShiftRightU32(step, Const(1)));
+            context.BranchIfTrue(lblStep, context.ICompareNotEqual(step, Const(0)));
+
+            return index;
         }
 
         // nxnative: loads through one untraced pointer at constant offsets resolve its pool once. A shader that reads a structure word after word through a pointer it loaded (Ocarina of Time's
@@ -1527,14 +1541,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             context.Copy(selected, hintIndex);
             context.BranchIfTrue(lblFound, hintFits);
 
-            Operand index = Const(0);
-
-            for (int step = 1 << (GmemMapLog2 - 1); step != 0; step >>= 1)
-            {
-                Operand candidate = context.IAdd(index, Const(step));
-                Operand entry = context.IMultiply(candidate, Const(GmemMapEntryWords));
-                index = context.ConditionalSelect(NotAbove(MapWord(entry, 1), MapWord(entry, 0), minHigh, minLow), candidate, index);
-            }
+            Operand index = EmitTableSearch(context, entry => NotAbove(MapWord(entry, 1), MapWord(entry, 0), minHigh, minLow));
 
             context.Copy(selected, index);
             context.MarkLabel(lblFound);

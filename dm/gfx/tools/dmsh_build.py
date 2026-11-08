@@ -1561,7 +1561,8 @@ def tg_fence(src):
     threadgroup array are touched"""
     names = {m.group(1) for m in TG_FENCE_DECL.finditer(src) if m.group(1) not in ('operator',)}
     if not names: return src
-    store = re.compile(r'^(\s*)(?:%s)\s*\[[^\n;]*\]\s*=(?!=)[^\n]*;\s*$' % '|'.join(map(re.escape, sorted(names))))
+    # a plain or compound assignment (SPIRV-Cross folds a load, an operation and a store of the same element into `_46[i] += 1u;`), also to a member or component (`_39[i].x = v;`)
+    store = re.compile(r'^(\s*)(?:%s)\s*\[[^\n;]*\](?:\.\w+)?\s*(?:[-+*/%%&|^]|<<|>>)?=(?!=)[^\n]*;\s*$' % '|'.join(map(re.escape, sorted(names))))
     out = []
     for ln in src.split('\n'):
         out.append(ln)

@@ -70,6 +70,16 @@ class TgFence(unittest.TestCase):
             self.assertEqual(nxt, FENCE)
         self.assertEqual(out.count(FENCE), 2)   # not after the loads, nor after the device store
 
+    def test_compound_and_member_stores_get_a_fence_too(self):   # SPIRV-Cross writes a read-modify-write of one element as a compound assignment
+        src = SCAN.replace('    _39[_10] = _11;\n', '    _39[_10] += _11;\n    _39[_10 ^ 1u] <<= 1u;\n    _39[_10 + 2u].x = _11;\n    bool _12 = _39[_10] >= _11;\n    bool _13 = _39[_10] <= _11;\n') % 64
+        out = tg_fence(src).split('\n')
+        for store in ('_39[_10] += _11;', '_39[_10 ^ 1u] <<= 1u;', '_39[_10 + 2u].x = _11;'):
+            k = next(i for i, ln in enumerate(out) if ln.strip() == store)
+            self.assertEqual(out[k + 1].strip(), FENCE, store)
+        for compare in ('bool _12', 'bool _13'):   # comparisons are no stores
+            k = next(i for i, ln in enumerate(out) if ln.strip().startswith(compare))
+            self.assertNotEqual(out[k + 1].strip(), FENCE, compare)
+
     def test_it_is_a_simdgroup_memory_fence_not_a_barrier(self):
         self.assertIn('thread_scope_simdgroup', FENCE)
         self.assertNotIn('barrier', FENCE)

@@ -462,6 +462,13 @@ t_srgb_alias: t_srgb_alias.m $(MTL_T_DEP)
 check_t_srgb_alias: RUN_ENV = MTL_DEBUG_LAYER=1
 t_image_alias: t_image_alias.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_image_alias.m $(MTL_T_SRC) $(FW)
+t_pool_heap: t_pool_heap.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_pool_heap.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_pool_heap
+check_t_pool_heap: t_pool_heap
+	DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_pool_heap
+	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_pool_heap
+	MTL_DEBUG_LAYER=1 ./t_pool_heap off
 .PHONY: check_t_image_alias
 check_t_image_alias: t_image_alias
 	DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_image_alias

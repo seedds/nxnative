@@ -290,7 +290,19 @@ HLE_FORCE("_ZN2nn2oe22SetCpuOverclockEnabledEb", "CPU overclock switch (through 
 // oe::GetGraphicsScalingParameters). The SDK maps the parameter's first word 10 / 20 / 30 to scale 0 / 1 / 2. Donkey Kong Bananza keeps it as a quality tier: a byte of its graphics
 // settings (+0x1c7, main+0x549348, next to the handheld flag it takes from the operation mode at +0x1c4), and an index into {3, 12, 16} (main+0x1d1a604) whose value less 3 (0, 9, 13)
 // goes to a renderer parameter (main+0x549614). Which tier the console reports in which mode is not measured: the host answers 0 handheld and 1 console, following the operation mode
-HLE_FORCE("_ZN2nn2oe23GetCurrentGraphicsScaleEv", "graphics scale (Switch 2, through am): 0 handheld, 1 console", int, h_oe_GfxScale, void) { return opmode() == 1; }
+// DM_GRAPHICS_SCALE=0|1|2 is a diagnostic override of this tier only, independent of operation/performance mode. It is not a linear resolution multiplier or a claim about hardware defaults.
+HLE_FORCE("_ZN2nn2oe23GetCurrentGraphicsScaleEv", "graphics scale tier (Switch 2, through am); optional diagnostic override", int, h_oe_GfxScale, void) {
+    int value = opmode() == 1;
+    const char *e = getenv("DM_GRAPHICS_SCALE");
+    int valid = e && e[0] >= '0' && e[0] <= '2' && !e[1];
+    if (valid) value = e[0] - '0';
+    static atomic_int logged;
+    if (!atomic_exchange(&logged, 1)) {
+        LOG("oe::GetCurrentGraphicsScale: tier %d (%s)", value,
+            e ? (valid ? "DM_GRAPHICS_SCALE" : "invalid override; stock fallback") : "stock");
+    }
+    return value;
+}
 HLE_FORCE("_ZN2nn2oe42SetGraphicsScaleChangedNotificationEnabledEb", "graphics scale change notification (Switch 2, through am); the scale changes only with the operation mode",
           void, h_oe_GfxScaleNotify, unsigned on) { (void)on; }
 // The frame length the game aims at (Switch 2 SDKs): oe::SetGraphicsTargetFrameRate maps up to 59 fps to mode 1, up to 119 to mode 2 and above to mode 3, SetGraphicsTargetFrameRateAuto

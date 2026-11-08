@@ -60,6 +60,25 @@ static int child_burst(int kind) {
     return WIFEXITED(st) && WEXITSTATUS(st) == 0;
 }
 int main(void) {
+    // The graphics quality tier is independent of operation/performance mode
+    // when explicitly selected. Malformed values retain the old defaults.
+    for (int mode = 0; mode <= 1; ++mode) {
+        g_opmode = mode; unsetenv("DM_GRAPHICS_SCALE");
+        CHECK(h_oe_GfxScale() == mode, "unset graphics tier retains stock behavior");
+        const char *valid[] = {"0", "1", "2"};
+        for (int tier = 0; tier < 3; ++tier) {
+            setenv("DM_GRAPHICS_SCALE", valid[tier], 1);
+            CHECK(h_oe_GfxScale() == tier && h_oe_GetOpMode() == mode,
+                  "graphics tier override leaves operation mode unchanged");
+        }
+        const char *invalid[] = {"", "-1", "3", "10", "0junk", " 0", "1 "};
+        for (unsigned i = 0; i < sizeof invalid / sizeof *invalid; ++i) {
+            setenv("DM_GRAPHICS_SCALE", invalid[i], 1);
+            CHECK(h_oe_GfxScale() == mode, "invalid graphics tier uses stock fallback");
+        }
+    }
+    unsetenv("DM_GRAPHICS_SCALE");
+
     unsetenv("DM_OE_SCRIPT"); reset();
     CHECK(h_oe_InactivityMode() == 0 && !h_oe_InactivityExtQ(), "inactivity extension starts disabled");
     h_oe_InactivityExtSafe(1);

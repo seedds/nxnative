@@ -1097,6 +1097,12 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** `camera_answer` (`hle_sf.c`) answers commands 3 and 4 with success, 21 with an event that never fires, and the others, 29 among them, with 0x7c4, so the game sees a console whose camera port has nothing plugged in. `nn::applet::BeginUsingCameraResource` / `EndUsingCameraResource` (the module takes the applet's camera resource) and `nn::camera::sdk::DestroyCameraContext` succeed too; the SDK's versions read service objects the host never made. The client also ends the session with an HIPC Close (message type 2), answered with the closed-session result 0xf601 (`hle_sf.c`); before that it logged `[RED] sf: camera: HIPC message type 2 not served`. Mario Kart World 1.8.0, whose reading of 0xdc4 the old answer followed, is not re-tested here.
 - **Found on:** [Star Fox](../../dm/games/0400E88025B1A000/README.md).
 
+### Selecting a graphics quality tier for diagnostics
+
+- `DM_GRAPHICS_SCALE=0|1|2` overrides the graphics quality tier returned by `oe::GetCurrentGraphicsScale` for controlled experiments.
+- Unset or invalid values preserve the existing operation-mode-dependent response. This does not change operation mode, performance mode, display size, or executable code.
+- Synthetic `t_oe` tests cover valid values, invalid values, and independence from operation mode.
+
 ### Whether the language selection is limited
 
 - **Symptom:** a null read at boot in `nn::oe::IsLanguageSelectionLimited`, right after the game asks for its language.

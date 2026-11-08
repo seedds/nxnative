@@ -45,7 +45,7 @@ int main(void) { @autoreleasepool {
         CHECK(cb.status == MTLCommandBufferStatusCompleted, "the texture takes its non-zero depth");
         res_add(base);
         state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
-        tex_zero_fill(base, 1);
+        tex_zero_fill(base);
         mtl_sub_commit(); mtl_drain();
         CHECK(!mtl_last_commit_error(), "zero fill completes without GPU error");
         id<MTLBuffer> count = [g_dev newBufferWithLength:4 options:MTLResourceStorageModeShared];

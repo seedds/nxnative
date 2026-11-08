@@ -526,5 +526,9 @@ class Switch2Record(unittest.TestCase):   # uepak.nvn2_record: a Switch 2 shader
         rec, _ = self.record(bytes(0x100))
         self.assertIsNone(uepak.lslg(rec[:-30]))   # the control section runs past the record
 
+    def test_a_magic_at_the_very_end_is_no_record(self):   # its version byte would lie past the record: None, not an IndexError that stops the split
+        for tail in (b'\x34\x12\x76\x98', b'\x34\x12\x76\x98\xc9'):
+            self.assertIsNone(uepak.lslg(bytes(0x40) + tail))
+
 
 if __name__ == '__main__': unittest.main()

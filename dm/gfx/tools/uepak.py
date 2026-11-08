@@ -681,7 +681,7 @@ def nvn2_record(s):
     k = len(s)
     while (k := s.rfind(b'\x34\x12\x76\x98', 0, k)) >= 8:
         nctl = struct.unpack_from('<I', s, k - 4)[0]
-        if s[k + 4] != 0xc9 or nctl < 0x48 or not 0 <= len(s) - (k + nctl) < 64: continue
+        if k + 0x48 > len(s) or s[k + 4] != 0xc9 or nctl < 0x48 or not 0 <= len(s) - (k + nctl) < 64: continue   # a magic too near the end for a control section's fields is none
         e, ncode = k - 4, struct.unpack_from('<I', s, k + 0x44)[0]   # the control section names the code area's length at +0x44 (as in BNSH files, shader_split.py check)
         c = e - ncode
         if 0x80 <= ncode and c >= 4 and struct.unpack_from('<I', s, c - 4)[0] == ncode: return '', s[k:k + nctl], s[c:e]

@@ -75,6 +75,17 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             private readonly Dictionary<LsKey, Dictionary<uint, SearchResult>> _sharedEntries;
             private readonly HelperFunctionManager _hfm;
 
+            // nxnative: the raw global memory load helpers (TryGenerateRawStorageOp) by function id, their variants that take a pool resolved once for a run of loads
+            // (ResolveRawRuns), and the helper that resolves a run's range
+            public readonly Dictionary<int, StorageKind> RawLoadFunctions = new();
+            public readonly Dictionary<StorageKind, int> ResolvedLoadFunctions = new();
+            public int ResolveRangeFunction = -1;
+
+            public int AddHelper(Function function)
+            {
+                return _hfm.AddFunction(function);
+            }
+
             public GtsContext(HelperFunctionManager hfm)
             {
                 _entries = [];
@@ -277,6 +288,8 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                     }
                 }
             }
+
+            ResolveRawRuns(gtsContext, resourceManager, gpuAccessor, blocks);
         }
 
         private static bool IsGlobalMemory(StorageKind storageKind)
@@ -801,7 +814,8 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             ResourceManager resourceManager,
             IGpuAccessor gpuAccessor,
             Operation operation,
-            out int functionId)
+            out int functionId,
+            bool resolved = false)
         {
             functionId = 0;
 
@@ -839,6 +853,11 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                 inArgumentsCount = 3;
             }
 
+            if (resolved)
+            {
+                inArgumentsCount = 5;   // the address, then the run's entry (0: none holds the whole run) and its delta (ResolveRawRuns)
+            }
+
             EmitterContext context = new();
 
             Operand addrLow = Argument(0);
@@ -861,6 +880,15 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                 return context.BitwiseOr(
                     context.ICompareLessUnsigned(addrHigh, high),
                     context.BitwiseAnd(context.ICompareEqual(addrHigh, high), context.ICompareLessUnsigned(addrLow, low)));
+            }
+
+            // A load of a run whose pool was resolved once (ResolveRawRuns) moves by that pool's delta; a run no single entry holds takes the lookup below
+            if (resolved)
+            {
+                Operand lblLookup = Label();
+                context.BranchIfFalse(lblLookup, context.ICompareNotEqual(Argument(2), Const(0)));
+                EmitAccess(Argument(3), Argument(4));
+                context.MarkLabel(lblLookup);
             }
 
             Operand selected = Local();
@@ -920,71 +948,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                 context.MarkLabel(lblLogged);
             }
 
-            // A small integer is read or written in its 32-bit word
-            Operand wordLow = isSmall ? context.BitwiseAnd(addrLow, Const(~3)) : addrLow;
-            Operand hostLow = context.IAdd(wordLow, MapWord(found, 4));
-            Operand carry = context.ConditionalSelect(context.ICompareLessUnsigned(hostLow, wordLow), Const(1), Const(0));
-            Operand hostHigh = context.IAdd(context.IAdd(addrHigh, MapWord(found, 5)), carry);
-
-            Operand resultValue = null;
-
-            if (operation.Inst == Instruction.Load)
-            {
-                resultValue = context.Load(StorageKind.GlobalMemory, hostLow, hostHigh);
-
-                if (isSmall)
-                {
-                    Operand bitOffset = HelperFunctionManager.GetBitOffset(context, addrLow);
-
-                    resultValue = operation.StorageKind switch
-                    {
-                        StorageKind.GlobalMemoryS8 => context.BitfieldExtractS32(context.ShiftRightS32(resultValue, bitOffset), Const(0), Const(8)),
-                        StorageKind.GlobalMemoryS16 => context.BitfieldExtractS32(context.ShiftRightS32(resultValue, bitOffset), Const(0), Const(16)),
-                        StorageKind.GlobalMemoryU8 => context.BitwiseAnd(context.ShiftRightU32(resultValue, bitOffset), Const(byte.MaxValue)),
-                        _ => context.BitwiseAnd(context.ShiftRightU32(resultValue, bitOffset), Const(ushort.MaxValue)),
-                    };
-                }
-            }
-            else if (operation.Inst == Instruction.Store)
-            {
-                Operand value = Argument(2);
-
-                if (isSmall)
-                {
-                    int bitSize = operation.StorageKind is StorageKind.GlobalMemoryS8 or StorageKind.GlobalMemoryU8 ? 8 : 16;
-                    Operand bitOffset = HelperFunctionManager.GetBitOffset(context, addrLow);
-
-                    Operand lblLoopHead = Label();
-                    context.MarkLabel(lblLoopHead);
-
-                    Operand oldValue = context.Load(StorageKind.GlobalMemory, hostLow, hostHigh);
-                    Operand newValue = context.BitfieldInsert(oldValue, value, bitOffset, Const(bitSize));
-                    Operand casResult = context.AtomicCompareAndSwap(StorageKind.GlobalMemory, hostLow, hostHigh, oldValue, newValue);
-
-                    context.BranchIfTrue(lblLoopHead, context.ICompareNotEqual(casResult, oldValue));
-                }
-                else
-                {
-                    context.Store(StorageKind.GlobalMemory, hostLow, hostHigh, value);
-                }
-            }
-            else if (operation.Inst == Instruction.AtomicCompareAndSwap)
-            {
-                resultValue = context.AtomicCompareAndSwap(StorageKind.GlobalMemory, hostLow, hostHigh, Argument(2), Argument(3));
-            }
-            else
-            {
-                resultValue = context.Add(operation.Inst, StorageKind.GlobalMemory, Local(), hostLow, hostHigh, Argument(2));
-            }
-
-            if (resultValue != null)
-            {
-                context.Return(resultValue);
-            }
-            else
-            {
-                context.Return();
-            }
+            EmitAccess(MapWord(found, 4), MapWord(found, 5));
 
             context.MarkLabel(lblSkip);
 
@@ -1001,12 +965,590 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
 
             Function function = new(
                 ControlFlowGraph.Create(context.GetOperations()).Blocks,
-                GetFunctionName(operation, isMultiTarget: true, []) + "Raw",
+                GetFunctionName(operation, isMultiTarget: true, []) + (resolved ? "RawResolved" : "Raw"),
                 returnsValue,
                 inArgumentsCount,
                 0);
 
-            functionId = gtsContext.AddFunction(operation, isMultiTarget: true, [], function);
+            if (resolved)
+            {
+                functionId = gtsContext.AddHelper(function);
+                gtsContext.ResolvedLoadFunctions[operation.StorageKind] = functionId;
+            }
+            else
+            {
+                functionId = gtsContext.AddFunction(operation, isMultiTarget: true, [], function);
+
+                if (operation.Inst == Instruction.Load)
+                {
+                    gtsContext.RawLoadFunctions[functionId] = operation.StorageKind;
+                }
+            }
+
+            return true;
+
+            // The access at the address moved by a pool's delta (its Metal GPU address minus its guest address), and its return
+            void EmitAccess(Operand deltaLow, Operand deltaHigh)
+            {
+                // A small integer is read or written in its 32-bit word
+                Operand wordLow = isSmall ? context.BitwiseAnd(addrLow, Const(~3)) : addrLow;
+                Operand hostLow = context.IAdd(wordLow, deltaLow);
+                Operand carry = context.ConditionalSelect(context.ICompareLessUnsigned(hostLow, wordLow), Const(1), Const(0));
+                Operand hostHigh = context.IAdd(context.IAdd(addrHigh, deltaHigh), carry);
+
+                Operand resultValue = null;
+
+                if (operation.Inst == Instruction.Load)
+                {
+                    resultValue = context.Load(StorageKind.GlobalMemory, hostLow, hostHigh);
+
+                    if (isSmall)
+                    {
+                        Operand bitOffset = HelperFunctionManager.GetBitOffset(context, addrLow);
+
+                        resultValue = operation.StorageKind switch
+                        {
+                            StorageKind.GlobalMemoryS8 => context.BitfieldExtractS32(context.ShiftRightS32(resultValue, bitOffset), Const(0), Const(8)),
+                            StorageKind.GlobalMemoryS16 => context.BitfieldExtractS32(context.ShiftRightS32(resultValue, bitOffset), Const(0), Const(16)),
+                            StorageKind.GlobalMemoryU8 => context.BitwiseAnd(context.ShiftRightU32(resultValue, bitOffset), Const(byte.MaxValue)),
+                            _ => context.BitwiseAnd(context.ShiftRightU32(resultValue, bitOffset), Const(ushort.MaxValue)),
+                        };
+                    }
+                }
+                else if (operation.Inst == Instruction.Store)
+                {
+                    Operand value = Argument(2);
+
+                    if (isSmall)
+                    {
+                        int bitSize = operation.StorageKind is StorageKind.GlobalMemoryS8 or StorageKind.GlobalMemoryU8 ? 8 : 16;
+                        Operand bitOffset = HelperFunctionManager.GetBitOffset(context, addrLow);
+
+                        Operand lblLoopHead = Label();
+                        context.MarkLabel(lblLoopHead);
+
+                        Operand oldValue = context.Load(StorageKind.GlobalMemory, hostLow, hostHigh);
+                        Operand newValue = context.BitfieldInsert(oldValue, value, bitOffset, Const(bitSize));
+                        Operand casResult = context.AtomicCompareAndSwap(StorageKind.GlobalMemory, hostLow, hostHigh, oldValue, newValue);
+
+                        context.BranchIfTrue(lblLoopHead, context.ICompareNotEqual(casResult, oldValue));
+                    }
+                    else
+                    {
+                        context.Store(StorageKind.GlobalMemory, hostLow, hostHigh, value);
+                    }
+                }
+                else if (operation.Inst == Instruction.AtomicCompareAndSwap)
+                {
+                    resultValue = context.AtomicCompareAndSwap(StorageKind.GlobalMemory, hostLow, hostHigh, Argument(2), Argument(3));
+                }
+                else
+                {
+                    resultValue = context.Add(operation.Inst, StorageKind.GlobalMemory, Local(), hostLow, hostHigh, Argument(2));
+                }
+
+                if (resultValue != null)
+                {
+                    context.Return(resultValue);
+                }
+                else
+                {
+                    context.Return();
+                }
+            }
+        }
+
+        // nxnative: loads through one untraced pointer at constant offsets resolve its pool once. A shader that reads a structure word after word through a pointer it loaded (Ocarina of Time's
+        // colour-pass mesh shaders, 253 to 506 raw loads each, a pointer from a fixed word of a storage buffer and offsets +0, +4, +8 ...) paid each word the last-entry check, 4 table reads, and the
+        // delta's 2 more: about 7 memory reads per word of data, and nearly all of the 683x384 colour pass's 5.8 ms of mesh work. Here the loads of one base {low, high} (SSA values) at
+        // offsets c >= 0, as the decoder builds them (low = base low + c, high = base high + the carry of that add), are a run: at the nearest block that dominates all of them, one call looks up
+        // the entry holding the run's whole range [base + min c, base + max c + 4) and reads its delta, and each load moves by that delta. A run no single entry holds (it spans two pools, or an
+        // address in none, or a guard that leaves the pointer invalid) gives entry 0, and each of its loads takes the full lookup as before. The resolve only reads the table, so running it
+        // where a guarded load would not run is harmless. Stores and atomics keep the per-access path: the write log is per entry
+        private const int RawRunMinLoads = 2;
+        private const int RawRunMaxOffset = 1 << 24;
+
+        private readonly struct RawRunAccess
+        {
+            public readonly LinkedListNode<INode> Node;
+            public readonly BasicBlock Block;
+            public readonly Operand BaseLow;
+            public readonly Operand BaseHigh;
+            public readonly int Offset;
+
+            public RawRunAccess(LinkedListNode<INode> node, BasicBlock block, Operand baseLow, Operand baseHigh, int offset)
+            {
+                Node = node;
+                Block = block;
+                BaseLow = baseLow;
+                BaseHigh = baseHigh;
+                Offset = offset;
+            }
+        }
+
+        private static void ResolveRawRuns(GtsContext gtsContext, ResourceManager resourceManager, IGpuAccessor gpuAccessor, BasicBlock[] blocks)
+        {
+            if (gtsContext.RawLoadFunctions.Count == 0)
+            {
+                return;
+            }
+
+            // The runs in program order (first load first), keyed by the base's value (RawValueKey: the same SSA values, or the same pure operations of them), and where each node is
+            Dictionary<string, List<RawRunAccess>> runs = new();
+            List<string> order = [];
+            Dictionary<INode, BasicBlock> blockOf = new();
+            Dictionary<Operand, string> keys = new();
+
+            foreach (BasicBlock block in blocks)
+            {
+                for (LinkedListNode<INode> node = block.Operations.First; node != null; node = node.Next)
+                {
+                    blockOf[node.Value] = block;
+
+                    if (node.Value is not Operation call ||
+                        call.Inst != Instruction.Call ||
+                        call.SourcesCount != 3 ||
+                        call.Dest == null ||
+                        call.GetSource(0).Type != OperandType.Constant ||
+                        !gtsContext.RawLoadFunctions.ContainsKey(call.GetSource(0).Value))
+                    {
+                        continue;
+                    }
+
+                    if (!TryGetRawBase(call.GetSource(1), call.GetSource(2), out Operand baseLow, out Operand baseHigh, out int offset))
+                    {
+                        continue;
+                    }
+
+                    string key = RawValueKey(baseLow, keys, RawKeyDepth) + "|" + RawValueKey(baseHigh, keys, RawKeyDepth);
+
+                    if (!runs.TryGetValue(key, out List<RawRunAccess> run))
+                    {
+                        runs.Add(key, run = []);
+                        order.Add(key);
+                    }
+
+                    run.Add(new RawRunAccess(node, block, baseLow, baseHigh, offset));
+                }
+            }
+
+            int mapBinding = -1;
+
+            foreach (string key in order)
+            {
+                List<RawRunAccess> run = runs[key];
+
+                if (run.Count < RawRunMinLoads)
+                {
+                    continue;
+                }
+
+                // The nearest block that dominates every load of the run
+                BasicBlock at = run[0].Block;
+
+                foreach (RawRunAccess access in run)
+                {
+                    at = NearestCommonDominator(at, access.Block);
+
+                    if (at == null)
+                    {
+                        break;
+                    }
+                }
+
+                if (at == null)
+                {
+                    continue;
+                }
+
+                if (mapBinding < 0)
+                {
+                    if (!resourceManager.TryGetStorageBufferBinding(GmemMapCbSlot, 0, write: false, out mapBinding) ||
+                        !TryGetResolveRangeFunction(gtsContext, resourceManager, out _))
+                    {
+                        return;
+                    }
+                }
+
+                int min = int.MaxValue, end = 0;
+
+                foreach (RawRunAccess access in run)
+                {
+                    min = Math.Min(min, access.Offset);
+                    end = Math.Max(end, access.Offset + 4);
+                }
+
+                // Before the run's first load in that block, else at its end (before its branch)
+                LinkedListNode<INode> before = null;
+
+                foreach (RawRunAccess access in run)
+                {
+                    if (access.Block == at)
+                    {
+                        before = access.Node;
+                        break;
+                    }
+                }
+
+                // A load's base whose value is defined there: one SSA value dominates all its uses, but loads that compute the same value each on their own may not
+                Operand baseLow = null, baseHigh = null;
+
+                foreach (RawRunAccess access in run)
+                {
+                    if (IsAvailableAt(access.BaseLow, at, before, blockOf) && IsAvailableAt(access.BaseHigh, at, before, blockOf))
+                    {
+                        (baseLow, baseHigh) = (access.BaseLow, access.BaseHigh);
+                        break;
+                    }
+                }
+
+                if (baseLow == null)
+                {
+                    continue;
+                }
+
+                EmitterContext context = new();
+
+                (Operand minLow, Operand minHigh) = AddOffset64(context, baseLow, baseHigh, min);
+                (Operand endLow, Operand endHigh) = AddOffset64(context, baseLow, baseHigh, end);
+                Operand entry = context.Call(gtsContext.ResolveRangeFunction, true, minLow, minHigh, endLow, endHigh);
+                Operand entryWord = context.IMultiply(entry, Const(GmemMapEntryWords));
+                Operand deltaLow = context.Load(StorageKind.StorageBuffer, mapBinding, Const(0), context.IAdd(entryWord, Const(4)));
+                Operand deltaHigh = context.Load(StorageKind.StorageBuffer, mapBinding, Const(0), context.IAdd(entryWord, Const(5)));
+
+                foreach (Operation op in context.GetOperations())
+                {
+                    if (before != null)
+                    {
+                        at.Operations.AddBefore(before, op);
+                    }
+                    else
+                    {
+                        at.Append(op);
+                    }
+                }
+
+                foreach (RawRunAccess access in run)
+                {
+                    Operation call = (Operation)access.Node.Value;
+                    StorageKind kind = gtsContext.RawLoadFunctions[call.GetSource(0).Value];
+
+                    if (!gtsContext.ResolvedLoadFunctions.TryGetValue(kind, out int resolvedId))
+                    {
+                        Operation model = new(Instruction.Load, kind, Local(), Const(0), Const(0));
+
+                        if (!TryGenerateRawStorageOp(gtsContext, resourceManager, gpuAccessor, model, out resolvedId, resolved: true))
+                        {
+                            continue;
+                        }
+                    }
+
+                    call.SetSource(0, Const(resolvedId));
+                    call.AppendSources([entry, deltaLow, deltaHigh]);
+                }
+            }
+        }
+
+        // The base and constant offset of a raw load's address, as the decoder builds an address plus an offset (InstEmitAmpereMem.AGlobalAddress, InstEmitMemory.Get40BitsAddress):
+        // low = base low + c, high = base high + (low < base low ? 1 : 0), or the carry alone for a base high of 0. An address that is no such sum is its own base at offset 0
+        private static bool TryGetRawBase(Operand low, Operand high, out Operand baseLow, out Operand baseHigh, out int offset)
+        {
+            low = SkipCopies(low);
+            high = SkipCopies(high);
+
+            if (low.AsgOp is Operation add && add.Inst == Instruction.Add && add.SourcesCount == 2)
+            {
+                for (int i = 0; i < 2; i++)
+                {
+                    Operand c = add.GetSource(i), b = SkipCopies(add.GetSource(1 - i));
+
+                    if (c.Type != OperandType.Constant || c.Value <= 0 || c.Value >= RawRunMaxOffset || b.Type != OperandType.LocalVariable)
+                    {
+                        continue;
+                    }
+
+                    if (IsCarryOf(high, low, b))   // a high word of 0: the optimizer folded 0 + carry to the carry
+                    {
+                        baseLow = b;
+                        baseHigh = Const(0);
+                        offset = c.Value;
+
+                        return true;
+                    }
+
+                    if (high.AsgOp is Operation addHigh && addHigh.Inst == Instruction.Add && addHigh.SourcesCount == 2)
+                    {
+                        for (int j = 0; j < 2; j++)
+                        {
+                            if (IsCarryOf(addHigh.GetSource(j), low, b))
+                            {
+                                baseLow = b;
+                                baseHigh = SkipCopies(addHigh.GetSource(1 - j));
+                                offset = c.Value;
+
+                                return baseHigh.Type is OperandType.LocalVariable or OperandType.Constant;
+                            }
+                        }
+                    }
+                }
+            }
+
+            baseLow = low;
+            baseHigh = high;
+            offset = 0;
+
+            return low.Type == OperandType.LocalVariable && high.Type is OperandType.LocalVariable or OperandType.Constant;
+        }
+
+        // carry = (sum < base) ? 1 : 0
+        private static bool IsCarryOf(Operand carry, Operand sum, Operand baseLow)
+        {
+            if (SkipCopies(carry).AsgOp is not Operation select ||
+                select.Inst != Instruction.ConditionalSelect ||
+                select.SourcesCount != 3 ||
+                select.GetSource(1).Type != OperandType.Constant || select.GetSource(1).Value != 1 ||
+                select.GetSource(2).Type != OperandType.Constant || select.GetSource(2).Value != 0)
+            {
+                return false;
+            }
+
+            return SkipCopies(select.GetSource(0)).AsgOp is Operation compare &&
+                   compare.Inst == Instruction.CompareLessU32 &&
+                   compare.SourcesCount == 2 &&
+                   SkipCopies(compare.GetSource(0)) == sum &&
+                   SkipCopies(compare.GetSource(1)) == baseLow;
+        }
+
+        private const int RawKeyDepth = 6;
+
+        // A key equal for two operands that hold the same value in an invocation: the same SSA value or constant, or the same pure integer operation of such values (a decoder computes
+        // a pointer plus a uniform register again for each instruction). Anything else, a memory load among them, is keyed by its own identity
+        private static string RawValueKey(Operand operand, Dictionary<Operand, string> keys, int depth)
+        {
+            operand = SkipCopies(operand);
+
+            if (operand.Type == OperandType.Constant)
+            {
+                return "#" + operand.Value.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            }
+
+            if (keys.TryGetValue(operand, out string known))
+            {
+                return known;
+            }
+
+            string key;
+
+            if (depth > 0 && operand.AsgOp is Operation op && op.Dest == operand && op.DestsCount == 1 && op.SourcesCount is >= 1 and <= 3 && IsPureInteger(op.Inst))
+            {
+                string[] sources = new string[op.SourcesCount];
+
+                for (int i = 0; i < sources.Length; i++)
+                {
+                    sources[i] = RawValueKey(op.GetSource(i), keys, depth - 1);
+                }
+
+                if (op.Inst is Instruction.Add or Instruction.BitwiseAnd or Instruction.BitwiseOr or Instruction.BitwiseExclusiveOr or Instruction.CompareEqual or Instruction.CompareNotEqual)
+                {
+                    Array.Sort(sources, StringComparer.Ordinal);
+                }
+
+                key = op.Inst.ToString() + "(" + string.Join(",", sources) + ")";
+            }
+            else
+            {
+                key = "v" + keys.Count.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            }
+
+            keys[operand] = key;
+
+            return key;
+        }
+
+        private static bool IsPureInteger(Instruction inst)
+        {
+            return inst is Instruction.Add or Instruction.Subtract or Instruction.Multiply or Instruction.ConditionalSelect or
+                Instruction.CompareLessU32 or Instruction.CompareEqual or Instruction.CompareNotEqual or
+                Instruction.BitwiseAnd or Instruction.BitwiseOr or Instruction.BitwiseExclusiveOr or Instruction.BitwiseNot or
+                Instruction.ShiftLeft or Instruction.ShiftRightU32 or Instruction.ShiftRightS32;
+        }
+
+        // The operand's value exists at the insertion point: before node in block, or at block's end when node is null
+        private static bool IsAvailableAt(Operand operand, BasicBlock block, LinkedListNode<INode> node, Dictionary<INode, BasicBlock> blockOf)
+        {
+            if (operand.Type == OperandType.Constant)
+            {
+                return true;
+            }
+
+            if (operand.Type != OperandType.LocalVariable || operand.AsgOp == null || !blockOf.TryGetValue(operand.AsgOp, out BasicBlock defBlock))
+            {
+                return false;
+            }
+
+            if (defBlock != block)
+            {
+                for (BasicBlock x = block.ImmediateDominator; x != null; x = x.ImmediateDominator == x ? null : x.ImmediateDominator)
+                {
+                    if (x == defBlock)
+                    {
+                        return true;
+                    }
+                }
+
+                return false;
+            }
+
+            if (node == null)
+            {
+                return true;
+            }
+
+            for (LinkedListNode<INode> n = node.Previous; n != null; n = n.Previous)
+            {
+                if (n.Value == operand.AsgOp)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static Operand SkipCopies(Operand operand)
+        {
+            while (operand.AsgOp is Operation copy && copy.Inst == Instruction.Copy && copy.SourcesCount == 1)
+            {
+                operand = copy.GetSource(0);
+            }
+
+            return operand;
+        }
+
+        private static (Operand, Operand) AddOffset64(EmitterContext context, Operand low, Operand high, int offset)
+        {
+            if (offset == 0)
+            {
+                return (low, high);
+            }
+
+            Operand sum = context.IAdd(low, Const(offset));
+            Operand carry = context.ConditionalSelect(context.ICompareLessUnsigned(sum, low), Const(1), Const(0));
+
+            return (sum, context.IAdd(high, carry));
+        }
+
+        private static BasicBlock NearestCommonDominator(BasicBlock a, BasicBlock b)
+        {
+            HashSet<BasicBlock> above = [];
+
+            for (BasicBlock x = a; x != null; x = x.ImmediateDominator == x ? null : x.ImmediateDominator)
+            {
+                above.Add(x);
+            }
+
+            for (BasicBlock y = b; y != null; y = y.ImmediateDominator == y ? null : y.ImmediateDominator)
+            {
+                if (above.Contains(y))
+                {
+                    return y;
+                }
+            }
+
+            return null;
+        }
+
+        // The entry of the pool table that holds a whole range [min, end): the entry this helper chose last in this invocation, else the hint of min's 2 MiB chunk, else the last entry
+        // starting at or below min, if that entry also reaches end; else 0. A shader that loads its pointers again in each guarded block resolves the same pointer many times
+        // (Ocarina of Time's colour-pass mesh shaders: 122 runs through 5 pointers), and all but the first take the remembered entry
+        private static bool TryGetResolveRangeFunction(GtsContext gtsContext, ResourceManager resourceManager, out int functionId)
+        {
+            functionId = gtsContext.ResolveRangeFunction;
+
+            if (functionId >= 0)
+            {
+                return true;
+            }
+
+            if (!resourceManager.TryGetStorageBufferBinding(GmemMapCbSlot, 0, write: false, out int mapBinding))
+            {
+                return false;
+            }
+
+            resourceManager.Properties.UsesPhysicalPointers = true;
+
+            EmitterContext context = new();
+
+            Operand minLow = Argument(0);
+            Operand minHigh = Argument(1);
+            Operand endLow = Argument(2);
+            Operand endHigh = Argument(3);
+
+            Operand MapWord(Operand entry, int word)
+            {
+                return context.Load(StorageKind.StorageBuffer, mapBinding, Const(0), context.IAdd(entry, Const(word)));
+            }
+
+            Operand NotAbove(Operand aHigh, Operand aLow, Operand bHigh, Operand bLow)   // {aLow, aHigh} <= {bLow, bHigh}
+            {
+                return context.BitwiseOr(
+                    context.ICompareLessUnsigned(aHigh, bHigh),
+                    context.BitwiseAnd(context.ICompareEqual(aHigh, bHigh), context.ICompareLessOrEqualUnsigned(aLow, bLow)));
+            }
+
+            Operand Holds(Operand index)
+            {
+                Operand found = context.IMultiply(index, Const(GmemMapEntryWords));
+
+                return context.BitwiseAnd(
+                    context.ICompareNotEqual(index, Const(0)),
+                    context.BitwiseAnd(
+                        NotAbove(MapWord(found, 1), MapWord(found, 0), minHigh, minLow),
+                        NotAbove(endHigh, endLow, MapWord(found, 3), MapWord(found, 2))));
+            }
+
+            int lastBinding = resourceManager.AddRawLastEntryMemory();
+            Operand last = context.Load(StorageKind.LocalMemory, lastBinding);
+            Operand lblMiss = Label();
+            context.BranchIfFalse(lblMiss, Holds(last));
+            context.Return(last);
+            context.MarkLabel(lblMiss);
+
+            Operand selected = Local();
+            Operand lblFound = Label();
+
+            Operand chunk = context.BitwiseOr(context.ShiftLeft(minHigh, Const(32 - GmemHintShift)), context.ShiftRightU32(minLow, Const(GmemHintShift)));
+            Operand indexMask = Const((1 << GmemMapLog2) - 1);
+            Operand hint = MapWord(context.IMultiply(context.BitwiseAnd(chunk, indexMask), Const(GmemMapEntryWords)), 6);
+            Operand hintIndex = context.BitwiseAnd(hint, indexMask);
+            Operand hintFits = context.BitwiseAnd(
+                context.BitwiseAnd(context.ICompareNotEqual(hintIndex, Const(0)), context.ICompareEqual(context.ShiftRightU32(hint, Const(GmemMapLog2)), chunk)),
+                context.ICompareLessUnsigned(minHigh, Const(1 << (GmemHintShift - GmemMapLog2))));
+            context.Copy(selected, hintIndex);
+            context.BranchIfTrue(lblFound, hintFits);
+
+            Operand index = Const(0);
+
+            for (int step = 1 << (GmemMapLog2 - 1); step != 0; step >>= 1)
+            {
+                Operand candidate = context.IAdd(index, Const(step));
+                Operand entry = context.IMultiply(candidate, Const(GmemMapEntryWords));
+                index = context.ConditionalSelect(NotAbove(MapWord(entry, 1), MapWord(entry, 0), minHigh, minLow), candidate, index);
+            }
+
+            context.Copy(selected, index);
+            context.MarkLabel(lblFound);
+
+            Operand lblNone = Label();
+            context.BranchIfFalse(lblNone, Holds(selected));
+            context.Store(StorageKind.LocalMemory, lastBinding, selected);
+            context.Return(selected);
+            context.MarkLabel(lblNone);
+            context.Return(Const(0));
+
+            Function function = new(ControlFlowGraph.Create(context.GetOperations()).Blocks, "RawResolveRange", true, 4, 0);
+
+            functionId = gtsContext.ResolveRangeFunction = gtsContext.AddHelper(function);
 
             return true;
         }

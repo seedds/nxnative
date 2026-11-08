@@ -80,6 +80,20 @@ static void t_slots(void) {
     CHECK(pad_slot_take(&s, NULL, "x") == -1 && pad_slot_free(&s, NULL) == -1, "no owner, no slot");
     memset(&s, 0, sizeof s);   // DM_KBD_PLAYER=own: the keyboard holds player 1 for good
     CHECK(pad_slot_take(&s, &kbd, "keyboard") == 0 && pad_slot_take(&s, &a, "Xbox Wireless Controller") == 1, "with the keyboard on its own the first controller is player 2");
+    CHECK(pad_slot_settle(&s) == -1, "player 1 held (the keyboard): nobody moves");
+    // A Bluetooth pad reconnecting under another name before its old connection is gone (Star Fox's log: "Xbox Wireless Controller" connected as player 1, "Controller"
+    // connected as player 2, then the first one disconnected)
+    memset(&s, 0, sizeof s);
+    CHECK(pad_slot_take(&s, &a, "Xbox Wireless Controller") == 0 && pad_slot_take(&s, &b, "Controller") == 1, "the reconnection takes player 2 while player 1 is held");
+    CHECK(pad_slot_settle(&s) == -1, "player 1 still held: nobody moves");
+    pad_slot_free(&s, &a);
+    CHECK(pad_slot_settle(&s) == 1 && pad_slot_of(&s, &b) == 0 && pad_slot_mask(&s) == 0x1, "the only controller left moves to player 1");
+    CHECK(!strcmp(s.last[0], "Controller") && !s.last[1][0], "its name moves with it");
+    CHECK(pad_slot_settle(&s) == -1, "settled: nothing more moves");
+    memset(&s, 0, sizeof s);
+    pad_slot_take(&s, &a, "Xbox Wireless Controller"); pad_slot_take(&s, &b, "DualSense Wireless Controller"); pad_slot_take(&s, &c, "Pro Controller");
+    pad_slot_free(&s, &a);
+    CHECK(pad_slot_settle(&s) == -1 && pad_slot_of(&s, &b) == 1 && pad_slot_of(&s, &c) == 2, "two controllers left keep their players");
 }
 
 static void t_npads(void) {

@@ -286,5 +286,20 @@ class Vote(Alu):
         self.assertIn('simd_any', self.kept(self.FSETP, self.VOTE, self.MOV_P0, srcs=(6, 19, 20)))
 
 
+class GuardedDeferredWrites(Translated):
+    """Two loads of one register under complementary guards, on two write barriers, with no wait between them (Star Fox's light grid, pixel shader
+    0396b3632ac7ea61 +0x640 / +0x6c0): @P1 LDC.64 R38, c[8][R40 + 8], then @!P1 LDC.64 R38, c[8][R40]. Both must land: with the first one dropped, the P1 lanes
+    read R38's old value as a light count and the GPU hung in the opening cutscene"""
+    LOP3 = (0x004fe2000782c0ff, 0x000000010fff7812)   # LOP3.LUT P1, RZ, R15, 0x1, RZ, 0xc0, !PT (+0x4d0): P1 = R15 & 1
+    LDC_P1 = (0x0000620000000a00, 0x0200020028261b82)   # @P1 LDC.64 R38, c[0x8][R40 + 0x8], write barrier 1
+    LDC_NP1 = (0x0000a20000000a00, 0x0200000028269b82)  # @!P1 LDC.64 R38, c[0x8][R40], write barrier 2
+    STORE_R38 = (STORE[0], STORE[1] & ~(0xff << 32) | 38 << 32)   # STS.U32 [R9 * 16 + 8], R38
+
+    def test_both_loads_kept(self):
+        code = b''.join(inst(*s2r_tid(r)) for r in (9, 15, 40)) + inst(*waiting(self.LOP3)) + inst(*self.LDC_P1) + inst(*self.LDC_NP1)
+        msl = self.translate(code + inst(*waiting(self.STORE_R38)) + inst(*EXIT), shared=0x1000)
+        self.assertEqual(len(re.findall(r'cp_c8\)\._m0\[', msl)), 2, msl)   # R38 of each: the +8 word and the +0 word (R39 is never read)
+
+
 if __name__ == '__main__':
     unittest.main()

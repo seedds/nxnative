@@ -95,8 +95,27 @@ static int test_output_lifetime(void) {
     printf("AudioOut fields and lifetime (%s): %d guarded open / close / unmap / resume cycles, no consumer left\n", real_audio() ? "real output" : "silent sink", CYCLES);
     return 0;
 }
+// The picture delay line (sync_delay), fixed at 10 ms: it settles while the input is quiet, then an impulse comes out exactly 480 frames late; while sound plays the delay
+// does not move, so nothing is replayed or skipped where it could be heard
+static int test_sync_delay(void) {
+    aout *a = calloc(1, sizeof *a); a->ch = 2;
+    setenv("DM_AUDIO_SYNC", "10", 1); sync_init(a); unsetenv("DM_AUDIO_SYNC");
+    enum { N = 240 }; int16_t blk[N * 2]; long at = 0, seen = -1, first = -1;
+    if (!a->dl || a->dl_fixed != 10) { puts("FAIL sync: no delay line for DM_AUDIO_SYNC=10"); return 1; }
+    for (int k = 0; k < 20; k++) { memset(blk, 0, sizeof blk); if (k == 4) blk[0] = blk[1] = 10000; sync_delay(a, blk, N, 2);
+        for (int i = 0; i < N; i++) if (blk[i * 2] == 10000) seen = at + i;
+        if (k == 0 && first < 0) first = a->dl_d; at += N; }
+    if (first != 480 || seen != 4 * N + 480) { printf("FAIL sync: delay %ld after the first quiet block (480), impulse out at %ld (%d)\n", first, seen, 4 * N + 480); return 1; }
+    a->dl_fixed = 20;
+    for (int k = 0; k < 10; k++) { for (int i = 0; i < N * 2; i++) blk[i] = (int16_t)(i & 1 ? 8000 : -8000); sync_delay(a, blk, N, 2); }
+    if (a->dl_d != 480) { printf("FAIL sync: the delay moved to %u while sound played\n", a->dl_d); return 1; }
+    for (int k = 0; k < 10; k++) { memset(blk, 0, sizeof blk); sync_delay(a, blk, N, 2); }   // the block is the output too: quiet input each time
+    if (a->dl_d != 960) { printf("FAIL sync: the delay is %u after the quiet stretch (960)\n", a->dl_d); return 1; }
+    printf("sync delay: 480 frames, impulse out 480 frames late, held while sound played, 960 after the quiet stretch \u2713\n");
+    free(a->dl); free(a); return 0;
+}
 int main(void) {
-    if (test_surround_output() || test_output_lifetime()) return 1;
+    if (test_surround_output() || test_output_lifetime() || test_sync_delay()) return 1;
     char out[64], ev[64]; uint8_t prm[16]; gbuf b[3]; static int16_t pcm[3][4800 * 2];
     h_au_InitParam(prm);
     if (h_au_Open(out, ev, NULL, prm)) return 1;

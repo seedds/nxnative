@@ -169,6 +169,14 @@ def header_one(g):
     if not utp.isdigit(): sys.exit(f"{g.id}: ue_texture_pool must be megabytes (0 = the game's own pool): {utp}")
     ufc = g.get('ue_fps_cvar', 't.MaxFPS')   # the Unreal console variable the host writes fps_target into (hle_fpslock.c; found by name by the rewriter, ue_cvar.py NAMES): a game's own frame limit its settings apply to t.MaxFPS
     if not re.fullmatch(r'[A-Za-z][A-Za-z0-9_.]{0,30}', ufc): sys.exit(f'{g.id}: ue_fps_cvar must be a console variable name: {ufc}')
+    # romfs_file <path> <content>, repeatable: a small RomFS file the host serves in place of the game's own (hle_fs.c profile_romfs_dir: written at the rom mount to a private
+    # folder, the last RomFS overlay, after DM_ROMFS_OVERLAY's; DM_ROMFS_FILES=0 turns them off). The content is one line, \n a newline, \t a tab and \\ a backslash. Star Fox: the engine's
+    # cvar file veclipse_build.cvar, its console resolution scale raised from the 0.4 it renders at docked
+    rf = []
+    for v in g.values('romfs_file'):
+        if len(v) != 2 or not v[0] or v[0].startswith('/') or '..' in v[0].split('/'): sys.exit(f'{g.id}: romfs_file takes a relative RomFS path without .. and one line of content: {v}')
+        rf.append((v[0], re.sub(r'\\(.)', lambda m: {'n': '\n', 't': '\t', '\\': '\\'}.get(m.group(1)) or sys.exit(f'{g.id}: romfs_file escape \\{m.group(1)}'), v[1])))
+    qc = lambda s: q(s).replace('\n', '\\n').replace('\t', '\\t')
     ps = g.get('present_snap', 'off')   # present snapshots by default (nvn_mtl.m mtl_snap_on; DM_PRESENT_SNAP and the iOS launcher's Frame buffering override it): on / off
     if ps not in ('on', 'off'): sys.exit(f'{g.id}: present_snap must be on or off: {ps}')
     p4 = g.get('pso_mtl4', 'off')   # render pipelines through MTL4Compiler on iOS by default, with the pipeline archive and hybrid pipelines (on by default on the Mac; DM_PSO_MTL4 overrides): on / off
@@ -265,6 +273,7 @@ def header_one(g):
          f'#define DM_GAME_DRAW_BARRIERS_GAME {int(dbr == "game")}',
          f'#define DM_GAME_UPSCALER_KEYS {q(",".join(ups))}', f'#define DM_GAME_UPSCALER_N {len(ups)}',
          f'#define DM_GAME_VCONV_RANGE {int(vcr == "on")}',
+         f'#define DM_GAME_ROMFS_FILES {", ".join("{" + q(a) + ", " + qc(b) + "}" for a, b in rf) or "{0}"}', f'#define DM_GAME_ROMFS_FILES_N {len(rf)}',
          *([f'#define DM_GAME_NVN_API_MAJOR {api.split(".")[0]}', f'#define DM_GAME_NVN_API_MINOR {api.split(".")[1]}'] if g.get('device_api', '') else []),   # without the key: by the SDK version (hle_nvn.c nvn_api)
          '']
     return '\n'.join(L)

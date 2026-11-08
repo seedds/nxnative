@@ -10,6 +10,7 @@ DM_APP_VERSION	switch	Overrides the IPA's version in `build_ipa.sh`; by default 
 DM_AUDIO	switch	`1` plays audio through Core Audio, `0` uses the silent sink; real output is the default on iOS, the silent sink on the Mac (the Mac launcher sets `1`)
 DM_AUDIO_DUMP	diagnostic	`=<file>` writes every PCM block the game appends as is (16-bit, 48 kHz, channel count as in the OpenAudioOut log), to judge whether a sound played
 DM_AUDIO_MUTE	switch	`=1` runs the real Core Audio output path (callback pacing, background take-over) with the output silenced, for lifecycle tests on the Mac without noise
+DM_AUDIO_SYNC	player	`auto` (the default) holds the sound back by the picture's measured delay with the display link (`hle_audio.c` `sync_delay`); `0` plays it at once; `=<ms>` holds it that long (at most 150)
 DM_AUDREN_TRACE	diagnostic	When set, the CPU audio renderer logs every update with the number of frames rendered since the previous one
 DM_AV1_DAV1D	switch	`=1` decodes AV1 movies with dav1d even where VideoToolbox decodes AV1 (Apple M3 and A17 Pro on), to compare the two or to check the path older chips take (`hle_movie_av1.c`)
 DM_BOOTPROF	diagnostic	When set, logs boot timing: the loader's breakdown (mapping, relocation, probes), Metal library loading, pipeline creation, texture uploads and the first present
@@ -113,11 +114,13 @@ DM_NRO_DIR	path	folder of NROs the shader split reads like `main`, and in which 
 DM_NVN_ALLOCPROF	diagnostic	`=1` charges Metal allocation growth to each replayed op type and function, and logs command allocator sizes and each new texture (serial, size, format, storage); `=2` also gives each main submission a fresh command allocator and reports command memory by operation, by encoder, by submission size and the indirect-count multi-draws encoded
 DM_NVN_API	switch	`=<major>.<minor>` overrides the NVN API version `nvnDeviceGetInteger` reports (by default decided by the SDK version or the profile's `device_api`: 55.15 for SDK 11 and later, 53.313 before)
 DM_NVN_BARRIER	switch	How draw passes are ordered: `full` (default) waits for all earlier GPU work, `game` only for the previous pass's fragment stage unless the game set a barrier, `ab` alternates with the `DM_AB` phases
+DM_NVN_BC_ALIAS	diagnostic	
 DM_NVN_BF_WANT	path	`=<file>`: appends the key of each fragment shader whose passes could not be merged for lack of a readable-tile version to that file, once per key
 DM_NVN_BLIT_ORDER	diagnostic	`0` drops the barriers between dependent operations in the copy encoder, which reproduces the fountain's vertical stripes in Mario Wonder
 DM_NVN_CAPTURE	diagnostic	`=<frame>:1:<path>` writes that frame (from its first submit to its present) to one file: pool bytes, registries, program keys, the textures whose content lives only in Metal, each submission's records with pointers relocatable, and the presented frame's SHA-256 and pixels; `dm/gfx/tests/nvn_replay` replays it ([development.md](development.md#frame-capture-and-replay))
 DM_NVN_CBDUMP	diagnostic	`=<dir>`: saves each draw's whole uniform blocks as `F<frame>_p<pass>_st<stage>_cb<slot>_<address>.bin`, and the source bytes of buffer-to-3D-texture copies, with `DM_NVN_PASSDUMP`
-DM_NVN_CBDUMP_KEY	diagnostic	`=<shader key>`: limits `DM_NVN_CBDUMP` to draws using that shader; for a vertex shader key also saves the draw's vertex streams and index buffer
+DM_NVN_CBDUMP_KEY	diagnostic	`=<shader key>[,<shader key>...]`: limits `DM_NVN_CBDUMP` to draws using one of those shaders; for a single vertex shader key also saves the draw's vertex streams and index buffer
+DM_NVN_CBDUMP_REG	diagnostic	`=<slot>`: limits `DM_NVN_CBDUMP` to that uniform buffer slot (the `cb<slot>` of the file names)
 DM_NVN_CBLOG	diagnostic	`=1` logs the command memory the game adds to command buffers (`AddCommandMemory`: the first 60, then every 500th) and the out-of-memory callbacks
 DM_NVN_CLEARLOG	diagnostic	`=1` logs the first 40 colour clears drawn as a triangle (inside a pass, with a partial channel mask or a partial scissor)
 DM_NVN_CMDSTAT	diagnostic	`=1` logs every 300 frames the command recording usage: bytes and records per frame, command memory segment sizes, out-of-memory callbacks, host segments, count and bytes per command type
@@ -300,6 +303,7 @@ DM_RESOURCE_VERSION	switch	Display version, written to `Gen/resources.env` by `g
 DM_RES_CHECK	diagnostic	`=1` prints the first 40 textures or buffers a shader reaches through its argument block that are not in the residency set (textures attributed to their parent allocation)
 DM_REWRITE_J	switch	`=<positive integer>`: worker processes per module for `patch_nso.py`'s x18 scan and spin wait search; `=1` runs serially. Default: one per core directly, an automatic per-module budget in the NSP script. An explicit value overrides that budget
 DM_ROMFS	path	The game's RomFS folder, mounted read-only as `rom` (default `$DM_ROOT/romfs`); the Mac launcher, the iOS app and the NSP script set it
+DM_ROMFS_FILES	switch	`=0` leaves out the RomFS files the game profile supplies (`romfs_file` in `game.tsv`), so the game reads its own
 DM_ROMFS_OVERLAY	path	`=<dir>[:<dir>…]`: RomFS reads look in these folders first, in order, and fall back to `DM_ROMFS` (for a modified copy of some files)
 DM_ROOT	path	Workspace root (default `~/dm-work`): the host's and tools' default paths (RomFS, temporary storage, shader libraries under `build/cache/metal_shader_cache`, probe dumps) are under it
 DM_RT	diagnostic	`0` leaves the thread that acquires the window on its QoS only, with no Mach time-constraint policy declaring the frame deadline (on by default; for power A/B)

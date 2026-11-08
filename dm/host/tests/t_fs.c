@@ -65,6 +65,7 @@ static void *sdk_sym(const char *name) {
 }
 
 int main(void) {
+    setenv("DM_ROMFS_FILES", "0", 1);   // the RomFS checks list the test's own image: not the files the profile it is built with may supply (game.tsv romfs_file)
     char root[1024], save[1100], work[1200], p[1200];
     const char *sp = getenv("TMPDIR"); snprintf(root, sizeof root, "%s/t_fs.XXXXXX", sp ? sp : "/private/tmp");
     if (!mkdtemp(root)) { perror("mkdtemp"); return 1; }

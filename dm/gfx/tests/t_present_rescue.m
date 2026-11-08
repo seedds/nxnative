@@ -115,6 +115,14 @@ static void latency(void) {   // Only variable-refresh fullscreen needs the late
     link_sync(); CHECK("a link created on a fixed-rate fullscreen screen keeps latency 1", link.preferredFrameLatency == 1);
     test_fullscreen = 0; link_sync();
     test_fullscreen = 1; link_sync(); CHECK("entering fullscreen on a fixed-rate screen keeps latency 1", link.preferredFrameLatency == 1);
+    {   // the lead latency 2 buys, 33 ms, a 30 Hz link has at latency 1; one counting 30 Hz on a faster screen's ticks has the screen's period
+        int mode_was = g_link_mode; double vp_was = g_link_vperiod;
+        test_variable_refresh = 1;
+        g_link_mode = 3; g_link_vperiod = 0; CHECK("a 30 Hz link in variable-refresh fullscreen takes latency 1", link_latency() == 1);
+        g_link_vperiod = 1.0 / 30; CHECK("30 Hz counted on a faster screen's ticks keeps latency 2", link_latency() == 2);
+        g_link_mode = 1; g_link_vperiod = 0; CHECK("a 60 Hz link in variable-refresh fullscreen keeps latency 2", link_latency() == 2);
+        g_link_mode = mode_was; g_link_vperiod = vp_was; test_variable_refresh = 0;
+    }
     for (int lat = 1; lat <= 2; lat++) for (int variable = 0; variable <= 1; variable++) for (int full = 0; full <= 1; full++) {
         g_present_latency = lat; test_variable_refresh = variable; test_fullscreen = full; link_sync();
         CHECK("DM_PRESENT_LATENCY wins for every screen and window mode", link.preferredFrameLatency == lat);

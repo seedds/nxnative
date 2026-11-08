@@ -234,6 +234,24 @@ static int merge_pads_left(GCController *gone) {
     for (GCController *c in GCController.controllers) if (c.extendedGamepad && c != gone) return 1;
     return 0;
 }
+// The one controller left moves to player 1 when player 1 went free (pad_slot_settle): a GameController controller with its handlers, motion and haptics, or a raw HID pad,
+// which is found by its slot when read
+static void pads_settle(void) {
+    const void *o = NULL; for (int i = 1; i < DM_PLAYERS && !o; i++) o = g_slots.owner[i];
+    int from = pad_slot_settle(&g_slots); if (from < 0) return;
+    char nb[16]; npad_name(0, nb, sizeof nb);
+    dm_pad_set_player(from, 0, 0, 0, 0, 0);
+    GCController *c = g_held[from];
+    if (c && (__bridge const void *)c == o) {
+        g_held[0] = c; g_held[from] = nil;
+        dm_motion_detach(c, from); dm_haptics_apple_controller(from, nil);
+        dm_motion_attach(c, 0);
+        LOG("controller '%s' is the only one left: moved from player %d to player 1 (npad %s)", pad_name(c), from + 1, nb);
+        pad_read(c.extendedGamepad);
+    } else {
+        for (hid_pad *d = g_hidpads; d; d = d->next) if (d == o) { LOG("controller '%s' (HID) is the only one left: moved from player %d to player 1 (npad %s)", d->name, from + 1, nb); hidpad_read(d); }
+    }
+}
 // Called at start and on every connect / disconnect (gone: the controller that was just removed, nil on a connect)
 static void pads_changed(GCController *gone) {
     if (g_merge) {
@@ -258,6 +276,7 @@ static void pads_changed(GCController *gone) {
         pad_slot_free(&g_slots, (__bridge const void *)g_held[p]); g_held[p] = nil;
         dm_pad_set_player(p, 0, 0, 0, 0, 0);   // nothing stays pressed
     }
+    pads_settle();
     for (GCController *c in now) if (c.extendedGamepad && c != gone && pad_slot_of(&g_slots, (__bridge const void *)c) < 0) {
         if (hidpad_gc_unread(c)) { pad_keep_system_buttons(c); c.extendedGamepad.valueChangedHandler = nil; continue; }   // its model's pads are read from IOKit; Home and Capture stay out of macOS's hands
         if (g_press_to_join) {   // a player at its first button (pad_read)
@@ -359,6 +378,7 @@ static void hidpad_detach(hid_pad *d) {   // d is already off g_hidpads
     if (d->twin && hidpad_is_pro(d)) dm_motion_clear_hid(p);
     npad_name(p, nb, sizeof nb); LOG("controller '%s' (HID) disconnected: player %d (npad %s) is free", d->name, p + 1, nb);
     dm_pad_set_player(p, 0, 0, 0, 0, 0);   // nothing stays pressed
+    pads_settle();
     dm_pad_players(pad_slot_mask(&g_slots));
     cp_poll();   // one controller fewer to wait for, or one player fewer
 }

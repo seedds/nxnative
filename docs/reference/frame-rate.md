@@ -20,6 +20,14 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Check:** probes confirmed the legacy result: the framework presents at interval 1, VFR reports interval 1 with ratio 0.5, and when a frame runs long the game steps back to 2 with ratio 1, so the game speed does not change.
 - **Note:** the zeldaret/botw decompilation (`VFR.cpp`) gave the semantics; 1.9.0's addresses were found by the constants (`60 / interval`, the `fmov s11, #2.0` floor).
 
+### A fixed frame step plays in slow motion on a slow Mac
+
+- **Symptom:** on a Mac whose frames take longer than a vsync, the game runs in slow motion rather than at a lower frame rate: movement, animation and the game's clocks fall behind real time, while the frame counter shows 30-45 fps.
+- **Cause:** the game advances its time by an amount fixed per frame, set by its own choice of frame rate, not by the time the frame took. On the Switch the game holds its rate, so the two agree; on a slower GPU each frame still counts as one vsync. Two forms: Ocarina of Time divides its base rate by its int frame rate into a frame ratio that its time object steps by; Mario Kart World's framework picks an interval of 1 or 2 vsyncs, which the game steps by, from the frame's CPU time alone, so frames that wait on the GPU keep interval 1.
+- **Fix:** the host's frame step (`fps_target 60`): the host decides how many vsyncs each frame stays on screen ([sead's dynamic present interval](#seads-dynamic-present-interval-ksysvfr-and-the-hosts-frame-step), `nvn_fstep.h`), and a stub hands that step to the game where it takes its own: Ocarina's ratio becomes step × base rate / 60, Mario Kart World's interval the step, at most 2 (its own intervals), with its own 30 fps mode published as a step the game fixes. Both stubs are placed by their function on any build that keeps it ([Frame-step stubs placed by their function](rewriter.md#frame-step-stubs-placed-by-their-function)). Until the host has decided a step, and at `fps_target 0`, the game's own code runs.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#frame-rate) ([issue 1375](https://github.com/seedds/nxnative/issues/1375)'s M1 Max) and [Mario Kart World](../../dm/games/0400C3F00006E000/README.md#frame-rate) (the 16 GB M1 Pro's 25-28 ms races); slow motion seen by the user on both. Lichii, a GPL emulator, named both places (facts only).
+- **Check:** see each game's note. Open: no run on a Mac slow enough to show the slow motion before and after.
+
 ### A regress run stops when another app takes the key window
 
 - **Symptom:** `scripts/regress.py` reports a hang (`no frame after … s`, a state dump with every game thread waiting) in some runs of Tears of the Kingdom, baseline and candidate alike; the log's last focus line before it is `oe focus state → 2`, with no `→ 1` after it.

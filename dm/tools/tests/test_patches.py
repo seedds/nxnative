@@ -63,7 +63,7 @@ class Registry(unittest.TestCase):
                 self.assertRegex(bid, r'^[0-9a-f]{32}$')
                 self.assertEqual(len(names), len(set(names)))
                 for name in names: self.assertRegex(name, r'^[A-Z][A-Z0-9_]*$')
-            self.assertFalse({k for k in vars(m) if k.isupper() and k not in ('CUTS', 'OBS', 'FRAME_STEP', 'CAPABILITIES', 'MATCH_CUTS', 'BINDING')} - set(dir(__import__('nso_asm'))),
+            self.assertFalse({k for k in vars(m) if k.isupper() and k not in ('CUTS', 'OBS', 'FRAME_STEP', 'CAPABILITIES', 'MATCH_CUTS', 'MATCH_FRAME_STEP', 'BINDING')} - set(dir(__import__('nso_asm'))),
                              f'{p}: a table patch_nso.py does not read')
             # every patch file states each patch's binding (docs_patches.py "Binding"), and no goal is tighter than the binding now
             self.assertTrue(getattr(m, 'BINDING', None), f'{p}: no BINDING (docs/agents/game-patches.md, "Binding")')
@@ -91,6 +91,19 @@ class Registry(unittest.TestCase):
                     self.assertNotEqual(module, 'sdk', 'SDK fixes belong in sdk_patches.py, for every game')
                 self.assertTrue(rules)
                 for rule in rules: validate(rule)
+
+    def test_function_matched_frame_steps(self):
+        # one frame step per main, in a game's own patches.py; its stub writes only inside the function it was matched by (docs_patches.frame_step_sites with that base)
+        from nso_match import validate_stub
+        for p, m in MODS.items():
+            for module, rules in getattr(m, 'MATCH_FRAME_STEP', {}).items():
+                self.assertEqual((p.name, module), ('patches.py', 'main'), f'{p}')
+                self.assertTrue(rules); self.assertEqual(len({r['name'] for r in rules}), 1, f'{p}: a main has one frame step')
+                for rule in rules:
+                    validate_stub(rule)
+                    sites, _ = docs_patches.frame_step_sites(rule['stub'], base=0x100000)
+                    self.assertTrue(sites, f'{p}: {rule["name"]} writes no site')
+                    for off, why in sites: self.assertTrue(0x100000 <= off < 0x100000 + rule['size'], f'{p}: {rule["name"]} site {off:#x} outside its function')
 
     def test_sdk_wide_rules_change_what_their_names_say(self):
         # the rules were taken from registered SDK cuts, and the builds they reproduce exactly have no row any more: each cut replaces the constant its rule names (0x3fe00000, the node
@@ -150,6 +163,12 @@ class ExternalRegistry(unittest.TestCase):
         self.patch_file(self.external, "MATCH_CUTS = {'main': ['external']}\n")
         tables, _ = self.registry()
         self.assertEqual(tables['MATCH_CUTS'][self.gid], {'main': ['repository']})
+
+    def test_frame_step_rules_are_scoped_like_match_rules(self):
+        self.patch_file(self.tools.parent / 'games', "MATCH_FRAME_STEP = {'main': ['repository']}\n")
+        self.patch_file(self.external, "MATCH_FRAME_STEP = {'main': ['external']}\n")
+        tables, _ = self.registry()
+        self.assertEqual(tables['MATCH_FRAME_STEP'][self.gid], {'main': ['repository']})
 
     def test_external_rules_cannot_enroll_a_repository_profile(self):
         (self.tools.parent / 'games' / self.gid).mkdir(parents=True)

@@ -163,6 +163,24 @@ class Matching(unittest.TestCase):
             self.assertEqual(resolve(img, len(img), [self.rule], messages.append), [])
             self.assertTrue(messages[0].startswith('[RED] '))
 
+    def test_frame_step_rule_locates_its_function_or_nothing(self):
+        # MATCH_FRAME_STEP: the stub gets the start of the one matching function, wherever the build put it; none or two give a red line and no stub
+        from nso_match import locate_stub
+        stub = dict(name='step', size=self.rule['size'], fingerprints=self.rule['fingerprints'], stub=lambda ctx: None)
+        moved = image({0x800: caller(0x800, 0x1200, 0x2980), 0x1200: [0xd2800020, RET]})
+        messages = []
+        self.assertEqual(locate_stub(moved, 0x2000, [stub], messages.append), (stub, 0x800))
+        self.assertFalse([m for m in messages if m.startswith('[RED]')], messages)
+        duplicate = image({0x100: caller(0x100, 0x500), 0x800: caller(0x800, 0x500), 0x500: [0xd2800020, RET]})
+        for img in (duplicate, image({0x100: [RET]})):
+            messages = []
+            self.assertIsNone(locate_stub(img, 0x2000, [stub], messages.append))
+            self.assertTrue(messages[0].startswith('[RED] frame step'), messages)
+        self.assertIsNone(locate_stub(moved, 0x2000, [], messages.append))
+        with self.assertRaisesRegex(ValueError, 'one frame step'): locate_stub(moved, 0x2000, [stub, dict(stub, name='other')], messages.append)
+        with self.assertRaisesRegex(ValueError, 'stub'): locate_stub(moved, 0x2000, [dict(stub, stub=None)], messages.append)
+        with self.assertRaisesRegex(ValueError, 'name, size'): locate_stub(moved, 0x2000, [dict(stub, cuts=[])], messages.append)
+
     def test_overlapping_rules_are_rejected(self):
         other = dict(self.rule, name='another patch')
         with self.assertRaisesRegex(MatchError, 'overlap'):

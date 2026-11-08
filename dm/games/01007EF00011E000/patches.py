@@ -481,5 +481,5 @@ BINDING = [
      'why': "sead::GameFrameworkNx's interval controller in this build; Tears of the Kingdom shares sead but not this code"},
     {'what': '60 fps frame step and render scale (ksys::VFR)', 'now': 'build', 'goal': 'game', 'purpose': 'frame rate',
      'why': "the game's own frame code; the frame-step state page is general",
-     'blocked': 'frame-step stubs have no function-matched form yet'},
+     'blocked': 'a function-matched frame step (MATCH_FRAME_STEP) covers one function; these stubs span several'},
 ]

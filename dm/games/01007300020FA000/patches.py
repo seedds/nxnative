@@ -792,5 +792,5 @@ sites = [
 BINDING = [
     {'what': '60 fps frame step (112 sites)', 'now': 'build', 'goal': 'game', 'purpose': 'frame rate',
      'why': "the game's own clock and timers (a community 60 fps mod on the host's frame step)",
-     'blocked': 'frame-step stubs have no function-matched form yet'},
+     'blocked': 'a function-matched frame step (MATCH_FRAME_STEP) covers one function; these stubs span several'},
 ]

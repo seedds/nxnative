@@ -172,10 +172,10 @@ def build_rows(gs):   # {build ID: [(game, display version, module)]}
     return out
 
 
-def frame_step_sites(fn):   # (offset, reason) of each site a FRAME_STEP function writes, and whether it marks a render-scale stub
+def frame_step_sites(fn, base=0):   # (offset, reason) of each site a FRAME_STEP function (or a MATCH_FRAME_STEP stub, its function at base) writes, and whether it marks a render-scale stub
     pos, puts = [0x8000000], []
     def emit(w): pos[0] += 4
-    ctx = types.SimpleNamespace(here=lambda: pos[0], emit=emit, site=lambda off, orig: None, put=lambda off, words, why: puts.append((off, why)), state=0x9000000, render_scale=0)
+    ctx = types.SimpleNamespace(here=lambda: pos[0], emit=emit, site=lambda off, orig: None, put=lambda off, words, why: puts.append((off, why)), state=0x9000000, render_scale=0, base=base)
     fn(ctx)
     return sorted(puts), ctx.render_scale
 
@@ -274,7 +274,7 @@ def page():
         m = mods.get(g.id)
         if not m and g.id not in host_games: continue
         text = files[g.id].read_text() if m else ''
-        cuts, obs, fs, mc, caps = (getattr(m, k, {}) for k in ('CUTS', 'OBS', 'FRAME_STEP', 'MATCH_CUTS', 'CAPABILITIES'))
+        cuts, obs, fs, mc, mfs, caps = (getattr(m, k, {}) for k in ('CUTS', 'OBS', 'FRAME_STEP', 'MATCH_CUTS', 'MATCH_FRAME_STEP', 'CAPABILITIES'))
         bids = list(dict.fromkeys([*cuts, *obs, *fs, *caps, *sorted(host_games.get(g.id, ()))]))
         n_fs = 0; lines = [f'### {name(g)}', '', f'{note(g)}, `{g.id}`' + (f', {link(files[g.id])}' if m else '') + '.', '']
         es = list(bound(m, rel(files[g.id]), own=True)) if m else []
@@ -304,6 +304,11 @@ def page():
             for r in rules:
                 fns = r.get('functions', [r]); ncut = sum(len(f['cuts']) for f in fns)
                 lines.append(f'- **function-matched** (`{module}` of builds without CUTS): {r["name"]}: {len(fns)} function{"s" * (len(fns) > 1)}, {ncut} cut{"s" * (ncut > 1)}')
+        for module, rules in mfs.items():
+            for i, r in enumerate(rules):
+                sites, _ = frame_step_sites(r['stub']); n_fs += len(sites) * (i == 0)
+                lines.append(f'- **function-matched frame step** (`{module}` of builds without FRAME_STEP): {r["name"]}: a function of {r["size"]:#x} bytes, '
+                             + ', '.join(f'`+{off:#x}`' for off, _ in sites) + ' in it')
         sections += lines + ['']
         n_host = sum(len(host.get(b, [])) for b in bids)
         kinds = {}

@@ -84,7 +84,8 @@ class UnsignedIpaTests(unittest.TestCase):
 
     @unittest.skipUnless(CAN_SIGN, 'needs macOS codesign and a C compiler')
     def test_executable_carries_the_entitlements(self):
-        cases = [({}, True), ({'DM_ENTITLEMENTS': ''}, False)]
+        iml, eva, dbg = (f'com.apple.developer.kernel.{k}' for k in ('increased-memory-limit', 'extended-virtual-addressing', 'increased-debugging-memory-limit'))
+        cases = [({}, {iml, eva, dbg}), ({'DM_ENTITLEMENTS': 'distribution'}, {iml, eva}), ({'DM_ENTITLEMENTS': ''}, set())]
         for extra, expected in cases:
             with self.subTest(extra=extra), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
@@ -94,7 +95,8 @@ class UnsignedIpaTests(unittest.TestCase):
                 result = run_step(SIGNING, root, APP=str(root / 'DmIOS.app'), O=str(root / 'pkg'), **extra)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 shown = subprocess.run(['codesign', '-d', '--entitlements', '-', str(root / 'DmIOS.app/DmIOS')], capture_output=True, text=True)
-                self.assertEqual('com.apple.developer.kernel.increased-memory-limit' in shown.stdout + shown.stderr, expected)
+                text = shown.stdout + shown.stderr
+                self.assertEqual({key for key in (iml, eva, dbg) if key in text}, expected)
 
 
 if __name__ == '__main__':

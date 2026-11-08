@@ -44,3 +44,9 @@ depth_mode	zero
 # ---- Shaders ----
 # 2 particle vertex shaders (210d8abb3b9996c5, d1c8e612ec7462b6) pick a buffer texture at run time: their only c2 reads are texture table words 0x170-0x188 and sampler table words 0x568 / 0x578
 tex_dyn_slots	on
+
+# ---- Frame rate ----
+# The game's config sets rhi.SyncInterval 2 (30 fps) and t.MaxFPS 0 (no limit), and its bUseFixedFrameRate is off: the engine steps by the time that really passed, so the
+# interval the host writes (found by name, dm/tools/ue_cvar.py) is all 60 and 120 need. The same walk at 30, 60 and 120 ends at the same spot; the user judged the speed right at 120 (README.md)
+fps_target	60
+fps_max	120

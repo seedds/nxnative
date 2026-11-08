@@ -1636,6 +1636,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Check:** `test_dmsh_pool_arrays.py` checks the rewrite and the reflection.
 - **Found on:** [Kirby Air Riders](../../dm/games/040077201BE50000/README.md): most of its lit materials and light probes.
 
+### Missing read bitmap in uniform texture handle tables
+
+- **Symptom:** a lighting pass that samples a uniform texture handle table can take hundreds of milliseconds on the GPU.
+- **Cause:** the shader translator emits `dm_pool_mark` for these texture reads. `htab_gpu` leaves the bitmap address in the table header unset, so the GPU makes an atomic access through an invalid address.
+- **Fix:** give uniform texture handle tables a resident bitmap with every bit set, including the dummy slot. The host has already resolved the table entries, so the shader can skip updating the bitmap. Existing Metal libraries keep working with the same table layout. The global texture pool still tracks its own reads separately.
+- **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md#rendering) at Alcineus Bridge.
+
 ### An array of uniform-buffer handles with its sampler word in c2
 
 - **Symptom:** `reflection conversion failed: B binding fp_t2ds_cb196614_10570000 has no resolved slot number`, then `failed to load`; those draws are skipped, and the scene is dark or black where it is lit by them.

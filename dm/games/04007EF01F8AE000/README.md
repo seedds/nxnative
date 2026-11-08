@@ -33,6 +33,7 @@ All 16,888 translate (current). One shader has 10 texture handles the translator
 - Ambient occlusion is interleaved: depth into a 4-layer 512x288 array, four triangles picking the layer by primitive ID, then back together at 1024x576 ([`[[primitive_id]]` in a specialized Metal 4 pipeline](../../../docs/reference/rendering.md#primitive_id-in-a-specialized-metal-4-pipeline)).
 - The enemy's checkered look and the pale squares over the ground are in the published footage too: both are the game's.
 - Frame time: 33 ms with the window on screen at the game's own 30 fps (16.7 ms at `fps_target 60`, [Frame rate](#frame-rate)), and GPU about 12 ms. A covered window reads 80-180 ms, the host's display-link fallback (`front end: window covered`), which measures nothing.
+- At Alcineus Bridge on an M1 Pro with macOS 27.2, [initializing the read bitmap for uniform texture handle tables](../../../docs/reference/shaders.md#missing-read-bitmap-in-uniform-texture-handle-tables) raised steady gameplay from 4.24 to 56.1 fps with 1080p output and the same shaders. The lighting pass took 196.7 ms before the fix and 2.35 ms after it. Both hosts were built from `bd979ce` with shader chain `3ee52af3ca18`.
 
 ## Frame rate
 
@@ -65,6 +66,7 @@ Keyboard in a window: J K U I are A B X Y, WASD the left stick, Shift + arrows t
 - [NVN2 compute reads its workgroup counts at c0 + 4](../../../docs/reference/shaders.md#nvn2-compute-reads-its-workgroup-counts-at-c0--4).
 - [Texture handles of SDK 22's Ampere code](../../../docs/reference/shaders.md#texture-handles-of-sdk-22s-ampere-code): white units.
 - [A table of handles past the array's length](../../../docs/reference/shaders.md#a-table-of-handles-past-the-arrays-length): black characters.
+- [Missing read bitmap in uniform texture handle tables](../../../docs/reference/shaders.md#missing-read-bitmap-in-uniform-texture-handle-tables) at Alcineus Bridge.
 - [`[[primitive_id]]` in a specialized Metal 4 pipeline](../../../docs/reference/rendering.md#primitive_id-in-a-specialized-metal-4-pipeline): the dot lattice over the ground.
 - [NVN2's DLSS on MetalFX](../../../docs/reference/rendering.md#nvn2s-dlss-on-metalfx).
 - [Bindless shaders taken as depth readers](../../../docs/reference/rendering.md#bindless-shaders-taken-as-depth-readers): the battle maps' decals split the G-buffer pass about 31 times a frame.

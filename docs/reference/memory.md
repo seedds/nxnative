@@ -35,8 +35,15 @@ The guest address space, heaps, pools, virtual address memory and the allocators
 
 - **Symptom:** `SetHeapSize OOM: req 0x600000 > cap 0`, followed by an SDK abort in `nninitStartup` on the first provisional boot.
 - **Cause:** the provisional Unreal profile reserved `0x1028000000` bytes but assigned `0x1008000000` to the alias region. The 256 MB module region and 256 MB stacks consumed the remainder, leaving no heap.
-- **Fix:** `profile_guess.py` gives the alias region exactly 64 GB (`0x1000000000`), leaving 128 MB for the initial heap before the heap check measures the game. `test_profile_guess.py` checks the partition through the real profile generator.
+- **Fix:** `profile_guess.py` leaves 128 MB for the initial heap after the 256 MB module region and the 256 MB stacks. The block is the 3.75 GB iPhone layout (`mem_reserve 0xF0000000`, `mem_alias 0xC8000000`): the Mac host maps 64 GB of alias region on its own, and iOS refuses a 64.6 GB reservation ([A provisional Unreal profile cannot be reserved on iOS](#a-provisional-unreal-profile-cannot-be-reserved-on-ios)). `test_profile_guess.py` checks the partition through the real profile generator.
 - **Found on:** [SHIN MEGAMI TENSEI V: Vengeance](../../dm/games/010069C01AB82000/README.md) 1.0.3, whose C library asks for 6 MB.
+
+### A provisional Unreal profile cannot be reserved on iOS
+
+- **Symptom:** the iPhone process quits before the game runs: `reserve guest AS`.
+- **Cause:** the provisional Unreal profile asked iOS to map `mem_reserve 0x1028000000` (64.6 GB) with a 64 GB alias region. One reservation past 6 GB fails. The Mac never maps that number: `hle_svc.c` gives the alias region 64 GB whatever the profile says, so the 64 GB keys did not change a Mac boot.
+- **Fix:** a new Unreal provisional profile uses the 3.75 GB block the other Unreal 4.27 games use (`mem_reserve 0xF0000000`, `mem_alias 0xC8000000`), which still leaves the 128 MB heap. The engine region is cut to the 2.81 GB that alias region holds. A profile already written with the 64 GB keys stays until that profile folder is deleted.
+- **Found on:** Dragon Quest VII Reimagined 1.1.0 (`0100505021440000`, SDK 19.3.1). The tested profile of the other dump, [0100A9D01C446000](../../dm/games/0100A9D01C446000/README.md), already uses this block. With the keys set, the phone log showed guest AS `+0xf0000000` and the engine region at 2.81 GB.
 
 ### Heap sized from the application pool less used memory
 
@@ -295,7 +302,7 @@ The guest address space, heaps, pools, virtual address memory and the allocators
   - [SHIN MEGAMI TENSEI V: Vengeance](../../dm/games/010069C01AB82000/README.md) (Unreal Engine 4.27): `main+0x1b89038`, the `csel` form.
   - [OCTOPATH TRAVELER II](../../dm/games/0100A3501946E000/README.md) (Unreal Engine 4.27, SDK 12.3.2): `main+0xbec3b4`.
 
-- **Note:** without virtual address memory there is no engine region: [OCTOPATH TRAVELER](../../dm/games/010057D006492000/README.md) (Unreal Engine 4.18, SDK 3.5.1, no system resource in its NPDM) has `nninitStartup` set a heap of pool − used (3.08 GB) and the engine runs on it, so it takes the 4 GB heap layout. The provisional profile used to give every Unreal game the 64 GB alias layout, which left this one no heap region (`SetHeapSize OOM: req 0xc5400000 > cap 0` and a `Break` in `nninitStartup`); `profile_guess.py` now gives it only with virtual address memory.
+- **Note:** without virtual address memory there is no engine region: [OCTOPATH TRAVELER](../../dm/games/010057D006492000/README.md) (Unreal Engine 4.18, SDK 3.5.1, no system resource in its NPDM) has `nninitStartup` set a heap of pool − used (3.08 GB) and the engine runs on it, so it takes the 4 GB heap layout. The provisional profile used to give every Unreal game the 64 GB alias layout, which left this one no heap region (`SetHeapSize OOM: req 0xc5400000 > cap 0` and a `Break` in `nninitStartup`). `profile_guess.py` no longer writes a 64 GB alias region: with virtual address memory the profile is the 3.75 GB iPhone block ([A provisional Unreal profile cannot be reserved on iOS](#a-provisional-unreal-profile-cannot-be-reserved-on-ios)); without it, the heap layout above.
 
 ### Unreal's FMallocBinned3 replaced by the host allocator
 

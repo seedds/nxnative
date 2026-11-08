@@ -214,6 +214,15 @@ namespace Ryujinx.Graphics.Shader
         }
 
         /// <summary>
+        /// nxnative: queries whether the host hands the game its GPU's own addresses, so raw global memory is accessed at the address itself (no pool table).
+        /// </summary>
+        /// <returns>True if raw global memory addresses are the GPU's own, false to look them up in the host's pool table</returns>
+        bool QueryHostRawDirect()
+        {
+            return false;
+        }
+
+        /// <summary>
         /// Queries host about the presence of the FrontFacing built-in variable bug.
         /// </summary>
         /// <returns>True if the bug is present on the host device used, false otherwise</returns>

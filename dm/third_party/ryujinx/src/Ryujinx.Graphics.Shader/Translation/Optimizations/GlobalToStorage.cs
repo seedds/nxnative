@@ -906,7 +906,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             out int functionId,
             int vectorCount = 1)
         {
-            if (RawDirect)
+            if (gpuAccessor.QueryHostRawDirect())
             {
                 return TryGenerateRawDirectOp(gtsContext, resourceManager, gpuAccessor, operation, out functionId, vectorCount);
             }
@@ -1072,13 +1072,12 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             return true;
         }
 
-        // nxnative (dmsh_abi.h DMSH_RAW_DIRECT): the host hands the game Metal's own GPU addresses (nvn_mtl.m mtl_pool_add), so an address the shader
+        // nxnative (the job's raw_direct, a profile's shader_raw_direct): the host hands the game Metal's own GPU addresses (nvn_mtl.m mtl_pool_add), so an address the shader
         // loaded from memory is accessed as it is, with no pool table and no search: the search's registers held Ocarina of Time's raw-memory shaders at 384 threads a threadgroup on an M1 Pro,
         // a direct access lets them reach 576. A load has no check: an Apple GPU reads 0 at an address nothing is mapped at (null, a stray CPU address), as a lookup that found no pool
         // returned, and any branch around it (even one that only returns 0) took the 576 back to 384. A store or an atomic outside [0x10_0000_0000, 0x70_0000_0000), the range macOS
         // keeps for the GPU's addresses, is dropped. Stores and atomics set the bit of their 2 MiB chunk in the write log (GmemLogBits bits: 16 GiB of GPU addresses before two
         // chunks share a bit, which only makes the host learn one pool too many), which the host maps back to pools (nvn_mtl.m gml_read)
-        private static readonly bool RawDirect = true;
         private const int GmemLogBits = 1 << GmemMapLog2;
 
         private static bool TryGenerateRawDirectOp(

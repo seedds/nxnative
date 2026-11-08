@@ -121,6 +121,8 @@ SWITCH_BINDING = [
      'why': "what the regions after it need, measured by the NSP script's region check; the host's cap is the default"}),
     ('shader_key_skip', '', {'what': 'control-section bytes left out of shader keys', 'now': 'game', 'goal': 'game', 'purpose': 'shaders',
      'why': "the engine shares one control section among shaders; leaving GLSLC's compile information out of every game's keys would change every shader key"}),
+    ('shader_raw_direct', '', {'what': "raw global memory at Metal's own GPU addresses", 'now': 'game', 'goal': 'host', 'purpose': 'shaders',
+     'why': 'validated on this game; on for every NVN game once games with sparse memory pools and the regression routes have run with it'}),
     ('ue_texture_pool', '', {'what': "Unreal's texture streaming pool", 'now': 'game', 'goal': 'game', 'purpose': 'memory', 'why': "the game's own budget, raised to its Windows value"}),
     ('snowdrop_pools', '', {'what': "Snowdrop's three page pools' address ranges", 'now': 'game', 'goal': 'game', 'purpose': 'address space',
      'why': "the rewriter finds the allocator in any build (snowdrop_pools.py); the sizes are measured against each game's regions, and the cause, an iPhone's address space, is a platform limit"}),

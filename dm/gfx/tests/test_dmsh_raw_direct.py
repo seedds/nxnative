@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Raw global memory at the address itself (GlobalToStorage.TryGenerateRawDirectOp, dmsh_abi.h DMSH_RAW_DIRECT): through the offline translator (dmsh_xlate, arch sm86), a compute shader's loads
+"""Raw global memory at the address itself (GlobalToStorage.TryGenerateRawDirectOp, the job's raw_direct, a profile's shader_raw_direct): through the offline translator (dmsh_xlate, arch sm86), a compute shader's loads
 through an address it cannot trace call a helper that takes the address's two words and nothing else (no pool table, no remembered entry) and reads through it once; an LDG.E.128 is one 128-bit
 load with the other three words passed back. On this Mac's GPU the translated helpers read Metal buffers through their own GPU addresses, which the host hands the game as NVN addresses
 (nvn_mtl.m mtl_gva_on): runs of addresses that stay in, leave and come back to buffers, one lane after another.
@@ -76,7 +76,7 @@ def run_on_gpu(case, kernel):
 class RawDirect(Translated):
     def msl(self):
         code = (s2r_tid(9), s2r_tid(5), LDG, STORE, (LDG[0], LDG[1] | 4 << 40), STORE)   # two loads, the second 4 bytes on, each kept by a store to shared memory
-        return self.translate(b''.join(inst(*waiting(i)) for i in code) + inst(*EXIT), shared=0x1000)
+        return self.translate(b''.join(inst(*waiting(i)) for i in code) + inst(*EXIT), shared=0x1000, raw_direct=True)
 
     def test_the_helper_reads_at_the_address(self):
         msl = self.msl()
@@ -111,7 +111,7 @@ class RawDirectVector(Translated):
     gmem_vec; on the GPU each of the four words is the buffer's"""
     def msl(self):
         code = (s2r_tid(9), s2r_tid(5), LDG128, sts(12, 0), sts(13, 4), sts(14, 8), sts(15, 12))
-        return self.translate(b''.join(inst(*waiting(i)) for i in code) + inst(*EXIT), shared=0x1000)
+        return self.translate(b''.join(inst(*waiting(i)) for i in code) + inst(*EXIT), shared=0x1000, raw_direct=True)
 
     def test_one_vector_load_for_the_four_words(self):
         msl = self.msl()

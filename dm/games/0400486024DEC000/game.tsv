@@ -35,6 +35,9 @@ sys_resource	0x3000000
 # ---- Shader split (shader_split.py) ----
 shader_groups	/Shader/=shader /Effect/=effect /Lib/=lib /UI/=layout
 shader_note	Ocarina of Time shaders
+# Raw global memory at the address itself (docs/reference/shaders.md, Raw global memory read through Metal's own GPU addresses): NVN hands the game Metal's own GPU
+# addresses and the shaders read through them without the pool table's search, which held the raw-memory compute shaders at 384 threads a threadgroup on an M1 Pro
+shader_raw_direct	1
 
 # ---- Frame rate ----
 # The game steps its time by a frame ratio, its base rate / its frame rate, whatever the frame took: frames longer than a vsync played in slow motion. The ratio takes the host's

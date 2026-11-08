@@ -709,11 +709,11 @@ static void pool_res(int i) {
 // pools' buffers do at shared pages; GPU addresses are not contiguous across them, so a lookup must say how far it reads. One that does not know (length 1: an indirect draw's index buffer, a raw storage
 // address) gets BIG_UNKNOWN past its address. Raw global memory, whose pool table the shader walks by itself, takes the whole pool: big_full
 enum { BIG_MIN = 512u << 20, BIG_S = 16u << 20, BIG_UNKNOWN = 64u << 20, BIG_MAX = 32 };
-typedef struct { uintptr_t lo, hi, a, b; const void *mem; int *chunk, full; NSMutableArray *old; id<MTLBuffer> va; int va_res; } big_pool;   // va, va_res: the buffer over the whole pool that gives its GPU addresses (DMSH_RAW_DIRECT), resident only once raw global memory may reach it   // chunk: stride → g_pools index + 1; full: the whole pool's entry + 1; old: buffers a longer chunk replaced, alive with the pool
+typedef struct { uintptr_t lo, hi, a, b; const void *mem; int *chunk, full; NSMutableArray *old; id<MTLBuffer> va; int va_res; } big_pool;   // va, va_res: the buffer over the whole pool that gives its GPU addresses (mtl_gva_on), resident only once raw global memory may reach it   // chunk: stride → g_pools index + 1; full: the whole pool's entry + 1; old: buffers a longer chunk replaced, alive with the pool
 static big_pool g_big[BIG_MAX]; static int g_nbig;
 static id<MTLBuffer> pool_buf(uintptr_t a, uintptr_t b);   // a pool's zero-copy buffer over [a, b), made over writable pages (beside the GPU-written storage spans below)
 static int big_of(uint64_t addr) { for (int i = 0; i < g_nbig; i++) if (addr >= g_big[i].lo && addr < g_big[i].hi) return i; return -1; }
-// ---------- NVN hands the game Metal's own GPU addresses (DMSH_RAW_DIRECT) ----------
+// ---------- NVN hands the game Metal's own GPU addresses (profile key shader_raw_direct) ----------
 // A pool's GPU address is its no-copy buffer's (a large pool's: a buffer over all of it that only gives the addresses, resident only once raw global memory may reach the pool, as big_full
 // did; its chunks still serve the bindings). An address the game hands back is mapped to the CPU through this table, sorted by GPU address (Metal's ranges never overlap). The chain's
 // shaders read raw global memory through the address itself, without a search; the pool table, which still says which pools raw global memory reaches, holds GPU ranges with a delta of 0
@@ -721,13 +721,7 @@ typedef struct { uint64_t glo, ghi, cpu; const void *key; } gva_ent;
 static gva_ent *g_gva; static int g_ngva, g_gva_cap; static os_unfair_lock g_gva_lk = OS_UNFAIR_LOCK_INIT;
 static _Atomic uint64_t g_gva_min = ~0ull, g_gva_max;
 static nvn_hmap g_gva_key = {.klen = 8};   // pool start (mtl_pool_add's mem) → its GPU address, under g_gva_lk
-int mtl_gva_on(void) {   // this chain's shaders access raw global memory at Metal's addresses: the host must hand them out
-#ifdef DMSH_RAW_DIRECT
-    return 1;
-#else
-    return 0;
-#endif
-}
+int mtl_gva_on(void) { return DM_GAME_SHADER_RAW_DIRECT; }   // the profile's shader_raw_direct: its shaders access raw global memory at Metal's addresses, so the host must hand them out
 static void gva_add(uint64_t glo, uint64_t len, uint64_t cpu, const void *key, uint64_t key_gpu) {
     os_unfair_lock_lock(&g_gva_lk);
     nvn_hm_put(&g_gva_key, &key, (void *)(uintptr_t)key_gpu);
@@ -752,7 +746,7 @@ int mtl_gva_back(uint64_t g, uint64_t *cpu) {   // a GPU address the game holds 
 }
 uint64_t mtl_pool_gva(const void *mem) { os_unfair_lock_lock(&g_gva_lk); uint64_t g = (uint64_t)(uintptr_t)nvn_hm_get(&g_gva_key, &mem); os_unfair_lock_unlock(&g_gva_lk); return g; }
 void mtl_gva_stats(int *n, uint64_t *lo, uint64_t *hi) { os_unfair_lock_lock(&g_gva_lk); *n = g_ngva; *lo = g_gva_min; *hi = g_gva_max; os_unfair_lock_unlock(&g_gva_lk); }
-// DMSH_RAW_DIRECT's write log: bit k stands for the 2 MiB chunks c with c % bits == k. The CPU ranges of the buffers that meet such a chunk, whole (the host learns pools, not pages)
+// The write log of shaders that access raw global memory at the address (mtl_gva_on): bit k stands for the 2 MiB chunks c with c % bits == k. The CPU ranges of the buffers that meet such a chunk, whole (the host learns pools, not pages)
 static int gva_chunk_ranges(unsigned k, unsigned bits, uint64_t (*r)[2], int max) {
     int n = 0; os_unfair_lock_lock(&g_gva_lk);
     for (int i = 0; i < g_ngva && n < max; i++) {
@@ -770,7 +764,8 @@ uint64_t mtl_pool_add(const void *mem, uint64_t size) {   // → the GPU address
     if (size >= BIG_MIN && chunks) {
         pthread_mutex_lock(&g_mu); int k = g_nbig < BIG_MAX ? g_nbig : -1;
         id<MTLBuffer> va = nil;
-        if (k >= 0 && mtl_gva_on()) { va = [g_dev newBufferWithBytesNoCopy:(void *)a length:b - a options:MTLResourceStorageModeShared deallocator:nil]; if (!va) MLOG("[RED] memory pool %p: the buffer for its GPU addresses was refused", mem); }
+        // made as the pool's other buffers are (pool_buf): one made over a write-protected page drops the GPU's writes through it (issue #1591), and stores reach the pool through this one
+        if (k >= 0 && mtl_gva_on()) { va = pool_buf(a, b); if (!va) MLOG("[RED] memory pool %p: the buffer for its GPU addresses was refused", mem); }
         if (k >= 0) { int *ch = calloc(((b - a) >> 24) + 1, sizeof *ch); if (!ch) MDIE("pool chunk table"); g_big[g_nbig++] = (big_pool){lo, hi, a, b, mem, ch, 0, [NSMutableArray array], va, 0};
             g_pidx_ok = 0; g_plast = -1; atomic_fetch_add(&g_pool_gen, 1); g_pool_adds++; atomic_fetch_add(&g_big_n, 1); }
         pthread_mutex_unlock(&g_mu);
@@ -9585,11 +9580,10 @@ static void gmem_slot_note(uint64_t *w, void *log) {
 }
 void mtl_gmem_words(uint64_t *words, uint64_t *older, uint64_t *behind) { *words = g_gmem_words; *older = g_gmem_older; *behind = g_gmem_behind; }
 static void gmem_commit_patch(void) {
-#ifdef DMSH_RAW_DIRECT
-    (void)gmem_map();   // no shader binds the table now: the pools raw global memory may reach are made resident here, before the commit, as the table's rebuild does
-#endif
-    int n = g_gmem_nslots; g_gmem_nslots = 0; if (!n || !g_gmem_buf) return;
-    uint64_t was = g_gmem_buf.gpuAddress; int lag = atomic_load(&g_pool_gen) != g_gmem_gen;
+    int n = g_gmem_nslots; g_gmem_nslots = 0;
+    uint64_t was = g_gmem_buf ? g_gmem_buf.gpuAddress : 0; int lag = atomic_load(&g_pool_gen) != g_gmem_gen;   // before the rebuild below, which would make every lagging word look older
+    if (mtl_gva_on()) (void)gmem_map();   // no shader binds the table then: the pools raw global memory may reach are made resident here, before the commit, as the table's rebuild does
+    if (!n || !g_gmem_buf) return;
     id<MTLBuffer> map = gmem_map(); uint64_t cur = map.gpuAddress;
     g_gmem_words += (uint64_t)n;
     for (int i = 0; i < n; i++) { const gmem_slot *k = &g_gmem_slots[i]; if (*k->w == cur) continue;
@@ -9627,11 +9621,8 @@ static void gml_read(id<MTLBuffer> b, id<MTLBuffer> map, int predicted, uint64_t
     g_gml_logs++;
     for (int i = 0; i < GML_WORDS && !g_gml_over; i++) for (uint32_t bits = w[i]; bits && !g_gml_over; bits &= bits - 1) {
         uint64_t er[16][2]; int ne = 1; unsigned bi = (unsigned)(i * 32 + __builtin_ctz(bits));
-#ifdef DMSH_RAW_DIRECT
-        ne = gva_chunk_ranges(bi, GML_WORDS * 32, er, 16);   // the pools whose GPU addresses meet that chunk
-#else
-        memcpy(er[0], t + (size_t)bi * DMSH_GMEM_MAP_ENTRY, sizeof er[0]); { uint64_t d = er[0][0] - gs_back(er[0][0]); er[0][0] -= d; er[0][1] -= d; }
-#endif
+        if (mtl_gva_on()) ne = gva_chunk_ranges(bi, GML_WORDS * 32, er, 16);   // the pools whose GPU addresses meet that chunk
+        else { memcpy(er[0], t + (size_t)bi * DMSH_GMEM_MAP_ENTRY, sizeof er[0]); uint64_t d = er[0][0] - gs_back(er[0][0]); er[0][0] -= d; er[0][1] -= d; }
         for (int q = 0; q < ne && !g_gml_over; q++) { uint64_t *e = er[q];
         int known = 0;
         for (int k = 0; k < g_gml_n && !known; k++) known = e[0] >= g_gml_lo[k] && e[1] <= g_gml_hi[k];

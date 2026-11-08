@@ -194,9 +194,9 @@ static void *gs_report(void *arg) {
     return NULL;
 }
 static void gs_init_once(void) {
-    if (mtl_gva_on()) {   // Metal's addresses (DMSH_RAW_DIRECT): the counts and the report only (Metal's addresses are not mapped on the CPU: a CPU access through one is a crash, whose report shows it)
+    if (mtl_gva_on()) {   // Metal's addresses (shader_raw_direct): the counts and the report only (Metal's addresses are not mapped on the CPU: a CPU access through one is a crash, whose report shows it)
         pthread_t th; if (!pthread_create(&th, NULL, gs_report, NULL)) pthread_detach(th);
-        LOG("[gpushift] NVN hands out Metal's GPU addresses (DMSH_RAW_DIRECT)"); return;
+        LOG("[gpushift] NVN hands out Metal's GPU addresses (shader_raw_direct)"); return;
     }
     const char *e = getenv("DM_NVN_GPUVA_SHIFT"); if (!e || !atoi(e)) return;
     uint8_t *as = NULL; size_t n = 0; svc_guest_range(&as, &n);

@@ -516,6 +516,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - `nvnWindowGetPresentInterval`, `nvnCommandBufferSetCopyImageStride` missing. → [SDK 8 window and copy-stride entry points](../reference/nvn-objects.md#sdk-8-window-and-copy-stride-entry-points)
 - `[RED] texture bound to an image slot lacks the shader-write usage`, and compute image writes go to a dummy texture. → [Image bindings supply shader-write intent](../reference/nvn-objects.md#image-bindings-supply-shader-write-intent)
 - a consumer submitted before another queue's producer uses stale input. In Mario Kart World, water jumps for one frame and the minimap retains fading wave artifacts. → [Guest event queue ordering](../reference/nvn-objects.md#guest-event-queue-ordering)
+- with the guest event queue ordering (above), a game whose submissions carry many event signals and waits runs with the GPU idle between its chunks. Ocarina of Time (Switch 2) on an iPad Pro (M5), Docked 1536x864: 37 host submissions a frame where the game makes 6, 2.5 ms (p50) of GPU idle inside a 22.9 ms frame against none in a 20.4 ms frame with the waits ignored, at the same GPU time; the 64-draw segment commits fell from 6.4-6.9 to 1-3 a frame. → [Scheduler chunks committed one by one](../reference/nvn-objects.md#scheduler-chunks-committed-one-by-one)
 
 ## Rendering
 

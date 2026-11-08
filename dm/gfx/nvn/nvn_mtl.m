@@ -12334,6 +12334,38 @@ static int cut_draws(void) { static int v = -1; if (v < 0) { const char *e = get
 static uint64_t g_cut_draw0, g_cuts, g_copy_cuts;
 // The count starts with the submission (mtl_sub_begin). It used to start at the submission's first sub_cut, which only a render target change reaches (OP_SET_RT): the draws a
 // submission makes into the target it inherited, before its first target change, were never counted, and the first segment came that many draws late
+// DM_NVN_CHUNK_MERGE=1 (0 / 1 / ab, alternated with the DM_AB phases; off by default): the queue scheduler (nvn_queue_dispatch.inc qe_pump) encodes the chunks it offers in a row into one
+// command buffer instead of committing each as a submission of its own. Under #1245 a guest submission is cut into chunks at its event waits and signals and each chunk was a host
+// submission: Ocarina of Time (Switch 2) went from 6 to 37 submissions a frame on an iPad Pro (M5), with the GPU draining between a chunk and the next while the host committed it (2.5 ms
+// of idle inside a 22.9 ms frame), the 64-draw segment cuts reset at every chunk, and a drain of the encode thread per chunk. The order is the scheduler's either way (one host queue, the
+// chunks in the order they were offered, a blocked queue's chunk still waits for its producer's offer), so a satisfied wait or a signal costs nothing: no commit, allocator, visibility
+// buffer, completion record or drain. In submission timestamp mode (gpu_timestamps submission) one buffer holds one logical submission's clock (post_run), so a chunk of another logical
+// submission opens a new buffer; in segment mode (Ocarina of Time) chunks of any submission share one. The open buffer's fence is g_fence + 1 (as OP_FENCE_SYNC and the PASSGPU ring take it);
+// the scheduler records it for the chunk and the event projection, and the pump commits before it returns, so no thread waits on a fence not yet committed
+static int chunk_merge_mode(void) {
+    static int m = -1;
+    if (m < 0) { m = sw_mode("DM_NVN_CHUNK_MERGE", 0); if (m) MLOG("DM_NVN_CHUNK_MERGE: the queue scheduler's chunks share one command buffer while they are offered in a row%s", m >= 2 ? " (alternated with the DM_AB phases)" : ""); }
+    return m;
+}
+int mtl_chunk_merge(mtl_submit_clock *clock, int open) {
+    if (!sw_on(chunk_merge_mode())) return 0;
+    if (open && !seg_ts() && g_submit_clock != clock) return 0;   // submission-mode reports take the buffer's one clock (post_run)
+    return 1;
+}
+uint64_t mtl_pending_fence(void) { return g_fence + 1; }
+void mtl_chunk_end(void) {   // the chunk's work lands in the open buffer: what mtl_sub_commit does before it commits (waiting clears, the deferred pass, the open pass, uniform updates, the blit encoder)
+    lc_land();
+    defer_fallback();
+    rp_flush(); ubd_land();
+    if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
+    treg_finish_submission();   // this chunk's transient views (g_sub_serial advances per chunk)
+}
+void mtl_chunk_begin(int resume) {   // the next chunk in the open buffer: sub_begin's per-chunk state, without a new buffer, allocator, visibility buffer, completion record or segment clock
+    g_sub_serial++;
+    if (!resume) { g_rc_npend = 0; g_rc_skip = 0; }
+    defer_reset();
+    zskip_clear(); g_zskip_count = 0;
+}
 static void sub_cut_begin(void) { g_cut_draw0 = g_stat_draw; }
 // DM_FSTEP_PROBE_RAMP=1 (default) / 0 / ab: a frame-step probe's grace is renewed while its frames keep getting cheaper (nvn_fstep.h FSTEP_RAMP), the time macOS's GPU clock takes to rise for the shorter deadline
 static int probe_ramp_mode(void) { static int m = -1; if (m < 0) m = sw_mode("DM_FSTEP_PROBE_RAMP", 1); return m; }

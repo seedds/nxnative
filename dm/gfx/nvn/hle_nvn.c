@@ -1699,6 +1699,9 @@ static void tsummary(uint64_t frame) {
         double v[TWIN]; memcpy(v, g_tw[k], n * sizeof *v); qsort(v, n, sizeof *v, dcmp);
         o += snprintf(line + o, sizeof line - o, " %s p50 %.2f / p95 %.2f / max %.2f ms (%u frames);", g_tname[k], v[n / 2], v[(n * 95) / 100 < n ? (n * 95) / 100 : n - 1], v[n - 1], n);
     }
+    { static uint64_t pf, pchunk, pmerged; double nf = (double)(frame - pf);   // the guest queue scheduler's chunks (nvn_queue_dispatch.inc): how many host submissions a frame they cost, and how many DM_NVN_CHUNK_MERGE spared
+      if (g_qe_chunks && pf && frame > pf) o += snprintf(line + o, sizeof line - o, " scheduler chunks per frame %.2f, %.2f of them merged into an open command buffer;", (double)(g_qe_chunks - pchunk) / nf, (double)(g_qe_merged - pmerged) / nf);
+      pf = frame; pchunk = g_qe_chunks; pmerged = g_qe_merged; }
     LOG("[nvn] timing up to frame %llu:%s", frame, line);
     { void mtl_pso_line(char *, size_t); char pl[1024]; mtl_pso_line(pl, sizeof pl); LOG("[nvn] pipelines up to frame %llu: %s", frame, pl); }
     double tgt = 1000.0 / mtl_fps_target();   // milliseconds one frame should take: 16.7 at 60 fps, 33.3 when the game itself asks for 30 (the over-time / dropped-frame counts below use it)

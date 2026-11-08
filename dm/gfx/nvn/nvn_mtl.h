@@ -54,6 +54,13 @@ void mtl_submit_clock_release(mtl_submit_clock *clock);
 void mtl_sub_set_clock(mtl_submit_clock *clock);    // after begin/resume, before encoding reports
 uint64_t mtl_completed_fence(void);                // post-operations are visible through this fence
 void mtl_queue_activate(uint64_t serial);              // submit lock held: restore this queue's persistent GPU state
+// DM_NVN_CHUNK_MERGE (nvn_queue_dispatch.inc qe_pump): chunks the scheduler offers in a row share one command buffer. mtl_chunk_merge: may the next chunk, with this
+// logical submission's clock, go into the open buffer (open: one is); mtl_chunk_end / mtl_chunk_begin: a chunk boundary inside the open buffer (what commit and begin do
+// for the chunk's own state, without a commit or a new buffer); mtl_pending_fence: the fence the open buffer commits with
+int mtl_chunk_merge(mtl_submit_clock *clock, int open);
+void mtl_chunk_end(void);
+void mtl_chunk_begin(int resume);
+uint64_t mtl_pending_fence(void);
 void mtl_queue_forget(uint64_t serial);                // finalize: discard its state, including guest object pointers
 void mtl_sub_copy(uint64_t src, uint64_t dst, uint64_t n);               // Buffer copy in GPU ordering
 void mtl_sub_event(volatile uint32_t *val, uint32_t mode, uint32_t v);   // Write the event value after completion (0 write / 1 add)

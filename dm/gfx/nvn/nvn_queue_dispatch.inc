@@ -30,6 +30,22 @@ static nvn_qs *g_qs;
 static qe_value *g_qe_values;
 static pthread_cond_t g_qe_cv = PTHREAD_COND_INITIALIZER;
 static void *qe_worker(void *unused);
+// DM_NVN_CHUNK_MERGE (nvn_mtl.m mtl_chunk_merge): the command buffer a chunk was encoded in stays open across the steps one pump offers, so the chunks after it (its own
+// queue's, or another queue's whose wait the scheduler found satisfied by what is already in submission order) are encoded into the same buffer; it commits when the pump
+// has no ready step left, before a present, or when the merge rule says no. Ordering is the one the scheduler chose either way (one host queue, chunks in offer order);
+// what changes is that a satisfied wait or a signal no longer costs a commit, an allocator, a visibility buffer, a completion record and (encode thread) a drain, and the
+// GPU is not left to drain between a chunk and the next while the host commits it. Ocarina of Time (Switch 2) cut a frame's 6 submissions into 37 chunks on an iPad Pro (M5),
+// 2.5 ms of GPU idle inside a 22.9 ms frame. The fence of an open buffer is the one it will commit with (mtl_pending_fence); every CPU wait on a fence runs outside the pump
+static int g_qe_open;              // a chunk's command buffer is open (this pump's; committed by qe_open_commit before the pump returns)
+static uint64_t g_qe_chunks, g_qe_merged;   // chunks executed; chunks encoded into an already open buffer (the timing line)
+static void qe_open_commit(void) {
+    if (!g_qe_open) {
+        return;
+    }
+    g_qe_open = 0;
+    mtl_sub_commit();
+    mtl_queue_seal();
+}
 
 static qe_value *qe_value_find(uint64_t address, int add) {
     qe_value *event = g_qe_values;
@@ -111,6 +127,7 @@ static void qe_pump(void) { // submission lock and graphics gate held
         if (item.step.kind == NVN_QS_WORK) {
             qe_work *work = item.step.payload;
             if (work->window) {
+                qe_open_commit(); // the present goes behind every chunk offered before it
                 work->window->ticket[work->image] = mtl_present(&work->texture, work->period, work->crop);
             } else {
                 uint32_t signal_value = 0;
@@ -121,17 +138,36 @@ static void qe_pump(void) { // submission lock and graphics gate held
                         die("NVN invalid event signal mode");
                     }
                 }
+                int merge = mtl_chunk_merge(work->clock, g_qe_open);
+                if (g_qe_open && !merge) {
+                    qe_open_commit();
+                }
+                if (g_qe_open) {
+                    mtl_chunk_end(); // the open buffer's chunk lands before the queue state may change
+                    mtl_queue_seal();
+                }
                 mtl_queue_activate(item.ticket.queue);
                 mtl_set_queue_origin_lower_left(work->origin);
-                mtl_sub_begin_alloc(work->alloc, !work->first);
+                if (g_qe_open) {
+                    mtl_chunk_begin(!work->first);
+                    g_qe_merged++;
+                } else {
+                    mtl_sub_begin_alloc(work->alloc, !work->first);
+                }
+                g_qe_chunks++;
                 mtl_sub_set_clock(work->clock);
                 uint64_t handle = (uint64_t)work->bytes;
                 mtl_sub_index(&handle, 1);
                 mtl_exec_rest(NULL, 0);
                 mtl_exec(work->bytes);
-                mtl_sub_commit();
-                mtl_queue_seal();
-                fence = mtl_last_fence();
+                if (merge) {
+                    g_qe_open = 1;
+                    fence = mtl_pending_fence();
+                } else {
+                    mtl_sub_commit();
+                    mtl_queue_seal();
+                    fence = mtl_last_fence();
+                }
                 if (!work->next) {
                     mtl_submit_alloc_close(work->alloc);
                 }
@@ -144,7 +180,7 @@ static void qe_pump(void) { // submission lock and graphics gate held
         } else if (item.step.kind == NVN_QS_WAIT) {
             // The producer is ordered, but may still be running. A wait-only
             // submission must retain that GPU completion dependency as well.
-            fence = mtl_last_fence();
+            fence = g_qe_open ? mtl_pending_fence() : mtl_last_fence();
         }
         // WAIT was satisfied at the ordered scheduling point. SIGNAL's WORK
         // already committed its producer and published the projected value.
@@ -152,6 +188,7 @@ static void qe_pump(void) { // submission lock and graphics gate held
             die("NVN queue scheduler lost its offered step");
         }
     }
+    qe_open_commit(); // nothing ready is left: the pending fence becomes the last one before any thread may wait on it
     nvn_qs_complete(g_qs, mtl_completed_fence());
     pthread_cond_broadcast(&g_qe_cv);
 }

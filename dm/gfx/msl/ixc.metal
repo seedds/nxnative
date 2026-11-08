@@ -12,3 +12,10 @@ kernel void ixc_expand(constant ejob &j [[buffer(0)]], uint i [[thread_position_
   if (i >= m) return;
   uint t = i / 3, c = i % 3, p = j.prim == 7 ? t / 2 * 4 + (c ? c + (t & 1) : 0) : j.prim == 6 ? (c ? t + c : 0) : i, x = j.rec[2] + p;
   j.out[i] = (ulong)x * j.isz + j.isz > j.ilen ? 0u : j.isz == 1 ? uint(j.ib[x]) : j.isz == 2 ? uint(((device const ushort *)j.ib)[x]) : ((device const uint *)j.ib)[x]; }
+// Indirect dispatch arguments clamped before the dispatch reads them (nvn_mtl.m dispatch): a group count the GPU wrote from bad data (billions of threadgroups) runs
+// for ever on the GPU and is not reclaimed when the process exits (PRAGMATA's first real frame, twice followed by the Mac's WindowServer stopping)
+struct djob { device const uint *rec; device uint *out; uint maxdim; uint maxtotal; };
+kernel void dpc_clamp(device const djob *j [[buffer(0)]]) {
+  uint x = min(j->rec[0], j->maxdim), y = min(j->rec[1], j->maxdim), z = min(j->rec[2], j->maxdim);
+  bool ok = (ulong)x * y * z <= j->maxtotal;
+  j->out[0] = ok ? x : 0u; j->out[1] = ok ? y : 0u; j->out[2] = ok ? z : 0u; }

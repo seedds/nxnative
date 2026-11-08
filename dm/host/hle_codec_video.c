@@ -352,6 +352,9 @@ static Result cv_dec_submit(uint64_t *out, void *t, const void *data, uint64_t s
     pthread_mutex_lock(&d->mu);
     if (d->nheld >= CV_HOLD) { static int n; if (n++ < 4) LOG("nn::codec %s: busy (result 3603), a packet refused with %d pictures waiting for a released buffer",k_cv_name[d->codec], d->nheld); if (d->event) hle_clear_system_event(d->event); pthread_mutex_unlock(&d->mu); return CV_BUSY; }
     int got = 0;
+    { static int dn = -1; if (dn < 0) dn = getenv("DM_CODEC_DUMP") ? 8 : 0;   // DM_CODEC_DUMP: the first bytes of the first packets
+      if (dn > 0 && size) { dn--; char hx[3 * 48 + 1]; int k = 0; for (uint64_t i = 0; i < size && i < 48; i++) k += snprintf(hx + k, sizeof hx - k, "%02x ", ((const uint8_t *)data)[i]);
+        LOG("[codec] %s packet: %llu bytes, ts %lld, eos %d: %s", k_cv_name[d->codec], (unsigned long long)size, (long long)ts, (int)eos, hx); } }
     if (d->codec == CV_H264 && d->avc) {   // VideoToolbox reorders: pictures leave in presentation order, all of them at the end of the stream
         if (size && mavc_decode(d->avc, data, (int)size, ts / 1000) < 0) { static int n; if (n++ < 4) LOG("[RED] nn::codec H.264: VideoToolbox could not decode a packet"); }
         uint8_t *nv12 = malloc((size_t)d->w * d->h * 3 / 2); int64_t pts = 0;
@@ -403,8 +406,12 @@ static Result cv_dec_encrypted(void) { static int once; if (!once++) LOG("[RED] 
 // Each decoder type's entry points, by their names in the SDK (the work buffer, the two Initialize overloads without the H.264 parameter sets, …)
 #define CV_FAMILY(tag, codec, s_work, s_init, s_init2, s_fin, s_reg, s_unreg, s_start, s_stop, s_flush, s_ev, s_sub, s_enc, s_acq, s_rel, s_props) \
     HLE_FORCE(s_work, "the host decoder needs no work memory", Result, h_cv_##tag##work, uint64_t *size, uint64_t *align, uint64_t bs, uint16_t w, uint16_t h) { (void)bs; (void)w; (void)h; *size = 0x1000; *align = 0x1000; return 0; } \
-    HLE_FORCE(s_init, "decoded on the host", Result, h_cv_##tag##init, void *t, void *work, uint64_t wsize, uint64_t bs, uint16_t w, uint16_t h, uint32_t refs, uint32_t in, uint32_t out) { (void)work; (void)wsize; (void)bs; (void)refs; return cv_dec_init(t, codec, w, h, in, out, NULL, 0); } \
-    HLE_FORCE(s_init2, "decoded on the host", Result, h_cv_##tag##init2, void *t, uint64_t bs, uint16_t w, uint16_t h, uint32_t refs, uint32_t in, uint32_t out) { (void)bs; (void)refs; return cv_dec_init(t, codec, w, h, in, out, NULL, 0); } \
+    /* H.264's forms end in the parameter sets (const void *, size_t); the other codecs' do not, and their trailing arguments are not read. Past the registers the */ \
+    /* guest passes 8-byte slots, so the output format there is read as one */ \
+    HLE_FORCE(s_init, "decoded on the host", Result, h_cv_##tag##init, void *t, void *work, uint64_t wsize, uint64_t bs, uint16_t w, uint16_t h, uint32_t refs, uint32_t in, uint64_t out, const void *csd, uint64_t csd_n) { \
+        (void)work; (void)wsize; (void)bs; (void)refs; return cv_dec_init(t, codec, w, h, in, (uint32_t)out, codec == CV_H264 ? csd : NULL, codec == CV_H264 ? csd_n : 0); } \
+    HLE_FORCE(s_init2, "decoded on the host", Result, h_cv_##tag##init2, void *t, uint64_t bs, uint16_t w, uint16_t h, uint32_t refs, uint32_t in, uint32_t out, const void *csd, uint64_t csd_n) { \
+        (void)bs; (void)refs; return cv_dec_init(t, codec, w, h, in, out, codec == CV_H264 ? csd : NULL, codec == CV_H264 ? csd_n : 0); } \
     HLE_FORCE(s_fin, "frees the host decoder", Result, h_cv_##tag##fin, void *t) { return cv_dec_fin(t); } \
     HLE_FORCE(s_reg, "a buffer of the host decoder, acquirable at once", Result, h_cv_##tag##reg, void *t, uint32_t i, void *pool, uint32_t pidx) { return cv_dec_reg(t, i, pool, pidx); } \
     HLE_FORCE(s_unreg, "the buffer leaves the host decoder", Result, h_cv_##tag##unreg, void *t, uint32_t i) { return cv_dec_unreg(t, i); } \

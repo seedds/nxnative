@@ -55,6 +55,60 @@ XC = ['--msl', '--msl-version', '20300', '--msl-argument-buffers', '--msl-textur
 # GX lighting takes max(0, NaN) from light directions left at zero, and the half of Mario its fill light faces came out white on the iPhone (GitHub issue 72; vk_shaders.py PRECISE)
 def precise(msl): return re.sub(r'\bfast::(min|max|clamp)\(', r'precise::\1(', msl)
 
+# Loop guard: every loop in a shader also ends once the function has run LOOP_CAP iterations in all, so a loop that never ends on the host (a wrong translation,
+# an uninitialized bound, a value the replay does not fill) cannot hang the GPU. On macOS a command buffer that never completes is not always reclaimed when the
+# process exits: PRAGMATA's first frames left one and the whole Mac stopped (WindowServer watchdog) minutes later, twice. One counter per function, so nested loops
+# cannot multiply past the cap; 2^18 iterations per invocation is far beyond what a frame's shader does (PRAGMATA's longest bounded loop: 255)
+# A loop whose body holds a barrier (threadgroup_barrier / simdgroup_barrier, at any depth) counts on a counter of its own instead (dm_lg1, dm_lg2, ..., declared with dm_lg at the
+# top of its function and never reset, so it still bounds every pass through that loop in all). The shared counter is per thread: the barrier-free loops in and before such a loop
+# run per-thread trip counts (a thread-strided copy loop over N items gives the threads up to one iteration more or less each), so once the cap was reached, threads of one
+# threadgroup left a barrier loop at different iterations and the others waited at its barrier for ever, which Metal does not recover from. A barrier loop's own trip count is the
+# same for every thread of the group (the shader's barriers would be wrong on the Switch otherwise), so its own counter ends it on the same iteration for all of them.
+# PRAGMATA's cloth solver 6f364b25e417234a: an outer do { ... } while (--iterations != 0) with a barrier in it and in the batch loop inside it, with stride-1024 / stride-256 copy
+# and constraint loops before and inside: if the iteration count it reads is 0 (data the host did not fill), the loop wraps and only the guard ends it, and the first
+# gameplay frame's compute submission never completed
+LOOP_CAP = 1 << 18
+_LOOP_HEAD = re.compile(r'(\s*)(?:do|for \(.*\)|while \(.*\))\s*')
+_BARRIER = re.compile(r'\b(?:threadgroup|simdgroup)_barrier\s*\(')
+def loop_guard(msl):
+    lines, out = msl.split('\n'), []
+    fn_head = lambda i: lines[i] == '{' and i and lines[i - 1].rstrip().endswith(')')   # a function body (SPIRV-Cross puts its brace alone in column 0; a struct's header does not end in ')')
+    own, fn_own, fn = {}, {}, None   # own: the line rewritten (a do loop's closing line, else its header) -> its counter; fn_own: a function's brace line -> its loops' counters
+    for i, l in enumerate(lines):
+        if fn_head(i): fn = i; continue
+        if fn is None or not (m := _LOOP_HEAD.fullmatch(l)): continue
+        ind = len(m.group(1))
+        end = next((j for j in range(i + 1, len(lines)) if lines[j][ind:ind + 1] == '}' and not lines[j][:ind].strip()), None)   # SPIRV-Cross indents each block by 4: the body closes at the header's column
+        if end is None or not any(_BARRIER.search(x) for x in lines[i + 1:end]): continue
+        name = f'dm_lg{len(own) + 1}'; own[end if l.strip() == 'do' else i] = name; fn_own.setdefault(fn, []).append(name)
+    for i, l in enumerate(lines):
+        if fn_head(i):
+            out += [l, '    uint dm_lg = 0u; (void)dm_lg;' + ''.join(f' uint {n} = 0u; (void){n};' for n in fn_own.get(i, ()))]; continue
+        cap = f'++{own.get(i, "dm_lg")} < {LOOP_CAP}u'
+        if (m := re.fullmatch(r'(\s*)\} while \((.*)\);\s*', l)): l = f'{m.group(1)}}} while (({m.group(2)}) && {cap});'
+        elif (m := re.fullmatch(r'(\s*)for \(;;\)\s*', l)): l = f'{m.group(1)}for (; {cap};)'
+        elif (m := re.fullmatch(r'(\s*)while \((.*)\)\s*', l)): l = f'{m.group(1)}while (({m.group(2)}) && {cap})'
+        elif (m := re.fullmatch(r'(\s*)for \(([^;]*);([^;]*);([^;]*)\)\s*', l)): l = f'{m.group(1)}for ({m.group(2)}; ({m.group(3).strip() or "true"}) && {cap};{m.group(4)})'
+        out.append(l)
+    return '\n'.join(out)
+# Workaround for a translator bug we cannot fix at its source (the prebuilt Ryujinx shader DLL, dmsh_xlate_bin; only its driver Program.cs is in-tree): a SCALAR load of a
+# storage buffer whose byte offset is computed and bounds-checked, but then indexed at element 0 instead of offset>>2. The SPIR-V emits `OFF = idx*4; if (uint(OFF) < size) v = buf._m0[0];`
+# where the computed OFF is stored and bounds-checked against the buffer's size (cp_cN._m0[K].z) but the OpAccessChain uses a constant 0 (confirmed in <key>.spv: `OpAccessChain %cp_s0 %int_0 %int_0`),
+# while the SAME shader's vector loads index correctly (`... >> 2` then a dynamic index). Found on Orbitals (040004F027560000): the UE5.6 GPUScene upload compute shaders f0db173d46f9cdc5
+# (PrimitiveSceneData, 704-byte/44-float4 records) and da5435fda42d9fb1 (InstanceSceneData) read the destination PrimitiveId from PrimitiveUploadIndices[PrimitiveIndex]; with the index lost to 0,
+# every uploaded primitive scattered to PrimitiveId 0's slot, so the LocalToWorld for all other primitives stayed zero -> gl_Position.w = 0 -> degenerate quad -> black 3D backgrounds. Restoring the
+# index (buf._m0[int(uint(OFF) >> uint(2))]) refilled PrimitiveSceneData (dumped 2/93 -> 65/93 populated records, the background primitive's transform now correct). The signature (an offset computed
+# as X*4 AND bounds-checked against a buffer size, then an element-0 load of a storage buffer) is specific to the miscompile; a legitimate element-0 read never computes and bounds-checks an offset it
+# does not use, so the rewrite leaves ordinary cp_sN._m0[0] reads untouched (62 of 1273 shaders that read a storage buffer at [0] match, in this game's cache).
+SBUF_SCALAR_INDEX = re.compile(
+    r'(int (\w+) = [^;\n]*\* 4;\s*'
+    r'bool \w+ = uint\(\2\) >= as_type<uint>\(\(\*spvDescriptorSet0\.cp_c\d+\)\._m0\[\d+\]\.z\);\s*'
+    r'bool \w+ = !\w+;\s*'
+    r'int \w+ = 0;\s*'
+    r'if \(\w+\)\s*\{\s*'
+    r'\w+ \w+ = as_type<\w+>\(\(\*spvDescriptorSet0\.cp_s\d+\)\._m0\[)0(\]\);)', re.M)
+def sbuf_scalar_index(msl): return SBUF_SCALAR_INDEX.sub(r'\g<1>int(uint(\2) >> uint(2))\g<3>', msl)
+
 # Ampere HMMA.16816 with an f16 accumulator (agl's upscaler networks, the NDVE video networks) reaches the MSL as calls of dmsh_hmma16816_f16(lane, block, A0..A3, B0, B1, C0, C1,
 # flags, A's LDSM address, A0..A3's offsets, A's row stride, out D1) → D0, the subgroup's 256-word block of the scratch shared memory as the last argument (InstEmitAmpereTensor.AHmma,
 # TensorPass, HelperFunctionManager.GenerateHmma16816F16). The translator's body computes D lane by lane from the block; here it becomes simdgroup_matrix code over the same block:
@@ -737,8 +791,18 @@ def job_for(key, name, rec, w):
         extra['arch'] = 'sm86'
         # compute lays out its driver constants in c[0] per shader: the control section gives its push constants' words (+0xa9), counts its uniform buffer, storage
         # buffer, texture, separate texture and separate sampler entries (+0xb1, +0xb2, +0xb3, +0xb4, +0xb5; images, +0xb6, come last) and gives the size (+0xba);
-        # the translator maps them to c[24] and NVN's fixed tables (InstEmitAmpere.cs AMapC0). Graphics keeps NVN's tables
-        if stage == 'cs': extra['nvn2_cs'] = [rec[ci + 0xb1], rec[ci + 0xb2], rec[ci + 0xb3], struct.unpack_from('<H', rec, ci + 0xba)[0], rec[ci + 0xa9] * 4, rec[ci + 0xb4], rec[ci + 0xb5]]
+        # the translator maps them to c[24] and NVN's fixed tables (InstEmitAmpere.cs AMapC0). Graphics keeps NVN's tables.
+        # The push region is two blocks, each 16-byte aligned: +0xa9 words, then +0xaa words. Donkey Kong Bananza's compiler leaves +0xaa at 0 (its 138 layouts add up
+        # with +0xa9 alone), PRAGMATA's (control +0x08 = 0x11) uses both: all 6,856 of its compute layouts add up to the size at +0xba this way, none with either block
+        # alone. Both blocks are mapped to c[24] as one run (AMapC0); what the second holds is not known yet
+        if stage == 'cs':
+            al = lambda v: (v + 0xf) & ~0xf
+            ub, sb, tx, size = rec[ci + 0xb1], rec[ci + 0xb2], rec[ci + 0xb3], struct.unpack_from('<H', rec, ci + 0xba)[0]
+            st, sm, im = rec[ci + 0xb4], rec[ci + 0xb5], rec[ci + 0xb6]
+            push = al(rec[ci + 0xa9] * 4) + al(rec[ci + 0xaa] * 4)
+            if 0x10 + push + 0x10 * (ub + sb) + 8 * (tx + st + sm + im) != size:
+                print(f'[RED] {key}: NVN2 compute c0 layout does not add up to its size {size:#x}', file=sys.stderr)
+            extra['nvn2_cs'] = [ub, sb, tx, size, push, st, sm]
         if stage in ('ts', 'ms'):
             # A task or mesh shader: translated as compute, its SPH taken off and its stage memory in shared memory, then wrapped as the Metal stage function (dmsh_meshstage.py).
             # Graphics stages' c[0] and c[2] tables stay: the translator reads their addresses out of the code as for a vertex shader
@@ -936,9 +1000,12 @@ def decode_ubo_tex(name):
     return (tb - 3, o0 * 4), (('id', o1) if ty == 3 else ('c2', o1 * 4) if ty and sb == 2 else (sb - 3, o1 * 4) if ty else (tb - 3, o0 * 4))
 
 def decode_ubo_img(name):
-    """An image whose handle the game keeps in its own uniform buffer (<stage>_i_cb<n>_<word>_<format>: Unreal Engine 5.4 on the Switch 2 keeps every image in c[3]). Returns (uniform slot, byte offset)"""
+    """An image whose handle the game keeps in its own uniform buffer (<stage>_i_cb<n>_<word>_<format>: Unreal Engine 5.4 on the Switch 2 keeps every image in c[3]; Orbitals' Unreal Engine 5.6
+    compute shaders read their images' handles from uniform slot 0 this way). An image handle names one image ID (low 20 bits), no sampler, so only handle type 0 occurs. Returns (uniform slot, byte offset)"""
     m = re.match(r'[a-z]+_i\w*?_cb(\d+)_([0-9A-F]+)', name)
-    return (int(m.group(1)) - 3, int(m.group(2), 16) * 4) if m and 3 <= int(m.group(1)) <= 16 else None
+    if not m or not 3 <= int(m.group(1)) <= 16: return None
+    h = int(m.group(2), 16)
+    return None if h >> 28 else (int(m.group(1)) - 3, (h & 0x3fff) * 4)
 
 def c2_array(name, ty):
     """An array of handles in the driver table c2 that the shader indexes at run time (Ryujinx's texture array from a buffer, here bank 2: <stage>_t<type>_cb<slots>_<handle>, declared
@@ -1056,9 +1123,17 @@ def reflect(key, stage, msl, res):
             if nm.endswith('Smplr') and us[0] == 'c2': e.update(kind=abi.KIND_SAMP_UBO, reg=ut[0], off=ut[1], soff=us[1], sreg=abi.SREG_C2)
             elif nm.endswith('Smplr'): e.update(kind=abi.KIND_SAMP_ID, reg=us[1]) if us[0] == 'id' else e.update(kind=abi.KIND_SAMP_UBO, reg=us[0], off=us[1], **({'soff': ut[1], 'sreg': ut[0]} if other else {}))
             elif 'texture_buffer' in ty: e.update(kind=abi.KIND_TBUF_UBO, reg=ut[0], off=ut[1])
-            else: e.update(kind=abi.KIND_TEX_UBO, reg=ut[0], off=ut[1], **({'soff': us[1], 'sreg': us[0]} if other else {}))
+            else:
+                e.update(kind=abi.KIND_TEX_UBO, reg=ut[0], off=ut[1], **({'soff': us[1], 'sreg': us[0]} if other else {}))
+                # a bindless 1D integer fetch the translator read as 2D rows of 16384 texels (the Ampere TLD path, InstEmitAmpereMem, as the Maxwell path already does): the slot-based
+                # res['fetch1d'] cannot name a bindless handle, so a bindless texture2d read by a 2D integer fetch (never a sample) is taken as such a wrapped read. A buffer texture bound here
+                # is then bound as those rows (nvn_refl f1d, nvn_mtl.m tbuf_as_2d); flagging a genuine 2D bindless fetch is harmless, as the host uses f1d only for a buffer texture
+                if re.fullmatch(r'texture2d<[^>]+>', ty) and re.search(r'\b%s\.read\(uint2\(' % re.escape(nm), msl):
+                    e['fetch1d'] = True
+                    if re.search(r'\b%s\.get_width\(' % re.escape(nm), msl): e['fetch1d_size'] = True   # also size-queried: a buffer texture of more than 16384 elements reports 16384 there
         elif decode_ubo_img(nm):
-            e.update(kind=abi.KIND_IMG_UBO, reg=decode_ubo_img(nm)[0], off=decode_ubo_img(nm)[1])   # pyright: ignore[reportOptionalSubscript]  (not None: tested above)
+            if ty.startswith('array<'): e.update(kind=abi.KIND_UNKNOWN)   # an array of them: not implemented in the replay layer
+            else: e.update(kind=abi.KIND_IMG_UBO, reg=decode_ubo_img(nm)[0], off=decode_ubo_img(nm)[1])   # pyright: ignore[reportOptionalSubscript]  (not None: tested above)
             if has_word(msl, nm + '.atomic_'): e['atomic'] = True   # as KIND_IMG below
         elif c2_array(nm, ty) is not None:   # an array of the driver table's handles (c2_array): the replay fills element k from the slot whose c2 word is at off + 8k
             off, soff = c2_array(nm, ty)   # pyright: ignore[reportGeneralTypeIssues]  (not None: tested above)
@@ -1108,6 +1183,9 @@ def drv_reads(src):
             if idx.isdigit(): offs.add(int(idx) * 16)
             else: dyn = True
         if offs or dyn: out[str(bank)] = {'vec4_offsets': sorted(offs), 'dynamic': dyn}
+    # the sample position table read at the byte 0x620 + the sample index alone (Switch 2 GLSLC, one sample position per sample with no location grid: Orbitals' pixel shaders,
+    # PIXLD.MY_INDEX + 0x620, then the byte of that word), see unfillable
+    if out.get('0', {}).get('dynamic') and '[[sample_id]]' in src and re.search(r'= as_type<int>\(\w+\) \+ %d;' % abi.C0_SAMPLE_TABLE, src): out['0']['sample_table'] = True
     return out
 
 SAMPLE_ROWS = [(abi.C0_SAMPLE_TABLE, abi.C0_SAMPLE_TABLE + abi.C0_SAMPLE_BYTES), (abi.C0_SAMPLE_INFO, abi.C0_SAMPLE_INFO + abi.C0_ROW)]   # c0: the pixel stage's sample position rows
@@ -1120,7 +1198,8 @@ def unfillable(dr, stage):
         # at 0x168 + 8i to test each light's handle); c0 is filled only in its tables and words above, so a computed index there may read what the replay does not write.
         # The one computed c0 index known is GLSLC's sample position lookup in a pixel shader: a byte of the table at 0x620, at an index made of the sample index (PIXLD.MYINDEX)
         # and the pixel's place in the location grid masked by the words of the 0x630 row, at most 15 (Metroid Prime Remastered: 30 of its 438 shaders that read the sample index)
-        if d['dynamic'] and bank == '0' and not (stage == 'ps' and abi.C0_SAMPLE_INFO in d['vec4_offsets']): bad.append(f'c{bank} dynamic index')
+        # Switch 2's GLSLC reads the table at 0x620 + the sample index without the grid row (drv_reads sample_table): at most 16 bytes, within the table
+        if d['dynamic'] and bank == '0' and not (stage == 'ps' and (abi.C0_SAMPLE_INFO in d['vec4_offsets'] or d.get('sample_table'))): bad.append(f'c{bank} dynamic index')
         for o in d['vec4_offsets']:
             # a read is a 16-byte row: overlapping any table is enough (Engage reads the c2+0x160 row for texture slot 0 at 0x168 in it)
             if not any(o < b and a < o + 16 for a, b in fill): bad.append(f'c{bank}+{o:#x}')
@@ -1508,7 +1587,7 @@ def geometry_finish(key, w, j, c1):
         dmsh_geometry.flatten_sets(spv)
         r = subprocess.run([SPIRV_CROSS, *dmsh_atomic.cross_args(XC, spv), spv], capture_output=True, text=True)
         if r.returncode: return 'geometry MSL failed', r.stderr.strip()[:160], None
-        plain = dmsh_geometry.topology_pointer(pool_arrays(precise(dmsh_atomic.check_msl(r.stdout))))
+        plain = dmsh_geometry.topology_pointer(pool_arrays(loop_guard(precise(sbuf_scalar_index(dmsh_atomic.check_msl(r.stdout))))))
         src = dmsh_geometry.capture_input(plain)
         res = json.load(open(os.path.join(w, k + '.res.json')))
         refl = {'key': key + '_bg' + str(t), 'route': 'B', 'chain': CHAIN, 'dm_ctl': key,
@@ -1538,7 +1617,7 @@ def geometry_finish(key, w, j, c1):
             spv = os.path.join(w, k + '.reader.spv'); dmsh_geometry.flatten_sets(spv)
             r = subprocess.run([SPIRV_CROSS, *dmsh_atomic.cross_args(XC, spv), spv], capture_output=True, text=True)
             if r.returncode: return 'geometry reader failed', r.stderr.strip()[:160], None
-            reader = vs_layer(vs_init(dmsh_geometry.reader(pool_arrays(precise(dmsh_atomic.check_msl(r.stdout))))))
+            reader = vs_layer(vs_init(dmsh_geometry.reader(pool_arrays(loop_guard(precise(sbuf_scalar_index(dmsh_atomic.check_msl(r.stdout))))))))
             analysis, full = vs_depth(reader)
             meta = {'key': key + '_bgv', 'route': 'B', 'chain': CHAIN, 'dm_ctl': key,
                     'stage': 'vs', 'entry': 'main0', 'entry_z': 'main0_z', 'msl_entry_kind': 'vertex',
@@ -1550,6 +1629,24 @@ def geometry_finish(key, w, j, c1):
             save('_bgv', full, meta)
     return 'ok', '', base
 
+
+TG_FENCE_DECL = re.compile(r'\bthreadgroup\s+(?:spvUnsafeArray<[^;&]*?>|[A-Za-z_][\w<>, ]*?)\s*&?\s*(\w+)\s*(?:\[[^\]]*\])?\s*[;,)]')
+TG_FENCE = 'atomic_thread_fence(mem_flags::mem_threadgroup, memory_order_seq_cst, thread_scope_simdgroup);'
+def tg_fence(src):
+    """A store to threadgroup memory followed by a load of another lane's word, with no barrier between them (Ampere compilers rely on lockstep warps for small
+    scans, e.g. Unreal's GPU radix sort downsweep d032ce5090303e01 at 0x2eb0: STS / LDS [x-4] / STS / LDS [x-8]): for one thread the load and the earlier store do not
+    alias, so Metal moves the load above the store and reads another lane's old value (Orbitals: Niagara's sorted index list wrong every frame, beams and particles broken).
+    A simdgroup-scope memory fence after each threadgroup store keeps the order; it is not an execution barrier, so it is safe in divergent code. Only kernels with a
+    threadgroup array are touched"""
+    names = {m.group(1) for m in TG_FENCE_DECL.finditer(src) if m.group(1) not in ('operator',)}
+    if not names: return src
+    store = re.compile(r'^(\s*)(?:%s)\s*\[[^\n;]*\]\s*=(?!=)[^\n]*;\s*$' % '|'.join(map(re.escape, sorted(names))))
+    out = []
+    for ln in src.split('\n'):
+        out.append(ln)
+        m = store.match(ln)
+        if m: out.append(m.group(1) + TG_FENCE)
+    return '\n'.join(out)
 
 def finish(key, w, j, c1):
     name, k = loc[key]
@@ -1579,9 +1676,11 @@ def finish(key, w, j, c1):
             src = open(msl).read()
     try: src = dmsh_atomic.check_msl(src)
     except ValueError as e: return 'image atomic MSL failed', str(e), None
+    src = sbuf_scalar_index(src)   # restore the index of scalar storage-buffer loads the translator emitted at element 0 (see sbuf_scalar_index)
     src = precise(src)   # min / max / clamp with Maxwell's NaN results (see precise)
     try: src = gather_offsets(src)   # four gathers instead of a wrapper's loop over their offsets (see gather_offsets)
     except ValueError as e: return 'gather offsets rewrite failed', str(e)[:160], None
+    src = loop_guard(src)   # no loop can run forever (see loop_guard)
     try: src = hmma_msl(src)   # Ampere HMMA through simdgroup_matrix (see hmma_msl)
     except ValueError as e: return 'HMMA rewrite failed', str(e)[:160], None
     try: src = shared_store_msl(src)   # shared memory byte and half-word stores as Metal byte stores (see shared_store_msl)
@@ -1589,6 +1688,7 @@ def finish(key, w, j, c1):
     try: src = pool_arrays(src)   # handles traced to no slot read the pools the replay keeps (see pool_arrays)
     except ValueError as e: return 'pool rewrite failed', str(e)[:160], None
     src = dmsh_wide.wide_loads(src)   # storage words the translator split, read whole again (see dmsh_wide.py)
+    src = tg_fence(src)   # warp-synchronous shared memory: a simdgroup-scope fence after each threadgroup store (see tg_fence)
     src = border_emu(src); open(msl, 'w').write(src)   # border colours Metal lacks (see border_emu)
     first, spill = [], 0
     mesh = j.get('mesh_stage')

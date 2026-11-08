@@ -84,6 +84,7 @@ int main(void) { @autoreleasepool {
     // Native GPU state: matching queue/device origins keep NVN's NDC facing;
     // differing origins reverse it. CW and CCW expectations are explicit here.
     const int front_in_clip[2][2][2] = {{{0,1},{1,0}},{{1,0},{0,1}}};
+    NvShader *uv_vs = [NvShader new]; uv_vs->rf.pos_attr=0; uv_vs->rf.pos_w1=1; uv_vs->rf.uv_attr[0]=1;
     // -1 keeps the implicit viewport; 0 changes the recording device after recording;
     // 1 records on a second device and submits on the game's queues; 2 also updates
     // viewport 1 under the opposite origin, which must leave viewport 0 unchanged.
@@ -144,6 +145,25 @@ int main(void) { @autoreleasepool {
         g_fd_dw=NULL;
         CHECK(scr_proof(program,0,8,8)==(queue == NVN_WINDOW_ORIGIN_MODE_UPPER_LEFT && current == NVN_WINDOW_ORIGIN_MODE_UPPER_LEFT && !flip),
             "screen-varying proof follows the recorded viewport origin");
+        // A pass-through UV stream for the ordinary-coordinate tile-read proof.
+        // The geometry checks below establish which target row each clip y reaches.
+        // Test both UV orientations: only the one matching that row can read the tile.
+        va_st saved_attr=S.attr[1]; vs_st saved_stream=S.stream[1]; NVNbufferRange saved_buffer=S.vbuf[1]; int saved_nattr=S.nattr;
+        S.nattr=2; S.attr[1]=(va_st){.fmt=NVN_FORMAT_RG32F,.stream=1}; S.stream[1]=(vs_st){.stride=16};
+        S.vbuf[1]=(NVNbufferRange){(uint64_t)vertices+256,48};
+        float (*uv)[4]=(float (*)[4])((uint8_t *)vertices+256);
+        for (int uv_flip=0;uv_flip<2;uv_flip++) {
+            for (int k=0;k<3;k++) { uv[k][0]=(positions[k][0]+1)*.5f; uv[k][1]=(1+(uv_flip ? positions[k][1] : -positions[k][1]))*.5f; }
+            CHECK(uv_proof(uv_vs,0,&draw,NULL)==(uv_flip == ((current == NVN_WINDOW_ORIGIN_MODE_LOWER_LEFT)^flip)),
+                "ordinary UV proof reads this pixel only in the recorded viewport direction");
+        }
+        const uint8_t unproved_swizzles[][4]={{1,0,0,0},{2,2,0,0},{0,0,1,0},{0,0,0,1}};
+        for (unsigned i=0;i<sizeof unproved_swizzles/sizeof unproved_swizzles[0];i++) {
+            memcpy(S.vp_sw[0],unproved_swizzles[i],4);
+            CHECK(!uv_proof(uv_vs,0,&draw,NULL),"ordinary UV proof rejects unproved viewport swizzles");
+        }
+        memset(S.vp_sw[0],0,4); S.vp_sw[0][1]=flip;
+        S.nattr=saved_nattr; S.attr[1]=saved_attr; S.stream[1]=saved_stream; S.vbuf[1]=saved_buffer;
         uint8_t expected[4] = {visible && !front ? 255:0,visible && front ? 255:0,visible ? 0:255,255};
         id<MTLBuffer> pixels = [g_dev newBufferWithLength:256 options:MTLResourceStorageModeShared];
         mtl_sub_begin(); res_add(pixels);

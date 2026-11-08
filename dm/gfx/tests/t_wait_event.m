@@ -260,8 +260,22 @@ static void event_queued_write(int mode) {
     CHECK(done && *result==after,"the consumer's copy reads the producer's payload"); if(!done) { P(nvnEventSignal)(&event,NVN_EVENT_SIGNAL_MODE_WRITE,1); _Exit(2); }
     P(nvnSyncFinalize)(&produced); P(nvnSyncFinalize)(&consumed);
 }
+// A wait on a sync no fence has reached when it is submitted is already satisfied: the queue's own later work, its fence included, runs (issue #1808)
+static void receipt_unfenced(int command_wait) {
+    printf("CASE %s wait on a never-fenced sync does not park its queue\n",command_wait?"command-buffer":"queue");
+    *source=before; *result=sentinel;
+    NVNsync never,consumed; P(nvnSyncInitialize)(&never,&device); P(nvnSyncInitialize)(&consumed,&device);
+    if(!command_wait) CHECK(P(nvnQueueWaitSync)(&queues[0],&never),"queue accepts a wait on a never-fenced sync");
+    begin_cmd(0); if(command_wait) P(nvnCommandBufferWaitSync)(&commands[0],&never);
+    P(nvnCommandBufferCopyBufferToBuffer)(&commands[0],source_addr,result_addr,4,0);
+    P(nvnCommandBufferFenceSync)(&commands[0],&consumed,NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE,0);
+    job j; enqueue(&j,&queues[0],P(nvnCommandBufferEndRecording)(&commands[0])); int r=returned(&j,250000000ull);
+    int done=landed(&consumed,5000000000ull);
+    CHECK(r && done && *result==before,"the work after the wait runs and its fence lands"); if(!done) _Exit(2);
+    P(nvnSyncFinalize)(&never); P(nvnSyncFinalize)(&consumed);
+}
 static void receipt_tests(void) {
-    receipt_unrelated_completion(); receipt_snapshot(0); receipt_snapshot(1); receipt_wait_only(0); receipt_wait_only(1);
+    receipt_unrelated_completion(); receipt_snapshot(0); receipt_snapshot(1); receipt_wait_only(0); receipt_wait_only(1); receipt_unfenced(0); receipt_unfenced(1);
 }
 static void event_mirror_publication(void) {
     printf("CASE terminal event waits for render-pass mirror publication\n");

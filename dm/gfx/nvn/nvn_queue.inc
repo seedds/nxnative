@@ -129,8 +129,10 @@ static void *nq_worker(void *unused) {
                     if(predecessor>mtl_completed_fence() || !nq_predicate(atomic_load_explicit((_Atomic uint32_t *)n->event,memory_order_acquire),n->mode,n->value)) { n->waiting=1; mapped_event_wait=1; continue; }
                 }
                 if(n->kind==NQ_SYNC) {
-                    if(!n->wait_kind || (n->receipt && !n->receipt->published)) continue;
-                    // Targets are immutable snapshots. One Metal queue orders an encoded producer before this continuation.
+                    if(n->receipt && !n->receipt->published) continue;
+                    // Targets are immutable snapshots. One Metal queue orders an encoded producer before this continuation. A sync not yet fenced when the wait was submitted
+                    // (wait_kind 0) is a snapshot of nothing to wait for, and the wait passes. Sparking! ZERO, on one NVN queue, waits on a sync before that queue's own first
+                    // fence of it at its first load, which runs on the console; parked here, the fence behind the wait never published and its SyncWait stalled the game (#1808)
                 }
                 break;
             }

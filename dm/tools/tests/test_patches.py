@@ -111,7 +111,7 @@ class Registry(unittest.TestCase):
                         for off, why in got: self.assertTrue(0 <= off < rule['others'][label]['size'], f'{p}: {label} site {off:#x} outside its function')
                     if rule.get('others'):   # none found: the stub leaves those parts out
                         rest = []
-                        ctx = docs_patches.types.SimpleNamespace(here=lambda: 0x8000000, emit=lambda w: None, site=lambda off, orig: None, put=lambda off, words, why: rest.append(off),
+                        ctx = docs_patches.types.SimpleNamespace(here=lambda: 0x8000000, emit=lambda w: None, site=lambda off, orig: None, put=lambda off, words, why, rest=rest: rest.append(off),
                                                                  state=0x9000000, render_scale=0, base=0x100000, others={label: None for label in rule['others']}, capabilities=set())
                         rule['stub'](ctx)
                         self.assertTrue(all(0x100000 <= off < 0x100000 + rule['size'] for off in rest), f'{p}: {rule["name"]} writes outside its function without its others')

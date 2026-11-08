@@ -217,6 +217,51 @@ static void gpu_lost_check(NSError *e, const char *where) {
     gpu_lost_release();
     front_gpu_lost();
 }
+// DM_NVN_A5288_C3=1 (diagnostic, off by default; #1605): Ocarina of Time's Hi-Z task a5288d0a6c4971fd scans a rectangle of its Hi-Z texture per object, clamped to
+// c3[193].xy - 1 (the Hi-Z width and height, ints at byte 3088 of Maxwell constant buffer 3, which is NVN uniform binding 0: c<n> is binding n - 3); its only loop. Each a5288 draw's c3[193].xy is kept with the fence of its command
+// buffer: a change of value is logged, and a GPU hang prints the values of the hung command buffer against those of the last command buffers that completed
+static _Atomic uint64_t g_cur_frame; static uint64_t g_stat_pass;   // tentative, defined below
+enum { A5C_N = 4096 };
+static struct { uint64_t fence, frame, pass, addr, size; int32_t x, y; uint8_t deferred; } g_a5c[A5C_N]; static _Atomic uint32_t g_a5c_i;
+static int a5c_fits(int32_t x, int32_t y, uint64_t size);
+static int a5c_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_A5288_C3"); v = e && *e == '1'; } return v; }
+static void a5c_report(NSError *e, uint64_t fence) {
+    if (!a5c_on() || !e || ![e.description containsString:@"kIOGPUCommandBufferCallbackErrorHang"]) return;
+    uint32_t end = atomic_load(&g_a5c_i); int nh = 0, np = 0; char hv[512] = "", pv[512] = ""; int32_t px[16], py[16]; int pn[16], npv = 0;
+    for (uint32_t k = 0; k < A5C_N && k < end; k++) { uint32_t i = (end - 1 - k) & (A5C_N - 1);
+        if (g_a5c[i].fence == fence) { if (nh++ < 12) { size_t o = strlen(hv); snprintf(hv + o, sizeof hv - o, " F%llu p%llu %d,%d@%#llx/%llu%s%s", (unsigned long long)g_a5c[i].frame, (unsigned long long)g_a5c[i].pass, g_a5c[i].x, g_a5c[i].y, (unsigned long long)g_a5c[i].addr, (unsigned long long)g_a5c[i].size, a5c_fits(g_a5c[i].x, g_a5c[i].y, g_a5c[i].size) ? "" : "(PAST the block)", g_a5c[i].deferred ? "(deferred update)" : ""); } }
+        else if (g_a5c[i].fence < fence && g_a5c[i].fence + 64 >= fence) { np++; int j = 0; while (j < npv && (px[j] != g_a5c[i].x || py[j] != g_a5c[i].y)) j++; if (j == npv && npv < 16) { px[npv] = g_a5c[i].x; py[npv] = g_a5c[i].y; pn[npv++] = 0; } if (j < 16) pn[j]++; } }
+    for (int j = 0; j < npv; j++) { size_t o = strlen(pv); snprintf(pv + o, sizeof pv - o, " %d,%d x%d", px[j], py[j], pn[j]); }
+    MLOG("[RED] a5288 c3[193].xy (Hi-Z size; the scan rectangle is clamped to it - 1): hung command buffer (fence %llu) %d draws:%s; the 64 command buffers before it %d draws, values:%s", (unsigned long long)fence, nh, nh ? hv : " none", np, npv ? pv : " none");
+}
+// The occlusion tiles are floats of the same block from byte 3120 (#1326, the maintainer): W x H tiles must fit in it, or the scan reads past the block (a page fault)
+static int a5c_fits(int32_t x, int32_t y, uint64_t size) { return x > 0 && y > 0 && x <= 65536 && y <= 65536 && 3120 + (uint64_t)x * (uint64_t)y * 4 <= size; }
+static void a5c_note(const char *key, uint64_t addr, uint64_t size, int deferred) {   // at a task-stage binding of c3 (uniform binding 0)
+    if (!a5c_on() || !key || strncmp(key, "a5288d0a6c4971fd", 16)) return;
+    int32_t x = 0, y = 0; if (size >= 194 * 16) { memcpy(&x, (const void *)(addr + 193 * 16), 4); memcpy(&y, (const void *)(addr + 193 * 16 + 4), 4); }
+    uint32_t i = atomic_fetch_add(&g_a5c_i, 1) & (A5C_N - 1);
+    g_a5c[i].fence = atomic_load(&g_fence) + 1; g_a5c[i].frame = atomic_load(&g_cur_frame); g_a5c[i].pass = g_stat_pass; g_a5c[i].x = x; g_a5c[i].y = y; g_a5c[i].deferred = (uint8_t)deferred;
+    g_a5c[i].addr = addr; g_a5c[i].size = size;
+    static int32_t lx = INT32_MIN, ly = INT32_MIN; static uint64_t lf, la, ls; static uint32_t nbad;
+    int fits = a5c_fits(x, y, size); float fx, fy; memcpy(&fx, &x, 4); memcpy(&fy, &y, 4);
+    if (!fits && nbad++ < 64) MLOG("[RED] a5288 c3[193].xy = %d,%d (as floats %g,%g) does not fit its block at %#llx (%llu bytes; %lld tiles from byte 3120) at frame %llu pass %llu%s", x, y, fx, fy, (unsigned long long)addr, (unsigned long long)size, (long long)x * y, (unsigned long long)g_a5c[i].frame, (unsigned long long)g_stat_pass, deferred ? "; an inline update of the block is deferred in this pass" : "");
+    if (x != lx || y != ly || addr != la || size != ls || g_a5c[i].frame >= lf + 900) {
+        MLOG("a5288 c3[193].xy = %d,%d at frame %llu pass %llu, block %#llx %llu bytes (Hi-Z size; worst-case scan rectangle %lld tiles, %s the block)%s", x, y, (unsigned long long)g_a5c[i].frame, (unsigned long long)g_stat_pass, (unsigned long long)addr, (unsigned long long)size, (long long)x * y, fits ? "within" : "PAST",
+             deferred ? ", an inline update of the block is deferred in this pass: memory may not hold the value the GPU reads" : "");
+        lx = x; ly = y; la = addr; ls = size; lf = g_a5c[i].frame; }
+}
+// At each submission's completion (DM_NVN_A5288_C3): its a5288 draws' c3[193].xy read again from memory. A different value means the block was rewritten while the GPU could
+// still read it (the CPU of the next frame, or an update the host applied late): the first hypothesis of #1326 for a garbage size
+static void a5c_complete(uint64_t fence) {
+    if (!a5c_on()) return;
+    static uint64_t ndraw, nchanged, nlog; uint32_t end = atomic_load(&g_a5c_i);
+    for (uint32_t k = 0; k < A5C_N && k < end; k++) { uint32_t i = (end - 1 - k) & (A5C_N - 1); if (g_a5c[i].fence < fence) break; if (g_a5c[i].fence != fence || g_a5c[i].size < 194 * 16) continue;
+        int32_t x, y; memcpy(&x, (const void *)(g_a5c[i].addr + 193 * 16), 4); memcpy(&y, (const void *)(g_a5c[i].addr + 193 * 16 + 4), 4); ndraw++;
+        if (x != g_a5c[i].x || y != g_a5c[i].y) { nchanged++;
+            if (nlog++ < 32 || !(nlog & 255)) MLOG("[RED] a5288 c3[193].xy of a draw at frame %llu pass %llu was %d,%d at encode and is %d,%d when its submission (fence %llu) completed: the block was rewritten while the GPU could read it (%llu of %llu draws so far)",
+                (unsigned long long)g_a5c[i].frame, (unsigned long long)g_a5c[i].pass, g_a5c[i].x, g_a5c[i].y, x, y, (unsigned long long)fence, (unsigned long long)nchanged, (unsigned long long)ndraw); } }
+    static uint64_t lastrep; if (ndraw >= lastrep + 20000) { lastrep = ndraw; MLOG("a5288 c3[193].xy at completion: %llu of %llu draws differ from their encode-time value", (unsigned long long)nchanged, (unsigned long long)ndraw); }
+}
 // DM_TEST_GPU_LOST=n (for testing): from the n-th submission on, imitate the revoked access without faulting the GPU: each submission's feedback reports it, in the shape the #1326
 // logs show, and the GPU's signal of its fence is left out (its work still runs)
 static int gpu_lost_test(void) {
@@ -2261,6 +2306,7 @@ uint64_t mtl_sub_commit(void) {
         uint64_t c0 = 0, c1 = 0; if (seg_ts()) { c0 = gpu_s_guest_ns(cb.GPUStartTime); c1 = gpu_s_guest_ns(cb.GPUEndTime); }
         if (cb.error) { atomic_store(&g_last_commit_error, 1); res_top_once(cb.error); static int n, nv; int victim = [cb.error.description containsString:@"InnocentVictim"]; if (victim ? nv++ < 1 : n++ < 8) MLOG("[RED] command buffer error details fence=%llu: %s | GPU %.3f→%.3f", (unsigned long long)fence, cb.error.description.UTF8String, cb.GPUStartTime, cb.GPUEndTime); if (!victim) MLOG("[RED] state of the failed submission fence=%llu: %s", (unsigned long long)fence, cctx.UTF8String); MLOG("[RED] command buffer execution error: %s", cb.error.localizedDescription.UTF8String); }
         char where[64]; snprintf(where, sizeof where, "fence %llu, its last command buffer", (unsigned long long)fence); cbs_feedback(cbs, cb.error, where);
+        a5c_report(cb.error, fence); a5c_complete(fence);
         gpu_lost_check(lost_test ? gpu_lost_test_error() : cb.error, "submission");
         post_complete(fence, c0, c1);
         if (atomic_load(&g_gpu_lost)) gpu_lost_release();   // the GPU signals none of these fences
@@ -9825,6 +9871,7 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
             if (!u || !u->addr || !mtl_gpu_addr(u->addr, u->size ? u->size : 1, &mb, &mo, &gpu)) {   // reads 0 (the all-zero bank), as an unbound texture slot does, instead of through a null pointer
                 RED_ONCE(16, "stage %d cb%d has no uniform buffer bound", nvn_stage, reg); slots[aid] = zero_bank_gpu(); USE(zero_bank(), MTLResourceUsageRead); continue; }
             uint64_t ul = cb_len(sh, reg, u->size);   // what the shader can read of it
+            if (nvn_stage == 3 && reg == 0) a5c_note(sh->key, u->addr, u->size, g_nubd && ubd_hits(u->addr, u->addr + ul));
             if (g_nubd && ubd_hits(u->addr, u->addr + ul)) {   // inline updates deferred in this pass (see mtl_sub_update); ubd_conflict made sure they cover the binding or the rest can be read from memory
                 uint64_t g; const uint8_t *c; if (ubd_covers(u->addr, u->addr + ul)) gpu = ubd_shadow(u->addr, u->addr + ul);
                 else if (ubp_get(u->addr, u->addr + ul, &g, &c)) gpu = g;
@@ -13800,6 +13847,7 @@ static void sub_cut(void) {
         if (sc) { if (k < SEG_CLK_N) { atomic_store(&sc->t[k][0], gpu_s_guest_ns(cb.GPUStartTime)); atomic_store(&sc->t[k][1], gpu_s_guest_ns(cb.GPUEndTime)); } seg_clk_put(sc); }
         if (cb.error) { atomic_store(&g_last_commit_error, 1); static int k; if (k++ < 8) MLOG("[RED] segment command buffer execution error: %s", cb.error.description.UTF8String); res_top_once(cb.error); }
         char where[64]; snprintf(where, sizeof where, "fence %llu, segment %u", (unsigned long long)cbs_fence, k); cbs_feedback(cbs, cb.error, where);
+        a5c_report(cb.error, cbs_fence);
         gpu_lost_check(cb.error, "segment");
     }];
     gmem_commit_patch();

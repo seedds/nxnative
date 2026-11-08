@@ -585,6 +585,10 @@ static id<MTLRenderPipelineState> mtk_pso(NvProg *raster) {
 static void mtk_encode(id<MTLRenderCommandEncoder> en_) {
     id<MTL4RenderCommandEncoder> en = (id<MTL4RenderCommandEncoder>)en_; NvShader *ts = g_mtk.ts, *ms = g_mtk.ms;
     [en setArgumentTable:g_vt atStages:MTLRenderStageMesh];
+    { static int gl = -1; if (gl < 0) { const char *e = getenv("DM_NVN_MESH_GRID_LOG"); gl = e && *e == '1'; }   // diagnostic, off by default (#1708: 1,024 threadgroups is the mesh grid limit on M1 / M2)
+      if (gl && !g_mtk.ind && g_mtk.count > 1024) { static uint64_t n; static uint32_t mx; n++; if (g_mtk.count > mx) mx = g_mtk.count;
+          if (n <= 16 || !(n & 255)) MLOG("mesh grid: a direct %s draw of %u workgroups (task %s, mesh %s): %s; %llu such draws, the largest %u", ts ? "task" : "mesh", g_mtk.count, ts ? ts->key : "-", ms->key,
+              ts ? "the object grid; its mesh grid comes from the task's payload" : "a mesh grid past 1,024 (#1708)", (unsigned long long)n, mx); } }
     uint64_t first_gpu = g_mtk.ind_first;
     if (!g_mtk.ind) { id<MTLBuffer> b; size_t o = arena_alloc(16, &b); memcpy((uint8_t *)b.contents + o, &g_mtk.first, 4); first_gpu = b.gpuAddress + o; }
     if (ts) { [en setArgumentTable:g_ot atStages:MTLRenderStageObject]; g_args_dirty[3] = 1; encode_args(en, ts, 3, 0);

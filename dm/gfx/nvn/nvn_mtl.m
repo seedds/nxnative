@@ -4957,7 +4957,7 @@ static void rt_mirror_flush(void) {
     }
     if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
 }
-static void rp_end_at(const char *fn, int line) { if (g_enc) { AP_B; geo_mesh_flush_pass(); PD("E %llu pass ends in %s:%d", g_stat_pass, fn, line);
+static void rp_end_at(const char *fn, int line) { if (g_enc) { AP_B; geo_mesh_flush_pass(); PD("E %llu pass ends in %s:%d", g_stat_pass, fn, line); int dmask = g_rt_dmask;
     if (enc_label_on()) { static uint64_t lf = ~0ull, base; uint64_t f = atomic_load(&g_cur_frame); if (f != lf) { lf = f; base = g_stat_pass - 1; }   // Intra-frame serial: the same pass has the same name every frame, so the table can aggregate by name
         [(id)g_enc setLabel:[NSString stringWithFormat:@"p%02llu %dx%d %s d%d", (unsigned long long)(g_stat_pass - base), g_el_w, g_el_h, g_el_key[0] ? g_el_key : "-", g_el_draws]]; }
 #ifdef NVN_RT_RANGE_TEST
@@ -4971,6 +4971,9 @@ static void rp_end_at(const char *fn, int line) { if (g_enc) { AP_B; geo_mesh_fl
 #ifdef NVN_RT_RANGE_TEST
     rr_finish(ranged);
 #endif
+    // The pass ended while the game had depth-only targets set over it (g_rt_dmask): those are the targets now. R.rt still named the pass's colour targets, so the next pass
+    // (a draw after a mid-pass ClearDepthStencil, a copy or a dispatch) attached them again with the colour mask back on, and the depth-only draws wrote colour into them
+    if (dmask) { memset(R.rt.color, 0, sizeof R.rt.color); memset(R.rt.has_cview, 0, sizeof R.rt.has_cview); R.rt.n = 0; g_pso_dirty = 1; }
     AP_E(0);
 } }
 void pg_sub_begin_ext(uint64_t fence) { pg_sub_begin(fence); }

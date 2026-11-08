@@ -1,0 +1,6 @@
+{
+ "root": "/Volumes/Games/windows-test",
+ "repo": "/path/to/nxnative",
+ "host": "nxbuild@192.0.2.10",
+ "share": "\\\\192.0.2.20\\Shared\\Switch"
+}

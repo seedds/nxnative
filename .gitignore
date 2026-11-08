@@ -11,3 +11,6 @@ dm/games/*/cb_extent.tsv
 .coverage
 .coverage.*
 /coverage.json
+
+# The Windows queue's settings for one Mac and its network (dm/windows/local.json.example)
+dm/windows/local.json

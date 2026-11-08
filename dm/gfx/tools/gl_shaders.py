@@ -4,6 +4,7 @@
 # Sources, all searched in every input path:
 #   · MVGL archives (*.mvgl, dm/gfx/tools/mvgl.py): every .shad file, named <material>_vp / <material>_fp (1,682 files, 615 distinct sources in Digimon);
 #   · an NSO (a file that starts with NSO0, the game's main): every NUL-terminated string that starts with '#version' (its built-in post effects, movie and shadow shaders);
+#   · loose GLSL files: *.vert / *.frag, and *.vs / *.fs as libGDX names them (Slay the Spire's shaders/, compiled as they are);
 #   · capture folders (the Mac host's DM_GL_CAPTURE): <key>.vert / <key>.frag, what the game really compiled, for sources it puts together at run time.
 # Per shader:
 #   · key = sha256(the source text up to its first NUL)[:16] (hex), as the host hashes the strings glShaderSource gets; the Metal function is gl_<key>_v or gl_<key>_f;
@@ -63,9 +64,9 @@ def sources(roots):
                         if not nm.endswith('.shad'): continue
                         st = 'vert' if nm.endswith('_vp.shad') else 'frag' if nm.endswith('_fp.shad') else None
                         yield text_of(a.read(nm)), st, f'/{os.path.relpath(p, r)}:{nm}'
-                elif fn.endswith(('.vert', '.frag')):
+                elif fn.endswith(('.vert', '.frag', '.vs', '.fs')):   # .vs / .fs: libGDX's names (Slay the Spire's shaders/, read as they are by ShaderProgram)
                     with open(p, 'rb') as f: source = text_of(f.read())
-                    yield source, fn.rsplit('.', 1)[1], '/' + os.path.relpath(p, r)
+                    yield source, 'vert' if fn.endswith(('.vert', '.vs')) else 'frag', '/' + os.path.relpath(p, r)
 
 # NVIDIA's GLSL compiler accepts more than the GLSL ES 3.20 specification, and glslang does not; these fix-ups run on the preprocessed text (glslang -E, so macros are expanded):
 #   · the GLSL ES 1.0 texture functions (89 of Digimon's fragment shaders call textureCube; with -V glslang reads textureCube as Vulkan's texture type, so a macro cannot rename it);

@@ -371,8 +371,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             Operand p = APred(context, x, 87, 90);
             BoolOp bop = (BoolOp)x.Bits(69, 71);
 
-            ASetPred(context, x.Bits(81, 84), GetPredLogicalOp(context, bop, lo, p));
-            ASetPred(context, x.Bits(84, 87), GetPredLogicalOp(context, bop, hi, p));
+            ASetPredPair(context, x, GetPredLogicalOp(context, bop, lo, p), GetPredLogicalOp(context, bop, hi, p));
         }
 
         // HSET2 Rd, a, b, P: each half 1.0 (.BF, 71) or all ones where (comparison bop P) holds, else 0

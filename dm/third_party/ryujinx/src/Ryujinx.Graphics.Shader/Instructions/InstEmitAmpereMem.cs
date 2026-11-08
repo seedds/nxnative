@@ -70,6 +70,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
             x(0x593, InstName.Suatom, ASuatom, N);
             x(0x59f, InstName.Sured, ASured, N, writesRd: false);
             x(0x394, InstName.SuatomB, ASuatom, N);
+            x(0x595, InstName.SuatomCas, ASuatomCas, N);
+            x(0x396, InstName.SuatomCasB, ASuatomCas, N);
             x(0xb1d, InstName.Bar, ABar, N, writesRd: false);
             x(0x992, InstName.Membar, AMembar, N, writesRd: false);
             x(0x9ab, InstName.Membar, AErrbar, N, writesRd: false);
@@ -84,11 +86,11 @@ namespace Ryujinx.Graphics.Shader.Instructions
         {
             AmpereOp x = new(context.CurrOp);
             int addr = x.Bits(64, 72) << 2;
+            bool atOffset = x.Bits(76, 78) == 2;
 
-            if (x.Bits(76, 78) == 2)
-            {
-                throw AFail(context, "IPA at an offset");
-            }
+            // IPA.OFFSET Rd, a[addr], Rb (32..40): Rb holds the offset from the pixel's centre, x in its low half and y in its high one, each a signed 12-bit fixed-point
+            // number of 1/4096 pixel (NAK nak_nir_lower_fs_inputs.c load_barycentric_offset). Read before Rd is written, which may be the same register
+            Operand offset = atOffset ? context.Copy(x.Rb < RegisterConsts.RegisterZeroIndex ? Register(x.Rb, RegisterType.Gpr) : Const(0)) : null;
 
             Operand idxAddress = null;
 
@@ -100,6 +102,28 @@ namespace Ryujinx.Graphics.Shader.Instructions
             IpaOp ipaOp = x.Bits(78, 80) == 1 ? IpaOp.Constant : IpaOp.Pass;
 
             EmitIpa(context, idxAddress, addr, ipaOp, RegisterConsts.RegisterZeroIndex, false, x.Rd);
+
+            if (atOffset && ipaOp == IpaOp.Pass && x.Rd < RegisterConsts.RegisterZeroIndex)
+            {
+                // What IPA.PASS returns is linear in screen space across the triangle: a perspective attribute divided by w, or a[0x7c], 1 / w (the shader divides one by
+                // the other itself). So its value at the offset is the centre's plus the screen derivatives times the offset, exactly (helper lanes extrapolate the same
+                // plane). The IR has no interpolation at an offset, and SPIR-V's needs the input variable, not a loaded value. Window y runs the other way under YNegate.
+                // PRAGMATA's pixel shader 4a9d4507eea6c837 interpolates a[0x7c], a[0x3b4] and a[0x3b8] at its sample's position this way (the offset from the c0 + 0x620
+                // sample table, PIXLD.MY_INDEX)
+                Operand ox = context.FPMultiply(context.IConvertS32ToFP32(context.BitfieldExtractS32(offset, Const(0), Const(12))), ConstF(1f / 4096f));
+                Operand oy = context.FPMultiply(context.IConvertS32ToFP32(context.BitfieldExtractS32(offset, Const(16), Const(12))), ConstF(1f / 4096f));
+
+                if (context.TranslatorContext.Definitions.YNegateEnabled)
+                {
+                    oy = context.FPNegate(oy);
+                }
+
+                Operand v = Register(x.Rd, RegisterType.Gpr);
+                Operand ddx = context.Add(Instruction.Ddx, Local(), v);
+                Operand ddy = context.Add(Instruction.Ddy, Local(), v);
+
+                context.Copy(v, context.FPFusedMultiplyAdd(ddy, oy, context.FPFusedMultiplyAdd(ddx, ox, v)));
+            }
         }
 
         // Geometry and tessellation stages. OUT (opcode 0x124 in the ALU forms): Rd = the new output handle, Ra the old, the stream in the second source; 78..80 emit (1),
@@ -142,11 +166,14 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             if (stage != null)
             {
-                // A task or mesh shader's stage input (QueryAmpereStageMemory). Mode 0x78: its workgroup's number; 0x38: a word of the payload its task wrote, [Ra + offset];
-                // 0xb8: a word it wrote itself with 0x927's mode 0xb8 (Ocarina of Time's task shader 5d3a096025e375a1 reads its payload back in a later thread)
+                // A task or mesh shader's stage input (QueryAmpereStageMemory). Mode 0x78: its workgroup's number; 0x38: a word of the payload its task wrote, [Ra + offset].
+                // The mode's bits as nvdisasm names them: 0x80 .O (the output area), 0x40 .SKEW, 0x30 .ATTR, 0x08 .32. So 0xf8 (ISBERD.O.ATTR.SKEW.32) and 0xb8 (.O.ATTR.32)
+                // read back a word the shader's own ISBEWR of the same mode wrote: a mesh shader's attributes, a task's payload (AStageOut). PRAGMATA's mesh shaders
+                // 5aab38bb5ba67ef7 and 28ef097c07ceb429 read the x, y and w of each triangle's three positions back this way and swap two of its indices by the sign of
+                // their determinant (a mirrored instance's winding). Ocarina of Time's task shader 5d3a096025e375a1 reads its payload back with 0xb8 in a later thread
                 int mode = x.Bits(72, 80);
 
-                if (mode != 0x78 && mode != 0x38 && mode != 0xb8)
+                if (mode != 0x78 && mode != 0x38 && mode != 0xf8 && mode != 0xb8)
                 {
                     throw AFail(context, $"ISBERD mode {mode:x2} in a task or mesh shader");
                 }
@@ -635,6 +662,37 @@ namespace Ryujinx.Graphics.Shader.Instructions
             EmitSuatom(context, (SuDim)x.Bits(61, 64), 0, (SuatomOp)x.Bits(87, 91), (SuatomSize)x.Bits(73, 76), handle, x.Ra, x.Rb, 0, x.Rd, false, isBindless: false, compareAndSwap: false, cbufSlot: cbufSlot);
         }
 
+        // SUATOM.CAS Rd, [Ra], Rb (0x595, the handle in a constant buffer at 40..59 as SUATOM's; 0x396 with it in a register at 64..72, NAK sm70_encode.rs OpSuAtom
+        // AtomOp::CmpExch): the compare value in Rb and the new one in Rb + 1 (NAK AtomCmpSrc::Packed, "cmpr coming first"), the dimension at 61..64, the size at 73..76, the
+        // predicate result at 81..84. nvdisasm: 000fe200001ee000a000080600ff7595 is SUATOM.D.3D.CAS.STRONG.GPU.IGN RZ, [R0], R6, 0x0, 0x8 (PRAGMATA's compute shader
+        // 50fece0d891feba4 adds a float to a 3D image texel with SULD, FADD into R7 and one compare-and-swap, its result discarded)
+        public static void ASuatomCas(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+
+            if (x.Bits(81, 84) != 7)
+            {
+                throw AFail(context, "SUATOM.CAS with a predicate result");
+            }
+
+            SuatomSize size = (SuatomSize)x.Bits(73, 76);
+
+            if (size is not (SuatomSize.U32 or SuatomSize.S32))
+            {
+                throw AFail(context, $"SUATOM.CAS size {size}");
+            }
+
+            if (x.Opcode == 0x396)
+            {
+                EmitSuatom(context, (SuDim)x.Bits(61, 64), 0, 0, size, 0, x.Ra, x.Rb, x.Bits(64, 72), x.Rd, false, isBindless: true, compareAndSwap: true);
+                return;
+            }
+
+            (int handle, int cbufSlot) = ATexHandle(context, x);
+
+            EmitSuatom(context, (SuDim)x.Bits(61, 64), 0, 0, size, handle, x.Ra, x.Rb, 0, x.Rd, false, isBindless: false, compareAndSwap: true, cbufSlot: cbufSlot);
+        }
+
         // SURED [Ra], Rb (0x59f): SUATOM's reduction, no result: the same fields (handle 40..59, dimension 61..64, size 73..76, operation 87..91), Rd unused.
         // Orbitals' compute shaders: SURED.ADD / OR / MAX .U32 on 1D buffer, 2D and 3D images with the handle in c[3] (000fe2000010e00020c002060500759f:
         // SURED.ADD.U32 on a 1D buffer image, coordinate R5, value R6, handle c[3] word 2). Emitted as SUATOM to RZ (the atomic's result discarded).
@@ -697,7 +755,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
         // PIXLD Rd (0x925): a pixel value, 78..81 (NAK sm70_encode.rs OpPixLd, ir.rs PixVal: MSCOUNT 0, COVMASK 1, CENTROID_OFFSET 2, MY_INDEX 3, INNER_COVERAGE 4),
         // predicate output 81..84. Orbitals' pixel shaders read MY_INDEX (040e0200000ec0000000000000007925, PIXLD.MY_INDEX R0): the sample the fragment runs for,
-        // as Maxwell's PIXLD.MYINDEX (InstEmitMove.Pixld). 0x925 is registered to APixelCovered (InstEmitAmpereAlu.cs), which hands MY_INDEX here; the other values are refused
+        // as Maxwell's PIXLD.MYINDEX (InstEmitMove.Pixld). 0x925 is registered to APixelCovered (InstEmitAmpereAlu.cs), which reads COVMASK itself and hands MY_INDEX here; the other values are refused
         public static void APixld(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
@@ -855,6 +913,22 @@ namespace Ryujinx.Graphics.Shader.Instructions
             // TEX through a handle in a register, not named by its offset: the compiler's form for a handle it read itself, usually from a table at a computed offset. BindlessElimination takes the
             // handle from there, as for Maxwell's TEX.B. The other fields are 0xb60's. 0xf60: a uniform register at 40..46. 0x361 (bit 59 set): a register, the first of the second source block,
             // before the LOD (a census of Fire Emblem Fortune's Weave's 3,327: of the sources that an LDC just wrote, always that place, with and without .SCR). Rc stays the second destination in both
+            Operand boundHandle = null;
+            bool handleInB = opcode == 0x361;
+            bool bindless = handleInB || opcode == 0xf60;
+
+            if (opcode == 0xf60)
+            {
+                int ur = x.Bits(40, 46);
+
+                boundHandle = ur == RegisterConsts.UniformZeroIndex ? Const(0) : context.Copy(Register(ur, RegisterType.Uniform));
+            }
+
+            if (bindless)
+            {
+                opcode = 0xb60;
+            }
+
             TexDim dim = ATexDim(context, x.Bits(61, 64));
             SamplerType type = ConvertSamplerType(dim);
             bool isArray = type.HasFlag(SamplerType.Array);

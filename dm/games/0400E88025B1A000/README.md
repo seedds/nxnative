@@ -48,6 +48,7 @@ Every 3D target is 768x432 from the first frame of the title to the tutorial: Me
 - [Ampere BMSK and the read of a covered pixel](../../../docs/reference/shaders.md#ampere-bmsk-and-the-read-of-a-covered-pixel): the last 3 shaders, `58046f286de779e1`, `46040940ce0fd49b` and `826168691af2e211`, none asked for in play so far.
 - [Compute pipelines compiled at first use](../../../docs/reference/shaders.md#compute-pipelines-compiled-at-first-use): 233 compute pipelines in the app's archive, none built at the title.
 - [Compute pipelines outside the bundled archive built at every start](../../../docs/reference/shaders.md#compute-pipelines-outside-the-bundled-archive-built-at-every-start): the second headless start took its 8 from the device's archive.
+- [PIXLD.COVMASK is the pixel's coverage mask](../../../docs/reference/shaders.md#pixldcovmask-is-the-pixels-coverage-mask): the 0x925 of `46040940ce0fd49b` and `826168691af2e211`, now read from `[[sample_mask]]`.
 
 ## Open
 

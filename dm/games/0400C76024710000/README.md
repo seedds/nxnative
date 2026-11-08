@@ -46,5 +46,6 @@ Through `DM_CTL`, silent (`DM_AUDIO=0`) and with `DM_FOCUS_KEEP=1`: press `A` ab
 ## Found on this game
 
 - [SDF definitions in RE Engine PAKs](../../../docs/reference/shaders.md#sdf-definitions-in-re-engine-paks): KPKA 4.2 and the Switch 2 SDF form.
+- [Ampere forms of PRAGMATA's shaders](../../../docs/reference/shaders.md#ampere-forms-of-pragmatas-shaders).
 - [LDC with the bank in its address register (`.IS`)](../../../docs/reference/shaders.md#ldc-with-the-bank-in-its-address-register-is) and [A deferred write under a false guard](../../../docs/reference/shaders.md#a-deferred-write-under-a-false-guard): c1 read at a run-time index.
 - [Pixel `c0 + 0x620`: the sample index and GLSLC's sample position table](../../../docs/reference/shaders.md#pixel-c0--0x620-the-sample-index-and-glslcs-sample-position-table): signed offsets from the centre on an Ounce SDK.

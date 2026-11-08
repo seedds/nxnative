@@ -74,6 +74,7 @@ typedef struct {
     void **evc;                                  // the client's DecoderEvents: {input, output, format, error} EventType*, read at signal time as the SDK does (md_event)
     void *ev[4];                                 // the entries that were events at registration: used when the client's entry no longer is one (by Metroid Dread's second movie its struct had been overwritten and Start crashed signalling)
     int w, h, fmt_sent, started, in_eos;          // in_eos: an end-of-stream packet was sent; no input until Flush / Stop (h_movie_AcqIn)
+    int fps;                                     // video frame-rate if provided by Configure (or default 30)
     uint8_t *in[MD_NIN]; int infree[MD_NIN], ninfree;                     // queue of free input indices
     int inown[MD_NIN]; uint64_t instale[MD_NIN];                          // inown: acquired by the client and not sent yet; instale: when a Flush / Stop found it held (the client may still send it), 0 if not
     struct { int used, pic, cli, rnd; int64_t pts; uint32_t flags; uint8_t *frm; size_t cap, bytes; } out[MD_NOUT];   // pic: frm holds a decoded picture (audio: bytes of PCM); cli: acquired by the client and not released; rnd: written into the client's texture, waiting for the client's release (md_rendered); cap: bytes in frm
@@ -643,9 +644,12 @@ HLE_FORCE("_ZN5movie7Decoder9ConfigureEPNS_9MediaDataE", "movie decoder configur
         for (int k = 0; k < 2; k++) { char key[8]; snprintf(key, sizeof key, "csd-%d", k); if (G.find_buf(md, key, &b) && b && G.data(b) && G.size(b)) mavc_param_sets(d->avc, G.data(b), G.size(b)); }
         if (G.find_buf(md, "avcc", &b) && b && G.data(b) && G.size(b)) mavc_avcc(d->avc, G.data(b), G.size(b));
     }
-    int w = 0, h = 0; if (md) { G.find_i32(md, "width", &w); G.find_i32(md, "height", &h); }
-    dm_host_mutex_lock(&d->mu); if (w > 0 && h > 0 && !d->fmt_sent) { d->w = w; d->h = h; } pthread_mutex_unlock(&d->mu);
-    MD_TRACE(d, 0, "Configure: MediaData width %d height %d", w, h);
+    int w = 0, h = 0, fps = 0; if (md) { G.find_i32(md, "width", &w); G.find_i32(md, "height", &h); G.find_i32(md, "frame-rate", &fps); }
+    dm_host_mutex_lock(&d->mu);
+    if (w > 0 && h > 0 && !d->fmt_sent) { d->w = w; d->h = h; }
+    if (fps > 0) d->fps = fps;
+    pthread_mutex_unlock(&d->mu);
+    MD_TRACE(d, 0, "Configure: MediaData width %d height %d fps %d", w, h, fps);
     return 0;
 }
 HLE_FORCE("_ZN5movie7Decoder20RegisterClientEventsEPNS_13DecoderEventsE", "movie decoder: register client events", int, h_movie_RegEv, void **self, void **ev) {
@@ -797,6 +801,9 @@ static void md_format(mdec_t *d, void *md) {
     if (d->avc) b709 = mavc_bt709(d->avc, h);
     else { b709 = d->vpx_cs == VPX_CS_BT_709 || (d->vpx_cs == VPX_CS_UNKNOWN && h >= 720); full = d->vpx_full; }
     G.set_i32(md, "nv12-colorspace", (b709 ? 3 : 1) + full);
+    // Stella of The End (Luca System): MoviePlayer::Play (main+0x22440c) queries "frame-rate" from GetOutputFormat's MediaData
+    // and stores movie_player->fps = (float)fps. If unset (0), 1000.0f / 0.0f yields +Inf, freezing frame presentation forever on frame 1.
+    G.set_i32(md, "frame-rate", d->fps > 0 ? d->fps : 30);
 }
 HLE_FORCE("_ZN5movie7Decoder15GetOutputFormatEPNS_9MediaDataE", "movie decoder: output format (NV12)", int, h_movie_OutFmt, void **self, void *md) {
     mdec_t *d = md_of(self); if (!d) return 0x1000;

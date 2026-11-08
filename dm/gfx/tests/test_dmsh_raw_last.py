@@ -179,5 +179,26 @@ class RawVector(Translated):
             self.assertIn('bad 0 of 1024', out.stdout, out.stdout + out.stderr)
 
 
+
+@unittest.skipUnless(os.environ.get('DMSH_TEST_XLATE'), 'set DMSH_TEST_XLATE to the offline translator')
+class RawVectorPair(Translated):
+    """Two LDG.128 in one block (lunks on PR #1813): the first's words 1..3 unused, the second's word 0 unused and its word 2 used. The first load's follower scan took the
+    second's word 2 as its own (same word count, word > 0), so it read the first load's gmem_vec and the second load's memory was never read. Each LDG's words now carry
+    their own group (Operation.GlobalVectorGroup): the first is one vector call, the second's word a scalar lookup of its own address"""
+    def msl(self):
+        a = (LDG128[0] & ~0xf, LDG128[1])   # predicate PT (64..67 = 0, stored as 7 - P): no branch around the load, so both loads are in one block
+        b = (a[0], (a[1] & ~(0xff << 16) & ~(0xffffff << 40)) | 16 << 16 | 0x40 << 40)   # LDG.E.128 R16, [R5.64 + UR4 + 0x40]
+        code = (s2r_tid(9), s2r_tid(5), a, b, sts(12, 0), sts(18, 4))
+        return self.translate(b''.join(inst(*waiting(i)) for i in code) + inst(*EXIT), shared=0x1000)
+
+    def test_a_word_of_the_next_load_is_not_read_from_this_ones_vector(self):
+        msl = self.msl()
+        vec, scalar = VEC_HELPER.search(msl), HELPER.search(msl)
+        self.assertTrue(vec, msl[:3000])
+        main = msl[msl.index('kernel void main0'):]
+        self.assertEqual(len(re.findall(vec.group(1) + r'\(', main)), 1, main[:3000])
+        self.assertNotRegex(main, re.escape(vec.group(4)) + r'\[\d\]', 'a word was read from the vector call\'s gmem_vec')
+        self.assertTrue(scalar and len(re.findall(scalar.group(1) + r'\(', main)) == 1, 'the second load\'s word 2 has no lookup of its own:\n' + main[:3000])
+
 if __name__ == '__main__':
     unittest.main()

@@ -1601,6 +1601,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Check:** `dm/gfx/tests/test_dmsh_raw_last.py` `RawVector.test_a_miss_zeroes_the_other_words` and `test_a_64_bit_miss_zeroes_its_other_word` (the 128- and 64-bit helpers' miss paths store 0 to `gmem_vec[0..2]` / `gmem_vec[0]`) and `test_reads_on_gpu`, whose kernel now sets the three words to `0xdead` before each call: a read in no pool must leave all four 0. All three fail with the previous translator (the GPU run: 256 of the GPU run's 1,024 reads, every miss).
 - **Found on:** found by reading the translated vector helper; no game's wrong picture is traced to it yet.
 
+### A word of one 128-bit load read from another's vector
+
+- **Symptom:** wrong data, no error: of two `LDG.64` / `LDG.128` in one block, a word of the second reads a word of the first load's memory, and the second load's own memory is never read.
+- **Cause:** `GenerateRawVectorLoad`'s follower scan took any later load with the same word count and a word above 0 as a word of its call. When the first load's later words are unused (so the scan does not end at its last word) and the second load's word 0 is unused too (so it has no call of its own), a used later word of the second load became a read of the first call's `gmem_vec`.
+- **Fix:** general, in the translator: the emitters give each access's words a group of their own (`Operation.GlobalVectorGroup`, counted by `EmitterContext.GlobalVectorGroups`), and the scan ends at a word of another group. That word then takes a lookup of its own.
+- **Check:** `dm/gfx/tests/test_dmsh_raw_last.py` `RawVectorPair` (two adjacent unpredicated `LDG.128`, the first using word 0, the second word 2): one vector call, no `gmem_vec` read, one scalar lookup for the second load. It fails with the previous translator, which read `gmem_vec[1]`.
+- **Found on:** reported by lunks on PR #1813 from reading the code; none of Ocarina of Time's 2,055 shaders that call a vector helper has the pattern.
+
 ### Bindless handles through a loop phi
 
 - **Symptom:** `no resolved slot number`, the shader does not load; the translation has a 32-entry texture-pool array (`fp_t2d_cb0_40000000`, handle type Direct).

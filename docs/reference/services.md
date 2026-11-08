@@ -692,6 +692,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Check:** `make -C dm/host/tests GAME=<id> run` runs `t_net_eventfd`.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) (SDK 22.2.8).
 
+### Event descriptors in an `fd_set`
+
+- **Symptom:** `CRASH sig=10` (SIGBUS) in a network thread right after start (Minecraft's `NetherNet Network`, `main+0x18b2ae8`, `x0=0x4000`), at a load from its own stack.
+- **Cause:** the host numbered its event descriptors from `0x4000`. The bsd service gives out the lowest free number from 0, and games size their tables for such small numbers: NetherNet puts its event descriptor in a 1024-bit `fd_set` on the stack for `Select`, and `FD_SET(0x4000)` reads and writes 2 KB past the set. `Select` also failed whenever a descriptor was set, so it could never wait on one.
+- **Fix:** the event descriptors are numbered as the service numbers them, the lowest free one from 0 (`hle_net.c`). `Select` (`dm_sk_select`, both overloads) is `Poll` over the descriptors in its sets: it waits on the host's event descriptors, a descriptor the host never made has nothing to say, the sets come back with the ready ones, and a descriptor closed during the wait fails with EBADF. As a game's own stale or never-valid descriptors now fall in the same range, `Poll` reports a closed descriptor (`POLLNVAL`) only for one that was open when the wait began.
+- **Check:** `t_net_eventfd` (`make -C dm/host/tests GAME=<id> run`).
+- **Found on:** Minecraft (Bedrock Edition, 1.21.120).
+
 ### The local user's profile image
 
 - **Symptom:** `Break#1 reason=0 Result=0` right after the first save is created, then exit 42; the stack has `nn::diag::detail::OnAssertionFailure` under `nn::image::JpegDecoder::Decode` (`sdk+0x394e4`), called from the game (Burnout Paradise Remastered, SDK 9.3).

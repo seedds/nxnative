@@ -196,7 +196,13 @@ def msl_inputs(msl):
 
 def copy_msl(msl, msls, dst, clone):
     """The shader libraries to dst, msl/<their name> in the app: an NVN game's as the one file dst.img, of what the host reads. Writing it costs the space of a copy, not a clone, as it leaves out the Mac build's sources"""
-    if is_chain_library(msl): shader_lib.subset(msl, f'{dst}.img'); return
+    if is_chain_library(msl):
+        img = Path(shader_lib.image_of(msl))
+        if clone and img.is_file():
+            copy([img], f'{dst}.img', clone=True)
+            return
+        shader_lib.subset(msl, f'{dst}.img')
+        return
     dst.mkdir(parents=True); copy(msls, dst, clone)
 
 
@@ -308,7 +314,9 @@ def pack(a):
     # each source is probed on its own, as they may lie on different volumes; cp -c copies what it cannot clone, so a probe decides only the free-space check and the step line
     trees, lists = {'romfs': romfs, 'aoc': aoc}, {'mods': mods, 'msl': msls, 'pso': pso}
     clone = {k: bool(d) and can_clone(d, res) for k, d in trees.items()} | {k: bool(ps) and can_clone(ps[0], res) for k, ps in lists.items()}
-    if is_chain_library(msl): clone['msl'] = False   # copy_msl writes it, which the free-space check below counts
+    if is_chain_library(msl):
+        img = Path(shader_lib.image_of(msl))
+        clone['msl'] = bool(img.is_file() and can_clone(img, res))
     need = sum(tree_bytes(d) for k, d in trees.items() if d and not clone[k]) + sum(p.stat().st_size for k, ps in lists.items() if not clone[k] for p in ps)
     if need:
         free = shutil.disk_usage(res).free

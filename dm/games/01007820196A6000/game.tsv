@@ -12,8 +12,9 @@ app_category	public.app-category.games
 
 # ---- Versions ----
 build	v0	1.0.0	main=9515ef1f79ef3cb800bd85e5d3de0d98	sdk=8618895246b420329b77746b960a66ab
-package	v0
-shader_versions	v0
+build	v262144	1.0.4	main=37531419da7654ec3f5b586693f7f331	sdk=8618895246b420329b77746b960a66ab
+package	v262144
+shader_versions	v0 v262144
 
 # ---- Files ----
 # every module main imports from
@@ -35,7 +36,7 @@ shader_groups	/redemption/=redemption /cero/=cero /d11extra/=d11extra
 shader_note	Red Dead Redemption shaders (RAGE effects in shaders.rpf and main, Double Eleven pack)
 
 # ---- After the rewrite ----
-# used memory for the current rewritten modules, at least the default 64 MB
+# used memory for the rewritten modules, at least the default 64 MB: 1.0.0's (1.0.4's fit in the default)
 mem_used	0x4ca4000
 # render_cond: the game draws under SetRenderEnableConditional (its only [RED] line in a 5-minute run); without the key small black squares showed in the title scene and the opening cutscene
 render_cond	on

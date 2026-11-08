@@ -1,4 +1,4 @@
-# kind: evidence  Red Dead Redemption shaders (provisional profile) (GLSLC in RomFS + main) → control section + code area keys (dm/gfx/tools/shader_split.py)
+# kind: evidence  Red Dead Redemption shaders (RAGE effects in shaders.rpf and main, Double Eleven pack) (GLSLC in RomFS + main) → control section + code area keys (dm/gfx/tools/shader_split.py)
 # column 5 records where each key first appears; no PC shader pairing supplied
 package	index	stage	dm_ctl_sha16	source
 ps_d11extra.bin	0	pixel	98664fb56b9c9fdf	/d11extra/langselect.pkdswitch#9be12403#GLSLC@0x0
@@ -3584,3 +3584,48 @@ ps_other.bin	1320	pixel	94ebda7f84ffebec	/shaders.rpf/shaders/world/switch/rdr2_
 ps_other.bin	1321	pixel	4d26b43e40605a71	/shaders.rpf/shaders/world/switch/rdr2_wire.nvn#RGXD@0xbf96
 ps_other.bin	1322	pixel	ed16ac8ab30e4476	/shaders.rpf/shaders/world/switch/rdr2_wire.nvn#RGXD@0xcbb9
 ps_other.bin	1323	pixel	379eefbcfe3dee9e	/shaders.rpf/shaders/world/switch/rdr2_wire.nvn#RGXD@0xe490
+ps_other.bin	1324	pixel	9b9ea0aac32d726b	/v262144/shaders.rpf/shaders/world/switch/rage_lightprepass.nvn#RGXD@0x1ad55
+ps_other.bin	1325	pixel	b972e43a34f07fb6	/v262144/shaders.rpf/shaders/world/switch/rage_lightprepass.nvn#RGXD@0x1e492
+ps_other.bin	1326	pixel	b377348b86794b06	/v262144/shaders.rpf/shaders/world/switch/rage_lightprepass.nvn#RGXD@0x22686
+ps_other.bin	1327	pixel	79126e51861e9db8	/v262144/shaders.rpf/shaders/world/switch/rage_lightprepass.nvn#RGXD@0x2678a
+ps_other.bin	1328	pixel	f584f394b56485a9	/v262144/shaders.rpf/shaders/world/switch/rage_lightprepass.nvn#RGXD@0x29dce
+ps_other.bin	1329	pixel	495c7630393198a3	/v262144/shaders.rpf/shaders/world/switch/rage_lightprepass.nvn#RGXD@0x2dec9
+ps_other.bin	1330	pixel	ecbef4cebe7755ec	/v262144/shaders.rpf/shaders/world/switch/rage_lightprepass.nvn#RGXD@0x31fc0
+ps_other.bin	1331	pixel	4eb5eef49ee4ab13	/v262144/shaders.rpf/shaders/world/switch/rage_lightprepass.nvn#RGXD@0x363be
+ps_other.bin	1332	pixel	65e33fa6288e5ed8	/v262144/shaders.rpf/shaders/world/switch/rage_lightprepass.nvn#RGXD@0x3a6b4
+ps_other.bin	1333	pixel	05fcb0489650db12	/v262144/shaders.rpf/shaders/world/switch/rage_lightprepass.nvn#RGXD@0x3e9b0
+ps_other.bin	1334	pixel	32b64fb24c32e426	/v262144/shaders.rpf/shaders/world/switch/rage_lightprepass.nvn#RGXD@0x41efd
+ps_other.bin	1335	pixel	f52dc9884ae55185	/v262144/shaders.rpf/shaders/world/switch/rage_lightprepass.nvn#RGXD@0x45549
+ps_other.bin	1336	pixel	3e7d7f002d1189e5	/v262144/shaders.rpf/shaders/world/switch/rage_lightprepass.nvn#RGXD@0x9c191
+ps_other.bin	1337	pixel	d169996a40b205a3	/v262144/shaders.rpf/shaders/world/switch/rage_lightprepass.nvn#RGXD@0x9fb65
+ps_other.bin	1338	pixel	ad53174cb35cf92a	/v262144/shaders.rpf/shaders/world/switch/rage_lightprepass.nvn#RGXD@0xa3efb
+ps_other.bin	1339	pixel	6a3bd12c6d7a8b11	/v262144/shaders.rpf/shaders/world/switch/rage_lightprepass.nvn#RGXD@0xa77d6
+ps_other.bin	1340	pixel	4109bf25c3603220	/v262144/shaders.rpf/shaders/world/switch/rage_lightprepass.nvn#RGXD@0xaba60
+ps_other.bin	1341	pixel	fa4983419d3b6210	/v262144/shaders.rpf/shaders/world/switch/rage_lightprepass.nvn#RGXD@0xb000b
+ps_other.bin	1342	pixel	4248f6925071bc20	/v262144/shaders.rpf/shaders/world/switch/rage_lightprepass.nvn#RGXD@0xb46e0
+ps_other.bin	1343	pixel	26691fba868ceab2	/v262144/shaders.rpf/shaders/world/switch/rage_lightprepass.nvn#RGXD@0xb8d9b
+ps_other.bin	1344	pixel	29a56427bb485e42	/v262144/shaders.rpf/shaders/world/switch/rage_lightprepass.nvn#RGXD@0xbc47e
+ps_other.bin	1345	pixel	23a748c41664a8f4	/v262144/shaders.rpf/shaders/world/switch/rdr2_alpha_foliage.nvn#RGXD@0x66848
+ps_other.bin	1346	pixel	a18663b0a378a29e	/v262144/shaders.rpf/shaders/world/switch/rdr2_alpha_foliage_no_fade.nvn#RGXD@0x5c5db
+ps_other.bin	1347	pixel	44f7e2b252567003	/v262144/shaders.rpf/shaders/world/switch/rdr2_grass.nvn#RGXD@0x10245c
+ps_other.bin	1348	pixel	408bf99bcd93e17b	/v262144/shaders.rpf/shaders/world/switch/rdr2_grass.nvn#RGXD@0x106676
+ps_other.bin	1349	pixel	95dd2fcfead1ca34	/v262144/shaders.rpf/shaders/world/switch/rdr2_grass.nvn#RGXD@0x10b243
+ps_other.bin	1350	pixel	6ab68609827448d5	/v262144/shaders.rpf/shaders/world/switch/rdr2_grass.nvn#RGXD@0x110131
+ps_other.bin	1351	pixel	3ab60440cb3dc45d	/v262144/shaders.rpf/shaders/world/switch/rdr2_grass.nvn#RGXD@0x115149
+ps_other.bin	1352	pixel	e2180daaf6877404	/v262144/shaders.rpf/shaders/world/switch/rdr2_grass.nvn#RGXD@0x11a147
+ps_other.bin	1353	pixel	1b064064dc356106	/v262144/shaders.rpf/shaders/world/switch/rdr2_grass.nvn#RGXD@0x11e169
+ps_other.bin	1354	pixel	362d8e46f7761352	/v262144/shaders.rpf/shaders/world/switch/rdr2_grass.nvn#RGXD@0x67229
+ps_other.bin	1355	pixel	9424ebc2c6730d5e	/v262144/shaders.rpf/shaders/world/switch/rdr2_grass.nvn#RGXD@0x6b36f
+ps_other.bin	1356	pixel	61ef4c39661be8a9	/v262144/shaders.rpf/shaders/world/switch/rdr2_grass.nvn#RGXD@0x6ff6c
+ps_other.bin	1357	pixel	9824d6c1bc48dfec	/v262144/shaders.rpf/shaders/world/switch/rdr2_grass.nvn#RGXD@0x74a79
+ps_other.bin	1358	pixel	3118b723d0e3b26a	/v262144/shaders.rpf/shaders/world/switch/rdr2_grass.nvn#RGXD@0x78ac6
+ps_other.bin	1359	pixel	f953123e8904d2ce	/v262144/shaders.rpf/shaders/world/switch/rdr2_grass.nvn#RGXD@0x7d5ca
+ps_other.bin	1360	pixel	cf1e174a4bfd7ece	/v262144/shaders.rpf/shaders/world/switch/rdr2_grass.nvn#RGXD@0x820ca
+ps_other.bin	1361	pixel	0e6cea994f1e68ac	/v262144/shaders.rpf/shaders/world/switch/rdr2_grass.nvn#RGXD@0x86ed1
+ps_other.bin	1362	pixel	d41b23b97cff2ff7	/v262144/shaders.rpf/shaders/world/switch/rdr2_grass.nvn#RGXD@0x8bbd0
+ps_other.bin	1363	pixel	b6d5fd56d8fafb8d	/v262144/shaders.rpf/shaders/world/switch/rdr2_grass.nvn#RGXD@0x908d5
+ps_other.bin	1364	pixel	fa1f79f08f466129	/v262144/shaders.rpf/shaders/world/switch/rdr2_grass.nvn#RGXD@0x9482b
+ps_other.bin	1365	pixel	72e723642509e9cf	/v262144/shaders.rpf/shaders/world/switch/rdr2_grass.nvn#RGXD@0x98880
+ps_other.bin	1366	pixel	7c21a23e7bb4a95e	/v262144/shaders.rpf/shaders/world/switch/rdr2_grass.nvn#RGXD@0xf9470
+ps_other.bin	1367	pixel	a888b96e39e7dae8	/v262144/shaders.rpf/shaders/world/switch/rdr2_grass.nvn#RGXD@0xfd783
+ps_other.bin	1368	pixel	15a84cd16af9d202	/v262144/shaders.rpf/shaders/world/switch/rdr2_improvedmotionblur.nvn#RGXD@0xec7

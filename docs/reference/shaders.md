@@ -1593,6 +1593,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md): the Kokiri Forest route (`bench.tsv` `kokiri-deck`, its partial shader set rebuilt, with [occlusion conditions read once landed](rendering.md#occlusion-conditions-read-once-landed)) on a 20-core M4 Pro went from GPU p50 16.3 / p95 18.6 ms at 34.7 fps (a 30 fps frame step) to 12.6 / 13.6 ms at 51.8 fps, frame p50 16.69 ms (60 fps most of the time), two runs each, picture unchanged.
 - **Check:** `dm/gfx/tests/test_dmsh_raw_last.py` `RawVector` (with `DMSH_TEST_XLATE`): an `LDG.E.128` through an untraced address translates to one call of a helper with one `uint4` load and no word call, and on this Mac's GPU each of its four words is the pool's.
 
+### A 64- or 128-bit raw global load in no pool reads undefined upper words
+
+- **Symptom:** a 64- or 128-bit load through an address in no pool (a null or stale pointer, a gap between pools) reads 0 in its first word and whatever the invocation's `gmem_vec` held in the others: the words of the previous vector load, or undefined data on the first. Before the change in [128-bit raw global loads read one word at a time](#128-bit-raw-global-loads-read-one-word-at-a-time), every word of such a load read 0. A shader that tests a loaded record's first word for 0 is unaffected; one that uses the other words (a bounding box, a count, a second pointer) gets garbage.
+- **Cause:** the vector helper (`…RawV2` / `…RawV4`, `GlobalToStorage.TryGenerateRawStorageOp`) returned 0 on a miss but wrote nothing to `gmem_vec`, which spirv-cross declares in the entry point without a value and the caller reads right after the call.
+- **Fix:** general, in the translator: before its miss return, the vector helper stores 0 to each of the other words, as the word loads it replaced read on a miss.
+- **Check:** `dm/gfx/tests/test_dmsh_raw_last.py` `RawVector.test_a_miss_zeroes_the_other_words` and `test_a_64_bit_miss_zeroes_its_other_word` (the 128- and 64-bit helpers' miss paths store 0 to `gmem_vec[0..2]` / `gmem_vec[0]`) and `test_reads_on_gpu`, whose kernel now sets the three words to `0xdead` before each call: a read in no pool must leave all four 0. All three fail with the previous translator (the GPU run: 256 of the GPU run's 1,024 reads, every miss).
+- **Found on:** found by reading the translated vector helper; no game's wrong picture is traced to it yet.
+
 ### Bindless handles through a loop phi
 
 - **Symptom:** `no resolved slot number`, the shader does not load; the translation has a 32-entry texture-pool array (`fp_t2d_cb0_40000000`, handle type Direct).

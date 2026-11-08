@@ -1104,6 +1104,12 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
 
             if (returnsValue)
             {
+                // A miss reads 0 in every word of a vector load, as the word loads it replaces did: gmem_vec has no initial value, and the caller reads its words after the call
+                for (int k = 0; k < vectorCount - 1; k++)
+                {
+                    context.Store(StorageKind.LocalMemory, resourceManager.GetRawVectorMemory(), Const(k), Const(0));
+                }
+
                 context.Return(Const(0));
             }
             else

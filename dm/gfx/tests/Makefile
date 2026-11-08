@@ -328,6 +328,12 @@ t_pso_pending: t_pso_pending.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_pending.m $(MTL_T_SRC) $(FW)
 t_shmap_warm: t_shmap_warm.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_shmap_warm.m $(MTL_T_SRC) $(FW)
+t_pass_end_stages: t_pass_end_stages.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_pass_end_stages.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_pass_end_stages
+check_t_pass_end_stages: t_pass_end_stages
+	MTL_DEBUG_LAYER=1 ./t_pass_end_stages
+	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_pass_end_stages
 t_pso_depth_stencil: t_pso_depth_stencil.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_depth_stencil.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_pso_depth_stencil

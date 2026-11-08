@@ -1158,6 +1158,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Check:** `DM_NVN_BLIT_ORDER=0` turns the barriers off to reproduce.
 - **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md).
 
+### Mesh shaders that start before the previous draw pass is done
+
+- **Symptom:** with `draw_barriers game` (or `DM_NVN_BARRIER=game`) something drawn from the previous pass's results is wrong for single frames, sporadically, and right with `DM_NVN_BARRIER=full`. In Ocarina of Time the whole picture turned darker for one frame.
+- **Cause:** in game mode a draw pass ends with a barrier that lets the next pass start its vertex work while this pass's fragments still run (`enc_r_end_pass` in `nvn_mtl.m`). Its later stages (`beforeQueueStages`) listed fragment, dispatch and blit, its earlier stages (`barrierAfterStages`) vertex, mesh and fragment. Metal tracks the object (task) and mesh stages apart from the vertex stage, so the next pass's task and mesh shaders, including the mesh pipelines that replay some geometry-shader draws, also started without waiting, and a read of what the previous pass wrote could see the old value. The earlier stages did not list object either.
+- **Fix:** the end barrier adds `MTLStageObject` to its earlier and `MTLStageObject | MTLStageMesh` to its later stages. Vertex work still overlaps, as the mode intends.
+- **Check:** `make -C dm/gfx/tests GAME=<id> check_t_pass_end_stages`: each fragment of a slow pass adds to a counter, the next production pass reads it from a vertex shader (the control: it reads early in nearly every run, so the window exists), a mesh shader and a task shader (both must see every fragment's add), 32 runs, with and without the encode thread. Without the fix 18 to 29 of 32 mesh and task reads came early (M4 Max, macOS 27.2).
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md), where it is measured.
+
 ### Buffer copies through aliased Metal addresses
 
 - **Symptom:** a buffer copy, inline update or fill completes, but a following copy through another Metal buffer over the same allocation reads stale bytes.

@@ -9,6 +9,8 @@
 # Each sets one of the game's s32 game-data flags to 9999. This host keeps those flags 0x2000 bytes higher in the heap
 # than Lichii does, so every address here is the post's plus 0x2000, and each write is gated on the flag's hash being in
 # its slot of the game-data table (README.md, "Cheats").
+# The two hearts entries at the end are not from the post: they were found from the same table (flag 963 is current
+# health, 964 max health, both in quarter hearts) and tested here.
 
 format = 1
 title = "0400486024DEC000"
@@ -80,6 +82,35 @@ code = """
 40000000 00000000 00000000
 14150000 7F3715E8 DF7C517A
 04100000 7F37E8DC 0000270F
+20000000
+"""
+builds = ["E0F3CCFAF50065AE"]
+
+[[cheats]]
+name = "Hearts: flags 963 current, 964 max, in quarter hearts"
+label = true
+
+[[cheats]]
+name = "20 heart containers"
+note = "Found from the game-data table, not from the post: max health (flag fbe01da1) = 80 quarter hearts"
+code = """
+40000000 00000000 00000000
+14150000 7F371620 FBE01DA1
+04100000 7F37E184 00000050
+20000000
+"""
+builds = ["E0F3CCFAF50065AE"]
+
+[[cheats]]
+name = "Infinite health"
+note = "Found from the game-data table: current health (flag 31ab5580) := max health (fbe01da1) every pass"
+code = """
+40000000 00000000 00000000
+14150000 7F370178 31AB5580
+14150000 7F371620 FBE01DA1
+54110000 7F37E184
+A4100410 7F37E15C
+20000000
 20000000
 """
 builds = ["E0F3CCFAF50065AE"]

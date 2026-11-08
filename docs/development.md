@@ -727,13 +727,15 @@ A new list goes in the profile as `shader_seen.tsv`, one key per line in the fir
 
 Metal compiles each combination of shaders and pipeline settings for the GPU the first time it is used. Each takes tens of milliseconds, so a burst of them on entering a level is a visible freeze. The host records what it had to compile and rebuilds those pipelines on a background queue at the next launch:
 
-- `pso_user.tsv` sits next to the save directory: `Documents/pso_user.tsv` on iOS, the parent of `DM_SAVE` on the Mac (`DM_PSO_USER=path` overrides it). It is appended while playing, one line per item built on the spot: a shader (`S`), a render pipeline (`R`, the hex of `pso_skey` in `dm/gfx/nvn/nvn_pso_skey.h`) or a compute pipeline (`C`).
+- `pso_user.tsv` sits next to the save directory: `Documents/pso_user.tsv` on iOS, the parent of `DM_SAVE` on the Mac (`DM_PSO_USER=path` overrides it). It is appended while playing, one line per item built on the spot: a shader (`S`), a render pipeline (`R`, the hex of `pso_skey` in `dm/gfx/nvn/nvn_pso_skey.h`) a compute pipeline (`C`), or a native task/mesh pipeline (`M`: optional task key, then the hex of the mesh/pixel `pso_skey`).
 - `dm/games/<id>/pso_manifest.tsv` is the seed list bundled with the app, prewarmed before `pso_user.tsv`.
 
 The lines name shaders by content key and hold no compiled code and nothing personal, so a list recorded on one device works on any other. To seed the bundled list:
 1. Record on the Mac with prewarm off, so everything is built on demand: `DM_PSO_MANIFEST=off DM_PSO_RECORD=<file>`, playing the scenes players reach first. Engage's list covers boot, the opening movie, the title, a save load and the prologue battle.
 2. Append the recorded lines below the header comments, in the recorded order. Duplicates are dropped at load, and so are shaders the shader map does not have (a list of another version of the game: the bundled list packed with a version the profile was not brought up on, or a device's `pso_user.tsv` kept across a game update), which the `prewarm done` line counts.
 3. Rebuild the IPA.
+
+For native mesh games, the profile also needs `M` rows; loading the libraries alone does not build their pipelines. To expand beyond observed programs on the Mac, `scripts/prewarm_native_mesh.py --game <id> --app /path/Game.app --seed /path/observed.tsv --output /path/expanded.tsv --report /path/coverage.json` reads exact BNSH associations from the packaged game and combines them with compatible observed render states. Pass `--seed` more than once to include the profile and user lists. It requires Xcode, leaves the app and saves untouched, and reports output signatures with no known template. Test the new file with `DM_PSO_MANIFEST=/path/expanded.tsv`; measure both first and warm preparation before choosing it as a bundled seed. This override replaces the normal list selection, so include the user list if its learning should be prewarmed too. See [Native mesh first-use compilation](reference/shaders.md#native-mesh-pipelines-first-compiled-during-gameplay).
 
 Record on the game version you ship. At launch the log names each list it read and its line count (`pipeline prewarm list …: N lines`), or says that `pso_user.tsv` does not exist yet.
 

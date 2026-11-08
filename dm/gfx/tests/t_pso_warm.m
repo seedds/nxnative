@@ -15,7 +15,15 @@ static int checks, failed;
 static int fixtures(NSString *dir) {
     NSString *source = @"#include <metal_stdlib>\nusing namespace metal;\n"
         "vertex float4 vs(uint id [[vertex_id]]) { float2 uv = float2((id << 1) & 2, id & 2); return float4(uv * 2 - 1, 0, 1); }\n"
-        "fragment float4 fs() { return float4(0.5, 0.25, 1, 0.5); }\n";
+        "fragment float4 fs() { return float4(0.5, 0.25, 1, 0.5); }\n"
+        "struct MeshVertex { float4 position [[position]]; };\n"
+        "using Triangle = mesh<MeshVertex, void, 3, 1, topology::triangle>;\n"
+        "[[mesh]] void ms(Triangle out) {\n"
+        "  out.set_primitive_count(1);\n"
+        "  out.set_vertex(0, MeshVertex{float4(-1, -1, 0.5, 1)}); out.set_index(0, 0);\n"
+        "  out.set_vertex(1, MeshVertex{float4( 3, -1, 0.5, 1)}); out.set_index(1, 1);\n"
+        "  out.set_vertex(2, MeshVertex{float4(-1,  3, 0.5, 1)}); out.set_index(2, 2);\n"
+        "}\n";
     NSString *metal = [dir stringByAppendingPathComponent:@"fixture.metal"];
     NSString *library = [dir stringByAppendingPathComponent:@"warm-vs.metallib"];
     if (![source writeToFile:metal atomically:YES encoding:NSUTF8StringEncoding error:nil]) return 0;
@@ -25,12 +33,14 @@ static int fixtures(NSString *dir) {
     if (![compiler launchAndReturnError:&error]) { fprintf(stderr, "fixture compiler: %s\n", error.localizedDescription.UTF8String); return 0; }
     [compiler waitUntilExit]; if (compiler.terminationStatus) return 0;
     if (![NSFileManager.defaultManager copyItemAtPath:library toPath:[dir stringByAppendingPathComponent:@"warm-fs.metallib"] error:nil]) return 0;
-    for (NSString *stage in @[@"vs", @"fs"]) {
-        NSDictionary *reflection = @{@"chain": @DMSH_CHAIN, @"route": @"B", @"entry": stage, @"entry_z": stage, @"bindings": @[], @"vertex_inputs": @[]};
+    if (![NSFileManager.defaultManager copyItemAtPath:library toPath:[dir stringByAppendingPathComponent:@"warm-ms.metallib"] error:nil]) return 0;
+    for (NSString *stage in @[@"vs", @"fs", @"ms"]) {
+        NSMutableDictionary *reflection = [@{@"chain": @DMSH_CHAIN, @"route": @"B", @"entry": stage, @"entry_z": stage, @"bindings": @[], @"vertex_inputs": @[]} mutableCopy];
+        if ([stage isEqualToString:@"ms"]) reflection[@"mesh_stage"] = @{@"kind": @"ms", @"threads": @1};
         NSData *json = [NSJSONSerialization dataWithJSONObject:reflection options:0 error:nil];
         if (![json writeToFile:[dir stringByAppendingPathComponent:[NSString stringWithFormat:@"warm-%@.json", stage]] atomically:YES]) return 0;
     }
-    g_msl_dir = dir; g_shmap = @{@"warm-vs": @"fixture", @"warm-fs": @"fixture"}.mutableCopy;
+    g_msl_dir = dir; g_shmap = @{@"warm-vs": @"vertex", @"warm-fs": @"pixel", @"warm-ms": @"mesh"}.mutableCopy;
     return 1;
 }
 
@@ -73,7 +83,7 @@ static NSString *row(const pso_key *key, int merged) {
     return [NSString stringWithFormat:@"R\t%s\n", hex];
 }
 
-static void pixels(id<MTLRenderPipelineState> pipeline, uint8_t out[4]) {
+static void pixels(id<MTLRenderPipelineState> pipeline, int mesh, uint8_t out[4]) {
     MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:4 height:4 mipmapped:NO];
     td.usage = MTLTextureUsageRenderTarget; td.storageMode = MTLStorageModeShared;
     id<MTLTexture> target = [g_dev newTextureWithDescriptor:td];
@@ -82,7 +92,12 @@ static void pixels(id<MTLRenderPipelineState> pipeline, uint8_t out[4]) {
     pass.colorAttachments[0].storeAction = MTLStoreActionStore;
     id<MTLCommandQueue> queue = [g_dev newCommandQueue]; id<MTLCommandBuffer> cb = [queue commandBuffer];
     id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:pass];
-    [enc setRenderPipelineState:pipeline]; [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; [enc endEncoding];
+    [enc setRenderPipelineState:pipeline];
+    if (mesh) {
+        MTLSize one = MTLSizeMake(1, 1, 1);
+        [enc drawMeshThreadgroups:one threadsPerObjectThreadgroup:one threadsPerMeshThreadgroup:one];
+    } else [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    [enc endEncoding];
     [cb commit]; [cb waitUntilCompleted];
     EXPECT("GPU draw completed", MTLCommandBufferStatusCompleted, cb.status);
     [target getBytes:out bytesPerRow:16 fromRegion:MTLRegionMake2D(1, 1, 1, 1) mipmapLevel:0];
@@ -109,7 +124,7 @@ static void check_draw(const pso_key *raw, int merged, const uint8_t expected[4]
     NSError *error = nil; id<MTLRenderPipelineState> reference = pso_build(pso_desc(&original, vs, fs, nil, merged), &error);
     EXPECT("original descriptor builds", 1, reference != nil);
     if (reference) {
-        uint8_t a[4], b[4]; pixels(warmed, a); pixels(reference, b);
+        uint8_t a[4], b[4]; pixels(warmed, 0, a); pixels(reference, 0, b);
         EXPECT("normalization preserves rendered pixels", 1, memcmp(a, b, sizeof a) == 0);
         int correct = 1; for (int i = 0; i < 4; i++) correct &= abs((int)a[i] - expected[i]) <= 1;
         EXPECT("pixels have the intended blend and channel mask", 1, correct);
@@ -220,6 +235,64 @@ static void scenario(NSString *dir, int merged) {
     printf("%s manifests: six rows -> %llu builds, %u cache keys\n", merged ? "merged" : "normal", (unsigned long long)g_warm_rps, g_pso.n);
 }
 
+static void native_mesh(NSString *dir) {
+    state_reset();
+    S.chmask.mask = 15;
+    memset(g_pass.cfmt, 0, sizeof g_pass.cfmt);
+    g_pass.cfmt[0] = MTLPixelFormatRGBA8Unorm; g_pass.dfmt = g_pass.sfmt = 0; g_pass.samples = 1;
+    NvShader *live = shader_load(@"warm-ms", 4, 0), *fragment = shader_load(@"warm-fs", 1, 0);
+    EXPECT("native mesh fixture loaded", 1, live != nil && fragment != nil);
+    if (!live || !fragment) return;
+
+    pso_key state;
+    pso_key_fill(&state, live, fragment, g_pass.cfmt, 0, 0, 1, 0);
+    pso_skey key; char hex[sizeof key * 2 + 1];
+    pso_skey_from(&state, live, fragment, 0, NULL, &key); pso_skey_hex(&key, hex);
+    NSString *valid = [NSString stringWithFormat:@"M\t-\t%s\n", hex];
+    NSString *wrong_stage = [NSString stringWithFormat:@"M\twarm-fs\t%s\n", hex];
+    NSString *manifest = [dir stringByAppendingPathComponent:@"mesh.tsv"];
+    NSString *text = [NSString stringWithFormat:@"%@%@%@", wrong_stage, valid, valid];
+    EXPECT("mesh manifest written", 1, [text writeToFile:manifest atomically:YES encoding:NSUTF8StringEncoding error:nil]);
+    long lines = 0; NSArray<WarmTask *> *tasks = warm_parse(@[manifest], &lines);
+    EXPECT("only the canonical, unique mesh row loads", 1, lines);
+    if (tasks.count != 1) return;
+    warm_load_begin(); warm_task(tasks[0]);
+    EXPECT("mesh warm task publishes a pipeline", 1, g_warm_items.count);
+    if (g_warm_items.count != 1) return;
+    WarmItem *item = g_warm_items[0];
+
+    // A live shader loaded while prewarm was in flight has a different object identity.
+    g_shcache = @{@"warm-ms": live, @"warm-fs": fragment}.mutableCopy;
+    warm_claim();
+    EXPECT("warm pipeline rejected for a different live shader", 0, g_pso_mtk.n);
+    g_mtk.ms = live;
+    NvProg *raster = [NvProg new]; raster->sh[1] = fragment;
+    uint64_t before = g_bp_pso_n;
+    id<MTLRenderPipelineState> demanded = mtk_pso(raster);
+    EXPECT("first demand returns the required mesh pipeline", 1, demanded != nil);
+    EXPECT("first demand builds exactly once", before + 1, g_bp_pso_n);
+    EXPECT("second demand reuses the pipeline", 1, mtk_pso(raster) == demanded);
+    EXPECT("second demand does not compile", before + 1, g_bp_pso_n);
+
+    g_shcache = nil;
+    warm_enqueue(item); warm_claim();
+    g_mtk.ms = g_shcache[@"warm-ms"]; raster->sh[1] = g_shcache[@"warm-fs"];
+    id<MTLRenderPipelineState> warmed = mtk_pso(raster);
+    EXPECT("first demand with identical shaders uses the warm pipeline", 1, warmed == item->object);
+    EXPECT("warm hit does not compile", before + 1, g_bp_pso_n);
+    if (demanded && warmed) {
+        uint8_t a[4], b[4];
+        pixels(demanded, 1, a); pixels(warmed, 1, b);
+        EXPECT("required and warmed mesh draws match", 1, memcmp(a, b, sizeof a) == 0);
+        EXPECT("native mesh draw writes the triangle", 1, a[0] == 128 && a[1] == 64 && a[2] == 255 && a[3] == 128);
+    }
+    pso_key depth = {.dfmt = MTLPixelFormatDepth32Float, .samples = 1};
+    NSError *error = nil;
+    EXPECT("depth-only native mesh pipeline uses the empty fragment", 1, mtk_build(&depth, nil, live, nil, &error) != nil);
+    g_mtk.ms = nil;
+    g_warm_t0 = bp_now(); warm_finish();
+}
+
 int main(void) { @autoreleasepool {
     alarm(60);   // A regression in owner/waiter progress must fail rather than hang the suite.
     setenv("DM_PSO_ARCHIVE", "off", 1); setenv("DM_NVN_PREDICT", "0", 1);
@@ -231,6 +304,7 @@ int main(void) { @autoreleasepool {
     EXPECT("prebuild tool workers: Metal's concurrent compiles", g_dev.maximumConcurrentCompilationTaskCount, compile_tasks());
     singleflight(@(dir));
     scenario(@(dir), 0); scenario(@(dir), 1);
+    native_mesh(@(dir));
     const char *mode = getenv("DM_PSO_MTL4");
     if (mode) EXPECT("requested compiler path selected", strcmp(mode, "0") != 0, g_comp4 != nil);
     [NSFileManager.defaultManager removeItemAtPath:@(dir) error:nil];

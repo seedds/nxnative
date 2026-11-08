@@ -1,0 +1,59 @@
+# Regenerates docs/agents/symptoms.md, the symptom index, on main: dm/tools/docs_symptoms.py writes it from the Symptom bullets in docs/reference, and when the file changes the
+# job commits it as github-actions[bot]. Pull requests need not touch the index (a stale one does not fail test_docs, see DM_DOCS_INDEX_STRICT there), so two pull requests that
+# each add an entry no longer conflict in it.
+# It runs only on pushes to main and by hand, never on a pull request, so no pull request's code runs with write access to the repository.
+# Loop guard: the bot's commit changes symptoms.md, which is one of the paths below, but a push made with GITHUB_TOKEN does not start workflows, so it does not trigger itself.
+# If a branch protection rule on main forbids pushes by the bot (required pull requests or status checks without a bypass for github-actions), the push step fails and the job
+# turns red: that is the visible signal; allow the bot to bypass the rule, or run docs_symptoms.py by hand and commit its output.
+name: docs-index
+
+on:
+  push:
+    branches: [main]
+    paths: [docs/reference/**, dm/tools/docs_symptoms.py, docs/agents/symptoms.md]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# Two pushes in a row queue instead of racing; the later run starts from a main that has the earlier one's index commit.
+concurrency:
+  group: docs-index
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+# Actions are pinned to commit SHAs (the tag in the comment), as in tests.yml.
+jobs:
+  regenerate:
+    name: regenerate the symptom index
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.14'
+      - name: Write the index
+        run: python3 dm/tools/docs_symptoms.py
+      - name: Check the references and the new index
+        env:
+          DM_DOCS_INDEX_STRICT: '1'
+        run: python3 -m unittest dm/tools/tests/test_docs.py
+      - name: Commit and push the index if it changed
+        run: |
+          if git diff --quiet -- docs/agents/symptoms.md; then
+            echo "The symptom index is current."
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/agents/symptoms.md
+          git commit -m 'Regenerate the symptom index'
+          # A push that landed meanwhile makes this one non-fast-forward: rebase onto it and try once more
+          git pull --rebase origin main && git push origin HEAD:main \
+            || { git pull --rebase origin main && git push origin HEAD:main; }

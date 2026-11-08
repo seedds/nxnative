@@ -41,7 +41,11 @@ static NSString *slurp(NSString *path) { return [NSString stringWithContentsOfFi
 static void arm(HoldCompiler *c) { if (![(id)g_ep->comp isKindOfClass:[HoldCompiler class]]) { c->compiler = g_ep->comp; g_ep->comp = (id<MTL4Compiler>)c; } }   // the current period's compiler
 static void reopen(NSString *dir) {   // the folder's files, as a new start opens them
     NSMutableArray<id<MTL4Archive>> *a = [NSMutableArray array];
-    for (NSString *n in [NSFileManager.defaultManager contentsOfDirectoryAtPath:dir error:nil]) if ([n hasSuffix:@".mtl4a"]) [a addObject:[g_dev newArchiveWithURL:[NSURL fileURLWithPath:[dir stringByAppendingPathComponent:n]] error:nil]];
+    for (NSString *n in [NSFileManager.defaultManager contentsOfDirectoryAtPath:dir error:nil]) if ([n hasSuffix:@".mtl4a"]) {
+        id<MTL4Archive> archive = [g_dev newArchiveWithURL:[NSURL fileURLWithPath:[dir stringByAppendingPathComponent:n]] error:nil];
+        if (!archive) abort();
+        [a addObject:archive];
+    }
     g_arch4p = a;
 }
 static int until(int (^cond)(void), double seconds) { uint64_t t0 = bp_now(); while (!cond()) { if (bp_now() - t0 > seconds * 1e9) return 0; usleep(10000); } return 1; }
@@ -85,7 +89,7 @@ int main(void) { @autoreleasepool {
     MTL4RenderPipelineDescriptor *m = pre_desc(@"v1", @"f4", 0);
     EXPECT("held: a descriptor for the draw", 1, m != nil);
     dispatch_group_t draw = dispatch_group_create(); __block id drawn = nil;
-    dispatch_group_async(draw, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ @autoreleasepool { NSError *e = nil; drawn = arch_capture(m, &e, 0); } });
+    dispatch_group_async(draw, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ @autoreleasepool { NSError *e = nil; drawn = arch_capture(m, &e, 0, NULL); } });
     EXPECT("held: a draw's compile returns", 0, dispatch_group_wait(draw, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC)));
     EXPECT("held: a draw's compile built", 1, drawn != nil);
     arch_flush();
@@ -103,8 +107,11 @@ int main(void) { @autoreleasepool {
 
     // every base is in the files
     NSMutableArray<id<MTL4Archive>> *open = [NSMutableArray array];
-    for (NSString *n in [NSFileManager.defaultManager contentsOfDirectoryAtPath:arch error:nil]) if ([n hasSuffix:@".mtl4a"])
-        [open addObject:[g_dev newArchiveWithURL:[NSURL fileURLWithPath:[arch stringByAppendingPathComponent:n]] error:nil]];
+    for (NSString *n in [NSFileManager.defaultManager contentsOfDirectoryAtPath:arch error:nil]) if ([n hasSuffix:@".mtl4a"]) {
+        id<MTL4Archive> archive = [g_dev newArchiveWithURL:[NSURL fileURLWithPath:[arch stringByAppendingPathComponent:n]] error:nil];
+        if (!archive) abort();
+        [open addObject:archive];
+    }
     int found = 0;
     for (NSString *k in @[@"f1", @"f2", @"f3", @"f4"]) @autoreleasepool {
         MTL4RenderPipelineDescriptor *d = pre_desc(@"v1", k, 0);
@@ -123,9 +130,13 @@ int main(void) { @autoreleasepool {
     g_arch_dir = arch2; g_arch4 = @[]; g_arch4p = @[];
     put([tables stringByAppendingPathComponent:@"shader_pairs.tsv"], @"# pairs\nv1\tf5\nv1\tf6\n");
     HoldCompiler *failc = [HoldCompiler new];   // armed in the current period before each run (one worker: both compiles in it; the run's last flush begins another)
+    // Apple's compiler fails it outside the archive too: a base the capture refuses is built by the plain compiler (arch_capture)
+    HoldCompiler *plainc = [HoldCompiler new]; id<MTL4Compiler> plain = g_comp4; plainc->compiler = plain; g_comp4 = (id<MTL4Compiler>)plainc;
     arm(failc); reset_counts();
     EXPECT("failing: two pairs", 2, pso_prebuild(1, 1, QOS_CLASS_USER_INITIATED));
     EXPECT("failing: asked once", 1, failc->bad);
+    EXPECT("failing: the plain compiler asked too", 1, plainc->bad);
+    EXPECT("failing: still capturing", 1, arch_capturing());
     EXPECT("failing: one failed", 1, g_pre_failed);
     EXPECT("failing: one built", 1, g_pre_built);
     EXPECT("failing: stamped all the same", 1, slurp(stamp) != nil);
@@ -153,6 +164,7 @@ int main(void) { @autoreleasepool {
     EXPECT("other build: the list is for this build now", 1, [slurp(failp) containsString:arch_os_build()]);
     // it builds after a system update (the real compiler, the list from another build): the list goes
     if ((id)g_ep->comp == failc) g_ep->comp = failc->compiler;
+    g_comp4 = plain;
     put(failp, [slurp(failp) stringByReplacingOccurrencesOfString:arch_os_build() withString:@"os\t1A1\n"]); reopen(arch2); reset_counts();
     EXPECT("fixed: two pairs", 2, pso_prebuild(1, 1, QOS_CLASS_USER_INITIATED));
     EXPECT("fixed: built", 1, g_pre_built);

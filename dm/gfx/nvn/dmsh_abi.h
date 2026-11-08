@@ -87,7 +87,7 @@
 #define DMSH_GMEM_LOG_CB_OFFSET 1
 
 // A pool binding points at a buffer the host keeps (nvn_mtl.m pool_gpu): a 32-bit bound n (the highest index the shader may read), then from DMSH_POOL_HEAD one 8-byte resource ID per ID
-#define DMSH_POOL_HEAD 16                // bytes before element 0 of a pool buffer: the bound n, 4 bytes of padding, and the 64-bit GPU address of the read bitmap: bit i in 32-bit word i / 32 is set by a shader that reads texture ID i (dmsh_build.py pool_arrays, nvn_mtl.m pool_seen_scan)
+#define DMSH_POOL_HEAD 16                // bytes before element 0 of a pool buffer: the bound n, 4 bytes of padding, and the 64-bit GPU address of the read bitmap: bit i in 32-bit word i / 32 is set by a shader that reads texture ID i (dmsh_build.py pool_arrays, nvn_mtl.m pool_seen_scan); 0 in a table of a uniform buffer's handles (htab_gpu), whose reads are not marked
 #define DMSH_KIND_UNKNOWN "?"            // a binding the build could not place: the host refuses the shader
 
 // The alpha test's state (dm/gfx/tools/dmsh_alpha.py, the _a entry points of the <key>_bx libraries): uint function (NVN_ALPHA_FUNC_*), float reference, at this fragment buffer index (nvn_mtl.m at_bind)

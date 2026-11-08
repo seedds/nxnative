@@ -352,6 +352,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Limits:** such pads have no rumble or player lights, and Home does not quit from them. Another model's buttons follow 8BitDo's numbering unless `DM_HID_MAP` says otherwise; only Pro Controllers were run, before the mechanism was folded into `pad_hid_mac.h` ([PR #1595](https://github.com/seedds/nxnative/pull/1595)), and the folded version awaits a run with two Pro Controllers over USB.
 - **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) 1.8.0, two Pro Controllers over USB, 33 minutes of two-player split-screen races.
 
+### One Pro Controller read as two players
+
+- **Symptom:** with one Pro Controller over Bluetooth, the log shows `GameController lists 1 of 2 pads of this model` twice for the same USB location, then players 1 and 2 for that pad; a one-player game opens the controller applet every few frames (`hid controller applet: 1 to 1 players wanted, 2 connected`, focus state 2 then 1, thousands of times). A game that suspends its music while an applet has focus plays none: sound effects and positional music still play, while area and cutscene music never start.
+- **Cause:** `IOHIDManager` hands a device over once per matching dictionary it meets, each time as a new `IOHIDDeviceRef` for the same I/O Registry entry. The Pro Controller meets both the GamePad usage dictionary and its own vendor / product one (added so identical pads are counted), and `hidpad_found` knew devices by reference only, so one pad counted as two pads of its model against GameController's one controller ([Identical controllers that GameController lists as one](#identical-controllers-that-gamecontroller-lists-as-one)).
+- **Fix:** `pad_hid_mac.h` knows a device by its registry entry ID (`hidpad_entry`): a second reference to a known entry is ignored in every list.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md), one Pro Controller over Bluetooth on the Mac: no music in Kokiri Forest gameplay or its cutscenes, back once the pad was read once.
+
 ### SDK 20 six-axis sensor and amiibo (`nfp`) calls
 
 - **Symptom:** SDK 20 calls that reach a service; `nfp`'s `AttachActivateEvent` / `AttachDeactivateEvent` crashed in the SDK at `sdk+0x3f2a78`.
@@ -591,7 +598,7 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Symptom:** right after the opening logo movie nothing is presented again, with no red line; the watchdog reports `no progress … stage present frame`. The game thread is in Unreal's `FlushRenderingCommands`, waking each millisecond from a condition variable whose event is never triggered, while the render, RHI, frame-flip and interrupt threads all wait idle.
 - **Cause:** Unreal's Switch RHI learns which frames reached the screen only from `nn::vi::ListFrameHistory`: its "Viewport Thread" waits for each vsync, asks for the entry count (a null buffer: the SDK answers 8, the history's size), reads the 40-byte `FrameInfo` entries and takes the first one shown as the latest flip. Those flips complete the frame-end fences that wait for the swap chain (`r.GTSyncType` 2, `FFrameEndSync`), and the first full `FlushRenderingCommands` waits for every fence in that ring. The host returned no entries, so no flip ever came and the flush waited for ever.
 - **Fix:** `dm/gfx/hle_vi.c` keeps the last 8 presents (recorded at each NVN present, numbered as `GetLatestFrameNumber`, with the present queue's ticket) and answers as the SDK fills `FrameInfo` (`sdk+0x4510a0` in SDK 20.5.15): status (2 shown with a present time, 1 queued and not shown yet), frame number, queue tick and present tick twice, newest first. A frame is shown once the present queue has handed it on (`mtl_present_progress`) and the system did not drop it. Its present time is the drawable's presented time when Metal reports one, else (headless, or before the handler runs) the time it was first seen handed on.
-- **Found on:** [Minecraft Dungeons II](../../dm/games/0100A7C01B792000/README.md); [Octopath Traveler 0](../../dm/games/01005270232F2000/README.md) and [OCTOPATH TRAVELER II](../../dm/games/0100A3501946E000/README.md) call it from the same RHI code (`main+0x1014994`, `main+0x32b408c`) and got no entries before.
+- **Found on:** [Minecraft Dungeons II](../../dm/games/0100A7C01B792000/README.md); [Octopath Traveler 0](../../dm/games/01005270232F2000/README.md) and [OCTOPATH TRAVELER II](../../dm/games/0100A3501946E000/README.md) call it from the same RHI code (`main+0x1014994`, `main+0x32b408c`) and got no entries before. [Luigi's Mansion 3](../../dm/games/0100DCA0064A6000/README.md) paces its presents by the history and the window's interval ([A game's own present pacing reads the interval the window presents at](frame-rate.md#a-games-own-present-pacing-reads-the-interval-the-window-presents-at)).
 
 ### Default display panel identifier
 
@@ -684,6 +691,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** `EventFd`, `EventFdRead` and `EventFdWrite` are host counters, `Poll` waits on them with a condition variable and `Close` frees them (`hle_net.c`). `Socket` and the rest still fail, as they do with no network. An endless wait comes back with 0 after 100 ms, as it does with nothing to wait on.
 - **Check:** `make -C dm/host/tests GAME=<id> run` runs `t_net_eventfd`.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) (SDK 22.2.8).
+
+### Event descriptors in an `fd_set`
+
+- **Symptom:** `CRASH sig=10` (SIGBUS) in a network thread right after start (Minecraft's `NetherNet Network`, `main+0x18b2ae8`, `x0=0x4000`), at a load from its own stack.
+- **Cause:** the host numbered its event descriptors from `0x4000`. The bsd service gives out the lowest free number from 0, and games size their tables for such small numbers: NetherNet puts its event descriptor in a 1024-bit `fd_set` on the stack for `Select`, and `FD_SET(0x4000)` reads and writes 2 KB past the set. `Select` also failed whenever a descriptor was set, so it could never wait on one.
+- **Fix:** the event descriptors are numbered as the service numbers them, the lowest free one from 0 (`hle_net.c`). `Select` (`dm_sk_select`, both overloads) is `Poll` over the descriptors in its sets: it waits on the host's event descriptors, a descriptor the host never made has nothing to say, the sets come back with the ready ones, and a descriptor closed during the wait fails with EBADF. As a game's own stale or never-valid descriptors now fall in the same range, `Poll` reports a closed descriptor (`POLLNVAL`) only for one that was open when the wait began.
+- **Check:** `t_net_eventfd` (`make -C dm/host/tests GAME=<id> run`).
+- **Found on:** Minecraft (Bedrock Edition, 1.21.120).
 
 ### The local user's profile image
 

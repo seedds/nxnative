@@ -50,6 +50,7 @@ General changes first needed here; each applies to every game:
 - **Encrypted Unreal paks and IoStore containers with the shaders inline**, the empty paks beside the containers, labels under a container's mount point, and `LSLG` records in Oodle shader tables (`uepak.py`, `shader_split.py`): [Unreal Engine 5.1 shaders inline in encrypted IoStore containers](../../../docs/reference/shaders.md#unreal-engine-51-shaders-inline-in-encrypted-iostore-containers).
 - **Every call of FMallocBinned3's constructor cut** (`ue_malloc.py`): [Unreal's FMallocBinned3 replaced by the host allocator](../../../docs/reference/memory.md#unreals-fmallocbinned3-replaced-by-the-host-allocator).
 - **Unreal's fixed frame rate written at `fps_target`** (`ue_fixed_rate.py`, `hle_fpslock.c`): [Unreal's fixed frame rate, found by its reflection entry](../../../docs/reference/frame-rate.md#unreals-fixed-frame-rate-found-by-its-reflection-entry).
+- **A `WaitSync` on a sync not yet fenced passes** (`nvn_queue.inc`): since the NVN queue scheduler landed (ea0c98df), the game stopped presenting at its first load after the title. A wait before the queue's first fence of that sync parked the queue for good. Resolved: [GPU event waits order work across queues](../../../docs/reference/nvn-objects.md#gpu-event-waits-order-work-across-queues) ([#1808](https://github.com/seedds/nxnative/issues/1808)).
 
 ## Open
 

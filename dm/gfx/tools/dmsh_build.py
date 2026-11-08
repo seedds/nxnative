@@ -12,7 +12,7 @@
 # Environment IOSOUT=dir: the same MSL also goes through dm/ios/tools/ios_metal.compile to produce an iphoneos metallib + reflection (chain_metal records the iOS compile convention)
 # Final summary: success / failure counts and the distribution of reasons; distribution of driver segment read offsets (those outside the range the replay layer can fill are listed separately);
 # a [RED] line per shader that built but lost something (shader_regressions.report_losses), which does not change the exit status
-import atexit, inspect, os, re, sys, json, mmap, struct, hashlib, shutil, subprocess, tempfile, time, collections, threading, concurrent.futures as cf
+import atexit, bisect, inspect, os, re, sys, json, mmap, struct, hashlib, shutil, subprocess, tempfile, time, collections, threading, concurrent.futures as cf
 import dmsh_geometry, dmsh_atomic, dmsh_wide, dmsh_meshstage, dmsh_abi as abi   # abi: the driver segment layout and the binding kinds the host shares (dm/gfx/nvn/dmsh_abi.h)
 DM_ROOT = os.environ.get('DM_ROOT') or os.path.expanduser('~/dm-work')   # Workspace root (game files, build outputs and run artifacts are all under it)
 HOME = os.path.expanduser('~')
@@ -54,6 +54,18 @@ XC = ['--msl', '--msl-version', '20300', '--msl-argument-buffers', '--msl-textur
 # and its saturation gives 0, as Metal's precise:: functions (IEEE fmin / fmax) do on every GPU. The M4 Pro's fast ones happen to agree, an A20 Pro's do not: Super Mario Galaxy 2's
 # GX lighting takes max(0, NaN) from light directions left at zero, and the half of Mario its fill light faces came out white on the iPhone (GitHub issue 72; vk_shaders.py PRECISE)
 def precise(msl): return re.sub(r'\bfast::(min|max|clamp)\(', r'precise::\1(', msl)
+
+# spirv-cross writes OpUMulExtended / OpSMulExtended as calls of an optnone template, spvMulExtended, as Metal's compiler may fail on an inlined mulhi (spirv_msl.cpp,
+# SPVFuncImplMulExtended). The barrier keeps every product a call that is never folded: Switch 2 shaders divide by constants through the high word of a product (Ocarina of Time
+# has 348,587 such calls, all scalar uint by a literal, 98% by a power of two), and its NDVE title movie ran 6.9% faster on an M1 Pro with its 5,679 others inline (PR #1741).
+# Scalar operands get overloads that take the halves of the 64-bit product, with no mulhi; overload resolution prefers them to the template, and vectors keep the template.
+def mul_extended(msl):
+    helper = re.compile(r'template<typename T, typename U, typename V>\s*\[\[clang::optnone\]\] T spvMulExtended\(V l, V r\)\s*\{\s*return T\{U\(l \* r\), U\(mulhi\(l, r\)\)\};\s*\}\n')
+    found = list(helper.finditer(msl)) if 'spvMulExtended' in msl else []
+    if len(found) != 1 or 'spvMulExtended(uint l, uint r)' in msl: return msl
+    scalar = ''.join(f'template<typename T, typename U> static inline __attribute__((always_inline)) T spvMulExtended({t} l, {t} r) {{ {w} p = {w}(l) * {w}(r); return T{{U(p), U(p >> 32)}}; }}\n'
+                     for t, w in (('uint', 'ulong'), ('int', 'long')))
+    return msl[:found[0].end()] + scalar + msl[found[0].end():]
 
 # Ampere HMMA.16816 with an f16 accumulator (agl's upscaler networks, the NDVE video networks) reaches the MSL as calls of dmsh_hmma16816_f16(lane, block, A0..A3, B0, B1, C0, C1,
 # flags, A's LDSM address, A0..A3's offsets, A's row stride, out D1) → D0, the subgroup's 256-word block of the scratch shared memory as the last argument (InstEmitAmpereTensor.AHmma,
@@ -115,11 +127,14 @@ def split_params(text):   # commas inside template arguments (spvUnsafeArray<uin
         if ch == ',' and depth == 0: params.append(cur.strip()); cur = ''
         else: cur += ch
     return params
-def block_end(src, start):   # the index of the brace closing the block opened at src[start]
+BRACE = re.compile(r'[{}]')
+FUNC_OPEN = re.compile(r'(?=\n\{\n)')   # where a line holding only a brace starts, overlapping ones included
+def block_end(src, start):   # the index of the brace closing the block opened at src[start] (start itself when it is no brace); the regular expression steps from brace to brace
+    if start < len(src) and src[start] not in '{}': return start
     depth = 0
-    for i in range(start, len(src)):
-        depth += {'{': 1, '}': -1}.get(src[i], 0)
-        if depth == 0: return i
+    for b in BRACE.finditer(src, start):
+        depth += 1 if b.group() == '{' else -1
+        if depth == 0: return b.start()
     raise ValueError('dmsh_hmma16816_f16: block not closed')
 def hmma_msl(msl):
     m = re.search(r'\n(\w+) dmsh_hmma16816_f16\(([^)]*)\)\n\{', msl)
@@ -135,15 +150,20 @@ def hmma_msl(msl):
     name = lambda x: group1(r'(\w+)$', x)
     v = dict(zip(HMMA_ARGS, [name(x) for x in plain]), scr=name(scr[0]), dt=group1(r'thread (\w+)&', plain[-1], re.match), rt=m.group(1))
     body_end = block_end(msl, m.end() - 1)
-    # The calls, and the functions they are in: where each opens its body (a brace at the start of a line), and the shared memory array it declares besides the scratch
-    calls, callers = [], {}
+    # The calls, and the functions they are in: where each opens its body (a brace at the start of a line), and the shared memory array it declares besides the scratch.
+    # A function's opening and end are found once (opens, ends): a network's function holds hundreds of calls in up to 1.8 MB of MSL, and a scan per call took Ocarina of Time's 71 HMMA
+    # shaders 578 s of one core. A call's function opens at the last line holding only a brace that ends before the call (overlapping ones included, as rfind would find them)
+    opens = [o.start() for o in FUNC_OPEN.finditer(msl)]
+    calls, callers, ends = [], {}, {}
     for c in HMMA_CALL.finditer(msl):
         if m.start() <= c.start() <= body_end: continue
-        open_at = msl.rfind('\n{\n', 0, c.start()) + 1
-        if open_at <= 0 or block_end(msl, open_at) < c.start(): raise ValueError('dmsh_hmma16816_f16: a call outside a function body')
+        k = bisect.bisect_right(opens, c.start() - 3) - 1
+        open_at = opens[k] + 1 if k >= 0 else 0
+        if open_at > 0 and open_at not in ends: ends[open_at] = block_end(msl, open_at)
+        if open_at <= 0 or ends[open_at] < c.start(): raise ValueError('dmsh_hmma16816_f16: a call outside a function body')
         if open_at not in callers:
             scratch = split_params(c.group(1))[-1]
-            arrays = [(t, n) for t, n in TG_ARRAY.findall(msl, open_at, block_end(msl, open_at)) if n != scratch]
+            arrays = [(t, n) for t, n in TG_ARRAY.findall(msl, open_at, ends[open_at]) if n != scratch]
             callers[open_at] = arrays[0] if len(arrays) == 1 else None
         calls.append((c, open_at))
     if not calls: return msl
@@ -354,6 +374,60 @@ def border_emu(msl):
         twin = f'spvDescriptorSet0.{m.group(2)}{abi.BORDER_TWIN}'
         msl = msl[:m.start()] + f'dm_bs({msl[m.start():i]}, spvDescriptorSet0.{abi.BORDER_MEMBER}, {bit[m.group(2)]}u, spvDescriptorSet0.{m.group(1)}, {twin}, {args})' + msl[i:]
     return msl.replace('using namespace metal;\n', 'using namespace metal;\n' + BORDER_HELPERS, 1)
+# gl_FragCoord.z against a depth the shader read. NVIDIA stores a fragment's depth as the z its pixel shader reads, so a shader can test a fragment against a depth image of its own surface and
+# find them equal. Apple's GPU stores a value below the [[position]].z its fragment shader reads at some pixels: by up to one ulp of z plus a fraction of the depth's step across a pixel
+# (dm/gfx/tests/t_zsnap.m: 0.2% of a perspective triangle's pixels, 2% of flat ones, none above, the largest gap one ulp plus 2^-23 of fwidth(z)); writing [[position]].z as the depth would
+# keep them equal, but takes the depth test after the shader, and the depth a prepass stores would then fail an EQUAL pass on the same geometry (Metroid Dread's G-buffer).
+# Ocarina of Time's mist discards a fragment whose gl_FragCoord.z is above the depth its depth-only pass stored, and lost its own surface at scattered pixels: dark dots flickering in the mist.
+# So where gl_FragCoord.z and a value read from a texture meet in one comparison of main0, through any arithmetic on either side (the mist's z > d; z * k > d * k), the z read takes that value
+# when it lies in the window the stored depth of the fragment's own surface can take, [z - ulp(z) - 2^-20 fwidth(z), z): the comparison then sees the equality NVIDIA's does, whatever its
+# operator. A value outside the window, a read whose texture value comes after it or in a block it does not see, and z read in another function stay as they were
+ZSNAP = ('static inline __attribute__((always_inline)) float dm_zsnap(float z, float d, float zw)   // see frag_z_snap\n'
+         '{\n    float lo = as_type<float>(as_type<int>(z) - 1) - zw * 0x1p-20f;\n    return (z > 0.0f && d < z && d >= lo) ? d : z;\n}\n')
+ZSNAP_WIDTH = 'dm_zw'
+def frag_z_snap(msl):
+    """→ (msl with each paired gl_FragCoord.z read in main0 as dm_zsnap(gl_FragCoord.z, <texture value>, dm_zw) and dm_zw = fwidth(gl_FragCoord.z) first in main0's body, the number of reads).
+    main0's body is dm_body_main0's when it has one (dmsh_side.shared_body: a library's sources), the build's rewrite comes before that"""
+    if 'gl_FragCoord.z' not in msl: return msl, 0
+    shared = dmsh_side.body(msl)
+    try: e = None if shared else dmsh_side.entry(msl, 'main0')
+    except ValueError: return msl, 0
+    if shared: head, end = shared[1:]; params = re.findall(r'[^,]+', msl[shared[0]:head])
+    elif e: head, end, params = e['head'], e['end'], e['params']
+    else: return msl, 0
+    if not any(re.search(r'\bfloat4 gl_FragCoord( \[\[position\]\])?\)?$', p.strip()) for p in params): return msl, 0
+    first = msl.find('{', head) + 1
+    lines = msl[first:end - 1].split('\n')
+    zr, xr, scope, line_of = {}, {}, {}, {}   # each local's gl_FragCoord.z reads and texture values it is computed from; the blocks it is declared in; its line
+    stack, blocks, pairs = [0], 0, {}
+    for i, ln in enumerate(lines):
+        m = re.match(r'\s*(?:const )?(float|bool|int|uint)\s+(_\d+) = (.+);$', ln)
+        if m:
+            ty, v, ex = m.groups(); refs = re.findall(r'\b_\d+\b', ex)
+            z = set().union(*(zr.get(r, set()) for r in refs)); x = set().union(*(xr.get(r, set()) for r in refs))
+            if ex == 'gl_FragCoord.z': z = {v}
+            elif ty == 'float' and re.search(r'\.(sample|read)\(', ex) and not z: x = {v}   # a scalar read from a texture (a depth image); not sample_compare or gather
+            zr[v], xr[v], scope[v], line_of[v] = z, x, tuple(stack), i
+            c = re.fullmatch(r'(_\d+) (?:<=|>=|<|>|==|!=) (_\d+)', ex) if ty == 'bool' else None
+            if c:
+                a, b = c.groups()
+                for zs, xs in ((a, b), (b, a)):
+                    if zr.get(zs) and xr.get(xs) and not xr.get(zs) and not zr.get(xs):
+                        for zv in zr[zs]: pairs.setdefault(zv, set()).update(xs_ for xs_ in xr[xs])
+        for ch in re.findall(r'[{}]', ln):
+            if ch == '{': blocks += 1; stack.append(blocks)
+            elif len(stack) > 1: stack.pop()
+    n = 0
+    for zv in sorted(pairs, key=lambda v: line_of[v]):
+        xs = [x for x in sorted(pairs[zv], key=lambda v: line_of[v]) if line_of[x] < line_of[zv] and scope[zv][:len(scope[x])] == scope[x]]   # declared before the read, in a block it sees
+        if not xs: continue
+        expr = 'gl_FragCoord.z'
+        for x in xs: expr = f'dm_zsnap({expr}, {x}, {ZSNAP_WIDTH})'
+        i = line_of[zv]; lines[i] = lines[i].replace(f'{zv} = gl_FragCoord.z;', f'{zv} = {expr};'); n += 1
+    if not n: return msl, 0
+    body = f'\n    float {ZSNAP_WIDTH} = fwidth(gl_FragCoord.z);' + '\n'.join(lines)   # in uniform control flow, before anything the body does
+    msl = msl[:first] + body + msl[end - 1:]
+    return msl.replace('using namespace metal;\n', 'using namespace metal;\n\n' + ZSNAP, 1), n
 STORE = shader_cache.Store(os.environ.get('DMSH_CAS', os.path.join(cache_root, 'cas.db')))
 atexit.register(STORE.close)   # folds its log into the one file
 CAS_LOCKS, CAS_LOCKS_GUARD = {}, threading.Lock()
@@ -710,6 +784,13 @@ def early_fragment_tests(ctl, code):
     is left as it is: tested early, the depth it computes would not be the one tested"""
     return len(ctl) > 0x718 and ctl[0x718] != 0 and len(code) >= 0x50 and not struct.unpack_from('<I', code, 19 * 4)[0] & 2
 
+def ps_omap(code):
+    """A pixel shader's output map: SPH word 18 (Maxwell's 0x50-byte SPH and NVN2's 0x80-byte one alike, at the start of the job's code; Ryujinx ShaderHeader OmapTargets),
+    4 bits per colour output, R G B A from the low bit. The GPU writes only these components of a bound target and leaves the others as they were; the translator stores only
+    them, and Metal writes the whole attachment under its write mask, so the host masks each target with its nibble (nvn_mtl.m). Lichii (a Switch 2 emulator) traced a band of
+    NaN above Ocarina of Time's horizon to the missing per-component mask (their commit 79c1516; Ocarina's agl_common depth pass has map 0x10f: output 0 RGBA, output 2 R only)"""
+    return struct.unpack_from('<I', code, 18 * 4)[0] if len(code) >= 0x50 else None
+
 def job_for(key, name, rec, w):
     ci = rec.find(bytes.fromhex('34127698')); code = rec[0x38:ci]; stage = name[:2]
     extra = {}
@@ -960,13 +1041,15 @@ def pool_arrays(src):
     storage buffer (6,370 pixel shaders). The argument IDs are then renumbered in member order, a pointer taking one and any other array its length, as the host lays the buffer out.
     Buffer textures and images keep their 32-entry slot arrays (tex_dyn_slots). ValueError on a use of a pool array the rewrite does not cover.
     An array of the handles in one of the game's uniform buffers (Ryujinx's texture array from a buffer, as long as a 64 KB buffer's handles, Program.cs QueryTextureArrayLengthFromBuffer) takes
-    the same form: the host keeps a table of that buffer's handles, as long as its last handle (nvn_mtl.m htab_gpu), so the element index is unchanged and only the textures the table names are made"""
+    the same form: the host keeps a table of that buffer's handles, as long as its last handle (nvn_mtl.m htab_gpu), so the element index is unchanged and only the textures the table names are made.
+    A table's reads are not marked: its index is an element of the table, not a texture ID, and the host has made every texture the table names already (it leaves seen 0). Marked through that
+    null address, Fire Emblem Fortune's Weave's lighting pass took 197 ms a frame on an M1 Pro (PR #1738)"""
     body = re.search(r'struct spvDescriptorSetBuffer0\s*\{(.*?)\};', src, re.S)
     if not body: return src
     pools = {}
     def to_pointer(m):
         if int(m.group(3)) < POOL_MIN or not (m.group(4).endswith('_cb0_40000000') or decode_ubo_tex(m.group(4).removesuffix('Smplr'))): return m.group(0)
-        pools[m.group(4)] = (m.group(2), int(m.group(3)))
+        pools[m.group(4)] = (m.group(2), int(m.group(3)), m.group(2) != 'sampler' and m.group(4).endswith('_cb0_40000000'))   # element, length, marked (a texture pool's reads)
         return f'{m.group(1)}constant spvPool_{m.group(4)}* {m.group(4)} [[id('
     members = re.sub(r'^(\s*)array<(.+), (\d+)> (\w+) \[\[id\(', to_pointer, body.group(1), flags=re.M)
     if not pools: return src
@@ -978,8 +1061,9 @@ def pool_arrays(src):
         aid += int(a.group(1)) if a else 1
         return out
     members = re.sub(r'^(\s*)(.+?)\s+(\w+)\s*\[\[id\((\d+)\)((?:\s*,\s*\w+\(\d+\))*)\]\];', renumber, members, flags=re.M)
-    structs = ''.join(f'struct spvPool_{nm}\n{{\n    uint n;\n    ulong seen;\n    array<{el}, 1> e;\n}};\n\n' for nm, (el, n) in pools.items())
-    if any(el != 'sampler' for el, _ in pools.values()): structs = POOL_MARK + structs
+    structs = ''.join(f'struct spvPool_{nm}\n{{\n    uint n;\n    ulong seen;\n    array<{el}, 1> e;\n}};\n\n' for nm, (el, n, _) in pools.items())
+    marked = any(mk for _, _, mk in pools.values())
+    if marked: structs = POOL_MARK + structs
     i = body.start()
     src = src[:i] + structs + src[i:body.start(1)] + members + src[body.end(1):]
     for nm in pools:   # base.name[index] → (&base.name->e[0])[min(uint(index), base.name->n)], the index taken with its brackets balanced
@@ -992,16 +1076,16 @@ def pool_arrays(src):
                 depth += {'[': 1, ']': -1}.get(src[j], 0); j += 1
             base = f'{m.group(1)}.{nm}'
             index = f'min(uint({src[m.end():j - 1]}), {base}->n)'
-            out.append(src[pos:m.start()] + f'(&{base}->e[0])[{index if pools[nm][0] == "sampler" else f"dm_pool_mark({base}, {index})"}]'); pos = j
+            out.append(src[pos:m.start()] + f'(&{base}->e[0])[{f"dm_pool_mark({base}, {index})" if pools[nm][2] else index}]'); pos = j
         src = ''.join(out) + src[pos:]
-        names = 2 if pools[nm][0] == 'sampler' else 3   # each read names it twice, and once more in a texture's mark; the member once (spvPool_<name> is one word)
+        names = 3 if pools[nm][2] else 2   # each read names it twice, and once more in a mark; the member once (spvPool_<name> is one word)
         left = len(re.findall(r'\b%s\b' % re.escape(nm), src)) - names * len(re.findall(r'\.%s->e\[0\]\)\[' % re.escape(nm), src)) - 1
         if left: raise ValueError(f'{nm}: {left} uses of the pool array the rewrite does not cover')
     # The mark stores to memory, so Metal would test this fragment shader against depth after running it: every covered pixel is shaded (no hidden surface removal) and the depth it tests differs by
     # an ulp from a prepass's, which fails an EQUAL pass along contours. The mark is the host's own, so it must not change when the test runs: early, unless the shader discards or writes depth, which
     # a test before it would get wrong (then it stays late, and only costs the shading)
     own = src.replace(POOL_MARK, '')   # what the shader does itself: a store of its own keeps the test where the game's own shader has it
-    if any(el != 'sampler' for el, _ in pools.values()) and not re.search(r'\bdiscard_fragment\b|\[\[\s*depth\(|\[\[\s*sample_mask\s*\]\]|\[\[\s*stencil\s*\]\]|\.write\(|\batomic_\w+_explicit\b|^\s*device\s', own, re.M):
+    if marked and not re.search(r'\bdiscard_fragment\b|\[\[\s*depth\(|\[\[\s*sample_mask\s*\]\]|\[\[\s*stencil\s*\]\]|\.write\(|\batomic_\w+_explicit\b|^\s*device\s', own, re.M):
         src = re.sub(r'^(?<!\]\] )fragment\s', '[[early_fragment_tests]] fragment ', src, flags=re.M)
     return src
 
@@ -1562,6 +1646,7 @@ def finish(key, w, j, c1):
     try: src = dmsh_atomic.check_msl(src)
     except ValueError as e: return 'image atomic MSL failed', str(e), None
     src = precise(src)   # min / max / clamp with Maxwell's NaN results (see precise)
+    src = mul_extended(src)   # scalar extended products without the optnone wrapper (see mul_extended)
     try: src = gather_offsets(src)   # four gathers instead of a wrapper's loop over their offsets (see gather_offsets)
     except ValueError as e: return 'gather offsets rewrite failed', str(e)[:160], None
     try: src = hmma_msl(src)   # Ampere HMMA through simdgroup_matrix (see hmma_msl)
@@ -1571,7 +1656,9 @@ def finish(key, w, j, c1):
     try: src = pool_arrays(src)   # handles traced to no slot read the pools the replay keeps (see pool_arrays)
     except ValueError as e: return 'pool rewrite failed', str(e)[:160], None
     src = dmsh_wide.wide_loads(src)   # storage words the translator split, read whole again (see dmsh_wide.py)
-    src = border_emu(src); open(msl, 'w').write(src)   # border colours Metal lacks (see border_emu)
+    src = border_emu(src)   # border colours Metal lacks (see border_emu)
+    if j['stage'] == 'ps': src = frag_z_snap(src)[0]   # gl_FragCoord.z against a depth of its own surface (see frag_z_snap)
+    open(msl, 'w').write(src)
     first, spill = [], 0
     mesh = j.get('mesh_stage')
     if mesh:   # the kernel as the Metal object or mesh function (dmsh_meshstage.py)
@@ -1635,7 +1722,7 @@ def finish(key, w, j, c1):
             'threadgroup_size': j.get('local'), 'c1': c1.hex(), 'notes': res['notes'] + (['not in the answer table, queries use defaults'] if j.get('no_facts') else []), 'drv_reads': dr, 'drv_unfillable': unfillable(dr, mesh['kind'] if mesh else j['stage']),
             'bindings': binds,
             'vertex_inputs': [{'location': int(m.group(3)), 'msl_type': m.group(1)} for m in attributes(src)],
-            'raster': raster_facts(j['stage'], src), 'vs_pad': pad}
+            'raster': {**raster_facts(j['stage'], src), **({'omap': ps_omap(open(j['code'], 'rb').read())} if j['stage'] == 'ps' else {})}, 'vs_pad': pad}
     if j['stage'] == 'vs': full = open(msl).read(); vin_finish(key, full, refl); pull_finish(key, full, refl)   # the shadow-input and pulling libraries (dmsh_vin.py, dmsh_pull.py), from the source with every entry point
     refl.update(side)   # the alpha test and logic operation entry points and the readable-tile version (ps_libraries)
     write_refl(key, refl)

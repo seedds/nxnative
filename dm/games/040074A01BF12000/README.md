@@ -67,6 +67,7 @@ Each step below stopped the boot before its fix:
 
 ## Found on this game
 
+- [A shader build holds a compile cache about the size of the library it writes](../../../docs/reference/packing.md#a-shader-build-holds-a-compile-cache-about-the-size-of-the-library-it-writes): the full build's own files peaked at 4.9 GB with the cache compressed (3.08x) and filled lazily, against about 7.6 GB with the plain cache; the eager fill copied 19,550 earlier libraries (0.70 GB), and a chain change asked for none.
 - [A prebuild pool sized from the Super cores](../../../docs/reference/shaders.md#a-prebuild-pool-sized-from-the-super-cores): the pipeline prebuild of its 21,225 shader pairs, M5 Pro, 393-452 s on 4 workers against 187-272 s on Metal's 14 (resolved).
 - [A depth clear over the whole target with a partial stencil mask](../../../docs/reference/rendering.md#a-depth-clear-over-the-whole-target-with-a-partial-stencil-mask): 22.8 MB of depth and stencil loaded a frame for a stencil mask of 1 (resolved).
 - [No Game language row in an app packed from a NUP or a dump](../../../docs/reference/packing.md#no-game-language-row-in-an-app-packed-from-a-nup-or-a-dump): reported by testers; this folder's dump has no control data.

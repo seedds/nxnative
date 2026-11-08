@@ -11,13 +11,16 @@ line per phase. This tool reads both:
   gpuprof.py log.txt --timeline 600        every encoder of frame 600 in GPU order, with the idle gaps between them
   gpuprof.py log.txt --ab                  the [ab] phases: medians per configuration and the difference from the base
 
+With DM_NVN_GPUPROF_GEOM=1 a render pass line ends in "geom <us>" (from the pass's start to where its vertex and mesh stages finish): the timeline splits each pass into
+geometry and the time after it, and the table adds the mean geometry ms per frame of each group.
+
 Times are GPU timestamps taken where each encoder begins and ends (relaxed: encoders may overlap), so the sum over encoders is not the frame's GPU time; the frame line's
 span (first start to last end) is closer to it. See docs/agents/05-debugging.md, "GPU time on the device".
 """
 import argparse, collections, re, statistics, sys
 
 ENC = re.compile(r'\[gpuprof\] F(\d+)\s+(\d+)\s+([\d.]+) us (render pass|compute / copy)(.*)')
-RP = re.compile(r'^ (\d+) (\d+)x(\d+) colors (\d+) depth (\d+) loads (\d+) draws (\d+) start ([+-][\d.]+) seg (\d+)(?: load (\d+) KB store (\d+) KB)?(?: fmt (\d+)/(\d+))?')
+RP = re.compile(r'^ (\d+) (\d+)x(\d+) colors (\d+) depth (\d+) loads (\d+) draws (\d+) start ([+-][\d.]+) seg (\d+)(?: load (\d+) KB store (\d+) KB)?(?: fmt (\d+)/(\d+))?(?: geom ([\d.]+))?')
 CP = re.compile(r'^ after pass (\d+) start ([+-][\d.]+) seg (\d+) copies (\d+) \(uniform updates (\d+)\) dispatches (\d+)')
 FRAME = re.compile(r'\[gpuprof\] frame (\d+): render ([\d.]+) ms, compute / copy ([\d.]+) ms over (\d+) encoders.*?first start to last end ([\d.]+) ms')
 AB = re.compile(r'\[ab\] phase (\d+) (\S+): (\d+) frames, GPU p50 ([\d.]+) / p90 ([\d.]+) / mean ([\d.]+) ms, frame p50 ([\d.]+) / p90 ([\d.]+) / mean ([\d.]+) ms'
@@ -39,7 +42,8 @@ def fmt_name(v):
     return MTL_FORMATS.get(v, str(v)) if v else '-'
 
 
-Enc = collections.namedtuple('Enc', 'frame idx us kind pass_ w h colors depth loads draws start seg load_kb store_kb cfmt dfmt copies ubd dispatches')
+# geom: us from a render pass's start to where its vertex and mesh stages finish (DM_NVN_GPUPROF_GEOM=1), None without
+Enc = collections.namedtuple('Enc', 'frame idx us kind pass_ w h colors depth loads draws start seg load_kb store_kb cfmt dfmt copies ubd dispatches geom', defaults=(None,))
 
 
 def parse(lines):
@@ -55,7 +59,8 @@ def parse(lines):
                 if not r: continue
                 g = [int(x) if x is not None else 0 for x in (r.group(1), r.group(2), r.group(3), r.group(4), r.group(5), r.group(6), r.group(7))]
                 e = Enc(f, idx, us, 'R', g[0], g[1], g[2], g[3], g[4], g[5], g[6], float(r.group(8)), int(r.group(9)),
-                        int(r.group(10) or 0), int(r.group(11) or 0), int(r.group(12) or 0), int(r.group(13) or 0), 0, 0, 0)
+                        int(r.group(10) or 0), int(r.group(11) or 0), int(r.group(12) or 0), int(r.group(13) or 0), 0, 0, 0,
+                        float(r.group(14)) if r.group(14) else None)
             else:
                 c = CP.match(rest)
                 if not c: continue
@@ -117,6 +122,18 @@ def aggregate(frames, by='shape', only=None):
     rows = [(k, v[0] / nf, v[1] / nf, v[2] / nf, v[3] / nf, v[4] / nf) for k, v in agg.items()] if nf else []
     rows.sort(key=lambda r: -r[2])
     return rows, nf
+
+
+def geom_means(frames, by='shape', only=None):
+    """Mean geometry us per frame of each group that has DM_NVN_GPUPROF_GEOM stamps ({group: us}; empty without them)"""
+    tot, nf = collections.defaultdict(float), 0
+    for f, es in frames.items():
+        if only and f not in only: continue
+        nf += 1
+        ref = max((e.w * e.h for e in es if e.kind == 'R' and e.colors), default=0)
+        for e in es:
+            if e.geom is not None: tot[shape_key(e) if by == 'shape' else class_key(e, ref)] += e.geom
+    return {k: v / nf for k, v in tot.items()} if nf else {}
 
 
 def parse_ab(lines):
@@ -188,7 +205,8 @@ def main(argv=None):
             gap = max(0.0, e.start - end); end = max(end, e.start + e.us)
             if e.kind == 'R':
                 what = (f'pass {e.pass_} {e.w}x{e.h} {e.colors}c{"+d" if e.depth else ""} draws {e.draws} loads {e.loads} '
-                        f'load {e.load_kb} KB store {e.store_kb} KB {fmt_name(e.cfmt)}/{fmt_name(e.dfmt)}')
+                        f'load {e.load_kb} KB store {e.store_kb} KB {fmt_name(e.cfmt)}/{fmt_name(e.dfmt)}'
+                        + (f' | geometry {e.geom:.1f} us, after it {e.us - e.geom:.1f} us' if e.geom is not None else ''))
             else:
                 what = f'compute / copy after pass {e.pass_}: copies {e.copies} (uniform updates {e.ubd}) dispatches {e.dispatches}'
             print(f'  {e.idx:4d} +{e.start:9.1f} {e.us:8.1f}{"  gap %.1f" % gap if gap >= 1 else "":>12s}  {what}')
@@ -203,11 +221,13 @@ def main(argv=None):
     rows, nf = aggregate(frames, a.by, only)
     tot = sum(r[2] for r in rows) or 1
     print(f'\nmean per frame over {nf} frames, by {a.by}:')
-    print(f'  {"group":52s} {"passes":>7s} {"ms":>7s} {"share":>6s} {"us/pass":>8s} {"draws":>7s} {"load MB":>8s} {"store MB":>8s}')
+    geo = geom_means(frames, a.by, only)
+    print(f'  {"group":52s} {"passes":>7s} {"ms":>7s} {"share":>6s} {"us/pass":>8s} {"draws":>7s} {"load MB":>8s} {"store MB":>8s}' + (f' {"geom ms":>8s}' if geo else ''))
     shown, rest = rows[:a.top], rows[a.top:]
     if rest: shown = shown + [('other (%d groups)' % len(rest), sum(r[1] for r in rest), sum(r[2] for r in rest), sum(r[3] for r in rest), sum(r[4] for r in rest), sum(r[5] for r in rest))]
     for k, n, us, dr, ld, st in shown:
-        print(f'  {k:52s} {n:7.1f} {us / 1e3:7.2f} {100 * us / tot:5.1f}% {us / n if n else 0:8.1f} {dr:7.0f} {ld / 1024:8.1f} {st / 1024:8.1f}')
+        g = (f' {geo[k] / 1e3:8.2f}' if k in geo else f' {"-":>8s}') if geo else ''
+        print(f'  {k:52s} {n:7.1f} {us / 1e3:7.2f} {100 * us / tot:5.1f}% {us / n if n else 0:8.1f} {dr:7.0f} {ld / 1024:8.1f} {st / 1024:8.1f}' + g)
     print(f'  {"total":52s} {sum(r[1] for r in rows):7.1f} {tot / 1e3:7.2f}')
     return 0
 

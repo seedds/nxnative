@@ -1,0 +1,2 @@
+/* English is the key of every translation (zh-Hans.lproj and the others), so this table stays empty. It is here so that English is a language the app has:
+   a player whose language has no table gets English, the development language, rather than the one translation there is (dm/ios/tests/test_launcher_strings.py). */

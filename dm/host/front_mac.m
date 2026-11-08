@@ -1467,9 +1467,9 @@ void front_run(void (*guest)(void)) {
             (void)n; static int vis = -1; int v = (win.occlusionState & NSWindowOcclusionStateVisible) != 0; if (v == vis) return; vis = v;
             if (v) LOG("front end: window visible"); else LOG("front end: window covered (its display link fires about once a second: frame times measure nothing)"); }];
         // Main menu: AppKit runs ⌘ shortcuts only through menu items, so ⌘Q quits and ⌃⌘F toggles fullscreen from here (AppKit shows the item as Globe-F and keeps ⌃⌘F as a hidden twin)
-        NSMenu *bar = [NSMenu new], *app = [NSMenu new], *wm = [[NSMenu alloc] initWithTitle:@"Window"];
+        NSMenu *bar = [NSMenu new], *app = [NSMenu new], *wm = [[NSMenu alloc] initWithTitle:NSLocalizedString(@"Window", nil)];
         [[bar addItemWithTitle:@"" action:nil keyEquivalent:@""] setSubmenu:app];
-        [app addItemWithTitle:[@"Quit " stringByAppendingString:@(DM_GAME_NAME)] action:@selector(terminate:) keyEquivalent:@"q"];
+        [app addItemWithTitle:[NSString stringWithFormat:NSLocalizedString(@"Quit %@", nil), @(DM_GAME_NAME)] action:@selector(terminate:) keyEquivalent:@"q"];
         // Cheats (hle_cheats.c): the rows rebuild on every open through the delegate, the same rows the file reload changes
         g_cheats_menu = [DmCheatsMenuDelegate new];
         NSMenu *cm = [[NSMenu alloc] initWithTitle:@"Cheats"];
@@ -1482,7 +1482,7 @@ void front_run(void (*guest)(void)) {
         [[bar addItemWithTitle:@"Cheats" action:nil keyEquivalent:@""] setSubmenu:cm];
         if (getenv("DM_CHEATS_WINDOW") && atoi(getenv("DM_CHEATS_WINDOW")))   // the Cheats panel open from the start (beside the game, not key)
             dispatch_async(dispatch_get_main_queue(), ^{ [g_cheats_menu showPanel:nil]; });
-        [[bar addItemWithTitle:@"Window" action:nil keyEquivalent:@""] setSubmenu:wm];
+        [[bar addItemWithTitle:NSLocalizedString(@"Window", nil) action:nil keyEquivalent:@""] setSubmenu:wm];
         [wm addItemWithTitle:@"Enter Full Screen" action:@selector(toggleFullScreen:) keyEquivalent:@"f"].keyEquivalentModifierMask = NSEventModifierFlagControl | NSEventModifierFlagCommand;
         NSApp.mainMenu = bar;
         const char *fs = getenv("DM_FULLSCREEN");   // 1 (or any value but 0): start in fullscreen; 0, the settings window's Window, or unset: a window
@@ -1605,9 +1605,9 @@ int front_text_input(const char *title, const char *sub, const char *guide, cons
         NSString *info = [NSString stringWithFormat:@"%s%s%s", sub ? sub : "", sub && *sub && guide && *guide ? "\n" : "", guide ? guide : ""];
         for (;;) {
             NSAlert *a = [NSAlert new];
-            a.messageText = title && *title ? @(title) : @"Input";
+            a.messageText = title && *title ? @(title) : NSLocalizedString(@"Input", nil);
             a.informativeText = info;
-            [a addButtonWithTitle:@"OK"]; [a addButtonWithTitle:@"Cancel"];
+            [a addButtonWithTitle:NSLocalizedString(@"OK", nil)]; [a addButtonWithTitle:NSLocalizedString(@"Cancel", nil)];
             NSTextField *f = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 300, 24)];
             f.stringValue = text ?: (initial ? @(initial) : @"");
             if (guide && *guide) f.placeholderString = @(guide);
@@ -1638,10 +1638,9 @@ void front_gpu_lost(void) {
             if (told++) return;
             NSAlert *a = [NSAlert new];
             a.alertStyle = NSAlertStyleCritical;
-            a.messageText = [@"The GPU stopped running " stringByAppendingString:@(DM_GAME_NAME)];   // @(): the name is UTF-8, which %s would not read as such
-            a.informativeText = [NSString stringWithFormat:@"After a GPU error, macOS stopped running the game's GPU work, so nothing more can be drawn and the game quits. The log has the details. "
-                                                           "Please report it on GitHub with python3 scripts/bug_report.py %@, which collects the log.", @(DM_GAME_ID)];
-            [a addButtonWithTitle:@"Quit"];
+            a.messageText = [NSString stringWithFormat:NSLocalizedString(@"The GPU stopped running %@", nil), @(DM_GAME_NAME)];   // @(): the name is UTF-8, which %s would not read as such
+            a.informativeText = [NSString stringWithFormat:NSLocalizedString(@"After a GPU error, macOS stopped running the game's GPU work, so nothing more can be drawn and the game quits. The log has the details. Please report it on GitHub with python3 scripts/bug_report.py %@, which collects the log.", nil), @(DM_GAME_ID)];
+            [a addButtonWithTitle:NSLocalizedString(@"Quit", nil)];
             // An app opened in the background would leave the alert behind other apps' windows, and DM_WINDOW_TOP's floating game window would cover it
             [NSApp activateIgnoringOtherApps:YES];
             [a layout]; NSWindow *game = g_win; if (game && a.window.level <= game.level) a.window.level = game.level + 1;

@@ -8,11 +8,11 @@ import unittest
 
 TOOLS = Path(__file__).resolve().parents[1] / 'tools'
 tree = ast.parse((TOOLS / 'dmsh_build.py').read_text())
-selected = [n for n in tree.body if (isinstance(n, ast.FunctionDef) and n.name == 'sbuf_scalar_index')
+selected = [n for n in tree.body if (isinstance(n, ast.FunctionDef) and n.name in ('sbuf_scalar_index', 'sbuf_index_fix'))
             or (isinstance(n, ast.Assign) and any(getattr(t, 'id', None) == 'SBUF_SCALAR_INDEX' for t in n.targets))]
 scope = {'re': re}
 exec(compile(ast.Module(body=selected, type_ignores=[]), str(TOOLS / 'dmsh_build.py'), 'exec'), scope)
-sbuf_scalar_index = scope['sbuf_scalar_index']
+sbuf_scalar_index, sbuf_index_fix = scope['sbuf_scalar_index'], scope['sbuf_index_fix']
 
 # The shape SPIRV-Cross prints for the translator's miscompiled load (f0db173d46f9cdc5's PrimitiveUploadIndices[PrimitiveIndex])
 LOST = """    int _120 = _118 * 4;
@@ -34,6 +34,10 @@ class ScalarIndex(unittest.TestCase):
     def test_plain_element_zero_read_is_kept(self):
         plain = '    uint _9 = as_type<uint>((*spvDescriptorSet0.cp_s0)._m0[0]);\n'
         self.assertEqual(sbuf_scalar_index(plain), plain)
+
+    def test_only_ampere_shaders_are_rewritten(self):   # the miscompile was seen on NVN2 (job arch sm86); a Maxwell shader's MSL stays as the translator wrote it
+        self.assertEqual(sbuf_index_fix({'arch': 'sm86'}, LOST), sbuf_scalar_index(LOST))
+        self.assertEqual(sbuf_index_fix({}, LOST), LOST)
 
     def test_offset_not_checked_against_a_size_is_kept(self):
         other = LOST.replace('>= as_type<uint>((*spvDescriptorSet0.cp_c1)._m0[2].z)', '>= 16u')

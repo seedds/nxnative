@@ -1572,8 +1572,8 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 ### A scalar storage-buffer load that lost its index
 
 - **Symptom:** a 3D background or scene drawn black, every instance at the same place: GPUScene's upload scattered every primitive to slot 0.
-- **Cause:** the translated MSL of a scalar storage-buffer load computes and bounds-checks its offset, but indexes element 0.
-- **Fix:** `dmsh_build.py` `sbuf_scalar_index` gives such a load its index back.
+- **Cause:** the translated MSL of a scalar storage-buffer load computes and bounds-checks its offset, but indexes element 0 (its SPIR-V access chain has a constant 0). Where the translator loses the offset is not found yet (open).
+- **Fix (a workaround):** `dmsh_build.py` `sbuf_scalar_index` gives such a load its index back in the MSL, on Ampere (NVN2) shaders only, where it was seen (`sbuf_index_fix`).
 - **Found on:** Orbitals (`040004F027560000`): the GPUScene upload compute shaders; the title's 3D background.
 - **Check:** `python3 dm/gfx/tests/test_dmsh_sbuf_index.py`.
 

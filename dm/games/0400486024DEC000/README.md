@@ -98,6 +98,7 @@ From an empty save: at about 45 s `A` (title), `A` (New Game), then the movie. F
 
 ## Found on this game
 
+- [Repeated archive misses while hybrid pipeline demand is saturated](../../../docs/reference/frame-rate.md#repeated-archive-misses-while-hybrid-pipeline-demand-is-saturated): repeated failed base-pipeline lookups dominated the presentation thread in the city.
 - [One Pro Controller read as two players](../../../docs/reference/services.md#one-pro-controller-read-as-two-players): resolved, no music in Kokiri Forest gameplay and its cutscenes; the controller applet opened over and over and the game kept its music suspended while it had focus.
 - [A fixed frame step plays in slow motion on a slow Mac](../../../docs/reference/frame-rate.md#a-fixed-frame-step-plays-in-slow-motion-on-a-slow-mac): the frame-ratio division.
 - [Frame-step stubs placed by their function](../../../docs/reference/rewriter.md#frame-step-stubs-placed-by-their-function)
@@ -161,3 +162,11 @@ From an empty save: at about 45 s `A` (title), `A` (New Game), then the movie. F
 - [Live resolution variants share physical image storage](../../../docs/reference/rendering.md#live-resolution-variants-share-physical-image-storage): the dynamic-resolution depth buffer (`COMPRESSIBLE` alone) kept 15-16 live sizes at one offset, 14.5 MB each, as separate Metal textures (GPU allocation 7,710 → 7,520 MB in Kokiri Forest before main's Ocarina fixes; the 17 sizes still form on main at 2eb71820, where all Depth32Float textures take 225 MB with them shared).
 - [Pixel shader inputs the mesh shader does not write](../../../docs/reference/shaders.md#pixel-shader-inputs-the-mesh-shader-does-not-write): the foliage point meshes' pipelines (pixel shaders reading generic attribute 5 that no mesh output writes).
 - [Mesh outputs as wide as their pixel shaders read](../../../docs/reference/shaders.md#mesh-outputs-as-wide-as-their-pixel-shaders-read): the foliage mesh `626fbf48041cb82b`, padded to 35,840 bytes of mesh output, past Metal's 32 KB.
+
+## Local city pipeline lookup validation
+
+[Repeated archive misses while hybrid pipeline demand is saturated](../../../docs/reference/frame-rate.md#repeated-archive-misses-while-hybrid-pipeline-demand-is-saturated) was found on Apple M5 / macOS 27.0.1, game v131072, SDK 22.2.8. These gameplay measurements used baseline `bd979ced3ae6` and a host carrying local frame-step and packaging changes; the candidate added only the miss cache. They are historical evidence for the mechanism, not a fresh performance comparison on current main. In the city, frame 4500's 300-frame window had frame-time p50/p95/max 107.06/169.34/268.74 ms, GPU p50/p95 24.27/31.89 ms, and CPU translation 113.837 ms per frame. Its 9,208 failed archive searches cost 30,532.8 ms; the demand queue held 384 entries. A live sample spent 287/456 presentation-thread samples under Metal archive lookup.
+
+After the process-local miss cache was installed, the player returned to the same area and reported roughly stable 30 fps. The new frame 3600 window measured frame-time p50/p95/max 28.49/33.78/37.54 ms, GPU p50/p95 27.85/33.33 ms, and CPU translation 6.439 ms per frame. Five failed archive searches cost 14.6 ms over those 300 frames. Earlier new-run windows had similar CPU costs (6.317–6.358 ms). GPU time now dominates those windows.
+
+This is a same-area gameplay comparison, not a deterministic replay: camera, route and cache warmth were not held identical. Only this game was available locally; the regression harness could not locate its manually assembled build layout. The focused archive regression is rerun on the PR base; no new gameplay result is implied.

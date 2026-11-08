@@ -393,11 +393,25 @@ HLE_FORCE("_ZN2nn2oe28SetResumeNotificationEnabledEb", "resume notification swit
 HLE_FORCE("_ZN2nn2oe42SetOperationModeChangedNotificationEnabledEb", "operation mode change notification switch", void, h_oe_SetOpModeNtf, unsigned on) { g_ntf_opmode = on & 0xff; }
 HLE_FORCE("_ZN2nn2oe44SetPerformanceModeChangedNotificationEnabledEb", "performance mode change notification switch", void, h_oe_SetPerfModeNtf, unsigned on) { g_ntf_perfmode = on & 0xff; }
 
+// The code GetDesiredLanguage returns. DM_LANG is the NACP tag (zh-Hans, zh-Hant). A game that only reads this
+// code and compares it itself is given the older settings tag instead: zh-CN (nn::settings::Language 6) and zh-TW
+// (11). Dragon Quest VII Reimagined 1.1.0 (0100505021440000, SDK 19.3.1) imports GetDesiredLanguage and no
+// nn::settings symbol (main, sdk and subsdk0). zh-Hans shares the prefix zh-H with zh-Hant; that boot stored
+// LanguageSaveData998 as zh-Hant and drew the Korean default of this SKU. Eden's Chinese slot is the code zh-CN,
+// and the same ROM draws Chinese. The settings equality hooks already match both spellings (hle_sdk16.c); they
+// never run for this game. A game whose main or an NRO imports nn::settings (Paper Mario's language list,
+// Catherine's LanguageCode::Make) keeps the NACP tag, so the index it finds in that list stays put.
+static const char *oe_desired(const char *e) {
+    if (!e || !*e) return "en-US";
+    if (dm_game_imports("_ZN2nn8settings")) return e;
+    if (!strcmp(e, "zh-Hans")) return "zh-CN";
+    if (!strcmp(e, "zh-Hant")) return "zh-TW";
+    return e;
+}
 // nn::settings::LanguageCode = struct { char string[8]; }, 8 bytes returned by value in x0
 HLE_FORCE("_ZN2nn2oe18GetDesiredLanguageEv", "system language query; value from DM_LANG", uint64_t, h_oe_GetLang, void) {
-    const char *e = getenv("DM_LANG");
     char code[8] = {0};
-    strncpy(code, e && *e ? e : "en-US", sizeof code - 1);
+    strncpy(code, oe_desired(getenv("DM_LANG")), sizeof code - 1);
     uint64_t v; memcpy(&v, code, 8);
     return v;
 }

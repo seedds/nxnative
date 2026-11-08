@@ -178,12 +178,11 @@ def guess(F, hooks=None):
     # The engine region needs virtual address memory; without it (OCTOPATH TRAVELER 1.0.5, Unreal Engine 4 on SDK 3.5.1, no system resource; Yoshi's Crafted World, SDK 4: 0xc5200000) nninitStartup sets a heap of pool − used instead,
     # which the heap-region layout above holds
     if F.get('main_markers', set()) & {'Unreal', 'Unreal 4'} and R['exts'].get('.pak') and 'nvnBootstrapLoader' in imp and F['sysres']:
-        G['mem_reserve'] =('0x1028000000', 'Unreal: nninitStartup reserves a 62 GB address region and its FMallocBinned3 takes 37 GB of it, so a 64 GB alias region for the bring-up on the Mac. '
-                            'The rewriter cuts the allocator in any Unreal 4 / 5 main (dm/tools/ue_malloc.py) and gives the region what the alias region has room for (dm/tools/ue_region.py), so an iPhone '
-                            'takes a smaller guest block, as Octopath Traveler 0\'s profile (docs/reference/memory.md)')
-        # Leave 128 MB for the initial heap after the 256 MB module and stack regions.
-        # The old 64.125 GB alias consumed the entire block (SMT V: Vengeance's 6 MB heap failed).
-        G['mem_alias'] = ('0x1000000000', '')
+        G['mem_reserve'] = ('0xF0000000', 'Unreal: nninitStartup reserves a 62 GB address region and its FMallocBinned3 takes 37 GB of it. '
+                            'The profile is the iPhone block, 3.75 GB with a 3.125 GB alias region, as the other Unreal 4.27 games: iOS refuses the old 64.6 GB reservation (reserve guest AS). '
+                            'The Mac host still maps a 64 GB alias region (hle_svc.c). The rewriter cuts the allocator in any Unreal 4 / 5 main (dm/tools/ue_malloc.py) and gives the region what the alias region has room for (dm/tools/ue_region.py), 2.81 GB in this block.')
+        # 128 MB of heap after the 256 MB module region and the 256 MB stacks. A 64.125 GB alias left none (SMT V: Vengeance's 6 MB heap failed).
+        G['mem_alias'] = ('0xC8000000', '')
     G.update(preset)
     return G
 

@@ -6,6 +6,13 @@
 #include HLE_OE_SOURCE
 #include <signal.h>
 #include <sys/wait.h>
+static int g_settings_import;   // the language test: 1 when main or an NRO imports nn::settings, as dm_game_imports reports
+int dm_game_imports(const char *prefix) { return g_settings_import && !strncmp(prefix, "_ZN2nn8settings", 15); }
+static uint64_t lang_of(const char *env) {
+    if (env) setenv("DM_LANG", env, 1); else unsetenv("DM_LANG");
+    return h_oe_GetLang();
+}
+static int lang_is(uint64_t v, const char *s) { char b[8] = {0}; memcpy(b, &v, 8); return strncmp(b, s, 8) == 0; }
 void dm_thread_native_wait(int entering) { (void)entering; } // queue-only test, without the guest scheduler
 uint64_t now_ns(void) { return 0; }
 void dm_audio_suspend(int on) { (void)on; }   // stubs for the bg item of DM_OE_SCRIPT (hle_audio.c / hle_os.c / hle_nvn.c)
@@ -155,5 +162,16 @@ int main(void) {
     h_oe_SetFocusMode(3); dm_applet_enter("test");
     CHECK(empty() && h_oe_GetFocus() == 2, "focus mode 3: an applet changes the state without a notification");
     dm_applet_leave(); CHECK(empty() && h_oe_GetFocus() == 1, "focus mode 3: back to 1 without a notification");
+    // Desired language. A game that does not import nn::settings gets the older settings code for Chinese (DQ7 compares the code itself);
+    // one that does keeps the NACP tag, so its index in the settings list does not move.
+    g_settings_import = 0;
+    CHECK(lang_is(lang_of(NULL), "en-US"), "no DM_LANG: en-US");
+    CHECK(lang_is(lang_of("ja"), "ja"), "ja passes through");
+    CHECK(lang_is(lang_of("zh-Hans"), "zh-CN"), "without a settings import, zh-Hans is returned as zh-CN");
+    CHECK(lang_is(lang_of("zh-Hant"), "zh-TW"), "without a settings import, zh-Hant is returned as zh-TW");
+    g_settings_import = 1;
+    CHECK(lang_is(lang_of("zh-Hans"), "zh-Hans"), "a settings import keeps the NACP tag zh-Hans");
+    CHECK(lang_is(lang_of("zh-Hant"), "zh-Hant"), "a settings import keeps the NACP tag zh-Hant");
+    unsetenv("DM_LANG"); g_settings_import = 0;
     printf("== oe %d checks, %d failed ==\n", checks, fails); return fails != 0;
 }

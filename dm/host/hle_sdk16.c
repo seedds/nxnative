@@ -365,8 +365,11 @@ static const char *const k_lang_code[] = {"ja", "en-US", "fr", "de", "it", "es",
 // GetDesiredLanguage's code for Chinese only with Language::Chinese (6) and Taiwanese (11), so the system must hand
 // them zh-CN / zh-TW, while DM_LANG carries zh-Hans / zh-Hant (the NSP script's spelling for the control data's
 // Simplified and Traditional Chinese). Which spelling the system picks for a title is not known: both spellings of
-// one script match here instead, in both operator directions. Do not rewrite GetDesiredLanguage or collapse Make /
-// the available list: newer games use the distinct entries and their indices (SimplifiedChinese 15 / TraditionalChinese 16).
+// one script match here instead, in both operator directions. Do not collapse Make or the available list: newer
+// games use the distinct entries and their indices (SimplifiedChinese 15 / TraditionalChinese 16). GetDesiredLanguage
+// returns the older spelling only when main and the NROs import no nn::settings symbol (hle_oe.c): that game compares
+// the code itself and never reaches this alias. One that takes an index from this list imports nn::settings and still
+// receives the NACP tag.
 static unsigned language_code_matches(int32_t lang, const char *code) {
     if ((unsigned)lang >= sizeof k_lang_code / sizeof *k_lang_code) return 0;
     if (!strncmp(k_lang_code[lang], code, 8)) return 1;

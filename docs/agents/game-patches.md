@@ -54,6 +54,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | `build` → `game` | 60 fps frame step: the KIDS frame task, frame-rate block and event cutscene counters | frame rate | blocked: a function-matched frame step (MATCH_FRAME_STEP) covers one function; these stubs span several | judgement | 1 | [Hyrule Warriors: Age of Calamity](../../dm/games/01002B00111A2000/README.md) | the game's own frame code; only the host's frame-step state page is shared. Fire Emblem: Three Houses and Taiko Risshiden V DX run on KTGL too, with other frame code |
 | `build` → `game` | screen shape: the sizes, the view, the layouts' projection and their edge widgets (DM_SCREEN_ASPECT) | rendering | blocked: the stubs have no function-matched form yet | judgement | 1 | [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md) | the output size is the host's, but where the game takes its sizes, its cameras and its layouts are this build's code |
 | `build` → `game` | Hagi coroutine stack region 1 GB → 64 MB | memory | kept: 1.1.4 is the last update; a match over Hagi would serve no other build of this game | checked: the final build 1.1.4 (the only one the profile packs), 2026-11-04 | 1 | [Super Mario 3D All-Stars: Super Mario Sunshine](../../dm/games/010049900F546002/README.md) | a size inside Hagi's own code: nothing the host sees tells a 1 GB reservation it can shrink from one it cannot |
+| `build` → `game` | render size: the app settings' width and height from the state page | rendering | kept: tested on 1.0.131248 only; PR #485 saw v0 crash at 1600x900 with the same change, so each build needs its own run first | checked: 1.0.131248 headless at 1600x900, 1920x1080, 2560x1440 and 3840x2160 (M5 Max, macOS 26.6.2) | 1 | [Hades II](../../dm/games/0100A00019DE0000/README.md) | the game's own init constant; the same two instructions sit at main+0x2a6080 in v0, so a function-matched rule could carry it over the updates |
 
 ## Summary
 
@@ -67,6 +68,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [FINAL FANTASY CRYSTAL CHRONICLES Remastered Edition](#final-fantasy-crystal-chronicles-remastered-edition) | 8 | 0 | 0 | 0 | 0 | `build` → `engine` |
 | [FINAL FANTASY TACTICS - The Ivalice Chronicles](#final-fantasy-tactics---the-ivalice-chronicles) | 2 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Fire Emblem: Three Houses](#fire-emblem-three-houses) | 7 | 0 | 0 | 0 | 0 | `build` → `game` |
+| [Hades II](#hades-ii) | 0 | 0 | 1 | 0 | 0 | `build` → `game` |
 | [Hyrule Warriors: Age of Calamity](#hyrule-warriors-age-of-calamity) | 0 | 0 | 5 | 0 | 0 | `build` → `game` |
 | [Luigi's Mansion 3](#luigis-mansion-3) | 0 | 0 | 0 | 0 | 1 | `build` → `engine` |
 | [Mario + Rabbids® Sparks of Hope](#mario--rabbids-sparks-of-hope) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
@@ -319,6 +321,16 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - cut `+0x50f8ec`: render thread wait timeout: fdiv s0,s1,s0 → ldr s8,[x8,#0xb50] (1000.0)
   - cut `+0x50f8f0`: render thread wait timeout: adrp x8,#0xcb7000 → fdiv s0,s8,s0 (1000/fps; the fmul by s8 that follows makes it µs)
   - cut `+0x50f8f4`: render thread wait timeout: ldr s8,[x8,#0xb50] → nop (moved up)
+
+### Hades II
+
+[Hades II](../../dm/games/0100A00019DE0000/README.md), `0100A00019DE0000`, [patches.py](../../dm/games/0100A00019DE0000/patches.py).
+
+- **`build` → `game`**, rendering, kept: tested on 1.0.131248 only; PR #485 saw v0 crash at 1600x900 with the same change, so each build needs its own run first, checked: 1.0.131248 headless at 1600x900, 1920x1080, 2560x1440 and 3840x2160 (M5 Max, macOS 26.6.2): render size: the app settings' width and height from the state page. The game's own init constant; the same two instructions sit at main+0x2a6080 in v0, so a function-matched rule could carry it over the updates
+
+- **1.0.131248 `main`** `e4f73664…` ([patches.py:23](../../dm/games/0100A00019DE0000/patches.py#L23))
+  - frame step `+0x2a4eb0`: app settings width and height: the state page's render size (DM_RENDER_SIZE), 1280x720 when it is 0
+  - launcher capabilities: RENDER_SIZE
 
 ### Hyrule Warriors: Age of Calamity
 

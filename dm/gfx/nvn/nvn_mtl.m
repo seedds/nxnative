@@ -11121,7 +11121,7 @@ static int mfx_present_frame(const tex_t *t, double period) { @autoreleasepool {
         if (keep && mfx_dump_due()) { while (atomic_load(&g_mfx_busy[a])) usleep(200); mfx_dump((long)atomic_load(&g_cur_frame), nil, nil); }   // DM_MFX_DUMP (diagnostic): waits for the GPU
     }
     g_mfx.scene_done = g_mfx.ui_cleared = g_mfx.depth_done = g_mfx.want_cam = g_mfx.ready = g_mfx.swap_draws = g_mfx.ui_lost = 0; g_mfx.canvas_tex = nil;
-    if (++g_mfx.frames % 300 == 0) { char b[512]; mfx_stats(b, sizeof b); MLOG("[mfx] up to frame %llu: %s", (unsigned long long)atomic_load(&g_cur_frame), b); }
+    if (++g_mfx.frames % 300 == 0) { char b[768]; mfx_stats(b, sizeof b); MLOG("[mfx] up to frame %llu: %s", (unsigned long long)atomic_load(&g_cur_frame), b); }
     return slot;
 } }
 static uint64_t present_enqueue(const tex_t *t, double period, const int crop[4], uint64_t ev_val) {

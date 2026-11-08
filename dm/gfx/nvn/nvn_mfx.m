@@ -13,7 +13,7 @@
 //  - the G-buffer depth (D32F, not reversed, infinite far plane) and the camera block.
 // Motion vectors come from the camera: depth plus this and the previous frame's view-projection. A pixel whose depth does
 // not match the previous frame's there (the previous depth around the reprojected position) is not still world: it gets
-// no motion on screen (mfx_mv_dyn, 2026-10-23). Before, what moves with the camera (Link) got the background's camera
+// no motion on screen (mfx_mv_dyn, 2026-10-23; on ground that moves with the camera, see mfx_ground). Before, what moves with the camera (Link) got the background's camera
 // motion and was put off his place in every interpolated frame, by the camera's step between two game frames: at 25+25
 // or 30+30 twice the step of 50+50 and 25-30 times a second, so he shook while the world stayed right (Breath of the Wild
 // 1.6.0). Zero motion everywhere shook the whole picture: MetalFX relies on the motion it is given. Conventions measured by the probe: motion in pixels of the motion texture, pointing to the
@@ -56,6 +56,7 @@ int mfx_dump_due(void) { return 0; }
 void mfx_dump(long frame, id<MTLTexture> prev, id<MTLTexture> cur) { (void)frame; (void)prev; (void)cur; }
 #else
 
+#define MFX_VOTES 8   /* frames of still-pixel votes kept: the GPU has long finished the one read and the one cleared */
 #define MFX_OUT 4   /* output slots: one per interpolated frame between its encode and its present; the present queue normally holds two (MacNativeGames: 3) */
 static struct {
     id<MTLDevice> dev;
@@ -64,10 +65,12 @@ static struct {
     id<MTLTexture> scene[2], ui, mv, out[MFX_OUT], outv[MFX_OUT];
     id<MTLTexture> pdepth; uint64_t pdepth_frame;   // the previous interpolated frame's depth (copied after its motion), and its g.frames
     id<MTLResidencySet> rs;
-    id<MTLComputePipelineState> mv_ps, fix_ps;
+    id<MTLComputePipelineState> mv_ps, fix_ps, vote_ps;
     id<MTL4ArgumentTable> mv_args[MFX_OUT], fix_args[MFX_OUT];
     __strong id<MTLTexture> repair;   // mfx_ui_repair: the canvas this frame's UI layer is corrected from
     id<MTLBuffer> mv_par[MFX_OUT];
+    id<MTLBuffer> votes;            // MFX_VOTES frames of {pixels asked, then the pixels still under each of the six explanations of the camera step} (mfx_ground)
+    uint64_t nvotes, ground_frames; unsigned enc_vote; uint32_t last_votes[7];
     id<MTLFence> fence;
     int cur;                       // scene[cur] is written by this frame
     int scene_ok, cam_ok;          // this frame
@@ -193,7 +196,7 @@ static void ensure_fi(NSUInteger iw, NSUInteger ih) {
     if (!g.mv_ps) {
         static const char *src =
             "#include <metal_stdlib>\nusing namespace metal;\n"
-            "struct P { float4x4 reproj; float2 size; float2 inv_size; float yflip; float dyn, pad1, pad2; };\n"
+            "struct P { float4x4 reproj; float2 size; float2 inv_size; float yflip; float dyn, pad1, pad2; float4x4 hyp[6]; };\n"
             // view distance from a depth value (not reversed, infinite far plane: z = near / (1 - d)), in units of near
             "static float vz(float d) { return 1.0 / max(1.0 - d, 1e-7); }\n"
             // camera motion of each depth pixel: where it was in the previous frame, in pixels of this texture. With dyn, a
@@ -207,25 +210,38 @@ static void ensure_fi(NSUInteger iw, NSUInteger ih) {
             "  float4 l = u.read(g); float3 want = c.read(g).rgb, got = saturate(l.rgb + s.read(g).rgb * (1.0 - saturate(l.a)));\n"
             "  if (any(abs(want - got) > 4.0 / 1023.0)) u.write(float4(want, 1.0), g);\n"
             "}\n"
-            "kernel void mfx_mv(depth2d<float, access::read> d [[texture(0)]], texture2d<float, access::write> mv [[texture(1)]],\n"
-            "                   depth2d<float, access::read> pd [[texture(2)]], constant P &p [[buffer(0)]], uint2 g [[thread_position_in_grid]]) {\n"
-            "  if (g.x >= uint(p.size.x) || g.y >= uint(p.size.y)) return;\n"
-            "  float2 uv = (float2(g) + 0.5) * p.inv_size;\n"
+            // one reprojection of one pixel: m its motion; 1 still, 0 not, -1 cannot tell (off the picture, the sky)
+            "static int mfx_reproject(depth2d<float, access::read> pd, float4x4 r, float2 uv, float d0, constant P &p, thread float2 &m) {\n"
+            "  float4 c = r * float4(uv.x * 2.0 - 1.0, p.yflip * (1.0 - uv.y * 2.0), d0 * 2.0 - 1.0, 1.0);\n"
+            "  m = 0.0;\n"
+            "  if (c.w <= 1e-7) return -1;\n"
+            "  float2 n = c.xy / c.w, prev = float2(n.x * 0.5 + 0.5, 0.5 - 0.5 * p.yflip * n.y);\n"
+            "  m = (prev - uv) * p.size;\n"
+            "  int2 q = int2(floor(prev * p.size));\n"
+            "  if (!(d0 < 1.0 && all(q >= 1) && all(q < int2(p.size) - 1))) return -1;\n"
+            "  float ze = vz(c.z / c.w * 0.5 + 0.5), zmin = 3.4e38, zmax = 0.0; bool near = false;\n"
+            "  for (int y = -1; y <= 1; y++) for (int x = -1; x <= 1; x++) {\n"
+            "    float z = vz(pd.read(uint2(q + int2(x, y)))); zmin = min(zmin, z); zmax = max(zmax, z); near = near || fabs(z - ze) <= ze * 0.01; }\n"
+            "  return (zmax <= zmin * 1.05 ? (ze >= zmin * 0.99 && ze <= zmax * 1.01) : near) ? 1 : 0;\n"
+            "}\n"
+            // every 8th pixel in both directions votes, before the motion is written: how many are still for each explanation of the camera's step (mfx_ground)
+            "kernel void mfx_vote(depth2d<float, access::read> d [[texture(0)]], depth2d<float, access::read> pd [[texture(2)]], constant P &p [[buffer(0)]], device atomic_uint *cnt [[buffer(1)]], uint2 t [[thread_position_in_grid]]) {\n"
+            "  uint2 g = t * 8;\n"
+            "  if (p.dyn <= 0.5 || g.x >= uint(p.size.x) || g.y >= uint(p.size.y)) return;\n"
+            "  float2 uv = (float2(g) + 0.5) * p.inv_size, m;\n"
             "  float d0 = d.read(g);\n"
-            "  float4 c = p.reproj * float4(uv.x * 2.0 - 1.0, p.yflip * (1.0 - uv.y * 2.0), d0 * 2.0 - 1.0, 1.0);\n"
-            "  float2 m = 0.0;\n"
-            "  if (c.w > 1e-7) {\n"
-            "    float2 n = c.xy / c.w, prev = float2(n.x * 0.5 + 0.5, 0.5 - 0.5 * p.yflip * n.y);\n"
-            "    m = (prev - uv) * p.size;\n"
-            "    int2 q = int2(floor(prev * p.size));\n"
-            "    if (p.dyn > 0.5 && d0 < 1.0 && all(q >= 1) && all(q < int2(p.size) - 1)) {\n"
-            "      float ze = vz(c.z / c.w * 0.5 + 0.5), zmin = 3.4e38, zmax = 0.0; bool near = false;\n"
-            "      for (int y = -1; y <= 1; y++) for (int x = -1; x <= 1; x++) {\n"
-            "        float z = vz(pd.read(uint2(q + int2(x, y)))); zmin = min(zmin, z); zmax = max(zmax, z); near = near || fabs(z - ze) <= ze * 0.01; }\n"
-            "      bool still = zmax <= zmin * 1.05 ? (ze >= zmin * 0.99 && ze <= zmax * 1.01) : near;\n"
-            "      if (!still) m = 0.0;\n"
-            "    }\n"
-            "  }\n"
+            "  if (mfx_reproject(pd, p.hyp[0], uv, d0, p, m) < 0) return;\n"
+            "  atomic_fetch_add_explicit(&cnt[0], 1u, memory_order_relaxed);\n"
+            "  for (int h = 0; h < 6; h++) if (mfx_reproject(pd, p.hyp[h], uv, d0, p, m) == 1) atomic_fetch_add_explicit(&cnt[1 + h], 1u, memory_order_relaxed);\n"
+            "}\n"
+            "kernel void mfx_mv(depth2d<float, access::read> d [[texture(0)]], texture2d<float, access::write> mv [[texture(1)]],\n"
+            "                   depth2d<float, access::read> pd [[texture(2)]], constant P &p [[buffer(0)]], constant uint *cnt [[buffer(1)]], uint2 g [[thread_position_in_grid]]) {\n"
+            "  if (g.x >= uint(p.size.x) || g.y >= uint(p.size.y)) return;\n"
+            "  int use = 1; for (int h = 2; h < 6; h++) if (cnt[1 + h] > cnt[1 + use]) use = h;\n"
+            "  if (!(p.dyn > 0.5 && cnt[1 + use] >= uint(float(cnt[0]) * 0.55) && float(cnt[1 + use]) >= float(cnt[1]) * 1.25)) use = 0;\n"
+            "  float2 uv = (float2(g) + 0.5) * p.inv_size, m;\n"
+            "  float d0 = d.read(g);\n"
+            "  if (mfx_reproject(pd, p.hyp[use], uv, d0, p, m) == 0 && p.dyn > 0.5) m = 0.0;\n"
             "  if (any(isnan(m)) || any(isinf(m))) m = 0.0;\n"
             "  mv.write(float4(m, 0.0, 0.0), g);\n"
             "}\n";
@@ -234,14 +250,18 @@ static void ensure_fi(NSUInteger iw, NSUInteger ih) {
         id<MTLFunction> fn = lib ? [lib newFunctionWithName:@"mfx_mv"] : nil;
         g.mv_ps = fn ? [g.dev newComputePipelineStateWithFunction:fn error:&e] : nil;
         if (!g.mv_ps) MDIE("motion vector kernel: %s", e.localizedDescription.UTF8String);
+        id<MTLFunction> vfn = [lib newFunctionWithName:@"mfx_vote"];
+        g.vote_ps = vfn ? [g.dev newComputePipelineStateWithFunction:vfn error:&e] : nil;
+        if (!g.vote_ps) MDIE("ground vote kernel: %s", e.localizedDescription.UTF8String);
         id<MTLFunction> ffn = [lib newFunctionWithName:@"mfx_ui_fix"];
         g.fix_ps = ffn ? [g.dev newComputePipelineStateWithFunction:ffn error:&e] : nil;
         if (!g.fix_ps) MDIE("UI layer repair kernel: %s", e.localizedDescription.UTF8String);
-        MTL4ArgumentTableDescriptor *ad = [MTL4ArgumentTableDescriptor new]; ad.maxBufferBindCount = 1; ad.maxTextureBindCount = 3;
+        MTL4ArgumentTableDescriptor *ad = [MTL4ArgumentTableDescriptor new]; ad.maxBufferBindCount = 2; ad.maxTextureBindCount = 3;
         for (int i = 0; i < MFX_OUT; i++) {
             g.mv_args[i] = [g.dev newArgumentTableWithDescriptor:ad error:&e]; if (!g.mv_args[i]) MDIE("argument table: %s", e.localizedDescription.UTF8String);
             g.fix_args[i] = [g.dev newArgumentTableWithDescriptor:ad error:&e]; if (!g.fix_args[i]) MDIE("argument table: %s", e.localizedDescription.UTF8String);
-            g.mv_par[i] = [g.dev newBufferWithLength:256 options:MTLResourceStorageModeShared]; [g.rs addAllocation:g.mv_par[i]];
+            g.mv_par[i] = [g.dev newBufferWithLength:512 options:MTLResourceStorageModeShared]; [g.rs addAllocation:g.mv_par[i]];
+            if (!g.votes) { g.votes = [g.dev newBufferWithLength:MFX_VOTES * 28 options:MTLResourceStorageModeShared]; [g.rs addAllocation:g.votes]; }
         }
         [g.rs commit];
         g.fence = [g.dev newFence];
@@ -276,6 +296,27 @@ static int camera_cut(void) {
     return sqrt(dx * dx + dy * dy + dz * dz) > 8.0 || f < cos(25.0 * M_PI / 180.0);
 }
 
+// Ground that moves with the camera (a walking Divine Beast, whose top carries Link at half a unit a game frame): the camera's step between two
+// frames is then the ground's, so its depth does not match the still-world reprojection: mfx_mv gave scattered parts of the ground no motion and
+// the rest the camera's, and MetalFX tore the picture along the seams. mg[0..4] reproject ground that made one estimate of that step: the camera's
+// own step and the step of a point 3 to 9 units in front of it (the camera swings around Link, who stands there and is carried with the ground).
+// The GPU counts on every 8th pixel how many are still under each (mfx_vote) before it writes the motion (mfx_mv): the best estimate is used on this
+// frame when it explains the depth clearly better than a still world.
+static void mfx_ground(const double vp[16], const double ic[16], double mg[5][16]) {
+    static const double dist[5] = {0, 3, 5, 7, 9};
+    for (int h = 0; h < 5; h++) {
+        double v[3]; for (int k = 0; k < 3; k++) v[k] = g.cam[47 + k * 4] - g.prev_cam[47 + k * 4] - dist[h] * (g.cam[8 + k] - g.prev_cam[8 + k]);
+        double t[16] = {1, 0, 0, -v[0], 0, 1, 0, -v[1], 0, 0, 1, -v[2], 0, 0, 0, 1}, vt[16];
+        mul4(vp, t, vt); mul4(vt, ic, mg[h]);
+    }
+    uint32_t *c = g.votes.contents;
+    if (g.nvotes >= 3) {   // for the log: the decision itself is on the GPU, in the frame
+        memcpy(g.last_votes, c + (g.nvotes + MFX_VOTES - 3) % MFX_VOTES * 7, sizeof g.last_votes);
+        int u = 1; for (int h = 2; h < 6; h++) if (g.last_votes[1 + h] > g.last_votes[1 + u]) u = h;
+        g.ground_frames += g.last_votes[1 + u] >= (uint32_t)(g.last_votes[0] * 0.55f) && g.last_votes[1 + u] >= g.last_votes[1] * 1.25f;
+    }
+    g.enc_vote = g.nvotes++ % MFX_VOTES; memset(c + g.enc_vote * 7, 0, 28);
+}
 void mfx_frame_skip(void) {   // no command buffer free: nothing of this frame is computed, the next pair starts fresh
     g.frames++; g.scene_ok = g.cam_ok = 0; g.depth = nil; g.prev_ok = g.hist_ok = 0; g.skip_busy++;
 }
@@ -303,16 +344,20 @@ int mfx_frame_prepare(double frame_s, unsigned busy) {
         memcpy(g.prev_cam, g.cam, sizeof g.cam); g.cur ^= 1; g.prev_ok = 1; g.hist_ok = 0;
         return -1;
     }
-    double vc[16], vp[16], ic[16], m[16];
+    double vc[16], vp[16], ic[16], m[16], mg[5][16];
     for (int i = 0; i < 16; i++) { vc[i] = g.cam[12 + i]; vp[i] = g.prev_cam[12 + i]; }
     if (!inv4(vc, ic)) { g.skip_input++; g.prev_ok = g.hist_ok = 0; return -1; }
     mul4(vp, ic, m);
+    mfx_ground(vp, ic, mg);
     int s = -1;   // the next output slot no pending present names (busy): a slot is overwritten only after its present is committed, which the encode's queue barrier then waits for
     for (int k = 1; k <= MFX_OUT && s < 0; k++) { int c = (g.slot + k) % MFX_OUT; if (!(busy >> c & 1)) s = c; }
     if (s < 0) { g.skip_busy++; g.prev_ok = g.hist_ok = 0; return -1; }
     g.slot = s;
     float *par = g.mv_par[s].contents;
-    for (int c = 0; c < 4; c++) for (int r = 0; r < 4; r++) par[c * 4 + r] = (float)m[r * 4 + c];   // float4x4 is column-major
+    for (int c = 0; c < 4; c++) for (int r = 0; r < 4; r++) {   // float4x4 is column-major
+        par[c * 4 + r] = (float)m[r * 4 + c]; par[24 + c * 4 + r] = (float)m[r * 4 + c];
+        for (int h = 0; h < 5; h++) par[40 + h * 16 + c * 4 + r] = (float)mg[h][r * 4 + c];
+    }
     par[16] = (float)depth.width; par[17] = (float)depth.height; par[18] = 1.0f / depth.width; par[19] = 1.0f / depth.height; par[20] = (float)g.yflip;
     par[21] = g.pdepth_frame && g.pdepth_frame == g.frames - 1 ? 1.0f : 0.0f;   // the previous game frame's depth is there
     g.enc_depth = depth;
@@ -323,6 +368,7 @@ NSArray *mfx_frame_encode(id<MTL4CommandBuffer> cb, int s, id<MTL4CounterHeap> h
     id<MTLTexture> depth = g.enc_depth; g.enc_depth = nil; g.last_depth = depth; g.last_slot = s;
     [g.mv_args[s] setTexture:depth.gpuResourceID atIndex:0]; [g.mv_args[s] setTexture:g.mv.gpuResourceID atIndex:1]; [g.mv_args[s] setAddress:g.mv_par[s].gpuAddress atIndex:0];
     [g.mv_args[s] setTexture:g.pdepth.gpuResourceID atIndex:2];
+    [g.mv_args[s] setAddress:g.votes.gpuAddress + g.enc_vote * 28 atIndex:1];
     id<MTL4ComputeCommandEncoder> e = [cb computeCommandEncoder];
     [e barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageDispatch | MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];   // the game's frame is done
     id<MTLTexture> repair = g.repair; g.repair = nil;
@@ -332,7 +378,10 @@ NSArray *mfx_frame_encode(id<MTL4CommandBuffer> cb, int s, id<MTL4CounterHeap> h
         [e dispatchThreads:MTLSizeMake(g.out_w, g.out_h, 1) threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
         g.ui_fixed++;
     }
-    [e setComputePipelineState:g.mv_ps]; [e setArgumentTable:g.mv_args[s]];
+    [e setArgumentTable:g.mv_args[s]]; [e setComputePipelineState:g.vote_ps];
+    [e dispatchThreads:MTLSizeMake((depth.width + 7) / 8, (depth.height + 7) / 8, 1) threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
+    [e barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
+    [e setComputePipelineState:g.mv_ps];
     [e dispatchThreads:MTLSizeMake(depth.width, depth.height, 1) threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
     [e updateFence:g.fence afterEncoderStages:MTLStageDispatch];
     // this frame's depth for the next one's still-world test, once the motion has read the previous one
@@ -353,7 +402,7 @@ NSArray *mfx_frame_encode(id<MTL4CommandBuffer> cb, int s, id<MTL4CounterHeap> h
     // bindings through completion, while the configuration cache retains only
     // the interpolator, not old scene/pool textures between configurations.
     NSArray *resources = @[fi, fi.colorTexture, fi.prevColorTexture, depth,
-                           g.mv, g.ui, g.out[s], g.mv_par[s], g.pdepth, repair ? repair : g.ui];
+                           g.mv, g.ui, g.out[s], g.mv_par[s], g.votes, g.pdepth, repair ? repair : g.ui];
     fi.colorTexture = nil; fi.prevColorTexture = nil; fi.depthTexture = nil;
     fi.motionTexture = nil; fi.uiTexture = nil; fi.outputTexture = nil;
     if (heap) [cb writeTimestampIntoHeap:heap atIndex:stamp + 1];
@@ -448,11 +497,11 @@ static double gpu_pct(double q) {
     return a[(int)(q * (n - 1))];
 }
 void mfx_stats(char *out, size_t n) {
-    snprintf(out, n, "interpolated %llu of %llu game frames (MetalFX GPU p50 %.2f / p95 %.2f ms; frame interval %.1f ms); not interpolated: missing input %llu (scene %llu camera %llu depth %llu UI %llu), first frame / history reset %llu, camera cut %llu, command buffer busy %llu, UI outside the UI layer %llu (presented texture %llu, copy not made %llu, merged pass %llu), layer repaired from the canvas %llu",
+    snprintf(out, n, "interpolated %llu of %llu game frames (MetalFX GPU p50 %.2f / p95 %.2f ms; frame interval %.1f ms); not interpolated: missing input %llu (scene %llu camera %llu depth %llu UI %llu), first frame / history reset %llu, camera cut %llu, command buffer busy %llu, UI outside the UI layer %llu (presented texture %llu, copy not made %llu, merged pass %llu), layer repaired from the canvas %llu, ground moving with the camera %llu frames (last votes of %u pixels: still world %u, moving ground %u %u %u %u %u)",
              (unsigned long long)g.made, (unsigned long long)g.frames, gpu_pct(0.5), gpu_pct(0.95), g.dt * 1e3, (unsigned long long)g.skip_input, (unsigned long long)g.miss[0], (unsigned long long)g.miss[1],
              (unsigned long long)g.miss[2], (unsigned long long)g.miss[3],
              (unsigned long long)g.skip_first, (unsigned long long)g.skip_cut, (unsigned long long)g.skip_busy,
-             (unsigned long long)g.skip_ui, (unsigned long long)g.ui_why[0], (unsigned long long)g.ui_why[1], (unsigned long long)g.ui_why[2], (unsigned long long)g.ui_fixed);
+             (unsigned long long)g.skip_ui, (unsigned long long)g.ui_why[0], (unsigned long long)g.ui_why[1], (unsigned long long)g.ui_why[2], (unsigned long long)g.ui_fixed, (unsigned long long)g.ground_frames, g.last_votes[0], g.last_votes[1], g.last_votes[2], g.last_votes[3], g.last_votes[4], g.last_votes[5], g.last_votes[6]);
 }
 
 #endif  // TARGET_OS_VISION

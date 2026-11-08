@@ -386,6 +386,15 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md#frame-interpolation-opt-in) 1.9.0, M1 Pro: 30 fps held, every frame after the load interpolated, MetalFX about 7.7 ms of GPU per interpolated frame.
 - **Check:** `DM_MFX_DUMP=<dir>` saves the scenes, depth, motion and output of 16 frame pairs while the camera turns (diagnostic: it waits for the GPU); the log's `[mfx] up to frame` line counts interpolated frames and why the others were not.
 
+### Frame interpolation tears the picture on ground that moves with the camera
+
+- **Symptom:** with `DM_MFX_INTERP=interp30`, on a walking Divine Beast (Breath of the Wild's Vah Naboris) the picture tears in the frames between game frames: ragged, speckled edges on glowing surfaces, a checkered smear on the ground and a doubled Link. The game frames themselves are clean.
+- **Cause:** motion comes from depth and the camera on the assumption that the world stands still (`mfx_mv`). The beast carries the camera at about half a unit a game frame, so the depth of its surfaces does not match where a still point would have been, and the check for still world fails on scattered parts of them. Those pixels got no motion and their neighbours the camera's, 30 to 60 pixels apart in a camera turn, and MetalFX tore the picture along the seams.
+- **Fix:** each frame, before the motion is written, the GPU counts on every 8th pixel how many are still under six explanations of the camera's step (`mfx_vote`, its matrices from `mfx_ground`): a still world; ground that made the camera's own step; and ground that made the step of a point 3, 5, 7 or 9 units in front of the camera, which leaves out the camera's swing around Link, who is carried with the ground. `mfx_mv` uses the best moving-ground explanation on that frame when it covers at least 55 % of the pixels and 25 % more than a still world. A single estimate from the camera's mean step was not enough: it was wrong while the camera turned, and the decision flipped about every 60 frames.
+- **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md#frame-interpolation-opt-in) 1.9.0, M1 Pro, from a save on Vah Naboris while the camera turned: textured blocks given no motion fell from 40 % to 2 to 3 %; moving ground covered 90 to 99 % of the pixels (a still world 3 to 70 %) on 5,757 of about 6,300 interpolated frames. Standing in Gerudo Town and turning the camera it was used on 4 of 7,800 frames.
+- **Check:** the `[mfx] up to frame` line's `ground moving with the camera` count and its last votes.
+- **Not checked:** running, riding or gliding across ordinary ground; the other Divine Beasts; Link walking about on the beast.
+
 ### A HUD element blinks at half strength under frame interpolation
 
 - **Symptom:** with `DM_MFX_INTERP=interp30`, a HUD element that appears for the first time in a session (Breath of the Wild's quest announcement) blinks on and off while it comes in, dim and half transparent.

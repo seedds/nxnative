@@ -436,6 +436,9 @@ check_t_attachment_capacity: t_attachment_capacity
 t_dispatch_clamp: t_dispatch_clamp.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_dispatch_clamp.m $(MTL_T_SRC) $(FW)
 check_t_dispatch_clamp: RUN_ENV = MTL_DEBUG_LAYER=1
+t_rt_dmask: t_rt_dmask.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_rt_dmask.m $(MTL_T_SRC) $(FW)
+check_t_rt_dmask: RUN_ENV = MTL_DEBUG_LAYER=1
 t_image_attachment_store: t_image_attachment_store.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_image_attachment_store.m $(MTL_T_SRC) $(FW)
 check_t_image_attachment_store: RUN_ENV = MTL_DEBUG_LAYER=1

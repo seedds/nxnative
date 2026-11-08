@@ -8,7 +8,8 @@
 # working files go into a folder per batch of shaders, removed when the batch is done; a working folder whose build is gone is removed at the next start (sweep_work).
 # A full build (no keys) also stamps both directories with the game and the digest of its profile inputs (inputs.tsv) and writes the profile's c1_full.tsv and cb_extent.tsv (c1_guard.py, cb_extent.py)
 # from its Mac outputs. One output directory per game: the chain version is the same for every game   Environment: DM_GAME=game profile (required, dm/games/<id>), XLATE=path to the translation tool (default the in-repo dmsh_xlate_bin), DMSH_CAS=the compile cache, one file (shader_cache.py; default <output cache dir>/cas.db), DMSH_PREFILL=Mac library root[=iOS library root] (separated by :, their b-*/ go into the MSL-keyed compile cache first; sibling b-*/ always do), J=concurrency
-# Build output: <key>_b.metallib, <key>_b.json (replay reflection, including drv_reads, the runtime read offsets into driver segments c0 / c2), <key>_b.metal (MSL)
+# Build output: <key>_b.metallib, <key>_b.json (replay reflection, including drv_reads, the runtime read offsets into driver segments c0 / c2), <key>_b.metal (MSL); a pixel shader's alpha test and
+# logic operation variants go out as MSL only (one unit, <key>_bx.metal, in the Mac and iOS folders), which the host compiles when a draw first needs one
 # Environment IOSOUT=dir: the same MSL also goes through dm/ios/tools/ios_metal.compile to produce an iphoneos metallib + reflection (chain_metal records the iOS compile convention)
 # Final summary: success / failure counts and the distribution of reasons; distribution of driver segment read offsets (those outside the range the replay layer can fill are listed separately);
 # a [RED] line per shader that built but lost something (shader_regressions.report_losses), which does not change the exit status
@@ -632,41 +633,43 @@ def vin_finish(key, full, refl):
     return refl
 
 def ps_libraries(key, msl, full, bindings):
-    """A pixel shader's libraries, cut from one compile through the MSL-keyed Metal cache (dmsh_side.cut): <key>_b with its own entry points, <key>_bx with its alpha test and logic
-    operation ones (dmsh_side.unit), <key>_bf with its readable-tile version main0_f (dmsh_fetch.fold; a shader without a rewritable sample only when bf_want.tsv lists it). The readable-tile
-    version was a source and a Metal compile of its own (13,666 of Mario Kart 8 Deluxe's 29,651 shaders). msl: the file of its plain source, full; bindings: its reflection's.
-    What does not build is left out, and only that: a unit whose readable-tile version does not build is compiled again without it, one that does not build at all gives <key>_b from the
-    plain source, each with a red line. A library a shader does not get is removed (a stale one of an earlier build), and the host draws without it. → what the reflection says of them.
-    Raises CalledProcessError when the plain source does not compile"""
+    """A pixel shader's libraries: <key>_b with its own entry points and <key>_bf with its readable-tile version main0_f (dmsh_fetch.fold; a shader without a rewritable sample only
+    when bf_want.tsv lists it), cut from one compile through the MSL-keyed Metal cache (dmsh_side.cut), and <key>_bx.metal, the compile unit with its alpha test and logic operation
+    entry points (dmsh_side.unit), written as MSL beside the Mac and iOS libraries and compiled by the host on first need (nvn_mtl.m side_lib): few shaders ever draw with either, and
+    compiling them for every pixel shader was most of a build's Metal compiles. The readable-tile version was a source and a Metal compile of its own (13,666 of Mario Kart 8 Deluxe's
+    29,651 shaders). msl: the file of its plain source, full; bindings: its reflection's. A unit whose readable-tile version does not build gives <key>_b from the plain source, with a red
+    line; a shader none of the side entry points apply to gets no <key>_bx.metal. A file a shader does not get is removed (a stale one of an earlier build, or an offline <key>_bx), and
+    the host draws without it. → what the reflection says of them. Raises CalledProcessError when the plain source does not compile"""
     targets = [(t, d) for t, d in (('mac', out), ('ios', IOSOUT)) if d and t in TARGETS]
-    def drop(*suffixes):
+    def drop(*names):
         for _, d in targets:
-            for s in suffixes:
-                try: os.unlink(os.path.join(d, key + s + '.metallib'))
+            for n in names:
+                try: os.unlink(os.path.join(d, key + n))
                 except FileNotFoundError: pass
     src, info = dmsh_side.unit(full)
-    side = set(info['alpha'] + info['logic']) if src else set()
-    folded, fmeta = dmsh_fetch.fold(src or full, bindings, om_only_ok=key in BF_WANT)   # also without side entry points: main0_f then shares the compile with main0 alone
-    for unit, fetch in ([(folded, fmeta)] if folded else []) + ([(src, None)] if src else []):
-        names = ['_b'] + (['_bx'] if side else []) + (['_bf'] if fetch else [])
-        groups = ([side] if side else []) + ([{'main0_f'}] if fetch else [])
-        u = os.path.join(w, key + '_bu.metal'); open(u, 'w').write(unit)
+    drop('_bx.metallib', *([] if src else ['_bx.metal']))
+    if src:
+        for _, d in targets:
+            p = os.path.join(d, key + '_bx.metal'); tmp = f'{p}.tmp-{threading.get_ident()}'
+            with open(tmp, 'w') as f: f.write(src)
+            os.replace(tmp, p)
+    SIDE_STATS['generated' if src else 'not generated'] += 1
+    side = {f: {'entries': info[f]} for f in ('alpha', 'logic') if src and info[f]}
+    folded, fetch = dmsh_fetch.fold(full, bindings, om_only_ok=key in BF_WANT)   # without the side entry points: main0_f shares the compile with main0 alone
+    if folded:
+        u = os.path.join(w, key + '_bu.metal'); open(u, 'w').write(folded)
         try:
-            for t, d in targets: MTL.compile_split(t, u, [os.path.join(d, key + n + '.metallib') for n in names], lambda lib, groups=groups: dmsh_side.cut(lib, *groups))
+            for t, d in targets: MTL.compile_split(t, u, [os.path.join(d, key + n + '.metallib') for n in ('_b', '_bf')], lambda lib: dmsh_side.cut(lib, {'main0_f'}))
+            BF_STATS['generated'] += 1
+            return {**side, 'fetch': fetch}
         except (subprocess.CalledProcessError, ValueError) as e:
-            if fetch: BF_STATS['failed'] += 1; print(f'[RED] {key}: the readable-tile version does not build ({str(e)[:120]}): its draws go without the tile read', flush=True)
-            else: SIDE_STATS['failed'] += 1; print(f'[RED] {key}: the alpha test and logic operation entry points do not build ({str(e)[:120]}): its draws go without them', flush=True)
-            continue
+            BF_STATS['failed'] += 1; print(f'[RED] {key}: the readable-tile version does not build ({str(e)[:120]}): its draws go without the tile read', flush=True)
         finally:
             try: os.unlink(u)
             except FileNotFoundError: pass
-        drop(*{'_bx', '_bf'} - set(names))
-        SIDE_STATS['generated'] += bool(side); BF_STATS['generated'] += bool(fetch)
-        return {**{f: {'entries': info[f]} for f in ('alpha', 'logic') if side and info[f]}, **({'fetch': fetch} if fetch else {})}
-    SIDE_STATS['not generated'] += not src
-    drop('_bx', '_bf')
+    drop('_bf.metallib')
     for t, d in targets: MTL.compile(t, msl, os.path.join(d, key + '_b.metallib'))
-    return {}
+    return side
 
 pc_of, loc = {}, {}
 MAP_ROWS, MAP_CONFLICT_ROWS = {}, {}
@@ -1834,7 +1837,7 @@ for reason in ('new key', 'rule changed', 'code fingerprint changed: all rebuilt
 print(f'readable-tile versions (<key>_bf, dmsh_fetch.py): {BF_STATS["generated"]} generated, {BF_STATS["failed"]} failed to compile')
 print(f'shadow-input libraries (<key>_bv, dmsh_vin.py): {VIN_STATS["generated"]} generated, {VIN_STATS["failed"]} failed to compile, {VIN_STATS["not generated"]} not generated; '
       f'{VIN_STATS["inputs"]} integer inputs shadowed, {VIN_STATS["float only"]} of them with no other-sign shadow (attribute indices ran out)')
-print(f'alpha test and logic operation libraries (<key>_bx, dmsh_side.py): {SIDE_STATS["generated"]} generated, {SIDE_STATS["failed"]} failed to compile, {SIDE_STATS["not generated"]} pixel shaders without either')
+print(f'alpha test and logic operation sources (<key>_bx.metal, dmsh_side.py, compiled by the host on first need): {SIDE_STATS["generated"]} generated, {SIDE_STATS["not generated"]} pixel shaders without either')
 print(f'pulling libraries (<key>_bp, dmsh_pull.py): {PULL_STATS["generated"]} generated, {PULL_STATS["failed"]} failed to compile, {PULL_STATS["not generated"]} not generated, '
       f'{PULL_STATS["no stage input"]} vertex shaders without stage inputs (none needed)')
 print('mesh libraries (<vertex>_<geometry>_m3, dmsh_mesh.py): ' + (', '.join(f'{k} {v}' for k, v in MESH_STATS.items()) or 'none'))

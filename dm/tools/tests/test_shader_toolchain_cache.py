@@ -410,6 +410,15 @@ class MetalPrefill(unittest.TestCase):
         self.cache.fill(str(self.old))
         self.assertEqual(self.cache.stats['mac', 'filled'], 3)
 
+    def test_library_without_reflection_leaves_out_only_itself(self):   # a build stopped between a library and its reflection
+        self.earlier_libraries(self.cache.ident['mac'].hex())
+        (self.old / f'{2:016x}_b.json').unlink()
+        notes = self.cache.fill(str(self.old))
+        self.assertEqual(self.cache.stats['mac', 'filled'], 2, notes)
+        result = self.root / 'result.metallib'
+        self.cache.compile('mac', str(self.old / f'{2:016x}_b.metal'), str(result))
+        self.assertEqual(result.read_bytes(), b'TESTED MSL 2')
+
     def test_unrequested_target_is_not_sample_compiled(self):
         self.earlier_libraries(self.cache.ident['mac'].hex())
         with mock.patch.object(self.cache, '_compile') as compile_sample:

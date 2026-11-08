@@ -85,14 +85,16 @@ class Cache:
         self.count((target, 'compiled'))
 
     def _check(self, target, d, stems, mac_dir):
-        """None if folder d was built with the current convention and compiler, else why not"""
-        rec, picks = self.targets[target][1], collections.defaultdict(list)
+        """(None, the stems to take) if folder d was built with the current convention and compiler, else (why not, []). A library without a readable reflection is
+        left out, not the folder: a build stopped between writing the two (Pokémon Scarlet: 5 of 11,153) had kept every other library of it out of the cache"""
+        rec, picks, ok = self.targets[target][1], collections.defaultdict(list), []
         for stem in stems:
             try: j = json.loads(romfs.open(os.path.join(d, stem + '.json'), 'rb').read())
-            except (OSError, ValueError): return f'no readable {stem}.json'
-            if j.get('chain_metal') != rec: return f'built with "{j.get("chain_metal")}"'
-            if j.get('chain_compiler') != self.ident[target].hex(): return f'{stem} has a different or unrecorded Metal compiler'
+            except (OSError, ValueError): continue
+            if j.get('chain_metal') != rec: return f'built with "{j.get("chain_metal")}"', []
+            if j.get('chain_compiler') != self.ident[target].hex(): return f'{stem} has a different or unrecorded Metal compiler', []
             if len(picks[j.get('stage')]) < 2: picks[j.get('stage')].append(stem)
+            ok.append(stem)
         for stem in (s for v in picks.values() for s in v):
             tmp = os.path.join(self.work, f'mtlcache-check-{target}.metallib')
             msl = os.path.join(mac_dir, stem + '.metal')
@@ -101,12 +103,12 @@ class Cache:
                 with romfs.open(msl, 'rb') as f, open(os.path.join(self.work, f'mtlcache-check-{stem}.metal'), 'wb') as o: shutil.copyfileobj(f, o)
                 msl = os.path.join(self.work, f'mtlcache-check-{stem}.metal')
             try: self._compile(target, msl, tmp)
-            except subprocess.CalledProcessError: return f'{stem}.metal does not compile now'
+            except subprocess.CalledProcessError: return f'{stem}.metal does not compile now', []
             finally:
                 if inside: os.unlink(msl)
             same = open(tmp, 'rb').read() == romfs.open(os.path.join(d, stem + '.metallib'), 'rb').read(); os.unlink(tmp)
-            if not same: return f'a fresh compile of {stem}.metal differs from its library'
-        return None
+            if not same: return f'a fresh compile of {stem}.metal differs from its library', []
+        return None, ok
 
     def fill(self, mac_dir, ios_dir=None, targets=None):
         """Takes the libraries of an earlier build: mac_dir = its Mac b-<chain>/ folder, ios_dir = the iOS folder of the same chain (or None). Returns the lines to print"""
@@ -123,9 +125,9 @@ class Cache:
             libs = names if d == mac_dir else set(romfs.os.listdir(d))
             have = [s for s in stems if s + '.metallib' in libs]; key = self.ident[target].hex() + ':' + os.path.realpath(d)
             if not have or stamps.get(key) == len(have): continue
-            why = self._check(target, d, have, mac_dir)
+            why, ok = self._check(target, d, have, mac_dir)
             if why: notes.append(f'Metal cache: not filled from {d}: {why}')
-            else: todo[target] = (d, set(have))
+            else: todo[target] = (d, set(ok))
             stamps[key] = len(have)
         added = collections.Counter()
         for stem in stems:

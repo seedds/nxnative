@@ -66,9 +66,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
             alu(0x0bf, InstName.Popc, APopc, uniform: true);
             alu(0x100, InstName.Flo, AFlo);
             alu(0x0bd, InstName.Flo, AFlo, uniform: true);
-            // BREV / UBREV 0x301 / 0x2be (Eden ampere_isa_table.h "BRev", lowered to Maxwell's BREV; NAK sm70_encode.rs OpBRev: encode_alu(0x101), the source in B)
-            alu(0x101, InstName.Bfe, ABrev);   // no InstName of its own (Maxwell's BREV is a BFE flag)
-            alu(0x0be, InstName.Bfe, ABrev, uniform: true);
+            alu(0x101, InstName.Flo, ABrev);
+            alu(0x0be, InstName.Flo, ABrev, uniform: true);
             alu(0x01a, InstName.Bfe, ASgxt);
             alu(0x09a, InstName.Bfe, ASgxt, uniform: true);
             alu(0x01b, InstName.Bfe, ABmsk);
@@ -92,7 +91,6 @@ namespace Ryujinx.Graphics.Shader.Instructions
             x(0x204, InstName.R2p, AR2p, N, writesRd: false);
             x(0x803, InstName.P2r, AP2r, N);
             x(0x203, InstName.P2r, AP2r, N);
-            x(0x883, InstName.P2r, AUp2ur, N, uniform: true);
             x(0x81c, InstName.Psetp, APlop3, N, writesRd: false);
             x(0x89c, InstName.Psetp, APlop3, N, uniform: true, writesRd: false);
             x(0x80d, InstName.Isetp, AGuardCull, N, writesRd: false);
@@ -263,8 +261,6 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 6 => context.UnpackDouble2x32High(context.FPReciprocal(context.PackDouble2x32(Const(0), res), Instruction.FP64)),
                 7 => context.UnpackDouble2x32High(context.FPReciprocalSquareRoot(context.PackDouble2x32(Const(0), res), Instruction.FP64)),
                 8 => context.FPSquareRoot(res),
-                // TANH (sm75+): 1 - 2 / (2^(2x log2 e) + 1), exact at the limits (an infinite power gives 1, a zero one -1); MythosOfs Eglantine 8f0db6749 expands it the same way
-                9 => context.FPAdd(ConstF(1f), context.FPMultiply(ConstF(-2f), context.FPReciprocal(context.FPAdd(context.FPExponentB2(context.FPMultiply(res, ConstF(2.8853900817779268f))), ConstF(1f))))),
                 int op => throw AFail(context, $"MUFU op {op}"),
             };
 
@@ -1465,14 +1461,6 @@ namespace Ryujinx.Graphics.Shader.Instructions
             ASet(context, x, res, u);
         }
 
-        // BREV Rd, b: the 32 bits of the source in reverse order. Orbitals: UBREV UR4, UR4 (000fe2000800000000000004000472be), BREV R3, R2 (...00000200037301)
-        public static void ABrev(EmitterContext context)
-        {
-            AmpereOp x = new(context.CurrOp);
-            bool u = AUniform(context);
-            ASet(context, x, context.BitfieldReverse(AGet(context, AOne(context, x, u, neg: false, abs: false))), u);
-        }
-
         // POPC Rd, b: bit count (63: of the bitwise not)
         public static void APopc(EmitterContext context)
         {
@@ -1517,6 +1505,15 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
 
             ASet(context, x, res, u);
+        }
+
+        // BREV Rd, b: the bits reversed. The compiler's find-lowest-set-bit is BREV, then FLO.SH, then a compare with -1 (Fire Emblem Fortune's Weave's light loops: 3,057 of them)
+        public static void ABrev(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+            bool u = AUniform(context);
+
+            ASet(context, x, context.BitfieldReverse(AGet(context, AOne(context, x, u, neg: false, abs: false))), u);
         }
 
         // SGXT Rd, a, n: the low n bits of a, sign-extended (73) or zero-extended; .W (75) wraps n, else it is clamped to 32

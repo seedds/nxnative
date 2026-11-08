@@ -1406,12 +1406,12 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 
 ### Ampere instructions of Unreal Engine 5.6's Switch 2 shaders
 
-- **Symptom:** most of a game's shaders are left out of the build: `Ampere instruction f60 at 0x… is not implemented`, then 361, 593 (`SUATOM` with its handle in bank 3), 2be, 364, 301, 925, 59f, 394 and others. The game draws black backgrounds and missing effects.
+- **Symptom:** most of a game's shaders are left out of the build: `Ampere instruction f60 at 0x… is not implemented`, then 593 (`SUATOM` with its handle in bank 3), 925, 59f, 394 and others. The game draws black backgrounds and missing effects.
 - **Cause:** Unreal Engine 5.6's Switch 2 shaders use Ampere forms the translator had no entry for:
   - TEX / TLD / TLD4 / TXD / TXQ with the handle in a uniform register (bit 91, opcodes with 0x400) or in a register after the operands (`.B`, bit 59);
   - SUATOM and SURED with the handle in another bank or a register, SUST.B;
   - images whose handle is in the game's own uniform buffer (`cp_i_cb3_*`);
-  - BREV / UBREV, FRND.F16, MUFU.TANH, LDGSTS / LDGDEPBAR, F2FP.MERGE_C, PIXLD.MY_INDEX;
+  - FRND.F16, F2FP.MERGE_C with `.H1` (c's high half), PIXLD.MY_INDEX;
   - NVN2's per-stage storage buffer banks 25..29;
   - bindless constant buffers.
 - **Fix:** each form in `InstEmitAmpere*.cs`, with its encoding taken from a game and checked against Eden's Ampere frontend and NAK's encoder where they have it. Also:

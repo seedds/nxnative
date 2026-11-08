@@ -85,7 +85,7 @@ iPhone and iPad. **Fit**, the default, shows the game's picture (16:9, or the ta
 
 ### Picture shape
 
-Games whose profile supports it (Breath of the Wild, Animal Crossing: New Horizons). **iPhone Duo screen (1.43:1)** renders a taller picture of the Duo's own shape: the sides of 16:9 with more above and below, and the HUD at the screen's edges. **16:9** is the Switch's picture. The taller picture has about a quarter more pixels, so it runs a little slower and warmer.
+Games whose profile supports it (Breath of the Wild, Animal Crossing: New Horizons, Hollow Knight: Silksong). **iPhone Duo screen (1.43:1)** renders a taller picture of the Duo's own shape: the sides of 16:9 with more above and below, and the HUD at the screen's edges. **16:9** is the Switch's picture. The taller picture has about a quarter more pixels, so it runs a little slower and warmer. Hollow Knight: Silksong renders at most 16:10, the tallest view its own camera takes: more above and below at the same height (1728x1080 docked), so about a tenth fewer pixels than 16:9, shown with thin bars on the Duo.
 
 ### Frame-rate counter
 

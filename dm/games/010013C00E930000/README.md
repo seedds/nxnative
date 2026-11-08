@@ -1,6 +1,6 @@
 # Hollow Knight: Silksong (`010013C00E930000`)
 
-Update 1.0.30000 (v655360) over the base game, SDK 20.5.8. Unity 6000.0.50f1 IL2CPP with FMOD (one AudioOut) on NVN. Modules `main`, `subsdk0` (the SDK's movie library, whose `movie::Extractor` demuxes the 27 MP4 cinematics, H.264 and AAC; `Intro_Cinematic.mp4` after a new file) and `sdk`. Plays on the iPhone. On the Mac: the logos, the title, a new file, the intro poem, the opening cinematic with its sound, and Hornet under control in the first two rooms of Moss Grotto (bind, jump, attack), with music and sound, at 60 fps as on the Switch (30 while a cinematic plays, as the game asks); memory flat in play. The base game alone (1.0.27776: another `main`, the same `sdk` and movie module) packs from a derived profile with its own 2,244 shaders and plays the same opening on the Mac with no red line.
+Update 1.0.30000 (v655360) over the base game, SDK 20.5.8. Unity 6000.0.50f1 IL2CPP with FMOD (one AudioOut) on NVN. Modules `main`, `subsdk0` (the SDK's movie library, whose `movie::Extractor` demuxes the 27 MP4 cinematics, H.264 and AAC; `Intro_Cinematic.mp4` after a new file) and `sdk`. Plays on the iPhone; on a screen taller than 16:9 (an iPhone Duo) in 16:10 with *Picture shape* ([Screen shape](#screen-shape-dm_screen_aspect-current)). On the Mac: the logos, the title, a new file, the intro poem, the opening cinematic with its sound, and Hornet under control in the first two rooms of Moss Grotto (bind, jump, attack), with music and sound, at 60 fps as on the Switch (30 while a cinematic plays, as the game asks); memory flat in play. The base game alone (1.0.27776: another `main`, the same `sdk` and movie module) packs from a derived profile with its own 2,244 shaders and plays the same opening on the Mac with no red line.
 
 ## What it needs
 
@@ -12,10 +12,20 @@ Update 1.0.30000 (v655360) over the base game, SDK 20.5.8. Unity 6000.0.50f1 IL2
 | `nn::hid::GetDebugPadStates` | host, `hle_hid.c` (every game) | an `nn::diag` abort in the first frames; see [Services](#services) |
 | `shader_groups /Data/=data` | `game.tsv` | everything is under `Data/`: the player's serialized files and the `StreamingAssets` bundles |
 | No `pad_layout` (the 2D default) | `game.tsv` | A binds, B jumps, Y attacks; see [Input](#input) and [Open](#open) |
+| `screen_aspect on` and Unity's screen apply and size getter stubbed (1.0.30000 `main`) | `game.tsv`, [`patches.py`](patches.py) | *Picture shape* (`DM_SCREEN_ASPECT`): a 16:10 picture on a screen taller than 16:9, such as the iPhone Duo; see [Screen shape](#screen-shape-dm_screen_aspect-current) |
 
 ## Frame rate
 
 - 60 fps, as on the Switch. While a cinematic plays the game draws 1280x720 with a window crop and asks for present interval 2 (30 fps).
+
+## Screen shape (`DM_SCREEN_ASPECT`, current)
+
+With *Picture shape* taller than 16:9 (`DM_SCREEN_ASPECT=1.43`, the iPhone Duo's; `auto` on a Duo resolves to it) the game renders 16:10: 1728x1080 docked, 1152x720 handheld, the same height with more of the scene above and below, the HUD at its own corners and the menus laid out in that shape. On a 1.43:1 screen that leaves thin bars above and below in Fit (about 5 % each instead of about 10 % at 16:9), and Fill crops much less of the sides. It also draws about a tenth fewer pixels than 16:9.
+
+- Unity's Switch player renders into its 1920x1080 window textures and crops them to the size it applies: the size getter `main+0x124e224` (1280x720 handheld, 1920x1080 docked by `nn::oe::GetOperationMode`) gives the start-up size, and the apply `main+0x129074c` (this, width, height) takes the game's own `Screen.SetResolution(1920, 1080)` from its settings (`main+0x253cad0`), clamped to the window textures. Both store at +0xb4 / +0xb8 of the screen manager, which the renderer's window crop (`main+0x1271594`) and `Screen.width` / `height` read. Giving the getter a taller height did nothing (the apply clamps it to the 1080 textures), so the stubs keep the height and take the width from the shape.
+- The game's camera (`ForceCameraAspect`, with `AutoScaleViewport` and a main camera height factor) fills any shape from 16:9 to 16:10 with more of the scene, as on a Steam Deck. At 1544x1080 (1.43:1) it letterboxes to 16:10 and draws a 16:9 view inside that, with white, yellow and blue bars between them (Mac). So the stubs ([`patches.py`](patches.py), each running the original code when `DM_SCREEN_ASPECT` is 16:9 or unset) turn a 16:9 size into the screen's width / height, at most 16:10, even: the apply's request and the getter's answer. The host shows a crop of that shape in its own shape ([A crop of the screen's shape is shown in its own shape](../../../docs/reference/rendering.md#a-crop-of-the-screens-shape-is-shown-in-its-own-shape)).
+- Checked on the Mac (M1 Pro, 1.0.30000) at 1.43:1 with the route under [Mac routes](#mac-routes): the profile menu, the poem and the opening cinematic (the movie fills the 16:10 frame unstretched) and the first room, docked (1728x1080; 1152x720 while the cinematic plays) and handheld (1152x720); `DM_SCREEN_ASPECT=0` keeps 1920x1080 and 1280x720 as before. Not yet run on a device.
+- Only build 1.0.30000's `main` has the stubs; another version packs at 16:9.
 
 ## Memory
 
@@ -50,6 +60,7 @@ General host changes first needed here; each applies to every game:
 - **`hid::GetDebugPadStates`**, the history form (`hle_hid.c`): [History reads fill every requested entry](../../../docs/reference/services.md#history-reads-fill-every-requested-entry).
 - **Unity 6 memory with no StandardAllocator and no heap**, and the NSP script's 5 GB block for every game with an NPDM system resource (`profile_guess.py`): [Unity 6 takes its memory with no StandardAllocator and no heap](../../../docs/reference/memory.md#unity-6-takes-its-memory-with-no-standardallocator-and-no-heap), [dm/games/README.md, Adding a game](../README.md#adding-a-game).
 - **Unity 6 `Shader` objects** read from the bundles' own type trees: [Unity 6 Shader objects](../../../docs/reference/shaders.md#unity-6-shader-objects).
+- **A crop of the screen's shape kept in its own shape** under *Picture shape* (`nvn_mtl.m` `present_shape`): [A crop of the screen's shape is shown in its own shape](../../../docs/reference/rendering.md#a-crop-of-the-screens-shape-is-shown-in-its-own-shape).
 
 ## Open
 

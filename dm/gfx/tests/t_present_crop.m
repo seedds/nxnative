@@ -223,7 +223,7 @@ int main(void) { @autoreleasepool {
         for(int y=0;y<TH;y++)for(int x=0;x<TW;x++)memcpy(sp+4*(y*TW+x),colors[x>=crop54[2]||y>=crop54[3]],4);
         [sw replaceRegion:MTLRegionMake2D(0,0,TW,TH) mipmapLevel:0 withBytes:sp bytesPerRow:TW*4];free(sp);res_add(sw);res_commit();
         double sa,sb;
-        mtl_present_layer(0,0);present_shape(sw,&sa,&sb);EXPECT("no sized layer: the display's width",1920,(int)sa);EXPECT("no sized layer: the display's height",1080,(int)sb);
+        mtl_present_layer(0,0);present_shape(sw,NULL,&sa,&sb);EXPECT("no sized layer: the display's width",1920,(int)sa);EXPECT("no sized layer: the display's height",1080,(int)sb);
         for(int m4=0;m4<2;m4++) {
             int outH[2]={H,40};   // 16:9 fills; a 16:10 canvas keeps the bars above and below
             for(int k=0;k<2;k++) {
@@ -237,12 +237,21 @@ int main(void) { @autoreleasepool {
                 EXPECT(k?"5:4 crop on a 16:10 canvas: 16:9 of red, black above and below":"5:4 crop on a 16:9 canvas: all red, no side bars",0,bad);free(o);res_remove(ot);
             }
         }
-        mtl_present_layer(4,3);present_shape(sw,&sa,&sb);EXPECT("a sized layer gives its own shape",4*(int)sb,3*(int)sa);mtl_present_layer(0,0);
+        mtl_present_layer(4,3);present_shape(sw,NULL,&sa,&sb);EXPECT("a sized layer gives its own shape",4*(int)sb,3*(int)sa);mtl_present_layer(0,0);
         MTLTextureDescriptor *td2=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:1920 height:1344 mipmapped:NO];td2.storageMode=MTLStorageModePrivate;td2.usage=MTLTextureUsageShaderRead;
         id<MTLTexture> tall=[g_dev newTextureWithDescriptor:td2];
-        present_shape(tall,&sa,&sb);EXPECT("a taller texture without DM_SCREEN_ASPECT: 16:9",1080,(int)sb);
-        mtl_present_screen(1920,1344);present_shape(tall,&sa,&sb);EXPECT("DM_SCREEN_ASPECT: a texture that follows it keeps the taller shape",1344,(int)sb);
-        present_shape(sw,&sa,&sb);EXPECT("DM_SCREEN_ASPECT: a 16:9 texture of a build without stubs stays 16:9",1080,(int)sb);mtl_present_screen(0,0);
+        present_shape(tall,NULL,&sa,&sb);EXPECT("a taller texture without DM_SCREEN_ASPECT: 16:9",1080,(int)sb);
+        mtl_present_screen(1920,1344);present_shape(tall,NULL,&sa,&sb);EXPECT("DM_SCREEN_ASPECT: a texture that follows it keeps the taller shape",1344,(int)sb);
+        present_shape(sw,NULL,&sa,&sb);EXPECT("DM_SCREEN_ASPECT: a 16:9 texture of a build without stubs stays 16:9",1080,(int)sb);
+        {   // A crop between the screen's shape and 16:9 keeps its own (Hollow Knight: Silksong's Unity: 1728x1080 of its 1920x1080 window textures at 16:10); one outside that range stays 16:9
+            const int c1610[4]={0,0,1728,1080},c143[4]={0,0,1544,1080},c169[4]={0,0,1920,1080},c54[4]={0,0,1200,960};
+            present_shape(sw,c1610,&sa,&sb);EXPECT("DM_SCREEN_ASPECT 1.43: a 16:10 crop keeps its width",1728,(int)sa);EXPECT("DM_SCREEN_ASPECT 1.43: a 16:10 crop keeps its height",1080,(int)sb);
+            present_shape(sw,c143,&sa,&sb);EXPECT("DM_SCREEN_ASPECT 1.43: a crop of the screen's shape keeps it",1544,(int)sa);
+            present_shape(sw,c169,&sa,&sb);EXPECT("DM_SCREEN_ASPECT 1.43: a 16:9 crop stays 16:9",1080,(int)sb);EXPECT("DM_SCREEN_ASPECT 1.43: a 16:9 crop, its width",1920,(int)sa);
+            present_shape(sw,c54,&sa,&sb);EXPECT("DM_SCREEN_ASPECT 1.43: a crop taller than the screen (Super Mario Galaxy 2's 1200x960) stays 16:9",1920,(int)sa);
+            mtl_present_screen(0,0);present_shape(sw,c1610,&sa,&sb);EXPECT("no DM_SCREEN_ASPECT: a 16:10 crop is shown at 16:9",1920,(int)sa);
+        }
+        mtl_present_screen(0,0);
         // The front end's layout and the mouse follow the same shape, not the crop's (front_picture_shape): a real present of the 5:4 crop
         tex_t st={.magic=MAGIC('T', 'E', 'X', 0), .serial =10002};st.d.width=TW;st.d.height=TH;st.d.depth=st.d.levels=1;st.d.format=NVN_FORMAT_RGBA8;st.d.target=NVN_TEXTURE_TARGET_2D;serial_put(st.serial,sw);
         win_t w3={.ntex=1};w3.tex[0]=(NVNtexture *)&st;set((NVNwindow *)&w3,crop54[0],crop54[1],crop54[2],crop54[3]);

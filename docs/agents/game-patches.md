@@ -55,6 +55,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | `build` → `game` | 60 fps frame step and render scale (ksys::VFR) | frame rate | blocked: a function-matched frame step (MATCH_FRAME_STEP) covers one function; these stubs span several | judgement | 1 | [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) | the game's own frame code; the frame-step state page is general |
 | `build` → `game` | 60 fps frame step: the KIDS frame task, frame-rate block and event cutscene counters | frame rate | blocked: a function-matched frame step (MATCH_FRAME_STEP) covers one function; these stubs span several | judgement | 1 | [Hyrule Warriors: Age of Calamity](../../dm/games/01002B00111A2000/README.md) | the game's own frame code; only the host's frame-step state page is shared. Fire Emblem: Three Houses and Taiko Risshiden V DX run on KTGL too, with other frame code |
 | `build` → `game` | screen shape: the sizes, the view, the layouts' projection and their edge widgets (DM_SCREEN_ASPECT) | rendering | blocked: the stubs have no function-matched form yet | judgement | 1 | [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md) | the output size is the host's, but where the game takes its sizes, its cameras and its layouts are this build's code |
+| `build` → `game` | screen shape: Unity's screen apply takes the screen's shape, at most 16:10 (DM_SCREEN_ASPECT) | rendering | blocked: the stub has no function-matched form yet | judgement | 1 | [Hollow Knight: Silksong](../../dm/games/010013C00E930000/README.md) | the apply is Unity's engine code, but the shape the game's own camera takes (16:9 to 16:10) is this game's |
 | `build` → `game` | Hagi coroutine stack region 1 GB → 64 MB | memory | kept: 1.1.4 is the last update; a match over Hagi would serve no other build of this game | checked: the final build 1.1.4 (the only one the profile packs), 2026-11-04 | 1 | [Super Mario 3D All-Stars: Super Mario Sunshine](../../dm/games/010049900F546002/README.md) | a size inside Hagi's own code: nothing the host sees tells a 1 GB reservation it can shrink from one it cannot |
 
 ## Summary
@@ -70,6 +71,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [FINAL FANTASY TACTICS - The Ivalice Chronicles](#final-fantasy-tactics---the-ivalice-chronicles) | 2 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Fire Emblem Engage](#fire-emblem-engage) | 1 | 0 | 0 | 0 | 0 | `build` → `engine` |
 | [Fire Emblem: Three Houses](#fire-emblem-three-houses) | 7 | 0 | 0 | 0 | 0 | `build` → `game` |
+| [Hollow Knight: Silksong](#hollow-knight-silksong) | 0 | 0 | 2 | 0 | 0 | `build` → `game` |
 | [Hyrule Warriors: Age of Calamity](#hyrule-warriors-age-of-calamity) | 0 | 0 | 5 | 0 | 0 | `build` → `game` |
 | [Luigi's Mansion 3](#luigis-mansion-3) | 0 | 0 | 0 | 0 | 1 | `build` → `engine` |
 | [Mario + Rabbids® Sparks of Hope](#mario--rabbids-sparks-of-hope) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
@@ -332,6 +334,16 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - cut `+0x50f8ec`: render thread wait timeout: fdiv s0,s1,s0 → ldr s8,[x8,#0xb50] (1000.0)
   - cut `+0x50f8f0`: render thread wait timeout: adrp x8,#0xcb7000 → fdiv s0,s8,s0 (1000/fps; the fmul by s8 that follows makes it µs)
   - cut `+0x50f8f4`: render thread wait timeout: ldr s8,[x8,#0xb50] → nop (moved up)
+
+### Hollow Knight: Silksong
+
+[Hollow Knight: Silksong](../../dm/games/010013C00E930000/README.md), `010013C00E930000`, [patches.py](../../dm/games/010013C00E930000/patches.py).
+
+- **`build` → `game`**, rendering, blocked: the stub has no function-matched form yet, judgement: screen shape: Unity's screen apply takes the screen's shape, at most 16:10 (DM_SCREEN_ASPECT). The apply is Unity's engine code, but the shape the game's own camera takes (16:9 to 16:10) is this game's
+
+- **1.0.30000 `main`** `fc9ea4cc…` ([patches.py:63](../../dm/games/010013C00E930000/patches.py#L63))
+  - frame step `+0x124e224`: Unity's screen size getter: a 16:9 size takes the screen's shape, at most 16:10 (DM_SCREEN_ASPECT)
+  - frame step `+0x129074c`: Unity's screen apply: a 16:9 request takes the screen's shape, at most 16:10 (DM_SCREEN_ASPECT)
 
 ### Hyrule Warriors: Age of Calamity
 

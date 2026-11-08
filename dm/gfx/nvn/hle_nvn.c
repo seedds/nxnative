@@ -1494,7 +1494,8 @@ NVN(nvnWindowSetPresentInterval, void, NVNwindow *w, int v) {
 }
 NVN(nvnWindowSetCrop, void, NVNwindow *w, int x, int y, int ww, int hh) {
     win_t *o = (win_t *)w; int v[4] = {x, y, ww, hh};
-    if (memcmp(o->crop, v, sizeof v)) LOG("[nvn] WindowCrop %d,%d %dx%d", x, y, ww, hh);
+    if (memcmp(o->crop, v, sizeof v)) { module_t *m = module_of(__builtin_return_address(0));
+        LOG("[nvn] WindowCrop %d,%d %dx%d (from %s+%#llx)", x, y, ww, hh, m ? m->name : "?", m ? (unsigned long long)((uint64_t)__builtin_return_address(0) - (uint64_t)m->base) : 0ULL); }
     memcpy(o->crop, v, sizeof v);
 }
 NVN(nvnWindowGetCrop, void, const NVNwindow *w, NVNrectangle *r) {   // Bayonetta 3 reads it back every few frames; before any SetCrop it is the whole first texture, as NVN starts it

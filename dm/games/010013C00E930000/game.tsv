@@ -38,6 +38,11 @@ mem_alias	0x118000000
 mem_stack	0x10000000
 app_pool	0xCD500000
 
+# ---- Screen shape ----
+# DM_SCREEN_ASPECT (launcher setting Picture shape): a screen taller than 16:9 gets a picture of its shape, at most 16:10, the tallest the game's camera fills (patches.py):
+# 1728x1080 docked, 1152x720 handheld, with more of the scene above and below; an iPhone Duo (1.43:1) shows it with thin bars
+screen_aspect	on
+
 # ---- Shader split (shader_split.py; Unity Shader and ComputeShader objects, read by unityfs.py) ----
 # everything is under Data/: the player's serialized files and the StreamingAssets bundles
 shader_groups	/Data/=data

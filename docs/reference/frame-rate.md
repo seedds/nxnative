@@ -257,6 +257,14 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Check:** `DM_TEST_PRESENT_LAG=90,30` (sleep 30 ms before every 90th present) makes Mario do this on the Mac; run it with `DM_WINDOW=1` to get the display link. `DM_NVN_TSV` writes each frame's interval as `@itv`.
 - **Note:** the windowless Mac host was never affected by the acquire: there the acquire sleeps until the interval's slot.
 
+### A game's own present pacing reads the interval the window presents at
+
+- **Symptom:** a game the profile upgrades to 60 fps (`fps_target 60`, `present_interval display`) drops to about 25 fps in a window on an M2 Pro, from the first frames and in every scene, with no red line, once `nn::vi::ListFrameHistory` lists the presents ([Layer frame history](services.md#layer-frame-history)). On an M6 it runs at 54–58 fps with 33 ms frames and empty display-link ticks. The `present interval set by the game` in the `interval mode display` line is 2.
+- **Cause:** the game paces its presents by the window's interval itself. Luigi's Mansion 3 (30 fps on the Switch at interval 2) reads the newest history entry and `nvnWindowGetPresentInterval` on its render thread before each `nvnQueuePresentTexture` (`main+0xb7a4b8`). While that frame is not shown yet it sleeps 16.67 ms (`os::SleepThread`) per vsync of the interval until it is. Once it is shown, it waits until (interval − 1) vsyncs after its present time. Display mode presents one frame per tick whatever the game set, but the host still answered the game's 2, so at 60 fps the game held itself to its 30 fps pacing. With no history entries it had skipped the whole block.
+- **Fix:** in display mode, `nvnWindowGetPresentInterval` answers the interval the window presents at (`window_interval` in `hle_nvn.c`): 1, or the cap's interval (2 under `DM_FPS_TARGET=30`). In game mode it answers the game's own. NieR:Automata (010056B015FE8000), Need for Speed Hot Pursuit Remastered and Monster Train 2 fetch the function but never call it.
+- **Found on:** [Luigi's Mansion 3](../../dm/games/0100DCA0064A6000/README.md) (issue #1705): title screen in a window on an M6, 54.3–58.2 → 60.0 fps, frame time p95 24–25 → 18 ms, max 107 → 22.7 ms, no empty display-link ticks after warm-up.
+- **Check:** `t_nvn` (`display mode: the game reads back the interval the window presents at`).
+
 ### Odd present intervals on the 30 Hz display link
 
 - **Symptom:** Donkey Kong Bananza ran its heavy areas at 15 fps where its GPU took about 46 ms a frame: the frames came every 66.7 ms, and the presentation thread spent 85% of its time in `nvnWindowAcquireTexture` waiting for display-link ticks.

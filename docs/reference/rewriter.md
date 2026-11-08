@@ -11,6 +11,16 @@ The NSO rewriter (`dm/tools/patch_nso.py`) and its per-build tables (`dm/tools/s
 - **Fix:** install `capstone>=5,<6` (README and CI). `patch_nso.py` checks the major version (`cs_version()`) before it disassembles anything, and the NSP script checks it before building or surveying, so the extraction is not wasted; both print the install command for the Python that runs them. Capstone 6 is not supported.
 - **Found on:** [Celeste](../../dm/games/01002B30028F6000/README.md#found-on-this-game).
 
+## Patch discovery
+
+### Repository patches missing under bracketed paths
+
+- **Symptom:** a build under a directory such as `Game [0400486024DEC000][v131072]` silently loses the repository's per-game cuts, observation gates and frame-step stubs, although its build ID is registered.
+- **Cause:** `PATCH_FILES` passed the absolute repository path to `glob` without escaping it. Brackets in a parent directory were interpreted as character classes, so the per-game `patches.py` search matched nothing. The explicitly named SDK patch file was still loaded. External profile roots already used `glob.escape`.
+- **Fix:** escape the literal tools directory before appending `../games/*/patches.py`. The parent path is literal and the game-directory wildcard keeps selecting every repository profile. Build gates, duplicate detection and external-profile precedence remain unchanged.
+- **Check:** `test_patches.ExternalRegistry.test_repository_patches_under_bracketed_directory` discovers and loads a synthetic frame-step registration through the production registry under a bracketed parent. The existing registry tests cover external roots, duplicate builds and profile precedence.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game), in the standalone build's parent directory.
+
 ## Patches across updates
 
 ### Function-matched cuts for unregistered builds

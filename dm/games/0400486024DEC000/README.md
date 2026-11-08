@@ -101,6 +101,7 @@ From an empty save: at about 45 s `A` (title), `A` (New Game), then the movie. F
 - [One Pro Controller read as two players](../../../docs/reference/services.md#one-pro-controller-read-as-two-players): resolved, no music in Kokiri Forest gameplay and its cutscenes; the controller applet opened over and over and the game kept its music suspended while it had focus.
 - [A fixed frame step plays in slow motion on a slow Mac](../../../docs/reference/frame-rate.md#a-fixed-frame-step-plays-in-slow-motion-on-a-slow-mac): the frame-ratio division.
 - [Frame-step stubs placed by their function](../../../docs/reference/rewriter.md#frame-step-stubs-placed-by-their-function)
+- [Repository patches missing under bracketed paths](../../../docs/reference/rewriter.md#repository-patches-missing-under-bracketed-paths): the standalone build directory prevented the repository registry from discovering per-game patches.
 
 - [Position invariance across shaders](../../../docs/reference/shaders.md#position-invariance-across-shaders): white shapes on plants and bushes for single frames in Kokiri Forest, from the foliage's mesh pre-pass and mesh colour pass rounding the position apart.
 - [GPU event waits order work across queues](../../../docs/reference/nvn-objects.md#gpu-event-waits-order-work-across-queues): the lighting producer-to-consumer dependency is proven in native SDK code and 297 live traced frames; the halo disappears when it is honored.

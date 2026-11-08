@@ -91,6 +91,16 @@ int main(void) {
     memset(tp, 0xaa, sizeof tp); memset(loc, 0xaa, sizeof loc);
     CHECK(loc_upd && loc_upd(loc, tp) == RES_OK && !memcmp(loc, a + 0xa8, sizeof loc) && !memcmp(tp, none, sizeof tp), "device location: the snapshot's name, a cleared time point");
     CHECK(memcmp(tp + 8, a + 0x90 + 8, 16), "the cleared time point's source ID is not the snapshots' steady clock");
+    // The network clock offline: its context (AdjustableNetworkSystemClock::Adjust aborts unless it gets one) is zero, 0x20 bytes, never calibrated; its time and the adjustable one's are unavailable
+    Result (*net_ctx)(uint8_t *) = hook("_ZN2nn4time26StandardNetworkSystemClock21GetSystemClockContextEPNS0_18SystemClockContextE");
+    Result (*adj_net)(int64_t *) = hook("_ZN2nn4time28AdjustableNetworkSystemClock14GetCurrentTimeEPNS0_9PosixTimeE");
+    uint8_t ctx_guard[0x40]; memset(ctx_guard, 0xa5, sizeof ctx_guard);
+    int ctx_ok = net_ctx && net_ctx(ctx_guard + 0x10) == RES_OK;
+    for (int i = 0; i < 0x40; i++) ctx_ok &= ctx_guard[i] == (i >= 0x10 && i < 0x30 ? 0 : 0xa5);
+    CHECK(ctx_ok, "network clock context: zero, only its 0x20 bytes");
+    CHECK(memcmp(ctx_guard + 0x10 + 0x10, a + 0x90 + 8, 16), "the network clock context's source ID is not the steady clock's: the time it stands for is unavailable");
+    ts = 1234;
+    CHECK(adj_net && adj_net(&ts) != RES_OK && ts == 1234, "adjustable network clock: unavailable, output untouched");
     printf("time: %d checks, %d failed\n", checks, fails);
     return fails != 0;
 }

@@ -85,6 +85,14 @@ HLE_FORCE("_ZN2nn4time16LoadTimeZoneRuleEPNS0_12TimeZoneRuleERKNS0_12LocationNam
 HLE_FORCE("_ZN2nn4time14ToCalendarTimeEPNS0_12CalendarTimeEPNS0_22CalendarAdditionalInfoERKNS0_9PosixTimeERKNS0_12TimeZoneRuleE", "conversion with an explicit time zone rule; same as the device zone (host localtime_r)",
           Result, h_time_ToCalendarTimeRule, CalendarTime *ct, CalendarAdditionalInfo *ai, const int64_t *pt, const void *rule) { (void)rule; return h_time_ToCalendarTime(ct, ai, pt); }
 HLE_FORCE("_ZN2nn4time26StandardNetworkSystemClock20IsAccuracySufficientEv", "network clock accuracy (time service): offline, never sufficient", unsigned, h_time_NetAccurate, void) { return 0; }
+// The adjustable network clock (METAL GEAR SOLID: Peace Walker - Master Collection Version, 1.3.1): Adjust copies the network clock's context into the SDK's MonotonicSystemClock
+// and aborts when the time service won't give it (AdjustableNetworkSystemClock::Adjust, sdk+0x42c514 on that build: Result 0x74 at start). A Switch gives that context offline too,
+// never calibrated: zero, whose steady clock source ID matches no steady clock, so the time it stands for is unavailable. Its GetCurrentTime would read the time service's shared
+// memory, which the host never maps: unavailable, as the network clock (StandardNetworkSystemClock::GetCurrentTime, hle_sdk16.c)
+HLE_FORCE("_ZN2nn4time26StandardNetworkSystemClock21GetSystemClockContextEPNS0_18SystemClockContextE", "network clock context (offline: never calibrated, zero)", Result, h_time_NetContext,
+          uint8_t *out) { memset(out, 0, 0x20); return RES_OK; }
+HLE_FORCE("_ZN2nn4time28AdjustableNetworkSystemClock14GetCurrentTimeEPNS0_9PosixTimeE", "adjustable network clock (offline, unavailable, as the network clock)", Result, h_time_AdjNetNow,
+          int64_t *out) { (void)out; return RES_FAIL; }
 // Clock snapshot (Tears of the Kingdom: CreateWithStandardSystemClock asks the time service, which the host never opens → abort in sm::Initialize). 0xD0 bytes, laid out
 // as Ryujinx lays out the service's ClockSnapshot and as this SDK's constructor clears it (its last store is the byte at +0xcd): +0x00 user clock context {offset,
 // steady time point}, +0x20 network clock context, +0x40 user time, +0x48 network time, +0x50 / +0x58 user / network calendar, +0x60 / +0x78 their additional info,

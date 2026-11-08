@@ -279,7 +279,7 @@ static void concurrent_bases(int fail) {
     dispatch_group_t group = dispatch_group_create(); __block int good = 0; NSObject *lock = [NSObject new];
     for (MTLRenderPipelineDescriptor *d in ds) dispatch_group_async(group, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         @autoreleasepool { NSError *err = nil; id ps = pso_build(d, &err);
-            @synchronized(lock) { good += fail ? !ps && [err.domain isEqualToString:@"test"] : ps != nil; }
+            @synchronized(lock) { good += ps != nil && !err; }   // a capture that fails (the archive's store full) builds the pipeline by the plain compiler all the same
         }
     });
     EXPECT("concurrent: first compiler entered", 0, dispatch_semaphore_wait(gate->entered, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)));
@@ -293,8 +293,19 @@ static void concurrent_bases(int fail) {
     EXPECT("concurrent: all callers receive result", 8, good);
     if (!fail) EXPECT("concurrent: one compile per base", 2, gate->calls);
     EXPECT("concurrent: no unfinished builds", 0, g_pbase_pending.n);
+    if (fail) {   // two bases failed to capture, each caller's own compile counted: the run still captures; past ARCH_CAP_GIVE_UP failures in a row it stops asking the archive's compiler
+        EXPECT("failed capture: counted", 1, g_arch_cap_failed >= 2 && g_arch_cap_failed < ARCH_CAP_GIVE_UP);
+        EXPECT("failed capture: still capturing", 1, arch_cap_on());
+        int calls = gate->calls;
+        for (int i = 0; i < ARCH_CAP_GIVE_UP; i++) { nvn_hm_clear(&g_pbase, hm_rel); NSError *err = nil; EXPECT("failed capture: built by the plain compiler", 1, pso_build(ds[i], &err) != nil && !err); }
+        EXPECT("failed capture: gave up after ARCH_CAP_GIVE_UP in a row", 0, arch_cap_on());
+        calls = gate->calls; nvn_hm_clear(&g_pbase, hm_rel); NSError *err = nil;
+        EXPECT("failed capture: no more captures asked", 1, pso_build(ds[0], &err) != nil && gate->calls == calls);
+        atomic_store(&g_arch_cap_failed, 0);
+        EXPECT("failed capture: a working capture resets the count", 1, arch_cap_on());
+    }
     ep->comp = gate->compiler;
-    if (fail) { NSError *err = nil; EXPECT("concurrent: failed base can retry", 1, pso_build(ds[0], &err) != nil); }
+    if (fail) { NSError *err = nil; nvn_hm_clear(&g_pbase, hm_rel); EXPECT("concurrent: failed base can retry", 1, pso_build(ds[0], &err) != nil); }
 }
 static void capture_preserves_foreign_folder(void) {
     arch_flush_wait();   // Finish earlier captures: the captures below go into a new flush period

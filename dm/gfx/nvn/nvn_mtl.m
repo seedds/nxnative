@@ -7469,22 +7469,41 @@ static ArchEpoch *ep_enter(void) {   // the current period, joined: a flush hand
 }
 static void ep_leave(ArchEpoch *ep) { atomic_fetch_sub(&ep->active, 1); dispatch_group_leave(ep->busy); }
 // A compile the archive captures, in the current flush period, counted there when it built (vd: the base has a vertex layout). No task options: a captured base never imports
-// archive entries (see the compaction crash below)
+// archive entries (see the compaction crash below).
+// The capturing compiler fails whole when the archive's store is full: Metal keeps each archive's state in an LMDB environment of fixed map size (com.apple.gpuarchiver), and once it is
+// full every compile through that compiler returns "cannot commit transaction …: MDB_MAP_FULL" or "cannot write 'UNITSMAPPINGS' database". Ocarina of Time's first start with a prewarm list
+// of 40,000 rows compiled 8,693 bases into one period's archive; 1,502 pipelines then failed to build at all and Kakariko Village drew without them at 30-70 ms a frame. A pipeline the
+// capture cannot take is built by the plain compiler, and after ARCH_CAP_GIVE_UP such failures in a row the run captures no more: the archive is a cache, never a condition of drawing
+enum { ARCH_CAP_GIVE_UP = 8 };
+static _Atomic int g_arch_cap_failed;   // captures that failed in a row while the plain compiler built the pipeline; reset by a capture that works
+static int arch_cap_on(void) { return g_arch_cap && atomic_load_explicit(&g_arch_cap_failed, memory_order_relaxed) < ARCH_CAP_GIVE_UP; }
+static void arch_cap_failed(NSError *ce, const char *what) {
+    int n = atomic_fetch_add(&g_arch_cap_failed, 1) + 1;
+    if (n <= 2 || n == ARCH_CAP_GIVE_UP)
+        MLOG("%spipeline archive: capturing a %s pipeline failed (%s): built without the archive%s", n == ARCH_CAP_GIVE_UP ? "[RED] " : "", what, ce ? ce.localizedDescription.UTF8String : "no error given",
+             n == ARCH_CAP_GIVE_UP ? "; no more captures this run (the archive's store is full: com.apple.gpuarchiver in the user cache folder)" : "");
+}
 static id<MTLRenderPipelineState> arch_capture(MTL4RenderPipelineDescriptor *d, NSError **e, int vd) {
-    if (!g_arch_cap) return [g_comp4 newRenderPipelineStateWithDescriptor:d compilerTaskOptions:nil error:e];
-    ArchEpoch *ep = ep_enter();
-    id<MTLRenderPipelineState> ps = [ep->comp newRenderPipelineStateWithDescriptor:d compilerTaskOptions:nil error:e];
-    if (ps) { atomic_fetch_add(&ep->n, 1); atomic_fetch_add(&g_arch_new, 1); if (vd) { atomic_fetch_add(&ep->vd, 1); atomic_fetch_add(&g_arch_new_vd, 1); } }
+    if (!arch_cap_on()) return [g_comp4 newRenderPipelineStateWithDescriptor:d compilerTaskOptions:nil error:e];
+    ArchEpoch *ep = ep_enter(); NSError *ce = nil;
+    id<MTLRenderPipelineState> ps = [ep->comp newRenderPipelineStateWithDescriptor:d compilerTaskOptions:nil error:&ce];
+    if (ps) { atomic_fetch_add(&ep->n, 1); atomic_fetch_add(&g_arch_new, 1); if (vd) { atomic_fetch_add(&ep->vd, 1); atomic_fetch_add(&g_arch_new_vd, 1); } atomic_store_explicit(&g_arch_cap_failed, 0, memory_order_relaxed); }
     ep_leave(ep);
+    if (ps) return ps;
+    ps = [g_comp4 newRenderPipelineStateWithDescriptor:d compilerTaskOptions:nil error:e];
+    if (ps) arch_cap_failed(ce, "render"); else if (e && !*e) *e = ce;   // the pipeline itself is wrong: the plain compiler's error, or the capture's when it gave none
     return ps;
 }
 // The same for a compute pipeline (cps_new). It counts as a base with a vertex layout does: its file is a plain one, never a p<seq> file, so its lookups skip the prebuild's files
 static id<MTLComputePipelineState> arch_capture_cs(MTL4ComputePipelineDescriptor *d, NSError **e) {
-    if (!g_arch_cap) return [g_comp4 newComputePipelineStateWithDescriptor:d compilerTaskOptions:nil error:e];
-    ArchEpoch *ep = ep_enter();
-    id<MTLComputePipelineState> ps = [ep->comp newComputePipelineStateWithDescriptor:d compilerTaskOptions:nil error:e];
-    if (ps) { atomic_fetch_add(&ep->n, 1); atomic_fetch_add(&g_arch_new, 1); atomic_fetch_add(&ep->cs, 1); }
+    if (!arch_cap_on()) return [g_comp4 newComputePipelineStateWithDescriptor:d compilerTaskOptions:nil error:e];
+    ArchEpoch *ep = ep_enter(); NSError *ce = nil;
+    id<MTLComputePipelineState> ps = [ep->comp newComputePipelineStateWithDescriptor:d compilerTaskOptions:nil error:&ce];
+    if (ps) { atomic_fetch_add(&ep->n, 1); atomic_fetch_add(&g_arch_new, 1); atomic_fetch_add(&ep->cs, 1); atomic_store_explicit(&g_arch_cap_failed, 0, memory_order_relaxed); }
     ep_leave(ep);
+    if (ps) return ps;
+    ps = [g_comp4 newComputePipelineStateWithDescriptor:d compilerTaskOptions:nil error:e];
+    if (ps) arch_cap_failed(ce, "compute"); else if (e && !*e) *e = ce;
     return ps;
 }
 // Metal opens a pipeline archive through NSData with "mapped if safe", and Foundation takes a file on an external drive as not safe: it reads it into memory, whole and for the whole run (docs/reference/memory.md). newArchiveWithURL has no option for this, so while the host

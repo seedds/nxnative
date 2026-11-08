@@ -42,6 +42,7 @@ static pthread_mutex_t nq_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t nq_cv = PTHREAD_COND_INITIALIZER;
 static pthread_once_t nq_once = PTHREAD_ONCE_INIT;
 static nq_queue *nq_queues;
+static int nq_test_held;   // nvn_queue_test_hold: replay takes no queued work while set (unit tests only)
 // The last GPU write of each event word not yet landed: its submission's fence, and for a WRITE signal the value it leaves (exact). A wait the queued value satisfies needs no
 // completion: its continuation is encoded after the writer's on the one ordered Metal queue, as the next submission of one NVN queue is, and memory the writer's completion lands
 // on the CPU (reports, render-target readbacks) is that same in-flight case. An ADD's result depends on the writes landing before it, so such a wait still waits for them
@@ -114,6 +115,7 @@ static void *nq_worker(void *unused) {
         pthread_mutex_lock(&nq_mu); nq_queue *q=NULL; nq_node *n=NULL; nq_job *j=NULL;
         for(;;) {
         scan_again:;
+            if(nq_test_held) { pthread_cond_wait(&nq_cv,&nq_mu); continue; }
             int mapped_event_wait=0;
             for(q=nq_queues;q;q=q->next) {
                 j=q->first; if(!j) continue; n=j->first;
@@ -221,6 +223,7 @@ uint64_t nvn_queue_present(queue_t *q,const tex_t *t,double period,const int cro
     pthread_mutex_lock(&nq_mu); j->receipt->refs++; uint64_t ticket=(uintptr_t)j->receipt;
     nq_enqueue(nq_get(q),j); pthread_mutex_unlock(&nq_mu); return ticket;
 }
+void nvn_queue_test_hold(int on) { pthread_mutex_lock(&nq_mu); nq_test_held=on; pthread_cond_broadcast(&nq_cv); pthread_mutex_unlock(&nq_mu); }
 void nvn_queue_present_release(uint64_t ticket) {
     if(!ticket) return; pthread_mutex_lock(&nq_mu); nq_put((nq_receipt *)(uintptr_t)ticket); pthread_mutex_unlock(&nq_mu);
 }

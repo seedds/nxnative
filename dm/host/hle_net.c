@@ -245,8 +245,7 @@ int dm_sk_accept(int s, void *a, unsigned *n) {
     return r;
 }
 int dm_sk_close(int s) {
-    if (s >= EFD_BASE && s < EFD_BASE + EFD_MAX) return efd_close(s);
-    if (!dm_net_online()) { t_skerr = SK_ENETDOWN; return -1; }
+    if (!dm_net_online()) return efd_close(s);   // offline the only descriptors are the host's event descriptors (0-63, as the bsd service numbers them); with DM_NET=1 the numbers are the host's own, and those win
     int rc = close(s); t_skerr = rc < 0 ? errno : 0; return rc;
 }
 int dm_sk_shutdown(int s, int how) {

@@ -188,17 +188,32 @@ namespace Ryujinx.Graphics.Shader.Instructions
         // ways, with the same values. A record word is the SoA word of vertex v, component c, so it goes there: the two writes coincide. Before, the record addresses ran past
         // the SoA area over the primitive count and index bytes (stage[3]) and drew garbage triangles (white streaks over PRAGMATA's cockpit window). stage[4] = aos,
         // stage[5] = n, stage[6] = the records' size (max vertices * 4n), from dmsh_meshstage.memory(); other addresses stay as they are. v = w / n as
-        // w * ceil(2^18 / n) >> 18, exact for w < 2^13 (256 vertices of 32 components)
+        // w * ceil(2^18 / n) >> 18 where that is exact for every word of the records (AosVertex checks it: it is for n up to 42, not for every n above, e.g. 51
+        // components and 160 vertices give vertex 109 for word 5609), else as an integer division
         private static Operand AosToSoa(EmitterContext context, Operand off, int[] stage)
         {
             int n = Math.Max(stage[5], 1);
             Operand rel = context.ISubtract(off, Const(stage[4]));
             Operand inside = context.ICompareLessUnsigned(rel, Const(stage[6]));
             Operand w = context.ShiftRightU32(rel, Const(2));
-            Operand v = context.ShiftRightU32(context.IMultiply(w, Const((int)(((1u << 18) + (uint)n - 1) / (uint)n))), Const(18));
+            Operand v = AosVertex(context, w, n, (uint)Math.Max(stage[6], 0) / 4);
             Operand c = context.ISubtract(w, context.IMultiply(v, Const(n)));
             Operand soa = context.IAdd(context.IAdd(context.IMultiply(context.ShiftRightU32(v, Const(5)), Const(n * 0x80)), context.ShiftLeft(context.BitwiseAnd(v, Const(31)), Const(2))), context.ShiftLeft(c, Const(7)));
             return context.ConditionalSelect(inside, soa, off);
+        }
+
+        // w / n for every w below words: by the reciprocal when it gives the quotient for all of them (and w * m stays within 32 bits), else by a division
+        internal static Operand AosVertex(EmitterContext context, Operand w, int n, uint words)
+        {
+            uint m = ((1u << 18) + (uint)n - 1) / (uint)n;
+            bool exact = (ulong)words * m < (1ul << 32);
+
+            for (uint k = 0; exact && k < words; k++)
+            {
+                exact = (k * m) >> 18 == k / (uint)n;
+            }
+
+            return exact ? context.ShiftRightU32(context.IMultiply(w, Const((int)m)), Const(18)) : context.Add(Instruction.Divide, Local(), w, Const(n));
         }
 
         public static void ALepc(EmitterContext context)

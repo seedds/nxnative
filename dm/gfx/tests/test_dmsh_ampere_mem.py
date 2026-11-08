@@ -296,6 +296,12 @@ class StageMemory(Translated):
         self.assertRegex(mesh, r'\* 768u?\b')     # a block of 32 vertices: 6 components of 0x80 bytes
         self.assertNotRegex(self.msl(self.PAYLOAD), r'43691')   # a task's mode 0xb8 is its payload, as before
 
+    def test_vertex_records_of_many_components_divide_exactly(self):   # 51 components, 160 vertices: the reciprocal gives vertex 109 for word 5609 (110 * 51 = 5610 > 5609 >= 109 * 51 + 50)
+        mesh = self.translate(inst(*self.PAYLOAD) + inst(*EXIT), stage_memory=[0, 0x10, 0x120, 0x400, 0x200, 51, 160 * 4 * 51], shared=0x8000)
+        self.assertRegex(mesh, r'< 32640u')                    # inside the records only
+        self.assertNotRegex(mesh, r'\* %du?\b' % (((1 << 18) + 50) // 51))   # no reciprocal
+        self.assertRegex(mesh, r'/ 51\b')                      # an integer division
+
     def test_outside_a_task_or_mesh_shader_it_is_refused(self):
         with self.assertRaises(AssertionError) as e: self.translate(inst(*self.PAYLOAD) + inst(*EXIT))
         self.assertIn('outside a task or mesh shader', str(e.exception))

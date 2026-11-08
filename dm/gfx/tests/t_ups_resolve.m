@@ -12,11 +12,12 @@ void svc_thread_dump(void) {}
 uint64_t now_ns(void) { return bp_now(); }
 static int checks, failed;
 #define CHECK(c, label) do { checks++; if (!(c)) { failed++; fprintf(stderr, "FAIL: %s\n", label); } } while (0)
-// A single-level 2D texture of the game's size w x h with NVN flags (COMPRESSIBLE makes a render target the host scales; IMAGE alone is data, left at the game's size)
-static tex_t texture(uint64_t serial, unsigned w, unsigned h, int format, uint32_t flags) {
-    tex_t t = {.magic = MAGIC('T','E','X',0), .serial = serial, .off = serial << 24};
-    t.d = (nvn_texdesc){.target = NVN_TEXTURE_TARGET_2D, .format = format, .width = w, .height = h, .depth = 1, .levels = 1, .samples = 1, .flags = flags};
-    nvn_tex_layout(&t.d, &t.L); mtl_tex_init(&t); return t;
+// A single-level 2D texture of the game's size w x h with NVN flags (COMPRESSIBLE makes a render target the host scales; IMAGE alone is data, left at the game's size), initialized
+// in the caller's object as a game's is: mtl_tex_init records that object's address (g_tex_live), and mtl_tex_release tells the texture's own object from a copy by it
+static void texture(tex_t *t, uint64_t serial, unsigned w, unsigned h, int format, uint32_t flags) {
+    *t = (tex_t){.magic = MAGIC('T','E','X',0), .serial = serial, .off = serial << 24};
+    t->d = (nvn_texdesc){.target = NVN_TEXTURE_TARGET_2D, .format = format, .width = w, .height = h, .depth = 1, .levels = 1, .samples = 1, .flags = flags};
+    nvn_tex_layout(&t->d, &t->L); mtl_tex_init(t);
 }
 static void fill(id<MTLTexture> t, MTLClearColor c) {
     id<MTLCommandBuffer> cb = q_cb(); MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -55,15 +56,16 @@ int main(void) { @autoreleasepool {
     mtl_init();
     int scaled = ups_factor() > 1;   // DM_UPSCALE=2 in the runs that resolve; unset in the last one
     // The scene: a 1600x900 sRGB render target, 3200x1800 at 2x; its left half one colour, its right half another. The output: a 1920x1080 sRGB image (IMAGE alone: unscaled)
-    tex_t scene = texture(77, 1600, 900, NVN_FORMAT_RGBA8_SRGB, NVN_TEXTURE_FLAGS_COMPRESSIBLE | NVN_TEXTURE_FLAGS_IMAGE), out = texture(78, 1920, 1080, NVN_FORMAT_RGBA8_SRGB, NVN_TEXTURE_FLAGS_IMAGE),
-          same = texture(79, 1600, 900, NVN_FORMAT_RGBA8_SRGB, NVN_TEXTURE_FLAGS_IMAGE), patch = texture(80, 4, 4, NVN_FORMAT_RGBA8_SRGB, NVN_TEXTURE_FLAGS_COMPRESSIBLE);
+    tex_t scene, out, same, patch;
+    texture(&scene, 77, 1600, 900, NVN_FORMAT_RGBA8_SRGB, NVN_TEXTURE_FLAGS_COMPRESSIBLE | NVN_TEXTURE_FLAGS_IMAGE); texture(&out, 78, 1920, 1080, NVN_FORMAT_RGBA8_SRGB, NVN_TEXTURE_FLAGS_IMAGE);
+    texture(&same, 79, 1600, 900, NVN_FORMAT_RGBA8_SRGB, NVN_TEXTURE_FLAGS_IMAGE); texture(&patch, 80, 4, 4, NVN_FORMAT_RGBA8_SRGB, NVN_TEXTURE_FLAGS_COMPRESSIBLE);
     mtl_reg_tex(701, &scene, NULL); mtl_reg_image(702, &out, NULL); mtl_reg_image(703, &same, NULL);
     id<MTLTexture> st = tex_mtl(&scene), ot = tex_mtl(&out), pt = tex_mtl(&patch);
     CHECK(st.width == (scaled ? 3200u : 1600u) && ot.width == 1920 && ot.height == 1080, scaled ? "the scene is made at 2x and the output at the game's size" : "at 1x both are at the game's size");
     // The viewport the constants name: 1200x675 of the 1600x900 scene (2400x1350 of the scaled one), the rest of the texture black, which must never reach the output
     const unsigned vw = 1200, vh = 675, sx = scaled ? 2400 : 1200, sy = scaled ? 1350 : 675;
     const MTLClearColor a = MTLClearColorMake(0.5, 0.25, 0.75, 1), b = MTLClearColorMake(0.1, 0.8, 0.3, 1);
-    tex_t patch_a = texture(81, 4, 4, NVN_FORMAT_RGBA8_SRGB, NVN_TEXTURE_FLAGS_COMPRESSIBLE); id<MTLTexture> pat = tex_mtl(&patch_a);
+    tex_t patch_a; texture(&patch_a, 81, 4, 4, NVN_FORMAT_RGBA8_SRGB, NVN_TEXTURE_FLAGS_COMPRESSIBLE); id<MTLTexture> pat = tex_mtl(&patch_a);
     fill(st, MTLClearColorMake(0, 0, 0, 1)); fill(pat, a); fill(pt, b);
     // The viewport in colour a and its left half in colour b, from 4x4 patches (nearest draws; scaling copies as the host's own, in the scene's texels)
     mtl_sub_begin();

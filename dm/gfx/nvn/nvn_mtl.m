@@ -13712,7 +13712,8 @@ static void mirror_rb_land(void *p) {   // the submission's completion handler
     free(m);
 }
 static void copy_b2t(const p_copy_b2t *c, uint32_t size) {
-    if (c->tex) zskip_del(c->tex->serial);
+    if (!c->tex) { PD("C (no texture)"); return; }   // the pass dump's line named c->tex's serial, and the copy's format and level read it, after tex_mtl(NULL) gave nil
+    zskip_del(c->tex->serial);
     id<MTLTexture> t = tex_mtl(c->tex); sparse_gpu_wrote(c->tex);
     if (!t) { PD("C ser=%llu (no host texture)", c->tex->serial); return; }
     int bw, bh, bpb = nvn_fmt_bpb(c->tex->d.format, &bw, &bh);

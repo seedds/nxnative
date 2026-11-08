@@ -128,8 +128,8 @@ class UnrealMemory(unittest.TestCase):
         }
         keys = pg.guess(facts, hooks=set())
         reserve, alias, stack = (int(keys[k][0], 0) for k in ('mem_reserve', 'mem_alias', 'mem_stack'))
-        self.assertGreaterEqual(alias, 64 * 1024**3)
-        # mem_init puts the modules before the alias region, then stacks and the heap.
+        self.assertEqual((reserve, alias), (0xF0000000, 0xC8000000))   # the iPhone block; the Mac host maps 64 GB of alias region on its own
+        # mem_init: 256 MB in front, then the heap, the stacks, the alias region.
         heap = reserve - 0x10000000 - alias - stack
         self.assertGreaterEqual(heap, 128 * pg.MiB)
 

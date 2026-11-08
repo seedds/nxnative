@@ -9,10 +9,10 @@ void svc_thread_dump(void) {}
 uint64_t now_ns(void) { return bp_now(); }
 static int checks, failed;
 #define CHECK(c, label) do { checks++; if (!(c)) { failed++; fprintf(stderr, "FAIL: %s\n", label); } } while (0)
-static tex_t texture(uint64_t serial, unsigned w, unsigned h, int format) {
-    tex_t t = {.magic = MAGIC('T','E','X',0), .serial = serial, .off = serial << 24};
-    t.d = (nvn_texdesc){.target = NVN_TEXTURE_TARGET_2D, .format = format, .width = w, .height = h, .depth = 1, .levels = 1, .samples = 1, .flags = NVN_TEXTURE_FLAGS_IMAGE};
-    nvn_tex_layout(&t.d, &t.L); mtl_tex_init(&t); return t;
+static void texture(tex_t *t, uint64_t serial, unsigned w, unsigned h, int format) {
+    *t = (tex_t){.magic = MAGIC('T','E','X',0), .serial = serial, .off = serial << 24};
+    t->d = (nvn_texdesc){.target = NVN_TEXTURE_TARGET_2D, .format = format, .width = w, .height = h, .depth = 1, .levels = 1, .samples = 1, .flags = NVN_TEXTURE_FLAGS_IMAGE};
+    nvn_tex_layout(&t->d, &t->L); mtl_tex_init(t);
 }
 static void fill(id<MTLTexture> t, MTLClearColor c, int depth) {
     id<MTLCommandBuffer> cb = q_cb(); MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -34,8 +34,13 @@ static int flat(id<MTLTexture> t, const float want[3]) {   // the middle half of
 }
 int main(void) { @autoreleasepool {
     mtl_init();
-    tex_t col = texture(90, 960, 540, NVN_FORMAT_RGBA16F), col2 = texture(91, 960, 540, NVN_FORMAT_RGBA16F), dep = texture(92, 960, 540, NVN_FORMAT_DEPTH32F),
-          mot = texture(93, 960, 540, NVN_FORMAT_RG16F), out = texture(94, 1920, 1080, NVN_FORMAT_RGBA16F), out2 = texture(95, 1920, 1080, NVN_FORMAT_RGBA16F);
+    tex_t col, col2, dep, mot, out, out2;
+    texture(&col, 90, 960, 540, NVN_FORMAT_RGBA16F);
+    texture(&col2, 91, 960, 540, NVN_FORMAT_RGBA16F);
+    texture(&dep, 92, 960, 540, NVN_FORMAT_DEPTH32F);
+    texture(&mot, 93, 960, 540, NVN_FORMAT_RG16F);
+    texture(&out, 94, 1920, 1080, NVN_FORMAT_RGBA16F);
+    texture(&out2, 95, 1920, 1080, NVN_FORMAT_RGBA16F);
     const float a[3] = {0.5f, 0.25f, 0.75f}, b[3] = {0.125f, 0.625f, 0.25f};
     fill(tex_mtl(&col), MTLClearColorMake(a[0], a[1], a[2], 1), 0); fill(tex_mtl(&col2), MTLClearColorMake(b[0], b[1], b[2], 1), 0);
     fill(tex_mtl(&dep), MTLClearColorMake(0, 0, 0, 0), 1); fill(tex_mtl(&mot), MTLClearColorMake(0, 0, 0, 0), 0);
@@ -49,6 +54,8 @@ int main(void) { @autoreleasepool {
     CHECK(g_dlss[0].sc != nil, "MetalFX made a temporal scaler for these formats");
     CHECK(flat(tex_mtl(&out), a), "the first evaluation's output holds its own colour");
     CHECK(flat(tex_mtl(&out2), b), "the second evaluation through the same scaler holds its own");
+    mtl_tex_release(&col); mtl_tex_release(&col2); mtl_tex_release(&dep);
+    mtl_tex_release(&mot); mtl_tex_release(&out); mtl_tex_release(&out2);
     printf("t_dlss_mfx (encoding thread %s): %d checks, %d failed\n", rec_on() ? "on" : "off", checks, failed);
     return failed != 0;
 }}

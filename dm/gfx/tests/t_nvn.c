@@ -56,7 +56,30 @@ static size_t tex_size(int fmt, int w, int h, int flags, size_t *align) {
     return P(nvnTextureBuilderGetStorageSize)(&tb);
 }
 
+static void shader_key_test(void) {
+    uint8_t control[0x880] = {0}, key[8]; uint32_t length = sizeof control;
+    memcpy(control + 0x20, &length, sizeof length);
+    const uint8_t expected[8] = {0xdc, 0x12, 0xfb, 0x42, 0x29, 0xfe, 0x1a, 0x92};   // SHA-256 of this synthetic control section
+    for (int registered = 0; registered < 2; registered++) {
+        prog_t p = {.nstage=1, .serial=registered ? nvn_new_serial() : 0};
+        memset(key, 0xa5, sizeof key);
+        EXPECT("shader key: missing control is refused", 0, prog_key(&p, 0, key));
+        EXPECT("shader key: failure leaves output alone", 0xa5, key[0]);
+        if (registered) EXPECT("shader key: failure is not cached", 0, pk_get(p.serial)->ok);
+        EXPECT("shader key: absent stage is refused", 0, prog_key(&p, 1, key));
+        p.sd[0].control = control;
+        EXPECT("shader key: control supplied later works", 1, prog_key(&p, 0, key));
+        EXPECT("shader key: hashes the control bytes", 0, memcmp(key, expected, sizeof key));
+        if (registered) {
+            p.sd[0].control = NULL;
+            EXPECT("shader key: cached after control is freed", 1, prog_key(&p, 0, key));
+            EXPECT("shader key: cached bytes stay the same", 0, memcmp(key, expected, sizeof key));
+        }
+    }
+}
+
 int main(void) {
+    shader_key_test();
     setenv("DM_NVN_COUNT", "1", 1);   // the call-count checks below need the counting trampolines (off by default)
     // Engine-native limiters have no FPS state page. Their launcher cap must
     // still pace presents and select the display-link rate in display mode.

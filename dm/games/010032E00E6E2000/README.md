@@ -61,6 +61,15 @@ are in the NSP folder's `010032E00E6E2000-work/run/`.
 
 ## Open
 
+- On this Mac, the full 110-second regression route at unchanged `ea0c98df35e2`
+  reports GPU hangs in a segment containing 26 game shaders. A repeat of that
+  same revision escalates to [revoked GPU access](../../../docs/reference/rendering.md#a-gpu-whose-access-macos-revoked-stops-the-game),
+  as does the CI-fix candidate; the cause of the hangs remains open. All 1,272
+  shaders and 612 pipeline bases build in both revisions. Both runs also report
+  that the profile's `depth_mode gl` differs from runtime `zero`; the pipeline
+  archive needs rebuilding with the observed mode. These runs do not establish
+  clean gameplay validation. Logs are under the NSP folder's
+  `010032E00E6E2000-work/regress/runs/20261108-*`.
 - iPhone gameplay has not been tested.
 - Later memories, the pocket watch and persistence across a story checkpoint
   have not been checked. The unsigned IPA is 908.7 MB; the Mac app is 2.1 GB.

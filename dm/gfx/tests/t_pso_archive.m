@@ -134,7 +134,10 @@ static void compute_pipelines(void) {
     EXPECT("compute: a plain file, not a p file", 1, names.count == 1 && ![names[0] hasPrefix:@"p"]);
     EXPECT("compute: nothing left to write", 0, g_arch_new);
     LookupCountArchive *la = [LookupCountArchive new];
-    la->archive = names.count ? [g_dev newArchiveWithURL:[NSURL fileURLWithPath:[@(kdir) stringByAppendingPathComponent:names[0]]] error:&err] : nil;
+    NSString *path = names.count ? [@(kdir) stringByAppendingPathComponent:names[0]] : nil;
+    if (!path) abort();
+    la->archive = [g_dev newArchiveWithURL:[NSURL fileURLWithPath:path] error:&err];
+    if (!la->archive) abort();
     g_arch4 = @[(id<MTL4Archive>)la];   // as a new start with that file
     built = g_cps_built; pending = g_arch_new;
     id<MTLComputePipelineState> kp2 = cps_new(kf, &err);
@@ -252,11 +255,13 @@ static void depth_only(void) {
     MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float width:4 height:4 mipmapped:NO];
     td.usage = MTLTextureUsageRenderTarget; td.storageMode = MTLStorageModePrivate;
     id<MTLTexture> t = [g_dev newTextureWithDescriptor:td];
+    if (!t) abort();
     MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor new]; rp.depthAttachment.texture = t;
     rp.depthAttachment.loadAction = MTLLoadActionClear; rp.depthAttachment.clearDepth = 1; rp.depthAttachment.storeAction = MTLStoreActionStore;
     MTLDepthStencilDescriptor *ds = [MTLDepthStencilDescriptor new]; ds.depthWriteEnabled = YES; ds.depthCompareFunction = MTLCompareFunctionAlways;
     float v[4] = {1, 1, 1, 1}; id<MTLBuffer> vb = [g_dev newBufferWithBytes:v length:sizeof v options:MTLResourceStorageModeShared];
     id<MTLBuffer> out = [g_dev newBufferWithLength:1024 options:MTLResourceStorageModeShared];
+    if (!vb || !out) abort();
     id<MTLCommandBuffer> cb = [g_q commandBuffer]; id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
     [enc setRenderPipelineState:ps]; [enc setDepthStencilState:[g_dev newDepthStencilStateWithDescriptor:ds]];
     [enc setVertexBuffer:vb offset:0 atIndex:16]; [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; [enc endEncoding];
@@ -358,7 +363,8 @@ static void spec_desc_ownership(void) {
 int main(int argc, char **argv) { @autoreleasepool {
     if (!mkdtemp(archive_cache_root)) abort();
     atexit(archive_cache_cleanup);
-    if (![NSFileManager.defaultManager createDirectoryAtPath:[@(archive_cache_root) stringByAppendingPathComponent:@"com.apple.gpuarchiver"]
+    NSString *cache = [@(archive_cache_root) stringByAppendingPathComponent:@"com.apple.gpuarchiver"];
+    if (!cache || ![NSFileManager.defaultManager createDirectoryAtPath:cache
                                withIntermediateDirectories:NO attributes:nil error:nil]) abort();
     char dir[] = "/tmp/t_pso_archive.XXXXXX"; if (!mkdtemp(dir)) abort();
     setenv("DM_PSO_ARCHIVE", argc == 3 ? argv[2] : dir, 1);

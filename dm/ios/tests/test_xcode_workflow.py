@@ -19,6 +19,7 @@ import game
 import gen_resources
 import nacp
 import profile_guess
+import romfs_image
 import xcode_projects
 
 
@@ -48,6 +49,7 @@ class XcodePipelineTests(unittest.TestCase):
             extraction = root / 'extracted' / version
             (extraction / 'RomFS').mkdir(parents=True)
             (extraction / 'ExeFS').mkdir()
+            romfs_image.pack(extraction / 'RomFS', extraction / 'RomFS.img')
             def fake_run(cmd, log, **kwargs):
                 log.parent.mkdir(parents=True, exist_ok=True)
                 log.write_text('')  # a successful command with no diagnostic output

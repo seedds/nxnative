@@ -1,0 +1,45 @@
+# Game profile of Timespinner (Switch, base game 1.0.0 = v0). Plays on the Mac from boot into the first scenes, with sound
+# Format: see dm/games/README.md
+# The game's C# runs as C++ compiled by Sickhead's BRUTE (its name is in main), on SDK 7.3.0; its graphics are FNA's OpenGLDevice with MojoShader (main's assertions name
+# D:/Projects/Switch/FNA/lib/MojoShader). It renders with NVIDIA's desktop OpenGL through EGL (subsdk0, not loaded): main gets its GL functions from eglGetProcAddress, which the
+# host's GL layer implements on Metal (dm/gfx/gl/hle_gl.m). Its sound is XACT (Content/Audio/*.xwb, .xsb, .xgs)
+# The shaders are XNA effects (Content/Effects/*.xnb: Direct3D 9 bytecode) that MojoShader turns into desktop GLSL 1.20 at run time: no game file holds the GLSL, so the NSP script
+# captures it by booting the game on the Mac (gl_capture.tsv lists it) and dm/gfx/tools/gl_shaders.py translates it offline; the host finds each shader by the hash of its text
+
+# ---- Identity ----
+title_id	0100DD300CF3A000
+program_id	0100DD300CF3A000
+
+# ---- App ----
+# Game name: only a label for profile listings and the Mac window title; the iOS app name is the game name in the base NSP, and the bundle ID comes from the base game title ID (build_ipa.sh / NSP script)
+name	Timespinner
+ipa	Timespinner.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v0	1.0.0	main=95947700181f5c615c7db2314bab7bbb	sdk=6bfe1085ed54bdf0dcc5d0ea0262b7c3
+package	v0
+shader_versions	v0
+
+# ---- Files ----
+# load order as on Horizon: main, subsdk*, sdk. subsdk0 / subsdk1 are NVIDIA's OpenGL and Vulkan drivers, which program the GPU through NvRm: never loaded, the GL layer answers
+# main's EGL imports
+modules	main sdk
+romfs_marker	Content/Audio/BGM.xwb
+zip_store	.xwb:.metallib
+
+# ---- Memory ----
+# main sets a heap of at most the pool − 64 MB: a 3328 MB heap region. The NPDM declares no system resource, so the game has no virtual address memory
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x0
+
+# ---- Shader split ----
+# no NVN shaders: the NVN tables stay empty (gl_shaders.py writes the GL library and its table, not the profile)
+shader_note	Timespinner has no NVN shaders (its GLSL shaders go through the GL layer)
+
+# ---- After the rewrite ----
+# used memory for the rewritten modules (102 MB), more than the default 64 MB
+mem_used	0x6600000

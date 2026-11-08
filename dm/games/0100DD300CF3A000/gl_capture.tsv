@@ -1,0 +1,17 @@
+# GLSL shaders Timespinner's MojoShader writes at run time (the Mac host's DM_GL_CAPTURE, booting into the first scene): its glsl120 translation of the game's 12 XNA effects
+# (Content/Effects/*.xnb, Direct3D 9 bytecode, one pixel shader each) and of SpriteBatch's built-in effect (its vertex and pixel shader); <key>.vert / <key>.frag, key = sha256(GLSL)[:16].
+# The NSP script's GL shader capture runs until every one here is captured; gl_shaders.py translates the capture
+02e24ac701b92e23.frag
+06e000d5b8cb8f64.frag
+26521dbeeeac21bc.frag
+55ff902aa520c4cc.frag
+6cc38e891cd2e9bf.frag
+7036704cee18c69e.frag
+8c26acd1c6571d3c.frag
+94132729d2ef3e22.frag
+9e082b30eeb7c7a6.frag
+cc559857c72434cb.vert
+e7a4b22331e355ce.frag
+f18928f370910227.frag
+f3e30f850e5dd4af.frag
+fe5a12b0ae3e6604.frag

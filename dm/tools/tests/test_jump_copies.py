@@ -423,6 +423,36 @@ class IndexCopiedBeforeCheck(unittest.TestCase):
                 self.assertIsNone(self.run_site([NOP] * 65 + [word])[0])
 
 
+class AddReadsCopiedBase(unittest.TestCase):
+    """The add reads a copy of the base the load reads (Timespinner 1.0.0 main+0x2c0a220): cmp w10,#3; b.hi; adrp/add x18; mov x6,x18; ldrsw x18,[x18,x10,lsl #2]; add x18,x18,x6; br x18"""
+    TABLE = 0x4040
+
+    def run_site(self, after_copy=(), after_load=(), far_base=True):
+        words = [cmp_w(10, 3), 0, ADRP(18, 8, self.TABLE), ADDI(18, 18, self.TABLE & 0xfff), mov(6, 18), *after_copy,
+                 0xb8a07800 | 10 << 16 | 18 << 5 | 18, *after_load, ADDR(18, 18, 6), BR(18)]
+        at = 4 * len(words); words += [RET] * 5; words[1] = bhi(4, at + 16)
+        targets = [at + 4 * i for i in range(4)]
+        for i, target in enumerate(targets): struct.pack_into('<i', IMG, self.TABLE + 4 * i, target - self.TABLE)
+        md = Cs(CS_ARCH_ARM64, CS_MODE_ARM); md.detail = True
+        ins = list(md.disasm(struct.pack('<' + 'I' * len(words), *words), 0))
+        self.assertEqual(len(ins), len(words))
+        return scope['jump_offsets'](ins, at // 4 - 1, copy_first=far_base, far_base=far_base), targets
+
+    def test_the_load_and_the_add_read_one_table(self):
+        for after_copy in ([], [NOP, mov(9, 0)]):
+            with self.subTest(after_copy=after_copy):
+                actual, expected = self.run_site(after_copy)
+                self.assertEqual(actual, expected)
+
+    def test_only_the_last_attempts_take_it(self):
+        self.assertIsNone(self.run_site(far_base=False)[0])
+
+    def test_a_base_changed_after_the_copy_is_refused(self):
+        for after_copy, after_load in (([ADDI(18, 18, 4)], []), ([mov(6, 0)], []), ([], [mov(6, 0)]), ([], [ADDI(6, 6, 4)]), ([0x94000000], [])):
+            with self.subTest(after_copy=after_copy, after_load=after_load):
+                self.assertIsNone(self.run_site(after_copy, after_load)[0])
+
+
 class ZeroExtendedIndex(unittest.TestCase):
     TABLE = 0x4040
     TARGETS = [52 + i * 4 for i in range(5)]

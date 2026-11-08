@@ -88,6 +88,12 @@ class GlslSources(unittest.TestCase):
         image = b'#version 450\nvoid main() {}\0#version 450\nvoid main (void) {}\0'
         self.assertEqual(pg.glsl_sources(image), 2)
 
+    def test_gl_sources_need_an_entry_point(self):
+        # Timespinner's MojoShader keeps only the version lines it puts before the GLSL it makes at run time; glslang's messages start with '#version:'
+        self.assertEqual(pg.gl_sources(b'\0#version 100\0#version 110\0#version 120\0#version: bad\0'), 0)
+        self.assertEqual(pg.gl_sources(b'\0#version 320 es\nvoid main() {}\0#version 120\0'), 1)
+        self.assertEqual(pg.shader_sources({'eglCreateWindowSurface'}, 0, [], 0, 0, gl_names=1, gl_src=pg.gl_sources(b'\0#version 120\0'))['gl_capture'][0], True)
+
     def test_only_text_files_count_as_glsl_sources(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d); (root / 'shaders').mkdir()

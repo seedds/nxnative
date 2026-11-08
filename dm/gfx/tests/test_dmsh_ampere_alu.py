@@ -10,6 +10,11 @@ from test_dmsh_ampere_mem import EXIT, Translated, inst
 STORE = (0x000fe8000000c800, 0x0000080609008388)   # STS.U32 [R9 * 16 + 8], R6 (Mario Kart World f94552a2a2bff505): the sink, R9 the thread index
 
 
+# A result's bits stepped by one, as SPIRV-Cross spells an integer add of 1 / -1 on int (_7 = _5 + 1;) or on uint (int(uint(_5) + 1u))
+STEP_UP = r'\b_\d+ \+ 1;|\buint\(_\d+\) \+ 1u\)'
+STEP_DOWN = r'\b_\d+ \+ \(-1\);|\buint\(_\d+\) \+ 4294967295u\)'
+
+
 def waiting(i): return (i[0] | 0x3f << 52, i[1])   # the instruction waits on every scoreboard (control bits 116..121): it reads what an S2R before it wrote
 def s2r_tid(rd): return (0x000e260000002100, 0x0000000000007919 | rd << 16)   # S2R Rd, SR_TID.X (Mario Kart World's encoding, write barrier 0)
 
@@ -341,10 +346,10 @@ class SingleInstructionSemantics(Alu):
         mov = (0x000fc20000000fff, 0x8839e130ff057802)     # MOV R5, 0x8839e130 (-2009472720)
         i2f = (0x000fc200002094ff, 0x00000005ff067306)     # I2F.RP R6, R5: -2009472640.0 (0xceef8c3d, truncated), not the nearest -2009472768.0
         msl = self.kept(mov, i2f)
-        # 32-bit source to F32 takes main's path (DirectedRounding): the nearest conversion, then its bits stepped toward zero when it came out above the value (- 1 on uint);
-        # otherwise the truncation, with the bits under the 24 kept cleared (spvFindUMSB)
+        # 32-bit source to F32 takes main's path (DirectedRounding): the nearest conversion, then its bits stepped toward zero when it came out above the value (- 1, in
+        # SPIRV-Cross's int or uint spelling); otherwise the truncation, with the bits under the 24 kept cleared (spvFindUMSB)
         if re.search(r'float\(-2009472720\)', msl):
-            self.assertRegex(msl, r'as_type<uint>\(_\d+\) \+ 4294967295u')
+            self.assertRegex(msl, r'as_type<int>\(_\d+\) \+ \(-1\);|as_type<uint>\(_\d+\) \+ 4294967295u')
         else:
             self.assertIn('spvFindUMSB', msl)
 
@@ -353,21 +358,21 @@ class SingleInstructionSemantics(Alu):
         i2f = (0x000fc2000020c8ff, 0x00000005ff067306)     # I2F.F16.U32.RZ R6, R5: 65504 (0x7bff), not infinity
         msl = self.kept(mov, i2f)
         self.assertRegex(msl, r'uint\(_\d+\) < uint\(_\d+\);')   # the magnitude of the half compared with that of the value it came from, as bits
-        self.assertIn('4294967295u)', msl)                     # and the half stepped down one where it came out larger
+        self.assertRegex(msl, STEP_DOWN)                       # and the half stepped down one where it came out larger
 
     def test_f2f_to_half_rounds_toward_plus_infinity(self):
         mov = (0x000fc20000000fff, 0x00800000ff057802)     # MOV R5, 0x800000 (FLT_MIN)
         f2f = (0x000fc200002088ff, 0x00000005ff067304)     # F2F.F16.F32.RP R6, R5: the smallest half denormal (0x0001), not 0
         msl = self.kept(mov, f2f)
         self.assertRegex(msl, r'_\d+ < 8388608;')           # the half's value key below FLT_MIN's bits (0x800000): an integer compare (Metal's fast math
-        self.assertIn('+ 1u)', msl)                         # folded the float one), and the half stepped up
+        self.assertRegex(msl, STEP_UP)                      # folded the float one), and the half stepped up
 
     def test_f2fp_rz_overflow_is_the_largest_half(self):
         mov = (0x000fc20000000fff, 0x477ff000ff057802)     # MOV R5, 0x477ff000 (65520.0)
         f2fp = (0x000fc200000180ff, 0x00000005ff06723e)    # F2FP.PACK_AB.RZ R6, RZ, R5: 0x00007bff (65504), not 0x7c00
         msl = self.kept(mov, f2fp)
         self.assertIn('1199566848u < uint(', msl)   # 65520.0's bits (0x477ff000) against the half's magnitude
-        self.assertIn('4294967295u)', msl)
+        self.assertRegex(msl, STEP_DOWN)
 
 if __name__ == '__main__':
     unittest.main()

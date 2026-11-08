@@ -15,7 +15,7 @@ def inst(hi, lo): return struct.pack('<QQ', lo, hi)
 
 @unittest.skipUnless(os.environ.get('DMSH_TEST_XLATE'), 'set DMSH_TEST_XLATE to the offline translator')
 class Translated(unittest.TestCase):
-    def translate(self, code, **extra):
+    def translate(self, code, atomics=False, **extra):
         with tempfile.TemporaryDirectory(prefix='ampere_mem_') as d:
             work = Path(d); (work / 'k.bin').write_bytes(code)
             # c0 layout (QueryAmpereComputeC0Layout): no uniform or storage buffers, 3 texture handles from 0x10, image handles from 0x28 (word 12 = image slot 1), 0x40 bytes
@@ -27,10 +27,23 @@ class Translated(unittest.TestCase):
             self.res = json.loads((work / 'k.res.json').read_text())   # the translator's own report of the shader
             sys.path.insert(0, str(TOOLS)); import dmsh_geometry
             dmsh_geometry.flatten_sets(work / 'k.spv')
-            r = subprocess.run([str(TOOLS / 'spirv_cross_bin/spirv-cross'), '--msl', '--msl-version', '20300', '--msl-argument-buffers', '--msl-texture-buffer-native',
-                                str(work / 'k.spv')], capture_output=True, text=True)
+            xc = ['--msl', '--msl-version', '20300', '--msl-argument-buffers', '--msl-texture-buffer-native']
+            if atomics:   # as dmsh_build runs it for image atomics: MSL 3.1 and the native-atomic checks and rewrites (dmsh_atomic.py)
+                import dmsh_atomic
+                xc = dmsh_atomic.cross_args(xc, str(work / 'k.spv'))
+            r = subprocess.run([str(TOOLS / 'spirv_cross_bin/spirv-cross'), *xc, str(work / 'k.spv')], capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, r.stderr)
-            return r.stdout
+            return dmsh_atomic.check_msl(r.stdout) if atomics else r.stdout
+
+    def refused(self, code, **extra):
+        """The translator's message for a shader it does not translate"""
+        with tempfile.TemporaryDirectory(prefix='ampere_mem_') as d:
+            work = Path(d); (work / 'k.bin').write_bytes(code)
+            job = [dict(key='k', stage='cs', arch='sm86', code=str(work / 'k.bin'), tex={}, img={}, attr={}, fout={}, local=[32, 1, 1], debug=True, nvn2_cs=extra.pop('nvn2_cs', [0, 0, 3, 0x40, 0]), **extra)]
+            (work / 'jobs.json').write_text(json.dumps(job))
+            r = subprocess.run([os.environ['DMSH_TEST_XLATE'], str(work / 'jobs.json'), d], capture_output=True, text=True)
+            self.assertFalse((work / 'k.spv').exists(), 'translated: ' + r.stdout + r.stderr)
+            return r.stdout + r.stderr
 
 
 class GuardedWrites(Translated):
@@ -419,10 +432,11 @@ class LdcIndexedBank(Translated):
 
     # PRAGMATA's compute form (78 of its compute shaders, and 3 vertex shaders): LDC.64.IS R12, c[0x0][R16+0x8] after LEA R16, i, 0x10000, 0x4, a vec4 array in c1
     # indexed at run time with the bank folded into the address, the immediate 8 picking the second pair of each entry. Its bank field is 0 but the bank read is c1
+    # The game's control bits set write barrier 0, so the atomic waits on it too (SUATOM's wait mask bit 0): before it, the atomic reads R12 as it was
     LDC_IS_PRAGMATA = (0x001e220000008a00, 0x0000000200100c7b82)
 
     def test_pragmata_reads_c1_at_the_immediate_offset(self):
-        msl = self.translate(inst(*self.LDC_IS_PRAGMATA) + inst(*SUATOM) + inst(*EXIT))
+        msl = self.translate(inst(*self.LDC_IS_PRAGMATA) + inst(SUATOM[0] | 1 << 52, SUATOM[1]) + inst(*EXIT))
         self.assertIn('cp_c1)._m0[', msl)
         self.assertRegex(msl, r'& 65535\b')
         self.assertNotIn('cp_c0)._m0[', msl)

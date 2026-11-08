@@ -1207,6 +1207,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Found on:** [Paper Mario: The Thousand-Year Door](../../dm/games/0100ECD018EBE000/README.md) (at the title); [Batman: Arkham Knight](../../dm/games/0100ACD0163D0000/README.md#files-and-shaders) (`stage 0 cb0`, at boot: the first command buffer draws before the game has bound any uniform buffer).
 - **Check:** a pass dump of the frame (`DM_NVN_PASSDUMP=<frame>`, frame 0 for the boot) shows the draw (`j` line) and its stage's `K` line with no `B … cb` line, and the frame's `[nvn]` call counts show whether the game called `CommandBufferBindUniformBuffer` at all.
 
+### Compute threadgroup size over the pipeline's maximum
+
+- **Symptom:** none seen in a game yet: a compute dispatch that does part of its work, or a Metal validation error on the dispatch's threadgroup size.
+- **Cause:** NVIDIA's compiler always meets a compute shader's declared block size, spilling registers if it must. Metal may give a kernel a `maxTotalThreadsPerThreadgroup` below the device's 1024 when it needs many registers (Apple's Feature Set Tables: check the pipeline's value at run time), and dispatching more threads than that is undefined. `dispatch` takes the size from the reflection and never compared it with the pipeline's maximum.
+- **Fix:** `tg_check` in `nvn_mtl.m`, once per pipeline (it holds the pipeline it checked): a declared size over the maximum rebuilds the pipeline with `MTLComputePipelineDescriptor.maxTotalThreadsPerThreadgroup` set to the size, which makes the compiler fit it, and the dispatches use the rebuild; when that cannot fit (or the size is over 1024) the shader's dispatches are skipped. Either case prints a `[RED] compute shader …: threadgroup …` line once, then one line per shader.
+- **Found on:** none yet (a guard): every compute kernel of 450 to 1,024 threads in PRAGMATA (255), Ocarina of Time (20) and Donkey Kong Bananza (6) reports a maximum of 1,024 on an M4 Pro, macOS 26.6.2.
+- **Check:** `make GAME=<id> check_t_tg_guard` (`dm/gfx/tests/t_tg_guard.m`): a pipeline built at a maximum of 256 runs a 512-thread shader in full after the rebuild, a 2,048-thread shader is not dispatched, a 64-thread one runs as before.
+
 ### Compute dispatches share the copy encoder
 
 - **Symptom:** GPU time per frame doubles with many small dispatches (Age of Calamity: GPU 9 → 18 ms a frame on the Mac; the iPhone's 15 → 51 ms, 17 fps).

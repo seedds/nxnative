@@ -5422,6 +5422,7 @@ static void shmap_read(void) {
     uint32_t geo_vertices, geo_invocations, geo_output, geo_stride, geo_index_stride;
     uint8_t mesh_kind, mesh_notask; uint16_t mesh_threads, mesh_payload;   // an NVN2 task (1) or mesh (2) shader, a mesh shader with no task, its workgroup's threads, its payload's bytes (dmsh_meshstage.py)
     id<MTLComputePipelineState> geo_pso; int geo_pso_failed, cps_failed;   // cps_failed: Metal refused this compute shader's pipeline (dispatch): its dispatches are skipped without asking again
+    id<MTLComputePipelineState> tg_ps, tg_chk; uint8_t tg_bad;   // the threadgroup-size guard (tg_check): the pipeline checked last (held), a rebuild that fits the size, or the size cannot run (dispatches skipped)
     int16_t *geo_slot; uint32_t geo_words;   // a lean passthrough kernel (dmsh_geometry.lean): capture word -> record slot (-1: not read), record words
     NvShader *geo_lean_v[5]; uint8_t geo_lean_tried;   // a geometry shader's lean kernels by input topology (looked up once)
     NvShader *geo_bg_v[5], *geo_bgv_v; uint8_t geo_bg_tried;   // its kernels by input topology (_bg<n>) and its reader (_bgv), looked up once (bit 7: the reader)
@@ -12963,6 +12964,38 @@ static id<MTL4ComputeCommandEncoder> dispatch_enc(void) {
     args_dirty_all();
     return e;
 }
+// Threadgroup size guard (always on). Metal gives a kernel a maximum below the device's 1024 threads when it needs many registers, and dispatching more threads than the pipeline's
+// maxTotalThreadsPerThreadgroup is undefined (a validation error, or part of the work silently not done); NVIDIA's compiler always meets the declared block size by spilling. Not hit
+// today (every PRAGMATA, Ocarina of Time and Donkey Kong Bananza kernel of 450-1024 threads reports 1024), but a later chain or game could cross it. When the declared size is over the
+// pipeline's maximum, the pipeline is built again with maxTotalThreadsPerThreadgroup set to the size (the compiler then spills to fit); if that still does not fit, the shader's
+// dispatches are skipped: never a dispatch of an invalid size. Checked once per pipeline (the pointer it checked is kept). The rebuild is a synchronous MTLDevice compile that the
+// pipeline archive does not keep: a rare path (no kernel of PRAGMATA, Ocarina of Time or Donkey Kong Bananza takes it), counted with the other pipeline builds
+static uint64_t g_tg_rebuilt, g_tg_skipped;
+static void tg_check(NvShader *cs, id<MTLComputePipelineState> ps) {
+    cs->tg_chk = ps; cs->tg_ps = nil;   // held (not a raw pointer): a new pipeline can never come back at the checked one's address
+    cs->tg_bad = 0;
+    const uint16_t *tg = cs->rf.tg; NSUInteger want = (NSUInteger)tg[0] * MAX(tg[1], (uint16_t)1) * MAX(tg[2], (uint16_t)1), have = ps.maxTotalThreadsPerThreadgroup;
+    if (want <= have) return;
+    id<MTLComputePipelineState> fit = nil; NSError *e = nil; NSUInteger fit_max = 0;
+    NSUInteger dev_max = g_dev.maxThreadsPerThreadgroup.width;   // the device's limit on a threadgroup (1024 on Apple GPUs)
+    NSUInteger w = MAX(ps.threadExecutionWidth, (NSUInteger)1), req = MIN((want + w - 1) / w * w, dev_max);   // asked for in whole SIMD groups: a maximum is a multiple of them
+    if (cs->fn && want <= dev_max) {
+        MTLComputePipelineDescriptor *d = [MTLComputePipelineDescriptor new]; d.computeFunction = cs->fn; d.maxTotalThreadsPerThreadgroup = req;
+        uint64_t bt = bp_now(); fit = [g_dev newComputePipelineStateWithDescriptor:d options:MTLPipelineOptionNone reflection:nil error:&e];
+        g_bp_pso_n++; g_bp_pso_ns += bp_now() - bt;
+        if (fit && fit.maxTotalThreadsPerThreadgroup < want) { fit_max = fit.maxTotalThreadsPerThreadgroup; fit = nil; }
+    }
+    if (fit) { cs->tg_ps = fit; g_tg_rebuilt++;
+        if (g_tg_rebuilt == 1) MLOG("[RED] compute shader %s: threadgroup %ux%ux%u (%lu threads) is over its pipeline's maximum of %lu; rebuilt with maxTotalThreadsPerThreadgroup = %lu (the compiler spills), which fits (first case)",
+                                        cs->key, tg[0], tg[1], tg[2], (unsigned long)want, (unsigned long)have, (unsigned long)req);
+        else MLOG("compute shader %s: threadgroup of %lu threads over its pipeline's maximum of %lu: rebuilt to fit (%llu pipelines so far)", cs->key, (unsigned long)want, (unsigned long)have, (unsigned long long)g_tg_rebuilt);
+        return; }
+    cs->tg_bad = 1; g_tg_skipped++;
+    const char *why = !cs->fn ? "no function to rebuild" : want > dev_max ? "over the device's limit" : fit_max ? "the rebuilt pipeline's maximum is still under it" : e ? e.localizedDescription.UTF8String : "the rebuild returned no pipeline";
+    if (g_tg_skipped == 1) MLOG("[RED] compute shader %s: threadgroup %ux%ux%u (%lu threads) is over its pipeline's maximum of %lu and it cannot be rebuilt to fit (%s): its dispatches are skipped (first case)",
+                                cs->key, tg[0], tg[1], tg[2], (unsigned long)want, (unsigned long)have, why);
+    else MLOG("compute shader %s: threadgroup of %lu threads over its pipeline's maximum of %lu: its dispatches are skipped (%llu pipelines so far)", cs->key, (unsigned long)want, (unsigned long)have, (unsigned long long)g_tg_skipped);
+}
 static void dispatch(const p_dispatch *dp) {
     zskip_clear();
     g_wr_epoch++; g_mdx_epoch++;
@@ -13003,12 +13036,16 @@ static void dispatch(const p_dispatch *dp) {
     }
     const uint16_t *tg = cs->rf.tg;
     if (!tg[0]) { RED_ONCE(29, "compute shader lacks threadgroup size reflection"); return; }
+    if (cs->tg_chk != ps) tg_check(cs, ps);   // the pipeline's real maximum against the declared size (see tg_check)
+    if (cs->tg_bad && !(up_mfx_wanted(cs) && !dp->ind)) return;   // (before any of its work: its first-invocation stores, landings; a shader MetalFX draws instead goes on)
+    if (cs->tg_ps) ps = cs->tg_ps;
     // A store the shader makes on its very first invocation only, before the others run on the Switch: the build takes it out of the shader (dmsh_build.py first_store), as Apple's GPUs start workgroups in no order
-    if (dp->ind || (dp->x && dp->y && dp->z)) for (int i = 0; i < cs->rf.nfirst; i++) { const p_bind_buf *u = &S.ssbo[5][cs->rf.first[i].reg]; if (u->addr) mtl_sub_fill(u->addr + 4ull * cs->rf.first[i].word, 4, cs->rf.first[i].value); }
+    if (!cs->tg_bad && (dp->ind || (dp->x && dp->y && dp->z))) for (int i = 0; i < cs->rf.nfirst; i++) { const p_bind_buf *u = &S.ssbo[5][cs->rf.first[i].reg]; if (u->addr) mtl_sub_fill(u->addr + 4ull * cs->rf.first[i].word, 4, cs->rf.first[i].value); }
     if (g_nubd && ubd_conflict_cs(cs, dp->ind)) { g_ubd_conflicts++; ubd_land(); }   // see ubd_conflict_cs
     rp_flush();   // A full clear with no draw after it waits for the next pass on its targets, but it comes before this dispatch, which may read or write them as images: land it first, as copy_t2t does
     image_prepare(prog_get(S.cprog), 0x20);
     if (up_mfx_wanted(cs) && !dp->ind && up_mfx_encode(cs)) return;   // the game's upscaler, drawn by MetalFX instead (DM_UPSCALER=metalfx)
+    if (cs->tg_bad) return;   // MetalFX did not take it: never a dispatch over the pipeline's maximum (tg_check)
     int own = dispatch_own();
     g_dispatch_dim[0] = (uint32_t)dp->x; g_dispatch_dim[1] = (uint32_t)dp->y; g_dispatch_dim[2] = (uint32_t)dp->z;   // read back by the driver segment c0 (encode_args_)
     g_c0_dim_buf = nil;

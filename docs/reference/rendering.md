@@ -722,6 +722,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Found on:** [Super Mario 3D World + Bowser's Fury](../../dm/games/010028600EBDA000/README.md): volume draws after the G-buffer (`50d813761ca3f1f9` and others) write only outputs 0 and 2, with blending and all channels enabled on targets 1 and 3.
 - **Check:** all five games' regressions were unchanged by it.
 
+### No writes to colour components outside the shader's output map
+
+- **Symptom:** undefined values in the components of a target the fragment shader does not write: a NaN or garbage alpha (or G, B) that later passes, such as bloom, spread.
+- **Cause:** the SPH's output map (word 18, 4 bits per colour output, R G B A from the low bit) names the components the GPU writes; it leaves the others of a bound target as they were. The translator stores only the mapped components, but Metal writes the whole attachment under its write mask, the unstored components undefined. [The entry above](#no-writes-to-colour-outputs-the-shader-does-not-write) covered only outputs with no component in the map.
+- **Fix:** `dmsh_build.py` `ps_omap` records a pixel shader's output map in its reflection (`raster.omap`, Maxwell's 0x50-byte SPH and NVN2's 0x80-byte one alike); `pso_desc` ANDs each target's write mask with its output's nibble, and `first_draw_covers` proves a load skippable only when the map covers every channel the target's format stores (`pf_chan_bits`). Libraries of an older chain have no map and keep the channel mask alone. `t_omap_mask` checks both Metal pipeline paths.
+- **Found on:** reported by Lichii, a Switch 2 emulator, on [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) (their commit `79c1516`): a depth-only visibility draw with target 0 still bound left a band of NaN and red / blue above the horizon, which bloom spread into violet halos. Ocarina's agl_common depth pass maps output 0 RGBA and output 2 R only (map 0x10f, `TranslatorContext.GetDepthRegister`). Not reproduced here (open).
+
 ### The alpha test through a library of its own
 
 - **Symptom:** foliage, hair and fences drawn as solid quads (the parts the texture leaves transparent filled with its colour or black), dissolve effects solid instead of breaking up; once per run `SetAlphaRef …: the host has no alpha test`.
@@ -873,6 +880,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** the replay tracks the program per stage (`bind_stages` in `nvn_mtl.m`). When the stages come from different programs, or the fragment stage is unbound, it builds a composite program, which gives a vertex-only pipeline for the prepass. Games that always bind every stage from one program (Mario, Engage) are unchanged.
 - **Found on:** [Metroid Dread](../../dm/games/010093801237C000/README.md): the combinations it uses are (program, 0x3), (null, 0x2), (null, 0x7). [13 Sentinels: Aegis Rim](../../dm/games/01003FC01670C000/README.md) builds one program per GLSLC output and pairs them only through these composites ([Single-stage programs paired with a cover](shaders.md#single-stage-programs-paired-with-a-cover)).
 - **Note:** pass dumps print a `Z` line wherever a draw is dropped (no program, no pipeline, empty scissor, both faces culled, no render pass). That is how this one was found: 144 `Z … draw skipped: no program bound` lines in a frame whose G-buffer pass had draws but stayed black.
+
+### Conditional rendering survives queue continuations
+
+- **Symptom:** a draw disabled by `SetRenderEnable(false)` executes after an event or fence, or a conditional clear erases a target whose preceding timestamp report should make it skip.
+- **Cause:** physical submission initialization reset the global render-enable state and discarded known pending counter values. A logical NVN queue can continue across several Metal submissions, including [event waits](nvn-objects.md#gpu-event-waits-order-work-across-queues); those boundaries do not reset its render state. Timestamp reports are written to guest memory at GPU completion, so reading their old CPU bytes before that completion also gives the wrong predicate.
+- **Fix:** render-enable state belongs to the logical queue. Known timestamp counter values survive physical prefixes until their completion writes land. Completion expires that knowledge before an event release can wake a CPU writer; a later CPU rewrite therefore remains visible. Later inline updates, fills and copies replace overlapping counter bytes and carry the latest writer’s completion fence. Copy sources with unfinished or unknown GPU writes remain unknown. This preserves the existing conservative treatment of unavailable occlusion-query results.
+- **Check:** `t_render_enable_queue` uses the public NVN API and pixel readback to cover event, signal, sync and fence boundaries, independent queues, pending reports behind a GPU gate, and a later CPU counter rewrite. Seven checks failed before the fix; all 38 pass in both encoding modes with Metal validation. `t_render_counter_overlap` adds 42 checks for explicit updates, fills, copies, partial writes and a second fence; five predicates failed before the metadata fix and all pass in both encoding modes. This does not resolve the older CPU-post report emulation: a later GPU read can still observe the report’s previous bytes, and a late CPU report write can overwrite a later GPU write. Those limitations are recorded separately by the fixture. The game note records visual validation.
+- **Found on:** the queue-ordering investigation for [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#open), M4 Pro.
 
 ### Composite program taken again after a replay state restore
 

@@ -17,6 +17,8 @@ pad_layout	full
 
 # ---- Versions ----
 build	v0	0.0.126424	main=5219053e5eb156be80fbb2f303779531	sdk=d83a56a5558798414c78ec722867a7da
+# 1.0.131248 (v196608): registered for its render-size stub (patches.py); its shaders are not in the tables, so the NSP script packs it from a derived profile
+build	v196608	1.0.131248	main=e4f736641889b26f3194847d2b9dce57	sdk=190030518b5d64e5d87b84bc54661af9
 package	v0
 shader_versions	v0
 

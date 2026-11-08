@@ -326,6 +326,16 @@ void dm_fps_state_apply(void) {
     const char *dr = getenv("DM_DYNAMIC_RESOLUTION"); uint32_t dyn = dr && !strcmp(dr, "1");
     if (dr && strcmp(dr, "0") && strcmp(dr, "1")) LOG("[RED] DM_DYNAMIC_RESOLUTION=%s: must be 0 or 1; keeping full resolution", dr);
     memcpy(dm_fps_state + 0x40, &dyn, sizeof dyn);
+    // Render size, for builds whose stub reads it (the RENDER_SIZE capability: Hades II 1.0.131248's app init): DM_RENDER_SIZE=<w>x<h>, 16:9 from 1280x720 to 3840x2160, sets the
+    // game's own swapchain and screen-sized targets; unset or 0 keeps the game's size. Builds without such a stub ignore the field
+    const char *rz = getenv("DM_RENDER_SIZE"); uint32_t wh[2] = {0, 0};
+    if (rz && strcmp(rz, "0")) {
+        unsigned w = 0, h = 0; char tail = 0;
+        if (sscanf(rz, "%ux%u%c", &w, &h, &tail) != 2 || w * 9 != h * 16 || w < 1280 || w > 3840)
+            LOG("[RED] DM_RENDER_SIZE=%s: must be <width>x<height>, 16:9, from 1280x720 to 3840x2160; keeping the game's size", rz);
+        else { wh[0] = w; wh[1] = h; LOG("%s: render size %ux%u (DM_RENDER_SIZE)", g_fps_mod, w, h); }
+    }
+    memcpy(dm_fps_state + 0x38, wh, sizeof wh);
     // Screen shape: DM_SCREEN_ASPECT, the screen's width / height between 1.3 and 1.77, makes the builds with screen-shape stubs
     // (Breath of the Wild 1.9.0's patches.py) render that shape: the output keeps its width (1920) and takes the height that gives the ratio, a multiple of 48 so the
     // 2/3-size layout space (1280 wide) stays whole: 1.43 → 1920x1344 and 1280x896. State +0x48 u32 output height, +0x4c u32 layout height, +0x50 its float; 0 = 16:9

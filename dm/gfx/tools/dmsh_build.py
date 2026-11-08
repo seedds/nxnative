@@ -55,6 +55,31 @@ XC = ['--msl', '--msl-version', '20300', '--msl-argument-buffers', '--msl-textur
 # GX lighting takes max(0, NaN) from light directions left at zero, and the half of Mario its fill light faces came out white on the iPhone (GitHub issue 72; vk_shaders.py PRECISE)
 def precise(msl): return re.sub(r'\bfast::(min|max|clamp)\(', r'precise::\1(', msl)
 
+# A fragment shader that compares its own depth with what the same surface stored: Metal's [[position]].z and the depth the rasterizer stores are not one value. On an M4 Max position.z is one ULP
+# above the stored depth on some pixels and never below (2.34 % of 552,088 pixels in t_frag_z; other GPUs not measured). The Switch GPU evidently gives equal values, since games rely on it: The Legend of
+# Zelda: Ocarina of Time draws its ground mist after a mesh depth pre-pass and discards when z > stored (5ad65c0eefd09c7f), which left black specks, often in pairs, through the mist. So the two
+# comparisons whose answer such a pixel changes, z > x (it must fail) and its negation z <= x (it must pass), take z one ULP down, and so do their mirrors x < z and x >= z. z >= x and z < x stay:
+# position.z never being below the stored depth, they already give the answer, and one ULP down would turn it. z of 0 stays 0: position.z is never below the stored depth, so the stored depth is 0
+# too and both comparisons already give the answer (one ULP down from 0 would be a NaN). z is gl_FragCoord.z or a plain copy of it, also through a select with 0.0 (the translator's flush of a
+# denormal, x ? 0.0 : z). Not reached: z scaled before the comparison (40 more of that game's shaders multiply z by a constant first; the one read is a depth fade against a sampled depth
+# times the same constant), a comparison other than two variables into a bool, == and != (none in that game), and the Vulkan and GL routes (vk_shaders.py, gl_shaders.py).
+def frag_z(msl):
+    if 'gl_FragCoord.z' not in msl: return msl
+    z = set(re.findall(r'float (_\d+) = gl_FragCoord\.z;', msl))
+    n = -1
+    while n != len(z):
+        n = len(z)
+        for m in re.finditer(r'float (_\d+) = (?:_\d+ \? 0\.0 : )?(_\d+);', msl):
+            if m.group(2) in z: z.add(m.group(1))
+    down = lambda v: f'as_type<float>(as_type<uint>({v}) - uint({v} > 0.0))'
+    def one(m):
+        a, op, b = m.group(2), m.group(3), m.group(4)
+        if op in ('>', '<=') and a in z and b not in z: a = down(a)
+        elif op in ('<', '>=') and b in z and a not in z: b = down(b)
+        else: return m.group(0)
+        return f'bool {m.group(1)} = {a} {op} {b};'
+    return re.sub(r'bool (_\d+) = (_\d+) (>=|<=|>|<) (_\d+);', one, msl)
+
 # Ampere HMMA.16816 with an f16 accumulator (agl's upscaler networks, the NDVE video networks) reaches the MSL as calls of dmsh_hmma16816_f16(lane, block, A0..A3, B0, B1, C0, C1,
 # flags, A's LDSM address, A0..A3's offsets, A's row stride, out D1) → D0, the subgroup's 256-word block of the scratch shared memory as the last argument (InstEmitAmpereTensor.AHmma,
 # TensorPass, HelperFunctionManager.GenerateHmma16816F16). The translator's body computes D lane by lane from the block; here it becomes simdgroup_matrix code over the same block:
@@ -1580,6 +1605,7 @@ def finish(key, w, j, c1):
     try: src = dmsh_atomic.check_msl(src)
     except ValueError as e: return 'image atomic MSL failed', str(e), None
     src = precise(src)   # min / max / clamp with Maxwell's NaN results (see precise)
+    if j['stage'] == 'ps': src = frag_z(src)   # position.z against the depth the same surface stored (see frag_z)
     try: src = gather_offsets(src)   # four gathers instead of a wrapper's loop over their offsets (see gather_offsets)
     except ValueError as e: return 'gather offsets rewrite failed', str(e)[:160], None
     try: src = hmma_msl(src)   # Ampere HMMA through simdgroup_matrix (see hmma_msl)

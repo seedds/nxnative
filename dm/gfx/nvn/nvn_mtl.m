@@ -1470,12 +1470,16 @@ static inline id enc_b_begin(id cb) {
     return e; }
 static inline void enc_b_end(id e) { m4_end(e); }
 static inline void enc_b_copy_buffer(id e, id<MTLBuffer> s, NSUInteger so, id<MTLBuffer> d, NSUInteger doff, NSUInteger n) { [e copyFromBuffer:s sourceOffset:so toBuffer:d destinationOffset:doff size:n]; }
-static inline void enc_b_copy_buffer_texture(id e, id<MTLBuffer> s, NSUInteger so, NSUInteger row, NSUInteger img, MTLSize z, id<MTLTexture> d, NSUInteger sl, NSUInteger lv, MTLOrigin o) { [e copyFromBuffer:s sourceOffset:so sourceBytesPerRow:row sourceBytesPerImage:img sourceSize:z toTexture:d destinationSlice:sl destinationLevel:lv destinationOrigin:o]; }
-static inline void enc_b_copy_texture_buffer(id e, id<MTLTexture> s, NSUInteger sl, NSUInteger lv, MTLOrigin o, MTLSize z, id<MTLBuffer> d, NSUInteger doff, NSUInteger row, NSUInteger img) { [e copyFromTexture:s sourceSlice:sl sourceLevel:lv sourceOrigin:o sourceSize:z toBuffer:d destinationOffset:doff destinationBytesPerRow:row destinationBytesPerImage:img]; }
+// copy_fit: a copy taller than its texture level (rows past the end; an NVN 1D array's height counts layers, its Metal texture has one row: tex_desc) is cut to the level, never encoded
+// past it: Metal's validation refuses it and without validation the GPU writes past the slice. DM_NVN_COPYCHECK=1 logs each such copy with the NVN texture (cc_label)
+static int copy_fit(id<MTLTexture> t, NSUInteger sl, NSUInteger lv, MTLOrigin o, MTLSize *z, const char *what);
+static int copy_fit_t2t(id<MTLTexture> s, NSUInteger sl, NSUInteger lv, MTLOrigin so, MTLSize *z, id<MTLTexture> d, NSUInteger dl, NSUInteger dv, MTLOrigin doo);
+static inline void enc_b_copy_buffer_texture(id e, id<MTLBuffer> s, NSUInteger so, NSUInteger row, NSUInteger img, MTLSize z, id<MTLTexture> d, NSUInteger sl, NSUInteger lv, MTLOrigin o) { if (!copy_fit(d, sl, lv, o, &z, "buffer→texture")) return; [e copyFromBuffer:s sourceOffset:so sourceBytesPerRow:row sourceBytesPerImage:img sourceSize:z toTexture:d destinationSlice:sl destinationLevel:lv destinationOrigin:o]; }
+static inline void enc_b_copy_texture_buffer(id e, id<MTLTexture> s, NSUInteger sl, NSUInteger lv, MTLOrigin o, MTLSize z, id<MTLBuffer> d, NSUInteger doff, NSUInteger row, NSUInteger img) { if (!copy_fit(s, sl, lv, o, &z, "texture→buffer")) return; [e copyFromTexture:s sourceSlice:sl sourceLevel:lv sourceOrigin:o sourceSize:z toBuffer:d destinationOffset:doff destinationBytesPerRow:row destinationBytesPerImage:img]; }
 // The same with a blit option: one plane of a combined depth / stencil texture (MTLBlitOptionDepthFromDepthStencil)
-static inline void enc_b_copy_buffer_texture_opt(id e, id<MTLBuffer> s, NSUInteger so, NSUInteger row, NSUInteger img, MTLSize z, id<MTLTexture> d, NSUInteger sl, NSUInteger lv, MTLOrigin o, MTLBlitOption opt) { [e copyFromBuffer:s sourceOffset:so sourceBytesPerRow:row sourceBytesPerImage:img sourceSize:z toTexture:d destinationSlice:sl destinationLevel:lv destinationOrigin:o options:opt]; }
-static inline void enc_b_copy_texture_buffer_opt(id e, id<MTLTexture> s, NSUInteger sl, NSUInteger lv, MTLOrigin o, MTLSize z, id<MTLBuffer> d, NSUInteger doff, NSUInteger row, NSUInteger img, MTLBlitOption opt) { [e copyFromTexture:s sourceSlice:sl sourceLevel:lv sourceOrigin:o sourceSize:z toBuffer:d destinationOffset:doff destinationBytesPerRow:row destinationBytesPerImage:img options:opt]; }
-static inline void enc_b_copy_texture(id e, id<MTLTexture> s, NSUInteger sl, NSUInteger lv, MTLOrigin so, MTLSize z, id<MTLTexture> d, NSUInteger dl, NSUInteger dv, MTLOrigin doo) { [e copyFromTexture:s sourceSlice:sl sourceLevel:lv sourceOrigin:so sourceSize:z toTexture:d destinationSlice:dl destinationLevel:dv destinationOrigin:doo]; }
+static inline void enc_b_copy_buffer_texture_opt(id e, id<MTLBuffer> s, NSUInteger so, NSUInteger row, NSUInteger img, MTLSize z, id<MTLTexture> d, NSUInteger sl, NSUInteger lv, MTLOrigin o, MTLBlitOption opt) { if (!copy_fit(d, sl, lv, o, &z, "buffer→texture")) return; [e copyFromBuffer:s sourceOffset:so sourceBytesPerRow:row sourceBytesPerImage:img sourceSize:z toTexture:d destinationSlice:sl destinationLevel:lv destinationOrigin:o options:opt]; }
+static inline void enc_b_copy_texture_buffer_opt(id e, id<MTLTexture> s, NSUInteger sl, NSUInteger lv, MTLOrigin o, MTLSize z, id<MTLBuffer> d, NSUInteger doff, NSUInteger row, NSUInteger img, MTLBlitOption opt) { if (!copy_fit(s, sl, lv, o, &z, "texture→buffer")) return; [e copyFromTexture:s sourceSlice:sl sourceLevel:lv sourceOrigin:o sourceSize:z toBuffer:d destinationOffset:doff destinationBytesPerRow:row destinationBytesPerImage:img options:opt]; }
+static inline void enc_b_copy_texture(id e, id<MTLTexture> s, NSUInteger sl, NSUInteger lv, MTLOrigin so, MTLSize z, id<MTLTexture> d, NSUInteger dl, NSUInteger dv, MTLOrigin doo) { if (!copy_fit_t2t(s, sl, lv, so, &z, d, dl, dv, doo)) return; [e copyFromTexture:s sourceSlice:sl sourceLevel:lv sourceOrigin:so sourceSize:z toTexture:d destinationSlice:dl destinationLevel:dv destinationOrigin:doo]; }
 static void blit_note(void);   // Per-pass dump: a copy / buffer update ended the render pass (defined after PD)
 // Ordering inside the copy encoder: Metal 4 does not order copies / fills within one encoder (no automatic hazard tracking); an operation reading or writing a range an earlier one wrote needs an intra-encoder barrier.
 // Without it, SMBW's two updates per frame to the same uniform slot ("write 4 bytes −1, then 16 bytes of coefficients") occasionally landed in reverse order; the fountain water wave simulation took −1 as its self coefficient, diverged, and the water vertices were pushed to the top of the screen.
@@ -2261,8 +2265,67 @@ void mtl_drain(void) { present_drop_for_suspend(); mtl_present_flush(); snap_dra
 
 // ================= Render replay =================
 #include "../../host/front.h"
-static int g_red_once[159];   // one past the highest key: a new key raises this, and the macro refuses to compile otherwise
+static int g_red_once[167];   // one past the highest key: a new key raises this, and the macro refuses to compile otherwise
 #define RED_ONCE(k, ...) do { _Static_assert((k) < sizeof g_red_once / sizeof *g_red_once, "a RED_ONCE key past g_red_once: raise its size"); if (!g_red_once[k]++) MLOG("[RED] " __VA_ARGS__); } while (0)
+static int copycheck_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("DM_NVN_COPYCHECK"); on = e && atoi(e) != 0; } return on; }
+// DM_NVN_COPYCHECK=1: each NVN texture's Metal texture is labelled with what it is, so a copy copy_fit cuts names it
+static void cc_label(id<MTLTexture> mt, const tex_t *t) {
+    if (!mt || !t || !copycheck_on()) return;
+    mt.label = [NSString stringWithFormat:@"ser=%llu NVN target %d format %#x %ux%ux%u levels %u", (unsigned long long)t->serial, t->d.target, t->d.format, t->d.width, t->d.height, t->d.depth, t->d.levels];
+}
+// DM_NVN_TGTFIX (default on; =0 off, for an A/B): NVN target geometry fixes beyond the 1D-array upload: copy_fit's width / slice / 3D depth checks,
+// 1D-array regions (y / height = layers) in CPU readback, WriteTexels, the CPU storage mirror, texture → texture copies and ClearTexture, and a resolve copy's level size
+int mtl_tgtfix_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("DM_NVN_TGTFIX"); on = !(e && !strcmp(e, "0")); if (!on) MLOG("DM_NVN_TGTFIX=0: NVN target geometry fixes off"); } return on; }
+static void copycheck_log(const char *what, const char *why, id<MTLTexture> t, NSUInteger sl, NSUInteger lv, MTLOrigin o, MTLSize z, NSUInteger lim) {
+    if (!copycheck_on()) return;
+    static _Atomic int n; if (atomic_fetch_add(&n, 1) >= 64) return;
+    MLOG("[RED] copycheck: %s copy %lux%lux%lu at %lu,%lu,%lu slice %lu level %lu exceeds the level's %s %lu: texture %lux%lux%lu x%lu layers Metal format %lu type %lu [%s]", what,
+         (unsigned long)z.width, (unsigned long)z.height, (unsigned long)z.depth, (unsigned long)o.x, (unsigned long)o.y, (unsigned long)o.z, (unsigned long)sl, (unsigned long)lv, why, (unsigned long)lim,
+         (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.depth, (unsigned long)t.arrayLength, (unsigned long)t.pixelFormat, (unsigned long)t.textureType, t.label ? t.label.UTF8String : "no NVN label");
+}
+// A copy that would leave its texture level is cut to it (or skipped when nothing is left): rows (always), and with DM_NVN_TGTFIX columns, the slice (past the texture's slices: skipped)
+// and a 3D level's depth. Without Metal's API validation the GPU writes such a copy past the slice or the level, into the next ones (the 1D-array upload)
+static int copy_fit(id<MTLTexture> t, NSUInteger sl, NSUInteger lv, MTLOrigin o, MTLSize *z, const char *what) {
+    if (!t) return 1;
+    if (mtl_tgtfix_on()) {
+        int is3d = t.textureType == MTLTextureType3D;
+        NSUInteger ns = is3d ? 1 : t.arrayLength * (t.textureType == MTLTextureTypeCube || t.textureType == MTLTextureTypeCubeArray ? 6 : 1);
+        NSUInteger w = MAX(t.width >> lv, 1ul), d = is3d ? MAX(t.depth >> lv, 1ul) : 1;
+        if (sl >= ns) { RED_ONCE(162, "%s copy at slice %lu of a texture of %lu slices (Metal texture type %lu, %s): skipped (DM_NVN_COPYCHECK=1 lists each)", what, (unsigned long)sl, (unsigned long)ns, (unsigned long)t.textureType, t.label ? t.label.UTF8String : "unlabelled");
+            copycheck_log(what, "slices", t, sl, lv, o, *z, ns); return 0; }
+        if (o.x + z->width > w) { RED_ONCE(163, "%s copy of %lu columns at column %lu into a texture level of %lu (Metal texture type %lu, %s): cut to the level (DM_NVN_COPYCHECK=1 lists each)", what, (unsigned long)z->width, (unsigned long)o.x, (unsigned long)w, (unsigned long)t.textureType, t.label ? t.label.UTF8String : "unlabelled");
+            copycheck_log(what, "width", t, sl, lv, o, *z, w); z->width = o.x < w ? w - o.x : 0; if (!z->width) return 0; }
+        if (is3d && o.z + z->depth > d) { RED_ONCE(164, "%s copy of %lu depth slices at %lu into a 3D level of %lu (%s): cut to the level (DM_NVN_COPYCHECK=1 lists each)", what, (unsigned long)z->depth, (unsigned long)o.z, (unsigned long)d, t.label ? t.label.UTF8String : "unlabelled");
+            copycheck_log(what, "depth", t, sl, lv, o, *z, d); z->depth = o.z < d ? d - o.z : 0; if (!z->depth) return 0; }
+    }
+    NSUInteger h = MAX(t.height >> lv, 1ul);
+    if (o.y + z->height <= h) return 1;
+    RED_ONCE(159, "%s copy of %lu rows at row %lu into a texture level of %lu rows (Metal texture type %lu, %s): cut to the level (DM_NVN_COPYCHECK=1 lists each)", what, (unsigned long)z->height, (unsigned long)o.y,
+             (unsigned long)h, (unsigned long)t.textureType, t.label ? t.label.UTF8String : "unlabelled");
+    copycheck_log(what, "height", t, sl, lv, o, *z, h);
+    z->height = o.y < h ? h - o.y : 0;
+    return z->height != 0;
+}
+static int mtl_fmt_block(MTLPixelFormat f);
+// Both sides of a texture copy: a block-compressed copy the source's edge cut (a width or height no longer a whole number of blocks) that does not also end at the destination
+// level's edge is no copy Metal takes (its validation refuses it): skipped (DM_NVN_TGTFIX)
+static int copy_fit_t2t(id<MTLTexture> s, NSUInteger sl, NSUInteger lv, MTLOrigin so, MTLSize *z, id<MTLTexture> d, NSUInteger dl, NSUInteger dv, MTLOrigin doo) {
+    MTLSize z0 = *z;
+    if (!copy_fit(s, sl, lv, so, z, "texture→texture source") || !copy_fit(d, dl, dv, doo, z, "texture→texture")) return 0;
+    if (mtl_tgtfix_on() && d && mtl_fmt_block(d.pixelFormat) && (z->width != z0.width || z->height != z0.height)
+        && ((z->width != z0.width && doo.x + z->width < MAX(d.width >> dv, 1ul)) || (z->height != z0.height && doo.y + z->height < MAX(d.height >> dv, 1ul)))) {
+        RED_ONCE(165, "block-compressed texture copy cut to the source level (%lux%lu) does not end at the destination's edge: skipped", (unsigned long)z->width, (unsigned long)z->height);
+        copycheck_log("texture→texture (block-compressed cut)", "edge", d, dl, dv, doo, *z, MAX(d.width >> dv, 1ul)); return 0; }
+    return 1;
+}
+// A level's height in rows of its Metal texture: an NVN 1D (target 0) or 1D array (3) texture is one row (tex_desc; a 1D array's NVN height counts its layers)
+static inline uint32_t tex_lh(const tex_t *t, unsigned l) { return t->d.target == 0 || t->d.target == 3 ? 1u : MAX(t->d.height >> l, 1u); }
+// An NVN copy region of a 1D (target 0) or 1D array (3) texture in its Metal texture's terms: a 1D array's rows are its layers (y → slice, one row per layer, *img = the row pitch), a 1D texture has one row
+static NVNcopyRegion region_1d(const tex_t *t, NVNcopyRegion r, size_t row, size_t *img) {
+    if (t->d.target == 3) { r.zoffset += r.yoffset; r.depth = r.height > 0 ? r.height : 1; r.yoffset = 0; r.height = 1; *img = row; }
+    else if (t->d.target == 0) { r.yoffset = 0; r.height = 1; }
+    return r;
+}
 // NVN vertex streams 0–15 → Metal vertex buffer slots: 0–13 go to 16–29 (30 is the constant fallback buffer), 14 and 15 to 14 and 15. Metal has only the 31 slots 0–30; translated shaders use only buffer(0) (the argument buffer),
 // and the host's own vertex functions read no vertex buffers. 13 Sentinels uses stream 15, and the old 16 + stream went out of range (Metal assertion: buffer index (31) must be < 31)
 #define VB_SLOT(st) ((st) < 14 ? 16 + (st) : (st))
@@ -3111,13 +3174,14 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
     int direct = !linear && !rb_shift && stamp && direct_upload_on() && g_nvn_deswz_gpu && !(t->pool && nvn_sparse_pool(t->pool)) && nvn_deswz_gpu_direct_supported(&t->d);
     if (direct) d.usage |= MTLTextureUsageShaderWrite | MTLTextureUsagePixelFormatView;
     id<MTLTexture> mt = reuse && reuse.pixelFormat == d.pixelFormat && reuse.width == d.width && reuse.height == d.height && reuse.mipmapLevelCount == d.mipmapLevelCount && reuse.textureType == d.textureType
-                        && (reuse.usage & d.usage) == d.usage
+                        && (reuse.usage & d.usage) == d.usage && (!mtl_tgtfix_on() || (reuse.arrayLength == d.arrayLength && reuse.depth == d.depth))   // a 2D array / 3D texture of other layers or depth is another shape
                         ? reuse : [g_dev newTextureWithDescriptor:d];
     if (!mt) { RED_ONCE(2, "failed to create MTLTexture %ux%u format %#x target %d", t->d.width, t->d.height, t->d.format, t->d.target); return nil; }
     if (mt.allocatedSize >= (256u << 20)) { static int nb; if (nb++ < 20)   // the textures that take most of the GPU's memory (a GPU out-of-memory error says nothing of which)
         MLOG("large texture ser=%llu %ux%ux%u format %#x target %d levels %u: %llu MB%s", (unsigned long long)t->serial, t->d.width, t->d.height, t->d.depth, t->d.format, t->d.target, t->d.levels,
              (unsigned long long)(mt.allocatedSize >> 20), t->pool && nvn_sparse_pool(t->pool) ? ", in a sparse virtual pool" : t->pool && (t->pool->flags & NVN_MEMORY_POOL_FLAGS_VIRTUAL) ? ", in a virtual pool" : ""); }
     if (g_allocprof > 0) { static int n; if (n++ < 30 || n % 500 == 0) MLOG("new texture (%s) #%d ser=%llu %ux%ux%u format %#x target %d levels %u storage %p", __func__, n, (unsigned long long)t->serial, t->d.width, t->d.height, t->d.depth, t->d.format, t->d.target, t->d.levels, (void *)t->mem); }
+    cc_label(mt, t);
     res_add(mt);   // Both first upload and re-upload register residency here (Metal 4 does not make resources resident automatically; a missed registration = GPU address page fault)
     int sparse = t->pool && nvn_sparse_pool(t->pool);
     if (stamp) {   // no stamp: a one-time upload of content the CPU will not change (tex_init_fill), with no write tracking
@@ -3127,7 +3191,7 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
     unsigned layers = (t->d.target == 4 || t->d.target == 9) ? t->d.depth : t->d.target == 8 ? 6 : t->d.target == 3 ? t->d.height : 1;   // a cube array's depth counts layer-faces (tex_desc)
     size_t total = 0;
     for (unsigned l = 0; l < d.mipmapLevelCount; l++) {
-        uint32_t w = MAX(t->d.width >> l, 1u), h = MAX(t->d.height >> l, 1u), z = t->d.target == 2 ? MAX(t->d.depth >> l, 1u) : 1;
+        uint32_t w = MAX(t->d.width >> l, 1u), h = tex_lh(t, l), z = t->d.target == 2 ? MAX(t->d.depth >> l, 1u) : 1;   // a 1D array: one row per layer (it was its NVN height in layers: 64 copies of 64 rows into one-row slices)
         total += (size_t)((w + bw - 1) / bw) * bpb * ((h + bh - 1) / bh) * z * layers;
     }
     g_bp_up_bytes += total;
@@ -3163,7 +3227,7 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
         if (upsrc) { uint64_t mo2; id<MTLBuffer> u2 = up_big_src((uint64_t)t->mem, t->L.size, &mo2); if (u2) { upsrc = u2; mb = (__bridge void *)u2; mo = mo2; } }   // up_alloc may have flushed the batch that held the first one
         size_t off = 0; int enc_ok = g_up_ce != nil, nb0 = g_nup_blits;
         for (unsigned l = 0; enc_ok && l < d.mipmapLevelCount; l++) {
-            uint32_t w = MAX(t->d.width >> l, 1u), h = MAX(t->d.height >> l, 1u), z = t->d.target == 2 ? MAX(t->d.depth >> l, 1u) : 1;
+            uint32_t w = MAX(t->d.width >> l, 1u), h = tex_lh(t, l), z = t->d.target == 2 ? MAX(t->d.depth >> l, 1u) : 1;
             size_t pitch = (size_t)((w + bw - 1) / bw) * bpb, rows = (h + bh - 1) / bh;
             for (unsigned y = 0; y < layers; y++) {
                 size_t poff; id<MTLBuffer> params = up_param_alloc(&poff);   // Metal 4 has no setBytes: the parameter block of each deswizzle is cut from a shared block (no new GPU buffer each time)
@@ -3194,7 +3258,7 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
     size_t off = 0;
     int zb = zblock_on() && t->d.format >= 0x79 && t->d.format <= 0x94; if (zb) { g_zb_ser = t->serial; g_zb_n = (int)MIN(d.mipmapLevelCount, 16u); memset(g_zb, 0, sizeof g_zb); memset(g_zb_tot, 0, sizeof g_zb_tot); }
     for (unsigned l = 0; l < d.mipmapLevelCount; l++) {
-        uint32_t w = MAX(t->d.width >> l, 1u), h = MAX(t->d.height >> l, 1u), z = t->d.target == 2 ? MAX(t->d.depth >> l, 1u) : 1;
+        uint32_t w = MAX(t->d.width >> l, 1u), h = tex_lh(t, l), z = t->d.target == 2 ? MAX(t->d.depth >> l, 1u) : 1;
         size_t pitch = (size_t)((w + bw - 1) / bw) * bpb, rows = (h + bh - 1) / bh;
         for (unsigned y = 0; y < layers; y++) {
             if (linear) {   // one 2D level (linear_fit): rows of the storage's stride, the same pitch GetStorageSize counts
@@ -3352,7 +3416,7 @@ static NvSparse *sparse_make(const tex_t *t, int gpu, __strong id<MTLTexture> *m
     s->gpu = gpu; s->tw = tw; s->th = th; s->ntiled = (uint32_t)n; s->levels = (uint32_t)d.mipmapLevelCount; s->layers = (uint32_t)MAX(d.arrayLength, 1u); s->layer_size = t->L.layer_size;
     uint32_t k = 0;
     for (uint32_t l = 0; l < s->ntiled; l++) {
-        uint32_t w = MAX(t->d.width >> l, 1u), h = MAX(t->d.height >> l, 1u);
+        uint32_t w = MAX(t->d.width >> l, 1u), h = tex_lh(t, l);
         s->tiles_x[l] = (w + tw - 1) / tw; s->tiles_y[l] = (h + th - 1) / th; s->loff_t[l] = k; k += s->tiles_x[l] * s->tiles_y[l];
         s->loff[l] = nvn_tex_level_offset(&t->d, l);
         uint64_t next = l + 1 < s->levels ? nvn_tex_level_offset(&t->d, l + 1) : s->layer_size;
@@ -3404,7 +3468,7 @@ static void sp_tile(sp_look *c, uint32_t y, uint32_t i) {
             sp_release(*sl - 1); *sl = 0; s->nmap[lev]--; c->unmapped++; }
         return;
     }
-    uint32_t lw = MAX(t->d.width >> l, 1u), lh = MAX(t->d.height >> l, 1u), x0 = tx * s->tw, y0 = ty * s->th;
+    uint32_t lw = MAX(t->d.width >> l, 1u), lh = tex_lh(t, l), x0 = tx * s->tw, y0 = ty * s->th;
     const uint8_t *p = is_tail || x0 + s->tw > lw || y0 + s->th > lh ? NULL : nvn_sparse_tile_phys(t->pool, a);   // shared tiles (see above)
     if (*sl) {
         const sp_tl *e = sp_tl_of(*sl - 1);
@@ -3434,7 +3498,7 @@ static void sp_tile(sp_look *c, uint32_t y, uint32_t i) {
         c->tail = realloc_or_die(c->tail, n, "the sparse tail copy");
         nvn_sparse_copy(t->pool, c->tail, a, n);
         for (uint32_t tl = s->ntiled; tl < s->levels; tl++) {
-            uint32_t w = MAX(t->d.width >> tl, 1u), h = MAX(t->d.height >> tl, 1u); size_t pitch = (size_t)((w + bw - 1) / bw) * bpb, rows = (h + bh - 1) / bh;
+            uint32_t w = MAX(t->d.width >> tl, 1u), h = tex_lh(t, tl); size_t pitch = (size_t)((w + bw - 1) / bw) * bpb, rows = (h + bh - 1) / bh;
             sp_stg(c, pitch * rows);
             if (nvn_deswizzle_from(&t->d, tl, y, c->tail, y * s->layer_size + s->tail_off, (uint8_t *)c->stg.contents + c->stg_off, pitch)) { RED_ONCE(147, "sparse tail level %u of format %#x not decoded", tl, t->d.format); break; }
             up_blit_add_at(c->stg, c->stg_off, pitch, pitch * rows, MTLSizeMake(w, h, 1), c->tex, y, tl, MTLOriginMake(0, 0, 0)); c->stg_off += (pitch * rows + 255) & ~(size_t)255;
@@ -4284,9 +4348,10 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
         if (!d) return nil;
         mt = image_texture(t, d);
         if (!mt) { mt = [g_dev newTextureWithDescriptor:d];
-            if (mt) { res_add(mt); if (!tex_init_fill(t, mt)) tex_zero_fill(mt); } }
+            if (mt) { cc_label(mt, t); res_add(mt); if (!tex_init_fill(t, mt)) tex_zero_fill(mt); } }
         if (!mt) { RED_ONCE(2, "failed to create MTLTexture %ux%u format %#x target %d", t->d.width, t->d.height, t->d.format, t->d.target); return nil; }
     }
+    cc_label(mt, t);
     if (mt.allocatedSize >= (256u << 20)) { static int nb; if (nb++ < 20)   // the textures that take most of the GPU's memory (a GPU out-of-memory error says nothing of which)
         MLOG("large texture ser=%llu %ux%ux%u format %#x target %d levels %u: %llu MB%s", (unsigned long long)t->serial, t->d.width, t->d.height, t->d.depth, t->d.format, t->d.target, t->d.levels,
              (unsigned long long)(mt.allocatedSize >> 20), t->pool && nvn_sparse_pool(t->pool) ? ", in a sparse virtual pool" : t->pool && (t->pool->flags & NVN_MEMORY_POOL_FLAGS_VIRTUAL) ? ", in a virtual pool" : ""); }
@@ -13206,18 +13271,31 @@ static void copy_t2b(const p_copy_b2t *c, uint32_t size) {
     void *mb; uint64_t mo;
     if (!mtl_addr(c->src, img * nz, &mb, &mo)) { RED_ONCE(31, "texture→buffer copy destination is in no memory pool"); return; }
     sbw_note(c->src, img * nz, SBW_GPU);
+    NVNcopyRegion mr = region_1d(c->tex, c->r, row, &img); if (c->tex->d.target == 3) { nz = mr.depth; rows = 1; }   // a 1D array: one row per layer
     id<MTL4ComputeCommandEncoder> b = blit();
     if (is3d)
-        enc_b_copy_texture_buffer(b, t, 0, level, MTLOriginMake(c->r.xoffset, c->r.yoffset, c->r.zoffset), MTLSizeMake(c->r.width, c->r.height, nz), (__bridge id<MTLBuffer>)mb, mo, row, img);
+        enc_b_copy_texture_buffer(b, t, 0, level, MTLOriginMake(mr.xoffset, mr.yoffset, mr.zoffset), MTLSizeMake(mr.width, mr.height, nz), (__bridge id<MTLBuffer>)mb, mo, row, img);
     else
         for (int z = 0; z < nz; z++)
-            enc_b_copy_texture_buffer(b, t, layer0 + c->r.zoffset + z, level, MTLOriginMake(c->r.xoffset, c->r.yoffset, 0), MTLSizeMake(c->r.width, c->r.height, 1), (__bridge id<MTLBuffer>)mb, mo + z * img, row, img);
+            enc_b_copy_texture_buffer(b, t, layer0 + mr.zoffset + z, level, MTLOriginMake(mr.xoffset, mr.yoffset, 0), MTLSizeMake(mr.width, mr.height, 1), (__bridge id<MTLBuffer>)mb, mo + z * img, row, img);
     int shift = rb_copy_shift(c->tex, t);   // into the guest's order, in the buffer
     if (shift) { uint64_t a = ((__bridge id<MTLBuffer>)mb).gpuAddress + mo; size_t wb = (size_t)((c->r.width + bw - 1) / bw) * bpb;
         if (!rb_swap_gpu(a, row, img, a, row, img, wb, rows, nz, shift)) RED_ONCE(6, "RGB565-family texture→buffer copy left in Metal's order: red and blue exchanged"); }
 }
 // CPU texture read (ReadTexels): for packaged textures the pool memory is the ground truth, de-layout and read directly; the rest are read back from the MTLTexture by blit (the caller has already waited for the GPU per NVN rules)
+static void read_texels_(const tex_t *t, unsigned level, unsigned layer0, const NVNcopyRegion *r, uint8_t *dst, size_t row, size_t img);
 void mtl_read_texels(const tex_t *t, unsigned level, unsigned layer0, const NVNcopyRegion *r, uint8_t *dst, size_t row, size_t img) {
+    // A 1D array's region counts layers in y / height (region_1d): one row of each layer, read layer by layer into the region's rows. Read as a 2D region it took rows past the
+    // layer's one row (the storage path: uninitialised rows of its level buffer; the blit path: a copy taller than its one-row slice)
+    if (t->d.target == 3 && mtl_tgtfix_on() && r->height > 1) {
+        for (int k = 0; k < r->height; k++) { NVNcopyRegion one = *r; one.yoffset = 0; one.height = 1; one.zoffset = 0; one.depth = 1;
+            read_texels_(t, level, layer0 + (unsigned)(r->zoffset + r->yoffset + k), &one, dst + (size_t)k * row, row, row); }
+        return;
+    }
+    if (t->d.target == 3 && mtl_tgtfix_on() && r->yoffset) { NVNcopyRegion one = *r; one.yoffset = 0; one.zoffset = 0; one.depth = 1; read_texels_(t, level, layer0 + (unsigned)(r->zoffset + r->yoffset), &one, dst, row, img); return; }
+    read_texels_(t, level, layer0, r, dst, row, img);
+}
+static void read_texels_(const tex_t *t, unsigned level, unsigned layer0, const NVNcopyRegion *r, uint8_t *dst, size_t row, size_t img) {
     xv_check(t->serial, level, layer0, "CPU readback");
     PD("U cpu_read ser=%llu lv%u sl%u xyz=%d,%d,%d size=%d,%d,%d dst=%p row=%lu img=%lu", t->serial, level, layer0, r->xoffset, r->yoffset, r->zoffset, r->width, r->height, r->depth, dst, (unsigned long)row, (unsigned long)img);
     int bw, bh, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh);
@@ -13252,7 +13330,7 @@ void mtl_read_texels(const tex_t *t, unsigned level, unsigned layer0, const NVNc
             if (!(part = malloc(t->L.size ? t->L.size : 1))) MDIE("sparse texture copy of %llu bytes failed", (unsigned long long)t->L.size);
             nvn_sparse_copy(t->pool, part, (uint64_t)(uintptr_t)t->mem, t->L.size); mem = part;
         }
-        uint32_t lw = MAX(t->d.width >> level, 1u), lh = MAX(t->d.height >> level, 1u), lz = is3d ? MAX(t->d.depth >> level, 1u) : 1;
+        uint32_t lw = MAX(t->d.width >> level, 1u), lh = mtl_tgtfix_on() ? tex_lh(t, level) : MAX(t->d.height >> level, 1u), lz = is3d ? MAX(t->d.depth >> level, 1u) : 1;   // a 1D array's level is one row (tex_lh)
         size_t lp = (size_t)((lw + bw - 1) / bw) * bpb, lr = (lh + bh - 1) / bh;
         uint8_t *lin = malloc(lp * lr * lz);
         for (int z = 0; z < nz; z++) {
@@ -13272,9 +13350,12 @@ void mtl_read_texels(const tex_t *t, unsigned level, unsigned layer0, const NVNc
     mtl_finish_gpu_at(WS_READTEX);
     id<MTLBuffer> buf = [g_dev newBufferWithLength:wb * hb * nz options:MTLResourceStorageModeShared];
     id<MTLCommandBuffer> cb = q_cb(); id<MTLBlitCommandEncoder> b = enc_b_begin(cb);
-    for (int z = 0; z < nz; z++)
-        [b copyFromTexture:mt sourceSlice:is3d ? 0 : layer0 + r->zoffset + z sourceLevel:level sourceOrigin:MTLOriginMake(r->xoffset, r->yoffset, is3d ? r->zoffset + z : 0)
-                sourceSize:MTLSizeMake(r->width, r->height, 1) toBuffer:buf destinationOffset:z * wb * hb destinationBytesPerRow:wb destinationBytesPerImage:wb * hb];
+    for (int z = 0; z < nz; z++) {
+        MTLOrigin so = MTLOriginMake(r->xoffset, r->yoffset, is3d ? r->zoffset + z : 0); MTLSize sz = MTLSizeMake(r->width, r->height, 1); NSUInteger sl = is3d ? 0 : layer0 + r->zoffset + z;
+        if (mtl_tgtfix_on() && !copy_fit(mt, sl, level, so, &sz, "CPU readback")) continue;   // the rest of the buffer stays 0 (a new shared buffer)
+        [b copyFromTexture:mt sourceSlice:sl sourceLevel:level sourceOrigin:so
+                sourceSize:sz toBuffer:buf destinationOffset:z * wb * hb destinationBytesPerRow:wb destinationBytesPerImage:wb * hb];
+    }
     enc_b_end(b); [cb commit]; [cb waitUntilCompleted];
     for (int z = 0; z < nz; z++) for (size_t y = 0; y < hb; y++) memcpy(dst + z * img + y * row, (uint8_t *)buf.contents + z * wb * hb + y * wb, wb);
     int shift = rb_copy_shift(t, mt); if (shift) rb_swap_rows(dst, wb, hb, (size_t)nz, row, img, shift);   // into the guest's order
@@ -13361,7 +13442,8 @@ static void mirror_readback(const tex_t *t, id<MTLTexture> d, unsigned level, un
     id<MTLBuffer> b = mrbuf_get(img * nz);
     if (!b) { mirror_note(-1, t, level, from, 1); return; }
     id<MTL4ComputeCommandEncoder> e = blit();
-    for (int z = 0; z < nz; z++) enc_b_copy_texture_buffer(e, d, layer0 + r->zoffset + z, level, MTLOriginMake(r->xoffset, r->yoffset, 0), MTLSizeMake(r->width, r->height, 1), b, (size_t)z * img, row, img);
+    size_t mimg = img; NVNcopyRegion mr = region_1d(t, *r, row, &mimg); int mnz = t->d.target == 3 ? mr.depth : nz;   // a 1D array: one row per layer, landing as the region's rows
+    for (int z = 0; z < mnz; z++) enc_b_copy_texture_buffer(e, d, layer0 + mr.zoffset + z, level, MTLOriginMake(mr.xoffset, mr.yoffset, 0), MTLSizeMake(mr.width, mr.height, 1), b, (size_t)z * mimg, row, img);
     mirror_rb *m = malloc(sizeof *m); *m = (mirror_rb){*t, level, layer0, *r, row, img, (void *)CFBridgingRetain(b), absorb ? (void *)CFBridgingRetain(d.parentTexture ? d.parentTexture : d) : NULL, rb_copy_shift(t, d)};
     post((post_op){4, NULL, 0, 0, 0, 0, m, 0});
     mrb_note(t->serial, 1);
@@ -13403,19 +13485,21 @@ static void copy_b2t(const p_copy_b2t *c, uint32_t size) {
     if (is3d && passdump()) { const char *dd = getenv("DM_NVN_CBDUMP"); if (dd) {   // the source bytes of a 3D upload, beside the uniform dumps (F<frame>_c3d_<serial>.bin)
         char p[1024]; snprintf(p, sizeof p, "%s/F%llu_c3d_%llu.bin", dd, (unsigned long long)atomic_load(&g_cur_frame), (unsigned long long)c->tex->serial);
         FILE *f = fopen(p, "wb"); if (f) { fwrite((const uint8_t *)((__bridge id<MTLBuffer>)mb).contents + mo, 1, img * nz, f); fclose(f); } } }
+    // A 1D / 1D array texture: the Metal copies go one row per layer (region_1d); the storage mirror above and the readback below keep the NVN region
+    NVNcopyRegion mr = region_1d(c->tex, c->r, row, &img); if (c->tex->d.target == 3) { nz = mr.depth; rows = 1; }
     // Into Metal's order (rb_copy_shift): converted on the GPU into a staging area of the frame arena, which the blit copies from
     id<MTLBuffer> sb = (__bridge id<MTLBuffer>)mb; int shift = rb_copy_shift(c->tex, t);
     if (shift) {
-        size_t wb = (size_t)((c->r.width + bw - 1) / bw) * bpb; id<MTLBuffer> ab; size_t ao = arena_alloc(wb * rows * nz, &ab);
+        size_t wb = (size_t)((mr.width + bw - 1) / bw) * bpb; id<MTLBuffer> ab; size_t ao = arena_alloc(wb * rows * nz, &ab);
         if (rb_swap_gpu(sb.gpuAddress + mo, row, img, ab.gpuAddress + ao, wb, wb * rows, wb, rows, nz, shift)) { sb = ab; mo = ao; row = wb; img = wb * rows; }
         else RED_ONCE(7, "RGB565-family buffer→texture copy left in the guest's order: red and blue exchanged");
     }
     id<MTL4ComputeCommandEncoder> b = blit();
     if (is3d)
-        enc_b_copy_buffer_texture(b, sb, mo, row, img, MTLSizeMake(c->r.width, c->r.height, nz), t, 0, level, MTLOriginMake(c->r.xoffset, c->r.yoffset, c->r.zoffset));
+        enc_b_copy_buffer_texture(b, sb, mo, row, img, MTLSizeMake(mr.width, mr.height, nz), t, 0, level, MTLOriginMake(mr.xoffset, mr.yoffset, mr.zoffset));
     else
         for (int z = 0; z < nz; z++)
-            enc_b_copy_buffer_texture(b, sb, mo + z * img, row, img, MTLSizeMake(c->r.width, c->r.height, 1), t, layer0 + c->r.zoffset + z, level, MTLOriginMake(c->r.xoffset, c->r.yoffset, 0));
+            enc_b_copy_buffer_texture(b, sb, mo + z * img, row, img, MTLSizeMake(mr.width, mr.height, 1), t, layer0 + mr.zoffset + z, level, MTLOriginMake(mr.xoffset, mr.yoffset, 0));
     if (rb) mirror_readback(c->tex, t, level, layer0, &c->r, "buffer", 0);
 }
 
@@ -13634,7 +13718,9 @@ static void copy_t2t(const p_copy_t2t *c) {
     if (!d || !tex_level_ok(d, dl, "texture copy destination")) return;
     if (c->flags & DM_COPY_RESOLVE) {   // Downsample: multisample resolve into the single-sample destination (depth takes sample 0); with equal sample counts it is a plain whole copy
         if (s.sampleCount == d.sampleCount && s.pixelFormat == d.pixelFormat && s.width == d.width && s.height == d.height) {
-            enc_b_copy_texture(blit(), s, sz0, sl, MTLOriginMake(0, 0, 0), MTLSizeMake(s.width, s.height, 1), d, dz0, dl, MTLOriginMake(0, 0, 0));
+            // the source level's size (the base level's was taken for every level: a copy past a smaller level)
+            MTLSize z = mtl_tgtfix_on() ? MTLSizeMake(MAX(s.width >> sl, 1ul), MAX(s.height >> sl, 1ul), 1) : MTLSizeMake(s.width, s.height, 1);
+            enc_b_copy_texture(blit(), s, sz0, sl, MTLOriginMake(0, 0, 0), z, d, dz0, dl, MTLOriginMake(0, 0, 0));
             return;
         }
         // A single-sample source: a filtered scale of the whole level into the destination, converting the format (Bayonetta 2, SDK 3.6: 320x176 → 80x48 RGBA8 every frame, a quarter of
@@ -13663,6 +13749,14 @@ static void copy_t2t(const p_copy_t2t *c) {
     PD("t src=%llu lv%u sl%u xyz=%d,%d,%d dst=%llu lv%u sl%u xyz=%d,%d,%d size=%d,%d,%d", c->src->serial, sl, sz0, c->sr.xoffset, c->sr.yoffset, c->sr.zoffset,
        c->dst->serial, dl, dz0, c->dr.xoffset, c->dr.yoffset, c->dr.zoffset, c->sr.width, c->sr.height, c->sr.depth);
     int s3 = c->src->d.target == 2, d3 = c->dst->d.target == 2, nz = c->sr.depth ? c->sr.depth : 1;
+    // A 1D array's regions count layers in y / height (region_1d): both sides one row a layer, a copy of that many layers. Taken as rows, the blit copied only the first layer's row
+    // (copy_fit cut it to the one-row slice) and the other layers kept their old content. The mirrors (nvn_tex_mirror_t2t, mirror_readback) keep the NVN regions
+    NVNcopyRegion sr = c->sr, dr = c->dr;
+    if (mtl_tgtfix_on() && (c->src->d.target == 3 || c->dst->d.target == 3)) {
+        size_t im;
+        if (c->src->d.target == 3 && c->dst->d.target == 3) { sr = region_1d(c->src, sr, 0, &im); dr = region_1d(c->dst, dr, 0, &im); nz = sr.depth; }
+        else RED_ONCE(166, "texture copy between a 1D array (target 3) and NVN target %d: rows taken as rows (copy_fit cuts them to the one-row slice)", c->src->d.target == 3 ? c->dst->d.target : c->src->d.target);
+    }
     // The copy's bytes belong in the destination's storage: written there now from the source's storage when that holds its content and the copy is a plain one (the same Metal format: a
     // format change is drawn below and converts the bytes), else read back after the copy (decided before the draw path gives the destination render-target use, which makes it GPU-owned from then on)
     int rb = !d3 && tex_storage_dst(c->dst);
@@ -13670,23 +13764,23 @@ static void copy_t2t(const p_copy_t2t *c) {
         && !mrb_pending(c->dst->serial) && tex_storage_src(c->src) && !nvn_tex_mirror_t2t(c->src, sl, sz0, &c->sr, c->dst, dl, dz0, &c->dr)) { mirror_note(0, c->dst, dl, "texture", 0); rb = 0; }
     // The draw path renders into the destination: one made without render-target use (packaged) gets it first, as a whole-level clear does (Paper Mario: The Thousand-Year Door copies a
     // 128x128 RGBA8 render target into an RG8 texture, mirrored in Y)
-    if ((c->sr.width != c->dr.width || c->sr.height != c->dr.height || s.pixelFormat != d.pixelFormat || (c->flags & (NVN_COPY_FLAGS_MIRROR_X_BIT | NVN_COPY_FLAGS_MIRROR_Y_BIT))) && !s3 && !d3
+    if ((sr.width != dr.width || sr.height != dr.height || s.pixelFormat != d.pixelFormat || (c->flags & (NVN_COPY_FLAGS_MIRROR_X_BIT | NVN_COPY_FLAGS_MIRROR_Y_BIT))) && !s3 && !d3
         && !(d.usage & MTLTextureUsageRenderTarget) && !mtl_fmt_block(d.pixelFormat) && d.sampleCount == 1 && !fmt_int_or_ds(s.pixelFormat) && !fmt_int_or_ds(d.pixelFormat))
         d = tex_upgrade(c->dst, d, MTLTextureUsageRenderTarget, d.pixelFormat);
-    if ((c->sr.width != c->dr.width || c->sr.height != c->dr.height || s.pixelFormat != d.pixelFormat || (c->flags & (NVN_COPY_FLAGS_MIRROR_X_BIT | NVN_COPY_FLAGS_MIRROR_Y_BIT))) && !s3 && !d3
-        && (c->sr.depth ? c->sr.depth : 1) == (c->dr.depth ? c->dr.depth : 1)
+    if ((sr.width != dr.width || sr.height != dr.height || s.pixelFormat != d.pixelFormat || (c->flags & (NVN_COPY_FLAGS_MIRROR_X_BIT | NVN_COPY_FLAGS_MIRROR_Y_BIT))) && !s3 && !d3
+        && (sr.depth ? sr.depth : 1) == (dr.depth ? dr.depth : 1)
         && !(c->flags & ~(NVN_COPY_FLAGS_ENGINE_2D_BIT | NVN_COPY_FLAGS_LINEAR_FILTER_BIT | NVN_COPY_FLAGS_MIRROR_X_BIT | NVN_COPY_FLAGS_MIRROR_Y_BIT))
-        && copy_t2t_draw(s, d, sl, sz0, dl, dz0, &c->sr, &c->dr, !!(c->flags & NVN_COPY_FLAGS_LINEAR_FILTER_BIT), c->flags)) {   // format change / scaling / mirroring: draw it (see copy_t2t_draw)
+        && copy_t2t_draw(s, d, sl, sz0, dl, dz0, &sr, &dr, !!(c->flags & NVN_COPY_FLAGS_LINEAR_FILTER_BIT), c->flags)) {   // format change / scaling / mirroring: draw it (see copy_t2t_draw)
         if (rb) mirror_readback(c->dst, d, dl, dz0, &c->dr, "texture", 0);
         return;
     }
     // The depth plane of a depth-stencil texture into a depth-only one, or back (EA SPORTS FC 27's Frostbite copies its 1920x1080 Depth32Float_Stencil8 target into a Depth32Float
     // texture): a blit copies only between equal formats, so the 32-bit float depth goes through a buffer, taken from and written to the combined texture's depth plane
-    if (!s3 && !d3 && c->sr.width == c->dr.width && c->sr.height == c->dr.height && (c->sr.depth ? c->sr.depth : 1) == 1 && (c->dr.depth ? c->dr.depth : 1) == 1
+    if (!s3 && !d3 && sr.width == dr.width && sr.height == dr.height && (sr.depth ? sr.depth : 1) == 1 && (dr.depth ? dr.depth : 1) == 1
         && !(c->flags & ~NVN_COPY_FLAGS_ENGINE_2D_BIT & ~NVN_COPY_FLAGS_LINEAR_FILTER_BIT) && s.sampleCount == 1 && d.sampleCount == 1
         && ((s.pixelFormat == MTLPixelFormatDepth32Float_Stencil8 && d.pixelFormat == MTLPixelFormatDepth32Float) || (s.pixelFormat == MTLPixelFormatDepth32Float && d.pixelFormat == MTLPixelFormatDepth32Float_Stencil8))) {
         static id<MTLBuffer> plane;   // kept from copy to copy, replaced (deferred) by a larger one
-        NSUInteger row = (NSUInteger)c->sr.width * 4, img = row * (NSUInteger)c->sr.height;
+        NSUInteger row = (NSUInteger)sr.width * 4, img = row * (NSUInteger)sr.height;
         if (!plane || plane.length < img) {
             if (plane) defer_obj_release(plane);
             plane = [g_dev newBufferWithLength:img options:MTLResourceStorageModePrivate];
@@ -13694,24 +13788,24 @@ static void copy_t2t(const p_copy_t2t *c) {
             res_add(plane);
         }
         MTLBlitOption so = s.pixelFormat == MTLPixelFormatDepth32Float_Stencil8 ? MTLBlitOptionDepthFromDepthStencil : MTLBlitOptionNone, dop = d.pixelFormat == MTLPixelFormatDepth32Float_Stencil8 ? MTLBlitOptionDepthFromDepthStencil : MTLBlitOptionNone;
-        enc_b_copy_texture_buffer_opt(blit(), s, sz0, sl, MTLOriginMake(c->sr.xoffset, c->sr.yoffset, 0), MTLSizeMake(c->sr.width, c->sr.height, 1), plane, 0, row, img, so);
-        enc_b_copy_buffer_texture_opt(blit(), plane, 0, row, img, MTLSizeMake(c->sr.width, c->sr.height, 1), d, dz0, dl, MTLOriginMake(c->dr.xoffset, c->dr.yoffset, 0), dop);
-        static int once; if (!once++) MLOG("depth plane copy: %dx%d Metal format %lu → %lu through a staging buffer", c->sr.width, c->sr.height, (unsigned long)s.pixelFormat, (unsigned long)d.pixelFormat);
+        enc_b_copy_texture_buffer_opt(blit(), s, sz0, sl, MTLOriginMake(sr.xoffset, sr.yoffset, 0), MTLSizeMake(sr.width, sr.height, 1), plane, 0, row, img, so);
+        enc_b_copy_buffer_texture_opt(blit(), plane, 0, row, img, MTLSizeMake(sr.width, sr.height, 1), d, dz0, dl, MTLOriginMake(dr.xoffset, dr.yoffset, 0), dop);
+        static int once; if (!once++) MLOG("depth plane copy: %dx%d Metal format %lu → %lu through a staging buffer", sr.width, sr.height, (unsigned long)s.pixelFormat, (unsigned long)d.pixelFormat);
         if (rb) mirror_readback(c->dst, d, dl, dz0, &c->dr, "texture", 0);
         return;
     }
-    if (c->sr.width != c->dr.width || c->sr.height != c->dr.height || (c->sr.depth ? c->sr.depth : 1) != (c->dr.depth ? c->dr.depth : 1) || (c->flags & ~NVN_COPY_FLAGS_ENGINE_2D_BIT & ~NVN_COPY_FLAGS_LINEAR_FILTER_BIT)
+    if (sr.width != dr.width || sr.height != dr.height || (sr.depth ? sr.depth : 1) != (dr.depth ? dr.depth : 1) || (c->flags & ~NVN_COPY_FLAGS_ENGINE_2D_BIT & ~NVN_COPY_FLAGS_LINEAR_FILTER_BIT)
         || s.pixelFormat != d.pixelFormat || s3 != d3) {
-        RED_ONCE(33, "texture→texture copy case not implemented: %dx%dx%d→%dx%dx%d flags %#x format %lu→%lu 3D %d→%d", c->sr.width, c->sr.height, c->sr.depth, c->dr.width, c->dr.height, c->dr.depth,
+        RED_ONCE(33, "texture→texture copy case not implemented: %dx%dx%d→%dx%dx%d flags %#x format %lu→%lu 3D %d→%d", sr.width, sr.height, sr.depth, dr.width, dr.height, dr.depth,
                  c->flags, (unsigned long)s.pixelFormat, (unsigned long)d.pixelFormat, s3, d3);
         return;
     }
     id<MTL4ComputeCommandEncoder> b = blit();
     if (s3)
-        enc_b_copy_texture(b, s, 0, sl, MTLOriginMake(c->sr.xoffset, c->sr.yoffset, c->sr.zoffset), MTLSizeMake(c->sr.width, c->sr.height, nz), d, 0, dl, MTLOriginMake(c->dr.xoffset, c->dr.yoffset, c->dr.zoffset));
+        enc_b_copy_texture(b, s, 0, sl, MTLOriginMake(sr.xoffset, sr.yoffset, sr.zoffset), MTLSizeMake(sr.width, sr.height, nz), d, 0, dl, MTLOriginMake(dr.xoffset, dr.yoffset, dr.zoffset));
     else
         for (int z = 0; z < nz; z++)
-            enc_b_copy_texture(b, s, sz0 + c->sr.zoffset + z, sl, MTLOriginMake(c->sr.xoffset, c->sr.yoffset, 0), MTLSizeMake(c->sr.width, c->sr.height, 1), d, dz0 + c->dr.zoffset + z, dl, MTLOriginMake(c->dr.xoffset, c->dr.yoffset, 0));
+            enc_b_copy_texture(b, s, sz0 + sr.zoffset + z, sl, MTLOriginMake(sr.xoffset, sr.yoffset, 0), MTLSizeMake(sr.width, sr.height, 1), d, dz0 + dr.zoffset + z, dl, MTLOriginMake(dr.xoffset, dr.yoffset, 0));
     if (rb) mirror_readback(c->dst, d, dl, dz0, &c->dr, "texture", 0);
     // Diagnostic DM_NVN_T2T_TRACE=WxH:file: after each copy into an RGBA16F texture of that size, copy the result once more into a trace buffer on the GPU timeline (frame numbers kept on the CPU side); after 240 copies write the file
     { static int on = -1; static uint32_t tw, th; static const char *tf; static id<MTLBuffer> tb; static int tn; static uint64_t tfr[240], from;
@@ -13828,6 +13922,10 @@ static unsigned mtl_pf_chmask(MTLPixelFormat pf) {
 // View with changed format: clear on that view. Partial colour regions / channel masks use a triangle and preserve everything else.
 static void clear_tex_tri(id<MTLTexture> t, unsigned lv, unsigned l0, const p_clear_tex *c);
 static void clear_tex(const p_clear_tex *c) {
+    // A 1D array's region counts layers in y / height (region_1d): its clear covers that many layers of one row. Taken as rows, only the first layer's row was cleared (clear_tex_tri cut
+    // the rows to the slice's one, nz = depth = 1), the other layers kept their old content
+    p_clear_tex c1;
+    if (c->tex && c->tex->d.target == 3 && mtl_tgtfix_on()) { size_t im; c1 = *c; c1.r = region_1d(c->tex, c->r, 0, &im); c = &c1; }
     if (c->tex) zskip_del(c->tex->serial);
     id<MTLTexture> t = tex_mtl(c->tex); sparse_gpu_wrote(c->tex);
     PD("X ser=%llu view format %#x region %d,%d,%d %dx%dx%d mask %#x %s %g,%g,%g,%g", c->tex ? c->tex->serial : 0ull, c->has_view && c->view.set_format ? c->view.format : -1, c->r.xoffset, c->r.yoffset, c->r.zoffset, c->r.width, c->r.height, c->r.depth, c->mask,
@@ -14601,7 +14699,7 @@ void ts_after(void) {
         id<MTLTexture> t = g_ts_att[i]; if (t.textureType != MTLTextureType2D && t.textureType != MTLTextureType2DArray) continue;   // 2D arrays take slice 0
         MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:t.pixelFormat width:t.width height:t.height mipmapped:t.mipmapLevelCount > 1];
         d.usage = MTLTextureUsageShaderRead; d.storageMode = MTLStorageModePrivate; d.mipmapLevelCount = t.mipmapLevelCount;
-        id<MTLTexture> c = [g_dev newTextureWithDescriptor:d]; res_add(c);
+        id<MTLTexture> c = [g_dev newTextureWithDescriptor:d]; if (!c) continue; res_add(c);
         NSUInteger lv = g_ts_lv[i], w = MAX((NSUInteger)1, t.width >> lv), h = MAX((NSUInteger)1, t.height >> lv);
         enc_b_copy_texture(blit(), t, 0, lv, MTLOriginMake(0, 0, 0), MTLSizeMake(w, h, 1), c, 0, lv, MTLOriginMake(0, 0, 0));
         [g_td_list addObject:@[c, @(g_ts_ser[i]), @(g_ts_lv[i]), @0, @(g_ts_on - 1)]];   // the end-of-frame fields (texture, serial, level, layer) plus the in-frame pass index: saved as <path with %d = 0>_s<index>_<serial>_<level>.png

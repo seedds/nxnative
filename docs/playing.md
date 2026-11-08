@@ -28,6 +28,8 @@ A controller that supplies gyro data through Apple's controller support (DualSen
 
 Switch Pro Controller gyro on the Mac still needs the HID support being developed in [PR #296](https://github.com/seedds/nxnative/pull/296).
 
+On the Mac, the 8BitDo Ultimate 2 Wireless's gyro is read from the pad itself over Bluetooth (firmware 1.03 or later), since Apple's controller support gives it none; with two of them connected neither gets motion ([details](reference/services.md#8bitdo-ultimate-2-wireless-has-no-gyro-on-the-mac)).
+
 **Shaking.** Shake the iPhone to shake the controller, in games that read its motion: Super Mario Odyssey's motion moves (such as the cap throw on a shake) need it, and Odyssey only takes them in its default docked mode. A light bump does not count; a sharp flick of the phone does.
 
 ## Game language

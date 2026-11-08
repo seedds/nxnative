@@ -99,6 +99,11 @@ def decode_tex(name):
     s = next((slot(x, SAMP_BASE, sb) for x in words if x * 4 >= SAMP_BASE and slot(x, SAMP_BASE, sb) is not None), None) if ty != 3 else None
     return t, s, ty
 
+def fetch1d_names(msl, res):
+    """The 2D texture names whose slot the translator reads by 1D integer fetches as 2D rows (res "fetch1d", Program.cs RecordTexelFetch1D; a texture buffer may be bound there): fetch_clamp keeps them"""
+    f1 = set(res.get('fetch1d', ()))
+    return {nm for nm in re.findall(r'\btexture2d<\w+>\s+(\w+)', msl) if (decode_tex(nm) or (None,))[0] in f1} if f1 else set()
+
 def const_sampler(name):
     """The constant sampler ID of a type-3 handle (fp_t_cb65538_3041005C: the texture handle at c2 word 0x5C ORed with sampler 0x104), or None"""
     m = re.match(r'[a-z]+_t\w*?_(?:cb(\d+)|tcb)_([0-9A-F]+)', name)

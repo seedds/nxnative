@@ -722,6 +722,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Found on:** [Super Mario 3D World + Bowser's Fury](../../dm/games/010028600EBDA000/README.md): volume draws after the G-buffer (`50d813761ca3f1f9` and others) write only outputs 0 and 2, with blending and all channels enabled on targets 1 and 3.
 - **Check:** all five games' regressions were unchanged by it.
 
+### No writes to colour components outside the shader's output map
+
+- **Symptom:** undefined values in the components of a target the fragment shader does not write: a NaN or garbage alpha (or G, B) that later passes, such as bloom, spread.
+- **Cause:** the SPH's output map (word 18, 4 bits per colour output, R G B A from the low bit) names the components the GPU writes; it leaves the others of a bound target as they were. The translator stores only the mapped components, but Metal writes the whole attachment under its write mask, the unstored components undefined. [The entry above](#no-writes-to-colour-outputs-the-shader-does-not-write) covered only outputs with no component in the map.
+- **Fix:** `dmsh_build.py` `ps_omap` records a pixel shader's output map in its reflection (`raster.omap`, Maxwell's 0x50-byte SPH and NVN2's 0x80-byte one alike); `pso_desc` ANDs each target's write mask with its output's nibble, and `first_draw_covers` proves a load skippable only when the map covers every channel the target's format stores (`pf_chan_bits`). Libraries of an older chain have no map and keep the channel mask alone. `t_omap_mask` checks both Metal pipeline paths.
+- **Found on:** reported by Lichii, a Switch 2 emulator, on [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) (their commit `79c1516`): a depth-only visibility draw with target 0 still bound left a band of NaN and red / blue above the horizon, which bloom spread into violet halos. Ocarina's agl_common depth pass maps output 0 RGBA and output 2 R only (map 0x10f, `TranslatorContext.GetDepthRegister`). Not reproduced here (open).
+
 ### The alpha test through a library of its own
 
 - **Symptom:** foliage, hair and fences drawn as solid quads (the parts the texture leaves transparent filled with its colour or black), dissolve effects solid instead of breaking up; once per run `SetAlphaRef …: the host has no alpha test`.

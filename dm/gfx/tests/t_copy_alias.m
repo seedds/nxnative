@@ -95,7 +95,9 @@ static void shader_alias(void) {
         "kernel void w(device uint *a [[buffer(0)]], constant uint &s [[buffer(2)]], uint i [[thread_position_in_grid]]) { a[i] = s + i; }\n"
         "kernel void r(device const uint *b [[buffer(0)]], device uint *o [[buffer(1)]], uint i [[thread_position_in_grid]]) { o[i] = b[i]; }\n" options:nil error:&e];
     if (!l || !a || !b || !io) { fprintf(stderr, "%s\n", e.localizedDescription.UTF8String); abort(); }
-    id<MTLComputePipelineState> pw = [g_dev newComputePipelineStateWithFunction:[l newFunctionWithName:@"w"] error:&e], pr = [g_dev newComputePipelineStateWithFunction:[l newFunctionWithName:@"r"] error:&e];
+    id<MTLFunction> fw = [l newFunctionWithName:@"w"], fr = [l newFunctionWithName:@"r"];
+    if (!fw || !fr) { fprintf(stderr, "compute functions missing\n"); abort(); }
+    id<MTLComputePipelineState> pw = [g_dev newComputePipelineStateWithFunction:fw error:&e], pr = [g_dev newComputePipelineStateWithFunction:fr error:&e];
     id<MTLBuffer> seed = [g_dev newBufferWithLength:16 options:MTLResourceStorageModeShared];
     res_add(a); res_add(b); res_add(io); res_add(seed); atomic_fetch_add(&g_big_n, 1);
     CHECK(resource_vis() & MTL4VisibilityOptionResourceAlias, "overlapping buffers turn on the alias flush");

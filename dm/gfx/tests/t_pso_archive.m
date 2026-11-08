@@ -134,7 +134,10 @@ static void compute_pipelines(void) {
     EXPECT("compute: a plain file, not a p file", 1, names.count == 1 && ![names[0] hasPrefix:@"p"]);
     EXPECT("compute: nothing left to write", 0, g_arch_new);
     LookupCountArchive *la = [LookupCountArchive new];
-    la->archive = names.count ? [g_dev newArchiveWithURL:[NSURL fileURLWithPath:[@(kdir) stringByAppendingPathComponent:names[0]]] error:&err] : nil;
+    NSString *name = names.firstObject;
+    NSString *path = name ? [@(kdir) stringByAppendingPathComponent:name] : nil;
+    NSURL *url = path ? [NSURL fileURLWithPath:path] : nil;
+    la->archive = url ? [g_dev newArchiveWithURL:url error:&err] : nil;
     g_arch4 = @[(id<MTL4Archive>)la];   // as a new start with that file
     built = g_cps_built; pending = g_arch_new;
     id<MTLComputePipelineState> kp2 = cps_new(kf, &err);

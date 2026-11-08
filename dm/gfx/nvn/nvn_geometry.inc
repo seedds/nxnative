@@ -585,17 +585,31 @@ static id<MTLRenderPipelineState> mtk_pso(NvProg *raster) {
 static void mtk_encode(id<MTLRenderCommandEncoder> en_) {
     id<MTL4RenderCommandEncoder> en = (id<MTL4RenderCommandEncoder>)en_; NvShader *ts = g_mtk.ts, *ms = g_mtk.ms;
     [en setArgumentTable:g_vt atStages:MTLRenderStageMesh];
-    uint64_t first_gpu = g_mtk.ind_first;
-    if (!g_mtk.ind) { id<MTLBuffer> b; size_t o = arena_alloc(16, &b); memcpy((uint8_t *)b.contents + o, &g_mtk.first, 4); first_gpu = b.gpuAddress + o; }
-    if (ts) { [en setArgumentTable:g_ot atStages:MTLRenderStageObject]; g_args_dirty[3] = 1; encode_args(en, ts, 3, 0);
-              if (rec_on()) rec_table_op(RO_T_ADDR, g_ot, first_gpu, DMSH_MESH_FIRST_SLOT); else [g_ot setAddress:first_gpu atIndex:DMSH_MESH_FIRST_SLOT]; }
+    MTLSize to = MTLSizeMake(ts ? ts->mesh_threads : 1, 1, 1), tm = MTLSizeMake(ms->mesh_threads, 1, 1);
+    if (ts) { uint64_t first_gpu = g_mtk.ind_first;
+              if (!g_mtk.ind) { id<MTLBuffer> b; size_t o = arena_alloc(16, &b); memcpy((uint8_t *)b.contents + o, &g_mtk.first, 4); first_gpu = b.gpuAddress + o; }
+              [en setArgumentTable:g_ot atStages:MTLRenderStageObject]; g_args_dirty[3] = 1; encode_args(en, ts, 3, 0);
+              if (rec_on()) rec_table_op(RO_T_ADDR, g_ot, first_gpu, DMSH_MESH_FIRST_SLOT); else [g_ot setAddress:first_gpu atIndex:DMSH_MESH_FIRST_SLOT];
+              g_args_dirty[4] = 1; encode_args(en, ms, 4, 1);
+              enc_r_vbuf(en, DMSH_MESH_FIRST_SLOT, first_gpu);
+              if (g_mtk.ind) [en drawMeshThreadgroupsWithIndirectBuffer:g_mtk.ind threadsPerObjectThreadgroup:to threadsPerMeshThreadgroup:tm];
+              else [en drawMeshThreadgroups:MTLSizeMake(g_mtk.count, 1, 1) threadsPerObjectThreadgroup:to threadsPerMeshThreadgroup:tm];
+              return; }
+    // With no task shader the threadgroups are the mesh grid, which Metal holds to MDX_MESH_GRID: past it the GPU read out of bounds and the command buffer failed with a page fault
+    // (Ocarina of Time: indirect mesh draws of up to 1,771 workgroups). The draw goes in parts, each with its own first workgroup; an indirect draw's parts are written by mdx_mask
     g_args_dirty[4] = 1; encode_args(en, ms, 4, 1);
-    enc_r_vbuf(en, DMSH_MESH_FIRST_SLOT, first_gpu);
-    if (g_mtk.ind) [en drawMeshThreadgroupsWithIndirectBuffer:g_mtk.ind threadsPerObjectThreadgroup:MTLSizeMake(ts ? ts->mesh_threads : 1, 1, 1) threadsPerMeshThreadgroup:MTLSizeMake(ms->mesh_threads, 1, 1)];
-    else [en drawMeshThreadgroups:MTLSizeMake(g_mtk.count, 1, 1) threadsPerObjectThreadgroup:MTLSizeMake(ts ? ts->mesh_threads : 1, 1, 1) threadsPerMeshThreadgroup:MTLSizeMake(ms->mesh_threads, 1, 1)];
+    if (g_mtk.ind) {
+        for (int k = 0; k < MDX_MESH_PARTS; k++) { uint64_t part = g_mtk.ind + 16 + 16 * (uint64_t)k;
+            enc_r_vbuf(en, DMSH_MESH_FIRST_SLOT, part + 12);
+            [en drawMeshThreadgroupsWithIndirectBuffer:part threadsPerObjectThreadgroup:to threadsPerMeshThreadgroup:tm]; }
+        return; }
+    for (uint32_t o = 0; o < g_mtk.count; o += MDX_MESH_GRID) {
+        id<MTLBuffer> b; size_t bo = arena_alloc(16, &b); uint32_t first = g_mtk.first + o; memcpy((uint8_t *)b.contents + bo, &first, 4);
+        enc_r_vbuf(en, DMSH_MESH_FIRST_SLOT, b.gpuAddress + bo);
+        [en drawMeshThreadgroups:MTLSizeMake(MIN(g_mtk.count - o, MDX_MESH_GRID), 1, 1) threadsPerObjectThreadgroup:to threadsPerMeshThreadgroup:tm]; }
 }
 // DrawMeshTasksIndirect: {count, first}, which the game's culling writes earlier in the submission, while Metal's indirect mesh draw takes {x, y, z}. mdx_run copies the count to a {count, 1, 1} on the
-// GPU, before the render pass and for every such draw up to the next write, and the shader reads first from the record. Reading the record on the CPU instead took a wait for the GPU at each hazard:
+// GPU, before the render pass and for every such draw up to the next write, and the shader reads first from the record (with no task shader: parts of at most MDX_MESH_GRID, mtk_encode). Reading the record on the CPU instead took a wait for the GPU at each hazard:
 // 73 % of the submit thread in Ocarina of Time's Kokiri Forest, frames of 90 ms and more against 25 ms of GPU work
 static void mesh_tasks_draw(const p_draw *dw) {
     if (!S.prog || (!dw->ind && dw->count <= 0)) return;

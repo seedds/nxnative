@@ -8,9 +8,13 @@
 # Filling from earlier builds: every imported library must record the current compiler identity and flags in its reflection. Legacy libraries without that identity are not imported.
 # A fresh compile of two shaders per stage also checks their bytes. Each folder is read once per compiler identity (filled.json remembers its number of libraries).
 # Not part of the chain version (dmsh_chain.py): the cache never changes an output, it only skips recompiling one. Change FORMAT when what it stores changes.
+# Lazy fill (DMSH_PREFILL_LAZY=1, or DMSH_ONE_IN_ONE_OUT=1): fill makes the same checks but only notes where each earlier library lies, and one goes into the cache when a compile asks for its
+# source. After a chain change most of them are never asked for (Donkey Kong Bananza: 4 of 19,550 on a subset; 3,646 of 20,412 on another game), and they no longer take the cache's room.
+# The earlier build is read until this build ends: a library whose file changed since fill looked (size, time, inode) is compiled instead. A lazy fill notes again at each build; the sample
+# check of an earlier image is remembered in filled.json while the image is unchanged.
 import os, re, sys, json, shutil, ctypes, hashlib, threading, subprocess, collections
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'tools'))
-import romfs, shader_lib   # the libraries of an earlier build may be one file (shader_lib.py), read in place
+import romfs, shader_lib, shader_cache   # the libraries of an earlier build may be one file (shader_lib.py), read in place
 STAMPS = 'metallib/filled.json'   # the earlier builds' folders already read
 
 FORMAT = b'dmsh_mtlcache 2'   # earlier prefill could misclassify an unsampled library from another compiler
@@ -22,6 +26,14 @@ def clone(src, dst):
     tmp = f'{dst}.tmp-{os.getpid()}-{threading.get_ident()}'
     if _clonefile is None or _clonefile(os.fsencode(src), os.fsencode(tmp), 0) != 0: shutil.copyfile(src, tmp)
     os.replace(tmp, dst)
+
+
+def _holder_stat(path):
+    """(size, mtime, inode) of the file holding path: the image for a path inside one (<x>.img/<name>, an image being a file, not a folder of that name), else the file itself"""
+    i = path.find('.img' + os.sep)
+    while i >= 0 and not os.path.isfile(path[:i + 4]): i = path.find('.img' + os.sep, i + 1)
+    st = os.stat(path[:i + 4] if i >= 0 else path)
+    return st.st_size, st.st_mtime_ns, st.st_ino
 
 
 def compiler_id(sdk):
@@ -36,6 +48,8 @@ class Cache:
         self.store, self.targets, self.work = store, targets, work
         self.ident = {t: hashlib.sha256(FORMAT + b'\0' + rec.encode() + b'\0' + compiler_id(sdk).encode()).digest() for t, (sdk, rec, _) in targets.items()}
         self.stats, self.lock = collections.Counter(), threading.Lock()
+        self.lazy = shader_cache._env_on('DMSH_PREFILL_LAZY', 'DMSH_ONE_IN_ONE_OUT')
+        self.earlier = {}   # lazy fill: cache name → (the earlier library's path, the _holder_stat fill saw)
 
     def path(self, target, src):
         d = hashlib.sha256(self.ident[target] + b'\0' + src).hexdigest()
@@ -56,7 +70,7 @@ class Cache:
     def compile(self, target, msl, lib):
         """msl → lib for target: a clone of the library that the same source compiled to before, or a compile (then kept). Raises CalledProcessError as the compile does"""
         p = self.path(target, open(msl, 'rb').read())
-        if self.store.to_file(p, lib): self.count((target, 'reused')); return
+        if self.store.to_file(p, lib) or self._take_earlier(target, p, lib): self.count((target, 'reused')); return
         tmp = f'{lib}.tmp-{os.getpid()}-{threading.get_ident()}'
         self._compile(target, msl, tmp)
         os.replace(tmp, lib)
@@ -68,8 +82,7 @@ class Cache:
         one source always splits the same way. Raises CalledProcessError as the compile does, and what split raises"""
         p = self.path(target, open(msl, 'rb').read())
         paths = [p] + [f'{p[:-len(".metallib")]}_x{i if i > 1 else ""}.metallib' for i in range(1, len(libs))]
-        if all(self.store.has(x) for x in paths):
-            for src, dst in zip(paths, libs): self.store.to_file(src, dst)
+        if all(self.store.has(x) for x in paths) and all([self.store.to_file(src, dst) for src, dst in zip(paths, libs)]):   # a piece removed since the look (a prune): compiled again
             self.count((target, 'reused')); return
         whole = f'{libs[0]}.tmp-{os.getpid()}-{threading.get_ident()}'
         self._compile(target, msl, whole)
@@ -83,6 +96,21 @@ class Cache:
         with self.store.batch():
             for path, lib in zip(paths, libs): self.store.put_file(path, lib)
         self.count((target, 'compiled'))
+
+    def _take_earlier(self, target, p, lib):
+        """Lazy fill: the earlier library noted under the cache name p, into the cache and to lib. False when there is none, or its file changed or went since fill looked"""
+        noted = self.earlier.get(p)
+        if noted is None: return False
+        src, seen = noted
+        try:
+            if _holder_stat(src) != seen: return False   # rebuilt in place since fill checked it: compiled instead
+            with romfs.open(src, 'rb') as f: data = f.read()
+            if _holder_stat(src) != seen: return False   # and not replaced while it was read
+        except OSError: return False
+        self.store.put(p, data)
+        if not self.store.to_file(p, lib): return False
+        self.count((target, 'filled'))
+        return True
 
     def _check(self, target, d, stems, mac_dir):
         """None if folder d was built with the current convention and compiler, else why not"""
@@ -123,10 +151,14 @@ class Cache:
             libs = names if d == mac_dir else set(romfs.os.listdir(d))
             have = [s for s in stems if s + '.metallib' in libs]; key = self.ident[target].hex() + ':' + os.path.realpath(d)
             if not have or stamps.get(key) == len(have): continue
-            why = self._check(target, d, have, mac_dir)
+            # a lazy fill's libraries are not in the cache, so it notes them again each time; its check is remembered for an image (lazy:<key> → its count and the image's stat) and holds
+            # while the image is as it was. A folder is checked each time: a library rewritten in place would not show in its stat
+            seen = list(_holder_stat(os.path.join(d, have[0] + '.metallib'))) if d.endswith('.img') else None
+            why = None if self.lazy and seen and stamps.get('lazy:' + key) == [len(have)] + seen else self._check(target, d, have, mac_dir)
             if why: notes.append(f'Metal cache: not filled from {d}: {why}')
             else: todo[target] = (d, set(have))
-            stamps[key] = len(have)
+            if not self.lazy: stamps[key] = len(have)
+            elif seen and not why: stamps['lazy:' + key] = [len(have)] + seen
         added = collections.Counter()
         for stem in stems:
             ts = [t for t, (d, have) in todo.items() if stem in have]
@@ -134,9 +166,13 @@ class Cache:
             src = romfs.open(os.path.join(mac_dir, stem + '.metal'), 'rb').read()
             for t in ts:
                 p = self.path(t, src)
-                if self.store.has(p): continue
-                self.store.put(p, romfs.open(os.path.join(todo[t][0], stem + '.metallib'), 'rb').read()); added[t] += 1
+                if p in self.earlier or self.store.has(p): continue
+                lib = os.path.join(todo[t][0], stem + '.metallib')
+                if self.lazy: self.earlier[p] = (lib, _holder_stat(lib))
+                else: self.store.put(p, romfs.open(lib, 'rb').read())
+                added[t] += 1
         for t, (d, have) in todo.items():
+            if self.lazy: notes.append(f'Metal cache: {added[t]} {t} libraries noted in {d} ({len(have)} there), taken when a compile asks for one'); continue
             self.count((t, 'filled'), added[t]); notes.append(f'Metal cache: {added[t]} {t} libraries added from {d} ({len(have)} there)')
         self.store.put(STAMPS, json.dumps(stamps, indent=1).encode())
         return notes

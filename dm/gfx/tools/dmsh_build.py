@@ -437,7 +437,11 @@ PRE_STATS = collections.Counter()
 # -O1: the front end's -O2 (CorrelatedValuePropagation, then SimplifyCFG) folds the translated shaders' repeated tests of one value into switches whose cases jump past their own join.
 # Apple's GPU backend then exceeds its control-flow ID budget ("Max Unstruct ID 758 ... exceeds supported limit", a note, not an error) and falls back to a slower lowering:
 # Odyssey's alRenderMaterialUber took 25 minutes and 17.3 MB of GPU code, 31 s and 1.3 MB at -O1. Ordinary shaders come out within a few percent either way (the backend optimizes again)
-MAC_METAL = ['xcrun', '-sdk', 'macosx', 'metal', '-c', '-O1', '-fpreserve-invariance']
+# -fwrapv: signed integer overflow wraps, as on Maxwell / Ampere (and as SPIR-V defines it). Without it Metal's front end treats an overflowing signed multiply as undefined and folds
+# around it: Ocarina of Time's mesh shaders shift packed 16-bit vertex data left with an IMAD by 65536 and back right by 16 to extract the low half, and the compiler folded the pair
+# to the whole word, so the lightmap / probe UV's x came out 65536x too large and the models drawn with mesh shaders took their ambient light from the wrong texels (the bright
+# band on the walls of the Deku Tree, the pale patch at the Kokiri Forest exit). 64 of the game's 42,848 translated shaders use the idiom
+MAC_METAL = ['xcrun', '-sdk', 'macosx', 'metal', '-c', '-O1', '-fpreserve-invariance', '-fwrapv']
 MAC_RECORD = ' '.join(MAC_METAL) + '; xcrun -sdk macosx metallib'
 # The compiles run the tools xcrun names, found once: each xcrun launch looks them up again, about 4 ms of a compile's two launches (8 ms a shader). -isysroot is what xcrun -sdk passes
 # (as SDKROOT), and the outputs are the same bytes (.air and .metallib, checked on Odyssey's shaders); without it the driver targets the running macOS, not the SDK, and they differ.

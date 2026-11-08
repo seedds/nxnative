@@ -7075,7 +7075,7 @@ static int vconv_wanted(const nvn_refl *rf, int v, const pso_key *k, int on) {  
 }
 // nv elements from src (stride bytes apart) into d, four 32-bit values each. The 8 / 16-bit integer and the half formats (Age of Calamity's soldiers: Short2, Half2) have loops
 // of their own with the format decoded once; vconv_elem decodes it for every element
-static void vconv_fill(int f, uint64_t src, uint32_t stride, uint64_t nv, float *d) {
+static void vconv_fill_seq(int f, uint64_t src, uint32_t stride, uint64_t nv, float *d) {
     const uint8_t *p = (const uint8_t *)(uintptr_t)src; uint32_t *u = (uint32_t *)d; int ib, is, in = vconv_int(f, &ib, &is);
     if (in) {   // as vconv_elem: the register's 32-bit value, the missing components (0, 0, 0, 1)
         for (uint64_t i = 0; i < nv; i++, p += stride, u += 4) {
@@ -7091,6 +7091,15 @@ static void vconv_fill(int f, uint64_t src, uint32_t stride, uint64_t nv, float 
             for (int c = 0; c < n; c++) { _Float16 h; memcpy(&h, p + 2 * c, 2); d[c] = (float)h; } }
         return; }
     for (uint64_t i = 0; i < nv; i++) vconv_elem(f, p + i * stride, d + 4 * i);
+}
+// A long range is converted in chunks on every core, as a football stadium's mesh is millions of vertices a frame (25 ms of one core); each chunk reads and writes its own part
+enum { VCONV_CHUNK = 32768 };
+static void vconv_fill(int f, uint64_t src, uint32_t stride, uint64_t nv, float *d) {
+    if (nv < 2 * VCONV_CHUNK) { vconv_fill_seq(f, src, stride, nv, d); return; }
+    dispatch_apply((size_t)((nv + VCONV_CHUNK - 1) / VCONV_CHUNK), DISPATCH_APPLY_AUTO, ^(size_t i) {
+        uint64_t a = (uint64_t)i * VCONV_CHUNK;
+        vconv_fill_seq(f, src + a * stride, stride, MIN(nv - a, (uint64_t)VCONV_CHUNK), d + 4 * a);
+    });
 }
 // Profile vconv_range (Age of Calamity): convert only the vertices each draw reads. KTGL binds whole mesh pools (up to ~590,000 vertices) and draws parts of them, so
 // converting the bound range came to millions of vertices a frame in a battle with hundreds of soldiers: 24 of the 32 ms the replay took per frame on the Mac (26 fps at

@@ -467,6 +467,23 @@ class Pack(Base):
         nac = bytearray(nac); struct.pack_into('<I', nac, 0x302C, 0b11); (u / 'control.nacp').write_bytes(nac)
         self.assertEqual(nsp.languages_control(u, b), u / 'control.nacp')
 
+    def test_app_version_is_never_the_base_games_for_an_update(self):   # LNPANDY/NX2Apple#953: an update packed without control data (a dump, a NUP update without a NACP)
+        class G:
+            def __init__(self, rows): self.rows = rows
+            def builds(self): return self.rows
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp); u, b = tmp / 'u', tmp / 'b'
+            for d in (u, b): (d / 'ExeFS').mkdir(parents=True); (d / 'ExeFS/main').write_bytes(b'main')
+            (b / 'control.nacp').write_bytes(control_nacp('Test Game', 'テス', '1.0.0'))
+            with mock.patch.object(nsp, 'build_id', lambda p: 'aa' * 16):
+                package = G({'v458752': {'display': 'v458752', 'main': 'aa' * 16}})   # a row that holds the package version (Donkey Kong Bananza's)
+                self.assertEqual(nsp.app_display_version(package, u, b, True), '')
+                self.assertEqual(nsp.app_display_version(package, b, b, False), '1.0.0')   # the base game packed: its own
+                self.assertEqual(nsp.app_display_version(G({'v65536': {'display': '1.1.0', 'main': 'aa' * 16}}), u, b, True), '1.1.0')   # the row registers a display version
+                self.assertEqual(nsp.app_display_version(G({'v65536': {'display': '?', 'main': 'aa' * 16}}), u, b, True), '')
+                (u / 'control.nacp').write_bytes(control_nacp('Test Game', 'テス', '1.2.3'))
+                self.assertEqual(nsp.app_display_version(package, u, b, True), '1.2.3')   # the update's own control data wins
+
     def test_ipa_settings_read_the_picked_file_and_the_version_the_packed_one(self):   # build_ipa.sh's own lines: CONTROL is the NSP script's languages_control
         self.assertIn('CONTROL=str(control)', (REPO / 'scripts/build_ipa_from_nsp.py').read_text(encoding='utf-8'))
         script = (REPO / 'dm/ios/tools/build_ipa.sh').read_text(encoding='utf-8')

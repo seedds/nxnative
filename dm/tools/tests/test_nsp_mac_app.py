@@ -445,7 +445,7 @@ class App(unittest.TestCase):
         cls.app = t / 'Game - Test.app'
         cls.args = pack_app.parse([str(cls.app), '--host', str(t / 'dmhost'), '--patched', str(t / 'patched'), '--romfs', str(t / 'romfs'), '--msl', str(t / 'cache/b-0123456789ab'),
                                    '--tables', str(t / 'profile'), '--font', str(t / 'font'), '--aoc', str(t / 'aoc'), '--pso', str(t / 'pso'), '--env-file', str(t / 'env.txt'), '--settings', str(t / 'launcher.json'), '--title-id', TID.lower(),
-                                   '--name', 'Game: Test', '--version', '1.0.1', '--lang', 'fr', '--marker', 'region_common/audio/edward.bfsar', '--icon', str(t / 'icon.jpg'),
+                                   '--name', 'Game: Test', '--version', '1.0.1', '--package-version', 'v65536', '--lang', 'fr', '--marker', 'region_common/audio/edward.bfsar', '--icon', str(t / 'icon.jpg'),
                                    '--category', 'public.app-category.games'])
         with contextlib.redirect_stdout(io.StringIO()): pack_app.pack(cls.args)
 
@@ -495,11 +495,20 @@ class App(unittest.TestCase):
             a.out = str(self.tmp / 'Own.app'); a.tables = self.args.tables; pack_app.pack(a)
             self.assertEqual((self.tmp / 'Own.app/Contents/Resources/dm/pso_pairs.tsv').read_text(), 'other-vertex\tother-pixel\n')
 
+    def test_info_plist_of_an_update_without_its_display_version(self):   # LNPANDY/NX2Apple#953: a dump's update has no control data; the front ends show DMPackageVersion
+        a = types.SimpleNamespace(**{**vars(self.args), 'version': None, 'package_version': 'v458752', 'settings': None})
+        p = pack_app.info_plist(a, '14.0', None)
+        self.assertEqual((p['CFBundleShortVersionString'], p['DMPackageVersion']), ('1.0', 'v458752'))
+        self.assertNotIn('DMDisplayVersion', p)
+        a.package_version = None
+        self.assertNotIn('DMPackageVersion', pack_app.info_plist(a, '14.0', None))   # an older NSP script passes neither
+
     def test_info_plist(self):
         p = plistlib.loads((self.app / 'Contents/Info.plist').read_bytes())
         self.assertEqual((p['CFBundleExecutable'], p['CFBundleName'], p['CFBundleIdentifier'], p['CFBundleShortVersionString']), ('nxnative', 'Game: Test', 'org.nxnative.01008cf01baac000', '1.0.1'))
         self.assertEqual((p['DMTitleID'], p['DMLanguage'], p['DMRomfsMarker'], p['CFBundleIconFile']), (TID, 'fr', 'region_common/audio/edward.bfsar', 'AppIcon'))
         self.assertIs(p['LSSupportsGameMode'], False)   # macOS's Game Mode holds the GPU at its lowest clock (frame-rate.md)
+        self.assertEqual((p['DMDisplayVersion'], p['DMPackageVersion']), ('1.0.1', 'v65536'))
         self.assertEqual(p['DMSettings'], [])   # launcher.json's settings, as the saved choices they accept: none here
         self.assertRegex(p['DMCommit'], r'^[0-9a-f]{12}(\+dirty)?$')   # the packing checkout (scripts/bug_report.py, the host's start line)
         self.assertEqual(p['DMChain'], '0123456789ab')   # the chain of the libraries packed (msl/b-<chain>)

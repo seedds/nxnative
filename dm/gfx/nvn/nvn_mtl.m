@@ -6130,6 +6130,9 @@ static __unsafe_unretained NvProg *prog_get(const prog_t *cp) {   // Called only
     if (!p) return nil;   // no program bound: nil, as the callers that test S.prog first get (draw_'s passdump line tests it, the lines after it did not)
     static const prog_t *lp; static uint64_t lser, lgen; static NvProg *lpr;   // Last result: same object, same serial and unchanged serial table means it is used directly
     uint64_t gen = g_ser_gen;
+    // Every caller passes a program (mtl_prog_snapshot's two callers skip a null one, nvn_queue.inc nq_snapshot_object and queue_program_preserve); the analyzer, which cannot see them,
+    // assumes a null cp with the cache's initial null lp. Reported once the watchdog's dispatch note changed its path budget
+    // NOLINTNEXTLINE(clang-analyzer-core.NullDereference)
     if (p == lp && p->serial == lser && gen == lgen && lpr) return lpr;
     __unsafe_unretained NvProg *have = p->serial ? serial_get(p->serial) : nil;
     if (have) { lp = p; lser = p->serial; lgen = gen; lpr = have; return have; }

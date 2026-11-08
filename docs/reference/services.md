@@ -1110,6 +1110,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** `hle_vi.c` answers as a Switch 2 does: in handheld mode its own 1080p screen; in console mode the largest of the four that the display the game is shown on holds, as a docked Switch 2 does with its TV. The display's size comes from the front end (`front_display_pixels`: on the Mac the window's screen in its current mode, an iPhone's or iPad's screen), 1080p when it is not known. The host logs the answer once.
 - **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md): its DLSS output is 2048x1152 for 1440p and for 4K, from 1024x576; for 1080p it renders 960x540 into 1920x1080, a fifth fewer pixels at each stage, and the output matches the screen.
 
+### The display's largest layer
+
+- **Symptom:** a Switch 2 game outputs 1920x1080 docked on a 4K screen, its scene a quarter of that, softer than console footage from a 4K TV: Star Fox rendered 960x540 for a 1080p window that the present stretched to the screen.
+- **Cause:** `nn::vi::ListDisplays` gives each display's largest layer, and the host answered 1920x1080, a Switch 1's. A Switch 2 game sizes its output by it: Star Fox's window manager keeps it (`main+0xba66a78`), its output is the smaller of it and [the largest buffer](#the-displays-largest-buffer) (`main+0xb448874`), and its data's scale for a Switch 2 docked (`render.resolution_scale_console` 0.5, `data/eclipse/cvars/game.cvar`) gives the scene, which DLSS anti-aliases and its NDSR network doubles. The two answers only differ for a game when the layer is the smaller.
+- **Fix:** for a Switch 2 build (`dm_sdk_ounce`) the largest layer is the largest buffer, the picture the display shows now: the 1080p screen handheld, docked the largest of 720p / 1080p / 1440p / 4K the screen holds (`hle_vi.c`; a Switch 1 build keeps 1920x1080). Check: `t_vi_display`.
+- **Found on:** [Star Fox](../../dm/games/0400E88025B1A000/README.md): docked on a 5K screen it outputs 3840x2160 from a 1920x1080 scene (DLSS 1920x1080, NDSR 1920x1080 → 3840x2160), where it was 960x540 → 1920x1080; GPU p50 in the intro 12.4 against 7.3 ms.
+
 ### A game that decodes its code at run time
 
 - **Symptom:** `registered NROs not found` from `nro_collect.py` in a game whose RomFS has an NRR, or `[RED] ro::LoadModule: no rewritten NRO with SHA-256 …`. `main` is small (about 600 KB of code) beside a data segment of random-looking bytes.

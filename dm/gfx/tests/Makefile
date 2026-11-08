@@ -193,6 +193,11 @@ t_sparse_span3: t_sparse_span3.m $(MTL_T_DEP)
 .PHONY: check_t_sparse_span3
 check_t_sparse_span3: t_sparse_span3
 	MTL_DEBUG_LAYER=1 ./t_sparse_span3 && MTL_DEBUG_LAYER=1 DM_NVN_SPARSE_SPAN_ALL=0 DM_NVN_REDIR_RETRY=0 DM_NVN_BIND_CLAMP=0 ./t_sparse_span3 || true
+t_sparse_run_big: t_sparse_run_big.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_sparse_run_big.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
+.PHONY: check_t_sparse_run_big
+check_t_sparse_run_big: t_sparse_run_big
+	./t_sparse_run_big
 t_flightrec: t_flightrec.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_flightrec.m $(MTL_T_SRC) $(FW)
 check_t_flightrec: RUN_ENV = MTL_DEBUG_LAYER=1

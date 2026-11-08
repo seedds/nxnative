@@ -1094,17 +1094,21 @@ static uint64_t sparse_redirect(uint64_t addr, uint64_t *lenp, uint64_t *runp) {
 }
 // The pool entry made for a sparse pool's mapped run (key: the run's start), holding [addr, addr + len): → its index, or -1. Not through pool_find, which may return an older
 // entry over the same virtual range (a large pool's chunk), made before pages under it were remapped. Caller holds g_mu
+// A run of BIG_MIN or more is a large pool (mtl_pool_add): no entry over the run, only stride chunks made on demand, each looked up for its 16 MB stride, so the scan below found none
+// for a range crossing a stride or in a stride not looked up yet (PRAGMATA: a 16 MB storage span at +0xb60000 into a 523 MB run, a [RED] line per run). The run's large pool answers it
 static int pool_run(uint64_t key, uint64_t addr, uint64_t len) {
+    for (int k = 0; k < g_nbig; k++) if ((uint64_t)(uintptr_t)g_big[k].mem == key) return addr >= g_big[k].lo ? big_lookup(&g_big[k], addr, len) : -1;
     static __thread struct { uint64_t gen, key; int i; } c[4]; static __thread unsigned nx; uint64_t gen = atomic_load_explicit(&g_pool_gen, memory_order_relaxed);
     for (int k = 0; k < 4; k++) if (c[k].gen == gen && c[k].key == key) { int i = c[k].i; if (i < g_npool && addr >= g_pools[i].lo && addr + len <= g_pools[i].hi) return i; }
     for (int i = 0; i < g_npool; i++) if ((uint64_t)(uintptr_t)g_pools[i].key == key && addr >= g_pools[i].lo && addr + len <= g_pools[i].hi) { c[nx++ & 3] = (typeof(c[0])){gen, key, i}; return i; }
     return -1;
 }
+static _Atomic int g_run_red;   // run lookups that found no entry ([RED] below; t_sparse_run_big)
 static int run_lookup(uint64_t key, uint64_t addr, uint64_t len, void **buf, uint64_t *off, uint64_t *gpu) {
     pthread_mutex_lock(&g_mu); int i = pool_run(key, addr, len);
     if (i >= 0) { pool_res(i); *buf = (__bridge void *)g_pools[i].buf; *off = addr - g_pools[i].base; if (gpu) *gpu = g_pools[i].gpu + *off; }
     pthread_mutex_unlock(&g_mu);
-    if (i < 0) { static int l; if (l++ < 8) MLOG("[RED] sparse pool run %#llx: no pool entry of its own holds %#llx+%#llx; looked up as before", (unsigned long long)key, (unsigned long long)addr, (unsigned long long)len); }
+    if (i < 0) { static _Atomic int l; atomic_fetch_add(&g_run_red, 1); if (atomic_fetch_add(&l, 1) < 8) MLOG("[RED] sparse pool run %#llx: no pool entry of its own holds %#llx+%#llx; looked up as before", (unsigned long long)key, (unsigned long long)addr, (unsigned long long)len); }
     return i >= 0;
 }
 // A sparse run's pool entries are replaced in steps (vrun_set: the old runs deleted, the merged run added, one pool generation each), and a lookup or a pool table built between

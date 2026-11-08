@@ -80,10 +80,11 @@ The game may also write into an NVN object directly, without an NVN call, throug
 - **Fix:**
   - A lookup of more than one page inside a sparse pool binds the physical pool's own buffer at the matching offset when the mapped part of the range is one contiguous physical piece (unmapped pages may follow); `DM_NVN_SPARSE_PHYS=0` turns it off.
   - When it is one virtual run in several pieces, the lookup is cut to the mapped length and bound through the run's own zero-copy buffer, which `vrun_set` makes after the run's last remap; `DM_NVN_SPARSE_RUN=0` turns it off. A large lookup that is not redirected logs its pieces, once per address.
+  - A run of 512 MB or more is a large pool, kept in 16 MB chunks made on demand: its own lookup goes through that pool (`big_lookup`), which makes or lengthens the chunk, so a range crossing a chunk or in one not looked up yet finds the run too. It used to find no entry of the run's own and fall back to the address lookup with `[RED] sparse pool run …: no pool entry of its own holds …`.
   - The run table holds 16,384 runs, and a full one leaves the lookup untouched (`DM_NVN_VRUN_MAX` sets a smaller cap for A/B runs).
   - Lookups of one page or less are never redirected, so the redirect needs the binding's size: graphics storage buffers from push constants carry theirs ([NVN2 push constants: the block word picks the block](#nvn2-push-constants-the-block-word-picks-the-block)).
 - **Found on:** [PRAGMATA](../../dm/games/0400C76024710000/README.md): the title's Earth read an 80 MB buffer of zeros, and the terrain's mesh shader its 80 MB instance buffer (448 KB mapped, in two pieces).
-- **Check:** `t_sparse_buf` (1,500 separate runs, a contiguous redirect, a two-piece run read by a GPU blit, a piece after a hole that is not taken as a run); it fails with `DM_NVN_VRUN_MAX=1024` or `DM_NVN_SPARSE_RUN=0`.
+- **Check:** `t_sparse_buf` (1,500 separate runs, a contiguous redirect, a two-piece run read by a GPU blit, a piece after a hole that is not taken as a run); it fails with `DM_NVN_VRUN_MAX=1024` or `DM_NVN_SPARSE_RUN=0`. `t_sparse_run_big` (a 576 MB run: across a 16 MB stride, a stride not looked up yet, two strides, the run's end; a 64 MB run), CPU only.
 
 ### Pages and pool tables changed under live GPU work (sparse safe mode)
 

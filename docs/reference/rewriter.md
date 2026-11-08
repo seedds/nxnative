@@ -315,6 +315,13 @@ To enroll a cut for any game's own module:
 - **Fix:** for a front patch area, reserve a zero-filled 16 KB state page immediately after the key page by extending `IMAGE_SIZE`. The existing Mac and iOS loaders map it with the BSS; no padding is added to the game binary. Ordinary modules retain their existing layout.
 - **Found on:** [ASTRAL CHAIN](../../dm/games/01007300020FA000/README.md#frame-rate).
 
+### Frame-step state when the key page ends on 64 KB
+
+- **Symptom:** `frame step state page` assertion when a `FRAME_STEP` (or `MATCH_FRAME_STEP`) stub is added to a module whose patch area is appended after the image.
+- **Cause:** the state page is the page after the key page, and the appended patch area starts at the next 64 KB boundary after the key page. When the key page itself ends on a 64 KB boundary, the patch area starts exactly where the state page has to go.
+- **Fix:** in that case the patch area starts 64 KB later. Modules without frame-step stubs, and those whose rounding already leaves the page free, keep their layout (`dm/tools/tests/test_frame_step_page.py`).
+- **Found on:** [Hades II](../../dm/games/0100A00019DE0000/README.md) 1.0.131248 `main` (key page `0x590c000`, patch area `0x5910000`).
+
 ### Patch area right before the base for a long text
 
 - **Symptom:** `B()` range assertion, then `patch area of … bytes does not fit in the … before the base`.

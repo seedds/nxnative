@@ -597,16 +597,16 @@ static void mtk_encode(id<MTLRenderCommandEncoder> en_) {
 // DrawMeshTasksIndirect: {count, first}, which the game's culling writes earlier in the submission, while Metal's indirect mesh draw takes {x, y, z}. mdx_run copies the count to a {count, 1, 1} on the
 // GPU, before the render pass and for every such draw up to the next write, and the shader reads first from the record. Reading the record on the CPU instead took a wait for the GPU at each hazard:
 // 73 % of the submit thread in Ocarina of Time's Kokiri Forest, frames of 90 ms and more against 25 ms of GPU work
-// Task isolation (DM_NVN_ISOLATE_TASK: unset = the default list, 0 = off, 1 = the default list, <keys> = those task shaders). On Apple silicon the draws of Ocarina of Time's
+// Task isolation (DM_NVN_ISOLATE_TASK, off by default: 1 = the default list, <keys> = those task shaders, unset or 0 = off). On Apple silicon the draws of Ocarina of Time's
 // Hi-Z task a5288d0a6c4971fd (with its mesh 3439aaa071d868ae: cliffs and giant trunks) hang the GPU now and then after an area change (fw_ta_state 1, the tiler) when they share a command
 // buffer with the rest of the pass; macOS revokes the GPU after 2 to 5 such hangs. Each such draw is put in a command buffer of its own: the pass ends and the segment is committed
 // right before and right after it (sub_cut, forced as a buffer -> texture copy forces it). 4 of 4 walks of 420 s without a hang against about 15 of 16 with one, for +0 to 2 ms of
-// GPU a frame (seedds/nxnative#1585 saw the same on an M2 Pro). The cause in the tiler is not known; the hang guard (nvn_mtl.m hang_guard_check) stays as the net behind it
+// GPU a frame (seedds/nxnative#1585 saw the same on an M2 Pro). The cause in the tiler is not known (#1326, #1605: the task's only loop scans a Hi-Z rectangle bounded by its c3[193].xy)
 static const char *isolate_keys(void) {
     static const char *k; static int done;
     if (!done) { done = 1; const char *e = getenv("DM_NVN_ISOLATE_TASK");
-        k = !e || !strcmp(e, "1") ? "a5288d0a6c4971fd" : !strcmp(e, "0") || !*e ? NULL : e;
-        if (k) MLOG("task isolation: draws of task %s go in command buffers of their own (DM_NVN_ISOLATE_TASK=0 turns it off)", k); else MLOG("task isolation off (DM_NVN_ISOLATE_TASK=0)"); }
+        k = !e || !*e || !strcmp(e, "0") ? NULL : !strcmp(e, "1") ? "a5288d0a6c4971fd" : e;
+        if (k) MLOG("task isolation (DM_NVN_ISOLATE_TASK): draws of task %s go in command buffers of their own", k); }
     return k;
 }
 static uint64_t g_iso_draws, g_iso_cuts;

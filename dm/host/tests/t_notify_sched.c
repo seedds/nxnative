@@ -12,6 +12,7 @@ static int observed_wait(pthread_cond_t *, pthread_mutex_t *);
 #define HLE_OE_SOURCE "../hle_oe.c"
 #endif
 #include HLE_OE_SOURCE
+int dm_game_imports(const char *prefix) { (void)prefix; return 0; }   // hle_oe.c GetDesiredLanguage; this test loads no game
 void dm_host_shutdown_then(const char *why, void (*then)(void *), void *arg) { (void)why; (void)then; (void)arg; }   // oe::ExecuteProgram: not exercised here
 void dm_host_shutdown(const char *why) { (void)why; }
 #undef pthread_cond_wait

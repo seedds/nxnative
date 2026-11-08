@@ -1207,6 +1207,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Found on:** [Hyrule Warriors: Age of Calamity](../../dm/games/01002B00111A2000/README.md): after its first cutscene the first battle runs about 900–1,500 small dispatches a frame on the Mac (an iPhone log's call counts suggest more), each after a game barrier, at the same draws and passes; GPU 7.3 → 8.1 ms across the cutscene with the change.
 - **Note:** `DM_NVN_DISPATCH_OWN=1` (and `DM_NVN_PASSGPU`, which times each dispatch) gives each dispatch its own encoder again.
 
+### Compute bindings prepare texture copies before the dispatch encoder
+
+- **Symptom:** a compute shader's first read through a different-format texture view crashes the Metal driver with `DM_NVN_DISPATCH_OWN=1`, or reads stale pixels with shared dispatch encoders. Metal validation reports `Command buffer already has an open command encoder` for the separate-encoder case.
+- **Cause:** resolving a sampled texture binding can upgrade its allocation to allow format views and copy the old pixels into it (`tex_upgrade`). `dispatch` used to open its encoder before `encode_args` resolved that binding. With a separate encoder, the copy opened a second encoder on the same command buffer. With a shared encoder, the copy arrived after the dispatch's dependency barrier, leaving the copy and texture read unordered.
+- **Fix:** prepare the compute argument table, including any texture upgrades, before opening the dispatch's encoder or placing its copy-to-dispatch barrier. The existing encoder and barrier rules then order the copy before the shader reads it; direct and indirect driver group counts remain per-dispatch.
+- **Found on:** investigation of [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md)'s diagnostic-mode crash ([issue #1743](https://github.com/seedds/nxnative/issues/1743)). The encoder overlap and stale pixels are reproduced with generated textures and a synthetic compute shader. Whether this accounts for the game's reported crash remains open; no game files or gameplay validation were available.
+
 ### Fragment-ordering barriers between draws that write images
 
 - **Symptom:** dialog boxes with holes the size of their text, and white specks where text faded.

@@ -5,6 +5,8 @@
 // app without the game. "Show this window at launch" off: no window unless Option is held at launch, and launcher.c applies the saved choices. The window never takes focus by itself: an app
 // opened in the background (open -g) keeps its window behind until the player switches to it
 import AppKit
+import AVFAudio
+import CoreAudio
 import QuartzCore
 import SwiftUI
 
@@ -16,6 +18,48 @@ struct LauncherView: View {
     let fit: (CGFloat) -> Void
     @AppStorage("window.show") private var show = true
     @AppStorage("window.advanced") private var advanced = false
+    @AppStorage("launcher.DM_MIC_DEVICE") private var microphoneDeviceUID = ""
+    @AppStorage("launcher.DM_MIC_GAIN") private var microphoneGain = "4"
+    @State private var microphonePermission = AVAudioApplication.shared.recordPermission
+    @State private var requestingMicrophonePermission = false
+    @State private var launchAfterMicrophonePermission = false
+    @State private var microphoneDevices = MicrophoneInputDevices.list()
+
+    private var hasAudioInput: Bool { Bundle.main.object(forInfoDictionaryKey: "DMUsesAudioInput") as? Bool == true }
+    private var microphonePermissionLabel: String {
+        switch microphonePermission {
+        case .granted: "Allowed"
+        case .denied: "Denied"
+        case .undetermined: "Not asked"
+        @unknown default: "Unknown"
+        }
+    }
+    private var microphoneGainValue: Double { min(max(Double(microphoneGain) ?? 4.0, 1.0), 8.0) }
+    private var microphoneGainSlider: Binding<Double> {
+        Binding(get: { microphoneGainValue }, set: {
+            let value = Int($0.rounded())
+            microphoneGain = String(value)
+            if value == 4 { UserDefaults.standard.removeObject(forKey: "launcher.DM_MIC_GAIN") }
+        })
+    }
+    private var microphoneDeviceSelection: Binding<String> {
+        Binding(get: { microphoneDeviceUID }, set: {
+            microphoneDeviceUID = $0
+            if $0.isEmpty { UserDefaults.standard.removeObject(forKey: "launcher.DM_MIC_DEVICE") }
+        })
+    }
+    private var environment: [String: String] { ProcessInfo.processInfo.environment }
+    private var environmentKeys: Set<String> {
+        Set(((environment["DM_ENV_FILE_KEYS"] ?? "") + " " + (environment["DM_ENV_LAUNCH_KEYS"] ?? "")).split(separator: " ").map(String.init))
+    }
+    private func fixedMicrophoneSetting(_ variable: String) -> String? {
+        guard environmentKeys.contains(variable) || environment[variable] != nil else { return nil }
+        return environment[variable] ?? ""
+    }
+    private func microphoneDeviceLabel(_ uid: String) -> String {
+        if uid.isEmpty || uid == "default" { return "Default (system)" }
+        return microphoneDevices.first(where: { $0.uid == uid })?.name ?? "Unavailable device (system default fallback)"
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -31,6 +75,35 @@ struct LauncherView: View {
             Form {
                 settingSections(basic: true)
                 CloudSavesSection()
+                if hasAudioInput {
+                    Section {
+                        if let fixed = fixedMicrophoneSetting("DM_MIC_DEVICE") {
+                            LabeledContent("Input device", value: microphoneDeviceLabel(fixed) + " (environment)")
+                        } else {
+                            Picker("Input device", selection: microphoneDeviceSelection) {
+                                Text("Default (system)").tag("")
+                                if !microphoneDeviceUID.isEmpty && microphoneDeviceUID != "default" && !microphoneDevices.contains(where: { $0.uid == microphoneDeviceUID }) {
+                                    Text("Unavailable saved device").tag(microphoneDeviceUID)
+                                }
+                                ForEach(microphoneDevices) { device in Text(device.name).tag(device.uid) }
+                            }
+                        }
+                        if let fixed = fixedMicrophoneSetting("DM_MIC_GAIN") {
+                            LabeledContent("Microphone gain", value: "\(fixed)x (environment)")
+                        } else {
+                            HStack {
+                                Text("Microphone gain")
+                                Slider(value: microphoneGainSlider, in: 1...8, step: 1)
+                                Text("\(Int(microphoneGainValue.rounded()))×").monospacedDigit().frame(width: 32, alignment: .trailing)
+                            }
+                        }
+                        LabeledContent("Access", value: microphonePermissionLabel)
+                    } footer: {
+                        Text(microphonePermission == .denied
+                             ? "Access is denied. Change it in System Settings > Privacy & Security > Microphone."
+                             : "Access is requested when the launcher opens. If the selected device is unavailable, capture falls back to the system default.")
+                    }
+                }
                 Section {
                     DisclosureGroup("Advanced settings", isExpanded: $advanced) {}
                 }
@@ -54,11 +127,48 @@ struct LauncherView: View {
                 Toggle("Show this window at launch", isOn: $show).toggleStyle(.checkbox)
                 Spacer()
                 Button("Quit") { done(false) }
-                Button("Play") { done(true) }.keyboardShortcut(.defaultAction)
+                Button(requestingMicrophonePermission ? "Requesting Microphone Access…" : "Play") { play() }
+                    .disabled(requestingMicrophonePermission)
+                    .keyboardShortcut(.defaultAction)
             }
             .padding(20)
         }
         .frame(minWidth: 520, idealWidth: 560)
+        .onAppear { refreshMicrophoneState(); requestMicrophonePermissionIfNeeded() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            refreshMicrophoneState()
+            requestMicrophonePermissionIfNeeded()
+        }
+    }
+
+    private func play() {
+        guard hasAudioInput, microphonePermission == .undetermined else { done(true); return }
+        requestMicrophonePermissionIfNeeded(playWhenFinished: true)
+    }
+
+    private func refreshMicrophoneState() {
+        microphonePermission = AVAudioApplication.shared.recordPermission
+        microphoneDevices = MicrophoneInputDevices.list()
+    }
+
+    private func requestMicrophonePermissionIfNeeded(playWhenFinished: Bool = false) {
+        if playWhenFinished {
+            guard microphonePermission == .undetermined else { done(true); return }
+            launchAfterMicrophonePermission = true
+        }
+        guard hasAudioInput, microphonePermission == .undetermined, !requestingMicrophonePermission else { return }
+        requestingMicrophonePermission = true
+        AVAudioApplication.requestRecordPermission { _ in
+            DispatchQueue.main.async {
+                microphonePermission = AVAudioApplication.shared.recordPermission
+                requestingMicrophonePermission = false
+                fputs("launcher: microphone permission \(microphonePermissionLabel.lowercased())\n", stderr)
+                if launchAfterMicrophonePermission {
+                    launchAfterMicrophonePermission = false
+                    done(true)
+                }
+            }
+        }
     }
 
     @ViewBuilder private func settingSections(basic: Bool) -> some View {
@@ -70,6 +180,60 @@ struct LauncherView: View {
                 }
             }
         }
+    }
+}
+
+private struct MicrophoneInputDevice: Identifiable, Hashable {
+    let uid: String
+    let name: String
+    var id: String { uid }
+}
+
+private enum MicrophoneInputDevices {
+    static func list() -> [MicrophoneInputDevice] {
+        var address = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDevices,
+                                                 mScope: kAudioObjectPropertyScopeGlobal,
+                                                 mElement: kAudioObjectPropertyElementMain)
+        var size: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size) == noErr,
+              size >= UInt32(MemoryLayout<AudioDeviceID>.size) else { return [] }
+        var ids = [AudioDeviceID](repeating: kAudioObjectUnknown, count: Int(size) / MemoryLayout<AudioDeviceID>.stride)
+        let status = ids.withUnsafeMutableBytes { bytes in
+            AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, bytes.baseAddress!)
+        }
+        guard status == noErr else { return [] }
+        return ids.compactMap { device in
+            guard hasInput(device), let uid = string(device, selector: kAudioDevicePropertyDeviceUID),
+                  let name = string(device, selector: kAudioObjectPropertyName), !uid.isEmpty else { return nil }
+            return MicrophoneInputDevice(uid: uid, name: name)
+        }.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    private static func hasInput(_ device: AudioDeviceID) -> Bool {
+        var address = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyStreamConfiguration,
+                                                 mScope: kAudioDevicePropertyScopeInput,
+                                                 mElement: kAudioObjectPropertyElementMain)
+        var size: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(device, &address, 0, nil, &size) == noErr,
+              size >= UInt32(MemoryLayout<AudioBufferList>.size) else { return false }
+        let data = UnsafeMutableRawPointer.allocate(byteCount: Int(size), alignment: MemoryLayout<AudioBufferList>.alignment)
+        defer { data.deallocate() }
+        guard AudioObjectGetPropertyData(device, &address, 0, nil, &size, data) == noErr else { return false }
+        let buffers = UnsafeMutableAudioBufferListPointer(data.assumingMemoryBound(to: AudioBufferList.self))
+        return buffers.contains { $0.mNumberChannels > 0 }
+    }
+
+    private static func string(_ device: AudioDeviceID, selector: AudioObjectPropertySelector) -> String? {
+        var address = AudioObjectPropertyAddress(mSelector: selector,
+                                                 mScope: kAudioObjectPropertyScopeGlobal,
+                                                 mElement: kAudioObjectPropertyElementMain)
+        var value: CFString?
+        var size = UInt32(MemoryLayout<CFString?>.size)
+        let status = withUnsafeMutablePointer(to: &value) { pointer in
+            AudioObjectGetPropertyData(device, &address, 0, nil, &size, UnsafeMutableRawPointer(pointer))
+        }
+        guard status == noErr, let value else { return nil }
+        return value as String
     }
 }
 

@@ -5,20 +5,21 @@
 # aoc/<index>/ (DLC), pso/ (an NVN game's pipeline archive made offline for this Mac's GPU, dm/gfx/tools/pso_offline.py: the launcher hands it to the host as DM_PSO_BUNDLE),
 # and dm/ (the rewritten modules and their rewriter tables, nro.tsv, the profile's shader_map.tsv / pso_manifest.tsv / c1_full.tsv / cb_extent.tsv / shader_pairs.tsv / pso_pairs.tsv, font/, env.txt,
 # launcher.json: the game's launcher settings, dm/games/settings.py, which the settings window and Mac front ends show),
-# plus AppIcon.icns from the game's icon (sips, iconutil) and the Info.plist keys the launcher reads (DMTitleID, DMRomfsMarker, DMLanguage).
+# plus AppIcon.icns from the game's icon (sips, iconutil) and the Info.plist keys the launcher reads (DMTitleID, DMRomfsMarker, DMLanguage, DMUsesAudioInput).
 # The large folders are APFS clones (cp -c) when the app is on the same APFS volume as the build, so they take no space; plain copies otherwise.
 # Signing: the inner host first, then the bundle (codesign --force --sign <identity>; '-' = ad-hoc), without the hardened runtime: the host maps the game's code executable, which the hardened
 # runtime refuses without entitlements, and so the app cannot be notarized. The bundle is stripped of its "._name" files first: on exFAT (an external drive for the build or the app) every
 # file's extended attributes live in such a file beside it, and codesign reads each one as a code object that is not signed, which fails the whole bundle.
 # Usage: pack_app.py <out.app> --host <dmhost> --patched <dir> --romfs <image or dir> --msl <dir> --tables <profile dir> --font <dir> --title-id <id> --name <name> [options]
 #   Reuses <out.app> while <out.app>.key matches; otherwise writes <out.app>.partial and swaps it in at the end. Prints "step: ..." and "app: <path>[, reused (inputs unchanged)]".
-import argparse, ctypes, errno, hashlib, json, os, plistlib, re, shutil, stat, subprocess, sys, tempfile
+import argparse, ctypes, errno, hashlib, json, os, plistlib, re, shutil, stat, struct, subprocess, sys, tempfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / 'tools'))
 import romfs as rfs
 import shader_lib
+from nso_syms import dynsyms
 MODULE_FILES = ('*.patched.bin', '*.fixups.tsv', '*.gates.tsv', '*.cuts.tsv', '*.obs.tsv', '*.changed.tsv', 'nro.tsv')   # what the host reads from the module folder (build_ipa.sh copies the same tables but changed.tsv: the iPhone's cheats never write code)
 MSL_FILES = ('*.metallib', '*.json', '*.tsv')   # what the host reads from msl/ (not the Mac build's .metal sources or _b_build.json); an NVN game's b-<chain> goes in as one file of them (shader_lib.py)
 # read beside DM_NVN_SHMAP; any of them may be absent (a Vulkan or GL game has no c1_full.tsv). The shader pairs are the pipeline prebuild's (nvn_mtl.m pso_prebuild): without them the
@@ -97,7 +98,7 @@ def build_launcher(out, minos, clang, swiftc, sdk):   # launcher.c's main and th
         for obj, src in zip(objs, (HERE / 'launcher.c', HERE.parent / 'host/save_sync.c')):
             run([clang, '-isysroot', sdk, '-arch', 'arm64', f'-mmacosx-version-min={minos}', '-O2', '-Wall', '-I', HERE.parent / 'host', '-c', '-o', obj, src])
         run([swiftc, '-sdk', sdk, '-target', f'arm64-apple-macos{minos}', '-O', '-swift-version', '5', '-parse-as-library', '-module-cache-path', Path(t) / 'module-cache',
-             '-o', out, *swift_sources(), *objs, '-framework', 'CoreFoundation', '-framework', 'AppKit', '-framework', 'SwiftUI'])
+             '-o', out, *swift_sources(), *objs, '-framework', 'CoreFoundation', '-framework', 'AppKit', '-framework', 'SwiftUI', '-framework', 'AVFAudio', '-framework', 'CoreAudio'])
 
 
 def make_icns(jpg, out):   # the game's icon (256x256 JPEG) at every size an .icns holds
@@ -124,6 +125,7 @@ def info_plist(a, minos, icon):
          'CFBundleVersion': a.version or '1.0', 'CFBundleShortVersionString': a.version or '1.0', 'CFBundlePackageType': 'APPL', 'CFBundleExecutable': EXE,
          'CFBundleInfoDictionaryVersion': '6.0', 'LSMinimumSystemVersion': minos, 'LSArchitecturePriority': ['arm64'], 'NSHighResolutionCapable': True,
          'NSBluetoothAlwaysUsageDescription': 'Connect Switch 2 Joy-Con and Pro Controllers over Bluetooth.',
+         'NSMicrophoneUsageDescription': f'{a.name} uses the microphone for in-game audio input.',
          'LSApplicationCategoryType': a.category or 'public.app-category.games', 'LSSupportsGameMode': False, 'DMTitleID': a.title_id.upper(), 'DMRomfsMarker': a.marker or '', 'DMLanguage': a.lang or 'en-US', 'DMSaveSyncChoice': 1}
     if icon: p['CFBundleIconFile'] = 'AppIcon'
     if a.settings:
@@ -227,6 +229,18 @@ def selected_inputs(a):
     return mods, msls, pso, tables, pairs, fonts, files
 
 
+def audio_input_capable(modules):
+    """Whether a packed module imports a public nn::audio input API."""
+    markers = ('InputStream', 'AudioIn', 'InputDevice')
+    for module in modules:
+        if not module.name.endswith('.patched.bin'): continue
+        try: symbols = dynsyms(module.read_bytes())
+        except (AssertionError, KeyError, IndexError, UnicodeDecodeError, ValueError, struct.error): continue
+        if any(not defined and name.startswith('_ZN2nn5audio') and any(marker in name for marker in markers)
+               for name, defined, _ in symbols): return True
+    return False
+
+
 def replace_app(tmp, out):
     if out.exists():
         # RENAME_SWAP exchanges complete directories atomically; a failed swap leaves the old app at out.
@@ -287,7 +301,7 @@ def pack(a):
         if not codesign: raise SystemExit('codesign is not available')
         codesign = Path(codesign).resolve()
         minos = min_os(a.host)
-        sources = [Path(__file__).resolve(), HERE / 'launcher.c', HERE.parent / 'host/romfs_image.h', HERE.parent / 'host/save_sync.c', HERE.parent / 'host/save_sync.h', HERE.parent / 'tools/romfs.py'] + swift_sources()
+        sources = [Path(__file__).resolve(), HERE / 'launcher.c', HERE.parent / 'host/romfs_image.h', HERE.parent / 'host/save_sync.c', HERE.parent / 'host/save_sync.h', HERE.parent / 'tools/romfs.py', HERE.parent / 'tools/nso_syms.py'] + swift_sources()
         inputs = {'options': vars(a), 'files': [(str(p), p.stat().st_mode, digest(p), os.readlink(p) if p.is_symlink() else None) for p in files + sources],
                   'trees': [(p, inventory(Path(p))) for p in (a.romfs, a.aoc, a.html, *(str(x[1]) for x in programs), *(str(x[3]) for x in programs)) if p and Path(p).exists()],
                   'tools': [[str(c), c.stat().st_mode, c.stat().st_size, c.stat().st_mtime_ns, c.stat().st_ctime_ns, run([c, '--version']).strip()] for c in (clang, swiftc)] + [
@@ -344,6 +358,8 @@ def pack(a):
     if icon: step('icon'); make_icns(a.icon, res / 'AppIcon.icns')
     info = info_plist(a, minos, icon)
     info['DMModuleFiles'] = [p.name for p in mods]
+    audio_modules = mods + [module for program in programs for module in program[4]]
+    info['DMUsesAudioInput'] = audio_input_capable(audio_modules)
     commit = source_commit()
     if commit: info['DMCommit'] = commit
     if msl_dst.name.startswith('b-'): info['DMChain'] = msl_dst.name[2:]   # the library chain the app carries (a Vulkan or GL game's vk / gl has none)

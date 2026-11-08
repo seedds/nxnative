@@ -1207,6 +1207,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Found on:** [Hyrule Warriors: Age of Calamity](../../dm/games/01002B00111A2000/README.md): after its first cutscene the first battle runs about 900–1,500 small dispatches a frame on the Mac (an iPhone log's call counts suggest more), each after a game barrier, at the same draws and passes; GPU 7.3 → 8.1 ms across the cutscene with the change.
 - **Note:** `DM_NVN_DISPATCH_OWN=1` (and `DM_NVN_PASSGPU`, which times each dispatch) gives each dispatch its own encoder again.
 
+### Compute bindings prepare texture copies before the dispatch encoder
+
+- **Symptom:** with `DM_NVN_DISPATCH_OWN=1` the host crashes in the Metal driver (`CRASH sig=11 addr=0x98` in `AGX::ComputeContext<…>::prepareForEnqueue(bool)`) at a compute shader's first read through a texture view of another format; by default (dispatches sharing the copy encoder) that read can see the texture's old pixels. Metal validation reports `Command buffer already has an open command encoder` for the first.
+- **Cause:** resolving a sampled texture binding can upgrade the texture to allow format views and copy the old pixels into the new one (`tex_upgrade`, through `blit()`). `dispatch` opened its encoder before `encode_args` resolved the bindings. With an encoder of its own, the copy opened a second encoder on the same command buffer. With the shared encoder, the copy came after the dispatch's barrier (`dispatch_enc`), so nothing ordered it before the shader's read.
+- **Fix:** `dispatch` fills the compute argument table before it opens an encoder of its own or places the shared encoder's barrier, as `image_prepare` already does for image writes. Compute bindings only write the argument table, so they need no open encoder; any copy a binding issues then lands before the barrier. `dm/gfx/tests/t_dispatch_own.m` checks the pixels and the driver group counts for direct and indirect dispatches, first and cached views, both encoder modes and both encoding threads.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) with `DM_NVN_DISPATCH_OWN=1` ([issue #1743](https://github.com/seedds/nxnative/issues/1743)), during the Kokiri Forest load: on an M2 Pro 5 of 5 runs crashed before the fix and 3 of 3 loaded the forest after it. The stale read on the default path is reproduced by the test (M2 Max, M6).
+
 ### Fragment-ordering barriers between draws that write images
 
 - **Symptom:** dialog boxes with holes the size of their text, and white specks where text faded.

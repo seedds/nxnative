@@ -27,6 +27,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md); [Pokémon Brilliant Diamond](../../dm/games/0100000011D90000/README.md): the opening movie's YUV conversion uses GEQUAL against a new 1920×1080 depth texture that the game never clears. Metal supplied depth 1, discarding the movie; zero initialization restores it without a shader override.
 - **Check:** `t_clear_ds` poisons depth and stencil before calling the real initializer and checks both become zero; depth clear, stencil-view and upload-budget tests cover the related paths.
 
+### Multisample color textures also start as zero
+
+- **Symptom:** a scene background is green and retains silhouettes of moving characters; pixels a character covers can recover their normal color. The resolved scene is already wrong before postprocessing.
+- **Cause:** `tex_zero_fill` cleared depth/stencil attachments through render passes and ordinary color textures through a zero-buffer copy, but returned without initializing multisample color textures. Metal leaves their storage undefined, whereas the new Switch pool is zero. A game can load the color target without a color clear.
+- **Fix:** initialize multisample color attachments through the existing upload-batch render-pass clear path, once when their Metal texture is created, over every layer. Keep the game's clears, blend state, shaders and later frame content unchanged. A buffer copy cannot initialize multisample samples.
+- **Found on:** Rune Factory 5 (`01007B4014086000`, local provisional profile), opening forest, 1920×1080 RG11B10Float color with two samples. Initializing the new target alone fixes the captured frame with its original blending; forcing a per-frame clear or disabling blending is unnecessary.
+- **Check:** `t_clear_msaa` first fills the texture with a nonzero color, calls the real initializer, then reads every sample on the GPU for RGBA8, RG11B10Float and RGBA16Float at two and four samples. This detects the omitted initialization even on a driver that happens to return zeroed allocations.
+
 ### Texture swizzle through swizzled Metal views
 
 - **Symptom:** glyphs render as white boxes (the font atlas is `(1, 1, 1, R)`).

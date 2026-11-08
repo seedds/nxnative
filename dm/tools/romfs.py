@@ -55,6 +55,12 @@ class Image:
             if not t and any(self.name(j - 1) >= self.name(j) for j in range(a + 1, a + b)):
                 raise ValueError(f'unsorted or duplicate RomFS image names: {path}')
 
+    @functools.cached_property
+    def shader_library(self):
+        """Whether this is a shader library image (shader_lib.py): flat, with a Metal library in it. Only such an image may hold compressed files (imgz.py), so a game's RomFS is read as stored"""
+        names = self.children(0)
+        return all(self.entry(k)[4] for _, k in names) and any(n.endswith('.metallib') for n, _ in names)
+
     def entry(self, k): return ENT.unpack_from(self.index, k * ENT.size)
     def name(self, k):
         _, _, no, nl, _, _ = self.entry(k)
@@ -138,6 +144,34 @@ class _File(io.RawIOBase):
         super().close()
 
 
+def _imgz():
+    if _os.path.dirname(_os.path.abspath(__file__)) not in sys.path: sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+    import imgz
+    return imgz
+
+
+def _dmz_size(image, fd, start, length):
+    """The original size of a file of a shader library image stored compressed (imgz.py), which reads as its original bytes; None for a file stored as it is. A DMZ1 header with an unknown
+    algorithm or a size out of range is OSError(EIO), as the host refuses it"""
+    z = _imgz()
+    if length < z.HEAD.size or not image.shader_library: return None
+    head = _os.pread(fd, z.HEAD.size, start)
+    if len(head) != z.HEAD.size: raise OSError(errno.EIO, f'short read in {image.path}')
+    magic, alg, size = z.HEAD.unpack(head)
+    if magic != z.MAGIC: return None
+    if not z.header_ok(alg, size): raise OSError(errno.EIO, f'damaged compressed file header in {image.path} (algorithm {alg:#x}, size {size})')
+    return size
+
+
+def open_stored(file):
+    """A file's bytes as stored, binary: a compressed image file is not decoded (shader_lib.write keeps it compressed when it copies it into a new image)"""
+    resolved = _resolve(file) if not isinstance(file, int) else None
+    if not resolved: return builtins.open(file, 'rb')
+    image, relative = resolved; k = image.find(relative)
+    if not image.entry(k)[4]: raise IsADirectoryError(file)
+    return io.BufferedReader(_File(image, k))
+
+
 # Type checkers see the builtin's overloads, so a reader's open(..., 'rb').read() stays bytes and 'r' stays str.
 if TYPE_CHECKING:
     from builtins import open
@@ -149,29 +183,44 @@ else:
         image, relative = resolved; k = image.find(relative)
         if not image.entry(k)[4]: raise IsADirectoryError(file)
         raw = _File(image, k)
+        try:
+            compressed = _dmz_size(image, raw.fd, raw.start, raw.length) is not None   # a compressed shader library file (imgz.py, shader_lib.py compress): its original bytes
+            if compressed:
+                try: data = _imgz().decode(_os.pread(raw.fd, raw.length, raw.start))
+                except ValueError as e: raise OSError(errno.EIO, f'compressed file does not decode: {e}', file) from None
+        except BaseException: raw.close(); raise
+        if compressed:
+            raw.close(); reader = io.BytesIO(data)
+            return reader if 'b' in mode else io.TextIOWrapper(reader, encoding=encoding, errors=errors, newline=newline)
         if buffering == 0 and 'b' in mode: return raw
         reader = io.BufferedReader(raw, io.DEFAULT_BUFFER_SIZE if buffering < 0 else buffering or io.DEFAULT_BUFFER_SIZE)
         return reader if 'b' in mode else io.TextIOWrapper(reader, encoding=encoding, errors=errors, newline=newline)
 
 
-def stat(path, **kwargs):
+def stat(path, _size=True, **kwargs):   # _size False: the caller wants only the type, so a compressed file's header is not read
     resolved = _resolve(path)
     if not resolved: return _os.stat(path, **kwargs)
     image, relative = resolved; k = image.find(relative)
     a, b, _, _, t, _ = image.entry(k); s = image.stat
+    if t and _size and image.shader_library and b >= 16:   # a compressed file's size is its original's, as open() reads it; a damaged header keeps the stored size here and fails the open
+        try:
+            fd = _os.open(image.path, _os.O_RDONLY)
+            try: b = _dmz_size(image, fd, a, b) or b
+            finally: _os.close(fd)
+        except OSError: pass
     return SimpleNamespace(st_mode=(_stat.S_IFREG | 0o444) if t else (_stat.S_IFDIR | 0o555), st_size=b if t else 0,
                            st_ino=k + 1, st_dev=s.st_dev, st_mtime=s.st_mtime, st_mtime_ns=s.st_mtime_ns,
                            st_ctime=s.st_ctime, st_ctime_ns=s.st_ctime_ns, st_atime=s.st_atime, st_atime_ns=s.st_atime_ns)
 
 
 def exists(path):
-    try: stat(path); return True
+    try: stat(path, False); return True
     except OSError: return False
 def isdir(path):
-    try: return _stat.S_ISDIR(stat(path).st_mode)
+    try: return _stat.S_ISDIR(stat(path, False).st_mode)
     except OSError: return False
 def isfile(path):
-    try: return _stat.S_ISREG(stat(path).st_mode)
+    try: return _stat.S_ISREG(stat(path, False).st_mode)
     except OSError: return False
 
 

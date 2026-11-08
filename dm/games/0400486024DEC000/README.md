@@ -90,6 +90,8 @@ From an empty save: at about 45 s `A` (title), `A` (New Game), then the movie. F
 
 ## Found on this game
 
+- [Invalid GPU completion times inflate frame diagnostics](../../../docs/reference/frame-rate.md#invalid-gpu-completion-times-inflate-frame-diagnostics): the timing accumulator rejects corrupt endpoints; the intermittent GPU address fault in issue #1737 remains unresolved, without a new gameplay validation.
+
 - [One Pro Controller read as two players](../../../docs/reference/services.md#one-pro-controller-read-as-two-players): resolved, no music in Kokiri Forest gameplay and its cutscenes; the controller applet opened over and over and the game kept its music suspended while it had focus.
 - [A fixed frame step plays in slow motion on a slow Mac](../../../docs/reference/frame-rate.md#a-fixed-frame-step-plays-in-slow-motion-on-a-slow-mac): the frame-ratio division.
 - [Frame-step stubs placed by their function](../../../docs/reference/rewriter.md#frame-step-stubs-placed-by-their-function)

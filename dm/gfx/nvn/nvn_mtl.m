@@ -2777,6 +2777,12 @@ static int tex_atomic_alias(id<MTLTexture> base) {
 // targets and demoted at their first written binding.
 // The factor is fixed for the run (textures already made keep their size): DM_UPSCALE=1|1.5|2, else 1. A Mac app's launcher sets DM_UPSCALE from the player's saved choice
 // (launcher.DM_UPSCALE, which the settings window writes; docs/frontends.md, Saved choices). At 1 none of this runs: ups_pick and the conversions are gated on g_ups > 1, so allocations and passes are as without it.
+// A game built for the Switch 2 (dm_sdk_ounce) renders at its own resolution unless DM_UPSCALE_SWITCH2=1 as well: such games draw their 3D at a dynamic resolution and enlarge it
+// with an upscaler of their own toward a 1440p or 4K output, and the host does not carry the factor through those paths. NVN2's DLSS (dlss_eval) and agl's NDSR drawn by MetalFX
+// (up_mfx_encode) take their rectangles in the game's pixels on textures that may be scaled; agl's engine writes scene targets in compute and keeps them in image alias families
+// (Ocarina of Time at 1.5x: the scene back at 1536x864 after 24 demotions, 7 family members left out); outputs past 1920x1080 meet the 4K ceiling at 2x; and a dynamic-resolution
+// controller answers the heavier frame by lowering its own resolution (Hyrule Warriors: Age of Imprisonment settles near 1007x566 of 1600x900 at 2x). docs/reference/rendering.md, Render
+// resolution on Switch 2 games, has the measurements and what extending it would take
 // The log names the first 24 scaled textures and every 200th after them, the demotions the same way, and once per shader the ranks at which it binds scaled textures (ups_vec_build)
 static float g_ups = 1;   // the factor of this run (1 = off), set once by ups_init
 static pthread_once_t g_ups_once = PTHREAD_ONCE_INIT;
@@ -2788,9 +2794,13 @@ static float ups_parse(const char *s) {
     while (*end == ' ' || *end == '\n' || *end == '\r' || *end == 'x' || *end == 'X') end++;   // "2x" and a trailing newline are accepted
     return *end ? 0 : f == 1.0f || f == 1.5f || f == 2.0f ? f : 0;
 }
+int dm_sdk_ounce(void);
 static void ups_init(void) {
     const char *e = getenv("DM_UPSCALE"); float f = 0;
     if (e) { f = ups_parse(e); if (!f) MLOG("[RED] DM_UPSCALE=%s: must be 1, 1.5 or 2; rendering at the game's resolution", e); }
+    const char *s2 = getenv("DM_UPSCALE_SWITCH2");
+    if (f > 1 && dm_sdk_ounce() && !(s2 && !strcmp(s2, "1"))) {   // see the section comment: a Switch 2 game keeps its own resolution unless asked
+        MLOG("resolution upscaling: off for this game, built for the Switch 2 (DM_UPSCALE=%s is for Switch 1 games; DM_UPSCALE_SWITCH2=1 scales it anyway)", e); f = 1; }
     g_ups = f > 1 ? f : 1;
     if (g_ups > 1) MLOG("resolution upscaling: render targets at %gx the game's size (DM_UPSCALE)", g_ups);
 }

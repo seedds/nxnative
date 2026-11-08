@@ -18,10 +18,11 @@ BOTW, WONDER = '01007EF00011E000', '010015100B514000'
 PERFORMANCE_NVN = ['DM_PRESENT_SNAP', 'DM_PSO_MTL4', 'DM_PSO_PREBUILD', 'DM_NVN_ENC_THREAD', 'DM_FPS_HOLD', 'DM_METAL_HUD']
 
 
-def build(gid, api, platform=None):
+def build(gid, api, platform=None, sdk=None):   # sdk: the rewritten sdk module's bytes (sdk.patched.bin), when the case needs one
     env = {'GFXAPI': api, **({'SETTINGS_PLATFORM': platform} if platform else {})}
     with tempfile.TemporaryDirectory() as tmp, patch.object(settings.nacp, 'languages', return_value=['en-US']), patch.dict(os.environ, env):
         if not platform: os.environ.pop('SETTINGS_PLATFORM', None)
+        if sdk is not None: (Path(tmp) / 'sdk.patched.bin').write_bytes(sdk)
         return {s['env']: s for s in settings.build(gid, tmp, Path(tmp) / 'control.nacp')['settings']}
 
 
@@ -94,6 +95,19 @@ class LauncherSettingsTests(unittest.TestCase):
         self.assertNotIn('DM_UPSCALE', build(BOTW, 'vulkan', 'mac')); self.assertNotIn('DM_UPSCALE', build(BOTW, 'nvn', 'ios'))
         s = build(BOTW, 'nvn', 'mac')['DM_UPSCALE']
         self.assertEqual((s['kind'], s['default'], [o[0] for o in s['options']], s['level']), ('choice', '1', ['1', '1.5', '2'], 'basic'))   # the values the launcher accepts for launcher.DM_UPSCALEs
+
+    def test_render_resolution_only_for_switch_1_games(self):   # console:switch: a game whose sdk was built for the Switch 2 (spec: Ounce) renders at its own resolution (nvn_mtl.m ups_init)
+        fs = b'FS_ACCESS: { sdk_version: %s, spec: %s }'
+        for sdk, shown in ((fs % (b'16.2.0', b'NX'), True), (fs % (b'20.5.15', b'Ounce'), False), (None, True)):
+            with self.subTest(sdk=sdk):
+                rows = build(WONDER, 'nvn', 'mac', sdk=sdk)
+                self.assertEqual(('DM_UPSCALE' in rows, 'DM_UPSCALE_GAME' in rows), (shown, shown))
+                self.assertIn('DM_FULLSCREEN', rows)
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / 'settings.tsv').write_text('\t'.join(('DM_X', 'toggle', '-', '1', 'console:switch3', 'Game', 'X')) + '\n', encoding='utf-8')
+            with patch.object(settings, 'HERE', Path(tmp)), patch.object(settings.nacp, 'languages', return_value=['en-US']), \
+                    self.assertRaisesRegex(SystemExit, 'console is switch or switch2'):
+                settings.build(BOTW, tmp, Path(tmp) / 'control.nacp')
 
     def test_unknown_platform_is_rejected(self):
         with self.assertRaisesRegex(SystemExit, 'SETTINGS_PLATFORM must be ios or mac'):

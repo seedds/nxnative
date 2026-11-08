@@ -231,11 +231,11 @@ Turn off **Show this window at launch** to start the game at once with your choi
 
 ### Render resolution
 
-**1×**, **1.5×** or **2×** (NVN games): the game draws its 3D at that multiple of its own size, so edges are sharper on a Retina or 4K screen, for more GPU time and memory. It is not [Upscaling](#upscaling), which scales the finished picture to the screen. Textures keep the size they were made at, so a change applies at the next launch. In an `env.txt`: `DM_UPSCALE=1.5` or `2`.
+**1×**, **1.5×** or **2×** (NVN games built for the Switch 1; Switch 2 games render at their own resolution and do not show it): the game draws its 3D at that multiple of its own size, so edges are sharper on a Retina or 4K screen, for more GPU time and memory. It is not [Upscaling](#upscaling), which scales the finished picture to the screen. Textures keep the size they were made at, so a change applies at the next launch. In an `env.txt`: `DM_UPSCALE=1.5` or `2`.
 
 ### Upscaler at higher render resolutions
 
-Some games draw their 3D below their output size and enlarge it themselves (Hyrule Warriors: Age of Imprisonment draws at up to 1600x900 and upscales to 1920x1080). At a render resolution above 1× that 3D is already larger than the game's output, and the game's own upscaler, built for its smaller picture, blurs it. **Resolved by the app**, the default, writes the game's upscaled picture from the larger render instead (filtered down to the game's output size), so the picture is sharper than at 1×; the game's sharpening and interface run unchanged on it. **Game's own** keeps the game's upscaler, to compare. At 1× the setting changes nothing. In an `env.txt`: `DM_UPSCALE_GAME=bypass` or `keep`.
+Some games draw their 3D below their output size and enlarge it themselves with AMD's FSR 1. At a render resolution above 1× that 3D is already larger than the game's output, and the game's own upscaler, built for its smaller picture, blurs it. **Resolved by the app**, the default, writes the game's upscaled picture from the larger render instead (filtered down to the game's output size), so the picture is sharper than at 1×; the game's sharpening and interface run unchanged on it. **Game's own** keeps the game's upscaler, to compare. At 1× the setting changes nothing. In an `env.txt`: `DM_UPSCALE_GAME=bypass` or `keep`.
 
 ### Cloud saves folder
 

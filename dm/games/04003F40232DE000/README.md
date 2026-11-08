@@ -31,6 +31,8 @@ The rewritten modules take 62.5 MB, so the default `mem_used` (64 MB) covers the
 
 ## Resolution upscaling
 
+**Current: off by default** (2026-11-08): a Switch 2 game renders at its own resolution unless `DM_UPSCALE_SWITCH2=1` is set with `DM_UPSCALE` ([Render resolution on Switch 2 games](../../../docs/reference/rendering.md#render-resolution-on-switch-2-games)). Everything below was measured with the factor applied, before that rule.
+
 Measured 2026-11-04 in the first field (Zelda walking), `DM_UPSCALE=2` with `DM_NVN_PASSDUMP_ALL=1`, `DM_NVN_PASSDUMP` of three frames and `DM_CTL` `texlist 1`, before IMAGE-flagged textures could be scaled:
 
 - KTGL makes every render target with `IMAGE | COMPRESSIBLE` (flags `0xc`), and the swap chain's three 3840x2160 textures with `DISPLAY | IMAGE | COMPRESSIBLE` (`0xd`), whether or not a shader ever writes them as images; `DM_NVN_TEXINFO=1920x1080` and `texlist` show no screen-sized target without `IMAGE`. So nothing was scaled.
@@ -70,3 +72,4 @@ Run headless: `DM_WINDOW` set to anything, `0` too, opens a window, and a covere
 - [Barrier moves around warp shuffles](../../../docs/reference/shaders.md#barrier-moves-around-warp-shuffles): two pixel shaders left out of the build.
 - [LDC with the bank in its address register (`.IS`)](../../../docs/reference/shaders.md#ldc-with-the-bank-in-its-address-register-is): two shaders left out of the build.
 - [The game's own upscaler resolved by the host](../../../docs/reference/rendering.md#the-games-own-upscaler-resolved-by-the-host): a softened picture at 2x, the dynamic resolution's rectangle from FSR's constants.
+- [Render resolution on Switch 2 games](../../../docs/reference/rendering.md#render-resolution-on-switch-2-games): its chain stays scaled at 2x, but its dynamic resolution settles near 1007x566 and the frame is GPU-bound; off by default with the other Switch 2 games.

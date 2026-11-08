@@ -8,7 +8,8 @@
 #   default   a value (a toggle's: 1 on, 0 off); DM_GAME_<NAME>: the host's own default from the game profile (game_profile.h, game.py); build:<VAR>: the IPA build's setting (build_ipa.sh)
 #             <ios>|<mac> selects the platform's default before resolving a profile macro or build variable
 #   shown     always; DM_GAME_<NAME>!=<value> or ==<value>; fixups:<KEY>: main's rewriter table has that key (a stub in the game's build, patch_nso.py); languages>1 (more than one to pick, so also when the control data lists none); gfxapi:<API>: the packer's GFXAPI;
-#             platform:<ios | mac>: the app's platform (SETTINGS_PLATFORM, ios when unset), for a switch only that platform's front end reads; conditions joined by & must all hold
+#             platform:<ios | mac>: the app's platform (SETTINGS_PLATFORM, ios when unset), for a switch only that platform's front end reads; console:<switch | switch2>: the console the
+#             game was built for (its sdk module's spec string, NX or Ounce); conditions joined by & must all hold
 #   section   Game, Controls or Performance: a heading on the single settings screen. Rows appear in table order within each section
 #             Reset to tested defaults clears all launcher choices; values fixed by an env file stay
 #   label, note  the setting's name and the line under it (may be empty; only for a setting with a cost: latency, memory, heat)
@@ -23,8 +24,8 @@ DM_UPSCALER	choice	game=Game's own,metalfx=MetalFX	game	DM_GAME_UPSCALER_N!=0	Ga
 DM_LANG	choice	languages	build:DM_LANG	languages>1	Game	Game language		level=basic
 DM_FULLSCREEN	choice	0=Window,1=Fullscreen	0	platform:mac	Game	Display mode		level=basic
 DM_PICTURE_FIT	choice	fit=Fit,fill=Fill	fit	platform:ios	Game	Picture	Fill crops the game's 16:9 picture to cover the screen. Health bars, subtitles or maps near the edges can be cut off. A full-screen picture without cropping needs a patch for each game.
-DM_UPSCALE	choice	1=1×,1.5=1.5×,2=2×	1	gfxapi:nvn&platform:mac	Game	Render resolution	Renders the game's 3D at that multiple of its size: sharper, and more GPU time and memory.	level=basic
-DM_UPSCALE_GAME	choice	bypass=Resolved by the app,keep=Game's own	bypass	gfxapi:nvn&platform:mac	Game	Upscaler at 1.5× / 2×	At a render resolution above 1×, a game that upscales its own picture gets it resolved from the larger render instead: sharper. Game's own keeps its upscaler.
+DM_UPSCALE	choice	1=1×,1.5=1.5×,2=2×	1	gfxapi:nvn&platform:mac&console:switch	Game	Render resolution	Renders the game's 3D at that multiple of its size: sharper, and more GPU time and memory.	level=basic
+DM_UPSCALE_GAME	choice	bypass=Resolved by the app,keep=Game's own	bypass	gfxapi:nvn&platform:mac&console:switch	Game	Upscaler at 1.5× / 2×	At a render resolution above 1×, a game that upscales its own picture gets it resolved from the larger render instead: sharper. Game's own keeps its upscaler.
 DM_SHOW_FPS	toggle	-	build:DM_SHOW_FPS	platform:ios	Game	Frame-rate counter
 DM_TOUCH_HAPTICS	toggle	-	1	platform:ios	Controls	Touch feedback
 DM_RUMBLE	toggle	-	1	always	Controls	Game rumble		level=basic

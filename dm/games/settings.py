@@ -3,7 +3,7 @@
 # build_ipa.sh writes it into the app as dm/launcher.json; Launcher.swift draws the screen from it (an app without the file starts the game at once).
 # Usage: settings.py <game id> <rewritten modules dir> <control.nacp> <out.json>   (DM_GAMES_DIR finds provisional profiles, as in game.py; build:<VAR> defaults come from the environment;
 #   GFXAPI is the packer's graphics API, SETTINGS_PLATFORM the app's platform: ios (default) or mac, whose launcher is the Mac front end)
-import json, os, re, sys
+import functools, json, os, re, sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -56,6 +56,14 @@ def fixups_keys(path):   # '# KEY<TAB>value' header rows of a rewriter table
     return {m[1] for m in re.finditer(r'^# (\w+)\t', path.read_text(encoding='utf-8'), re.M)}
 
 
+@functools.lru_cache(maxsize=None)
+def switch2(patched):
+    """Whether the game's sdk module was built for the Switch 2: "spec: Ounce" in its rewritten image, where a Switch 1 SDK says "spec: NX" (loader.c dm_sdk_ounce reads the same
+    string). A folder without the module (a test's) counts as the Switch 1"""
+    sdk = Path(patched) / 'sdk.patched.bin'
+    return sdk.is_file() and b'spec: Ounce' in sdk.read_bytes()
+
+
 UNKNOWN_LANGUAGES = 'This game\'s files do not list its languages, so some of these may not be in the game. It may then show another one.'
 
 
@@ -79,6 +87,9 @@ def build(gid, patched, control):
         if cond.startswith('fixups:'): return cond[7:] in keys
         if cond.startswith('gfxapi:'): return os.environ.get('GFXAPI', '') == cond[7:]
         if cond.startswith('platform:'): return platform == cond[9:]
+        if cond.startswith('console:'):   # the console the game was built for: its sdk module's spec string, as the host reads it (loader.c dm_sdk_ounce)
+            if cond[8:] not in ('switch', 'switch2'): sys.exit(f'settings.tsv:{n}: console is switch or switch2: {cond}')
+            return (cond[8:] == 'switch2') == switch2(str(patched))
         m = re.fullmatch(r'(DM_GAME_\w+)(!=|==)(.*)', cond)
         if m: return (macro(m[1], n) == m[3]) == (m[2] == '==')
         sys.exit(f'settings.tsv:{n}: unknown condition {cond}')

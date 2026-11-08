@@ -3,12 +3,14 @@
 // name a 1200x675 viewport, and a 1920x1080 output image, has its output written by the host: the viewport filtered down, so a viewport of two flat colours comes out as the same
 // two colours away from their edge, with every filter (box, tent, Lanczos-2), nothing of the scene outside the viewport reaches the output, and the sRGB encoding survives the
 // round trip (the output is read back as bytes). DM_UPSCALE_GAME=keep, constants that are not EASU's, an output of the scene's own size, and a run without DM_UPSCALE (the last
-// run) leave the dispatch to the game's kernel. Runs under any profile: the shape, the constants and the sizes decide, not the shader's key
+// run) leave the dispatch to the game's kernel, as does a Switch 2 game's run without DM_UPSCALE_SWITCH2=1 (T_UPS_SWITCH2=1 plays one: the factor stays 1, ups_init). Runs under
+// any profile: the shape, the constants and the sizes decide, not the shader's key
 #include "../nvn/nvn_mtl.m"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t *g_mod; int g_nmod;
 void svc_thread_dump(void) {}
+int dm_sdk_ounce(void) { const char *e = getenv("T_UPS_SWITCH2"); return e && !strcmp(e, "1"); }   // the sdk's console (loader.c; hle_nvn.c's weak stand-in says Switch 1)
 uint64_t now_ns(void) { return bp_now(); }
 static int checks, failed;
 #define CHECK(c, label) do { checks++; if (!(c)) { failed++; fprintf(stderr, "FAIL: %s\n", label); } } while (0)
@@ -55,6 +57,8 @@ static NvShader *upscaler(void) {   // the shape of KTGL's FSR-style pass: a con
 int main(void) { @autoreleasepool {
     mtl_init();
     int scaled = ups_factor() > 1;   // DM_UPSCALE=2 in the runs that resolve; unset in the last one
+    if (dm_sdk_ounce()) { const char *o = getenv("DM_UPSCALE_SWITCH2");
+        CHECK(scaled == (o && !strcmp(o, "1")), "a Switch 2 game keeps its own resolution at DM_UPSCALE=2 unless DM_UPSCALE_SWITCH2=1"); }
     // The scene: a 1600x900 sRGB render target, 3200x1800 at 2x; its left half one colour, its right half another. The output: a 1920x1080 sRGB image (IMAGE alone: unscaled)
     tex_t scene, out, same, patch;
     texture(&scene, 77, 1600, 900, NVN_FORMAT_RGBA8_SRGB, NVN_TEXTURE_FLAGS_COMPRESSIBLE | NVN_TEXTURE_FLAGS_IMAGE); texture(&out, 78, 1920, 1080, NVN_FORMAT_RGBA8_SRGB, NVN_TEXTURE_FLAGS_IMAGE);
@@ -111,6 +115,6 @@ int main(void) { @autoreleasepool {
         S.tex[5][0] = 701; S.tex[5][1] = 701;
         mtl_sub_begin(); CHECK(!ups_bypass_encode(two) && two->up_byp == 2, "a second sampled texture is not the upscaler's shape"); mtl_wait(mtl_sub_commit(), 5000000000ull);
     }
-    printf("t_ups_resolve (%s): %d checks, %d failed\n", scaled ? "2x" : "1x", checks, failed);
+    printf("t_ups_resolve (%s%s): %d checks, %d failed\n", scaled ? "2x" : "1x", dm_sdk_ounce() ? ", Switch 2" : "", checks, failed);
     return failed != 0;
 }}

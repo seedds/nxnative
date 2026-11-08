@@ -146,8 +146,43 @@ static void atomic_alias_case(void) { @autoreleasepool {
     dispatch_sync(g_feedback_q, ^{}); defer_drain();
     CHECK(![g_res_objects containsObject:rgba] && [g_res_objects containsObject:rgba.parentTexture], "held atomic view keeps its raw storage resident after pool retirement");
 } }
+// The descriptor's integer view must be resolved before an independent compute
+// encoder opens, even when the shader only loads from that image.
+static void format_view_case(int writes) { @autoreleasepool {
+    tex_t t = {.magic=MAGIC('T','E','X',0), .serial=99800+10*writes, .off=(uint64_t)(20+writes)<<20};
+    t.d=(nvn_texdesc){.target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_R32F,.flags=NVN_TEXTURE_FLAGS_IMAGE,
+                     .width=8,.height=8,.depth=1,.levels=1,.samples=1};
+    nvn_tex_layout(&t.d,&t.L);mtl_tex_init(&t);id<MTLTexture> original=tex_mtl(&t);
+    CHECK(!(original.usage&MTLTextureUsagePixelFormatView), "format-view fixture starts without format-view usage");
+    mtl_sub_begin();memset(&R,0,sizeof R);R.has_rt=1;R.rt.n=1;R.rt.color[0]=&t;
+    R.clear_c[0]=1;R.cc[0]=MTLClearColorMake(0.5,0,0,1);CHECK(rp_begin()!=nil,"format-view fixture opens a producer pass");
+    view_t v={.set_format=1,.format=NVN_FORMAT_R32UI};int tid=610+writes;mtl_reg_image(tid,&t,&v);
+    NvProg *program=[NvProg new];NvShader *shader=[NvShader new];program->sh[5]=shader;
+    shader->rf.nb=1;shader->rf.b[0]=(nvn_rbind){.kind=NVN_RB_IMG,.dtt=MTLTextureType2D,.dpf=NVN_DPF_UINT,.reg=0,.rw=(uint8_t)writes};
+    S.img[5][0]=tid;image_prepare(program,0x20);
+    CHECK(!g_enc,"format-view preparation closes producer before copying");
+    id<MTLTexture> prepared=tex_mtl(&t);
+    CHECK(prepared!=original&&(prepared.usage&MTLTextureUsagePixelFormatView),"format-view backing upgraded before consumer");
+    // Negative control stops before invoking Metal on an invalid encoder pair.
+    if(g_enc||!(prepared.usage&MTLTextureUsagePixelFormatView)){rp_end();mtl_sub_commit();mtl_drain();return;}
+    if(g_blit){enc_b_end(g_blit);g_blit=nil;}
+    id<MTLComputeCommandEncoder> encoder=pg_compute();uint64_t rid;int real;
+    os_unfair_lock_lock(&g_rmu);id<MTLTexture> image=img_binding(tid,&shader->rf.b[0],&rid,&real);os_unfair_lock_unlock(&g_rmu);
+    CHECK(real&&image.pixelFormat==MTLPixelFormatR32Uint,"consumer resolves the registered integer view");
+    CHECK(!g_blit&&tex_mtl(&t)==prepared,"argument binding opens no copy encoder and replaces no storage");
+    enc_c_end(encoder);mtl_sub_commit();mtl_drain();CHECK(!mtl_last_commit_error(),"format-view consumer completes");
+    id<MTLBuffer> result=[g_dev newBufferWithLength:256 options:MTLResourceStorageModeShared];
+    CHECK(result!=nil,"format-view readback buffer allocated");
+    if(!result)return;
+    id<MTLCommandBuffer> cb=q_cb();id<MTLBlitCommandEncoder> copy=[cb blitCommandEncoder];
+    [copy copyFromTexture:image sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(8,8,1)
+                toBuffer:result destinationOffset:0 destinationBytesPerRow:32 destinationBytesPerImage:256];
+    [copy endEncoding];[cb commit];[cb waitUntilCompleted];CHECK(cb.status==MTLCommandBufferStatusCompleted,"format-view readback completes");
+    int same=1;for(int i=0;i<64;i++)same&=((uint32_t*)result.contents)[i]==0x3f000000u;
+    CHECK(same,"registered view preserves producer pixel bits");
+} }
 int main(void) { @autoreleasepool {
-    mtl_init(); image_case(0); image_case(1); atomic_alias_case();
+    mtl_init(); image_case(0); image_case(1); atomic_alias_case(); format_view_case(0); format_view_case(1);
     printf("explicit image usage: %d checks, %d failed\n", checks, failed);
     return failed != 0;
 } }

@@ -305,6 +305,15 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             LinkedListNode<INode> node)
         {
             Operation operation = node.Value as Operation;
+            // A typed float atomic must not become an integer storage-buffer atomic.
+            // Use the existing bounded physical-address translation and write log.
+            if (operation.Inst == Instruction.AtomicAddF32)
+            {
+                if (!gtsContext.TryGetFunctionId(operation, isMultiTarget: true, new List<uint>(), out int nativeFunction) &&
+                    !TryGenerateRawStorageOp(gtsContext, resourceManager, gpuAccessor, operation, out nativeFunction))
+                    return null;
+                return GenerateCallStorageOp(node, operation, null, nativeFunction);
+            }
             Operand globalAddress = operation.GetSource(0);
             SearchResult result = FindUniqueBaseAddressCb(gtsContext, block, globalAddress, needsOffset: true);
 

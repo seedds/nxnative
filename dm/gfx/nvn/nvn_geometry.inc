@@ -627,6 +627,7 @@ static void mtk_encode(id<MTLRenderCommandEncoder> en_) {
 static void mesh_tasks_draw(const p_draw *dw) {
     if (!S.prog || (!dw->ind && dw->count <= 0)) return;
     __unsafe_unretained NvProg *pr = prog_get(S.prog);
+    if (skip_fs_draw(pr)) return;   // DM_NVN_SKIP_FS by the fragment shader, as for other draws
     NvShader *ts = pr ? pr->sh[3] : nil, *ms = pr ? pr->sh[4] : nil;
     if (ts && ts->mesh_kind != 1) ts = nil;
     if (!ms || ms->mesh_kind != 2 || !ms->fn || (ts ? !ts->fn : !ms->mesh_notask)) {
@@ -656,7 +657,7 @@ static void mesh_tasks_draw(const p_draw *dw) {
     draw_(&triangle, NULL);
     g_geo_program = nil; g_mtk.on = 0; args_dirty_all();
     if (g_mtk.miss) return;
-    swrite_note(pr); if (prog_swrites(pr)) g_wr_epoch++;
+    swrite_note(pr); if (prog_swrites(pr)) { uint64_t prior = g_wr_epoch++; ixc_mesh_written(pr, prior); }
     if (!g_mtk_n++) MLOG("task / mesh: first %s draw, task %s mesh %s fragment %s", indirect ? "indirect" : "direct", ts ? ts->key : "-", ms->key, pr->sh[1] ? pr->sh[1]->key : "-");
 }
 static uint64_t g_geo_mesh_n, g_geo_mesh_wait;   // mesh draws; draws the compute path drew while their mesh pipeline was built

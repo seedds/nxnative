@@ -138,8 +138,47 @@ static void separate_storage(pool_t *pool, id<MTLHeap> original) {
     for (int i=0;i<8;i++) mtl_tex_release(&t[i]);
     mtl_alias_drop_pool(&other_pool); mtl_alias_drop_pool(&cpu_pool);
 }
+// Alias producer -> ordinary pass -> sampled alias. The ordinary pass may relax
+// even with a live image heap; heap and shader writers must retain full ordering.
+static id<MTL4RenderCommandEncoder> clear_pass(id<MTLTexture> t, double red) {
+    MTL4RenderPassDescriptor *d=[MTL4RenderPassDescriptor new];
+    d.colorAttachments[0].texture=t; d.colorAttachments[0].loadAction=MTLLoadActionClear;
+    d.colorAttachments[0].storeAction=MTLStoreActionStore;
+    d.colorAttachments[0].clearColor=MTLClearColorMake(red,0,0,1);
+    g_pass_swrite=0; return enc_r_begin_pass(d);
+}
+static void pass_alias_order(id<MTLTexture> heaptex) {
+    CHECK(barrier_game(),"alias ordering test uses game barriers");
+    MTLTextureDescriptor *d=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:16 height:16 mipmapped:NO];
+    d.storageMode=MTLStorageModePrivate; d.usage=MTLTextureUsageRenderTarget|MTLTextureUsageShaderRead;
+    id<MTLTexture> ordinary=[g_dev newTextureWithDescriptor:d], output=[g_dev newTextureWithDescriptor:d];res_add(ordinary);res_add(output);
+    NSError *error=nil;
+    id<MTLLibrary> lib=[g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal; struct V{float4 p[[position]];}; vertex V v(uint n[[vertex_id]]){float2 p[3]={float2(-1,-1),float2(3,-1),float2(-1,3)};return {float4(p[n],0,1)};} fragment float4 f(V v[[stage_in]],texture2d<float> t[[texture(0)]]){return t.read(uint2(v.p.xy));}" options:nil error:&error];
+    MTLRenderPipelineDescriptor *pd=[MTLRenderPipelineDescriptor new];pd.vertexFunction=[lib newFunctionWithName:@"v"];pd.fragmentFunction=[lib newFunctionWithName:@"f"];pd.colorAttachments[0].pixelFormat=MTLPixelFormatRGBA8Unorm;
+    id<MTLRenderPipelineState> ps=[g_dev newRenderPipelineStateWithDescriptor:pd error:&error];CHECK(ps!=nil,"alias read pipeline compiles");if(!ps)return;
+    MTL4ArgumentTableDescriptor *ad=[MTL4ArgumentTableDescriptor new];ad.maxTextureBindCount=1;
+    MTLTextureDescriptor *aliasd=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:heaptex.pixelFormat width:heaptex.width height:heaptex.height mipmapped:NO];
+    aliasd.storageMode=heaptex.storageMode;aliasd.cpuCacheMode=heaptex.cpuCacheMode;aliasd.hazardTrackingMode=heaptex.hazardTrackingMode;aliasd.usage=heaptex.usage;
+    id<MTLTexture> alias=[heaptex.heap newTextureWithDescriptor:aliasd offset:heaptex.heapOffset];CHECK(alias && alias!=heaptex,"reader is a distinct resource over the same heap bytes");if(!alias)return;
+    id<MTL4ArgumentTable> table=rec_table([g_dev newArgumentTableWithDescriptor:ad error:&error]);[table setTexture:alias.gpuResourceID atIndex:0];
+    for(int n=0;n<32;n++) {
+        double red=(n&1)?1.0:0.0;
+        id<MTL4RenderCommandEncoder> e=clear_pass(heaptex,red);enc_r_end_pass(e);
+        CHECK(!g_last_end_relaxed,"heap attachment retains full producer barrier");
+        uint64_t full=g_bar_full;e=clear_pass(ordinary,0);CHECK(g_bar_full==full+1,"consumer after alias writer is full");enc_r_end_pass(e);
+        CHECK(g_last_end_relaxed,"ordinary writer relaxes despite unrelated live heaps");
+        full=g_bar_full;e=clear_pass(output,0);CHECK(g_bar_full==full,"next consumer uses preceding relaxed ordering");
+        [e setArgumentTable:table atStages:MTLRenderStageFragment];enc_r_pso(e,ps);enc_r_viewport(e,(MTLViewport){0,0,16,16,0,1});enc_r_cull(e,MTLCullModeNone);enc_r_draw(e,MTLPrimitiveTypeTriangle,0,3);enc_r_end_pass(e);
+        id<MTLBuffer> pixels=read_image(output);uint32_t *p=pixels.contents;int ok=1;uint32_t want=(n&1)?0xff0000ffu:0xff000000u;
+        for(int i=0;i<256;i++)ok &= p[i]==want;CHECK(ok,"alias pixels survive an intervening relaxed ordinary pass");
+    }
+    id<MTL4RenderCommandEncoder> e=clear_pass(ordinary,0);g_pass_swrite=1;enc_r_end_pass(e);CHECK(!g_last_end_relaxed,"unknown shader writes keep full alias ordering");g_pass_swrite=0;
+    e=clear_pass(ordinary,0);enc_r_end_pass(e);g_game_barrier=1;g_game_bar_bits=NVN_BARRIER_ORDER_PRIMITIVES_BIT;uint64_t full=g_bar_full;e=clear_pass(output,0);CHECK(g_bar_full==full+1,"explicit primitive barrier retains full ordering");enc_r_end_pass(e);
+    mtl_sub_commit();mtl_drain();CHECK(!mtl_last_commit_error(),"alias ordering sequence completes");res_remove(ordinary);res_remove(output);mtl_sub_begin();
+}
+
 int main(void) { @autoreleasepool {
-    mtl_init(); __weak id<MTLHeap> weak_heap; void *mem=NULL;
+    setenv("DM_NVN_BARRIER", "game", 1); mtl_init(); __weak id<MTLHeap> weak_heap; void *mem=NULL;
     posix_memalign(&mem,16384,16<<20); memset(mem,0,16<<20);
     @autoreleasepool {
     mtl_sub_begin();
@@ -171,13 +210,14 @@ int main(void) { @autoreleasepool {
     pixels(big,0x55667788); pixels(tex_mtl(&a[63]),0xa1b2c3d4); pixels(small,0x76543210);
     separate_storage(&pool,small.heap);
     indirect_pixels(small,0x76543210);   // writes to other pools, offsets and formats left it intact
+    pass_alias_order(small);
     atomic_colour(&pool);
     depth_planes(&pool);
     CHECK([g_res_objects containsObject:small.heap],"the parent heap is resident for indirect access");
     CHECK(![g_res_objects containsObject:small],"aliases do not each register a separate allocation");
     // Different offsets, formats, CPU-visible and sparse flags cannot join this family.
     tex_t other=image(&pool,991000,64,64); other.off=10<<20; other.mem=pool.mem+other.off; mtl_tex_init(&other);
-    CHECK(!tex_mtl(&other).heap,"single-description storage stays an ordinary texture");
+    CHECK(!objc_getAssociatedObject(tex_mtl(&other),&g_image_heap_owner_key),"single-description storage stays out of the family heaps (its memory is a recycled heap of its own, rh_texture)");
     tex_t sparse=image(&pool,991001,128,64); sparse.d.flags|=NVN_TEXTURE_FLAGS_SPARSE; mtl_tex_init(&sparse);
     CHECK(!tex_mtl(&sparse).heap,"sparse images stay outside physical image sharing");
     // A dynamic-resolution depth buffer has no image flag (Ocarina of Time: COMPRESSIBLE alone); its sizes share one allocation. A linear image keeps its own

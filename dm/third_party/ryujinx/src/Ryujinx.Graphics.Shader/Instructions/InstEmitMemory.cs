@@ -137,7 +137,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             (Operand addrLow, Operand addrHigh) = Get40BitsAddress(context, new Register(op.SrcA, RegisterType.Gpr), op.E, op.Imm20);
 
-            EmitAtomicOp(context, StorageKind.GlobalMemory, (AtomOp)op.RedOp, op.RedSize, addrLow, addrHigh, GetDest(op.SrcB));
+            EmitAtomicOp(context, StorageKind.GlobalMemory, (AtomOp)op.RedOp, op.RedSize, addrLow, addrHigh, GetDest(op.SrcB), resultNeeded: false);
         }
 
         public static void Stg(EmitterContext context)
@@ -225,7 +225,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
             AtomSize type,
             Operand e0,
             Operand e1,
-            Operand value)
+            Operand value,
+            bool resultNeeded = true)
         {
             Operand res = Const(0);
 
@@ -238,7 +239,11 @@ namespace Ryujinx.Graphics.Shader.Instructions
                     }
                     else if (type == AtomSize.F32FtzRn)
                     {
-                        res = EmitAtomicAddF32(context, storageKind, e0, e1, value);
+                        // Native device float add preserves the global reduction sum. Its old-value
+                        // return canonicalizes some bit patterns; keep CAS for returning atomics.
+                        res = !resultNeeded && storageKind == StorageKind.GlobalMemory
+                            ? context.AtomicAddF32(storageKind, e0, e1, value)
+                            : EmitAtomicAddF32(context, storageKind, e0, e1, value);
                     }
                     else
                     {

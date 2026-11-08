@@ -367,8 +367,7 @@ def sts(offset, rb):   # STS.U32 [RZ + offset], Rb: keeps its result
 
 
 class RedF32(Translated):
-    """RED.E.ADD.F32.FTZ.RN (0x98e, type 3 at 73..76), in Ocarina of Time's encoding (agl's sky_analyze 21d9f83e6027c565 at +0xa70, there on UR4 and R9): the IR has no float atomic, so
-    the add retries a compare-and-swap of the word. The translator used to log `Invalid reduction type: F32FtzRn` and drop the instruction"""
+    """RED.E.ADD.F32.FTZ.RN (0x98e, type 3 at 73..76), in Ocarina of Time's encoding (agl's sky_analyze 21d9f83e6027c565 at +0xa70, there on UR4 and R9): the native device atomic preserves the add without a retry loop. The translator used to log `Invalid reduction type: F32FtzRn` and drop the instruction"""
     ULDC = (0x000fe40000000a00, 0x0000100000067ab9)   # ULDC.64 UR6, c[0][0x40]: storage slot 0 with the c0 layout below (3 uniform buffers, 1 storage buffer)
     RED = (0x000fe8000c10e706, 0x00000005ff00798e)    # RED.E.ADD.F32.FTZ.RN [UR6], R5: at the start of storage slot 0
 
@@ -378,14 +377,16 @@ class RedF32(Translated):
 
     def test_the_add_is_kept(self):
         msl = self.msl()
-        self.assertRegex(msl, r'atomic_compare_exchange_weak_explicit\(\(device atomic_uint\*\)&\(\*spvDescriptorSet0\.cp_s0\)\._m0\[0\]')
-        self.assertIn('1.5', msl)   # the value, as a float operand of the add
+        self.assertIn('atomic_fetch_add_explicit((device atomic_float*)', msl)
+        self.assertIn('1069547520', msl)   # the value, as a float operand of the add
 
-    def test_it_retries_until_the_word_held_what_it_read(self):
-        self.assertRegex(self.msl(), r'\bdo\s*\{[^}]*\}\s*while|for \(;;\)|while \(')
+    def test_no_compare_exchange_loop(self):
+        self.assertNotIn('atomic_compare_exchange_weak_explicit', self.msl())
 
-    def test_the_sum_flushes_denormals(self):
-        self.assertIn('1.1754943508222875', self.msl())
+    def test_bounds_and_write_log_remain(self):
+        msl = self.msl()
+        self.assertIn('atomic_fetch_or_explicit', msl)
+        self.assertIn('return 0;', msl)
 
 
 def ctrl(wb=7, wait=0, stall=2):   # an instruction's control bits, high word: stall, yield, write barrier wb, no read barrier, waiting on the barriers in wait
@@ -683,6 +684,28 @@ class Pokopia(Translated):
 
     def test_membar_orders_memory(self):
         self.assertRegex(self.msl(self.MEMBAR, self.ERRBAR), r'threadgroup_barrier|atomic_thread_fence')
+
+
+# Native atomic fixtures reused from upstream PR #995.
+class NativeFloatAtomic(Translated):
+    def test_returning_float_atomic_keeps_integer_cas(self):
+        hi, lo = AtomgCas.CAS
+        hi = (hi & ~((31 << 23) | (15 << 9) | 255)) | (3 << 9)
+        lo = (lo & ~0xfff) | 0x3a8
+        code = mov(4, 0x3fc00000) + b''.join(inst(*x) for x in (AtomgCas.ULDC, AtomgCas.ADDR_LO, AtomgCas.ADDR_HI, (hi, lo), AtomgCas.KEEP, EXIT))
+        msl = self.translate(code, shared=0x40, nvn2_cs=[3, 1, 0, 0x50, 0])
+        self.assertIn('atomic_compare_exchange_weak_explicit', msl)
+        self.assertNotIn('device atomic_float', msl)
+
+    def test_storage_address(self):
+        msl = self.translate(inst(0x000fc80000000a00, 0x0000240000047ab9) + inst(0x000fe2000c10e704, 0x00000001ff00798e) + inst(*EXIT))
+        self.assertIn('atomic_fetch_add_explicit((device atomic_float*)', msl)
+        self.assertNotIn('atomic_compare_exchange_weak_explicit', msl)
+
+    def test_raw_address(self):
+        msl = self.translate(inst(0x000e220000002100, 0x0000000000027919) + inst(0x001fe2000410e73f, 0x000000010200798e) + inst(*EXIT))
+        self.assertIn('atomic_fetch_add_explicit((device atomic_float*)', msl)
+        self.assertNotIn('atomic_compare_exchange_weak_explicit', msl)
 
 
 if __name__ == '__main__':

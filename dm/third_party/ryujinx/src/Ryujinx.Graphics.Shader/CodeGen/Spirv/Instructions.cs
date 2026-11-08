@@ -31,6 +31,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
             Add(Instruction.Absolute,                 GenerateAbsolute);
             Add(Instruction.Add,                      GenerateAdd);
             Add(Instruction.AtomicAdd,                GenerateAtomicAdd);
+            Add(Instruction.AtomicAddF32,             GenerateAtomicAddF32);
             Add(Instruction.AtomicAnd,                GenerateAtomicAnd);
             Add(Instruction.AtomicCompareAndSwap,     GenerateAtomicCompareAndSwap);
             Add(Instruction.AtomicMinS32,             GenerateAtomicMinS32);
@@ -178,6 +179,35 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
         private static OperationResult GenerateAtomicAdd(CodeGenContext context, AstOperation operation)
         {
             return GenerateAtomicMemoryBinary(context, operation, context.Delegates.AtomicIAdd);
+        }
+
+        // nxnative: a float atomic add on global memory, through a physical storage buffer pointer to the float (OpAtomicFAddEXT;
+        // spirv-cross makes it a device atomic_float, which Metal 3 has)
+        private static OperationResult GenerateAtomicAddF32(CodeGenContext context, AstOperation operation)
+        {
+            if (operation.StorageKind != StorageKind.GlobalMemory)
+            {
+                throw new InvalidOperationException($"{operation.Inst} with {operation.StorageKind} storage is not supported.");
+            }
+
+            context.AddCapability(Capability.AtomicFloat32AddEXT);
+            context.AddExtension("SPV_EXT_shader_atomic_float_add");
+
+            SpvInstruction addressWords = context.CompositeConstruct(
+                context.TypeVector(context.TypeU32(), 2),
+                context.Get(AggregateType.U32, operation.GetSource(0)),
+                context.Get(AggregateType.U32, operation.GetSource(1)));
+
+            SpvInstruction pointer = context.ConvertUToPtr(
+                context.TypePointer(StorageClass.PhysicalStorageBuffer, context.TypeFP32()),
+                context.Bitcast(context.TypeInt(64, 0), addressWords));
+
+            SpvInstruction value = context.Get(AggregateType.FP32, operation.GetSource(2));
+
+            SpvInstruction one = context.Constant(context.TypeU32(), 1);
+            SpvInstruction zero = context.Constant(context.TypeU32(), 0);
+
+            return new OperationResult(AggregateType.FP32, context.AtomicFAddEXT(context.TypeFP32(), pointer, one, zero, value));
         }
 
         private static OperationResult GenerateAtomicAnd(CodeGenContext context, AstOperation operation)

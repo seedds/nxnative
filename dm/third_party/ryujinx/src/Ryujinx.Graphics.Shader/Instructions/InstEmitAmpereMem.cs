@@ -366,7 +366,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 return;
             }
 
-            EmitAtomicOp(context, StorageKind.GlobalMemory, op, (AtomSize)x.Bits(73, 76), lo, hi, Register(x.Rb, RegisterType.Gpr));
+            EmitAtomicOp(context, StorageKind.GlobalMemory, op, (AtomSize)x.Bits(73, 76), lo, hi, Register(x.Rb, RegisterType.Gpr), resultNeeded: false);
         }
 
         // ATOMG Rd, [Ra + UR + offset], Rb: operation 87..91; the uniform form keeps Ra's pair bit at 70

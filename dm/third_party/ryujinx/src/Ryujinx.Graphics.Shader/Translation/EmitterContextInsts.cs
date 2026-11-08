@@ -12,6 +12,11 @@ namespace Ryujinx.Graphics.Shader.Translation
             return context.Add(Instruction.AtomicAdd, storageKind, Local(), a, b, c);
         }
 
+        public static Operand AtomicAddF32(this EmitterContext context, StorageKind storageKind, Operand a, Operand b, Operand c)
+        {
+            return context.Add(Instruction.AtomicAddF32, storageKind, Local(), a, b, c);
+        }
+
         public static Operand AtomicAnd(this EmitterContext context, StorageKind storageKind, Operand a, Operand b, Operand c)
         {
             return context.Add(Instruction.AtomicAnd, storageKind, Local(), a, b, c);

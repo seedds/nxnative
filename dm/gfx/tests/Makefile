@@ -148,7 +148,7 @@ check_t_transient_pool_delta: RUN_ENV = MTL_DEBUG_LAYER=1
 t_deferred_release: t_deferred_release.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_deferred_release.m $(MTL_T_SRC) $(FW)
 t_mesh_indirect: t_mesh_indirect.m $(MTL_T_DEP)
-	clang $(CFLAGS) -fobjc-arc -o $@ t_mesh_indirect.m $(MTL_T_SRC) $(FW)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_mesh_indirect.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
 .PHONY: check_t_cpu_tex
 check_t_cpu_tex: t_cpu_tex
 	MTL_DEBUG_LAYER=1 ./t_cpu_tex --metal
@@ -265,6 +265,13 @@ t_ub: t_ub.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_ub.m $(MTL_T_SRC) $(FW)
 t_gpuprof: t_gpuprof.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_gpuprof.m $(MTL_T_SRC) $(FW)
+t_dispatch_own: t_dispatch_own.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_dispatch_own.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_dispatch_own
+check_t_dispatch_own: t_dispatch_own
+	@set -e; for own in 0 1; do for enc in 0 1; do \
+	    DM_NVN_DISPATCH_OWN=$$own DM_NVN_ENC_THREAD=$$enc MTL_DEBUG_LAYER=1 ./t_dispatch_own; \
+	done; done
 t_vbuf: t_vbuf.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_vbuf.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_vbuf
@@ -498,6 +505,13 @@ t_image_alias: t_image_alias.m $(MTL_T_DEP)
 check_t_image_alias: t_image_alias
 	DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_image_alias
 	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_image_alias
+t_rt_recycle: t_rt_recycle.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_rt_recycle.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_rt_recycle
+check_t_rt_recycle: t_rt_recycle
+	DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_rt_recycle
+	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_rt_recycle
+	DM_NVN_RT_RECYCLE=0 MTL_DEBUG_LAYER=1 ./t_rt_recycle
 # A game's upscaler drawn by MetalFX (any profile; the profile's upscaler shaders, from its shader map, when it has some); with and without the switch, and on the encoding thread
 t_upscaler_mfx: t_upscaler_mfx.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_upscaler_mfx.m $(MTL_T_SRC) $(FW)
@@ -545,6 +559,11 @@ t_logic: t_logic.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_logic.m $(MTL_T_SRC) $(FW)
 check_t_logic: t_logic
 	@set -e; work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; python3 test_dmsh_logic.py --fixture "$$work"; MTL_DEBUG_LAYER=1 ./t_logic "$$work"
+# gl_FragCoord.z against the depth the rasterizer stored for the same triangle, through dmsh_build.py frag_z_snap's dm_zsnap (from test_dmsh_zsnap.py)
+t_zsnap: t_zsnap.m
+	clang -O1 -g -Wall -fobjc-arc -o $@ t_zsnap.m -framework Metal -framework Foundation
+check_t_zsnap: t_zsnap
+	@set -e; work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; python3 test_dmsh_zsnap.py --fixture "$$work"; MTL_DEBUG_LAYER=1 ./t_zsnap "$$work"
 # MUFU.SIN / COS lowered from turns through the fraction (InstEmitAmpereAlu.cs ATurnsToRadians), on the GPU against a double-precision reference
 t_mufu_turns: t_mufu_turns.m
 	clang -O1 -g -Wall -fobjc-arc -o $@ t_mufu_turns.m -framework Metal -framework Foundation
@@ -597,3 +616,34 @@ t_gptr_quads: t_gptr_quads.m
 .PHONY: check_t_gptr_quads
 check_t_gptr_quads: t_gptr_quads
 	@set -e; work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; python3 test_dmsh_gptr_quads.py --fixture "$$work"; MTL_DEBUG_LAYER=1 ./t_gptr_quads "$$work/synthetic-gpu.metallib"
+
+t_pass_end_stages: t_pass_end_stages.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_pass_end_stages.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_pass_end_stages
+check_t_pass_end_stages: t_pass_end_stages
+	MTL_DEBUG_LAYER=1 ./t_pass_end_stages
+	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_pass_end_stages
+
+# GPU visibility predicates: real visibility results, masked indirect arguments,
+# and full command replay. Both encoder modes must preserve conditional pixels.
+t_predicate_map: t_predicate_map.c ../nvn/nvn_predicate_map.h
+	$(CC) -std=c11 -O2 -g -Wall -Wextra -Werror -o $@ $<
+t_rc_host: t_rc_host.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ $< $(MTL_T_SRC) $(FW)
+t_rc_replay: t_rc_replay.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ $< $(MTL_T_SRC) $(FW)
+.PHONY: check_t_rc_host check_t_rc_replay
+check_t_rc_host: t_rc_host
+	./t_rc_host ../msl/rc_mask.metal
+	DM_NVN_ENC_THREAD=1 ./t_rc_host ../msl/rc_mask.metal
+check_t_rc_replay: t_rc_replay
+	./t_rc_replay
+	DM_NVN_ENC_THREAD=1 ./t_rc_replay
+
+# Bounded buffer dispatch hazards, including copies and conservative fallback.
+t_cs_ranges: t_cs_ranges.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ $< $(MTL_T_SRC) $(FW)
+.PHONY: check_t_cs_ranges
+check_t_cs_ranges: t_cs_ranges
+	MTL_DEBUG_LAYER=1 ./t_cs_ranges
+	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_cs_ranges

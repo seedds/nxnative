@@ -8,6 +8,7 @@
 #import <Metal/Metal.h>
 #import <AVFAudio/AVFAudio.h>
 #include <errno.h>
+#include <os/proc.h>
 #include "front.h"
 #include "hle.h"
 #include "dm.h"
@@ -316,7 +317,9 @@ static void front_ios_power_watch(void) {
         (void)n; LOG("front end: thermal state → %d (%.0f s after launch)", dm_thermal_now(), (now_ns() - g_t0_ns) / 1e9); }];
     [NSNotificationCenter.defaultCenter addObserverForName:NSProcessInfoPowerStateDidChangeNotification object:nil queue:nil usingBlock:^(NSNotification *n) {
         (void)n; LOG("front end: Low Power Mode → %s (%.0f s after launch)", dm_low_power_now() ? "on" : "off", (now_ns() - g_t0_ns) / 1e9); }];
-    LOG("front end: thermal state %d, brightness %.2f, Low Power Mode %s", dm_thermal_now(), g_brightness, dm_low_power_now() ? "on" : "off");
+    [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationDidReceiveMemoryWarningNotification object:nil queue:nil usingBlock:^(NSNotification *n) {   // before a jetsam kill, which leaves no log line of its own
+        (void)n; LOG("[RED] front end: system memory warning (headroom %llu MB, %.0f s after launch)", (unsigned long long)(os_proc_available_memory() >> 20), (now_ns() - g_t0_ns) / 1e9); }];
+    LOG("front end: thermal state %d, brightness %.2f, Low Power Mode %s, memory headroom %llu MB", dm_thermal_now(), g_brightness, dm_low_power_now() ? "on" : "off", (unsigned long long)(os_proc_available_memory() >> 20));
 }
 
 // Frame-rate counter: the frames put on screen in the last second (nvn_mtl.m counts them for NVN and for the Vulkan layer alike; frames the display link merged away are not counted).

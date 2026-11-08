@@ -57,10 +57,9 @@ def decode(blob):
     if not is_dmz(blob): return bytes(blob)
     _, alg, raw = HEAD.unpack_from(blob)
     if not header_ok(alg, raw): raise ValueError(f'DMZ1: unknown algorithm {alg:#x} or original size {raw} out of range')
-    out = bytearray(raw + 1)   # one byte of room past the original catches a stream that makes more
+    out = ctypes.create_string_buffer(raw + 1)   # one byte of room past the original catches a stream that makes more
     src = blob if isinstance(blob, bytes) else bytes(blob)
     body = (ctypes.cast(ctypes.c_char_p(src), ctypes.c_void_p).value or 0) + HEAD.size   # the stream in place, not a copy (src lives through the call)
-    n = _lib().compression_decode_buffer((ctypes.c_char * len(out)).from_buffer(out), raw + 1, body, len(src) - HEAD.size, None, alg)
+    n = _lib().compression_decode_buffer(out, raw + 1, body, len(src) - HEAD.size, None, alg)
     if n != raw: raise ValueError(f'DMZ1: the stream decodes to {n} bytes, its header names {raw}')
-    del out[raw:]
-    return bytes(out)
+    return ctypes.string_at(out, raw)   # not bytearray+from_buffer: free-threaded py keeps the export alive, so the resize raised BufferError

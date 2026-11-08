@@ -12,8 +12,8 @@ struct SettingRow: View {
 
     private var locked: Bool { m.fixed.contains(s.env) }
     private var note: String {
-        guard locked else { return s.note }
-        return (s.note.isEmpty ? "" : s.note + " · ") + (m.fromLaunch.contains(s.env) ? "Set at launch" : "Set by an env file")
+        guard locked else { return loc(s.note) }
+        return (s.note.isEmpty ? "" : loc(s.note) + " · ") + (m.fromLaunch.contains(s.env) ? loc("Set at launch") : loc("Set by an env file"))
     }
     private var rangeValue: Binding<Double> {
         Binding(get: { Double(m.values[s.env] ?? s.def) ?? s.max ?? 1 },
@@ -23,7 +23,7 @@ struct SettingRow: View {
 
     private var settingLabel: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(s.label)
+            Text(loc(s.label))
             if !note.isEmpty { Text(note).font(.footnote).foregroundStyle(.secondary) }
         }
     }
@@ -33,7 +33,7 @@ struct SettingRow: View {
             switch s.kind {
             case "choice":
                 Picker(selection: m.binding(s)) {
-                    ForEach(s.options ?? [], id: \.[0]) { Text($0[1]).tag($0[0]) }
+                    ForEach(s.options ?? [], id: \.[0]) { Text(loc($0[1])).tag($0[0]) }
                 } label: {
                     settingLabel
                 }
@@ -46,7 +46,7 @@ struct SettingRow: View {
                         Text(percentage).monospacedDigit().foregroundStyle(.secondary)
                     }
                     Slider(value: rangeValue, in: (s.min ?? 0)...(s.max ?? 1), step: s.step ?? 0.05)
-                        .accessibilityLabel(s.label)
+                        .accessibilityLabel(loc(s.label))
                         .accessibilityValue(percentage)
                 }
             default:

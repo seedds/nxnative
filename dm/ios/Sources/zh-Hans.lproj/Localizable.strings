@@ -1,0 +1,134 @@
+/* Simplified Chinese for the iOS launcher (Launcher.swift, LauncherRow.swift), its in-game menu (GameMenu.swift) and the Mac settings window (dm/mac/Launcher.swift).
+   The key is the English text; dm/ios/tests/test_launcher_strings.py lists what is missing or no longer shown. */
+
+/* The settings screen */
+"Play" = "开始游戏";
+"Version %@" = "版本 %@";
+"Reset to tested defaults" = "恢复为测试过的默认设置";
+"Brings back all settings this game was tested with." = "把所有设置恢复为这个游戏测试时用的值。";
+"Memory available" = "可用内存";
+"Set at launch" = "已在启动时设定";
+"Set by an env file" = "已由 env 文件设定";
+
+/* Cloud saves */
+"Cloud saves" = "云存档";
+"Off" = "关";
+"Choose a folder in iCloud Drive…" = "选择 iCloud 云盘中的文件夹…";
+"Choose a different folder…" = "换一个文件夹…";
+"Saved. The game uses this folder when you press Play." = "已保存。按下“开始游戏”后，游戏会使用这个文件夹。";
+"That folder could not be remembered — try a different one." = "无法记住这个文件夹，请换一个试试。";
+"Turn off cloud saves" = "关闭云存档";
+"Choose a folder in iCloud Drive, and the same one in the Mac app's Cloud saves. The save comes in when the game starts and goes out after each save; a save that is replaced is kept in save-backups." = "在 iCloud 云盘中选择一个文件夹，并在 Mac 版的“云存档”中选择同一个。游戏启动时读入那里的存档，每次存档后再存回去；被替换的存档会保留在 save-backups 中。";
+"The folder you chose before is no longer readable (the app was signed differently). Please choose it again." = "之前选择的文件夹已无法读取（App 的签名变了），请重新选择。";
+
+/* The in-game menu */
+"More settings on the start screen" = "更多设置请在启动画面中调整";
+"Controller layout" = "操控布局";
+"Tap" = "触屏";
+"Set in env.txt" = "已在 env.txt 中设定";
+"%@, set in env.txt" = "%@，已在 env.txt 中设定";
+
+/* The Mac settings window */
+"Advanced settings" = "高级设置";
+"Show this window at launch" = "启动时显示此窗口";
+"Quit" = "退出";
+"Quit %@" = "退出 %@";
+"Close Window" = "关闭窗口";
+"Choose a folder…" = "选择文件夹…";
+"Turn off" = "关闭";
+"Choose the iCloud Drive folder the iPhone app uses for this game. The save comes in when the game starts and goes out after each save; a save that is replaced is kept in the save's -backups folder." = "选择 iPhone 版这个游戏所用的 iCloud 云盘文件夹。游戏启动时读入那里的存档，每次存档后再存回去；被替换的存档会保留在存档旁的 -backups 文件夹中。";
+"Use for Cloud Saves" = "用作云存档";
+"The folder the iPhone app chose in its launcher's Cloud saves" = "iPhone 版在启动画面“云存档”中选择的文件夹";
+"iCloud Drive" = "iCloud 云盘";
+
+/* The game's own messages: the iPhone app (front_ios.m, DmGamepad.m) */
+"Game files unusable." = "游戏文件无法使用。";
+"Game files not found.\nPut the RomFS folder into this App's Documents as \"romfs\" (Files app), then restart." = "找不到游戏文件。\n请用“文件”App 把 RomFS 文件夹放进本 App 的“文稿”，命名为“romfs”，然后重新打开。";
+"This device is not supported." = "不支持这台设备。";
+"Game files" = "游戏文件";
+"Starting %@…" = "正在启动 %@…";
+"Storage is full, so progress was not saved. Free up space and save again." = "存储空间已满，进度没有保存。请清理空间后再存一次。";
+"Saving failed (errno %d); progress was not saved." = "保存失败（errno %d），进度没有保存。";
+"Save failed" = "保存失败";
+"Menu" = "菜单";
+"OK" = "好";
+"Cancel" = "取消";
+
+/* The game's own messages: the Mac app's game window (front_mac.m); "Quit %@", "Quit" and "Window" are above and below */
+"Input" = "输入";
+"The GPU stopped running %@" = "GPU 已停止运行 %@";
+"After a GPU error, macOS stopped running the game's GPU work, so nothing more can be drawn and the game quits. The log has the details. Please report it on GitHub with python3 scripts/bug_report.py %@, which collects the log." = "GPU 出错后，macOS 停止执行游戏的 GPU 工作，画面无法再更新，游戏将退出。日志里有详细信息。请用 python3 scripts/bug_report.py %@ 收集日志，并在 GitHub 上报告。";
+
+/* The settings list (dm/games/settings.tsv): sections */
+"Game" = "游戏";
+"Controls" = "操控";
+"Performance" = "性能";
+
+/* Game */
+"Frame rate" = "帧率";
+"30 fps" = "30 帧";
+"60 fps" = "60 帧";
+"120 fps" = "120 帧";
+"Dynamic resolution" = "动态分辨率";
+"Lets the game lower its resolution under load. Turn off to keep full resolution for the selected console mode." = "负载高时让游戏降低分辨率。关闭后保持所选运行模式的完整分辨率。";
+"Render scale" = "渲染比例";
+"Console mode" = "运行模式";
+"Docked" = "TV 模式";
+"Handheld" = "掌机模式";
+"Upscaling" = "画面放大";
+"Standard" = "标准";
+"MetalFX" = "MetalFX";
+"Uses more GPU time and can increase heat." = "占用更多 GPU 时间，可能增加发热。";
+"Game's upscaler" = "游戏自带放大";
+"Game's own" = "游戏自带";
+"Game language" = "游戏语言";
+"This game's files do not list its languages, so some of these may not be in the game. It may then show another one." = "这个游戏的文件没有列出它支持的语言，下面有些语言游戏里可能没有；选了这样的语言，游戏可能会显示另一种语言。";
+"Display mode" = "显示方式";
+"Window" = "窗口";
+"Fullscreen" = "全屏";
+"Picture" = "画面";
+"Fit" = "适应屏幕";
+"Fill" = "填满屏幕";
+"Fill crops the game's 16:9 picture to cover the screen. Health bars, subtitles or maps near the edges can be cut off. A full-screen picture without cropping needs a patch for each game." = "“填满屏幕”会裁切游戏的 16:9 画面来铺满屏幕，靠近边缘的血条、字幕或地图可能被切掉。要不裁切又铺满全屏，需要为每个游戏单独打补丁。";
+"Frame-rate counter" = "帧率显示";
+"Picture shape" = "画面比例";
+"Match screen" = "匹配屏幕";
+"iPhone Duo screen (1.43:1)" = "iPhone Duo 屏幕（1.43:1）";
+"16:9 (Switch)" = "16:9（Switch）";
+"Renders about a quarter more pixels: a little slower and warmer." = "多渲染约四分之一的像素：稍慢一些，也更热一些。";
+
+/* Game language: the languages a game's control data lists (dm/tools/nacp.py) */
+"American English" = "英语（美国）";
+"British English" = "英语（英国）";
+"Japanese" = "日语";
+"French" = "法语";
+"German" = "德语";
+"Latin American Spanish" = "西班牙语（拉丁美洲）";
+"Spanish" = "西班牙语";
+"Italian" = "意大利语";
+"Dutch" = "荷兰语";
+"Canadian French" = "法语（加拿大）";
+"Portuguese" = "葡萄牙语";
+"Russian" = "俄语";
+"Korean" = "韩语";
+"Traditional Chinese" = "繁体中文";
+"Simplified Chinese" = "简体中文";
+"Brazilian Portuguese" = "葡萄牙语（巴西）";
+
+/* Controls */
+"Touch feedback" = "触控反馈";
+"Game rumble" = "游戏震动";
+"Rumble strength" = "震动强度";
+"Rumble cutoff" = "震动阈值";
+"Press a button to join" = "按键加入";
+
+/* Performance */
+"Frame buffering" = "帧缓冲";
+"Up to one frame more display latency." = "显示延迟最多增加一帧。";
+"Metal 4 pipelines" = "Metal 4 管线";
+"Keeps a pipeline archive; uses more memory." = "保留管线缓存文件，占用更多内存。";
+"Pipeline prebuild" = "管线预编译";
+"The first start waits a few minutes for it, once." = "第一次启动需要等几分钟，只此一次。";
+"Encode thread" = "独立编码线程";
+"Hold frames when late" = "掉帧时暂降帧率";
+"Performance HUD" = "性能 HUD";

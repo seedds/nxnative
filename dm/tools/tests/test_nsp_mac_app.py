@@ -109,7 +109,7 @@ class PackReuse(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp(prefix='pack-reuse-', dir=TEST_ROOT)).resolve()
         self.addCleanup(shutil.rmtree, self.tmp)
         t = self.tmp
-        for d in ('patched', 'romfs/empty', 'msl', 'profile', 'font', 'aoc/1', 'pso', 'bin', 'sdk', 'source', 'host', 'tools', 'ios/Sources'):
+        for d in ('patched', 'romfs/empty', 'msl', 'profile', 'font', 'aoc/1', 'pso', 'bin', 'sdk', 'source', 'host', 'tools', 'ios/Sources/en.lproj', 'ios/Sources/zh-Hans.lproj'):
             (t / d).mkdir(parents=True)
         files = {
             'dmhost': b'host', 'patched/main.patched.bin': b'code', 'patched/main.fixups.tsv': b'fixups',
@@ -120,6 +120,7 @@ class PackReuse(unittest.TestCase):
             'env.txt': b'DM_TEST=1', 'split.tsv': b'split', 'icon.jpg': b'jpeg', 'source/launcher.c': b'launcher',
             'host/romfs_image.h': b'validator', 'host/save_sync.c': b'sync', 'host/save_sync.h': b'sync api', 'tools/romfs.py': b'reader',
             'source/Launcher.swift': b'window', 'ios/Sources/LauncherSettings.swift': b'model', 'ios/Sources/LauncherRow.swift': b'rows',
+            'ios/Sources/en.lproj/Localizable.strings': b'/* English */', 'ios/Sources/zh-Hans.lproj/Localizable.strings': b'"Play" = "x";',
         }
         for n in pack_app.TABLES: files['profile/' + n] = n.encode()
         for n, content in files.items(): (t / n).write_bytes(content)
@@ -302,6 +303,18 @@ class PackReuse(unittest.TestCase):
         self.args.out = str(new); self.assert_repacked()
         for name in ('icon', 'env_file', 'aoc', 'pso', 'pso_pairs'):
             with self.subTest(option=name): setattr(self.args, name, None); self.assert_repacked()
+
+    def test_launcher_translations_are_packed_and_invalidate(self):
+        # the settings window's Localizable.strings (dm/ios/Sources/<language>.lproj) in Contents/Resources, where Bundle.main looks; English is the development language, so a
+        # player whose language has no table gets English, not the one translation there is
+        self.pack()
+        res = Path(self.args.out) / 'Contents/Resources'
+        self.assertEqual(sorted(p.name for p in res.glob('*.lproj')), ['en.lproj', 'zh-Hans.lproj'])
+        self.assertEqual((res / 'zh-Hans.lproj/Localizable.strings').read_bytes(), b'"Play" = "x";')
+        self.assertEqual(plistlib.loads((Path(self.args.out) / 'Contents/Info.plist').read_bytes())['CFBundleDevelopmentRegion'], 'en')
+        self.assert_reused()
+        (self.tmp / 'ios/Sources/zh-Hans.lproj/Localizable.strings').write_bytes(b'"Play" = "y";'); self.assert_repacked()
+        self.assertEqual((res / 'zh-Hans.lproj/Localizable.strings').read_bytes(), b'"Play" = "y";')
 
     def test_packer_source_content_invalidates(self):
         source = self.tmp / 'source/pack_app.py'; shutil.copy2(pack_app.__file__, source)

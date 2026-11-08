@@ -23,19 +23,19 @@ private struct CloudSavesSection: View {
             HStack {
                 Text("Cloud saves")
                 Spacer()
-                Text(folder.isEmpty ? "Off" : (folder as NSString).lastPathComponent)
+                Text(folder.isEmpty ? loc("Off") : (folder as NSString).lastPathComponent)
                     .foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
             }
-            Button(folder.isEmpty ? "Choose a folder in iCloud Drive…" : "Choose a different folder…") { picking = true }
+            Button(folder.isEmpty ? loc("Choose a folder in iCloud Drive…") : loc("Choose a different folder…")) { picking = true }
                 // The sheet sits on the button, not on the Section: SwiftUI hands a Section's modifiers to every row, so one tap presented a picker per row and they invalidated each other (LNPANDY/NX2Apple#315).
                 .sheet(isPresented: $picking) {
                     DocumentPicker(types: [.folder]) { url in
                         picking = false
                         if dm_store_cloud_saves(url) {
-                            note = "Saved. The game uses this folder when you press Play."
+                            note = loc("Saved. The game uses this folder when you press Play.")
                             refresh()
                         } else {
-                            note = "That folder could not be remembered — try a different one."
+                            note = loc("That folder could not be remembered — try a different one.")
                         }
                     } onCancel: { picking = false }
                 }
@@ -46,7 +46,7 @@ private struct CloudSavesSection: View {
             }
         } footer: {
             Text(note.isEmpty
-                 ? "Choose a folder in iCloud Drive, and the same one in the Mac app's Cloud saves. The save comes in when the game starts and goes out after each save; a save that is replaced is kept in save-backups."
+                 ? loc("Choose a folder in iCloud Drive, and the same one in the Mac app's Cloud saves. The save comes in when the game starts and goes out after each save; a save that is replaced is kept in save-backups.")
                  : note)
         }
         .onAppear(perform: refresh)
@@ -56,7 +56,7 @@ private struct CloudSavesSection: View {
         var stale: ObjCBool = false
         folder = dm_cloud_saves_path(&stale) ?? ""
         if stale.boolValue && folder.isEmpty {
-            note = "The folder you chose before is no longer readable (the app was signed differently). Please choose it again."
+            note = loc("The folder you chose before is no longer readable (the app was signed differently). Please choose it again.")
         }
     }
 }
@@ -118,7 +118,7 @@ private struct LauncherView: View {
                     ForEach(m.sections, id: \.self) { section in
                         let rows = m.rows(in: section)
                         if !rows.isEmpty {
-                            Section(section) {
+                            Section(loc(section)) {
                                 ForEach(rows) { SettingRow(s: $0, m: m) }
                             }
                         }

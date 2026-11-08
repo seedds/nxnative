@@ -2,6 +2,11 @@
 import Foundation
 import Combine
 
+// Text as the player reads it: the English text the settings list (launcher.json) and the launchers carry is the key into the app's Localizable.strings (dm/ios/Sources/<language>.lproj,
+// which the iOS app and the Mac app both take), and a language without that key shows the English. Only display text goes through it: setting values, variables and the section
+// names the code compares (GameMenu.swift's "Controls") stay English. No format is applied to the key, so a note may hold "%"
+func loc(_ english: String) -> String { english.isEmpty ? english : Bundle.main.localizedString(forKey: english, value: english, table: nil) }
+
 struct Setting: Decodable, Identifiable {
     let env, kind, label, note, def: String
     let section: String?   // heading on the settings screen; absent in older bundles

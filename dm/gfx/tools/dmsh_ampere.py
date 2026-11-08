@@ -27,3 +27,19 @@ def inst_len(ctl):   # the instructions (SPH included)
 def c1_segment(ctl, code):   # the c1 constant segment at the end of the code area
     a, e = struct.unpack_from('<II', ctl, 0x40)
     return code[a:e] if a <= e <= len(code) else b''
+
+
+EARLY_FRAGMENT_TESTS = 0x5b   # a pixel shader's early fragment tests byte (see early_fragment_tests)
+EARLY_FRAGMENT_TESTS_FROM = 11   # the first control sub-version (+0x08) where the byte is shown to be the flag
+
+
+def early_fragment_tests(ctl):
+    """An NVN2 pixel shader's early fragment tests flag: control byte +0x5b (NVN1 keeps it at +0x718; dmsh_build.early_fragment_tests reads that one). The NVN2 driver
+    reads the pixel shader's flags as single bytes at +0x58..+0x62, a getter each (ldr x8, [x0, #8]; ldrb w0, [x8, #0x5b]; ret, in the sdk's seven vtables of control
+    section versions). +0x58 is set exactly when the SPH writes depth (word 19 bit 1), in all 70,763 pixel shaders of four Switch 2 games (Ocarina of Time, Donkey Kong
+    Bananza, PRAGMATA, Orbitals), and +0x5b never is together with it. The early tests are not an SPH bit on Ampere (NAK writes none; NVK sends the fragment shader's
+    early_fragment_tests as the 3D method SET_API_MANDATED_EARLY_Z, which Ryujinx / Eden read as EarlyZForce / mandated_early_z). On PRAGMATA's cabin route (248 pixel shaders) it is set on all
+    81 pixel shaders whose only blocker of early tests is their own store (the streaming feedback's atomic_fetch_min), on 11 of 84 that discard, and on none of the 75
+    without side effects or the 5 depth writers. Shown for control sub-versions 11, 0x11 and 0x14, and read from 11 on (the getter reads +0x5b in all seven vtables); the 77 pixel shaders on hand with older sub-versions (0, 2, 7) set
+    neither +0x58 nor +0x5b, so their layout is not shown and they keep late tests, which are never wrong, only slower"""
+    return len(ctl) > EARLY_FRAGMENT_TESTS and struct.unpack_from('<I', ctl, 8)[0] >= EARLY_FRAGMENT_TESTS_FROM and ctl[EARLY_FRAGMENT_TESTS] != 0

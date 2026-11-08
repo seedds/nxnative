@@ -17,7 +17,7 @@ TOOLS = Path(__file__).resolve().parents[1] / 'tools'
 sys.path.insert(0, str(TOOLS))
 import dmsh_abi as abi   # tg_spill's slot and limits
 
-NAMES = {'shared_store_msl', 'split_params', 'block_end', 'SHARED_STORE', 'SHARED_ALIAS', 'tg_spill', 'TG_DECL', 'TG_BYTES'}
+NAMES = {'shared_store_msl', 'split_params', 'block_end', 'BRACE', 'SHARED_STORE', 'SHARED_ALIAS', 'tg_spill', 'TG_DECL', 'TG_BYTES'}
 tree = ast.parse((TOOLS / 'dmsh_build.py').read_text())
 selected = [n for n in tree.body if (isinstance(n, ast.FunctionDef) and n.name in NAMES)
             or (isinstance(n, ast.Assign) and any(getattr(t, 'id', None) in NAMES for t in n.targets))]

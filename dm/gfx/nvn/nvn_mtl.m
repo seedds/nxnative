@@ -3748,6 +3748,10 @@ static id<MTLTexture> tex_linear(const tex_t *t) {
     MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:(MTLPixelFormat)pf width:t->d.width ? t->d.width : 1 height:t->d.height ? t->d.height : 1 mipmapped:NO];
     d.resourceOptions = b.resourceOptions;
     d.usage = MTLTextureUsageShaderRead | img_usage(t, (MTLPixelFormat)pf) | (t->d.flags & NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET ? MTLTextureUsageRenderTarget : 0);
+    // As tex_desc: a 32-bit integer texture is read and written in the other signedness (img_fit); made without the format-view usage it is upgraded at every re-creation,
+    // as buffer textures were (see below). DM_NVN_LINEAR_PFV=0 turns this off (diagnostic A/B)
+    { static int on = -1; if (on < 0) { const char *e = getenv("DM_NVN_LINEAR_PFV"); on = !(e && !strcmp(e, "0")); }
+      if (on && (pf == MTLPixelFormatR32Sint || pf == MTLPixelFormatR32Uint)) d.usage |= MTLTextureUsagePixelFormatView; }
     return [b newTextureWithDescriptor:d offset:mo bytesPerRow:row];
 }
 // CPU-written block-linear textures (WriteTexels): the game gave no packaged layout and changes the content from the CPU each frame (Engage's movie frames: a Y plane R8 + a UV plane RG8, WriteTexels every frame).
@@ -4293,8 +4297,13 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
             if (t->d.flags & NVN_TEXTURE_FLAGS_IMAGE) RED_ONCE(119, "image buffer texture at pool offset %#llx, below Metal's %lu-byte alignment: shader writes to it land at the 16-byte boundary below", (unsigned long long)mo, (unsigned long)al);
             static int once; if (!once++) MLOG("buffer texture at pool offset %#llx, below Metal's %lu-byte alignment: created there, read through an aligned copy (tbuf_shadow)", (unsigned long long)mo, (unsigned long)al);
         }
-        MTLTextureDescriptor *d = [MTLTextureDescriptor textureBufferDescriptorWithPixelFormat:(MTLPixelFormat)pf width:t->d.width resourceOptions:b.resourceOptions
-                                                                                         usage:MTLTextureUsageShaderRead | img_usage(t, (MTLPixelFormat)pf)];
+        // A 32-bit integer buffer texture gets the format-view usage too, as tex_desc gives other textures: shaders read and write it in the other signedness (img_fit's r32
+        // view). Made without it, it was upgraded before the first pass that bound it, and until then img_fit bound it as it was (Orbitals: a 128-element R32I image buffer
+        // re-created every frame, upgraded once a frame; one view of the split screen flashed red / yellow / blue / green). DM_NVN_TBUF_PFV=0 turns this off
+        MTLTextureUsage tbu = MTLTextureUsageShaderRead | img_usage(t, (MTLPixelFormat)pf);
+        { static int on = -1; if (on < 0) { const char *e = getenv("DM_NVN_TBUF_PFV"); on = !(e && !strcmp(e, "0")); }
+          if (on && (pf == MTLPixelFormatR32Sint || pf == MTLPixelFormatR32Uint)) tbu |= MTLTextureUsagePixelFormatView; }
+        MTLTextureDescriptor *d = [MTLTextureDescriptor textureBufferDescriptorWithPixelFormat:(MTLPixelFormat)pf width:t->d.width resourceOptions:b.resourceOptions usage:tbu];
         size_t row = ((size_t)t->d.width * bpb + al - 1) / al * al;
         id<MTLTexture> mt = [b newTextureWithDescriptor:d offset:mo bytesPerRow:row];
         if (!mt) { RED_ONCE(39, "cannot create buffer texture: %u elements format %#x", t->d.width, t->d.format); return nil; }
@@ -13165,6 +13174,19 @@ static int tex_storage_dst(const tex_t *t) {
     if (t->has_layout || tex_cpu_written(t->serial) || nvn_ft_tracked(t->serial)) return !mtl_tex_gpu_owned(t->serial);
     return [tex_get(t->serial) isKindOfClass:[NvPkg class]];
 }
+// A GPU block encoder's destination: a texture of 64- or 128-bit unsigned texels (one per 4x4 block) in a pool the CPU cannot access, whose storage a BC texture of the same block size
+// shares on NVN. Cricket 24 encodes each kit into an RGBA32Uint texture by compute, copies it level by level into a 128x128 RGBA32Uint texture at offset 0 of the kit's own 0x56000-byte
+// pool, and samples the 512x512 BC3 texture made over the same storage. The two are separate Metal textures here, so the copy is read back into the storage: the BC texture is filled
+// from there at its first use (tex_init_fill takes a CPU_NO_ACCESS pool's storage), as the Switch reads the same bytes (both block-linear with 16-byte elements)
+// DM_NVN_BLOCK_ALIAS=0 turns this off (on by default), for an A/B. A test sets g_block_alias_on back to -1 after changing the switch
+static int g_block_alias_on = -1;
+static int tex_block_alias_dst(const tex_t *t, id<MTLTexture> d) {
+    if (g_block_alias_on < 0) { const char *e = getenv("DM_NVN_BLOCK_ALIAS"); g_block_alias_on = !e || atoi(e) != 0; }
+    if (!g_block_alias_on) return 0;
+    if (!t->mem || !t->pool || !(t->pool->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) || (t->pool->flags & NVN_MEMORY_POOL_FLAGS_VIRTUAL) || t->d.samples > 1
+        || t->d.target != NVN_TEXTURE_TARGET_2D || (t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET | NVN_TEXTURE_FLAGS_COMPRESSIBLE))) return 0;
+    return d.pixelFormat == MTLPixelFormatRGBA32Uint || d.pixelFormat == MTLPixelFormatRG32Uint || d.pixelFormat == MTLPixelFormatRGBA16Uint;
+}
 // Readbacks queued and not landed, by texture (mirror_readback / mirror_rb_land). Until one lands the texture's storage lacks the copied bytes: a copy from the texture is read back too, and
 // so is a copy into it, so that both land in the order they were recorded (a submission's post-ops run in order, and submissions complete in order). A full table counts the rest as
 // untracked, which makes every texture pending until they land
@@ -13538,7 +13560,7 @@ static void copy_t2t(const p_copy_t2t *c) {
     int s3 = c->src->d.target == 2, d3 = c->dst->d.target == 2, nz = c->sr.depth ? c->sr.depth : 1;
     // The copy's bytes belong in the destination's storage: written there now from the source's storage when that holds its content and the copy is a plain one (the same Metal format: a
     // format change is drawn below and converts the bytes), else read back after the copy (decided before the draw path gives the destination render-target use, which makes it GPU-owned from then on)
-    int rb = !d3 && tex_storage_dst(c->dst);
+    int rb = !d3 && (tex_storage_dst(c->dst) || tex_block_alias_dst(c->dst, d));
     if (rb && !s3 && c->sr.width == c->dr.width && c->sr.height == c->dr.height && !(c->flags & (NVN_COPY_FLAGS_MIRROR_X_BIT | NVN_COPY_FLAGS_MIRROR_Y_BIT)) && s.pixelFormat == d.pixelFormat
         && !mrb_pending(c->dst->serial) && tex_storage_src(c->src) && !nvn_tex_mirror_t2t(c->src, sl, sz0, &c->sr, c->dst, dl, dz0, &c->dr)) { mirror_note(0, c->dst, dl, "texture", 0); rb = 0; }
     // The draw path renders into the destination: one made without render-target use (packaged) gets it first, as a whole-level clear does (Paper Mario: The Thousand-Year Door copies a

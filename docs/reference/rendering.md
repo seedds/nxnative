@@ -161,6 +161,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** any `NVN_RB_TEXU` declared 2D takes the row form for a buffer texture. Rows of a finalized object are kept by what they view (`g_tb2_gone`: buffer, offset, length, format), emptied with the pools.
 - **Found on:** [Yoshi and the Mysterious Book](../../dm/games/0400245021D2C000/README.md): 13.1 million views made for 13.2 million binds became 1.08 million, with frame times unchanged at 16.7 ms.
 
+### 32-bit integer buffer and linear textures re-created every frame
+
+- **Symptom:** `texture upgraded to allow … view format` repeats for new serials all session (Orbitals: about 8,000 upgrades a session, 44,000 in a long play), each a copy into a new texture before the next pass, and until then the draw binds the texture as it was.
+- **Cause:** shaders read and write R32 images in the other signedness ([Integer views for images a shader declares uint or int](#integer-views-for-images-a-shader-declares-uint-or-int)), so a 32-bit integer texture needs the format-view usage. `tex_desc` gives it to R32 textures at creation, but buffer textures (`textureBufferDescriptorWithPixelFormat`) and linear textures are made elsewhere, without it. A game that re-creates such a texture every frame is upgraded every frame.
+- **Fix:** buffer textures and linear textures of `R32Sint` / `R32Uint` get `MTLTextureUsagePixelFormatView` at creation, as `tex_desc` gives it (`nvn_mtl.m`). `DM_NVN_TBUF_PFV=0` and `DM_NVN_LINEAR_PFV=0` turn each off for an A/B.
+- **Found on:** Orbitals (`040004F027560000`): Niagara's 128-element R32I free-ID buffer (an image buffer texture, NVN format 0xc) is re-created every frame; upgrades went from about 8,000 a session to 0.
+- **Check:** `make -C dm/gfx/tests GAME=<id> check_t_tbuf_pfv` (Metal validation: R32I and R32UI buffer and linear textures have the usage, R32F ones do not; 3 of its 7 checks fail with both switches at 0).
+
 ### Buffer textures read by 1D integer fetches (row wrap)
 
 - **Symptom:** `texture type mismatch: shader declares 2, texture is 9`; the slot read 0.

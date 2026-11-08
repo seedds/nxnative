@@ -623,6 +623,19 @@ The first Xcode build copies the complete game, so allow free space on the game'
 
 Each prepared game is a scheme in the shared workspace (by default `NxNative.xcworkspace` beside the NSP folder; `--xcode-workspace`, `XCODE_WORKSPACE` in Spyder, collects games from different folders in one). Give each game its own bundle ID (`--bundle-id`) to keep them installed together; keep it when updating an installed game, as another ID is a separate app with separate saves. The script rejects a bundle ID that another project in the workspace uses. Preparing a game again regenerates only its project and keeps its Release bundle ID and team, including changes made in Xcode; `--bundle-id` / `--team-id` (`BUNDLE_ID` / `TEAM_ID` in Spyder, or `DM_TEAM_ID`) override them. Other manual project edits are replaced; edit `dm/ios/project.yml` for shared changes. Prepare a game again after changing its game files, profile, shaders or the project template; switching games needs only the scheme menu.
 
+### Signing an IPA with Xcode
+
+`scripts/resign_ipa.py` signs and installs a built IPA with your own Apple account when a sideloading tool cannot: AltServer 1.8 on macOS 27.0.1 stops with `could not retrieve anisette data value "machineID"`, and Sideloadly is reported to drop the Increased Memory Limit. No new build or game files are needed, and the IPA itself is not changed.
+
+```
+python3 scripts/resign_ipa.py --dry-run "<game>.ipa"
+python3 scripts/resign_ipa.py "<game>.ipa"
+```
+
+Add your account in **Xcode > Settings > Apple Accounts**, connect and trust the device, and enable **Developer Mode**. For each IPA the script builds a one-file stub app with automatic signing, so Xcode makes the certificate, the App ID with the capability and the profile. It unpacks a copy to `resign_work/` beside the IPA (`--work-dir` moves it; it needs room for the unpacked game), applies the stub's profile and entitlements, signs and checks the copy, installs it with `devicectl` and deletes the copy.
+
+The bundle ID is `org.nxnative.<team>.<title ID>`. It stays the same between runs, so installing again keeps `Documents`; it differs from the IPA's own, so an app installed earlier under another ID stays a separate app with a separate save. A free Apple ID keeps 3 such apps at one time and each stops opening after 7 days, so the script stops at more than 3 IPAs (`--ignore-app-limit` tries anyway); run it again to renew. A team that goes from free to paid keeps its ID, so its bundle IDs and saves stay, but Xcode reuses a local profile while it is valid; on a paid team the script removes a 7-day profile from Xcode's cache and asks again, and says so in red if Apple still gives a short one. `--no-memory-limit` is for an account that cannot provision the capability, and only suits a game that fits in about 3.3 GB. `--no-install` leaves the signed app in the work folder.
+
 ### Quick reinstalls
 
 A full install sends the whole app, about 11 GB for Animal Crossing: New Horizons (3 to 4 minutes). The game files can stay on the phone instead:

@@ -2835,6 +2835,21 @@ def unzs(path):
     if not did: return subprocess.run(['zstd', '-d', '-c', '-q'], input=d, capture_output=True, check=True).stdout
     return unzs_dict(d, did, path)
 
+def nested_zstd(d, label, limit):
+    """Decode one nested frame within its enclosing archive's expansion budget."""
+    zstd = zstd_mod(); did = zs_dict_id(d)
+    if did:
+        if did not in ZDICTS: red(f'{label}: a frame needs zstd dictionary {did}, which Pack/ZsDic.pack.zs does not have')
+        if did not in _ZD: _ZD[did] = zstd.ZstdDict(ZDICTS[did])
+    declared = frame_size(d)
+    if declared is not None and declared > limit: red(f'{label}: zstd archive members expand to more than {NEST} times the file')
+    dec = zstd.ZstdDecompressor(zstd_dict=_ZD[did]) if did else zstd.ZstdDecompressor()
+    out = dec.decompress(d, max_length=limit + 1)
+    if len(out) > limit or not dec.eof and not dec.needs_input:
+        red(f'{label}: zstd archive members expand to more than {NEST} times the file')
+    if not dec.eof or dec.unused_data: red(f'{label}: incomplete or trailing data in a nested zstd frame')
+    return out
+
 def frame_size(f):
     """The uncompressed size a zstd or LZ4 frame header records, None when it records none"""
     if f[:4] == LZ4_FRAME_MAGIC:   # FLG, BD, then the 8-byte content size when FLG bit 3 is set
@@ -2992,8 +3007,9 @@ def unity_text_glslc(x, base):
     return out
 
 NEST = 16   # archives in archives scan_blob opens (SARC, PlatinumGames' DAT): real files nest a few. A damaged or crafted one could nest one per header's length, or have every
-            # member point at the same inner archive, its work doubling with each level. Two budgets of NEST times the file bound the work: left[0], the members a file's archives open,
-            # each counted by what it takes up in its archive, and left[1], what its Yaz0 members expand to. Counting a Yaz0 member by what it expands to in the first budget paid twice
+            # member point at the same inner archive, its work doubling with each level. Two budgets start at NEST times the file: left[0], the members a file's archives open,
+            # each counted by what it takes up in its archive, and left[1], what compressed members expand to. Decoded storage credits only the remaining traversal levels;
+            # the independent expansion budget does not grow. Counting a Yaz0 member by what it expands to in the first budget paid twice
             # for the same bytes, once for the member and once for its members (GitHub issue #640: Mario Kart 8 Deluxe's UI/<lang>/race.sarc, 204 KB, holds one layout archive
             # that expands 9 times, which then added up to 18 times the file)
 def scan_blob(d, label, out, depth=0, left=None):
@@ -3008,13 +3024,21 @@ def scan_blob(d, label, out, depth=0, left=None):
         return
     for m in re.finditer(b'SLCT\x03\x10\0\0', d): out.extend(slct_shaders(d, m.start(), label))
     stored = len(d)   # what the member takes up in its archive
+    compressed = d[:4] in (b'Yaz0', ZSTD_MAGIC)
     if d[:4] == b'Yaz0':
         if left is not None:   # charged by its header before it is decoded
             left[1] -= int.from_bytes(d[4:8], 'big')
             if left[1] < 0: red(f'{label}: the Yaz0 archive members expand to more than {NEST} times the file')
         d = yaz0(d, label)
-    if left is None: left = [NEST * len(d)] * 2   # the file itself: what its archives' members may add up to, and what their Yaz0 may expand to
+    elif d[:4] == ZSTD_MAGIC:
+        d = nested_zstd(d, label, left[1] if left is not None else NEST * stored)
+        if left is not None: left[1] -= len(d)
+    if left is None: left = [NEST * len(d)] * 2   # the file itself: traversal bytes and compressed-member expansion
     else:
+        # Children of a decoded archive occupy decoded storage. Its remaining
+        # levels may traverse those bytes once each without counting a second
+        # decompression; repeated/overlapping expansion still spends left[1].
+        if compressed and len(d) > stored: left[0] += (NEST - depth) * (len(d) - stored)
         left[0] -= stored
         if left[0] < 0: red(f'{label}: the archive members add up to more than {NEST} times the file (members that overlap)')
     if d[:4] == b'SARC':
@@ -3353,7 +3377,7 @@ def scan_file_in(args):
         try: pairs = unity_shaders(d, '/' + rel, found, trees if not TREES else dict(TREES))
         except unityfs.NoTree: return rel, {}, set(), 'defer'
         return rel, uniq_keys(found), var_pairs(found) | {(a, b, 'prog') for a, b in pairs}, trees
-    elif b'BNSH\0\0\0\0' not in d and b'BAHS' not in d and d[:4] != b'MSHD' and d[:4] != b'NDSR' and d[:4] != b'NARC' and d[:4] != b'NDVE' and not (d[:4] == b'SARC' and b'Yaz0' in d) and b'\x91\x68\x86\x19' not in d and MGFX not in d and NEEDLE not in d and d[:8] != SUMO_MUX and SUMO_NX not in d and NVNSH not in d: return rel, {}, set(), {}   # a SARC may hold Yaz0 members, a NARC packed ones (cra.undo)
+    elif b'BNSH\0\0\0\0' not in d and b'BAHS' not in d and d[:4] != b'MSHD' and d[:4] != b'NDSR' and d[:4] != b'NARC' and d[:4] != b'NDVE' and not (d[:4] == b'SARC' and (b'Yaz0' in d or ZSTD_MAGIC in d)) and b'\x91\x68\x86\x19' not in d and MGFX not in d and NEEDLE not in d and d[:8] != SUMO_MUX and SUMO_NX not in d and NVNSH not in d: return rel, {}, set(), {}   # a SARC may hold Yaz0 or zstd members, a NARC packed ones (cra.undo)
     else:
         scan_blob(d, '/' + rel, found)
         # whole GLSLC outputs in a file no other reader takes (FINAL FANTASY TACTICS - The Ivalice Chronicles: its engine's technique files, resources_nx/…/shader/*.tec, 261 outputs beside

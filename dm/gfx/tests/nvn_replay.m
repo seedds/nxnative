@@ -225,6 +225,20 @@ int main(int argc, char **argv) { @autoreleasepool {
     cap_reader rd; int lr = cap_load(&rd, path);
     if (lr <= 0) RFAIL("%s: %s", path, lr < 0 ? "not a capture of format 1" : "cannot read");
     for (;;) { cap_chunk c; uint8_t *d; int r = cap_next(&rd, &c, &d); if (r < 0) RFAIL("%s: corrupt chunk at byte %zu", path, rd.pos); if (!r) break;
+        if (c.tag == CAP_FAIL) RFAIL("%s: capture refused: %.*s", path, (int)MIN(c.raw, 1024), (const char *)d);
+        if (c.tag == CAP_SEGM) {
+            uint32_t idx, len; if (c.raw < 8) RFAIL("%s: short segment chunk", path);
+            memcpy(&idx, d, 4); memcpy(&len, d + 4, 4);
+            if ((uint64_t)len != c.raw - 8) RFAIL("%s: segment %u size mismatch", path, idx);
+            for (uint32_t off = 0; off < len;) {
+                op_hdr h; if (len - off < 8) RFAIL("%s: segment %u has a short record", path, idx);
+                memcpy(&h, d + 8 + off, 8);
+                if (h.size < 8 || (h.size & 7) || h.size > len - off) RFAIL("%s: segment %u has a corrupt record", path, idx);
+                const char *why = cap_record_unsupported(h.op);
+                if (why) RFAIL("%s: submit %u segment %u: %s", path, c.submit, idx, why);
+                off += h.size;
+            }
+        }
         rp_ch = realloc(rp_ch, (rp_nch + 1) * sizeof *rp_ch); rp_ch[rp_nch++] = (chunk){c, d}; }
     cap_unload(&rd);
     // header: game, layout, chain; then the live run's settings

@@ -2123,6 +2123,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Check:** screenshots every few seconds (`ctl.sh snap` from a script) told the two apart.
 - **Found on:** [Bayonetta 3](../../dm/games/01004A4010FEA000/README.md) (SDK 13.3.2).
 
+### Native mesh draws omitted while their pipeline compiles
+
+- **Symptom:** missing geometry or bright patches just after loading, which disappear as background pipeline compilation finishes.
+- **Cause:** `mtk_pso` started an asynchronous native task/mesh pipeline build and returned no pipeline; the draw was omitted until a later frame found the completed pipeline. This copied the geometry-mesh optimization's behavior without its equivalent compute fallback. Native mesh draws have no such replacement. Metal validation also rejected the helper descriptor assigning a mesh function to `vertexFunction` before copying its raster state.
+- **Fix:** compile the demanded native mesh pipeline before issuing its first draw, then reuse the cached pipeline. The shared descriptor helper leaves `vertexFunction` unset for a native mesh shader; the mesh descriptor receives it as `meshFunction`. A cold pipeline can delay the first frame but cannot silently remove its draw. `t_mesh_first_use` exercises real NVN submissions with mesh-only, task/mesh, depth-only and ordinary vertex shaders: the old host failed 10 of 42 pixel/state checks; the fixed host passes all 42 with Metal validation in both encoding modes.
+- **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md), M4 Pro startup white patches. The synthetic GPU regression verifies the missing-draw mechanism; the corrected game's startup remains to be checked with the queue fix.
+
 ### Geometry runs across occlusion query boundaries
 
 - **Symptom:** hundreds of geometry raster passes in combat, despite support for batching consecutive geometry draws.

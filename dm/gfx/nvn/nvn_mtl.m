@@ -18,6 +18,7 @@
 #include <os/proc.h>   // os_proc_available_memory: for the memory readout line
 #endif
 #include "nvn_mtl.h"
+#include "nvn_queue.h"
 #include <mach/mach.h>
 #include "nvn_obj.h"
 #include "../tex/nvn_fmt_mtl.h"
@@ -870,33 +871,191 @@ typedef struct seg_clk seg_clk; static seg_clk *g_sclk; static void seg_clk_put(
 // second field), so after one clear the two compare equal and later conditional clears of that target are skipped. The host used to ignore the condition and write the time
 // into both fields, so every clear ran: the first tile-lighting round, the half-resolution scene depth its light volumes test against and the light accumulation were cleared
 // before the composite read them, and the 3D scene came out black.
-// Metal has no predication, so the condition is evaluated here at replay, on the CPU, from the records in memory. A report replayed earlier in this submission is not written yet
+// Metal has no predication, so the condition is evaluated here at replay, on the CPU, from the records in memory. A report in an earlier unfinished GPU prefix is not written yet
 // (that happens when the GPU completes): a timestamp one counts with its known counter 0; a samples-passed result (an occlusion query, written from the visibility buffers) is
 // unknown, and a condition on it keeps drawing, as before (occlusion culling only saves work). Inside a block evaluated false, draws and clears are dropped
-static int g_rc_skip;   // a render-enable block evaluated false is active
-// Neither table may drop an entry: a timestamp report forgotten leaves the condition reading the 1 the CPU wrote, so the clear runs again. They held 256 reports a submission of both kinds, and Splatoon Raiders' 285 ink
-// queries a frame came first: every conditional clear after them ran, and the lit scene was wiped before the composite read it (a black screen with only the dialogue on it). Now only timestamps are kept per submission, and both tables grow
-static uint64_t *g_rc_pend; static uint32_t g_rc_npend, g_rc_pcap;   // timestamp reports replayed in this submission: their counter is 0, though memory does not show it yet
-static uint64_t *g_rc_occ; static uint32_t g_rc_ocap, g_rc_on;   // addresses ever written by a non-timestamp report (open addressing, a power of two): conditions on them keep drawing
-static int rc_occ_has(uint64_t a) { if (!g_rc_ocap) return 0; for (uint32_t i = (uint32_t)(a >> 4) & (g_rc_ocap - 1);; i = (i + 1) & (g_rc_ocap - 1)) { if (g_rc_occ[i] == a) return 1; if (!g_rc_occ[i]) return 0; } }
-static void rc_occ_add(uint64_t a) {
-    if (rc_occ_has(a)) return;
-    if ((g_rc_on + 1) * 2 > g_rc_ocap) { uint32_t oc = g_rc_ocap, nc = oc ? oc * 2 : 4096; uint64_t *old = g_rc_occ, *t = calloc(nc, 8); if (!t) MDIE("no memory for the query report table");
-        for (uint32_t k = 0; k < oc; k++) if (old[k]) { uint32_t i = (uint32_t)(old[k] >> 4) & (nc - 1); while (t[i]) i = (i + 1) & (nc - 1); t[i] = old[k]; }
-        g_rc_occ = t; g_rc_ocap = nc; free(old); }
-    uint32_t i = (uint32_t)(a >> 4) & (g_rc_ocap - 1); while (g_rc_occ[i]) i = (i + 1) & (g_rc_ocap - 1);
-    g_rc_occ[i] = a; g_rc_on++;
+static int g_rc_skip;   // logical queue state: a render-enable block evaluated false is active
+// Latest command-ordered writer of each report counter. Completed reports are read
+// from memory, so CPU rewrites remain visible. Unfinished queries stay unknown;
+// timestamp counters and explicit writes can supply known bytes before completion.
+// Address lookup is constant-time. The dirty list stamps only this prefix's writers,
+// and the page index keeps unrelated buffer updates out of the report table.
+typedef struct rc_report {
+    uint64_t addr, fence, value, report_fence, gpu_epoch;
+    uint8_t known, dirty, readable, reported, report_dirty, unreliable, gpu_domain, opaque_unreliable, opaque_later, conservative;
+    struct rc_report *page_next, *dirty_next;
+} rc_report;
+static nvn_hmap g_rc_reports={.klen=8}, g_rc_pages={.klen=8};
+static uint64_t *g_rc_page_order; static uint32_t g_rc_page_n, g_rc_page_cap;
+static uint32_t rc_page_lower(uint64_t page) {
+    uint32_t lo=0, hi=g_rc_page_n;
+    while (lo<hi) { uint32_t mid=lo+(hi-lo)/2; if (g_rc_page_order[mid]<page) lo=mid+1; else hi=mid; }
+    return lo;
 }
-static void rc_note(uint64_t a, int kind) {
-    if (kind == 2) { rc_occ_add(a); return; }   // rc_value asks this table first
-    for (uint32_t i = 0; i < g_rc_npend; i++) if (g_rc_pend[i] == a) return;
-    if (g_rc_npend == g_rc_pcap) { uint32_t nc = g_rc_pcap ? g_rc_pcap * 2 : 256; uint64_t *t = realloc(g_rc_pend, (size_t)nc * 8); if (!t) MDIE("no memory for the timestamp report table"); g_rc_pend = t; g_rc_pcap = nc; }
-    g_rc_pend[g_rc_npend++] = a;
+static void rc_page_add(uint64_t page) {
+    uint32_t at=rc_page_lower(page);
+    if (g_rc_page_n==g_rc_page_cap) {
+        uint32_t cap=g_rc_page_cap ? g_rc_page_cap*2 : 64;
+        uint64_t *p=realloc(g_rc_page_order,(size_t)cap*sizeof *p);
+        if (!p) MDIE("no memory for the report page index");
+        g_rc_page_order=p; g_rc_page_cap=cap;
+    }
+    memmove(g_rc_page_order+at+1,g_rc_page_order+at,(g_rc_page_n-at)*sizeof *g_rc_page_order);
+    g_rc_page_order[at]=page; g_rc_page_n++;
 }
-static int rc_value(uint64_t a, uint64_t *v) {   // 0 = unknown at encode time
-    if (rc_occ_has(a)) return 0;
-    for (uint32_t i = g_rc_npend; i-- > 0;) if (g_rc_pend[i] == a) { *v = 0; return 1; }
-    *v = *(const volatile uint64_t *)a; return 1;
+static rc_report *g_rc_dirty;
+static uint64_t g_rc_gpu_epoch, g_rc_gpu_fence;
+static int g_rc_gpu_dirty;
+// Published after the CPU post effects land, before an event can wake a CPU writer.
+// g_done is later than event publication and would briefly hide such a writer.
+static _Atomic uint64_t g_rc_complete;
+static rc_report *rc_find(uint64_t addr) { return nvn_hm_get(&g_rc_reports,&addr); }
+static void rc_touch(rc_report *r) {
+    r->fence=0; r->gpu_epoch=g_rc_gpu_epoch;
+    if (!r->dirty) { r->dirty=1; r->dirty_next=g_rc_dirty; g_rc_dirty=r; }
+}
+static void rc_commit(uint64_t fence) {
+    for (rc_report *r=g_rc_dirty,*next;r;r=next) {
+        next=r->dirty_next; r->fence=fence; r->dirty=0; r->dirty_next=NULL;
+        if (r->report_dirty) { r->report_fence=fence; r->report_dirty=0; }
+    }
+    g_rc_dirty=NULL;
+    if (g_rc_gpu_dirty) { g_rc_gpu_fence=fence; g_rc_gpu_dirty=0; }
+}
+static void rc_forget(void) {
+    g_rc_dirty=NULL; g_rc_gpu_epoch=g_rc_gpu_fence=0; g_rc_gpu_dirty=0;
+    nvn_hm_clear(&g_rc_pages,NULL); nvn_hm_clear(&g_rc_reports,free);
+    free(g_rc_page_order); g_rc_page_order=NULL; g_rc_page_n=g_rc_page_cap=0;
+}
+static rc_report *rc_ensure(uint64_t addr) {
+    rc_report *r=rc_find(addr);
+    if (!r) {
+        r=calloc(1,sizeof *r); if (!r) MDIE("no memory for the report table");
+        r->addr=addr; r->readable=1; r->gpu_epoch=g_rc_gpu_epoch; nvn_hm_put(&g_rc_reports,&addr,r);
+        uint64_t page=addr>>12; r->page_next=nvn_hm_get(&g_rc_pages,&page);
+        if (!r->page_next) rc_page_add(page);
+        nvn_hm_put(&g_rc_pages,&page,r);
+    }
+    return r;
+}
+static void rc_query_operand(rc_report *r) {
+    if (r->gpu_domain) return;
+    r->gpu_domain=1;
+    // An earlier opaque writer may have raced this timestamp before the address
+    // first participated in a query comparison. Do not expose its CPU-post bytes.
+    if (r->opaque_later) { r->known=0; r->opaque_later=0; }
+    if (r->opaque_unreliable) r->unreliable=1;
+}
+static void rc_note(uint64_t addr, int kind) {
+    rc_report *r=rc_ensure(addr);
+    if (kind!=1) r->conservative=1;   // retain main's unavailable-query fallback; completed-query culling is a separate change
+    // A condition compares adjacent 16-byte records. Either operand can be the
+    // query; track its unreported neighbor before later explicit buffer writers.
+    // Existing entries keep their own report type, pending fence and known bytes.
+    if (kind==2) { rc_query_operand(r); if (addr>=16) rc_query_operand(rc_ensure(addr-16)); rc_query_operand(rc_ensure(addr+16)); }
+    // Only timestamp and samples-passed reports have implemented counter values.
+    // Other counter kinds retain the conservative fallback after their placeholder lands.
+    r->value=0; r->known=kind==1 ? 255 : 0; r->readable=kind!=3;
+    r->reported=r->report_dirty=1; r->report_fence=0; r->unreliable=r->opaque_unreliable=r->opaque_later=0; rc_touch(r);
+}
+static int rc_gpu_unknown(rc_report *r, uint64_t done) {
+    if (!r->gpu_domain || r->gpu_epoch==g_rc_gpu_epoch) return 0;
+    // An unbounded shader writer may race a CPU-landed query. A fresh report or
+    // explicit full write can establish that counter again. Unreported reference
+    // words have no deferred CPU report, so they become readable after the writer.
+    if (r->reported || g_rc_gpu_dirty || g_rc_gpu_fence>done) return 1;
+    r->gpu_epoch=g_rc_gpu_epoch; return 0;
+}
+static int rc_value(uint64_t addr, uint64_t *v) {   // 0 = unknown at encode time
+    rc_report *r=rc_find(addr);
+    uint64_t done=atomic_load_explicit(&g_rc_complete,memory_order_acquire);
+    if (r) {
+        if (r->conservative) return 0;
+        if (rc_gpu_unknown(r,done)) return 0;
+        if (r->dirty || r->fence>done) { *v=r->value; return r->known==255; }
+        if (!r->readable || r->unreliable) return 0;
+    }
+    *v=*(const volatile uint64_t *)addr; return 1;
+}
+// Counter records need not share a page with the buffer write. Include the previous
+// seven bytes so even an unaligned eight-byte counter crossing a page is covered.
+static rc_report *rc_containing(uint64_t addr) {
+    uint64_t first=(addr>7 ? addr-7 : 0)>>12, last=addr>>12;
+    for (uint64_t page=first;page<=last;page++)
+        for (rc_report *r=nvn_hm_get(&g_rc_pages,&page);r;r=r->page_next)
+            if (addr>=r->addr && addr-r->addr<8) return r;
+    return NULL;
+}
+static uint8_t rc_source(uint64_t a, unsigned n, uint8_t *out, int *unreliable);
+static void rc_overwrite(rc_report *r, uint64_t dst, uint64_t n, const void *data, unsigned period, uint64_t src, uint64_t done, int opaque) {
+    uint64_t lo=MAX(dst,r->addr), hi=MIN(dst+n,r->addr+8);
+    if (hi<=lo) return;
+    if (opaque && !r->gpu_domain) {
+        // Keep ordinary timestamp forwarding unchanged, but retain this history
+        // in case a later query makes the address a comparison operand.
+        if (r->reported) r->opaque_unreliable=r->opaque_later=1;
+        return;
+    }
+    int report_pending=r->reported && (r->report_dirty || r->report_fence>done);
+    if (r->opaque_later) { r->known=0; r->opaque_later=0; }
+    if (r->opaque_unreliable) r->unreliable=1;
+    if ((r->reported && r->gpu_epoch!=g_rc_gpu_epoch) || rc_gpu_unknown(r,done)) { r->known=0; if (r->reported) r->unreliable=1; }
+    if (opaque) {
+        if (report_pending) r->unreliable=1;
+        r->known=0; rc_touch(r); return;
+    }
+    // The preceding writer has landed: keep unaffected bytes from the current CPU
+    // value, including a legal CPU rewrite after that writer completed.
+    if (!r->dirty && r->fence<=done) {
+        if (r->readable && !r->unreliable && !rc_gpu_unknown(r,done)) { r->value=*(const volatile uint64_t *)r->addr; r->known=255; }
+        else r->known=0;
+    }
+    int unreliable=report_pending;
+    unsigned at=(unsigned)(lo-r->addr), bytes=(unsigned)(hi-lo);
+    if (data) {
+        for (unsigned b=0;b<bytes;b++) {
+            uint64_t off=lo+b-dst;
+            ((uint8_t *)&r->value)[at+b]=((const uint8_t *)data)[period ? off%period : off];
+            r->known|=(uint8_t)(1u<<(at+b));
+        }
+    } else {
+        uint8_t value[8], known=rc_source(src+lo-dst,bytes,value,&unreliable), mask=(uint8_t)(((1u<<bytes)-1)<<at);
+        for (unsigned b=0;b<bytes;b++) if (known>>b&1) ((uint8_t *)&r->value)[at+b]=value[b];
+        r->known=(r->known&~mask)|(known<<at);
+    }
+    if (r->known==255) r->readable=1;
+    // Query reports still land on the CPU after GPU execution. A following GPU
+    // overwrite/copy can therefore leave unreliable final bytes. Preserve the
+    // existing conservative fallback for this unsupported ordering pattern;
+    // pending command-known values remain valid, but completed memory is not used.
+    if (unreliable) r->unreliable=1;
+    else if (at==0 && bytes==8) r->unreliable=r->opaque_unreliable=r->opaque_later=0;
+    rc_touch(r);
+}
+// A later explicit buffer write replaces the report's command-ordered knowledge,
+// including partial writes. Its bytes stay live until that writer completes.
+// This does not make CPU-landed query reports ordered GPU sources: arbitrary
+// shader-produced predicates and GPU reads of an unfinished report remain unsupported.
+static void rc_change(uint64_t dst, uint64_t n, const void *data, unsigned period, uint64_t src, int opaque) {
+    if (!g_rc_reports.n || !n) return;
+    uint64_t done=atomic_load_explicit(&g_rc_complete,memory_order_acquire);
+    uint64_t first=(dst>7 ? dst-7 : 0)>>12, last=(dst+n-1)>>12;
+    // Large writable bindings are common on every draw. Search the recorded page
+    // addresses, then visit only intersecting pages; scanning every report made
+    // unrelated storage buffers cost several milliseconds per frame.
+    if (last-first>=8) {
+        for (uint32_t i=rc_page_lower(first);i<g_rc_page_n && g_rc_page_order[i]<=last;i++)
+            for (rc_report *r=nvn_hm_get(&g_rc_pages,&g_rc_page_order[i]);r;r=r->page_next) rc_overwrite(r,dst,n,data,period,src,done,opaque);
+    } else {
+        for (uint64_t page=first;page<=last;page++)
+            for (rc_report *r=nvn_hm_get(&g_rc_pages,&page);r;r=r->page_next) rc_overwrite(r,dst,n,data,period,src,done,opaque);
+    }
+}
+static void rc_write(uint64_t dst, uint64_t n, const void *data, unsigned period) { rc_change(dst,n,data,period,0,0); }
+static void rc_copy(uint64_t src, uint64_t dst, uint64_t n) { if (src!=dst) rc_change(dst,n,NULL,0,src,0); }
+static void rc_gpu_write(uint64_t dst, uint64_t n) {
+    if (!n) { g_rc_gpu_epoch++; g_rc_gpu_dirty=1; }
+    else rc_change(dst,n,NULL,0,0,1);
 }
 // ---------- Occlusion queries (NVN_COUNTER_TYPE_SAMPLES_PASSED) ----------
 // NVN semantics: samples passed is a cumulative counter on the queue - ResetCounter zeroes it, every draw afterwards adds to it, and ReportCounter writes out the cumulative value at that moment (+ timestamp) when the GPU completes.
@@ -969,6 +1128,7 @@ enum { SBW_GPU = 1, SBW_REPORT = 2 };
 static uint32_t g_sbw_gen;   // bumped by every write noted that this submission's shadows must respect (a cached shadow made before it is checked again)
 static void drw_note(uint64_t lo, uint64_t n);   // the writes since the last drain (below g_wr_epoch)
 static void sbw_note(uint64_t lo, uint64_t n, int src) {
+    if (src==SBW_GPU) rc_gpu_write(lo,n);
     if (src == SBW_GPU) { g_sbw_gen++; drw_note(lo, n); }
     if (!n) { if (src == SBW_GPU) g_sbw_over = 1; return; }
     uint64_t hi = lo + n;
@@ -1077,7 +1237,7 @@ void mtl_prepare(void) {
 static void sub_cut_begin(void); static void ts_sub_begin(void), ts_boundary(void); static int ts_on(void);
 static void gmem_commit_patch(void);   // the raw pool table words of the arguments encoded so far follow the pools (gmem_slot_note)
 void mtl_sub_begin(void) {
-    mtl_init(); g_sub_serial++; g_seg = 0; seg_clk_put(g_sclk); g_sclk = NULL; g_rc_npend = 0; g_rc_skip = 0;
+    mtl_init(); g_sub_serial++; g_seg = 0; seg_clk_put(g_sclk); g_sclk = NULL;
     sub_cut_begin();
     defer_drain();
     defer_reset();
@@ -1389,6 +1549,7 @@ static id<MTL4ComputeCommandEncoder> blit(void) {
 }
 
 void mtl_sub_copy(uint64_t src, uint64_t dst, uint64_t n) {
+    rc_copy(src,dst,n);
     pend_add(dst, n, 2); g_mdx_epoch++;
     void *sb, *db; uint64_t so, dof;
     if (!mtl_addr(src, n, &sb, &so) || !mtl_addr(dst, n, &db, &dof))
@@ -1611,6 +1772,30 @@ static int pend_since(uint64_t a, uint64_t b, int since, int *out) {
     return n;
 }
 int nvn_host_readable(uint64_t a, uint64_t n);   // hle_nvn.c: guest memory and sparse pools
+// Only read copy sources that the command stream proves, or memory with no
+// unfinished GPU writer. Never use stale mapped bytes to replace an unknown copy.
+static uint8_t rc_source(uint64_t a, unsigned n, uint8_t *out, int *unreliable) {
+    uint8_t known=0; uint64_t done=atomic_load_explicit(&g_rc_complete,memory_order_acquire);
+    for (unsigned b=0;b<n;b++) {
+        uint64_t p=a+b; rc_report *r=rc_containing(p);
+        if (r) {
+            unsigned off=(unsigned)(p-r->addr);
+            if (r->unreliable || r->opaque_unreliable || (r->reported && (r->report_dirty || r->report_fence>done))) *unreliable=1;
+            if (r->opaque_later) continue;
+            if ((r->reported && r->gpu_epoch!=g_rc_gpu_epoch) || rc_gpu_unknown(r,done)) { *unreliable=1; continue; }
+            if (!r->dirty && r->fence<=done) {
+                if (r->readable && !r->unreliable && !r->opaque_unreliable) { out[b]=*(const volatile uint8_t *)p; known|=(uint8_t)(1u<<b); }
+            } else if (r->known>>off&1) { out[b]=((const uint8_t *)&r->value)[off]; known|=(uint8_t)(1u<<b); }
+            continue;
+        }
+        int kind, page=sbw_slot(p>>12,0);
+        if (pend_read(p,1,&out[b],&kind)) known|=(uint8_t)(1u<<b);
+        else if (!pend_hits(p,1) && !g_sbw_over && !sbw_hits(p,p+1) && (page<0 || !g_sbwp[page].src) && !gw_live_in(g_gw,p,p+1) && nvn_host_readable(p,1)) {
+            out[b]=*(const uint8_t *)p; known|=(uint8_t)(1u<<b);
+        }
+    }
+    return known;
+}
 // Shadows made from memory, per range. One is kept while no write is queued after it (the draws after an update bind the same block again and again); the next one for the same range starts
 // from it and lays over only the writes queued since (the game rewrites one block hundreds of times a submission). A range read whole from memory once is not read from memory again in the submission
 enum { UBP_CACHE = 16, UBP_MAX_BYTES = 65536 };
@@ -1662,6 +1847,7 @@ void mtl_ubp_stats(uint64_t *made, uint64_t *reused, uint64_t *refused) { *made 
 void mtl_ubp_why(uint64_t w[5]) { memcpy(w, g_ubp_why, sizeof g_ubp_why); }
 void mtl_sub_update(const void *data, uint64_t dst, uint64_t n) {
     if (!n) return;
+    rc_write(dst,n,data,0);
     int pi = pend_add(dst, n, 1);
     void *db; uint64_t dof;
     if (!mtl_addr(dst, n, &db, &dof)) MDIE("uniform update target is in no memory pool dst=%#llx n=%#llx", (unsigned long long)dst, (unsigned long long)n);
@@ -1689,6 +1875,7 @@ void mtl_sub_update(const void *data, uint64_t dst, uint64_t n) {
 // In-order buffer fill within the submission: all four bytes equal → fillBuffer; otherwise copied in chunks from a 64 KiB pattern buffer
 void mtl_sub_fill(uint64_t dst, uint64_t n, uint32_t value) {
     if (!n) return;
+    rc_write(dst,n,&value,4);
     pend_add(dst, n, 3); g_mdx_epoch++;
     void *db; uint64_t dof;
     if (!mtl_addr(dst, n, &db, &dof)) MDIE("buffer fill address is in no memory pool dst=%#llx n=%#llx", (unsigned long long)dst, (unsigned long long)n);
@@ -1705,7 +1892,7 @@ static void post(post_op o) {
     g_post[g_npost++] = o;
 }
 void mtl_sub_event(volatile uint32_t *val, uint32_t mode, uint32_t v) { post((post_op){1, val, mode, v, 0, 0, NULL}); }
-static int seg_ts(void); static void ts_clk(void);
+static void ts_clk(void);
 void mtl_sub_counter(uint64_t addr, uint32_t type) { sbw_note(addr, 16, SBW_REPORT); post((post_op){2, NULL, 0, 0, addr, type, NULL, g_seg}); ts_clk(); }
 void mtl_counter_stats(uint64_t rep[32], uint64_t rst[32]) { memcpy(rep, g_cnt_report, sizeof g_cnt_report); memcpy(rst, g_cnt_reset, sizeof g_cnt_reset); }
 
@@ -1911,7 +2098,7 @@ static void post_run(post_rec *r, uint64_t c0, uint64_t c1) {
     @autoreleasepool {
     int n = r->n; post_op *ops = r->ops; seg_clk *sc = r->sc; uint32_t seg_last = r->seg_last;
     for (int i = 0; i < n; i++) {
-        if (ops[i].kind == 1) { if (ops[i].mode == 1) *ops[i].val += ops[i].v; else *ops[i].val = ops[i].v; }
+        if (ops[i].kind == 1) continue;   // A terminal release publishes after every earlier GPU write has landed.
         else if (ops[i].kind == 3) {   // Samples passed: the sum of all slots since the reset
             vis_list *l = ops[i].vis; uint64_t sum = 0;
             for (int k = 0; k < l->n; k++) { sum += ((const uint64_t *)((__bridge id<MTLBuffer>)l->s[k].buf).contents)[l->s[k].slot]; CFRelease(l->s[k].buf); }
@@ -1920,6 +2107,13 @@ static void post_run(post_rec *r, uint64_t c0, uint64_t c1) {
         else if (ops[i].kind == 4) mirror_rb_land(ops[i].vis);
         else { uint64_t t = rep_ticks(&ops[i], sc, seg_last, c0, c1), rec[2] = {(ops[i].type == 0 || ops[i].type == 0x10) && !DM_GAME_RENDER_COND ? t : 0, t}; memcpy((void *)ops[i].addr, rec, sizeof rec); }   // render_cond: a timestamp report's counter field is 0, as on the GPU (see rc_value)
     }
+    // Forwarded counter values expire once their CPU-visible reports have landed.
+    // This precedes event publication so a released CPU writer is never hidden by stale knowledge.
+    uint64_t completed=atomic_load_explicit(&g_rc_complete,memory_order_relaxed);
+    while(completed<r->fence && !atomic_compare_exchange_weak_explicit(&g_rc_complete,&completed,r->fence,memory_order_release,memory_order_relaxed)) {}
+    // Pass teardown can append mirror readbacks after the recorded signal. They are
+    // preceding GPU writes, and must be CPU-visible before this prefix releases its event.
+    for (int i=0;i<n;i++) if(ops[i].kind==1) nvn_event_publish_gpu(ops[i].val,ops[i].mode,ops[i].v,r->fence);
     free(ops); seg_clk_put(sc); r->ops = NULL; r->sc = NULL;
     atomic_store(&r->claimed, 1);
     pthread_mutex_unlock(&g_post_mu);
@@ -1940,9 +2134,11 @@ static void post_complete(uint64_t fence, uint64_t c0, uint64_t c1) {
         post_run(r, f == fence && c1 ? c0 : seg_ts() ? start : 0, f == fence && c1 ? c1 : seg_ts() ? now : 0);
     }
     pthread_mutex_lock(&g_mu); if (fence > g_done) g_done = fence; pthread_cond_broadcast(&g_cv); pthread_mutex_unlock(&g_mu);
+    nvn_queue_gpu_progress();
 }
 static _Atomic int g_seg_inflight;   // main command buffers committed and not reported back yet (sub_cut)
 static void rt_preserve_bound(void);
+static void queue_program_preserve(void);
 uint64_t mtl_sub_commit(void) {
     lc_land();   // clears still waiting (the command list ends with them)
     defer_fallback();   // Deferred merged pass: at the end of the submission there are still P draws not replayed (the normal path never gets here)
@@ -1954,8 +2150,9 @@ uint64_t mtl_sub_commit(void) {
     g_cut_copy = 0;
     treg_finish_submission();   // Late descriptor views retire behind this submission's fence.
     rt_preserve_bound();   // The game may reuse completed command memory; queue bindings must not point into its texture snapshots.
+    queue_program_preserve(); // Submitted metadata may retire while these programs remain bound.
     uint64_t fence = ++g_fence;
-    gw_commit(fence);
+    gw_commit(fence); rc_commit(fence);
     if (g_vis_ring_i >= 0) g_vis_ring[g_vis_ring_i].fence = fence;
     // CPU-visible effects after completion: copy the op table into the callback
     int n = g_npost; post_op *ops = n ? malloc(n * sizeof *ops) : NULL; post_rec *pr = &g_postr[fence % POST_RING];
@@ -2000,6 +2197,7 @@ uint64_t mtl_sub_commit(void) {
     return fence;
 }
 
+uint64_t mtl_completed_fence(void) { return atomic_load_explicit(&g_done,memory_order_acquire); }
 uint64_t mtl_last_fence(void) { return g_fence; }
 int mtl_last_commit_error(void) { return atomic_load(&g_last_commit_error); }
 
@@ -2155,9 +2353,14 @@ static void image_desc_drop_pool(const void *pool) {   // caller holds g_smu
         } else i++;
     }
 }
+// Deferred command descriptors and persistent bindings retain a texture serial
+// independently of the guest descriptor and the bounded recently-finalized cache.
+typedef struct { unsigned refs; void *object; } tex_pin;
+static nvn_hmap g_tex_pins={.klen=8}, g_tex_pin_objects={.klen=sizeof(uintptr_t)};
+static int tex_object_pinned(id o) { uintptr_t key=(uintptr_t)(__bridge void *)o; return o && nvn_hm_get(&g_tex_pin_objects,&key)!=NULL; }
 static CFMutableSetRef g_alias_set;   // Textures in the sharing table (non-owning; used to ask "is this shared")
 static uint64_t g_alias_evicted;   // shared textures evicted on pool Finalize so far (for the memory report)
-static int alias_has(id o) { return g_alias_set && o && CFSetContainsValue(g_alias_set, (__bridge const void *)o); }
+static int alias_has(id o) { return tex_object_pinned(o) || (g_alias_set && o && CFSetContainsValue(g_alias_set, (__bridge const void *)o)); }
 static void retire_wait(id o) {   // defer_drain: a serial entry still holds what it retires. Caller holds g_smu
     uintptr_t k = (uintptr_t)(__bridge void *)o;
     if (!nvn_hm_get(&g_retire_held, &k)) nvn_hm_put(&g_retire_held, &k, (void *)CFBridgingRetain(o));
@@ -2265,8 +2468,34 @@ void mtl_tex_init(const tex_t *t) {
     pthread_mutex_unlock(&g_smu);
 }
 static void obj_drop(id o) { if (alias_has(o)) defer_obj_unref(o); else defer_obj_release(o); }   // caller holds g_smu
+static void tex_pin_set(tex_pin *pin,id object) { // g_smu held
+    id old=(__bridge id)pin->object; if(old==object) return;
+    if(old) {
+        uintptr_t key=(uintptr_t)pin->object, count=(uintptr_t)nvn_hm_get(&g_tex_pin_objects,&key);
+        if(count>1) nvn_hm_put(&g_tex_pin_objects,&key,(void *)(count-1)); else nvn_hm_del(&g_tex_pin_objects,&key);
+        held_add(pin->object,-1); if(alias_has(old) || serial_table_holds((__bridge void *)old)) defer_obj_unref(old); else defer_obj_release(old); CFRelease(pin->object); pin->object=NULL;
+    }
+    if(object) {
+        pin->object=(void *)CFBridgingRetain(object); uintptr_t key=(uintptr_t)pin->object;
+        uintptr_t count=(uintptr_t)nvn_hm_get(&g_tex_pin_objects,&key);
+        nvn_hm_put(&g_tex_pin_objects,&key,(void *)(count+1)); held_add(pin->object,1);
+    }
+}
+void mtl_tex_pin(uint64_t serial) {
+    if(!serial) return; pthread_mutex_lock(&g_smu);
+    tex_pin *pin=nvn_hm_get(&g_tex_pins,&serial);
+    if(!pin) { pin=calloc(1,sizeof *pin); if(!pin) MDIE("texture retention allocation failed"); nvn_hm_put(&g_tex_pins,&serial,pin); }
+    pin->refs++;
+    if(!pin->object) { id o=hm_get_id(&g_by_serial,&serial); if(!o) o=hm_get_id(&g_ghost,&serial); tex_pin_set(pin,o); }
+    pthread_mutex_unlock(&g_smu);
+}
+void mtl_tex_unpin(uint64_t serial) {
+    if(!serial) return; pthread_mutex_lock(&g_smu); tex_pin *pin=nvn_hm_get(&g_tex_pins,&serial);
+    if(pin && !--pin->refs) { nvn_hm_del(&g_tex_pins,&serial); tex_pin_set(pin,nil); free(pin); }
+    pthread_mutex_unlock(&g_smu);
+}
 static __unsafe_unretained id tex_get(uint64_t k) {
-    pthread_mutex_lock(&g_smu); __unsafe_unretained id o = hm_get_id(&g_by_serial, &k); if (!o && g_ghost.n) o = hm_get_id(&g_ghost, &k); pthread_mutex_unlock(&g_smu); return o;
+    pthread_mutex_lock(&g_smu); __unsafe_unretained id o = hm_get_id(&g_by_serial, &k); if (!o && g_ghost.n) o = hm_get_id(&g_ghost, &k); if(!o) { tex_pin *pin=nvn_hm_get(&g_tex_pins,&k); if(pin) o=(__bridge id)pin->object; } pthread_mutex_unlock(&g_smu); return o;
 }
 static void tex_put(uint64_t k, id o) {   // serials from 2^62 up are external textures (mtl_ext_tex), never initialized by the game
     pthread_mutex_lock(&g_smu);
@@ -2279,7 +2508,7 @@ static void tex_put(uint64_t k, id o) {   // serials from 2^62 up are external t
         if (*slot) { id ev = hm_get_id(&g_ghost, slot); if (ev) { ghost_held_add((__bridge void *)ev, -1); obj_drop(ev); } hm_del_id(&g_ghost, slot); ser_note(*slot); }   // the evicted serial resolves anew too
         *slot = k; g_ghost_puts++;
     }
-    hm_put_id(m, &k, o); ser_note(k);
+    hm_put_id(m, &k, o); tex_pin *pin=nvn_hm_get(&g_tex_pins,&k); if(pin) tex_pin_set(pin,o); ser_note(k);
     count_add(m == &g_by_serial ? &g_by_serial_held : &g_ghost_held, (__bridge void *)o, 1);
     pthread_mutex_unlock(&g_smu);
 }
@@ -2533,6 +2762,7 @@ static id<MTLTexture> tex_upgrade(const tex_t *t, id<MTLTexture> asked, MTLTextu
             nvn_hmap *cnt = j == 0 ? &g_by_serial_held : &g_ghost_held; count_add(cnt, old, -1); count_add(cnt, (__bridge void *)upgraded, 1);   // the count moves with the name
             CFRelease(old); named |= serial == t->serial;
         }
+        for(uint32_t i=0;i<g_tex_pins.cap;i++) if(g_tex_pins.vals[i]) { tex_pin *pin=g_tex_pins.vals[i]; if(pin->object==(__bridge void *)base) tex_pin_set(pin,upgraded); }
         for (uint32_t i = 0; i < g_alias.cap; i++) {
             if (g_alias.vals[i] != (__bridge void *)base) continue;
             void *old = g_alias.vals[i]; g_alias.vals[i] = (void *)CFBridgingRetain(upgraded); CFRelease(old); shared = 1;
@@ -4152,9 +4382,8 @@ static void rr_snap(const p_draw *, const p_draw_idx *);
 static void rr_reset(void);
 #endif
 static id<MTL4RenderCommandEncoder> g_enc;
-// Segment times without the segments. A report in segment mode takes the GPU start or end of the segment it fell in, and what a game's controller makes of those depends on where the boundaries lie: Ocarina of Time, given each report's own true time, went to its lowest resolution and
-// frames of 13 and 52 ms in turn. So the boundaries stay every cut_draws() draws, each with a GPU timestamp, whether or not the host commits there (sub_cut): the game reads what it read, and a GPU still busy gets no extra command buffer. The encode thread records its command
-// buffers and has no such write: with it each boundary stays a commit
+// Segment timestamps retain the existing GPU boundaries every cut_draws() draws, even when sub_cut keeps the command buffer open.
+// The encode-thread path keeps its existing feedback-based segment fallback; its exact BOTTOM stamps are recorded by DmRecCB independently of this heap.
 enum { TS_SLOTS = 4096 };   // the largest timestamp heap Metal makes
 static uint32_t g_ts_next; static int g_ts_state, g_ts_s0;   // state: 0 not tried, 1 on, -1 off; s0: the slot of this submission's first boundary
 static int ts_on(void) {
@@ -5561,7 +5790,27 @@ static __unsafe_unretained NvProg *prog_get(const prog_t *cp) {   // Called only
     if (p->serial) serial_put(p->serial, o);
     return o;
 }
-void mtl_prog_release(prog_t *p) { if (p->serial) serial_del(p->serial); }
+// A submitted descriptor and a queue binding hold the compiled program by its
+// immutable initialization serial. Retaining it must not mint serial aliases:
+// alias churn invalidates texture tables and changes composite-program keys.
+typedef struct { unsigned refs, retired; } prog_pin;
+static nvn_hmap g_prog_pins={.klen=8}; // protected by the submission lock
+void mtl_prog_release(prog_t *p) {
+    if(!p->serial) return;
+    prog_pin *pin=nvn_hm_get(&g_prog_pins,&p->serial);
+    if(pin) pin->retired=1; else serial_del(p->serial);
+}
+void mtl_prog_unpin(prog_t *p) {
+    prog_pin *pin=nvn_hm_get(&g_prog_pins,&p->serial);
+    if(pin && !--pin->refs) { nvn_hm_del(&g_prog_pins,&p->serial); if(pin->retired) serial_del(p->serial); free(pin); }
+}
+void mtl_prog_snapshot(prog_t *copy,const prog_t *source) {
+    prog_get(source); *copy=*source;
+    if(!source->serial) MDIE("cannot retain a program without an initialization serial");
+    prog_pin *pin=nvn_hm_get(&g_prog_pins,&source->serial);
+    if(!pin) { pin=calloc(1,sizeof *pin); if(!pin) MDIE("program retention allocation failed"); nvn_hm_put(&g_prog_pins,&source->serial,pin); }
+    pin->refs++;
+}
 
 // ---------- Descriptor pool: texture ID / sampler ID → object ----------
 // At registration the whole texture object is snapshotted (NVN semantics: the descriptor has been written into the pool); view: the MTLTexture for that ID (a view or the base texture, held via CFBridgingRetain) and the serial-table / guest-write generations at the time it was obtained
@@ -6525,6 +6774,7 @@ static void prog_resolve(void) {
 }
 static int g_state_inited;
 static void state_reset(void) {
+    g_rc_skip=0;
     g_state_inited = 1;
     memset(&S, 0, sizeof S);
     g_pso_dirty = g_dss_dirty = 1;
@@ -6537,7 +6787,7 @@ static void state_reset(void) {
 
 // GPU bindings belong to a queue, including across submissions. FFX/X-2 destroys its launcher's queue before creating a game's: a global S kept freed launcher programs in S.bst,
 // and X-2's first fragment-only bind dereferenced that stale vertex program in keys_hash. Separate queues also retain their own bindings when submissions alternate (Three Houses).
-typedef struct queue_state { uint64_t serial; typeof(S) s; typeof(R) r; tex_t rt_tex[9]; struct queue_state *next; } queue_state;
+typedef struct queue_state { uint64_t serial; typeof(S) s; typeof(R) r; tex_t rt_tex[9]; uint64_t rt_pins[9]; prog_t programs[6]; int rc_skip; struct queue_state *next; } queue_state;
 static queue_state *g_queue_states, *g_active_queue;
 // Recording snapshots belong to command memory, not to the queue. Keep only the
 // bound target descriptions after CPU replay, before this submission can finish
@@ -6552,6 +6802,10 @@ static void rt_preserve_bound(void) {
         source[k] = k == 8 ? R.rt.depth : k < R.rt.n ? R.rt.color[k] : NULL;
         if (source[k] && source[k] != &owned[k]) pending |= 1u << k;
     }
+    if (g_active_queue) for(int k=0;k<9;k++) {
+        uint64_t serial=source[k]?source[k]->serial:0, old=g_active_queue->rt_pins[k];
+        if(serial!=old) { mtl_tex_pin(serial); mtl_tex_unpin(old); g_active_queue->rt_pins[k]=serial; }
+    }
     if (!pending) return;
     tex_t next[9];   // Read every source first: retained targets can be reordered or aliased.
     for (int k = 0; k < 9; k++) if (pending & (1u << k)) next[k] = *source[k];
@@ -6560,12 +6814,32 @@ static void rt_preserve_bound(void) {
         if (k == 8) R.rt.depth = &owned[k]; else R.rt.color[k] = &owned[k];
     }
 }
+// Jobs own immutable program descriptors; the queue owns copies of bindings that survive a job.
+static void queue_program_preserve(void) {
+    queue_state *q=g_active_queue; if(!q) return;
+    const prog_t *bound[6]={S.bst[0],S.bst[1],S.bst[2],S.bst[3],S.bst[4],S.cprog};
+    int changed=0;
+    for(int i=0;i<6;i++) if(bound[i] && ((uintptr_t)bound[i]<(uintptr_t)q->programs || (uintptr_t)bound[i]>=(uintptr_t)(q->programs+6))) changed=1;
+    if(!changed) return;
+    prog_t next[6]={0}; int index[6],count=0;
+    for(int i=0;i<6;i++) {
+        index[i]=-1; if(!bound[i]) continue;
+        int k=0; while(k<count && next[k].serial!=bound[i]->serial) k++;
+        if(k==count) { mtl_prog_snapshot(&next[k],bound[i]); count++; }
+        index[i]=k;
+    }
+    for(int i=0;i<6;i++) if(q->programs[i].serial) mtl_prog_unpin(&q->programs[i]);
+    memset(q->programs,0,sizeof q->programs);
+    for(int i=0;i<count;i++) q->programs[i]=next[i];
+    for(int i=0;i<5;i++) S.bst[i]=index[i]<0?NULL:&q->programs[index[i]];
+    S.cprog=index[5]<0?NULL:&q->programs[index[5]]; S.prog=bind_stages(NULL,0); args_dirty_all();
+}
 void mtl_queue_activate(uint64_t serial) {   // caller holds the submission lock
     if (g_active_queue && g_active_queue->serial == serial) return;
-    if (g_active_queue) { g_active_queue->s = S; g_active_queue->r = R; }
+    if (g_active_queue) { g_active_queue->s = S; g_active_queue->r = R; g_active_queue->rc_skip=g_rc_skip; }
     queue_state *q = g_queue_states;
     while (q && q->serial != serial) q = q->next;
-    if (q) { S = q->s; R = q->r; prog_resolve(); }
+    if (q) { S = q->s; R = q->r; g_rc_skip=q->rc_skip; prog_resolve(); }
     else {
         q = calloc(1, sizeof *q); if (!q) MDIE("queue state allocation failed");
         q->serial = serial; q->next = g_queue_states; g_queue_states = q;
@@ -6579,6 +6853,8 @@ void mtl_queue_forget(uint64_t serial) {   // caller holds the submission lock
     if (!*p) return;
     queue_state *q = *p; *p = q->next;
     if (g_active_queue == q) { g_active_queue = NULL; state_reset(); memset(&R, 0, sizeof R); args_dirty_all(); }
+    for(int i=0;i<6;i++) if(q->programs[i].serial) mtl_prog_unpin(&q->programs[i]);
+    for(int i=0;i<9;i++) mtl_tex_unpin(q->rt_pins[i]);
     free(q);
 }
 // A finalized program leaves the bindings of every queue: NVN reads a program only when it is bound, so a game may finalize one that a queue still has bound and reuse its memory.
@@ -7178,7 +7454,7 @@ static void lo_bind(id<MTLCommandEncoder> en) {
 #define PSO_WHOLE @"built whole"   // pso_desc's label for pso_build_ex: no base, see there
 static MTLRenderPipelineDescriptor *pso_desc(const pso_key *k, NvShader *vs, NvShader *fs, id<MTLFunction> fsfn, int merged) {
     MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
-    d.vertexFunction = vs->fn; d.fragmentFunction = fsfn ? fsfn : fs ? fs->fn : nil;
+    d.vertexFunction = vs->mesh_kind == 2 ? nil : vs->fn; d.fragmentFunction = fsfn ? fsfn : fs ? fs->fn : nil;   // mtk_pso copies the raster state only: a mesh function is not a vertex function
     // Diagnostic DM_NVN_HILITE=fragment shader key,...: these draws use a solid-color fragment instead (keys 1–6 in order magenta / green / cyan / yellow / blue / white), to see where the geometry lands
     // Pipelines are built on several threads at once: the keys and the library are set up once (a lazy setup raced, and a thread used a library another had just replaced: Hades II, 6 keys)
     if (fs) { static char keys[6][24]; static int nk; static id<MTLLibrary> hl; static dispatch_once_t once;
@@ -13577,7 +13853,7 @@ void mtl_exec(const uint8_t *p) {
                 PD("Y signal_event cmd=%p dst=%p mode=%u value=%u", p, val, m, v); mtl_sub_event(val, m, v); break; }
             case OP_REPORT_COUNTER: { uint64_t t, ad; memcpy(&t, a, 8); memcpy(&ad, (const uint8_t *)a + 8, 8); g_cnt_report[t & 31]++;
                 PD("Q report type=%llu cmd=%p dst=%#llx", (unsigned long long)t, p, (unsigned long long)ad);
-                if (DM_GAME_RENDER_COND) rc_note(ad, t == 0 || t == 0x10 ? 1 : 2);
+                if (DM_GAME_RENDER_COND) rc_note(ad, t == 0 || t == 0x10 ? 1 : t == NVN_COUNTER_TYPE_SAMPLES_PASSED ? 2 : 3);
                 if (t == NVN_COUNTER_TYPE_SAMPLES_PASSED) { post((post_op){3, NULL, 0, 0, ad, (uint32_t)t, vis_snapshot()}); g_vis_cur = -1; }
                 else mtl_sub_counter(ad, (uint32_t)t);
                 break; }
@@ -14637,14 +14913,14 @@ __attribute__((weak)) uint64_t dm_focus_in_since(void) { return 0; }
     if (fifo && ticket > first) ticket = ticket - first >= 2 ? g_pq_in - 1 : first;
     pq_item it = g_pq[(ticket - 1) % PQ]; g_link_it_tin = it.t_in;
     g_pq_read = ticket;
-    if (ticket > first) { g_link_dropped += ticket - first; for (uint64_t k = first; k < ticket; k++) g_pres[k % PRING] = (pres_ent){k, -1}; }   // Old frames merged and dropped are recorded as "not presented", so the present statistics honestly count them as dropped frames
+    if (ticket > first) { g_link_dropped += ticket - first; for (uint64_t k = first; k < ticket; k++) { g_pres[k % PRING] = (pres_ent){k, -1}; mtl_tex_unpin(g_pq[(k-1)%PQ].t.serial); } }   // Old frames merged and dropped are recorded as "not presented", so the present statistics honestly count them as dropped frames
     if (ticket > 1 && g_pq_done < ticket - 1) g_pq_done = ticket - 1;
     g_link_ring[ticket % PRING] = (link_ent){ticket, update.targetPresentationTimestamp, (update.targetPresentationTimestamp - cb) * 1e3, gap_max * 1e3, nticks}; nticks = 0; gap_max = 0;
     pthread_cond_broadcast(&g_pq_cv);
     pthread_mutex_unlock(&g_pq_mu);
     int submitted;
     ext_wait(it.ev_val); snap_commit_wait(it.snap_v);
-    @autoreleasepool { submitted = present_now(&it.t, it.period, it.frame, ticket, it.crop, update.drawable, update.targetPresentationTimestamp); }
+    @autoreleasepool { submitted = present_now(&it.t, it.period, it.frame, ticket, it.crop, update.drawable, update.targetPresentationTimestamp); mtl_tex_unpin(it.t.serial); }
     g_link_hold_until = submitted && it.period > 0.025 ? update.targetPresentationTimestamp + it.period : 0;
     if (!submitted) {
         pthread_mutex_lock(&g_pq_mu);
@@ -14751,7 +15027,7 @@ static void present_drop_for_suspend(void) {
     pthread_mutex_lock(&g_pq_mu);
     if (g_link_owns_layer) {
         uint64_t n = g_pq_in - g_pq_read;
-        for (uint64_t k = g_pq_read + 1; k <= g_pq_in; k++) g_pres[k % PRING] = (pres_ent){k, -1};
+        for (uint64_t k = g_pq_read + 1; k <= g_pq_in; k++) { g_pres[k % PRING] = (pres_ent){k, -1}; mtl_tex_unpin(g_pq[(k-1)%PQ].t.serial); }
         g_link_dropped += n; g_pq_read = g_pq_in;
         while (g_pq_inflight) pthread_cond_wait(&g_pq_cv, &g_pq_mu);
         if (g_pq_done < g_pq_in) g_pq_done = g_pq_in;
@@ -14773,7 +15049,7 @@ static void *present_main(void *arg) {
         pthread_mutex_unlock(&g_pq_mu);
         int submitted;
         ext_wait(it.ev_val); snap_commit_wait(it.snap_v);
-        @autoreleasepool { submitted = present_now(&it.t, it.period, it.frame, ticket, it.crop, nil, 0); }
+        @autoreleasepool { submitted = present_now(&it.t, it.period, it.frame, ticket, it.crop, nil, 0); mtl_tex_unpin(it.t.serial); }
         pthread_mutex_lock(&g_pq_mu); g_classic_busy = 0; pthread_cond_broadcast(&g_pq_cv); pthread_mutex_unlock(&g_pq_mu);
         if (!submitted) {
             pthread_mutex_lock(&g_pq_mu);
@@ -14936,6 +15212,7 @@ static uint64_t present_enqueue(const tex_t *t, double period, const int crop[4]
         slot = (int)(atomic_load(&g_snap_next) % (uint64_t)g_snap_n);
         if ((ss = snap_take(t))) { memset(&snap, 0, sizeof snap); snap.magic = MAGIC('T', 'E', 'X', 0); snap.serial = ss; t = &snap; }
     }
+    mtl_tex_pin(t->serial);
     pthread_mutex_lock(&g_pq_mu);
     while (g_pq_in - g_pq_done >= PQ) pthread_cond_wait(&g_pq_cv, &g_pq_mu);   // Wait only when the queue is full; normally AcquireTexture blocks first
     pq_item *it = &g_pq[g_pq_in % PQ]; *it = (pq_item){*t, period, atomic_load(&g_cur_frame), {0}, CACurrentMediaTime(), ev_val, ss ? g_snap[slot].ev : 0};
@@ -14962,7 +15239,7 @@ void mtl_present_wait(uint64_t tk) {
         if (g_pq_read >= tk) continue;
         if (now - last < STALL_NS) { pthread_cond_timedwait(&g_pq_cv, &g_pq_mu, &ts); continue; }   // The display link is still running, it is just not this one's turn yet: keep waiting (bounded, no busy spinning)
         uint64_t n = tk - g_pq_read;
-        for (uint64_t k = g_pq_read + 1; k <= tk; k++) g_pres[k % PRING] = (pres_ent){k, -1};
+        for (uint64_t k = g_pq_read + 1; k <= tk; k++) { g_pres[k % PRING] = (pres_ent){k, -1}; mtl_tex_unpin(g_pq[(k-1)%PQ].t.serial); }
         g_link_dropped += n; g_pq_read = tk;
         while (g_pq_inflight) pthread_cond_wait(&g_pq_cv, &g_pq_mu);
         if (g_pq_done < tk) g_pq_done = tk;

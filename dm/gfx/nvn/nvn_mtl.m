@@ -8699,7 +8699,8 @@ static __unsafe_unretained id<MTLRenderPipelineState> pso_get_(NvProg *pr, MTLRe
                 // Demand first (main's order): the draw's own pipeline is queued before the prediction admits speculative builds; with a stand-in nothing waits for it
                 __unsafe_unretained id<MTLRenderPipelineState> h = hybrid_get(&k, vs, fs);
                 if (h) {
-                    if (st == 0) { pso_pend_demand(&k, vs, fs); wl_bump(vs->key, fs ? fs->key : ""); }   // the pair's task in warm_later's list, if still queued, builds next
+                    if (st == 0) pso_pend_demand(&k, vs, fs);
+                    wl_bump(vs->key, fs ? fs->key : "");   // the pair's task in warm_later's list, if still queued, builds next (also when the pipeline is already pending)
                     g_pso_pull = 1; g_hy_ns += bp_now() - bt;
                     if (g_pp_submit_mark != g_sub_serial) { g_pp_submit_mark = g_sub_serial; uint64_t t0 = bp_now(); pso_predict_rest(); g_bp_pso_ns += bp_now() - t0; }
                     return h;
@@ -9005,24 +9006,28 @@ static void prepare_prebuild(void) {
 // The background list's order. Workers take the next task of the list, but a task a draw asked for (wl_bump: the draw has its shader pair's pulling stand-in because the pair's
 // pipelines are still queued here) goes first, so the area the player is in builds before the rest of the playthrough. A task is built once: wl_st goes to 2 by exchange, whoever
 // gets it from 0 or 1 builds it. The table of pairs is built once and only read afterwards (the draw thread takes no lock unless it bumps a task that was still queued)
-typedef struct { uint64_t h; __unsafe_unretained WarmTask *t; } wl_slot;
-static wl_slot *g_wl_tab; static size_t g_wl_mask; static NSArray<WarmTask *> *g_wl_rest; static _Atomic long g_wl_next; static _Atomic int g_wl_live, g_wl_nbump;
+typedef struct { uint64_t h; __unsafe_unretained WarmTask *t; char *v, *f; } wl_slot;   // the pair's keys are copied: the draw thread compares C strings, no message sends
+typedef struct { size_t mask; wl_slot s[]; } wl_table;
+static _Atomic(wl_table *) g_wl_tab; static NSArray<WarmTask *> *g_wl_rest; static _Atomic long g_wl_next; static _Atomic int g_wl_live, g_wl_nbump;
 static os_unfair_lock g_wl_lock = OS_UNFAIR_LOCK_INIT; static NSMutableArray<WarmTask *> *g_wl_bumps; static NSUInteger g_wl_bhead; static _Atomic uint64_t g_wl_bumped, g_wl_miss;
 static uint64_t wl_hash(const char *v, const char *f) { uint64_t h = 1469598103934665603ull; for (; *v; v++) h = (h ^ (uint8_t)*v) * 1099511628211ull; h = (h ^ 0xff) * 1099511628211ull; for (; f && *f; f++) h = (h ^ (uint8_t)*f) * 1099511628211ull; return h | 1; }
-static int wl_same(WarmTask *t, const char *v, const char *f) { return !strcmp(t->vkey.UTF8String, v) && !strcmp(t->fkey.UTF8String, f ? f : ""); }
-static void wl_init(NSArray<WarmTask *> *rest) {   // before any worker or bump; a table of a first list is cleared and reused
+static wl_slot *wl_find(wl_table *tb, const char *v, const char *f) {   // the pair's slot, or the empty slot where it would go
+    uint64_t h = wl_hash(v, f); size_t i = h & tb->mask;
+    while (tb->s[i].h && !(tb->s[i].h == h && !strcmp(tb->s[i].v, v) && !strcmp(tb->s[i].f, f ? f : ""))) i = (i + 1) & tb->mask;
+    return &tb->s[i];
+}
+// Once per list, before any worker or bump. The table is published whole; an older one (a second list in a test) stays allocated, as a draw may still be probing it
+static void wl_init(NSArray<WarmTask *> *rest) {
     atomic_store(&g_wl_live, 0); g_wl_rest = rest; atomic_store(&g_wl_next, 0); atomic_store(&g_wl_nbump, 0); atomic_store(&g_wl_bumped, 0); atomic_store(&g_wl_miss, 0); g_wl_bumps = [NSMutableArray array]; g_wl_bhead = 0;
     size_t cap = 16; while (cap < rest.count * 2) cap <<= 1;
-    if (!g_wl_tab || cap > g_wl_mask + 1) { g_wl_tab = calloc(cap, sizeof *g_wl_tab); g_wl_mask = cap - 1; }   // one list per process; an old table is not freed (a draw may be reading it)
-    else memset(g_wl_tab, 0, (g_wl_mask + 1) * sizeof *g_wl_tab);
+    wl_table *tb = calloc(1, sizeof *tb + cap * sizeof(wl_slot)); tb->mask = cap - 1;
     for (WarmTask *t in rest) {
         atomic_store(&t->wl_st, 0);
         if (t->kind != 1) continue;
-        uint64_t h = wl_hash(t->vkey.UTF8String, t->fkey.UTF8String);
-        size_t i = h & g_wl_mask; while (g_wl_tab[i].h && !(g_wl_tab[i].h == h && wl_same(g_wl_tab[i].t, t->vkey.UTF8String, t->fkey.UTF8String))) i = (i + 1) & g_wl_mask;
-        if (!g_wl_tab[i].h) { g_wl_tab[i].h = h; g_wl_tab[i].t = t; }   // a pair named twice stays one task (warm_parse joins its rows)
+        wl_slot *sl = wl_find(tb, t->vkey.UTF8String, t->fkey.UTF8String);
+        if (!sl->h) { sl->h = wl_hash(t->vkey.UTF8String, t->fkey.UTF8String); sl->t = t; sl->v = strdup(t->vkey.UTF8String); sl->f = strdup(t->fkey.UTF8String); }   // a pair named twice stays one task (warm_parse joins its rows)
     }
-    atomic_store(&g_wl_live, 1);
+    atomic_store(&g_wl_tab, tb); atomic_store(&g_wl_live, 1);
 }
 static WarmTask *wl_next(void) {   // the next task to build, nil at the end of the list
     for (;;) {
@@ -9041,9 +9046,8 @@ static WarmTask *wl_next(void) {   // the next task to build, nil at the end of 
 // A draw falls back to its pair's pulling pipeline: move the pair's task to the front if it is still queued. Returns 1 when it was moved. Safe from any thread
 static int wl_bump(const char *vkey, const char *fkey) {
     if (!atomic_load(&g_wl_live)) return 0;
-    uint64_t h = wl_hash(vkey, fkey); size_t i = h & g_wl_mask;
-    while (g_wl_tab[i].h && !(g_wl_tab[i].h == h && wl_same(g_wl_tab[i].t, vkey, fkey))) i = (i + 1) & g_wl_mask;
-    WarmTask *t = g_wl_tab[i].h ? g_wl_tab[i].t : nil; if (!t) { atomic_fetch_add(&g_wl_miss, 1); return 0; }   // a pair the list does not hold (built before the mark, or in no list)
+    wl_slot *sl = wl_find(atomic_load(&g_wl_tab), vkey, fkey);
+    WarmTask *t = sl->h ? sl->t : nil; if (!t) { atomic_fetch_add(&g_wl_miss, 1); return 0; }   // a pair the list does not hold (built before the mark, or in no list)
     int z = 0; if (!atomic_compare_exchange_strong(&t->wl_st, &z, 1)) return 0;   // taken or bumped already
     os_unfair_lock_lock(&g_wl_lock); [g_wl_bumps addObject:t]; atomic_fetch_add(&g_wl_nbump, 1); os_unfair_lock_unlock(&g_wl_lock);
     atomic_fetch_add(&g_wl_bumped, 1); return 1;
@@ -9059,11 +9063,11 @@ static void warm_later(NSArray<WarmTask *> *rest, long rest_lines) {
     wl_init(rest);
     dispatch_group_t g = dispatch_group_create();
     for (int w = 0; w < workers; w++) dispatch_group_async(g, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        for (WarmTask *t; (t = wl_next()); ) warm_task(t);
+        for (;;) { @autoreleasepool { WarmTask *t = wl_next(); if (!t) break; warm_task(t); t->rs = nil; } }   // a built task keeps nothing (the table holds the task and its keys)
     });
     dispatch_group_notify(g, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ @autoreleasepool {
         atomic_store(&g_wl_live, 0);
-        MLOG("pipeline prewarm: the %ld lines after the first frame done in %.1f s (%llu pairs moved to the front by draws; %llu stand-in draws named a pair the list does not hold)", rest_lines, (bp_now() - t0) / 1e9, (unsigned long long)atomic_load(&g_wl_bumped), (unsigned long long)atomic_load(&g_wl_miss));
+        MLOG("pipeline prewarm: the %ld lines after the first frame done in %.1f s (%llu pairs moved to the front by draws; %llu stand-in pipelines named a pair the list does not hold)", rest_lines, (bp_now() - t0) / 1e9, (unsigned long long)atomic_load(&g_wl_bumped), (unsigned long long)atomic_load(&g_wl_miss));
         warm_finish();
     } });
 }

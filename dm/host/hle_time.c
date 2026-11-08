@@ -15,6 +15,24 @@ static int64_t fixed_time(void) {
                    if (v >= 0) LOG("DM_FIXED_TIME=%lld: the user clock returns a fixed value", (long long)v); }
     return v;
 }
+// The game clock's distance from the host clock, in seconds; 0 follows the system clock. DM_TIME_OFFSET at start (the Clock menu's choice, saved per game: dm/mac/launcher.c), then the Clock
+// menu (front_mac.m). A change renews the context below, so the game sees a clock change by the user. Not under DM_FIXED_TIME
+static _Atomic int64_t g_time_offset = INT64_MIN;   // INT64_MIN: DM_TIME_OFFSET not read yet
+int64_t dm_time_offset(void) {
+    int64_t v = g_time_offset;
+    if (v == INT64_MIN) {
+        const char *e = getenv("DM_TIME_OFFSET"); char *end = NULL; int64_t s = e ? strtoll(e, &end, 10) : 0;
+        if (e && (end == e || *end)) { LOG("[RED] DM_TIME_OFFSET=%s is not a whole number of seconds: the game clock follows the system clock", e); s = 0; }
+        if (atomic_compare_exchange_strong(&g_time_offset, &v, s) && s) LOG("time: game clock %+lld s from the system clock (DM_TIME_OFFSET)", (long long)s);
+        v = g_time_offset;
+    }
+    return fixed_time() >= 0 ? 0 : v;
+}
+void dm_time_set_offset(int64_t s) {
+    g_time_offset = s;
+    if (s) LOG("time: game clock %+lld s from the system clock (Clock menu)", (long long)s); else LOG("time: the game clock follows the system clock (Clock menu)");
+}
+int dm_time_fixed(void) { return fixed_time() >= 0; }
 HLE_FORCE("_ZN2nn4time10InitializeEv", "connect to the time service; clocks come from the host system time instead", Result, h_time_Initialize, void) { return RES_OK; }
 HLE_FORCE("_ZN2nn4time13IsInitializedEv", "the time service is taken over, always initialized", int, h_time_IsInitialized, void) { return 1; }
 // Steady clock (seconds since boot + a clock source ID, a 16-byte UUID): the host's monotonic seconds with a fixed source ID. GetSpanBetween runs as is in sdk: it subtracts only when the source IDs match
@@ -24,7 +42,7 @@ HLE_FORCE("_ZN2nn4time19StandardSteadyClock19GetCurrentTimePointEPNS0_20SteadyCl
 }
 HLE_FORCE("_ZN2nn4time38GetStandardSteadyClockCurrentTimePointEPNS0_20SteadyClockTimePointE", "steady clock (the free function form, SDK 20) → host monotonic clock", Result, h_time_SteadyNowFn, uint8_t *out) { return h_time_SteadyNow(out); }
 HLE_FORCE("_ZN2nn4time23StandardUserSystemClock14GetCurrentTimeEPNS0_9PosixTimeE", "user clock → host time()", Result, h_time_GetCurrentTime, int64_t *out) {
-    int64_t ft = fixed_time(); *out = ft >= 0 ? ft : time(NULL); return RES_OK;
+    int64_t ft = fixed_time(); *out = ft >= 0 ? ft : time(NULL) + dm_time_offset(); return RES_OK;
 }
 // The adjustable user clock (Animal Crossing: New Horizons 3.0.3, whose days follow it): the SDK keeps it in a MonotonicSystemClock that Adjust sets from the user clock's context, and its
 // GetCurrentTime reads the time service's shared memory, which the host never maps (an abort in MonotonicSystemClock::GetCurrentTime, sdk+0x4421cc on that build). On the host the user clock
@@ -36,7 +54,7 @@ HLE_FORCE("_ZN2nn4time25AdjustableUserSystemClock14GetCurrentTimeEPNS0_9PosixTim
 static int h_time_timespec(int64_t *ts) {
     int64_t ft = fixed_time();
     if (ft >= 0) { ts[0] = ft; ts[1] = 0; return 0; }
-    struct timespec t; clock_gettime(CLOCK_REALTIME, &t); ts[0] = t.tv_sec; ts[1] = t.tv_nsec; return 0;
+    struct timespec t; clock_gettime(CLOCK_REALTIME, &t); ts[0] = t.tv_sec + dm_time_offset(); ts[1] = t.tv_nsec; return 0;
 }
 HLE_FORCE("_ZN2nn4time41GetStandardUserSystemClockCurrentTimespecEP8timespec", "C library real-time clock from the user clock → host real time", int, h_time_StdTimespec, int64_t *ts) { return h_time_timespec(ts); }
 HLE_FORCE("_ZN2nn4time43GetAdjustableUserSystemClockCurrentTimespecEP8timespec", "C library real-time clock from the adjustable user clock → host real time", int, h_time_AdjTimespec, int64_t *ts) { return h_time_timespec(ts); }
@@ -67,7 +85,7 @@ HLE_FORCE("_ZN2nn4time23StandardUserSystemClock21GetSystemClockContextEPNS0_18Sy
     return RES_OK;
 }
 HLE_FORCE("_ZN2nn4time23StandardUserSystemClock3nowEv", "user clock → host time()", int64_t, h_time_now, void) {
-    int64_t ft = fixed_time(); return ft >= 0 ? ft : time(NULL); }
+    int64_t ft = fixed_time(); return ft >= 0 ? ft : time(NULL) + dm_time_offset(); }
 HLE_FORCE("_ZN2nn4time23StandardUserSystemClock9to_time_tERKNSt3__16chrono10time_pointINS0_17SystemClockTraitsENS3_8durationIlNS2_5ratioILl1ELl1EEEEEEE",
           "the SDK implementation pairs with now(), taken over with it", int64_t, h_time_to_time_t, const int64_t *tp) { return *tp; }
 HLE_FORCE("_ZN2nn4time14ToCalendarTimeEPNS0_12CalendarTimeEPNS0_22CalendarAdditionalInfoERKNS0_9PosixTimeE",

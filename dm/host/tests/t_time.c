@@ -91,6 +91,9 @@ int main(void) {
     memset(tp, 0xaa, sizeof tp); memset(loc, 0xaa, sizeof loc);
     CHECK(loc_upd && loc_upd(loc, tp) == RES_OK && !memcmp(loc, a + 0xa8, sizeof loc) && !memcmp(tp, none, sizeof tp), "device location: the snapshot's name, a cleared time point");
     CHECK(memcmp(tp + 8, a + 0x90 + 8, 16), "the cleared time point's source ID is not the snapshots' steady clock");
+    // DM_FIXED_TIME (read at the first snapshot) wins over the Clock menu: the clock stays fixed (t_time_offset tests the offset itself)
+    int64_t fixed_now = 0; dm_time_set_offset(3600);
+    CHECK(dm_time_fixed() && dm_time_offset() == 0 && h_time_GetCurrentTime(&fixed_now) == RES_OK && fixed_now == 1700000000, "a game clock offset is ignored under DM_FIXED_TIME");
     printf("time: %d checks, %d failed\n", checks, fails);
     return fails != 0;
 }

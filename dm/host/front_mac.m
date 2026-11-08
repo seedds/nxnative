@@ -798,6 +798,51 @@ static DmCheatsPanel *g_cheats_panel;   // created on the first Show Cheats Wind
 @end
 static DmCheatsMenuDelegate *g_cheats_menu;   // NSMenu keeps its delegate unretained
 
+// Clock (hle_time.c, dm_time_offset): the game's date and time follow the system clock, or a date and time the player sets, from which the clock keeps running.
+// The choice is kept per game in the app's preferences (clock.offset: the seconds from the system clock, a string), which dm/mac/launcher.c passes on as DM_TIME_OFFSET
+static void clock_save(int64_t s) {
+    CFStringRef domain = CFBundleGetIdentifier(CFBundleGetMainBundle());
+    if (!domain) return;   // a host started outside its app: nothing to keep
+    CFStringRef v = s ? CFStringCreateWithFormat(NULL, NULL, CFSTR("%lld"), (long long)s) : NULL;   // NULL removes the key: the system clock
+    CFPreferencesSetAppValue(CFSTR("clock.offset"), v, domain); CFPreferencesAppSynchronize(domain);
+    if (v) CFRelease(v);
+}
+@interface DmClockMenuDelegate : NSObject <NSMenuDelegate> @end
+@implementation DmClockMenuDelegate
+- (void)menuNeedsUpdate:(NSMenu *)menu {
+    [menu removeAllItems];
+    int fixed = dm_time_fixed(); int64_t off = dm_time_offset();
+    NSMenuItem *sys = [menu addItemWithTitle:@"Match System Clock" action:@selector(matchSystemClock:) keyEquivalent:@""];
+    sys.target = self; sys.enabled = !fixed; sys.state = off ? NSControlStateValueOff : NSControlStateValueOn;
+    NSMenuItem *set = [menu addItemWithTitle:@"Set Date and Time…" action:@selector(setDateAndTime:) keyEquivalent:@""];
+    set.target = self; set.enabled = !fixed; set.state = off ? NSControlStateValueOn : NSControlStateValueOff;
+    [menu addItem:NSMenuItem.separatorItem];
+    NSString *now = fixed ? @"fixed by DM_FIXED_TIME" : [NSDateFormatter localizedStringFromDate:[NSDate dateWithTimeIntervalSinceNow:off] dateStyle:NSDateFormatterMediumStyle timeStyle:NSDateFormatterShortStyle];
+    [menu addItemWithTitle:[@"Game clock: " stringByAppendingString:now] action:nil keyEquivalent:@""].enabled = NO;
+}
+- (void)matchSystemClock:(NSMenuItem *)it { (void)it; dm_time_set_offset(0); clock_save(0); }
+// A sheet on the game's window, so the game keeps running behind it
+- (void)setDateAndTime:(NSMenuItem *)it {
+    (void)it;
+    NSWindow *win = g_win; if (!win || win.attachedSheet) return;
+    NSAlert *a = [NSAlert new];
+    a.messageText = @"Set the game's date and time";
+    a.informativeText = @"The clock keeps running from this time, and the game keeps it until you choose Match System Clock.";
+    NSDate *shown = [NSDate dateWithTimeIntervalSinceNow:dm_time_offset()];
+    NSDatePicker *p = [NSDatePicker new];
+    p.datePickerStyle = NSDatePickerStyleTextFieldAndStepper;
+    p.datePickerElements = NSDatePickerElementFlagYearMonthDay | NSDatePickerElementFlagHourMinute;
+    p.dateValue = shown; [p sizeToFit]; a.accessoryView = p;
+    [a addButtonWithTitle:@"Set"]; [a addButtonWithTitle:@"Cancel"];
+    [a beginSheetModalForWindow:win completionHandler:^(NSModalResponse r) {
+        if (r != NSAlertFirstButtonReturn || [p.dateValue isEqualToDate:shown]) return;   // unchanged: the clock stays as it ran meanwhile
+        int64_t s = llround(p.dateValue.timeIntervalSinceNow);
+        dm_time_set_offset(s); clock_save(s);
+    }];
+}
+@end
+static DmClockMenuDelegate *g_clock_menu;   // NSMenu keeps its delegate unretained
+
 @implementation DmCheatsPanel {
     NSPanel *_panel;              // created once in show, kept for the process's lifetime
     NSTextField *_header;         // the one-line status line above the rows
@@ -1482,6 +1527,10 @@ void front_run(void (*guest)(void)) {
         [[bar addItemWithTitle:@"Cheats" action:nil keyEquivalent:@""] setSubmenu:cm];
         if (getenv("DM_CHEATS_WINDOW") && atoi(getenv("DM_CHEATS_WINDOW")))   // the Cheats panel open from the start (beside the game, not key)
             dispatch_async(dispatch_get_main_queue(), ^{ [g_cheats_menu showPanel:nil]; });
+        g_clock_menu = [DmClockMenuDelegate new];   // Clock: its rows rebuild on every open (the game clock line moves)
+        NSMenu *clk = [[NSMenu alloc] initWithTitle:@"Clock"];
+        clk.delegate = g_clock_menu; clk.autoenablesItems = NO;
+        [[bar addItemWithTitle:@"Clock" action:nil keyEquivalent:@""] setSubmenu:clk];
         [[bar addItemWithTitle:@"Window" action:nil keyEquivalent:@""] setSubmenu:wm];
         [wm addItemWithTitle:@"Enter Full Screen" action:@selector(toggleFullScreen:) keyEquivalent:@"f"].keyEquivalentModifierMask = NSEventModifierFlagControl | NSEventModifierFlagCommand;
         NSApp.mainMenu = bar;

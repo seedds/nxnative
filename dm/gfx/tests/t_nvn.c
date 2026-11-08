@@ -340,8 +340,8 @@ int main(void) {
     uint64_t ts[2]; memcpy(ts, cnt, 16);
     EXPECT("counter timestamp written (non-zero)", 1, ts[1] != 0);
     EXPECT("its counter field: the time, 0 with the profile's render_cond (as on the GPU)", DM_GAME_RENDER_COND ? 0 : ts[1], ts[0]);
-    NVNcounterData fixed_counter = {0, 614400};
-    EXPECT("614400 raw counter ticks = 1 ms", 1000000, P(nvnDeviceGetTimestampInNanoseconds)(&dev, &fixed_counter));
+    NVNcounterData fixed_counter = {0, nvn_ts_hz() / 1000};   // 614400 at the default rate, 31250 with Ocarina of Time's gpu_ts_hz
+    EXPECT("a millisecond of raw counter ticks at the report rate = 1 ms", 1000000, P(nvnDeviceGetTimestampInNanoseconds)(&dev, &fixed_counter));
     NVNcounterData reported_counter; memcpy(&reported_counter, cnt, sizeof reported_counter);
     uint64_t counter_ns = P(nvnDeviceGetTimestampInNanoseconds)(&dev, &reported_counter);
     EXPECT("report converted to ns lies inside submit/wait", 1, counter_ns + 2 >= counter_before && counter_ns <= counter_after);

@@ -457,6 +457,8 @@ def chain_build_locked(tree, g, a, v, inp, key, out):
         tools_dir = tree.path / 'dm/gfx/tools'
         cas = chain_cache(tree, g)
         env.update(XLATE=str(tools_dir / 'dmsh_xlate_bin/dmsh_xlate'), DMSH_CAS=str(cas))
+        # The cache is the player's: a chain build of another revision files its keys under other digests, and one in, one out would remove the player's entries (and the other revision's)
+        if env.get('DMSH_ONE_IN_ONE_OUT') == '1': env.update(DMSH_ONE_IN_ONE_OUT='0', DMSH_CAS_ZSTD=env.get('DMSH_CAS_ZSTD', '1'), DMSH_PREFILL_LAZY=env.get('DMSH_PREFILL_LAZY', '1'))
         entry = tools_dir / ('own_compilers.py' if (tools_dir / 'own_compilers.py').is_file() else 'dmsh_build.py')
         lib = out / f'b-{v}'
         if not done:

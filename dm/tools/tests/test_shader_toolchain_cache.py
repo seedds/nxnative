@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import types
 from typing import Any
 import unittest
@@ -287,6 +288,32 @@ class ShaderCache(unittest.TestCase):
         self.assertEqual((out / (key + '_b.metal')).read_text(), 'source')
         self.assertFalse(os.path.exists(shader_lib.image_of(str(out))))
 
+    def test_a_compressed_evicting_cache_writes_the_same_image(self):   # DMSH_ONE_IN_ONE_OUT changes how entries are kept, never an output
+        if shader_cache._zstd is None: self.skipTest('no zstd')
+        root, images = Path(self.tmp.name), {}
+        for mode, kw in (('plain', dict(compress=False, evict=False)), ('one in, one out', dict(compress=True, evict=True))):
+            out = root / mode.replace(' ', '_') / 'b-chain'; out.mkdir(parents=True)
+            store = shader_cache.Store(root / mode.replace(' ', '_') / 'cas.db', say=lambda m: None, **kw); self.addCleanup(store.close)
+            self.ns.update(STORE=store, out=str(out))
+            for chain_digest, body in (('d0', 'older chain'), ('d1', 'this chain')):   # an earlier chain's entries, then this build's (another digest per key)
+                if chain_digest == 'd1': store.opened = time.time() + 1e-3; time.sleep(2e-3)
+                for i in range(4):
+                    key = f'{i:016x}'
+                    (out / f'{key}_b.metal').write_text(f'{body} {key} ' * 50); (out / f'{key}_b.metallib').write_bytes(f'{body} {key} lib'.encode() * 20)
+                    (out / f'{key}_b.json').write_text(json.dumps({'stage': 'ps', 'chain': 'test-chain'}))
+                    self.ns['publish_cache'](key, chain_digest + key, 'rule', 'code')
+                    if chain_digest == 'd1': self.ns['commit'](key)
+                    else:
+                        for f in out.iterdir(): f.unlink()
+            for i in range(4):   # a later shader comes back from the cache: restored, then staged
+                key = f'{i + 8:016x}'; (out / f'{key}_b.metal').write_text('restored'); (out / f'{key}_b.metallib').write_bytes(b'R'); (out / f'{key}_b.json').write_text('{}')
+                self.ns['publish_cache'](key, 'r' + key, 'rule', 'code'); [f.unlink() for f in out.iterdir()]
+                self.assertTrue(self.ns['restore_cache'](key, 'r' + key)); self.ns['commit'](key)
+            self.ns['publish_library']('mac')
+            images[mode] = Path(shader_lib.image_of(str(out))).read_bytes()
+            if kw['evict']: self.assertEqual(store.evicted['shaders'], 4)
+        self.assertEqual(images['plain'], images['one in, one out'])
+
 
 class TargetSelection(unittest.TestCase):
     def test_mesh_compiles_only_requested_targets(self):
@@ -447,6 +474,90 @@ class MetalPrefill(unittest.TestCase):
         with self.assertRaises(ValueError): self.cache.compile_split('mac', str(msl), [str(a), str(b)], lambda lib: (lib,))   # fewer pieces than libraries
         self.assertEqual(sorted(p.name for p in self.root.glob('a.metallib*')), [])
         self.assertFalse(b.exists()); self.assertEqual(self.cache.stats['mac', 'compiled'], 0)
+
+
+class LazyPrefill(unittest.TestCase):
+    """DMSH_PREFILL_LAZY (or DMSH_ONE_IN_ONE_OUT): an earlier library enters the cache only when a compile asks for its source"""
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name); self.old = self.root / 'b-old'; self.old.mkdir(); (self.root / 'ios' / 'b-old').mkdir(parents=True); self.compiles = []
+        def compile_current(msl, air, lib): self.compiles.append(Path(msl).read_bytes()); Path(lib).write_bytes(b'TESTED ' + Path(msl).read_bytes())
+        with mock.patch.object(dmsh_mtlcache, 'compiler_id', return_value='tested compiler and SDK'), mock.patch.dict(os.environ, {'DMSH_PREFILL_LAZY': '1'}):
+            self.cache = dmsh_mtlcache.Cache(shader_cache.Store(self.root / 'cas.db', compress=False, evict=False),
+                                             {'mac': ('macosx', 'flags', compile_current), 'ios': ('iphoneos', 'ios flags', compile_current)}, str(self.root))
+        self.addCleanup(self.cache.store.close)
+        for i in range(3):
+            stem = f'{i:016x}_b'; src = f'MSL {i}'.encode()
+            (self.old / (stem + '.metal')).write_bytes(src); (self.old / (stem + '.metallib')).write_bytes(b'EARLIER ' + src)
+            (self.root / 'ios' / 'b-old' / (stem + '.metallib')).write_bytes(b'EARLIER IOS ' + src)
+            for d, t in ((self.old, 'mac'), (self.root / 'ios' / 'b-old', 'ios')):
+                (d / (stem + '.json')).write_text(json.dumps({'chain_metal': self.cache.targets[t][1], 'stage': 'ps', 'chain_compiler': self.cache.ident[t].hex()}))
+
+    def fill(self, ios=False):   # the sample check compiles the earlier sources and compares them with their libraries: taken as passed here (MetalPrefill tests it)
+        with mock.patch.object(self.cache, '_check', return_value=None):
+            return self.cache.fill(str(self.old), str(self.root / 'ios' / 'b-old') if ios else None)
+
+    def compile(self, src, target='mac'):
+        msl, out = self.root / 'one.metal', self.root / f'one-{target}.metallib'; msl.write_bytes(src)
+        self.cache.compile(target, str(msl), str(out)); return out.read_bytes()
+
+    def test_nothing_enters_the_cache_until_asked_for(self):
+        notes = self.fill()
+        self.assertTrue(any('taken when a compile asks' in n for n in notes), notes)
+        self.assertEqual(self.cache.store.names('metallib/mac/'), set())
+        self.assertEqual(self.compile(b'MSL 1'), b'EARLIER MSL 1'); self.assertEqual(self.compiles, [])
+        self.assertEqual(len(self.cache.store.names('metallib/mac/')), 1)
+        self.assertEqual((self.cache.stats['mac', 'filled'], self.cache.stats['mac', 'reused']), (1, 1))
+        self.assertEqual(self.compile(b'MSL 1'), b'EARLIER MSL 1'); self.assertEqual(self.cache.stats['mac', 'filled'], 1)   # now from the cache itself
+        self.assertEqual(self.compile(b'MSL changed'), b'TESTED MSL changed'); self.assertEqual(self.compiles, [b'MSL changed'])
+
+    def test_both_targets_are_noted(self):
+        self.fill(ios=True)
+        self.assertEqual(len(self.cache.earlier), 6)
+        self.assertEqual((self.compile(b'MSL 2'), self.compile(b'MSL 2', 'ios')), (b'EARLIER MSL 2', b'EARLIER IOS MSL 2')); self.assertEqual(self.compiles, [])
+
+    def test_a_lazy_fill_looks_again_next_time(self):
+        self.fill(); self.fill()
+        self.assertEqual(json.loads(self.cache.store.get(dmsh_mtlcache.STAMPS) or b'{}'), {}); self.assertEqual(len(self.cache.earlier), 3)   # a folder: no stamp
+
+    def test_the_check_of_an_unchanged_image_is_remembered(self):
+        shader_lib.pack(self.old, lambda m: None); image = Path(shader_lib.image_of(str(self.old)))
+        with mock.patch.object(self.cache, '_check', return_value=None) as check:
+            self.cache.fill(str(self.old)); self.cache.earlier.clear(); self.cache.fill(str(self.old))
+            self.assertEqual(check.call_count, 1); self.assertEqual(len(self.cache.earlier), 3)
+            os.utime(image, ns=(1, 1)); self.cache.fill(str(self.old)); self.assertEqual(check.call_count, 2)
+
+    def test_an_earlier_image_replaced_while_read_is_compiled(self):
+        shader_lib.pack(self.old, lambda m: None); image = Path(shader_lib.image_of(str(self.old)))
+        self.fill(); real = romfs.open
+        def open_then_replace(path, *a, **k):
+            f = real(path, *a, **k); os.utime(image, ns=(1, 1)); return f
+        with mock.patch.object(romfs, 'open', side_effect=open_then_replace): self.assertEqual(self.compile(b'MSL 0'), b'TESTED MSL 0')
+        self.assertEqual(self.cache.store.names('metallib/mac/'), {self.cache.path('mac', b'MSL 0')})   # the compile's, not the earlier library
+        self.assertEqual(self.cache.store.get(self.cache.path('mac', b'MSL 0')), b'TESTED MSL 0')
+
+    def test_an_earlier_library_gone_meanwhile_is_compiled(self):
+        self.fill(); (self.old / f'{1:016x}_b.metallib').unlink()
+        self.assertEqual(self.compile(b'MSL 1'), b'TESTED MSL 1'); self.assertEqual(self.compiles, [b'MSL 1'])
+
+    def test_an_earlier_library_rebuilt_after_fill_is_compiled(self):   # the earlier build written again in place (another source) after fill looked
+        self.fill(); lib = self.old / f'{1:016x}_b.metallib'; lib.write_bytes(b'REBUILT FROM OTHER MSL'); os.utime(lib, ns=(1, 1))
+        self.assertEqual(self.compile(b'MSL 1'), b'TESTED MSL 1'); self.assertEqual(self.compiles, [b'MSL 1'])
+
+    def test_an_earlier_image_is_read_in_place_and_rechecked(self):
+        shader_lib.pack(self.old, lambda m: None); image = Path(shader_lib.image_of(str(self.old)))
+        self.assertTrue(image.is_file())
+        self.fill(); self.assertEqual(self.compile(b'MSL 0'), b'EARLIER MSL 0')
+        os.utime(image, ns=(1, 1))
+        self.assertEqual(self.compile(b'MSL 2'), b'TESTED MSL 2')
+
+    def test_a_split_piece_removed_after_the_look_is_compiled_again(self):
+        msl = self.root / 'unit.metal'; msl.write_bytes(b'UNIT'); a, b = self.root / 'a.metallib', self.root / 'b.metallib'
+        self.cache.compile_split('mac', str(msl), [str(a), str(b)], lambda lib: (lib[:6], lib[6:]))
+        a.unlink(); b.unlink()
+        with mock.patch.object(self.cache.store, 'to_file', return_value=False):   # has() saw them, then a prune removed them
+            self.cache.compile_split('mac', str(msl), [str(a), str(b)], lambda lib: (lib[:6], lib[6:]))
+        self.assertEqual((a.read_bytes(), b.read_bytes()), (b'TESTED', b' UNIT')); self.assertEqual(self.cache.stats['mac', 'compiled'], 2)
 
 
 if __name__ == '__main__':

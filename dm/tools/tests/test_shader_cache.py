@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-# The compile cache as one file (dm/tools/shader_cache.py): entries in and out, bytes stored once, several threads and processes, a damaged file, pruning, and taking in a cache from before it.
-import os, subprocess, sys, tarfile, tempfile, threading, time, unittest
+# The compile cache as one file (dm/tools/shader_cache.py): entries in and out, bytes stored once, several threads and processes, a damaged file, pruning, and taking in a cache from before it;
+# compressed entries beside plain ones (DMSH_CAS_ZSTD), and one in, one out (DMSH_ONE_IN_ONE_OUT).
+import json, os, sqlite3, subprocess, sys, tarfile, tempfile, threading, time, unittest
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO / 'dm/tools'))
@@ -180,6 +182,223 @@ class Adopt(unittest.TestCase):
         Path(f'{self.old}.tar.part').write_bytes(b'1')
         shader_cache.adopt(self.old, self.path, self.said.append)
         self.assertEqual(os.listdir(self.root), [])
+
+
+@unittest.skipIf(shader_cache._zstd is None, 'no zstd: Python 3.14, or pip install backports.zstd')
+class Compressed(unittest.TestCase):
+    """DMSH_CAS_ZSTD: entries as zstd frames in zentry / zblob, read beside the plain tables; a store that cannot read them misses them"""
+    def setUp(self):
+        t = tempfile.TemporaryDirectory(); self.addCleanup(t.cleanup)
+        self.root = Path(t.name); self.path = self.root / 'cas.db'; self.said = []
+
+    def store(self, **kw): return shader_cache.Store(self.path, self.said.append, **kw)
+
+    def count(self, table):
+        db = sqlite3.connect(self.path); n = db.execute(f'SELECT count(*) FROM {table}').fetchone()[0]; db.close(); return n
+
+    def test_in_and_out_smaller(self):
+        msl = b'float4 x = float4(0.0);\n' * 4000
+        s = self.store(compress=True); s.put('shader/k_b.metal', msl); s.put('empty', b'')
+        self.assertEqual((s.get('shader/k_b.metal'), s.get('empty')), (msl, b'')); self.assertTrue(s.has('empty')); s.close()
+        s = self.store(compress=False)   # a plain store reads them too
+        self.assertEqual((s.get('shader/k_b.metal'), s.names('')), (msl, {'shader/k_b.metal', 'empty'})); s.close()
+        db = sqlite3.connect(self.path)
+        self.assertLess(db.execute('SELECT max(length(data)) FROM zblob').fetchone()[0], len(msl) // 20); db.close()
+        self.assertEqual(self.count('entry'), 0)
+
+    def test_the_switches(self):
+        for env, z in (({}, False), ({'DMSH_CAS_ZSTD': '1'}, True), ({'DMSH_ONE_IN_ONE_OUT': '1'}, True), ({'DMSH_ONE_IN_ONE_OUT': '1', 'DMSH_CAS_ZSTD': '0'}, False)):
+            with self.subTest(env=env), mock.patch.dict(os.environ, env, clear=False):
+                for k in ('DMSH_CAS_ZSTD', 'DMSH_ONE_IN_ONE_OUT'):
+                    if k not in env: os.environ.pop(k, None)
+                s = self.store(); self.assertEqual(s.z, z); self.assertEqual(s.evict, env.get('DMSH_ONE_IN_ONE_OUT') == '1'); s.close()
+
+    def test_mixed_old_and_new_entries(self):   # a cache from before this, then a compressing build
+        s = self.store(compress=False); s.put('a', b'old plain'); s.put('b', b'kept plain'); s.close()
+        s = self.store(compress=True)
+        self.assertEqual(s.get('b'), b'kept plain'); s.put('a', b'new'); self.assertEqual(s.names(''), {'a', 'b'}); s.close()
+        s = self.store(compress=False); self.assertEqual((s.get('a'), s.get('b')), (b'new', b'kept plain')); s.close()
+        db = sqlite3.connect(self.path); self.assertEqual([r[0] for r in db.execute('SELECT name FROM entry')], ['b']); db.close()
+
+    def test_a_plain_write_replaces_a_compressed_entry(self):   # a store with compression off, or one without zstd
+        s = self.store(compress=True); s.put('index/k.json', b'old'); s.close()
+        s = self.store(compress=False); s.put('index/k.json', b'new'); self.assertEqual(s.get('index/k.json'), b'new'); s.close()
+        self.assertEqual(self.count('zentry'), 0)
+        s = self.store(compress=True); s.put('index/k.json', b'z'); s.close()
+        with mock.patch.object(shader_cache, '_zstd', None):
+            s = self.store(compress=True); self.assertFalse(s.z); s.put('index/k.json', b'plain'); s.close()
+        s = self.store(); self.assertEqual(s.get('index/k.json'), b'plain'); s.close()
+
+    def test_the_newer_of_a_name_in_both_pairs_is_read(self):   # a store from before this writes plain entries and does not know zentry
+        s = self.store(compress=True); s.put('metallib/filled.json', b'older', 1000.0); s.close()
+        db = sqlite3.connect(self.path)
+        db.execute("INSERT INTO blob(hash, data) VALUES(x'00', x'6e65776572')"); db.execute("INSERT INTO entry VALUES('metallib/filled.json', last_insert_rowid(), 2000.0)"); db.commit(); db.close()
+        s = self.store(compress=True); self.assertEqual(s.get('metallib/filled.json'), b'newer'); s.close()
+
+    def test_a_store_without_zstd_misses_them(self):
+        s = self.store(compress=True); s.put('metallib/mac/x.metallib', b'LIB'); s.close()
+        with mock.patch.object(shader_cache, '_zstd', None):
+            s = self.store(compress=True)
+            self.assertFalse(s.z); self.assertIsNone(s.get('metallib/mac/x.metallib')); self.assertFalse(s.has('metallib/mac/x.metallib'))
+            s.put('metallib/mac/y.metallib', b'PLAIN'); s.delete_prefix('metallib/mac/x'); s.close()
+        self.assertTrue(any('zstd' in m for m in self.said), self.said)
+        self.assertEqual(self.count('zentry'), 0)   # removals cover the pair it cannot read
+        s = self.store(); self.assertEqual(s.get('metallib/mac/y.metallib'), b'PLAIN'); s.close()
+
+    def test_a_damaged_frame_is_a_miss(self):
+        s = self.store(compress=True); s.put('x', b'bytes' * 100); s.db.execute("UPDATE zblob SET data=x'00010203'")
+        self.assertIsNone(s.get('x')); self.assertFalse(s.to_file('x', str(self.root / 'out'))); self.assertFalse((self.root / 'out').exists()); s.close()
+
+    def test_removals_cover_both_pairs(self):
+        t = time.time() - 100
+        s = self.store(compress=False); s.put(f'shader/{D1}/mac/k_b.metal', b'p' * 999, t); s.put('stage/x/1', b'p1'); s.close()
+        s = self.store(compress=True); s.put(f'shader/{D2}/mac/k_b.metal', b'z' * 999, t); s.put('stage/x/2', b'z2')
+        self.assertEqual(s.prune_shaders(set(), time.time())[0], 2); s.delete_prefix('stage/'); self.assertEqual(s.names(''), set()); s.close()
+        self.assertEqual([self.count(t) for t in ('entry', 'blob', 'zentry', 'zblob')], [0, 0, 0, 0])
+
+
+class PruneRace(Base):
+    def test_an_entry_written_again_after_the_scan_stays(self):   # another build sharing the file filed it anew between the scan and the transaction
+        now = time.time(); name = f'shader/{D1}/mac/k_b.metal'
+        self.store.put(name, b'old', now - 100)
+        real = self.store._run
+        def scan_then_rewrite(sql, *args):
+            rows = real(sql, *args)
+            if 'length(b.data)' in sql:
+                other = shader_cache.Store(self.path, compress=False); other.put(name, b'filed again', now - 50); other.close()
+            return rows
+        with mock.patch.object(self.store, '_run', side_effect=scan_then_rewrite): self.store.prune_shaders(set(), now)
+        self.assertEqual(self.store.get(name), b'filed again')
+        self.assertEqual(self.store.db.execute('SELECT count(*) FROM blob WHERE id NOT IN (SELECT blob FROM entry)').fetchone()[0], 0)
+
+
+class OneInOneOut(unittest.TestCase):
+    """DMSH_ONE_IN_ONE_OUT: a key's new entry (index/<key>.json under another digest) replaces its older one in the same transaction"""
+    OLD, NEW, OTHER = D1, D2, D3
+    Z = False
+
+    def setUp(self):
+        t = tempfile.TemporaryDirectory(); self.addCleanup(t.cleanup); self.path = Path(t.name) / 'cas.db'; self.said = []
+        old = shader_cache.Store(self.path, compress=False, evict=False); w = 1000.0
+        old.put(f'shader/{self.OLD}/mac/k1_b.metal', b'old msl k1', w); old.put(f'shader/{self.OLD}/mac/k1_b.metallib', b'old lib k1' * 40000, w)
+        old.put(f'shader/{self.OLD}/mac/k1_b.json', b'{"old": 1}', w); old.put('metallib/mac/m1.metallib', b'old lib k1' * 40000, w)
+        old.put(f'shader/{self.OLD}/mac/k9_b.metal', b'same digest, another key', w)
+        old.put('index/k1.json', json.dumps({'digest': self.OLD}).encode(), w)
+        old.put(f'shader/{self.OTHER}/mac/k3_b.metallib', b'unchanged lib k3', w); old.put('metallib/mac/m3.metallib', b'unchanged lib k3', w)
+        old.put('index/k3.json', json.dumps({'digest': self.OTHER}).encode(), w)
+        old.put('metallib/mac/side.metallib', b'a side library', w)
+        old.close()
+
+    def store(self, **kw): return shader_cache.Store(self.path, self.said.append, **{'compress': self.Z, 'evict': True, **kw})
+
+    def publish(self, store, key, digest, files):   # as dmsh_build.py's publish_cache
+        with store.batch():
+            for n, data in files.items(): store.put(f'shader/{digest}/mac/{key}_{n}', data)
+            store.put(f'index/{key}.json', json.dumps({'digest': digest}).encode())
+
+    def names(self):
+        s = shader_cache.Store(self.path, compress=False, evict=False); n = s.names(''); s.close(); return n
+
+    def unnamed(self):
+        db = sqlite3.connect(self.path); pairs = [p for p in (shader_cache.PLAIN, shader_cache.ZSTD) if db.execute('SELECT 1 FROM sqlite_master WHERE name=?', (p[0],)).fetchone()]
+        n = sum(db.execute(f'SELECT count(*) FROM {b} WHERE id NOT IN (SELECT blob FROM {e})').fetchone()[0] for e, b in pairs); db.close(); return n
+
+    def test_the_older_entry_and_its_unshared_library_go(self):
+        s = self.store(); self.publish(s, 'k1', self.NEW, {'b.metal': b'new msl k1', 'b.metallib': b'new lib k1'}); s.close()
+        names = self.names()
+        self.assertFalse([n for n in names if n.startswith(f'shader/{self.OLD}/mac/k1_')])
+        self.assertNotIn('metallib/mac/m1.metallib', names)
+        self.assertIn(f'shader/{self.OLD}/mac/k9_b.metal', names)   # another key with the same digest keeps its files
+        self.assertTrue({'metallib/mac/m3.metallib', 'metallib/mac/side.metallib', f'shader/{self.OTHER}/mac/k3_b.metallib', f'shader/{self.NEW}/mac/k1_b.metal'} <= names)
+        self.assertEqual((s.evicted['shaders'], s.evicted['entries'], s.evicted['libraries']), (1, 3, 1))
+        self.assertGreater(s.evicted['bytes'], 0); self.assertEqual(self.unnamed(), 0)
+        self.assertTrue(any(m.startswith('one in, one out: 1 older') for m in self.said), self.said)
+
+    def test_a_library_the_new_entry_shares_stays(self):   # unchanged MSL: the new entry names the same bytes
+        s = self.store(); self.publish(s, 'k3', self.NEW, {'b.metallib': b'unchanged lib k3'}); s.close()
+        names = self.names()
+        self.assertNotIn(f'shader/{self.OTHER}/mac/k3_b.metallib', names); self.assertIn('metallib/mac/m3.metallib', names)
+        s = self.store(evict=False); self.assertEqual((s.get(f'shader/{self.NEW}/mac/k3_b.metallib'), s.get('metallib/mac/m3.metallib')), (b'unchanged lib k3',) * 2); s.close()
+
+    def test_off_by_default_and_for_the_same_digest(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            for k in ('DMSH_ONE_IN_ONE_OUT', 'DMSH_CAS_ZSTD'): os.environ.pop(k, None)
+            s = shader_cache.Store(self.path, self.said.append)
+        self.assertFalse(s.evict); self.publish(s, 'k1', self.NEW, {'b.metal': b'new msl k1'}); s.close()
+        self.assertIn(f'shader/{self.OLD}/mac/k1_b.metal', self.names())
+        s = self.store(); self.publish(s, 'k3', self.OTHER, {'b.metallib': b'unchanged lib k3'}); s.close()
+        self.assertIn(f'shader/{self.OTHER}/mac/k3_b.metallib', self.names()); self.assertEqual(s.evicted['shaders'], 0)
+
+    def test_entries_written_since_the_store_opened_stay(self):   # the same build filed the key twice, or another build shares the file
+        s = self.store(); self.publish(s, 'k5', self.OLD, {'b.metal': b'first'}); self.publish(s, 'k5', self.NEW, {'b.metal': b'second'}); s.close()
+        self.assertTrue({f'shader/{self.OLD}/mac/k5_b.metal', f'shader/{self.NEW}/mac/k5_b.metal'} <= self.names())
+
+    def test_a_rolled_back_batch_evicts_nothing(self):
+        s = self.store()
+        with self.assertRaises(KeyboardInterrupt), s.batch():
+            s.put('index/k1.json', json.dumps({'digest': self.NEW}).encode()); raise KeyboardInterrupt
+        s.close()
+        self.assertIn(f'shader/{self.OLD}/mac/k1_b.metal', self.names()); self.assertEqual(s.evicted['shaders'], 0)
+
+    def test_an_eviction_error_skips_that_eviction_and_the_write_goes_on(self):   # a damaged frame, an odd name: the savepoint undoes the part done
+        s = self.store(); real = s._drop_unnamed
+        def fail_late(pair, blob):
+            if pair[1] in ('blob', 'zblob') and s._evicting['entries']: raise ValueError('boom')
+            return real(pair, blob)
+        with mock.patch.object(s, '_drop_unnamed', side_effect=fail_late):
+            self.publish(s, 'k1', self.NEW, {'b.metal': b'new msl k1'})
+        s.put('after', b'still written'); s.close()
+        names = self.names()
+        self.assertIn(f'shader/{self.OLD}/mac/k1_b.metal', names); self.assertIn('metallib/mac/m1.metallib', names)   # all of the eviction undone
+        self.assertIn(f'shader/{self.NEW}/mac/k1_b.metal', names); self.assertIn('after', names)
+        self.assertTrue(any('stays (ValueError: boom)' in m for m in self.said), self.said); self.assertEqual(s.evicted['errors'], 1)
+        self.assertEqual((s.evicted['shaders'], s.evicted['entries'], s.evicted['libraries']), (0, 0, 0))   # what the savepoint undid is not counted
+        self.assertTrue(any(m.startswith('one in, one out: 0 older') and '1 left after an error' in m for m in self.said), self.said)
+
+    def test_the_newer_older_index_decides(self):   # a store from before this filed the key plain after a compressing build filed it
+        if shader_cache._zstd is None: self.skipTest('no zstd')
+        db = sqlite3.connect(self.path); db.executescript(';'.join(shader_cache.ZSCHEMA))   # the compressing build's index, older (500) than the plain one (1000), which names OLD
+        db.execute('INSERT INTO zblob(hash, data) VALUES(?, ?)', (b'z', shader_cache.Store._compress(json.dumps({'digest': self.OTHER}).encode())))
+        db.execute("INSERT INTO zentry VALUES('index/k1.json', last_insert_rowid(), 500.0)"); db.commit(); db.close()
+        s = self.store(); self.publish(s, 'k1', self.NEW, {'b.metal': b'new'}); s.close()   # the plain index (1000) names OLD
+        self.assertFalse([n for n in self.names() if n.startswith(f'shader/{self.OLD}/mac/k1_')]); self.assertEqual(s.evicted['shaders'], 1)
+
+    def test_bytes_stored_already_are_not_compressed_again(self):
+        if not self.Z: self.skipTest('compressed writes')
+        s = self.store()
+        with mock.patch.object(shader_cache.Store, '_compress', wraps=shader_cache.Store._compress) as z:
+            s.put('a', b'same bytes' * 100); s.put('b', b'same bytes' * 100); self.assertEqual(z.call_count, 1)
+        self.assertEqual((s.get('a'), s.get('b')), (b'same bytes' * 100,) * 2); s.close()
+
+    def test_the_summary_comes_only_from_a_store_that_filed_shaders(self):
+        s = self.store(); s.put('metallib/mac/x.metallib', b'x'); s.close()
+        self.assertFalse([m for m in self.said if m.startswith('one in, one out')])
+
+    def test_pages_go_back_to_the_drive(self):
+        with mock.patch.object(shader_cache, 'EVICT_VACUUM', 1):
+            s = self.store(); s.db.execute('PRAGMA wal_checkpoint(TRUNCATE)'); before = os.path.getsize(self.path)
+            self.publish(s, 'k1', self.NEW, {'b.metal': b'n'}); s.close()
+        db = sqlite3.connect(self.path); self.assertEqual(db.execute('PRAGMA freelist_count').fetchone()[0], 0); db.close()
+        self.assertLess(os.path.getsize(self.path), before)
+
+
+@unittest.skipIf(shader_cache._zstd is None, 'no zstd: Python 3.14, or pip install backports.zstd')
+class OneInOneOutCompressed(OneInOneOut):
+    """The same with the build writing compressed entries over a plain cache from before: a plain library the new entry shares moves to the compressed pair"""
+    Z = True
+
+    def test_a_library_the_new_entry_shares_stays(self):
+        super().test_a_library_the_new_entry_shares_stays()
+        db = sqlite3.connect(self.path)
+        self.assertEqual(db.execute("SELECT count(*) FROM entry WHERE name='metallib/mac/m3.metallib'").fetchone()[0], 0)
+        self.assertEqual(db.execute("SELECT count(*) FROM zentry WHERE name='metallib/mac/m3.metallib'").fetchone()[0], 1)
+        self.assertEqual(db.execute("SELECT count(*) FROM blob WHERE data=?", (b'unchanged lib k3',)).fetchone()[0], 0); db.close()
+
+    def test_a_damaged_older_index_skips_the_eviction(self):
+        s = self.store(compress=True, evict=False); s.put('index/k7.json', json.dumps({'digest': self.OLD}).encode(), 1000.0)
+        s.db.execute("UPDATE zblob SET data=x'00010203' WHERE id=(SELECT blob FROM zentry WHERE name='index/k7.json')"); s.close()
+        s = self.store(); self.publish(s, 'k7', self.NEW, {'b.metal': b'x'}); s.close()
+        self.assertEqual(s.evicted['shaders'], 0); self.assertIn(f'shader/{self.NEW}/mac/k7_b.metal', self.names())
 
 
 if __name__ == '__main__': unittest.main()

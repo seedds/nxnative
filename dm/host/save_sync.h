@@ -5,7 +5,10 @@
 // When: the cloud's copy comes in at the game's first save mount (hle_fs.c, before the work directory is cloned from the committed save); the committed save goes out a few
 // seconds after a Commit, on a thread of its own (the game never waits), when the iPhone app goes to the background, and from the Mac launcher once the host has exited.
 // Which way: <DM_SAVE>.sync keeps the hash of the save last known to be the same here and in the cloud. Only the cloud's changed: it comes in; only this one changed: it goes out;
-// both changed (played on both without syncing in between, or the first sync of a device that has a save of its own): the newer one wins and the other is kept.
+// both changed (played on both without syncing in between, or the first sync of a device that has a save of its own): neither replaces the other. The game plays on
+// with this device's, nothing is sent, and the player chooses at the next start: a front end compares the two before it starts the game and passes the choice in
+// DM_SAVE_SYNC_CHOICE (save_sync.c, read_choice). A cloud save is replaced only by a send that compared it: when it is no save, the one last synced or damaged, or
+// when the player chose this device's over it. A cloud that cannot be read (offline, a download that does not come) replaces nothing and is replaced by nothing.
 // Every save this replaces, here or in the cloud, is kept first in <DM_SAVE>-backups/<date> <side>; the newest 10 of each side stay.
 #pragma once
 #include <stdint.h>
@@ -27,8 +30,9 @@ int ss_pack(const char *save, const char *title, const char *out, ss_meta *m);
 // Reads a packed save and checks all of it (the header, every entry, the hash, the end marker); with `into`, unpacks it there as into/save and into/save_device.
 // 0 on success; a damaged or cut-off file, or a path that leaves the save, fails
 int ss_read(const char *bundle, const char *into, ss_meta *m);
-typedef enum { SS_KEEP, SS_PULL, SS_PUSH } ss_way;
-// Which way, from the three hashes ("" for none: no save here, no sync yet, nothing in the cloud) and, when both sides changed, their times. *both = both changed
+typedef enum { SS_KEEP, SS_PULL, SS_PUSH, SS_ASK } ss_way;
+// Which way, from the three hashes ("" for none: no save here, no sync yet, nothing in the cloud). SS_ASK: both changed (*both = 1), the player chooses.
+// The times are not used: a save's time is shown to the player, it never picks one
 ss_way ss_decide(const char *local, const char *base, const char *remote, int64_t local_saved, int64_t remote_saved, int *both);
 
 // ---- the host ----

@@ -56,6 +56,7 @@ void dm_thread_enter(uint64_t entry, uint64_t arg, uint64_t sp) { (void)entry; (
 uint64_t now_ns(void) { return clock_ns; }
 uint64_t guest_ns(void) { return now_ns(); }
 int dm_detclock_enabled(void) { return 0; }
+__thread uint64_t dm_clock_reads;   // guest clock reads per thread (hle_os.c in the host; thr_yield reads it)
 int dm_guest_as_contains(uintptr_t addr) { (void)addr; return 0; }
 int dm_sdk_major(void) { return 20; }
 int dm_game_imports(const char *prefix) { (void)prefix; return 1; }

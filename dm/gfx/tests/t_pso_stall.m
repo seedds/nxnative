@@ -85,7 +85,7 @@ int main(void) { @autoreleasepool {
     MTL4RenderPipelineDescriptor *m = pre_desc(@"v1", @"f4", 0);
     EXPECT("held: a descriptor for the draw", 1, m != nil);
     dispatch_group_t draw = dispatch_group_create(); __block id drawn = nil;
-    dispatch_group_async(draw, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ @autoreleasepool { NSError *e = nil; drawn = arch_capture(m, &e, 0); } });
+    dispatch_group_async(draw, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ @autoreleasepool { NSError *e = nil; drawn = arch_capture(m, &e, 0, NULL); } });
     EXPECT("held: a draw's compile returns", 0, dispatch_group_wait(draw, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC)));
     EXPECT("held: a draw's compile built", 1, drawn != nil);
     arch_flush();
@@ -123,9 +123,13 @@ int main(void) { @autoreleasepool {
     g_arch_dir = arch2; g_arch4 = @[]; g_arch4p = @[];
     put([tables stringByAppendingPathComponent:@"shader_pairs.tsv"], @"# pairs\nv1\tf5\nv1\tf6\n");
     HoldCompiler *failc = [HoldCompiler new];   // armed in the current period before each run (one worker: both compiles in it; the run's last flush begins another)
+    // Apple's compiler fails it outside the archive too: a base the capture refuses is built by the plain compiler (arch_capture)
+    HoldCompiler *plainc = [HoldCompiler new]; id<MTL4Compiler> plain = g_comp4; plainc->compiler = plain; g_comp4 = (id<MTL4Compiler>)plainc;
     arm(failc); reset_counts();
     EXPECT("failing: two pairs", 2, pso_prebuild(1, 1, QOS_CLASS_USER_INITIATED));
     EXPECT("failing: asked once", 1, failc->bad);
+    EXPECT("failing: the plain compiler asked too", 1, plainc->bad);
+    EXPECT("failing: still capturing", 1, arch_capturing());
     EXPECT("failing: one failed", 1, g_pre_failed);
     EXPECT("failing: one built", 1, g_pre_built);
     EXPECT("failing: stamped all the same", 1, slurp(stamp) != nil);
@@ -153,6 +157,7 @@ int main(void) { @autoreleasepool {
     EXPECT("other build: the list is for this build now", 1, [slurp(failp) containsString:arch_os_build()]);
     // it builds after a system update (the real compiler, the list from another build): the list goes
     if ((id)g_ep->comp == failc) g_ep->comp = failc->compiler;
+    g_comp4 = plain;
     put(failp, [slurp(failp) stringByReplacingOccurrencesOfString:arch_os_build() withString:@"os\t1A1\n"]); reopen(arch2); reset_counts();
     EXPECT("fixed: two pairs", 2, pso_prebuild(1, 1, QOS_CLASS_USER_INITIATED));
     EXPECT("fixed: built", 1, g_pre_built);

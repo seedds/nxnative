@@ -174,6 +174,45 @@ int main(void) { @autoreleasepool {
     P(nvnCommandBufferCopyTextureToBuffer)(&command,&target,NULL,&region,output,0);
     submit(0,P(nvnCommandBufferEndRecording)(&command),&sync);finish(&sync);
     CHECK(pixels(0,255,0,0),"CPU counter write after completed report replaces pending zero");
+
+    // Occlusion conditions: a samples-passed report that has landed decides the
+    // block as the GPU would; one still in flight keeps the block drawing.
+    uint64_t *empty=(uint64_t *)(memory+EVENT+256),*seen=(uint64_t *)(memory+EVENT+320);
+    empty[0]=seen[0]=7;empty[2]=seen[2]=0;   // +16 stays 0: RENDER_IF_NOT_EQUAL draws when samples passed
+    P(nvnCommandBufferBeginRecording)(&command);
+    P(nvnCommandBufferSetRenderTargets)(&command,1,colors,NULL,NULL,NULL);
+    P(nvnCommandBufferSetViewports)(&command,0,1,viewport); P(nvnCommandBufferSetScissor)(&command,0,0,W,H);
+    P(nvnCommandBufferResetCounter)(&command,NVN_COUNTER_TYPE_SAMPLES_PASSED);
+    P(nvnCommandBufferReportCounter)(&command,NVN_COUNTER_TYPE_SAMPLES_PASSED,(NVNbufferAddress)(uintptr_t)empty);   // no draw counted
+    P(nvnCommandBufferResetCounter)(&command,NVN_COUNTER_TYPE_SAMPLES_PASSED);
+    P(nvnCommandBufferBindProgram)(&command,&stable_red,3);
+    P(nvnCommandBufferDrawArrays)(&command,NVN_DRAW_PRIMITIVE_TRIANGLES,0,3);   // covers the target
+    P(nvnCommandBufferReportCounter)(&command,NVN_COUNTER_TYPE_SAMPLES_PASSED,(NVNbufferAddress)(uintptr_t)seen);
+    submit(0,P(nvnCommandBufferEndRecording)(&command),&sync);finish(&sync);
+    CHECK(empty[0]==0 && seen[0]==W*H,"samples-passed reports land with 0 and the drawn samples");
+    const char *occ[]={"landed zero query culls its block","landed nonzero query draws its block"};
+    for (int k=0;k<2;k++) {
+        P(nvnCommandBufferBeginRecording)(&command);
+        P(nvnCommandBufferClearColor)(&command,0,blue,15);
+        P(nvnCommandBufferBindProgram)(&command,&stable_green,3);
+        P(nvnCommandBufferSetRenderEnableConditional)(&command,(NVNconditionalRenderMode)1,(NVNbufferAddress)(uintptr_t)(k ? seen : empty));
+        P(nvnCommandBufferDrawArrays)(&command,NVN_DRAW_PRIMITIVE_TRIANGLES,0,3);
+        P(nvnCommandBufferSetRenderEnable)(&command,1);
+        P(nvnCommandBufferCopyTextureToBuffer)(&command,&target,NULL,&region,output,0);
+        submit(0,P(nvnCommandBufferEndRecording)(&command),&sync);finish(&sync);
+        CHECK(k ? pixels(0,0,255,0) : pixels(0,0,0,255),occ[k]);
+    }
+    P(nvnCommandBufferBeginRecording)(&command);
+    P(nvnCommandBufferClearColor)(&command,0,blue,15);
+    P(nvnCommandBufferResetCounter)(&command,NVN_COUNTER_TYPE_SAMPLES_PASSED);
+    P(nvnCommandBufferReportCounter)(&command,NVN_COUNTER_TYPE_SAMPLES_PASSED,(NVNbufferAddress)(uintptr_t)empty);
+    P(nvnCommandBufferBindProgram)(&command,&stable_green,3);
+    P(nvnCommandBufferSetRenderEnableConditional)(&command,(NVNconditionalRenderMode)1,(NVNbufferAddress)(uintptr_t)empty);
+    P(nvnCommandBufferDrawArrays)(&command,NVN_DRAW_PRIMITIVE_TRIANGLES,0,3);
+    P(nvnCommandBufferSetRenderEnable)(&command,1);
+    P(nvnCommandBufferCopyTextureToBuffer)(&command,&target,NULL,&region,output,0);
+    submit(0,P(nvnCommandBufferEndRecording)(&command),&sync);finish(&sync);
+    CHECK(pixels(0,0,255,0),"query in flight keeps its block drawing");
     P(nvnSyncFinalize)(&dependency);P(nvnSyncFinalize)(&split_sync);
     P(nvnQueueFinish)(&queues[0]); P(nvnQueueFinish)(&queues[1]);
     P(nvnProgramFinalize)(&stable_red); P(nvnProgramFinalize)(&stable_green);

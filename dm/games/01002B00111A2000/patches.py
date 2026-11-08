@@ -117,5 +117,5 @@ FRAME_STEP = {'c3cf52bf2b05d7310884971b50bcccb8': frame_step}
 BINDING = [
     {'what': '60 fps frame step: the KIDS frame task, frame-rate block and event cutscene counters', 'now': 'build', 'goal': 'game', 'purpose': 'frame rate',
      'why': "the game's own frame code; only the host's frame-step state page is shared. Fire Emblem: Three Houses and Taiko Risshiden V DX run on KTGL too, with other frame code",
-     'blocked': 'frame-step stubs have no function-matched form yet'},
+     'blocked': 'a function-matched frame step (MATCH_FRAME_STEP) covers one function; these stubs span several'},
 ]

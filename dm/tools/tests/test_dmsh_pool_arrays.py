@@ -97,7 +97,9 @@ kernel void main0(constant spvDescriptorSetBuffer0& spvDescriptorSet0 [[buffer(0
 }
 '''
         out = NS['pool_arrays'](src)
-        self.assertIn('(&spvDescriptorSet0.cp_t2da_cb196612_10570000->e[0])[dm_pool_mark(spvDescriptorSet0.cp_t2da_cb196612_10570000, min(uint(_7), spvDescriptorSet0.cp_t2da_cb196612_10570000->n))]', out)   # a texture read marks its ID as seen
+        self.assertIn('(&spvDescriptorSet0.cp_t2da_cb196612_10570000->e[0])[min(uint(_7), spvDescriptorSet0.cp_t2da_cb196612_10570000->n)]', out)   # a table's index is its element, not a texture ID: not marked
+        self.assertNotIn('dm_pool_mark', out)
+        self.assertNotIn('early_fragment_tests', NS['pool_arrays'](src.replace('kernel void', 'fragment main0_out')))   # nothing marked, nothing stored: the test stays where Metal puts it
         self.assertIn('(&spvDescriptorSet0.cp_t2da_cb196612_10570000Smplr->e[0])[min(uint(_7), spvDescriptorSet0.cp_t2da_cb196612_10570000Smplr->n)]', out)   # a sampler read does not
         self.assertIn('array<texture2d<float>, 32> fp_t2d_cb14_0 [[id(2)]];', out)   # a pointer takes one ID; an array of 32 stays an array (nothing in the game's buffers is that short now but images and buffer textures)
         b = {e['msl_name']: e for e in NS['reflect']('k', 'cs', out, {'sbufs': []})}

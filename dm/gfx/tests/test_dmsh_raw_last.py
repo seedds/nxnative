@@ -107,5 +107,53 @@ class RawLast(Translated):
             self.assertIn('bad 0 of 1024', out.stdout, out.stdout + out.stderr)
 
 
+LDG128 = ((LDG[0] & ~(7 << 9)) | 6 << 9, (LDG[1] & ~(0xff << 16)) | 12 << 16)   # LDG.E.128 R12, [R5.64 + UR4]: size bits 73..75 = 6 (B128), R12..R15
+def sts(rb, off): return (STORE[0], (STORE[1] & ~(0xffffffff << 32)) | rb << 32 | off << 40)   # STS.U32 [R9 * 16 + off], Rb
+VEC_HELPER = re.compile(r'(?m)^int (_\d+)\(thread const int& _\d+, thread const int& _\d+, const device (_\d+)& \w+, thread uint& (_\d+), thread spvUnsafeArray<uint, 3>& (_\d+)\)\n\{\n')
+
+
+@unittest.skipUnless(os.environ.get('DMSH_TEST_XLATE'), 'set DMSH_TEST_XLATE to the offline translator')
+class RawVector(Translated):
+    """An LDG.128 through an address the translator ties to no storage buffer: one pool table lookup and one 128-bit load (Operation.GlobalVectorCount, GlobalToStorage
+    GenerateRawVectorLoad), not four, the other words passed back in gmem_vec; on the GPU each of the four words is the pool's"""
+    def msl(self):
+        code = (s2r_tid(9), s2r_tid(5), LDG128, sts(12, 0), sts(13, 4), sts(14, 8), sts(15, 12))
+        return self.translate(b''.join(inst(*waiting(i)) for i in code) + inst(*EXIT), shared=0x1000)
+
+    def test_one_vector_load_for_the_four_words(self):
+        msl = self.msl()
+        m = VEC_HELPER.search(msl)
+        self.assertTrue(m, msl[:3000])
+        helper = msl[m.end():msl.index('\n}\n', m.end())]
+        self.assertEqual(len(re.findall(r'uint4 _\d+ = \*\(reinterpret_cast<const device uint4\*>', helper)), 1, helper[-1500:])
+        self.assertNotRegex(helper, r'reinterpret_cast<const device uint\*>')   # no word loads besides it
+        main = msl[msl.index('kernel void main0'):]
+        self.assertEqual(len(re.findall(m.group(1) + r'\(', main)), 1)
+        scalar = HELPER.search(msl)
+        self.assertFalse(scalar and re.search(scalar.group(1) + r'\(', main), 'a word of the 128-bit load went through the scalar helper')
+        for k in range(3): self.assertRegex(main, re.escape(m.group(4)) + rf'\[{k}\]')
+
+    @unittest.skipUnless(shutil.which('xcrun') and sys.platform == 'darwin', 'needs Metal')
+    def test_reads_on_gpu(self):
+        msl = self.msl()
+        m = VEC_HELPER.search(msl)
+        # each step's word 0 when words 1..3 are the next three of its pool (value() counts words), 0 where it reads no pool; the runner's addresses keep all four in one pool
+        kernel = (msl[:msl.index('kernel void main0')] +
+                  f'kernel void k(const device {m.group(2)}& map [[buffer(0)]], const device uint2* addr [[buffer(1)]], device int* out [[buffer(2)]], uint id [[thread_position_in_grid]])\n'
+                  '{\n    uint last = 0u;\n    spvUnsafeArray<uint, 3> vec;\n    for (int s = 0; s < 16; s++)\n    {\n        int lo = int(addr[id * 16 + s].x), hi = int(addr[id * 16 + s].y);\n'
+                  f'        int w = {m.group(1)}(lo, hi, map, last, vec);\n'
+                  '        out[id * 16 + s] = w == 0 || (vec[0] == uint(w) + 1u && vec[1] == uint(w) + 2u && vec[2] == uint(w) + 3u) ? w : int(0xdead);\n    }\n}\n')
+        with tempfile.TemporaryDirectory() as w:
+            w = Path(w)
+            (w / 'k.metal').write_text(kernel)
+            r = subprocess.run(MAC_METAL + [str(w / 'k.metal'), '-o', str(w / 'k.air')], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr[-3000:])
+            subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', str(w / 'k.air'), '-o', str(w / 'k.metallib')], check=True)
+            (w / 'r.m').write_text(RUNNER)
+            subprocess.run(['clang', '-fobjc-arc', '-framework', 'Metal', '-framework', 'Foundation', str(w / 'r.m'), '-o', str(w / 'r')], check=True, capture_output=True)
+            out = subprocess.run([str(w / 'r'), str(w / 'k.metallib')], capture_output=True, text=True)
+            self.assertIn('bad 0 of 1024', out.stdout, out.stdout + out.stderr)
+
+
 if __name__ == '__main__':
     unittest.main()

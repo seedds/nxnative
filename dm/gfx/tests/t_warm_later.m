@@ -40,7 +40,7 @@ int main(void) { @autoreleasepool {
     if (!mkdtemp(tmpl)) { perror("mkdtemp"); return 2; }
     NSString *dir = @(tmpl);
     g_shmap = [NSMutableDictionary dictionary];
-    for (NSString *k in @[@"a1", @"a2", @"b1", @"b2", @"u1", @"v0", @"f0", @"c1", @"c2"]) g_shmap[k] = @"x";
+    for (NSString *k in @[@"a1", @"a2", @"b1", @"b2", @"u1", @"v0", @"f0", @"c1", @"c2", @"v1", @"f1", @"v2", @"f2", @"v3", @"f3"]) g_shmap[k] = @"x";
     NSString *pair = [rrow("v0_b", "f0_b", 0) substringFromIndex:2];
     pso_skey probe; int parse_ok = pso_skey_parse(pair.UTF8String, &probe) == 0;
     EXPECT_EQ("a written render row parses back", 1, parse_ok);
@@ -84,6 +84,22 @@ int main(void) { @autoreleasepool {
     t = warm_parse(@[stale], &lines, &first);
     EXPECT_EQ("stale keys dropped: tasks", 1, t.count);
     EXPECT_EQ("stale keys dropped: first", 0, first);
+
+    // the background order (location-aware priority): a pair a draw bumped builds before the earlier queued ones, once; a bump of a taken or unknown pair does nothing
+    NSString *pri = put(dir, @"pri.tsv", [@[@"S\ta1_b\t0", @"#@after_first_frame", rrow("v1_b", "f1_b", 0), rrow("v2_b", "f2_b", 0), @"S\tb1_b\t4", rrow("v3_b", "f3_b", 0), @""] componentsJoinedByString:@"\n"]);
+    t = warm_parse(@[pri], &lines, &first);
+    NSArray<WarmTask *> *rest = [t subarrayWithRange:NSMakeRange((NSUInteger)first, t.count - (NSUInteger)first)];
+    EXPECT_EQ("order: later tasks", 4, rest.count);
+    wl_init(rest);
+    EXPECT_EQ("bump of a queued pair", 1, wl_bump("v3_b", "f3_b"));
+    EXPECT_EQ("bump of the same pair again does nothing", 0, wl_bump("v3_b", "f3_b"));
+    EXPECT_EQ("bump of a pair that is not in the list does nothing", 0, wl_bump("v0_b", "f0_b"));
+    EXPECT_EQ("the bumped pair builds before the earlier unbumped ones", 1, wl_next() == rest[3]);
+    EXPECT_EQ("then the list in order", 1, wl_next() == rest[0]);
+    EXPECT_EQ("bump of a pair a worker has taken does nothing", 0, wl_bump("v1_b", "f1_b"));
+    EXPECT_EQ("a later bump goes before the list's next", 1, wl_bump("v2_b", "f2_b") && wl_next() == rest[1]);   // rest[1] is the pair v2/f2: the listed next
+    EXPECT_EQ("the bumped pair is not built twice", 1, wl_next() == rest[2]);
+    EXPECT_EQ("the list ends", 1, wl_next() == nil);
 
     [NSFileManager.defaultManager removeItemAtPath:dir error:nil];
     printf("t_warm_later: %d checks, %d failed\n", g_checks, g_failed);

@@ -8386,6 +8386,7 @@ static MTLRenderPipelineDescriptor *pso_desc_pull(const pso_key *k, NvShader *vs
     d.vertexFunction = pf; d.vertexDescriptor = [MTLVertexDescriptor vertexDescriptor];
     return d;
 }
+static int wl_bump(const char *vkey, const char *fkey);   // warm_later's order
 static __unsafe_unretained id<MTLRenderPipelineState> hybrid_get(const pso_key *k, NvShader *vs, NvShader *fs) {
     __unsafe_unretained id<MTLRenderPipelineState> h = hm_get_id(&g_pso_hy, k);
     if (h) return h;
@@ -8698,7 +8699,7 @@ static __unsafe_unretained id<MTLRenderPipelineState> pso_get_(NvProg *pr, MTLRe
                 // Demand first (main's order): the draw's own pipeline is queued before the prediction admits speculative builds; with a stand-in nothing waits for it
                 __unsafe_unretained id<MTLRenderPipelineState> h = hybrid_get(&k, vs, fs);
                 if (h) {
-                    if (st == 0) pso_pend_demand(&k, vs, fs);
+                    if (st == 0) { pso_pend_demand(&k, vs, fs); wl_bump(vs->key, fs ? fs->key : ""); }   // the pair's task in warm_later's list, if still queued, builds next
                     g_pso_pull = 1; g_hy_ns += bp_now() - bt;
                     if (g_pp_submit_mark != g_sub_serial) { g_pp_submit_mark = g_sub_serial; uint64_t t0 = bp_now(); pso_predict_rest(); g_bp_pso_ns += bp_now() - t0; }
                     return h;
@@ -8746,7 +8747,7 @@ static NSString *warm_key(const char *s, size_t n) {
 // The prewarm runs the lines of its lists as tasks: a shader (S), a compute pipeline (C), or every render pipeline (R) of one shader pair. The pipelines of a pair share their
 // bases, so one worker builds them one after the other. A native mesh pipeline (M) is a separate task. The tasks keep the lists' order (a render pair at its first line).
 // Shaders share one dictionary. Only one worker prepares a key, including its pulling entry; a failed warm load stays NSNull for this prewarm only.
-@interface WarmTask : NSObject { @public int kind, stage; NSString *key, *vkey, *fkey, *tkey; NSMutableArray<NSData *> *rs; } @end
+@interface WarmTask : NSObject { @public int kind, stage; NSString *key, *vkey, *fkey, *tkey; NSMutableArray<NSData *> *rs; _Atomic int wl_st; } @end   // wl_st (warm_later): 0 queued, 1 bumped, 2 taken by a worker
 @implementation WarmTask @end
 static NSMutableDictionary *g_warm_dict; static os_unfair_lock g_warm_dict_lock = OS_UNFAIR_LOCK_INIT;
 @interface WarmLoad : NSObject { @public dispatch_group_t done; id shader; } @end
@@ -9005,16 +9006,61 @@ static void prepare_prebuild(void) {
 // utility QoS, as pso_prebuild_bg builds, so the game keeps its frame rate meanwhile; a draw whose pipeline is not built yet draws with its shader pair's pulling pipeline (hybrid),
 // whose bases the prepare step's prebuild made. Only on a start that does not compact the archive (warm_start): the prewarm stays running (g_warm_running) until warm_finish at
 // the end, which matters to the archive only while compacting (the recapture and the held flushes), so what it builds is captured as any compile at run time is
+// The background list's order. Workers take the next task of the list, but a task a draw asked for (wl_bump: the draw has its shader pair's pulling stand-in because the pair's
+// pipelines are still queued here) goes first, so the area the player is in builds before the rest of the playthrough. A task is built once: wl_st goes to 2 by exchange, whoever
+// gets it from 0 or 1 builds it. The table of pairs is built once and only read afterwards (the draw thread takes no lock unless it bumps a task that was still queued)
+typedef struct { uint64_t h; __unsafe_unretained WarmTask *t; } wl_slot;
+static wl_slot *g_wl_tab; static size_t g_wl_mask; static NSArray<WarmTask *> *g_wl_rest; static _Atomic long g_wl_next; static _Atomic int g_wl_live, g_wl_nbump;
+static os_unfair_lock g_wl_lock = OS_UNFAIR_LOCK_INIT; static NSMutableArray<WarmTask *> *g_wl_bumps; static _Atomic uint64_t g_wl_bumped;
+static uint64_t wl_hash(const char *v, const char *f) { uint64_t h = 1469598103934665603ull; for (; *v; v++) h = (h ^ (uint8_t)*v) * 1099511628211ull; h = (h ^ 0xff) * 1099511628211ull; for (; f && *f; f++) h = (h ^ (uint8_t)*f) * 1099511628211ull; return h | 1; }
+static void wl_init(NSArray<WarmTask *> *rest) {
+    g_wl_rest = rest; atomic_store(&g_wl_next, 0); atomic_store(&g_wl_nbump, 0); atomic_store(&g_wl_bumped, 0); g_wl_bumps = [NSMutableArray array];
+    size_t cap = 16; while (cap < rest.count * 2) cap <<= 1;
+    free(g_wl_tab); g_wl_tab = calloc(cap, sizeof *g_wl_tab); g_wl_mask = cap - 1;
+    for (WarmTask *t in rest) {
+        atomic_store(&t->wl_st, 0);
+        if (t->kind != 1) continue;
+        uint64_t h = wl_hash(t->vkey.UTF8String, t->fkey.UTF8String);
+        size_t i = h & g_wl_mask; while (g_wl_tab[i].h && g_wl_tab[i].h != h) i = (i + 1) & g_wl_mask;
+        if (!g_wl_tab[i].h) { g_wl_tab[i].h = h; g_wl_tab[i].t = t; }   // a pair named twice stays one task (warm_parse joins its rows)
+    }
+    atomic_store(&g_wl_live, 1);
+}
+static WarmTask *wl_next(void) {   // the next task to build, nil at the end of the list
+    for (;;) {
+        if (atomic_load(&g_wl_nbump) > 0) {
+            WarmTask *b = nil; os_unfair_lock_lock(&g_wl_lock);
+            if (g_wl_bumps.count) { b = g_wl_bumps.lastObject; [g_wl_bumps removeLastObject]; atomic_fetch_sub(&g_wl_nbump, 1); }   // the latest ask first: it is the player's current view
+            os_unfair_lock_unlock(&g_wl_lock);
+            if (b) { if (atomic_exchange(&b->wl_st, 2) == 2) continue; return b; }
+        }
+        long i = atomic_fetch_add(&g_wl_next, 1); if (i >= (long)g_wl_rest.count) return nil;
+        WarmTask *t = g_wl_rest[(NSUInteger)i]; if (atomic_exchange(&t->wl_st, 2) == 2) continue;   // already built as a bumped task
+        return t;
+    }
+}
+// A draw falls back to its pair's pulling pipeline: move the pair's task to the front if it is still queued. Returns 1 when it was moved. Safe from any thread
+static int wl_bump(const char *vkey, const char *fkey) {
+    if (!atomic_load(&g_wl_live)) return 0;
+    uint64_t h = wl_hash(vkey, fkey); size_t i = h & g_wl_mask;
+    while (g_wl_tab[i].h && g_wl_tab[i].h != h) i = (i + 1) & g_wl_mask;
+    WarmTask *t = g_wl_tab[i].h ? g_wl_tab[i].t : nil; if (!t) return 0;
+    int z = 0; if (!atomic_compare_exchange_strong(&t->wl_st, &z, 1)) return 0;   // taken or bumped already
+    os_unfair_lock_lock(&g_wl_lock); [g_wl_bumps addObject:t]; atomic_fetch_add(&g_wl_nbump, 1); os_unfair_lock_unlock(&g_wl_lock);
+    atomic_fetch_add(&g_wl_bumped, 1); return 1;
+}
 static void warm_later(NSArray<WarmTask *> *rest, long rest_lines) {
     int pc = 0; size_t sz = sizeof pc; if (sysctlbyname("hw.perflevel0.physicalcpu", &pc, &sz, NULL, 0) || pc <= 1) pc = 4;
-    int workers = pc > 4 ? pc / 2 : 2; long n = (long)rest.count; uint64_t t0 = bp_now();
+    int workers = pc > 4 ? pc / 2 : 2; uint64_t t0 = bp_now();
     MLOG("pipeline prewarm: %ld lines after the first frame, on %d workers", rest_lines, workers);
-    dispatch_group_t g = dispatch_group_create(); __block _Atomic long next = 0;
+    wl_init(rest);
+    dispatch_group_t g = dispatch_group_create();
     for (int w = 0; w < workers; w++) dispatch_group_async(g, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        for (;;) { long i = atomic_fetch_add(&next, 1); if (i >= n) break; warm_task(rest[(NSUInteger)i]); }
+        for (WarmTask *t; (t = wl_next()); ) warm_task(t);
     });
     dispatch_group_notify(g, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ @autoreleasepool {
-        MLOG("pipeline prewarm: the %ld lines after the first frame done in %.1f s", rest_lines, (bp_now() - t0) / 1e9);
+        atomic_store(&g_wl_live, 0);
+        MLOG("pipeline prewarm: the %ld lines after the first frame done in %.1f s (%llu pairs moved to the front by draws)", rest_lines, (bp_now() - t0) / 1e9, (unsigned long long)atomic_load(&g_wl_bumped));
         warm_finish();
     } });
 }

@@ -5,9 +5,9 @@ that fits:
 
   nan-bits    both NaN, different bits: Ampere writes the canonical NaN (0x7fffffff, f16 0x7fff), Metal another
   nan-one     one side NaN, the other a number
-  denorm-in   an f32 input is a denormal: Metal's f32 arithmetic flushes them, Ampere keeps them without .FTZ (Metal keeps f16 denormals, so a half input
-              does not count)
-  denorm-out  either f32 result is a denormal, or one is zero and the other a denormal or the smallest normal (a denormal intermediate rounded up)
+  denorm-in   an f32 input is a denormal, or the same lane of a bf16x2 input (bf16 has f32's exponent and is computed in f32): Metal's f32 arithmetic
+              flushes them, Ampere keeps them without .FTZ (Metal keeps f16 denormals, so a half input does not count)
+  denorm-out  either f32 (or bf16) result is a denormal, or one is zero and the other a denormal or the smallest normal (a denormal intermediate rounded up)
   zero-sign   +0 against -0
   rn-result   a directed-rounding op (name ends in _rz / _rm / _rp) where Metal gave the round-to-nearest result: the rounding mode was not applied
   other       the rest, with their ULP distances (float lanes) for the report
@@ -19,6 +19,7 @@ from collections import Counter
 PLATFORM = frozenset({'nan-bits', 'denorm-in', 'denorm-out'})
 
 _MASK = {'f': (0x7f800000, 0x007fffff, 32), 'h': (0x7c00, 0x03ff, 16), 'b': (0x7f80, 0x007f, 16)}
+_SIGN = {'f': 0x80000000, 'b': 0x8000}
 
 
 def is_nan(v, k):
@@ -52,10 +53,13 @@ def lanes(word, kind):
     return [(word, kind)]
 
 
-def denorm_input(row, kinds):
+def denorm_input(row, kinds, half=None):
+    """an f32 input is a denormal; with half (0 low, 1 high, for a bf16x2 output lane) also that lane of a bf16x2 input"""
     for v, k in zip(row, kinds):
         k = k.lower()
         if k == 'f' and is_denorm(v, 'f'):
+            return True
+        if k == 'b' and half is not None and is_denorm(lanes(v, 'b')[half][0], 'b'):
             return True
     return False
 
@@ -101,7 +105,7 @@ def classify(op, rows, orin, metal):
         row_causes = []
         for k, (ow, mw) in enumerate(zip(o_row, m_row)):
             kind = kinds_out[k]
-            for (a, lk), (b, _) in zip(lanes(ow, kind), lanes(mw, kind)):
+            for half, ((a, lk), (b, _)) in enumerate(zip(lanes(ow, kind), lanes(mw, kind))):
                 n += 1
                 if a == b:
                     continue
@@ -114,11 +118,11 @@ def classify(op, rows, orin, metal):
                 else:
                     if din is None:
                         din = denorm_input(row, kinds_in)
-                    if din:
+                    if din or (lk == 'b' and denorm_input(row, kinds_in, half)):
                         cause = 'denorm-in'
                     elif is_nan(a, lk) or is_nan(b, lk):
                         cause = 'nan-one'
-                    elif lk == 'f' and (is_denorm(a, lk) or is_denorm(b, lk) or {a & 0x7fffffff, b & 0x7fffffff} == {0, 0x00800000}):
+                    elif lk in 'fb' and (is_denorm(a, lk) or is_denorm(b, lk) or {a & ~_SIGN[lk], b & ~_SIGN[lk]} == {0, _MASK[lk][1] + 1}):
                         cause = 'denorm-out'
                     elif is_zero(a, lk) and is_zero(b, lk):
                         cause = 'zero-sign'

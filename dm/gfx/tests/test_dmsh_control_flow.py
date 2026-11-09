@@ -96,6 +96,16 @@ class ControlFlow(unittest.TestCase):
         msl = self.translate(program, struct.pack('<2i', *words))
         self.assertEqual(len(re.findall(r'== (?:\w+\()?\d+', msl)), 1, msl)
 
+    def test_table_loaded_in_a_block_split_later(self):
+        # 0: work; 1: LDC R1, c1[R2 + 0]; 2: if (P0) jump to 5; 3: if (P1) jump back to 1; 4: exit; 5: BRX R1 to 6 or 7; 6: jump to 8; 7: work; 8: exit.
+        # Block 0..2 is decoded whole before the jump back splits it at 1, and the split left the BRX's predecessor naming 0..0, which has no LDC: "BRX with no
+        # target found in the c1 jump table" (16 pixel shaders of Pokémon Pokopia)
+        anchor = 6 * SIZE
+        program = [WORK, ldc(1, 2, 0), bra(2, 5, pred=0), bra(3, 1, pred=1), EXIT, branch(0x949, 0, ra=1), bra(6, 8), WORK, EXIT]
+        words = [t * SIZE - anchor for t in (6, 7)]
+        msl = self.translate(program, struct.pack('<2i', *words))
+        self.assertEqual(len(re.findall(r'== (?:\w+\()?\d+', msl)), 1, msl)
+
     def test_word_past_the_code_ends_the_table(self):
         # What follows a table in c1 is data, and may lead past the code's end: the translator took that as a failure (ArgumentOutOfRangeException, two compute shaders of Yoshi and the Mysterious Book)
         anchor = 2 * SIZE

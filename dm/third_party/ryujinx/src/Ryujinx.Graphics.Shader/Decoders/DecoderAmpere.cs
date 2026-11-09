@@ -104,6 +104,7 @@ namespace Ryujinx.Graphics.Shader.Decoders
 
                             nBlock.Split(currBlock);
                             blocks.Insert(nBlkIndex + 1, currBlock);
+                            MovePredecessorsAmpere(nBlock, currBlock);
 
                             continue;
                         }
@@ -295,6 +296,23 @@ namespace Ryujinx.Graphics.Shader.Decoders
             while (!op.Props.HasFlag(InstProps.Bra));
 
             block.EndAddress = address;
+        }
+
+        // Block.Split gives the right half the left half's successors, but their predecessor lists still name the left half. FindBrxTableAmpere walks those lists
+        // back to the LDC that loaded the jump register, so a split between the LDC and the BRX's block sent it into code before the load (Pokémon Pokopia: 16 pixel
+        // shaders, an LDC c[0x1][R20+0x790] and a conditional BRA to the BRX in a block split later at a branch target: the walk met another write of R20 and gave up).
+        // Only the Ampere decoder's split is mended here: the Maxwell decoder's blocks feed the same lists to register usage, and its games' outputs stay as they are
+        private static void MovePredecessorsAmpere(Block left, Block right)
+        {
+            foreach (Block successor in right.Successors)
+            {
+                int i = successor.Predecessors.IndexOf(left);
+
+                if (i >= 0)
+                {
+                    successor.Predecessors[i] = right;
+                }
+            }
         }
 
         // A BRX's jump table as far as the decoder has read it

@@ -133,6 +133,7 @@ DM_NVN_CUT_BUSY	switch	`=0`: a segment boundary commits whatever the GPU is doin
 DM_NVN_DEFER	switch	`0` turns off the deferred pass merging of the TBDR optimizations (which run only with `DM_NVN_TBDR=1`)
 DM_NVN_DEFER_AB	diagnostic	`=1` keeps the deferred pass merging (with `DM_NVN_TBDR=1`) off until the second screenshot has been written, then turns it on, to compare the pictures with and without it
 DM_NVN_DEPTHOVR	diagnostic	`=<fragment shader key prefix>,…`: those draws compare depth with `ALWAYS`; with `DM_NVN_HILITE`, tells "the depth test rejects every fragment" from "nothing rasterizes"
+DM_NVN_DEPTH_SWAP	switch	`0` turns off the depth copy for a draw that writes the depth attachment while a texture slot or bindless handle of its fragment shader names it (on by default): such a draw gets a pass whose depth attachment is a copy, which goes back at the pass end
 DM_NVN_DIRECT_UPLOAD	switch	0 disables bounded direct RGBA16F array uploads and keeps staged copies; on by default for supported non-sparse textures.
 DM_NVN_DIRTYCHECK	diagnostic	`=1` fully hashes pool content on every use to find changes the dirty-page tracking missed
 DM_NVN_DISPATCH_OWN	switch	`=1` gives every compute dispatch a compute encoder of its own with full barriers, as before (by default dispatches share the copy encoder); `DM_NVN_PASSGPU` does the same

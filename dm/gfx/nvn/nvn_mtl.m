@@ -4912,6 +4912,13 @@ static void rt_mirror_flush(void) {
     }
     if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
 }
+// A draw that writes the depth attachment while a texture slot or bindless handle of its fragment shader names that depth reads what Metal leaves undefined:
+// on Apple's GPUs whole 16x16 tiles of another state come back, where NVN reads the depth from before the draw. Ocarina of Time's snow (55845639d605e028, ee567dea65288f58 and
+// others: depth LEQUAL with writes, a depth fade sampled through a texture slot) drew flickering black blocks where it met rock and walls. Such a draw gets a pass of its own whose depth
+// attachment is a copy of the depth (g_dswap): it writes the copy and reads the original, which nothing changes until the pass ends and the copy goes back. DM_NVN_DEPTH_SWAP=0: off
+static int g_dswap_want, g_dswap_on; static __strong id<MTLTexture> g_dswap_src, g_dswap_tex; static uint64_t g_dswap_n;
+static int dswap_enabled(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_DEPTH_SWAP"); v = !(e && !strcmp(e, "0")); if (!v) MLOG("depth read while written: no copy of the attachment (DM_NVN_DEPTH_SWAP=0)"); } return v; }
+static void dswap_back(void);
 static void rp_end_at(const char *fn, int line) { if (g_enc) { AP_B; geo_mesh_flush_pass(); PD("E %llu pass ends in %s:%d", g_stat_pass, fn, line);
     if (enc_label_on()) { static uint64_t lf = ~0ull, base; uint64_t f = atomic_load(&g_cur_frame); if (f != lf) { lf = f; base = g_stat_pass - 1; }   // Intra-frame serial: the same pass has the same name every frame, so the table can aggregate by name
         [(id)g_enc setLabel:[NSString stringWithFormat:@"p%02llu %dx%d %s d%d", (unsigned long long)(g_stat_pass - base), g_el_w, g_el_h, g_el_key[0] ? g_el_key : "-", g_el_draws]]; }
@@ -4920,6 +4927,7 @@ static void rp_end_at(const char *fn, int line) { if (g_enc) { AP_B; geo_mesh_fl
 #endif
     sd_finish(); enc_r_end_pass(g_enc); g_gp_bw_l0 = g_bw_load; g_gp_bw_s0 = g_bw_store;   // the profile's per-pass ledger counts from the previous pass end, profiled or not
     zskip_commit_clears(); g_enc = nil; g_enc_geo_nocolor = 0; g_rt_merged = 0; g_sm_pass = 0; g_rt_range_active = g_rt_range_pending = 0; pg_end_render(); ts_after(); ms_after(); if (g_lp.count) lp_finish(); fz_end();
+    if (g_dswap_on) dswap_back();   // the depth this pass wrote into the copy goes back to the attachment
     if (g_nubd && g_nubd >= ubd_lazy()) ubd_flush();   // the inline updates deferred in this pass, in order (see mtl_sub_update); across passes they wait for the next copy or dispatch (blit_raw)
     if (g_nbcrt) bcrt_flush();   // blocks drawn into shadows go back into their compressed textures
     if (g_nrtm) rt_mirror_flush();
@@ -5061,6 +5069,12 @@ static void attach(MTLRenderPassAttachmentDescriptor *a, const tex_t *t, const v
 // (Mac character select screen: the color-clear pass drags along a 400x225 depth load and store)
 static id<MTL4RenderCommandEncoder> rp_begin_ex(int clear_only);
 static NSUInteger g_rp_aw; static int g_rp_whole;
+static void dswap_back(void) {
+    id<MTLTexture> src = g_dswap_src, cp = g_dswap_tex; g_dswap_on = 0; g_dswap_src = nil;
+    if (!src || !cp) return;
+    id<MTL4ComputeCommandEncoder> be = blit(); enc_b_copy_texture(be, cp, 0, 0, MTLOriginMake(0, 0, 0), MTLSizeMake(src.width, src.height, 1), src, 0, 0, MTLOriginMake(0, 0, 0));
+    g_game_barrier = 1;   // the next pass waits for it too
+}
 static id<MTL4RenderCommandEncoder> rp_begin(void) { if (g_enc && g_rp_aw) rp_end(); g_rp_whole = 1; id<MTL4RenderCommandEncoder> e = rp_begin_ex(0); g_rp_whole = 0; return e; }   // the callers draw anywhere in the target (see g_rp_aw)
 static id<MTL4RenderCommandEncoder> rp_begin_ex_(int clear_only);
 static id<MTL4RenderCommandEncoder> rp_begin_ex(int clear_only) { AP_B; id<MTL4RenderCommandEncoder> e = rp_begin_ex_(clear_only); AP_E(1); return e; }
@@ -5076,6 +5090,7 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex_(int clear_only) {
     if (rt_range_on()) { reg0 = g_reg_gen; ser0 = g_ser_gen; }
     if (rt_range_on()) dirty0=nvn_dirty_now();
     if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
+    int dswap = g_dswap_want; g_dswap_want = 0;   // asked by the draw opening this pass (fb_prepare), for this pass only
     MTL4RenderPassDescriptor *pd = [MTL4RenderPassDescriptor new];
     int any = 0;
     for (int i = 0; i < R.rt.n; i++) {
@@ -5119,6 +5134,22 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex_(int clear_only) {
     if (R.rt.depth && clear_only != 2 && !(clear_only == 1 && !R.clear_d && !R.clear_s)) {
         attach(pd.depthAttachment, R.rt.depth, &R.rt.dview, R.rt.has_dview);
         id<MTLTexture> t = pd.depthAttachment.texture;
+        if (dswap) {
+            if (t && mtl_fmt_depth(t.pixelFormat) && !R.clear_d && !t.parentTexture && t.textureType == MTLTextureType2D && t.sampleCount == 1 && !pd.depthAttachment.level && !pd.depthAttachment.slice) {
+                if (!g_dswap_tex || g_dswap_tex.pixelFormat != t.pixelFormat || g_dswap_tex.width != t.width || g_dswap_tex.height != t.height) {
+                    if (g_dswap_tex) defer_obj_release(g_dswap_tex);
+                    MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:t.pixelFormat width:t.width height:t.height mipmapped:NO];
+                    d.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead; d.storageMode = MTLStorageModePrivate;
+                    g_dswap_tex = [g_dev newTextureWithDescriptor:d]; if (g_dswap_tex) res_add(g_dswap_tex); }
+                if (g_dswap_tex) {
+                    id<MTL4ComputeCommandEncoder> be = blit(); enc_b_copy_texture(be, t, 0, 0, MTLOriginMake(0, 0, 0), MTLSizeMake(t.width, t.height, 1), g_dswap_tex, 0, 0, MTLOriginMake(0, 0, 0));
+                    enc_b_end(g_blit); g_blit = nil; g_game_barrier = 1;   // the pass waits for the copy (enc_r_begin_pass)
+                    g_dswap_src = t; g_dswap_on = 1; t = g_dswap_tex; pd.depthAttachment.texture = t;
+                    if (!g_dswap_n++) MLOG("depth read while written: a draw whose texture slot or handle names the depth it writes draws into a copy of it (first at pass %llu; DM_NVN_DEPTH_SWAP)", g_stat_pass + 1);
+                    PD("S %llu depth attachment ser=%llu swapped for a copy: a draw reads the depth it writes", g_stat_pass + 1, (unsigned long long)R.rt.depth->serial);
+                }
+            } else { static int once; if (!once++) MLOG("depth read while written: the attachment is not a whole single-level 2D texture, or the pass clears it; left as is"); }
+        }
         MTLPixelFormat pf = t.pixelFormat;
         // Combined storage stays on both attachments: single-plane descriptors work
         // on macOS but iOS rejects Invalid / Depth32Float_Stencil8 at pipeline creation.
@@ -12201,6 +12232,17 @@ static int fb_texu_reads(NvShader *fs, uint64_t ser) {
             if (s == ser) return 1; } }
     return 0;
 }
+// Whether a sampled texture or read-only image slot of the fragment stage names this texture's storage (the depth attachment): read as fb_prepare reads the slots
+static int fb_slot_reads(NvShader *fs, const tex_t *att) {
+    for (int i = 0; i < fs->rf.nb; i++) { const nvn_rbind *b = &fs->rf.b[i];
+        int image = b->kind == NVN_RB_IMG && b->reg < 32;
+        if (!image && (b->kind != NVN_RB_TEX || b->reg >= NTEX)) continue;
+        uint64_t handle = image ? S.img[1][b->reg] : tex_slot_h(S.tex[1], S.img[1], b->reg);
+        int tid = (int)(handle & 0xfffff); if (!tid) continue;
+        os_unfair_lock_lock(&g_rmu); tex_t t = tid < g_ntreg && g_treg[tid].ok ? g_treg[tid].t : (tex_t){0}; os_unfair_lock_unlock(&g_rmu);
+        if (t.serial && tex_storage_overlap(&t, att)) return 1; }
+    return 0;
+}
 // Called before the draw opens its render pass: if a snapshot is needed, end the current render pass, copy the snapshot (or reuse a valid one) and register the substitution (used by this draw's argument encoding)
 static void fb_prepare(NvProg *pr) {
     g_draw_seq++; g_fb_n = 0;
@@ -12214,6 +12256,8 @@ static void fb_prepare(NvProg *pr) {
     int dsw = R.rt.depth && ((S.ds.dt && S.ds.dw) || (S.ds.st && (S.st_wmask[0] || S.st_wmask[1]) && (S.ds.fail_f != NVN_STENCIL_OP_KEEP || S.ds.zfail_f != NVN_STENCIL_OP_KEEP || S.ds.zpass_f != NVN_STENCIL_OP_KEEP
         || S.ds.fail_b != NVN_STENCIL_OP_KEEP || S.ds.zfail_b != NVN_STENCIL_OP_KEEP || S.ds.zpass_b != NVN_STENCIL_OP_KEEP)));
     if (g_enc && dsw && g_fb_dread) { g_fb_split++; g_fb_split_pool += g_fb_dread_pool; g_fb_dread_pool = 0; rp_end(); fb_pass_sync(); }   // the same for its depth and stencil (see rtc_on)
+    if (dsw && R.rt.depth && S.ds.dt && S.ds.dw && !g_dswap_on && dswap_enabled() && (fb_slot_reads(fs, R.rt.depth) || (fs->rf.bindless && fb_texu_reads(fs, R.rt.depth->serial)))) {   // a read the slots or handles prove: a pool or dynamic read may name any texture (pool_ds_read), and a copy for each would cost a pass and two copies a draw
+        if (g_enc) { rp_end(); fb_pass_sync(); } g_dswap_want = 1; }   // it reads the depth it writes: its pass draws into a copy (g_dswap)
     if (R.rt.depth && !g_fb_dread && ((fs->rf.pool && pool_ds_read(R.rt.depth) && (g_fb_dread_pool = 1)) || fs->rf.dyn || (fs->rf.bindless && fb_texu_reads(fs, R.rt.depth->serial)))) g_fb_dread = 1;
     uint64_t tile[4]; int ntile = fb_tile_plan(pr, wm, tile);
     for (int i = 0; i < fs->rf.nb && g_fb_n < 4; i++) {

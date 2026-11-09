@@ -249,6 +249,8 @@ t_geometry: t_geometry.m $(MTL_T_DEP)
 check_t_geometry: RUN_ENV = MTL_DEBUG_LAYER=1
 t_feedback: t_feedback.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_feedback.m $(MTL_T_SRC) $(FW)
+t_depth_swap: t_depth_swap.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_depth_swap.m $(MTL_T_SRC) $(FW)
 t_rast_discard: t_rast_discard.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_rast_discard.m $(MTL_T_SRC) $(FW)
 t_queue_origin: t_queue_origin.m $(MTL_T_DEP)
@@ -310,6 +312,10 @@ t_geometry_mesh: t_geometry_mesh.m t_geometry.m ../tools/dmsh_mesh.py $(MTL_T_DE
 .PHONY: check_t_geometry_mesh
 check_t_geometry_mesh: t_geometry_mesh
 	@set -e; work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; python3 test_dmsh_geometry.py --fixture "$$work"; MTL_DEBUG_LAYER=1 ./t_geometry_mesh "$$work"; DM_NVN_GEO_MESH_RUN=0 MTL_DEBUG_LAYER=1 ./t_geometry_mesh "$$work"; DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_geometry_mesh "$$work"
+.PHONY: check_t_depth_swap
+check_t_depth_swap: t_depth_swap
+	MTL_DEBUG_LAYER=1 ./t_depth_swap
+	DM_NVN_DEPTH_SWAP=0 MTL_DEBUG_LAYER=1 ./t_depth_swap
 .PHONY: check_t_feedback
 check_t_feedback: t_feedback
 	@set -e; work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; python3 test_dmsh_fetch.py --fixture "$$work"; MTL_DEBUG_LAYER=1 ./t_feedback "$$work"

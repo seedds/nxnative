@@ -63,6 +63,22 @@ static size_t tex_size(int fmt, int w, int h, int flags, size_t *align) {
 }
 
 int main(void) {
+    {
+        uint32_t state[32] = {0}; float target = 120; memcpy(state, &target, sizeof target);
+        dm_fps_state = (uint8_t *)state; dm_fps_fractional = 2;
+        setenv("DM_FPS_TARGET", "120", 1); g_fps_high = -1;
+        EXPECT("fractional contract permits high rate", DM_GAME_FPS_MAX >= 120, fps_high());
+        atomic_store(&g_high_cap, 120);
+        EXPECT("fractional cap follows high display", DM_GAME_FPS_MAX >= 120 ? 120 : 60, fps_step_cap());
+        EXPECT("fractional bypasses whole vsync controller", 0, fstep_on());
+        atomic_store(&g_high_cap, 60);
+        EXPECT("fractional respects display fallback", 60, fps_step_cap());
+        setenv("DM_FRAME_DELTA", "0", 1); g_fps_high = -1;
+        EXPECT("disabled fractional clock rejects high rate", 0, fps_high());
+        unsetenv("DM_FRAME_DELTA"); dm_fps_fractional = 0; g_fps_high = -1;
+        EXPECT("whole vsync contract rejects high rate", 0, fps_high());
+        dm_fps_state = NULL; g_fps_high = -1; unsetenv("DM_FPS_TARGET");
+    }
     setenv("DM_NVN_COUNT", "1", 1);   // the call-count checks below need the counting trampolines (off by default)
     {   // A missing control section must not publish uninitialized bytes or poison a serial's key cache.
         uint8_t control[0x880] = {0}, key[8];

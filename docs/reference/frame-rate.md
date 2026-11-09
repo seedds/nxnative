@@ -541,3 +541,13 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Fix:** `dmsh_build.py` `pool_arrays`: a fragment shader whose only store is the mark gets `[[early_fragment_tests]]`. One that discards, writes depth, stencil or a sample mask, or stores anything itself keeps its test where it was; there the mark costs the shading. A chain change.
 - **Check:** `python3 dm/tools/tests/test_dmsh_pool_arrays.py`. On the same route, the game's own controller then held its main pass at 1536x864, four times the pixels, at the same GPU time.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md): 56 of the 258 fragment programs of a frame in Kokiri Forest carry the mark, 3 of them with a discard.
+
+## Experimental fractional frame-step contract
+
+**Symptom:** A game whose simulation divides a base rate by its selected frame rate cannot run at arbitrary high display rates using whole 1/60-second steps.
+
+**Cause:** The existing whole-vsync state contract represents integer steps. Reusing it at 90–120 frames per second changes simulation speed. The older experimental fractional override at state +0x40 also conflicts with the dynamic-resolution field now assigned there.
+
+**Fix (experimental):** A rewrite opt-in (`DM_EXPERIMENTAL_FRACTIONAL=1`) and a verified NSO build gate select a fractional stub. `FPS_FRACTIONAL=2` names elapsed seconds at +0x38, a runtime marker at +0x3c, and the floating-point override at +0x44. The loader rejects legacy contract 1. Dynamic resolution retains +0x40. Normal rewrites retain the existing whole-vsync stub. The host requests 120 only with a declared contract; movie, thermal and sub-120-Hz display caps still apply. Deterministic clocks and `DM_FRAME_DELTA=0` disable high-rate pacing. Elapsed-time smoothing and the bounded hitch step are inherited experimental policy, not a guarantee of exact time recovery after long stalls.
+
+**Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md#experimental-fractional-timing-review). Open: current-main gameplay, movie/audio transitions, long stalls and iOS validation. This contract does not establish support for other titles.

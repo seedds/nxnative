@@ -371,22 +371,84 @@ namespace Ryujinx.Graphics.Shader.Instructions
             return r;
         }
 
-        // F2I.U64 Rd:Rd+1, b (F32): the layout of F2I. The compiler's 32-bit division takes its reciprocal this way: I2F, RCP, IADD 0x1ffffffe (2^64 and two ulps down), F2I.U64, then the high word
-        // (Fire Emblem Fortune's Weave's Lighting compute shaders). The translator has 32-bit integers, so the two words are taken apart in float: a float's value has at most 24 significant
-        // bits, so the high word and the rest are exact, and the result is exact for every value in range
+        // F2I.S64 / .U64 Rd:Rd+1, b (F32): the layout of F2I, with NTZ (a NaN gives 0) at 77 and FTZ at 80. The compiler's 32-bit division takes its reciprocal through F2I.U64.TRUNC
+        // (I2F, RCP, IADD 0x1ffffffe, F2I.U64, then the high word: Fire Emblem Fortune's Weave's Lighting compute shaders), and cvt.rzi.s64.f32 is F2I.S64.TRUNC. The translator has
+        // 32-bit integers and Metal's fast math assumes no NaN or infinity, so the result is built from the float's bits: its 24-bit significand shifted into the two words, and below
+        // 2^23 the fraction it drops rounded as .ROUND (to nearest even), .FLOOR, .CEIL or .TRUNC asks. As a Jetson Orin computes it: a value out of range saturates (+-infinity
+        // too), and a NaN gives the smallest value, 0x8000000000000000 signed (0 unsigned), or 0 with NTZ
         public static void AF2i64(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
             ASrc s = AOne(context, x);
 
-            if (x.Bits(84, 86) != 2 || x.Bits(75, 77) != 3 || x.Bit(72) || x.Bits(78, 80) != 3)
+            if (x.Bits(84, 86) != 2 || x.Bits(75, 77) != 3)
             {
-                throw AFail(context, "F2I to 64 bits other than an unsigned truncation of an F32");
+                throw AFail(context, "F2I to 64 bits from a float other than an F32");
             }
 
-            Operand f = AFloat(context, s);
-            Operand hi = context.FP32ConvertToU32(context.FPMultiply(f, ConstF(1.0f / 4294967296.0f)));
-            Operand lo = context.FP32ConvertToU32(context.FPSubtract(f, context.FPMultiply(context.IConvertU32ToFP32(hi), ConstF(4294967296.0f))));
+            bool signed = x.Bit(72);
+            int rnd = x.Bits(78, 80);
+            Operand Sel(Operand c, Operand t, Operand f) => context.ConditionalSelect(c, t, f);
+
+            Operand bits = AGet(context, s);
+            bits = s.Abs ? context.BitwiseAnd(bits, Const(0x7fffffff)) : bits;
+            bits = s.Neg ? context.BitwiseExclusiveOr(bits, Const(int.MinValue)) : bits;
+
+            Operand neg = context.ICompareLess(bits, Const(0));
+            Operand e = context.BitwiseAnd(context.ShiftRightU32(bits, Const(23)), Const(0xff));
+            Operand m = context.BitwiseAnd(bits, Const(0x7fffff));
+            Operand zeroExp = context.ICompareEqual(e, Const(0));
+            Operand nan = context.BitwiseAnd(context.ICompareEqual(e, Const(0xff)), context.ICompareNotEqual(m, Const(0)));
+            Operand sig = Sel(zeroExp, x.Bit(80) ? Const(0) : m, context.BitwiseOr(m, Const(0x800000)));
+
+            // The value is sig 2^(max(e, 1) - 150). At e >= 150 it is an integer: sig shifted left by up to 40 (beyond, it is out of range), exact
+            Operand eb = context.IMaximumS32(e, Const(1));
+            Operand left = context.IMinimumS32(context.IMaximumS32(context.ISubtract(eb, Const(150)), Const(0)), Const(40));
+            Operand leftLo = context.IMinimumS32(left, Const(31));
+            Operand wide = context.ICompareGreaterOrEqual(left, Const(32));
+            Operand bigLo = Sel(wide, Const(0), context.ShiftLeft(sig, leftLo));
+            Operand bigHi = Sel(wide, context.ShiftLeft(sig, context.BitwiseAnd(left, Const(31))),
+                context.ShiftRightU32(context.ShiftRightU32(sig, Const(1)), context.ISubtract(Const(31), leftLo)));
+
+            // Below, the integer part is sig >> right and the fraction rem of 2^right; past 31 the integer part is 0 and the fraction below a half
+            Operand right = context.IMinimumS32(context.IMaximumS32(context.ISubtract(Const(150), eb), Const(1)), Const(31));
+            Operand ip = context.ShiftRightU32(sig, right);
+            Operand rem = context.ISubtract(sig, context.ShiftLeft(ip, right));
+            Operand inexact = context.ICompareNotEqual(rem, Const(0));
+            Operand half = context.ShiftLeft(Const(1), context.ISubtract(right, Const(1)));
+            Operand up = rnd switch
+            {
+                0 => context.BitwiseOr(context.ICompareGreaterUnsigned(rem, half),
+                    context.BitwiseAnd(context.ICompareEqual(rem, half), context.ICompareNotEqual(context.BitwiseAnd(ip, Const(1)), Const(0)))),
+                1 => context.BitwiseAnd(inexact, neg),
+                2 => context.BitwiseAnd(inexact, context.BitwiseNot(neg)),
+                _ => null,
+            };
+            Operand smallLo = up == null ? ip : context.IAdd(ip, Sel(up, Const(1), Const(0)));
+
+            Operand big = context.ICompareGreaterOrEqual(e, Const(150));
+            Operand lo = Sel(big, bigLo, smallLo);
+            Operand hi = Sel(big, bigHi, Const(0));
+
+            if (signed)
+            {
+                // Negated in two words; 2^63 and above saturate (the negative of 2^63 is the smallest value, which saturation gives too)
+                Operand nlo = context.INegate(lo);
+                Operand nhi = Sel(context.ICompareEqual(lo, Const(0)), context.INegate(hi), context.BitwiseNot(hi));
+                Operand over = context.ICompareGreaterOrEqual(e, Const(190));
+                lo = Sel(over, Sel(neg, Const(0), Const(-1)), Sel(neg, nlo, lo));
+                hi = Sel(over, Sel(neg, Const(int.MinValue), Const(int.MaxValue)), Sel(neg, nhi, hi));
+                lo = Sel(nan, Const(0), lo);
+                hi = Sel(nan, x.Bit(77) ? Const(0) : Const(int.MinValue), hi);
+            }
+            else
+            {
+                // A negative value gives 0, 2^64 and above all ones
+                Operand over = context.ICompareGreaterOrEqual(e, Const(191));
+                Operand zero = context.BitwiseOr(neg, nan);
+                lo = Sel(zero, Const(0), Sel(over, Const(-1), lo));
+                hi = Sel(zero, Const(0), Sel(over, Const(-1), hi));
+            }
 
             if (x.Rd < RegisterConsts.RegisterZeroIndex)
             {

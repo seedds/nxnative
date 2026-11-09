@@ -32,7 +32,7 @@ int main(void) { @autoreleasepool {
     CHECK(mem != MAP_FAILED, "memory allocated"); if (mem == MAP_FAILED) return 1;
     mtl_pool_add(mem, LEN);
     state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
-    running = g_done + 1000;
+    running = g_done + 1000; g_fence = running;   // committed, as a running submission's fence is: g_done never passes g_fence, and objects deferred to g_fence + 1 (the open submission's update buffers) would be freed at once (defer_obj_at)
     memset(mem, 0x11, LEN);
 
     // The first case: every frame the same fields, with a hole (word 1) nothing updates
@@ -63,7 +63,7 @@ int main(void) { @autoreleasepool {
     commit_as_running();
 
     // Once it completes, memory holds the truth: what the CPU wrote after it is not overwritten by what was remembered
-    g_done = running; running += 1000;
+    g_done = running; running += 1000; g_fence = running;
     memset(mem, 0x22, LEN);
     update(0x48, 0xf2, 4);
     { const uint32_t want[] = {0x22222222, 0x22222222, 0xf2}; words(made_shadow(0x40, 12), want, 3, "a finished update is no longer laid over memory"); }

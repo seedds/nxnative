@@ -73,7 +73,7 @@ static void test_dispatch_after(dispatch_time_t when, dispatch_queue_t target, d
 @property BOOL loopEnabled, isMuted;
 @property int starts, stops;
 @property NSMutableArray<NSNumber *> *levels;
-@property BOOL failStart, failSend;
+@property BOOL failStart, failSend, raiseSend;   // raiseSend: the engine stopped under the player, as Core Haptics reports it, by raising
 @end
 @implementation TestPlayer
 - (instancetype)init { if ((self = [super init])) _levels = [NSMutableArray new]; return self; }
@@ -81,6 +81,7 @@ static void test_dispatch_after(dispatch_time_t when, dispatch_queue_t target, d
 - (BOOL)stopAtTime:(NSTimeInterval)t error:(NSError **)e { (void)t; (void)e; self.stops++; return YES; }
 - (BOOL)sendParameters:(NSArray<CHHapticDynamicParameter *> *)p atTime:(NSTimeInterval)t error:(NSError **)e {
     (void)t; (void)e;
+    if (self.raiseSend) [NSException raise:@"com.apple.CoreHaptics" format:@"-[CHHapticEngine checkEngineRunning:]: self.running"];
     if (self.failSend) return NO;
     for (CHHapticDynamicParameter *v in p) if ([v.parameterID isEqual:CHHapticDynamicParameterIDHapticIntensityControl]) [self.levels addObject:@(v.value)];
     return YES;
@@ -302,6 +303,12 @@ int main(void) { @autoreleasepool {
     assert(left.testPlayer.stops == 1);   // idle hardware eventually released
     int engines = made; starts = left.starts; send_pair(0.7, 0.7);
     assert(made == engines && left.starts == starts + 1 && left.testPlayer.levels.lastObject.floatValue == 0.7f);   // the released engine is restarted, not made again
+    // An engine that stopped on its own raises instead of returning an error: that is a failed engine, not a crash of the app.
+    left.testPlayer.raiseSend = YES; send_pair(0.9, 0.9); drain();
+    assert(dm_haptics_actual(0, 0).amplitude_low == 0);   // cleared, so a fresh identical send retries after the backoff
+    left.testPlayer.raiseSend = NO; expire_retries(); send_pair(0.9, 0.9);
+    assert(dm_haptics_actual(0, 0).amplitude_low == 0.9f);
+    send_pair(0, 0);
     // A permanently broken helper/engine is replaced, rather than retried for the rest of the session.
     // Exercise the real controller route (including a nil engine factory result), without hardware.
     for (int stage = 1; stage <= 5; stage++) {
@@ -346,6 +353,18 @@ int main(void) { @autoreleasepool {
     assert(pe.stops == 1 && pe.testPlayer.stops == 0);   // the engine stopped after the last pulse, which was not cut
     send_pair(0.5, 0); drain();
     assert(plainc.haptics.attempts == 2 && pe.plainPlayers == pulses + 1 && pe.testPlayer.levels.lastObject.floatValue == 0.5f);
+    // A plain player whose engine stopped under it raises: the engine is dropped without calling its players again (a stop sends them zero,
+    // which would raise once more), and the next effect after the backoff plays from a new engine
+    pe.testPlayer.raiseSend = YES; send_pair(0.7, 0); drain();
+    assert(channels[0].firstObject.engine == nil && dm_haptics_actual(0, 0).amplitude_low == 0);
+    expire_retries(); send_pair(0.7, 0); drain();
+    TestEngine *pe2 = plainc.haptics.engines.lastObject;
+    assert(plainc.haptics.attempts == 3 && pe2 != pe && pe2.testPlayer.levels.lastObject.floatValue == 0.7f);
+    // The same from the idle release, which silences the pulses a second after the effect ends
+    send_pair(0, 0); drain(); pe2.testPlayer.raiseSend = YES; advance(1.1);
+    assert(channels[0].firstObject.engine == nil);
+    expire_retries(); send_pair(0.4, 0); drain();
+    assert(plainc.haptics.attempts == 4 && plainc.haptics.engines.lastObject.testPlayer.levels.lastObject.floatValue == 0.4f);
     send_pair(0, 0); drain();
     TestController *split = [TestController new]; split.haptics = [TestHaptics new];
     split.haptics.supportedLocalities = [NSSet setWithObjects:GCHapticsLocalityDefault, GCHapticsLocalityLeftHandle, GCHapticsLocalityRightHandle, nil];

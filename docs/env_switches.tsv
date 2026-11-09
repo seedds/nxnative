@@ -1,4 +1,5 @@
 name	class	meaning
+DMSH_RAW_LOAD_QUADS	diagnostic	`1` opts the shader builder into conservative grouping of four adjacent legacy raw global reads in read-only Ampere compute kernels; changes the chain and requires matching shaders and host
 DM_AB	diagnostic	`=<frames>` splits the run into phases of that many frames and alternates every switch set to `ab` (on in the odd phases); logs an `[ab]` line per phase with GPU and frame time and attachment traffic
 DM_ALIAS_SIZE	diagnostic	`=<bytes>` gives the guest an alias region of that size instead of the platform's, which is at least the Switch's 64 GB on the Mac and the profile's `mem_alias` on an iPhone (at least 256 MB, whole host pages; the heap and stacks stay as they are): the profile's value reproduces an iPhone's address space on the Mac, as the NSP script's heap check does; its address region check sets 64 GB (Mac only: an iPhone has no room)
 DM_ALIAS_WINDOWS	diagnostic	`=<MB>` logs every 30 s how much of each window of that size in the alias region is mapped (windows aligned to their size in absolute addresses)

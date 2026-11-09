@@ -18,13 +18,16 @@ static int fixtures(NSString *dir) {
         "fragment float4 fs() { return float4(0.5, 0.25, 1, 0.5); }\n"
         "struct MeshVertex { float4 position [[position]]; };\n"
         "using Triangle = mesh<MeshVertex, void, 3, 1, topology::triangle>;\n"
-        "[[mesh]] void ms(Triangle out) {\n"
+        // a mesh shader with no task has an object function of its own that launches its blocks (dmsh_meshstage.py main0_o)
+        "struct Block { uint first; };\n"
+        "[[object]] void ms_o(object_data Block &b [[payload]], mesh_grid_properties g) { b.first = 0; g.set_threadgroups_per_grid(uint3(1, 1, 1)); }\n"
+        "[[mesh]] void ms(Triangle out, const object_data Block &b [[payload]]) {\n"
         "  out.set_primitive_count(1);\n"
         "  out.set_vertex(0, MeshVertex{float4(-1, -1, 0.5, 1)}); out.set_index(0, 0);\n"
         "  out.set_vertex(1, MeshVertex{float4( 3, -1, 0.5, 1)}); out.set_index(1, 1);\n"
         "  out.set_vertex(2, MeshVertex{float4(-1,  3, 0.5, 1)}); out.set_index(2, 2);\n"
         "}\n"
-        "[[mesh]] void ms_z(Triangle out) { out.set_primitive_count(0); }\n";
+        "[[mesh]] void ms_z(Triangle out, const object_data Block &b [[payload]]) { out.set_primitive_count(0); }\n";
     NSString *metal = [dir stringByAppendingPathComponent:@"fixture.metal"];
     NSString *library = [dir stringByAppendingPathComponent:@"warm-vs.metallib"];
     if (![source writeToFile:metal atomically:YES encoding:NSUTF8StringEncoding error:nil]) return 0;
@@ -37,7 +40,7 @@ static int fixtures(NSString *dir) {
     if (![NSFileManager.defaultManager copyItemAtPath:library toPath:[dir stringByAppendingPathComponent:@"warm-ms.metallib"] error:nil]) return 0;
     for (NSString *stage in @[@"vs", @"fs", @"ms"]) {
         NSMutableDictionary *reflection = [@{@"chain": @DMSH_CHAIN, @"route": @"B", @"entry": stage, @"entry_z": stage, @"bindings": @[], @"vertex_inputs": @[]} mutableCopy];
-        if ([stage isEqualToString:@"ms"]) { reflection[@"mesh_stage"] = @{@"kind": @"ms", @"threads": @1}; reflection[@"entry_z"] = @"ms_z"; }
+        if ([stage isEqualToString:@"ms"]) { reflection[@"mesh_stage"] = @{@"kind": @"ms", @"threads": @1}; reflection[@"entry_z"] = @"ms_z"; reflection[@"entry_object"] = @"ms_o"; }
         NSData *json = [NSJSONSerialization dataWithJSONObject:reflection options:0 error:nil];
         if (![json writeToFile:[dir stringByAppendingPathComponent:[NSString stringWithFormat:@"warm-%@.json", stage]] atomically:YES]) return 0;
     }

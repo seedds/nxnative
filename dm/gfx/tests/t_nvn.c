@@ -1008,6 +1008,31 @@ int main(void) {
         mtl_present_test_stall(0); mtl_present_flush();
     }
 
+    // 6g. SetNumActiveTextures: acquire hands out the first n of the swap chain (Super Mario Bros. Wonder sets 2 of 3), the window's own call changes it, a count out of range keeps all
+    {
+        nvn_present_config(0, 0);
+        NVNwindowBuilder wb4; NVNwindow w4; P(nvnWindowBuilderSetDevice)(&wb4, &dev); P(nvnWindowBuilderSetDefaults)(&wb4);
+        NVNtexture *sc3[3] = {&sc[0], &sc[1], &sc[0]};
+        typedef void (*set_b)(NVNwindowBuilder *, int); typedef int (*get_b)(const NVNwindowBuilder *);
+        typedef void (*set_w)(NVNwindow *, int); typedef int (*get_w)(const NVNwindow *);
+        P(nvnWindowBuilderSetTextures)(&wb4, 3, sc3);
+        EXPECT("builder: active defaults to the swap chain", 3, ((get_b)proc("nvnWindowBuilderGetNumActiveTextures"))(&wb4));
+        ((set_b)proc("nvnWindowBuilderSetNumActiveTextures"))(&wb4, 2);
+        EXPECT("builder: 2 active", 2, ((get_b)proc("nvnWindowBuilderGetNumActiveTextures"))(&wb4));
+        P(nvnWindowInitialize)(&w4, &wb4);
+        EXPECT("window: 2 active", 2, ((get_w)proc("nvnWindowGetNumActiveTextures"))(&w4));
+        int ix, seq = 0;
+        for (int k = 0; k < 4; k++) { P(nvnWindowAcquireTexture)(&w4, NULL, &ix); seq = seq * 10 + ix; P(nvnQueuePresentTexture)(&q, &w4, ix); }
+        EXPECT("2 of 3 active: textures 0 1 0 1", 101, seq);
+        ((set_w)proc("nvnWindowSetNumActiveTextures"))(&w4, 3);
+        int seen = 0;
+        for (int k = 0; k < 3; k++) { P(nvnWindowAcquireTexture)(&w4, NULL, &ix); seen |= 1 << ix; P(nvnQueuePresentTexture)(&q, &w4, ix); }
+        EXPECT("3 active again: every texture handed out", 7, seen);
+        ((set_w)proc("nvnWindowSetNumActiveTextures"))(&w4, 4);
+        EXPECT("4 of 3 (out of range): all stay active", 3, ((get_w)proc("nvnWindowGetNumActiveTextures"))(&w4));
+        mtl_present_flush();
+    }
+
     // 7. Unimplemented functions: return 0, report a failure, report only once
     // Use a function that is still unimplemented (nvnBufferBuilderSetDefaults, used before, was implemented later and crashes on NULL)
     unsigned ui = 0; while (strcmp(nvn_names[ui], "nvnBufferBuilderGetDevice")) ui++;

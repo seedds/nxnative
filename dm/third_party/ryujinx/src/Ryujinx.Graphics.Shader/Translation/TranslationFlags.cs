@@ -15,5 +15,8 @@ namespace Ryujinx.Graphics.Shader.Translation
         // Ampere (sm_86) machine code, as NVN2 (Switch 2) ships it: a 0x80-byte shader header (SPH version 4, its first 0x50 bytes laid out as version 3)
         // and 128-bit instructions, decoded and emitted by the Ampere frontend.
         Ampere = 1 << 4,
+        // Offline Metal: a read of a game uniform slot (c[3] to c[16]) past the size the game bound gives 0, as Maxwell's constant buffers do; Metal has no bounds
+        // of its own, so the read reached the guest memory past the binding (Constants.NxUniformSizesBank)
+        MetalUniformBounds = 1 << 5,
     }
 }

@@ -29,18 +29,19 @@ def find(img, text_end, ro_off, data_off):
     for j in range(0, text_end, 4):
         a = add_imm(word(j))
         if not a or a[2] != (s & 0xFFF): continue
-        if any(is_adrp(word(i)) and word(i) & 31 == a[1] and adrp_page(word(i), i) == s & ~0xFFF for i in range(max(0, j - 20), j, 4)): refs.append(j)
+        if any(is_adrp(word(i)) and word(i) & 31 == a[1] and adrp_page(word(i), i) == s & ~0xFFF for i in range(max(0, j - 20), j, 4)): refs.append((j, a[0]))
     if len(refs) != 1: return None, f'[RED] ALLOC_BUCKET: {len(refs)} references, not one'
-    j = refs[0]
-    if add_imm(word(j))[0] != 1: return None, f'[RED] ALLOC_BUCKET at {j:#x}: the name is not loaded into x1'
+    j, d = refs[0]
+    if d != 1: return None, f'[RED] ALLOC_BUCKET at {j:#x}: the name is not loaded into x1'
     last = {}   # register → (offset, value) of its last mov before the call
     for t in range(j + 4, min(text_end, j + 4 + 4 * 16), 4):
         u = word(t)
         if (u & 0xFC000000) == 0x94000000: break                                      # bl the constructor
         if (u & 0x7C000000) == 0x14000000 or (u & 0xFFFFFC1F) in (0xD63F0000, 0xD61F0000) or u == 0xD65F03C0:
             return None, f'[RED] ALLOC_BUCKET at {j:#x}: a branch before the constructor call'
+        m = movz32(u)
         for r in (4, 5):
-            if writes(u, r): last[r] = (t, movz32(u)[1]) if movz32(u) and movz32(u)[0] == r else (t, None)
+            if writes(u, r): last[r] = (t, m[1]) if m and m[0] == r else (t, None)
     else: return None, f'[RED] ALLOC_BUCKET at {j:#x}: no constructor call'
     if 4 not in last or 5 not in last or last[4][1] is None or last[5][1] is None:   # Unity 2021 and later: the sizes come from the player's settings (boot.config), one block by default
         return None, f'ALLOC_BUCKET at {j:#x}: sizes set at run time, no cut'

@@ -320,6 +320,16 @@ void dm_fps_state_apply(void) {
     // another factor fixes the size at that fraction (DM_RENDER_SCALE, 0.5 to 1.0). Independent of the frame step: written at target 0 too
     const char *rs = getenv("DM_RENDER_SCALE"); float sc = 1.0f;
     if (rs) { char *end; sc = strtof(rs, &end); if (end == rs || *end || !(sc >= 0.5f && sc <= 1.0f)) { LOG("[RED] DM_RENDER_SCALE=%s: must be 0.5 to 1.0; keeping the game's size", rs); sc = 1.0f; } else LOG("%s: 3D views rendered at %.2f of the game's size (DM_RENDER_SCALE)", g_fps_mod, sc); }
+    // A Switch 2 game at a lighter graphics scale tier (hle_oe.c dm_gfx_scale) draws a picture 0.8 or 2/3 the size of its whole-GPU one (Donkey Kong Bananza's table at
+    // main+0x30f840; Ocarina of Time measured 2560x1440, 2048x1152 and 1706x960 docked), and its scale is a fraction of that picture. DM_RENDER_SCALE is a fraction of the
+    // whole-GPU picture (the profile's render_base, which the launcher shows in pixels), so it is divided by the tier's: a setting renders the same size at every tier, up to the
+    // tier's whole picture (just below 1.0, which would mean the game's own dynamic resolution). Tier 0, every Switch 1 game's, keeps it
+    int tier = dm_gfx_scale();
+    if (sc < 1.0f && tier) {
+        static const float picture[3] = {1.0f, 0.8f, 2.0f / 3.0f};
+        float g = sc / picture[tier]; sc = g < 1.0f ? g : 0.999f;
+        LOG("%s: graphics scale tier %d: %.3f of its smaller picture", g_fps_mod, tier, sc);
+    }
     memcpy(dm_fps_state + 0x10, &sc, sizeof sc);
     // The game's own dynamic resolution, for builds whose stubs read it (the DYNAMIC_RESOLUTION capability of a frame step stub: Ocarina of Time's level function): 1 lets it
     // run, 0 (the default) holds full resolution. Builds without such a stub ignore the field

@@ -155,10 +155,13 @@ int main(void) {
     h_oe_SetFocusMode(3); dm_applet_enter("test");
     CHECK(empty() && h_oe_GetFocus() == 2, "focus mode 3: an applet changes the state without a notification");
     dm_applet_leave(); CHECK(empty() && h_oe_GetFocus() == 1, "focus mode 3: back to 1 without a notification");
-    // the graphics scale is the GPU share the system leaves the game, not the operation mode: tier 0 in both modes; DM_GFX_SCALE picks a reduced tier, nonsense keeps 0
-    unsetenv("DM_GFX_SCALE"); dm_set_opmode(1); CHECK(h_oe_GfxScale() == 0, "graphics scale docked: tier 0 (the whole GPU)");
-    dm_set_opmode(0); CHECK(h_oe_GfxScale() == 0, "graphics scale handheld: tier 0");
+    // the graphics scale is the GPU share the system leaves the game, not the operation mode: the profile's tier (0 by default) in both modes; DM_GFX_SCALE picks one, nonsense keeps the profile's
+    unsetenv("DM_GFX_SCALE"); dm_set_opmode(1); CHECK(h_oe_GfxScale() == DM_GAME_GFX_SCALE, "graphics scale docked: the profile's tier (0, the whole GPU, by default)");
+    dm_set_opmode(0); CHECK(h_oe_GfxScale() == DM_GAME_GFX_SCALE, "graphics scale handheld: the same tier (not the operation mode)");
     setenv("DM_GFX_SCALE", "2", 1); CHECK(h_oe_GfxScale() == 2, "DM_GFX_SCALE=2: tier 2");
-    setenv("DM_GFX_SCALE", "7", 1); CHECK(h_oe_GfxScale() == 0, "DM_GFX_SCALE=7: no such tier, 0"); unsetenv("DM_GFX_SCALE");
+    setenv("DM_GFX_SCALE", "7", 1); CHECK(h_oe_GfxScale() == DM_GAME_GFX_SCALE, "DM_GFX_SCALE=7: no such tier, the profile's"); setenv("DM_GFX_SCALE", "0", 1); CHECK(h_oe_GfxScale() == 0, "DM_GFX_SCALE=0: tier 0"); setenv("DM_GFX_SCALE", "auto", 1); CHECK(h_oe_GfxScale() == DM_GAME_GFX_SCALE, "DM_GFX_SCALE=auto (the launcher's Auto): the profile's tier");
+    unsetenv("DM_GFX_SCALE");
+    CHECK(dm_opmode_value(NULL) == DM_GAME_OPMODE && dm_opmode_value("auto") == DM_GAME_OPMODE, "DM_OPMODE unset or auto: the profile's mode");
+    CHECK(dm_opmode_value("0") == 0 && dm_opmode_value("1") == 1, "DM_OPMODE 0 / 1: handheld / docked");
     printf("== oe %d checks, %d failed ==\n", checks, fails); return fails != 0;
 }

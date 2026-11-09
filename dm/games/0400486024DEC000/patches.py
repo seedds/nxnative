@@ -32,6 +32,7 @@ def frame_step(ctx):
     emit(0x1e201828); emit(B(here(), site + 4))   # orig: fdiv s8,s1,s0; back
     fs_put(site, [B(site, start)], 'frame ratio: the host\'s step × base rate / 60 instead of base rate / the game\'s frame rate (state page target fps; 0 = the game\'s ratio)')
     dynamic_resolution(ctx)
+    render_scale(ctx)
 
 # The game's dynamic resolution (game__gfx__DynamicResolutionParam: LoadThreshold, ReduceCounterMax, IncreaseCounterMax and a list of levels, each a ResolutionReduceScale and a
 # Priority; on v131072 levels 0..9 at 0.75..0.333 of 2048x1152, 1536x864 to 683x384). Its update (main+0x805aa0) reads the frame's GPU load (about 0.2 ms a unit) into +0x8, subtracts
@@ -71,16 +72,54 @@ def dynamic_resolution(ctx):
     fs_put(site, [B(site, start)], 'dynamic resolution level: 0 (full resolution), or with state +0x40 (DM_DYNAMIC_RESOLUTION) a climb on the load measured at each level')
     ctx.capabilities.add('DYNAMIC_RESOLUTION')
 
+
+# Render scale (state +0x10, a float the loader writes: DM_RENDER_SCALE, 1.0 by default = the game's own dynamic resolution). The graphics system's update (v131072 main+0x31d3200) asks its
+# dynamic-resolution controller (main+0x805aa0) for a level and keeps scale = level x (+0xe58) / (+0xe50) at +0xe5c, or the game's own fixed 0.75 / 0.5 (+0xe20 & 0x18, main+0x31d3f1c). Its
+# apply block (+0xdd8 of the update) runs when the scale changed (+0xe2c bit 3) or in a fixed mode: it caps the scale, rounds each view's width and stores the view scales (+0x5328 / +0x532c
+# of each 0x53d8-byte view), from which the scene's targets are sized. With a factor the block takes the host's scale, stores it at +0xe5c (the controller's next measurement then reads the
+# size really drawn) and runs every frame, as in the game's fixed modes. x10, s1, s2 and the flags are dead at both sites
+def render_scale(ctx):
+    here, emit, fs_site, fs_put, FS_STATE_OFF = ctx.here, ctx.emit, ctx.site, ctx.put, ctx.state
+    fn = ctx.others.get('render scale')
+    if fn is None: return   # not found in this build (a red line from the locator): the game's own scale
+    apply_site, test_site = fn + 0xdd8, fn + 0xdd0
+    fs_site(apply_site, '815e4ebd'); fs_site(test_site, '8ab27839')
+    apply = here(); emit(ADRP(10, here(), FS_STATE_OFF))
+    for w in (0xbd401141,   # ldr s1,[x10,#0x10]     render scale
+              0x1e202028,   # fcmp s1,#0.0
+              0x540000cd,   # b.le orig (+6)         not set
+              0x1e2e1002,   # fmov s2,#1.0
+              0x1e222020,   # fcmp s1,s2
+              0x5400006a,   # b.ge orig (+3)         1.0: the game's own scale
+              0xbd0e5e81):  # str s1,[x20,#0xe5c]    the host's scale
+        emit(w)
+    emit(B(here(), apply_site + 4))
+    emit(0xbd4e5e81); emit(B(here(), apply_site + 4))                # orig: ldr s1,[x20,#0xe5c]; back
+    fs_put(apply_site, [B(apply_site, apply)], 'scene scale = the host render scale (1.0 = the game\'s dynamic resolution)'); ctx.render_scale = 1
+    start = here(); emit(ADRP(10, here(), FS_STATE_OFF))
+    for w in (0xb940114a,   # ldr w10,[x10,#0x10]    render scale (float bits)
+              0x3400008a,   # cbz w10,skip (+4)      not set
+              0x5209194a,   # eor w10,w10,#0x3f800000
+              0x3400004a):  # cbz w10,skip (+2)      1.0
+        emit(w)
+    emit(B(here(), apply_site))                                      # apply the host's scale
+    emit(0x3978b28a); emit(B(here(), test_site + 4))                 # skip: ldrb w10,[x20,#0xe2c]; back to the bit 3 test
+    fs_put(test_site, [B(test_site, start)], 'scale apply block taken every frame when the host render scale is not 1.0')
+
 MATCH_FRAME_STEP = {'main': [
     {'name': 'frame ratio from the host\'s step', 'size': 0x9b4, 'fingerprints': ['6ae2aff5344d14568e4dbaf93455e2d8278384bf892ed6c6eca87fef98fbcd1d'], 'stub': frame_step,   # v131072 main+0x6e6be0
      'others': {'dynamic resolution': {'size': 0x294, 'fingerprints': ['7af6ceb0aedf8e0c17dc08ce17fcd6a7cba6d394a0d09e3b504c6d668dc418e7']},   # v131072 main+0x8065e0
-                'dynamic resolution update': {'size': 0xb24, 'fingerprints': ['5a423697838976baf286cffa5e2ceef0d4e037abbcd9d371e90e9e702d61b3d4']}}},   # main+0x805aa0
+                'dynamic resolution update': {'size': 0xb24, 'fingerprints': ['5a423697838976baf286cffa5e2ceef0d4e037abbcd9d371e90e9e702d61b3d4']},   # main+0x805aa0
+                'render scale': {'size': 4040, 'fingerprints': ['2c1804f08798ceee012ae30a1ba6b177a6b6a61ce732185bad28e9989d05e165']}}},   # main+0x31d3200: the graphics update, its scale apply block at +0xdd8
 ]}
 
 BINDING = [
     {'what': 'frame ratio from the host\'s step', 'now': 'game', 'goal': 'game', 'purpose': 'frame rate',
      'why': "the game's own frame-ratio division, found by its function's fingerprint on any build that keeps the function",
      'checked': 'v131072 main: one function with this fingerprint, the site and its free registers read by disassembly (2026-11-08)'},
+    {'what': 'render scale in the graphics update\'s scale apply block', 'now': 'game', 'goal': 'game', 'purpose': 'rendering',
+     'why': "the game's own graphics update, found by its function's fingerprint on any build that keeps it; the block that applies the scale to the views, taken every frame while the host sets a scale",
+     'checked': 'v131072 main: one function with this fingerprint, the two sites and their dead registers read by disassembly; the stub measured in play at 0.5 to 0.99 (2026-11-08)'},
     {'what': 'dynamic resolution: full size, or a climb on the load measured at each level', 'now': 'game', 'goal': 'game', 'purpose': 'rendering',
      'why': "the game's own dynamic-resolution level function and update, found by their functions' fingerprints on any build that keeps both; switchable (DM_DYNAMIC_RESOLUTION)",
      'checked': 'v131072 main: one function with each fingerprint (the level function a leaf, x2..x11 / x16 / x17 / s0..s2 free), its callers, the update and the controller fields read by disassembly, the fields read in play (2026-11-08); the climb run natively against a model of the update and in play to full size (2026-11-09)'},

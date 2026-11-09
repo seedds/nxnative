@@ -8,6 +8,7 @@ struct Setting: Decodable, Identifiable {
     let needs: String?     // "<VAR>=<value>": a sub-setting, drawn only while that setting has that value
     let level: String?     // "basic": shown first (the Mac window's Basic settings); any other or none: Advanced settings. The iPhone keeps one list
     let base: Base?        // render scale: the 3D views' size at 1.0, docked and handheld, for the size in pixels (the Mac window)
+    let auto: String?      // choice: the value its auto option stands for (the game's tested default), for the settings that depend on it
     struct Base: Decodable { let docked, handheld: [Int] }
     let options: [[String]]?   // choice: [value, label]
     let min, max, step: Double?   // range
@@ -30,7 +31,7 @@ struct Setting: Decodable, Identifiable {
         default: return true
         }
     }
-    enum CodingKeys: String, CodingKey { case env, kind, label, note, def = "default", section, needs, level, base, options, min, max, step, on, off }
+    enum CodingKeys: String, CodingKey { case env, kind, label, note, def = "default", section, needs, level, base, auto, options, min, max, step, on, off }
 }
 struct SettingsFile: Decodable { let settings: [Setting] }
 
@@ -80,9 +81,19 @@ final class LauncherModel: ObservableObject {
     func rangeLabel(_ s: Setting, _ v: Double) -> String {
         let p = "\(Int((v * 100).rounded())) %"
         guard let b = s.base else { return p }
-        let size = (values["DM_OPMODE"] ?? "1") == "0" ? b.handheld : b.docked
+        let size = (value("DM_OPMODE") ?? "1") == "0" ? b.handheld : b.docked
         guard size.count == 2 else { return p }
         return "\(Int((Double(size[0]) * v).rounded())) × \(Int((Double(size[1]) * v).rounded())) (\(p))"
+    }
+    // A choice's option as shown: a render scale's level in pixels (its other options, Dynamic, by their label)
+    func optionLabel(_ s: Setting, _ o: [String]) -> String {
+        guard s.base != nil, let v = Double(o[0]), v < 1 else { return o[1] }
+        return rangeLabel(s, v)
+    }
+    // A setting's value with Auto resolved to the default it stands for
+    func value(_ env: String) -> String? {
+        guard let v = values[env] else { return nil }
+        return v == "auto" ? settings.first { $0.env == env }?.auto ?? v : v
     }
     var changed: Bool { settings.contains { !fixed.contains($0.env) && !$0.isDefault(values[$0.env] ?? $0.def) } }
 

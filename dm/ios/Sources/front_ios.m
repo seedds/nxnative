@@ -280,7 +280,7 @@ bool dm_setting_live(const char *env, const char *value) {
     }
     if (!strcmp(env, "DM_OPMODE")) {
         if (!value) return true;
-        int m = atoi(value) ? 1 : 0;
+        int m = dm_opmode_value(value) ? 1 : 0;   // Auto: the game's tested default (hle_oe.c)
         if (g_tv_mode_was >= 0) { g_tv_mode_was = m; LOG("front end: console mode %s once the TV is unplugged (in-game menu)", m ? "docked" : "handheld"); return true; }
         dm_set_opmode(m); dm_gamepad_opmode_changed(); LOG("front end: console mode %s (in-game menu)", m ? "docked" : "handheld");
         return true;

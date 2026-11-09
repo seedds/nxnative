@@ -28,6 +28,7 @@
         "step": {"description": "range: the step between values.", "type": "number"},
         "on": {"description": "toggle: the value the switch takes when on.", "type": "string"},
         "off": {"description": "toggle: the value the switch takes when off.", "type": "string"},
+        "auto": {"description": "Choice only: the value the row's auto option (its default) stands for, the game's tested default; absent when the row has no auto option.", "type": "string"},
         "base": {"description": "Render scale only: the 3D views' size the scale multiplies, docked and handheld, from the game's profile; absent for most games.", "type": "object", "required": ["docked", "handheld"],
                  "properties": {"docked": {"$ref": "#/$defs/size"}, "handheld": {"$ref": "#/$defs/size"}}},
         "level": {"description": "basic: a setting a front end shows first. Without it, the front end decides.", "const": "basic"},

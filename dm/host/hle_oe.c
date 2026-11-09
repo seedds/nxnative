@@ -10,9 +10,11 @@
 #include <TargetConditionals.h>
 #include <unistd.h>
 static _Atomic int g_opmode = -1;
+// A DM_OPMODE value as the mode it sets: unset or auto (the launcher's Auto) = the profile's op_mode, the game's tested default; the in-game menu of the iOS front end passes its choice here too
+int dm_opmode_value(const char *e) { return e && strcmp(e, "auto") ? atoi(e) : DM_GAME_OPMODE; }
 int dm_opmode(void) {
     int m = g_opmode;
-    if (m < 0) { const char *e = getenv("DM_OPMODE"); int v = e ? atoi(e) : DM_GAME_OPMODE; int exp = -1; atomic_compare_exchange_strong(&g_opmode, &exp, v); m = g_opmode; }
+    if (m < 0) { int v = dm_opmode_value(getenv("DM_OPMODE")); int exp = -1; atomic_compare_exchange_strong(&g_opmode, &exp, v); m = g_opmode; }
     return m;
 }
 // ---------- System notification queue (AppletMessage): front end state changes → fetched by the game every frame with TryPopNotificationMessage ----------
@@ -292,10 +294,13 @@ HLE_FORCE("_ZN2nn2oe22SetCpuOverclockEnabledEb", "CPU overclock switch (through 
 // to match. Donkey Kong Bananza takes it as its display manager's scale index (+0x1c7, main+0x549348): its frame buffer is the display's size times {1.0, 0.8, 2/3}[tier]
 // (main+0x30f840), and as an index into {3, 12, 16} (main+0x1d1a604) whose value less 3 (0, 9, 13) its dynamic resolution takes into its GPU time (main+0x549614). Star Fox
 // keeps only "tier 0" (byte +0xa of its event 5, main+0xba69970) and renders 0.8 times smaller below it: docked, 768x432 for its 1920x1080 window where tier 0 gives 960x540,
-// smaller than its 960x540 handheld on a GPU twice as fast; console footage matches tier 0. The host answered 1 docked until it was found so. DM_GFX_SCALE sets a tier to
-// reproduce a reduced share
-static int gfx_scale(void) { const char *e = getenv("DM_GFX_SCALE"); int v = e ? atoi(e) : 0; return v >= 0 && v <= 2 ? v : 0; }
-HLE_FORCE("_ZN2nn2oe23GetCurrentGraphicsScaleEv", "graphics scale (Switch 2, through am): 0, the whole GPU (DM_GFX_SCALE sets 1 or 2)", int, h_oe_GfxScale, void) { return gfx_scale(); }
+// smaller than its 960x540 handheld on a GPU twice as fast; console footage matches tier 0. The host answered 1 docked until it was found so. The profile's gfx_scale gives
+// another tier by default (DM_GAME_GFX_SCALE): the game's own lighter mode, for a game that does not hold its frame rate on smaller Macs at tier 0 (Ocarina of Time on a MacBook
+// Air M4: tier 0 53 fps in Hyrule Field at its 854x480 floor, tier 1 57 at 683x384). DM_GFX_SCALE (the launcher's GPU share) overrides it
+int dm_gfx_scale(void) {   // unset, empty or auto (the launcher's Auto): the profile's; a value outside 0 to 2 too
+    const char *e = getenv("DM_GFX_SCALE"); int v = e && *e && strcmp(e, "auto") ? atoi(e) : DM_GAME_GFX_SCALE; return v >= 0 && v <= 2 ? v : DM_GAME_GFX_SCALE;
+}
+HLE_FORCE("_ZN2nn2oe23GetCurrentGraphicsScaleEv", "graphics scale (Switch 2, through am): the profile's gfx_scale, 0 (the whole GPU) by default; DM_GFX_SCALE sets 0, 1 or 2", int, h_oe_GfxScale, void) { return dm_gfx_scale(); }
 HLE_FORCE("_ZN2nn2oe42SetGraphicsScaleChangedNotificationEnabledEb", "graphics scale change notification (Switch 2, through am); the host's scale never changes",
           void, h_oe_GfxScaleNotify, unsigned on) { (void)on; }
 // The frame length the game aims at (Switch 2 SDKs): oe::SetGraphicsTargetFrameRate maps up to 59 fps to mode 1, up to 119 to mode 2 and above to mode 3, SetGraphicsTargetFrameRateAuto

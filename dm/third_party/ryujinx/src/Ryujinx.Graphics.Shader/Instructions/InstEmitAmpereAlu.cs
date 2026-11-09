@@ -60,6 +60,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             alu(0x017, InstName.Imnmx, AImnmx);
             alu(0x085, InstName.Imnmx, AImnmx, uniform: true);
             alu(0x013, InstName.I2i, AIabs);
+            alu(0x038, InstName.I2i, AI2i);
             alu(0x016, InstName.Prmt, APrmt);
             alu(0x096, InstName.Prmt, APrmt, uniform: true);
             alu(0x109, InstName.Popc, APopc);
@@ -1322,6 +1323,29 @@ namespace Ryujinx.Graphics.Shader.Instructions
             AmpereOp x = new(context.CurrOp);
 
             ASet(context, x, context.IAbsolute(AGet(context, AOne(context, x, neg: false, abs: false))));
+        }
+
+        // I2I.<dst>.S32.SAT: the signed 32-bit source clamped to the destination's range, destination type in 76..77 (U8, S8, U16, S16); the result is the
+        // clamped value itself, so a signed one is sign-extended. NVIDIA's compiler emits it only with an S32 source and .SAT, and every other field it
+        // sets is zero; a nonzero one is a form not seen, so it fails rather than guess.
+        public static void AI2i(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+
+            if (x.Bits(72, 76) != 0 || x.Bits(78, 91) != 0)
+            {
+                throw AFail(context, $"I2I with fields 72..75 = {x.Bits(72, 76)}, 78..90 = {x.Bits(78, 91)}");
+            }
+
+            Operand src = AGet(context, AOne(context, x, neg: false, abs: false));
+
+            ASet(context, x, x.Bits(76, 78) switch
+            {
+                0 => context.IClampS32(src, Const(0), Const(byte.MaxValue)),
+                1 => context.IClampS32(src, Const(sbyte.MinValue), Const(sbyte.MaxValue)),
+                2 => context.IClampS32(src, Const(0), Const(ushort.MaxValue)),
+                _ => context.IClampS32(src, Const(short.MinValue), Const(short.MaxValue)),
+            });
         }
 
         // PRMT Rd, a, sel, c: byte i of the result is byte (s & 7) of {c:a}, or that byte's sign repeated when s & 8, s = sel's nibble i (mode 72..75: index)

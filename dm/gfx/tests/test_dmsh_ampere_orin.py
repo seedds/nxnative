@@ -55,7 +55,7 @@ KNOWN = {
     'hmin2_nan': 'HMNMX2.NAN is not implemented', 'bmin2': 'HMNMX2.BF16_V2 is not implemented', 'bmax2_nan': '(as bmin2)',
     'bfma2': 'HFMA2.BF16_V2 is not implemented', 'hmma_16816_bf16': 'HMMA .BF16 is not implemented', 'hmma_1688_tf32': 'HMMA .TF32 is not implemented',
     'imma_16832_s8': 'IMMA is not implemented', 'dp4a_u32': 'IDP.4A is not implemented', 'dp4a_s32': '(as dp4a_u32)', 'dp4a_su': '(as dp4a_u32)',
-    'dp2a_lo': 'IDP.2A is not implemented', 'dp2a_hi': '(as dp2a_lo)', 'i2i_s8_sat': 'I2I .SAT is not implemented', 'i2i_u16_sat': '(as i2i_s8_sat)',
+    'dp2a_lo': 'IDP.2A is not implemented', 'dp2a_hi': '(as dp2a_lo)',
     'isad': 'VABSDIFF is not implemented', 'iadd_sat': 'PLOP3 with .SIGN register sources (0x21f) is not implemented', 'isub_sat': '(as iadd_sat)',
     'prmt': 'PRMT modes other than the index form (.F4E .B4E .RC8 .ECL .ECR .RC16) are not implemented',
     'mufu_tanh': 'MUFU.TANH is not implemented', 'mufu_tanh_f16x2': '(as mufu_tanh)',

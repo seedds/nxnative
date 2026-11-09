@@ -1484,6 +1484,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Check:** `DMSH_TEST_XLATE=dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate python3 dm/gfx/tests/test_dmsh_ampere_orin.py` (about 5 s on an M5 Max); it prints every op's differing lanes by cause. `AMPERE_ORIN_ONLY=<ops or families>` runs some, `AMPERE_ORIN_REPORT=<file>` writes the results as JSON. To record again: `python3 dm/gfx/tools/ampere_orin/capture.py --host <user@machine> [--arch sm_86]`, with NVIDIA's `nvdisasm` (the `cuda_nvdisasm` redistributable) in `~/ampere_orin` on that machine.
 - **Found on:** no game; a Jetson Orin's results. The HMMA comparison it extends is PR #1897's.
 
+### I2I clamps an integer to a narrower type
+
+- **Symptom:** a Switch 2 shader with a saturating integer narrowing (PTX `cvt.sat.s8.s32`, `cvt.sat.u16.s32`) fails to translate: `Ampere instruction 238 ... is not implemented`.
+- **Cause:** the translator had no emitter for Ampere's I2I (opcode `0x238`); `0x013`, registered as I2I, is IABS. NVIDIA's compiler emits I2I only as `I2I.<type>.S32.SAT`: the signed 32-bit source clamped to the destination's range, the type (U8, S8, U16, S16) in bits 76..77 and every other field zero, as CuAssembler's sm_75, sm_80 and sm_86 instruction lists show. The packed form I2IP (`0x239`) is a separate instruction that this doesn't cover.
+- **Fix:** `AI2i` in `InstEmitAmpereAlu.cs` clamps the source with a signed clamp to the type's limits (`clamp(as_type<int>(r), -128, 127)` for S8), so a signed result comes out sign-extended in the 32-bit register, as F2I's narrow results do. An I2I with any other field set fails to translate rather than guess its meaning.
+- **Check:** `test_dmsh_ampere_orin.py`: `i2i_s8_sat` and `i2i_u16_sat` failed to translate before, and now all 1,024 lanes of each match the Orin. Both programs mask or sign-extend the result with a PRMT or LOP3 straight after, so the fixture doesn't show what the GPU leaves in the upper bits of a narrow result.
+- **Found on:** no game; a Jetson Orin's results ([Ampere instructions checked against an Ampere GPU](#ampere-instructions-checked-against-an-ampere-gpu)).
+
 ### The NDVE movie network by the host
 
 - **Symptom:** a Switch 2 game's movies and the title behind them run below 60 fps on a Mac with a smaller GPU, and the GPU profile (`DM_NVN_GPUPROF`) shows almost all of the frame in a dozen compute dispatches of `nn::ndve`'s movie network: Ocarina of Time's title at about 24 fps and 38 ms of GPU a frame on an M1 Pro with 16 GPU cores, 24.8 ms on an M1 Max ([issue 1375](https://github.com/seedds/nxnative/issues/1375)), 18.9 ms of compute on an M4 with 8 ([HMMA chains keep their matrices in the SIMD-group](#hmma-chains-keep-their-matrices-in-the-simd-group)); 11-14 ms of the 16.7 on an M6, an M4 Pro or an M5 Max.

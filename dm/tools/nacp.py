@@ -38,6 +38,15 @@ def version(path):
     return m.group().decode() if m else ''
 
 
+def cache_limits(path):
+    """Maximum cache index and combined data/journal capacity, or None if unavailable."""
+    p = Path(path)
+    if not p.is_file(): return None
+    data = p.read_bytes()
+    if len(data) < 0x318a: return None
+    return struct.unpack_from('<H', data, 0x3188)[0], struct.unpack_from('<Q', data, 0x3180)[0]
+
+
 def languages(path):
     """The language codes the game supports (the u32 SupportedLanguageFlag at 0x302C, one bit per language in LANGUAGES order; Horizon picks the game language among them), in that order;
     a missing file or no flag returns an empty list"""

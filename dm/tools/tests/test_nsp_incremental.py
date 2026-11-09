@@ -72,6 +72,25 @@ class Base(unittest.TestCase):
 
 
 class DeriveProfile(Base):
+    def test_cache_limits_follow_control_metadata_into_profile(self):
+        path = self.ex / 'control.nacp'
+        data = bytearray(0x4000)
+        data[0x3060:0x3065] = b'1.1.0'
+        data[0x3180:0x3188] = (0x123456789).to_bytes(8, 'little')
+        data[0x3188:0x318a] = (43).to_bytes(2, 'little')
+        path.write_bytes(data)
+        self.derive()
+        self.assertEqual(game.Game(self.pdir).get('cache_storage_limits'), '43 4886718345')
+        with (self.pdir / "game.tsv").open("a") as f:
+            f.write("mem_reserve\t0x140000000\nmem_alias\t0x118000000\nmem_stack\t0x10000000\napp_pool\t0xCD500000\n")
+        header = game.header(game.Game(self.pdir))
+        self.assertIn('#define DM_GAME_CACHE_MAX_INDEX 43', header)
+        self.assertIn('#define DM_GAME_CACHE_MAX_SIZE 4886718345ll', header)
+        data[0x3188:0x318a] = (44).to_bytes(2, 'little')
+        path.write_bytes(data)
+        self.derive()
+        self.assertEqual(game.Game(self.pdir).get('cache_storage_limits'), '44 4886718345')
+
     def later_stages(self):   # what refine_after_rewrite and the shader split write into the derived profile
         nsp.set_keys(game.Game(self.pdir), {'mem_used': ('0x4800000', 'rewritten modules')}, 'After the rewrite')
         (self.pdir / 'shader_map.tsv').write_text('# split\npkg.bin\t0\tvertex\tderived\tx\n')

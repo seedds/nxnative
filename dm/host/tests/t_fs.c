@@ -74,12 +74,23 @@ int main(void) {
     char linkpath[1200]; snprintf(linkpath, sizeof linkpath, "%s_cache4", temp); symlink(root, linkpath);
     uint64_t list = 0; int count = -1; uint8_t records[64];
     CHECK(h_fs_OpenCacheList(&list) == RES_OK && list, "cache list opens with a numeric handle");
+    // Changes after Open belong to the next snapshot, not this handle.
+    snprintf(cache, sizeof cache, "%s_cache6", temp); mkdir(cache, 0755);
+    snprintf(cache, sizeof cache, "%s_cache08", temp); mkdir(cache, 0755);
+    snprintf(cache, sizeof cache, "%s_cache65536", temp); mkdir(cache, 0755);
+    snprintf(cache, sizeof cache, "%s_cache9junk", temp); mkdir(cache, 0755);
     memset(records, 0xff, sizeof records);
     CHECK(h_fs_ReadCacheList(&count, records, list, 1) == RES_OK && count == 1 && records[0] == 2, "cache enumeration first page returns index 2");
     int padding_zero = 1; for (int i = 4; i < 32; i++) if (records[i]) padding_zero = 0;
     CHECK(padding_zero, "cache info reserved bytes are zero");
     CHECK(h_fs_ReadCacheList(&count, records, list, 1) == RES_OK && count == 1 && records[0] == 8, "cache enumeration second page returns index 8");
     CHECK(h_fs_ReadCacheList(&count, records, list, 1) == RES_OK && count == 0, "cache enumeration reaches end");
+    uint64_t fresh = 0;
+    CHECK(h_fs_OpenCacheList(&fresh) == RES_OK, "a second cache snapshot opens");
+    uint8_t snapshot[128] = {0};
+    CHECK(h_fs_ReadCacheList(&count, snapshot, fresh, 4) == RES_OK && count == 3 && snapshot[0] == 2 && snapshot[32] == 6 && snapshot[64] == 8,
+          "new snapshot includes later directory, rejects noncanonical and out-of-range names");
+    h_fs_CloseCacheList(fresh);
     h_fs_CloseCacheList(list); h_fs_CloseCacheList(list);
     CHECK(h_fs_ReadCacheList(&count, records, list, 1) != RES_OK, "closed cache handle is rejected after double close");
     CHECK(h_fs_ReadCacheList(&count, records, UINT64_MAX, 1) != RES_OK, "invalid cache handle never dereferences a guest pointer");
@@ -87,6 +98,11 @@ int main(void) {
     CHECK(h_fs_OpenCacheList(NULL) != RES_OK, "null cache handle output is rejected");
     int max_index = -1; int64_t max_size = -1;
     unsetenv("DM_CONTROL_NACP");
+#ifdef DM_GAME_CACHE_MAX_INDEX
+    CHECK(h_fs_CacheMax(&max_index, &max_size) == RES_OK && max_index == DM_GAME_CACHE_MAX_INDEX && max_size == DM_GAME_CACHE_MAX_SIZE,
+          "compiled profile cache limits work without any environment path");
+    CHECK(h_fs_CacheMax(NULL, &max_size) != RES_OK, "compiled cache limits reject null outputs");
+#else
     CHECK(h_fs_CacheMax(&max_index, &max_size) != RES_OK, "missing control metadata returns an error instead of aborting");
     char control[1200]; snprintf(control, sizeof control, "%s/control.nacp", root);
     FILE *cf = fopen(control, "wb"); uint8_t nacp[0x4000] = {0};
@@ -96,6 +112,7 @@ int main(void) {
     CHECK(h_fs_CacheMax(NULL, &max_size) != RES_OK, "cache limits reject null outputs");
     put(control, "short");
     CHECK(h_fs_CacheMax(&max_index, &max_size) != RES_OK, "truncated control metadata returns an error");
+#endif
     unsetenv("DM_CONTROL_NACP"); unsetenv("DM_TEMP");
     char rom[1100], overlay[1100], rdata[1200], odata[1200], fn[1300], got[64];
     snprintf(rom, sizeof rom, "%s/rom", root); snprintf(overlay, sizeof overlay, "%s/overlay", root); snprintf(rdata, sizeof rdata, "%s/data", rom); snprintf(odata, sizeof odata, "%s/data", overlay);

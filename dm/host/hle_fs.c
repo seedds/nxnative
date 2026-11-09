@@ -654,7 +654,30 @@ HLE_FORCE("_ZN2nn2fs21MountTemporaryStorageEPKc", "fsp-srv; temporary storage â†
 static const char *cache_dir(int index, char *b, size_t n) { char t[1024]; snprintf(b, n, "%s_cache%d", envdir("DM_TEMP", "run/platform/temp", t, sizeof t), index); return b; }
 // Numeric handles prevent arbitrary guest pointers or a double close from reaching free().
 // Enumeration is serialized with handle lifetime, including concurrent reads/closes.
-typedef struct { uint64_t id; int next; } HostCacheList;
+typedef struct { uint64_t id; int next; uint8_t indices[65536 / 8]; } HostCacheList;
+// Snapshot only the parent's actual entries, never probe all 65,536 paths.
+static void cache_list_snapshot(HostCacheList *list) {
+    char path[1100]; cache_dir(0, path, sizeof path);
+    char *leaf = strrchr(path, '/');
+    const char *parent = "."; char prefix[1100];
+    snprintf(prefix, sizeof prefix, "%s", leaf ? leaf + 1 : path);
+    size_t len = strlen(prefix); if (!len) return; prefix[--len] = 0; // remove index 0
+    if (leaf) { *leaf = 0; parent = *path ? path : "/"; }
+    DIR *dir = opendir(parent); if (!dir) return;
+    struct dirent *entry;
+    while ((entry = readdir(dir))) {
+        if (strncmp(entry->d_name, prefix, len)) continue;
+        const char *digits = entry->d_name + len;
+        if (!*digits || (*digits == '0' && digits[1])) continue;
+        unsigned index = 0; const char *q = digits;
+        while (*q >= '0' && *q <= '9' && index <= 65535) { index = index * 10 + (unsigned)(*q - '0'); q++; }
+        if (*q || index > 65535) continue;
+        struct stat st;
+        if (fstatat(dirfd(dir), entry->d_name, &st, AT_SYMLINK_NOFOLLOW) || !S_ISDIR(st.st_mode)) continue;
+        list->indices[index / 8] |= (uint8_t)(1u << (index % 8));
+    }
+    closedir(dir);
+}
 static HostCacheList g_cache_lists[64];
 static uint64_t g_cache_list_id = 1;
 static pthread_mutex_t g_cache_list_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -665,6 +688,7 @@ HLE_FORCE("_ZN2nn2fs20OpenCacheStorageListEPNS0_22CacheStorageListHandleE", "fsp
         if (g_cache_lists[i].id) continue;
         uint64_t id = g_cache_list_id++; if (!id) id = g_cache_list_id++;
         g_cache_lists[i] = (HostCacheList){.id = id};
+        cache_list_snapshot(&g_cache_lists[i]);
         memcpy(h, &id, sizeof id); pthread_mutex_unlock(&g_cache_list_mutex); return RES_OK;
     }
     pthread_mutex_unlock(&g_cache_list_mutex); return RES_PATH_NOT_FOUND;
@@ -679,8 +703,8 @@ HLE_FORCE("_ZN2nn2fs20ReadCacheStorageListEPiPNS0_16CacheStorageInfoENS0_22Cache
     if (!list) { pthread_mutex_unlock(&g_cache_list_mutex); return RES_PATH_NOT_FOUND; }
     // SDK 14 ReadCacheStorageList zeroes 0x20 bytes per entry and writes a u32 index.
     while (list->next <= 65535 && *n < max) {
-        int index = list->next++; char path[1100]; struct stat st;
-        if (lstat(cache_dir(index, path, sizeof path), &st) || !S_ISDIR(st.st_mode)) continue;
+        int index = list->next++;
+        if (!(list->indices[index / 8] & (1u << (index % 8)))) continue;
         uint8_t *entry = (uint8_t *)info + (size_t)(*n) * 0x20;
         memset(entry, 0, 0x20); memcpy(entry, &index, sizeof index); (*n)++;
     }
@@ -716,6 +740,10 @@ HLE_FORCE("_ZN2nn2fs18GetSaveDataSizeMaxEPlS1_", "fsp-srv; largest save data siz
 // DM_CONTROL_NACP names the original control data retained with a local build.
 HLE_FORCE("_ZN2nn2fs18GetCacheStorageMaxEPiPl", "fsp-srv; cache limits from application control metadata", Result, h_fs_CacheMax, int *index, int64_t *size) {
     if (!index || !size) return RES_PATH_NOT_FOUND;
+    // Generated profile metadata is compiled into every host target, not just Mac apps.
+#ifdef DM_GAME_CACHE_MAX_INDEX
+    *index = DM_GAME_CACHE_MAX_INDEX; *size = DM_GAME_CACHE_MAX_SIZE; return RES_OK;
+#endif
     const char *path = getenv("DM_CONTROL_NACP");
     if (!path) { LOG("[RED] cache limits unavailable: rebuild with application control metadata"); return RES_PATH_NOT_FOUND; }
     FILE *f = fopen(path, "rb"); uint8_t limits[10];

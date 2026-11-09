@@ -1051,6 +1051,10 @@ def derive_profile(g, pdir, ver, d, mods, app=None, shader_only=False):
             if not put: out += [row, f'package{T}{ver}', f'shader_versions{T}{ver}']; put = True
             continue
         out.append(line)
+    limits = nacp.cache_limits(d / 'control.nacp')
+    if limits is not None:
+        out = [line for line in out if line.split(T, 1)[0] != 'cache_storage_limits']
+        out.append(f'cache_storage_limits{T}{limits[0]} {limits[1]}')
     text, kf = '\n'.join(out) + '\n', derived_key(pdir)   # beside the profile, not in it: no tool reads it as a table
     key = fingerprint(('files', src), text)
     if (pdir / 'game.tsv').is_file() and reused(kf, key) is not None:
@@ -3087,6 +3091,15 @@ def main(args=None):
         say(f'derived game profile for {pkg_ver} ({disp}): {g.dir}')
     sv = versions if derived else need   # the versions whose files the shaders come from
     game = dirs[pkg_ver]
+    # Application metadata travels through the generated profile to every host
+    # target (Mac run, app, iOS and later regression runs using this profile).
+    limits = nacp.cache_limits(game / 'control.nacp')
+    if limits is not None and g.get('cache_storage_limits', '') != f'{limits[0]} {limits[1]}':
+        pdir = profile_folder(args, nsp_dir, app)
+        derive_profile(g, pdir / g.id, pkg_ver, game, g.words('modules'), app, shader_only=True)
+        os.environ['DM_GAMES_DIR'] = env['DM_GAMES_DIR'] = os.pathsep.join([str(pdir)] + [d for d in os.environ.get('DM_GAMES_DIR', '').split(os.pathsep) if d and d != str(pdir)])
+        os.environ['DM_GAMES_FIRST'] = env['DM_GAMES_FIRST'] = '1'
+        g = gamemod.load(g.id)
     # how the shaders are got follows from the packed version's files (profile_guess.py shader_sources): the graphics API, and the shaders made only at run time
     src = pg.build_sources(game / 'ExeFS', rfs.source(game), g.modules_in(game / 'ExeFS'))
     gfx = src['graphics'][0]   # nvn, vulkan (Hades: the host's Vulkan layer, SPIR-V shaders) or gl (Digimon Story Cyber Sleuth: the host's GL layer, GLSL sources)

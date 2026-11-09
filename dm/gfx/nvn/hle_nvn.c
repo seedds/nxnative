@@ -3050,6 +3050,7 @@ static void region_image(const tex_t *t, unsigned layer0, const NVNcopyRegion *r
     else { *layer = layer0 + (unsigned)(r->zoffset + z); *slice = 0; }
 }
 static void write_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r, const uint8_t *src, size_t row, size_t img) {
+    const char *where = "";   // which path wrote, for DM_MOVIE_DBG
     if (!t->mem) { LOG("[RED] WriteTexels: texture has no storage"); return; }
     int bw, bh, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh);
     if (!bpb) { ONCE_LOG("[RED] WriteTexels: unknown format %#x", t->d.format); return; }
@@ -3065,7 +3066,21 @@ static void write_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r
         // linear storage as block-linear: a full-surface 1920x1080 region writes a few thousand garbage bytes (hb is the
         // GOB-row count, 135 of 1080) and the row-based upload shows the texture as empty: Tsukihime's title movie backdrop black.
         for (int z = 0; z < nz && ok; z++) { unsigned layer, slice; region_image(t, layer0, r, z, &layer, &slice); ok = !write_region_mirror(t, level, layer, slice, r, src + (size_t)z * img0, row0, bw, bh, bpb); }
-        if (ok) { mtl_tex_cpu_written(t); return; }
+        if (ok) { where = "mirror:";
+    // DM_MOVIE_DBG: what a CPU texture write did (the first 60 lines, DM_MOVIE_DBG=2 for every write): the format and
+    // flags that routed it, and whether the bytes stuck: a nonzero-byte sample of the source and of the storage at the
+    // same offsets after the write. A movie drawing black starts here: src_nz > 0 with dst_nz == 0 means the write went
+    // in and did not land in the layout the upload reads.
+    if (getenv("DM_MOVIE_DBG")) { static int n; if (n++ < (atoi(getenv("DM_MOVIE_DBG")) > 1 ? 200000 : 60)) {
+        size_t w = (size_t)r->width, h = (size_t)r->height, dl = t->L.size;
+        const uint8_t *sb = (const uint8_t *)src, *m = (const uint8_t *)t->mem;
+        size_t snz = 0, dnz = 0, lim = w * h * 4 < dl ? w * h * 4 : dl;
+        for (size_t q = 0; q < lim; q += 64) { snz += sb[q] != 0; dnz += m[q] != 0; }
+        LOG("[movie-dbg] #%d ser=%llu fmt=%#x flags=%#x %zux%zu row=%zu %s src_nz=%zu dst_nz=%zu src4=%02x%02x%02x%02x",
+            n, (unsigned long long)t->serial, (unsigned)t->d.format, (unsigned)t->d.flags, w, h, row,
+            where, snz, dnz, sb[0], sb[1], sb[2], sb[3]);
+    } }
+ mtl_tex_cpu_written(t); return; }
     }
     uint32_t lw = t->d.width >> level ? t->d.width >> level : 1, lh = t->d.height >> level ? t->d.height >> level : 1, lz = is3d ? (t->d.depth >> level ? t->d.depth >> level : 1) : 1;
     size_t lp = (size_t)((lw + bw - 1) / bw) * bpb, lr = (lh + bh - 1) / bh;
@@ -3084,6 +3099,20 @@ static void write_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r
         if (!is3d || z == nz - 1) nvn_swizzle(&t->d, level, layer, lin, lp, t->mem);
     }
     free(lin);
+    where = "swizzle-fallback:";
+    // DM_MOVIE_DBG: what a CPU texture write did (the first 60 lines, DM_MOVIE_DBG=2 for every write): the format and
+    // flags that routed it, and whether the bytes stuck: a nonzero-byte sample of the source and of the storage at the
+    // same offsets after the write. A movie drawing black starts here: src_nz > 0 with dst_nz == 0 means the write went
+    // in and did not land in the layout the upload reads.
+    if (getenv("DM_MOVIE_DBG")) { static int n; if (n++ < (atoi(getenv("DM_MOVIE_DBG")) > 1 ? 200000 : 60)) {
+        size_t w = (size_t)r->width, h = (size_t)r->height, dl = t->L.size;
+        const uint8_t *sb = (const uint8_t *)src, *m = (const uint8_t *)t->mem;
+        size_t snz = 0, dnz = 0, lim = w * h * 4 < dl ? w * h * 4 : dl;
+        for (size_t q = 0; q < lim; q += 64) { snz += sb[q] != 0; dnz += m[q] != 0; }
+        LOG("[movie-dbg] #%d ser=%llu fmt=%#x flags=%#x %zux%zu row=%zu %s src_nz=%zu dst_nz=%zu src4=%02x%02x%02x%02x",
+            n, (unsigned long long)t->serial, (unsigned)t->d.format, (unsigned)t->d.flags, w, h, row,
+            where, snz, dnz, sb[0], sb[1], sb[2], sb[3]);
+    } }
     mtl_tex_cpu_written(t);
 }
 NVN(nvnTextureWriteTexels, void, const NVNtexture *t, const NVNtextureView *v, const NVNcopyRegion *r, const void *src) { write_texels(CTX(t), (const view_t *)v, r, src, 0, 0); }

@@ -56,7 +56,7 @@ static void queue_picture(mavc *a) {
 static OSStatus synthetic_decode(VTDecompressionSessionRef session, CMSampleBufferRef sample, VTDecodeFrameFlags flags,
                                 void *source, VTDecodeInfoFlags *info) {
     assert(!flags && !info);   // the production callback must remain synchronous
-    uint8_t bytes[64]; CMBlockBufferRef block = CMSampleBufferGetDataBuffer(sample);
+    uint8_t bytes[64]; CMBlockBufferRef block = CMSampleBufferGetDataBuffer(sample); assert(block);
     size_t n = CMBlockBufferGetDataLength(block);
     assert(n <= sizeof bytes && !CMBlockBufferCopyDataBytes(block, 0, n, bytes));
     int marker = -1;
@@ -88,20 +88,37 @@ static mavc *synthetic_avc(void) {
     return a;
 }
 static void synthetic_free(mavc *a) { a->vs = NULL; mavc_free(a); }
-static void submit_picture(mavc *a, int annex_b, int idr, int marker, int64_t pts) {
+static void submit_picture(mavc *a, int short_sc, int idr, int marker, int64_t pts) {   // start codes of 3 bytes, or of 4 (zero_byte first)
     uint8_t au[12]; size_t n = 0;
     for (int slice = 0; slice < (idr ? 2 : 1); slice++) {
-        if (annex_b) { au[n++] = 0; au[n++] = 0; au[n++] = 1; }
-        else { au[n++] = 0; au[n++] = 0; au[n++] = 0; au[n++] = 2; }
+        if (!short_sc) au[n++] = 0;
+        au[n++] = 0; au[n++] = 0; au[n++] = 1;
         au[n++] = idr ? 0x65 : 0x41; au[n++] = (uint8_t)marker;
     }
     assert(!mavc_decode(a, au, (int)n, pts));
 }
-static void loop_order(int annex_b) {
+// Packets and csd are Annex B (hle_movie_avc.c each_nal). Leading zero bytes are allowed before the first start code; a packet without a start code is refused whole,
+// and NAL length prefixes are not read: 00 00 01 0d is a start code and a NAL header, not a 269-byte length (issue #629)
+static void annex_b_only(void) {
+    mavc *a = synthetic_avc(); uint8_t out[16 * 16 * 3 / 2]; int64_t pts;
+    const uint8_t lead[] = {0, 0, 0, 0, 0, 1, 0x65, 50};
+    assert(!mavc_decode(a, lead, sizeof lead, 0) && mavc_queued(a) == 1);
+    const uint8_t lengths[] = {0, 0, 0, 2, 0x41, 51}, late[] = {0x41, 52, 0, 0, 1, 0x41, 53}, none[] = {0, 0, 0, 0};
+    assert(mavc_decode(a, lengths, sizeof lengths, 1000) == -1 && mavc_decode(a, late, sizeof late, 1000) == -1);
+    assert(mavc_decode(a, none, sizeof none, 1000) == -1 && mavc_decode(a, none, 0, 1000) == 0 && mavc_queued(a) == 1);
+    assert(mavc_take(a, 1, out, 16, 16, &pts) && out[0] == 50 && !mavc_queued(a));
+    synthetic_free(a);
+    a = mavc_new(); writer w; uint8_t ps[64] = {0, 0, 0, 1}; size_t n = sps(&w, 100, 2, 1, 0); memcpy(ps + 4, w.p, n);
+    mavc_param_sets(a, ps, n + 4); assert(a->nsps == (int)n && a->depth == 0);
+    size_t m = sps(&w, 100, 0, 1, 0); uint8_t len[64] = {0, 0, 0, (uint8_t)m}; memcpy(len + 4, w.p, m);   // a length-prefixed SPS
+    a->dirty = 0; mavc_param_sets(a, len, m + 4); assert(!a->dirty && a->nsps == (int)n && a->depth == 0);
+    mavc_free(a);
+}
+static void loop_order(int short_sc) {
     static const int decode[] = {0, 3, 1, 2, 6, 4, 5, 9, 7, 8, 11, 10};
     mavc *a = synthetic_avc(); uint8_t out[16 * 16 * 3 / 2]; int64_t pts; int got = 0;
     for (int loop = 0; loop < 3; loop++) for (int i = 0; i < 12; i++) {
-        submit_picture(a, annex_b, !i, 16 + loop * 12 + decode[i], decode[i] * 1000);
+        submit_picture(a, short_sc, !i, 16 + loop * 12 + decode[i], decode[i] * 1000);
         // md_avc takes at most one picture for each input packet.
         if (mavc_take(a, 0, out, 16, 16, &pts)) {
             assert(pts == (got % 12) * 1000 && out[0] == 16 + got); got++;
@@ -183,7 +200,9 @@ static void tex_slots(void) {
 }
 int main(void) {
     loop_order(1); loop_order(0);
-    puts("AVC loops: all 36 pictures ordered through packet parsing and callback refcons, with both NAL prefix formats");
+    puts("AVC loops: all 36 pictures ordered through packet parsing and callback refcons, with 3- and 4-byte start codes");
+    annex_b_only();
+    puts("AVC framing: leading zeros before the first start code are skipped; packets and parameter sets without a start code are refused, not read as NAL lengths");
     sequence_boundaries();
     puts("AVC boundaries: short sequences drain, non-IDR timestamps and SEI retain lookahead, Flush discards, zero-depth output stays immediate");
     tex_slots();

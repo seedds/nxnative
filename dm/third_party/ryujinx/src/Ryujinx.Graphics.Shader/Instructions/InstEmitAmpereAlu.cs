@@ -170,7 +170,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             Operand srcB = AFloat(context, b);
 
             // The predicate (87..90) picks the minimum where it holds
-            Operand res = context.ConditionalSelect(APred(context, x, 87, 90), context.FPMinimum(srcA, srcB), context.FPMaximum(srcA, srcB));
+            Operand res = FPMinMax(context, APred(context, x, 87, 90), srcA, srcB);
 
             ASet(context, x, res);
         }

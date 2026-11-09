@@ -9,6 +9,20 @@ namespace Ryujinx.Graphics.Shader.Instructions
 {
     static class InstEmitAluHelper
     {
+        // nxnative: FMNMX and HMNMX2 order -0 below +0 whatever the operand order: min(+0, -0) is -0 and max(+0, -0) is +0. Metal's fmin and fmax may return
+        // either zero. Where both operands are zeros, the minimum is their bits ORed (-0 if either is) and the maximum their bits ANDed (+0 unless both are -0).
+        // The test is on the bits, so a NaN (never a zero) keeps fmin and fmax's own result and fast math, which assumes no signed zeros, cannot fold it away.
+        // Each instruction costs an OR, a shift, an integer compare and a select, plus an AND for the maximum; a constant predicate keeps one side.
+        public static Operand FPMinMax(EmitterContext context, Operand isMin, Operand a, Operand b)
+        {
+            Operand or = context.BitwiseOr(a, b);
+            Operand bothZero = context.ICompareEqual(context.ShiftLeft(or, Const(1)), Const(0));
+            Operand min = context.ConditionalSelect(bothZero, or, context.FPMinimum(a, b));
+            Operand max = context.ConditionalSelect(bothZero, context.BitwiseAnd(a, b), context.FPMaximum(a, b));
+
+            return context.ConditionalSelect(isMin, min, max);
+        }
+
         // A float comparison with .FTZ (FSET and FSETP, Maxwell's FCMP): a denormal operand compares as zero, as on NVIDIA; Apple's GPUs keep fp32 denormals. The compilers set the flag on nearly
         // every comparison, so an immediate or RZ, the usual second operand, is decided here and adds no code
         public static Operand FlushDenormal(EmitterContext context, Operand v)

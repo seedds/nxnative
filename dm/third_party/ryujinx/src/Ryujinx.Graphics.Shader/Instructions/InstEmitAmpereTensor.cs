@@ -410,7 +410,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             for (int i = 0; i < 2; i++)
             {
-                r[i] = context.ConditionalSelect(p, context.FPMinimum(a[i], b[i]), context.FPMaximum(a[i], b[i]));
+                r[i] = FPMinMax(context, p, a[i], b[i]);
             }
 
             ASet(context, x, context.PackHalf2x16(r[0], r[1]));

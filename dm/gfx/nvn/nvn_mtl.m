@@ -33,6 +33,7 @@
 // the same fixed address as before; the planner / worker split makes TCI the worker's own index. Submission-wide tracking and shared caches stay single
 enum { NW = 4 };
 #define TCI 0
+static void pcn_open(void), pcn_close(void);   // the parallel translation census (DM_NVN_PAR_CENSUS, below mtl_exec)
 #include "nvn_refl.h"
 #include "nvn_cover.h"
 #include "nvn_border.h"
@@ -5065,7 +5066,7 @@ static void rp_end_at(const char *fn, int line) { if (g_enc) { AP_B; geo_mesh_fl
 #ifdef NVN_RT_RANGE_TEST
     int ranged=g_rt_range_active && !g_rt_range_pending;
 #endif
-    sd_finish(); enc_r_end_pass(g_enc); g_gp_bw_l0 = g_bw_load; g_gp_bw_s0 = g_bw_store;   // the profile's per-pass ledger counts from the previous pass end, profiled or not
+    pcn_close(); sd_finish(); enc_r_end_pass(g_enc); g_gp_bw_l0 = g_bw_load; g_gp_bw_s0 = g_bw_store;   // the profile's per-pass ledger counts from the previous pass end, profiled or not
     zskip_commit_clears(); g_enc = nil; g_enc_geo_nocolor = 0; g_rt_merged = 0; g_sm_pass = 0; g_rt_range_active = g_rt_range_pending = 0; pg_end_render(); ts_after(); ms_after(); if (g_lp.count) lp_finish(); fz_end();
     if (g_nubd && g_nubd >= ubd_lazy()) ubd_flush();   // the inline updates deferred in this pass, in order (see mtl_sub_update); across passes they wait for the next copy or dispatch (blit_raw)
     if (g_nbcrt) bcrt_flush();   // blocks drawn into shadows go back into their compressed textures
@@ -5437,6 +5438,7 @@ static id<MTL4RenderCommandEncoder> rp_open(MTL4RenderPassDescriptor *pd) {
     ser_gate();
     g_stat_pass++;   // gp_begin records this pass; match the attachment and draw dump labels
     g_enc = enc_r_begin_pass(pd);
+    pcn_open();
     args_dirty_all();
     if (enc_label_on()) { id<MTLTexture> lt = pd.colorAttachments[0].texture ?: pd.depthAttachment.texture ?: pd.stencilAttachment.texture; g_el_w = (int)lt.width; g_el_h = (int)lt.height; g_el_draws = 0; g_el_key[0] = 0; }
     return g_enc;
@@ -14739,12 +14741,66 @@ static void clear_ds_tri(const p_clear_ds *c) {
        (unsigned long)sc.x, (unsigned long)sc.y, (unsigned long)sc.width, (unsigned long)sc.height);
 }
 
+// ---------- Parallel translation census (DM_NVN_PAR_CENSUS=1, diagnostic; stage P2) ----------
+// Which passes a worker could translate from a snapshot of the state at their start and the run of operations inside them: per pass, the operations met while it stayed open
+// (the one that ends a pass is not inside it), the modes that keep a pass with the single-threaded translation, and whether the run leaves the list the pass began in. A line
+// every 300 frames: passes and draws, the share a worker could take, why the others could not, and how many passes hold each kind of operation
+enum { PCN_CALL = 1, PCN_END = 2, PCN_FZ = 4, PCN_SM = 8, PCN_DEFER = 16, PCN_RANGE = 32, PCN_TF = 64, PCN_MTK = 128, PCN_OP = 256, PCN_GEO = 512, PCN_NWHY = 10 };
+static const char *const g_pcn_why_name[PCN_NWHY] = {"call", "list end", "fused", "slice-merged", "deferred", "range", "transform feedback", "task/mesh", "unsupported op", "geometry"};
+static int pcn_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_PAR_CENSUS"); v = e && atoi(e) > 0; if (v) MLOG("parallel translation census on (DM_NVN_PAR_CENSUS)"); } return v; }
+_Static_assert(OP_COUNT_ <= 64, "the census keeps 64 operation kinds");
+static struct { int open, depth0, pending; uint64_t pass, draw0; uint32_t why; uint8_t seen[64]; } g_pcs;
+static uint64_t g_pcn_pass, g_pcn_ok, g_pcn_draw, g_pcn_draw_ok, g_pcn_why[PCN_NWHY], g_pcn_op_in[64], g_pcn_frame;
+static int pcn_supported(unsigned op) {   // operations a worker replays inside a pass: state, draws, mid-pass clears and barriers, inline uniform updates, counters, same-target continuations
+    switch (op) {
+        case OP_BIND_PROGRAM: case OP_BIND_STATE: case OP_BIND_VATTR: case OP_BIND_VSTREAM: case OP_BIND_VBUF: case OP_BIND_VBUF1: case OP_BIND_UBO: case OP_BIND_UBO_SMALL:
+        case OP_BIND_SSBO: case OP_BIND_TEX: case OP_BIND_TEX1: case OP_BIND_SAMP: case OP_BIND_IMG: case OP_VIEWPORTS: case OP_SCISSOR: case OP_DEPTH_RANGE: case OP_STENCIL:
+        case OP_POLY_OFFSET: case OP_BLEND_COLOR: case OP_DEPTH_CLAMP: case OP_VP_SWIZZLE: case OP_PRIM_RESTART: case OP_ALPHA_REF: case OP_PUSH_CONST: case OP_SET_TEX_POOL:
+        case OP_SET_SAMP_POOL: case OP_COPY_STRIDE: case OP_RAST_DISCARD: case OP_DRAW: case OP_DRAW_IDX: case OP_MULTI_DRAW: case OP_CLEAR_COLOR: case OP_CLEAR_DS:
+        case OP_BARRIER: case OP_UPDATE_UB: case OP_REPORT_COUNTER: case OP_RESET_COUNTER: case OP_SET_RT: case OP_JUMP: case OP_BEGIN: return 1;
+        default: return 0;
+    }
+}
+static void pcn_modes(void) {
+    if (g_fz.active) g_pcs.why |= PCN_FZ; if (g_sm_pass) g_pcs.why |= PCN_SM; if (g_defer_replaying || defer_has_active()) g_pcs.why |= PCN_DEFER;
+    if (g_rt_range_active) g_pcs.why |= PCN_RANGE; if (S.tf_on) g_pcs.why |= PCN_TF; if (g_mtk.on) g_pcs.why |= PCN_MTK; if (g_geo_program && !g_geo_mesh.on) g_pcs.why |= PCN_GEO;
+}
+static void pcn_open(void) {
+    if (!pcn_on()) return;
+    memset(&g_pcs, 0, sizeof g_pcs); g_pcs.open = 1; g_pcs.depth0 = g_ret_n; g_pcs.pending = -1; g_pcs.pass = g_stat_pass; g_pcs.draw0 = g_stat_draw; pcn_modes();
+}
+static void pcn_op(unsigned op) {   // mtl_exec, before each operation: the previous one is inside the pass if the pass is still open
+    if (!g_pcs.open) return;
+    if (g_pcs.pending >= 0 && g_enc && g_stat_pass == g_pcs.pass) { unsigned k = (unsigned)g_pcs.pending;
+        if (k < 64) g_pcs.seen[k] = 1; if (!pcn_supported(k)) g_pcs.why |= PCN_OP; if (k == OP_CALL) g_pcs.why |= PCN_CALL; if (k == OP_END) g_pcs.why |= PCN_END; }
+    if (g_ret_n != g_pcs.depth0) g_pcs.why |= PCN_CALL;
+    pcn_modes(); g_pcs.pending = (int)op;
+}
+static void pcn_close(void) {
+    if (!pcn_on() || !g_pcs.open) return;
+    pcn_modes(); g_pcs.open = 0;
+    uint64_t draws = g_stat_draw - g_pcs.draw0 + 1;   // with the one that opened the pass (counted after rp_open)
+    g_pcn_pass++; g_pcn_draw += draws;
+    if (!g_pcs.why) { g_pcn_ok++; g_pcn_draw_ok += draws; } else for (int i = 0; i < PCN_NWHY; i++) if (g_pcs.why >> i & 1) g_pcn_why[i]++;
+    for (int k = 0; k < 64; k++) g_pcn_op_in[k] += g_pcs.seen[k];
+    uint64_t f = atomic_load(&g_cur_frame);
+    if (f >= g_pcn_frame + 300) {
+        char w[400], o[900]; size_t a = 0, b = 0;
+        for (int i = 0; i < PCN_NWHY; i++) if (g_pcn_why[i]) a += (size_t)snprintf(w + a, sizeof w - a, "%s%s %llu", a ? ", " : "", g_pcn_why_name[i], (unsigned long long)g_pcn_why[i]);
+        for (int k = 0; k < 64 && b < sizeof o - 24; k++) if (g_pcn_op_in[k]) b += (size_t)snprintf(o + b, sizeof o - b, " %d:%llu", k, (unsigned long long)g_pcn_op_in[k]);
+        if (g_pcn_frame) MLOG("parallel census up to frame %llu: passes %llu, a worker could take %llu (%.0f%%), draws %llu of which in those %llu (%.0f%%); kept: %s; passes holding op kinds:%s",
+            (unsigned long long)f, (unsigned long long)g_pcn_pass, (unsigned long long)g_pcn_ok, g_pcn_pass ? 100.0 * g_pcn_ok / g_pcn_pass : 0.0, (unsigned long long)g_pcn_draw,
+            (unsigned long long)g_pcn_draw_ok, g_pcn_draw ? 100.0 * g_pcn_draw_ok / g_pcn_draw : 0.0, a ? w : "-", b ? o : " -");
+        g_pcn_frame = f; g_pcn_pass = g_pcn_ok = g_pcn_draw = g_pcn_draw_ok = 0; memset(g_pcn_why, 0, sizeof g_pcn_why); memset(g_pcn_op_in, 0, sizeof g_pcn_op_in);
+    }
+}
 void mtl_exec(const uint8_t *p) {
     if (!g_state_inited) state_reset();
     static int dump_all = -1; if (dump_all < 0) dump_all = getenv("DM_NVN_PASSDUMP_ALL") != NULL;
     int trace = dump_all && passdump();   // Normal mode does not check the frame range per operation; the full command position is only used for the designated diagnostic frames
     for (;;) {
         op_hdr h; memcpy(&h, p, sizeof h);
+        if (g_pcs.open) pcn_op(h.op);
         g_exec_cur = p;   // Scan start point of the store lookahead: the operation that ends the render pass (inclusive)
         if (p == g_defer_pend) { for (int gi = 0; gi < 4; gi++) if (g_defer_slots[gi].active && g_defer_slots[gi].p_end_op == p) g_defer_slots[gi].in_p = 0; g_defer_pend = NULL; }
         sdx_seq(p);

@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -35,6 +36,15 @@ assert spec and spec.loader
 nsp = importlib.util.module_from_spec(spec); spec.loader.exec_module(nsp)
 
 
+class FullAtCommit(sqlite3.Connection):
+    full = True
+
+    def commit(self):
+        if self.full:
+            raise sqlite3.OperationalError('database or disk is full')
+        super().commit()
+
+
 class ShaderCache(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
@@ -48,6 +58,7 @@ class ShaderCache(unittest.TestCase):
                        CHAIN='test-chain', clone=shutil.copyfile, shader_rule_source=lambda name: b'',
                        STAGE='stage/test', want=set(), OUT_KEY=re.compile(r'([0-9a-f]{16})_b'), OLD_IMAGE={}, shader_lib=shader_lib, romfs=romfs, shutil=shutil,
                        STAMP_BEFORE=None, INPUTS='inputs')
+        self.addCleanup(self.ns['STORE'].close)
         (root / 'out').mkdir()
         names = {'tool_fingerprint', 'shader_key', 'cache_path', 'cache_outputs', 'restore_cache', 'publish_cache', 'atomic_json', 'cache_meta_path',
                  'vs_pad', 'partner_inputs', 'label_dir', 'output', 'commit', 'publish_library'}
@@ -266,6 +277,64 @@ class ShaderCache(unittest.TestCase):
         img = shader_lib.view(out)
         self.assertEqual(sorted(p.name for p in img.iterdir()), sorted([a + '_b.metal', a + '_b.metallib', b + '_b.metal', b + '_b.metallib', 'inputs.tsv']))
         self.assertEqual((img / (a + '_b.metallib')).read_bytes(), a.encode())
+
+    def test_full_cache_keeps_every_staged_output_on_disk(self):
+        store = self.ns['STORE']
+        pages, = store.db.execute('PRAGMA page_count').fetchone()
+        store.db.execute(f'PRAGMA max_page_count={pages}')
+        out = Path(self.ns['out'])
+        outputs = {'first': b'first', 'second': b'x' * 500_000}
+        for name, data in outputs.items():
+            (out / name).write_bytes(data)
+
+        self.ns['commit'](names=list(outputs))
+
+        self.assertEqual(store.names('stage/'), set())
+        self.assertFalse(store.db.in_transaction)
+        self.assertEqual({p.name: p.read_bytes() for p in out.iterdir()}, outputs)
+        self.ns['publish_library']('mac')
+        image = shader_lib.view(out)
+        self.assertEqual({p.name: p.read_bytes() for p in image.iterdir()}, outputs)
+
+    def test_full_cache_commit_preserves_old_entries_and_can_retry(self):
+        store = self.ns['STORE']
+        store.put('old', b'keep')
+        db = sqlite3.connect(store.path, isolation_level=None, factory=FullAtCommit)
+        self.addCleanup(db.close)
+        out = Path(self.ns['out'])
+        (out / 'key_b.json').write_text('{}')
+        (out / 'key_b.metal').write_bytes(b'msl')
+        (out / 'key_b.metallib').write_bytes(b'library')
+        messages = []
+        with mock.patch.object(store, 'db', db), mock.patch.object(store, 'say', messages.append):
+            for _ in range(2):
+                self.ns['publish_cache']('key', 'digest', 'rule', 'source')
+                self.assertFalse(db.in_transaction)
+                self.assertEqual(store.names(''), {'old'})
+            self.assertEqual(len(messages), 1)
+            db.full = False
+            self.ns['publish_cache']('key', 'digest', 'rule', 'source')
+            self.assertTrue(self.ns['restore_cache']('key', 'digest'))
+            self.assertEqual(store.get('old'), b'keep')
+
+    def test_full_cache_cleanup_leaves_the_completed_image_usable(self):
+        store = self.ns['STORE']
+        store.put('stage/test/mac/shader', b'compiled')
+        db = sqlite3.connect(store.path, isolation_level=None, factory=FullAtCommit)
+        self.addCleanup(db.close)
+        out = Path(self.ns['out'])
+
+        with mock.patch.object(store, 'db', db):
+            self.ns['publish_library']('mac')
+            self.assertFalse(db.in_transaction)
+            self.assertEqual(store.get('stage/test/mac/shader'), b'compiled')
+            with self.assertRaisesRegex(sqlite3.OperationalError, 'database or disk is full'):
+                store.delete_prefix('stage/test/')  # the next build must clear stale staging
+            db.full = False
+            store.delete_prefix('stage/test/')
+
+        self.assertFalse(out.exists())
+        self.assertEqual((shader_lib.view(out) / 'shader').read_bytes(), b'compiled')
 
     def test_partial_build_keeps_the_image_less_the_keys_it_builds(self):
         out, built, kept = Path(self.ns['out']), '1' * 16, '2' * 16

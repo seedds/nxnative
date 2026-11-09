@@ -553,15 +553,22 @@ def output_of(label, name) -> bytes:   # an output its shader has just written o
 
 def commit(key='', names=None):
     """A finished shader's files (<key>_*, or the names given) into the cache's stage and off the disk. A file the cache could not take (a full drive) stays on disk, where publish_library finds it too"""
-    with STORE.batch():
+    paths = []
+    def entries():
         for label in ('mac', 'ios'):
             d = label_dir(label)
             if not d: continue
             for n in (names if names is not None else [n for n in os.listdir(d) if n.startswith(key + '_')]):
                 p = os.path.join(d, n)
                 if n.startswith('.') or '.tmp' in n or not os.path.isfile(p): continue
-                STORE.put_file(f'{STAGE}/{label}/{n}', p)
-                if not STORE.full: os.unlink(p)
+                paths.append(p)
+                with open(p, 'rb') as f:
+                    data = f.read()
+                yield f'{STAGE}/{label}/{n}', data
+    with STORE.lock:
+        if STORE.put_many(entries()):
+            for path in paths:
+                os.unlink(path)
 
 def publish_library(label):
     """The library's image <dir>.img from the staged outputs and the files left on disk (these win), and for a partial build the image it builds on, less the outputs of the keys it built
@@ -582,7 +589,7 @@ def publish_library(label):
         print(f'[RED] could not write {image}, the library stays the folder {d}: {e}', flush=True)
         for n in STORE.names(prefix): STORE.to_file(n, os.path.join(d, n[len(prefix):]))
         return
-    STORE.delete_prefix(prefix)
+    STORE.delete_prefix(prefix, best_effort=True)   # the image is complete, the next build clears any staging left here
     shutil.rmtree(d, ignore_errors=True)
 
 def cache_outputs(key, digest, cached=False):
@@ -633,15 +640,21 @@ def publish_cache(key, digest, rule_fp, code_fp):
     found = cache_outputs(key, digest)
     if not found: return
     root, files = found
-    with STORE.batch():   # a stop leaves the whole entry or none of it
+    def entries():
         for label, names in files.items():
             for name in names:
                 src = os.path.join(out if label == 'mac' else IOSOUT, name)
                 if name.endswith('.json'):
-                    value = json.load(open(src)); value.pop('fetch', None); value.pop('vin', None); value.pop('pull', None); value.pop('alpha', None); value.pop('logic', None)   # the side libraries are made again from the restored MSL (ps_libraries, vin_finish, pull_finish)
-                    STORE.put(f'{root}/{label}/{name}', json.dumps(value, ensure_ascii=False, indent=1).encode())
-                else: STORE.put_file(f'{root}/{label}/{name}', src)
-        STORE.put(cache_meta_path(key), json.dumps({'digest': digest, 'rule_fp': rule_fp, 'code_fp': code_fp}).encode())
+                    with open(src) as f:
+                        value = json.load(f)
+                    value.pop('fetch', None); value.pop('vin', None); value.pop('pull', None); value.pop('alpha', None); value.pop('logic', None)   # the side libraries are made again from the restored MSL (ps_libraries, vin_finish, pull_finish)
+                    yield f'{root}/{label}/{name}', json.dumps(value, ensure_ascii=False, indent=1).encode()
+                else:
+                    with open(src, 'rb') as f:
+                        data = f.read()
+                    yield f'{root}/{label}/{name}', data
+        yield cache_meta_path(key), json.dumps({'digest': digest, 'rule_fp': rule_fp, 'code_fp': code_fp}).encode()
+    STORE.put_many(entries())
 
 def write_refl(key, refl):
     for target, d in (('mac', out),) + ((('ios', IOSOUT),) if IOSOUT else ()):

@@ -14,6 +14,7 @@ SCHEMA = ('CREATE TABLE IF NOT EXISTS blob(id INTEGER PRIMARY KEY, hash BLOB UNI
 SHADER_ENTRY = re.compile(r'shader/([0-9a-f]{64})/')
 WAIT = 600   # seconds another process's write may hold this one up
 _DAMAGED = ('malformed', 'not a database', 'disk image')
+_FULL = 'database or disk is full'
 
 
 class Store:
@@ -60,20 +61,44 @@ class Store:
     def names(self, prefix):   # the set of names starting with prefix
         return {r[0] for r in self._run('SELECT name FROM entry WHERE name>=? AND name<?', prefix, prefix + '\U0010ffff')}
 
+    def _put(self, name, data, when=None):
+        digest = hashlib.blake2b(data, digest_size=16).digest()
+        row = self.db.execute('SELECT id FROM blob WHERE hash=?', (digest,)).fetchone()
+        blob = row[0] if row else self.db.execute('INSERT INTO blob(hash, data) VALUES(?, ?)', (digest, data)).lastrowid
+        self.db.execute('INSERT OR REPLACE INTO entry(name, blob, mtime) VALUES(?, ?, ?)', (name, blob, time.time() if when is None else when))
+
+    def _warn_write(self, error):
+        if not self.full:
+            self.full = True
+            self.say(f'[RED] the shader compile cache {self.path} cannot be written, the build goes on without it: {error}')
+
     def put(self, name, data, when=None):
         """An entry's bytes, replacing what it held. A cache that cannot be written (a full drive) is one [RED] line: the build goes on without it"""
-        digest = hashlib.blake2b(data, digest_size=16).digest()
         with self.lock:
             try:
                 with self.batch():
-                    row = self.db.execute('SELECT id FROM blob WHERE hash=?', (digest,)).fetchone()
-                    blob = row[0] if row else self.db.execute('INSERT INTO blob(hash, data) VALUES(?, ?)', (digest, data)).lastrowid
-                    self.db.execute('INSERT OR REPLACE INTO entry(name, blob, mtime) VALUES(?, ?, ?)', (name, blob, time.time() if when is None else when))
+                    self._put(name, data, when)
             except sqlite3.OperationalError as e:
-                if any(w in str(e) for w in _DAMAGED): self._damage(e)
-                elif not self.full: self.full = True; self.say(f'[RED] the shader compile cache {self.path} cannot be written, the build goes on without it: {e}')
+                if not self._damage(e): self._warn_write(e)
             except sqlite3.DatabaseError as e:
                 if not self._damage(e): raise
+
+    def put_many(self, entries):
+        """Write an iterable of (name, bytes) in one transaction. True only after it commits."""
+        with self.lock:
+            if self.db.in_transaction:
+                raise RuntimeError('put_many requires its own transaction')
+            try:
+                with self.batch():
+                    for name, data in entries:
+                        self._put(name, data)
+            except sqlite3.DatabaseError as e:
+                if isinstance(e, sqlite3.OperationalError) and str(e) == _FULL:
+                    self._warn_write(e)
+                elif not self._damage(e):
+                    raise
+                return False
+            return True
 
     def put_file(self, name, path):
         with open(path, 'rb') as f: self.put(name, f.read())
@@ -92,11 +117,12 @@ class Store:
         with self.lock:
             if self.db.in_transaction: yield; return
             self.db.execute('BEGIN IMMEDIATE')
-            try: yield
+            try:
+                yield
+                self.db.commit()
             except BaseException:
                 if self.db.in_transaction: self.db.rollback()
                 raise
-            else: self.db.commit()
 
     def prune_shaders(self, keep, since):
         """Remove the shader/<64 hex digits>/ entries not in keep and all written before since, and the bytes nothing names any more, giving their pages back. Other names stay.
@@ -116,16 +142,19 @@ class Store:
         self._run('PRAGMA incremental_vacuum')
         return len(gone), sum(size.get(d, 0) for d in gone)
 
-    def delete_prefix(self, prefix):
+    def delete_prefix(self, prefix, *, best_effort=False):
         """Remove every entry whose name starts with prefix, and the bytes nothing names any more, giving their pages back (dmsh_build.py's staged outputs once its image is written)"""
         with self.lock:
             try:
                 with self.batch():
                     self.db.execute('DELETE FROM entry WHERE name>=? AND name<?', (prefix, prefix + '\U0010ffff'))
                     self.db.execute('DELETE FROM blob WHERE id NOT IN (SELECT blob FROM entry)')
+                self._run('PRAGMA incremental_vacuum')
             except sqlite3.DatabaseError as e:
-                if not self._damage(e): raise
-        self._run('PRAGMA incremental_vacuum')
+                if best_effort and isinstance(e, sqlite3.OperationalError) and str(e) == _FULL:
+                    self._warn_write(e)
+                elif not self._damage(e):
+                    raise
 
     def close(self):   # also folds the write-ahead log into the file, so that one file is left
         with self.lock, contextlib.suppress(sqlite3.Error): self.db.close()

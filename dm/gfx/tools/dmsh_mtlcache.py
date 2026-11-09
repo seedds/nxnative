@@ -80,8 +80,7 @@ class Cache:
         for lib, data in zip(libs, pieces):
             with open(whole, 'wb') as f: f.write(data)
             os.replace(whole, lib)
-        with self.store.batch():
-            for path, lib in zip(paths, libs): self.store.put_file(path, lib)
+        self.store.put_many(zip(paths, pieces))
         self.count((target, 'compiled'))
 
     def _check(self, target, d, stems, mac_dir):

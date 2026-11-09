@@ -83,6 +83,7 @@ Game-specific findings. The general host changes they led to are listed under [F
 
 ## Found on this game
 
+- [A full shader cache stopped the build](../../../docs/reference/shaders.md#a-full-shader-cache-stopped-the-build): the iOS shader build stopped when the external volume filled.
 - [AltServer cannot install a file of 2 GiB or more](../../../docs/reference/packing.md#altserver-cannot-install-a-file-of-2-gib-or-more) (2026-11-08, #1688): 1.4.3's shader library is 2.10 GiB; `--shader-files` packs it as separate files.
 - [The Mac's alias region is the Switch's 64 GB](../../../docs/reference/memory.md#the-macs-alias-region-is-the-switchs-64-gb) (2026-11-05, #639): the long-session Blood Moon reached +2.25 of the iPhone-sized 2.38 GB. Whether this ends it is open until a long session runs on the larger region.
 - [A work folder holds millions of small files](../../../docs/reference/packing.md#a-work-folder-holds-millions-of-small-files): 8,893,028 files and 509 GB here.

@@ -1,6 +1,6 @@
 # The Legend of Zelda: Ocarina of Time (0400486024DEC000): the rewriter's patches of this game's own code. dm/tools/patch_nso.py loads every profile's patches.py;
 # MATCH_FRAME_STEP as described there ("Registered patches"). Patches of Nintendo SDK module builds are in dm/tools/sdk_patches.py
-from nso_asm import ADRP, B
+from nso_asm import ADDI, ADRP, B
 
 # The game's frame ratio. Once a frame the function at main+0x6e6be0 (v131072) divides its base rate (60.0, or 30.0 while bit 0 of [x21+0x24f] is set) by the int frame rate at
 # [x21+0x2c8] (fdiv s8,s1,s0 at +0xe4) and hands the result to the time object (main+0x3b4e300: ratio at +0x10, 1 / ratio at +0x14, round(60 / ratio) at +0x1c), which the game
@@ -102,6 +102,7 @@ def screen_shape(ctx):
     fs_put(site, [B(site, start)], 'output size: the requested size times the screen shape\'s width and height factors (state +0xa4 / +0xa8; +0xa0 0 = 16:9, as it is)')
     window_size(ctx)
     camera_projection(ctx)
+    hud(ctx)
 
 # The window textures. The game creates its three window textures at 2560x1440 (the window object's +0x8 / +0xc floats; defaults main+0xecbc80), and a crop larger than them
 # (2048x1576 at 1.3:1, 2688x1152 at 21:9) cannot be presented. The game re-creates its window and textures from +0x8 / +0xc when +0xc8 is 1: main+0x527fc0, which the
@@ -168,6 +169,49 @@ def shape_change(ctx):
     emit(B(here(), site + 4))
     fs_put(site, [B(site, start)], 'screen shape change: the display update recomputes the output size when the loader\'s change count (state +0xac) moved since the last (+0xc0)')
 
+# The HUD and menus (eui, Nintendo's newer UI: layouts UI/Layout2Archive/*.blarc.zs). Every layout file holds its screen size, 3840x2160 (LayoutResData +0x200, file offset 0x2f8), and
+# the game reads it in place through one getter (main+0x583fd0: [x0] + 0x200). A screen's init (main+0x773b90, a virtual) builds its orthographic projection from it (+-w/2,
+# +-h/2, main+0x773f28) and keeps it in the screen's uniform block (+0x1b8: view-projection +8 and its y-flipped copy +0x48, column major, the size twice at +0x88, main+0x7741e0);
+# each frame the screen's draw copies the block's 0x90 bytes into the frame's ring (main+0x2d2ba0, its memcpy at +0x48), so the HUD drew in a 16:9 space stretched over any
+# output. The stub after that memcpy scales the copy's x / y rows by the HUD's multipliers and divides the size by them: the space takes the output's shape at the HUD's pixel
+# size, at the next frame after a shape change and without touching the screen's block. A capture's block (main+0x154b660) holds its texture size beside the screen's and
+# is left as it is. The HUD's multipliers are the camera's (state +0xb8 / +0xbc, those the output size was made with) divided by the largest of them and 1: in landscape the
+# camera's, so the HUD keeps the size it has at 16:9 of the same height (wider) or width (taller); upright, the 16:9 space still fits the width, so nothing is cut off. The
+# layouts place everything about the screen's centre (eui does not anchor panes to the screen's edges: a layout made 4752 wide in a copy of its file drew round hearts at
+# their 16:9 place), so the HUD keeps its 16:9 arrangement in the middle; moving the edge groups (60x80 nulls at the space's edges, as PlayerStatus_00's N_ScaleL_00 at
+# (-1920, 1078)) and stretching full-screen panes (3840x2160 at the centre: fades, menu backgrounds) is open (game note, Screen shape)
+hud_upload = (   # hud.s, assembled with clang; x0 the copy (memcpy's result), x20 the block, x16 the state page (the ADRP before it)
+    0xa948aa89, 0xeb0a013f, 0x54000441, 0xb4000429, 0xb940ba09, 0x340003e9,   # the size twice (a screen's own projection) and a shape other than 16:9
+    0x2d574610, 0x1e316a12, 0x1e2e1013, 0x1e336a52, 0x1e321a10, 0x1e321a31,   # the camera's multipliers / max(mx, my, 1)
+    0x4f03f614, 0x6e040614, 0x6e0c0634,                                       # (mx', my', 1, 1)
+    0xad405815, 0x6e34deb5, 0x6e34ded6, 0xad005815, 0xad415815, 0x6e34deb5, 0x6e34ded6, 0xad015815,   # both matrices' columns: rows x / y scaled
+    0xad425815, 0x6e34deb5, 0x6e34ded6, 0xad025815, 0xad435815, 0x6e34deb5, 0x6e34ded6, 0xad035815,
+    0x2d504c12, 0x1e301a52, 0x1e311a73, 0x2d104c12, 0x2d114c12)               # the size / the multipliers, both copies
+# The game's other conversions between the layout space and the screen (a pane's rect in screen coordinates, a 3D position's place on the HUD) read the same getter: the
+# stub at its entry returns the size the HUD draws with (state +0xd0, scratch), except to the screen's init (its two calls, main+0x773ee0 / +0x773f24), whose projection the
+# upload stub widens each frame. A leaf: x8..x10, x16 and s16..s21 are free
+layout_size = (   # lsize.s, assembled with clang; x16 the state page, x10 the init's first return address (the ADRP / ADD before it)
+    0xf9400008, 0x91080100, 0xb940ba09, 0x34000229,                           # the layout's size; 16:9: as it is
+    0xeb0a03df, 0x540001e0, 0x9101114a, 0xeb0a03df, 0x54000180,               # the screen's init: as it is
+    0x2d404410, 0x2d574e12, 0x1e336a54, 0x1e2e1015, 0x1e356a94, 0x1e341a52, 0x1e341a73,   # the HUD's multipliers
+    0x1e321a10, 0x1e331a31, 0x91034200, 0x2d004410, 0xd65f03c0)               # the size / them, into state +0xd0; x0 -> it
+def hud(ctx):
+    here, emit, fs_site, fs_put, FS_STATE_OFF = ctx.here, ctx.emit, ctx.site, ctx.put, ctx.state
+    fn = ctx.others.get('hud upload')
+    if fn is not None:   # not found in this build (a red line from the locator): the HUD stays 16:9, stretched over the output
+        site = fn + 0x4c
+        fs_site(site, 'e00315aa')   # mov x0,x21 (after the memcpy)
+        start = here(); emit(ADRP(16, here(), FS_STATE_OFF))
+        for w in hud_upload: emit(w)
+        emit(0xaa1503e0); emit(B(here(), site + 4))   # mov x0,x21; back
+        fs_put(site, [B(site, start)], 'HUD projection: the screen\'s uniform block copy takes the output\'s shape at the HUD\'s pixel size (state +0xb8 / +0xbc; 0 = 16:9)')
+    fn, init = ctx.others.get('layout size'), ctx.others.get('screen init')
+    if fn is None or init is None: return   # the game's own layout size for its conversions
+    fs_site(fn, '080040f9')   # ldr x8,[x0]
+    start = here(); emit(ADRP(16, here(), FS_STATE_OFF)); emit(ADRP(10, here(), init + 0x354)); emit(ADDI(10, 10, (init + 0x354) & 0xfff))
+    for w in layout_size: emit(w)
+    fs_put(fn, [B(fn, start)], 'layout size: the size the HUD draws with for the game\'s conversions to and from the screen (state +0xd0), the screen\'s init as it is')
+
 MATCH_FRAME_STEP = {'main': [
     {'name': 'frame ratio from the host\'s step', 'size': 0x9b4, 'fingerprints': ['6ae2aff5344d14568e4dbaf93455e2d8278384bf892ed6c6eca87fef98fbcd1d'], 'stub': frame_step,   # v131072 main+0x6e6be0
      'others': {'dynamic resolution': {'size': 0x294, 'fingerprints': ['7af6ceb0aedf8e0c17dc08ce17fcd6a7cba6d394a0d09e3b504c6d668dc418e7']},   # v131072 main+0x8065e0
@@ -175,7 +219,10 @@ MATCH_FRAME_STEP = {'main': [
                 'output size': {'size': 0xd8, 'fingerprints': ['9e24f74affcfca6fb386818db0e5a9d4c9e3c57aee7b35c5afff3abed93a58a4']},   # main+0x1087f40
                 'camera copy': {'size': 0x1648, 'fingerprints': ['66a50abf2237dee694c40d6a2371071d62e91379d40b643869d680f597bfab02']},   # main+0x33a8c0
                 'display update': {'size': 0x554, 'fingerprints': ['c0cab0dbf6f0644635315a356f8fd23a4701515c4ab4775d52191835b1a12e3c']},   # main+0x6502e0
-                'window crop': {'size': 0x14, 'fingerprints': ['a6116ba396321af2dacdfc1b236bbf1103285a96b92db1c2c6cc3f1aed190f6d']}}},   # main+0xe9a860
+                'window crop': {'size': 0x14, 'fingerprints': ['a6116ba396321af2dacdfc1b236bbf1103285a96b92db1c2c6cc3f1aed190f6d']},   # main+0xe9a860
+                'hud upload': {'size': 0x70, 'fingerprints': ['7cf489e6e9cc18b56c67f82ba4ca22e55abbd592d21309873d6803d19e0e7872']},   # main+0x2d2ba0
+                'screen init': {'size': 0x62c, 'fingerprints': ['103de33fb929cda858c2fbd57b726e6e1bca705bad66de872701819fbf5c6089']},   # main+0x773b90
+                'layout size': {'size': 0xc, 'fingerprints': ['d451096b59a2483a7e026bd2764333eecd505ea3aad2b3f8d902aa20ba5b02f7']}}},   # main+0x583fd0
 ]}
 
 BINDING = [
@@ -188,4 +235,7 @@ BINDING = [
     {'what': 'screen shape: the output size, the window textures, the camera projection and a live shape change (screen_aspect any)', 'now': 'game', 'goal': 'game', 'purpose': 'rendering',
      'why': "the game's own size setter, setCrop, camera copy and display update, found by their functions' fingerprints on any build that keeps them; switchable (DM_SCREEN_ASPECT)",
      'checked': 'v131072 main: one function with each fingerprint, the sites and their free registers read by disassembly, the camera matrix and its writer found in play with DM_PROBE_FINDMAT and the write watch, the stubs run natively (test_oot_aspect.py) and on the Mac at six window shapes resized live (2026-11-09)'},
+    {'what': "HUD: the screens' orthographic projection and the layout size take the output's shape", 'now': 'game', 'goal': 'game', 'purpose': 'rendering',
+     'why': "the screen draw's uniform block copy and the layout-size getter, found by their functions' fingerprints with the screen init beside them",
+     'checked': 'v131072 main: one function with each fingerprint, the block layout and its per-frame copy read by disassembly, the 3840x2160 size read in play with probes and changed in a copy of a layout file, the stubs run natively (test_oot_aspect.py) and on the Mac at six shapes, the pause menu and a cutscene (2026-11-09)'},
 ]

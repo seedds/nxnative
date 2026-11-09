@@ -260,5 +260,128 @@ class WindowSize(unittest.TestCase):
         self.assertEqual(self.crop(2048, 1152), ((2688, 1576), 0))   # back to 16:9: no re-creation
 
 
+def hud_space(r):
+    """The HUD's layout space for a shape: the camera's view of 3840x2160, grown to hold all of it upright"""
+    mx, my = camera(r); k = max(mx, my, 1)
+    return 3840 * k / mx, 2160 * k / my
+
+
+def applied(u, state, r):
+    """The camera multipliers the output size was made with (state +0xb8 / +0xbc; 0 = 16:9), which the HUD's stubs read"""
+    u.mem_write(state + 0xb8, struct.pack('<2f', *camera(r)) if r else bytes(8))
+
+
+@unittest.skipIf(uc is None, 'optional ARM64 execution dependency: unicorn')
+class HudUpload(unittest.TestCase):
+    # The screen draw's uniform block copy: memcpy's return (x0 = the copy) at FN + 0x4c (mov x0,x21); x20 the block, x21 the ring object
+    base, area, state, blk, ring = 0x4000000, 0x4100000, 0x4200000, 0x6000000, 0x6100000
+    FN = 0x1000; SITE = FN + 0x4c
+
+    def setUp(self):
+        self.u = uc.Uc(uc.UC_ARCH_ARM64, uc.UC_MODE_ARM)
+        for a, n in ((self.base, 0x100000), (self.area, 0x10000), (self.state, 0x4000), (self.blk, 0x1000), (self.ring, 0x1000)):
+            self.u.mem_map(a, n)
+        self.u.mem_write(self.base + self.SITE, struct.pack('<2I', 0xaa1503e0, 0xd503201f))   # mov x0,x21; nop
+        self.cursor = self.area - self.base
+        patch.hud(types.SimpleNamespace(here=lambda: self.cursor, emit=self.emit, site=lambda off, orig: None, put=self.put, state=self.state - self.base, others={'hud upload': self.FN}))
+
+    emit, put = OutputSize.emit, OutputSize.put
+
+    @staticmethod
+    def block(w=3840.0, h=2160.0, other=None):
+        """A screen's block as main+0x773b90 leaves it: its orthographic view-projection, column major (rows x, y, z, w), the y-flipped copy, the size twice"""
+        m = (2 / w, 0, 0, 0, 0, 2 / h, 0, 0, 0, 0, -0.5, 0, 0, 0, 0.5, 1)   # columns: (x, y, z, w) of each
+        f = (m[0], -m[1], m[2], m[3], m[4], -m[5], m[6], m[7], m[8], -m[9], m[10], m[11], m[12], -m[13], m[14], m[15])
+        return struct.pack('<16f16f4f', *m, *f, w, h, *(other or (w, h)))
+
+    def upload(self, blk):
+        """Run the stub on a copy of blk's 0x90 bytes; the copy after, as floats, and the block (never written)"""
+        self.u.mem_write(self.blk, bytes(8) + blk); self.u.mem_write(self.ring, blk[:0x90])
+        for r, v in ((arm.UC_ARM64_REG_X0, self.ring), (arm.UC_ARM64_REG_X20, self.blk), (arm.UC_ARM64_REG_X21, 0x1234)): self.u.reg_write(r, v)
+        end = self.base + self.SITE + 4
+        stop = self.u.hook_add(uc.UC_HOOK_CODE, lambda u, a, n, d: u.emu_stop(), begin=end, end=end)
+        try: self.u.emu_start(self.base + self.SITE, end, count=100)
+        finally: self.u.hook_del(stop)
+        self.assertEqual(self.u.reg_read(arm.UC_ARM64_REG_PC), end)
+        self.assertEqual(self.u.reg_read(arm.UC_ARM64_REG_X0), 0x1234)   # the original instruction ran
+        self.assertEqual(bytes(self.u.mem_read(self.blk + 8, len(blk))), blk)
+        return struct.unpack('<36f', self.u.mem_read(self.ring, 0x90))
+
+    def shape(self, r): applied(self.u, self.state, r)
+
+    def test_16_9_is_the_copy_as_it_is(self):
+        self.shape(0)
+        self.assertEqual(self.upload(self.block()), struct.unpack('<36f', self.block()[:0x90]))
+
+    def test_a_capture_is_left_as_it_is(self):
+        self.shape(2.2)
+        b = self.block(other=(1984.0, 1184.0))   # main+0x154b660: the capture's own size beside the screen's
+        self.assertEqual(self.upload(b), struct.unpack('<36f', b[:0x90]))
+
+    def test_shapes(self):
+        for r in (2.2, 2.4, 1.43, 1.3, 1.0, 0.7, 1179 / 2556, 9 / 16):
+            self.shape(r)
+            c = self.upload(self.block())
+            w, h = c[32], c[33]
+            self.assertAlmostEqual(w / h, r, 3, r)                                    # the HUD's space has the output's shape
+            self.assertEqual((c[34], c[35]), (w, h))
+            ew, eh = hud_space(r)
+            self.assertAlmostEqual(w, ew, 0, r); self.assertAlmostEqual(h, eh, 0, r)
+            self.assertGreaterEqual(w, 3839.9, r); self.assertGreaterEqual(h, 2159.9, r)   # all of the 16:9 space in view
+            if r >= 1: self.assertTrue(abs(w - 3840) < 0.5 or abs(h - 2160) < 0.5, r)   # landscape: the HUD keeps its size
+            self.assertAlmostEqual(c[0], 2 / w, 8, r); self.assertAlmostEqual(c[5], 2 / h, 8, r)
+            self.assertAlmostEqual(c[16], 2 / w, 8, r); self.assertAlmostEqual(c[21], -2 / h, 8, r)   # the y-flipped copy too
+            for i in (2, 3, 10, 11, 14, 15, 18, 19, 26, 27, 30, 31):                  # z and w untouched
+                self.assertEqual(c[i], struct.unpack('<36f', self.block()[:0x90])[i], (r, i))
+
+
+@unittest.skipIf(uc is None, 'optional ARM64 execution dependency: unicorn')
+class LayoutSize(unittest.TestCase):
+    # The getter (ldr x8,[x0]; add x0,x8,#0x200; ret) at FN; the screen's init at INIT calls it at +0x350 and +0x394
+    base, area, state, obj, res = 0x4000000, 0x4100000, 0x4200000, 0x6000000, 0x6100000
+    FN, INIT, CALLER = 0x1000, 0x8000, 0x9000
+
+    def setUp(self):
+        self.u = uc.Uc(uc.UC_ARCH_ARM64, uc.UC_MODE_ARM)
+        for a, n in ((self.base, 0x100000), (self.area, 0x10000), (self.state, 0x4000), (self.obj, 0x1000), (self.res, 0x1000)):
+            self.u.mem_map(a, n)
+        self.u.mem_write(self.base + self.FN, struct.pack('<3I', 0xf9400008, 0x91080100, 0xd65f03c0))
+        self.cursor = self.area - self.base
+        patch.hud(types.SimpleNamespace(here=lambda: self.cursor, emit=self.emit, site=lambda off, orig: None, put=self.put, state=self.state - self.base,
+                                        others={'layout size': self.FN, 'screen init': self.INIT}))
+        self.u.mem_write(self.obj, struct.pack('<Q', self.res)); self.u.mem_write(self.res + 0x200, struct.pack('<2f', 3840, 2160))
+
+    emit, put = OutputSize.emit, OutputSize.put
+
+    def get(self, ret):
+        """Call the getter with lr = ret (a module offset); the pair x0 points to after"""
+        self.u.reg_write(arm.UC_ARM64_REG_X0, self.obj); self.u.reg_write(arm.UC_ARM64_REG_LR, self.base + ret)
+        end = self.base + ret
+        stop = self.u.hook_add(uc.UC_HOOK_CODE, lambda u, a, n, d: u.emu_stop(), begin=end, end=end)
+        try: self.u.emu_start(self.base + self.FN, end, count=100)
+        finally: self.u.hook_del(stop)
+        self.assertEqual(self.u.reg_read(arm.UC_ARM64_REG_PC), end)
+        x0 = self.u.reg_read(arm.UC_ARM64_REG_X0)
+        return x0, struct.unpack('<2f', self.u.mem_read(x0, 8))
+
+    def test_16_9_is_the_layout_size(self):
+        applied(self.u, self.state, 0)
+        self.assertEqual(self.get(self.CALLER), (self.res + 0x200, (3840, 2160)))
+
+    def test_the_hud_size_for_conversions(self):
+        for r in (2.2, 1.43, 1179 / 2556):
+            applied(self.u, self.state, r)
+            x0, (w, h) = self.get(self.CALLER)
+            self.assertEqual(x0, self.state + 0xd0)
+            ew, eh = hud_space(r)
+            self.assertAlmostEqual(w, ew, 0, r); self.assertAlmostEqual(h, eh, 0, r)
+            self.assertEqual(struct.unpack('<2f', self.u.mem_read(self.res + 0x200, 8)), (3840, 2160))   # the layout file in memory is never written
+
+    def test_the_screen_init_gets_the_layout_size(self):
+        applied(self.u, self.state, 2.2)
+        for ret in (self.INIT + 0x354, self.INIT + 0x398):   # its projection is widened at each upload
+            self.assertEqual(self.get(ret), (self.res + 0x200, (3840, 2160)))
+
+
 if __name__ == '__main__':
     unittest.main()

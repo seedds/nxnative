@@ -1368,15 +1368,15 @@ def build_mismatch(d, name, g):   # the modules of an extraction whose build ID 
 def patch_files(repo, exe_dir, mods, game_id=None):
     """The patch files that name one of the modules' builds (dm/tools/sdk_patches.py, dm/games/*/patches.py): patch_nso.py loads them all but applies only those of a module's
     build ID. The selected game's file also counts for unknown builds: it may supply MATCH_CUTS. Another game's rules do not change this game's rewrite. sdk_patches.py always counts:
-    its MATCH_CUTS are SDK-wide and apply to builds it does not name. The patches.py of profiles in DM_GAMES_DIR (a provisional profile's) count too, as patch_nso.py loads them"""
+    its MATCH_CUTS are SDK-wide and apply to builds it does not name, as engine_patches.py's (engine-wide) do. The patches.py of profiles in DM_GAMES_DIR (a provisional profile's) count too, as patch_nso.py loads them"""
     ids = {build_id(exe_dir / m) for m in mods}
     selected = Path(game_id).name if game_id else None
     extra = [p for d in os.environ.get('DM_GAMES_DIR', '').split(os.pathsep) if d for p in sorted(Path(d).glob('*/patches.py'))]
-    sdk_wide = repo / 'dm/tools/sdk_patches.py'
+    shared = [repo / 'dm/tools/sdk_patches.py', repo / 'dm/tools/engine_patches.py']   # their MATCH_CUTS apply to every game's module of a kind
     files = {}
-    for p in [sdk_wide] + sorted((repo / 'dm/games').glob('*/patches.py')) + extra: files.setdefault(p.resolve(), p)
+    for p in shared + sorted((repo / 'dm/games').glob('*/patches.py')) + extra: files.setdefault(p.resolve(), p)
     return [p for p in files.values()
-            if p == sdk_wide or p.parent.name == selected or any(i in p.read_text(errors='replace') for i in ids)]
+            if p in shared or p.parent.name == selected or any(i in p.read_text(errors='replace') for i in ids)]
 
 
 def collect_nros(py, repo, romfs, dst, env, logs):
@@ -1430,7 +1430,7 @@ def rewrite(py, repo, exe_dir, out, env, logs, g, provisional=False):
     # the repository profile's build rows decide which builds the rewriter treats as the game's own (SDK-wide function patches skip those), and its snowdrop_pools the sizes of those cuts, so they are inputs too
     try: own = [l for l in (repo / 'dm/games' / Path(env.get('DM_GAME') or '-').name / 'game.tsv').read_text(encoding='utf-8').splitlines() if l.startswith(('build\t', 'snowdrop_pools\t'))]
     except OSError: own = []
-    key = fingerprint(('files', [repo / 'dm/tools' / f for f in ('patch_nso.py', 'nso.py', 'nso_code.py', 'nso_asm.py', 'nso_match.py', 'ue_cvar.py', 'ue_malloc.py', 'ue_region.py', 'ue_ring.py', 'snowdrop_pools.py', 'loader_census.py', 'fps_target.py', 'ue_fixed_rate.py', 'unity_fps.py')] + patch_files(repo, exe_dir, mods, env.get('DM_GAME')) + list(src.values()) + ([manifest] if manifest.is_file() else [])), names, capstone.__version__,
+    key = fingerprint(('files', [repo / 'dm/tools' / f for f in ('patch_nso.py', 'nso.py', 'nso_code.py', 'nso_asm.py', 'nso_match.py', 'ue_cvar.py', 'ue_malloc.py', 'ue_region.py', 'ue_ring.py', 'snowdrop_pools.py', 'loader_census.py', 'fps_target.py', 'ue_fixed_rate.py', 'unity_fps.py', 'unity_bucket.py')] + patch_files(repo, exe_dir, mods, env.get('DM_GAME')) + list(src.values()) + ([manifest] if manifest.is_file() else [])), names, capstone.__version__,
                       {k: env.get(k) for k in ('DM_PATCH_FRONT', 'DM_GAME')}, own)
     if all((out / f'{m}.patched.bin').is_file() for m in names) and reused(kf, key) is not None:
         PROG.end(f'{", ".join(mods)}{f" and {len(nros)} NROs" if nros else ""}, reused (inputs unchanged)')

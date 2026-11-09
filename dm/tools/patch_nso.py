@@ -92,10 +92,12 @@ else:
 #     which the NSP script reports with the build (what an unregistered build lost)
 #   sdk_patches.py's MATCH_CUTS are SDK-wide: every game's module of that name whose build has no CUTS, whatever the profile (a build that must keep Nintendo's code registers an
 #     empty CUTS list). They are fixes of Nintendo's code that hold for any game on a platform with a small address space; a build without a reviewed implementation of one keeps
-#     the original code, logged but not red (games without virtual address memory never reach it)
+#     the original code, logged but not red (games without virtual address memory never reach it). engine_patches.py's MATCH_CUTS are engine-wide in the same way: fixes of
+#     middleware code (Unity, Unreal, ...) for every game's module that ships it, logged but not red where nothing matches
 #   CAPABILITIES = {build ID: (name,...)}: verified main-build features exposed by fixups metadata to the launcher
 #   BINDING = [{what, now, goal, purpose, why[, blocked or kept][, checked]}]: not read here; each patch's binding now and the loosest it could have (dm/tools/docs_patches.py "Binding", docs/agents/game-patches.md)
-PATCH_FILES = [os.path.join(os.path.dirname(os.path.abspath(__file__)), 'sdk_patches.py')] + sorted(glob.glob(os.path.join(os.path.dirname(os.path.abspath(__file__)), '../games/*/patches.py')))
+SHARED = ('sdk_patches.py', 'engine_patches.py')   # rules for every game's module of a kind: Nintendo's SDK, and engine code (their MATCH_CUTS, keyed by module name)
+PATCH_FILES = [os.path.join(os.path.dirname(os.path.abspath(__file__)), f) for f in SHARED] + sorted(glob.glob(os.path.join(os.path.dirname(os.path.abspath(__file__)), '../games/*/patches.py')))
 # Profiles outside the repository (DM_GAMES_DIR, folders separated by os.pathsep, which is ':' as in dm/games/game.py: the NSP script's provisional profile of a game being brought up) may have a
 # patches.py of their own builds too; they are loaded after the repository's, under the same rule (a build ID claimed twice stops the rewrite)
 PATCH_FILES += [p for d in os.environ.get('DM_GAMES_DIR', '').split(os.pathsep) if d for p in sorted(glob.glob(os.path.join(glob.escape(d), '*', 'patches.py')))]
@@ -108,11 +110,11 @@ def load_patches():
         spec = importlib.util.spec_from_file_location(f'patches_{n}', path); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
         for kind, table in tables.items():
             if kind == 'SDK_MATCH_CUTS': continue
-            if kind == 'MATCH_CUTS' and os.path.basename(path) == 'sdk_patches.py':   # SDK-wide
-                tables['SDK_MATCH_CUTS'] = getattr(m, kind, {})
+            if kind == 'MATCH_CUTS' and os.path.basename(path) in SHARED:   # SDK-wide and engine-wide
+                for mod, rules in getattr(m, kind, {}).items(): tables['SDK_MATCH_CUTS'].setdefault(mod, []).extend(rules)
                 continue
             if kind in ('MATCH_CUTS', 'MATCH_FRAME_STEP'):
-                if os.path.basename(path) == 'sdk_patches.py': continue
+                if os.path.basename(path) in SHARED: continue
                 profile = os.path.basename(os.path.dirname(path))
                 roots = [os.path.join(os.path.dirname(os.path.abspath(__file__)), '../games')] + [d for d in os.environ.get('DM_GAMES_DIR', '').split(os.pathsep) if d]
                 profile_dir = next((os.path.join(root, profile) for root in roots if os.path.isdir(os.path.join(root, profile))), None)
@@ -203,6 +205,15 @@ for _c in UE_CALLS or ():
     struct.pack_into('<I', IMG, _c, NOP)
 if UE_CALLS: print(f'{NAME}: {ue_why}')
 elif ue_why.startswith('[RED] '): print(f'[RED] {NAME}: {ue_why[6:]}: Unreal\'s own allocator runs')
+
+# ---- Unity's ALLOC_BUCKET BucketAllocator (main: dm/tools/unity_bucket.py finds its construction by the allocator's name, without a build ID) ----
+# Unity 2019 reserves (255 + 1) x 4 MB for it at once; its block limit is cut to what 256 MB holds (a platform limit: an iPhone's alias region is 4.375 GB)
+import unity_bucket
+UB_CUT, ub_why = unity_bucket.find(bytes(IMG), TEXT_END, RO_OFF, DATA_OFF) if NAME == 'main' else (None, '')
+if UB_CUT:
+    cuts.append(UB_CUT); IMG[UB_CUT[0]:UB_CUT[0] + 4] = bytes.fromhex(UB_CUT[2])
+    print(f'{NAME}: {ub_why}')
+elif ub_why.startswith('[RED] '): print(f'[RED] {NAME}: {ub_why[6:]}: its whole reservation stays')
 
 # ---- Snowdrop's three-pool page allocator (main: dm/tools/snowdrop_pools.py finds its constructor by its structure, without a build ID) ----
 # Its 12 GB of address ranges become the sizes the profile decides on (snowdrop_pools, measured against the game's regions)
@@ -1891,7 +1902,7 @@ else:
     open(P('patched.bin'), 'wb').write(IMG + bytearray(PATCH_OFF - len(IMG)) + patch)
 import hashlib
 with open(os.path.join(outdir, 'build_src.sha256'), 'w') as f:   # the same for every module: the rewriter and every patch file, by path from dm/tools
-    for src_ in (os.path.abspath(__file__), nso.__file__, nso_code.__file__, nso_asm.__file__, ue_cvar.__file__, ue_malloc.__file__, fps_target.__file__, ue_fixed_rate.__file__, unity_fps.__file__, ue_region.__file__, ue_ring.__file__, snowdrop_pools.__file__, os.path.join(os.path.dirname(ue_malloc.__file__), 'loader_census.py'), *PATCH_FILES): f.write(hashlib.sha256(open(src_, 'rb').read()).hexdigest() + f'  {os.path.relpath(os.path.abspath(src_), os.path.dirname(os.path.abspath(__file__)))}\n')
+    for src_ in (os.path.abspath(__file__), nso.__file__, nso_code.__file__, nso_asm.__file__, ue_cvar.__file__, ue_malloc.__file__, fps_target.__file__, ue_fixed_rate.__file__, unity_fps.__file__, unity_bucket.__file__, ue_region.__file__, ue_ring.__file__, snowdrop_pools.__file__, os.path.join(os.path.dirname(ue_malloc.__file__), 'loader_census.py'), *PATCH_FILES): f.write(hashlib.sha256(open(src_, 'rb').read()).hexdigest() + f'  {os.path.relpath(os.path.abspath(src_), os.path.dirname(os.path.abspath(__file__)))}\n')
 with open(P('fixups.tsv'), 'w') as f:
     f.write(f'# PATCH_OFF\t{PATCH_OFF:#x}\n# KEY_PAGE_OFF\t{KEY_PAGE_OFF:#x}\n# KEY_PAGE_SIZE\t0x4000\n# TEXT_END\t{TEXT_END:#x}\n# RO_OFF\t{RO_OFF:#x}\n# DATA_OFF\t{DATA_OFF:#x}\n')
     if FAR: f.write(f'# IMAGE_SIZE\t{IMAGE_SIZE:#x}\n# FILE_IMAGE_LEN\t{FILE_IMAGE_LEN:#x}\n')   # patch area before the base (negative PATCH_OFF): whole image size, length of the image part of the file

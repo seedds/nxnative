@@ -39,13 +39,11 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | `build` → `game` | task ring push and pop barriers | race | gap | judgement | 1 | [Batman: Arkham Knight](../../dm/games/0100ACD0163D0000/README.md) | a data race in the game's own task ring |
 | `build` → `game` | UE3's GMalloc setup skipped, the host allocator in (hle_uemalloc.c) | address space | gap | judgement | 1 | [Batman: Arkham Knight](../../dm/games/0100ACD0163D0000/README.md) | UE3 inlines the allocator's constructor into the GMalloc setup and has its own vtable layout (25 slots, 32-bit sizes), so the Unreal 4/5 discovery does not apply |
 | `build` → `game` | unused 272-byte slot pool: 4,194,304 → 65,536 slots | address space | gap | judgement | 1 | [Mario + Rabbids® Sparks of Hope](../../dm/games/0100317013770000/README.md) | Sparks of Hope's own init (Kingdom Battle has none) |
-| `build` → `game` | Unity BucketAllocator ALLOC_BUCKET: 255 blocks of 4 MB → 63 | address space | blocked: no extracted main of either Subnautica on the game drive to fingerprint | checked: the bucket allocator of five Unity 2021 and later mains (not Subnautica's), 2026-10-29 | 2 | [Subnautica](../../dm/games/0100429011144000/README.md); [Subnautica: Below Zero](../../dm/games/010014C011146000/README.md) | Unity 2019's constructor call takes the block count as a constant; Unity 2021 and later read the bucket sizes from boot.config with a default of one block (Cult of the Lamb, Monster Train 2, Blasphemous 2, BALL x PIT, Donkey Kong Country Returns HD; checked 2026-10-29) and need no cut, so no Unity rule. A function-matched rule could carry it over the game's updates |
 | `build` → `sdk` | VammManager node area and alignment, SDK 4.4.0 (9de92bad) | address space | blocked: one game ships it | judgement | 1 | [sdk_patches.py](../../dm/tools/sdk_patches.py) | an older implementation no rule covers (its large regions aligned to 32 MB, not the rules' 2 MB); a rule once a second game ships it |
 | `build` → `engine` | Criterion's 60 fps mode, frame ticks and game step at fixed addresses | frame rate | blocked: one game on that engine here | judgement | 1 | [Need For Speed™ Hot Pursuit Remastered](../../dm/games/010029B0118E8000/README.md) | the studio's engine, which its other games ship |
 | `build` → `engine` | Frostbite's frame regulator at a fixed pointer | frame rate | blocked: one Frostbite game here | judgement | 1 | [EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md) | engine code other Frostbite games ship (the simulation's own rate is already set by name) |
 | `build` → `engine` | Next Level Games' frame limiter target at a fixed address | frame rate | blocked: one game on that engine here | judgement | 1 | [Luigi's Mansion 3](../../dm/games/0100DCA0064A6000/README.md) | the studio's engine, which its other games ship |
 | `build` → `engine` | RE Engine's frame limit at a fixed pointer | frame rate | blocked: one RE Engine game here | judgement | 1 | [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md) | engine code other RE Engine games ship |
-| `build` → `engine` | ThreadedStreamBuffer load-acquires | race | blocked: no game files of those games on the drive to compare | judgement | 1 | [FINAL FANTASY CRYSTAL CHRONICLES Remastered Edition](../../dm/games/0100CE4010AAC000/README.md) | the race is in Unity 2018.4's ThreadedStreamBuffer, engine code other Unity games of that era ship (Cuphead, AI: THE SOMNIUM FILES, Raging Loop): a function-matched rule per Unity version |
 | `build` → `game` | 60 fps frame step (112 sites) | frame rate | blocked: a function-matched frame step (MATCH_FRAME_STEP) covers one function; these stubs span several | judgement | 1 | [ASTRAL CHAIN](../../dm/games/01007300020FA000/README.md) | the game's own clock and timers (a community 60 fps mod on the host's frame step) |
 | `build` → `game` | 60 fps frame step and render scale | frame rate | blocked: a function-matched frame step (MATCH_FRAME_STEP) covers one function; these stubs span several | judgement | 1 | [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md) | the game's own timing object |
 | `build` → `game` | 60 fps frame step and render scale (ksys::VFR) | frame rate | blocked: a function-matched frame step (MATCH_FRAME_STEP) covers one function; these stubs span several | judgement | 1 | [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) | the game's own frame code; the frame-step state page is general |
@@ -62,7 +60,6 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [Batman: Arkham Knight](#batman-arkham-knight) | 8 | 0 | 0 | 0 | 1 | `build` → `game` ×2 |
 | [DARK SOULS: REMASTERED](#dark-souls-remastered) | 2 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [EA SPORTS FC 27](#ea-sports-fc-27) | 0 | 0 | 0 | 0 | 1 | `build` → `engine` |
-| [FINAL FANTASY CRYSTAL CHRONICLES Remastered Edition](#final-fantasy-crystal-chronicles-remastered-edition) | 8 | 0 | 0 | 0 | 0 | `build` → `engine` |
 | [FINAL FANTASY TACTICS - The Ivalice Chronicles](#final-fantasy-tactics---the-ivalice-chronicles) | 2 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Fire Emblem: Three Houses](#fire-emblem-three-houses) | 7 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Hyrule Warriors: Age of Calamity](#hyrule-warriors-age-of-calamity) | 0 | 0 | 5 | 0 | 0 | `build` → `game` |
@@ -75,8 +72,6 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [NieR:Automata The End of YoRHa Edition (0100B8E016F76000)](#nierautomata-the-end-of-yorha-edition-0100b8e016f76000) | 8 | 0 | 0 | 0 | 1 | `build` → `game` ×2 |
 | [Paper Mario: The Thousand-Year Door](#paper-mario-the-thousand-year-door) | 1 | 0 | 1 | 0 | 0 | `build` → `game` |
 | [Pokémon Legends: Arceus](#pokémon-legends-arceus) | 0 | 0 | 0 | 1 | 0 | `game` |
-| [Subnautica](#subnautica) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
-| [Subnautica: Below Zero](#subnautica-below-zero) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Super Mario 3D All-Stars: Super Mario Sunshine](#super-mario-3d-all-stars-super-mario-sunshine) | 2 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Super Smash Bros. Ultimate](#super-smash-bros-ultimate) | 11 | 0 | 0 | 1 | 0 | `game` |
 | [Taiko Risshiden V DX](#taiko-risshiden-v-dx) | 1 | 0 | 0 | 2 | 0 | `game` |
@@ -277,22 +272,6 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 - **1.8d.310c `main`** `a48c0de3…`
   - host [hle_fpslock.c:53](../../dm/host/hle_fpslock.c#L53): engine frame limit set to fps_target: FIFA frame regulator
 
-### FINAL FANTASY CRYSTAL CHRONICLES Remastered Edition
-
-[FINAL FANTASY CRYSTAL CHRONICLES Remastered Edition](../../dm/games/0100CE4010AAC000/README.md), `0100CE4010AAC000`, [patches.py](../../dm/games/0100CE4010AAC000/patches.py).
-
-- **`build` → `engine`**, race, blocked: no game files of those games on the drive to compare, judgement: ThreadedStreamBuffer load-acquires. The race is in Unity 2018.4's ThreadedStreamBuffer, engine code other Unity games of that era ship (Cuphead, AI: THE SOMNIUM FILES, Raging Loop): a function-matched rule per Unity version
-
-- **1.0.3 `main`** `e1d8b399…` ([patches.py:14](../../dm/games/0100CE4010AAC000/patches.py#L14))
-  - cut `+0x1e67a50`: stream reader going to sleep: ldr w8,[x8] → ldar (write position after the store-release of "reader sleeping")
-  - cut `+0x1e683a8`: stream writer: ldr w8,[x8] → ldar ("reader sleeping" after the store-release of the write position)
-  - cut `+0x1e68498`: stream writer: ldr w8,[x8] → ldar ("reader sleeping" after the store-release of the write position)
-  - cut `+0x1e6851c`: stream writer: ldr w8,[x8] → ldar ("reader sleeping" after the store-release of the write position)
-  - cut `+0x1e687c8`: stream writer going to sleep: ldr w9,[x9] → ldar (read position after the store-release of "writer sleeping")
-  - cut `+0x1e6805c`: stream reader: ldr w8,[x8] → ldar ("writer sleeping" after the store-release of the read position)
-  - cut `+0x1e68154`: stream reader: ldr w8,[x8] → ldar ("writer sleeping" after the store-release of the read position)
-  - cut `+0x1e681d8`: stream reader: ldr w8,[x8] → ldar ("writer sleeping" after the store-release of the read position)
-
 ### FINAL FANTASY TACTICS - The Ivalice Chronicles
 
 [FINAL FANTASY TACTICS - The Ivalice Chronicles](../../dm/games/010038B015560000/README.md), `010038B015560000`, [patches.py](../../dm/games/010038B015560000/patches.py).
@@ -436,24 +415,6 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 - **`game`**, runtime, at goal, checked: function-matched on 1.1.1, the only build on hand: exactly one match, a boot to the field setup, and the patched function run on the module's own bytes in a small interpreter for both null paths. Issue #712's reporters ran the earlier cuts for about 7 hours with no crash; the path itself has not been reached with these cuts: capture demo: the empty result when the weak reference at +0x88 is unset or dead. The game's own function dereferences its own weak reference; no host service is on the path, so no host or engine rule can hold it. Whether another Game Freak game shares the function is unchecked
 
 - **function-matched** (`main` of builds without CUTS): capture demo: the empty result when the weak reference at +0x88 is unset or dead: 1 function, 5 cuts
-
-### Subnautica
-
-[Subnautica](../../dm/games/0100429011144000/README.md), `0100429011144000`, [patches.py](../../dm/games/0100429011144000/patches.py).
-
-- **`build` → `game`**, address space, blocked: no extracted main of either Subnautica on the game drive to fingerprint, checked: the bucket allocator of five Unity 2021 and later mains (not Subnautica's), 2026-10-29: Unity BucketAllocator ALLOC_BUCKET: 255 blocks of 4 MB → 63. Unity 2019's constructor call takes the block count as a constant; Unity 2021 and later read the bucket sizes from boot.config with a default of one block (Cult of the Lamb, Monster Train 2, Blasphemous 2, BALL x PIT, Donkey Kong Country Returns HD; checked 2026-10-29) and need no cut, so no Unity rule. A function-matched rule could carry it over the game's updates
-
-- **1.23.83358 `main`** `b3db5a1e…` ([patches.py:13](../../dm/games/0100429011144000/patches.py#L13))
-  - cut `+0x60ea64`: BucketAllocator ALLOC_BUCKET: at most 255 blocks of 4 MB (a 1 GB address region) → 63 (256 MB)
-
-### Subnautica: Below Zero
-
-[Subnautica: Below Zero](../../dm/games/010014C011146000/README.md), `010014C011146000`, [patches.py](../../dm/games/010014C011146000/patches.py).
-
-- **`build` → `game`**, address space, blocked: no extracted main of either Subnautica on the game drive to fingerprint, checked: the bucket allocator of five Unity 2021 and later mains (not Subnautica's), 2026-10-29: Unity BucketAllocator ALLOC_BUCKET: 255 blocks of 4 MB → 63. Unity 2019's constructor call takes the block count as a constant; Unity 2021 and later read the bucket sizes from boot.config with a default of one block (Cult of the Lamb, Monster Train 2, Blasphemous 2, BALL x PIT, Donkey Kong Country Returns HD; checked 2026-10-29) and need no cut, so no Unity rule. A function-matched rule could carry it over the game's updates
-
-- **1.23.55063 `main`** `5b050c55…` ([patches.py:14](../../dm/games/010014C011146000/patches.py#L14))
-  - cut `+0x6517f4`: BucketAllocator ALLOC_BUCKET: at most 255 blocks of 4 MB (a 1 GB address region) → 63 (256 MB)
 
 ### Super Mario 3D All-Stars: Super Mario Sunshine
 

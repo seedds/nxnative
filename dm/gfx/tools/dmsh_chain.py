@@ -32,7 +32,10 @@ XLATE_DIR = os.path.dirname(os.environ.get('XLATE', os.path.join(HERE, 'dmsh_xla
 SPIRV_CROSS = os.environ.get('SPIRV_CROSS', os.path.join(HERE, 'spirv_cross_bin/spirv-cross'))
 
 def options():
-    return 'debug=%s reduced=%s' % (os.environ.get('XLATE_DEBUG', '1') != '0', os.environ.get('XLATE_REDUCED', '1') == '1')
+    return 'debug=%s reduced=%s raw_load_quads=%s' % (os.environ.get('XLATE_DEBUG', '1') != '0', os.environ.get('XLATE_REDUCED', '1') == '1', raw_load_quads())
+
+def raw_load_quads():
+    return os.environ.get('DMSH_RAW_LOAD_QUADS') == '1'
 
 def version():
     h = hashlib.sha256()

@@ -572,3 +572,10 @@ t_tg_spill: t_tg_spill.m $(MTL_T_DEP)
 check_t_tg_spill: t_tg_spill
 	MTL_DEBUG_LAYER=1 DM_NVN_DISPATCH_OWN=0 ./$<
 	MTL_DEBUG_LAYER=1 DM_NVN_DISPATCH_OWN=1 ./$<
+
+# Scalar and grouped raw reads against a CPU oracle, including range crossings.
+t_raw_quad: t_raw_quad.m
+	clang $(CFLAGS) -fobjc-arc -o $@ $< -framework Foundation -framework Metal
+.PHONY: check_t_raw_quad
+check_t_raw_quad: t_raw_quad
+	@set -e; work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; python3 test_dmsh_raw_quads_dynamic.py --fixture "$$work"; MTL_DEBUG_LAYER=1 ./t_raw_quad "$$work/scalar.metallib" "$$work/quads.metallib"

@@ -1,0 +1,18 @@
+# kind: evidence  エスプレイドΨ shaders (BNSH / BAHS in RomFS + main) → control section + code area keys (dm/gfx/tools/shader_split.py)
+# column 5 records where each key first appears; no PC shader pairing supplied
+package	index	stage	dm_ctl_sha16	source
+ps_main.bin	0	pixel	c481240d8ece8e46	main#BNSH@0x8ae128#var0
+ps_main.bin	1	pixel	9385b00668f3e880	main#BNSH@0x8ae128#var1
+ps_main.bin	2	pixel	a9f21270d11fa113	main#BNSH@0x8ae128#var2
+ps_main.bin	3	pixel	0e77f65ab37a3158	main#BNSH@0x8ae128#var3
+ps_main.bin	4	pixel	b27a304a75429414	main#BNSH@0x8ae128#var4
+ps_main.bin	5	pixel	430fb54d76402cac	main#BNSH@0x8b5490#var0
+ps_main.bin	6	pixel	e4c9c17c78668303	main#BNSH@0x8b5490#var1
+ps_main.bin	7	pixel	10202618fe78ddba	main#BNSH@0x8b5490#var2
+ps_main.bin	8	pixel	b39ac134dfa9cf3e	main#BNSH@0x8b5490#var3
+vs_main.bin	0	vertex	63dbd5169fdd9eba	main#BNSH@0x8b5490#var4
+ps_main.bin	9	pixel	86f39a7f410b6830	main#BNSH@0x8b5490#var4
+vs_main.bin	1	vertex	5dc5fe5e986a6bb4	main#BNSH@0x8bc808#var0
+ps_main.bin	10	pixel	a646dc003c516648	main#BNSH@0x8bc808#var0
+vs_main.bin	2	vertex	08ba103ca653dfeb	main#BNSH@0x8bf9a0#var0
+ps_main.bin	11	pixel	b84799f64cc13172	main#BNSH@0x8bf9a0#var0

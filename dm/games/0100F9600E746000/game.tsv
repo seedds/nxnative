@@ -1,0 +1,41 @@
+# Game profile of ESP Ra.De. Ψ (エスプレイドΨ, Switch, Japan only; update 1.4.1 = v327680 over the base game). Plays on the Mac (boot, attract, game mode menu, play into stage 2) with sound at 60 fps
+# Format: see dm/games/README.md
+# M2's engine (m2engage), SDK 7.4.0: it emulates Cave's 1998 arcade board in the NROs it loads from the RomFS's nro/ folder through nn::ro. Started from the provisional profile of build_ipa_from_nsp.py: the keys are its guesses, unchanged
+
+# ---- Identity ----
+title_id	0100F9600E746000
+program_id	0100F9600E746000
+
+# ---- App ----
+# Game name: only a label for profile listings and the Mac window title; the iOS app name is the game name in the base NSP, and the bundle ID comes from the base game title ID
+name	ESP Ra.De. Ψ
+ipa	ESPRaDePsi.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v327680	1.4.1	main=4485f4ff5482b4f6e4c83fa16e868c8e	subsdk0=baee264d3658fc6b6b581e5cbb662e3a	sdk=e30d2170165e907aba457c79fd83383d
+package	v327680
+shader_versions	v327680
+
+# ---- Files ----
+# load order as on Horizon: main, subsdk*, sdk (subsdk0 = NintendoSDK_movie); the five NROs are found in the RomFS and loaded when the game asks
+modules	main subsdk0 sdk
+romfs_marker	102/movie/title_tutorial.mp4
+zip_store	.mp4:.nro:.psb:.metallib
+
+# ---- Memory ----
+# main sets a heap of at most the pool − 64 MB: a 3328 MB heap region (it sets 3.14 GB)
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 0 MB of system resource: IsVirtualAddressMemoryEnabled is false, as on Horizon
+sys_resource	0x0
+
+# ---- Shader split ----
+shader_groups	/102/=102 /system/=system /nro/=nro /.nrr/=nrr
+shader_note	ESP Ra.De. Ψ shaders
+
+# ---- After the rewrite ----
+# used memory for the current rewritten modules, at least the default 64 MB
+mem_used	0x4600000

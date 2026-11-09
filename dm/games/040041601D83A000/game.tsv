@@ -1,0 +1,45 @@
+# Drag x Drive (Switch 2, update v196608). Plays on the Mac with a pair of Joy-Con 2s over Bluetooth LE (the launcher's Switch 2 controllers setting).
+# Nintendo EPD's engine (sead / agl / gsys, Phive, Havok), SDK 20.5.6, NVN2; modules main + sdk. Packed from its NUP by scripts/build_ipa_from_nsp.py.
+# The values below are the survey's (dm/games/profile_guess.py), unchanged after play, except the NVN keys at the end.
+
+# ---- Identity ----
+title_id	040041601D83A000
+program_id	040041601D83A000
+
+# ---- App ----
+name	Drag x Drive
+ipa	DragxDrive.ipa
+app_category	public.app-category.sports-games
+
+# ---- Versions ----
+build	v196608	?	main=1524535e08b4881d3a93402d3eb23d2c	sdk=f70a530f2fda8f64a9b4d12086b28e00
+package	v196608
+shader_versions	v196608
+
+# ---- Files ----
+# every module main imports from
+modules	main sdk
+romfs_marker	Sound/Resource/All_Static.bars.zs
+zip_store	.webm:.zs:.metallib
+
+# ---- Memory ----
+# main sets a heap of at most the pool − 64 MB: a 9216 MB heap region
+mem_reserve	0x270000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+# the sdk is built for the Switch 2 (spec: Ounce): its 9 GB pool
+app_pool	0x240000000
+# the NPDM declares 0 MB of system resource: IsVirtualAddressMemoryEnabled is false, as on Horizon (Big Brain Academy: Brain vs. Brain sets a heap only then)
+sys_resource	0x0
+
+# ---- Shader split ----
+shader_groups	/Net/=net /Model/=model /Tex/=tex /GameParameter/=gameparameter /Pack/=pack /Phive/=phive /Effect/=effect /Game/=game /Banc/=banc /Mals/=mals /Scene/=scene /Sound/=sound /RSDB/=rsdb /System/=system /UI/=ui /Font/=font /CameraAnimation/=cameraanimation /Lib/=lib /Sequence/=sequence /AI/=ai /Component/=component /GameData/=gamedata /Logic/=logic /Bake/=bake
+shader_note	Drag x Drive shaders
+
+# ---- NVN ----
+# Four-byte command tickets for a lone direct indexed draw (PR #1609, issue #1580): the host records such a draw in 48 bytes where the console needs 4, and a game that sizes
+# its model scratch from nvnCommandBufferGetCommandMemoryUsed can outgrow a fixed resource budget. Without them this game initializes a buffer in no memory pool 5 s after boot
+# ([RED] BufferInitialize: pool has no storage) and crashes in nvnMemoryPoolGetFlags; the same host with the tickets turned off (#1609's switch) crashes there, with them on it played. Ignored without PR #1609
+nvn_draw_ctl	on
+# Conditional rendering evaluated at replay, as in every session played; not measured without it
+render_cond	on

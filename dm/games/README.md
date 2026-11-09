@@ -83,6 +83,7 @@ One row per profile; the notes are each profile's `README.md`.
 | [Star Fox](0400E88025B1A000/README.md) | `0400E88025B1A000` | v131072 (Switch 2) | 21.4.4 (Ounce) | Its own engine (`vrender`, `vfs`), Wwise | NVN2 |
 | [Donkey Kong Country Returns HD](01009D901BC56000/README.md) | `01009D901BC56000` | 1.1.0 | 18.3.5 | Unity 6000.0.28f1 IL2CPP | NVN |
 | [Donkey Kong Country: Tropical Freeze](0100C1F0051B6000/README.md) | `0100C1F0051B6000` | 1.0.2 | 4.4.0 | Retro Studios' engine | NVN |
+| [Drag x Drive](040041601D83A000/README.md) | `040041601D83A000` | v196608 (Switch 2) | 20.5.6 (Ounce) | Nintendo EPD (sead / agl / gsys) | NVN2 |
 | [DRAGON BALL: Sparking! ZERO](010035F022078000/README.md) | `010035F022078000` | 2.0.76 | 14.3.0 | Unreal Engine 5.1.1, CRIWARE | NVN |
 | [DRAGON QUEST BUILDERS 2](010042000A986000/README.md) | `010042000A986000` | 1.7.3d | 5.4.0 | Koei Tecmo's KTGL | NVN |
 | [DRAGON QUEST I & II HD-2D Remake](0100D7C01F254000/README.md) | `0100D7C01F254000` | 1.0.2 | 18.3.2 | Unreal Engine 4.27.2 | NVN |

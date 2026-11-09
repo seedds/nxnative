@@ -208,7 +208,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             Operand lblRetry = Label();
             context.MarkLabel(lblRetry);
 
-            Operand expected = context.Load(storageKind, e0, e1);
+            Operand expected = context.Load(storageKind, e0, e1);   // a plain reload each try: the main program's locals are single-assignment for the Optimizer (r9 review)
             Operand sum = context.FPAdd(expected, value);
             Operand found = context.AtomicCompareAndSwap(storageKind, e0, e1, expected, sum);
 

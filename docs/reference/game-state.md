@@ -34,6 +34,14 @@ The games' own state: saves, scripted state, and behaviour that looks like a hos
 
 ## Scripted state
 
+### A scripted run on a physical iPhone (`DM_CTL` pushed with `devicectl`)
+
+- **Symptom:** a measurement on an iPhone needs someone to hold the phone and press the same buttons each run. No tool on a Mac puts touches into a physical iPhone (Xcode's device interaction lists simulators only), and a `DM_KEYS` list timed in seconds drifts with the prepare step and the heat.
+- **Cause:** nothing in the host: `DM_CTL` was written up for the Mac only. Its reader opens the file again at every poll and reads on from its last offset (`ctl_main` in `hle_hid.c`), and the iOS app's working directory is its `Documents` folder, so a longer copy pushed over the file counts as appended lines.
+- **Fix:** start the game with `DM_CTL=ctl.txt` in the launch environment (`xcrun devicectl device process launch --device <udid> --environment-variables '{"DM_CTL":"ctl.txt"}' <bundle ID>`), and for each step push a longer copy over the old one: `xcrun devicectl device copy to --device <udid> --domain-type appDataContainer --domain-identifier <bundle ID> --source ctl.txt --destination Documents/ctl.txt`. Push an empty file before the launch, or the last run's lines play again. The eyes are `xcrun devicectl device capture screenshot --device <udid> --destination shot.png` (the whole screen, the frame counter included) and `Documents/log.txt`, which is line buffered: copy it out and wait for the line a step should cause. `DM_SAVE=<folder>` in the launch environment (relative to `Documents`) gives the run a save folder of its own, so the player's save is never opened; an empty one is a new game. `xcrun devicectl device info processes` finds the process to end (`xcrun devicectl device process terminate --pid`).
+- **Limit:** system UI is out of reach (Control Center, alerts, the Home screen), and the phone has to be unlocked for the launch. The log's lines carry no time: bracket an event by the nearest `[longframe] frame N (T s)` lines, or by the Mac's clock at the poll that first saw it.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) on an iPhone Duo (2026-11-09, iOS 27.3 beta): the title movie's `first picture` line, two `A~0.2` lines for a new game, a screenshot every 15 s to the opening movie's `end of stream`, the same route a dozen times (2026-11-09 and 11-10) with different switches.
+
 ### The software keyboard in scripted runs (`DM_KBD`)
 
 - **Symptom:** in a scripted run, a screen goes back by itself right after a confirm; the log shows `swkbd: … → no window, treated as cancel`.

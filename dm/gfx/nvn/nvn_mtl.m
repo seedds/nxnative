@@ -2269,10 +2269,12 @@ static void post_complete(uint64_t fence, uint64_t c0, uint64_t c1) {
 static _Atomic int g_seg_inflight;   // main command buffers committed and not reported back yet (sub_cut)
 static void rt_preserve_bound(void);
 static void queue_program_preserve(void);
+static void gsb_flush(void); static int g_ngsb;
 uint64_t mtl_sub_commit(void) {
     lc_land();   // clears still waiting (the command list ends with them)
     defer_fallback();   // Deferred merged pass: at the end of the submission there are still P draws not replayed (the normal path never gets here)
     rp_flush(); ubd_land();
+    if (g_ngsb) gsb_flush();
     g_ts_pend = -1;   // nothing after it: the last segment's end is the command buffer's own (rep_ticks)
     if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
     up_flush();
@@ -4953,15 +4955,92 @@ static int g_nbcrt; static void bcrt_flush(void);   // shadows of block-compress
 // its terrain tiles (260x260 RG8, 9 levels, in a CPU-cached pool) after a flush over their storage made them CPU-written. Its resource defragmentation (main+0x5bc988) later moves each
 // tile with memcpy and re-creates the texture at the new address, which uploaded the zeros the storage held: a tile's grass got no length and its ground no light (dark, bare meadows a
 // few seconds after loading)
-static struct { tex_t t; void *tex; unsigned level, slice, n; int att; } g_rtm[8]; static int g_nrtm;   // n: the layers the pass draws from slice on; att: the colour slot
+static struct { tex_t t; void *tex; unsigned level, slice, n; int att, own; } g_rtm[8]; static int g_nrtm;   // n: the layers the pass draws from slice on; att: the colour slot; own: a GPU texture's (gsb_mark)
 static int tex_storage_dst(const tex_t *t);
-static void mirror_readback(const tex_t *t, id<MTLTexture> d, unsigned level, unsigned layer0, const NVNcopyRegion *r, const char *from, int absorb);
+static void mirror_readback(const tex_t *t, id<MTLTexture> d, unsigned level, unsigned layer0, const NVNcopyRegion *r, const char *from, int how);
+// A GPU texture in storage the CPU can read: the hardware's render pass, clear or copy writes that storage, and the game may read it there. Ocarina of Time's terrain defragmentation
+// moves the normal maps the GPU drew (260x260 RG8, 9 levels, a CPU_CACHED | GPU_CACHED pool, never flushed, so GPU textures here) with memcpy and re-creates them at the new address,
+// where the host found the zeros the storage had kept: crossing stripes on the ground. So what the GPU wrote into such a texture is read back into its storage (mirror_readback, own):
+// each level's written region at the end of the submission that writes it, unless that level was written within the GSB_QUIET frames before as well (a target drawn every frame or
+// every other one, also through a new texture object over the same storage each time: it waits), and then once that many frames have passed without a write. By storage range, on
+// the submit thread; a write into the range through another texture ends the wait for the old one's levels, whose content the storage no longer is
+// (open: the storage of a level written in close succession lacks the last writes until GSB_QUIET frames pass without one; DM_NVN_GPU_STORAGE=0 turns the readbacks off)
+enum { GSB_QUIET = 2 };
+static int mtl_fmt_depth(MTLPixelFormat f); static size_t mtl_pf_block_bytes(MTLPixelFormat pf);
+typedef struct { uintptr_t lo, hi; tex_t t; void *tex; uint64_t frame, at[16]; uint32_t levels, hot; uint16_t s0[16], s1[16]; int32_t x0[16], y0[16], x1[16], y1[16]; } gsb_ent;   // levels: written and not read back, with
+static gsb_ent *g_gsb; static int g_cgsb; static uint64_t g_gsb_reads;                                                // their slices and region; at: frame + 1 of a level's last write; hot: levels that wait
+static _Atomic uint64_t g_gsb_landed, g_gsb_kept;
+static int tex_storage_gpu(const tex_t *t, id<MTLTexture> mt) {
+    static int on = -1; if (on < 0) { const char *e = getenv("DM_NVN_GPU_STORAGE"); on = !e || atoi(e) != 0; }
+    if (!on || !mt || !tex_unc(t) || !tex_storage_ok(t, 1) || t->d.levels > 16 || tex_cpu_written(t->serial)) return 0;
+    int bw, bh, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh);   // as mirror_readback asks: a format the host widens (RGB8) or a depth view cannot be read back as the storage's bytes
+    return bpb && mt.sampleCount == 1 && !mtl_fmt_depth(mt.pixelFormat) && mt.pixelFormat != MTLPixelFormatStencil8 && mtl_pf_block_bytes(mt.pixelFormat) == (size_t)bpb;
+}
+// r: the region written, NULL for the whole level
+static void gsb_mark(const tex_t *t, id<MTLTexture> mt, unsigned level, unsigned slice, unsigned n, const NVNcopyRegion *r) {
+    if (!n || !tex_storage_gpu(t, mt) || level >= t->d.levels) return;
+    uintptr_t lo = (uintptr_t)t->mem, hi = lo + t->L.size; uint64_t f = atomic_load(&g_cur_frame);
+    int32_t lw = (int32_t)MAX(t->d.width >> level, 1u), lh = (int32_t)MAX(t->d.height >> level, 1u), x0 = 0, y0 = 0, x1 = lw, y1 = lh;
+    if (r) { x0 = MAX(r->xoffset, 0); y0 = MAX(r->yoffset, 0); x1 = MIN(r->xoffset + r->width, lw); y1 = MIN(r->yoffset + r->height, lh); }
+    if (x1 <= x0 || y1 <= y0) return;
+    gsb_ent *e = NULL;
+    for (int i = 0; i < g_ngsb;) {
+        gsb_ent *o = &g_gsb[i];
+        if (o->lo >= hi || o->hi <= lo || (o->lo == lo && o->hi == hi)) { i++; continue; }
+        CFRelease(o->tex); *o = g_gsb[--g_ngsb];
+    }
+    for (int i = 0; i < g_ngsb && !e; i++) if (g_gsb[i].lo == lo && g_gsb[i].hi == hi) e = &g_gsb[i];
+    if (!e) {
+        if (g_ngsb == g_cgsb) { g_cgsb = g_cgsb ? 2 * g_cgsb : 64; g_gsb = realloc_or_die(g_gsb, (size_t)g_cgsb * sizeof *g_gsb, "the GPU-written storage readbacks"); }
+        e = &g_gsb[g_ngsb++]; *e = (gsb_ent){.lo = lo, .hi = hi, .tex = (void *)CFBridgingRetain(mt)};
+    } else {
+        if (e->t.serial != t->serial || memcmp(&e->t.d, &t->d, sizeof t->d)) e->levels = 0;   // another texture over the storage: the old one's waiting levels are not its content, but how often the storage is written still holds
+        if (e->tex != (__bridge void *)mt) { CFRelease(e->tex); e->tex = (void *)CFBridgingRetain(mt); }
+    }
+    e->t = *t; e->frame = f;
+    uint32_t bit = 1u << level; unsigned last = slice + n - 1;
+    if (e->at[level] != f + 1) { if (e->at[level] && e->at[level] + GSB_QUIET >= f + 1) e->hot |= bit; else e->hot &= ~bit; }
+    e->at[level] = f + 1;
+    if (!(e->levels & bit)) { e->levels |= bit; e->s0[level] = (uint16_t)slice; e->s1[level] = (uint16_t)last; e->x0[level] = x0; e->y0[level] = y0; e->x1[level] = x1; e->y1[level] = y1; }
+    else {
+        if (slice < e->s0[level]) e->s0[level] = (uint16_t)slice;
+        if (last > e->s1[level]) e->s1[level] = (uint16_t)last;
+        e->x0[level] = MIN(e->x0[level], x0); e->y0[level] = MIN(e->y0[level], y0); e->x1[level] = MAX(e->x1[level], x1); e->y1[level] = MAX(e->y1[level], y1);
+    }
+}
+// At the end of a submission (mtl_sub_commit), before its copy encoder closes. The texture read is the one the serial resolves to now (a later upgrade replaced the one marked), or,
+// when the object is gone, the one marked while the sharing table still holds it (its storage outlives the object; a texture no table holds may have left the residency set, and
+// is not read). One the CPU has taken back since (packaged) is not read: its storage is its content
+static void gsb_flush(void) {
+    uint64_t f = atomic_load(&g_cur_frame);
+    for (int i = 0; i < g_ngsb;) {
+        gsb_ent *e = &g_gsb[i]; id<MTLTexture> mt = nil; int looked = 0;
+        for (unsigned lv = 0; lv < 16; lv++) {
+            uint32_t bit = 1u << lv;
+            if (!(e->levels & bit) || ((e->hot & bit) && e->at[lv] - 1 + GSB_QUIET >= f)) continue;
+            e->levels &= ~bit;
+            if (!looked) {
+                looked = 1;
+                __unsafe_unretained id o = tex_get(e->t.serial);
+                if ([o isKindOfClass:[NvPkg class]] || tex_cpu_written(e->t.serial)) mt = nil;
+                else if (o && [o conformsToProtocol:@protocol(MTLTexture)]) mt = o;
+                else if (!o) { pthread_mutex_lock(&g_smu); if (alias_has((__bridge id)e->tex)) mt = (__bridge id<MTLTexture>)e->tex; pthread_mutex_unlock(&g_smu); }
+            }
+            if (!mt || lv >= mt.mipmapLevelCount || e->s1[lv] >= mt.arrayLength * (mt.textureType == MTLTextureTypeCube || mt.textureType == MTLTextureTypeCubeArray ? 6 : 1)) continue;
+            NVNcopyRegion r = {e->x0[lv], e->y0[lv], 0, e->x1[lv] - e->x0[lv], e->y1[lv] - e->y0[lv], e->s1[lv] - e->s0[lv] + 1};
+            mirror_readback(&e->t, mt, lv, e->s0[lv], &r, "render", 2);
+        }
+        if (e->frame + GSB_QUIET < f) { CFRelease(e->tex); *e = g_gsb[--g_ngsb]; } else i++;
+    }
+}
 // slice: the attachment's first slice, or of a 3D texture its depth plane (mirror_readback reads a 3D texture's planes from there on)
 static void rt_mirror_add(const tex_t *t, id<MTLTexture> mt, NSUInteger level, NSUInteger slice, int att) {
-    if (!mt || !tex_storage_dst(t)) return;
+    if (!mt) return;
+    int own = !tex_storage_dst(t);
+    if (own && !tex_storage_gpu(t, mt)) return;
     for (int i = 0; i < g_nrtm; i++) if (g_rtm[i].t.serial == t->serial && g_rtm[i].level == level && g_rtm[i].slice == slice) return;
     if (g_nrtm == (int)(sizeof g_rtm / sizeof g_rtm[0])) { RED_ONCE(131, "more than %d storage-backed render targets in one pass: the rest are not read back into their storage", g_nrtm); return; }
-    g_rtm[g_nrtm++] = (typeof(g_rtm[0])){*t, (void *)CFBridgingRetain(mt), (unsigned)level, (unsigned)slice, 1, att};
+    g_rtm[g_nrtm++] = (typeof(g_rtm[0])){*t, (void *)CFBridgingRetain(mt), (unsigned)level, (unsigned)slice, 1, att, own};
 }
 // Once the pass's layers are known: a layered or slice-merged pass (renderTargetArrayLength) draws into that many layers of each attachment from its attached slice on, all read back
 static void rt_mirror_layers(MTL4RenderPassDescriptor *pd) {
@@ -4976,7 +5055,8 @@ static void rt_mirror_flush(void) {
         id<MTLTexture> mt = CFBridgingRelease(g_rtm[i].tex);
         int d3 = mt.textureType == MTLTextureType3D;   // a 3D attachment's planes are the region's depth, from its plane on; any other's layers, from its slice on
         NVNcopyRegion r = {0, 0, d3 ? (int)g_rtm[i].slice : 0, (int)MAX(mt.width >> g_rtm[i].level, 1u), (int)MAX(mt.height >> g_rtm[i].level, 1u), (int)g_rtm[i].n};
-        mirror_readback(&g_rtm[i].t, mt, g_rtm[i].level, d3 ? 0 : g_rtm[i].slice, &r, "render", 1);
+        if (g_rtm[i].own) gsb_mark(&g_rtm[i].t, mt, g_rtm[i].level, g_rtm[i].slice, g_rtm[i].n, NULL);
+        else mirror_readback(&g_rtm[i].t, mt, g_rtm[i].level, d3 ? 0 : g_rtm[i].slice, &r, "render", 1);
     }
     if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
 }
@@ -13729,7 +13809,7 @@ static void mirror_note(int rc, const tex_t *t, unsigned level, const char *from
 // A source the GPU wrote has no content in guest memory to mirror on the CPU: the destination region is read back from the host texture after the copy, on the GPU, into a shared buffer, and
 // written into the storage when the submission completes (a post-op, run before the fence is published, so the game cannot have released the pool yet; it runs after any upload of the
 // texture encoded before it, so the pages it dirties are carried by the next one). The texture record is copied: the game may finalize the object once it has waited
-typedef struct { tex_t t; unsigned level, layer0; NVNcopyRegion r; size_t row, img; void *buf, *src; int shift; } mirror_rb;   // buf: the readback buffer, retained for the handler; src: a render pass's host tex; shift: rb_copy_shift
+typedef struct { tex_t t; unsigned level, layer0; NVNcopyRegion r; size_t row, img; void *buf, *src; int shift, own; } mirror_rb;   // buf: the readback buffer, retained for the handler; src: a render pass's host tex; shift: rb_copy_shift; own: a GPU texture's (gsb_flush)
 static size_t mtl_pf_block_bytes(MTLPixelFormat pf) {   // bytes per texel, or per block of a compressed format; 0 when not known
     int bb = bc_block_bytes(pf); if (bb) return (size_t)bb;
     if (pf >= MTLPixelFormatASTC_4x4_sRGB && pf <= MTLPixelFormatASTC_12x12_HDR) return 16;
@@ -13758,7 +13838,9 @@ static void mrbuf_put(id<MTLBuffer> b) {   // the readback has landed: the GPU i
     if (!kept) res_remove(b);
     for (int i = 0; i < nout; i++) res_remove(out[i]);
 }
-static void mirror_readback(const tex_t *t, id<MTLTexture> d, unsigned level, unsigned layer0, const NVNcopyRegion *r, const char *from, int absorb) {   // absorb: a render pass's readback, which the texture takes as its own (pkg_absorb_note)
+// how: 0 a copy's; 1 a render pass's or a clear's into a texture uploaded from its storage, which takes the readback as its own (pkg_absorb_note); 2 a GPU texture's own content
+// (gsb_flush), which is no entry of the pending table: its storage is no source for a copy's CPU mirror in any case (tex_storage_src)
+static void mirror_readback(const tex_t *t, id<MTLTexture> d, unsigned level, unsigned layer0, const NVNcopyRegion *r, const char *from, int how) {
     int bw, bh, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh), nz = r->depth ? r->depth : 1;
     if (!bpb || r->width <= 0 || r->height <= 0 || d.sampleCount > 1 || mtl_fmt_depth(d.pixelFormat) || d.pixelFormat == MTLPixelFormatStencil8 || mtl_pf_block_bytes(d.pixelFormat) != (size_t)bpb) { mirror_note(-1, t, level, from, 1); return; }
     size_t row = (size_t)((r->width + bw - 1) / bw) * bpb, img = row * (size_t)((r->height + bh - 1) / bh);
@@ -13766,20 +13848,65 @@ static void mirror_readback(const tex_t *t, id<MTLTexture> d, unsigned level, un
     if (!b) { mirror_note(-1, t, level, from, 1); return; }
     id<MTL4ComputeCommandEncoder> e = blit(); int d3 = d.textureType == MTLTextureType3D;   // a 3D texture's images are its depth slices, at origin z; any other's its slices (layers)
     for (int z = 0; z < nz; z++) enc_b_copy_texture_buffer(e, d, d3 ? 0 : layer0 + r->zoffset + z, level, MTLOriginMake(r->xoffset, r->yoffset, d3 ? r->zoffset + z : 0), MTLSizeMake(r->width, r->height, 1), b, (size_t)z * img, row, img);
-    mirror_rb *m = malloc(sizeof *m); *m = (mirror_rb){*t, level, layer0, *r, row, img, (void *)CFBridgingRetain(b), absorb ? (void *)CFBridgingRetain(d.parentTexture ? d.parentTexture : d) : NULL, rb_copy_shift(t, d)};
+    mirror_rb *m = malloc(sizeof *m); *m = (mirror_rb){*t, level, layer0, *r, row, img, (void *)CFBridgingRetain(b), how == 1 ? (void *)CFBridgingRetain(d.parentTexture ? d.parentTexture : d) : NULL, rb_copy_shift(t, d), how == 2};
     post((post_op){4, NULL, 0, 0, 0, 0, m, 0});
+    if (m->own) {
+        if (g_gsb_reads++ < 4) MLOG("GPU texture in storage the CPU can read ser=%llu %ux%u format %#x level %u: what the GPU wrote is read back into its storage when the GPU completes",
+                                    (unsigned long long)t->serial, t->d.width, t->d.height, t->d.format, level);
+        return;
+    }
     mrb_note(t->serial, 1);
     if (m->src) pkg_absorb_pending(t->serial, 1);
     mirror_note(0, t, level, from, 1);
 }
+// A GPU texture's own content lands only in storage that is still that texture's and the GPU's: its span as recorded (mtl_tex_gpu_written), not taken by a texture, no whole page
+// written by the CPU since its stamp; a span with no whole page cannot tell a CPU write, so there the texture object must still be alive. Storage the game reused meanwhile, or
+// whose pool is gone (gws_drop_pool), keeps what it holds. The span and the registered texture's entry are stamped again once written, so the host's own write does not count as
+// the CPU's (gws_owned, nvn_ft_written); the registered textures' lock is held across, as a ReadTexels between the write and the stamp would take the texture for CPU-written.
+// The game's threads take no lock to write: if the storage does not read back as written once it is protected again, the CPU wrote it meanwhile, and the span keeps its old stamp,
+// which makes the storage the CPU's. Open: bytes the CPU wrote between the look and the host's write, where the readback lands, are overwritten
+static int mirror_rb_differs(const mirror_rb *m, const uint8_t *src) {
+    int bw, bh, bpb = nvn_fmt_bpb(m->t.d.format, &bw, &bh), nz = m->r.depth ? m->r.depth : 1, diff = 0;
+    size_t lp = (size_t)MAX(m->t.d.width >> m->level, 1u) * bpb, lr = MAX(m->t.d.height >> m->level, 1u);
+    uint8_t *lin = malloc(lp * lr); if (!lin) return 0;
+    for (int z = 0; z < nz && !diff; z++) {
+        if (nvn_deswizzle(&m->t.d, m->level, m->layer0 + (unsigned)(m->r.zoffset + z), m->t.mem, lin, lp)) break;
+        for (int y = 0; y < m->r.height && !diff; y++) diff = memcmp(lin + (size_t)(m->r.yoffset + y) * lp + (size_t)m->r.xoffset * bpb, src + (size_t)z * m->img + (size_t)y * m->row, m->row) != 0;
+    }
+    free(lin);
+    return diff;
+}
+static int mirror_rb_own(const mirror_rb *m, const uint8_t *src) {
+    uintptr_t lo = (uintptr_t)m->t.mem, hi = lo + m->t.L.size; int rc = 0, landed = 0;
+    pthread_mutex_lock(&g_smu); int live = nvn_hm_get(&g_tex_live, &m->t.serial) != NULL; pthread_mutex_unlock(&g_smu);
+    nvn_ft_hold();
+    pthread_mutex_lock(&g_gws_mu);
+    size_t i = gws_find(lo);
+    uintptr_t a, e; whole_pages(lo, hi, &a, &e);
+    int mine = i < g_ngws && g_gws[i].lo == lo && g_gws[i].hi == hi && !g_gws[i].taken, seen = mine && e > a && g_gws[i].rg;
+    if (mine && (seen ? !gws_cpu_since(&g_gws[i], lo, hi) : live)) {
+        uint64_t before = g_gws[i].stamp;
+        rc = nvn_tex_mirror_b2t(&m->t, m->level, m->layer0, &m->r, src, m->row, m->img);
+        gws_stamp(&g_gws[i]);
+        if (!rc && mirror_rb_differs(m, src)) g_gws[i].stamp = before;
+        else if (!rc) { landed = 1; nvn_ft_restamp_held(m->t.serial); }
+    }
+    pthread_mutex_unlock(&g_gws_mu);
+    nvn_ft_release();
+    if (landed) atomic_fetch_add(&g_gsb_landed, 1);
+    else if (atomic_fetch_add(&g_gsb_kept, 1) < 4)
+        MLOG("GPU texture in storage the CPU can read ser=%llu level %u: not read back into its storage, which is no longer that texture's and the GPU's (%llu landed so far)",
+             (unsigned long long)m->t.serial, m->level, (unsigned long long)atomic_load(&g_gsb_landed));
+    return rc;
+}
 static void mirror_rb_land(void *p) {   // the submission's completion handler
     mirror_rb *m = p; id<MTLBuffer> b = CFBridgingRelease(m->buf);
     if (m->shift) { int bw, bh; nvn_fmt_bpb(m->t.d.format, &bw, &bh); rb_swap_rows(b.contents, m->row, (size_t)((m->r.height + bh - 1) / bh), (size_t)(m->r.depth ? m->r.depth : 1), m->row, m->img, m->shift); }   // into the guest's order
-    if (nvn_tex_mirror_b2t(&m->t, m->level, m->layer0, &m->r, b.contents, m->row, m->img)) { static int n; if (n++ < 4) MLOG("[RED] GPU copy read back into the storage of texture ser=%llu level %u: not written", (unsigned long long)m->t.serial, m->level);
+    if (m->own ? mirror_rb_own(m, b.contents) : nvn_tex_mirror_b2t(&m->t, m->level, m->layer0, &m->r, b.contents, m->row, m->img)) { static int n; if (n++ < 4) MLOG("[RED] GPU copy read back into the storage of texture ser=%llu level %u: not written", (unsigned long long)m->t.serial, m->level);
         if (m->src) CFRelease(m->src); }
     else if (m->src) pkg_absorb_note(&m->t, m->src);
     if (m->src) pkg_absorb_pending(m->t.serial, -1);   // after the note: the next resolution finds it
-    mrb_note(m->t.serial, -1);
+    if (!m->own) mrb_note(m->t.serial, -1);
     mrbuf_put(b);
     free(m);
 }
@@ -13800,7 +13927,7 @@ static void copy_b2t(const p_copy_b2t *c, uint32_t size) {
     if (!mtl_addr(c->src, img * nz, &mb, &mo)) { RED_ONCE(23, "buffer→texture copy source is in no memory pool"); return; }
     // The copy's bytes belong in the texture's storage: written there now from the buffer's, unless the GPU writes the buffer (a copy, fill or update queued in this submission: pend_hits; a shader
     // or a texture→buffer copy of it: sbw_hits; one of a submission still running: gw_live) or a readback into the texture is pending (read back after the copy then)
-    int rb = tex_storage_dst(c->tex);
+    int rb = tex_storage_dst(c->tex), own = !rb;
     if (rb && img * nz && !mrb_pending(c->tex->serial) && !pend_hits(c->src, img * nz) && !g_sbw_over && !sbw_hits(c->src, c->src + img * nz) && !gw_live(c->src, c->src + img * nz)
         && nvn_host_readable(c->src, img * nz) && !nvn_tex_mirror_b2t(c->tex, level, layer0, &c->r, (const uint8_t *)(uintptr_t)c->src, row, img)) { mirror_note(0, c->tex, level, "buffer", 0); rb = 0; }
     g_cut_copy = 1;
@@ -13821,6 +13948,7 @@ static void copy_b2t(const p_copy_b2t *c, uint32_t size) {
         for (int z = 0; z < nz; z++)
             enc_b_copy_buffer_texture(b, sb, mo + z * img, row, img, MTLSizeMake(c->r.width, c->r.height, 1), t, layer0 + c->r.zoffset + z, level, MTLOriginMake(c->r.xoffset, c->r.yoffset, 0));
     if (rb) mirror_readback(c->tex, t, level, layer0, &c->r, "buffer", 0);
+    else if (own && !is3d) gsb_mark(c->tex, t, level, layer0 + (unsigned)c->r.zoffset, (unsigned)nz, &c->r);
 }
 
 // Texture copies a blit cannot do -- a format change, a scaled region or a mirrored one (MIRROR_X / MIRROR_Y) (Link's Awakening converts its 1408x792 RG11B10F scene to RGBA16F every frame; Super Mario 3D World scales 1920x1080 to 1280x720
@@ -14036,6 +14164,7 @@ static void copy_t2t(const p_copy_t2t *c) {
     if (bc_alias_copy(c, s, sl, sz0, dl, dz0)) return;   // the destination aliases a compressed texture: the bytes go there, and the alias's own texture is not made (see bc_alias_copy)
     id<MTLTexture> d = tex_mtl(c->dst); sparse_gpu_wrote(c->dst);
     if (!d || !tex_level_ok(d, dl, "texture copy destination")) return;
+    if (!tex_storage_dst(c->dst)) gsb_mark(c->dst, d, dl, dz0 + (unsigned)c->dr.zoffset, (unsigned)(c->dr.depth ? c->dr.depth : 1), &c->dr);   // the destination's level as it is when the submission ends
     if (c->flags & DM_COPY_RESOLVE) {   // Downsample: multisample resolve into the single-sample destination (depth takes sample 0); with equal sample counts it is a plain whole copy
         if (s.sampleCount == d.sampleCount && s.pixelFormat == d.pixelFormat && s.width == d.width && s.height == d.height) {
             enc_b_copy_texture(blit(), s, sz0, sl, MTLOriginMake(0, 0, 0), MTLSizeMake(s.width, s.height, 1), d, dz0, dl, MTLOriginMake(0, 0, 0));
@@ -14240,6 +14369,7 @@ static void clear_tex(const p_clear_tex *c) {
     unsigned lv = c->has_view && c->view.set_levels ? c->view.base_level : 0, l0 = c->has_view && c->view.set_layers ? c->view.min_layer : 0;
     NSUInteger w = MAX(t.width >> lv, 1u), h = MAX(t.height >> lv, 1u);
     int is3d = t.textureType == MTLTextureType3D, nz = c->r.depth ? c->r.depth : 1;
+    int rb = tex_storage_dst(c->tex);   // the clear writes the storage too, as a render pass does (rt_mirror_flush): read back after it, or at the submission's end (gsb_mark)
     if (!(t.usage & MTLTextureUsageRenderTarget) && !mtl_fmt_block(t.pixelFormat) && t.sampleCount == 1)
         t = tex_upgrade(c->tex, t, MTLTextureUsageRenderTarget, t.pixelFormat);   // a clear of a texture made without render-target use (packaged): give it that use
     if (c->has_view && c->view.set_format) {   // View with changed format: the clear value is interpreted in the view format (all 5 of the game's calls are the ui version with an integer view), and the clear is done on a view of the same format
@@ -14252,11 +14382,17 @@ static void clear_tex(const p_clear_tex *c) {
             t = v;
         }
     }
+    id<MTLTexture> whole = t.parentTexture ? t.parentTexture : t;
     MTLPixelFormat pf = t.pixelFormat;
     int depth = pf == MTLPixelFormatDepth32Float || pf == MTLPixelFormatDepth16Unorm || pf == MTLPixelFormatDepth32Float_Stencil8, stencil = pf == MTLPixelFormatStencil8 || pf == MTLPixelFormatDepth32Float_Stencil8;
     if (c->r.xoffset || c->r.yoffset || (NSUInteger)c->r.width != w || (NSUInteger)c->r.height != h || (c->mask & mtl_pf_chmask(pf)) != mtl_pf_chmask(pf)
         || !(t.usage & MTLTextureUsageRenderTarget)) {
-        if (!depth && !stencil && (t.usage & MTLTextureUsageRenderTarget)) { clear_tex_tri(t, lv, l0, c); return; }
+        if (!depth && !stencil && (t.usage & MTLTextureUsageRenderTarget)) {
+            clear_tex_tri(t, lv, l0, c);
+            if (rb) mirror_readback(c->tex, whole, lv, l0, &c->r, "clear", 1);
+            else if (!is3d) gsb_mark(c->tex, whole, lv, l0 + (unsigned)c->r.zoffset, (unsigned)nz, &c->r);
+            return;
+        }
         RED_ONCE(44, "texture clear case not implemented: region %d,%d %dx%d (level size %lux%lu) mask %#x render-target capable %d (format %#x flags %#x)", c->r.xoffset, c->r.yoffset, c->r.width, c->r.height,
                  (unsigned long)w, (unsigned long)h, c->mask, !!(t.usage & MTLTextureUsageRenderTarget), c->tex->d.format, c->tex->d.flags);
         return;
@@ -14274,6 +14410,9 @@ static void clear_tex(const p_clear_tex *c) {
         else rp.colorAttachments[0].clearColor = c->is_uint ? MTLClearColorMake(c->c.u[0], c->c.u[1], c->c.u[2], c->c.u[3]) : MTLClearColorMake(c->c.f[0], c->c.f[1], c->c.f[2], c->c.f[3]);
         ser_gate(); enc_r_end(enc_r_begin(rp));
     }
+    if (depth || stencil) return;
+    if (rb) mirror_readback(c->tex, whole, lv, l0, &c->r, "clear", 1);
+    else if (!is3d) gsb_mark(c->tex, whole, lv, l0 + (unsigned)c->r.zoffset, (unsigned)nz, &c->r);
 }
 
 // Context description of one submit (mtl_sub_commit takes one per submit and prints it into the failure line when the command buffer errors): for the GPU memory fault on the first frame entering Travincal, the failure line had only the sequence number and error code, and it was impossible to tell what was in that submit

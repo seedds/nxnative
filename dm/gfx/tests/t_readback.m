@@ -344,6 +344,60 @@ static void stale_pools(void) {
     h_nvnMemoryPoolFinalize(mp2); munmap(phys, len); free(mp); free(mp2); free(sp);
 }
 
+// A GPU texture in storage the CPU can read (no packaged layout, never CPU-written; a CPU_CACHED | GPU_CACHED pool): what a render pass, a texture copy and a texture clear write
+// into it reaches its storage too, as on the hardware (gsb_mark). Ocarina of Time moves the terrain normal maps the GPU drew with memcpy and re-creates them at the new address
+static void gpu_storage(void) {
+    enum { N = 1 << 20, W = 128 };
+    void *mem = NULL; if (posix_memalign(&mem, getpagesize(), N)) abort(); memset(mem, 0, N);
+    pool_t pool = {.magic=MAGIC('P','O','O','L'), .mem=mem, .size=N, .flags=NVN_MEMORY_POOL_FLAGS_CPU_CACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED}; mtl_pool_add(mem, N); nvn_dirty_add_range(mem, N);
+    NVNtextureBuilder tb; NVNtexture drawn, copied, cleared, moved, pkc; h_nvnTextureBuilderSetDefaults(&tb); h_nvnTextureBuilderSetWidth(&tb, W); h_nvnTextureBuilderSetHeight(&tb, W);
+    h_nvnTextureBuilderSetFormat(&tb, NVN_FORMAT_RGBA8);
+    h_nvnTextureBuilderSetStorage(&tb, (const NVNmemoryPool *)&pool, 0x40000); EXPECT("GPU texture init", 1, h_nvnTextureInitialize(&drawn, &tb));
+    h_nvnTextureBuilderSetStorage(&tb, (const NVNmemoryPool *)&pool, 0x60000); EXPECT("GPU texture 2 init", 1, h_nvnTextureInitialize(&copied, &tb));
+    h_nvnTextureBuilderSetStorage(&tb, (const NVNmemoryPool *)&pool, 0x80000); EXPECT("GPU texture 3 init", 1, h_nvnTextureInitialize(&cleared, &tb));
+    NVNtextureBuilder pb = tb; NVNpackagedTextureLayout lay = {{1, 0, 0, 0, 7, 0, 1, 0}}; h_nvnTextureBuilderSetPackagedTextureLayout(&pb, &lay); h_nvnTextureBuilderSetWidth(&pb, 8); h_nvnTextureBuilderSetHeight(&pb, 4);
+    h_nvnTextureBuilderSetStorage(&pb, (const NVNmemoryPool *)&pool, 0xc0000); EXPECT("packaged texture init", 1, h_nvnTextureInitialize(&pkc, &pb));
+    NVNcommandBuffer cmd; EXPECT("command init", 1, h_nvnCommandBufferInitialize(&cmd, NULL));
+    h_nvnCommandBufferAddCommandMemory(&cmd, (const NVNmemoryPool *)&pool, 0, 65536);
+    h_nvnCommandBufferBeginRecording(&cmd);
+    const NVNtexture *targets[] = {&drawn}; const NVNtextureView *views[] = {NULL};
+    h_nvnCommandBufferSetRenderTargets(&cmd, 1, targets, views, NULL, NULL);
+    float color[] = {0.2f, 0.4f, 0.6f, 1.f}; h_nvnCommandBufferClearColor(&cmd, 0, color, 15);
+    NVNcopyRegion region = {0, 0, 0, W, W, 1}, small = {0, 0, 0, 8, 4, 1};
+    h_nvnCommandBufferCopyTextureToTexture(&cmd, &drawn, NULL, &region, &copied, NULL, &region, 0);
+    float color2[] = {0.8f, 0.6f, 0.4f, 1.f}; h_nvnCommandBufferClearTexture(&cmd, &cleared, NULL, &region, color2, 15);
+    h_nvnCommandBufferClearTexture(&cmd, &pkc, NULL, &small, color2, 15);   // a texture uploaded from its storage: its clear is read back as its render passes are
+    NVNsync sync; h_nvnSyncInitialize(&sync, NULL);
+    h_nvnCommandBufferFenceSync(&cmd, &sync, NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE, 0);
+    NVNcommandHandle h = h_nvnCommandBufferEndRecording(&cmd);
+    state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin(); mtl_exec((const uint8_t *)h); mtl_sub_commit();
+    int wait = h_nvnSyncWait(&sync, 5000000000ull); EXPECT("GPU storage fence wait", 1, wait == 0 || wait == 1);
+    EXPECT("GPU success", 0, mtl_last_commit_error());
+    static const uint8_t expected[] = {51, 102, 153, 255}, expected2[] = {204, 153, 102, 255};
+    uint8_t *lin = malloc(W * W * 4); const tex_t *td = TX(&drawn), *tc = TX(&copied), *tl = TX(&cleared), *tp = TX(&pkc); int bad;
+    memset(lin, 0xEE, W * W * 4); bad = nvn_deswizzle(&td->d, 0, 0, td->mem, lin, W * 4) ? 1 << 20 : 0; for (int i = 0; i < W * W; i++) bad += memcmp(lin + i * 4, expected, 4) != 0;
+    EXPECT("render pass into a GPU texture -> its storage, every pixel", 0, bad);
+    memset(lin, 0xEE, W * W * 4); bad = nvn_deswizzle(&tc->d, 0, 0, tc->mem, lin, W * 4) ? 1 << 20 : 0; for (int i = 0; i < W * W; i++) bad += memcmp(lin + i * 4, expected, 4) != 0;
+    EXPECT("texture copy into a GPU texture -> its storage, every pixel", 0, bad);
+    memset(lin, 0xEE, W * W * 4); bad = nvn_deswizzle(&tl->d, 0, 0, tl->mem, lin, W * 4) ? 1 << 20 : 0; for (int i = 0; i < W * W; i++) bad += memcmp(lin + i * 4, expected2, 4) != 0;
+    EXPECT("texture clear of a GPU texture -> its storage, every pixel", 0, bad);
+    memset(lin, 0xEE, W * W * 4); bad = nvn_deswizzle(&tp->d, 0, 0, tp->mem, lin, 32) ? 1 << 20 : 0; for (int i = 0; i < 32; i++) bad += memcmp(lin + i * 4, expected2, 4) != 0;
+    EXPECT("texture clear of a packaged texture -> its storage, 32 pixels", 0, bad);
+    uint64_t up = 0, reup = 0, up2 = 0, reup2 = 0; mtl_pkg_stats(&up, &reup);
+    nvn_ft_poll(); mtl_sub_begin(); id<MTLTexture> host = tex_mtl(td); tex_mtl(tc); tex_mtl(tl); tex_mtl(tp); mtl_wait(mtl_sub_commit(), 5000000000ull); mtl_pkg_stats(&up2, &reup2);
+    EXPECT("they stay GPU textures: nothing is uploaded from the storage the host wrote", 1, host && up == up2 && reup == reup2 && mtl_tex_gpu_owned(td->serial) && mtl_tex_gpu_owned(tc->serial) && mtl_tex_gpu_owned(tl->serial)
+           && !tex_cpu_written(td->serial) && !tex_cpu_written(tc->serial) && !tex_cpu_written(tl->serial) && gws_owned((uintptr_t)td->mem, (uintptr_t)td->mem + td->L.size));
+    EXPECT("no entry left in the tables of textures uploaded from their storage", 1, !g_nabsp && !g_mrb_n && !g_mrb_untracked);
+    memcpy((uint8_t *)mem + 0xa0000, td->mem, td->L.size);
+    h_nvnTextureBuilderSetStorage(&tb, (const NVNmemoryPool *)&pool, 0xa0000); EXPECT("moved texture init", 1, h_nvnTextureInitialize(&moved, &tb));
+    memset(lin, 0xEE, W * W * 4); h_nvnTextureReadTexels(&moved, NULL, &region, lin); bad = 0; for (int i = 0; i < W * W; i++) bad += memcmp(lin + i * 4, expected, 4) != 0;
+    EXPECT("storage moved with memcpy -> a texture there holds the drawing (ReadTexels), every pixel", 0, bad);
+    EXPECT("and is taken from its storage", 1, tex_cpu_written(TX(&moved)->serial));
+    free(lin);
+    h_nvnTextureFinalize(&moved); h_nvnTextureFinalize(&pkc); h_nvnTextureFinalize(&cleared); h_nvnTextureFinalize(&copied); h_nvnTextureFinalize(&drawn);
+    mtl_alias_drop_pool(&pool); nvn_dirty_remove_range(mem); mtl_pool_del(mem); mtl_drain(); free(mem);
+}
+
 int main(void) { @autoreleasepool {
     alarm(60); if (setvbuf(stdout, NULL, _IONBF, 0)) abort();   // GPU, callback and pthread failures must not leave the check target hanging.
     mtl_init();
@@ -473,5 +527,6 @@ int main(void) { @autoreleasepool {
     packed_copies(NVN_FORMAT_RGB565, 500); packed_copies(NVN_FORMAT_RGB5A1, 501); packed_copies(NVN_FORMAT_RGB5, 502); packed_copies(NVN_FORMAT_RGBA4, 503);
     mirror_completion();
     readback_pool();
+    gpu_storage();
     printf("READBACK cases=%d failed=%d\n", cases, failed); return failed != 0;
 } }

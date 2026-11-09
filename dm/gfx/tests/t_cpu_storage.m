@@ -35,6 +35,18 @@ static uint8_t first_red(id<MTLTexture> image) {   // the red of texel (3, 5), r
     CHECK("readback completes", cb.status == MTLCommandBufferStatusCompleted);
     return *(uint8_t *)out.contents;
 }
+static uint8_t stored_red(const tex_t *t) {   // the red of texel (3, 5) of level 0, as the storage holds it
+    uint8_t *linear = malloc((size_t)t->d.width * t->d.height * 4);
+    CHECK("fixture deswizzle succeeds", !nvn_deswizzle(&t->d, 0, 0, t->mem, linear, t->d.width * 4));
+    uint8_t red = linear[(5 * t->d.width + 3) * 4];
+    free(linear);
+    return red;
+}
+static void gpu_clear(tex_t *t, float red) {   // a texture clear: recorded (the storage's span is stamped), replayed, completed
+    mtl_tex_gpu_written(t);
+    p_clear_tex c = {.tex = t, .r = {0, 0, 0, (int)t->d.width, (int)t->d.height, 1}, .mask = 15, .c.f = {red, 0, 0, 1}};
+    mtl_sub_begin(); clear_tex(&c); finish();
+}
 static id<MTLTexture> resolve(tex_t *t) { mtl_sub_begin(); id<MTLTexture> image = tex_mtl(t); CHECK("texture resolves", image != nil); finish(); return image; }
 typedef struct { void *mem; pool_t pool; tex_t t; } fixture;
 static tex_t texture_at(fixture *f, uint64_t serial, uint64_t off, uint32_t size, int format, uint32_t tex_flags) {
@@ -209,6 +221,71 @@ int main(void) {
             CHECK(left_out[i].label, !tex_cpu_content(&f.t));
             teardown(&f);
         }
+
+        // What the GPU writes into a GPU texture in storage the CPU can read reaches that storage (gsb_mark, mirror_rb_own): Ocarina of Time moves the terrain normal maps the GPU
+        // drew with memcpy and re-creates them at the new address
+        atomic_store(&g_cur_frame, 100);
+        setup(&f, 7060, CACHED, NVN_FORMAT_RGBA8, 0);
+        large = texture_at(&f, 7061, 0x40000, 128, NVN_FORMAT_RGBA8, 0);
+        uintptr_t llo = (uintptr_t)large.mem, lhi = llo + large.L.size;
+        uint64_t reads = g_gsb_reads;
+        gpu_clear(&large, 0.2f);
+        CHECK("a clear of a GPU texture reaches its storage", stored_red(&large) == 51 && g_gsb_reads == reads + 1);
+        CHECK("which stays the GPU's: the host's own write is not the CPU's", gws_owned(llo, lhi) && !tex_cpu_written(large.serial) && mtl_tex_cpu_rewritten(&large) == MTL_REWRITE_GPU_NOW);
+        tex_t moved = texture_at(&f, 7062, 0x60000, 128, NVN_FORMAT_RGBA8, 0);
+        dm_guest_write_prepare(moved.mem, moved.L.size); memcpy(moved.mem, large.mem, large.L.size);
+        CHECK("its storage moved with memcpy: a texture made there holds the clear", first_red(resolve(&moved)) == 51 && tex_cpu_written(moved.serial));
+        // written in close succession: read back when first written, then not until GSB_QUIET frames pass without a write
+        atomic_store(&g_cur_frame, 101); gpu_clear(&large, 0.4f);
+        atomic_store(&g_cur_frame, 102); gpu_clear(&large, 0.6f);
+        CHECK("a texture written every frame is not read back every frame", g_gsb_reads == reads + 1 && stored_red(&large) == 51);
+        atomic_store(&g_cur_frame, 104); mtl_sub_begin(); finish();
+        CHECK("nor in the frames just after its last write", g_gsb_reads == reads + 1);
+        atomic_store(&g_cur_frame, 105); mtl_sub_begin(); finish();
+        CHECK("once the frames have passed without a write, its storage holds the last one", g_gsb_reads == reads + 2 && stored_red(&large) == 153 && gws_owned(llo, lhi));
+        atomic_store(&g_cur_frame, 106); gpu_clear(&large, 0.2f);
+        atomic_store(&g_cur_frame, 108); gpu_clear(&large, 0.4f);
+        atomic_store(&g_cur_frame, 110); gpu_clear(&large, 0.8f);
+        CHECK("a texture written every other frame is read back once at first", g_gsb_reads == reads + 3 && stored_red(&large) == 51);
+        atomic_store(&g_cur_frame, 113); mtl_sub_begin(); finish();
+        CHECK("and once when it stops", g_gsb_reads == reads + 4 && stored_red(&large) == 204);
+        // the game reused the storage before the readback landed: the CPU's bytes stay, and are the content
+        atomic_store(&g_cur_frame, 115);
+        tex_t reused = texture_at(&f, 7063, 0x80000, 128, NVN_FORMAT_RGBA8, 0);
+        mtl_tex_gpu_written(&reused);
+        p_clear_tex rc = {.tex = &reused, .r = {0, 0, 0, 128, 128, 1}, .mask = 15, .c.f = {0.8f, 0, 0, 1}};
+        mtl_sub_begin(); clear_tex(&rc);
+        dm_guest_write_prepare(reused.mem, reused.L.size); fill(&reused, reused.mem, 77);
+        finish();
+        CHECK("a CPU fill before the readback lands survives it", stored_red(&reused) == 77 && !gws_owned((uintptr_t)reused.mem, (uintptr_t)reused.mem + reused.L.size));
+        CHECK("and is taken from the storage", mtl_tex_cpu_rewritten(&reused) == MTL_REWRITE_UPLOADED && first_red(resolve(&reused)) == 77);
+        // another texture drawn over the storage while the first one's levels wait: the first one's content is no longer the storage's
+        atomic_store(&g_cur_frame, 120);
+        tex_t first = texture_at(&f, 7064, 0xa0000, 128, NVN_FORMAT_RGBA8, 0), second = texture_at(&f, 7065, 0xa0000, 128, NVN_FORMAT_RGBA8, 0);
+        gpu_clear(&first, 0.2f);
+        atomic_store(&g_cur_frame, 121); gpu_clear(&first, 0.4f);
+        mtl_tex_release(&first);
+        reads = g_gsb_reads;
+        gpu_clear(&second, 0.6f);
+        CHECK("a new texture object over storage written the frame before waits as the old one did", g_gsb_reads == reads && stored_red(&second) == 51);
+        atomic_store(&g_cur_frame, 124); mtl_sub_begin(); finish();
+        CHECK("and its content lands, not the old texture's waiting levels", g_gsb_reads == reads + 1 && stored_red(&second) == 153);
+        // a texture with no whole page of its own (its span sees no CPU write): read back all the same; and storage whose pool is gone is left alone
+        mtl_tex_init(&f.t);
+        gpu_clear(&f.t, 0.2f);
+        CHECK("a live texture smaller than a page is read back into its storage", stored_red(&f.t) == 51);
+        tex_t ended = texture_at(&f, 7067, 0xe0000, SIZE, NVN_FORMAT_RGBA8, 0);   // never initialized as an object: as one finalized before the landing
+        gpu_clear(&ended, 0.2f);
+        CHECK("one whose object is gone is not: its span cannot tell whether the CPU reused the storage", stored_red(&ended) == 0);
+        mtl_tex_release(&ended);
+        tex_t gone = texture_at(&f, 7066, 0xc0000, 128, NVN_FORMAT_RGBA8, 0);
+        mtl_tex_gpu_written(&gone);
+        p_clear_tex gc = {.tex = &gone, .r = {0, 0, 0, 128, 128, 1}, .mask = 15, .c.f = {0.8f, 0, 0, 1}};
+        mtl_sub_begin(); clear_tex(&gc); gws_drop_pool(&f.pool); finish();
+        CHECK("storage whose spans went with their pool is not written", stored_red(&gone) == 0);
+        CHECK("none of it through the tables of textures uploaded from their storage", !g_nabs && !g_nabsp && !g_mrb_n && !g_mrb_untracked);
+        mtl_tex_release(&gone); mtl_tex_release(&second); mtl_tex_release(&reused); mtl_tex_release(&moved); mtl_tex_release(&large);
+        teardown(&f);
     }
     printf("t_cpu_storage: %d checks, %d failed\n", checks, failed);
     return failed != 0;

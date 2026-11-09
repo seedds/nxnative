@@ -468,6 +468,17 @@ int nvn_ft_tracked(uint64_t serial) {   // registered and not resolved yet: its 
     pthread_mutex_unlock(&g_ft_mu);
     return r;
 }
+// The host writes what the GPU drew into a registered texture's storage (mirror_rb_own in nvn_mtl.m, which found no CPU write on its whole pages first): that write is not the
+// CPU's, so the entry is stamped again, as the poll does for a texture left to the GPU. The list is held from before the write: a first use or a ReadTexels in between
+// (nvn_ft_written) would take the texture for CPU-written. This lock comes before the storage spans' (ft_flush)
+void nvn_ft_hold(void) { pthread_mutex_lock(&g_ft_mu); }
+void nvn_ft_release(void) { pthread_mutex_unlock(&g_ft_mu); }
+void nvn_ft_restamp_held(uint64_t serial) {
+    if (!DM_GAME_TEX_DIRTY_UPLOAD || !serial) return;
+    for (size_t i = 0; i < g_nft; i++) if (g_ft[i].t.serial == serial) {
+        g_ft[i].stamp = nvn_dirty_now(); nvn_dirty_protect(g_ft[i].mem, g_ft[i].size); ft_edges_take(&g_ft[i]);
+        break; }
+}
 // Later writes (tex_dirty_upload): a texture first resolved before the CPU filled it stays a GPU-only texture, and the first-use check above never runs for it again.
 // Once per submission, when guest memory has changed since the last look, the registered textures whose pages were written since registration are handed to mtl_tex_cpu_rewritten
 // (nvn_mtl.m), which makes them CPU-written (tex_mtl_ then drops the GPU-only texture and uploads it) unless their content is the GPU's. Tears of the Kingdom fills its 5120x5120 BC4

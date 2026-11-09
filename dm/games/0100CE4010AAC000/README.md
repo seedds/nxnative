@@ -8,7 +8,7 @@ Build IDs (first 16 hex digits, as cheat files name them): 1.0.0 `DF154E1D08E396
 
 | Setting | Where | Why |
 |---|---|---|
-| ThreadedStreamBuffer cuts (8 per build) | [`patches.py`](patches.py) | without them the boot deadlocks in 3 of 5 runs: [Unity's stream buffer handshake loses a wake-up on Apple cores](../../../docs/reference/threads.md#unitys-stream-buffer-handshake-loses-a-wake-up-on-apple-cores) |
+| ThreadedStreamBuffer load-acquires (8 sites) | the engine-wide rule in `dm/tools/engine_patches.py` (Unity 2018), matched by function in any build | without them the boot deadlocks in 3 of 5 runs: [Unity's stream buffer handshake loses a wake-up on Apple cores](../../../docs/reference/threads.md#unitys-stream-buffer-handshake-loses-a-wake-up-on-apple-cores) |
 | the profile's other keys | [`game.tsv`](game.tsv) | the provisional profile's static guesses (`build_ipa_from_nsp.py` / `profile_guess.py`), unchanged: they boot and play |
 | default present interval (30 fps) | none | the game logic counts frames: see [Frame rate](#frame-rate) |
 
@@ -17,7 +17,7 @@ Build IDs (first 16 hex digits, as cheat files name them): 1.0.0 `DF154E1D08E396
 ## Code
 
 - **Rewriter: a jump-table form of its own.** `main+0x2d103cc` and `+0x2d10590` (1.0.0) index an offset table with a register masked in the block that branches in (`and x6,x17,#0x7ff; …; cbz w18,L`), while the bounds check in the dispatch block masks the same source again (`L: and w18,w17,#0x7ff; cmp w18,#3; b.hi`). `jump_masked_pred` in `dm/tools/patch_nso.py` resolves it, tried only after every older form has failed.
-- **The freeze.** All guest threads asleep on condition variables before the first frame; the main thread in `AcquireSemaphore` after posting a command to `UnityGfxDeviceWorker`, the worker one wait later. The cause is a store-release followed by a plain load in Unity's `ThreadedStreamBuffer` sleep handshake (details and the fix in the threads reference above). To carry the 8 sites to another build, match ±24 instructions around each with PC-relative immediates masked: each 1.0.0 site had exactly one match in 1.0.3, all moved by +0x25380. [`patches.py`](patches.py) holds only the registered 1.0.3 build; for a base-cartridge (1.0.0, main `df154e1d08e3964689eecef47fc057e6`) build, the same `ldr` → `ldar` cuts go at `main+0x1e426d0`, `0x1e43028`, `0x1e43118`, `0x1e4319c`, `0x1e42cdc`, `0x1e42dd4`, `0x1e42e58` (`080140b9` → `08fddf88`) and `0x1e43448` (`290140b9` → `29fddf88`), in a provisional profile's `patches.py`.
+- **The freeze.** All guest threads asleep on condition variables before the first frame; the main thread in `AcquireSemaphore` after posting a command to `UnityGfxDeviceWorker`, the worker one wait later. The cause is a store-release followed by a plain load in Unity's `ThreadedStreamBuffer` sleep handshake (details and the fix in the threads reference above). Since 2026-11-09 an engine-wide rule finds the 8 sites by their four functions in any build (`dm/tools/engine_patches.py`: 1.0.0 and 1.0.3, and Raging Loop's Unity 2018.3); until then 1.0.3's `patches.py` registered them. To carry the sites by hand, match ±24 instructions around each with PC-relative immediates masked: each 1.0.0 site had exactly one match in 1.0.3, all moved by +0x25380. On the base cartridge's build (1.0.0, main `df154e1d08e3964689eecef47fc057e6`) the rule puts them at `main+0x1e426d0`, `0x1e42cdc`, `0x1e42dd4`, `0x1e42e58`, `0x1e43028`, `0x1e43118`, `0x1e4319c` (`080140b9` → `08fddf88`) and `0x1e43448` (`290140b9` → `29fddf88`), the sites found by hand before.
 
 ## Files and shaders
 
@@ -45,6 +45,6 @@ General changes first needed here; each applies to every game:
 
 ## Open
 
-- The ThreadedStreamBuffer cuts for 1.0.0–1.0.2: only 1.0.3 is registered; the 1.0.0 sites are listed under [Code](#code). Function-matched cuts (`MATCH_CUTS`) once their fingerprints are checked on those builds.
+- The ThreadedStreamBuffer load-acquires on 1.0.1 and 1.0.2: the engine-wide rule matched 1.0.0 and 1.0.3 (2026-11-09); the two between were not on the drives to check.
 - 60 fps: find and cut the frame step.
 - iPhone: not tried; build an unsigned IPA and record its packaged size for the README gallery.

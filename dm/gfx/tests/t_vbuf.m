@@ -156,6 +156,10 @@ int main(void) { @autoreleasepool {
     S.nattr = 1; S.attr[0] = (va_st){.fmt = 0x22, .offset = 0, .stream = 0}; S.stream[0].stride = 12; S.stream[0].divisor = 0;
     S.vbuf[0].address = (uint64_t)tri; S.vbuf[0].size = 12;
     p_draw dw = {.prim = 4, .first = 0, .count = 3, .instances = 1};
+    uint64_t absent_last = 99;
+    EXPECT("stream 16 has no known vertex range", 0, vstream_last(16, &dw, NULL, &absent_last));
+    EXPECT("negative stream has no known vertex range", 0, vstream_last(-1, &dw, NULL, &absent_last));
+    EXPECT("an absent stream leaves the range unknown", 99, absent_last);
     mtl_sub_begin(); copies = g_vbuf_copies; vbuf_prepare(&rf, &dw, NULL);
     EXPECT("bytes the draw reads past the bound size", 36, g_vbuf_need[0]);
     en = encoder_prepared(tail); bind_vbufs(en); capture(en, out, 22);

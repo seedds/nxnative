@@ -3059,7 +3059,12 @@ static void write_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r
         size_t wb0 = (size_t)((r->width + bw - 1) / bw) * bpb, row0 = row ? row : wb0, img0 = img ? img : row0 * (size_t)((r->height + bh - 1) / bh);
         dm_guest_write_prepare(t->mem, t->L.size);
         int ok = 1;
-        for (int z = 0; z < nz && ok; z++) { unsigned layer, slice; region_image(t, layer0, r, z, &layer, &slice); ok = !write_region_bl(t, level, layer, slice, r, src + (size_t)z * img0, row0, bw, bh, bpb); }
+        // The dispatch is write_region_mirror (linear or block-linear by the texture's flags), not write_region_bl:
+        // a LINEAR texture (the video decoder's output pool carries NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_VIDEO_DECODE)
+        // makes nvn_deswizzle_geom refuse the block-linear path (-1), and the swizzle fallback below then reinterprets the
+        // linear storage as block-linear: a full-surface 1920x1080 region writes a few thousand garbage bytes (hb is the
+        // GOB-row count, 135 of 1080) and the row-based upload shows the texture as empty: Tsukihime's title movie backdrop black.
+        for (int z = 0; z < nz && ok; z++) { unsigned layer, slice; region_image(t, layer0, r, z, &layer, &slice); ok = !write_region_mirror(t, level, layer, slice, r, src + (size_t)z * img0, row0, bw, bh, bpb); }
         if (ok) { mtl_tex_cpu_written(t); return; }
     }
     uint32_t lw = t->d.width >> level ? t->d.width >> level : 1, lh = t->d.height >> level ? t->d.height >> level : 1, lz = is3d ? (t->d.depth >> level ? t->d.depth >> level : 1) : 1;

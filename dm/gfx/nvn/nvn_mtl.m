@@ -1390,7 +1390,23 @@ static int g_pass_order;    // ordering barriers came in the open draw pass afte
 static int g_pass_late_res; // a draw of the open pass reads memory in a stage after the vertex stage (order_note)
 static uint64_t g_order_vbar;   // ordering barriers kept inside the pass as a vertex-to-vertex barrier (prog_swrites)
 static void img_fit_upgrade(void); static int g_imfit_npend;   // textures an image slot needs a format view of (img_fit), upgraded before the next draw pass opens
-static int g_last_end_relaxed, g_game_barrier;   // the last encoder ended was a draw pass with the relaxed end barrier (nothing else since); the game issued nvnCommandBufferBarrier since the last draw pass began
+// Image heaps (resolution families, image_texture) alive: a draw pass used to end with the full barrier and the next begin behind another, for every pass of every game while any
+// family was alive. Ocarina of Time keeps one from its first frame (its dynamic-resolution targets), so none of its ~110 passes a frame could overlap the previous one's fragments:
+// a Metal System Trace on an M1 showed vertex work starting under the previous pass's fragments 135 times in 10,000 pass changes, about 4.6 ms a frame of GPU idle in that seam.
+// Aliased storage is still ordered: a pass's attachments are loaded and stored in its fragment stage, which the relaxed end barrier orders after the previous pass's vertex and
+// fragment stages, and that barrier carries resource_vis() (the alias flush while a heap is alive); encoders other than draw passes keep their full barriers. What changes is what
+// the relaxed path always allowed, a vertex stage overlapping the previous pass's fragments, ordered by the game's own barriers. DM_NVN_BARRIER_HEAP=0 restores the full barriers
+static int g_end_heap;   // the last draw pass ended with the full barrier only because image heaps were alive (draw-pass full barriers line)
+static int bar_heap_ok(void) { static int m = -1; if (m < 0) { const char *e = getenv("DM_NVN_BARRIER_HEAP"); m = !(e && !strcmp(e, "0")); if (!m) MLOG("DM_NVN_BARRIER_HEAP=0: while image heaps are alive, draw passes end and begin with full barriers"); } return m || !g_image_heap_n; }
+static int g_last_end_relaxed, g_game_barrier;   // the last encoder ended was a draw pass with the relaxed end barrier (nothing else since); the bits of the game's nvnCommandBufferBarrier calls since the last draw pass began
+// Whether the game's barriers since the last draw pass began (g_game_barrier: their bits) need the next pass's full barrier. NVN's ORDER_FRAGMENTS (and its tiled form) makes later
+// fragment work wait for earlier work, while later primitives may start at once; INVALIDATE_TEXTURE / SHADER make the writes visible to that ordered work. The relaxed end barrier
+// of a draw pass orders its vertex and fragment stages before the fragment, dispatch and copy stages of later work with the device made visible, which is that much. Only
+// ORDER_PRIMITIVES (later vertex work after earlier work) and ORDER_INDIRECT_DATA (indirect arguments, read before the vertex stage) need the full one. Ocarina of Time issues about
+// 60 barriers a frame between its passes (bits 0x12: fragments and texture invalidation), and every one put the next pass behind a full barrier. DM_NVN_BARRIER_GAME_BITS=0: any
+// game barrier gives the next pass the full barrier, as before
+static int bar_game_full(void) { static int m = -1; if (m < 0) { const char *e = getenv("DM_NVN_BARRIER_GAME_BITS"); m = !(e && !strcmp(e, "0")); if (!m) MLOG("DM_NVN_BARRIER_GAME_BITS=0: every game barrier puts the next draw pass behind a full barrier"); }
+    return m ? (g_game_barrier & (NVN_BARRIER_ORDER_PRIMITIVES_BIT | NVN_BARRIER_ORDER_INDIRECT_DATA_BIT)) != 0 : g_game_barrier != 0; }
 static uint64_t g_bar_skip, g_bar_full;            // draw passes begun without / with the consumer barrier (DM_NVN_BARRIER=game)
 static void gp_end(id e);
 // An encoder's end barrier flushes to the device coherence point only. MTL4VisibilityOptionResourceAlias (aliased virtual addresses: overlapping large-pool chunks, image family heaps,
@@ -1406,7 +1422,7 @@ static inline void m4_end(id e) {
     static int end_alias = -1; if (end_alias < 0) end_alias = sw_mode("DM_NVN_END_ALIAS", 0);
     MTL4VisibilityOptions vis = e == g_blit && g_blit_alias ? blit_vis() : end_alias && sw_on(end_alias) ? resource_vis() : MTL4VisibilityOptionDevice; if (e == g_blit) g_blit_alias = 0;
     if ([e conformsToProtocol:@protocol(MTL4CommandEncoder)]) [(id<MTL4CommandEncoder>)e barrierAfterStages:MTLStageAll beforeQueueStages:MTLStageAll visibilityOptions:vis];
-    [e endEncoding]; g_last_end_relaxed = 0; cm_enc_mark(-1);
+    [e endEncoding]; g_last_end_relaxed = 0; g_end_heap = 0; cm_enc_mark(-1);
 }
 // DM_NVN_BARRIER=game (default the profile's draw_barriers, full unless it says game): draw passes are ordered by the game's own barriers. A draw pass ends with a barrier from its vertex and fragment stages to the fragment, compute and copy stages of
 // later work, so the next pass's vertex work can overlap this pass's fragments (with the full barriers every pass waited for the previous one to finish completely: about 350 passes a frame in Breath of
@@ -1416,6 +1432,10 @@ static inline void m4_end(id e) {
 static int sw_mode(const char *name, int dflt); static inline int sw_on(int m);
 static int barrier_game(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_BARRIER"); v = e && !strncmp(e, "ab", 2) ? sw_mode("DM_NVN_BARRIER", 0) : e ? !strcmp(e, "game") : DM_GAME_DRAW_BARRIERS_GAME; if (v == 1) MLOG("DM_NVN_BARRIER=game: draw passes are ordered by the game's own barriers (fragment work still has barriers between passes; vertex work may overlap the previous pass's fragments)"); } return sw_on(v); }
 void mtl_barrier_stats(uint64_t *skip, uint64_t *full) { *skip = g_bar_skip; *full = g_bar_full; }
+// Why draw passes began with the full consumer barrier (DM_NVN_BARRIER=game): [0] the encoder before was not a draw pass that ended relaxed (compute, copies, uploads, a scaler,
+// the frame's first pass), [1] a game barrier since, [2] image heaps (resolution families) alive, [3] the game barrier mode off. A pass counts under the first that holds
+static uint64_t g_bar_why[4];
+void mtl_barrier_why(uint64_t w[4]) { for (int i = 0; i < 4; i++) w[i] = g_bar_why[i]; }
 uint64_t mtl_cut_count(void);
 // DM_NVN_GPUPROF=first frame[-last frame] (diagnostic): GPU time of every encoder of the main command buffers in those frames. A relaxed timestamp is written into a counter heap when an
 // encoder begins (before its first draw or dispatch) and when it ends (after its fragment stage); nothing is serialized beyond the barriers the replay already sets, so the frame runs
@@ -1496,13 +1516,13 @@ static void gp_report(int n, gp_lab *lab, uint64_t frame) {   // the frame's las
 }
 static inline id<MTL4RenderCommandEncoder> enc_r_begin_pass(MTL4RenderPassDescriptor *d) { g_cm_enc++; cm_enc_mark(2);   // the draw passes (rp_begin_ex); see barrier_game
     id<MTL4RenderCommandEncoder> e = [g_cb renderCommandEncoderWithDescriptor:d]; cm_enc_mark(0);
-    if (g_last_end_relaxed && !g_game_barrier && barrier_game() && !g_image_heap_n) g_bar_skip++;
-    else { [e barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:resource_vis()]; g_bar_full++; }
+    if (g_last_end_relaxed && !bar_game_full() && barrier_game() && bar_heap_ok()) g_bar_skip++;
+    else { [e barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:resource_vis()]; g_bar_full++; g_bar_why[!barrier_game() ? 3 : !g_last_end_relaxed ? (g_end_heap ? 2 : 0) : bar_game_full() ? 1 : 2]++; }
     g_game_barrier = 0;
     [e setArgumentTable:g_vt atStages:MTLRenderStageVertex]; [e setArgumentTable:g_ft atStages:MTLRenderStageFragment]; gp_begin(e, 'R', d); return e;
 }
 static inline void enc_r_end_pass(id e) {
-    if (!barrier_game() || g_image_heap_n) { m4_end(e); return; }
+    if (!barrier_game() || !bar_heap_ok()) { m4_end(e); g_end_heap = barrier_game(); return; }
     gp_end(e); [(id<MTL4CommandEncoder>)e barrierAfterStages:MTLStageVertex | MTLStageMesh | MTLStageFragment beforeQueueStages:MTLStageFragment | MTLStageDispatch | MTLStageBlit visibilityOptions:resource_vis()];
     [e endEncoding]; g_last_end_relaxed = 1;
 }
@@ -14502,7 +14522,7 @@ void mtl_exec(const uint8_t *p) {
                 PD("I %llu barrier bits %#x%s", g_stat_pass, bits, split ? ": ends the pass (shader writes)" : order ? " (render pass open; a later shader write is ordered after its draws)" : g_enc ? " (render pass open)" : "");
                 if (split) { rp_end(); static int once; if (!once++) MLOG("a game barrier (bits %#x) after shader writes in a draw pass: the pass ends there (first case pass %llu)", bits, (unsigned long long)g_stat_pass); }
                 else if (order) g_pass_order |= (bits & NVN_BARRIER_ORDER_PRIMITIVES_BIT ? 1 : 0) | (bits & (NVN_BARRIER_ORDER_FRAGMENTS_BIT | NVN_BARRIER_ORDER_FRAGMENTS_TILED_BIT) ? 2 : 0);
-                if (bits) { g_game_barrier = 1; g_fb_bar++; } break; }   // g_fb_bar: snapshots taken before it are stale (see fb_prepare)
+                if (bits) { g_game_barrier |= bits; g_fb_bar++; } break; }   // g_fb_bar: snapshots taken before it are stale (see fb_prepare)
             case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL: state_op(h.op, a); break;
             default: break;
         }

@@ -1,0 +1,36 @@
+# Game profile of Darkest Dungeon (Switch, base game 1.0.2 = v0).
+# Red Hook Studios / Sickhead Games, OpenGL 4.5 through EGL, SDK 3.6.0.
+# Shaders are GLSL 1.20 that the game puts together at run time from RomFS shaders/*.glsl
+# and main's video shaders: captured on the Mac (gl_capture.tsv) and translated by gl_shaders.py.
+
+# ---- Identity ----
+title_id	01008A700989A000
+program_id	01008A700989A000
+
+# ---- App ----
+name	Darkest Dungeon
+ipa	DarkestDungeon.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v0	1.0.2	main=92ffc7270abf9f7cce236722a2279614	subsdk0=6f819dc7432d467a7c90632def177932	sdk=8ceabb1750539c3874cc9fab45cab335
+package	v0
+shader_versions	v0
+
+# ---- Files ----
+# subsdk1 is NintendoSDK_OpenGL: the host's GL layer (hle_gl.m) supplies OpenGL functions directly
+modules	main subsdk0 sdk
+romfs_marker	audio/secondary_banks/voiceover.bank
+zip_store	.05:.bank:.mp4:.png:.tga:.metallib
+
+# ---- Memory ----
+# main never sets a heap (its memory is its own bss): a 256 MB heap region
+mem_reserve	0x40000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 0 MB of system resource: IsVirtualAddressMemoryEnabled is false
+sys_resource	0x0
+
+# ---- Shader split ----
+shader_note	Darkest Dungeon has no NVN shaders (its GLSL shaders go through the GL layer)

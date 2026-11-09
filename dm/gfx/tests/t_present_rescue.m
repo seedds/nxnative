@@ -32,6 +32,7 @@ int test_focus = 1;
 int test_fullscreen;
 int test_variable_refresh;
 int test_game_fps = 60;
+int test_covered;
 uint64_t test_focus_since;
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
@@ -80,6 +81,16 @@ static void backoff(void) {
         CHECK("retry delay doubles and stops at 60 s", g_rescue_back_at - test_now == seconds[i] * 1000000000ull);
         test_now = g_rescue_back_at; link_sync();
     }
+}
+static void covered(void) {   // a retry due while macOS reports the window covered waits until it is visible: a link made then stayed at 30 Hz after (link_sync)
+    reset(); g_link = nil; wait_frame(); CHECK("a stall while covered and active triggers rescue", g_rescue_mode == 1);
+    test_covered = 1; test_now = g_rescue_back_at; link_sync(); CHECK("no retry while the window is covered", g_rescue_mode == 1);
+    test_now += 10000000000ull; link_sync(); CHECK("no retry 10 s later while still covered", g_rescue_mode == 1);
+    test_covered = 0; link_sync(); CHECK("retry as soon as the window is visible", !g_rescue_mode && g_dm_present_link == 1);
+    CHECK("that retry starts a fresh stall clock", !g_stall_t0 && g_link_tick_ns == test_now);
+    reset(); g_link = nil; wait_frame(); test_covered = 1; g_dm_present_link = 0; link_sync();
+    CHECK("a new runtime mode ends rescue while covered too", !g_rescue_mode);
+    test_covered = 0; g_dm_present_link = 1;
 }
 static void settings(void) {
     for (int mode = 0; mode <= 2; mode += 2) {
@@ -161,7 +172,7 @@ static void metal_lifecycle(void) {
 int main(int argc, char **argv) { @autoreleasepool {
     alarm(10); setbuf(stdout, NULL);
     if (argc > 2 || (argc == 2 && strcmp(argv[1], "--metal"))) return 2;
-    thresholds(); backoff(); settings(); lifecycle(); latency(); thirty();
+    thresholds(); backoff(); covered(); settings(); lifecycle(); latency(); thirty();
     if (argc == 2) metal_lifecycle();
     printf("present rescue: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

@@ -63,6 +63,36 @@ class ArchiveRestartTests(unittest.TestCase):
                     self.assertEqual((Path(folder) / 'compacting').exists(), phase == 'seed', phase)
 
 
+    def test_old_names_compacted_once(self):
+        with tempfile.TemporaryDirectory(prefix='pso-oldname-') as folder:
+            env = dict(os.environ, DM_PSO_MTL4='1', MTL_DEBUG_LAYER='1')
+            for name in ('DM_GPU_CAPTURE', 'MTL_CAPTURE_ENABLED', 'DM_TEST_ARCHIVE_CONSTANTS', 'DM_TEST_ARCHIVE_MIXED'):
+                env.pop(name, None)
+            # nine files of one base, renamed as an archive from before the count; one compaction, then none
+            for phase, files in (('seed', 9), ('replay', 1), ('verify', 1)):
+                if phase == 'replay':
+                    for path in Path(folder).glob('*-*.mtl4a'):
+                        path.rename(path.with_name(path.name.split('-')[0] + '.mtl4a'))
+                    self.assertEqual(len(list(Path(folder).glob('*-*.mtl4a'))), 0)
+                result = subprocess.run([executable, '--oldname-' + phase, folder],
+                                        env=env, capture_output=True, text=True, timeout=60)
+                self.assertEqual(result.returncode, 0, phase + '\n' + result.stdout + result.stderr)
+                self.assertEqual(len(list(Path(folder).glob('*.mtl4a'))), files, phase)
+
+    def test_tier_compaction_restart(self):
+        with tempfile.TemporaryDirectory(prefix='pso-tier-') as folder:
+            env = dict(os.environ, DM_PSO_MTL4='1', MTL_DEBUG_LAYER='1')
+            for name in ('DM_GPU_CAPTURE', 'MTL_CAPTURE_ENABLED', 'DM_TEST_ARCHIVE_CONSTANTS', 'DM_TEST_ARCHIVE_MIXED'):
+                env.pop(name, None)
+            # a full period's file and nine of one base; the nine become a file per period of 4; then nothing to compact
+            for phase, files in (('seed', 10), ('replay', 4), ('verify', 4)):
+                result = subprocess.run([executable, '--tier-' + phase, folder],
+                                        env=env, capture_output=True, text=True, timeout=60)
+                self.assertEqual(result.returncode, 0, phase + '\n' + result.stdout + result.stderr)
+                self.assertEqual(len(list(Path(folder).glob('*.mtl4a'))), files, phase)
+
+
+
 if __name__ == '__main__':
     executable = sys.argv.pop(1)
     unittest.main()

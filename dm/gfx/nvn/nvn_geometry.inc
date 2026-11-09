@@ -596,7 +596,7 @@ static id<MTLRenderPipelineState> mtk_build(const pso_key *k, NvShader *ts, NvSh
     if (m4) {
         id<MTLRenderPipelineState> ps = nil; int from_run = 0;
         for (id<MTL4Archive> a in g_arch4p) if ((ps = [a newRenderPipelineStateWithDescriptor:m4 error:nil])) break;   // a period of mesh pipelines alone is a p file (no vertex layout)
-        if (!ps) for (id<MTL4Archive> a in g_arch4) if ((ps = [a newRenderPipelineStateWithDescriptor:m4 error:nil])) { from_run = 1; break; }
+        if (!ps) for (id<MTL4Archive> a in g_arch4) if ((ps = [a newRenderPipelineStateWithDescriptor:m4 error:nil])) { from_run = arch_compact_takes(a); break; }   // a file this compaction takes
         if (ps) {
             g_mtk_arch++; if (archived) *archived = 1;
             if (from_run && g_compact_enabled && atomic_load(&g_warm_running)) arch_harvest(m4, 1);

@@ -132,6 +132,7 @@ One row per profile; the notes are each profile's `README.md`.
 | [ŌKAMI HD](0100276009872000/README.md) | `0100276009872000` | 1.0.0 (base) | 4.5.0 | Clover Studio's PS2 engine, remastered; CRIWARE | NVN |
 | [Paper Mario: The Origami King](0100A3900C3E2000/README.md) | `0100A3900C3E2000` | 1.0.1 | 8.3.1 | Intelligent Systems' engine on NintendoWare | NVN |
 | [Paper Mario: The Thousand-Year Door](0100ECD018EBE000/README.md) | `0100ECD018EBE000` | 1.0.1 | 15.3.2 | Intelligent Systems' engine on NintendoWare | NVN |
+| [Pentiment](010036F01AE9E000/README.md) | `010036F01AE9E000` | 1.3.2 | 16.2.0 | Unity 2021.3.23f1 IL2CPP, FMOD | NVN |
 | [Patrick's Parabox](0100E44016C22000/README.md) | `0100E44016C22000` | 1.0.1 | 13.3.7 | Unity 2020.3.30f1 IL2CPP | NVN |
 | [Persona 4 Golden](010062B01525C000/README.md) | `010062B01525C000` | 1.0.2 | 14.3.0 | Atlus in-house (CRI middleware) | NVN |
 | [Persona 5 Royal](01005CA01580E000/README.md) | `01005CA01580E000` | 1.0.2 | 13.3.2 | Atlus GFD / Needle (CRI middleware) | NVN |

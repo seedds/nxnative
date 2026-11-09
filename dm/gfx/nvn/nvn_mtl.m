@@ -6188,7 +6188,16 @@ void mtl_reg_tex(int tid, const tex_t *t, const view_t *v) {
     int same = t && rr->ok && rr->has_v == (v != NULL) && !memcmp(&rr->t, t, sizeof *t) && (!v || !memcmp(&rr->v, v, sizeof *v));
     if (rr->gone) { rr->gone = 0; reg_bump(id_, 0); }   // registered again (pool storage made anew), even with the same data
     if (!same) {
-        reg_bump(id_, 0); pool_seen_clear(id_);
+        // An ID whose texture a shader has read (pool_seen) keeps that mark when the game puts another texture into it: the shaders go on reading the ID, so the next walk makes the new texture
+        // under the read budget (POOL_REQ_BYTES). Without the mark a walk makes it only within the walk's room (pool_room), which is 0 once pool_budget() is spent: Ocarina of Time allocates
+        // 15-18 GB against a 909 MB budget on a 24 GB Mac, so there an unread ID holds the dummy until a shader reads it. The game replaces the 17 textures of a material set at once (3-7 MB each)
+        // when the player nears the castle town wall, and registers each step twice, 4-5 frames apart: with the mark cleared, each registration's first read found the dummy, and the wall, the
+        // rocks and the trees drew black for one frame, twice. Only an ID that held a made texture keeps the mark (retired: a streaming replacement finalizes the old texture first, which drops
+        // its view); one that held none, or is emptied, is cleared as before. A texture streamed into an ID no shader has read yet still reads the dummy once (issue #1969).
+        // DM_NVN_POOL_SEEN_KEEP=0: clear it on every change, as before
+        static int keep = -1; if (keep < 0) { const char *e = getenv("DM_NVN_POOL_SEEN_KEEP"); keep = !(e && !strcmp(e, "0")); }
+        int keep_it = keep && t && rr->ok && (rr->retired || rr->view);
+        reg_bump(id_, 0); if (!keep_it) pool_seen_clear(id_);
         treg_unlink(id_); treg_drop_views(rr);
         rr->tt1 = 0;
         rr->ok = t != NULL; if (t) rr->t = *t; rr->has_v = v != NULL; if (v) rr->v = *v;

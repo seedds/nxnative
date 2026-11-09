@@ -409,3 +409,13 @@ coverage:
 	rm -rf $(B)/cov/prof
 	LLVM_PROFILE_FILE="$(call cov_profile,$(B)/cov)" $(MAKE) -i B=$(B)/cov SAN="$(COV_FLAGS)" run
 	@$(call cov_export,$(B)/cov)
+
+# Mac capture helper: bounded log IO and settings, no game assets or GPU required.
+$(B)/t_capture_mac: t_capture_mac.m ../capture_mac.h | $(B)
+	$(CLANG) -fobjc-arc -Wall -Wextra -framework Foundation $< -o $@
+.PHONY: capture-mac
+capture-mac: $(B)/t_capture_mac
+	$<
+
+# Exercise the capture helpers in the ordinary host test command.
+run: capture-mac

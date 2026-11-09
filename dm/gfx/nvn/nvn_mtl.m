@@ -15000,7 +15000,7 @@ void mtl_exec(const uint8_t *p) {
 // ---------- Present: draw the swapchain texture to the CAMetalLayer; optional screenshot ----------
 static id<MTLRenderPipelineState> g_blit_pso; static MTLPixelFormat g_blit_fmt;
 static id<MTLSamplerState> g_blit_samp;
-static uint64_t g_present_n;
+static _Atomic uint64_t g_present_n;   // read by screenshot requests and telemetry off the present thread
 uint64_t mtl_present_count(void) { return g_present_n; }   // Actual present count (heat attribution DM_HEAT computes the present frame rate)
 void mtl_res_snapshot(mtl_res_count *out) {
     memset(out, 0, sizeof *out);

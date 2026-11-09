@@ -303,7 +303,7 @@ static void pads_release(void) {
     if (g_merge) { if (merge_pads_left(nil)) dm_pad_set(0, 0, 0, 0, 0); return; }
     for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p]) dm_pad_set_player(p, 0, 0, 0, 0, 0);
     for (hid_pad *d = g_hidpads; d; d = d->next) { int p = pad_slot_of(&g_slots, d); if (p >= 0) dm_pad_set_player(p, 0, 0, 0, 0, 0); }
-    for (s2_pad *d = dm_switch2_pads(); d; d = d->next) { int p = s2pad_player(d); if (p >= 0) dm_pad_set_player(p, 0, 0, 0, 0, 0); }
+    for (s2_pad *d = dm_switch2_pads(); d; d = d->next) { int p = s2pad_player(d); if (p >= 0) { dm_pad_set_player(p, 0, 0, 0, 0, 0); dm_joy_set(p, 0, 0, 0, 0); dm_joy_set(p, 1, 0, 0, 0); } }
 }
 static void hidpad_motion_clear(void) {   // the gyro of identical Pro Controllers read from IOKit (pad_hid_mac.h)
     for (hid_pad *d = g_hidpads; d; d = d->next) { int p = d->twin && hidpad_is_pro(d) ? pad_slot_of(&g_slots, d) : -1; if (p >= 0) dm_motion_clear_hid(p); }
@@ -379,6 +379,7 @@ static void merge_rumble_to_s2(int on) {
     if (!g_merge || g_merge_s2_rumble == on) return;
     g_merge_s2_rumble = on; dm_haptics_apple_set_sink(0, on ? dm_switch2_rumble : NULL);
 }
+static int s2pad_blocked(void) { return !g_input_on || hq_blocks_input(g_hq.phase) || cp_blocks_input(g_cp.phase); }   // no input to the game (focus lost, the Home or controller prompt up): its Joy-Con states are not sent (pad_switch2_apple.m)
 static void s2pad_read(s2_pad *d) {
     hq_poll();   // Home and the prompt's A and B come from these pads too
     if (!g_input_on || hq_blocks_input(g_hq.phase)) return;
@@ -589,7 +590,7 @@ static void pads_start(void) {
     hq_log_setting();
     dm_motion_pro_start(pro_devices_changed);
     hidpad_start();
-    static const dm_switch2_front s2front = {s2pad_attach, s2pad_detach, s2pad_read, s2pad_player};
+    static const dm_switch2_front s2front = {s2pad_attach, s2pad_detach, s2pad_read, s2pad_player, s2pad_blocked};
     dm_switch2_start(&s2front);
 }
 

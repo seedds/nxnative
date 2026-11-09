@@ -296,8 +296,56 @@ static int player_of(uint32_t id) {   // the reported player on npad id; -1 when
     if (id == connected_id()) return 0;
     return id > 0 && id < DM_PLAYERS && reported((int)id) ? (int)id : -1;
 }
-static uint32_t style_for_player(uint32_t id, int p) { return p < 0 ? 0 : id == NPAD_HANDHELD ? STYLE_HANDHELD : STYLE_FULLKEY; }
-static uint32_t style_of(uint32_t id) { return style_for_player(id, player_of(id)); }
+// Joy-Cons as devices (dm_joy_attach, dm_joy_set): a pad that holds Joy-Cons is shown to the game in the way the game asked for. Docked (console mode): both Joy-Cons of a pad make one dual npad
+// (JoyDual: both buttons and both sticks, two six-axis sensors) unless the game asked for single assignment on that npad (SetNpadJoyAssignmentModeSingle), when the left Joy-Con stays there
+// (JoyLeft) and the right one takes the lowest free supported npad (JoyRight); one Joy-Con alone is JoyLeft or JoyRight. A game that supports none of these styles gets the pad's merged
+// state as a full-key controller, as before. In handheld mode player 1 stays as it was (handheld).
+enum { KIND_NONE = 0, KIND_PAD, KIND_DUAL, KIND_LEFT, KIND_RIGHT };
+typedef struct { int pad, kind; } npad_ref;
+static _Atomic uint32_t g_joy_sides[DM_PLAYERS];
+static _Atomic uint64_t g_joy_btn[DM_PLAYERS][2], g_joy_latch[DM_PLAYERS][2], g_joy_axes[DM_PLAYERS][2];
+static _Atomic uint32_t g_single_mask;               // bit id: the game asked for single assignment on npad No(id + 1)
+static _Atomic uint32_t g_single_keep[DM_PLAYERS];   // 1: the left Joy-Con stays on that npad, 2: the right one, 0: either (the left)
+static uint32_t g_styles_supported = 0xffffffffu;
+static int joy_active(int p) { return p >= 0 && p < DM_PLAYERS && atomic_load(&g_joy_sides[p]) && !(p == 0 && dm_opmode() == 0); }
+static int joy_split(int p) { return atomic_load(&g_joy_sides[p]) == 3 && (atomic_load(&g_single_mask) >> p & 1) && (g_styles_supported & (STYLE_JOYLEFT | STYLE_JOYRIGHT)) == (STYLE_JOYLEFT | STYLE_JOYRIGHT); }
+// The npad the other Joy-Con of pad p takes when the pair is split: the lowest supported npad No2..No8 that has no player of its own and is not another split's; -1 for none
+static int split_target(int p) {
+    uint32_t taken = atomic_load(&g_players) | 1u; int mine = -1;
+    for (int q = 0; q <= p && q < DM_PLAYERS; q++) if (joy_active(q) && joy_split(q)) {
+        int t = -1; for (int i = 1; i < DM_PLAYERS; i++) if (!(taken >> i & 1) && (atomic_load(&g_ids_supported) & id_bit((uint32_t)i))) { t = i; break; }
+        if (t >= 0) taken |= 1u << t;
+        if (q == p) mine = t;
+    }
+    return mine;
+}
+static npad_ref npad_resolve(uint32_t id) {
+    npad_ref r = {-1, KIND_NONE};
+    int pl = player_of(id);
+    if (pl >= 0) {
+        r.pad = pl; r.kind = KIND_PAD;
+        if (joy_active(pl)) {
+            uint32_t s = atomic_load(&g_joy_sides[pl]);
+            if (s == 3) r.kind = joy_split(pl) ? (atomic_load(&g_single_keep[pl]) == 2 ? KIND_RIGHT : KIND_LEFT) : (g_styles_supported & STYLE_JOYDUAL ? KIND_DUAL : KIND_PAD);
+            else r.kind = s == 1 ? KIND_LEFT : KIND_RIGHT;
+            if (r.kind == KIND_LEFT && !(g_styles_supported & STYLE_JOYLEFT)) r.kind = KIND_PAD;
+            if (r.kind == KIND_RIGHT && !(g_styles_supported & STYLE_JOYRIGHT)) r.kind = KIND_PAD;
+        }
+    } else if (id > 0 && id < DM_PLAYERS) {   // the other half of a split pair
+        for (int p = 0; p < DM_PLAYERS; p++) if (joy_active(p) && joy_split(p) && split_target(p) == (int)id) { r.pad = p; r.kind = atomic_load(&g_single_keep[p]) == 2 ? KIND_LEFT : KIND_RIGHT; break; }
+    }
+    return r;
+}
+static uint32_t kind_style(npad_ref r, uint32_t id) {
+    switch (r.kind) {
+    case KIND_PAD: return id == NPAD_HANDHELD ? STYLE_HANDHELD : STYLE_FULLKEY;
+    case KIND_DUAL: return STYLE_JOYDUAL;
+    case KIND_LEFT: return STYLE_JOYLEFT;
+    case KIND_RIGHT: return STYLE_JOYRIGHT;
+    default: return 0;
+    }
+}
+static uint32_t style_of(uint32_t id) { return kind_style(npad_resolve(id), id); }
 static int32_t ax(uint64_t v, int i) { return (int16_t)(v >> (16 * i)); }
 static int32_t pick(int32_t a, int32_t b) { return (a < 0 ? -a : a) >= (b < 0 ? -b : b) ? a : b; }   // whichever of two sources is deflected more
 
@@ -305,6 +353,19 @@ static int32_t pick(int32_t a, int32_t b) { return (a < 0 ? -a : a) >= (b < 0 ? 
 // service does. The front end reports from its own thread, where an event cannot be bound, so only a bound one is signalled (one the game destroyed is not bound any more)
 static void *_Atomic g_style_ev[DM_PLAYERS];
 static void style_changed(uint32_t id) { void *ev = id < DM_PLAYERS ? atomic_load(&g_style_ev[id]) : NULL; if (ev) hle_signal_bound_system_event(ev); }
+// Joy-Cons as devices (dm_input.h): which a pad holds, then each one's buttons and stick. The style events tell the game that its npads changed
+void dm_joy_attach(int p, uint32_t sides) {
+    if (p < 0 || p >= DM_PLAYERS) return;
+    sides &= 3;
+    if (atomic_exchange(&g_joy_sides[p], sides) == sides) return;
+    if (!sides) for (int s = 0; s < 2; s++) { atomic_store(&g_joy_btn[p][s], 0); atomic_store(&g_joy_axes[p][s], 0); }
+    for (uint32_t i = 0; i < DM_PLAYERS; i++) style_changed(i);
+}
+void dm_joy_set(int p, int side, uint64_t buttons, int32_t sx, int32_t sy) {
+    if (p < 0 || p >= DM_PLAYERS || (side != 0 && side != 1)) return;
+    uint64_t old = atomic_exchange(&g_joy_btn[p][side], buttons); atomic_fetch_or(&g_joy_latch[p][side], buttons & ~old);
+    atomic_store(&g_joy_axes[p][side], pack(sx, sy, 0, 0));
+}
 static void note_merged(void) {   // logs the players whose npad the game does not support, when that changes
     static _Atomic uint32_t last; uint32_t m = unsupported_players(), one = (uint32_t)one_player();
     if (atomic_exchange(&last, m | one << 31) == (m | one << 31)) return;
@@ -427,11 +488,37 @@ static void rec_start(void) {
     LOG("DM_REC: recording player 1's input to %s as DM_KEYS steps in presented frames", e);
 }
 
+// Stick direction pseudo-buttons (NpadButton 16..23) from the sticks' values
+static uint64_t stick_dirs(const int32_t a[4]) {
+    uint64_t b = 0;
+    if (a[0] < -STICK_THRESH) b |= 1u << 16;
+    if (a[1] > STICK_THRESH) b |= 1u << 17;
+    if (a[0] > STICK_THRESH) b |= 1u << 18;
+    if (a[1] < -STICK_THRESH) b |= 1u << 19;
+    if (a[2] < -STICK_THRESH) b |= 1u << 20;
+    if (a[3] > STICK_THRESH) b |= 1u << 21;
+    if (a[2] > STICK_THRESH) b |= 1u << 22;
+    if (a[3] < -STICK_THRESH) b |= 1u << 23;
+    return b;
+}
+// A Joy-Con style npad (JoyDual: both Joy-Cons of pad r.pad; JoyLeft / JoyRight: one): each Joy-Con's own buttons, rail buttons included, and its own stick, in the stick field of its side
+static void fill_joy(NpadState *s, npad_ref r) {
+    uint64_t b = 0; int32_t a[4] = {0}; int left = r.kind != KIND_RIGHT, right = r.kind != KIND_LEFT;
+    for (int side = 0; side < 2; side++) if (side == 0 ? left : right) {
+        b |= atomic_load(&g_joy_btn[r.pad][side]) | atomic_exchange(&g_joy_latch[r.pad][side], 0);
+        uint64_t v = atomic_load(&g_joy_axes[r.pad][side]); a[2 * side] = ax(v, 0); a[2 * side + 1] = ax(v, 1);
+    }
+    s->lx = a[0]; s->ly = a[1]; s->rx = a[2]; s->ry = a[3];
+    s->buttons = (b & 0x0f00ffffull) | stick_dirs(a);
+    s->attributes = ATTR_CONNECTED | (left ? ATTR_LEFT_CONN : 0) | (right ? ATTR_RIGHT_CONN : 0);
+}
 static void fill(NpadState *s, uint32_t id, uint32_t style) {
     memset(s, 0, sizeof *s);
     s->sampling = atomic_fetch_add(&g_sampling, 1) + 1;
-    int pl = player_of(id);
-    if (!(style_for_player(id, pl) & style)) return;   // no controller of this id / style: attributes = 0
+    npad_ref ref = npad_resolve(id);
+    if (!(kind_style(ref, id) & style)) return;   // no controller of this id / style: attributes = 0
+    if (ref.kind >= KIND_DUAL) { fill_joy(s, ref); return; }
+    int pl = ref.pad;
     // Player 1: keyboard / touch, script, its controller and the players merged into it; another player: its own controller path
     uint32_t src = pl ? 1u << pl : 1u | merged_players();
     uint64_t b = 0; int32_t a[4] = {0};
@@ -511,7 +598,6 @@ HLE_FORCE("_ZN2nn3hid22SetSupportedNpadIdTypeEPKjm", "supported controller ids; 
     for (int p = 1; p < DM_PLAYERS; p++) if ((uint32_t)reported(p) != (was >> p & 1)) style_changed((uint32_t)p);
     note_merged();
 }
-static uint32_t g_styles_supported = 0xffffffffu;
 HLE_FORCE("_ZN2nn3hid24SetSupportedNpadStyleSetENS_4util10BitFlagSetILi32ENS0_12NpadStyleTagEEE", "supported controller styles; the host records them and picks the reported style from them", void, h_hid_SetStyles, uint32_t styles) {
     if (styles != g_styles_supported) LOG("hid supported controller styles %#x", styles); g_styles_supported = styles; }
 HLE_FORCE("_ZN2nn3hid15GetNpadStyleSetERKj", "controller style query; follows DM_OPMODE", uint32_t, h_hid_GetStyle, const uint32_t *id) { return style_of(*id); }
@@ -523,8 +609,18 @@ HLE_FORCE("_ZN2nn3hid13GetNpadStatesEPNS0_17NpadJoyRightStateEiRKj", "right Joy-
 HLE_FORCE("_ZN2nn3hid14DisconnectNpadERKj", "disconnect a controller; ignored by the host", void, h_hid_Disconnect, const uint32_t *id) { (void)id; }
 static uint32_t g_hold_type;
 HLE_FORCE("_ZN2nn3hid18SetNpadJoyHoldTypeENS0_15NpadJoyHoldTypeE", "Joy-Con hold orientation; the host only records it", void, h_hid_HoldType, int t) { g_hold_type = (uint32_t)t; }
-HLE_FORCE("_ZN2nn3hid20GetNpadJoyAssignmentERKj", "Joy-Con assignment: dual", int, h_hid_GetJoyAssign, const uint32_t *id) { (void)id; return 0; }
-HLE_FORCE("_ZN2nn3hid30SetNpadJoyAssignmentModeSingleERKj", "Joy-Con single assignment; ignored by the host", void, h_hid_JoySingle, const uint32_t *id) { (void)id; }
+// The game's choice of how the Joy-Cons of a pad are used (npad_resolve): single, left or right staying on the npad, or dual. NpadJoyDeviceType: Left 0, Right 1; NpadJoyAssignmentMode: Dual 0, Single 1
+static void joy_assign(uint32_t id, int single, int keep) {
+    if (id >= DM_PLAYERS) return;
+    uint32_t was = atomic_load(&g_single_mask), now = single ? was | 1u << id : was & ~(1u << id);
+    atomic_store(&g_single_keep[id], (uint32_t)keep);
+    if (atomic_exchange(&g_single_mask, now) != now) {
+        LOG("hid: npad %u: %s Joy-Con assignment%s", id, single ? "single" : "dual", single && keep ? (keep == 1 ? " (left)" : " (right)") : "");
+        for (uint32_t i = 0; i < DM_PLAYERS; i++) style_changed(i);
+    }
+}
+HLE_FORCE("_ZN2nn3hid20GetNpadJoyAssignmentERKj", "Joy-Con assignment: what the game set (dual by default)", int, h_hid_GetJoyAssign, const uint32_t *id) { return *id < DM_PLAYERS && (atomic_load(&g_single_mask) >> *id & 1); }
+HLE_FORCE("_ZN2nn3hid30SetNpadJoyAssignmentModeSingleERKj", "Joy-Con single assignment: the pair splits, the left Joy-Con stays", void, h_hid_JoySingle, const uint32_t *id) { joy_assign(*id, 1, 0); }
 HLE_FORCE("_ZN2nn3hid18SwapNpadAssignmentERKjS2_", "swap controller ids; ignored by the host", void, h_hid_Swap, const uint32_t *a, const uint32_t *b) { (void)a; (void)b; }
 HLE_FORCE("_ZN2nn3hid21StartLrAssignmentModeEv", "L/R assignment mode; ignored by the host", void, h_hid_LrStart, void) {}
 HLE_FORCE("_ZN2nn3hid20StopLrAssignmentModeEv", "L/R assignment mode; ignored by the host", void, h_hid_LrStop, void) {}
@@ -537,9 +633,18 @@ HLE_FORCE("_ZN2nn3hid20StopLrAssignmentModeEv", "L/R assignment mode; ignored by
 // is at the controllers: the host answers at once, as the player closing it. An OK with fewer players is an answer a Switch never gives: Mario Kart 8 Deluxe asks for two in 2P
 // and opened the applet again every few frames on it (GitHub issue #550)
 #define RES_CTRL_CANCELED (202u | 3101u << 9)
-int dm_players_reported(void) { int n = 0; for (int p = 0; p < DM_PLAYERS; p++) n += reported(p); return n; }
+int dm_players_reported(void) {   // a pair of Joy-Cons split into two npads is two players
+    int n = 0; for (int p = 0; p < DM_PLAYERS; p++) n += reported(p) + (reported(p) && joy_active(p) && joy_split(p) && split_target(p) >= 0);
+    return n;
+}
 static Result ctrl_support(int32_t *info, const int8_t *arg) {
     int count = dm_players_reported(), canceled = 0;
+    // Too few players, but a pair of Joy-Cons is two when each is held sideways (single assignment): the applet splits the pair, as the player does on a Switch, to reach the minimum
+    for (int p = 0; arg && count < arg[0] && p < DM_PLAYERS; p++)
+        if (reported(p) && joy_active(p) && atomic_load(&g_joy_sides[p]) == 3 && !(atomic_load(&g_single_mask) >> p & 1)) {
+            joy_assign((uint32_t)p, 1, 0);
+            if (joy_split(p) && split_target(p) >= 0) count++; else joy_assign((uint32_t)p, 0, 0);
+        }
     if (arg && arg[0] > count) {
         const char *keys = getenv("DM_KEYS"), *ctl = getenv("DM_CTL");
         int r = (keys && *keys) || (ctl && *ctl) ? -1 : front_ctrl_support(arg[0], arg[1]);   // blocks until the prompt closes; -1: no window
@@ -579,6 +684,7 @@ enum { MOTION_STALE_NS = 300000000 };
 typedef struct { pthread_mutex_t mu; motion_state st; uint64_t last_ns, received_ns, logged; } live_motion;
 static live_motion g_motion[DM_PLAYERS] = {[0 ... DM_PLAYERS - 1] = {.mu = PTHREAD_MUTEX_INITIALIZER}};
 static live_motion g_hid_motion[DM_PLAYERS] = {[0 ... DM_PLAYERS - 1] = {.mu = PTHREAD_MUTEX_INITIALIZER}};
+static live_motion g_joy_motion[DM_PLAYERS][2] = {[0 ... DM_PLAYERS - 1] = {[0 ... 1] = {.mu = PTHREAD_MUTEX_INITIALIZER}}};   // each Joy-Con's own sensor (dm_motion_set_joy)
 static live_motion g_phone_motion = {.mu = PTHREAD_MUTEX_INITIALIZER};
 static pthread_once_t g_motion_once = PTHREAD_ONCE_INIT;
 static motion_map g_motion_map; static float g_motion_gain = 0.5f; static int g_motion_off, g_motion_log, g_phone_mode;
@@ -590,12 +696,15 @@ static void motion_env(void) {
     g_motion_log = (e = getenv("DM_MOTION_LOG")) && atoi(e);
     e = getenv("DM_PHONE_MOTION"); g_phone_mode = !e || !strcmp(e, "auto") ? -1 : !!atoi(e);
 }
+static void motion_set_to(live_motion *m, int p, const float acc[3], const float rot[3], int source, uint64_t sample_ns);
 static void motion_set(int p, const float acc[3], const float rot[3], int source, uint64_t sample_ns) {
     if (p < 0 || p >= DM_PLAYERS || (source == 1 && p)) return;
+    motion_set_to(source == 1 ? &g_phone_motion : source == 2 ? &g_hid_motion[p] : &g_motion[p], p, acc, rot, source, sample_ns);
+}
+static void motion_set_to(live_motion *m, int p, const float acc[3], const float rot[3], int source, uint64_t sample_ns) {
     pthread_once(&g_motion_once, motion_env); if (g_motion_off) return;
     static motion_map identity = {{0, 1, 2}, {1, 1, 1}, 1, 1};
     // Each transport owns its orientation. HID batches carry three sample times; arrival time controls freshness, never their integration intervals.
-    live_motion *m = source == 1 ? &g_phone_motion : source == 2 ? &g_hid_motion[p] : &g_motion[p];
     uint64_t now = now_ns(), t = sample_ns ? sample_ns : now;
     if (!t || t > now || now - t > MOTION_STALE_NS) return;
     pthread_mutex_lock(&m->mu);
@@ -614,6 +723,13 @@ static void motion_set(int p, const float acc[3], const float rot[3], int source
 void dm_motion_set(int p, const float acc[3], const float rot[3]) { motion_set(p, acc, rot, 0, 0); }
 void dm_motion_set_switch(int p, const float acc[3], const float rot[3]) { motion_set(p, acc, rot, 1, 0); }
 void dm_motion_set_hid(int p, const float acc[3], const float rot[3], uint64_t t) { if (t) motion_set(p, acc, rot, 2, t); }
+void dm_motion_set_joy(int p, int side, const float acc[3], const float rot[3], uint64_t t) {
+    if (t && p >= 0 && p < DM_PLAYERS && (side == 0 || side == 1)) motion_set_to(&g_joy_motion[p][side], p, acc, rot, 2, t);
+}
+void dm_motion_clear_joy(int p, int side) {
+    if (p < 0 || p >= DM_PLAYERS || (side != 0 && side != 1)) return;
+    pthread_mutex_lock(&g_joy_motion[p][side].mu); g_joy_motion[p][side].last_ns = 0; pthread_mutex_unlock(&g_joy_motion[p][side].mu);
+}
 void dm_motion_clear(int p) {
     if (p < 0 || p >= DM_PLAYERS) return;
     pthread_mutex_lock(&g_motion[p].mu); g_motion[p].last_ns = 0; pthread_mutex_unlock(&g_motion[p].mu);
@@ -643,6 +759,11 @@ static int motion_live(int p, motion_state *out) {
     }
     if (newest) return 1;
     return !p && g_phone_mode < 0 && motion_copy(&g_phone_motion, out);
+}
+// One Joy-Con's sensor: its own stream while fresh, else the pad's merged one (a controller that reports no per-Joy-Con motion)
+static int motion_joy(int p, int side, motion_state *out) {
+    if (p >= 0 && p < DM_PLAYERS && (side == 0 || side == 1)) { pthread_once(&g_motion_once, motion_env); if (!g_motion_off && motion_copy(&g_joy_motion[p][side], out)) return 1; }
+    return motion_live(p, out);
 }
 static void six_sample_live(SixAxisState *s, int64_t samp, const motion_state *ms, int shakes) {
     memset(s, 0, sizeof *s);
@@ -674,9 +795,11 @@ static int six_states(SixAxisState *out, int n, uint32_t h) {
     if (n <= 0) return 0;
     if (!six_connected(h)) { memset(out, 0, sizeof *out * (size_t)n); return 0; }
     int64_t samp = (int64_t)(guest_ns() / SIX_PERIOD_NS);
-    int pl = player_of(h >> 8 & 0xff), shakes = pl == 0;
+    npad_ref ref = npad_resolve(h >> 8 & 0xff);
+    int pl = ref.kind >= KIND_DUAL ? ref.pad : player_of(h >> 8 & 0xff), shakes = pl == 0 && ref.kind < KIND_DUAL;
     motion_state ms;
-    if (motion_live(pl, &ms)) { for (int i = 0; i < n; i++) six_sample_live(&out[i], samp - i, &ms, shakes); return n; }
+    int live = ref.kind >= KIND_DUAL ? motion_joy(ref.pad, ref.kind == KIND_LEFT ? 0 : ref.kind == KIND_RIGHT ? 1 : (int)(h >> 16 & 1), &ms) : motion_live(pl, &ms);
+    if (live) { for (int i = 0; i < n; i++) six_sample_live(&out[i], samp - i, &ms, shakes); return n; }
     for (int i = 0; i < n; i++) six_sample(&out[i], samp - i, shakes);
     return n;
 }
@@ -733,11 +856,27 @@ HLE_FORCE("_ZN2nn3hid22GetSixAxisSensorStatesEPNS0_18SixAxisSensorStateEiRKNS0_1
           int, h_hid_SixStates, SixAxisState *out, int n, const uint32_t *h) { return six_states(out, n, *h); }
 // Vibration handles: byte 0 = SDK style index (FullKey 3, Handheld 4), byte 1 = npad id, byte 2 = motor.
 // See libnx hid.c _hidGetVibrationDeviceHandles. Only the styles this host connects are exposed.
-static uint32_t vib_targets(uint32_t h) {
-    unsigned type = h & 0xff, id = h >> 8 & 0xff, motor = h >> 16 & 0xff;
-    if (h >> 24 || motor > 1 || (type != 3 && type != 4)) return 0;
+// A Joy-Con style's handle (type 5 JoyDual, 6 JoyLeft, 7 JoyRight) reaches the pad's motor of its Joy-Con: the left one's is motor 0, the right one's motor 1, whichever npad the right one is on
+static uint32_t vib_targets(uint32_t h, int *motor) {
+    unsigned type = h & 0xff, id = h >> 8 & 0xff, dev = h >> 16 & 0xff;
+    *motor = (int)(dev & 1);
+    if (h >> 24 || dev > 1 || type < 3 || type > 7) return 0;
+    npad_ref r = npad_resolve(id);
+    if (type >= 5) {
+        if (r.kind != (type == 5 ? KIND_DUAL : type == 6 ? KIND_LEFT : KIND_RIGHT) || (type != 5 && dev)) return 0;
+        if (type != 5) *motor = type == 7;
+        return dm_haptics_available() & (1u << r.pad);
+    }
+    if (type > 4) return 0;
     int p = player_of(id);
-    if (style_for_player(id, p) != (1u << (type - 3))) return 0;
+    // A full-key handle on an npad that now holds Joy-Cons still reaches them: a game keeps the handles it got before the Joy-Cons connected (Super Mario Odyssey asks for the
+    // JoyDual handles when the pair connects, but keeps sending to its full-key ones). Its motor is the Joy-Con of that side; a single Joy-Con takes the handle of its side
+    if (p >= 0 && r.kind >= KIND_DUAL && type == 3 && id != NPAD_HANDHELD) {
+        if (r.kind == KIND_LEFT && dev) return 0;
+        if (r.kind == KIND_RIGHT && !dev) return 0;
+        return dm_haptics_available() & (1u << r.pad);
+    }
+    if (p < 0 || r.kind != KIND_PAD || kind_style(r, id) != (1u << (type - 3))) return 0;
     return dm_haptics_available() & (p == 0 ? 1u | merged_players() : 1u << p);
 }
 static void vib_send(const uint32_t *handles, const dm_vibration *values, int n) {
@@ -745,10 +884,10 @@ static void vib_send(const uint32_t *handles, const dm_vibration *values, int n)
     dm_vibration_update updates[DM_PLAYERS * 2];
     uint32_t used = 0; int unrouted = 0;
     for (int i = 0; i < n; i++) {
-        uint32_t targets = vib_targets(handles[i]);
+        int m; uint32_t targets = vib_targets(handles[i], &m);
         if (!targets) unrouted++;
         for (int p = 0; p < DM_PLAYERS; p++) if (targets >> p & 1) {
-            int m = handles[i] >> 16 & 1, k = p * 2 + m;
+            int k = p * 2 + m;
             updates[k] = (dm_vibration_update){p, m, values[i]}; used |= 1u << k;
         }
     }
@@ -776,8 +915,10 @@ HLE_FORCE("_ZN2nn3hid25GetVibrationDeviceHandlesEPNS0_21VibrationDeviceHandleEiR
         if (getenv("DM_RUMBLE_LOG") && id) LOG("rumble: game asked for vibration handles of npad %u style %#x: none (connected style %#x, %s)", *id, style, style_of(*id), dm_haptics_has_output() ? "output ready" : "no output yet");
         return 0;
     }
-    uint32_t base = (*id << 8) | (*id == NPAD_HANDHELD ? 4u : 3u);
-    int count = n < 2 ? n : 2;
+    npad_ref r = npad_resolve(*id);
+    uint32_t type = r.kind == KIND_DUAL ? 5u : r.kind == KIND_LEFT ? 6u : r.kind == KIND_RIGHT ? 7u : *id == NPAD_HANDHELD ? 4u : 3u;
+    uint32_t base = (*id << 8) | type;
+    int count = n < (r.kind == KIND_LEFT || r.kind == KIND_RIGHT ? 1 : 2) ? n : (r.kind == KIND_LEFT || r.kind == KIND_RIGHT ? 1 : 2);
     for (int i = 0; i < count; i++) h[i] = base | (uint32_t)i << 16;
     if (getenv("DM_RUMBLE_LOG")) LOG("rumble: game asked for vibration handles of npad %u style %#x: %d, first %#x", *id, style, count, h[0]);
     return count;
@@ -825,9 +966,13 @@ HLE_FORCE("_ZN2nn3hid24GetNpadCommunicationModeEv", "wireless communication mode
 HLE_FORCE("_ZN2nn3hid24SetNpadCommunicationModeENS0_21NpadCommunicationModeE", "wireless communication mode; the host only records it", void, h_hid_SetComm, int m) { g_comm_mode = (uint32_t)m; }
 HLE_FORCE("_ZN2nn3hid29GetNpadHandheldActivationModeEv", "handheld activation mode: returns the value that was set", int, h_hid_GetHh, void) { return (int)g_hh_mode; }
 HLE_FORCE("_ZN2nn3hid29SetNpadHandheldActivationModeENS0_26NpadHandheldActivationModeE", "handheld activation mode; the host only records it", void, h_hid_SetHh, int m) { g_hh_mode = (uint32_t)m; }
-HLE_FORCE("_ZN2nn3hid28SetNpadJoyAssignmentModeDualERKj", "Joy-Con dual assignment; ignored by the host", void, h_hid_JoyDual, const uint32_t *id) { (void)id; }
-HLE_FORCE("_ZN2nn3hid30SetNpadJoyAssignmentModeSingleERKjNS0_17NpadJoyDeviceTypeE", "Joy-Con single assignment (left or right given); ignored by the host", void, h_hid_JoySingleT, const uint32_t *id, int t) { (void)id; (void)t; }
-HLE_FORCE("_ZN2nn3hid30SetNpadJoyAssignmentModeSingleEPjRKjNS0_17NpadJoyDeviceTypeE", "Joy-Con single assignment (returning the other half); ignored by the host, there is no other half", int, h_hid_JoySingleOut, uint32_t *out, const uint32_t *id, int t) { (void)out; (void)id; (void)t; return 0; }
+HLE_FORCE("_ZN2nn3hid28SetNpadJoyAssignmentModeDualERKj", "Joy-Con dual assignment: the Joy-Cons of the npad are one controller", void, h_hid_JoyDual, const uint32_t *id) { joy_assign(*id, 0, 0); }
+HLE_FORCE("_ZN2nn3hid30SetNpadJoyAssignmentModeSingleERKjNS0_17NpadJoyDeviceTypeE", "Joy-Con single assignment (left or right given): that Joy-Con stays on the npad", void, h_hid_JoySingleT, const uint32_t *id, int t) { joy_assign(*id, 1, t == 1 ? 2 : 1); }
+HLE_FORCE("_ZN2nn3hid30SetNpadJoyAssignmentModeSingleEPjRKjNS0_17NpadJoyDeviceTypeE", "Joy-Con single assignment (returning the other half's npad)", int, h_hid_JoySingleOut, uint32_t *out, const uint32_t *id, int t) {
+    joy_assign(*id, 1, t == 1 ? 2 : 1);
+    int q = *id < DM_PLAYERS && joy_active((int)*id) && joy_split((int)*id) ? split_target((int)*id) : -1;
+    if (out) *out = q >= 0 ? (uint32_t)q : *id;
+    return q >= 0; }
 HLE_FORCE("_ZN2nn3hid23MergeSingleJoyAsDualJoyERKjS2_", "merge single Joy-Cons; ignored by the host, reports success", Result, h_hid_Merge, const uint32_t *a, const uint32_t *b) { (void)a; (void)b; return RES_OK; }
 // Bound and signalled once when its controller is connected (the hid service reports the controller already attached at start the same way), and again whenever a player's controller
 // comes or goes (dm_pad_players). Link's Awakening reads no controller state until this event has fired: without it GetNpadState was never called and the title's "Press L+R" never saw a press
@@ -911,20 +1056,20 @@ HLE_FORCE("_ZN2nn3hid34ResetSixAxisSensorFusionParametersERKNS0_19SixAxisSensorH
 HLE_FORCE("_ZN2nn3hid41IsFirmwareUpdateAvailableForSixAxisSensorERKNS0_19SixAxisSensorHandleE", "six-axis sensor firmware update: none", unsigned, h_hid_SixFw, const uint32_t *h) { (void)h; return 0; }
 // GetActual returns the sanitized guest value accepted by the host, before output-device adaptation.
 HLE_FORCE("_ZN2nn3hid22GetVibrationDeviceInfoEPNS0_19VibrationDeviceInfoERKNS0_21VibrationDeviceHandleE", "vibration: linear resonant actuator, left or right", void, h_hid_VibInfo, uint32_t *info, const uint32_t *h) {
-    int on = h && vib_targets(*h); info[0] = on ? 1 : 0; info[1] = on ? 1 + (*h >> 16 & 1) : 0;
+    int m = 0, on = h && vib_targets(*h, &m) != 0; info[0] = on ? 1 : 0; info[1] = on ? 1 + m : 0;
 }
 // The SDK's own call reaches the hid service (a null read in hid::detail::IsVibrationDeviceMounted; Super Mario Odyssey asks for each handle of a controller).
 // On Horizon a device is mounted when the npad's connected controller has that style and an actuator on that side: here, when the channel has an output, as GetVibrationDeviceInfo reports it
 HLE_FORCE("_ZN2nn3hid24IsVibrationDeviceMountedERKNS0_21VibrationDeviceHandleE", "vibration: device mounted when the channel has an output", unsigned, h_hid_VibMounted, const uint32_t *h) {
-    return h && vib_targets(*h);
+    int m; return h && vib_targets(*h, &m);
 }
 // The Switch 2's form of the same question (Kirby Air Riders asks soon after boot in a run with a window, main+0x10709b0; its SDK's call reads the same null service object)
 HLE_FORCE("_ZN2nn3hid29IsOunceVibrationDeviceMountedERKNS0_21VibrationDeviceHandleE", "vibration (Switch 2): device mounted when the channel has an output", unsigned, h_hid_VibMountedOunce, const uint32_t *h) {
-    return h && vib_targets(*h);
+    int m; return h && vib_targets(*h, &m);
 }
 HLE_FORCE("_ZN2nn3hid23GetActualVibrationValueEPNS0_14VibrationValueERKNS0_21VibrationDeviceHandleE", "vibration: last accepted channel value", void, h_hid_VibActual, dm_vibration *v, const uint32_t *h) {
-    uint32_t targets = h ? vib_targets(*h) : 0;
-    *v = targets ? dm_haptics_actual(__builtin_ctz(targets), *h >> 16 & 1) : (dm_vibration){0, 160, 0, 320};
+    int m = 0; uint32_t targets = h ? vib_targets(*h, &m) : 0;
+    *v = targets ? dm_haptics_actual(__builtin_ctz(targets), m) : (dm_vibration){0, 160, 0, 320};
 }
 
 // Poké Ball Plus (Palma, Pokémon Sword / Shield, SDK 7.3.2): the host has none. The SDK's own calls reach the hid service (SetPalmaBoostMode, the first, at start-up: a null read in

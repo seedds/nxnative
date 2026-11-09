@@ -10325,7 +10325,11 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
             else { slots[aid] = dummy_buf_gpu(); USE(dummy_buf(), MTLResourceUsageRead); }
             if (bl) PD("B %llu st%d sbufp reg%d %s addr=%#llx size=%llu %s", g_stat_pass, nvn_stage, reg, u && u->addr ? "real" : "dummy", u ? (unsigned long long)u->addr : 0ull, u ? (unsigned long long)u->size : 0ull, b->rw ? "rw" : "ro");
         } else if (b->kind == NVN_RB_SBUFU) {   // B: a storage buffer whose GPU address the game keeps in its own uniform buffer (Monster Hunter Rise's compute shaders: c3 + 0x38); read like a bindless handle
-            uint64_t addr; ubo_read(nvn_stage, reg, b->off, 8, &addr);
+            // Its address in NVN2's push constants (c[24], uniform "slot" DMSH_PUSH_BANK - 3, which no game uniform slot reaches): read from the pushed bytes (PRAGMATA's
+            // compute shaders keep their storage buffer addresses there, dmsh_build.py nvn2_cs)
+            uint64_t addr = 0;
+            if (reg == DMSH_PUSH_BANK - 3) { if (b->off + 8 <= DMSH_PUSH_SIZE) memcpy(&addr, S.push[nvn_stage == 5 ? 1 : 0] + b->off, 8); }
+            else ubo_read(nvn_stage, reg, b->off, 8, &addr);
             void *mb; uint64_t mo, gpu;
             if (addr && mtl_gpu_addr(addr, 1, &mb, &mo, &gpu)) { slots[aid] = gpu; USE((__bridge id<MTLBuffer>)mb, b->rw ? MTLResourceUsageRead | MTLResourceUsageWrite : MTLResourceUsageRead); if (b->rw) sbw_note(addr, sbw_len(0, mb, mo), SBW_GPU); }   // size not known
             else { slots[aid] = dummy_buf_gpu(); USE(dummy_buf(), MTLResourceUsageRead); }

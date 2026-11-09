@@ -66,6 +66,25 @@ def mul_extended(msl):
     scalar = ''.join(f'template<typename T, typename U> static inline __attribute__((always_inline)) T spvMulExtended({t} l, {t} r) {{ {w} p = {w}(l) * {w}(r); return T{{U(p), U(p >> 32)}}; }}\n'
                      for t, w in (('uint', 'ulong'), ('int', 'long')))
     return msl[:found[0].end()] + scalar + msl[found[0].end():]
+# A workaround for a translator miscompile whose cause is not found yet (open: the Ryujinx sources are in the tree, dm/third_party/ryujinx, and the fix belongs there): a SCALAR load
+# of a storage buffer whose byte offset is computed and bounds-checked, but then indexed at element 0 instead of offset>>2. The SPIR-V emits `OFF = idx*4; if (uint(OFF) < size) v = buf._m0[0];`
+# where the computed OFF is stored and bounds-checked against the buffer's size (cp_cN._m0[K].z) but the OpAccessChain uses a constant 0 (confirmed in <key>.spv: `OpAccessChain %cp_s0 %int_0 %int_0`),
+# while the SAME shader's vector loads index correctly (`... >> 2` then a dynamic index). Found on Orbitals (040004F027560000): the UE5.6 GPUScene upload compute shaders f0db173d46f9cdc5
+# (PrimitiveSceneData, 704-byte/44-float4 records) and da5435fda42d9fb1 (InstanceSceneData) read the destination PrimitiveId from PrimitiveUploadIndices[PrimitiveIndex]; with the index lost to 0,
+# every uploaded primitive scattered to PrimitiveId 0's slot, so the LocalToWorld for all other primitives stayed zero -> gl_Position.w = 0 -> degenerate quad -> black 3D backgrounds. Restoring the
+# index (buf._m0[int(uint(OFF) >> uint(2))]) refilled PrimitiveSceneData (dumped 2/93 -> 65/93 populated records, the background primitive's transform now correct). The signature (an offset computed
+# as X*4 AND bounds-checked against a buffer size, then an element-0 load of a storage buffer) is specific to the miscompile; a legitimate element-0 read never computes and bounds-checks an offset it
+# does not use, so the rewrite leaves ordinary cp_sN._m0[0] reads untouched (62 of 1273 shaders that read a storage buffer at [0] match, in this game's cache).
+# Only Ampere (NVN2, job arch sm86) shaders are rewritten (sbuf_index_fix), where the miscompile was seen: a Maxwell shader keeps its MSL as the translator wrote it
+SBUF_SCALAR_INDEX = re.compile(
+    r'(int (\w+) = [^;\n]*\* 4;\s*'
+    r'bool \w+ = uint\(\2\) >= as_type<uint>\(\(\*spvDescriptorSet0\.cp_c\d+\)\._m0\[\d+\]\.z\);\s*'
+    r'bool \w+ = !\w+;\s*'
+    r'int \w+ = 0;\s*'
+    r'if \(\w+\)\s*\{\s*'
+    r'\w+ \w+ = as_type<\w+>\(\(\*spvDescriptorSet0\.cp_s\d+\)\._m0\[)0(\]\);)', re.M)
+def sbuf_scalar_index(msl): return SBUF_SCALAR_INDEX.sub(r'\g<1>int(uint(\2) >> uint(2))\g<3>', msl)
+def sbuf_index_fix(j, msl): return sbuf_scalar_index(msl) if j.get('arch') == 'sm86' else msl   # Ampere shaders only (see above)
 
 # Ampere HMMA.16816 with an f16 accumulator (agl's upscaler networks, the NDVE video networks) reaches the MSL as calls of dmsh_hmma16816_f16(lane, block, A0..A3, B0, B1, C0, C1,
 # flags, A's LDSM address, A0..A3's offsets, A's row stride, out D1) → D0, the subgroup's 256-word block of the scratch shared memory as the last argument (InstEmitAmpereTensor.AHmma,
@@ -809,8 +828,18 @@ def job_for(key, name, rec, w):
         extra['arch'] = 'sm86'
         # compute lays out its driver constants in c[0] per shader: the control section gives its push constants' words (+0xa9), counts its uniform buffer, storage
         # buffer, texture, separate texture and separate sampler entries (+0xb1, +0xb2, +0xb3, +0xb4, +0xb5; images, +0xb6, come last) and gives the size (+0xba);
-        # the translator maps them to c[24] and NVN's fixed tables (InstEmitAmpere.cs AMapC0). Graphics keeps NVN's tables
-        if stage == 'cs': extra['nvn2_cs'] = [rec[ci + 0xb1], rec[ci + 0xb2], rec[ci + 0xb3], struct.unpack_from('<H', rec, ci + 0xba)[0], rec[ci + 0xa9] * 4, rec[ci + 0xb4], rec[ci + 0xb5]]
+        # the translator maps them to c[24] and NVN's fixed tables (InstEmitAmpere.cs AMapC0). Graphics keeps NVN's tables.
+        # The push region is two blocks, each 16-byte aligned: +0xa9 words, then +0xaa words. Donkey Kong Bananza's compiler leaves +0xaa at 0 (its 138 layouts add up
+        # with +0xa9 alone), PRAGMATA's (control +0x08 = 0x11) uses both: all 6,856 of its compute layouts add up to the size at +0xba this way, none with either block
+        # alone. Both blocks are mapped to c[24] as one run (AMapC0); what the second holds is not known yet
+        if stage == 'cs':
+            al = lambda v: (v + 0xf) & ~0xf
+            ub, sb, tx, size = rec[ci + 0xb1], rec[ci + 0xb2], rec[ci + 0xb3], struct.unpack_from('<H', rec, ci + 0xba)[0]
+            st, sm, im = rec[ci + 0xb4], rec[ci + 0xb5], rec[ci + 0xb6]
+            push = al(rec[ci + 0xa9] * 4) + al(rec[ci + 0xaa] * 4)
+            if 0x10 + push + 0x10 * (ub + sb) + 8 * (tx + st + sm + im) != size:
+                print(f'[RED] {key}: NVN2 compute c0 layout does not add up to its size {size:#x}', file=sys.stderr)
+            extra['nvn2_cs'] = [ub, sb, tx, size, push, st, sm]
         if stage in ('ts', 'ms'):
             # A task or mesh shader: translated as compute, its SPH taken off and its stage memory in shared memory, then wrapped as the Metal stage function (dmsh_meshstage.py).
             # Graphics stages' c[0] and c[2] tables stay: the translator reads their addresses out of the code as for a vertex shader
@@ -1580,7 +1609,7 @@ def geometry_finish(key, w, j, c1):
         dmsh_geometry.flatten_sets(spv)
         r = subprocess.run([SPIRV_CROSS, *dmsh_atomic.cross_args(XC, spv), spv], capture_output=True, text=True)
         if r.returncode: return 'geometry MSL failed', r.stderr.strip()[:160], None
-        plain = dmsh_geometry.topology_pointer(pool_arrays(precise(dmsh_atomic.check_msl(r.stdout))))
+        plain = dmsh_geometry.topology_pointer(pool_arrays(precise(sbuf_index_fix(j, dmsh_atomic.check_msl(r.stdout)))))
         src = dmsh_geometry.capture_input(plain)
         res = json.load(open(os.path.join(w, k + '.res.json')))
         refl = {'key': key + '_bg' + str(t), 'route': 'B', 'chain': CHAIN, 'dm_ctl': key,
@@ -1610,7 +1639,7 @@ def geometry_finish(key, w, j, c1):
             spv = os.path.join(w, k + '.reader.spv'); dmsh_geometry.flatten_sets(spv)
             r = subprocess.run([SPIRV_CROSS, *dmsh_atomic.cross_args(XC, spv), spv], capture_output=True, text=True)
             if r.returncode: return 'geometry reader failed', r.stderr.strip()[:160], None
-            reader = vs_layer(vs_init(dmsh_geometry.reader(pool_arrays(precise(dmsh_atomic.check_msl(r.stdout))))))
+            reader = vs_layer(vs_init(dmsh_geometry.reader(pool_arrays(precise(sbuf_index_fix(j, dmsh_atomic.check_msl(r.stdout)))))))
             analysis, full = vs_depth(reader)
             meta = {'key': key + '_bgv', 'route': 'B', 'chain': CHAIN, 'dm_ctl': key,
                     'stage': 'vs', 'entry': 'main0', 'entry_z': 'main0_z', 'msl_entry_kind': 'vertex',
@@ -1651,6 +1680,7 @@ def finish(key, w, j, c1):
             src = open(msl).read()
     try: src = dmsh_atomic.check_msl(src)
     except ValueError as e: return 'image atomic MSL failed', str(e), None
+    src = sbuf_index_fix(j, src)   # Ampere: restore the index of scalar storage-buffer loads the translator emitted at element 0 (see sbuf_scalar_index)
     src = precise(src)   # min / max / clamp with Maxwell's NaN results (see precise)
     src = mul_extended(src)   # scalar extended products without the optnone wrapper (see mul_extended)
     try: src = gather_offsets(src)   # four gathers instead of a wrapper's loop over their offsets (see gather_offsets)

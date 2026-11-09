@@ -39,6 +39,7 @@
 #   · SNVN (Retro Studios, Donkey Kong Country: Tropical Freeze, Metroid Prime Remastered): zlib program records in the SNVN chunks of MaterialArchive.arc, of the MTRL resources in its
 #       .pak archives and of the startup material archive LZSS-compressed in main, see rfrm_shaders and retro_main_forms
 #   · BERG (Snowdrop, Mario + Rabbids Sparks of Hope): shader objects in the individually zstd-compressed records of its SDF data slices, see snowdrop_shaders
+#   · SHARC (GIANTS Engine, Farming Simulator 26): LZMA-compressed GLSLC compiler outputs in the shader archive (shared/shader_switch.sharc), see sharc_shaders
 #   · bnd2 (Criterion's Bundle 2, Need for Speed: Hot Pursuit Remastered): whole GLSLC outputs in the zlib resources of SHADERS.BNDL, see bnd2_resources and bnd2_shaders
 #   · Heaps (Dead Cells): whole GLSLC outputs in base64 after the GLSL of the engine's shader cache (shaders.cache.nx), inside its PAK archive, see heaps_pak_files and heaps_shaders
 #   · Frostbite (EA SPORTS FC 27): the CompiledBytecode resources of the bundles its superbundle tables (.toc) list, in its cas files (Oodle Leviathan, decoded by the game's own decoder in the
@@ -57,7 +58,7 @@
 #   With an update: give RomFS and main as comma-separated lists (base game first, e.g. data/v0/RomFS,data/v327680/RomFS); the output is the union of both versions (see main())
 #   Unity type trees need Unity's common string table, which is taken from the first main
 # Pair table: (vertex key, pixel key) of every BNSH variation (every Unity program); dmsh_build uses it to give vertex shaders the outputs their pixel shaders read but they do not write (see dmsh_build.py vs_pad)
-import base64, collections, concurrent.futures as cf, glob, hashlib, json, os, re, struct, subprocess, sys, time, zlib
+import base64, collections, concurrent.futures as cf, glob, hashlib, json, lzma, os, re, struct, subprocess, sys, time, zlib
 from typing import NoReturn
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../tools'))
 from romfs import os, open, is_image
@@ -2751,6 +2752,7 @@ def scan_blob(d, label, out, depth=0, left=None):
     if d[:4] == b'NDVE': out.extend(ndve_shaders(d, label)); return
     if shaders := sead_prim_shaders(d, label): out.extend(shaders); return
     if d[:len(TFXO)] == TFXO: out.extend(tfxo_shaders(d, label)); return
+    if d[:4] == SHARC: out.extend(sharc_shaders(d, label)); return
     if d[:4] == b'MSHD': out.extend(mshd_shaders(d, label)); return
     if d[:4] == PGDAT and len(d) >= 0x1c and (mem := pgdat_members(d, label)) is not None:   # PlatinumGames
         for nm, m in mem: scan_blob(m, f'{label}/{nm}', out, depth + 1, left)
@@ -2806,6 +2808,7 @@ def separable_pairs(keys):
 
 SMASH_ARC = struct.pack('<Q', 0xABCDEF9876543210)   # smash_arc.MAGIC (scan_file reads only the first bytes, without importing the reader)
 BND2 = b'bnd2'
+SHARC = b'RAHS'
 
 def bnd2_resources(d, label):
     """The resources of a Criterion Bundle 2 ('bnd2', Burnout Paradise's format; version 3 in Need for Speed: Hot Pursuit Remastered): → [(resource ID, type, block, data)].
@@ -2846,6 +2849,59 @@ def bnd2_shaders(d, label):
     found = []
     for rid, typ, k, r in bnd2_resources(d, label):
         if b'\x91\x68\x86\x19' in r: found += glslc_shaders(r, f'{label}/{rid:016x}.{typ:x}.{k}', need=False)
+    return found
+
+def sharc_shaders(d, label):
+    """GIANTS Engine shader archive (.sharc, Farming Simulator 26): 'RAHS', version 11, header size 0x2c,
+    counts c1 (metadata entries, 24 bytes), c2 (shader entries, 32 bytes), c3 (hierarchy entries, 20 bytes).
+    Each shader entry in Table 2 references an LZMA-compressed GLSLC compiler output stream preceded by 5 property/dict_size bytes."""
+    if len(d) < 0x2c or d[:4] != SHARC: return []
+    ver, _, _, h_size, c1, c2, c3 = struct.unpack_from('<7I', d, 4)
+    if ver != 11 or h_size < 0x2c:
+        red(f'{label}: sharc version {ver} header size {h_size:#x} is not a layout this reader knows')
+    t1_off = h_size
+    t2_off = t1_off + c1 * 24
+    t3_off = t2_off + c2 * 32
+    data_off = t3_off + c3 * 20
+    if data_off > len(d):
+        red(f'{label}: sharc table offset {data_off:#x} exceeds file size {len(d):#x}')
+
+    pos = data_off
+    for i in range(c1):
+        if t1_off + (i + 1) * 24 > len(d): red(f'{label}: truncated Table 1 at entry {i}')
+        sz, u1, u2 = struct.unpack_from('<IHH', d, t1_off + i * 24)
+        pos += sz + 5 * u1
+
+    found = []
+    for i in range(c2):
+        if t2_off + (i + 1) * 32 > len(d): red(f'{label}: truncated Table 2 at entry {i}')
+        w0, w1, w2, w3, w4, w5, w6, w7 = struct.unpack_from('<8I', d, t2_off + i * 32)
+        sz = w0
+        extra = 5 * w1
+        chunk = d[pos : pos + sz]
+        if sz >= 5:
+            props = chunk[0]
+            dict_size = int.from_bytes(chunk[1:5], 'little')
+            try:
+                dec = lzma.LZMADecompressor(format=lzma.FORMAT_RAW, filters=[{
+                    'id': lzma.FILTER_LZMA1,
+                    'dict_size': dict_size,
+                    'lc': props % 9,
+                    'lp': (props // 9) % 5,
+                    'pb': (props // 9) // 5,
+                }])
+                decomp = dec.decompress(chunk[5:], max_length=10000000)
+                if b'\x91\x68\x86\x19' in decomp:
+                    found += glslc_shaders(decomp, f'{label}#{i}', need=False)
+            except Exception as e:
+                red(f'{label}#{i}: damaged LZMA stream ({e})')
+        pos += sz + extra
+        pos += 16 * w2
+        for _ in range(w7):
+            if pos + 2 > len(d): red(f'{label}#{i}: string table exceeds file size')
+            slen = d[pos + 1]
+            pos += 2 + slen
+
     return found
 
 HEAPS_CACHE = 'shaders.cache.nx'
@@ -2992,6 +3048,9 @@ def scan_file_in(args):
     if head[:4] == BND2:   # a Criterion Bundle 2 (Need for Speed: Hot Pursuit Remastered's SHADERS.BNDL): GLSLC outputs in its zlib resources (bnd2_shaders)
         found += bnd2_shaders(open(path, 'rb').read(), '/' + rel)
         return rel, uniq_keys(found), var_pairs(found), trees
+    if head[:4] == SHARC:   # GIANTS Engine shader archive (Farming Simulator: shared/shader_switch.sharc)
+        with open(path, 'rb') as f: found += sharc_shaders(f.read(), '/' + rel)
+        return rel, uniq_keys(found), var_pairs(found), trees
     if head[:3] == b'PAK':   # a Heaps PAK archive (Dead Cells): only its shader cache is read, not its 2 GB of other files (heaps_pak_files, heaps_shaders)
         with open(path, 'rb') as f:
             members = heaps_pak_files(f)
@@ -3059,7 +3118,7 @@ def scan_file_in(args):
         try: pairs = unity_shaders(d, '/' + rel, found, trees if not TREES else dict(TREES))
         except unityfs.NoTree: return rel, {}, set(), 'defer'
         return rel, uniq_keys(found), var_pairs(found) | {(a, b, 'prog') for a, b in pairs}, trees
-    elif b'BNSH\0\0\0\0' not in d and b'BAHS' not in d and d[:4] != b'MSHD' and d[:4] != b'NDSR' and d[:4] != b'NARC' and d[:4] != b'NDVE' and not (d[:4] == b'SARC' and b'Yaz0' in d) and b'\x91\x68\x86\x19' not in d and MGFX not in d and NEEDLE not in d and d[:8] != SUMO_MUX and SUMO_NX not in d and NVNSH not in d: return rel, {}, set(), {}   # a SARC may hold Yaz0 members, a NARC packed ones (cra.undo)
+    elif b'BNSH\0\0\0\0' not in d and b'BAHS' not in d and d[:4] != b'MSHD' and d[:4] != b'NDSR' and d[:4] != b'NARC' and d[:4] != b'NDVE' and not (d[:4] == b'SARC' and b'Yaz0' in d) and b'\x91\x68\x86\x19' not in d and MGFX not in d and NEEDLE not in d and d[:8] != SUMO_MUX and SUMO_NX not in d and NVNSH not in d and d[:4] != SHARC: return rel, {}, set(), {}   # a SARC may hold Yaz0 members, a NARC packed ones (cra.undo)
     else:
         scan_blob(d, '/' + rel, found)
         # whole GLSLC outputs in a file no other reader takes (FINAL FANTASY TACTICS - The Ivalice Chronicles: its engine's technique files, resources_nx/…/shader/*.tec, 261 outputs beside

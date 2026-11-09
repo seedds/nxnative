@@ -94,6 +94,8 @@ void dm_motion_clear(int player) {
 }
 
 uint32_t dm_player_npad(int player) { return player == 0 ? 0x20 : (uint32_t)player; }
+int dm_players_reported(void) { return 1; }   // hle_hid.c: the players the game sees (the controller applet's prompt)
+int front_web_touch(void) { return 0; }   // web_apple.m: no offline page is shown
 
 static int g_opmode;   // handheld, until a test or the in-game menu docks it
 int dm_opmode(void) { return g_opmode; }
@@ -104,6 +106,9 @@ int duo_harness_rumble(void) { return g_rumble; }
 void dm_haptics_apple_init(void) {}
 void dm_haptics_apple_controller(int player, GCController *controller) { (void)player; (void)controller; }
 
+static double g_view_shape;
+void dm_screen_view_changed(double aspect) { g_view_shape = aspect; }   // loader.c: the shape a screen_aspect any profile renders
+double duo_harness_view_shape(void) { return g_view_shape; }
 int front_ios_boot_ok(void) { return 1; }
 void front_ios_boot(void) {}
 bool dm_show_launcher(void *viewController, void (*done)(void)) { (void)viewController; (void)done; return false; }

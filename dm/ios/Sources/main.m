@@ -21,6 +21,7 @@ extern char **environ;
 
 int dm_main(int argc, char **argv);   // dm/host/main.c compiled in with -Dmain=dm_main
 UIViewController *front_ios_root(void);
+UIInterfaceOrientationMask front_ios_app_orientations(void);   // front_ios.m: the orientations Rotation allows (DM_ROTATION)
 void front_ios_focus_event(int ev);
 
 static char *g_argv[4]; static int g_argc;
@@ -246,6 +247,8 @@ int front_ios_boot_ok(void) { return g_boot_ok; }
 - (UISceneConfiguration *)application:(UIApplication *)a configurationForConnectingSceneSession:(UISceneSession *)s options:(UISceneConnectionOptions *)o {
     return [[UISceneConfiguration alloc] initWithName:[s.role isEqualToString:UIWindowSceneSessionRoleExternalDisplayNonInteractive] ? @"TV" : @"Default" sessionRole:s.role];   // a TV (front_ios.m DmTVSceneDelegate)
 }
+// Replaces the Info.plist orientation list: Rotation (DM_ROTATION) can turn a phone upright, auto keeps the list (front_ios.m front_ios_app_orientations)
+- (UIInterfaceOrientationMask)application:(UIApplication *)a supportedInterfaceOrientationsForWindow:(UIWindow *)w { return front_ios_app_orientations(); }
 @end
 
 // Scene lifecycle: create the window + hand focus events to front_ios.m

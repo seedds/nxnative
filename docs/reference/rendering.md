@@ -882,6 +882,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Absent streams (resolved, found by clang-tidy):** CPU conversion already binds zero for a stream outside the sixteen stream slots, but its range query indexed `S.stream` first. `vstream_last` now returns unknown before accessing an absent slot; `t_vbuf` checks both boundary indices. No game failure was observed.
 - **Found on:** [Super Mario Odyssey](../../dm/games/0100000000010000/README.md) (GitHub issue #558): the composite of agl's half-resolution translucent pass (`alProgramShader`, vertex `40cc99352976d0ff`, pixel `934386ce027e72be`), every frame the half-resolution effects draw.
 
+### A vertex stream in no memory pool
+
+- **Symptom:** `[RED] vertex stream N's buffer 0x… is in no memory pool; draw skipped` (`; its attributes read zeros` for a pulling pipeline, `; a geometry capture reads the buffer bound before` for one). Before the line existed: a draw whose vertices came from an earlier draw's buffer, with nothing in the log.
+- **Cause:** the host failed to place a non-zero stream address in any memory pool it tracks (a pool it missed, or an address the game computed wrongly; on the Switch the GPU would fault). `bind_vbufs` skipped such a stream, so its Metal slot kept the buffer an earlier draw had bound there. A stream with address 0 is different: the vertex descriptor points its attributes at the zero buffer (`ZERO_ATTR`).
+- **Fix:** `bind_vbufs` reports the first stream the vertex shader reads (`vs_streams`, from its reflection) that is in no pool, after binding the others. The draw is skipped with the red line, as for an index buffer in no pool, and so are a transform feedback capture and the vertex dump; a pulling pipeline's layout gives the stream's attributes zeros. A geometry capture shares its encoder with the job's later stages, which read what it writes, so it runs with the red line and the old binding. A stale address on a stream no input reads changes nothing. Not a fix for the address itself: the red line is there to find which pool the host missed.
+- **Found on:** no game has shown the line. The S2Arm project reported the stale binding on its copy of this layer. `t_vbuf` checks that a read stream in no pool is reported and the others still bound, and that an unread one is not.
+
 ### Programs bound per stage
 
 - **Symptom:** scenes and characters black, only foliage, light shafts and the HUD drawn; pass dumps full of `Z … draw skipped: no program bound`.

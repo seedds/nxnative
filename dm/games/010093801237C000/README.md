@@ -91,6 +91,7 @@ After integration with main's pipeline archive and profiling changes (`7753b7b`)
 
 General host changes first needed here; each applies to every game:
 
+- **Switch 2 controllers over Bluetooth LE:** [Switch 2 controllers over Bluetooth LE](../../../docs/reference/services.md#switch-2-controllers-over-bluetooth-le): a left and a right Joy-Con 2 woke toward the Mac and played as one pair, a Joy-Con held in Sync during the game paired and kept playing, and the Home hold opened the quit prompt.
 - **Synchronization review gameplay validation:** [Final gameplay validation](#final-gameplay-validation-2026-10-26-current) records the #158/#213 comparison and its limits; the general fixes and synthetic regressions are linked under the earlier smoke routes.
 - **Patch areas before the module base** for modules with a giant bss (negative `PATCH_OFF`, `FILE_IMAGE_LEN`, `IMAGE_SIZE`): [Patch area before the module base for a large bss](../../../docs/reference/rewriter.md#patch-area-before-the-module-base-for-a-large-bss).
 - **Used memory counts the bss of front-patch modules** (`big_bss_bytes`): [Heap sized from the application pool less used memory](../../../docs/reference/memory.md#heap-sized-from-the-application-pool-less-used-memory).

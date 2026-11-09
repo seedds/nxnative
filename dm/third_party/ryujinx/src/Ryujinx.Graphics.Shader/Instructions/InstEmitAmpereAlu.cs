@@ -71,6 +71,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             alu(0x01a, InstName.Bfe, ASgxt);
             alu(0x09a, InstName.Bfe, ASgxt, uniform: true);
             alu(0x01b, InstName.Bfe, ABmsk);
+            alu(0x014, InstName.Vabsdiff, AVabsdiff);
 
             x(0x882, InstName.Mov, AUMov, N, uniform: true);
             x(0x883, InstName.P2r, AUp2ur, N, uniform: true);
@@ -1315,6 +1316,28 @@ namespace Ryujinx.Graphics.Shader.Instructions
             Operand max = signed ? context.IMaximumS32(srcA, srcB) : context.IMaximumU32(srcA, srcB);
 
             ASet(context, x, context.ConditionalSelect(APred(context, x, 87, 90, u), min, max), u);
+        }
+
+        // nxnative: VABSDIFF Rd, a, b, c (PTX sad): |a - b| + c, wrapping at 32 bits, a and b compared signed unless bit 73 is clear (.U32, as IMNMX). The Jetson
+        // Orin's sad.u32 gives VABSDIFF.U32 with its predicate output (81..83) PT; other predicate outputs and the other bits of 72..90 are not known, so they fail.
+        public static void AVabsdiff(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+            (ASrc a, ASrc b, ASrc c) = AAluSrcs(context, x, neg: false, abs: false);
+
+            if (x.Bits(81, 84) != RegisterConsts.PredicateTrueIndex || x.Bit(72) || x.Bits(74, 81) != 0 || x.Bits(84, 91) != 0)
+            {
+                throw AFail(context, "VABSDIFF with a predicate output or modifiers");
+            }
+
+            Operand srcA = AGet(context, a);
+            Operand srcB = AGet(context, b);
+            bool signed = x.Bit(73);
+
+            Operand min = signed ? context.IMinimumS32(srcA, srcB) : context.IMinimumU32(srcA, srcB);
+            Operand max = signed ? context.IMaximumS32(srcA, srcB) : context.IMaximumU32(srcA, srcB);
+
+            ASet(context, x, context.IAdd(context.ISubtract(max, min), AGet(context, c)));
         }
 
         public static void AIabs(EmitterContext context)

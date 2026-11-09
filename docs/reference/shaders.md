@@ -1484,6 +1484,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Check:** `DMSH_TEST_XLATE=dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate python3 dm/gfx/tests/test_dmsh_ampere_orin.py` (about 5 s on an M5 Max); it prints every op's differing lanes by cause. `AMPERE_ORIN_ONLY=<ops or families>` runs some, `AMPERE_ORIN_REPORT=<file>` writes the results as JSON. To record again: `python3 dm/gfx/tools/ampere_orin/capture.py --host <user@machine> [--arch sm_86]`, with NVIDIA's `nvdisasm` (the `cuda_nvdisasm` redistributable) in `~/ampere_orin` on that machine.
 - **Found on:** no game; a Jetson Orin's results. The HMMA comparison it extends is PR #1897's.
 
+### VABSDIFF, the absolute difference with an add
+
+- **Symptom:** a Switch 2 shader that uses PTX's `sad` (sum of absolute differences, `|a - b| + c`) fails to translate: `Ampere instruction 214 ... is not implemented`.
+- **Cause:** the GPU compiler turns `sad.u32` into `VABSDIFF.U32 Rd, a, b, c` (opcode 0x214), and the Ampere opcode table had no entry for VABSDIFF in any form.
+- **Fix:** `InstEmitAmpereAlu.cs` emits it as `max(a, b) - min(a, b) + c` wrapping at 32 bits, comparing a and b unsigned when bit 73 is clear (`.U32`, as IMNMX) and signed when it's set, and registers it for every ALU form (0x?14: register, immediate, constant buffer and uniform register), whose operands the shared reader takes. A predicate output other than PT or any other modifier bit fails the translation, since we haven't seen one. It costs one `min`, one `max`, a subtraction and an add.
+- **Check:** `test_dmsh_ampere_orin.py`'s `isad` (`sad.u32`): translation failed before, 0 of 1,024 lanes differ now.
+- **Found on:** no game; a Jetson Orin's results ([Ampere instructions checked against an Ampere GPU](#ampere-instructions-checked-against-an-ampere-gpu)).
+
 ### The NDVE movie network by the host
 
 - **Symptom:** a Switch 2 game's movies and the title behind them run below 60 fps on a Mac with a smaller GPU, and the GPU profile (`DM_NVN_GPUPROF`) shows almost all of the frame in a dozen compute dispatches of `nn::ndve`'s movie network: Ocarina of Time's title at about 24 fps and 38 ms of GPU a frame on an M1 Pro with 16 GPU cores, 24.8 ms on an M1 Max ([issue 1375](https://github.com/seedds/nxnative/issues/1375)), 18.9 ms of compute on an M4 with 8 ([HMMA chains keep their matrices in the SIMD-group](#hmma-chains-keep-their-matrices-in-the-simd-group)); 11-14 ms of the 16.7 on an M6, an M4 Pro or an M5 Max.

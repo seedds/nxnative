@@ -338,6 +338,8 @@ check_t_rt_range: t_rt_range
 	DM_NVN_UNWRITTEN_DC=0 MTL_DEBUG_LAYER=1 ./t_rt_range --sample-attachment --both-flags
 t_rec_draws: t_rec_draws.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_rec_draws.m $(MTL_T_SRC) $(FW)
+t_ubc_wait: t_ubc_wait.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_ubc_wait.m $(MTL_T_SRC) $(FW)
 t_rt_depth_ro: t_rt_depth_ro.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_rt_depth_ro.m $(MTL_T_SRC) $(FW)
 t_pso_pending: t_pso_pending.m $(MTL_T_DEP)

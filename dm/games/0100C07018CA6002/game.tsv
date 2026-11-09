@@ -1,0 +1,25 @@
+# Baten Kaitos II, program 2 of Baten Kaitos I & II HD Remaster 1.0.3.
+title_id	0100C07018CA6002
+program_id	0100C07018CA6002
+name	Baten Kaitos II
+ipa	BatenKaitosII.ipa
+app_category	public.app-category.games
+program_of	0100C07018CA6000
+
+build	v196608	1.0.3	main=446dd0dc908e197cefea6b3548fc9fd6	subsdk0=ff0149d0b5e882b87c2f06a981302b13	sdk=3053b22935e32ddf15ef81997603e5c2
+package	v196608
+shader_versions	v196608
+
+modules	main subsdk0 sdk
+romfs_marker	Data/StreamingAssets/Switch/Batenkaitos2/Sounds/BT2_02_DIALOG.awb
+zip_store	.acb:.awb:.bundle:.dat:.json:.mp4:.metallib
+
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0x40000000
+sys_resource	0x1000000
+
+depth_mode	zero
+shader_groups	/Data/=data
+shader_note	Baten Kaitos Ⅰ&Ⅱ HD Remaster shaders

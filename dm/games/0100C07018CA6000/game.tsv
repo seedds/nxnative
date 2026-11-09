@@ -1,0 +1,25 @@
+# Baten Kaitos I & II HD Remaster 1.0.3, program 0 (the collection launcher).
+title_id	0100C07018CA6000
+program_id	0100C07018CA6000
+name	Baten Kaitos I & II HD Remaster
+ipa	BatenKaitosHdRemaster.ipa
+app_category	public.app-category.games
+programs	1=0100C07018CA6001 2=0100C07018CA6002
+
+build	v196608	1.0.3	main=519b783cc041177e383e55fc76adf1ab	subsdk0=ff0149d0b5e882b87c2f06a981302b13	sdk=3053b22935e32ddf15ef81997603e5c2
+package	v196608
+shader_versions	v196608
+
+modules	main subsdk0 sdk
+romfs_marker	Data/sharedassets0.assets.resS
+zip_store	.assets:.bundle:.dat:.resource:.ress:.metallib
+
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x1000000
+
+depth_mode	zero
+shader_groups	/Data/=data
+shader_note	Baten Kaitos Ⅰ&Ⅱ HD Remaster shaders

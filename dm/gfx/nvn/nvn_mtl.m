@@ -5212,8 +5212,16 @@ static id<MTL4RenderCommandEncoder> rp_begin(void) { if (g_enc && g_rp_aw) rp_en
 static id<MTL4RenderCommandEncoder> rp_begin_ex_(int clear_only);
 static id<MTL4RenderCommandEncoder> rp_begin_ex(int clear_only) { AP_B; id<MTL4RenderCommandEncoder> e = rp_begin_ex_(clear_only); AP_E(1); return e; }
 static void bare_dims(NSUInteger *w, NSUInteger *h);
+// A pass is planned (rp_plan: its descriptor, load actions, clears that need a pass of their own, the bandwidth ledger and the pass info) apart from opening its encoder (rp_open):
+// the parallel translation's planner makes the first, the context that encodes the pass's draws the second (stage P2). Single-threaded they run back to back, as before
+static MTL4RenderPassDescriptor *rp_plan(int clear_only);
+static id<MTL4RenderCommandEncoder> rp_open(MTL4RenderPassDescriptor *pd);
 static id<MTL4RenderCommandEncoder> rp_begin_ex_(int clear_only) {
     if (g_enc) return g_enc;
+    MTL4RenderPassDescriptor *pd = rp_plan(clear_only);
+    return pd ? rp_open(pd) : nil;
+}
+static MTL4RenderPassDescriptor *rp_plan(int clear_only) {
     memset(g_zskip_cand_ok, 0, sizeof g_zskip_cand_ok);
     g_enc_mode = clear_only; g_enc_geo_nocolor = g_geo_omit_colors; g_pass_swrite = g_pass_order = g_pass_late_res = 0; g_sm_pass = 0;
     if (!R.has_rt) { RED_ONCE(3, "no render target set before the draw"); return nil; }
@@ -5423,6 +5431,9 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex_(int clear_only) {
       void ts_note(id pd, NSUInteger nc); ts_note(pd, (NSUInteger)R.rt.n);
       void ms_note(id pd, NSUInteger nc); ms_note(pd, (NSUInteger)R.rt.n); }
     if (g_blit) { enc_b_end(g_blit); g_blit = nil; }   // the copy encoder the shadows' blocks were moved in with (bcrt_attach)
+    return pd;
+}
+static id<MTL4RenderCommandEncoder> rp_open(MTL4RenderPassDescriptor *pd) {
     ser_gate();
     g_stat_pass++;   // gp_begin records this pass; match the attachment and draw dump labels
     g_enc = enc_r_begin_pass(pd);
@@ -10814,7 +10825,17 @@ static int ds_scan(const uint8_t *p, ds_st *ds, int depth) {
 static const uint8_t *g_exec_cur_[NW];   // The op currently being replayed (inclusive)
 static void sd_need(sd_att *t, int why) { if (!t->state) { t->state = 1; t->why = (uint8_t)why; } }   // why: 1 a draw reads it as a texture 2 as an attachment, drawn before cleared 3 copy 4 texture clear 5 scanned to the end undecided 6 no start point / index unavailable
 static int sdx_decide(uint8_t st[SD_ATT_MAX]);   // Store lookahead decision (for the index see mtl_sub_index)
-static void sd_finish(void) {
+// The store actions a pass ends with: decided at its end (sd_decide: the lookahead, the trial and dead-store rules, the ledger) apart from setting them on its encoder (sd_apply), so the
+// parallel translation's planner decides and the context that encoded the pass's draws sets them (stage P2); single-threaded they run back to back (sd_finish)
+typedef struct { int n; int8_t kind[SD_ATT_MAX], idx[SD_ATT_MAX]; uint8_t dead[SD_ATT_MAX]; } sd_stores;   // kind 0 colour (attachment idx), 1 depth, 2 stencil
+static void sd_apply(id<MTL4RenderCommandEncoder> en, const sd_stores *st) {
+    for (int i = 0; i < st->n; i++) { MTLStoreAction sa = st->dead[i] ? MTLStoreActionDontCare : MTLStoreActionStore;
+        if (st->kind[i] == 1) [en setDepthStoreAction:sa]; else if (st->kind[i] == 2) [en setStencilStoreAction:sa]; else [en setColorStoreAction:sa atIndex:(NSUInteger)st->idx[i]]; }
+}
+static void sd_decide(sd_stores *st);
+static void sd_finish(void) { sd_stores st; sd_decide(&st); if (st.n) sd_apply(g_enc, &st); }
+static void sd_decide(sd_stores *st) {
+    st->n = 0;
     if (!g_nsd) return;
     uint8_t nst[SD_ATT_MAX];
     // Unchanged, loaded attachments already have their content in memory. Their proof depends only on writes in this pass, independently of future bindless readers or the optional lookahead.
@@ -10836,7 +10857,7 @@ static void sd_finish(void) {
         int img_dead = t->depth == 0 && t->load && t->img && !t->rast;
         int dead = t->state == 2 || udc_dead || xvdead || img_dead; MTLStoreAction sa = dead ? MTLStoreActionDontCare : MTLStoreActionStore;
         if (xvdead) { xv_set(t->ser, t->lv, t->sl, XV_INVALID, xtag); g_xv_dc++; }
-        if (t->depth == 1) [g_enc setDepthStoreAction:sa]; else if (t->depth == 2) [g_enc setStencilStoreAction:sa]; else [g_enc setColorStoreAction:sa atIndex:(NSUInteger)t->idx];
+        (void)sa; st->kind[st->n] = (int8_t)t->depth; st->idx[st->n] = (int8_t)t->idx; st->dead[st->n] = (uint8_t)dead; st->n++;
         g_sd_n_all++; if (dead) { g_sd_n_dead++; g_sd_dead_bytes += t->bytes; g_bw_store -= t->bytes; if (udc_dead) g_udc_saved_bytes += t->bytes; }
         if (!t->state) t->why = 5;
         PD("Z %llu %s ser=%llu lv%u sl%u %s why=%d by=%s slot=%d", g_stat_pass, t->depth == 1 ? "d" : t->depth == 2 ? "s" : "c", (unsigned long long)t->ser, t->lv, t->sl, xvdead ? "dontcare-xv" : dead ? "dontcare" : "store", dead ? 0 : t->why, t->why == 1 && t->wkey ? t->wkey : "-", t->wslot);

@@ -21,6 +21,12 @@ static int g_fail, g_n;
 #define P(name) ((NVNT_##name)proc(#name))
 static PFNNVNDEVICEGETPROCADDRESSPROC gpa; static NVNdevice dev;
 static void *proc(const char *n) { void *p = (void *)gpa(&dev, n); if (!p) { printf("address lookup failed %s\n", n); exit(1); } return p; }
+// CRC-16 with the reflected polynomial 0xA001, from 0: the hash Super Mario Odyssey's sampler cache takes of a sampler's bytes 8 on (main+0x96e400)
+static uint16_t crc16_a001(const uint8_t *p, size_t n) {
+    uint16_t c = 0;
+    while (n--) { c ^= *p++; for (int k = 0; k < 8; k++) c = c & 1 ? (uint16_t)((c >> 1) ^ 0xA001) : (uint16_t)(c >> 1); }
+    return c;
+}
 
 // Command memory callback: hands out a new 256-byte memory segment each time (forces a multi-segment JUMP chain)
 static uint8_t g_cmdmem[64 * 1024]; static size_t g_cmdoff; static int g_cb_calls; static NVNmemoryPool g_cmdpool;
@@ -58,6 +64,20 @@ static size_t tex_size(int fmt, int w, int h, int flags, size_t *align) {
 
 int main(void) {
     setenv("DM_NVN_COUNT", "1", 1);   // the call-count checks below need the counting trampolines (off by default)
+    {   // A missing control section must not publish uninitialized bytes or poison a serial's key cache.
+        uint8_t control[0x880] = {0}, key[8];
+        const uint8_t expected[8] = {0x56, 0x26, 0xd9, 0xa8, 0xf1, 0xd7, 0x36, 0x4b}; // SHA-256 of 0x880 zero bytes
+        prog_t p = {.nstage=1};
+        for (int cached = 0; cached < 2; cached++) {
+            p.serial = cached ? nvn_new_serial() : 0; p.sd[0].control = NULL;
+            memset(key, 0xa5, sizeof key);
+            EXPECT("missing shader control has no key", 0, prog_key(&p, 0, key));
+            EXPECT("a failed key leaves the output untouched", 0xa5, key[0]);
+            p.sd[0].control = control;
+            EXPECT("supplying control after failure hashes it", 1, prog_key(&p, 0, key));
+            EXPECT("a failed key was not cached as zero", 0, memcmp(key, expected, sizeof key));
+        }
+    }
     // Engine-native limiters have no FPS state page. Their launcher cap must
     // still pace presents and select the display-link rate in display mode.
     { win_t w={.interval=1};nvn_present_config(60,1);dm_fps_state=NULL;
@@ -149,6 +169,22 @@ int main(void) {
     P(nvnSamplerInitialize)(&sampler, &sb);
     EXPECT("signed integer border RGB is numeric", 1, ((samp_t *)&sampler)->p.border[0] == 1.f && ((samp_t *)&sampler)->p.border[2] == 1.f);
     P(nvnSamplerFinalize)(&sampler);
+    {   // Games tell samplers apart by their bytes from 8 on: Super Mario Odyssey's sampler cache keys entries by a CRC-16 (polynomial 0xA001) of them alone (nvn_obj.h samp_t)
+        NVNsampler s2;
+        #define SAMP_CRC(s) crc16_a001((const uint8_t *)&(s) + 8, sizeof(NVNsampler) - 8)
+        P(nvnSamplerBuilderSetDefaults)(&sb);
+        memset(&sampler, 0xA5, sizeof sampler); memset(&s2, 0x5A, sizeof s2);   // object memory with different old bytes
+        P(nvnSamplerInitialize)(&sampler, &sb); P(nvnSamplerInitialize)(&s2, &sb);
+        EXPECT("equal samplers: equal bytes from 8 on", 1, !memcmp((const uint8_t *)&sampler + 8, (const uint8_t *)&s2 + 8, sizeof sampler - 8));
+        uint16_t base = SAMP_CRC(s2);   // the same object for the base and the changes, so only the state differs
+        P(nvnSamplerBuilderSetMinMagFilter)(&sb, NVN_MIN_FILTER_NEAREST, NVN_MAG_FILTER_NEAREST); P(nvnSamplerInitialize)(&s2, &sb);
+        EXPECT("filter alone changes the bytes from 8 on", 1, SAMP_CRC(s2) != base);
+        P(nvnSamplerBuilderSetDefaults)(&sb); P(nvnSamplerBuilderSetWrapMode)(&sb, NVN_WRAP_MODE_CLAMP_TO_EDGE, NVN_WRAP_MODE_MIRRORED_REPEAT, NVN_WRAP_MODE_REPEAT);
+        P(nvnSamplerInitialize)(&s2, &sb);
+        EXPECT("wrap alone changes the bytes from 8 on", 1, SAMP_CRC(s2) != base);
+        #undef SAMP_CRC
+        P(nvnSamplerFinalize)(&sampler); P(nvnSamplerFinalize)(&s2);
+    }
 
     // 3. Memory pool: GPU address = the storage address given by the game
     static uint8_t poolmem[1 << 20] __attribute__((aligned(4096)));
@@ -970,6 +1006,31 @@ int main(void) {
         P(nvnWindowAcquireTexture)(&w3, NULL, &ix);
         EXPECT("acquire returns texture 0", 0, ix);
         mtl_present_test_stall(0); mtl_present_flush();
+    }
+
+    // 6g. SetNumActiveTextures: acquire hands out the first n of the swap chain (Super Mario Bros. Wonder sets 2 of 3), the window's own call changes it, a count out of range keeps all
+    {
+        nvn_present_config(0, 0);
+        NVNwindowBuilder wb4; NVNwindow w4; P(nvnWindowBuilderSetDevice)(&wb4, &dev); P(nvnWindowBuilderSetDefaults)(&wb4);
+        NVNtexture *sc3[3] = {&sc[0], &sc[1], &sc[0]};
+        typedef void (*set_b)(NVNwindowBuilder *, int); typedef int (*get_b)(const NVNwindowBuilder *);
+        typedef void (*set_w)(NVNwindow *, int); typedef int (*get_w)(const NVNwindow *);
+        P(nvnWindowBuilderSetTextures)(&wb4, 3, sc3);
+        EXPECT("builder: active defaults to the swap chain", 3, ((get_b)proc("nvnWindowBuilderGetNumActiveTextures"))(&wb4));
+        ((set_b)proc("nvnWindowBuilderSetNumActiveTextures"))(&wb4, 2);
+        EXPECT("builder: 2 active", 2, ((get_b)proc("nvnWindowBuilderGetNumActiveTextures"))(&wb4));
+        P(nvnWindowInitialize)(&w4, &wb4);
+        EXPECT("window: 2 active", 2, ((get_w)proc("nvnWindowGetNumActiveTextures"))(&w4));
+        int ix, seq = 0;
+        for (int k = 0; k < 4; k++) { P(nvnWindowAcquireTexture)(&w4, NULL, &ix); seq = seq * 10 + ix; P(nvnQueuePresentTexture)(&q, &w4, ix); }
+        EXPECT("2 of 3 active: textures 0 1 0 1", 101, seq);
+        ((set_w)proc("nvnWindowSetNumActiveTextures"))(&w4, 3);
+        int seen = 0;
+        for (int k = 0; k < 3; k++) { P(nvnWindowAcquireTexture)(&w4, NULL, &ix); seen |= 1 << ix; P(nvnQueuePresentTexture)(&q, &w4, ix); }
+        EXPECT("3 active again: every texture handed out", 7, seen);
+        ((set_w)proc("nvnWindowSetNumActiveTextures"))(&w4, 4);
+        EXPECT("4 of 3 (out of range): all stay active", 3, ((get_w)proc("nvnWindowGetNumActiveTextures"))(&w4));
+        mtl_present_flush();
     }
 
     // 7. Unimplemented functions: return 0, report a failure, report only once

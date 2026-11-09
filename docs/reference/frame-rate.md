@@ -265,6 +265,14 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Found on:** [Luigi's Mansion 3](../../dm/games/0100DCA0064A6000/README.md) (issue #1705): title screen in a window on an M6, 54.3–58.2 → 60.0 fps, frame time p95 24–25 → 18 ms, max 107 → 22.7 ms, no empty display-link ticks after warm-up.
 - **Check:** `t_nvn` (`display mode: the game reads back the interval the window presents at`).
 
+### Swap chain textures a game leaves inactive
+
+- **Symptom:** a game that asks NVN for fewer active swap chain textures than it gave the window gets one frame more queued between its rendering and the screen than it chose (input latency), with a log line `WindowBuilderSetNumActiveTextures n (the host rotates through the SetTextures count)`.
+- **Cause:** `nvnWindowBuilderSetNumActiveTextures` / `nvnWindowSetNumActiveTextures` limit `nvnWindowAcquireTexture` to the first n textures of the swap chain. The host only logged them and rotated through all of them, and their getters were unimplemented (a red line and 0).
+- **Fix:** the window keeps the count (`nactive` in `win_t` and `win_builder_t`) and the acquire rotates through `window_active` textures; the getters answer it. A count outside 1 to the swap chain's own is a red line and keeps all of them. `WindowInitialize`'s log line names the active count.
+- **Found on:** no game on the Mac's drives: every one that calls it (Mario vs. Donkey Kong 2 of 2; 11 others, among them Fire Emblem Engage, Super Mario RPG and Super Monkey Ball Banana Rumble, 3 of 3) asks for its whole swap chain. The S2Arm project reports that [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md) sets 2 of its 3; not run here.
+- **Check:** `t_nvn` (`2 of 3 active: textures 0 1 0 1`, the window's own call, a count out of range).
+
 ### Odd present intervals on the 30 Hz display link
 
 - **Symptom:** Donkey Kong Bananza ran its heavy areas at 15 fps where its GPU took about 46 ms a frame: the frames came every 66.7 ms, and the presentation thread spent 85% of its time in `nvnWindowAcquireTexture` waiting for display-link ticks.

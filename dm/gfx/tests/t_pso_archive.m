@@ -4,7 +4,7 @@
 // Metal 4 descriptor keeps the MTLDevice path; pso_key_norm drops what no pipeline depends on; compaction merges the files the prewarm took bases from into one per full period despite a
 // mid-prewarm timer flush, removing them only after its last period, and a compaction that did not finish is not tried again on the same system build; depth-only draws write depth; concurrent colour variants compile
 // one base; archive flushes preserve unrelated compiler state; a function with function constants is specialized by its pipeline's descriptor, not through its library,
-// and an MTLDevice pipeline gets it specialized; the descriptor for a specialization is the caller's whether the driver returns it retained or autoreleased; a compute pipeline is captured into a plain file and taken from it later, one without a Metal 4 descriptor never looked up; a capture that fails builds the pipeline all the same and hands a full period over, or stops capturing after a failure in a period that captured nothing
+// and an MTLDevice pipeline gets it specialized; the descriptor for a specialization is the caller's whether the driver returns it retained or autoreleased; a compute pipeline is captured into a plain file and taken from it later, one without a Metal 4 descriptor never looked up; a native mesh pipeline is captured into a p file and taken from it later, with or without a task shader or a pixel shader, captured again by a compaction, and one without a Metal 4 descriptor built through the MTLDevice; a capture that fails builds the pipeline all the same and hands a full period over, or stops capturing after a failure in a period that captured nothing
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -125,7 +125,7 @@ static void compute_pipelines(void) {
     id<MTLComputePipelineState> kp = cps_new(kf, &err);
     EXPECT("compute: a pipeline", 1, kp != nil);
     EXPECT("compute: built", built + 1, g_cps_built);
-    dispatch_sync(cps_harvest_q(), ^{});   // its capture, in the background
+    dispatch_sync(arch_harvest_q(), ^{});   // its capture, in the background
     EXPECT("compute: captured for the archive", pending + 1, g_arch_new);
     EXPECT("compute: its dispatch writes", 1, run_kernel(kp));
     arch_flush_wait();
@@ -134,7 +134,9 @@ static void compute_pipelines(void) {
     EXPECT("compute: a plain file, not a p file", 1, names.count == 1 && ![names[0] hasPrefix:@"p"]);
     EXPECT("compute: nothing left to write", 0, g_arch_new);
     LookupCountArchive *la = [LookupCountArchive new];
-    la->archive = names.count ? [g_dev newArchiveWithURL:[NSURL fileURLWithPath:[@(kdir) stringByAppendingPathComponent:names[0]]] error:&err] : nil;
+    NSString *path = names.count ? [@(kdir) stringByAppendingPathComponent:names[0]] : nil;
+    if (!path) abort();
+    la->archive = [g_dev newArchiveWithURL:[NSURL fileURLWithPath:path] error:&err];
     g_arch4 = @[(id<MTL4Archive>)la];   // as a new start with that file
     built = g_cps_built; pending = g_arch_new;
     id<MTLComputePipelineState> kp2 = cps_new(kf, &err);
@@ -147,7 +149,7 @@ static void compute_pipelines(void) {
     g_compact_enabled = 1; g_compacted = 0; atomic_store(&g_warm_running, 1);
     EXPECT("compute, compaction: a pipeline", 1, cps_new(kf, &err) != nil);
     EXPECT("compute, compaction: from the archive", run + 2, g_cps_run);
-    dispatch_sync(cps_harvest_q(), ^{});
+    dispatch_sync(arch_harvest_q(), ^{});
     EXPECT("compute, compaction: captured again", 1, g_compacted);
     EXPECT("compute, compaction: waits for the flush", pending + 1, g_arch_new);
     atomic_store(&g_warm_running, 0); g_compact_enabled = 0; g_compacted = 0;
@@ -158,10 +160,105 @@ static void compute_pipelines(void) {
     EXPECT("compute without a descriptor: a pipeline", 1, up != nil);
     EXPECT("compute without a descriptor: never looked up", looked, la->lookups);
     EXPECT("compute without a descriptor: built", built + 1, g_cps_built);
-    dispatch_sync(cps_harvest_q(), ^{});
+    dispatch_sync(arch_harvest_q(), ^{});
     EXPECT("compute without a descriptor: not captured", pending, g_arch_new);
     EXPECT("compute without a descriptor: its dispatch writes", 1, run_kernel(up));
     [NSFileManager.defaultManager removeItemAtPath:@(kdir) error:nil]; g_arch_dir = saved; g_arch4 = @[];
+}
+// Draws mesh pipeline ps (one triangle over the target) into a 4x4 RGBA8 target cleared to red: 1 when the centre pixel is the fragment's colour, or red with no fragment
+static int mesh_draw_ok(id<MTLRenderPipelineState> ps, int fragment) {
+    if (!ps) return 0;
+    MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:4 height:4 mipmapped:NO];
+    td.usage = MTLTextureUsageRenderTarget; td.storageMode = MTLStorageModeShared;
+    id<MTLTexture> t = [g_dev newTextureWithDescriptor:td];
+    MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+    rp.colorAttachments[0].texture = t; rp.colorAttachments[0].loadAction = MTLLoadActionClear; rp.colorAttachments[0].clearColor = MTLClearColorMake(1, 0, 0, 1); rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+    id<MTLCommandBuffer> cb = [g_q commandBuffer]; id<MTLRenderCommandEncoder> en = [cb renderCommandEncoderWithDescriptor:rp];
+    MTLSize one = MTLSizeMake(1, 1, 1);
+    [en setRenderPipelineState:ps]; [en drawMeshThreadgroups:one threadsPerObjectThreadgroup:one threadsPerMeshThreadgroup:one]; [en endEncoding];
+    [cb commit]; [cb waitUntilCompleted];
+    uint8_t px[4]; [t getBytes:px bytesPerRow:16 fromRegion:MTLRegionMake2D(1, 1, 1, 1) mipmapLevel:0];
+    return fragment ? px[0] == 0 && px[1] == 255 && px[2] == 0 && px[3] == 255 : px[0] == 255 && px[1] == 0 && px[2] == 0 && px[3] == 255;
+}
+// Native mesh pipelines (mtk_build) beside the bases: one built through the MTLDevice is compiled into the flush period in the background, written to a p file (no vertex layout), and a later start takes it from
+// that file without compiling, with or without a task shader; a compacting prewarm captures one taken from a plain file again; a depth-only one (no pixel shader) takes the noted
+// empty fragment and goes the same way; one whose function has no Metal 4 descriptor is built through the MTLDevice and not captured
+static void mesh_pipelines(void) {
+    char mdir[] = "/tmp/t_pso_mesh.XXXXXX"; if (!mkdtemp(mdir)) abort();
+    NSString *saved = g_arch_dir; g_arch_dir = @(mdir); g_arch4 = @[]; g_arch4p = @[]; NSError *err = nil;
+    arch_flush_wait();   // from an empty period
+    NSString *src = @"#include <metal_stdlib>\nusing namespace metal;\nstruct MV { float4 p [[position]]; };\nusing Tri = mesh<MV, void, 3, 1, topology::triangle>;\n"
+        "struct PL { uint n; }; struct BL { uint first; };\n"
+        "[[object]] void os(object_data PL &pl [[payload]], mesh_grid_properties g) { pl.n = 1; g.set_threadgroups_per_grid(uint3(1, 1, 1)); }\n"
+        // a mesh shader with no task has an object function of its own that launches its blocks (dmsh_meshstage.py main0_o)
+        "[[object]] void ob(object_data BL &b [[payload]], mesh_grid_properties g) { b.first = 0; g.set_threadgroups_per_grid(uint3(1, 1, 1)); }\n"
+        "[[mesh]] void ms(Tri out, const object_data BL &b [[payload]]) { out.set_primitive_count(1 + b.first); out.set_vertex(0, MV{float4(-1, -1, 0.5, 1)}); out.set_vertex(1, MV{float4(3, -1, 0.5, 1)}); out.set_vertex(2, MV{float4(-1, 3, 0.5, 1)});\n"
+        "  out.set_index(0, 0); out.set_index(1, 1); out.set_index(2, 2); }\n"
+        "[[mesh]] void mt(Tri out, const object_data PL &pl [[payload]]) { out.set_primitive_count(pl.n); out.set_vertex(0, MV{float4(-1, -1, 0.5, 1)}); out.set_vertex(1, MV{float4(3, -1, 0.5, 1)}); out.set_vertex(2, MV{float4(-1, 3, 0.5, 1)});\n"
+        "  out.set_index(0, 0); out.set_index(1, 1); out.set_index(2, 2); }\n"
+        "fragment float4 mf() { return float4(0, 1, 0, 1); }\n";
+    id<MTLLibrary> ml = [g_dev newLibraryWithSource:src options:nil error:&err], ul = [g_dev newLibraryWithSource:[src stringByAppendingString:@"// unregistered\n"] options:nil error:&err];
+    EXPECT("mesh: fixture library", 1, ml != nil && ul != nil);
+    if (!ml || !ul) { g_arch_dir = saved; return; }
+    NvShader *ms = [NvShader new], *mt = [NvShader new], *os = [NvShader new], *fs = [NvShader new], *um = [NvShader new];
+    ms->fn = test_fn(ml, @"ms", 1); ms->stage = 4; ms->mesh_kind = 2; ms->mesh_threads = 1; ms->mesh_notask = 1; ms->mesh_obj = test_fn(ml, @"ob", 1); strlcpy(ms->key, "mesh", sizeof ms->key);
+    mt->fn = test_fn(ml, @"mt", 1); mt->stage = 4; mt->mesh_kind = 2; mt->mesh_threads = 1; strlcpy(mt->key, "mesh-task", sizeof mt->key);
+    os->fn = test_fn(ml, @"os", 1); os->stage = 3; os->mesh_kind = 1; os->mesh_threads = 1; os->mesh_payload = 4; strlcpy(os->key, "task", sizeof os->key);
+    fs->fn = test_fn(ml, @"mf", 1); fs->stage = 1; strlcpy(fs->key, "pixel", sizeof fs->key);
+    um->fn = test_fn(ul, @"ms", 0); um->stage = 4; um->mesh_kind = 2; um->mesh_threads = 1; um->mesh_notask = 1; um->mesh_obj = test_fn(ul, @"ob", 0); strlcpy(um->key, "mesh-u", sizeof um->key);
+    pso_key k; memset(&k, 0, sizeof k); k.cfmt[0] = MTLPixelFormatRGBA8Unorm; k.chmask = 0xf; k.samples = 1;
+    pso_key kz; memset(&kz, 0, sizeof kz); kz.cfmt[0] = MTLPixelFormatRGBA8Unorm; kz.samples = 1;   // depth only: no pixel shader, no colour written
+    uint64_t built = g_mtk_built, arch = g_mtk_arch, dev = g_mtk_dev; int pending = g_arch_new, got = 0;
+    id<MTLRenderPipelineState> p1 = mtk_build(&k, nil, ms, fs, &err, &got), p2 = mtk_build(&k, os, mt, fs, &err, NULL), p3 = mtk_build(&kz, nil, ms, nil, &err, NULL);
+    EXPECT("mesh: pipelines", 1, p1 && p2 && p3);
+    EXPECT("mesh: built", built + 3, g_mtk_built);
+    EXPECT("mesh: not from the archive", 0, got);
+    dispatch_sync(arch_harvest_q(), ^{});   // their captures, in the background
+    EXPECT("mesh: captured for the archive", pending + 3, g_arch_new);
+    EXPECT("mesh: its draw writes", 1, mesh_draw_ok(p1, 1));
+    EXPECT("mesh with a task shader: its draw writes", 1, mesh_draw_ok(p2, 1));
+    EXPECT("mesh, depth only: draws nothing into colour", 1, mesh_draw_ok(p3, 0));
+    arch_flush_wait();
+    NSArray<NSString *> *names = [NSFileManager.defaultManager contentsOfDirectoryAtPath:@(mdir) error:nil];
+    EXPECT("mesh: one file written", 1, names.count);
+    EXPECT("mesh: a p file (no vertex layout)", 1, names.count == 1 && [names[0] hasPrefix:@"p"]);
+    NSString *first = names.firstObject;
+    id<MTL4Archive> file = first ? [g_dev newArchiveWithURL:[NSURL fileURLWithPath:[NSString stringWithFormat:@"%s/%@", mdir, first]] error:&err] : nil;
+    g_arch4p = file ? @[file] : @[];   // as a new start with that file
+    built = g_mtk_built; pending = g_arch_new;
+    id<MTLRenderPipelineState> q1 = mtk_build(&k, nil, ms, fs, &err, &got), q2 = mtk_build(&k, os, mt, fs, &err, NULL), q3 = mtk_build(&kz, nil, ms, nil, &err, NULL);
+    EXPECT("mesh again: from the archive", arch + 3, g_mtk_arch);
+    EXPECT("mesh again: reported as archived", 1, got);
+    EXPECT("mesh again: not built", built, g_mtk_built);
+    dispatch_sync(arch_harvest_q(), ^{});
+    EXPECT("mesh again: nothing captured", pending, g_arch_new);
+    EXPECT("mesh again: its draw writes", 1, mesh_draw_ok(q1, 1));
+    EXPECT("mesh again with a task shader: its draw writes", 1, mesh_draw_ok(q2, 1));
+    EXPECT("mesh again, depth only: draws nothing into colour", 1, mesh_draw_ok(q3, 0));
+    pso_key kb = k; kb.cfmt[0] = MTLPixelFormatBGRA8Unorm;   // other colour state: another pipeline, not in the file
+    EXPECT("mesh, other colour format: built", 1, mtk_build(&kb, nil, ms, fs, &err, NULL) != nil && g_mtk_built == built + 1);
+    dispatch_sync(arch_harvest_q(), ^{});
+    arch_flush_wait();
+    // the same file as a plain one during a compacting prewarm: captured again from its functions, for the file that replaces the old ones
+    g_arch4p = @[]; g_arch4 = file ? @[file] : @[];
+    g_compact_enabled = 1; g_compacted = 0; atomic_store(&g_warm_running, 1); pending = g_arch_new;
+    EXPECT("mesh, compaction: a pipeline", 1, mtk_build(&k, nil, ms, fs, &err, NULL) != nil);
+    EXPECT("mesh, compaction: from the archive", arch + 4, g_mtk_arch);
+    dispatch_sync(arch_harvest_q(), ^{});
+    EXPECT("mesh, compaction: captured again", 1, g_compacted);
+    EXPECT("mesh, compaction: waits for the flush", pending + 1, g_arch_new);
+    atomic_store(&g_warm_running, 0); g_compact_enabled = 0; g_compacted = 0;
+    arch_flush_wait();
+    // no Metal 4 descriptor: built through the MTLDevice, nothing captured
+    pending = g_arch_new; built = g_mtk_built;
+    id<MTLRenderPipelineState> up = mtk_build(&k, nil, um, fs, &err, NULL);
+    EXPECT("mesh without a descriptor: a pipeline", 1, up != nil);
+    EXPECT("mesh without a descriptor: MTLDevice build", dev + 1, g_mtk_dev);
+    EXPECT("mesh without a descriptor: not counted as kept", built, g_mtk_built);
+    dispatch_sync(arch_harvest_q(), ^{});
+    EXPECT("mesh without a descriptor: not captured", pending, g_arch_new);
+    EXPECT("mesh without a descriptor: its draw writes", 1, mesh_draw_ok(up, 1));
+    [NSFileManager.defaultManager removeItemAtPath:@(mdir) error:nil]; g_arch_dir = saved; g_arch4 = @[]; g_arch4p = @[];
 }
 // Notes whether the compaction marker exists while the serializer writes (issue #342: a flush that does not return leaves it)
 @interface MarkerSerializer : NSObject { @public id<MTL4PipelineDataSetSerializer> ser; int calls, marked; } @end
@@ -252,6 +349,7 @@ static void depth_only(void) {
     MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float width:4 height:4 mipmapped:NO];
     td.usage = MTLTextureUsageRenderTarget; td.storageMode = MTLStorageModePrivate;
     id<MTLTexture> t = [g_dev newTextureWithDescriptor:td];
+    if (!t) abort();
     MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor new]; rp.depthAttachment.texture = t;
     rp.depthAttachment.loadAction = MTLLoadActionClear; rp.depthAttachment.clearDepth = 1; rp.depthAttachment.storeAction = MTLStoreActionStore;
     MTLDepthStencilDescriptor *ds = [MTLDepthStencilDescriptor new]; ds.depthWriteEnabled = YES; ds.depthCompareFunction = MTLCompareFunctionAlways;
@@ -386,7 +484,9 @@ static void spec_desc_ownership(void) {
 int main(int argc, char **argv) { @autoreleasepool {
     if (!mkdtemp(archive_cache_root)) abort();
     atexit(archive_cache_cleanup);
-    if (![NSFileManager.defaultManager createDirectoryAtPath:[@(archive_cache_root) stringByAppendingPathComponent:@"com.apple.gpuarchiver"]
+    NSString *cache_path = [@(archive_cache_root) stringByAppendingPathComponent:@"com.apple.gpuarchiver"];
+    if (!cache_path) abort();
+    if (![NSFileManager.defaultManager createDirectoryAtPath:cache_path
                                withIntermediateDirectories:NO attributes:nil error:nil]) abort();
     char dir[] = "/tmp/t_pso_archive.XXXXXX"; if (!mkdtemp(dir)) abort();
     setenv("DM_PSO_ARCHIVE", argc == 3 ? argv[2] : dir, 1);
@@ -551,6 +651,7 @@ int main(int argc, char **argv) { @autoreleasepool {
         [NSFileManager.defaultManager removeItemAtPath:@(cdir) error:nil]; g_arch_dir = saved; g_arch4 = @[];
     }
     compute_pipelines();
+    mesh_pipelines();
     // a function with no Metal 4 descriptor: the MTLDevice path
     uint64_t legacy = g_pb_legacy;
     id<MTLRenderPipelineState> l = pso_build(desc(MTLPixelFormatRGBA8Unorm, 0, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll, 0), &err);

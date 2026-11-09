@@ -32,7 +32,13 @@
 // context, and named through a macro that indexes it with TCI, the calling thread's context. One context (TCI 0) translates everything for now, so each access is
 // the same fixed address as before; the planner / worker split makes TCI the worker's own index. Submission-wide tracking and shared caches stay single
 enum { NW = 4 };
-#define TCI 0
+static int g_tci;   // the context the calling code translates in: 0 the planner (and everything single-threaded); the verify mode (DM_NVN_PAR=2) switches to 1 on the same thread
+#define TCI g_tci
+static void pv_open(MTL4RenderPassDescriptor *pd), pv_close(void); static int g_pv_from_draw;   // the verify mode (DM_NVN_PAR=2, beside draw_enc)
+static int g_pv_open; static uint32_t g_pv_badbits; static int g_pv_slot;   // a pass is being captured; why it cannot be compared; the visibility slot of the draw translated again
+static inline int g_pv_on_(void) { return g_pv_open; }
+static inline void g_pv_bad(int w) { if (g_pv_open) g_pv_badbits |= 1u << w; }
+static int g_wet;   // translating a pass again from its snapshot (DM_NVN_PAR=2): the planner's notes and decisions are not made a second time
 static void pcn_open(void), pcn_close(void);   // the parallel translation census (DM_NVN_PAR_CENSUS, below mtl_exec)
 #include "nvn_refl.h"
 #include "nvn_cover.h"
@@ -713,11 +719,13 @@ void mtl_init(void) {
     MTL4ArgumentTableDescriptor *atd = [MTL4ArgumentTableDescriptor new];
     atd.maxBufferBindCount = 31; atd.maxTextureBindCount = 1;
     NSError *ate = nil;
+    for (int k = 0; k < NW; k++) { g_tci = k;   // every translation context binds through tables of its own
     g_vt = rec_table([g_dev newArgumentTableWithDescriptor:atd error:&ate]); if (!g_vt) MDIE("failed to create the vertex argument table: %s", ate.localizedDescription.UTF8String);
     g_vt_valid = 0;
     g_ft = rec_table([g_dev newArgumentTableWithDescriptor:atd error:&ate]); if (!g_ft) MDIE("failed to create the fragment argument table: %s", ate.localizedDescription.UTF8String);
     g_ct = rec_table([g_dev newArgumentTableWithDescriptor:atd error:&ate]); if (!g_ct) MDIE("failed to create the compute argument table: %s", ate.localizedDescription.UTF8String);
     g_ot = rec_table([g_dev newArgumentTableWithDescriptor:atd error:&ate]); if (!g_ot) MDIE("failed to create the object argument table: %s", ate.localizedDescription.UTF8String);
+    } g_tci = 0;
     g_up_ct = [g_dev newArgumentTableWithDescriptor:atd error:&ate]; if (!g_up_ct) MDIE("failed to create the upload compute argument table: %s", ate.localizedDescription.UTF8String);
     MTL4ArgumentTableDescriptor *pad = [MTL4ArgumentTableDescriptor new];
     pad.maxTextureBindCount = 1; pad.maxSamplerStateBindCount = 1; pad.maxBufferBindCount = 1;
@@ -1609,7 +1617,7 @@ static inline void enc_r_visibility(id<MTL4RenderCommandEncoder> e, MTLVisibilit
 // transform feedback and shader arguments; helper passes with their own tables do not change this state.
 static inline void enc_r_vbuf(id<MTL4RenderCommandEncoder> e, NSUInteger i, uint64_t gpu) {
     (void)e; uint32_t bit = 1u << i;
-    if (g_vbuf_cache && (g_vt_valid & bit) && g_vt_addr[i] == gpu) { g_vbuf_skip++; return; }
+    if (g_vbuf_cache && (g_vt_valid & bit) && g_vt_addr[i] == gpu && !g_pv_open && !g_wet) { g_vbuf_skip++; return; }   // the verify mode writes every one (arena addresses differ between its contexts)
     if (rec_on()) rec_table_op(RO_T_ADDR, g_vt, gpu, i); else [g_vt setAddress:gpu atIndex:i];
     g_vt_addr[i] = gpu; g_vt_valid |= bit; g_vbuf_set++;
 }
@@ -4649,7 +4657,8 @@ static id<MTLRenderPipelineState> g_enc_pso_[NW]; static id<MTLDepthStencilState
 #define g_enc_dss (g_enc_dss_[TCI])
 // Dynamic state already sent on the open render encoder: each draw used to send all nine (stencil reference, viewport, scissor, cull, winding, fill, depth bias, depth clip, blend colour);
 // now a value is sent only when it differs. g_ed.ok holds one bit per item and is cleared for every new encoder and after a clear triangle (which sets its own)
-static struct { unsigned ok; uint32_t sref; MTLViewport vp; MTLScissorRect sc; int cull, wind, fill, clip; float bias[3], blend[4]; } g_ed;
+static struct { unsigned ok; uint32_t sref; MTLViewport vp; MTLScissorRect sc; int cull, wind, fill, clip; float bias[3], blend[4]; } g_ed_[NW];
+#define g_ed (g_ed_[TCI])
 enum { ED_SREF = 1, ED_VP = 2, ED_SC = 4, ED_CULL = 8, ED_WIND = 16, ED_FILL = 32, ED_BIAS = 64, ED_CLIP = 128, ED_BLEND = 256 };
 static int g_enc_vis_[NW], g_enc_has_vis_[NW];   // This encoder's current visibility count mode (0 off / slot number + 1), and whether a visibility buffer is attached
 #define g_enc_vis (g_enc_vis_[TCI])
@@ -4670,6 +4679,7 @@ static int g_kd_force;   // the draw DM_NVN_KEYDUMP matched: force the per-bindi
 static _Atomic long g_pd_a0 = -2, g_pd_a1;   // the frames dumped (inclusive); -2 = DM_NVN_PASSDUMP not read yet, -3 = DM_NVN_PASSDUMP=every:<n>
 static long g_pd_every;
 static inline int passdump(void) {
+    if (g_wet) return 0;   // a pass translated again (DM_NVN_PAR=2) logs nothing twice
     if (g_kd_force) return 1;
 #ifdef NVN_RT_RANGE_TEST
     if (g_rr_checking) return 0;
@@ -5066,7 +5076,7 @@ static void rp_end_at(const char *fn, int line) { if (g_enc) { AP_B; geo_mesh_fl
 #ifdef NVN_RT_RANGE_TEST
     int ranged=g_rt_range_active && !g_rt_range_pending;
 #endif
-    pcn_close(); sd_finish(); enc_r_end_pass(g_enc); g_gp_bw_l0 = g_bw_load; g_gp_bw_s0 = g_bw_store;   // the profile's per-pass ledger counts from the previous pass end, profiled or not
+    pcn_close(); sd_finish(); enc_r_end_pass(g_enc); if (g_pv_on_()) pv_close(); g_gp_bw_l0 = g_bw_load; g_gp_bw_s0 = g_bw_store;   // the profile's per-pass ledger counts from the previous pass end, profiled or not
     zskip_commit_clears(); g_enc = nil; g_enc_geo_nocolor = 0; g_rt_merged = 0; g_sm_pass = 0; g_rt_range_active = g_rt_range_pending = 0; pg_end_render(); ts_after(); ms_after(); if (g_lp.count) lp_finish(); fz_end();
     if (g_nubd && g_nubd >= ubd_lazy()) ubd_flush();   // the inline updates deferred in this pass, in order (see mtl_sub_update); across passes they wait for the next copy or dispatch (blit_raw)
     if (g_nbcrt) bcrt_flush();   // blocks drawn into shadows go back into their compressed textures
@@ -5437,6 +5447,7 @@ static MTL4RenderPassDescriptor *rp_plan(int clear_only) {
 static id<MTL4RenderCommandEncoder> rp_open(MTL4RenderPassDescriptor *pd) {
     ser_gate();
     g_stat_pass++;   // gp_begin records this pass; match the attachment and draw dump labels
+    if (g_pv_from_draw && !g_wet) pv_open(pd);
     g_enc = enc_r_begin_pass(pd);
     pcn_open();
     args_dirty_all();
@@ -10835,7 +10846,8 @@ static void sd_apply(id<MTL4RenderCommandEncoder> en, const sd_stores *st) {
         if (st->kind[i] == 1) [en setDepthStoreAction:sa]; else if (st->kind[i] == 2) [en setStencilStoreAction:sa]; else [en setColorStoreAction:sa atIndex:(NSUInteger)st->idx[i]]; }
 }
 static void sd_decide(sd_stores *st);
-static void sd_finish(void) { sd_stores st; sd_decide(&st); if (st.n) sd_apply(g_enc, &st); }
+static void pv_stores(const sd_stores *st);
+static void sd_finish(void) { sd_stores st; sd_decide(&st); if (st.n) sd_apply(g_enc, &st); pv_stores(&st); }
 static void sd_decide(sd_stores *st) {
     st->n = 0;
     if (!g_nsd) return;
@@ -13283,6 +13295,8 @@ static int long_pass_split_due(void) {
 // A geometry-shader draw drawn as a mesh draw (geo_mesh_draw) is split before it, as draw_ splits the others: its inner draw_ runs with g_geo_program set, where no split is made
 static void long_pass_split_geo(void) { if (g_enc && long_pass_split_due()) { rp_end(); g_lps_splits++; g_cut_force = 1; sub_cut(); g_cut_force = 0; } }
 static void draw(const p_draw *dw, const p_draw_idx *di) { cp_stamp start = cp_begin(); if (dw && dw->prim == DM_PRIM_MESH_TASKS) mesh_tasks_draw(dw); else draw_(dw, di); cp_end(5, start); }
+static void draw_enc(NvProg *pr, const p_draw *dw, const p_draw_idx *di, id<MTLRenderCommandEncoder> en, int mode, id<MTLFunction> fz_fn, uint64_t mdx);
+static void pv_note(NvProg *pr, const p_draw *dw, const p_draw_idx *di, id<MTLFunction> fz_fn, uint64_t mdx); static void pv_slot(int s);
 static void draw_(const p_draw *dw, const p_draw_idx *di) {
     g_draw_binst = (uint32_t)(dw ? dw->base_instance : di ? di->base_instance : 0);   // c0 + 0x644 of the stages that read the driver segment (encode_args)
     if (passdump()) { NvProg *p = g_geo_program ? g_geo_program : S.prog ? prog_get(S.prog) : nil;
@@ -13364,7 +13378,8 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     if (rt_sampled) { static int once; if (!once++) MLOG("same-target continuation: a draw in the continued pass samples an attachment; split here (first case pass %llu)", g_stat_pass);
         PD("M %llu a draw in the continued pass samples an attachment; split here", g_stat_pass); rp_end(); }
     order_draw(pr, g_fz.active || g_sm_pass || g_defer_replaying);   // a write after an ordering barrier in the pass
-    static id<MTLFunction> fz_fn;   // Specialized fragment function for this draw of the later pass in a merged render pass (nil = use the original version)
+    static id<MTLFunction> fz_fn_tc[NW];
+#define fz_fn (fz_fn_tc[TCI])   // Specialized fragment function for this draw of the later pass in a merged render pass (nil = use the original version)
     if (g_fz.active && g_enc && g_fz.phase == 2 && (lop_on() || !fz_p2_draw(pr, dw, di, g_fz.lmap2, &fz_fn))) {   // Cannot be proven (or a logic operation, which needs the shader's own targets: lop_key): end the merged render pass (the earlier pass's result is stored as usual) and reopen with the later pass's original targets
         static int once3; if (!once3++) MLOG("readable-tile pass merge: a draw of the later pass is not provable; back to separate passes (first case pass %llu)", g_stat_pass);
         g_fz_fallback++; rp_end(); }
@@ -13395,7 +13410,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     if (g_enc && !defer_q_draw && long_pass_split_due()) { PD("M %llu %llu draws in this pass with the GPU idle: split here, the part so far submitted", g_stat_pass, (unsigned long long)(g_stat_draw - g_lps_draw0)); rp_end(); g_lps_splits++; g_cut_force = 1; sub_cut(); g_cut_force = 0; }
     if (!g_enc && mode == 0 && !g_rp_layered && !defer_q_draw && g_exec_next && !tbdr_on() && !g_geo_program && sm_on()) sm_plan(pr);
     vbuf_prepare(pr->sh[0] ? &pr->sh[0]->rf : NULL, dw, di);   // an unaligned GPU-written stream, or one the draw reads past, needs its ordered copy before the render encoder
-    id<MTLRenderCommandEncoder> en = rp_begin_ex(mode);
+    g_pv_from_draw = 1; id<MTLRenderCommandEncoder> en = rp_begin_ex(mode); g_pv_from_draw = 0;
     g_rp_layered = 0; g_sm_plan.on = 0;
     g_fd_dw = NULL; g_fd_di = NULL;
     if (!en) { PD("Z %llu draw skipped: the render pass did not begin vs=%.16s fs=%.16s", g_stat_pass, pr && pr->sh[0] ? pr->sh[0]->key : "-", pr && pr->sh[1] ? pr->sh[1]->key : "-"); return; }   // Z lines: why a draw was dropped at these early returns
@@ -13407,11 +13422,158 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
         vbuf_prepare(pr->sh[0] ? &pr->sh[0]->rf : NULL, dw, di); g_fd_dw = dw; g_fd_di = di; en = rp_begin_ex(mode); g_fd_dw = NULL; g_fd_di = NULL; g_rp_layered = 0;
         if (!en) return;
     }
+    draw_enc(pr, dw, di, en, mode, fz_fn, mdx);
+#undef fz_fn
+}
+
+// ---------- Verify mode (DM_NVN_PAR=2, diagnostic; parallel translation stage P2) ----------
+// The single-threaded translation draws as always. Each pass a draw opens is captured besides: the state at its start (S, R, the pass info), its descriptor, the run of operations
+// inside it, the store actions it ended with, and per draw it encoded the operation and its visibility slot. When the pass ends, its encoding is made again from that capture in
+// context 1 (pv_wet: draw_enc for each draw, state operations replayed, the planner's notes not made again), into a chain of its own that is compared with the records the pass
+// made and then dropped. The comparison takes the operations in order and their arguments, except the argument tables (each context has its own) and arena addresses (soft:
+// counted apart). A line every 300 frames: passes, those compared and why the others were not, identical, identical but for soft words, different (with the first difference)
+enum { PV_SPECIAL = 0, PV_AGAIN = 1, PV_END = 2, PV_DEPTH = 3, PV_SPLIT = 4, PV_OP = 5, PV_COUNT = 6, PV_BARRIER = 7, PV_NWHY = 8 };
+static const char *const g_pv_why_name[PV_NWHY] = {"special draw", "re-encoded", "no end op", "list depth", "drained mid-pass", "unsupported op", "draw count", "ordering barrier"};
+typedef struct { const uint8_t *op; int slot; } pv_draw;
+static struct { const uint8_t *p0; int depth0; __strong MTL4RenderPassDescriptor *pd; uint64_t stat_pass, vbar0; typeof(g_S_[0]) s; typeof(g_R_[0]) r; typeof(g_pass_[0]) pass;
+                int has_vis, mode, geo_nocolor; NSUInteger rp_aw, rp_ah; sd_stores st; pv_draw *d; int nd, cap; } g_pv;
+static uint64_t g_pv_pass, g_pv_tried, g_pv_same, g_pv_soft, g_pv_diff, g_pv_why[PV_NWHY], g_pv_frame, g_pv_softw;
+static char g_pv_first[512];
+static int pv_mode(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_PAR"); v = e ? atoi(e) : 0; if (v == 2) MLOG("parallel translation verify mode (DM_NVN_PAR=2): every pass a draw opens is encoded again from its capture in another context and compared"); } return v; }
+static void pv_open(MTL4RenderPassDescriptor *pd) {
+    if (pv_mode() != 2 || !rec_on()) return;
+    g_pv_open = 1; g_pv_badbits = 0; g_pv.nd = 0; g_pv.p0 = g_exec_cur; g_pv.depth0 = g_ret_n; g_pv.pd = pd; g_pv.stat_pass = g_stat_pass; g_pv.vbar0 = g_order_vbar;
+    memcpy(&g_pv.s, &S, sizeof S); g_pv.r = R; g_pv.pass = g_pass; g_pv.has_vis = g_enc_has_vis; g_pv.mode = g_enc_mode; g_pv.geo_nocolor = g_enc_geo_nocolor; g_pv.rp_aw = g_rp_aw; g_pv.rp_ah = g_rp_ah;
+    g_pv.st.n = 0; g_vt_valid = 0;   // both contexts write every vertex table slot of a compared pass, so each one's table history does not show in the records
+    if (!g_pv.p0) g_pv_bad(PV_END);
+    rec_job_begin();   // the pass's records gather here; pv_close hands them to the queue
+}
+static void pv_stores(const sd_stores *st) { if (g_pv_open && !g_wet) g_pv.st = *st; }
+static void pv_note(NvProg *pr, const p_draw *dw, const p_draw_idx *di, id<MTLFunction> fz_fn, uint64_t mdx) {
+    if (g_fb_n || (g_fb_tseq == g_draw_seq && g_fb_tfn) || mdx || fz_fn || g_geo_program || g_geo_mesh.on || g_mtk.on || g_fz.active || g_sm_pass || g_rt_range_active || g_kd_force
+        || g_defer_replaying || S.tf_on || (dw && (dw->mdi_cnt || dw->prim == DM_PRIM_MESH_TASKS)) || (di && di->mdi_cnt) || !pr) g_pv_bad(PV_SPECIAL);
+    if (g_pv.nd == g_pv.cap) { g_pv.cap = g_pv.cap ? g_pv.cap * 2 : 256; g_pv.d = realloc_or_die(g_pv.d, (size_t)g_pv.cap * sizeof *g_pv.d, "the verify mode's draws"); }
+    g_pv.d[g_pv.nd++] = (pv_draw){g_exec_cur, -1};
+}
+static void pv_slot(int s) { if (g_pv.nd) g_pv.d[g_pv.nd - 1].slot = s; }
+static int pv_state_op(uint32_t op) {
+    switch (op) {
+        case OP_BIND_PROGRAM: case OP_BIND_STATE: case OP_BIND_VATTR: case OP_BIND_VSTREAM: case OP_BIND_VBUF: case OP_BIND_VBUF1: case OP_BIND_UBO: case OP_BIND_UBO_SMALL:
+        case OP_BIND_SSBO: case OP_BIND_TEX: case OP_BIND_TEX1: case OP_BIND_SAMP: case OP_BIND_IMG: case OP_VIEWPORTS: case OP_SCISSOR: case OP_DEPTH_RANGE: case OP_STENCIL:
+        case OP_POLY_OFFSET: case OP_BLEND_COLOR: case OP_DEPTH_CLAMP: case OP_VP_SWIZZLE: case OP_PRIM_RESTART: case OP_ALPHA_REF: case OP_PUSH_CONST: case OP_SET_TEX_POOL:
+        case OP_SET_SAMP_POOL: case OP_COPY_STRIDE: case OP_RAST_DISCARD: return 1;
+        default: return 0;
+    }
+}
+// The pass's encoding again from the capture, in context 1; *ok = 0 when an operation in the run is not one a worker replays
+static rec_chain pv_wet(const uint8_t *p_end, int *ok) {
+    int t0 = g_tci; g_tci = 1; g_wet = 1; *ok = 1;
+    memcpy(&S, &g_pv.s, sizeof S); R = g_pv.r; g_pass = g_pv.pass; g_stat_pass = g_pv.stat_pass; g_cb = g_cb_[0];
+    if (!g_sub_arenas) g_sub_arenas = [NSMutableArray array];
+    args_dirty_all(); g_pso_dirty = g_dss_dirty = 1; g_enc_pso = nil; g_enc_dss = nil; g_ed.ok = 0; g_enc_vis = 0; g_enc_has_vis = g_pv.has_vis; g_enc_mode = g_pv.mode;
+    g_enc_geo_nocolor = g_pv.geo_nocolor; g_rp_aw = g_pv.rp_aw; g_rp_ah = g_pv.rp_ah; g_fb_n = 0; g_fb_rebind = 0; g_vt_valid = 0;
+    rec_job_begin();
+    g_enc = enc_r_begin_pass(g_pv.pd);
+    int k = 0; long n = 0;
+    for (const uint8_t *p = g_pv.p0; p && p != p_end; ) {
+        if (++n > 4000000) { *ok = 0; break; }
+        op_hdr h; memcpy(&h, p, sizeof h); const void *a = p + 8;
+        if (h.op == OP_JUMP) { memcpy(&p, a, 8); continue; }
+        if (h.op == OP_DRAW || h.op == OP_DRAW_IDX) {
+            for (; k < g_pv.nd && g_pv.d[k].op == p; k++) { p_draw t; p_draw_idx ti; g_pv_slot = g_pv.d[k].slot; g_exec_cur = p; g_exec_next = p + h.size;
+                draw_enc(prog_get(S.prog), h.op == OP_DRAW ? draw_rec(a, h.size, &t) : NULL, h.op == OP_DRAW_IDX ? draw_idx_rec(a, h.size, &ti) : NULL, g_enc, 0, nil, 0); }
+            g_exec_next = NULL;
+        } else if (h.op == OP_SET_RT) R.rt = *(const p_set_rt *)a;   // a same-target continuation (any other SET_RT ends the pass before it)
+        else if (pv_state_op(h.op)) state_op(h.op, a);
+        else if (h.op != OP_BARRIER && h.op != OP_UPDATE_UB && h.op != OP_REPORT_COUNTER && h.op != OP_RESET_COUNTER && h.op != OP_BEGIN) { *ok = 0; g_pv_why[PV_OP]++; break; }
+        p += h.size;
+    }
+    if (*ok && k != g_pv.nd) { *ok = 0; g_pv_why[PV_COUNT]++; }
+    geo_mesh_flush_pass(); if (g_pv.st.n) sd_apply(g_enc, &g_pv.st); enc_r_end_pass(g_enc); g_enc = nil;
+    rec_publish(); rec_chain c = g_rb_job; g_rb_job = (rec_chain){0}; g_rb_jobmode = 0;
+    [g_sub_arenas_[0] addObjectsFromArray:g_sub_arenas]; [g_sub_arenas removeAllObjects]; g_cur_arena = nil;   // its arena blocks complete with the submission
+    g_tci = t0; g_wet = 0;
+    return c;
+}
+static int pv_words(uint32_t op) {   // as rec_exec reads them; 0: the operation alone is compared (a begin's descriptor is copied by each begin, the same one by construction)
+    switch (op) {
+        case RO_BAR_QUEUE: case RO_BAR_AFTER_STAGES: case RO_BAR_ENCODER: case RO_R_BIAS: case RO_R_AMP: case RO_R_DRAW: case RO_R_MESH: case RO_R_MESH_IND: case RO_T_ADDR: case RO_T_TEX: case RO_T_SAMP: return 3;
+        case RO_R_TABLE: case RO_R_VIS: case RO_R_DRAW_IND: case RO_R_STORE_C: return 2;
+        case RO_R_PSO: case RO_R_DSS: case RO_R_CULL: case RO_R_WINDING: case RO_R_FILL: case RO_R_CLIP: case RO_R_SREF: case RO_R_STORE_D: case RO_R_STORE_S: return 1;
+        case RO_R_VIEWPORT: return 6;
+        case RO_R_SCISSOR: case RO_R_BLEND: return 4;
+        case RO_R_DRAW_INST: case RO_R_DRAW_IDX_IND: return 5;
+        case RO_R_DRAW_IDX: return 8;
+        default: return 0;
+    }
+}
+static const rec_t *pv_rec(rec_blk **b, int *i) { while (*b && *i >= (*b)->n) { *b = (*b)->next; *i = 0; } return *b ? &(*b)->r[(*i)++] : NULL; }
+// 0 identical, 1 identical but for soft words, 2 different (*why says where)
+static int pv_cmp(rec_chain x, rec_chain y, char *why, size_t nwhy) {
+    rec_blk *bx = x.head, *by = y.head; int ix = 0, iy = 0, soft = 0; long k = 0;
+    for (;; k++) {
+        const rec_t *a = pv_rec(&bx, &ix), *b = pv_rec(&by, &iy);
+        if (!a || !b) { if (a || b) { snprintf(why, nwhy, "record %ld: %s ends first (op %u)", k, a ? "the replay" : "the pass", a ? a->op : b->op); return 2; } return soft; }
+        if (a->op != b->op || a->nobj != b->nobj) { size_t o = (size_t)snprintf(why, nwhy, "record %ld: op %u, the replay's %u; ops from %ld:", k, a->op, b->op, k > 12 ? k - 12 : 0);
+            for (int side = 0; side < 2; side++) { rec_blk *bb = side ? y.head : x.head; int ii = 0; o += (size_t)snprintf(why + o, nwhy > o ? nwhy - o : 0, side ? " | replay" : " pass");
+                for (long q = 0; q <= k + 4; q++) { const rec_t *r = pv_rec(&bb, &ii); if (!r) break; if (q >= k - 12 && o < nwhy) o += (size_t)snprintf(why + o, nwhy - o, " %u", r->op); } }
+            return 2; }
+        int first = 0, hard = 1, nw = pv_words(a->op);   // the words the call reads (the rest of a recycled record is old content)
+        if (a->op == RO_T_ADDR || a->op == RO_T_TEX || a->op == RO_T_SAMP) { first = 1; hard = a->op != RO_T_ADDR; }   // a[0] the context's own table; an address may be in an arena
+        else if (a->op == RO_R_TABLE) first = 1;   // the context's own table
+        for (int w = first; w < nw; w++) if (a->a[w] != b->a[w]) {
+            int addr = (a->op == RO_R_DRAW_IDX && w == 3) || (a->op == RO_R_DRAW_IDX_IND && (w == 2 || w == 4)) || (a->op == RO_R_DRAW_IND && w == 1);   // index and argument buffers: arena copies of each context
+            if (!hard || addr) { soft = 1; g_pv_softw++; continue; }
+            snprintf(why, nwhy, "record %ld op %u word %d: %#llx, the replay's %#llx", k, a->op, w, (unsigned long long)a->a[w], (unsigned long long)b->a[w]); return 2; }
+    }
+}
+static void pv_drop(rec_chain c) {   // release the replay's objects and give its blocks back
+    for (rec_blk *b = c.head, *next; b; b = next) { next = b->next;
+        for (int i = 0; i < b->n; i++) for (uint32_t j = 0; j < b->r[i].nobj; j++) if (b->r[i].a[j]) CFRelease((CFTypeRef)(uintptr_t)b->r[i].a[j]);
+        pthread_mutex_lock(&g_rb_mu); b->n = 0; b->next = g_rb_free; g_rb_free = b; pthread_mutex_unlock(&g_rb_mu); }
+}
+static void pv_close(void) {
+    if (!g_pv_open || g_wet) return;
+    g_pv_open = 0;
+    rec_publish(); rec_chain ser = g_rb_job; g_rb_job = (rec_chain){0}; g_rb_jobmode = 0;
+    const uint8_t *p_end = g_exec_cur;
+    if (!p_end) g_pv_badbits |= 1u << PV_END;
+    if (g_ret_n != g_pv.depth0) g_pv_badbits |= 1u << PV_DEPTH;
+    if (g_rb_job_split) { g_pv_badbits |= 1u << PV_SPLIT; g_rb_job_split = 0; }
+    if (g_order_vbar != g_pv.vbar0) g_pv_badbits |= 1u << PV_BARRIER;
+    g_pv_pass++;
+    if (g_pv_badbits) { for (int i = 0; i < PV_NWHY; i++) if (g_pv_badbits >> i & 1) g_pv_why[i]++; }
+    else {
+        int ok; rec_chain wet = pv_wet(p_end, &ok);
+        if (ok) { char why[400]; int r = pv_cmp(ser, wet, why, sizeof why); g_pv_tried++;
+            if (r == 0) g_pv_same++; else if (r == 1) g_pv_soft++;
+            else { g_pv_diff++; if (!g_pv_first[0]) { size_t o = (size_t)snprintf(g_pv_first, sizeof g_pv_first, "pass %llu (%d draws, slots", (unsigned long long)g_pv.stat_pass, g_pv.nd);
+                for (int i = 0; i < g_pv.nd && i < 8 && o < sizeof g_pv_first; i++) o += (size_t)snprintf(g_pv_first + o, sizeof g_pv_first - o, " %d", g_pv.d[i].slot);
+                snprintf(g_pv_first + o, o < sizeof g_pv_first ? sizeof g_pv_first - o : 0, "): %s", why); } } }
+        pv_drop(wet);
+    }
+    g_pv.pd = nil;
+    rec_chain_push(ser);
+    uint64_t f = atomic_load(&g_cur_frame);
+    if (f >= g_pv_frame + 300) {
+        char w[300]; size_t o = 0;
+        for (int i = 0; i < PV_NWHY; i++) if (g_pv_why[i]) o += (size_t)snprintf(w + o, sizeof w - o, "%s%s %llu", o ? ", " : "", g_pv_why_name[i], (unsigned long long)g_pv_why[i]);
+        if (g_pv_frame) MLOG("parallel verify up to frame %llu: passes %llu, compared %llu (identical %llu, identical but for arena addresses %llu, different %llu), not compared: %s%s%s",
+            (unsigned long long)f, (unsigned long long)g_pv_pass, (unsigned long long)g_pv_tried, (unsigned long long)g_pv_same, (unsigned long long)g_pv_soft, (unsigned long long)g_pv_diff,
+            o ? w : "-", g_pv_first[0] ? "; first difference " : "", g_pv_first);
+        g_pv_frame = f; g_pv_pass = g_pv_tried = g_pv_same = g_pv_soft = g_pv_diff = 0; memset(g_pv_why, 0, sizeof g_pv_why); g_pv_first[0] = 0;
+    }
+}
+// The encoding half of a draw (draw_ after its pass is open): the pipeline, depth-stencil and dynamic state, the vertex streams, the arguments, the visibility slot and the draw call.
+// The verify mode (DM_NVN_PAR=2) runs it again for a pass from the pass's snapshot in another context (pv_wet), where the planner's notes are not made twice
+static void draw_enc(NvProg *pr, const p_draw *dw, const p_draw_idx *di, id<MTLRenderCommandEncoder> en0, int mode, id<MTLFunction> fz_fn, uint64_t mdx) {
+    id<MTLRenderCommandEncoder> en = en0; int skip_d = mode != 0;
+    if (!g_wet && g_pv_on_()) pv_note(pr, dw, di, fz_fn, mdx);
     if (skip_d) { g_stat_ds_omit++; if (mode == 3) g_stat_s_only++; else if (mode == 4) g_stat_d_only++; }
     // The pipeline depends only on (program, render pass targets, blend / color / write mask / multisample state, vertex layout): if these did not change, reuse the previous one
     static id<MTLRenderPipelineState> cur_ps_tc[NW]; static NvProg *cur_pr_tc[NW]; static uint64_t cur_ps_pass_tc[NW]; static int cur_pull_tc[NW];   // cur_pull: a hybrid (pulling) pipeline, asked for again at the next draw
     if (g_fz.active && !g_defer_replaying) { g_pso_lmap = g_fz.phase == 1 ? g_fz.lmap1 : g_fz.lmap2; g_pso_fsfn = g_fz.phase == 1 ? nil : fz_fn; g_pso_fz = g_fz.phase == 1 ? (pso_fz_desc){0} : g_fz_desc; g_pso_dirty = 1; }   // Readable tile merge: fetch the pipeline by the physical -> logical mapping and the specialization
-    else if (g_fb_tseq == g_draw_seq && g_fb_tfn && !g_defer_replaying) { g_pso_lmap = g_fb_tlmap; g_pso_fsfn = g_fb_tfn; g_pso_fz = g_fb_tdesc; g_pso_dirty = 1; }   // same-pass feedback read from the tile (fb_tile_plan)
+    else if (!g_wet && g_fb_tseq == g_draw_seq && g_fb_tfn && !g_defer_replaying) { g_pso_lmap = g_fb_tlmap; g_pso_fsfn = g_fb_tfn; g_pso_fz = g_fb_tdesc; g_pso_dirty = 1; }   // same-pass feedback read from the tile (fb_tile_plan)
     if (g_mtk.on) { cur_ps_tc[TCI] = mtk_pso(pr); cur_pull_tc[TCI] = 0; cur_pr_tc[TCI] = nil; if (!cur_ps_tc[TCI]) { g_mtk.miss = 1; return; } }   // a task / mesh draw (mesh_tasks_draw)
     else if (g_geo_mesh.on) { cur_ps_tc[TCI] = geo_mesh_pso(pr); cur_pull_tc[TCI] = 1; cur_pr_tc[TCI] = nil; if (!cur_ps_tc[TCI]) { g_geo_mesh.miss = 1; return; } }   // a mesh draw (geo_mesh_draw): pulls its streams; the next draw fetches its own pipeline; none yet: the compute path draws
     else if (g_pso_dirty || pr != cur_pr_tc[TCI] || cur_ps_pass_tc[TCI] != g_pass.serial) { g_pso_amp = g_sm_pass; cur_ps_tc[TCI] = pso_get(pr, nil); g_pso_amp = 0; cur_pull_tc[TCI] = g_pso_pull; cur_pr_tc[TCI] = pr; cur_ps_pass_tc[TCI] = g_pass.serial; g_pso_dirty = !cur_ps_tc[TCI] || cur_pull_tc[TCI]; }
@@ -13480,6 +13642,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     // a 4096x1024 texture sampled through another format's view at its first loading screen). The texture is upgraded now, so the draw is encoded again in a new pass
     if (g_enc != en) {
         static int again; if (again) { RED_ONCE(130, "binding a draw's arguments ended its render pass twice; draw skipped"); return; }
+        g_pv_bad(1);
         PD("M %llu binding the draw's arguments ended the render pass (texture upgrade); encoded again", g_stat_pass);
         again = 1; draw(dw, di); again = 0; return;
     }
@@ -13494,7 +13657,8 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
                                                     pr->sh[3] ? pr->sh[3]->key : "-", pr->sh[4] ? pr->sh[4]->key : "-", pr->sh[1] ? pr->sh[1]->key : "-"); }
             PD("Z %llu draw skipped: primitive type %d", g_stat_pass, prim); return;
     }
-    if (g_vis_counting) {   // Occlusion query counting: a new slot for this render pass (also switch to a new slot after a report / reset)
+    if (g_wet) { int sl = g_pv_slot; if (sl >= 0 && g_enc_vis != sl + 1) { enc_r_visibility(en, MTLVisibilityResultModeCounting, (NSUInteger)sl * 8); g_enc_vis = sl + 1; } }   // the slot the pass's draw had (pv_wet)
+    else if (g_vis_counting) {   // Occlusion query counting: a new slot for this render pass (also switch to a new slot after a report / reset)
         if (!g_enc_has_vis) RED_ONCE(34, "occlusion query counting began in a pass without a visibility buffer (the first reset happened mid-pass); that pass's samples are not counted");
         else {
             if (g_vis_cur < 0 || g_vis_cur_pass != g_pass.serial) {
@@ -13506,8 +13670,9 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
             if (g_vis_cur >= 0 && g_enc_vis != g_vis_cur + 1) { enc_r_visibility(en, MTLVisibilityResultModeCounting, (NSUInteger)g_vis_cur * 8); g_enc_vis = g_vis_cur + 1; }
         }
     }
+    if (!g_wet && g_pv_on_()) pv_slot(g_vis_counting && g_enc_has_vis ? g_vis_cur : -1);
     g_stat_draw++;
-    if (enc_label_on() && !g_el_draws++ && pr->sh[1]) { memcpy(g_el_key, pr->sh[1]->key, 8); g_el_key[8] = 0; }
+    if (!g_wet && enc_label_on() && !g_el_draws++ && pr->sh[1]) { memcpy(g_el_key, pr->sh[1]->key, 8); g_el_key[8] = 0; }
     if (passdump()) {   // Characteristics of a render pass's first draw (to judge whether the load can be omitted: full screen, no blending, writes all channels, does not depend on depth); with DM_NVN_PASSDUMP_ALL every draw is recorded
         static uint64_t last_pass_tc[NW] = {[0 ... NW-1] = ~0ull}; static int all = -1; if (all < 0) all = getenv("DM_NVN_PASSDUMP_ALL") != NULL;
         if (all || g_kd_force) PD("d %llu bv=%d bi=%d first=%d vs=%s fs=%s vc=%d inst=%d blend=%#x b0=%#llx dt=%d dw=%d df=%d cull=%d st=%d sf=%d,%d sop=%d,%d,%d/%d,%d,%d smask=%#x,%#x/%#x,%#x sref=%#x,%#x ib=%#llx it=%d cmask=%#x b1=%#llx b2=%#llx b3=%#llx po=%d/%g,%g,%g dc=%d", g_stat_pass, di ? di->base_vertex : 0, di ? di->base_instance : 0, dw ? dw->first : 0, pr->sh[0] ? pr->sh[0]->key : "-", pr->sh[1] ? pr->sh[1]->key : "-",
@@ -13555,6 +13720,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
         }
     }
     g_kd_force = 0;
+    if (!g_wet) {   // the planner's notes: made once, by the translation that is drawn
     if (rt_range_on() && !rt_range_pr_ro(pr)) g_pass.range_external=1;
     rt_range_note_depth();
 #ifdef NVN_RT_RANGE_TEST
@@ -13562,6 +13728,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
 #endif
     udc_note_draw(pr, raster_mask);
     swrite_note(pr); order_note(pr);
+    }
     if (g_mtk.on) { mtk_encode(en); return; }
     if (g_geo_mesh.on) { geo_mesh_encode(en); return; }
     if (g_geo_program) {

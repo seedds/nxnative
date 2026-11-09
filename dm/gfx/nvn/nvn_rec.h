@@ -278,8 +278,10 @@ static void rec_job_end(uint64_t id) {
 }
 
 // Hand over what is recorded and wait until the encode thread has made every call
+static int g_rb_job_split;   // a drain met a context gathering a job: what it had went to the queue (the verify mode cannot compare that pass)
 static void rec_drain(void) {
     if (!g_rb_started) return;
+    if (g_rb_jobmode) { rec_publish(); rec_chain_push(g_rb_job); g_rb_job = (rec_chain){0}; g_rb_job_split = 1; }
     if (g_jseq_pushed != g_jseq_issued) jseq_push(1);   // every job translated and handed over first (none are numbered unless DM_NVN_PAR is on)
     rec_publish();
     uint64_t w0 = ws_t0(); int blocked = 0;

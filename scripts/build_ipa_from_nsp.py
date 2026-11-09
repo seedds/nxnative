@@ -994,10 +994,10 @@ def derived_key(profile_dir):
     return profile_dir.with_name(profile_dir.name + '.derived.key')
 
 
-def frame_step_builds(path):   # the build IDs of the FRAME_STEP table of a patches.py, read without running the file (empty: no table)
+def frame_step_builds(path, table='FRAME_STEP'):   # the keys of a table of a patches.py (FRAME_STEP: build IDs; MATCH_FRAME_STEP: module names), read without running the file (empty: no table)
     try:
         for n in ast.parse(path.read_text(encoding='utf-8')).body:
-            if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'FRAME_STEP' for t in n.targets) and isinstance(n.value, ast.Dict):
+            if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == table for t in n.targets) and isinstance(n.value, ast.Dict):
                 return {k.value for k in n.value.keys if isinstance(k, ast.Constant)}
     except (OSError, UnicodeError, SyntaxError): pass
     return set()
@@ -1010,7 +1010,7 @@ def derive_profile(g, pdir, ver, d, mods, app=None, shader_only=False):
     left out: the build makes them again from this version's own files, as for a provisional profile. The hand-written tables (the prewarm list, shader_facts_manual.tsv) are copied:
     they name shaders by content key. A folder derived from the same inputs (the files copied and the game.tsv written, kept in <pdir>.derived.key) is kept as it is, with what later
     stages wrote into it (mem_used, the heap check, the split's tables), so their own reuse holds. shader_only preserves all registered game.tsv rows and links its existing cuts:
-    only the shader tables change with installed DLC or newly decoded compute kernels. The modules are the profile's that this version ships and those main imports from that the list leaves out. A profile with frame step stubs (FRAME_STEP) for other builds only gets fps_target 0 for this version:
+    only the shader tables change with installed DLC or newly decoded compute kernels. The modules are the profile's that this version ships and those main imports from that the list leaves out. A profile with frame step stubs (FRAME_STEP) and no function-matched ones (MATCH_FRAME_STEP) for other builds only gets fps_target 0 for this version:
     its main has no state page, so a cap of 30 or 60 would present every vsync while the game steps 1/30 s per frame (double speed). Returns the version's display version"""
     src = sorted(p for p in g.dir.iterdir() if p.is_file() and (p.name not in DERIVED_SKIP or shader_only and p.name == 'patches.py'))
     # The display version: the package's control data, else the one the profile registers for this main build. A NUP update or a dump carries no control data, and the game asks
@@ -1031,7 +1031,10 @@ def derive_profile(g, pdir, ver, d, mods, app=None, shader_only=False):
         ids = {'title_id': f'title_id{T}{app:016X}', 'program_id': f'program_id{T}{(pg.npdm(d / "ExeFS/main.npdm")[1] or app):016X}'}
         out.insert(1, f'# under title ID {app:016X}, not the profile\'s {g.title_id:016X}')
     stubs = frame_step_builds(g.dir / 'patches.py')
-    own_step = shader_only or not stubs or not (d / 'ExeFS/main').exists() or build_id(d / 'ExeFS/main') in stubs
+    # a frame step placed by its functions (MATCH_FRAME_STEP) may serve this main; whether it does is known only when the rewrite matches it, and where it does not the main
+    # has no state page and the host keeps the game's own present interval anyway (fps_present_cap: a cap needs a frame step or an engine limit the host writes)
+    matched = 'main' in frame_step_builds(g.dir / 'patches.py', 'MATCH_FRAME_STEP')
+    own_step = shader_only or not stubs or matched or not (d / 'ExeFS/main').exists() or build_id(d / 'ExeFS/main') in stubs
     for line in (g.dir / 'game.tsv').read_text(encoding='utf-8').splitlines():
         if not own_step and line.split(T, 1)[0] == 'fps_target' and line.partition(T)[2].strip() != '0':
             out += ['# the profile has frame step stubs for other builds only: this version\'s main has none, so it keeps the game\'s own step', f'fps_target{T}0']; continue

@@ -2,7 +2,7 @@
 // Checks: pipelines that differ only in colour state share one base; a specialized pipeline draws the same pixels as one built through the MTLDevice; a flushed archive
 // file serves the base again without compiling; a flush of bases without a vertex layout is a p<seq> file, where a base with a layout is not looked up; a function with no
 // Metal 4 descriptor keeps the MTLDevice path; pso_key_norm drops what no pipeline depends on; compaction merges the files the prewarm took bases from into one per full period despite a
-// mid-prewarm timer flush, removing them only after its last period, and a compaction that did not finish is not tried again on the same system build; depth-only draws write depth; concurrent colour variants compile
+// mid-prewarm timer flush, removing them only after its last period, counting them for the prepare line, and a compaction that did not finish is not tried again on the same system build; a timer flush waits for any prewarm, so a cold start writes a file per full period; depth-only draws write depth; concurrent colour variants compile
 // one base; archive flushes preserve unrelated compiler state; a function with function constants is specialized by its pipeline's descriptor, not through its library,
 // and an MTLDevice pipeline gets it specialized; the descriptor for a specialization is the caller's whether the driver returns it retained or autoreleased; a compute pipeline is captured into a plain file and taken from it later, one without a Metal 4 descriptor never looked up; a native mesh pipeline is captured into a p file and taken from it later, with or without a task shader or a pixel shader, captured again by a compaction, and one without a Metal 4 descriptor built through the MTLDevice; a capture that fails builds the pipeline all the same and hands a full period over, or stops capturing after a failure in a period that captured nothing
 #include <stdlib.h>
@@ -499,7 +499,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     if (getenv("DM_TEST_ARCHIVE_CONSTANTS")) src = [src stringByReplacingOccurrencesOfString:@"fragment O fs() { return" withString:@"constant bool enabled [[function_constant(0)]]; fragment O fs() { if (is_function_constant_defined(enabled) && enabled) discard_fragment(); return"];
     if (argc == 3) {
         NSString *metal = [@(argv[2]) stringByAppendingPathComponent:@"fixture.metal"], *library = [metal stringByAppendingString:@"lib"];
-        if (!strcmp(argv[1], "--compact-seed")) {
+        if (strstr(argv[1], "-seed")) {   // a mode that writes the archive builds the shader library
             [src writeToFile:metal atomically:YES encoding:NSUTF8StringEncoding error:nil];
             NSTask *task = [NSTask new]; task.executableURL = [NSURL fileURLWithPath:@"/usr/bin/xcrun"];
             task.arguments = @[@"-sdk", @"macosx", @"metal", metal, @"-o", library];
@@ -510,6 +510,38 @@ int main(int argc, char **argv) { @autoreleasepool {
     } else g_lib = [g_dev newLibraryWithSource:src options:nil error:&err];
     if (!g_lib) { fprintf(stderr, "%s\n", err.localizedDescription.UTF8String); return 1; }
     g_lib2 = [g_dev newLibraryWithSource:[src stringByAppendingString:@"// another library: the same source would come back as the same library\n"] options:nil error:&err];
+    if (argc == 3 && !strncmp(argv[1], "--cold-", 7)) {   // across fresh processes: a cold start's prewarm with a timer flush after each new base, then the next start
+        g_arch_period_max = 4; int seed = !strcmp(argv[1], "--cold-seed"), cut = !strcmp(argv[1], "--cold-cut-seed"), after_cut = !strcmp(argv[1], "--cold-after-cut");
+        int quit = !strcmp(argv[1], "--cold-quit-seed"), after_quit = !strcmp(argv[1], "--cold-after-quit");
+        // a crashed compaction's marker, left by an earlier run: the quit's write must not take it away
+        if (quit) [arch_compact_stamp() writeToFile:[@(argv[2]) stringByAppendingPathComponent:@"compacting"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        pso4_init();
+        EXPECT("cold restart: no compaction", 0, g_compact_enabled);
+        uint64_t arch0 = g_pb_archived, built0 = g_pb_built;
+        atomic_store(&g_warm_running, 1);
+        for (int i = 0; i <= PSO_ARCH_COMPACT; i++) {
+            MTLRenderPipelineDescriptor *cd = desc(MTLPixelFormatRGBA8Unorm, 0, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll, 1);
+            cd.vertexDescriptor.layouts[16].stride = 16 * (i + 70);
+            EXPECT("cold restart: pipeline", 1, pso_build(cd, &err) != nil);
+            if (seed || cut || quit) dispatch_sync(g_arch_q, ^{ arch_flush(); });   // the timer's
+            if (cut && i == 5) {   // the cold start is killed here, in its prewarm: the full period is written, the 2 captures after it are not
+                dispatch_group_wait(g_arch_pending, DISPATCH_TIME_FOREVER);
+                printf("t_pso_archive %s: %d checks, %d failed\n", argv[1], checks, failed);
+                _exit(failed != 0);
+            }
+            if (quit && i == 5) {   // the player quits here, in the prewarm: exit() writes the 2 captures after the full period too (mtl_arch_save)
+                printf("t_pso_archive %s: %d checks, %d failed\n", argv[1], checks, failed);
+                exit(failed != 0);
+            }
+        }
+        atomic_store(&g_warm_running, 0); arch_flush_wait();
+        int expect_archived = seed ? 0 : after_cut ? 4 : after_quit ? 6 : PSO_ARCH_COMPACT + 1;
+        EXPECT("cold restart: compiled in the cold start, from the archive in the next", expect_archived, (int)(g_pb_archived - arch0));
+        EXPECT("cold restart: compiled where not in the archive", PSO_ARCH_COMPACT + 1 - expect_archived, (int)(g_pb_built - built0));
+        [NSFileManager.defaultManager removeItemAtPath:@(dir) error:nil];
+        printf("t_pso_archive %s: %d checks, %d failed\n", argv[1], checks, failed);
+        return failed != 0;
+    }
     // A fresh process is essential: a compiler that built the source archives still has their online binaries.
     if (argc == 3) {
         int seed = !strcmp(argv[1], "--compact-seed");
@@ -603,7 +635,7 @@ int main(int argc, char **argv) { @autoreleasepool {
         NSMutableArray<id<MTL4Archive>> *open = [NSMutableArray array]; NSMutableArray<NSString *> *paths = [NSMutableArray array];
         for (NSString *n in names.reverseObjectEnumerator) { NSString *f = [@(cdir) stringByAppendingPathComponent:n]; [paths addObject:f]; [open addObject:[g_dev newArchiveWithURL:[NSURL fileURLWithPath:f] error:&err]]; }
         nvn_hm_clear(&g_pbase, hm_rel); g_arch4 = open;   // as a new start with that many files
-        g_compact_enabled = 1; g_compact_files = paths; g_compacted = 0;
+        g_compact_enabled = 1; g_compact_files = paths; g_compacted = 0; g_compact_bases = 0; g_compact_ns = 0;
         g_arch_period_max = 4;   // the recaptured bases fill two periods and part of a third: each full one is handed over, the timer's flushes wait
         uint64_t arch0 = g_pb_archived, built0 = g_pb_built;
         ArchEpoch *ep = g_ep; ArchiveGateCompiler *gate = [ArchiveGateCompiler new]; gate->compiler = ep->comp; gate->calls = 1; ep->comp = (id<MTL4Compiler>)gate;
@@ -621,6 +653,8 @@ int main(int argc, char **argv) { @autoreleasepool {
         EXPECT("compaction: every base from the archive", arch0 + descs.count, g_pb_archived);
         EXPECT("compaction: none compiled", built0, g_pb_built);
         EXPECT("compaction: every base captured again", descs.count, g_compacted);
+        EXPECT("compaction: the prepare line counts them", descs.count, g_compact_bases);
+        EXPECT("compaction: and their time", 1, g_compact_ns > 0);
         MarkerSerializer *ms = [MarkerSerializer new]; ms->ser = g_ep->ser; g_ep->ser = (id<MTL4PipelineDataSetSerializer>)ms;   // the period being written
         arch_flush_wait();
         EXPECT("compaction: the marker exists while the flush writes", 1, ms->calls == 1 && ms->marked == 1);
@@ -651,6 +685,26 @@ int main(int argc, char **argv) { @autoreleasepool {
         [NSFileManager.defaultManager removeItemAtPath:@(cdir) error:nil]; g_arch_dir = saved; g_arch4 = @[];
     }
     compute_pipelines();
+    // a timer's flush waits for the prewarm's end, compacting or not, and so a cold start writes a file per full period, not one per 10 s: here 3 files for 9 new bases,
+    // where a file per timer flush made 9, more than PSO_ARCH_COMPACT, and the next start compacted them all
+    {
+        char cdir[] = "/tmp/t_pso_cold.XXXXXX"; if (!mkdtemp(cdir)) abort();
+        NSString *saved = g_arch_dir; g_arch_dir = @(cdir); nvn_hm_clear(&g_pbase, hm_rel); g_arch4 = @[]; g_arch4p = @[];
+        g_arch_period_max = 4; atomic_store(&g_warm_running, 1);
+        for (int i = 0; i <= PSO_ARCH_COMPACT; i++) {
+            MTLRenderPipelineDescriptor *cd = desc(MTLPixelFormatRGBA8Unorm, 0, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll, 1);
+            cd.vertexDescriptor.layouts[16].stride = 16 * (i + 70);
+            if (!pso_build(cd, &err)) { fprintf(stderr, "cold: no pipeline %d\n", i); failed++; }
+            ArchEpoch *ep = g_ep;
+            dispatch_sync(g_arch_q, ^{ arch_flush(); });   // the timer's
+            if (i % 4 != 3) EXPECT("cold: the timer's flush waits for the prewarm's end", 1, g_ep == ep);
+        }
+        atomic_store(&g_warm_running, 0); arch_flush_wait();
+        NSUInteger files = [NSFileManager.defaultManager contentsOfDirectoryAtPath:@(cdir) error:nil].count;
+        EXPECT("cold: a file per full period and one for the rest", (PSO_ARCH_COMPACT + 4) / 4, files);
+        nvn_hm_clear(&g_pbase, hm_rel); g_arch_period_max = ARCH_PERIOD_MAX;
+        [NSFileManager.defaultManager removeItemAtPath:@(cdir) error:nil]; g_arch_dir = saved; g_arch4 = @[];
+    }
     mesh_pipelines();
     // a function with no Metal 4 descriptor: the MTLDevice path
     uint64_t legacy = g_pb_legacy;

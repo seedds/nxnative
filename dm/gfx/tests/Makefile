@@ -572,3 +572,11 @@ t_tg_spill: t_tg_spill.m $(MTL_T_DEP)
 check_t_tg_spill: t_tg_spill
 	MTL_DEBUG_LAYER=1 DM_NVN_DISPATCH_OWN=0 ./$<
 	MTL_DEBUG_LAYER=1 DM_NVN_DISPATCH_OWN=1 ./$<
+
+# Bounded buffer dispatch dependencies, direct and deferred encoding.
+t_cs_ranges: t_cs_ranges.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ $< $(MTL_T_SRC) $(FW)
+.PHONY: check_t_cs_ranges
+check_t_cs_ranges: t_cs_ranges
+	MTL_DEBUG_LAYER=1 ./t_cs_ranges
+	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_cs_ranges

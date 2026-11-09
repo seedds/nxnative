@@ -241,6 +241,13 @@ void nvn_queue_test_hold(int on) { pthread_mutex_lock(&nq_mu); nq_test_held=on; 
 void nvn_queue_present_release(uint64_t ticket) {
     if(!ticket) return; pthread_mutex_lock(&nq_mu); nq_put((nq_receipt *)(uintptr_t)ticket); pthread_mutex_unlock(&nq_mu);
 }
+uint64_t nvn_queue_present_hold(uint64_t ticket) { if(!ticket) return 0; pthread_mutex_lock(&nq_mu); ((nq_receipt *)(uintptr_t)ticket)->refs++; pthread_mutex_unlock(&nq_mu); return ticket; }
+uint64_t nvn_queue_ticket_fence(uint64_t ticket,uint64_t timeout_ns) {
+    if(!ticket) return 0; nq_receipt *r=(nq_receipt *)(uintptr_t)ticket; uint64_t start=now_ns();
+    pthread_mutex_lock(&nq_mu);
+    while(!r->published) { uint64_t e=now_ns()-start; if(e>=timeout_ns) break; uint64_t left=timeout_ns-e; struct timespec ts={(time_t)(left/1000000000ull),(long)(left%1000000000ull)}; pthread_cond_timedwait_relative_np(&nq_cv,&nq_mu,&ts); }
+    uint64_t f=r->published?r->fence:0; pthread_mutex_unlock(&nq_mu); return f;
+}
 void nvn_queue_present_wait(uint64_t ticket) {
     if(!ticket) return; nq_receipt *r=(nq_receipt *)(uintptr_t)ticket;
     pthread_mutex_lock(&nq_mu); while(!r->published) pthread_cond_wait(&nq_cv,&nq_mu); uint64_t physical=r->present; pthread_mutex_unlock(&nq_mu);

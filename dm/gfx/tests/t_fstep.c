@@ -242,6 +242,30 @@ int main(void) {
             else { snprintf(b, sizeof b, "  without draw counts the same run is called slowed and probes (probes %llu, failed %llu)", (unsigned long long)m.s.probes, (unsigned long long)m.s.failed);
                    check(slowed && m.s.probes > 0, b); }
         }
+        {   // Ocarina of Time's title on an M1 iPad: the boot screens set the hold-1 reference (GPU 0.03 vsyncs, 50 draws, no dispatch), then the title's movie network adds
+            // 14 dispatches and 3.6 vsyncs at the same draws. Counted dispatches tell the work apart: not slowed, no probe; without them it probes hold 1 again and again
+            for (int known = 1; known >= 0; known--) {
+                sim m = {0}; nvn_fgpu g = {0}; int slowed = 0;
+                for (int i = 0; i < 3000; i++) {
+                    int title = i >= 300, k = m.s.k ? m.s.k : 1; double w = title ? 3.6 : 0.03;
+                    m.slow = nvn_fstep_gpu_slowed2(&g, w, 50, known ? (title ? 14 : 0) : -1, k, 1, m.s.probe); slowed |= title && m.slow;
+                    run(&m, 1, title ? w : 0.5, 1, 3, 0);
+                }
+                if (known) { snprintf(b, sizeof b, "title's dispatches against a boot-screen reference with none: not slowed, no probe (k %d, probes %llu)", m.s.k, (unsigned long long)m.s.probes);
+                             check(m.s.k == 3 && !slowed && m.s.probes == 0, b); }
+                else { snprintf(b, sizeof b, "  without dispatch counts the same run is called slowed and probes (probes %llu, failed %llu)", (unsigned long long)m.s.probes, (unsigned long long)m.s.failed);
+                       check(slowed && m.s.probes > 0, b); }
+            }
+            sim m = {0}; nvn_fgpu g = {0}; int at1 = 0, stepped = 0;   // the same draws and dispatches at both holds: still a clock that fell (BotW's run below, with 14 dispatches)
+            for (int i = 0; i < 2000; i++) {
+                double w = i < 600 ? 0.86 : i < 603 ? 1.25 : m.s.k >= 2 ? 1.5 : at1++ < 20 ? 1.5 : 0.86;
+                stepped |= i >= 603 && m.s.k == 2;
+                m.slow = nvn_fstep_gpu_slowed2(&g, w, i % 3 ? 4900 : 4700, 14, m.s.k ? m.s.k : 1, 1, m.s.probe);
+                run(&m, 1, w, 1, 3, 0);
+            }
+            snprintf(b, sizeof b, "  the same draws and dispatches at both holds: one probe back to hold 1 that holds (k %d, probes %llu)", m.s.k, (unsigned long long)m.s.probes);
+            check(stepped && m.s.k == 1 && m.s.probes == 1 && m.s.failed == 0, b);
+        }
         sim m = {0}; nvn_fgpu g = {0}; int at1 = 0, stepped = 0;   // the same work at both holds is still a clock that fell (BotW above, with its draw counts)
         for (int i = 0; i < 2000; i++) {
             double w = i < 600 ? 0.86 : i < 603 ? 1.25 : m.s.k >= 2 ? 1.5 : at1++ < 20 ? 1.5 : 0.86;

@@ -165,29 +165,38 @@ static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int km
 // The comparison holds only for the same work: a clock that fell shows as the same draws taking longer. The draws a frame encodes are kept beside each reference (dref_at) and at
 // the longer hold (dcur); when both are known, the GPU counts as slowed only while they are within FSTEP_GPU_WORK of each other. Ocarina of Time on an M4 Air ran its title and
 // loading screen at hold 1 (GPU 0.2 vsyncs, 2-60 draws), then gameplay at hold 2 (1.4 vsyncs, 700-900 draws, 1.3 at hold 1): against the loading screen's reference the GPU
-// read 6 times slowed, and the host probed hold 1 every few seconds (32 probes in 66 s, all failed), each failure's late frames stepping it on to hold 3 (20 fps)
+// read 6 times slowed, and the host probed hold 1 every few seconds (32 probes in 66 s, all failed), each failure's late frames stepping it on to hold 3 (20 fps).
+// Compute dispatches are work too, which draws do not see: Ocarina of Time's title spends 61 ms of an M1 iPad's GPU on its movie network's 14 dispatches with 20-80 draws, and its
+// hold-1 reference came from the boot screens (0.4 ms, 22 draws, no dispatch), so the title read as a GPU slowed 9.9 times and probed hold 1 every 3-6 s, none held. The
+// dispatches a frame encodes are kept the same way (cref_at, ccur; counted as dispatches + 1, so a frame with none is known), and both must match
 #define FSTEP_GPU_SLOW 1.3    // GPU time at the longer hold against its time at kmin
 #define FSTEP_GPU_N 30        // frames at the longer hold before the comparison counts
 #define FSTEP_GPU_WORK 1.5    // draws at the longer hold against the reference's, either way, that still count as the same work (one scene's views vary by about 1.3)
-typedef struct { double ref, cur; int n, k; double ref_at[FSTEP_MAX + 1]; double dref, dcur, dref_at[FSTEP_MAX + 1]; } nvn_fgpu;   // GPU time at kmin (running mean; of every kmin
-                              // in ref_at); at the current hold k and its frame count; the draws a frame encodes beside each (0 = not known)
-static inline int nvn_fgpu_same_work(const nvn_fgpu *g) { return g->dref <= 0 || g->dcur <= 0 || (g->dcur <= FSTEP_GPU_WORK * g->dref && g->dref <= FSTEP_GPU_WORK * g->dcur); }
+typedef struct { double ref, cur; int n, k; double ref_at[FSTEP_MAX + 1]; double dref, dcur, dref_at[FSTEP_MAX + 1]; double cref, ccur, cref_at[FSTEP_MAX + 1]; } nvn_fgpu;   // GPU time at kmin
+                              // (running mean; of every kmin in ref_at); at the current hold k and its frame count; the draws and the dispatches + 1 a frame encodes beside each (0 = not known)
+static inline int nvn_fgpu_near(double a, double b) { return a <= 0 || b <= 0 || (b <= FSTEP_GPU_WORK * a && a <= FSTEP_GPU_WORK * b); }
+static inline int nvn_fgpu_same_work(const nvn_fgpu *g) { return nvn_fgpu_near(g->dref, g->dcur) && nvn_fgpu_near(g->cref, g->ccur); }
 static inline int nvn_fgpu_slow(const nvn_fgpu *g) { return g->n >= FSTEP_GPU_N && g->ref > 0 && g->cur >= FSTEP_GPU_SLOW * g->ref && g->cur > FSTEP_FIT * (g->k - 1) && nvn_fgpu_same_work(g); }
-// Once per frame, with the frame's GPU time (vsyncs; 0 = none finished yet), its draws (0 = not counted) and the hold and probe state (nvn_fstep.probe) it ran under
-static inline int nvn_fstep_gpu_slowed(nvn_fgpu *g, double gpu, double draws, int k, int kmin, int probe) {
+// Once per frame, with the frame's GPU time (vsyncs; 0 = none finished yet), its draws (0 = not counted), its dispatches (< 0 = not counted) and the hold and probe state
+// (nvn_fstep.probe) it ran under
+static inline int nvn_fstep_gpu_slowed2(nvn_fgpu *g, double gpu, double draws, double disps, int k, int kmin, int probe) {
     if (kmin < 1 || kmin > FSTEP_MAX) return 0;   // no reference slot for it (hle_nvn.c passes 1 or 2)
-    g->ref = g->ref_at[kmin]; g->dref = g->dref_at[kmin];
+    double cw = disps >= 0 ? disps + 1 : 0;
+    g->ref = g->ref_at[kmin]; g->dref = g->dref_at[kmin]; g->cref = g->cref_at[kmin];
     if (gpu <= 0) return nvn_fgpu_slow(g);
     if (k <= kmin) {
         if (probe != 1) {
             g->ref = g->ref_at[kmin] = g->ref > 0 ? g->ref + (gpu - g->ref) / 32 : gpu;
             if (draws > 0) g->dref = g->dref_at[kmin] = g->dref > 0 ? g->dref + (draws - g->dref) / 32 : draws;
+            if (cw > 0) g->cref = g->cref_at[kmin] = g->cref > 0 ? g->cref + (cw - g->cref) / 32 : cw;
         }
         g->n = 0; g->k = k; return 0;
     }
     if (k != g->k) { g->k = k; g->n = 0; }
     g->cur = g->n ? g->cur + (gpu - g->cur) / 8 : gpu;
     if (draws > 0) g->dcur = g->n && g->dcur > 0 ? g->dcur + (draws - g->dcur) / 8 : draws;
+    if (cw > 0) g->ccur = g->n && g->ccur > 0 ? g->ccur + (cw - g->ccur) / 8 : cw;
     g->n++;
     return nvn_fgpu_slow(g);
 }
+static inline int nvn_fstep_gpu_slowed(nvn_fgpu *g, double gpu, double draws, int k, int kmin, int probe) { return nvn_fstep_gpu_slowed2(g, gpu, draws, -1, k, kmin, probe); }   // dispatches not counted

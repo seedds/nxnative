@@ -2,33 +2,50 @@
 # MATCH_FRAME_STEP as described there ("Registered patches"). Patches of Nintendo SDK module builds are in dm/tools/sdk_patches.py
 from nso_asm import ADRP, B
 
-# The game's frame ratio. Once a frame the function at main+0x6e6be0 (v131072) divides its base rate (60.0, or 30.0 while bit 0 of [x21+0x24f] is set) by the int frame rate at
-# [x21+0x2c8] (fdiv s8,s1,s0 at +0xe4) and hands the result to the time object (main+0x3b4e300: ratio at +0x10, 1 / ratio at +0x14, round(60 / ratio) at +0x1c), which the game
-# steps by; the frame's own time never enters it, so a frame that takes two vsyncs at rate 60 plays at half speed. The stub gives the ratio the host's step instead: step × base / 60
-# (the division's value when the host keeps frames 60 / rate vsyncs), and counts the vsyncs stepped. Until the host has decided a step, and at fps_target 0, the division runs.
-# s0 and x16 / x17 are free there (s0 is written again on every path before it is read; the function uses neither x16 nor x17); s1 keeps the base rate.
+# The game's frame ratio. Once a frame the function at main+0x6e6be0 (v131072, ModuleSystem::moduleCalc_ by the name of its job) divides its base rate (60.0, or 30.0 while
+# bit 0 of [x21+0x24f] is set) by the int frame rate at [x21+0x2c8] (fdiv s8,s1,s0 at +0xe4) and hands the result to the time object (main+0x3b4e300: ratio at +0x10, 1 / ratio
+# at +0x14, ratio / 60 at +0x18, the step in seconds, round(60 / ratio) at +0x1c), which the game steps by; the frame's own time never enters it, so a frame that takes two
+# vsyncs at rate 60 plays at half speed. The stub gives the ratio the host's step instead: step × base / 60, and counts the vsyncs stepped. Until the host has decided a step,
+# and at fps_target 0, the division runs. s0 and x16 / x17 are free there (s0 is written again on every path before it is read; the function uses neither x16 nor x17); s1 keeps
+# the base rate and x21 the framework.
+# Why × base / 60 and not the step alone (PR #1996 read base 30 as a cutscene rate and took the step, twice the speed there): the ratio's unit is 1/60 s whatever the base
+# (the time object's +0x18 is ratio × 1/60, the constant at main+0x3e4066c). Base 30 is the framework's half rate: bit 0 of its +0x24f is that mode and bit 1 flips each pass of
+# its frame function (main+0x346c680); with both set the draw and the present return at once (main+0x2cb020, main+0x40cd20) while the calc tree runs (main+0x2cabd0). So it
+# calcs twice a drawn frame, this function among them, and each calc takes half the frame's step: 30 / 30 = 1 twice a 30 fps frame on the console, step / 2 twice here. The
+# vsyncs are counted once a drawn frame, at the calc that is drawn (bit 1 clear): counted at both, the host's game time read twice the real time in that mode.
+# The branch targets are computed from the words emitted, so a word added to the stub cannot leave one pointing into its middle (dsi-hub's HookLink met that on an iPhone,
+# a fault on the first frame, when a block was added between main's fixed offsets and their target).
 # Lichii (a GPL emulator; only the fact was taken) found the division (its notes: main+0x6E6CC4, 60 / [x21+0x2C8])
 def frame_step(ctx):
     here, emit, fs_site, fs_put, FS_STATE_OFF, base = ctx.here, ctx.emit, ctx.site, ctx.put, ctx.state, ctx.base
     site = base + 0xe4
     fs_site(site, '2818201e')   # fdiv s8,s1,s0
-    start = here(); emit(ADRP(16, here(), FS_STATE_OFF))
-    for w in (0xb9400211,   # ldr w17,[x16]          target fps (0 = off)
-              0x340001b1,   # cbz w17,orig (+13)
-              0xb9402211,   # ldr w17,[x16,#0x20]    step in vsyncs
-              0x34000171,   # cbz w17,orig (+11)     not decided yet
-              0x1e230220,   # ucvtf s0,w17
-              0xf9401a10,   # ldr x16,[x16,#0x30]
+    start = here()
+    ORIG, COUNTED, n = 18, 13, [0]   # the original division is word 18 of the stub, the ratio starts at word 13 (both checked below); n counts the words emitted
+    def put(w): emit(w); n[0] += 1
+    def cbz_w17_orig(): return 0x34000000 | (((ORIG - n[0]) & 0x7FFFF) << 5) | 17   # from this word to word ORIG
+    put(ADRP(16, here(), FS_STATE_OFF))
+    put(0xb9400211)             # ldr w17,[x16]          target fps (0 = off)
+    put(cbz_w17_orig())         # cbz w17,orig
+    put(0xb9402211)             # ldr w17,[x16,#0x20]    step in vsyncs
+    put(cbz_w17_orig())         # cbz w17,orig           not decided yet
+    put(0x1e230220)             # ucvtf s0,w17
+    put(0x39493eb0)             # ldrb w16,[x21,#0x24f]  the framework's half-rate bits
+    put(0x37000000 | 1 << 19 | ((COUNTED - n[0]) & 0x3FFF) << 5 | 16)   # tbnz w16,#1,ratio: the calc of a half-rate frame that is not drawn; its vsyncs are counted at the drawn one
+    put(ADRP(16, here(), FS_STATE_OFF))
+    for w in (0xf9401a10,   # ldr x16,[x16,#0x30]
               0x8b110210):  # add x16,x16,x17
-        emit(w)
-    emit(ADRP(17, here(), FS_STATE_OFF))
-    for w in (0xf9001a30,   # str x16,[x17,#0x30]    vsyncs stepped
-              0x1e210808,   # fmul s8,s0,s1          step × base rate
+        put(w)
+    put(ADRP(17, here(), FS_STATE_OFF))
+    put(0xf9001a30)             # str x16,[x17,#0x30]    vsyncs stepped
+    assert n[0] == COUNTED, f'frame_step: the ratio starts at word {n[0]}, the tbnz goes to word {COUNTED}'
+    for w in (0x1e210808,   # fmul s8,s0,s1          step × base rate
               0x52a84e10,   # mov w16,#0x42700000    60.0
               0x1e270200,   # fmov s0,w16
               0x1e201908):  # fdiv s8,s8,s0          / 60
-        emit(w)
-    emit(B(here(), site + 4))
+        put(w)
+    put(B(here(), site + 4))
+    assert n[0] == ORIG, f'frame_step: the original division is word {n[0]}, the cbz branches go to word {ORIG}'
     emit(0x1e201828); emit(B(here(), site + 4))   # orig: fdiv s8,s1,s0; back
     fs_put(site, [B(site, start)], 'frame ratio: the host\'s step × base rate / 60 instead of base rate / the game\'s frame rate (state page target fps; 0 = the game\'s ratio)')
     dynamic_resolution(ctx)

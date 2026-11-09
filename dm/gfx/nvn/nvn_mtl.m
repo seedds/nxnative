@@ -1560,7 +1560,9 @@ static inline id<MTL4RenderCommandEncoder> enc_r_begin_pass(MTL4RenderPassDescri
 }
 static inline void enc_r_end_pass(id e) {
     if (!barrier_game() || !bar_heap_ok()) { m4_end(e); g_end_heap = barrier_game(); return; }
-    gp_end(e); [(id<MTL4CommandEncoder>)e barrierAfterStages:MTLStageVertex | MTLStageMesh | MTLStageFragment beforeQueueStages:MTLStageFragment | MTLStageDispatch | MTLStageBlit visibilityOptions:resource_vis()];
+    // Object and mesh stages on both sides: a mesh pipeline's pass ends after its task and mesh work as well, and the next pass's task and mesh shaders wait for this pass's fragments
+    // (without them they could start before those fragments were done, as an iPhone run of Ocarina of Time showed)
+    gp_end(e); [(id<MTL4CommandEncoder>)e barrierAfterStages:MTLStageVertex | MTLStageObject | MTLStageMesh | MTLStageFragment beforeQueueStages:MTLStageObject | MTLStageMesh | MTLStageFragment | MTLStageDispatch | MTLStageBlit visibilityOptions:resource_vis()];
     [e endEncoding]; g_last_end_relaxed = 1;
 }
 static inline id<MTL4RenderCommandEncoder> enc_r_begin(MTL4RenderPassDescriptor *d) { g_cm_enc++; cm_enc_mark(2); id<MTL4RenderCommandEncoder> e = [g_cb renderCommandEncoderWithDescriptor:d]; cm_enc_mark(0); [e barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:resource_vis()]; [e setArgumentTable:g_vt atStages:MTLRenderStageVertex]; [e setArgumentTable:g_ft atStages:MTLRenderStageFragment]; gp_begin(e, 'R', d); return e; }

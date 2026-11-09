@@ -223,6 +223,8 @@ check_t_present_snap: t_present_snap
 t_reorder_chain: t_reorder_chain.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_reorder_chain.m $(MTL_T_SRC) $(FW)
 check_t_reorder_chain: RUN_ENV = MTL_DEBUG_LAYER=1
+t_par_seq: t_par_seq.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_par_seq.m $(MTL_T_SRC) $(FW)
 t_defer_chain: t_defer_chain.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_defer_chain.m $(MTL_T_SRC) $(FW)
 check_t_defer_chain: RUN_ENV = MTL_DEBUG_LAYER=1

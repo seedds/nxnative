@@ -1,6 +1,7 @@
 // Synthetic modules exercise real relocation and nn::ro calls; no game files or executable guest code required.
 #include "../loader.c"
 void dm_thread_service_connect(void) {}   // threads started so far have nothing to wait for here
+int dm_gfx_scale(void) { return 0; }   // loader.c's render scale divides by the graphics tier's picture (hle_oe.c): the whole GPU here
 #include "../hle_ro.c"
 #include <assert.h>
 #include <stddef.h>

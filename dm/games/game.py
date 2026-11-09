@@ -211,6 +211,8 @@ def header_one(g):
     om = g.get('op_mode', 'console')   # the operation mode reported at start (hle_oe.c dm_opmode; DM_OPMODE overrides): console = docked, handheld = touch screen in use (Super Mario Galaxy's pointer)
     if om not in ('console', 'handheld'): sys.exit(f'{g.id}: op_mode must be console or handheld: {om}')
     if pl == 'touch' and om != 'handheld': sys.exit(f'{g.id}: pad_layout touch needs op_mode handheld (the touch screen reaches the game only in handheld mode)')
+    gsc = g.get('gfx_scale', '0')   # the graphics scale tier oe::GetCurrentGraphicsScale answers by default (hle_oe.c gfx_scale; DM_GFX_SCALE overrides): 0 the whole GPU, 1 / 2 the game's lighter modes
+    if gsc not in ('0', '1', '2'): sys.exit(f'{g.id}: gfx_scale must be 0, 1 or 2: {gsc}')
     pm = g.get('perf_mode', 'follow')   # the performance mode reported (hle_oe.c): follow = the operation mode's (Boost docked, Normal handheld), boost = Boost always
     if pm not in ('follow', 'boost'): sys.exit(f'{g.id}: perf_mode must be follow or boost: {pm}')
     dmo = g.get('depth_mode', 'gl')   # the NVN depth mode the game sets, for the pipeline archive made offline (dm/gfx/tools/pso_offline.py; the host follows the game at run time): gl / zero
@@ -256,6 +258,8 @@ def header_one(g):
          f'#define DM_GAME_PAD_LAYOUT {("simple", "full", "touch").index(pl)}',
          f'#define DM_GAME_OPMODE {int(om == "console")}',
          f'#define DM_GAME_PERF_BOOST {int(pm == "boost")}',
+         f'#define DM_GAME_GFX_SCALE {int(gsc)}',
+         f'#define DM_GAME_GFX_SCALE_SET {int(g.get("gfx_scale", "") != "")}',   # the profile names a tier: the launcher offers the GPU share
          f'#define DM_GAME_TEX_FLUSH_UPLOAD {int(tfu == "on")}',
          f'#define DM_GAME_SHADER_KEY_SKIP_OFF {sko:#x}', f'#define DM_GAME_SHADER_KEY_SKIP_LEN {skl:#x}',
          f'#define DM_GAME_RENDER_COND {int(rcd == "on")}',

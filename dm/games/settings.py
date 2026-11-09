@@ -42,6 +42,17 @@ def render_base(g):
     return {'docked': [int(m[1]), int(m[2])], 'handheld': [int(m[3]), int(m[4])]}
 
 
+def render_levels(g, lo, hi):
+    """The profile's render_levels (the scales the game's own dynamic resolution steps through, highest first), those from lo to below hi: the fixed scales a render scale
+    offers instead of a range; None when the profile has none"""
+    v = g.get('render_levels', '')
+    if not v: return None
+    try: levels = [float(x) for x in v.split()]
+    except ValueError: sys.exit(f'{g.id}: render_levels are scales such as 0.75 0.5: {v}')
+    if levels != sorted(set(levels), reverse=True): sys.exit(f'{g.id}: render_levels go from the highest down, each once: {v}')
+    return [f'{x:g}' for x in levels if lo <= x < hi] or sys.exit(f'{g.id}: no render_levels from {lo:g} to below {hi:g}: {v}')
+
+
 def rows():
     for n, line in enumerate((HERE / 'settings.tsv').read_text(encoding='utf-8').splitlines(), 1):
         if not line.strip() or line.startswith('#'): continue
@@ -57,6 +68,7 @@ def fixups_keys(path):   # '# KEY<TAB>value' header rows of a rewriter table
 
 
 UNKNOWN_LANGUAGES = 'This game\'s files do not list its languages, so some of these may not be in the game. It may then show another one.'
+DYNAMIC = 'Game\'s own'   # a render scale's 1.0 when it offers the game's levels: its own size, which its dynamic resolution (the Dynamic resolution switch under it) may lower by the frame time
 
 
 def build(gid, patched, control):
@@ -113,9 +125,21 @@ def build(gid, patched, control):
         if not shown(cond, n): continue
         s = {'env': var, 'kind': kind, 'section': section, 'label': label, 'note': note, 'default': value(default, n), **m}
         if var == 'DM_RENDER_SCALE' and base: s['base'] = base   # the render scale in pixels, for the console mode chosen
+        if kind == 'range' and var == 'DM_RENDER_SCALE':
+            lo, hi, _ = (float(x) for x in values.split(':'))
+            levels = render_levels(g, lo, hi)
+            if levels:   # the game's own levels to fix the scale at, after its own size (1.0: its dynamic resolution); a front end shows a level in pixels from base
+                if float(s['default']) != hi: sys.exit(f'settings.tsv:{n}: a render scale with levels defaults to {hi:g}, the game\'s own size')
+                kind, s['kind'] = 'choice', 'choice'
+                values = ','.join([f'{s["default"]}={DYNAMIC}'] + [f'{x}={round(float(x) * 100)} %' for x in levels])
         if kind == 'choice':
             opts = [list(l) for l in langs] if values == 'languages' else [v.split('?', 1)[0].split('=', 1) for v in values.split(',') if offered(v, n)]
             if any(len(o) != 2 for o in opts): sys.exit(f'settings.tsv:{n}: choice values are value=label,...')
+            if 'auto' in (o[0] for o in opts) and default.startswith('DM_GAME_'):   # Auto: the profile's default, by name (the host reads auto as that default)
+                label_of = {v: l for v, l in opts}
+                if s['default'] not in label_of or s['default'] == 'auto': sys.exit(f'settings.tsv:{n}: Auto stands for the profile default {default}={s["default"]}, which is no other option')
+                s['auto'], opts = s['default'], [[v, f'{l} ({label_of[s["default"]]})' if v == 'auto' else l] for v, l in opts]
+                s['default'] = 'auto'
             if s['default'] not in [o[0] for o in opts]: s['default'] = opts[0][0]   # a default the game does not offer (a language it lacks): its first
             s['options'] = opts
             if values == 'languages' and not have: s['note'] = UNKNOWN_LANGUAGES

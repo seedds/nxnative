@@ -14,7 +14,7 @@ spec = importlib.util.spec_from_file_location('launcher_settings', ROOT / 'dm/ga
 settings = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(settings)
 
-BOTW, WONDER = '01007EF00011E000', '010015100B514000'
+BOTW, WONDER, OOT = '01007EF00011E000', '010015100B514000', '0400486024DEC000'
 PERFORMANCE_NVN = ['DM_PRESENT_SNAP', 'DM_PSO_MTL4', 'DM_PSO_PREBUILD', 'DM_NVN_ENC_THREAD', 'DM_FPS_HOLD', 'DM_METAL_HUD']
 
 
@@ -160,6 +160,43 @@ class LauncherSettingsTests(unittest.TestCase):
             with self.subTest(bad=bad):
                 profile = type('Profile', (), {'id': BOTW, 'get': lambda self, key, default='', bad=bad: bad})()
                 with self.assertRaises(SystemExit): settings.render_base(profile)
+
+    def test_render_levels_make_the_render_scale_a_choice_of_the_games_levels(self):
+        schema = json.loads((ROOT / 'docs/launcher.schema.json').read_text(encoding='utf-8'))
+        with tempfile.TemporaryDirectory() as tmp, patch.object(settings.nacp, 'languages', return_value=['en-US']), patch.dict(os.environ, {'GFXAPI': 'nvn', 'SETTINGS_PLATFORM': 'mac'}):
+            (Path(tmp) / 'main.fixups.tsv').write_text('# RENDER_SCALE\t1\n')   # Ocarina of Time's render-scale stub
+            listed = settings.build(OOT, tmp, Path(tmp) / 'control.nacp')
+        s = {s['env']: s for s in listed['settings']}['DM_RENDER_SCALE']
+        self.assertEqual((s['kind'], s['default'], s['base']), ('choice', '1.0', {'docked': [2560, 1440], 'handheld': [1920, 1080]}))
+        self.assertEqual(s['options'], [['1.0', settings.DYNAMIC], ['0.75', '75 %'], ['0.71112', '71 %'], ['0.66667', '67 %'], ['0.62223', '62 %'], ['0.58334', '58 %'],
+                                        ['0.53334', '53 %'], ['0.5', '50 %']])   # the game's levels the loader takes (0.5 to below 1.0), highest first
+        self.assertFalse({'min', 'max', 'step'} & set(s))
+        self.assertEqual(conforms(listed, schema, schema), [])
+        for bad in ('0.5 0.75', '0.75 0.75', 'big', '0.25 0.1'):   # not from the highest down, twice, not numbers, none the setting takes
+            with self.subTest(bad=bad):
+                profile = type('Profile', (), {'id': OOT, 'get': lambda self, key, default='', bad=bad: bad})()
+                with self.assertRaises(SystemExit): settings.render_levels(profile, 0.5, 1.0)
+
+    def test_ocarina_of_time_offers_the_picture_controls(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(settings.nacp, 'languages', return_value=['en-US']), patch.dict(os.environ, {'GFXAPI': 'nvn', 'SETTINGS_PLATFORM': 'mac'}):
+            (Path(tmp) / 'main.fixups.tsv').write_text('# RENDER_SCALE\t1\n# DYNAMIC_RESOLUTION\t1\n')   # the rewriter's stubs of its build
+            rows = {s['env']: s for s in settings.build(OOT, tmp, Path(tmp) / 'control.nacp')['settings']}
+        self.assertEqual([o[0] for o in rows['DM_FPS_TARGET']['options']], ['30', '60'])   # its pacer steps whole vsyncs; 120 is for games checked at it (fps_max)
+        self.assertEqual([o[0] for o in rows['DM_OPMODE']['options']], ['auto', '1', '0'])
+        self.assertEqual([o[0] for o in rows['DM_GFX_SCALE']['options']], ['auto', '0', '1', '2'])
+        self.assertEqual([o[0] for o in rows['DM_FULLSCREEN']['options']], ['0', '1'])
+        self.assertEqual(rows['DM_RENDER_SCALE']['options'][0], ['1.0', settings.DYNAMIC])   # 1.0: the game's own, and its dynamic resolution (the switch under it) is its sub-setting
+        self.assertEqual(rows['DM_DYNAMIC_RESOLUTION']['needs'], 'DM_RENDER_SCALE=1.0')
+        for var in ('DM_FPS_TARGET', 'DM_RENDER_SCALE', 'DM_DYNAMIC_RESOLUTION', 'DM_OPMODE', 'DM_GFX_SCALE', 'DM_FULLSCREEN'): self.assertEqual(rows[var]['level'], 'basic', var)
+
+    def test_auto_stands_for_the_profiles_default(self):
+        rows = build(OOT, 'nvn', 'mac')
+        self.assertEqual((rows['DM_OPMODE']['default'], rows['DM_OPMODE']['auto'], rows['DM_OPMODE']['options'][0]), ('auto', '1', ['auto', 'Auto (Docked)']))
+        self.assertEqual((rows['DM_GFX_SCALE']['default'], rows['DM_GFX_SCALE']['auto'], rows['DM_GFX_SCALE']['options'][0]), ('auto', '0', ['auto', 'Auto (Whole GPU)']))
+        self.assertEqual(rows['DM_GFX_SCALE']['options'][1:], [['0', 'Whole GPU'], ['1', '80%'], ['2', '67%']])
+        self.assertNotIn('auto', build(BOTW, 'nvn')['DM_FPS_TARGET'], 'a row without an auto option has no auto field')
+        aspect = build(BOTW, 'nvn')['DM_SCREEN_ASPECT'] if 'DM_SCREEN_ASPECT' in build(BOTW, 'nvn') else None
+        if aspect: self.assertNotIn('auto', aspect, 'Picture shape\'s auto (match the screen) defaults to no profile macro: a value of its own')
 
     def test_table_format_is_strict(self):
         good = 'DM_X\ttoggle\t-\t0\talways\tGame\tX\n'

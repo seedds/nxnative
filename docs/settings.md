@@ -3,7 +3,7 @@
 The screen before the game starts shows the settings the game supports. A setting that only matters while another is on appears under it and disappears when that one is turned off. Tap **Play** to start; the app remembers your choices for the next start. All settings are on one scrollable screen, under **Game**, **Controls** and **Performance**. Tap a menu or move a slider there; no settings page needs opening. **Upscaling** is in **Game**, beside **Console mode**. A Mac app shows the same settings in a [window of its own](#the-mac-settings-window).
 
 - [Tested defaults](#tested-defaults)
-- [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Game's upscaler](#games-upscaler), [Game language](#game-language), [Picture](#picture), [Frame-rate counter](#frame-rate-counter)
+- [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [GPU share](#gpu-share), [Upscaling](#upscaling), [Game's upscaler](#games-upscaler), [Game language](#game-language), [Picture](#picture), [Frame-rate counter](#frame-rate-counter)
 - [Controls](#controls): [Touch feedback](#touch-feedback), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff), [Press a button to join](#press-a-button-to-join)
 - [Performance](#performance): [Frame buffering](#frame-buffering), [Metal 4 pipelines](#metal-4-pipelines), [Pipeline prebuild](#pipeline-prebuild), [Encode thread](#encode-thread), [Hold frames when late](#hold-frames-when-late), [Performance HUD](#performance-hud), [Reset to tested defaults](#reset-to-tested-defaults)
 - [The Mac settings window](#the-mac-settings-window): [Display mode](#display-mode)
@@ -35,9 +35,15 @@ Off, the default, keeps the 3D picture at full size. On lets the game lower its 
 
 The size of the 3D picture, from 50 to 100 %. Below 100 % the size is fixed there and the game's own dynamic resolution is off; 100 % keeps the game's own. Lower can be lighter on the GPU but is blurrier; the HUD and text keep their sharpness. Only games the app can scale offer it.
 
+A game whose own dynamic resolution steps through sizes of its own offers those instead of a slider. Ocarina of Time: **Game's own** (1.0), the default, which is the game's full size, 1920 × 1080 docked and 1440 × 810 handheld with the whole GPU, and which its dynamic resolution may lower (down to 854 × 480 docked) when the **Dynamic resolution** switch under it is on; or one of the game's sizes fixed: 1920 × 1080, 1820 × 1024, 1707 × 960, 1593 × 896, 1493 × 840, 1365 × 768 or 1280 × 720 docked (1440 × 810 down to 960 × 540 handheld). A fixed size stays the same at every [GPU share](#gpu-share), up to the share's whole picture (1707 × 960 docked at 67 %). A lower size is blurrier and hardly lighter: the game's GPU time on a Mac depends little on its size (on a MacBook Air M4 1280 × 720 gave 45.4 fps in Hyrule Field, 1920 × 1080 44.9).
+
 ### Console mode
 
-**Docked** renders at the Switch's TV resolution, **Handheld** at its lower handheld resolution, which is lighter on the phone and can give a higher frame rate.
+**Docked** renders at the Switch's TV resolution, **Handheld** at its lower handheld resolution, which is lighter on the phone and can give a higher frame rate. **Auto**, the default, is the mode the game was tested in (shown beside it, **Auto (Docked)** for most games), and follows a later build that changes it; picking **Docked** or **Handheld** keeps that mode.
+
+### GPU share
+
+Shown for a Switch 2 game whose profile starts it in one of its lighter modes. **Whole GPU** gives the game the whole GPU, as the console does in normal play. **80%** and **67%** are the modes the console uses while it needs the GPU itself: the game draws a smaller picture and asks less of the GPU, for a steadier frame rate on a smaller Mac. **Auto**, the default, is the share the game was tested with (**Auto (80%)** for Ocarina of Time), and follows a later build that changes it.
 
 ### Upscaling
 
@@ -219,7 +225,7 @@ Sets every setting back to the game's tested default; **Play** then forgets your
 
 ## The Mac settings window
 
-A Mac app ([A Mac app](development.md#a-mac-app)) shows its settings in a window before the game starts. They are the same settings as on the iPhone, with the same defaults. The window shows the most used ones first: **Frame rate**, **Render scale**, **Console mode**, **Game language**, **Display mode** and **Game rumble**, when the game has them. **Render scale** shows the picture's size in pixels beside the percentage for the chosen **Console mode**, when the game's profile has it (Breath of the Wild: 1600 × 900 docked, 1280 × 720 handheld at 100 %). The others are under **Advanced settings**, in the usual sections, with **Reset to tested defaults**. The window remembers whether Advanced settings is open. **Frame-rate counter** and **Touch feedback** are only on the iPhone.
+A Mac app ([A Mac app](development.md#a-mac-app)) shows its settings in a window before the game starts. They are the same settings as on the iPhone, with the same defaults. The window shows the most used ones first: **Frame rate**, **Render scale** (with **Dynamic resolution** under it at the game's own size), **Console mode**, **GPU share**, **Game language**, **Display mode** and **Game rumble**, when the game has them. **Render scale** shows the picture's size in pixels beside the percentage for the chosen **Console mode**, when the game's profile has it (Breath of the Wild: 1600 × 900 docked, 1280 × 720 handheld at 100 %). The others are under **Advanced settings**, in the usual sections, with **Reset to tested defaults**. The window remembers whether Advanced settings is open. **Frame-rate counter** and **Touch feedback** are only on the iPhone.
 
 Click **Play** (or press Return) to start the game. **Quit**, ⌘Q or closing the window ends the app without the game. The app remembers your choices for that game, and a game started without the window, from a front end or with the window turned off, uses them too ([Saved choices](frontends.md#saved-choices)). A setting fixed by an `env.txt` or by the program that started the app is shown greyed out.
 
@@ -264,8 +270,9 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 | Setting | Variable | Values |
 |---|---|---|
 | Frame rate | `DM_FPS_TARGET` | `30`, `60`, `120` (Mac, games with `fps_max 120`) |
-| Render scale | `DM_RENDER_SCALE` | `0.5` to `1.0` |
-| Console mode | `DM_OPMODE` | `1` docked, `0` handheld |
+| Render scale | `DM_RENDER_SCALE` | `0.5` to `1.0` (`1.0`: the game's own size) |
+| Console mode | `DM_OPMODE` | `auto` the game's tested mode, `1` docked, `0` handheld |
+| GPU share | `DM_GFX_SCALE` | `auto` the game's tested share, `0` the whole GPU, `1` 80 %, `2` 67 % |
 | Game language | `DM_LANG` | a language code, such as `ja` |
 | Display mode (Mac) | `DM_FULLSCREEN` | `1` fullscreen, `0` a window |
 | Cloud saves folder (Mac) | `DM_SAVE_SYNC` | a folder; `icloud`: iCloud Drive › nxnative Saves; `0`: off |

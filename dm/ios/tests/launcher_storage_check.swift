@@ -78,6 +78,13 @@ import Foundation
         expect(mm.rangeLabel(macScale, 0.75) == "960 × 540 (75 %)", "handheld size in pixels")
         let plainScale = try! JSONDecoder().decode(Setting.self, from: Data(#"{"env":"DM_X","kind":"range","label":"X","note":"","default":"1.0","min":0.5,"max":1.0,"step":0.05,"level":"expert"}"#.utf8))
         expect(mm.rangeLabel(plainScale, 0.5) == "50 %" && !plainScale.basic, "no base size: the percentage; an unknown level decodes as Advanced")
+        // Auto (the game's tested default) resolves for the pixels; a render scale with the game's levels shows each level in pixels and Dynamic by its label
+        mm.values["DM_OPMODE"] = "auto"
+        expect(mm.value("DM_OPMODE") == "1" && mm.rangeLabel(macScale, 0.5) == "800 × 450 (50 %)", "Auto stands for the profile's docked")
+        let levels = try! JSONDecoder().decode(Setting.self, from: Data(#"{"env":"DM_RENDER_SCALE","kind":"choice","label":"Render scale","note":"","default":"1.0","base":{"docked":[2560,1440],"handheld":[1920,1080]},"options":[["1.0","Dynamic (the game's own)"],["0.75","75 %"],["0.5","50 %"]]}"#.utf8))
+        expect(mm.optionLabel(levels, levels.options![0]) == "Dynamic (the game's own)" && mm.optionLabel(levels, levels.options![1]) == "1920 × 1080 (75 %)", "levels in pixels, Dynamic by its label")
+        mm.values["DM_OPMODE"] = "0"
+        expect(mm.optionLabel(levels, levels.options![2]) == "960 × 540 (50 %)" && mm.optionLabel(plainScale, ["0.5", "x"]) == "x", "handheld pixels; no base size: the option's label")
         d.set("1", forKey: "launcher.DM_OPMODE"); setenv("DM_ENV_LAUNCH_KEYS", "DM_OPMODE", 1); setenv("DM_OPMODE", "0", 1)   // a front end's launch override over a saved choice
         let launched = LauncherModel(mac.settings, defaults: d)
         expect(launched.values["DM_OPMODE"] == "0" && launched.fixed.contains("DM_OPMODE") && launched.fromLaunch.contains("DM_OPMODE"), "a variable set at launch is shown fixed, over the saved choice")

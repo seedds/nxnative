@@ -93,7 +93,7 @@ The game autosaves into `slot_00` and `slot_01`, with `option.sav` and `account.
 
   At the next update the cave sees the flag, clears it, builds the arg with those four parameters (names copied from the game's own read-only strings, values pointing at the strings in `.bss`), calls the request, and writes `0x100` + its result to `main+0x4E9FF24` (`0x200` with no manager). It then runs the `pacibsp` and returns to the update. The update reads only `x0`, and the cave keeps `x0`, `x1`, `x19`, `x20`, the frame and `sp`. The hook stays after the warp and does nothing while the flag is 0, so a row needs no off entry.
 - **The scratch words.** `main+0x4E9FF20`–`0x4E9FFBF` are in the last 0x5B38 bytes of `.bss` (`0x4E9A4C8`–`0x4EA0000`). No `adrp` pair in the text reaches past `main+0x4E9A4C0`, a single pointer. A dump of the range after 20 minutes of play held nothing else.
-- **Tested** on an M3 Max in the Mac app: Apply on a Warp now row warped Link to its area. The same cave and request, started by a button combination in an earlier layout, warped from the Market and Hyrule Field, same-age and cross-age (child Link to `HyruleField_Adult`), into areas the story had not reached yet and into dungeons from outside.
+- **Tested** on an M3 Max in the Mac app: Apply on a Warp now row warped Link to its area. The same cave and request also warped from the Market and Hyrule Field, same-age and cross-age (child Link to `HyruleField_Adult`), into areas the story had not reached yet and into dungeons from outside.
 - **Not traced:** whether the request loads an event flow that no loading zone of the area has loaded (`OneShotBeforehandLoadEventRequestRegister`). It worked everywhere it was tried.
 
 ## Driving it on the Mac

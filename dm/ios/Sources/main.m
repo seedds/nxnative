@@ -219,6 +219,9 @@ static NSString *program_env(void) {
     if (!romfs) return nil;
     fprintf(stderr, "boot: game files %s\n", romfs.fileSystemRepresentation);
     setenv("DM_ROMFS", romfs.fileSystemRepresentation, 0);
+    // A folder of edited game files beside the image (Documents/res_overlay): the app's container path changes at each install, so an absolute DM_ROMFS_OVERLAY in env.txt goes stale
+    { NSString *ov = [doc stringByAppendingPathComponent:@"res_overlay"]; BOOL isdir = NO;
+      if ([fm fileExistsAtPath:ov isDirectory:&isdir] && isdir) { setenv("DM_ROMFS_OVERLAY", ov.fileSystemRepresentation, 1); fprintf(stderr, "boot: game file overlay %s\n", ov.fileSystemRepresentation); } }
     setenv("DM_NVN_SHMAP", [dmdir stringByAppendingPathComponent:@"shader_map.tsv"].fileSystemRepresentation, 0);
     setenv("DM_MSL_DIR", msl.fileSystemRepresentation, 0);
     return dmdir;

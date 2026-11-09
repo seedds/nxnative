@@ -31,6 +31,7 @@ static void merge_rumble_to_s2(int on);
 #include "home_quit.h"
 #include "home_quit_mac.h"
 #include "ctrl_prompt.h"
+#include "key_map.h"
 #include <signal.h>
 #include <math.h>
 #include <sys/stat.h>
@@ -38,6 +39,7 @@ static void merge_rumble_to_s2(int on);
 static CAMetalLayer *g_layer;
 static uint64_t g_btn;
 static int g_w, g_a, g_s, g_d;
+static key_map g_keymap;   // DM_KEY_MAP: keys given another control than the layout's (key_map.h); keymap_init reads it
 static int g_rl, g_ru, g_rr, g_rd;   // arrow keys pressed with Shift held: the right stick (each goes back up as it went down, whatever Shift does meanwhile)
 static int g_input_on = 1;   // main thread: the game window is key, so its keyboard, mouse and controllers reach the game (input_release / input_resume)
 
@@ -156,6 +158,32 @@ static int key_bit(unsigned short code) {
     }
     return -1;
 }
+// What a key does: what DM_KEY_MAP gives it, else the layout's: WASD the left stick, the keys of key_bit their buttons, Space the shake (key_map.h's actions)
+static int key_action(unsigned short code) {
+    int a = key_map_act(&g_keymap, code);
+    if (a != KM_DEFAULT) return a;
+    switch (code) { case 13: return KM_LS_UP; case 0: return KM_LS_LEFT; case 1: return KM_LS_DOWN; case 2: return KM_LS_RIGHT; case 49: return KM_SHAKE; }
+    int b = key_bit(code);
+    return b >= 0 ? b : KM_NONE;
+}
+static void keymap_init(void) {   // DM_KEY_MAP: a wrong map is refused whole, with its reason, and the layout stays
+    const char *spec = getenv("DM_KEY_MAP"); char err[160];
+    if (!spec || !*spec) return;
+    int n = key_map_parse(&g_keymap, spec, err, sizeof err);
+    if (n < 0) LOG("[RED] DM_KEY_MAP: %s; the keyboard keeps its layout", err);
+    else LOG("keyboard: %d key%s given another control by DM_KEY_MAP", n, n == 1 ? "" : "s");
+}
+// A modifier key reaches the window as a flagsChanged event, with no key down or up: whether that key is down is its own bit of the flags (device-dependent, left and right apart)
+static int modifier_down(NSEvent *e) {
+    switch (e.keyCode) {
+        case 56: return (e.modifierFlags & 0x2) != 0; case 60: return (e.modifierFlags & 0x4) != 0;        // left / right Shift
+        case 59: return (e.modifierFlags & 0x1) != 0; case 62: return (e.modifierFlags & 0x2000) != 0;     // left / right Control
+        case 58: return (e.modifierFlags & 0x20) != 0; case 61: return (e.modifierFlags & 0x40) != 0;      // left / right Option
+        case 55: return (e.modifierFlags & 0x8) != 0; case 54: return (e.modifierFlags & 0x10) != 0;       // left / right Command
+        case 57: return (e.modifierFlags & NSEventModifierFlagCapsLock) != 0; case 63: return (e.modifierFlags & NSEventModifierFlagFunction) != 0;
+    }
+    return 0;
+}
 // fn held with a letter: the arrow and function keys carry the same modifier flag, so the key must be a letter for this to be a Globe shortcut
 static int fn_shortcut(NSEvent *e) {
     NSString *s = e.charactersIgnoringModifiers;
@@ -170,15 +198,17 @@ static void on_key(NSEvent *e, int down) {
         if (down && g_cp.phase == CP_OPEN) { if (c == 53 || c == 40) g_cp_cancel = 1; else if (c == 36 || c == 38) g_cp_confirm = 1; cp_poll(); }
         return;
     }
-    switch (c) { case 13: g_w = down; break; case 0: g_a = down; break; case 1: g_s = down; break; case 2: g_d = down; break; }
     // An arrow key pressed with Shift held is the right stick until it is released; without Shift, the D-pad. The keyboard had no right stick: a 3D game's camera
-    // could be turned only with a controller (Donkey Kong Bananza)
-    int *rs = c == 123 ? &g_rl : c == 126 ? &g_ru : c == 124 ? &g_rr : c == 125 ? &g_rd : NULL;
+    // could be turned only with a controller (Donkey Kong Bananza). An arrow DM_KEY_MAP gives another control does what the map says, Shift or not
+    int *rs = key_map_act(&g_keymap, c) != KM_DEFAULT ? NULL : c == 123 ? &g_rl : c == 126 ? &g_ru : c == 124 ? &g_rr : c == 125 ? &g_rd : NULL;
     if (rs && (down ? (e.modifierFlags & NSEventModifierFlagShift) != 0 : *rs)) { *rs = down; push(); return; }
-    int b = key_bit(c);
-    uint64_t m = b >= 0 ? 1ull << b : c == 49 ? DM_BTN_SHAKE : 0;   // Space: shaken while held
+    int a = key_action(c);
+    int *st = a == KM_LS_UP ? &g_w : a == KM_LS_LEFT ? &g_a : a == KM_LS_DOWN ? &g_s : a == KM_LS_RIGHT ? &g_d
+            : a == KM_RS_UP ? &g_ru : a == KM_RS_LEFT ? &g_rl : a == KM_RS_DOWN ? &g_rd : a == KM_RS_RIGHT ? &g_rr : NULL;   // a stick direction
+    if (st) *st = down;
+    uint64_t m = a >= 0 && a < 16 ? 1ull << a : a == KM_SHAKE ? DM_BTN_SHAKE : 0;   // a button; Space (or the key mapped to shake): shaken while held
     g_btn = down ? (g_btn | m) : (g_btn & ~m);
-    if (down && (m || c == 13 || c == 0 || c == 1 || c == 2)) cursor_hide_for_input();   // a key the game takes (WASD: the left stick)
+    if (down && (m || st)) cursor_hide_for_input();   // a key the game takes
     push();
 }
 
@@ -1591,9 +1621,15 @@ void front_run(void (*guest)(void)) {
                 if (conn) hq_log_setting(); }];
         dm_haptics_apple_init();
         pads_start();
-        [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown | NSEventMaskKeyUp handler:^NSEvent *(NSEvent *e) {
+        keymap_init();
+        int cmd_is_control = key_map_act(&g_keymap, 55) != KM_DEFAULT || key_map_act(&g_keymap, 54) != KM_DEFAULT;   // a Command key DM_KEY_MAP gives a control: keys pressed with it held are the game's, not the menu's
+        [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown | NSEventMaskKeyUp | NSEventMaskFlagsChanged handler:^NSEvent *(NSEvent *e) {
             if (e.window != win) return e;   // Only swallow keys for the game window; other windows such as the software keyboard input box receive typing as usual
-            if (e.type == NSEventTypeKeyDown && (e.modifierFlags & NSEventModifierFlagCommand)) return e;   // ⌘ shortcuts go to the menu; a key released while ⌘ is held still reaches the game, or it would stay pressed
+            if (e.type == NSEventTypeFlagsChanged) {   // a modifier key: only one DM_KEY_MAP names is the game's (the trap of issue #1216: no key down or up comes for it)
+                if (key_map_act(&g_keymap, e.keyCode) == KM_DEFAULT) return e;
+                on_key(e, modifier_down(e)); return nil;
+            }
+            if (e.type == NSEventTypeKeyDown && (e.modifierFlags & NSEventModifierFlagCommand) && !cmd_is_control) return e;   // ⌘ shortcuts go to the menu; a key released while ⌘ is held still reaches the game, or it would stay pressed
             if (e.type == NSEventTypeKeyDown && fn_shortcut(e)) return e;   // fn (Globe) + a letter is the system's (fn+F full screen, GitHub issue #873), not the game's F
             if (!e.isARepeat) on_key(e, e.type == NSEventTypeKeyDown);
             return nil;   // Swallow it to avoid the system beep

@@ -1549,6 +1549,34 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 - LÖVE builds each source in Lua from its header, its built-in code and the game's `.fs` file. The NSP script captures them on the Mac (`gl_capture.tsv`). A capture run has no library.
 - **Found on:** [Balatro](../../dm/games/0100CD801CE5E000/README.md): the 35 shaders are all made before the first frame.
 
+### A version line with no entry point is not a shader
+
+- **Symptom:** the NSP script's GL shader step fails with `main#0 … Missing entry point` and `'#version' : bad profile name` for three strings of `main`, then `metallib: error: no input files`; no capture runs.
+- **Cause:** MojoShader keeps only the `#version 100` / `110` / `120` lines it puts before the GLSL it writes at run time. `profile_guess.py` counted every string of `main` that starts with `#version <number>` as a GLSL source, so the game looked as if it held its shaders and was not captured, and `gl_shaders.py` tried to translate the lines.
+- **Fix:** both take a string of `main` as a source only when it holds an entry point (`void main(`), the rule `glsl_sources` already applied to GLSLC games (`profile_guess.py` `gl_sources`, `gl_shaders.py` `nso_strings`). A game whose strings have none is captured on the Mac.
+- **Found on:** [Timespinner](../../dm/games/0100DD300CF3A000/README.md) (FNA with MojoShader).
+
+### Desktop GLSL 1.10 / 1.20 and its built-in varyings
+
+- **Symptom:** `gl_shaders.py` fails on every captured shader with `Desktop shaders for Vulkan SPIR-V require version 140 or higher`, then `'gl_TexCoord' : undeclared identifier` or `'gl_Color'`.
+- **Cause:** MojoShader's glsl120 profile writes compatibility GLSL: `attribute`, `texture2D`, `gl_FragColor` and the built-in varyings `gl_FrontColor` / `gl_Color`, `gl_TexCoord[n]` (and in other shaders `gl_FrontSecondaryColor` / `gl_SecondaryColor`, `gl_FogFragCoord`, `gl_FragData[n]`), which neither SPIR-V nor GLSL ES has. It names them only in `#define`s (`#define ps_v0 gl_Color`).
+- **Fix:** the rewrite that made GLSL ES 1.00 into 3.10 (`legacy_glsl`, formerly `es100`) takes `#version 110` and `120` too, and `legacy_io` turns the built-ins into declared inputs and outputs before preprocessing. A varying keeps one name in both stages (`gl_FrontColor` and `gl_Color` become `dm_Color`, `gl_TexCoord[0]` `dm_TexCoord0`), since the host links varyings by name. Tests: `dm/gfx/tests/test_gl_legacy.py`.
+- **Found on:** [Timespinner](../../dm/games/0100DD300CF3A000/README.md): 14 shaders, 13 fragment and SpriteBatch's vertex shader.
+
+### A program whose shader the library lacks still has its uniforms
+
+- **Symptom:** a capture run stops after the first shaders with `Assertion failed: ctx->bound_program->vs_flip_loc != -1 … MOJOSHADER_glProgramViewportFlip`; an app whose capture missed a shader stops the same way when the game reaches it.
+- **Cause:** a program with a shader the library lacks did not link, so `glGetUniformLocation` returned -1 for every name. MojoShader asserts on its `vpFlip` uniform, and a capture run has no library at all.
+- **Fix:** such a program still draws nothing, but `glLinkProgram` lists the uniforms its GLSL declares (`uni_from_source`): the game gets their locations and its writes go nowhere. A capture run then goes on until the game has compiled every shader.
+- **Found on:** [Timespinner](../../dm/games/0100DD300CF3A000/README.md): the capture stopped at 13 of its 14 shaders.
+
+### GL functions FNA's OpenGL device requires
+
+- **Symptom:** the game stops at start with `NoSuitableGraphicsDeviceException: OpenGL ES 3.0 support is required! Entry Point: glBlendColor`.
+- **Cause:** FNA's `OpenGLDevice` checks the pointers of the functions it needs and gives up at the first null one. The layer lacked 16 core functions: `glBlendColor`, `glStencilFuncSeparate`, `glStencilOpSeparate`, `glColorMaski`, `glSampleMaski`, `glDrawRangeElements`, `glDrawRangeElementsBaseVertex`, `glCompressedTexSubImage2D`, `glGetTexImage`, `glGetBufferSubData`, the occlusion queries (`glGenQueries`, `glDeleteQueries`, `glBeginQuery`, `glEndQuery`, `glGetQueryObjectuiv`) and `glGetFramebufferAttachmentParameteriv`.
+- **Fix:** each follows GL in `hle_gl.m`: a blend colour set on the encoder; a stencil test per face (`glStencilFunc`, `glStencilOp`, `glStencilMask` set both, a clear writes through the front faces' mask); range draws as `draw_elements`; compressed sub-images copied into the texture's block format; `glGetTexImage` through `glReadPixels`'s readback; buffer contents read from the shared `MTLBuffer` (nothing the GPU runs writes a buffer); occlusion queries as Metal visibility results, a slot per render pass the query spans, summed when the command buffer that ended it completes; attachment sizes and types, the window's as its EGL configuration reports them (`WIN_*_BITS`). `glColorMaski` writes only buffer 0's mask (one colour attachment); `GL_SAMPLE_MASK` is reported, not applied, as Metal takes a sample mask only from a fragment shader. The names `DM_GL_STUBS` and `DM_GL_MISSES` print are now copies: FNA's C# loader passes each name in a buffer it frees.
+- **Found on:** [Timespinner](../../dm/games/0100DD300CF3A000/README.md) (FNA's OpenGL device); FNA also asks for MojoShader's ARB and NV names, which it does not use with its GLSL profile.
+
 ### The GL core profile and persistently mapped buffers
 
 - LÖVE reads `GL_CONTEXT_PROFILE_MASK`; on a core profile it streams vertices through persistently mapped buffers (`glBufferStorage` + `glMapBufferRange` of a 3-frame ring, a `glFenceSync` per frame and `glClientWaitSync` three frames later), on a compatibility one from client memory, which Metal cannot draw from. The layer answers core: the mapping is the shared `MTLBuffer`'s memory, a fence is the serial of the command buffer being recorded, and a wait on a fence of that command buffer commits it first. The shaders then come as `#version 330 core`.
@@ -1570,6 +1598,13 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 
 - `glBufferData` on a buffer the GPU may still read gets a new `MTLBuffer`, as GL drivers orphan it. A whole-framebuffer clear becomes the next pass's load action; a scissored or masked one is a quad.
 - **Found on:** [Digimon Story Cyber Sleuth: Complete Edition](../../dm/games/010014E00DB56000/README.md).
+
+### A waiting clear runs before an attachment changes
+
+- **Symptom:** whole layers of a scene composed in a render target are missing while the draws into them are there with the right colour, texture and state.
+- **Cause:** a clear waits for the next pass to become its load action (above), keyed by the framebuffer's name. The game clears its layer texture, attaches its scene texture to the same framebuffer without drawing into the layer, and draws: the clear meant for the layer cleared the scene. Each empty layer so erased everything composed before it.
+- **Fix:** `fb_attach` runs a clear waiting on the framebuffer before it changes one of its attachments, as `glBindFramebuffer` does when the game leaves a framebuffer; a clear then reaches the images attached when the game asked for it. The attachment functions run on the big stack (`GLB`), since one can now begin a pass.
+- **Found on:** [Timespinner](../../dm/games/0100DD300CF3A000/README.md): its scene is a 512x256 target composed layer by layer (clear texture 26, draw the layer, attach texture 27, draw 26 over it).
 
 ### GL draws and framebuffers
 

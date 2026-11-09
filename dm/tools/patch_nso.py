@@ -854,6 +854,17 @@ def jump_offsets(insl, j, copy_first=False, far_base=False, forward_base=False):
     if not add: return None
     _, t, rb = add.op_str.split(', ')   # t = the loaded entry, rb = the table base
     ld = next((p for p in reversed(ctx) if p.mnemonic == 'ldrsw' and re.fullmatch(rf'{t}, \[{rb}, x(\d+), lsl #2\]', p.op_str)), None)
+    if not ld and far_base:
+        # The add may read a copy of the base the load reads (Timespinner 1.0.0 main+0x2c0a220, six times in one function: adrp x18 + add x18; mov x6,x18;
+        # ldrsw x18,[x18,x10,lsl #2]; add x18,x18,x6; br x18, the load replacing the base it read). Accepted when both registers hold the same table address where they are read,
+        # each followed back through its copies (copied_base); the rest of the walk then reads the load's base. Only the last attempts (far_base) get here, so sites that rewrote before come out the same
+        ka = ctx.index(add)
+        ld = next((p for p in reversed(ctx[:ka]) if p.mnemonic == 'ldrsw' and re.fullmatch(rf'{t}, \[x\d+, x\d+, lsl #2\]', p.op_str)), None)
+        if not ld: return None
+        rl = ld.op_str.split('[')[1].split(',')[0]
+        tb = copied_base(insl, insl.index(add), rb)
+        if tb is None or copied_base(insl, insl.index(ld), rl) != tb: return None
+        rb = rl
     if not ld: return None
     # GLSLC subsdk0+0x2f403c checks a masked copy instead: and w16,w18,#0x3f; cmp w16,#0xe; b.hi; ...; and x18,x18,#0x3f; ldrsw x18,[x15,x18,lsl #2]
     idx = {'w' + re.fullmatch(rf'{t}, \[{rb}, x(\d+), lsl #2\]', ld.op_str).group(1)}   # pyright: ignore[reportOptionalMemberAccess]  # ld was chosen by this match

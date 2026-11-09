@@ -38,12 +38,14 @@ def text_of(b):
     return b[:z] if z >= 0 else b
 
 def nso_strings(path):
-    """'#version <number>' strings of an NSO's read-only segment (dm/tools/nso.py); a main that links glslang (Balatro's LÖVE) also has its messages that start with '#version:'.
+    """'#version <number>' strings of an NSO's read-only segment (dm/tools/nso.py) that hold an entry point; a main that links glslang (Balatro's LÖVE) also has its messages that start
+    with '#version:', and Timespinner's MojoShader only the '#version 1x0' lines it puts before the GLSL it makes at run time (dm/games/profile_guess.py gl_sources counts the same strings).
     nso.Error (a ValueError) on a damaged file"""
     import nso
     with open(path, 'rb') as f: m = nso.load(f.read(), path)
     (mo, sz) = m.segments[1]; img = bytes(m.image[mo:mo + sz])
-    return [text_of(img[m.start():m.start() + 0x10000]) for m in re.finditer(rb'(?:^|(?<=\0))#version [0-9]', img)]
+    strings = (text_of(img[m.start():m.start() + 0x10000]) for m in re.finditer(rb'(?:^|(?<=\0))#version [0-9]', img))
+    return [s for s in strings if re.search(rb'\bvoid\s+main\s*\(', s)]
 
 def sources(roots):
     """(source bytes, stage or None, where) for every shader in the input paths"""
@@ -118,10 +120,28 @@ def uni_members(refl, ms, prefix, base, f, bools):
         if ty not in VEC_TYPES: return f'uniform {name}: type {ty} (structs are not implemented)'
         f.append(f'u:{name}={base + mb["offset"]}:{ty}:{arr[0] if arr else 0}:{mb.get("array_stride", 0)}')
 
-# GLSL ES 1.00, with its version statement (#version 100) or, as GameMaker's runner writes it, without one (Well Dweller's 93 run-time shaders): `attribute`, `varying`, `texture2D`, `gl_FragColor`, precision statements and
+# The legacy GLSL dialects: GLSL ES 1.00, with its version statement (#version 100) or, as GameMaker's runner writes it, without one (Well Dweller's 93 run-time shaders), and desktop GLSL 1.10 / 1.20
+# (MojoShader's glsl120 profile in FNA's OpenGL driver, which writes Timespinner's XNA effects as GLSL at run time): `attribute`, `varying`, `texture2D`, `gl_FragColor`, precision statements and
 # lowp / mediump / highp qualifiers. SPIR-V needs ES 3.10 or newer, so the text is rewritten before preprocessing (glslang rejects those keywords in 310). Metal has no use for the precision qualifiers;
-# the texture functions stay for fixups(), which renames them after preprocessing (a macro could hide one)
-def es100(t, stage):
+# the texture functions stay for fixups(), which renames them after preprocessing (a macro could hide one).
+# Desktop GLSL's built-in varyings and outputs (LEGACY_IO, gl_TexCoord[n], gl_FragData[n]) become declared ones; a varying keeps one name in both stages (gl_FrontColor and gl_Color are dm_Color), as the
+# host links varyings by name. MojoShader names them only in its #defines (#define ps_v0 gl_Color), so the rename runs on the text before preprocessing too
+LEGACY_IO = {'vert': [('gl_FrontColor', 'dm_Color', 'vec4'), ('gl_FrontSecondaryColor', 'dm_SecondaryColor', 'vec4'), ('gl_FogFragCoord', 'dm_FogFragCoord', 'float')],
+             'frag': [('gl_Color', 'dm_Color', 'vec4'), ('gl_SecondaryColor', 'dm_SecondaryColor', 'vec4'), ('gl_FogFragCoord', 'dm_FogFragCoord', 'float')]}
+
+def legacy_io(t, stage):
+    io = 'out' if stage == 'vert' else 'in'; decl = []
+    for old, new, ty in LEGACY_IO[stage]:
+        if re.search(rf'\b{old}\b', t): t = re.sub(rf'\b{old}\b', new, t); decl.append(f'{io} {ty} {new};')
+    for n in sorted({int(n) for n in re.findall(r'\bgl_TexCoord\s*\[\s*(\d+)\s*\]', t)}): decl.append(f'{io} vec4 dm_TexCoord{n};')
+    t = re.sub(r'\bgl_TexCoord\s*\[\s*(\d+)\s*\]', r'dm_TexCoord\1', t)
+    if stage == 'frag':
+        for n in sorted({int(n) for n in re.findall(r'\bgl_FragData\s*\[\s*(\d+)\s*\]', t)}): decl.append(f'layout(location = {n}) out vec4 dm_FragData{n};')
+        t = re.sub(r'\bgl_FragData\s*\[\s*(\d+)\s*\]', r'dm_FragData\1', t)
+    return ''.join(d + '\n' for d in decl) + t
+
+def legacy_glsl(t, stage):
+    t = legacy_io(t, stage)
     t = re.sub(r'^[ \t]*precision[ \t]+\w+[ \t]+\w+[ \t]*;\r?[ \t]*\r?\n', '', t, flags=re.M)
     t = re.sub(r'\b(?:lowp|mediump|highp)\b[ \t]*', '', t)
     t = re.sub(r'\battribute\b', 'in', t)
@@ -135,7 +155,7 @@ def translate(src, stage, key, tmp):
     """GLSL → MSL; returns (msl path, table fields) or an error string"""
     t = src.decode('latin1')
     v = re.search(r'^[ \t]*#version[ \t]+(\d+)[^\n]*\n?', t, re.M)
-    if not v or v.group(1) == '100': src = es100(t.replace(v.group(0), '', 1) if v else t, stage).encode('latin1')
+    if not v or v.group(1) in ('100', '110', '120'): src = legacy_glsl(t.replace(v.group(0), '', 1) if v else t, stage).encode('latin1')
     g = os.path.join(tmp, f'{key}.{stage}'); spv = g + '.spv'; msl = os.path.join(tmp, f'{key}_{stage[0]}.metal')
     open(g + '.in', 'wb').write(src)
     r = subprocess.run(['glslangValidator', '-E', '-S', stage, g + '.in'], capture_output=True, text=True)

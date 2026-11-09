@@ -89,6 +89,13 @@ To enroll a cut for any game's own module:
 - **Fix:** in its last pass (`far_base`), `jump_offsets` accepts `cmp xI, #N` on the index too. The earlier passes are unchanged, so modules that rewrote before come out the same.
 - **Found on:** [OCTOPATH TRAVELER](../../dm/games/010057D006492000/README.md) `main+0x1676f58` (1.0.5), the only such site in that `main`.
 
+### The add reads a copy of the table base
+
+- **Symptom:** `jump table <addr>` assertion in `patch_nso.py` where the load and the add name different base registers (`cmp w10, #3; b.hi; adrp x18 + add x18; mov x6, x18; ldrsw x18, [x18, x10, lsl #2]; add x18, x18, x6; br x18`).
+- **Cause:** `jump_offsets` looks for a load whose base is the add's, so a load through the original register and an add through its copy matched no form. The load replaces the base it read, which is why the compiler kept a copy for the add.
+- **Fix:** in its last passes (`far_base`), `jump_offsets` takes the load with any base when both registers hold the same table address where they are read, each followed back through its copies (`copied_base`); the rest of the walk then reads the load's base. A base changed between the copy and the add, or a call between them, is refused. The earlier passes are unchanged, so modules that rewrote before come out the same: of ten local games, only Timespinner's `main` has this form.
+- **Found on:** [Timespinner](../../dm/games/0100DD300CF3A000/README.md) `main+0x2c0a220` and five more sites in the same function (a four-way switch on a pixel's byte width).
+
 ### Index zero-extended after a 32-bit bounds check
 
 - **Symptom:** `jump table <addr>` assertion in `patch_nso.py` where the index is made with a 64-bit `and` by `0xffffffff` after the check (`cmp w8, #4; b.hi; and x18, x8, #0xffffffff; ldrsw x18, [x16, x18, lsl #2]; add x18, x18, x16; br x18`).

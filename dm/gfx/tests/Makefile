@@ -242,6 +242,8 @@ t_ub: t_ub.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_ub.m $(MTL_T_SRC) $(FW)
 t_gpuprof: t_gpuprof.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_gpuprof.m $(MTL_T_SRC) $(FW)
+t_sub_overlap: t_sub_overlap.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_sub_overlap.m $(MTL_T_SRC) $(FW)
 t_dispatch_own: t_dispatch_own.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_dispatch_own.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_dispatch_own

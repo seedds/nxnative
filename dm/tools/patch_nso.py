@@ -6,7 +6,7 @@
 #   mrs tpidrro_el0     → read thread slot KTLR (Horizon ThreadLocalRegion pointer)
 #   svc #n, mrs cntpct_el0 → host gate (gate address taken from thread slot KGATE; once in C, gates.tsv is looked up by return point)
 #   sub sp, sp, xN      → xN rounded up to 16 first (Apple's kernel faults on a misaligned sp, Horizon does not; site_sp_align)
-#   ldxr rt,[rn]; cbnz rt,<it>; stxr ws,rk,[rn]; cbnz ws,<it> with no dmb after it (a test-and-set lock acquire with no acquire ordering) → ldaxr (acquire_lock_sites; the games ran on the Switch's Cortex-A57 without the ordering, Apple cores need it)
+#   ldxr* / ldxp → ldaxr* / ldaxp, stxr* / stxp → stlxr* / stlxp: every exclusive access gets acquire or release ordering (exclusive_order_sites; the games ran on the Switch's Cortex-A57 without it, Apple cores need it)
 #   the completer of Trinity's per-frame rendezvous: dmb ish between its flag store and its load of the state word (trinity_completer_sites; exactly one such function in a module, or no change)
 #   spin wait loops     → a copy whose back-edges pass a spin gate (the host yields there; a busy poll costs nothing on the Switch, see "Spin waits")
 #   Registered cuts (CUTS of the patch files, restricted by NSO build ID, see "Registered patches"): before rewriting, the original bytes are asserted one by one and any mismatch aborts; results are listed in <name>.cuts.tsv
@@ -659,26 +659,27 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import nso_code
 DATA_BLOCKS = nso_code.data_blocks(IMG, TEXT_END, md)
 CODE_RANGES = list(zip([0] + [e for _, e in DATA_BLOCKS], [s for s, _ in DATA_BLOCKS] + [TEXT_END]))
-def acquire_lock_sites(img, ranges):
-    """Offsets of exclusive test-and-set lock acquires without acquire ordering: ldxr rt,[rn]; cbnz rt,<the ldxr>; stxr ws,rk,[rn]; cbnz ws,<the ldxr> (w or x, rk not zero), not followed by
-    dmb ish / dmb ishld (Tears of the Kingdom's and Super Mario Bros. Wonder's locks of this shape all are, which orders them already). Armv8 lets the loads after such a lock be satisfied
-    before it is held; the games ran on the Switch's Cortex-A57 without that showing, Apple cores do it, so two threads take the same queue item (Breath of the Wild 1.6.0 main: 412 of this shape counted without the barrier check,
-    the job queue pop at main+0x13a0784 ran one job on two threads, see docs/reference/threads.md). Nintendo's own SDK locks use ldaxr"""
+def exclusive_order_sites(img, ranges):
+    """Offsets of the exclusive loads and stores without ordering: ldxr / ldxrb / ldxrh / ldxp and stxr / stxrb / stxrh / stxp, any size (each with its fixed fields exact; not CAS or CASP).
+    Setting bit 15 makes each the same instruction with ordering: ldaxr* / ldaxp (acquire) and stlxr* / stlxp (release). Armv8 lets the accesses after an exclusive load without acquire
+    be satisfied before it, and those before an exclusive store without release be seen after it. The games ran on the Switch's Cortex-A57 without that showing, Apple cores do both:
+    a lock taken with ldxr / stxr let two threads take the same queue item (Breath of the Wild 1.6.0's job queue pop at main+0x13a0784), and on an Apple M6 a plain store published
+    with stxr or stxp was read stale 12,858 and 10,961 times in 100 million rounds, never with stlxr or stlxp (docs/reference/threads.md). Every one is upgraded, with no shape list:
+    ordering only removes outcomes, and an atomic increment cost the same with stlxr as with stxr there. Nintendo's own SDK atomics already use the ordered forms"""
     out = []
     for s, e in ranges:
-        for o in range(s, e - 12, 4):
+        for m in re.finditer(rb'[\x08\x48\x88\xC8]', img[s:e]):   # the top byte of every form: size << 6 | 0x08
+            o = s + m.start() - 3
+            if o & 3 or o < s: continue
             w = struct.unpack_from('<I', img, o)[0]
-            if w & 0xBFFFFC00 != 0x885F7C00: continue
-            c1, st, c2 = struct.unpack_from('<III', img, o + 4)
-            rt, rn, rs, rk = w & 31, w >> 5 & 31, st >> 16 & 31, st & 31
-            cbnz = lambda x, r, back: x & 0x7F00001F == 0x35000000 | r and x >> 5 & 0x7FFFF == 0x80000 - back   # cbnz r, <the ldxr>: back words
-            fenced = o + 20 <= e and struct.unpack_from('<I', img, o + 16)[0] in (0xD5033BBF, 0xD50339BF)   # dmb ish, dmb ishld right after the loop
-            if cbnz(c1, rt, 1) and cbnz(c2, rs, 3) and st & 0xBFE0FC00 == 0x88007C00 and st >> 5 & 31 == rn and rk != 31 and rs not in (rn, rk) and not fenced:
+            if (w & 0x3FFFFC00 == 0x085F7C00 or w & 0xBFFF8000 == 0x887F0000           # ldxr* (Rs and Rt2 all ones), ldxp (Rs all ones)
+                    or w & 0x3FE0FC00 == 0x08007C00 or w & 0xBFE08000 == 0x88200000):   # stxr* (Rt2 all ones), stxp
                 out.append(o)
     return out
-for o in acquire_lock_sites(IMG, CODE_RANGES):
-    struct.pack_into('<I', IMG, o, struct.unpack_from('<I', IMG, o)[0] | 0x8000)   # ldxr → ldaxr
-    stat('acquire_lock')
+ORDERED = set(exclusive_order_sites(IMG, CODE_RANGES))   # changed_runs leaves these out: a cheat that writes over one runs its own instruction, which no site depends on
+for o in ORDERED:
+    struct.pack_into('<I', IMG, o, struct.unpack_from('<I', IMG, o)[0] | 0x8000)   # ldxr → ldaxr, stxr → stlxr, ldxp → ldaxp, stxp → stlxp
+if ORDERED: stats['exclusive_ordered'] = len(ORDERED)
 def trinity_completer_sites(img, ranges):
     """Offsets of the completer of Trinity's per-frame rendezvous (Game Freak; Pokémon Scarlet 1.0.0 main+0x28f872c, 4.0.0 main+0x2d0010c):
       stp x29,x30,[sp,#-0x20]!; stp x20,x19,[sp,#0x10]; mov x29,sp; ldr x8,[x0,#imm]; mov w9,#1; strb w9,[x8,#A]; ldrb w9,[x8,#A+1]; cbz w9,..;
@@ -1933,15 +1934,16 @@ with open(P('sites.tsv'), 'w') as f:
 with open(P('cuts.tsv'), 'w') as f:
     f.write(f'# BUILD_ID\t{BUILD_ID}\n')
     for off, ob, nb, why in cuts: f.write(f'{off:#x}\t{ob}\t{nb}\t{why}\n')   # Columns: offset, original bytes, new bytes, reason
-# The text words whose instructions no longer run as the file has them: every word this rewriter changed (sites, cuts, lock
-# acquires, jump tables), the windows whose copies in the patch area run instead, and the spin waits' instructions, which run
+# The text words whose instructions no longer run as the file has them: every word this rewriter changed (sites, cuts,
+# jump tables; not an exclusive access that only gained ordering), the windows whose copies in the patch area run instead, and the spin waits' instructions, which run
 # from their copies after the first pass. Runs of offset and length; the host's cheat engine refuses a write into any of them
 # (hle_cheats.c main_write_pages: a cheat's instruction there would undo a site or never run)
 def changed_runs():
     words = set()
     for o in range(0, TEXT_END, 0x1000):   # whole blocks first: almost all of the text is unchanged
         if IMG[o:o + 0x1000] != ORIG_TEXT[o:o + 0x1000]:
-            words.update(w for w in range(o, min(o + 0x1000, TEXT_END), 4) if IMG[w:w + 4] != ORIG_TEXT[w:w + 4])
+            words.update(w for w in range(o, min(o + 0x1000, TEXT_END), 4) if IMG[w:w + 4] != ORIG_TEXT[w:w + 4]
+                         and not (w in ORDERED and struct.unpack_from('<I', IMG, w)[0] == struct.unpack_from('<I', ORIG_TEXT, w)[0] | 0x8000))   # ordering alone
     for wseg in windows: words.update(range(wseg[0].address, wseg[-1].address + 4, 4))
     for g in spin_regions:
         for a in g['R']:

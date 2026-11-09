@@ -12305,6 +12305,7 @@ static int fb_depth_snap(NvShader *fs, const nvn_rbind *b, int tid, uint64_t ser
     if (!use) { e->ser = 0; RED_ONCE(163, "same-pass depth sampling: cannot create the snapshot view (format %lu); left as is", (unsigned long)t.pixelFormat); return 0; }
     if (fresh) {
         if (g_enc) { g_fb_split++; rp_end(); }
+        if (R.clear_d || R.clear_s) rp_flush();   // the recorded clear precedes this draw, so its depth sample must see it
         enc_b_copy_texture(blit(), base, (NSUInteger)sl, (NSUInteger)lv, MTLOriginMake(0, 0, 0), MTLSizeMake(w, h, 1), e->snap, 0, 0, MTLOriginMake(0, 0, 0));
         fb_pass_sync();
     } else g_fb_dsnap_reuse++;

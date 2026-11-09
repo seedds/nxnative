@@ -89,8 +89,22 @@ static inline int rec_on(void) {
 }
 static pthread_mutex_t g_rb_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_rb_work = PTHREAD_COND_INITIALIZER, g_rb_idle = PTHREAD_COND_INITIALIZER;
-static rec_blk *g_rb_cur, *g_rb_head, *g_rb_tail, *g_rb_free;   // the submit thread's open block; blocks waiting for the encode thread; empty blocks
+static rec_blk *g_rb_cur_[NW], *g_rb_head, *g_rb_tail, *g_rb_free;   // each translation context's open block; blocks waiting for the encode thread; empty blocks
+#define g_rb_cur (g_rb_cur_[TCI])
 static int g_rb_busy, g_rb_started, g_rb_sleeping;              // the encode thread is working through a block; the thread exists; it waits for work
+
+// Parallel translation (stage P2, DM_NVN_PAR): a context that translates a job publishes its blocks into that job's chain instead of the queue, and the sequencer hands the chains to
+// the encode thread in job order, so the one command buffer sees the calls in the order a single translating thread made them. Jobs are numbered by the planner as it hands them
+// out; a job's chain is pushed once it is done and every job before it has been pushed. Off (0, the default), every context publishes into the queue as before
+static int par_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_PAR"); v = e && atoi(e) > 0; } return v; }
+typedef struct { rec_blk *head, *tail; } rec_chain;
+static rec_chain g_rb_job_[NW]; static int g_rb_jobmode_[NW];   // the chain of the job this context translates; whether the context publishes into it
+#define g_rb_job (g_rb_job_[TCI])
+#define g_rb_jobmode (g_rb_jobmode_[TCI])
+enum { JSEQ_N = 1024 };   // jobs in flight at most (a frame of Donkey Kong Bananza's map has about 180 passes)
+static struct { rec_chain c; _Atomic int done; } g_jseq[JSEQ_N];
+static uint64_t g_jseq_issued, g_jseq_pushed;   // jobs numbered so far; jobs whose chains went to the queue (both only on the planner's thread)
+static pthread_mutex_t g_jseq_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_jseq_cv = PTHREAD_COND_INITIALIZER;
 
 static inline uint64_t rec_obj(id o) { return o ? (uint64_t)(uintptr_t)CFBridgingRetain(o) : 0; }
 static inline id rec_id(uint64_t v) { return (__bridge id)(void *)(uintptr_t)v; }
@@ -200,6 +214,10 @@ static void *rec_thread(void *arg) {
 // ---------- The submit thread's side ----------
 static void rec_publish(void) {
     if (!g_rb_cur || !g_rb_cur->n) return;
+    if (g_rb_jobmode) {   // a job's block: into its chain, which the sequencer pushes in job order (jseq_push)
+        g_rb_cur->next = NULL; if (g_rb_job.tail) g_rb_job.tail->next = g_rb_cur; else g_rb_job.head = g_rb_cur; g_rb_job.tail = g_rb_cur; g_rb_cur = NULL;
+        return;
+    }
     pthread_mutex_lock(&g_rb_mu);
     g_rb_cur->next = NULL; if (g_rb_tail) g_rb_tail->next = g_rb_cur; else g_rb_head = g_rb_cur; g_rb_tail = g_rb_cur; g_rb_cur = NULL;
     if (g_rb_sleeping) pthread_cond_signal(&g_rb_work);
@@ -218,9 +236,54 @@ static rec_t *rec_put(uint32_t op, uint32_t nobj) {
     }
     rec_t *r = &g_rb_cur->r[g_rb_cur->n++]; r->op = op; r->nobj = nobj; return r;
 }
+// ---------- The sequencer (parallel translation) ----------
+// Behind the blocks published so far, in one piece
+static void rec_chain_push(rec_chain c) {
+    if (!c.head) return;
+    pthread_mutex_lock(&g_rb_mu);
+    c.tail->next = NULL; if (g_rb_tail) g_rb_tail->next = c.head; else g_rb_head = c.head; g_rb_tail = c.tail;
+    if (g_rb_sleeping) pthread_cond_signal(&g_rb_work);
+    pthread_mutex_unlock(&g_rb_mu);
+}
+// Planner: push every finished job whose predecessors are pushed, in job order; wait: until every job numbered so far is pushed
+static void jseq_push(int wait) {
+    for (;;) {
+        while (g_jseq_pushed < g_jseq_issued && atomic_load_explicit(&g_jseq[g_jseq_pushed % JSEQ_N].done, memory_order_acquire)) {
+            rec_chain_push(g_jseq[g_jseq_pushed % JSEQ_N].c); g_jseq[g_jseq_pushed % JSEQ_N].c = (rec_chain){0}; g_jseq_pushed++; }
+        if (!wait || g_jseq_pushed == g_jseq_issued) return;
+        pthread_mutex_lock(&g_jseq_mu);
+        while (!atomic_load_explicit(&g_jseq[g_jseq_pushed % JSEQ_N].done, memory_order_acquire)) pthread_cond_wait(&g_jseq_cv, &g_jseq_mu);
+        pthread_mutex_unlock(&g_jseq_mu);
+    }
+}
+// Planner: the next job's number (its slot is reused once the job JSEQ_N before it is pushed)
+static uint64_t jseq_issue(void) {
+    while (g_jseq_issued - g_jseq_pushed >= JSEQ_N) {
+        pthread_mutex_lock(&g_jseq_mu);
+        while (!atomic_load_explicit(&g_jseq[g_jseq_pushed % JSEQ_N].done, memory_order_acquire)) pthread_cond_wait(&g_jseq_cv, &g_jseq_mu);
+        pthread_mutex_unlock(&g_jseq_mu);
+        jseq_push(0);
+    }
+    uint64_t id = g_jseq_issued++;
+    g_jseq[id % JSEQ_N].c = (rec_chain){0}; atomic_store_explicit(&g_jseq[id % JSEQ_N].done, 0, memory_order_relaxed);
+    return id;
+}
+// The translating context: what it records from here goes into the job's chain
+static void rec_job_begin(void) { rec_publish(); g_rb_jobmode = 1; g_rb_job = (rec_chain){0}; }
+// ... until here: the chain is handed to job id's slot, which the planner pushes in order
+static void rec_job_end(uint64_t id) {
+    rec_publish(); g_rb_jobmode = 0;
+    g_jseq[id % JSEQ_N].c = g_rb_job; g_rb_job = (rec_chain){0};
+    pthread_mutex_lock(&g_jseq_mu); atomic_store_explicit(&g_jseq[id % JSEQ_N].done, 1, memory_order_release); pthread_cond_broadcast(&g_jseq_cv); pthread_mutex_unlock(&g_jseq_mu);
+}
+
 // Hand over what is recorded and wait until the encode thread has made every call
+static int g_rb_job_split;   // a drain met a context gathering a job: what it had went to the queue (the verify mode cannot compare that pass)
 static void rec_drain(void) {
+    pv_wait_idle();   // the verify worker (DM_NVN_PAR=3) is done with this submission's command memory
     if (!g_rb_started) return;
+    if (g_rb_jobmode) { rec_publish(); rec_chain_push(g_rb_job); g_rb_job = (rec_chain){0}; g_rb_job_split = 1; }
+    if (g_jseq_pushed != g_jseq_issued) jseq_push(1);   // every job translated and handed over first (none are numbered unless DM_NVN_PAR is on)
     rec_publish();
     uint64_t w0 = ws_t0(); int blocked = 0;
     pthread_mutex_lock(&g_rb_mu);

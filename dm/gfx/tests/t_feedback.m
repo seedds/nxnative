@@ -80,7 +80,7 @@ static void slot_case(NvProg *pr, id<MTLRenderPipelineState> pipeline, int slot,
     clear(MTLClearColorMake(image ? 29 : 0, 1, 0, 1)); rp_end();
     R.rt.color[0] = &output;
     sample(fs, pipeline);
-    uint64_t bound = *(uint64_t *)((uint8_t *)fs->ab_buf.contents + fs->ab_off);
+    uint64_t bound = *(uint64_t *)((uint8_t *)fs->ab[TCI].buf.contents + fs->ab[TCI].off);
     CHECK(g_fb_n == 1 && bound == g_fb_rid[0] && bound != original.gpuResourceID._impl,
           "production argument buffer contains the snapshot resource ID");
     readback(destination, result, 0);
@@ -88,7 +88,7 @@ static void slot_case(NvProg *pr, id<MTLRenderPipelineState> pipeline, int slot,
         // A different slot can write the same resource: a snapshot already available for a reader must never redirect a writer.
         fs->rf.b[0].rw = 1; args_dirty_all();
         sample(fs, pipeline);
-        bound = *(uint64_t *)((uint8_t *)fs->ab_buf.contents + fs->ab_off);
+        bound = *(uint64_t *)((uint8_t *)fs->ab[TCI].buf.contents + fs->ab[TCI].off);
         CHECK(bound == original.gpuResourceID._impl, "a writable image bypasses an available snapshot");
         fs->rf.b[0].rw = 0; args_dirty_all();
     }
@@ -96,7 +96,7 @@ static void slot_case(NvProg *pr, id<MTLRenderPipelineState> pipeline, int slot,
     fb_prepare(pr);
     CHECK(g_fb_n == 0, "following draw needs no snapshot");
     sample(fs, pipeline);
-    bound = *(uint64_t *)((uint8_t *)fs->ab_buf.contents + fs->ab_off);
+    bound = *(uint64_t *)((uint8_t *)fs->ab[TCI].buf.contents + fs->ab[TCI].off);
     CHECK(bound == original.gpuResourceID._impl, "following draw restores the original resource ID");
     readback(destination, result, 1024);
     CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "GPU submission completed");

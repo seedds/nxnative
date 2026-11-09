@@ -15,6 +15,8 @@ void bf_want_note(const char *key);
 // Memory pool: [mem, mem+size) is expanded outward to page boundaries to build a zero-copy buffer; look up the buffer and offset by GPU address (= CPU address)
 void mtl_pool_add(const void *mem, uint64_t size);
 void mtl_pool_addressed(const void *mem, uint64_t size);   // the game holds a GPU address in this range, so raw global memory may reach it
+void mtl_pool_addressed_by(const void *mem, uint64_t size, int kind);   // the same, with who gave it out (0 pool, 1 buffer: its range, the table takes the whole pool, 2 texture, 3 virtual mapping), for res_top
+void mtl_pool_tag(const void *mem, uint32_t tag);   // res_top: the pool's flags (bit 31: a mapped run of a virtual pool)
 void mtl_pool_del(const void *mem);
 // memory pool Finalize: evict the textures built on this pool (pool object address) from the storage-sharing table
 void mtl_alias_drop_pool(const void *pool);

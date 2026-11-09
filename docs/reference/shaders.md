@@ -1328,7 +1328,8 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Cause:** the compiler builds a handle in a register under a guard (`R = word`; `R |= sampler word`) and reads through it under a guard of its own. The register's phi then merges the handle, its first word and what the register held before. `Utils.FindLastOperation` picks the phi's input only when both guards are the same operand in the same branch form, which misses `!UP0` with UP0 the vote of `P0` against a read under `!P0`, `P4` against a read under `P5 = P4 && !P1`, and `P6` against a read past `BRA.!P6`. `TryTableHandle` then took only c2 words, so a handle in another bank was deleted. In a register with no earlier value the first word's phi is (undefined, word): `FindLastOperation`'s rule that the one defined source of such a phi is its value was also applied to that phi inside the outer phi, so the first word came back as the whole handle.
 - **Fix:** in the vendored translator. `TryTableHandle` also takes a texture word ORed with a sampler word of the same bank or a constant sampler from any constant buffer, including when only the OR's source is a phi and the handle is not. A word of a game's uniform buffer alone is no candidate, as it may be other data, so the first word and a float left in the register drop out without a look at the guards. A c2 word alone that an ORed candidate also takes is that handle on its way, not a second candidate, which also saves a read chosen at run time. `FindLastOperation` applies the undefined rule only to the phi it was asked about. Proving the guards equal instead would take a boolean prover over predicate logic and the vote's meaning. A chain change.
 - **Found on:** [Yoshi and the Mysterious Book](../../dm/games/0400245021D2C000/README.md): of 128,113 translated shaders, 130 reads in 78 were deleted (the pool's water surface on Chapter 1's page) and 189 reads in 152 bound the texture word alone. SPIR-V of every shader against the translator before: those 230 change there; 364 of 22,072 in [DAVE THE DIVER](../../dm/games/010097F018538000/README.md) and 2,633 of 69,924 in [DRAGON QUEST I & II HD-2D Remake](../../dm/games/0100D7C01F254000/README.md), of which 319 and 1,780 bound the texture word alone and the others lose a second read; 16 of 13,980 in [OCTOPATH TRAVELER II](../../dm/games/0100A3501946E000/README.md), a second read. None of Fire Emblem Fortune's Weave's 16,888, nor of Blasphemous, NieR:Automata, Return of the Obra Dinn, Catherine: Full Body and FINAL FANTASY X/X-2. Only Yoshi's water was compared in a picture. FINAL FANTASY RESONANCE's 26 reads with [no c2 word](#bindless-reads-whose-handle-phi-also-carries-other-values) may be this form, not checked: its shaders are not split on disk.
-- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py` (the three guard forms, an unguarded OR, and a c2 handle read once).
+- **Note:** when these rules find no candidate, a second pass takes a word of any constant buffer alone, or a texture word ORed with a sampler word of another bank, since the read is deleted otherwise. Unreal Engine 5.6 on the Switch 2 builds such handles (Orbitals (`040004F027560000`)). A shader the first pass finds a handle in translates as with these rules alone.
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py` (the three guard forms, an unguarded OR, a c2 handle read once, and the second pass's two forms).
 
 ### Layer entry points with the point size passed by reference
 
@@ -1376,6 +1377,26 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Limit:** only the comparisons. The compilers set .FTZ on nearly every float instruction of every shader, so it is in effect a mode of the whole shader, and Metal has none (`MTLCompileOptions` has math modes, no denormal control). Flushing the arithmetic would be about 3.3 million more sites in Mario Kart World, so its FADD, FMUL and FFMA keep denormals. Four denormal weights can still add up to a normal sum, which NVIDIA sees as zero; it stays finite, so it makes no NaN.
 - **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md): its deferred lighting `635061c90d75a8d1` normalises four depth-weighted half-resolution samples by `1 / sum` only where `FSETP.NEU.FTZ` says the sum is not zero. No Switch 1 game has shown the symptom; Maxwell's comparisons follow for the same semantics (the flag is on all of them in the 8 Switch 1 games counted).
 - **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_alu.py` (`CompareFtz`, on the game's encoding) and `test_dmsh_maxwell_ftz.py`.
+
+### Ampere instructions of Unreal Engine 5.6's Switch 2 shaders
+
+- **Symptom:** most of a game's shaders are left out of the build: `Ampere instruction f60 at 0x… is not implemented`, then 593 (`SUATOM` with its handle in bank 3), 925, 59f, 394 and others. The game draws black backgrounds and missing effects.
+- **Cause:** Unreal Engine 5.6's Switch 2 shaders use Ampere forms the translator had no entry for:
+  - TEX / TLD / TLD4 / TXD / TXQ with the handle in a uniform register (bit 91, opcodes with 0x400) or in a register after the operands (`.B`, bit 59);
+  - SUATOM and SURED with the handle in another bank or a register, SUST.B;
+  - images whose handle is in the game's own uniform buffer (`cp_i_cb3_*`);
+  - FRND.F16, F2FP.MERGE_C with `.H1` (c's high half), PIXLD.MY_INDEX;
+  - NVN2's per-stage storage buffer banks 25..29;
+  - bindless constant buffers.
+- **Fix:** each form in `InstEmitAmpere*.cs`, with its encoding taken from a game and checked against Eden's Ampere frontend and NAK's encoder where they have it. Also:
+  - the TXD derivative order, I2F / I2FP `.RZ`, the FSWZADD sign and the SHFL.UP clamp;
+  - IMAD.WIDE's carry out, the MEMBAR scope, and LDL / STL without the shared stride;
+  - Ampere results kept on predicated paths;
+  - a bindless 1D integer fetch read as 2D rows (`fetch1d` on a `tex_ubo` binding, `nvn_mtl.m` `tbuf_as_2d`).
+
+  A 64-bit SURED is refused, not faked.
+- **Found on:** Orbitals (`040004F027560000`): 3,712 of 23,432 shaders translated on the translator of 2026-11-01, 23,432 with these.
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py` and `test_dmsh_ampere_alu.py`.
 
 ### Barrier moves around warp shuffles
 
@@ -1768,6 +1789,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** the translator (`TranslationFlags.MetalImageAtomics`, Metal only; other backends keep their behaviour) keeps the bounds mode and whether the result is used, queries the bound image's size and tests every original coordinate, the layer included, before the atomic. Negative coordinates fail an unsigned comparison; coordinates are not clamped or flattened. Invalid coordinates leave memory unchanged and return zero ([ARB_shader_image_load_store, issue 30](https://registry.khronos.org/OpenGL/extensions/ARB/ARB_shader_image_load_store.txt)): a returning `IGN` atomic joins the old texel from the valid branch and zero from the other with an SPIR-V phi. A compare-and-swap (`SUATOM.CAS`: compare with Rb, swap in Rb+1) is Metal's texture compare-exchange behind the same guard; SPIRV-Cross loops `atomic_compare_exchange_weak` until it succeeds or the texel differs. Predicate-returning, `TRAP` and unknown modes fail translation, as do 64-bit, floating-point and half2 sources (checked before the descriptor format can erase their size), descriptors that are not R32 integers, bindless handles that do not resolve statically, and indexed or multisample images. Source 1D and 1D-array surfaces keep the translator's one-row normalization to 2D.
 - **Found on:** [Pokémon Legends: Z-A](../../dm/games/0100F43008C44000/README.md#rendering) ([PR #178](https://github.com/seedds/nxnative/pull/178)); [SHIN MEGAMI TENSEI V: Vengeance](../../dm/games/010069C01AB82000/README.md), whose two buffer-image counter shaders dispatched at boot consume their returned values.
 - **Check:** `dm/tools/tests/test_image_atomic_bounds.py`. Portable tests check the MSL version choice and the rejection of the pointer form. With `DMSH_TEST_XLATE` set to a rebuilt translator (and `spirv-val` on `PATH`; spirv-cross is the in-repo build) the synthetic shaders are translated, the guard's dataflow is checked in the SPIR-V (the size query and comparison dominate the atomic, the phi carries zero on the invalid edge), and the MSL is produced; `DMSH_TEST_METAL=1` compiles and links it (`DMSH_TEST_METAL_SDKS=macosx,iphoneos` for both SDKs) and `DMSH_TEST_GPU=1` runs the returning fixtures (above). Changing this path changes the chain version: rebuild the translator and update the lock before building shaders.
+
+### 64-bit image atomic max and min
+
+- **Symptom:** `SURED form …` or a refused 64-bit `SURED` in the build; those shaders are left out. Here the visibility buffer's writers, so nothing drew into it.
+- **Cause:** `SURED.D.2D.MAX.U64` on an RG32UI image (depth << 32 | id, the nearest wins) has no 32-bit equivalent, and main refused every 64-bit form ([Ampere forms with a handle in a register, and SURED's other operations](#ampere-forms-with-a-handle-in-a-register-and-sureds-other-operations)).
+- **Fix:** a 64-bit unsigned max or min whose result is discarded, on a 2D, 2D array or 3D image, becomes Metal's 64-bit texture atomic (MSL 3.1 `texture2d<ulong>::atomic_max` / `atomic_min`, rewritten by `dmsh_atomic.py` with the bounds check of [Bounds of image atomics](#bounds-of-image-atomics)); the host binds such an image as a 64-bit view of an RG32Uint texture with the shader-atomic usage (`nvn_refl` atom 2), on Apple GPU family 9. R is the low word, G the high one. Metal has no 64-bit add, bitwise or returning texture atomic, so those forms stay refused.
+- **Found on:** [PRAGMATA](../../dm/games/0400C76024710000/README.md): 336 shaders.
+- **Check:** `test_dmsh_ampere_mem.py` (`Sured64`); `t_image_atomic64` (GPU, `DMSH_TEST_ATOMIC64`) checks that the whole 64-bit texel is compared on the GPU.
 
 ## Shaders compiled at run time
 

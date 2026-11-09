@@ -372,11 +372,14 @@ namespace Ryujinx.Graphics.Shader.Translation
             Operand index = Argument(1);
             Operand mask = Argument(2);
 
+            // nxnative: SHFL.UP is valid from maxLane = (lane & segMask) | (clamp & ~segMask) on (PTX shfl.up, Eden EmitShuffleUp); upstream ignored the clamp field
+            Operand clamp = context.BitwiseAnd(mask, Const(0x1f));
             Operand segMask = context.BitwiseAnd(context.ShiftRightU32(mask, Const(8)), Const(0x1f));
             Operand laneId = GenerateLoadSubgroupLaneId(context, subgroupSize);
             Operand minThreadId = context.BitwiseAnd(laneId, segMask);
+            Operand maxThreadId = context.BitwiseOr(context.BitwiseAnd(clamp, context.BitwiseNot(segMask)), minThreadId);
             Operand srcThreadId = context.ISubtract(laneId, index);
-            Operand valid = context.ICompareGreaterOrEqual(srcThreadId, minThreadId);
+            Operand valid = context.ICompareGreaterOrEqual(srcThreadId, maxThreadId);
 
             context.Copy(Argument(3), valid);
 

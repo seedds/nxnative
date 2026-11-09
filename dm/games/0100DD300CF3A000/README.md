@@ -2,7 +2,7 @@
 
 Base game 1.0.0 (v0), SDK 7.3.0. The game's C# runs as C++ compiled by Sickhead's BRUTE (its name is in `main`); its graphics are FNA's `OpenGLDevice` with MojoShader (`main`'s assertions name `D:/Projects/Switch/FNA/lib/MojoShader`), its sound XACT (`Content/Audio/*.xwb`, `.xsb`, `.xgs`). It renders with **OpenGL**, not NVN: NVIDIA's desktop GL through EGL, which the host implements on Metal ([Games that render with desktop OpenGL through EGL](../../../docs/reference/rendering.md#games-that-render-with-desktop-opengl-through-egl)).
 
-On the Mac: boot, the title, a new game, the first scene's dialogue with Sélène and play on from there, with sound and no red line but `eglBindAPI` (below). Not built for iOS.
+On the Mac: boot, the title, a new game and play into the game, with sound and no red line but `eglBindAPI` (below). Not built for iOS.
 
 ## What it needs
 
@@ -24,7 +24,7 @@ On the Mac: boot, the title, a new game, the first scene's dialogue with Sélèn
 ## Rendering (OpenGL)
 
 - **Resolved:** the game stopped at start with `OpenGL ES 3.0 support is required! Entry Point: glBlendColor`: FNA's device checks 16 core functions the layer lacked ([GL functions FNA's OpenGL device requires](../../../docs/reference/rendering.md#gl-functions-fnas-opengl-device-requires)). It also asks for MojoShader's ARB and NV names, which it does not use with the glsl120 profile.
-- **Resolved:** Sélène, who speaks to Lunais in the first scene, and tiles of the scene were missing. The scene is a 512x256 target composed layer by layer (clear texture 26, draw the layer, attach texture 27 to the same framebuffer, draw 26 over it), and a clear waiting for its pass landed on texture 27 after each empty layer: [A waiting clear runs before an attachment changes](../../../docs/reference/rendering.md#a-waiting-clear-runs-before-an-attachment-changes).
+- **Resolved:** sprites and tiles of the scene were missing. The scene is a 512x256 target composed layer by layer (clear texture 26, draw the layer, attach texture 27 to the same framebuffer, draw 26 over it), and a clear waiting for its pass landed on texture 27 after each empty layer: [A waiting clear runs before an attachment changes](../../../docs/reference/rendering.md#a-waiting-clear-runs-before-an-attachment-changes).
 - **Current:** the game binds the OpenGL ES API (`[RED] eglBindAPI(0x30a0): only desktop OpenGL (0x30a2) is implemented`) and gets the desktop context the layer gives; MojoShader then picks its glsl120 profile from the context's version string, and the game renders.
 
 ## Rewriter

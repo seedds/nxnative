@@ -1586,10 +1586,10 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 
 ### A waiting clear runs before an attachment changes
 
-- **Symptom:** whole layers of a scene composed in a render target are missing while the draws into them are there with the right colour, texture and state (Timespinner: a character the dialogue names stands invisible, and tiles of the scene are gone).
-- **Cause:** a clear waits for the next pass to become its load action (above), keyed by the framebuffer's name. The game clears its layer texture, attaches its scene texture to the same framebuffer without drawing into the layer, and draws: the clear meant for the layer cleared the scene. Each empty layer after one with a character so erased everything composed before it.
+- **Symptom:** whole layers of a scene composed in a render target are missing while the draws into them are there with the right colour, texture and state.
+- **Cause:** a clear waits for the next pass to become its load action (above), keyed by the framebuffer's name. The game clears its layer texture, attaches its scene texture to the same framebuffer without drawing into the layer, and draws: the clear meant for the layer cleared the scene. Each empty layer so erased everything composed before it.
 - **Fix:** `fb_attach` runs a clear waiting on the framebuffer before it changes one of its attachments, as `glBindFramebuffer` does when the game leaves a framebuffer; a clear then reaches the images attached when the game asked for it. The attachment functions run on the big stack (`GLB`), since one can now begin a pass.
-- **Found on:** [Timespinner](../../dm/games/0100DD300CF3A000/README.md): its scene is a 512x256 target composed layer by layer (clear texture 26, draw the layer, attach texture 27, draw 26 over it); Sélène in the first scene, and the tiles of the layers before her, showed again.
+- **Found on:** [Timespinner](../../dm/games/0100DD300CF3A000/README.md): its scene is a 512x256 target composed layer by layer (clear texture 26, draw the layer, attach texture 27, draw 26 over it).
 
 ### GL draws and framebuffers
 

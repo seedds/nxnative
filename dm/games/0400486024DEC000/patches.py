@@ -32,6 +32,7 @@ def frame_step(ctx):
     emit(0x1e201828); emit(B(here(), site + 4))   # orig: fdiv s8,s1,s0; back
     fs_put(site, [B(site, start)], 'frame ratio: the host\'s step × base rate / 60 instead of base rate / the game\'s frame rate (state page target fps; 0 = the game\'s ratio)')
     dynamic_resolution(ctx)
+    if base == 0x6e6be0: native_output(ctx)   # v131072's main (the only build the crop sites are known for)
 
 # The game's dynamic resolution (game__gfx__DynamicResolutionParam: LoadThreshold, ReduceCounterMax, IncreaseCounterMax and a list of levels, each a ResolutionReduceScale and a
 # Priority; on v131072 levels 0..9 at 0.75..0.333 of 2048x1152, 1536x864 to 683x384). Its update (main+0x805aa0) reads the frame's GPU load (about 0.2 ms a unit) into +0x8, subtracts
@@ -71,6 +72,25 @@ def dynamic_resolution(ctx):
     fs_put(site, [B(site, start)], 'dynamic resolution level: 0 (full resolution), or with state +0x40 (DM_DYNAMIC_RESOLUTION) a climb on the load measured at each level')
     ctx.capabilities.add('DYNAMIC_RESOLUTION')
 
+# Native output (DM_OUTPUT=native, the launcher's Output; v131072 only, guarded by the matched frame-step function's place): the game draws its picture into 80 % of the output
+# and the system scales that up, the console's own frame. The crop is set in main+0x650380's function: crop = the base size ([entry+0x64], ints) times a float pair per mode and
+# level, 0.8 here, read from [obj+0xf0 + mode * 0x208 + level * 0x60 + (signed byte [obj+0x54a]) * 8 + 0x1e4 / +0x1e8]; each side is clamped to the size from main+0x112c5e0
+# and stored through main+0x1087f40, which main+0x650538 later reads for nvnWindowSetCrop (called from main+0x11e7b74). The 0.8 is in code, not in
+# ModelSceneExtensionParam. Found by watching the crop object's size field: one store, 3024x1702 -> 2419x1361, pc main+0x1087f64, lr main+0x650604.
+# The stubs skip the two multiplies when state +0x44 is 1, so the crop is the full base size and the picture, the 3D and its depth are the full output size. x16 is free at
+# both sites: a call (bl main+0x112c5e0) follows within three instructions and nothing between reads x16
+def native_output(ctx):
+    here, emit, fs_site, fs_put, ST = ctx.here, ctx.emit, ctx.site, ctx.put, ctx.state
+    for site, orig in ((0x6505c4, 0x1e200840), (0x6505d4, 0x1e200820)):   # fmul s0,s2,s0 (width) / fmul s0,s1,s0 (height)
+        fs_site(site, orig.to_bytes(4, 'little').hex())
+        start = here(); emit(ADRP(16, here(), ST))
+        emit(0xb9404610)   # ldr w16,[x16,#0x44]   1 = native output
+        emit(0x35000050)   # cbnz w16,+8           skip the multiply
+        emit(orig)         # the original multiply: the game's 80 %
+        emit(B(here(), site + 4))
+        fs_put(site, [B(site, start)], 'native output: the crop multiply skipped when state +0x44 is set (DM_OUTPUT=native), so the picture is the full output size')
+    ctx.capabilities.add('NATIVE_OUTPUT')
+
 MATCH_FRAME_STEP = {'main': [
     {'name': 'frame ratio from the host\'s step', 'size': 0x9b4, 'fingerprints': ['6ae2aff5344d14568e4dbaf93455e2d8278384bf892ed6c6eca87fef98fbcd1d'], 'stub': frame_step,   # v131072 main+0x6e6be0
      'others': {'dynamic resolution': {'size': 0x294, 'fingerprints': ['7af6ceb0aedf8e0c17dc08ce17fcd6a7cba6d394a0d09e3b504c6d668dc418e7']},   # v131072 main+0x8065e0
@@ -84,4 +104,7 @@ BINDING = [
     {'what': 'dynamic resolution: full size, or a climb on the load measured at each level', 'now': 'game', 'goal': 'game', 'purpose': 'rendering',
      'why': "the game's own dynamic-resolution level function and update, found by their functions' fingerprints on any build that keeps both; switchable (DM_DYNAMIC_RESOLUTION)",
      'checked': 'v131072 main: one function with each fingerprint (the level function a leaf, x2..x11 / x16 / x17 / s0..s2 free), its callers, the update and the controller fields read by disassembly, the fields read in play (2026-11-08); the climb run natively against a model of the update and in play to full size (2026-11-09)'},
+    {'what': 'native output: the window crop\'s two 80 % multiplies skipped (DM_OUTPUT=native)', 'now': 'build', 'goal': 'game', 'purpose': 'rendering',
+     'why': "two multiplies in v131072's crop function, placed by address and only when the frame-step function sits at v131072's place; a function-matched rule could carry them to other builds",
+     'checked': 'v131072 main: the sites and x16 read by disassembly; the same skip (both multiplies as no-ops) run headless in Castle Town at 3024x1702 and checked for speech bubbles and button prompts (M5 Max, macOS 26.6.2, 2026-11-09)'},
 ]

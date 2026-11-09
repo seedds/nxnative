@@ -250,6 +250,7 @@ DM_NVN_VSDUMP_FROM	diagnostic	First presented frame eligible for a post-vertex c
 DM_NVN_VSDUMP_KEY	diagnostic	Vertex key to capture, or `*` for all eligible vertex shaders; storage-writing shaders are excluded
 DM_NVN_VSDUMP_MAX	diagnostic	Maximum post-vertex captures (default 1, or 256 for the wildcard key)
 DM_NVN_WAITS	diagnostic	`=1` turns on the wait ledger: every place a host or game thread waits on the CPU for the GPU or the encode thread, counted per frame
+DM_NVN_WINDOW_ALIAS	switch	`0` / `1` forces textures in GPU-only memory to keep allocations of their own / to share bytes in a placement heap per 32 MB span of guest addresses (`window_texture`); by default they share only where Metal's working set is under 8 GB, as on 8 GB iPads and iPhones, and elsewhere each render target keeps its recycled heap (`DM_NVN_RT_RECYCLE`)
 DM_NVN_XV	switch	`0` turns off the cross-submission attachment validity ledger, which skips write-backs of colour attachments cleared before their next use (on by default, only with `DM_NVN_TBDR` on)
 DM_NVN_ZBLOCK	diagnostic	`=1` logs (`[zb]`) the all-zero blocks per level of each ASTC texture uploaded on the CPU (magenta when drawn); `=<folder>` also writes the raw storage of the first one per format and size
 DM_NVN_ZSKIP	switch	`0` turns off the zero-source skip, which drops a draw whose fragment shader is proven to write 0 over targets already 0 (on by default, only with `DM_NVN_TBDR` on)

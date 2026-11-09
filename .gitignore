@@ -11,3 +11,8 @@ dm/games/*/cb_extent.tsv
 .coverage
 .coverage.*
 /coverage.json
+/.venv/
+/result
+/result-*
+/.envrc
+/.direnv/

@@ -79,6 +79,7 @@ DM_HOME_QUIT_TEXT	switch	The texts of the Home button's quit prompt in the playe
 DM_HTML	path	Folder of the offline HTML pages (default: `html` beside the RomFS)
 DM_ICON	path	`=<image>` gives `build_ipa.sh` another app icon (default the `icon.jpg` beside the RomFS)
 DM_IMPORTS	diagnostic	When set, logs each import the loader binds to a host function and each forced takeover
+DM_JCMS_LOG	diagnostic	`=1` logs the game's Joy-Con mouse sensor and pointer calls (JcmsState reads, Nmouse handles, states and positions), at most once a second each
 DM_JIT_CAPTURE	path	Folder the Mac host writes what a game's `nn::jit` plugin makes to, one `<key>.jit` per request, for `dm/tools/jit_capture.py`; the NSP script sets it
 DM_JIT_LOG	diagnostic	`1` logs every `nn::jit` `GenerateCode` request
 DM_JIT_MISS_DUMP	diagnostic	Folder for the input of each `nn::jit` request a served image lacks
@@ -331,6 +332,13 @@ DM_SPIN	switch	`0` makes the rewriter's spin gate return at once, so guest poll 
 DM_SPIN_LIST	diagnostic	`=1` makes `patch_nso.py` print every guest poll loop it found and sends through a spin gate
 DM_SPIN_POLL	switch	`=<µs>`: how long a spin-gate wait polls before it sleeps with the yield back-off (default 2000; `0` yields on every pass)
 DM_SVC	diagnostic	`=1` logs memory SVCs (`SetHeapSize`, `MapMemory`, `Map`/`UnmapPhysicalMemory`) with their addresses and sizes
+DM_SW2	player	`=1` turns on Switch 2 controllers over Bluetooth LE (Joy-Con 2, Pro Controller 2): the settings window's Switch 2 controllers. Off, no Bluetooth client is created and macOS asks nothing. The host also stays off when the app's Info.plist has no NSBluetoothAlwaysUsageDescription, without which macOS ends the process at the first Bluetooth scan
+DM_SW2_GYRO_DPS	diagnostic	`=<degrees per second per count>` is the Switch 2 controllers' gyro scale (default 0.0607, measured on a left and a right Joy-Con 2; the Switch family's nominal 0.070 turned a 90 degree tilt into 104)
+DM_SW2_HOST	switch	`=aa:bb:cc:dd:ee:ff` names this Mac's Bluetooth address when the Mac's Bluetooth host controller does not give it (IOBluetooth): a paired Switch 2 controller wakes with an advertisement addressed to it, and pairing gives it this address
+DM_SW2_MAP	diagnostic	`=a,b,c,d,e,f` replaces the built-in map from a Switch 2 controller's raw sensor channels (1 to 6: accelerometer x y z, gyro x y z, a minus flips the sign) to the Switch frame's acceleration x y z and rotation x y z, e.g. `-1,-2,-3,4,5,6` for a Joy-Con 2 held upright
+DM_SW2_MOTION	switch	`=0` leaves out the motion of Switch 2 controllers (buttons, sticks and rumble stay)
+DM_SW2_MOTION_SIDE	switch	`=L` takes a Joy-Con 2 pair's motion from the left Joy-Con instead of the right one
+DM_SW2_VERBOSE	diagnostic	`=1` logs the first report of each second of every Switch 2 controller: buttons, sticks, raw sensors, battery
 DM_SYMCHECK	diagnostic	`=1` checks every hashed module symbol lookup against a linear search and logs a red line for each mismatch
 DM_TBUF_ALIGN	diagnostic	`=<bytes>` uses that value as the linear-texture alignment when it is larger than the device's `minimumLinearTextureAlignmentForPixelFormat`, for buffer textures and for linear textures on a pool's buffer: a Mac can then reproduce a phone's larger alignment (a 64-byte one fails the buffers and linear textures a device with 64 bytes cannot view), to check `tbuf_as_2d`'s aligned-row copy and the upload of unaligned linear textures (`linear_fit`)
 DM_TEAM_ID	switch	Apple team ID for the per-game Xcode project, used when `--team-id` / `TEAM_ID` is not given; `build_ipa.sh` uses the placeholder `0000000000` (unsigned) when unset

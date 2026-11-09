@@ -59,6 +59,7 @@ void dm_applet_leave(void) { applet_closes_at_depth0 += --applet_depth == 0; }
 static uint64_t buttons_of(uint32_t id, uint32_t style) { NpadState s; fill(&s, id, style); return s.attributes ? s.buttons & 0xffff : 0; }
 static int32_t lx_of(uint32_t id) { NpadState s; fill(&s, id, STYLE_FULLKEY); return s.lx; }
 static void ids(const uint32_t *v, uint64_t n) { h_hid_SetIds(v, n); }
+static NpadState npad_of(uint32_t id, uint32_t style) { NpadState s; fill(&s, id, style); return s; }   // all of it, the rail buttons (bits 24..27) included
 
 static void t_slots(void) {
     pad_slots s; memset(&s, 0, sizeof s);
@@ -162,6 +163,93 @@ static void t_npads(void) {
     CHECK(info[0] == 2 && info[1] == NPAD_HANDHELD, "handheld: the applet selects the handheld controller");
 }
 
+
+// Joy-Cons as devices of their own (dm_joy_attach / dm_joy_set): nothing changes until a front end reports a Joy-Con half; then the pair is a JoyDual npad, splits into JoyLeft and
+// JoyRight when the game asks for single assignment (or the controller applet needs another player), keeps the rail buttons, and has vibration handles per Joy-Con. Handheld: unchanged.
+static void t_joycons(void) {
+    g_mode = 1; ids((uint32_t[]){0, 1, 2, 3}, 4); dm_pad_players(1);
+    h_hid_SetStyles(STYLE_FULLKEY | STYLE_JOYDUAL | STYLE_JOYLEFT | STYLE_JOYRIGHT);
+    CHECK(h_hid_GetStyle(&(uint32_t){0}) == STYLE_FULLKEY, "no Joy-Con reported: player 1 is full-key, as before");
+    { int m; CHECK(vib_targets(0x0003, &m) && m == 0, "and its full-key vibration handle reaches it"); }
+    dm_haptics_route(0, 1);
+    g_signals = 0; dm_joy_attach(0, 3);
+    CHECK(g_signals > 0 && h_hid_GetStyle(&(uint32_t){0}) == STYLE_JOYDUAL, "a left and a right Joy-Con on player 1: one JoyDual npad, the style event signalled");
+    dm_joy_set(0, 0, DM_BTN_UP | DM_BTN_LSL, -20000, 0); dm_joy_set(0, 1, DM_BTN_A | DM_BTN_RSR, 0, 15000);
+    NpadState st = npad_of(0, STYLE_JOYDUAL);
+    CHECK((st.buttons & (DM_BTN_UP | DM_BTN_A | DM_BTN_LSL | DM_BTN_RSR)) == (DM_BTN_UP | DM_BTN_A | DM_BTN_LSL | DM_BTN_RSR), "JoyDual: both Joy-Cons' buttons, the rail buttons kept");
+    CHECK(st.lx == -20000 && st.ry == 15000 && (st.attributes & (ATTR_LEFT_CONN | ATTR_RIGHT_CONN)) == (ATTR_LEFT_CONN | ATTR_RIGHT_CONN), "JoyDual: each Joy-Con's stick on its side, both halves connected");
+    uint32_t h[2], id = 0;
+    CHECK(h_hid_VibHandles(h, 2, &id, STYLE_JOYDUAL) == 2 && (h[0] & 0xff) == 5 && h[1] == (h[0] | 1u << 16), "JoyDual vibration handles: type 5, a motor per Joy-Con");
+    { int m; CHECK(vib_targets(h[1], &m) == 1 && m == 1, "the right Joy-Con's JoyDual handle reaches motor 1"); }
+    { int m; CHECK(vib_targets(0x10003, &m) == 1 && m == 1 && vib_targets(0x0003, &m) == 1 && m == 0, "the full-key handles the game got before the pair connected still reach both Joy-Cons"); }
+
+    // The game supports no Joy-Con style: the pad's merged state as full-key, as before
+    h_hid_SetStyles(STYLE_FULLKEY);
+    CHECK(h_hid_GetStyle(&(uint32_t){0}) == STYLE_FULLKEY, "no Joy-Con style supported: full-key");
+    h_hid_SetStyles(STYLE_FULLKEY | STYLE_JOYDUAL | STYLE_JOYLEFT | STYLE_JOYRIGHT);
+
+    // Single assignment: the left Joy-Con stays on No1, the right one takes No2 (no player of its own there)
+    h_hid_JoySingle(&(uint32_t){0});
+    CHECK(h_hid_GetJoyAssign(&(uint32_t){0}) == 1 && h_hid_GetStyle(&(uint32_t){0}) == STYLE_JOYLEFT && h_hid_GetStyle(&(uint32_t){1}) == STYLE_JOYRIGHT, "single: JoyLeft on No1, JoyRight on No2");
+    st = npad_of(1, STYLE_JOYRIGHT);
+    CHECK((st.buttons & (DM_BTN_A | DM_BTN_RSR)) == (DM_BTN_A | DM_BTN_RSR) && !(st.buttons & DM_BTN_UP) && st.ry == 15000 && st.attributes == (ATTR_CONNECTED | ATTR_RIGHT_CONN), "the right half on No2: its own buttons and stick only");
+    id = 1; CHECK(h_hid_VibHandles(h, 2, &id, STYLE_JOYRIGHT) == 1 && (h[0] & 0xff) == 7, "JoyRight: one vibration handle, type 7");
+    { int m; CHECK(vib_targets(h[0], &m) == 1 && m == 1, "it reaches player 1's right motor, on No2"); }
+    uint32_t other = 9; CHECK(h_hid_JoySingleOut(&other, &(uint32_t){0}, 0) == 1 && other == 1, "single assignment with the other half: No2");
+    h_hid_JoyDual(&(uint32_t){0});
+    CHECK(h_hid_GetStyle(&(uint32_t){0}) == STYLE_JOYDUAL && h_hid_GetStyle(&(uint32_t){1}) == 0, "dual again: one JoyDual npad, No2 empty");
+
+    // The controller applet asks for two players with one pair connected: it splits the pair, as holding the Joy-Cons sideways does on a Switch
+    int32_t info[2]; int8_t arg[8] = {2, 4};
+    { int calls = g_prompt_calls;
+    CHECK(h_hid_ShowCtrl(info, arg) == RES_OK && info[0] == 2 && h_hid_GetStyle(&(uint32_t){1}) == STYLE_JOYRIGHT, "the applet splits the pair for a second player");
+    CHECK(g_prompt_calls == calls && dm_players_reported() == 2, "the split pair is enough: no controller prompt, and the prompt's count (dm_players_reported) sees two players"); }
+    h_hid_JoyDual(&(uint32_t){0});
+
+    // Handheld mode: player 1's Joy-Cons count as attached to the console (the Handheld npad), and are never split
+    g_mode = 0; ids((uint32_t[]){0, 1, NPAD_HANDHELD}, 3);
+    CHECK(h_hid_GetStyle(&(uint32_t){NPAD_HANDHELD}) == STYLE_HANDHELD && h_hid_GetStyle(&(uint32_t){0}) == 0, "handheld: player 1's Joy-Cons are the Handheld npad");
+    g_mode = 1; ids((uint32_t[]){0, 1, 2, 3}, 4);
+
+    // One Joy-Con alone on player 2: JoyRight on No2; leaving: full-key again
+    dm_pad_players(3); dm_joy_attach(1, 2);
+    CHECK(h_hid_GetStyle(&(uint32_t){1}) == STYLE_JOYRIGHT, "one right Joy-Con alone: JoyRight on its own npad");
+    dm_joy_attach(1, 0); dm_joy_attach(0, 0);
+    CHECK(h_hid_GetStyle(&(uint32_t){0}) == STYLE_FULLKEY && h_hid_GetStyle(&(uint32_t){1}) == STYLE_FULLKEY, "no Joy-Con reported any more: full-key controllers, as before");
+    dm_haptics_route(0, 0); dm_pad_players(1); h_hid_SetStyles(0xffffffffu);
+}
+
+// A Joy-Con's mouse sensor (dm_joy_mouse): its JcmsState ring by handle (npad id, JcmsType 0 left / 1 right), newest first; none for a Joy-Con that never reported
+static void t_jcms(void) {
+    g_mode = 1; ids((uint32_t[]){0, 1}, 2); dm_pad_players(1); dm_joy_attach(0, 3);
+    JcmsState st[4]; uint32_t hl = h_hid_JcmsHandle(&(uint32_t){0}, &(uint32_t){0}), hr = h_hid_JcmsHandle(&(uint32_t){0}, &(uint32_t){1});
+    CHECK(hl == 0x000 && hr == 0x100 && h_hid_JcmsStates(st, 4, &hr) == 0, "no mouse samples before a front end reports them");
+    CHECK(!dm_joy_mouse_wanted(), "the sensors stay off until the game sets them up");
+    h_hid_JcmsInit(NULL, 0); CHECK(dm_joy_mouse_wanted(), "InitializeJcms asks for the sensors");
+    h_hid_NmouseInit(NULL, 0, 1920, 1080); h_hid_JcmsFini(); CHECK(dm_joy_mouse_wanted(), "the pointer still wants them after FinalizeJcms");
+    h_hid_NmouseFini(); CHECK(!dm_joy_mouse_wanted(), "off again once both are finalized");
+    dm_joy_mouse(0, 1, 5, -3, DM_JOYMOUSE_CONNECTED | DM_JOYMOUSE_ON_SURFACE); dm_joy_mouse(0, 1, 7, 2, DM_JOYMOUSE_CONNECTED | DM_JOYMOUSE_ON_SURFACE);
+    CHECK(h_hid_JcmsStates(st, 4, &hr) == 2 && st[0].sampling == 2 && st[0].dx == 7 && st[1].dy == -3 && st[0].attributes == 3, "the right Joy-Con's samples, newest first");
+    CHECK(h_hid_JcmsStates(st, 4, &hl) == 0, "the left Joy-Con has reported none");
+    memset(st, 0xff, sizeof st); h_hid_JcmsState(st, &hr);
+    CHECK(st[0].sampling == 2 && st[0].dx == 7 && st[0].unk0 == 0, "GetJcmsState: the newest");
+    for (int i = 0; i < 40; i++) dm_joy_mouse(0, 1, i, 0, 1);
+    CHECK(h_hid_JcmsStates(st, 4, &hr) == 4 && st[0].dx == 39 && st[3].dx == 36, "a full ring keeps the newest");
+    uint32_t bad = 0x200; CHECK(h_hid_JcmsStates(st, 4, &bad) == 0, "a JcmsType past 1 has no states");
+    // The pointer: a handle per Joy-Con whose sensor reports, the one last used on a surface first, kept first while lifted
+    uint64_t nh[4]; CHECK(h_hid_NmouseHandles(nh, 4, 0) == 1 && (nh[0] & 0xffff) == 0x0001, "one pointer handle: the right Joy-Con, the only one that reported");
+    dm_joy_mouse(0, 0, 1, 1, DM_JOYMOUSE_CONNECTED | DM_JOYMOUSE_ON_SURFACE);
+    CHECK(h_hid_NmouseHandles(nh, 4, 0) == 2 && (nh[0] & 1) == 0 && (nh[1] & 1) == 1, "the left Joy-Con, last on a surface, comes first");
+    dm_joy_mouse(0, 0, 0, 0, DM_JOYMOUSE_CONNECTED);
+    CHECK(h_hid_NmouseHandles(nh, 4, 0) == 2 && (nh[0] & 1) == 0, "it stays first while lifted");
+    NmouseState ns; CHECK(h_hid_NmouseState(&ns, nh[0]) && (ns.attributes & 2) && !(ns.attributes & 1) && !h_hid_NmouseState(&ns, 0), "its state: connected, off the surface; the merged handle has none");
+    // The Joy-Con 2 styles: a Joy-Con 2 pair shows JoyDual's Joy-Con 2 form to a game that supports only that
+    h_hid_SetStyles(STYLE_JOYDUAL2); dm_joy_attach(0, 3 | DM_JOY_2);
+    CHECK((h_hid_GetStyle(&(uint32_t){0}) & (STYLE_JOYDUAL | STYLE_JOYDUAL2)) == (STYLE_JOYDUAL | STYLE_JOYDUAL2), "a Joy-Con 2 pair: JoyDual with its Joy-Con 2 bit");
+    dm_joy_attach(0, 3); CHECK(!(h_hid_GetStyle(&(uint32_t){0}) & STYLE_JOYDUAL2), "a plain pair: no Joy-Con 2 bit");
+    h_hid_SetStyles(0xffffffffu); dm_joy_attach(0, 0);
+}
+
 static dm_haptic_state vibration[DM_PLAYERS];
 static int vibration_calls;
 static void vibration_sink(dm_haptic_state s) { vibration[s.player] = s; vibration_calls++; }
@@ -208,7 +296,7 @@ static void t_vibration(void) {
     CHECK(h_hid_VibHandles(h, 2, &id, STYLE_FULLKEY) == 2, "merged controller supplies rumble when player 1 has no physical output");
     g_mode = 0; id = NPAD_HANDHELD;
     CHECK(h_hid_VibHandles(h, 2, &id, STYLE_HANDHELD) == 2 && h[0] == 0x2004 && h[1] == 0x12004, "handheld SDK vibration handles");
-    CHECK(!vib_targets(3), "old docked handle is not valid in handheld mode");
+    { int m; CHECK(!vib_targets(3, &m), "old docked handle is not valid in handheld mode"); }
     CHECK(!h_hid_VibMounted(&(uint32_t){3}) && h_hid_VibMounted(&h[0]), "mounted follows the connected controller's style");
     dm_haptics_route(1, 0);
     CHECK(!h_hid_VibPermit(), "disconnecting the last output disables vibration");
@@ -516,6 +604,8 @@ int main(void) {
     t_npads();
     t_script();
     t_vibration();
+    t_joycons();
+    t_jcms();
     t_rumble_log();
     t_motion_threads();
     t_motion_live();

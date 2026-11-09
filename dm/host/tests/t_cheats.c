@@ -645,6 +645,44 @@ int main(void) {
     rm("1111111111111111.txt"); load_all();
     CHECK(!dm_cheats_found() && !exists(".cheats-running-0100000000000000"), "a reload that finds no file removes the flag: nothing runs now");
 
+    // ---- turning a cheat off puts back what it changed (the undo log, <build>.undo) ----
+    fresh("undo", "[Rupees]\n04000000 00004500 000003E7\n[Guarded]\n14050000 00004510 0000ABCD\n04000000 00004514 00000050\n20000000\n");
+    wr32(0x4500, 99); wr32(0x4510, 0xABCD); wr32(0x4514, 12);
+    load_all();
+    int ur = at("Rupees", 0), ug = at("Guarded", 0);
+    on_and_pass(ur);
+    CHECK(rd32(0x4500) == 999 && entry("Rupees")[0].nundo == 1 && entry("Rupees")[0].undo[0].old == 99, "undo: the first write keeps the value from before");
+    CHECK(strstr(get("1111111111111111.undo"), "Rupees\t") != NULL, "undo: the log is saved beside the toggles");
+    dm_cheat_toggle(ur); cheats_pass();
+    CHECK(rd32(0x4500) == 99 && entry("Rupees")[0].nundo == 0, "undo: turned off, the next pass puts the old value back");
+    CHECK(!exists("1111111111111111.undo"), "undo: an empty log leaves no file");
+    on_and_pass(ur); dm_cheat_toggle(ur); wr32(0x4500, 500); cheats_pass();
+    CHECK(rd32(0x4500) == 500, "undo: a value the game changed after the cheat's last write stays the game's");
+    wr32(0x4500, 99); on_and_pass(ur); cheats_pass(); dm_cheat_toggle(ur); on_and_pass(ur);
+    CHECK(rd32(0x4500) == 999 && entry("Rupees")[0].undo[0].old == 99, "undo: on, off and on again before a pass: the log still holds the value from before the first write");
+    load_all();   // a new launch with the cheat still on (its toggle and its log are read back)
+    CHECK(dm_cheat_on_at(at("Rupees", 0)) && entry("Rupees")[0].nundo == 1 && entry("Rupees")[0].undo[0].old == 99, "undo: the log survives a reload");
+    cheats_pass(); dm_cheat_toggle(at("Rupees", 0)); cheats_pass();
+    CHECK(rd32(0x4500) == 99, "undo: and puts back the value from before the earlier launch");
+    on_and_pass(at("Rupees", 0));
+    files_drain(); put("1111111111111111.enabled", ""); load_all();   // the toggles say off, the log is still there (the game quit before the restore pass)
+    CHECK(entry("Rupees")[0].undo_pending, "undo: a cheat off at load with a log left finishes its restore");
+    cheats_pass();
+    CHECK(rd32(0x4500) == 99, "undo: put back on the first pass");
+    ug = at("Guarded", 0); on_and_pass(ug);
+    CHECK(rd32(0x4514) == 0x50, "undo: a guarded write applies");
+    wr32(0x4510, 0); dm_cheat_toggle(ug); cheats_pass();
+    CHECK(rd32(0x4514) == 12, "undo: the guard does not matter to the restore: the written address is put back");
+    fresh("undo_off", "[Rupees]\n04000000 00004500 000003E7\n"); wr32(0x4500, 99);
+    g_undo = 0; load_all(); ur = at("Rupees", 0); on_and_pass(ur); dm_cheat_toggle(ur); cheats_pass();
+    CHECK(rd32(0x4500) == 999 && !exists("1111111111111111.undo"), "undo: DM_CHEATS_UNDO=0 leaves what the cheat wrote, as on a Switch");
+    g_undo = 1;
+    fresh("undo_pair", "[W - off]\n04000000 00004520 00000001\n[W - on]\n04000000 00004520 00000007\n[Once]\n04000000 00004524 00000009\n");
+    put("1111111111111111.meta.tsv", "name\tonce\nOnce\t1\n");
+    wr32(0x4520, 3); load_all();
+    on_and_pass(at("W - on", 0)); on_and_pass(at("Once", 0));
+    CHECK(entry("W - on")[0].nundo == 0 && entry("Once")[0].nundo == 0 && rd32(0x4524) == 9, "undo: pairs and \"set\" cheats keep no log (they bring their own restore, or none by design)");
+
     // ---- Atmosphère's limits in the report ----
     size_t cap = 0x200 * 9 + 64; char *big = malloc(cap); size_t o = (size_t)snprintf(big, cap, "[Big]\n");
     for (int k = 0; k < 0x200; k++) o += (size_t)snprintf(big + o, cap - o, "20000000\n");

@@ -40,6 +40,11 @@
 //   - "X - on" / "X - off" entries (or a meta pair) form one switch: turning it off runs the off entry (the restore) for one
 //     pass; whatever <build>.enabled says is kept as it is
 //   - a dry run (dm_cheat_preview) describes what a cheat would write right now and writes nothing
+//   - turning a plain cheat off puts back what it changed (the undo log): the first time a cheat writes an address the value
+//     there before is kept, and the pass after the player turns it off writes each kept value back where the address still
+//     holds what the cheat wrote last (a value the game changed since stays the game's). The log is kept in <build>.undo,
+//     so a cheat on when the game quit, or saved into the game's save, is still undone later. Not for masters, "set"
+//     cheats or on / off pairs, which have their own restore; DM_CHEATS_UNDO=0 turns it off
 //   - a master switch (the folder's .cheats-off-<title> file) and a safe mode (not on iOS): a run that ended without a
 //     clean exit while cheats were on leaves the folder's .cheats-running-<title> file behind, and the next launch starts
 //     with every cheat off (masters too) until the player restores the saved toggles or turns a cheat on (which restores them)
@@ -51,6 +56,7 @@
 //   DM_CHEATS_ANY_BUILD=1   with no file of this build, load the folder's single .txt of another build, with a warning
 //   DM_CHEATS_ON=<n>,…      cheats turned on by name at launch (the menu's own toggle states stay what they were)
 //   DM_CHEATS_DEBUG=1       log every applied write (cheat name, where, value)
+//   DM_CHEATS_UNDO=0        turning a cheat off leaves what it wrote, as on a Switch (default: its undo log restores it)
 #include "dm.h"
 #include "dm_input.h"   // dm_cheats_keys, the key mask the type-8 conditional reads
 #include <libkern/OSCacheControl.h>
@@ -85,6 +91,7 @@
 #define ATM_CHEATS 0x80        // Atmosphère's dmnt: cheats per file,
 #define ATM_WORDS 0x100        // ... words per cheat,
 #define ATM_PROGRAM 0x400      // ... and words of all enabled cheats together (the load report warns past them)
+#define UNDO_MAX 512           // addresses one cheat's undo log keeps (a 'have every item' cheat writes about 200)
 
 typedef struct {
     char name[NAME_MAX];       // the [Name] / {Name} header line, trimmed
@@ -122,6 +129,11 @@ typedef struct {
     double vmin, vmax; uint8_t has_min, has_max;   // the meta ask bounds
     uint8_t nd_region; uint64_t nd_off;            // never-decrease: region 0 main / 1 heap, offset in it
     uint8_t nd_have; uint64_t nd_max;              // never-decrease: the highest value seen since it was turned on
+    // The undo log (undo_note, undo_run): per address it wrote, the value there before the cheat's first write and the
+    // value it wrote last. undo_pending: turned off, the next pass puts the old values back. undo_full: an address past
+    // UNDO_MAX was not logged (logged once)
+    struct { uint64_t addr, old, val; uint8_t len; } undo[UNDO_MAX];
+    int nundo; uint8_t undo_pending, undo_full;
 } cheat_t;
 
 static cheat_t g_cheat[CHEAT_MAX]; static int g_ncheat;
@@ -147,6 +159,9 @@ static _Atomic int g_master = 1;   // the master switch: 0 = no cheat runs (the 
 static int g_safe;             // safe mode: the last run ended without a clean exit while cheats were on
 static _Atomic uint64_t g_present_ns;   // the last present: the ~60 Hz thread stands down while it is recent
 static _Atomic int g_dbg;      // DM_CHEATS_DEBUG
+static int g_undo = 1;         // the undo log is on (DM_CHEATS_UNDO=0 turns it off)
+static int g_undo_writing;     // undo_run is writing old values back (under g_lock): those writes are not logged themselves
+static int g_undo_dirty;       // the undo log gained or lost an address since <build>.undo was last written (under g_lock)
 static int g_any;              // DM_CHEATS_ANY_BUILD
 
 // Region 0: the guest main NSO as the loader mapped it (dm/host/loader.c map_image: text pages and the patch area
@@ -640,6 +655,25 @@ static void value_text(const cheat_t *c, unsigned width, uint64_t v, char *out, 
     snprintf(out, n, "%llu (0x%llX)", (unsigned long long)v, (unsigned long long)v);
 }
 
+// The undo log of a cheat's write, before it happens: the first write to an address keeps the value there now (when it
+// can be read: an unreadable one is a failed write anyway), every write keeps the value it puts. Masters always run,
+// a "set" cheat is a one-time change by design and an on / off pair brings its own restore: none of them is logged,
+// nor are undo_run's own writes
+static int undo_logs(const cheat_t *c) { return g_undo && !c->master && !c->once && c->pair < 0 && !c->label; }
+static void undo_note(cheat_t *c, uint64_t addr, uint64_t len, uint64_t val) {
+    if (g_undo_writing || !undo_logs(c) || !len || len > 8) return;
+    val &= len == 8 ? UINT64_MAX : (1ull << (8 * len)) - 1;
+    for (int k = 0; k < c->nundo; k++) if (c->undo[k].addr == addr && c->undo[k].len == len) { c->undo[k].val = val; return; }
+    if (c->nundo >= UNDO_MAX) {
+        if (!c->undo_full) { c->undo_full = 1; LOG("[RED] cheats: \"%s\" writes more than %d addresses: the rest will not be put back when it is turned off", c->name, UNDO_MAX); }
+        return;
+    }
+    uint64_t old = 0;
+    if (mem_read(addr, len, &old)) return;
+    c->undo[c->nundo].addr = addr; c->undo[c->nundo].len = (uint8_t)len; c->undo[c->nundo].old = old; c->undo[c->nundo].val = val; c->nundo++;
+    g_undo_dirty = 1;
+}
+
 // dmnt's WriteCheatProcessMemoryUnsafe for this host: val's low len bytes, little-endian (guest aarch64 = host arm64),
 // into the page where_get finds. A range that is not writable (unmapped, another module's code, the host's own memory)
 // is a failed access: nothing is written and the cheat goes on (cheat_fail; the reference discards a failed write the
@@ -672,6 +706,7 @@ static void cheat_write(cheat_t *c, uint64_t addr, uint64_t len, uint64_t val) {
         g_dry_writes++;
         return;
     }
+    undo_note(c, addr, len, val);
     if (atomic_load(&g_dbg)) LOG("cheat \"%s\": write %llu bytes of 0x%llx at guest address 0x%llx (%s)", c->name, (unsigned long long)len, (unsigned long long)val, (unsigned long long)addr,
                                  w.kind == WH_MAIN ? "main NSO" : w.kind == WH_HEAP ? "heap" : w.kind == WH_MODULE ? w.mod->name : "guest page");
     int bad = 0;
@@ -1013,6 +1048,30 @@ static void note_settle(cheat_t *c) {
     if (c->noted && !c->pass_fail) { c->noted = 0; c->why[0] = 0; }
 }
 
+// A cheat turned off puts back what it wrote (its undo log): each address that still holds the value the cheat wrote last
+// gets the value it held before the cheat's first write; one that holds something else changed hands (the game spent the
+// rupees, a loading screen moved the data) and keeps it. An address that cannot be read now (the heap not open yet, a
+// page gone) waits for a later pass; the rest leave the log, and the cheat's restore ends when the log is empty
+static void undo_run(cheat_t *c) {
+    int keep = 0;
+    g_undo_writing = 1;
+    for (int k = 0; k < c->nundo; k++) {
+        uint64_t cur = 0;
+        if (mem_read(c->undo[k].addr, c->undo[k].len, &cur)) { c->undo[keep++] = c->undo[k]; continue; }
+        if (cur == c->undo[k].val && cur != c->undo[k].old) {
+            cheat_write(c, c->undo[k].addr, c->undo[k].len, c->undo[k].old);
+            if (atomic_load(&g_dbg)) LOG("cheat \"%s\": put back 0x%llx at guest address 0x%llx (it wrote 0x%llx)", c->name, (unsigned long long)c->undo[k].old,
+                                         (unsigned long long)c->undo[k].addr, (unsigned long long)c->undo[k].val);
+        }
+    }
+    g_undo_writing = 0;
+    if (keep != c->nundo) g_undo_dirty = 1;
+    c->nundo = keep;
+    if (!keep) { c->undo_pending = 0; c->undo_full = 0; LOG("cheats: \"%s\" turned off: what it changed is put back", c->name); }
+}
+
+static void undo_save(void);
+
 // One pass: the masters first, then the enabled cheats in file order, as the reference's LoadProgram orders them. The
 // keys are read once, then the registers and the saved values are reset, before the first cheat, and shared by every
 // cheat of the pass: the reference's Execute (one GetKeysHeld, then ResetState) over its one concatenated program
@@ -1031,6 +1090,8 @@ static void cheats_pass(void) {
     int fired = 0, ran = 0;
     g_held = dm_cheats_keys();
     memset(g_reg, 0, sizeof g_reg); memset(g_saved, 0, sizeof g_saved);   // the reference's once-per-pass ResetState (the loop tops: per cheat, in vm_run)
+    // the cheats turned off put back what they changed first, so an enabled cheat writing the same address has the last word
+    for (int i = 0; i < g_ncheat; i++) if (g_cheat[i].undo_pending && !g_cheat[i].on && !g_safe) undo_run(&g_cheat[i]);
     for (int half = 0; half < 2; half++) for (int i = 0; i < g_ncheat; i++) {
         cheat_t *c = &g_cheat[i];
         if (!pass_runs(c, half)) continue;
@@ -1040,7 +1101,8 @@ static void cheats_pass(void) {
         if ((c->once || c->restore_once) && half) { c->on = 0; c->restore_once = 0; fired = 1; }
     }
     if (ran) g_keyold = g_held;
-    if (fired) states_save();   // the file writes themselves leave on the files queue: the presenting thread never waits for the disk
+    if (fired) states_save();
+    if (g_undo_dirty) undo_save();   // the file writes themselves leave on the files queue: the presenting thread never waits for the disk
     pthread_mutex_unlock(&g_lock);
 }
 
@@ -1236,6 +1298,69 @@ static void states_load(void) {
     for (int k = 0; k < g_non; k++)
         for (int i = 0; i < g_ncheat; i++)
             if (!g_cheat[i].master && !g_cheat[i].label && !strcasecmp(g_cheat[i].name, g_on[k])) g_cheat[i].on = 1;
+}
+
+// The undo logs, <build>.undo in the cheats folder: one line per logged address, the cheat's key, the guest address, the
+// width and the old and last written values in hex, tab-separated. Written by the files queue (as <build>.enabled) when a
+// log gains or loses an address, on a toggle and at a clean exit; read at each load, after the toggles, so a cheat that was
+// on when the game quit keeps the values from before it was first turned on, and one that is off with a log left (its
+// restore had not finished) finishes it. Values the game saved while a cheat was on are put back the same way
+static void undo_save(void) {
+    g_undo_dirty = 0;
+    if (!g_dir[0] || !g_build[0] || !g_undo) return;
+    char p[1400]; snprintf(p, sizeof p, "%s/%s.undo", g_dir, g_build);
+    size_t cap = 1, o = 0;
+    for (int i = 0; i < g_ncheat; i++) cap += (size_t)g_cheat[i].nundo * (NAME_MAX + 80);
+    char *text = malloc(cap), *path = strdup(p);
+    if (!text || !path) { free(text); free(path); return; }
+    text[0] = 0;
+    for (int i = 0; i < g_ncheat; i++) {
+        const cheat_t *c = &g_cheat[i];
+        char k[NAME_MAX + 16]; cheat_key(c, k, sizeof k);
+        for (int j = 0; j < c->nundo; j++)
+            o += (size_t)snprintf(text + o, cap - o, "%s\t%llx\t%u\t%llx\t%llx\n", k, (unsigned long long)c->undo[j].addr, c->undo[j].len,
+                                  (unsigned long long)c->undo[j].old, (unsigned long long)c->undo[j].val);
+    }
+    dispatch_async(files_queue(), ^{
+        if (!o) unlink(path);
+        else {
+            char tmp[1500]; snprintf(tmp, sizeof tmp, "%s.tmp", path);
+            FILE *f = fopen(tmp, "w");
+            if (!f) LOG("cheats: cannot write %s (errno %d)", tmp, errno);
+            else if (fputs(text, f) < 0 || fclose(f)) { LOG("cheats: cannot write %s (errno %d)", tmp, errno); unlink(tmp); }
+            else if (rename(tmp, path)) { LOG("cheats: cannot rename %s over %s (errno %d)", tmp, path, errno); unlink(tmp); }
+        }
+        free(text); free(path);
+    });
+}
+
+static int tsv_split(char *line, char **f, int max);
+static void undo_load(void) {
+    if (!g_dir[0] || !g_build[0] || !g_undo) return;
+    files_drain();
+    char p[1400]; snprintf(p, sizeof p, "%s/%s.undo", g_dir, g_build);
+    FILE *f = fopen(p, "r");
+    if (!f) return;
+    char line[NAME_MAX + 128]; int n = 0;
+    while (fgets(line, sizeof line, f)) {   // NOLINT(clang-analyzer-unix.BlockInCriticalSection): a file load under the cheats lock, as states_read
+        char *fld[5]; int nf = tsv_split(line, fld, 5);
+        if (nf < 5) continue;
+        unsigned len = (unsigned)strtoul(fld[2], NULL, 10);
+        if (!len || len > 8) continue;
+        for (int i = 0; i < g_ncheat; i++) {
+            cheat_t *c = &g_cheat[i];
+            char k[NAME_MAX + 16]; cheat_key(c, k, sizeof k);
+            if (strcmp(k, fld[0]) || !undo_logs(c) || c->nundo >= UNDO_MAX) continue;
+            c->undo[c->nundo].addr = strtoull(fld[1], NULL, 16); c->undo[c->nundo].len = (uint8_t)len;
+            c->undo[c->nundo].old = strtoull(fld[3], NULL, 16); c->undo[c->nundo].val = strtoull(fld[4], NULL, 16);
+            c->nundo++; n++;
+            break;
+        }
+    }
+    fclose(f);
+    int pend = 0;
+    for (int i = 0; i < g_ncheat; i++) if (g_cheat[i].nundo && !g_cheat[i].on && !g_safe) { g_cheat[i].undo_pending = 1; pend++; }
+    if (n) LOG("cheats: %s: %d logged addresses to put back when their cheats are turned off%s", p, n, pend ? " (some are off: putting back now)" : "");
 }
 
 // ---------- typed values the panel may set ("ask") ----------
@@ -1814,6 +1939,7 @@ static void load_all(void) {
     pairs_link();
     values_load();
     states_load();
+    undo_load();
     // the summary: masters are always on, a broken / empty cheat never runs, the rest keep the menu's saved state
     int on = 0, bad = 0, masters = 0, labels = 0;
     for (int i = 0; i < g_ncheat; i++) {
@@ -1850,6 +1976,7 @@ static void folder_flags(void) {
 void dm_cheats_init(void) {
     atomic_store(&g_dbg, !!getenv("DM_CHEATS_DEBUG"));
     const char *e = getenv("DM_CHEATS_ANY_BUILD"); g_any = e && *e && atoi(e) != 0;
+    e = getenv("DM_CHEATS_UNDO"); g_undo = !(e && *e && atoi(e) == 0);
     e = getenv("DM_CHEATS");
     if (e && *e) snprintf(g_dir, sizeof g_dir, "%s", e);
     else { e = getenv("DM_ROOT"); if (e && *e) snprintf(g_dir, sizeof g_dir, "%s/cheats", e); }
@@ -1885,6 +2012,7 @@ void dm_cheats_init(void) {
 void dm_cheats_exit(void) {
     atomic_store(&g_exiting, 1);   // a pass still running on another thread must not write the flag back
     if (!g_dir[0]) return;
+    if (!pthread_mutex_trylock(&g_lock)) { undo_save(); pthread_mutex_unlock(&g_lock); }   // the last written values of the cheats still on
     files_drain();                 // a queued <build>.enabled lands before the process ends; a queued flag sees g_exiting
     char p[1100]; flag_file(p, sizeof p, "running");
     unlink(p);
@@ -1958,6 +2086,7 @@ void dm_cheat_toggle(int i) {
         c->on = (uint8_t)now;
         c->restore_once = 0;   // the player's own choice: a pending one-pass restore no longer applies
         if (now) c->nd_have = 0;
+        c->undo_pending = (uint8_t)(!now && c->nundo > 0);   // off: the next pass puts back what it changed; on again: the log keeps the values from before
         if (c->noted) { c->noted = 0; c->why[0] = 0; }   // the failed-access note describes passes before this choice; its next pass renews it if it must
         if (c->pair >= 0) {
             cheat_t *p = &g_cheat[c->pair];
@@ -1965,6 +2094,7 @@ void dm_cheat_toggle(int i) {
             else if (now) p->on = 0;
         }
         states_save();
+        undo_save();
     }
     pthread_mutex_unlock(&g_lock);
 }

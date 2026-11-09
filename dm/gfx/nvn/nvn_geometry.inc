@@ -612,6 +612,7 @@ static id<MTLRenderPipelineState> mtk_build(const pso_key *k, NvShader *ts, NvSh
     if (ps) { if (m4) { g_mtk_built++; arch_harvest(m4, 0); } else g_mtk_dev++; }
     return ps;
 }
+static NSObject *g_mtk_async_mark;   // g_pso_mtk's value while a key builds in the background
 static void mtk_bind_key(pso_key *k, NvShader *ts, NvShader *ms, NvShader *fs) {
     k->vs = (__bridge void *)ms; k->fs = (__bridge void *)fs;
     k->fsfn = (__bridge void *)(ts ? ts->fn : ms ? ms->fn : nil);   // the third function, distinct from a specialized fragment
@@ -620,7 +621,258 @@ static void mtk_claim(pso_key *k, NvShader *ts, NvShader *ms, NvShader *fs, id<M
     if (!ms || !ms->fn || !ps) return;
     mtk_bind_key(k, ts, ms, fs);
     id current = hm_get_id(&g_pso_mtk, k);
-    if (!current || current == NSNull.null) hm_put_id(&g_pso_mtk, k, ps);
+    if (!current || current == NSNull.null || current == g_mtk_async_mark) hm_put_id(&g_pso_mtk, k, ps);   // a prewarmed pipeline also ends an async build's skips (its own result is then dropped)
+}
+// DM_PSO_MESH_ASYNC=skip (off by default): a task / mesh draw whose pipeline is not built yet is skipped (draws nothing) while the pipeline builds in the background,
+// instead of stopping the submit thread for the build (up to ~1 s on a cold Metal cache, Ocarina of Time). The object pops in a few frames late rather than the frame stalling.
+// Native mesh draws have no stand-in as render pipelines do (a pulling pipeline, DM_PSO_HYBRID), so skipping is the only no-wait choice. Kept safe:
+//  - a program is skipped only when no stage (task, mesh, pixel) can write memory, proven from its reflection and its MSL (the write gate below); anything else waits for its
+//    build as before (a skipped writer leaves stale indices / counts for later work to read);
+//  - a skipped draw inside occlusion-query counting marks the counter (g_vis_forced), so the next samples-passed report is at least 1 (visible) instead of hiding the object;
+//  - the finished pipeline is published on the submit thread (mtk_async_take), so draws encoded after that use it; the draw's pipeline state (lmap / fsfn / fz) is reset on a skip
+//    as on a draw (draw_), so the next draw does not inherit it;
+//  - at most MTK_ASYNC_MAX builds run at once on their own queue; past that a draw is skipped without starting its build (a later draw starts it). A build still running after
+//    g_mtk_async_slow_s gives its slot back (mtk_async_sweep: [RED], counted as abandoned), so wedged builds cannot hold the cap; if it returns later its pipeline is still published.
+//    While MTK_ASYNC_MAX abandoned builds have not returned (each holds a queue thread), no build starts and new readers' draws stay skipped ([RED] once): a build at the draw
+//    could wedge the frame the same way. Writers and stages whose proof is not known yet still wait for a build at the draw (as without the switch);
+//  - logged: the first skip of a key, its skip count at each power of two, the build time and the frames its draws were skipped, and the [RED] abandon line above.
+//    DM_PSO_MESH_ASYNC_LOG=1 logs every skip.
+// The pipeline is recorded as an M row like one built at the draw, so the next start prewarms it. Conditional rendering is unaffected (it reads reports).
+// Concurrency: mtk_build is what the prewarm workers already run beside the submit thread (warm_task kind 3); a mesh pipeline has no vertex function, so the AGX vertex-variant
+// guard (vs_stripe_of) has nothing to serialize; pso_desc's lazy alpha-test / logic entry points take their locks (at_fn, g_at_lock).
+// DM_PSO_MESH_ASYNC unset or anything else: the draw waits for the build (the behaviour before)
+enum { MTK_ASYNC_MAX = 2 };
+static double g_mtk_async_slow_s = 10; static useconds_t g_mtk_async_test_delay_us;   // the tests lower the deadline and slow the builds down
+static int mtk_async_on(void) {
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("DM_PSO_MESH_ASYNC"); v = e && !strcmp(e, "skip");
+        if (v) MLOG("DM_PSO_MESH_ASYNC=skip: a task / mesh draw whose pipeline is not built yet is skipped while it builds in the background (programs that may write memory still wait)"); }
+    return v;
+}
+static int mtk_async_log_all(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_PSO_MESH_ASYNC_LOG"); v = e && !strcmp(e, "1"); } return v; }
+// Write gate: a draw may be skipped only when no stage of its program can write memory. All must hold:
+//  - reflection: every binding is of a kind that only reads (mtk_bind_may_write: default "may write"); storage buffers, buffer textures and global memory pass only when
+//    the reflection says read-only; images and the global-memory store log never pass;
+//  - code: the MSL of the very library the stage was loaded from (shader_load's lib_path with .metal for .metallib: the cache's <key>.metal, the key ending in _b; a library
+//    from elsewhere is read only from its own folder, lib_cache 0) holds no memory-writing operation (mtk_msl_no_stores). The proof runs in the background
+//    when the shader is loaded (mtk_proof_note); a stage whose proof is not known yet waits;
+//  - the pipeline binds only that library's functions: a key with the alpha test or a logic operation (pso_desc's at_fn / lo_fn from the _bx library) or a DM_NVN_HILITE
+//    diagnostic waits. fn_u / fn_m / fn_d are entry points of the same library and the same .metal.
+static int mtk_bind_may_write(const nvn_rbind *b) {
+    switch (b->kind) {
+        case NVN_RB_CBUF: case NVN_RB_SAMP: case NVN_RB_TEX: case NVN_RB_SAMPT: case NVN_RB_SAMPI: case NVN_RB_UBOP: case NVN_RB_SUPPORT: case NVN_RB_C1: case NVN_RB_DRV0:
+        case NVN_RB_DRV2: case NVN_RB_BORDER: case NVN_RB_PUSH: case NVN_RB_TEXU: case NVN_RB_SAMPU: case NVN_RB_TEXD: case NVN_RB_SAMPD: case NVN_RB_TEXA: case NVN_RB_SAMPA:
+        case NVN_RB_TEXP: case NVN_RB_SAMPP: case NVN_RB_TEXH: case NVN_RB_SAMPH: return 0;   // uniforms, driver tables, textures and samplers by any handle: reads (what the code does with them is the MSL check)
+        case NVN_RB_SBUFP: case NVN_RB_SBUFU: case NVN_RB_GMEM: return b->rw != 0;
+        default: return 1;   // IMG / IMGU (write views), TBUF / TBUFU (the reflection never sets their rw), GMEML (the store log), GEOMETRY, any kind not listed
+    }
+}
+static int mtk_ident_char(char c) { return isalnum((unsigned char)c) || c == '_'; }
+static int mtk_word_at(const char *p, const char *s, const char *w, size_t wl) { return !strncmp(p, w, wl) && (p == s || !mtk_ident_char(p[-1])) && !mtk_ident_char(p[wl]); }
+static const char *mtk_skip_ws(const char *p) { while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++; return p; }
+// The non-const `device` at p is the loop guard's buffer (a host diagnostic at index 28, not the game's memory) only in the translator's three exact forms:
+// the stage's parameter `device atomic_uint* dm_hg_buf [[buffer(28)]]`, its alias `device atomic_uint* dm_hg = dm_hg_buf;`, the parameter `device atomic_uint* dm_hg` of
+// dm_stage_body (which the entry calls with that alias), and the parameter `device atomic_uint* hg` of a function whose name starts with dm_hg (its helpers). w: start of the text (to find the enclosing function's name)
+static int mtk_msl_param_of(const char *w, const char *p, const char *fn, size_t fl, int prefix) {   // the parameter at p belongs to the function fn (prefix: whose name starts with fn)
+    int depth = 0; const char *b = p;
+    for (; b > w; b--) { if (b[-1] == ')') depth++; else if (b[-1] == '(') { if (!depth) break; depth--; } else if (b[-1] == ';' || b[-1] == '{' || b[-1] == '}') return 0; }
+    if (b == w) return 0;
+    const char *e = b - 1; while (e > w && (e[-1] == ' ' || e[-1] == '\t')) e--;
+    const char *s = e; while (s > w && mtk_ident_char(s[-1])) s--;
+    return prefix ? (size_t)(e - s) >= fl && !strncmp(s, fn, fl) : (size_t)(e - s) == fl && !strncmp(s, fn, fl);
+}
+static int mtk_msl_guard_decl(const char *w, const char *p) {
+    const char *q = mtk_skip_ws(p + 6);
+    if (!mtk_word_at(q, w, "atomic_uint", 11)) return 0;
+    q = mtk_skip_ws(q + 11); if (*q++ != '*') return 0; q = mtk_skip_ws(q);
+    const char *n = q; while (mtk_ident_char(*q)) q++; size_t nl = (size_t)(q - n); q = mtk_skip_ws(q);
+    if (nl == 9 && !strncmp(n, "dm_hg_buf", 9)) { if (*q++ != '[' || *q++ != '[') return 0; q = mtk_skip_ws(q); return !strncmp(q, "buffer(28)", 10); }
+    if (nl == 5 && !strncmp(n, "dm_hg", 5)) {
+        if (*q == ',' || *q == ')') return mtk_msl_param_of(w, p, "dm_stage_body", 13, 0);   // the stage body's parameter (the entry passes it dm_hg)
+        if (*q++ != '=') return 0; q = mtk_skip_ws(q); return !strncmp(q, "dm_hg_buf", 9) && !mtk_ident_char(q[9]) && *mtk_skip_ws(q + 9) == ';'; }
+    if (nl == 2 && !strncmp(n, "hg", 2) && (*q == ')' || *q == ',')) return mtk_msl_param_of(w, p, "dm_hg", 5, 1);   // a dm_hg* helper's parameter
+    return 0;
+}
+// spvUnsafeArray's element operator, `device T& operator [] (size_t pos) device`: its two `device` words are address-space qualifiers of the template, not memory the shader writes
+static int mtk_msl_unsafe_array(const char *w, const char *p) {
+    const char *q = mtk_skip_ws(p + 6);
+    if (!strncmp(q, "T&", 2) && !strncmp(mtk_skip_ws(mtk_skip_ws(q + 2)), "operator", 8)) return 1;   // the leading one
+    const char *b = p; while (b > w && (b[-1] == ' ' || b[-1] == '\t')) b--;   // the trailing one: `... operator [] (size_t pos) device`, operator on the same line
+    if (!(b - w >= 12 && !strncmp(b - 12, "(size_t pos)", 12))) return 0;
+    const char *ls = b - 12; while (ls > w && ls[-1] != '\n') ls--;
+    for (const char *o = ls; o < b - 12; o++) if (!strncmp(o, "operator", 8) && !strncmp(mtk_skip_ws(o + 8), "[", 1)) return 1;
+    return 0;
+}
+// The translator's texture-pool read mark (dmsh_build.py POOL_MARK): in `dm_pool_mark(constant P* p, uint i)`, `device uint* w = reinterpret_cast<device uint*>(p->seen) + (i >> 5);`
+// and `if (!(*w & b)) atomic_fetch_or_explicit(reinterpret_cast<device atomic_uint*>(w), b, memory_order_relaxed);` set the read texture's bit in the pool's seen bitmap,
+// which tells the host which pool textures shaders read (nvn_mtl.m pool_seen). A skipped draw reads none, so the bits it does not set are exact, not stale; the real draw sets
+// them when it runs. Exempt only inside a function named exactly dm_pool_mark with exactly those parameters whose whole body is exactly the translator's
+static int mtk_msl_pool_mark(const char *w, const char *p) {
+    static const char body[] = "deviceuint*w=reinterpret_cast<deviceuint*>(p->seen)+(i>>5);uintb=1u<<(i&31u);"
+                               "if(!(*w&b))atomic_fetch_or_explicit(reinterpret_cast<deviceatomic_uint*>(w),b,memory_order_relaxed);returni;";
+    const char *ob = p; while (ob > w && ob[-1] != '{') { if (ob[-1] == '}') return 0; ob--; }   // the enclosing body (no nested block before p)
+    if (ob == w) return 0;
+    const char *cb = strchr(p, '}'); if (!cb) return 0;
+    for (const char *q = p; q < cb; q++) if (*q == '{') return 0;   // nor after it
+    char got[256]; size_t gl = 0;   // the whole body, without whitespace and // comments, must be exactly the translator's
+    for (const char *q = ob; q < cb; q++) {
+        if (q[0] == '/' && q[1] == '/') { while (q < cb && *q != '\n') q++; continue; }
+        if (q[0] == '/' && q[1] == '*') return 0;
+        if (!isspace((unsigned char)*q)) { if (gl >= sizeof got - 1) return 0; got[gl++] = *q; }
+    }
+    got[gl] = 0; if (strcmp(got, body)) return 0;
+    const char *se = ob - 1;   // its signature: the function named exactly dm_pool_mark, parameters (constant P* p, uint i); attributes may precede it
+    while (se > w && isspace((unsigned char)se[-1])) se--;
+    if (se == w || se[-1] != ')') return 0;
+    const char *op = se - 1; while (op > w && *op != '(') op--;
+    if (*op != '(') return 0;
+    char par[64]; size_t pl = 0; for (const char *q = op; q < se; q++) if (!isspace((unsigned char)*q)) { if (pl >= sizeof par - 1) return 0; par[pl++] = *q; } par[pl] = 0;
+    if (strcmp(par, "(constantP*p,uinti)")) return 0;
+    const char *ne = op; while (ne > w && (ne[-1] == ' ' || ne[-1] == '\t')) ne--;
+    const char *ns = ne; while (ns > w && mtk_ident_char(ns[-1])) ns--;
+    return ne - ns == 12 && !strncmp(ns, "dm_pool_mark", 12);
+}
+// 1: the MSL text proves no memory write. The whole text at once (statements may span lines): no #include other than <metal_stdlib>, no texture write or texture atomic
+// (`.write(`, `.atomic_`, access::write / read_write, whitespace ignored), and no non-const `device` (every device store, device atomic and store through a pool or bindless
+// address needs one) other than the loop guard's buffer and spvUnsafeArray's operator. A `const` before `device` may be separated by any whitespace
+static int mtk_msl_no_stores(const char *txt, size_t n) {
+    char *t = malloc(n + 1), *c = malloc(n + 1); if (!t || !c) { free(t); free(c); return 0; }
+    memcpy(t, txt, n); t[n] = 0; if (strlen(t) != n) { free(t); free(c); return 0; }   // a NUL inside: not MSL text
+    size_t cn = 0; for (size_t i = 0; i < n; i++) if (!isspace((unsigned char)t[i])) c[cn++] = t[i]; c[cn] = 0;   // the text without whitespace, for the token checks
+    int ok = 1;
+    if (strstr(c, ".write(") || strstr(c, ".atomic_") || strstr(c, "access::write") || strstr(c, "access::read_write")) ok = 0;
+    for (const char *p = c; ok && (p = strstr(p, "#include")); p += 8)   // system headers only: anything else could hide code
+        if (strncmp(p + 8, "<metal_stdlib>", 14) && strncmp(p + 8, "<simd/simd.h>", 13) && strncmp(p + 8, "<metal_atomic>", 14)) ok = 0;
+    if (ok && (strstr(c, "#import") || strstr(c, "_Pragma"))) ok = 0;
+    for (const char *p = t; ok && (p = strchr(p, '#')); p++) {   // a macro could hide a store: #define / #undef whose line names device, const, access, write or atomic
+        const char *q = mtk_skip_ws(p + 1);
+        if (strncmp(q, "define", 6) && strncmp(q, "undef", 5)) continue;
+        const char *e = strchr(q, '\n'); while (e && e > q && e[-1] == '\\') e = strchr(e + 1, '\n');   // continued lines belong to it
+        size_t len = e ? (size_t)(e - q) : strlen(q); char *d = strndup(q, len); if (!d) { ok = 0; break; }
+        if (strstr(d, "device") || strstr(d, "const") || strstr(d, "access") || strstr(d, "write") || strstr(d, "atomic")) ok = 0;
+        free(d);
+    }
+    for (const char *p = t; ok && (p = strstr(p, "device")); p += 6) {
+        if (!mtk_word_at(p, t, "device", 6)) continue;
+        const char *q = p; while (q > t && isspace((unsigned char)q[-1])) q--;
+        if (q - t >= 5 && mtk_word_at(q - 5, t, "const", 5)) continue;   // const device: read only
+        { const char *r = mtk_skip_ws(p + 6); if (mtk_word_at(r, t, "const", 5)) continue; }   // device const: read only too
+        if (mtk_msl_guard_decl(t, p) || mtk_msl_unsafe_array(t, p) || mtk_msl_pool_mark(t, p)) continue;
+        ok = 0;
+    }
+    free(t); free(c); return ok;
+}
+// The proof of one shader's code (any thread): its library's MSL, as shader_load chose the library. 1 no store, 2 may write or no MSL
+static int mtk_proof(NvShader *sh) {
+    NSString *lp = sh->lib_path; NSData *d = nil;
+    if (lp.length > 9 && [lp hasSuffix:@".metallib"]) {
+        NSString *mp = [[lp substringToIndex:lp.length - 9] stringByAppendingString:@".metal"];
+        d = sh->lib_cache ? msl_data(mp) : [NSData dataWithContentsOfFile:mp];   // the cache (folder or image), else the override folder's own file only (never the cache image's text)
+    }
+    return d && mtk_msl_no_stores(d.bytes, d.length) ? 1 : 2;
+}
+static void mtk_proof_note(NvShader *sh) {   // at load: the proof runs on a background queue, the draw reads the result (0 until then: the draw waits)
+    if (!sh || !mtk_async_on()) return;
+    static dispatch_queue_t q; static dispatch_once_t once;
+    dispatch_once(&once, ^{ q = dispatch_queue_create("dm.nvn.mesh-async-proof", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0)); });
+    dispatch_async(q, ^{ @autoreleasepool { __atomic_store_n(&sh->mtk_store, (uint8_t)mtk_proof(sh), __ATOMIC_RELEASE); } });
+}
+static const char *mtk_stage_why(NvShader *sh) {   // NULL: the stage may be skipped
+    if (!sh) return NULL;
+    for (int i = 0; i < sh->rf.nb; i++) if (mtk_bind_may_write(&sh->rf.b[i])) return "a binding the reflection marks writable";
+    uint8_t st = __atomic_load_n(&sh->mtk_store, __ATOMIC_ACQUIRE);
+    return st == 1 ? NULL : st == 2 ? "its code may write memory (or has no MSL to check)" : "its code is not checked yet";
+}
+static int mtk_hilite_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_HILITE"); v = e && *e; } return v; }
+static const char *mtk_async_why(const pso_key *k, NvShader *ts, NvShader *ms, NvShader *fs) {   // NULL: the draw may be skipped
+    if (k && (k->atest || k->logic)) return "an alpha-test or logic-operation entry point from another library";
+    if (fs && mtk_hilite_on()) return "DM_NVN_HILITE";
+    return mtk_stage_why(ts) ?: mtk_stage_why(ms) ?: mtk_stage_why(fs);
+}
+static int mtk_async_may_skip(const pso_key *k, NvShader *ts, NvShader *ms, NvShader *fs) { return !mtk_async_why(k, ts, ms, fs); }
+@interface MtkAsync : NSObject { @public NSData *key; NvShader *ts, *ms, *fs; id ps; NSString *err; uint64_t build_ns, skips, first_frame, last_frame, t_start; int archived, started;
+    _Atomic int state; } @end   // state: 0 not running / running, 1 the build returned (its slot given back by the build), 2 abandoned at the deadline (its slot given back by the sweep)
+@implementation MtkAsync @end
+static NSMutableDictionary<NSData *, MtkAsync *> *g_mtk_async;   // submit thread: keys skipped until built, started or not
+static NSMutableArray<MtkAsync *> *g_mtk_async_done; static os_unfair_lock g_mtk_async_lock = OS_UNFAIR_LOCK_INIT;   // finished builds, handed to the submit thread
+static _Atomic int g_mtk_async_ready, g_mtk_async_running, g_mtk_async_lost;   // lost: builds abandoned at the deadline that have not returned (each holds a queue thread)
+static uint64_t g_mtk_async_skips, g_mtk_async_builds, g_mtk_async_waits, g_mtk_async_abandoned;
+static NSMutableArray<MtkAsync *> *g_mtk_async_live;   // submit thread: started builds whose slot is held (for the deadline sweep)
+static dispatch_queue_t mtk_async_queue(void) {
+    static dispatch_queue_t q; static dispatch_once_t once;
+    dispatch_once(&once, ^{ q = dispatch_queue_create("dm.nvn.mesh-async", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_CONCURRENT, QOS_CLASS_USER_INITIATED, 0)); });
+    return q;
+}
+static void mtk_async_sweep(void) {   // submit thread: builds past the deadline give their slot back (a compile that does not return, GitHub issue #294)
+    if (!g_mtk_async_live.count) return;
+    uint64_t now = bp_now();
+    for (NSInteger i = (NSInteger)g_mtk_async_live.count - 1; i >= 0; i--) { MtkAsync *a = g_mtk_async_live[(NSUInteger)i];
+        int st = atomic_load(&a->state);
+        if (st == 1) { [g_mtk_async_live removeObjectAtIndex:(NSUInteger)i]; continue; }   // returned: its slot is back already
+        if ((double)(now - a->t_start) < g_mtk_async_slow_s * 1e9) continue;
+        int zero = 0;
+        if (atomic_compare_exchange_strong(&a->state, &zero, 2)) {   // the build has not returned: its slot goes back, its draws stay skipped
+            atomic_fetch_sub(&g_mtk_async_running, 1); atomic_fetch_add(&g_mtk_async_lost, 1); g_mtk_async_abandoned++;
+            MLOG("[RED] task / mesh pipeline async: the build of task %s mesh %s fragment %s has run %.0f s and not returned; its slot is given back (its draws stay skipped, the frame does not wait; a late result is still used)",
+                 a->ts ? a->ts->key : "-", a->ms->key, a->fs ? a->fs->key : "-", g_mtk_async_slow_s); }
+        [g_mtk_async_live removeObjectAtIndex:(NSUInteger)i];
+    }
+}
+static void mtk_async_take(void) {   // submit thread: publish finished builds
+    mtk_async_sweep();
+    if (!atomic_load_explicit(&g_mtk_async_ready, memory_order_acquire)) return;
+    os_unfair_lock_lock(&g_mtk_async_lock); NSArray<MtkAsync *> *done = g_mtk_async_done; g_mtk_async_done = nil; atomic_store(&g_mtk_async_ready, 0); os_unfair_lock_unlock(&g_mtk_async_lock);
+    for (MtkAsync *a in done) {
+        pso_key k; memcpy(&k, a->key.bytes, sizeof k);
+        id cur = hm_get_id(&g_pso_mtk, &k);
+        if (cur == g_mtk_async_mark) hm_put_id(&g_pso_mtk, &k, a->ps ?: NSNull.null);   // else the prewarm claimed it first (mtk_claim)
+        [g_mtk_async removeObjectForKey:a->key];
+        const char *task = a->ts ? a->ts->key : "-";
+        if (!a->ps) { MLOG("[RED] task / mesh pipeline failed: task %s mesh %s fragment %s: %s", task, a->ms->key, a->fs ? a->fs->key : "-", a->err.UTF8String ?: "invalid depth/stencil formats"); continue; }
+        k.fsfn = NULL; pso_skey sk; char hex[sizeof sk * 2 + 1];
+        pso_skey_from(&k, a->ms, a->fs, 0, NULL, &sk); pso_skey_hex(&sk, hex);
+        pso_record("M\t%s\t%s\n", task, hex); pso_user_record("M\t%s\t%s\n", task, hex);
+        MLOG("task / mesh pipeline async: task %s mesh %s fragment %s, %.1f ms%s in the background; %llu draws skipped over %llu frames (frames %llu-%llu), drawn from frame %llu", task, a->ms->key, a->fs ? a->fs->key : "-",
+             a->build_ns / 1e6, a->archived ? " (from the pipeline archive)" : "", (unsigned long long)a->skips, (unsigned long long)(a->skips ? a->last_frame - a->first_frame + 1 : 0),
+             (unsigned long long)a->first_frame, (unsigned long long)a->last_frame, (unsigned long long)atomic_load(&g_cur_frame));
+    }
+}
+static void mtk_async_start(MtkAsync *a) {   // submit thread, below the cap
+    a->started = 1; a->t_start = bp_now(); atomic_fetch_add(&g_mtk_async_running, 1); g_mtk_async_builds++;
+    if (!g_mtk_async_live) g_mtk_async_live = [NSMutableArray array];
+    [g_mtk_async_live addObject:a];
+    pso_key kc; memcpy(&kc, a->key.bytes, sizeof kc);
+    dispatch_async(mtk_async_queue(), ^{ @autoreleasepool {
+        NSError *error = nil; int archived = 0; uint64_t t0 = bp_now();
+        if (g_mtk_async_test_delay_us) usleep(g_mtk_async_test_delay_us);
+        pso_key kb = kc; id<MTLRenderPipelineState> ps = mtk_build(&kb, a->ts, a->ms, a->fs, &error, &archived);
+        a->build_ns = bp_now() - t0; a->ps = ps; a->archived = archived; a->err = error.localizedDescription;
+        os_unfair_lock_lock(&g_mtk_async_lock); if (!g_mtk_async_done) g_mtk_async_done = [NSMutableArray array]; [g_mtk_async_done addObject:a];
+        atomic_store_explicit(&g_mtk_async_ready, 1, memory_order_release); os_unfair_lock_unlock(&g_mtk_async_lock);
+        int zero = 0; if (atomic_compare_exchange_strong(&a->state, &zero, 1)) atomic_fetch_sub(&g_mtk_async_running, 1);   // else the sweep gave the slot back already
+        else atomic_fetch_sub(&g_mtk_async_lost, 1);   // an abandoned build returned: its thread is free again
+    } });
+}
+// A draw of key k (whose pipeline is not in g_pso_mtk) is skipped; the first one queues the build. Returns nil (the draw is dropped, mesh_tasks_draw counts it in g_mtk_wait)
+static id<MTLRenderPipelineState> mtk_async_skip(const pso_key *k, NvShader *ts, NvShader *ms, NvShader *fs) {
+    NSData *kd = [NSData dataWithBytes:k length:sizeof *k];
+    if (!g_mtk_async) g_mtk_async = [NSMutableDictionary dictionary];
+    uint64_t fr = atomic_load(&g_cur_frame);
+    MtkAsync *a = g_mtk_async[kd];
+    if (!a) {
+        a = [MtkAsync new]; a->key = kd; a->ts = ts; a->ms = ms; a->fs = fs; a->first_frame = fr; g_mtk_async[kd] = a;
+        hm_put_id(&g_pso_mtk, k, g_mtk_async_mark);
+        MLOG("task / mesh pipeline async: task %s mesh %s fragment %s first skipped at frame %llu; its draws are skipped until it is built", ts ? ts->key : "-", ms->key, fs ? fs->key : "-", (unsigned long long)fr);
+    }
+    if (!a->started && atomic_load(&g_mtk_async_running) < MTK_ASYNC_MAX && atomic_load(&g_mtk_async_lost) < MTK_ASYNC_MAX) mtk_async_start(a);
+    else if (!a->started && atomic_load(&g_mtk_async_lost) >= MTK_ASYNC_MAX) { static int once; if (!once++) MLOG("[RED] task / mesh pipeline async: %d builds never returned; new task / mesh pipelines are not built and their draws stay skipped until one returns", MTK_ASYNC_MAX); }
+    a->skips++; a->last_frame = fr; g_mtk_async_skips++;
+    if (a->skips >= 2 && !(a->skips & (a->skips - 1)))
+        MLOG("task / mesh pipeline async: mesh %s fragment %s still skipped: %llu draws over %llu frames, build %s", ms->key, fs ? fs->key : "-", (unsigned long long)a->skips,
+             (unsigned long long)(fr - a->first_frame + 1), a->started ? "running" : "waiting for a slot");
+    else if (mtk_async_log_all()) MLOG("task / mesh pipeline async: skip %llu of mesh %s at frame %llu", (unsigned long long)a->skips, ms->key, (unsigned long long)fr);
+    if (g_vis_counting) g_vis_forced = 1;   // this draw would have added samples: the next report must not read "occluded" because of the skip
+    return nil;
 }
 static id<MTLRenderPipelineState> mtk_pso(NvProg *raster) {
     if (!raster || !g_mtk.ms || !g_mtk.ms->fn) return nil;
@@ -628,8 +880,19 @@ static id<MTLRenderPipelineState> mtk_pso(NvProg *raster) {
     pso_key k; pso_key_fill(&k, ms, fs, g_pass.cfmt, g_pass.dfmt, g_pass.sfmt, g_pass.samples, 0);
     memset(k.attr, 0, sizeof k.attr); memset(k.attr_hi, 0, sizeof k.attr_hi); memset(k.stream, 0, sizeof k.stream);
     mtk_bind_key(&k, ts, ms, fs);
+    if (g_mtk_async) mtk_async_take();
     id ps = hm_get_id(&g_pso_mtk, &k);
+    if (ps && ps == g_mtk_async_mark) {
+        MtkAsync *a = g_mtk_async[[NSData dataWithBytes:&k length:sizeof k]];
+        return mtk_async_skip(&k, ts, ms, fs);   // started or not: a build that never returns holds no thread here (a build at the draw would wedge the frame instead)
+    }
     if (ps) return ps == NSNull.null ? nil : ps;
+    if (mtk_async_on()) {
+        const char *why = mtk_async_why(&k, ts, ms, fs);
+        if (!why) { if (!g_mtk_async_mark) g_mtk_async_mark = [NSObject new]; return mtk_async_skip(&k, ts, ms, fs); }   // at the lost cap it is skipped and not built (mtk_async_skip)
+        g_mtk_async_waits++;
+        static int nw; if (nw < 64) { nw++; MLOG("task / mesh pipeline async: task %s mesh %s fragment %s waits for its build (%s)", ts ? ts->key : "-", ms->key, fs ? fs->key : "-", why); }
+    }
     NSError *error = nil; uint64_t start = bp_now(); int archived = 0;
     ps = mtk_build(&k, ts, ms, fs, &error, &archived);
     uint64_t elapsed = bp_now() - start;

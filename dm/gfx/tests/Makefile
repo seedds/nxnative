@@ -541,6 +541,14 @@ t_mesh_first_use: t_mesh_first_use.m $(MTL_T_DEP)
 check_t_mesh_first_use: t_mesh_first_use
 	DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_mesh_first_use
 	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_mesh_first_use
+# DM_PSO_MESH_ASYNC=skip: a task/mesh draw is skipped while its pipeline builds, never for a program that may write; direct and threaded encoding, and the switch off (must fail)
+t_mesh_async: t_mesh_async.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_mesh_async.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+.PHONY: check_t_mesh_async
+check_t_mesh_async: t_mesh_async
+	DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_mesh_async
+	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_mesh_async
+	! DM_PSO_MESH_ASYNC=0 DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_mesh_async > /dev/null 2>&1
 
 t_wait_event: t_wait_event.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_wait_event.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)

@@ -86,7 +86,34 @@ static void report(NSError *e, NSString *target, const char *stage) {
 }
 
 @implementation DmRumbleChannel
-- (void)stop {
+// Core Haptics raises an NSException, not an NSError, when a player call reaches an engine that is not running ("-[CHHapticEngine(CHHapticEngineInternal)
+// checkEngineRunning:]: self.running"), and it offers no running state to ask first: the engine stops on its own at any time (an audio interruption,
+// the haptics helper's exit) while its stopped handler is only queued here, and a stop is asynchronous. So every entry into a channel (apply:, stop,
+// the queued renewals and stops) runs its Core Haptics calls through guarded:work:, and a raise drops the engine as a failed one. Uncaught, it ended
+// Mario Kart World on an iPhone (2026-11-07); which call raised there is not known. The host is ARC without -fobjc-arc-exceptions, so a raise leaks
+// what ARC held in the frames it unwinds: the player whose call raised (and so perhaps its dead engine) and the parameters sent to it, once per engine
+// failure (t_haptics_apple under leaks: about 300 bytes a raise, none with the flag). The flag would cover the whole host, or need a per-file rule in
+// both the Makefile and the iOS project; not worth it for this
+- (void)guarded:(const char *)stage work:(void (^)(void))work {
+    @try { work(); }
+    @catch (NSException *x) { [self stoppedEngine:x stage:stage]; }
+}
+// Like a failed start (failed:), except that neither the engine nor its players are called again: a stop sends the players zero, which raises once more.
+// Nothing plays from an engine that is not running. The next effect makes a new engine after the backoff
+- (void)stoppedEngine:(NSException *)x stage:(const char *)stage {
+    if (++errors <= 8 || errors % 64 == 0)
+        fprintf(stderr, "[RED] haptics: %s %s on a stopped engine (%s: %s)\n", self.target.UTF8String, stage,
+                x.name.UTF8String ?: "exception", x.reason.UTF8String ?: "no reason");
+    self.generation++; self.silenceGeneration++;   // its renewals, idle release and callbacks are stale
+    self.engine.stoppedHandler = ^(CHHapticEngineStoppedReason reason) { (void)reason; }; self.engine.resetHandler = ^{};
+    self.engine = nil; self.pattern = nil; self.previous = nil; self.level = (dm_haptic_level){0, 0};
+    self.failures = MIN(self.failures + 1, 4u);
+    self.retryAfter = now() + (1u << (self.failures - 1));
+    dm_haptics_clear(self.player);
+}
+- (void)stop { [self guarded:"stop" work:^{ [self halt]; }]; }
+// stop's work, for callers already inside guarded:work:
+- (void)halt {
     self.generation++; self.silenceGeneration++;
     self.engine.stoppedHandler = ^(CHHapticEngineStoppedReason reason) { (void)reason; }; self.engine.resetHandler = ^{};
     if (self.simple) {
@@ -100,7 +127,8 @@ static void report(NSError *e, NSString *target, const char *stage) {
             __weak DmRumbleChannel *weak = self; CHHapticEngine *engine = self.engine;
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((left + 0.05) * NSEC_PER_SEC)), queue, ^{
                 DmRumbleChannel *c = weak; if (c && c.engine == engine && c.pattern) return;   // a new effect took the engine meanwhile
-                [engine stopWithCompletionHandler:nil];
+                @try { [engine stopWithCompletionHandler:nil]; }
+                @catch (NSException *x) { if (c && c.engine == engine) [c stoppedEngine:x stage:"stop engine"]; }   // one no channel holds is gone anyway
             });
             return;
         }
@@ -118,15 +146,15 @@ static void report(NSError *e, NSString *target, const char *stage) {
     __weak DmRumbleChannel *weak = self; uint64_t generation = self.generation;
     NSTimeInterval wait = MAX(0, self.pulseEnd - PULSE_LEAD - self.engine.currentTime);
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(wait * NSEC_PER_SEC)), queue, ^{
-        DmRumbleChannel *c = weak; NSError *e = nil;
+        DmRumbleChannel *c = weak;
         if (!c || c.generation != generation || c.pattern != next || c.level.intensity == 0) return;   // stopped, replaced or silent
-        if (![c pulse:&e]) [c failed:e stage:"pulse"];
+        [c guarded:"pulse" work:^{ NSError *e = nil; if (![c pulse:&e]) [c failed:e stage:"pulse"]; }];
     });
     return YES;
 }
-- (void)failed:(NSError *)error stage:(const char *)stage {
+- (void)failed:(NSError *)error stage:(const char *)stage {   // inside guarded:work: (apply: or a renewal), which handles a raise from halt
     report(error, self.target, stage);
-    [self stop]; self.engine = nil;   // A failed helper connection must not be reused for every later vibration.
+    [self halt]; self.engine = nil;   // A failed helper connection must not be reused for every later vibration.
     self.failures = MIN(self.failures + 1, 4u);
     self.retryAfter = now() + (1u << (self.failures - 1));
     dm_haptics_clear(self.player);
@@ -159,7 +187,8 @@ static void report(NSError *e, NSString *target, const char *stage) {
     if (![self.engine startAndReturnError:&error]) { [self engineFailed:error stage:"start engine"]; return NO; }
     return YES;
 }
-- (void)apply:(dm_haptic_level)level {
+- (void)apply:(dm_haptic_level)level { [self guarded:"apply" work:^{ [self applyLevel:level]; }]; }
+- (void)applyLevel:(dm_haptic_level)level {
     if ([self.target hasPrefix:@"controller"]) level.intensity = controller_level(level.intensity);
     uint64_t silence = ++self.silenceGeneration;
     NSError *error = nil;
@@ -186,7 +215,7 @@ static void report(NSError *e, NSString *target, const char *stage) {
                 fprintf(stderr, "haptics: player %d %s has no advanced players (%s %ld): plain players\n", self.player + 1, self.target.UTF8String,
                         error.domain.UTF8String ?: "no error", (long)error.code);
                 error = nil;
-                [self stop]; self.engine = nil;
+                [self halt]; self.engine = nil;
                 // Without advanced players, the engines of the left and right handles override each other on an Xbox Wireless Controller instead of
                 // adding up: with both playing, the handle motors were not felt, while one engine for both handles was
                 if (self.merge) { dm_haptics_clear(self.player); self.merge(); return; }

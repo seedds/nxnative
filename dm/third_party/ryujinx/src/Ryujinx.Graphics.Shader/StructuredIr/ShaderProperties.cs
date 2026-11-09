@@ -22,6 +22,18 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
         // nxnative: a global memory access traced to no storage buffer goes through a physical storage buffer pointer (GlobalToStorage.TryGenerateRawStorageOp)
         public bool UsesPhysicalPointers { get; set; }
 
+        // nxnative: uniform bounds (TranslationFlags.MetalUniformBounds). The binding of each game uniform slot's buffer whose reads past the bound size give 0, with its
+        // index in the size table, and the binding of that table (Constants.NxUniformSizesBank), -1 when no read is bounded
+        private readonly Dictionary<int, int> _boundedConstantBuffers = new();
+        public IReadOnlyDictionary<int, int> BoundedConstantBuffers => _boundedConstantBuffers;
+        public int UniformSizesBinding { get; private set; } = -1;
+
+        public void AddBoundedConstantBuffer(int binding, int sizeIndex, int sizesBinding)
+        {
+            _boundedConstantBuffers[binding] = sizeIndex;
+            UniformSizesBinding = sizesBinding;
+        }
+
         public ShaderProperties()
         {
             _constantBuffers = new Dictionary<int, BufferDefinition>();

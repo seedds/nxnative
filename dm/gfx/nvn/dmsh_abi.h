@@ -111,7 +111,6 @@
 // Its function constants: bool, colour target n is attached (the variant reads it only then), at this index + n (nvn_mtl.m lo_fn specializes the entry point per pass's targets)
 #define DMSH_LOGIC_FC 200
 // Compute shared memory past Metal's limit (dm/gfx/tools/dmsh_build.py tg_spill): a kernel whose threadgroup arrays exceed DMSH_TG_MAX bytes takes them from a device buffer at this compute
-// buffer index, one slice of the reflection's tg_spill bytes per workgroup, the workgroup's index in the dispatch modulo DMSH_TG_GROUPS (nvn_mtl.m dispatch binds DMSH_TG_GROUPS slices at most)
+// buffer index, one slice of the reflection's tg_spill bytes per workgroup, at the workgroup's index in the whole grid (nvn_mtl.m dispatch binds a slice for every workgroup of the dispatch)
 #define DMSH_TG_SLOT 30
 #define DMSH_TG_MAX 0x8000
-#define DMSH_TG_GROUPS 512

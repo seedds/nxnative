@@ -566,3 +566,9 @@ t_render_counter_overlap: t_render_counter_overlap.m $(MTL_T_DEP)
 check_t_render_counter_overlap: t_render_counter_overlap
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./$<
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./$<
+t_tg_spill: t_tg_spill.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_tg_spill.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_tg_spill
+check_t_tg_spill: t_tg_spill
+	MTL_DEBUG_LAYER=1 DM_NVN_DISPATCH_OWN=0 ./$<
+	MTL_DEBUG_LAYER=1 DM_NVN_DISPATCH_OWN=1 ./$<

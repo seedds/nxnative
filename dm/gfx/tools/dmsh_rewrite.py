@@ -24,6 +24,18 @@ def mul_extended(msl):
                      for t, w in (('uint', 'ulong'), ('int', 'long')))
     return msl[:found[0].end()] + scalar + msl[found[0].end():]
 
+# spirv-cross writes an add, subtract or multiply decorated NoContraction as a call of an optnone template, spvFAdd / spvFSub / spvFMul, whose body is one fma
+# (fma(1, l, r), fma(-1, r, l), fma(l, r, 0)) (spirv_msl.cpp, SPVFuncImplFAdd ...). optnone also means noinline, so each one is a real call on Apple GPUs, with the caller's live
+# registers spilled around it. The fma already keeps the operation from fusing with its neighbours: it rounds once, and an operand that is a product arrives rounded. The
+# helpers become always inline with the same body. The translator decorates NoContraction where an operation must stay exact (ForcePreciseEnable's 1 / (x + c) bias adds in
+# Ocarina of Time's pixel shaders); test_dmsh_no_contraction.py checks on the GPU that the inlined forms still give the separately rounded results.
+NC_HELPER = re.compile(r'template<typename T>\s*\[\[clang::optnone\]\] T (spvF(?:Add|Sub|Mul))\(T l, T r\)\s*\{\s*return (fma\(T\(1\), l, r\)|fma\(T\(-1\), r, l\)|fma\(l, r, T\(0\)\));\s*\}')
+NC_BODY = {'spvFAdd': 'fma(T(1), l, r)', 'spvFSub': 'fma(T(-1), r, l)', 'spvFMul': 'fma(l, r, T(0))'}
+def no_contraction(msl):
+    if 'clang::optnone]] T spvF' not in msl: return msl
+    return NC_HELPER.sub(lambda m: f'template<typename T>\nstatic inline __attribute__((always_inline)) T {m.group(1)}(T l, T r)\n{{\n    return {m.group(2)};\n}}'
+                         if NC_BODY[m.group(1)] == m.group(2) else m.group(0), msl)
+
 # Ampere HMMA.16816 with an f16 accumulator (agl's upscaler networks, the NDVE video networks) reaches the MSL as calls of dmsh_hmma16816_f16(lane, block, A0..A3, B0, B1, C0, C1,
 # flags, A's LDSM address, A0..A3's offsets, A's row stride, out D1) → D0, the subgroup's 256-word block of the scratch shared memory as the last argument (InstEmitAmpereTensor.AHmma,
 # TensorPass, HelperFunctionManager.GenerateHmma16816F16). The translator's body computes D lane by lane from the block; here it becomes simdgroup_matrix code over the same block:

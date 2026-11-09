@@ -719,7 +719,7 @@ NVN(nvnSamplerBuilderGetLodClamp, void, const NVNsamplerBuilder *b, float *lo, f
     const samp_par *o = &((const samp_builder_t *)b)->p; *lo = o->lod_min; *hi = o->lod_max;
 }
 NVN(nvnSamplerInitialize, NVNboolean, NVNsampler *s, const NVNsamplerBuilder *b) {
-    samp_t *o = (samp_t *)s; o->magic = MAGIC('S', 'M', 'P', 0); o->p = ((const samp_builder_t *)b)->p; return 1;
+    samp_t *o = (samp_t *)s; memset(o, 0, sizeof *o); o->magic = MAGIC('S', 'M', 'P', 0); o->p = ((const samp_builder_t *)b)->p; return 1;   // nvn_obj.h samp_t: games hash the bytes
 }
 NVN(nvnSamplerFinalize, void, NVNsampler *s) { ((samp_t *)s)->magic = 0; }
 
@@ -782,9 +782,9 @@ static int keys_hash(const NVNshaderData *sd, int mapped, uint8_t out[8]) {
 }
 int prog_key(const prog_t *p, unsigned st, uint8_t key[8]) {
     if (st >= p->nstage) return 0;
-    if (!p->serial) return keys_hash(&p->sd[st], 0, key), 1;   // not set by SetShaders (the game wrote the struct itself): no record to keep the key in
+    if (!p->serial) return keys_hash(&p->sd[st], 0, key);   // not set by SetShaders (the game wrote the struct itself): no record to keep the key in
     prog_keys_t *k = pk_get(p->serial);
-    if (!(k->ok >> st & 1)) { keys_hash(&p->sd[st], 0, k->key[st]); k->ok |= (uint8_t)(1u << st); }
+    if (!(k->ok >> st & 1)) { if (!keys_hash(&p->sd[st], 0, k->key[st])) return 0; k->ok |= (uint8_t)(1u << st); }
     memcpy(key, k->key[st], 8);
     return 1;
 }

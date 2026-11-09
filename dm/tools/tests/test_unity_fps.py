@@ -1,6 +1,7 @@
 """Unity's frame-rate settings, found through the engine's internal-call table (dm/tools/unity_fps.py), on synthetic code, no game files: Unity 6000's layout (the QualitySettings
 global read directly, levels of 1 << 8 bytes), Unity 2021's (a thunk to the targetFrameRate setter, QualitySettings from the managers array, levels of 0xa8 bytes by madd), a getter
-it cannot read, names with no function table after them, and a main without the table."""
+it cannot read, names with no function table after them, and a main without the table; Unity 2019.4's registration from code (a name registered with two
+functions gives none) with a framed manager getter, and Unity 2017.4's managers-array lookup."""
 import struct
 import sys
 import unittest
@@ -38,16 +39,40 @@ def context(at):   # GetManagerFromContext(K) at at + 8: mov w0, #11; b there; a
     return [movz(0, 11), B(at + 4, at + 8), ADRP(8, at + 8, CTX), ADDI(8, 8, CTX & 0xfff), ldr_idx(0, 8, 0), RET]
 
 
+def context2019(at):   # Unity 2019.4 (Pokémon Brilliant Diamond): a framed getter, stp; mov x29, sp; mov w0, #11; bl H; ldp; ret, with H as in context
+    return [0xA9BF7BFD, 0x910003FD, movz(0, 11), bl(at + 12, at + 24), 0xA8C17BFD, RET, ADRP(8, at + 24, CTX), ADDI(8, 8, CTX & 0xfff), ldr_idx(0, 8, 0), RET]
+
+
+def context2017(at):   # Unity 2017.4 (Return of the Obra Dinn): framed, and H adds the index first: add x8, x8, w0, sxtw #3; ldr x0, [x8, #0xc0]
+    return [0xA9BF7BFD, 0x910003FD, movz(0, 11), bl(at + 12, at + 24), 0xA8C17BFD, RET, ADRP(8, at + 24, CTX), ADDI(8, 8, CTX & 0xfff), 0x8B20CD08, LDRX(0, 8, 0xc0 // 8), RET]
+
+
+GOT = 0xa200   # the relocated slots code registration loads the functions from
+
+
+def register(names):
+    """Unity 2019.4's registration from code: per name, adrp x1; ldr x1, [x1, #slot] (the function), adrp x0; add x0, x0, #lo (the name), bl the register call (at 'reg')"""
+    def code(at, reg):
+        w, s = [], STRINGS
+        for i, name in enumerate(names):
+            a = at + 4 * len(w)
+            w += [ADRP(1, a, GOT), LDRX(1, 1, (GOT & 0xfff) // 8 + i), ADRP(0, a + 8, s), ADDI(0, 0, s & 0xfff), bl(a + 16, reg)]
+            s += len(name) + 1
+        return w + [RET]
+    return code
+
+
 def getter2021(at, ctx):
     return [0xA9BF7BFD, bl(at + 4, ctx), ldrsw(8, 0, 0x4c), movz(10, 0xa8), LDRX(9, 0, 0x30 // 8), madd(8, 8, 10, 9), ldr_w(0, 8, 0x68), 0xA8C17BFD, RET]
 
 
-def image(funcs: dict, names=(unity_fps.TFR, OTHER, unity_fps.VSYNC), table=True):
-    """funcs: {name: code(at) or (code(at, *refs), ref names)}; the name table at NAMES with the function table right after it (relative relocations)"""
+def image(funcs: dict, names=(unity_fps.TFR, OTHER, unity_fps.VSYNC), table=True, got=()):
+    """funcs: {name: code(at) or (code(at, *refs), ref names)}; the name table at NAMES with the function table right after it (relative relocations); got: (slot, function
+    name) relocated slots, as code registration reads them. Functions not named in names are placed first, in funcs' order, so later ones can refer to them"""
     img = bytearray(END)
     struct.pack_into('<I', img, 4, MOD0); img[MOD0:MOD0 + 4] = b'MOD0'; struct.pack_into('<i', img, MOD0 + 4, DYN - MOD0)
     rel, at, s, placed = [], 0x1000, STRINGS, {}
-    for name in ('ctx',) + tuple(names):
+    for name in tuple(k for k in funcs if k not in names) + tuple(names):
         f: Any = funcs.get(name)
         if f is None: continue
         code, refs = f if isinstance(f, tuple) else (f, [])
@@ -57,6 +82,7 @@ def image(funcs: dict, names=(unity_fps.TFR, OTHER, unity_fps.VSYNC), table=True
         img[s:s + len(name) + 1] = name.encode() + b'\0'
         rel.append((NAMES + 8 * i, s)); s += len(name) + 1
         if table: rel.append((NAMES + 8 * (len(names) + i), placed.get(name, 0x10)))
+    rel += [(slot, placed[name]) for slot, name in got]
     struct.pack_into('<qQqQqQ', img, DYN, 7, RELA, 8, 24 * len(rel), 0, 0)
     for k, (off, val) in enumerate(rel): struct.pack_into('<QQq', img, RELA + 24 * k, off, 1027, val)   # R_AARCH64_RELATIVE
     return img
@@ -75,6 +101,24 @@ class FindTest(unittest.TestCase):
         funcs = {'ctx': context, unity_fps.VSYNC: (getter2021, ['ctx']), REAL: setter, unity_fps.TFR: thunk}
         out, why = find(image(funcs, names=(REAL, unity_fps.TFR, OTHER, unity_fps.VSYNC)))
         self.assertEqual(out, {'target': TFR_G, 'qs': (CTX + 8 * 11, 0x4c, 0x30, 0xa8, 0x68)}, why)
+
+    def test_unity2019_code_registration(self):
+        names = (unity_fps.TFR, OTHER, unity_fps.VSYNC)
+        for ctx, qs in ((context2019, CTX + 8 * 11), (context2017, CTX + 0xc0 + 8 * 11)):
+            funcs = {'ctx': ctx, 'reg': lambda at: [RET], unity_fps.TFR: setter, OTHER: lambda at: [RET], unity_fps.VSYNC: (getter2021, ['ctx']),
+                     'init': (register(names), ['reg'])}
+            got = [(GOT + 8 * i, n) for i, n in enumerate(names)]
+            out, why = find(image(funcs, names=names, table=False, got=got))
+            self.assertEqual(out, {'target': TFR_G, 'qs': (qs, 0x4c, 0x30, 0xa8, 0x68)}, why)
+
+    def test_code_registration_twice_is_none(self):
+        # the same name registered with two functions: neither is taken
+        names = (unity_fps.TFR, unity_fps.TFR + 'X', unity_fps.VSYNC)
+        two = lambda at, reg: register((unity_fps.TFR,))(at, reg)[:-1] + [ADRP(1, at + 20, GOT), LDRX(1, 1, (GOT & 0xfff) // 8 + 1), ADRP(0, at + 28, STRINGS),
+                                                                         ADDI(0, 0, STRINGS & 0xfff), bl(at + 36, reg), RET]
+        funcs = {'reg': lambda at: [RET], 'other': lambda at: [RET], unity_fps.TFR: setter, 'init': (two, ['reg'])}
+        out, why = find(image(funcs, names=names, table=False, got=[(GOT, unity_fps.TFR), (GOT + 8, 'other')]))
+        self.assertNotIn('target', out, why)
 
     def test_unread_getter_is_red(self):
         out, why = find(image({unity_fps.TFR: setter, unity_fps.VSYNC: lambda at: [movz(0, 1), RET]}))

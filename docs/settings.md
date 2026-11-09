@@ -29,7 +29,7 @@ On a Mac, a game checked at that speed (Fire Emblem Fortune's Weave, Mario & Lui
 
 ### Dynamic resolution
 
-Off, the default, keeps the 3D picture at full size. On lets the game lower its resolution when frames run heavy, as on the Switch: steadier frame rate, softer picture. Only games whose resolution control the app can hold offer it (NieR:Automata, Ocarina of Time).
+Off, the default, keeps the 3D picture at full size. On lets the game lower its resolution when frames run heavy and raise it again when they fit, as on the Switch: steadier frame rate, at times a softer picture. Only games whose resolution control the app can hold offer it (NieR:Automata, Ocarina of Time).
 
 ### Render scale
 

@@ -1,0 +1,5 @@
+# Hand-written translation facts, merged over the generated rows of shader_facts.tsv by dm/gfx/tools/shader_split.py: key <TAB> facts JSON (same format)
+# Texture type mismatch: slot 7 declared as 2DArray by default, runtime binds 3D texture (NVN target 2, format 0x3f, Metal format RG11B10Float)
+09ab31c69af710c9	{"tex":{"7":"3d"}}
+9b310b3349825e9a	{"tex":{"7":"3d"}}
+c0aff0eee66cda0f	{"tex":{"7":"3d"}}

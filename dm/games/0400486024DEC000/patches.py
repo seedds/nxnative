@@ -40,27 +40,34 @@ def frame_step(ctx):
 # 16.4 ms). On Apple GPUs this game's cost hardly depends on the resolution (mesh, compute and the upscaler's fixed 2048x1152 dominate): 683x384 cost 14.3 ms and 1536x864 14.7 ms on
 # an M4 Pro, yet at 683x384 the extrapolation put 1536x864 at about 300 units against the 83 it allows, so the controller sat at its floor for good (game note, Dynamic resolution).
 # The stub replaces the level function. With DM_DYNAMIC_RESOLUTION 0 (the default; state +0x40 0) it returns 0: full resolution. With 1 it climbs on what was measured at each
-# level, with no model of how the cost grows: one level down when the load (+0x8) has been over the threshold for 8 calls in a row, and that level is marked as not fitting; one level
-# up when the load fits and the level above was never measured, fitted when it was last measured, or was measured more than 600 calls (about 10 s) ago; else the current level
-# (+0x174). Nothing is decided or recorded until a level has held 8 calls: the load is read a few frames late, so before that it may be the previous level's. The 8 calls over in a
-# row keep a single slow frame, or the first frames at a new size (its render targets), from marking a level that fits (on the full library at level 1: one burst to 90 against loads
-# of 77-80 at levels 2 and 1). The game's counters still pace the steps (down after ReduceCounterMax frames, up after IncreaseCounterMax); its level count (+0x1a0) is the floor.
+# level, with no model of how the cost grows: one level down when the load (+0x8) has been over the threshold for 8 calls in a row, unless the level above was measured within 600
+# calls and this level is not at least 1/16 cheaper (load >= above * 0.9375) or the level below was measured within 600 calls and is not at least 1/16 cheaper than this one, in which
+# case it climbs back one level; one level up when the load fits and the level above was never measured, fitted when it was last measured, is not at least 1/16 costlier than this
+# level, or was measured more than 600 calls (about 10 s) ago; else the current level (+0x174). Nothing is decided or recorded until a level has held 8 calls: the load is read a few
+# frames late, so before that it may be the previous level's. The 8 calls over in a row keep a single slow frame, or the first frames at a new size (its render targets), from marking
+# a level that fits (on the full library at level 1: one burst to 90 against loads of 77-80 at levels 2 and 1). The game's counters still pace the steps (down after ReduceCounterMax
+# frames, up after IncreaseCounterMax); its level count (+0x1a0) is the floor.
 # The memory is in the state page: +0x200 calls, +0x204 the last call's level, +0x208 calls at it, +0x20c calls over in a row, +0x210 the load measured at each level (16 floats),
 # +0x250 the call it was measured at (0 = never). Run against a model of the update (a level moves after the stub asked 5 times up or 2 times down; the load two frames late): a load
 # of 70 at every level climbs from the floor to full size in 9 steps, as does Ocarina's measured 72-80 with a spike every 37 frames and a burst after each change; a load that grows
-# with the pixel count settles at the highest level that fits and tries the one above once per 600 calls; a scene that gets lighter climbs again, a heavier one steps down.
+# with the pixel count settles at the highest level that fits and tries the one above once per 600 calls; a heavy scene whose cost does not follow the resolution probes level 1 once
+# per 600 calls and climbs back to full size instead of stepping down to the floor; a scene that gets lighter climbs again, a heavier pixel-bound one steps down.
 # The function is a leaf: x2..x11, x16, x17 and s0..s2 are free, w0 its only result (the original also stores its predicted cost at +0x18, which only it and the update's own
 # decision read). The update's fingerprint is required too: +0x8 and +0x174 are its fields
 drs_controller = (   # drs_stub.s, assembled with clang; x0 the controller, x16 the state page (the ADRP before it)
     0xb9404211, 0x35000071, 0x2a1f03e0, 0xd65f03c0,                                                   # off (state +0x40 0): level 0
     0xbd400800, 0xbd401001, 0xb9417402, 0xb941a003, 0x7100005f, 0x1a9fa042, 0x528001e9, 0x6b09005f,   # load, threshold, level (0..15), count
     0x1a89d042, 0xb9420204, 0x11000484, 0xb9020204, 0xb9420605, 0xb9420a06, 0x6b0200bf, 0x1a8617e6,   # calls + 1; calls at this level
-    0xb9020602, 0xb9020a06, 0x35000046, 0xb9020e1f, 0x91084207, 0x91094208, 0x710020df, 0x5400040b,   # a new level: none over; under 8 calls: stay
-    0x1e212000, 0x540001ad, 0xb9420e0b, 0x1100056b, 0xb9020e0b, 0x7100217f, 0x5400032b,               # over: under 8 in a row, stay
-    0xbc2258e0, 0xb8225904, 0x51000469, 0x1100044a, 0x6b09015f, 0x1a89d140, 0xd65f03c0,               # 8 in a row: record it, down one (to the floor)
-    0xb9020e1f, 0xbc2258e0, 0xb8225904, 0x34000182, 0x51000449, 0xb869590a, 0x340000ea, 0x4b0a008a,   # fits: record it; at 0 stay; the level above's record
-    0x7109615f, 0x54000088, 0xbc6958e2, 0x1e212040, 0x540000aa, 0x2a0903e0, 0xd65f03c0,               # never, stale or fitting: up one
-    0x2a1f03e0, 0xd65f03c0, 0x2a0203e0, 0xd65f03c0)                                                   # 0; or stay
+    0xb9020602, 0xb9020a06, 0x35000046, 0xb9020e1f, 0x91084207, 0x91094208, 0x710020df, 0x540007eb,   # a new level: none over; under 8 calls: stay
+    0x1e212000, 0x5400050d, 0xb9420e0b, 0x1100056b, 0xb9020e0b, 0x7100217f, 0x5400070b,               # over: under 8 in a row, stay
+    0xbc2258e0, 0xb8225904, 0x1e2dd001, 0x34000162, 0x51000449, 0xb869590a, 0x3400010a, 0x4b0a008a,   # 8 in a row: record it; if not < 0.9375 of above, climb back
+    0x7109615f, 0x540000a8, 0xbc6958e2, 0x1e210842, 0x1e222000, 0x540004ca, 0x51000469, 0x1100044a,   # else target = min(level + 1, count - 1)
+    0x6b09015f, 0x1a89d14a, 0x6b02015f, 0x540001ad, 0xb86a590b, 0x3400016b, 0x4b0b008b, 0x7109617f,   # if target fresh and not < 0.9375 of current, climb back
+    0x54000108, 0xbc6a58e2, 0x1e210801, 0x1e212040, 0x5400008b, 0x71000449, 0x1a9fa120, 0xd65f03c0,   # else step down to target
+    0x2a0a03e0, 0xd65f03c0, 0xb9020e1f, 0xbc2258e0, 0xb8225904, 0x34000202, 0x51000449, 0xb869590a,   # fits: record it; at 0 stay; the level above's record
+    0x3400016a, 0x4b0a008a, 0x7109615f, 0x54000108, 0xbc6958e2, 0x1e212040, 0x540000ab, 0x1e2dd001,   # never, stale, fitting, or not > 16/15 of current: up one
+    0x1e210842, 0x1e222000, 0x540000ab, 0x2a0903e0, 0xd65f03c0, 0x2a1f03e0, 0xd65f03c0, 0x2a0203e0,   # 0; or stay
+    0xd65f03c0)
 def dynamic_resolution(ctx):
     here, emit, fs_site, fs_put, FS_STATE_OFF = ctx.here, ctx.emit, ctx.site, ctx.put, ctx.state
     site = ctx.others.get('dynamic resolution')

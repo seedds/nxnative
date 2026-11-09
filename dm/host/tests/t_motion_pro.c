@@ -35,5 +35,13 @@ int main(void) {
     assert(!pro_live(0, t));                                                          // an entry that never sent report 0x30
     assert(pro_live(t, t) && pro_live(t, t + PRO_SILENT_NS - 1));                     // still streaming
     assert(!pro_live(t, t + PRO_SILENT_NS) && !pro_live(t + 1, t));                   // silent for a second; a stamp ahead of the clock
+    pro_motion d = {0}; uint8_t q[78] = {0x11}; const float rd = 2000.f / 32767.f * (float)M_PI / 180.f;
+    assert(!ds4_motion_decode(&d, q, 77, t, out) && !ds4_motion_decode(&d, q, 78, t, out));   // short report; empty sensor stream
+    int16_t w[6] = {1000, -500, 250, 0, 8192, 0};   // rotation x, y, z, acceleration: lying face up
+    for (int i = 0; i < 6; i++) { q[15 + 2 * i] = (uint8_t)w[i]; q[16 + 2 * i] = (uint8_t)((uint16_t)w[i] >> 8); }
+    q[0] = 0x01; assert(!ds4_motion_decode(&d, q, 78, t, out)); q[0] = 0x11;
+    assert(ds4_motion_decode(&d, q, 78, t, out) == 1 && out[0].ns == t);
+    assert(out[0].acc[0] == 0 && out[0].acc[1] == 0 && out[0].acc[2] == -1);
+    assert(fabsf(out[0].rot[0] - 1000 * rd) < 1e-6f && fabsf(out[0].rot[1] + 250 * rd) < 1e-6f && fabsf(out[0].rot[2] + 500 * rd) < 1e-6f);
     puts("t_motion_pro: passed");
 }

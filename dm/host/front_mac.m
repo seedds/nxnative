@@ -233,7 +233,7 @@ static const char *pad_name(GCController *c) { return c.vendorName.UTF8String ?:
 static void npad_name(int p, char *out, size_t cap) { uint32_t id = dm_player_npad(p); if (id == 0x20) snprintf(out, cap, "handheld"); else snprintf(out, cap, "%u", id); }
 static void pro_players_changed(GCController *gone) {
     int count = 0, player = -1;
-    for (GCController *c in GCController.controllers) if (c != gone && c.extendedGamepad && [c.productCategory isEqualToString:@"Switch Pro Controller"]) {
+    for (GCController *c in GCController.controllers) if (c != gone && c.extendedGamepad && ([c.productCategory isEqualToString:@"Switch Pro Controller"] || [c.productCategory isEqualToString:@"DualShock 4"])) {
         count++; player = g_merge ? 0 : pad_slot_of(&g_slots, (__bridge const void *)c);
     }
     dm_motion_pro_players(count, player);

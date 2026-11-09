@@ -71,5 +71,16 @@ int main(void) {
     assert(late_frames == 2);
     assert(late_max < 2000);
     puts("PASS: a shorter period costs two late waits, then the waits end on time again");
+
+    // The power line's clause (dm_clock_top) names the thread, its predicted sleeps, the waits a sleep ended too late for (the two above) and the period; a second call, with no clock
+    // wait since, gives nothing: a game with no clock waits prints no clause
+    char ck[400]; dm_clock_top(ck, sizeof ck); printf("  clause: %s\n", ck);
+    unsigned long long y = 0, pr = 0, first = 0; double per = 0;
+    const char *q = strchr(ck, '\''); q = q ? strchr(q + 1, '\'') : NULL;
+    assert(q && sscanf(q, "' %llu yields, %llu predicted sleeps (wait over at the first poll after it %llu;", &y, &pr, &first) == 3);
+    assert(strstr(ck, "period ") && sscanf(strstr(ck, "period ") + 7, "%lf", &per) == 1);
+    assert(y > 0 && pr >= 40 && first >= 2 && first <= 4 && per > 16.0 && per < 17.0);
+    dm_clock_top(ck, sizeof ck); assert(!ck[0]);
+    puts("PASS: the power line names the thread that made clock waits, and says nothing once none did");
     return 0;
 }

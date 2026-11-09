@@ -320,7 +320,9 @@ namespace Ryujinx.Graphics.Shader.Translation
             EmitterContext context = new();
 
             Operand value = Argument(0);
-            Operand index = Argument(1);
+            // nxnative: SHFL takes its lane from b[4:0] in every mode; a lane in a register keeps its high bits, which made the
+            // index out of range and returned the thread's own value
+            Operand index = context.BitwiseAnd(Argument(1), Const(0x1f));
             Operand mask = Argument(2);
 
             Operand clamp = context.BitwiseAnd(mask, Const(0x1f));
@@ -344,7 +346,9 @@ namespace Ryujinx.Graphics.Shader.Translation
             EmitterContext context = new();
 
             Operand value = Argument(0);
-            Operand index = Argument(1);
+            // nxnative: SHFL takes its lane from b[4:0] in every mode; a lane in a register keeps its high bits, which made the
+            // index out of range and returned the thread's own value
+            Operand index = context.BitwiseAnd(Argument(1), Const(0x1f));
             Operand mask = Argument(2);
 
             Operand clamp = context.BitwiseAnd(mask, Const(0x1f));
@@ -369,7 +373,9 @@ namespace Ryujinx.Graphics.Shader.Translation
             EmitterContext context = new();
 
             Operand value = Argument(0);
-            Operand index = Argument(1);
+            // nxnative: SHFL takes its lane from b[4:0] in every mode; a lane in a register keeps its high bits, which made the
+            // index out of range and returned the thread's own value
+            Operand index = context.BitwiseAnd(Argument(1), Const(0x1f));
             Operand mask = Argument(2);
 
             Operand segMask = context.BitwiseAnd(context.ShiftRightU32(mask, Const(8)), Const(0x1f));
@@ -392,7 +398,9 @@ namespace Ryujinx.Graphics.Shader.Translation
             EmitterContext context = new();
 
             Operand value = Argument(0);
-            Operand index = Argument(1);
+            // nxnative: SHFL takes its lane from b[4:0] in every mode; a lane in a register keeps its high bits, which made the
+            // index out of range and returned the thread's own value
+            Operand index = context.BitwiseAnd(Argument(1), Const(0x1f));
             Operand mask = Argument(2);
 
             Operand clamp = context.BitwiseAnd(mask, Const(0x1f));

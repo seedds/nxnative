@@ -44,6 +44,9 @@ General host changes first needed here; each applies to every game:
 - **The SDK 19 `nn::ro::LoadModule` form** and `ro::Finalize` hooked (`hle_ro.c`): [`nn::ro` and its port](../../../docs/reference/services.md#nnro-and-its-port).
 - **Fullscreen startup from another fullscreen app (resolved):** the NX2Apple reporter reproduced the rollback on four of four launches and confirmed the deferred request succeeds: [A game opened from a fullscreen app stays a window](../../../docs/reference/frame-rate.md#a-game-opened-from-a-fullscreen-app-stays-a-window).
 
+- **Movie backgrounds on the iPhone (fixed, iPhone retest open):** the title screen's background grey and flickering, green and magenta blocks behind the options menu (GitHub issue #1956). The game decodes its Bink movies (`MainMenu.bik` and the menu backgrounds) on the CPU into 736x480 `IMAGE | LINEAR` R8 planes in a `CPU_UNCACHED` pool and only samples them. iOS wants 64-byte rows for a view on the pool's buffer, and 736 is not a multiple of 64 (the Mac asks for 16), so they became private textures filled once. Now a linear texture whose storage the GPU has not written is uploaded from it and again after each CPU write, whatever its `IMAGE` flag: [Linear textures a device cannot view on their pool's buffer](../../../docs/reference/nvn-objects.md#linear-textures-a-device-cannot-view-on-their-pools-buffer).
+
 ## Open
 
 - `game.tsv` says values marked "Mario's" are not measured for this game; none of its rows is marked so.
+- The iPhone retest of the movie backgrounds (#1956); this Mac has no copy of the game, so the fix was checked by `t_linear_readback` only.

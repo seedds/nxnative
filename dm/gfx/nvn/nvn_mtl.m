@@ -3759,8 +3759,8 @@ static int tex_init_fill(const tex_t *t, id<MTLTexture> mt) {
 
 static int clear_rect_zero(int i);
 // Whether a linear texture can be a view on its pool's buffer: 1 yes (*pf, *mb, *mo, *row filled), 0 not a linear texture this applies to, -1 linear but its offset or row pitch is not aligned
-// to the device's minimum (iOS: 64 bytes on an A18 Pro and an M4; 16 on the Macs here; DM_TBUF_ALIGN raises it to reproduce a phone's on a Mac). An unaligned one the GPU does not render
-// or store into (linear_cpu_only) is uploaded from its storage instead, and again after each CPU write (tex_mtl_)
+// to the device's minimum (iOS: 64 bytes on an A18 Pro and an M4; 16 on the Macs here; DM_TBUF_ALIGN raises it to reproduce a phone's on a Mac). An unaligned one whose storage holds its
+// content (linear_storage_ok) is uploaded from its storage instead, and again after each CPU write (tex_mtl_)
 static NSUInteger tbuf_align(NSUInteger al);
 static int linear_fit(const tex_t *t, uint32_t *pf, void **mb, uint64_t *mo, size_t *row) {
     // LINEAR_RENDER_TARGET is a linear layout too (SMBW's sky colour ramps: four 64×1 RGBA16F, written by the CPU every frame). Also in a pool the CPU cannot access, whose buffer holds what
@@ -3779,16 +3779,25 @@ static int linear_fit(const tex_t *t, uint32_t *pf, void **mb, uint64_t *mo, siz
     }
     return 1;
 }
-// A linear texture the GPU does not render or store into (LINEAR, neither LINEAR_RENDER_TARGET nor IMAGE): the CPU writes its content into its storage, so one that no view can take
-// is uploaded from there, and a GPU copy into it is written into the storage as well (tex_storage_dst). One the GPU renders or stores into stays a GPU texture when no view can take
-// it: a private texture the CPU's writes do not reach
-static int linear_cpu_only(const tex_t *t) { return (t->d.flags & NVN_TEXTURE_FLAGS_LINEAR) && !(t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET | NVN_TEXTURE_FLAGS_IMAGE)) && t->mem; }
+// Whether a linear texture's storage holds its content, so that one no view can take is uploaded from there and again after each CPU write (tex_mtl_), and read there (mtl_read_texels).
+// In NVN a linear texture's content is its storage until the GPU writes it. LINEAR alone: always, as a GPU copy into it is written into the storage too (tex_storage_dst).
+// LINEAR_RENDER_TARGET or IMAGE only say that the GPU may render or store into it, not that it does: Hades II decodes its Bink movies on the CPU into IMAGE | LINEAR R8 planes of
+// 736-byte rows that its shaders only sample (GitHub issue #1956). Such a texture's storage holds its content while the GPU has not written it (gws_owned, from the GPU writes the
+// commands record, mtl_tex_gpu_written), and one taken from it becomes a GPU texture at the GPU's next write there (cpu_unc_take / cpu_unc_drop). In a pool the CPU cannot write,
+// GPU writes are not recorded: there it stays a GPU texture (its first fill takes its storage, tex_init_fill)
+static int gws_owned(uintptr_t lo, uintptr_t hi);
+static int linear_gpu_may_write(const tex_t *t) { return (t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET | NVN_TEXTURE_FLAGS_IMAGE)) != 0; }
+static int linear_storage_ok(const tex_t *t) {
+    if (!(t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)) || !t->mem) return 0;
+    if (!linear_gpu_may_write(t)) return 1;
+    return t->pool && !(t->pool->flags & (NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS | NVN_MEMORY_POOL_FLAGS_VIRTUAL)) && !gws_owned((uintptr_t)t->mem, (uintptr_t)t->mem + t->L.size);
+}
 // Linear textures (LINEAR) in a CPU-visible pool: the game writes the pool memory directly from the CPU (SMBW's glyph cache: 2048×8192 R8, IMAGE|LINEAR, pool CPU_UNCACHED|GPU_CACHED,
 // the font engine rasterizes glyphs into it on the CPU). A GPU-private texture never sees those writes → all menu / dialog text is blank. On unified memory, create a linear texture directly on the pool buffer (zero copy): the GPU reads the current content at execution time, same as NVN.
 static id<MTLTexture> tex_linear(const tex_t *t) {
     uint32_t pf = 0; void *mb; uint64_t mo; size_t row;
     int fit = linear_fit(t, &pf, &mb, &mo, &row);
-    if (fit < 0) RED_ONCE(65, "linear texture %ux%u format %#x flags %#x: rows of %zu bytes no view can take, a private texture the CPU's writes do not reach (a render target or image, or first used off the submit thread)",
+    if (fit < 0) RED_ONCE(65, "linear texture %ux%u format %#x flags %#x: rows of %zu bytes no view can take, a private texture the CPU's writes do not reach (the GPU wrote its storage, or first used off the submit thread)",
                           t->d.width, t->d.height, t->d.format, t->d.flags, row);
     if (fit != 1) return nil;
     id<MTLBuffer> b = (__bridge id<MTLBuffer>)mb;
@@ -4036,8 +4045,8 @@ static int tex_cpu_written(uint64_t serial) {
 }
 // Whether the host takes a texture's content from its storage (tex_mtl_'s packaged path): a packaged layout, CPU-written, or a sampled texture in a sparse virtual pool, which holds what
 // the CPU wrote into the physical pages mapped there (Monster Hunter Rise: the hunter's innerwear, ASTC 6x6 with no packaged layout, came out magenta, and the face black) and is read
-// through the page table. Render targets, images, linear and buffer textures stay GPU textures (as ft_add), except a linear texture the GPU does not render or store into that no view on
-// its buffer can take (linear_cpu_only, made CPU-written by tex_mtl_). mtl_read_texels reads these from the storage too, on whatever thread asks
+// through the page table. Render targets, images, linear and buffer textures stay GPU textures (as ft_add), except a linear texture whose storage holds its content that no view on
+// its buffer can take (linear_storage_ok, made CPU-written by tex_mtl_). mtl_read_texels reads these from the storage too, on whatever thread asks
 static int tex_from_storage(const tex_t *t) {
     return (t->has_layout || tex_cpu_written(t->serial) || (t->pool && (t->pool->flags & NVN_MEMORY_POOL_FLAGS_VIRTUAL) && t->d.target != NVN_TEXTURE_TARGET_BUFFER
             && !(t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET | NVN_TEXTURE_FLAGS_COMPRESSIBLE | NVN_TEXTURE_FLAGS_IMAGE)) && nvn_sparse_pool(t->pool))) && t->mem;
@@ -4271,9 +4280,12 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
     id have = tex_get(t->serial);
     if (!packaged && !have && DM_GAME_TEX_DIRTY_UPLOAD && t->mem && on_sub_thread()) { int nvn_ft_written(const tex_t *); packaged = nvn_ft_written(t); }   // first use of a texture the CPU wrote since init without a flush (hle_nvn.c)
     if (!packaged && !have && on_sub_thread() && tex_cpu_content(t)) { mtl_tex_cpu_written(t); packaged = 1; }   // storage the CPU wrote before its first use (tex_cpu_content)
-    if (!packaged && !have && on_sub_thread() && linear_cpu_only(t)) {   // a linear texture no view on its buffer can take (iOS wants 64-byte rows; Axiom Verge's 8x8 RGBA8 linear textures have 32): uploaded, and again after CPU writes
+    if (!packaged && !have && on_sub_thread() && linear_storage_ok(t)) {   // a linear texture no view on its buffer can take (iOS wants 64-byte rows; Axiom Verge's 8x8 RGBA8 linear textures have 32): uploaded, and again after CPU writes
         uint32_t pf; void *mb; uint64_t mo; size_t row;
-        if (linear_fit(t, &pf, &mb, &mo, &row) < 0) { mtl_tex_cpu_written(t); packaged = 1; }
+        if (linear_fit(t, &pf, &mb, &mo, &row) < 0) {
+            if (linear_gpu_may_write(t)) cpu_unc_take(t);   // the GPU's first write into its storage makes it a GPU texture (cpu_unc_drop)
+            mtl_tex_cpu_written(t); packaged = 1;
+        }
     }
     if (packaged) {
         NvPkg *pk = [have isKindOfClass:[NvPkg class]] ? have : nil;   // resolved as GPU-only before the CPU wrote it: dropped and rebuilt as packaged
@@ -13538,10 +13550,13 @@ void mtl_read_texels(const tex_t *t, unsigned level, unsigned layer0, const NVNc
     // textures from the CPU, reads them back with ReadTexels on its own thread before any draw uses them, and copies the blocks into its 5120x5120 roughness atlas. Read from the
     // never-uploaded host texture they were zeros, the atlas stayed empty, and the opening cave's stone blocks got roughness 0 and no torch light
     int nvn_ft_written(const tex_t *);
-    // A 2D linear texture the GPU does not render or store into (linear_cpu_only) is read from its storage, by rows of its stride, on whatever thread asks, as the textures below: its
-    // storage holds what the CPU wrote, and the GPU's copies into it once they complete (tex_storage_dst; a view's land there anyway). Resolving it here instead, off the submit thread,
-    // would make an unresolved one a private texture the CPU's later writes never reach, and an uploaded one whose pages changed would be uploaded on this thread (up_owner_check)
-    int lin_cpu = linear_cpu_only(t) && t->pool && !nvn_sparse_pool(t->pool) && t->d.target == NVN_TEXTURE_TARGET_2D && t->d.levels <= 1 && t->d.samples <= 1 && bw == 1 && bh == 1;
+    // A 2D linear texture whose storage holds its content (linear_storage_ok) is read from there, by rows of its stride, on whatever thread asks, as the textures below: its storage
+    // holds what the CPU wrote, and the GPU's copies into it once they complete (tex_storage_dst; a view's land there anyway). Resolving it here instead, off the submit thread, would
+    // make an unresolved one a private texture the CPU's later writes never reach, and an uploaded one whose pages changed would be uploaded on this thread (up_owner_check). One the
+    // GPU may render or store into counts while it is CPU-written, or before its first use while the GPU has not written its storage; once resolved as a GPU texture (cpu_unc_drop, or
+    // the GPU wrote first) it is read back from that
+    int lin_cpu = (linear_gpu_may_write(t) ? tex_cpu_written(t->serial) || (!tex_get(t->serial) && linear_storage_ok(t)) : linear_storage_ok(t))
+                  && t->pool && !nvn_sparse_pool(t->pool) && t->d.target == NVN_TEXTURE_TARGET_2D && t->d.levels <= 1 && t->d.samples <= 1 && bw == 1 && bh == 1;
     if (lin_cpu) {
         size_t srow = t->L.layer_size / (t->d.height ? t->d.height : 1);
         if (level || layer0 + r->zoffset || nz != 1 || x0 + wb > srow || (y0 + hb) * srow > t->L.size) {
@@ -13591,8 +13606,8 @@ void mtl_read_texels(const tex_t *t, unsigned level, unsigned layer0, const NVNc
 // Whether a texture's storage is where the host takes its content from, now or once the CPU writes it: tex_mtl_'s packaged textures (a packaged layout, CPU-written, uploaded) and those
 // tex_flush_upload / tex_dirty_upload registered and has not resolved yet; not one the GPU owns. A GPU copy into such a texture is written into its storage as well (nvn_tex_mirror_b2t /
 // nvn_tex_mirror_t2t in hle_nvn.c), as the hardware's copy would, so that an upload from the storage carries the copied levels (the reasons are there): on the CPU from the source's storage
-// when that holds the source's content (tex_storage_src), else read back after the copy (mirror_readback). A linear texture counts once it is CPU-written (linear_cpu_only, one no view can
-// take): a view's copies land in the storage it is made on
+// when that holds the source's content (tex_storage_src), else read back after the copy (mirror_readback). A LINEAR texture counts once it is CPU-written (linear_storage_ok, one no view can
+// take): a view's copies land in the storage it is made on. One the GPU may render or store into does not: a GPU write makes it a GPU texture (cpu_unc_drop)
 static int tex_storage_dst(const tex_t *t) {
     if (!t->mem || !t->pool || (t->pool->flags & (NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS | NVN_MEMORY_POOL_FLAGS_VIRTUAL)) || t->d.samples > 1 || t->d.target == NVN_TEXTURE_TARGET_BUFFER
         || (t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET | NVN_TEXTURE_FLAGS_COMPRESSIBLE | NVN_TEXTURE_FLAGS_IMAGE))

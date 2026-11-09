@@ -136,6 +136,13 @@ class Host(unittest.TestCase):
         self.assertEqual(int(m.group(1)), abi.C2_SEP_SLOTS)
         self.assertEqual(abi.C2_ROW, 8)
 
+    def test_uniform_bounds_agree(self):   # the translator's size table (Ryujinx Constants.cs) is the bank and the slots the host fills (nvn_mtl.m NVN_RB_CBSIZE)
+        src = (REPO / 'dm/third_party/ryujinx/src/Ryujinx.Graphics.Shader/Constants.cs').read_text()
+        got = {n: int(v) for n, v in re.findall(r'public const int (Nx\w+) = (\d+);', src)}
+        self.assertEqual(got, {'NxFirstUniformSlot': 3, 'NxUniformSlots': abi.CBSIZE_SLOTS, 'NxUniformSizesBank': abi.CBSIZE_BANK})
+        self.assertEqual(abi.CBSIZE_SLOTS, 16 - 3 + 1, 'uniform slots c[3] to c[16], as dmsh_build.py reflects them')
+        self.assertIn('TranslationFlags.MetalUniformBounds', (REPO / 'dm/gfx/tools/dmsh_xlate/Program.cs').read_text())
+
 
 class Ratchet(unittest.TestCase):
     def test_no_new_abi_literals(self):

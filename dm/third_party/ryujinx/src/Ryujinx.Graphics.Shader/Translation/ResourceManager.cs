@@ -58,6 +58,9 @@ namespace Ryujinx.Graphics.Shader.Translation
 
         public ResourceReservations Reservations { get; }
 
+        // nxnative: TranslationFlags.MetalUniformBounds
+        public bool UniformBounds { get; set; }
+
         public ResourceManager(ShaderStage stage, IGpuAccessor gpuAccessor, ResourceReservations reservations = null)
         {
             _gpuAccessor = gpuAccessor;
@@ -66,8 +69,8 @@ namespace Ryujinx.Graphics.Shader.Translation
             _stage = stage;
             _stagePrefix = GetShaderStagePrefix(stage);
 
-            // Constant buffer banks 0-17 (Maxwell's), and 24: NVN2's push constants (c[24])
-            _cbSlotToBindingMap = new SetBindingPair[25];
+            // Constant buffer banks 0-17 (Maxwell's), 24: NVN2's push constants (c[24]), and 25: the uniform slots' sizes (Constants.NxUniformSizesBank)
+            _cbSlotToBindingMap = new SetBindingPair[Constants.NxUniformSizesBank + 1];
             // Storage buffers the global-to-storage pass found: the stage's storage buffer table and, for compute, its uniform buffer address table (NVN 16 + 16 slots)
             _sbSlotToBindingMap = new SetBindingPair[32];
             _cbSlotToBindingMap.AsSpan().Fill(new(-1, -1));
@@ -193,6 +196,35 @@ namespace Ryujinx.Graphics.Shader.Translation
                 _cbSlotToBindingMap[slot] = setAndBinding;
                 string slotNumber = slot.ToString(CultureInfo.InvariantCulture);
                 AddNewConstantBuffer(setAndBinding.SetIndex, setAndBinding.Binding, $"{_stagePrefix}_c{slotNumber}");
+
+                // nxnative: a game uniform slot's reads are bounded by the size the host puts in the size table (Constants.NxUniformSizesBank)
+                if (UniformBounds && slot >= Constants.NxFirstUniformSlot && slot < Constants.NxFirstUniformSlot + Constants.NxUniformSlots)
+                {
+                    Properties.AddBoundedConstantBuffer(setAndBinding.Binding, slot - Constants.NxFirstUniformSlot, GetUniformSizesBinding());
+                }
+            }
+
+            return setAndBinding.Binding;
+        }
+
+        // nxnative: the size table, bank Constants.NxUniformSizesBank: one u32 a game uniform slot, in uint4 data[4] (a std140 array of u32 would take 16 bytes an element)
+        private int GetUniformSizesBinding()
+        {
+            int slot = Constants.NxUniformSizesBank;
+            SetBindingPair setAndBinding = _cbSlotToBindingMap[slot];
+
+            if (setAndBinding.Binding < 0)
+            {
+                setAndBinding = _gpuAccessor.CreateConstantBufferBinding(slot);
+                _cbSlotToBindingMap[slot] = setAndBinding;
+
+                StructureType type = new(new[]
+                {
+                    new StructureField(AggregateType.Array | AggregateType.Vector4 | AggregateType.U32, "data", (Constants.NxUniformSlots + 3) / 4),
+                });
+
+                Properties.AddOrUpdateConstantBuffer(new(BufferLayout.Std140, setAndBinding.SetIndex, setAndBinding.Binding, $"{_stagePrefix}_c{slot.ToString(CultureInfo.InvariantCulture)}", type));
+                SetUsedConstantBufferBinding(setAndBinding.Binding);
             }
 
             return setAndBinding.Binding;

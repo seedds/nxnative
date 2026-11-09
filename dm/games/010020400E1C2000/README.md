@@ -45,6 +45,7 @@ Base game 1.0.0 (v0), SDK 7.3.2. Unity 2018.3.10f1 IL2CPP with FMOD on NVN. Modu
 
 - **Unity 2018.3's `Shader` layout written out** (`SHADER_2018_3`, from AssetRipper's TypeTreeDumps): [Unity Shader layouts written out for players without bundles](../../../docs/reference/shaders.md#unity-shader-layouts-written-out-for-players-without-bundles).
 - **The heap check keeps the hardware pool** for a Unity 2018.3 game that maps only inside StandardAllocator's region: [dm/games/README.md, Adding a game](../README.md#adding-a-game).
+- **Unity 2018's stream buffer handshake** takes the engine-wide load-acquires (`dm/tools/engine_patches.py`: the same four `ThreadedStreamBuffer` functions as FINAL FANTASY CRYSTAL CHRONICLES', eight sites from `main+0x73dda0`), which no Mac run of this game had needed yet; with them it boots through the logos and opening movie to the title at 60 fps (240 s from a fresh save, 2026-11-09): [Unity's stream buffer handshake loses a wake-up on Apple cores](../../../docs/reference/threads.md#unitys-stream-buffer-handshake-loses-a-wake-up-on-apple-cores).
 
 ## Open
 

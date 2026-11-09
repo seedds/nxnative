@@ -257,6 +257,13 @@ A decoder hands out as many outputs as it has slots, and while every slot is tak
 
 - H.264 (type 1) into the client's NVN texture (output 3 = RGBA, mode 2), with AAC 5.1 sound (type 4, PCM16). VideoToolbox decodes to BGRA for that mode (`mavc_set_rgba`), and AAC goes through AudioToolbox's converter with an MPEG-4 ES descriptor built from the AudioSpecificConfig in `csd-0` (as FFmpeg's AudioToolbox decoder does). Found on [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md); its end-of-stream packets and decoder deletes are in [End-of-stream packets with no data, and deleted decoders](#end-of-stream-packets-with-no-data-and-deleted-decoders).
 
+### H.264 packets are Annex B, not NAL lengths
+
+- **Symptom:** an H.264 movie is black or frozen and the log has `[RED] movie: AVC packet without an Annex B start code (… bytes), not decoded` (or `AVC parameter sets without an Annex B start code`).
+- **Cause:** the SDK's demuxer converts the MP4's length-prefixed samples to Annex B start codes before they reach the decoder, also when it hands over the `avcc` record, and its `csd-0` / `csd-1` are Annex B too. `hle_movie_avc.c` nevertheless read packets without a leading start code as 4-byte NAL lengths, a fallback no game was seen to need. The two framings cannot be told apart from the bytes: a 4-byte length from 256 to 511 begins `00 00 01`, so such a NAL was taken as Annex B with its last length byte as the NAL header. [Issue #629](https://github.com/seedds/nxnative/issues/629) reported this ambiguity from another runtime's decoder (MGS3 clips with 269- and 407-byte NALs).
+- **Fix:** `each_nal` reads only Annex B (3- or 4-byte start codes, leading zero bytes allowed); a packet or parameter set that does not begin with a start code is refused with the red line above, and `mavc_decode` returns -1. A game found to send NAL lengths would need its framing known for the stream, not guessed per packet. `t_movie_avc` runs its loops with both start-code lengths and checks the refusal.
+- **Found on:** [Kirby Star Allies](../../dm/games/01007E3006DDA000/README.md) as the check. Its `ImageMovie.mp4` has 167 of 1,386 samples whose first NAL is 256 to 511 bytes (the first at decode index 2). Through real VideoToolbox, main's parser decoded 3 of its pictures from the length-prefixed samples and all 1,386 from Annex B, so the game's movie playing in full on main shows the SDK hands over Annex B. With the change, a boot from an empty save decoded that movie with "1387 packets in, 1387 frames out" and no red line (2026-11-09, Mac, on the chain its libraries were built with).
+
 ### Vorbis movie sound
 
 - Movie sound in [The Legend of Zelda: Link's Awakening](../../dm/games/01006BB00C6F0000/README.md) (SDK 8.2.0): the decoder is asked for type 5 (Vorbis) with output format 1 (PCM16); see the other entries in this file and `hle_movie.c`.
@@ -274,6 +281,13 @@ A decoder hands out as many outputs as it has slots, and while every slot is tak
 - **Cause:** `h_movie_Flush` called `stb_vorbis_flush_pushdata` on the Vorbis decoder, which puts it into its page search mode. The packets `md_vorbis` hands it afterwards (each wrapped as one whole Ogg page) gave no sample: in a test on a generated stream, none of the next 100 packets did, whether the stream went on or started again from its first packet.
 - **Fix:** a Flush closes the Vorbis decoder, and the next packet opens it again from the headers (`md_vorbis_open`), as at the start of a stream. `t_movie_vpx` builds a small Vorbis stream, flushes twice and checks that the same samples come again.
 - **Found on:** [Super Smash Bros. Ultimate](../../dm/games/01006A800016E000/README.md) (13.0.5, iPhone: the opening movie, after the app lost focus once. [#505](https://github.com/seedds/nxnative/issues/505) reported the same silence and was closed after a reinstall, with the app having been backgrounded once in the silent session).
+
+### AV1 movies stop an M1 iPad with SIGILL in dav1d
+
+- **Symptom:** on an iPad with an M1 (the one supported chip without I8MM), the app quits at the first AV1 movie (a title or opening movie): `[dm] CRASH sig=4 addr=put_8tap_neon_i8mm+0x… lr=dav1d_recon_b_inter_8bpc+0x…`, with a `dav1d_worker_task` thread beside it. The same build plays on an M2 or newer iPad, an A17 Pro or newer iPhone, and on the Mac.
+- **Cause:** the iOS project compiled everything with `-mcpu=apple-a18`, and dav1d's `src/cpu.h` adds every feature the compiler's target promises (`__ARM_FEATURE_MATMUL_INT8`, `__ARM_FEATURE_DOTPROD`) to the features it detects at run time (`sysctl hw.optional.arm.FEAT_I8MM`, which says no on an M1). Its I8MM motion compensation then ran on a CPU without those instructions. The A18 target had been chosen only for the LSE atomics of the host's assembly.
+- **Fix:** `dm/ios/project.yml` and `dm/ios/tools/compile_check.py` build for `-mcpu=apple-m1`, the oldest chip the app supports (the games need BC textures: an M1 iPad, an iPhone from the A17 Pro) and the Mac build's default, which has LSE; dav1d picks its I8MM paths from the device at run time. `dm/ios/tests/test_cpu_target.py` asks clang what each build's target defines: LSE, and none of I8MM, BF16 or SME.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) (its title movie, on an iPad Pro 11-inch 3rd generation, M1, iPadOS 27.0.1; 2026-11-08). Every M1 iPad that plays an AV1 movie was affected.
 
 ## The Switch 2's decoder API
 

@@ -29,7 +29,8 @@
 #define DMSH_C0_SSBO_PS 0x510            // pixel stage storage buffer table
 #define DMSH_C0_SSBO_TS 0x670            // NVN2 task stage storage buffer table: Mario Kart World's task shaders read c0 0x670 and 0x680, and the game binds their buffers at slots 0 and 1
 #define DMSH_C0_SSBO_MS 0x770            // NVN2 mesh stage storage buffer table: its mesh shaders read c0 0x770, 0x780, 0x790 and 0x7b0, and it binds slots from 0
-#define DMSH_MESH_FIRST_SLOT 29          // a task or mesh function's buffer: the draw's first workgroup (dmsh_meshstage.py, nvn_geometry.inc mtk_encode)
+#define DMSH_MESH_DRAW_SLOT 29           // a task or object function's buffer: the draw's {count, first} workgroups, NVN's DrawMeshTasksIndirect record (dmsh_meshstage.py, nvn_geometry.inc mtk_encode)
+#define DMSH_MESH_GRID 1024              // Metal's limit of threadgroups in a mesh grid: a mesh shader with no task shader is drawn by an object function launching blocks of this many (dmsh_meshstage.py)
 #define DMSH_C0_DISPATCH 0x200           // compute: the dispatch's workgroup counts x, y, z (32 bits each; Link's Awakening's light culling)
 #define DMSH_C0_DISPATCH_NVN2 4          // NVN2 compute keeps them here, below its per-shader layout at 0x10 (x and y read by Fire Emblem Fortune's Weave's light culling; z by their order)
 #define DMSH_C0_CS_UBO 0x210             // compute: uniform slot r's address and size at 0x210 + 0x10 r, read through global memory (the build's ubo_ptr bindings); it ends where the storage buffer table starts
@@ -39,6 +40,11 @@
 // compute's c0 push region there); one block for the graphics stages, one for compute
 #define DMSH_PUSH_BANK 24
 #define DMSH_PUSH_SIZE 0x100             // bytes of a block
+
+// Uniform bounds: a read of a game uniform slot (c[3 + reg]) past the size the game bound gives 0, as Maxwell's constant buffers do. The translator reads each slot's bound size from
+// a table in a bank of its own (TranslationFlags.MetalUniformBounds, Ryujinx Constants.NxUniformSizesBank), which the host fills from the current bindings
+#define DMSH_CBSIZE_BANK 25
+#define DMSH_CBSIZE_SLOTS 14             // a u32 for each of uniform slots 0 to 13, as four uint4: 64 bytes
 #define DMSH_C0_POINT_SIZE 0x610         // graphics stages: the largest point size, to which GLSLC clamps a shader-written gl_PointSize (Super Mario Odyssey's point sprites)
 #define DMSH_C0_SAMPLE_TABLE 0x620       // pixel stage: GLSLC's sample position table, one byte per (pixel of the location grid, sample): x and y in 1/16 pixel, low and high nibble
 #define DMSH_C0_SAMPLE_BYTES 16          // bytes of that table
@@ -49,6 +55,7 @@
 #define DMSH_KIND_CBUF "cbuf"            // uniform buffer slot reg (c[3 + reg])
 #define DMSH_KIND_C1 "c1"                // the shader's own constant segment c[1] (its bytes are the json's c1)
 #define DMSH_KIND_DRVCB "drvcb"          // a driver segment, c[bank] (bank 0 or 2): NVN_RB_DRV0 / NVN_RB_DRV2
+#define DMSH_KIND_CBSIZE "cbsize"        // the uniform slots' bound sizes, c[DMSH_CBSIZE_BANK]: NVN_RB_CBSIZE
 #define DMSH_KIND_SUPPORT "support"      // the translator's support buffer
 #define DMSH_KIND_GEOMETRY "geometry"    // one of the geometry lowering's helper buffers, reg = its index (dmsh_geometry.py HELPERS)
 #define DMSH_KIND_SBUF "sbuf"            // storage buffer slot reg, its address in the stage's c0 table; rw = the shader writes it

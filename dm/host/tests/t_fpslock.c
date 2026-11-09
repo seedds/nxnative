@@ -59,7 +59,7 @@ static void check(int which) {
     *unity = which == 1 ? 60 : which == 4 ? -1 : which == 5 ? 0 : 30;
     uint8_t object[0x500] = {0};
     float *f = NULL; int32_t *sync = NULL;
-    if (which == 3) g_mod[0].build_id[0] = '0';
+    if (which <= 5 && which != 3) g_mod[0].unity_target_fps = 0x4afc868;   // 0 to 5: Unity's targetFrameRate where the rewriter found it (Pokémon Brilliant Diamond 1.3.0); 3: nothing found
     if (which == 6) {
         strcpy(g_mod[0].build_id, "c9a3dd7702075ecd90101f4555389582");
         *(uintptr_t *)(base + 0x1295b3f0) = (uintptr_t)object;
@@ -104,7 +104,7 @@ static void check(int which) {
         else object[0x100 - 4] = 0x07;
     } else if (which >= 25 && which <= 29) {   // Unity, at the places the rewriter found through the internal-call table (The Rogue Prince of Persia 1.1.0): vSyncCount in quality
         // level 1 of 0x100-byte levels, set to 2 (0 in 29, where the game paces by targetFrameRate), and targetFrameRate (-1; 60 in 26, 30 in 29); 28: Pokémon Brilliant Diamond's
-        // build, whose own row names the same targetFrameRate field
+        // targetFrameRate field (found from code registration, Unity 2019.4), set to 30
         if (which != 28) strcpy(g_mod[0].build_id, "0123456789abcdef0123456789abcdef");
         g_mod[0].unity_target_fps = which == 28 ? 0x4afc868 : 0x8d33de8;
         g_mod[0].unity_qs_ptr = 0x90957d8; g_mod[0].unity_qs_idx = 0x64; g_mod[0].unity_qs_arr = 0x20; g_mod[0].unity_qs_size = 0x100; g_mod[0].unity_qs_vsync = 0x88;
@@ -123,7 +123,7 @@ static void check(int which) {
         *(uintptr_t *)(base + 0x8adca10 + 0x10) = which == 13 ? 0 : (uintptr_t)object;
         sync = (int32_t *)object; sync[0] = sync[1] = which == 10 ? 1 : 2;
     }
-    int engine = which != 3 && which != 12;   // a limiter the host writes: any but another build's main (3) and a main the rewriter found no Unreal variable in (12)
+    int engine = which != 3 && which != 12;   // a limiter the host writes: any but a main the rewriter found no Unity field in (3) and one it found no Unreal variable in (12)
     if (which & 1) assert(dm_fps_lock_engine() == engine);   // the graphics layer's present cap may ask before the first present (the acquire)
     dm_fps_lock_tick();
     assert(dm_fps_lock_engine() == engine);
@@ -159,7 +159,7 @@ static void check(int which) {
             assert(*sync == 1 && *t == 120);
             test_high = 60; dm_fps_lock_tick(); assert(*sync == 1 && *t == 60);
         } else if (which == 27) assert(*sync == 2 && *t == -1 && writes == 0);   // no target: left as the game sets them, though the engine limit is there
-        else if (which == 28) assert(*sync == 1 && *unity == 60 && writes == 2);   // the build's row and the found field are the same: written once
+        else if (which == 28) assert(*sync == 1 && *unity == 60 && writes == 2);   // the count and the target, each written once
         else assert(*sync == 0 && *t == 60 && writes == 1);   // 29: a count of 0 is the game's choice to pace by targetFrameRate, which is raised
         munmap(base, len); return;
     }

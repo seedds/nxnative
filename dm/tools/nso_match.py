@@ -220,7 +220,8 @@ def validate_function(rule):
 
 def validate_stub(rule):
     """A frame-step rule (patch_nso.py MATCH_FRAME_STEP): {name, size, fingerprints, stub[, others]}, stub(ctx) writing its sites at ctx.base + offsets inside the function;
-    others = {label: {size, fingerprints}} names more functions the stub patches, each found the same way (ctx.others[label], None when not exactly one matches)"""
+    others = {label: {size, fingerprints}} names more functions the stub patches or depends on (fields it reads), each found the same way (ctx.others[label], None when not
+    exactly one matches)"""
     if not {'name', 'size', 'fingerprints', 'stub'} <= set(rule) <= {'name', 'size', 'fingerprints', 'stub', 'others'}:
         raise ValueError('a frame-step rule needs name, size, fingerprints and stub (and may name others)')
     validate_function(rule)
@@ -326,7 +327,7 @@ def registered_cuts(build_id):
     """The CUTS the patch files register for a build ID (dm/tools/sdk_patches.py, dm/games/*/patches.py), or None"""
     import glob, os, runpy
     here = os.path.dirname(os.path.abspath(__file__))
-    for path in [os.path.join(here, 'sdk_patches.py')] + sorted(glob.glob(os.path.join(here, '../games/*/patches.py'))):
+    for path in [os.path.join(here, 'sdk_patches.py')] + sorted(glob.glob(os.path.join(glob.escape(here), '../games/*/patches.py'))):   # escaped: brackets in a parent folder are a glob pattern
         cuts = runpy.run_path(path).get('CUTS', {})
         if build_id in cuts: return cuts[build_id]
     return None

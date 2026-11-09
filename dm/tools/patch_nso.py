@@ -6,7 +6,7 @@
 #   mrs tpidrro_el0     → read thread slot KTLR (Horizon ThreadLocalRegion pointer)
 #   svc #n, mrs cntpct_el0 → host gate (gate address taken from thread slot KGATE; once in C, gates.tsv is looked up by return point)
 #   sub sp, sp, xN      → xN rounded up to 16 first (Apple's kernel faults on a misaligned sp, Horizon does not; site_sp_align)
-#   ldxr rt,[rn]; cbnz rt,<it>; stxr ws,rk,[rn]; cbnz ws,<it> with no dmb after it (a test-and-set lock acquire with no acquire ordering) → ldaxr (acquire_lock_sites; the games ran on the Switch's Cortex-A57 without the ordering, Apple cores need it)
+#   ldxr* / ldxp → ldaxr* / ldaxp, stxr* / stxp → stlxr* / stlxp: every exclusive access gets acquire or release ordering (exclusive_order_sites; the games ran on the Switch's Cortex-A57 without it, Apple cores need it)
 #   the completer of Trinity's per-frame rendezvous: dmb ish between its flag store and its load of the state word (trinity_completer_sites; exactly one such function in a module, or no change)
 #   spin wait loops     → a copy whose back-edges pass a spin gate (the host yields there; a busy poll costs nothing on the Switch, see "Spin waits")
 #   Registered cuts (CUTS of the patch files, restricted by NSO build ID, see "Registered patches"): before rewriting, the original bytes are asserted one by one and any mismatch aborts; results are listed in <name>.cuts.tsv
@@ -85,17 +85,20 @@ else:
 #   MATCH_FRAME_STEP = {'main': [{name, size, fingerprints, stub}, ...]}: the frame step stubs of any main without FRAME_STEP, placed by the function they patch (nso_match.locate_stub:
 #     one complete unwind function of that size and fingerprint, or no stubs and a red line); stub(ctx) writes its sites at ctx.base + offsets inside that function. Rules are
 #     one patch's reviewed implementations (one name). Only the profile selected by DM_GAME participates, as for MATCH_CUTS. A rule's others = {label: {size, fingerprints}}
-#     are more functions its stub patches, found the same way: ctx.others[label] is the start of each, or None (a red line) when it does not match, and the stub leaves that part out
+#     are more functions its stub patches or depends on, found the same way: ctx.others[label] is the start of each, or None (a red line) when it does not match, and the stub leaves that part out
 #   MATCH_CUTS = {module name: [nso_match rule, ...]}: fallback for modules without registered CUTS. Only the profile selected by DM_GAME participates; a derived profile uses
 #     the repository's rules, an external-only provisional profile its own. Missing or ambiguous matches are reported and skipped; known builds retain their exact CUTS.
 #     A rule of several functions applies whole or not at all. For such a module <name>.match.tsv lists the cuts of the profile's registered builds of it and each patch's result,
 #     which the NSP script reports with the build (what an unregistered build lost)
 #   sdk_patches.py's MATCH_CUTS are SDK-wide: every game's module of that name whose build has no CUTS, whatever the profile (a build that must keep Nintendo's code registers an
 #     empty CUTS list). They are fixes of Nintendo's code that hold for any game on a platform with a small address space; a build without a reviewed implementation of one keeps
-#     the original code, logged but not red (games without virtual address memory never reach it)
+#     the original code, logged but not red (games without virtual address memory never reach it). engine_patches.py's MATCH_CUTS are engine-wide in the same way: fixes of
+#     middleware code (Unity, Unreal, ...) for every game's module that ships it, logged but not red where nothing matches
 #   CAPABILITIES = {build ID: (name,...)}: verified main-build features exposed by fixups metadata to the launcher
 #   BINDING = [{what, now, goal, purpose, why[, blocked or kept][, checked]}]: not read here; each patch's binding now and the loosest it could have (dm/tools/docs_patches.py "Binding", docs/agents/game-patches.md)
-PATCH_FILES = [os.path.join(os.path.dirname(os.path.abspath(__file__)), 'sdk_patches.py')] + sorted(glob.glob(os.path.join(os.path.dirname(os.path.abspath(__file__)), '../games/*/patches.py')))
+SHARED = ('sdk_patches.py', 'engine_patches.py')   # rules for every game's module of a kind: Nintendo's SDK, and engine code (their MATCH_CUTS, keyed by module name)
+PATCH_FILES = [os.path.join(os.path.dirname(os.path.abspath(__file__)), f) for f in SHARED] + sorted(glob.glob(os.path.join(glob.escape(os.path.dirname(os.path.abspath(__file__))), '../games/*/patches.py')))
+# Every folder given to glob is escaped: brackets in a parent folder (`Game [0400486024DEC000][v131072]`) are a character class to glob, and the search would find nothing
 # Profiles outside the repository (DM_GAMES_DIR, folders separated by os.pathsep, which is ':' as in dm/games/game.py: the NSP script's provisional profile of a game being brought up) may have a
 # patches.py of their own builds too; they are loaded after the repository's, under the same rule (a build ID claimed twice stops the rewrite)
 PATCH_FILES += [p for d in os.environ.get('DM_GAMES_DIR', '').split(os.pathsep) if d for p in sorted(glob.glob(os.path.join(glob.escape(d), '*', 'patches.py')))]
@@ -108,11 +111,11 @@ def load_patches():
         spec = importlib.util.spec_from_file_location(f'patches_{n}', path); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
         for kind, table in tables.items():
             if kind == 'SDK_MATCH_CUTS': continue
-            if kind == 'MATCH_CUTS' and os.path.basename(path) == 'sdk_patches.py':   # SDK-wide
-                tables['SDK_MATCH_CUTS'] = getattr(m, kind, {})
+            if kind == 'MATCH_CUTS' and os.path.basename(path) in SHARED:   # SDK-wide and engine-wide
+                for mod, rules in getattr(m, kind, {}).items(): tables['SDK_MATCH_CUTS'].setdefault(mod, []).extend(rules)
                 continue
             if kind in ('MATCH_CUTS', 'MATCH_FRAME_STEP'):
-                if os.path.basename(path) == 'sdk_patches.py': continue
+                if os.path.basename(path) in SHARED: continue
                 profile = os.path.basename(os.path.dirname(path))
                 roots = [os.path.join(os.path.dirname(os.path.abspath(__file__)), '../games')] + [d for d in os.environ.get('DM_GAMES_DIR', '').split(os.pathsep) if d]
                 profile_dir = next((os.path.join(root, profile) for root in roots if os.path.isdir(os.path.join(root, profile))), None)
@@ -203,6 +206,15 @@ for _c in UE_CALLS or ():
     struct.pack_into('<I', IMG, _c, NOP)
 if UE_CALLS: print(f'{NAME}: {ue_why}')
 elif ue_why.startswith('[RED] '): print(f'[RED] {NAME}: {ue_why[6:]}: Unreal\'s own allocator runs')
+
+# ---- Unity's ALLOC_BUCKET BucketAllocator (main: dm/tools/unity_bucket.py finds its construction by the allocator's name, without a build ID) ----
+# Unity 2019 reserves (255 + 1) x 4 MB for it at once; its block limit is cut to what 256 MB holds (a platform limit: an iPhone's alias region is 4.375 GB)
+import unity_bucket
+UB_CUT, ub_why = unity_bucket.find(bytes(IMG), TEXT_END, RO_OFF, DATA_OFF) if NAME == 'main' else (None, '')
+if UB_CUT:
+    cuts.append(UB_CUT); IMG[UB_CUT[0]:UB_CUT[0] + 4] = bytes.fromhex(UB_CUT[2])
+    print(f'{NAME}: {ub_why}')
+elif ub_why.startswith('[RED] '): print(f'[RED] {NAME}: {ub_why[6:]}: its whole reservation stays')
 
 # ---- Snowdrop's three-pool page allocator (main: dm/tools/snowdrop_pools.py finds its constructor by its structure, without a build ID) ----
 # Its 12 GB of address ranges become the sizes the profile decides on (snowdrop_pools, measured against the game's regions)
@@ -648,26 +660,27 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import nso_code
 DATA_BLOCKS = nso_code.data_blocks(IMG, TEXT_END, md)
 CODE_RANGES = list(zip([0] + [e for _, e in DATA_BLOCKS], [s for s, _ in DATA_BLOCKS] + [TEXT_END]))
-def acquire_lock_sites(img, ranges):
-    """Offsets of exclusive test-and-set lock acquires without acquire ordering: ldxr rt,[rn]; cbnz rt,<the ldxr>; stxr ws,rk,[rn]; cbnz ws,<the ldxr> (w or x, rk not zero), not followed by
-    dmb ish / dmb ishld (Tears of the Kingdom's and Super Mario Bros. Wonder's locks of this shape all are, which orders them already). Armv8 lets the loads after such a lock be satisfied
-    before it is held; the games ran on the Switch's Cortex-A57 without that showing, Apple cores do it, so two threads take the same queue item (Breath of the Wild 1.6.0 main: 412 of this shape counted without the barrier check,
-    the job queue pop at main+0x13a0784 ran one job on two threads, see docs/reference/threads.md). Nintendo's own SDK locks use ldaxr"""
+def exclusive_order_sites(img, ranges):
+    """Offsets of the exclusive loads and stores without ordering: ldxr / ldxrb / ldxrh / ldxp and stxr / stxrb / stxrh / stxp, any size (each with its fixed fields exact; not CAS or CASP).
+    Setting bit 15 makes each the same instruction with ordering: ldaxr* / ldaxp (acquire) and stlxr* / stlxp (release). Armv8 lets the accesses after an exclusive load without acquire
+    be satisfied before it, and those before an exclusive store without release be seen after it. The games ran on the Switch's Cortex-A57 without that showing, Apple cores do both:
+    a lock taken with ldxr / stxr let two threads take the same queue item (Breath of the Wild 1.6.0's job queue pop at main+0x13a0784), and on an Apple M6 a plain store published
+    with stxr or stxp was read stale 12,858 and 10,961 times in 100 million rounds, never with stlxr or stlxp (docs/reference/threads.md). Every one is upgraded, with no shape list:
+    ordering only removes outcomes, and an atomic increment cost the same with stlxr as with stxr there. Nintendo's own SDK atomics already use the ordered forms"""
     out = []
     for s, e in ranges:
-        for o in range(s, e - 12, 4):
+        for m in re.finditer(rb'[\x08\x48\x88\xC8]', img[s:e]):   # the top byte of every form: size << 6 | 0x08
+            o = s + m.start() - 3
+            if o & 3 or o < s: continue
             w = struct.unpack_from('<I', img, o)[0]
-            if w & 0xBFFFFC00 != 0x885F7C00: continue
-            c1, st, c2 = struct.unpack_from('<III', img, o + 4)
-            rt, rn, rs, rk = w & 31, w >> 5 & 31, st >> 16 & 31, st & 31
-            cbnz = lambda x, r, back: x & 0x7F00001F == 0x35000000 | r and x >> 5 & 0x7FFFF == 0x80000 - back   # cbnz r, <the ldxr>: back words
-            fenced = o + 20 <= e and struct.unpack_from('<I', img, o + 16)[0] in (0xD5033BBF, 0xD50339BF)   # dmb ish, dmb ishld right after the loop
-            if cbnz(c1, rt, 1) and cbnz(c2, rs, 3) and st & 0xBFE0FC00 == 0x88007C00 and st >> 5 & 31 == rn and rk != 31 and rs not in (rn, rk) and not fenced:
+            if (w & 0x3FFFFC00 == 0x085F7C00 or w & 0xBFFF8000 == 0x887F0000           # ldxr* (Rs and Rt2 all ones), ldxp (Rs all ones)
+                    or w & 0x3FE0FC00 == 0x08007C00 or w & 0xBFE08000 == 0x88200000):   # stxr* (Rt2 all ones), stxp
                 out.append(o)
     return out
-for o in acquire_lock_sites(IMG, CODE_RANGES):
-    struct.pack_into('<I', IMG, o, struct.unpack_from('<I', IMG, o)[0] | 0x8000)   # ldxr → ldaxr
-    stat('acquire_lock')
+ORDERED = set(exclusive_order_sites(IMG, CODE_RANGES))   # changed_runs leaves these out: a cheat that writes over one runs its own instruction, which no site depends on
+for o in ORDERED:
+    struct.pack_into('<I', IMG, o, struct.unpack_from('<I', IMG, o)[0] | 0x8000)   # ldxr → ldaxr, stxr → stlxr, ldxp → ldaxp, stxp → stlxp
+if ORDERED: stats['exclusive_ordered'] = len(ORDERED)
 def trinity_completer_sites(img, ranges):
     """Offsets of the completer of Trinity's per-frame rendezvous (Game Freak; Pokémon Scarlet 1.0.0 main+0x28f872c, 4.0.0 main+0x2d0010c):
       stp x29,x30,[sp,#-0x20]!; stp x20,x19,[sp,#0x10]; mov x29,sp; ldr x8,[x0,#imm]; mov w9,#1; strb w9,[x8,#A]; ldrb w9,[x8,#A+1]; cbz w9,..;
@@ -1544,7 +1557,9 @@ obs += region_obs
 # stub holds full resolution (DM_DYNAMIC_RESOLUTION, written by the loader; the stub declares the DYNAMIC_RESOLUTION capability). Stub bodies assembled with clang
 # A build's stubs are FRAME_STEP[build ID](ctx) in its patches.py: ctx.here() / ctx.emit(word) assemble into the patch area, ctx.site(offset, original bytes) asserts a site and that it is
 # no rewrite site, ctx.put(offset, words, reason) writes it (listed with the cuts), ctx.state is the state page's offset, ctx.render_scale = 1 marks a render-scale stub,
-# ctx.others the other functions a MATCH_FRAME_STEP rule names, and ctx.capabilities.add(name) declares a launcher capability the stubs provide (written as CAPABILITIES are)
+# ctx.others the other functions a MATCH_FRAME_STEP rule names, ctx.address(offset) the data address an adrp there and the add / load / store after it make (in the original
+# text: the fingerprints mask those pages, so a matched stub reads the globals it needs from its functions), and ctx.capabilities.add(name) declares a launcher capability the
+# stubs provide (written as CAPABILITIES are)
 FRAME_STEP = PATCHES['FRAME_STEP']
 FS_STATE_OFF = 0
 RENDER_SCALE = 0   # 1 = the build has a render-scale stub (state +0x10): the fixups table says so (RENDER_SCALE), and the iOS launcher offers the setting (dm/games/settings.tsv)
@@ -1565,9 +1580,18 @@ if (BUILD_ID in FRAME_STEP or FS_MATCH) and NAME == 'main':
         old = bytes(IMG[off:off + 4 * len(words)])
         for i, w in enumerate(words): struct.pack_into('<I', IMG, off + 4 * i, w)
         cuts.append((off, old.hex(), bytes(IMG[off:off + 4 * len(words)]).hex(), why + (' [function match]' if FS_MATCH else ''))); stat('frame_step')
+    def fs_address(off):   # the data address the adrp at off and the add / unsigned-offset load or store right after it (on the adrp's register) make, from the original text
+        a, b = struct.unpack_from('<2I', ORIG_TEXT, off)
+        assert a & 0x9f000000 == 0x90000000, f'frame step: no adrp at {off:#x}'
+        imm = (((a >> 5) & 0x7ffff) << 2 | (a >> 29) & 3) << 12
+        page = (off & ~0xfff) + (imm - (1 << 33) if imm & 1 << 32 else imm)
+        assert (b >> 5) & 31 == a & 31, f'frame step: the instruction after the adrp at {off:#x} does not use its register'
+        if b & 0xffc00000 == 0x91000000: return page + ((b >> 10) & 0xfff)                       # add xD, xN, #imm
+        assert b & 0x3b000000 == 0x39000000, f'frame step: no add, load or store after the adrp at {off:#x}'
+        return page + ((b >> 10) & 0xfff) * (1 << (b >> 30)) * (16 if b & 0x04800000 == 0x04800000 and b >> 30 == 0 else 1)   # scaled by the access size (q: 16)
 if FS_STATE_OFF:   # the build's stubs (FRAME_STEP of its patches.py), or those placed by their function (MATCH_FRAME_STEP: ctx.base is its start)
     use_area(0); fs = types.SimpleNamespace(here=here, emit=emit, site=fs_site, put=fs_put, state=FS_STATE_OFF, render_scale=0, base=FS_MATCH[1] if FS_MATCH else 0,
-                                            others=FS_MATCH[2] if FS_MATCH else {}, capabilities=set())
+                                            others=FS_MATCH[2] if FS_MATCH else {}, capabilities=set(), address=fs_address)
     (FS_MATCH[0]['stub'] if FS_MATCH else FRAME_STEP[BUILD_ID])(fs); RENDER_SCALE = fs.render_scale; FS_CAPABILITIES = fs.capabilities
 
 # ---- Spin waits (every module) ----
@@ -1891,7 +1915,7 @@ else:
     open(P('patched.bin'), 'wb').write(IMG + bytearray(PATCH_OFF - len(IMG)) + patch)
 import hashlib
 with open(os.path.join(outdir, 'build_src.sha256'), 'w') as f:   # the same for every module: the rewriter and every patch file, by path from dm/tools
-    for src_ in (os.path.abspath(__file__), nso.__file__, nso_code.__file__, nso_asm.__file__, ue_cvar.__file__, ue_malloc.__file__, fps_target.__file__, ue_fixed_rate.__file__, unity_fps.__file__, ue_region.__file__, ue_ring.__file__, snowdrop_pools.__file__, os.path.join(os.path.dirname(ue_malloc.__file__), 'loader_census.py'), *PATCH_FILES): f.write(hashlib.sha256(open(src_, 'rb').read()).hexdigest() + f'  {os.path.relpath(os.path.abspath(src_), os.path.dirname(os.path.abspath(__file__)))}\n')
+    for src_ in (os.path.abspath(__file__), nso.__file__, nso_code.__file__, nso_asm.__file__, ue_cvar.__file__, ue_malloc.__file__, fps_target.__file__, ue_fixed_rate.__file__, unity_fps.__file__, unity_bucket.__file__, ue_region.__file__, ue_ring.__file__, snowdrop_pools.__file__, os.path.join(os.path.dirname(ue_malloc.__file__), 'loader_census.py'), *PATCH_FILES): f.write(hashlib.sha256(open(src_, 'rb').read()).hexdigest() + f'  {os.path.relpath(os.path.abspath(src_), os.path.dirname(os.path.abspath(__file__)))}\n')
 with open(P('fixups.tsv'), 'w') as f:
     f.write(f'# PATCH_OFF\t{PATCH_OFF:#x}\n# KEY_PAGE_OFF\t{KEY_PAGE_OFF:#x}\n# KEY_PAGE_SIZE\t0x4000\n# TEXT_END\t{TEXT_END:#x}\n# RO_OFF\t{RO_OFF:#x}\n# DATA_OFF\t{DATA_OFF:#x}\n')
     if FAR: f.write(f'# IMAGE_SIZE\t{IMAGE_SIZE:#x}\n# FILE_IMAGE_LEN\t{FILE_IMAGE_LEN:#x}\n')   # patch area before the base (negative PATCH_OFF): whole image size, length of the image part of the file
@@ -1922,15 +1946,16 @@ with open(P('sites.tsv'), 'w') as f:
 with open(P('cuts.tsv'), 'w') as f:
     f.write(f'# BUILD_ID\t{BUILD_ID}\n')
     for off, ob, nb, why in cuts: f.write(f'{off:#x}\t{ob}\t{nb}\t{why}\n')   # Columns: offset, original bytes, new bytes, reason
-# The text words whose instructions no longer run as the file has them: every word this rewriter changed (sites, cuts, lock
-# acquires, jump tables), the windows whose copies in the patch area run instead, and the spin waits' instructions, which run
+# The text words whose instructions no longer run as the file has them: every word this rewriter changed (sites, cuts,
+# jump tables; not an exclusive access that only gained ordering), the windows whose copies in the patch area run instead, and the spin waits' instructions, which run
 # from their copies after the first pass. Runs of offset and length; the host's cheat engine refuses a write into any of them
 # (hle_cheats.c main_write_pages: a cheat's instruction there would undo a site or never run)
 def changed_runs():
     words = set()
     for o in range(0, TEXT_END, 0x1000):   # whole blocks first: almost all of the text is unchanged
         if IMG[o:o + 0x1000] != ORIG_TEXT[o:o + 0x1000]:
-            words.update(w for w in range(o, min(o + 0x1000, TEXT_END), 4) if IMG[w:w + 4] != ORIG_TEXT[w:w + 4])
+            words.update(w for w in range(o, min(o + 0x1000, TEXT_END), 4) if IMG[w:w + 4] != ORIG_TEXT[w:w + 4]
+                         and not (w in ORDERED and struct.unpack_from('<I', IMG, w)[0] == struct.unpack_from('<I', ORIG_TEXT, w)[0] | 0x8000))   # ordering alone
     for wseg in windows: words.update(range(wseg[0].address, wseg[-1].address + 4, 4))
     for g in spin_regions:
         for a in g['R']:

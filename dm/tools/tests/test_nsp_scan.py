@@ -276,6 +276,13 @@ class Merged(unittest.TestCase):
             nsp.extract_aoc('nx', 'k', REPO, self.tmp / 'work', APP, {'dlc': [(APP + 0x1001, 65536, m)]}, self.tmp / 'logs')
         self.assertEqual(calls[0][-1], f'{APP + 0x1001:016x}')
 
+    def test_a_programs_dlc_are_the_applications(self):   # program 1 (app + 1) asks for the application's DLC by their index from the application: DLC …1001 is 1.img, not 0.img
+        m = self.merged_nsp(); made = []
+        def fake_run(cmd, log, **k): made.append(Path(cmd[4]).name); Path(cmd[4]).parent.mkdir(parents=True, exist_ok=True); Path(cmd[4]).write_bytes(b'img')
+        with mock.patch.object(nsp, 'run', fake_run), mock.patch.object(nsp, 'PROG', mock.MagicMock()):
+            nsp.extract_aoc('nx', 'k', REPO, self.tmp / 'work', APP + 1, {'dlc': [(APP + 0x1001, 0, m), (APP + 0x1002, 0, m)]}, self.tmp / 'logs')
+        self.assertEqual(made, ['1.img', '2.img'])
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -177,6 +177,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             // A rows g and g + 8, every k: from lanes 4g + j (j = 0..3), which hold k = 2j, 2j + 1 (+ 8)
             Operand[,] a = new Operand[2, 16];
+            Operand[,] aWord = new Operand[2, 16];   // the packed pair holding a[row, kk]: half kk & 1 of it
 
             for (int j = 0; j < 4; j++)
             {
@@ -188,11 +189,13 @@ namespace Ryujinx.Graphics.Shader.Instructions
                     int row = r & 1, kb = (r >> 1) * 8 + 2 * j;
                     a[row, kb] = AHalf(context, v, 0);
                     a[row, kb + 1] = AHalf(context, v, 1);
+                    aWord[row, kb] = aWord[row, kb + 1] = v;
                 }
             }
 
             // B columns 2t and 2t + 1, every k: from lanes 4 col + j, which hold k = 2j, 2j + 1 (+ 8)
             Operand[,] b = new Operand[2, 16];
+            Operand[,] bWord = new Operand[2, 16];
 
             for (int c = 0; c < 2; c++)
             {
@@ -208,6 +211,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                         int kb = r * 8 + 2 * j;
                         b[c, kb] = AHalf(context, v, 0);
                         b[c, kb + 1] = AHalf(context, v, 1);
+                        bWord[c, kb] = bWord[c, kb + 1] = v;
                     }
                 }
             }
@@ -228,9 +232,11 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             if (f32)
             {
+                Operand[] d = AHmmaF32(context, x, k, aWord, bWord, acc);
+
                 for (int i = 0; i < 4 && x.Rd + i < RegisterConsts.RegisterZeroIndex; i++)
                 {
-                    context.Copy(Register(x.Rd + i, RegisterType.Gpr), acc[i]);
+                    context.Copy(Register(x.Rd + i, RegisterType.Gpr), d[i]);
                 }
             }
             else
@@ -240,6 +246,118 @@ namespace Ryujinx.Graphics.Shader.Instructions
                     context.Copy(Register(x.Rd + row, RegisterType.Gpr), context.PackHalf2x16(acc[row * 2], acc[row * 2 + 1]));
                 }
             }
+        }
+
+        // nxnative: HMMA with an f32 accumulator adds as Ampere's tensor core does (the A100 model of Khattak and Mikaitis, "Accurate models of NVIDIA tensor cores",
+        // 2025, and their MATLAB-tensor-core toolbox; it matches all 4,096 lanes a Jetson Orin computed): the products are exact; each block of 8 products and C (the
+        // previous block's result for the second block of k16) are aligned to the largest exponent with 24 fraction bits (one more than f32's), every bit below truncated,
+        // summed exactly, and the sum truncated to f32 (round toward zero). The FMA chain (round to nearest after every product) was 1 ULP off in two thirds of the lanes,
+        // thousands where the alignment drops a small product. Integer operations on the bits, so Metal's fast math cannot change it; an Inf or NaN operand takes the chain.
+        private static Operand[] AHmmaF32(EmitterContext context, AmpereOp x, int k, Operand[,] aWord, Operand[,] bWord, Operand[] chain)
+        {
+            var aPart = new (Operand Sig, Operand Exp, Operand Sign, Operand Field)[2, 16];
+            var bPart = new (Operand Sig, Operand Exp, Operand Sign, Operand Field)[2, 16];
+            Operand[] aMaxField = new Operand[2], bMaxField = new Operand[2];
+
+            for (int r = 0; r < 2; r++)
+            {
+                for (int kk = 0; kk < k; kk++)
+                {
+                    aPart[r, kk] = AHalfParts(context, aWord[r, kk], kk & 1, 4);
+                    bPart[r, kk] = AHalfParts(context, bWord[r, kk], kk & 1, 0);
+                    aMaxField[r] = kk == 0 ? aPart[r, kk].Field : context.IMaximumU32(aMaxField[r], aPart[r, kk].Field);
+                    bMaxField[r] = kk == 0 ? bPart[r, kk].Field : context.IMaximumU32(bMaxField[r], bPart[r, kk].Field);
+                }
+            }
+
+            Operand[] d = new Operand[4];
+
+            for (int i = 0; i < 4; i++)
+            {
+                int row = i >> 1, c = i & 1;
+                Operand[] mag = new Operand[k], exp = new Operand[k], sign = new Operand[k];
+
+                for (int kk = 0; kk < k; kk++)
+                {
+                    mag[kk] = context.IMultiply(aPart[row, kk].Sig, bPart[c, kk].Sig);    // < 2^26: 20 fraction bits, << 4 (A's significands are shifted)
+                    exp[kk] = context.IAdd(aPart[row, kk].Exp, bPart[c, kk].Exp);        // f16 biased exponents' sum; the f32 biased exponent is 97 more
+                    sign[kk] = context.BitwiseExclusiveOr(aPart[row, kk].Sign, bPart[c, kk].Sign);
+                }
+
+                Operand cIn = AGpr(x.Rc + i);
+                Operand res = cIn;
+
+                for (int blk = 0; blk < k; blk += 8)
+                {
+                    res = AHmmaF32Block(context, mag[blk..(blk + 8)], exp[blk..(blk + 8)], sign[blk..(blk + 8)], res);
+                }
+
+                // An f16 Inf or NaN (exponent field 31) among this output's A row and B column, or an f32 one in C
+                Operand special = context.BitwiseOr(
+                    context.ICompareEqual(context.IMaximumU32(aMaxField[row], bMaxField[c]), Const(31)),
+                    context.ICompareEqual(context.BitwiseAnd(cIn, Const(0x7f800000)), Const(0x7f800000)));
+                d[i] = context.ConditionalSelect(special, chain[i], res);
+            }
+
+            return d;
+        }
+
+        // Half `half` of packed pair w: (significand << sigShift, exponent field with denormals at 1 and zeros at -256 (so a zero product never sets a block's exponent),
+        // sign as 0 or -1, the exponent field)
+        private static (Operand Sig, Operand Exp, Operand Sign, Operand Field) AHalfParts(EmitterContext context, Operand w, int half, int sigShift)
+        {
+            int o = half * 16;
+            Operand field = context.BitfieldExtractU32(w, Const(o + 10), Const(5));
+            Operand frac = context.BitfieldExtractU32(w, Const(o), Const(10));
+            Operand sig = context.BitwiseOr(context.ShiftLeft(frac, Const(sigShift)), context.ShiftLeft(context.IMinimumU32(field, Const(1)), Const(10 + sigShift)));
+            Operand exp = context.ConditionalSelect(context.ICompareEqual(sig, Const(0)), Const(-256), context.IMaximumU32(field, Const(1)));
+            Operand sign = context.BitfieldExtractS32(w, Const(o + 15), Const(1));
+
+            return (sig, exp, sign, field);
+        }
+
+        // One block: 8 products (magnitude with 24 fraction bits below 2^exp, exponent on the products' scale, sign 0 / -1) and C (f32 bits) aligned to the largest
+        // exponent, truncated, summed, and the sum truncated to f32 bits. |sum| < 9 * 2^26 fits in an int.
+        private static Operand AHmmaF32Block(EmitterContext context, Operand[] mag, Operand[] exp, Operand[] sign, Operand c)
+        {
+            Operand cField = context.BitfieldExtractU32(c, Const(23), Const(8));
+            Operand cMag = context.ShiftLeft(context.BitwiseOr(context.BitwiseAnd(c, Const(0x7fffff)), context.ShiftLeft(context.IMinimumU32(cField, Const(1)), Const(23))), Const(1));
+            Operand cExp = context.ConditionalSelect(context.ICompareEqual(context.BitwiseAnd(c, Const(0x7fffffff)), Const(0)), Const(-512),
+                                                     context.ISubtract(context.IMaximumU32(cField, Const(1)), Const(97)));
+            Operand cSign = context.ShiftRightS32(c, Const(31));
+
+            Operand max = cExp;
+
+            for (int j = 0; j < mag.Length; j++)
+            {
+                max = context.IMaximumS32(max, exp[j]);
+            }
+
+            Operand Aligned(Operand m, Operand e, Operand s)
+            {
+                Operand v = context.ShiftRightU32(m, context.IMinimumU32(context.ISubtract(max, e), Const(31)));
+                return context.ISubtract(context.BitwiseExclusiveOr(v, s), s);
+            }
+
+            Operand sum = Aligned(cMag, cExp, cSign);
+
+            for (int j = 0; j < mag.Length; j++)
+            {
+                sum = context.IAdd(sum, Aligned(mag[j], exp[j], sign[j]));
+            }
+
+            // value = |sum| * 2^(max + 97 - 127 - 24); its leading bit p gives the f32 biased exponent max + 73 + p, here less 1 (the significand's bit 23 adds it back).
+            // Below the normal range the f32 bits are |sum| * 2^(max + 95): the same shift with the exponent's deficit added
+            Operand m = context.IAbsolute(sum);
+            Operand p = context.FindMSBU32(m);
+            Operand e1 = context.IAdd(max, context.IAdd(p, Const(72)));
+            Operand shift = context.ISubtract(context.IAdd(Const(23), context.IMinimumS32(e1, Const(0))), p);
+            Operand n = context.ShiftRightU32(context.ShiftLeft(m, context.IMaximumS32(shift, Const(0))), context.IMaximumS32(context.INegate(shift), Const(0)));
+            Operand bits = context.IAdd(context.ShiftLeft(context.IMaximumS32(e1, Const(0)), Const(23)), n);
+            bits = context.ConditionalSelect(context.ICompareGreaterOrEqual(e1, Const(254)), Const(0x7f800000), bits);
+            bits = context.BitwiseOr(bits, context.BitwiseAnd(sum, Const(unchecked((int)0x80000000))));
+
+            return context.ConditionalSelect(context.ICompareEqual(sum, Const(0)), Const(0), bits);
         }
 
         // LDSM.16.M88.n / .MT88.n Rd, [Ra + UR + offset]: n (72..74: 1, 2, 4) 8 x 8 matrices of halves from shared memory; lanes 8i .. 8i + 7 give the addresses of

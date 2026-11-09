@@ -2,12 +2,13 @@
 spellings (a product with 1.0 / w either way round, a quotient) and not when a name is assigned twice or the components come from different outputs; screen_varyings finds the
 clip → screen varying ((x + w) / 2, (w − y) / 2, ·, w) of gl_Position in every vertex entry point, after branches, and not with a flipped y, another w, an assignment in a branch,
 an early return or a uniform coefficient; a sample at gl_FragCoord.xy [/ render scale] times a uniform is marked 'frag_pos' with its uniform references, and not at another
-position, scale or uniform; the variants compile for the Mac and the iPhone. With --fixture <dir>, writes t_feedback.m's tile-read shaders: fb_vs.metal, fb_fs.metal, the variant
-library fedcba9876543210_bf.metallib and facts.json (the vertex shader's screen varyings and the fragment shader's calls), and the pixel-position shader fb_pos.metal with its
-variant fedcba9876543211_bf.metallib and pos.json"""
+position, scale or uniform; the readable-tile version main0_f compiles for the Mac and the iPhone, beside the other entry points calling main0's body (main0_d, a compile unit's), with
+only the body rewritten and main0 without function constants. With --fixture <dir>, writes t_feedback.m's tile-read shaders: fb_vs.metal, fb_fs.metal, the readable-tile library
+fedcba9876543210_bf.metallib (main0_f, cut from the shader's compile as the build cuts it) and facts.json (the vertex shader's screen varyings and the fragment shader's calls), the
+pixel-position shader fb_pos.metal with fedcba9876543211_bf.metallib and pos.json, and the output-mapping-only fedcba9876543212_bf.metallib with om.json"""
 import json, pathlib, subprocess, sys, tempfile, unittest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / 'tools'))
-import dmsh_abi, dmsh_fetch
+import dmsh_abi, dmsh_fetch, dmsh_side, pso_offline
 
 # Breath of the Wild's decal vertex shader 095cd6ad97fd779a as spirv-cross writes it, cut down (a full-screen triangle with w = 2 in place of the decal box), and a branch first,
 # as Tears of the Kingdom's bb19fab2f950e587 has
@@ -149,6 +150,26 @@ fragment main0_out main0(constant spvDescriptorSetBuffer0& spvDescriptorSet0 [[b
 """
 POS_KEY = 'fedcba9876543211'
 
+# Output-mapping-only: no rewritable sample, but the host still needs a readable-tile version so colour
+# outputs can move (bf_want.tsv / om_only_ok). Magenta on color(0); main0_f remaps it through OM_0_k.
+FS_OM = """#include <metal_stdlib>
+using namespace metal;
+
+struct main0_out
+{
+    float4 m_46 [[color(0)]];
+};
+
+fragment main0_out main0()
+{
+    main0_out out = {};
+    out.m_46 = float4(1.0, 0.0, 1.0, 1.0);
+    return out;
+}
+"""
+OM_KEY = 'fedcba9876543212'
+
+
 
 def compile_lib(src, root, name, sdk='macosx'):   # → the library path; CalledProcessError with the compiler's message
     msl = root / (name + '.metal'); msl.write_text(src); air = root / (name + '.' + sdk + '.air'); lib = root / (name + '.metallib')
@@ -160,7 +181,7 @@ def compile_lib(src, root, name, sdk='macosx'):   # → the library path; Called
 
 class ProjectiveSample(unittest.TestCase):
     def calls(self, src):
-        v, meta = dmsh_fetch.variant(src, BINDINGS)
+        v, meta = dmsh_fetch.fold(src, BINDINGS)
         return meta if v is None else meta['calls']
 
     def test_product_with_reciprocal(self):
@@ -171,9 +192,11 @@ class ProjectiveSample(unittest.TestCase):
         self.assertEqual(self.calls(FS.replace('float _69 = _59 * _67;', 'float _69 = _59 / _57;').replace('float _71 = _61 * _67;', 'float _71 = _61 / _57;'))[0].get('proj'), 1)
 
     def test_rewritten_like_a_plain_sample(self):
-        v, _ = dmsh_fetch.variant(FS, BINDINGS)
-        self.assertIn('(FX_0 == 0 ? fb0 : ', v)
+        v, _ = dmsh_fetch.fold(FS, BINDINGS)
+        self.assertIn('(fx0 == 0 ? fb0 : ', v)
         self.assertIn('float4 fb0 [[color(0), function_constant(FB_0)]]', v)
+        self.assertIn('fragment main0_out_f main0_f(', v)
+        self.assertIn('static __attribute__((always_inline)) main0_out dm_body_main0(', v)
 
     def test_not_rewritten(self):
         for why, src in (('a name assigned twice', FS.replace('    float2 _309', '    _69 = 0.5;\n    float2 _309')),
@@ -183,7 +206,7 @@ class ProjectiveSample(unittest.TestCase):
             with self.subTest(why=why): self.assertEqual(self.calls(src), 'no rewritable sample')
 
     def test_compiles_on_both_platforms(self):
-        v, _ = dmsh_fetch.variant(FS, BINDINGS)
+        v, _ = dmsh_fetch.fold(FS, BINDINGS)
         with tempfile.TemporaryDirectory() as d:
             for sdk in ('macosx', 'iphoneos'):
                 with self.subTest(sdk=sdk):
@@ -193,7 +216,7 @@ class ProjectiveSample(unittest.TestCase):
 
 class PixelPositionSample(unittest.TestCase):
     def calls(self, src):
-        v, meta = dmsh_fetch.variant(src, BINDINGS)
+        v, meta = dmsh_fetch.fold(src, BINDINGS)
         return meta if v is None else meta['calls']
 
     def test_over_the_render_scale(self):
@@ -202,6 +225,11 @@ class PixelPositionSample(unittest.TestCase):
     def test_without_the_render_scale_and_uniform_first(self):
         src = FS_POS.replace('    float _47 = _43 / _45;\n', '').replace('_47 * (*spvDescriptorSet0.fp_c3)._m0[6].x', '(*spvDescriptorSet0.fp_c3)._m0[6].x * _43')
         self.assertEqual(self.calls(src)[0]['frag_pos'], [[0, 6, 0], [0, 6, 1]])
+
+    def test_through_the_uniform_bounds(self):   # the translator's bounded read (TranslationFlags.MetalUniformBounds, GitHub issue #1860), in parentheses as a product writes it
+        v, meta = dmsh_fetch.fold(guarded(FS_POS), BINDINGS)
+        self.assertEqual(meta['calls'], [{'fc': 0, 'tex_reg': 0, 'frag_pos': [[0, 6, 0], [0, 6, 1]]}])
+        self.assertIn(GUARD.format(w=24, r='(*spvDescriptorSet0.fp_c3)._m0[6].x'), v, 'the compiled source keeps the guard')
 
     def test_not_rewritten(self):
         for why, src in (('y from x', FS_POS.replace('float _49 = gl_FragCoord.y;', 'float _49 = gl_FragCoord.x;')),
@@ -213,13 +241,43 @@ class PixelPositionSample(unittest.TestCase):
             with self.subTest(why=why): self.assertEqual(self.calls(src), 'no rewritable sample')
 
     def test_compiles_on_both_platforms(self):
-        v, _ = dmsh_fetch.variant(FS_POS, BINDINGS)
+        v, _ = dmsh_fetch.fold(FS_POS, BINDINGS)
         with tempfile.TemporaryDirectory() as d:
             for sdk in ('macosx', 'iphoneos'):
                 with self.subTest(sdk=sdk):
                     try: compile_lib(v, pathlib.Path(d), 'pos_' + sdk, sdk)
                     except subprocess.CalledProcessError as e: self.fail(e.stderr)
 
+
+# A uniform read as the translator bounds it: the word when the slot's size in words (the size table, bank DMSH_CBSIZE_BANK) holds its index w, else 0
+GUARD = '(({w}u < ((*spvDescriptorSet0.fp_c%d)._m0[0].x >> 2u)) ? {r} : 0.0)' % dmsh_abi.CBSIZE_BANK
+
+def guarded(src):   # FS_POS with its two c[6] words bounded, and the size table declared
+    for c, w in (('x', 24), ('y', 25)): src = src.replace('(*spvDescriptorSet0.fp_c3)._m0[6].%s' % c, GUARD.format(w=w, r='(*spvDescriptorSet0.fp_c3)._m0[6].%s' % c))
+    return src.replace('struct spvDescriptorSetBuffer0', 'struct _23\n{\n    uint4 _m0[4];\n};\n\nstruct spvDescriptorSetBuffer0').replace(
+        '    sampler fp_t_tcb_8Smplr_w [[id(5)]];', '    sampler fp_t_tcb_8Smplr_w [[id(5)]];\n    constant _23* fp_c%d [[id(6)]];' % dmsh_abi.CBSIZE_BANK)
+
+class UniformBounds(unittest.TestCase):
+    def test_unguard(self):
+        read = '(*spvDescriptorSet0.vp_c5)._m0[29].y'
+        bare = GUARD.format(w=117, r=read)[1:-1].replace('fp_c', 'vp_c')
+        for why, src, want in (('in parentheses', 'float _1 = _2 * %s;' % GUARD.format(w=117, r=read).replace('fp_c', 'vp_c'), 'float _1 = _2 * %s;' % read),
+                               ('a function argument', 'float _1 = fma(_2, %s, _3);' % bare, 'float _1 = fma(_2, %s, _3);' % read),
+                               ('bit-cast', 'bool _1 = 0 >= as_type<int>(%s);' % bare, 'bool _1 = 0 >= as_type<int>(%s);' % read)):
+            with self.subTest(why=why): self.assertEqual(dmsh_fetch.unguard(src), want)
+
+    def test_a_computed_offset_stays(self):   # its guard is a value of its own, and the read's index chooses row 0 when out of bounds
+        src = ('bool _5 = ((uint(_3) << 2u) | uint(_4)) < ((*spvDescriptorSet0.fp_c%d)._m0[2].w >> 2u);\n'
+               'float _6 = _5 ? (*spvDescriptorSet0.fp_c14)._m0[_5 ? _3 : 0][_4] : 0.0;' % dmsh_abi.CBSIZE_BANK)
+        self.assertEqual(dmsh_fetch.unguard(src), src)
+
+    def test_compiles_on_both_platforms(self):
+        v, _ = dmsh_fetch.fold(guarded(FS_POS), BINDINGS)
+        with tempfile.TemporaryDirectory() as d:
+            for sdk in ('macosx', 'iphoneos'):
+                with self.subTest(sdk=sdk):
+                    try: compile_lib(v, pathlib.Path(d), 'bounded_' + sdk, sdk)
+                    except subprocess.CalledProcessError as e: self.fail(e.stderr)
 
 class ScreenVaryings(unittest.TestCase):
     def test_both_spellings_after_a_branch(self):
@@ -240,17 +298,97 @@ class ScreenVaryings(unittest.TestCase):
         self.assertEqual(dmsh_fetch.screen_varyings(early), [], 'an early return')
 
 
+class OutputMappingOnly(unittest.TestCase):
+    def test_refused_without_the_flag(self):
+        v, meta = dmsh_fetch.fold(FS_OM, [])
+        self.assertIsNone(v)
+        self.assertEqual(meta, 'no rewritable sample')
+
+    def test_folded_with_the_flag(self):
+        v, meta = dmsh_fetch.fold(FS_OM, [], om_only_ok=True)
+        self.assertIsNotNone(v)
+        self.assertEqual(meta['calls'], [])
+        self.assertEqual(meta['outputs'], [{'color': 0, 'type': 'float4'}])
+        self.assertIn('fragment main0_out_f main0_f(', v)
+        self.assertIn('static __attribute__((always_inline)) main0_out dm_body_main0(', v)
+        self.assertIn('constant bool OM_0_0 [[function_constant(64)]]', v)
+        self.assertIn('constant bool OM_0_1 [[function_constant(65)]]', v)
+        self.assertIn('if (OM_0_1) out.m_46_at1 = r.m_46;', v)
+        self.assertNotIn('constant int FX_0', v)
+
+    def test_compiles_on_both_platforms(self):
+        v, _ = dmsh_fetch.fold(FS_OM, [], om_only_ok=True)
+        with tempfile.TemporaryDirectory() as d:
+            for sdk in ('macosx', 'iphoneos'):
+                with self.subTest(sdk=sdk):
+                    try: compile_lib(v, pathlib.Path(d), 'om_' + sdk, sdk)
+                    except subprocess.CalledProcessError as e: self.fail(e.stderr)
+
+
+def tile_library(src, root, name, side=frozenset(), sdk='macosx'):
+    """The libraries ps_libraries cuts from a folded source: (base, side..., main0_f) as files root/<name>_<i>.metallib; raises AssertionError unless main0_f, alone in the last, declares
+    function constants and the base's entry points none (the logic operation entry points have their own)"""
+    lib = compile_lib(src, root, name, sdk); libs = []
+    for i, piece in enumerate(dmsh_side.cut(lib.read_bytes(), *([side] if side else []), {'main0_f'})):
+        libs.append(root / f'{name}_{i}.metallib'); libs[-1].write_bytes(piece)
+    base, tile = pso_offline.functions(libs[0]), pso_offline.functions(libs[-1])
+    assert list(tile) == ['main0_f'] and tile['main0_f'], f'{name}: the readable-tile library {tile}'
+    assert 'main0' in base and not any(base.values()), f'{name}: the base library {base}'
+    return libs
+
+
+# A pixel shader with two outputs, as the dual-source entry point main0_d wants (dmsh_build.py fs_dual), with FS's projective sample
+FS2 = FS.replace('    float4 m_46 [[color(0)]];\n', '    float4 m_46 [[color(0)]];\n    float4 m_47 [[color(1)]];\n').replace('    return out;', '    out.m_47 = _84;\n    return out;')
+
+
+class OtherEntryPoints(unittest.TestCase):
+    def dual(self):   # as dmsh_build.py finish writes it: main0's body shared, main0_d calling it
+        e = dmsh_side.entry(FS2, 'main0')
+        return dmsh_side.shared_body(FS2) + '\nstruct main0_out_d\n{\n    float4 m_46 [[color(0)]];\n    float4 m_47 [[color(0), index(1)]];\n};\n\n' + \
+            dmsh_side.calling(e, 'main0_d', 'main0_out_d', 'return main0_out_d{out.m_46, out.m_47};')
+
+    def test_only_the_body_is_rewritten(self):
+        v, meta = dmsh_fetch.fold(self.dual(), BINDINGS)
+        self.assertIsNotNone(v, meta)
+        self.assertEqual(len(meta['calls']), 1)
+        self.assertEqual(v.count('fx0 == 0 ? fb0 : '), 1)
+        self.assertEqual(v.count('dm_body_main0(in, spvDescriptorSet0, -1, float4(0.0)'), 2)   # main0 and main0_d turn the tile read off
+
+    def test_a_copy_of_the_body_is_left_alone(self):   # main0_d as a copy of main0 (fs_dual before it called the body): its sample has no fb0 to read
+        copy = FS2 + '\nstruct main0_out_d\n{\n    float4 m_46 [[color(0)]];\n    float4 m_47 [[color(0), index(1)]];\n};\n\n' + \
+            FS2[FS2.index('fragment main0_out main0('):].replace('fragment main0_out main0(', 'fragment main0_out_d main0_d(').replace('return out;', 'return main0_out_d{out.m_46, out.m_47};')
+        v, meta = dmsh_fetch.fold(copy, BINDINGS)
+        self.assertEqual((len(meta['calls']), v.count('fx0 == 0 ? fb0 : ')), (1, 1))
+        with tempfile.TemporaryDirectory() as d:
+            try: tile_library(v, pathlib.Path(d), 'copy')
+            except subprocess.CalledProcessError as e: self.fail(e.stderr)
+
+    def test_builds_beside_a_dual_source_entry_point(self):
+        v, _ = dmsh_fetch.fold(self.dual(), BINDINGS)
+        with tempfile.TemporaryDirectory() as d:
+            try: tile_library(v, pathlib.Path(d), 'dual')
+            except subprocess.CalledProcessError as e: self.fail(e.stderr)
+
+    def test_builds_in_a_compile_unit(self):   # the base, the alpha test and logic operation entry points and main0_f from one compile
+        for name, src in (('unit', FS), ('unit_dual', self.dual())):
+            with self.subTest(name):
+                u, info = dmsh_side.unit(src)
+                self.assertIsNotNone(u, info)
+                v, meta = dmsh_fetch.fold(u, BINDINGS)
+                self.assertIsNotNone(v, meta)
+                with tempfile.TemporaryDirectory() as d:
+                    for sdk in ('macosx', 'iphoneos'):
+                        try: tile_library(v, pathlib.Path(d), name + sdk, set(info['alpha'] + info['logic']), sdk)
+                        except subprocess.CalledProcessError as e: self.fail(e.stderr)
+
+
 def fixture(out):
     out = pathlib.Path(out); out.mkdir(parents=True, exist_ok=True)
-    v, meta = dmsh_fetch.variant(FS, BINDINGS)
-    (out / 'fb_vs.metal').write_text(VS); (out / 'fb_fs.metal').write_text(FS)
-    compile_lib(v, out, 'v').rename(out / f'{FS_KEY}_bf.metallib')
-    (out / 'facts.json').write_text(json.dumps({'screen': dmsh_fetch.screen_varyings(VS), 'calls': meta['calls'], 'outputs': meta['outputs']}))
-    v, meta = dmsh_fetch.variant(FS_POS, BINDINGS)
-    (out / 'fb_pos.metal').write_text(FS_POS)
-    compile_lib(v, out, 'vp').rename(out / f'{POS_KEY}_bf.metallib')
-    (out / 'pos.json').write_text(json.dumps({'calls': meta['calls'], 'outputs': meta['outputs']}))
-
+    (out / 'fb_vs.metal').write_text(VS); (out / 'fb_fs.metal').write_text(FS); (out / 'fb_pos.metal').write_text(FS_POS)
+    for src, key, name, facts, om in ((FS, FS_KEY, 'v', 'facts.json', False), (FS_POS, POS_KEY, 'vp', 'pos.json', False), (FS_OM, OM_KEY, 'vom', 'om.json', True)):
+        v, meta = dmsh_fetch.fold(src, BINDINGS if not om else [], om_only_ok=om)
+        tile_library(v, out, name)[-1].rename(out / f'{key}_bf.metallib')
+        (out / facts).write_text(json.dumps({**({'screen': dmsh_fetch.screen_varyings(VS)} if src is FS else {}), 'calls': meta['calls'], 'outputs': meta['outputs']}))
 
 if __name__ == '__main__':
     if len(sys.argv) == 3 and sys.argv[1] == '--fixture': fixture(sys.argv[2])

@@ -35,6 +35,11 @@ mem_stack	0x10000000
 app_pool	0xCD500000
 sys_resource	0x1000000
 
+# ---- Graphics ----
+# The game sets the near=0 NVN depth mode (nvnDeviceSetDepthMode; the host logs "depth mode: near=0, vertex shaders use the main0_z entry"): offline pipeline bases take the main0_z
+# vertex entries. Without the key the bundled archive (1,317 MB) was made for near=-w and refused at start, and a Mac built the bases of all 31,148 shader pairs before the first frame (397 s)
+depth_mode	zero
+
 # ---- Shader split (shader_split.py; data.arc's current files, smash_arc.py) ----
 shader_groups	/data.arc/SHDR=shdr /data.arc/EFFN=effect /data.arc/SARC=ui
 shader_note	Super Smash Bros. Ultimate shaders

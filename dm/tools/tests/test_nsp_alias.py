@@ -75,6 +75,18 @@ class Alias(unittest.TestCase):
         nsp.derive_profile(g, out, 'v0', d, ['main'], PROFILE)   # the profile's own title: its IDs as they are
         self.assertEqual(game.Game(out).title_id, PROFILE)
 
+    def test_derived_profile_keeps_the_display_version_the_profile_registers_for_the_build(self):
+        # a NUP update or a dump has no control data: the game shows what the build row says (the host answers GetDisplayVersion from it by main's build ID)
+        d = self.tmp / 'extract/v0'; nso(d / 'ExeFS/main', BID)
+        g = game.load(f'{PROFILE:016X}'); out = self.tmp / 'derived' / g.id
+        self.assertEqual(nsp.derive_profile(g, out, 'v0', d, ['main']), '1.0.0')
+        self.assertEqual(game.Game(out).builds()['v0']['display'], '1.0.0')
+        (d / 'control.nacp').write_bytes(bytes(0x3060) + b'2.3.4' + bytes(0x1000))   # the package's own control data comes first
+        shutil.rmtree(out); self.assertEqual(nsp.derive_profile(g, out, 'v0', d, ['main']), '2.3.4')
+        (d / 'control.nacp').unlink(); nso(d / 'ExeFS/main', UPD_BID)   # a build the profile does not register, with no control data: unknown, as before
+        shutil.rmtree(out); self.assertEqual(nsp.derive_profile(g, out, 'v0', d, ['main']), '?')
+        self.assertEqual(game.Game(out).builds()['v0']['display'], '?')
+
 
 if __name__ == '__main__':
     unittest.main()

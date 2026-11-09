@@ -55,6 +55,7 @@ Status: brought up on the Mac: the boot, the initial settings, the title, a new 
 
 General changes first needed here; each applies to every game:
 
+- **The decode proves an Oodle shader table, and a package that does not read costs only itself** (`uepak.py` `shader_map_entries`, `shader_split.py` `ue_inline_shaders`, `ue_packages`): six of this game's package summaries looked like tables and stopped its split at 11,832 of 13,980 shaders: [An entry of a package's export list read as an Oodle shader table](../../../docs/reference/shaders.md#an-entry-of-a-packages-export-list-read-as-an-oodle-shader-table).
 - **Unreal paks with inline shaders read in version 11, and Zlib / LZ4 pak blocks decoded in Python** (`uepak.py` `inline_shaders`, `Pak.read`; `shader_split.py` `ue_legacy_jobs`, `ue_inline_shaders`; `profile_guess.py` `ue_legacy`): [Unreal Engine 4.27 shaders inline in cooked packages (LZ4)](../../../docs/reference/shaders.md#unreal-engine-427-shaders-inline-in-cooked-packages-lz4).
 - **More than 64 bindings per shader** (`NVN_REFL_MAXB`, now 128): [More than 64 bindings in one shader](../../../docs/reference/shaders.md#more-than-64-bindings-in-one-shader).
 - **The precompile look-ahead restores the scissor** (`pso_predict_rest`; `DM_NVN_PREDICT=0` turns the look-ahead off): [The precompile look-ahead restores the scissor](../../../docs/reference/shaders.md#the-precompile-look-ahead-restores-the-scissor).

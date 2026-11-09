@@ -60,7 +60,7 @@ dm/gfx/tools/dmsh_build.py:vs_layer|vs_layer_entry	shader:layer_output	layer out
 dm/gfx/tools/dmsh_build.py:fs_uint	shader:integer_outputs	integer fragment outputs
 dm/gfx/tools/dmsh_build.py:int_inputs|vin_finish	shader:integer_vertex_inputs	integer vertex inputs
 dm/gfx/tools/dmsh_build.py:pull_finish	shader:pulling_vertex_inputs	pulling vertex inputs
-dm/gfx/tools/dmsh_build.py:fetch_finish|bf_	shader:readable_tile	readable tiles
+dm/gfx/tools/dmsh_build.py:ps_libraries	shader:readable_tile	readable tiles (cut from the pixel shader's one compile)
 dm/gfx/tools/dmsh_build.py:vs_pad	shader:vs_pad	padded vertex outputs
 dm/gfx/tools/dmsh_build.py:drv_reads|unfillable|DRV_FILL	shader:driver_read_*	driver constant segments
 dm/gfx/tools/dmsh_build.py:spv_single_lane|SG_	shader:simd	subgroup operations
@@ -72,6 +72,7 @@ dm/gfx/tools/dmsh_pull.*	shader:pulling_vertex_inputs	pulling vertex inputs
 dm/gfx/tools/dmsh_fetch.py	shader:readable_tile	readable tiles
 dm/gfx/tools/dmsh_alpha.py	nvn:nvnColorStateSetAlphaTest	the alpha test entry points
 dm/gfx/tools/dmsh_logic.py	nvn:nvnColorStateSetLogicOp	the logic operation entry points
+dm/gfx/tools/dmsh_side.py	shader:stage:ps	every pixel shader's compile unit and main0's shared body (side, integer, dual-source and readable-tile entry points)
 dm/gfx/tools/dmsh_geometry.py	shader:stage:gs	geometry shaders
 dm/gfx/tools/dmsh_facts.py	shader:stage:*	the translator's answer table
 dm/gfx/tools/dmsh_chain.*	shader:stage:*	the chain version: every NVN game's libraries are rebuilt
@@ -138,6 +139,9 @@ dm/host/pad_apple.h	hle:*hid*	controller face buttons from GameController
 dm/host/motion_fusion.h	hle:*SixAxisSensor*	six-axis motion mapping and orientation
 dm/host/motion_pro.h	hle:*SixAxisSensor*	passive Switch Pro Controller IMU decoder
 dm/host/motion_pro_mac.h	hle:*SixAxisSensor*	Mac Pro Controller raw motion transport and routing
+dm/host/switch2_proto.h	hle:*hid*	Switch 2 controller protocol: reports, sticks, buttons, motion maps
+dm/host/pad_switch2_apple.h	hle:*hid*	Switch 2 controllers over Bluetooth LE (off unless DM_SW2=1)
+dm/host/pad_switch2_apple.m	hle:*hid*	Switch 2 controllers over Bluetooth LE (off unless DM_SW2=1)
 dm/host/front.h	present:*	the front end
 dm/ios/*	*:*	the iOS app
 dm/third_party/ryujinx/src/Ryujinx.Graphics.Shader/Translation/Transforms/GeometryToCompute.cs	shader:stage:gs	geometry compute input and output lowering

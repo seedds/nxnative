@@ -25,9 +25,11 @@ romfs_marker	Data/data.unity3d
 zip_store	.bundle:.wem:.unity3d:.metallib
 
 # ---- Presentation ----
-# The original sets present interval 2 (30 fps on the Switch). A rewriter cut on 2.0.0 main (patches.py, QualitySettings.set_vSyncCount can only set 1) takes the game's own 60 fps path:
-# frame-counted logic steps by GameTime.VsyncFixedCount (= vSyncCount), so a count of 1 at 60 fps runs at the speed of the original at 30 fps. The game then sets interval 1 itself and game mode gives 60 fps.
-# Measured on the Mac (holding Down for 0.45 s in the save list): 60 fps with the cut and the original 30 fps both move 6 slots; without the cut, 60 fps forced by DM_PRESENT_INTERVAL=display reaches the end (9 or more), i.e. frame-counted logic speeds up
+# The original sets present interval 2 (30 fps on the Switch) through QualitySettings.vSyncCount. Frame-counted logic steps by GameTime.VsyncFixedCount (= vSyncCount, read back through
+# the getter), so a count of 1 at 60 fps runs at the speed of the original at 30 fps. The rewriter finds the current quality level's count through Unity's internal-call table
+# (dm/tools/unity_fps.py) and the host writes 60 / fps_target into it (hle_fpslock.c), with the present cap at the same rate; until 2026-11-09 a cut on 2.0.0 main held the setter's argument at 1.
+# Measured on the Mac (holding Down for 0.45 s in the save list): 60 fps with a count of 1 and the original 30 fps both move 6 slots; 60 fps with a count of 2 (DM_PRESENT_INTERVAL=display) reaches the end (9 or more)
+fps_target	60
 
 # ---- Memory ----
 # The NPDM declares 16 MB of system resource, so IsVirtualAddressMemoryEnabled is true: nninitStartup hands all free memory (application pool − 64 MB) to StandardAllocator as virtual address memory,

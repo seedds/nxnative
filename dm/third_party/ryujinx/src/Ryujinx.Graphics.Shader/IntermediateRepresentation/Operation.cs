@@ -10,6 +10,14 @@ namespace Ryujinx.Graphics.Shader.IntermediateRepresentation
 
         public bool ForcePrecise { get; set; }
 
+        // nxnative: the words of one 64- or 128-bit global load (LDG.64 / LDG.128), which the emitters split into 32-bit loads: the access's word count (2 or 4) on each of
+        // them and the word's index, 0 on none other. GlobalToStorage reads such an access through the pool table as one vector load (TryGenerateRawStorageOp)
+        public int GlobalVectorCount { get; set; }
+        public int GlobalVectorWord { get; set; }
+        // nxnative: which LDG the word belongs to, the same on all words of one access and different for each access of a function (EmitterContext.GlobalVectorGroups):
+        // two LDG.128 of one block have the same count, so the word index alone does not tell their words apart
+        public int GlobalVectorGroup { get; set; }
+
         private Operand[] _dests;
 
         public Operand Dest

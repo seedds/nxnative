@@ -194,8 +194,9 @@ struct VkBufferView_T { VkBuffer buf; const fmt_t *f; VkDeviceSize off, range; _
 struct VkImage_T { __strong id<MTLTexture> tex; const fmt_t *f; VkFormat fmt; VkImageType type; uint32_t w, h, d, mips, layers, samples; VkDeviceSize size; uint64_t serial;
                   VkImageUsageFlags usage; uint32_t pitch;   // pitch: row pitch of a linear image (its texture is made over the bound memory), 0 otherwise
                   VkDeviceMemory cmem; VkDeviceSize coff; uint8_t *shadow;   // a linear image of a converted format (fmt_t.conv): its memory, and the texels last unpacked
-                  int swap; };   // one of a swap chain's images: the swap chain owns it
-struct VkImageView_T { __strong id<MTLTexture> tex; VkImage img; };
+                  int swap;   // one of a swap chain's images: the swap chain owns it
+                  __strong id<MTLTexture> rt; };   // a 1D image drawn or cleared into: its 2D twin, one texel high (rt_1d)
+struct VkImageView_T { __strong id<MTLTexture> tex, rt; VkImage img; uint32_t level, layer, layers; };   // rt: the view of the image's 2D twin; level, layer(s): the view's range
 struct VkSampler_T { __strong id<MTLSamplerState> s; };
 struct VkShaderModule_T { const shinfo *si; __strong id<MTLFunction> fn, fn_d; char key[17]; int tried_d; };   // fn_d: the dual-source variant vk_<key>_d, looked up on first use
 struct VkPipelineCache_T { int unused; };
@@ -577,7 +578,8 @@ VKB(vkCreateImage, VkResult, VkDevice d, const VkImageCreateInfo *ci, const VkAl
         else td.textureType = layers > 1 ? MTLTextureType2DArray : MTLTextureType2D;
         td.arrayLength = cube ? layers / 6 : layers;
         MTLTextureUsage u = MTLTextureUsageShaderRead;
-        if (ci->usage & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT)) u |= MTLTextureUsageRenderTarget;   // a transfer destination may be cleared (C_CLEARI: a clearing pass)
+        int drawn = (ci->usage & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT)) != 0;
+        if (drawn && ci->imageType != VK_IMAGE_TYPE_1D) u |= MTLTextureUsageRenderTarget;   // a transfer destination may be cleared (C_CLEARI: a clearing pass); a 1D image is drawn through its twin (rt_1d)
         if (ci->usage & VK_IMAGE_USAGE_STORAGE_BIT) u |= MTLTextureUsageShaderWrite;
         // A stencil-aspect view of a depth-stencil image is an X32_Stencil8 view, which Metal allows only with the format-view usage (Vulkan needs no mutable-format flag for it;
         // the API validation layer aborts without it). As in the NVN layer, it costs nothing measured on a depth-stencil texture
@@ -586,6 +588,13 @@ VKB(vkCreateImage, VkResult, VkDevice d, const VkImageCreateInfo *ci, const VkAl
         id<MTLTexture> t = [g_dev newTextureWithDescriptor:td];
         if (!t) { LOG("[vk] [RED] cannot create image %ux%ux%u format %d levels %u layers %u", ci->extent.width, ci->extent.height, ci->extent.depth, ci->format, ci->mipLevels, layers); return VK_ERROR_OUT_OF_DEVICE_MEMORY; }
         VkImage im = zalloc(sizeof *im);
+        if (drawn && ci->imageType == VK_IMAGE_TYPE_1D) {   // rt_1d: Metal draws into no 1D texture (the API validation layer aborts); Vulkan lets a 1D view be a framebuffer attachment
+            MTLTextureDescriptor *rd = [MTLTextureDescriptor new];
+            rd.pixelFormat = f->pf; rd.width = td.width; rd.height = 1; rd.mipmapLevelCount = td.mipmapLevelCount; rd.arrayLength = layers;
+            rd.textureType = layers > 1 ? MTLTextureType2DArray : MTLTextureType2D; rd.usage = MTLTextureUsageRenderTarget | (u & MTLTextureUsagePixelFormatView); rd.storageMode = MTLStorageModePrivate;
+            im->rt = [g_dev newTextureWithDescriptor:rd];
+            if (!im->rt) LOG("[vk] [RED] cannot create the 2D twin of a 1D image %u wide, format %d", ci->extent.width, ci->format);
+        }
         im->tex = t; im->f = f; im->fmt = ci->format; im->type = ci->imageType; im->w = (uint32_t)td.width; im->h = (uint32_t)td.height; im->d = (uint32_t)td.depth;
         im->mips = (uint32_t)td.mipmapLevelCount; im->layers = layers; im->samples = samples; im->size = img_bytes(f, im->w, im->h, im->d, im->mips, layers, samples);
         OLOG("CreateImage %p %ux%ux%u format %d levels %u layers %u usage %#x", (void *)im, im->w, im->h, im->d, ci->format, im->mips, layers, ci->usage);
@@ -595,7 +604,7 @@ VKB(vkCreateImage, VkResult, VkDevice d, const VkImageCreateInfo *ci, const VkAl
 }
 // A swap chain's image is not the game's to destroy, but Super Mario 3D All-Stars' Super Mario 64 destroys the images vkGetSwapchainImagesKHR gave it as it tears down (main+0x9500) and keeps the
 // swap chain, as the console's driver lets it: ignored, or the swap chain would go on using freed memory
-VKB(vkDestroyImage, void, VkDevice d, VkImage im, const VkAllocationCallbacks *a) { (void)d; (void)a; if (im && im->swap) return; if (im) { if (im->shadow) conv_remove(im); im->tex = nil; free(im->shadow); free(im); } }
+VKB(vkDestroyImage, void, VkDevice d, VkImage im, const VkAllocationCallbacks *a) { (void)d; (void)a; if (im && im->swap) return; if (im) { if (im->shadow) conv_remove(im); im->tex = nil; im->rt = nil; free(im->shadow); free(im); } }
 VK(vkGetImageMemoryRequirements, void, VkDevice d, VkImage im, VkMemoryRequirements *r) {
     (void)d; r->alignment = 4096; r->size = (im->size + 4095) & ~4095ull; r->memoryTypeBits = 7;
 }
@@ -670,7 +679,12 @@ VKB(vkCreateImageView, VkResult, VkDevice d, const VkImageViewCreateInfo *ci, co
     MTLTextureSwizzleChannels sw = MTLTextureSwizzleChannelsMake(swz(ci->components.r, MTLTextureSwizzleRed), swz(ci->components.g, MTLTextureSwizzleGreen),
                                                                  swz(ci->components.b, MTLTextureSwizzleBlue), bc1rgb ? MTLTextureSwizzleOne : swz(ci->components.a, MTLTextureSwizzleAlpha));
     int ident = sw.red == MTLTextureSwizzleRed && sw.green == MTLTextureSwizzleGreen && sw.blue == MTLTextureSwizzleBlue && sw.alpha == MTLTextureSwizzleAlpha;
-    VkImageView v = zalloc(sizeof *v); v->img = im;
+    VkImageView v = zalloc(sizeof *v); v->img = im; v->level = r->baseMipLevel; v->layer = r->baseArrayLayer; v->layers = ly;
+    if (im->rt) @autoreleasepool {   // rt_1d: the same levels and layers of the 2D twin, for drawing
+        MTLTextureType rt2 = im->rt.textureType == MTLTextureType2DArray && tt == MTLTextureType1DArray ? MTLTextureType2DArray : MTLTextureType2D;
+        v->rt = !r->baseMipLevel && lv == im->mips && !r->baseArrayLayer && ly == im->layers && rt2 == im->rt.textureType && pf == im->rt.pixelFormat ? im->rt
+              : [im->rt newTextureViewWithPixelFormat:pf textureType:rt2 levels:NSMakeRange(r->baseMipLevel, lv) slices:NSMakeRange(r->baseArrayLayer, ly)];
+    }
     if (pf == im->tex.pixelFormat && tt == im->tex.textureType && !r->baseMipLevel && lv == im->mips && !r->baseArrayLayer && ly == im->layers && ident) v->tex = im->tex;
     else @autoreleasepool {
         v->tex = [im->tex newTextureViewWithPixelFormat:pf textureType:tt levels:NSMakeRange(r->baseMipLevel, lv)
@@ -679,7 +693,7 @@ VKB(vkCreateImageView, VkResult, VkDevice d, const VkImageViewCreateInfo *ci, co
     }
     *out = v; return VK_SUCCESS;
 }
-VKB(vkDestroyImageView, void, VkDevice d, VkImageView v, const VkAllocationCallbacks *a) { (void)d; (void)a; if (v) { v->tex = nil; free(v); } }
+VKB(vkDestroyImageView, void, VkDevice d, VkImageView v, const VkAllocationCallbacks *a) { (void)d; (void)a; if (v) { v->tex = nil; v->rt = nil; free(v); } }
 
 static MTLSamplerAddressMode addr_mode(VkSamplerAddressMode m) {
     switch (m) {
@@ -1210,12 +1224,27 @@ typedef struct {
     // The current render pass: its descriptor (attachments created with deferred store actions) and the store actions it ends with; cut = its encoder was ended
     // for a copy in the middle of the pass and is resumed (loading the attachments) at the next draw
     MTLRenderPassDescriptor *rpd; MTLStoreAction st_col[8], st_d, st_s; int cut;
+    VkImageView d1[8];   // the pass's colour attachments that are 1D views, drawn through their 2D twin (rt_1d): copied into the image when the pass's encoder ends
     VkQueryPool aq; uint32_t aq_first;   // the occlusion query running (occ_start)
     uint32_t sdyn[3][2]; int sdyn_set[3], s_dirty;   // dynamic stencil compare mask / write mask / reference, front and back (C_STENCIL)
 } rs_t;
 #define DONE_RING 1024
 static uint64_t g_done_ns[DONE_RING];   // completion time of submit v at [v % DONE_RING] (timestamp query results)
 static void end_blit(rs_t *s) { if (s->be) { [s->be endEncoding]; s->be = nil; } }
+// rt_1d: a 1D image that is drawn or cleared into has a 2D twin one texel high (Metal draws into no 1D texture), which the pass draws into; its texels are copied between the two
+// (through a buffer: Metal copies texture to texture only between textures of one type) before a pass that loads them, and into the image when the pass's encoder ends
+static void sync_1d(rs_t *s, VkImage im, uint32_t level, uint32_t layer, uint32_t nl, int to_rt) {
+    if (!im->rt) return;
+    NSUInteger w = MAX(im->w >> level, 1u), row = w * im->f->bytes;
+    id<MTLBuffer> b = [g_dev newBufferWithLength:row * nl options:MTLResourceStorageModePrivate];
+    if (!b) return;
+    if (!s->be) s->be = [s->cb blitCommandEncoder];
+    id<MTLTexture> from = to_rt ? im->tex : im->rt, to = to_rt ? im->rt : im->tex;
+    for (uint32_t l = 0; l < nl; l++) {
+        [s->be copyFromTexture:from sourceSlice:layer + l sourceLevel:level sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(w, 1, 1) toBuffer:b destinationOffset:row * l destinationBytesPerRow:row destinationBytesPerImage:row];
+        [s->be copyFromBuffer:b sourceOffset:row * l sourceBytesPerRow:row sourceBytesPerImage:row sourceSize:MTLSizeMake(w, 1, 1) toTexture:to destinationSlice:layer + l destinationLevel:level destinationOrigin:MTLOriginMake(0, 0, 0)];
+    }
+}
 static MTLStoreAction keep(MTLStoreAction a) { return a == MTLStoreActionMultisampleResolve || a == MTLStoreActionStoreAndMultisampleResolve ? MTLStoreActionStoreAndMultisampleResolve : MTLStoreActionStore; }
 static void end_rp(rs_t *s, int final) {   // final: the pass's own store actions; otherwise everything is stored, to be loaded again when the pass resumes
     if (!s->re) return;
@@ -1224,6 +1253,8 @@ static void end_rp(rs_t *s, int final) {   // final: the pass's own store action
     if (d.depthAttachment.texture) [s->re setDepthStoreAction:final ? s->st_d : MTLStoreActionStore];
     if (d.stencilAttachment.texture) [s->re setStencilStoreAction:final ? s->st_s : MTLStoreActionStore];
     [s->re endEncoding]; s->re = nil;
+    for (int i = 0; i < 8; i++) if (s->d1[i]) sync_1d(s, s->d1[i]->img, s->d1[i]->level, s->d1[i]->layer, s->d1[i]->layers, 0);   // rt_1d: the drawn texels into the image (the blit encoder stays open)
+    if (final) memset(s->d1, 0, sizeof s->d1);
 }
 // A copy inside a render pass, which NVIDIA's driver runs: Super Mario Galaxy copies from its EFB in the middle of a pass (vkCmdCopyImage). The encoder ends here and
 // the pass resumes at its next draw (resume_rp); without that, the rest of the pass's draws were dropped
@@ -1258,10 +1289,15 @@ static void begin_rp(rs_t *s, const c_brp *c) {
     VkRenderPass rp = c->rp; VkFramebuffer fb = c->fb;
     MTLRenderPassDescriptor *d = [MTLRenderPassDescriptor renderPassDescriptor];
     uint32_t w = fb->w, h = fb->h;
+    memset(s->d1, 0, sizeof s->d1);
     for (uint32_t i = 0; i < rp->ncol; i++) {
         int a = rp->col[i]; if (a < 0 || (uint32_t)a >= fb->n) continue;
         const ratt *at = &rp->att[a]; MTLRenderPassColorAttachmentDescriptor *ca = d.colorAttachments[i];
-        ca.texture = fb->v[a]->tex; w = umin(w, (uint32_t)ca.texture.width); h = umin(h, (uint32_t)ca.texture.height);
+        VkImageView cv = fb->v[a];
+        if (cv->rt) {   // rt_1d: drawn through the 2D twin, which takes the image's texels first when the pass loads them
+            s->d1[i] = cv; if (at->load == VK_ATTACHMENT_LOAD_OP_LOAD) sync_1d(s, cv->img, cv->level, cv->layer, cv->layers, 1);
+        }
+        ca.texture = cv->rt ? cv->rt : cv->tex; w = umin(w, (uint32_t)ca.texture.width); h = umin(h, (uint32_t)ca.texture.height);
         ca.loadAction = load_a(at->load); s->st_col[i] = store_a(at->store); ca.storeAction = MTLStoreActionUnknown;
         if (at->load == VK_ATTACHMENT_LOAD_OP_CLEAR && (uint32_t)a < c->nclear) { const float *f = c->clear[a].color.float32; ca.clearColor = MTLClearColorMake(f[0], f[1], f[2], f[3]); }
         int r = rp->res[i];
@@ -1281,6 +1317,7 @@ static void begin_rp(rs_t *s, const c_brp *c) {
     }
     if (!rp->ncol && rp->depth < 0) { d.renderTargetWidth = fb->w; d.renderTargetHeight = fb->h; d.defaultRasterSampleCount = 1; }
     if (s->sq->vis) d.visibilityResultBuffer = s->sq->vis;
+    end_blit(s);   // rt_1d's copies
     s->rpd = d; s->re = [s->cb renderCommandEncoderWithDescriptor:d];
     s->applied = NULL; s->rt_w = w; s->rt_h = h;
     // Dynamic viewport and scissor persist across render passes within a command buffer, as in Vulkan; the render target's size stands in only until the game sets them.
@@ -1524,7 +1561,7 @@ static void replay(rs_t *s, VkCommandBuffer cb) {
                         for (uint32_t l = 0; l < nl; l++) {
                             MTLRenderPassDescriptor *d = [MTLRenderPassDescriptor renderPassDescriptor];
                             if (!x->ds) {
-                                MTLRenderPassColorAttachmentDescriptor *a = d.colorAttachments[0]; a.texture = im->tex; a.level = r->baseMipLevel + m; a.slice = r->baseArrayLayer + l;
+                                MTLRenderPassColorAttachmentDescriptor *a = d.colorAttachments[0]; a.texture = im->rt ? im->rt : im->tex; a.level = r->baseMipLevel + m; a.slice = r->baseArrayLayer + l;   // rt_1d
                                 a.loadAction = MTLLoadActionClear; a.storeAction = MTLStoreActionStore;
                                 const VkClearColorValue *cv = &x->v.color;
                                 a.clearColor = im->f->kind == K_INT ? MTLClearColorMake(cv->uint32[0], cv->uint32[1], cv->uint32[2], cv->uint32[3])
@@ -1541,6 +1578,7 @@ static void replay(rs_t *s, VkCommandBuffer cb) {
                                 if (!d.depthAttachment.texture && !d.stencilAttachment.texture) continue;
                             }
                             [[s->cb renderCommandEncoderWithDescriptor:d] endEncoding];
+                            if (!x->ds && im->rt) { sync_1d(s, im, r->baseMipLevel + m, r->baseArrayLayer + l, 1, 0); end_blit(s); }   // rt_1d: the cleared texels into the image
                         }
                 }
                 break;

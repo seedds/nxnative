@@ -1500,6 +1500,13 @@ The Vulkan layer (`dm/gfx/vk/hle_vk.m`) was written for Hades; Super Mario Galax
 - **Fix:** the layer reports nothing. The callback object is a token that is never called.
 - **Found on:** [Super Mario 64 (Super Mario 3D All-Stars)](../../dm/games/010049900F546001/README.md).
 
+### 1D images drawn into
+
+- **Symptom:** under Metal's API validation (on when Xcode's Run starts the app, or `MTL_DEBUG_LAYER=1`), a Vulkan game stops with a validation assertion when it draws or clears into a one-dimensional image; without validation it goes on.
+- **Cause:** Vulkan lets a 1D image view be a framebuffer attachment and a clear's target; Metal draws into no 1D texture. The layer gave such an image the render-target usage and attached its 1D texture to the pass.
+- **Fix:** a 1D image that may be drawn or cleared into (`rt_1d` in `hle_vk.m`) keeps its 1D texture for sampling and gets a 2D twin one texel high (array for layers) for drawing. Views take the matching levels and layers of the twin. A pass draws into the twin; before a pass that loads the attachment, the image's texels are copied into the twin, and when the pass's encoder ends (or a clear ends) the twin's texels are copied back into the image, through a buffer (Metal copies texture to texture only between textures of one type).
+- **Found on:** [Hades](../../dm/games/0100535012974000/README.md): a 512x1 colour target, drawn about 30 s into play; under validation the iPhone and the Mac stopped there. After the fix a validated Mac run reached frame 6,900 (two minutes), and its pictures matched the unvalidated run's apart from the moving characters.
+
 ### Not translated in the Vulkan layer: geometry shaders
 
 - **Symptom:** GX points and lines drawn as one-pixel points and lines.

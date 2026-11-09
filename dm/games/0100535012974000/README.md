@@ -48,6 +48,7 @@ General host changes first needed here; each applies to every game:
 - **A host notification event** for `oe::GetNotificationMessageEvent` (`hle_oe.c`), described above.
 - **A network request on hold for its first query only** (`hle_net.c`, `nn::nifm`): [Network requests stay on hold before they settle](../../../docs/reference/services.md#network-requests-stay-on-hold-before-they-settle).
 - **A wait at two yields gets the back-off** (`thr_yield`, `hle_thread.c`): [A wait at two yields is not progress](../../../docs/reference/threads.md#a-wait-at-two-yields-is-not-progress).
+- **1D images drawn through a 2D twin** (`rt_1d`, `hle_vk.m`): [1D images drawn into](../../../docs/reference/rendering.md#1d-images-drawn-into).
 
 ## Open
 

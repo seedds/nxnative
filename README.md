@@ -14,14 +14,15 @@ Questions, how a game runs on your Mac or iPhone, and ideas go in [Discussions](
 
 Switch 2 games are built from one `.nup` file or a folder of their files, not from NSPs, and are tested on the Mac only: see [Switch 2 games](#switch-2-games).
 
-### With a Mac app
+### Community front ends
 
-Community projects build on nxnative with Mac apps that turn your games into apps for your iPhone, iPad or Mac, with no command line, and keep them in a library. They are separate projects: questions and bugs about them go to their own pages.
+Community projects build on nxnative with tools to turn your games into apps for your iPhone, iPad or Mac without the command line, and libraries to organize and launch them. They are separate projects: questions and bugs about them go to their own pages.
 
-- [NX2Apple](https://github.com/LNPANDY/NX2Apple)
-- [NX Play](https://github.com/varyform/nx-native-wrapper)
-- [NxNative Launcher](https://github.com/rennan101/nxnative_Launcher)
-- [LumaNX](https://github.com/Xc1Ym/LumaNX)
+- [NX2Apple](https://github.com/LNPANDY/NX2Apple) — Mac builder with a shared iPhone/iPad game library.
+- [NX Play](https://github.com/varyform/nx-native-wrapper) — Mac library with device installs and save sync.
+- [NxNative Launcher](https://github.com/rennan101/nxnative_Launcher) — Mac launcher with guided builds and controller mapping.
+- [LumaNX](https://github.com/Xc1Ym/LumaNX) — Mac game builder with IPA export.
+- [GameCase](https://github.com/Tiaoge-tou/GameCase) — iOS game library based on LiveContainer.
 
 ### Build from the command line
 

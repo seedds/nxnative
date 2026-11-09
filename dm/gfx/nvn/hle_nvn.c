@@ -2343,6 +2343,22 @@ static void fstep_tick(const win_t *o, int c) {
     g_fs.per_vsync = fstep_hz() / 60;
     int n = nvn_fstep_next(&g_fs, shown, cost, kmin, kmax, fixed, cslow || gslow);
     if (dm_fps_state) __atomic_store_n((uint32_t *)(dm_fps_state + 0x20), (uint32_t)n, __ATOMIC_RELAXED);
+    // The game's own half rate, asked for while the hold is 2 vsyncs or more (state +0x44, read by a stub with the HALF_RATE capability: Ocarina of Time's request site;
+    // DM_FPS_HALF_RATE=1). The game then calcs twice a drawn frame, so what counts calcs in it (its subtitle and voice timeline, its movie player's one picture a calc) sees 60
+    // a second at 30 fps, as on the console, while the step above stays the frame's: each calc takes half of it (the stub's step × 30 / 60). Needs the hold: with frames shown
+    // as they come (DM_FPS_HOLD=off) a half-rate frame of one vsync would calc 120 times a second
+    if (dm_fps_state) {
+        static int half = -1, nhalf; static uint32_t was;
+        if (half < 0) {
+            const char *e = getenv("DM_FPS_HALF_RATE"); half = e && !strcmp(e, "1");
+            if (e && strcmp(e, "0") && strcmp(e, "1")) LOG("[RED] DM_FPS_HALF_RATE=%s: must be 0 or 1; not asking for the half rate", e);
+            if (half && !fstep_hold()) { LOG("[RED] DM_FPS_HALF_RATE=1 needs the hold (DM_FPS_HOLD is off): not asking for the half rate"); half = 0; }
+            if (half) LOG("[nvn] frame step: the game is asked for its half rate (two calcs a drawn frame) while the hold is 2 vsyncs or more (DM_FPS_HALF_RATE)");
+        }
+        uint32_t want = half && g_fs.k >= 2 && !fixed;
+        if (want != was && nhalf < 40) LOG("[nvn] frame step: half rate %s at present %llu (hold %d)%s", want ? "asked for" : "no longer asked for", (unsigned long long)o->presents, g_fs.k, ++nhalf == 40 ? "; further changes not logged" : "");
+        was = want; __atomic_store_n((uint32_t *)(dm_fps_state + 0x44), want, __ATOMIC_RELAXED);
+    }
     atomic_store(&g_fs_k, g_fs.k);
     held[g_fs.k]++; if (fixed) fixed_sum += (uint64_t)n;   // the stubs count only the host's steps
     static int fixed_was, nfix;

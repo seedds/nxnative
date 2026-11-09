@@ -106,5 +106,44 @@ class FrameStep(unittest.TestCase):
         self.assertEqual(run(30.0, 30.0, 60.0, 0, half_rate=3), (1.0, 0, BASE + SITE + 4))
 
 
+HALF_FUNC, MODULE = 0x650d00, 0x710000   # the function of the half-rate request (the site at +0x1a4) and a ModuleSystem (x19)
+
+
+def ask(own, host):
+    """The request the game writes to the framework's +0x24e (2 = enter the half rate, 1 = leave), for its own flags at [x19+0xa30] and the host's ask at state +0x44"""
+    assert unicorn is not None and arm is not None
+    m = unicorn.Uc(unicorn.UC_ARCH_ARM64, unicorn.UC_MODE_ARM)
+    m.mem_map(BASE, 0xa00000)
+    ctx = Ctx(m)
+    ctx.others['half rate request'] = HALF_FUNC
+    profile.half_rate(ctx)
+    site = HALF_FUNC + 0x1a4
+    assert ctx.sites == {site: '68324ab9'} and 'HALF_RATE' in ctx.capabilities
+    m.mem_write(BASE + site + 4, struct.pack('<3I', 0x7200011f, 0x52800028, 0x1a880508))   # the game's own words: tst w8,#1; mov w8,#1; cinc w8,w8,ne
+    m.mem_write(BASE + MODULE + 0xa30, struct.pack('<I', own))
+    m.mem_write(BASE + STATE + 0x44, struct.pack('<I', host))
+    m.reg_write(arm.UC_ARM64_REG_X19, BASE + MODULE)
+    m.emu_start(BASE + site, BASE + site + 16, count=32)
+    return m.reg_read(arm.UC_ARM64_REG_X8) & 0xffffffff
+
+
+@unittest.skipIf(unicorn is None, 'optional ARM64 execution dependency: unicorn')
+class HalfRate(unittest.TestCase):
+    def test_the_games_own_flag_still_decides_without_an_ask(self):
+        self.assertEqual(ask(0, 0), 1)
+        self.assertEqual(ask(1, 0), 2)
+        self.assertEqual(ask(0xfffffffe, 0), 1)   # its other flags are not the request
+
+    def test_the_hosts_ask_enters_the_half_rate(self):
+        self.assertEqual(ask(0, 1), 2)
+        self.assertEqual(ask(0xfffffffe, 1), 2)
+        self.assertEqual(ask(1, 1), 2)
+
+    def test_no_stub_without_the_function(self):
+        ctx = Ctx(None)
+        profile.half_rate(ctx)   # the locator did not find it: nothing is written
+        self.assertEqual((ctx.sites, ctx.cursor, ctx.capabilities), ({}, AREA, set()))
+
+
 if __name__ == '__main__':
     unittest.main()

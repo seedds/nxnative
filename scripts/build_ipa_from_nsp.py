@@ -409,14 +409,33 @@ def rmtree(p):
     elif p.exists(): shutil.rmtree(p, onexc=_gone)   # Python 3.13 and later pass these by themselves
 
 
+NX_EXTRACT_BUILT = {}   # this run's nx_extract builds, by the key of their sources: the folder each went into, copied from instead of built again
+
+
+def nx_extract_key(repo, env):   # the content of nx_extract's sources and the dotnet that builds them
+    src = repo / 'dm/tools/nx_extract'
+    return fingerprint(('files', sorted(p for p in src.iterdir() if p.is_file())), ('cmd', ['dotnet', '--version']), env=env)
+
+
 def build_nx_extract(repo, work, logs, env):
-    """Build nx_extract into <work>/tools/nx_extract/. It is built in a temporary folder and copied over: with an apostrophe in the output path (e.g. "Bowser's Fury") MSBuild's conditions break,
-    LibHac.dll and the executable are not copied, and the build still reports success"""
-    nx = work / 'tools/nx_extract/nx_extract'
-    with tempfile.TemporaryDirectory(prefix='nx_extract_') as t:
-        run(['dotnet', 'build', repo / 'dm/tools/nx_extract', '-c', 'Release', '-o', t, '-v', 'quiet', '-nologo'], logs / 'nx_extract_build.log', env=env)
-        if not (Path(t) / 'nx_extract').exists(): raise BuildError(f'nx_extract built without an executable (see {logs / "nx_extract_build.log"})')
-        rmtree(nx.parent); shutil.copytree(t, nx.parent)
+    """nx_extract in <work>/tools/nx_extract/, built once for its sources (issue #1181). The folder keeps the key of the sources it was built from (build_src.sha256,
+    as the other stages do): a folder whose key still matches keeps its build, so a run after another with the same sources builds nothing, and a folder built earlier
+    in this run (the title reader's, the survey's) is copied into the next one that needs it, where the first run of a new game built the tool up to four times.
+    It is built in a temporary folder and copied over: with an apostrophe in the output path (e.g. "Bowser's Fury") MSBuild's conditions break, LibHac.dll and the
+    executable are not copied, and the build still reports success"""
+    nx = work / 'tools/nx_extract/nx_extract'; kf = nx.parent / 'build_src.sha256'
+    key = nx_extract_key(repo, env)
+    if nx.exists() and reused(kf, key) is not None: return nx
+    done = NX_EXTRACT_BUILT.get(key)
+    if done is not None and done != nx.parent and (done / 'nx_extract').exists():
+        rmtree(nx.parent); shutil.copytree(done, nx.parent)
+    else:
+        with tempfile.TemporaryDirectory(prefix='nx_extract_') as t:
+            run(['dotnet', 'build', repo / 'dm/tools/nx_extract', '-c', 'Release', '-o', t, '-v', 'quiet', '-nologo'], logs / 'nx_extract_build.log', env=env)
+            if not (Path(t) / 'nx_extract').exists(): raise BuildError(f'nx_extract built without an executable (see {logs / "nx_extract_build.log"})')
+            rmtree(nx.parent); shutil.copytree(t, nx.parent)
+    kf.write_text(f'{key}\n')
+    NX_EXTRACT_BUILT[key] = nx.parent
     return nx
 
 

@@ -82,6 +82,13 @@
 - **Fix:** general, in the package format. `shader_split.py` writes each record's key (its 8 bytes) at record +0x08, in header bytes that were zero; `dmsh_build.py` `record_index` indexes a package by those keys and `rec_of` finds a row's record by its key, so a row's index no longer matters and a package that does not hold a row's shader stops the build before the first job. The control section is searched from +0x38, after the header. The map keeps its index column, so the profiles' tables did not change. A package from before the change carries no keys: the NSP script splits again by itself (its key covers `shader_split.py`), while a tool that hands `dmsh_build.py` an older package, such as `regress.py`'s use of a game's `<id>_build/shader/pkg`, needs that build run again first. `test_shader_package_keys` covers both sides.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) ([issue #1841](https://github.com/seedds/nxnative/issues/1841), diagnosed by its reporter). A build through NX2Apple 1.3.0 kept `ps_lib.bin` from an older split (4,711 records) beside a map from a split after 04df08d4 (4,707 rows), so the present pass's pixel shader `29e3c9dd92b8a571` was translated from a terrain shader's record and drew black.
 
+### nx_extract built up to four times in one run
+
+- **Symptom:** the first build of a game with no profile spends minutes building `nx_extract`: the title reader, the build-ID lookup, the survey and the extraction each ran `dotnet build` on the same sources, and every later run built it again (GitHub issue #1181).
+- **Cause:** `build_nx_extract` built into a temporary folder and copied the result over without a key, so nothing told it the sources had not changed, and each stage asked for its own copy in its own folder (the title reader's temporary one, `<id>_survey`, `<id>_build`).
+- **Fix:** the tool's folder keeps the key of its sources and of `dotnet --version` (`build_src.sha256`, as the other stages' keys): a folder whose key matches keeps its build, and a folder built earlier in the same run is copied into the next one that needs it. A first build of a new game builds the tool once (the title reader's temporary copy is gone by the survey, which builds the second and last time); a run after another with the same sources builds nothing. `test_nsp_nx_extract.py` covers the key, the copy, a new run, changed sources and another dotnet.
+- **Found on:** reading the script while measuring a dump rebuild (issue #1181); 1.1 s against 0.07 s per skipped build on an M4 with a warm `obj/`, a full toolchain build from cold otherwise.
+
 ## IPA archives
 
 ### AltServer cannot install a file of 2 GiB or more

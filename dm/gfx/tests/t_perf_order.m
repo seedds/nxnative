@@ -179,14 +179,14 @@ static void hoists(id<MTLLibrary> lib) {
     R.has_rt=1; R.rt.n=1; R.rt.color[0]=&linear;
     cs->sh[5]->rf.nb=1; cs->sh[5]->rf.b[0]=(nvn_rbind){.kind=NVN_RB_UBOP,.reg=0};
     S.ubo[5][0]=(p_bind_buf){.addr=(uint64_t)mem,.size=4}; nr=0; int depth=0;
-    CHECK("compute uniform read cannot precede aliased attachment write",!csh_cs(cs->sh[5],&d,ranges,&nr,&depth));
+    CHECK("compute uniform read cannot precede aliased attachment write",!csh_cs(cs->sh[5],&d,ranges,&nr,&depth,NULL,NULL));
     cs->sh[5]->rf.b[0].kind=NVN_RB_SBUFP;
     S.ssbo[5][0]=S.ubo[5][0]; nr=0;
-    CHECK("compute storage access cannot precede aliased attachment write",!csh_cs(cs->sh[5],&d,ranges,&nr,&depth));
+    CHECK("compute storage access cannot precede aliased attachment write",!csh_cs(cs->sh[5],&d,ranges,&nr,&depth,NULL,NULL));
     tex_t overlapping=linear; overlapping.serial++; overlapping.mem=(uint8_t *)mem+64; overlapping.L.size=128;
     mtl_reg_tex(504,&overlapping,NULL); S.tex[5][0]=504;
     cs->sh[5]->rf.b[0].kind=NVN_RB_TEX; nr=0;
-    CHECK("offset compute texture read cannot precede overlapping target",!csh_cs(cs->sh[5],&d,ranges,&nr,&depth));
+    CHECK("offset compute texture read cannot precede overlapping target",!csh_cs(cs->sh[5],&d,ranges,&nr,&depth,NULL,NULL));
     S.tex[1][0]=504; drawpr->sh[1]->rf.b[0].kind=NVN_RB_TEX;
     CHECK("offset sampled storage splits merged pass",draw_samples_rt(drawpr));
     mtl_pool_del(mem); free(mem);

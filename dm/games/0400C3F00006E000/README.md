@@ -110,6 +110,7 @@ Update 1.8.0 (v917504, SDK 21.4.0) is not on this Mac. Pull request #1116 ported
 - [Comparisons with .FTZ](../../../docs/reference/shaders.md#comparisons-with-ftz)
 - [Variable rate shading ignored](../../../docs/reference/rendering.md#variable-rate-shading-ignored)
 - [Image views of the type a shader declares](../../../docs/reference/rendering.md#image-views-of-the-type-a-shader-declares) (the dark box around each kart's shadow, issue #1648)
+- [A haptic engine that stops under a call raises, and ended the app](../../../docs/reference/services.md#a-haptic-engine-that-stops-under-a-call-raises-and-ended-the-app) (the iPhone crash after about 85 s of a race)
 - [A DualShock 4 that connects after the first stays on Core Haptics](../../../docs/reference/services.md#a-dualshock-4-that-connects-after-the-first-stays-on-core-haptics)
 - [Identical controllers that GameController lists as one](../../../docs/reference/services.md#identical-controllers-that-gamecontroller-lists-as-one) (two Pro Controllers over USB, split-screen races)
 - [Scaled shared memory addresses](../../../docs/reference/shaders.md#scaled-shared-memory-addresses)

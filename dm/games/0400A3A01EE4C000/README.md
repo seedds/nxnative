@@ -19,6 +19,10 @@ A Switch 2 game: update v655360 (the title screen says Ver. 2.0.1), SDK 20.5.25 
 
 ## Shaders
 
+The expanded selection's 18 additions and their paired pixel shader compile on chain `39417042cfe8`: 19 base shaders, 41 Metal libraries, no compile failure or reported loss. The 46 focused documentation, profile, chain and partial-build tests pass. No gameplay or visual comparison on this chain was performed.
+
+- The `--seen-shaders` selection now includes 18 more shaders (12 pixel, 6 vertex) requested in later M1 Max desktop sessions of update 2.0.1, bringing the list to 8,175. All are already in the full shader map; this extends partial builds without changing the translator or the shader facts. The requests were retained in the November 2–4 local diagnostic reports; the last two sessions exited normally after 259,800 and 882,047 frames on chain `cd5ecdaec434`. These are historical playtests of that local build, not validation of the current chain or complete coverage of later areas.
+
 - Resolved: `cc679c7b4d3e703c` did not translate (`LDC with a bindless bank or an address mode`): an indexed read of c1 with the bank in the address register, found on Hyrule Warriors: Age of Imprisonment, which ships the same shader ([LDC with the bank in its address register](../../../docs/reference/shaders.md#ldc-with-the-bank-in-its-address-register-is)); all 8,158 shaders of the playtest library now translate, and the walk below logged no shader failing to load. The census also lists f55 three times, two more of that LDC and 16 BRX with no target: whether they are the forms since translated ([Barrier moves around warp shuffles](../../../docs/reference/shaders.md#barrier-moves-around-warp-shuffles)) is not checked (open).
 - A `3D binding fallback` line fires once at about frame 2100: a 2D 8x8 texture in a 3D slot. The shader is not identified (open).
 

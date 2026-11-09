@@ -67,6 +67,19 @@ class UpscalerKeys(unittest.TestCase):
         self.assertEqual(macros(MAP), ['#define DM_GAME_UPSCALER_KEYS "7629d857a0a93833,c56db3d5a0f1b5af"', '#define DM_GAME_UPSCALER_N 2'])
 
 
+class MovieNetKeys(unittest.TestCase):
+    def test_from_shader_map(self):   # nn::movie's NDVE part (Ocarina of Time's Movie/Ndve file): its compute shaders, not the file's NDSR pack
+        mv = ('cs_other.bin\t8\tcompute\tba079f68ae288dba\t/Movie/Ndve/Ndve-Nvn2-vid_seq5.dat.zs#NDVE@0x1423e8\n'
+              'cs_other.bin\t9\tcompute\t4f41ccf24f163e0d\t/Movie/Ndve/Ndve-Nvn2-vid_seq5.dat.zs#NDSR@0x104fe0\n')
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, ID).mkdir()
+            (Path(d, ID) / 'game.tsv').write_text(TSV)
+            (Path(d, ID) / 'shader_map.tsv').write_text(MAP.split('cs_other.bin')[0] + mv)
+            subprocess.run([sys.executable, str(GAME), 'header', ID, str(Path(d, ID) / 'game.h')], env={**os.environ, 'DM_GAMES_DIR': d}, check=True, capture_output=True)
+            got = [l for l in (Path(d, ID) / 'game.h').read_text().splitlines() if 'MOVIE_NET' in l]
+        self.assertEqual(got, ['#define DM_GAME_MOVIE_NET_KEYS "ba079f68ae288dba"', '#define DM_GAME_MOVIE_NET_N 1'])
+
+
 if __name__ == '__main__':
     unittest.main()
 

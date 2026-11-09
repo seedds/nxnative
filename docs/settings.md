@@ -3,7 +3,7 @@
 The screen before the game starts shows the settings the game supports. A setting that only matters while another is on appears under it and disappears when that one is turned off. Tap **Play** to start; the app remembers your choices for the next start. All settings are on one scrollable screen, under **Game**, **Controls** and **Performance**. Tap a menu or move a slider there; no settings page needs opening. **Upscaling** is in **Game**, beside **Console mode**. A Mac app shows the same settings in a [window of its own](#the-mac-settings-window).
 
 - [Tested defaults](#tested-defaults)
-- [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Game's upscaler](#games-upscaler), [Game language](#game-language), [Picture](#picture), [Frame-rate counter](#frame-rate-counter)
+- [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Game's upscaler](#games-upscaler), [Movie enhancement](#movie-enhancement), [Game language](#game-language), [Picture](#picture), [Frame-rate counter](#frame-rate-counter)
 - [Controls](#controls): [Touch feedback](#touch-feedback), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff), [Press a button to join](#press-a-button-to-join)
 - [Performance](#performance): [Frame buffering](#frame-buffering), [Metal 4 pipelines](#metal-4-pipelines), [Pipeline prebuild](#pipeline-prebuild), [Encode thread](#encode-thread), [Hold frames when late](#hold-frames-when-late), [Performance HUD](#performance-hud), [Reset to tested defaults](#reset-to-tested-defaults)
 - [The Mac settings window](#the-mac-settings-window): [Display mode](#display-mode)
@@ -75,6 +75,13 @@ flowchart LR
 - **Cost:** none in GPU time (it saves 2.5-4 ms a frame in that case); the picture is Apple's scaler's rather than the game's. Frames where the game renders at its output size are not upscaled and keep the game's shader either way. Devices without MetalFX keep the game's upscaler.
 - **Not the same as [Upscaling](#upscaling):** that one scales the finished picture, HUD included, to the screen; this one replaces the game's own step inside the frame. Both can be on.
 
+
+### Movie enhancement
+
+Shown only for games whose movies go through a network of Nintendo's movie library before they reach the screen: The Legend of Zelda: Ocarina of Time's title and opening movies. **On**, the default, keeps it. **Off** leaves the network out and shows each movie frame as it was decoded: a little softer, at a fraction of the GPU time.
+
+- **When to change it:** when the movies stutter. On an M1 the network takes 60-70 ms of every movie frame, so the opening movie (24 fps) plays at about 13 fps; off, the movie keeps its pace.
+- **On the Mac:** the setting under **Game** in the [settings window](#the-mac-settings-window), or `DM_MOVIE_ENHANCE=0` in its `env.txt`.
 ### Game language
 
 The game's own languages. The app was packed with one of them; pick another here without repacking. A game packed from a dump or a NUP may come without its list: every language is offered then, with a note, and a game that lacks the one you pick may show another.
@@ -279,6 +286,7 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 | Press a button to join | `DM_PAD_PRESS_TO_JOIN` | `1`, `0` |
 | Upscaling | `DM_PRESENT_UPSCALE` | `off`, `metalfx` |
 | Game's upscaler | `DM_UPSCALER` | `game`, `metalfx` |
+| Movie enhancement | `DM_MOVIE_ENHANCE` | `1`, `0` |
 | Frame buffering | `DM_PRESENT_SNAP` | `1`, `0` |
 | Metal 4 pipelines | `DM_PSO_MTL4` | `1`, `0` |
 | Pipeline prebuild | `DM_PSO_PREBUILD` | `1`, `0` |

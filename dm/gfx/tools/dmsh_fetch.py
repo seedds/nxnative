@@ -43,6 +43,17 @@ def _proj(msl, var, comp, locn):
     return src(m.group(1), comp) if m and src(m.group(1), comp) == src(m.group(2), 'w') else None
 
 _UNI = re.compile(r'\(\*spvDescriptorSet0\.fp_c(\d+)\)\._m0\[(\d+)\]\.([xyzw])')
+
+# A read of a game uniform slot at a fixed offset, as the translator bounds it (TranslationFlags.MetalUniformBounds, GitHub issue #1860): the word when the slot's bound size (the size
+# table, bank DMSH_CBSIZE_BANK) holds it, else 0, wrapped in parentheses or not as the expression around it needs. unguard gives back the bare read for the analyses that look for a
+# uniform's word (_frag_pos below, dmsh_build.py raster_facts and int_outputs): the host takes such a word's value only from inside the binding (nvn_mtl.m ubo_float refuses a word
+# past its size), where the guard chooses the read. Only for analysis: never in source that is compiled
+_GCOND = r'\(\d+u < \(\(\*spvDescriptorSet0\.[a-z]+_c%d\)\._m0\[\d\]\.[xyzw] >> 2u\)\)' % abi.CBSIZE_BANK
+_GREAD = r'(\(\*spvDescriptorSet0\.[a-z]+_c\d+\)\._m0\[\d+\]\.[xyzw])'
+_GUARDED = re.compile(r'(?<![\w>])\(%s \? %s : 0(?:\.0|u)?\)|%s \? %s : 0(?:\.0|u)?(?![\w.])' % (_GCOND, _GREAD, _GCOND, _GREAD))   # parentheses after a name or > are a call's
+
+def unguard(msl):
+    return _GUARDED.sub(lambda m: m.group(1) or m.group(2), msl) if 'spvDescriptorSet0' in msl else msl
 _SCALE = '(*spvDescriptorSet0.support_buffer)._m5[0].x'   # the support buffer's render scale (Ryujinx's layout), which the host fills with 1 (nvn_mtl.m support buffer)
 
 def _frag_pos(msl, var, comp):
@@ -212,7 +223,8 @@ def fold(msl, bindings, om_only_ok=False):
         if a and b and a.group(1) == b.group(1) and a.group(1) in locn: how = {'varying_locn': locn[a.group(1)]}
         else:
             pa, pb = (_proj(text, d.group(1), 'x', locn), _proj(text, d.group(2), 'y', locn)) if d else (None, None)
-            fx, fy = (_frag_pos(text, d.group(1), 'x'), _frag_pos(text, d.group(2), 'y')) if d else (None, None)
+            bare = unguard(text) if d else text   # the uniform words the proof names, read bare (unguard)
+            fx, fy = (_frag_pos(bare, d.group(1), 'x'), _frag_pos(bare, d.group(2), 'y')) if d else (None, None)
             if pa and pa == pb: how = {'varying_locn': locn[pa], 'proj': 1}
             elif fx and fy: how = {'frag_pos': [fx, fy]}
             else: continue

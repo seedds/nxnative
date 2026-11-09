@@ -2,7 +2,7 @@
 # without hand-copying lists: when the Makefile changes, the next iOS build follows automatically.
 #   Gen/src/<flat name>   symlinks to source files (excluding main.c and front_mac.m; main.c is linked separately to Gen/main/main.c and compiled with -Dmain=dm_main)
 #   stdout            xcconfig lines: HEADER_SEARCH_PATHS (-I directories + the directory of every source file, so relative includes resolve as usual),
-#                     OTHER_CFLAGS (-D), frameworks (Cocoa is replaced by what the UIKit side already has, skipped)
+#                     OTHER_CFLAGS (-D), frameworks (the Mac-only ones skipped: Cocoa, which the UIKit side replaces, and IOBluetooth, which only the Mac's Switch 2 transport reads: pad_switch2_apple.m)
 # Usage: gen_build.py <dm/host dir> <Gen dir>
 import os, shlex, subprocess, sys
 host, gen = os.path.abspath(sys.argv[1]), os.path.abspath(sys.argv[2])
@@ -41,4 +41,5 @@ for s in srcs:
     os.symlink(s, f'{gen}/src/{flat}')
 print('HEADER_SEARCH_PATHS = $(inherited) ' + ' '.join(f'"{d}"' for d in incs + dirs))
 print('OTHER_CFLAGS = $(inherited) ' + ' '.join(defs))
-print('DM_FRAMEWORKS = ' + ' '.join(f'-framework {f}' for f in fws if f != 'Cocoa'))
+MAC_ONLY = {'Cocoa', 'IOBluetooth'}   # no such framework in the iOS SDK: linking it fails the build
+print('DM_FRAMEWORKS = ' + ' '.join(f'-framework {f}' for f in fws if f not in MAC_ONLY))

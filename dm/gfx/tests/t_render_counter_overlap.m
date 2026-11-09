@@ -2,6 +2,11 @@
 // Public NVN commands exercise the predicate; a bounded Metal gate holds reports
 // unfinished. OPEN diagnostics separately expose pre-existing CPU-post query
 // byte ordering; passing this test does not claim native GPU report bytes work.
+// It checks the profile key render_cond's replay, so the key is on whatever profile GAME names:
+// without it the host draws every render-enable block and posts no pending counter values.
+#include "game_profile.h"
+#undef DM_GAME_RENDER_COND
+#define DM_GAME_RENDER_COND 1
 #define nvn_game_fps nvn_game_fps_mtl_default
 #include "../nvn/nvn_mtl.m"
 #undef nvn_game_fps

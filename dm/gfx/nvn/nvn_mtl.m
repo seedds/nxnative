@@ -12805,6 +12805,7 @@ static int csh_dispatch_ahead(void) {
             case OP_DISPATCH: return 1;
             case OP_BARRIER: { uint32_t bits; memcpy(&bits, aq, sizeof bits); if (bits) return 0; continue; }
             case OP_REPORT_COUNTER: case OP_RESET_COUNTER: { uint64_t t; memcpy(&t, aq, 8); if (t == NVN_COUNTER_TYPE_SAMPLES_PASSED) continue; return 0; }   // see cs_hoist_try
+            case OP_RENDER_COND: continue;   // conditional rendering gates draws and clears, not dispatches (see cs_hoist_try)
             case OP_DRAW: case OP_DRAW_IDX:
             case OP_ALPHA_REF: case OP_BIND_IMG: case OP_BIND_PROGRAM: case OP_BIND_SAMP: case OP_BIND_SSBO: case OP_BIND_STATE: case OP_BIND_TEX: case OP_BIND_TEX1:
             case OP_BIND_UBO: case OP_BIND_UBO_SMALL: case OP_BIND_VATTR: case OP_BIND_VBUF: case OP_BIND_VBUF1: case OP_BIND_VSTREAM: case OP_BLEND_COLOR: case OP_COPY_STRIDE:
@@ -12836,6 +12837,11 @@ static void cs_hoist_try(NvProg *pr0, const p_draw *dw0, const p_draw_idx *di0) 
         if (hq.op == OP_BARRIER) { uint32_t bits; memcpy(&bits, aq, sizeof bits); if (bits) { g_csh_stop[5]++; break; } continue; }
         if (hq.op == OP_REPORT_COUNTER || hq.op == OP_RESET_COUNTER) { uint64_t t, ad = 0; memcpy(&t, aq, 8); if (hq.op == OP_REPORT_COUNTER) memcpy(&ad, (const uint8_t *)aq + 8, 8);
             if (t != NVN_COUNTER_TYPE_SAMPLES_PASSED || (ad && !csh_add(csh_rep, &nrep, ad, 16))) { g_csh_stop[5]++; break; }
+            continue; }
+        // Conditional rendering between the draws (Ocarina of Time draws each object only if its occlusion query passed): it skips draws and clears, never a dispatch, so a dispatch
+        // moves past it; one that writes the two counters the condition compares would change it, so their 32 bytes join the reports' memory
+        if (hq.op == OP_RENDER_COND) { const p_render_cond *rc = aq;
+            if (rc->mode < 2 && rc->addr && !csh_add(csh_rep, &nrep, rc->addr, 32)) { g_csh_stop[5]++; break; }
             continue; }
         if (hq.op == OP_DRAW || hq.op == OP_DRAW_IDX) {
             p_draw tdw; p_draw_idx tdi; const p_draw *d = hq.op == OP_DRAW ? draw_rec(aq, hq.size, &tdw) : NULL; const p_draw_idx *x = hq.op == OP_DRAW_IDX ? draw_idx_rec(aq, hq.size, &tdi) : NULL;

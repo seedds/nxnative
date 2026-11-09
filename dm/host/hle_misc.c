@@ -115,6 +115,10 @@ HLE_FORCE("_ZNK2nn2ec19ShopServiceAccessor13AsyncResponse12GetErrorCodeEv", "sho
 // The "add-on content lost" error screen is an applet too: logged only
 HLE_FORCE("_ZN2nn3aoc25ShowAddOnContentLostErrorEPKii", "add-on content lost error applet; the host only logs it", void, h_aoc_LostErr, const int *idx, int n) { DM_APPLET("error"); (void)idx; LOG("aoc::ShowAddOnContentLostError (%d entries) (cut)", n); }
 
+// ---------- notification: the host has no scheduled system reminder alarms ----------
+HLE_FORCE("_ZN2nn12notification17ListAlarmSettingsEPNS0_12AlarmSettingEi", "no host system alarms to list; do not connect to the console's notif:a service",
+          int, h_notification_ListAlarms, void *out, int capacity) { (void)out; (void)capacity; return 0; }
+
 // ---------- err error applet: printed by the host ----------
 HLE_FORCE("_ZN2nn3err9ShowErrorENS_6ResultE", "error display applet; the host prints the module / description number", void, h_err_ShowError, Result r) { DM_APPLET("error");
     LOG("err::ShowError Result=%#x (module %u, description %u)", r, r & 0x1ff, (r >> 9) & 0x1fff);

@@ -30,6 +30,14 @@ static void *hook(const char *name) {
     return count == 1 ? fn : NULL;
 }
 int main(void) {
+    int (*list_alarms)(void *, int) = hook("_ZN2nn12notification17ListAlarmSettingsEPNS0_12AlarmSettingEi");
+    if (list_alarms) {
+        uint8_t alarms[8 * 0x40], before[sizeof alarms];
+        memset(alarms, 0xa5, sizeof alarms); memcpy(before, alarms, sizeof alarms);
+        CHECK(list_alarms(alarms, 8) == 0, "host has no system reminder alarms");
+        CHECK(!memcmp(alarms, before, sizeof alarms), "empty alarm list leaves caller storage untouched");
+        CHECK(list_alarms(NULL, 0) == 0, "empty alarm query accepts zero capacity without touching memory");
+    }
     // bool arguments are widened as hle.h requires (only the low 8 bits count); the returns are bools in w0, not nn::Result
     unsigned (*check)(unsigned) = hook("_ZN2nn4pctl32CheckFreeCommunicationPermissionEb");
     unsigned (*begin)(unsigned) = hook("_ZN2nn4pctl25TryBeginFreeCommunicationEb");

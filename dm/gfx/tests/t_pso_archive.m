@@ -35,6 +35,9 @@ static int checks, failed;
 
 static id<MTLLibrary> g_lib, g_lib2;   // g_lib2: the same source again, for functions with no Metal 4 descriptor (a library hands out one function object per name)
 static id<MTLCommandQueue> g_q;
+static NSArray<NSString *> *archive_files(NSString *dir) {   // the archive's files, without their indexes (<file>.keys)
+    return [[NSFileManager.defaultManager contentsOfDirectoryAtPath:dir error:nil] filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"self ENDSWITH '.mtl4a'"]];
+}
 static id<MTLFunction> test_fn(id<MTLLibrary> lib, NSString *name, int registered) {
     id<MTLFunction> f = [lib newFunctionWithName:name];
     MTLFunctionConstantValues *cv = f.functionConstantsDictionary.count ? [MTLFunctionConstantValues new] : nil;
@@ -129,7 +132,7 @@ static void compute_pipelines(void) {
     EXPECT("compute: captured for the archive", pending + 1, g_arch_new);
     EXPECT("compute: its dispatch writes", 1, run_kernel(kp));
     arch_flush_wait();
-    NSArray<NSString *> *names = [NSFileManager.defaultManager contentsOfDirectoryAtPath:@(kdir) error:nil];
+    NSArray<NSString *> *names = archive_files(@(kdir));
     EXPECT("compute: one file written", 1, names.count);
     EXPECT("compute: a plain file, not a p file", 1, names.count == 1 && ![names[0] hasPrefix:@"p"]);
     EXPECT("compute: nothing left to write", 0, g_arch_new);
@@ -224,7 +227,7 @@ static void mesh_pipelines(void) {
     EXPECT("mesh with a task shader: its draw writes", 1, mesh_draw_ok(p2, 1));
     EXPECT("mesh, depth only: draws nothing into colour", 1, mesh_draw_ok(p3, 0));
     arch_flush_wait();
-    NSArray<NSString *> *names = [NSFileManager.defaultManager contentsOfDirectoryAtPath:@(mdir) error:nil];
+    NSArray<NSString *> *names = archive_files(@(mdir));
     EXPECT("mesh: one file written", 1, names.count);
     EXPECT("mesh: a p file (no vertex layout)", 1, names.count == 1 && [names[0] hasPrefix:@"p"]);
     NSString *first = names.firstObject;
@@ -533,6 +536,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     } else g_lib = [g_dev newLibraryWithSource:src options:nil error:&err];
     if (!g_lib) { fprintf(stderr, "%s\n", err.localizedDescription.UTF8String); return 1; }
     g_lib2 = [g_dev newLibraryWithSource:[src stringByAppendingString:@"// another library: the same source would come back as the same library\n"] options:nil error:&err];
+    lib_tag(g_lib, @"fixture.metallib"); lib_tag(g_lib2, @"fixture2.metallib");   // as lib_from_file names the game's: their pipelines have index keys
     if (argc == 3 && !strncmp(argv[1], "--cold-", 7)) {   // across fresh processes: a cold start's prewarm with a timer flush after each new base, then the next start
         g_arch_period_max = 4; int seed = !strcmp(argv[1], "--cold-seed"), cut = !strcmp(argv[1], "--cold-cut-seed"), after_cut = !strcmp(argv[1], "--cold-after-cut");
         int quit = !strcmp(argv[1], "--cold-quit-seed"), after_quit = !strcmp(argv[1], "--cold-after-quit");
@@ -540,7 +544,7 @@ int main(int argc, char **argv) { @autoreleasepool {
         if (quit) [arch_compact_stamp() writeToFile:[@(argv[2]) stringByAppendingPathComponent:@"compacting"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
         pso4_init();
         EXPECT("cold restart: no compaction", 0, g_compact_enabled);
-        uint64_t arch0 = g_pb_archived, built0 = g_pb_built;
+        uint64_t arch0 = g_pb_archived, built0 = g_pb_built, asks0 = g_arch_asks;
         atomic_store(&g_warm_running, 1);
         for (int i = 0; i <= PSO_ARCH_COMPACT; i++) {
             MTLRenderPipelineDescriptor *cd = desc(MTLPixelFormatRGBA8Unorm, 0, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll, 1);
@@ -561,6 +565,7 @@ int main(int argc, char **argv) { @autoreleasepool {
         int expect_archived = seed ? 0 : after_cut ? 4 : after_quit ? 6 : PSO_ARCH_COMPACT + 1;
         EXPECT("cold restart: compiled in the cold start, from the archive in the next", expect_archived, (int)(g_pb_archived - arch0));
         EXPECT("cold restart: compiled where not in the archive", PSO_ARCH_COMPACT + 1 - expect_archived, (int)(g_pb_built - built0));
+        EXPECT("cold restart: the index asks one file for each base found and none for a miss", expect_archived, (int)(g_arch_asks - asks0));
         [NSFileManager.defaultManager removeItemAtPath:@(dir) error:nil];
         printf("t_pso_archive %s: %d checks, %d failed\n", argv[1], checks, failed);
         return failed != 0;
@@ -619,7 +624,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     if (argc == 3) {
         int seed = !strcmp(argv[1], "--compact-seed");
         pso4_init();
-        EXPECT("restart: opened run archives", seed ? 0 : !strcmp(argv[1], "--compact-replay") ? PSO_ARCH_COMPACT + 1 : 1, g_arch4.count);
+        EXPECT("restart: opened run archives", seed ? 0 : !strcmp(argv[1], "--compact-replay") ? PSO_ARCH_COMPACT + 1 : 1, g_arch4.count + g_arch_ixf.count);
         atomic_store(&g_warm_running, !seed);
         NSMutableArray<MTLRenderPipelineDescriptor *> *descs = [NSMutableArray array];
         for (int i = 0; i <= PSO_ARCH_COMPACT; i++) {
@@ -669,6 +674,34 @@ int main(int argc, char **argv) { @autoreleasepool {
     EXPECT("archive file written", 1, [NSFileManager.defaultManager fileExistsAtPath:file]);
     EXPECT("the flush began a new period", 1, g_ep != ep0);
     EXPECT("nothing left to write", 0, g_arch_new);
+    {   // its index: the one base's key, complete; a key is the descriptor's, the same for the same pipeline and another for another, none without names
+        int complete = -1; NSData *keys = arch_keys_read(arch_keys_path(file), &complete);
+        MTLRenderPipelineDescriptor *k1 = desc(MTLPixelFormatRGBA8Unorm, 1, MTLPixelFormatRGBA16Float, MTLColorWriteMaskAll, 1), *k2 = desc(MTLPixelFormatRGBA8Unorm, 1, MTLPixelFormatRGBA16Float, MTLColorWriteMaskAll, 1);
+        uint64_t a = arch_key(pso_desc4(k1, 1)), b = arch_key(pso_desc4(k2, 1));
+        EXPECT("index: written beside the file, one key", 1, keys.length == sizeof(uint64_t));
+        EXPECT("index: complete", 1, complete);
+        EXPECT("index: the base's key", 1, keys.length == sizeof(uint64_t) && !memcmp(keys.bytes, &a, sizeof a));
+        EXPECT("key: the same pipeline, the same key", 1, a && a == b);
+        k2.vertexDescriptor.layouts[16].stride = 32;
+        EXPECT("key: another layout, another key", 1, arch_key(pso_desc4(k2, 1)) != a);
+        MTL4RenderPipelineDescriptor *u = pso_desc4(k1, 1); MTL4LibraryFunctionDescriptor *uf = [MTL4LibraryFunctionDescriptor new];
+        uf.library = [g_dev newLibraryWithSource:[src stringByAppendingString:@"// a library with no name\n"] options:nil error:&err]; uf.name = @"vs"; u.vertexFunctionDescriptor = uf;
+        EXPECT("key: none for a library with no name", 0, arch_key(u));
+        uf.library = g_lib;
+        uint64_t (^spec_key)(MTLFunctionConstantValues *) = ^uint64_t(MTLFunctionConstantValues *cv) {   // the descriptors copy what they are given: set, then assign
+            MTL4SpecializedFunctionDescriptor *sf = [MTL4SpecializedFunctionDescriptor new]; sf.functionDescriptor = uf; sf.constantValues = cv; u.vertexFunctionDescriptor = sf;
+            return arch_key(u);
+        };
+        MTLFunctionConstantValues *c1 = [MTLFunctionConstantValues new], *c2 = [MTLFunctionConstantValues new]; bool on = 1, off = 0; int seven = 7;
+        [c1 setConstantValue:&on type:MTLDataTypeBool atIndex:3]; [c1 setConstantValue:&seven type:MTLDataTypeInt atIndex:0];
+        [c2 setConstantValue:&seven type:MTLDataTypeInt atIndex:0]; [c2 setConstantValue:&on type:MTLDataTypeBool atIndex:3];   // the same values, set in another order
+        uint64_t c0 = spec_key([MTLFunctionConstantValues new]), ka = spec_key(c1), kb = spec_key(c2);
+        [c2 setConstantValue:&off type:MTLDataTypeBool atIndex:3]; uint64_t kc = spec_key(c2);
+        EXPECT("key: constant values by their values", 1, c0 && ka && ka != c0 && ka == kb && kc != ka);
+        int partial = -1; NSString *kp = [@(dir) stringByAppendingPathComponent:@"t.keys"];
+        EXPECT("index: one with a pipeline with no key is not complete", 1, arch_keys_write(kp, keys, 0) && arch_keys_read(kp, &partial) && partial == 0);
+        unlink(kp.fileSystemRepresentation);
+    }
     nvn_hm_clear(&g_pbase, hm_rel);   // as a new start: no base in memory, the archive opened
     g_arch4 = @[[g_dev newArchiveWithURL:[NSURL fileURLWithPath:file] error:&err]];
     uint64_t built = g_pb_built;
@@ -703,7 +736,7 @@ int main(int argc, char **argv) { @autoreleasepool {
             if (!pso_build(cd, &err)) { fprintf(stderr, "compaction: no pipeline %d\n", i); failed++; }
             arch_flush_wait();
         }
-        NSArray<NSString *> *names = [[NSFileManager.defaultManager contentsOfDirectoryAtPath:@(cdir) error:nil] sortedArrayUsingSelector:@selector(compare:)];
+        NSArray<NSString *> *names = [archive_files(@(cdir)) sortedArrayUsingSelector:@selector(compare:)];
         EXPECT("compaction: one file per flush", PSO_ARCH_COMPACT + 1, names.count);
         NSMutableArray<id<MTL4Archive>> *open = [NSMutableArray array]; NSMutableArray<NSString *> *paths = [NSMutableArray array];
         for (NSString *n in names.reverseObjectEnumerator) { NSString *f = [@(cdir) stringByAppendingPathComponent:n]; [paths addObject:f]; [open addObject:[g_dev newArchiveWithURL:[NSURL fileURLWithPath:f] error:&err]]; }
@@ -719,7 +752,7 @@ int main(int argc, char **argv) { @autoreleasepool {
         dispatch_sync(g_arch_q, ^{ arch_flush(); });   // the timer fires while prewarm still has other work
         arch_flush_wait();   // the timer's flush waits for the prewarm; the full periods are written
         EXPECT("compaction: timed flush keeps the last recaptured bases pending", descs.count % 4, g_arch_new);
-        EXPECT("compaction: a file per full period", PSO_ARCH_COMPACT + 1 + descs.count / 4, [NSFileManager.defaultManager contentsOfDirectoryAtPath:@(cdir) error:nil].count);
+        EXPECT("compaction: a file per full period", PSO_ARCH_COMPACT + 1 + descs.count / 4, archive_files(@(cdir)).count);
         int kept = 0; for (NSString *f in paths) kept += [NSFileManager.defaultManager fileExistsAtPath:f];
         EXPECT("compaction: the old files stay until its last period is written", paths.count, kept);
         atomic_store(&g_warm_running, 0);
@@ -732,7 +765,7 @@ int main(int argc, char **argv) { @autoreleasepool {
         arch_flush_wait();
         EXPECT("compaction: the marker exists while the flush writes", 1, ms->calls == 1 && ms->marked == 1);
         EXPECT("compaction: the flush that returned removed the marker", 0, [NSFileManager.defaultManager fileExistsAtPath:arch_compact_marker()]);
-        names = [NSFileManager.defaultManager contentsOfDirectoryAtPath:@(cdir) error:nil];
+        names = archive_files(@(cdir));
         EXPECT("compaction: a file per period left", (descs.count + 3) / 4, names.count);
         EXPECT("compaction: done", 0, g_compact_periods + !g_compact_closed + g_compact_bad);
         g_arch_period_max = ARCH_PERIOD_MAX;
@@ -827,7 +860,7 @@ int main(int argc, char **argv) { @autoreleasepool {
             if (!pso_build(cd, &err)) { fprintf(stderr, "tier: no pipeline %d\n", i); failed++; }
             arch_flush_wait();
         }
-        NSArray<NSString *> *names = [[NSFileManager.defaultManager contentsOfDirectoryAtPath:@(cdir) error:nil] sortedArrayUsingSelector:@selector(compare:)];
+        NSArray<NSString *> *names = [archive_files(@(cdir)) sortedArrayUsingSelector:@selector(compare:)];
         EXPECT("tier: two full periods' files and one file per flush", PSO_ARCH_COMPACT + 3, names.count);
         EXPECT("tier: a full period's file, in no tier", 8, names.count ? arch_tier(names[0]) : -1);
         EXPECT("tier: a flush of one pipeline, the smallest tier", 0, names.count ? arch_tier(names.lastObject) : -1);
@@ -853,7 +886,7 @@ int main(int argc, char **argv) { @autoreleasepool {
         EXPECT("tier: the full period's file the run took nothing from stays too", 1, [NSFileManager.defaultManager fileExistsAtPath:gone]);
         int left = 0; for (NSString *f in compacted) left += [NSFileManager.defaultManager fileExistsAtPath:f];
         EXPECT("tier: the small files removed", 0, left);
-        names = [[NSFileManager.defaultManager contentsOfDirectoryAtPath:@(cdir) error:nil] sortedArrayUsingSelector:@selector(compare:)];
+        names = [archive_files(@(cdir)) sortedArrayUsingSelector:@selector(compare:)];
         EXPECT("tier: the two full files and a file per period", 2 + (small.count + 3) / 4, names.count);
         nvn_hm_clear(&g_pbase, hm_rel); g_compact_enabled = 0; g_compact_files = nil; g_compact_state = NULL; g_compacted = 0;
         NSMutableArray<id<MTL4Archive>> *again = [NSMutableArray array];
@@ -882,7 +915,7 @@ int main(int argc, char **argv) { @autoreleasepool {
             if (i % 4 != 3) EXPECT("cold: the timer's flush waits for the prewarm's end", 1, g_ep == ep);
         }
         atomic_store(&g_warm_running, 0); arch_flush_wait();
-        NSUInteger files = [NSFileManager.defaultManager contentsOfDirectoryAtPath:@(cdir) error:nil].count;
+        NSUInteger files = archive_files(@(cdir)).count;
         EXPECT("cold: a file per full period and one for the rest", (PSO_ARCH_COMPACT + 4) / 4, files);
         nvn_hm_clear(&g_pbase, hm_rel); g_arch_period_max = ARCH_PERIOD_MAX;
         [NSFileManager.defaultManager removeItemAtPath:@(cdir) error:nil]; g_arch_dir = saved; g_arch4 = @[];

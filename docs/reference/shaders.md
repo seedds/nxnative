@@ -1484,6 +1484,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Check:** `DMSH_TEST_XLATE=dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate python3 dm/gfx/tests/test_dmsh_ampere_orin.py` (about 5 s on an M5 Max); it prints every op's differing lanes by cause. `AMPERE_ORIN_ONLY=<ops or families>` runs some, `AMPERE_ORIN_REPORT=<file>` writes the results as JSON. To record again: `python3 dm/gfx/tools/ampere_orin/capture.py --host <user@machine> [--arch sm_86]`, with NVIDIA's `nvdisasm` (the `cuda_nvdisasm` redistributable) in `~/ampere_orin` on that machine.
 - **Found on:** no game; a Jetson Orin's results. The HMMA comparison it extends is PR #1897's.
 
+### FSETP.NE and FSET.NE held with a NaN operand
+
+- **Symptom:** a comparison `a != b` that NVIDIA's GPU answers false when a or b is NaN came out true, so a guard against a NaN let it through (none seen in a game yet).
+- **Cause:** `.NE` is the ordered not-equal, false when either operand is NaN (`.NEU`, its unordered twin, is true then). `GetFPComparison` emits it as SPIR-V's `OpFOrdNotEqual`, which is right, but spirv-cross writes that as MSL's `!=`, which is unordered. Writing it as `(a < b) || (a > b)` does not help: Metal's fast math, which assumes no NaN, folds that back to `!=`. The helper is shared, so Maxwell's FSETP and FSET had it too, and every compiler output that tests an ordered not-equal (ptxas also builds `setp.equ` from the negated FSETP.NE).
+- **Fix:** `.NE` is `a != b && !isnan(a) && !isnan(b)` (`InstEmitFloatComparison.cs` `GetFPComparison`). Metal keeps `isnan` under fast math, as the unordered comparisons already relied on.
+- **Check:** `test_dmsh_ampere_orin.py`'s `fsetp` and `fsetp_ftz` match the Orin (before: 800 of 16,384 cases each differed, every one with a NaN operand; what remains of `fsetp` is f32 denormal inputs, which Metal flushes).
+- **Found on:** no game; a Jetson Orin's results ([Ampere instructions checked against an Ampere GPU](#ampere-instructions-checked-against-an-ampere-gpu)). A scan of Ocarina of Time's shader code finds only a handful of FSETP.NE.
+
 ### The NDVE movie network by the host
 
 - **Symptom:** a Switch 2 game's movies and the title behind them run below 60 fps on a Mac with a smaller GPU, and the GPU profile (`DM_NVN_GPUPROF`) shows almost all of the frame in a dozen compute dispatches of `nn::ndve`'s movie network: Ocarina of Time's title at about 24 fps and 38 ms of GPU a frame on an M1 Pro with 16 GPU cores, 24.8 ms on an M1 Max ([issue 1375](https://github.com/seedds/nxnative/issues/1375)), 18.9 ms of compute on an M4 with 8 ([HMMA chains keep their matrices in the SIMD-group](#hmma-chains-keep-their-matrices-in-the-simd-group)); 11-14 ms of the 16.7 on an M6, an M4 Pro or an M5 Max.

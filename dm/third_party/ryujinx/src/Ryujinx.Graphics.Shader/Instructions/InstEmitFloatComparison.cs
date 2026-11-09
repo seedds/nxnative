@@ -560,6 +560,16 @@ namespace Ryujinx.Graphics.Shader.Instructions
                     res = context.BitwiseNot(res);
                 }
             }
+            else if (cond == FComp.Ne)
+            {
+                // nxnative: the ordered not-equal (false where either operand is NaN) with its NaN tests spelled out. Its own compare, OpFOrdNotEqual, is
+                // written by spirv-cross as MSL's !=, which is unordered and true for a NaN operand, so FSETP.NE and FSET.NE held where NVIDIA's do not (a
+                // Jetson Orin, test_dmsh_ampere_orin.py's fsetp). (a < b) || (a > b) is no better: Metal's fast math, which assumes no NaN, folds it back to
+                // !=; it keeps isnan, as the unordered comparisons below show
+                res = context.Add(Instruction.CompareNotEqual | fpType, Local(), srcA, srcB);
+                res = context.BitwiseAnd(res, context.BitwiseNot(context.IsNan(srcA, fpType)));
+                res = context.BitwiseAnd(res, context.BitwiseNot(context.IsNan(srcB, fpType)));
+            }
             else
             {
                 Instruction inst = (cond & ~FComp.Nan) switch

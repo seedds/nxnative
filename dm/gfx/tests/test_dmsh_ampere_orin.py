@@ -40,7 +40,6 @@ KNOWN = {
     'ffma_rz': 'FFMA .RZ / .RM / .RP: the rounding mode is dropped', 'ffma_rm': '(as ffma_rz)', 'ffma_rp': '(as ffma_rz)',
     'i2f_s32_rz': 'I2FP.F32.S32.RZ rounds to nearest (PR #1800 has the fix)',
     'fmax_nan': 'FMNMX.NAN: a NaN operand gives the other operand, not NaN (PR #1800 has the fix)', 'fmin_nan': '(as fmax_nan)',
-    'fsetp': 'FSETP.NE (ordered) becomes MSL !=, which is unordered: true with a NaN operand', 'fsetp_ftz': '(as fsetp)',
     'shfl_idx': 'SHFL: a lane in a register is not masked to its low 5 bits', 'shfl_bfly': '(as shfl_idx)', 'shfl_idx_seg': '(as shfl_idx)',
     'f2fp_pack_bf16x2': 'F2FP.BF16.PACK_AB packs f16, not bf16', 'f2fp_pack_f16x2_relu': 'F2FP.RELU: negative results are not clamped to 0',
     'i2f_s64': 'I2F.S64 rounds twice (the high and low words apart)',

@@ -2,18 +2,110 @@
 # Map select by UserDerezzed (https://github.com/UserDerezzed).
 # Compile it for a build with
 #   cheat_anchor.py compile <this file> --nso <that build's ExeFS/main> -o <cheats folder>
-# The warps read the game data through [main+0x4E842A8] and keep their state in the unused end of main's .bss
-# (main+0x4E9FF10), with stores indexed by register 0, so they compile only for build E0F3CCFAF50065AE (update v131072).
-# They write no code, so they should run on the iPhone too (not tried there).
+# The locations read and write the game data through [main+0x4E842A8] and keep their state in the unused end of main's
+# .bss (main+0x4E9FF10-0x4E9FFFF), with stores indexed by register 0, so everything here compiles only for build
+# E0F3CCFAF50065AE (update v131072). The locations write no code; Instant warp patches code (a cave in the text's zero
+# padding and one hook), so it runs on the Mac only: the iPhone's code pages are the app's signed pages.
 
 format = 1
 title = "0400486024DEC000"
 authored = "E0F3CCFAF50065AE"
 
 [[cheats]]
+name = "Instant warp: ZL+ZR+Down goes to the location turned on below - on"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. Hooks the Main sequence's per-frame update (main+0x3303CA0) to a cave at main+0x3C46E70 that, when a location asks for it, builds an EventRequestArg (constructor main+0xD79F10) for Dm_SY_BancChangeGo with NextBanc, NextStartPos, NextStartPosAir and BootEventName and calls EventMgr::requestEvent (main+0xD7A820, manager [[main+0x4C7E090]]), as a loading zone does. Mac only (code writes)"
+code = """
+40000000 00000000 00000000
+04000000 03C46E70 B00092D0
+04000000 03C46E74 B94F2211
+04000000 03C46E78 350000F1
+04000000 03C46E7C D503237F
+04000000 03C46E80 17DAF389
+04000000 03C46E84 38401429
+04000000 03C46E88 38001409
+04000000 03C46E8C 35FFFFC9
+04000000 03C46E90 D65F03C0
+04000000 03C46E94 A9BD7BFD
+04000000 03C46E98 A90107E0
+04000000 03C46E9C A90253F3
+04000000 03C46EA0 910003FD
+04000000 03C46EA4 913C8213
+04000000 03C46EA8 B900027F
+04000000 03C46EAC 52800034
+04000000 03C46EB0 D14007FF
+04000000 03C46EB4 D12C83FF
+04000000 03C46EB8 910003E0
+04000000 03C46EBC 9744CC15
+04000000 03C46EC0 914007E0
+04000000 03C46EC4 912A7000
+04000000 03C46EC8 91022261
+04000000 03C46ECC 97FFFFEE
+04000000 03C46ED0 9100B3E0
+04000000 03C46ED4 B0000AE1
+04000000 03C46ED8 91333421
+04000000 03C46EDC 97FFFFEA
+04000000 03C46EE0 B9001BF4
+04000000 03C46EE4 91002268
+04000000 03C46EE8 F9005BE8
+04000000 03C46EEC 9103D3E0
+04000000 03C46EF0 D00004E1
+04000000 03C46EF4 91223821
+04000000 03C46EF8 97FFFFE3
+04000000 03C46EFC 1400000B
+04000000 03C46F28 B900E3F4
+04000000 03C46F2C 9100A268
+04000000 03C46F30 F900BFE8
+04000000 03C46F34 9106F3E0
+04000000 03C46F38 90000A21
+04000000 03C46F3C 14000003
+04000000 03C46F48 911C8C21
+04000000 03C46F4C 97FFFFCE
+04000000 03C46F50 B901ABF4
+04000000 03C46F54 9100A268
+04000000 03C46F58 F90123E8
+04000000 03C46F5C 910A13E0
+04000000 03C46F60 D0000541
+04000000 03C46F64 91244821
+04000000 03C46F68 97FFFFC7
+04000000 03C46F6C B90273F4
+04000000 03C46F70 91016268
+04000000 03C46F74 F90187E8
+04000000 03C46F78 52800089
+04000000 03C46F7C B90013E9
+04000000 03C46F80 52804009
+04000000 03C46F84 900081C8
+04000000 03C46F88 F9404908
+04000000 03C46F8C F9400100
+04000000 03C46F90 B40000A0
+04000000 03C46F94 910003E1
+04000000 03C46F98 9744CE22
+04000000 03C46F9C 52802009
+04000000 03C46FA0 2A000129
+04000000 03C46FA4 B9000669
+04000000 03C46FA8 910003BF
+04000000 03C46FAC A94253F3
+04000000 03C46FB0 A94107E0
+04000000 03C46FB4 A8C37BFD
+04000000 03C46FB8 17FFFFB1
+04000000 03303CA0 14250C74
+"""
+builds = ["E0F3CCFAF50065AE"]
+
+[[cheats]]
+name = "Instant warp: ZL+ZR+Down goes to the location turned on below - off"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. Puts the hooked word back"
+code = """
+40000000 00000000 00000000
+04000000 03303CA0 D503237F
+"""
+builds = ["E0F3CCFAF50065AE"]
+
+[[cheats]]
 name = "Warp to BottomOfTheWell (Well_KakarikoSide) - on"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to BottomOfTheWell at Well_KakarikoSide with the arrival event Dm_SY_BancChangeArrive, as the entrance from KakarikoVillage_Child does; the change after that is left alone, and turning it off and on arms it again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to BottomOfTheWell at Well_KakarikoSide with the arrival event Dm_SY_BancChangeArrive, as the entrance from KakarikoVillage_Child does; with Instant warp on, ZL+ZR+Down goes there at once, once per press. Turning it off and on arms the door redirect again"
 code = """
 40000000 00000000 00000000
 580F0000 04E842A8
@@ -57,13 +149,36 @@ C085B400 00000000 00000000
 04000000 04E9FF10 00000002
 20000000
 20000000
+80008300
+14050000 04E9FFF8 00000000
+14050000 03303CA0 14250C74
+08000000 04E9FF28 664F6D6F 74746F42
+08000000 04E9FF30 006C6C65 57656854
+08000000 04E9FF48 6B614B5F 6C6C6557
+08000000 04E9FF50 6469536F 6B697261
+08000000 04E9FF58 00000000 00000065
+08000000 04E9FF78 61425F59 535F6D44
+08000000 04E9FF80 65676E61 6843636E
+08000000 04E9FF88 00006576 69727241
+08000000 04E9FFA8 61425F59 535F6D44
+08000000 04E9FFB0 65676E61 6843636E
+08000000 04E9FFB8 00000000 00006F47
+04000000 04E9FF24 00000000
+04000000 04E9FF10 00000002
+04000000 04E9FFF8 00000001
+04000000 04E9FF20 00000001
+20000000
+20000000
+21000000
+04000000 04E9FFF8 00000000
+20000000
 """
 builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to BottomOfTheWell (Well_KakarikoSide) - off"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. Arms the warp again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. Arms the door redirect again"
 code = """
 40000000 00000000 00000000
 04000000 04E9FF10 00000000
@@ -72,8 +187,8 @@ builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to DeathMountainCrater_Adult (OutsideOfFireTemple) - on"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to DeathMountainCrater_Adult at OutsideOfFireTemple with the arrival event Dm_SY_BancChangeArrive_DeathMountainCrater_02, as the entrance from FireTemple does; the change after that is left alone, and turning it off and on arms it again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to DeathMountainCrater_Adult at OutsideOfFireTemple with the arrival event Dm_SY_BancChangeArrive_DeathMountainCrater_02, as the entrance from FireTemple does; with Instant warp on, ZL+ZR+Down goes there at once, once per press. Turning it off and on arms the door redirect again"
 code = """
 40000000 00000000 00000000
 580F0000 04E842A8
@@ -122,13 +237,41 @@ C085B400 00000000 00000000
 04000000 04E9FF10 00000002
 20000000
 20000000
+80008300
+14050000 04E9FFF8 00000000
+14050000 03303CA0 14250C74
+08000000 04E9FF28 756F4D68 74616544
+08000000 04E9FF30 6172436E 6961746E
+08000000 04E9FF38 6C756441 5F726574
+08000000 04E9FF40 00000000 00000074
+08000000 04E9FF48 4F656469 7374754F
+08000000 04E9FF50 6D655465 72694666
+08000000 04E9FF58 00000000 00656C70
+08000000 04E9FF78 61425F59 535F6D44
+08000000 04E9FF80 65676E61 6843636E
+08000000 04E9FF88 445F6576 69727241
+08000000 04E9FF90 6E756F4D 68746165
+08000000 04E9FF98 74617243 6E696174
+08000000 04E9FFA0 00000032 305F7265
+08000000 04E9FFA8 61425F59 535F6D44
+08000000 04E9FFB0 65676E61 6843636E
+08000000 04E9FFB8 00000000 00006F47
+04000000 04E9FF24 00000000
+04000000 04E9FF10 00000002
+04000000 04E9FFF8 00000001
+04000000 04E9FF20 00000001
+20000000
+20000000
+21000000
+04000000 04E9FFF8 00000000
+20000000
 """
 builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to DeathMountainCrater_Adult (OutsideOfFireTemple) - off"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. Arms the warp again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. Arms the door redirect again"
 code = """
 40000000 00000000 00000000
 04000000 04E9FF10 00000000
@@ -137,8 +280,8 @@ builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to DeathMountainCrater_Child (OutsideOfFireTemple) - on"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to DeathMountainCrater_Child at OutsideOfFireTemple with the arrival event Dm_SY_BancChangeArrive_DeathMountainCrater_02, as the entrance from FireTemple does; the change after that is left alone, and turning it off and on arms it again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to DeathMountainCrater_Child at OutsideOfFireTemple with the arrival event Dm_SY_BancChangeArrive_DeathMountainCrater_02, as the entrance from FireTemple does; with Instant warp on, ZL+ZR+Down goes there at once, once per press. Turning it off and on arms the door redirect again"
 code = """
 40000000 00000000 00000000
 580F0000 04E842A8
@@ -187,13 +330,41 @@ C085B400 00000000 00000000
 04000000 04E9FF10 00000002
 20000000
 20000000
+80008300
+14050000 04E9FFF8 00000000
+14050000 03303CA0 14250C74
+08000000 04E9FF28 756F4D68 74616544
+08000000 04E9FF30 6172436E 6961746E
+08000000 04E9FF38 6C696843 5F726574
+08000000 04E9FF40 00000000 00000064
+08000000 04E9FF48 4F656469 7374754F
+08000000 04E9FF50 6D655465 72694666
+08000000 04E9FF58 00000000 00656C70
+08000000 04E9FF78 61425F59 535F6D44
+08000000 04E9FF80 65676E61 6843636E
+08000000 04E9FF88 445F6576 69727241
+08000000 04E9FF90 6E756F4D 68746165
+08000000 04E9FF98 74617243 6E696174
+08000000 04E9FFA0 00000032 305F7265
+08000000 04E9FFA8 61425F59 535F6D44
+08000000 04E9FFB0 65676E61 6843636E
+08000000 04E9FFB8 00000000 00006F47
+04000000 04E9FF24 00000000
+04000000 04E9FF10 00000002
+04000000 04E9FFF8 00000001
+04000000 04E9FF20 00000001
+20000000
+20000000
+21000000
+04000000 04E9FFF8 00000000
+20000000
 """
 builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to DeathMountainCrater_Child (OutsideOfFireTemple) - off"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. Arms the warp again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. Arms the door redirect again"
 code = """
 40000000 00000000 00000000
 04000000 04E9FF10 00000000
@@ -202,8 +373,8 @@ builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to DeathMountainTrail_Adult (MountainTrail_DodongoCavernSide) - on"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to DeathMountainTrail_Adult at MountainTrail_DodongoCavernSide with the arrival event Dm_SY_BancChangeArrive_DeathMountainTrail_03, as the entrance from DodongoCavern does; the change after that is left alone, and turning it off and on arms it again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to DeathMountainTrail_Adult at MountainTrail_DodongoCavernSide with the arrival event Dm_SY_BancChangeArrive_DeathMountainTrail_03, as the entrance from DodongoCavern does; with Instant warp on, ZL+ZR+Down goes there at once, once per press. Turning it off and on arms the door redirect again"
 code = """
 40000000 00000000 00000000
 580F0000 04E842A8
@@ -254,13 +425,42 @@ C085B400 00000000 00000000
 04000000 04E9FF10 00000002
 20000000
 20000000
+80008300
+14050000 04E9FFF8 00000000
+14050000 03303CA0 14250C74
+08000000 04E9FF28 756F4D68 74616544
+08000000 04E9FF30 6172546E 6961746E
+08000000 04E9FF38 746C7564 415F6C69
+08000000 04E9FF40 00000000 00000000
+08000000 04E9FF48 6E696174 6E756F4D
+08000000 04E9FF50 6F445F6C 69617254
+08000000 04E9FF58 7661436F 676E6F64
+08000000 04E9FF60 00656469 536E7265
+08000000 04E9FF78 61425F59 535F6D44
+08000000 04E9FF80 65676E61 6843636E
+08000000 04E9FF88 445F6576 69727241
+08000000 04E9FF90 6E756F4D 68746165
+08000000 04E9FF98 69617254 6E696174
+08000000 04E9FFA0 00000000 33305F6C
+08000000 04E9FFA8 61425F59 535F6D44
+08000000 04E9FFB0 65676E61 6843636E
+08000000 04E9FFB8 00000000 00006F47
+04000000 04E9FF24 00000000
+04000000 04E9FF10 00000002
+04000000 04E9FFF8 00000001
+04000000 04E9FF20 00000001
+20000000
+20000000
+21000000
+04000000 04E9FFF8 00000000
+20000000
 """
 builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to DeathMountainTrail_Adult (MountainTrail_DodongoCavernSide) - off"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. Arms the warp again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. Arms the door redirect again"
 code = """
 40000000 00000000 00000000
 04000000 04E9FF10 00000000
@@ -269,8 +469,8 @@ builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to DeathMountainTrail_Child (MountainTrail_DodongoCavernSide) - on"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to DeathMountainTrail_Child at MountainTrail_DodongoCavernSide with the arrival event Dm_SY_BancChangeArrive_DeathMountainTrail_03, as the entrance from DodongoCavern does; the change after that is left alone, and turning it off and on arms it again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to DeathMountainTrail_Child at MountainTrail_DodongoCavernSide with the arrival event Dm_SY_BancChangeArrive_DeathMountainTrail_03, as the entrance from DodongoCavern does; with Instant warp on, ZL+ZR+Down goes there at once, once per press. Turning it off and on arms the door redirect again"
 code = """
 40000000 00000000 00000000
 580F0000 04E842A8
@@ -321,13 +521,42 @@ C085B400 00000000 00000000
 04000000 04E9FF10 00000002
 20000000
 20000000
+80008300
+14050000 04E9FFF8 00000000
+14050000 03303CA0 14250C74
+08000000 04E9FF28 756F4D68 74616544
+08000000 04E9FF30 6172546E 6961746E
+08000000 04E9FF38 646C6968 435F6C69
+08000000 04E9FF40 00000000 00000000
+08000000 04E9FF48 6E696174 6E756F4D
+08000000 04E9FF50 6F445F6C 69617254
+08000000 04E9FF58 7661436F 676E6F64
+08000000 04E9FF60 00656469 536E7265
+08000000 04E9FF78 61425F59 535F6D44
+08000000 04E9FF80 65676E61 6843636E
+08000000 04E9FF88 445F6576 69727241
+08000000 04E9FF90 6E756F4D 68746165
+08000000 04E9FF98 69617254 6E696174
+08000000 04E9FFA0 00000000 33305F6C
+08000000 04E9FFA8 61425F59 535F6D44
+08000000 04E9FFB0 65676E61 6843636E
+08000000 04E9FFB8 00000000 00006F47
+04000000 04E9FF24 00000000
+04000000 04E9FF10 00000002
+04000000 04E9FFF8 00000001
+04000000 04E9FF20 00000001
+20000000
+20000000
+21000000
+04000000 04E9FFF8 00000000
+20000000
 """
 builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to DeathMountainTrail_Child (MountainTrail_DodongoCavernSide) - off"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. Arms the warp again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. Arms the door redirect again"
 code = """
 40000000 00000000 00000000
 04000000 04E9FF10 00000000
@@ -336,8 +565,8 @@ builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to DesertColossus_Adult (DesertColossus_FromHountedWasteland) - on"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to DesertColossus_Adult at DesertColossus_FromHountedWasteland with the arrival event Dm_SY_BancChangeArrive_DesertColossus_01, as the entrance from HountedWasteland_Child does; the change after that is left alone, and turning it off and on arms it again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to DesertColossus_Adult at DesertColossus_FromHountedWasteland with the arrival event Dm_SY_BancChangeArrive_DesertColossus_01, as the entrance from HountedWasteland_Child does; with Instant warp on, ZL+ZR+Down goes there at once, once per press. Turning it off and on arms the door redirect again"
 code = """
 40000000 00000000 00000000
 580F0000 04E842A8
@@ -389,13 +618,42 @@ C085B400 00000000 00000000
 04000000 04E9FF10 00000002
 20000000
 20000000
+80008300
+14050000 04E9FFF8 00000000
+14050000 03303CA0 14250C74
+08000000 04E9FF28 6F437472 65736544
+08000000 04E9FF30 415F7375 73736F6C
+08000000 04E9FF38 00000000 746C7564
+08000000 04E9FF48 6F437472 65736544
+08000000 04E9FF50 465F7375 73736F6C
+08000000 04E9FF58 746E756F 486D6F72
+08000000 04E9FF60 6C657473 61576465
+08000000 04E9FF68 00000000 00646E61
+08000000 04E9FF78 61425F59 535F6D44
+08000000 04E9FF80 65676E61 6843636E
+08000000 04E9FF88 445F6576 69727241
+08000000 04E9FF90 6C6F4374 72657365
+08000000 04E9FF98 31305F73 7573736F
+08000000 04E9FFA0 00000000 00000000
+08000000 04E9FFA8 61425F59 535F6D44
+08000000 04E9FFB0 65676E61 6843636E
+08000000 04E9FFB8 00000000 00006F47
+04000000 04E9FF24 00000000
+04000000 04E9FF10 00000002
+04000000 04E9FFF8 00000001
+04000000 04E9FF20 00000001
+20000000
+20000000
+21000000
+04000000 04E9FFF8 00000000
+20000000
 """
 builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to DesertColossus_Adult (DesertColossus_FromHountedWasteland) - off"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. Arms the warp again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. Arms the door redirect again"
 code = """
 40000000 00000000 00000000
 04000000 04E9FF10 00000000
@@ -404,8 +662,8 @@ builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to DesertColossus_Child (DesertColossus_FromHountedWasteland) - on"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to DesertColossus_Child at DesertColossus_FromHountedWasteland with the arrival event Dm_SY_BancChangeArrive_DesertColossus_01, as the entrance from HountedWasteland_Child does; the change after that is left alone, and turning it off and on arms it again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to DesertColossus_Child at DesertColossus_FromHountedWasteland with the arrival event Dm_SY_BancChangeArrive_DesertColossus_01, as the entrance from HountedWasteland_Child does; with Instant warp on, ZL+ZR+Down goes there at once, once per press. Turning it off and on arms the door redirect again"
 code = """
 40000000 00000000 00000000
 580F0000 04E842A8
@@ -457,13 +715,42 @@ C085B400 00000000 00000000
 04000000 04E9FF10 00000002
 20000000
 20000000
+80008300
+14050000 04E9FFF8 00000000
+14050000 03303CA0 14250C74
+08000000 04E9FF28 6F437472 65736544
+08000000 04E9FF30 435F7375 73736F6C
+08000000 04E9FF38 00000000 646C6968
+08000000 04E9FF48 6F437472 65736544
+08000000 04E9FF50 465F7375 73736F6C
+08000000 04E9FF58 746E756F 486D6F72
+08000000 04E9FF60 6C657473 61576465
+08000000 04E9FF68 00000000 00646E61
+08000000 04E9FF78 61425F59 535F6D44
+08000000 04E9FF80 65676E61 6843636E
+08000000 04E9FF88 445F6576 69727241
+08000000 04E9FF90 6C6F4374 72657365
+08000000 04E9FF98 31305F73 7573736F
+08000000 04E9FFA0 00000000 00000000
+08000000 04E9FFA8 61425F59 535F6D44
+08000000 04E9FFB0 65676E61 6843636E
+08000000 04E9FFB8 00000000 00006F47
+04000000 04E9FF24 00000000
+04000000 04E9FF10 00000002
+04000000 04E9FFF8 00000001
+04000000 04E9FF20 00000001
+20000000
+20000000
+21000000
+04000000 04E9FFF8 00000000
+20000000
 """
 builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to DesertColossus_Child (DesertColossus_FromHountedWasteland) - off"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. Arms the warp again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. Arms the door redirect again"
 code = """
 40000000 00000000 00000000
 04000000 04E9FF10 00000000
@@ -472,8 +759,8 @@ builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to DodongoCavern (DodongoCavern_MountainTrailSide) - on"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to DodongoCavern at DodongoCavern_MountainTrailSide with the arrival event Dm_SY_BancChangeArrive, as the entrance from DeathMountainTrail_Child does; the change after that is left alone, and turning it off and on arms it again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to DodongoCavern at DodongoCavern_MountainTrailSide with the arrival event Dm_SY_BancChangeArrive, as the entrance from DeathMountainTrail_Child does; with Instant warp on, ZL+ZR+Down goes there at once, once per press. Turning it off and on arms the door redirect again"
 code = """
 40000000 00000000 00000000
 580F0000 04E842A8
@@ -519,13 +806,37 @@ C085B400 00000000 00000000
 04000000 04E9FF10 00000002
 20000000
 20000000
+80008300
+14050000 04E9FFF8 00000000
+14050000 03303CA0 14250C74
+08000000 04E9FF28 436F676E 6F646F44
+08000000 04E9FF30 0000006E 72657661
+08000000 04E9FF48 436F676E 6F646F44
+08000000 04E9FF50 6F4D5F6E 72657661
+08000000 04E9FF58 72546E69 61746E75
+08000000 04E9FF60 00656469 536C6961
+08000000 04E9FF78 61425F59 535F6D44
+08000000 04E9FF80 65676E61 6843636E
+08000000 04E9FF88 00006576 69727241
+08000000 04E9FFA8 61425F59 535F6D44
+08000000 04E9FFB0 65676E61 6843636E
+08000000 04E9FFB8 00000000 00006F47
+04000000 04E9FF24 00000000
+04000000 04E9FF10 00000002
+04000000 04E9FFF8 00000001
+04000000 04E9FF20 00000001
+20000000
+20000000
+21000000
+04000000 04E9FFF8 00000000
+20000000
 """
 builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to DodongoCavern (DodongoCavern_MountainTrailSide) - off"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. Arms the warp again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. Arms the door redirect again"
 code = """
 40000000 00000000 00000000
 04000000 04E9FF10 00000000
@@ -534,8 +845,8 @@ builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to FinalBattleField (FinalBattleField_Entrance) - on"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to FinalBattleField at FinalBattleField_Entrance with the arrival event InsideGanonCaslte_Dungeon_Escape, as the entrance from CrumblingGanonCastle does; the change after that is left alone, and turning it off and on arms it again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to FinalBattleField at FinalBattleField_Entrance with the arrival event InsideGanonCaslte_Dungeon_Escape, as the entrance from CrumblingGanonCastle does; with Instant warp on, ZL+ZR+Down goes there at once, once per press. Turning it off and on arms the door redirect again"
 code = """
 40000000 00000000 00000000
 580F0000 04E842A8
@@ -584,13 +895,40 @@ C085B400 00000000 00000000
 04000000 04E9FF10 00000002
 20000000
 20000000
+80008300
+14050000 04E9FFF8 00000000
+14050000 03303CA0 14250C74
+08000000 04E9FF28 7461426C 616E6946
+08000000 04E9FF30 646C6569 46656C74
+08000000 04E9FF38 00000000 00000000
+08000000 04E9FF48 7461426C 616E6946
+08000000 04E9FF50 646C6569 46656C74
+08000000 04E9FF58 636E6172 746E455F
+08000000 04E9FF60 00000000 00000065
+08000000 04E9FF78 61476564 69736E49
+08000000 04E9FF80 746C7361 436E6F6E
+08000000 04E9FF88 6F65676E 75445F65
+08000000 04E9FF90 65706163 73455F6E
+08000000 04E9FF98 00000000 00000000
+08000000 04E9FFA8 61425F59 535F6D44
+08000000 04E9FFB0 65676E61 6843636E
+08000000 04E9FFB8 00000000 00006F47
+04000000 04E9FF24 00000000
+04000000 04E9FF10 00000002
+04000000 04E9FFF8 00000001
+04000000 04E9FF20 00000001
+20000000
+20000000
+21000000
+04000000 04E9FFF8 00000000
+20000000
 """
 builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to FinalBattleField (FinalBattleField_Entrance) - off"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. Arms the warp again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. Arms the door redirect again"
 code = """
 40000000 00000000 00000000
 04000000 04E9FF10 00000000
@@ -599,8 +937,8 @@ builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to FireTemple (FireTemple) - on"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to FireTemple at FireTemple with the arrival event Dm_SY_BancChangeArrive, as the entrance from DeathMountainCrater_Child does; the change after that is left alone, and turning it off and on arms it again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to FireTemple at FireTemple with the arrival event Dm_SY_BancChangeArrive, as the entrance from DeathMountainCrater_Child does; with Instant warp on, ZL+ZR+Down goes there at once, once per press. Turning it off and on arms the door redirect again"
 code = """
 40000000 00000000 00000000
 580F0000 04E842A8
@@ -642,13 +980,35 @@ C085B400 00000000 00000000
 04000000 04E9FF10 00000002
 20000000
 20000000
+80008300
+14050000 04E9FFF8 00000000
+14050000 03303CA0 14250C74
+08000000 04E9FF28 706D6554 65726946
+08000000 04E9FF30 00000000 0000656C
+08000000 04E9FF48 706D6554 65726946
+08000000 04E9FF50 00000000 0000656C
+08000000 04E9FF78 61425F59 535F6D44
+08000000 04E9FF80 65676E61 6843636E
+08000000 04E9FF88 00006576 69727241
+08000000 04E9FFA8 61425F59 535F6D44
+08000000 04E9FFB0 65676E61 6843636E
+08000000 04E9FFB8 00000000 00006F47
+04000000 04E9FF24 00000000
+04000000 04E9FF10 00000002
+04000000 04E9FFF8 00000001
+04000000 04E9FF20 00000001
+20000000
+20000000
+21000000
+04000000 04E9FFF8 00000000
+20000000
 """
 builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to FireTemple (FireTemple) - off"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. Arms the warp again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. Arms the door redirect again"
 code = """
 40000000 00000000 00000000
 04000000 04E9FF10 00000000
@@ -657,8 +1017,8 @@ builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to ForestTemple (ForestTemple) - on"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to ForestTemple at ForestTemple with the arrival event Dm_SY_BancChangeArrive, as the entrance from SacredForestMeadow_Child does; the change after that is left alone, and turning it off and on arms it again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to ForestTemple at ForestTemple with the arrival event Dm_SY_BancChangeArrive, as the entrance from SacredForestMeadow_Child does; with Instant warp on, ZL+ZR+Down goes there at once, once per press. Turning it off and on arms the door redirect again"
 code = """
 40000000 00000000 00000000
 580F0000 04E842A8
@@ -700,13 +1060,35 @@ C085B400 00000000 00000000
 04000000 04E9FF10 00000002
 20000000
 20000000
+80008300
+14050000 04E9FFF8 00000000
+14050000 03303CA0 14250C74
+08000000 04E9FF28 65547473 65726F46
+08000000 04E9FF30 00000000 656C706D
+08000000 04E9FF48 65547473 65726F46
+08000000 04E9FF50 00000000 656C706D
+08000000 04E9FF78 61425F59 535F6D44
+08000000 04E9FF80 65676E61 6843636E
+08000000 04E9FF88 00006576 69727241
+08000000 04E9FFA8 61425F59 535F6D44
+08000000 04E9FFB0 65676E61 6843636E
+08000000 04E9FFB8 00000000 00006F47
+04000000 04E9FF24 00000000
+04000000 04E9FF10 00000002
+04000000 04E9FFF8 00000001
+04000000 04E9FF20 00000001
+20000000
+20000000
+21000000
+04000000 04E9FFF8 00000000
+20000000
 """
 builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to ForestTemple (ForestTemple) - off"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. Arms the warp again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. Arms the door redirect again"
 code = """
 40000000 00000000 00000000
 04000000 04E9FF10 00000000
@@ -715,8 +1097,8 @@ builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to GanonCastle (GanonCastleEntrance_FromInside) - on"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to GanonCastle at GanonCastleEntrance_FromInside with the arrival event Dm_SY_BancChangeArrive_GanonCastle_02, as the entrance from InsideGanonCastle does; the change after that is left alone, and turning it off and on arms it again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to GanonCastle at GanonCastleEntrance_FromInside with the arrival event Dm_SY_BancChangeArrive_GanonCastle_02, as the entrance from InsideGanonCastle does; with Instant warp on, ZL+ZR+Down goes there at once, once per press. Turning it off and on arms the door redirect again"
 code = """
 40000000 00000000 00000000
 580F0000 04E842A8
@@ -764,13 +1146,39 @@ C085B400 00000000 00000000
 04000000 04E9FF10 00000002
 20000000
 20000000
+80008300
+14050000 04E9FFF8 00000000
+14050000 03303CA0 14250C74
+08000000 04E9FF28 7361436E 6F6E6147
+08000000 04E9FF30 00000000 00656C74
+08000000 04E9FF48 7361436E 6F6E6147
+08000000 04E9FF50 6172746E 45656C74
+08000000 04E9FF58 6D6F7246 5F65636E
+08000000 04E9FF60 00006564 69736E49
+08000000 04E9FF78 61425F59 535F6D44
+08000000 04E9FF80 65676E61 6843636E
+08000000 04E9FF88 475F6576 69727241
+08000000 04E9FF90 74736143 6E6F6E61
+08000000 04E9FF98 00000032 305F656C
+08000000 04E9FFA8 61425F59 535F6D44
+08000000 04E9FFB0 65676E61 6843636E
+08000000 04E9FFB8 00000000 00006F47
+04000000 04E9FF24 00000000
+04000000 04E9FF10 00000002
+04000000 04E9FFF8 00000001
+04000000 04E9FF20 00000001
+20000000
+20000000
+21000000
+04000000 04E9FFF8 00000000
+20000000
 """
 builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to GanonCastle (GanonCastleEntrance_FromInside) - off"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. Arms the warp again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. Arms the door redirect again"
 code = """
 40000000 00000000 00000000
 04000000 04E9FF10 00000000
@@ -779,8 +1187,8 @@ builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to GerudoFortress_Adult (GerudoFortress_FromHountedWasteland) - on"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to GerudoFortress_Adult at GerudoFortress_FromHountedWasteland with the arrival event Dm_SY_BancChangeArrive_GerudoFortress_02, as the entrance from HountedWasteland_Adult does; the change after that is left alone, and turning it off and on arms it again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to GerudoFortress_Adult at GerudoFortress_FromHountedWasteland with the arrival event Dm_SY_BancChangeArrive_GerudoFortress_02, as the entrance from HountedWasteland_Adult does; with Instant warp on, ZL+ZR+Down goes there at once, once per press. Turning it off and on arms the door redirect again"
 code = """
 40000000 00000000 00000000
 580F0000 04E842A8
@@ -832,13 +1240,42 @@ C085B400 00000000 00000000
 04000000 04E9FF10 00000002
 20000000
 20000000
+80008300
+14050000 04E9FFF8 00000000
+14050000 03303CA0 14250C74
+08000000 04E9FF28 6F466F64 75726547
+08000000 04E9FF30 415F7373 65727472
+08000000 04E9FF38 00000000 746C7564
+08000000 04E9FF48 6F466F64 75726547
+08000000 04E9FF50 465F7373 65727472
+08000000 04E9FF58 746E756F 486D6F72
+08000000 04E9FF60 6C657473 61576465
+08000000 04E9FF68 00000000 00646E61
+08000000 04E9FF78 61425F59 535F6D44
+08000000 04E9FF80 65676E61 6843636E
+08000000 04E9FF88 475F6576 69727241
+08000000 04E9FF90 726F466F 64757265
+08000000 04E9FF98 32305F73 73657274
+08000000 04E9FFA0 00000000 00000000
+08000000 04E9FFA8 61425F59 535F6D44
+08000000 04E9FFB0 65676E61 6843636E
+08000000 04E9FFB8 00000000 00006F47
+04000000 04E9FF24 00000000
+04000000 04E9FF10 00000002
+04000000 04E9FFF8 00000001
+04000000 04E9FF20 00000001
+20000000
+20000000
+21000000
+04000000 04E9FFF8 00000000
+20000000
 """
 builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to GerudoFortress_Adult (GerudoFortress_FromHountedWasteland) - off"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. Arms the warp again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. Arms the door redirect again"
 code = """
 40000000 00000000 00000000
 04000000 04E9FF10 00000000
@@ -847,8 +1284,8 @@ builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to GerudoTrainingGround (GerudoTrainingGround_FromGerudoFortress) - on"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to GerudoTrainingGround at GerudoTrainingGround_FromGerudoFortress with the arrival event FromGerudoFortress_ArriveTrainingGround, as the entrance from GerudoFortress_Adult does; the change after that is left alone, and turning it off and on arms it again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to GerudoTrainingGround at GerudoTrainingGround_FromGerudoFortress with the arrival event FromGerudoFortress_ArriveTrainingGround, as the entrance from GerudoFortress_Adult does; with Instant warp on, ZL+ZR+Down goes there at once, once per press. Turning it off and on arms the door redirect again"
 code = """
 40000000 00000000 00000000
 580F0000 04E842A8
@@ -899,13 +1336,41 @@ C085B400 00000000 00000000
 04000000 04E9FF10 00000002
 20000000
 20000000
+80008300
+14050000 04E9FFF8 00000000
+14050000 03303CA0 14250C74
+08000000 04E9FF28 72546F64 75726547
+08000000 04E9FF30 7247676E 696E6961
+08000000 04E9FF38 00000000 646E756F
+08000000 04E9FF48 72546F64 75726547
+08000000 04E9FF50 7247676E 696E6961
+08000000 04E9FF58 6F72465F 646E756F
+08000000 04E9FF60 466F6475 7265476D
+08000000 04E9FF68 00737365 7274726F
+08000000 04E9FF78 75726547 6D6F7246
+08000000 04E9FF80 65727472 6F466F64
+08000000 04E9FF88 76697272 415F7373
+08000000 04E9FF90 6E696E69 61725465
+08000000 04E9FF98 00646E75 6F724767
+08000000 04E9FFA8 61425F59 535F6D44
+08000000 04E9FFB0 65676E61 6843636E
+08000000 04E9FFB8 00000000 00006F47
+04000000 04E9FF24 00000000
+04000000 04E9FF10 00000002
+04000000 04E9FFF8 00000001
+04000000 04E9FF20 00000001
+20000000
+20000000
+21000000
+04000000 04E9FFF8 00000000
+20000000
 """
 builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to GerudoTrainingGround (GerudoTrainingGround_FromGerudoFortress) - off"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. Arms the warp again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. Arms the door redirect again"
 code = """
 40000000 00000000 00000000
 04000000 04E9FF10 00000000
@@ -914,8 +1379,8 @@ builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to GerudoValley_Adult (GerudoValley_FromLakeHylia) - on"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to GerudoValley_Adult at GerudoValley_FromLakeHylia with the arrival event Dm_SY_BancChangeArrive, as the entrance from HyruleField_Child does; the change after that is left alone, and turning it off and on arms it again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to GerudoValley_Adult at GerudoValley_FromLakeHylia with the arrival event Dm_SY_BancChangeArrive, as the entrance from HyruleField_Child does; with Instant warp on, ZL+ZR+Down goes there at once, once per press. Turning it off and on arms the door redirect again"
 code = """
 40000000 00000000 00000000
 580F0000 04E842A8
@@ -962,13 +1427,38 @@ C085B400 00000000 00000000
 04000000 04E9FF10 00000002
 20000000
 20000000
+80008300
+14050000 04E9FFF8 00000000
+14050000 03303CA0 14250C74
+08000000 04E9FF28 61566F64 75726547
+08000000 04E9FF30 7564415F 79656C6C
+08000000 04E9FF38 00000000 0000746C
+08000000 04E9FF48 61566F64 75726547
+08000000 04E9FF50 6F72465F 79656C6C
+08000000 04E9FF58 6C794865 6B614C6D
+08000000 04E9FF60 00000000 00006169
+08000000 04E9FF78 61425F59 535F6D44
+08000000 04E9FF80 65676E61 6843636E
+08000000 04E9FF88 00006576 69727241
+08000000 04E9FFA8 61425F59 535F6D44
+08000000 04E9FFB0 65676E61 6843636E
+08000000 04E9FFB8 00000000 00006F47
+04000000 04E9FF24 00000000
+04000000 04E9FF10 00000002
+04000000 04E9FFF8 00000001
+04000000 04E9FF20 00000001
+20000000
+20000000
+21000000
+04000000 04E9FFF8 00000000
+20000000
 """
 builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to GerudoValley_Adult (GerudoValley_FromLakeHylia) - off"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. Arms the warp again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. Arms the door redirect again"
 code = """
 40000000 00000000 00000000
 04000000 04E9FF10 00000000
@@ -977,8 +1467,8 @@ builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to GerudoValley_Child (GerudoValley_FromLakeHylia) - on"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to GerudoValley_Child at GerudoValley_FromLakeHylia with the arrival event Dm_SY_BancChangeArrive, as the entrance from HyruleField_Child does; the change after that is left alone, and turning it off and on arms it again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to GerudoValley_Child at GerudoValley_FromLakeHylia with the arrival event Dm_SY_BancChangeArrive, as the entrance from HyruleField_Child does; with Instant warp on, ZL+ZR+Down goes there at once, once per press. Turning it off and on arms the door redirect again"
 code = """
 40000000 00000000 00000000
 580F0000 04E842A8
@@ -1025,13 +1515,38 @@ C085B400 00000000 00000000
 04000000 04E9FF10 00000002
 20000000
 20000000
+80008300
+14050000 04E9FFF8 00000000
+14050000 03303CA0 14250C74
+08000000 04E9FF28 61566F64 75726547
+08000000 04E9FF30 6968435F 79656C6C
+08000000 04E9FF38 00000000 0000646C
+08000000 04E9FF48 61566F64 75726547
+08000000 04E9FF50 6F72465F 79656C6C
+08000000 04E9FF58 6C794865 6B614C6D
+08000000 04E9FF60 00000000 00006169
+08000000 04E9FF78 61425F59 535F6D44
+08000000 04E9FF80 65676E61 6843636E
+08000000 04E9FF88 00006576 69727241
+08000000 04E9FFA8 61425F59 535F6D44
+08000000 04E9FFB0 65676E61 6843636E
+08000000 04E9FFB8 00000000 00006F47
+04000000 04E9FF24 00000000
+04000000 04E9FF10 00000002
+04000000 04E9FFF8 00000001
+04000000 04E9FF20 00000001
+20000000
+20000000
+21000000
+04000000 04E9FFF8 00000000
+20000000
 """
 builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to GerudoValley_Child (GerudoValley_FromLakeHylia) - off"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. Arms the warp again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. Arms the door redirect again"
 code = """
 40000000 00000000 00000000
 04000000 04E9FF10 00000000
@@ -1040,8 +1555,8 @@ builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to GoronCity_Adult (GoronCity_CraterSide) - on"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to GoronCity_Adult at GoronCity_CraterSide with the arrival event Dm_SY_BancChangeArrive, as the entrance from DeathMountainCrater_Child does; the change after that is left alone, and turning it off and on arms it again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to GoronCity_Adult at GoronCity_CraterSide with the arrival event Dm_SY_BancChangeArrive, as the entrance from DeathMountainCrater_Child does; with Instant warp on, ZL+ZR+Down goes there at once, once per press. Turning it off and on arms the door redirect again"
 code = """
 40000000 00000000 00000000
 580F0000 04E842A8
@@ -1085,13 +1600,36 @@ C085B400 00000000 00000000
 04000000 04E9FF10 00000002
 20000000
 20000000
+80008300
+14050000 04E9FFF8 00000000
+14050000 03303CA0 14250C74
+08000000 04E9FF28 7469436E 6F726F47
+08000000 04E9FF30 00746C75 64415F79
+08000000 04E9FF48 7469436E 6F726F47
+08000000 04E9FF50 72657461 72435F79
+08000000 04E9FF58 00000000 65646953
+08000000 04E9FF78 61425F59 535F6D44
+08000000 04E9FF80 65676E61 6843636E
+08000000 04E9FF88 00006576 69727241
+08000000 04E9FFA8 61425F59 535F6D44
+08000000 04E9FFB0 65676E61 6843636E
+08000000 04E9FFB8 00000000 00006F47
+04000000 04E9FF24 00000000
+04000000 04E9FF10 00000002
+04000000 04E9FFF8 00000001
+04000000 04E9FF20 00000001
+20000000
+20000000
+21000000
+04000000 04E9FFF8 00000000
+20000000
 """
 builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to GoronCity_Adult (GoronCity_CraterSide) - off"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. Arms the warp again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. Arms the door redirect again"
 code = """
 40000000 00000000 00000000
 04000000 04E9FF10 00000000
@@ -1100,8 +1638,8 @@ builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to GoronCity_Child (GoronCity_CraterSide) - on"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to GoronCity_Child at GoronCity_CraterSide with the arrival event Dm_SY_BancChangeArrive, as the entrance from DeathMountainCrater_Child does; the change after that is left alone, and turning it off and on arms it again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to GoronCity_Child at GoronCity_CraterSide with the arrival event Dm_SY_BancChangeArrive, as the entrance from DeathMountainCrater_Child does; with Instant warp on, ZL+ZR+Down goes there at once, once per press. Turning it off and on arms the door redirect again"
 code = """
 40000000 00000000 00000000
 580F0000 04E842A8
@@ -1145,13 +1683,36 @@ C085B400 00000000 00000000
 04000000 04E9FF10 00000002
 20000000
 20000000
+80008300
+14050000 04E9FFF8 00000000
+14050000 03303CA0 14250C74
+08000000 04E9FF28 7469436E 6F726F47
+08000000 04E9FF30 00646C69 68435F79
+08000000 04E9FF48 7469436E 6F726F47
+08000000 04E9FF50 72657461 72435F79
+08000000 04E9FF58 00000000 65646953
+08000000 04E9FF78 61425F59 535F6D44
+08000000 04E9FF80 65676E61 6843636E
+08000000 04E9FF88 00006576 69727241
+08000000 04E9FFA8 61425F59 535F6D44
+08000000 04E9FFB0 65676E61 6843636E
+08000000 04E9FFB8 00000000 00006F47
+04000000 04E9FF24 00000000
+04000000 04E9FF10 00000002
+04000000 04E9FFF8 00000001
+04000000 04E9FF20 00000001
+20000000
+20000000
+21000000
+04000000 04E9FFF8 00000000
+20000000
 """
 builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to GoronCity_Child (GoronCity_CraterSide) - off"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. Arms the warp again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. Arms the door redirect again"
 code = """
 40000000 00000000 00000000
 04000000 04E9FF10 00000000
@@ -1160,8 +1721,8 @@ builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to Graveyard_Adult (GraveYard_KakarikoSide) - on"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to Graveyard_Adult at GraveYard_KakarikoSide with the arrival event Dm_SY_BancChangeArrive_Graveyard_01, as the entrance from KakarikoVillage_Child does; the change after that is left alone, and turning it off and on arms it again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to Graveyard_Adult at GraveYard_KakarikoSide with the arrival event Dm_SY_BancChangeArrive_Graveyard_01, as the entrance from KakarikoVillage_Child does; with Instant warp on, ZL+ZR+Down goes there at once, once per press. Turning it off and on arms the door redirect again"
 code = """
 40000000 00000000 00000000
 580F0000 04E842A8
@@ -1207,13 +1768,38 @@ C085B400 00000000 00000000
 04000000 04E9FF10 00000002
 20000000
 20000000
+80008300
+14050000 04E9FFF8 00000000
+14050000 03303CA0 14250C74
+08000000 04E9FF28 72617965 76617247
+08000000 04E9FF30 00746C75 64415F64
+08000000 04E9FF48 72615965 76617247
+08000000 04E9FF50 6972616B 614B5F64
+08000000 04E9FF58 00006564 69536F6B
+08000000 04E9FF78 61425F59 535F6D44
+08000000 04E9FF80 65676E61 6843636E
+08000000 04E9FF88 475F6576 69727241
+08000000 04E9FF90 64726179 65766172
+08000000 04E9FF98 00000000 0031305F
+08000000 04E9FFA8 61425F59 535F6D44
+08000000 04E9FFB0 65676E61 6843636E
+08000000 04E9FFB8 00000000 00006F47
+04000000 04E9FF24 00000000
+04000000 04E9FF10 00000002
+04000000 04E9FFF8 00000001
+04000000 04E9FF20 00000001
+20000000
+20000000
+21000000
+04000000 04E9FFF8 00000000
+20000000
 """
 builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to Graveyard_Adult (GraveYard_KakarikoSide) - off"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. Arms the warp again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. Arms the door redirect again"
 code = """
 40000000 00000000 00000000
 04000000 04E9FF10 00000000
@@ -1222,8 +1808,8 @@ builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to Graveyard_Child (GraveYard_KakarikoSide) - on"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to Graveyard_Child at GraveYard_KakarikoSide with the arrival event Dm_SY_BancChangeArrive_Graveyard_01, as the entrance from KakarikoVillage_Child does; the change after that is left alone, and turning it off and on arms it again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to Graveyard_Child at GraveYard_KakarikoSide with the arrival event Dm_SY_BancChangeArrive_Graveyard_01, as the entrance from KakarikoVillage_Child does; with Instant warp on, ZL+ZR+Down goes there at once, once per press. Turning it off and on arms the door redirect again"
 code = """
 40000000 00000000 00000000
 580F0000 04E842A8
@@ -1269,13 +1855,38 @@ C085B400 00000000 00000000
 04000000 04E9FF10 00000002
 20000000
 20000000
+80008300
+14050000 04E9FFF8 00000000
+14050000 03303CA0 14250C74
+08000000 04E9FF28 72617965 76617247
+08000000 04E9FF30 00646C69 68435F64
+08000000 04E9FF48 72615965 76617247
+08000000 04E9FF50 6972616B 614B5F64
+08000000 04E9FF58 00006564 69536F6B
+08000000 04E9FF78 61425F59 535F6D44
+08000000 04E9FF80 65676E61 6843636E
+08000000 04E9FF88 475F6576 69727241
+08000000 04E9FF90 64726179 65766172
+08000000 04E9FF98 00000000 0031305F
+08000000 04E9FFA8 61425F59 535F6D44
+08000000 04E9FFB0 65676E61 6843636E
+08000000 04E9FFB8 00000000 00006F47
+04000000 04E9FF24 00000000
+04000000 04E9FF10 00000002
+04000000 04E9FFF8 00000001
+04000000 04E9FF20 00000001
+20000000
+20000000
+21000000
+04000000 04E9FFF8 00000000
+20000000
 """
 builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to Graveyard_Child (GraveYard_KakarikoSide) - off"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. Arms the warp again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. Arms the door redirect again"
 code = """
 40000000 00000000 00000000
 04000000 04E9FF10 00000000
@@ -1284,8 +1895,8 @@ builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to HountedWasteland_Adult (HountedWasteland_FromDesertColossus) - on"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to HountedWasteland_Adult at HountedWasteland_FromDesertColossus with the arrival event FromColossus_ArriveWasteland, as the entrance from DesertColossus_Child does; the change after that is left alone, and turning it off and on arms it again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to HountedWasteland_Adult at HountedWasteland_FromDesertColossus with the arrival event FromColossus_ArriveWasteland, as the entrance from DesertColossus_Child does; with Instant warp on, ZL+ZR+Down goes there at once, once per press. Turning it off and on arms the door redirect again"
 code = """
 40000000 00000000 00000000
 580F0000 04E842A8
@@ -1335,13 +1946,40 @@ C085B400 00000000 00000000
 04000000 04E9FF10 00000002
 20000000
 20000000
+80008300
+14050000 04E9FFF8 00000000
+14050000 03303CA0 14250C74
+08000000 04E9FF28 57646574 6E756F48
+08000000 04E9FF30 646E616C 65747361
+08000000 04E9FF38 0000746C 7564415F
+08000000 04E9FF48 57646574 6E756F48
+08000000 04E9FF50 646E616C 65747361
+08000000 04E9FF58 7365446D 6F72465F
+08000000 04E9FF60 736F6C6F 43747265
+08000000 04E9FF68 00000000 00737573
+08000000 04E9FF78 6F6C6F43 6D6F7246
+08000000 04E9FF80 7272415F 73757373
+08000000 04E9FF88 65747361 57657669
+08000000 04E9FF90 00000000 646E616C
+08000000 04E9FFA8 61425F59 535F6D44
+08000000 04E9FFB0 65676E61 6843636E
+08000000 04E9FFB8 00000000 00006F47
+04000000 04E9FF24 00000000
+04000000 04E9FF10 00000002
+04000000 04E9FFF8 00000001
+04000000 04E9FF20 00000001
+20000000
+20000000
+21000000
+04000000 04E9FFF8 00000000
+20000000
 """
 builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to HountedWasteland_Adult (HountedWasteland_FromDesertColossus) - off"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. Arms the warp again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. Arms the door redirect again"
 code = """
 40000000 00000000 00000000
 04000000 04E9FF10 00000000
@@ -1350,8 +1988,8 @@ builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to HountedWasteland_Child (HountedWasteland_FromDesertColossus) - on"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to HountedWasteland_Child at HountedWasteland_FromDesertColossus with the arrival event FromColossus_ArriveWasteland, as the entrance from DesertColossus_Child does; the change after that is left alone, and turning it off and on arms it again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to HountedWasteland_Child at HountedWasteland_FromDesertColossus with the arrival event FromColossus_ArriveWasteland, as the entrance from DesertColossus_Child does; with Instant warp on, ZL+ZR+Down goes there at once, once per press. Turning it off and on arms the door redirect again"
 code = """
 40000000 00000000 00000000
 580F0000 04E842A8
@@ -1401,13 +2039,40 @@ C085B400 00000000 00000000
 04000000 04E9FF10 00000002
 20000000
 20000000
+80008300
+14050000 04E9FFF8 00000000
+14050000 03303CA0 14250C74
+08000000 04E9FF28 57646574 6E756F48
+08000000 04E9FF30 646E616C 65747361
+08000000 04E9FF38 0000646C 6968435F
+08000000 04E9FF48 57646574 6E756F48
+08000000 04E9FF50 646E616C 65747361
+08000000 04E9FF58 7365446D 6F72465F
+08000000 04E9FF60 736F6C6F 43747265
+08000000 04E9FF68 00000000 00737573
+08000000 04E9FF78 6F6C6F43 6D6F7246
+08000000 04E9FF80 7272415F 73757373
+08000000 04E9FF88 65747361 57657669
+08000000 04E9FF90 00000000 646E616C
+08000000 04E9FFA8 61425F59 535F6D44
+08000000 04E9FFB0 65676E61 6843636E
+08000000 04E9FFB8 00000000 00006F47
+04000000 04E9FF24 00000000
+04000000 04E9FF10 00000002
+04000000 04E9FFF8 00000001
+04000000 04E9FF20 00000001
+20000000
+20000000
+21000000
+04000000 04E9FFF8 00000000
+20000000
 """
 builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to HountedWasteland_Child (HountedWasteland_FromDesertColossus) - off"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. Arms the warp again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. Arms the door redirect again"
 code = """
 40000000 00000000 00000000
 04000000 04E9FF10 00000000
@@ -1416,8 +2081,8 @@ builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to HyruleCastle (GanonCastleEntrance) - on"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to HyruleCastle at GanonCastleEntrance with the arrival event Dm_SY_BancChangeArrive_GanonCastle_01, as the entrance from Market_Adult does; the change after that is left alone, and turning it off and on arms it again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to HyruleCastle at GanonCastleEntrance with the arrival event Dm_SY_BancChangeArrive_GanonCastle_01, as the entrance from Market_Adult does; with Instant warp on, ZL+ZR+Down goes there at once, once per press. Turning it off and on arms the door redirect again"
 code = """
 40000000 00000000 00000000
 580F0000 04E842A8
@@ -1463,13 +2128,38 @@ C085B400 00000000 00000000
 04000000 04E9FF10 00000002
 20000000
 20000000
+80008300
+14050000 04E9FFF8 00000000
+14050000 03303CA0 14250C74
+08000000 04E9FF28 6143656C 75727948
+08000000 04E9FF30 00000000 656C7473
+08000000 04E9FF48 7361436E 6F6E6147
+08000000 04E9FF50 6172746E 45656C74
+08000000 04E9FF58 00000000 0065636E
+08000000 04E9FF78 61425F59 535F6D44
+08000000 04E9FF80 65676E61 6843636E
+08000000 04E9FF88 475F6576 69727241
+08000000 04E9FF90 74736143 6E6F6E61
+08000000 04E9FF98 00000031 305F656C
+08000000 04E9FFA8 61425F59 535F6D44
+08000000 04E9FFB0 65676E61 6843636E
+08000000 04E9FFB8 00000000 00006F47
+04000000 04E9FF24 00000000
+04000000 04E9FF10 00000002
+04000000 04E9FFF8 00000001
+04000000 04E9FF20 00000001
+20000000
+20000000
+21000000
+04000000 04E9FFF8 00000000
+20000000
 """
 builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to HyruleCastle (GanonCastleEntrance) - off"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. Arms the warp again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. Arms the door redirect again"
 code = """
 40000000 00000000 00000000
 04000000 04E9FF10 00000000
@@ -1478,8 +2168,8 @@ builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to HyruleField_Adult (HyruleField_FrontOfGerudoValley) - on"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to HyruleField_Adult at HyruleField_FrontOfGerudoValley with the arrival event Dm_SY_BancChangeArrive_HyruleField_03, as the entrance from GerudoValley_Child does; the change after that is left alone, and turning it off and on arms it again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to HyruleField_Adult at HyruleField_FrontOfGerudoValley with the arrival event Dm_SY_BancChangeArrive_HyruleField_03, as the entrance from GerudoValley_Child does; with Instant warp on, ZL+ZR+Down goes there at once, once per press. Turning it off and on arms the door redirect again"
 code = """
 40000000 00000000 00000000
 580F0000 04E842A8
@@ -1528,13 +2218,40 @@ C085B400 00000000 00000000
 04000000 04E9FF10 00000002
 20000000
 20000000
+80008300
+14050000 04E9FFF8 00000000
+14050000 03303CA0 14250C74
+08000000 04E9FF28 6946656C 75727948
+08000000 04E9FF30 6C756441 5F646C65
+08000000 04E9FF38 00000000 00000074
+08000000 04E9FF48 6946656C 75727948
+08000000 04E9FF50 6E6F7246 5F646C65
+08000000 04E9FF58 64757265 47664F74
+08000000 04E9FF60 0079656C 6C61566F
+08000000 04E9FF78 61425F59 535F6D44
+08000000 04E9FF80 65676E61 6843636E
+08000000 04E9FF88 485F6576 69727241
+08000000 04E9FF90 65694665 6C757279
+08000000 04E9FF98 00000033 305F646C
+08000000 04E9FFA8 61425F59 535F6D44
+08000000 04E9FFB0 65676E61 6843636E
+08000000 04E9FFB8 00000000 00006F47
+04000000 04E9FF24 00000000
+04000000 04E9FF10 00000002
+04000000 04E9FFF8 00000001
+04000000 04E9FF20 00000001
+20000000
+20000000
+21000000
+04000000 04E9FFF8 00000000
+20000000
 """
 builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to HyruleField_Adult (HyruleField_FrontOfGerudoValley) - off"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. Arms the warp again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. Arms the door redirect again"
 code = """
 40000000 00000000 00000000
 04000000 04E9FF10 00000000
@@ -1543,8 +2260,8 @@ builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to HyruleField_Child (HyruleField_FrontOfGerudoValley) - on"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to HyruleField_Child at HyruleField_FrontOfGerudoValley with the arrival event Dm_SY_BancChangeArrive_HyruleField_03, as the entrance from GerudoValley_Child does; the change after that is left alone, and turning it off and on arms it again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to HyruleField_Child at HyruleField_FrontOfGerudoValley with the arrival event Dm_SY_BancChangeArrive_HyruleField_03, as the entrance from GerudoValley_Child does; with Instant warp on, ZL+ZR+Down goes there at once, once per press. Turning it off and on arms the door redirect again"
 code = """
 40000000 00000000 00000000
 580F0000 04E842A8
@@ -1593,13 +2310,40 @@ C085B400 00000000 00000000
 04000000 04E9FF10 00000002
 20000000
 20000000
+80008300
+14050000 04E9FFF8 00000000
+14050000 03303CA0 14250C74
+08000000 04E9FF28 6946656C 75727948
+08000000 04E9FF30 6C696843 5F646C65
+08000000 04E9FF38 00000000 00000064
+08000000 04E9FF48 6946656C 75727948
+08000000 04E9FF50 6E6F7246 5F646C65
+08000000 04E9FF58 64757265 47664F74
+08000000 04E9FF60 0079656C 6C61566F
+08000000 04E9FF78 61425F59 535F6D44
+08000000 04E9FF80 65676E61 6843636E
+08000000 04E9FF88 485F6576 69727241
+08000000 04E9FF90 65694665 6C757279
+08000000 04E9FF98 00000033 305F646C
+08000000 04E9FFA8 61425F59 535F6D44
+08000000 04E9FFB0 65676E61 6843636E
+08000000 04E9FFB8 00000000 00006F47
+04000000 04E9FF24 00000000
+04000000 04E9FF10 00000002
+04000000 04E9FFF8 00000001
+04000000 04E9FF20 00000001
+20000000
+20000000
+21000000
+04000000 04E9FFF8 00000000
+20000000
 """
 builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to HyruleField_Child (HyruleField_FrontOfGerudoValley) - off"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. Arms the warp again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. Arms the door redirect again"
 code = """
 40000000 00000000 00000000
 04000000 04E9FF10 00000000
@@ -1608,8 +2352,8 @@ builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to IceCavern (IceCavern_FromZoraFountain) - on"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to IceCavern at IceCavern_FromZoraFountain with the arrival event SageOfWater_Arrival_IceCavern, as the entrance from ZoraFountain_Adult does; the change after that is left alone, and turning it off and on arms it again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to IceCavern at IceCavern_FromZoraFountain with the arrival event SageOfWater_Arrival_IceCavern, as the entrance from ZoraFountain_Adult does; with Instant warp on, ZL+ZR+Down goes there at once, once per press. Turning it off and on arms the door redirect again"
 code = """
 40000000 00000000 00000000
 580F0000 04E842A8
@@ -1656,13 +2400,38 @@ C085B400 00000000 00000000
 04000000 04E9FF10 00000002
 20000000
 20000000
+80008300
+14050000 04E9FFF8 00000000
+14050000 03303CA0 14250C74
+08000000 04E9FF28 72657661 43656349
+08000000 04E9FF30 00000000 0000006E
+08000000 04E9FF48 72657661 43656349
+08000000 04E9FF50 6F5A6D6F 72465F6E
+08000000 04E9FF58 61746E75 6F466172
+08000000 04E9FF60 00000000 00006E69
+08000000 04E9FF78 6157664F 65676153
+08000000 04E9FF80 69727241 5F726574
+08000000 04E9FF88 43656349 5F6C6176
+08000000 04E9FF90 0000006E 72657661
+08000000 04E9FFA8 61425F59 535F6D44
+08000000 04E9FFB0 65676E61 6843636E
+08000000 04E9FFB8 00000000 00006F47
+04000000 04E9FF24 00000000
+04000000 04E9FF10 00000002
+04000000 04E9FFF8 00000001
+04000000 04E9FF20 00000001
+20000000
+20000000
+21000000
+04000000 04E9FFF8 00000000
+20000000
 """
 builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to IceCavern (IceCavern_FromZoraFountain) - off"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. Arms the warp again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. Arms the door redirect again"
 code = """
 40000000 00000000 00000000
 04000000 04E9FF10 00000000
@@ -1671,8 +2440,8 @@ builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to InsideGanonCastle (Entrance) - on"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to InsideGanonCastle at Entrance with the arrival event Dm_SY_BancChangeArrive_InsideGanonCastle_01, as the entrance from GanonCastle does; the change after that is left alone, and turning it off and on arms it again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to InsideGanonCastle at Entrance with the arrival event Dm_SY_BancChangeArrive_InsideGanonCastle_01, as the entrance from GanonCastle does; with Instant warp on, ZL+ZR+Down goes there at once, once per press. Turning it off and on arms the door redirect again"
 code = """
 40000000 00000000 00000000
 580F0000 04E842A8
@@ -1718,13 +2487,39 @@ C085B400 00000000 00000000
 04000000 04E9FF10 00000002
 20000000
 20000000
+80008300
+14050000 04E9FFF8 00000000
+14050000 03303CA0 14250C74
+08000000 04E9FF28 61476564 69736E49
+08000000 04E9FF30 6C747361 436E6F6E
+08000000 04E9FF38 00000000 00000065
+08000000 04E9FF48 65636E61 72746E45
+08000000 04E9FF50 00000000 00000000
+08000000 04E9FF78 61425F59 535F6D44
+08000000 04E9FF80 65676E61 6843636E
+08000000 04E9FF88 495F6576 69727241
+08000000 04E9FF90 6E614765 6469736E
+08000000 04E9FF98 656C7473 61436E6F
+08000000 04E9FFA0 00000000 0031305F
+08000000 04E9FFA8 61425F59 535F6D44
+08000000 04E9FFB0 65676E61 6843636E
+08000000 04E9FFB8 00000000 00006F47
+04000000 04E9FF24 00000000
+04000000 04E9FF10 00000002
+04000000 04E9FFF8 00000001
+04000000 04E9FF20 00000001
+20000000
+20000000
+21000000
+04000000 04E9FFF8 00000000
+20000000
 """
 builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to InsideGanonCastle (Entrance) - off"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. Arms the warp again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. Arms the door redirect again"
 code = """
 40000000 00000000 00000000
 04000000 04E9FF10 00000000
@@ -1733,8 +2528,8 @@ builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to InsideJabuJabuBelly (InsideJabuJabuBelly_FromZoraFountain) - on"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to InsideJabuJabuBelly at InsideJabuJabuBelly_FromZoraFountain with the arrival event Dm_SY_BancChangeArrive, as the entrance from ZoraFountain_Child does; the change after that is left alone, and turning it off and on arms it again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to InsideJabuJabuBelly at InsideJabuJabuBelly_FromZoraFountain with the arrival event Dm_SY_BancChangeArrive, as the entrance from ZoraFountain_Child does; with Instant warp on, ZL+ZR+Down goes there at once, once per press. Turning it off and on arms the door redirect again"
 code = """
 40000000 00000000 00000000
 580F0000 04E842A8
@@ -1783,13 +2578,39 @@ C085B400 00000000 00000000
 04000000 04E9FF10 00000002
 20000000
 20000000
+80008300
+14050000 04E9FFF8 00000000
+14050000 03303CA0 14250C74
+08000000 04E9FF28 614A6564 69736E49
+08000000 04E9FF30 65427562 614A7562
+08000000 04E9FF38 00000000 00796C6C
+08000000 04E9FF48 614A6564 69736E49
+08000000 04E9FF50 65427562 614A7562
+08000000 04E9FF58 6D6F7246 5F796C6C
+08000000 04E9FF60 6E756F46 61726F5A
+08000000 04E9FF68 00000000 6E696174
+08000000 04E9FF78 61425F59 535F6D44
+08000000 04E9FF80 65676E61 6843636E
+08000000 04E9FF88 00006576 69727241
+08000000 04E9FFA8 61425F59 535F6D44
+08000000 04E9FFB0 65676E61 6843636E
+08000000 04E9FFB8 00000000 00006F47
+04000000 04E9FF24 00000000
+04000000 04E9FF10 00000002
+04000000 04E9FFF8 00000001
+04000000 04E9FF20 00000001
+20000000
+20000000
+21000000
+04000000 04E9FFF8 00000000
+20000000
 """
 builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to InsideJabuJabuBelly (InsideJabuJabuBelly_FromZoraFountain) - off"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. Arms the warp again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. Arms the door redirect again"
 code = """
 40000000 00000000 00000000
 04000000 04E9FF10 00000000
@@ -1798,8 +2619,8 @@ builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to InsideTheDekuTree (Entrance) - on"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to InsideTheDekuTree at Entrance with the arrival event Dm_SY_BancChangeArrive_InsideTheDekuTree_01, as the entrance from KokiriForest_Child does; the change after that is left alone, and turning it off and on arms it again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to InsideTheDekuTree at Entrance with the arrival event Dm_SY_BancChangeArrive_InsideTheDekuTree_01, as the entrance from KokiriForest_Child does; with Instant warp on, ZL+ZR+Down goes there at once, once per press. Turning it off and on arms the door redirect again"
 code = """
 40000000 00000000 00000000
 580F0000 04E842A8
@@ -1845,13 +2666,39 @@ C085B400 00000000 00000000
 04000000 04E9FF10 00000002
 20000000
 20000000
+80008300
+14050000 04E9FFF8 00000000
+14050000 03303CA0 14250C74
+08000000 04E9FF28 68546564 69736E49
+08000000 04E9FF30 65725475 6B654465
+08000000 04E9FF38 00000000 00000065
+08000000 04E9FF48 65636E61 72746E45
+08000000 04E9FF50 00000000 00000000
+08000000 04E9FF78 61425F59 535F6D44
+08000000 04E9FF80 65676E61 6843636E
+08000000 04E9FF88 495F6576 69727241
+08000000 04E9FF90 65685465 6469736E
+08000000 04E9FF98 65657254 756B6544
+08000000 04E9FFA0 00000000 0031305F
+08000000 04E9FFA8 61425F59 535F6D44
+08000000 04E9FFB0 65676E61 6843636E
+08000000 04E9FFB8 00000000 00006F47
+04000000 04E9FF24 00000000
+04000000 04E9FF10 00000002
+04000000 04E9FFF8 00000001
+04000000 04E9FF20 00000001
+20000000
+20000000
+21000000
+04000000 04E9FFF8 00000000
+20000000
 """
 builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to InsideTheDekuTree (Entrance) - off"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. Arms the warp again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. Arms the door redirect again"
 code = """
 40000000 00000000 00000000
 04000000 04E9FF10 00000000
@@ -1860,8 +2707,8 @@ builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to KakarikoVillage_Adult (Kakariko_WellSide) - on"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to KakarikoVillage_Adult at Kakariko_WellSide with the arrival event Dm_SY_BancChangeArrive, as the entrance from BottomOfTheWell does; the change after that is left alone, and turning it off and on arms it again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to KakarikoVillage_Adult at Kakariko_WellSide with the arrival event Dm_SY_BancChangeArrive, as the entrance from BottomOfTheWell does; with Instant warp on, ZL+ZR+Down goes there at once, once per press. Turning it off and on arms the door redirect again"
 code = """
 40000000 00000000 00000000
 580F0000 04E842A8
@@ -1906,13 +2753,37 @@ C085B400 00000000 00000000
 04000000 04E9FF10 00000002
 20000000
 20000000
+80008300
+14050000 04E9FFF8 00000000
+14050000 03303CA0 14250C74
+08000000 04E9FF28 6F6B6972 616B614B
+08000000 04E9FF30 5F656761 6C6C6956
+08000000 04E9FF38 00000074 6C756441
+08000000 04E9FF48 6F6B6972 616B614B
+08000000 04E9FF50 6469536C 6C65575F
+08000000 04E9FF58 00000000 00000065
+08000000 04E9FF78 61425F59 535F6D44
+08000000 04E9FF80 65676E61 6843636E
+08000000 04E9FF88 00006576 69727241
+08000000 04E9FFA8 61425F59 535F6D44
+08000000 04E9FFB0 65676E61 6843636E
+08000000 04E9FFB8 00000000 00006F47
+04000000 04E9FF24 00000000
+04000000 04E9FF10 00000002
+04000000 04E9FFF8 00000001
+04000000 04E9FF20 00000001
+20000000
+20000000
+21000000
+04000000 04E9FFF8 00000000
+20000000
 """
 builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to KakarikoVillage_Adult (Kakariko_WellSide) - off"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. Arms the warp again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. Arms the door redirect again"
 code = """
 40000000 00000000 00000000
 04000000 04E9FF10 00000000
@@ -1921,8 +2792,8 @@ builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to KakarikoVillage_Child (Kakariko_WellSide) - on"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to KakarikoVillage_Child at Kakariko_WellSide with the arrival event Dm_SY_BancChangeArrive, as the entrance from BottomOfTheWell does; the change after that is left alone, and turning it off and on arms it again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to KakarikoVillage_Child at Kakariko_WellSide with the arrival event Dm_SY_BancChangeArrive, as the entrance from BottomOfTheWell does; with Instant warp on, ZL+ZR+Down goes there at once, once per press. Turning it off and on arms the door redirect again"
 code = """
 40000000 00000000 00000000
 580F0000 04E842A8
@@ -1967,13 +2838,37 @@ C085B400 00000000 00000000
 04000000 04E9FF10 00000002
 20000000
 20000000
+80008300
+14050000 04E9FFF8 00000000
+14050000 03303CA0 14250C74
+08000000 04E9FF28 6F6B6972 616B614B
+08000000 04E9FF30 5F656761 6C6C6956
+08000000 04E9FF38 00000064 6C696843
+08000000 04E9FF48 6F6B6972 616B614B
+08000000 04E9FF50 6469536C 6C65575F
+08000000 04E9FF58 00000000 00000065
+08000000 04E9FF78 61425F59 535F6D44
+08000000 04E9FF80 65676E61 6843636E
+08000000 04E9FF88 00006576 69727241
+08000000 04E9FFA8 61425F59 535F6D44
+08000000 04E9FFB0 65676E61 6843636E
+08000000 04E9FFB8 00000000 00006F47
+04000000 04E9FF24 00000000
+04000000 04E9FF10 00000002
+04000000 04E9FFF8 00000001
+04000000 04E9FF20 00000001
+20000000
+20000000
+21000000
+04000000 04E9FFF8 00000000
+20000000
 """
 builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to KakarikoVillage_Child (Kakariko_WellSide) - off"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. Arms the warp again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. Arms the door redirect again"
 code = """
 40000000 00000000 00000000
 04000000 04E9FF10 00000000
@@ -1982,8 +2877,8 @@ builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to KokiriForest_Adult (LostWoodBridge_FrontOfHyruleField) - on"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to KokiriForest_Adult at LostWoodBridge_FrontOfHyruleField with the arrival event Dm_SY_BancChangeArrive, as the entrance from HyruleField_Child does; the change after that is left alone, and turning it off and on arms it again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to KokiriForest_Adult at LostWoodBridge_FrontOfHyruleField with the arrival event Dm_SY_BancChangeArrive, as the entrance from HyruleField_Child does; with Instant warp on, ZL+ZR+Down goes there at once, once per press. Turning it off and on arms the door redirect again"
 code = """
 40000000 00000000 00000000
 580F0000 04E842A8
@@ -2032,13 +2927,39 @@ C085B400 00000000 00000000
 04000000 04E9FF10 00000002
 20000000
 20000000
+80008300
+14050000 04E9FFF8 00000000
+14050000 03303CA0 14250C74
+08000000 04E9FF28 6F466972 696B6F4B
+08000000 04E9FF30 7564415F 74736572
+08000000 04E9FF38 00000000 0000746C
+08000000 04E9FF48 646F6F57 74736F4C
+08000000 04E9FF50 465F6567 64697242
+08000000 04E9FF58 7948664F 746E6F72
+08000000 04E9FF60 6C656946 656C7572
+08000000 04E9FF68 00000000 00000064
+08000000 04E9FF78 61425F59 535F6D44
+08000000 04E9FF80 65676E61 6843636E
+08000000 04E9FF88 00006576 69727241
+08000000 04E9FFA8 61425F59 535F6D44
+08000000 04E9FFB0 65676E61 6843636E
+08000000 04E9FFB8 00000000 00006F47
+04000000 04E9FF24 00000000
+04000000 04E9FF10 00000002
+04000000 04E9FFF8 00000001
+04000000 04E9FF20 00000001
+20000000
+20000000
+21000000
+04000000 04E9FFF8 00000000
+20000000
 """
 builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to KokiriForest_Adult (LostWoodBridge_FrontOfHyruleField) - off"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. Arms the warp again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. Arms the door redirect again"
 code = """
 40000000 00000000 00000000
 04000000 04E9FF10 00000000
@@ -2047,8 +2968,8 @@ builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to KokiriForest_Child (LostWoodBridge_FrontOfHyruleField) - on"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to KokiriForest_Child at LostWoodBridge_FrontOfHyruleField with the arrival event Dm_SY_BancChangeArrive, as the entrance from HyruleField_Child does; the change after that is left alone, and turning it off and on arms it again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to KokiriForest_Child at LostWoodBridge_FrontOfHyruleField with the arrival event Dm_SY_BancChangeArrive, as the entrance from HyruleField_Child does; with Instant warp on, ZL+ZR+Down goes there at once, once per press. Turning it off and on arms the door redirect again"
 code = """
 40000000 00000000 00000000
 580F0000 04E842A8
@@ -2097,13 +3018,39 @@ C085B400 00000000 00000000
 04000000 04E9FF10 00000002
 20000000
 20000000
+80008300
+14050000 04E9FFF8 00000000
+14050000 03303CA0 14250C74
+08000000 04E9FF28 6F466972 696B6F4B
+08000000 04E9FF30 6968435F 74736572
+08000000 04E9FF38 00000000 0000646C
+08000000 04E9FF48 646F6F57 74736F4C
+08000000 04E9FF50 465F6567 64697242
+08000000 04E9FF58 7948664F 746E6F72
+08000000 04E9FF60 6C656946 656C7572
+08000000 04E9FF68 00000000 00000064
+08000000 04E9FF78 61425F59 535F6D44
+08000000 04E9FF80 65676E61 6843636E
+08000000 04E9FF88 00006576 69727241
+08000000 04E9FFA8 61425F59 535F6D44
+08000000 04E9FFB0 65676E61 6843636E
+08000000 04E9FFB8 00000000 00006F47
+04000000 04E9FF24 00000000
+04000000 04E9FF10 00000002
+04000000 04E9FFF8 00000001
+04000000 04E9FF20 00000001
+20000000
+20000000
+21000000
+04000000 04E9FFF8 00000000
+20000000
 """
 builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to KokiriForest_Child (LostWoodBridge_FrontOfHyruleField) - off"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. Arms the warp again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. Arms the door redirect again"
 code = """
 40000000 00000000 00000000
 04000000 04E9FF10 00000000
@@ -2112,8 +3059,8 @@ builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to LostWood_Adult (LostWood_Entrance) - on"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to LostWood_Adult at LostWood_Entrance with the arrival event Get_StoneOfFire_ArriveFromKokiri, as the entrance from KokiriForest_Child does; the change after that is left alone, and turning it off and on arms it again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to LostWood_Adult at LostWood_Entrance with the arrival event Get_StoneOfFire_ArriveFromKokiri, as the entrance from KokiriForest_Child does; with Instant warp on, ZL+ZR+Down goes there at once, once per press. Turning it off and on arms the door redirect again"
 code = """
 40000000 00000000 00000000
 580F0000 04E842A8
@@ -2159,13 +3106,38 @@ C085B400 00000000 00000000
 04000000 04E9FF10 00000002
 20000000
 20000000
+80008300
+14050000 04E9FFF8 00000000
+14050000 03303CA0 14250C74
+08000000 04E9FF28 646F6F57 74736F4C
+08000000 04E9FF30 0000746C 7564415F
+08000000 04E9FF48 646F6F57 74736F4C
+08000000 04E9FF50 636E6172 746E455F
+08000000 04E9FF58 00000000 00000065
+08000000 04E9FF78 6E6F7453 5F746547
+08000000 04E9FF80 5F657269 46664F65
+08000000 04E9FF88 72466576 69727241
+08000000 04E9FF90 6972696B 6F4B6D6F
+08000000 04E9FF98 00000000 00000000
+08000000 04E9FFA8 61425F59 535F6D44
+08000000 04E9FFB0 65676E61 6843636E
+08000000 04E9FFB8 00000000 00006F47
+04000000 04E9FF24 00000000
+04000000 04E9FF10 00000002
+04000000 04E9FFF8 00000001
+04000000 04E9FF20 00000001
+20000000
+20000000
+21000000
+04000000 04E9FFF8 00000000
+20000000
 """
 builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to LostWood_Adult (LostWood_Entrance) - off"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. Arms the warp again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. Arms the door redirect again"
 code = """
 40000000 00000000 00000000
 04000000 04E9FF10 00000000
@@ -2174,8 +3146,8 @@ builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to LostWood_Child (LostWood_Entrance) - on"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to LostWood_Child at LostWood_Entrance with the arrival event Get_StoneOfFire_ArriveFromKokiri, as the entrance from KokiriForest_Child does; the change after that is left alone, and turning it off and on arms it again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to LostWood_Child at LostWood_Entrance with the arrival event Get_StoneOfFire_ArriveFromKokiri, as the entrance from KokiriForest_Child does; with Instant warp on, ZL+ZR+Down goes there at once, once per press. Turning it off and on arms the door redirect again"
 code = """
 40000000 00000000 00000000
 580F0000 04E842A8
@@ -2221,13 +3193,38 @@ C085B400 00000000 00000000
 04000000 04E9FF10 00000002
 20000000
 20000000
+80008300
+14050000 04E9FFF8 00000000
+14050000 03303CA0 14250C74
+08000000 04E9FF28 646F6F57 74736F4C
+08000000 04E9FF30 0000646C 6968435F
+08000000 04E9FF48 646F6F57 74736F4C
+08000000 04E9FF50 636E6172 746E455F
+08000000 04E9FF58 00000000 00000065
+08000000 04E9FF78 6E6F7453 5F746547
+08000000 04E9FF80 5F657269 46664F65
+08000000 04E9FF88 72466576 69727241
+08000000 04E9FF90 6972696B 6F4B6D6F
+08000000 04E9FF98 00000000 00000000
+08000000 04E9FFA8 61425F59 535F6D44
+08000000 04E9FFB0 65676E61 6843636E
+08000000 04E9FFB8 00000000 00006F47
+04000000 04E9FF24 00000000
+04000000 04E9FF10 00000002
+04000000 04E9FFF8 00000001
+04000000 04E9FF20 00000001
+20000000
+20000000
+21000000
+04000000 04E9FFF8 00000000
+20000000
 """
 builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to LostWood_Child (LostWood_Entrance) - off"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. Arms the warp again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. Arms the door redirect again"
 code = """
 40000000 00000000 00000000
 04000000 04E9FF10 00000000
@@ -2236,8 +3233,8 @@ builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to Market_Adult (Market_Entrance_FromCastle) - on"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to Market_Adult at Market_Entrance_FromCastle with the arrival event Dm_SY_BancChangeArrive_Market_03, as the entrance from GanonCastle does; the change after that is left alone, and turning it off and on arms it again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to Market_Adult at Market_Entrance_FromCastle with the arrival event Dm_SY_BancChangeArrive_Market_03, as the entrance from GanonCastle does; with Instant warp on, ZL+ZR+Down goes there at once, once per press. Turning it off and on arms the door redirect again"
 code = """
 40000000 00000000 00000000
 580F0000 04E842A8
@@ -2285,13 +3282,39 @@ C085B400 00000000 00000000
 04000000 04E9FF10 00000002
 20000000
 20000000
+80008300
+14050000 04E9FFF8 00000000
+14050000 03303CA0 14250C74
+08000000 04E9FF28 415F7465 6B72614D
+08000000 04E9FF30 00000000 746C7564
+08000000 04E9FF48 455F7465 6B72614D
+08000000 04E9FF50 5F65636E 6172746E
+08000000 04E9FF58 74736143 6D6F7246
+08000000 04E9FF60 00000000 0000656C
+08000000 04E9FF78 61425F59 535F6D44
+08000000 04E9FF80 65676E61 6843636E
+08000000 04E9FF88 4D5F6576 69727241
+08000000 04E9FF90 33305F74 656B7261
+08000000 04E9FF98 00000000 00000000
+08000000 04E9FFA8 61425F59 535F6D44
+08000000 04E9FFB0 65676E61 6843636E
+08000000 04E9FFB8 00000000 00006F47
+04000000 04E9FF24 00000000
+04000000 04E9FF10 00000002
+04000000 04E9FFF8 00000001
+04000000 04E9FF20 00000001
+20000000
+20000000
+21000000
+04000000 04E9FFF8 00000000
+20000000
 """
 builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to Market_Adult (Market_Entrance_FromCastle) - off"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. Arms the warp again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. Arms the door redirect again"
 code = """
 40000000 00000000 00000000
 04000000 04E9FF10 00000000
@@ -2300,8 +3323,8 @@ builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to Market_Child (Market_Entrance) - on"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to Market_Child at Market_Entrance with the arrival event Dm_SY_BancChangeArrive_Market_02, as the entrance from HyruleField_Child does; the change after that is left alone, and turning it off and on arms it again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to Market_Child at Market_Entrance with the arrival event Dm_SY_BancChangeArrive_Market_02, as the entrance from HyruleField_Child does; with Instant warp on, ZL+ZR+Down goes there at once, once per press. Turning it off and on arms the door redirect again"
 code = """
 40000000 00000000 00000000
 580F0000 04E842A8
@@ -2345,13 +3368,37 @@ C085B400 00000000 00000000
 04000000 04E9FF10 00000002
 20000000
 20000000
+80008300
+14050000 04E9FFF8 00000000
+14050000 03303CA0 14250C74
+08000000 04E9FF28 435F7465 6B72614D
+08000000 04E9FF30 00000000 646C6968
+08000000 04E9FF48 455F7465 6B72614D
+08000000 04E9FF50 0065636E 6172746E
+08000000 04E9FF78 61425F59 535F6D44
+08000000 04E9FF80 65676E61 6843636E
+08000000 04E9FF88 4D5F6576 69727241
+08000000 04E9FF90 32305F74 656B7261
+08000000 04E9FF98 00000000 00000000
+08000000 04E9FFA8 61425F59 535F6D44
+08000000 04E9FFB0 65676E61 6843636E
+08000000 04E9FFB8 00000000 00006F47
+04000000 04E9FF24 00000000
+04000000 04E9FF10 00000002
+04000000 04E9FFF8 00000001
+04000000 04E9FF20 00000001
+20000000
+20000000
+21000000
+04000000 04E9FFF8 00000000
+20000000
 """
 builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to Market_Child (Market_Entrance) - off"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. Arms the warp again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. Arms the door redirect again"
 code = """
 40000000 00000000 00000000
 04000000 04E9FF10 00000000
@@ -2360,8 +3407,8 @@ builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to SacredForestMeadow_Adult (OutsideOfForestTemple) - on"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to SacredForestMeadow_Adult at OutsideOfForestTemple with the arrival event Dm_SY_BancChangeArrive_SacredForestMeadow_01, as the entrance from ForestTemple does; the change after that is left alone, and turning it off and on arms it again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to SacredForestMeadow_Adult at OutsideOfForestTemple with the arrival event Dm_SY_BancChangeArrive_SacredForestMeadow_01, as the entrance from ForestTemple does; with Instant warp on, ZL+ZR+Down goes there at once, once per press. Turning it off and on arms the door redirect again"
 code = """
 40000000 00000000 00000000
 580F0000 04E842A8
@@ -2410,13 +3457,41 @@ C085B400 00000000 00000000
 04000000 04E9FF10 00000002
 20000000
 20000000
+80008300
+14050000 04E9FFF8 00000000
+14050000 03303CA0 14250C74
+08000000 04E9FF28 6F466465 72636153
+08000000 04E9FF30 6461654D 74736572
+08000000 04E9FF38 746C7564 415F776F
+08000000 04E9FF40 00000000 00000000
+08000000 04E9FF48 4F656469 7374754F
+08000000 04E9FF50 54747365 726F4666
+08000000 04E9FF58 00000065 6C706D65
+08000000 04E9FF78 61425F59 535F6D44
+08000000 04E9FF80 65676E61 6843636E
+08000000 04E9FF88 535F6576 69727241
+08000000 04E9FF90 726F4664 65726361
+08000000 04E9FF98 6F646165 4D747365
+08000000 04E9FFA0 00000000 31305F77
+08000000 04E9FFA8 61425F59 535F6D44
+08000000 04E9FFB0 65676E61 6843636E
+08000000 04E9FFB8 00000000 00006F47
+04000000 04E9FF24 00000000
+04000000 04E9FF10 00000002
+04000000 04E9FFF8 00000001
+04000000 04E9FF20 00000001
+20000000
+20000000
+21000000
+04000000 04E9FFF8 00000000
+20000000
 """
 builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to SacredForestMeadow_Adult (OutsideOfForestTemple) - off"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. Arms the warp again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. Arms the door redirect again"
 code = """
 40000000 00000000 00000000
 04000000 04E9FF10 00000000
@@ -2425,8 +3500,8 @@ builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to SacredForestMeadow_Child (OutsideOfForestTemple) - on"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to SacredForestMeadow_Child at OutsideOfForestTemple with the arrival event Dm_SY_BancChangeArrive_SacredForestMeadow_01, as the entrance from ForestTemple does; the change after that is left alone, and turning it off and on arms it again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to SacredForestMeadow_Child at OutsideOfForestTemple with the arrival event Dm_SY_BancChangeArrive_SacredForestMeadow_01, as the entrance from ForestTemple does; with Instant warp on, ZL+ZR+Down goes there at once, once per press. Turning it off and on arms the door redirect again"
 code = """
 40000000 00000000 00000000
 580F0000 04E842A8
@@ -2475,13 +3550,41 @@ C085B400 00000000 00000000
 04000000 04E9FF10 00000002
 20000000
 20000000
+80008300
+14050000 04E9FFF8 00000000
+14050000 03303CA0 14250C74
+08000000 04E9FF28 6F466465 72636153
+08000000 04E9FF30 6461654D 74736572
+08000000 04E9FF38 646C6968 435F776F
+08000000 04E9FF40 00000000 00000000
+08000000 04E9FF48 4F656469 7374754F
+08000000 04E9FF50 54747365 726F4666
+08000000 04E9FF58 00000065 6C706D65
+08000000 04E9FF78 61425F59 535F6D44
+08000000 04E9FF80 65676E61 6843636E
+08000000 04E9FF88 535F6576 69727241
+08000000 04E9FF90 726F4664 65726361
+08000000 04E9FF98 6F646165 4D747365
+08000000 04E9FFA0 00000000 31305F77
+08000000 04E9FFA8 61425F59 535F6D44
+08000000 04E9FFB0 65676E61 6843636E
+08000000 04E9FFB8 00000000 00006F47
+04000000 04E9FF24 00000000
+04000000 04E9FF10 00000002
+04000000 04E9FFF8 00000001
+04000000 04E9FF20 00000001
+20000000
+20000000
+21000000
+04000000 04E9FFF8 00000000
+20000000
 """
 builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to SacredForestMeadow_Child (OutsideOfForestTemple) - off"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. Arms the warp again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. Arms the door redirect again"
 code = """
 40000000 00000000 00000000
 04000000 04E9FF10 00000000
@@ -2490,8 +3593,8 @@ builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to ShadowTemple (Entrance) - on"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to ShadowTemple at Entrance with the arrival event ShadowTemple_Arrive, as the entrance from Graveyard_Child does; the change after that is left alone, and turning it off and on arms it again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to ShadowTemple at Entrance with the arrival event ShadowTemple_Arrive, as the entrance from Graveyard_Child does; with Instant warp on, ZL+ZR+Down goes there at once, once per press. Turning it off and on arms the door redirect again"
 code = """
 40000000 00000000 00000000
 580F0000 04E842A8
@@ -2533,13 +3636,35 @@ C085B400 00000000 00000000
 04000000 04E9FF10 00000002
 20000000
 20000000
+80008300
+14050000 04E9FFF8 00000000
+14050000 03303CA0 14250C74
+08000000 04E9FF28 6554776F 64616853
+08000000 04E9FF30 00000000 656C706D
+08000000 04E9FF48 65636E61 72746E45
+08000000 04E9FF50 00000000 00000000
+08000000 04E9FF78 6554776F 64616853
+08000000 04E9FF80 7272415F 656C706D
+08000000 04E9FF88 00000000 00657669
+08000000 04E9FFA8 61425F59 535F6D44
+08000000 04E9FFB0 65676E61 6843636E
+08000000 04E9FFB8 00000000 00006F47
+04000000 04E9FF24 00000000
+04000000 04E9FF10 00000002
+04000000 04E9FFF8 00000001
+04000000 04E9FF20 00000001
+20000000
+20000000
+21000000
+04000000 04E9FFF8 00000000
+20000000
 """
 builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to ShadowTemple (Entrance) - off"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. Arms the warp again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. Arms the door redirect again"
 code = """
 40000000 00000000 00000000
 04000000 04E9FF10 00000000
@@ -2548,8 +3673,8 @@ builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to SpiritTemple (SpiritTemple_FromLeftHand) - on"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to SpiritTemple at SpiritTemple_FromLeftHand with the arrival event Dm_SY_BancChangeArrive, as the entrance from DesertColossus_Child does; the change after that is left alone, and turning it off and on arms it again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to SpiritTemple at SpiritTemple_FromLeftHand with the arrival event Dm_SY_BancChangeArrive, as the entrance from DesertColossus_Child does; with Instant warp on, ZL+ZR+Down goes there at once, once per press. Turning it off and on arms the door redirect again"
 code = """
 40000000 00000000 00000000
 580F0000 04E842A8
@@ -2595,13 +3720,37 @@ C085B400 00000000 00000000
 04000000 04E9FF10 00000002
 20000000
 20000000
+80008300
+14050000 04E9FFF8 00000000
+14050000 03303CA0 14250C74
+08000000 04E9FF28 65547469 72697053
+08000000 04E9FF30 00000000 656C706D
+08000000 04E9FF48 65547469 72697053
+08000000 04E9FF50 6F72465F 656C706D
+08000000 04E9FF58 6E614874 66654C6D
+08000000 04E9FF60 00000000 00000064
+08000000 04E9FF78 61425F59 535F6D44
+08000000 04E9FF80 65676E61 6843636E
+08000000 04E9FF88 00006576 69727241
+08000000 04E9FFA8 61425F59 535F6D44
+08000000 04E9FFB0 65676E61 6843636E
+08000000 04E9FFB8 00000000 00006F47
+04000000 04E9FF24 00000000
+04000000 04E9FF10 00000002
+04000000 04E9FFF8 00000001
+04000000 04E9FF20 00000001
+20000000
+20000000
+21000000
+04000000 04E9FFF8 00000000
+20000000
 """
 builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to SpiritTemple (SpiritTemple_FromLeftHand) - off"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. Arms the warp again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. Arms the door redirect again"
 code = """
 40000000 00000000 00000000
 04000000 04E9FF10 00000000
@@ -2610,8 +3759,8 @@ builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to WaterTemple (WaterTemple_FromLakeHylia) - on"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to WaterTemple at WaterTemple_FromLakeHylia with the arrival event SageOfWater_Arrival_WaterTemple, as the entrance from HyruleField_Child does; the change after that is left alone, and turning it off and on arms it again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to WaterTemple at WaterTemple_FromLakeHylia with the arrival event SageOfWater_Arrival_WaterTemple, as the entrance from HyruleField_Child does; with Instant warp on, ZL+ZR+Down goes there at once, once per press. Turning it off and on arms the door redirect again"
 code = """
 40000000 00000000 00000000
 580F0000 04E842A8
@@ -2658,13 +3807,38 @@ C085B400 00000000 00000000
 04000000 04E9FF10 00000002
 20000000
 20000000
+80008300
+14050000 04E9FFF8 00000000
+14050000 03303CA0 14250C74
+08000000 04E9FF28 6D655472 65746157
+08000000 04E9FF30 00000000 00656C70
+08000000 04E9FF48 6D655472 65746157
+08000000 04E9FF50 6D6F7246 5F656C70
+08000000 04E9FF58 696C7948 656B614C
+08000000 04E9FF60 00000000 00000061
+08000000 04E9FF78 6157664F 65676153
+08000000 04E9FF80 69727241 5F726574
+08000000 04E9FF88 65746157 5F6C6176
+08000000 04E9FF90 00656C70 6D655472
+08000000 04E9FFA8 61425F59 535F6D44
+08000000 04E9FFB0 65676E61 6843636E
+08000000 04E9FFB8 00000000 00006F47
+04000000 04E9FF24 00000000
+04000000 04E9FF10 00000002
+04000000 04E9FFF8 00000001
+04000000 04E9FF20 00000001
+20000000
+20000000
+21000000
+04000000 04E9FFF8 00000000
+20000000
 """
 builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to WaterTemple (WaterTemple_FromLakeHylia) - off"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. Arms the warp again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. Arms the door redirect again"
 code = """
 40000000 00000000 00000000
 04000000 04E9FF10 00000000
@@ -2673,8 +3847,8 @@ builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to ZoraDomain_Adult (ZoraDomain_FromZoraFountain) - on"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to ZoraDomain_Adult at ZoraDomain_FromZoraFountain with the arrival event Dm_SY_BancChangeArrive, as the entrance from ZoraFountain_Child does; the change after that is left alone, and turning it off and on arms it again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to ZoraDomain_Adult at ZoraDomain_FromZoraFountain with the arrival event Dm_SY_BancChangeArrive, as the entrance from ZoraFountain_Child does; with Instant warp on, ZL+ZR+Down goes there at once, once per press. Turning it off and on arms the door redirect again"
 code = """
 40000000 00000000 00000000
 580F0000 04E842A8
@@ -2721,13 +3895,38 @@ C085B400 00000000 00000000
 04000000 04E9FF10 00000002
 20000000
 20000000
+80008300
+14050000 04E9FFF8 00000000
+14050000 03303CA0 14250C74
+08000000 04E9FF28 616D6F44 61726F5A
+08000000 04E9FF30 746C7564 415F6E69
+08000000 04E9FF38 00000000 00000000
+08000000 04E9FF48 616D6F44 61726F5A
+08000000 04E9FF50 5A6D6F72 465F6E69
+08000000 04E9FF58 746E756F 4661726F
+08000000 04E9FF60 00000000 006E6961
+08000000 04E9FF78 61425F59 535F6D44
+08000000 04E9FF80 65676E61 6843636E
+08000000 04E9FF88 00006576 69727241
+08000000 04E9FFA8 61425F59 535F6D44
+08000000 04E9FFB0 65676E61 6843636E
+08000000 04E9FFB8 00000000 00006F47
+04000000 04E9FF24 00000000
+04000000 04E9FF10 00000002
+04000000 04E9FFF8 00000001
+04000000 04E9FF20 00000001
+20000000
+20000000
+21000000
+04000000 04E9FFF8 00000000
+20000000
 """
 builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to ZoraDomain_Adult (ZoraDomain_FromZoraFountain) - off"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. Arms the warp again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. Arms the door redirect again"
 code = """
 40000000 00000000 00000000
 04000000 04E9FF10 00000000
@@ -2736,8 +3935,8 @@ builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to ZoraDomain_Child (ZoraDomain_FromZoraFountain) - on"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to ZoraDomain_Child at ZoraDomain_FromZoraFountain with the arrival event Dm_SY_BancChangeArrive, as the entrance from ZoraFountain_Child does; the change after that is left alone, and turning it off and on arms it again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to ZoraDomain_Child at ZoraDomain_FromZoraFountain with the arrival event Dm_SY_BancChangeArrive, as the entrance from ZoraFountain_Child does; with Instant warp on, ZL+ZR+Down goes there at once, once per press. Turning it off and on arms the door redirect again"
 code = """
 40000000 00000000 00000000
 580F0000 04E842A8
@@ -2784,13 +3983,38 @@ C085B400 00000000 00000000
 04000000 04E9FF10 00000002
 20000000
 20000000
+80008300
+14050000 04E9FFF8 00000000
+14050000 03303CA0 14250C74
+08000000 04E9FF28 616D6F44 61726F5A
+08000000 04E9FF30 646C6968 435F6E69
+08000000 04E9FF38 00000000 00000000
+08000000 04E9FF48 616D6F44 61726F5A
+08000000 04E9FF50 5A6D6F72 465F6E69
+08000000 04E9FF58 746E756F 4661726F
+08000000 04E9FF60 00000000 006E6961
+08000000 04E9FF78 61425F59 535F6D44
+08000000 04E9FF80 65676E61 6843636E
+08000000 04E9FF88 00006576 69727241
+08000000 04E9FFA8 61425F59 535F6D44
+08000000 04E9FFB0 65676E61 6843636E
+08000000 04E9FFB8 00000000 00006F47
+04000000 04E9FF24 00000000
+04000000 04E9FF10 00000002
+04000000 04E9FFF8 00000001
+04000000 04E9FF20 00000001
+20000000
+20000000
+21000000
+04000000 04E9FFF8 00000000
+20000000
 """
 builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to ZoraDomain_Child (ZoraDomain_FromZoraFountain) - off"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. Arms the warp again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. Arms the door redirect again"
 code = """
 40000000 00000000 00000000
 04000000 04E9FF10 00000000
@@ -2799,8 +4023,8 @@ builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to ZoraFountain_Adult (ZoraFountain_FromIceCavern) - on"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to ZoraFountain_Adult at ZoraFountain_FromIceCavern with the arrival event Dm_SY_BancChangeArrive_IceCaven_02, as the entrance from IceCavern does; the change after that is left alone, and turning it off and on arms it again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to ZoraFountain_Adult at ZoraFountain_FromIceCavern with the arrival event Dm_SY_BancChangeArrive_IceCaven_02, as the entrance from IceCavern does; with Instant warp on, ZL+ZR+Down goes there at once, once per press. Turning it off and on arms the door redirect again"
 code = """
 40000000 00000000 00000000
 580F0000 04E842A8
@@ -2849,13 +4073,40 @@ C085B400 00000000 00000000
 04000000 04E9FF10 00000002
 20000000
 20000000
+80008300
+14050000 04E9FFF8 00000000
+14050000 03303CA0 14250C74
+08000000 04E9FF28 6E756F46 61726F5A
+08000000 04E9FF30 7564415F 6E696174
+08000000 04E9FF38 00000000 0000746C
+08000000 04E9FF48 6E756F46 61726F5A
+08000000 04E9FF50 6F72465F 6E696174
+08000000 04E9FF58 65766143 6563496D
+08000000 04E9FF60 00000000 00006E72
+08000000 04E9FF78 61425F59 535F6D44
+08000000 04E9FF80 65676E61 6843636E
+08000000 04E9FF88 495F6576 69727241
+08000000 04E9FF90 5F6E6576 61436563
+08000000 04E9FF98 00000000 00003230
+08000000 04E9FFA8 61425F59 535F6D44
+08000000 04E9FFB0 65676E61 6843636E
+08000000 04E9FFB8 00000000 00006F47
+04000000 04E9FF24 00000000
+04000000 04E9FF10 00000002
+04000000 04E9FFF8 00000001
+04000000 04E9FF20 00000001
+20000000
+20000000
+21000000
+04000000 04E9FFF8 00000000
+20000000
 """
 builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to ZoraFountain_Adult (ZoraFountain_FromIceCavern) - off"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. Arms the warp again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. Arms the door redirect again"
 code = """
 40000000 00000000 00000000
 04000000 04E9FF10 00000000
@@ -2864,8 +4115,8 @@ builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to ZoraFountain_Child (ZoraFountain_FromIceCavern) - on"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to ZoraFountain_Child at ZoraFountain_FromIceCavern with the arrival event Dm_SY_BancChangeArrive_IceCaven_02, as the entrance from IceCavern does; the change after that is left alone, and turning it off and on arms it again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to ZoraFountain_Child at ZoraFountain_FromIceCavern with the arrival event Dm_SY_BancChangeArrive_IceCaven_02, as the entrance from IceCavern does; with Instant warp on, ZL+ZR+Down goes there at once, once per press. Turning it off and on arms the door redirect again"
 code = """
 40000000 00000000 00000000
 580F0000 04E842A8
@@ -2914,13 +4165,40 @@ C085B400 00000000 00000000
 04000000 04E9FF10 00000002
 20000000
 20000000
+80008300
+14050000 04E9FFF8 00000000
+14050000 03303CA0 14250C74
+08000000 04E9FF28 6E756F46 61726F5A
+08000000 04E9FF30 6968435F 6E696174
+08000000 04E9FF38 00000000 0000646C
+08000000 04E9FF48 6E756F46 61726F5A
+08000000 04E9FF50 6F72465F 6E696174
+08000000 04E9FF58 65766143 6563496D
+08000000 04E9FF60 00000000 00006E72
+08000000 04E9FF78 61425F59 535F6D44
+08000000 04E9FF80 65676E61 6843636E
+08000000 04E9FF88 495F6576 69727241
+08000000 04E9FF90 5F6E6576 61436563
+08000000 04E9FF98 00000000 00003230
+08000000 04E9FFA8 61425F59 535F6D44
+08000000 04E9FFB0 65676E61 6843636E
+08000000 04E9FFB8 00000000 00006F47
+04000000 04E9FF24 00000000
+04000000 04E9FF10 00000002
+04000000 04E9FFF8 00000001
+04000000 04E9FF20 00000001
+20000000
+20000000
+21000000
+04000000 04E9FFF8 00000000
+20000000
 """
 builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to ZoraFountain_Child (ZoraFountain_FromIceCavern) - off"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. Arms the warp again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. Arms the door redirect again"
 code = """
 40000000 00000000 00000000
 04000000 04E9FF10 00000000
@@ -2929,8 +4207,8 @@ builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to ZoraRiver_Adult (ZoraRiver_FromZoraDomain) - on"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to ZoraRiver_Adult at ZoraRiver_FromZoraDomain with the arrival event ZoraRiver_ArriveFromZoraDomain_Child, as the entrance from ZoraDomain_Child does; the change after that is left alone, and turning it off and on arms it again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to ZoraRiver_Adult at ZoraRiver_FromZoraDomain with the arrival event ZoraRiver_ArriveFromZoraDomain_Child, as the entrance from ZoraDomain_Child does; with Instant warp on, ZL+ZR+Down goes there at once, once per press. Turning it off and on arms the door redirect again"
 code = """
 40000000 00000000 00000000
 580F0000 04E842A8
@@ -2978,13 +4256,39 @@ C085B400 00000000 00000000
 04000000 04E9FF10 00000002
 20000000
 20000000
+80008300
+14050000 04E9FFF8 00000000
+14050000 03303CA0 14250C74
+08000000 04E9FF28 65766952 61726F5A
+08000000 04E9FF30 00746C75 64415F72
+08000000 04E9FF48 65766952 61726F5A
+08000000 04E9FF50 6F5A6D6F 72465F72
+08000000 04E9FF58 6E69616D 6F446172
+08000000 04E9FF60 00000000 00000000
+08000000 04E9FF78 65766952 61726F5A
+08000000 04E9FF80 65766972 72415F72
+08000000 04E9FF88 61726F5A 6D6F7246
+08000000 04E9FF90 435F6E69 616D6F44
+08000000 04E9FF98 00000000 646C6968
+08000000 04E9FFA8 61425F59 535F6D44
+08000000 04E9FFB0 65676E61 6843636E
+08000000 04E9FFB8 00000000 00006F47
+04000000 04E9FF24 00000000
+04000000 04E9FF10 00000002
+04000000 04E9FFF8 00000001
+04000000 04E9FF20 00000001
+20000000
+20000000
+21000000
+04000000 04E9FFF8 00000000
+20000000
 """
 builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to ZoraRiver_Adult (ZoraRiver_FromZoraDomain) - off"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. Arms the warp again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. Arms the door redirect again"
 code = """
 40000000 00000000 00000000
 04000000 04E9FF10 00000000
@@ -2993,8 +4297,8 @@ builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to ZoraRiver_Child (ZoraRiver_FromZoraDomain) - on"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to ZoraRiver_Child at ZoraRiver_FromZoraDomain with the arrival event ZoraRiver_ArriveFromZoraDomain_Child, as the entrance from ZoraDomain_Child does; the change after that is left alone, and turning it off and on arms it again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. While on, the first area change (a loading zone, a door) goes to ZoraRiver_Child at ZoraRiver_FromZoraDomain with the arrival event ZoraRiver_ArriveFromZoraDomain_Child, as the entrance from ZoraDomain_Child does; with Instant warp on, ZL+ZR+Down goes there at once, once per press. Turning it off and on arms the door redirect again"
 code = """
 40000000 00000000 00000000
 580F0000 04E842A8
@@ -3042,15 +4346,45 @@ C085B400 00000000 00000000
 04000000 04E9FF10 00000002
 20000000
 20000000
+80008300
+14050000 04E9FFF8 00000000
+14050000 03303CA0 14250C74
+08000000 04E9FF28 65766952 61726F5A
+08000000 04E9FF30 00646C69 68435F72
+08000000 04E9FF48 65766952 61726F5A
+08000000 04E9FF50 6F5A6D6F 72465F72
+08000000 04E9FF58 6E69616D 6F446172
+08000000 04E9FF60 00000000 00000000
+08000000 04E9FF78 65766952 61726F5A
+08000000 04E9FF80 65766972 72415F72
+08000000 04E9FF88 61726F5A 6D6F7246
+08000000 04E9FF90 435F6E69 616D6F44
+08000000 04E9FF98 00000000 646C6968
+08000000 04E9FFA8 61425F59 535F6D44
+08000000 04E9FFB0 65676E61 6843636E
+08000000 04E9FFB8 00000000 00006F47
+04000000 04E9FF24 00000000
+04000000 04E9FF10 00000002
+04000000 04E9FFF8 00000001
+04000000 04E9FF20 00000001
+20000000
+20000000
+21000000
+04000000 04E9FFF8 00000000
+20000000
 """
 builds = ["E0F3CCFAF50065AE"]
 
 [[cheats]]
 name = "Warp to ZoraRiver_Child (ZoraRiver_FromZoraDomain) - off"
-section = "Map select: turn one on, then take any door or loading zone"
-note = "By UserDerezzed. Arms the warp again"
+section = "Map select: turn one location on, then take any door, or press ZL+ZR+Down with Instant warp on"
+note = "By UserDerezzed. Arms the door redirect again"
 code = """
 40000000 00000000 00000000
 04000000 04E9FF10 00000000
 """
 builds = ["E0F3CCFAF50065AE"]
+
+[anchors.cave]
+pad = 0x190
+authored = "0x3C46E70"

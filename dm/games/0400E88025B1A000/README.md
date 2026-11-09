@@ -53,6 +53,6 @@ Every 3D target is 768x432 from the first frame of the title to the tutorial: Me
 
 - [The picture](#the-picture): why the 3D stays at 768x432.
 - `[RED] DLSS: the game's bias mask (a reactive mask for MetalFX) is not passed on`.
-- The game's wake-up eventfd fails (the host refuses `nn::socket::EventFd`), so its HTTP thread polls without a wake-up; harmless offline.
+- The game's wake-up eventfd: noted when the host refused `nn::socket::EventFd` (its HTTP thread polled without a wake-up, harmless offline). The host makes real event descriptors now ([`EventFd` needs no network](../../../docs/reference/services.md#eventfd-needs-no-network)); not run again on this game to confirm.
 - A `pso_manifest.tsv` has not been recorded; `render_cond` not tried; the later levels and combat, and iOS, not tested.
 - Mario Kart World 1.8.0 has not been run with the camera answers changed for this game.

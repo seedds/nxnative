@@ -101,6 +101,14 @@ The SDK's movie library (`movie::Decoder`, `movie::Extractor`), which the host t
 - **Fix:** also as with MediaCodec, an input marked end-of-stream is the last until `Flush` / `Stop`: no input index is handed out or announced after it (`in_eos` in `hle_movie.c`).
 - **Found on:** [Metroid Dread](../../dm/games/010093801237C000/README.md) (movie sub-list); [DRAGON QUEST XI S](../../dm/games/01006C300E9F0000/README.md).
 
+### Input buffers already held when end of stream arrives
+
+- **Symptom:** the intro finishes, then the game crashes while calling its movie-completion handlers.
+- **Cause:** stopping new input acquisitions at end of stream does not cover buffers the client already holds. Tied Together's Unity player acquires all four inputs and sends each with the end-of-stream flag. The host queued all four, producing four completion notifications; the first handler freed the event list that the later notifications still used.
+- **Fix:** `h_movie_SendIn` accepts the first end-of-stream packet and returns subsequent client-held inputs once, without decoding or signalling them, whether or not they carry the flag. A queued or decoding input cannot be returned this way. An input returned by `Flush` is already on the free list and is not added again. Duplicate and full-queue checks precede ownership changes, and only an accepted packet commits `in_eos`. `Flush` / `Stop` still allow a new stream.
+- **Found on:** Tied Together (`0100B6D00C2DE000`) 1.0.2, with a provisional profile on the Mac. The intro reaches the title menu after the fix.
+- **Check:** `t_movie_avc` feeds four held inputs through `SendInputBufferForDecode`, drains the reordered pictures and checks that only one output carries end of stream. It also covers late ordinary data, duplicate and invalid submissions, an input being decoded, and held inputs sent after `Flush`. The four-input check fails on the previous host.
+
 ### End-of-stream packets with no data, and deleted decoders
 
 - **Symptom:** decoding the end-of-stream packet gave VideoToolbox −12909 and AudioToolbox −50.

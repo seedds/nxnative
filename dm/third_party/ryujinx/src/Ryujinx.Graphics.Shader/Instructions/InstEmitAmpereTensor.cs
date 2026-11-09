@@ -195,7 +195,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             if (type == 2)
             {
                 // nxnative: the tensor core reads a tf32 as the float's top 19 bits (sign, exponent, 10 mantissa bits) and ignores the low 13 (a Jetson Orin's results:
-                // with them kept, no output of 4,096 matches), so the FMA chain an Inf or NaN takes (AHmmaF32) clears them too
+                // with them kept, no output of 4,096 matches), so the FMA chain an Inf or NaN takes (AHmmaExact) clears them too
                 Operand Tf32(Operand v) => context.BitwiseAnd(v, Const(unchecked((int)0xffffe000)));
 
                 // A rows g and g + 8, k = 0..7: from lanes 4g + j (j = 0..3), which hold k = j (regs 0, 1) and j + 4 (regs 2, 3)
@@ -282,10 +282,10 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 }
             }
 
+            Operand[] d = AHmmaExact(context, x, k, type, f32, aWord, bWord, acc);
+
             if (f32)
             {
-                Operand[] d = AHmmaF32(context, x, k, type, aWord, bWord, acc);
-
                 for (int i = 0; i < 4 && x.Rd + i < RegisterConsts.RegisterZeroIndex; i++)
                 {
                     context.Copy(Register(x.Rd + i, RegisterType.Gpr), d[i]);
@@ -295,7 +295,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             {
                 for (int row = 0; row < 2 && x.Rd + row < RegisterConsts.RegisterZeroIndex; row++)
                 {
-                    context.Copy(Register(x.Rd + row, RegisterType.Gpr), context.PackHalf2x16(acc[row * 2], acc[row * 2 + 1]));
+                    context.Copy(Register(x.Rd + row, RegisterType.Gpr), context.BitwiseOr(d[row * 2], context.ShiftLeft(d[row * 2 + 1], Const(16))));
                 }
             }
         }
@@ -307,7 +307,12 @@ namespace Ryujinx.Graphics.Shader.Instructions
         // thousands where the alignment drops a small product. Integer operations on the bits, so Metal's fast math cannot change it; an Inf or NaN operand takes the chain.
         // nxnative: bf16 sources (type 1) add the same way in blocks of 8, tf32 (type 2, k8) in blocks of 4, each of their products with its 24 fraction bits too: the same
         // model matches all 4,096 of the Orin's outputs for each
-        private static Operand[] AHmmaF32(EmitterContext context, AmpereOp x, int k, int type, Operand[,] aWord, Operand[,] bWord, Operand[] chain)
+        // nxnative: with an f16 accumulator (f16 sources only) the blocks are the same and each block's sum is rounded to f16 (to nearest, even), which is the next block's
+        // C. On this Mac's GPU it matches all 4,718,592 outputs of 3 x 4,096 warps of single and chained HMMA.16816 a Jetson Orin computed; the FMA chain rounded once after
+        // all 16 products and missed 34 % of them. A compute shader's m16n8k16 keeps the simdgroup_matrix path above (an f32 sum of each block rounded once to f16, 1 ULP off
+        // in about 0.03 % of the outputs): this model there, each lane summing its outputs in integers, made Ocarina of Time's NDSR networks 23 to 30 times slower. Returns
+        // the 4 outputs: f32 bits, or f16 bits in the low half of each word
+        private static Operand[] AHmmaExact(EmitterContext context, AmpereOp x, int k, int type, bool f32, Operand[,] aWord, Operand[,] bWord, Operand[] chain)
         {
             int blockSize = type == 2 ? 4 : 8;
             int special = type == 0 ? 31 : 255;   // the exponent field of an Inf or NaN
@@ -341,25 +346,27 @@ namespace Ryujinx.Graphics.Shader.Instructions
                     sign[kk] = context.BitwiseExclusiveOr(aPart[row, kk].Sign, bPart[c, kk].Sign);
                 }
 
-                Operand cIn = AGpr(x.Rc + i);
+                Operand cIn = f32 ? AGpr(x.Rc + i) : context.BitfieldExtractU32(AGpr(x.Rc + row), Const(c * 16), Const(16));
                 Operand res = cIn;
 
                 for (int blk = 0; blk < k; blk += blockSize)
                 {
-                    res = AHmmaF32Block(context, mag[blk..(blk + blockSize)], exp[blk..(blk + blockSize)], sign[blk..(blk + blockSize)], res);
+                    res = f32 ? AHmmaF32Block(context, mag[blk..(blk + blockSize)], exp[blk..(blk + blockSize)], sign[blk..(blk + blockSize)], res)
+                              : AHmmaF16Block(context, mag[blk..(blk + blockSize)], exp[blk..(blk + blockSize)], sign[blk..(blk + blockSize)], res);
                 }
 
-                // An Inf or NaN (the format's largest exponent field) among this output's A row and B column, or an f32 one in C
+                // An Inf or NaN (the format's largest exponent field) among this output's A row and B column, or an f32 (f16) one in C
                 Operand isSpecial = context.BitwiseOr(
                     context.ICompareEqual(context.IMaximumU32(aMaxField[row], bMaxField[c]), Const(special)),
-                    context.ICompareEqual(context.BitwiseAnd(cIn, Const(0x7f800000)), Const(0x7f800000)));
-                d[i] = context.ConditionalSelect(isSpecial, chain[i], res);
+                    f32 ? context.ICompareEqual(context.BitwiseAnd(cIn, Const(0x7f800000)), Const(0x7f800000))
+                        : context.ICompareEqual(context.BitwiseAnd(cIn, Const(0x7c00)), Const(0x7c00)));
+                d[i] = context.ConditionalSelect(isSpecial, f32 ? chain[i] : context.BitwiseAnd(context.PackHalf2x16(chain[i], ConstF(0)), Const(0xffff)), res);
             }
 
             return d;
         }
 
-        // nxnative: one source element of register w for AHmmaF32: half `half` of a packed f16 or bf16 pair, or a tf32 (bits 13..31). (significand, shifted in A so that
+        // nxnative: one source element of register w for AHmmaExact: half `half` of a packed f16 or bf16 pair, or a tf32 (bits 13..31). (significand, shifted in A so that
         // a product has 24 fraction bits; exponent field with denormals at 1 and zeros at -1024 (so a zero product never sets a block's exponent), in A less 224 for the
         // 8-bit exponents, so that a product's is the f32 biased exponent less 97 as with f16; sign as 0 or -1; the exponent field)
         private static (Operand Sig, Operand Exp, Operand Sign, Operand Field) AMmaParts(EmitterContext context, Operand w, int half, int type, bool a)
@@ -393,6 +400,60 @@ namespace Ryujinx.Graphics.Shader.Instructions
                                                      context.ISubtract(context.IMaximumU32(cField, Const(1)), Const(97)));
             Operand cSign = context.ShiftRightS32(c, Const(31));
 
+            (Operand sum, Operand max) = AHmmaBlockSum(context, mag, exp, sign, cMag, cExp, cSign);
+
+            // value = |sum| * 2^(max + 97 - 127 - 24); its leading bit p gives the f32 biased exponent max + 73 + p, here less 1 (the significand's bit 23 adds it back).
+            // Below the normal range the f32 bits are |sum| * 2^(max + 95): the same shift with the exponent's deficit added
+            Operand m = context.IAbsolute(sum);
+            Operand p = context.FindMSBU32(m);
+            Operand e1 = context.IAdd(max, context.IAdd(p, Const(72)));
+            Operand shift = context.ISubtract(context.IAdd(Const(23), context.IMinimumS32(e1, Const(0))), p);
+            // nxnative: a right shift of 32 or more (a sum below f32's denormals, which only 8-bit source exponents reach) is undefined in MSL, so at most 31 (m < 2^30 is then 0)
+            Operand n = context.ShiftRightU32(context.ShiftLeft(m, context.IMaximumS32(shift, Const(0))),
+                                              context.IMinimumS32(context.IMaximumS32(context.INegate(shift), Const(0)), Const(31)));
+            Operand bits = context.IAdd(context.ShiftLeft(context.IMaximumS32(e1, Const(0)), Const(23)), n);
+            bits = context.ConditionalSelect(context.ICompareGreaterOrEqual(e1, Const(254)), Const(0x7f800000), bits);
+            bits = context.BitwiseOr(bits, context.BitwiseAnd(sum, Const(unchecked((int)0x80000000))));
+
+            return context.ConditionalSelect(context.ICompareEqual(sum, Const(0)), Const(0), bits);
+        }
+
+        // nxnative: one block with an f16 C (its bits in the low half of c): the sum as AHmmaF32Block's, rounded to f16 bits (to nearest, even)
+        private static Operand AHmmaF16Block(EmitterContext context, Operand[] mag, Operand[] exp, Operand[] sign, Operand c)
+        {
+            // C with 24 fraction bits; on the products' scale its exponent is the f16 field plus 15
+            Operand cField = context.BitfieldExtractU32(c, Const(10), Const(5));
+            Operand cMag = context.ShiftLeft(context.BitwiseOr(context.BitwiseAnd(c, Const(0x3ff)), context.ShiftLeft(context.IMinimumU32(cField, Const(1)), Const(10))), Const(14));
+            Operand cExp = context.ConditionalSelect(context.ICompareEqual(context.BitwiseAnd(c, Const(0x7fff)), Const(0)), Const(-1024),
+                                                     context.IAdd(context.IMaximumU32(cField, Const(1)), Const(15)));
+            Operand cSign = context.BitfieldExtractS32(c, Const(15), Const(1));
+
+            (Operand sum, Operand max) = AHmmaBlockSum(context, mag, exp, sign, cMag, cExp, cSign);
+
+            // value = |sum| * 2^(max - 54); its leading bit p gives the f16 biased exponent e = max + p - 39. The significand keeps 11 bits (fewer below the normal range):
+            // shift right by p - 10 + max(1 - e, 0), rounding to nearest even on the bits shifted out, or left when that is negative (exact)
+            Operand m = context.IAbsolute(sum);
+            Operand p = context.FindMSBU32(m);
+            Operand e = context.IAdd(max, context.ISubtract(p, Const(39)));
+            Operand shift = context.IAdd(context.ISubtract(p, Const(10)), context.IMaximumS32(context.ISubtract(Const(1), e), Const(0)));
+            Operand r = context.IMinimumS32(context.IMaximumS32(shift, Const(0)), Const(31));
+            Operand q = context.ShiftLeft(context.ShiftRightU32(m, r), context.IMaximumS32(context.INegate(shift), Const(0)));
+            Operand one = context.ShiftLeft(Const(1), r);
+            Operand rem = context.BitwiseAnd(m, context.ISubtract(one, Const(1)));
+            Operand up = context.BitwiseAnd(context.ICompareNotEqual(r, Const(0)),
+                                            context.ICompareGreaterUnsigned(context.IAdd(rem, context.BitwiseAnd(q, Const(1))), context.ShiftRightU32(one, Const(1))));
+            q = context.IAdd(q, context.ConditionalSelect(up, Const(1), Const(0)));
+            Operand bits = context.IAdd(context.ShiftLeft(context.ISubtract(context.IMaximumS32(e, Const(1)), Const(1)), Const(10)), q);
+            bits = context.IMinimumU32(bits, Const(0x7c00));   // past the largest half: Inf
+            bits = context.BitwiseOr(bits, context.BitwiseAnd(context.ShiftRightU32(sum, Const(16)), Const(0x8000)));
+
+            return context.ConditionalSelect(context.ICompareEqual(sum, Const(0)), Const(0), bits);
+        }
+
+        // The terms of one block (the products and C, each magnitude with 24 fraction bits below 2^exp, sign 0 / -1) aligned to the largest exponent, each truncated, and
+        // summed: (the sum, the largest exponent)
+        private static (Operand Sum, Operand Max) AHmmaBlockSum(EmitterContext context, Operand[] mag, Operand[] exp, Operand[] sign, Operand cMag, Operand cExp, Operand cSign)
+        {
             Operand max = cExp;
 
             for (int j = 0; j < mag.Length; j++)
@@ -413,20 +474,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 sum = context.IAdd(sum, Aligned(mag[j], exp[j], sign[j]));
             }
 
-            // value = |sum| * 2^(max + 97 - 127 - 24); its leading bit p gives the f32 biased exponent max + 73 + p, here less 1 (the significand's bit 23 adds it back).
-            // Below the normal range the f32 bits are |sum| * 2^(max + 95): the same shift with the exponent's deficit added
-            Operand m = context.IAbsolute(sum);
-            Operand p = context.FindMSBU32(m);
-            Operand e1 = context.IAdd(max, context.IAdd(p, Const(72)));
-            Operand shift = context.ISubtract(context.IAdd(Const(23), context.IMinimumS32(e1, Const(0))), p);
-            // nxnative: a right shift of 32 or more (a sum below f32's denormals, which only 8-bit source exponents reach) is undefined in MSL, so at most 31 (m < 2^30 is then 0)
-            Operand n = context.ShiftRightU32(context.ShiftLeft(m, context.IMaximumS32(shift, Const(0))),
-                                              context.IMinimumS32(context.IMaximumS32(context.INegate(shift), Const(0)), Const(31)));
-            Operand bits = context.IAdd(context.ShiftLeft(context.IMaximumS32(e1, Const(0)), Const(23)), n);
-            bits = context.ConditionalSelect(context.ICompareGreaterOrEqual(e1, Const(254)), Const(0x7f800000), bits);
-            bits = context.BitwiseOr(bits, context.BitwiseAnd(sum, Const(unchecked((int)0x80000000))));
-
-            return context.ConditionalSelect(context.ICompareEqual(sum, Const(0)), Const(0), bits);
+            return (sum, max);
         }
 
         // LDSM.16.M88.n / .MT88.n Rd, [Ra + UR + offset]: n (72..74: 1, 2, 4) 8 x 8 matrices of halves from shared memory; lanes 8i .. 8i + 7 give the addresses of

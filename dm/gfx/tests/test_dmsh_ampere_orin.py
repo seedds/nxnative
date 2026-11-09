@@ -64,8 +64,9 @@ KNOWN = {
 # Ops that run Metal's own approximation (MUFU, and the divisions built on it): compared and reported, never failed
 APPROX = {'mufu_ex2', 'mufu_ex2_ftz', 'mufu_lg2', 'mufu_lg2_ftz', 'mufu_rcp_ftz', 'mufu_rsqrt', 'mufu_rsqrt_ftz', 'mufu_sqrt', 'mufu_sqrt_ftz', 'mufu_sin',
           'mufu_cos', 'mufu_ex2_f16x2', 'fdiv_full', 'fdiv_approx',
-          # HMMA with an f16 accumulator: one block of 8 rounded once (PR #1897) matches 99.97 %; the rest are 1-2 ULP where the sum nearly cancels
-          'hmma_16816_f16', 'hmma_1688_f16'}
+          # HMMA.16816 with an f16 accumulator in a compute shader (this test's stage) goes through simdgroup_matrix: an f32 sum of each block of 8 rounded once to f16
+          # (PR #1897), 99.97 % of a Jetson Orin's outputs; the tensor core's truncating sum, which the per-thread HMMA computes, costs 23-30 times as much there
+          'hmma_16816_f16'}
 
 MAC_METAL = ['xcrun', '-sdk', 'macosx', 'metal', '-c', '-O1', '-fpreserve-invariance', '-fwrapv']   # dmsh_build.py MAC_METAL
 

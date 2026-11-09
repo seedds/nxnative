@@ -233,5 +233,5 @@ FRAME_STEP = {
 BINDING = [
     {'what': "screen shape: the sizes, the view, the layouts' projection and their edge widgets (DM_SCREEN_ASPECT)", 'now': 'build', 'goal': 'game', 'purpose': 'rendering',
      'why': "the output size is the host's, but where the game takes its sizes, its cameras and its layouts are this build's code",
-     'blocked': 'the stubs have no function-matched form yet'},
+     'blocked': "the stubs have no function-matched form yet (Ocarina of Time's screen-shape stubs, function-matched others of its frame-step rule, are the model)"},
 ]

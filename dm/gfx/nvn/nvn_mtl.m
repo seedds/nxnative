@@ -9012,6 +9012,7 @@ static _Atomic(wl_table *) g_wl_tab; static NSArray<WarmTask *> *g_wl_rest; stat
 static os_unfair_lock g_wl_lock = OS_UNFAIR_LOCK_INIT; static NSMutableArray<WarmTask *> *g_wl_bumps; static NSUInteger g_wl_bhead; static _Atomic uint64_t g_wl_bumped, g_wl_miss;
 static uint64_t wl_hash(const char *v, const char *f) { uint64_t h = 1469598103934665603ull; for (; *v; v++) h = (h ^ (uint8_t)*v) * 1099511628211ull; h = (h ^ 0xff) * 1099511628211ull; for (; f && *f; f++) h = (h ^ (uint8_t)*f) * 1099511628211ull; return h | 1; }
 static wl_slot *wl_find(wl_table *tb, const char *v, const char *f) {   // the pair's slot, or the empty slot where it would go
+    if (!v) v = "";   // a key's UTF8String is nullable
     uint64_t h = wl_hash(v, f); size_t i = h & tb->mask;
     while (tb->s[i].h && !(tb->s[i].h == h && !strcmp(tb->s[i].v, v) && !strcmp(tb->s[i].f, f ? f : ""))) i = (i + 1) & tb->mask;
     return &tb->s[i];

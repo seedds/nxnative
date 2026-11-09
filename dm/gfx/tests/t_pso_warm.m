@@ -150,7 +150,7 @@ static void singleflight(NSString *dir) {
     NSString *manifest = [dir stringByAppendingPathComponent:@"concurrent.tsv"];
     NSString *text = [@"S\twarm-vs\t0\n" stringByAppendingString:row(&key, 0)];
     EXPECT("concurrent manifest written", 1, [text writeToFile:manifest atomically:YES encoding:NSUTF8StringEncoding error:nil]);
-    long lines = 0; NSArray<WarmTask *> *tasks = warm_parse(@[manifest], &lines);
+    long lines = 0, first = 0; NSArray<WarmTask *> *tasks = warm_parse(@[manifest], &lines, &first);
     EXPECT("S and R are distinct real warm tasks", 2, tasks.count);
     if (tasks.count != 2) return;
     pso4_init();   // Match warm_start: initialize the real compiler before substituting the test device.
@@ -223,7 +223,7 @@ static void scenario(NSString *dir, int merged) {
     EXPECT("seed manifest written", 1, [seed writeToFile:a atomically:YES encoding:NSUTF8StringEncoding error:nil]);
     EXPECT("user manifest written", 1, [user writeToFile:b atomically:YES encoding:NSUTF8StringEncoding error:nil]);
     uint64_t before = g_pb_spec + g_pb_legacy; g_warm_t0 = bp_now(); atomic_store(&g_warm_running, 1);
-    long lines = 0; for (WarmTask *t in warm_parse(@[a, b], &lines)) warm_task(t);
+    long lines = 0, first = 0; for (WarmTask *t in warm_parse(@[a, b], &lines, &first)) warm_task(t);
     warm_finish();
     EXPECT("only three effective pipelines compiled across both manifests", 3, g_pb_spec + g_pb_legacy - before);
     EXPECT("only three render pipelines enqueued", 3, g_warm_rps);
@@ -258,7 +258,7 @@ static void native_mesh(NSString *dir) {
     NSString *manifest = [dir stringByAppendingPathComponent:@"mesh.tsv"];
     NSString *text = [NSString stringWithFormat:@"%@%@%@", wrong_stage, valid, valid];
     EXPECT("mesh manifest written", 1, [text writeToFile:manifest atomically:YES encoding:NSUTF8StringEncoding error:nil]);
-    long lines = 0; NSArray<WarmTask *> *tasks = warm_parse(@[manifest], &lines);
+    long lines = 0, first = 0; NSArray<WarmTask *> *tasks = warm_parse(@[manifest], &lines, &first);
     EXPECT("only the canonical, unique mesh row loads", 1, lines);
     if (tasks.count != 1) return;
     warm_load_begin(); warm_task(tasks[0]);

@@ -8,10 +8,10 @@ using static Ryujinx.Graphics.Shader.IntermediateRepresentation.OperandHelper;
 
 namespace Ryujinx.Graphics.Shader.Instructions
 {
-    // Ampere warp-cooperative matrix instructions (HMMA, LDSM, MOVM) and packed-half compares, translated per thread. A matrix fragment is spread over the warp's 32
+    // Ampere warp-cooperative matrix instructions (HMMA, IMMA, LDSM, MOVM) and packed-half compares, translated per thread. A matrix fragment is spread over the warp's 32
     // lanes in NVIDIA's documented layouts (PTX mma.m16n8k16 / ldmatrix / movmatrix): lane L holds rows L / 4 (and L / 4 + 8) at columns 2 (L % 4) and + 1. Each lane
     // gathers what it needs from the lanes that hold it with subgroup shuffles (Metal SIMD-groups are 32 wide, as the warp), and computes its own part. Field
-    // positions: Mesa NAK sm70_encode.rs (OpHmma, OpLdsm, OpMovm, OpHSetP2, OpHSet2, OpHMnMx2).
+    // positions: Mesa NAK sm70_encode.rs (OpHmma, OpImma, OpLdsm, OpMovm, OpHSetP2, OpHSet2, OpHMnMx2).
     static partial class InstEmit
     {
         public static void RegisterAmpereTensor(AmpereRegistrar x)
@@ -19,6 +19,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             const InstProps N = InstProps.None;
 
             x(0x23c, InstName.Hfma2, AHmma, N);
+            x(0x237, InstName.Imad, AImma, N);
             x(0x83b, InstName.Lds, ALdsm, N);
             x(0x23a, InstName.Mov, AMovm, N);
             x(0x3a1, InstName.Vote, AMatch, N);
@@ -239,6 +240,109 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 {
                     context.Copy(Register(x.Rd + row, RegisterType.Gpr), context.PackHalf2x16(acc[row * 2], acc[row * 2 + 1]));
                 }
+            }
+        }
+
+        // nxnative: IMMA.16832 / .16816 / .8816 Rd, Ra.ROW, Rb.COL, Rc (PTX mma.sync m16n8k32 / m16n8k16 / m8n8k16 .s32 with 8-bit sources): D = A * B + C in 32-bit integers.
+        // Size 75 and 85..86 (Mesa NAK OpImma: 0 m8n8k16, 4 m16n8k16, 5 m16n8k32; 2 m8n8k32 and 6 m16n8k64 are 4-bit only), A signed 76, B signed 78, .SAT 82, A / B 4-bit
+        // 83 / 84. Lane L, g = L / 4, t = L % 4: each A register holds 4 bytes, (row g, or g + 8 in odd registers of m16) x (k 4t .. 4t + 3, + 16 in the next pair); each B
+        // register (k 4t .. 4t + 3, + 16) x (column g); C / D (row g, then g + 8) x (columns 2t, 2t + 1). The products and their sum are exact integers, so the result is the GPU's
+        // bit for bit: the 8-bit products sum to at most 32 x 2^14 in magnitude, so only the add of C can wrap (or, with .SAT, clamp)
+        public static void AImma(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+            int size = x.Bits(75, 76) | (x.Bits(85, 87) << 1);
+            bool aSigned = x.Bit(76), bSigned = x.Bit(78), sat = x.Bit(82);
+
+            if ((size != 0 && size != 4 && size != 5) || x.Bit(83) || x.Bit(84))
+            {
+                throw AFail(context, $"IMMA size {size} 4-bit sources {x.Bits(83, 85)}");
+            }
+
+            int rows = size == 0 ? 1 : 2;   // 8 or 16 rows: groups g (and g + 8)
+            int k = size == 5 ? 32 : 16;
+            int chunks = k / 16;            // 16 k a register set: 4 lanes x 4 bytes
+            int aRegs = rows * chunks;      // register r: row r % rows, k chunk r / rows
+            int bRegs = chunks;
+
+            Operand lane = ALaneId(context);
+            Operand g = context.ShiftRightU32(lane, Const(2));
+            Operand t = context.BitwiseAnd(lane, Const(3));
+
+            Operand Byte(Operand word, int i, bool signed) => signed ? context.BitfieldExtractS32(word, Const(8 * i), Const(8))
+                                                                     : context.BitfieldExtractU32(word, Const(8 * i), Const(8));
+
+            // A rows g (and g + 8), every k: from lanes 4g + j (j = 0..3), which hold k = 4j .. 4j + 3 (+ 16)
+            Operand[,] a = new Operand[rows, k];
+
+            for (int j = 0; j < 4; j++)
+            {
+                Operand src = context.IAdd(context.ShiftLeft(g, Const(2)), Const(j));
+
+                for (int r = 0; r < aRegs; r++)
+                {
+                    Operand v = context.Shuffle(AGpr(x.Ra + r), src);
+                    int row = r % rows, kb = (r / rows) * 16 + 4 * j;
+
+                    for (int i = 0; i < 4; i++)
+                    {
+                        a[row, kb + i] = Byte(v, i, aSigned);
+                    }
+                }
+            }
+
+            // B columns 2t and 2t + 1, every k: from lanes 4 col + j, which hold k = 4j .. 4j + 3 (+ 16)
+            Operand[,] b = new Operand[2, k];
+
+            for (int c = 0; c < 2; c++)
+            {
+                Operand col = context.IAdd(context.ShiftLeft(t, Const(1)), Const(c));
+
+                for (int j = 0; j < 4; j++)
+                {
+                    Operand src = context.IAdd(context.ShiftLeft(col, Const(2)), Const(j));
+
+                    for (int r = 0; r < bRegs; r++)
+                    {
+                        Operand v = context.Shuffle(AGpr(x.Rb + r), src);
+
+                        for (int i = 0; i < 4; i++)
+                        {
+                            b[c, r * 16 + 4 * j + i] = Byte(v, i, bSigned);
+                        }
+                    }
+                }
+            }
+
+            Operand[] res = new Operand[rows * 2];
+
+            for (int i = 0; i < res.Length; i++)
+            {
+                int row = i >> 1, c = i & 1;
+                Operand sum = context.IMultiply(a[row, 0], b[c, 0]);
+
+                for (int kk = 1; kk < k; kk++)
+                {
+                    sum = context.IAdd(sum, context.IMultiply(a[row, kk], b[c, kk]));
+                }
+
+                Operand acc = AGpr(x.Rc + i);
+                Operand d = context.IAdd(acc, sum);
+
+                if (sat)
+                {
+                    // The add overflowed when C and the sum have the same sign and D's differs: clamp toward that sign
+                    Operand over = context.ICompareLess(context.BitwiseAnd(context.BitwiseNot(context.BitwiseExclusiveOr(acc, sum)), context.BitwiseExclusiveOr(acc, d)), Const(0));
+                    Operand clamp = context.ConditionalSelect(context.ICompareLess(acc, Const(0)), Const(int.MinValue), Const(int.MaxValue));
+                    d = context.ConditionalSelect(over, clamp, d);
+                }
+
+                res[i] = d;
+            }
+
+            for (int i = 0; i < res.Length && x.Rd + i < RegisterConsts.RegisterZeroIndex; i++)
+            {
+                context.Copy(Register(x.Rd + i, RegisterType.Gpr), res[i]);
             }
         }
 

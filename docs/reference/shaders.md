@@ -1484,6 +1484,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Check:** `DMSH_TEST_XLATE=dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate python3 dm/gfx/tests/test_dmsh_ampere_orin.py` (about 5 s on an M5 Max); it prints every op's differing lanes by cause. `AMPERE_ORIN_ONLY=<ops or families>` runs some, `AMPERE_ORIN_REPORT=<file>` writes the results as JSON. To record again: `python3 dm/gfx/tools/ampere_orin/capture.py --host <user@machine> [--arch sm_86]`, with NVIDIA's `nvdisasm` (the `cuda_nvdisasm` redistributable) in `~/ampere_orin` on that machine.
 - **Found on:** no game; a Jetson Orin's results. The HMMA comparison it extends is PR #1897's.
 
+### IDP integer dot products
+
+- **Symptom:** a Switch 2 shader with an integer dot product (PTX `dp4a` or `dp2a`, Ampere's IDP) doesn't translate: the translator stops with "Ampere instruction 226 ... is not implemented".
+- **Cause:** the Ampere opcode table had no entry for IDP (opcode 0x026 in its low 9 bits, so 0x226 with a register B, 0x426 with an immediate and so on).
+- **Fix:** `InstEmitAmpereAlu.cs`'s `AIdp` adds c to the products of a's parts and b's bytes, in 32 bits with wraparound, with integer IR operations (a sign- or zero-extending field extract per part, a multiply and an add per product). Bit 73 says a's parts are signed and bit 74 b's bytes; bit 76 picks `.2A`, where a's two 16-bit halves multiply b's bytes 0 and 1, or with bit 77 (`.HI`) bytes 2 and 3; without it `.4A` multiplies the four bytes of each. A `.4A` costs four extracts of each source, four multiplies and four adds; a `.2A` half that.
+- **Check:** `test_dmsh_ampere_orin.py`'s `dp4a_u32`, `dp4a_s32`, `dp4a_su`, `dp2a_lo` and `dp2a_hi` (IDP.4A.U8.U8, .S8.S8, .S8.U8, IDP.2A.LO.S16.S8 and .2A.HI.U16.U8): the translator refused all five before, and now all 1,024 lanes of each match the Orin.
+- **Found on:** no game; a Jetson Orin's results ([Ampere instructions checked against an Ampere GPU](#ampere-instructions-checked-against-an-ampere-gpu)).
+
 ### The NDVE movie network by the host
 
 - **Symptom:** a Switch 2 game's movies and the title behind them run below 60 fps on a Mac with a smaller GPU, and the GPU profile (`DM_NVN_GPUPROF`) shows almost all of the frame in a dozen compute dispatches of `nn::ndve`'s movie network: Ocarina of Time's title at about 24 fps and 38 ms of GPU a frame on an M1 Pro with 16 GPU cores, 24.8 ms on an M1 Max ([issue 1375](https://github.com/seedds/nxnative/issues/1375)), 18.9 ms of compute on an M4 with 8 ([HMMA chains keep their matrices in the SIMD-group](#hmma-chains-keep-their-matrices-in-the-simd-group)); 11-14 ms of the 16.7 on an M6, an M4 Pro or an M5 Max.

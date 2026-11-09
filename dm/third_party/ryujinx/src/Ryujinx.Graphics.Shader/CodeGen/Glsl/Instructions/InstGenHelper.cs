@@ -114,6 +114,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Glsl.Instructions
             Add(Instruction.ShuffleUp,                InstType.CallBinary,     "subgroupShuffleUp");
             Add(Instruction.ShuffleXor,               InstType.CallBinary,     "subgroupShuffleXor");
             Add(Instruction.Sine,                     InstType.CallUnary,      "sin");
+            Add(Instruction.HyperbolicTangent,        InstType.CallUnary,      "tanh");
             Add(Instruction.SquareRoot,               InstType.CallUnary,      "sqrt");
             Add(Instruction.Store,                    InstType.Special);
             Add(Instruction.Subtract,                 InstType.OpBinary,       "-",               2);

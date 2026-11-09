@@ -58,7 +58,6 @@ KNOWN = {
     'dp2a_lo': 'IDP.2A is not implemented', 'dp2a_hi': '(as dp2a_lo)', 'i2i_s8_sat': 'I2I .SAT is not implemented', 'i2i_u16_sat': '(as i2i_s8_sat)',
     'isad': 'VABSDIFF is not implemented', 'iadd_sat': 'PLOP3 with .SIGN register sources (0x21f) is not implemented', 'isub_sat': '(as iadd_sat)',
     'prmt': 'PRMT modes other than the index form (.F4E .B4E .RC8 .ECL .ECR .RC16) are not implemented',
-    'mufu_tanh': 'MUFU.TANH is not implemented', 'mufu_tanh_f16x2': '(as mufu_tanh)',
     # the program calls a routine of the CUDA driver's own (CALL.ABS to a relocation the JIT resolves at load), which a game's shader never does
     'frcp_rn': 'not testable: CALL.ABS into the CUDA driver', 'fsqrt_rn': '(as frcp_rn)',
 }
@@ -66,7 +65,9 @@ KNOWN = {
 APPROX = {'mufu_ex2', 'mufu_ex2_ftz', 'mufu_lg2', 'mufu_lg2_ftz', 'mufu_rcp_ftz', 'mufu_rsqrt', 'mufu_rsqrt_ftz', 'mufu_sqrt', 'mufu_sqrt_ftz', 'mufu_sin',
           'mufu_cos', 'mufu_ex2_f16x2', 'fdiv_full', 'fdiv_approx',
           # HMMA with an f16 accumulator: one block of 8 rounded once (PR #1897) matches 99.97 %; the rest are 1-2 ULP where the sum nearly cancels
-          'hmma_16816_f16', 'hmma_1688_f16'}
+          'hmma_16816_f16', 'hmma_1688_f16',
+          # MUFU.TANH is the GPU's own approximation (up to 116 ULP from tanh), Metal's is within 2; the .F16 form matches all but 3 finite halves (1 ULP)
+          'mufu_tanh', 'mufu_tanh_f16x2'}
 
 MAC_METAL = ['xcrun', '-sdk', 'macosx', 'metal', '-c', '-O1', '-fpreserve-invariance', '-fwrapv']   # dmsh_build.py MAC_METAL
 

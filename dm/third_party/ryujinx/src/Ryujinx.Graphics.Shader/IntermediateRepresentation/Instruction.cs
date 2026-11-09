@@ -130,6 +130,8 @@ namespace Ryujinx.Graphics.Shader.IntermediateRepresentation
         SubgroupBarrier,
         // nxnative: Ampere LDSM in a compute shader (InstEmitAmpereTensor.ALdsm), lowered to its per-lane emulation by TensorPass once the HMMAs it feeds are known
         MatrixLoad,
+        // nxnative: Ampere MUFU.TANH (InstEmitAmpereAlu.AMufu)
+        HyperbolicTangent,
 
         Count,
 

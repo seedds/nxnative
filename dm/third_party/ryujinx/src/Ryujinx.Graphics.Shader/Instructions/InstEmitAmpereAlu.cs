@@ -233,6 +233,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 throw AFail(context, "MUFU.F16 RCP64H / RSQ64H");
             }
 
+            Operand src = res;
+
             res = x.Bits(74, 80) switch
             {
                 0 => context.FPCosine(ATurnsToRadians(context, res)),   // Volta and later: the argument is in turns (the compiler multiplies by 1 / 2pi first,
@@ -244,10 +246,30 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 6 => context.UnpackDouble2x32High(context.FPReciprocal(context.PackDouble2x32(Const(0), res), Instruction.FP64)),
                 7 => context.UnpackDouble2x32High(context.FPReciprocalSquareRoot(context.PackDouble2x32(Const(0), res), Instruction.FP64)),
                 8 => context.FPSquareRoot(res),
+                9 => context.FPHyperbolicTangent(res),
                 int op => throw AFail(context, $"MUFU op {op}"),
             };
 
+            if (half && x.Bits(74, 80) == 9)
+            {
+                res = AHalfTanh(context, src, res);
+            }
+
             ASet(context, x, half ? context.PackHalf2x16(res, ConstF(0f)) : res);
+        }
+
+        // nxnative: MUFU.TANH.F16 rounds toward zero, gives x itself below 2^-8 (subnormal halves included) and +-1 from 8 on (on a Jetson Orin, all but 3 of 1,876 finite halves;
+        // those 3 are 1 ULP off, its own approximation). The f32 tanh's low 13 bits cleared make the pack's round-to-nearest a truncation, as the half result is a normal there.
+        // The range tests read the bits, so a NaN keeps tanh's NaN under fast math. MUFU.TANH (f32) is the GPU's approximation, up to about 2^-17 off, which Metal's tanh does not copy
+        private static Operand AHalfTanh(EmitterContext context, Operand src, Operand tanh)
+        {
+            Operand mag = context.BitwiseAnd(src, Const(0x7fffffff));
+            Operand res = context.BitwiseAnd(tanh, Const(unchecked((int)0xffffe000)));
+            res = context.ConditionalSelect(context.ICompareLessUnsigned(mag, Const(0x3b800000)), src, res);
+            Operand one = context.BitwiseOr(context.BitwiseAnd(src, Const(unchecked((int)0x80000000))), Const(0x3f800000));
+            Operand saturated = context.ICompareLessUnsigned(context.ISubtract(mag, Const(0x41000000)), Const(0x7f800001 - 0x41000000));
+
+            return context.ConditionalSelect(saturated, one, res);
         }
 
         // MUFU.SIN / COS take turns and use only their fraction, so a large argument keeps an exact angle. t * 2pi in float rounds away that fraction (at 2^20 turns a step of 0.4 rad), and

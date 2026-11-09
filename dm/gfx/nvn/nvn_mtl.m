@@ -278,7 +278,22 @@ static void ws_report(uint64_t frame, uint64_t frames) {
         if (n && o < sizeof line - 160) o += snprintf(line + o, sizeof line - o, " %s %.2f/frame (blocked %.2f, %.3f ms);", ws_name[i], (double)n / frames, (double)b / frames, ns / 1e6 / frames); }
     MLOG("[waits] up to frame %llu, per frame:%s", (unsigned long long)frame, o ? line : " none");
 }
+// DM_NVN_GPUPROF's CPU timeline: while a frame is profiled, the host's CPU side is logged beside its encoders' GPU stamps, so a gap between two encoders says what the GPU waited
+// for: each submission's encoding (its begin to its end on the replay thread), each real commit to the queue (from before its uniform-copy wait to the commit's return; the encode
+// thread makes it), every blocking CPU wait for the GPU by its wait-ledger site (the game's SyncWait, the allocator, ...), and the NVN queue worker parked with nothing it can
+// replay (no work, or the first job of each queue held by an event or sync wait). Mach ticks: Metal 4's counter-heap timestamps are the same clock (measured on an M-series Mac:
+// a stamp falls between the commit's and the completion's mach_absolute_time), so the report places them on the encoders' timeline with no conversion
+enum { GT_SUB, GT_COMMIT, GT_WAIT, GT_QPARK, GT_MAX = 2048 };
+typedef struct { uint64_t t0, t1, a, b; uint32_t kind; } gt_ev;
+static gt_ev g_gt[GT_MAX]; static _Atomic int g_gt_n, g_gt_on;
+static uint64_t g_sub_serial; static uint32_t g_seg;   // tentative: defined with the submission state below
 static _Atomic uint64_t g_sub_cmt;   // the last submission whose commit the encode thread has made (its fence; with no encode thread, the last committed: mtl_sub_commit)
+static inline void gt_put(uint32_t kind, uint64_t t0, uint64_t a, uint64_t b) {
+    if (__builtin_expect(!atomic_load_explicit(&g_gt_on, memory_order_relaxed), 1)) return;
+    int i = atomic_fetch_add_explicit(&g_gt_n, 1, memory_order_relaxed); if (i < GT_MAX) g_gt[i] = (gt_ev){t0, mach_absolute_time(), a, b, kind};
+}
+// The NVN queue worker (nvn_queue.inc) parked from t0 until now: why (0 no work queued, 1 an event wait, 2 a sync wait) and the held queue's serial
+void mtl_gp_note_park(uint64_t t0, unsigned why, uint64_t queue) { gt_put(GT_QPARK, t0, why, queue); }
 #include "nvn_rec.h"   // deferred encoding (DM_NVN_ENC_THREAD)
 static NSHashTable *g_res_objects;
 static char g_tex_range_key;   // res_top: a GPU-made texture's storage (guest address, NVN size, pool flags)
@@ -1627,7 +1642,10 @@ void mtl_prepare(void) {
 }
 static void sub_cut_begin(void); static void ts_sub_begin(void), ts_boundary(void); static int ts_on(void);
 static void gmem_commit_patch(void);   // the raw pool table words of the arguments encoded so far follow the pools (gmem_slot_note)
+static uint64_t g_gt_sub0;   // DM_NVN_GPUPROF's timeline: when this submission's encoding began
+static uint64_t g_gt_queue;   // the NVN queue being replayed (mtl_queue_activate)
 void mtl_sub_begin(void) {
+    g_gt_sub0 = mach_absolute_time();
     mtl_init(); g_sub_serial++; g_seg = 0;
     if (g_pkg_kept) { g_pkg_kept = 0; nvn_dirty_touch(); } seg_clk_put(g_sclk); g_sclk = NULL;
     sub_cut_begin();
@@ -1733,7 +1751,7 @@ uint64_t mtl_cut_count(void);
 // A render pass line also gives what it loaded and stored of its attachments (KB, the bandwidth ledger's view: DontCare stores are not counted) and the Metal pixel formats of
 // colour attachment 0 and of the depth / stencil attachment (0: none)
 enum { GP_MAX = 4096 };   // the largest timestamp heap Metal makes
-typedef struct { char kind; uint16_t w, h; uint8_t nc, depth, loads; uint32_t draws, seg; uint64_t pass; uint32_t ld_kb, st_kb; uint16_t cfmt, dfmt; } gp_lab;   // seg: the command buffer (segment) of the submission it is in
+typedef struct { char kind; uint16_t w, h; uint8_t nc, depth, loads; uint32_t draws, seg; uint64_t pass; uint32_t ld_kb, st_kb; uint16_t cfmt, dfmt; uint32_t sub; } gp_lab;   // seg: the command buffer (segment) of the submission it is in; sub: the submission (g_sub_serial)
 static id<MTL4CounterHeap> g_gp_heap; static gp_lab g_gp_lab[GP_MAX / 2]; static int g_gp_n, g_gp_state, g_gp_cur = -1; static long g_gp_f0 = -2, g_gp_f1, g_gp_every; static uint64_t g_gp_frame;
 // DM_NVN_GPUPROF_GEOM=1 (with DM_NVN_GPUPROF) also stamps each render pass where its vertex and its mesh stages finish (a second heap, at the pass's end), and the pass line gives
 // "geom <us>": the time from the pass's start to the later of the two, inside the pass. On a tile-based GPU a pass's vertex, object and mesh work (binning) runs ahead of most of its
@@ -1753,14 +1771,21 @@ static int gp_active(void) {
     if (g_gp_every > 0) return f > 0 && f % g_gp_every == 0;
     return f >= g_gp_f0 && f <= g_gp_f1;
 }
-static void gp_report(int n, gp_lab *lab, uint64_t frame);
+typedef struct { int n, ngt; gp_lab *lab; gt_ev *gt; uint64_t frame; } gp_snap;
+static void gp_report(gp_snap s);
+// The profiled frame is over: its labels and CPU timeline are copied for the report, which runs once its last command buffer completes, and the heap is busy until then
+static gp_snap gp_close(void) {
+    atomic_store(&g_gt_on, 0); int ngt = atomic_load(&g_gt_n); if (ngt > GT_MAX) ngt = GT_MAX;
+    gp_snap r = {g_gp_n, ngt, malloc(sizeof(gp_lab) * (g_gp_n ? g_gp_n : 1)), malloc(sizeof(gt_ev) * (ngt ? ngt : 1)), g_gp_frame};
+    memcpy(r.lab, g_gp_lab, sizeof(gp_lab) * r.n); memcpy(r.gt, g_gt, sizeof(gt_ev) * ngt);
+    g_gp_state = 2; atomic_store(&g_gp_busy, 1); return r;
+}
 static void gp_periodic_finish(void) {   // on the submit thread, before the next frame's first encoder can touch the heap
     if (!g_gp_every || g_gp_state != 1 || g_gp_frame == atomic_load(&g_cur_frame)) return;
-    int n = g_gp_n; gp_lab *lab = malloc(sizeof *lab * (n ? n : 1)); memcpy(lab, g_gp_lab, sizeof *lab * n); uint64_t frame = g_gp_frame;
-    g_gp_state = 2; atomic_store(&g_gp_busy, 1);
+    gp_snap snap = gp_close();
     static MTLSharedEventListener *listener; if (!listener) listener = [MTLSharedEventListener new];
     // g_fence covers all submissions of the sampled frame. No GPU wait or extra command buffer is needed, including for every:1.
-    [g_ev notifyListener:listener atValue:g_fence block:^(id<MTLSharedEvent> event, uint64_t value) { (void)event; (void)value; gp_report(n, lab, frame); }];
+    [g_ev notifyListener:listener atValue:g_fence block:^(id<MTLSharedEvent> event, uint64_t value) { (void)event; (void)value; gp_report(snap); }];
 }
 static id<MTL4CounterHeap> g_ts_heap; static int g_ts_pend = -1;   // ts_on; pend: the boundary the next encoder writes (ts_stamp)
 static void gp_begin(id e, char kind, MTL4RenderPassDescriptor *d) {   // right after an encoder of the main command buffer is made
@@ -1775,9 +1800,10 @@ static void gp_begin(id e, char kind, MTL4RenderPassDescriptor *d) {   // right 
     if (g_gp_geom < 0) { const char *ge = getenv("DM_NVN_GPUPROF_GEOM"); g_gp_geom = ge && atoi(ge) > 0; if (g_gp_geom) MLOG("DM_NVN_GPUPROF_GEOM: render passes also stamped where their vertex and mesh stages finish"); }
     if (g_gp_geom && !g_gp_gheap) { MTL4CounterHeapDescriptor *hd = [MTL4CounterHeapDescriptor new]; hd.type = MTL4CounterHeapTypeTimestamp; hd.count = GP_MAX; NSError *er = nil;
         g_gp_gheap = [g_dev newCounterHeapWithDescriptor:hd error:&er]; if (!g_gp_gheap) { MLOG("[RED] GPUPROF_GEOM: no counter heap: %s", er.description.UTF8String); g_gp_geom = 0; } }
-    if (!g_gp_state) { g_gp_state = 1; g_gp_n = 0; g_gp_frame = atomic_load(&g_cur_frame); [g_gp_heap invalidateCounterRange:NSMakeRange(0, GP_MAX)]; if (g_gp_geom) [g_gp_gheap invalidateCounterRange:NSMakeRange(0, GP_MAX)]; }
+    if (!g_gp_state) { g_gp_state = 1; g_gp_n = 0; g_gp_frame = atomic_load(&g_cur_frame); [g_gp_heap invalidateCounterRange:NSMakeRange(0, GP_MAX)]; if (g_gp_geom) [g_gp_gheap invalidateCounterRange:NSMakeRange(0, GP_MAX)];
+        atomic_store(&g_gt_n, 0); atomic_store(&g_gt_on, 1); if (g_gt_sub0) gt_put(GT_SUB, g_gt_sub0, g_sub_serial, g_gt_queue | 1ull << 63); }   // the timeline opens with the submission being encoded (its end not reached: bit 63)
     if (2 * g_gp_n + 2 > GP_MAX) return;
-    gp_lab l = {kind, 0, 0, 0, 0, 0, kind == 'R' ? (uint32_t)g_stat_draw : g_gp_copies, g_seg, g_stat_pass, 0, 0, 0, 0}; if (kind != 'R') { l.w = (uint16_t)g_gp_disp; l.h = (uint16_t)g_gp_ubd; }
+    gp_lab l = {kind, 0, 0, 0, 0, 0, kind == 'R' ? (uint32_t)g_stat_draw : g_gp_copies, g_seg, g_stat_pass, 0, 0, 0, 0, (uint32_t)g_sub_serial}; if (kind != 'R') { l.w = (uint16_t)g_gp_disp; l.h = (uint16_t)g_gp_ubd; }
     if (d) { for (int i = 0; i < 8; i++) { MTLRenderPassColorAttachmentDescriptor *c = d.colorAttachments[i]; if (!c.texture) continue;
             if (!l.nc) l.cfmt = (uint16_t)c.texture.pixelFormat; l.nc++; l.w = (uint16_t)MAX(c.texture.width >> c.level, 1); l.h = (uint16_t)MAX(c.texture.height >> c.level, 1); l.loads += c.loadAction == MTLLoadActionLoad; }
         MTLRenderPassDepthAttachmentDescriptor *z = d.depthAttachment;
@@ -1799,8 +1825,10 @@ static void gp_end(id e) {   // right before that encoder ends
     if (g_gp_lab[k].kind == 'R') [(id<MTL4RenderCommandEncoder>)e writeTimestampWithGranularity:MTL4TimestampGranularityRelaxed afterStage:MTLRenderStageFragment intoHeap:g_gp_heap atIndex:2 * k + 1];
     else [(id<MTL4ComputeCommandEncoder>)e writeTimestampWithGranularity:MTL4TimestampGranularityRelaxed intoHeap:g_gp_heap atIndex:2 * k + 1];
 }
-static void gp_report(int n, gp_lab *lab, uint64_t frame) {   // the frame's last command buffer has completed
-    NSData *r = [g_gp_heap resolveCounterRange:NSMakeRange(0, 2 * n)]; const uint64_t *t = r.bytes; if (!t) { free(lab); atomic_store(&g_gp_busy, 0); return; }
+static int gt_cmp(const void *x, const void *y) { const gt_ev *a = x, *b = y; return a->t0 < b->t0 ? -1 : a->t0 > b->t0; }
+static void gp_report(gp_snap snap) {   // the frame's last command buffer has completed
+    int n = snap.n; const gp_lab *lab = snap.lab; uint64_t frame = snap.frame;
+    NSData *r = [g_gp_heap resolveCounterRange:NSMakeRange(0, 2 * n)]; const uint64_t *t = r.bytes; if (!t) { free(snap.lab); free(snap.gt); atomic_store(&g_gp_busy, 0); return; }
     NSData *gr = g_gp_geom > 0 ? [g_gp_gheap resolveCounterRange:NSMakeRange(0, 2 * n)] : nil; const uint64_t *gt = gr.bytes;   // DM_NVN_GPUPROF_GEOM's stamps, two per encoder
     double tick_ns = 1e9 / (double)[g_dev queryTimestampFrequency], tot[2] = {0}, span = 0; uint64_t t0 = 0, t1 = 0, ld = 0, st = 0; int np = 0;
     for (int i = 0; i < n; i++) { uint64_t a = t[2 * i], b = t[2 * i + 1]; if (!a || !b || b < a) continue;
@@ -1810,11 +1838,28 @@ static void gp_report(int n, gp_lab *lab, uint64_t frame) {   // the frame's las
             char geom[32] = "";   // the later of the vertex and mesh stamps that falls inside the pass; none when neither does
             if (gt) { uint64_t g = 0; for (int j = 0; j < 2; j++) { uint64_t v = gt[2 * i + j]; if (v >= a && v <= b && v > g) g = v; }
                 if (g) snprintf(geom, sizeof geom, " geom %.1f", (g - a) * tick_ns / 1e3); }
-            MLOG("[gpuprof] F%llu %4d %8.1f us render pass %llu %ux%u colors %u depth %u loads %u draws %u start %+.1f seg %u load %u KB store %u KB fmt %u/%u%s", (unsigned long long)frame, i, us, (unsigned long long)l->pass, l->w, l->h, l->nc, l->depth, l->loads, l->draws, (a - t[0]) * tick_ns / 1e3, l->seg, l->ld_kb, l->st_kb, l->cfmt, l->dfmt, geom); }
-        else MLOG("[gpuprof] F%llu %4d %8.1f us compute / copy after pass %llu start %+.1f seg %u copies %u (uniform updates %u) dispatches %u", (unsigned long long)frame, i, us, (unsigned long long)l->pass, (a - t[0]) * tick_ns / 1e3, l->seg, l->draws, l->h, l->w); }
+            MLOG("[gpuprof] F%llu %4d %8.1f us render pass %llu %ux%u colors %u depth %u loads %u draws %u start %+.1f seg %u load %u KB store %u KB fmt %u/%u%s sub %u", (unsigned long long)frame, i, us, (unsigned long long)l->pass, l->w, l->h, l->nc, l->depth, l->loads, l->draws, (a - t[0]) * tick_ns / 1e3, l->seg, l->ld_kb, l->st_kb, l->cfmt, l->dfmt, geom, l->sub); }
+        else MLOG("[gpuprof] F%llu %4d %8.1f us compute / copy after pass %llu start %+.1f seg %u copies %u (uniform updates %u) dispatches %u sub %u", (unsigned long long)frame, i, us, (unsigned long long)l->pass, (a - t[0]) * tick_ns / 1e3, l->seg, l->draws, l->h, l->w, l->sub); }
     span = (t1 - t0) * tick_ns / 1e3;
     MLOG("[gpuprof] frame %llu: render %.2f ms, compute / copy %.2f ms over %d encoders (%d render passes, attachments load %.1f MB store %.1f MB), first start to last end %.2f ms", (unsigned long long)frame, tot[0] / 1e3, tot[1] / 1e3, n, np, ld / 1024.0, st / 1024.0, span / 1e3);
-    free(lab); atomic_store(&g_gp_busy, 0);
+    // The CPU timeline (gt_put), on the encoders' clock: microseconds from the frame's first stamp
+    if (snap.ngt && n && t[0]) {
+        mach_timebase_info_data_t tb; mach_timebase_info(&tb); double cpu_ns = (double)tb.numer / tb.denom;
+        #define GT_US(v) (((double)(int64_t)((v) - t[0])) * cpu_ns / 1e3)
+        qsort(snap.gt, (size_t)snap.ngt, sizeof *snap.gt, gt_cmp);
+        static const char *const park[3] = {"no work queued", "an event wait holds queue", "a sync wait holds queue"};
+        for (int i = 0; i < snap.ngt; i++) { const gt_ev *e = &snap.gt[i]; char what[160];
+            switch (e->kind) {
+            case GT_SUB: snprintf(what, sizeof what, "submission %llu (NVN queue %llu) encoded%s", (unsigned long long)e->a, (unsigned long long)(e->b & ~(1ull << 63)), e->b >> 63 ? " (still encoding when the profile began)" : ""); break;
+            case GT_COMMIT: if (e->b == UINT32_MAX) snprintf(what, sizeof what, "commit of an upload batch of submission %llu", (unsigned long long)e->a);
+                else snprintf(what, sizeof what, "commit of submission %llu segment %llu (from before its uniform-copy wait)", (unsigned long long)e->a, (unsigned long long)e->b); break;
+            case GT_WAIT: snprintf(what, sizeof what, "CPU wait for fence %llu: %s", (unsigned long long)e->b, e->a < WS_N ? ws_name[e->a] : "?"); break;
+            default: snprintf(what, sizeof what, "NVN queue worker parked: %s", park[e->a < 3 ? e->a : 0]); if (e->a) snprintf(what + strlen(what), sizeof what - strlen(what), " %llu", (unsigned long long)e->b); break; }
+            MLOG("[gpuprof] F%llu cpu %+.1f..%+.1f us %s", (unsigned long long)frame, GT_US(e->t0), GT_US(e->t1), what); }
+        MLOG("[gpuprof] F%llu cpu timeline: %d events%s; this report at %+.1f us (after the last end %+.1f: the CPU and GPU clocks agree when it is later)", (unsigned long long)frame, snap.ngt, snap.ngt == GT_MAX ? " (the limit: later ones lost)" : "", GT_US(mach_absolute_time()), (t1 - t[0]) * tick_ns / 1e3);
+        #undef GT_US
+    }
+    free(snap.lab); free(snap.gt); atomic_store(&g_gp_busy, 0);
 }
 static inline id<MTL4RenderCommandEncoder> enc_r_begin_pass(MTL4RenderPassDescriptor *d) { g_cm_enc++; cm_enc_mark(2);   // the draw passes (rp_begin_ex); see barrier_game
     id<MTL4RenderCommandEncoder> e = [g_cb renderCommandEncoderWithDescriptor:d]; cm_enc_mark(0);
@@ -2680,8 +2725,7 @@ uint64_t mtl_sub_commit(void) {
     }];
     void arena_commit(uint64_t fence); arena_commit(fence);
     res_commit();
-    if (g_gp_state == 1 && !gp_active()) { int gn = g_gp_n; gp_lab *gl = malloc(sizeof(gp_lab) * (gn ? gn : 1)); memcpy(gl, g_gp_lab, sizeof(gp_lab) * gn); uint64_t gf = g_gp_frame; g_gp_state = 2; atomic_store(&g_gp_busy, 1);
-        [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) { (void)f; gp_report(gn, gl, gf); }]; }
+    if (g_gp_state == 1 && !gp_active()) { gp_snap snap = gp_close(); [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) { (void)f; gp_report(snap); }]; }
     [g_cb endCommandBuffer];
     rec_commit(g_cb, o); g_cbgen++;   // the stores it holds come before any later upload batch (gsb_held)
     if (!lost_test) rec_signal(g_ev, fence);
@@ -2694,6 +2738,7 @@ uint64_t mtl_sub_commit(void) {
     if (rec_on() && g_rb_started) { rec_t *r = rec_put(RO_NOTE, 0); r->a[0] = (uint64_t)(uintptr_t)&g_sub_cmt; r->a[1] = fence; if (drain && sw_on(drain)) rec_drain(); else rec_publish(); }
     else atomic_store(&g_sub_cmt, fence);
     g_alloc_fence[g_alloc_cur] = fence;
+    gt_put(GT_SUB, g_gt_sub0, g_sub_serial, g_gt_queue);
     g_cb = nil;
     atomic_store(&g_sub_on, 0);   // after ++g_fence and the last encoding: a buffer retired from now on waits for this fence at most
     defer_idle_commit();   // a feedback handler that drained since this submission's own commit saw it open
@@ -2716,11 +2761,12 @@ static void post_early(uint64_t fence) {
 }
 static int mtl_wait_at(uint64_t fence, uint64_t timeout_ns, int site) {
     if (g_done >= fence) { if (ws_on()) ws_put(site, 0, 0); return 1; }
-    uint64_t w0 = ws_t0();
+    uint64_t w0 = ws_t0(), gt0 = atomic_load_explicit(&g_gt_on, memory_order_relaxed) ? mach_absolute_time() : 0;   // gt0: DM_NVN_GPUPROF's timeline
     if ((site == WS_SYNC || site == WS_SYNC_NEWEST || site == WS_ACQ) && fast_wake() && g_ev && fence <= g_fence) {   // the game's own wait: wake on the GPU's signal (rec_signal(g_ev, fence) after each submission)
         uint64_t ms = timeout_ns / 1000000ull; if (ms > 3600000ull) ms = 3600000ull;
         if ([g_ev waitUntilSignaledValue:fence timeoutMS:ms]) post_early(fence);
         int ok = g_done >= fence;
+        if (gt0) gt_put(GT_WAIT, gt0, (uint64_t)site, fence);
         if (ws_on()) { ws_put(site, w0, 1); ws_wake(fence); }
         if (ok || timeout_ns < 1000000ull) return ok;
         // The event and feedback waits share a finite budget; a timeout must not buy another full wait.
@@ -2751,6 +2797,7 @@ static int mtl_wait_at(uint64_t fence, uint64_t timeout_ns, int site) {
     }
     int ok = g_done >= fence;
     pthread_mutex_unlock(&g_mu);
+    if (gt0) gt_put(GT_WAIT, gt0, (uint64_t)site, fence);
     if (ws_on()) { ws_put(site, w0, 1); if (site == WS_SYNC_NEWEST || site == WS_SYNC || site == WS_ACQ) ws_wake(fence); }
     return ok;
 }
@@ -7700,6 +7747,7 @@ static void queue_program_preserve(void) {
     S.cprog=index[5]<0?NULL:&q->programs[index[5]]; S.prog=bind_stages(NULL,0); args_dirty_all();
 }
 void mtl_queue_activate(uint64_t serial) {   // caller holds the submission lock
+    g_gt_queue = serial;
     if (g_active_queue && g_active_queue->serial == serial) return;
     if (g_active_queue) { g_active_queue->s = S; g_active_queue->r = R; g_active_queue->rc_skip=g_rc_skip; }
     queue_state *q = g_queue_states;

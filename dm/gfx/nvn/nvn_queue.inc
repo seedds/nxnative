@@ -109,16 +109,18 @@ static void nq_cost_end(nq_cost c) {
     atomic_fetch_add(&g_sub_instr,ins-c.instr); atomic_fetch_add(&g_cum_sub_instr,ins-c.instr);
     atomic_fetch_add(&g_cum_sub_cyc,cyc-c.cycles); atomic_fetch_add(&g_cum_sub_sys_ns,thr_sys_ns()-c.sys);
 }
+void mtl_gp_note_park(uint64_t t0,unsigned why,uint64_t queue);   // nvn_mtl.m: DM_NVN_GPUPROF's CPU timeline
 static void *nq_worker(void *unused) {
     (void)unused; pthread_setname_np("NVN queue replay");
     pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE,0);
     uint64_t frame=UINT64_MAX;
+    uint64_t park0=0,park_q=0; unsigned park_why=0;   // parked since park0 (mach ticks) and why: 0 no work queued, 1 an event wait, 2 a sync wait holds queue park_q (the first held)
     for(;;) {
         pthread_mutex_lock(&nq_mu); nq_queue *q=NULL; nq_node *n=NULL; nq_job *j=NULL;
         for(;;) {
         scan_again:;
             if(nq_test_held) { pthread_cond_wait(&nq_cv,&nq_mu); continue; }
-            int mapped_event_wait=0;
+            int mapped_event_wait=0; unsigned held_why=0; uint64_t held_q=0;
             for(q=nq_queues;q;q=q->next) {
                 j=q->first; if(!j) continue; n=j->first;
                 if(!n) { nq_publish(j->receipt,q->physical); q->first=j->next; if(!q->first) q->last=NULL; nq_put(j->receipt);
@@ -136,14 +138,14 @@ static void *nq_worker(void *unused) {
                         else if(t-n->wait_since>5000000000ull && !n->wait_said) { static _Atomic int said; n->wait_said=1; if(atomic_fetch_add(&said,1)<8)
                             LOG("[RED] queue %llu: an event wait has held it %.1f s: word %p is %#x, waiting for %s %#x; a GPU write of it is %s",(unsigned long long)q->serial,(t-n->wait_since)/1e9,(void *)n->event,
                                 atomic_load_explicit((_Atomic uint32_t *)n->event,memory_order_acquire),n->mode==0?"equal to":"at least",n->value,predecessor>mtl_completed_fence()?"queued, not completed":"not queued"); }
-                        n->waiting=1; mapped_event_wait=1; continue; }
+                        n->waiting=1; mapped_event_wait=1; if(!held_why) { held_why=1; held_q=q->serial; } continue; }
                 }
                 if(n->kind==NQ_SYNC) {
                     if(n->receipt && !n->receipt->published) {
                         uint64_t t=now_ns(); if(!n->wait_since) n->wait_since=t;
                         else if(t-n->wait_since>5000000000ull && !n->wait_said) { static _Atomic int said; n->wait_said=1; if(atomic_fetch_add(&said,1)<8)
                             LOG("[RED] queue %llu: a sync wait has held it %.1f s: the fence it waits for (receipt %p) is not published yet",(unsigned long long)q->serial,(t-n->wait_since)/1e9,(void *)n->receipt); }
-                        continue; }
+                        if(!held_why) { held_why=2; held_q=q->serial; } continue; }
                     // Targets are immutable snapshots. One Metal queue orders an encoded producer before this continuation. A sync not yet fenced when the wait was submitted
                     // (wait_kind 0) is a snapshot of nothing to wait for, and the wait passes. Sparking! ZERO, on one NVN queue, waits on a sync before that queue's own first
                     // fence of it at its first load, which runs on the console; parked here, the fence behind the wait never published and its SyncWait stalled the game (#1808)
@@ -151,11 +153,14 @@ static void *nq_worker(void *unused) {
                 break;
             }
             if(q) break;
+            if(park0 && (held_why!=park_why || held_q!=park_q)) { mtl_gp_note_park(park0,park_why,park_q); park0=0; }
+            if(!park0) { park0=mach_absolute_time(); park_why=held_why; park_q=held_q; }
             // NVN events can also be changed by plain stores through mapped pool memory.
             // A bounded notification poll only while such a word is awaited complements API/callback wakes.
             if(mapped_event_wait) { struct timespec tick={0,1000000}; pthread_cond_timedwait_relative_np(&nq_cv,&nq_mu,&tick); }
             else pthread_cond_wait(&nq_cv,&nq_mu);
         }
+        if(park0) { mtl_gp_note_park(park0,park_why,park_q); park0=0; }
         j->first=n->next; if(!j->first) j->last=NULL;
         // Round-robin ready queues: a continually fed independent producer cannot starve another queue.
         if(q->next) { nq_queue **link=&nq_queues; while(*link!=q) link=&(*link)->next; *link=q->next; nq_queue *tail=nq_queues; while(tail->next) tail=tail->next; tail->next=q; q->next=NULL; }

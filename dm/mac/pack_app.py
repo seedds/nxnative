@@ -5,7 +5,7 @@
 # aoc/<index>/ (DLC), pso/ (an NVN game's pipeline archive made offline for this Mac's GPU, dm/gfx/tools/pso_offline.py: the launcher hands it to the host as DM_PSO_BUNDLE),
 # and dm/ (the rewritten modules and their rewriter tables, nro.tsv, the profile's shader_map.tsv / pso_manifest.tsv / c1_full.tsv / cb_extent.tsv / shader_pairs.tsv / pso_pairs.tsv, font/, env.txt,
 # launcher.json: the game's launcher settings, dm/games/settings.py, which the settings window and Mac front ends show),
-# plus AppIcon.icns from the game's icon (sips, iconutil) and the Info.plist keys the launcher reads (DMTitleID, DMRomfsMarker, DMLanguage).
+# plus AppIcon.icns from the game's icon (app_icon.swift, in macOS's rounded-square shape; iconutil) and the Info.plist keys the launcher reads (DMTitleID, DMRomfsMarker, DMLanguage).
 # The large folders are APFS clones (cp -c) when the app is on the same APFS volume as the build, so they take no space; plain copies otherwise.
 # Signing: the inner host first, then the bundle (codesign --force --sign <identity>; '-' = ad-hoc), without the hardened runtime: the host maps the game's code executable, which the hardened
 # runtime refuses without entitlements, and so the app cannot be notarized. The bundle is stripped of its "._name" files first: on exFAT (an external drive for the build or the app) every
@@ -100,13 +100,35 @@ def build_launcher(out, minos, clang, swiftc, sdk):   # launcher.c's main and th
              '-o', out, *swift_sources(), *objs, '-framework', 'CoreFoundation', '-framework', 'AppKit', '-framework', 'SwiftUI'])
 
 
-def make_icns(jpg, out):   # the game's icon (256x256 JPEG) at every size an .icns holds
+def make_icns(jpg, out, ribbon=None):
+    """The game's icon (a 256x256 JPEG) at every size an .icns holds, in macOS's rounded-square shape (app_icon.swift); ribbon: a corner ribbon's text (a development build's DEV).
+    Where Swift cannot run, the square art resized by sips, as before"""
     with tempfile.TemporaryDirectory(dir=out.parent) as t:
-        s = Path(t) / 'AppIcon.iconset'; s.mkdir()
-        for n in ICON_SIZES:
-            for k, suffix in ((1, ''), (2, '@2x')):
-                run(['sips', '-s', 'format', 'png', '-z', n * k, n * k, jpg, '--out', s / f'icon_{n}x{n}{suffix}.png'])
+        s = Path(t) / 'AppIcon.iconset'
+        try: run(['xcrun', 'swift', HERE / 'app_icon.swift', jpg, s] + (['--ribbon', ribbon] if ribbon else []))
+        except (SystemExit, FileNotFoundError):   # run's failure, or no xcrun
+            shutil.rmtree(s, ignore_errors=True); s.mkdir()
+            for n in ICON_SIZES:
+                for k, suffix in ((1, ''), (2, '@2x')):
+                    run(['sips', '-s', 'format', 'png', '-z', n * k, n * k, jpg, '--out', s / f'icon_{n}x{n}{suffix}.png'])
         run(['iconutil', '-c', 'icns', s, '-o', out])
+
+
+def dev_app(out, host, name, title_id, icon=None):
+    """A Mac-only build's development app (build_ipa_from_nsp.py --platform mac): a bundle around a clone of the host, so the Dock and the app switcher show the game's name and icon,
+    with a DEV ribbon, instead of "dmhost". The run command starts the host inside it with the build's environment; it holds no game files. Returns the host inside the bundle"""
+    out = Path(out); tmp = out.with_name(out.name + '.partial')
+    shutil.rmtree(tmp, ignore_errors=True)
+    exe = tmp / 'Contents/MacOS' / Path(host).name
+    exe.parent.mkdir(parents=True)
+    if subprocess.run(['cp', '-c', host, exe], capture_output=True).returncode: shutil.copy2(host, exe)   # an APFS clone, else a copy
+    if icon: (tmp / 'Contents/Resources').mkdir(); make_icns(Path(icon), tmp / 'Contents/Resources/AppIcon.icns', ribbon='DEV')
+    p = {'CFBundleName': name, 'CFBundleDisplayName': name, 'CFBundleIdentifier': f'org.nxnative.{title_id.lower()}.dev', 'CFBundleExecutable': exe.name,
+         'CFBundlePackageType': 'APPL', 'CFBundleInfoDictionaryVersion': '6.0', 'NSHighResolutionCapable': True, 'LSApplicationCategoryType': 'public.app-category.games', 'LSSupportsGameMode': False}
+    if icon: p['CFBundleIconFile'] = 'AppIcon'
+    (tmp / 'Contents/Info.plist').write_bytes(plistlib.dumps(p))
+    shutil.rmtree(out, ignore_errors=True); tmp.rename(out)   # a running game keeps its own host: the old bundle's files stay open until it quits
+    return out / 'Contents/MacOS' / exe.name
 
 
 def settings_rules(listed):   # DMSettings: what the launcher accepts as each setting's saved choice (docs/frontends.md, Saved choices)
@@ -287,7 +309,7 @@ def pack(a):
         if not codesign: raise SystemExit('codesign is not available')
         codesign = Path(codesign).resolve()
         minos = min_os(a.host)
-        sources = [Path(__file__).resolve(), HERE / 'launcher.c', HERE.parent / 'host/romfs_image.h', HERE.parent / 'host/save_sync.c', HERE.parent / 'host/save_sync.h', HERE.parent / 'tools/romfs.py'] + swift_sources()
+        sources = [Path(__file__).resolve(), HERE / 'launcher.c', HERE.parent / 'host/romfs_image.h', HERE.parent / 'host/save_sync.c', HERE.parent / 'host/save_sync.h', HERE.parent / 'tools/romfs.py', HERE / 'app_icon.swift'] + swift_sources()
         inputs = {'options': vars(a), 'files': [(str(p), p.stat().st_mode, digest(p), os.readlink(p) if p.is_symlink() else None) for p in files + sources],
                   'trees': [(p, inventory(Path(p))) for p in (a.romfs, a.aoc, a.html, *(str(x[1]) for x in programs), *(str(x[3]) for x in programs)) if p and Path(p).exists()],
                   'tools': [[str(c), c.stat().st_mode, c.stat().st_size, c.stat().st_mtime_ns, c.stat().st_ctime_ns, run([c, '--version']).strip()] for c in (clang, swiftc)] + [

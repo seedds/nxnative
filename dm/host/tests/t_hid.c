@@ -43,6 +43,8 @@ void hle_bind_system_event(void *g, int autoclear) { (void)g; (void)autoclear; }
 void hle_signal_system_event(void *g) { g_signalled = g; g_signals++; }
 int hle_signal_bound_system_event(void *g) { g_signalled = g; g_signals++; return 1; }
 void dm_gfx_texlist(int target) { (void)target; }
+// the guest address space (hle_svc.c): the unit test has none, so every stack is a host stack and the big-stack take-overs (the controller applet) run on it directly (hle_bigstack.c)
+int dm_guest_as_contains(uintptr_t a) { (void)a; return 0; }
 void dm_gfx_restop(void) {}
 void dm_gfx_texraw(uint64_t serial, const char *path) { (void)serial; (void)path; }
 void dm_ctl_peek(uint64_t a, int n) { (void)a; (void)n; }

@@ -668,7 +668,7 @@ static Result ctrl_support(int32_t *info, const int8_t *arg) {
     if (info) { info[0] = count; info[1] = (int32_t)connected_id(); }
     return canceled ? RES_CTRL_CANCELED : RES_OK;
 }
-HLE_FORCE("_ZN2nn3hid21ShowControllerSupportEPNS0_27ControllerSupportResultInfoERKNS0_20ControllerSupportArgE", "controller applet; the host reports the connected players (fewer than the minimum: the front end's prompt waits for more, canceled without a window)",
+HLE_FORCE_BIG("_ZN2nn3hid21ShowControllerSupportEPNS0_27ControllerSupportResultInfoERKNS0_20ControllerSupportArgE", "controller applet; the host reports the connected players (fewer than the minimum: the front end's prompt waits for more, canceled without a window)",
           Result, h_hid_ShowCtrl, int32_t *info, const int8_t *arg) {
     DM_APPLET("controller support");
     return ctrl_support(info, arg);
@@ -1095,7 +1095,7 @@ HLE_FORCE("_ZN2nn3hid19GetPlayerLedPatternERKj", "player LED: the Switch's patte
 static void ctrl_color(uint32_t *c) { c[0] = 0xff828282u; c[1] = 0xff0f0f0fu; }
 HLE_FORCE("_ZN2nn3hid22GetNpadControllerColorEPNS0_19NpadControllerColorERKj", "controller color", Result, h_hid_Color, uint32_t *c, const uint32_t *id) { (void)id; ctrl_color(c); return RES_OK; }
 HLE_FORCE("_ZN2nn3hid22GetNpadControllerColorEPNS0_19NpadControllerColorES2_RKj", "left and right Joy-Con colors", Result, h_hid_Color2, uint32_t *l, uint32_t *r, const uint32_t *id) { (void)id; ctrl_color(l); ctrl_color(r); return RES_OK; }
-HLE_FORCE("_ZN2nn3hid21ShowControllerSupportERKNS0_20ControllerSupportArgE", "controller applet (no result wanted); the host answers as the overload above", Result, h_hid_ShowCtrl0, const int8_t *arg) { DM_APPLET("controller support"); return ctrl_support(NULL, arg); }
+HLE_FORCE_BIG("_ZN2nn3hid21ShowControllerSupportERKNS0_20ControllerSupportArgE", "controller applet (no result wanted); the host answers as the overload above", Result, h_hid_ShowCtrl0, const int8_t *arg) { DM_APPLET("controller support"); return ctrl_support(NULL, arg); }
 HLE_FORCE("_ZN2nn3hid24ShowControllerStrapGuideEv", "strap guide applet; not shown by the host", Result, h_hid_Strap, void) { DM_APPLET("controller strap guide"); return RES_OK; }
 HLE_FORCE("_ZN2nn3hid24ShowControllerStrapGuideERKNS0_13StrapGuideArgE", "strap guide applet with its argument (SDK 22); not shown by the host", Result, h_hid_StrapArg, const void *arg) { DM_APPLET("controller strap guide"); (void)arg; return RES_OK; }
 HLE_FORCE("_ZN2nn3hid28ShowControllerFirmwareUpdateERKNS0_27ControllerFirmwareUpdateArgE", "controller firmware update applet; not shown by the host", Result, h_hid_FwUpd, const void *arg) { DM_APPLET("controller firmware update"); (void)arg; return RES_OK; }

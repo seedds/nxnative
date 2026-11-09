@@ -277,6 +277,14 @@ Most service calls can be found before they crash, before the first boot or the 
 
 ## Input
 
+### Controller-specific prompt overlays
+
+- **Symptom:** a PlayStation or Xbox pad works by position, but the game's on-screen prompts still show Nintendo's letters.
+- **Cause:** the input mapping changes the buttons the guest reads, not the glyphs and textures the game draws. Those resources and their paths are game-specific.
+- **Fix:** the Mac front end selects a separately installed `Mods/ButtonPrompts-<family>/romfs/` beside `DM_SAVE`, before starting the guest. `pad_apple.h` identifies DualSense / DualShock 4 and Xbox through Apple's product-category constants. `DM_BUTTON_PROMPTS` chooses `auto`, `switch`, `playstation`, `xbox` or `steamdeck`; an explicit `DM_ROMFS_OVERLAY` wins, including an empty value. Unknown controllers and missing packs keep the game's files. Selection is fixed for the run, because the game may cache its resources. The mechanism supplies no game files, artwork or downloads and changes no input mappings. [Installation](../playing.md#button-prompts-mac).
+- **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md): its separately installed PlayStation font and layout replacements. Mac gameplay validation is recorded in the game note.
+- **Check:** `t_button_prompts` uses temporary pack directories to check overrides, missing or invalid packs and bounded paths; `t_pad_apple` checks Apple's controller categories as well as the existing physical button mapping.
+
 ### Controller disconnect between style and player lookup
 
 - **Symptom:** clang reports a negative shift in `fill` or `vib_targets` (`hle_hid.c`).

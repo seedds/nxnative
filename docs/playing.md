@@ -50,6 +50,14 @@ With [Press a button to join](settings.md#press-a-button-to-join) on in the sett
 
 To quit with a controller, hold its Home button (the logo button on an Xbox or PlayStation controller) for 2 seconds, then press A to quit or B to go back to the game. Quitting this way is the same as ⌘Q: progress the game has not saved is lost. If holding Home opens the Games app instead, macOS keeps the Home button for itself: its controller settings for the Home button decide whether apps may use it. `DM_HOME_QUIT=0` in `env.txt` turns the hold off.
 
+### Button prompts (Mac)
+
+Connect the controller before starting the game. With a compatible prompt pack installed, the Mac selects PlayStation icons for a DualSense or DualShock 4, or Xbox icons for an Xbox controller. It uses player 1's controller; with **Press a button to join** or merged controllers, it uses the first controller already listed at launch. Unknown controllers and the keyboard keep the game's icons. Selection happens once at launch: reconnecting or changing controllers needs a restart because games cache their fonts and textures. With mixed controller families, choose a style by hand.
+
+Packs are game-specific RomFS replacements, supplied separately. Put a pack's `ButtonPrompts-PlayStation/romfs/` or `ButtonPrompts-Xbox/romfs/` under `~/Library/Application Support/nxnative/<title ID>/Mods/`, with the replacement paths inside `romfs`. For example, [Ocarina of Time's prompt packs](https://github.com/exgde/oot-switch2-button-prompts) supply its icon font and layout textures. The host selects the installed folder; it does not download or redistribute any pack. A missing pack leaves the game unchanged.
+
+`DM_BUTTON_PROMPTS=playstation`, `xbox`, `steamdeck` or `switch` in the game's `env.txt` chooses by hand; `auto` is the default. Steam Deck uses `ButtonPrompts-SteamDeck/romfs/` and is selected only by hand. An explicit `DM_ROMFS_OVERLAY`, including an empty value, takes precedence over this selection. No shader rebuild is needed to add or change a pack. On iOS, use the existing `DM_ROMFS_OVERLAY` instead; automatic selection here is Mac-only.
+
 ### Switch 2 controllers (Mac)
 
 Joy-Con 2 and the Pro Controller 2 do not appear in macOS's Bluetooth settings: they speak Nintendo's own Bluetooth LE protocol. Turn on **Switch 2 controllers** in the game's settings window ([Switch 2 controllers](settings.md#switch-2-controllers)), then:

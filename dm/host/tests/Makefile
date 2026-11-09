@@ -62,6 +62,7 @@ run: $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_to
 	$(B)/t_motion
 	$(B)/t_motion_apple
 	$(B)/t_pad_apple
+	$(B)/t_button_prompts
 	$(B)/t_home_quit
 	$(B)/t_home_quit_mac
 	$(B)/t_ctrl_prompt
@@ -229,8 +230,11 @@ run: $(B)/t_motion_apple
 $(B)/t_motion_apple: t_motion_apple.m ../motion_apple.h ../dm_input.h | $(B)
 	$(CLANG) -O1 -g -fobjc-arc -Wall -Werror -I.. -o $@ t_motion_apple.m -framework Foundation -framework GameController
 run: $(B)/t_pad_apple
-$(B)/t_pad_apple: t_pad_apple.m ../pad_apple.h ../dm_input.h | $(B)
+$(B)/t_pad_apple: t_pad_apple.m ../pad_apple.h ../dm_input.h ../button_prompts.h | $(B)
 	$(CLANG) -O1 -g -fobjc-arc -Wall -Werror -I.. -o $@ t_pad_apple.m -framework Foundation -framework GameController
+run: $(B)/t_button_prompts
+$(B)/t_button_prompts: t_button_prompts.c ../button_prompts.h | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -I.. -o $@ t_button_prompts.c
 run: $(B)/t_home_quit $(B)/t_home_quit_mac
 $(B)/t_home_quit: t_home_quit.c ../home_quit.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -I.. -o $@ t_home_quit.c

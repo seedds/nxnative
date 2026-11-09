@@ -39,5 +39,14 @@ int main(void) { @autoreleasepool {
     }
     TestPad *g = [TestPad new];   // nothing pressed, buttons nil: none
     assert(dm_pad_face((GCExtendedGamepad *)(id)g) == 0);
+    TestController *c = [TestController new];
+    for (NSString *category in @[GCProductCategoryDualSense, GCProductCategoryDualShock4]) {
+        c.productCategory = category; assert(dm_pad_prompt_style((GCController *)(id)c) == DM_PROMPTS_PLAYSTATION);
+    }
+    c.productCategory = GCProductCategoryXboxOne; assert(dm_pad_prompt_style((GCController *)(id)c) == DM_PROMPTS_XBOX);
+    for (NSString *category in @[@"Switch Pro Controller", @"Nintendo Switch Joy-Con (L/R)", @"HID"]) {
+        c.productCategory = category; assert(dm_pad_prompt_style((GCController *)(id)c) == DM_PROMPTS_SWITCH);
+    }
+    assert(dm_pad_prompt_style(nil) == DM_PROMPTS_SWITCH);
     printf("t_pad_apple OK\n");
 } return 0; }

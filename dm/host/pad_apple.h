@@ -8,6 +8,15 @@
 #import <GameController/GameController.h>
 #include <stdint.h>
 #include "dm_input.h"
+#include "button_prompts.h"
+
+// The family of the controller's printed buttons, independent of the Switch input mapping below.
+static inline dm_prompt_style dm_pad_prompt_style(GCController *c) {
+    NSString *k = c.productCategory;
+    if ([k isEqualToString:GCProductCategoryDualSense] || [k isEqualToString:GCProductCategoryDualShock4]) return DM_PROMPTS_PLAYSTATION;
+    if ([k isEqualToString:GCProductCategoryXboxOne]) return DM_PROMPTS_XBOX;
+    return DM_PROMPTS_SWITCH;
+}
 
 static inline int dm_pad_labelled(GCController *c) {
     NSString *k = c.productCategory;

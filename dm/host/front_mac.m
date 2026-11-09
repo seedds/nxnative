@@ -608,6 +608,38 @@ static void pads_start(void) {
     dm_switch2_start(&s2front);
 }
 
+static GCController *button_prompts_controller(void) {
+    GCController *c = g_held[0];
+    if (!c && !g_slots.owner[0])   // a raw HID pad, keyboard or Switch 2 pad holding player 1 must not pick player 2's icons
+        for (GCController *candidate in GCController.controllers) if (candidate.extendedGamepad) { c = candidate; break; }
+    return c;
+}
+// Font/texture resources may be cached by the game, so choose once before its thread starts, never on hot-plug.
+static void button_prompts_start(void) {
+    if (getenv("DM_ROMFS_OVERLAY")) return;
+    const char *choice = getenv("DM_BUTTON_PROMPTS"); char overlay[1024];
+    GCController *c = button_prompts_controller();
+    if ((!choice || !*choice || !strcmp(choice, "auto")) && !c && !g_slots.owner[0]) {
+        // GameController delivers already-connected pads asynchronously, after its first query. Pump those notifications
+        // only when a pack could be selected; without a pack, or with an explicit choice, startup never waits for a pad.
+        char ps[1024], xb[1024]; const char *save = getenv("DM_SAVE");
+        dm_prompt_overlay("playstation", DM_PROMPTS_SWITCH, NULL, save, ps, sizeof ps);
+        dm_prompt_overlay("xbox", DM_PROMPTS_SWITCH, NULL, save, xb, sizeof xb);
+        if (ps[0] || xb[0]) {
+            NSDate *until = [NSDate dateWithTimeIntervalSinceNow:0.5];
+            while (!(c = button_prompts_controller()) && !g_slots.owner[0] && until.timeIntervalSinceNow > 0)
+                [NSRunLoop.currentRunLoop runMode:NSDefaultRunLoopMode beforeDate:until];
+        }
+    }
+    dm_prompt_style style = dm_prompt_overlay(choice, dm_pad_prompt_style(c), getenv("DM_ROMFS_OVERLAY"), getenv("DM_SAVE"), overlay, sizeof overlay);
+    if (style == DM_PROMPTS_INVALID) LOG("button prompts: unknown DM_BUTTON_PROMPTS=%s; keeping the game's icons", choice);
+    else if (overlay[0]) {
+        if (setenv("DM_ROMFS_OVERLAY", overlay, 1)) LOG("button prompts: cannot select %s", overlay);
+        else LOG("button prompts: %s, user-installed overlay %s (selected at launch)", dm_prompt_name(style), overlay);
+    } else if (choice && strcmp(choice, "auto") && style != DM_PROMPTS_SWITCH)
+        LOG("button prompts: no installed %s pack beside DM_SAVE; keeping the game's icons", dm_prompt_name(style));
+}
+
 // Mouse as a single-point touchscreen (front.h dm_touch_set): left button down / drag = finger 0, release = lifted. The content view takes the clicks,
 // not a window-wide event monitor, so clicks on the title bar, the window buttons and the resize edges still reach AppKit.
 // The picture's width / height (front.h front_picture_shape; 16:9 until the first present), which the present fits into the view
@@ -1504,7 +1536,7 @@ static NSArray<NSURL *> *found_cheat_files(NSString *build) {
 void front_run(void (*guest)(void)) {
     // A game: tell macOS its work is latency-critical, so the system does not trade its frame time for power while the frame rate is capped
     static id activity; activity = [[NSProcessInfo processInfo] beginActivityWithOptions:NSActivityUserInitiated | NSActivityLatencyCritical reason:@"game"];
-    if (!getenv("DM_WINDOW")) { guest(); return; }
+    if (!getenv("DM_WINDOW")) { button_prompts_start(); guest(); return; }
     @autoreleasepool {
         [NSApplication sharedApplication];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
@@ -1591,6 +1623,7 @@ void front_run(void (*guest)(void)) {
                 if (conn) hq_log_setting(); }];
         dm_haptics_apple_init();
         pads_start();
+        button_prompts_start();
         [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown | NSEventMaskKeyUp handler:^NSEvent *(NSEvent *e) {
             if (e.window != win) return e;   // Only swallow keys for the game window; other windows such as the software keyboard input box receive typing as usual
             if (e.type == NSEventTypeKeyDown && (e.modifierFlags & NSEventModifierFlagCommand)) return e;   // ⌘ shortcuts go to the menu; a key released while ⌘ is held still reaches the game, or it would stay pressed

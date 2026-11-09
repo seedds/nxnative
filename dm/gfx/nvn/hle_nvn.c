@@ -26,9 +26,21 @@
 #include <TargetConditionals.h>
 #include <unistd.h>
 #include <sys/mman.h>
+#include <sys/sysctl.h>
 #include <errno.h>
 #if TARGET_OS_OSX
-#define DM_MEM_CAP_DEFAULT_GB 24
+static inline long dm_host_mem_cap_gb(void) {
+    uint64_t mem = 0; size_t len = sizeof mem;
+    if (sysctlbyname("hw.memsize", &mem, &len, NULL, 0) == 0 && mem > 0) {
+        long gb = (long)(mem >> 30);
+        if (gb >= 64) return gb - 16;   // 64 GB Mac -> 48 GB; 128 GB -> 112 GB
+        if (gb >= 36) return gb - 8;    // 36-48 GB Mac -> 28-40 GB
+        if (gb >= 16) return gb - 4;    // 16-24 GB Mac -> 12-20 GB
+        return (gb * 3) / 4;
+    }
+    return 24;
+}
+#define DM_MEM_CAP_DEFAULT_GB dm_host_mem_cap_gb()
 #else
 #define DM_MEM_CAP_DEFAULT_GB 0
 #endif

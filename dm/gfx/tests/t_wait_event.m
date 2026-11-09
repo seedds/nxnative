@@ -187,6 +187,7 @@ static void receipt_wait_only(int command_wait) {
     *source=before;
     NVNsync produced,consumed; P(nvnSyncInitialize)(&produced,&device); P(nvnSyncInitialize)(&consumed,&device);
     id<MTLSharedEvent> gate=[g_dev newSharedEvent];
+    if (!gate) abort();
     pthread_mutex_lock(&g_sub_mu); rec_drain(); [g_q4 waitForEvent:gate value:1]; pthread_mutex_unlock(&g_sub_mu);
     begin_cmd(1); uint32_t payload=after; P(nvnCommandBufferUpdateUniformBuffer)(&commands[1],source_addr,4,0,4,&payload);
     job producer,waiter; enqueue(&producer,&queues[1],P(nvnCommandBufferEndRecording)(&commands[1])); int pr=returned(&producer,250000000ull);
@@ -214,6 +215,7 @@ static void event_stale_gpu_reset(void) {
     printf("CASE queued GPU reset precedes equality evaluation\n");
     *source=before; *result=sentinel; P(nvnEventSignal)(&event,NVN_EVENT_SIGNAL_MODE_WRITE,1);
     id<MTLSharedEvent> gate=[g_dev newSharedEvent];
+    if (!gate) abort();
     pthread_mutex_lock(&g_sub_mu); pthread_mutex_lock(&g_res_mu); [g_q4 waitForEvent:gate value:1]; pthread_mutex_unlock(&g_res_mu); pthread_mutex_unlock(&g_sub_mu);
     NVNsync reset,consumed; P(nvnSyncInitialize)(&reset,&device); P(nvnSyncInitialize)(&consumed,&device);
     begin_cmd(0);
@@ -241,6 +243,7 @@ static void event_queued_write(int mode) {
     printf("CASE wait on an in-flight %s signal\n",mode==NVN_EVENT_SIGNAL_MODE_WRITE?"WRITE":"ADD");
     *source=before; *result=sentinel; P(nvnEventSignal)(&event,NVN_EVENT_SIGNAL_MODE_WRITE,0);
     id<MTLSharedEvent> gate=[g_dev newSharedEvent];
+    if (!gate) abort();
     pthread_mutex_lock(&g_sub_mu); pthread_mutex_lock(&g_res_mu); [g_q4 waitForEvent:gate value:1]; pthread_mutex_unlock(&g_res_mu); pthread_mutex_unlock(&g_sub_mu);
     NVNsync produced,consumed; P(nvnSyncInitialize)(&produced,&device); P(nvnSyncInitialize)(&consumed,&device);
     begin_cmd(1); uint32_t payload=after;
@@ -302,7 +305,7 @@ static void event_mirror_publication(void) {
     atomic_store(&event_test_storage,0); P(nvnSyncFinalize)(&fence); P(nvnTextureFinalize)(&texture);
 }
 int main(void) { @autoreleasepool {
-    setbuf(stdout,NULL); setenv("DM_PSO_PREPARE","0",1);
+    if (setvbuf(stdout, NULL, _IONBF, 0)) abort(); setenv("DM_PSO_PREPARE","0",1);
     mtl_init();
     NVNdeviceBuilder db={0}; P(nvnDeviceBuilderSetDefaults)(&db); CHECK(P(nvnDeviceInitialize)(&device,&db),"device initialized");
     for(int i=0;i<2;i++) { NVNqueueBuilder qb={0}; P(nvnQueueBuilderSetDefaults)(&qb); P(nvnQueueBuilderSetDevice)(&qb,&device); CHECK(P(nvnQueueInitialize)(&queues[i],&qb),"NVN queue initialized"); }

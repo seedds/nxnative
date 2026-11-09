@@ -279,7 +279,7 @@ static void tile_case(const char *dir) {
     CHECK(g_enc == first && g_fb_n == 0 && g_fb_count == copies + 1 && g_fb_tseq == g_draw_seq && g_fb_tfn && g_fb_tile_draws == tiles + 1 && g_fb_tdesc.fbmask == 1 && g_fb_tdesc.fx[0] == 0,
           "after a barrier the draw reads the tile: no snapshot, the pass stays open");
     {   // bf_fn's numeric memo: the same shader, redirections, mask and map give the function the draw got; another mask is another specialization, not the remembered one
-        int fx[32] = {0}; for (int i = 0; i < 32; i++) fx[i] = g_fb_tdesc.fx[i]; uint8_t lm[8]; memcpy(lm, g_fb_tlmap, 8);
+        int fx[32] = {0}; for (int i = 0; i < 32; i++) fx[i] = g_fb_tdesc.fx[i]; uint8_t lm[8]; memcpy(lm, g_fb_tlmap, 8); // NOLINT(bugprone-signed-char-misuse): these numeric int8_t redirects include the sentinel -1
         id<MTLFunction> a = bf_fn(fs, fx, g_fb_tdesc.fbmask, lm), b = bf_fn(fs, fx, g_fb_tdesc.fbmask, lm), c = bf_fn(fs, fx, (uint8_t)(g_fb_tdesc.fbmask | 2), lm);
         CHECK(a && a == g_fb_tfn && b == a && c != a, "the readable-tile function is remembered by its numbers, and a different attachment mask is not taken for it");
     }

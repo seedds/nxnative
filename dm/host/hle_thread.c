@@ -275,7 +275,7 @@ static int64_t block(thr_t *t, int kind, int64_t ns) {
     if (ns == 0) { wait_unlink(t); t->wkind = 0; return R_TIMEOUT; }
     hand_leave(t);
     struct timespec dl;
-    int det_wait = ns > 0 && dm_detclock_enabled();
+    int det_wait = dm_detclock_waits_guest(ns);   // a wait shorter than one step is a poll, on the wall clock
     uint64_t guest_deadline = det_wait ? guest_ns() + (uint64_t)ns : 0;
     if (ns > 0 && !det_wait) { clock_gettime(CLOCK_REALTIME, &dl); dl.tv_sec += ns / 1000000000; dl.tv_nsec += ns % 1000000000;
                   if (dl.tv_nsec >= 1000000000) { dl.tv_sec++; dl.tv_nsec -= 1000000000; } }
@@ -984,7 +984,7 @@ static void sleep_precise(uint64_t dl) {
 // call which blocks on hardware (hle_net.c: Poll / Select with nothing to wait on)
 void dm_guest_sleep_ns(int64_t ns) {
     if (ns <= 0) return;
-    if (dm_detclock_enabled()) {
+    if (dm_detclock_waits_guest(ns)) {   // shorter sleeps are polls: on time, below
         uint64_t deadline = guest_ns() + (uint64_t)ns;
         while (guest_ns() < deadline) { struct timespec ts = {0, 1000000}; nanosleep(&ts, 0); }
         return;
@@ -1052,7 +1052,7 @@ static int svc_thread_impl(int num, uint64_t *regs) {
         // A sleep, and YieldToAnyThread (-2), which takes the thread off its core so that lower-priority threads run there, end its part in a handoff;
         // the other yields (0, -1) pass the core only to threads of its own priority or higher
         if (ns > 0 || ns == -2) { thr_t *me = pthread_getspecific(g_keythr); if (me && me->nhand) { pthread_mutex_lock(&G); hand_leave(me); pthread_mutex_unlock(&G); } }
-        if ((ns > 0 && dm_detclock_enabled()) || ns >= 20000) dm_guest_sleep_ns(ns);
+        if (dm_detclock_waits_guest(ns) || ns >= 20000) dm_guest_sleep_ns(ns);
         // Yield (0 / -1 / -2), and sleeps shorter than 20 µs, which sleep_precise would return from at once: Super Mario Galaxy's Hagi polls with SleepThread(100 ns) (main+0x517c),
         // which kept a core at 100% (1.4 billion calls in 200 s); as yields they get the back-off below.
         // Count and time of the main thread's yields are recorded: a render task graph's "wait for everything to finish" is often pure polling + yield; measure how much of a frame it takes

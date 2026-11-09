@@ -72,6 +72,12 @@ int main(void) {
         CHECK("deterministic projection uses the current guest frame", guest_ns_at_host_time(host) == deterministic);
         dm_guest_frame_tick();
         CHECK("deterministic projection advances by the configured step", guest_ns_at_host_time(host) == deterministic + 1000000);
+        dm_guest_frame_tick_n(2);
+        CHECK("a present of two vsyncs advances two steps (Mario Kart World's interval 2 pacing)", guest_ns() == deterministic + 3000000);
+        dm_guest_frame_tick_n(0);
+        CHECK("an interval below one counts as one vsync", guest_ns() == deterministic + 4000000);
+        CHECK("a wait shorter than one step is a poll on the wall clock (a job system's sleep)", !dm_detclock_waits_guest(999999) && !dm_detclock_waits_guest(0));
+        CHECK("a wait of a step or more waits on the guest clock", dm_detclock_waits_guest(1000000) && dm_detclock_waits_guest(33333333));
     }
     printf("counter clock: %u checks, %u failed\n", checks, failures);
     return failures != 0;

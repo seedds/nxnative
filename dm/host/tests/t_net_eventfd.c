@@ -9,6 +9,7 @@ void dm_guest_sleep_ns(int64_t ns) { struct timespec ts = {ns / 1000000000, ns %
 void dm_guest_cond_wait_ns(pthread_cond_t *c, pthread_mutex_t *m, int64_t ns) { struct timespec ts = {ns / 1000000000, ns % 1000000000}; pthread_cond_timedwait_relative_np(c, m, &ts); }
 uint64_t guest_ns(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec; }
 int dm_detclock_enabled(void) { return 0; }
+int dm_detclock_waits_guest(int64_t ns) { (void)ns; return 0; }
 
 static void *writer(void *fd) { dm_guest_sleep_ns(20000000); assert(h_sk_EventFdWrite((int)(intptr_t)fd, 1) == 0); return NULL; }
 static void *closer(void *fd) { dm_guest_sleep_ns(20000000); assert(h_sk_Close((int)(intptr_t)fd) == 0); return NULL; }

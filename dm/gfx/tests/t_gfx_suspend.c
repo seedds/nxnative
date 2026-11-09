@@ -36,7 +36,7 @@ module_t *g_mod; int g_nmod;
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 void svc_thread_dump(void) {}
-uint64_t now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000ull + t.tv_nsec; }
+uint64_t now_ns(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }   // the host's clock (hle_os.c: Mach absolute time), which Metal's timestamps are on
 
 static dispatch_semaphore_t preparing, second_waiting, finish_prepare, prepared, suspended, returned, committed;
 static __thread int second_submit;

@@ -1,5 +1,5 @@
 # The Legend of Zelda: Ocarina of Time (0400486024DEC000): the rewriter's patches of this game's own code. dm/tools/patch_nso.py loads every profile's patches.py;
-# MATCH_FRAME_STEP as described there ("Registered patches"). Patches of Nintendo SDK module builds are in dm/tools/sdk_patches.py
+# MATCH_FRAME_STEP and MATCH_CUTS as described there ("Registered patches"). Patches of Nintendo SDK module builds are in dm/tools/sdk_patches.py
 from nso_asm import ADRP, B
 
 # The game's frame ratio. Once a frame the function at main+0x6e6be0 (v131072) divides its base rate (60.0, or 30.0 while bit 0 of [x21+0x24f] is set) by the int frame rate at
@@ -77,7 +77,25 @@ MATCH_FRAME_STEP = {'main': [
                 'dynamic resolution update': {'size': 0xb24, 'fingerprints': ['5a423697838976baf286cffa5e2ceef0d4e037abbcd9d371e90e9e702d61b3d4']}}},   # main+0x805aa0
 ]}
 
+# Movie pictures. The movies are AV1 at 60 pictures a second (Event/Movie/*.webm, no sound track: the opening's Dm_Kokiri_0000 is 9,254 pictures, 154.2 s). The player's update
+# (main+0x3b5ca60, v131072) adds the time object's step (+0x18 × 60, the frame ratio) to a remainder and advances that many picture times, at most the player's limit (+0x20):
+# main+0x3b5cb20. Its queue (main+0x3b61ea0) pops that many decoded pictures and shows the last, so the player can skip. The limit is 1 + (the creation argument >= 2)
+# (main+0x3b5d068 / +0x3b5d084), and the game passes 1 (main+0x3b5c55c): one picture a calc at most, right at 60 calcs a second and nowhere else. Below 60 fps the movie fell
+# behind its sound, which the game's audio plays on its own: on an iPhone at 26-31 ms a frame the opening's 9,254 pictures took 262 s (35 a second), and at a 2-vsync hold a
+# movie plays at half speed (issue #1922; the "half-speed cutscenes" of PR #1996, which a frame ratio cannot mend: the ratio was already 2 a frame there). The cut makes the
+# limit 2, the player's own value for an argument of 2 or more (its buffers follow it, +0x50), so a movie keeps its time down to 30 fps.
+#   main+0x3b5cec0, 828 bytes: cinc w8,w28,ge → add w8,w28,#1 at +0x1c4 (w28 = 1; the flags of cmp w27,#2 are not read again)
+movie = 'movie pictures: up to 2 a calc'
+MATCH_CUTS = {'main': [
+    {'name': movie, 'size': 828, 'fingerprints': ['f61ad468b6b4e1d574fe8678f5a12dfc60e1aab71be7375142a4b48b0d73ce19'],
+     'cuts': [(452, '88b79c1a', '88070011', movie + ' (as v131072 main+0x3b5d084)')]},
+]}
+
 BINDING = [
+    {'what': movie, 'now': 'game', 'goal': 'game', 'purpose': 'frame rate',
+     'why': "the game's own movie player takes one picture a calc at most; function-matched (MATCH_CUTS) on any build that keeps the player's constructor",
+     'checked': 'v131072 main: one function with this fingerprint; the limit, its two readers, the update that clamps to it and the queue that skips read by disassembly (2026-11-09); '
+                'the opening movie timed on an iPhone before the cut (9,254 pictures in 262 s for 154 s)'},
     {'what': 'frame ratio from the host\'s step', 'now': 'game', 'goal': 'game', 'purpose': 'frame rate',
      'why': "the game's own frame-ratio division, found by its function's fingerprint on any build that keeps the function",
      'checked': 'v131072 main: one function with this fingerprint, the site and its free registers read by disassembly (2026-11-08)'},

@@ -18,6 +18,12 @@
 // rise set k to kmin with no grace, so three frames late while the clock rose stepped up again, with cref dropped at the cap change and a GPU reference taken at the 30 fps
 // cap: neither the fit trial (a GPU-bound cost near FSTEP_FIT) nor a probe brought kmin back (t_fstep: the movie and thermal cap cases). A cref kept from before the cap
 // starts a probe only when the cost at the longer hold is within FSTEP_SAME of it, and a failed probe doubles the hold-off as any other does.
+// A one-off frame is a frame no hold absorbs (its cost above kmax) that breaks a run of FSTEP_RUN frames on time, while a step up is possible and no trial runs: a load's
+// first frames, an upload burst, whose frames after it run on clocks still set for the cheap frames before it. It starts FSTEP_GRACE frames whose lateness does not step the
+// hold up (a grace with no trial, never renewed), and the debt pays them back. Not at 120 fps, where no step pays a debt back and a late frame is slow motion. With present
+// snapshots the screen's verdict comes 8 presents late (hle_nvn.c), so the last late frames after one may still step up there. Ocarina of Time after loading a save: before,
+// three late frames among the first scene frames stepped to the one-off frame's cost, hold 3, where the GPU clock stayed low (19-34 ms for 12-14 ms of work) until the
+// GPU-slowed probe 34 frames (about 1.7 s) later.
 #pragma once
 #include <math.h>
 #include <stdint.h>
@@ -29,7 +35,7 @@
 #define FSTEP_DEBT_MAX 15.0   // debt kept at most (0.25 s): the rest of a long stall (a load) is dropped, not replayed
 #define FSTEP_HOLD0 60.0      // vsyncs since the last step up before a trial: 1 s, doubled after each failed trial up to 8 s
 #define FSTEP_HOLD_MAX 480.0
-#define FSTEP_GRACE 30        // a probe's first frames, whose lateness neither fails it nor counts toward a step up (the controller lowered the clock within 10 frames of a step to 30)
+#define FSTEP_GRACE 30        // a probe's first frames, and the frames from a one-off frame, whose lateness neither fails a probe nor counts toward a step up (the controller lowered the clock within 10 frames of a step to 30)
 #define FSTEP_SAME 1.1        // the cost at the longer hold against the cost that held kmin: at most this much is the same scene (BotW at hold 2: 1.0–1.07 times its hold-1 GPU time)
 // The grace is renewed (nvn_fstep.ramp) while the probe's frames keep getting cheaper: a controller that raises the clock slowly is still raising it. macOS raises the GPU clock
 // of a game that misses its deadline at 85–100% GPU occupancy by about 100 MHz a second (Breath of the Wild on an M5 Pro: 338 → 432 MHz over a 33-frame probe, GPU 24.8 → 18.5 ms,
@@ -43,7 +49,7 @@ typedef struct {
     int kmin;                 // the last call's kmin (a lower one takes effect at once)
     double debt;              // real time the game is behind, in vsyncs
     int late_run, fit_run, trial;   // late frames in a row; frames in a row whose cost fits k − 1; frames left of a trial at k − 1 (0 = none)
-    int probe, grace;         // 1: the trial in progress is a probe; 2: a probe held and its run at kmin has not ended yet; frames left of the probe's grace
+    int probe, grace;         // 1: the trial in progress is a probe; 2: a probe held and its run at kmin has not ended yet; frames left of the probe's or the one-off frame's grace
     int ramp;                 // set by the caller (kept): 1 = a probe's grace is renewed while its frames keep getting cheaper (FSTEP_RAMP; the host's DM_FSTEP_PROBE_RAMP)
     double pa, pb; int plate, ptotal;   // the current grace window: the cost of its first and second halves (sums), its late frames; grace frames this probe has taken in all
     double hold, since;       // vsyncs a trial waits for after a step up; vsyncs since the last step up
@@ -56,7 +62,8 @@ typedef struct {
     double ccur; int ck, cn;  // the cost of the frames on time at the longer hold ck (running mean) and their count
     int ckmin;                // the kmin run, crun and cref belong to
     double cref_at[FSTEP_MAX + 1];   // cref of each kmin, kept while another kmin is in force
-    uint64_t late, paid, ups, downs, failed, probes; double dropped;   // statistics for the log
+    int ontime_run;           // frames on time in a row, counted up to FSTEP_RUN (a one-off frame breaks such a run)
+    uint64_t late, paid, ups, downs, failed, probes, oneoffs; double dropped;   // statistics for the log
 } nvn_fstep;
 
 // Whether the cost at the longer hold is the cost that held kmin (a probe without a slowed report)
@@ -74,7 +81,7 @@ static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int km
     if (!s->hold) s->hold = hold0;
     if (fixed > 0) {   // the game's own step: speed is right by construction, nothing to pay back
         s->k = s->step = fixed < FSTEP_MAX ? fixed : FSTEP_MAX;
-        s->debt = 0; s->late_run = s->fit_run = s->trial = s->probe = s->grace = 0; s->run = 0;
+        s->debt = 0; s->late_run = s->fit_run = s->trial = s->probe = s->grace = 0; s->run = 0; s->ontime_run = 0;
         s->kmin = FSTEP_MAX + 1;   // when it ends, k starts again from kmin
         return s->step;
     }
@@ -92,10 +99,15 @@ static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int km
     s->kmin = kmin;
     int scr = s->screen; s->screen = 0;
     int late = scr ? scr == 2 : shown > held + FSTEP_LATE + s->shown_slack || cost > held + FSTEP_LATE, grace = s->grace > 0;
+    // A one-off frame (see the top): its cost above kmax, after FSTEP_RUN frames on time, a step up possible (not with fps_hold off, where kmax is kmin), no trial in
+    // progress (a probe has one), not at 120 fps. Its grace has no trial and is not renewed (the ramp rule below is the probes'). The probe accounting (pa, pb, plate, ptotal)
+    // is not reset for it: the next probe resets it. !grace matters only with screen verdicts, where a frame above kmax can be on time and the run go on
+    if (cost > kmax + FSTEP_LATE && s->ontime_run >= FSTEP_RUN && s->k < kmax && !grace && !s->trial && (s->per_vsync ? s->per_vsync : 1) == 1) { s->grace = FSTEP_GRACE; grace = 1; s->oneoffs++; }
+    s->ontime_run = late ? 0 : s->ontime_run < FSTEP_RUN ? s->ontime_run + 1 : FSTEP_RUN;
     if (grace && !cap_probe) {   // the completed frame at the old cap does not consume the new hold's grace
         if (s->grace > FSTEP_GRACE / 2) s->pa += cost; else s->pb += cost;
         s->plate += late; s->ptotal++;
-        if (!--s->grace && s->ramp && s->plate && s->ptotal + FSTEP_GRACE <= FSTEP_PROBE_MAX && s->pb <= (1 - FSTEP_RAMP) * s->pa) { s->grace = FSTEP_GRACE; s->pa = s->pb = 0; s->plate = 0; }   // still getting cheaper: another window
+        if (!--s->grace && s->ramp && s->probe == 1 && s->plate && s->ptotal + FSTEP_GRACE <= FSTEP_PROBE_MAX && s->pb <= (1 - FSTEP_RAMP) * s->pa) { s->grace = FSTEP_GRACE; s->pa = s->pb = 0; s->plate = 0; }   // still getting cheaper: another window
     }
     if (late) { s->late++; s->late_run = grace ? 0 : s->late_run + 1; s->fit_run = 0; } else s->late_run = 0;
     // The cost of the frames on time (a hitch is not what the scene costs): at kmin, and at the longer hold

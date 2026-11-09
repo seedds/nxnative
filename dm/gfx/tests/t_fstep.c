@@ -360,6 +360,57 @@ int main(void) {
             check(first_len == want[c] && m.s.k == 2 && m.s.failed == 1, b);
         }
     }
+    for (int ramp = 0; ramp <= 1; ramp++) {   // A one-off frame (nvn_fstep.h): no hold absorbs it (cost above kmax), and it breaks a run of frames on time; ramp 1 is the host's default
+        // Ocarina of Time's first scene frames after loading a save (replay, M4 Max, in vsyncs): a loading screen at 0.01, its first frame 9.8 = 164 ms, a 7.2 = 119 ms upload
+        // frame among frames of 1.8-2.1 while the GPU clock left low by the loading screen rises. Before, the three late frames stepped to the one-off frame's cost, hold 3, and the clock
+        // stayed low at 50 ms a frame until a probe 34 frames later
+        static const double burst[] = {9.8, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 2.0, 7.2, 2.1, 1.8, 1.8, 1.7, 1.6, 1.5, 1.4, 1.3, 1.2, 1.1, 1.0, 0.9};
+        sim m = {0}; m.s.ramp = ramp; run(&m, 600, 0.01, 1, 3, 0);
+        int kmax_seen = 1; for (size_t i = 0; i < sizeof burst / sizeof *burst; i++) { run(&m, 1, burst[i], 1, 3, 0); if (m.s.k > kmax_seen) kmax_seen = m.s.k; }
+        run(&m, 600, 0.75, 1, 3, 0); if (m.s.k > kmax_seen) kmax_seen = m.s.k;
+        snprintf(b, sizeof b, "ramp %d: one-off frame after a loading screen, then the clock rises: hold 1 throughout (k max %d, ups %llu, one-off frames %llu)", ramp, kmax_seen, (unsigned long long)m.s.ups, (unsigned long long)m.s.oneoffs);
+        check(kmax_seen == 1 && m.s.ups == 0 && m.s.k == 1 && m.s.oneoffs == 1, b);
+        snprintf(b, sizeof b, "  game time %.1f against real time %.1f (debt %.2f, dropped %.1f)", m.game, m.real, m.s.debt, m.s.dropped);
+        check(m.real - m.game - m.s.debt - m.s.dropped > -1.01 && m.real - m.game - m.s.debt - m.s.dropped < 1.01, b);
+        // The scene after the one-off frame really needs hold 2: it steps up once the grace is over, and the grace is not renewed
+        sim h = {0}; h.s.ramp = ramp; run(&h, 600, 0.01, 1, 3, 0); run(&h, 1, 9.8, 1, 3, 0);
+        int at = -1; for (int i = 0; i < 200 && at < 0; i++) { run(&h, 1, 1.5, 1, 3, 0); if (h.s.k == 2) at = i; }
+        run(&h, 600, 1.5, 1, 3, 0);
+        snprintf(b, sizeof b, "  a scene after the one-off frame that needs hold 2 gets it after one grace (frame %d, k %d, ups %llu)", at, h.s.k, (unsigned long long)h.s.ups);
+        check(at >= 0 && at <= FSTEP_GRACE + 3 && h.s.k == 2 && h.s.ups == 1, b);
+        // Every frame above kmax (a device far too slow): only the first follows a run on time, so the hold still reaches kmax, one grace later at most
+        sim d = {0}; d.s.ramp = ramp; run(&d, 120, 0.5, 1, 3, 0);
+        at = -1; for (int i = 0; i < 200 && at < 0; i++) { run(&d, 1, 4.5, 1, 3, 0); if (d.s.k == 3) at = i; }
+        snprintf(b, sizeof b, "  every frame above kmax: hold 3 within one grace (frame %d, one-off frames %llu)", at, (unsigned long long)d.s.oneoffs);
+        check(at >= 0 && at <= FSTEP_GRACE + 3 && d.s.oneoffs == 1, b);
+        // A borderline scene with a spike every 30 frames, each right after one frame on time: only the first spike breaks a run of FSTEP_RUN on time, so the hold steps up after
+        // one grace (with one after any frame on time, every spike started a new grace and the scene stayed late at hold 1)
+        sim p = {0}; p.s.ramp = ramp; run(&p, 600, 0.5, 1, 3, 0);
+        at = -1; for (int r = 0, i = 0; r < 10; r++) { run(&p, 1, 4.0, 1, 3, 0); if (p.s.k > 1 && at < 0) at = i; i++; for (int j = 0; j < 28; j++, i++) { run(&p, 1, 1.2, 1, 3, 0); if (p.s.k > 1 && at < 0) at = i; } run(&p, 1, 0.5, 1, 3, 0); i++; }
+        snprintf(b, sizeof b, "  spikes every 30 frames, each after a frame on time, in a scene late at hold 1: one one-off frame, a step up within one grace (frame %d, one-off frames %llu)", at, (unsigned long long)p.s.oneoffs);
+        check(at >= 0 && at <= FSTEP_GRACE + 3 && p.s.oneoffs == 1, b);
+    }
+    {   // Where the rule does not apply. 120 fps (per_vsync 2, kmax 2): no step pays a debt back there, so a frame of 2.4 ticks after frames on time steps down to 60 as before
+        sim m = {0}; m.s.per_vsync = 2; run(&m, 120, 0.7, 1, 2, 0); run(&m, 1, 2.4, 1, 2, 0); run(&m, 3, 1.6, 1, 2, 0);
+        snprintf(b, sizeof b, "120 fps: none, a late run still steps down to 60 (k %d, one-off frames %llu)", m.s.k, (unsigned long long)m.s.oneoffs);
+        check(m.s.k == 2 && m.s.oneoffs == 0, b);
+        // fps_hold off (kmax = kmin): the hold cannot step up, so a frame above kmax is not one either (and logs nothing)
+        sim f = {0}; run(&f, 600, 0.5, 1, 1, 0); run(&f, 1, 4.0, 1, 1, 0); run(&f, 60, 1.3, 1, 1, 0);
+        snprintf(b, sizeof b, "  kmax = kmin (fps_hold off): none (k %d, one-off frames %llu)", f.s.k, (unsigned long long)f.s.oneoffs);
+        check(f.s.k == 1 && f.s.oneoffs == 0, b);
+        // A trial at k - 1 in progress: a frame above kmax is not one, and the trial is judged as before
+        sim t = {0}; run(&t, 120, 0.5, 1, 3, 0); run(&t, 30, 1.5, 1, 3, 0); run(&t, 600, 1.5, 1, 3, 0); run(&t, 30, 0.6, 1, 3, 0);
+        int trial = t.s.trial; run(&t, 1, 4.0, 1, 3, 0);
+        snprintf(b, sizeof b, "  a trial in progress: none (trial %d before, one-off frames %llu)", trial, (unsigned long long)t.s.oneoffs);
+        check(trial > 0 && t.s.oneoffs == 0, b);
+        // Present snapshots: the screen shows a costly frame on time, so the run on time goes on; a second one inside the first one's grace starts no grace of its own
+        sim n = {0}; for (int i = 0; i < 600; i++) { n.s.screen = 1; n.next = nvn_fstep_next(&n.s, 1.0, 0.5, 1, 3, 0, 0); }
+        n.s.screen = 1; n.next = nvn_fstep_next(&n.s, 1.0, 4.0, 1, 3, 0, 0);
+        for (int i = 0; i < 5; i++) { n.s.screen = 1; n.next = nvn_fstep_next(&n.s, 1.0, 0.5, 1, 3, 0, 0); }
+        int left = n.s.grace; n.s.screen = 1; n.next = nvn_fstep_next(&n.s, 1.0, 4.0, 1, 3, 0, 0);
+        snprintf(b, sizeof b, "  snapshots: a second costly frame inside the grace does not renew it (one-off frames %llu, grace %d → %d)", (unsigned long long)n.s.oneoffs, left, n.s.grace);
+        check(n.s.oneoffs == 1 && n.s.grace == left - 1, b);
+    }
     printf("== %d checks, %d failed ==\n", checks, fail);
     return fail != 0;
 }

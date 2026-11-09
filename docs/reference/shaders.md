@@ -1990,6 +1990,15 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
   - `t_mesh_first_use`: no first draw is left out.
 - **Open:** the archive path has run only in `t_pso_archive`, not on a game route. On iOS the Metal 4 path, and with it the archive, is off for a profile without `pso_mtl4 on` (Ocarina of Time has none), so there the rows and the system's shader cache are what keep a mesh pipeline. `pso_offline.py` makes no native mesh pipelines for the archive bundled with the app.
 
+### Vertex shaders with layer entry points left out of the prebuild
+
+- **Symptom:** a frame of 200 ms or more the first time an effect appears, although the bundled pipeline archive was trusted and the prewarm finished. With `DM_PSO_WAITLOG=1` the frame shows waits on render pipelines with no pulling entry, 34-74 ms each, for vertex shaders that have no stage inputs.
+- **Cause:** a vertex library can carry layer entry points of its own (`entry_layer` in its reflection, `main0_l`), which alone write `render_target_array_index`; its `main0` writes none. The shader loader already takes the layer from the entry it uses (`layer_out` in `shader_load`). The offline archive (`pso_offline.py`, `writes_layer`) and the device's prebuild (`pre_desc`) instead looked for the layer anywhere in the library and left every pair of such a shader out. A shader with no stage inputs has no stand-in pipeline, so each of those pairs was compiled at its first draw while the frame waited.
+- **Fix:** both take the rule the loader takes: a library with `entry_layer` writes the layer only in those entries, so its `main0` (and `main0_z`) pairs get bases. A library without layer entry points whose code writes the layer is still left out. Shaders are not rebuilt; the archive is. A host with the fix and an archive built before it finds bases the archive lacks, so it trusts it no more and compiles the prebuild on the device in the background.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game), v131072, M6 (macOS 27.2): 2,675 pairs had been left out, so the archive grows from 30,690 bases to 33,365. On the `field-run` bench route from a Hyrule Field save (a camera turn at about 105 s), two runs each: the worst frame was 230-234 ms with 4 waits of over 20 ms per run before, and 39 ms with none after.
+- **Check:** `dm/tools/tests/test_pso_offline.py` (a library with `entry_layer` gets its `main0` base); `t_pso_bundle` (the prebuild gives such a library's `main0` a base, and a library whose `main0` writes the layer none).
+- **Open:** a 39 ms frame at about 117 s on the same route, one pipeline taking 15-20 ms, under the wait log's threshold; not traced.
+
 ### The device's prewarm list unread without a seed list
 
 - **Symptom:** `[RED] pipeline prewarm: seed list does not exist: …/pso_manifest.tsv` at every start, no `pipeline prewarm list …/pso_user.tsv` line, and the same compile stalls every session in places already visited, while `pso_user.tsv` keeps growing; the pipeline archive gains files every start and is never compacted (Donkey Kong Bananza: 88 files, 7 s to open them).

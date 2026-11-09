@@ -109,10 +109,13 @@ class Plan(unittest.TestCase):
         self.shader('fsx', {'entry': 'main1'}, {'_b': [('main0', False)]})
         self.shader('fsp', {'raster': {'primitive_id': 1}}, {'_b': [('main0', False)]})   # reads the primitive ID: no base
         self.shader('mesh', {'entry_z': 'main0_z', 'mesh_stage': {'kind': 'ms'}}, {'_b': vz})   # a mesh shader's pair (for its padding): built at the draw, no base
+        # Layer entry points of its own (dmsh_build.py vs_layer_entry): main0 writes no layer, as the host takes it (shader_load layer_out). Ocarina of Time's effect vertex shaders,
+        # with no stage inputs and so no stand-in, were left out and compiled at their first draw
+        self.shader('layered', {'entry_z': 'main0_z', 'entry_layer': 'main0_l', 'vertex_inputs': []}, {'_b': (vz + [('main0_l', False)], True)})
         pairs = [('pull', 'fs'), ('plain', 'fs'), ('inputs', 'fs'), ('layer', 'fs'), ('other', 'fs'), ('nolib', 'fs'), ('pull', 'fsc'), ('pull', 'fsx'), ('pull', 'gone'), ('pull', 'fs'),
-                 ('plain', 'fsp'), ('mesh', 'fs')]
+                 ('plain', 'fsp'), ('mesh', 'fs'), ('layered', 'fs')]
         bases, rest, left = po.plan(self.d, CHAIN, pairs, False)
-        self.assertEqual(bases, [('pull_bp', 'main0', 'fs_b', 'main0'), ('plain_b', 'main0', 'fs_b', 'main0')])
+        self.assertEqual(bases, [('pull_bp', 'main0', 'fs_b', 'main0'), ('plain_b', 'main0', 'fs_b', 'main0'), ('layered_b', 'main0', 'fs_b', 'main0')])
         self.assertEqual(rest, [('pull', 'fsc')])
         self.assertEqual(left, {'reflection': 2, 'mesh': 1, 'stage inputs': 1, 'library': 1, 'layer': 1, 'primitive ID': 1, 'entry': 1})
         bases, _, _ = po.plan(self.d, CHAIN, pairs[:2], True)   # near = 0: the entry_z entries

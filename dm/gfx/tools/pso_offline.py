@@ -6,7 +6,7 @@
 #   · the vertex shader's pulling library <key>_bp (a vertex shader without stage inputs: its own <key>_b), entry `entry`, or `entry_z` for the near = 0 depth mode, from its reflection
 #     <key>_b.json; the pixel shader's <key>_b, entry `entry` (main0); no vertex descriptor, one sample, every colour attachment unspecialized
 #   · left out as the host leaves them out (to the draws): a reflection of another chain version or none, a vertex shader with stage inputs and no pulling library, a vertex library that
-#     writes the layer (render_target_array_index), a pixel shader that reads the primitive ID (its reflection's raster.primitive_id: the host builds its pipelines whole, since
+#     writes the layer (render_target_array_index) from the entry the pair uses (not one whose library has layer entry points of its own, entry_layer: its main0 writes none), a pixel shader that reads the primitive ID (its reflection's raster.primitive_id: the host builds its pipelines whole, since
 #     through a base every primitive reads 0), a missing library or entry point
 #   · a pair whose functions declare function constants is left to the device (rest_pairs.tsv): the host specializes such functions with an empty set of values, and metal-tt makes
 #     no specialized function from a library (applegpu-nt: "cannot find private metadata"), nor the function unspecialized ("cannot lower module with unresolved function constants")
@@ -140,7 +140,7 @@ def plan(lib_dir, chain, pairs, zero):
         vl, fl = vk + ('_bp' if pull else '_b'), fk + '_b'
         vf, ff = fn(vl), fn(fl)
         if vf is None or ff is None: left['library'] += 1; continue
-        if writes_layer(vl): left['layer'] += 1; continue
+        if writes_layer(vl) and not vj.get('entry_layer'): left['layer'] += 1; continue   # the entry the pair uses writes the layer; a library with layer entry points of its own (entry_layer) writes it in those alone, as the host takes it (shader_load layer_out)
         if ventry not in vf or fentry not in ff: left['entry'] += 1; continue
         if vf[ventry] or ff[fentry]: rest.append((vk, fk)); continue
         b = (vl, ventry, fl, fentry)

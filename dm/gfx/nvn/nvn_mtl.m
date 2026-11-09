@@ -8798,7 +8798,7 @@ static MTL4RenderPipelineDescriptor *pre_desc(NSString *vk, NSString *fk, int ze
     NSError *e = nil;
     if (pre_lib_absent(vk, pull ? @"_bp.metallib" : @"_b.metallib") || pre_lib_absent(fk, @"_b.metallib")) return nil;
     id<MTLLibrary> vl = lib_from_file([NSString stringWithFormat:@"%@/%@%@.metallib", g_msl_dir, vk, pull ? @"_bp" : @"_b"], &e);
-    if (!vl || t_lib_layer) return nil;   // writes the layer: its pipelines take an input primitive class (pso_desc), no pulling pipeline
+    if (!vl || (t_lib_layer && !vj[@"entry_layer"])) return nil;   // the entry writes the layer: its pipelines take an input primitive class (pso_desc), no pulling pipeline. A library with layer entry points of its own (entry_layer) writes it in those alone, as shader_load takes it (layer_out): Ocarina of Time's effect vertex shaders (no stage inputs, so no stand-in) were compiled at their first draw, 34-74 ms each
     id<MTLLibrary> fl = lib_from_file([NSString stringWithFormat:@"%@/%@_b.metallib", g_msl_dir, fk], &e);
     MTL4FunctionDescriptor *vf = pre_fn(vl, ventry), *ff = fl ? pre_fn(fl, fentry) : nil;
     if (!vf || !ff) return nil;

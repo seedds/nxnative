@@ -62,7 +62,9 @@ def base_of(word, text_end, r, t):
     for s in range(t - 4, max(-4, t - 4 * 4096), -4):
         u = word(s)
         if u == RET or (u & 0xFFFFFC1F) == 0xD61F0000: return None                                        # ret, br
-        if (u & 0xFC000000) == 0x14000000 and not s < branch_target(u, s) <= t: return None              # b, but not over an else block
+        if (u & 0xFC000000) == 0x14000000:                                                           # b, but not over an else block
+            target = branch_target(u, s)
+            if target is None or not s < target <= t: return None
         if r < 19 and ((u & 0xFC000000) == 0x94000000 or (u & 0xFFFFFC1F) == 0xD63F0000): return None    # bl, blr: x0-x18 may change
         if not writes(u, r): continue
         if is_adrp(u) and u & 31 == r: break

@@ -25,7 +25,9 @@ static const char *SRC =
 
 int main(int argc, char **argv) { @autoreleasepool {
     if (argc != 2) { fprintf(stderr, "usage: t_zsnap <dir with zsnap.h>\n"); return 2; }
-    NSString *helper = [NSString stringWithContentsOfFile:[@(argv[1]) stringByAppendingPathComponent:@"zsnap.h"] encoding:NSUTF8StringEncoding error:nil];
+    NSString *path = [@(argv[1]) stringByAppendingPathComponent:@"zsnap.h"];
+    if (!path) return 2;
+    NSString *helper = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
     if (!helper) { fprintf(stderr, "no zsnap.h in %s\n", argv[1]); return 2; }
     id<MTLDevice> dev = MTLCreateSystemDefaultDevice(); NSError *e = nil;
     MTLCompileOptions *co = [MTLCompileOptions new]; co.preserveInvariance = YES;   // the chain's -fpreserve-invariance

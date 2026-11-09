@@ -120,7 +120,7 @@ int main(void) { @autoreleasepool {
         EXPECT("compute not in the map: a pipeline", 1, c3 && cps_new(c3->fn, &err) != nil);
         EXPECT("compute with constants, not in the map: built", b0 + 2, g_cps_built);
         EXPECT("compute with constants, not in the map: not from the bundle", a0 + 2, g_cps_arch);
-        dispatch_sync(cps_harvest_q(), ^{});
+        dispatch_sync(arch_harvest_q(), ^{});
         EXPECT("compute not in the map: captured into this device's archive, the one with constants not", n0 + 1, g_arch_new);
     }
     // A separate output forces one base per compiler invocation, then metal-pack merges both for this GPU.

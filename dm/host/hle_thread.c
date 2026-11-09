@@ -1082,19 +1082,27 @@ static int svc_thread_impl(int num, uint64_t *regs) {
         thr_t *t = h_get((uint32_t)regs[0], O_THREAD); int64_t r = 0;
         if (!t) r = R_BAD_HANDLE;
         else if (t == me) r = R_BAD_STATE;
+        // Horizon's KThread::SetActivity takes a thread that is Waiting or Runnable with no request of the same kind pending, and answers InvalidState otherwise: a thread not yet started or
+        // already exited, a second pause, a resume of a thread that is not paused. The host answered success to all of them and, for a pause before StartThread, set `paused` at once: the
+        // thread then ran guest code once started (thread_main waits only for `started`) while the requester believed it stopped (issue #1855)
+        else if (!t->started || t->exited) r = R_BAD_STATE;
         else if (act == 1) {
-            atomic_store(&t->pause_req, 1);
-            int st = atomic_fetch_or(&t->svc_state, 2);
-            if (!t->started || t->exited || (st & 1)) t->paused = 1;
-            uint64_t t0 = now_ns(); int warned = 0;
-            while (!t->paused && !t->exited) {
-                pthread_mutex_unlock(&G); pthread_kill(t->pt, SIGUSR2); pthread_mutex_lock(&G);
-                if (t->paused || t->exited) break;
-                struct timespec dl; clock_gettime(CLOCK_REALTIME, &dl); dl.tv_nsec += 100000; if (dl.tv_nsec >= 1000000000) { dl.tv_sec++; dl.tv_nsec -= 1000000000; }
-                pthread_cond_timedwait(&t->pcv, &G, &dl);
-                if (!warned && now_ns() - t0 > 1000000000ull) { warned = 1; LOG("[RED] thread %#x still not suspended after more than 1 second (stuck in host code?)", t->handle); }
+            if (atomic_load(&t->pause_req)) r = R_BAD_STATE;
+            else {
+                atomic_store(&t->pause_req, 1);
+                int st = atomic_fetch_or(&t->svc_state, 2);
+                if (st & 1) t->paused = 1;
+                uint64_t t0 = now_ns(); int warned = 0;
+                while (!t->paused && !t->exited) {
+                    pthread_mutex_unlock(&G); pthread_kill(t->pt, SIGUSR2); pthread_mutex_lock(&G);
+                    if (t->paused || t->exited) break;
+                    struct timespec dl; clock_gettime(CLOCK_REALTIME, &dl); dl.tv_nsec += 100000; if (dl.tv_nsec >= 1000000000) { dl.tv_sec++; dl.tv_nsec -= 1000000000; }
+                    pthread_cond_timedwait(&t->pcv, &G, &dl);
+                    if (!warned && now_ns() - t0 > 1000000000ull) { warned = 1; LOG("[RED] thread %#x still not suspended after more than 1 second (stuck in host code?)", t->handle); }
+                }
             }
-        } else { atomic_store(&t->pause_req, 0); atomic_fetch_and(&t->svc_state, ~2); t->paused = 0; pthread_cond_broadcast(&t->pcv); }
+        } else if (!atomic_load(&t->pause_req)) r = R_BAD_STATE;
+        else { atomic_store(&t->pause_req, 0); atomic_fetch_and(&t->svc_state, ~2); t->paused = 0; pthread_cond_broadcast(&t->pcv); }
         pthread_mutex_unlock(&G);
         { static int n; if (n++ < 4) LOG("SetThreadActivity %#x → %s (%s)", (uint32_t)regs[0], act ? "pause" : "resume", r ? "failed" : "ok"); }
         regs[0] = (uint64_t)r; return 1;

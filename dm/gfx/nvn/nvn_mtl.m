@@ -2056,8 +2056,14 @@ static void seg_clk_put(seg_clk *c) { if (c && atomic_fetch_sub(&c->refs, 1) == 
 static uint64_t gpu_s_guest_ns(double s) {   // a feedback GPU time (seconds on the mach absolute time base) on the guest clock; 0 when unknown
     uint64_t now = now_ns();
     uint64_t g = guest_ns_at_host_time(now);
-    double age = (double)now - s * 1e9;
-    return s > 0 && age >= 0 && age < (double)g ? g - (uint64_t)age : 0;
+    // The age is taken in integer nanoseconds, allowing the double what its resolution can add. As `(double)now - s * 1e9` the line contracted into a fused multiply-subtract, so the
+    // product was not rounded, and for about half of all times its exact value lies a fraction of a nanosecond above the integer `now` of the same clock tick: a feedback time read in the
+    // tick of the report came out as in the future and was dropped as unknown (issue #1896). A double carries a time to within its resolution, about 0.5 ns a month of uptime
+    if (!(s > 0) || !(s < 1e10)) return 0;   // NaN, infinity or a negative time; 1e10 s of uptime stays within the integer range
+    uint64_t t = (uint64_t)llround(s * 1e9), slack = (uint64_t)((nextafter(s, INFINITY) - s) * 1e9) + 1;
+    if (t > now + slack) return 0;
+    uint64_t age = t < now ? now - t : 0;
+    return age < g ? g - age : 0;
 }
 static uint64_t rep_ticks(const post_op *o, seg_clk *sc, uint32_t last, uint64_t c0, uint64_t c1) {   // the time a counter report records (614.4 MHz); c0 / c1: the last segment's GPU start / end on the guest clock
     int top = o->type == 0x10; uint64_t ns = 0;

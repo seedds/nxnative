@@ -133,6 +133,14 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Found on:** [NieR:Automata The End of YoRHa Edition](../../dm/games/010056B015FE8000/README.md), whose dynamic-resolution controller subtracts two raw report timestamps and converts the difference inline.
 - **Check:** `t_timestamp` checks known vectors, long uptimes, round-trip precision and the game's exact inline arithmetic. `t_nvn` checks the API's known units and bounds a completed report between submit and fence wait.
 
+### A feedback time read in its own clock tick counted as in the future
+
+- **Symptom:** `t_counter_clock`'s check "feedback conversion uses the resumed guest epoch" failed in about one run of six (`gpu_s_guest_ns` returned 0, unknown). In a game, a counter report whose completion handler reads the clock in the same tick as the command buffer's `GPUStartTime` or `GPUEndTime` fell back as if that GPU time were unknown (GitHub issue #1896).
+- **Cause:** `gpu_s_guest_ns` (`nvn_mtl.m`) took the age of a feedback time as `(double)now - s * 1e9`. clang contracts that line into a fused multiply-subtract, so the product `s * 1e9` is not rounded to a double, and for about half of all times its exact value lies a fraction of a nanosecond above the integer `now` of the same clock tick (mach time steps 41.67 ns at 24 MHz). The age came out just below 0 and the time was rejected as in the future.
+- **Fix:** the age is taken in integer nanoseconds: the time rounded to a nanosecond, allowed to lie ahead of `now` by what the double's resolution at that uptime can add (about 0.5 ns a month) plus the rounding; such a time is the read's own. NaN, infinity and negative times stay unknown.
+- **Check:** `t_counter_clock` converts 20,000 times read just before the call, none of which may come out unknown (failed in every run before, passes in 100 of 100 after, on an M4 up for 33 hours), and a time one double step ahead of the read, which must be the read's time.
+- **Found on:** the unit test, on an M5 Max (3 of 20 runs) and an M4 (6 of 40); no game report.
+
 ### The Switch 2's system tick is 31.25 MHz
 
 - **Symptom:** a Switch 2 game holds 20 or 30 fps on the Mac although its frame work fits in one vsync: its frame-rate controller raises the present interval (`the game sets present interval 1 → 3` in the log) and never steps back down.

@@ -100,9 +100,11 @@ Game-specific findings; the general host changes they led to are listed under [F
 
 ## Found on this game
 
+- **Joy-Cons as dual or single npads:** [Joy-Cons as dual or single npads](../../../docs/reference/services.md#joy-cons-as-dual-or-single-npads): choosing two players splits a Joy-Con 2 pair through the controller applet, one sideways Joy-Con each.
 - [Offline pipeline archive missing for the device GPU](../../../docs/reference/shaders.md#offline-pipeline-archive-missing-for-the-device-gpu): archive targets can follow profile metadata while iOS Metal 4 remains opt-in; [the probe above](#offline-pipeline-archive-probe) records the build evidence and open device checks.
 General host changes first needed here; each applies to every game:
 
+- **Resolved: `Ver. ?` on the title screen of a build packed from an update-only NUP**: [A game packed from a NUP or a dump shows "Ver. ?" for a build its profile registers](../../../docs/reference/packing.md#a-game-packed-from-a-nup-or-a-dump-shows-ver--for-a-build-its-profile-registers). One Mac boot before and after.
 - **Resolved: Mac launcher metadata matches native defaults**: [A Mac front end's default settings change Metal execution paths](../../../docs/reference/packing.md#a-mac-front-ends-default-settings-change-metal-execution-paths), found by metadata generation and source inspection; no gameplay measurement.
 - [A capture refused after a change to the reflection structs](../../../docs/reference/nvn-objects.md#a-capture-refused-after-a-change-to-the-reflection-structs).
 - **zstd files inside a RomFS image** (`shader_split.py` `unzs`): [The zstd command given a path inside the image](../../../docs/reference/packing.md#the-zstd-command-given-a-path-inside-the-image).

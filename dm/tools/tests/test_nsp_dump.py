@@ -72,7 +72,7 @@ class Scan(Base):
         self.assertEqual(pack_dump.scan(d), (TID, {VER: d / f'updates/{VER}'}, {}))
         app, fam = nsp.scan_dump(d)
         self.assertIsNone(fam['base'])
-        self.assertEqual(nsp.nsp_versions(fam, {}), {f'v{VER}': d / f'updates/{VER}'})
+        self.assertEqual(nsp.nsp_versions(fam), {f'v{VER}': d / f'updates/{VER}'})
 
     def test_title_id_of_the_newest_whole_update(self):
         d = self.dump.parent / 'updates2'; version(d / f'updates/{VER}'); (d / f'updates/{VER + 1}/romfs').mkdir(parents=True)
@@ -84,7 +84,7 @@ class Scan(Base):
         self.assertEqual(pack_dump.scan(d), (TID, {}, {}))
         app, fam = nsp.scan_dump(d)
         self.assertEqual((app, fam['base']), (TID, d))
-        self.assertEqual(nsp.nsp_versions(fam, {}), {'v0': None})
+        self.assertEqual(nsp.nsp_versions(fam), {'v0': None})
         (d / 'base/exefs').mkdir(parents=True); (d / 'base/romfs').mkdir(); (d / 'base/exefs/main.npdm').write_bytes(npdm(TID + 0x2000))
         self.assertEqual(pack_dump.scan(d)[0], TID + 0x2000)   # base/ wins
 
@@ -149,7 +149,7 @@ class Main(Base):
         def stop(env, *a): seen.update(env); raise Stop()
         with mock.patch.object(nsp, 'find_repo', return_value=REPO), mock.patch.object(nsp, 'configure_dotnet'), mock.patch.object(nsp, 'WORK_DIR', ''), mock.patch.object(nsp, 'PROD_KEYS', ''), \
              mock.patch.object(nsp, 'check_prereqs', side_effect=stop), mock.patch.object(nsp, 'say', side_effect=said.append), \
-             mock.patch.object(nsp, 'ask', side_effect=AssertionError('asked for something')), mock.patch.object(nsp, 'package_title_reader', side_effect=AssertionError('read a package')):
+             mock.patch.object(nsp, 'ask', side_effect=AssertionError('asked for something')), mock.patch.object(nsp, 'package_reader', side_effect=AssertionError('read a package')):
             with self.assertRaises(Stop): nsp.main(args)
         return Path(seen['DM_ROOT']), said
 
@@ -157,6 +157,14 @@ class Main(Base):
         work, said = self.run_main()
         self.assertEqual(work, self.dump / f'{TID:016X}_build')
         self.assertTrue(any(s.startswith('a dump folder: ') for s in said), said)
+
+    def test_icon_is_checked_before_the_build(self):   # a dump has no control data, so --icon / ICON is its only icon: a wrong path stops at once, not after the extraction
+        with mock.patch.object(nsp, 'find_repo', return_value=REPO), mock.patch.object(nsp, 'configure_dotnet'), mock.patch.object(nsp, 'WORK_DIR', ''), \
+             mock.patch.object(nsp, 'check_prereqs', side_effect=AssertionError('went on')), self.assertRaisesRegex(nsp.BuildError, r'no such icon file \(--icon / ICON\)'):
+            nsp.main(nsp.parse_args([str(self.dump), '--icon', str(self.dump / 'missing.png')]))
+        (self.dump.parent / 'icon.png').write_bytes(b'png')
+        self.run_main('--icon', str(self.dump.parent / 'icon.png'))
+        with mock.patch.object(nsp, 'ICON', str(self.dump / 'missing.jpg')), self.assertRaisesRegex(nsp.BuildError, 'no such icon file'): self.run_main()
 
     def test_title_id_must_match(self):
         with mock.patch.object(nsp, 'find_repo', return_value=REPO), mock.patch.object(nsp, 'configure_dotnet'), self.assertRaisesRegex(nsp.BuildError, 'which holds'):

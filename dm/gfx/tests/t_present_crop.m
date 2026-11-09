@@ -23,6 +23,9 @@ void dm_vi_layer_crop(int c[4]) { memcpy(c, g_layer_crop, sizeof g_layer_crop); 
 static int failed, cases;
 #define EXPECT(n, w, v) do { int a=(w),b=(v); cases++; printf("%s expected %d → got %d %s\n",n,a,b,a==b?"✓":"✗");failed+=a!=b; } while(0)
 static const uint8_t colors[4][4]={{255,0,0,255},{0,255,0,255},{0,0,255,255},{255,255,0,255}};
+#ifndef CROP_LEGACY_HEADER
+extern int g_shape_w,g_shape_h;   // t_host_stubs.c: the last shape the present reported to the front end
+#endif
 
 #ifndef CROP_LEGACY_HEADER
 // Exercise the persistent scaler used by real presents, completing each command buffer before its allocator and output leave scope.
@@ -61,8 +64,24 @@ static void check(id<MTLTexture> src, const char *name, const int crop[4], int w
     EXPECT(name,0,bad);free(out);
 }
 
+// This fixture is the only present producer. A window now holds a logical queue receipt;
+// wait for replay, then for the display ticket (snapshots do not return that ticket).
+static uint64_t display_ticket(uint64_t receipt, uint64_t before) {
+    EXPECT("present returned a logical receipt",1,receipt!=0);
+    if (!receipt) return 0;
+    nvn_queue_present_wait(receipt);
+    uint64_t queued, done; mtl_present_progress(&queued,&done);
+    EXPECT("one frame reached the display queue",1,queued==before+1);
+    if (queued!=before+1) return 0;
+    mtl_present_wait(queued);
+    return queued;
+}
+
 int main(void) { @autoreleasepool {
     mtl_init();
+#ifndef CROP_LEGACY_HEADER
+    mtl_present_layer(1,1);   // square fixtures: a sized square layer, so the checks below see the crop's texels and the bars of that shape; the display's own shape is checked at the end
+#endif
     MTLTextureDescriptor *d=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:8 height:8 mipmapped:NO];d.storageMode=MTLStorageModeShared;d.usage=MTLTextureUsageShaderRead;
     id<MTLTexture> src=[g_dev newTextureWithDescriptor:d];uint8_t px[8*8*4];
     for(int y=0;y<8;y++)for(int x=0;x<8;x++)memcpy(px+4*(y*8+x),colors[(x>=4)+2*(y>=4)],4);
@@ -186,17 +205,30 @@ int main(void) { @autoreleasepool {
     PFNNVNDEVICEGETPROCADDRESSPROC get=(PFNNVNDEVICEGETPROCADDRESSPROC)h_nvnBootstrapLoader("nvnDeviceGetProcAddress");
     NVNT_nvnWindowSetCrop set=(NVNT_nvnWindowSetCrop)get(NULL,"nvnWindowSetCrop");
     NVNT_nvnQueuePresentTexture present=(NVNT_nvnQueuePresentTexture)get(NULL,"nvnQueuePresentTexture");
+    NVNqueueBuilder builder={0}; NVNqueue queue={0};
+    h_nvnQueueBuilderSetDefaults(&builder);
+    EXPECT("fixture queue initialized",1,h_nvnQueueInitialize(&queue,&builder));
+    uint64_t before, done;
     tex_t tex={.magic=MAGIC('T', 'E', 'X', 0), .serial =10001};tex.d.width=tex.d.height=8;tex.d.depth=tex.d.levels=1;tex.d.format=NVN_FORMAT_RGBA8;tex.d.target=NVN_TEXTURE_TARGET_2D;serial_put(tex.serial,src);
     win_t win={.ntex=1};win.tex[0]=(NVNtexture *)&tex;set((NVNwindow *)&win,4,4,4,4);
-    mtl_present_test_stall(100000000);present(NULL,(NVNwindow *)&win,0);uint64_t tk=win.ticket[0];set((NVNwindow *)&win,0,0,8,8);
+    mtl_present_progress(&before,&done);
+    // Replay is held until the window changes: QueuePresent must take this frame's crop when it queues the frame, not when replay presents it
+    nvn_queue_test_hold(1);
+    present(&queue,(NVNwindow *)&win,0);set((NVNwindow *)&win,0,0,8,8);
+    {   // without a working hold the crop check below would pass whenever replay ran first
+        uint64_t held; usleep(20000); mtl_present_progress(&held,&done);
+        EXPECT("the held replay queues no frame for the display",1,held==before);
+    }
+    nvn_queue_test_hold(0);
+    uint64_t tk=display_ticket(win.ticket[0],before);
 #ifdef CROP_LEGACY_HEADER
     EXPECT("old queue struct has no room for a four-value copy (struct check)",1,sizeof(pq_item)>=sizeof(tex_t)+sizeof(double)+sizeof(uint64_t)+sizeof br);
 #else
-    pthread_mutex_lock(&g_pq_mu);if(!tk)tk=g_pq_in;   // a present snapshot (DM_PRESENT_SNAP; with the encode thread too) hands back no ticket: the frame is the last one queued
-    int saved=memcmp(g_pq[(tk-1)%PQ].crop,br,sizeof br)==0;pthread_mutex_unlock(&g_pq_mu);
+    pthread_mutex_lock(&g_pq_mu);
+    int saved=tk && memcmp(g_pq[(tk-1)%PQ].crop,br,sizeof br)==0;pthread_mutex_unlock(&g_pq_mu);
     EXPECT("real QueuePresent: the frame's crop copy does not change with the window",1,saved);
 #endif
-    mtl_present_wait(tk);mtl_present_test_stall(0);
+    h_nvnWindowFinalize((NVNwindow *)&win);
 #ifndef CROP_LEGACY_HEADER
     {   // A window without a crop of its own presents by the vi layer crop (Link's Awakening in handheld mode: 1280x720 of its 1920x1080 window textures, cropped through vi::SetLayerCrop)
         int none[4]={0},lay[4]={0,4,4,4},over[4]={0,0,16,16},lc[4];
@@ -205,11 +237,52 @@ int main(void) { @autoreleasepool {
         EXPECT("the window's own crop wins over the layer crop",1,present_crop(br,8,8,lc)==br);
         memcpy(g_layer_crop,over,sizeof over);EXPECT("a layer crop larger than the texture: the whole texture",1,present_crop(none,8,8,lc)==none);
         memcpy(g_layer_crop,lay,sizeof lay);win_t w2={.ntex=1};w2.tex[0]=(NVNtexture *)&tex;
-        mtl_present_test_stall(100000000);present(NULL,(NVNwindow *)&w2,0);uint64_t t2=w2.ticket[0];memset(g_layer_crop,0,sizeof g_layer_crop);
-        pthread_mutex_lock(&g_pq_mu);if(!t2)t2=g_pq_in;int got=memcmp(g_pq[(t2-1)%PQ].crop,lay,sizeof lay)==0;pthread_mutex_unlock(&g_pq_mu);
+        mtl_present_progress(&before,&done);
+        nvn_queue_test_hold(1);
+        present(&queue,(NVNwindow *)&w2,0);memset(g_layer_crop,0,sizeof g_layer_crop);
+        nvn_queue_test_hold(0);
+        uint64_t t2=display_ticket(w2.ticket[0],before);
+        pthread_mutex_lock(&g_pq_mu);int got=t2 && memcmp(g_pq[(t2-1)%PQ].crop,lay,sizeof lay)==0;pthread_mutex_unlock(&g_pq_mu);
         EXPECT("real QueuePresent: a window without a crop queues the layer crop",1,got);
-        mtl_present_wait(t2);mtl_present_test_stall(0);
+        h_nvnWindowFinalize((NVNwindow *)&w2);
+    }
+    {   // The crop only picks texels; the picture has the layer's shape (Super Mario Galaxy 2's storybook cutscenes: 1200x960 of a 1920x1080 swapchain, shown at 16:9, issue #949)
+        const int W=64,H=36,TW=64,TH=36;MTLTextureDescriptor *td=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:TW height:TH mipmapped:NO];td.storageMode=MTLStorageModeShared;td.usage=MTLTextureUsageShaderRead;
+        id<MTLTexture> sw=[g_dev newTextureWithDescriptor:td];uint8_t *sp=malloc(TW*TH*4);
+        const int crop54[4]={0,0,40,32};   // 5:4 in the top-left corner: red inside, green outside
+        for(int y=0;y<TH;y++)for(int x=0;x<TW;x++)memcpy(sp+4*(y*TW+x),colors[x>=crop54[2]||y>=crop54[3]],4);
+        [sw replaceRegion:MTLRegionMake2D(0,0,TW,TH) mipmapLevel:0 withBytes:sp bytesPerRow:TW*4];free(sp);res_add(sw);res_commit();
+        double sa,sb;
+        mtl_present_layer(0,0);present_shape(sw,&sa,&sb);EXPECT("no sized layer: the display's width",1920,(int)sa);EXPECT("no sized layer: the display's height",1080,(int)sb);
+        for(int m4=0;m4<2;m4++) {
+            int outH[2]={H,40};   // 16:9 fills; a 16:10 canvas keeps the bars above and below
+            for(int k=0;k<2;k++) {
+                MTLTextureDescriptor *od=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:W height:outH[k] mipmapped:NO];od.storageMode=MTLStorageModeShared;od.usage=MTLTextureUsageRenderTarget;
+                id<MTLTexture> ot=[g_dev newTextureWithDescriptor:od];res_add(ot);res_commit();
+                if(m4){EXPECT("Metal 4 present of a 5:4 crop",1,present_offscreen_wait(sw,crop54,ot)!=PRESENT_FAILED);}
+                else{id<MTLCommandBuffer> cb=[g_q commandBuffer];EXPECT("classic present of a 5:4 crop",1,present_encode(cb,sw,ot,crop54));[cb commit];[cb waitUntilCompleted];}
+                uint8_t *o=malloc(W*outH[k]*4);[ot getBytes:o bytesPerRow:W*4 fromRegion:MTLRegionMake2D(0,0,W,outH[k]) mipmapLevel:0];
+                int bad=0,top=(outH[k]-H)/2;static const uint8_t black[4]={0,0,0,255};
+                for(int y=0;y<outH[k];y++)for(int x=0;x<W;x++)bad+=memcmp(o+4*(y*W+x),y<top||y>=top+H?black:colors[0],4)!=0;
+                EXPECT(k?"5:4 crop on a 16:10 canvas: 16:9 of red, black above and below":"5:4 crop on a 16:9 canvas: all red, no side bars",0,bad);free(o);res_remove(ot);
+            }
+        }
+        mtl_present_layer(4,3);present_shape(sw,&sa,&sb);EXPECT("a sized layer gives its own shape",4*(int)sb,3*(int)sa);mtl_present_layer(0,0);
+        MTLTextureDescriptor *td2=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:1920 height:1344 mipmapped:NO];td2.storageMode=MTLStorageModePrivate;td2.usage=MTLTextureUsageShaderRead;
+        id<MTLTexture> tall=[g_dev newTextureWithDescriptor:td2];
+        present_shape(tall,&sa,&sb);EXPECT("a taller texture without DM_SCREEN_ASPECT: 16:9",1080,(int)sb);
+        mtl_present_screen(1920,1344);present_shape(tall,&sa,&sb);EXPECT("DM_SCREEN_ASPECT: a texture that follows it keeps the taller shape",1344,(int)sb);
+        present_shape(sw,&sa,&sb);EXPECT("DM_SCREEN_ASPECT: a 16:9 texture of a build without stubs stays 16:9",1080,(int)sb);mtl_present_screen(0,0);
+        // The front end's layout and the mouse follow the same shape, not the crop's (front_picture_shape): a real present of the 5:4 crop
+        tex_t st={.magic=MAGIC('T', 'E', 'X', 0), .serial =10002};st.d.width=TW;st.d.height=TH;st.d.depth=st.d.levels=1;st.d.format=NVN_FORMAT_RGBA8;st.d.target=NVN_TEXTURE_TARGET_2D;serial_put(st.serial,sw);
+        win_t w3={.ntex=1};w3.tex[0]=(NVNtexture *)&st;set((NVNwindow *)&w3,crop54[0],crop54[1],crop54[2],crop54[3]);
+        mtl_present_progress(&before,&done);
+        present(&queue,(NVNwindow *)&w3,0);display_ticket(w3.ticket[0],before);
+        h_nvnWindowFinalize((NVNwindow *)&w3);
+        EXPECT("the shape reported to the front end is the layer's, width",1920,g_shape_w);EXPECT("the shape reported to the front end is the layer's, height",1080,g_shape_h);
+        res_remove(sw);
     }
 #endif
+    h_nvnQueueFinalize(&queue);
     printf("== %d checks, %d failed ==\n",cases,failed);return failed!=0;
 } }

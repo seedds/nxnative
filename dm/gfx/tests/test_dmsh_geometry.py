@@ -158,6 +158,22 @@ def geometry_header(passthrough=True, vertices=1, topology=7, invocations=1):
     return struct.pack('<5I', int(passthrough) << 24, 0, invocations << 24, topology << 24, vertices)
 
 
+class TopologyPointer(unittest.TestCase):
+    def test_a_helper_function_gets_the_table_as_a_pointer(self):   # Kirby Air Riders: SPIRV-Cross makes a helper of a block the shader reaches from several places, and passes the table to it
+        src = ('struct spvDescriptorSetBuffer0 { texture_buffer<float> trb_data [[id(16)]]; };\n'
+               'void _97(texture_buffer<float> trb_data) { float a = trb_data.read(uint(1)).x; }\n'
+               'kernel void main0(constant spvDescriptorSetBuffer0& spvDescriptorSet0) { float b = spvDescriptorSet0.trb_data.read(uint(f(2))).x; _97(spvDescriptorSet0.trb_data); }\n')
+        out = dmsh_geometry.topology_pointer(src)
+        self.assertNotIn('texture_buffer', out)
+        self.assertIn('device const uint* trb_data [[id(16)]]', out)
+        self.assertIn('void _97(device const uint* trb_data)', out)
+        self.assertIn('as_type<float>(trb_data[uint(1)])', out)
+        self.assertIn('as_type<float>(spvDescriptorSet0.trb_data[uint(f(2))])', out)
+
+    def test_no_table_stops_the_shader(self):
+        with self.assertRaises(ValueError): dmsh_geometry.topology_pointer('struct spvDescriptorSetBuffer0 { };')
+
+
 class GeometryOutputLayout(unittest.TestCase):
     def test_passthrough_uses_input_primitive_vertex_count(self):
         layouts = [dmsh_geometry.output_layout(geometry_header(), t) for t in range(5)]

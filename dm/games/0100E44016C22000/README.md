@@ -6,7 +6,7 @@ Update 1.0.1 (v65536) over the base game, SDK 13.3.7. Unity 2020.3.30f1 IL2CPP w
 
 | Setting | Where | Why |
 |---|---|---|
-| Node area cut 1 GB → 62 MB | `dm/tools/sdk_patches.py`, `sdk` build `9c73fb73…` (the constructor at `sdk+0x37c3a0`; the movs at `+0x37c3b0` and `+0x37c44c`) | `StandardAllocator::Initialize` aborted at its `CentralHeap::Init`; see [Memory](#memory) |
+| Node area cut 1 GB → 62 MB; regions of 4 MB and more aligned to 2 MB | the SDK-wide rules in `dm/tools/sdk_patches.py` (the constructor at `sdk+0x37c3a0`: the movs at `+0x37c3b0` and `+0x37c44c`; the placement's alignments at `+0x37c5a4`, `+0x37c5ac`, `+0x37c5b0`) | `StandardAllocator::Initialize` aborted at its `CentralHeap::Init`; see [Memory](#memory) |
 | `sys_resource 0x1000000` | [`game.tsv`](game.tsv) | the NPDM's 16 MB of system resource: virtual address memory |
 | 5 GB guest layout: `mem_reserve 0x140000000`, `mem_alias 0x118000000`, `mem_stack 0x10000000`, `app_pool 0x40000000` | `game.tsv` | the layout of Ace Attorney Investigations Collection ([010005501E68C000](../010005501E68C000/README.md)) and Brain Memory Training Academy ([0100F5D01DA3A000](../0100F5D01DA3A000/README.md)): a 1 GB pool (in place of the provisional profile's hardware pool) and the 5 GB block (256 MB in front + 4.375 GB alias region + 256 MB stack region + 128 MB heap region) |
 | Shared fonts as plain TTFs | host, `hle_sdk16.c` `font_skip` (every game) | Japanese, Korean and Chinese text drew nothing; see [Fonts](#fonts) |
@@ -18,6 +18,7 @@ Update 1.0.1 (v65536) over the base game, SDK 13.3.7. Unity 2020.3.30f1 IL2CPP w
 - The NPDM declares 16 MB of system resource, so `IsVirtualAddressMemoryEnabled` is true: `nninitStartup` (`main+0x1cd010`) hands application pool − used memory to StandardAllocator as virtual address memory and never calls `SetMemoryHeapSize`, as in Ace Attorney Investigations Collection and Brain Memory Training Academy.
 - **Resolved: `StandardAllocator::Initialize` aborted** at `sdk+0x324dec`, called from `nninitStartup` at `main+0x1cd080`: the same `nninitStartup` and the same cut as theirs, on this build's constructor. With the 1 GB pool and the 5 GB block it boots to its title with no red line, and the alias region is mapped up to +1.5 GB with 0.27 GB in use.
 - To find the constructor on a new `sdk` build, search its text for the two `mov w8 / w9, #0x3fe00000` words (`08fca752`, `09fca752`); `sdis.py --fn` names the function `AddressRegionManagerC2Emm` from its dynamic symbols.
+- Since 2026-11-09 the SDK-wide rules give the node area cut and the 2 MB alignment of regions of 4 MB and more in place of this `sdk` build's row; run with the iPhone's alias region (`DM_ALIAS_SIZE=0x118000000`): 240 s from a fresh save to the language select, the gaps between live regions 0.19 → 0.11 GB.
 
 ## Fonts
 

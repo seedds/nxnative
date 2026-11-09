@@ -26,6 +26,8 @@
 #include "pad_switch2_apple.h"
 static int s2pad_player(s2_pad *d);   // the Switch 2 pads' player slots (below, beside the raw HID pads')
 static void s2pad_read(s2_pad *d);
+static int g_merge_s2_rumble;   // DM_PAD_MERGE: player 1's rumble goes to the Switch 2 pads (merge_rumble_to_s2)
+static void merge_rumble_to_s2(int on);
 #include "home_quit.h"
 #include "home_quit_mac.h"
 #include "ctrl_prompt.h"
@@ -203,6 +205,7 @@ static void pad_read(GCExtendedGamepad *g) {
         g_held[p] = c; dm_motion_attach(c, p); pro_players_changed(nil);
     }
     if (cp_poll()) return;   // the controller applet's prompt has the controllers (front_ctrl_support)
+    if (g_merge_s2_rumble && m) merge_rumble_to_s2(0);   // DM_PAD_MERGE: a button on this controller takes player 1's rumble back from a Switch 2 pad
     dm_haptics_apple_controller(p, g.controller);
     pad_set(p, m, pad_axis(g.leftThumbstick.xAxis.value), pad_axis(g.leftThumbstick.yAxis.value), pad_axis(g.rightThumbstick.xAxis.value), pad_axis(g.rightThumbstick.yAxis.value));
 }
@@ -371,13 +374,22 @@ static void hidpad_detach(hid_pad *d) {   // d is already off g_hidpads
 }
 // Switch 2 controllers over Bluetooth LE (pad_switch2_apple.h): a pad is a player's controller, as a GameController one or a raw HID pad
 static int s2pad_player(s2_pad *d) { return g_merge ? 0 : pad_slot_of(&g_slots, d); }
+// DM_PAD_MERGE: player 1's rumble follows the controller last used, as pad_read hands it to a GameController one
+static void merge_rumble_to_s2(int on) {
+    if (!g_merge || g_merge_s2_rumble == on) return;
+    g_merge_s2_rumble = on; dm_haptics_apple_set_sink(0, on ? dm_switch2_rumble : NULL);
+}
 static void s2pad_read(s2_pad *d) {
     hq_poll();   // Home and the prompt's A and B come from these pads too
     if (!g_input_on || hq_blocks_input(g_hq.phase)) return;
     int p = s2pad_player(d);
     uint64_t m; int32_t s[4]; if (!s2_pad_input(&d->st, &m, s)) return;
-    if (p < 0 && (!g_press_to_join || !m || (p = pad_join(d, d->name)) < 0)) return;   // DM_PAD_PRESS_TO_JOIN=1: joins at its first button
+    if (p < 0) {   // DM_PAD_PRESS_TO_JOIN=1: joins at its first button
+        if (!g_press_to_join || !m || (p = pad_join(d, d->name)) < 0) return;
+        dm_haptics_apple_set_sink(p, dm_switch2_rumble);   // its rumble goes over Bluetooth, not to a Core Haptics engine
+    }
     if (cp_poll()) return;   // the controller applet's prompt has the controllers
+    if (m) merge_rumble_to_s2(1);
     pad_set(p, m, s[0], s[1], s[2], s[3]);
 }
 static void s2pad_attach(s2_pad *d) {
@@ -385,16 +397,18 @@ static void s2pad_attach(s2_pad *d) {
     int p = g_merge ? 0 : pad_slot_take(&g_slots, d, d->name); char nb[16];
     if (p < 0) { LOG("controller '%s' (Bluetooth) connected: all %d players are taken, not used", d->name, DM_PLAYERS); return; }
     npad_name(p, nb, sizeof nb); LOG("controller '%s' (Bluetooth) connected: player %d (npad %s)", d->name, p + 1, nb);
-    if (!g_merge) dm_pad_players(pad_slot_mask(&g_slots));
+    if (!g_merge) { dm_pad_players(pad_slot_mask(&g_slots)); dm_haptics_apple_set_sink(p, dm_switch2_rumble); }   // its rumble goes over Bluetooth, not to a Core Haptics engine
     cp_poll();   // one controller fewer to wait for
 }
 static void s2pad_detach(s2_pad *d) {   // d is already off g_s2pads
     if (g_merge) {
         LOG("controller '%s' (Bluetooth) disconnected", d->name);
+        if (!dm_switch2_pads()) merge_rumble_to_s2(0);
         if (!merge_pads_left(nil)) dm_pad_set(0, 0, 0, 0, 0);
         return;
     }
     int p = pad_slot_free(&g_slots, d); char nb[16]; if (p < 0) { cp_poll(); return; }   // one that had not joined: one fewer waiting
+    dm_haptics_apple_set_sink(p, NULL);
     npad_name(p, nb, sizeof nb); LOG("controller '%s' (Bluetooth) disconnected: player %d (npad %s) is free", d->name, p + 1, nb);
     dm_pad_set_player(p, 0, 0, 0, 0, 0);
     dm_pad_players(pad_slot_mask(&g_slots));

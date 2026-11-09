@@ -43,6 +43,7 @@ static void finish(recording *r) {
 }
 static void seed(const tex_t *t) {
     id<MTLTexture> m=tex_mtl(t);id<MTLCommandBuffer> cb=q_cb();   // q_cb flushes the host's pending new-texture zeroing first and waits for it; a plain g_q command buffer ran before it, and the zeroing wiped the seed
+    mtl_tex_zero_cancel(m);   // a texture made before the first submit is zeroed at the next one instead (tex_zero_fill), after this seed: the seed is its content
     for(int l=0;l<t->d.levels;l++){MTLRenderPassDescriptor *p=[MTLRenderPassDescriptor renderPassDescriptor];
         if(t->d.format==NVN_FORMAT_RGBA8){p.colorAttachments[0].texture=m;p.colorAttachments[0].level=l;
             p.colorAttachments[0].loadAction=MTLLoadActionClear;p.colorAttachments[0].storeAction=MTLStoreActionStore;p.colorAttachments[0].clearColor=MTLClearColorMake(0,0,1,1);}

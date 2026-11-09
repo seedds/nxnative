@@ -272,6 +272,12 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Fix:** the window keeps the count (`nactive` in `win_t` and `win_builder_t`) and the acquire rotates through `window_active` textures; the getters answer it. A count outside 1 to the swap chain's own is a red line and keeps all of them. `WindowInitialize`'s log line names the active count.
 - **Found on:** no game on the Mac's drives: every one that calls it (Mario vs. Donkey Kong 2 of 2; 11 others, among them Fire Emblem Engage, Super Mario RPG and Super Monkey Ball Banana Rumble, 3 of 3) asks for its whole swap chain. The S2Arm project reports that [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md) sets 2 of its 3; not run here.
 - **Check:** `t_nvn` (`2 of 3 active: textures 0 1 0 1`, the window's own call, a count out of range).
+### Display-link counts that read as drops in steady state
+
+- **Symptom:** a game pacing itself by its present interval (no frame step) logs `display link up to tick …: … held for the present interval 0, old frames dropped by merging 2265` in every line, which reads as frames rendered and never shown and the interval not held.
+- **Cause:** the counts in that line were totals since launch (only `ticks 300` was per line, and it counted presents, not ticks). All 2,265 were dropped during boot, while the window was covered and its display link fired about once a second; the later lines had 300 presents in 300 ticks and none dropped. `held … 0` is right at interval 1: the hold applies only to frames of interval 2 or more.
+- **Fix:** the line prints each count over its own 300-present span (ticks too). Without the frame step, every 1800 presents the host logs `present interval: X s of vsyncs asked in Y s (R of real time, R' without N hitches); frames at interval 1 / 2 / 3+ …`: the sum of the frames' intervals against wall time. 1.000 means each frame was held for its interval on average; for a game whose time step is its interval it is the game's speed, as the frame step's `game time` line is.
+- **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md) with its own controller (`DM_FPS_TARGET=0`), after the guest counter was put at 31.25 MHz: fullscreen at 60 Hz, interval 1 in 1800 of 1800 frames, 300 presents per 300 ticks, 1784 of 1788 frames on screen for 16.67 ms, speed 1.000 (0.987 with two screenshot hitches).
 
 ### Odd present intervals on the 30 Hz display link
 

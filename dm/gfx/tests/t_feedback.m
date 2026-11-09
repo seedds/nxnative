@@ -141,37 +141,6 @@ static void image_view_case(NvProg *pr) {
     mtl_tex_release(&source);
     CHECK(serial_get(source.serial) == nil, "releasing the image target removes its serial entry");
 }
-// Mip-chain passes: a draw rendering one level of a texture whose view it samples reads a view without the attached level. Downsampling (the level below) keeps the view of the
-// levels below; a sampler whose LOD clamp pins one level (fb_pinned_level) reads that level alone, also above the attachment's (an upsample: level n from n + 1) and while
-// rendering the view's base level, which the levels below could not reach (the view clamped the read to n - 1, or none was made)
-static void mip_chain_case(NvProg *pr) {
-    const int tid = 671, sid = 672; NvShader *fs = pr->sh[1]; nvn_rbind keep[2] = {fs->rf.b[0], fs->rf.b[1]}; int keep_nb = fs->rf.nb;
-    fs->rf.nb = 2; fs->rf.b[0] = (nvn_rbind){.kind=NVN_RB_TEX, .reg=0, .aid=0, .dtt=MTLTextureType2D}; fs->rf.b[1] = (nvn_rbind){.kind=NVN_RB_SAMPT, .reg=0, .aid=1};
-    tex_t chain; id<MTLTexture> original = target_format(&chain, 99800, NVN_FORMAT_RGBA8, 3);   // 4x4, 2x2, 1x1
-    mtl_reg_tex(tid, &chain, NULL);
-    state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
-    R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &chain; R.rt.has_cview[0] = 1; S.tex[1][0] = tid | (uint64_t)sid << 20;
-    struct { int level, lod_min, lod_max, minf, want_n, want_level, want_levels; const char *label; } c[] = {
-        {1, 2, 2, 5, 1, 2, 1, "an upsample's sampler pins the level above: that level alone"},
-        {1, 0, 0, 5, 1, 0, 1, "a sampler pinning the level below: that level alone"},
-        {1, -1000, 1000, 5, 1, 0, 1, "a sampler that pins no level: the levels below"},
-        {1, 2, 2, 1, 1, 0, 1, "no mip filter: the levels below"},
-        {0, 1, 1, 5, 1, 1, 1, "rendering the base level, the sampler pins level 1: that level alone"},
-        {0, -1000, 1000, 5, 0, 0, 0, "rendering the base level, no level pinned: left as is"},
-    };
-    for (unsigned i = 0; i < sizeof c / sizeof *c; i++) {
-        samp_par sp = {.minf = (uint8_t)c[i].minf, .magf = 1, .ws = 2, .wt = 2, .wr = 2, .lod_min = c[i].lod_min, .lod_max = c[i].lod_max, .aniso = 1}; mtl_reg_samp(sid, &sp);
-        R.rt.cview[0] = (view_t){.set_levels=1, .base_level=c[i].level, .nlevels=1};
-        clear(MTLClearColorMake(0, 0, 0, 1)); fb_prepare(pr);
-        id<MTLTexture> use = g_fb_n ? g_fb_use[0] : nil;
-        printf("%s: %d views, level %lu+%lu\n", c[i].label, g_fb_n, (unsigned long)use.parentRelativeLevel, (unsigned long)use.mipmapLevelCount);
-        CHECK(g_fb_n == c[i].want_n && (!c[i].want_n || (use.parentTexture == original && (int)use.parentRelativeLevel == c[i].want_level && (int)use.mipmapLevelCount == c[i].want_levels)), c[i].label);
-        rp_end();
-    }
-    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "mip-chain submission completed without error");
-    fs->rf.nb = keep_nb; fs->rf.b[0] = keep[0]; fs->rf.b[1] = keep[1];
-    mtl_tex_release(&chain);
-}
 // The rule without a listed shader: copy once, reuse until a barrier, end the pass when an earlier draw of it read the attachment directly.
 static void reuse_case(NvProg *pr) {
     int before = failed, tid = 650; NvShader *fs = pr->sh[1]; fs->rf.b[0].reg = 0;
@@ -219,6 +188,54 @@ static void reuse_case(NvProg *pr) {
     CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "GPU submission completed");
     CHECK(!mtl_last_commit_error(), "GPU submission has no error");
     printf("feedback reuse: %s\n", before == failed ? "PASS" : "FAIL");
+    mtl_tex_release(&source);
+}
+// Mip-chain passes: render level 2 of a 16x16 3-level texture while sampling a view of the whole chain. A sampler clamped to LOD 1 samples a cached view of levels 0+2 below the attachment
+// (same parent and base level, the pass stays open, no copy) and reads level 1 as it is; a sampler reaching level 2 takes the whole-view snapshot; one whose clamp starts above level 2 reads directly.
+static void mip_case(NvProg *pr, id<MTLRenderPipelineState> pipeline) {
+    int before = failed, tid = 660, sid = 7; NvShader *fs = pr->sh[1]; fs->rf.b[0].reg = 0;
+    tex_t source = {.magic=MAGIC('T','E','X',0), .serial=99800};
+    source.d = (nvn_texdesc){.target=NVN_TEXTURE_TARGET_2D, .format=NVN_FORMAT_RGBA8, .width=16, .height=16, .depth=1, .levels=3, .samples=1};
+    MTLTextureDescriptor *d = tex_desc(&source, 0); d.storageMode = MTLStorageModeShared;
+    id<MTLTexture> original = [g_dev newTextureWithDescriptor:d];
+    CHECK(original != nil && original.mipmapLevelCount == 3, "mip-chain render target created");
+    res_add(original); mtl_tex_init(&source); serial_put(source.serial, original);
+    mtl_reg_tex(tid, &source, NULL);
+    samp_par sp = {.minf=NVN_MIN_FILTER_LINEAR_MIPMAP_LINEAR, .magf=1, .lod_min=0, .lod_max=1};
+    mtl_reg_samp(sid, &sp);
+    id<MTLBuffer> result = [g_dev newBufferWithLength:1024 options:MTLResourceStorageModeShared]; res_add(result);
+    state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
+    R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &source; R.rt.has_cview[0] = 1; R.rt.cview[0].set_levels = 1; R.rt.cview[0].nlevels = 1;
+    S.tex[1][0] = (uint64_t)tid | (uint64_t)sid << 20; S.chmask.mask = 0xffffffffu;
+    R.rt.cview[0].base_level = 1; clear(MTLClearColorMake(1, 0, 0, 1)); rp_end();   // level 1 red
+    R.rt.cview[0].base_level = 2; clear(MTLClearColorMake(0, 0, 1, 1));   // level 2 attached and written
+    uint64_t copies = g_fb_count, made = g_fbb_made;
+    fb_prepare(pr);
+    id<MTLTexture> below = g_fb_n == 1 ? g_fb_use[0] : nil;
+    CHECK(g_fb_n == 1 && g_fb_src[0] != below && below.parentTexture == original && below.parentRelativeLevel == 0 && below.mipmapLevelCount == 2 && below.textureType == MTLTextureType2D,
+          "a sampler clamped below the attachment samples the view of the levels below it");
+    CHECK(g_enc && g_fb_count == copies && g_fbb_made == made + 1, "the view below needs no copy and keeps the pass open");
+    enc_r_pso(g_enc, pipeline); enc_r_viewport(g_enc, (MTLViewport){0, 0, 4, 4, 0, 1});
+    CHECK(encode_args((id<MTLCommandEncoder>)g_enc, fs, 1, 0), "production fragment arguments encoded");
+    uint64_t bound = *(uint64_t *)((uint8_t *)fs->ab_buf.contents + fs->ab_off);
+    CHECK(below && bound == below.gpuResourceID._impl, "production argument buffer contains the view below");
+    enc_r_draw(g_enc, MTLPrimitiveTypeTriangle, 0, 3); rp_end();
+    enc_b_copy_texture_buffer(blit(), original, 0, 2, MTLOriginMake(0, 0, 0), MTLSizeMake(4, 4, 1), result, 0, 256, 1024);
+    clear(MTLClearColorMake(0, 0, 1, 1));
+    fb_prepare(pr);
+    CHECK(g_fb_n == 1 && g_fb_use[0] == below && g_fbb_made == made + 1, "the next pass reuses the cached view below");
+    sp.lod_max = 3; mtl_reg_samp(sid, &sp);
+    fb_prepare(pr);
+    CHECK(g_fb_n == 1 && !g_enc && g_fb_count == copies && g_fb_use[0].parentTexture && g_fb_use[0].parentTexture != original && g_fb_use[0].mipmapLevelCount == 3,
+          "a sampler reaching the attachment's level samples a whole-view snapshot");
+    sp.lod_min = 3; mtl_reg_samp(sid, &sp); clear(MTLClearColorMake(0, 0, 1, 1));
+    fb_prepare(pr);
+    CHECK(g_fb_n == 0 && g_enc, "a sampler clamped above the attachment's level reads directly");
+    rp_end();
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "GPU submission completed");
+    CHECK(!mtl_last_commit_error(), "GPU submission has no error");
+    pixels(result, 0, (const uint8_t[]){255, 0, 0, 255}, "level 2 holds level 1 read through the view below");
+    printf("feedback mip chain: %s\n", before == failed ? "PASS" : "FAIL");
     mtl_tex_release(&source);
 }
 static id<MTLLibrary> lib_file(NSString *path) {
@@ -409,16 +426,16 @@ static void shape_case(void) {
     for (int frame = 0; frame < 6; frame++) {
         g_fb_bar++;   // the game's barrier before each snapshot draw, as in Tears of the Kingdom's shrines
         for (int k = 0; k < 5; k++, g_fb_bar++) {
-            fb_cache_t *e = fb_snap(1000 + frame * 5 + k, 0, 0, MTLPixelFormatRGBA8Unorm, size[k][0], size[k][1], 0, &fresh);
+            fb_cache_t *e = fb_snap(1000 + frame * 5 + k, 0, 0, MTLPixelFormatRGBA8Unorm, size[k][0], size[k][1], 1, 1, 0, &fresh);
             bad += !e || !fresh || e->snap.width != size[k][0] || e->snap.height != size[k][1];
             if (e) [made addObject:[NSValue valueWithPointer:(__bridge void *)e->snap]];
         }
     }
     CHECK(!bad, "every new key gets a texture of its size");
     CHECK(made.count == 4, "30 snapshots of 4 sizes over 6 frames make one texture per size, not one each");
-    fb_cache_t *a = fb_snap(1, 0, 0, MTLPixelFormatRGBA8Unorm, 64, 32, 0, &fresh), *b = fb_snap(2, 0, 0, MTLPixelFormatRGBA8Unorm, 64, 32, 0, &fresh);
+    fb_cache_t *a = fb_snap(1, 0, 0, MTLPixelFormatRGBA8Unorm, 64, 32, 1, 1, 0, &fresh), *b = fb_snap(2, 0, 0, MTLPixelFormatRGBA8Unorm, 64, 32, 1, 1, 0, &fresh);
     CHECK(a != b, "a live snapshot is not taken for another key while a stale entry is free");
-    fb_cache_t *a2 = fb_snap(1, 0, 0, MTLPixelFormatRGBA8Unorm, 64, 32, 0, &fresh);
+    fb_cache_t *a2 = fb_snap(1, 0, 0, MTLPixelFormatRGBA8Unorm, 64, 32, 1, 1, 0, &fresh);
     CHECK(a2 == a && !fresh, "the live snapshot is reused until the next barrier");
     for (int i = 0; i < 8; i++) { g_fbc[i] = (fb_cache_t){0}; } g_fbc_use = 0;
 }
@@ -567,6 +584,7 @@ int main(int argc, char **argv) { @autoreleasepool {
         "vertex float4 v(uint i[[vertex_id]]) { return float4(i == 1 ? 3.0 : -1.0, i == 2 ? 3.0 : -1.0, 0, 1); }\n"
         "struct A {texture2d<float, access::read> source[[id(0)]];};\n"
         "fragment float4 f(float4 p[[position]], constant A&a[[buffer(0)]]) {return a.source.read(uint2(p.xy));}\n"
+        "fragment float4 g(float4 p[[position]], constant A&a[[buffer(0)]]) {return a.source.read(uint2(p.xy), 1);}\n"
         "struct I {texture2d<uint, access::read> source[[id(0)]];};\n"
         "fragment float4 mask(float4 p[[position]], constant I&a[[buffer(0)]]) {uint v = a.source.read(uint2(p.xy)).x; return float4(v==17u, v==29u, 0, 1);}\n"
         options:nil error:&error];
@@ -585,8 +603,15 @@ int main(int argc, char **argv) { @autoreleasepool {
     const int slots[] = {0, 128, 255};
     for (int i = 0; i < 3; i++) slot_case(pr, pipeline, slots[i], i);
     reuse_case(pr);
+    NvProg *mp = [NvProg new]; NvShader *ms = [NvShader new]; mp->sh[1] = ms;   // reads level 1 of its texture (the level below the attachment's)
+    ms->stage = 1; strcpy(ms->key, "fedcba9876543210"); ms->fn = [lib newFunctionWithName:@"g"];
+    ms->ae = [ms->fn newArgumentEncoderWithBufferIndex:0]; ms->arg_len = ms->ae.encodedLength;
+    ms->rf.nb = 1; ms->rf.b[0] = (nvn_rbind){.kind=NVN_RB_TEX, .aid=0, .dtt=MTLTextureType2D};
+    d.fragmentFunction = ms->fn;
+    id<MTLRenderPipelineState> mpipe = [g_dev newRenderPipelineStateWithDescriptor:d error:&error];
+    CHECK(mpipe != nil, "synthetic mip-chain pipeline compiles");
+    if (mpipe) mip_case(mp, mpipe);
     shape_case();
-    mip_chain_case(pr);
     fs->fn = [lib newFunctionWithName:@"mask"];
     fs->ae = [fs->fn newArgumentEncoderWithBufferIndex:0]; fs->arg_len = fs->ae.encodedLength;
     fs->rf.b[0] = (nvn_rbind){.kind=NVN_RB_IMG, .aid=0, .dtt=MTLTextureType2D, .dpf=NVN_DPF_UINT};

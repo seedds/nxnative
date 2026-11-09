@@ -47,6 +47,8 @@
 #define DMSH_C0_BASE_INSTANCE 0x644      // graphics stages: the draw's base instance, which GLSLC adds to Maxwell's instance ID (Pokémon Legends: Z-A's occlusion boxes)
 
 // Binding kinds: the "kind" of each binding in a shader's <key>_b.json, as the build writes it and the host reads it (nvn_refl.m turns each into an NVN_RB_* code, nvn_refl.h)
+#define DMSH_CBUF_BYTES_PREFIX "dm_ubo_bytes_"
+#define DMSH_KIND_CBUF_BYTES "cbuf_bytes" // inline bound length for guarded fragment uniform reads
 #define DMSH_KIND_CBUF "cbuf"            // uniform buffer slot reg (c[3 + reg])
 #define DMSH_KIND_C1 "c1"                // the shader's own constant segment c[1] (its bytes are the json's c1)
 #define DMSH_KIND_DRVCB "drvcb"          // a driver segment, c[bank] (bank 0 or 2): NVN_RB_DRV0 / NVN_RB_DRV2

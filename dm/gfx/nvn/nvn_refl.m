@@ -61,6 +61,10 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
                 r->n = (uint8_t)n; o->dyn = 1; o->nb++; continue;
             }
             if ([k isEqualToString:@DMSH_KIND_CBUF]) r->kind = NVN_RB_CBUF;
+            else if ([k isEqualToString:@DMSH_KIND_CBUF_BYTES]) {
+                if (reg < 0 || reg >= 16) FAIL("uniform byte count has no valid slot");
+                r->kind = NVN_RB_CBUF_BYTES;
+            }
             else if ([k isEqualToString:@DMSH_KIND_SAMP]) r->kind = NVN_RB_SAMP;
             else if ([k isEqualToString:@DMSH_KIND_SAMP_TEX]) r->kind = NVN_RB_SAMPT;
             else if ([k isEqualToString:@DMSH_KIND_TEX]) { r->kind = NVN_RB_TEX; dummy_kind(b[@"msl_type"], &r->dtt, &r->dpf); r->f1d = [b[@"fetch1d"] boolValue]; }

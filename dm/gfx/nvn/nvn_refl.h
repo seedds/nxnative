@@ -8,7 +8,7 @@
 #include <stdint.h>
 
 enum { NVN_RB_CBUF = 1, NVN_RB_SAMP, NVN_RB_TEX, NVN_RB_IMG, NVN_RB_TBUF,
-       NVN_RB_SBUFP, NVN_RB_SUPPORT, NVN_RB_C1, NVN_RB_DRV0, NVN_RB_DRV2, NVN_RB_SAMPT, NVN_RB_UBOP, NVN_RB_TEXU, NVN_RB_SAMPU, NVN_RB_SAMPI, NVN_RB_SBUFU, NVN_RB_TEXD, NVN_RB_SAMPD, NVN_RB_TEXA, NVN_RB_SAMPA, NVN_RB_GEOMETRY, NVN_RB_TEXP, NVN_RB_SAMPP, NVN_RB_TEXH, NVN_RB_SAMPH, NVN_RB_BORDER, NVN_RB_PUSH, NVN_RB_GMEM, NVN_RB_GMEML, NVN_RB_IMGU, NVN_RB_TBUFU };
+       NVN_RB_SBUFP, NVN_RB_SUPPORT, NVN_RB_C1, NVN_RB_DRV0, NVN_RB_DRV2, NVN_RB_SAMPT, NVN_RB_UBOP, NVN_RB_TEXU, NVN_RB_SAMPU, NVN_RB_SAMPI, NVN_RB_SBUFU, NVN_RB_TEXD, NVN_RB_SAMPD, NVN_RB_TEXA, NVN_RB_SAMPA, NVN_RB_GEOMETRY, NVN_RB_TEXP, NVN_RB_SAMPP, NVN_RB_TEXH, NVN_RB_SAMPH, NVN_RB_BORDER, NVN_RB_PUSH, NVN_RB_GMEM, NVN_RB_GMEML, NVN_RB_IMGU, NVN_RB_TBUFU, NVN_RB_CBUF_BYTES };
 // IMGU / TBUFU: an image / a buffer texture whose handle the game keeps in uniform slot reg at byte off, as TEXU (Unreal Engine 5.4 on the Switch 2 keeps every image in c[3]). Read at encode time
 // GMEM: the host's memory pool table for global memory the translator traced to no storage buffer (dmsh_abi.h DMSH_GMEM_MAP_*, nvn_mtl.m gmem_map_gpu): the shader may read, and with rw
 // write, anything in any pool. GMEML: the write log of those stores (dmsh_abi.h DMSH_GMEM_LOG_*, nvn_mtl.m gml_take)
@@ -26,8 +26,8 @@ enum { NVN_CT_FLOAT = 0, NVN_CT_UINT, NVN_CT_INT };                             
 // Bindings of one shader: NVN gives a stage 32 texture and 32 sampler slots beside its uniform and storage buffers and images. OCTOPATH TRAVELER II's 3D world map material
 // (UiMM_WorldMap3D) has a pixel shader with 30 textures, 30 samplers, 3 uniform buffers and the c1 / support / driver segments, 66 in all, which the old limit of 64 refused
 // (the traveler selection drew its map black). The border colour twins (dmsh_build.py border_emu) add one binding per sampler and the block: that shader has 97
-#define NVN_REFL_MAXB 128
-#define NVN_REFL_MAXARG 768   // argument buffer entries of one shader (an array binding takes n of them; a c2 handle array 301, with its samplers 602)
+#define NVN_REFL_MAXB (128 + 16)   // room for the fragment uniform lengths as well as their banks
+#define NVN_REFL_MAXARG (768 + 16)   // argument buffer entries of one shader (an array binding takes n of them; a c2 handle array 301, with its samplers 602)
 #define NVN_REFL_MAXV 32
 
 typedef struct {

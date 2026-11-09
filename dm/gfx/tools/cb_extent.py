@@ -31,6 +31,10 @@ def extents(source, bindings):
         name = b["msl_name"]
         uses = len(re.findall(r"\b" + re.escape(name) + r"\b", source))
         reads = re.findall(r"\(\*spvDescriptorSet0\." + re.escape(name) + r"\)\._m0\[([^\]]+)\]", source)
+        # A guarded fragment read carries the original vec4 index and a separate bound length.
+        guarded = (r"dm_ubo_load\(\(\*spvDescriptorSet0\." + re.escape(name)
+                   + r"\)\._m0, uint\(([^;\n]*?)\), spvDescriptorSet0\.dm_ubo_bytes_" + re.escape(name) + r"\)")
+        reads.extend(re.findall(guarded, source))
         declared = len(re.findall(r"\b" + re.escape(name) + r"\s*\[\[id\(", source))   # the argument buffer member
         if uses != len(reads) + declared: continue
         high = -1

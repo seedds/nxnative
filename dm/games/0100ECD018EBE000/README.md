@@ -52,6 +52,8 @@ Update 1.0.1 (v65536), SDK 15.3.2. Intelligent Systems' engine on NintendoWare (
 
 ## Rendering
 
+- Peach's invisibility-potion sequence ([issue #1860](https://github.com/seedds/nxnative/issues/1860)): fragment variant 6 of `forward.bfsha` (`f1e0f08cc43e21e3`) reads a loop count at offset `0x900` in uniform slot 11. Observed bindings were 16 and 2,384 bytes. On the M3 Ultra the unmodified game hung on both Standard and MetalFX. Keeping the draws enabled and supplying zeroes past byte 16 in a diagnostic build passed the doorway on M3 Ultra and M4 iPad Pro with MetalFX. The original failing GPU read was not captured.
+
 11,858 shaders (3,154 vertex, 7,826 pixel, 874 compute, 4 domain), all BNSH; every one builds with Mario's binding layout ([Zstd files recognised by their magic](../../../docs/reference/shaders.md#zstd-files-recognised-by-their-magic)).
 
 - **Resolved: a texture picked at run time between bound slots** (2,386 pixel shaders: 5,476 cube samples, 487 2D). The handle is read from the driver table of combined texture handles (c2 `0x20 + 8 × slot`, slots 0, 7, 8, 13 and 28, constant offsets only) and chosen by branches, so the translator falls back to an array indexed by the handle's texture ID. These read the whole texture and sampler pools now ([Texture handles from game memory index the pools](../../../docs/reference/shaders.md#texture-handles-from-game-memory-index-the-pools)), and the profile key `tex_dyn_slots`, which put slot indices in the table and bound slot k at element k, is gone. Checked on the Mac (2026-10-29): a fresh save through the prologue, Mario's house and the boat to Rogueport's docks, with no missing or wrong surface seen, at 60 fps; its cube pool held 15 textures.
@@ -82,6 +84,8 @@ Update 1.0.1 (v65536), SDK 15.3.2. Intelligent Systems' engine on NintendoWare (
 ## Found on this game
 
 General host changes first needed here; each applies to every game:
+
+- [Fragment shaders reading beyond a bound uniform range](../../../docs/reference/rendering.md#fragment-shaders-reading-beyond-a-bound-uniform-range).
 
 - **Blocking native HLE waits release the guest core:** [Native HLE waits release the guest core](../../../docs/reference/threads.md#native-hle-waits-release-the-guest-core).
 - **Spin waits:** the rewriter copies pure poll loops and sends their back-edges through a gate that polls 2 ms, then sleeps (`patch_nso.py` "Spin waits", `dm_spin_wait`, `DM_SPIN`, `DM_SPIN_POLL`, `DM_SPIN_LIST`): [development.md, Power](../../../docs/development.md#power), [05, Scripted input and thread scheduling](../../../docs/agents/05-debugging.md#scripted-input-and-thread-scheduling).

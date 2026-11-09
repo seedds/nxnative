@@ -1222,6 +1222,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Found on:** [Paper Mario: The Thousand-Year Door](../../dm/games/0100ECD018EBE000/README.md) (at the title); [Batman: Arkham Knight](../../dm/games/0100ACD0163D0000/README.md#files-and-shaders) (`stage 0 cb0`, at boot: the first command buffer draws before the game has bound any uniform buffer).
 - **Check:** a pass dump of the frame (`DM_NVN_PASSDUMP=<frame>`, frame 0 for the boot) shows the draw (`j` line) and its stage's `K` line with no `B … cb` line, and the frame's `[nvn]` call counts show whether the game called `CommandBufferBindUniformBuffer` at all.
 
+### Fragment shaders reading beyond a bound uniform range
+
+- **Symptom:** a fragment shader can read adjacent pool data through a short NVN uniform binding. Paper Mario can hang the GPU during the Peach sequence.
+- **Cause:** the NVN bind records both address and byte count. The generated Metal fragment shader previously received only the address. A GPU test with a 16-byte binding read the value at byte 2,304 in the same pool.
+- **Fix:** ordinary translated fragment constant banks carry their byte count in the Metal argument buffer. A vector entirely inside the binding uses the original load. A partial vector returns the available bytes and zeroes the rest. Reads wholly outside return zero. The original buffer remains bound for in-range reads, including data written on the GPU.
+- **Found on:** [Paper Mario: The Thousand-Year Door](../../dm/games/0100ECD018EBE000/README.md#rendering). The GPU fixture is `t_fragment_uniform`.
+
 ### Compute dispatches share the copy encoder
 
 - **Symptom:** GPU time per frame doubles with many small dispatches (Age of Calamity: GPU 9 → 18 ms a frame on the Mac; the iPhone's 15 → 51 ms, 17 fps).

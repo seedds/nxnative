@@ -1230,6 +1230,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Found on:** [Hyrule Warriors: Age of Calamity](../../dm/games/01002B00111A2000/README.md): after its first cutscene the first battle runs about 900–1,500 small dispatches a frame on the Mac (an iPhone log's call counts suggest more), each after a game barrier, at the same draws and passes; GPU 7.3 → 8.1 ms across the cutscene with the change.
 - **Note:** `DM_NVN_DISPATCH_OWN=1` (and `DM_NVN_PASSGPU`, which times each dispatch) gives each dispatch its own encoder again.
 
+### Compute dispatches ordered by the game's own barriers
+
+- **Symptom:** a frame that runs many compute dispatches back to back spends much of their GPU time waiting: each dispatch starts only when the one before it has finished, also where the game put no barrier between them.
+- **Cause:** `dispatch_enc` puts a barrier inside the shared copy encoder before every dispatch ([Compute dispatches share the copy encoder](#compute-dispatches-share-the-copy-encoder)). That is more ordering than NVN gives: it orders a dispatch after earlier work only through `nvnCommandBufferBarrier`, as the draw passes of a game with `draw_barriers game` are ordered.
+- **Fix:** the profile key `dispatch_overlap` (`DM_NVN_DISPATCH_OVERLAP` overrides it), in `dispatch_enc`. Two of the game's dispatches with nothing else between them in the copy encoder and no game barrier between them run side by side. A copy, fill or inline update between them, a dispatch of the host's own, or a game barrier keeps the barrier, and whatever follows a dispatch other than another dispatch still waits for it. `dm/gfx/tests/t_dispatch_overlap.m` checks where the barriers go.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game), which runs most of its compute at the start of a frame with no barriers between the dispatches. Its `kokiri-deck` route (`scripts/bench.py`, docked, Apple M4 Pro, three runs a side, `DM_NVN_DISPATCH_OVERLAP=0` against the profile's `on`): GPU p50 15.63 → 14.76 ms, p95 16.43 → 15.66 ms, frames over budget 63 → 36, the pictures alike.
+
 ### Compute bindings prepare texture copies before the dispatch encoder
 
 - **Symptom:** with `DM_NVN_DISPATCH_OWN=1` the host crashes in the Metal driver (`CRASH sig=11 addr=0x98` in `AGX::ComputeContext<…>::prepareForEnqueue(bool)`) at a compute shader's first read through a texture view of another format; by default (dispatches sharing the copy encoder) that read can see the texture's old pixels. Metal validation reports `Command buffer already has an open command encoder` for the first.

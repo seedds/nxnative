@@ -8673,6 +8673,13 @@ static NSString *pso_user_path(void);
 // that cannot open it (one older than the archive's minimum, or an OS update that changed the GPU compiler) or a GPU it was not built for gets an info line, and the device builds
 // the bases itself as before (the on-device prebuild is the fallback)
 static id<MTL4Archive> g_arch_bundle; static NSString *g_bundle_dir;
+// The bases of the prewarm list's R rows (the pipelines with a vertex layout, which the archive above does not hold), made offline by the host itself (mtl_pso_prewarm_tool, the NSP
+// script's --prebake) and bundled beside it as <GPU architecture>-prewarm-<NN>.mtl4a: Metal's serializer store fills past about 2,000 captures (MDB_MAP_FULL, ARCH_PERIOD_MAX), so the
+// tool writes one file per flush period, as a run does, with the index beside it (<file>.keys, arch_write_file). They are opened with the bundle, before the device's files: their
+// index goes into g_arch_ix first, so a lookup asks the one file that holds the base, and a file with no usable index is searched first among the files of bases with a vertex layout
+// (g_arch4). With them a first start's prepare step finds its R rows' bases and compiles none (Ocarina of Time, 40,000 lines: 6,400 bases, 450-475 s without, seconds with).
+// g_pw_tool: the prewarm tool is running (nothing retained, no specialization, and the tool's own earlier output is not opened); g_pw_files: the prewarm files opened
+static int g_pw_tool; static NSUInteger g_pw_files; static _Atomic int g_pw_failed; static NSMutableArray<id<MTL4Archive>> *g_pw_open;   // g_pw_open: the prewarm files, which g_arch_ix names without owning them
 // Metal's loader crashes on malformed containers rather than returning an error. Check the GPU image's load commands and referenced file ranges, including every slice of a
 // universal archive, before giving it to Metal. This checks the container, not the compiler's private payload: Metal still decides whether this system can use its binaries.
 static int arch_macho_ok(int fd, uint64_t off, uint64_t size) {
@@ -8752,6 +8759,34 @@ static void pso_bundle_open(NSMutableArray<id<MTL4Archive>> *archp) {
                    p.UTF8String, ae.localizedDescription.UTF8String); return; }
     g_arch_bundle = a; g_bundle_dir = dir; [archp addObject:a];
     MLOG("pipeline archive bundled with the app: %s, %.1f MB, opened in %.1f ms", p.UTF8String, [[NSFileManager.defaultManager attributesOfItemAtPath:p error:nil] fileSize] / 1048576.0, (bp_now() - t0) / 1e6);
+}
+// The prewarm files of the bundle (see g_pw_files). A file with a complete index is known to g_arch_ix by its keys; one without goes first among the files of bases with a vertex
+// layout. A file that is not an archive, or that this system cannot open, is left out with a line in the log: its bases are built on the device as before. Call between
+// arch_open_begin and arch_open_end, before the device's files (the first file to name a key keeps it)
+static NSString *pw_prefix(NSString *gpu) { return [gpu stringByAppendingString:@"-prewarm-"]; }
+static void pso_bundle_open_prewarm(NSMutableArray<id<MTL4Archive>> *arch) {
+    const char *e = getenv("DM_PSO_BUNDLE");
+    if (g_pw_tool || !e || !*e || !strcmp(e, "off")) return;
+    NSString *dir = @(e), *gpu = [(id)g_dev respondsToSelector:@selector(architecture)] ? g_dev.architecture.name : nil; if (!gpu) return;
+    NSString *pre = pw_prefix(gpu);
+    NSArray<NSString *> *names = [[[NSFileManager.defaultManager contentsOfDirectoryAtPath:dir error:nil]
+        filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"self BEGINSWITH %@ AND self ENDSWITH '.mtl4a'", pre]] sortedArrayUsingSelector:@selector(compare:)];
+    if (!names.count) return;
+    uint64_t t0 = bp_now(); unsigned long long bytes = 0; NSUInteger n = 0, nidx = 0, nkeys = 0, nplain = 0; g_pw_open = [NSMutableArray array];
+    for (NSString *name in names) {
+        NSString *p = [dir stringByAppendingPathComponent:name]; NSError *ae = nil;
+        id<MTL4Archive> a = arch_file_ok(p) ? [g_dev newArchiveWithURL:[NSURL fileURLWithPath:p] error:&ae] : nil;
+        if (!a) { MLOG("[RED] prewarm archive bundled with the app: %s not usable (%s): its bases are built on the device", p.UTF8String, ae ? ae.localizedDescription.UTF8String : "not a pipeline archive"); continue; }
+        int complete = 0; NSData *keys = arch_keys_read(arch_keys_path(p), &complete);
+        n++; bytes += [[NSFileManager.defaultManager attributesOfItemAtPath:p error:nil] fileSize];
+        if (keys && complete) {
+            const uint64_t *kv = keys.bytes; nidx++;
+            for (NSUInteger j = 0; j < keys.length / sizeof(uint64_t); j++) if (!nvn_hm_get(&g_arch_ix, &kv[j])) { nvn_hm_put(&g_arch_ix, &kv[j], (__bridge void *)a); nkeys++; }
+        } else [arch insertObject:a atIndex:nplain++];
+        [g_pw_open addObject:a];   // the archives stay open for the run
+    }
+    g_pw_files = n;
+    MLOG("prewarm archive bundled with the app: %lu of %lu files, %lu with an index of %lu bases, %.1f MB, opened in %.1f ms", (unsigned long)n, (unsigned long)names.count, (unsigned long)nidx, (unsigned long)nkeys, bytes / 1048576.0, (bp_now() - t0) / 1e6);
 }
 // gpuarchiver-* folders are Metal's private compiler state. On the Mac their parent is shared by every program: a directory appearing during our capture or flush may belong
 // to another compiler, and serialization success does not end its lifetime. Only our output archives are ours to remove. iOS can reclaim previous runs' app-private folders
@@ -8885,6 +8920,7 @@ static void pso4_init(void) {
         NSMutableArray<id<MTL4Archive>> *arch = [NSMutableArray array], *archp = [NSMutableArray array];
         arch_open_begin();   // every archive opened from here to arch_open_end is mapped: the bundled one and the device's
         pso_bundle_open(archp);   // first: it holds every pair's base
+        pso_bundle_open_prewarm(arch);   // then the prewarm list's bases made at build time (--prebake), before the device's files
         if (g_arch_dir) {
             g_arch_q = dispatch_queue_create("dm.nvn.pso-archive", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0));
             g_arch_pending = dispatch_group_create();
@@ -9239,7 +9275,7 @@ static id<MTLRenderPipelineState> pso_build_ex(MTLRenderPipelineDescriptor *d, i
         os_unfair_lock_unlock(&g_pbase_lock);
         if (!base) { if (compile && e) *e = job->error; return nil; }
     }
-    if (!rast) return base;
+    if (!rast || g_pw_tool) return base;   // the prewarm tool wants the base alone, its colour state is the device's
     uint64_t ts = bp_now();
     MTL4RenderPipelineDescriptor *s = spec_desc(base, &g_spec_own);
     for (int i = 0; i < 8; i++) pso_col4(s.colorAttachments[i], d.colorAttachments[i]);
@@ -9908,7 +9944,8 @@ static void warm_task(WarmTask *t) {
             pso_key k = sk.k; k.vs = (__bridge void *)vs; k.fs = (__bridge void *)fs; k.fsfn = (__bridge void *)fsfn;   // pso_skey_parse normalized rows written before the key was
             NSError *e = nil; id ps = pso_build(pso_desc(&k, vs, fs, fsfn, sk.merged), !k.border, &e);
             g_warm_done++;
-            if (!ps) { MLOG("[RED] background render pipeline creation failed: %s", e.localizedDescription.UTF8String); continue; }
+            if (!ps) { g_pw_failed++; MLOG("[RED] background render pipeline creation failed: %s", e.localizedDescription.UTF8String); continue; }
+            if (g_pw_tool) { g_warm_rps++; continue; }   // the base is in the serializer; keep nothing
             WarmItem *item = [WarmItem new]; item->kind = 1; item->vs_key = t->vkey; item->fs_key = t->fkey; item->vs = vs; item->fs = fs; item->fsfn = fsfn; item->pso = k; item->object = ps;
             warm_enqueue(item); g_warm_rps++;
         }
@@ -10004,6 +10041,67 @@ static void prepare_prebuild(void) {
     int left = atomic_load(&g_pre_running) ? n - (int)g_pre_done : 0;   // a worker's last compile can still be under way
     if (left > 0) MLOG("pipeline prepare: every shader pair handed out after %.1f s; %d compiles still under way finish in the background", (bp_now() - t0) / 1e9, left);
     if (shown) front_progress(NULL, n, n);
+}
+// ---- The prewarm tool: the R rows' bases, made offline and bundled with the app ----
+// The prepare step builds one base per distinct (shader pair, vertex layout, topology, sample count) the prewarm list's R rows name, before the first frame: Ocarina of Time's
+// 40,000 lines are about 6,400 of them, 450-475 s on an M5 Max at a first start (5.5 s once they are in the device's archive). pso_offline.py (metal-tt) makes the bases without a
+// vertex layout, the pairs' pulling stand-ins; the others are built from the descriptor pso_desc makes out of a pso_skey and the shader's reflection (vertex attributes, strides,
+// formats), which only this code knows. So DM_PSO_PREWARM=tool runs the prepare step's own tasks (warm_parse, warm_task: the same decode, the same libraries, the same descriptor),
+// with the bases going into the serializer and nothing else kept, and writes what it captured as the files pso_bundle_open_prewarm opens. The depth mode, which a run knows only at
+// the first submit (nvnDeviceSetDepthMode), comes as DM_PSO_PREWARM_DEPTH=zero from the profile's depth_mode key (as DM_PSO_PREBUILD_DEPTH): a base for the other mode is simply
+// not found at a run, whose lookup is by content.
+// Environment as for a run (DM_NVN_SHMAP, DM_MSL_DIR), and: DM_PSO_ARCHIVE=<work folder> where the captures are written (the flush periods of ARCH_PERIOD_MAX, as a run writes them;
+// a folder with files from an earlier run is opened like a device's, so an interrupted run goes on from where it was), DM_PSO_PREWARM_OUT=<folder> where <GPU>-prewarm-<NN>.mtl4a and
+// prewarm.tsv are put, DM_PSO_BUNDLE=<folder> the pairs' bundle (bases it holds are not captured again), DM_PSO_PREWARM_LIST=<file> (default: pso_manifest.tsv beside the shader map),
+// DM_PSO_PREWARM_THREADS=<n> workers (default: compile_tasks). Returns 0 when not asked for, 1 done, 2 failed
+int mtl_pso_prewarm_tool(void) {
+    const char *e = getenv("DM_PSO_PREWARM"); if (!e || strcmp(e, "tool")) return 0;
+    g_pw_tool = 1;
+    setenv("DM_PSO_MANIFEST", "off", 1);   // loading the shader map starts no prewarm: the tool runs the list's R rows itself
+    mtl_init(); const char *z = getenv("DM_PSO_PREWARM_DEPTH"); if (z && !strcmp(z, "zero")) atomic_store(&g_depth_zero, 1);
+    const char *oc = getenv("DM_PSO_PREWARM_OUT"), *ac = getenv("DM_PSO_ARCHIVE");
+    if (!oc || !*oc || !ac || !*ac || !strcmp(ac, "off")) { MLOG("[RED] prewarm tool: DM_PSO_PREWARM_OUT (where the bundled files go) and DM_PSO_ARCHIVE (the work folder of the captures) are both needed"); return 2; }
+    shmap_load(); pso4_init();
+    if (!g_comp4 || !g_arch_cap) { MLOG("[RED] prewarm tool: no Metal 4 compiler or pipeline serializer: nothing can be captured"); return 2; }
+    const char *lc = getenv("DM_PSO_PREWARM_LIST");
+    NSString *list = lc && *lc ? @(lc) : [g_shmap_path.stringByDeletingLastPathComponent stringByAppendingPathComponent:@"pso_manifest.tsv"], *out = @(oc);
+    warm_load_begin(); long lines = 0; NSMutableArray<WarmTask *> *tasks = [NSMutableArray array]; long rows = 0;
+    for (WarmTask *t in warm_parse(@[list], &lines)) if (t->kind == 1) { [tasks addObject:t]; rows += (long)t->rs.count; }   // S rows only load shaders, C rows are the bundle's, M rows build no base
+    int threads = getenv("DM_PSO_PREWARM_THREADS") ? atoi(getenv("DM_PSO_PREWARM_THREADS")) : 0; if (threads <= 0) threads = compile_tasks();
+    MLOG("prewarm tool: %ld R rows of %s in %lu shader pairs, %d workers, depth %s, captures in %s", rows, list.UTF8String, (unsigned long)tasks.count, threads, atomic_load(&g_depth_zero) ? "near=0" : "near=-w", g_arch_dir.UTF8String);
+    uint64_t t0 = bp_now(); __block _Atomic long next = 0; long n = (long)tasks.count;
+    dispatch_group_t g = dispatch_group_create();
+    for (int w = 0; w < threads; w++) dispatch_group_async(g, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        for (;;) { long i = atomic_fetch_add(&next, 1); if (i >= n) break; warm_task(tasks[(NSUInteger)i]); }
+    });
+    while (dispatch_group_wait(g, dispatch_time(DISPATCH_TIME_NOW, 10 * (int64_t)NSEC_PER_SEC))) {
+        MLOG("prewarm tool: %ld of %ld rows, %llu bases compiled, %llu from the archives, %d failed, %.0f s", (long)g_warm_done, rows, (unsigned long long)g_pb_built, (unsigned long long)g_pb_archived,
+             (int)atomic_load(&g_pw_failed), (bp_now() - t0) / 1e9);
+        if (atomic_load(&g_arch_new) >= 1000) arch_flush();   // the serializer holds what it captured until written
+    }
+    arch_flush_wait();
+    NSFileManager *fm = NSFileManager.defaultManager; NSString *gpu = g_dev.architecture.name, *pre = pw_prefix(gpu);
+    NSArray<NSString *> *staged = [[[fm contentsOfDirectoryAtPath:g_arch_dir error:nil] filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"self ENDSWITH '.mtl4a'"]] sortedArrayUsingSelector:@selector(compare:)];
+    [fm createDirectoryAtPath:out withIntermediateDirectories:YES attributes:nil error:nil];
+    for (NSString *old in [fm contentsOfDirectoryAtPath:out error:nil]) if ([old hasPrefix:pre] || [old isEqualToString:@"prewarm.tsv"]) [fm removeItemAtPath:[out stringByAppendingPathComponent:old] error:nil];
+    int k = 0, bad = 0; unsigned long long bytes = 0;
+    for (NSString *name in staged) {   // the folder's files are the bases of this run and of any earlier one into it: a hard link, else a copy
+        NSString *src = [g_arch_dir stringByAppendingPathComponent:name];
+        if (!arch_file_ok(src)) { bad++; MLOG("[RED] prewarm tool: %s is not a pipeline archive, left out", src.UTF8String); continue; }
+        NSString *dst = [out stringByAppendingPathComponent:[NSString stringWithFormat:@"%@%02d.mtl4a", pre, k]];
+        if (![fm linkItemAtPath:src toPath:dst error:nil] && ![fm copyItemAtPath:src toPath:dst error:nil]) { bad++; MLOG("[RED] prewarm tool: cannot put %s in %s", name.UTF8String, out.UTF8String); continue; }
+        NSString *ksrc = arch_keys_path(src), *kdst = arch_keys_path(dst);   // its index goes with it (the host reads it at the open)
+        if ([fm fileExistsAtPath:ksrc] && ![fm linkItemAtPath:ksrc toPath:kdst error:nil] && ![fm copyItemAtPath:ksrc toPath:kdst error:nil]) MLOG("[RED] prewarm tool: cannot put the index of %s in %s", name.UTF8String, out.UTF8String);
+        bytes += [[fm attributesOfItemAtPath:dst error:nil] fileSize]; k++;
+    }
+    NSString *stamp = [NSString stringWithFormat:@"chain\t%s\ndepth\t%s\nrows\t%ld\nfiles\t%d\nbases\t%llu\n%@", DMSH_CHAIN, atomic_load(&g_depth_zero) ? "near=0" : "near=-w", rows, k,
+                       (unsigned long long)(g_pb_built + g_pb_archived), arch_os_build()];
+    if (k) [stamp writeToFile:[out stringByAppendingPathComponent:@"prewarm.tsv"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    MLOG("prewarm tool done: %ld rows, %llu bases compiled, %llu already archived, %d rows failed, %d files (%.1f MB) in %s, %.1f s", rows, (unsigned long long)g_pb_built, (unsigned long long)g_pb_archived,
+         (int)atomic_load(&g_pw_failed), k, bytes / 1048576.0, out.UTF8String, (bp_now() - t0) / 1e9);
+    int ok = !bad && !atomic_load(&g_arch_cap_off) && (k || !rows);
+    if (!ok) MLOG("[RED] prewarm tool: the output is incomplete (%d files not usable, capturing %s)", bad, atomic_load(&g_arch_cap_off) ? "stopped" : "went on");
+    return ok ? 1 : 2;
 }
 static void warm_start(void) {
     if (g_warm_started++) return;

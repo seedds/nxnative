@@ -2368,6 +2368,15 @@ static int fstep_hold(void) {
     }
     return h;
 }
+// The longest hold the frame step may give at cap c (nvn_fstep_next's kmax), and why it may go no higher, for the log: a 30 fps cap's display link runs at 30 Hz, where a hold of 3
+// would take two ticks (66.7 ms), so it holds 2 and late frames are shown at the next vsync instead (nvn_fstep.h fine)
+static int fstep_kmax(int c, const char **why) {
+    int kmin = fstep_hz() / c;
+    if (fps_high()) { *why = "120 fps: the game steps by its target, so a late frame steps down to 60 and no further"; return 2; }
+    if (!fstep_hold()) { *why = "fps_hold off: frames are not held longer than the cap's vsyncs"; return kmin; }
+    if (kmin >= 2) { *why = "the 30 fps cap's display link runs at 30 Hz, where a hold of 3 would take 66.7 ms; late frames are shown at the next vsync of a 60 Hz link instead"; return 2; }
+    *why = "the games' own interval logic uses 1-3"; return FSTEP_MAX;
+}
 // Once per present, before this frame's period is taken: the time since the previous frame's start (shown) and the frame's cost decide this frame's hold and the next frame's step.
 // Cost = max(CPU: the time between the frames' starts without the pacing wait, GPU: the latest finished frame's GPU time), in vsyncs
 static void fstep_tick(const win_t *o, int c) {
@@ -2381,8 +2390,8 @@ static void fstep_tick(const win_t *o, int c) {
     static uint64_t pdisp; static int pdisp_ok; uint64_t ndisp = mtl_dispatches();   // and the dispatches (none is a count too)
     double disps = pdisp_ok ? (double)(ndisp - pdisp) : -1; pdisp = ndisp; pdisp_ok = 1;
     double cpu = shown - pw / v, cost = cpu > gpu ? cpu : gpu;
-    int kmin = fstep_hz() / c, kmax = fps_high() ? 2 : !fstep_hold() ? kmin : kmin >= 2 ? 2 : FSTEP_MAX, k0 = g_fs.k,   // at 120 fps a late frame must step down whatever fps_hold says: the game steps by the target
-         kmin0 = g_fs.kmin, probe0 = g_fs.probe;
+    const char *kwhy; int kmin = fstep_hz() / c, kmax = fstep_kmax(c, &kwhy), k0 = g_fs.k;   // at 120 fps a late frame must step down whatever fps_hold says: the game steps by the target
+    int kmin0 = g_fs.kmin, probe0 = g_fs.probe;
     int fixed = dm_fps_state ? (int)__atomic_load_n((uint32_t *)(dm_fps_state + 0x24), __ATOMIC_RELAXED) : 0;
     uint64_t probes0 = g_fs.probes, failed0 = g_fs.failed;
     // A screen whose rate is not a multiple of 60 (144, 165 Hz) shows the link's 1/60 s ticks on their nearest refreshes (nvn_mtl.m link_range), so a frame on time can show for one
@@ -2443,9 +2452,10 @@ static void fstep_tick(const win_t *o, int c) {
         if (o->presents % 1800 == 0) { LOG("[nvn] 120 fps: held 1 / 2 ticks %llu / %llu frames, %llu late, %llu up / %llu down (%llu probes, %llu failed trials)", (unsigned long long)held[1], (unsigned long long)held[2], (unsigned long long)g_fs.late, (unsigned long long)g_fs.ups, (unsigned long long)g_fs.downs, (unsigned long long)g_fs.probes, (unsigned long long)g_fs.failed); memset(held, 0, sizeof held); }
     } else if (o->presents % 1800 == 0) {   // game time against real time (1.000 = normal speed; lower when a device cannot hold 20 fps or after long stalls)
         uint64_t vs = __atomic_load_n((uint64_t *)(dm_fps_state + 0x30), __ATOMIC_RELAXED) + fixed_sum, t = now_ns();
-        if (t0) LOG("[nvn] frame step: game time %.2f s in %.2f s (%.3f of real time); held 1 / 2 / 3 vsyncs %llu / %llu / %llu frames, %llu late, %llu vsyncs paid back, %.0f dropped, %llu up / %llu down (%llu probes, %llu failed trials)",
+        char fn[96] = ""; if (kmax == 2 && kmin == 2) snprintf(fn, sizeof fn, ", now %s (%llu times so far)", g_fs.fine ? "at the next vsync" : "on the 30 Hz link", (unsigned long long)g_fs.fines);
+        if (t0) LOG("[nvn] frame step: game time %.2f s in %.2f s (%.3f of real time); held 1 / 2 / 3 vsyncs %llu / %llu / %llu frames, %llu late, %llu vsyncs paid back, %.0f dropped, %llu up / %llu down (%llu probes, %llu failed trials); cap %d fps, hold at most %d vsyncs: %s%s",
                     (vs - v0) / 60.0, (t - t0) / 1e9, (vs - v0) / 60.0 / ((t - t0) / 1e9), (unsigned long long)held[1], (unsigned long long)held[2], (unsigned long long)held[3],
-                    (unsigned long long)g_fs.late, (unsigned long long)g_fs.paid, g_fs.dropped, (unsigned long long)g_fs.ups, (unsigned long long)g_fs.downs, (unsigned long long)g_fs.probes, (unsigned long long)g_fs.failed);
+                    (unsigned long long)g_fs.late, (unsigned long long)g_fs.paid, g_fs.dropped, (unsigned long long)g_fs.ups, (unsigned long long)g_fs.downs, (unsigned long long)g_fs.probes, (unsigned long long)g_fs.failed, c, kmax, kwhy, fn);
         t0 = t; v0 = vs; memset(held, 0, sizeof held);
     }
 }
@@ -2469,7 +2479,8 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     if (fps_high()) high_cap_tick();
     if (dm_fps_state) __atomic_store_n((uint32_t *)(dm_fps_state + 4), (uint32_t)dm_movie_playing(), __ATOMIC_RELAXED);   // the stubs' copy of the movie state (hle.h)
     int c = fps_step_cap();
-    if (dm_fps_state) { static int was; if (c != was) { LOG("[nvn] frame step cap %d → %d fps at present %llu%s", was, c, (unsigned long long)o->presents, c == 30 && was == 60 ? (dm_movie_playing() ? " (movie playing)" : thermal_capped() ? " (thermal state serious)" : "") : ""); was = c; } }
+    if (dm_fps_state) { static int was; if (c != was) { char kw[256] = ""; const char *kwhy; if (c) snprintf(kw, sizeof kw, ": hold at most %d vsyncs, %s", fstep_kmax(c, &kwhy), kwhy);   // the cap and why the hold may not rise above it, so a log shows both at once
+        LOG("[nvn] frame step cap %d → %d fps at present %llu%s%s", was, c, (unsigned long long)o->presents, c == 30 && was == 60 ? (dm_movie_playing() ? " (movie playing)" : thermal_capped() ? " (thermal state serious)" : "") : "", kw); was = c; } }
     if (c) fstep_tick(o, c);
     dm_fps_lock_tick();   // after the frame step: at 120 fps the target follows the hold just decided
     static uint64_t prev_in, prev_out, prev_pass, prev_draw;

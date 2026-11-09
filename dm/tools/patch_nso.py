@@ -1556,7 +1556,9 @@ obs += region_obs
 # stub holds full resolution (DM_DYNAMIC_RESOLUTION, written by the loader; the stub declares the DYNAMIC_RESOLUTION capability). Stub bodies assembled with clang
 # A build's stubs are FRAME_STEP[build ID](ctx) in its patches.py: ctx.here() / ctx.emit(word) assemble into the patch area, ctx.site(offset, original bytes) asserts a site and that it is
 # no rewrite site, ctx.put(offset, words, reason) writes it (listed with the cuts), ctx.state is the state page's offset, ctx.render_scale = 1 marks a render-scale stub,
-# ctx.others the other functions a MATCH_FRAME_STEP rule names, and ctx.capabilities.add(name) declares a launcher capability the stubs provide (written as CAPABILITIES are)
+# ctx.others the other functions a MATCH_FRAME_STEP rule names, ctx.address(offset) the data address an adrp there and the add / load / store after it make (in the original
+# text: the fingerprints mask those pages, so a matched stub reads the globals it needs from its functions), and ctx.capabilities.add(name) declares a launcher capability the
+# stubs provide (written as CAPABILITIES are)
 FRAME_STEP = PATCHES['FRAME_STEP']
 FS_STATE_OFF = 0
 RENDER_SCALE = 0   # 1 = the build has a render-scale stub (state +0x10): the fixups table says so (RENDER_SCALE), and the iOS launcher offers the setting (dm/games/settings.tsv)
@@ -1577,9 +1579,18 @@ if (BUILD_ID in FRAME_STEP or FS_MATCH) and NAME == 'main':
         old = bytes(IMG[off:off + 4 * len(words)])
         for i, w in enumerate(words): struct.pack_into('<I', IMG, off + 4 * i, w)
         cuts.append((off, old.hex(), bytes(IMG[off:off + 4 * len(words)]).hex(), why + (' [function match]' if FS_MATCH else ''))); stat('frame_step')
+    def fs_address(off):   # the data address the adrp at off and the add / unsigned-offset load or store right after it (on the adrp's register) make, from the original text
+        a, b = struct.unpack_from('<2I', ORIG_TEXT, off)
+        assert a & 0x9f000000 == 0x90000000, f'frame step: no adrp at {off:#x}'
+        imm = (((a >> 5) & 0x7ffff) << 2 | (a >> 29) & 3) << 12
+        page = (off & ~0xfff) + (imm - (1 << 33) if imm & 1 << 32 else imm)
+        assert (b >> 5) & 31 == a & 31, f'frame step: the instruction after the adrp at {off:#x} does not use its register'
+        if b & 0xffc00000 == 0x91000000: return page + ((b >> 10) & 0xfff)                       # add xD, xN, #imm
+        assert b & 0x3b000000 == 0x39000000, f'frame step: no add, load or store after the adrp at {off:#x}'
+        return page + ((b >> 10) & 0xfff) * (1 << (b >> 30)) * (16 if b & 0x04800000 == 0x04800000 and b >> 30 == 0 else 1)   # scaled by the access size (q: 16)
 if FS_STATE_OFF:   # the build's stubs (FRAME_STEP of its patches.py), or those placed by their function (MATCH_FRAME_STEP: ctx.base is its start)
     use_area(0); fs = types.SimpleNamespace(here=here, emit=emit, site=fs_site, put=fs_put, state=FS_STATE_OFF, render_scale=0, base=FS_MATCH[1] if FS_MATCH else 0,
-                                            others=FS_MATCH[2] if FS_MATCH else {}, capabilities=set())
+                                            others=FS_MATCH[2] if FS_MATCH else {}, capabilities=set(), address=fs_address)
     (FS_MATCH[0]['stub'] if FS_MATCH else FRAME_STEP[BUILD_ID])(fs); RENDER_SCALE = fs.render_scale; FS_CAPABILITIES = fs.capabilities
 
 # ---- Spin waits (every module) ----

@@ -428,23 +428,23 @@ int main(int argc, char **argv) { @autoreleasepool {
     if (!g_lib) { fprintf(stderr, "%s\n", err.localizedDescription.UTF8String); return 1; }
     g_lib2 = [g_dev newLibraryWithSource:[src stringByAppendingString:@"// another library: the same source would come back as the same library\n"] options:nil error:&err];
     // A fresh process is essential: a compiler that built the source archives still has their online binaries.
-    if (argc == 3 && !strncmp(argv[1], "--legacy-", 9)) {   // across fresh processes: nine run files named before the count (the test renames them) are compacted once, then not again
-        int seed = !strcmp(argv[1], "--legacy-seed"), replay = !strcmp(argv[1], "--legacy-replay");
+    if (argc == 3 && !strncmp(argv[1], "--oldname-", 10)) {   // across fresh processes: nine run files named before the count (the test renames them) are compacted once, then not again
+        int seed = !strcmp(argv[1], "--oldname-seed"), replay = !strcmp(argv[1], "--oldname-replay");
         pso4_init();
         NSMutableArray<MTLRenderPipelineDescriptor *> *descs = [NSMutableArray array];
         for (int i = 0; i <= PSO_ARCH_COMPACT; i++) {
             MTLRenderPipelineDescriptor *cd = desc(MTLPixelFormatRGBA8Unorm, 0, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll, 1);
             cd.vertexDescriptor.layouts[16].stride = 16 * (i + 2); [descs addObject:cd];
         }
-        if (seed) for (MTLRenderPipelineDescriptor *cd in descs) { EXPECT("legacy restart: pipeline", 1, pso_build(cd, &err) != nil); arch_flush_wait(); }
+        if (seed) for (MTLRenderPipelineDescriptor *cd in descs) { EXPECT("old names restart: pipeline", 1, pso_build(cd, &err) != nil); arch_flush_wait(); }
         else {
-            EXPECT("legacy restart: the nine old names compacted once", replay ? PSO_ARCH_COMPACT + 1 : 0, g_compact_enabled ? compacting_n() : 0);
+            EXPECT("old names restart: the nine old names compacted once", replay ? PSO_ARCH_COMPACT + 1 : 0, g_compact_enabled ? compacting_n() : 0);
             uint64_t arch0 = g_pb_archived, built0 = g_pb_built;
             atomic_store(&g_warm_running, 1);
             for (MTLRenderPipelineDescriptor *cd in descs) pso_build(cd, &err);
             atomic_store(&g_warm_running, 0);
-            EXPECT("legacy restart: every base from disk", arch0 + descs.count, g_pb_archived);
-            EXPECT("legacy restart: none compiled", built0, g_pb_built);
+            EXPECT("old names restart: every base from disk", arch0 + descs.count, g_pb_archived);
+            EXPECT("old names restart: none compiled", built0, g_pb_built);
             arch_flush_wait();
         }
         [NSFileManager.defaultManager removeItemAtPath:@(dir) error:nil];

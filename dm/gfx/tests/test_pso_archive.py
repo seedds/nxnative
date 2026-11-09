@@ -25,8 +25,8 @@ class ArchiveRestartTests(unittest.TestCase):
                     self.assertEqual((Path(folder) / 'compacting').exists(), phase == 'seed', phase)
 
 
-    def test_legacy_names_compacted_once(self):
-        with tempfile.TemporaryDirectory(prefix='pso-legacy-') as folder:
+    def test_old_names_compacted_once(self):
+        with tempfile.TemporaryDirectory(prefix='pso-oldname-') as folder:
             env = dict(os.environ, DM_PSO_MTL4='1', MTL_DEBUG_LAYER='1')
             for name in ('DM_GPU_CAPTURE', 'MTL_CAPTURE_ENABLED', 'DM_TEST_ARCHIVE_CONSTANTS', 'DM_TEST_ARCHIVE_MIXED'):
                 env.pop(name, None)
@@ -36,7 +36,7 @@ class ArchiveRestartTests(unittest.TestCase):
                     for path in Path(folder).glob('*-*.mtl4a'):
                         path.rename(path.with_name(path.name.split('-')[0] + '.mtl4a'))
                     self.assertEqual(len(list(Path(folder).glob('*-*.mtl4a'))), 0)
-                result = subprocess.run([executable, '--legacy-' + phase, folder],
+                result = subprocess.run([executable, '--oldname-' + phase, folder],
                                         env=env, capture_output=True, text=True, timeout=60)
                 self.assertEqual(result.returncode, 0, phase + '\n' + result.stdout + result.stderr)
                 self.assertEqual(len(list(Path(folder).glob('*.mtl4a'))), files, phase)

@@ -5,7 +5,9 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-typedef struct { CGRect game, controls; BOOL separated, topSafeOnly; } DmLayout;
+// game: the picture's rectangle; controls: the touch controls'; area: where the picture may go (the view in the overlay layout, the part above the controls in a split), whose shape a
+// profile with screen_aspect any renders (front_ios.m view_shape, front.h front_view_aspect)
+typedef struct { CGRect game, controls; BOOL separated, topSafeOnly; CGRect area; } DmLayout;
 
 // Rotation (DM_ROTATION, a launcher and in-game menu setting): auto, landscape or portrait. auto gives `automatic`: every orientation for the view controllers, so the app's own list
 // decides, and for the app (front_ios_app_orientations) its Info.plist list for the device: the phone's two landscapes, the iPad's four. landscape locks the two landscapes, portrait
@@ -55,7 +57,7 @@ static inline CGRect dm_horizontal_division(CGRect b, CGRect division) {
 }
 
 static inline DmLayout dm_layout(CGRect b, UIEdgeInsets insets, BOOL partiallyOpen, CGRect division, CGFloat aspect) {
-    DmLayout l = { dm_aspect_fit(b, aspect), b, NO, NO };
+    DmLayout l = { dm_aspect_fit(b, aspect), b, NO, NO, b };
     if (CGRectIsEmpty(b)) return l;
     division = dm_horizontal_division(b, division);
     BOOL portrait = b.size.height > b.size.width;
@@ -67,17 +69,26 @@ static inline DmLayout dm_layout(CGRect b, UIEdgeInsets insets, BOOL partiallyOp
     CGRect lower = CGRectMake(CGRectGetMinX(b), CGRectGetMaxY(division), b.size.width,
                              CGRectGetMaxY(b) - CGRectGetMaxY(division));
     if (upper.size.height <= 0 || CGRectGetMaxY(safe) <= CGRectGetMinY(lower)) return l;
-    l.game = dm_aspect_fit(upper, aspect); l.controls = lower; l.separated = YES;
+    l.game = dm_aspect_fit(upper, aspect); l.controls = lower; l.separated = YES; l.area = upper;
     return l;
 }
 
+// The touch controls are hidden (a controller is connected, DmGamepad.m dm_gamepad_off): upright with no fold to split at, the picture takes the whole screen inside its safe area
+// instead of the half above controls that are not there. Landscape, and a half-folded Duo's split at its fold, stay as dm_layout makes them
+static inline DmLayout dm_layout_controls_hidden(DmLayout l, CGRect b, UIEdgeInsets insets, BOOL partiallyOpen, CGRect division, CGFloat aspect) {
+    if (CGRectIsEmpty(b) || b.size.height <= b.size.width || partiallyOpen || !CGRectIsNull(dm_horizontal_division(b, division))) return l;
+    CGRect safe = UIEdgeInsetsInsetRect(b, insets);
+    if (CGRectIsEmpty(safe)) return l;
+    return (DmLayout){ dm_aspect_fit(safe, aspect), b, NO, NO, safe };
+}
+
 // The picture is on a TV (front_ios.m DmTVSceneDelegate): the controls take the whole view and no touch goes to the game's touch screen (the game is docked there).
-static inline DmLayout dm_layout_pad_only(CGRect b) { return (DmLayout){ CGRectZero, b, NO, NO }; }
+static inline DmLayout dm_layout_pad_only(CGRect b) { return (DmLayout){ CGRectZero, b, NO, NO, CGRectZero }; }
 
 // Fill covers the full view only in the overlay layout (landscape). A portrait or tabletop split keeps the picture fitted in its
-// area above the controls, where cropping a small picture would cost more than the bars.
+// area above the controls, where cropping a small picture would cost more than the bars, and so does an upright screen with the controls hidden (a 16:9 picture would lose most of its width)
 static inline DmLayout dm_layout_picture(DmLayout l, CGRect b, BOOL fill, CGFloat aspect) {
-    if (fill && !l.separated && !CGRectIsEmpty(b)) l.game = dm_aspect_fill(b, aspect);
+    if (fill && !l.separated && !CGRectIsEmpty(b) && b.size.width >= b.size.height) l.game = dm_aspect_fill(b, aspect);
     return l;
 }
 
@@ -93,5 +104,6 @@ UIView *dm_gamepad_view(CGRect frame);
 void dm_gamepad_arrange(UIView *view, DmLayout layout);
 void dm_gamepad_reset(void);
 void dm_gamepad_opmode_changed(void);   // the console mode changed (the in-game menu, a TV): the Tap layout exists only in handheld mode
+BOOL dm_gamepad_off(UIView *view);   // the touch controls are hidden while a controller is in use (the view stays, for game touches)
 
 NS_ASSUME_NONNULL_END

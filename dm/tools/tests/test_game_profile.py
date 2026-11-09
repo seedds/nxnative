@@ -1,5 +1,5 @@
 # dm/games/game.py's profile-key validation, on a synthetic profile: pso_gpu (the GPU architectures the app's offline pipeline archive is made for, beside pso_mtl4) takes, none and no others,
-# and a profile without the key generates its header unchanged; the game's upscaler shaders (the launcher's Game's upscaler) are the compute shaders its shader map found in agl_ndsr.pck
+# and a profile without the key generates its header unchanged; the game's upscaler shaders (the launcher's Game's upscaler) are the compute shaders its shader map found in agl_ndsr.pck, and its chained upscaler's those of agl_ndsr_vr(_light).pck
 from pathlib import Path
 import os
 import subprocess
@@ -61,10 +61,17 @@ def macros(shader_map):
 
 class UpscalerKeys(unittest.TestCase):
     def test_from_shader_map(self):
-        none = ['#define DM_GAME_UPSCALER_KEYS ""', '#define DM_GAME_UPSCALER_N 0']   # the launcher hides the setting
+        none = ['#define DM_GAME_UPSCALER_KEYS ""', '#define DM_GAME_UPSCALER_N 0', '#define DM_GAME_UPSCALER_CHAIN_KEYS ""', '#define DM_GAME_UPSCALER_CHAIN_N 0']   # the launcher hides the setting
         self.assertEqual(macros(None), none)
         self.assertEqual(macros(MAP.split('cs_other.bin')[0]), none)
-        self.assertEqual(macros(MAP), ['#define DM_GAME_UPSCALER_KEYS "7629d857a0a93833,c56db3d5a0f1b5af"', '#define DM_GAME_UPSCALER_N 2'])
+        self.assertEqual(macros(MAP), ['#define DM_GAME_UPSCALER_KEYS "7629d857a0a93833,c56db3d5a0f1b5af"', '#define DM_GAME_UPSCALER_N 2',
+                                       '#define DM_GAME_UPSCALER_CHAIN_KEYS ""', '#define DM_GAME_UPSCALER_CHAIN_N 0'])
+
+    def test_chain_from_shader_map(self):   # Ocarina of Time's agl_ndsr_vr packs: the chain's keys, counted in DM_GAME_UPSCALER_N so the launcher shows the setting
+        vr = ('cs_other.bin\t6\tcompute\tf8965bffbdf51d78\t/Lib/agl/agl_resource.Nin_Ounce_NVN2.release.sarc.zs/agl_ndsr_vr.pck#NDSR@0x97710\n'
+              'cs_other.bin\t7\tcompute\tfa3033d05c0a41d6\t/Lib/agl/agl_resource.Nin_Ounce_NVN2.release.sarc.zs/agl_ndsr_vr_light.pck#NDSR@0x84910\n')
+        self.assertEqual(macros(MAP.split('cs_other.bin')[0] + vr), ['#define DM_GAME_UPSCALER_KEYS ""', '#define DM_GAME_UPSCALER_N 2',
+                                                                     '#define DM_GAME_UPSCALER_CHAIN_KEYS "f8965bffbdf51d78,fa3033d05c0a41d6"', '#define DM_GAME_UPSCALER_CHAIN_N 2'])
 
 
 if __name__ == '__main__':

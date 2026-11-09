@@ -5440,6 +5440,7 @@ static void shmap_read(void) {
     NSMutableDictionary *geo_mesh;   // a vertex shader's mesh entries by lean kernel key (geo_mesh_fn; NSNull: none)
     uint8_t up_mfx;   // a compute shader that is the game's own upscaler (DM_GAME_UPSCALER_KEYS, from the shader map): 0 not decided, 1 drawn by MetalFX when DM_UPSCALER=metalfx, 2 not one or one its colour keeps (up_mfx_wanted)
     uint8_t up_color;   // such a shader's colour, from its code at load with DM_UPSCALER=metalfx (up_mfx_color; UP_COLOR_UNREAD otherwise)
+    uint8_t up_chain;   // a compute shader of the game's chained upscaler (DM_GAME_UPSCALER_CHAIN_KEYS): 0 not decided, then one of UPC_* (up_chain_dispatch)
     int gs_loc, lay_loc; char gs_comp, lay_comp;   // a slice-writing geometry shader (no function: the layer comes from input gs_loc.gs_comp) / a vertex shader with layer entry points writing output lay_loc.lay_comp (dmsh_build.py gs_slice, vs_layer_entry); -1 = none
     uint64_t cbs_seen; uint32_t cbs_runs;   // the command buffer that listed this shader last, and how many have (cbs_note)
     // The argument buffer encoded last time
@@ -12690,7 +12691,7 @@ static int lc_keeps(uint32_t op) {
 }
 
 static void dispatch(const p_dispatch *dp);
-static int up_mfx_wanted(NvShader *cs); static int up_mfx_encode(NvShader *cs);   // a game's upscaler through MetalFX (see up_mfx_encode)
+static int up_mfx_wanted(NvShader *cs); static int up_mfx_encode(NvShader *cs); static int up_chain_dispatch(NvShader *cs);   // a game's upscaler through MetalFX (see up_mfx_encode, up_chain_dispatch)
 // ---------- Compute dispatches moved ahead of the render pass they would split (DM_NVN_CS_HOIST) ----------
 // Metal cannot run a compute dispatch inside a render pass, so a dispatch between two draws of one pass ends it, and on a tile-based GPU every attachment is stored and loaded again:
 // Breath of the Wild runs one GPU particle dispatch per emitter between the G-buffer's effect draws, six to eight splits of a 1600x900 G-buffer a frame (about 350 MB of attachment
@@ -13363,6 +13364,7 @@ static void dispatch(const p_dispatch *dp) {
     rp_flush();   // A full clear with no draw after it waits for the next pass on its targets, but it comes before this dispatch, which may read or write them as images: land it first, as copy_t2t does
     image_prepare(prog_get(S.cprog), 0x20);
     if (up_mfx_wanted(cs) && !dp->ind && up_mfx_encode(cs)) return;   // the game's upscaler, drawn by MetalFX instead (DM_UPSCALER=metalfx)
+    if (DM_GAME_UPSCALER_CHAIN_N && !dp->ind && up_chain_dispatch(cs)) return;   // a dispatch of the game's chained upscaler that MetalFX drew or made unneeded
     int own = dispatch_own();
     g_dispatch_dim[0] = (uint32_t)dp->x; g_dispatch_dim[1] = (uint32_t)dp->y; g_dispatch_dim[2] = (uint32_t)dp->z;   // read back by the driver segment c0 (encode_args_)
     g_c0_dim_buf = nil;
@@ -15038,12 +15040,24 @@ static int up_mfx_color(const void *code, size_t n) {
 #undef UP_F16
     return enc32 && dec32 && !enc16 && !dec16 ? UP_COLOR_LINEAR : dec16 && !enc16 && !enc32 && !dec32 ? UP_COLOR_SRGB : UP_COLOR_KEEP;
 }
+// Whether the code holds any of the sRGB curves' constants up_mfx_color looks for (as floats or half floats)
+static int up_mfx_curves(const void *code, size_t n) {
+    float e1 = 0.0031308f, e2 = 1 / 2.4f, d1 = 0.04045f, d2 = 2.4f; __fp16 h1 = 0.41650390625f, h2 = 0.416748046875f, h3 = 0.040435791015625f, h4 = 2.3984375f;
+    return up_mfx_uses(code, n, &e1, 4) || up_mfx_uses(code, n, &e2, 4) || up_mfx_uses(code, n, &d1, 4) || up_mfx_uses(code, n, &d2, 4) ||
+           up_mfx_uses(code, n, &h1, 2) || up_mfx_uses(code, n, &h2, 2) || up_mfx_uses(code, n, &h3, 2) || up_mfx_uses(code, n, &h4, 2);
+}
 // Whether cs is one of the game's upscaler shaders (DM_GAME_UPSCALER_KEYS: comma-separated 16-digit keys)
 static int up_mfx_named(NvShader *cs) {
     for (const char *k = DM_GAME_UPSCALER_KEYS; *k; k += k[16] == ',' ? 17 : 16) if (!strncmp(k, cs->key, 16)) return 1;
     return 0;
 }
+static int up_chain_named(NvShader *cs);
+static int up_mfx_curves(const void *code, size_t n);
 static void up_mfx_read_color(NvShader *cs, const NVNshaderData *sd) {
+    if (!cs->up_color && DM_GAME_UPSCALER_CHAIN_N && up_mfx_on() && up_chain_named(cs)) {   // the chained upscaler: only whether the code has a colour curve (up_chain_dispatch)
+        uint32_t nctl, ncode = 0; if (sd->control) nvn_ctl_lens(sd->control, &nctl, &ncode);
+        cs->up_color = sd->data && ncode && ncode < (1u << 24) && !up_mfx_curves((const void *)(uintptr_t)sd->data, ncode) ? UP_COLOR_LINEAR : UP_COLOR_KEEP;
+        return; }
     if (cs->up_color || !DM_GAME_UPSCALER_N || !up_mfx_on() || !up_mfx_named(cs)) return;
     uint32_t nctl, ncode = 0; if (sd->control) nvn_ctl_lens(sd->control, &nctl, &ncode);
     cs->up_color = sd->data && ncode && ncode < (1u << 24) ? up_mfx_color((const void *)(uintptr_t)sd->data, ncode) : UP_COLOR_KEEP;
@@ -15091,15 +15105,18 @@ static int up_mfx_rect(const uint32_t v[4], NSUInteger w, NSUInteger h, NVNcopyR
     if (v[0] > INT_MAX || v[1] > INT_MAX || rw > INT_MAX || rh > INT_MAX || (uint64_t)v[0] + rw > w || (uint64_t)v[1] + rh > h) return 0;
     *r = (NVNcopyRegion){(int)v[0], (int)v[1], 0, (int)rw, (int)rh, 1}; return 1;
 }
-// The dispatch of upscaler cs as MetalFX's spatial scaler from its texture slot's rectangle to its image slot's (see above): 1 when drawn, 0 to run the shader
-static int up_mfx_encode(NvShader *cs) {
+// The dispatch of upscaler cs as MetalFX's spatial scaler from its texture slot's rectangle to its image slot's (see above): 1 when drawn, 0 to run the shader.
+// over: another texture to scale instead of the one cs reads, of the same size (the chained upscaler's colour, up_chain_dispatch); 0 = cs's own
+static int up_mfx_encode_from(NvShader *cs, int over) {
     int ti = -1, oi = -1;
     for (int i = 0; i < cs->rf.nb; i++) { int k = cs->rf.b[i].kind; if (k == NVN_RB_TEX && ti < 0) ti = i; else if (k == NVN_RB_IMG && oi < 0) oi = i; else if (k == NVN_RB_TEX || k == NVN_RB_IMG) return 0; }
     if (ti < 0 || oi < 0) { static int once; if (!once++) MLOG("[RED] upscaler %s: not one texture and one image; the shader draws", cs->key); return 0; }
-    int tin = (int)(tex_slot_h(S.tex[5], S.img[5], cs->rf.b[ti].reg) & 0xfffff), tout = cs->rf.b[oi].reg < 32 ? (int)(S.img[5][cs->rf.b[oi].reg] & 0xfffff) : 0;
+    int own = (int)(tex_slot_h(S.tex[5], S.img[5], cs->rf.b[ti].reg) & 0xfffff), tin = over ? over : own, tout = cs->rf.b[oi].reg < 32 ? (int)(S.img[5][cs->rf.b[oi].reg] & 0xfffff) : 0;
     tex_t dout = {0}; id<MTLTexture> in, out;
     os_unfair_lock_lock(&g_rmu);
     int ok = tin > 0 && tin < g_ntreg && g_treg[tin].ok && tout > 0 && tout < g_ntreg && g_treg[tout].ok;
+    if (ok && over) { id<MTLTexture> mine = own > 0 && own < g_ntreg && g_treg[own].ok ? tex_by_id(own) : nil, sub = tex_by_id(tin);   // the rectangles are cs's: the colour must be its input's size
+        ok = mine && sub && mine.width == sub.width && mine.height == sub.height; }
     if (ok) dout = g_treg[tout].t;
     in = ok ? tex_by_id(tin) : nil;
     // The sampled view can be read-only (channel swizzle) even when the image backing is writable.
@@ -15141,10 +15158,50 @@ static int up_mfx_encode(NvShader *cs) {
         args_dirty_all(); g_up_mfx_kept++; return 0;   // only the scratch image was scaled; the game's shader can still produce the output
     }
     args_dirty_all();
-    if (!g_up_mfx_n++) MLOG("upscaler: first dispatch of %s drawn by MetalFX, %dx%d at %d,%d of %lux%lu (format %lu) → %dx%d at %d,%d of %lux%lu (format %lu)%s", cs->key, ir.width, ir.height, ir.xoffset, ir.yoffset,
+    if (!g_up_mfx_n++) MLOG("upscaler: first dispatch of %s drawn by MetalFX%s, %dx%d at %d,%d of %lux%lu (format %lu) → %dx%d at %d,%d of %lux%lu (format %lu)%s", cs->key, over ? " from the chain's colour" : "", ir.width, ir.height, ir.xoffset, ir.yoffset,
                             (unsigned long)in.width, (unsigned long)in.height, (unsigned long)in.pixelFormat, orr.width, orr.height, orr.xoffset, orr.yoffset, (unsigned long)out.width, (unsigned long)out.height,
                             (unsigned long)out.pixelFormat, direct ? ", straight" : srgb ? ", through RGBA16F, decoded from sRGB" : ", through RGBA16F");
     return 1;
+}
+static int up_mfx_encode(NvShader *cs) { return up_mfx_encode_from(cs, 0); }
+// ---------- agl's chained upscaler (NDSR VR) drawn by MetalFX (DM_UPSCALER) ----------
+// Ocarina of Time upscales with agl_ndsr_vr.pck / agl_ndsr_vr_light.pck: four dispatches a frame instead of agl_ndsr.pck's one. The first reads the frame's colour (one texture: a 1440x810
+// R11G11B10F target in handheld mode) and writes a quarter-size image and two storage buffers; the second and third pack it into two R32Uint images; the network (one texture, one image,
+// the push constants of agl_ndsr's: the input and output rectangles) reads the last of them and writes the output picture (1920x1080). Each frame clears the intermediates, and nothing
+// outside the chain reads them. On an M1 the chain took 3.4 ms of a 30 fps frame. With DM_UPSCALER=metalfx the network's dispatch is drawn by the spatial scaler from the colour the first
+// dispatch read (up_mfx_encode_from, with the network's rectangles: that colour is its input's size), in HDR mode, for a network variant whose code has no sRGB curve (linear in and out);
+// a variant with a curve, or anything up_mfx_encode_from refuses, runs the chain. The three dispatches before the network are left out only while the previous network was drawn by
+// MetalFX and this frame's colour is known, so a refusal costs no frame: the chain then runs whole from the next frame on, and the skipped stages of this one are logged in red
+enum { UPC_STAGE = 1, UPC_NETWORK, UPC_KEEP, UPC_NONE };   // NvShader up_chain: a dispatch before the network, a network MetalFX draws, a network that keeps the chain, not in the chain
+static int g_upc_color, g_upc_ok, g_upc_skipped;   // the colour of this frame's chain (texture ID, 0 none), the previous network drawn by MetalFX, stages left out since the colour was taken
+static uint64_t g_upc_drawn, g_upc_left;   // networks drawn by MetalFX, stage dispatches left out
+void mtl_up_chain_stats(uint64_t *drawn, uint64_t *left) { *drawn = g_upc_drawn; *left = g_upc_left; }
+static int up_chain_named(NvShader *cs) {
+    for (const char *k = DM_GAME_UPSCALER_CHAIN_KEYS; *k; k += k[16] == ',' ? 17 : 16) if (!strncmp(k, cs->key, 16)) return 1;
+    return 0;
+}
+static int up_chain_dispatch(NvShader *cs) {
+    if (cs->up_chain == UPC_NONE || !up_mfx_on()) return 0;
+    int nt = 0, ni = 0, ti = -1;
+    if (!cs->up_chain) {
+        if (!up_chain_named(cs)) { cs->up_chain = UPC_NONE; return 0; }
+        for (int i = 0; i < cs->rf.nb; i++) { if (cs->rf.b[i].kind == NVN_RB_TEX) nt++; else if (cs->rf.b[i].kind == NVN_RB_IMG) ni++; }
+        cs->up_chain = nt == 1 && ni == 1 ? (cs->up_color == UP_COLOR_LINEAR ? UPC_NETWORK : UPC_KEEP) : UPC_STAGE;
+        MLOG("upscaler chain %s: %s", cs->key, cs->up_chain == UPC_STAGE ? "a stage before the network" : cs->up_chain == UPC_NETWORK ? "the network, no colour curve: MetalFX in HDR mode" : "the network, with a colour curve: the chain runs");
+    }
+    if (cs->up_chain == UPC_STAGE) {
+        nt = 0; for (int i = 0; i < cs->rf.nb; i++) if (cs->rf.b[i].kind == NVN_RB_TEX) { nt++; ti = i; }
+        if (nt == 1) { g_upc_color = (int)(tex_slot_h(S.tex[5], S.img[5], cs->rf.b[ti].reg) & 0xfffff); g_upc_skipped = 0; }   // the chain's first dispatch (the only stage with one texture): the frame's colour
+        if (!g_upc_ok || !g_upc_color) return 0;
+        g_upc_skipped++; g_upc_left++; return 1;
+    }
+    int color = g_upc_color; g_upc_color = 0;
+    int ok = cs->up_chain == UPC_NETWORK && color && up_mfx_encode_from(cs, color);
+    if (!ok && g_upc_skipped) MLOG("[RED] upscaler chain %s: MetalFX refused the network after %d stages were left out: this frame's picture is wrong; the chain runs whole from now on", cs->key, g_upc_skipped);
+    if (ok && !g_upc_drawn++) MLOG("upscaler chain: network %s drawn by MetalFX; the stages before it are left out from the next frame", cs->key);
+    g_upc_ok = ok; g_upc_skipped = 0;
+    if (!ok && color && cs->up_chain == UPC_NETWORK) cs->up_chain = UPC_KEEP;   // refused with the colour known: this variant keeps the chain
+    return ok;
 }
 // The present pass: src's valid rectangle drawn into dst (the drawable, or a screenshot's texture) as present_encode draws it, through MetalFX first where fx_encode takes it
 // (fx: the scaler state to use, nil = bilinear). uvb: the pass's crop constants (one buffer per present allocator, written by the CPU)

@@ -7,13 +7,21 @@
 #pragma once
 #include <stdint.h>
 #include <stdlib.h>
+#include <stdatomic.h>
 
 #define NVN_TS_HZ_DEFAULT 614400000ull
 extern uint64_t nvn_ts_profile_hz;   // the profile's gpu_ts_hz (nvn_mtl.m), 0 = the default
 static inline uint64_t nvn_ts_hz(void) {
-    static uint64_t hz;
-    if (!hz) { const char *e = getenv("DM_NVN_TS_HZ"); uint64_t v = e && *e ? strtoull(e, NULL, 10) : 0; hz = v ? v : nvn_ts_profile_hz ? nvn_ts_profile_hz : NVN_TS_HZ_DEFAULT; }
-    return hz;
+    static _Atomic uint64_t hz;
+    uint64_t value = atomic_load_explicit(&hz, memory_order_relaxed);
+    if (!value) {
+        const char *e = getenv("DM_NVN_TS_HZ");
+        uint64_t v = e && *e ? strtoull(e, NULL, 10) : 0;
+        value = v ? v : nvn_ts_profile_hz ? nvn_ts_profile_hz : NVN_TS_HZ_DEFAULT;
+        uint64_t unset = 0;
+        if (!atomic_compare_exchange_strong_explicit(&hz, &unset, value, memory_order_relaxed, memory_order_relaxed)) value = unset;
+    }
+    return value;
 }
 static inline uint64_t nvn_timestamp_from_ns(uint64_t ns) {
     uint64_t hz = nvn_ts_hz();

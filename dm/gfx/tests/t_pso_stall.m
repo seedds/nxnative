@@ -2,7 +2,9 @@
 // A compile that does not return holds back only the file of its own flush period (ArchEpoch in nvn_mtl.m). Checks, while it is held: the prebuild hands out every pair (where the
 // prepare step stops waiting) and builds the others; a draw's compile goes through; a flush of a later period writes its file. Once released: its period is written, the prebuild
 // finishes and stamps, nothing is left to write. A base that fails (pre_fail_load): the stamp is written and prebuild_failed.tsv names it; a later start of this system build
-// with that stamp does nothing, and without the stamp it leaves the pair to the draws without compiling it; a list written on another system build makes it try the pair again
+// with that stamp does nothing, and without the stamp it leaves the pair to the draws without compiling it; a list written on another system build makes it try the pair again.
+// A library file the app does not carry (a pulling library; a shader): the stamp names it, a later start of that app does nothing, one with the file builds the pair; a stamp from
+// before this check runs once. The same with the library as one image (shader_lib.py pack), and a file added beside it
 #include "../nvn/nvn_mtl.m"
 uint64_t g_t0_ns;
 int dm_guest_as_contains(uintptr_t address) { (void)address; return 0; }
@@ -41,7 +43,11 @@ static NSString *slurp(NSString *path) { return [NSString stringWithContentsOfFi
 static void arm(HoldCompiler *c) { if (![(id)g_ep->comp isKindOfClass:[HoldCompiler class]]) { c->compiler = g_ep->comp; g_ep->comp = (id<MTL4Compiler>)c; } }   // the current period's compiler
 static void reopen(NSString *dir) {   // the folder's files, as a new start opens them
     NSMutableArray<id<MTL4Archive>> *a = [NSMutableArray array];
-    for (NSString *n in [NSFileManager.defaultManager contentsOfDirectoryAtPath:dir error:nil]) if ([n hasSuffix:@".mtl4a"]) [a addObject:[g_dev newArchiveWithURL:[NSURL fileURLWithPath:[dir stringByAppendingPathComponent:n]] error:nil]];
+    for (NSString *n in [NSFileManager.defaultManager contentsOfDirectoryAtPath:dir error:nil]) if ([n hasSuffix:@".mtl4a"]) {
+        id<MTL4Archive> archive = [g_dev newArchiveWithURL:[NSURL fileURLWithPath:[dir stringByAppendingPathComponent:n]] error:nil];
+        if (!archive) abort();
+        [a addObject:archive];
+    }
     g_arch4p = a;
 }
 static int until(int (^cond)(void), double seconds) { uint64_t t0 = bp_now(); while (!cond()) { if (bp_now() - t0 > seconds * 1e9) return 0; usleep(10000); } return 1; }
@@ -85,7 +91,7 @@ int main(void) { @autoreleasepool {
     MTL4RenderPipelineDescriptor *m = pre_desc(@"v1", @"f4", 0);
     EXPECT("held: a descriptor for the draw", 1, m != nil);
     dispatch_group_t draw = dispatch_group_create(); __block id drawn = nil;
-    dispatch_group_async(draw, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ @autoreleasepool { NSError *e = nil; drawn = arch_capture(m, &e, 0); } });
+    dispatch_group_async(draw, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ @autoreleasepool { NSError *e = nil; drawn = arch_capture(m, &e, 0, NULL); } });
     EXPECT("held: a draw's compile returns", 0, dispatch_group_wait(draw, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC)));
     EXPECT("held: a draw's compile built", 1, drawn != nil);
     arch_flush();
@@ -103,8 +109,11 @@ int main(void) { @autoreleasepool {
 
     // every base is in the files
     NSMutableArray<id<MTL4Archive>> *open = [NSMutableArray array];
-    for (NSString *n in [NSFileManager.defaultManager contentsOfDirectoryAtPath:arch error:nil]) if ([n hasSuffix:@".mtl4a"])
-        [open addObject:[g_dev newArchiveWithURL:[NSURL fileURLWithPath:[arch stringByAppendingPathComponent:n]] error:nil]];
+    for (NSString *n in [NSFileManager.defaultManager contentsOfDirectoryAtPath:arch error:nil]) if ([n hasSuffix:@".mtl4a"]) {
+        id<MTL4Archive> archive = [g_dev newArchiveWithURL:[NSURL fileURLWithPath:[arch stringByAppendingPathComponent:n]] error:nil];
+        if (!archive) abort();
+        [open addObject:archive];
+    }
     int found = 0;
     for (NSString *k in @[@"f1", @"f2", @"f3", @"f4"]) @autoreleasepool {
         MTL4RenderPipelineDescriptor *d = pre_desc(@"v1", k, 0);
@@ -112,7 +121,7 @@ int main(void) { @autoreleasepool {
     }
     EXPECT("every base in the files", 4, found);
     // a base whose period is written and gone still specializes (the draws keep bases for the whole run)
-    MTL4RenderPipelineDescriptor *s = (MTL4RenderPipelineDescriptor *)[drawn newRenderPipelineDescriptorForSpecialization];
+    MTL4RenderPipelineDescriptor *s = spec_desc(drawn, &g_spec_own);
     s.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm; s.colorAttachments[0].writeMask = MTLColorWriteMaskAll; s.colorAttachments[0].blendingState = MTL4BlendStateDisabled;
     NSError *se = nil;
     EXPECT("a base of a written period specializes", 1, [g_comp4 newRenderPipelineStateBySpecializationWithDescriptor:s pipeline:drawn error:&se] != nil);
@@ -123,9 +132,13 @@ int main(void) { @autoreleasepool {
     g_arch_dir = arch2; g_arch4 = @[]; g_arch4p = @[];
     put([tables stringByAppendingPathComponent:@"shader_pairs.tsv"], @"# pairs\nv1\tf5\nv1\tf6\n");
     HoldCompiler *failc = [HoldCompiler new];   // armed in the current period before each run (one worker: both compiles in it; the run's last flush begins another)
+    // Apple's compiler fails it outside the archive too: a base the capture refuses is built by the plain compiler (arch_capture)
+    HoldCompiler *plainc = [HoldCompiler new]; id<MTL4Compiler> plain = g_comp4; plainc->compiler = plain; g_comp4 = (id<MTL4Compiler>)plainc;
     arm(failc); reset_counts();
     EXPECT("failing: two pairs", 2, pso_prebuild(1, 1, QOS_CLASS_USER_INITIATED));
     EXPECT("failing: asked once", 1, failc->bad);
+    EXPECT("failing: the plain compiler asked too", 1, plainc->bad);
+    EXPECT("failing: still capturing", 1, arch_capturing());
     EXPECT("failing: one failed", 1, g_pre_failed);
     EXPECT("failing: one built", 1, g_pre_built);
     EXPECT("failing: stamped all the same", 1, slurp(stamp) != nil);
@@ -153,10 +166,67 @@ int main(void) { @autoreleasepool {
     EXPECT("other build: the list is for this build now", 1, [slurp(failp) containsString:arch_os_build()]);
     // it builds after a system update (the real compiler, the list from another build): the list goes
     if ((id)g_ep->comp == failc) g_ep->comp = failc->compiler;
+    g_comp4 = plain;
     put(failp, [slurp(failp) stringByReplacingOccurrencesOfString:arch_os_build() withString:@"os\t1A1\n"]); reopen(arch2); reset_counts();
     EXPECT("fixed: two pairs", 2, pso_prebuild(1, 1, QOS_CLASS_USER_INITIATED));
     EXPECT("fixed: built", 1, g_pre_built);
     EXPECT("fixed: no failure list", 0, [NSFileManager.defaultManager fileExistsAtPath:failp]);
+
+    // a pulling library the app does not carry (an IPA packed without _bp.metallib, then DM_PSO_MTL4=1): into a fresh archive folder
+    NSString *arch3 = [root stringByAppendingPathComponent:@"archive3"], *stamp3 = [arch3 stringByAppendingPathComponent:@"prebuilt.tsv"];
+    [NSFileManager.defaultManager createDirectoryAtPath:arch3 withIntermediateDirectories:YES attributes:nil error:nil];
+    g_arch_dir = arch3; g_arch4 = @[]; g_arch4p = @[];
+    put([msl stringByAppendingPathComponent:@"v2_b.json"], [NSString stringWithFormat:@"{\"chain\": \"%s\", \"entry\": \"main0\", \"pull\": {}, \"vertex_inputs\": []}", DMSH_CHAIN]);
+    NSString *pairs3 = @"# pairs\nv2\tf6\nv1\tf4\n"; put([tables stringByAppendingPathComponent:@"shader_pairs.tsv"], pairs3);
+    reset_counts();
+    EXPECT("no library: two pairs", 2, pso_prebuild(1, 1, QOS_CLASS_USER_INITIATED));
+    EXPECT("no library: left to the draws", 1, g_pre_skipped);
+    EXPECT("no library: counted", 1, g_pre_nolib);
+    EXPECT("no library: the other built", 1, g_pre_built);
+    EXPECT("no library: the stamp names it", 1, [slurp(stamp3) hasSuffix:@"libs\tmissing\tv2_bp.metallib\n"]);
+    reset_counts();
+    EXPECT("no library, same app: nothing to do", (uint64_t)-1, (uint64_t)(int64_t)pso_prebuild(1, 1, QOS_CLASS_USER_INITIATED));
+    // the app comes back with the library: the pair is built, the other taken from the archive, and the stamp says all
+    EXPECT("library installed", 0, lib(msl, @"v2_bp", v));
+    reopen(arch3); reset_counts();
+    EXPECT("library back: two pairs", 2, pso_prebuild(1, 1, QOS_CLASS_USER_INITIATED));
+    EXPECT("library back: built", 1, g_pre_built);
+    EXPECT("library back: the other from the archive", 1, g_pre_archived);
+    EXPECT("library back: none counted", 0, g_pre_nolib);
+    EXPECT("library back: the stamp says all", 1, [slurp(stamp3) hasSuffix:@"libs\tall\n"]);
+    reset_counts();
+    EXPECT("library back: nothing to do", (uint64_t)-1, (uint64_t)(int64_t)pso_prebuild(1, 1, QOS_CLASS_USER_INITIATED));
+    // a stamp from before this check (no libs line) may hide such pairs: one more run, everything from the archive
+    put(stamp3, pre_stamp(pairs3, 0)); reopen(arch3); reset_counts();
+    EXPECT("old stamp: two pairs", 2, pso_prebuild(1, 1, QOS_CLASS_USER_INITIATED));
+    EXPECT("old stamp: nothing compiled", 0, g_pre_built);
+    EXPECT("old stamp: both from the archive", 2, g_pre_archived);
+    EXPECT("old stamp: the stamp says all", 1, [slurp(stamp3) hasSuffix:@"libs\tall\n"]);
+    // the library as one image beside its folder, as the Mac app and the IPA carry it (dm/tools/shader_lib.py pack, msl_image.h): its files are found there, and a pixel shader
+    // the library lacks is named by its file
+    NSString *packer = [[@(__FILE__) stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"../../tools/shader_lib.py"];
+    EXPECT("image: packed", 0, sh([NSString stringWithFormat:@"python3 %@ pack %@ > /dev/null", packer, msl]));
+    EXPECT("image: no folder", 0, [NSFileManager.defaultManager fileExistsAtPath:msl]);
+    NSString *arch4d = [root stringByAppendingPathComponent:@"archive4"], *stamp4 = [arch4d stringByAppendingPathComponent:@"prebuilt.tsv"];
+    [NSFileManager.defaultManager createDirectoryAtPath:arch4d withIntermediateDirectories:YES attributes:nil error:nil];
+    g_arch_dir = arch4d; g_arch4 = @[]; g_arch4p = @[];
+    put([tables stringByAppendingPathComponent:@"shader_pairs.tsv"], @"# pairs\nv2\tf6\nv1\tf4\nv1\tf9\n");
+    reset_counts();
+    EXPECT("image: three pairs", 3, pso_prebuild(1, 1, QOS_CLASS_USER_INITIATED));
+    EXPECT("image: both built from it", 2, g_pre_built);
+    EXPECT("image: the absent shader counted", 1, g_pre_nolib);
+    EXPECT("image: the stamp names its file", 1, [slurp(stamp4) hasSuffix:@"libs\tmissing\tf9_b.json\n"]);
+    reset_counts();
+    EXPECT("image, same app: nothing to do", (uint64_t)-1, (uint64_t)(int64_t)pso_prebuild(1, 1, QOS_CLASS_USER_INITIATED));
+    // a partial build makes that shader in a folder beside the image: its pair is built, the others taken from the archive
+    put([msl stringByAppendingPathComponent:@"f9_b.json"], [NSString stringWithFormat:@"{\"chain\": \"%s\", \"entry\": \"main0\"}", DMSH_CHAIN]);
+    EXPECT("image: shader added", 0, lib(msl, @"f9_b", [NSString stringWithFormat:f, @"main0", 2, 2, pid]));
+    reopen(arch4d); reset_counts();
+    EXPECT("image + folder: three pairs", 3, pso_prebuild(1, 1, QOS_CLASS_USER_INITIATED));
+    EXPECT("image + folder: built", 1, g_pre_built);
+    EXPECT("image + folder: the others from the archive", 2, g_pre_archived);
+    EXPECT("image + folder: none counted", 0, g_pre_nolib);
+    EXPECT("image + folder: the stamp says all", 1, [slurp(stamp4) hasSuffix:@"libs\tall\n"]);
     [NSFileManager.defaultManager removeItemAtPath:root error:nil];
     printf("t_pso_stall: %d checks, %d failed\n", checks, failed);
     return failed != 0;

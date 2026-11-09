@@ -1,4 +1,5 @@
 using Ryujinx.Graphics.Shader.IntermediateRepresentation;
+using Ryujinx.Graphics.Shader.Translation.Transforms;
 using System;
 using System.Collections.Generic;
 using static Ryujinx.Graphics.Shader.IntermediateRepresentation.OperandHelper;
@@ -202,7 +203,8 @@ namespace Ryujinx.Graphics.Shader.Translation
         }
 
         // nxnative: Ampere HMMA.16816 with an f16 accumulator, D (16 x 8) = A (16 x 16) * B (16 x 8) + C, for one warp (Metal SIMD-group). In: the lane, the word
-        // offset of this subgroup's 256-word block of the scratch shared memory `id`, A (4 words), B (2), C (2); returns D's first word, the second through the out argument. Fragments (PTX mma.m16n8k16): lane L, g = L / 4,
+        // offset of this subgroup's 256-word block of the scratch shared memory `id`, A (4 words), B (2), C (2), then TensorPass's flags and A's place in shared memory (the
+        // row address of an LDSM, four matrix offsets, the row stride), which only the Metal rewrite reads; returns D's first word, the second through the out argument. Fragments (PTX mma.m16n8k16): lane L, g = L / 4,
         // t = L % 4; A word r: row g + 8 (r & 1), k 2t + 8 (r >> 1) and + 1; B word r: k 2t + 8 r and + 1 of column g; C / D word r: row g + 8 r, columns 2t, 2t + 1.
         // The block holds A row-major (words 0..127, 8 a row), B transposed (128..191: row n, 8 words of k) and C / D row-major (192..255, 4 a row), so every lane stores its
         // packed words as they are. This body computes D from the block lane by lane; the shader build replaces it in the Metal source (dmsh_build.py, HMMA_MSL) with
@@ -262,11 +264,11 @@ namespace Ryujinx.Graphics.Shader.Translation
             // The next HMMA of this subgroup overwrites the block: every lane has read it by then
             context.SubgroupBarrier();
 
-            context.Copy(Argument(10), d[1]);
+            context.Copy(Argument(TensorPass.HmmaInArguments), d[1]);
 
             context.Return(d[0]);
 
-            return new Function(ControlFlowGraph.Create(context.GetOperations()).Blocks, "dmsh_hmma16816_f16", true, 10, 1);
+            return new Function(ControlFlowGraph.Create(context.GetOperations()).Blocks, "dmsh_hmma16816_f16", true, TensorPass.HmmaInArguments, 1);
         }
 
         private static Function GenerateSharedStore8(int id)
@@ -296,7 +298,9 @@ namespace Ryujinx.Graphics.Shader.Translation
 
             context.Return();
 
-            return new Function(ControlFlowGraph.Create(context.GetOperations()).Blocks, $"SharedStore{bitSize}_{id}", false, 2, 0);
+            // nxnative: the dmsh_ name keeps the helper's name in the SPIR-V, and the shader build replaces this compare-and-swap loop in the Metal source with a store of the byte or
+            // half-word (dmsh_build.py, shared_store_msl), which Metal's threadgroup memory takes: the name, the arguments (byte offset, value) and the array are the contract
+            return new Function(ControlFlowGraph.Create(context.GetOperations()).Blocks, $"dmsh_shared_store{bitSize}_{id}", false, 2, 0);
         }
 
         private static Function GenerateShuffleFunction(HelperFunctionName functionName, int subgroupSize)

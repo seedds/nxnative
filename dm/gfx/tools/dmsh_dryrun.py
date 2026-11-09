@@ -34,7 +34,7 @@ jobs, seen = [], set()
 for name in sorted(os.listdir(dm_dir)):
     if not name.endswith('.bin'): continue
     for b in records(open(os.path.join(dm_dir, name), 'rb').read()):
-        ci = b.find(bytes.fromhex('34127698')); csz = struct.unpack_from('<I', b, 0x28)[0]
+        ci = b.find(bytes.fromhex('34127698'), 0x38); csz = struct.unpack_from('<I', b, 0x28)[0]
         key = hashlib.sha256(b[ci:ci + csz]).hexdigest()[:16]
         if key in seen: continue
         seen.add(key); comp = name.startswith('cs_'); code = b[0x38:ci]

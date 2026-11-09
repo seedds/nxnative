@@ -69,7 +69,7 @@ static int s2_blocked(void) { return !g_active || (g_front.blocked && g_front.bl
 // Which Joy-Cons a pad holds, to the npad layer (dm_joy_attach): a Pro Controller 2 is 0
 static void s2_sync_sides(s2_pad *p) {
     int pl = g_joy ? s2_player(p) : -1; if (pl < 0) return;
-    dm_joy_attach(pl, p->st.pro.have ? 0 : (uint32_t)((p->st.left.have ? 1 : 0) | (p->st.right.have ? 2 : 0)));
+    dm_joy_attach(pl, p->st.pro.have ? 0 : (uint32_t)((p->st.left.have ? 1 : 0) | (p->st.right.have ? 2 : 0) | DM_JOY_2));
 }
 static void s2_joy_release(int pl, int side) { if (g_joy && pl >= 0) { dm_joy_set(pl, side, 0, 0, 0); dm_motion_clear_joy(pl, side); } }
 static void s2_pad_unlink(s2_pad *p) { s2_pad **link = &g_pads; while (*link && *link != p) link = &(*link)->next; if (*link) *link = p->next; }
@@ -91,6 +91,7 @@ static s2_pad *s2_pad_for(uint16_t pid) {   // a Joy-Con joins a pad that has th
     NSTimer *_tick; uint64_t _reports; BOOL _handshaken; s2_rest _rest;
     s2_clock _clk; uint64_t _lost; char _serial[15]; uint64_t _restSaved;   // sample times from the controller's clock; the serial its learned gyro offset is kept under
     CBCharacteristic *_vib; uint8_t _vseq; int _offLeft; s2_rumble_cursor _rcur;   // _rcur: where this controller is in its player's rumble log
+    int16_t _mouseX, _mouseY; BOOL _mouseSeen, _mouseOn;   // _mouseOn: its mouse sensor is turned on (features)   // the mouse sensor's counters at the last report
     s2_hold _hold;   // the choosing gesture this Joy-Con holds now (s2_gesture)
 }
 - (void)dealloc { [self saveRest]; }
@@ -237,12 +238,29 @@ static s2_pad *s2_pad_for(uint16_t pid) {   // a Joy-Con joins a pad that has th
         }); }];
     }); }];
 }
+// The features this controller reports: a Joy-Con 2's mouse sensor too once the game reads the sensors (dm_joy_mouse_wanted; the Pro Controller 2 has none), as the console
+// turns it on only for a game that uses it. Once on, it stays on while the controller is connected
+- (uint8_t)features {
+    if (_pid != S2_PID_PRO && dm_joy_mouse_wanted()) _mouseOn = YES;
+    return _mouseOn ? S2_FEATURES | S2_FEATURE_MOUSE : S2_FEATURES;
+}
+// The game set up the mouse sensors after this controller connected: the handshake's two feature commands again, with the sensor's bit
+- (void)mouseOn {
+    __weak S2Session *w = self;
+    uint8_t fe[4] = {S2_FEATURES | S2_FEATURE_MOUSE, 0, 0, 0};
+    [self send:S2_CMD_FEATURE sub:S2_SUB_FEATURE_SET payload:fe len:4 done:^(NSData *r1) {
+        (void)r1; S2Session *s = w; if (!s) return;
+        uint8_t on[4] = {S2_FEATURES | S2_FEATURE_MOUSE, 0, 0, 0};
+        [s send:S2_CMD_FEATURE sub:S2_SUB_FEATURE_ENABLE payload:on len:4 done:^(NSData *r2) { S2Session *t = w; if (t) LOG("[sw2] %s: mouse sensor %s", s2_kind(t->_pid), r2 ? "on" : "not turned on (no answer)"); }];
+    }];
+}
 - (void)finish {
     __weak S2Session *w = self;
-    uint8_t pl[4] = {S2_FEATURES, 0, 0, 0};
+    uint8_t feat = [self features];
+    uint8_t pl[4] = {feat, 0, 0, 0};
     [self send:S2_CMD_FEATURE sub:S2_SUB_FEATURE_SET payload:pl len:4 done:^(NSData *r1) {
         S2Session *s = w; if (!s) return; (void)r1;
-        uint8_t on[4] = {S2_FEATURES, 0, 0, 0};
+        uint8_t on[4] = {feat, 0, 0, 0};
         [s send:S2_CMD_FEATURE sub:S2_SUB_FEATURE_ENABLE payload:on len:4 done:^(NSData *r2) {
             S2Session *t = w; if (!t) return;
             if (!r2) { [t fail:@"enabling the features was refused"]; return; }
@@ -272,6 +290,7 @@ static s2_pad *s2_pad_for(uint16_t pid) {   // a Joy-Con joins a pad that has th
         int pl = s2_player(s->_pad); uint8_t l[4] = {s2_led_pattern[pl >= 0 && pl < 8 ? pl : 0], 0, 0, 0}; uint8_t f[12];
         size_t n = s2_command(f, sizeof f, S2_CMD_LEDS, S2_SUB_LEDS_SET, l, 4);
         if (s->_wr && n) [s->_peripheral writeValue:[NSData dataWithBytes:f length:n] forCharacteristic:s->_wr type:CBCharacteristicWriteWithoutResponse];
+        if (!s->_mouseOn && [s features] != S2_FEATURES) [s mouseOn];
     }];
 }
 // Every 15 ms: this controller's share of the player's motors (s2_rumble_pick) over its next three 5 ms slots (switch2_proto.h, Rumble timing).
@@ -304,7 +323,7 @@ static s2_pad *s2_pad_for(uint16_t pid) {   // a Joy-Con joins a pad that has th
     s2_rest_update(&_rest, r.raw);
     if (_rest.have && (!had || was[0] != _rest.bias[0] || was[1] != _rest.bias[1] || was[2] != _rest.bias[2]) && ts - _restSaved > 30000000000ull) { [self saveRest]; _restSaved = ts; }
     if (g_verbose && _reports % 33 == 1)
-        LOG("[sw2] %s: clock %u ms, %llu reports lost so far; buttons 0x%08x sticks %u,%u %u,%u accel %d,%d,%d gyro %d,%d,%d battery %u mV", s2_kind(_pid), r.clock_ms, (unsigned long long)_lost, r.buttons, r.lx, r.ly, r.rx, r.ry, r.raw[0], r.raw[1], r.raw[2], r.raw[3], r.raw[4], r.raw[5], r.battery_mv);
+        LOG("[sw2] %s: clock %u ms, %llu reports lost so far; buttons 0x%08x sticks %u,%u %u,%u accel %d,%d,%d gyro %d,%d,%d battery %u mV mouse %d,%d %u,%u", s2_kind(_pid), r.clock_ms, (unsigned long long)_lost, r.buttons, r.lx, r.ly, r.rx, r.ry, r.raw[0], r.raw[1], r.raw[2], r.raw[3], r.raw[4], r.raw[5], r.battery_mv, r.mouse_x, r.mouse_y, r.mouse_q, r.mouse_s);
     if (g_front.read) g_front.read(_pad);
     int player = s2_player(_pad), blocked = s2_blocked();
     if (g_motion && !blocked && player >= 0 && s2_pad_motion_dev(&_pad->st, g_motion_right) == dev) {
@@ -318,7 +337,14 @@ static s2_pad *s2_pad_for(uint16_t pid) {   // a Joy-Con joins a pad that has th
         int32_t st[2]; s2_joy_stick(dev, right, st);
         dm_joy_set(player, right, s2_joy_buttons(r.buttons, right), st[0], st[1]);
         if (g_motion) { float acc[3], rot[3]; s2_motion(r.raw, g_map_set ? g_map : s2_map_pair, _rest.have ? _rest.bias : NULL, g_gyro, acc, rot); dm_motion_set_joy(player, right, acc, rot, ts); }
+        // The mouse sensor, once it is on and reporting: the movement since the last report, none while lifted (the counters drift with no surface under them)
+        if (_mouseOn && s2_mouse_present(&r)) {
+            int on = s2_mouse_on_surface(&r);
+            int32_t dx = _mouseSeen && on ? s2_mouse_delta(r.mouse_x, _mouseX) : 0, dy = _mouseSeen && on ? s2_mouse_delta(r.mouse_y, _mouseY) : 0;
+            dm_joy_mouse(player, right, dx, dy, DM_JOYMOUSE_CONNECTED | (on ? DM_JOYMOUSE_ON_SURFACE : 0));
+        }
     }
+    _mouseSeen = _mouseOn && s2_mouse_present(&r); _mouseX = r.mouse_x; _mouseY = r.mouse_y;
     [self gesture:r.buttons right:right];
 }
 // SL + SR held on a Joy-Con of a pair: it plays alone. L on a left one alone and R on a right one alone, held together: they pair (switch2_proto.h, s2_gesture)

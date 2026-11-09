@@ -788,20 +788,24 @@ static int svc_thread_impl(int num, uint64_t *regs);
 // Waits under 2 ms are handoffs between threads that do work; waits beyond it are limiters and idle polls. Returns the sleep for a yield whose run started `run_ns` ago (0 = plain yield);
 // a clock wait (`clock`, thr_yield) has no start: it waits for a time, not for another thread, and sleeps from its first yield on.
 // DM_YIELD_BACKOFF=0 turns it off; DM_YIELD_BACKOFF=<cap µs>[:<start µs>] sets the cap and the run length after which it starts (default 250:2000)
-static int64_t g_bo_cap = -1, g_bo_start = 2000000;
-static void backoff_init(void) {
-    if (g_bo_cap >= 0) return;
-    const char *e = getenv("DM_YIELD_BACKOFF"); g_bo_cap = 250000;
-    if (e && *e) { g_bo_cap = atoll(e) * 1000; const char *c = strchr(e, ':'); if (c) g_bo_start = atoll(c + 1) * 1000; }
-    if (!g_bo_cap) LOG("DM_YIELD_BACKOFF=0: no back-off on repeated yields (plain sched_yield spin)"); else if (e && *e) LOG("DM_YIELD_BACKOFF: back off after %lld µs of repeated yields, sleeping at most %lld µs at a time", (long long)(g_bo_start / 1000), (long long)(g_bo_cap / 1000));
+// These helpers run without G on several guest threads. Publish each immutable
+// environment snapshot once, including all fields, before a caller can use it.
+static pthread_once_t g_backoff_once = PTHREAD_ONCE_INIT;
+static int64_t g_backoff_cap, g_backoff_start;
+static void yield_backoff_init(void) {
+    const char *e = getenv("DM_YIELD_BACKOFF"); g_backoff_cap = 250000; g_backoff_start = 2000000;
+    if (e && *e) { g_backoff_cap = atoll(e) * 1000; const char *c = strchr(e, ':'); if (c) g_backoff_start = atoll(c + 1) * 1000; }
+    if (!g_backoff_cap) LOG("DM_YIELD_BACKOFF=0: no back-off on repeated yields (plain sched_yield spin)");
+    else if (e && *e) LOG("DM_YIELD_BACKOFF: back off after %lld µs of repeated yields, sleeping at most %lld µs at a time", (long long)(g_backoff_start / 1000), (long long)(g_backoff_cap / 1000));
 }
-// The back-off's longest sleep (0: off)
-static uint64_t yield_backoff_cap(void) { backoff_init(); return (uint64_t)g_bo_cap; }
+// The new short-sleep getter shares the complete once-published settings.
+static uint64_t yield_backoff_cap(void) { pthread_once(&g_backoff_once, yield_backoff_init); return (uint64_t)g_backoff_cap; }
 static uint64_t yield_backoff_ns(uint64_t run_ns, int clock) {
-    backoff_init();
-    if (!g_bo_cap || (!clock && run_ns < (uint64_t)g_bo_start)) return 0;
+    pthread_once(&g_backoff_once, yield_backoff_init);
+    int64_t cap = g_backoff_cap, start = g_backoff_start;
+    if (!cap || (!clock && run_ns < (uint64_t)start)) return 0;
     uint64_t s = run_ns / 8; if (s < 10000) s = 10000;
-    return s < (uint64_t)g_bo_cap ? s : (uint64_t)g_bo_cap;
+    return s < (uint64_t)cap ? s : (uint64_t)cap;
 }
 static void sleep_precise(uint64_t dl);
 // One back-off sleep of bo ns, counted for the power line
@@ -825,10 +829,17 @@ static void yield_for(thr_t *me, uint64_t run_ns, int clock) {
 // in each pass's wait for the nifm request (w23 = 2,000, its retry count), and spun a host core as one that moved on at every yield.
 // A wait whose pass reads the system clock (dm_clock_reads moved since the last yield of the run) waits for a time, not for another thread's handoff: a clock wait (clock_wait).
 static void clock_wait(thr_t *me, uint64_t sig, uint64_t now, int predict);
+static pthread_once_t g_yield_clock_once = PTHREAD_ONCE_INIT;
+static int g_yield_clock;
+static void yield_clock_init(void) {
+    const char *e = getenv("DM_YIELD_CLOCK"); g_yield_clock = e && *e ? atoi(e) : 2;
+    if (g_yield_clock != 2) LOG("DM_YIELD_CLOCK=%d: yield loops that read the clock %s", g_yield_clock, g_yield_clock ? "back off from their start, with no sleep to a predicted end" : "back off after the start, as other yields");
+}
 static void thr_yield(thr_t *me, const uint64_t *regs) {
     if (!me) { sched_yield(); return; }
-    static int clock_on = -1;   // DM_YIELD_CLOCK: 0 = clock waits are yields as any other, 1 = they back off from their start but sleep to no predicted end, 2 (the default) = both
-    if (clock_on < 0) { const char *e = getenv("DM_YIELD_CLOCK"); clock_on = e && *e ? atoi(e) : 2; if (clock_on != 2) LOG("DM_YIELD_CLOCK=%d: yield loops that read the clock %s", clock_on, clock_on ? "back off from their start, with no sleep to a predicted end" : "back off after the start, as other yields"); }
+    // DM_YIELD_CLOCK: 0 ordinary yields, 1 clock back-off, 2 (default) also predicts the end.
+    pthread_once(&g_yield_clock_once, yield_clock_init);
+    int clock_on = g_yield_clock;
     uint64_t y0 = now_ns(), sig = 0xcbf29ce484222325ull;
     for (int i = 19; i <= 28; i++) sig = (sig ^ regs[i]) * 0x100000001b3ull;
     int same = me->yrun_svc + 1 == me->nsvc;   // no other SVC since the thread's last yield
@@ -899,17 +910,24 @@ static void clock_wait(thr_t *me, uint64_t sig, uint64_t now, int predict) {
 // (yield_backoff_ns, DM_YIELD_BACKOFF), which leaves the core to the threads doing the work. A sched_yield on every pass instead (DM_SPIN_POLL=0) raised the Mac's frame p95 by 2-5 ms,
 // as a yield there hands the core to other processes. DM_SPIN=0: no sleeps either. gate = the gate's address, site = the loop head (module offset)
 #define SPIN_GAP_NS 20000
+static pthread_once_t g_spin_once = PTHREAD_ONCE_INIT;
+static int g_spin_on;
+static uint64_t g_spin_poll_ns;
+static void spin_init(void) {
+    const char *e = getenv("DM_SPIN"), *p = getenv("DM_SPIN_POLL");
+    g_spin_poll_ns = (p && *p ? strtoull(p, 0, 10) : 2000) * 1000; g_spin_on = !(e && *e && atoi(e) == 0);
+    if (!g_spin_on) LOG("DM_SPIN=0: spin waits do not yield or sleep");
+    else if (p && *p) LOG("DM_SPIN_POLL: spin waits poll for %llu µs, then yield", (unsigned long long)(g_spin_poll_ns / 1000));
+}
 void dm_spin_wait(uint64_t gate, uint64_t site) {
-    static int on = -1; static uint64_t poll_ns;
-    if (on < 0) { const char *e = getenv("DM_SPIN"), *p = getenv("DM_SPIN_POLL"); poll_ns = (p && *p ? strtoull(p, 0, 10) : 2000) * 1000; on = !(e && *e && atoi(e) == 0);
-                  if (!on) LOG("DM_SPIN=0: spin waits do not yield or sleep"); else if (p && *p) LOG("DM_SPIN_POLL: spin waits poll for %llu µs, then yield", (unsigned long long)(poll_ns / 1000)); }
+    pthread_once(&g_spin_once, spin_init);
     thr_t *me = pthread_getspecific(g_keythr);
     if (!me) return;
     uint64_t now = now_ns();
     if (me->srun_svc != me->nsvc || now - me->spin_ret > SPIN_GAP_NS) me->srun_t0 = now;   // a new wait
     me->srun_svc = me->nsvc; me->nspin++;
     if (site != me->spin_site || !me->spin_mod) { const module_t *m = module_of((void *)gate); me->spin_mod = m ? m->name : "?"; me->spin_site = site; }
-    if (on && now - me->srun_t0 >= poll_ns) { me->nyield++; yield_for(me, now - me->srun_t0, 0); }
+    if (g_spin_on && now - me->srun_t0 >= g_spin_poll_ns) { me->nyield++; yield_for(me, now - me->srun_t0, 0); }
     me->spin_ret = now_ns();
 }
 // Short timed waits as polls. A wait with a timeout under 20 µs (a condition variable, WaitSynchronization or WaitForAddress) that times out is a poll, as a SleepThread that short is

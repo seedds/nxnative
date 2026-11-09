@@ -4,6 +4,14 @@ Guest threads, their synchronization and how the host schedules them. Each entry
 
 ## Thread creation and cores
 
+### Concurrent first use of scheduler settings
+
+- **Symptom:** ThreadSanitizer reports races when guest threads first yield or enter rewritten spin waits together. No gameplay hitch or hang has been attributed to these races.
+- **Cause:** `hle_thread.c` lazily initialized the shared yield cap/start, clock-wait mode and spin enable/poll interval without synchronization. Those paths do not hold the scheduler lock; a caller could observe partially initialized settings.
+- **Fix:** separate `pthread_once` initializers publish each immutable environment snapshot on its first use. Defaults, parsing, logging and scheduling decisions are unchanged.
+- **Check:** `make -C dm/host/tests GAME=<id> scheduler-config-tsan` runs eight simultaneous callers in fresh processes for defaults, custom settings, disabled features and empty environment values. The unmodified helpers reproduce races; all four cases pass after the fix without suppressions. Existing clock-wait and short-poll regressions also pass.
+- **Found on:** synthetic host scheduler tests on Apple silicon; no game files or GPU work.
+
 ### Publishing a new thread's scheduler fields
 
 - **Symptom:** TSan reports `thread_main` writing `host_work` while `thr_runnable` reads it during a same-core yield (`t_notify_sched`, issue #411).

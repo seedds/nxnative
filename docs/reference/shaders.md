@@ -1484,6 +1484,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Check:** `DMSH_TEST_XLATE=dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate python3 dm/gfx/tests/test_dmsh_ampere_orin.py` (about 5 s on an M5 Max); it prints every op's differing lanes by cause. `AMPERE_ORIN_ONLY=<ops or families>` runs some, `AMPERE_ORIN_REPORT=<file>` writes the results as JSON. To record again: `python3 dm/gfx/tools/ampere_orin/capture.py --host <user@machine> [--arch sm_86]`, with NVIDIA's `nvdisasm` (the `cuda_nvdisasm` redistributable) in `~/ampere_orin` on that machine.
 - **Found on:** no game; a Jetson Orin's results. The HMMA comparison it extends is PR #1897's.
 
+### Saturating integer add and subtract (PLOP3 on sign bits)
+
+- **Symptom:** a shader with a saturating 32-bit integer add or subtract (PTX `add.sat.s32` / `sub.sat.s32`) doesn't translate: the translator stops with `Ampere instruction 21f ... is not implemented`.
+- **Cause:** for these the GPU compiler adds or subtracts with IADD3 and then decides overflow with `PLOP3.LUT P0, PT, Ra.SIGN, Rb.SIGN, Rc.SIGN, lut0, lut1` (opcode 0x21f), a PLOP3 whose three inputs are the sign bits of general registers instead of predicates, so the two SELs that follow can clamp to 0x7fffffff or 0x80000000. The translator had only the predicate forms (0x81c, 0x89c), and Mesa NAK doesn't encode this one either.
+- **Fix:** `InstEmitAmpereAlu.cs`'s `APlop3Sign` reads the three registers as ALU sources a (24), b (32) and c (64), turns each into `R < 0`, and runs the same truth-table code as the predicate PLOP3, with the first LUT at bits 72..79 for the first destination (81..83) and the second at bits 16..23 for the second (84..86). Those fields are the ones `nvdisasm` decodes in the fixture's code. It costs three integer compares and the LUT's ANDs and NOTs per destination, and only the 0x21f encoding is taken, since that's the only form we've seen.
+- **Check:** `test_dmsh_ampere_orin.py`'s `iadd_sat` and `isub_sat`, whose rows include about 50 clamps each way: both failed to translate before (all 1,024 lanes) and match the Orin in all 1,024 lanes now.
+- **Found on:** no game; a Jetson Orin's results ([Ampere instructions checked against an Ampere GPU](#ampere-instructions-checked-against-an-ampere-gpu)).
+
 ### The NDVE movie network by the host
 
 - **Symptom:** a Switch 2 game's movies and the title behind them run below 60 fps on a Mac with a smaller GPU, and the GPU profile (`DM_NVN_GPUPROF`) shows almost all of the frame in a dozen compute dispatches of `nn::ndve`'s movie network: Ocarina of Time's title at about 24 fps and 38 ms of GPU a frame on an M1 Pro with 16 GPU cores, 24.8 ms on an M1 Max ([issue 1375](https://github.com/seedds/nxnative/issues/1375)), 18.9 ms of compute on an M4 with 8 ([HMMA chains keep their matrices in the SIMD-group](#hmma-chains-keep-their-matrices-in-the-simd-group)); 11-14 ms of the 16.7 on an M6, an M4 Pro or an M5 Max.

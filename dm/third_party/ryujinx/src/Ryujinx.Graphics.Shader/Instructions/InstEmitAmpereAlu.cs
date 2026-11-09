@@ -90,6 +90,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             x(0x203, InstName.P2r, AP2r, N);
             x(0x81c, InstName.Psetp, APlop3, N, writesRd: false);
             x(0x89c, InstName.Psetp, APlop3, N, uniform: true, writesRd: false);
+            x(0x21f, InstName.Psetp, APlop3Sign, N, writesRd: false);
             x(0x80d, InstName.Isetp, AGuardCull, N, writesRd: false);
             x(0x806, InstName.Vote, AVote, N);
             x(0x886, InstName.Vote, AVote, N);
@@ -1551,6 +1552,24 @@ namespace Ryujinx.Graphics.Shader.Instructions
             Operand r1 = APredLut(context, a, b, c, lut1);
             ASetPred(context, x.Bits(81, 84), r0, u);
             ASetPred(context, x.Bits(84, 87), r1, u);
+        }
+
+        // PLOP3.LUT Pd0, Pd1, Ra.SIGN, Rb.SIGN, Rc.SIGN, lut0 (72..80), lut1 (16..24): PLOP3 on the sign bits of three registers, a (24), b (32), c (64),
+        // destinations as PLOP3's (81..84, 84..87). ptxas uses it for add.sat.s32 / sub.sat.s32 overflow (lut 0x02: a, b >= 0 and the sum < 0). Mesa NAK
+        // has no encoding for this form; the fields are the ones nvdisasm decodes in the GPU compiler's code for those operations.
+        public static void APlop3Sign(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+            (ASrc ra, ASrc rb, ASrc rc) = AAluSrcs(context, x, neg: false, abs: false);
+
+            Operand a = context.ICompareLess(AGet(context, ra), Const(0));
+            Operand b = context.ICompareLess(AGet(context, rb), Const(0));
+            Operand c = context.ICompareLess(AGet(context, rc), Const(0));
+
+            Operand r0 = APredLut(context, a, b, c, x.Bits(72, 80));
+            Operand r1 = APredLut(context, a, b, c, x.Bits(16, 24));
+            ASetPred(context, x.Bits(81, 84), r0);
+            ASetPred(context, x.Bits(84, 87), r1);
         }
 
         // A three-input boolean function by its truth table (bit (a << 2 | b << 1 | c) ... as LOP3: a = 0xf0, b = 0xcc, c = 0xaa)

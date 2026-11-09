@@ -162,6 +162,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** `pdat_jobs` and `pdat_shaders` in `shader_split.py`: a byte range of the archive per job, every zstd frame whose decoded tag is `PMAP`, and control sections outside any frame. The catalog is not read. A frame's first block can be 128 KB, and zstd gives no output before it has the whole block, so the tag check feeds it that much: fed 4 KB, 21,962 of 27,540 shaders were silently left out. A loose `.ndsr` file also never reached `ndsr_shaders` (the prefilter for loose files did not know its magic); it does now: `Bin/Nvn2-upper_left.ndsr`, 28 shaders, in Star Fox's and Bananza's record layout from +0x10.
 - **Found on:** [Kirby Air Riders](../../dm/games/040077201BE50000/README.md): 27,568 shaders, 13,078 pixel, 8,092 compute, 6,322 vertex and 76 geometry.
 
+### Shin'en's SHN!D files: control sections in the metadata, code in a pool
+
+- **Symptom:** a Switch 2 game from Shin'en with `.shdr` and `.w3d` files: the split finds no shaders, or a few whose keys the game never asks for (`[RED] shader … is not in the shader map` for every draw), and those few fail to translate (`Ampere instruction 15f at 0x0`). Whole scenes are missing: a track with no road, an award screen with nothing drawn.
+- **Cause:** a SHN!D file (`SHN!D\0\0\0`, a 0x44-byte header) holds two blocks, each one LZ4 block unless its stored length equals its length: the metadata (+0x08 stored length, +0x0c length, from +0x44) and the code pool (+0x24 offset, +0x28 stored length, +0x2c length). The metadata holds each shader's NVN2 control section whole, as the game hands it to NVN (+0x10 and +0x20 included, which change between shaders with the same code), and the pool holds their code areas back to back in the same order, each its control section's +0x44 bytes. One file holds many shaders: every variant of a post effect in a `.shdr`, up to 159 in a track's `.w3d`. Read as one shader per file, with the code still compressed, nothing matched.
+- **Fix:** `shn_shaders` in `shader_split.py` takes every control section of the metadata (`0x98761234`, version 0xc9, its own length at +0x30) and the next +0x44 bytes of the pool for each; `dm/tools/tests/test_split_shn.py` builds such files.
+- **Found on:** Fast Fusion (040041E0212AE000; a provisional profile, no game note yet): 554 of its 2,593 SHN!D files hold shaders, 2,948 unique (1,395 vertex, 1,426 pixel, 31 task, 31 mesh, 65 compute). Every one of the 745 shaders dumped at run time (`DM_NVN_SHDUMP`) over the menus and four tracks has its key among them.
+
 ### LZ4-chained zip members behind a VZIP preamble, and shader binaries of one stage
 
 - **Symptom:** a Switch 2 game's RomFS is one `data.zip` that does not start with a zip's local header, zipfile reads a member of it only to stop on `Bad CRC-32`, and the split finds no shader: every member is listed as stored, yet most are smaller on disk than their file size.
@@ -866,6 +873,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md): 7 task and 18 mesh shaders, which draw its bushes and grass. All 11 pipelines its first race makes build, and the race holds 60 fps with them. The facts of pull request #983 were checked against the game's code and hold, except its storage buffer table offsets.
 - **Check:** `python3 dm/gfx/tests/test_dmsh_meshstage.py` (the stages compile for macOS and iOS where the Metal compiler is installed), `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py` (`StageMemory`).
 
+### A task payload's 16-bit halves
+
+- **Symptom:** `stage output store mode b4 outside a task or mesh shader` (Ampere 927) and `ISBERD mode 34 in a task or mesh shader` (Ampere 923) in the build, and `[RED] failed to load shader <key>_b` for those task and mesh shaders at run time: what they draw is missing.
+- **Cause:** the stage memory modes carry LDS's size field at 73..76 (2 U16, 4 B32): 0xb4 writes a 16-bit half of a task's payload and ISBERD's 0x34 reads one, as 0xb8 and 0x38 do a word. Fast Fusion's tasks mask a value to 16 bits and write it at payload +0x18 + 2 x the thread's slot; their mesh shaders read +0x18 + 2 x their workgroup number with 0x34 and mask it to 16 bits again.
+- **Fix:** `AStageOut` writes 0xb4 to the payload as a 16-bit store (the shared memory's compare-and-swap on its word, as for bytes); `AIsberd` reads 0x34 as a 16-bit load. A chain change. `test_dmsh_ampere_mem.py` (`StageMemory`) covers both.
+- **Found on:** Fast Fusion (040041E0212AE000, no game note yet): 31 task and 31 mesh shaders, among them the collectibles, the HUD's energy bar and the award ceremony (`/objects/collectible.w3d`, `hud_energy.w3d`, `ceremony.w3d`).
+
 ### Task and mesh draws reading the dummy buffer
 
 - **Symptom:** large flat panels in front of the sky, the clouds behind them blinking at times, in some places and not others. In a `DM_NVN_PASSDUMP_ALL` dump every task and mesh shader's storage buffer shows as `st3` / `st4 sbufp reg6` or `reg7` `dummy addr=0 size=0`, though the game binds buffers for those stages.
@@ -1123,6 +1137,20 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Resolved:** 0x593 is SUATOM, an image atomic through a handle (`ASuatom`, `InstEmitAmpereMem.cs`): SUST's handle (40..59) and dimension (61..64), ATOMG's operation (87..91), size (73..76) and predicate result (81..83, PT here). Its two shaders, agl's `agl_technique_pfx` compute shaders, take an append counter with it (SUATOM.ADD.U32 on a 1D image, the old value shuffled to the warp, then their SUST), and now translate: all 22,852 of the package's shaders do. Neither has been met in play so far, so the picture is not checked; `test_dmsh_ampere_mem.py` translates the encoding. A handle in another bank or a predicate result is refused.
 - **Open:** loads and stores through addresses read from memory, which had no storage buffer to become, go through the memory pools now ([Global memory at an address loaded from memory](#global-memory-at-an-address-loaded-from-memory)).
 
+### NVN2 compute: an array of handles at a computed c0 address
+
+- **Symptom:** an NVN2 compute shader fails to load (`B binding cp_t2d_cb196608_… has no resolved slot number`), its dispatches skipped; in Fast Fusion's races the volumetric lighting is missing.
+- **Cause:** a handle read at a computed `c[0]` address (`LDC c[0][Ra]`, an array of separate textures) was not mapped at all. [NVN2 compute's separate handles in c[0]](#nvn2-computes-separate-handles-in-c0) maps a handle read at a constant offset; an array read at a computed one stayed in `c[0]`, which the host does not fill. Fast Fusion's volumetric lighting `cded8d0899ba4a6d` samples separate texture `c[0][0x40 + 8 i]` with the separate sampler at `c[0][0x60]`; in 1,300 compute shaders of Mario Kart World and Fast Fusion it is the only one with separate handles.
+- **Fix:** `BindlessToArray` moves a handle array read at a computed `c[0]` address of an NVN2 compute shader to the `c[2]` table its constant base maps to (`InstEmit.MapAmpereComputeC0`, the mapping `AMapC0` uses), the index shifted (here element 45 + i, with the sampler word at `c[2]` 0x568); the array then decodes as [Arrays of c2 handles cover the whole table, with a separate sampler word](#arrays-of-c2-handles-cover-the-whole-table-with-a-separate-sampler-word) (chain change).
+- **Found on:** Fast Fusion (040041E0212AE000; a provisional profile, no game note yet).
+
+### NVN2 compute shaders dumped at run time had no thread group
+
+- **Symptom:** `[RED] compute shader lacks threadgroup size reflection`; the dispatches are skipped. In Fast Fusion's races the sky stayed black and the vegetation was missing.
+- **Cause:** the thread group came only from the profile's answer table, which `shader_split.py` writes from the control sections of the package's shaders. A compute shader dumped at run time (`DM_NVN_SHDUMP`) and harvested into the package has no row there.
+- **Fix:** `dmsh_build.py` takes an NVN2 compute shader's thread group (+0x58) and shared memory (+0x64) from its own control section, as `shader_split.py` does.
+- **Found on:** Fast Fusion (040041E0212AE000; a provisional profile, no game note yet): its three harvested race compute shaders (8x8x8, 8x8x1, 32x1x1).
+
 ### Storage words read one by one
 
 - **Symptom:** a lit pass far slower on an M1 than the M4 Pro's figures suggest, the time spread over every material that loops over the scene's lights; dropping one material's draws (`DM_NVN_UB`) saved only its share.
@@ -1294,10 +1322,10 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 
 ### Ampere forms with a handle in a register, and SURED's other operations
 
-- **Symptom:** `Ampere instruction f63` (or `f6c`, `364`, `367`) `is not implemented`, or `SURED form 0310e000`, in the build.
-- **Cause:** 0xf60 and 0x361 were known for TEX. The same pairs exist for the others: 0xf63 and 0xf6c are TLD4 and TXD through a uniform register at 40..46, 0x364 and 0x367 are TLD4 and TLD through a register, the first of the second source block, each otherwise laid out as its bound form. 0x364's meaning was inferred from these siblings, and its use agrees: Yoshi's single-layer water converts each of its four results as a device Z (`c4[66]`), which only a gather of a depth texture gives. SURED takes SUATOM's operation field (87..91): MAX, OR and MIN on 32 bits turn up.
+- **Symptom:** `Ampere instruction f63` (or `f66`, `f6c`, `364`, `367`) `is not implemented`, or `SURED form 0310e000`, in the build.
+- **Cause:** 0xf60 and 0x361 were known for TEX. The same pairs exist for the others: 0xf63, 0xf66 and 0xf6c are TLD4, TLD and TXD through a uniform register at 40..46, 0x364 and 0x367 are TLD4 and TLD through a register, the first of the second source block, each otherwise laid out as its bound form. 0x364's meaning was inferred from these siblings, and its use agrees: Yoshi's single-layer water converts each of its four results as a device Z (`c4[66]`), which only a gather of a depth texture gives. SURED takes SUATOM's operation field (87..91): MAX, OR and MIN on 32 bits turn up.
 - **Fix:** `ATex` maps them to the bound forms, `ASured` takes the operation. TMML has the same pair, 0xf69 and 0x36a (Kirby Air Riders' cube map LOD, 4,776 pixel shaders), with a binding of its own only when the handle is bound by its slot. Open: SURED.MAX.U64 (33,550 uses, Nanite's visibility buffer) is still refused, as the host has no 64-bit image atomics; the game does not reach those shaders so far.
-- **Found on:** [Kirby Air Riders](../../dm/games/040077201BE50000/README.md) (TMML); [Yoshi and the Mysterious Book](../../dm/games/0400245021D2C000/README.md). Its shaders' jump tables also ran past their code on two compute shaders (`ArgumentOutOfRangeException`, in `GetCode`): an address past the code is now no code, which ends the table as the decoder expected.
+- **Found on:** [Kirby Air Riders](../../dm/games/040077201BE50000/README.md) (TMML); [Yoshi and the Mysterious Book](../../dm/games/0400245021D2C000/README.md). Its shaders' jump tables also ran past their code on two compute shaders (`ArgumentOutOfRangeException`, in `GetCode`): an address past the code is now no code, which ends the table as the decoder expected. Fast Fusion (040041E0212AE000, no game note yet): 0xf66 came later, `TLD.LZ` of a 2D texture through UR4 in all 8 terrain vertex shaders of `/shaders/terrain.shdr` (`001f4200089e03ff300004070a0a7f66` and its register variants), so the ground of a track was not drawn; `test_dmsh_ampere_mem.py` covers it.
 
 ### Ampere BMSK and the read of a covered pixel
 

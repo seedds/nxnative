@@ -66,6 +66,12 @@ class GuardedWrites(Translated):
         msl = self.translate(inst(*ur4) + inst(*txd) + inst(*used) + inst(*EXIT))
         self.assertIn('gradient', msl)
 
+    def test_a_fetch_through_a_uniform_register_keeps_its_handle(self):
+        # UR4 = c3[0x10]; TLD.LZ R22, R2 (2D, xy) through UR4 (0xf66, Fast Fusion's terrain vertex shaders, write barrier 5); after waiting on it, the result atomically added to an image, so it stays
+        ur4, tld, used = (0x000fe20000000a00, 0x00c0040000047ab9), (0x00014200089e03ff, 0x300004ff02167f66), (0x020ea200001ee000, 0x00000c16030c7593)
+        msl = self.translate(inst(*ur4) + inst(*tld) + inst(*used) + inst(*EXIT))
+        self.assertIn('cp_t_cb3_4.read(', msl)   # c3[0x10], word 4 of bank 3
+
     # A handle built under a guard from two words of the game's uniform buffer, read under a guard the translator cannot tie to it, so that a phi reaches the read with the first word and what the
     # register held before: Unreal Engine 5.4's single-layer water and a global pixel shader in Yoshi and the Mysterious Book. The read was deleted. Each ends in the result's atomic add, so it stays
     def test_handle_under_a_uniform_vote_of_the_reads_guard(self):
@@ -268,6 +274,10 @@ class StageMemory(Translated):
     COUNT_ZERO = (0x000fe20000008800, 0x000003ffff007927)  # 0x927 [RZ + 3], RZ, mode 0x88: every thread clears the count first
     COUNT = (0x0001e20000008800, 0x00000307ff007927)       # 0x927 [RZ + 3], R7, mode 0x88: the thread with the count
     INDEX = (0x0001e20000008000, 0x0000040605057927)       # 0x927 [R5 + 4], R6, mode 0x80: an index byte
+    # Fast Fusion's tasks write an array of 16-bit indices into their payload at +0x18 (each thread's at 2 x its slot), which their mesh shaders read back (94e15100e56df6d5 +0xe40, d8a70b71e30dacf9 +0x220)
+    HALF = (0x0003e2000000b400, 0x0000180003000927)        # 0x927 [R3 + 0x18], R0, mode 0xb4
+    HALF_INPUT = (0x000fe20000003400, 0x0000180007017923)  # ISBERD R1, [R7 + 0x18], mode 0x34 (the game's write barrier left out)
+    KEEP_R1 = (0x0041e8000000b800, 0x00001001ff007927)     # 0x927 [RZ + 0x10], R1, mode 0xb8
 
     def msl(self, *code):
         return self.translate(b''.join(inst(*c) for c in code) + inst(*EXIT), **self.MEMORY)
@@ -288,6 +298,16 @@ class StageMemory(Translated):
 
     def test_a_byte_goes_through_its_word_atomically(self):   # neighbouring threads write neighbouring bytes; the shader build makes the helper's loop one byte store (test_dmsh_shared_store.py)
         self.assertIn('atomic_compare_exchange', self.msl(self.INDEX))
+
+    def test_a_half_of_the_payload_goes_through_its_word_atomically(self):   # neighbouring threads write neighbouring halves
+        msl = self.msl(self.HALF)
+        self.assertIn('atomic_compare_exchange', msl)
+        self.assertIn('312', msl)   # 0x120 + 0x18
+
+    def test_a_half_of_the_input_reads_16_bits(self):   # 0x10 + 0x18
+        msl = self.msl(self.HALF_INPUT, self.KEEP_R1)
+        self.assertIn('40', msl)
+        self.assertRegex(msl, r'extract_bits\(|& 65535u?\b')
 
     def test_outside_a_task_or_mesh_shader_it_is_refused(self):
         with self.assertRaises(AssertionError) as e: self.translate(inst(*self.PAYLOAD) + inst(*EXIT))

@@ -47,6 +47,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             x(0x367, InstName.Tld, ATex, InstProps.Tex);
             x(0xf60, InstName.Tex, ATex, InstProps.Tex);
             x(0xf63, InstName.Tld4, ATex, InstProps.Tex);
+            x(0xf66, InstName.Tld, ATex, InstProps.Tex);
             x(0xf6c, InstName.Txd, ATex, InstProps.Tex);
             x(0xf69, InstName.Tmml, ATex, InstProps.Tex);
             x(0x36a, InstName.Tmml, ATex, InstProps.Tex);
@@ -134,16 +135,17 @@ namespace Ryujinx.Graphics.Shader.Instructions
             if (stage != null)
             {
                 // A task or mesh shader's stage input (QueryAmpereStageMemory). Mode 0x78: its workgroup's number; 0x38: a word of the payload its task wrote, [Ra + offset];
-                // 0xb8: a word it wrote itself with 0x927's mode 0xb8 (Ocarina of Time's task shader 5d3a096025e375a1 reads its payload back in a later thread)
+                // 0xb8: a word it wrote itself with 0x927's mode 0xb8 (Ocarina of Time's task shader 5d3a096025e375a1 reads its payload back in a later thread);
+                // 0x34: a 16-bit half of the payload (the size field at 73..76, LDS's: 2 U16, 4 B32), which the task wrote with 0xb4
                 int mode = x.Bits(72, 80);
 
-                if (mode != 0x78 && mode != 0x38 && mode != 0xb8)
+                if (mode != 0x78 && mode != 0x38 && mode != 0xb8 && mode != 0x34)
                 {
                     throw AFail(context, $"ISBERD mode {mode:x2} in a task or mesh shader");
                 }
 
                 Operand addr = mode == 0x78 ? Const(stage[0]) : context.IAdd(AGpr(x.Ra), Const(stage[mode == 0xb8 ? 2 : 1] + (int)x.SignedField(40, 64)));
-                EmitLoad(context, StorageKind.SharedMemory, LsSize2.B32, addr, x.Rd, 0);
+                EmitLoad(context, StorageKind.SharedMemory, mode == 0x34 ? LsSize2.U16 : LsSize2.B32, addr, x.Rd, 0);
                 return;
             }
 
@@ -153,7 +155,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
         }
 
-        // Task and mesh shaders' stage output (0x927), [Ra + offset], Rb, mode 72..79: 0xb8 a word of the task's payload; 0xf8 a word of a mesh shader's attributes (each component
+        // Task and mesh shaders' stage output (0x927), [Ra + offset], Rb, mode 72..79: 0xb8 a word of the task's payload, 0xb4 a 16-bit half of one (the size field at 73..76, as
+        // ISBERD's 0x34 that reads it: Fast Fusion's tasks write an array of 16-bit indices at +0x18, each thread's at 2 x its slot); 0xf8 a word of a mesh shader's attributes (each component
         // 0x80 bytes for 32 vertices or primitives); 0x88 the primitive count byte, 0x80 a primitive index byte. Bytes go through the shared memory's byte store, a compare-and-swap
         // on the word (SharedStoreSmallIntCas), since neighbouring threads write neighbouring bytes. A mesh workgroup of 32 threads is one warp on the console, all at the same
         // instruction, so the zero count each thread writes first (Mario Kart World: at its start) cannot pass the count one thread writes later; Metal's threads run in no such step,
@@ -164,7 +167,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             int[] stage = context.TranslatorContext.GpuAccessor.QueryAmpereStageMemory();
             int mode = x.Bits(72, 80);
 
-            if (stage == null || (mode != 0xb8 && mode != 0xf8 && mode != 0x88 && mode != 0x80))
+            if (stage == null || (mode != 0xb8 && mode != 0xb4 && mode != 0xf8 && mode != 0x88 && mode != 0x80))
             {
                 throw AFail(context, $"stage output store mode {mode:x2} outside a task or mesh shader");
             }
@@ -175,8 +178,9 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
 
             bool word = mode == 0xb8 || mode == 0xf8;
-            Operand addr = context.IAdd(AGpr(x.Ra), Const((word ? stage[2] : stage[3]) + (int)x.SignedField(40, 64)));
-            EmitStore(context, StorageKind.SharedMemory, word ? LsSize2.B32 : LsSize2.U8, addr, x.Rb, 0);
+            bool payload = mode == 0xb8 || mode == 0xb4;
+            Operand addr = context.IAdd(AGpr(x.Ra), Const((word || payload ? stage[2] : stage[3]) + (int)x.SignedField(40, 64)));
+            EmitStore(context, StorageKind.SharedMemory, word ? LsSize2.B32 : mode == 0xb4 ? LsSize2.U16 : LsSize2.U8, addr, x.Rb, 0);
         }
 
         public static void ALepc(EmitterContext context)
@@ -731,15 +735,15 @@ namespace Ryujinx.Graphics.Shader.Instructions
             int opcode = x.Opcode;
 
             // TEX through a handle in a register, not named by its offset: the compiler's form for a handle it read itself, usually from a table at a computed offset. BindlessElimination takes the
-            // handle from there, as for Maxwell's TEX.B. The other fields are 0xb60's. 0xf60, 0xf63 and 0xf6c (TEX, TLD4 and TXD, whose other fields are 0xb60's, 0xb63's and 0xb6c's): a uniform register at
+            // handle from there, as for Maxwell's TEX.B. The other fields are 0xb60's. 0xf60, 0xf63, 0xf66 and 0xf6c (TEX, TLD4, TLD and TXD, whose other fields are 0xb60's, 0xb63's, 0xb66's and 0xb6c's): a uniform register at
             // 40..46. 0x361, 0x364 and 0x367 (TEX, TLD4 and TLD, bit 59 set): a register, the first of the second source block,
             // before the LOD (a census of Fire Emblem Fortune's Weave's 3,327: of the sources that an LDC just wrote, always that place, with and without .SCR). Rc stays the second destination in both
             Operand boundHandle = null;
             // 0xf69 and 0x36a are TMML the same way (0xb69's other fields; Kirby Air Riders: 4,776 pixel shaders).
             bool handleInB = opcode is 0x361 or 0x364 or 0x367 or 0x36a;
-            bool bindless = handleInB || opcode is 0xf60 or 0xf63 or 0xf6c or 0xf69;
+            bool bindless = handleInB || opcode is 0xf60 or 0xf63 or 0xf66 or 0xf6c or 0xf69;
 
-            if (opcode is 0xf60 or 0xf63 or 0xf6c or 0xf69)
+            if (opcode is 0xf60 or 0xf63 or 0xf66 or 0xf6c or 0xf69)
             {
                 int ur = x.Bits(40, 46);
 
@@ -748,7 +752,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             if (bindless)
             {
-                opcode = opcode is 0xf63 or 0xf6c or 0xf69 ? opcode - 0x400 : opcode is 0x364 or 0x367 or 0x36a ? opcode + 0x7ff : 0xb60;
+                opcode = opcode is 0xf63 or 0xf66 or 0xf6c or 0xf69 ? opcode - 0x400 : opcode is 0x364 or 0x367 or 0x36a ? opcode + 0x7ff : 0xb60;
             }
 
             TexDim dim = ATexDim(context, x.Bits(61, 64));

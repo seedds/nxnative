@@ -10,3 +10,5 @@ extern int test_variable_refresh;
 int front_screen_variable_refresh(void) { return test_variable_refresh; }
 extern int test_game_fps;
 int test_game_fps_now(void) { return test_game_fps; }
+extern int test_screen_hz;
+int front_screen_max_fps(void) { return test_screen_hz; }

@@ -1,6 +1,14 @@
 # Donkey Kong Bananza (`040074A01BF12000`)
 
-A Switch 2 game: update v458752 over the base game, SDK 20.5.19 built for the Switch 2 (`sdk` names its spec `Ounce`), NVN2. Nintendo EPD's engine (sead / agl / gsys, Phive), modules `main` + `sdk`. **Plays on the Mac** (M4 Pro): three play sessions of about 5 minutes each and scripted runs of up to 15,900 frames, through the opening, the mining tunnel and the areas after it, with the guide movies in their panel, at 60 fps; in busy scenes the game drops itself to 30 fps for a few seconds ([Open](#open)). The first start with no pipeline archive builds the pipelines for about 4 minutes, once. Nothing past the first level's opening areas is tested; iOS is untested.
+A Switch 2 game: update v458752 over the base game, SDK 20.5.19 built for the Switch 2 (`sdk` names its spec `Ounce`), NVN2. Nintendo EPD's engine (sead / agl / gsys, Phive), modules `main` + `sdk`. **Plays on the Mac** (M4 Pro): three play sessions of about 5 minutes each and scripted runs of up to 15,900 frames, through the opening, the mining tunnel and the areas after it, with the guide movies in their panel, at 60 fps; in busy scenes the game drops itself to 30 fps for a few seconds ([Open](#open)). The first start with no pipeline archive builds the pipelines for about 4 minutes, once. The Mac tests cover only the first level's opening areas. An initial [community iOS report](#ios-community-report) is recorded below.
+
+## iOS community report
+
+[Issue #1183](https://github.com/seedds/nxnative/issues/1183) reports a successful nine-minute session (33,600 frames) on an iPhone 18 Pro (`iPhone19,2`), iOS 27.2 (`24B119`), with update v458752 and one DLC. This is a community report on commit `d145b9563063`, shader chain `09e6fcbd87b8`, not a test of current main. The app was built from a dump folder with `--platform ios --prepare-xcode` and signed through Xcode with Increased Memory Limit; settings were defaults plus `DM_METAL_HUD=1`, with Low Power Mode off.
+
+- No crash or `[RED]` line was reported. The opening minutes ran at about 60 fps; after thermal state reached 2, most windows ran at 45–60 fps, with a session average of 50.5 fps. One stretch ran at 30 fps; its cause was not checked.
+- Peak reported footprint was 5,575 MiB. Loads and area changes had frame-time p99 spikes of 50–166 ms.
+- Coverage is limited to this device, build and short session. Longer play, current main and other iOS devices remain unvalidated.
 
 ## What it needs
 
@@ -66,7 +74,7 @@ Each step below stopped the boot before its fix:
 - **Render scale (`DM_RENDER_SCALE`):** the stubs in `patches.py` replace the NDSR upscale rate bounds (`NdsrUpscaleMinRate` 1.375, `NdsrUpscaleMaxRate` 1.9, read at `main+0x38dd04` / `+0x38dd98` / `+0x38e104` / `+0x38e194`) and the rate the dynamic-resolution update applies (`main+0x38de2c`) with the loader's 1 / scale (state +0x14), so the scene keeps one size. The game draws only at its table's steps (1.0, 1.375, 1.5, 2.0 of the output, 2304x1296 docked and 1920x1080 handheld) and sizes its targets per step: a rate between the steps snaps down (0.8333 drew 2304x1296 docked); writing 1.2 into the table's 1.375 step (`[main+0x26ce408]+0x78`, +4) drew that step's 1397x786. Handheld 1920x1080 is 0.999.
 - **Frame time by mode (M4 MacBook Air, 2560x1440 screen, cool):** handheld 1920x1080 17.0 ms (GPU 15.5, translation 7.8), handheld 1397x786 16.6 ms (GPU 12.6), docked 1676x943 18.8 ms (GPU 16.4, translation 10.6: the docked tier draws more), docked 1536x864 about 18 ms. After `ea0c98df` (NVN queue scheduling) the 1080p frame is 18.1 ms: the submission snapshot adds about 1.2 ms before the replay; the game's GPU event waits and signals send almost every submission through the scheduler.
 - **The map:** zoomed out, docked, it renders at the fixed 2304x1296 (no dynamic resolution there): its depth prepass is 1,900-8,000 geometry-shader draws and its lighting pass about 7,600 draws, 8 ms of GPU; 30 → about 55 fps docked, 60 handheld with [Long passes split while the GPU is idle](../../../docs/reference/frame-rate.md#long-passes-split-while-the-gpu-is-idle).
-- iOS untested.
+- iOS: longer sessions, current main and other devices remain unvalidated; see the initial [community report](#ios-community-report).
 
 ## Found on this game
 

@@ -60,6 +60,8 @@ class ArchiveRestartTests(unittest.TestCase):
                                             env=env, capture_output=True, text=True, timeout=60)
                     self.assertEqual(result.returncode, 0, phase + '\n' + result.stdout + result.stderr)
                     self.assertEqual(len(list(Path(folder).glob('*.mtl4a'))), files, phase)
+                    # every file has its index beside it, and a compacted file's index goes with it
+                    self.assertEqual(sorted(path.stem for path in Path(folder).glob('*.keys')), sorted(path.stem for path in Path(folder).glob('*.mtl4a')), phase)
                     self.assertEqual((Path(folder) / 'compacting').exists(), phase == 'seed', phase)
 
 

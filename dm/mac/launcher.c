@@ -134,6 +134,37 @@ static void saved_choices(void) {   // after the env files, before the bundle's 
     }
 }
 
+static void saved_microphone_choice(const char *env) {
+    if (getenv(env)) return;   // command line and env.txt values win over launcher preferences
+    CFStringRef domain = CFBundleGetIdentifier(CFBundleGetMainBundle());
+    if (!domain) return;
+    CFStringRef key = CFStringCreateWithFormat(NULL, NULL, CFSTR("launcher.%s"), env);
+    CFPropertyListRef value = CFPreferencesCopyAppValue(key, domain); CFRelease(key);
+    char text[256];
+    if (!value) return;
+    if (CFGetTypeID(value) != CFStringGetTypeID() || !CFStringGetCString(value, text, sizeof text, kCFStringEncodingUTF8)) {
+        fprintf(stderr, "launcher: saved microphone choice for %s ignored: expected a short string\n", env);
+        CFRelease(value); return;
+    }
+    int accepted = 1;
+    if (!strcmp(env, "DM_MIC_GAIN")) {
+        char *end = NULL; double gain = strtod(text, &end);
+        accepted = text[0] && !isspace((unsigned char)text[0]) && end != text && !*end && gain >= 1.0 && gain <= 8.0;
+    }
+    if (accepted && *text) {
+        setenv(env, text, 0);
+        fprintf(stderr, "launcher: %s loaded from microphone preferences\n", env);
+    } else if (!accepted) fprintf(stderr, "launcher: saved microphone choice for %s ignored: outside its supported range\n", env);
+    CFRelease(value);
+}
+
+static void saved_microphone_choices(void) {
+    const char *off = getenv("DM_SAVED_CHOICES");
+    if (off && !strcmp(off, "0")) return;
+    saved_microphone_choice("DM_MIC_DEVICE");
+    saved_microphone_choice("DM_MIC_GAIN");
+}
+
 // Cloud saves: the folder chosen in the settings window (Launcher.swift CloudSavesSection, cloudSaves.folder in the app's preferences) becomes DM_SAVE_SYNC
 // (dm/host/save_sync.h), with or without the window; a DM_SAVE_SYNC the launch environment or an env file set wins. A front end may write the key too (docs/frontends.md, The cloud saves folder)
 static void cloud_saves_folder(void) {
@@ -204,6 +235,7 @@ int main(int argc, char **argv) {
     int shown = window ? dm_mac_launcher() : 2;
     if (!shown) return 0;   // Quit: no game
     if (shown == 2) saved_choices();
+    saved_microphone_choices();
     cloud_saves_folder();
     setenv("DM_ROOT", sup, 0); setenv("DM_ROMFS", romfs, 0); setenv("DM_SAVE", save, 0); setenv("DM_TEMP", temp, 0);
     snprintf(p, sizeof p, "%s/msl", res); setenv("DM_MSL_DIR", p, 0);

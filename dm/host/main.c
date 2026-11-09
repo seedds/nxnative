@@ -3,6 +3,8 @@
 #include "front.h"
 #include "../gfx/nvn/dmsh_chain.h"
 #include <CoreFoundation/CoreFoundation.h>
+#include <TargetConditionals.h>
+#include <limits.h>
 #include <stdatomic.h>
 #include <sys/resource.h>
 #include <sys/sysctl.h>
@@ -167,6 +169,13 @@ void dm_host_preload_start(int argc, char **argv) {
     if (pthread_create(&g_pre.th, &a, preload_thread, NULL)) die("dm_host_preload_start: cannot start the thread");
 }
 int main(int argc, char **argv) {
+#if TARGET_OS_OSX
+    if (argc == 3 && !strncmp(argv[2], "--controller-setup-fd=", 22)) {
+        char *end = NULL; long fd = strtol(argv[2] + 22, &end, 10);
+        if (!end || *end || fd < 3 || fd > INT_MAX || !front_controller_setup((int)fd)) return 0;
+        argc = 2; argv[2] = NULL;
+    }
+#endif
     { int mtl_pso_prebuild_tool(void); if (mtl_pso_prebuild_tool()) return 0; }   // DM_PSO_PREBUILD=tool: the pipeline archive's prebuild alone, no game (nvn_mtl.m)
     if (getenv("DM_PRELOAD")) dm_host_preload_start(argc, argv);   // Exercise the early-start path on Mac (on iOS it is called from the App's main())
     if (atomic_load(&g_pre.started)) {

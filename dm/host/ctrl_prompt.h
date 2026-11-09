@@ -18,18 +18,23 @@ typedef struct {
     cp_phase phase;
     int min, max;     // the game's playerCountMin and playerCountMax (max <= 0: none)
     int joined;       // the players the game sees (dm_players_reported) at the last step
+    int ready;        // joined players with accepted styles and complete pairs
     int a_up, b_up;   // A and B have been up since the prompt opened or a player last joined: a button held then does not count
     int ok;           // the answer once settled: 1 done, 0 canceled
 } ctrl_prompt;
 
 // Opens the prompt with the buttons as they are now (pressed on any controller)
 static inline void cp_open(ctrl_prompt *q, int min, int max, int joined, int a, int b) {
-    *q = (ctrl_prompt){.phase = CP_OPEN, .min = min, .max = max, .joined = joined, .a_up = !a, .b_up = !b};
+    *q = (ctrl_prompt){.phase = CP_OPEN, .min = min, .max = max, .joined = joined, .ready=joined, .a_up = !a, .b_up = !b};
+}
+static inline void cp_open_ready(ctrl_prompt *q,int min,int max,int joined,int ready,int a,int b) {
+    cp_open(q,min,max,joined,a,b); q->ready=ready;
 }
 
 // One step: joined = the players the game sees, waiting = connected controllers that are no player yet, a / b = A / B pressed on any controller (a press that makes a controller
 // join changes joined, so it does not count), confirm / cancel = a key pressed (Return, Escape) or a touch on the prompt's buttons since the last step
-static inline cp_phase cp_step(ctrl_prompt *q, int joined, int waiting, int a, int b, int confirm, int cancel) {
+static inline cp_phase cp_step_ready(ctrl_prompt *q, int joined, int ready, int waiting, int a, int b, int confirm, int cancel, int active) {
+    q->ready=ready;
     switch (q->phase) {
     case CP_IDLE:
         break;
@@ -37,8 +42,8 @@ static inline cp_phase cp_step(ctrl_prompt *q, int joined, int waiting, int a, i
         if (joined != q->joined) { q->joined = joined; q->a_up = !a; q->b_up = !b; }
         if (!a) q->a_up = 1;
         if (!b) q->b_up = 1;
-        if ((b && q->b_up) || cancel) { q->phase = CP_SETTLE; q->ok = 0; }   // with A and B at once the safe one wins
-        else if (joined >= q->min && ((a && q->a_up) || confirm || (q->max > 0 && joined >= q->max) || !waiting)) { q->phase = CP_SETTLE; q->ok = 1; }
+        if (active && ((b && q->b_up) || cancel)) { q->phase = CP_SETTLE; q->ok = 0; }   // with A and B at once the safe one wins
+        else if (ready >= q->min && (q->max<=0 || q->min<=q->max) && ((active && ((a && q->a_up) || confirm)) || (q->max > 0 && ready >= q->max) || !waiting)) { q->phase = CP_SETTLE; q->ok = 1; }
         break;
     case CP_SETTLE:
         if (!a && !b) q->phase = CP_IDLE;
@@ -46,11 +51,15 @@ static inline cp_phase cp_step(ctrl_prompt *q, int joined, int waiting, int a, i
     }
     return q->phase;
 }
+// Compatibility entry point for callers without a separate readiness snapshot.
+static inline cp_phase cp_step(ctrl_prompt *q,int joined,int waiting,int a,int b,int confirm,int cancel) {
+    return cp_step_ready(q,joined,joined,waiting,a,b,confirm,cancel,1);
+}
 
 // The game gets no controller input in these phases
 static inline int cp_blocks_input(cp_phase p) { return p != CP_IDLE; }
 // Whether A would finish it now (the prompt shows its action enabled)
-static inline int cp_can_confirm(const ctrl_prompt *q) { return q->joined >= q->min; }
+static inline int cp_can_confirm(const ctrl_prompt *q) { return q->ready >= q->min && (q->max<=0 || q->min<=q->max); }
 
 // The texts, in this order, one per line of DM_CTRL_PROMPT_TEXT: the title, the hint, the count, the done button, the cancel button. {min}, {max} and {joined} in a text are
 // replaced by the numbers. An empty or missing line (or no text) keeps the English one
@@ -67,7 +76,7 @@ static inline void cp_text(const char *text, int i, const ctrl_prompt *q, char *
     for (size_t k = 0; k < n && o + 1 < cap;) {
         static const char *const key[3] = {"{min}", "{max}", "{joined}"};
         int v = -1; size_t kl = 0;
-        for (int j = 0; j < 3; j++) { size_t l = strlen(key[j]); if (k + l <= n && !memcmp(s + k, key[j], l)) { v = j == 0 ? q->min : j == 1 ? q->max : q->joined; kl = l; break; } }
+        for (int j = 0; j < 3; j++) { size_t l = strlen(key[j]); if (k + l <= n && !memcmp(s + k, key[j], l)) { v = j == 0 ? q->min : j == 1 ? q->max : q->ready; kl = l; break; } }
         if (kl) { int w = snprintf(out + o, cap - o, "%d", v); o = w < 0 ? o : o + (size_t)w < cap ? o + (size_t)w : cap - 1; k += kl; }
         else out[o++] = s[k++];
     }

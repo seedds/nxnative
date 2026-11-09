@@ -28,6 +28,10 @@ static uint64_t tick = 1000000000, sample_time;
 uint64_t now_ns(void) { return tick; }
 void dm_motion_set_hid(int p, const float a[3], const float w[3], uint64_t ns) { sent++; player = p; sample_time = ns; assert(a[2] == -1 && w[2] == 0); }
 void dm_motion_clear_hid(int p) { cleared = p; }
+static int pairRole, sideCleared, sideSent;
+uint64_t dm_pad_generation(int p) { (void)p; return 1; }
+void dm_motion_set_side_sample(int p,int role,uint64_t generation,const float a[3],const float w[3],uint64_t ns) { assert(generation==1); pairRole=role; sideSent++; dm_motion_set_hid(p,a,w,ns); }
+void dm_motion_clear_side(int p,int role) { (void)p; sideCleared=role; }
 #define LOG(...) ((void)0)
 #define IOHIDDeviceGetProperty test_property
 #define IOHIDDeviceRegisterInputReportCallback test_callback
@@ -67,5 +71,13 @@ int main(void) { @autoreleasepool {
     removed(a); assert(!a.callback && !g_pro_devices && !g_pro_bound && cleared == 4);
     dm_motion_pro_players(1, 0); found(b); report(b); assert(sent == 15 && player == 0);   // reconnect / merged mode
     removed(b); removed(synthetic); assert(!g_pro_devices);
+    found(a); dm_motion_pro_players_role(1,2,1); report(a);
+    assert(sideSent==3 && pairRole==1 && player==2);
+    dm_motion_pro_players_role(1,2,2); assert(sideCleared==1); report(a);
+    assert(sideSent==6 && pairRole==2);
+    dm_motion_pro_active(0); assert(sideCleared==2);
+    dm_motion_pro_active(1); dm_motion_pro_players(1,2); report(a);
+    assert(sideSent==6 && sideCleared==2);
+    removed(a);
     puts("t_motion_pro_mac: passed");
 } }

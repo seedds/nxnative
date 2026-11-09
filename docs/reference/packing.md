@@ -433,3 +433,10 @@
 - **Cause:** the base game's HtmlDocument NCA can be sparse too (16 KB, beside the sparse Program NCA). `--html` reads the update's HtmlDocument NCAs, each over a base one when it is a patch, and then every base HtmlDocument NCA on its own; a sparse one read alone fails the hash check while its tables open.
 - **Fix:** `dm/tools/nx_extract/Program.cs` reads no sparse base HtmlDocument NCA on its own (`a sparse HtmlDocument NCA of the base game (… bytes): read only through the update's patch, not alone`), as Horizon mounts it only through its patch.
 - **Found on:** [Minecraft Dungeons II](../../dm/games/0100A7C01B792000/README.md), base v0 with update v131072: the update's patch (`accessible-urls`) and its full legal information NCA are read, the base's legal information NCA too.
+
+### macOS-only Bluetooth framework in an iOS project
+
+- **Symptom:** the unsigned iOS app fails to link with `framework 'IOBluetooth' not found` after the Mac host adds native Switch 2 Bluetooth support.
+- **Cause:** `gen_build.py` takes framework flags from the shared host Makefile. It excluded Cocoa but passed the Mac-only IOBluetooth framework to the iPhone linker.
+- **Fix:** exclude Cocoa and IOBluetooth while retaining cross-platform frameworks such as CoreBluetooth. A synthetic Makefile regression checks the generated iOS framework list.
+- **Found on:** the production iOS smoke project with synthetic modules and the [Jamboree profile](../../dm/games/0100965017338000/README.md), without game files or signing.

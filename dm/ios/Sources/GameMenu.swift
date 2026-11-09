@@ -4,7 +4,7 @@
 // that need the next start (language, pipelines, the frame rate and so on), and the sliders, stay on the settings screen, which the menu's title points to.
 import UIKit
 
-var gameMenuModel: LauncherModel?   // the settings screen's model (Launcher.swift); nil in an app without one: the menu has the layout only
+var gameMenuModel: LauncherModel?   // the settings screen's model (Launcher.swift); nil in an app without one: the menu has layout and controller setup
 
 @_cdecl("dm_game_menu")
 public func dmGameMenu() -> UnsafeMutableRawPointer {
@@ -19,6 +19,9 @@ private func gameMenuItems() -> [UIMenuElement] {
         UIAction(title: names[l], state: dm_pad_layout() == l ? .on : .off) { _ in dm_pad_layout_set(Int32(l)) }
     }
     let layout = UIMenu(title: "Controller layout", options: .singleSelection, children: layouts)   // a choice's value shows in its submenu: a subtitle would make each row two lines
+    let controllers = UIAction(title: String(localized: "Configure controllers"), image: UIImage(systemName: "gamecontroller")) { _ in
+        dm_ios_controller_open()
+    }
     var items: [UIMenuElement] = []
     var placed = false
     if let m = gameMenuModel {
@@ -26,10 +29,11 @@ private func gameMenuItems() -> [UIMenuElement] {
             var rows: [UIMenuElement] = section == "Controls" ? [layout] : []
             if section == "Controls" { placed = true }
             for s in m.rows(in: section) where (s.kind == "choice" || s.kind == "toggle") && dm_setting_live(s.env, nil) { rows.append(gameMenuRow(m, s)) }
+            if section == "Controls" { rows.append(controllers) }
             if !rows.isEmpty { items.append(UIMenu(options: .displayInline, children: rows)) }
         }
     }
-    if !placed { items.insert(UIMenu(options: .displayInline, children: [layout]), at: 0) }
+    if !placed { items.insert(UIMenu(options: .displayInline, children: [layout, controllers]), at: 0) }
     return items
 }
 

@@ -7,7 +7,7 @@
 // replaces a variable already set), as the iOS app reads Documents/env.txt and dm/env.txt. Then the player's saved choices: launcher.<VAR> strings in the app's preferences domain (its bundle ID), which a
 // front end or a settings window writes, each checked against the bundle's settings (Info.plist DMSettings, from launcher.json) and used only for a variable still unset; DM_SAVED_CHOICES=0 ignores them.
 // So the order is: the launch environment, the player's env.txt, the bundle's, saved choices, the host's tested defaults (docs/frontends.md, Saved choices).
-// Before the host starts, the settings window (dm/mac/Launcher.swift dm_mac_launcher, linked in by pack_app.py) runs in this process and puts the player's settings into the environment; it keeps
+// Before the game loads, the settings window (dm/mac/Launcher.swift dm_mac_launcher, linked in by pack_app.py) runs in this process and puts the player's settings into the environment; it keeps
 // what the launch environment and the env files set (DM_ENV_LAUNCH_KEYS, DM_ENV_FILE_KEYS). DM_LAUNCHER=0 or --no-launcher (open <app> --args --no-launcher) starts the game without the window,
 // with the saved choices; so does "Show this window at launch" turned off.
 #include <CoreFoundation/CoreFoundation.h>
@@ -23,12 +23,15 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <sys/socket.h>
 #include <unistd.h>
 #include "romfs_image.h"
 #include "save_sync.h"
 
 extern char **environ;
-int dm_mac_launcher(void);   // Launcher.swift: 1 = Play (the settings are in the environment), 0 = the player quit, 2 = no window (apply the saved choices here)
+int dm_mac_launcher(int controller_fd);   // 1 = Play, 0 = Quit, 2 = no window
+int dm_mac_launcher_will_show(void);
+int dm_mac_controllers_start(void);   // send the choices and final launch environment to the prepared host
 static pid_t g_child;
 static char *g_file_keys, *g_launch_keys;   // the variables the env files set, and the settings the launch environment set (DM_ENV_FILE_KEYS, DM_ENV_LAUNCH_KEYS)
 
@@ -201,8 +204,30 @@ int main(int argc, char **argv) {
     int window = !(getenv("DM_LAUNCHER") && !strcmp(getenv("DM_LAUNCHER"), "0"));
     for (int i = 1; i < argc; i++) if (!strcmp(argv[i], "--no-launcher")) window = 0;
     if (!window) fprintf(stderr, "launcher: no settings window (DM_LAUNCHER=0 or --no-launcher)\n");
-    int shown = window ? dm_mac_launcher() : 2;
-    if (!shown) return 0;   // Quit: no game
+    programs_table(contents, res, sup);
+    if (chdir(sup)) { fprintf(stderr, "[RED] launcher: cannot enter %s\n", sup); return 1; }
+    struct sigaction sa = {.sa_handler = forward};   // no SA_RESTART: waitpid below sees EINTR and waits again
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGTERM, &sa, NULL); sigaction(SIGINT, &sa, NULL); sigaction(SIGHUP, &sa, NULL);
+    char *host_argv[] = {host, dm, NULL};
+    int channel = -1, err;
+    if (window && dm_mac_launcher_will_show()) {
+        int pair[2];
+        if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair)) { perror("launcher: controller socket"); return 1; }
+        int no_sigpipe = 1; setsockopt(pair[0], SOL_SOCKET, SO_NOSIGPIPE, &no_sigpipe, sizeof no_sigpipe);
+        fcntl(pair[0], F_SETFD, FD_CLOEXEC);
+        char argument[64]; snprintf(argument, sizeof argument, "--controller-setup-fd=%d", pair[1]);
+        char *prepare_argv[] = {host, dm, argument, NULL};
+        err = posix_spawn(&g_child, host, NULL, NULL, prepare_argv, environ);
+        close(pair[1]);
+        if (err) { close(pair[0]); fprintf(stderr, "[RED] launcher: controller setup host: %s\n", strerror(err)); return 1; }
+        channel = pair[0];
+    }
+    int shown = channel >= 0 ? dm_mac_launcher(channel) : 2;
+    if (!shown) {
+        if (channel >= 0) { shutdown(channel, SHUT_RDWR); close(channel); while (waitpid(g_child, NULL, 0) < 0 && errno == EINTR) {} }
+        return 0;
+    }
     if (shown == 2) saved_choices();
     cloud_saves_folder();
     setenv("DM_ROOT", sup, 0); setenv("DM_ROMFS", romfs, 0); setenv("DM_SAVE", save, 0); setenv("DM_TEMP", temp, 0);
@@ -213,14 +238,16 @@ int main(int argc, char **argv) {
     snprintf(p, sizeof p, "%s/pso", res); if (!stat(p, &st)) setenv("DM_PSO_BUNDLE", p, 0);   // the bases of every shader pair: the first start builds none
     if (*lang) setenv("DM_LANG", lang, 0);
     setenv("DM_WINDOW", "1", 0); setenv("DM_AUDIO", "1", 0);
-    programs_table(contents, res, sup);
-    if (chdir(sup)) { fprintf(stderr, "[RED] launcher: cannot enter %s\n", sup); return 1; }
-    struct sigaction sa = {.sa_handler = forward};   // no SA_RESTART: waitpid below sees EINTR and waits again
-    sigemptyset(&sa.sa_mask);
-    sigaction(SIGTERM, &sa, NULL); sigaction(SIGINT, &sa, NULL); sigaction(SIGHUP, &sa, NULL);
-    char *host_argv[] = {host, dm, NULL};
-    int err = posix_spawn(&g_child, host, NULL, NULL, host_argv, environ);
-    if (err) { fprintf(stderr, "[RED] launcher: cannot start %s: %s\n", host, strerror(err)); return 1; }
+    if (channel >= 0) {
+        int started = dm_mac_controllers_start(); shutdown(channel, SHUT_RDWR); close(channel);
+        if (!started) {
+            kill(g_child, SIGTERM); while (waitpid(g_child, NULL, 0) < 0 && errno == EINTR) {}
+            fprintf(stderr, "[RED] launcher: controller setup could not be applied; the game was not started\n"); return 1;
+        }
+    } else {
+        err = posix_spawn(&g_child, host, NULL, NULL, host_argv, environ);
+        if (err) { fprintf(stderr, "[RED] launcher: cannot start %s: %s\n", host, strerror(err)); return 1; }
+    }
     int status;
     while (waitpid(g_child, &status, 0) < 0) if (errno != EINTR) return 1;
     // Cloud saves (DM_SAVE_SYNC, dm/host/save_sync.h): what the host committed and had not sent yet goes now, after a crash too (the committed save is whole whatever the host was doing)

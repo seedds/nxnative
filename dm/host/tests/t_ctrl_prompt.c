@@ -61,6 +61,14 @@ int main(void) {
     cp_text("{min", CP_TEXT_TITLE, &q, out, sizeof out); CHECK(!strcmp(out, "{min"), "an unfinished key stays as written");
     cp_text("{joined}{joined}{joined}", CP_TEXT_TITLE, &q, out, 3); CHECK(!strcmp(out, "11"), "cut at the buffer's end");
 
+    cp_open_ready(&q,2,4,1,0,0,0);
+    CHECK(!cp_can_confirm(&q),"an incompatible joined player is not ready");
+    CHECK(cp_step_ready(&q,2,0,0,0,1,0,0,1)==CP_OPEN,"a B that joins an incompatible player still is not cancel");
+    CHECK(cp_step_ready(&q,2,0,0,0,0,1,0,1)==CP_OPEN,"confirm cannot accept incompatible joined players");
+    CHECK(cp_step_ready(&q,2,2,0,0,0,0,0,1)==CP_SETTLE && q.ok,"complete compatible players satisfy the card");
+    cp_open_ready(&q,1,1,2,1,0,0);
+    cp_text(NULL,CP_TEXT_COUNT,&q,out,sizeof out);
+    CHECK(!strcmp(out,"Players: 1 of 1"),"localized progress uses ready players without losing raw join tracking");
     printf("t_ctrl_prompt: %d checks, %d failed\n", checks, fails);
     return fails != 0;
 }

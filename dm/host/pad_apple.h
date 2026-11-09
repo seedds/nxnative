@@ -9,9 +9,11 @@
 #include <stdint.h>
 #include "dm_input.h"
 
+static inline BOOL dm_pad_is_joycon(GCController *c) {
+    return [c.productCategory containsString:@"Joy-Con"];
+}
 static inline int dm_pad_labelled(GCController *c) {
-    NSString *k = c.productCategory;
-    return [k isEqualToString:@"Switch Pro Controller"] || [k containsString:@"Joy-Con"];
+    return [c.productCategory isEqualToString:@"Switch Pro Controller"] || dm_pad_is_joycon(c);
 }
 // DM_BTN_A / B / X / Y of the pad's pressed face buttons
 static inline uint64_t dm_pad_face(GCExtendedGamepad *g) {

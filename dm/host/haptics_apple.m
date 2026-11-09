@@ -39,6 +39,7 @@
 static dispatch_queue_t queue;
 static NSMutableArray<DmRumbleChannel *> *channels[DM_PLAYERS];
 static GCController *controllers[DM_PLAYERS];
+static GCController *pairControllers[DM_PLAYERS][2];
 #if TARGET_OS_IPHONE
 static BOOL phoneSupported;
 #endif
@@ -333,6 +334,47 @@ static void add_engine(int p, int motor, NSString *target, CHHapticEngine *(^cre
     DmRumbleChannel *c = [DmRumbleChannel new]; c.createEngine = create; c.target = target; c.player = p; c.motor = motor;
     [channels[p] addObject:c];
 }
+// Identify works before game haptics are initialized and while the controller
+// sheet suspends them. Give the selected physical device a short separate pulse.
+BOOL dm_haptics_apple_identify(GCController *controller) {
+    static NSHashTable<GCController *> *signaling;
+    if (!signaling) signaling = [NSHashTable weakObjectsHashTable];
+    if ([signaling containsObject:controller]) return YES;
+    GCDeviceHaptics *haptics = controller.haptics;
+    if (haptics) {
+        CHHapticEvent *event = [[CHHapticEvent alloc] initWithEventType:CHHapticEventTypeHapticContinuous
+            parameters:@[[[CHHapticEventParameter alloc] initWithParameterID:CHHapticEventParameterIDHapticIntensity value:1]]
+            relativeTime:0 duration:0.55];
+        CHHapticPattern *pattern = [[CHHapticPattern alloc] initWithEvents:@[event] parameters:@[] error:nil];
+        for (GCHapticsLocality locality in @[GCHapticsLocalityDefault, GCHapticsLocalityAll, GCHapticsLocalityHandles, GCHapticsLocalityLeftHandle, GCHapticsLocalityRightHandle]) {
+            CHHapticEngine *engine = [haptics createEngineWithLocality:locality];
+            if (!pattern || ![engine startAndReturnError:nil]) continue;
+            id<CHHapticPatternPlayer> player = [engine createPlayerWithPattern:pattern error:nil];
+            if ([player startAtTime:CHHapticTimeImmediate error:nil]) {
+                [signaling addObject:controller];
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 650 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+                    [player stopAtTime:CHHapticTimeImmediate error:nil];
+                    [engine stopWithCompletionHandler:nil];
+                    [signaling removeObject:controller];
+                });
+                return YES;
+            }
+            [engine stopWithCompletionHandler:nil];
+        }
+    }
+    GCDeviceLight *light = controller.light;
+    if (!light) return NO;
+    GCColor *previous = light.color;
+    GCColor *signal = [[GCColor alloc] initWithRed:1 green:0 blue:0.8];
+    light.color = signal;
+    [signaling addObject:controller];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 650 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+        light.color = previous;
+        [signaling removeObject:controller];
+    });
+    return YES;
+}
+
 static void default_controller(int p, GCDeviceHaptics *h, NSTimeInterval retryAfter) {
     add_engine(p, -1, @"controller default", ^CHHapticEngine *(NSError **e) { (void)e; return [h createEngineWithLocality:GCHapticsLocalityDefault]; });
     channels[p].lastObject.retryAfter = retryAfter;
@@ -390,16 +432,41 @@ void dm_haptics_apple_set_sink(int p, void (*sink)(const dm_haptic_state *)) {
     if (!queue || p < 0 || p >= DM_PLAYERS) return;
     pthread_mutex_lock(&routeLock);
     dm_haptics_route(p, 0);   // invalidate queued work before changing the output
+    if (sink) { pairControllers[p][0]=nil; pairControllers[p][1]=nil; }
     dispatch_sync(queue, ^{ sink_silence(p); sinks[p] = sink; configure(p, controllers[p]); });
+    pthread_mutex_unlock(&routeLock);
+}
+void dm_haptics_apple_pair(int p, GCController *left, GCController *right) {
+    if (!queue || p<0 || p>=DM_PLAYERS) return;
+    pthread_mutex_lock(&routeLock);
+    if (pairControllers[p][0]!=left || pairControllers[p][1]!=right || controllers[p] || ((left || right) && sinks[p])) {
+        pairControllers[p][0]=left; pairControllers[p][1]=right;
+        controllers[p]=nil; dm_haptics_route(p,0);
+        dispatch_sync(queue,^{
+            sink_silence(p); sinks[p]=NULL;
+            for (DmRumbleChannel *c in channels[p]) [c stop]; channels[p]=[NSMutableArray new];
+#if !TARGET_OS_IPHONE
+            ds4_release(p);
+#endif
+            NSArray *devices=@[left ?: (id)NSNull.null,right ?: (id)NSNull.null];
+            for (int side=0;side<2;side++) if (devices[side]!=NSNull.null) {
+                GCDeviceHaptics *h=[devices[side] haptics]; NSSet *available=h.supportedLocalities;
+                GCHapticsLocality loc=[available containsObject:GCHapticsLocalityDefault] ? GCHapticsLocalityDefault :
+                    [available containsObject:GCHapticsLocalityLeftHandle] ? GCHapticsLocalityLeftHandle : available.anyObject;
+                if (loc) add_engine(p,side,side ? @"controller right source" : @"controller left source",^CHHapticEngine *(NSError **e) { (void)e; return [h createEngineWithLocality:loc]; });
+            }
+            dm_haptics_route(p,channels[p].count!=0);
+        });
+    }
     pthread_mutex_unlock(&routeLock);
 }
 void dm_haptics_apple_controller(int p, GCController *controller) {
     if (!queue || p < 0 || p >= DM_PLAYERS) return;
     pthread_mutex_lock(&routeLock);
-    if (controllers[p] != controller) {
-        controllers[p] = controller;
+    if (controllers[p] != controller || pairControllers[p][0] || pairControllers[p][1] || (controller && sinks[p])) {
+        controllers[p] = controller; pairControllers[p][0]=nil; pairControllers[p][1]=nil;
         dm_haptics_route(p, 0);   // invalidate queued work before changing hardware
-        dispatch_sync(queue, ^{ configure(p, controller); });
+        dispatch_sync(queue, ^{ if (controller) { sink_silence(p); sinks[p]=NULL; } configure(p, controller); });
     }
     pthread_mutex_unlock(&routeLock);
 }

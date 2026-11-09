@@ -7,6 +7,7 @@
 extern "C" {
 #endif
 void *dm_game_menu(void);   // GameMenu.swift: a retained UIMenu, rebuilt each time it opens
+void dm_ios_controller_open(void);   // open the existing runtime setup sheet after the gear menu action
 int dm_pad_layout(void);   // DmGamepad.m: 0 = 2D, 1 = 3D, 2 = Tap (DM_GAME_PAD_LAYOUT's numbers)
 bool dm_pad_layout_offered(int layout);   // Tap only in handheld mode
 void dm_pad_layout_set(int layout);   // releases every touch first, and is saved for the next start

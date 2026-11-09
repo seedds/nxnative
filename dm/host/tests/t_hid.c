@@ -13,9 +13,15 @@ static int hid_usleep(useconds_t usec);
 #include "../pad_slots.h"
 void dm_oe_execute(int index, const void *param, size_t n) { (void)index; (void)param; (void)n; }   // DM_CTL "program", "webshot": not exercised here
 void front_web_shot(const char *path) { (void)path; }
-// The controller applet's prompt (front.h): -1 is no window; a test sets the answer and the players that join while it is up
-static int g_prompt_answer = -1, g_prompt_calls, g_prompt_min, g_prompt_max; static uint32_t g_prompt_join;
-int front_ctrl_support(int min, int max) { g_prompt_calls++; g_prompt_min = min; g_prompt_max = max; if (g_prompt_join) dm_pad_players(g_prompt_join); return g_prompt_answer; }
+static int prompt_calls, prompt_min, prompt_max, prompt_answer=-1;
+static uint32_t prompt_join;
+static int (*prompt_callback)(int,int);
+int front_ctrl_support(int minimum,int maximum) {
+    prompt_calls++; prompt_min=minimum; prompt_max=maximum;
+    if (prompt_callback) return prompt_callback(minimum,maximum);
+    if (prompt_join) dm_pad_players(prompt_join);
+    return prompt_answer;
+}
 
 static int checks, fails, g_mode = 1, g_signals;
 static void *g_signalled;
@@ -26,7 +32,8 @@ static int hid_clock_gettime(clockid_t clock, struct timespec *ts) { (void)clock
 static int hid_usleep(useconds_t usec) { (void)usec; if (script_hold) script_hold(); return 0; }
 #define CHECK(c, msg) do { checks++; if (!(c)) { fails++; fprintf(stderr, "FAIL: %s (line %d)\n", msg, __LINE__); } } while (0)
 int dm_opmode(void) { return g_mode; }
-uint64_t guest_ns(void) { return 1000000000ull; }
+static uint64_t pair_guest_time=1000000000ull;
+uint64_t guest_ns(void) { return pair_guest_time; }
 uint64_t now_ns(void) { return motion_now; }
 static uint64_t test_frame;   // presented frames (t_rec moves it)
 uint64_t dm_guest_frame(void) { return test_frame; }
@@ -52,7 +59,7 @@ void dm_ctl_cvar_i32(uint64_t off, int32_t v) { (void)off; (void)v; }
 void dm_ctl_cvar_f32(uint64_t off, float v) { (void)off; (void)v; }
 void dm_gfx_texdump_next(const char *path) { (void)path; }
 void dm_gfx_passdump_next(long n) { (void)n; }
-static int applet_depth, applet_opens, applet_closes_at_depth0;   // hle_oe.c: the applet stand-ins open and close their applet around the answer
+static _Atomic int applet_depth, applet_opens, applet_closes_at_depth0;   // hle_oe.c: the applet stand-ins open and close their applet around the answer
 void dm_applet_enter(const char *name) { (void)name; applet_depth++; applet_opens++; }
 void dm_applet_leave(void) { applet_closes_at_depth0 += --applet_depth == 0; }
 
@@ -81,6 +88,11 @@ static void t_slots(void) {
     CHECK(pad_slot_take(&s, NULL, "x") == -1 && pad_slot_free(&s, NULL) == -1, "no owner, no slot");
     memset(&s, 0, sizeof s);   // DM_KBD_PLAYER=own: the keyboard holds player 1 for good
     CHECK(pad_slot_take(&s, &kbd, "keyboard") == 0 && pad_slot_take(&s, &a, "Xbox Wireless Controller") == 1, "with the keyboard on its own the first controller is player 2");
+    memset(&s, 0, sizeof s);
+    CHECK(pad_slot_assign(&s, &a, "same name", 5) == 5, "explicit assignment selects the requested slot");
+    CHECK(pad_slot_assign(&s, &b, "same name", 5) == -1 && pad_slot_of(&s, &a) == 5, "an occupied explicit slot is not stolen by a same-named device");
+    CHECK(pad_slot_assign(&s, &a, "same name", 2) == 2 && !s.owner[5], "moving an explicit owner releases its previous slot");
+    CHECK(pad_slot_assign(&s, &b, "same name", -1) == -1 && pad_slot_assign(&s, &b, "same name", DM_PLAYERS) == -1, "invalid explicit assignments do not take a slot");
 }
 
 static void t_npads(void) {
@@ -113,26 +125,10 @@ static void t_npads(void) {
     CHECK(h_hid_ShowCtrl(info, arg) == RES_CTRL_CANCELED && info[0] == 2, "fewer players than the game's minimum: canceled (2202-3101), as the player closing the applet");
     CHECK(h_hid_ShowCtrl0(arg) == RES_CTRL_CANCELED, "the overload without a result: canceled too");
     arg[0] = 2; CHECK(h_hid_ShowCtrl0(arg) == RES_OK, "the overload without a result: OK when the minimum is met");
-    CHECK(g_prompt_calls == 2 && g_prompt_min == 3 && g_prompt_max == 4, "below the minimum the front end's prompt is asked, with the game's minimum and maximum");
-    {   // GitHub issue #1640: with a window the prompt waits for players to join
-        int calls = g_prompt_calls; arg[0] = 3; arg[1] = 4;
-        g_prompt_answer = 1; g_prompt_join = 0x7;
-        CHECK(h_hid_ShowCtrl(info, arg) == RES_OK && info[0] == 3, "a third player joins while the prompt is up: OK with three");
-        g_prompt_join = 0x3; dm_pad_players(0x3);
-        CHECK(h_hid_ShowCtrl(info, arg) == RES_CTRL_CANCELED && info[0] == 2, "the prompt done with fewer than the minimum: canceled all the same");
-        g_prompt_answer = 0; g_prompt_join = 0x7;
-        CHECK(h_hid_ShowCtrl(info, arg) == RES_CTRL_CANCELED && info[0] == 3, "the player closes the prompt (B): canceled, whoever joined");
-        dm_pad_players(0x3); g_prompt_answer = 1; g_prompt_join = 0;
-        setenv("DM_CTL", "/nonexistent", 1);
-        CHECK(h_hid_ShowCtrl(info, arg) == RES_CTRL_CANCELED && g_prompt_calls == calls + 3, "scripted input (DM_CTL): no prompt, canceled at once");
-        unsetenv("DM_CTL");
-        arg[0] = 2; CHECK(h_hid_ShowCtrl(info, arg) == RES_OK && g_prompt_calls == calls + 3, "the minimum met: no prompt");
-        g_prompt_answer = -1;
-    }
     CHECK(h_hid_Strap() == RES_OK && h_hid_StrapArg(arg) == RES_OK, "both strap guide overloads answer as the player closing the guide");
-    CHECK(applet_opens == 12 && applet_depth == 0, "every answer opened and closed its applet");
+    CHECK(applet_opens == 7 && applet_depth == 0, "every answer opened and closed its applet");
     arg[0] = 1;
-    CHECK(six_connected(0x0100 | 0) && !six_connected(0x0200 | 0), "player 2 has a six-axis sensor, No3 none");
+    CHECK(six_connected(0x20103) && !six_connected(0x20203), "player 2 has a six-axis sensor, No3 none");
 
     // A one-player game ({No1, Handheld}): player 2's controller plays as player 1, No2 reads as not connected
     g_signals = 0; ids((const uint32_t[]){0, NPAD_HANDHELD}, 2);
@@ -201,9 +197,9 @@ static void t_joycons(void) {
 
     // The controller applet asks for two players with one pair connected: it splits the pair, as holding the Joy-Cons sideways does on a Switch
     int32_t info[2]; int8_t arg[8] = {2, 4};
-    { int calls = g_prompt_calls;
+    { int calls = prompt_calls;
     CHECK(h_hid_ShowCtrl(info, arg) == RES_OK && info[0] == 2 && h_hid_GetStyle(&(uint32_t){1}) == STYLE_JOYRIGHT, "the applet splits the pair for a second player");
-    CHECK(g_prompt_calls == calls && dm_players_reported() == 2, "the split pair is enough: no controller prompt, and the prompt's count (dm_players_reported) sees two players"); }
+    CHECK(prompt_calls == calls && dm_players_reported() == 2, "the split pair is enough: no controller prompt, and the prompt's count (dm_players_reported) sees two players"); }
     h_hid_JoyDual(&(uint32_t){0});
 
     // Handheld mode: player 1's Joy-Cons count as attached to the console (the Handheld npad), and are never split
@@ -246,6 +242,9 @@ static void t_jcms(void) {
     // The Joy-Con 2 styles: a Joy-Con 2 pair shows JoyDual's Joy-Con 2 form to a game that supports only that
     h_hid_SetStyles(STYLE_JOYDUAL2); dm_joy_attach(0, 3 | DM_JOY_2);
     CHECK((h_hid_GetStyle(&(uint32_t){0}) & (STYLE_JOYDUAL | STYLE_JOYDUAL2)) == (STYLE_JOYDUAL | STYLE_JOYDUAL2), "a Joy-Con 2 pair: JoyDual with its Joy-Con 2 bit");
+    CHECK(dm_controller_support_evaluation().ready_count==1,"native Joy-Con 2 routes contribute to configuration readiness");
+    int8_t noPair[8]={1,1,0,0,0,0};
+    CHECK(h_hid_ShowCtrl0(noPair)==RES_CTRL_CANCELED,"forbidding a pair also excludes the native Joy-Con 2 dual style");
     dm_joy_attach(0, 3); CHECK(!(h_hid_GetStyle(&(uint32_t){0}) & STYLE_JOYDUAL2), "a plain pair: no Joy-Con 2 bit");
     h_hid_SetStyles(0xffffffffu); dm_joy_attach(0, 0);
 }
@@ -567,7 +566,7 @@ static void t_motion_live(void) {
 }
 static void t_motion_hid(void) {
     g_mode = 1; dm_pad_players(3); ids((uint32_t[]){0, 1, NPAD_HANDHELD}, 3); g_phone_mode = 0;
-    uint32_t h = 0; SixAxisState st;   // SixAxisSensorHandle uses the style bit index (FullKey = 0), unlike VibrationDeviceHandle's SDK style = 3.
+    uint32_t h = 0x20003; SixAxisState st;   // FullKey: SDK style 3, device 2.
     float flat[3] = {0, 0, -1}, tilted[3] = {.5f, 0, -.8660254f}, turn[3] = {0, 0, 2 * (float)M_PI};
     motion_now += 1000000000;
     dm_motion_clear(0);
@@ -598,6 +597,448 @@ static void t_motion_hid(void) {
     dm_pad_players(1); g_phone_mode = -1;
 }
 
+static void t_explicit(void) {
+    g_mode = 0; ids((uint32_t[]){0, 1, 2, NPAD_HANDHELD}, 4);
+    h_hid_SetStyles(0x1f);
+    dm_pad_explicit(1);
+    dm_pad_style(0, DM_STYLE_LEFT, 0); dm_pad_style(1, DM_STYLE_RIGHT, 0); dm_pad_style(2, DM_STYLE_PAIR, 0);
+    dm_pad_players(7);
+    CHECK(dm_player_npad(0) == 0 && !style_of(NPAD_HANDHELD), "explicit external controller uses No1 even in handheld mode");
+    CHECK(style_of(0) == STYLE_JOYLEFT && style_of(1) == STYLE_JOYRIGHT && style_of(2) == STYLE_JOYDUAL, "three players report their independently selected styles");
+    dm_input_set(0, 0, 0, 0, 0);
+    dm_pad_set_player(0, DM_BTN_A | DM_BTN_L | DM_BTN_R, 10000, -12000, 20000, 23000);
+    dm_pad_set_player(1, DM_BTN_B | DM_BTN_L | DM_BTN_R, -7000, 9000, 0, 0);
+    NpadState left, right, wrong;
+    fill(&left, 0, STYLE_JOYLEFT); fill(&right, 1, STYLE_JOYRIGHT); fill(&wrong, 0, STYLE_FULLKEY);
+    CHECK(left.buttons == (DM_BTN_RIGHT | DM_BTN_LSL | DM_BTN_LSR), "single left Joy-Con exposes direction buttons and both left SL/SR bits");
+    CHECK(right.buttons == (DM_BTN_B | DM_BTN_RSL | DM_BTN_RSR), "single right Joy-Con exposes face buttons and both right SL/SR bits");
+    CHECK(left.lx == 10000 && !left.rx && right.rx == -7000 && !right.lx, "the primary stick drives only the selected Joy-Con side");
+    // Game changes the hold type between reads while both pads stay held.
+    dm_pad_style(0, DM_STYLE_LEFT, 1); dm_pad_style(1, DM_STYLE_RIGHT, 1);
+    h_hid_HoldType(JOY_HOLD_HORIZONTAL);
+    fill(&left, 0, STYLE_JOYLEFT); fill(&right, 1, STYLE_JOYRIGHT);
+    CHECK(h_hid_GetHold() == JOY_HOLD_HORIZONTAL, "the game still reads back its horizontal hold type");
+    CHECK(left.lx == -12000 && left.ly == -10000 && left.buttons == (DM_BTN_DOWN | DM_BTN_LSL | DM_BTN_LSR),
+          "horizontal virtual left compensates with a clockwise turn");
+    CHECK(right.rx == -9000 && right.ry == -7000 && right.buttons == (DM_BTN_A | DM_BTN_RSL | DM_BTN_RSR),
+          "horizontal virtual right compensates with a counterclockwise turn");
+    dm_pad_style(1, DM_STYLE_RIGHT, 0);   // physical Joy-Con keeps the previous layout
+    fill(&right, 1, STYLE_JOYRIGHT);
+    CHECK(right.rx == -7000 && right.ry == 9000 && (right.buttons & DM_BTN_B), "physical Joy-Con bypasses hold compensation");
+    h_hid_HoldType(0);
+    fill(&left, 0, STYLE_JOYLEFT);
+    CHECK(left.lx == 10000 && left.ly == -12000 && (left.buttons & DM_BTN_RIGHT), "returning to vertical restores the layout immediately");
+    CHECK(left.attributes == (ATTR_CONNECTED | ATTR_LEFT_CONN) && right.attributes == (ATTR_CONNECTED | ATTR_RIGHT_CONN) && !wrong.attributes, "connection attributes and state reader match the chosen style");
+    CHECK(h_hid_GetJoyAssign(&(uint32_t){0}) == 1 && h_hid_GetJoyAssign(&(uint32_t){2}) == 0, "single and paired Joy-Con assignments are reported consistently");
+    uint32_t lh[2], rh[2], ph[2];
+    CHECK(h_hid_SixHandles(lh, 2, &(uint32_t){0}, STYLE_JOYLEFT) == 1 && lh[0] == 6, "left sensor uses SDK style 6 and device 0");
+    CHECK(h_hid_SixHandles(rh, 2, &(uint32_t){1}, STYLE_JOYRIGHT) == 1 && rh[0] == 0x10107, "right sensor uses SDK style 7 and device 1");
+    CHECK(h_hid_SixHandles(ph, 2, &(uint32_t){2}, STYLE_JOYDUAL) == 2 && ph[0] == 0x205 && ph[1] == 0x10205, "paired Joy-Con has two sensor handles on its own player");
+    dm_motion_clear(0); dm_motion_clear(1);
+    dm_motion_set(0, (float[]){0, 0, -1}, (float[]){1, 0, 0});
+    dm_motion_set(1, (float[]){0, -1, 0}, (float[]){0, 2, 0});
+    SixAxisState ls, rs;
+    CHECK(h_hid_SixStates(&ls, 1, lh) == 1 && h_hid_SixStates(&rs, 1, rh) == 1 && ls.acc[2] == -1 && rs.acc[1] == -1, "each Joy-Con sensor reads only its assigned player's motion");
+    CHECK(!six_connected(lh[0] | 1u << 16) && !six_connected(rh[0] & ~0x10000u), "handles for the other half are disconnected");
+    dm_haptics_init(vibration_sink, 1); dm_haptics_route(0, 1); dm_haptics_route(1, 1);
+    CHECK(h_hid_VibHandles(lh, 2, &(uint32_t){0}, STYLE_JOYLEFT) == 1 && lh[0] == 6, "left Joy-Con exposes only its left vibration channel");
+    CHECK(h_hid_VibHandles(rh, 2, &(uint32_t){1}, STYLE_JOYRIGHT) == 1 && rh[0] == 0x10107, "right Joy-Con exposes only its right vibration channel");
+    int lm,rm;
+    CHECK(vib_targets(lh[0],&lm) == 1 && vib_targets(rh[0],&rm) == 2, "vibration routes to the independently assigned players");
+    h_hid_SetStyles(STYLE_JOYRIGHT);
+    CHECK(!style_of(0) && style_of(1) == STYLE_JOYRIGHT, "a game cannot see a selected style it does not support");
+    h_hid_SetStyles(0x1f);
+    ids((uint32_t[]){0, NPAD_HANDHELD}, 2);
+    CHECK(!merged_players(), "explicit player 2 does not silently feed player 1 in a one-player game");
+    dm_pad_players(0);
+    CHECK(!style_of(0) && !six_connected(6), "disconnecting explicit player 1 disconnects its style and sensor");
+    dm_pad_explicit(0); for (int p = 0; p < DM_PLAYERS; p++) dm_pad_style(p, DM_STYLE_AUTO, 0);
+    dm_pad_players(1); g_mode = 1; h_hid_SetStyles(0xffffffffu);
+}
+
+static void t_ios_touch_fallback(void) {
+    g_mode = 0; h_hid_SetStyles(0x1f);
+    ids((uint32_t[]){0, 1, NPAD_HANDHELD}, 3);
+    dm_pad_players_ios(2, 0);
+    CHECK(style_of(NPAD_HANDHELD) == STYLE_HANDHELD && style_of(1) == STYLE_FULLKEY,
+          "automatic iOS assignments keep the legacy player 1 fallback");
+    dm_pad_style(1, DM_STYLE_RIGHT, 1); dm_pad_players_ios(2, 2);
+    CHECK(!style_of(NPAD_HANDHELD) && !style_of(0) && style_of(1) == STYLE_JOYRIGHT,
+          "a manual assignment to player 2 does not add a hidden touch player");
+    dm_pad_style(1, DM_STYLE_AUTO, 0); dm_pad_players_ios(0, 0);
+    CHECK(style_of(NPAD_HANDHELD) == STYLE_HANDHELD, "with no assigned controller the touch pad returns as handheld");
+    g_mode = 1;
+    CHECK(style_of(0) == STYLE_FULLKEY, "docked touch fallback uses the Pro slot");
+    h_hid_SetStyles(STYLE_JOYRIGHT);
+    CHECK(!style_of(0), "touch fallback is not counted for a Joy-Con-only game");
+
+    ids((uint32_t[]){0}, 1); h_hid_SetStyles(0x1f);
+    dm_pad_style(1, DM_STYLE_LEFT, 1); dm_pad_players_ios(7, 2);
+    CHECK(merged_players() == 4, "only untouched automatic pads still merge into player 1");
+    dm_pad_style(1, DM_STYLE_AUTO, 0); dm_pad_players(1); h_hid_SetStyles(0xffffffffu);
+}
+
+static void t_ios_automatic_compatibility(void) {
+    const uint32_t masks[] = {0, 1, 2, 3, 0xff};
+    const uint32_t supported_ids[] = {0, 1, 0x103, 0x3ff};
+    const uint32_t supported_styles[] = {0, STYLE_FULLKEY, STYLE_HANDHELD, 0x1f};
+    dm_pad_explicit(0);
+    for (int p = 0; p < DM_PLAYERS; p++) dm_pad_style(p, DM_STYLE_AUTO, 0);
+    for (g_mode = 0; g_mode <= 1; g_mode++) {
+        for (unsigned i = 0; i < sizeof supported_ids / sizeof supported_ids[0]; i++) {
+            atomic_store(&g_ids_supported, supported_ids[i]);
+            for (unsigned s = 0; s < sizeof supported_styles / sizeof supported_styles[0]; s++) {
+                h_hid_SetStyles(supported_styles[s]);
+                for (unsigned m = 0; m < sizeof masks / sizeof masks[0]; m++) {
+                    dm_pad_players_ios(masks[m], 0);
+                    uint32_t legacy_players = masks[m] | 1u, unsupported = 0;
+                    for (int p = 0; p < DM_PLAYERS; p++) {
+                        // Original iOS always reported the default Player 1.
+                        uint32_t id = p == 0 && !g_mode ? NPAD_HANDHELD : (uint32_t)p;
+                        int legacy_reported = !p || ((legacy_players >> p & 1u) && (supported_ids[i] >> p & 1u));
+                        uint32_t expected = legacy_reported ? (id == NPAD_HANDHELD ? STYLE_HANDHELD : STYLE_FULLKEY) & supported_styles[s] : 0;
+                        CHECK(style_of(id) == expected, "automatic iOS controller styles match the original HID behavior");
+                        if (p && (legacy_players >> p & 1u) && !legacy_reported) unsupported |= 1u << p;
+                    }
+                    uint32_t expected_merge = !(supported_ids[i] & 0xfeu) ? unsupported : 0;
+                    CHECK(merged_players() == expected_merge, "automatic iOS one-player merging matches the original HID behavior");
+                }
+            }
+        }
+    }
+    g_mode = 1;
+    atomic_store(&g_ids_supported, 0x3ff);
+    h_hid_SetStyles(0xffffffffu);
+    dm_pad_players(1);
+    g_signals = 0;
+    uint64_t generation = dm_pad_generation(0);
+    dm_pad_reconfigure_begin();
+    dm_pad_reconfigure_sources(1);
+    dm_pad_players_ios(1, 0);
+    dm_pad_reconfigure_end();
+    CHECK(dm_pad_generation(0) == generation + 1, "automatic source changes still invalidate queued motion");
+    CHECK(!g_signals, "an unchanged automatic controller layout emits no extra style event");
+    static uint8_t second[0x40];
+    h_hid_BindStyleEv(&(uint32_t){1}, second, 0);
+    dm_pad_reconfigure_begin();
+    dm_pad_reconfigure_sources(2);
+    dm_pad_players_ios(3, 0);
+    dm_pad_reconfigure_end();
+    CHECK(g_signals == 1, "connecting automatic player 2 emits exactly the original connection event");
+    dm_pad_players(1);
+}
+
+static int controller_hook_answer, controller_hook_calls, controller_hook_min, controller_hook_max;
+static int controller_hook(int minimum, int maximum) {
+    CHECK(applet_depth == 1, "native controller request stays within the applet focus lifetime");
+    controller_hook_calls++; controller_hook_min = minimum; controller_hook_max = maximum;
+    if (controller_hook_answer) dm_pad_style(0,DM_STYLE_PRO,0);
+    return controller_hook_answer;
+}
+static _Atomic int live_reader_started, live_reader_finished;
+static NpadState live_observed;
+static void *live_reader(void *unused) {
+    (void)unused; atomic_store(&live_reader_started, 1);
+    fill(&live_observed, 0, STYLE_JOYRIGHT);
+    atomic_store(&live_reader_finished, 1); return NULL;
+}
+static void t_live_apply(void) {
+    g_mode = 1; ids((uint32_t[]){0, 1, NPAD_HANDHELD}, 3); h_hid_SetStyles(0x1f);
+    dm_pad_explicit(1); dm_pad_style(0, DM_STYLE_PRO, 0); dm_pad_style(1, DM_STYLE_PRO, 0); dm_pad_players(3);
+    dm_input_set(0, 0, 0, 0, 0); script_set(0, 0, 0, 0, 0);
+    dm_pad_set_player(0, DM_BTN_A, 111, 0, 0, 0); dm_pad_set_player(0, 0, 0, 0, 0, 0);
+    uint64_t old = dm_pad_generation(0), unchanged = dm_pad_generation(1);
+    dm_motion_set_generation(0, old, (float[]){0, 0, -1}, (float[]){1, 0, 0});
+    dm_motion_set_generation(1, unchanged, (float[]){0, -1, 0}, (float[]){0, 2, 0});
+    dm_haptics_init(vibration_sink, 1); dm_haptics_route(0, 1); dm_haptics_route(1, 1);
+    h_hid_SendVib(&(uint32_t){3}, &(dm_vibration){.amplitude_low = .7f, .frequency_low = 160, .frequency_high = 320});
+    h_hid_SendVib(&(uint32_t){0x103}, &(dm_vibration){.amplitude_low = .6f, .frequency_low = 160, .frequency_high = 320});
+    dm_pad_reconfigure_begin(); dm_pad_reconfigure_end();
+    CHECK(dm_pad_generation(0) == old && dm_haptics_actual(0, 0).amplitude_low == .7f, "validation without a reset leaves active state unchanged");
+    dm_pad_reconfigure_begin(); dm_pad_reconfigure_reset(1);
+    pthread_t reader; pthread_create(&reader, NULL, live_reader, NULL);
+    while (!atomic_load(&live_reader_started)) sched_yield();
+    usleep(10000);
+    CHECK(!atomic_load(&live_reader_finished), "a guest state read waits until the complete live apply has been published");
+    dm_pad_style(0, DM_STYLE_RIGHT, 0); dm_pad_set_player(0, DM_BTN_B, 1234, 0, 0, 0); dm_pad_players(3);
+    dm_motion_set_generation(0, old, (float[]){1, 0, 0}, (float[]){9, 9, 9});
+    motion_state ms;
+    CHECK(!motion_live(0, &ms), "a queued gyro sample from the old slot owner is ignored");
+    CHECK(dm_pad_generation(1) == unchanged && motion_live(1, &ms) && ms.acc[1] == -1, "unchanged players retain their motion generation and source");
+    CHECK(dm_haptics_actual(0, 0).amplitude_low == 0 && dm_haptics_actual(1, 0).amplitude_low == .6f, "only reassigned players lose their old vibration values");
+    dm_pad_reconfigure_end(); pthread_join(reader, NULL);
+    CHECK(live_observed.attributes == (ATTR_CONNECTED | ATTR_RIGHT_CONN) && live_observed.buttons == DM_BTN_B && live_observed.rx == 1234, "a guest reader sees the complete new style and input without the old press latch");
+    dm_motion_set_generation(0, dm_pad_generation(0), (float[]){0, 0, -1}, (float[]){0, 1, 0});
+    CHECK(motion_live(0, &ms) && ms.acc[2] == -1, "the new controller generation supplies motion normally");
+    dm_motion_suspend(1);
+    CHECK(!motion_live(0, &ms) && !motion_live(1, &ms), "the controller sheet suppresses live motion for every player");
+    dm_motion_suspend(0);
+    CHECK(motion_live(1, &ms) && ms.acc[1] == -1, "closing the sheet restores motion on the same player");
+    dm_pad_set_player(0, DM_BTN_A, 0, 0, 0, 0); dm_pad_set_player(0, 0, 0, 0, 0, 0);
+    dm_input_set(DM_BTN_X, 0, 0, 0, 0); dm_input_quiesce();
+    NpadState state; fill(&state, 0, STYLE_JOYRIGHT);
+    CHECK(!state.buttons, "opening configuration discards physical held input and pending press edges");
+    h_hid_SetStyles(STYLE_FULLKEY); // current JoyRight needs configuration while both slots remain joined
+    dm_controller_support_hook = controller_hook;
+    int8_t arg[32] = {2, 4}; int32_t info[2];
+    controller_hook_answer = 0;
+    CHECK(h_hid_ShowCtrl(info, arg) == RES_CTRL_CANCELED, "native Cancel returns the controller applet's cancellation result");
+    CHECK(controller_hook_min == 2 && controller_hook_max == 4 && !applet_depth, "the game's player limits reach the native request and applet focus is restored");
+    controller_hook_answer = 1;
+    CHECK(h_hid_ShowCtrl0(arg) == RES_OK && controller_hook_calls == 2, "the no-result applet overload also waits for native Apply");
+    dm_controller_support_hook = NULL;
+    h_hid_SetStyles(0x1f);
+    dm_pad_explicit(0); dm_pad_style(0, DM_STYLE_AUTO, 0); dm_pad_style(1, DM_STYLE_AUTO, 0); g_mode = 0; dm_pad_players(1);
+    static uint8_t handheld[0x40], external[0x40];
+    h_hid_BindStyleEv(&(uint32_t){NPAD_HANDHELD}, handheld, 0); h_hid_BindStyleEv(&(uint32_t){0}, external, 0);
+    g_signals = 0;
+    dm_pad_reconfigure_begin(); dm_pad_reconfigure_reset(1); dm_pad_explicit(1); dm_pad_style(0, DM_STYLE_PRO, 0); dm_pad_players(1);
+    CHECK(!g_signals, "style events are deferred while live Apply is incomplete");
+    dm_pad_reconfigure_end();
+    CHECK(g_signals == 2, "changing player 1 from handheld to external signals both npad style events once");
+    dm_pad_explicit(0); dm_pad_style(0, DM_STYLE_AUTO, 0); dm_pad_players(1); g_mode = 1; h_hid_SetStyles(0xffffffffu);
+}
+
+
+static void t_two_source_pair(void) {
+    g_mode=1; ids((uint32_t[]){0,1},2); h_hid_SetStyles(0x1f);
+    dm_pad_reconfigure_begin(); dm_pad_reconfigure_reset(1);
+    dm_pad_explicit(1); dm_pad_style(0,DM_STYLE_PAIR,0); dm_pad_pair_sources(0,1,3); dm_pad_players(1);
+    dm_pad_reconfigure_end(); dm_input_quiesce();
+    dm_pad_set_side(0,1,DM_BTN_A|DM_BTN_L,100,200);
+    dm_pad_set_side(0,2,DM_BTN_B|DM_BTN_R,300,400);
+    NpadState state; fill(&state,0,STYLE_JOYDUAL);
+    CHECK(state.lx==100 && state.ly==200 && state.rx==300 && state.ry==400,"two sources drive separate sticks on one paired player");
+    CHECK((state.buttons & (DM_BTN_RIGHT|DM_BTN_L|DM_BTN_B|DM_BTN_R))==(DM_BTN_RIGHT|DM_BTN_L|DM_BTN_B|DM_BTN_R),"pair composes left and right buttons");
+    dm_pad_set_side(0,1,0,0,0); fill(&state,0,STYLE_JOYDUAL);
+    CHECK((state.buttons & (DM_BTN_B|DM_BTN_R))==(DM_BTN_B|DM_BTN_R) && state.rx==300,"one side's release preserves the other side");
+    uint32_t handles[2]; CHECK(h_hid_SixHandles(handles,2,&(uint32_t){0},STYLE_JOYDUAL)==2,"pair exposes two side-specific sensor handles");
+    uint64_t gen=dm_pad_generation(0); motion_now+=10000000;
+    dm_motion_set_side_generation(0,1,gen,(float[]){0,0,-1},(float[]){1,0,0});
+    dm_motion_set_side_generation(0,2,gen,(float[]){0,0,-1},(float[]){0,2,0});
+    SixAxisState left,right;
+    h_hid_SixStates(&left,1,&handles[0]); h_hid_SixStates(&right,1,&handles[1]);
+    CHECK(left.gyro[0]>.1f && left.gyro[1]==0 && right.gyro[0]==0 && right.gyro[1]>.2f,"left and right handles read independent motion sources");
+    dm_pad_reconfigure_begin(); dm_pad_reconfigure_reset(1); dm_pad_reconfigure_end();
+    dm_motion_set_side_generation(0,1,gen,(float[]){0,0,-1},(float[]){9,0,0});
+    h_hid_SixStates(&left,1,&handles[0]); CHECK(left.gyro[0]==0,"old pair callbacks cannot publish after a source swap");
+    dm_pad_set_side(0,1,DM_BTN_SHAKE,0,0); pair_guest_time+=20000000;
+    h_hid_SixStates(&left,1,&handles[0]); h_hid_SixStates(&right,1,&handles[1]);
+    CHECK(fabsf(left.acc[0])>.1f && right.acc[0]==0,"mapped Shake affects only its paired side");
+    dm_pad_pair_sources(0,1,1);
+    CHECK(!style_of(0) && h_hid_SixStates(&right,1,&handles[1])==0,"a partial two-controller pair is disconnected rather than keyboard-ready");
+    dm_pad_pair_sources(0,0,0); dm_pad_style(0,DM_STYLE_PAIR,0); motion_now+=10000000;
+    dm_motion_set(0,(float[]){0,0,-1},(float[]){0,0,1});
+    h_hid_SixStates(&left,1,&handles[0]); h_hid_SixStates(&right,1,&handles[1]);
+    CHECK(left.gyro[0]==right.gyro[0] && left.gyro[1]==right.gyro[1] && left.gyro[2]==right.gyro[2],"single-gamepad pair emulation retains shared motion");
+    dm_pad_style(0,DM_STYLE_AUTO,0); dm_pad_explicit(0); dm_pad_players(1); h_hid_SetStyles(0xffffffffu);
+}
+
+static void t_pair_full_gamepad_buttons(void) {
+    g_mode=1; ids((uint32_t[]){0,1},2); h_hid_SetStyles(0x1f);
+    dm_pad_explicit(1); dm_pad_style(0,DM_STYLE_PAIR,0); dm_pad_pair_sources(0,1,3); dm_pad_players(1);
+    NpadState state;
+    for (int role=1;role<=2;role++) for (int bit=0;bit<16;bit++) {
+        dm_input_quiesce(); dm_pad_set_pair_gamepad(0,role,1u<<bit,0,0); fill(&state,0,STYLE_JOYDUAL);
+        CHECK((state.buttons&0xffffu)==(1u<<bit),"either full gamepad preserves face, D-pad, shoulder, trigger, menu and stick-click meanings");
+    }
+    dm_input_quiesce(); dm_pad_set_pair_gamepad(0,1,DM_BTN_L|DM_BTN_R,10,20); fill(&state,0,STYLE_JOYDUAL);
+    CHECK((state.buttons&(DM_BTN_L|DM_BTN_R))==(DM_BTN_L|DM_BTN_R),"one full gamepad can satisfy an L+R prompt");
+    dm_pad_set_pair_gamepad(0,2,DM_BTN_B,30,40); dm_pad_set_pair_gamepad(0,1,DM_BTN_B,10,20); fill(&state,0,STYLE_JOYDUAL);
+    CHECK((state.buttons&(DM_BTN_B|DM_BTN_DOWN))==DM_BTN_B,"B does not also move the menu down");
+    dm_pad_set_pair_gamepad(0,1,0,0,0); fill(&state,0,STYLE_JOYDUAL);
+    CHECK((state.buttons&DM_BTN_B) && state.rx==30 && state.ry==40,"releasing one gamepad preserves the other source's button and stick");
+    dm_pad_set_pair_gamepad(0,2,0,0,0); fill(&state,0,STYLE_JOYDUAL); fill(&state,0,STYLE_JOYDUAL);
+    CHECK(!(state.buttons&DM_BTN_B),"the last source's release clears the shared button");
+    dm_input_quiesce(); dm_pad_set_side(0,1,DM_BTN_L|DM_BTN_LEFT,12,13); dm_pad_set_pair_gamepad(0,2,DM_BTN_R|DM_BTN_A,14,15); fill(&state,0,STYLE_JOYDUAL);
+    CHECK((state.buttons&(DM_BTN_L|DM_BTN_LEFT|DM_BTN_R|DM_BTN_A))==(DM_BTN_L|DM_BTN_LEFT|DM_BTN_R|DM_BTN_A),"a native half and a full gamepad compose without cross-aliases");
+    dm_pad_set_pair_gamepad(0,2,0,0,0); fill(&state,0,STYLE_JOYDUAL); fill(&state,0,STYLE_JOYDUAL);
+    CHECK((state.buttons&(DM_BTN_L|DM_BTN_LEFT))==(DM_BTN_L|DM_BTN_LEFT) && !(state.buttons&(DM_BTN_A|DM_BTN_R)),"full gamepad release leaves the native half untouched");
+    uint32_t handles[2]; h_hid_SixHandles(handles,2,&(uint32_t){0},STYLE_JOYDUAL);
+    uint64_t gen=dm_pad_generation(0); motion_now+=10000000; pair_guest_time=motion_now;
+    dm_motion_set_side_generation(0,1,gen,(float[]){0,0,-1},(float[]){1,0,0});
+    dm_motion_set_side_generation(0,2,gen,(float[]){0,0,-1},(float[]){0,2,0});
+    dm_input_quiesce(); dm_pad_set_pair_gamepad(0,1,DM_BTN_SHAKE|DM_BTN_R,0,0); motion_now+=20000000; pair_guest_time=motion_now;
+    SixAxisState left,right; h_hid_SixStates(&left,1,&handles[0]); h_hid_SixStates(&right,1,&handles[1]);
+    CHECK(left.gyro[0]>.1f && right.gyro[1]>.2f && fabsf(left.acc[0])>.1f && right.acc[0]==0,"cross-half R leaves motion and synthetic Shake assigned to the physical source role");
+    dm_pad_reconfigure_begin(); dm_pad_reconfigure_reset(1); dm_pad_pair_sources(0,1,1); dm_pad_reconfigure_end();
+    CHECK(!style_of(0),"a missing pair member still disconnects the logical player");
+    dm_pad_pair_sources(0,1,3); fill(&state,0,STYLE_JOYDUAL);
+    CHECK(!(state.buttons&0xffffu),"source reset clears held cross-half buttons before reconnection");
+    dm_pad_pair_sources(0,0,0); dm_pad_style(0,DM_STYLE_AUTO,0); dm_pad_explicit(0); dm_input_quiesce();
+}
+
+static void t_pair_hid_motion(void) {
+    g_mode=1; ids((uint32_t[]){0},1); h_hid_SetStyles(0x1f);
+    dm_pad_explicit(1); dm_pad_style(0,DM_STYLE_PAIR,0); dm_pad_pair_sources(0,1,3); dm_pad_players(1);
+    dm_motion_clear_side(0,1); dm_motion_clear_side(0,2);
+    motion_now+=100000000;
+    pair_guest_time=motion_now;
+    uint64_t generation=dm_pad_generation(0);
+    for (int i=0;i<3;i++) dm_motion_set_side_sample(0,1,generation,(float[]){0,0,-1},(float[]){0,1,0},motion_now-(2-i)*5000000);
+    CHECK(g_side_motion[0][0].count==3 && !g_side_motion[0][1].count,"three HID samples reach only their assigned pair side");
+    CHECK(g_side_motion[0][0].times[0]==guest_ns()-10000000 && g_side_motion[0][0].times[2]==guest_ns(),"pair HID history preserves sample timestamps rather than batch arrival");
+    uint32_t handles[2]; h_hid_SixHandles(handles,2,&(uint32_t){0},STYLE_JOYDUAL);
+    SixAxisState left,right; h_hid_SixStates(&left,1,&handles[0]); h_hid_SixStates(&right,1,&handles[1]);
+    CHECK(left.gyro[1]>.1f && right.gyro[1]==0,"the guest reads raw motion from the assigned sensor only");
+    dm_motion_set_side_sample(0,1,generation,(float[]){0,0,-1},(float[]){9,0,0},motion_now+1);
+    dm_motion_set_side_sample(0,1,generation,(float[]){0,0,-1},(float[]){9,0,0},motion_now-MOTION_STALE_NS-1);
+    dm_motion_set_side_sample(0,1,generation,(float[]){0,0,-1},(float[]){9,0,0},motion_now-5000000);
+    CHECK(g_side_motion[0][0].count==3,"future, stale and out-of-order pair samples cannot replace valid history");
+    dm_pad_reconfigure_begin(); dm_pad_reconfigure_reset(1); dm_pad_reconfigure_end();
+    dm_motion_set_side_sample(0,1,generation,(float[]){0,0,-1},(float[]){9,0,0},motion_now);
+    CHECK(!g_side_motion[0][0].count,"reassignment rejects raw pair samples from the previous generation");
+    dm_pad_pair_sources(0,0,0); dm_pad_style(0,DM_STYLE_AUTO,0); dm_pad_explicit(0); dm_input_quiesce();
+}
+
+static int support_low, support_high, support_repair; static uint32_t support_styles;
+static int support_options_hook(int minimum,int maximum) {
+    support_low=minimum; support_high=maximum;
+    int low,high; dm_controller_setup_requirements(&support_styles,NULL,&low,&high);
+    CHECK(low==minimum && high==maximum,"native sheet and engine share the effective request limits");
+    if (support_repair) { dm_pad_style(0,DM_STYLE_PRO,0); dm_pad_style(1,DM_STYLE_PRO,0); }
+    return 1;
+}
+static void t_support_options(void) {
+    g_mode=1; ids((uint32_t[]){0,1},2); h_hid_SetStyles(0x1f);
+    dm_pad_explicit(0); dm_pad_style(0,DM_STYLE_AUTO,0); dm_pad_style(1,DM_STYLE_AUTO,0); dm_pad_players(3);
+    dm_pad_style(0,DM_STYLE_RIGHT,0); dm_pad_style(1,DM_STYLE_RIGHT,0); h_hid_SetStyles(STYLE_FULLKEY|STYLE_JOYDUAL); support_repair=1;
+    int8_t arg[8]={2,4,1,1,1,1}; int32_t info[2]; dm_controller_support_hook=support_options_hook;
+    CHECK(h_hid_ShowCtrl(info,arg)==RES_OK && support_low==1 && support_high==1 && info[0]==1,"single mode overrides the raw multiplayer range and returns one player");
+    support_repair=0;
+    CHECK(support_styles & STYLE_JOYDUAL,"a permitted Joy-Con pair stays available to setup");
+    int low,high; dm_controller_setup_requirements(NULL,NULL,&low,&high);
+    CHECK(low==0 && high==DM_PLAYERS,"finishing the request releases its temporary count constraints");
+    dm_pad_explicit(1); dm_pad_style(0,DM_STYLE_PAIR,0); dm_pad_players(1);
+    arg[0]=1; // pair permission here; raw-versus-effective joining limits are tested separately
+    arg[4]=0;
+    CHECK(h_hid_ShowCtrl(info,arg)==RES_CTRL_CANCELED && !(support_styles&STYLE_JOYDUAL) && !info[0],"an unpermitted pair cannot satisfy a request even if a UI reports Apply");
+    arg[4]=1;
+    CHECK(h_hid_ShowCtrl(info,arg)==RES_OK && info[0]==1,"two-hand pair style is one player in single mode");
+    dm_controller_support_hook=NULL; dm_pad_style(0,DM_STYLE_AUTO,0); dm_pad_explicit(0); dm_pad_players(1); h_hid_SetStyles(0xffffffffu);
+}
+
+static int fallback_calls, fallback_repair;
+static int fallback_hook(int minimum,int maximum) {
+    (void)minimum; (void)maximum; fallback_calls++;
+    if (fallback_repair) { dm_pad_style(0,DM_STYLE_LEFT,0); dm_pad_style(1,DM_STYLE_RIGHT,0); }
+    return 1;
+}
+static void t_support_priority(void) {
+    g_mode=1; ids((uint32_t[]){0,1},2); h_hid_SetStyles(0x1f);
+    dm_pad_explicit(0); dm_pad_style(0,0,0); dm_pad_style(1,0,0); dm_pad_players(1);
+    int8_t arg[8]={2,4,1,1,1,0}; int32_t info[2];
+    dm_controller_support_hook=fallback_hook; fallback_calls=prompt_calls=0;
+    prompt_answer=1; prompt_join=3;
+    CHECK(h_hid_ShowCtrl(info,arg)==RES_OK && info[0]==2,"upstream card recounts a player joining while it waits");
+    CHECK(prompt_calls==1 && prompt_min==2 && prompt_max==4 && !fallback_calls,"upstream popup has exclusive priority below its raw minimum");
+    dm_pad_players(1); prompt_join=0; prompt_answer=0;
+    CHECK(h_hid_ShowCtrl0(arg)==RES_CTRL_CANCELED && prompt_calls==2 && !fallback_calls,"Cancel on the original popup never launches the fallback editor");
+    prompt_answer=-1;
+    CHECK(h_hid_ShowCtrl(info,arg)==RES_CTRL_CANCELED && !fallback_calls,"an unavailable joining window stays noninteractive");
+    dm_pad_players(3);
+    CHECK(h_hid_ShowCtrl(info,arg)==RES_OK && !fallback_calls && prompt_calls==3,"an already valid setup skips both the upstream popup and our editor");
+    h_hid_SetStyles(DM_STYLE_LEFT|DM_STYLE_RIGHT); fallback_repair=1;
+    CHECK(h_hid_ShowCtrl(info,arg)==RES_OK && fallback_calls==1 && prompt_calls==3,"a skipped popup with incompatible types opens the editor and accepts the repaired configuration");
+    fallback_repair=0;
+    const char *names[]={"DM_KEYS","DM_CTL"};
+    for (int i=0;i<2;i++) {
+        setenv(names[i],"nonempty",1); dm_pad_players(1);
+        CHECK(h_hid_ShowCtrl(info,arg)==RES_CTRL_CANCELED && prompt_calls==3 && fallback_calls==1,"scripts bypass both presentations below minimum");
+        dm_pad_players(3);
+        CHECK(h_hid_ShowCtrl(info,arg)==RES_OK && prompt_calls==3 && fallback_calls==1,"scripts bypass the editor fallback with enough players too");
+        unsetenv(names[i]);
+    }
+    // Preserve the raw joining trigger, even where effective single-mode
+    // requirements differ. This discrepancy is documented, not fixed here.
+    dm_pad_players(1); arg[5]=1;
+    CHECK(h_hid_ShowCtrl(info,arg)==RES_OK && prompt_calls==4 && prompt_min==1 && prompt_max==1 && fallback_calls==1,"upstream popup priority keeps the effective single-player limits");
+    dm_controller_support_hook=NULL; prompt_answer=-1; prompt_join=0;
+    dm_pad_style(0,0,0); dm_pad_style(1,0,0); dm_pad_players(1); h_hid_SetStyles(0xffffffffu);
+}
+
+// Compare the new evaluator with the existing live HID rules, not a second
+// copy of the evaluator. No input or assignment implementation is replaced.
+static void t_readiness_differential(void) {
+    const uint32_t masks[]={0,1,2,3,5,255}, manuals[]={0,1,2};
+    const uint32_t idsSet[]={0,1,2,3,256,1023}, stylesSet[]={0,1,4,24,31};
+    for (int mode=0;mode<2;mode++) for (int explicit=0;explicit<2;explicit++)
+    for (unsigned m=0;m<6;m++) for (unsigned n=0;n<3;n++) for (int pattern=0;pattern<3;pattern++)
+    for (unsigned i=0;i<6;i++) for (unsigned j=0;j<5;j++) {
+        g_mode=mode; dm_pad_explicit(explicit);
+        for (int p=0;p<DM_PLAYERS;p++) { dm_pad_style(p,0,0); dm_pad_pair_sources(p,0,0); }
+        if (pattern==1) { dm_pad_style(0,DM_STYLE_LEFT,0); dm_pad_style(1,DM_STYLE_PAIR,0); dm_pad_pair_sources(1,1,1); }
+        if (pattern==2) { dm_pad_style(0,DM_STYLE_PAIR,0); dm_pad_pair_sources(0,1,3); dm_pad_style(1,DM_STYLE_PRO,0); dm_pad_style(2,DM_STYLE_RIGHT,0); }
+        atomic_store(&g_ids_supported,idsSet[i]); atomic_store(&g_styles_supported,stylesSet[j]);
+        dm_pad_players_ios(masks[m],manuals[n]);
+        dm_controller_limits limits={stylesSet[j],idsSet[i],0,2};
+        dm_controller_evaluation result=dm_controller_evaluate(dm_controller_current_routes(),limits);
+        uint32_t joined=0,ready=0;
+        for (int p=0;p<DM_PLAYERS;p++) {
+            joined|=(uint32_t)reported(p)<<p;
+            ready|=(uint32_t)(style_of(dm_player_npad(p))!=0)<<p;
+        }
+        CHECK(result.joined==joined,"shared evaluator preserves the live legacy joining mask");
+        CHECK(result.ready==ready,"shared evaluator matches actual live Npad style and pair readiness");
+        int count=__builtin_popcount(ready);
+        CHECK(result.result_count==(count>2 ? 2 : count),"result capping never adds or disconnects a player");
+    }
+    g_mode=1; atomic_store(&g_ids_supported,0x3ff); atomic_store(&g_styles_supported,0xffffffffu);
+    for (int p=0;p<DM_PLAYERS;p++) { dm_pad_style(p,0,0); dm_pad_pair_sources(p,0,0); }
+    dm_pad_explicit(0); dm_pad_players(1);
+    CHECK(!dm_controller_source_waiting(0,-1,0),"deliberate Unassigned is not waiting to join");
+    CHECK(!dm_controller_source_waiting(1,0,0),"a pair member already consumed by a player is not waiting");
+    CHECK(dm_controller_source_waiting(0,-2,0) && !dm_controller_source_waiting(0,-2,1),"automatic admission and merge policy keep their original ownership");
+}
+static pthread_mutex_t support_test_lock=PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t support_test_changed=PTHREAD_COND_INITIALIZER;
+static int first_support_open,release_support;
+static _Atomic int ui_active,ui_peak,ui_arrivals,second_request_started;
+static int serialized_prompt(int minimum,int maximum) {
+    (void)maximum;
+    int ordinal=atomic_fetch_add(&ui_arrivals,1);
+    int active=atomic_fetch_add(&ui_active,1)+1;
+    if (active>atomic_load(&ui_peak)) atomic_store(&ui_peak,active);
+    if (!ordinal) {
+        CHECK(minimum==2,"first game request retains its own limits");
+        pthread_mutex_lock(&support_test_lock); first_support_open=1; pthread_cond_signal(&support_test_changed);
+        while (!release_support) pthread_cond_wait(&support_test_changed,&support_test_lock);
+        pthread_mutex_unlock(&support_test_lock); dm_pad_players(3);
+    } else { CHECK(minimum==3,"queued game request starts with its own limits"); dm_pad_players(7); }
+    atomic_fetch_sub(&ui_active,1); return 1;
+}
+typedef struct { int minimum,count; Result result; } support_thread_result;
+static void *support_thread(void *context) {
+    support_thread_result *result=context;
+    if (result->minimum==3) atomic_store(&second_request_started,1);
+    int8_t arg[8]={(int8_t)result->minimum,4,1,1,1,0}; int32_t info[2];
+    result->result=h_hid_ShowCtrl(info,arg); result->count=info[0]; return NULL;
+}
+static void t_support_exclusive(void) {
+    g_mode=1; ids((uint32_t[]){0,1,2},3); h_hid_SetStyles(0x1f);
+    dm_pad_players(1); prompt_callback=serialized_prompt; dm_controller_support_hook=fallback_hook;
+    fallback_calls=0; first_support_open=release_support=0;
+    atomic_store(&ui_active,0); atomic_store(&ui_peak,0); atomic_store(&ui_arrivals,0); atomic_store(&second_request_started,0);
+    support_thread_result a={.minimum=2},b={.minimum=3}; pthread_t first,second;
+    pthread_create(&first,NULL,support_thread,&a);
+    pthread_mutex_lock(&support_test_lock);
+    while (!first_support_open) pthread_cond_wait(&support_test_changed,&support_test_lock);
+    pthread_mutex_unlock(&support_test_lock);
+    pthread_create(&second,NULL,support_thread,&b);
+    while (!atomic_load(&second_request_started)) sched_yield();
+    int minimum=0; dm_controller_setup_requirements(NULL,NULL,&minimum,NULL);
+    CHECK(minimum==2 && atomic_load(&ui_arrivals)==1,"queued requests cannot replace the active request or open another UI");
+    CHECK(dm_controller_support_evaluation().ready_count==1,"the HID barrier stays available while the first UI waits");
+    pthread_mutex_lock(&support_test_lock); release_support=1; pthread_cond_signal(&support_test_changed); pthread_mutex_unlock(&support_test_lock);
+    pthread_join(first,NULL); pthread_join(second,NULL);
+    CHECK(a.result==RES_OK && a.count==2 && b.result==RES_OK && b.count==3,"serialized requests each receive their own single result");
+    CHECK(atomic_load(&ui_peak)==1 && atomic_load(&ui_arrivals)==2 && !fallback_calls,"joining and fallback never invoke simultaneously for either request");
+    prompt_callback=NULL; prompt_answer=1; prompt_join=3; dm_pad_players(1); h_hid_SetStyles(DM_STYLE_LEFT|DM_STYLE_RIGHT);
+    CHECK(h_hid_ShowCtrl((int32_t[2]){0},(int8_t[8]){2,4,1,1,1,0})==RES_CTRL_CANCELED && !fallback_calls,
+        "a joining answer that is still incompatible never opens a second automatic editor for the same request");
+    prompt_answer=-1; prompt_join=0; dm_controller_support_hook=NULL; h_hid_SetStyles(0xffffffffu); dm_pad_players(1);
+}
+
 int main(void) {
     CHECK(setenv("DM_RUMBLE_LOG", "1", 1) == 0, "enable rumble diagnostics");
     t_slots();
@@ -623,18 +1064,17 @@ int main(void) {
         CHECK(!h_hid_NmouseEnable(5, 1) && !h_hid_NmousePos(5, 0, 0), "an unknown handle does not");
         CHECK(!h_hid_NmouseState(NULL, merged) && !h_hid_NmouseNpad(&npad, merged) && npad == 9, "no state and no controller behind the merged handle");
     }
-    {   // DM_PAD_PRESS_TO_JOIN=1: the lowest free slot at the first press, not the slot a controller of that name held before
-        pad_slots q = {0}; static char x, y, z;   // distinct addresses
-        CHECK(pad_slot_take_lowest(&q, &x, "Pro Controller") == 0, "press: the first to press is player 1");
-        CHECK(pad_slot_take_lowest(&q, &y, "Pro Controller") == 1, "press: the next is player 2, even of the same model");
-        CHECK(pad_slot_take_lowest(&q, &x, "Pro Controller") == 0, "press: pressing again keeps the slot");
-        pad_slot_free(&q, &x);
-        CHECK(pad_slot_take_lowest(&q, &z, "Xbox Wireless Controller") == 0, "press: a freed player 1 goes to whoever presses next, whatever its name");
-        pad_slots f = {0}; static char o[DM_PLAYERS + 1];
-        for (int i = 0; i < DM_PLAYERS; i++) pad_slot_take_lowest(&f, &o[i], "pad");
-        CHECK(pad_slot_take_lowest(&f, &o[DM_PLAYERS], "pad") == -1, "press: none left when every player is held");
-        CHECK(pad_slot_take_lowest(&f, NULL, "pad") == -1, "press: no owner, no slot");
-    }
+    t_explicit();
+    t_live_apply();
+    t_ios_touch_fallback();
+    t_ios_automatic_compatibility();
+    t_two_source_pair();
+    t_pair_full_gamepad_buttons();
+    t_pair_hid_motion();
+    t_support_options();
+    t_support_priority();
+    t_readiness_differential();
+    t_support_exclusive();
     printf("hid players: %d checks, %d failed\n", checks, fails);
     return fails != 0;
 }

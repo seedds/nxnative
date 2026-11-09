@@ -33,6 +33,8 @@ static IOReturn test_device_report(IOHIDDeviceRef d, IOHIDReportType t, CFIndex 
 #define IOHIDDeviceClose test_device_close
 #define IOHIDDeviceSetReport test_device_report
 #import "../haptics_apple.m"
+static int externalSends;
+static void external_sink(const dm_haptic_state *state) { (void)state; externalSends++; }
 #undef IOServiceGetMatchingServices
 #undef IOIteratorNext
 #undef IOObjectRelease
@@ -440,6 +442,30 @@ int main(void) { @autoreleasepool {
     send_pair(0, 0); drain();
     dm_haptics_apple_controller(0, nil); dm_haptics_apple_controller(1, nil); drain();
     assert(back.closes == 1 && second.closes == 1 && objects == 0);   // every iterator and service released
+    // A virtual Joy-Con pair routes each guest motor to its own physical pad.
+    TestController *pairLeft=[TestController new], *pairRight=[TestController new];
+    pairLeft.haptics=[TestHaptics new]; pairRight.haptics=[TestHaptics new];
+    dm_haptics_apple_pair(0,(id)pairLeft,(id)pairRight); drain();
+    assert(channels[0].count==2 && pairControllers[0][0]==(id)pairLeft && pairControllers[0][1]==(id)pairRight);
+    send_pair(.7f,0); drain();
+    TestPlayer *lp=pairLeft.haptics.engines.lastObject.testPlayer, *rp=pairRight.haptics.engines.lastObject.testPlayer;
+    assert(lp && lp.starts && (!rp || !rp.starts));
+    send_pair(0,.4f); drain();
+    rp=pairRight.haptics.engines.lastObject.testPlayer;
+    assert(rp && rp.starts);
+    dm_haptics_apple_set_sink(0,external_sink); drain();
+    assert(sinks[0]==external_sink && !pairControllers[0][0] && !pairControllers[0][1]);
+    int externalBefore=externalSends;
+    dm_haptics_apple_pair(0,(id)pairLeft,(id)pairRight); drain();
+    assert(!sinks[0] && externalSends>externalBefore && pairControllers[0][0]==(id)pairLeft);
+    dm_haptics_apple_set_sink(0,external_sink); drain();
+    dm_haptics_apple_controller(0,(id)pairLeft); drain();
+    assert(!sinks[0] && controllers[0]==(id)pairLeft && !pairControllers[0][0]);
+    dm_haptics_apple_controller(0,nil); drain();
+    assert(!pairControllers[0][0] && !pairControllers[0][1] && !channels[0].count);
+    NSUInteger oldSends=lp.levels.count;
+    send_pair(.8f,.8f); drain(); assert(lp.levels.count==oldSends);
+    dm_haptics_apple_controller(0,nil); drain();
     assert(ds4_crc((const uint8_t *)"123456789", 9) == 0xCBF43926u);   // the report's CRC32 (IEEE, reflected)
     dm_haptics_apple_shutdown();
     puts("Apple haptics: channels, pulses, idle release, startup handlers, engine replacement, backoff, stale callbacks, plain players, level cutoff and the DualShock 4 route passed");

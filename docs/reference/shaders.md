@@ -1484,6 +1484,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Check:** `DMSH_TEST_XLATE=dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate python3 dm/gfx/tests/test_dmsh_ampere_orin.py` (about 5 s on an M5 Max); it prints every op's differing lanes by cause. `AMPERE_ORIN_ONLY=<ops or families>` runs some, `AMPERE_ORIN_REPORT=<file>` writes the results as JSON. To record again: `python3 dm/gfx/tools/ampere_orin/capture.py --host <user@machine> [--arch sm_86]`, with NVIDIA's `nvdisasm` (the `cuda_nvdisasm` redistributable) in `~/ampere_orin` on that machine.
 - **Found on:** no game; a Jetson Orin's results. The HMMA comparison it extends is PR #1897's.
 
+### PRMT's byte-select modes
+
+- **Symptom:** a Switch 2 shader with PRMT in one of its special modes (`.F4E`, `.B4E`, `.RC8`, `.ECL`, `.ECR`, `.RC16`) didn't translate: the translator stopped with `PRMT mode 1` (or 2 to 6) and the shader was lost.
+- **Cause:** the Ampere PRMT emitter only knew the default index mode, where each nibble of the selector picks a byte and its bit 3 repeats that byte's sign. Bits 72..74 hold the mode (Mesa NAK's `PrmtMode`: 0 index, 1 F4E, 2 B4E, 3 RC8, 4 ECL, 5 ECR, 6 RC16), and in the other modes only the selector's low 2 bits count.
+- **Fix:** `APrmt` takes byte i of the result from byte k of the 64-bit pair {c:a}, with s the selector's low 2 bits: F4E k = s + i, B4E k = (s - i) & 7, RC8 k = s, ECL k = max(s, i), ECR k = min(s, i), RC16 k = 2(s & 1) + (i & 1), and none of them repeat the sign. A constant selector folds k at translation time, as the index mode already did; both the vector (0x016) and uniform (0x096) forms use it.
+- **Check:** `test_dmsh_ampere_orin.py`'s `prmt` (all seven modes on 1,024 rows) failed to translate before and now matches the Orin in all 7,168 lanes; `prmt_imm` still matches in all 3,072.
+- **Found on:** no game; a Jetson Orin's results ([Ampere instructions checked against an Ampere GPU](#ampere-instructions-checked-against-an-ampere-gpu)).
+
 ### The NDVE movie network by the host
 
 - **Symptom:** a Switch 2 game's movies and the title behind them run below 60 fps on a Mac with a smaller GPU, and the GPU profile (`DM_NVN_GPUPROF`) shows almost all of the frame in a dozen compute dispatches of `nn::ndve`'s movie network: Ocarina of Time's title at about 24 fps and 38 ms of GPU a frame on an M1 Pro with 16 GPU cores, 24.8 ms on an M1 Max ([issue 1375](https://github.com/seedds/nxnative/issues/1375)), 18.9 ms of compute on an M4 with 8 ([HMMA chains keep their matrices in the SIMD-group](#hmma-chains-keep-their-matrices-in-the-simd-group)); 11-14 ms of the 16.7 on an M6, an M4 Pro or an M5 Max.

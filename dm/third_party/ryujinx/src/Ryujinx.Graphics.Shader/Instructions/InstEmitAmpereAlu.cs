@@ -1324,22 +1324,26 @@ namespace Ryujinx.Graphics.Shader.Instructions
             ASet(context, x, context.IAbsolute(AGet(context, AOne(context, x, neg: false, abs: false))));
         }
 
-        // PRMT Rd, a, sel, c: byte i of the result is byte (s & 7) of {c:a}, or that byte's sign repeated when s & 8, s = sel's nibble i (mode 72..75: index)
+        // PRMT Rd, a, sel, c: byte i of the result is byte k of {c:a} (k & 4 picks c). Mode 72..74 says how k comes from sel (PTX prmt):
+        // 0 index: k = sel's nibble i, and bit 3 of it repeats that byte's sign; the others take s = sel & 3 and never repeat the sign:
+        // 1 F4E k = s + i, 2 B4E k = (s - i) & 7, 3 RC8 k = s, 4 ECL k = max(s, i), 5 ECR k = min(s, i), 6 RC16 k = 2 (s & 1) + (i & 1)
         public static void APrmt(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
             bool u = AUniform(context);
             (ASrc a, ASrc b, ASrc c) = AAluSrcs(context, x, u, neg: false, abs: false);
+            int mode = x.Bits(72, 75);
 
-            if (x.Bits(72, 75) != 0)
+            if (mode > 6)
             {
-                throw AFail(context, $"PRMT mode {x.Bits(72, 75)}");
+                throw AFail(context, $"PRMT mode {mode}");
             }
 
             Operand srcA = AGet(context, a);
             Operand sel = AGet(context, b);
             Operand srcC = AGet(context, c);
             Operand res = Const(0);
+            Operand s = mode == 0 || sel.Type == OperandType.Constant ? null : context.BitwiseAnd(sel, Const(3));
 
             for (int i = 0; i < 4; i++)
             {
@@ -1347,28 +1351,54 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
                 if (sel.Type == OperandType.Constant)
                 {
-                    int s = (sel.Value >> (i * 4)) & 0xf;
-                    Operand src = (s & 4) != 0 ? srcC : srcA;
-                    byteValue = context.BitfieldExtractU32(src, Const((s & 3) * 8), Const(8));
+                    int k = mode == 0 ? (sel.Value >> (i * 4)) & 0xf : APrmtIndex(mode, sel.Value & 3, i);
+                    Operand src = (k & 4) != 0 ? srcC : srcA;
+                    byteValue = context.BitfieldExtractU32(src, Const((k & 3) * 8), Const(8));
 
-                    if ((s & 8) != 0)
+                    if ((k & 8) != 0)
                     {
                         byteValue = context.ShiftRightS32(context.ShiftLeft(byteValue, Const(24)), Const(31));
                     }
                 }
                 else
                 {
-                    Operand s = context.BitfieldExtractU32(sel, Const(i * 4), Const(4));
-                    Operand src = context.ConditionalSelect(context.ICompareNotEqual(context.BitwiseAnd(s, Const(4)), Const(0)), srcC, srcA);
-                    byteValue = context.BitfieldExtractU32(src, context.ShiftLeft(context.BitwiseAnd(s, Const(3)), Const(3)), Const(8));
-                    Operand sign = context.ShiftRightS32(context.ShiftLeft(byteValue, Const(24)), Const(31));
-                    byteValue = context.ConditionalSelect(context.ICompareNotEqual(context.BitwiseAnd(s, Const(8)), Const(0)), sign, byteValue);
+                    Operand k = mode switch
+                    {
+                        0 => context.BitfieldExtractU32(sel, Const(i * 4), Const(4)),
+                        1 => context.IAdd(s, Const(i)),
+                        2 => context.BitwiseAnd(context.ISubtract(s, Const(i)), Const(7)),
+                        3 => s,
+                        4 => context.IMaximumU32(s, Const(i)),
+                        5 => context.IMinimumU32(s, Const(i)),
+                        _ => context.IAdd(context.ShiftLeft(context.BitwiseAnd(s, Const(1)), Const(1)), Const(i & 1)),
+                    };
+                    Operand src = context.ConditionalSelect(context.ICompareNotEqual(context.BitwiseAnd(k, Const(4)), Const(0)), srcC, srcA);
+                    byteValue = context.BitfieldExtractU32(src, context.ShiftLeft(context.BitwiseAnd(k, Const(3)), Const(3)), Const(8));
+
+                    if (mode == 0)
+                    {
+                        Operand sign = context.ShiftRightS32(context.ShiftLeft(byteValue, Const(24)), Const(31));
+                        byteValue = context.ConditionalSelect(context.ICompareNotEqual(context.BitwiseAnd(k, Const(8)), Const(0)), sign, byteValue);
+                    }
                 }
 
                 res = context.BitwiseOr(res, context.ShiftLeft(context.BitwiseAnd(byteValue, Const(0xff)), Const(i * 8)));
             }
 
             ASet(context, x, res, u);
+        }
+
+        private static int APrmtIndex(int mode, int s, int i)
+        {
+            return mode switch
+            {
+                1 => s + i,
+                2 => (s - i) & 7,
+                3 => s,
+                4 => Math.Max(s, i),
+                5 => Math.Min(s, i),
+                _ => (s & 1) * 2 + (i & 1),
+            };
         }
 
         // POPC Rd, b: bit count (63: of the bitwise not)

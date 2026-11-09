@@ -94,6 +94,7 @@ void dm_motion_clear(int player) {
 }
 
 uint32_t dm_player_npad(int player) { return player == 0 ? 0x20 : (uint32_t)player; }
+int dm_players_reported(void) { return __builtin_popcount(duo_harness_state().connected_players); }
 
 static int g_opmode;   // handheld, until a test or the in-game menu docks it
 int dm_opmode(void) { return g_opmode; }

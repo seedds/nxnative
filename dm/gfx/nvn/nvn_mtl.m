@@ -12797,6 +12797,16 @@ static int csh_cs(NvShader *cs, const p_dispatch *dp, csh_rng *w, int *nw, int *
 // Whether a dispatch comes before the first op that would stop cs_hoist_try's scan, looking at op codes only. Most passes have none: the scan then saved and restored the
 // whole replay state (S, R) and marked every argument table dirty at each pass's first draw for nothing (BotW: 2.5% of the submit thread in those copies alone).
 // Ops it cannot rule out (draws whose reads may stop the full scan) count as passable, so a 1 here only means the full scan may move something
+// A render-target switch to the targets the pass already has, which replay continues the pass across (same-target continuation, rtc_on): a scan goes past it. Ocarina of
+// Time sets its 1440x810 scene targets again before each group of compute work between its draws, and nearly every scan stopped there (op 8 about 27,000 times per 300 frames),
+// so the dispatches after it split the pass each time (about 9 MB of colour and depth stored and loaded again per split). A switch replay would not continue (other targets, the
+// continuation off, a deferred pass's start) stops the scan as before
+static int csh_rt_same(const uint8_t *q, const void *aq) {
+    const p_set_rt *r = aq;
+    for (int i = 0; i < 4; i++) if (g_defer_slots[i].active && !g_defer_slots[i].at_q && g_defer_slots[i].q_op == q) return 0;
+    return R.has_rt && rtc_on() && r->n && rt_same(&R.rt, r);
+}
+static uint64_t g_csh_rt;   // render-target switches to the same targets the scans went past
 static int csh_dispatch_ahead(void) {
     fz_cursor cur = {.p = g_exec_next}; for (int k = 0; k < g_ret_n; k++) cur.ret[cur.ret_n++] = g_ret[k];
     for (int guard = 0; guard < 4096; guard++) {
@@ -12806,7 +12816,8 @@ static int csh_dispatch_ahead(void) {
             case OP_DISPATCH: return 1;
             case OP_BARRIER: { uint32_t bits; memcpy(&bits, aq, sizeof bits); if (bits && !csh_bar_pass()) { g_csh_pre_op = hq.op; return 0; } continue; }   // see cs_hoist_try
             case OP_REPORT_COUNTER: case OP_RESET_COUNTER: { uint64_t t; memcpy(&t, aq, 8); if (t == NVN_COUNTER_TYPE_SAMPLES_PASSED) continue; g_csh_pre_op = hq.op; return 0; }   // see cs_hoist_try
-            case OP_RENDER_COND: case OP_UPDATE_UB: continue;   // conditional rendering gates draws and clears, not dispatches; a uniform update a dispatch does not touch (see cs_hoist_try)
+            case OP_RENDER_COND: case OP_UPDATE_UB: continue;
+            case OP_SET_RT: if (csh_rt_same(q, aq)) continue; g_csh_pre_op = hq.op; return 0;   // see csh_rt_same   // conditional rendering gates draws and clears, not dispatches; a uniform update a dispatch does not touch (see cs_hoist_try)
             case OP_DRAW: case OP_DRAW_IDX:
             case OP_ALPHA_REF: case OP_BIND_IMG: case OP_BIND_PROGRAM: case OP_BIND_SAMP: case OP_BIND_SSBO: case OP_BIND_STATE: case OP_BIND_TEX: case OP_BIND_TEX1:
             case OP_BIND_UBO: case OP_BIND_UBO_SMALL: case OP_BIND_VATTR: case OP_BIND_VBUF: case OP_BIND_VBUF1: case OP_BIND_VSTREAM: case OP_BLEND_COLOR: case OP_COPY_STRIDE:
@@ -12875,6 +12886,7 @@ static void cs_hoist_try(NvProg *pr0, const p_draw *dw0, const p_draw_idx *di0) 
               memcpy(R.clear_c, cc, sizeof cc); R.clear_d = cd; R.clear_s = cst; }
             g_csh_op[g_csh_n++] = q; g_csh_moved++; g_csh_depth += depth; moved++;
             continue; }
+        if (hq.op == OP_SET_RT && csh_rt_same(q, aq)) { g_csh_rt++; continue; }   // see csh_rt_same
         if (hq.op == OP_TF_STATE) { g_csh_stop[5]++; g_csh_stop_op[hq.op]++; break; }   // saves/restores counters in GPU memory
         if (state_op(hq.op, aq)) continue;
         g_csh_stop[5]++; if (hq.op < OP_COUNT_) g_csh_stop_op[hq.op]++; break;   // anything else may end the pass, write memory or depend on the order (copies, updates, clears, targets, queries)
@@ -12891,6 +12903,7 @@ void mtl_cshoist_stop_ops(char *out, size_t n) {
     size_t at = 0; out[0] = 0;
     for (int k = 0; k < 4; k++) { int b = -1; for (int i = 0; i < OP_COUNT_; i++) if (d[i] && (b < 0 || d[i] > d[b])) b = i;
         if (b < 0) break; at += (size_t)snprintf(out + at, at < n ? n - at : 0, "%s%d=%llu", k ? " " : "", b, (unsigned long long)d[b]); d[b] = 0; if (at >= n) break; }
+    { static uint64_t prt; if (g_csh_rt != prt && at < n) at += (size_t)snprintf(out + at, n - at, "%ssame-target switches passed %llu", at ? "; " : "", (unsigned long long)(g_csh_rt - prt)); prt = g_csh_rt; }
 }
 void mtl_cshoist_stats(uint64_t *moved, uint64_t *depth, uint64_t *stops) { *moved = g_csh_moved; *depth = g_csh_depth; for (int i = 0; i < 8; i++) stops[i] = g_csh_stop[i]; }
 // Physical color attachments the selected pipeline can write. A merged pass remaps logical outputs and channel masks; a specialized fragment's outputs are unknown here.

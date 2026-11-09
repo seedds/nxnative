@@ -394,18 +394,31 @@ namespace Ryujinx.Graphics.Shader.Instructions
             ASet(context, x, res);
         }
 
-        // HMNMX2 Rd, a, b, P: each half's minimum where P (87..90) holds, else maximum
+        // HMNMX2 Rd, a, b, P: each half's minimum where P (87..90) holds, else maximum. .NAN (81): a NaN in a lane gives NaN (0x7fff) there, not the other operand.
+        // .BF16_V2 (85): bf16 lanes, compared as integers (ABf16MinMax)
         public static void AHmnmx2(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
+            bool nan = x.Bit(81);
 
-            if (x.Bit(78) || x.Bit(81) || x.Bit(82) || x.Bit(85))
+            if (x.Bit(78) || x.Bit(82))
             {
-                throw AFail(context, "HMNMX2 .F32 / .NAN / .XORSIGN / .BF16");
+                throw AFail(context, "HMNMX2 .F32 / .XORSIGN");
+            }
+
+            Operand p = APred(context, x, 87, 90);
+
+            if (x.Bit(85))
+            {
+                (Operand[] fa, Operand[] fb) = AHalfSecond(context, x, bf16: true);
+                Operand lo = ABf16MinMax(context, fa[0], fb[0], p, nan);
+                Operand hi = ABf16MinMax(context, fa[1], fb[1], p, nan);
+
+                ASet(context, x, context.BitwiseOr(context.ShiftRightU32(lo, Const(16)), context.BitwiseAnd(hi, Const(unchecked((int)0xffff0000)))));
+                return;
             }
 
             (Operand[] a, Operand[] b) = AHalfSecond(context, x);
-            Operand p = APred(context, x, 87, 90);
             Operand[] r = new Operand[2];
 
             for (int i = 0; i < 2; i++)
@@ -413,7 +426,44 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 r[i] = context.ConditionalSelect(p, context.FPMinimum(a[i], b[i]), context.FPMaximum(a[i], b[i]));
             }
 
-            ASet(context, x, context.PackHalf2x16(r[0], r[1]));
+            Operand res = context.PackHalf2x16(r[0], r[1]);
+
+            if (nan)
+            {
+                // isnan survives Metal's fast math; the lane's bits are set as integers, as PackHalf2x16 of a NaN gives Metal's own NaN
+                for (int i = 0; i < 2; i++)
+                {
+                    Operand any = context.BitwiseOr(context.IsNan(a[i]), context.IsNan(b[i]));
+                    Operand keep = Const(i == 0 ? unchecked((int)0xffff0000) : 0xffff);
+                    res = context.ConditionalSelect(any, context.BitwiseOr(context.BitwiseAnd(res, keep), Const(0x7fff << (16 * i))), res);
+                }
+            }
+
+            ASet(context, x, res);
+        }
+
+        // The minimum (P) or maximum of two bf16 lanes held as f32 bits (low half zero), in integer arithmetic so fast math cannot reorder it: an f32's bits as a signed
+        // integer, with the magnitude bits of a negative one flipped, order as the floats do, -0 below +0 (the Orin's min(+0, -0) is -0 and its max +0). Without .NAN a NaN
+        // operand gives the other one, two give NaN; with it any NaN gives NaN. The Orin's NaN is 0x7fff
+        private static Operand ABf16MinMax(EmitterContext context, Operand a, Operand b, Operand p, bool nanWins)
+        {
+            Operand Key(Operand v) => context.BitwiseExclusiveOr(v, context.ShiftRightU32(context.ShiftRightS32(v, Const(31)), Const(1)));
+            Operand IsNan(Operand v) => context.ICompareGreaterUnsigned(context.BitwiseAnd(v, Const(0x7fffffff)), Const(0x7f800000));
+
+            Operand aLess = context.ICompareLess(Key(a), Key(b));
+            Operand r = context.ConditionalSelect(context.BitwiseExclusiveOr(aLess, context.BitwiseNot(p)), a, b);
+            Operand aNan = IsNan(a);
+            Operand bNan = IsNan(b);
+            Operand canon = Const(0x7fff0000);
+
+            if (nanWins)
+            {
+                return context.ConditionalSelect(context.BitwiseOr(aNan, bNan), canon, r);
+            }
+
+            r = context.ConditionalSelect(aNan, b, context.ConditionalSelect(bNan, a, r));
+
+            return context.ConditionalSelect(context.BitwiseAnd(aNan, bNan), canon, r);
         }
     }
 }

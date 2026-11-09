@@ -2313,8 +2313,8 @@ static void fstep_tick(const win_t *o, int c) {
     static uint64_t prev, t0, v0, fixed_sum, held[FSTEP_MAX + 1]; static int nlog;
     const double v = 1e9 / fstep_hz();
     uint64_t st = g_fs_start ? g_fs_start : now_ns(), pw = g_fs_wait; g_fs_start = g_fs_wait = 0;
-    double shown = prev ? (st - prev) / v : 0, gpu = 0; prev = st;
-    for (uint64_t f = g_frame; f-- > 0 && g_frame - f <= 8;) { double g = mtl_gpu_ms(f); if (g >= 0) { gpu = g * 1e6 / v; break; } }
+    double shown = prev ? (st - prev) / v : 0, gpu = 0; prev = st; int gpu_on = 0;
+    for (uint64_t f = g_frame; f-- > 0 && g_frame - f <= 8;) { double g = mtl_gpu_ms(f); if (g >= 0) { gpu = g * 1e6 / v; gpu_on = 1; break; } }
     double cpu = shown - pw / v, cost = cpu > gpu ? cpu : gpu;
     int kmin = fstep_hz() / c, kmax = fps_high() ? 2 : !fstep_hold() ? kmin : kmin >= 2 ? 2 : FSTEP_MAX, k0 = g_fs.k,   // at 120 fps a late frame must step down whatever fps_hold says: the game steps by the target
          kmin0 = g_fs.kmin, probe0 = g_fs.probe;
@@ -2341,6 +2341,7 @@ static void fstep_tick(const win_t *o, int c) {
     // (Breath of the Wild on an M5 Pro: the probe's 33 frames took the clock 338 → 432 MHz and its GPU time 24.8 → 18.5 ms, then it failed at 22 ms frames; hold 1 needed about 560 MHz)
     g_fs.ramp = mtl_probe_ramp_on();
     g_fs.per_vsync = fstep_hz() / 60;
+    g_fs.gpu_on = gpu_on; g_fs.gpu = gpu;   // an idle GPU's late frames do not step up; a hold the GPU does not explain is probed (nvn_fstep.h)
     int n = nvn_fstep_next(&g_fs, shown, cost, kmin, kmax, fixed, cslow || gslow);
     if (dm_fps_state) __atomic_store_n((uint32_t *)(dm_fps_state + 0x20), (uint32_t)n, __ATOMIC_RELAXED);
     atomic_store(&g_fs_k, g_fs.k);
@@ -2349,13 +2350,17 @@ static void fstep_tick(const win_t *o, int c) {
     if (fixed != fixed_was && nfix < 40) { nfix++; if (fixed) LOG("[nvn] frame step: the game fixes its own step at %d vsyncs at present %llu", fixed, (unsigned long long)o->presents); else LOG("[nvn] frame step: the game hands the step back to the host at present %llu", (unsigned long long)o->presents); }
     fixed_was = fixed;
     if (k0 && g_fs.k != k0 && nlog < 40) {
-        char why[160], held[48] = ""; int w = snprintf(why, sizeof why, "probe");
+        char why[256], held[48] = ""; int w = snprintf(why, sizeof why, "probe");
         if (cslow) w += snprintf(why + w, sizeof why - w, ", CPU %d%% on performance cores", g_fs_pshare);
+        if (w >= (int)sizeof why) w = sizeof why - 1;
         if (gslow) w += snprintf(why + w, sizeof why - w, ", GPU %.2f× its time at hold %d", g_fg.cur / g_fg.ref, kmin);
-        if (nvn_fstep_same(&g_fs)) snprintf(why + w, sizeof why - w, ", cost %.2f× the cost that held hold %d", g_fs.ccur / g_fs.cref, kmin);
+        if (w >= (int)sizeof why) w = sizeof why - 1;
+        if (nvn_fstep_same(&g_fs)) w += snprintf(why + w, sizeof why - w, ", cost %.2f× the cost that held hold %d", g_fs.ccur / g_fs.cref, kmin);
+        if (w >= (int)sizeof why) w = sizeof why - 1;   // snprintf returns the length it would have written
+        if (g_fs.uprobe) snprintf(why + w, sizeof why - w, ", GPU fits a shorter hold, frames not waiting in the pacing");
         if (g_fs.k > k0 && g_fs.cref > 0) snprintf(held, sizeof held, "; hold %d held at %.2f", kmin, g_fs.cref);   // what a probe compares the longer hold's cost with
         LOG("[nvn] frame step: hold %d → %d %s at present %llu (%s; cost %.2f, GPU %.2f%s)%s", k0, g_fs.k, fps_high() ? "ticks of 1/120 s" : "vsyncs", (unsigned long long)o->presents,
-            fixed ? "the game's own step" : kmin0 > FSTEP_MAX ? "the game's own step ended" : kmin != kmin0 ? "the cap changed" : g_fs.k > k0 ? "3 late frames" : g_fs.probes != probes0 ? why : "trial", cost, gpu, held, ++nlog == 40 ? "; further changes only counted below" : "");
+            fixed ? "the game's own step" : kmin0 > FSTEP_MAX ? "the game's own step ended" : kmin != kmin0 ? "the cap changed" : g_fs.k > k0 ? (g_fs.up_idle ? "30 late frames, some with the GPU idle" : "3 late frames") : g_fs.probes != probes0 ? why : "trial", cost, gpu, held, ++nlog == 40 ? "; further changes only counted below" : "");
     }
     if (probe0 == 1 && g_fs.probe != 1 && !fixed && nlog < 40)   // whether the controller raised the clock for the shorter deadline
         LOG("[nvn] frame step: the probe %s at present %llu (CPU %d%% on performance cores)%s", g_fs.probe == 2 ? "held" : "failed", (unsigned long long)o->presents, g_fs_pshare, ++nlog == 40 ? "; further changes only counted below" : "");

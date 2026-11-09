@@ -58,6 +58,12 @@ class PoolArrays(unittest.TestCase):
         self.assertLess(out.index('dm_pool_mark(constant P* p'), out.index('struct spvPool_'))
         self.assertIn('.sample((&spvDescriptorSet0.fp_s_cb0_40000000->e[0])[min(uint(int(_7)), spvDescriptorSet0.fp_s_cb0_40000000->n)], uv)', out)
 
+    def test_mark_tests_with_a_plain_load(self):
+        # an atomic load goes to the shared cache every time, and a pass's pixels queue on the few words its IDs share (frame-rate.md); only a clear bit takes the atomic
+        mark = NS['POOL_MARK']
+        self.assertNotIn('atomic_load', mark)
+        self.assertIn('if (!(*w & b)) atomic_fetch_or_explicit(', mark)
+
     def test_mark_keeps_depth_test_early(self):
         pool = 'struct spvDescriptorSetBuffer0\n{\n    array<texture2d<float>, 1048576> fp_t_cb0_40000000 [[id(0)]];\n};\n'
         use = 'fragment main0_out main0(constant spvDescriptorSetBuffer0& d [[buffer(0)]])\n{\n    float4 c = d.fp_t_cb0_40000000[i].sample(s, u);%s\n}\n'

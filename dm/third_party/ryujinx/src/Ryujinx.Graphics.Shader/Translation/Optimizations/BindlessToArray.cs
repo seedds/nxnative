@@ -190,6 +190,40 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                     continue;
                 }
 
+                // nxnative: an NVN2 compute shader's handles at a computed index in its own c[0] layout (InstEmit.MapAmpereComputeC0), which the host does not fill: the array
+                // moves to the handle table in c[2] the range maps to, the index shifted to match. Fast Fusion's volumetric lighting cded8d0899ba4a6d samples separate texture
+                // c[0][0x40 + 8 i] (one of four) with the separate sampler at c[0][0x60]: c[2] 0x168 + 8 i, element 45 + i, with the sampler at c[2] 0x568
+                if (src0CbufSlot == 0 && gpuAccessor.QueryAmpereComputeC0Layout() is int[] c0Layout && TryC0HandleBase(ldcVecIndex, out Operand c0Index, out int c0Offset))
+                {
+                    (int mappedBank, int mappedOffset) = Instructions.InstEmit.MapAmpereComputeC0(c0Layout, c0Offset);
+
+                    if (mappedBank != NvnTextureBufferIndex || (mappedOffset & 7) != 0)
+                    {
+                        continue;
+                    }
+
+                    int c2Length = Math.Max(MinimumArrayLength, gpuAccessor.QueryTextureArrayLengthFromBuffer(NvnTextureBufferIndex));
+
+                    TurnIntoArray(
+                        resourceManager,
+                        texOp,
+                        hasSecondaryHandle ? TextureHandle.PackSlots(NvnTextureBufferIndex, secondaryCbufSlot) : NvnTextureBufferIndex,
+                        hasSecondaryHandle ? TextureHandle.PackOffsets(0, secondaryCbufOffset, TextureHandleType.SeparateSamplerHandle) : 0,
+                        c2Length);
+
+                    Operand c0Element = Local();
+                    Operand c2Element = Local();
+                    Operand c2ElementMin = Local();
+
+                    block.Operations.AddBefore(node, new Operation(Instruction.ShiftRightU32, c0Element, c0Index, Const(3)));
+                    block.Operations.AddBefore(node, new Operation(Instruction.Add, c2Element, c0Element, Const(mappedOffset / 8)));
+                    block.Operations.AddBefore(node, new Operation(Instruction.MinimumU32, c2ElementMin, c2Element, Const(c2Length - 1)));
+
+                    texOp.SetSource(0, c2ElementMin);
+
+                    continue;
+                }
+
                 int cbufSlot;
                 int handleIndex;
 
@@ -283,6 +317,53 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
 
             index = add.GetSource(0);
             byteOffset = add.GetSource(1).Value;
+
+            return byteOffset > 0 && (byteOffset & 7) == 0;
+        }
+
+        // nxnative: the address of a 32-bit constant buffer load (vector index (address >> 2) >> 2, as EmitLoadConstant makes it, the word's + 0 included) taken apart into
+        // a computed part and the constants added to it: (index, byte offset), the offset a multiple of 8 (a handle)
+        private static bool TryC0HandleBase(Operand vecIndex, out Operand index, out int byteOffset)
+        {
+            index = null;
+            byteOffset = 0;
+
+            static Operand Shift2(Operand o) =>
+                o.AsgOp is Operation op && op.Inst == Instruction.ShiftRightU32 && op.GetSource(1).Type == OperandType.Constant && op.GetSource(1).Value == 2 ? op.GetSource(0) : null;
+
+            Operand word = Shift2(vecIndex);
+
+            if (word?.AsgOp is Operation plus0 && plus0.Inst == Instruction.Add && plus0.GetSource(1).Type == OperandType.Constant && plus0.GetSource(1).Value == 0)
+            {
+                word = plus0.GetSource(0);
+            }
+
+            Operand address = word != null ? Shift2(word) : null;
+
+            if (address == null)
+            {
+                return false;
+            }
+
+            for (int depth = 0; depth < 8 && address.AsgOp is Operation add && add.Inst == Instruction.Add; depth++)
+            {
+                if (add.GetSource(1).Type == OperandType.Constant)
+                {
+                    byteOffset += add.GetSource(1).Value;
+                    address = add.GetSource(0);
+                }
+                else if (add.GetSource(0).Type == OperandType.Constant)
+                {
+                    byteOffset += add.GetSource(0).Value;
+                    address = add.GetSource(1);
+                }
+                else
+                {
+                    break;
+                }
+            }
+
+            index = address;
 
             return byteOffset > 0 && (byteOffset & 7) == 0;
         }

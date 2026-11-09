@@ -327,7 +327,7 @@ def registered_cuts(build_id):
     """The CUTS the patch files register for a build ID (dm/tools/sdk_patches.py, dm/games/*/patches.py), or None"""
     import glob, os, runpy
     here = os.path.dirname(os.path.abspath(__file__))
-    for path in [os.path.join(here, 'sdk_patches.py')] + sorted(glob.glob(os.path.join(here, '../games/*/patches.py'))):
+    for path in [os.path.join(here, 'sdk_patches.py')] + sorted(glob.glob(os.path.join(glob.escape(here), '../games/*/patches.py'))):   # escaped: brackets in a parent folder are a glob pattern
         cuts = runpy.run_path(path).get('CUTS', {})
         if build_id in cuts: return cuts[build_id]
     return None

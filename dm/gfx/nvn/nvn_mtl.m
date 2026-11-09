@@ -8460,6 +8460,73 @@ static void pbase_key_of(MTLRenderPipelineDescriptor *d, pbase_key *k) {
         k->vl[i][0] = (uint32_t)l.stride; k->vl[i][1] = (uint32_t)l.stepFunction; k->vl[i][2] = (uint32_t)l.stepRate;
     }
 }
+// AGX vertex-variant guard (DM_PSO_VS_SERIAL; on unless 0). The G16X driver keeps one variant entry per vertex program and key (Program<VertexProgramVariant>::getOrCreateVariantEntry):
+// the thread that creates the entry compiles the variant, or reads it from a pipeline archive, and its completion block stores the result and leaves the entry's dispatch group; the
+// others wait on that group. Ocarina of Time runs crashed in that block's one dispatch_group_leave (createVertexProgramVariant ... _block_invoke+0x264, macOS 26.6, M4 Pro), with
+// "unbalanced call to dispatch_group_leave" (SIGTRAP) or on a group of 0 (SIGSEGV at 0x30): the block ran for an entry that had already been left, or freed. Each time while the
+// prewarm's workers took bases with shared vertex shaders from the archive and another thread compiled a pipeline of one of them. So pipelines whose vertex function is the same
+// library function (the library's name, lib_tag, and the entry name; VS_STRIPES stripes) are taken from the archive or compiled one at a time; pipelines of other vertex shaders
+// still build in parallel. Not covered: specializations of a base (no vertex compile), pipelines through the MTLDevice (pso_build_dev, geometry capture), mesh pipelines.
+// Waits are bounded:
+// - a draw's lookup without compiling (pso_build_ex compile 0) never waits: with the stripe busy it leaves the base to the build in flight;
+// - a caller at user-interactive QoS (the game's threads: the submit thread, a draw that compiles) waits g_vs_wait_draw_ms at most, then goes on unguarded, once;
+// - a compile that does not return (GitHub issue #294) must not hold the others as the flush lock once did: once the stripe's holder has held it for g_vs_wait_max_ms, the stripe
+//   is marked stalled and every caller goes on unguarded until the holder releases it. A waiter queued behind several short builds keeps waiting
+enum { VS_STRIPES = 1024 };
+static dispatch_semaphore_t g_vs_sem[VS_STRIPES]; static _Atomic int g_vs_stalled[VS_STRIPES]; static _Atomic uint64_t g_vs_since[VS_STRIPES];   // since: when its holder took it
+static int g_vs_wait_max_ms = 20000, g_vs_wait_draw_ms = 50;   // the tests lower them. 20 s: a compaction recapture under load took over 5 s
+static _Atomic uint64_t g_vs_wait_n, g_vs_wait_ns, g_vs_busy, g_vs_stall_n, g_vs_short_n;
+static int vs_serial_on(void) {
+    static dispatch_once_t once; static int on;
+    dispatch_once(&once, ^{
+        const char *e = getenv("DM_PSO_VS_SERIAL"); on = !(e && !strcmp(e, "0"));
+        if (on) for (int i = 0; i < VS_STRIPES; i++) g_vs_sem[i] = dispatch_semaphore_create(1);
+        else MLOG("DM_PSO_VS_SERIAL=0: pipelines that share a vertex function are built in parallel (the AGX vertex-variant guard is off)");
+    });
+    return on;
+}
+static int vs_stripe_of(MTL4RenderPipelineDescriptor *m) {   // -1: none (the guard off, or no library function)
+    if (!m || !vs_serial_on()) return -1;
+    MTL4FunctionDescriptor *f = m.vertexFunctionDescriptor;
+    if ([f isKindOfClass:[MTL4SpecializedFunctionDescriptor class]]) f = ((MTL4SpecializedFunctionDescriptor *)f).functionDescriptor;
+    if (![f isKindOfClass:[MTL4LibraryFunctionDescriptor class]]) return -1;
+    MTL4LibraryFunctionDescriptor *l = (MTL4LibraryFunctionDescriptor *)f; id<MTLLibrary> lib = l.library;
+    NSString *name = lib ? objc_getAssociatedObject(lib, &g_lib_tag) : nil;   // the same file loaded twice (shader_load, the prewarm's pre_desc) is one vertex shader
+    uint64_t h = (name ? (uint64_t)name.hash : (uint64_t)(uintptr_t)(__bridge void *)lib) * 31u + l.name.hash;
+    h ^= h >> 33; h *= 0xff51afd7ed558ccdull; h ^= h >> 33;   // a pointer's low bits are 0: mix before the modulo
+    return (int)(h % VS_STRIPES);
+}
+static int vs_took(int i) { atomic_store(&g_vs_stalled[i], 0); atomic_store(&g_vs_since[i], bp_now()); return 1; }
+// 1: the caller holds the stripe and releases it (vs_unlock); 0: it goes on unguarded (no stripe, a stalled one, or a game thread that waited its limit)
+static int vs_lock(int i) {
+    if (i < 0) return 0;
+    if (!dispatch_semaphore_wait(g_vs_sem[i], DISPATCH_TIME_NOW)) return vs_took(i);
+    if (atomic_load(&g_vs_stalled[i])) return 0;
+    int urgent = qos_class_self() >= QOS_CLASS_USER_INTERACTIVE; uint64_t t0 = bp_now(); int got = 0;
+    for (;;) {
+        if (!dispatch_semaphore_wait(g_vs_sem[i], dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_MSEC))) { got = 1; break; }
+        if (atomic_load(&g_vs_stalled[i])) break;
+        uint64_t now = bp_now(), since = atomic_load(&g_vs_since[i]);
+        if (urgent && now - t0 >= (uint64_t)g_vs_wait_draw_ms * 1000000) { atomic_fetch_add(&g_vs_short_n, 1); break; }
+        if (since && now > since && now - since >= (uint64_t)g_vs_wait_max_ms * 1000000) {
+            atomic_store(&g_vs_stalled[i], 1);
+            if (!atomic_fetch_add(&g_vs_stall_n, 1))
+                MLOG("[RED] pipeline build: a pipeline of the same vertex function has been building for over %d ms: the pipelines of that vertex function go on without the AGX vertex-variant guard until it returns", g_vs_wait_max_ms);
+            break;
+        }
+    }
+    atomic_fetch_add(&g_vs_wait_n, 1); atomic_fetch_add(&g_vs_wait_ns, bp_now() - t0);
+    return got ? vs_took(i) : 0;
+}
+// A lookup that must not wait (compile 0): 0 with the stripe busy (and not stalled); else 1, *own as vs_lock returns it
+static int vs_try(int i, int *own) {
+    *own = 0;
+    if (i < 0) return 1;
+    if (!dispatch_semaphore_wait(g_vs_sem[i], DISPATCH_TIME_NOW)) { *own = vs_took(i); return 1; }
+    if (atomic_load(&g_vs_stalled[i])) return 1;
+    atomic_fetch_add(&g_vs_busy, 1); return 0;
+}
+static void vs_unlock(int i, int own) { if (own && i >= 0 && i < VS_STRIPES) { atomic_store(&g_vs_since[i], 0); atomic_store(&g_vs_stalled[i], 0); dispatch_semaphore_signal(g_vs_sem[i]); } }
 // A pipeline with no Metal 4 descriptor, through the MTLDevice: from specialized functions (fn_dev)
 static id<MTLRenderPipelineState> pso_build_dev(MTLRenderPipelineDescriptor *d, NSError **e) {
     id<MTLFunction> vf = fn_dev(d.vertexFunction), ff = fn_dev(d.fragmentFunction);
@@ -8506,7 +8573,12 @@ static id<MTLRenderPipelineState> pso_build_ex(MTLRenderPipelineDescriptor *d, N
     // ambient occlusion draws 4 triangles and writes the array layer of each one's primitive ID: every one wrote layer 0, so 3 pixels in 4 had no sun light. A platform limit: the ID has no other source
     if (rast && g_comp4 && [d.label isEqualToString:PSO_WHOLE]) {
         MTL4RenderPipelineDescriptor *whole = pso_desc4(d, 0);
-        if (whole) { if (!compile) return nil; return [g_comp4 newRenderPipelineStateWithDescriptor:whole compilerTaskOptions:nil error:e]; }
+        if (whole) {
+            if (!compile) return nil;
+            int vi = vs_stripe_of(whole), own = vs_lock(vi);   // the AGX vertex-variant guard
+            id<MTLRenderPipelineState> ps = [g_comp4 newRenderPipelineStateWithDescriptor:whole compilerTaskOptions:nil error:e];
+            vs_unlock(vi, own); return ps;
+        }
     }
     MTL4RenderPipelineDescriptor *b = g_comp4 ? pso_desc4(d, rast) : nil;   // with rasterization off there is no colour state to leave open: the base is the pipeline
     if (!b) { if (!compile) return nil; g_pb_legacy++; return pso_build_dev(d, e); }
@@ -8531,24 +8603,29 @@ static id<MTLRenderPipelineState> pso_build_ex(MTLRenderPipelineDescriptor *d, N
     else {
         uint64_t t0 = bp_now();
         int vd = 0; for (int i = 0; i < 31 && !vd; i++) vd = bk.va[i][0] != 0;   // a vertex layout (MTLVertexFormatInvalid is 0)
-        int from_run = 0; base = arch_lookup(b, vd, &from_run);
-        uint64_t t1 = bp_now();
-        if (base) { g_pb_archived++; g_pt_hit_n++; g_pt_hit_ns += t1 - t0; }
-        if (base && from_run && g_compact_enabled && atomic_load(&g_warm_running)) {
-            // Metal can crash in materializeAirNTFromOnlineForSlice when serializing archive imports mixed with fresh bases (#342).
-            // Work around that framework bug by capturing the original shader functions, without lookupArchives. The normal compiler cache still applies.
-            int cap = 0; id<MTLRenderPipelineState> cb = arch_capturing() ? arch_capture(b, nil, vd, &cap) : nil;
-            g_compact_ns += bp_now() - t1;
-            if (cb) base = cb;
-            if (cap) { g_compacted++; g_compact_bases++; } else g_compact_bad = 1;   // not in the new files: the old ones stay
-        }
-        if (!base) {
-            if (g_arch4.count + g_arch4p.count) { g_pt_miss_n++; g_pt_miss_ns += t1 - t0; }
-            if (compile) {
-                NSError *be = nil; base = arch_capture(b, &be, vd, NULL); job->error = be; job->compiled = 1;
-                g_pt_comp_ns += bp_now() - t1;
-                if (base) { g_pb_built++; if (g_arch_cap) arch_note_new(); }
+        int vi = vs_stripe_of(b), own = 0, busy = 0;   // the AGX vertex-variant guard: a compile 0 lookup never waits for it, and records no miss when it is busy
+        if (compile) own = vs_lock(vi); else busy = !vs_try(vi, &own);
+        if (!busy) {
+            int from_run = 0; base = arch_lookup(b, vd, &from_run);
+            uint64_t t1 = bp_now();
+            if (base) { g_pb_archived++; g_pt_hit_n++; g_pt_hit_ns += t1 - t0; }
+            if (base && from_run && g_compact_enabled && atomic_load(&g_warm_running)) {
+                // Metal can crash in materializeAirNTFromOnlineForSlice when serializing archive imports mixed with fresh bases (#342).
+                // Work around that framework bug by capturing the original shader functions, without lookupArchives. The normal compiler cache still applies.
+                int cap = 0; id<MTLRenderPipelineState> cb = arch_capturing() ? arch_capture(b, nil, vd, &cap) : nil;
+                g_compact_ns += bp_now() - t1;
+                if (cb) base = cb;
+                if (cap) { g_compacted++; g_compact_bases++; } else g_compact_bad = 1;   // not in the new files: the old ones stay
             }
+            if (!base) {
+                if (g_arch4.count + g_arch4p.count) { g_pt_miss_n++; g_pt_miss_ns += t1 - t0; }
+                if (compile) {
+                    NSError *be = nil; base = arch_capture(b, &be, vd, NULL); job->error = be; job->compiled = 1;
+                    g_pt_comp_ns += bp_now() - t1;
+                    if (base) { g_pb_built++; if (g_arch_cap) arch_note_new(); }
+                }
+            }
+            vs_unlock(vi, own);
         }
         if (base || compile) g_pb_base_ns += bp_now() - t0;
         os_unfair_lock_lock(&g_pbase_lock);
@@ -8728,6 +8805,11 @@ void mtl_pso_line(char *o, size_t n) {
     o2 += snprintf(o + o2, n > o2 ? n - o2 : 0, "; draws that waited:");
     for (int i = 0; i < 5; i++) if (g_pw_n[i] > pn[i]) o2 += snprintf(o + o2, n > o2 ? n - o2 : 0, " %s %llu / %.1f ms,", g_pw_why[i], (unsigned long long)(g_pw_n[i] - pn[i]), (g_pw_ns[i] - pns[i]) / 1e6);
     memcpy(pn, g_pw_n, sizeof pn); memcpy(pns, g_pw_ns, sizeof pns);
+    static uint64_t pvn, pvns, pvb, pvs, pvh; uint64_t vn = g_vs_wait_n, vns = g_vs_wait_ns, vb = g_vs_busy, vs = g_vs_stall_n, vh = g_vs_short_n;   // the AGX vertex-variant guard (vs_lock)
+    if (vn > pvn || vb > pvb)
+        o2 += snprintf(o + o2, n > o2 ? n - o2 : 0, "; pipelines that waited for one of the same vertex function %llu / %.1f ms (%llu game-thread waits cut short, %llu on a stalled build), "
+                       "draw lookups left to the build in flight %llu", (unsigned long long)(vn - pvn), (vns - pvns) / 1e6, (unsigned long long)(vh - pvh), (unsigned long long)(vs - pvs), (unsigned long long)(vb - pvb));
+    pvn = vn; pvns = vns; pvb = vb; pvs = vs; pvh = vh;
     static uint64_t pca, pcr, pcb, pcl, pcn; uint64_t ca = g_cps_arch, cr = g_cps_run, cb = g_cps_built, cl = g_cps_look_ns, cn = g_cps_build_ns;   // compute pipelines (cps_new)
     if (ca > pca || cr > pcr || cb > pcb)
         snprintf(o + o2, n > o2 ? n - o2 : 0, "; compute pipelines from the archive bundled with the app %llu, from this device's archive %llu, built %llu (%.1f ms looking up, %.1f ms building)",
@@ -8815,8 +8897,11 @@ static void pre_pair(NSString *vk, NSString *fk, int zero) {
         if (g_pre_known.count && g_pre_known[[NSString stringWithFormat:@"%@\t%@", vk, fk]]) { g_pre_skipped++; g_pre_known_n++; return; }
         MTL4RenderPipelineDescriptor *m = pre_desc(vk, fk, zero);
         if (!m) { g_pre_skipped++; return; }
-        if (arch_lookup(m, 0, NULL)) { g_pre_archived++; return; }
-        NSError *e = nil; id ps = arch_capture(m, &e, 0, NULL);
+        int vi = vs_stripe_of(m), own = vs_lock(vi);   // the AGX vertex-variant guard
+        int hit = arch_lookup(m, 0, NULL) != nil;
+        NSError *e = nil; id ps = hit ? nil : arch_capture(m, &e, 0, NULL);
+        vs_unlock(vi, own);
+        if (hit) { g_pre_archived++; return; }
         if (ps) g_pre_built++;
         else {
             if (g_pre_failed++ < 4) MLOG("[RED] pipeline prebuild: the base of %s + %s failed: %s", vk.UTF8String, fk.UTF8String, e.localizedDescription.UTF8String);
@@ -8874,7 +8959,9 @@ static int pso_bundle_covers(NSArray<NSArray<NSString *> *> *pairs, NSString *wa
         NSArray<NSString *> *p = cand[k * n / MIN(n, (NSUInteger)PRE_PROBE)];
         MTL4RenderPipelineDescriptor *m = pre_desc(p[0], p[1], zero);
         if (!m) continue;
+        int vi = vs_stripe_of(m), own = vs_lock(vi);   // the AGX vertex-variant guard
         probed++; found += [g_arch_bundle newRenderPipelineStateWithDescriptor:m error:nil] != nil;
+        vs_unlock(vi, own);
     }
     int ok = probed > 0 && found == probed;   // skipped samples give no evidence that this system can take a base from the archive
     MLOG("pipeline archive bundled with the app: %s (%d of %d probed bases found, %.1f ms)%s", ok ? "holds the bases of every shader pair" : "this system does not take its bases",

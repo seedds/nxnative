@@ -15186,12 +15186,28 @@ static int up_chain_dispatch(NvShader *cs) {
     if (!cs->up_chain) {
         if (!up_chain_named(cs)) { cs->up_chain = UPC_NONE; return 0; }
         for (int i = 0; i < cs->rf.nb; i++) { if (cs->rf.b[i].kind == NVN_RB_TEX) nt++; else if (cs->rf.b[i].kind == NVN_RB_IMG) ni++; }
-        cs->up_chain = nt == 1 && ni == 1 ? (cs->up_color == UP_COLOR_LINEAR ? UPC_NETWORK : UPC_KEEP) : UPC_STAGE;
+        int up = 0;   // one texture and one image is the network only when the image is larger: the first stage has that shape too, writing a quarter-size image
+        if (nt == 1 && ni == 1) {
+            int t = -1, o = -1; for (int i = 0; i < cs->rf.nb; i++) { if (cs->rf.b[i].kind == NVN_RB_TEX) t = i; else if (cs->rf.b[i].kind == NVN_RB_IMG) o = i; }
+            int tin = (int)(tex_slot_h(S.tex[5], S.img[5], cs->rf.b[t].reg) & 0xfffff), tout = cs->rf.b[o].reg < 32 ? (int)(S.img[5][cs->rf.b[o].reg] & 0xfffff) : 0;
+            os_unfair_lock_lock(&g_rmu);
+            id<MTLTexture> a = tin > 0 && tin < g_ntreg && g_treg[tin].ok ? tex_by_id(tin) : nil, b = tout > 0 && tout < g_ntreg && g_treg[tout].ok ? tex_by_id(tout) : nil;
+            up = a && b && b.width > a.width && b.height > a.height;
+            os_unfair_lock_unlock(&g_rmu);
+        }
+        cs->up_chain = up ? (cs->up_color == UP_COLOR_LINEAR ? UPC_NETWORK : UPC_KEEP) : UPC_STAGE;
         MLOG("upscaler chain %s: %s", cs->key, cs->up_chain == UPC_STAGE ? "a stage before the network" : cs->up_chain == UPC_NETWORK ? "the network, no colour curve: MetalFX in HDR mode" : "the network, with a colour curve: the chain runs");
     }
     if (cs->up_chain == UPC_STAGE) {
         nt = 0; for (int i = 0; i < cs->rf.nb; i++) if (cs->rf.b[i].kind == NVN_RB_TEX) { nt++; ti = i; }
-        if (nt == 1) { g_upc_color = (int)(tex_slot_h(S.tex[5], S.img[5], cs->rf.b[ti].reg) & 0xfffff); g_upc_skipped = 0; }   // the chain's first dispatch (the only stage with one texture): the frame's colour
+        if (nt == 1) {   // the chain's first dispatch (one texture, not an integer one: the packed intermediates are R32Uint): the frame's colour
+            int c = (int)(tex_slot_h(S.tex[5], S.img[5], cs->rf.b[ti].reg) & 0xfffff);
+            os_unfair_lock_lock(&g_rmu);
+            id<MTLTexture> t = c > 0 && c < g_ntreg && g_treg[c].ok ? tex_by_id(c) : nil;
+            int col = t && !fmt_int_or_ds(t.pixelFormat);
+            os_unfair_lock_unlock(&g_rmu);
+            if (col) { g_upc_color = c; g_upc_skipped = 0; }
+        }
         if (!g_upc_ok || !g_upc_color) return 0;
         g_upc_skipped++; g_upc_left++; return 1;
     }

@@ -328,6 +328,28 @@ __attribute__((weak)) double front_view_aspect(void) { return 0; }   // front.h:
 static pthread_mutex_t g_screen_mu = PTHREAD_MUTEX_INITIALIZER;   // the game's start (main.c) and the front end's main thread both write the shape
 static void screen_any_write_(double a, const char *why);
 static void screen_any_write(double a, const char *why) { pthread_mutex_lock(&g_screen_mu); screen_any_write_(a, why); pthread_mutex_unlock(&g_screen_mu); }
+// The camera's x / y multipliers for a shape (state +0xc4 / +0xc8; 0 = 16:9). Landscape: wider than 16:9 keeps the vertical angle (x × 16:9 / r), narrower keeps the horizontal one
+// (y × r / 16:9). Portrait takes the scale of the same screen turned landscape, its width getting what that one's height gets: a phone or a window turned keeps the characters'
+// size and shows another part of the world. Their ratio y / x is always r × 9 / 16, the projection's aspect over 16:9's
+static void screen_camera(double r, float c[2]) {
+    double l = r >= 1 ? r : 1 / r, xl = l >= 16.0 / 9 ? 16.0 / 9 / l : 1, yl = l >= 16.0 / 9 ? 1 : l * 9 / 16;
+    c[0] = r == 0 ? 1 : r >= 1 ? (float)xl : (float)(yl * 16 / 9); c[1] = r == 0 ? 1 : r >= 1 ? (float)yl : (float)(xl * 9 / 16);
+}
+// Upright, the vertical angle is capped (DM_SCREEN_UPRIGHT_FOV, read once): an upright screen shows no more height than a picture of that shape (default 1, a square) would, its
+// width narrowing instead. A phone upright with the rule above sees about 90° vertically (Ocarina's fovy 50° at 16:9, 79° at 1:1), past what the game ever shows: above Link's
+// house the world is not built. 0 turns the cap off; another shape from 0.25 to 6 moves it (1.777: the game's own vertical angle; under 1 only screens taller than it are held).
+// Landscape is never capped. The y multiplier is raised to the cap's and x follows it, so the projection keeps the screen's aspect
+static double g_upright_cap = -1;
+static double screen_upright_cap(void) {
+    if (g_upright_cap >= 0) return g_upright_cap;
+    const char *e = getenv("DM_SCREEN_UPRIGHT_FOV"); double v = 1;
+    if (e && *e) {
+        char *end; v = strtod(e, &end);
+        if (end == e || *end || !(v == 0 || (v >= SCREEN_MIN && v <= SCREEN_MAX))) { LOG("[RED] DM_SCREEN_UPRIGHT_FOV=%s: 0 (off) or a width / height from 0.25 to 6; keeping 1", e); v = 1; }
+        else LOG("%s: upright vertical angle %s (DM_SCREEN_UPRIGHT_FOV)", g_fps_mod, v ? "held to that shape's" : "not capped");
+    }
+    return g_upright_cap = v;
+}
 static void screen_any_write_(double a, const char *why) {
     if (!dm_fps_state) return;
     double r = a < SCREEN_MIN ? SCREEN_MIN : a > SCREEN_MAX ? SCREEN_MAX : a;
@@ -335,16 +357,18 @@ static void screen_any_write_(double a, const char *why) {
     if (r == g_screen_ratio) return;
     float f[3] = {(float)r, r ? (float)fmax(r * 9 / 16, 1) : 1, r ? (float)fmax(16 / (9 * r), 1) : 1};
     memcpy(dm_fps_state + 0xa0, f, sizeof f);
-    // +0xc4 / +0xc8: the camera's x / y multipliers (the projection's rows). Landscape: wider than 16:9 keeps the vertical angle (x × 16:9 / r), narrower keeps the horizontal one
-    // (y × r / 16:9). Portrait takes the scale of the same screen turned landscape, its width getting what that one's height gets: a phone or a window turned keeps the
-    // characters' size and shows another part of the world. The size stub copies them with the size it sets (patches.py screen_shape)
-    { double l = r >= 1 ? r : 1 / r, xl = l >= 16.0 / 9 ? 16.0 / 9 / l : 1, yl = l >= 16.0 / 9 ? 1 : l * 9 / 16;
-      float c[2] = {r == 0 ? 1 : r >= 1 ? (float)xl : (float)(yl * 16 / 9), r == 0 ? 1 : r >= 1 ? (float)yl : (float)(xl * 9 / 16)};
-      memcpy(dm_fps_state + 0xc4, c, sizeof c); }
+    // +0xc4 / +0xc8: the camera's x / y multipliers (the projection's rows; screen_camera), upright capped (screen_upright_cap). The size stub copies them with the size it sets
+    // (patches.py screen_shape), and the HUD's follow from them
+    float c[2]; screen_camera(r, c); double cap = screen_upright_cap(); int capped = 0;
+    { float k[2];
+      if (r && cap && r < 1 && r < cap) { screen_camera(cap, k); if (c[1] < k[1]) { c[1] = k[1]; c[0] = (float)(k[1] * 16 / (9 * r)); capped = 1; } } }
+    memcpy(dm_fps_state + 0xc4, c, sizeof c);
     uint32_t gen; memcpy(&gen, dm_fps_state + 0xac, 4); gen++; memcpy(dm_fps_state + 0xac, &gen, 4);
     extern void mtl_present_screen(uint32_t w, uint32_t h); mtl_present_screen(r ? (uint32_t)(r * 10000 + 0.5) : 0, r ? 10000 : 0);   // the picture's shape for a crop of that shape (nvn_mtl.m present_shape)
     int first = g_screen_ratio < 0; g_screen_ratio = r;
-    if (r) LOG("%s: screen shape %.3f (%s%s): %s, picture %.3f x %.3f of 16:9", g_fps_mod, r, why, a != r && a > 0 ? ", held to 0.25..6" : "", r > 16.0 / 9 ? "more at the sides" : "more above and below", f[1], f[2]);
+    if (r) LOG("%s: screen shape %.3f (%s%s): %s, picture %.3f x %.3f of 16:9, camera x %.3f y %.3f%s", g_fps_mod, r, why, a != r && a > 0 ? ", held to 0.25..6" : "",
+               r > 16.0 / 9 ? "more at the sides" : "more above and below", f[1], f[2], c[0], c[1], capped ? ", upright cap" : "");
+    if (r && capped) LOG("%s: upright: vertical angle held to a %.2f picture's (DM_SCREEN_UPRIGHT_FOV)", g_fps_mod, cap);
     else LOG("%s: screen shape 16:9 (%s)", g_fps_mod, why);
     if (!first) { void dm_display_changed(void); dm_display_changed(); }   // the game lays its picture out again (hle_oe.c)
 }

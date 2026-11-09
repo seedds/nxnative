@@ -279,4 +279,3 @@ class Images(Base):
         self.base_img.write_bytes(b'not an image at all'); d = self.dump / 'base'
         self.assertTrue(pack_dump.is_version(d), 'the layout is read by names; the content is checked when it is packed')
         with self.assertRaisesRegex(pack_dump.Error, 'not a RomFS image'): pack_dump.pack_version(d, TID, self.out(0), say=lambda s: None)
-

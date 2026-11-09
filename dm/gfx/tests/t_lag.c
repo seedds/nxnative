@@ -18,5 +18,11 @@ int main(void) {
     check(nvn_lag_fence(&l, 0) == 139 && nvn_lag_fence(&l, 3) == 136, "after the ring wraps");
     check(nvn_lag_fence(&l, NVN_LAG_RING - 1) == 124, "the oldest slot of the ring");
     check(nvn_lag_fence(&l, NVN_LAG_RING) == 0, "k past the ring: no wait");
+    check(nvn_lag_early(100, 0, 60) == 100, "early 0: the fence itself");
+    check(nvn_lag_early(100, 4, 60) == 96, "early 4: four submissions before the fence");
+    check(nvn_lag_early(100, 50, 60) == 60, "early past the frame before's fence: that fence");
+    check(nvn_lag_early(100, 4, 0) == 96 && nvn_lag_early(3, 4, 0) == 0, "no earlier frame: down to no wait");
+    check(nvn_lag_early(0, 4, 0) == 0, "no fence: no wait");
+    check(nvn_lag_early(100, 4, 120) == 100, "a frame-before fence past this one: this fence");
     printf("t_lag: %d checks, %d failed\n", checks, fail); return fail != 0;
 }

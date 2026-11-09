@@ -1558,6 +1558,9 @@ static void frame_lag_wait(void) {
     static long ms = -1, pub = -1; if (ms < 0) { const char *e = getenv("DM_NVN_FRAME_LAG_MS"); ms = e ? atol(e) : 250; e = getenv("DM_NVN_FRAME_LAG_PUB_MS"); pub = e ? atol(e) : 17; }
     uint64_t t0 = now_ns(), f = nvn_queue_ticket_fence(tk, (uint64_t)(pub < ms ? pub : ms) * 1000000ull);
     nvn_queue_present_release(tk);
+    // DM_NVN_FRAME_LAG_EARLY=<n> (nvn_lag.h nvn_lag_early; default 0 = off): start the frame n submissions before the present's fence, never before the frame before's fence
+    static int early = -1; static uint64_t prev_f; if (early < 0) { const char *e = getenv("DM_NVN_FRAME_LAG_EARLY"); early = e ? atoi(e) : 0; if (early > 0) LOG("[nvn] DM_NVN_FRAME_LAG_EARLY=%d: a frame starts once all but the last %d submissions before the present's fence have completed", early, early); }
+    if (f && early > 0) { uint64_t fe = nvn_lag_early(f, early, prev_f); prev_f = f; f = fe; }
     if (!f) { uint64_t nu = ++g_lag_unpub; if (!(nu & (nu - 1))) LOG("[nvn] DM_NVN_FRAME_LAG: the present's receipt was not published within %ld ms (its queue waits on the guest): %llu frames started without the wait", pub, (unsigned long long)g_lag_unpub); }
     else if (mtl_completed_fence() < f) { uint64_t used = now_ns() - t0, budget = (uint64_t)ms * 1000000ull; mtl_wait(f, used < budget ? budget - used : 0); }
     g_lag_ns += now_ns() - t0;

@@ -50,8 +50,9 @@ KNOWN = {
     # the translator refuses these
     'hfma2': 'HFMA2.MMA (0x235) is not implemented', 'hfma2_ftz': '(as hfma2)', 'hfma2_sat': '(as hfma2)', 'hfma2_relu': '(as hfma2)',
     'mufu_rcp': 'HFMA2.MMA with an immediate (0x435) is not implemented', 'f2f_tf32': '(as mufu_rcp)', 'idiv_u32': '(as mufu_rcp)',
-    'idiv_u32_by_7': '(as mufu_rcp)', 'irem_s32': '(as mufu_rcp)', 'fdiv_rn': '(as mufu_rcp)', 'f2i_s64': '(as mufu_rcp)', 'iadd64': '(as mufu_rcp)',
+    'idiv_u32_by_7': '(as mufu_rcp)', 'irem_s32': '(as mufu_rcp)', 'fdiv_rn': '(as mufu_rcp)', 'iadd64': '(as mufu_rcp)',
     'isub64': '(as mufu_rcp)', 'imul64': '(as mufu_rcp)', 'imul24': '(as mufu_rcp)', 'dadd': '(as mufu_rcp; then DADD)', 'dmul': '(as mufu_rcp; then DMUL)',
+    'f2i_s64': 'HFMA2.MMA with an immediate (0x435, PR #2049); its F2I.S64 matches the GPU',
     'hmin2_nan': 'HMNMX2.NAN is not implemented', 'bmin2': 'HMNMX2.BF16_V2 is not implemented', 'bmax2_nan': '(as bmin2)',
     'bfma2': 'HFMA2.BF16_V2 is not implemented', 'hmma_16816_bf16': 'HMMA .BF16 is not implemented', 'hmma_1688_tf32': 'HMMA .TF32 is not implemented',
     'imma_16832_s8': 'IMMA is not implemented', 'dp4a_u32': 'IDP.4A is not implemented', 'dp4a_s32': '(as dp4a_u32)', 'dp4a_su': '(as dp4a_u32)',

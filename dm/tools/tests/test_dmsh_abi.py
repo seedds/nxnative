@@ -16,13 +16,13 @@ sys.path.insert(0, str(REPO / 'dm/gfx/tools'))
 import dmsh_abi as abi   # noqa: E402
 
 # Literals of the ABI still written in each file (outside comments), counted as the ratchet below does: the value, or the kind string (repr). These stay for other reasons:
-# a json key spelled like a kind ('c1', 'geometry', 'tex', 'img' in the facts and reflection json), an NVN stage name ("geometry"), a "?" placeholder in a log line, and 0x100
+# a json key spelled like a kind ('c1', 'geometry', 'tex', 'img' in the facts and reflection json), an NVN stage name ("geometry"), and 0x100
 # where it is not the push constant block's size (DMSH_PUSH_SIZE): a viewport swizzle value in nvn_mtl.m, the start of compute code in a package record in dmsh_build.py,
 # a single texture bind record's flag bit in nvn_obj.h (BIND_TEX1_NOBASE).
 # 0x1000 where it is not the pool table's entry count (DMSH_GMEM_MAP_ENTRIES): the 4 KB page step of nvn_mtl.m's sparse residency map.
 # A count may only go down; when it does, lower it here.
 BASELINE = {
-    'dm/gfx/nvn/nvn_mtl.m': {"'?'": 2, "'geometry'": 3, '0x100': 2, '0x1000': 2},
+    'dm/gfx/nvn/nvn_mtl.m': {"'geometry'": 3, '0x100': 2, '0x1000': 2},
     'dm/gfx/nvn/nvn_refl.m': {"'c1'": 1},
     'dm/gfx/nvn/nvn_refl.h': {},
     'dm/gfx/nvn/nvn_obj.h': {'0x100': 1},
@@ -31,6 +31,7 @@ BASELINE = {
     'dm/gfx/tools/cb_extent.py': {},
 }
 NUMBERS = {v for v in abi.VALUES.values() if isinstance(v, int) and v >= 0x100}   # the offsets and sizes distinctive enough to find as literals (not 8, 16, 0x20 or 128)
+KINDS = abi.KINDS - {abi.KIND_UNKNOWN}   # the kind names distinctive enough: not "?", which log lines also write for a name they do not have (nvn_mtl.m has three such placeholders)
 C_TOKEN = re.compile(r'"(?:\\.|[^"\\\n])*"|\'(?:\\.|[^\'\\\n])*\'|//[^\n]*|/\*.*?\*/|\b0[xX][0-9A-Fa-f]+\b', re.S)
 
 
@@ -53,7 +54,7 @@ def py_literals(text):   # the same for Python source
 def abi_literals(path):
     text = (REPO / path).read_text()
     lits = py_literals(text) if path.endswith('.py') else c_literals(text)
-    return collections.Counter(f'{v:#x}' if k == 'int' else repr(v) for k, v in lits if (k == 'int' and v in NUMBERS) or (k == 'str' and v in abi.KINDS))
+    return collections.Counter(f'{v:#x}' if k == 'int' else repr(v) for k, v in lits if (k == 'int' and v in NUMBERS) or (k == 'str' and v in KINDS))
 
 
 class Header(unittest.TestCase):

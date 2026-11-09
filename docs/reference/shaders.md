@@ -2046,6 +2046,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** a missing seed list is logged and left out; the device list is still warmed, and the prewarm returns only when neither list exists. Host only.
 - **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md): before, a 13,200-frame session had 154 frames over 100 ms (122 mostly compiling, the worst 7.1 s), 87 s of compiling on the submit thread and 95 draws with a hybrid pipeline; after, the start warmed the 2,484-line device list in 7.6 s (1,002 bases from the archive), compacted 98 archive files into one and ran the prebuild once (20,647 pairs, 116 s before the first frame), and a 17,700-frame session had 68 such frames (40 compiling, the worst 1.9 s), 12 s of compiling and 5,320 hybrid draws. The game has a seed list now.
 
+### A pipeline a hybrid draw stood in for listed only once built
+
+- **Symptom:** on an iPhone the next start still waits on, or draws with stand-ins for, the pipelines the last session asked for last. Ocarina of Time on an iPhone 18 Pro Max asked for about 400 pipelines in Castle Town and finished about 60 a minute; whatever was still unbuilt when the run ended was not in `pso_user.tsv`, so the next start's prepare step did not build it. HookLink's measurement; we have not reproduced it.
+- **Cause:** `pso_user.tsv` took a pipeline's row from the submit thread only once its build finished. While a hybrid draw drew with its shader pair's pulling pipeline, the pipeline it wanted was queued in the background (`pso_pend_demand`), where a build took 5-50 s with the game running on two performance cores, against about 1 s in the prepare step before the first frame.
+- **Fix:** `demand_record` (`dm/gfx/nvn/nvn_mtl.m`) writes the row when the hybrid draw first asks for the pipeline, once per key. The later row from the built pipeline is the same line, which `pso_user_record` drops. `DM_PSO_DEMAND_RECORD=0` records a pipeline only once built, as before.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game), found by [HookLink](https://github.com/dsi-hub/HookLink) (engine branch: https://github.com/dsi-hub/nxnative/tree/hooklink, commit 0ad4e1a9) on an iPhone 18 Pro Max.
+- **Check:** `t_pso_demand_record` calls `demand_record` twice for one key and checks that `pso_user.tsv` gets one row, that a second key gets its own, and that with `DM_PSO_DEMAND_RECORD=0` nothing is written. It does not draw: the hybrid call site is not run by any test.
+
 ### Shader libraries loaded when the program is made
 
 - **Symptom:** the first frame that draws with new programs loads their shader libraries on the submit thread (`[longframe] ... shader libraries N, X ms`): tens of milliseconds with the files cached, seconds when the drive is slow.

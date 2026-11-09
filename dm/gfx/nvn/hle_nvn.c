@@ -1943,6 +1943,7 @@ static double g_pres_exp[TWIN], g_pres_exp_last;   // how long that frame should
 // The hold (60 Hz vsyncs) each present was given, by present number. On-screen intervals are read 8 presents late, so each is judged against the holds of its own presents:
 // with the frame step at 2 vsyncs every frame stays 33.3 ms, which is not a dropped frame
 static uint8_t g_hold_ring[16];
+static _Atomic int g_fs_fine;   // nvn_fstep.fine (fstep_tick): frames late at hold 2, the longest a 30 fps cap allows, each shown at the next vsync after its hold (nvn_game_fps)
 static int fstep_hz(void);
 static double pres_expect_ms(uint64_t n) {   // the interval between presents n - 1 and n shows frame n - 1: the display link holds it for its own present's hold, the Mac pacer spaces present n by n's, so the larger of the two
     int k = g_hold_ring[n % 16] > g_hold_ring[(n - 1) % 16] ? g_hold_ring[n % 16] : g_hold_ring[(n - 1) % 16];
@@ -2045,15 +2046,16 @@ static void tsummary(uint64_t frame) {
     }
     LOG("[nvn] timing up to frame %llu:%s", frame, line);
     { void mtl_pso_line(char *, size_t); char pl[1024]; mtl_pso_line(pl, sizeof pl); LOG("[nvn] pipelines up to frame %llu: %s", frame, pl); }
-    double tgt = 1000.0 / mtl_fps_target();   // milliseconds one frame should take: 16.7 at 60 fps, 33.3 when the game itself asks for 30 (the over-time / dropped-frame counts below use it)
+    double tgt = 1000.0 / (atomic_load(&g_fs_fine) ? 30 : mtl_fps_target());   // milliseconds one frame should take: 16.7 at 60 fps, 33.3 when the game itself asks for 30 or at a 30 cap whose late frames the 60 Hz link shows (the over-time / dropped-frame counts below use it)
     { unsigned n = g_tn[0] < TWIN ? g_tn[0] : TWIN, over = 0; double v[TWIN];   // frame interval gets its own line (M1 baseline): number of frames longer than one frame period in this window and p99
       if (n) { memcpy(v, g_tw[0], n * sizeof *v); qsort(v, n, sizeof *v, dcmp); for (unsigned i = 0; i < n; i++) over += v[i] > tgt;
         LOG("[nvn] frame interval up to frame %llu: >%.1fms %u / %u frames, p99 %.2f ms", frame, tgt, over, n, v[(n * 99) / 100 < n ? (n * 99) / 100 : n - 1]); } }
-    { unsigned n = g_presn < TWIN ? g_presn : TWIN, k = 0, drop = 0, discard = 0; double v[TWIN];   // on-screen present: dropped frame = on screen longer than its hold × 1.5 (pres_expect_ms) or discarded
-      for (unsigned i = 0; i < n; i++) { double x = g_pres_iv[i]; if (x < 0) { drop++; discard++; } else if (x > 0) { v[k++] = x; drop += x > g_pres_exp[i] * 1.5; } }
+    { unsigned n = g_presn < TWIN ? g_presn : TWIN, k = 0, drop = 0, discard = 0, over[3] = {0}; double v[TWIN], vs = 1000.0 / fstep_hz();   // on-screen present: dropped frame = on screen longer than its hold × 1.5 (pres_expect_ms) or discarded
+      // over: intervals at their hold, one vsync longer and two or more longer (at hold 2: 33.3 / 50 / 66.7 ms and more; a frame late at hold 2 shows 50 ms on the 60 Hz link, 66.7 on the 30 Hz one)
+      for (unsigned i = 0; i < n; i++) { double x = g_pres_iv[i]; if (x < 0) { drop++; discard++; } else if (x > 0) { v[k++] = x; drop += x > g_pres_exp[i] * 1.5; over[x < g_pres_exp[i] + 0.5 * vs ? 0 : x < g_pres_exp[i] + 1.5 * vs ? 1 : 2]++; } }
       task_vm_info_data_t vi; mach_msg_type_number_t vc = TASK_VM_INFO_COUNT; double fp = task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vi, &vc) == KERN_SUCCESS ? vi.phys_footprint / 1048576.0 : -1;
       double br = dm_brightness_now();   // footprint / brightness are carried on the on-screen present row: does not depend on the tick-entry observation gate (camp runs have it too)
-      if (k) { qsort(v, k, sizeof *v, dcmp); LOG("[nvn] on-screen up to frame %llu: %u frames, dropped %u (discarded %u), p99 %.2f ms; footprint %.0f MiB; brightness %.2f; thermal %d", frame, k + discard, drop, discard, v[(k * 99) / 100 < k ? (k * 99) / 100 : k - 1], fp, br, dm_thermal_now()); }
+      if (k) { qsort(v, k, sizeof *v, dcmp); LOG("[nvn] on-screen up to frame %llu: %u frames, dropped %u (discarded %u), p99 %.2f ms; intervals at the hold / one vsync longer / two or more %u / %u / %u; footprint %.0f MiB; brightness %.2f; thermal %d", frame, k + discard, drop, discard, v[(k * 99) / 100 < k ? (k * 99) / 100 : k - 1], over[0], over[1], over[2], fp, br, dm_thermal_now()); }
       g_presn = 0; }
     power_line(frame);
     { static uint64_t prev[6], pf; uint64_t v[6]; mtl_vbuf_stats(&v[0], &v[1], &v[2], &v[3], &v[4], &v[5]);
@@ -2264,13 +2266,15 @@ static int fps_present_cap(void) {
 static nvn_fstep g_fs;   // present thread only
 static nvn_fgpu g_fg;   // the GPU time at kmin and at the current hold (nvn_fstep_gpu_slowed)
 static _Atomic int g_fs_k;   // the hold presentation follows (0 = not decided yet)
-// The display link runs at 30 Hz at a 30 cap, except while the game fixes its own step at 1 (BotW's VFR override)
+// The display link runs at 30 Hz at a 30 cap, except while the game fixes its own step at 1 (BotW's VFR override) and while frames are late at hold 2 (nvn_fstep.h fine): the 30 Hz link
+// shows a late frame only on its next tick, 66.7 ms after the one before, where the 60 Hz link, which holds each frame its two vsyncs (g_link_hold_until, nvn_mtl.m), shows it at the next
+// vsync, 50 ms. Ocarina of Time on an iPhone at the launcher's 30 fps cap (frames 36.5 ms) got 33 intervals of 66.7 ms in each 300 on the 30 Hz link
 int nvn_fps_high_now(void) { return atomic_load(&g_fs_k) == 1 ? 120 : 60; }   // hle_fpslock.c: the target of the next game frame, from the hold in force
 // The rate of vi::GetDisplayVsyncEvent (hle_sdk16.c, nvn_mtl.m mtl_link_wait_vsync): the Switch's 60 Hz, or 120 while 120 fps is on and its hold is one tick of 1/120 s. A game that
 // waits for the next vblank each frame is held to the event's rate whatever the present cap: Unity's NVN device waits until its vblank time (set from the event) passes
 // (The Rogue Prince of Persia: main+0x14f65f0), so at 120 every frame came two ticks late and the hold fell back to 60. The hold's trial at 120 must already have the event at 120
 int nvn_vsync_hz(void) { return fps_high() && atomic_load(&g_fs_k) == 1 && atomic_load(&g_high_cap) == 120 ? 120 : 60; }
-int nvn_game_fps(void) { int c = fps_present_cap(); if (c) return c == 30 && atomic_load(&g_fs_k) == 1 && fstep_on() ? 60 : c; uint64_t s = atomic_load(&g_itv2_since); return g_hz > 0 && !g_display_mode && s && now_ns() >= s + 1000000000ull ? 30 : 60; }
+int nvn_game_fps(void) { int c = fps_present_cap(); if (c) return c == 30 && (atomic_load(&g_fs_k) == 1 || atomic_load(&g_fs_fine)) && fstep_on() ? 60 : c; uint64_t s = atomic_load(&g_itv2_since); return g_hz > 0 && !g_display_mode && s && now_ns() >= s + 1000000000ull ? 30 : 60; }
 static void present_cfg(const win_t *o) {
     if (g_hz >= 0) return;
     // The interval mode comes from the game profile (present_interval, default game): whether frames follow the present interval the game sets depends on whether the game's logic counts frames, which differs per game. Environment variables override it, and can override the fixed 60 Hz.
@@ -2408,6 +2412,12 @@ static void fstep_tick(const win_t *o, int c) {
     int n = nvn_fstep_next(&g_fs, shown, cost, kmin, kmax, fixed, cslow || gslow);
     if (dm_fps_state) __atomic_store_n((uint32_t *)(dm_fps_state + 0x20), (uint32_t)n, __ATOMIC_RELAXED);
     atomic_store(&g_fs_k, g_fs.k);
+    int fine = g_fs.fine && c == 30 && !fps_high(), fine0 = atomic_exchange(&g_fs_fine, fine);   // only a 30 fps cap's link runs slower than the vsyncs
+    static int nfine;
+    if (fine != fine0 && nfine < 40) {
+        if (fine) LOG("[nvn] frame step: frames late at hold %d, the longest the 30 fps cap allows (cost %.2f, GPU %.2f vsyncs): each is shown at the next vsync (a 60 Hz display link: 50 ms) instead of a 30 Hz link's next tick (66.7 ms), at present %llu%s", g_fs.k, cost, gpu, (unsigned long long)o->presents, ++nfine == 40 ? "; further changes only counted below" : "");
+        else LOG("[nvn] frame step: %s: the 30 fps cap's own 30 Hz display link again at present %llu%s", c != 30 ? "the cap is no longer 30 fps" : fixed ? "the game fixes its own step" : g_fs.k < kmax ? "the hold may rise again" : "no late frame for 8 s", (unsigned long long)o->presents, ++nfine == 40 ? "; further changes only counted below" : "");
+    }
     held[g_fs.k]++; if (fixed) fixed_sum += (uint64_t)n;   // the stubs count only the host's steps
     static int fixed_was, nfix;
     if (fixed != fixed_was && nfix < 40) { nfix++; if (fixed) LOG("[nvn] frame step: the game fixes its own step at %d vsyncs at present %llu", fixed, (unsigned long long)o->presents); else LOG("[nvn] frame step: the game hands the step back to the host at present %llu", (unsigned long long)o->presents); }

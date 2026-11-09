@@ -508,6 +508,29 @@ int main(void) {
         snprintf(b, sizeof b, "host-paced game at 2.95 vsyncs: game/real %.3f (probes %llu, failed %llu)", (m.game - g0) / (m.real - r0), (unsigned long long)m.s.probes, (unsigned long long)m.s.failed);
         check((m.game - g0) / (m.real - r0) >= 0.985 && m.s.probes <= 24, b);
     }
+    {   // a 30 fps cap (kmin = kmax = 2) whose frames run late (Ocarina of Time on an iPhone: 36.5 ms, GPU 32 ms): the hold cannot rise, so the frame step asks the caller to show each late
+        // frame at the next vsync (nvn_fstep.fine: the 60 Hz display link) instead of the next tick of the cap's 30 Hz link, and returns to it once the frames fit for FSTEP_HOLD_MAX
+        sim m = {0}; rung(&m, 120, 1.2, 1.0, 1, 2, 2);
+        check(m.s.k == 2 && !m.s.fine, "30 fps cap, frames that fit hold 2: the cap's own link");
+        rung(&m, 2, 2.19, 1.92, 1, 2, 2); check(!m.s.fine, "  two late frames are not yet a scene that does not fit");
+        rung(&m, 1, 2.19, 1.92, 1, 2, 2); check(m.s.fine && m.s.k == 2 && m.s.fines == 1, "  the third: late frames show at the next vsync, the hold stays 2");
+        double r0 = m.real, g0 = m.game; rung(&m, 1800, 2.19, 1.92, 1, 2, 2);
+        snprintf(b, sizeof b, "  1,800 late frames: stays at the next vsync, game time %.3f of real time (switches %llu)", (m.game - g0) / (m.real - r0), (unsigned long long)m.s.fines);
+        check(m.s.fine && m.s.fines == 1 && (m.game - g0) / (m.real - r0) > 0.99, b);
+        rung(&m, 200, 1.2, 1.0, 1, 2, 2); check(m.s.fine, "  frames that fit for 400 vsyncs keep it (no flapping)");
+        rung(&m, 60, 1.2, 1.0, 1, 2, 2); check(!m.s.fine, "  after 8 s of frames that fit, the cap's own link again");
+        for (int i = 0; i < 20; i++) { rung(&m, 1, 2.3, 2.0, 1, 2, 2); rung(&m, 49, 1.2, 1.0, 1, 2, 2); }
+        check(!m.s.fine && m.s.fines == 1, "  a single late frame every 50 does not switch");
+        sim i = {0}; rung(&i, 120, 1.2, 1.0, 1, 2, 2); rung(&i, 20, 2.5, 0.01, 1, 2, 2);
+        check(!i.s.fine, "30 fps cap, 20 late frames with the GPU idle (a load): the cap's own link");
+        rung(&i, 20, 2.5, 0.01, 1, 2, 2); check(i.s.fine, "  30 in a row are a CPU-heavy scene, as for a step up");
+        sim u = {0}; rung(&u, 120, 0.5, 0.4, 1, 1, 3); rung(&u, 600, 2.19, 1.92, 1, 1, 3);
+        check(u.s.k == 3 && !u.s.fine, "60 fps cap, 36.5 ms frames: the hold rises to 3, no fine pacing needed");
+        sim f = {0}; rung(&f, 120, 1.2, 1.0, 1, 2, 2); rung(&f, 10, 2.19, 1.92, 1, 2, 2); run(&f, 1, 2.19, 2, 2, 2);
+        check(!f.s.fine, "the game fixing its own step ends it");
+        sim c = {0}; rung(&c, 120, 1.2, 1.0, 1, 2, 2); rung(&c, 10, 2.19, 1.92, 1, 2, 2); rung(&c, 1, 0.8, 0.7, 1, 1, 3);
+        check(!c.s.fine, "the cap rising (the hold may rise again) ends it");
+    }
     printf("== %d checks, %d failed ==\n", checks, fail);
     return fail != 0;
 }

@@ -34,6 +34,12 @@
 // it stayed at hold 3 (18 fps, work 50 ms, GPU 12.5 ms) for about 1,470 presents where hold 1 held at 16.6 ms before. A game whose CPU really needs the longer hold fails the
 // probe; these probes have their own hold-off (uhold), doubled after each one fails up to FSTEP_UHOLD_MAX (60 s), so such a game pays one failed probe a minute at most
 // and not one every 8 s. Late frames with the GPU idle still step up after FSTEP_RUN of them in a row: a CPU-heavy scene that draws almost nothing is not a load.
+// Late frames at the longest hold allowed (kmax: 2 at a 30 fps cap, or kmin with fps_hold off) cannot step up. The caller's display link at the cap's rate (30 Hz) can then only
+// show a late frame on its next tick, 66.7 ms after the one before: Ocarina of Time on an iPhone at the launcher's 30 fps cap (frames 36.5 ms, GPU 32 ms) left one tick in 9 empty,
+// 33 intervals of 66.7 ms in each 300 and the rest 33.3, at 27 fps. So the same late frames that would step up (3 in a row, or FSTEP_RUN with the GPU idle among them) set fine:
+// the caller then shows each frame at the next vsync after its hold instead (a 60 Hz link that holds each frame its k vsyncs), 33.3 or 50 ms and never 66.7, still never faster
+// than the cap. fine ends after FSTEP_HOLD_MAX vsyncs with no such late frame (a scene that fits again; a late frame now and then does not flap the link), when the hold may rise
+// again (the cap rose) and while the game fixes its own step.
 #pragma once
 #include <math.h>
 #include <stdint.h>
@@ -85,7 +91,8 @@ typedef struct {
     double last_cost[3];      // the last three frames' costs, oldest first
     int smax;                 // set by the caller: the largest step the game takes (its stub's STEP_MAX; 0 = FSTEP_MAX)
     int no_payback;           // set by the caller: 1 = the game does not take the step (120 fps: it steps by its target), so three late frames raise the hold whatever the average
-    uint64_t late, paid, ups, downs, failed, probes; double dropped;   // statistics for the log
+    int fine; double fine_ok; // 1 = frames are late at kmax, shown at the next vsync after their hold; vsyncs since the last late frame while fine (FSTEP_HOLD_MAX ends it)
+    uint64_t late, paid, ups, downs, failed, probes, fines; double dropped;   // statistics for the log (fines: times fine was set)
 } nvn_fstep;
 
 // Whether the cost at the longer hold is the cost that held kmin (a probe without a slowed report)
@@ -110,7 +117,7 @@ static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int km
     int gpu_on = s->gpu_on; double gpu = s->gpu; s->gpu_on = 0; s->gpu = 0;   // cleared on every return
     if (fixed > 0) {   // the game's own step: speed is right by construction, nothing to pay back
         s->k = s->step = fixed < smax ? fixed : smax;
-        s->debt = 0; s->late_run = s->ilate_run = s->fit_run = s->trial = s->probe = s->grace = 0; s->run = 0;
+        s->debt = 0; s->late_run = s->ilate_run = s->fit_run = s->trial = s->probe = s->grace = 0; s->run = 0; s->fine = 0;
         s->kmin = FSTEP_MAX + 1;   // when it ends, k starts again from kmin
         return s->step;
     }
@@ -175,6 +182,9 @@ static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int km
         s->up_idle = s->late_run < 3;
         s->k = want; s->ups++; s->late_run = s->ilate_run = s->fit_run = s->urun = 0; s->since = 0; s->probe = s->uprobe = 0;
     } else if (s->trial && !grace && !--s->trial) { if (s->probe) { s->probe = 2; s->since = 0; } else s->hold = hold0; }   // the trial held (a probe's run at kmin is judged at the next step up)
+    // Late at the longest hold allowed: shown at the next vsync, as the hold cannot rise (fine above)
+    if (s->k >= kmax && (s->late_run >= 3 || s->ilate_run >= FSTEP_RUN)) { if (!s->fine) s->fines++; s->fine = 1; s->fine_ok = 0; }
+    else if (s->fine) { s->fine_ok = late && !idle ? 0 : s->fine_ok + shown; if (s->k < kmax || s->fine_ok >= hold_max) s->fine = 0; }
     if (!late) s->fit_run = s->k > kmin && cost <= FSTEP_FIT * (s->k - 1) ? s->fit_run + 1 : 0;
     if (s->fit_run >= FSTEP_RUN && s->since >= s->hold && !s->trial) { s->k--; s->downs++; s->trial = FSTEP_RUN; s->fit_run = 0; }
     else if ((slow || nvn_fstep_same(s) || (nvn_fstep_unpaced(s) && s->since >= s->uhold)) && s->k > kmin && s->since >= s->hold && !s->trial) {   // probe: straight to kmin, so the controller sees the whole deadline

@@ -103,48 +103,19 @@ private struct LauncherView: View {
 
     var body: some View {
         GeometryReader { geometry in
-            HStack(spacing: 0) {
-                VStack(spacing: 16) {
-                    if let icon = appIcon() {
-                        Image(uiImage: icon).resizable().frame(width: 96, height: 96)
-                            .clipShape(RoundedRectangle(cornerRadius: 22))
-                            .accessibilityHidden(true)
-                    }
-                    Text((info("CFBundleDisplayName") as? String) ?? "Game")
-                        .font(.title.weight(.bold)).multilineTextAlignment(.center)
-                    Text("Version \((info("CFBundleShortVersionString") as? String) ?? "")")
-                        .font(.callout).foregroundStyle(.secondary)
-                    playButton
+            // Landscape: the game's name and Play on the left third, the settings beside them; upright (Rotation, an iPad turned), the name and Play above the settings
+            if geometry.size.width >= geometry.size.height {
+                HStack(spacing: 0) {
+                    header(icon: 96)
+                        .padding(16)
+                        .frame(width: geometry.size.width / 3, height: geometry.size.height)
+                    settingsList.frame(width: geometry.size.width * 2 / 3)
                 }
-                .padding(16)
-                .frame(width: geometry.size.width / 3, height: geometry.size.height)
-                List {
-                    ForEach(m.sections, id: \.self) { section in
-                        let rows = m.rows(in: section)
-                        if !rows.isEmpty {
-                            Section(section) {
-                                ForEach(rows) { SettingRow(s: $0, m: m) }
-                            }
-                        }
-                    }
-                    Section {
-                        Button("Reset to tested defaults") { m.reset() }
-                            .disabled(!m.changed)
-                    } footer: {
-                        Text("Brings back all settings this game was tested with.")
-                    }
-                    CloudSavesSection()
-                    Section {
-                        HStack {
-                            Text("Memory available")
-                            Spacer()
-                            Text(ByteCountFormatter.string(fromByteCount: Int64(memory), countStyle: .memory)).monospacedDigit().foregroundStyle(.secondary)
-                        }
-                    }
+            } else {
+                VStack(spacing: 0) {
+                    header(icon: 64).padding(.horizontal, 16).padding(.vertical, 12)
+                    settingsList
                 }
-                .listStyle(.insetGrouped)
-                .contentMargins(.horizontal, 12, for: .scrollContent)
-                .frame(width: geometry.size.width * 2 / 3)
             }
         }
         .preferredColorScheme(.dark)
@@ -164,6 +135,53 @@ private struct LauncherView: View {
                 try? await Task.sleep(for: .seconds(2))
             }
         }
+        // Rotation turns the screen as soon as it is picked, before Play (front_ios.m dm_rotation_set); the saved pick at once when the screen shows
+        .onAppear { if let v = m.values["DM_ROTATION"] { dm_rotation_set(v) } }
+        .onChange(of: m.values["DM_ROTATION"]) { _, v in if let v { dm_rotation_set(v) } }
+    }
+
+    private func header(icon size: CGFloat) -> some View {
+        VStack(spacing: size > 64 ? 16 : 8) {
+            if let icon = appIcon() {
+                Image(uiImage: icon).resizable().frame(width: size, height: size)
+                    .clipShape(RoundedRectangle(cornerRadius: size * 22 / 96))
+                    .accessibilityHidden(true)
+            }
+            Text((info("CFBundleDisplayName") as? String) ?? "Game")
+                .font(.title.weight(.bold)).multilineTextAlignment(.center)
+            Text("Version \((info("CFBundleShortVersionString") as? String) ?? "")")
+                .font(.callout).foregroundStyle(.secondary)
+            playButton
+        }
+    }
+
+    private var settingsList: some View {
+        List {
+            ForEach(m.sections, id: \.self) { section in
+                let rows = m.rows(in: section)
+                if !rows.isEmpty {
+                    Section(section) {
+                        ForEach(rows) { SettingRow(s: $0, m: m) }
+                    }
+                }
+            }
+            Section {
+                Button("Reset to tested defaults") { m.reset() }
+                    .disabled(!m.changed)
+            } footer: {
+                Text("Brings back all settings this game was tested with.")
+            }
+            CloudSavesSection()
+            Section {
+                HStack {
+                    Text("Memory available")
+                    Spacer()
+                    Text(ByteCountFormatter.string(fromByteCount: Int64(memory), countStyle: .memory)).monospacedDigit().foregroundStyle(.secondary)
+                }
+            }
+        }
+        .listStyle(.insetGrouped)
+        .contentMargins(.horizontal, 12, for: .scrollContent)
     }
 
     @ViewBuilder var playButton: some View {

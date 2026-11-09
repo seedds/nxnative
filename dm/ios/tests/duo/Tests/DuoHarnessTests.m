@@ -12,6 +12,7 @@
 #import "DmLayout.h"
 #import "DmGameMenu.h"
 #import "DuoHarnessRuntime.h"
+#import "DmRotation.h"
 #include "dm_input.h"
 #include <math.h>
 #include <stdio.h>
@@ -1362,4 +1363,30 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
 }
 
 
+// Rotation (DM_ROTATION): the view controllers' mask and the app's, which replaces the Info.plist list (main.m), so a phone can be locked upright
+- (void)testRotationSettingSetsTheOrientationMasks {
+    const UIInterfaceOrientationMask all = UIInterfaceOrientationMaskAll, land = UIInterfaceOrientationMaskLandscape,
+        upright = UIInterfaceOrientationMaskPortrait | UIInterfaceOrientationMaskPortraitUpsideDown;
+    XCTAssertEqual(dm_rotation_mask(NULL, all), all);
+    XCTAssertEqual(dm_rotation_mask("auto", land), land, @"auto keeps the device's own list");
+    XCTAssertEqual(dm_rotation_mask("landscape", all), land);
+    XCTAssertEqual(dm_rotation_mask("portrait", land), upright, @"portrait is allowed even where the Info.plist lists only landscape");
+    XCTAssertEqual(dm_rotation_mask("sideways", land), land, @"an unknown value is auto");
+
+    UIViewController *root = [self harnessRootViewController];
+    XCTAssertNotNil(root);
+    [root.view layoutIfNeeded];
+    unsetenv("DM_ROTATION");
+    BOOL pad = UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad;
+    XCTAssertEqual(root.supportedInterfaceOrientations, all);
+    XCTAssertEqual(front_ios_app_orientations(), pad ? all : land, @"auto: the Info.plist list for this device");
+    XCTAssertTrue(dm_setting_live("DM_ROTATION", NULL), @"the in-game menu offers Rotation");
+    dm_setting_live("DM_ROTATION", "landscape");
+    XCTAssertEqual(root.supportedInterfaceOrientations, land);
+    XCTAssertEqual(front_ios_app_orientations(), land);
+    dm_setting_live("DM_ROTATION", "auto");
+    XCTAssertEqual(root.supportedInterfaceOrientations, all);
+    XCTAssertEqual(front_ios_app_orientations(), pad ? all : land);
+    unsetenv("DM_ROTATION");
+}
 @end

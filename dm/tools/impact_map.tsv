@@ -139,6 +139,9 @@ dm/host/pad_apple.h	hle:*hid*	controller face buttons from GameController
 dm/host/motion_fusion.h	hle:*SixAxisSensor*	six-axis motion mapping and orientation
 dm/host/motion_pro.h	hle:*SixAxisSensor*	passive Switch Pro Controller IMU decoder
 dm/host/motion_pro_mac.h	hle:*SixAxisSensor*	Mac Pro Controller raw motion transport and routing
+dm/host/switch2_proto.h	hle:*hid*	Switch 2 controller protocol: reports, sticks, buttons, motion maps
+dm/host/pad_switch2_apple.h	hle:*hid*	Switch 2 controllers over Bluetooth LE (off unless DM_SW2=1)
+dm/host/pad_switch2_apple.m	hle:*hid*	Switch 2 controllers over Bluetooth LE (off unless DM_SW2=1)
 dm/host/front.h	present:*	the front end
 dm/ios/*	*:*	the iOS app
 dm/third_party/ryujinx/src/Ryujinx.Graphics.Shader/Translation/Transforms/GeometryToCompute.cs	shader:stage:gs	geometry compute input and output lowering

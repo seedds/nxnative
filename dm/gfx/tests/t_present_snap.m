@@ -109,7 +109,7 @@ static void pacing_case(void) {
 }
 static void pending_copy_case(void) {
     tex_t t = source(0);
-    id<MTLSharedEvent> gpu_gate = [g_dev newSharedEvent]; [g_q4 waitForEvent:gpu_gate value:1];
+    id<MTLSharedEvent> gpu_gate = [g_dev newSharedEvent]; if (!gpu_gate) abort(); [g_q4 waitForEvent:gpu_gate value:1];
     pthread_mutex_lock(&g_pq_mu); g_link_owns_layer = 1; pthread_mutex_unlock(&g_pq_mu);
     CHECK("first snapshot queued", present_enqueue(&t, 1. / 60, NULL, 0) == 0);
     CHECK("second snapshot queued", present_enqueue(&t, 1. / 60, NULL, 0) == 0);
@@ -129,7 +129,7 @@ static void resize_case(void) {
     snap_present(&small); snap_present(&small);
     CHECK("both ring slots copied", [g_snap_ev waitUntilSignaledValue:g_snap_v timeoutMS:2000]);
     id<MTLTexture> old0 = g_snap[0].tex, old1 = g_snap[1].tex;
-    id<MTLSharedEvent> gpu_gate = [g_dev newSharedEvent]; [g_q4 waitForEvent:gpu_gate value:1];   // stands for display command buffers still queued
+    id<MTLSharedEvent> gpu_gate = [g_dev newSharedEvent]; if (!gpu_gate) abort(); [g_q4 waitForEvent:gpu_gate value:1];   // stands for display command buffers still queued
     snap_present(&big);
     CHECK("slot 0 has a texture of the new size", g_snap[0].tex != old0 && g_snap[0].tex.width == 16);
     CHECK("slot 0's old texture is still resident", [g_snap_res containsAllocation:old0]);

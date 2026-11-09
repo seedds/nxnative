@@ -81,6 +81,7 @@ DM_HOME_QUIT_TEXT	switch	The texts of the Home button's quit prompt in the playe
 DM_HTML	path	Folder of the offline HTML pages (default: `html` beside the RomFS)
 DM_ICON	path	`=<image>` gives `build_ipa.sh` another app icon (default the `icon.jpg` beside the RomFS)
 DM_IMPORTS	diagnostic	When set, logs each import the loader binds to a host function and each forced takeover
+DM_JCMS_LOG	diagnostic	`=1` logs the game's Joy-Con mouse sensor and pointer calls (JcmsState reads, Nmouse handles, states and positions), at most once a second each
 DM_JIT_CAPTURE	path	Folder the Mac host writes what a game's `nn::jit` plugin makes to, one `<key>.jit` per request, for `dm/tools/jit_capture.py`; the NSP script sets it
 DM_JIT_LOG	diagnostic	`1` logs every `nn::jit` `GenerateCode` request
 DM_JIT_MISS_DUMP	diagnostic	Folder for the input of each `nn::jit` request a served image lacks
@@ -116,6 +117,7 @@ DM_NVN_ACQ_FENCE	switch	`last` gives `nvnWindowAcquireTexture`'s sync the latest
 DM_NVN_ALLOCPROF	diagnostic	`=1` charges Metal allocation growth to each replayed op type and function, and logs command allocator sizes and each new texture (serial, size, format, storage); `=2` also gives each main submission a fresh command allocator and reports command memory by operation, by encoder, by submission size and the indirect-count multi-draws encoded
 DM_NVN_API	switch	`=<major>.<minor>` overrides the NVN API version `nvnDeviceGetInteger` reports (by default decided by the SDK version or the profile's `device_api`: 55.15 for SDK 11 and later, 53.313 before)
 DM_NVN_BARRIER	switch	How draw passes are ordered: `full` (default) waits for all earlier GPU work, `game` only for the previous pass's fragment stage unless the game set a barrier, `ab` alternates with the `DM_AB` phases
+DM_NVN_BC_ALIAS	diagnostic	Set 0 to send copies to an uncompressed alias instead of its block-compressed storage, for an A/B check; default 1
 DM_NVN_BF_WANT	path	`=<file>`: appends the key of each fragment shader whose passes could not be merged for lack of a readable-tile version to that file, once per key
 DM_NVN_BLIT_ORDER	diagnostic	`0` drops the barriers between dependent operations in the copy encoder, which reproduces the fountain's vertical stripes in Mario Wonder
 DM_NVN_CAPTURE	diagnostic	`=<frame>:1:<path>` writes that frame (from its first submit to its present) to one file: pool bytes, registries, program keys, the textures whose content lives only in Metal, each submission's records with pointers relocatable, and the presented frame's SHA-256 and pixels; `dm/gfx/tests/nvn_replay` replays it ([development.md](development.md#frame-capture-and-replay))
@@ -181,10 +183,10 @@ DM_NVN_PROF	diagnostic	`=1` wraps the implemented NVN functions in a timing wrap
 DM_NVN_PROGTRACE	diagnostic	`=<vertex keys,...>` logs matching ProgramSetShaders calls and their guest backtraces
 DM_NVN_REGLUM	diagnostic	`=x0,y0,x1,y1:<file>` (normalized coordinates): on every present records the present number, time, mean luminance and a grayscale thumbnail of that region, to check animation speed against frame rate
 DM_NVN_RP_AREA	switch	`0` makes passes on targets of 16 M pixels or more cover the whole target, as before; by default a draw pass that loads what it keeps stops at the far corner of its scissor when that is at most half the target
-DM_NVN_RT_RECYCLE	switch	`0` makes each render target in a GPU-only pool its own Metal allocation, as before; by default it is placed in a heap of its own, and a freed one's heap is reused by the next target it fits (`ab` alternates it with the `DM_AB` phases)
 DM_NVN_RT_CONTINUE	switch	`0` ends the pass whenever the game sets render targets, as before; by default SetRenderTargets naming the open pass's targets continues the pass
 DM_NVN_RT_RANGE	switch	`=1` (experimental, off by default; with `DM_NVN_TBDR=1`) keeps the pass open when the game sets the same colour and depth target again with a view that differs only in its level count
 DM_NVN_RT_RANGE_CHECK	diagnostic	With `DM_NVN_RT_RANGE=1` and `DM_NVN_PASSDUMP`, renders a candidate pass both ways in the same frame and logs and writes the comparison (`CHECK_RESULTS.tsv`, `[RED]` on a difference)
+DM_NVN_RT_RECYCLE	switch	`0` makes each render target in a GPU-only pool its own Metal allocation, as before; by default it is placed in a heap of its own, and a freed one's heap is reused by the next target it fits (`ab` alternates it with the `DM_AB` phases)
 DM_NVN_SHDUMP	diagnostic	`=<dir>` saves programs missing from the shader map as `<key>.ctl` (control section) and `<key>.code`, to find the files that hold them
 DM_NVN_SHMAP	path	The shader map (`shader_map.tsv`); `c1_full.tsv` and `pso_manifest.tsv` are taken from the same folder. Default: the game profile's folder on the Mac; the iOS app sets it
 DM_NVN_SHOT	diagnostic	`=<frame>[,<frame>…]:<path>` saves the swapchain texture as an image at those frames (`%d` in the path = frame number)
@@ -336,6 +338,13 @@ DM_SPIN	switch	`0` makes the rewriter's spin gate return at once, so guest poll 
 DM_SPIN_LIST	diagnostic	`=1` makes `patch_nso.py` print every guest poll loop it found and sends through a spin gate
 DM_SPIN_POLL	switch	`=<µs>`: how long a spin-gate wait polls before it sleeps with the yield back-off (default 2000; `0` yields on every pass)
 DM_SVC	diagnostic	`=1` logs memory SVCs (`SetHeapSize`, `MapMemory`, `Map`/`UnmapPhysicalMemory`) with their addresses and sizes
+DM_SW2	player	`=1` turns on Switch 2 controllers over Bluetooth LE (Joy-Con 2, Pro Controller 2): the settings window's Switch 2 controllers. Off, no Bluetooth client is created and macOS asks nothing. The host also stays off when the app's Info.plist has no NSBluetoothAlwaysUsageDescription, without which macOS ends the process at the first Bluetooth scan
+DM_SW2_GYRO_DPS	diagnostic	`=<degrees per second per count>` is the Switch 2 controllers' gyro scale (default 0.0607, measured on a left and a right Joy-Con 2; the Switch family's nominal 0.070 turned a 90 degree tilt into 104)
+DM_SW2_HOST	switch	`=aa:bb:cc:dd:ee:ff` names this Mac's Bluetooth address when the Mac's Bluetooth host controller does not give it (IOBluetooth): a paired Switch 2 controller wakes with an advertisement addressed to it, and pairing gives it this address
+DM_SW2_MAP	diagnostic	`=a,b,c,d,e,f` replaces the built-in map from a Switch 2 controller's raw sensor channels (1 to 6: accelerometer x y z, gyro x y z, a minus flips the sign) to the Switch frame's acceleration x y z and rotation x y z, e.g. `-1,-2,-3,4,5,6` for a Joy-Con 2 held upright
+DM_SW2_MOTION	switch	`=0` leaves out the motion of Switch 2 controllers (buttons, sticks and rumble stay)
+DM_SW2_MOTION_SIDE	switch	`=L` takes a Joy-Con 2 pair's motion from the left Joy-Con instead of the right one
+DM_SW2_VERBOSE	diagnostic	`=1` logs the first report of each second of every Switch 2 controller: buttons, sticks, raw sensors, battery
 DM_SYMCHECK	diagnostic	`=1` checks every hashed module symbol lookup against a linear search and logs a red line for each mismatch
 DM_TBUF_ALIGN	diagnostic	`=<bytes>` uses that value as the linear-texture alignment when it is larger than the device's `minimumLinearTextureAlignmentForPixelFormat`, for buffer textures and for linear textures on a pool's buffer: a Mac can then reproduce a phone's larger alignment (a 64-byte one fails the buffers and linear textures a device with 64 bytes cannot view), to check `tbuf_as_2d`'s aligned-row copy and the upload of unaligned linear textures (`linear_fit`)
 DM_TEAM_ID	switch	Apple team ID for the per-game Xcode project, used when `--team-id` / `TEAM_ID` is not given; `build_ipa.sh` uses the placeholder `0000000000` (unsigned) when unset
@@ -382,3 +391,4 @@ DM_XCODE_DERIVED_DATA	path	Xcode derived data folder for `build_ipa.sh` (default
 DM_XCODE_PROJECT_DIR	path	Folder of the per-game Xcode project that `build_ipa.sh --prepare-xcode` makes (default `$W/xcode`); the NSP script sets it
 DM_XV_FILE	path	File where the attachment validity ledger keeps the keys it disabled after a violation, read at the next launch
 DM_YIELD_BACKOFF	switch	`0` turns off the yield back-off; `=<cap µs>[:<start µs>]` sets its sleep cap and the run of yields after which it starts (default 250:2000)
+DM_YIELD_CLOCK	diagnostic	Clock-reading yield loops: 0 uses ordinary yield backoff, 1 backs off from the start, 2 also sleeps to the predicted end (default)

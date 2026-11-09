@@ -7,7 +7,7 @@
 # Usage: pack_ipa.py <out.ipa> [--store .a:.b] [--skip <archive path>]... <archive path>=<source file or folder>...
 #   Mappings are packed in command-line order; put the files that change least first, and the app last
 #   --skip: an archive path left out of the walk of the folder that holds it (folders a stale app build still has, the signature); a mapping of its own still adds it
-#   --skip-suffix: files whose names end so are left out of every walk (build_ipa.sh: the pulling vertex libraries _bp.metallib when the profile's pso_mtl4 is off, unless IOS_PULL overrides it)
+#   --skip-suffix: files whose names end so are left out of every walk (build_ipa.sh: the pulling vertex libraries _bp.metallib only with an explicit IOS_PULL=0 and no offline archive)
 #   --shader-files: an NVN game's shader library goes in as its separate files, msl/b-<chain>/, not as the one file b-<chain>.img, for install tools that cannot copy a large file (AltServer: 2 GiB,
 #     docs/reference/packing.md). Off by default: one file installs faster than tens of thousands, and other install tools take it whatever its size
 #   Writes <out.ipa>.partial and renames it at the end; prints "pack: N entries, X bytes" first (the NSP script's progress total, X = the files' bytes) and a summary line last

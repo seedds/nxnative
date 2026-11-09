@@ -5,7 +5,12 @@ shader with its SPH taken off and its stage memory in shared memory (job stage_m
 the wrapper fills the stage inputs, calls the kernel's body and hands the stage outputs to Metal.
 
 Stage memory, in shared memory (memory()), all of it zero when the body starts:
-  word 0        the workgroup's number (ISBERD mode 0x78): a task's is the draw's first task + its threadgroup, a mesh shader's with no task the draw's first + its threadgroup
+  word 0        the workgroup's number (ISBERD mode 0x78): a task's is the draw's first task + its threadgroup, a mesh shader's with no task its block's first + its threadgroup
+
+A mesh shader with no task also gets an object function, main0_o: Metal launches at most METAL_MAX_GRID threadgroups in a mesh grid, a limit the object grid does not have, and a draw's
+workgroups went past it (Ocarina of Time's foliage: up to 1,056 a draw, PRAGMATA's 6,623; past the limit the GPU read out of bounds). Each of its one-thread threadgroups launches a
+block of up to METAL_MAX_GRID mesh threadgroups and hands them the block's first workgroup in its payload, so a draw is one Metal draw of ceil(count / METAL_MAX_GRID) object
+threadgroups (nvn_geometry.inc mtk_encode). The task and object functions read the draw's {count, first} at buffer MESH_DRAW_SLOT, NVN's DrawMeshTasksIndirect record
   INPUT         the payload a mesh shader's task wrote (ISBERD mode 0x38). Its word 0 is the mesh workgroup's number among its task's launches, which the hardware puts there
   outputs       a task's payload (0xb8): its word 1 is the number of mesh workgroups to launch, its records start at +0x10
                 or a mesh shader's attributes (0xf8): all blocks of 32 vertices (the components the SPH's OMAP enables, 0x80 bytes each, a word per vertex), followed by all blocks of 32
@@ -20,7 +25,7 @@ WORKGROUP, INPUT = 0, 0x10
 BLOCK = 32   # vertices and primitives of an attribute block
 TOPOLOGY = {1: 'point', 2: 'line', 3: 'triangle'}
 METAL_MAX_VERTICES, METAL_MAX_PRIMITIVES = 256, 512   # a Metal mesh's limits
-METAL_MAX_GRID = 1024   # mesh threadgroups an object threadgroup may launch
+METAL_MAX_GRID = abi.MESH_GRID   # mesh threadgroups an object threadgroup may launch
 METAL_MAX_SHARED = 0x8000   # threadgroup memory of a Metal function
 
 
@@ -153,11 +158,11 @@ def to_stage(msl, i, reads=None):
              '    threadgroup_barrier(mem_flags::mem_threadgroup);\n')
     head = f'struct dm_payload_t {{ uint w[{max(pay, 1)}]; }};\n'
     sig = ', '.join(params + extra)
-    first = f'constant uint* dm_first [[buffer({abi.MESH_FIRST_SLOT})]]'   # the draw's first task or mesh workgroup, which the host binds (nvn_geometry.inc mtk_encode)
+    draw = f'constant uint* dm_draw [[buffer({abi.MESH_DRAW_SLOT})]]'   # the draw's {count, first}, which the host binds (nvn_geometry.inc mtk_encode)
     if kind == 'ts':
         return src + '\n' + head + (
-            f'[[object]] void main0({sig}, object_data dm_payload_t& dm_payload [[payload]], mesh_grid_properties dm_grid, {first})\n{{\n{start}'
-            f'    if ({lid} == 0u) {mem}[{wg}] = dm_first[0] + {tg};\n'
+            f'[[object]] void main0({sig}, object_data dm_payload_t& dm_payload [[payload]], mesh_grid_properties dm_grid, {draw})\n{{\n{start}'
+            f'    if ({lid} == 0u) {mem}[{wg}] = dm_draw[1] + {tg};\n'
             f'    threadgroup_barrier(mem_flags::mem_threadgroup);\n    {call}\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n'
             f'    for (uint i = {lid}; i < {pay}u; i += {thr}u) dm_payload.w[i] = {mem}[{out}u + i];\n'
             f'    if ({lid} == 0u) dm_grid.set_threadgroups_per_grid(uint3(min({mem}[{out + 1}], {METAL_MAX_GRID}u), 1u, 1u));\n}}\n')
@@ -199,8 +204,9 @@ def to_stage(msl, i, reads=None):
         # With a task the payload is the input, its word 0 the workgroup's number among the task's launches, as the hardware leaves it (+0 is not a word the task writes: it starts at +4)
         fill = (f'    for (uint i = {lid}; i < {pay}u; i += {thr}u) {mem}[{inp}u + i] = dm_payload.w[i];\n'
                 '    threadgroup_barrier(mem_flags::mem_threadgroup);\n'
-                f'    if ({lid} == 0u) {{ {mem}[{wg}] = {tg}; {mem}[{inp}] = {tg}; }}\n') if i['task'] else f'    if ({lid} == 0u) {mem}[{wg}] = dm_first[0] + {tg};\n'
-        return (f'[[mesh]] void {name}({sig}, dm_mesh_t dm_out' + (', const object_data dm_payload_t& dm_payload [[payload]]' if i['task'] else f', {first}') + f')\n{{\n{start}{fill}'
+                f'    if ({lid} == 0u) {{ {mem}[{wg}] = {tg}; {mem}[{inp}] = {tg}; }}\n') if i['task'] else f'    if ({lid} == 0u) {mem}[{wg}] = dm_block.first + {tg};\n'
+        return (f'[[mesh]] void {name}({sig}, dm_mesh_t dm_out' + (', const object_data dm_payload_t& dm_payload [[payload]]' if i['task'] else ', const object_data dm_block_t& dm_block [[payload]]') +
+                f')\n{{\n{start}{fill}'
                 f'    threadgroup_barrier(mem_flags::mem_threadgroup);\n    {call}\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n'
                 f'    uint np = min({mem}[{prim >> 2}] >> 24, {max_p}u);\n'
                 f'    if ({lid} == 0u) dm_out.set_primitive_count(np);\n'
@@ -209,4 +215,10 @@ def to_stage(msl, i, reads=None):
                 '        dm_out.set_vertex(n, v);\n    }\n' +
                 (f'    for (uint n = {lid}; n < np; n += {thr}u)\n    {{\n        uint b = {p_block("n")};\n        dm_prim_t p;\n{psets}        dm_out.set_primitive(n, p);\n    }}\n' if pm else '') +
                 f'    for (uint n = {lid}; n < np * {verts}u; n += {thr}u)\n    {{\n        uint at = {prim + 4}u + n;\n        dm_out.set_index(n, ({mem}[at >> 2] >> ((at & 3u) * 8u)) & 0xffu);\n    }}\n}}\n')
-    return src + '\n' + head + entry('main0', True) + '\n' + entry('main0_z', False)
+    if i['task']: return src + '\n' + head + entry('main0', True) + '\n' + entry('main0_z', False)
+    # The object function of a mesh shader with no task: one thread a block of METAL_MAX_GRID workgroups
+    head += 'struct dm_block_t { uint first; };\n'
+    obj = (f'[[object]] void main0_o(object_data dm_block_t& dm_block [[payload]], mesh_grid_properties dm_grid, uint dm_otg [[threadgroup_position_in_grid]], {draw})\n{{\n'
+           f'    uint b = dm_otg * {METAL_MAX_GRID}u;\n    dm_block.first = dm_draw[1] + b;\n'
+           f'    dm_grid.set_threadgroups_per_grid(uint3(min(dm_draw[0] - b, {METAL_MAX_GRID}u), 1u, 1u));\n}}\n')
+    return src + '\n' + head + entry('main0', True) + '\n' + entry('main0_z', False) + '\n' + obj

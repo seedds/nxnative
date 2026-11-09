@@ -437,7 +437,11 @@ PRE_STATS = collections.Counter()
 # -O1: the front end's -O2 (CorrelatedValuePropagation, then SimplifyCFG) folds the translated shaders' repeated tests of one value into switches whose cases jump past their own join.
 # Apple's GPU backend then exceeds its control-flow ID budget ("Max Unstruct ID 758 ... exceeds supported limit", a note, not an error) and falls back to a slower lowering:
 # Odyssey's alRenderMaterialUber took 25 minutes and 17.3 MB of GPU code, 31 s and 1.3 MB at -O1. Ordinary shaders come out within a few percent either way (the backend optimizes again)
-MAC_METAL = ['xcrun', '-sdk', 'macosx', 'metal', '-c', '-O1', '-fpreserve-invariance']
+# -fwrapv: signed integer overflow wraps, as SPIR-V's integer arithmetic and the Switch's GPUs do; in MSL it is undefined, and the front end folds around it. Ocarina of Time's mesh shader
+# 35785cddc971290c sign-extends a packed 16-bit vertex field as a = w * 65536, then (a >> 31) << 16 | uint(a) >> 16; without the flag the compiler took the sign bits from bits 15-30 of w,
+# so the lightmap / probe UV's x came out far too large and models drawn with mesh shaders took their ambient light from the wrong texels (the bright band on the Deku Tree's walls).
+# The flag also drops inbounds from pointer arithmetic (Metal's clang has no -fwrapv-pointer) and keeps loop bounds that may wrap (test_dmsh_wrapv.py)
+MAC_METAL = ['xcrun', '-sdk', 'macosx', 'metal', '-c', '-O1', '-fpreserve-invariance', '-fwrapv']
 MAC_RECORD = ' '.join(MAC_METAL) + '; xcrun -sdk macosx metallib'
 # The compiles run the tools xcrun names, found once: each xcrun launch looks them up again, about 4 ms of a compile's two launches (8 ms a shader). -isysroot is what xcrun -sdk passes
 # (as SDKROOT), and the outputs are the same bytes (.air and .metallib, checked on Odyssey's shaders); without it the driver targets the running macOS, not the SDK, and they differ.
@@ -466,12 +470,14 @@ def mac_compile(msl, air, lib):   # same interface as ios_metal.compile; the pre
 TEX_BASE, IMG_BASE, IMG_SLOTS, SEPTEX_BASE, SEPTEX_SLOT0, SAMP_BASE = abi.C2_TEX, abi.C2_IMG, abi.C2_IMG_SLOTS, abi.C2_SEPTEX, abi.SEPTEX_SLOT0, abi.C2_SAMP
 SSBO = {'vs': abi.C0_SSBO_VS, 'cs': abi.C0_SSBO_CS, 'gs': abi.C0_SSBO_GS, 'ps': abi.C0_SSBO_PS, 'ts': abi.C0_SSBO_TS, 'ms': abi.C0_SSBO_MS}
 
-def record_index(path):   # → (an open descriptor, the offsets of the package's records and its end): record k is bytes offsets[k]..offsets[k + 1]
+def record_index(path):   # → (an open descriptor, {a record's key: its bytes' (start, end)}): shader_split.py writes each record's key at +0x08, its bytes from its marker to the next one
     # Scanned through a read-only mapping that is closed again, so no package stays in this process. Pokopia's ps_rdb.bin (4.25 GB) read and cut into its 105,118
     # records left the process at 8.7 GB, and each fork (every spirv-cross and Metal compile) then took 75 ms instead of 3 with the GIL held: one shader worker at a time (GitHub issue #1036)
     fd = os.open(path, os.O_RDONLY); n = os.fstat(fd).st_size
-    if not n: return fd, [0]
-    with mmap.mmap(fd, n, access=mmap.ACCESS_READ) as m: return fd, [x.start() for x in re.finditer(b'BTCDBTCD', m)] + [n]
+    if not n: return fd, {}
+    with mmap.mmap(fd, n, access=mmap.ACCESS_READ) as m:
+        offs = [x.start() for x in re.finditer(b'BTCDBTCD', m)] + [n]
+        return fd, {m[o + 8:o + 16].hex(): (o, e) for o, e in zip(offs, offs[1:])}
 
 def clone(src, dst):   # APFS copy-on-write, else a plain copy; the clonefile call, not a cp: a fork of this large process costs about 6 ms
     os.makedirs(os.path.dirname(dst), exist_ok=True)
@@ -792,7 +798,7 @@ def ps_omap(code):
     return struct.unpack_from('<I', code, 18 * 4)[0] if len(code) >= 0x50 else None
 
 def job_for(key, name, rec, w):
-    ci = rec.find(bytes.fromhex('34127698')); code = rec[0x38:ci]; stage = name[:2]
+    ci = rec.find(bytes.fromhex('34127698'), 0x38); code = rec[0x38:ci]; stage = name[:2]
     extra = {}
     if dmsh_ampere.is_nvn2(rec[ci:]):
         # NVN2 (Switch 2): Ampere code (a 0x80-byte SPH for the graphics stages, then the instructions, control +0x38 long), which the translator's Ampere
@@ -1266,7 +1272,7 @@ def partner_reads(key):
     for ps in PAIRS[key]:
         got = {}
         if ps in loc:
-            rec = rec_of(ps)[1]; ci = rec.find(bytes.fromhex('34127698')); code = rec[0x38:ci]
+            rec = rec_of(ps)[1]; ci = rec.find(bytes.fromhex('34127698'), 0x38); code = rec[0x38:ci]
             got = dmsh_meshstage.pixel_reads(code[:0x80] if dmsh_ampere.is_nvn2(rec[ci:]) else code[0x30:0x80])   # an Ampere SPH leads the code, a Maxwell one follows its 0x30 header
         data = output('mac', ps + '_b.metal')
         for n in ({int(x) for x in re.findall(r'\[\[user\(locn(\d+)\)', data.decode())} if data is not None else set()) - got.keys(): got[n] = 0xf
@@ -1712,7 +1718,8 @@ def finish(key, w, j, c1):
     entry = re.search(r'(vertex|fragment|kernel)\s+\S+\s+(\w+)\s*\(', src)
     dr = drv_reads(src)
     refl = {'key': key + '_b', 'route': 'B', 'chain': CHAIN, 'dm_ctl': key, 'source': f'{name}#{k}', 'pc_paired': pc_of[key], 'stage': mesh['kind'] if mesh else j['stage'],
-            **({'mesh_stage': {'kind': mesh['kind'], 'threads': mesh['threads'], 'payload': mesh['payload'], 'task': mesh.get('task', True)}, **({'entry_z': 'main0_z'} if mesh['kind'] == 'ms' else {})} if mesh else {}),
+            **({'mesh_stage': {'kind': mesh['kind'], 'threads': mesh['threads'], 'payload': mesh['payload'], 'task': mesh.get('task', True)}, **({'entry_z': 'main0_z'} if mesh['kind'] == 'ms' else {}),
+               **({'entry_object': 'main0_o'} if mesh['kind'] == 'ms' and not mesh.get('task', True) else {})} if mesh else {}),
             'entry': entry.group(2) if entry else 'main0', 'msl_entry_kind': entry.group(1) if entry else None, **({'entry_z': 'main0_z', 'entry_geometry_capture': 'main0_gs'} if j['stage'] == 'vs' else {}),
             **({'entry_discard': 'main0_discard'} if discard else {}),
             **({'entry_tf': 'main0_tf', 'tf_strides': [e['stride'] if e else 0 for e in j['tf']]} if j.get('tf') else {}),
@@ -1796,12 +1803,20 @@ def progress(step, done, total, force=False, **extra):
 packs, jobs, c1s = {}, {}, {}
 packs_lock = threading.Lock()
 digests, rule_fps, cache_reasons, cache_hits = {}, {}, {}, set()
-def rec_of(key):   # → (package name, the shader's record), read from the package each time and not kept (see record_index)
-    name, k = loc[key]
+def rec_of(key):
+    """→ (package name, the shader's record), found by its key and read from the package each time, not kept (see record_index). Not by the map row's index: a package from another
+    shader_split.py run than the map translated every row after a dropped or added one from its neighbour's bytes (issue #1841: Ocarina of Time's present pass ran a terrain pixel
+    shader and showed black). Every key is looked up before the first job starts, so a package that does not hold one stops the build here"""
+    name = loc[key][0]
     with packs_lock:
         if name not in packs: packs[name] = record_index(os.path.join(dm_dir, name))
-    fd, offs = packs[name]
-    return name, os.pread(fd, offs[k + 1] - offs[k], offs[k])
+    fd, recs = packs[name]
+    if key not in recs:
+        old = ' (its records carry no keys: it was split before they did)' if recs and set(recs) == {'0' * 16} else ''
+        sys.exit(f'[RED] {name} holds no record of shader {key}, which the shader map names: the package and the map come from different shader_split.py runs{old}; '
+                 f'split the shaders again (the NSP script does when {dm_dir} is removed)')
+    o, e = recs[key]
+    return name, os.pread(fd, e - o, o)
 for key in keys: digests[key] = shader_key(key, *rec_of(key))
 def plain_digest(k):   # a paired pixel shader's key, also when it is not built this time
     if k in digests: return digests[k]

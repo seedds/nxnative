@@ -216,11 +216,11 @@ class Matching(unittest.TestCase):
 
     def test_registry_scopes_rules_and_preserves_known_builds(self):
         source = TOOLS / 'patch_nso.py'; tree = ast.parse(source.read_text())
-        start = next(i for i, n in enumerate(tree.body) if isinstance(n, ast.Assign) and ast.unparse(n.targets[0]) == 'PATCH_FILES')
+        start = next(i for i, n in enumerate(tree.body) if isinstance(n, ast.Assign) and ast.unparse(n.targets[0]) == 'SHARED')   # the shared files, then PATCH_FILES
         end = next(i for i, n in enumerate(tree.body[start:], start) if isinstance(n, ast.Assign) and ast.unparse(n.targets[0]) == 'KEYS')
         code = compile(ast.Module(body=tree.body[start:end], type_ignores=[]), str(source), 'exec')
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp); (root / 'tools').mkdir(); (root / 'tools/sdk_patches.py').write_text('')
+            root = Path(tmp); (root / 'tools').mkdir(); (root / 'tools/sdk_patches.py').write_text(''); (root / 'tools/engine_patches.py').write_text('')
             for gid in ('0100000000000001', '0100000000000002'):
                 p = root / 'games' / gid / 'patches.py'; p.parent.mkdir(parents=True)
                 rule = copy.deepcopy(self.rule)
@@ -250,12 +250,12 @@ class Matching(unittest.TestCase):
     def test_registry_reports_what_an_unregistered_build_lost(self):
         # the repository profile's build rows name the registered builds of the module, whose CUTS the unregistered build did not get
         source = TOOLS / 'patch_nso.py'; tree = ast.parse(source.read_text())
-        start = next(i for i, n in enumerate(tree.body) if isinstance(n, ast.Assign) and ast.unparse(n.targets[0]) == 'PATCH_FILES')
+        start = next(i for i, n in enumerate(tree.body) if isinstance(n, ast.Assign) and ast.unparse(n.targets[0]) == 'SHARED')   # the shared files, then PATCH_FILES
         end = next(i for i, n in enumerate(tree.body[start:], start) if isinstance(n, ast.Assign) and ast.unparse(n.targets[0]) == 'KEYS')
         code = compile(ast.Module(body=tree.body[start:end], type_ignores=[]), str(source), 'exec')
         gid, known = '0100000000000001', 'ab' * 16
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp); (root / 'tools').mkdir(); (root / 'tools/sdk_patches.py').write_text('')
+            root = Path(tmp); (root / 'tools').mkdir(); (root / 'tools/sdk_patches.py').write_text(''); (root / 'tools/engine_patches.py').write_text('')
             g = root / 'games' / gid; g.mkdir(parents=True)
             (g / 'patches.py').write_text("CUTS = {'" + known + "': [(0x108, 'e00317aa', '1f2003d5', 'a'), (0x10c, '1f2003d5', '1f2003d5', 'b')]}\n")
             (g / 'game.tsv').write_text(f'build\tv65536\t1.0.1\tmain={known}\tsdk={"cd" * 16}\n')
@@ -275,13 +275,14 @@ class Matching(unittest.TestCase):
         # sdk_patches.py's MATCH_CUTS apply to every game's sdk of a build with no CUTS, the selected profile's own builds too (without a match.tsv: they lost nothing); an empty
         # CUTS list keeps Nintendo's code; a miss is not red
         source = TOOLS / 'patch_nso.py'; tree = ast.parse(source.read_text())
-        start = next(i for i, n in enumerate(tree.body) if isinstance(n, ast.Assign) and ast.unparse(n.targets[0]) == 'PATCH_FILES')
+        start = next(i for i, n in enumerate(tree.body) if isinstance(n, ast.Assign) and ast.unparse(n.targets[0]) == 'SHARED')   # the shared files, then PATCH_FILES
         end = next(i for i, n in enumerate(tree.body[start:], start) if isinstance(n, ast.Assign) and ast.unparse(n.targets[0]) == 'KEYS')
         code = compile(ast.Module(body=tree.body[start:end], type_ignores=[]), str(source), 'exec')
         gid, own, kept = '0100000000000001', 'cd' * 16, 'ef' * 16
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); (root / 'tools').mkdir()
             (root / 'tools/sdk_patches.py').write_text(f'CUTS = {{{kept!r}: []}}\nMATCH_CUTS = {{"sdk": [{self.rule!r}]}}\n')
+            (root / 'tools/engine_patches.py').write_text('')
             g = root / 'games' / gid; g.mkdir(parents=True)
             (g / 'game.tsv').write_text(f'build\tv0\t1.0.0\tmain={"ab" * 16}\tsdk={own}\n')
             for name, bid, gamed, expected in (('sdk', '00' * 16, gid, ADD), ('sdk', own, gid, ADD), ('sdk', own, '0100000000000002', ADD), ('sdk', kept, gid, MOV),

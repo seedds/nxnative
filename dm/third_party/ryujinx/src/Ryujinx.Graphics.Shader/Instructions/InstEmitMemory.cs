@@ -395,6 +395,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             // nxnative: the words of one LDG.64 / LDG.128 are marked as one access (Operation.GlobalVectorCount, as in InstEmitAmpereMem.ALdg)
             bool vector = count > 1 && storageKind == StorageKind.GlobalMemory && rd + count <= RegisterConsts.RegisterZeroIndex;
+            int group = vector ? ++context.GlobalVectorGroups : 0;
 
             for (int index = 0; index < count; index++)
             {
@@ -411,6 +412,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 {
                     load.GlobalVectorCount = count;
                     load.GlobalVectorWord = index;
+                    load.GlobalVectorGroup = group;
                 }
 
                 context.Copy(Register(dest), value);

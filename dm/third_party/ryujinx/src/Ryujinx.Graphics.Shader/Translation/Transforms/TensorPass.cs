@@ -647,6 +647,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Transforms
                     case Instruction.ExponentB2:
                     case Instruction.LogarithmB2:
                     case Instruction.Sine:
+                    case Instruction.HyperbolicTangent:
                     case Instruction.Cosine:
                     case Instruction.IsNan:
                     case Instruction.PackHalf2x16:

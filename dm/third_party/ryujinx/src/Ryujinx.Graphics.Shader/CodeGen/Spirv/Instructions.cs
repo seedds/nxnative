@@ -130,6 +130,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
             Add(Instruction.ShuffleUp,                GenerateShuffleUp);
             Add(Instruction.ShuffleXor,               GenerateShuffleXor);
             Add(Instruction.Sine,                     GenerateSine);
+            Add(Instruction.HyperbolicTangent,        GenerateHyperbolicTangent);
             Add(Instruction.SquareRoot,               GenerateSquareRoot);
             Add(Instruction.Store,                    GenerateStore);
             Add(Instruction.Subtract,                 GenerateSubtract);
@@ -1200,6 +1201,12 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
         private static OperationResult GenerateSine(CodeGenContext context, AstOperation operation)
         {
             return GenerateUnary(context, operation, context.Delegates.GlslSin, null);
+        }
+
+        // nxnative: Ampere MUFU.TANH
+        private static OperationResult GenerateHyperbolicTangent(CodeGenContext context, AstOperation operation)
+        {
+            return GenerateUnary(context, operation, context.Delegates.GlslTanh, null);
         }
 
         private static OperationResult GenerateSquareRoot(CodeGenContext context, AstOperation operation)

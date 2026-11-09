@@ -23,6 +23,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
         public readonly FuncUnaryInstruction GlslInverseSqrt;
         public readonly FuncUnaryInstruction GlslRoundEven;
         public readonly FuncUnaryInstruction GlslSin;
+        public readonly FuncUnaryInstruction GlslTanh;
         public readonly FuncUnaryInstruction GlslSqrt;
         public readonly FuncUnaryInstruction GlslTrunc;
 
@@ -131,6 +132,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
             GlslInverseSqrt = context.GlslInverseSqrt;
             GlslRoundEven = context.GlslRoundEven;
             GlslSin = context.GlslSin;
+            GlslTanh = context.GlslTanh;
             GlslSqrt = context.GlslSqrt;
             GlslTrunc = context.GlslTrunc;
 

@@ -119,6 +119,7 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
             Add(Instruction.ShuffleUp,                AggregateType.FP32,   AggregateType.FP32,    AggregateType.U32);
             Add(Instruction.ShuffleXor,               AggregateType.FP32,   AggregateType.FP32,    AggregateType.U32);
             Add(Instruction.Sine,                     AggregateType.Scalar, AggregateType.Scalar);
+            Add(Instruction.HyperbolicTangent,        AggregateType.Scalar, AggregateType.Scalar);
             Add(Instruction.SquareRoot,               AggregateType.Scalar, AggregateType.Scalar);
             Add(Instruction.Store,                    AggregateType.Void);
             Add(Instruction.Subtract,                 AggregateType.Scalar, AggregateType.Scalar,  AggregateType.Scalar);

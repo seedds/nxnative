@@ -454,6 +454,12 @@ namespace Ryujinx.Graphics.Shader.Translation
             return context.Add(Instruction.FP32 | Instruction.Sine, Local(), a);
         }
 
+        // nxnative: Ampere MUFU.TANH
+        public static Operand FPHyperbolicTangent(this EmitterContext context, Operand a)
+        {
+            return context.Add(Instruction.FP32 | Instruction.HyperbolicTangent, Local(), a);
+        }
+
         public static Operand FPSquareRoot(this EmitterContext context, Operand a)
         {
             return context.Add(Instruction.FP32 | Instruction.SquareRoot, Local(), a);

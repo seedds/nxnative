@@ -1484,6 +1484,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Check:** `DMSH_TEST_XLATE=dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate python3 dm/gfx/tests/test_dmsh_ampere_orin.py` (about 5 s on an M5 Max); it prints every op's differing lanes by cause. `AMPERE_ORIN_ONLY=<ops or families>` runs some, `AMPERE_ORIN_REPORT=<file>` writes the results as JSON. To record again: `python3 dm/gfx/tools/ampere_orin/capture.py --host <user@machine> [--arch sm_86]`, with NVIDIA's `nvdisasm` (the `cuda_nvdisasm` redistributable) in `~/ampere_orin` on that machine.
 - **Found on:** no game; a Jetson Orin's results. The HMMA comparison it extends is PR #1897's.
 
+### IMMA, the 8-bit integer matrix multiply
+
+- **Symptom:** a Switch 2 shader with an IMMA (PTX `mma.sync` with 8-bit integer sources and a 32-bit accumulator, such as `IMMA.16832.S8.S8`) didn't build: the translator stopped with "Ampere instruction 237".
+- **Cause:** the translator had HMMA, the half-precision matrix multiply, but not its integer twin, opcode 0x237.
+- **Fix:** `InstEmitAmpereTensor.cs` translates IMMA per thread the way it does HMMA: each lane fetches the bytes of A and B it needs from the lanes that hold them with subgroup shuffles, in the layouts PTX documents for m16n8k32, m16n8k16 and m8n8k16, and sums the products onto C in 32-bit integers that wrap, or clamp with `.SAT`. Signed or unsigned bytes come from bits 76 (A) and 78 (B), the shape from bits 75 and 85..86 (Mesa NAK's `OpImma`). The 4-bit shapes still stop the translator. It's exact integer arithmetic, so the result matches the GPU's bit for bit. For m16n8k32 it costs each lane 32 shuffles, 128 byte extracts, 128 multiplies and 128 adds.
+- **Check:** `test_dmsh_ampere_orin.py`'s `imma_16832_s8` went from not translating (all 4,096 output words of 1,024 rows) to 0 differing words. Only m16n8k32 with signed bytes is in the fixture; m16n8k16, m8n8k16, unsigned bytes and `.SAT` share the code but aren't checked against a GPU.
+- **Found on:** no game; a Jetson Orin's results ([Ampere instructions checked against an Ampere GPU](#ampere-instructions-checked-against-an-ampere-gpu)).
+
 ### The NDVE movie network by the host
 
 - **Symptom:** a Switch 2 game's movies and the title behind them run below 60 fps on a Mac with a smaller GPU, and the GPU profile (`DM_NVN_GPUPROF`) shows almost all of the frame in a dozen compute dispatches of `nn::ndve`'s movie network: Ocarina of Time's title at about 24 fps and 38 ms of GPU a frame on an M1 Pro with 16 GPU cores, 24.8 ms on an M1 Max ([issue 1375](https://github.com/seedds/nxnative/issues/1375)), 18.9 ms of compute on an M4 with 8 ([HMMA chains keep their matrices in the SIMD-group](#hmma-chains-keep-their-matrices-in-the-simd-group)); 11-14 ms of the 16.7 on an M6, an M4 Pro or an M5 Max.

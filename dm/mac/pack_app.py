@@ -260,7 +260,35 @@ def swap_by_moves(tmp, out):
         raise
 
 
+def deploy_host(a):
+    out = Path(a.out).resolve()
+    if not out.is_dir() or not (out / 'Contents/MacOS/dmhost').is_file():
+        raise SystemExit(f'{out} is not a valid Mac app bundle (missing Contents/MacOS/dmhost)')
+    host_src = Path(a.host).resolve()
+    if not host_src.is_file():
+        raise SystemExit(f'no host binary at {host_src}')
+    codesign = shutil.which('codesign')
+    if not codesign: raise SystemExit('codesign is not available')
+    codesign = Path(codesign).resolve()
+    host_dst = out / 'Contents/MacOS/dmhost'
+    shutil.copy2(host_src, host_dst)
+    host_dst.chmod(0o755)
+    commit = source_commit()
+    plist_path = out / 'Contents/Info.plist'
+    if commit and plist_path.is_file():
+        try:
+            info = plistlib.loads(plist_path.read_bytes())
+            info['DMCommit'] = commit
+            plist_path.write_bytes(plistlib.dumps(info))
+        except Exception: pass
+    sign(out, a.sign, codesign)
+    print(f'app: {out} (dmhost deployed and signed)', flush=True)
+
+
 def pack(a):
+    if getattr(a, 'host_only', False):
+        deploy_host(a)
+        return
     out = Path(a.out).resolve()
     if out.suffix != '.app': raise SystemExit(f'the output must end in .app: {out}')
     key_file = out.with_name(out.name + '.key')
@@ -368,14 +396,16 @@ def pack(a):
 
 def parse(argv):
     ap = argparse.ArgumentParser(prog='pack_app.py', description='Pack a self-contained Mac app of a game')
+    host_only = '--host-only' in argv
     ap.add_argument('out', help='the app (<name>.app)')
     ap.add_argument('--host', required=True, help='the Mac host built for the profile')
-    ap.add_argument('--patched', required=True, help='the rewritten modules (patch_nso.py output)')
-    ap.add_argument('--romfs', required=True, help='the RomFS of the packed version')
-    ap.add_argument('--msl', required=True, help='the Mac shader libraries: <shader>/cache/b-<chain>, or a Vulkan or GL game\'s <shader>/vk or gl')
+    ap.add_argument('--host-only', action='store_true', help='update and sign dmhost in an existing .app bundle')
+    ap.add_argument('--patched', required=not host_only, help='the rewritten modules (patch_nso.py output)')
+    ap.add_argument('--romfs', required=not host_only, help='the RomFS of the packed version')
+    ap.add_argument('--msl', required=not host_only, help='the Mac shader libraries: <shader>/cache/b-<chain>, or a Vulkan or GL game\'s <shader>/vk or gl')
     ap.add_argument('--msl-name', help='its folder name in the app (default: its own)')
-    ap.add_argument('--tables', required=True, help='the game profile folder (shader_map.tsv and the tables beside it)')
-    ap.add_argument('--font', required=True, help='the folder of the shared-font stand-ins (nintendo_ext.ttf)')
+    ap.add_argument('--tables', required=not host_only, help='the game profile folder (shader_map.tsv and the tables beside it)')
+    ap.add_argument('--font', required=not host_only, help='the folder of the shared-font stand-ins (nintendo_ext.ttf)')
     ap.add_argument('--aoc', help='the DLC RomFS images or folders by index')
     ap.add_argument('--pso', help='the pipeline archive made offline for this Mac (pso_offline.py --platform macos output: <arch>.mtl4a, prebuilt.tsv)')
     ap.add_argument('--pso-pairs', help='pso_pairs.tsv for a profile that has none (the shader split\'s copy)')
@@ -383,7 +413,7 @@ def parse(argv):
     ap.add_argument('--program', action='append', help='another program of a game of several programs: index, rewritten modules, RomFS, Mac shader libraries, tables, offline pages (tab-separated)')
     ap.add_argument('--env-file', help='environment switches baked in (Resources/dm/env.txt)')
     ap.add_argument('--settings', help='the game\'s launcher settings (dm/games/settings.py output; Resources/dm/launcher.json, which the Mac front end reads)')
-    ap.add_argument('--title-id', required=True); ap.add_argument('--name', required=True)
+    ap.add_argument('--title-id', required=not host_only); ap.add_argument('--name', required=not host_only)
     ap.add_argument('--version'); ap.add_argument('--bundle-id'); ap.add_argument('--category'); ap.add_argument('--lang'); ap.add_argument('--marker', help='the profile\'s romfs_marker')
     ap.add_argument('--icon', help='the game icon (icon.jpg from the control data)')
     ap.add_argument('--sign', default='-', help='codesign identity (default: - = ad-hoc)')

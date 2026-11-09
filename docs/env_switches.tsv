@@ -288,6 +288,7 @@ DM_PSO_PREPARE_THREADS	switch	`=<n>`: the workers of the prepare step that build
 DM_PSO_PULL_ALL	diagnostic	`=1`: every draw that has a pulling pipeline draws with it, never with the pipeline for its vertex layout
 DM_PSO_RECORD	path	`=<file>`: appends the shaders and pipelines used in the run to that file, for re-recording the prewarm manifest
 DM_PSO_USER	path	The per-device list of shaders and pipelines built on the spot (default: `pso_user.tsv` in the parent of `DM_SAVE`)
+DM_PSO_VS_SERIAL	switch	`0` lets render pipelines that share a vertex function be taken from the archive or compiled in parallel; by default they go one at a time (a game thread waits 50 ms at most, a build stuck 20 s releases the others), the work-around for an AGX driver crash in `createVertexProgramVariant` (`dispatch_group_leave`)
 DM_PSO_WAITLOG	diagnostic	`=1` logs each draw that waited more than 20 ms for its pipeline, with its shader pair and why no stand-in served it
 DM_QOS_EDGES	switch	`=e1,e2`: the Switch priority edges of `DM_QOS_MAP` (default `44,59`)
 DM_QOS_MAP	switch	`=1` maps guest thread priority to QoS class: ≤ 44 user-interactive, 45–59 user-initiated, the rest utility (off by default: every guest thread runs user-interactive)

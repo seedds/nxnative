@@ -81,9 +81,18 @@ int main(void) { @autoreleasepool {
     hold->entered = dispatch_semaphore_create(0); hold->release = dispatch_semaphore_create(0); ep1->comp = (id<MTL4Compiler>)hold;
     EXPECT("three pairs", 3, pso_prebuild(2, 0, QOS_CLASS_USER_INITIATED));
     EXPECT("held: the compile of f1 entered", 0, dispatch_semaphore_wait(hold->entered, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC)));
+    // The AGX vertex-variant guard (vs_stripe_of): f2 and f3 share v1 with the held f1, so they wait for its stripe until the holder has held it g_vs_wait_max_ms (20 s by
+    // default: a compaction recapture under load took over 5 s), not for ever (#294). Here the limit is lowered after 3 s instead of waiting it out
+    EXPECT("held: the holder cap is 20 s", 20000, g_vs_wait_max_ms);
+    uint64_t stalls0 = g_vs_stall_n;
+    usleep(3000000);
+    EXPECT("held: under the cap a pair of the held vertex function still waits (one may have built before f1 took the stripe)", 1, g_pre_done < 2);
+    EXPECT("held: under the cap no stall", 0, g_vs_stall_n - stalls0);
+    g_vs_wait_max_ms = 1000;   // past the cap
     EXPECT("held: every pair handed out (the prepare step stops waiting)", 1, until(^{ return (int)(atomic_load(&g_pre_next) >= 3); }, 10));
     EXPECT("held: the other pairs built", 1, until(^{ return (int)(g_pre_done == 2); }, 10));
     EXPECT("held: the prebuild not done", 1, g_pre_running);
+    EXPECT("held: past the cap the stripe stalled once", 1, g_vs_stall_n - stalls0);
 
     // a flush hands the held period over and returns; a draw's compile in the next period goes through, and that period's flush writes its file
     arch_flush();

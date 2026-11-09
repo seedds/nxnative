@@ -77,6 +77,25 @@ Measured on an M6 Mac with 16 GB, headless, on one walk with camera turns (`walk
 
 The game autosaves into `slot_00` and `slot_01`, with `option.sav` and `account.sav`. The Load screen lists them and reloading works. A save's thumbnail is a 543x306 JPEG in `caption.sav`, made from a copy of a texture to a buffer. A manual save (Menu, System, Save) on the current build has the picture (slot 02, mean colour 138 / 123 / 86). The autosaves in the work folder's saves, made on older chains, hold a black one. Open: an autosave made on the current build has not been looked at.
 
+## Cheats
+
+[`OcarinaOfTime.cheats.toml`](OcarinaOfTime.cheats.toml) holds a free camera. It detaches the camera from Link and flies it with the controller. It patches code at fixed addresses, so it compiles only for build `E0F3CCFAF50065AE`, update v131072 ([Cheats that survive game updates](../../../docs/development.md#cheats-that-survive-game-updates)), and runs on the Mac only. Turn it on in play, not at the title: it takes the camera's pose at that moment, and while it is on, the game reads an idle controller.
+
+| Input | Effect |
+|---|---|
+| Left stick up / down | Fly forward / back along the view, up and down included |
+| Left stick left / right | Strafe |
+| Right stick left / right | Turn |
+| Right stick up / down | Tilt up / down |
+| ZR / ZL | Rise / sink |
+
+Speeds are fixed: the cheat VM sees stick directions as buttons (`dm_cheats_keys`), not as amounts. Turning it off puts every patched word back, and the game's camera takes over again where it left off.
+
+- **The camera.** The gameplay camera is a `sead::LookAtCamera` (position `+0x38`, target `+0x44`, up `+0x50` as floats, position and target again as doubles at `+0x60` / `+0x78`). The camera component's apply, `main+0x4C48C0`, builds its view from those values and stores them at `main+0x4C4E50` (`fcvt s17, d0`, after position and target are in d0–d5 and the up vector in s7 / s16 / s6). The cheat branches that word to a cave at `main+0x3C46C00`, in the zero padding between the end of the text and the read-only data. While the cave's enable word is set, the cave replaces d0–d5 with its own position and target, and the up vector with (0, 1, 0). Without that up vector, the game's camera kept orbiting Link on the right stick, and its up, tilted for its own view, rolled the free view. The cheat program keeps position and target at `main+0x3C46C88` / `+0x3C46C94`. It moves them by a fixed fraction of target − position, so movement follows the view. It turns them about the vertical axis by 0.03 rad per pass. It takes them once from the per-frame camera snapshot (`[main+0x4E371E8]`, position `+0x3AEC` / `+0x3AFC` / `+0x3B0C`, target `+0x3C78`), only when that position is not zero.
+- **The controller.** The game's controller reader, `main+0x34693D0`, reads each controller type with its own `nn::hid::GetNpadStates` call (`main+0x34694F8`, `+0x3469524`, `+0x3469550`, `+0x346966C`, `+0x3469698`). Each call goes through a wrapper at `main+0x3C46D00` + 0x20 per call. The wrapper calls the import, then, while the free camera's enable word is set, clears the buttons and both sticks (bytes 8 to 0x1F) of every state the call returned. The game sees a connected controller with nothing pressed, so it shows no controller prompt. The cheat engine still reads the host's own input.
+- **Size.** The on entry is 308 words, past the 256 a Switch accepts in one cheat. This host runs it, and `cheat_anchor.py compile` warns.
+- **Tested** on an M3 Max in the Mac app: flying through the Deku Tree, the camera followed the sticks, and with the controller wrappers both sticks flew the camera while Link stood still. Headless, in Kokiri Forest: capture, flight, turning, and the word at `main+0x4C4E50` back to its original after turning it off.
+
 ## Driving it on the Mac
 
 Run headless, `DM_CTL` at a control file. The work folder has `boot.sh <secs> <log>` (with a guard that kills the host past 12.5 GB wired or 16 GB of swap; do not run without it), `ctl.sh`, `seq.sh`, `snap.sh`, `keys.sh <logs>` (adds and builds the keys the logs ask for), `white.py` (share of near-white pixels in a shot) and `run/save_ref` (autosaves in Kokiri Forest).

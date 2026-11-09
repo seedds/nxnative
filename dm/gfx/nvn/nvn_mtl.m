@@ -4880,8 +4880,9 @@ static int g_nbcrt; static void bcrt_flush(void);   // shadows of block-compress
 static struct { tex_t t; void *tex; unsigned level, slice, n; int att; } g_rtm[8]; static int g_nrtm;   // n: the layers the pass draws from slice on; att: the colour slot
 static int tex_storage_dst(const tex_t *t);
 static void mirror_readback(const tex_t *t, id<MTLTexture> d, unsigned level, unsigned layer0, const NVNcopyRegion *r, const char *from, int absorb);
+// slice: the attachment's first slice, or of a 3D texture its depth plane (mirror_readback reads a 3D texture's planes from there on)
 static void rt_mirror_add(const tex_t *t, id<MTLTexture> mt, NSUInteger level, NSUInteger slice, int att) {
-    if (!mt || t->d.target == NVN_TEXTURE_TARGET_3D || !tex_storage_dst(t)) return;
+    if (!mt || !tex_storage_dst(t)) return;
     for (int i = 0; i < g_nrtm; i++) if (g_rtm[i].t.serial == t->serial && g_rtm[i].level == level && g_rtm[i].slice == slice) return;
     if (g_nrtm == (int)(sizeof g_rtm / sizeof g_rtm[0])) { RED_ONCE(131, "more than %d storage-backed render targets in one pass: the rest are not read back into their storage", g_nrtm); return; }
     g_rtm[g_nrtm++] = (typeof(g_rtm[0])){*t, (void *)CFBridgingRetain(mt), (unsigned)level, (unsigned)slice, 1, att};
@@ -4889,7 +4890,7 @@ static void rt_mirror_add(const tex_t *t, id<MTLTexture> mt, NSUInteger level, N
 // Once the pass's layers are known: a layered or slice-merged pass (renderTargetArrayLength) draws into that many layers of each attachment from its attached slice on, all read back
 static void rt_mirror_layers(MTL4RenderPassDescriptor *pd) {
     for (int i = 0; i < g_nrtm; i++) { MTLRenderPassColorAttachmentDescriptor *c = pd.colorAttachments[g_rtm[i].att];
-        g_rtm[i].slice = (unsigned)c.slice; g_rtm[i].n = pd.renderTargetArrayLength > 1 ? (unsigned)pd.renderTargetArrayLength : 1; }
+        g_rtm[i].slice = (unsigned)(c.texture.textureType == MTLTextureType3D ? c.depthPlane : c.slice); g_rtm[i].n = pd.renderTargetArrayLength > 1 ? (unsigned)pd.renderTargetArrayLength : 1; }
 }
 // After the pass has ended. The readbacks open the copy encoder, which is closed again: callers of rp_end may open an encoder of their own next and rely on none being open
 // (with it left open, Tears of the Kingdom stopped presenting on loading its opening at frame 1983)
@@ -4897,8 +4898,9 @@ static void rt_mirror_flush(void) {
     int n = g_nrtm; g_nrtm = 0;
     for (int i = 0; i < n; i++) {
         id<MTLTexture> mt = CFBridgingRelease(g_rtm[i].tex);
-        NVNcopyRegion r = {0, 0, 0, (int)MAX(mt.width >> g_rtm[i].level, 1u), (int)MAX(mt.height >> g_rtm[i].level, 1u), (int)g_rtm[i].n};
-        mirror_readback(&g_rtm[i].t, mt, g_rtm[i].level, g_rtm[i].slice, &r, "render", 1);
+        int d3 = mt.textureType == MTLTextureType3D;   // a 3D attachment's planes are the region's depth, from its plane on; any other's layers, from its slice on
+        NVNcopyRegion r = {0, 0, d3 ? (int)g_rtm[i].slice : 0, (int)MAX(mt.width >> g_rtm[i].level, 1u), (int)MAX(mt.height >> g_rtm[i].level, 1u), (int)g_rtm[i].n};
+        mirror_readback(&g_rtm[i].t, mt, g_rtm[i].level, d3 ? 0 : g_rtm[i].slice, &r, "render", 1);
     }
     if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
 }
@@ -5094,7 +5096,8 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex_(int clear_only) {
         if (g_xv_n) { xv_ent *xe = xv_find(R.rt.color[i]->serial, (uint32_t)pd.colorAttachments[i].level, (uint32_t)pd.colorAttachments[i].slice);
             if (xe && (xe->state == XV_INVALID || xe->state == XV_PROBE)) { if (pd.colorAttachments[i].loadAction == MTLLoadActionLoad) { xv_ent copy = *xe; xv_violation(&copy, "old content loaded as an attachment"); } else xv_good(xe); } }
         pd.colorAttachments[i].storeAction = MTLStoreActionStore;
-        rt_mirror_add(R.rt.color[i], pd.colorAttachments[i].texture, pd.colorAttachments[i].level, pd.colorAttachments[i].slice, i);
+        rt_mirror_add(R.rt.color[i], pd.colorAttachments[i].texture, pd.colorAttachments[i].level,
+                      pd.colorAttachments[i].texture.textureType == MTLTextureType3D ? pd.colorAttachments[i].depthPlane : pd.colorAttachments[i].slice, i);
     }
     if (g_sm_plan.on && !clear_only && pd.colorAttachments[0].texture && !R.rt.depth) {   // slice-merged pass (see g_sm_plan): the attachment holds every layer the draws reach
         MTLRenderPassColorAttachmentDescriptor *c = pd.colorAttachments[0];
@@ -13358,8 +13361,8 @@ static void mirror_readback(const tex_t *t, id<MTLTexture> d, unsigned level, un
     size_t row = (size_t)((r->width + bw - 1) / bw) * bpb, img = row * (size_t)((r->height + bh - 1) / bh);
     id<MTLBuffer> b = mrbuf_get(img * nz);
     if (!b) { mirror_note(-1, t, level, from, 1); return; }
-    id<MTL4ComputeCommandEncoder> e = blit();
-    for (int z = 0; z < nz; z++) enc_b_copy_texture_buffer(e, d, layer0 + r->zoffset + z, level, MTLOriginMake(r->xoffset, r->yoffset, 0), MTLSizeMake(r->width, r->height, 1), b, (size_t)z * img, row, img);
+    id<MTL4ComputeCommandEncoder> e = blit(); int d3 = d.textureType == MTLTextureType3D;   // a 3D texture's images are its depth slices, at origin z; any other's its slices (layers)
+    for (int z = 0; z < nz; z++) enc_b_copy_texture_buffer(e, d, d3 ? 0 : layer0 + r->zoffset + z, level, MTLOriginMake(r->xoffset, r->yoffset, d3 ? r->zoffset + z : 0), MTLSizeMake(r->width, r->height, 1), b, (size_t)z * img, row, img);
     mirror_rb *m = malloc(sizeof *m); *m = (mirror_rb){*t, level, layer0, *r, row, img, (void *)CFBridgingRetain(b), absorb ? (void *)CFBridgingRetain(d.parentTexture ? d.parentTexture : d) : NULL, rb_copy_shift(t, d)};
     post((post_op){4, NULL, 0, 0, 0, 0, m, 0});
     mrb_note(t->serial, 1);
@@ -13394,7 +13397,7 @@ static void copy_b2t(const p_copy_b2t *c, uint32_t size) {
     if (!mtl_addr(c->src, img * nz, &mb, &mo)) { RED_ONCE(23, "buffer→texture copy source is in no memory pool"); return; }
     // The copy's bytes belong in the texture's storage: written there now from the buffer's, unless the GPU writes the buffer (a copy, fill or update queued in this submission: pend_hits; a shader
     // or a texture→buffer copy of it: sbw_hits; one of a submission still running: gw_live) or a readback into the texture is pending (read back after the copy then)
-    int rb = !is3d && tex_storage_dst(c->tex);
+    int rb = tex_storage_dst(c->tex);
     if (rb && img * nz && !mrb_pending(c->tex->serial) && !pend_hits(c->src, img * nz) && !g_sbw_over && !sbw_hits(c->src, c->src + img * nz) && !gw_live(c->src, c->src + img * nz)
         && nvn_host_readable(c->src, img * nz) && !nvn_tex_mirror_b2t(c->tex, level, layer0, &c->r, (const uint8_t *)(uintptr_t)c->src, row, img)) { mirror_note(0, c->tex, level, "buffer", 0); rb = 0; }
     g_cut_copy = 1;
@@ -13663,8 +13666,8 @@ static void copy_t2t(const p_copy_t2t *c) {
     int s3 = c->src->d.target == 2, d3 = c->dst->d.target == 2, nz = c->sr.depth ? c->sr.depth : 1;
     // The copy's bytes belong in the destination's storage: written there now from the source's storage when that holds its content and the copy is a plain one (the same Metal format: a
     // format change is drawn below and converts the bytes), else read back after the copy (decided before the draw path gives the destination render-target use, which makes it GPU-owned from then on)
-    int rb = !d3 && tex_storage_dst(c->dst);
-    if (rb && !s3 && c->sr.width == c->dr.width && c->sr.height == c->dr.height && !(c->flags & (NVN_COPY_FLAGS_MIRROR_X_BIT | NVN_COPY_FLAGS_MIRROR_Y_BIT)) && s.pixelFormat == d.pixelFormat
+    int rb = tex_storage_dst(c->dst);
+    if (rb && s3 == d3 && c->sr.width == c->dr.width && c->sr.height == c->dr.height && !(c->flags & (NVN_COPY_FLAGS_MIRROR_X_BIT | NVN_COPY_FLAGS_MIRROR_Y_BIT)) && s.pixelFormat == d.pixelFormat
         && !mrb_pending(c->dst->serial) && tex_storage_src(c->src) && !nvn_tex_mirror_t2t(c->src, sl, sz0, &c->sr, c->dst, dl, dz0, &c->dr)) { mirror_note(0, c->dst, dl, "texture", 0); rb = 0; }
     // The draw path renders into the destination: one made without render-target use (packaged) gets it first, as a whole-level clear does (Paper Mario: The Thousand-Year Door copies a
     // 128x128 RGBA8 render target into an RG8 texture, mirrored in Y)

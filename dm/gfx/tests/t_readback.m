@@ -389,12 +389,31 @@ int main(void) { @autoreleasepool {
     h_nvnTextureBuilderSetStorage(&tb, (const NVNmemoryPool *)&pool, 393216); EXPECT("packaged texture 6 init", 1, h_nvnTextureInitialize(&pk6, &tb));
     float color2[] = {0.8f, 0.6f, 0.4f, 1.f}; h_nvnCommandBufferClearTexture(&cmd, &pk5, NULL, &region, color2, 15);
     h_nvnCommandBufferCopyTextureToTexture(&cmd, &pk5, NULL, &region, &pk6, NULL, &region, 0);
+    // A buffer copy into slices 1 and 2 of a packaged 3D texture from a buffer this submission writes on the GPU: the region is read back from the host texture's depth slices into those
+    // slices of the storage (GitHub #1856: LEGO Star Wars fills its light-probe volumes a slice at a time and then moves them by copying their storage); slices 0 and 3 stay as they were
+    uint8_t *src3 = (uint8_t *)mem + 204800; memset(src3, 0xEE, 512);
+    h_nvnCommandBufferCopyBufferToBuffer(&cmd, (NVNbufferAddress)out, (NVNbufferAddress)src3, 256, 0);
+    h_nvnCommandBufferCopyBufferToBuffer(&cmd, (NVNbufferAddress)out, (NVNbufferAddress)(src3 + 256), 256, 0);
+    NVNtexture vol3; h_nvnTextureBuilderSetTarget(&tb, NVN_TEXTURE_TARGET_3D); h_nvnTextureBuilderSetSize3D(&tb, 8, 4, 4);
+    h_nvnTextureBuilderSetStorage(&tb, (const NVNmemoryPool *)&pool, 229376); EXPECT("packaged 3D texture init", 1, h_nvnTextureInitialize(&vol3, &tb));
+    EXPECT("packaged 3D texture fits the pool", 1, 229376 + ((const tex_t *)&vol3)->L.size <= 262144);
+    NVNcopyRegion region3 = {0, 0, 1, 8, 4, 2};
+    h_nvnCommandBufferCopyBufferToTexture(&cmd, (NVNbufferAddress)src3, &vol3, NULL, &region3, 0);
+    h_nvnTextureBuilderSetTarget(&tb, NVN_TEXTURE_TARGET_2D); h_nvnTextureBuilderSetSize3D(&tb, 8, 4, 1);
     // A render pass into a packaged texture writes its storage, as the hardware's would: what the pass drew is read back into the storage when the submission completes (rt_mirror_flush).
     // Tears of the Kingdom moves such textures with memcpy (its resource defragmentation) and re-creates them at the new address, which then has to carry the drawing
     NVNtexture pk8; h_nvnTextureBuilderSetStorage(&tb, (const NVNmemoryPool *)&pool, 458752); EXPECT("packaged render target init", 1, h_nvnTextureInitialize(&pk8, &tb));
     const NVNtexture *targets8[] = {&pk8};
     h_nvnCommandBufferSetRenderTargets(&cmd, 1, targets8, views, NULL, NULL);
     float color3[] = {0.4f, 0.2f, 0.8f, 1.f}; h_nvnCommandBufferClearColor(&cmd, 0, color3, 15);
+    // The same into depth plane 2 of a packaged 3D texture (a view's first layer selects the plane): that plane is read back into plane 2 of the storage, the others stay as they were
+    NVNtexture vol3r; h_nvnTextureBuilderSetTarget(&tb, NVN_TEXTURE_TARGET_3D); h_nvnTextureBuilderSetSize3D(&tb, 8, 4, 4);
+    h_nvnTextureBuilderSetStorage(&tb, (const NVNmemoryPool *)&pool, 245760); EXPECT("packaged 3D render target init", 1, h_nvnTextureInitialize(&vol3r, &tb));
+    EXPECT("packaged 3D render target fits before the next", 1, 245760 + ((const tex_t *)&vol3r)->L.size <= 262144);
+    h_nvnTextureBuilderSetTarget(&tb, NVN_TEXTURE_TARGET_2D); h_nvnTextureBuilderSetSize3D(&tb, 8, 4, 1);
+    NVNtextureView plane2; h_nvnTextureViewSetDefaults(&plane2); h_nvnTextureViewSetLayers(&plane2, 2, 1);
+    const NVNtexture *targets3[] = {&vol3r}; const NVNtextureView *views3[] = {&plane2};
+    h_nvnCommandBufferSetRenderTargets(&cmd, 1, targets3, views3, NULL, NULL); h_nvnCommandBufferClearColor(&cmd, 0, color3, 15);
     NVNsync sync; h_nvnSyncInitialize(&sync, NULL);
     h_nvnCommandBufferFenceSync(&cmd, &sync, NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE, 0);
     NVNcommandHandle h = h_nvnCommandBufferEndRecording(&cmd);
@@ -438,7 +457,15 @@ int main(void) { @autoreleasepool {
     memset(cpu, 0xEE, sizeof cpu); h_nvnTextureReadTexels(&pk9, NULL, &region, cpu); bad = 0;
     for (int i=0; i<32; i++) bad += memcmp(cpu+i*4, expected3, 4) != 0;
     EXPECT("storage moved with memcpy -> a texture there holds the drawing, 32 literal pixels", 0, bad);
-    h_nvnTextureFinalize(&pk9); h_nvnTextureFinalize(&pk8);
+    {   // the 3D copy's slices in the storage: decode the whole level (4 slices of 8x4 RGBA8)
+        const tex_t *v3 = (const tex_t *)&vol3; uint8_t lin3[4 * 128]; memset(lin3, 0xEE, sizeof lin3); bad = nvn_deswizzle(&v3->d, 0, 0, v3->mem, lin3, 32) ? 1000 : 0;
+        for (int z = 0; z < 4; z++) for (int i = 0; i < 32; i++) bad += z == 1 || z == 2 ? memcmp(lin3 + z * 128 + i * 4, expected, 4) != 0 : (lin3[z * 128 + i * 4] | lin3[z * 128 + i * 4 + 1] | lin3[z * 128 + i * 4 + 2] | lin3[z * 128 + i * 4 + 3]) != 0;
+        EXPECT("buffer copy into slices 1-2 of a packaged 3D texture -> read back into those slices of its storage, the others untouched", 0, bad);
+        const tex_t *r3 = (const tex_t *)&vol3r; memset(lin3, 0xEE, sizeof lin3); bad = nvn_deswizzle(&r3->d, 0, 0, r3->mem, lin3, 32) ? 1000 : 0;
+        for (int z = 0; z < 4; z++) for (int i = 0; i < 32; i++) bad += z == 2 ? memcmp(lin3 + z * 128 + i * 4, expected3, 4) != 0 : (lin3[z * 128 + i * 4] | lin3[z * 128 + i * 4 + 1] | lin3[z * 128 + i * 4 + 2] | lin3[z * 128 + i * 4 + 3]) != 0;
+        EXPECT("render pass into depth plane 2 of a packaged 3D texture -> read back into that plane of its storage, the others untouched", 0, bad);
+    }
+    h_nvnTextureFinalize(&pk9); h_nvnTextureFinalize(&pk8); h_nvnTextureFinalize(&vol3); h_nvnTextureFinalize(&vol3r);
     h_nvnTextureFinalize(&pk6); h_nvnTextureFinalize(&pk5); h_nvnTextureFinalize(&pk3); h_nvnTextureFinalize(&pk7); h_nvnTextureFinalize(&pk4); h_nvnTextureFinalize(&pk2);
     h_nvnTextureFinalize(&pk); h_nvnTextureFinalize(&tex); nvn_dirty_remove_range(mem); mtl_pool_del(mem); free(mem);
     sparse_reads(&region, expected);

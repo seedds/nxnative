@@ -1,8 +1,8 @@
 # OCTOPATH TRAVELER (`010057D006492000`)
 
-Update 1.0.5 (v327680) over the base game, SDK 3.5.1 (its own `sdk` build; NVN API 53). Square Enix / Acquire, Unreal Engine 4.18 (`++UE4+Release-4.18`; its project is called Kingship): two legacy version 4 paks with the shaders inline in the cooked packages, NVN, PhysX 3.4, CRIWARE (ADX2 sound banks, one USM movie). Modules `main`, `subsdk0` (the movie module) and `sdk`. 30 fps, as on the Switch.
+Update 1.0.5 (v327680) over the base game, SDK 3.5.1 (its own `sdk` build; NVN API 53). Square Enix / Acquire, Unreal Engine 4.18 (`++UE4+Release-4.18`; its project is called Kingship): two legacy version 4 paks with the shaders inline in the cooked packages, NVN, PhysX 3.4, CRIWARE (ADX2 sound banks, one USM movie). Modules `main`, `subsdk0` (the movie module) and `sdk`. 60 fps (30 on the Switch).
 
-Status: brought up on the Mac: the boot, the language notice, the title, a new game, the traveler selection (the world map, the travelers' cards), Ophilia's opening (her room, the cathedral hall and nave, the tutorials) and H'aanit's (the flashback, free play in S'warkii), at 30 fps (frame time p50 33.4 ms) with no red line but the two untranslated compute shaders below; about 2.4 GB resident with 1.2 GB of Metal allocations. Not yet seen: a battle, the sound (runs were headless, `DM_AUDIO` off), the iPhone.
+Status: brought up on the Mac: the boot, the language notice, the title, a new game, the traveler selection (the world map, the travelers' cards), Ophilia's opening (her room, the cathedral hall and nave, the tutorials) and H'aanit's (the flashback, free play in S'warkii), at 60 fps since 2026-11-09 (frame time p50 16.7 ms; 30 before, p50 33.4 ms) with no red line but the two untranslated compute shaders below; about 2.4 GB resident with 1.2 GB of Metal allocations. Not yet seen: a battle, the sound (runs were headless, `DM_AUDIO` off), the iPhone.
 
 ## What it needs
 
@@ -13,6 +13,12 @@ Status: brought up on the Mac: the boot, the language notice, the title, a new g
 | `tex_flush_upload on`, `tex_dirty_upload on` | `game.tsv` | the CPU loads textures straight into CPU-uncached pools after creating them and never flushes; see [Rendering](#rendering) |
 | `pad_layout full` | `game.tsv` | menus and the battle commands take the D-pad |
 | `shader_groups GlobalShaderCache=global #Engine/=engine #Kingship/=game` | `game.tsv` | the global shader cache, the engine's materials and the game's |
+| `fps_target 60` | `game.tsv` | 60 fps: the host writes the frame limit the game sets to 30; see [Frame rate](#frame-rate) |
+
+## Frame rate
+
+- **Current:** 60 fps (30 on the Switch), since 2026-11-09. The game's config sets Unreal's frame limit `t.MaxFPS` to 30; its present interval, `nvn.SyncInterval` in UE 4.18's Switch RHI, is already 1 (the log's "present interval set by the game 1"). The rewriter finds both console variables by name (`dm/tools/ue_cvar.py`: `t.MaxFPS` at `main+0x50b5688`, `nvn.SyncInterval` at `main+0x5adc4a8`), and `hle_fpslock.c` writes 60 into `t.MaxFPS` (profile key `fps_target 60`); `DM_FPS_TARGET=30` keeps the game's 30. This build registers its variables in inlined static constructors, which take one page base in `x22` (`main+0x1bfd0a4`, about 700 instructions before the `t.MaxFPS` name at `main+0x1bfdb90`) and store each object's vtable and value pointer at offsets from it (`[x22, #0x5d8]`, `[x22, #0x5e8]`); the search follows that form since 2026-11-09 ([Unreal's frame limit and present interval, found by name](../../../docs/reference/frame-rate.md#unreals-frame-limit-and-present-interval-found-by-name)).
+- **Measured** (M4 Pro, headless, the S'warkii route below, 300 s each): frame time p50 16.7 ms at 60 against 33.5 ms with `DM_FPS_TARGET=30`, GPU p50 about 7 ms. Long frames (CPU-side: no new pipelines, the GPU under 12 ms) are more frequent at 60: 284 over 50 ms and 101 over 100 ms, against 127 and 39 at 30 in the same 300 s (open, below). Unreal steps the game by the time that really passed, as in [OCTOPATH TRAVELER II](../0100A3501946E000/README.md); the game's speed at 60 has not been compared on a walk yet.
 
 ## Memory
 
@@ -45,7 +51,7 @@ Status: brought up on the Mac: the boot, the language notice, the title, a new g
 
 ## Mac routes
 
-The work folder `<NSP folder>/010057D006492000-work/run` has `host.sh` (builds the octo1 worktree's host and copies it to `build/o1host`), `boot.sh <log> [secs] VAR=…`, `ctlrun.sh` / `ctl.sh` / `step.sh` / `see.sh` / `mash.sh` for driving a run through `DM_CTL`, `stop.sh`, `to_story.sh` (Ophilia's opening) and `ab.sh` (several variants at once on copies of the save, the same scripted route, shots at given frames).
+The work folder `<NSP folder>/010057D006492000-work/run` has `host.sh` (builds the octo1 worktree's host and copies it to `build/o1host`; since 2026-11-09 the NSP script's build holds only the current chain's libraries, so run its `tools/dmhost` with `DM_GAMES_DIR` set to this repository's `dm/games` and `DM_ROMFS=<build>/extract/v327680/RomFS.img`), `boot.sh <log> [secs] VAR=…`, `ctlrun.sh` / `ctl.sh` / `step.sh` / `see.sh` / `mash.sh` for driving a run through `DM_CTL`, `stop.sh`, `to_story.sh` (Ophilia's opening) and `ab.sh` (several variants at once on copies of the save, the same scripted route, shots at given frames).
 
 - With system data in the save (the language notice is shown only on a fresh save): the title at about 28 s; A, A (New Game) opens the traveler selection; L picks a traveler (L once Ophilia, twice H'aanit); A opens the confirmation, whose cursor appears only after a direction press (Down, Up), then A starts the story.
 - Into S'warkii: `DM_KEYS=28:A,36:A,70:L,72:L,75:A,78:Down,79:Up,80:A,95:A*480/0.6,390:B` (the village at about frame 12,000).
@@ -61,10 +67,11 @@ General changes first needed here; each applies to every game:
 - **Provisional profiles:** Unreal's 64 GB alias layout only with virtual address memory (`profile_guess.py`): [Unreal's engine address region](../../../docs/reference/memory.md#unreals-engine-address-region-and-its-options).
 - **NVN:** `nvnTextureBuilderGetSparseTileLayout` / `nvnTextureGetSparseTileLayout`: [The sparse tile layout of a texture](../../../docs/reference/nvn-objects.md#the-sparse-tile-layout-of-a-texture); every virtual pool with a range of its own until its first mapping decides: [Virtual pools of one texture each](../../../docs/reference/nvn-objects.md#virtual-pools-of-one-texture-each-mapped-before-and-after-the-texture); sparse textures' block height: [Sparse textures take the block height of their 64 KB tile](../../../docs/reference/rendering.md#sparse-textures-take-the-block-height-of-their-64-kb-tile).
 - **Audio:** the update lock without `SdkMutexType`: [No `SdkMutexType` in SDK 3](../../../docs/reference/audio.md#no-sdkmutextype-in-sdk-3).
+- **Frame rate:** Unreal console variables registered by inlined static constructors, from a page base made far before the name: [Unreal's frame limit and present interval, found by name](../../../docs/reference/frame-rate.md#unreals-frame-limit-and-present-interval-found-by-name).
 
 ## Open
 
 - A battle, the sound and the iPhone are not tested; the IPA (3.6 GB) is built but not run on a device.
 - The travelers' signatures on their cards stop part-drawn ("Opli…", "Haa…"): not looked into.
 - The two untranslated compute shaders (above).
-- 60 fps: the host's frame-limit writes (`hle_fpslock.c`) need this build's `t.MaxFPS` and `nvn.SyncInterval`, which the rewriter's search (`dm/tools/ue_cvar.py`) does not find yet: the inlined static constructor (`t.MaxFPS` loaded at `main+0x1bfdb90`) keeps a page base in `x22` from far before the name and stores the value pointer at `[x22, #0x5e8]`; see [Unreal's frame limit and present interval, found by name](../../../docs/reference/frame-rate.md#unreals-frame-limit-and-present-interval-found-by-name).
+- At 60 fps: CPU-side long frames are 2 to 2.5 times as frequent as at 30 over the same route ([Frame rate](#frame-rate)), not looked into; and the game's speed at 60 is not compared on a walk yet.

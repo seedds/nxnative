@@ -23,6 +23,7 @@
 
 #define R_TIMEOUT     0xEA01u   // Kernel module 1, description 117
 #define R_CANCELLED   0xEC01u   // 118
+#define R_OUT_OF_RANGE 0xEE01u  // 119
 #define R_BAD_HANDLE  0xE401u   // 114
 #define R_BAD_STATE   0xFA01u   // 125
 #define R_OUT_OF_RES  0xCE01u   // 103
@@ -30,6 +31,8 @@
 #define H_CUR_THREAD  0xFFFF8000u
 
 enum { O_FREE, O_THREAD, O_EVENT_R, O_EVENT_W };
+enum { MAX_SYNC_OBJECTS = 64 };
+typedef struct { void *obj; int type; } sync_ref_t;
 // Service-layer SystemEvent bindings (see hle_bind_system_event): guest SystemEventType address → the write-end handle of its kernel event.
 // An entry lives as long as that handle: CloseHandle on it removes the entry (se_unbind), so a SystemEvent destroyed and created again at the same address gets a new kernel event.
 // Entries used to stay forever: the second bind returned early, the new event was never created and signals went to the closed handle (or to whatever event reused its number).
@@ -68,24 +71,28 @@ typedef struct thr {
     struct thr *next;          // Wait chain
     struct thr *all;           // All-threads chain (for the state dump)
     int last_svc; uint64_t last_lr;
-    int closed;                // Handle closed: the object is freed only when this holds together with exited (Horizon: the thread object goes away with the last reference)
+    int closed, sync_refs;      // Reclaim only after handle close, thread exit and the final synchronization wait reference
     uint64_t nsvc;             // SVC count (for the state dump)
     uint64_t nyield, nyield_seen, nbackoff, nbackoff_seen;   // Yields (SleepThread 0/-1/-2) and those the back-off turned into short sleeps, with both counts at the last power report (dm_yield_top)
+    uint64_t nclkyield, nclkyield_seen;       // Yields of clock waits (thr_yield), and their count at the last power report
     uint64_t nspin, nspin_seen, spin_site; const char *spin_mod;   // Spin wait passes (dm_spin_wait; those that yield count in nyield too) and where the last one was
     uint64_t srun_svc, srun_t0, spin_ret;     // Current spin wait: nsvc at its passes, when it began, when the last pass returned
     uint64_t cpu_seen_us;                     // CPU time (µs) at the last power report (dm_thread_cpu)
     uint64_t yrun_svc, yrun_t0, yrun_sig, yrun_sig2, poll_ret;   // Current run of yields: nsvc of the last yield, when the run began, and the caller's x19–x28 at the last two yields (a run lasts while no other SVC comes between two yields and those registers match one of the last two, thr_yield); when the last yield or short timed-out wait returned (poll_wait_begin)
+    uint64_t yrun_clk;                        // dm_clock_reads at the last yield: a pass that read the clock since makes the yield a clock wait (thr_yield)
+    uint64_t cw_sig, cw_run, cw_last, cw_end, cw_per, cw_per2, cw_wake, ncwpred, ncwpred_seen;   // The clock wait followed (clock_wait): its x19–x28, the run it was last seen in, when its last yield returned,
+    int cw_ok, cw_pred, cw_after, cw_trip;    // when its last wait ended, the last two periods between ends, when the predicted sleep ended, predicted sleeps (and at the last power report); periods in a row that matched, a predicted sleep in this run, yields after it, waits in a row that ended at the first poll after it
     mach_port_t mport;         // Host thread port (to get CPU time)
     _Atomic int qos_pending;   // SetThreadPriority from another thread changed prio: the thread applies the new class at its next SVC (only a thread can set its own QoS)
     uint32_t qos;
-    // Pausing (SetThreadActivity, used by IL2CPP's garbage collector to stop the world): pause_req = requested, paused = stopped; when stopped inside an SVC the context comes from the gate frame svc_regs (registered on SVC entry),
+    // Pausing (SetThreadActivity, used by IL2CPP's garbage collector to stop the world): pause_req = requested, paused = stopped for the current request; when stopped inside an SVC the context comes from the gate frame svc_regs (registered on SVC entry),
     // when stopped in guest code the signal handler saves it into ctx_*; pcv lets the requester wait for "stopped" and the paused thread wait for "resume"
     _Atomic int pause_req; int paused;
     uint64_t *_Atomic svc_regs; uint64_t svc_pc, svc_x18;   // svc_x18: the guest's x18 at SVC entry (its thread slot; the gate frame holds the Apple platform register)
     // SVC exit without G: bit 0 = inside an SVC, bit 1 = a pause was requested. The exit clears bit 0 with one compare-and-swap when bit 1 is clear, and takes G only otherwise;
     // the requester sets bit 1 and treats the thread as stopped only if bit 0 was set, so a thread it counts as stopped in an SVC cannot leave the SVC without G (svc_regs stays valid for GetThreadContext3)
     _Atomic int svc_state;
-    const uint32_t *whs; int whn;   // WaitSynchronization's handle array (guest memory, valid while the thread waits there): a signal wakes only waiters that hold the signalled object
+    sync_ref_t wobjs[MAX_SYNC_OBJECTS]; int wn, widx;   // WaitSynchronization's retained objects (the first wn) and the index the completing signal recorded, independent of handle reuse and guest memory (Horizon: KThread's sync object buffer)
     int ctx_ok; uint64_t ctx_x[29], ctx_fp, ctx_lr, ctx_sp, ctx_pc; uint32_t ctx_pstate, ctx_fpcr, ctx_fpsr; __uint128_t ctx_v[32];
     pthread_cond_t pcv;
 } thr_t;
@@ -371,9 +378,9 @@ static void thread_exit(thr_t *t) {
     // No logging here: the exit happens on the guest thread's own stack (some are only a dozen or so KiB), and a printf with floating point would blow the stack (real-device smoke test: SIGBUS when LibcurlResolver exits, backtrace fprintf → __dtoa). Only the time is recorded, and it is printed later in the state dump
     pthread_mutex_lock(&G);
     t->exited = 1;
-    wake_sync_waiters(t);   // Synchronization waiters on this thread re-check
+    wake_sync_waiters(t);   // Complete synchronization waits on this thread
     pthread_setspecific(g_keythr, NULL);
-    if (t->closed) thr_free(t);
+    if (t->closed && !t->sync_refs) thr_free(t);
     pthread_mutex_unlock(&G);
     pthread_exit(NULL);
 }
@@ -384,6 +391,9 @@ void dm_thread_returned(void) { die("guest thread entry function returned (Horiz
 //   · inside an SVC (the gate frame holds every register): stopped at once, context = the gate frame; if still paused when the SVC returns, the thread waits at the exit for the resume;
 //   · running guest code: send SIGUSR2; the handler saves the ucontext and waits there for the resume (guest code holds no host locks, so the handler may take G);
 //   · inside host code (HLE functions etc.): the handler does not stop it; the requester resends every 100 µs until the thread is back in guest code or enters an SVC.
+//   · `paused` acknowledges the current request only: the resume clears it, and whoever waits for the resume (the signal handler, the SVC exit) sets it again on every wakeup, because a new pause can arrive before that thread has retaken G.
+//     A thread stopped inside an SVC leaves by the lock-free exit once resumed; with the flag left set, the next pause returned at once while the thread ran guest code, with an empty context
+//     (Aokana: FMOD's stream thread decoded while IL2CPP's liveness pass had set bit 0 of the class words of the objects it used, and jumped through one).
 module_t *module_of(const void *p);
 static void on_pause_sig(int sig, siginfo_t *si, void *uc_) {
     (void)sig; (void)si;
@@ -401,8 +411,8 @@ static void on_pause_sig(int sig, siginfo_t *si, void *uc_) {
         t->ctx_fp = __darwin_arm_thread_state64_get_fp(*ss); t->ctx_lr = __darwin_arm_thread_state64_get_lr(*ss);
         t->ctx_sp = __darwin_arm_thread_state64_get_sp(*ss) - 32; t->ctx_pc = __darwin_arm_thread_state64_get_pc(*ss); t->ctx_pstate = ss->__cpsr;
         memcpy(t->ctx_v, uc->uc_mcontext->__ns.__v, sizeof t->ctx_v); t->ctx_fpcr = uc->uc_mcontext->__ns.__fpcr; t->ctx_fpsr = uc->uc_mcontext->__ns.__fpsr;
-        t->ctx_ok = 1; t->paused = 1; pthread_cond_broadcast(&t->pcv);
-        while (t->pause_req) pthread_cond_wait(&t->pcv, &G);
+        t->ctx_ok = 1;
+        while (t->pause_req) { t->paused = 1; pthread_cond_broadcast(&t->pcv); pthread_cond_wait(&t->pcv, &G); }
         t->paused = 0; t->ctx_ok = 0;
     }
     pthread_mutex_unlock(&G);
@@ -564,27 +574,39 @@ uint32_t dm_guest_work_qos(unsigned *count) {
 }
 
 // ---------- Synchronization objects ----------
-static int sig_obj(uint32_t h, int *bad) {    // 1 = signaled (holding G)
+// Resolve and retain the whole list before checking readiness. A handle close
+// cannot destroy an object or redirect an existing wait to a reused slot.
+static int sync_open(uint32_t h, sync_ref_t *ref) {   // holding G; no pseudo-handles
     unsigned i = h - 0x1000;
-    if (h == H_CUR_THREAD) return 0;
-    if (i == 0 || i >= MAX_H) { *bad = 1; return 0; }
-    switch (g_h[i].type) {
-    case O_THREAD: return ((thr_t *)g_h[i].obj)->exited;
-    case O_EVENT_R: return ((event_t *)g_h[i].obj)->signaled;
-    default: *bad = 1; return 0;
+    if (i == 0 || i >= MAX_H) return 0;
+    if (g_h[i].type == O_THREAD) ((thr_t *)g_h[i].obj)->sync_refs++;
+    else if (g_h[i].type == O_EVENT_R) ((event_t *)g_h[i].obj)->refs++;
+    else return 0;
+    *ref = (sync_ref_t){g_h[i].obj, g_h[i].type};
+    return 1;
+}
+static void sync_close(sync_ref_t ref) {   // holding G
+    if (ref.type == O_THREAD) {
+        thr_t *t = ref.obj;
+        if (!--t->sync_refs && t->closed && t->exited) thr_free(t);
+    } else {
+        event_t *e = ref.obj;
+        if (!--e->refs) free(e);
     }
 }
-// A synchronization object became signaled (an event, or a thread that exited): wake the WaitSynchronization waiters whose handle set holds it, so they re-check (holding G).
-// It used to wake every such waiter on every signal; each then re-checked its handles and went back to sleep, a wake-up per waiting thread per signal
+static int sync_signaled(sync_ref_t ref) {   // holding G
+    return ref.type == O_THREAD ? ((thr_t *)ref.obj)->exited : ((event_t *)ref.obj)->signaled;
+}
+// Complete each registered wait under G: a clear before the waiter resumes
+// must not erase the notification that already made it runnable.
 static void wake_sync_waiters(const void *obj) {
     for (thr_t *w = g_wait; w; ) { thr_t *n = w->next;
-        if (w->wkind == 4) { int hit = !w->whs;
-            for (int i = 0; i < w->whn && !hit; i++) { unsigned k = w->whs[i] - 0x1000; hit = k > 0 && k < MAX_H && g_h[k].obj == obj; }
-            if (hit) wake(w, -1); }
+        if (w->wkind == 4)
+            for (int i = 0; i < w->wn; i++) if (w->wobjs[i].obj == obj) {
+                w->widx = i; wake(w, 0); break;
+            }
         w = n; }
 }
-
-static int64_t now_mono_ns(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return ts.tv_sec * 1000000000ll + ts.tv_nsec; }
 void dm_guest_clock_advanced(void) {
     if (!dm_detclock_enabled()) return;
     pthread_mutex_lock(&G);
@@ -757,25 +779,28 @@ void svc_thread_dump(void) {
 // These are cooperative boundaries, not an asynchronous guest-core scheduler.
 static int svc_thread_impl(int num, uint64_t *regs);
 // Yield back-off: on the Switch a yield with nothing else runnable costs nothing, but a guest loop that polls the tick and yields (Three Houses' frame limiter main+0x5be430 waited out each 33 ms frame this way:
-// 228,105 yields per frame on an iPhone, a P-core at full clock; a per-build cut in its patches.py now makes it sleep) becomes a host busy spin. A run of yields with no other SVC between them (and no progress, thr_yield) is let through as plain sched_yield for its first 2 ms;
+// 228,105 yields per frame on an iPhone, a P-core at full clock) becomes a host busy spin. A run of yields with no other SVC between them (and no progress, thr_yield) is let through as plain sched_yield for its first 2 ms
+// (a run that reads the clock between its yields sleeps from its start, thr_yield);
 // after that each yield sleeps an eighth of the run so far, between 10 and 250 µs (a 23 ms limiter wait: about 90 sleeps instead of 200k yields, ending at most 250 µs late; idle workers polling for jobs the same).
 // The back-off used to start after 200 µs: that also caught Tears of the Kingdom's main thread waiting for its ModuleSystem workers (about 350 yields a frame, runs of a few hundred µs on the
 // frame's critical path). A sleep that overran the moment the workers finished pushed frames past 33 ms, and the game then drops itself to present interval 3 (20 fps) for a while:
 // Mac frame p95 34.5 → 41 ms with 7 drops per 300 frames; on the iPhone the threads also looked idle to the performance controller, which kept them on efficiency cores at 1.5 GHz.
-// Waits under 2 ms are handoffs between threads that do work; waits beyond it are limiters and idle polls. Returns the sleep for a yield whose run started `run_ns` ago (0 = plain yield).
+// Waits under 2 ms are handoffs between threads that do work; waits beyond it are limiters and idle polls. Returns the sleep for a yield whose run started `run_ns` ago (0 = plain yield);
+// a clock wait (`clock`, thr_yield) has no start: it waits for a time, not for another thread, and sleeps from its first yield on.
 // DM_YIELD_BACKOFF=0 turns it off; DM_YIELD_BACKOFF=<cap µs>[:<start µs>] sets the cap and the run length after which it starts (default 250:2000)
-static uint64_t yield_backoff_ns(uint64_t run_ns) {
+static uint64_t yield_backoff_ns(uint64_t run_ns, int clock) {
     static int64_t cap = -1, start = 2000000;
     if (cap < 0) { const char *e = getenv("DM_YIELD_BACKOFF"); cap = 250000;
         if (e && *e) { cap = atoll(e) * 1000; const char *c = strchr(e, ':'); if (c) start = atoll(c + 1) * 1000; }
         if (!cap) LOG("DM_YIELD_BACKOFF=0: no back-off on repeated yields (plain sched_yield spin)"); else if (e && *e) LOG("DM_YIELD_BACKOFF: back off after %lld µs of repeated yields, sleeping at most %lld µs at a time", (long long)(start / 1000), (long long)(cap / 1000)); }
-    if (!cap || run_ns < (uint64_t)start) return 0;
+    if (!cap || (!clock && run_ns < (uint64_t)start)) return 0;
     uint64_t s = run_ns / 8; if (s < 10000) s = 10000;
     return s < (uint64_t)cap ? s : (uint64_t)cap;
 }
+static void sleep_precise(uint64_t dl);
 // sched_yield, or a short sleep once the wait has lasted run_ns past the back-off's start
-static void yield_for(thr_t *me, uint64_t run_ns) {
-    uint64_t bo = yield_backoff_ns(run_ns);
+static void yield_for(thr_t *me, uint64_t run_ns, int clock) {
+    uint64_t bo = yield_backoff_ns(run_ns, clock);
     if (bo) { me->nbackoff++; me->sleeping = 1; struct timespec ts = {0, (long)bo}; nanosleep(&ts, 0); me->sleeping = 0; }
     else sched_yield();
 }
@@ -790,16 +815,74 @@ static void yield_for(thr_t *me, uint64_t run_ns) {
 // stretched to about 30 s): standing outdoors on the Mac, CPU energy 0.35–0.74 → 0.21–0.34 W at 60 fps, CPU 76–83% → 96–106% of a core, frame interval p99 19 → 20–21 ms.
 // With sched_yield on each such yield (about 200,000 a second) it was 108–121% of a core and 0.38–0.70 W.
 // A loop that waits at two yields comes back to the registers of the yield before last: Hades' NetworkPollThread (main+0x27aaa0) yields between its passes (w23 = 0) and once
-// in each pass's wait for the nifm request (w23 = 2,000, its retry count), and spun a host core as one that moved on at every yield
+// in each pass's wait for the nifm request (w23 = 2,000, its retry count), and spun a host core as one that moved on at every yield.
+// A wait whose pass reads the system clock (dm_clock_reads moved since the last yield of the run) waits for a time, not for another thread's handoff: a clock wait (clock_wait).
+static void clock_wait(thr_t *me, uint64_t sig, uint64_t now, int predict);
 static void thr_yield(thr_t *me, const uint64_t *regs) {
     if (!me) { sched_yield(); return; }
+    static int clock_on = -1;   // DM_YIELD_CLOCK: 0 = clock waits are yields as any other, 1 = they back off from their start but sleep to no predicted end, 2 (the default) = both
+    if (clock_on < 0) { const char *e = getenv("DM_YIELD_CLOCK"); clock_on = e && *e ? atoi(e) : 2; if (clock_on != 2) LOG("DM_YIELD_CLOCK=%d: yield loops that read the clock %s", clock_on, clock_on ? "back off from their start, with no sleep to a predicted end" : "back off after the start, as other yields"); }
     uint64_t y0 = now_ns(), sig = 0xcbf29ce484222325ull;
     for (int i = 19; i <= 28; i++) sig = (sig ^ regs[i]) * 0x100000001b3ull;
-    int moved = me->yrun_svc + 1 == me->nsvc && me->yrun_sig != sig && me->yrun_sig2 != sig;   // the loop moved on since its last two yields
-    me->nyield++; if (me->yrun_svc + 1 != me->nsvc || moved) me->yrun_t0 = y0; me->yrun_svc = me->nsvc; me->yrun_sig2 = me->yrun_sig; me->yrun_sig = sig;
-    if (!moved) yield_for(me, y0 - me->yrun_t0);
+    int same = me->yrun_svc + 1 == me->nsvc;   // no other SVC since the thread's last yield
+    int moved = same && me->yrun_sig != sig && me->yrun_sig2 != sig;   // the loop moved on since its last two yields
+    int clock = clock_on && same && !moved && dm_clock_reads != me->yrun_clk;   // a wait whose pass read the clock
+    me->nyield++; if (!same || moved) me->yrun_t0 = y0; me->yrun_svc = me->nsvc; me->yrun_sig2 = me->yrun_sig; me->yrun_sig = sig; me->yrun_clk = dm_clock_reads;
+    if (clock) { me->nclkyield++; clock_wait(me, sig, y0, clock_on == 2 && !dm_detclock_enabled()); }
+    else if (!moved) yield_for(me, y0 - me->yrun_t0, 0);
     me->poll_ret = now_ns();
+    if (clock && sig == me->cw_sig) me->cw_last = me->poll_ret;
     if (me->handle == 0x1001) { g_main_yield_ns += me->poll_ret - y0; g_main_yield_n++; }
+}
+// Clock waits: a run of yields whose passes read the system clock waits for a time, not for another thread's handoff, so it has no 2 ms start of plain yields (yield_backoff_ns).
+// Three Houses' frame limiter (main+0x5be430: yield, read the tick, until 60/fps ticks of 1/59.94 s have passed since the last frame end) made about 9,700 plain yields a frame on a
+// performance core with the start. Backing off from the first yield alone took its CPU energy on the Mac from 0.3-0.8 to 0.2-0.35 W, but its frames still took 16.8 ms instead of 16.68
+// (59.5 fps): the back-off cannot know the deadline, so each wait ended up to 250 µs late (nanosleep's slack adds a quarter); a 100 µs cap made it 16.73 ms at 0.6-1.0 W.
+// A wait that ends at a steady period knows its deadline, though: its last end plus the period. The loop followed (one per thread, by its x19–x28) learns the period from the times its
+// waits end (after their last yield); after three periods in a row within CW_TOL of each other, a wait sleeps on time (sleep_precise) from its first clock yield to CW_MARGIN before the
+// predicted end, polls with plain yields from there for 2 CW_MARGIN, and then backs off from that point. A wait that ends at the first poll after such a sleep may have ended late.
+// The first time, the period is taken 2 CW_MARGIN shorter: one learned from waits the back-off ended carries their lateness, which is more than CW_MARGIN; the second time in a row
+// the period changed (a game going from 30 to 60) and is learned again, so such a change costs two late waits. A prediction that comes too early (the period got longer) only costs
+// the polls and back-off sleeps until the end, and that wait's end teaches the new period. The loop followed changes once it has not ended a wait for a second while another clock
+// wait runs. Three Houses without its old per-build cut (its limiter made to sleep) on the Mac: 59.8-60.0 fps, frame p50 16.67-16.81 ms, 0.09-0.16 W of CPU (with the cut 16.68 ms,
+// 0.11-0.49 W). make -C dm/host/tests GAME=<id> build/t_clockwait checks the cases on a test clock
+#define CW_MARGIN 150000   // ns before the predicted end where the sleep stops (sleep_precise ends within 20 µs)
+#define CW_TOL 250000      // two periods within this are the same
+static void clock_wait(thr_t *me, uint64_t sig, uint64_t now, int predict) {
+    if (me->cw_run != me->yrun_t0) {   // the run's first clock yield (its second yield: the first follows another SVC)
+        me->cw_run = me->yrun_t0;
+        if (sig != me->cw_sig) {
+            if (me->cw_sig && now - me->cw_last < 1000000000ull) { yield_for(me, now - me->yrun_t0, 1); return; }   // another clock wait: the followed loop is still in use
+            me->cw_sig = sig; me->cw_end = me->cw_per = me->cw_per2 = 0; me->cw_ok = me->cw_pred = me->cw_trip = 0;
+        } else {
+            if (me->cw_pred && !me->cw_after) {   // the last wait ended at the first poll after its predicted sleep: maybe late
+                // once: the period learned from waits the back-off ended carries their lateness (up to 250 µs, and nanosleep's quarter): predict it shorter;
+                // twice in a row: the period changed, learn it again
+                if (me->cw_trip++ || me->cw_per < 4 * CW_MARGIN) { me->cw_ok = 0; me->cw_trip = 0; }
+                else { me->cw_per -= 2 * CW_MARGIN; me->cw_per2 = 0; }
+            } else if (me->cw_end) {
+                me->cw_trip = 0;
+                uint64_t per = me->cw_last - me->cw_end;
+                me->cw_ok = me->cw_per && per + CW_TOL > me->cw_per && per < me->cw_per + CW_TOL ? me->cw_ok + (me->cw_ok < 3) : 0;
+                me->cw_per2 = me->cw_per; me->cw_per = per;
+            }
+            me->cw_end = me->cw_last;
+        }
+        me->cw_pred = me->cw_after = 0;
+        if (predict && me->cw_ok >= 3) {
+            uint64_t per = me->cw_per2 && me->cw_per2 < me->cw_per ? me->cw_per2 : me->cw_per, dl = me->cw_end + per;   // the shorter of the last two periods
+            if (dl > now + 2 * CW_MARGIN) {
+                me->nbackoff++; me->ncwpred++; me->sleeping = 1; sleep_precise(dl - CW_MARGIN); me->sleeping = 0;
+                me->cw_pred = 1; me->cw_wake = now_ns(); return;
+            }
+        }
+    } else if (me->cw_pred) {   // polling after the predicted sleep
+        me->cw_after++;
+        uint64_t past = now > me->cw_wake ? now - me->cw_wake : 0;
+        if (past < 2 * CW_MARGIN) sched_yield(); else yield_for(me, past - 2 * CW_MARGIN, 1);
+        return;
+    }
+    yield_for(me, now - me->yrun_t0, 1);
 }
 // Spin waits (patch_nso.py "Spin waits"): a guest loop that polls memory with no SVC, which the rewriter has made go through a spin gate on every pass after the first. On the Switch
 // such a poll costs nothing while another thread of its core has work (a higher-priority one preempts it); here it takes a host core from the threads doing the work: Paper Mario:
@@ -819,7 +902,7 @@ void dm_spin_wait(uint64_t gate, uint64_t site) {
     if (me->srun_svc != me->nsvc || now - me->spin_ret > SPIN_GAP_NS) me->srun_t0 = now;   // a new wait
     me->srun_svc = me->nsvc; me->nspin++;
     if (site != me->spin_site || !me->spin_mod) { const module_t *m = module_of((void *)gate); me->spin_mod = m ? m->name : "?"; me->spin_site = site; }
-    if (on && now - me->srun_t0 >= poll_ns) { me->nyield++; yield_for(me, now - me->srun_t0); }
+    if (on && now - me->srun_t0 >= poll_ns) { me->nyield++; yield_for(me, now - me->srun_t0, 0); }
     me->spin_ret = now_ns();
 }
 // Short timed waits as polls. A wait with a timeout under 20 µs (a condition variable, WaitSynchronization or WaitForAddress) that times out is a poll, as a SleepThread that short is
@@ -835,7 +918,7 @@ static int64_t poll_wait_begin(int64_t ns) {
     uint64_t now = now_ns();
     if (me->yrun_svc + 1 != me->nsvc || now - me->poll_ret > SPIN_GAP_NS) me->yrun_t0 = now;   // a new run
     me->yrun_svc = me->nsvc;
-    uint64_t bo = yield_backoff_ns(now - me->yrun_t0);
+    uint64_t bo = yield_backoff_ns(now - me->yrun_t0, 0);
     if (bo <= (uint64_t)ns) return ns;
     me->nyield++; me->nbackoff++;   // counted as a yield that backed off (the power line)
     return (int64_t)bo;
@@ -847,19 +930,20 @@ static void poll_wait_end(int64_t ns, int64_t r) {
     if (r == R_TIMEOUT) me->poll_ret = now_ns(); else me->yrun_svc = 0;
 }
 // The threads that yielded or passed through spin waits most since the last call (the power line every 300 frames, hle_nvn.c): "handle name N (back-off sleeps M)", at most two,
-// N the yields (spin wait passes that yielded among them), with the spin wait passes and the last one's site ("; spin passes K, last at main+0x…")
+// N the yields (spin wait passes that yielded among them), with the clock waits' yields among them ("; clock waits C"), the spin wait passes and the last one's site ("; spin passes K, last at main+0x…")
 void dm_yield_top(char *out, size_t n) {
-    thr_t *top[2] = {0}; uint64_t d[2] = {0}, b[2] = {0}, s[2] = {0}, r[2] = {0};
+    thr_t *top[2] = {0}; uint64_t d[2] = {0}, b[2] = {0}, c[2] = {0}, cp[2] = {0}, s[2] = {0}, r[2] = {0};
     pthread_mutex_lock(&G);
     for (thr_t *t = g_all; t; t = t->all) {
-        uint64_t y = t->nyield - t->nyield_seen, bo = t->nbackoff - t->nbackoff_seen, sp = t->nspin - t->nspin_seen, k = y + sp;
-        t->nyield_seen = t->nyield; t->nbackoff_seen = t->nbackoff; t->nspin_seen = t->nspin;
-        if (k > r[0]) { top[1] = top[0]; d[1] = d[0]; b[1] = b[0]; s[1] = s[0]; r[1] = r[0]; top[0] = t; d[0] = y; b[0] = bo; s[0] = sp; r[0] = k; }
-        else if (k > r[1]) { top[1] = t; d[1] = y; b[1] = bo; s[1] = sp; r[1] = k; }
+        uint64_t y = t->nyield - t->nyield_seen, bo = t->nbackoff - t->nbackoff_seen, ck = t->nclkyield - t->nclkyield_seen, pr = t->ncwpred - t->ncwpred_seen, sp = t->nspin - t->nspin_seen, k = y + sp;
+        t->nyield_seen = t->nyield; t->nbackoff_seen = t->nbackoff; t->nclkyield_seen = t->nclkyield; t->ncwpred_seen = t->ncwpred; t->nspin_seen = t->nspin;
+        if (k > r[0]) { top[1] = top[0]; d[1] = d[0]; b[1] = b[0]; c[1] = c[0]; cp[1] = cp[0]; s[1] = s[0]; r[1] = r[0]; top[0] = t; d[0] = y; b[0] = bo; c[0] = ck; cp[0] = pr; s[0] = sp; r[0] = k; }
+        else if (k > r[1]) { top[1] = t; d[1] = y; b[1] = bo; c[1] = ck; cp[1] = pr; s[1] = sp; r[1] = k; }
     }
     size_t o = 0; char nb[32];
     for (int i = 0; i < 2 && top[i] && o < n; i++) {
         o += snprintf(out + o, n - o, "%s%#x '%s' %llu times (back-off sleeps %llu", i ? ", " : "", top[i]->handle, thr_name(top[i], nb, sizeof nb), (unsigned long long)d[i], (unsigned long long)b[i]);
+        if (o < n && c[i]) o += snprintf(out + o, n - o, "; clock waits %llu, %llu of them slept to a predicted end", (unsigned long long)c[i], (unsigned long long)cp[i]);
         if (o < n && s[i]) o += snprintf(out + o, n - o, "; spin passes %llu, last at %s+%#llx", (unsigned long long)s[i], top[i]->spin_mod, (unsigned long long)top[i]->spin_site);
         if (o < n) o += snprintf(out + o, n - o, ")");
     }
@@ -907,6 +991,13 @@ void dm_guest_sleep_ns(int64_t ns) {
     }
     thr_t *me = pthread_getspecific(g_keythr); if (me) me->sleeping = 1;
     sleep_precise(now_ns() + (uint64_t)ns);
+    if (me) me->sleeping = 0;
+}
+// A host hook's bounded wait on a host condition variable (m held), a sleep to a garbage collector's pause like dm_guest_sleep_ns; the caller checks its condition and the clock
+void dm_guest_cond_wait_ns(pthread_cond_t *c, pthread_mutex_t *m, int64_t ns) {
+    thr_t *me = pthread_getspecific(g_keythr); if (me) me->sleeping = 1;
+    struct timespec ts = {ns / 1000000000, ns % 1000000000};
+    pthread_cond_timedwait_relative_np(c, m, &ts);
     if (me) me->sleeping = 0;
 }
 int svc_thread(int num, uint64_t *regs) {
@@ -1003,7 +1094,7 @@ static int svc_thread_impl(int num, uint64_t *regs) {
                 pthread_cond_timedwait(&t->pcv, &G, &dl);
                 if (!warned && now_ns() - t0 > 1000000000ull) { warned = 1; LOG("[RED] thread %#x still not suspended after more than 1 second (stuck in host code?)", t->handle); }
             }
-        } else { atomic_store(&t->pause_req, 0); atomic_fetch_and(&t->svc_state, ~2); pthread_cond_broadcast(&t->pcv); }
+        } else { atomic_store(&t->pause_req, 0); atomic_fetch_and(&t->svc_state, ~2); t->paused = 0; pthread_cond_broadcast(&t->pcv); }
         pthread_mutex_unlock(&G);
         { static int n; if (n++ < 4) LOG("SetThreadActivity %#x → %s (%s)", (uint32_t)regs[0], act ? "pause" : "resume", r ? "failed" : "ok"); }
         regs[0] = (uint64_t)r; return 1;
@@ -1117,8 +1208,7 @@ static int svc_thread_impl(int num, uint64_t *regs) {
         event_t *e = num == 0x11 ? h_peek(h, O_EVENT_W) : num == 0x17 ? h_peek(h, O_EVENT_R)
                    : (h_peek(h, O_EVENT_W) ? h_peek(h, O_EVENT_W) : h_peek(h, O_EVENT_R));
         int64_t r = 0;
-        if (!e) { r = (num == 0x17 && h_peek(h, O_THREAD)) ? R_BAD_STATE : R_BAD_HANDLE;
-                  if (r == R_BAD_HANDLE) LOG("event SVC %#x invalid handle %#x", num, h); }
+        if (!e) { r = R_BAD_HANDLE; LOG("event SVC %#x invalid handle %#x", num, h); }
         else if (num == 0x11) { e->signaled = 1; wake_sync_waiters(e); }
         else if (num == 0x17 && !e->signaled) r = R_BAD_STATE;
         else e->signaled = 0;
@@ -1126,33 +1216,39 @@ static int svc_thread_impl(int num, uint64_t *regs) {
         regs[0] = (uint64_t)r; return 1;
     }
     case 0x18: {  // WaitSynchronization(→w1 index; x1 handle array, w2 count, x3 timeout)
-        thr_t *t = cur(); const uint32_t *hs = (const uint32_t *)regs[1]; int n = (int)regs[2]; int64_t ns = poll_wait_begin((int64_t)regs[3]);
-        int64_t deadline = ns > 0 ? (dm_detclock_enabled() ? (int64_t)guest_ns() : now_mono_ns()) + ns : 0;
+        thr_t *t = cur(); int n = (int)regs[2]; int64_t ns = (int64_t)regs[3];
+        if (n < 0 || n > MAX_SYNC_OBJECTS) { regs[0] = R_OUT_OF_RANGE; regs[1] = 0; return 1; }
+        int64_t wait_ns = poll_wait_begin(ns);
+        uint32_t hs[MAX_SYNC_OBJECTS]; sync_ref_t *objects = t->wobjs;
+        if (n) memcpy(hs, (const void *)regs[1], n * sizeof *hs);
         pthread_mutex_lock(&G);
-        int64_t r; int idx = -1;
-        for (;;) {
-            if (t->cancel) { t->cancel = 0; r = R_CANCELLED; break; }
-            int bad = 0;
-            for (int i = 0; i < n && idx < 0; i++) if (sig_obj(hs[i], &bad)) idx = i;
-            if (bad) { r = R_BAD_HANDLE; break; }
-            if (idx >= 0) { r = 0; break; }
-            int64_t left = ns < 0 ? -1 : ns == 0 ? 0 : deadline - (dm_detclock_enabled() ? (int64_t)guest_ns() : now_mono_ns());
-            if (ns > 0 && left <= 0) { r = R_TIMEOUT; break; }
-            t->whs = hs; t->whn = n; int64_t br = block(t, 4, left); t->whs = NULL; t->whn = 0;
-            if (br == R_TIMEOUT) { r = R_TIMEOUT; break; }
+        int held = 0, idx = -1; int64_t r = R_BAD_HANDLE;
+        while (held < n && sync_open(hs[held], &objects[held])) held++;
+        if (held == n) {
+            for (int i = 0; i < n; i++) if (sync_signaled(objects[i])) { idx = i; break; }
+            // Ready objects, then a zero-time poll, precede pending cancellation.
+            if (idx >= 0) r = 0;
+            else if (!ns) r = R_TIMEOUT;
+            else if (t->cancel) { t->cancel = 0; r = R_CANCELLED; }
+            else {
+                t->wn = n; t->widx = -1;
+                r = block(t, 4, wait_ns); idx = t->widx;
+                t->wn = 0;
+            }
         }
+        for (int i = 0; i < held; i++) sync_close(objects[i]);
         pthread_mutex_unlock(&G);
-        poll_wait_end((int64_t)regs[3], r);
+        poll_wait_end(ns, r);
         regs[0] = (uint64_t)r; regs[1] = idx >= 0 ? (uint64_t)idx : 0; return 1;
     }
     case 0x19: {  // CancelSynchronization(w0 thread)
         pthread_mutex_lock(&G);
         thr_t *t = h_get((uint32_t)regs[0], O_THREAD);
-        if (t) { t->cancel = 1; if (t->wkind == 4) wake(t, -1); }
+        if (t) { if (t->wkind == 4) wake(t, R_CANCELLED); else t->cancel = 1; }
         pthread_mutex_unlock(&G);
         regs[0] = t ? 0 : R_BAD_HANDLE; return 1;
     }
-    case 0x16: {  // CloseHandle(w0): an event is freed only when both ends are closed; after a thread handle is closed the slot is recycled, and the object is freed once the thread has also exited
+    case 0x16: {  // CloseHandle(w0): recycle the slot; synchronization waits retain their original objects
         pthread_mutex_lock(&G);
         unsigned i = (uint32_t)regs[0] - 0x1000;
         if (i > 0 && i < MAX_H && (g_h[i].type == O_EVENT_R || g_h[i].type == O_EVENT_W)) {
@@ -1163,7 +1259,7 @@ static int svc_thread_impl(int num, uint64_t *regs) {
             thr_t *t = g_h[i].obj;
             g_h[i].type = O_FREE; g_h[i].obj = NULL;
             t->closed = 1;
-            if (t->exited) thr_free(t);
+            if (t->exited && !t->sync_refs) thr_free(t);
         }
         pthread_mutex_unlock(&G);
         regs[0] = 0; return 1;

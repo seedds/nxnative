@@ -40,8 +40,8 @@ def sph(pos=0xf0, generics=b''):
     return bytes(s)
 
 
-def control(stage, threads=32, payload=256, task=0, max_v=0, max_p=0, prim_at=0):
-    c = bytearray(0x80); c[0x56] = stage; struct.pack_into('<2H', c, 0x58, threads, payload); c[0x5e] = task; struct.pack_into('<2H', c, 0x60, max_v, max_p)
+def control(stage, threads=32, payload=256, task=0, max_v=0, max_p=0, prim_at=0, verts=0):
+    c = bytearray(0x80); c[0x56] = stage; struct.pack_into('<2H', c, 0x58, threads, payload); c[0x5e] = task; c[0x5f] = verts; struct.pack_into('<2H', c, 0x60, max_v, max_p)
     if prim_at: struct.pack_into('<I', c, 0x64, prim_at); c[0x68] = 0x80
     return bytes(c)
 
@@ -50,9 +50,10 @@ class Facts(unittest.TestCase):
     def test_stage_byte(self):
         self.assertEqual([ms.is_stage(control(s)) for s in (1, 5, 6, 7)], [None, None, 'ts', 'ms'])
 
-    def test_outputs_follow_the_omap(self):   # 0x36: a nibble an attribute, low first. ddc034e8e009ebfc's 0x30: generic 1's x and y
+    def test_outputs_follow_the_omap(self):   # 0x36: a nibble an attribute, low first. ddc034e8e009ebfc's 0x30: generic 1's x and y; 0x35 bit 3: point size ahead of position
         self.assertEqual(ms.sph_outputs(sph(0xf0, b'\x30')), [(None, 0), (None, 1), (None, 2), (None, 3), (1, 0), (1, 1)])
         self.assertEqual(ms.sph_outputs(sph(0x30, b'\x01')), [(None, 0), (None, 1), (0, 0)])
+        self.assertEqual(ms.sph_outputs(sph(0xf8)), [('psiz', 0), (None, 0), (None, 1), (None, 2), (None, 3)])
 
     def test_per_primitive_sph(self):   # after the instructions, at control +0x64 where +0x68 bit 7 is set; the position is not a primitive's
         area = sph(0xf0, b'\x30') + bytes(0x100) + sph(0x00, b'\x01')
@@ -67,7 +68,20 @@ class Facts(unittest.TestCase):
     def test_mesh_memory(self):   # 128 vertices: four blocks of 32. Six components a block, 0x80 bytes each; the primitive bytes follow, 3 a triangle after the count's word
         i = ms.info(control(7, payload=128, max_v=128, max_p=64), sph(0xf0, b'\x30'))
         lay, size = ms.memory(i)
-        self.assertEqual(lay[2], 0x10 + 0x80); self.assertEqual(lay[3], lay[2] + 4 * 6 * 0x80); self.assertEqual(size, lay[3] + 4 + 3 * 64)
+        self.assertEqual(lay[2], 0x10 + 0x80); self.assertEqual(lay[3], lay[2] + 4 * 6 * 0x80); self.assertEqual(size, lay[3] + 4 + 3 * 2 * 32)   # the bytes of two primitive blocks: the vertices' four blocks do not count
+        # With per-primitive attributes (Ocarina of Time's ee4ef51a4fddc28e: 128 vertices, 64 primitives, 4 primitive components): two primitive blocks follow the four vertex blocks
+        ip = ms.info(control(7, payload=128, max_v=128, max_p=64, prim_at=0x80), sph(0xf0, b'\x30') + sph(0, b'\x0f'))
+        self.assertEqual(ms.memory(ip)[0][3], lay[2] + (4 * 6 + 2 * 4) * 0x80)
+
+    def test_mesh_memory_126_primitives(self):   # lanes 126 and 127 of the fourth primitive block write too (a count of 0 wraps count - 1); the vertices' two blocks come first
+        i = ms.info(control(7, max_v=64, max_p=126), sph(0xf0, b'\x30'))
+        lay, size = ms.memory(i)
+        self.assertEqual(lay[3], lay[2] + 2 * 6 * 0x80); self.assertEqual(size, lay[3] + 4 + 3 * 4 * 32)
+
+    def test_point_mesh_memory(self):   # a point has one index byte: one block of 32 (Ocarina of Time's 3a6340a04bf09797: point size and position, 32 vertices, 32 points)
+        i = ms.info(control(7, max_v=32, max_p=32, verts=1), sph(0xf8))
+        lay, size = ms.memory(i)
+        self.assertEqual(lay[3], lay[2] + 5 * 0x80); self.assertEqual(size, lay[3] + 4 + 32)
 
     def test_largest_of_the_game_fits_metal(self):   # c34e01565dac1124: 256 vertices, 192 primitives
         i = ms.info(control(7, max_v=256, max_p=192), sph(0xf0, b'\x00\x0f'))
@@ -83,17 +97,18 @@ class Stage(unittest.TestCase):
         i = ms.info(control(6), bytes(0x80))
         return ms.to_stage(KERNEL % (ms.memory(i)[1] // 4, ms.memory(i)[0][2] // 4 + 1), i), i
 
-    def mesh(self, task=False, primitive=False, vertices=128, primitives=64):
-        area = sph(0xf0, b'\x30') + (sph(0, b'\x01') if primitive else b'')
-        i = ms.info(control(7, payload=128, task=int(task), max_v=vertices, max_p=primitives, prim_at=0x80 if primitive else 0), area)
-        return ms.to_stage(KERNEL % (ms.memory(i)[1] // 4, ms.memory(i)[0][3] // 4), i), i
+    def mesh(self, task=False, primitive=False, vertices=128, primitives=64, pos=0xf0, verts=0, reads=None):
+        area = sph(pos, b'\x30') + (sph(0, b'\x01') if primitive else b'')
+        i = ms.info(control(7, payload=128, task=int(task), max_v=vertices, max_p=primitives, prim_at=0x80 if primitive else 0, verts=verts), area)
+        return ms.to_stage(KERNEL % (ms.memory(i)[1] // 4, ms.memory(i)[0][3] // 4), i, reads), i
 
     def test_task_launches_what_it_wrote(self):
         src, i = self.task(); out = ms.memory(i)[0][2] // 4
         self.assertIn('[[object]] void main0(', src)
         self.assertIn(f'set_threadgroups_per_grid(uint3(min(_23[{out + 1}], {ms.METAL_MAX_GRID}u), 1u, 1u))', src)
         self.assertIn(f'dm_payload.w[i] = _23[{out}u + i]', src)
-        self.assertIn(f'[[buffer({abi.MESH_FIRST_SLOT})]]', src)
+        self.assertIn(f'[[buffer({abi.MESH_DRAW_SLOT})]]', src)
+        self.assertIn('_23[0] = dm_draw[1] + dm_tg;', src)   # the draw's {count, first}: its first task + this threadgroup
 
     def test_body_returns_to_the_wrapper(self):   # an early return must not skip handing the outputs over
         src, _ = self.task()
@@ -121,17 +136,70 @@ class Stage(unittest.TestCase):
         self.assertIn(f'uint at = {prim + 4}u + n;', src)
 
     def test_mesh_with_a_task_reads_its_number_from_the_payload(self):
-        self.assertIn('_23[4] = dm_tg;', self.mesh(task=True)[0])
+        src = self.mesh(task=True)[0]
+        self.assertIn('_23[4] = dm_tg;', src)
+        self.assertNotIn('main0_o', src)
 
-    def test_mesh_without_a_task_counts_from_the_draws_first(self):
+    def test_mesh_without_a_task_counts_from_its_blocks_first(self):   # Metal's mesh grid holds at most METAL_MAX_GRID threadgroups: an object function launches the draw in blocks
         src = self.mesh()[0]
-        self.assertIn('_23[0] = dm_first[0] + dm_tg;', src)
-        self.assertNotIn('[[payload]]', src)
+        self.assertEqual(ms.METAL_MAX_GRID, abi.MESH_GRID)
+        self.assertIn('_23[0] = dm_block.first + dm_tg;', src)
+        self.assertIn('const object_data dm_block_t& dm_block [[payload]]', src)
+        self.assertIn('[[object]] void main0_o(object_data dm_block_t& dm_block [[payload]]', src)
+        self.assertIn(f'[[buffer({abi.MESH_DRAW_SLOT})]]', src)
+        self.assertIn(f'uint b = dm_otg * {ms.METAL_MAX_GRID}u;', src)
+        self.assertIn('dm_block.first = dm_draw[1] + b;', src)
+        self.assertIn(f'dm_grid.set_threadgroups_per_grid(uint3(min(dm_draw[0] - b, {ms.METAL_MAX_GRID}u), 1u, 1u));', src)
 
-    def test_per_primitive_outputs(self):
+    def test_per_primitive_outputs(self):   # four blocks of 6 vertex components (36 + 4 * 192 = 804 words), then the per-primitive blocks of 1 component (stride 32)
         src = self.mesh(primitive=True)[0]
         self.assertIn('metal::mesh<dm_vertex_t, dm_prim_t,', src)
-        self.assertRegex(src, r'p\.p0 = float4\(as_type<float>\(_23\[b \+ 192u\]\), 0\.0, 0\.0, 1\.0\);')   # after the six vertex components
+        self.assertIn('uint b = 36u + (n / 32u) * 192u + n % 32u;', src)
+        self.assertIn('uint b = 804u + (n / 32u) * 32u + n % 32u;', src)
+        self.assertRegex(src, r'p\.p0 = float4\(as_type<float>\(_23\[b \+ 0u\]\), 0\.0, 0\.0, 1\.0\);')
+
+    def test_point_mesh(self):   # Ocarina of Time's 2582bd7ea6490d33 / 28f82c129deea140: point size at +0 ahead of position, topology point (control +0x5f = 1)
+        src = self.mesh(vertices=32, primitives=32, pos=0xf8, verts=1)[0]
+        self.assertIn('float point_size [[point_size]];', src)
+        self.assertIn('metal::mesh<dm_vertex_t, void, 32, 32, metal::topology::point>', src)
+        self.assertIn('v.point_size = as_type<float>(_23[b + 0u]);', src)
+        self.assertIn('v.position = float4(as_type<float>(_23[b + 32u]), as_type<float>(_23[b + 64u]), as_type<float>(_23[b + 96u]), as_type<float>(_23[b + 128u]));', src)
+        self.assertIn('for (uint n = gl_LocalInvocationID.x; n < np * 1u; n += 32u)', src)
+
+    def test_pad_unwritten_pixel_inputs(self):   # Ocarina of Time's foliage point mesh 3a6340a04bf09797 writes no generic output, its pixel shader 2a7c48d595feaaeb reads locn5
+        src = self.mesh(primitive=True, reads={0: 1, 1: 1, 5: 0xf})[0]   # 1 is a vertex output and 0 a primitive output: only 5 is padded, as (0,0,0,1)
+        self.assertIn('    float4 dm_pad5 [[user(locn5)]];\n};', src)
+        self.assertIn('        v.dm_pad5 = float4(0.0, 0.0, 0.0, 1.0);\n', src)
+        self.assertEqual(src.count('[[user(locn1)]]'), 1); self.assertEqual(src.count('[[user(locn0)]]'), 1)
+        self.assertNotIn('dm_pad', self.mesh(primitive=True)[0])
+
+    def test_outputs_as_wide_as_read(self):   # Ocarina of Time's 626fbf48041cb82b: 160 vertices, its float4s came to 35,840 bytes, past a Metal mesh's 32 KB
+        src = self.mesh(primitive=True, reads={0: 1, 1: 1, 5: 0x7})[0]
+        self.assertIn('    float2 a1 [[user(locn1)]];', src)   # x and y written, x read: what it writes
+        self.assertIn('v.a1 = float2(as_type<float>(_23[b + 128u]), as_type<float>(_23[b + 160u]));', src)
+        self.assertIn('    float dm_pad5 [[user(locn5)]];', src)   # no w read: Metal gives the missing y, z, w 0, the hardware's default for x, y and z
+        self.assertIn('v.dm_pad5 = 0.0;', src)
+        self.assertIn('    float p0 [[user(locn0)]];', src)
+        self.assertIn('    float4 a1 [[user(locn1)]];', self.mesh(primitive=True, reads={1: 0xf})[0])   # w read and not written: it must hold 1
+        self.assertIn('v.a1 = float4(as_type<float>(_23[b + 128u]), as_type<float>(_23[b + 160u]), 0.0, 1.0);', self.mesh(primitive=True, reads={1: 0xf})[0])
+        full = self.mesh(primitive=True)[0]   # partners not known: every output a float4, as the hardware starts it
+        self.assertIn('    float4 a1 [[user(locn1)]];', full); self.assertIn('    float4 p0 [[user(locn0)]];', full)
+
+    def test_pixel_reads(self):   # c5eb985e769e317f's input map: locn0 x (linear), 3 xyzw, 4 xyz
+        s = bytearray(0x80); s[0x18] = 0x03; s[0x18 + 3] = 0xaa; s[0x18 + 4] = 0x2a
+        self.assertEqual(ms.pixel_reads(bytes(s)), {0: 1, 3: 0xf, 4: 0x7})
+
+    def local_word(self):   # a private variable spirv-cross initializes ahead of the stage memory: the last entry of a raw global memory lookup (GlobalToStorage.TryGenerateRawStorageOp)
+        i = ms.info(control(7, payload=128, max_v=128, max_p=64), sph(0xf0, b'\x30'))
+        src = (KERNEL % (ms.memory(i)[1] // 4, ms.memory(i)[0][3] // 4)).replace('{\n    threadgroup', '{\n    uint _9 = 0u;\n    threadgroup', 1)
+        src = src.replace('kernel void', 'static inline __attribute__((always_inline))\nvoid _5(thread uint& _10) { _10 = _10 + 1u; }\n\nkernel void', 1).replace('    if (gl_', '    _5(_9);\n    if (gl_', 1)
+        return ms.to_stage(src, i)
+
+    def test_thread_variables_stay_in_the_body(self):
+        src = self.local_word()
+        body, entries = src.split('[[mesh]] void main0(')
+        self.assertRegex(body, r'void dm_stage_body\([^)]*\)\n\{\n    uint _9 = 0u;\n    _5\(_9\);')
+        self.assertNotIn('_9', entries)
 
     def test_past_metal_refused(self):
         with self.assertRaises(ValueError): self.mesh(vertices=300)
@@ -144,9 +212,12 @@ class Stage(unittest.TestCase):
         src = (KERNEL % (ms.memory(i)[1] // 4, ms.memory(i)[0][2] // 4 + 1)).replace('main0(', 'main0(uint (&a)[4], ')
         with self.assertRaises(ValueError): ms.to_stage(src, i)
 
+    def test_position_is_invariant(self):   # two mesh shaders of one geometry must agree: a pre-pass and a colour pass testing depth for equality
+        self.assertIn('float4 position [[position, invariant]];', self.mesh()[0])
+
     @unittest.skipUnless(shutil.which('xcrun') and subprocess.run(['xcrun', '-sdk', 'macosx', '-f', 'metal'], capture_output=True).returncode == 0, 'no Metal compiler')
     def test_compiles(self):
-        cases = [self.task()[0], self.mesh()[0], self.mesh(task=True)[0], self.mesh(primitive=True)[0]]
+        cases = [self.task()[0], self.mesh()[0], self.mesh(task=True)[0], self.mesh(primitive=True)[0], self.mesh(vertices=32, primitives=32, pos=0xf8, verts=1, reads={5: 0x7})[0], self.mesh(primitive=True, reads={0: 1, 1: 0xf, 5: 0xf})[0], self.local_word()]
         with tempfile.TemporaryDirectory() as d:
             for n, src in enumerate(cases):
                 f = Path(d, f's{n}.metal'); f.write_text(src)
@@ -182,7 +253,8 @@ fragment main0_out main0(main0_in in [[stage_in]])
         import ast, re
         tools = Path(__file__).resolve().parents[1] / 'tools'
         tree = ast.parse((tools / 'dmsh_build.py').read_text())
-        scope = {'re': re, 'collections': __import__('collections')}
+        sys.path.insert(0, str(tools)); import dmsh_side   # fs_uint's entry points call main0's shared body
+        scope = {'re': re, 'collections': __import__('collections'), 'dmsh_side': dmsh_side}
         exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ('fs_uint', 'int_outputs', 'in_word')], type_ignores=[]), 'dmsh_build.py', 'exec'), scope)
         cls.fs_uint = staticmethod(scope['fs_uint'])
 

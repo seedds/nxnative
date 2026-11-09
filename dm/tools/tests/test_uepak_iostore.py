@@ -1,4 +1,6 @@
 """IoStore shader resolution using synthetic TOCs, libraries and shader groups; no game files or keys."""
+import contextlib
+import io
 import json
 import os
 from pathlib import Path
@@ -61,7 +63,7 @@ def fstr(s):
     return struct.pack('<i', len(s) + 1) + s.encode() + b'\0'
 
 
-def directory(paths):
+def directory(paths, mount='../../../'):
     """FIoDirectoryIndexResource for {chunk index: 'Dir/File'}: the root, one directory per first path part, their files"""
     none = 0xffffffff
     tops = sorted({v.split('/')[0] for v in paths.values()}); strs = tops + sorted(v.split('/')[1] for v in paths.values())
@@ -71,7 +73,7 @@ def directory(paths):
         for chunk, v in sorted(paths.items()):
             if v.split('/')[0] == top: files.append((strs.index(v.split('/')[1]), first, chunk)); first = len(files) - 1
         dirs.append((strs.index(top), none, k + 2 if k + 1 < len(tops) else none, first))
-    b = fstr('../../../') + struct.pack('<i', len(dirs)) + b''.join(struct.pack('<4I', *d) for d in dirs)
+    b = fstr(mount) + struct.pack('<i', len(dirs)) + b''.join(struct.pack('<4I', *d) for d in dirs)
     b += struct.pack('<i', len(files)) + b''.join(struct.pack('<3I', *f) for f in files)
     return b + struct.pack('<i', len(strs)) + b''.join(fstr(x) for x in strs)
 
@@ -81,6 +83,25 @@ def pak11(path, names):
     d = b''.join(n.encode() + b'\0' for n in names)
     index = fstr('../../../') + struct.pack('<iQ', len(names), 0) + struct.pack('<i', 0) + struct.pack('<iQQ', 1, 0, len(d)) + bytes(20)
     path.write_bytes(d + index + bytes(16) + b'\0' + struct.pack('<IIQQ', uepak.PAK_MAGIC, 11, len(d), len(index)) + bytes(20) + bytes(32 * 5))
+
+
+def aes_encrypt(key, data):
+    import ctypes
+    cc = ctypes.CDLL('/usr/lib/libSystem.B.dylib').CCCrypt
+    out = ctypes.create_string_buffer(len(data)); moved = ctypes.c_size_t()
+    assert cc(0, 0, 2, key, len(key), None, data, len(data), out, len(data), ctypes.byref(moved)) == 0
+    return out.raw[:moved.value]
+
+
+def pad16(b):
+    return b + bytes(-len(b) % 16)
+
+
+def pak11_encrypted(path, names, key, mount='../../../'):
+    """pak11 with its index and directory index encrypted (DRAGON BALL Sparking! ZERO); no names: the empty pak beside a container, mount point "/\""""
+    d = pad16(b''.join(n.encode() + b'\0' for n in names))
+    index = pad16(fstr(mount) + struct.pack('<iQ', len(names), 0) + struct.pack('<i', 0) + struct.pack('<iQQ', 1, 0, len(d)) + bytes(20))
+    path.write_bytes(aes_encrypt(key, d) + aes_encrypt(key, index) + bytes(16) + b'\1' + struct.pack('<IIQQ', uepak.PAK_MAGIC, 11, len(d), len(index)) + bytes(20) + bytes(32 * 5))
 
 
 class IoStore(unittest.TestCase):
@@ -267,6 +288,49 @@ class IoStore(unittest.TestCase):
         self.assertFalse(uepak.inline_shaders(self.inline_pak(('Engine/GlobalShaderCache-X.bin', 'ShaderArchive-Global-X.ushaderbytecode'))))
         self.assertFalse(uepak.inline_shaders(self.inline_pak(('Engine/Config/a.ini',))))
 
+    KEY = bytes(range(40, 72))
+
+    def sparking_zero(self):
+        """DRAGON BALL Sparking! ZERO's layout: pakchunk0's encrypted index names the global shader cache, its encrypted container holds the export bundles (data and directory index encrypted),
+        and pakchunk1's pak is empty (mount point "/") beside a container of its own"""
+        k = self.KEY
+        p0, p1 = self.romfs / 'pakchunk0-Switch.pak', self.romfs / 'pakchunk1-Switch.pak'
+        pak11_encrypted(p0, ['Engine/GlobalShaderCache-SP_GLSL_SWITCH.bin'], k); pak11_encrypted(p1, [], k, mount='/')
+        raw = b'scanned bundle..' * 2
+        toc = container(self.romfs, 'pakchunk0-Switch.utoc', [(chunk_id(1, uepak.IO_EXPORT_BUNDLE), raw), (chunk_id(2, 6), b'header' + bytes(10))], encrypted=True, version=5,
+                        directory=aes_encrypt(k, pad16(directory({0: 'Game/M_A.uasset'}))))
+        ucas = toc.with_suffix('.ucas'); ucas.write_bytes(aes_encrypt(k, ucas.read_bytes()))   # each block a multiple of 16 bytes, so ECB over the file is ECB per block
+        container(self.romfs, 'pakchunk1-Switch.utoc', [(chunk_id(3, uepak.IO_EXPORT_BUNDLE), bytes(16))], encrypted=True, version=5)
+        img = bytes(0x1000) + os.urandom(64) + k + os.urandom(64)   # main: the key in its read-only data, after a text of 0x1000 bytes
+        return str(p0), str(p1), toc, raw, (img, 0x1000, len(img))
+
+    def test_an_encrypted_index_is_read_with_mains_key(self):
+        p0, p1, _, _, img = self.sparking_zero()
+        self.assertTrue(uepak.inline_shaders(p0, self.KEY))
+        self.assertFalse(uepak.inline_shaders(p0))   # no key: counted as one with shader code archives (Octopath Traveler 0), as before
+        self.assertIsNone(uepak.inline_shaders(p1, self.KEY))   # names no file: neither kind
+        with patch.object(uepak, 'nso_image', return_value=img):
+            self.assertEqual(uepak.unreal_paks(str(self.romfs), inline=True, mains=['main']), [p0])
+            self.assertEqual(uepak.unreal_paks(str(self.romfs), inline=False, mains=['main']), [])   # no decode step
+            self.assertEqual(len(uepak.unreal_paks(str(self.romfs), mains=['main'])), 2)
+
+    def test_split_reads_an_encrypted_container_with_the_key_of_the_pak_beside_it(self):
+        p0, _, toc, raw, img = self.sparking_zero()
+        with patch.object(uepak, 'nso_image', return_value=img), patch.object(uepak, 'Pak') as pk:
+            pk.return_value.mount, pk.return_value.files = '../../../', {}
+            files = [(str(f), f.name) for f in sorted(self.romfs.iterdir())]
+            jobs, taken = ss.ue_legacy_jobs(files, mains=['main'])
+        io = [(Path(p).name, a) for p, _, a in jobs if a[0] == ss.UE_IO]
+        # every container in the inline pak's folder is scanned, pakchunk1's too (its empty pak names nothing; the engine mounts all of them), each with the key
+        self.assertEqual(io, [('pakchunk0-Switch.utoc', (ss.UE_IO, (0,), self.KEY)), ('pakchunk1-Switch.utoc', (ss.UE_IO, (0,), self.KEY))])
+        self.assertIn(str(toc), taken)
+        self.assertEqual(uepak.Toc(str(toc)).names(), {})   # without the key the directory index is not read
+        seen = []
+        ss._PAKS.pop(str(toc), None); self.addCleanup(ss._PAKS.pop, str(toc), None)
+        with patch.object(ss, 'ue_inline_shaders', side_effect=lambda d, label, out: seen.append((d, label))):
+            ss.ue_io_shaders(str(toc), 'pakchunk0-Switch.utoc', (0,), [], self.KEY)
+        self.assertEqual(seen, [(raw, '/pakchunk0-Switch.utoc#Game/M_A.uasset')])
+
     def split_jobs(self, tocs):
         with patch.object(uepak, 'Pak') as pk:
             pk.return_value.mount, pk.return_value.files = '../../../', {}
@@ -287,6 +351,10 @@ class IoStore(unittest.TestCase):
         got = sorted((Path(p).name, i) for p, _, (tag, idx) in jobs if tag == ss.UE_IO for i in idx)
         self.assertEqual(got, [('Game.utoc', 1), ('Game_0_P.utoc', 0)])
 
+    def test_names_are_joined_to_a_deeper_mount_point(self):   # DRAGON BALL Sparking! ZERO's pakchunk2-17: labelled as their paks' files would be
+        toc = container(self.romfs, 'Game.utoc', [(chunk_id(1, uepak.IO_EXPORT_BUNDLE), b'b')], version=5, directory=directory({0: 'HUD/T_A.uasset'}, '../../../Game/Content/L10N/ja/'))
+        self.assertEqual(uepak.Toc(str(toc)).names(), {0: 'Game/Content/L10N/ja/HUD/T_A.uasset'})
+
     def test_split_labels_a_shader_with_its_package(self):
         raw = b'scanned'
         toc = container(self.romfs, 'Game.utoc', [(chunk_id(1, uepak.IO_EXPORT_BUNDLE_427), raw)], version=3, directory=directory({0: 'Game/M_A.uasset'}))
@@ -295,6 +363,152 @@ class IoStore(unittest.TestCase):
         with patch.object(ss, 'ue_inline_shaders', side_effect=lambda d, label, out: seen.append((d, label))):
             ss.ue_io_shaders(str(toc), 'Game.utoc', (0,), [])
         self.assertEqual(seen, [(raw, '/Game.utoc#Game/M_A.uasset')])
+
+
+FAKE_HOST = """#!{python} -I
+import struct, sys, zlib
+sys.stderr.write({say!r}); sys.stderr.flush()
+if {gone!r}: sys.exit(1)
+i, o = sys.stdin.buffer, sys.stdout.buffer
+while h := i.read(16):
+    c, n = struct.unpack('<QQ', h); b = i.read(c)
+    try: s = zlib.decompress(b[2:])
+    except zlib.error: s = b''
+    o.write(struct.pack('<Q', n if len(s) == n else 0) + (s if len(s) == n else b'')); o.flush()
+"""
+
+
+class OodleTables(unittest.TestCase):
+    """shader_map_entries's tables in ue_inline_shaders, through a stand-in for the Mac host's DM_OODLE_SERVE: an Oodle stream here is its two first bytes and zlib"""
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp()); self.addCleanup(__import__('shutil').rmtree, self.tmp)
+        self.addCleanup(self.stop)
+        self.host()
+
+    def stop(self):
+        if ss._OODLE:
+            p = ss._OODLE[0]; assert p.stdin
+            p.stdin.close(); p.wait(); ss._OODLE = None
+
+    def host(self, say='', gone=False):
+        self.stop()
+        p = self.tmp / 'host'; p.write_text(FAKE_HOST.format(python=sys.executable, say=say, gone=gone)); p.chmod(0o755)
+        env = patch.dict(os.environ, {'DM_OODLE_HOST': str(p), 'DM_OODLE_MODULES': 'unused'}); env.start(); self.addCleanup(env.stop)
+
+    @staticmethod
+    def record():
+        code = struct.pack('<I', 0x0461) + bytes(0x7c)
+        name = b'Global/FShader/0:/Engine/Private/X.usf|MainVS\0'
+        ctl = uepak.CTL_NVN2 + bytes(0x3c) + struct.pack('<I', len(code)) + bytes(0x98)
+        return bytes(0x3e) + struct.pack('<I', len(name)) + name + struct.pack('<I', len(code)) + code + struct.pack('<I', len(ctl)) + ctl + bytes(12)
+
+    @staticmethod
+    def table(streams):
+        out = struct.pack('<I', len(streams)) + bytes(20 * len(streams)) + struct.pack('<I', len(streams))
+        for b, raw, f in streams: out += struct.pack('<I', len(b)) + b + struct.pack('<IB', raw, f)
+        return out
+
+    def real(self):
+        rec = self.record()
+        return b'\x8c\x0a' + zlib.compress(rec), len(rec), 1
+
+    def export(self):   # an entry of a split package's export list: name number 1, flags 8, size 0xb8c, offset 30650 (OCTOPATH TRAVELER II)
+        return self.table([(struct.pack('<q', 0xb8c), 30650, 0)])
+
+    def scan(self, d):
+        out = []
+        ss.ue_inline_shaders(d, '/Game.pak#M', out)
+        return out
+
+    def test_an_export_entry_is_taken_for_a_table_by_the_walk(self):
+        self.assertEqual(len(uepak.shader_map_entries(bytes(16) + self.export())), 1)
+        self.assertEqual(uepak.shader_map_entries(bytes(16) + self.export(), lambda row: False), [])
+
+    def test_a_stream_the_decoder_refuses_is_no_table(self):
+        out = self.scan(bytes(16) + self.export() + self.table([self.real()]))
+        self.assertEqual([st for _, st, _, _ in out], ['vs'])
+
+    def test_every_entry_of_a_proved_table_is_read(self):
+        self.assertEqual(len(self.scan(bytes(16) + self.table([self.real(), self.real(), self.real()]))), 3)
+
+    def test_a_refused_table_hides_nothing_inside_it(self):
+        inner = self.table([self.real()])
+        self.assertEqual(len(self.scan(bytes(16) + self.table([(b'\x8c\x0b' + inner, 1 << 20, 0)]))), 1)
+
+    def test_a_stored_stream_that_is_no_record_is_no_table(self):
+        self.assertEqual(self.scan(bytes(16) + self.table([(b'\x8c\x0a' + bytes(10), 12, 0)])), [])
+
+    def test_a_stored_record_is_a_table(self):
+        rec = b'\x8c\x0a' + self.record()
+        self.assertEqual(len(self.scan(bytes(16) + self.table([(rec, len(rec), 1)]))), 1)
+
+    @staticmethod
+    def lslg():   # a Switch vertex shader's LSLG record (uepak.lslg): tag, the code area, the control section
+        ctl, code = bytearray(0x880), bytearray(0x100)
+        ctl[:4] = bytes.fromhex('34127698'); struct.pack_into('<I', ctl, 0x20, len(ctl)); struct.pack_into('<I', ctl, 0x704, len(code))
+        code[:4] = bytes.fromhex('78563412'); struct.pack_into('<I', code, 0x30, 1 << 10 | 1)
+        return b'LSLGSV' + bytes(2) + struct.pack('<I', len(code)) + code + struct.pack('<I', len(ctl)) + ctl
+
+    def test_lslg_records_in_an_oodle_table(self):
+        """Unreal Engine 5.1 for the Switch (DRAGON BALL Sparking! ZERO's SP_GLSL_SWITCH): the shader map's tables in Oodle, each entry an LSLG record; one stored as it is is taken once"""
+        rec = self.lslg()
+        packed = (b'\x8c\x0a' + zlib.compress(rec), len(rec), 1)
+        out = self.scan(bytes(16) + self.table([packed, packed]))
+        self.assertEqual([st for _, st, _, _ in out], ['vs', 'vs'])
+        out = self.scan(bytes(16) + self.table([packed, (rec, len(rec), 1)]))
+        self.assertEqual(len(out), 2)
+        self.assertEqual(len({w for w, *_ in out}), 2)
+
+    def test_a_later_entry_the_decoder_refuses_is_red(self):
+        with self.assertRaisesRegex(SystemExit, r"^\[RED\] the game's decoder in the Mac host failed on a 8 → 30650 byte stream"):
+            self.scan(bytes(16) + self.table([self.real(), (struct.pack('<q', 0xb8c), 30650, 0)]))
+
+    def test_a_stream_that_decodes_to_another_layout_is_red(self):
+        other = zlib.compress(b'no record of this layout' * 4)
+        with self.assertRaisesRegex(SystemExit, r"^\[RED\] /Game\.pak#M: the shader record at .* is not a record of the known layout"):
+            self.scan(bytes(16) + self.table([(b'\x8c\x0a' + other, 96, 1)]))
+
+    def test_a_host_that_is_gone_is_red(self):
+        self.host(say='crashed', gone=True)
+        with self.assertRaisesRegex(SystemExit, r"^\[RED\] the game's decoder in the Mac host failed.*\n.*crashed"):
+            self.scan(bytes(16) + self.export())
+
+    def test_a_game_with_no_decoder_has_no_table(self):
+        self.host(say='DM_OODLE_JOB: main has no "OodleLZ_Decompress" name and no streaming decoder to find (0 functions)', gone=True)
+        self.assertEqual(self.scan(bytes(16) + self.export()), [])
+
+    def test_a_package_that_does_not_read_costs_only_itself(self):
+        bad = bytes(16) + self.table([self.real(), (struct.pack('<q', 0xb8c), 30650, 0)])
+        good = bytes(16) + self.table([self.real()])
+        out, said = [], io.StringIO()
+        with contextlib.redirect_stdout(said):
+            extra = ss.ue_packages([('/Game.pak#A', lambda: bad), ('/Game.pak#B', lambda: good)], out)
+        self.assertEqual({w.split('#')[1] for w, *_ in out}, {'A', 'B'})   # the first entry of A was read before its second failed
+        assert extra
+        self.assertEqual((extra[0], extra[2]), ('unreadable', 1))
+        self.assertTrue(extra[1].startswith("/Game.pak#A: the game's decoder"), extra[1])
+        self.assertEqual(said.getvalue().count('[RED] /Game.pak#A: '), 1)
+
+    def test_only_the_first_failures_of_a_job_get_a_line(self):
+        def fail(): raise ValueError('cut short')
+        said = io.StringIO()
+        with contextlib.redirect_stdout(said):
+            extra = ss.ue_packages([(f'/Game.pak#{i}', fail) for i in range(20)], [])
+        self.assertEqual(extra, ('unreadable', '/Game.pak#0: ValueError: cut short', 20))
+        self.assertEqual(said.getvalue().count('\n'), 8)
+
+    def test_nothing_lost_gives_no_extra(self):
+        self.assertIsNone(ss.ue_packages([('/Game.pak#A', lambda: b'')], []))
+
+    def test_a_job_keeps_what_it_read_and_says_how_many_it_lost(self):
+        p = self.tmp / 'Game.pak'; p.write_bytes(bytes(16))
+        ctl = uepak.sage_record(self.record()); assert ctl
+        def job(path, rel, names, out):
+            out.append(('/Game.pak#B', 'vs', ctl[1], ctl[2]))
+            return ('unreadable', '/Game.pak#A: why', 3)
+        with patch.object(ss, 'ue_legacy_shaders', side_effect=job):
+            rel, keys, _, extra = ss.scan_file((str(p), 'Game.pak', (ss.UE_LEGACY, ('A', 'B'))))
+        self.assertEqual((rel, len(keys), extra), ('Game.pak', 1, ('unreadable', '/Game.pak#A: why', 3)))
 
 
 if __name__ == '__main__': unittest.main()

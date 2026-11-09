@@ -17,7 +17,8 @@
 // (the movie decoder thread writing a frame into texture storage, a disk read into a guest buffer) could set the state back to NONE, then the mprotect landed => the page read-only with state NONE: a game thread writing it got only
 // "re-execute" from the fault handler and spun forever; a host system call reading into it saw NONE in prep_write, skipped, and failed with EFAULT (reproduced by t_dirty_race).
 // BUSY lasts at most one mprotect (plus a few atomic writes when setting read-only). The wait is capped at BUSY_WAIT_MS and reports red beyond it: in the fault handler it then returns "not our page" so the crash handler reports truthfully
-enum { PG_NONE = 0, PG_PROT = 1, PG_BUSY = 2 };
+// OPEN (nvn_dirty_open): protected, made writable for a moment without counting as written; a host write takes it as it takes a protected page.
+enum { PG_NONE = 0, PG_PROT = 1, PG_BUSY = 2, PG_OPEN = 3 };
 enum { BUSY_WAIT_MS = 2000 };
 // Tracked ranges = the memory pools (registered by MemoryPoolInitialize). After a pool is destroyed its live=0 slot is reused; the signal handler scans without locks.
 // The table grows in blocks of 1,024 slots, up to 262,144; a block is never moved or freed, so the signal handler reads it without locks. A pool past the end goes untracked: its textures count
@@ -82,12 +83,18 @@ static void unprotect_page(range_t *r, uintptr_t p) {   // The caller has alread
     stamp_page(r, p); sparse_note(r, p);
     atomic_store(&r->state[p], PG_NONE);
 }
+// Take a protected or open page for unprotecting (-> BUSY): 1 = taken; 0 = not, with the state found in *st
+static int take_page(range_t *r, uintptr_t p, uint8_t *st) {
+    *st = PG_PROT;
+    if (atomic_compare_exchange_strong(&r->state[p], st, PG_BUSY)) return 1;
+    return *st == PG_OPEN && atomic_compare_exchange_strong(&r->state[p], st, PG_BUSY);
+}
 // Unprotect one page of a range: if protected, unprotect and stamp it; if another thread is changing its protection, wait for it to finish and look again -- if the other side was setting read-only, the page is PROT after the wait and still has to be unprotected
 // (an unprotect-before-write never reaches the fault handler, so it must be done here). Returns 1 = this page is managed by this module; 0 = it is not, or the wait on BUSY timed out
 static int release_page(range_t *r, uintptr_t p, _Atomic uint64_t *count) {
     for (;;) {
-        uint8_t st = PG_PROT;
-        if (atomic_compare_exchange_strong(&r->state[p], &st, PG_BUSY)) { unprotect_page(r, p); if (count) atomic_fetch_add(count, 1); return 1; }
+        uint8_t st;
+        if (take_page(r, p, &st)) { unprotect_page(r, p); if (count) atomic_fetch_add(count, 1); return 1; }
         if (st != PG_BUSY) return atomic_load(&r->gen[p]) != 0;   // already NONE: just unprotected by another thread (the fault happened before the unprotect) -> re-execute; pages never protected are not ours
         if (!busy_wait(r, p)) return 0;
     }
@@ -105,7 +112,7 @@ static int on_fault(void *addr, int is_write, void *uc) {
 static void release_pages(range_t *r, uintptr_t p, uintptr_t q, _Atomic uint64_t *count) {
     uintptr_t run = 0; int open = 0;
     for (uintptr_t i = p; i <= q + 1; i++) {
-        uint8_t st = PG_PROT; int took = i <= q && atomic_compare_exchange_strong(&r->state[i], &st, PG_BUSY);
+        uint8_t st = PG_NONE; int took = i <= q && take_page(r, i, &st);
         if (took) { if (!open) { run = i; open = 1; } continue; }
         if (open) {
             mp(r->base + (run << g_shift), (i - run) << g_shift, PROT_READ | PROT_WRITE);
@@ -176,6 +183,77 @@ void nvn_dirty_remove_range(const void *mem) {
     if (r) { prep_write((void *)r->base, r->end - r->base); atomic_store_explicit(&r->live, 0, memory_order_release); atomic_fetch_sub(&g_live, 1); }
     pthread_mutex_unlock(&g_slot_mu);
 }
+// A zero-copy Metal buffer made while any of its pages is read-only drops every GPU write through it, with no error, even to pages never protected and even once its pages are writable again;
+// one made over writable pages keeps working when they are protected later (M4 Pro probe; LEGO Star Wars: The Skywalker Saga's font copies inside its 1.4 GB pool, issue #1591). So the protected
+// pages of [addr, addr + len) are opened for the buffer: nvn_dirty_open makes them writable without counting them as written, the buffer is made, and nvn_dirty_close protects them again and
+// counts as written only the pages whose bytes changed meanwhile (a write to an open page does not fault, so their hash before and after is what sees it). Counting every opened page as written
+// (2d544e0d) read every packaged texture there again, though nothing wrote it: 34 on Ocarina of Time's village walk, 4,038 in its first load on a contributor's build that makes chunks there,
+// and storage the GPU drew into lost its content (LEGO's 3D picture went black). A host write to an open page takes it as a protected one (stamped, left writable, not protected again). No protection starts between open and close:
+// protection and pool retirement wait meanwhile (g_slot_mu, under which a page cannot become protected); the page-fault path takes no lock and is not held up
+typedef struct { range_t *r; uintptr_t p; uint64_t h; } open_pg;
+static open_pg *g_open; static size_t g_nopen, g_copen;   // the pages nvn_dirty_open opened, by range and then page; g_slot_mu held
+static _Atomic uint64_t g_opened, g_open_changed;
+static uint64_t page_hash(const void *page) {   // xxHash64's rounds over a page's four lanes: a change to any word changes it, and changes to several cancel only by chance (2^-64)
+    const uint64_t P1 = 0x9E3779B185EBCA87ull, P2 = 0xC2B2AE3D27D4EB4Full, *w = page;
+    uint64_t a = P1 + P2, b = P2, c = 0, d = -P1;
+    for (size_t i = 0, n = g_pg / 8; i < n; i += 4) {
+        a = __builtin_rotateleft64(a + w[i] * P2, 31) * P1; b = __builtin_rotateleft64(b + w[i + 1] * P2, 31) * P1;
+        c = __builtin_rotateleft64(c + w[i + 2] * P2, 31) * P1; d = __builtin_rotateleft64(d + w[i + 3] * P2, 31) * P1;
+    }
+    uint64_t h = __builtin_rotateleft64(a, 1) + __builtin_rotateleft64(b, 7) + __builtin_rotateleft64(c, 12) + __builtin_rotateleft64(d, 18);
+    h ^= h >> 33; h *= P2; h ^= h >> 29; h *= P1; return h ^ (h >> 32);
+}
+static void open_add(range_t *r, uintptr_t p, uint64_t h) {
+    if (g_nopen == g_copen) {
+        size_t cap = g_copen ? 2 * g_copen : 1024; open_pg *grown = realloc(g_open, cap * sizeof *g_open);
+        if (!grown) die("dirty-page tracking: out of memory for %zu open pages", cap);
+        g_open = grown; g_copen = cap;
+    }
+    g_open[g_nopen++] = (open_pg){r, p, h};
+}
+void nvn_dirty_open(const void *addr, size_t len) {
+    pthread_mutex_lock(&g_slot_mu);
+    g_nopen = 0;
+    uintptr_t a = (uintptr_t)addr, e = a + len; int n = atomic_load(&g_nr);
+    for (int k = 0; len && k < n; k++) {
+        range_t *r = rg(k);
+        if (!live_at(k) || e <= r->base || a >= r->end) continue;
+        uintptr_t lo = a > r->base ? a : r->base, hi = e < r->end ? e : r->end, p = (lo - r->base) >> g_shift, q = (hi - 1 - r->base) >> g_shift, run = 0; int open = 0;
+        for (uintptr_t i = p; i <= q + 1; i++) {
+            // A protected page is read-only and, with g_slot_mu held, stays protected until someone unprotects it: hashed first, then taken; one unprotected meanwhile is not ours
+            uint8_t st = i <= q ? atomic_load(&r->state[i]) : PG_NONE; int took = 0;
+            if (st == PG_PROT) {
+                uint64_t h = page_hash((const void *)(r->base + (i << g_shift)));
+                if ((took = atomic_compare_exchange_strong(&r->state[i], &st, PG_BUSY))) open_add(r, i, h);
+            }
+            if (took) { if (!open) { run = i; open = 1; } continue; }
+            if (open) {
+                mp(r->base + (run << g_shift), (i - run) << g_shift, PROT_READ | PROT_WRITE);
+                for (uintptr_t j = run; j < i; j++) atomic_store(&r->state[j], PG_OPEN);
+                open = 0;
+            }
+            if (st == PG_BUSY) busy_wait(r, i);   // being unprotected: writable once it is done (with g_slot_mu held nothing protects it), and the buffer must not be made before
+        }
+    }
+    atomic_fetch_add(&g_opened, g_nopen);
+}
+void nvn_dirty_close(void) {
+    size_t changed = 0;
+    for (size_t j = 0; j < g_nopen; ) {
+        // A run: one range's consecutive pages still open. A page a host write took meanwhile (stamped, left writable) ends the run and is left as it is
+        range_t *r = g_open[j].r; size_t s = j;
+        for (uint8_t st = PG_OPEN; j < g_nopen && g_open[j].r == r && g_open[j].p == g_open[s].p + (j - s) && atomic_compare_exchange_strong(&r->state[g_open[j].p], &st, PG_BUSY); st = PG_OPEN) j++;
+        if (j == s) { j++; continue; }
+        mp(r->base + (g_open[s].p << g_shift), (j - s) << g_shift, PROT_READ);   // protected again first: a write from here on faults as usual, and the bytes stay as hashed below
+        for (size_t k = s; k < j; k++) atomic_store(&r->state[g_open[k].p], PG_PROT);
+        for (size_t k = s; k < j; k++)
+            if (page_hash((const void *)(r->base + (g_open[k].p << g_shift))) != g_open[k].h) { stamp_page(r, g_open[k].p); sparse_note(r, g_open[k].p); changed++; }
+    }
+    atomic_fetch_add(&g_open_changed, changed);
+    g_nopen = 0;
+    pthread_mutex_unlock(&g_slot_mu);
+}
+void nvn_dirty_open_stats(uint64_t *opened, uint64_t *changed) { *opened = atomic_load(&g_opened); *changed = atomic_load(&g_open_changed); }
 int nvn_dirty_tracked(const void *addr, size_t len) {
     return find_span((uintptr_t)addr, len) != NULL;
 }

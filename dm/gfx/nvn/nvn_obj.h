@@ -20,8 +20,7 @@ typedef struct { uint32_t magic; NVNdevice *dev; uint64_t submits; int origin_ll
 
 typedef struct { NVNdevice *dev; void *mem; uint64_t size; uint32_t flags; } pool_builder_t;  FITS(pool_builder_t, NVNmemoryPoolBuilder);
 // A virtual pool (flags 0x200) keeps its sparse state in vp (hle_nvn.c struct vpool, NULL for an aliased one); vmode: 0 not mapped yet, 1 aliased onto one physical pool, 2 sparse
-// gpu_written: a render target, a shader image, a texture clear or a copy into a texture has been recorded in it (mtl_pool_gpu_written)
-typedef struct { uint32_t magic, flags; uint8_t *mem; uint64_t size; struct vpool *vp; int vmode; _Atomic int gpu_written; } pool_t;   FITS(pool_t, NVNmemoryPool);
+typedef struct { uint32_t magic, flags; uint8_t *mem; uint64_t size; struct vpool *vp; int vmode; } pool_t;   FITS(pool_t, NVNmemoryPool);
 
 typedef struct { const pool_t *pool; int64_t off; int32_t n; } dpool_t;                       // Texture / sampler descriptor pool
 FITS(dpool_t, NVNtexturePool); FITS(dpool_t, NVNsamplerPool);
@@ -51,19 +50,23 @@ _Static_assert(sizeof(view_t) <= 16, "view_t exceeds the newer SDKs' NVNtextureV
 // Sampler parameters (one copy shared by builder and object)
 typedef struct { uint8_t minf, magf, ws, wt, wr, cmp_mode, cmp_func, reduction; float lod_min, lod_max, lod_bias, aniso, border[4]; } samp_par;   // Enum values are all < 256; reduction takes the padding byte
 typedef struct { NVNdevice *dev; samp_par p; } samp_builder_t;                                FITS(samp_builder_t, NVNsamplerBuilder);
-typedef struct { uint32_t magic; samp_par p; } samp_t;                                        FITS(samp_t, NVNsampler);
+// All of the state lies from byte 8 on, and nvnSamplerInitialize writes every byte of the record (docs/reference/nvn-objects.md): games hash a sampler from byte 8 to tell samplers apart. Super Mario Odyssey's sampler cache
+// (main+0x980e20) keys its entries by a CRC-16 of bytes 8-0x5f alone and reuses the ID of the entry whose CRC matches, so filter and wrap modes at bytes 4-7 made samplers that differ only in them one sampler
+typedef struct { uint32_t magic, zero; samp_par p; } samp_t;                                  FITS(samp_t, NVNsampler);
+_Static_assert(__builtin_offsetof(samp_t, p) == 8 && sizeof(samp_par) == 40, "sampler state from byte 8, with no padding");
 
 // The per-stage shader keys are not kept in prog_t: the game's real NVNprogram may be smaller than the header's 0xC0 (growing prog_t corrupted the adjacent object in Mario); see prog_keys in hle_nvn.c
 typedef struct { uint32_t magic, nstage; NVNshaderData sd[6]; uint64_t serial; } prog_t;     FITS(prog_t, NVNprogram);   // serial: table key for the replay layer's resolved result
 
-typedef struct { uint32_t magic, fenced; uint64_t fence; } sync_t;   /* fenced 2: by WindowAcquireTexture */                           FITS(sync_t, NVNsync);
+typedef struct { uint32_t magic, fenced; uint64_t fence; } sync_t;   /* fenced 1: physical, 2: acquire, 3: owned logical receipt */                           FITS(sync_t, NVNsync);
 typedef struct { const pool_t *pool; int64_t off; } ev_builder_t;                             FITS(ev_builder_t, NVNeventBuilder);
-typedef struct { uint32_t magic; volatile uint32_t *val; } ev_t;                              FITS(ev_t, NVNevent);
+typedef struct { uint32_t magic; volatile uint32_t *val; const pool_t *pool; int64_t off; } ev_t; FITS(ev_t, NVNevent);   // pool / off: EventGetMemoryPool / Offset
 
-typedef struct { NVNdevice *dev; void *native; int32_t ntex, interval; NVNtexture *tex[4]; } win_builder_t;
+// nactive: SetNumActiveTextures, the first textures AcquireTexture hands out (0 = all of them)
+typedef struct { NVNdevice *dev; void *native; int32_t ntex, interval; NVNtexture *tex[4]; int32_t nactive; } win_builder_t;
 FITS(win_builder_t, NVNwindowBuilder);
 // avail[i]: time at which swapchain image i can be acquired again (ns, monotonic clock) = its display time + one present period; pace: target time of this window's present pacer
-typedef struct { uint32_t magic; void *native; int32_t ntex, interval, next, crop[4]; NVNtexture *tex[4]; uint64_t presents, avail[4], pace, ticket[4]; } win_t;   // ticket[i]: ticket of the most recent present of image i
+typedef struct { uint32_t magic; void *native; int32_t ntex, interval, next, crop[4]; NVNtexture *tex[4]; uint64_t presents, avail[4], pace, ticket[4]; int32_t nactive; } win_t;   // ticket[i]: ticket of the most recent present of image i; nactive as in win_builder_t
 FITS(win_t, NVNwindow);
 
 // Command buffer: commands are written into the command memory given by the game (AddCommandMemory), handle = segment start address; when it runs out, the game is called back for more memory
@@ -80,13 +83,15 @@ typedef struct {
     uint64_t used;                       // Bytes written since the game last added command memory, across recordings and host segments, including segment-switch JUMPs (returned by GetCommandMemoryUsed)
     int32_t tex_base, samp_base;         // Host-table bases of the texture / sampler pool this command buffer last bound (hle_nvn.c dpool_add; 0 = the first pool of its kind)
     size_t ctl_size;                     // Bytes in the last control memory block supplied by the game (the host records no control commands)
+    int64_t copy_row, copy_image;        // SetCopyRowStride / SetCopyImageStride: state of the command buffer, written into each buffer <-> texture copy (p_copy_strides), not recorded
+    size_t cmd_size;                     // GetCommandMemorySize: the bytes the game last passed to AddCommandMemory, as in NVN; a host-lent segment leaves it (see there)
 } cmd_t;                                                                                   FITS(cmd_t, NVNcommandBuffer);
 
 // ---------- State objects (defaults follow the NVN / GL defaults) ----------
 typedef struct { uint32_t blend_en : 8, logic_op : 4, alpha_func : 4; } color_st;            FITS(color_st, NVNcolorState);
 typedef struct { uint32_t mask; } chmask_st;            /* 4 bits per target: r=1 g=2 b=4 a=8, bit set = write */ FITS(chmask_st, NVNchannelMaskState);
-// adv: NVN advanced blend mode (0 = none); adv_npm: the source is not premultiplied (SetAdvancedPremultipliedSrc(false)); adv_ovl: overlap mode (0 = uncorrelated, the default)
-typedef struct { uint64_t target : 3, src_rgb : 7, dst_rgb : 7, src_a : 7, dst_a : 7, eq_rgb : 3, eq_a : 3, adv : 6, adv_npm : 1, adv_ovl : 2; } blend_st;
+// adv: NVN advanced blend mode (0 = none); adv_npm: the source is not premultiplied (SetAdvancedPremultipliedSrc(false)); adv_ovl: overlap mode (0 = uncorrelated, the default); adv_dst_free: SetAdvancedNormalizedDst(false)
+typedef struct { uint64_t target : 3, src_rgb : 7, dst_rgb : 7, src_a : 7, dst_a : 7, eq_rgb : 3, eq_a : 3, adv : 6, adv_npm : 1, adv_ovl : 2, adv_dst_free : 1; } blend_st;
 FITS(blend_st, NVNblendState);
 typedef struct { uint8_t enable, samples, a2c, a2c_dither, raster_samples, cov_mod, cov2color_en, cov2color_out, sl_en, sl_grid; } ms_st;
 FITS(ms_st, NVNmultisampleState);
@@ -107,7 +112,7 @@ enum {
     OP_BIND_PROGRAM, OP_BIND_STATE, OP_BIND_VATTR, OP_BIND_VSTREAM, OP_BIND_VBUF,
     OP_BIND_UBO, OP_BIND_SSBO, OP_BIND_TEX, OP_BIND_SAMP,
     OP_STENCIL, OP_POLY_OFFSET, OP_DRAW, OP_DRAW_IDX, OP_DISPATCH, OP_BARRIER,
-    OP_SET_TEX_POOL, OP_SET_SAMP_POOL, OP_COPY_B2T, OP_COPY_STRIDE, OP_BLEND_COLOR, OP_COPY_T2B, OP_BIND_IMG, OP_COPY_T2T, OP_RESET_COUNTER, OP_CLEAR_TEX, OP_CLEAR_BUF, OP_DEPTH_CLAMP, OP_RENDER_COND, OP_FENCE_SYNC, OP_TF_BIND, OP_TF_STATE, OP_RAST_DISCARD, OP_VP_SWIZZLE, OP_BIND_TEX1, OP_PRIM_RESTART, OP_BIND_UBO_SMALL, OP_BIND_VBUF1, OP_DRAW_TEX, OP_ALPHA_REF, OP_PUSH_CONST, OP_DLSS, OP_MULTI_DRAW, OP_COUNT_
+    OP_SET_TEX_POOL, OP_SET_SAMP_POOL, OP_COPY_B2T, OP_COPY_STRIDE, OP_BLEND_COLOR, OP_COPY_T2B, OP_BIND_IMG, OP_COPY_T2T, OP_RESET_COUNTER, OP_CLEAR_TEX, OP_CLEAR_BUF, OP_DEPTH_CLAMP, OP_RENDER_COND, OP_FENCE_SYNC, OP_TF_BIND, OP_TF_STATE, OP_RAST_DISCARD, OP_VP_SWIZZLE, OP_BIND_TEX1, OP_PRIM_RESTART, OP_BIND_UBO_SMALL, OP_BIND_VBUF1, OP_DRAW_TEX, OP_ALPHA_REF, OP_PUSH_CONST, OP_DLSS, OP_MULTI_DRAW, OP_WAIT_EVENT, OP_WAIT_SYNC, OP_COUNT_
 };
 // Payload (immediately follows op_hdr)
 typedef struct {
@@ -188,7 +193,16 @@ typedef struct { uint64_t src; const tex_t *tex; view_t view; uint8_t has_view; 
 #define DM_COPY_RESOLVE 0x40000000
 typedef struct { const tex_t *src, *dst; view_t sv, dv; uint8_t has_sv, has_dv; NVNcopyRegion sr, dr; int32_t flags; } p_copy_t2t;   // Reused for T2B: src stores the destination buffer address
 typedef struct { const tex_t *tex; view_t view; uint8_t has_view, is_uint; NVNcopyRegion r; int32_t mask; union { float f[4]; uint32_t u[4]; } c; } p_clear_tex;
-typedef struct { int64_t stride; int image; } p_copy_stride;   // image: SetCopyImageStride (bytes per layer / depth slice) instead of SetCopyRowStride
+typedef struct { int64_t stride; int image; } p_copy_stride;   // image: SetCopyImageStride (bytes per layer / depth slice) instead of SetCopyRowStride. Replayed from older captures only: the recorder no longer writes it
+// The copy strides of a buffer <-> texture copy. In NVN they are command buffer state that a copy reads when it is recorded, and setting them takes no command memory
+// (GetCopyRowStride reads them back). A copy record carries them after its texture snapshot only when one is set, so a copy with the default (tight) strides keeps its size.
+// Super Smash Bros. Ultimate records one upload in 256 bytes of command memory: SetCopyRowStride, SetCopyImageStride, CopyBufferToTexture, as two 24-byte records before the copy,
+// went past them and called the game's out-of-memory callback, which that command buffer never set (a jump to 0, docs/reference/nvn-objects.md "Copy strides are command buffer state")
+typedef struct { int64_t row, image; } p_copy_strides;
+#define COPY_STRIDES_OFF ((((sizeof(p_copy_b2t) + 7) & ~(size_t)7)) + sizeof(tex_t))   // payload offset: after the record and its one texture snapshot (REC_SNAP)
+static inline const p_copy_strides *copy_strides(const void *a, uint32_t size) {
+    return size >= 8 && size - 8 >= COPY_STRIDES_OFF + sizeof(p_copy_strides) ? (const p_copy_strides *)((const uint8_t *)a + COPY_STRIDES_OFF) : NULL;
+}
 // NVN2's DLSS evaluation: the parameters at the time of the call, each texture snapped after the record (hle_nvn.c "NVN2's DLSS", nvn_mtl.m dlss_eval)
 enum { DLSS_COLOR, DLSS_DEPTH, DLSS_MOTION, DLSS_OUTPUT, DLSS_BIAS, DLSS_EXPOSURE, DLSS_TEXTURES };
 typedef struct { const tex_t *tex[DLSS_TEXTURES]; uint64_t net; int32_t iw, ih, ow, oh, base[DLSS_TEXTURES][2]; float mv[2], jitter[2], pre_exposure; uint32_t flags, reset; } p_dlss;
@@ -242,6 +256,8 @@ int mtl_snap_on(void); uint64_t mtl_snap_acquire_wait(void);   // present snapsh
 // Texture release (at Finalize)
 void mtl_tex_init(const tex_t *t);      // TextureInitialize: the serial belongs to a live texture object until mtl_tex_release
 void mtl_tex_release(tex_t *t);
+void mtl_tex_pin(uint64_t serial);
+void mtl_tex_unpin(uint64_t serial);
 void mtl_pkg_stats(uint64_t *uploads, uint64_t *reuploads);
 unsigned mtl_cpu_tex_count(void);   // live textures the CPU writes (retired snapshots are excluded)
 uint64_t mtl_pkg_edge_skips(void);   // packaged texture checks that found only writes beside the texture (pkg_edges_clean)
@@ -257,17 +273,23 @@ void mtl_reg_tex_gone(int id);   // the ID stays registered, its memory pool fin
 void mtl_reg_image(int id, const tex_t *t, const view_t *v);   // RegisterImage declares image use even when the builder omitted IMAGE
 // textures written by WriteTexels (recorded by serial): the replay layer treats them like packaged textures, uploaded from guest memory and re-uploaded on dirty pages
 void mtl_tex_cpu_written(const tex_t *t);
+void mtl_tex_gpu_written(const tex_t *t);   // a GPU write into the texture's storage is recorded: uncompressed textures over it are no longer taken from storage (tex_cpu_content)
 int mtl_tex_gpu_owned(uint64_t serial);                                  // its host texture is a render target or shader-writable: GPU content, never re-uploaded from guest memory
+enum { MTL_REWRITE_UPLOADED, MTL_REWRITE_GPU, MTL_REWRITE_GPU_NOW };     // mtl_tex_cpu_rewritten: uploaded from its storage / left to the GPU for good / until the CPU rewrites it
+int mtl_tex_cpu_rewritten(const tex_t *t);                               // nvn_ft_poll: the CPU wrote a registered texture's pages after its first use (MTL_REWRITE_*)
 // hle_nvn.c: a texture tex_flush_upload / tex_dirty_upload registered and has not resolved yet; GPU copies written into the destination texture's storage as well (see there)
 int nvn_ft_tracked(uint64_t serial);
 int nvn_tex_mirror_b2t(const tex_t *t, unsigned level, unsigned layer0, const NVNcopyRegion *r, const uint8_t *src, size_t row, size_t img);
 int nvn_tex_mirror_t2t(const tex_t *s, unsigned sl, unsigned ss, const NVNcopyRegion *sr, const tex_t *d, unsigned dl, unsigned ds, const NVNcopyRegion *dr);
 // A program's per-stage shader key (hle_nvn.c): the first 8 bytes of sha256(first 0x880 bytes of the control section (its own length when shorter) + code area). Computed at SetShaders (NVN lets the caller free the control section once it returns, and Unity does);
-// a stage whose code area was not yet in any memory pool then is computed the first time it is asked for. Returns 0 = no such stage
+// a stage whose code area was not yet in any memory pool then is computed the first time it is asked for, from the host's copy of its control section. The keys belong to
+// the program's serial, so a copy of the NVNprogram the game made after SetShaders finds them. Returns 0 = no such stage
 int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]);
 void nvn_ctl_lens(const void *control, uint32_t *nctl, uint32_t *ncode);   // a control section's bytes in the shader key and its code area's length (NVN or NVN2), hle_nvn.c
 void mtl_reg_samp(int id, const samp_par *p);
 void mtl_prog_release(prog_t *p);
+void mtl_prog_unpin(prog_t *p); // submit lock held: release a queued descriptor or saved binding
+void mtl_prog_snapshot(prog_t *copy, const prog_t *source); // submit lock held: retain compiled shaders behind owned metadata
 void mtl_prog_prefetch(const prog_t *p);   // loads a new program's shader libraries in the background (nvn_mtl.m)
 void mtl_prog_forget(const prog_t *p);   // program finalize, submit lock held: drop it from every queue's bindings
 // New serial (> 0, globally increasing)

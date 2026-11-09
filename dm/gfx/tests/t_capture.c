@@ -66,6 +66,15 @@ static void walk(seg *s, uint8_t *bytes, const cap_ops *ops, const uint8_t *orig
 }
 
 int main(void) {
+    cap_queue_state single = {0}, multi_queue = {0}, waited = {0};
+    cap_queue_note(&single, 11, 0); cap_queue_note(&single, 11, 0);
+    CHECK(!cap_queue_unsupported(&single), "one logical queue without waits remains capturable");
+    cap_queue_note(&multi_queue, 11, 0); cap_queue_note(&multi_queue, 12, 0);
+    CHECK(cap_queue_unsupported(&multi_queue) && atomic_load(&multi_queue.unsupported) == CAP_QUEUE_MULTIPLE, "different logical queues are rejected before their physical order can be mistaken for queue semantics");
+    cap_queue_note(&waited, 11, 1);
+    CHECK(cap_queue_unsupported(&waited) && atomic_load(&waited.unsupported) == CAP_QUEUE_WAIT, "wait-only queue operations cannot disappear from a capture");
+    CHECK(cap_record_unsupported(OP_WAIT_EVENT) && cap_record_unsupported(OP_WAIT_SYNC), "standalone replay rejects logical waits");
+    CHECK(!cap_record_unsupported(OP_FENCE_SYNC) && !cap_record_unsupported(OP_SIGNAL_EVENT), "legacy fences and event signals remain replayable");
     char path[1024]; const char *tmp = getenv("TMPDIR"); snprintf(path, sizeof path, "%s/t_capture_XXXXXX", tmp && *tmp ? tmp : "/tmp");
     int fd = mkstemp(path); CHECK(fd >= 0, "temporary file"); close(fd);
     pool_a = calloc(1, 65536); pool_b = calloc(1, 16384);
@@ -120,6 +129,8 @@ int main(void) {
     const char *lay = cap_layout();
     const char *multi_layout = strstr(lay, "op 55 p_multi_draw");
     CHECK(multi_layout && cap_layout_matches(lay, (size_t)(multi_layout - lay)), "the complete legacy record layout remains readable");
+    const char *strides_layout = strstr(lay, "p_copy_strides");
+    CHECK(strides_layout && cap_layout_matches(lay, (size_t)(strides_layout - lay)), "the layout before the copy strides' tail remains readable");
     CHECK(cap_layout_matches(lay, strlen(lay)) && !cap_layout_matches(lay, strlen(lay) - 1), "accept the current layout, reject a truncated extension");
     cap_put(&w, CAP_LAYT, 0, lay, strlen(lay), 0);
     for (int r = 0; r < nregs; r++) { uint8_t b[sizeof(cap_regn) + 65536]; cap_regn h = {(uint32_t)r, r == 2, regs[r].lo, regs[r].size};
@@ -186,6 +197,11 @@ int main(void) {
     FILE *f = fopen(path, "r+b"); fseeko(f, 0, SEEK_END); off_t n = ftello(f); fclose(f); truncate(path, n - 40);
     CHECK(cap_load(&rd, path) == 1, "a truncated capture still opens"); int r, bad = 0; while ((r = cap_next(&rd, &c, &d)) == 1) free(d); bad = r < 0; cap_unload(&rd);
     CHECK(bad, "a truncated capture ends in an error");
+    CHECK(cap_open(&w, path), "replace a rejected capture with a failure marker");
+    const char *why = cap_queue_unsupported(&waited);
+    cap_put(&w, CAP_FAIL, 0, why, strlen(why), 0); CHECK(cap_close(&w), "close rejected capture");
+    CHECK(cap_load(&rd, path) == 1 && cap_next(&rd, &c, &d) == 1 && c.tag == CAP_FAIL && c.raw == strlen(why) && !memcmp(d, why, c.raw), "failure reason survives the capture file round-trip");
+    free(d); cap_unload(&rd);
     unlink(path);
     printf("t_capture: %d checks, %d failed\n", checks, failed);
     return failed != 0;

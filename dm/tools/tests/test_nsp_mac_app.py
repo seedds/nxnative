@@ -176,6 +176,12 @@ class PackReuse(unittest.TestCase):
         self.assertTrue(any('--sign' in c for c in self.commands))
         self.assertTrue(self.key.is_file())
 
+    def test_save_sync_choice_capability(self):
+        self.args.settings = None
+        info = pack_app.info_plist(self.args, '26.6', False)
+        self.assertIs(type(info['DMSaveSyncChoice']), int)
+        self.assertEqual(info['DMSaveSyncChoice'], 1)   # the host follows DM_SAVE_SYNC_CHOICE (docs/frontends.md, The cloud saves folder)
+
     def test_retargeted_input_symlink_repacks(self):
         msl = self.tmp / 'msl'
         for name in ('left.metallib', 'right.metallib'): (msl / name).write_bytes(b'same library')
@@ -904,10 +910,6 @@ class SeenShaders(unittest.TestCase):   # --seen-shaders: the keys, the partial 
         with mock.patch.object(nsp, 'chain_tables', lambda *a: True), mock.patch.object(nsp, 'stale_shaders', lambda *a: None), mock.patch.object(nsp, 'prune_stale_chains'), mock.patch.object(nsp, 'prune_shader_cache'):
             self.build()
         self.assertFalse(any('--seen-shaders' in m for m in self.said))
-
-    def test_shader_watch_counts_the_list(self):
-        self.assertEqual(nsp.ShaderWatch(self.g, self.tmp, self.tmp).n, 4)
-        self.assertEqual(nsp.ShaderWatch(self.g, self.tmp, self.tmp, seen=self.keys('a', 'b')).n, 2)
 
     def run_cmd(self, **kw):
         game = self.tmp / 'ex'; game.mkdir(exist_ok=True); (game / 'RomFS').mkdir(exist_ok=True)

@@ -95,7 +95,7 @@ rfs = shader_lib.romfs
 ROOT = Path(os.environ.get('REGRESS_ROOT', ''))
 GAMES = Path(os.environ.get('REGRESS_GAMES', ''))
 HOST_DIRS = ('dm/host', 'dm/gfx', 'dm/gfx/nvn', 'dm/gfx/nvn/include', 'dm/gfx/tex', 'dm/gfx/vk', 'dm/gfx/gl')   # as build_ipa_from_nsp.py: the host's sources and headers
-REWRITER = ('dm/tools/patch_nso.py', 'dm/tools/nso.py', 'dm/tools/nso_code.py', 'dm/tools/nso_asm.py', 'dm/tools/nso_match.py', 'dm/tools/sdk_patches.py', 'dm/tools/ue_cvar.py', 'dm/tools/ue_malloc.py', 'dm/tools/ue_region.py', 'dm/tools/ue_ring.py', 'dm/tools/fps_target.py', 'dm/tools/loader_census.py')
+REWRITER = ('dm/tools/patch_nso.py', 'dm/tools/nso.py', 'dm/tools/nso_code.py', 'dm/tools/nso_asm.py', 'dm/tools/nso_match.py', 'dm/tools/sdk_patches.py', 'dm/tools/engine_patches.py', 'dm/tools/ue_cvar.py', 'dm/tools/ue_malloc.py', 'dm/tools/ue_region.py', 'dm/tools/ue_ring.py', 'dm/tools/fps_target.py', 'dm/tools/loader_census.py', 'dm/tools/ue_fixed_rate.py', 'dm/tools/unity_fps.py', 'dm/tools/unity_bucket.py', 'dm/tools/snowdrop_pools.py')
 HEAVY_EXE = {'clang', 'make', 'xcodebuild', 'ld', 'ld64', 'swift-frontend', 'dotnet', 'metal', 'metal-tt', 'air-tt', 'applegpu-nt', 'dmsh_xlate', 'spirv-cross'}   # jobs that skew a measurement
 HEAVY_PY = r'(dmsh_build|shader_split|own_compilers|patch_nso|vk_shaders)\.py'   # (the shared measuring rule)
 # Tolerances, from runs of one revision against itself (docs/development.md, The regression harness)
@@ -463,14 +463,14 @@ def chain_build_locked(tree, g, a, v, inp, key, out):
             say(f'  {g.id}: chain {v} (inputs {inp}) of {tree.id}: translating the shaders ({jobs} workers) → {out}')
             if cas.suffix != '.db': tree_tar.unpack(cas, say)
             rc, paused = run_heavy([sys.executable, entry, g.build / 'shader/pkg', out], log, tree.path, env, a, f'{g.id} shader build'); t0 += paused
-            if rc or not (lib / '_b_build.json').is_file():
+            if rc or not (shader_lib.view(lib) / '_b_build.json').is_file():   # a folder (an older revision's dmsh_build.py) or the image a newer one writes
                 raise HarnessError(f'{g.id}: dmsh_build.py of {tree.id} failed (exit {rc}); last lines of {log}:\n' + ''.join(collections.deque(open(log, errors='replace'), maxlen=8)))
             prof = out / 'profile'; prof.mkdir(exist_ok=True)   # the tables the host reads beside the shader map, as this build made them
             for src in g.profile_dir(tree).glob('*.tsv'): shutil.copyfile(src, prof / src.name)
             (out / 'built.ok').write_text(f'{tree.id}\n')
             if cas.suffix != '.db': tree_tar.pack(cas, say)
         say(f'  {g.id}: hashing the outputs of chain {v}')
-        shaders = nvn_manifest(lib, jobs)
+        shaders = nvn_manifest(shader_lib.view(lib), jobs)
     else:
         say(f'  {g.id}: vk_shaders.py {v} of {tree.id} → {out}')
         msl = out / 'msl'; shutil.rmtree(msl, ignore_errors=True); msl.mkdir()

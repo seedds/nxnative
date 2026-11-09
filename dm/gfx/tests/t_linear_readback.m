@@ -99,7 +99,10 @@ static void scaled_copy_case(void) {
 //   0: LINEAR, 32-byte rows: uploaded from its storage at its stride, and ReadTexels reads its pixels; then an NVN copy into it, a CPU write, reads on another thread and an upload
 //   1: LINEAR, 64-byte rows: stays a view
 //   2: LINEAR, 32-byte rows, read by ReadTexels on another thread before its first use: the read has its pixels, and the first use on the submit thread still uploads it
-//   3: IMAGE|LINEAR, 32-byte rows (the GPU may write it): a GPU texture, not CPU-written, its first fill at its stride
+//   3: IMAGE|LINEAR, 32-byte rows, only sampled (Hades II's Bink planes, GitHub issue #1956): CPU-written while the GPU has not written its storage, uploaded again after a CPU
+//      write; a recorded GPU write into it makes it a GPU texture that keeps its content
+//   4: IMAGE|LINEAR, 32-byte rows, its storage written by the GPU before its first use: a GPU texture, not CPU-written, its first fill at its stride
+//   5: LINEAR_RENDER_TARGET, 32-byte rows, only sampled: CPU-written, as 3
 static int blit_bad(id<MTLTexture> t, const uint8_t *stored, int stride) {   // rows of the texture unlike the storage's
     id<MTLBuffer> out = [g_dev newBufferWithLength:24 * 6 options:MTLResourceStorageModeShared]; if (!out) return 6;
     id<MTLCommandBuffer> cb = q_cb(); id<MTLBlitCommandEncoder> bl = [cb blitCommandEncoder];
@@ -122,8 +125,9 @@ static void unaligned_upload_case(void) {   // a pool made through NVN, so that 
     const size_t len = 262144; uint8_t *mem = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0); if (mem == MAP_FAILED) abort(); memset(mem, 0xee, len);
     pool_t pool = {0}; pool_builder_t pb = {.mem = mem, .size = len, .flags = NVN_MEMORY_POOL_FLAGS_CPU_CACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED};
     EXPECT("unaligned case: pool init", 1, h_nvnMemoryPoolInitialize((NVNmemoryPool *)&pool, (const NVNmemoryPoolBuilder *)&pb));
-    enum { N = 4 }; NVNtexture tex[N]; id<MTLTexture> t[N];
-    int stride[N] = {32, 64, 32, 32}, flags[N] = {NVN_TEXTURE_FLAGS_LINEAR, NVN_TEXTURE_FLAGS_LINEAR, NVN_TEXTURE_FLAGS_LINEAR, NVN_TEXTURE_FLAGS_IMAGE | NVN_TEXTURE_FLAGS_LINEAR};
+    enum { N = 6 }; NVNtexture tex[N]; id<MTLTexture> t[N];
+    int stride[N] = {32, 64, 32, 32, 32, 32}, flags[N] = {NVN_TEXTURE_FLAGS_LINEAR, NVN_TEXTURE_FLAGS_LINEAR, NVN_TEXTURE_FLAGS_LINEAR, NVN_TEXTURE_FLAGS_IMAGE | NVN_TEXTURE_FLAGS_LINEAR,
+                                                    NVN_TEXTURE_FLAGS_IMAGE | NVN_TEXTURE_FLAGS_LINEAR, NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET};
     const uint8_t *stored[N];
     for (int i = 0; i < N; i++) {
         uint64_t at = 65536 + (uint64_t)i * 4096; stored[i] = mem + at;
@@ -133,7 +137,8 @@ static void unaligned_upload_case(void) {   // a pool made through NVN, so that 
         h_nvnTextureBuilderSetStorage(&tb, (const NVNmemoryPool *)&pool, (ptrdiff_t)at);
         EXPECT("unaligned case: texture init", 1, h_nvnTextureInitialize(&tex[i], &tb));
     }
-    h_nvnMemoryPoolFlushMappedRange((const NVNmemoryPool *)&pool, 65536 + 3 * 4096, 32 * 6);   // 3: flushed, so its first fill takes the storage (tex_init_fill; the pool is CPU_CACHED)
+    h_nvnMemoryPoolFlushMappedRange((const NVNmemoryPool *)&pool, 65536 + 4 * 4096, 32 * 6);   // 4: flushed, so its first fill takes the storage (tex_init_fill; the pool is CPU_CACHED)
+    mtl_tex_gpu_written((const tex_t *)&tex[4]);   // 4: a GPU write into its storage is recorded before its first use, as a render target, clear, copy or image binding records it
     mtl_sub_begin();   // this thread is the submit thread from here on (tex_mtl_ uploads only there)
     read_job job = {&tex[2], stored[2], -1}; pthread_t th;
     if (pthread_create(&th, NULL, read_on_thread, &job)) abort();
@@ -143,12 +148,15 @@ static void unaligned_upload_case(void) {   // a pool made through NVN, so that 
     EXPECT("0: not a view on the pool's buffer", 1, t[0] && !t[0].buffer);
     EXPECT("1: a view on the pool's buffer", 1, t[1] && t[1].buffer && t[1].bufferBytesPerRow == 64);
     EXPECT("2: not a view on the pool's buffer after the read", 1, t[2] && !t[2].buffer);
-    EXPECT("3: not a view on the pool's buffer", 1, t[3] && !t[3].buffer);
+    for (int i = 3; i < N; i++) EXPECT(i == 3 ? "3: not a view on the pool's buffer" : i == 4 ? "4: not a view on the pool's buffer" : "5: not a view on the pool's buffer", 1, t[i] && !t[i].buffer);
     EXPECT("0: CPU-written", 1, tex_cpu_written(((const tex_t *)&tex[0])->serial));
     EXPECT("2: CPU-written", 1, tex_cpu_written(((const tex_t *)&tex[2])->serial));
-    EXPECT("3: not CPU-written (the GPU may write it)", 0, tex_cpu_written(((const tex_t *)&tex[3])->serial));
+    EXPECT("3: CPU-written (the GPU has not written its storage)", 1, tex_cpu_written(((const tex_t *)&tex[3])->serial));
+    EXPECT("4: not CPU-written (the GPU wrote its storage)", 0, tex_cpu_written(((const tex_t *)&tex[4])->serial));
+    EXPECT("5: CPU-written (the GPU has not written its storage)", 1, tex_cpu_written(((const tex_t *)&tex[5])->serial));
     mtl_wait(mtl_sub_commit(), 5000000000ull);
-    static const char *const up[N] = {"0: 6 rows uploaded at the storage's stride", "1: 6 rows read as stored", "2: 6 rows uploaded at the storage's stride", "3: 6 rows filled at the storage's stride"};
+    static const char *const up[N] = {"0: 6 rows uploaded at the storage's stride", "1: 6 rows read as stored", "2: 6 rows uploaded at the storage's stride", "3: 6 rows uploaded at the storage's stride",
+                                      "4: 6 rows filled at the storage's stride", "5: 6 rows uploaded at the storage's stride"};
     for (int i = 0; i < N; i++) if (t[i]) EXPECT(up[i], 0, blit_bad(t[i], stored[i], stride[i]));
     EXPECT("0: ReadTexels has its 6 rows", 0, read_bad(&tex[0], stored[0], 32));
     EXPECT("1: ReadTexels has its 6 rows", 0, read_bad(&tex[1], stored[1], 64));
@@ -167,6 +175,19 @@ static void unaligned_upload_case(void) {   // a pool made through NVN, so that 
     EXPECT("0: ReadTexels on another thread after a CPU write has it, and the copied rows", 0, after_write.bad);
     mtl_sub_begin(); id<MTLTexture> again = tex_mtl((const tex_t *)&tex[0]); mtl_wait(mtl_sub_commit(), 5000000000ull);
     EXPECT("0: uploaded again on the submit thread with the CPU's row and the copied ones", 0, again ? blit_bad(again, want, 24) : 6);
+    // 3, as a movie decoder writes a frame: the CPU's row is read on another thread and uploaded at the next use. Then a recorded GPU write into its storage makes it a GPU texture
+    // (cpu_unc_drop at the next resolve), with the content it has
+    uint8_t want3[24 * 6]; for (int y = 0; y < 6; y++) memcpy(want3 + y * 24, stored[3] + y * 32, 24);
+    dm_guest_write_prepare(mem + 65536 + 3 * 4096, 24); memset(mem + 65536 + 3 * 4096, 0x66, 24); memset(want3, 0x66, 24);
+    read_job frame = {&tex[3], want3, -1}; read_job_tight(&frame);
+    EXPECT("3: ReadTexels on another thread after a CPU write has it", 0, frame.bad);
+    mtl_sub_begin(); id<MTLTexture> next = tex_mtl((const tex_t *)&tex[3]); mtl_wait(mtl_sub_commit(), 5000000000ull);
+    EXPECT("3: uploaded again on the submit thread with the CPU's row", 0, next ? blit_bad(next, want3, 24) : 6);
+    mtl_tex_gpu_written((const tex_t *)&tex[3]);
+    mtl_sub_begin(); id<MTLTexture> gpu = tex_mtl((const tex_t *)&tex[3]); mtl_wait(mtl_sub_commit(), 5000000000ull);
+    EXPECT("3: not CPU-written after a GPU write into its storage", 0, tex_cpu_written(((const tex_t *)&tex[3])->serial));
+    EXPECT("3: the GPU texture keeps its content", 0, gpu ? blit_bad(gpu, want3, 24) : 6);
+    EXPECT("3: ReadTexels reads the GPU texture", 0, read_bad(&tex[3], want3, 24));
     h_nvnCommandBufferFinalize(&cmd);
     for (int i = 0; i < N; i++) h_nvnTextureFinalize(&tex[i]);
     h_nvnMemoryPoolFinalize((NVNmemoryPool *)&pool); defer_drain(); munmap(mem, len);

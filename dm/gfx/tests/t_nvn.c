@@ -12,7 +12,7 @@ void nvn_present_config(int hz, int display_mode);
 #include <fcntl.h>
 #include <errno.h>
 #include <unistd.h>
-uint64_t now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000ull + t.tv_nsec; }
+uint64_t now_ns(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }   // the host's clock (hle_os.c: Mach absolute time), which Metal's timestamps are on
 
 static int g_fail, g_n;
 #define EXPECT(name, want, got) do { long long w_ = (long long)(want), g_ = (long long)(got); g_n++;                 \
@@ -62,6 +62,21 @@ static size_t tex_size(int fmt, int w, int h, int flags, size_t *align) {
     return P(nvnTextureBuilderGetStorageSize)(&tb);
 }
 
+// 5d's recorder: records small draws into one command buffer, re-adding the same memory well before it is full (so it never needs a host-lent segment), until told to stop
+#define CMDSIZE_MARGIN 512   // room left for one more draw record and the END, whatever their sizes
+typedef struct { NVNcommandBuffer *c; NVNmemoryPool *mp; size_t n; _Atomic int stop; _Atomic long recs; } cmdsize_rec_t;
+static void *cmdsize_recorder(void *a) {
+    cmdsize_rec_t *r = a;
+    while (!atomic_load_explicit(&r->stop, memory_order_relaxed)) {
+        P(nvnCommandBufferAddCommandMemory)(r->c, r->mp, 0, r->n); P(nvnCommandBufferBeginRecording)(r->c);
+        while (P(nvnCommandBufferGetCommandMemoryFree)(r->c) >= CMDSIZE_MARGIN) {
+            P(nvnCommandBufferDrawElementsBaseVertex)(r->c, NVN_DRAW_PRIMITIVE_TRIANGLES, NVN_INDEX_TYPE_UNSIGNED_SHORT, 36, 0x10000, 5);
+            atomic_fetch_add_explicit(&r->recs, 1, memory_order_relaxed);
+        }
+        P(nvnCommandBufferEndRecording)(r->c);
+    }
+    return NULL;
+}
 int main(void) {
     setenv("DM_NVN_COUNT", "1", 1);   // the call-count checks below need the counting trampolines (off by default)
     {   // A missing control section must not publish uninitialized bytes or poison a serial's key cache.
@@ -414,6 +429,44 @@ int main(void) {
         memcpy(&rh, m, sizeof rh);
         EXPECT("a copy with the default strides keeps its size and has no strides", 1, rh.size == 8 + COPY_STRIDES_OFF && !copy_strides(m + 8, rh.size));
         P(nvnTextureFinalize)(&tx); P(nvnCommandBufferFinalize)(&c3);
+    }
+
+    // 5d. GetCommandMemorySize is the size of the memory the game last added, stable while another thread records into the buffer (GitHub issue #768): Super Smash Bros. Ultimate
+    //     sorts its pool of command buffers by it while its other render dispatch thread records into buffers of that pool. Summed per call, a reader saw sizes torn by the records
+    {
+        static uint8_t m[4096] __attribute__((aligned(4096))); NVNmemoryPoolBuilder mb; NVNmemoryPool mp; NVNcommandBuffer c4;
+        P(nvnMemoryPoolBuilderSetDefaults)(&mb); P(nvnMemoryPoolBuilderSetStorage)(&mb, m, sizeof m); P(nvnMemoryPoolInitialize)(&mp, &mb);
+        P(nvnCommandBufferInitialize)(&c4, &dev);
+        P(nvnCommandBufferAddCommandMemory)(&c4, &mp, 0, sizeof m);
+        EXPECT("size after AddCommandMemory: the memory added", sizeof m, P(nvnCommandBufferGetCommandMemorySize)(&c4));
+        P(nvnCommandBufferBeginRecording)(&c4);
+        P(nvnCommandBufferDrawElementsBaseVertex)(&c4, NVN_DRAW_PRIMITIVE_TRIANGLES, NVN_INDEX_TYPE_UNSIGNED_SHORT, 36, 0x10000, 5);
+        EXPECT("size unchanged by a record", sizeof m, P(nvnCommandBufferGetCommandMemorySize)(&c4));
+        EXPECT("size = used + free in the memory the game added", 1, P(nvnCommandBufferGetCommandMemorySize)(&c4) == P(nvnCommandBufferGetCommandMemoryUsed)(&c4) + P(nvnCommandBufferGetCommandMemoryFree)(&c4));
+        // Past the memory added (no callback): the recording goes on in a host-lent segment, which is not the game's memory and leaves the size as the game set it
+        for (int i = 0; i < 200; i++) P(nvnCommandBufferDrawElementsBaseVertex)(&c4, NVN_DRAW_PRIMITIVE_TRIANGLES, NVN_INDEX_TYPE_UNSIGNED_SHORT, 36, 0x10000, 5);
+        EXPECT("in a host-lent segment: size is still the memory added", 1, P(nvnCommandBufferGetCommandMemorySize)(&c4) == sizeof m && P(nvnCommandBufferGetCommandMemoryUsed)(&c4) > sizeof m);
+        P(nvnCommandBufferEndRecording)(&c4);
+        // Memory added at an offset the host aligns past: the size is the bytes the game passed, not the host's segment
+        P(nvnCommandBufferAddCommandMemory)(&c4, &mp, 4, sizeof m - 4);
+        EXPECT("memory added at offset 4: size is the bytes passed", sizeof m - 4, P(nvnCommandBufferGetCommandMemorySize)(&c4));
+        // Memory added in the middle of a recording (a game's out-of-memory callback): the JUMP to it counts in the old memory, and the size is the new memory's
+        P(nvnCommandBufferBeginRecording)(&c4);
+        P(nvnCommandBufferDrawElementsBaseVertex)(&c4, NVN_DRAW_PRIMITIVE_TRIANGLES, NVN_INDEX_TYPE_UNSIGNED_SHORT, 36, 0x10000, 5);
+        P(nvnCommandBufferAddCommandMemory)(&c4, &mp, 0, sizeof m);
+        EXPECT("memory added during a recording: size is that memory", sizeof m, P(nvnCommandBufferGetCommandMemorySize)(&c4));
+        P(nvnCommandBufferEndRecording)(&c4);
+        // Another thread records into the same memory over and over: every size read here is the memory added
+        cmdsize_rec_t r = { .c = &c4, .mp = &mp, .n = sizeof m }; pthread_t th; long torn = 0;
+        P(nvnCommandBufferAddCommandMemory)(&c4, &mp, 0, sizeof m);
+        EXPECT("the recorder thread starts", 0, pthread_create(&th, NULL, cmdsize_recorder, &r));
+        for (uint64_t w = now_ns(); !atomic_load_explicit(&r.recs, memory_order_relaxed) && now_ns() - w < 2000000000ull; ) {}
+        for (uint64_t t0 = now_ns(); now_ns() - t0 < 200000000ull; )
+            for (int i = 0; i < 4096; i++) torn += P(nvnCommandBufferGetCommandMemorySize)(&c4) != sizeof m;
+        atomic_store_explicit(&r.stop, 1, memory_order_relaxed); pthread_join(th, NULL);
+        EXPECT("the recorder recorded while the sizes were read", 1, atomic_load_explicit(&r.recs, memory_order_relaxed) > 0);
+        EXPECT("size reads during another thread's recording: none torn", 0, torn);
+        P(nvnCommandBufferFinalize)(&c4); P(nvnMemoryPoolFinalize)(&mp);
     }
 
     // 5a. Command memory per recording, as GetCommandMemoryUsed reports it (games size prerecorded command blocks by it: Breath of the Wild records one scratch draw per mesh):

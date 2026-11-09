@@ -154,6 +154,7 @@ HALF = r'''#import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 static float h2f(uint16_t h) { __fp16 v; memcpy(&v, &h, 2); return (float)v; }
 static uint16_t f2h(float f) { __fp16 v = (__fp16)f; uint16_t h; memcpy(&h, &v, 2); return h; }
+static float r16(float f) { return h2f(f2h(f)); }   // one rounding to f16 (RNE)
 static id<MTLComputePipelineState> pipeline(id<MTLDevice> dev, const char *path, NSString *name) {
     NSError *e = nil; NSData *lib_data = [NSData dataWithContentsOfFile:@(path)];
     id<MTLLibrary> lib = [dev newLibraryWithData:dispatch_data_create(lib_data.bytes, lib_data.length, nil, DISPATCH_DATA_DESTRUCTOR_DEFAULT) error:&e];
@@ -168,8 +169,8 @@ static void run(id<MTLDevice> dev, id<MTLComputePipelineState> ps, id<MTLBuffer>
     [ce dispatchThreadgroups:MTLSizeMake(groups, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)]; [ce endEncoding]; [cb commit]; [cb waitUntilCompleted];
 }
 '''
-# The GPU check: 64 threadgroups of 128 lanes, random halves in [-1, 1]; the reference sums in float and rounds once; the matrix hardware rounds the f16 accumulator as
-# it goes, as Ampere's f16 accumulator does, so the tolerance is 0.01 + 0.4 % of the value
+# The GPU check: 64 threadgroups of 128 lanes, random halves in [-1, 1]; the reference is Ampere's: C, then k 0-7 summed in float in order and rounded once to f16,
+# then k 8-15 the same way (dmsh_build.py HMMA_BODY), and every output must match it bit for bit
 RUNNER = HALF + r'''
 int main(int argc, char **argv) {
     @autoreleasepool {
@@ -194,19 +195,19 @@ int main(int argc, char **argv) {
                 int g = L / 4, t = L % 4; const uint32_t *r = o + (warp * 32 + L) * 2;
                 for (int q2 = 0; q2 < 2; q2++) for (int j = 0; j < 2; j++) {
                     int row = g + 8 * q2, col = 2 * t + j; float ref = C[row][col];
-                    for (int k = 0; k < 16; k++) ref += A[row][k] * B[k][col];
+                    for (int k = 0; k < 16; k++) { ref = fmaf(A[row][k], B[k][col], ref); if (k == 7 || k == 15) ref = r16(ref); }
                     double d = fabs(h2f((r[q2] >> (16 * j)) & 0xffff) - ref);
                     if (d > worst) worst = d;
-                    bad += d > 0.01 + fabs(ref) * 0.004;
+                    bad += (r[q2] >> (16 * j) & 0xffff) != f2h(ref);
                 }
             }
         }
-        printf("%d SIMD-groups, max abs error %.4g, %ld outputs over tolerance\n", n / 32, worst, bad);
+        printf("%d SIMD-groups, max abs error %.4g, %ld outputs that differ from Ampere's\n", n / 32, worst, bad);
         return bad != 0;
     }
 }
 '''
-# The run of calls: E0 = A0 (B0 + B1) + C and E1 = A1 (B2 + B3), each two HMMAs with an f16 accumulator in between: the tolerance is twice the single call's
+# The run of calls: E0 = A0 B0 + A0 B1 + C and E1 = A1 B2 + A1 B3, each two HMMAs with an f16 accumulator in between, bit for bit against the same reference
 SEQ_RUNNER = HALF + r'''
 int main(int argc, char **argv) {
     @autoreleasepool {
@@ -227,14 +228,16 @@ int main(int argc, char **argv) {
                     int row = g + 8 * q2, col = 2 * t + j;
                     const uint16_t *A = x + 256 * e, *Ba = x + 512 + 256 * e, *Bb = Ba + 128;
                     float ref = e == 0 ? h2f(x[1024 + row * 8 + col]) : 0;
-                    for (int k = 0; k < 16; k++) ref += h2f(A[row * 16 + k]) * (h2f(Ba[k * 8 + col]) + h2f(Bb[k * 8 + col]));
+                    for (int c = 0; c < 2; c++) for (int k = 0; k < 16; k++) {   // two calls, B0 then B1: their k 0-7 and k 8-15 each rounded once
+                        ref = fmaf(h2f(A[row * 16 + k]), h2f((c ? Bb : Ba)[k * 8 + col]), ref); if (k == 7 || k == 15) ref = r16(ref);
+                    }
                     double d = fabs(h2f((r[e * 2 + q2] >> (16 * j)) & 0xffff) - ref);
                     if (d > worst) worst = d;
-                    bad += d > 0.02 + fabs(ref) * 0.008;
+                    bad += (r[e * 2 + q2] >> (16 * j) & 0xffff) != f2h(ref);
                 }
             }
         }
-        printf("%d SIMD-groups, max abs error %.4g, %ld outputs over tolerance\n", warps, worst, bad);
+        printf("%d SIMD-groups, max abs error %.4g, %ld outputs that differ from Ampere's\n", warps, worst, bad);
         return bad != 0;
     }
 }

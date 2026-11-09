@@ -18,7 +18,7 @@ import dmsh_atomic  # noqa: E402
 import dmsh_fetch  # noqa: E402
 import dmsh_side  # noqa: E402
 
-ns: dict[str, Any] = {'re': re, 'collections': collections, 'dmsh_side': dmsh_side}   # dmsh_build.py is a script that runs a build when imported
+ns: dict[str, Any] = {'re': re, 'collections': collections, 'dmsh_side': dmsh_side, 'dmsh_fetch': dmsh_fetch}   # dmsh_build.py is a script that runs a build when imported
 exec(compile(ast.Module(body=[n for n in ast.parse((TOOLS / 'dmsh_build.py').read_text()).body if isinstance(n, ast.FunctionDef) and n.name in {'attributes', 'in_word', 'has_word', 'int_outputs', 'fs_uint'}], type_ignores=[]), 'dmsh_build', 'exec'), ns)
 attributes, has_word, fs_uint = ns['attributes'], ns['has_word'], ns['fs_uint']
 

@@ -1797,6 +1797,11 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                 return GenerateRawVectorLoad(context, operation);
             }
 
+            if (!isStore && operation.StorageKind == StorageKind.ConstantBuffer && TryGenerateBoundedUniformLoad(context, operation, out OperationResult bounded))
+            {
+                return bounded;
+            }
+
             SpvInstruction pointer = GetStoragePointer(context, operation, out AggregateType varType);
 
             // nxnative: a load or store through a physical storage buffer pointer must state its alignment (a 32-bit word)
@@ -1858,6 +1863,74 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
             }
 
             return new OperationResult(AggregateType.U32, context.CompositeExtract(context.TypeU32(), value, (SpvLiteralInteger)0));
+        }
+
+        // nxnative: a read of a game uniform slot (TranslationFlags.MetalUniformBounds) gives 0 past the size the game bound, as Maxwell's constant buffers do. Metal has no
+        // bounds of its own: the read reached the guest memory past the binding. Paper Mario: The Thousand-Year Door binds 16 bytes to a slot whose shader reads its light
+        // count at byte 0x900 and loops over that many lights, and the GPU hung on what lay there (GitHub issue #1860). The size is the u32 the host puts in the size table
+        // (Constants.NxUniformSizesBank); the word read is in bounds when its index is below the size in words. A read at a fixed offset keeps its constant address (Metal
+        // reads it as before) and only its value is chosen; a read at a computed offset reads row 0 when out of bounds, so it reaches no memory past the binding either
+        private static bool TryGenerateBoundedUniformLoad(CodeGenContext context, AstOperation operation, out OperationResult result)
+        {
+            result = OperationResult.Invalid;
+
+            if (operation.GetSource(0) is not AstOperand { Type: OperandType.Constant } bindingIndex ||
+                !context.Properties.BoundedConstantBuffers.TryGetValue(bindingIndex.Value, out int sizeIndex))
+            {
+                return false;
+            }
+
+            if (operation.SourcesCount != 4 || operation.GetSource(1) is not AstOperand { Type: OperandType.Constant } fieldIndex)
+            {
+                throw new InvalidOperationException($"A uniform slot read with {operation.SourcesCount} sources cannot be bounded (binding {bindingIndex.Value}).");
+            }
+
+            StructureField field = context.Properties.ConstantBuffers[bindingIndex.Value].Type.Fields[fieldIndex.Value];
+            AggregateType varType = field.Type & AggregateType.ElementTypeMask;
+            SpvInstruction type = context.GetType(varType);
+            SpvInstruction u32 = context.TypeU32();
+            SpvInstruction s32 = context.TypeS32();
+
+            SpvInstruction sizePointer = context.AccessChain(
+                context.TypePointer(StorageClass.Uniform, u32),
+                context.ConstantBuffers[context.Properties.UniformSizesBinding],
+                context.Constant(s32, 0),
+                context.Constant(s32, sizeIndex >> 2),
+                context.Constant(s32, sizeIndex & 3));
+            SpvInstruction sizeWords = context.ShiftRightLogical(u32, context.Load(u32, sizePointer), context.Constant(u32, 2u));
+
+            IAstNode vecNode = operation.GetSource(2);
+            IAstNode elemNode = operation.GetSource(3);
+            SpvInstruction vec = context.Get(AggregateType.S32, vecNode);
+            SpvInstruction elem = context.Get(AggregateType.S32, elemNode);
+            bool fixedOffset = vecNode is AstOperand { Type: OperandType.Constant } && elemNode is AstOperand { Type: OperandType.Constant };
+
+            SpvInstruction word = fixedOffset
+                ? context.Constant(u32, (uint)(((AstOperand)vecNode).Value * 4 + ((AstOperand)elemNode).Value))
+                : context.BitwiseOr(u32, context.ShiftLeftLogical(u32, context.Bitcast(u32, vec), context.Constant(u32, 2u)), context.Bitcast(u32, elem));
+            SpvInstruction inBounds = context.ULessThan(context.TypeBool(), word, sizeWords);
+
+            if (!fixedOffset)
+            {
+                vec = context.Select(s32, inBounds, vec, context.Constant(s32, 0));
+            }
+
+            SpvInstruction pointer = context.AccessChain(
+                context.TypePointer(StorageClass.Uniform, type),
+                context.ConstantBuffers[bindingIndex.Value],
+                context.Get(AggregateType.S32, fieldIndex),
+                vec,
+                elem);
+            SpvInstruction zero = varType switch
+            {
+                AggregateType.FP32 => context.Constant(type, 0f),
+                AggregateType.U32 => context.Constant(type, 0u),
+                AggregateType.S32 => context.Constant(type, 0),
+                _ => throw new InvalidOperationException($"A uniform slot read of type {varType} cannot be bounded."),
+            };
+
+            result = new OperationResult(varType, context.Select(type, inBounds, context.Load(type, pointer), zero));
+            return true;
         }
 
         private static SpvInstruction GetStoragePointer(CodeGenContext context, AstOperation operation, out AggregateType varType)

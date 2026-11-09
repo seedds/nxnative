@@ -318,7 +318,11 @@ static void file_wire(id<MTLAllocation> r) {
         return;
     }
     g_fwire_ns += clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0; g_fwire_n++; g_fwire_bytes += hi - lo;
-    if (g_nfwire == g_cfwire) { g_cfwire = g_cfwire ? 2 * g_cfwire : 64; g_fwire = realloc_or_die(g_fwire, g_cfwire * sizeof *g_fwire, "the wired file ranges"); }
+    if (g_nfwire == g_cfwire) {   // the list file_unwire undoes; a range it cannot hold is unwired at once (the commit pages it in itself, as before)
+        size_t n = g_cfwire ? 2 * g_cfwire : 64; void *grown = realloc(g_fwire, n * sizeof *g_fwire);
+        if (!grown) { munlock((void *)lo, hi - lo); return; }
+        g_fwire = grown; g_cfwire = n;
+    }
     g_fwire[g_nfwire].p = (void *)lo; g_fwire[g_nfwire++].n = hi - lo;
 }
 static void file_unwire(fwire_t *fw, size_t n) { for (size_t i = 0; i < n; i++) munlock(fw[i].p, fw[i].n); free(fw); }   // a range the game has mapped anew meanwhile fails, harmlessly

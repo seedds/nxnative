@@ -14472,6 +14472,7 @@ static void td_dump_depth(void) {   // after mtl_finish_gpu (td_dump): see DM_NV
         if (t.storageMode == MTLStorageModeMemoryless) continue;
         NSUInteger w = MAX(t.width >> lv, 1ul), h = MAX(t.height >> lv, 1ul), row = w * bpp;
         id<MTLBuffer> buf = [g_dev newBufferWithLength:row * h options:MTLResourceStorageModeShared];
+        if (!buf) { MLOG("[texdump] depth ser=%llu: no %lu-byte buffer, skipped", ser, (unsigned long)(row * h)); continue; }
         id<MTLCommandBuffer> cb = q_cb(); id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
         [b copyFromTexture:t sourceSlice:0 sourceLevel:lv sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(w, h, 1) toBuffer:buf destinationOffset:0 destinationBytesPerRow:row destinationBytesPerImage:row * h
                    options:pf == MTLPixelFormatDepth32Float_Stencil8 ? MTLBlitOptionDepthFromDepthStencil : MTLBlitOptionNone];

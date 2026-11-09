@@ -2092,6 +2092,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Breath of the Wild](../../dm/games/01007EF00011E000/README.md#found-on-this-game) (resolved).
 - **Check:** `test_nsp_mac.py` (`test_prune_stale_chains_after_success`, `test_failed_build_keeps_stale_chains`, `test_prune_ignores_other_names`).
 
+### A full shader cache stopped the build
+
+- **Symptom:** the shader stage stops with `sqlite3.OperationalError: database or disk is full` while committing a compile-cache batch.
+- **Cause:** the individual writes handled a full database, but the outer commit could still raise. Staging also removed output files before SQLite committed the batch, so a rollback could lose earlier files from the same batch.
+- **Fix:** write the optional cache entries in one transaction and report a full cache once. Staging removes its source files only after that transaction commits. On failure, the library packer still finds the files on disk.
+- **Check:** `test_shader_toolchain_cache.py` reaches a real SQLite page limit during staging and injects a full-disk error at commit during cache publication. The staged files still make a complete image, and a later retry can publish the cache entry.
+- **Found on:** [Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md), iOS build to an external exFAT volume ([NX2Apple issue #965](https://github.com/LNPANDY/NX2Apple/issues/965)). Verified with synthetic shader outputs.
+
 ### Old per-shader cache entries grew a game's build folder with each chain change
 
 - **Symptom:** `<id>_build/shader/cache/cas/shader/` holds several entries for each shader, and grows by a full set with every upstream update that changes the shader chain. Tears of the Kingdom ([seedds/nxnative#1033](https://github.com/seedds/nxnative/issues/1033)): 172,014 entries after six builds for 28,669 shaders, 11.85 GB of `.metal` and `.json` that no build read; the test Mac's copy held 934,955, of which the prune (dry run) found 906,286 unused: 70.2 GB of sources and reflection, scanned in 18 minutes on an external SSD.

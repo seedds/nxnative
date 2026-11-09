@@ -16,8 +16,8 @@ int dm_opmode(void) {
     return m;
 }
 // ---------- System notification queue (AppletMessage): front end state changes → fetched by the game every frame with TryPopNotificationMessage ----------
-// Message numbers the host sends: 15 focus change, 30 operation mode change, 31 performance mode change
-enum { MSG_FOCUS = 15, MSG_OPMODE = 30, MSG_PERFMODE = 31 };
+// Message numbers the host sends: 15 focus change, 30 operation mode change, 31 performance mode change, 95 startup logo disappeared
+enum { MSG_FOCUS = 15, MSG_OPMODE = 30, MSG_PERFMODE = 31, MSG_STARTUP_LOGO = 95 };
 #define MQ 32
 static pthread_mutex_t g_mq_lock = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_mq_cond = PTHREAD_COND_INITIALIZER;   // cond: wakes the blocking PopNotificationMessage
 static uint32_t g_mq[MQ]; static int g_mqh, g_mqn;
@@ -43,7 +43,7 @@ static void mq_push_(uint32_t m) {
     // 15/30/31 are invalidation notifications meaning "query the current state", not events carrying historical values.
     // While one of the same type has not been taken yet, the first queue position is kept: a consumer loop only reads the latest state, repeated notifications write back the same thing, and with the same size there is no further resize.
     // Only these three state notifications are merged; future per-occurrence events (such as Resume/Exit) must not use this rule.
-    // Legitimate producers only send these three, so at most three items are pending, and any number of focus losses/restores no longer hits the 32-slot limit; after a pop, new changes are enqueued as usual.
+    // State changes occupy at most three positions; per-occurrence messages, such as startup-logo registration, retain their own positions.
     if (m == MSG_FOCUS || m == MSG_OPMODE || m == MSG_PERFMODE)
         for (int i = 0; i < g_mqn; i++)
             if (g_mq[(g_mqh + i) % MQ] == m) { pthread_mutex_unlock(&g_mq_lock); return; }
@@ -103,6 +103,8 @@ HLE_FORCE("_ZN2nn2oe41ExitApplicationAndGoBackToInStoreDemoMenuEv", "the in-stor
     static int once; if (!once++) LOG("[RED] oe: ExitApplicationAndGoBackToInStoreDemoMenu called: ignored (no in-store demo menu)");
 }
 HLE_FORCE("_ZN2nn2oe17FinishStartupLogoEv", "dismiss the system boot screen (through the am application proxy); the host has no boot screen", void, h_oe_FinishLogo, void) {}   // Metroid Dread calls it at main+0xadfed0
+HLE_FORCE("_ZN2nn2oe35EnableStartupLogoDisappearedMessageEv", "startup logo is already absent: deliver its notification through the host's queue, without an am proxy",
+          void, h_oe_EnableStartupLogoMessage, void) { mq_push(MSG_STARTUP_LOGO); }
 // am retains the requested inactivity extension even when auto-sleep is disabled.
 // SDK 12.3.9 maps the normal setter to mode 1, Unsafe to mode 2, and false to 0.
 // Xenoblade Chronicles 3 reads it after the opening movie (sdk+0x3391f0).

@@ -386,6 +386,25 @@ static void spec_desc_ownership(void) {
         }
     }
 }
+static void compaction_growth_policy(void) {
+    NSString *saved = g_arch_dir;
+    g_arch_dir = [@(archive_cache_root) stringByAppendingPathComponent:@"compaction-policy"];
+    [NSFileManager.defaultManager createDirectoryAtPath:g_arch_dir withIntermediateDirectories:YES attributes:nil error:nil];
+    EXPECT("no compacted size: original threshold", 8, arch_compact_limit());
+    for (unsigned i = 0; i < 12; i++) [NSData.data writeToFile:[g_arch_dir stringByAppendingPathComponent:[NSString stringWithFormat:@"%05u.mtl4a", i]] atomically:YES];
+    [NSData.data writeToFile:[g_arch_dir stringByAppendingPathComponent:@"p00000.mtl4a"] atomically:YES];
+    arch_compact_note_size();
+    EXPECT("compacted shards leave room for growth; prebuilt shards excluded", 24, arch_compact_limit());
+    EXPECT("stable twelve-shard cache does not compact again", 0, 12 > arch_compact_limit());
+    EXPECT("growth beyond twice the compacted size compacts", 1, 25 > arch_compact_limit());
+    for (NSString *value in @[@"0", @"-1", @"12junk", @"1000001"]) {
+        [[arch_compact_stamp() stringByAppendingString:value] writeToFile:arch_compact_size_path() atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        EXPECT("invalid compacted size uses default", 8, arch_compact_limit());
+    }
+    [@"old system or method\n12\n" writeToFile:arch_compact_size_path() atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    EXPECT("old system stamp uses default", 8, arch_compact_limit());
+    g_arch_dir = saved;
+}
 int main(int argc, char **argv) { @autoreleasepool {
     if (!mkdtemp(archive_cache_root)) abort();
     atexit(archive_cache_cleanup);
@@ -418,11 +437,18 @@ int main(int argc, char **argv) { @autoreleasepool {
     // A fresh process is essential: a compiler that built the source archives still has their online binaries.
     if (argc == 3) {
         int seed = !strcmp(argv[1], "--compact-seed");
+        int large = getenv("DM_TEST_ARCHIVE_LARGE") != NULL;
+        int count = large ? 21 : PSO_ARCH_COMPACT + 1;
+        if (large) g_arch_period_max = 2;
         pso4_init();
-        EXPECT("restart: opened run archives", seed ? 0 : !strcmp(argv[1], "--compact-replay") ? PSO_ARCH_COMPACT + 1 : 1, g_arch4.count);
+        if (large && !strcmp(argv[1], "--compact-verify")) {
+            EXPECT("restart: large compacted cache is reused", 0, g_compact_enabled);
+            EXPECT("restart: persisted compacted size", 22, arch_compact_limit());
+        }
+        EXPECT("restart: opened run archives", seed ? 0 : !strcmp(argv[1], "--compact-replay") ? count : large ? 11 : 1, g_arch4.count);
         atomic_store(&g_warm_running, !seed);
         NSMutableArray<MTLRenderPipelineDescriptor *> *descs = [NSMutableArray array];
-        for (int i = 0; i <= PSO_ARCH_COMPACT; i++) {
+        for (int i = 0; i < count; i++) {
             MTLRenderPipelineDescriptor *cd = desc(MTLPixelFormatRGBA8Unorm, 0, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll, 1);
             cd.vertexDescriptor.layouts[16].stride = 16 * (i + 2);
             [descs addObject:cd];
@@ -430,21 +456,25 @@ int main(int argc, char **argv) { @autoreleasepool {
         }
         if (!seed) {
             int fresh = getenv("DM_TEST_ARCHIVE_MIXED") != NULL, compacting = g_compact_files != nil;
-            int outcomes[PSO_ARCH_COMPACT + 1] = {0}; int *results = outcomes;
-            dispatch_apply(descs.count, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^(size_t i) {
+            int outcomes[21] = {0}; int *results = outcomes;
+            if (large) {
+                // Keep this cache-shape regression deterministic; concurrent
+                // capture/period rollover is covered separately below.
+                for (int i = 0; i < count; i++) results[i] = pso_build(descs[i], NULL) != nil;
+            } else dispatch_apply(descs.count, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^(size_t i) {
                 @autoreleasepool { results[i] = pso_build(descs[i], NULL) != nil; }
             });
-            for (int i = 0; i <= PSO_ARCH_COMPACT; i++) EXPECT("restart: pipeline", 1, outcomes[i]);
+            for (int i = 0; i < count; i++) EXPECT("restart: pipeline", 1, outcomes[i]);
             if (fresh) {
                 MTLRenderPipelineDescriptor *extra = desc(MTLPixelFormatRGBA8Unorm, 0, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll, 1);
                 extra.fragmentFunction = test_fn(g_lib, @"fs2", 1);
                 extra.vertexDescriptor.layouts[16].stride = 4096;
                 EXPECT("restart: fresh pipeline mixed with recaptures", 1, pso_build(extra, &err) != nil);
             }
-            EXPECT("restart: every base from disk", PSO_ARCH_COMPACT + 1 + (fresh && !compacting), g_pb_archived);
+            EXPECT("restart: every base from disk", count + (fresh && !compacting), g_pb_archived);
             EXPECT("restart: compiled bases", fresh && compacting, g_pb_built);
             dispatch_sync(g_arch_q, ^{ arch_flush(); });
-            if (g_compact_files) EXPECT("restart: timed flush keeps recaptures pending", PSO_ARCH_COMPACT + 1 + fresh, g_arch_new);
+            if (g_compact_files) EXPECT("restart: timed flush keeps recaptures pending", (count + fresh) % (large ? 2 : ARCH_PERIOD_MAX), g_arch_new);
             atomic_store(&g_warm_running, 0);
             arch_flush_wait();
         }
@@ -530,8 +560,12 @@ int main(int argc, char **argv) { @autoreleasepool {
         arch_flush_wait();
         EXPECT("compaction: the marker exists while the flush writes", 1, ms->calls == 1 && ms->marked == 1);
         EXPECT("compaction: the flush that returned removed the marker", 0, [NSFileManager.defaultManager fileExistsAtPath:arch_compact_marker()]);
-        names = [NSFileManager.defaultManager contentsOfDirectoryAtPath:@(cdir) error:nil];
+        names = [[NSFileManager.defaultManager contentsOfDirectoryAtPath:@(cdir) error:nil]
+            filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSString *name, NSDictionary *bindings) {
+                return [name.pathExtension isEqualToString:@"mtl4a"];
+            }]];
         EXPECT("compaction: a file per period left", (descs.count + 3) / 4, names.count);
+        EXPECT("compaction: successful flush records its size", 1, [NSFileManager.defaultManager fileExistsAtPath:arch_compact_size_path()]);
         EXPECT("compaction: done", 0, g_compact_periods + !g_compact_closed + g_compact_bad);
         g_arch_period_max = ARCH_PERIOD_MAX;
         // a marker left by a compaction that did not finish: the next start on this system build does not compact, one from another build is removed and compaction tried
@@ -598,6 +632,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     spec_desc_ownership();
     capture_preserves_foreign_folder();
     [NSFileManager.defaultManager removeItemAtPath:@(dir) error:nil];
+    compaction_growth_policy();
     printf("t_pso_archive: %d checks, %d failed\n", checks, failed);
     return failed != 0;
 } }

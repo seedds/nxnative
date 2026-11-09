@@ -1400,8 +1400,8 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Cause:** Ampere lets a thread that has exited leave the workgroup's barriers; Metal requires every thread of a threadgroup at each `threadgroup_barrier`. Separately, a loop whose bound comes from GPU data that went wrong does not end.
 - **Fix:**
   - `BarrierExits.cs`: a compute thread that returns before a barrier keeps arriving at the later barriers instead. It runs on every compute shader, Maxwell's too, so its "exited" flag is a register no frontend writes (`RegisterConsts.BarrierExitedIndex`): as Maxwell's overflow flag, which every `IADD.CC` writes, it turned live threads into exited ones.
-  - `dmsh_build.py` `loop_guard`: every loop also ends once its function has run 2^18 iterations in all (the longest bounded loop seen: 255). A loop with a barrier in its body counts on a counter of its own, so the cap ends it on the same iteration for every thread of the threadgroup.
-- **Found on:** Orbitals (`040004F027560000`) and PRAGMATA (not in the games table): GPU hangs that needed a restart.
+  - `dmsh_build.py` `loop_guard`: every loop also ends once its function has run 2^18 iterations in all (the longest bounded loop seen: 255). A loop with a barrier in its body counts on a counter of its own, so the cap ends it on the same iteration for every thread of the threadgroup. Its counters are declared a statement a line: `dmsh_meshstage.py` reads a task or mesh kernel's leading declarations line by line.
+- **Found on:** Orbitals (`040004F027560000`) and PRAGMATA (not in the games table): GPU hangs that needed a restart. [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md): with the counters on one line, all 520 of its task and mesh shaders failed the mesh-stage wrap (`no kernel main0 starting with its stage memory`).
 - **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_barrier_exits.py` and `python3 dm/gfx/tests/test_dmsh_loop_guard.py`.
 
 ### Barrier moves around warp shuffles

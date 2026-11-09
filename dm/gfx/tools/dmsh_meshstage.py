@@ -111,7 +111,7 @@ def own_shared(code):
 
 
 # The kernel's head, through its stage memory array: SPIRV-Cross declares the array first, but dmsh_build.py loop_guard (which runs before to_stage) puts its counter
-# (uint dm_lg = 0u; (void)dm_lg;) as the body's first line, and spirv-cross declares a private variable's initializer ahead of it (GlobalToStorage.TryGenerateRawStorageOp's last entry, uint _N = 0u;),
+# declarations (uint dm_lg = 0u; then (void)dm_lg;, a statement a line) as the body's first lines, and spirv-cross declares a private variable's initializer ahead of it (GlobalToStorage.TryGenerateRawStorageOp's last entry, uint _N = 0u;),
 # so plain declarations before the array are taken along (group 2) and stay at the top of the body.
 # PRAGMATA's 539 mesh shaders all failed here when the array had to follow the brace
 _KERNEL = re.compile(r'kernel\s+void\s+main0\s*\(((?:[^()]|\([^()]*\))*)\)\s*\{[ \t]*\n((?:(?![ \t]*threadgroup\b)[ \t]+[^\n{}]*;[ \t]*\n)*?)'

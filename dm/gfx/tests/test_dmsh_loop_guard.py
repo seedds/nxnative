@@ -7,11 +7,15 @@ import ast
 import os
 import re
 import shutil
+import struct
 import subprocess
+import sys
 import tempfile
 import unittest
 
 TOOLS = Path(__file__).resolve().parents[1] / 'tools'
+sys.path.insert(0, str(TOOLS))
+import dmsh_meshstage as ms
 tree = ast.parse((TOOLS / 'dmsh_build.py').read_text())
 selected = [n for n in tree.body if (isinstance(n, ast.FunctionDef) and n.name == 'loop_guard')
             or (isinstance(n, ast.Assign) and any(getattr(t, 'id', None) in ('LOOP_CAP', '_LOOP_HEAD', '_BARRIER') for t in n.targets))]
@@ -91,6 +95,28 @@ kernel void main0(constant spvDescriptorSetBuffer0& spvDescriptorSet0 [[buffer(0
     (*spvDescriptorSet0.cp_s0)._m0[1] = _5(_8);
 }
 """
+# A task shader as the translator leaves it for dmsh_meshstage.py: its stage memory first in the kernel, a loop with a barrier (Ocarina of Time's 520 task and mesh shaders all have
+# the stage memory; the loop guard's declarations go in ahead of it)
+TASK = HEAD.replace('struct B', """template<typename T, size_t Num>
+struct spvUnsafeArray
+{
+    T elements[Num ? Num : 1];
+    thread T& operator [] (size_t pos) thread { return elements[pos]; }
+    threadgroup T& operator [] (size_t pos) threadgroup { return elements[pos]; }
+};
+struct B""") + """
+kernel void main0(constant spvDescriptorSetBuffer0& spvDescriptorSet0 [[buffer(0)]], uint3 gl_LocalInvocationID [[thread_position_in_threadgroup]])
+{
+    threadgroup spvUnsafeArray<uint, %d> _23;
+    uint _8 = (*spvDescriptorSet0.cp_s0)._m0[0];
+    while (_8 != 0u)
+    {
+        _8 = _8 - 1u;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    _23[1] = _8;
+}
+"""
 
 
 def lines_with(src, text):
@@ -108,7 +134,7 @@ class LoopGuard(unittest.TestCase):
         out = loop_guard(SOLVER)
         self.assertIn(f'}} while ((_30) && ++dm_lg1 < {CAP}u);', out)       # the solver loop: barriers at two depths
         self.assertIn(f'for (int _22 = 0; (_22 < int(_12)) && ++dm_lg2 < {CAP}u; _22++)', out)   # the batch loop: a barrier after its per-thread loop
-        self.assertEqual(lines_with(out, 'uint dm_lg = 0u'), ['uint dm_lg = 0u; (void)dm_lg; uint dm_lg1 = 0u; (void)dm_lg1; uint dm_lg2 = 0u; (void)dm_lg2;'])
+        self.assertEqual(lines_with(out, 'uint dm_lg'), ['uint dm_lg = 0u;', 'uint dm_lg1 = 0u;', 'uint dm_lg2 = 0u;'])
 
     def test_no_barrier_loop_still_has_one_counter(self):   # the MSL of a shader without barriers in loops is what it was (the Metal compile cache keeps its libraries)
         src = SOLVER.replace('            threadgroup_barrier(mem_flags::mem_threadgroup);\n', '').replace('        threadgroup_barrier(mem_flags::mem_threadgroup);\n        _30', '        _30')
@@ -122,7 +148,7 @@ class LoopGuard(unittest.TestCase):
         self.assertIn(f'while ((_6 > 3u) && ++dm_lg < {CAP}u)', helper)
         self.assertNotRegex(helper, r'dm_lg\d')
         self.assertIn(f'while ((_8 != 0u) && ++dm_lg1 < {CAP}u)', kernel)
-        self.assertIn('uint dm_lg = 0u; (void)dm_lg; uint dm_lg1 = 0u; (void)dm_lg1;', kernel)
+        self.assertIn('uint dm_lg = 0u;\n    (void)dm_lg;\n    uint dm_lg1 = 0u;\n    (void)dm_lg1;', kernel)
 
     def test_the_barrier_loop_ends_on_the_same_iteration_for_every_thread(self):
         # Thread t runs the stride-256 loops ceil((n - t) / 256) times. With one shared counter a thread with fewer per-thread iterations reaches the cap later, so it was still
@@ -153,11 +179,23 @@ class LoopGuard(unittest.TestCase):
         self.assertGreater(len(exits('dm_lg', 'dm_lg')), 1)   # one shared counter: the threads leave the barrier loop at different iterations
         self.assertEqual(len(exits(solver, batch)), 1)
 
+    def task_stage(self):
+        c = bytearray(0x80); c[0x56] = 6; struct.pack_into('<2H', c, 0x58, 32, 256)   # control: a task shader, 32 threads, a 256-byte payload
+        i = ms.info(bytes(c), bytes(0x80))
+        return ms.to_stage(loop_guard(TASK % (ms.memory(i)[1] // 4)), i)
+
+    def test_a_guarded_task_shader_still_wraps_as_a_stage(self):   # dmsh_meshstage.py _KERNEL reads the kernel's leading declarations a statement a line
+        src = self.task_stage()
+        self.assertIn('[[object]] void main0(', src)
+        body = src[src.index('void dm_stage_body('):src.index('[[object]]')]
+        self.assertIn('uint dm_lg1 = 0u;', body)
+        self.assertIn(f'while ((_8 != 0u) && ++dm_lg1 < {CAP}u)', body)
+
     @unittest.skipUnless(os.environ.get('DMSH_TEST_METAL') and shutil.which('xcrun'), 'set DMSH_TEST_METAL=1 to compile with the Metal compiler')
     def test_guarded_kernels_compile(self):
         with tempfile.TemporaryDirectory() as d:
-            for name, src in (('solver', SOLVER), ('two', TWO_FUNCTIONS)):
-                p = Path(d) / f'{name}.metal'; p.write_text(loop_guard(src))
+            for name, src in (('solver', loop_guard(SOLVER)), ('two', loop_guard(TWO_FUNCTIONS)), ('task', self.task_stage())):
+                p = Path(d) / f'{name}.metal'; p.write_text(src)
                 r = subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-c', str(p), '-o', str(p.with_suffix('.air'))], capture_output=True, text=True)
                 self.assertEqual(r.returncode, 0, r.stderr)
 

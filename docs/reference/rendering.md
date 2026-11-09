@@ -1657,3 +1657,12 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 - **Fix:** the present reports the shape of the frame it draws ([the layer's](#a-crop-only-picks-texels-the-picture-has-the-layers-shape)) whenever its width / height changes (`nvn_mtl.m` `present_now` → `front.h` `front_picture_shape`; every graphics API presents there). The iOS front end lays the game's view out in that shape (`DmLayout.h` takes it as a parameter: the overlay, the split, Fill and the TV alike), so a 1.43:1 picture fills a 1.43:1 screen in Fit and touches are normalized on the picture as drawn; the Mac maps the mouse on the picture's own rectangle. A 16:9 game reports 16:9 and keeps its layout, and a size change of the same shape (1280x720 handheld, 1920x1080 docked) is not reported.
 - **Check:** the [Duo harness](../../dm/ios/tests/duo/README.md) tests the taller picture in Fit, in Fill and on a wider screen, and the production root view following a reported shape and returning to 16:9. Not yet run on a device.
 - **Found on:** [Breath of the Wild](../../dm/games/01007EF00011E000/README.md#screen-shape-dm_screen_aspect-current) and [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md#screen-shape-dm_screen_aspect-current) with `DM_SCREEN_ASPECT=1.43`.
+
+
+### Disjoint mesh writes invalidate indirect conversions
+
+- **Symptom:** a native mesh draw invalidates cached indirect-draw conversions even when its writes are disjoint from every cached input.
+- **Cause:** the global write epoch advances for every possible mesh shader write.
+- **Fix:** advance only this cache's epoch after proving every writable reflected storage binding disjoint. Preserve global invalidation for other consumers; unknown kinds, bad slots, sparse aliases, overflow, overlapping input and stale epochs/submissions remain conservative. Indexed draws protect the whole remaining input buffer because a GPU-written firstIndex can address beyond output capacity.
+- **Check:** `check_t_ixc_ranges` exercises 22 allocation/range assertions under Metal validation, including RAW overlap, record boundaries, stale generations, unknown writes and indexed inputs beyond conversion capacity.
+- **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md#indirect-cache-range-extraction).

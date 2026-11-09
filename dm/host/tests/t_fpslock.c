@@ -1,6 +1,6 @@
 // Exercise production build gates and frame-limit writes against sparse synthetic module memory; Unreal's rows come from the console variables the rewriter names in main's fixups,
 // a target frame rate the game steps by from the field it names there (FPS_TARGET_PTR, FPS_TARGET_FIELD), Unreal's fixed frame rate on GEngine (UE_FIXED_RATE_PTR / _FIELD), and
-// Unity's targetFrameRate and vSyncCount from its internal-call table (UNITY_*).
+// Unity's targetFrameRate and vSyncCount from its internal-call table (UNITY_*), and HAL's frame interval and dynamic-resolution bounds from the engine's code (HAL_*).
 #include "../hle.h"
 #undef DM_GAME_FPS_MAX
 static int test_fps_max = 120;
@@ -53,12 +53,13 @@ static void check(int which) {
     assert(base != MAP_FAILED);
     g_nmod = 1; strcpy(g_mod[0].name, "main"); g_mod[0].base = base;
     strcpy(g_mod[0].build_id, "94ceae325c205c4b9d6f7235552f28fd");
-    setenv("DM_FPS_TARGET", which == 27 ? "0" : which == 26 ? "120" : which >= 25 ? "60" : which == 22 || which == 24 ? "60" : which >= 19 ? "120" : which == 1 || which == 10 || which == 18 ? "30" : which == 2 || which == 11 ? "0" : "60", 1);
+    setenv("DM_FPS_TARGET", which == 31 ? "30" : which == 30 ? "60" : which == 27 ? "0" : which == 26 ? "120" : which >= 25 ? "60" : which == 22 || which == 24 ? "60" : which >= 19 ? "120" : which == 1 || which == 10 || which == 18 ? "30" : which == 2 || which == 11 ? "0" : "60", 1);
     if (which == 20) test_fps_max = 60;
     int32_t *unity = (int32_t *)(base + 0x4afc868);
     *unity = which == 1 ? 60 : which == 4 ? -1 : which == 5 ? 0 : 30;
     uint8_t object[0x500] = {0};
     float *f = NULL; int32_t *sync = NULL;
+    static uint8_t chain[4][0x200];   // HAL's dynamic resolution: [[[[main+0xa767b0]+0x140]+0x1b0]+0x20]+0x34
     if (which <= 5 && which != 3) g_mod[0].unity_target_fps = 0x4afc868;   // 0 to 5: Unity's targetFrameRate where the rewriter found it (Pokémon Brilliant Diamond 1.3.0); 3: nothing found
     if (which == 6) {
         strcpy(g_mod[0].build_id, "c9a3dd7702075ecd90101f4555389582");
@@ -112,6 +113,15 @@ static void check(int which) {
         *(int32_t *)(object + 0x64) = 1; *(uintptr_t *)(object + 0x20) = (uintptr_t)(object + 0x100);   // two levels from object + 0x100: level 1's count at +0x288
         sync = (int32_t *)(object + 0x100 + 0x100 + 0x88); *sync = which == 29 ? 0 : 2; sync[-0x40] = 3;   // and level 0's, which the host must not touch
         if (which != 28) { int32_t *t = (int32_t *)(base + 0x8d33de8); *t = which == 26 ? 60 : which == 29 ? 30 : -1; }
+    } else if (which == 30 || which == 31) {   // Kirby and the Forgotten Land 1.1.0, at the places the rewriter found (hal_fps.py): HAL's frame interval (the game sets 2) and the
+        // dynamic resolution's bounds (1.95, 1.7); 30 at DM_FPS_TARGET=60, 31 at 30
+        strcpy(g_mod[0].build_id, "0123456789abcdef0123456789abcdef");
+        g_mod[0].hal_frame_ptr = 0xa76728; g_mod[0].hal_frame_field = 0x50;
+        g_mod[0].hal_dr_ptr = 0xa767b0; g_mod[0].hal_dr_hop[0] = 0x140; g_mod[0].hal_dr_hop[1] = 0x1b0; g_mod[0].hal_dr_hop[2] = 0x20; g_mod[0].hal_dr_field = 0x34;
+        *(uintptr_t *)(base + 0xa76728) = (uintptr_t)object; sync = (int32_t *)(object + 0x50); *sync = 2;
+        *(uintptr_t *)(base + 0xa767b0) = (uintptr_t)chain[0]; *(uintptr_t *)(chain[0] + 0x140) = (uintptr_t)chain[1];
+        *(uintptr_t *)(chain[1] + 0x1b0) = (uintptr_t)chain[2]; *(uintptr_t *)(chain[2] + 0x20) = (uintptr_t)chain[3];
+        f = (float *)(chain[3] + 0x34); f[0] = 1.95f; f[1] = 1.7f;
     } else if (which == 17 || which == 18 || which == 19 || which == 20) {   // Fire Emblem Fortune's Weave: the target the rewriter found, 30 in gameplay (17) or 60 in a menu (18, at DM_FPS_TARGET=30)
         strcpy(g_mod[0].build_id, "0123456789abcdef0123456789abcdef");
         g_mod[0].fps_target_ptr = 0x21e60d8; g_mod[0].fps_target_field = 0x1dc;
@@ -163,6 +173,13 @@ static void check(int which) {
         else assert(*sync == 0 && *t == 60 && writes == 1);   // 29: a count of 0 is the game's choice to pace by targetFrameRate, which is raised
         munmap(base, len); return;
     }
+    if (which == 30) {   // 60: the interval freed and the bounds halved; written again when the game sets its own again, not otherwise
+        assert(*sync == 0 && f[0] == 1.95f * 30 / 60 && f[1] == 1.7f * 30 / 60 && writes == 3);
+        dm_fps_lock_tick(); assert(writes == 3);
+        *sync = 2; f[0] = 1.95f; dm_fps_lock_tick(); assert(*sync == 0 && f[0] == 1.95f * 30 / 60 && f[1] == 1.7f * 30 / 60 && writes == 5);
+        munmap(base, len); return;
+    }
+    if (which == 31) { assert(*sync == 2 && f[0] == 1.95f && f[1] == 1.7f && writes == 0); munmap(base, len); return; }   // 30: the game keeps its own limit and bounds
     if (which == 21) {
         assert(f[0] == 120 && f[1] == 120 && sync[0] == 1 && sync[1] == 1);
         test_high = 60; dm_fps_lock_tick(); assert(f[0] == 60 && f[1] == 60 && sync[0] == 1 && sync[1] == 1);
@@ -209,10 +226,10 @@ static void check(int which) {
 
 int main(void) {
     // Each process starts the production one-time initialization with a fresh build and target.
-    for (int i = 0; i < 30; i++) {
+    for (int i = 0; i < 32; i++) {
         pid_t p = fork(); assert(p >= 0);
         if (!p) { check(i); _exit(0); }
         int status; assert(waitpid(p, &status, 0) == p); assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
     }
-    puts("Frame limits: integer/float FPS, milliseconds, vsync copies, build gates, found fields and overrides passed");
+    puts("Frame limits: integer/float FPS, milliseconds, vsync copies, a freed vsync interval and scaled bounds, build gates, found fields and overrides passed");
 }

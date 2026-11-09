@@ -3,6 +3,7 @@
 // (hle_nvn.c); the game sets the values after boot and may set them again, so each is written whenever it differs. Fixed addresses: each row runs only on the main build it was found in (AGENTS.md).
 // A target frame rate the game steps by needs no row either: the rewriter finds it by its readers in any build (dm/tools/fps_target.py, main's fixups FPS_TARGET_PTR / FPS_TARGET_FIELD).
 // Nor do Unity's Application.targetFrameRate and QualitySettings.vSyncCount: the rewriter finds them through the engine's internal-call table (dm/tools/unity_fps.py, main's fixups UNITY_*).
+// Nor do HAL Laboratory's frame interval and dynamic-resolution bounds (Kirby and the Forgotten Land): the rewriter finds them by the engine's own code (dm/tools/hal_fps.py, main's fixups HAL_*).
 // Unreal Engine needs no row: the rewriter finds its console variables by their registered names in any build (dm/tools/ue_cvar.py, main's fixups UE_CVAR:<name>), and the host writes
 // the frame limit, the profile's ue_fps_cvar (t.MaxFPS, or a game's own variable its settings apply to t.MaxFPS: SHIN MEGAMI TENSEI V: Vengeance's Project.FrameRateLimit), and the
 // present interval, rhi.SyncInterval (nvn.SyncInterval in UE 4.18's Switch RHI: DRAGON QUEST XI S). Each is a TAutoConsoleVariable whose +0x10 points to its value, the game thread's
@@ -21,8 +22,9 @@
 // (the acquire waits): Luigi's Mansion 3's display interval p99 18.69 → 16.67 ms, 60.0 fps. Not at 30: with present_interval display the presents follow every vsync and hold no
 // frame for two, so a shorter time showed some frames for one (30.4 fps); 30 writes the game's own 33.333 ms
 // Also: a frame time in ticks as a uint32 (scale / frame rate: 19,200,000 for the Switch's 19.2 MHz system tick), a frame step in seconds as a float (1 / frame rate), and a mode
-// switch an engine reads before it takes those fields at all (written 1 at any target)
-enum { FPS_F32, VSYNCS_I32, MS_F32, FPS_I32, TICKS_U32, SECS_F32, MODE_U32, FPS_F64 };
+// switch an engine reads before it takes those fields at all (written 1 at any target), and a vsync interval an engine also accepts as 0, for no limit with a step of the time that really
+// passed (written 0 above 30; at 30 the game keeps its own)
+enum { FPS_F32, VSYNCS_I32, MS_F32, FPS_I32, TICKS_U32, SECS_F32, MODE_U32, FPS_F64, FREE_I32 };
 #define MS_MARGIN 0.5f
 static float ms_want(int fps) { return 1000.0f / (float)fps - (fps == 60 ? MS_MARGIN : 0); }
 typedef struct { const char *build, *what; uint64_t ptr_off; uint32_t field; uint8_t kind, copies; uint32_t scale; uint32_t flag; } lock_t;   // flag: byte offset << 8 | bit mask the object must have set for the write (0: none)
@@ -206,6 +208,37 @@ static int ue_rows(const module_t *m, lock_t *out, int *missing) {
     return n;
 }
 
+// HAL Laboratory's frame interval, at the place the rewriter found by the engine's own code (dm/tools/hal_fps.py; main's fixups HAL_FRAME_PTR, HAL_FRAME_FIELD): an int32 in the frame
+// object a global points to, the vsyncs the frame manager waits for each frame (Kirby and the Forgotten Land sets 2). The game asks for present interval 1 and paces itself by this field;
+// 0 lifts its limit and steps the game by the time that really passed, so the host's present cap sets the frame rate (FREE_I32). 60 is the ceiling: the frame manager counts each frame's
+// step in whole 60 Hz vsyncs, at least one, so frames shorter than 16.7 ms would run the game fast (on a 120 Hz display link an iPhone 17 Pro Max still made 60, at 3.5 times the CPU energy)
+static int hal_row(const module_t *m, lock_t *out) {
+    if (!m->hal_frame_ptr) return 0;
+    *out = (lock_t){ "", "HAL frame interval", m->hal_frame_ptr, m->hal_frame_field, FREE_I32, 1, 0 };
+    return 1;
+}
+// Its dynamic resolution's GPU frame-time bounds (fixups HAL_DR_PTR, HAL_DR_HOP0..2, HAL_DR_FIELD): two floats (max, min) in 60 Hz vsyncs at the end of a pointer path from a global, set
+// for 30 fps (1.95 and 1.7 in Kirby). Above 30 each is written as the game's own value times 30 / target, or the game keeps its full resolution at frame times too long for the target.
+// The game's value is the one it holds when it differs from the last write (the game may set its bounds again)
+static struct { uint8_t *base; uint64_t ptr; uint32_t hop[3], field; float game[2], wrote[2]; } hdr;
+static void hal_dr_tick(int target, const char *src) {
+    static int nlog; uint64_t p = 0;
+    if (!rd((uint64_t)(uintptr_t)(hdr.base + hdr.ptr), &p, sizeof p) || !p) return;   // not made yet
+    for (int h = 0; h < 3; h++) if (!rd(p + hdr.hop[h], &p, sizeof p) || !p) return;
+    float cur[2];
+    if (!rd(p + hdr.field, cur, sizeof cur)) return;
+    for (int c = 0; c < 2; c++) {
+        if (!(cur[c] > 0.1f && cur[c] < 5.0f)) continue;   // not set yet
+        if (cur[c] != hdr.wrote[c]) hdr.game[c] = cur[c];   // the game's own value: the first one, or one it set again
+        float want = hdr.game[c] * 30 / (float)target;
+        if (cur[c] == want) continue;
+        hdr.wrote[c] = want;
+        uint32_t *dst = (uint32_t *)(uintptr_t)(p + hdr.field + 4 * (uint64_t)c), w; memcpy(&w, &hdr.wrote[c], sizeof w);
+        dm_guest_write_prepare(dst, sizeof *dst); __atomic_store_n(dst, w, __ATOMIC_RELAXED);
+        if (nlog < 8) { nlog++; LOG("main: HAL dynamic resolution GPU frame time %s %g → %g (%d fps; %s)", c ? "min" : "max", cur[c], hdr.wrote[c], target, src); }
+    }
+}
+
 // Unity's frame rate, at the places the rewriter found through the engine's internal-call table (dm/tools/unity_fps.py; main's fixups UNITY_*), in any Unity build it reads:
 // Application.targetFrameRate, an int32 in main's bss (-1 until a game sets it: left so), and the current quality level's vSyncCount. On the Switch, Unity presents at
 // vSyncCount vsyncs a frame: QualitySettings.vSyncCount's setter hands the count to the graphics device, which calls nvnWindowSetPresentInterval when it changes, and Unity steps
@@ -223,13 +256,15 @@ static void unity_vsync_tick(int target, const char *src) {
     if (nlog < 8) { nlog++; LOG("main: Unity QualitySettings.vSyncCount (level %d) %u → %u vsyncs (%d fps; %s)", lvl, cur, want, target, src); }
 }
 // The running main's engine limiters, found once: by the first present (dm_fps_lock_tick) or by the graphics layer's present cap, which may ask first (dm_fps_lock_engine, from the acquire)
-static lock_t ue[4], target_lock, unity_tfr; static const lock_t *rows[NLOCKS + 6]; static int nrow, nier, ue_missing; static uint8_t *base; static uint32_t display;
+static lock_t ue[4], target_lock, unity_tfr, hal_lock; static const lock_t *rows[NLOCKS + 7]; static int nrow, nier, ue_missing; static uint8_t *base; static uint32_t display;
 static pthread_once_t g_found = PTHREAD_ONCE_INIT;
 static void lock_find(void) {
     for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) {
         for (int k = 0; k < (int)(sizeof k_nier_dr / sizeof *k_nier_dr); k++) if (!strcmp(g_mod[i].build_id, k_nier_dr[k].build)) { base = g_mod[i].base; nier = 1; display = k_nier_dr[k].display; }
         for (int k = 0; k < NLOCKS; k++) if (!strcmp(g_mod[i].build_id, k_locks[k].build)) { rows[nrow++] = &k_locks[k]; base = g_mod[i].base; }
         if (target_row(&g_mod[i], &target_lock)) { rows[nrow++] = &target_lock; base = g_mod[i].base; }
+        if (hal_row(&g_mod[i], &hal_lock)) { rows[nrow++] = &hal_lock; base = g_mod[i].base; }
+        if (g_mod[i].hal_dr_ptr) { hdr.base = g_mod[i].base; hdr.ptr = g_mod[i].hal_dr_ptr; memcpy(hdr.hop, g_mod[i].hal_dr_hop, sizeof hdr.hop); hdr.field = g_mod[i].hal_dr_field; }
         int nue = ue_rows(&g_mod[i], ue, &ue_missing);
         for (int k = 0; k < nue; k++) { rows[nrow++] = &ue[k]; base = g_mod[i].base; }
         if (g_mod[i].unity_target_fps) {   // unless a build row writes the same field
@@ -245,26 +280,27 @@ static void lock_find(void) {
     fb_find();
 }
 // Whether the host writes fps_target into an engine limiter of this main (a row for its build, NieR's frame interval, a target frame rate found by its readers, Unreal's variables or
-// Frostbite's simulation rate, found by name).
+// Frostbite's simulation rate, found by name, or Unity's settings and HAL's frame interval, found by their code; HAL's dynamic-resolution bounds do not pace the game).
 // Without one, and without a frame step state page, nothing makes the game follow the cap, so the graphics layer keeps the game's own present interval (hle_nvn.c fps_present_cap):
 // presenting at a cap the game does not step by runs a fixed-step game fast or slow (Tears of the Kingdom 1.4.2 at 2x with DM_FPS_TARGET=60)
 int dm_fps_lock_engine(void) { pthread_once(&g_found, lock_find); return nrow || nier || fb.n || uq.base; }
 int nvn_fps_high_now(void);   // hle_nvn.c
 void dm_fps_lock_tick(void) {
     dynamic_resolution_tick();   // separate from the FPS cap
-    static int state = -2, nlog[NLOCKS + 5], target, high; static const char *src;
+    static int state = -2, nlog[NLOCKS + 7], target, high; static const char *src;
     if (state == -1) return;
     if (state == -2) {
         state = -1; pthread_once(&g_found, lock_find);
-        if (!nrow && !nier && !fb.n && !uq.base && !ue_missing) return;
+        if (!nrow && !nier && !fb.n && !uq.base && !hdr.base && !ue_missing) return;
         const char *e = getenv("DM_FPS_TARGET"); int t = e ? atoi(e) : DM_GAME_FPS_TARGET; src = e ? "DM_FPS_TARGET" : "game profile fps_target";
         if (t != 0 && t != 30 && t != 60 && t != 120) { LOG("[RED] DM_FPS_TARGET=%s: must be 0, 30, 60 or 120; leaving the game's frame limit", e); t = 0; }
         if (t == 120 && DM_GAME_FPS_MAX < 120) { LOG("[RED] DM_FPS_TARGET=120: this game's speed at 120 fps is not checked (profile fps_max); running at 60"); t = 60; }
         high = t == 120;
         if (t && ue_missing) LOG("[RED] main: Unreal %s not found by the rewriter (ue_cvar.py NAMES; game profile ue_fps_cvar): the game's own frame limit stays", DM_GAME_UE_FPS_CVAR);
-        if (!nrow && !nier && !fb.n && !uq.base) return;
+        if (!nrow && !nier && !fb.n && !uq.base && !hdr.base) return;
         if (!t) { for (int r = 0; r < nrow; r++) LOG("main: %s left as the game sets it (%s)", rows[r]->what, src); if (nier) LOG("main: NieR frame interval left as the game sets it (%s)", src);
-                  if (fb.n) LOG("main: Frostbite simulation rate left as the game sets it (%s)", src); if (uq.base) LOG("main: Unity vSyncCount left as the game sets it (%s)", src); return; }
+                  if (fb.n) LOG("main: Frostbite simulation rate left as the game sets it (%s)", src); if (uq.base) LOG("main: Unity vSyncCount left as the game sets it (%s)", src);
+                  if (hdr.base) LOG("main: HAL dynamic resolution left as the game sets it (%s)", src); return; }
         target = t; state = 0;
     }
     if (high) target = nvn_fps_high_now();   // 120 while frames fit, else 60: the game's step stays what the screen shows (hle_nvn.c fps_high)
@@ -292,6 +328,7 @@ void dm_fps_lock_tick(void) {
     }
     if (fb.n) fb_tick(target, src);
     if (uq.base) unity_vsync_tick(target, src);
+    if (hdr.base && target > 30) hal_dr_tick(target, src);
     for (int r = 0; r < nrow; r++) {
         const lock_t *L = rows[r]; uint64_t obj = (uint64_t)(uintptr_t)base;
         if (L->ptr_off && (!rd((uint64_t)(uintptr_t)(base + L->ptr_off), &obj, sizeof obj) || !obj)) continue;   // not created yet
@@ -326,6 +363,10 @@ void dm_fps_lock_tick(void) {
                 want = 1;
                 if (cur) continue;   // already 1, or not this switch: 0 is the engine's default
                 snprintf(was, sizeof was, "%u", cur);
+            } else if (L->kind == FREE_I32) {
+                want = 0;
+                if (target <= 30 || !cur || cur > 4) continue;   // the game's own limit at 30; already free, or not set yet (0 from the constructor until the game sets it)
+                snprintf(was, sizeof was, "%u", cur);
             } else {
                 int fps = L->kind == FPS_I32;
                 want = fps ? (uint32_t)target : target > 60 ? 1 : 60 / (uint32_t)target;   // above 60 the display link paces it: a vsync count stays 1
@@ -339,6 +380,7 @@ void dm_fps_lock_tick(void) {
                 else if (L->kind == SECS_F32) snprintf(now, sizeof now, "%.5f s (%d fps)", 1.0 / target, target);
                 else if (L->kind == TICKS_U32) snprintf(now, sizeof now, "%u (%d fps)", want, target);
                 else if (L->kind == MODE_U32) snprintf(now, sizeof now, "1 (%d fps)", target);
+                else if (L->kind == FREE_I32) snprintf(now, sizeof now, "0 (%d fps)", target);
                 else snprintf(now, sizeof now, "%u%s", L->kind == FPS_F32 ? (unsigned)target : want, L->kind == FPS_F32 || L->kind == FPS_I32 ? " fps" : " vsyncs");
                 LOG("main: %s%s %s → %s (%s)", L->what, L->copies > 1 ? (c ? " (render thread)" : " (game thread)") : "", was, now, src); }
         }

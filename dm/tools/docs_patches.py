@@ -87,7 +87,11 @@ HOST_BINDING = [
 # Translator rules keyed by one shader's code hash: (the start of the rule's comment, entry)
 SHADER_BINDING = [
     ('Tears of the Kingdom 1.4.3 visibility counter', {'what': 'one vertex shader\'s visibility counter (VertexCounterLowering)', 'now': 'game', 'goal': 'host', 'purpose': 'shaders',
-     'why': 'a general lowering of subgroup ballots in vertex shaders would cover any shader that counts that way'}),
+     'why': 'a general lowering of subgroup ballots in vertex shaders (subgroups of one invocation: ballots, votes, lane ids and counts, refusing shuffles that exchange '
+            'data between lanes) would cover any shader that counts that way',
+     'checked': 'the shader-build logs of the 51 game builds on the game drive: no shader failed to translate or compile, none mentions a subgroup operation (2026-11-09)',
+     'kept': 'one shader in one game, already handled; a general lowering is a chain change (every game\'s shaders rebuilt) for no measured gain: revisit when a vertex shader '
+             'with subgroup operations fails in another game'}),
 ]
 # Profile switches: (key, the start of its value ('' = any), entry). A key is per-game data, so `game`; its goal is `host` where it is the semantics every game should get
 DEFAULT_SOON = 'a default for every game after `regress.py check` on the games'

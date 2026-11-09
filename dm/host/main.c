@@ -115,7 +115,8 @@ static void host_preload(int argc, char **argv) {
     {   // Which build this is: the commit the packer stamped into the app (DMCommit; a run outside an app has none), the shader chain the host loads, the profile
         CFBundleRef b = CFBundleGetMainBundle(); CFTypeRef c = b ? CFBundleGetValueForInfoDictionaryKey(b, CFSTR("DMCommit")) : NULL; char cs[64] = "not recorded";
         if (c && CFGetTypeID(c) == CFStringGetTypeID()) CFStringGetCString((CFStringRef)c, cs, sizeof cs, kCFStringEncodingUTF8);
-        LOG("build: commit %s, shader chain %s, profile %s", cs, DMSH_CHAIN, DM_GAME_ID);
+        const char *cenv = getenv("DM_CHAIN");
+        LOG("build: commit %s, shader chain %s, profile %s", cs, cenv && *cenv ? cenv : DMSH_CHAIN, DM_GAME_ID);
     }
     const char *race = getenv("DM_TEST_KEYRACE");
     if (race && *race) {

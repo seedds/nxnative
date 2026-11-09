@@ -315,6 +315,14 @@ To enroll a cut for any game's own module:
 - **Fix:** for a front patch area, reserve a zero-filled 16 KB state page immediately after the key page by extending `IMAGE_SIZE`. The existing Mac and iOS loaders map it with the BSS; no padding is added to the game binary. Ordinary modules retain their existing layout.
 - **Found on:** [ASTRAL CHAIN](../../dm/games/01007300020FA000/README.md#frame-rate).
 
+### The frame-step state page on the patch area's boundary
+
+- **Symptom:** `frame step state page` assertion in `patch_nso.py` when the first `FRAME_STEP` stubs are added to a module whose patch area follows the image.
+- **Cause:** the frame-step state page is the 16 KB page after the key page (`KEY_PAGE_OFF + 0x4000`), and an appended patch area starts at the next 64 KB boundary after the key page. When the key page ends exactly on a 64 KB boundary, that boundary is the state page itself, so the state page would have held stubs and the assertion refused the layout.
+- **Fix:** for a `main` with frame-step stubs (registered or function-matched), an appended patch area that would start within the state page moves 64 KB on (`patch_nso.py`, after `FS_MATCH`). Other modules keep their layout byte for byte.
+- **Found on:** [The Legend of Zelda: Link's Awakening](../../dm/games/01006BB00C6F0000/README.md#screen-shape-dm_screen_aspect-current) 1.1.0 `main`, its first frame-step stubs (screen shape).
+- **Check:** `test_patches.py`; a `main` without frame-step stubs is rewritten as before.
+
 ### Patch area right before the base for a long text
 
 - **Symptom:** `B()` range assertion, then `patch area of … bytes does not fit in the … before the base`.

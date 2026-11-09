@@ -159,6 +159,10 @@ FS_MATCH = None
 if NAME == 'main' and BUILD_ID not in PATCHES['FRAME_STEP']:
     from nso_match import locate_stub
     FS_MATCH = locate_stub(IMG, TEXT_END, PATCHES['MATCH_FRAME_STEP'].get(os.path.basename(os.environ.get('DM_GAME', '').rstrip('/')), {}).get(NAME, []))
+# The frame step state page is the page after the key page (KEY_PAGE_OFF + 0x4000), before the patch area. An appended patch area starts at the next 64 KB boundary, which is that
+# very page when the key page ends on one (Link's Awakening 1.1.0's main): the patch area then moves 64 KB on, for a main with frame step stubs only (others keep their layout)
+if not FAR and NAME == 'main' and (BUILD_ID in PATCHES['FRAME_STEP'] or FS_MATCH) and PATCH_OFF < KEY_PAGE_OFF + 0x4000 + 0x1000:
+    PATCH_OFF += 0x10000
 for off, ob, nb, why in cuts:
     ob, nb = bytes.fromhex(ob), bytes.fromhex(nb)
     assert len(ob) == len(nb) and IMG[off:off + len(ob)] == ob, f'cut original bytes mismatch {off:#x}: {bytes(IMG[off:off + len(ob)]).hex()}'

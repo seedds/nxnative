@@ -42,6 +42,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | `build` → `engine` | Next Level Games' frame limiter target at a fixed address | frame rate | blocked: one game on that engine here | judgement | 1 | [Luigi's Mansion 3](../../dm/games/0100DCA0064A6000/README.md) | the studio's engine, which its other games ship |
 | `build` → `engine` | RE Engine's frame limit at a fixed pointer | frame rate | blocked: one RE Engine game here | judgement | 1 | [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md) | engine code other RE Engine games ship |
 | `build` → `game` | 60 fps frame step on 1.3.0 (the same stub at its known addresses) | frame rate | blocked: 1.3.0's main is on neither drive to fingerprint (v458752 is the update on them) | judgement | 1 | [Hyrule Warriors: Age of Calamity](../../dm/games/01002B00111A2000/README.md) | the stub above, placed at 1.3.0's addresses: the matched rule would serve it once its functions are fingerprinted |
+| `build` → `game` | screen shape: the render size and targets, the display viewport, the field camera's aspect and fov y, its culling frustum, and the 2D layouts' panes (DM_SCREEN_ASPECT) | rendering | blocked: the stubs have no function-matched form yet | judgement | 1 | [The Legend of Zelda: Link's Awakening](../../dm/games/01006BB00C6F0000/README.md) | the sizes and the camera's projection are this game's own code; the pane rule (which panes are full-screen pictures) is this game's layouts' |
 | `build` → `game` | screen shape: the sizes, the view, the layouts' projection and their edge widgets (DM_SCREEN_ASPECT) | rendering | blocked: the stubs have no function-matched form yet | judgement | 1 | [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md) | the output size is the host's, but where the game takes its sizes, its cameras and its layouts are this build's code |
 | `build` → `game` | screen shape: Unity's screen apply takes the screen's shape, at most 16:10 (DM_SCREEN_ASPECT) | rendering | blocked: the stub has no function-matched form yet | judgement | 1 | [Hollow Knight: Silksong](../../dm/games/010013C00E930000/README.md) | the apply is Unity's engine code, but the shape the game's own camera takes (16:9 to 16:10) is this game's |
 | `build` → `game` | 60 fps intervals and dynamic-resolution constants | frame rate | kept: 1.0.3 (v131072) is the newest update of both releases and likely their last: a function match would serve no other build; the rewriter would also need matched rules that write fixups and declare capabilities, a new mechanism (2026-11-09) | checked: both releases' mains, where the host's rows for them were found; the global main's sites mapped into ASTRAL CHAIN and Bayonetta 1-3 (2026-11-09) | 2 | [NieR:Automata The End of YoRHa Edition (010056B015FE8000)](../../dm/games/010056B015FE8000/README.md); [NieR:Automata The End of YoRHa Edition (0100B8E016F76000)](../../dm/games/0100B8E016F76000/README.md) | the game's own constants; the Asian release's function is the global one's 0x13c0 further on, so one function-matched rule could serve both releases. No PlatinumGames sibling shares the code: none of its sites has an exact match in ASTRAL CHAIN or Bayonetta 1-3 (nso_fnmap, 2026-11-09) |
@@ -77,7 +78,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [Super Smash Bros. Ultimate](#super-smash-bros-ultimate) | 11 | 0 | 0 | 1 | 0 | `game` |
 | [Taiko Risshiden V DX](#taiko-risshiden-v-dx) | 1 | 0 | 0 | 2 | 0 | `game` |
 | [The Legend of Zelda: Breath of the Wild](#the-legend-of-zelda-breath-of-the-wild) | 7 | 0 | 43 | 0 | 0 | `build` → `game` ×2 |
-| [The Legend of Zelda: Link's Awakening](#the-legend-of-zelda-links-awakening) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
+| [The Legend of Zelda: Link's Awakening](#the-legend-of-zelda-links-awakening) | 1 | 0 | 12 | 0 | 0 | `build` → `game` ×2 |
 | [The Legend of Zelda: Ocarina of Time](#the-legend-of-zelda-ocarina-of-time) | 0 | 0 | 2 | 0 | 0 | `game` ×2 |
 | [The Legend of Zelda: Tears of the Kingdom](#the-legend-of-zelda-tears-of-the-kingdom) | 0 | 0 | 9 | 0 | 0 | `game` |
 | [Xenoblade Chronicles 3](#xenoblade-chronicles-3) | 6 | 0 | 0 | 0 | 0 | `build` → `game` |
@@ -540,9 +541,22 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 [The Legend of Zelda: Link's Awakening](../../dm/games/01006BB00C6F0000/README.md), `01006BB00C6F0000`, [patches.py](../../dm/games/01006BB00C6F0000/patches.py).
 
 - **`build` → `game`**, race, gap, judgement: PhysX completion task release. A lifetime race in the game's own completion task (its release slot serves this one vtable)
+- **`build` → `game`**, rendering, blocked: the stubs have no function-matched form yet, judgement: screen shape: the render size and targets, the display viewport, the field camera's aspect and fov y, its culling frustum, and the 2D layouts' panes (DM_SCREEN_ASPECT). The sizes and the camera's projection are this game's own code; the pane rule (which panes are full-screen pictures) is this game's layouts'
 
-- **1.1.0 `main`** `909e904a…` ([patches.py:12](../../dm/games/01006BB00C6F0000/patches.py#L12))
+- **1.1.0 `main`** `909e904a…` ([patches.py:15](../../dm/games/01006BB00C6F0000/patches.py#L15))
   - cut `+0x10cd070`: physics completion task release (calls its own destructor): ldr x8,[x0] → ret (no longer destroyed; the step function rebuilds it in place every step)
+  - frame step `+0x10918`: the field camera's fov y: opened so that its width stays 16:9's on the screen's shape (DM_SCREEN_ASPECT)
+  - frame step `+0x10930`: the field camera's aspect: / (16 / 9) x the screen's shape (DM_SCREEN_ASPECT)
+  - frame step `+0x852cd4`: the culling frustum: the field camera's fov y and aspect on the screen's shape (DM_SCREEN_ASPECT)
+  - frame step `+0x1019758`: the display viewport: its width takes the screen's shape (DM_SCREEN_ASPECT)
+  - frame step `+0x1019770`: the display scissor: its width takes the screen's shape (DM_SCREEN_ASPECT)
+  - frame step `+0x1019814`: the display viewport: its width takes the screen's shape (DM_SCREEN_ASPECT)
+  - frame step `+0x1019828`: the display scissor: its width takes the screen's shape (DM_SCREEN_ASPECT)
+  - frame step `+0x102376c`: the render size: a 16:9 one keeps its height and takes the screen's shape (DM_SCREEN_ASPECT)
+  - frame step `+0x1023d40`: the scene's render targets: their width takes the screen's shape over 16:9 (DM_SCREEN_ASPECT)
+  - frame step `+0x1167694`: the 2D layouts keep their shape on the taller screen, full-screen pictures fill it (DM_SCREEN_ASPECT)
+  - frame step `+0x1167854`: the 2D layouts keep their shape on the taller screen, full-screen pictures fill it (DM_SCREEN_ASPECT)
+  - frame step `+0x1167900`: the 2D layouts keep their shape on the taller screen, full-screen pictures fill it (DM_SCREEN_ASPECT)
 
 ### The Legend of Zelda: Ocarina of Time
 

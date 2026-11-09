@@ -85,6 +85,14 @@ int main(void) { @autoreleasepool {
     EXPECT_EQ("stale keys dropped: tasks", 1, t.count);
     EXPECT_EQ("stale keys dropped: first", 0, first);
 
+    // a start that compacts the pipeline archive, or has no hybrid draws, prepares everything first; otherwise the first part only
+    g_compact_enabled = 1;
+    EXPECT_EQ("compacting start: everything first", 7, warm_first_part(5, 7, 1));
+    g_compact_enabled = 0;
+    EXPECT_EQ("no hybrid draws: everything first", 7, warm_first_part(5, 7, 0));
+    EXPECT_EQ("hybrid, no compaction: the first part", 5, warm_first_part(5, 7, 1));
+    EXPECT_EQ("no mark: unchanged", 7, warm_first_part(7, 7, 1));
+
     // the background order (location-aware priority): a pair a draw bumped builds before the earlier queued ones, once; a bump of a taken or unknown pair does nothing
     NSString *pri = put(dir, @"pri.tsv", [@[@"S\ta1_b\t0", @"#@after_first_frame", rrow("v1_b", "f1_b", 0), rrow("v2_b", "f2_b", 0), @"S\tb1_b\t4", rrow("v3_b", "f3_b", 0), @""] componentsJoinedByString:@"\n"]);
     t = warm_parse(@[pri], &lines, &first);

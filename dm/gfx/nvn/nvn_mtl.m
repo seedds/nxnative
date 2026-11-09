@@ -9071,6 +9071,16 @@ static void warm_later(NSArray<WarmTask *> *rest, long rest_lines) {
         warm_finish();
     } });
 }
+// How many tasks the prepare step builds before the first frame: the lines after a WARM_LATER_MARK wait for it only with hybrid draws (a pulling pipeline stands in meanwhile) and on a
+// start that does not compact the archive. A compaction recaptures every base the prewarm finds before it removes the old files, and such a start finds them all in the archive, which
+// takes seconds; deferring part of it was left out (a crash inside Metal's compiler on a compacting start, the #342 family)
+static long warm_first_part(long first, long total, int hybrid) {
+    if (first < total && (!hybrid || g_compact_enabled)) {
+        MLOG("pipeline prepare: the lines after the first frame mark are prepared too (%s)", g_compact_enabled ? "this start compacts the pipeline archive" : "no hybrid draws");
+        return total;
+    }
+    return first;
+}
 static void warm_start(void) {
     if (g_warm_started++) return;
     const char *e = getenv("DM_PSO_MANIFEST");
@@ -9097,12 +9107,7 @@ static void warm_start(void) {
     atomic_store(&g_warm_running, 1);
     if (prepare_on()) {
         long lines = 0, first = 0; NSArray<WarmTask *> *tasks = warm_parse(paths, &lines, &first);
-        // The lines after a WARM_LATER_MARK wait for the first frame only with hybrid draws (a pulling pipeline stands in meanwhile) and on a start that does not compact the archive
-        // (a compaction recaptures every base the prewarm finds before it removes the old files; its starts find them all in the archive, which takes seconds)
-        if (first < (long)tasks.count && (!hybrid_on() || g_compact_enabled)) {
-            MLOG("pipeline prepare: the lines after the first frame mark are prepared too (%s)", g_compact_enabled ? "this start compacts the pipeline archive" : "no hybrid draws");
-            first = (long)tasks.count;
-        }
+        first = warm_first_part(first, (long)tasks.count, hybrid_on());
         long first_lines = first == (long)tasks.count ? lines : warm_lines(tasks, 0, first);
         if (first_lines) warm_prepare(first == (long)tasks.count ? tasks : [tasks subarrayWithRange:NSMakeRange(0, (NSUInteger)first)], first_lines);
         else if (!lines) MLOG("pipeline prepare: the prewarm lists hold nothing to build");

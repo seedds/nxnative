@@ -399,22 +399,82 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
         }
 
-        // I2F.F32 Rd, b:b+1 (source size 3, a 64-bit register pair, low word first): the other half of that division. Signed at 74, as I2F. The two words are converted and added, which can round
-        // twice where the hardware rounds once; the sequence's correction steps take that, and a high word of zero, the case seen, is exact
+        // I2F.F32 Rd, b:b+1 (source size 3, a 64-bit register pair, low word first): signed at 74, as I2F; rounding .RN / .RM / .RP / .RZ at 78..80. The compiler's 32-bit
+        // division uses it, and PTX cvt.rn.f32.s64 / .u64 gives it. The translator has 32-bit integers only, so the value is rounded once in integer arithmetic, which Metal's
+        // fast math leaves alone: the magnitude, normalised so its top bit is bit 63, keeps 24 bits; the next bit rounds, and every bit below it is sticky. Converting the
+        // two words to float and adding them rounded twice, one ulp off (and more for negative values near a power of two, where the high word is -1 or -2)
         public static void AI2f64(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
+            int rnd = x.Bits(78, 80);
 
-            if (x.Bits(84, 86) != 3 || x.Bits(75, 77) != 2 || x.Opcode != 0x312)
+            if (x.Bits(84, 86) != 3 || x.Bits(75, 77) != 2 || x.Opcode != 0x312 || rnd > 3)
             {
                 throw AFail(context, "I2F from 64 bits other than a register pair to an F32");
             }
 
             Operand lo = x.Rb >= RegisterConsts.RegisterZeroIndex ? Const(0) : Register(x.Rb, RegisterType.Gpr);
             Operand hi = x.Rb + 1 >= RegisterConsts.RegisterZeroIndex ? Const(0) : Register(x.Rb + 1, RegisterType.Gpr);
-            Operand fh = x.Bit(74) ? context.IConvertS32ToFP32(hi) : context.IConvertU32ToFP32(hi);
+            Operand neg = null;
 
-            ASet(context, x, context.FPAdd(context.FPMultiply(fh, ConstF(4294967296.0f)), context.IConvertU32ToFP32(lo)));
+            if (x.Bit(74))
+            {
+                // The magnitude of a negative value: the 64-bit two's complement, with the carry out of the low word when it is zero. -2^63 stays 2^63 read unsigned
+                neg = context.ICompareLess(hi, Const(0));
+                Operand nhi = context.ConditionalSelect(context.ICompareEqual(lo, Const(0)), context.INegate(hi), context.BitwiseNot(hi));
+                hi = context.ConditionalSelect(neg, nhi, hi);
+                lo = context.ConditionalSelect(neg, context.INegate(lo), lo);
+            }
+
+            // top: the word that holds the leading one, bottom: the word below it; s: the leading zeros of top (0..31). The 64 bits shifted left by s give h (the top
+            // word, its bit 31 set) and l (what is left of the low word). (bottom >> 1) >> (31 - s) is bottom >> (32 - s) with no shift by 32
+            Operand hz = context.ICompareEqual(hi, Const(0));
+            Operand top = context.ConditionalSelect(hz, lo, hi);
+            Operand bottom = context.ConditionalSelect(hz, Const(0), lo);
+            Operand msb = context.FindMSBU32(top);
+            Operand s = context.ISubtract(Const(31), msb);
+            Operand h = context.BitwiseOr(context.ShiftLeft(top, s), context.ShiftRightU32(context.ShiftRightU32(bottom, Const(1)), msb));
+            Operand l = context.ShiftLeft(bottom, s);
+
+            // The leading one sits at bit 32 + msb (or msb), so the biased exponent is that + 127. Its bit 23 of h >> 8 adds one to the exponent field, hence 126.
+            // A rounding carry out of the mantissa moves into the exponent, as it should
+            Operand exp = context.IAdd(msb, context.ConditionalSelect(hz, Const(126), Const(126 + 32)));
+            Operand bits = context.IAdd(context.ShiftLeft(exp, Const(23)), context.ShiftRightU32(h, Const(8)));
+            Operand lNz = context.ICompareNotEqual(l, Const(0));
+            Operand inc;
+
+            if (rnd == 0)
+            {
+                // Nearest even: the round bit (h bit 7) set, and a sticky bit below it or an odd mantissa (h bit 8)
+                Operand roundBit = context.ICompareNotEqual(context.BitwiseAnd(h, Const(0x80)), Const(0));
+                Operand rest = context.BitwiseOr(context.ICompareNotEqual(context.BitwiseAnd(h, Const(0x17f)), Const(0)), lNz);
+                inc = context.BitwiseAnd(roundBit, rest);
+            }
+            else if (rnd == 3)
+            {
+                inc = null;   // RZ: the magnitude truncated
+            }
+            else
+            {
+                // RM (1) rounds the magnitude up for a negative value, RP (2) for a positive one, when any bit was dropped
+                Operand inexact = context.BitwiseOr(context.ICompareNotEqual(context.BitwiseAnd(h, Const(0xff)), Const(0)), lNz);
+                inc = rnd == 1
+                    ? (neg == null ? null : context.BitwiseAnd(inexact, neg))
+                    : (neg == null ? inexact : context.BitwiseAnd(inexact, context.BitwiseNot(neg)));
+            }
+
+            if (inc != null)
+            {
+                bits = context.ConditionalSelect(inc, context.IAdd(bits, Const(1)), bits);
+            }
+
+            if (neg != null)
+            {
+                bits = context.BitwiseOr(bits, context.ConditionalSelect(neg, Const(unchecked((int)0x80000000)), Const(0)));
+            }
+
+            // Zero has no leading one (FindMSBU32 gives -1)
+            ASet(context, x, context.ConditionalSelect(context.ICompareEqual(top, Const(0)), Const(0), bits));
         }
 
         // I2FP.F32.S32 / .U32: signed at 74

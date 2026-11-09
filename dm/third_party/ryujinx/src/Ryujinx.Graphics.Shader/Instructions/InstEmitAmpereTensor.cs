@@ -1,4 +1,3 @@
-using System.Linq;
 using Ryujinx.Graphics.Shader.Decoders;
 using Ryujinx.Graphics.Shader.IntermediateRepresentation;
 using Ryujinx.Graphics.Shader.Translation;
@@ -338,20 +337,6 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
         }
 
-        // .FTZ (80) of HSETP2 / HSET2: a subnormal half compares as zero, as FSETP.FTZ's float does (AFtz). The lanes are unpacked to 32 bits, where a half's subnormals
-        // are normal floats, so FlushDenormal's bound would never flush them: the half's own bound is 2^-14
-        private static (Operand[] A, Operand[] B) AHalfFtz(EmitterContext context, AmpereOp x, (Operand[] A, Operand[] B) src)
-        {
-            if (!x.Bit(80))
-            {
-                return src;
-            }
-
-            Operand[] Flush(Operand[] v) => [.. v.Select(l => context.ConditionalSelect(context.FPCompareLess(context.FPAbsolute(l), ConstF(6.1035156e-05f)), ConstF(0), l))];
-
-            return (Flush(src.A), Flush(src.B));
-        }
-
         // HSETP2 Pd0, Pd1, a, b, P: each half's comparison (76..80) combined with P (87..90) by the operation at 69..71; with .H_AND (71) the two halves' results ANDed
         // into Pd0 and its negation into Pd1
         public static void AHsetp2(EmitterContext context)
@@ -404,7 +389,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 throw AFail(context, "HMNMX2 .F32 / .NAN / .XORSIGN / .BF16");
             }
 
-            (Operand[] a, Operand[] b) = AHalfSecond(context, x);
+            (Operand[] a, Operand[] b) = AHalfFtz(context, x, AHalfSecond(context, x));
             Operand p = APred(context, x, 87, 90);
             Operand[] r = new Operand[2];
 

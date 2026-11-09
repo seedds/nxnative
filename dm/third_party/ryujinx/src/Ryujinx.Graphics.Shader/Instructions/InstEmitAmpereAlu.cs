@@ -606,8 +606,38 @@ namespace Ryujinx.Graphics.Shader.Instructions
             return (a, x.Form is 1 or 4 or 5 or 6 ? b : c);
         }
 
+        // .FTZ (80) of the half-pair arithmetic (HADD2, HMUL2, HFMA2), compares (HSETP2, HSET2) and HMNMX2: a subnormal half reads as a zero of its own sign. The lanes are unpacked to 32 bits,
+        // where a half's subnormals are normal floats, so FlushDenormal's bound would never flush them: the half's own bound is 2^-14. Unlike f32 (AFtz), Metal keeps f16 subnormals and
+        // so does its half conversion: HMUL2.FTZ of the subnormal 0x03ff and +Inf is NaN on NVIDIA (0 * Inf), not Inf
+        private static Operand[] AHalfFlush(EmitterContext context, Operand[] v)
+        {
+            Operand[] r = new Operand[v.Length];
+
+            for (int i = 0; i < v.Length; i++)
+            {
+                Operand l = v[i];
+
+                if (l.Type == OperandType.Constant)
+                {
+                    r[i] = Math.Abs(l.AsFloat()) < 6.1035156e-05f ? Const(l.Value & int.MinValue) : l;
+                }
+                else
+                {
+                    r[i] = context.ConditionalSelect(context.FPCompareLess(context.FPAbsolute(l), ConstF(6.1035156e-05f)), context.BitwiseAnd(l, Const(int.MinValue)), l);
+                }
+            }
+
+            return r;
+        }
+
+        private static (Operand[] A, Operand[] B) AHalfFtz(EmitterContext context, AmpereOp x, (Operand[] A, Operand[] B) src)
+        {
+            return x.Bit(80) ? (AHalfFlush(context, src.A), AHalfFlush(context, src.B)) : src;
+        }
+
         // The result: two halves packed, or with .F32 (78) the low lane as one float. HFMA2 / HMUL2 (sm_86): .RELU (79) clamps at zero; .BF16_V2 (85)
-        // is not handled.
+        // is not handled. .FTZ (80) flushes a subnormal result lane to a zero of its sign after rounding to half, as the Orin does (HMUL2.FTZ of 0x3555 and 0x8608 is -0, not 0x8203);
+        // the .F32 result is a float, whose subnormals Metal flushes itself
         private static void AHalfResult(EmitterContext context, AmpereOp x, Operand lo, Operand hi)
         {
             bool sat = x.Bit(77);
@@ -629,13 +659,24 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 return;
             }
 
-            ASet(context, x, context.PackHalf2x16(context.FPSaturate(lo, sat), context.FPSaturate(hi, sat)));
+            Operand res = context.PackHalf2x16(context.FPSaturate(lo, sat), context.FPSaturate(hi, sat));
+
+            if (x.Bit(80))
+            {
+                // A lane whose exponent field is zero keeps only its sign
+                Operand loSub = context.ICompareEqual(context.BitwiseAnd(res, Const(0x7c00)), Const(0));
+                Operand hiSub = context.ICompareEqual(context.BitwiseAnd(res, Const(0x7c000000)), Const(0));
+                Operand keep = context.BitwiseAnd(context.ConditionalSelect(loSub, Const(unchecked((int)0xfffffc00)), Const(-1)), context.ConditionalSelect(hiSub, Const(unchecked((int)0xfc00ffff)), Const(-1)));
+                res = context.BitwiseAnd(res, keep);
+            }
+
+            ASet(context, x, res);
         }
 
         public static void AHadd2(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
-            (Operand[] a, Operand[] b) = AHalfSecond(context, x);
+            (Operand[] a, Operand[] b) = AHalfFtz(context, x, AHalfSecond(context, x));
 
             AHalfResult(context, x, context.FPAdd(a[0], b[0]), context.FPAdd(a[1], b[1]));
         }
@@ -643,7 +684,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
         public static void AHmul2(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
-            (Operand[] a, Operand[] b) = AHalfSecond(context, x);
+            (Operand[] a, Operand[] b) = AHalfFtz(context, x, AHalfSecond(context, x));
 
             AHalfResult(context, x, context.FPMultiply(a[0], b[0]), context.FPMultiply(a[1], b[1]));
         }
@@ -652,6 +693,11 @@ namespace Ryujinx.Graphics.Shader.Instructions
         {
             AmpereOp x = new(context.CurrOp);
             (Operand[] a, Operand[] b, Operand[] c) = AHalfSrcs(context, x);
+
+            if (x.Bit(80))
+            {
+                (a, b, c) = (AHalfFlush(context, a), AHalfFlush(context, b), AHalfFlush(context, c));
+            }
 
             // .H0_NH1 (86), named high lane first: the high lane reads B's low half, the low lane B's high half negated (a rotation by 90 degrees, what cross products and 2D rotations need).
             // Pokemon Pokopia's sun shadow mask crosses its two lanes without it (the shadow against the cloud map rather than the cascade fade), which lights cave floors and drops cloud shadows

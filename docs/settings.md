@@ -37,7 +37,7 @@ The size of the 3D picture, from 50 to 100 %. Below 100 % the size is fixed ther
 
 ### Resolution
 
-The size the game renders at, for games the app can resize (Hades II 1.0.131248): **1280 × 720** as on the Switch, **1920 × 1080**, **2560 × 1440** or **3840 × 2160**. A larger size is sharper on a larger screen and takes more GPU time per frame; the HUD and text are laid out for the size.
+The size the game renders at, for games the app can resize (Hades II 1.0.131248; Ocarina of Time v131072, docked): **Game's own**, the size it renders on the Switch (Hades II 1280 × 720, Ocarina of Time 2560 × 1440, of which it draws 80 % and scales up), **1920 × 1080**, **2560 × 1440** or **3840 × 2160**. A larger size is sharper on a larger screen and takes more GPU time per frame; the HUD and text are laid out for the size.
 
 ### Console mode
 

@@ -52,6 +52,12 @@ Measured on an M6 Mac with 16 GB, headless, on one walk with camera turns (`walk
 - With a window, the first start on a new chain runs the pipeline prebuild first: 33,190 shader pairs, 691 s on this Mac. A run with no window skips it.
 - The opening movie runs at the movie's own 24 fps pace during the story section and cannot be skipped: about 8 minutes on a new file.
 
+## Render size
+
+- The launcher's **Resolution** (`DM_RENDER_SIZE`, v131072, docked): the game sizes its docked output and render targets from fixed 2560x1440 constants, and stubs at those sites (`patches.py`, the sites [PR 1460](https://github.com/seedds/nxnative/pull/1460) found for its ultrawide cuts) take the chosen size instead. The swapchain and every target that follows the output take it; the game still draws 80 % of the output (`nvnWindowSetCrop`, 3072x1728 at 3840x2160) and its 3D at most at its top level, ×0.75 of that. Handheld (1920x1080) is left alone.
+- Measured (M5 Max, macOS 26.6.2, 2026-11-08, a 1-minute headless route from a save, n=1 each): every size held 60 fps (frame p50 16.7 ms); GPU p50 8.9 ms at the game's own size, 9.2 ms at 2560x1440 through the stubs, 9.6 ms at 3840x2160. On this Mac the frame hardly follows the size (see Dynamic resolution). In play, 2026-11-08 and 09: 2560x1440 (three sessions, 2 to 14 minutes) and 3024x1702 (a size not in the launcher's list; five sessions, up to 28 minutes), through Kakariko, Death Mountain Trail, Hyrule Field and Castle Town.
+- Not checked: 1920x1080 docked (below the game's own size), handheld, other builds.
+
 ## Dynamic resolution
 
 - The controller (v131072; found by fingerprint, so the addresses are only for reading): the parameters are `game__gfx__DynamicResolutionParam` (`LoadThreshold`, `ReduceCounterMax`, `IncreaseCounterMax`, and a list of levels, each a `ResolutionReduceScale` and a `Priority`). Once a frame the update (`main+0x805aa0`) reads the frame's GPU time, subtracts what its cost model predicts at the current size and keeps the trend of that residual. The level function (`main+0x8065e0`) adds the residual to the model's cost at each level and returns the best level under the threshold: 0, the full 1536x864, when the current size fits. The update moves down after `ReduceCounterMax` frames that ask for it and back up after `IncreaseCounterMax`. Scripted `GPULoad` hints from event data (`main+0x31c3de0`) and `OneshotSetDynamicResolutionLoadThreshold` adjust it in cutscenes.

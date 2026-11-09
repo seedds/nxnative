@@ -32,6 +32,7 @@ def frame_step(ctx):
     emit(0x1e201828); emit(B(here(), site + 4))   # orig: fdiv s8,s1,s0; back
     fs_put(site, [B(site, start)], 'frame ratio: the host\'s step × base rate / 60 instead of base rate / the game\'s frame rate (state page target fps; 0 = the game\'s ratio)')
     dynamic_resolution(ctx)
+    if base == 0x6e6be0: render_size(ctx)   # v131072's main (the only build the render-size sites are known for)
 
 # The game's dynamic resolution (game__gfx__DynamicResolutionParam: LoadThreshold, ReduceCounterMax, IncreaseCounterMax and a list of levels, each a ResolutionReduceScale and a
 # Priority; on v131072 levels 0..9 at 0.75..0.333 of 2048x1152, 1536x864 to 683x384). Its update (main+0x805aa0) reads the frame's GPU load (about 0.2 ms a unit) into +0x8, subtracts
@@ -71,6 +72,57 @@ def dynamic_resolution(ctx):
     fs_put(site, [B(site, start)], 'dynamic resolution level: 0 (full resolution), or with state +0x40 (DM_DYNAMIC_RESOLUTION) a climb on the load measured at each level')
     ctx.capabilities.add('DYNAMIC_RESOLUTION')
 
+# Render size (DM_RENDER_SIZE, the launcher's Resolution; v131072 only, guarded by the matched frame-step function's place): the game sizes its docked output and render
+# targets from fixed 2560x1440 constants (the sites upstream PR #1460 found for its ultrawide cuts); these stubs take the state page's size instead (+0x38: u32 width,
+# u32 height, read as one x = width | height << 32; 0 = the game's own). Each keeps the original instructions for size 0. Handheld (1920x1080) is left alone.
+#   main+0x1202ee0  the graphics setup config's output size (swap chain), x8 = 2560 | 1440 << 32 (mov/movk), stored at [x21+0x14]
+#   main+0x31f39f4  the docked render size, the same pattern, stored at [x19+0xb68]
+#   main+0x112c604  the display mode's output size, read from the table at main+0x3f58540: its 2560x1440 entry becomes the size
+#   main+0xecbc80 / +0xecbcb4  the float copies of the output width (w9 = 2560.0f) and height (w8 = 1440.0f) in the same object's init
+# The float stubs convert through s31, saved below sp and restored (no FP register is known free there)
+NOP = 0xd503201f
+def render_size(ctx):
+    here, emit, fs_site, fs_put, ST = ctx.here, ctx.emit, ctx.site, ctx.put, ctx.state
+    for site in (0x1202ee0, 0x31f39f4):   # mov x8,#0xa00; movk x8,#0x5a0,lsl #32
+        fs_site(site, '084081d208b4c0f2')
+        start = here(); emit(ADRP(8, here(), ST))
+        for w in (0xf9401d08,   # ldr x8,[x8,#0x38]       width | height << 32
+                  0xb5000068,   # cbnz x8,+12             set: keep it
+                  0xd2814008,   # mov x8,#0xa00           2560
+                  0xf2c0b408):  # movk x8,#0x5a0,lsl #32  1440
+            emit(w)
+        emit(B(here(), site + 8))
+        fs_put(site, [B(site, start), NOP], 'render size: %s from the state page (DM_RENDER_SIZE), 2560x1440 when it is 0' % ('output (swap chain) size' if site == 0x1202ee0 else 'docked render size'))
+    site = 0x112c604   # ldr x8,[x9,x8,lsl #3]  the display mode's output size from the table
+    fs_site(site, '287968f8')
+    start = here(); emit(0xf8687928)          # ldr x8,[x9,x8,lsl #3]
+    emit(ADRP(16, here(), ST))
+    for w in (0xf9401e10,   # ldr x16,[x16,#0x38]
+              0xb40000b0,   # cbz x16,+20            not set: the table's entry
+              0xd2814011,   # mov x17,#0xa00
+              0xf2c0b411,   # movk x17,#0x5a0,lsl #32
+              0xeb11011f,   # cmp x8,x17             the 2560x1440 entry (docked)
+              0x9a880208):  # csel x8,x16,x8,eq
+        emit(w)
+    emit(B(here(), site + 4))
+    fs_put(site, [B(site, start)], 'render size: the display mode\'s 2560x1440 output entry becomes the state page\'s size (DM_RENDER_SIZE)')
+    for site, orig, ldr, cbz, fmov, name in ((0xecbc80, 0x52a8a409, 0xb9403929, 0x340000c9, 0x1e2603e9, 'width'),    # mov w9,#0x45200000 (2560.0f)
+                                             (0xecbcb4, 0x52a89688, 0xb9403d08, 0x340000c8, 0x1e2603e8, 'height')):  # mov w8,#0x44b40000 (1440.0f)
+        r = 9 if name == 'width' else 8
+        fs_site(site, orig.to_bytes(4, 'little').hex())
+        start = here(); emit(ADRP(r, here(), ST))
+        for w in (ldr,          # ldr wR,[xR,#0x38 / 0x3c]
+                  cbz,          # cbz wR,orig (+24)
+                  0xfc1f0fff,   # str d31,[sp,#-16]!
+                  0x1e23001f | r << 5,   # ucvtf s31,wR
+                  fmov,         # fmov wR,s31
+                  0xfc4107ff):  # ldr d31,[sp],#16
+            emit(w)
+        emit(B(here(), site + 4))
+        emit(orig); emit(B(here(), site + 4))
+        fs_put(site, [B(site, start)], 'render size: output %s as a float from the state page (DM_RENDER_SIZE)' % name)
+    ctx.capabilities.add('RENDER_SIZE')
+
 MATCH_FRAME_STEP = {'main': [
     {'name': 'frame ratio from the host\'s step', 'size': 0x9b4, 'fingerprints': ['6ae2aff5344d14568e4dbaf93455e2d8278384bf892ed6c6eca87fef98fbcd1d'], 'stub': frame_step,   # v131072 main+0x6e6be0
      'others': {'dynamic resolution': {'size': 0x294, 'fingerprints': ['7af6ceb0aedf8e0c17dc08ce17fcd6a7cba6d394a0d09e3b504c6d668dc418e7']},   # v131072 main+0x8065e0
@@ -84,4 +136,7 @@ BINDING = [
     {'what': 'dynamic resolution: full size, or a climb on the load measured at each level', 'now': 'game', 'goal': 'game', 'purpose': 'rendering',
      'why': "the game's own dynamic-resolution level function and update, found by their functions' fingerprints on any build that keeps both; switchable (DM_DYNAMIC_RESOLUTION)",
      'checked': 'v131072 main: one function with each fingerprint (the level function a leaf, x2..x11 / x16 / x17 / s0..s2 free), its callers, the update and the controller fields read by disassembly, the fields read in play (2026-11-08); the climb run natively against a model of the update and in play to full size (2026-11-09)'},
+    {'what': 'render size: the docked output and render size, the display mode\'s 2560x1440 entry and the float output size from the state page', 'now': 'build', 'goal': 'game', 'purpose': 'rendering',
+     'why': "five fixed 2560x1440 constants in v131072's main (the sites PR #1460 found for its ultrawide cuts), placed by address and only when the frame-step function sits at v131072's place; a function-matched rule could carry them to other builds",
+     'checked': 'v131072 headless at 2560x1440 and 3840x2160 (swapchain at the size, no crash, 60 fps held), in play at 2560x1440 and 3024x1702 (M5 Max, macOS 26.6.2, 2026-11-08 and 09)'},
 ]

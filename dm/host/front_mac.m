@@ -21,6 +21,10 @@
 #include "haptics_apple.h"
 #include "motion_apple.h"
 #include "motion_pro_mac.h"
+#include "motion_8bitdo_mac.h"
+// A controller's motion: GameController's, and for an 8BitDo Ultimate 2 Wireless its HID reports' (motion_8bitdo_mac.h), which GameController does not give
+static void pad_motion_attach(GCController *c, int p) { dm_motion_attach(c, p); abitdo_motion_attach(c, p); }
+static void pad_motion_detach(GCController *c, int p) { dm_motion_detach(c, p); abitdo_motion_detach(c, p); }
 #include "pad_apple.h"
 #include "pad_hid_mac.h"
 #include "pad_switch2_apple.h"
@@ -202,7 +206,7 @@ static void pad_read(GCExtendedGamepad *g) {
     #undef K
     if (p < 0) {   // DM_PAD_PRESS_TO_JOIN=1: it joins at its first button
         GCController *c = g.controller; if (!m || (p = pad_join((__bridge const void *)c, pad_name(c))) < 0) return;
-        g_held[p] = c; dm_motion_attach(c, p); pro_players_changed(nil);
+        g_held[p] = c; pad_motion_attach(c, p); pro_players_changed(nil);
     }
     if (cp_poll()) return;   // the controller applet's prompt has the controllers (front_ctrl_support)
     if (g_merge_s2_rumble && m) merge_rumble_to_s2(0);   // DM_PAD_MERGE: a button on this controller takes player 1's rumble back from a Switch 2 pad
@@ -246,10 +250,10 @@ static void pads_changed(GCController *gone) {
         int any = 0;
         for (GCController *c in GCController.controllers) if (c.extendedGamepad && c != gone) {
             any = 1; pad_keep_system_buttons(c); c.extendedGamepad.valueChangedHandler = ^(GCExtendedGamepad *g, GCControllerElement *el) { (void)el; pad_read(g); };
-            dm_motion_attach(c, 0);   // every controller is player 1: the last one moved drives its six-axis sensor
+            pad_motion_attach(c, 0);   // every controller is player 1: the last one moved drives its six-axis sensor
             pad_read(c.extendedGamepad);
         }
-        if (gone) dm_motion_detach(gone, 0);
+        if (gone) pad_motion_detach(gone, 0);
         if (!any) { if (!g_hidpads && !dm_switch2_pads()) dm_pad_set(0, 0, 0, 0, 0); dm_haptics_apple_controller(0, nil); }   // a raw HID pad still plays player 1 (pad_hid_mac.h)
         pro_players_changed(gone);
         return;
@@ -259,7 +263,7 @@ static void pads_changed(GCController *gone) {
     for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p] && (g_held[p] == gone || ![now containsObject:g_held[p]] || hidpad_gc_unread(g_held[p]))) {
         npad_name(p, nb, sizeof nb); LOG("controller '%s' disconnected: player %d (npad %s) is free", pad_name(g_held[p]), p + 1, nb);
         g_held[p].extendedGamepad.valueChangedHandler = nil;
-        dm_motion_detach(g_held[p], p);
+        pad_motion_detach(g_held[p], p);
         dm_haptics_apple_controller(p, nil);
         pad_slot_free(&g_slots, (__bridge const void *)g_held[p]); g_held[p] = nil;
         dm_pad_set_player(p, 0, 0, 0, 0, 0);   // nothing stays pressed
@@ -276,7 +280,7 @@ static void pads_changed(GCController *gone) {
         if (p < 0) { LOG("controller '%s' connected: all %d players are taken, not used", pad_name(c), DM_PLAYERS); continue; }
         g_held[p] = c; pad_keep_system_buttons(c);
         c.extendedGamepad.valueChangedHandler = ^(GCExtendedGamepad *g, GCControllerElement *el) { (void)el; pad_read(g); };
-        dm_motion_attach(c, p);
+        pad_motion_attach(c, p);
         npad_name(p, nb, sizeof nb); LOG("controller '%s' connected: player %d (npad %s)%s", pad_name(c), p + 1, nb, c.motion.hasRotationRate ? ", with motion (gyro)" : "");
         pad_read(c.extendedGamepad);
     }

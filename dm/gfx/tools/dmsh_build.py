@@ -83,7 +83,7 @@ def loop_guard(msl):
         name = f'dm_lg{len(own) + 1}'; own[end if l.strip() == 'do' else i] = name; fn_own.setdefault(fn, []).append(name)
     for i, l in enumerate(lines):
         if fn_head(i):
-            out += [l, '    uint dm_lg = 0u; (void)dm_lg;' + ''.join(f' uint {n} = 0u; (void){n};' for n in fn_own.get(i, ()))]; continue
+            out += [l] + [f'    uint {n} = 0u;\n    (void){n};' for n in ('dm_lg', *fn_own.get(i, ()))]; continue   # a statement a line: dmsh_meshstage.py _KERNEL reads a kernel's leading declarations that way
         cap = f'++{own.get(i, "dm_lg")} < {LOOP_CAP}u'
         if (m := re.fullmatch(r'(\s*)\} while \((.*)\);\s*', l)): l = f'{m.group(1)}}} while (({m.group(2)}) && {cap});'
         elif (m := re.fullmatch(r'(\s*)for \(;;\)\s*', l)): l = f'{m.group(1)}for (; {cap};)'

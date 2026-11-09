@@ -17015,9 +17015,14 @@ static CAFrameRateRange link_range(int mode) {
 // and why a fixed-rate screen still has about 20 ms more presentation delay with the link at either latency, remain open (docs/reference/frame-rate.md)
 __attribute__((weak)) int front_fullscreen(void) { return 0; }   // front_mac.m; graphics unit tests and iOS have none
 __attribute__((weak)) int front_screen_variable_refresh(void) { return 0; }   // front_mac.m; graphics unit tests and iOS have none
+// Latency 2 also while the 60 Hz link shows the late frames of a 30 fps cap at the next vsync (hle_nvn.c nvn_fstep_fine): at latency 1 it calls back 16.5 ms before the target
+// time and takes a frame whose GPU work is still running, so on a ProMotion screen the present lands one 120 Hz refresh late and the link skips its next tick; the acquire, which
+// counts ticks, then held each frame 50 ms (Ocarina of Time's title on an M1 iPad: 40 ms frames, 25 → 20 fps) or the screen showed them 33 / 38 / 42 ms apart. Latency 2 is the
+// 33 ms lead the 30 Hz link has at latency 1, so the input lag is that of the cap's own link.
+__attribute__((weak)) int nvn_fstep_fine(void) { return 0; }   // hle_nvn.c; graphics unit tests have no frame step
 // CAMetalDisplayLink accepts only 1 or 2. Compare its readback with the supported request, or an oversized override rewrites and logs every frame.
-static int link_latency(void) { return g_present_latency > 0 ? MIN(g_present_latency, 2) : front_fullscreen() && front_screen_variable_refresh() ? 2 : 1; }
-static const char *link_latency_why(void) { return g_present_latency > 0 ? "DM_PRESENT_LATENCY" : !front_fullscreen() ? "window" : front_screen_variable_refresh() ? "fullscreen, variable refresh" : "fullscreen, fixed refresh"; }
+static int link_latency(void) { return g_present_latency > 0 ? MIN(g_present_latency, 2) : (front_fullscreen() && front_screen_variable_refresh()) || nvn_fstep_fine() ? 2 : 1; }
+static const char *link_latency_why(void) { return g_present_latency > 0 ? "DM_PRESENT_LATENCY" : nvn_fstep_fine() ? "late frames of a 30 fps cap at the next vsync" : !front_fullscreen() ? "window" : front_screen_variable_refresh() ? "fullscreen, variable refresh" : "fullscreen, fixed refresh"; }
 // The 30 Hz link at a 30 fps target, except in fullscreen on a fixed-rate screen. There the link skipped ticks: Ocarina of Time at a 30 fps cap on a MacBook Air M4 (60 Hz) got
 // 16.5-25 callbacks a second over stretches of 300 frames, also on frames with under 1 ms of GPU, and each skipped tick kept a frame on screen 66.7 ms (a 180 s walk: 388 and 996
 // frames over 50 ms; 3-4 in a window, where the same link held 30.0). Why is open (docs/reference/frame-rate.md). The 60 Hz link paces the 30 through the present interval, as it

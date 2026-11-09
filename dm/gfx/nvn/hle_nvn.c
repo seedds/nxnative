@@ -2274,6 +2274,7 @@ int nvn_fps_high_now(void) { return atomic_load(&g_fs_k) == 1 ? 120 : 60; }   //
 // waits for the next vblank each frame is held to the event's rate whatever the present cap: Unity's NVN device waits until its vblank time (set from the event) passes
 // (The Rogue Prince of Persia: main+0x14f65f0), so at 120 every frame came two ticks late and the hold fell back to 60. The hold's trial at 120 must already have the event at 120
 int nvn_vsync_hz(void) { return fps_high() && atomic_load(&g_fs_k) == 1 && atomic_load(&g_high_cap) == 120 ? 120 : 60; }
+int nvn_fstep_fine(void) { return atomic_load(&g_fs_fine); }   // nvn_mtl.m link_latency: the 60 Hz link's lead while it shows a 30 fps cap's late frames
 int nvn_game_fps(void) { int c = fps_present_cap(); if (c) return c == 30 && (atomic_load(&g_fs_k) == 1 || atomic_load(&g_fs_fine)) && fstep_on() ? 60 : c; uint64_t s = atomic_load(&g_itv2_since); return g_hz > 0 && !g_display_mode && s && now_ns() >= s + 1000000000ull ? 30 : 60; }
 static void present_cfg(const win_t *o) {
     if (g_hz >= 0) return;

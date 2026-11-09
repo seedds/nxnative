@@ -120,18 +120,32 @@ namespace Ryujinx.Graphics.Shader.Instructions
             return half == 0 ? context.UnpackHalf2x16Low(packed) : context.UnpackHalf2x16High(packed);
         }
 
+        // nxnative: one element of a packed pair of HMMA sources as a float: f16 (type 0), or bf16 (1), the high half of a float, so its bits moved up 16
+        private static Operand AMmaHalf(EmitterContext context, Operand packed, int half, int type)
+        {
+            if (type == 0)
+            {
+                return AHalf(context, packed, half);
+            }
+
+            return half == 0 ? context.ShiftLeft(packed, Const(16)) : context.BitwiseAnd(packed, Const(unchecked((int)0xffff0000)));
+        }
+
         // HMMA.16816 / .1688 Rd, Ra, Rb, Rc: D (16 x 8) = A (16 x 16, or 16 x 8) * B (16 x 8, or 8 x 8) + C. Size 75 / 78 (0 m16n8k8, 1 m16n8k16), F32 accumulator and result
-        // (76; else packed halves), source type 82..84 (0 f16). Lane L, g = L / 4, t = L % 4: A regs (row g / g + 8) x (columns 2t, 2t + 1; + 8 in the second half of k), B regs
-        // (k 2t, 2t + 1; + 8) x (column g), C / D (row g / g + 8) x (columns 2t, 2t + 1).
+        // (76; else packed halves), source type 82..84 (0 f16, 1 bf16, 2 tf32). Lane L, g = L / 4, t = L % 4: A regs (row g / g + 8) x (columns 2t, 2t + 1; + 8 in the second half
+        // of k), B regs (k 2t, 2t + 1; + 8) x (column g), C / D (row g / g + 8) x (columns 2t, 2t + 1). TF32 (one element a register): A regs (row g / g + 8) x (column t; + 4),
+        // B regs (k t; + 4) x (column g).
         public static void AHmma(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
             int size = x.Bits(75, 76) | (x.Bits(78, 79) << 1);
             bool f32 = x.Bit(76);
+            int type = x.Bits(82, 84);
 
-            if (size > 1 || x.Bits(82, 84) != 0)
+            // nxnative: BF16 (m16n8k16) and TF32 (m16n8k8) sources, both with an f32 accumulator only (PTX mma.sync)
+            if (size > 1 || type > 2 || (type != 0 && !f32) || (type == 2 && size != 0))
             {
-                throw AFail(context, $"HMMA size {size} source type {x.Bits(82, 84)}");
+                throw AFail(context, $"HMMA size {size} source type {type}");
             }
 
             // nxnative: HMMA.16816 with an f16 accumulator in a compute shader (agl's upscaler networks: every HMMA of Donkey Kong Bananza's agl_ndsr.pck) becomes
@@ -139,7 +153,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             // shuffles and 64 FMAs a lane per HMMA, 2.3-6.5 ms a frame for the upscaler's dispatch on an M4 Pro, five times the simdgroup_matrix version's cost
             ShaderDefinitions defs = context.TranslatorContext.Definitions;
 
-            if (size == 1 && !f32 && defs.Stage == ShaderStage.Compute)
+            if (size == 1 && !f32 && type == 0 && defs.Stage == ShaderStage.Compute)
             {
                 int threads = defs.ComputeLocalSizeX * defs.ComputeLocalSizeY * defs.ComputeLocalSizeZ;
                 int memoryId = context.ResourceManager.GetHmmaScratchMemoryId(System.Math.Max(1, (threads + 31) / 32));
@@ -175,43 +189,81 @@ namespace Ryujinx.Graphics.Shader.Instructions
             Operand g = context.ShiftRightU32(lane, Const(2));
             Operand t = context.BitwiseAnd(lane, Const(3));
 
-            // A rows g and g + 8, every k: from lanes 4g + j (j = 0..3), which hold k = 2j, 2j + 1 (+ 8)
-            Operand[,] a = new Operand[2, 16];
-            Operand[,] aWord = new Operand[2, 16];   // the packed pair holding a[row, kk]: half kk & 1 of it
+            Operand[,] a = new Operand[2, 16], aWord = new Operand[2, 16];   // aWord: the register holding a[row, kk] (half kk & 1 of it, or all of a tf32)
+            Operand[,] b = new Operand[2, 16], bWord = new Operand[2, 16];
 
-            for (int j = 0; j < 4; j++)
+            if (type == 2)
             {
-                Operand src = context.IAdd(context.ShiftLeft(g, Const(2)), Const(j));
+                // nxnative: the tensor core reads a tf32 as the float's top 19 bits (sign, exponent, 10 mantissa bits) and ignores the low 13 (a Jetson Orin's results:
+                // with them kept, no output of 4,096 matches), so the FMA chain an Inf or NaN takes (AHmmaF32) clears them too
+                Operand Tf32(Operand v) => context.BitwiseAnd(v, Const(unchecked((int)0xffffe000)));
 
-                for (int r = 0; r < aRegs; r++)
-                {
-                    Operand v = context.Shuffle(AGpr(x.Ra + r), src);
-                    int row = r & 1, kb = (r >> 1) * 8 + 2 * j;
-                    a[row, kb] = AHalf(context, v, 0);
-                    a[row, kb + 1] = AHalf(context, v, 1);
-                    aWord[row, kb] = aWord[row, kb + 1] = v;
-                }
-            }
-
-            // B columns 2t and 2t + 1, every k: from lanes 4 col + j, which hold k = 2j, 2j + 1 (+ 8)
-            Operand[,] b = new Operand[2, 16];
-            Operand[,] bWord = new Operand[2, 16];
-
-            for (int c = 0; c < 2; c++)
-            {
-                Operand col = context.IAdd(context.ShiftLeft(t, Const(1)), Const(c));
-
+                // A rows g and g + 8, k = 0..7: from lanes 4g + j (j = 0..3), which hold k = j (regs 0, 1) and j + 4 (regs 2, 3)
                 for (int j = 0; j < 4; j++)
                 {
-                    Operand src = context.IAdd(context.ShiftLeft(col, Const(2)), Const(j));
+                    Operand src = context.IAdd(context.ShiftLeft(g, Const(2)), Const(j));
 
-                    for (int r = 0; r < bRegs; r++)
+                    for (int r = 0; r < 4; r++)
                     {
-                        Operand v = context.Shuffle(AGpr(x.Rb + r), src);
-                        int kb = r * 8 + 2 * j;
-                        b[c, kb] = AHalf(context, v, 0);
-                        b[c, kb + 1] = AHalf(context, v, 1);
-                        bWord[c, kb] = bWord[c, kb + 1] = v;
+                        Operand v = context.Shuffle(AGpr(x.Ra + r), src);
+                        int row = r & 1, kk = (r >> 1) * 4 + j;
+                        a[row, kk] = Tf32(v);
+                        aWord[row, kk] = v;
+                    }
+                }
+
+                // B columns 2t and 2t + 1, k = 0..7: from lanes 4 col + j, which hold k = j (reg 0) and j + 4 (reg 1)
+                for (int c = 0; c < 2; c++)
+                {
+                    Operand col = context.IAdd(context.ShiftLeft(t, Const(1)), Const(c));
+
+                    for (int j = 0; j < 4; j++)
+                    {
+                        Operand src = context.IAdd(context.ShiftLeft(col, Const(2)), Const(j));
+
+                        for (int r = 0; r < 2; r++)
+                        {
+                            Operand v = context.Shuffle(AGpr(x.Rb + r), src);
+                            b[c, r * 4 + j] = Tf32(v);
+                            bWord[c, r * 4 + j] = v;
+                        }
+                    }
+                }
+            }
+            else
+            {
+                // A rows g and g + 8, every k: from lanes 4g + j (j = 0..3), which hold k = 2j, 2j + 1 (+ 8)
+                for (int j = 0; j < 4; j++)
+                {
+                    Operand src = context.IAdd(context.ShiftLeft(g, Const(2)), Const(j));
+
+                    for (int r = 0; r < aRegs; r++)
+                    {
+                        Operand v = context.Shuffle(AGpr(x.Ra + r), src);
+                        int row = r & 1, kb = (r >> 1) * 8 + 2 * j;
+                        a[row, kb] = AMmaHalf(context, v, 0, type);
+                        a[row, kb + 1] = AMmaHalf(context, v, 1, type);
+                        aWord[row, kb] = aWord[row, kb + 1] = v;
+                    }
+                }
+
+                // B columns 2t and 2t + 1, every k: from lanes 4 col + j, which hold k = 2j, 2j + 1 (+ 8)
+                for (int c = 0; c < 2; c++)
+                {
+                    Operand col = context.IAdd(context.ShiftLeft(t, Const(1)), Const(c));
+
+                    for (int j = 0; j < 4; j++)
+                    {
+                        Operand src = context.IAdd(context.ShiftLeft(col, Const(2)), Const(j));
+
+                        for (int r = 0; r < bRegs; r++)
+                        {
+                            Operand v = context.Shuffle(AGpr(x.Rb + r), src);
+                            int kb = r * 8 + 2 * j;
+                            b[c, kb] = AMmaHalf(context, v, 0, type);
+                            b[c, kb + 1] = AMmaHalf(context, v, 1, type);
+                            bWord[c, kb] = bWord[c, kb + 1] = v;
+                        }
                     }
                 }
             }
@@ -232,7 +284,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             if (f32)
             {
-                Operand[] d = AHmmaF32(context, x, k, aWord, bWord, acc);
+                Operand[] d = AHmmaF32(context, x, k, type, aWord, bWord, acc);
 
                 for (int i = 0; i < 4 && x.Rd + i < RegisterConsts.RegisterZeroIndex; i++)
                 {
@@ -253,8 +305,13 @@ namespace Ryujinx.Graphics.Shader.Instructions
         // previous block's result for the second block of k16) are aligned to the largest exponent with 24 fraction bits (one more than f32's), every bit below truncated,
         // summed exactly, and the sum truncated to f32 (round toward zero). The FMA chain (round to nearest after every product) was 1 ULP off in two thirds of the lanes,
         // thousands where the alignment drops a small product. Integer operations on the bits, so Metal's fast math cannot change it; an Inf or NaN operand takes the chain.
-        private static Operand[] AHmmaF32(EmitterContext context, AmpereOp x, int k, Operand[,] aWord, Operand[,] bWord, Operand[] chain)
+        // nxnative: bf16 sources (type 1) add the same way in blocks of 8, tf32 (type 2, k8) in blocks of 4, each of their products with its 24 fraction bits too: the same
+        // model matches all 4,096 of the Orin's outputs for each
+        private static Operand[] AHmmaF32(EmitterContext context, AmpereOp x, int k, int type, Operand[,] aWord, Operand[,] bWord, Operand[] chain)
         {
+            int blockSize = type == 2 ? 4 : 8;
+            int special = type == 0 ? 31 : 255;   // the exponent field of an Inf or NaN
+
             var aPart = new (Operand Sig, Operand Exp, Operand Sign, Operand Field)[2, 16];
             var bPart = new (Operand Sig, Operand Exp, Operand Sign, Operand Field)[2, 16];
             Operand[] aMaxField = new Operand[2], bMaxField = new Operand[2];
@@ -263,8 +320,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
             {
                 for (int kk = 0; kk < k; kk++)
                 {
-                    aPart[r, kk] = AHalfParts(context, aWord[r, kk], kk & 1, 4);
-                    bPart[r, kk] = AHalfParts(context, bWord[r, kk], kk & 1, 0);
+                    aPart[r, kk] = AMmaParts(context, aWord[r, kk], kk & 1, type, a: true);
+                    bPart[r, kk] = AMmaParts(context, bWord[r, kk], kk & 1, type, a: false);
                     aMaxField[r] = kk == 0 ? aPart[r, kk].Field : context.IMaximumU32(aMaxField[r], aPart[r, kk].Field);
                     bMaxField[r] = kk == 0 ? bPart[r, kk].Field : context.IMaximumU32(bMaxField[r], bPart[r, kk].Field);
                 }
@@ -279,44 +336,54 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
                 for (int kk = 0; kk < k; kk++)
                 {
-                    mag[kk] = context.IMultiply(aPart[row, kk].Sig, bPart[c, kk].Sig);    // < 2^26: 20 fraction bits, << 4 (A's significands are shifted)
-                    exp[kk] = context.IAdd(aPart[row, kk].Exp, bPart[c, kk].Exp);        // f16 biased exponents' sum; the f32 biased exponent is 97 more
+                    mag[kk] = context.IMultiply(aPart[row, kk].Sig, bPart[c, kk].Sig);    // < 2^26 with 24 fraction bits (A's significands are shifted to give them)
+                    exp[kk] = context.IAdd(aPart[row, kk].Exp, bPart[c, kk].Exp);        // the f32 biased exponent less 97 (f16 biased exponents' sum)
                     sign[kk] = context.BitwiseExclusiveOr(aPart[row, kk].Sign, bPart[c, kk].Sign);
                 }
 
                 Operand cIn = AGpr(x.Rc + i);
                 Operand res = cIn;
 
-                for (int blk = 0; blk < k; blk += 8)
+                for (int blk = 0; blk < k; blk += blockSize)
                 {
-                    res = AHmmaF32Block(context, mag[blk..(blk + 8)], exp[blk..(blk + 8)], sign[blk..(blk + 8)], res);
+                    res = AHmmaF32Block(context, mag[blk..(blk + blockSize)], exp[blk..(blk + blockSize)], sign[blk..(blk + blockSize)], res);
                 }
 
-                // An f16 Inf or NaN (exponent field 31) among this output's A row and B column, or an f32 one in C
-                Operand special = context.BitwiseOr(
-                    context.ICompareEqual(context.IMaximumU32(aMaxField[row], bMaxField[c]), Const(31)),
+                // An Inf or NaN (the format's largest exponent field) among this output's A row and B column, or an f32 one in C
+                Operand isSpecial = context.BitwiseOr(
+                    context.ICompareEqual(context.IMaximumU32(aMaxField[row], bMaxField[c]), Const(special)),
                     context.ICompareEqual(context.BitwiseAnd(cIn, Const(0x7f800000)), Const(0x7f800000)));
-                d[i] = context.ConditionalSelect(special, chain[i], res);
+                d[i] = context.ConditionalSelect(isSpecial, chain[i], res);
             }
 
             return d;
         }
 
-        // Half `half` of packed pair w: (significand << sigShift, exponent field with denormals at 1 and zeros at -256 (so a zero product never sets a block's exponent),
-        // sign as 0 or -1, the exponent field)
-        private static (Operand Sig, Operand Exp, Operand Sign, Operand Field) AHalfParts(EmitterContext context, Operand w, int half, int sigShift)
+        // nxnative: one source element of register w for AHmmaF32: half `half` of a packed f16 or bf16 pair, or a tf32 (bits 13..31). (significand, shifted in A so that
+        // a product has 24 fraction bits; exponent field with denormals at 1 and zeros at -1024 (so a zero product never sets a block's exponent), in A less 224 for the
+        // 8-bit exponents, so that a product's is the f32 biased exponent less 97 as with f16; sign as 0 or -1; the exponent field)
+        private static (Operand Sig, Operand Exp, Operand Sign, Operand Field) AMmaParts(EmitterContext context, Operand w, int half, int type, bool a)
         {
-            int o = half * 16;
-            Operand field = context.BitfieldExtractU32(w, Const(o + 10), Const(5));
-            Operand frac = context.BitfieldExtractU32(w, Const(o), Const(10));
-            Operand sig = context.BitwiseOr(context.ShiftLeft(frac, Const(sigShift)), context.ShiftLeft(context.IMinimumU32(field, Const(1)), Const(10 + sigShift)));
-            Operand exp = context.ConditionalSelect(context.ICompareEqual(sig, Const(0)), Const(-256), context.IMaximumU32(field, Const(1)));
-            Operand sign = context.BitfieldExtractS32(w, Const(o + 15), Const(1));
+            (int o, int fracBits, int expBits, int sigShift) = type switch
+            {
+                0 => (half * 16, 10, 5, 4),    // f16 x f16: 20 fraction bits
+                1 => (half * 16, 7, 8, 10),    // bf16 x bf16: 14
+                _ => (13, 10, 8, 4),           // tf32 x tf32: 20
+            };
+
+            sigShift = a ? sigShift : 0;
+            Operand field = context.BitfieldExtractU32(w, Const(o + fracBits), Const(expBits));
+            Operand frac = context.BitfieldExtractU32(w, Const(o), Const(fracBits));
+            Operand sig = context.BitwiseOr(context.ShiftLeft(frac, Const(sigShift)), context.ShiftLeft(context.IMinimumU32(field, Const(1)), Const(fracBits + sigShift)));
+            Operand exp = context.IMaximumU32(field, Const(1));
+            exp = a && type != 0 ? context.ISubtract(exp, Const(224)) : exp;
+            exp = context.ConditionalSelect(context.ICompareEqual(sig, Const(0)), Const(-1024), exp);
+            Operand sign = context.BitfieldExtractS32(w, Const(o + fracBits + expBits), Const(1));
 
             return (sig, exp, sign, field);
         }
 
-        // One block: 8 products (magnitude with 24 fraction bits below 2^exp, exponent on the products' scale, sign 0 / -1) and C (f32 bits) aligned to the largest
+        // One block: 4 or 8 products (magnitude with 24 fraction bits below 2^exp, exponent on the products' scale, sign 0 / -1) and C (f32 bits) aligned to the largest
         // exponent, truncated, summed, and the sum truncated to f32 bits. |sum| < 9 * 2^26 fits in an int.
         private static Operand AHmmaF32Block(EmitterContext context, Operand[] mag, Operand[] exp, Operand[] sign, Operand c)
         {
@@ -352,7 +419,9 @@ namespace Ryujinx.Graphics.Shader.Instructions
             Operand p = context.FindMSBU32(m);
             Operand e1 = context.IAdd(max, context.IAdd(p, Const(72)));
             Operand shift = context.ISubtract(context.IAdd(Const(23), context.IMinimumS32(e1, Const(0))), p);
-            Operand n = context.ShiftRightU32(context.ShiftLeft(m, context.IMaximumS32(shift, Const(0))), context.IMaximumS32(context.INegate(shift), Const(0)));
+            // nxnative: a right shift of 32 or more (a sum below f32's denormals, which only 8-bit source exponents reach) is undefined in MSL, so at most 31 (m < 2^30 is then 0)
+            Operand n = context.ShiftRightU32(context.ShiftLeft(m, context.IMaximumS32(shift, Const(0))),
+                                              context.IMinimumS32(context.IMaximumS32(context.INegate(shift), Const(0)), Const(31)));
             Operand bits = context.IAdd(context.ShiftLeft(context.IMaximumS32(e1, Const(0)), Const(23)), n);
             bits = context.ConditionalSelect(context.ICompareGreaterOrEqual(e1, Const(254)), Const(0x7f800000), bits);
             bits = context.BitwiseOr(bits, context.BitwiseAnd(sum, Const(unchecked((int)0x80000000))));

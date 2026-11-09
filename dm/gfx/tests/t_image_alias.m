@@ -176,7 +176,8 @@ int main(void) { @autoreleasepool {
     CHECK(small.heap!=nil,"live resolution family has physical backing");
     CHECK(!(small.usage&MTLTextureUsagePixelFormatView),"a family texture gets no forced format-view usage");
     CHECK(!small.allowGPUOptimizedContents,"family textures are uncompressed: a size reading another's compressed blocks decodes garbage");
-    MTLSizeAndAlign max_size=[g_dev heapTextureSizeAndAlignWithDescriptor:tex_desc(&a[N-1],0)];
+    MTLTextureDescriptor *largest=tex_desc(&a[N-1],0); largest.allowGPUOptimizedContents=NO;   // family members are sized uncompressed, as they are made (image_texture)
+    MTLSizeAndAlign max_size=[g_dev heapTextureSizeAndAlignWithDescriptor:largest];
     CHECK(small.heap.size==max_size.size,"heap capacity is the exact largest declared size");
     is_zero(small);
     id<MTLTexture> big=tex_mtl(&a[N-1]); is_zero(big);

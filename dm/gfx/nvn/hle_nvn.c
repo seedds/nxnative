@@ -1872,8 +1872,8 @@ static int fps_high(void) {
     int v = __atomic_load_n(&g_fps_high, __ATOMIC_RELAXED);
     if (v < 0) {
         const char *e = getenv("DM_FPS_TARGET"); int t = e ? atoi(e) : DM_GAME_FPS_TARGET;
-        v = t == 120 && DM_GAME_FPS_MAX >= 120 && !dm_fps_state && dm_fps_lock_engine();
-        if (t == 120 && DM_GAME_FPS_MAX >= 120 && !v) LOG("[RED] [nvn] 120 fps: this main has %s, so it runs at 60", dm_fps_state ? "a frame step in whole vsyncs" : "no engine frame limit the host writes");
+        v = t == 120 && DM_GAME_FPS_MAX == 120 && !dm_fps_state && dm_fps_lock_engine();   // fps_max above 120: a fixed target instead (loader.c dm_fps_high_apply)
+        if (t == 120 && DM_GAME_FPS_MAX == 120 && !v) LOG("[RED] [nvn] 120 fps: this main has %s, so it runs at 60", dm_fps_state ? "a frame step in whole vsyncs" : "no engine frame limit the host writes");
         __atomic_store_n(&g_fps_high, v, __ATOMIC_RELAXED);
     }
     return v;
@@ -1908,7 +1908,7 @@ static int fps_present_cap(void) {
     if (dm_fps_state || fps_high()) return fps_step_cap();
     if (g_present_cap < 0) {
         const char *e=getenv("DM_FPS_TARGET");int t=e?atoi(e):DM_GAME_FPS_TARGET;
-        g_present_cap=t==30||t==60?t:t==120?60:0;   // 120 here: not this game's (fps_high), so it runs at 60
+        g_present_cap=t==30||t==60?t:t>60&&t>DM_GAME_FPS_MAX?60:t==120&&DM_GAME_FPS_MAX==120?60:0;   // above the profile's fps_max it runs at 60 (hle_fpslock.c); 120 here with fps_max 120: fps_high could not take it; up to an fps_max above 120: no cap, the display link paces it (dm_fps_high_apply)
         if (g_present_cap && !dm_fps_lock_engine()) {
             LOG("[nvn] present cap %d fps (%s) not applied: this main has neither a frame step nor an engine frame limit the host writes, so the game's own present interval stays", g_present_cap, e ? "DM_FPS_TARGET" : "game profile fps_target");
             g_present_cap=0;

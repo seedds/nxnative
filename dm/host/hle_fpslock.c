@@ -258,9 +258,10 @@ void dm_fps_lock_tick(void) {
         state = -1; pthread_once(&g_found, lock_find);
         if (!nrow && !nier && !fb.n && !uq.base && !ue_missing) return;
         const char *e = getenv("DM_FPS_TARGET"); int t = e ? atoi(e) : DM_GAME_FPS_TARGET; src = e ? "DM_FPS_TARGET" : "game profile fps_target";
-        if (t != 0 && t != 30 && t != 60 && t != 120) { LOG("[RED] DM_FPS_TARGET=%s: must be 0, 30, 60 or 120; leaving the game's frame limit", e); t = 0; }
-        if (t == 120 && DM_GAME_FPS_MAX < 120) { LOG("[RED] DM_FPS_TARGET=120: this game's speed at 120 fps is not checked (profile fps_max); running at 60"); t = 60; }
-        high = t == 120;
+        if (t != 0 && t != 30 && t != 60 && !(t > 60 && t <= 240)) { LOG("[RED] DM_FPS_TARGET=%s: must be 0, 30, 60 or 61 to 240; leaving the game's frame limit", e); t = 0; }
+        if (t > 60 && t > DM_GAME_FPS_MAX) { LOG("[RED] DM_FPS_TARGET=%d: this game's speed at that rate is not checked (profile fps_max %d); running at 60", t, DM_GAME_FPS_MAX); t = 60; }
+        if (t > 60 && (nier || fb.n)) t = 60;   // their fields hold vsyncs per frame or a simulation rate no one has run above 60
+        high = t == 120 && DM_GAME_FPS_MAX == 120;   // above 120 (fps_max): fixed at the target, on a display link at that rate (loader.c dm_fps_high_apply)
         if (t && ue_missing) LOG("[RED] main: Unreal %s not found by the rewriter (ue_cvar.py NAMES; game profile ue_fps_cvar): the game's own frame limit stays", DM_GAME_UE_FPS_CVAR);
         if (!nrow && !nier && !fb.n && !uq.base) return;
         if (!t) { for (int r = 0; r < nrow; r++) LOG("main: %s left as the game sets it (%s)", rows[r]->what, src); if (nier) LOG("main: NieR frame interval left as the game sets it (%s)", src);
@@ -300,7 +301,7 @@ void dm_fps_lock_tick(void) {
             for (int c = 0; c < L->copies; c++) {
                 uint64_t a = obj + L->field + 8 * (uint64_t)c; double cur, want = target;
                 if (!rd(a, &cur, sizeof cur)) break;
-                if (cur == want || !(cur >= 10 && cur <= 120)) continue;   // already set, or not set yet
+                if (cur == want || !(cur >= 10 && cur <= 240)) continue;   // already set, or not set yet
                 double *p = (double *)(uintptr_t)a;
                 dm_guest_write_prepare(p, sizeof *p); __atomic_store_n((uint64_t *)p, *(uint64_t *)&want, __ATOMIC_RELAXED);
                 if (nlog[r] < 8) { nlog[r]++; LOG("main: %s%s %g → %d fps (%s)", L->what, L->copies > 1 ? (c ? " (reported rate)" : " (target)") : "", cur, target, src); }
@@ -312,15 +313,15 @@ void dm_fps_lock_tick(void) {
             if (!rd(a, &cur, sizeof cur)) break;
             if (L->kind == FPS_F32 || L->kind == MS_F32) {
                 int ms = L->kind == MS_F32; float f, w = ms ? ms_want(target) : (float)target; memcpy(&f, &cur, sizeof f); memcpy(&want, &w, sizeof want);
-                if (cur == want || !(ms ? f >= 8 && f <= 100 : f >= 10 && f <= 120)) continue;   // already set, or not set yet (RE Engine: 6000 at boot; Unreal: 0 = no limit until the config sets it)
+                if (cur == want || !(ms ? f >= 4 && f <= 100 : f >= 10 && f <= 240)) continue;   // already set, or not set yet (RE Engine: 6000 at boot; Unreal: 0 = no limit until the config sets it)
                 snprintf(was, sizeof was, ms ? "%.3f ms" : "%g", f);
             } else if (L->kind == SECS_F32) {
                 float f, w = 1.0f / (float)target; memcpy(&f, &cur, sizeof f); memcpy(&want, &w, sizeof want);
-                if (cur == want || !(f >= 1.0f / 120 && f <= 0.1f)) continue;   // not set yet (0 before the game's first frame)
+                if (cur == want || !(f >= 1.0f / 240 && f <= 0.1f)) continue;   // not set yet (0 before the game's first frame)
                 snprintf(was, sizeof was, "%.5f s", f);
             } else if (L->kind == TICKS_U32) {
                 want = L->scale / (uint32_t)target;
-                if (cur == want || cur < L->scale / 120 || cur > L->scale / 10) continue;
+                if (cur == want || cur < L->scale / 240 || cur > L->scale / 10) continue;
                 snprintf(was, sizeof was, "%u", cur);
             } else if (L->kind == MODE_U32) {
                 want = 1;
@@ -329,7 +330,7 @@ void dm_fps_lock_tick(void) {
             } else {
                 int fps = L->kind == FPS_I32;
                 want = fps ? (uint32_t)target : target > 60 ? 1 : 60 / (uint32_t)target;   // above 60 the display link paces it: a vsync count stays 1
-                if (cur == want || cur < (fps ? 10u : 1u) || cur > (fps ? 120u : 4u)) continue;
+                if (cur == want || cur < (fps ? 10u : 1u) || cur > (fps ? 240u : 4u)) continue;
                 snprintf(was, sizeof was, "%u", cur);
             }
             uint32_t *p = (uint32_t *)(uintptr_t)a;

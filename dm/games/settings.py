@@ -78,7 +78,8 @@ def build(gid, patched, control):
         if cond.startswith('fixups:'): return cond[7:] in keys
         if cond.startswith('gfxapi:'): return os.environ.get('GFXAPI', '') == cond[7:]
         if cond.startswith('platform:'): return platform == cond[9:]
-        m = re.fullmatch(r'(DM_GAME_\w+)(!=|==)(.*)', cond)
+        m = re.fullmatch(r'(DM_GAME_\w+)(!=|==|>=)(.*)', cond)
+        if m and m[2] == '>=': return int(macro(m[1], n)) >= int(m[3])   # a number at least this (DM_GAME_FPS_MAX>=160)
         if m: return (macro(m[1], n) == m[3]) == (m[2] == '==')
         sys.exit(f'settings.tsv:{n}: unknown condition {cond}')
 

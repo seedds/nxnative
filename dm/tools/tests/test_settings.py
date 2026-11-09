@@ -30,6 +30,16 @@ class FrameRateOption(unittest.TestCase):
                 self.assertEqual(fps['default'],'60',gid)
                 self.assertEqual(fps['options'],[['30','30 fps'],['60','60 fps']]+([['120','120 fps']] if has else []),(gid,platform))
 
+    def test_above_120_every_fixed_rate_up_to_fps_max_on_the_mac(self):
+        real=settings.game.header_one
+        def at(fm): return lambda g: real(g).replace('#define DM_GAME_FPS_MAX 120',f'#define DM_GAME_FPS_MAX {fm}')
+        with tempfile.TemporaryDirectory() as tmp,patch.object(settings.nacp,'languages',return_value=['en-US']):
+            (Path(tmp)/'main.fixups.tsv').write_text('')
+            for fm,platform,more in [('160','mac',[['90','90 fps'],['120','120 fps'],['160','160 fps']]),('160','ios',[]),('144','mac',[['90','90 fps'],['120','120 fps']])]:
+                with patch.dict(settings.os.environ,{'SETTINGS_PLATFORM':platform}),patch.object(settings.game,'header_one',side_effect=at(fm)):
+                    fps=next(s for s in settings.build('04007EF01F8AE000',tmp,'unused')['settings'] if s['env']=='DM_FPS_TARGET')   # Fortune's Weave's profile, its fps_max raised
+                self.assertEqual(fps['options'],[['30','30 fps'],['60','60 fps']]+more,(fm,platform))
+
 class UpscalerSetting(unittest.TestCase):
     def test_only_for_games_naming_their_upscaler(self):
         with tempfile.TemporaryDirectory() as tmp,patch.object(settings.nacp,'languages',return_value=['en-US']):

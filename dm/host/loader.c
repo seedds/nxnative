@@ -314,7 +314,8 @@ static void install_fps_state(module_t *m) {
 void dm_fps_state_apply(void) {
     if (!dm_fps_state) return;
     const char *e = getenv("DM_FPS_TARGET"); int t = e ? atoi(e) : DM_GAME_FPS_TARGET;
-    if (t != 0 && t != 30 && t != 60) { LOG("[RED] DM_FPS_TARGET=%s: must be 0, 30 or 60; using the game's own frame step", e); t = 0; }
+    if (t > 60 && t <= 240) t = 60;   // the frame step decides in vsyncs of 60 Hz: above that is for engines with their own frame limit (hle_fpslock.c)
+    if (t != 0 && t != 30 && t != 60) { LOG("[RED] DM_FPS_TARGET=%s: must be 0, 30, 60 or 61 to 240; using the game's own frame step", e); t = 0; }
     float f = (float)t; memcpy(dm_fps_state, &f, sizeof f);
     // Render scale of the 3D views (the stubs at Tears of the Kingdom's main+0xd5cc0, Breath of the Wild's main+0x1266880): 1.0 keeps the game's own size and dynamic resolution;
     // another factor fixes the size at that fraction (DM_RENDER_SCALE, 0.5 to 1.0). Independent of the frame step: written at target 0 too
@@ -364,6 +365,18 @@ void dm_fps_state_apply(void) {
     }
     char cap[32]; snprintf(cap, sizeof cap, ", capped at %d fps", t);
     LOG("%s: frame step %s%s (%s)", g_fps_mod, !t ? "as the game sets it" : "in whole vsyncs decided by the host", t ? cap : "", e ? "DM_FPS_TARGET" : "game profile fps_target");
+}
+// DM_FPS_TARGET above 60 up to the profile's fps_max, when that is above 120 (Mac, a game with no frame step): the engine's limit (hle_fpslock.c) needs presents as fast, a frame per tick of a display link at that rate, with no hold for late
+// frames. Crash Bandicoot 4 on an M5 Pro at 120: 119 fps in play, GPU 5 ms a frame. Each switch set by hand stays. Before the graphics layer reads them, on its first frame
+void dm_fps_high_apply(void) {
+#if !TARGET_OS_IPHONE
+    const char *e = getenv("DM_FPS_TARGET");
+    int t = e ? atoi(e) : 0;
+    if (dm_fps_state || t <= 60 || t > 240 || DM_GAME_FPS_MAX <= 120 || t > DM_GAME_FPS_MAX) return;   // fps_max 120: hle_nvn.c fps_high; above the game's fps_max: 60 (hle_fpslock.c)
+    char hz[8]; snprintf(hz, sizeof hz, "%d", t);
+    setenv("DM_PRESENT_LINK", "2", 0); setenv("DM_PRESENT_HZ", hz, 0); setenv("DM_PRESENT_INTERVAL", "display", 0); setenv("DM_FPS_HOLD", "off", 0);
+    LOG("frame rate target %d: presents on a display link at that rate (DM_FPS_TARGET)", t);
+#endif
 }
 static void install_key_page(module_t *m) {
     if (m->key_page_off + m->key_page_size > m->size) die("%s: key page out of range", m->name);

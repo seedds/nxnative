@@ -1279,6 +1279,10 @@ class Compiler:
         """[(name, master, words, meta)] for one cheat (two for a patch with an off entry, in the source's order)."""
         base = {'section': c.get('section', ''), 'note': c.get('note', '')}
         master = bool(c.get('master'))
+        once = c.get('once', False)   # a code program applied once (the panel's Apply), as action = "set" marks a data cheat
+        if once not in (True, False): raise AnchorError(f'"once" is true or false, not {once!r}')
+        if once and ('code' not in c or master):
+            raise AnchorError('"once" is for code entries that are not masters (a data cheat is applied once with action = "set")')
         if c.get('label'): return [(c['name'], master, [], dict(base, kind='label'))]
         if 'patch' in c:
             on, off, how = self.patch(c)
@@ -1291,7 +1295,7 @@ class Compiler:
             return out
         if 'code' in c:
             words, how = self.code_words(c['code'], c)
-            return [(c['name'], master, words, dict(base, kind='code', how=summary(how)))]
+            return [(c['name'], master, words, dict(base, kind='code', how=summary(how), **({'once': '1'} if once else {})))]
         if 'target' in c:
             words, how, meta = self.data(c)
             return [(c['name'], master, words, dict(base, kind='data', how=summary({how}), **meta))]

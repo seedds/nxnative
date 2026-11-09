@@ -266,7 +266,13 @@ namespace Ryujinx.Graphics.Shader.Instructions
         // c[2] + 0x168 + 8 r, separate sampler r to c[2] + 0x568 + 8 r and image slot i to c[2] + 0x120 + 8 i (NVN's handle tables). Other offsets stay.
         private static (int Bank, int Offset) AMapC0(EmitterContext context, int bank, int offset)
         {
-            int[] layout = bank == 0 ? context.TranslatorContext.GpuAccessor.QueryAmpereComputeC0Layout() : null;
+            return bank == 0 ? MapAmpereComputeC0(context.TranslatorContext.GpuAccessor.QueryAmpereComputeC0Layout(), offset) : (bank, offset);
+        }
+
+        // The mapping itself, for a c[0] offset: also used by BindlessToArray for a handle array indexed in c[0] (TryC0HandleBase)
+        public static (int Bank, int Offset) MapAmpereComputeC0(int[] layout, int offset)
+        {
+            const int bank = 0;
 
             if (layout == null || layout.Length < 5)
             {

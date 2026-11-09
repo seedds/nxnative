@@ -1170,6 +1170,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** `nvnDlssNetworkResize` succeeds, logging the first size (`hle_nvn.c`).
 - **Found on:** [Star Fox](../../dm/games/0400E88025B1A000/README.md): 768x432, once; its evaluations run 768x432 to 768x432.
 
+### DLSS output alpha
+
+- **Symptom:** a Switch 2 game's menus missing while DLSS runs (text, backgrounds, stat bars), with the 3D scene drawn; with the bilinear stand-in they show.
+- **Cause:** MetalFX's temporal scaler writes alpha 1.0 everywhere. NVN2's DLSS hands the input's alpha on to the output (the game builds its network with flags 0x42, no NGX alpha upscaling, and still composites by it): Fast Fusion draws its menu background and text into the target first, then blends the DLSS output over them with `SRC_ALPHA / ONE_MINUS_SRC_ALPHA`, the input's alpha 0 where no 3D was drawn (76% of the main menu). At 1.0 the 3D layer covered the menus.
+- **Fix:** after the scaler's encode, `dlss_eval` draws the input's alpha alone into the output (`copy_t2t_draw_wm` with `MTLColorWriteMaskAlpha`, bilinear when the sizes differ, the destination loaded); the output gets render-target usage for it. Formats without alpha on either side are left as they were.
+- **Found on:** Fast Fusion (040041E0212AE000; a provisional profile, no game note yet): main menu, ship select, pause menu.
+
 ### A game's own upscaler drawn by MetalFX
 
 - **Symptom:** a Switch 2 game's frame in its heavy scenes is dominated by one compute dispatch between the render-resolution passes and the output-resolution ones: Donkey Kong Bananza's upscaler takes 3.5-5 ms of a 24 ms GPU frame on an M1 in handheld mode (960x540 → 1920x1080, `DM_NVN_GPUPROF`), and the game cannot reach its 60 fps interval there.

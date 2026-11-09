@@ -1123,6 +1123,20 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Resolved:** 0x593 is SUATOM, an image atomic through a handle (`ASuatom`, `InstEmitAmpereMem.cs`): SUST's handle (40..59) and dimension (61..64), ATOMG's operation (87..91), size (73..76) and predicate result (81..83, PT here). Its two shaders, agl's `agl_technique_pfx` compute shaders, take an append counter with it (SUATOM.ADD.U32 on a 1D image, the old value shuffled to the warp, then their SUST), and now translate: all 22,852 of the package's shaders do. Neither has been met in play so far, so the picture is not checked; `test_dmsh_ampere_mem.py` translates the encoding. A handle in another bank or a predicate result is refused.
 - **Open:** loads and stores through addresses read from memory, which had no storage buffer to become, go through the memory pools now ([Global memory at an address loaded from memory](#global-memory-at-an-address-loaded-from-memory)).
 
+### NVN2 compute: an array of handles at a computed c0 address
+
+- **Symptom:** an NVN2 compute shader fails to load (`B binding cp_t2d_cb196608_… has no resolved slot number`), its dispatches skipped; in Fast Fusion's races the volumetric lighting is missing.
+- **Cause:** a handle read at a computed `c[0]` address (`LDC c[0][Ra]`, an array of separate textures) was not mapped at all. [NVN2 compute's separate handles in c[0]](#nvn2-computes-separate-handles-in-c0) maps a handle read at a constant offset; an array read at a computed one stayed in `c[0]`, which the host does not fill. Fast Fusion's volumetric lighting `cded8d0899ba4a6d` samples separate texture `c[0][0x40 + 8 i]` with the separate sampler at `c[0][0x60]`; in 1,300 compute shaders of Mario Kart World and Fast Fusion it is the only one with separate handles.
+- **Fix:** `BindlessToArray` moves a handle array read at a computed `c[0]` address of an NVN2 compute shader to the `c[2]` table its constant base maps to (`InstEmit.MapAmpereComputeC0`, the mapping `AMapC0` uses), the index shifted (here element 45 + i, with the sampler word at `c[2]` 0x568); the array then decodes as [Arrays of c2 handles cover the whole table, with a separate sampler word](#arrays-of-c2-handles-cover-the-whole-table-with-a-separate-sampler-word) (chain change).
+- **Found on:** Fast Fusion (040041E0212AE000; a provisional profile, no game note yet).
+
+### NVN2 compute shaders dumped at run time had no thread group
+
+- **Symptom:** `[RED] compute shader lacks threadgroup size reflection`; the dispatches are skipped. In Fast Fusion's races the sky stayed black and the vegetation was missing.
+- **Cause:** the thread group came only from the profile's answer table, which `shader_split.py` writes from the control sections of the package's shaders. A compute shader dumped at run time (`DM_NVN_SHDUMP`) and harvested into the package has no row there.
+- **Fix:** `dmsh_build.py` takes an NVN2 compute shader's thread group (+0x58) and shared memory (+0x64) from its own control section, as `shader_split.py` does.
+- **Found on:** Fast Fusion (040041E0212AE000; a provisional profile, no game note yet): its three harvested race compute shaders (8x8x8, 8x8x1, 32x1x1).
+
 ### Storage words read one by one
 
 - **Symptom:** a lit pass far slower on an M1 than the M4 Pro's figures suggest, the time spread over every material that loops over the scene's lights; dropping one material's draws (`DM_NVN_UB`) saved only its share.

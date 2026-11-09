@@ -64,6 +64,13 @@ void dm_set_opmode(int m) {   // called by the front end (overheat downgrade etc
     if (g_ntf_opmode) mq_push(MSG_OPMODE);
     if (g_ntf_perfmode) mq_push(MSG_PERFMODE);
 }
+// The picture's shape changed (loader.c, a profile with screen_aspect any following its window): the notifications a console sends when the display changes, docked to handheld,
+// with the mode unchanged, so the game queries its display again and lays its picture out for the new shape as it does for a mode change (Ocarina of Time resizes its targets then)
+void dm_display_changed(void) {
+    LOG("oe: display changed (picture shape): operation mode notification%s", g_ntf_opmode ? "" : " not enabled by the game");
+    if (g_ntf_opmode) mq_push(MSG_OPMODE);
+    if (g_ntf_perfmode) mq_push(MSG_PERFMODE);
+}
 // FocusState: 1 InFocus, 2 OutOfFocus, 3 Background. The front end calls dm_focus_set (iOS lifecycle / Mac window losing focus)
 static _Atomic int g_focus = 1; static _Atomic uint64_t g_focus_in_ns;   // the front end's state; time of its most recent entry into InFocus
 // Focus handling mode the game set (-1: none). The SDK's oe::SetFocusHandlingMode (SDK 18 sdk+0x3c5770) turns it into am's SetFocusHandlingMode(notify, ?, suspend) and

@@ -8,6 +8,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <limits.h>
+#include <math.h>
 #include <mach-o/getsect.h>
 #include <mach-o/ldsyms.h>
 #include "hle.h"
@@ -314,6 +315,55 @@ static void install_fps_state(module_t *m) {
     dm_fps_state = m->base + m->fps_state_off; g_fps_mod = m->name; dm_fps_step_max = (int)m->step_max;
     if (m->render_scale_max > 1) g_render_scale_max = (float)m->render_scale_max;
 }
+// Screen shape for a profile whose stubs take any shape (game.tsv screen_aspect any, DM_GAME_SCREEN_ASPECT 2: Ocarina of Time's patches.py), wider or taller than 16:9, and follow it
+// while the game runs. State +0xa0 float the screen's width / height (0 = 16:9: the stubs run the game's own code), +0xa4 float the width factor (the ratio over 16:9, at least 1),
+// +0xa8 float the height factor (16:9 over the ratio, at least 1), +0xac u32 a count bumped at each change, +0xc4 / +0xc8 floats the camera's x / y multipliers (below). A wider screen keeps the game's height and vertical angle and shows more
+// at the sides; a taller one keeps its width and horizontal angle and shows more above and below, whatever the shape, as a PC game in a window does: a portrait window too (the
+// profile's stubs keep the picture's pixel count in bounds and grow the window textures). The bounds below only keep a degenerate window (a few pixels high) out
+#define SCREEN_MIN 0.25
+#define SCREEN_MAX 6.0
+static int g_screen_follow;          // DM_SCREEN_ASPECT auto (the default): the front end's view gives the shape, now and when it changes
+static double g_screen_ratio = -1;   // what the state page holds (0 = 16:9), -1 = not written yet
+__attribute__((weak)) double front_view_aspect(void) { return 0; }   // front.h: the game view's width / height, 0 = no view (a run with no window); front_mac.m, front_ios.m
+static pthread_mutex_t g_screen_mu = PTHREAD_MUTEX_INITIALIZER;   // the game's start (main.c) and the front end's main thread both write the shape
+static void screen_any_write_(double a, const char *why);
+static void screen_any_write(double a, const char *why) { pthread_mutex_lock(&g_screen_mu); screen_any_write_(a, why); pthread_mutex_unlock(&g_screen_mu); }
+static void screen_any_write_(double a, const char *why) {
+    if (!dm_fps_state) return;
+    double r = a < SCREEN_MIN ? SCREEN_MIN : a > SCREEN_MAX ? SCREEN_MAX : a;
+    if (fabs(r / (16.0 / 9.0) - 1) < 0.005) r = 0;   // 16:9 within half a percent: the game's own picture
+    if (r == g_screen_ratio) return;
+    float f[3] = {(float)r, r ? (float)fmax(r * 9 / 16, 1) : 1, r ? (float)fmax(16 / (9 * r), 1) : 1};
+    memcpy(dm_fps_state + 0xa0, f, sizeof f);
+    // +0xc4 / +0xc8: the camera's x / y multipliers (the projection's rows). Landscape: wider than 16:9 keeps the vertical angle (x × 16:9 / r), narrower keeps the horizontal one
+    // (y × r / 16:9). Portrait takes the scale of the same screen turned landscape, its width getting what that one's height gets: a phone or a window turned keeps the
+    // characters' size and shows another part of the world. The size stub copies them with the size it sets (patches.py screen_shape)
+    { double l = r >= 1 ? r : 1 / r, xl = l >= 16.0 / 9 ? 16.0 / 9 / l : 1, yl = l >= 16.0 / 9 ? 1 : l * 9 / 16;
+      float c[2] = {r == 0 ? 1 : r >= 1 ? (float)xl : (float)(yl * 16 / 9), r == 0 ? 1 : r >= 1 ? (float)yl : (float)(xl * 9 / 16)};
+      memcpy(dm_fps_state + 0xc4, c, sizeof c); }
+    uint32_t gen; memcpy(&gen, dm_fps_state + 0xac, 4); gen++; memcpy(dm_fps_state + 0xac, &gen, 4);
+    extern void mtl_present_screen(uint32_t w, uint32_t h); mtl_present_screen(r ? (uint32_t)(r * 10000 + 0.5) : 0, r ? 10000 : 0);   // the picture's shape for a crop of that shape (nvn_mtl.m present_shape)
+    int first = g_screen_ratio < 0; g_screen_ratio = r;
+    if (r) LOG("%s: screen shape %.3f (%s%s): %s, picture %.3f x %.3f of 16:9", g_fps_mod, r, why, a != r && a > 0 ? ", held to 0.25..6" : "", r > 16.0 / 9 ? "more at the sides" : "more above and below", f[1], f[2]);
+    else LOG("%s: screen shape 16:9 (%s)", g_fps_mod, why);
+    if (!first) { void dm_display_changed(void); dm_display_changed(); }   // the game lays its picture out again (hle_oe.c)
+}
+static void screen_any_apply(const char *as) {
+    if (!as || !*as || !strcmp(as, "auto")) {   // the default: follow the view (16:9 until there is one)
+        g_screen_follow = 1; double v = front_view_aspect(); screen_any_write(v > 0 ? v : 16.0 / 9.0, v > 0 ? "the window's shape" : "no window yet");
+        return;
+    }
+    char *end; double a = strtod(as, &end);
+    if (!strcmp(as, "0")) a = 16.0 / 9.0;
+    else if (end == as || *end || !(a >= SCREEN_MIN && a <= SCREEN_MAX)) { LOG("[RED] DM_SCREEN_ASPECT=%s: auto, 0 or a width / height (0.25 to 6); keeping 16:9", as); a = 16.0 / 9.0; }
+    screen_any_write(a, "DM_SCREEN_ASPECT");
+}
+// front.h: the front end's game view changed shape (a window resized, full screen, a rotated or resized iPad window). Followed only under DM_SCREEN_ASPECT auto by a profile with
+// screen_aspect any; a fixed DM_SCREEN_ASPECT keeps its shape
+void dm_screen_view_changed(double aspect) {
+    if (DM_GAME_SCREEN_ASPECT != 2 || !g_screen_follow || g_screen_ratio < 0 || !(aspect > 0)) return;
+    screen_any_write(aspect, "the window's shape");
+}
 // The settings in the state page, written when the game starts (main.c, after host loading): on iOS the loading runs at app launch, before the launcher has set DM_FPS_TARGET and
 // DM_RENDER_SCALE (Launcher.swift), and nothing reads the page before the game runs
 void dm_fps_state_apply(void) {
@@ -336,7 +386,8 @@ void dm_fps_state_apply(void) {
     // (Breath of the Wild 1.9.0's patches.py) render that shape: the output keeps its width (1920) and takes the height that gives the ratio, a multiple of 48 so the
     // 2/3-size layout space (1280 wide) stays whole: 1.43 → 1920x1344 and 1280x896. State +0x48 u32 output height, +0x4c u32 layout height, +0x50 its float; 0 = 16:9
     const char *as = getenv("DM_SCREEN_ASPECT");
-    if (as && *as && strcmp(as, "0") && strcmp(as, "auto")) {   // 0: 16:9; auto: the iOS front end resolves it to the screen's shape (a Mac window has none)
+    if (DM_GAME_SCREEN_ASPECT == 2) screen_any_apply(as);   // a profile whose stubs take any shape (screen_aspect any): below
+    else if (as && *as && strcmp(as, "0") && strcmp(as, "auto")) {   // 0: 16:9; auto: the iOS front end resolves it to the screen's shape (a Mac window has none)
         char *end; float a = strtof(as, &end);
         if (end == as || *end || !(a >= 1.3f && a < 1.77f)) LOG("[RED] DM_SCREEN_ASPECT=%s: a width / height from 1.3 to 1.77; keeping 16:9", as);
         else {

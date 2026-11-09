@@ -96,6 +96,16 @@ static void tv_attach(void);
 @end
 static DmRootVC *g_root;
 static CGFloat g_picture_aspect = DM_PICTURE_16_9;   // the presented picture's width / height (front_picture_shape); main thread
+// The game view's shape for a profile with screen_aspect any (front.h front_view_aspect, dm_screen_view_changed): the app window's width / height in landscape (an iPad's 1.43, an
+// iPhone's 2.17, a window under Stage Manager), 16:9 in portrait, where the picture sits above the pad. A change is handed to the host once the layout has settled for 300 ms
+static _Atomic double g_view_aspect; static uint64_t g_view_change;   // g_view_change: main thread
+double front_view_aspect(void) { return g_view_aspect; }
+static void view_shape(CGSize sz, int notify) {
+    double a = sz.width > sz.height && sz.height > 0 ? sz.width / sz.height : 16.0 / 9.0; if (a == g_view_aspect) return;
+    g_view_aspect = a; if (!notify) return;
+    uint64_t n = ++g_view_change;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 300 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{ if (n == g_view_change) dm_screen_view_changed(a); });
+}
 static void launcher_done(void) { [g_root startGame]; }
 @implementation DmRootVC
 - (void)loadView { self.view = [DmRootView new]; }
@@ -154,7 +164,9 @@ static void launcher_done(void) { [g_root startGame]; }
         // takes 1.3 to 1.77), else 16:9. The window's, not the screen's: on an iPad under Stage Manager or Split View the app does not fill the screen. Resolved here, before the
         // host writes the state page (main.c dm_fps_state_apply)
         const char *a = getenv("DM_SCREEN_ASPECT");
-        if (a && !strcmp(a, "auto")) {
+        if (DM_GAME_SCREEN_ASPECT == 2) {   // a profile whose stubs take any shape (screen_aspect any) follows the window itself, wider or taller (loader.c, front_view_aspect)
+            CGSize sz = self.view.window ? self.view.window.bounds.size : UIScreen.mainScreen.bounds.size; view_shape(sz, 0);
+        } else if (a && !strcmp(a, "auto")) {
             CGSize sz = self.view.window ? self.view.window.bounds.size : UIScreen.mainScreen.bounds.size; double r = MAX(sz.width, sz.height) / MAX(MIN(sz.width, sz.height), 1);
             char v[16]; if (r >= 1.3 && r < 1.77) snprintf(v, sizeof v, "%.3f", r); else strcpy(v, "0");
             setenv("DM_SCREEN_ASPECT", v, 1); LOG("front end: picture shape auto: window %.0fx%.0f points (%.3f:1) → DM_SCREEN_ASPECT=%s", sz.width, sz.height, r, v);
@@ -182,6 +194,7 @@ static void launcher_done(void) { [g_root startGame]; }
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
     CGRect b = self.view.bounds; if (!self.game) return;
+    view_shape(b.size, 1);
     CGRect division = CGRectNull;   // an iPhone Duo's fold, as UIKit reports it (iOS 27.1)
     NSMutableArray<NSString *> *regionLog = [NSMutableArray array];
 #if __has_include(<UIKit/UIHingeInteraction.h>)

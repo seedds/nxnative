@@ -115,5 +115,12 @@ int main(int argc, char **argv) { @autoreleasepool {
     if ((r = run_case(@(argv[1]), 40, 1, 0)) <= 0 || failed) { if (!r) fprintf(stderr, "with counting on, the draws did not join runs\n"); return 1; }
     r = 0; for (int pass = 41; pass < 81 && !(r = run_case(@(argv[1]), pass, 0, 1)); pass++) usleep(100000);   // the fragment case's pipelines
     if (r <= 0 || failed) { if (!r) fprintf(stderr, "the fragment case's mesh pipelines were never ready\n"); return 1; }
+    {   // the log's compute-path line (mtl_geocomp_stats): the first passes drew while the mesh pipelines were built, the test pair's vertex and geometry keys among the most
+        char gc[768]; uint64_t n = mtl_geocomp_stats(gc, sizeof gc); printf("geometry compute path: %s\n", gc);
+        EXPECT("the compute path's draws are counted", 1, n > 0);
+        EXPECT("with the reason they took it", 1, strstr(gc, "mesh pipeline being built") != NULL);
+        EXPECT("and the pair", 1, strstr(gc, "7e57000000000a00_b+7e57000000000b00_b") != NULL);
+        EXPECT("a second call has nothing new", 0, mtl_geocomp_stats(gc, sizeof gc)); }
+    if (failed) return 1;
     printf("geometry mesh %s: %d checks passed\n", geo_mesh_run_on() ? "runs" : "single draws", checks); return 0;
 }}

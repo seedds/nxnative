@@ -399,6 +399,20 @@ static uint32_t geo_mesh_prims(id<MTLFunction> f) {
     return prims;
 }
 static struct { NvShader *vs, *lean; id<MTLFunction> f; } g_geo_mesh_last;
+// Why a geometry draw took the compute path (geo_mesh_fn, geo_mesh_draw, geo_draw_), counted per pair for the log's "geometry compute path" line (mtl_geocomp_stats)
+enum { GCP_OFF, GCP_PRIM, GCP_INST, GCP_IND, GCP_INDEX, GCP_RAST, GCP_VS, GCP_STAGES, GCP_LEAN, GCP_NOLIB, GCP_IB, GCP_PSO, GCP_SPLIT, GCP_N };
+static const char *const g_gcp_name[GCP_N] = {"mesh draws off", "not a triangle list", "instanced", "indirect", "restart or index type", "rasterizer discard or transform feedback",
+    "vertex shader without a pulling entry", "tessellation or mesh stages", "no lean kernel", "no mesh library (geo_mesh.tsv)", "index buffer outside a Metal buffer", "mesh pipeline being built", "depth split"};
+static int g_geo_why;   // the reason of the last geo_mesh_fn / geo_mesh_draw that gave the compute path
+static uint64_t g_gcp[GCP_N];
+enum { GCP_PAIRS = 64 };
+static struct { __unsafe_unretained NvShader *vs, *gs; uint64_t n; int why; } g_gcp_pair[GCP_PAIRS]; static int g_gcp_npair;   // this window's pairs (mtl_geocomp_stats empties it)
+static void gcp_count(NvProg *pr, int why) {
+    g_gcp[why]++;
+    NvShader *vs = pr ? pr->sh[0] : nil, *gs = pr ? pr->sh[2] : nil;
+    for (int i = 0; i < g_gcp_npair; i++) if (g_gcp_pair[i].vs == vs && g_gcp_pair[i].gs == gs && g_gcp_pair[i].why == why) { g_gcp_pair[i].n++; return; }
+    if (g_gcp_npair < GCP_PAIRS) { g_gcp_pair[g_gcp_npair].vs = vs; g_gcp_pair[g_gcp_npair].gs = gs; g_gcp_pair[g_gcp_npair].why = why; g_gcp_pair[g_gcp_npair++].n = 1; }
+}
 static NSMutableDictionary *g_geo_mesh_runfn;   // a mesh entry → its run twin (dm_mesh_run..., dmsh_mesh.py), or NSNull: none in the library, or its pipeline failed
 // Generated mesh entries inherit the vertex library's constants. Keep their descriptors so fn_dev and fn_dev_b can materialize the defaults or the specialization without the border corrections, as for shader_load.
 static id<MTLFunction> geo_mesh_entry(id<MTLLibrary> lib, NSString *name) {
@@ -407,14 +421,15 @@ static id<MTLFunction> geo_mesh_entry(id<MTLLibrary> lib, NSString *name) {
 }
 // The mesh entry for this draw's program, or nil (the compute path draws it)
 static id<MTLFunction> geo_mesh_fn(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
-    if (!geo_mesh_on()) return nil;
+    if (!geo_mesh_on()) { g_geo_why = GCP_OFF; return nil; }
     int prim = dw ? dw->prim : di->prim, instances = dw ? dw->instances : di->instances, count = dw ? dw->count : di->count;
     NvShader *vs = pr->sh[0];
-    if (prim != 4 || count < 3 || instances > 1 || (dw ? dw->ind : di->ind) || (di && (S.restart.on || di->itype < 0 || di->itype > 2)) || S.rast_discard || S.tf_on ||
-        !vs || !vs->has_pull || vs->layer_out || vs->discard_fn || !vs->fn || pr->sh[3] || pr->sh[4]) return nil;
-    NvShader *lean = geo_lean_pick(pr, NULL, 3, instances); if (!lean) return nil;
+    int why = prim != 4 || count < 3 ? GCP_PRIM : instances > 1 ? GCP_INST : (dw ? dw->ind : di->ind) ? GCP_IND : di && (S.restart.on || di->itype < 0 || di->itype > 2) ? GCP_INDEX :
+              S.rast_discard || S.tf_on ? GCP_RAST : !vs || !vs->has_pull || vs->layer_out || vs->discard_fn || !vs->fn ? GCP_VS : pr->sh[3] || pr->sh[4] ? GCP_STAGES : -1;
+    if (why >= 0) { g_geo_why = why; return nil; }
+    NvShader *lean = geo_lean_pick(pr, NULL, 3, instances); if (!lean) { g_geo_why = GCP_LEAN; return nil; }
     // the last pair's answer, without a key string and a dictionary lookup a draw (strong references: a pair cannot be freed and another take its addresses)
-    if (vs == g_geo_mesh_last.vs && lean == g_geo_mesh_last.lean) return g_geo_mesh_last.f;
+    if (vs == g_geo_mesh_last.vs && lean == g_geo_mesh_last.lean) { if (!g_geo_mesh_last.f) g_geo_why = GCP_NOLIB; return g_geo_mesh_last.f; }
     if (!vs->geo_mesh) vs->geo_mesh = [NSMutableDictionary dictionary];
     NSString *k = @(lean->key); id f = vs->geo_mesh[k];
     if (!f) {
@@ -429,6 +444,7 @@ static id<MTLFunction> geo_mesh_fn(NvProg *pr, const p_draw *dw, const p_draw_id
         vs->geo_mesh[k] = f = f ?: NSNull.null;
     }
     g_geo_mesh_last.vs = vs; g_geo_mesh_last.lean = lean; g_geo_mesh_last.f = f == NSNull.null ? nil : f;
+    if (!g_geo_mesh_last.f) g_geo_why = GCP_NOLIB;
     return g_geo_mesh_last.f;
 }
 static nvn_hmap g_pso_mesh = {.klen = sizeof(pso_key)}; static os_unfair_lock g_pso_mesh_lock = OS_UNFAIR_LOCK_INIT;
@@ -727,7 +743,7 @@ static uint64_t g_geo_mesh_n, g_geo_mesh_wait;   // mesh draws; draws the comput
 static int geo_mesh_draw(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
     id<MTLFunction> fn = geo_mesh_fn(pr, dw, di); if (!fn) return 0;
     uint64_t ib = 0; void *mb; uint64_t mo;
-    if (di && !mtl_gpu_addr(di->ibuf, 1, &mb, &mo, &ib)) return 0;
+    if (di && !mtl_gpu_addr(di->ibuf, 1, &mb, &mo, &ib)) { g_geo_why = GCP_IB; return 0; }
     uint32_t bi = (uint32_t)(dw ? dw->base_instance : di->base_instance);
     NvProg *raster = pr->geo_lean_raster;
     if (!raster || raster->sh[0] != pr->sh[0] || raster->sh[1] != pr->sh[1]) { raster = [NvProg new]; raster->sh[0] = pr->sh[0]; raster->sh[1] = pr->sh[1]; pr->geo_lean_raster = raster; }
@@ -742,7 +758,7 @@ static int geo_mesh_draw(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
     // The draw bound the geometry stage's arguments in the vertex table and the vertex stage's for its raster program: those stages encode again. The fragment stage's block is the one
     // the raster program's fragment shader had, from the same bindings, so it stays: re-encoded at every mesh draw, it moved in the frame arena and its address split every run (geo_mesh_ft_change)
     { uint8_t f = g_args_dirty[1]; g_geo_program = nil; g_geo_mesh.on = 0; args_dirty_all(); if (!g_geo_mesh.miss) g_args_dirty[1] = f; }
-    if (g_geo_mesh.miss) { g_geo_mesh_wait++; return 0; }
+    if (g_geo_mesh.miss) { g_geo_mesh_wait++; g_geo_why = GCP_PSO; return 0; }
     // the kernel's storage writes, noted as its arguments were encoded (always: geo_mesh_encode), so a drain's list of later writes holds them (g_wr_geo, drw_valid)
     swrite_note(pr); udc_note_draw(pr, 0); g_wr_epoch++; g_wr_geo++; g_mdx_epoch++;
     if (!g_geo_mesh_n++) MLOG("geometry mesh: first mesh draw, vertex %s kernel %s, %u triangles", pr->sh[0]->key, g_geo_mesh.lean->key, g_geo_mesh.a.count / 3);
@@ -763,6 +779,7 @@ typedef struct {
     uint32_t capture_words, direct_count;
     int lean;
     uint64_t gs_dispatch, pack_dispatch;   // geo_prep_gpu: the geometry kernel's and the compaction's threadgroup counts, written on the GPU
+    int why;   // why it took the compute path (GCP_*), for a draw prepared ahead of its pass
 } geo_job;
 enum { GEO_RUN = 64 };
 static geo_job g_geo_run[GEO_RUN];
@@ -1172,8 +1189,10 @@ static int geo_run_walk(id<MTL4RenderCommandEncoder> re) {
         NvProg *pr = S.prog ? prog_get(S.prog) : nil;
         if (!pr || !pr->sh[2] || !pr->sh[2]->geo_vertices) break;
         if (geo_mesh_fn(pr, dw, di)) break;
+        int why = g_geo_why;
         int r = geo_prep(pr, dw, di, &g_geo_run[n], 0, 0);
         if (r <= 0) break;
+        g_geo_run[n].why = why;
         if (geo_run_conflict(&run, &g_geo_run[n].access)) { g_geo_dependency_splits++; break; }
         geo_run_note(&run, &g_geo_run[n].access);
         g_geo_run[n].op = p;
@@ -1186,10 +1205,11 @@ static int geo_run_walk(id<MTL4RenderCommandEncoder> re) {
 static void geo_draw(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0, uint32_t primitive_base) { cp_stamp start = cp_begin(); geo_draw_(pr, dw0, di0, primitive_base); cp_end(6, start); }
 static void geo_draw_(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0, uint32_t primitive_base) {
     for (int i = 1; i < g_geo_nrun; i++) if (g_geo_run[i].op && g_geo_run[i].op == g_exec_cur) {
-        g_geo_run[i].op = NULL; geo_raster(&g_geo_run[i], i == g_geo_nrun - 1); return;
+        g_geo_run[i].op = NULL; gcp_count(pr, g_geo_run[i].why); geo_raster(&g_geo_run[i], i == g_geo_nrun - 1); return;
     }
     g_geo_nrun = 0;
     if (!g_geo_split_depth && geo_mesh_draw(pr, dw0, di0)) return;
+    gcp_count(pr, g_geo_split_depth ? GCP_SPLIT : g_geo_why);
     // Land deferred commands before checking their writes against the CPU read.
     if (defer_has_active()) defer_fallback();
     lc_land(); rp_flush(); rp_end(); ubd_land();

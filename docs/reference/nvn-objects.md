@@ -35,6 +35,16 @@ The game may also write into an NVN object directly, without an NVN call, throug
 - **Found on:** [LEGO Star Wars: The Skywalker Saga, issue #723](https://github.com/seedds/nxnative/issues/723), 1.10.0, SDK 12.3.6, main build `ec593a5f9552100a9fe95c4ca9e34873` (reporter's trace). This is a general object ABI correction; no game profile is needed.
 - **Check:** `t_nvn.c` initializes a buffer through the public API, retargets it repeatedly with raw byte writes, and checks address, size, mapping, pool and offset queries, builder independence and neighbouring-object guards. It also retargets a CPU-inaccessible buffer. Validation uses synthetic memory only; the reported game's rendering has not been retested.
 
+### Games hash a sampler's bytes from 8 on
+
+A game may tell NVN objects apart by their bytes, without an NVN call. A host record stored in place must then keep all of its state in the bytes the game reads, and the same state must give the same bytes.
+
+- **Symptom:** a game registers the same few sampler states into its sampler pool again and again: Super Mario Odyssey made 3,368 to 5,737 `nvnSamplerPoolRegisterSampler` calls for 168 distinct states in two runs of about 110 s from the regress route's save, against 168 for 168 after the fix. Each re-registration rewrites a pool ID that recorded draws may still use. Its picture on that route (frames 4,500 to 6,300) was the same either way, apart from the hint video's corner, which also varies between runs of one host.
+- **Cause:** Odyssey's sampler cache (`main+0x980e20`, 1.4.1) keys its entries by a CRC-16 (reflected polynomial 0xA001, from 0; `main+0x96e400`) of bytes 8 to 0x5f of the `NVNsampler`, and in its hash mode finds an entry by that CRC alone (`main+0x93f730` over the entry's u16 at +0x62); only its other mode calls `nvnSamplerCompare`. `samp_t` held the min and mag filters and the S and T wrap modes at bytes 4 to 7, so samplers that differed only in them had one CRC: 151,626 of 276,480 initializations met a CRC another state already had (for example CRC 0xb911 for wrap modes 6/6, 6/1, 6/7 and 1/6). Which state an ID then held depended on the order the game met them.
+- **Fix:** `samp_t` keeps every field from byte 8 on (`magic` and a zero word before it), and `nvnSamplerInitialize` writes every byte of the record (`nvn_obj.h`, `hle_nvn.c`). Bytes 0x30 to 0x5f, past the host record, are the game's own and are not written: the size of a real `NVNsampler` is not known for every SDK ([Host records must fit the game's SDK object sizes](#host-records-must-fit-the-games-sdk-object-sizes)).
+- **Found on:** [Super Mario Odyssey](../../dm/games/0100000000010000/README.md); reported first by the S2Arm project on its copy of this layer. The builder already had its state from byte 8 on, after the device pointer.
+- **Check:** `t_nvn.c` initializes samplers over memory with different old bytes and takes the game's CRC of bytes 8 on: equal states must give equal bytes, and a change of filter alone, or wrap alone, a different CRC (the old layout fails all three). Texture, view and state objects were not checked for the same kind of hashing.
+
 ### Sizes the hardware never reports as 0 (ZCull save area)
 
 - **Symptom:** sprites broke apart in some runs only, depending on the allocation order; buffers overlapped.

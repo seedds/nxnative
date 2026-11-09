@@ -513,7 +513,45 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 return;
             }
 
-            ASet(context, x, context.PackHalf2x16(AFloat(context, b), AFloat(context, a)), AUniform(context));
+            // nxnative: .RELU (75) takes a negative float to +0 before the rounding (-0 too; a NaN stays a NaN), as cvt.rn.relu does. On the float's bits, which
+            // Metal's fast math keeps
+            Operand fa = AFloat(context, a);
+            Operand fb = AFloat(context, b);
+
+            if (x.Bit(75))
+            {
+                fa = AF2fpRelu(context, fa);
+                fb = AF2fpRelu(context, fb);
+            }
+
+            // nxnative: .BF16 (76) packs two bfloat16s, the high 16 bits of each float rounded to nearest even; a NaN gives 0x7fff, as the Jetson Orin does
+            if (x.Bit(76))
+            {
+                Operand high = context.ShiftLeft(AF2fpBf16(context, fa), Const(16));
+
+                ASet(context, x, context.BitwiseOr(high, AF2fpBf16(context, fb)), AUniform(context));
+                return;
+            }
+
+            ASet(context, x, context.PackHalf2x16(fb, fa), AUniform(context));
+        }
+
+        private static Operand AF2fpRelu(EmitterContext context, Operand f)
+        {
+            // the sign bit set and not a NaN: 0x80000000 (-0) to 0xff800000 (-inf)
+            Operand neg = context.ICompareGreaterOrEqualUnsigned(f, Const(unchecked((int)0x80000000)));
+            Operand notNan = context.ICompareLessOrEqualUnsigned(f, Const(unchecked((int)0xff800000)));
+
+            return context.ConditionalSelect(context.BitwiseAnd(neg, notNan), Const(0), f);
+        }
+
+        private static Operand AF2fpBf16(EmitterContext context, Operand f)
+        {
+            Operand odd = context.BitwiseAnd(context.ShiftRightU32(f, Const(16)), Const(1));
+            Operand rounded = context.ShiftRightU32(context.IAdd(f, context.IAdd(odd, Const(0x7fff))), Const(16));
+            Operand nan = context.ICompareGreaterUnsigned(context.BitwiseAnd(f, Const(0x7fffffff)), Const(0x7f800000));
+
+            return context.ConditionalSelect(nan, Const(0x7fff), rounded);
         }
 
         // F2IP.U8 Rd, a, b: a and b to saturated bytes, a in byte 1 and b in byte 0, like F2FP's halves; bits 78..79 the rounding, as F2I's. Ocarina of Time's FoliageShader writes colour with it

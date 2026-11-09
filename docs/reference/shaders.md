@@ -1484,6 +1484,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Check:** `DMSH_TEST_XLATE=dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate python3 dm/gfx/tests/test_dmsh_ampere_orin.py` (about 5 s on an M5 Max); it prints every op's differing lanes by cause. `AMPERE_ORIN_ONLY=<ops or families>` runs some, `AMPERE_ORIN_REPORT=<file>` writes the results as JSON. To record again: `python3 dm/gfx/tools/ampere_orin/capture.py --host <user@machine> [--arch sm_86]`, with NVIDIA's `nvdisasm` (the `cuda_nvdisasm` redistributable) in `~/ampere_orin` on that machine.
 - **Found on:** no game; a Jetson Orin's results. The HMMA comparison it extends is PR #1897's.
 
+### F2FP's .BF16 and .RELU packs
+
+- **Symptom:** none seen in a game: a shader that packs two floats into a pair of bfloat16s with `F2FP.BF16.PACK_AB` got two f16s instead, so every value read back as something else, and `F2FP.RELU.PACK_AB` kept negative values instead of taking them to 0.
+- **Cause:** the translator's F2FP read the merge bit and nothing else of the format, so it ignored .BF16 (bit 76) and .RELU (bit 75) and always packed f16s with `packHalf2x16`.
+- **Fix:** .RELU takes a negative float, -0 and -inf included, to +0 before the conversion and leaves a NaN alone, as the Jetson Orin does (a NaN still gives a NaN). .BF16 rounds each float to its high 16 bits to nearest even with integer operations on its bits (`bits + 0x7fff + (bits >> 16 & 1)`, then `>> 16`), so Metal's fast math can't change it; denormals are kept and a NaN gives 0x7fff, as on the Orin. The two can come together (`cvt.rn.relu.bf16x2.f32`), and then the clamp comes first. A plain f16 pack is unchanged.
+- **Check:** `test_dmsh_ampere_orin.py`: `f2fp_pack_bf16x2` differed in 1,827 of its 2,048 halves and matches in all of them now; `f2fp_pack_f16x2_relu` differed in 843 and now only in 51 NaN bit patterns, the same platform difference as the plain f16 pack. The .BF16 and .RELU encoding together isn't in the fixture and was checked only in the MSL.
+- **Found on:** no game; a Jetson Orin's results ([Ampere instructions checked against an Ampere GPU](#ampere-instructions-checked-against-an-ampere-gpu)).
+
 ### The NDVE movie network by the host
 
 - **Symptom:** a Switch 2 game's movies and the title behind them run below 60 fps on a Mac with a smaller GPU, and the GPU profile (`DM_NVN_GPUPROF`) shows almost all of the frame in a dozen compute dispatches of `nn::ndve`'s movie network: Ocarina of Time's title at about 24 fps and 38 ms of GPU a frame on an M1 Pro with 16 GPU cores, 24.8 ms on an M1 Max ([issue 1375](https://github.com/seedds/nxnative/issues/1375)), 18.9 ms of compute on an M4 with 8 ([HMMA chains keep their matrices in the SIMD-group](#hmma-chains-keep-their-matrices-in-the-simd-group)); 11-14 ms of the 16.7 on an M6, an M4 Pro or an M5 Max.

@@ -441,6 +441,14 @@ The guest address space, heaps, pools, virtual address memory and the allocators
 - **Check:** `make -C dm/gfx/tests GAME=<id> check_t_pool_retire`: a buffer retired between submissions goes with none after it, one retired with a submission open stays until that submission completes, one retired with a submission in flight waits for that fence. In a game, `DM_OE_SCRIPT="focus=2@60,focus=1@90"`: GPU allocated stays flat between the two.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md), measured and diagnosed by Pedro Nascimento in [PR #1392](https://github.com/seedds/nxnative/pull/1392).
 
+### The pool walk's statistics made chunks of a large pool
+
+- **Symptom:** in an area load GPU allocated jumps by 6-10 GB between two stats windows (Ocarina of Time: 3.3 GB at frame 900, 15.8 GB at frame 1200 on a 16 GB M5, issue #2068; 3.5 to 13.7 GB inside the load on an M5 Pro) while the residency set grows by about 4 GB, and stays there. The memory census's "not counted" line is 8 GB, and the pool buffers made sum to twice the pools' size.
+- **Cause:** the pool walk's log (`pool walk: ... in wired pools`, the first pool-table build of a scene and every 500th after) and the raw-memory log's pool age asked `pool_find(addr, 1)` where each texture's storage lies. For a large pool (`BIG_MIN` and up, in 16 MB strides) `pool_find` makes the stride's chunk, a zero-copy buffer of the asked length plus a stride, and a length of 1 means `BIG_UNKNOWN` (64 MB) past the address: 80 MB or more, not in the residency set, overlapping its neighbours' chunks, none used by the GPU. Ocarina's 2,432 MB pool has 153 strides; the walk touched 77 of them: 6.7 GB that `currentAllocatedSize` counts in full (it counts a no-copy buffer at its whole length, in a residency set or not). The pages are shared, so resident memory did not grow by that much (10.9 GB against 14.1 GB allocated), but the 16 GB Macs that run this game reach 17-18 GB allocated.
+- **Fix:** `pool_peek` (`nvn_mtl.m`) answers the same question without making a chunk: the stride's entry if it has one, else -1. Both statistics use it.
+- **Check:** `make -C dm/gfx/tests GAME=<id> check_t_pool_chunks`: asking where an address is makes no chunk, and finds the chunk of a stride that has one. In a game, the memory census line ("GPU allocation census") at the same point before and after: Metal's total and the pool buffers made.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md), diagnosed from the allocation census of Pedro Nascimento's M5 Pro runs and the numbers in issue #2068.
+
 ### Upload staging grows within one rendering submission
 
 - **Symptom:** travelling produces a brief multi-GB footprint spike, then memory returns to its earlier level; periodic memory lines can miss the peak. Upload diagnostics show many swapped-out blocks still alive in one batch.

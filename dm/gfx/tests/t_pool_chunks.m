@@ -40,8 +40,13 @@ int main(void) { @autoreleasepool {
     mtl_pool_add(mem, GB);
     CHECK("no buffer until a lookup", g_npool == pools0 && g_nbig == 1);
     CHECK("overlapping buffers: barriers carry alias visibility", resource_vis() & MTL4VisibilityOptionResourceAlias);
+    pthread_mutex_lock(&g_mu); int peeked = pool_peek(base + 100), peek_chunks = g_npool; pthread_mutex_unlock(&g_mu);
+    CHECK("asking where an address is (the pool walk's statistics) makes no chunk", peeked == -1 && peek_chunks == pools0);
     id<MTLBuffer> a = look(base + 100, 4096);
     CHECK("one chunk", g_npool == pools0 + 1);
+    pthread_mutex_lock(&g_mu); int in_stride = pool_peek(base + 9 * MB), other = pool_peek(base + 300 * MB), n_after = g_npool; pthread_mutex_unlock(&g_mu);
+    CHECK("peek finds the chunk of a stride that has one", in_stride >= 0 && g_pools[in_stride].buf == a);
+    CHECK("peek of a stride with none: -1, and still no new chunk", other == -1 && n_after == pools0 + 1);
     CHECK("a chunk is far smaller than the pool", a.length <= 3 * BIG_S);
     CHECK("the same stride: the same buffer", look(base + 200, 4096) == a);
     CHECK("no more chunks", g_npool == pools0 + 1);

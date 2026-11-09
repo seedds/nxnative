@@ -261,7 +261,7 @@ static void geo_ix_put(const geo_ix_key *key,const void *raw,size_t raw_n,uint32
     nvn_hm_put(&g_geo_ix,key,e);geo_ix_front(e);g_geo_ix_bytes+=bytes;
 }
 static int geo_color_omit_(void);
-static int geo_color_omit(void) {
+static int geo_color_omit(void) { TCX;
     if (g_geo_full_colors < 0) { const char *e = getenv("DM_NVN_GEOMETRY_COLOR"); g_geo_full_colors = e && !strcmp(e, "full"); }
     if (g_geo_full_colors || !R.has_rt || !R.rt.depth || R.clear_d || R.clear_s) return 0;
     // The answer of the last call with the same targets (each tex_t with its serial, so another texture at the same address does not match), views, clears and color
@@ -389,7 +389,7 @@ static struct { NvShader *vs, *lean; id<MTLFunction> f; } g_geo_mesh_last;
 static NSMutableDictionary *g_geo_mesh_runfn;   // a mesh entry → its run twin (dm_mesh_run..., dmsh_mesh.py), or NSNull: none in the library, or its pipeline failed
 static uint64_t g_geo_mesh_runfn_gen;   // changes with every entry of g_geo_mesh_runfn (geo_mesh_take caches the last lookup)
 // The mesh entry for this draw's program, or nil (the compute path draws it)
-static id<MTLFunction> geo_mesh_fn(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
+static id<MTLFunction> geo_mesh_fn(NvProg *pr, const p_draw *dw, const p_draw_idx *di) { TCX;
     if (!geo_mesh_on()) return nil;
     int prim = dw ? dw->prim : di->prim, instances = dw ? dw->instances : di->instances, count = dw ? dw->count : di->count;
     NvShader *vs = pr->sh[0];
@@ -407,7 +407,7 @@ static id<MTLFunction> geo_mesh_fn(NvProg *pr, const p_draw *dw, const p_draw_id
         f = lib ? [lib newFunctionWithName:want] : nil;
         if (lib && !f) for (NSString *nm in lib.functionNames) if ([nm hasPrefix:[want stringByAppendingString:@"_p"]]) { f = [lib newFunctionWithName:nm]; break; }   // fewer triangles a group (dm_mesh_p16)
         if (f) { if (!g_geo_mesh_runfn) g_geo_mesh_runfn = [NSMutableDictionary dictionary];   // its run twin: dm_mesh_z_p16 → dm_mesh_run_z_p16
-            g_geo_mesh_runfn_gen++; g_geo_mesh_runfn[[NSValue valueWithPointer:(__bridge const void *)f]] = [lib newFunctionWithName:[@"dm_mesh_run" stringByAppendingString:[((id<MTLFunction>)f).name substringFromIndex:7]]] ?: NSNull.null; }
+            pso_lock(); g_geo_mesh_runfn_gen++; g_geo_mesh_runfn[[NSValue valueWithPointer:(__bridge const void *)f]] = [lib newFunctionWithName:[@"dm_mesh_run" stringByAppendingString:[((id<MTLFunction>)f).name substringFromIndex:7]]] ?: NSNull.null; pso_unlock(); }
         static int n; if (f || n++ < 16) MLOG("geometry mesh: vertex %s kernel %s %s", vs->key, lean->key, f ? "has a mesh library" : "has no mesh library (geo_mesh.tsv): the compute path draws it");
         vs->geo_mesh[k] = f = f ?: NSNull.null;
     }
@@ -417,7 +417,7 @@ static id<MTLFunction> geo_mesh_fn(NvProg *pr, const p_draw *dw, const p_draw_id
 static nvn_hmap g_pso_mesh = {.klen = sizeof(pso_key)}; static os_unfair_lock g_pso_mesh_lock = OS_UNFAIR_LOCK_INIT;
 static NSObject *g_pso_mesh_building;
 // The draw's mesh pipeline for mesh function fn (the draw's own, or its run twin), or nil while it is built in the background (or when it failed)
-static id<MTLRenderPipelineState> geo_mesh_pso_for(NvProg *pr, id<MTLFunction> fn, int run) {
+static id<MTLRenderPipelineState> geo_mesh_pso_for(NvProg *pr, id<MTLFunction> fn, int run) { TCX;
     NvShader *vs = pr->sh[0], *fs = pr->sh[1];
     pso_key k; pso_key_fill(&k, vs, fs, g_pass.cfmt, g_pass.dfmt, g_pass.sfmt, g_pass.samples, 0);
     memset(k.attr, 0, sizeof k.attr); memset(k.attr_hi, 0, sizeof k.attr_hi); memset(k.stream, 0, sizeof k.stream);   // the pipeline pulls its streams: no vertex layout in it
@@ -446,7 +446,7 @@ static id<MTLRenderPipelineState> geo_mesh_pso_for(NvProg *pr, id<MTLFunction> f
     }
     // A failed pipeline sends the pair back to the compute path for good: with its mesh function still set, every draw of the pair left the geometry runs (geo_run_walk) and drew
     // alone (a mesh output over Metal's limit took Donkey Kong Bananza's translation from about 10 to 22-31 ms a frame)
-    if (ps == NSNull.null && run) { g_geo_mesh_runfn[[NSValue valueWithPointer:(__bridge const void *)g_geo_mesh.fn]] = NSNull.null; g_geo_mesh_runfn_gen++; }   // the draws of the pair stay single
+    if (ps == NSNull.null && run) { pso_lock(); g_geo_mesh_runfn[[NSValue valueWithPointer:(__bridge const void *)g_geo_mesh.fn]] = NSNull.null; g_geo_mesh_runfn_gen++; pso_unlock(); }   // the draws of the pair stay single
     else if (ps == NSNull.null && g_geo_mesh.lean) { NvShader *vs = pr->sh[0]; vs->geo_mesh[@(g_geo_mesh.lean->key)] = NSNull.null; g_geo_mesh_last.vs = nil; }
     if (ps == NSNull.null || ps == g_pso_mesh_building) return nil;
     last_k_tc[TCI] = k; last_ps_tc[TCI] = ps;   // the table keeps it alive (entries are never removed)
@@ -519,7 +519,7 @@ static int geo_mesh_run_fits(NvProg *pr) {
     return 0;
 }
 // The draw about to be dispatched (geo_mesh_encode, with its arguments bound): 1 when it joined the run instead
-static int geo_mesh_take(id<MTL4RenderCommandEncoder> en) {
+static int geo_mesh_take(id<MTL4RenderCommandEncoder> en) { TCX;
     if (!geo_mesh_run_on() || g_defer_replaying) return 0;
     NvProg *pr = g_geo_program;
     if (g_mrun.n && ((__bridge void *)en != (__bridge void *)g_mrun.en || g_geo_mesh.ps != g_mrun.ps || g_geo_mesh.fn != g_mrun.fn || pr->sh[0] != g_mrun.vs || pr->sh[1] != g_mrun.fs)) {
@@ -531,7 +531,7 @@ static int geo_mesh_take(id<MTL4RenderCommandEncoder> en) {
         // The twin of the last mesh function asked for: a boxed key and a dictionary lookup a draw took 12 % of the submit thread in Donkey Kong Bananza's map (draws that then drew alone)
         static __unsafe_unretained id<MTLFunction> last_fn_tc[NW]; static __unsafe_unretained id last_f_tc[NW]; static uint64_t last_gen_tc[NW];
         if ((__bridge void *)g_geo_mesh.fn != (__bridge void *)last_fn_tc[TCI] || last_gen_tc[TCI] != g_geo_mesh_runfn_gen) {
-            last_f_tc[TCI] = g_geo_mesh_runfn[[NSValue valueWithPointer:(__bridge const void *)g_geo_mesh.fn]]; last_fn_tc[TCI] = g_geo_mesh.fn; last_gen_tc[TCI] = g_geo_mesh_runfn_gen; }
+            pso_lock(); last_f_tc[TCI] = g_geo_mesh_runfn[[NSValue valueWithPointer:(__bridge const void *)g_geo_mesh.fn]]; pso_unlock(); last_fn_tc[TCI] = g_geo_mesh.fn; last_gen_tc[TCI] = g_geo_mesh_runfn_gen; }
         id f = last_f_tc[TCI];
         if (!f || f == NSNull.null || !geo_mesh_run_fits(pr)) return 0;   // no twin (a library from before runs, or a pair whose vertex resources are not all constant references)
         id<MTLRenderPipelineState> rps = geo_mesh_pso_for(pr, f, 1); if (!rps) return 0;   // built in the background: single draws until it is ready
@@ -546,7 +546,7 @@ static int geo_mesh_take(id<MTL4RenderCommandEncoder> en) {
 }
 // The draw itself (draw() calls it with its pipeline, the vertex and fragment arguments and the pulling layout bound): the kernel's arguments, with vb_info
 // m0 = (0, 1 instance) and m1.x = the draw's triangles, and the draw's index source
-static void geo_mesh_encode(id<MTLRenderCommandEncoder> en_) {
+static void geo_mesh_encode(id<MTLRenderCommandEncoder> en_) { TCX;
     id<MTL4RenderCommandEncoder> en = (id<MTL4RenderCommandEncoder>)en_;
     [en setArgumentTable:g_vt atStages:MTLRenderStageMesh];
     uint32_t tris = g_geo_mesh.a.count / 3;
@@ -710,7 +710,7 @@ static void mesh_tasks_draw(const p_draw *dw) {
     if (!g_mtk_n++) MLOG("task / mesh: first draw, task %s mesh %s fragment %s, %u workgroups from %u%s", ts ? ts->key : "-", ms->key, pr->sh[1] ? pr->sh[1]->key : "-", g_mtk.count, g_mtk.first, ind ? " (indirect)" : "");
 }
 static uint64_t g_geo_mesh_n, g_geo_mesh_wait;   // mesh draws; draws the compute path drew while their mesh pipeline was built
-static int geo_mesh_draw(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
+static int geo_mesh_draw(NvProg *pr, const p_draw *dw, const p_draw_idx *di) { TCX;
     id<MTLFunction> fn = geo_mesh_fn(pr, dw, di); if (!fn) return 0;
     long_pass_split_geo();
     uint64_t ib = 0; void *mb; uint64_t mo;
@@ -797,7 +797,7 @@ static int geo_query_run(void) {
     return g_geo_query_run;
 }
 // 1: j is ready; 0: this draw draws nothing; -1: cannot join an open run.
-static int geo_prep(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0, geo_job *j, int may_wait, uint32_t primitive_base) {
+static int geo_prep(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0, geo_job *j, int may_wait, uint32_t primitive_base) { TCX;
     *j = (geo_job){.pr = pr, .vs = pr ? pr->sh[0] : nil, .gs = pr ? pr->sh[2] : nil,
                    .dw = dw0 ? *dw0 : (p_draw){0}, .di = di0 ? *di0 : (p_draw_idx){0}, .has_di = di0 != NULL};
     NvShader *vs = j->vs, *base = j->gs;
@@ -1079,8 +1079,8 @@ static int geo_run_walk(id<MTL4RenderCommandEncoder> re) {
     S = s0; R = r0; g_pso_dirty = pd; g_dss_dirty = dd;
     return n;
 }
-static void geo_draw(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0, uint32_t primitive_base) { cp_stamp start = cp_begin(); geo_draw_(pr, dw0, di0, primitive_base); cp_end(6, start); }
-static void geo_draw_(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0, uint32_t primitive_base) {
+static void geo_draw(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0, uint32_t primitive_base) { TCX; cp_stamp start = cp_begin(); geo_draw_(pr, dw0, di0, primitive_base); cp_end(6, start); }
+static void geo_draw_(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0, uint32_t primitive_base) { TCX;
     for (int i = 1; i < g_geo_nrun; i++) if (g_geo_run[i].op && g_geo_run[i].op == g_exec_cur) {
         g_geo_run[i].op = NULL; geo_raster(&g_geo_run[i], i == g_geo_nrun - 1); return;
     }

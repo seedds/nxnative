@@ -31,14 +31,38 @@
 // Translation contexts (parallel translation, stage P1): the state a translating thread owns while it translates a pass is kept as an array of NW, one element a
 // context, and named through a macro that indexes it with TCI, the calling thread's context. One context (TCI 0) translates everything for now, so each access is
 // the same fixed address as before; the planner / worker split makes TCI the worker's own index. Submission-wide tracking and shared caches stay single
-enum { NW = 4 };
-static int g_tci;   // the context the calling code translates in: 0 the planner (and everything single-threaded); the verify mode (DM_NVN_PAR=2) switches to 1 on the same thread
-#define TCI g_tci
-static void pv_open(MTL4RenderPassDescriptor *pd), pv_close(void); static int g_pv_from_draw;   // the verify mode (DM_NVN_PAR=2, beside draw_enc)
-static int g_pv_open; static uint32_t g_pv_badbits; static int g_pv_slot;   // a pass is being captured; why it cannot be compared; the visibility slot of the draw translated again
+#ifdef DM_PAR
+enum { NW = 4 };   // translation contexts: the planner and up to three workers
+#else
+enum { NW = 1 };   // one context: the per-context arrays hold one element each, laid out as single variables were
+#endif
+// The context the calling thread translates in: 0 the planner (and everything single-threaded), a worker its own (the verify modes DM_NVN_PAR=2 / 3).
+// Built with -DDM_PAR only, for now: a context read at run time makes every per-context address depend on a load, and the single-threaded translation took 13 % more cycles a draw
+// for the same instructions (Donkey Kong Bananza's Freezer Layer, M4: 20.5 -> 23.2 ms a frame). Without it TCI is the constant 0, as before, and the parallel modes are off.
+// With it: a thread-local read in tci_tl(), a call the compiler makes once a function (const), behind a flag that stays 0 until such a mode starts; a function that uses per-context
+// state often declares TCX first, a local copy TCI then reads (_Generic on the type of tcx_, a struct at file scope), so a function without it is still right, only slower. A function
+// that switches context does its work in another function (pv_wet)
+#ifdef DM_PAR
+static _Thread_local int g_tci_tl; static int g_par_any;   // g_par_any: a mode that translates in more than one context is on (DM_NVN_PAR >= 2); until then every context is 0
+__attribute__((const, noinline)) static int tci_tl(void) { return g_tci_tl; }
+__attribute__((always_inline)) static inline int tci(void) { return __builtin_expect(g_par_any, 0) ? tci_tl() : 0; }
+static void tci_set(int k) { g_tci_tl = k; }
+#else
+static int g_par_any;
+__attribute__((always_inline)) static inline int tci(void) { return 0; }
+static void tci_set(int k) { (void)k; }
+#endif
+static const struct { char none; } tcx_ = {0};   // the file-scope stand-in: no local context copy here (TCI calls tci())
+#define TCI _Generic(tcx_, int: tcx_, default: tci())
+#define TCX const int tcx_ = tci(); (void)tcx_   // a hot function's local copy of the context
+static void pv_open(MTL4RenderPassDescriptor *pd), pv_close(void), pv_wait_idle(void); static int g_pv_from_draw;   // the verify mode (DM_NVN_PAR=2 / 3, beside draw_enc)
+static int g_pv_open_[NW]; static uint32_t g_pv_badbits; static int g_pv_slot_[NW];
+#define g_pv_open (g_pv_open_[TCI])
+#define g_pv_slot (g_pv_slot_[TCI])   // a pass is being captured; why it cannot be compared; the visibility slot of the draw translated again
 static inline int g_pv_on_(void) { return g_pv_open; }
 static inline void g_pv_bad(int w) { if (g_pv_open) g_pv_badbits |= 1u << w; }
-static int g_wet;   // translating a pass again from its snapshot (DM_NVN_PAR=2): the planner's notes and decisions are not made a second time
+static void pso_lock(void), pso_unlock(void);   // the pipeline tables' lock (beside pso_get)
+#define g_wet (TCI != 0)   // translating a pass again from its capture (a context other than the planner's): the planner's notes and decisions are not made a second time
 static void pcn_open(void), pcn_close(void);   // the parallel translation census (DM_NVN_PAR_CENSUS, below mtl_exec)
 #include "nvn_refl.h"
 #include "nvn_cover.h"
@@ -61,7 +85,7 @@ static int c0_ssbo_base(int stage) { return stage == 0 ? DMSH_C0_SSBO_VS : stage
 // The handle a texture binding of slot reg reads: as c2 holds it (encode_args fills c2 the same way), a combined slot past 31 shares its word with an image slot, and a bound image
 // is what lies there. A texture instruction on an image handle names such a slot: a size query of the image a compute shader writes (Unreal's GetDimensions on a RWTexture3D,
 // dmsh_build.py decode_tex). DRAGON QUEST VII Reimagined's volumetric lightmap indirection patch read the empty texture slot 32 there, got a 1x1 size and wrote only cell (0, 0, 0)
-static inline uint64_t tex_slot_h(const uint64_t *tex, const uint64_t *img, unsigned reg) {
+static inline uint64_t tex_slot_h(const uint64_t *tex, const uint64_t *img, unsigned reg) { TCX;
     return reg >= 32 && reg - 32 < DMSH_C2_IMG_SLOTS && img[reg - 32] ? img[reg - 32] : reg < NTEX ? tex[reg] : 0;
 }
 static uint64_t c2_handle(int stage, unsigned b);   // the handle c2 holds at byte b (defined with the draw state, TEXA / SAMPA)
@@ -719,13 +743,13 @@ void mtl_init(void) {
     MTL4ArgumentTableDescriptor *atd = [MTL4ArgumentTableDescriptor new];
     atd.maxBufferBindCount = 31; atd.maxTextureBindCount = 1;
     NSError *ate = nil;
-    for (int k = 0; k < NW; k++) { g_tci = k;   // every translation context binds through tables of its own
-    g_vt = rec_table([g_dev newArgumentTableWithDescriptor:atd error:&ate]); if (!g_vt) MDIE("failed to create the vertex argument table: %s", ate.localizedDescription.UTF8String);
-    g_vt_valid = 0;
-    g_ft = rec_table([g_dev newArgumentTableWithDescriptor:atd error:&ate]); if (!g_ft) MDIE("failed to create the fragment argument table: %s", ate.localizedDescription.UTF8String);
-    g_ct = rec_table([g_dev newArgumentTableWithDescriptor:atd error:&ate]); if (!g_ct) MDIE("failed to create the compute argument table: %s", ate.localizedDescription.UTF8String);
-    g_ot = rec_table([g_dev newArgumentTableWithDescriptor:atd error:&ate]); if (!g_ot) MDIE("failed to create the object argument table: %s", ate.localizedDescription.UTF8String);
-    } g_tci = 0;
+    for (int k = 0; k < NW; k++) {   // every translation context binds through tables of its own
+    g_vt_[k] = rec_table([g_dev newArgumentTableWithDescriptor:atd error:&ate]); if (!g_vt_[k]) MDIE("failed to create the vertex argument table: %s", ate.localizedDescription.UTF8String);
+    g_vt_valid_[k] = 0;
+    g_ft_[k] = rec_table([g_dev newArgumentTableWithDescriptor:atd error:&ate]); if (!g_ft_[k]) MDIE("failed to create the fragment argument table: %s", ate.localizedDescription.UTF8String);
+    g_ct_[k] = rec_table([g_dev newArgumentTableWithDescriptor:atd error:&ate]); if (!g_ct_[k]) MDIE("failed to create the compute argument table: %s", ate.localizedDescription.UTF8String);
+    g_ot_[k] = rec_table([g_dev newArgumentTableWithDescriptor:atd error:&ate]); if (!g_ot_[k]) MDIE("failed to create the object argument table: %s", ate.localizedDescription.UTF8String);
+    }
     g_up_ct = [g_dev newArgumentTableWithDescriptor:atd error:&ate]; if (!g_up_ct) MDIE("failed to create the upload compute argument table: %s", ate.localizedDescription.UTF8String);
     MTL4ArgumentTableDescriptor *pad = [MTL4ArgumentTableDescriptor new];
     pad.maxTextureBindCount = 1; pad.maxSamplerStateBindCount = 1; pad.maxBufferBindCount = 1;
@@ -1293,7 +1317,7 @@ static int sbw_slot(uint64_t pg, int add) {   // open addressing; −1 = not the
 enum { SBW_GPU = 1, SBW_REPORT = 2 };
 static uint32_t g_sbw_gen;   // bumped by every write noted that this submission's shadows must respect (a cached shadow made before it is checked again)
 static void drw_note(uint64_t lo, uint64_t n);   // the writes since the last drain (below g_wr_epoch)
-static void sbw_note(uint64_t lo, uint64_t n, int src) {
+static void sbw_note(uint64_t lo, uint64_t n, int src) { TCX;
     if (src==SBW_GPU) rc_gpu_write(lo,n);
     if (src == SBW_GPU) { g_sbw_gen++; drw_note(lo, n); }
     if (!n) { if (src == SBW_GPU) g_sbw_over = 1; return; }
@@ -1601,8 +1625,8 @@ static inline void enc_r_end_pass(id e) {
 }
 static inline id<MTL4RenderCommandEncoder> enc_r_begin(MTL4RenderPassDescriptor *d) { g_cm_enc++; cm_enc_mark(2); id<MTL4RenderCommandEncoder> e = [g_cb renderCommandEncoderWithDescriptor:d]; cm_enc_mark(0); [e barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:resource_vis()]; [e setArgumentTable:g_vt atStages:MTLRenderStageVertex]; [e setArgumentTable:g_ft atStages:MTLRenderStageFragment]; gp_begin(e, 'R', d); return e; }
 static inline void enc_r_end(id e) { m4_end(e); }
-static inline void enc_r_pso(id<MTL4RenderCommandEncoder> e, id<MTLRenderPipelineState> p) { [e setRenderPipelineState:p]; }
-static inline void enc_r_dss(id<MTL4RenderCommandEncoder> e, id<MTLDepthStencilState> s) { [e setDepthStencilState:s]; }
+static inline void enc_r_pso(id<MTL4RenderCommandEncoder> e, id<MTLRenderPipelineState> p) { TCX; [e setRenderPipelineState:p]; }
+static inline void enc_r_dss(id<MTL4RenderCommandEncoder> e, id<MTLDepthStencilState> s) { TCX; [e setDepthStencilState:s]; }
 static inline void enc_r_viewport(id<MTL4RenderCommandEncoder> e, MTLViewport v) { [e setViewport:v]; }
 static inline void enc_r_scissor(id<MTL4RenderCommandEncoder> e, MTLScissorRect r) { [e setScissorRect:r]; }
 static inline void enc_r_cull(id<MTL4RenderCommandEncoder> e, MTLCullMode m) { [e setCullMode:m]; }
@@ -5070,7 +5094,7 @@ static void rt_mirror_flush(void) {
     }
     if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
 }
-static void rp_end_at(const char *fn, int line) { if (g_enc) { AP_B; geo_mesh_flush_pass(); PD("E %llu pass ends in %s:%d", g_stat_pass, fn, line);
+static void rp_end_at(const char *fn, int line) { TCX; if (g_enc) { AP_B; geo_mesh_flush_pass(); PD("E %llu pass ends in %s:%d", g_stat_pass, fn, line);
     if (enc_label_on()) { static uint64_t lf = ~0ull, base; uint64_t f = atomic_load(&g_cur_frame); if (f != lf) { lf = f; base = g_stat_pass - 1; }   // Intra-frame serial: the same pass has the same name every frame, so the table can aggregate by name
         [(id)g_enc setLabel:[NSString stringWithFormat:@"p%02llu %dx%d %s d%d", (unsigned long long)(g_stat_pass - base), g_el_w, g_el_h, g_el_key[0] ? g_el_key : "-", g_el_draws]]; }
 #ifdef NVN_RT_RANGE_TEST
@@ -5227,12 +5251,12 @@ static void bare_dims(NSUInteger *w, NSUInteger *h);
 // the parallel translation's planner makes the first, the context that encodes the pass's draws the second (stage P2). Single-threaded they run back to back, as before
 static MTL4RenderPassDescriptor *rp_plan(int clear_only);
 static id<MTL4RenderCommandEncoder> rp_open(MTL4RenderPassDescriptor *pd);
-static id<MTL4RenderCommandEncoder> rp_begin_ex_(int clear_only) {
+static id<MTL4RenderCommandEncoder> rp_begin_ex_(int clear_only) { TCX;
     if (g_enc) return g_enc;
     MTL4RenderPassDescriptor *pd = rp_plan(clear_only);
     return pd ? rp_open(pd) : nil;
 }
-static MTL4RenderPassDescriptor *rp_plan(int clear_only) {
+static MTL4RenderPassDescriptor *rp_plan(int clear_only) { TCX;
     memset(g_zskip_cand_ok, 0, sizeof g_zskip_cand_ok);
     g_enc_mode = clear_only; g_enc_geo_nocolor = g_geo_omit_colors; g_pass_swrite = g_pass_order = g_pass_late_res = 0; g_sm_pass = 0;
     if (!R.has_rt) { RED_ONCE(3, "no render target set before the draw"); return nil; }
@@ -5444,7 +5468,7 @@ static MTL4RenderPassDescriptor *rp_plan(int clear_only) {
     if (g_blit) { enc_b_end(g_blit); g_blit = nil; }   // the copy encoder the shadows' blocks were moved in with (bcrt_attach)
     return pd;
 }
-static id<MTL4RenderCommandEncoder> rp_open(MTL4RenderPassDescriptor *pd) {
+static id<MTL4RenderCommandEncoder> rp_open(MTL4RenderPassDescriptor *pd) { TCX;
     ser_gate();
     g_stat_pass++;   // gp_begin records this pass; match the attachment and draw dump labels
     if (g_pv_from_draw && !g_wet) pv_open(pd);
@@ -5615,8 +5639,8 @@ static void shmap_read(void) {
     uint64_t cbs_seen; uint32_t cbs_runs;   // the command buffer that listed this shader last, and how many have (cbs_note)
     // The argument buffer encoded last time
     int8_t uc_st; int uc_npend; uint32_t uc_sbw, uc_pgen; uint64_t uc_ver; p_bind_buf uc_ubo[16], uc_ssbo[16];   // ubd_conflict_sh's last answer of no conflict: the state it held for (uc_st -1: none)
-    uint8_t *ab_cpu; uint8_t ab_patch, ab_ncb; uint8_t ab_cb[24];   // ab_cb: the uniform-slot bindings (CBUF, UBOP) a patch makes again, ab_ncb of them (ab_patchable)   // the block's bytes (encode_args_ patches a copy when only uniform bindings changed), whether its bindings allow that (0 not decided, 1 yes, 2 no: ab_patchable)
-    id<MTLBuffer> ab_buf; uint64_t ab_gpu; size_t ab_off; uint64_t ab_pass; uint32_t ab_binst; uint64_t ab_pgen;   // ab_pass: serial of the render pass that encoded this argument block - reused only within the same pass (the arena holding a block from another pass / another submission may already have been reclaimed and rewritten); ab_pgen: g_psnap_gen when it was encoded (pools, pool_gpu)
+    uint8_t ab_patch, ab_ncb; uint8_t ab_cb[24];   // ab_cb: the uniform-slot bindings (CBUF, UBOP) a patch makes again, ab_ncb of them (ab_patchable)   // the block's bytes (encode_args_ patches a copy when only uniform bindings changed), whether its bindings allow that (0 not decided, 1 yes, 2 no: ab_patchable)
+    struct { id<MTLBuffer> buf; uint8_t *cpu; uint64_t gpu; size_t off; uint64_t pass; uint64_t pgen; uint32_t binst; } ab[NW];   // per translation context, each one's fields together (encode_args_ reads them every draw)   // ab_pass: serial of the render pass that encoded this argument block - reused only within the same pass (the arena holding a block from another pass / another submission may already have been reclaimed and rewritten); ab_pgen: g_psnap_gen when it was encoded (pools, pool_gpu)
     id<MTLLibrary> bflib; int bflib_state; NSMutableArray *bffn;   // bflib: the readable-tile version <key>_bf (state as afn_state), bffn: its functions specialized by their numbers (NvBfFn, bf_fn)
     uint64_t mis[4];   // mis: texture slots 0-255 already reported for a type mismatch (tex_mis_note)
     NSString *ventry; id<MTLFunction> vfn; int vfn_state;
@@ -5943,7 +5967,7 @@ static NvShader *shader_load(NSString *pc, int stage, int layer) {
     return o;
 }
 // The part of uniform slot reg's binding the shader can read: its first cb_ext bytes when cb_extent.tsv bounds them, else the whole binding
-static inline uint64_t cb_len(NvShader *sh, int reg, uint64_t size) { uint32_t e = sh && reg >= 0 && reg < 16 ? sh->cb_ext[reg] : 0; return e && e < size ? e : size; }
+static inline uint64_t cb_len(NvShader *sh, int reg, uint64_t size) { TCX; uint32_t e = sh && reg >= 0 && reg < 16 ? sh->cb_ext[reg] : 0; return e && e < size ? e : size; }
 // Encodes where a uniform slot is bound shorter than the shader reads it at a fixed offset (cb_extent.tsv: the slot's proven extent, else its highest fixed-offset read, f<reg>:<bytes>).
 // Maxwell gives 0 past a constant buffer's size and the translator's reads do the same (DMSH_CBSIZE_BANK), so this is not wrong: it counts what used to read the guest memory past the
 // binding. Paper Mario: The Thousand-Year Door binds 16 bytes to a slot read up to byte 0x930, and the GPU hung on the light count it read at 0x900 (GitHub issue #1860)
@@ -6051,7 +6075,7 @@ static NvShader *builtin_get(const char *ctl) {
     return nil;
 }
 static void up_mfx_read_color(NvShader *cs, const NVNshaderData *sd);
-static __unsafe_unretained NvProg *prog_get(const prog_t *cp) {   // Called only on the submit thread
+static __unsafe_unretained NvProg *prog_get(const prog_t *cp) { TCX;   // Called only on the submit thread
     prog_t *p = (prog_t *)cp;
     if (!p) return nil;   // no program bound: nil, as the callers that test S.prog first get (draw_'s passdump line tests it, the lines after it did not)
     static const prog_t *lp_tc[NW]; static uint64_t lser_tc[NW], lgen_tc[NW]; static NvProg *lpr_tc[NW];   // Last result: same object, same serial and unchanged serial table means it is used directly
@@ -6787,8 +6811,15 @@ void arena_commit(uint64_t fence) { for (NvArena *a in g_sub_arenas) { a->fence 
 static size_t arena_alloc(size_t n, __strong id<MTLBuffer> *buf) {
     n = (n + 255) & ~(size_t)255;
     if (!g_cur_arena || g_cur_arena->used + n > g_cur_arena->len) {
+        if (g_wet) {   // a verify replay: blocks of its own context, reused replay after replay (what it writes never reaches the GPU), apart from the shared list
+            NvArena *r = nil; for (NvArena *a in g_sub_arenas) if (a->used + n <= a->len) { r = a; break; }
+            if (!r) { r = [NvArena new]; r->buf = [g_dev newBufferWithLength:MAX(n, (size_t)4 << 20) options:MTLResourceStorageModeShared]; if (!r->buf) MDIE("cannot allocate %zu bytes of replay scratch", n);
+                r->gpu = r->buf.gpuAddress; r->len = r->buf.length; r->cpu = r->buf.contents; [g_sub_arenas addObject:r]; }
+            g_cur_arena = r;
+        } else {
         pthread_mutex_lock(&g_mu); g_cur_arena = arena_new(n); pthread_mutex_unlock(&g_mu);
         [g_sub_arenas addObject:g_cur_arena];
+        }
     }
     size_t off = g_cur_arena->used; g_cur_arena->used += n; *buf = g_cur_arena->buf; return off;
 }
@@ -6874,7 +6905,7 @@ static uint64_t vbuf_unaligned(uint64_t addr, uint64_t size, uint64_t need, int 
     if (!c) { c = malloc(sizeof *c); if (!c) MDIE("cannot allocate vertex copy cache entry"); nvn_hm_put(&g_vbuf_unaligned, key, c); }
     *c = (vbuf_copy){ab.gpuAddress + off, g_wr_epoch, g_vbuf_write_epoch, g_sbw_gen, g_npend}; return c->gpu;
 }
-static int vattr_bytes(int f) {   // bytes of one element of NVN vertex format f; 0 = not a vertex format
+static int vattr_bytes(int f) { TCX;   // bytes of one element of NVN vertex format f; 0 = not a vertex format
     static const uint8_t c[12] = {1, 1, 1, 1, 2, 2, 2, 2, 2, 4, 4, 4};   // per component of 0x01-0x30 (one to four components): UNORM8 SNORM8 UINT8 SINT8, F16 UNORM16 SNORM16 UINT16 SINT16, F32 UINT32 SINT32
     if (f >= 0x01 && f <= 0x30) return c[(f - 1) % 12] * ((f - 1) / 12 + 1);
     if (f == 0x3D || f == 0x69 || f == 0x3F || f == 0x9A) return 4;   // 10:10:10:2, 11:11:10 float, BGRA8
@@ -6891,7 +6922,7 @@ static int vstream_last(int st, const p_draw *dw, const p_draw_idx *di, uint64_t
     if (!dw || dw->first < 0 || dw->count <= 0) return 0;
     *last = (uint64_t)dw->first + (uint64_t)dw->count - 1; return 1;
 }
-static void vbuf_need(const nvn_refl *rf, const p_draw *dw, const p_draw_idx *di) {   // fills g_vbuf_need for the inputs the vertex shader reads
+static void vbuf_need(const nvn_refl *rf, const p_draw *dw, const p_draw_idx *di) { TCX;   // fills g_vbuf_need for the inputs the vertex shader reads
     memset(g_vbuf_need, 0, sizeof g_vbuf_need);
     for (int v = 0; rf && v < rf->nv; v++) {
         int a = rf->v[v].nvn; if (a >= 32 || a >= S.nattr || !S.attr[a].fmt) continue;
@@ -6901,7 +6932,7 @@ static void vbuf_need(const nvn_refl *rf, const p_draw *dw, const p_draw_idx *di
         if (end > S.vbuf[st].size && end > g_vbuf_need[st]) g_vbuf_need[st] = end;
     }
 }
-static void vbuf_prepare(const nvn_refl *rf, const p_draw *dw, const p_draw_idx *di) {   // before the draw's render encoder: rf, dw / di the draw's vertex shader and record (NULL: no bounds)
+static void vbuf_prepare(const nvn_refl *rf, const p_draw *dw, const p_draw_idx *di) { TCX;   // before the draw's render encoder: rf, dw / di the draw's vertex shader and record (NULL: no bounds)
     static uint64_t sub_tc[NW], gen_tc[NW], sparse_tc[NW];
     uint64_t pool_gen = atomic_load_explicit(&g_pool_gen, memory_order_acquire), sparse_gen = nvn_sparse_gen();
     if (sub_tc[TCI] != g_sub_serial || gen_tc[TCI] != pool_gen || sparse_tc[TCI] != sparse_gen) nvn_hm_clear(&g_vbuf_unaligned, free);
@@ -6914,14 +6945,14 @@ static void vbuf_prepare(const nvn_refl *rf, const p_draw *dw, const p_draw_idx 
 }
 // Resolved guest streams are separate from the table cache: vconv_bind may overwrite a stream's table slot.
 // Take the pool generation before resolving, so a concurrent pool change forces a fresh lookup next time.
-static unsigned vs_streams(const nvn_refl *rf) {   // the streams the vertex shader's inputs read (bit per stream)
+static unsigned vs_streams(const nvn_refl *rf) { TCX;   // the streams the vertex shader's inputs read (bit per stream)
     unsigned m = 0;
     for (int v = 0; rf && v < rf->nv; v++) { int a = rf->v[v].nvn; if (a < 32 && a < S.nattr && S.attr[a].fmt && S.attr[a].stream < 16) m |= 1u << S.attr[a].stream; }
     return m;
 }
 // Returns the first stream the vertex shader reads (rf) whose non-zero address is in no memory pool, or -1. Such a slot would keep the buffer an earlier draw bound
 // there, so the caller skips the draw, as for an index buffer in no pool; a stream with address 0 reads the zero buffer through the vertex descriptor (ZERO_ATTR)
-static int bind_vbufs(id<MTL4RenderCommandEncoder> en, const nvn_refl *rf) {
+static int bind_vbufs(id<MTL4RenderCommandEncoder> en, const nvn_refl *rf) { TCX;
     static struct { uint64_t addr, gpu, gen; } cache_tc[NW][16];
     uint64_t gen = atomic_load_explicit(&g_pool_gen, memory_order_acquire);
     unsigned used = vs_streams(rf); int bad = -1;
@@ -6954,7 +6985,7 @@ enum { PULL_SLOT = 16 };   // = dmsh_pull.py SLOT
 typedef struct { uint64_t base; uint32_t stride, divisor; } pull_stream;
 typedef struct { pull_stream s[16]; uint32_t attr[16]; } pull_layout;
 _Static_assert(sizeof(pull_layout) == 320, "dmsh_pull.metal dm_vlayout");
-static void pull_layout_fill(pull_layout *Lp) {
+static void pull_layout_fill(pull_layout *Lp) { TCX;
     pull_layout L; memset(&L, 0, sizeof L); uint32_t lo[16] = {0};
     for (int st = 0; st < 16; st++) {
         uint64_t addr = S.vbuf[st].address, gpu; void *mb; uint64_t mo;
@@ -6974,7 +7005,7 @@ static void pull_layout_fill(pull_layout *Lp) {
     }
     *Lp = L;
 }
-static void pull_bind(id<MTL4RenderCommandEncoder> en) {
+static void pull_bind(id<MTL4RenderCommandEncoder> en) { TCX;
     pull_layout L; pull_layout_fill(&L);
     id<MTLBuffer> ab; size_t off = arena_alloc(sizeof L, &ab);
     memcpy((uint8_t *)ab.contents + off, &L, sizeof L);
@@ -7012,7 +7043,7 @@ static void order_note(NvProg *pr) {   // after each draw of the pass: does it r
 // orders only primitives (whose fragments NVN leaves unordered too), a barrier inside the pass from the vertex stage to the stages that write keeps the pass and its attachments (the
 // skinning draws come in the middle of Xenoblade Chronicles 2's geometry pass, and ending it there split it about a hundred times a frame). Otherwise, or for a write in another stage,
 // or in a merged or deferred pass, whose encoder holds more than these draws, the pass ends first: Metal has no barrier from the fragment stage back to the vertex stage inside a pass
-static void order_draw(NvProg *pr, int merged) {   // merged: a merged (readable-tile, slice-merged) or deferred pass
+static void order_draw(NvProg *pr, int merged) { TCX;   // merged: a merged (readable-tile, slice-merged) or deferred pass
     int w = g_enc && g_pass_order ? prog_swrites(pr) : 0;
     if (!w) return;
     if (!(w & 4) && !((g_pass_order & 2) && g_pass_late_res) && !merged) {
@@ -7025,12 +7056,12 @@ static void order_draw(NvProg *pr, int merged) {   // merged: a merged (readable
     static int once; if (!once++) MLOG("a draw with shader writes after a game barrier in a draw pass: the pass ends before it (first case pass %llu)", g_stat_pass);
     PD("M %llu a draw with shader writes after an ordering barrier; split here", g_stat_pass); rp_end();
 }
-static void swrite_note(NvProg *pr) {
+static void swrite_note(NvProg *pr) { TCX;
     if (!pr) return;
     if (g_pass_swrite) { g_vbuf_write_epoch++; return; }   // further shader writes also invalidate aligned vertex snapshots
     if (prog_swrites(pr)) { g_pass_swrite = 1; g_vbuf_write_epoch++; }
 }
-static void udc_note_draw(NvProg *pr, uint32_t raster_mask) {
+static void udc_note_draw(NvProg *pr, uint32_t raster_mask) { TCX;
     int td = tbdr_on();
     if (td && R.has_rt) for (int i = 0; i < R.rt.n && i < 8; i++) if (R.rt.color[i]) { zskip_del(R.rt.color[i]->serial); g_zskip_cand_ok[i] = 0; }   // Zero-source set: once really drawn it is no longer all zeros
     if (td && pr) for (int st = 0; st < 6; st++) { __unsafe_unretained NvShader *sh = pr->sh[st]; if (!sh) continue; for (int i = 0; i < sh->rf.nb; i++) if (sh->rf.b[i].kind == NVN_RB_IMG || sh->rf.b[i].kind == NVN_RB_IMGU) { zskip_clear(); break; } }   // Image slots are writable: conservatively clear
@@ -7065,7 +7096,7 @@ static void udc_note_draw(NvProg *pr, uint32_t raster_mask) {
 // When every stage comes from the same program, that program is the effective one (all of Mario's and Engage's binds are like this, so nothing changes for them); otherwise a composite is made: a host-made prog_t carrying only a serial, whose NvProg in the serial table takes each stage from its source program (a null fragment = a vertex-only pipeline)
 // NVN2's task and mesh bits (0x40, 0x80) of a program bind: stages 3 and 4, where those shaders are kept (hle_nvn.c st_host)
 static inline int gfx_stage_bits(int stages) { return (stages & 0x1f) | (stages & 0x40 ? 8 : 0) | (stages & 0x80 ? 16 : 0); }
-static const prog_t *bind_stages(const prog_t *p, int stages) {
+static const prog_t *bind_stages(const prog_t *p, int stages) { TCX;
     for (int st = 0; st < 5; st++) if (stages >> st & 1) S.bst[st] = p;
     const prog_t *v = S.bst[0] ? S.bst[0] : S.bst[4];   // a mesh program has no vertex stage
     if (!v) return NULL;
@@ -7090,7 +7121,7 @@ static const prog_t *bind_stages(const prog_t *p, int stages) {
 // replayed after the save can give the slot the saved pointer names to another combination. AI: THE SOMNIUM FILES (Unity 2017.4) binds its vertex and fragment programs apart; the
 // prediction over a 280-draw submission (pso_predict_rest) made more than NCMP combinations, and the draw after it ran Legacy Shaders/VertexLit's shadow vertex shader with
 // PSYNC/BG_AlphaTest's shadow pixel shader, a pipeline Metal refused (the pixel shader reads two outputs that vertex shader does not write). The combination is taken again from S.bst
-static void prog_resolve(void) {
+static void prog_resolve(void) { TCX;
     const prog_t *np = bind_stages(NULL, 0); if (np == S.prog) return;
     S.prog = np; g_pso_dirty = 1;
     static unsigned n; if (!n++ || !(n & (n - 1))) MLOG("combined program taken again after a state restore: its ring slot had been reused (%u times so far)", n);
@@ -7255,7 +7286,7 @@ static int vconv_ncomp(int f) {   // components of an NVN float-type vertex form
 // an input of the same signedness, and vfmt_for_ct's switch to the other sign keeps the 8 / 16 bits but widens them the other way. So an input of the other signedness takes the 32-bit
 // values converted here too. Fire Emblem: Three Houses: the terrain's heights are RGBA16I into a uint input; negative heights read as 32768-65535 and the ground under close-up
 // cameras was never drawn (the lighting then saw depth 0 and painted fog there)
-static int vconv_int(int f, int *bits, int *sgn) {   // components of an 8 / 16-bit integer format (with its component size and signedness); 0 = not one
+static int vconv_int(int f, int *bits, int *sgn) { TCX;   // components of an 8 / 16-bit integer format (with its component size and signedness); 0 = not one
     static const uint8_t T[16] = { 0x03, 0x04, 0x08, 0x09, 0x0F, 0x10, 0x14, 0x15, 0x1B, 0x1C, 0x20, 0x21, 0x27, 0x28, 0x2C, 0x2D };   // per component count: UI8, I8, UI16, I16
     for (int i = 0; i < 16; i++) if (T[i] == f) { *bits = i & 2 ? 16 : 8; *sgn = i & 1; return i / 4 + 1; }
     return 0;
@@ -7372,7 +7403,7 @@ static int vin_ct(const nvn_refl *rf, int v, int f, int on) {
 }
 // Whether this pipeline (k, or the current state at bind time: both give the same answer) uses the shadow inputs: some input takes a shadow and the library loads. Asked by pso_desc
 // and vconv_bind alike, so the converted attributes and the pipeline's buffer slots agree
-static int vin_on(NvShader *vs, const pso_key *k, int tf) {
+static int vin_on(NvShader *vs, const pso_key *k, int tf) { TCX;
     const nvn_refl *rf = &vs->rf;
     if (tf || !rf->has_vin || vin_cpu()) return 0;
     int need = 0; for (int v = 0; v < rf->nv && !need; v++) need = vin_ct(rf, v, vin_fmt(k, rf->v[v].nvn), 1) != rf->v[v].ct;
@@ -7380,7 +7411,7 @@ static int vin_on(NvShader *vs, const pso_key *k, int tf) {
 }
 // A float input fed an 8 / 16-bit integer format takes the same 32-bit register values through a Float4 attribute, which Metal passes through bit for bit: Monster Hunter Rise's
 // skinned vertex shaders (40609cd5c1443df4, 1369a37113da0012) read RGBA8UI attribute 5 as flags (as_type<int>(x) & 2 ...) and also as a float, so the build leaves the input float
-static int vconv_wanted(const nvn_refl *rf, int v, const pso_key *k, int on) {   // does Metal input v of this pipeline take converted data (on: it uses the shadow inputs, vin_on)
+static int vconv_wanted(const nvn_refl *rf, int v, const pso_key *k, int on) { TCX;   // does Metal input v of this pipeline take converted data (on: it uses the shadow inputs, vin_on)
     int a = rf->v[v].nvn, ct = rf->v[v].ct, ib, is;
     if (a >= 32) return 0;
     int f = k ? pso_key_attr(k, a).fmt : S.attr[a].fmt;
@@ -7473,7 +7504,7 @@ static void vc_stat(void) {   // every 3600 submissions
 static struct { uint64_t addr, size, serial, v0, nv, nt; uint32_t fmt, off, stride; uint64_t gpu; } g_vconv_[NW][64]; static int g_vconv_next_[NW];
 #define g_vconv (g_vconv_[TCI])
 #define g_vconv_next (g_vconv_next_[TCI])
-static void vconv_bind(id<MTL4RenderCommandEncoder> en, NvShader *vs, int tf, const p_draw *dw, const p_draw_idx *di) {   // tf: a transform feedback capture (no shadow inputs)
+static void vconv_bind(id<MTL4RenderCommandEncoder> en, NvShader *vs, int tf, const p_draw *dw, const p_draw_idx *di) { TCX;   // tf: a transform feedback capture (no shadow inputs)
     const nvn_refl *rf = &vs->rf; int slot = VCONV_SLOT0, vc = vc_on(), rk = -1, on = vin_on(vs, NULL, tf); int64_t rlo = 0, rhi = 0;   // rk: the draw's vertex range is known (-1 = not looked up yet)
     vc_stat();
     for (int v = 0; v < rf->nv && slot < VCONV_SLOT0 + VCONV_MAX; v++) {
@@ -8687,7 +8718,7 @@ static id<MTLRenderPipelineState> pso_build_ex(MTLRenderPipelineDescriptor *d, N
 }
 static id<MTLRenderPipelineState> pso_build(MTLRenderPipelineDescriptor *d, NSError **e) { return pso_build_ex(d, e, 1); }
 // Pipeline key: current state S + pass formats (normal pass; a merged pass additionally carries lmap / specialized function, filled in by pso_get)
-static void pso_key_fill(pso_key *k, NvShader *vs, NvShader *fs, const uint32_t cfmt[8], uint32_t dfmt, uint32_t sfmt, uint32_t samples, int lmap) {
+static void pso_key_fill(pso_key *k, NvShader *vs, NvShader *fs, const uint32_t cfmt[8], uint32_t dfmt, uint32_t sfmt, uint32_t samples, int lmap) { TCX;
     memset(k, 0, sizeof *k);
     k->vs = (__bridge void *)vs; k->fs = (__bridge void *)fs;
     memcpy(k->cfmt, cfmt, sizeof k->cfmt); k->dfmt = dfmt; k->sfmt = sfmt; k->samples = samples;
@@ -9101,7 +9132,12 @@ static const char *pso_fout_hint(NvShader *fs, const uint32_t cfmt[8], char *b, 
     if (o < (int)n) snprintf(b + o, n - o, "}}");
     return b;
 }
-static __unsafe_unretained id<MTLRenderPipelineState> pso_get(NvProg *pr, MTLRenderPassDescriptor *unused) { AP_B; __unsafe_unretained id<MTLRenderPipelineState> r = pso_get_(pr, unused); AP_E(2); return r; }
+// The pipeline and depth-stencil tables (g_pso, g_dss, g_pso_fail, g_pso_hy) and the mesh run twins (g_geo_mesh_runfn) are kept by one lock while a worker translates beside the planner
+// (DM_NVN_PAR >= 3); recursive, since a pipeline being made may ask for another
+static pthread_mutex_t g_pso_mu; static int g_pso_mu_on;
+static void pso_lock(void) { if (g_pso_mu_on) pthread_mutex_lock(&g_pso_mu); }
+static void pso_unlock(void) { if (g_pso_mu_on) pthread_mutex_unlock(&g_pso_mu); }
+static __unsafe_unretained id<MTLRenderPipelineState> pso_get(NvProg *pr, MTLRenderPassDescriptor *unused) { AP_B; pso_lock(); __unsafe_unretained id<MTLRenderPipelineState> r = pso_get_(pr, unused); pso_unlock(); AP_E(2); return r; }
 // The pipelines of slice-merged passes (g_sm_plan): the draw's pipeline built with maxVertexAmplificationCount 2, keyed with AMP_MARK. Built in the background on first use; until it is
 // there the draw gets nil and goes to a pass of its own (sm_plan does not merge, draw splits a merged pass), so no frame waits for the compiler. A failed build is not tried again
 enum { SM_AMP_MAX = 64 };
@@ -9118,7 +9154,7 @@ static __unsafe_unretained id<MTLRenderPipelineState> sm_amp_get(const pso_key *
         os_unfair_lock_lock(&g_sm_amp_lock); g_sm_amp[i].ps = ps; g_sm_amp[i].done = 1; os_unfair_lock_unlock(&g_sm_amp_lock); });
     return nil;
 }
-static __unsafe_unretained id<MTLRenderPipelineState> pso_get_(NvProg *pr, MTLRenderPassDescriptor *unused) {
+static __unsafe_unretained id<MTLRenderPipelineState> pso_get_(NvProg *pr, MTLRenderPassDescriptor *unused) { TCX;
     (void)unused;
     g_pso_pull = 0;   // set again only where a pulling pipeline is returned: a stale 1 made the next draw, whose pipeline came from the cache, bind the layout block instead of its streams
     __unsafe_unretained NvShader *vs = pr->sh[0], *fs = pr->sh[1];
@@ -9484,7 +9520,9 @@ static void warm_start(void) {
     dispatch_queue_t q = dispatch_queue_create("dm.nvn.pso-warm", attr);
     dispatch_async(q, ^{ @autoreleasepool { long lines = 0; for (WarmTask *t in warm_parse(paths, &lines)) warm_task(t); warm_finish(); } });
 }
-static id<MTLDepthStencilState> dss_get(int has_depth, int has_stencil) {
+static id<MTLDepthStencilState> dss_get_(int has_depth, int has_stencil);
+static id<MTLDepthStencilState> dss_get(int has_depth, int has_stencil) { pso_lock(); id<MTLDepthStencilState> r = dss_get_(has_depth, has_stencil); pso_unlock(); return r; }
+static id<MTLDepthStencilState> dss_get_(int has_depth, int has_stencil) { TCX;
     struct { ds_st ds; uint32_t vm[2], wm[2]; int hd, hs; } k;
     memset(&k, 0, sizeof k); k.ds = S.ds; memcpy(k.vm, S.st_vmask, 8); memcpy(k.wm, S.st_wmask, 8); k.hd = has_depth; k.hs = has_stencil;
     if (!g_dss.klen) g_dss.klen = sizeof k;
@@ -9604,8 +9642,11 @@ static uint64_t dummy_samp_rid(void) { static uint64_t rid; if (!rid) rid = dumm
 enum { POOL_IDS_MAX = 1024 };
 typedef struct { int *v, n, cap; } pool_ids;
 typedef struct { __strong id<MTLBuffer> buf; uint64_t gpu, reg, ser, frame, sub; int samp, dtt, dpf, base, left, left_req; pool_ids dead, trans; } pool_snap;
-static pool_snap g_psnap[POOL_SNAPS]; static unsigned g_psnap_next;
-static uint64_t g_psnap_gen = 1;   // bumped by each rebuild or patch: an argument block holding a pool address is not reused past it (encode_args_)
+static pool_snap g_psnap_[NW][POOL_SNAPS]; static unsigned g_psnap_next_[NW];
+#define g_psnap (g_psnap_[TCI])
+#define g_psnap_next (g_psnap_next_[TCI])
+static uint64_t g_psnap_gen_[NW] = {[0 ... NW-1] = 1};   // bumped by each rebuild or patch: an argument block holding a pool address is not reused past it (encode_args_)
+#define g_psnap_gen (g_psnap_gen_[TCI])
 static uint64_t g_stat_pool_builds_[NW]; static double g_stat_pool_ms_[NW];
 #define g_stat_pool_builds (g_stat_pool_builds_[TCI])
 #define g_stat_pool_ms (g_stat_pool_ms_[TCI])
@@ -9659,7 +9700,12 @@ static int tex_storage_live(const tex_t *t) {
 // the working set, as a pass that runs once (a bake) has no second frame to find its texture in. Each upload reads pages the system may have swapped out and wires them: one 300-frame window spent 8.6 s
 // in residency commits. A read of the rest finds the dummy for a few frames
 enum { POOL_FRAME_BYTES = 32u << 20, POOL_REQ_BYTES = 128u << 20, POOL_SUB_MS = 2 };
-static uint64_t g_walk_frame = ~0ull, g_walk_spent, g_walk_sub = ~0ull; static double g_walk_ms; static int g_walk_over;
+static uint64_t g_walk_frame_[NW] = {[0 ... NW-1] = ~0ull}, g_walk_spent_[NW], g_walk_sub_[NW] = {[0 ... NW-1] = ~0ull}; static double g_walk_ms_[NW]; static int g_walk_over_[NW];
+#define g_walk_frame (g_walk_frame_[TCI])
+#define g_walk_spent (g_walk_spent_[TCI])
+#define g_walk_sub (g_walk_sub_[TCI])
+#define g_walk_ms (g_walk_ms_[TCI])
+#define g_walk_over (g_walk_over_[TCI])
 static uint64_t pool_tex_size(const tex_t *t) { return t->L.size ? t->L.size : 1; }
 static int pool_size_cmp(const void *a, const void *b) { uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b; return x < y ? -1 : x > y; }
 static uint64_t pool_budget(void) { return g_dev.recommendedMaxWorkingSetSize / 20; }
@@ -9706,7 +9752,7 @@ static void pool_ds_note(int id_) {
     alias_key k = tex_alias_key(&g_treg[id_].t);
     if (!nvn_hm_get(&g_pool_ds, &k)) { nvn_hm_put(&g_pool_ds, &k, (void *)1); g_pool_ds_gen++; }
 }
-static int pool_ds_read(const tex_t *t) {
+static int pool_ds_read(const tex_t *t) { TCX;
     static uint64_t ser_tc[NW] = {[0 ... NW-1] = 0}, gen_tc[NW] = {[0 ... NW-1] = ~0ull}; static int read_tc[NW];   // asked for every pool draw of a pass: the answer holds until the target or the set changes
     if (t->serial != ser_tc[TCI] || g_pool_ds_gen != gen_tc[TCI]) { alias_key k = tex_alias_key(t); read_tc[TCI] = nvn_hm_get(&g_pool_ds, &k) != NULL; ser_tc[TCI] = t->serial; gen_tc[TCI] = g_pool_ds_gen; }
     return read_tc[TCI];
@@ -9774,7 +9820,7 @@ static uint64_t pool_entry(int samp, int dtt, int id_, uint64_t limit, int *gone
     if (g_treg[id_].retired && g_treg[id_].transient_sub == g_sub_serial) *transient = 1;
     return tr;
 }
-static uint64_t pool_gpu(int samp, int dtt, int dpf, int base, __unsafe_unretained id<MTLBuffer> *out) {
+static uint64_t pool_gpu(int samp, int dtt, int dpf, int base, __unsafe_unretained id<MTLBuffer> *out) { TCX;
     pool_seen_scan();
     uint64_t rg = atomic_load(&g_reg_gen), sg = samp ? 0 : atomic_load(&g_ser_gen);   // a sampler table follows registrations alone
     pool_snap *p = NULL, *free_ = NULL;
@@ -9919,7 +9965,7 @@ static id<MTLTexture> img_binding(int tid, const nvn_rbind *b, uint64_t *rid, in
 // An image bind may follow rendering into a texture created without IMAGE; upgrading it inside encode_args would
 // copy out of an attachment while its render pass was still open. Close that pass first, then replace the shared backing (all registered sampled views follow g_ser_gen).
 static uint32_t ubo_handle(int stage, int reg, int off); static int ubo_tex_id(uint32_t h);
-static void image_prepare(NvProg *pr, unsigned stages) {
+static void image_prepare(NvProg *pr, unsigned stages) { TCX;
     if (!pr) return;
     if (!pr->c_img) { int any = 0;   // no written or atomic image slot in any stage: nothing to resolve, every draw
         for (int st = 0; st < 6 && !any; st++) { __unsafe_unretained NvShader *sh = pr->sh[st]; if (!sh) continue;
@@ -10026,7 +10072,7 @@ static inline void args_sync_dirty(void) {
 }
 static NSUInteger g_args_mesh_[NW];   // nonzero: geometry-stage arguments go to this slot of the vertex table, which the mesh stage shares (geo_mesh_draw)
 #define g_args_mesh (g_args_mesh_[TCI])
-static void bind_args(id<MTLCommandEncoder> en, int nvn_stage, int metal_vertex, id<MTLBuffer> ab, uint64_t gpu, size_t off, NSUInteger ai) {
+static void bind_args(id<MTLCommandEncoder> en, int nvn_stage, int metal_vertex, id<MTLBuffer> ab, uint64_t gpu, size_t off, NSUInteger ai) { TCX;
     if (g_args_mesh && nvn_stage == 2) { enc_r_vbuf((id<MTL4RenderCommandEncoder>)en, g_args_mesh, gpu); return; }
     if (nvn_stage == 3) { if (rec_on()) rec_table_op(RO_T_ADDR, g_ot, gpu, ai); else [g_ot setAddress:gpu atIndex:ai]; return; }   // a task shader: the object stage's table (mesh_tasks_draw)
     if (nvn_stage == 5 || nvn_stage == 2) enc_c_args((id<MTLComputeCommandEncoder>)en, gpu, ai);
@@ -10195,6 +10241,7 @@ static void ubo_read(int stage, int reg, int off, size_t n, void *out) {
     if (stage < 0 || stage >= 6 || reg < 0 || reg >= 16) return;
     const p_bind_buf *u = &S.ubo[stage][reg];
     if (!u->addr || (uint64_t)off + n > u->size) return;
+    if (g_wet) goto mem;   // a replay reads memory as it is (the verify mode; a worker gets the planner's outcome instead)
     if (g_nubd && ubd_hits(u->addr + off, u->addr + off + n) && ubd_covers(u->addr + off, u->addr + off + n)) { ubd_read(u->addr + off, n, out); return; }   // written by an inline update deferred in this pass
     { uint64_t g; const uint8_t *c; if (pend_hits(u->addr + off, n) && ubp_get(u->addr + off, u->addr + off + n, &g, &c)) { ubc_wait(g_ubp_ready); memcpy(out, c, n); return; } }   // memory and the inline updates queued over it
     if (pend_hits(u->addr + off, n)) { int kind; if (pend_read(u->addr + off, n, out, &kind)) return;   // written by an inline update queued in this submission: its data
@@ -10203,6 +10250,7 @@ static void ubo_read(int stage, int reg, int off, size_t n, void *out) {
     // A pool's buffer wraps guest memory without a copy (mtl_pool_add), so its contents at mo are the guest bytes at the address itself: read there, once a pool is found to hold
     // them. Asking the buffer for its contents cost a message, and, contents being an inner pointer, a retain and autorelease of the buffer at every handle read (Fire Emblem:
     // Fortune's Weave: about 4% of the submit thread's samples, and as much again draining the autorelease pool at commit)
+mem:;
     void *mb; uint64_t mo;
     if (!mtl_addr(u->addr + off, n, &mb, &mo)) return;
     memcpy(out, (const void *)(uintptr_t)(u->addr + off), n);
@@ -10232,7 +10280,7 @@ static htab_snap g_htab_[NW][HTAB_SNAPS], *g_htab_last_[NW]; static unsigned g_h
 static uint64_t g_stat_htab_builds_[NW]; static double g_stat_htab_ms_[NW];
 #define g_stat_htab_builds (g_stat_htab_builds_[TCI])
 #define g_stat_htab_ms (g_stat_htab_ms_[TCI])
-static uint64_t htab_gpu(int stage, const nvn_rbind *b, __unsafe_unretained id<MTLBuffer> *out) {
+static uint64_t htab_gpu(int stage, const nvn_rbind *b, __unsafe_unretained id<MTLBuffer> *out) { TCX;
     int samp = b->kind == NVN_RB_SAMPH, reg = b->reg;
     const p_bind_buf *u = reg < 16 ? &S.ubo[stage][reg] : NULL;
     uint64_t addr = u ? u->addr + b->off : 0, rg = atomic_load(&g_reg_gen), sg = atomic_load(&g_ser_gen);
@@ -10376,25 +10424,26 @@ static int ab_patchable(NvShader *sh) {
         sh->ab_patch = ok ? 1 : 2; }
     return sh->ab_patch == 1;
 }
-static int encode_args(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, int metal_vertex) { cbs_note(sh); AP_B; int r = encode_args_(en, sh, nvn_stage, metal_vertex); AP_E(3); return r; }
-static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, int metal_vertex) {
+static int encode_args(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, int metal_vertex) { if (!g_wet) cbs_note(sh);   // a replay encodes a pass the planner has listed (and only the submit thread adds to the list)
+    AP_B; int r = encode_args_(en, sh, nvn_stage, metal_vertex); AP_E(3); return r; }
+static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, int metal_vertex) { TCX;
     if (nvn_stage == 1 && !metal_vertex && sh->has_alpha && atest_on()) at_bind(en);   // also for a shader without bindings
     if (nvn_stage == 1 && !metal_vertex && sh->has_logic && lop_on()) lo_bind(en);
     if (!sh->ae) return 1;
     args_sync_dirty();
-    int same = !passdump() && sh->ab_buf && sh->ab_pass == g_pass.serial && nvn_stage != 5 && !(sh->rf.drv_read[0] && sh->ab_binst != g_draw_binst) && !((sh->rf.pool || sh->rf.htab) && sh->ab_pgen != g_psnap_gen);
+    int same = !passdump() && sh->ab[TCI].buf && sh->ab[TCI].pass == g_pass.serial && nvn_stage != 5 && !(sh->rf.drv_read[0] && sh->ab[TCI].binst != g_draw_binst) && !((sh->rf.pool || sh->rf.htab) && sh->ab[TCI].pgen != g_psnap_gen);
     if (same && !g_args_dirty[nvn_stage]) {
-        bind_args(en, nvn_stage, metal_vertex, sh->ab_buf, sh->ab_gpu, sh->ab_off, sh->rf.abi);
+        bind_args(en, nvn_stage, metal_vertex, sh->ab[TCI].buf, sh->ab[TCI].gpu, sh->ab[TCI].off, sh->rf.abi);
         g_args_last[nvn_stage] = sh;
         g_stat_args_reuse++;
         return 1;
     }
     // Only uniform bindings changed since this shader's block was bound on this stage (g_args_dirty 2): a copy of that block with those slots' entries made again, as the loop below makes them
-    if (same && g_args_dirty[nvn_stage] == 2 && g_args_last[nvn_stage] == sh && sh->ab_cpu && !__builtin_expect(g_res_check_on, 0) && ab_patchable(sh)) {
+    if (same && g_args_dirty[nvn_stage] == 2 && g_args_last[nvn_stage] == sh && sh->ab[TCI].cpu && !__builtin_expect(g_res_check_on, 0) && ab_patchable(sh)) {
         uint16_t m = g_args_ubo_mask[nvn_stage];
         NSUInteger plen = sh->arg_len ? sh->arg_len : sh->ae.encodedLength;
         id<MTLBuffer> ab; size_t off = arena_alloc(plen, &ab); uint8_t *dst = g_cur_arena->cpu + off;
-        memcpy(dst, sh->ab_cpu, plen);
+        memcpy(dst, sh->ab[TCI].cpu, plen);
         for (int k = 0; k < sh->ab_ncb; k++) {   // the uniform-slot bindings only; no texture or sampler table is read, so g_rmu is not taken
             const nvn_rbind *b = &sh->rf.b[sh->ab_cb[k]]; int reg = b->reg;
             if (reg >= 16 || !(m >> reg & 1)) continue;
@@ -10402,13 +10451,13 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
             if (b->kind == NVN_RB_UBOP) { if (!u->addr || !mtl_gpu_addr(u->addr, u->size ? u->size : 1, &mb, &mo, &gpu)) gpu = dummy_buf_gpu(); }
             else if (!u->addr || !mtl_gpu_addr(u->addr, u->size ? u->size : 1, &mb, &mo, &gpu)) { RED_ONCE(16, "stage %d cb%d has no uniform buffer bound", nvn_stage, reg); gpu = zero_bank_gpu(); }
             else { uint64_t ul = cb_len(sh, reg, u->size);
-                if (g_nubd && ubd_hits(u->addr, u->addr + ul)) { uint64_t g; const uint8_t *c; if (ubd_covers(u->addr, u->addr + ul)) gpu = ubd_shadow(u->addr, u->addr + ul);
+                if (g_nubd && !g_wet && ubd_hits(u->addr, u->addr + ul)) { uint64_t g; const uint8_t *c; if (ubd_covers(u->addr, u->addr + ul)) gpu = ubd_shadow(u->addr, u->addr + ul);
                     else if (ubp_get(u->addr, u->addr + ul, &g, &c)) gpu = g;
                     else RED_ONCE(92, "a uniform update deferred inside the pass covers only part of the binding (stage %d cb%d): the content before the update is read", nvn_stage, reg); } }
             memcpy(dst + 8 * (size_t)b->aid, &gpu, 8);
         }
         bind_args(en, nvn_stage, metal_vertex, ab, g_cur_arena->gpu + off, off, sh->rf.abi);
-        sh->ab_buf = ab; sh->ab_gpu = g_cur_arena->gpu + off; sh->ab_off = off; sh->ab_cpu = dst; g_args_dirty[nvn_stage] = 0; g_args_last[nvn_stage] = sh;
+        sh->ab[TCI].buf = ab; sh->ab[TCI].gpu = g_cur_arena->gpu + off; sh->ab[TCI].off = off; sh->ab[TCI].cpu = dst; g_args_dirty[nvn_stage] = 0; g_args_last[nvn_stage] = sh;
         if (!g_stat_args_patch++ || g_stat_args_patch % 1000000 == 0) MLOG("argument blocks patched for changed uniform bindings only: %llu (encoded in full %llu, reused %llu)", (unsigned long long)g_stat_args_patch, (unsigned long long)g_stat_args_enc, (unsigned long long)g_stat_args_reuse);
         return 1;
     }
@@ -10432,7 +10481,7 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
             if (!u || !u->addr || !mtl_gpu_addr(u->addr, u->size ? u->size : 1, &mb, &mo, &gpu)) {   // reads 0 (the all-zero bank), as an unbound texture slot does, instead of through a null pointer
                 RED_ONCE(16, "stage %d cb%d has no uniform buffer bound", nvn_stage, reg); slots[aid] = zero_bank_gpu(); USE(zero_bank(), MTLResourceUsageRead); continue; }
             uint64_t ul = cb_len(sh, reg, u->size);   // what the shader can read of it
-            if (g_nubd && ubd_hits(u->addr, u->addr + ul)) {   // inline updates deferred in this pass (see mtl_sub_update); ubd_conflict made sure they cover the binding or the rest can be read from memory
+            if (g_nubd && !g_wet && ubd_hits(u->addr, u->addr + ul)) {   // inline updates deferred in this pass (see mtl_sub_update); ubd_conflict made sure they cover the binding or the rest can be read from memory
                 uint64_t g; const uint8_t *c; if (ubd_covers(u->addr, u->addr + ul)) gpu = ubd_shadow(u->addr, u->addr + ul);
                 else if (ubp_get(u->addr, u->addr + ul, &g, &c)) gpu = g;
                 else RED_ONCE(92, "a uniform update deferred inside the pass covers only part of the binding (stage %d cb%d): the content before the update is read", nvn_stage, reg); }
@@ -10692,8 +10741,8 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
     memcpy(g_cur_arena->cpu + off, slots, arg_len);
     if (gmem_aid >= 0) gmem_slot_note((uint64_t *)(void *)(g_cur_arena->cpu + off) + gmem_aid, gml_taken ? (__bridge void *)g_gml_last : NULL);   // the arena arena_alloc took it from (no contents message: see ubo_read)
     bind_args(en, nvn_stage, metal_vertex, ab, g_cur_arena->gpu + off, off, sh->rf.abi);
-    sh->ab_buf = ab; sh->ab_gpu = g_cur_arena->gpu + off; sh->ab_off = off; sh->ab_pass = g_pass.serial; sh->ab_binst = g_draw_binst; sh->ab_pgen = g_psnap_gen; g_args_dirty[nvn_stage] = 0;
-    sh->ab_cpu = g_cur_arena->cpu + off; g_args_last[nvn_stage] = sh;
+    sh->ab[TCI].buf = ab; sh->ab[TCI].gpu = g_cur_arena->gpu + off; sh->ab[TCI].off = off; sh->ab[TCI].pass = g_pass.serial; sh->ab[TCI].binst = g_draw_binst; sh->ab[TCI].pgen = g_psnap_gen; g_args_dirty[nvn_stage] = 0;
+    sh->ab[TCI].cpu = g_cur_arena->cpu + off; g_args_last[nvn_stage] = sh;
     g_stat_args_enc++;
     return 1;
 }
@@ -10848,7 +10897,7 @@ static void sd_apply(id<MTL4RenderCommandEncoder> en, const sd_stores *st) {
 static void sd_decide(sd_stores *st);
 static void pv_stores(const sd_stores *st);
 static void sd_finish(void) { sd_stores st; sd_decide(&st); if (st.n) sd_apply(g_enc, &st); pv_stores(&st); }
-static void sd_decide(sd_stores *st) {
+static void sd_decide(sd_stores *st) { TCX;
     st->n = 0;
     if (!g_nsd) return;
     uint8_t nst[SD_ATT_MAX];
@@ -10937,7 +10986,7 @@ static int first_draw_covers(int i, id<MTLTexture> t, NSUInteger level) {
 }
 
 int nvn_dpool_base(const void *pool, int tex);   // hle_nvn.c: where a descriptor pool's IDs start in the host table
-static int state_op(uint32_t op, const void *a) {
+static int state_op(uint32_t op, const void *a) { TCX;
     switch (op) {
         case OP_SCISSOR: R.sc = *(const p_scissor *)a; R.has_sc = 1; break;
         // The pool bound when the draw runs, as on the GPU (a command buffer that binds none keeps the queue's): handles a shader reads from a uniform buffer are resolved only here,
@@ -12059,7 +12108,7 @@ static int zskip_vis_dead(void) {
         p += h.size; }
     return 0;
 }
-static int zskip_can_draw(NvProg *pr) {
+static int zskip_can_draw(NvProg *pr) { TCX;
     // Skip conditions (all must hold): the fragment key is in the fact table, the view bound to every texture slot declared by its reflection covers only subresources known to be all zero, the coefficient is finite,
     // no depth write and no stencil, not counting an occlusion query, and every color attachment to be written is already 0 (a candidate cleared entirely to 0 in this render pass, or known all zero) -- writing 0 over 0.
     // Reasons for not holding (the N line of PASSDUMP): 1 depth / stencil 2 occlusion query counting with a report before the reset 3 coefficient unreadable or non-finite 4 image slot 5 sampled view not known all zero 6 no target 7 target is not 0
@@ -12424,7 +12473,7 @@ static int fb_tile_ready(NvShader *vs, NvShader *fs, id<MTLFunction> fn, const u
     return 0;
 }
 // The texture slots (bit per slot 0-255) whose attachment this draw reads from the tile; 0 = none (then g_fb_tfn and the rest are not this draw's)
-static int fb_tile_plan(NvProg *pr, uint32_t wm, uint64_t tile[4]) {
+static int fb_tile_plan(NvProg *pr, uint32_t wm, uint64_t tile[4]) { TCX;
     NvShader *vs = pr->sh[0], *fs = pr->sh[1]; memset(tile, 0, 4 * sizeof *tile);
     if (g_fb_mode != 1 || !g_enc || !vs || !(fs->rf.fc_proj | fs->rf.fc_fpos) || !fs->rf.color_known || !fs->rf.nfo || !fb_tile_on() || tbdr_on()) return 0;
     if (atest_on() || lop_on() || g_pass.samples > 1 || S.rast_discard || g_sm_pass || geo_drawing() || ms_fs_override(fs)) return 0;
@@ -12468,7 +12517,7 @@ void mtl_fb_stats(uint64_t *snaps, uint64_t *reused, uint64_t *tile, uint64_t *w
 // Whether the fragment shader's handles in uniform buffers (TEXU) name a texture of this serial: read as encode_args reads them for the draw. Fire Emblem Fortune's Weave's
 // decals are bindless and write depth; taking every bindless shader as a depth reader ended the pass before each of them (about 30 passes a frame, each loading and storing four targets).
 // texa: whether a table of handles in c2 (TEXA), not read here, counts as naming it
-static int fb_texu_reads(NvShader *fs, uint64_t ser, int texa) {
+static int fb_texu_reads(NvShader *fs, uint64_t ser, int texa) { TCX;
     for (int i = 0; i < fs->rf.nb; i++) { const nvn_rbind *b = &fs->rf.b[i]; if (b->kind == NVN_RB_TEXA) { if (texa) return 1; continue; }   // a bindless shader with one stays a reader where texa asks (a TEXA-only shader is not one, as before)
         if (b->kind == NVN_RB_TEXH) { __unsafe_unretained id<MTLBuffer> pb = nil; int hit = 0;   // a table of a uniform buffer's handles: its serials
             os_unfair_lock_lock(&g_rmu); htab_gpu(1, b, &pb); for (uint32_t k = 0; k < g_htab_last->n && !hit; k++) hit = g_htab_last->ser[k] == ser; os_unfair_lock_unlock(&g_rmu);
@@ -12554,10 +12603,8 @@ static void fb_depth_rule(NvShader *fs, int dsw) {
     if (other) g_fb_dread = 1;
 }
 // Called before the draw opens its render pass: if a snapshot is needed, end the current render pass, copy the snapshot (or reuse a valid one) and register the substitution (used by this draw's argument encoding)
-static void fb_prepare_(NvProg *pr);
-static void pv_fb(void);
-static void fb_prepare(NvProg *pr) { fb_prepare_(pr); if (g_pv_open && !g_wet) pv_fb(); }   // the verify mode replays its outcome (pv_wet)
-static void fb_prepare_(NvProg *pr) {
+static void pv_fb(void);   // the verify mode notes fb_prepare's outcome (draw_) and replays it (pv_wet)
+static void fb_prepare(NvProg *pr) { TCX;
     g_draw_seq++; g_fb_n = 0;
     if (g_fb_rebind) { args_dirty_all(); g_fb_rebind = 0; }   // the previous draw had a substituted binding: re-encode with the original bindings this time
     if (!pr || !pr->sh[1] || (!R.rt.n && !R.rt.depth) || g_fz.active || g_defer_replaying || !fb_mode()) return;   // a depth-only pass too, for the depth rule
@@ -12673,7 +12720,7 @@ static void fb_prepare_(NvProg *pr) {
 typedef struct { uint64_t ind, ibuf; int32_t prim, itype; uint64_t args, ixb; uint32_t ixlen; } ixc_ent;   // args 0: the record could not be converted
 static ixc_ent g_ixc[IXC_MAX]; static int g_ixc_n; static uint64_t g_ixc_epoch, g_ixc_sub, g_ixc_runs, g_ixc_splits;
 // The kernels: dm/gfx/msl/ixc.metal
-static int ixc_wanted(const p_draw *dw, const p_draw_idx *di) {
+static int ixc_wanted(const p_draw *dw, const p_draw_idx *di) { TCX;
     if (dw) return dw->ind && (dw->prim == 6 || dw->prim == 7);
     return di->ind && (di->prim == 6 || di->prim == 7 || di->itype == 0);
 }
@@ -12820,7 +12867,7 @@ static void ubp_check(uint64_t lo, uint64_t hi, const uint8_t *sh) {
 // Whether this draw needs more from the inline updates deferred in the open pass than the uniform shadows give (see mtl_sub_update): a uniform binding they cover only in part whose rest
 // cannot be read from memory (ubp_get; a binding counts only as far as the shader can read it, cb_len), a bindless handle in such a part, or their data read as vertices, indices, indirect
 // arguments or a storage buffer. Then the pass ends first and the updates land before the draw, as before
-static int ubd_conflict_scan(NvShader *sh, int st, uint32_t only) {   // one stage's bindings (encode_args binds the vertex, fragment and compute stages); only: the uniform slots to look at (~0 all)
+static int ubd_conflict_scan(NvShader *sh, int st, uint32_t only) { TCX;   // one stage's bindings (encode_args binds the vertex, fragment and compute stages); only: the uniform slots to look at (~0 all)
     for (int i = 0; i < sh->rf.nb; i++) { const nvn_rbind *b = &sh->rf.b[i];
         if (only != ~0u) {   // a partial look: the bindings that read a uniform slot in only
             if (b->kind == NVN_RB_CBUF || b->kind == NVN_RB_UBOP) { if (b->reg >= 16 || !(only >> b->reg & 1)) continue; }
@@ -12844,7 +12891,7 @@ static int ubd_conflict_scan(NvShader *sh, int st, uint32_t only) {   // one sta
 // The answer depends on the stage's uniform and storage bindings, the deferred updates (g_ubd_ver) and what the shadows from memory may read (the writes queued and noted in this
 // submission). A draw loop that rebinds one uniform block per draw asked about every binding of the shader each time (Donkey Kong Bananza: 47 fragment bindings, 12,000 draws a pass);
 // with the rest as it was at the last answer of no conflict, only the bindings of the uniform slots that changed are looked at again
-static int ubd_conflict_sh(NvShader *sh, int st) {
+static int ubd_conflict_sh(NvShader *sh, int st) { TCX;
     uint32_t only = ~0u;
     if (sh->uc_st == st && sh->uc_ver == g_ubd_ver && sh->uc_sbw == g_sbw_gen && sh->uc_pgen == g_pend_gen && sh->uc_npend == g_npend && !ubp_check_on() && !memcmp(sh->uc_ssbo, S.ssbo[st], sizeof sh->uc_ssbo)) {
         only = 0; for (int r = 0; r < 16; r++) if (memcmp(&sh->uc_ubo[r], &S.ubo[st][r], sizeof sh->uc_ubo[r])) only |= 1u << r;
@@ -12854,7 +12901,7 @@ static int ubd_conflict_sh(NvShader *sh, int st) {
     memcpy(sh->uc_ubo, S.ubo[st], sizeof sh->uc_ubo);
     return 0;
 }
-static int ubd_conflict(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
+static int ubd_conflict(NvProg *pr, const p_draw *dw, const p_draw_idx *di) { TCX;
     static uint64_t vb_ver_tc[NW]; static typeof(S.vbuf[0]) vb_last_tc[NW][16];   // the vertex streams found clear of the deferred updates as they were (g_ubd_ver)
     if (vb_ver_tc[TCI] != g_ubd_ver || memcmp(vb_last_tc[TCI], S.vbuf, sizeof vb_last_tc[TCI])) {
         for (int s_ = 0; s_ < 16; s_++) if (S.vbuf[s_].address && ubd_hits(S.vbuf[s_].address, S.vbuf[s_].address + S.vbuf[s_].size)) { vb_ver_tc[TCI] = 0; return 1; }
@@ -13179,7 +13226,7 @@ static int csh_dispatch_ahead(void) {
     }
     return 1;
 }
-static void cs_hoist_try(NvProg *pr0, const p_draw *dw0, const p_draw_idx *di0) {
+static void cs_hoist_try(NvProg *pr0, const p_draw *dw0, const p_draw_idx *di0) { TCX;
     if (!g_exec_next || g_ret_n > 8 || g_fz_checking || g_defer_replaying || g_nlc || R.clear_d || R.clear_s) return;
     for (int i = 0; i < 8; i++) if (R.clear_c[i]) return;   // a clear this pass takes as its load action comes before anything a moved dispatch could read
     { static int pre = -1; if (pre < 0) { const char *e = getenv("DM_NVN_CSH_PRESCAN"); pre = !(e && !strcmp(e, "0")); }
@@ -13221,7 +13268,7 @@ void mtl_geomesh_stats(uint64_t *n, uint64_t *wait, uint64_t *run_draws, uint64_
 void mtl_geohoist_stats(uint64_t *moved, uint64_t *runs, uint64_t *stops) { *moved = g_geo_hoisted; *runs = g_geo_hoist_runs; memset(stops, 0, 6 * sizeof *stops); stops[3] = g_geo_dependency_splits; }
 void mtl_cshoist_stats(uint64_t *moved, uint64_t *depth, uint64_t *stops) { *moved = g_csh_moved; *depth = g_csh_depth; for (int i = 0; i < 8; i++) stops[i] = g_csh_stop[i]; }
 // Physical color attachments the selected pipeline can write. A merged pass remaps logical outputs and channel masks; a specialized fragment's outputs are unknown here.
-static uint32_t draw_color_writes(NvProg *pr) {
+static uint32_t draw_color_writes(NvProg *pr) { TCX;
     NvShader *fs = pr ? pr->sh[1] : nil;
     if (!fs || S.rast_discard) return 0;
     uint32_t outputs = g_pso_fsfn || ms_fs_override(fs) || !fs->rf.color_known ? UINT32_MAX : fs->rf.color_mask;
@@ -13236,7 +13283,7 @@ static uint32_t draw_color_writes(NvProg *pr) {
 // with a fresh mask table for this range. Coincident records (stride zero) need a different predicate at each index,
 // and the conversion paths need a resolved count. Beyond the mask table's capacity read the count once, so even
 // an INT_MAX maximum with only a few live draws does not allocate or encode billions of masked draws.
-static void draw_multi(const p_multi_draw *m) {
+static void draw_multi(const p_multi_draw *m) { TCX;
     if (!m->cnt) return;
     ubd_land();   // a deferred inline update can feed the count or any record in the range
     p_draw arr = {.prim = m->prim, .instances = 1, .ind = m->ind, .mdi_cnt = m->cnt};
@@ -13279,7 +13326,7 @@ static int skip_fs_draw(NvProg *pr) {
 static uint64_t g_lps_pass, g_lps_draw0, g_lps_splits;
 static void sub_cut(void);
 static int pass_split_draws(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_PASS_SPLIT"); v = e ? atoi(e) : 1536; if (v > 0) MLOG("long passes: split for a segment every %d draws while the GPU is idle (DM_NVN_PASS_SPLIT, 0 = off)", v); } return v; }
-static int long_pass_split_due(void) {
+static int long_pass_split_due(void) { TCX;
     if (g_lps_pass != g_pass.serial) { g_lps_pass = g_pass.serial; g_lps_draw0 = g_stat_draw; return 0; }
     int n = pass_split_draws();
     if (n <= 0) return 0;
@@ -13300,7 +13347,7 @@ static void long_pass_split_geo(void) { if (g_enc && long_pass_split_due()) { rp
 static void draw(const p_draw *dw, const p_draw_idx *di) { cp_stamp start = cp_begin(); if (dw && dw->prim == DM_PRIM_MESH_TASKS) mesh_tasks_draw(dw); else draw_(dw, di); cp_end(5, start); }
 static void draw_enc(NvProg *pr, const p_draw *dw, const p_draw_idx *di, id<MTLRenderCommandEncoder> en, int mode, id<MTLFunction> fz_fn, uint64_t mdx);
 static void pv_note(NvProg *pr, const p_draw *dw, const p_draw_idx *di, id<MTLFunction> fz_fn, uint64_t mdx); static void pv_slot(int s);
-static void draw_(const p_draw *dw, const p_draw_idx *di) {
+static void draw_(const p_draw *dw, const p_draw_idx *di) { TCX;
     g_draw_binst = (uint32_t)(dw ? dw->base_instance : di ? di->base_instance : 0);   // c0 + 0x644 of the stages that read the driver segment (encode_args)
     if (passdump()) { NvProg *p = g_geo_program ? g_geo_program : S.prog ? prog_get(S.prog) : nil;
         PD("j %llu draw-entry vs=%s fs=%s gs=%s prim=%d count=%d instances=%d indexed=%d indirect=%#llx discard=%d feedback=%d", g_stat_pass + !g_enc,
@@ -13389,6 +13436,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     if (g_enc && g_vis_counting && g_vis_n >= VIS_SLOTS) rp_end();   // this draw's query needs a slot and the buffer is bound for the whole pass: the next pass begins with a new one (rp_begin_ex)
     if (g_enc && g_rp_aw && (!R.has_sc || (long)R.sc.x + R.sc.w > (long)g_rp_aw || (long)R.sc.y + R.sc.h > (long)g_rp_ah)) rp_end();   // leaves the pass's render area
     fb_prepare(pr);   // same-pass feedback sampling: copy the snapshot first (see fb_prepare)
+    if (__builtin_expect(g_pv_open, 0)) pv_fb();
     if (R.has_sc && !g_enc && !S.rast_discard) {
         NSUInteger tw0 = 0, th0 = 0; rt_dims(&tw0, &th0);
         long x0 = R.sc.x < 0 ? 0 : R.sc.x, y0 = R.sc.y < 0 ? 0 : R.sc.y, x1 = (long)R.sc.x + R.sc.w, y1 = (long)R.sc.y + R.sc.h;
@@ -13429,38 +13477,61 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
 #undef fz_fn
 }
 
-// ---------- Verify mode (DM_NVN_PAR=2, diagnostic; parallel translation stage P2) ----------
-// The single-threaded translation draws as always. Each pass a draw opens is captured besides: the state at its start (S, R, the pass info), its descriptor, the run of operations
-// inside it, the store actions it ended with, and per draw it encoded the operation and its visibility slot. When the pass ends, its encoding is made again from that capture in
-// context 1 (pv_wet: draw_enc for each draw, state operations replayed, the planner's notes not made again), into a chain of its own that is compared with the records the pass
-// made and then dropped. The comparison takes the operations in order and their arguments, except the argument tables (each context has its own) and arena addresses (soft:
-// counted apart). A line every 300 frames: passes, those compared and why the others were not, identical, identical but for soft words, different (with the first difference)
+// ---------- Verify mode (DM_NVN_PAR=2 on the planner's thread, 3 on a worker thread; diagnostic; parallel translation stage P2) ----------
+// The single-threaded translation draws as always. Each pass a draw opens is captured besides, as a job: the state at its start (S, R, the pass info), its descriptor, the run of
+// operations inside it, the store actions it ended with, per draw it encoded the operation, its visibility slot, its mesh state and fb_prepare's outcomes, and a copy of the records
+// the pass made. pv_wet encodes the pass again from the job in another context (draw_enc for each draw, state operations replayed, the planner's notes not made again, uniform data
+// read as memory holds it), into a chain of its own; pv_cmp compares it with the copy (the operations in order and the words each one reads, except each context's argument tables,
+// the copied pass descriptor and arena addresses: soft) and the chain is dropped. With 3 a worker thread replays while the planner goes on, so the shared tables the replay uses
+// are taken under their locks; a submission's end waits for its jobs (they read its command memory). A line every 300 frames: passes, those compared and why the others were not,
+// identical, identical but for soft words, different (with the first difference)
 enum { PV_SPECIAL = 0, PV_AGAIN = 1, PV_END = 2, PV_DEPTH = 3, PV_SPLIT = 4, PV_OP = 5, PV_COUNT = 6, PV_BARRIER = 7, PV_NWHY = 8 };
 static const char *const g_pv_why_name[PV_NWHY] = {"special draw", "re-encoded", "no end op", "list depth", "drained mid-pass", "unsupported op", "draw count", "ordering barrier"};
 typedef struct { const uint8_t *op; int kind, slot; int mesh, omit, fbn; typeof(g_geo_mesh_[0]) gm; __unsafe_unretained NvProg *raster; p_draw syn;
                  __unsafe_unretained id<MTLTexture> fsrc[4], fuse[4]; uint64_t frid[4]; } pv_draw;   // kind 0 a draw draw_enc encoded (mesh: a geometry mesh draw), 1 fb_prepare's outcome
-static struct { const uint8_t *p0; int depth0; __strong MTL4RenderPassDescriptor *pd; uint64_t stat_pass, vbar0; typeof(g_S_[0]) s; typeof(g_R_[0]) r; typeof(g_pass_[0]) pass;
+typedef struct pv_job { struct pv_job *next; const uint8_t *p0, *p_end; int depth0; void *pd; uint64_t stat_pass, vbar0; typeof(g_S_[0]) s; typeof(g_R_[0]) r; typeof(g_pass_[0]) pass;
                 int has_vis, mode, geo_nocolor; NSUInteger rp_aw, rp_ah; sd_stores st; pv_draw *d; int nd, cap;
-                int fbn, fb_rebind; uint64_t draw_seq; __unsafe_unretained id<MTLTexture> fsrc[4], fuse[4]; uint64_t frid[4]; } g_pv;   // fb: the opening draw's fb_prepare outcome
+                int fbn, fb_rebind; uint64_t draw_seq; __unsafe_unretained id<MTLTexture> fsrc[4], fuse[4]; uint64_t frid[4];   // fb: the opening draw's fb_prepare outcome
+                rec_t *ser; long nser, sercap; } pv_job;   // pd: the descriptor, retained; ser: a copy of the records the pass made
 enum { PVS_TILE, PVS_MDX, PVS_FZ, PVS_GEO, PVS_MTK, PVS_MODE, PVS_KD, PVS_TF, PVS_MDI, PVS_N };
 static const char *const g_pvs_name[PVS_N] = {"tile read", "masked multi-draw", "fused", "geometry compute", "task/mesh shader", "merged/range/deferred", "draw dump", "transform feedback", "indirect count"};
 static uint64_t g_pvs[PVS_N];
-static uint64_t g_pv_pass, g_pv_tried, g_pv_same, g_pv_soft, g_pv_diff, g_pv_why[PV_NWHY], g_pv_frame, g_pv_softw;
+static pv_job *g_pvj;   // the capture of the open pass (the planner's)
+static pthread_mutex_t g_pv_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_pv_cv = PTHREAD_COND_INITIALIZER, g_pv_idle = PTHREAD_COND_INITIALIZER;
+static pv_job *g_pv_q, *g_pv_qt, *g_pv_free; static int g_pv_busy;   // jobs for the worker, its tail; spent jobs; the worker is replaying one
+static uint64_t g_pv_pass, g_pv_tried, g_pv_same, g_pv_soft, g_pv_diff, g_pv_why[PV_NWHY], g_pv_frame;   // under g_pv_mu
 static char g_pv_first[512];
-static int pv_mode(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_PAR"); v = e ? atoi(e) : 0; if (v == 2) MLOG("parallel translation verify mode (DM_NVN_PAR=2): every pass a draw opens is encoded again from its capture in another context and compared"); } return v; }
+static int pv_mode(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_PAR"); v = e ? atoi(e) : 0;
+#ifndef DM_PAR
+    if (v >= 2) { MLOG("DM_NVN_PAR=%d: this host is built without DM_PAR (one translation context); the parallel modes are off", v); v = 0; }
+#endif
+    if (v >= 2) g_par_any = 1;
+    if (v == 2) MLOG("parallel translation verify mode (DM_NVN_PAR=2): every pass a draw opens is encoded again from its capture in another context and compared");
+    if (v == 3) MLOG("parallel translation verify mode on a worker thread (DM_NVN_PAR=3): every pass a draw opens is encoded again by a worker from its capture while the planner goes on, and compared"); } return v; }
+static pv_job *pv_job_new(void) {
+    pthread_mutex_lock(&g_pv_mu); pv_job *j = g_pv_free; if (j) g_pv_free = j->next; pthread_mutex_unlock(&g_pv_mu);
+    if (!j) { j = calloc(1, sizeof *j); if (!j) MDIE("no memory for the verify mode's jobs"); }
+    j->next = NULL; j->nd = 0; j->nser = 0; return j;
+}
+static void pv_job_free(pv_job *j) {
+    if (j->pd) { CFRelease(j->pd); j->pd = NULL; }
+    pthread_mutex_lock(&g_pv_mu); j->next = g_pv_free; g_pv_free = j; pthread_mutex_unlock(&g_pv_mu);
+}
 static void pv_open(MTL4RenderPassDescriptor *pd) {
-    if (pv_mode() != 2 || !rec_on()) return;
-    g_pv_open = 1; g_pv_badbits = 0; g_pv.nd = 0; g_pv.p0 = g_exec_cur; g_pv.depth0 = g_ret_n; g_pv.pd = pd; g_pv.stat_pass = g_stat_pass; g_pv.vbar0 = g_order_vbar;
-    memcpy(&g_pv.s, &S, sizeof S); g_pv.r = R; g_pv.pass = g_pass; g_pv.has_vis = g_enc_has_vis; g_pv.mode = g_enc_mode; g_pv.geo_nocolor = g_enc_geo_nocolor; g_pv.rp_aw = g_rp_aw; g_pv.rp_ah = g_rp_ah;
-    g_pv.fbn = g_fb_n; g_pv.fb_rebind = g_fb_rebind; g_pv.draw_seq = g_draw_seq; for (int i = 0; i < 4; i++) { g_pv.fsrc[i] = g_fb_src[i]; g_pv.fuse[i] = g_fb_use[i]; g_pv.frid[i] = g_fb_rid[i]; }
-    g_pv.st.n = 0; g_vt_valid = 0;   // both contexts write every vertex table slot of a compared pass, so each one's table history does not show in the records
-    if (!g_pv.p0) g_pv_bad(PV_END);
+    if (pv_mode() < 2 || !rec_on()) return;
+    pv_job *j = g_pvj = pv_job_new();
+    g_pv_open = 1; g_pv_badbits = 0; j->p0 = g_exec_cur; j->depth0 = g_ret_n; j->pd = (void *)CFBridgingRetain(pd); j->stat_pass = g_stat_pass; j->vbar0 = g_order_vbar;
+    memcpy(&j->s, &S, sizeof S); j->r = R; j->pass = g_pass; j->has_vis = g_enc_has_vis; j->mode = g_enc_mode; j->geo_nocolor = g_enc_geo_nocolor; j->rp_aw = g_rp_aw; j->rp_ah = g_rp_ah;
+    j->fbn = g_fb_n; j->fb_rebind = g_fb_rebind; j->draw_seq = g_draw_seq; for (int i = 0; i < 4; i++) { j->fsrc[i] = g_fb_src[i]; j->fuse[i] = g_fb_use[i]; j->frid[i] = g_fb_rid[i]; }
+    j->st.n = 0; g_vt_valid = 0;   // both contexts write every vertex table slot of a compared pass, so each one's table history does not show in the records
+    if (!j->p0) g_pv_bad(PV_END);
     rec_job_begin();   // the pass's records gather here; pv_close hands them to the queue
 }
-static void pv_stores(const sd_stores *st) { if (g_pv_open && !g_wet) g_pv.st = *st; }
+static void pv_stores(const sd_stores *st) { if (g_pv_open && !g_wet) g_pvj->st = *st; }
 static pv_draw *pv_push(int kind) {
-    if (g_pv.nd == g_pv.cap) { g_pv.cap = g_pv.cap ? g_pv.cap * 2 : 256; g_pv.d = realloc_or_die(g_pv.d, (size_t)g_pv.cap * sizeof *g_pv.d, "the verify mode's draws"); }
-    pv_draw *d = &g_pv.d[g_pv.nd++]; memset(d, 0, sizeof *d); d->op = g_exec_cur; d->kind = kind; d->slot = -1; return d;
+    pv_job *j = g_pvj;
+    if (j->nd == j->cap) { j->cap = j->cap ? j->cap * 2 : 256; j->d = realloc_or_die(j->d, (size_t)j->cap * sizeof *j->d, "the verify mode's draws"); }
+    pv_draw *d = &j->d[j->nd++]; memset(d, 0, sizeof *d); d->op = g_exec_cur; d->kind = kind; d->slot = -1; return d;
 }
 static void pv_note(NvProg *pr, const p_draw *dw, const p_draw_idx *di, id<MTLFunction> fz_fn, uint64_t mdx) {
     uint32_t w = 0;
@@ -13475,7 +13546,7 @@ static void pv_note(NvProg *pr, const p_draw *dw, const p_draw_idx *di, id<MTLFu
 static void pv_fb(void) {   // fb_prepare's outcome for a draw of the captured pass
     pv_draw *d = pv_push(1); d->fbn = g_fb_n; for (int i = 0; i < g_fb_n && i < 4; i++) { d->fsrc[i] = g_fb_src[i]; d->fuse[i] = g_fb_use[i]; d->frid[i] = g_fb_rid[i]; }
 }
-static void pv_slot(int s) { for (int i = g_pv.nd - 1; i >= 0; i--) if (g_pv.d[i].kind == 0) { g_pv.d[i].slot = s; break; } }
+static void pv_slot(int s) { pv_job *j = g_pvj; for (int i = j->nd - 1; i >= 0; i--) if (j->d[i].kind == 0) { j->d[i].slot = s; break; } }
 static int pv_state_op(uint32_t op) {
     switch (op) {
         case OP_BIND_PROGRAM: case OP_BIND_STATE: case OP_BIND_VATTR: case OP_BIND_VSTREAM: case OP_BIND_VBUF: case OP_BIND_VBUF1: case OP_BIND_UBO: case OP_BIND_UBO_SMALL:
@@ -13485,24 +13556,27 @@ static int pv_state_op(uint32_t op) {
         default: return 0;
     }
 }
-// The pass's encoding again from the capture, in context 1; *ok = 0 when an operation in the run is not one a worker replays
-static rec_chain pv_wet(const uint8_t *p_end, int *ok) {
-    int t0 = g_tci; g_tci = 1; g_wet = 1; *ok = 1;
-    memcpy(&S, &g_pv.s, sizeof S); R = g_pv.r; g_pass = g_pv.pass; g_stat_pass = g_pv.stat_pass; g_cb = g_cb_[0];
+// The pass's encoding again from the job, in context 1; *why: 0, or the reason the run could not be replayed (PV_OP, PV_COUNT)
+static rec_chain pv_wet_body(const pv_job *j, int *why) __attribute__((noinline));
+static rec_chain pv_wet(const pv_job *j, int *why) { int t0 = TCI; tci_set(1); rec_chain c = pv_wet_body(j, why); tci_set(t0); return c; }
+static rec_chain pv_wet_body(const pv_job *j, int *why) {
+    *why = 0;
+    memcpy(&S, &j->s, sizeof S); R = j->r; g_pass = j->pass; g_stat_pass = j->stat_pass; g_cb = g_cb_[0];
     if (!g_sub_arenas) g_sub_arenas = [NSMutableArray array];
-    args_dirty_all(); g_pso_dirty = g_dss_dirty = 1; g_enc_pso = nil; g_enc_dss = nil; g_ed.ok = 0; g_enc_vis = 0; g_enc_has_vis = g_pv.has_vis; g_enc_mode = g_pv.mode;
-    g_enc_geo_nocolor = g_pv.geo_nocolor; g_rp_aw = g_pv.rp_aw; g_rp_ah = g_pv.rp_ah; g_vt_valid = 0;
-    g_fb_n = g_pv.fbn; g_fb_rebind = g_pv.fb_rebind; g_draw_seq = g_pv.draw_seq; for (int i = 0; i < 4; i++) { g_fb_src[i] = g_pv.fsrc[i]; g_fb_use[i] = g_pv.fuse[i]; g_fb_rid[i] = g_pv.frid[i]; }
+    for (NvArena *ar in g_sub_arenas) ar->used = 0; g_cur_arena = g_sub_arenas.firstObject;   // the context's private replay blocks (arena_alloc)
+    args_dirty_all(); g_pso_dirty = g_dss_dirty = 1; g_enc_pso = nil; g_enc_dss = nil; g_ed.ok = 0; g_enc_vis = 0; g_enc_has_vis = j->has_vis; g_enc_mode = j->mode;
+    g_enc_geo_nocolor = j->geo_nocolor; g_rp_aw = j->rp_aw; g_rp_ah = j->rp_ah; g_vt_valid = 0;
+    g_fb_n = j->fbn; g_fb_rebind = j->fb_rebind; g_draw_seq = j->draw_seq; for (int i = 0; i < 4; i++) { g_fb_src[i] = j->fsrc[i]; g_fb_use[i] = j->fuse[i]; g_fb_rid[i] = j->frid[i]; }
     rec_job_begin();
-    g_enc = enc_r_begin_pass(g_pv.pd);
-    int k = 0; long n = 0;
-    for (const uint8_t *p = g_pv.p0; p && p != p_end; ) {
-        if (++n > 4000000) { *ok = 0; break; }
+    g_enc = enc_r_begin_pass((__bridge MTL4RenderPassDescriptor *)j->pd);
+    int k = 0; long n = 0; const uint8_t *p_end = j->p_end;
+    for (const uint8_t *p = j->p0; p && p != p_end; ) {
+        if (++n > 4000000) { *why = PV_OP; break; }
         op_hdr h; memcpy(&h, p, sizeof h); const void *a = p + 8;
         if (g_mrun.n && !geo_mesh_keeps(h.op)) geo_mesh_flush();   // as mtl_exec does before each operation
         if (h.op == OP_JUMP) { memcpy(&p, a, 8); continue; }
         if (h.op == OP_DRAW || h.op == OP_DRAW_IDX) {
-            for (; k < g_pv.nd && g_pv.d[k].op == p; k++) { const pv_draw *d = &g_pv.d[k]; p_draw t; p_draw_idx ti; g_exec_cur = p; g_exec_next = p + h.size;
+            for (; k < j->nd && j->d[k].op == p; k++) { const pv_draw *d = &j->d[k]; p_draw t; p_draw_idx ti; g_exec_cur = p; g_exec_next = p + h.size;
                 if (d->kind == 1) {   // fb_prepare's per-context part, with the planner's outcome
                     g_draw_seq++; g_fb_n = 0; if (g_fb_rebind) { args_dirty_all(); g_fb_rebind = 0; }
                     if (d->fbn) { for (int i = 0; i < d->fbn; i++) { g_fb_src[i] = d->fsrc[i]; g_fb_use[i] = d->fuse[i]; g_fb_rid[i] = d->frid[i]; } g_fb_n = d->fbn; args_dirty_all(); g_fb_rebind = 1; }
@@ -13521,15 +13595,13 @@ static rec_chain pv_wet(const uint8_t *p_end, int *ok) {
             g_exec_next = NULL;
         } else if (h.op == OP_SET_RT) R.rt = *(const p_set_rt *)a;   // a same-target continuation (any other SET_RT ends the pass before it)
         else if (pv_state_op(h.op)) state_op(h.op, a);
-        else if (h.op != OP_BARRIER && h.op != OP_UPDATE_UB && h.op != OP_REPORT_COUNTER && h.op != OP_RESET_COUNTER && h.op != OP_BEGIN) { *ok = 0; g_pv_why[PV_OP]++; break; }
+        else if (h.op != OP_BARRIER && h.op != OP_UPDATE_UB && h.op != OP_REPORT_COUNTER && h.op != OP_RESET_COUNTER && h.op != OP_BEGIN) { *why = PV_OP; break; }
         p += h.size;
     }
-    while (k < g_pv.nd && g_pv.d[k].kind == 1 && g_pv.d[k].op == p_end) k++;   // fb_prepare of the draw that ended the pass, before it ended it
-    if (*ok && k != g_pv.nd) { *ok = 0; g_pv_why[PV_COUNT]++; }
-    geo_mesh_flush_pass(); if (g_pv.st.n) sd_apply(g_enc, &g_pv.st); enc_r_end_pass(g_enc); g_enc = nil;
+    while (k < j->nd && j->d[k].kind == 1 && j->d[k].op == p_end) k++;   // fb_prepare of the draw that ended the pass, before it ended it
+    if (!*why && k != j->nd) *why = PV_COUNT;
+    geo_mesh_flush_pass(); if (j->st.n) sd_apply(g_enc, &j->st); enc_r_end_pass(g_enc); g_enc = nil;
     rec_publish(); rec_chain c = g_rb_job; g_rb_job = (rec_chain){0}; g_rb_jobmode = 0;
-    [g_sub_arenas_[0] addObjectsFromArray:g_sub_arenas]; [g_sub_arenas removeAllObjects]; g_cur_arena = nil;   // its arena blocks complete with the submission
-    g_tci = t0; g_wet = 0;
     return c;
 }
 static int pv_words(uint32_t op) {   // as rec_exec reads them; 0: the operation alone is compared (a begin's descriptor is copied by each begin, the same one by construction)
@@ -13545,54 +13617,85 @@ static int pv_words(uint32_t op) {   // as rec_exec reads them; 0: the operation
     }
 }
 static const rec_t *pv_rec(rec_blk **b, int *i) { while (*b && *i >= (*b)->n) { *b = (*b)->next; *i = 0; } return *b ? &(*b)->r[(*i)++] : NULL; }
-// 0 identical, 1 identical but for soft words, 2 different (*why says where)
-static int pv_cmp(rec_chain x, rec_chain y, char *why, size_t nwhy) {
-    rec_blk *bx = x.head, *by = y.head; int ix = 0, iy = 0, soft = 0; long k = 0;
+// The pass's records (a copy) against the replay's chain: 0 identical, 1 identical but for soft words, 2 different (*why says where)
+static int pv_cmp(const rec_t *xs, long nx, rec_chain y, char *why, size_t nwhy) {
+    rec_blk *by = y.head; int iy = 0, soft = 0; long k = 0;
     for (;; k++) {
-        const rec_t *a = pv_rec(&bx, &ix), *b = pv_rec(&by, &iy);
+        const rec_t *a = k < nx ? &xs[k] : NULL, *b = pv_rec(&by, &iy);
         if (!a || !b) { if (a || b) { snprintf(why, nwhy, "record %ld: %s ends first (op %u)", k, a ? "the replay" : "the pass", a ? a->op : b->op); return 2; } return soft; }
         if (a->op != b->op || a->nobj != b->nobj) { size_t o = (size_t)snprintf(why, nwhy, "record %ld: op %u, the replay's %u; ops from %ld:", k, a->op, b->op, k > 12 ? k - 12 : 0);
-            for (int side = 0; side < 2; side++) { rec_blk *bb = side ? y.head : x.head; int ii = 0; o += (size_t)snprintf(why + o, nwhy > o ? nwhy - o : 0, side ? " | replay" : " pass");
-                for (long q = 0; q <= k + 4; q++) { const rec_t *r = pv_rec(&bb, &ii); if (!r) break; if (q >= k - 12 && o < nwhy) o += (size_t)snprintf(why + o, nwhy - o, " %u", r->op); } }
+            o += (size_t)snprintf(why + o, nwhy > o ? nwhy - o : 0, " pass"); for (long q = k > 12 ? k - 12 : 0; q <= k + 4 && q < nx && o < nwhy; q++) o += (size_t)snprintf(why + o, nwhy - o, " %u", xs[q].op);
+            rec_blk *bb = y.head; int ii = 0; o += (size_t)snprintf(why + o, nwhy > o ? nwhy - o : 0, " | replay");
+            for (long q = 0; q <= k + 4; q++) { const rec_t *r = pv_rec(&bb, &ii); if (!r) break; if (q >= k - 12 && o < nwhy) o += (size_t)snprintf(why + o, nwhy - o, " %u", r->op); }
             return 2; }
         int first = 0, hard = 1, nw = pv_words(a->op);   // the words the call reads (the rest of a recycled record is old content)
         if (a->op == RO_T_ADDR || a->op == RO_T_TEX || a->op == RO_T_SAMP) { first = 1; hard = a->op != RO_T_ADDR; }   // a[0] the context's own table; an address may be in an arena
         else if (a->op == RO_R_TABLE) first = 1;   // the context's own table
         for (int w = first; w < nw; w++) if (a->a[w] != b->a[w]) {
             int addr = (a->op == RO_R_DRAW_IDX && w == 3) || (a->op == RO_R_DRAW_IDX_IND && (w == 2 || w == 4)) || (a->op == RO_R_DRAW_IND && w == 1);   // index and argument buffers: arena copies of each context
-            if (!hard || addr) { soft = 1; g_pv_softw++; continue; }
+            if (!hard || addr) { soft = 1; continue; }
             snprintf(why, nwhy, "record %ld op %u word %d: %#llx, the replay's %#llx", k, a->op, w, (unsigned long long)a->a[w], (unsigned long long)b->a[w]); return 2; }
     }
 }
 static void pv_drop(rec_chain c) {   // release the replay's objects and give its blocks back
     for (rec_blk *b = c.head, *next; b; b = next) { next = b->next;
-        for (int i = 0; i < b->n; i++) for (uint32_t j = 0; j < b->r[i].nobj; j++) if (b->r[i].a[j]) CFRelease((CFTypeRef)(uintptr_t)b->r[i].a[j]);
+        for (int i = 0; i < b->n; i++) for (uint32_t q = 0; q < b->r[i].nobj; q++) if (b->r[i].a[q]) CFRelease((CFTypeRef)(uintptr_t)b->r[i].a[q]);
         pthread_mutex_lock(&g_rb_mu); b->n = 0; b->next = g_rb_free; g_rb_free = b; pthread_mutex_unlock(&g_rb_mu); }
+}
+static void pv_run(pv_job *j) {   // replay, compare, count
+    int why; rec_chain wet = pv_wet(j, &why);
+    char w[400]; int r = why ? -1 : pv_cmp(j->ser, j->nser, wet, w, sizeof w);
+    pv_drop(wet);
+    pthread_mutex_lock(&g_pv_mu);
+    if (why) g_pv_why[why]++;
+    else { g_pv_tried++; if (r == 0) g_pv_same++; else if (r == 1) g_pv_soft++;
+        else { g_pv_diff++; if (!g_pv_first[0]) { size_t o = (size_t)snprintf(g_pv_first, sizeof g_pv_first, "pass %llu (%d entries): %s", (unsigned long long)j->stat_pass, j->nd, w); (void)o; } } }
+    pthread_mutex_unlock(&g_pv_mu);
+}
+static void *pv_worker(void *arg) {
+    (void)arg; pthread_setname_np("dm-translate"); pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0); tci_set(1);
+    for (;;) { @autoreleasepool {
+        pthread_mutex_lock(&g_pv_mu);
+        while (!g_pv_q) pthread_cond_wait(&g_pv_cv, &g_pv_mu);
+        pv_job *j = g_pv_q; g_pv_q = j->next; if (!g_pv_q) g_pv_qt = NULL; g_pv_busy = 1;
+        pthread_mutex_unlock(&g_pv_mu);
+        pv_run(j); pv_job_free(j);
+        pthread_mutex_lock(&g_pv_mu); g_pv_busy = 0; if (!g_pv_q) pthread_cond_broadcast(&g_pv_idle); pthread_mutex_unlock(&g_pv_mu);
+    } }
+    return NULL;
+}
+static void pv_wait_idle(void) {   // the planner, before its submission ends: the worker has replayed every job (they read the submission's command memory)
+    if (pv_mode() != 3) return;
+    pthread_mutex_lock(&g_pv_mu); while (g_pv_q || g_pv_busy) pthread_cond_wait(&g_pv_idle, &g_pv_mu); pthread_mutex_unlock(&g_pv_mu);
+}
+static void pv_queue(pv_job *j) {
+    static int started;
+    if (!started) { pthread_mutexattr_t at; pthread_mutexattr_init(&at); pthread_mutexattr_settype(&at, PTHREAD_MUTEX_RECURSIVE); pthread_mutex_init(&g_pso_mu, &at); pthread_mutexattr_destroy(&at);
+        g_pso_mu_on = 1; pthread_t th; if (pthread_create(&th, NULL, pv_worker, NULL)) MDIE("cannot start the translation worker"); pthread_detach(th); started = 1; }
+    pthread_mutex_lock(&g_pv_mu); j->next = NULL; if (g_pv_qt) g_pv_qt->next = j; else g_pv_q = j; g_pv_qt = j; pthread_cond_signal(&g_pv_cv); pthread_mutex_unlock(&g_pv_mu);
 }
 static void pv_close(void) {
     if (!g_pv_open || g_wet) return;
-    g_pv_open = 0;
+    g_pv_open = 0; pv_job *j = g_pvj; g_pvj = NULL;
     rec_publish(); rec_chain ser = g_rb_job; g_rb_job = (rec_chain){0}; g_rb_jobmode = 0;
-    const uint8_t *p_end = g_exec_cur;
-    if (!p_end) g_pv_badbits |= 1u << PV_END;
-    if (g_ret_n != g_pv.depth0) g_pv_badbits |= 1u << PV_DEPTH;
+    j->p_end = g_exec_cur;
+    if (!j->p_end) g_pv_badbits |= 1u << PV_END;
+    if (g_ret_n != j->depth0) g_pv_badbits |= 1u << PV_DEPTH;
     if (g_rb_job_split) { g_pv_badbits |= 1u << PV_SPLIT; g_rb_job_split = 0; }
-    if (g_order_vbar != g_pv.vbar0) g_pv_badbits |= 1u << PV_BARRIER;
-    g_pv_pass++;
-    if (g_pv_badbits) { for (int i = 0; i < PV_NWHY; i++) if (g_pv_badbits >> i & 1) g_pv_why[i]++; }
-    else {
-        int ok; rec_chain wet = pv_wet(p_end, &ok);
-        if (ok) { char why[400]; int r = pv_cmp(ser, wet, why, sizeof why); g_pv_tried++;
-            if (r == 0) g_pv_same++; else if (r == 1) g_pv_soft++;
-            else { g_pv_diff++; if (!g_pv_first[0]) { size_t o = (size_t)snprintf(g_pv_first, sizeof g_pv_first, "pass %llu (%d draws, slots", (unsigned long long)g_pv.stat_pass, g_pv.nd);
-                for (int i = 0; i < g_pv.nd && i < 8 && o < sizeof g_pv_first; i++) o += (size_t)snprintf(g_pv_first + o, sizeof g_pv_first - o, " %d", g_pv.d[i].slot);
-                snprintf(g_pv_first + o, o < sizeof g_pv_first ? sizeof g_pv_first - o : 0, "): %s", why); } } }
-        pv_drop(wet);
+    if (g_order_vbar != j->vbar0) g_pv_badbits |= 1u << PV_BARRIER;
+    pthread_mutex_lock(&g_pv_mu); g_pv_pass++; if (g_pv_badbits) for (int i = 0; i < PV_NWHY; i++) if (g_pv_badbits >> i & 1) g_pv_why[i]++; pthread_mutex_unlock(&g_pv_mu);
+    if (!g_pv_badbits) {   // a copy of the pass's records for the comparison (the chain itself goes to the encode thread now)
+        long n = 0; for (rec_blk *b = ser.head; b; b = b->next) n += b->n;
+        if (n > j->sercap) { j->sercap = n + 1024; j->ser = realloc_or_die(j->ser, (size_t)j->sercap * sizeof *j->ser, "the verify mode's records"); }
+        j->nser = 0; for (rec_blk *b = ser.head; b; b = b->next) { memcpy(j->ser + j->nser, b->r, (size_t)b->n * sizeof *b->r); j->nser += b->n; }
     }
-    g_pv.pd = nil;
     rec_chain_push(ser);
+    if (g_pv_badbits) pv_job_free(j);
+    else if (pv_mode() == 3) pv_queue(j);
+    else { pv_run(j); pv_job_free(j); }
     uint64_t f = atomic_load(&g_cur_frame);
     if (f >= g_pv_frame + 300) {
+        pthread_mutex_lock(&g_pv_mu);
         char w[300]; size_t o = 0;
         for (int i = 0; i < PV_NWHY; i++) if (g_pv_why[i]) o += (size_t)snprintf(w + o, sizeof w - o, "%s%s %llu", o ? ", " : "", g_pv_why_name[i], (unsigned long long)g_pv_why[i]);
         if (g_pv_frame) MLOG("parallel verify up to frame %llu: passes %llu, compared %llu (identical %llu, identical but for arena addresses %llu, different %llu), not compared: %s%s%s",
@@ -13601,11 +13704,12 @@ static void pv_close(void) {
         { char v[300]; size_t q = 0; for (int i = 0; i < PVS_N; i++) if (g_pvs[i]) q += (size_t)snprintf(v + q, sizeof v - q, "%s%s %llu", q ? ", " : "", g_pvs_name[i], (unsigned long long)g_pvs[i]);
           if (q && g_pv_frame) MLOG("parallel verify: special draws by kind: %s", v); memset(g_pvs, 0, sizeof g_pvs); }
         g_pv_frame = f; g_pv_pass = g_pv_tried = g_pv_same = g_pv_soft = g_pv_diff = 0; memset(g_pv_why, 0, sizeof g_pv_why); g_pv_first[0] = 0;
+        pthread_mutex_unlock(&g_pv_mu);
     }
 }
 // The encoding half of a draw (draw_ after its pass is open): the pipeline, depth-stencil and dynamic state, the vertex streams, the arguments, the visibility slot and the draw call.
 // The verify mode (DM_NVN_PAR=2) runs it again for a pass from the pass's snapshot in another context (pv_wet), where the planner's notes are not made twice
-static void draw_enc(NvProg *pr, const p_draw *dw, const p_draw_idx *di, id<MTLRenderCommandEncoder> en0, int mode, id<MTLFunction> fz_fn, uint64_t mdx) {
+static void draw_enc(NvProg *pr, const p_draw *dw, const p_draw_idx *di, id<MTLRenderCommandEncoder> en0, int mode, id<MTLFunction> fz_fn, uint64_t mdx) { TCX;
     id<MTLRenderCommandEncoder> en = en0; int skip_d = mode != 0;
     if (!g_wet && g_pv_on_()) pv_note(pr, dw, di, fz_fn, mdx);
     if (skip_d) { g_stat_ds_omit++; if (mode == 3) g_stat_s_only++; else if (mode == 4) g_stat_d_only++; }
@@ -15000,7 +15104,7 @@ static void pcn_close(void) {
         g_pcn_frame = f; g_pcn_pass = g_pcn_ok = g_pcn_draw = g_pcn_draw_ok = 0; memset(g_pcn_why, 0, sizeof g_pcn_why); memset(g_pcn_op_in, 0, sizeof g_pcn_op_in);
     }
 }
-void mtl_exec(const uint8_t *p) {
+void mtl_exec(const uint8_t *p) { TCX;
     if (!g_state_inited) state_reset();
     static int dump_all = -1; if (dump_all < 0) dump_all = getenv("DM_NVN_PASSDUMP_ALL") != NULL;
     int trace = dump_all && passdump();   // Normal mode does not check the frame range per operation; the full command position is only used for the designated diagnostic frames

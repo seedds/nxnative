@@ -145,3 +145,15 @@ dm/host/pad_switch2_apple.m	hle:*hid*	Switch 2 controllers over Bluetooth LE (of
 dm/host/front.h	present:*	the front end
 dm/ios/*	*:*	the iOS app
 dm/third_party/ryujinx/src/Ryujinx.Graphics.Shader/Translation/Transforms/GeometryToCompute.cs	shader:stage:gs	geometry compute input and output lowering
+
+# Native Apple controller configuration and game-facing styles
+dm/host/pad_hid_mac.h:hidpad_gc_controllers	hle:_ZN2nn3hid*	native controller discovery excludes sources already owned by HID
+dm/host/controller*.h	hle:_ZN2nn3hid*	controller discovery, assignment, readiness and native controller applets
+dm/host/ctrl_prompt.h	hle:_ZN2nn3hid*ShowControllerSupport*	controller joining completion and input settling
+dm/host/home_quit_mac.h	present:*	the shared Mac Home and controller-joining card views
+dm/host/pad_slots.h	hle:_ZN2nn3hid*	physical controller player slots
+dm/host/pad_style.h	hle:_ZN2nn3hid*	single and paired Joy-Con state conversion
+dm/host/haptics_apple.*	hle:*Vibration*	Apple controller rumble and device identification
+dm/host/hle_haptics.h	hle:*Vibration*	controller vibration state and suspension
+dm/mac/Controller*.swift	*:*	the built Mac game controller launch sheet and private launch channel
+dm/mac/tests/*	-	Mac game launcher tests

@@ -3,6 +3,7 @@ from contextlib import ExitStack, redirect_stdout
 import io
 import json
 import os
+import runpy
 from pathlib import Path
 import subprocess
 import sys
@@ -23,6 +24,17 @@ import xcode_projects
 
 
 class XcodePipelineTests(unittest.TestCase):
+    def test_generated_project_excludes_mac_only_frameworks(self):
+        command = 'clang main.c front_mac.m -o dmhost -framework Cocoa -framework IOBluetooth -framework CoreBluetooth -framework Metal'
+        with tempfile.TemporaryDirectory() as tmp, patch.object(sys, 'argv', ['gen_build.py', tmp, str(Path(tmp) / 'Gen')]), \
+             patch('subprocess.run', return_value=SimpleNamespace(stdout=command)), redirect_stdout(io.StringIO()) as out:
+            runpy.run_path(str(REPO / 'dm/ios/tools/gen_build.py'), run_name='__main__')
+        frameworks = next(line for line in out.getvalue().splitlines() if line.startswith('DM_FRAMEWORKS'))
+        self.assertNotIn('-framework Cocoa', frameworks)
+        self.assertNotIn('-framework IOBluetooth', frameworks)
+        self.assertIn('-framework CoreBluetooth', frameworks)
+        self.assertIn('-framework Metal', frameworks)
+
     def test_prepare_preserves_upstream_options_and_graphics_paths(self):
         for graphics in ('nvn', 'vulkan', 'gl'):
             for derived in (False, True):

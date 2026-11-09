@@ -13,6 +13,9 @@ GINC = $(if $(strip $(GAME)),-I../gen/$(GAME) -I../../games/$(GAME),$(error GAME
 $(B)/t_fs $(B)/t_fs_case $(B)/t_fs_commit_list $(B)/t_fs_commit_list_tsan: ../romfs_image.h
 GAME_H = ../gen/$(GAME)/game_profile.h
 run: $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_touch $(B)/t_gesture $(B)/t_oe $(B)/t_fs $(B)/t_fs_commit_list $(B)/t_thread_leak $(B)/t_fs_case $(B)/t_audio $(B)/t_output_stream $(B)/t_audio_spsc $(B)/t_swkbd $(B)/t_altstack $(B)/t_condvar $(B)/t_condvar_old $(B)/t_pollwait $(B)/t_clockwait $(B)/t_pause $(B)/t_pause_stress $(B)/t_pctl $(B)/t_sf $(B)/t_time $(B)/t_shared_font $(B)/t_vorbis $(B)/t_vorbis_divides $(B)/t_hid $(B)/t_haptics $(B)/t_haptics_apple $(B)/t_cheats $(B)/t_pad_hid $(B)/t_switch2
+	$(B)/t_ctrl_prompt
+	$(B)/t_controller_join_apple
+	$(B)/t_controller_join_mac
 	$(B)/t_language
 	$(B)/t_heap_size
 	$(B)/t_touch
@@ -35,6 +38,7 @@ run: $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_to
 	$(B)/t_audren_layout
 	$(B)/t_swkbd
 	$(B)/t_altstack
+	$(B)/t_sync_wait
 	$(B)/t_bigstack
 	$(B)/t_condvar
 	$(B)/t_condvar_old
@@ -48,7 +52,6 @@ run: $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_to
 	$(B)/t_net_eventfd
 	$(B)/t_sf
 	$(B)/t_time
-	$(B)/t_sync_wait
 	$(B)/t_shared_font
 	$(B)/t_system_event
 	$(B)/t_vorbis
@@ -64,7 +67,10 @@ run: $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_to
 	$(B)/t_pad_apple
 	$(B)/t_home_quit
 	$(B)/t_home_quit_mac
-	$(B)/t_ctrl_prompt
+	$(B)/t_controller_setup_mac
+	$(B)/t_controller_inventory_mac
+	$(B)/t_controller_panel_mac
+	$(B)/t_controller_assignment_mac
 	$(B)/t_motion_pro
 	$(B)/t_motion_pro_mac
 	TMPDIR="$(abspath $(B))" $(B)/t_hid
@@ -77,12 +83,6 @@ run: $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_to
 	$(B)/t_nro
 	$(B)/t_symbols
 run: $(B)/t_nro
-run: $(B)/t_sync_wait
-$(B)/t_sync_wait: t_sync_wait.c t_condvar_stub.c ../hle_thread.c ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_sync_wait.c t_condvar_stub.c
-sync-wait: $(B)/t_sync_wait
-	$(B)/t_sync_wait
-.PHONY: sync-wait
 run: $(B)/t_symbols
 $(B)/t_symbols: t_symbols.c ../hle.c ../loader.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -Wno-deprecated-declarations -I.. $(GINC) -o $@ t_symbols.c
@@ -229,6 +229,15 @@ run: $(B)/t_motion_apple
 $(B)/t_motion_apple: t_motion_apple.m ../motion_apple.h ../dm_input.h | $(B)
 	$(CLANG) -O1 -g -fobjc-arc -Wall -Werror -I.. -o $@ t_motion_apple.m -framework Foundation -framework GameController
 run: $(B)/t_pad_apple
+run: $(B)/t_controller_setup_mac
+run: $(B)/t_controller_panel_mac
+run: $(B)/t_controller_assignment_mac
+$(B)/t_controller_assignment_mac: t_controller_assignment_mac.m ../controller_routes_ios.h ../controller_assignment_apple.h ../controller_setup_mac.h ../controller_setup_apple.h ../controller_requirements_apple.h ../pad_slots.h ../motion_apple.h ../haptics_apple.h ../dm_input.h | $(B)
+	$(CLANG) -O1 -g -fobjc-arc -Wall -Werror -Wno-unused-function -o $@ t_controller_assignment_mac.m -framework AppKit -framework GameController
+$(B)/t_controller_panel_mac: t_controller_panel_mac.m ../controller_panel_mac.h ../controller_routes_ios.h ../controller_setup_apple.h ../controller_requirements_apple.h ../dm_input.h | $(B)
+	$(CLANG) -O1 -g -fobjc-arc -Wall -Werror -o $@ t_controller_panel_mac.m -framework AppKit
+$(B)/t_controller_setup_mac: t_controller_setup_mac.m ../controller_setup_mac.h ../controller_setup_apple.h ../controller_requirements_apple.h ../dm_input.h | $(B)
+	$(CLANG) -O1 -g -fobjc-arc -Wall -Werror -Wno-unused-function -I.. -o $@ t_controller_setup_mac.m -framework Foundation -framework AppKit -framework GameController
 $(B)/t_pad_apple: t_pad_apple.m ../pad_apple.h ../dm_input.h | $(B)
 	$(CLANG) -O1 -g -fobjc-arc -Wall -Werror -I.. -o $@ t_pad_apple.m -framework Foundation -framework GameController
 run: $(B)/t_home_quit $(B)/t_home_quit_mac
@@ -236,17 +245,14 @@ $(B)/t_home_quit: t_home_quit.c ../home_quit.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -I.. -o $@ t_home_quit.c
 $(B)/t_home_quit_mac: t_home_quit_mac.m ../home_quit_mac.h | $(B)
 	$(CLANG) -O1 -g -fobjc-arc -Wall -Werror -Wno-unused-function -I.. -o $@ t_home_quit_mac.m -framework Cocoa -framework QuartzCore
-run: $(B)/t_ctrl_prompt
-$(B)/t_ctrl_prompt: t_ctrl_prompt.c ../ctrl_prompt.h | $(B)
-	$(CLANG) -O1 -g -Wall -Werror -fsanitize=address,undefined -I.. -o $@ t_ctrl_prompt.c
 run: $(B)/t_motion_pro $(B)/t_motion_pro_mac
 $(B)/t_motion_pro: t_motion_pro.c ../motion_pro.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -fsanitize=address,undefined -o $@ t_motion_pro.c
 $(B)/t_motion_pro_mac: t_motion_pro_mac.m ../motion_pro_mac.h ../motion_pro.h ../dm_input.h | $(B)
 	$(CLANG) -O1 -g -fobjc-arc -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_motion_pro_mac.m -framework Foundation -framework GameController -framework IOKit
-$(B)/t_hid: t_hid.c ../hle_hid.c ../motion_fusion.h ../hle_haptics.c ../hle_haptics.h ../pad_slots.h ../dm_input.h ../hle.h ../dm.h $(GAME_H) | $(B)
+$(B)/t_hid: t_hid.c ../hle_hid.c ../motion_fusion.h ../hle_haptics.c ../hle_haptics.h ../pad_slots.h ../pad_style.h ../dm_input.h ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_hid.c ../hle_haptics.c
-$(B)/t_hid_tsan: t_hid.c ../hle_hid.c ../motion_fusion.h ../hle_haptics.c ../hle_haptics.h ../pad_slots.h ../dm_input.h ../hle.h ../dm.h $(GAME_H) | $(B)
+$(B)/t_hid_tsan: t_hid.c ../hle_hid.c ../motion_fusion.h ../hle_haptics.c ../hle_haptics.h ../pad_slots.h ../pad_style.h ../dm_input.h ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -fsanitize=thread -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_hid.c ../hle_haptics.c
 $(B)/t_haptics: t_haptics.c ../hle_haptics.c ../hle_haptics.h ../dm_input.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -I.. -o $@ t_haptics.c ../hle_haptics.c
@@ -394,9 +400,6 @@ tsan-threads-run: $(addprefix $(B)/,$(TSAN_T))
 	DM_QOS_MAP=1 $(B)/t_notify_sched --all-peers
 $(B)/t_pad_hid: t_pad_hid.c ../pad_hid.h ../dm_input.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_pad_hid.c
-run: $(B)/t_pad_pro
-$(B)/t_pad_pro: t_pad_pro.c ../pad_pro.h ../dm_input.h | $(B)
-	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_pad_pro.c
 $(B)/t_switch2: t_switch2.c ../switch2_proto.h ../dm_input.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_switch2.c
 
@@ -409,3 +412,30 @@ coverage:
 	rm -rf $(B)/cov/prof
 	LLVM_PROFILE_FILE="$(call cov_profile,$(B)/cov)" $(MAKE) -i B=$(B)/cov SAN="$(COV_FLAGS)" run
 	@$(call cov_export,$(B)/cov)
+
+# Original upstream joining rules and the shared Apple editor/prompt owner.
+run: $(B)/t_ctrl_prompt $(B)/t_controller_join_apple $(B)/t_controller_join_mac
+$(B)/t_ctrl_prompt: t_ctrl_prompt.c ../ctrl_prompt.h | $(B)
+	$(CLANG) -O1 -Wall -Werror -o $@ $<
+$(B)/t_controller_join_apple: t_controller_join_apple.m ../controller_join_apple.h ../ctrl_prompt.h | $(B)
+	$(CLANG) -O1 -Wall -Werror -fobjc-arc -o $@ $< -framework Foundation
+
+$(B)/t_controller_join_mac: t_controller_join_mac.m ../controller_join_mac.h ../controller_join_apple.h ../ctrl_prompt.h ../controller_panel_mac.h ../home_quit_mac.h | $(B)
+	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -fobjc-arc -o $@ $< -framework AppKit -framework QuartzCore
+
+$(B)/t_hid $(B)/t_hid_tsan $(B)/t_controller_assignment_mac $(B)/t_controller_panel_mac $(B)/t_controller_join_mac $(B)/t_controller_setup_mac: ../controller_readiness.h ../controller_routes_ios.h ../controller_requirements_apple.h
+
+run: $(B)/t_sync_wait
+$(B)/t_sync_wait: t_sync_wait.c t_condvar_stub.c ../hle_thread.c ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_sync_wait.c t_condvar_stub.c
+sync-wait: $(B)/t_sync_wait
+	$(B)/t_sync_wait
+.PHONY: sync-wait
+
+run: $(B)/t_pad_pro
+$(B)/t_pad_pro: t_pad_pro.c ../pad_pro.h ../dm_input.h | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_pad_pro.c
+
+run: $(B)/t_controller_inventory_mac
+$(B)/t_controller_inventory_mac: t_controller_inventory_mac.m ../pad_hid_mac.h ../pad_hid.h ../pad_pro.h ../motion_pro.h | $(B)
+	$(CLANG) -O1 -fobjc-arc -Wall -Werror -Wno-unused-function -o $@ $< -framework Foundation -framework GameController -framework IOKit

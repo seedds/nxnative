@@ -2,7 +2,7 @@
 
 Update 2.3.0 (`v458752`), SDK 17.5.9. NintendoWare Bezel Engine 2.9 on NVN, by NDcube. Modules `main`, `subsdk0` (NintendoSDK_movie) and `sdk`; the boards, minigames and modes are 139 NROs (`nro/NX_Release/*.nro`, registered by one NRR) that the game loads with `ro::LoadModule`. No `patches.py`: the standard rewriter covers `main`, `sdk` and every NRO.
 
-On the Mac (headless, docked): from a fresh save the opening movie with sound, the title, the player count and character setup, the Party Plaza with Toad's tour, the island map, and Mario Party on Mega Wiggler's Tree Party with CPU opponents: the turn-order roll, the dice block, moving on the board, the item shop, the 4-player minigame Snag the Flags (rules, practice and the match), its results, the save and turn 2. 60 fps on the board (frame time p99 about 18 ms), no crash, no `[RED]` line beyond those below. A shorter test than usual, at the user's request: one board, one minigame. Not tested on the iPhone: no IPA was built.
+On the Mac (headless, docked): from a fresh save the opening movie with sound, the title, the player count and character setup, the Party Plaza with Toad's tour, the island map, and Mario Party on Mega Wiggler's Tree Party with CPU opponents: the turn-order roll, the dice block, moving on the board, the item shop, the 4-player minigame Snag the Flags (rules, practice and the match), its results, the save and turn 2. 60 fps on the board (frame time p99 about 18 ms), no crash, no `[RED]` line beyond those below. A shorter test than usual, at the user's request: one board, one minigame. That original bring-up run did not build an IPA; later controller-feature validation is recorded below.
 
 ## What it needs
 
@@ -47,6 +47,17 @@ On the Mac (headless, docked): from a fresh save the opening movie with sound, t
 
 General changes first needed here; each applies to every game:
 
+- **Compact iOS controller-sheet layout** moves persistent actions to native navigation controls ([mechanism and verification](../../../docs/reference/services.md#compact-ios-controller-sheet-chrome)). On-device visual checks remain pending.
+
+- **Both full gamepads can supply ordinary pair buttons**, while motion and native Joy-Con behavior remain side-specific ([mechanism and validation](../../../docs/reference/services.md#shared-buttons-in-a-two-source-pair)). Physical/controller gameplay checks of this follow-up remain pending.
+
+- **Selecting an occupied player forms a pair** ([mechanism and input investigation](../../../docs/reference/services.md#pair-controllers-by-selecting-the-same-player)). Mac automated coverage and iOS compilation are separate from pending physical/gameplay checks.
+
+- **Controller-support validation** respects single-mode and pair-permission request flags ([mechanism and limits](../../../docs/reference/services.md#player-count-in-controller-support-requests)). Automated coverage is recorded there. The game's exact flags for the reported one-player pairing case and gameplay validation remain pending.
+
+- **Two-source Joy-Con pair configuration** now has synthetic input, independent-motion and rumble coverage ([mechanism and limits](../../../docs/reference/services.md#two-physical-controllers-for-one-joy-con-pair)). Gameplay and physical-device checks of this addition are pending.
+- **Live controller configuration** was requested for this game ([engine mechanism](../../../docs/reference/services.md#live-controller-reconfiguration-on-mac-and-ios)). See the controller-type section below for automated coverage and the contributor's macOS/iOS feature-testing report.
+- **iOS framework filtering:** the unsigned synthetic smoke build exposed a [Mac-only Bluetooth framework in the iOS project](../../../docs/reference/packing.md#macos-only-bluetooth-framework-in-an-ios-project). This is build verification, separate from gameplay testing.
 - **Bezel Engine 2.9 archives** (`bea_members` reads inline entries): [Bezel Engine 2.9 archives keep their entries inline](../../../docs/reference/shaders.md#bezel-engine-29-archives-keep-their-entries-inline).
 - **Native-texture `GetOutputBuffer` returns the output index**, and a release of an index the client does not hold changes nothing (`hle_movie.c`): [`GetOutputBuffer` returns the output index in native-texture mode](../../../docs/reference/movies.md#getoutputbuffer-returns-the-output-index-in-native-texture-mode).
 - **The base instance of indirect draws from Metal** (`dmsh_build.py` `vs_base_instance`): [The base instance of indirect draws comes from Metal](../../../docs/reference/shaders.md#the-base-instance-of-indirect-draws-comes-from-metal).
@@ -55,6 +66,12 @@ General changes first needed here; each applies to every game:
 ## Open
 
 - **Current (2026-11-05):** the translator deletes 6 bindless accesses in 3 shaders (3 pixel; texture2D 6), whose results read 0: `061eb3acaed2678b` `99e839ad6339f567` `d9bc8141191909f2`. The cause is not traced, and whether a route reaches them is not known. [Losses a shader build reports](../../../docs/reference/shaders.md#losses-a-shader-build-reports).
-- Only one board and one minigame were played; the other boards, modes (Koopathlon, Bowser Kaboom Squad, Rhythm Kitchen, …) and most minigame NROs were not loaded. Motion minigames were turned off at the prompt.
+- The original bring-up route covered one board and one minigame with motion minigames disabled. The later controller-feature report below does not enumerate all boards, modes (Koopathlon, Bowser Kaboom Squad, Rhythm Kitchen, …) or minigames, so exhaustive gameplay coverage remains open.
 - Only the 2.3.0 build (`v458752`) is registered.
-- iPhone: not built, not installed, not tested.
+- iPhone: controller features were subsequently tested on iPhone 16 / iOS 27 (below); no full-game iPhone performance or compatibility survey is recorded.
+
+## Controller-type configuration
+
+The Mac game launch window and the in-game Controllers menu can select a game-facing controller type per physical controller, with each device retaining its own player motion source ([engine mechanism](../../../docs/reference/services.md#explicit-controller-types-in-a-mac-game-launch)). On iOS the top-centre gear menu also offers Configure controllers. The game's controller-support request prioritizes the upstream joining popup, with access to that same runtime sheet; when upstream skips its popup but the current types or pair arrangement cannot satisfy the request, the sheet opens directly ([live configuration](../../../docs/reference/services.md#live-controller-reconfiguration-on-mac-and-ios)). This upstream integration has native-UI fixture, synthetic-device and host-unit coverage. The contributor reports that all controller-configuration features have been tested on both macOS and iOS, using an iPhone 16 running iOS 27 for iOS. On 9 November 2026 the contributor clarified that the game was Jamboree 2.3.0 and that they tried all motion minigames. The tested build SHA, duration, exact DualShock model and coverage by device/mode remain unknown. Automated checks of later source revisions are separate evidence. This does not establish complete game or minigame compatibility.
+
+The [joining popup integration and readiness discrepancies](../../../docs/reference/services.md#joining-popup-and-controller-configuration) have synthetic core/native-UI coverage. The [shared readiness evaluator](../../../docs/reference/services.md#shared-controller-readiness) now reconciles those counts and normalizes the card’s limits while preserving its raw priority trigger. Concurrent game requests and card/editor transitions have automated exclusivity coverage. New on-device/gameplay validation remains pending.

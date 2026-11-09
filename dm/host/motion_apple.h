@@ -7,11 +7,12 @@
 #include <stdlib.h>
 #include "dm_input.h"
 
-static inline void dm_motion_attach(GCController *c, int player) {
+static inline void dm_motion_attach_role(GCController *c, int player, int role) {
     const char *e = getenv("DM_MOTION"); if (e && !atoi(e)) return;
     GCMotion *mo = c.motion;
     if (!mo || !mo.hasRotationRate) return;
     if (mo.sensorsRequireManualActivation) mo.sensorsActive = YES;   // DualSense / DualShock 4: off until asked for
+    uint64_t generation = dm_pad_generation(player);
     __block int live = 0;
     mo.valueChangedHandler = ^(GCMotion *m) {
         float acc[3], rot[3];
@@ -24,17 +25,21 @@ static inline void dm_motion_attach(GCController *c, int player) {
             if (acc[0] == 0 && acc[1] == 0 && acc[2] == 0 && rot[0] == 0 && rot[1] == 0 && rot[2] == 0) return;
             live = 1;
         }
-        dm_motion_set(player, acc, rot);
+        if (role) dm_motion_set_side_generation(player,role,generation,acc,rot);
+        else dm_motion_set_generation(player, generation, acc, rot);
     };
 }
+static inline void dm_motion_attach(GCController *c, int player) { dm_motion_attach_role(c,player,0); }
 // iOS turns a manual-activation controller's sensors off while the app is in the background (Control Center, the home screen) and leaves them off, so the gyro stayed dead until the
 // controller reconnected (found by MacNativeGames on the iPad). Called when the app becomes active again: only controllers attached above (their handler is set)
 static inline void dm_motion_rearm(GCController *c) {
     GCMotion *mo = c.motion;
     if (mo && mo.valueChangedHandler && mo.sensorsRequireManualActivation) mo.sensorsActive = YES;
 }
-static inline void dm_motion_detach(GCController *c, int player) {
+static inline void dm_motion_detach_role(GCController *c, int player, int role) {
     GCMotion *mo = c.motion;
     if (mo) { mo.valueChangedHandler = nil; if (mo.sensorsRequireManualActivation) mo.sensorsActive = NO; }
-    dm_motion_clear(player);
+    if (role) dm_motion_clear_side(player,role); else dm_motion_clear(player);
 }
+
+static inline void dm_motion_detach(GCController *c, int player) { dm_motion_detach_role(c,player,0); }

@@ -193,6 +193,11 @@ static int hidpad_gc_unread(GCController *c) {
         if (d->twin_want && (!pass || d->twin) && hidpad_gc_is_model(c, d)) return 1;
     return 0;
 }
+static NSArray<GCController *> *hidpad_gc_controllers(NSArray<GCController *> *controllers) {
+    return [controllers filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(GCController *c,NSDictionary *bindings) {
+        (void)bindings; return !hidpad_gc_unread(c);
+    }]];
+}
 // The twins of a model GameController lists them all of again go back to it
 static void hidpad_twins_release(void) {
     for (hid_pad **link = &g_hidpads; *link;) {

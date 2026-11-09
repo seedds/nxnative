@@ -128,6 +128,13 @@
 - **Fix:** the script replaces `Documents/aoc` over AFC only (`afcclient … rm -rf /Documents/aoc`, `mkdir`, then a `put -r -f` of each DLC item, each checked with `afcclient info`, as `afcclient` exits 0 when a command fails) and never passes `--remove-existing-content`. Without `afcclient` it leaves `Documents/aoc` as it is when the build has no DLC, and stops with a `[RED]` line, after the image, when it has some. `dm/tools/tests/test_romfs_image.py` (`DlcTransfers`) checks that a save and the app's preferences survive both a DLC set and an empty one, and that `devicectl` is never given the flag.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) (2026-11-08): the first complete AFC copy of its 26.2 GB image was deleted by the DLC step that followed it; reproduced twice with test files (with `Documents/aoc` missing and present). The app held no save yet.
 
+### A dump made from a build's image unpacks and packs it again
+
+- **Symptom:** a dump folder made by exploding an earlier build's `RomFS.img` (or a DLC's `aoc/<n>.img`) takes two full passes over the game files on its first build: the explode, then `pack_dump`'s pack of the tree into an identical image (GitHub issue #1181).
+- **Cause:** the dump layout took only `romfs/` trees: an image had to become a tree to be a dump, and a tree is always packed.
+- **Fix:** any `romfs/` of the layout may be a `romfs.img` instead (`pack_dump.romfs_of`): the image is checked (its index reads), cloned into the build (an APFS clone on the same volume, a copy otherwise) and stamped as `romfs_image`'s own images are, with the source file's identity as the digest, so a repeat run with the same file keeps it. The survey reads the manifest and the NROs from the image's index. A tree beside an image wins: the tree is what a player edits.
+- **Found on:** reading the script (issue #1181); `test_nsp_dump.py` covers the layout, the clone and its reuse, the tree winning, the survey and a file that is no image.
+
 ### A reboot packs a RomFS image again
 
 - **Symptom:** the first build after restarting the Mac spends minutes in `unpack` (`[1/5] unpack v131072: 5%, 1.2/~24.4 GB`) although the game, the packer and the image are as they were: 8 minutes for a 24.4 GB image from a NUP on a network share.

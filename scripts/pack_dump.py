@@ -5,6 +5,8 @@
 #   base/exefs/ (main, main.npdm, sdk, rtld, subsdk*), base/romfs/   (base/romfs is optional when an update has its RomFS: that one is whole, and nothing packs the base's for it)
 #   updates/<version>/exefs/, updates/<version>/romfs/   (optional; <version> is the title version as a decimal number, 458752 = 0x70000)
 #   dlc/<DLC title ID>/<n>/romfs/   (optional; the DLC title ID in hex)
+#   In place of any romfs/ tree, romfs.img: that RomFS as an image already packed (a build's extract/<v>/RomFS.img or aoc/<n>.img), cloned into the build instead of packed, so a dump
+#   made from an earlier build's image skips the explode and the pack (issue #1181). A tree beside an image wins: the tree is what a player edits.
 #   A dump may have no base/ when it holds an update: the update's folder is the whole game (below), so the base game adds nothing to it (Fire Emblem Fortune's Weave: updates/131072 only).
 #   exefs/ and romfs/ directly in the folder count as base/: one version of the game, as `nup extract` writes it (issue #1265).
 # An update's RomFS in such a dump is the patched RomFS (base + the update's BKTR patch, the tree the game sees), not a patch: it is packed on its own, never laid over the base
@@ -16,7 +18,7 @@
 # A dump has no control data, so there is no control.nacp or icon.jpg beside them, as there is after nx_extract.
 # The title ID is the program ID in main.npdm. A repeat run keeps code modules that are the same and an image whose source tree, packer and image are unchanged (romfs_image.py --reuse).
 # Usage: pack_dump.py <dump folder> [--version N] [--work-dir DIR]   (exit 1 on error)
-import argparse, filecmp, shutil, struct, subprocess, sys
+import argparse, filecmp, hashlib, json, shutil, struct, subprocess, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'dm/tools'))
 import romfs_image
@@ -46,20 +48,46 @@ def exefs(src, dst):
     shutil.rmtree(dst, ignore_errors=True); tmp.rename(dst)
 
 
-def pack(src, img, say=print):
+IMAGE = 'romfs.img'   # a RomFS already packed as an image, in place of a romfs/ tree
+
+
+def pack(src, img, say=print):   # src: a romfs/ tree, packed, or a romfs.img, cloned; either kept while unchanged
     img.parent.mkdir(parents=True, exist_ok=True)
+    if src.is_file():
+        take_image(src, img, say); return
     say(f'packing {src} → {img}')
     try: n = romfs_image.pack(src, img, reuse=True)
     except RuntimeError as e: raise Error(f'{src}: {e}') from e   # the files changed while packing
     say(f'  {n:,} entries, {img.stat().st_size / 2**30:.2f} GB')
 
 
+def take_image(src, img, say=print):   # an image given as the RomFS: checked, cloned, and stamped as romfs_image's own images are, so a repeat run with the same file keeps it
+    try: romfs_image.read_index(src)
+    except (OSError, AssertionError, struct.error, UnicodeDecodeError) as e: raise Error(f'{src}: not a RomFS image ({e})') from e
+    digest = hashlib.sha256(b'image\0' + str(src.resolve()).encode() + b'\0' + json.dumps(romfs_image.file_identity(src)).encode()).hexdigest()
+    if romfs_image.reusable(str(img), digest): return
+    say(f'taking {src} → {img}')
+    part = img.with_name(img.name + '.part'); part.unlink(missing_ok=True)
+    clone(src, part)
+    romfs_image.publish(str(part), str(img), digest)
+    say(f'  {img.stat().st_size / 2**30:.2f} GB')
+
+
 def has_code(src):   # base/ or updates/<version>/ with its code
     return (src / 'exefs/main.npdm').is_file()
 
 
+def romfs_of(src):   # the RomFS of a version's or a DLC's folder: its romfs/ tree, else its romfs.img; None with neither
+    if (src / 'romfs').is_dir(): return src / 'romfs'
+    if (src / IMAGE).is_file(): return src / IMAGE
+    return None
+
+
+def has_romfs(src): return romfs_of(src) is not None
+
+
 def is_version(src):   # base/ or updates/<version>/ with its code and its RomFS
-    return has_code(src) and (src / 'romfs').is_dir()
+    return has_code(src) and has_romfs(src)
 
 
 def updates(folder):   # {version: updates/<version>/}
@@ -74,7 +102,7 @@ def base_of(folder):   # the base game's folder: base/, or the folder itself whe
 
 def is_dump(folder):   # whether a folder has the layout above: a base game's code with a RomFS beside it or in an update, or an update with its code and RomFS and no base
     base, ups = base_of(folder), updates(folder).values()
-    if base: return (base / 'romfs').is_dir() or any((p / 'romfs').is_dir() for p in ups)
+    if base: return has_romfs(base) or any(has_romfs(p) for p in ups)
     return any(is_version(p) for p in ups)
 
 
@@ -89,17 +117,17 @@ def scan(dump):
         try: tid = int(d.name, 16)
         except ValueError: raise Error(f'{d}: not a DLC title ID') from None
         if not 0 < tid - app - 0x1000 <= 2000: raise Error(f'{d}: {tid:016X} is not a DLC of {app:016X}')
-        roms = sorted(d.glob('*/romfs')) or ([d / 'romfs'] if (d / 'romfs').is_dir() else [])
-        if len(roms) != 1: raise Error(f'{d}: expected one <n>/romfs folder, found {len(roms)}')
+        roms = [r for n in sorted(d.iterdir()) if n.is_dir() for r in [romfs_of(n)] if r] or [r for r in [romfs_of(d)] if r]
+        if len(roms) != 1: raise Error(f'{d}: expected one <n>/romfs folder (or romfs.img), found {len(roms)}')
         dlc[tid] = roms[0]
     return app, vers, dlc
 
 
 def pack_version(src, app, out, say=print):   # one version's folder (base/ or updates/<version>/) → out/ExeFS and out/RomFS.img
-    if not (src / 'exefs/main').is_file() or not (src / 'exefs/main.npdm').is_file() or not (src / 'romfs').is_dir(): raise Error(f'{src}: no exefs/main, exefs/main.npdm and romfs')
+    if not (src / 'exefs/main').is_file() or not (src / 'exefs/main.npdm').is_file() or not has_romfs(src): raise Error(f'{src}: no exefs/main, exefs/main.npdm and romfs (or romfs.img)')
     if (pid := program_id(src / 'exefs/main.npdm')) != app: raise Error(f'{src}: program ID {pid:016X}, the base is {app:016X}')
     exefs(src / 'exefs', out / 'ExeFS')
-    pack(src / 'romfs', out / 'RomFS.img', say)
+    pack(romfs_of(src), out / 'RomFS.img', say)
 
 
 def pack_dlc(app, dlc, aoc, say=print):   # {DLC title ID: its RomFS folder} → aoc/<index>.img; images of DLC no longer in the folder go
@@ -112,7 +140,7 @@ def pack_dlc(app, dlc, aoc, say=print):   # {DLC title ID: its RomFS folder} →
 
 def main():
     ap = argparse.ArgumentParser(description='Pack a dumped game (base/, updates/<version>/, dlc/) into the extraction layout of build_ipa_from_nsp.py')
-    ap.add_argument('dump', type=Path, help='the dump folder (holds base/exefs with base/romfs or updates/<version>/romfs, or updates/<version>/ with exefs and romfs, or exefs and romfs directly)')
+    ap.add_argument('dump', type=Path, help='the dump folder (holds base/exefs with base/romfs or updates/<version>/romfs, or updates/<version>/ with exefs and romfs, or exefs and romfs directly; romfs.img, an image already packed, in place of any romfs)')
     ap.add_argument('--version', type=int, help='the update version to pack (default: the newest in updates/; 0 = the base game)')
     ap.add_argument('--work-dir', type=Path, help='the build folder (default: <dump>/<title ID>_build)')
     a = ap.parse_args()

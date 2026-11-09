@@ -222,3 +222,61 @@ class Survey(Base):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+def imaged(folder):   # the folder's romfs/ tree packed into romfs.img beside it, the tree removed: a dump made from a build's image
+    romfs_image.pack(folder / 'romfs', folder / 'romfs.img'); shutil.rmtree(folder / 'romfs')
+    return folder / 'romfs.img'
+
+
+class Images(Base):
+    """romfs.img in place of a romfs/ tree (issue #1181): taken as the RomFS, cloned into the build and kept while unchanged; a tree beside it wins"""
+    def setUp(self):
+        super().setUp()
+        self.base_img = imaged(self.dump / 'base'); self.upd_img = imaged(self.dump / f'updates/{VER}'); self.dlc_img = imaged(self.dump / 'dlc/040074a01bf13001/0')
+
+    def out(self, ver=VER): return self.dump / f'{TID:016X}_build/extract/v{ver}'
+
+    def test_layout(self):
+        self.assertTrue(pack_dump.is_dump(self.dump) and pack_dump.is_version(self.dump / 'base'))
+        self.assertEqual(pack_dump.romfs_of(self.dump / 'base'), self.base_img)
+        self.assertEqual(pack_dump.scan(self.dump), (TID, {VER: self.dump / f'updates/{VER}'}, {TID + 0x1001: self.dlc_img}))
+
+    def test_taken_as_the_image_and_kept(self):
+        pack_dump.pack_version(self.dump / f'updates/{VER}', TID, self.out(), say=lambda s: None)
+        img = self.out() / 'RomFS.img'
+        self.assertEqual(romfs_image.read_index(img), romfs_image.read_index(self.upd_img))
+        self.assertIn('dir/new', romfs_image.read_index(img)); self.assertTrue((self.out() / 'ExeFS/main').exists())
+        ident = romfs_image.file_identity(img)
+        with mock.patch.object(pack_dump, 'clone', side_effect=AssertionError('cloned again')): pack_dump.pack_version(self.dump / f'updates/{VER}', TID, self.out(), say=lambda s: None)
+        self.assertEqual(romfs_image.file_identity(img), ident, 'the same source file keeps the image')
+        clones = []
+        with mock.patch.object(pack_dump, 'clone', side_effect=lambda a, b: clones.append(a) or shutil.copy2(a, b)):
+            self.upd_img.touch()   # the source file changed (its mtime): taken again
+            pack_dump.pack_version(self.dump / f'updates/{VER}', TID, self.out(), say=lambda s: None)
+        self.assertEqual(clones, [self.upd_img]); self.assertNotEqual(romfs_image.file_identity(img), ident)
+        aoc = self.dump / 'aoc'; pack_dump.pack_dlc(TID, {TID + 0x1001: self.dlc_img}, aoc, say=lambda s: None)
+        self.assertIn('dlcfile', romfs_image.read_index(aoc / '1.img'))
+
+    def test_a_tree_beside_the_image_wins(self):
+        d = self.dump / 'base'; (d / 'romfs/dir').mkdir(parents=True); (d / 'romfs/dir/edited').write_text('mod')
+        self.assertEqual(pack_dump.romfs_of(d), d / 'romfs')
+        pack_dump.pack_version(d, TID, self.out(0), say=lambda s: None)
+        names = romfs_image.read_index(self.out(0) / 'RomFS.img')
+        self.assertIn('dir/edited', names); self.assertNotIn('dir/old', names)
+
+    def test_surveyed_from_the_image(self):
+        src = self.dump.parent / 'v'; version(src); nro = b'NRO0' + bytes(60)
+        (src / 'romfs/nro').mkdir(); (src / 'romfs/nro/m.NRO').write_bytes(nro); imaged(src)
+        out = self.dump.parent / 'out'
+        self.assertEqual(nsp.survey_dump(src, out), 2)
+        rows = sorted(r.split('\t') for r in (out / 'romfs_manifest.tsv').read_text().splitlines() if not r.startswith('#'))
+        self.assertEqual([(r[0], int(r[1])) for r in rows], [('/dir/marker', 4), ('/nro/m.NRO', 64)])
+        self.assertEqual(bytes.fromhex(rows[0][2]), b'data'); self.assertEqual((out / 'romfs_nro/nro/m.NRO').read_bytes(), nro)
+        self.assertEqual(nsp.package_size({'dump': True}, src)[1], nsp.tree_size(src / 'exefs')[1] + (src / 'romfs.img').stat().st_size)
+
+    def test_not_an_image_refused(self):
+        self.base_img.write_bytes(b'not an image at all'); d = self.dump / 'base'
+        self.assertTrue(pack_dump.is_version(d), 'the layout is read by names; the content is checked when it is packed')
+        with self.assertRaisesRegex(pack_dump.Error, 'not a RomFS image'): pack_dump.pack_version(d, TID, self.out(0), say=lambda s: None)
+

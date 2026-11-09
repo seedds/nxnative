@@ -207,7 +207,11 @@ static void launcher_done(void) { [g_root startGame]; }
     if (self.fps) {   // the top row's free stretch: right of DmGamepad.m's L3 key (102 + 17 of its units from the safe edge), level with − / + (22 units down); u is its unit
         CGRect s = CGRectIntersection(layout.controls, UIEdgeInsetsInsetRect(b, gameInsets));
         CGFloat u = layout.separated ? MIN(MIN(s.size.height / 430.0, s.size.width / 700.0), 1.3) : MIN(b.size.height / 430.0, 1.3);
-        self.fps.frame = CGRectMake(floor(CGRectGetMinX(s) + 130 * u), floor(CGRectGetMinY(s) + 22 * u - 11), 64, 22);
+        // as wide as its lines, up to the − key (DmGamepad.m: its centre 52 units left of the midline, 50 wide); two lines (frame rate and thermal state, battery) centred on the row
+        CGFloat x = floor(CGRectGetMinX(s) + 130 * u), room = CGRectGetMidX(s) - 77 * u - 8 - x;
+        CGSize fit = [self.fps sizeThatFits:CGSizeMake(MAX(room - 12, 64), 60)];
+        CGFloat w = MIN(MAX(ceil(fit.width) + 12, 64), MAX(room, 64)), h = ceil(fit.height) + 4;
+        self.fps.frame = CGRectMake(x, floor(CGRectGetMinY(s) + 22 * u - h / 2), w, h);
     }
 }
 - (void)showFPS:(BOOL)on {   // the frame-rate counter: DM_SHOW_FPS at Play, then the in-game menu
@@ -319,22 +323,60 @@ static void front_ios_power_watch(void) {
     LOG("front end: thermal state %d, brightness %.2f, Low Power Mode %s", dm_thermal_now(), g_brightness, dm_low_power_now() ? "on" : "off");
 }
 
-// Frame-rate counter: the frames put on screen in the last second (nvn_mtl.m counts them for NVN and for the Vulkan layer alike; frames the display link merged away are not counted).
+// Frame-rate counter: the frames put on screen in the last second (nvn_mtl.m counts them for NVN and for the Vulkan layer alike; frames the display link merged away are not counted),
+// with the device's thermal state (iOS gives apps no temperature, only NSProcessInfo's four levels), the battery level and the play time it leaves at the rate it has fallen.
 // On when the IPA was built with it (the NSP script's SHOW_FPS / --show-fps → DMShowFPS in Info.plist); DM_SHOW_FPS=0 / 1 (the launcher, Documents/env.txt) overrides that without a rebuild,
 // and the in-game menu turns it on and off ([DmRootVC showFPS:])
 uint64_t mtl_present_count(void);
+// The battery's fall while the game is in front: the level UIKit reports moves in steps (5 % on current iOS: an iPhone Duo went 80 % → 75 % after about 15 minutes of
+// Silksong while its own status bar counted down by 1 %), so the rate is taken from the first step down (a known point of the curve) to the latest one, refined at every later
+// step. Until the second step a rough time is shown ("rough"): the first reading's place inside its step is unknown, so half a step is taken to have fallen between it and the
+// first step down. Charging, a level that rose, and time in the background (the app's own background notification; a late timer tick is not one: the main thread stalls for
+// seconds while a game loads) start the measurement again
+typedef struct { double t0, l0, last, tf, lf; bool armed; } battery_fall_t;
+static void battery_fall_reset(battery_fall_t *b) { b->armed = false; b->last = -1; b->t0 = 0; b->l0 = 0; b->tf = 0; b->lf = -1; }
+static NSString *battery_line(battery_fall_t *b, double now) {
+    UIDevice *d = UIDevice.currentDevice; float level = d.batteryLevel; UIDeviceBatteryState st = d.batteryState;
+    if (level < 0 || st == UIDeviceBatteryStateUnknown) return @"🔋 --";
+    int pct = (int)lround(level * 100);
+    if (st == UIDeviceBatteryStateCharging || st == UIDeviceBatteryStateFull) { battery_fall_reset(b); return [NSString stringWithFormat:@"🔋 %d%% · charging", pct]; }
+    if (level != b->last) LOG("front end: battery %d%% (%s)", pct, st == UIDeviceBatteryStateUnplugged ? "unplugged" : "other");   // its steps, for the estimate's reading
+    if (b->last >= 0 && level > b->last) battery_fall_reset(b);
+    if (b->lf < 0) { b->tf = now; b->lf = level; }   // the first reading: somewhere inside its step
+    if (b->last >= 0 && level < b->last && !b->armed) { b->armed = true; b->t0 = now; b->l0 = level; }   // the first step down: the start of the measurement
+    b->last = level;
+    double fell = b->armed ? b->l0 - level : 0, left; const char *rough = "";
+    if (fell >= 0.005) left = level / (fell / (now - b->t0));   // seconds at the rate so far
+    else if (b->armed && b->t0 - b->tf > 60) { left = level / ((b->lf - b->l0) / 2 / (b->t0 - b->tf)); rough = " (rough)"; }   // half the first step over the time to it
+    else return [NSString stringWithFormat:@"🔋 %d%% · estimating", pct];
+    int m = (int)(left / 60);
+    return m >= 60 ? [NSString stringWithFormat:@"🔋 %d%% · ~%dh %02dm left%s", pct, m / 60, m % 60, rough] : [NSString stringWithFormat:@"🔋 %d%% · ~%dm left%s", pct, m, rough];
+}
 static UILabel *front_ios_fps_label(void) {
     UILabel *l = [UILabel new];
-    l.font = [UIFont monospacedDigitSystemFontOfSize:13 weight:UIFontWeightSemibold]; l.textColor = UIColor.whiteColor; l.textAlignment = NSTextAlignmentCenter;
+    l.font = [UIFont monospacedDigitSystemFontOfSize:12 weight:UIFontWeightSemibold]; l.textColor = UIColor.whiteColor; l.textAlignment = NSTextAlignmentCenter;
+    l.numberOfLines = 2; l.adjustsFontSizeToFitWidth = YES; l.minimumScaleFactor = 0.7;
     l.backgroundColor = [UIColor colorWithWhite:0 alpha:0.45]; l.layer.cornerRadius = 6; l.layer.masksToBounds = YES; l.userInteractionEnabled = NO;
-    l.text = @"-- fps";
-    __block uint64_t n0 = mtl_present_count(); __block double t0 = CACurrentMediaTime();
-    [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *t) {
-        (void)t; uint64_t n = mtl_present_count(); double now = CACurrentMediaTime();
-        if (now - t0 < 1.5) l.text = [NSString stringWithFormat:@"%.0f fps", (n - n0) / (now - t0)];   // a longer span is the time in the background: no reading
+    UIDevice.currentDevice.batteryMonitoringEnabled = YES;
+    static NSString *const thermal[] = {@"Nominal", @"Fair", @"Serious", @"Critical"};
+    __block battery_fall_t bat; battery_fall_reset(&bat);
+    __block uint64_t n0 = mtl_present_count(); __block double t0 = CACurrentMediaTime(); __block NSString *fps = @"--";
+    void (^update)(void) = ^{
+        double now = CACurrentMediaTime(); uint64_t n = mtl_present_count();
+        if (now - t0 < 1.5) fps = [NSString stringWithFormat:@"%.0f", (n - n0) / (now - t0)];   // a longer span (a stall, the background): no reading
         n0 = n; t0 = now;
-    }];
-    LOG("front end: frame-rate counter on");
+        int th = dm_thermal_now();
+        static int last_th = -1; if (th != last_th) { LOG("front end: thermal state %d (%s)", th, thermal[th >= 0 && th <= 3 ? th : 0].UTF8String); last_th = th; }
+        NSString *text = [NSString stringWithFormat:@"%@ fps · 🌡 %@\n%@", fps, thermal[th >= 0 && th <= 3 ? th : 0], battery_line(&bat, now)];
+        if (![text isEqualToString:l.text]) { BOOL grew = text.length != l.text.length; l.text = text; if (grew) [l.superview setNeedsLayout]; }
+    };
+    update();
+    [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationDidEnterBackgroundNotification object:nil queue:NSOperationQueue.mainQueue
+                                                usingBlock:^(NSNotification *note) { (void)note; battery_fall_reset(&bat); }];   // suspended: the fall is measured again on return
+    // In the common modes: while UIKit tracks a touch (the touch controls) the main run loop runs in its tracking mode, where a timer of the default mode does not fire, and the
+    // label would stop updating while a finger is down
+    [NSRunLoop.mainRunLoop addTimer:[NSTimer timerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *t) { (void)t; update(); }] forMode:NSRunLoopCommonModes];
+    LOG("front end: frame-rate counter on (with thermal state and battery)");
     return l;
 }
 

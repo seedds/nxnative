@@ -48,6 +48,10 @@ fps_hold	off
 render_cond	on
 gpu_timestamps	segment
 draw_barriers	game
+enc_thread	on
 # As Tears of the Kingdom: the terrain's height, blend and hole maps are written by the CPU into textures after they are created. Without these keys they stay zero: holes in the ground and the wrong materials
 tex_flush_upload	on
 tex_dirty_upload	on
+
+# ---- Threads & Power ----
+qos_map	on

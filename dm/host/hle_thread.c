@@ -327,9 +327,12 @@ void guest_gate_stack(int own_stack);   // thread.c: the thread's gate slot and 
 // Switch priority → QoS class (DM_QOS_MAP=1; off by default until a phone A/B shows it saves power without dropping frames). Otherwise every guest thread runs at user-interactive
 // whatever its priority, and the performance controller keeps all of them on fast cores at high clocks. Bands: priority <= e1 (the main thread is 44) user-interactive, <= e2 user-initiated,
 // above that utility; DM_QOS_EDGES=e1,e2 moves them (default 44,59). Read once in svc_thread_main_init, before any other guest thread exists
+#ifndef DM_GAME_QOS_MAP
+#define DM_GAME_QOS_MAP 0
+#endif
 static int g_qos_map, g_qos_e1 = 44, g_qos_e2 = 59;
 static void qos_map_init(void) {
-    const char *e = getenv("DM_QOS_MAP"), *d = getenv("DM_QOS_EDGES"); g_qos_map = e && atoi(e);
+    const char *e = getenv("DM_QOS_MAP"), *d = getenv("DM_QOS_EDGES"); g_qos_map = e ? atoi(e) : DM_GAME_QOS_MAP;
     if (d) sscanf(d, "%d,%d", &g_qos_e1, &g_qos_e2);
     if (g_qos_map) LOG("DM_QOS_MAP=1: guest threads get QoS by priority (≤%d interactive, ≤%d user-initiated, the rest utility)", g_qos_e1, g_qos_e2);
 }
@@ -787,20 +790,22 @@ static int svc_thread_impl(int num, uint64_t *regs);
 // Mac frame p95 34.5 → 41 ms with 7 drops per 300 frames; on the iPhone the threads also looked idle to the performance controller, which kept them on efficiency cores at 1.5 GHz.
 // Waits under 2 ms are handoffs between threads that do work; waits beyond it are limiters and idle polls. Returns the sleep for a yield whose run started `run_ns` ago (0 = plain yield);
 // a clock wait (`clock`, thr_yield) has no start: it waits for a time, not for another thread, and sleeps from its first yield on.
-// DM_YIELD_BACKOFF=0 turns it off; DM_YIELD_BACKOFF=<cap µs>[:<start µs>] sets the cap and the run length after which it starts (default 250:2000)
-static uint64_t yield_backoff_ns(uint64_t run_ns, int clock) {
+// DM_YIELD_BACKOFF=0 turns it off; DM_YIELD_BACKOFF=<cap µs>[:<start µs>] sets the cap and the run length after which it starts (default 250:2000 for main, 250:200 for workers)
+static uint64_t yield_backoff_ns(thr_t *me, uint64_t run_ns, int clock) {
     static int64_t cap = -1, start = 2000000;
+    static int custom_start = 0;
     if (cap < 0) { const char *e = getenv("DM_YIELD_BACKOFF"); cap = 250000;
-        if (e && *e) { cap = atoll(e) * 1000; const char *c = strchr(e, ':'); if (c) start = atoll(c + 1) * 1000; }
+        if (e && *e) { cap = atoll(e) * 1000; const char *c = strchr(e, ':'); if (c) { start = atoll(c + 1) * 1000; custom_start = 1; } }
         if (!cap) LOG("DM_YIELD_BACKOFF=0: no back-off on repeated yields (plain sched_yield spin)"); else if (e && *e) LOG("DM_YIELD_BACKOFF: back off after %lld µs of repeated yields, sleeping at most %lld µs at a time", (long long)(start / 1000), (long long)(cap / 1000)); }
-    if (!cap || (!clock && run_ns < (uint64_t)start)) return 0;
+    uint64_t st = (custom_start || !me || me->handle == 0x1001) ? (uint64_t)start : 200000;
+    if (!cap || (!clock && run_ns < st)) return 0;
     uint64_t s = run_ns / 8; if (s < 10000) s = 10000;
     return s < (uint64_t)cap ? s : (uint64_t)cap;
 }
 static void sleep_precise(uint64_t dl);
 // sched_yield, or a short sleep once the wait has lasted run_ns past the back-off's start
 static void yield_for(thr_t *me, uint64_t run_ns, int clock) {
-    uint64_t bo = yield_backoff_ns(run_ns, clock);
+    uint64_t bo = yield_backoff_ns(me, run_ns, clock);
     if (bo) { me->nbackoff++; me->sleeping = 1; struct timespec ts = {0, (long)bo}; nanosleep(&ts, 0); me->sleeping = 0; }
     else sched_yield();
 }
@@ -918,7 +923,7 @@ static int64_t poll_wait_begin(int64_t ns) {
     uint64_t now = now_ns();
     if (me->yrun_svc + 1 != me->nsvc || now - me->poll_ret > SPIN_GAP_NS) me->yrun_t0 = now;   // a new run
     me->yrun_svc = me->nsvc;
-    uint64_t bo = yield_backoff_ns(now - me->yrun_t0, 0);
+    uint64_t bo = yield_backoff_ns(me, now - me->yrun_t0, 0);
     if (bo <= (uint64_t)ns) return ns;
     me->nyield++; me->nbackoff++;   // counted as a yield that backed off (the power line)
     return (int64_t)bo;

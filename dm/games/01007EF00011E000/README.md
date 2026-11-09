@@ -98,6 +98,14 @@ Measurements reported in [PR #215](https://github.com/seedds/nxnative/pull/215),
 
 On the Mac, frame times stayed at 60 fps; crop comparisons showed sharper edges on Link, his shield and the map text, with unchanged colours. The iPhone ran at 60 fps with the launcher setting reaching the host; a cold docked run reached thermal state serious after 226 s, a warm start after 64 s. The matching iPhone Standard run and MetalFX's share of the thermal cost remain unmeasured. Standard stays the default. These gameplay measurements are the PR author's; this integration has not repeated a device gameplay run.
 
+### Frame interpolation (opt-in)
+
+[MetalFX frame interpolation](../../../docs/reference/rendering.md#metalfx-frame-interpolation-3030), `DM_MFX_INTERP=interp30` with `DM_FPS_TARGET=30` and `DM_MFX_MSL_DIR=<NSP folder>/01007EF00011E000_build/shader/cache` (Mac; a copy outside `~/Downloads` avoids macOS asking for folder access). The profile's `scene_upscale` is the agl post-effect upscale `bd7ffdd435c6c3bc` (every later draw into the 1920x1080 RGB10A2 canvas is UI) and its `camera_block` is vertex uniform 0, 2336 bytes. The interpolator takes the 1600x900 G-buffer depth and writes the 1920x1080 canvas size.
+
+- Mac (M1 Pro, macOS 27.0.1), a Great Plateau save, a scripted route (title, Continue, standing, camera turns) and play: 30 fps held (frame time p50 33.3-33.4 ms), every frame after the load interpolated (1,111-1,125 of the last 1,125 per run), MetalFX GPU p50 7.6-7.7 ms, 0 frames dropped on screen; 7 UI fragment shaders get a copy on the route. A dump while the camera turns 2.8 degrees a frame shows the interpolated frame between its two game frames, the HUD in place.
+- At a save load the game draws a frame into another canvas (the load screen's): no frame is interpolated across it.
+- Open: enemies appearing raised a few frames to 50 ms on the CPU (the render thread about 300 ms/s, the host's encoding about 10 ms of each frame), so the overlay read about 45 for a moment; the encode thread is not supported with interpolation yet. The first launch after the app is signed again can stall at the load while macOS checks the bundle, with or without interpolation.
+
 ### Screen shape (`DM_SCREEN_ASPECT`, current)
 
 A screen taller than 16:9 (the iPhone Duo's, about 1.43:1) gets a picture of its own shape instead of a stretched or letterboxed 16:9 one. `DM_SCREEN_ASPECT=1.43` (launcher setting *Picture shape*, offered because the profile has `screen_aspect on`) makes the host give the game a 1920x1344 output and a 1280x896 layout space (`loader.c`, state +0x48..+0x9c); the stubs in `patches.py` and `duo_anchor.c` make the game follow it:
@@ -221,6 +229,7 @@ Before publishing, the fixes were integrated with main's pipeline archive and GP
 
 General host changes first needed here; each applies to every game:
 
+- **MetalFX frame interpolation (30+30)** (`nvn_mfx.m`, the `mfx_*` hooks in `nvn_mtl.m`, profile keys `scene_upscale` / `camera_block`): [MetalFX frame interpolation (30+30)](../../../docs/reference/rendering.md#metalfx-frame-interpolation-3030); measured under [Frame interpolation (opt-in)](#frame-interpolation-opt-in).
 - **Movies at twice their speed at 60 fps** (issue #636): [Movies hold 30 fps under the frame step](../../../docs/reference/frame-rate.md#movies-hold-30-fps-under-the-frame-step).
 - **Frame captures under the standard thread policy** (`cap_policy_standard`; also on Pokemon Scarlet): [A frame capture runs under the standard thread policy](../../../docs/reference/nvn-objects.md#a-frame-capture-runs-under-the-standard-thread-policy).
 - **Capture interface hashes of binding values** (also on Scarlet, Tears of the Kingdom and Wonder): [A capture refused after a change to the reflection structs](../../../docs/reference/nvn-objects.md#a-capture-refused-after-a-change-to-the-reflection-structs).

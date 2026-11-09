@@ -24,12 +24,17 @@ assert spec is not None and spec.loader is not None
 patch = importlib.util.module_from_spec(spec); spec.loader.exec_module(patch)
 
 
-def camera(r):
-    """The camera's x / y multipliers the loader writes for a shape (loader.c screen_any_write)"""
+def camera(r, cap=1):
+    """The camera's x / y multipliers the loader writes for a shape (loader.c screen_camera), upright held to the vertical angle of a picture of shape cap (screen_upright_cap,
+    DM_SCREEN_UPRIGHT_FOV: 1 by default, 0 off)"""
     if not r: return (1, 1)
     l = r if r >= 1 else 1 / r
     xl, yl = (16 / 9 / l, 1) if l >= 16 / 9 else (1, l * 9 / 16)
-    return (xl, yl) if r >= 1 else (yl * 16 / 9, xl * 9 / 16)
+    x, y = (xl, yl) if r >= 1 else (yl * 16 / 9, xl * 9 / 16)
+    if cap and r < 1 and r < cap:
+        ky = camera(cap, 0)[1]
+        if y < ky: x, y = ky * 16 / (9 * r), ky
+    return x, y
 
 
 @unittest.skipIf(uc is None, 'optional ARM64 execution dependency: unicorn')
@@ -134,11 +139,11 @@ class CameraProjection(unittest.TestCase):
 
     emit, put = OutputSize.emit, OutputSize.put
 
-    def shape(self, ratio, asked=None):
+    def shape(self, ratio, asked=None, cap=1):
         """The factors the output size was made with (state +0xb8 / +0xbc, 0 = 16:9) and, apart, the shape the host asks for now (+0xa0..: the camera ignores it)"""
         f = lambda r: (r, max(r * 9 / 16, 1), max(16 / (9 * r), 1)) if r else (0, 1, 1)
         self.u.mem_write(self.state + 0xa0, struct.pack('<3f', *f(ratio if asked is None else asked)))
-        self.u.mem_write(self.state + 0xb8, struct.pack('<2f', *camera(ratio)) if ratio else bytes(8))
+        self.u.mem_write(self.state + 0xb8, struct.pack('<2f', *camera(ratio, cap)) if ratio else bytes(8))
 
     def run_copy(self):
         """The matrix as the copy leaves it (rows 0..2 stored, row 3 in q18, rows 0 / 1 also in v4 / v5), aspect 16:9 at +0x1d4; the matrix, v4, v5 and the aspect after"""
@@ -178,11 +183,35 @@ class CameraProjection(unittest.TestCase):
             self.assertAlmostEqual(m[5] / m[0], ratio, 3, ratio)                       # the projection's aspect is the screen's
             if ratio > 16 / 9: self.assertAlmostEqual(m[5], self.M[5], 5)            # wider: the vertical angle kept
             elif ratio >= 1: self.assertAlmostEqual(m[0], self.M[0], 5)              # taller landscape: the horizontal angle kept
-            elif 1 / ratio >= 16 / 9: self.assertAlmostEqual(m[0], self.M[5], 4)     # a phone upright: its width gets landscape's vertical angle
-            else: self.assertAlmostEqual(m[5], self.M[0], 4)                         # an iPad upright: its height gets landscape's horizontal angle
+            else: self.assertAlmostEqual(m[5], self.M[0], 4)                         # upright: no more height than a square, whose height gets landscape's horizontal angle
             for a, b in zip(m[8:], self.M[8:]): self.assertAlmostEqual(a, b, 5)      # z and w rows untouched
             for a, b in zip(v4 + v5, m[:8]): self.assertAlmostEqual(a, b, 6)          # the frustum code after reads the same rows
             self.assertAlmostEqual(aspect, ratio, 3, ratio)
+
+
+    def test_upright_without_the_cap(self):
+        # DM_SCREEN_UPRIGHT_FOV=0: upright takes the scale of the same screen turned landscape (a phone sees about 90 degrees vertically)
+        for ratio in (0.7, 1179 / 2556, 9 / 16):
+            self.shape(ratio, cap=0)
+            m = self.run_copy()[0]
+            self.assertAlmostEqual(m[5] / m[0], ratio, 3, ratio)
+            if 1 / ratio >= 16 / 9: self.assertAlmostEqual(m[0], self.M[5], 4)     # a phone upright: its width gets landscape's vertical angle
+            else: self.assertAlmostEqual(m[5], self.M[0], 4)                         # an iPad upright: its height gets landscape's horizontal angle
+
+    def test_the_upright_cap_holds_the_vertical_angle(self):
+        tan = lambda m: 1 / m[5]   # tan of half the vertical angle
+        for cap in (1, 0.75, 16 / 9):
+            self.shape(cap, cap=0); held = tan(self.run_copy()[0])                    # the cap's own picture
+            for ratio in (min(cap, 1) - 0.05, 0.6, 1179 / 2556, 0.3):
+                self.shape(ratio, cap=cap); m = self.run_copy()[0]
+                self.assertAlmostEqual(tan(m), held, 4, (cap, ratio))                 # no more height than the cap's picture
+                self.assertAlmostEqual(m[5] / m[0], ratio, 3, (cap, ratio))           # the picture keeps its own shape: the width narrows
+        self.assertAlmostEqual(tan(self.M), 1 / 2.14451, 5)                           # 16:9: fovy 50 degrees
+        self.shape(1.0, cap=0); square = tan(self.run_copy()[0])
+        self.shape(1179 / 2556, cap=0); phone = tan(self.run_copy()[0])
+        self.assertGreater(phone, 1.2 * square)                                        # a phone upright saw about 90 degrees, a square 79
+        self.shape(1.3, cap=16 / 9); m = self.run_copy()[0]
+        self.assertAlmostEqual(m[0], self.M[0], 5)                                     # landscape is never capped
 
 
 @unittest.skipIf(uc is None, 'optional ARM64 execution dependency: unicorn')

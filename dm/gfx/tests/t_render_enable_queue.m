@@ -1,5 +1,10 @@
 // Logical render-enable state and pending query values survive scheduler chunks.
 // Every path uses public NVN recording; the last case gates only GPU completion.
+// It checks the profile key render_cond's replay, so the key is on whatever profile GAME names:
+// without it the host draws every render-enable block and posts no pending counter values.
+#include "game_profile.h"
+#undef DM_GAME_RENDER_COND
+#define DM_GAME_RENDER_COND 1
 #define nvn_game_fps nvn_game_fps_mtl_default
 #include "../nvn/nvn_mtl.m"
 #undef nvn_game_fps

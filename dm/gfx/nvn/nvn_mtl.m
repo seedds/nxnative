@@ -128,6 +128,7 @@ static double g_link_hold_until; static uint64_t g_link_held;   // Changed only 
 static int g_pq_inflight;   // Under g_pq_mu: number of presents committed to the GPU whose completion callback has not arrived yet
 int g_dm_present_link;   // Present pacing mode (runtime value of DM_PRESENT_LINK, modified directly during same-process alternating measurement): 0 = acquire the drawable itself; 1 = display link at 60 Hz; 2 = display link at 120 Hz, the game presents a frame every other display-link tick
 static int g_present_latency;   // DM_PRESENT_LATENCY: the display link's frame latency in a window and in fullscreen alike (0 = not set: link_latency picks it)
+static int g_present_link_env;   // DM_PRESENT_LINK was set: its mode holds everywhere, and link_vrr_120 does not move a 60 Hz link to 120 Hz in variable-refresh fullscreen
 static uint64_t g_pq_done;
 static uint64_t g_pq_read;
 static id<MTLResidencySet> g_res;
@@ -630,7 +631,7 @@ void mtl_init(void) {
     if (g_dev) return;
     const char *vbc = getenv("DM_NVN_VBUF_CACHE"); g_vbuf_cache = !(vbc && !strcmp(vbc, "0"));
     const char *link = getenv("DM_PRESENT_LINK");
-    g_dm_present_link = link ? atoi(link) : 1; if (g_dm_present_link < 0 || g_dm_present_link > 2) g_dm_present_link = 1;   // Default 1 (real-device same-process alternation: when load exceeds one display-link period, long frames 15% → 0 and frame intervals even out; no difference from 0 at a steady 60); DM_PRESENT_LINK=0 turns it off   // 1 = present on every tick of a 60 Hz display link; 2 = 120 Hz display link, the game presents a frame every other display-link tick (when behind, it can present on the next 8.33 ms display-link tick)
+    g_dm_present_link = link ? atoi(link) : 1; if (g_dm_present_link < 0 || g_dm_present_link > 2) g_dm_present_link = 1; g_present_link_env = link != NULL;   // Default 1 (real-device same-process alternation: when load exceeds one display-link period, long frames 15% → 0 and frame intervals even out; no difference from 0 at a steady 60); DM_PRESENT_LINK=0 turns it off   // 1 = present on every tick of a 60 Hz display link; 2 = 120 Hz display link, the game presents a frame every other display-link tick (when behind, it can present on the next 8.33 ms display-link tick)
     const char *latency = getenv("DM_PRESENT_LATENCY");
     if (latency && atoi(latency) > 0) g_present_latency = atoi(latency);
     g_res_check_on = getenv("DM_RES_CHECK") != NULL;
@@ -15561,6 +15562,14 @@ static const char *link_latency_why(void) { return g_present_latency > 0 ? "DM_P
 // frames over 50 ms; 3-4 in a window, where the same link held 30.0). Why is open (docs/reference/frame-rate.md). The 60 Hz link paces the 30 through the present interval, as it
 // does interval-2 frames (two ticks per acquire, mtl_link_wait_tick; each frame held for its period, g_link_hold_until): 7 frames over 50 ms on the same walk
 static int link_30hz(void) { return !front_fullscreen() || front_screen_variable_refresh(); }
+// The 120 Hz link (mode 2, a frame every other tick) in place of the 60 Hz one in fullscreen on a variable-refresh screen whose rate is a multiple of 120 (a ProMotion
+// screen), unless DM_PRESENT_LINK chose the mode. There, with the 60 Hz link at frame latency 2, the system showed every present one 120 Hz refresh after the link's
+// target time (@pres_at_ms − @link_target_ms = 8.33 ms) and the link then skipped every other tick (@link_gap_ms 16.7, 33.3, 16.7, …): 40 callbacks a second, so a game
+// paced by the link ran at 40 fps with its GPU at 10 ms of the 16.7 (Ocarina of Time on an M5 Pro, macOS 27.2; at latency 1 the frame step went to 4 vsyncs, 15 fps).
+// The Mac front end first switches such a screen to a fixed-rate mode (front_screen_match: 60 Hz, 60.0 fps at latency 1 there), so this is the fallback for a screen with
+// no such mode or with DM_SCREEN_MATCH=0: the 120 Hz link held 59.2 fps, about 2% of frames up 25 ms. A window keeps the 60 Hz link, where every present lands on its
+// target (docs/reference/frame-rate.md)
+static int link_vrr_120(void) { int hz = front_screen_max_fps(); return !g_present_link_env && front_fullscreen() && front_screen_variable_refresh() && hz >= 120 && hz % 120 == 0; }
 static int g_link_mode = 1;   // Current mode of the display link object: 1 / 2 same as g_dm_present_link, 3 = power-saving mode 30 Hz
 static void *link_main(void *arg) {   // Display link thread: started when switching to display-link mode, exits when switching back to 0
     (void)arg;
@@ -15591,7 +15600,10 @@ static void link_sync(void) {   // Called every frame by the game's present thre
     if (g_rescue_mode) want = 0;
     pthread_mutex_unlock(&g_pq_mu);
     if (want && mtl_fps_target() == 30 && link_30hz()) want = 3;   // Power-saving mode: display link at 30 Hz
-    if (want) front_screen_match(want == 3 ? 30 : want == 2 ? 120 : 60);
+    if (want) front_screen_match(want == 3 ? 30 : want == 2 ? 120 : 60);   // the game's rate: a variable-refresh screen goes to a fixed-rate mode at a multiple where it has one
+    static int vrr_was; int vrr = want == 1 && link_vrr_120();   // variable-refresh fullscreen that kept its mode: the 120 Hz link paces the 60 (link_vrr_120)
+    if (vrr != vrr_was) { vrr_was = vrr; MLOG("display link: %s (frame %llu)", vrr ? "120 Hz in fullscreen on a variable-refresh screen, a frame every other tick (DM_PRESENT_LINK=1 keeps 60 Hz)" : "60 Hz again (window, fixed-rate screen or another frame rate)", (unsigned long long)atomic_load(&g_cur_frame)); }
+    if (vrr) want = 2;
     // The screen's rate changed (switched by front_screen_match, or another screen): the range again, virtual ticks or none. Taken only once the link object exists, so a change
     // while its thread starts (after link_main read the rate) is not lost
     static int hz_was; int hz = front_screen_max_fps(); CAMetalDisplayLink *lk = g_link;

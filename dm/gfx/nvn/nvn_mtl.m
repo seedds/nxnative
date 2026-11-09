@@ -12554,7 +12554,10 @@ static void fb_depth_rule(NvShader *fs, int dsw) {
     if (other) g_fb_dread = 1;
 }
 // Called before the draw opens its render pass: if a snapshot is needed, end the current render pass, copy the snapshot (or reuse a valid one) and register the substitution (used by this draw's argument encoding)
-static void fb_prepare(NvProg *pr) {
+static void fb_prepare_(NvProg *pr);
+static void pv_fb(void);
+static void fb_prepare(NvProg *pr) { fb_prepare_(pr); if (g_pv_open && !g_wet) pv_fb(); }   // the verify mode replays its outcome (pv_wet)
+static void fb_prepare_(NvProg *pr) {
     g_draw_seq++; g_fb_n = 0;
     if (g_fb_rebind) { args_dirty_all(); g_fb_rebind = 0; }   // the previous draw had a substituted binding: re-encode with the original bindings this time
     if (!pr || !pr->sh[1] || (!R.rt.n && !R.rt.depth) || g_fz.active || g_defer_replaying || !fb_mode()) return;   // a depth-only pass too, for the depth rule
@@ -13434,9 +13437,14 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
 // counted apart). A line every 300 frames: passes, those compared and why the others were not, identical, identical but for soft words, different (with the first difference)
 enum { PV_SPECIAL = 0, PV_AGAIN = 1, PV_END = 2, PV_DEPTH = 3, PV_SPLIT = 4, PV_OP = 5, PV_COUNT = 6, PV_BARRIER = 7, PV_NWHY = 8 };
 static const char *const g_pv_why_name[PV_NWHY] = {"special draw", "re-encoded", "no end op", "list depth", "drained mid-pass", "unsupported op", "draw count", "ordering barrier"};
-typedef struct { const uint8_t *op; int slot; } pv_draw;
+typedef struct { const uint8_t *op; int kind, slot; int mesh, omit, fbn; typeof(g_geo_mesh_[0]) gm; __unsafe_unretained NvProg *raster; p_draw syn;
+                 __unsafe_unretained id<MTLTexture> fsrc[4], fuse[4]; uint64_t frid[4]; } pv_draw;   // kind 0 a draw draw_enc encoded (mesh: a geometry mesh draw), 1 fb_prepare's outcome
 static struct { const uint8_t *p0; int depth0; __strong MTL4RenderPassDescriptor *pd; uint64_t stat_pass, vbar0; typeof(g_S_[0]) s; typeof(g_R_[0]) r; typeof(g_pass_[0]) pass;
-                int has_vis, mode, geo_nocolor; NSUInteger rp_aw, rp_ah; sd_stores st; pv_draw *d; int nd, cap; } g_pv;
+                int has_vis, mode, geo_nocolor; NSUInteger rp_aw, rp_ah; sd_stores st; pv_draw *d; int nd, cap;
+                int fbn, fb_rebind; uint64_t draw_seq; __unsafe_unretained id<MTLTexture> fsrc[4], fuse[4]; uint64_t frid[4]; } g_pv;   // fb: the opening draw's fb_prepare outcome
+enum { PVS_TILE, PVS_MDX, PVS_FZ, PVS_GEO, PVS_MTK, PVS_MODE, PVS_KD, PVS_TF, PVS_MDI, PVS_N };
+static const char *const g_pvs_name[PVS_N] = {"tile read", "masked multi-draw", "fused", "geometry compute", "task/mesh shader", "merged/range/deferred", "draw dump", "transform feedback", "indirect count"};
+static uint64_t g_pvs[PVS_N];
 static uint64_t g_pv_pass, g_pv_tried, g_pv_same, g_pv_soft, g_pv_diff, g_pv_why[PV_NWHY], g_pv_frame, g_pv_softw;
 static char g_pv_first[512];
 static int pv_mode(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_PAR"); v = e ? atoi(e) : 0; if (v == 2) MLOG("parallel translation verify mode (DM_NVN_PAR=2): every pass a draw opens is encoded again from its capture in another context and compared"); } return v; }
@@ -13444,18 +13452,30 @@ static void pv_open(MTL4RenderPassDescriptor *pd) {
     if (pv_mode() != 2 || !rec_on()) return;
     g_pv_open = 1; g_pv_badbits = 0; g_pv.nd = 0; g_pv.p0 = g_exec_cur; g_pv.depth0 = g_ret_n; g_pv.pd = pd; g_pv.stat_pass = g_stat_pass; g_pv.vbar0 = g_order_vbar;
     memcpy(&g_pv.s, &S, sizeof S); g_pv.r = R; g_pv.pass = g_pass; g_pv.has_vis = g_enc_has_vis; g_pv.mode = g_enc_mode; g_pv.geo_nocolor = g_enc_geo_nocolor; g_pv.rp_aw = g_rp_aw; g_pv.rp_ah = g_rp_ah;
+    g_pv.fbn = g_fb_n; g_pv.fb_rebind = g_fb_rebind; g_pv.draw_seq = g_draw_seq; for (int i = 0; i < 4; i++) { g_pv.fsrc[i] = g_fb_src[i]; g_pv.fuse[i] = g_fb_use[i]; g_pv.frid[i] = g_fb_rid[i]; }
     g_pv.st.n = 0; g_vt_valid = 0;   // both contexts write every vertex table slot of a compared pass, so each one's table history does not show in the records
     if (!g_pv.p0) g_pv_bad(PV_END);
     rec_job_begin();   // the pass's records gather here; pv_close hands them to the queue
 }
 static void pv_stores(const sd_stores *st) { if (g_pv_open && !g_wet) g_pv.st = *st; }
-static void pv_note(NvProg *pr, const p_draw *dw, const p_draw_idx *di, id<MTLFunction> fz_fn, uint64_t mdx) {
-    if (g_fb_n || (g_fb_tseq == g_draw_seq && g_fb_tfn) || mdx || fz_fn || g_geo_program || g_geo_mesh.on || g_mtk.on || g_fz.active || g_sm_pass || g_rt_range_active || g_kd_force
-        || g_defer_replaying || S.tf_on || (dw && (dw->mdi_cnt || dw->prim == DM_PRIM_MESH_TASKS)) || (di && di->mdi_cnt) || !pr) g_pv_bad(PV_SPECIAL);
+static pv_draw *pv_push(int kind) {
     if (g_pv.nd == g_pv.cap) { g_pv.cap = g_pv.cap ? g_pv.cap * 2 : 256; g_pv.d = realloc_or_die(g_pv.d, (size_t)g_pv.cap * sizeof *g_pv.d, "the verify mode's draws"); }
-    g_pv.d[g_pv.nd++] = (pv_draw){g_exec_cur, -1};
+    pv_draw *d = &g_pv.d[g_pv.nd++]; memset(d, 0, sizeof *d); d->op = g_exec_cur; d->kind = kind; d->slot = -1; return d;
 }
-static void pv_slot(int s) { if (g_pv.nd) g_pv.d[g_pv.nd - 1].slot = s; }
+static void pv_note(NvProg *pr, const p_draw *dw, const p_draw_idx *di, id<MTLFunction> fz_fn, uint64_t mdx) {
+    uint32_t w = 0;
+    if (g_fb_tseq == g_draw_seq && g_fb_tfn) w |= 1u << PVS_TILE; if (mdx) w |= 1u << PVS_MDX; if (fz_fn || g_fz.active) w |= 1u << PVS_FZ;
+    if (g_geo_program && !g_geo_mesh.on) w |= 1u << PVS_GEO; if (g_mtk.on || (dw && dw->prim == DM_PRIM_MESH_TASKS)) w |= 1u << PVS_MTK;
+    if (g_sm_pass || g_rt_range_active || g_defer_replaying) w |= 1u << PVS_MODE; if (g_kd_force) w |= 1u << PVS_KD; if (S.tf_on) w |= 1u << PVS_TF;
+    if ((dw && dw->mdi_cnt) || (di && di->mdi_cnt)) w |= 1u << PVS_MDI;
+    if (w || !pr) { g_pv_bad(PV_SPECIAL); for (int i = 0; i < PVS_N; i++) if (w >> i & 1) g_pvs[i]++; }
+    pv_draw *d = pv_push(0);
+    if (g_geo_mesh.on && g_geo_program) { d->mesh = 1; d->gm = g_geo_mesh; d->raster = g_geo_program; d->omit = g_geo_omit_colors; if (dw) d->syn = *dw; else g_pv_bad(PV_SPECIAL); }
+}
+static void pv_fb(void) {   // fb_prepare's outcome for a draw of the captured pass
+    pv_draw *d = pv_push(1); d->fbn = g_fb_n; for (int i = 0; i < g_fb_n && i < 4; i++) { d->fsrc[i] = g_fb_src[i]; d->fuse[i] = g_fb_use[i]; d->frid[i] = g_fb_rid[i]; }
+}
+static void pv_slot(int s) { for (int i = g_pv.nd - 1; i >= 0; i--) if (g_pv.d[i].kind == 0) { g_pv.d[i].slot = s; break; } }
 static int pv_state_op(uint32_t op) {
     switch (op) {
         case OP_BIND_PROGRAM: case OP_BIND_STATE: case OP_BIND_VATTR: case OP_BIND_VSTREAM: case OP_BIND_VBUF: case OP_BIND_VBUF1: case OP_BIND_UBO: case OP_BIND_UBO_SMALL:
@@ -13471,23 +13491,40 @@ static rec_chain pv_wet(const uint8_t *p_end, int *ok) {
     memcpy(&S, &g_pv.s, sizeof S); R = g_pv.r; g_pass = g_pv.pass; g_stat_pass = g_pv.stat_pass; g_cb = g_cb_[0];
     if (!g_sub_arenas) g_sub_arenas = [NSMutableArray array];
     args_dirty_all(); g_pso_dirty = g_dss_dirty = 1; g_enc_pso = nil; g_enc_dss = nil; g_ed.ok = 0; g_enc_vis = 0; g_enc_has_vis = g_pv.has_vis; g_enc_mode = g_pv.mode;
-    g_enc_geo_nocolor = g_pv.geo_nocolor; g_rp_aw = g_pv.rp_aw; g_rp_ah = g_pv.rp_ah; g_fb_n = 0; g_fb_rebind = 0; g_vt_valid = 0;
+    g_enc_geo_nocolor = g_pv.geo_nocolor; g_rp_aw = g_pv.rp_aw; g_rp_ah = g_pv.rp_ah; g_vt_valid = 0;
+    g_fb_n = g_pv.fbn; g_fb_rebind = g_pv.fb_rebind; g_draw_seq = g_pv.draw_seq; for (int i = 0; i < 4; i++) { g_fb_src[i] = g_pv.fsrc[i]; g_fb_use[i] = g_pv.fuse[i]; g_fb_rid[i] = g_pv.frid[i]; }
     rec_job_begin();
     g_enc = enc_r_begin_pass(g_pv.pd);
     int k = 0; long n = 0;
     for (const uint8_t *p = g_pv.p0; p && p != p_end; ) {
         if (++n > 4000000) { *ok = 0; break; }
         op_hdr h; memcpy(&h, p, sizeof h); const void *a = p + 8;
+        if (g_mrun.n && !geo_mesh_keeps(h.op)) geo_mesh_flush();   // as mtl_exec does before each operation
         if (h.op == OP_JUMP) { memcpy(&p, a, 8); continue; }
         if (h.op == OP_DRAW || h.op == OP_DRAW_IDX) {
-            for (; k < g_pv.nd && g_pv.d[k].op == p; k++) { p_draw t; p_draw_idx ti; g_pv_slot = g_pv.d[k].slot; g_exec_cur = p; g_exec_next = p + h.size;
-                draw_enc(prog_get(S.prog), h.op == OP_DRAW ? draw_rec(a, h.size, &t) : NULL, h.op == OP_DRAW_IDX ? draw_idx_rec(a, h.size, &ti) : NULL, g_enc, 0, nil, 0); }
+            for (; k < g_pv.nd && g_pv.d[k].op == p; k++) { const pv_draw *d = &g_pv.d[k]; p_draw t; p_draw_idx ti; g_exec_cur = p; g_exec_next = p + h.size;
+                if (d->kind == 1) {   // fb_prepare's per-context part, with the planner's outcome
+                    g_draw_seq++; g_fb_n = 0; if (g_fb_rebind) { args_dirty_all(); g_fb_rebind = 0; }
+                    if (d->fbn) { for (int i = 0; i < d->fbn; i++) { g_fb_src[i] = d->fsrc[i]; g_fb_use[i] = d->fuse[i]; g_fb_rid[i] = d->frid[i]; } g_fb_n = d->fbn; args_dirty_all(); g_fb_rebind = 1; }
+                    continue; }
+                g_pv_slot = d->slot;
+                if (d->mesh) {   // geo_mesh_draw's encoding: its run ends at another pair, then the mesh draw through its raster program
+                    if (g_mrun.n && (d->raster->sh[0] != g_mrun.vs || d->raster->sh[1] != g_mrun.fs || d->gm.fn != g_mrun.fn || (__bridge void *)g_enc != (__bridge void *)g_mrun.en)) geo_mesh_flush_draw();
+                    g_geo_mesh = d->gm; g_geo_mesh.on = 1; g_geo_mesh.miss = 0; g_geo_program = d->raster; g_geo_omit_colors = d->omit;
+                    draw_enc(d->raster, &d->syn, NULL, g_enc, 0, nil, 0);
+                    g_geo_program = nil; g_geo_mesh.on = 0; g_geo_omit_colors = 0; args_dirty_all();
+                } else {
+                    if (!g_geo_mesh.on) geo_mesh_flush_draw();   // draw_: a waiting run of mesh draws goes first
+                    draw_enc(prog_get(S.prog), h.op == OP_DRAW ? draw_rec(a, h.size, &t) : NULL, h.op == OP_DRAW_IDX ? draw_idx_rec(a, h.size, &ti) : NULL, g_enc, 0, nil, 0);
+                }
+            }
             g_exec_next = NULL;
         } else if (h.op == OP_SET_RT) R.rt = *(const p_set_rt *)a;   // a same-target continuation (any other SET_RT ends the pass before it)
         else if (pv_state_op(h.op)) state_op(h.op, a);
         else if (h.op != OP_BARRIER && h.op != OP_UPDATE_UB && h.op != OP_REPORT_COUNTER && h.op != OP_RESET_COUNTER && h.op != OP_BEGIN) { *ok = 0; g_pv_why[PV_OP]++; break; }
         p += h.size;
     }
+    while (k < g_pv.nd && g_pv.d[k].kind == 1 && g_pv.d[k].op == p_end) k++;   // fb_prepare of the draw that ended the pass, before it ended it
     if (*ok && k != g_pv.nd) { *ok = 0; g_pv_why[PV_COUNT]++; }
     geo_mesh_flush_pass(); if (g_pv.st.n) sd_apply(g_enc, &g_pv.st); enc_r_end_pass(g_enc); g_enc = nil;
     rec_publish(); rec_chain c = g_rb_job; g_rb_job = (rec_chain){0}; g_rb_jobmode = 0;
@@ -13561,6 +13598,8 @@ static void pv_close(void) {
         if (g_pv_frame) MLOG("parallel verify up to frame %llu: passes %llu, compared %llu (identical %llu, identical but for arena addresses %llu, different %llu), not compared: %s%s%s",
             (unsigned long long)f, (unsigned long long)g_pv_pass, (unsigned long long)g_pv_tried, (unsigned long long)g_pv_same, (unsigned long long)g_pv_soft, (unsigned long long)g_pv_diff,
             o ? w : "-", g_pv_first[0] ? "; first difference " : "", g_pv_first);
+        { char v[300]; size_t q = 0; for (int i = 0; i < PVS_N; i++) if (g_pvs[i]) q += (size_t)snprintf(v + q, sizeof v - q, "%s%s %llu", q ? ", " : "", g_pvs_name[i], (unsigned long long)g_pvs[i]);
+          if (q && g_pv_frame) MLOG("parallel verify: special draws by kind: %s", v); memset(g_pvs, 0, sizeof g_pvs); }
         g_pv_frame = f; g_pv_pass = g_pv_tried = g_pv_same = g_pv_soft = g_pv_diff = 0; memset(g_pv_why, 0, sizeof g_pv_why); g_pv_first[0] = 0;
     }
 }

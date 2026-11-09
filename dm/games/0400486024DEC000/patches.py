@@ -8,7 +8,33 @@ from nso_asm import ADRP, B
 # (the division's value when the host keeps frames 60 / rate vsyncs), and counts the vsyncs stepped. Until the host has decided a step, and at fps_target 0, the division runs.
 # s0 and x16 / x17 are free there (s0 is written again on every path before it is read; the function uses neither x16 nor x17); s1 keeps the base rate.
 # Lichii (a GPL emulator; only the fact was taken) found the division (its notes: main+0x6E6CC4, 60 / [x21+0x2C8])
+fractional_build = "e0f3ccfaf50065ae4ea01eb5aeb13b1a"
+
+def real_speed(ctx):
+    ctx.fractional = 2
+    here, emit = ctx.here, ctx.emit
+    ctx.site(0x6e6cc4, '2818201e')
+    start = here()
+    emit(0x1e201828)                 # fdiv s8,s1,s0: native fallback
+    emit(ADRP(16, here(), ctx.state))
+    emit(0x52800051)                 # mov w17,#2: fractional contract
+    emit(0xb9003e11)                 # str w17,[x16,#0x3c]
+    emit(0xb9404611)                 # ldr w17,[x16,#0x44]: validated positive float bits or zero
+    emit(0x34000071)                 # cbz w17,+12: native fallback, preserves NZCV
+    emit(0x1e270220)                 # fmov s0,w17
+    emit(0x1e201828)                 # fdiv s8,s1,s0: requested simulation step
+    emit(0xbd403a00)                 # ldr s0,[x16,#0x38]: elapsed seconds
+    emit(0x1e210800)                 # fmul s0,s0,s1
+    emit(0x1e204908)                 # fmax s8,s8,s0: correct late frames
+    emit(B(here(), 0x6e6cc8))
+    ctx.put(0x6e6cc4, [B(0x6e6cc4, start)], 'EXPERIMENT: fractional simulation step without modifying native rendering budget')
+
+
 def frame_step(ctx):
+    if getattr(ctx, "experimental_fractional", False) and getattr(ctx, "build_id", None) == fractional_build:
+        real_speed(ctx)
+        dynamic_resolution(ctx)
+        return
     here, emit, fs_site, fs_put, FS_STATE_OFF, base = ctx.here, ctx.emit, ctx.site, ctx.put, ctx.state, ctx.base
     site = base + 0xe4
     fs_site(site, '2818201e')   # fdiv s8,s1,s0

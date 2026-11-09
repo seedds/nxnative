@@ -1830,6 +1830,7 @@ static _Atomic uint64_t g_itv2_since;   // start of the game's current run of ev
 //   a single interval-2 frame is instead kept on screen for its own period by the display-link callback, and the next acquire waits as many ticks (mtl_link_wait_tick, nvn_mtl.m), without changing the mode
 // Frame step (patch_nso.py FRAME_STEP: Tears of the Kingdom 1.4.3, Breath of the Wild 1.9.0): the game no longer picks an interval. The host hands it each frame's step in whole vsyncs
 // (fstep_tick, nvn_fstep.h) and presents follow the hold k it decides with it
+__attribute__((weak)) int dm_fps_fractional;
 __attribute__((weak)) uint8_t *dm_fps_state;   // loader.c; graphics unit tests have no loader
 __attribute__((weak)) void dm_fps_lock_tick(void) {}   // hle_fpslock.c: engine frame limits in game memory (Monster Hunter Rise); graphics unit tests have no host
 static int g_engine_stub = 1;   // the weak dm_fps_lock_engine's answer, for graphics unit tests (t_nvn sets it)
@@ -1865,15 +1866,16 @@ static int thermal_capped(void) {
 // A game may step by its target whatever the frames really take (Fire Emblem Fortune's Weave: 60.0 / target a frame), so a target of 120 at 70 frames a second is a game at 58% speed, and
 // on a 60 Hz screen at half speed: late frames step the hold up (nvn_fstep.h), the target follows the hold, and the game's step stays what the screen shows. The cap is 60 on a screen
 // below 120 Hz, while a movie plays (its pictures are paced for the Switch's 30 and 60) and under the thermal cap. No window (headless): nothing limits the rate but the pacer's clock.
-// A game with a frame step state page is out: its stubs hand the game whole vsyncs of 1/60 s
+// Whole-vsync stubs cannot use high-rate pacing; fractional stubs explicitly declare their contract.
 static int g_fps_high = -1;
 static _Atomic int g_high_cap = 60;
 static int fps_high(void) {
     int v = __atomic_load_n(&g_fps_high, __ATOMIC_RELAXED);
     if (v < 0) {
         const char *e = getenv("DM_FPS_TARGET"); int t = e ? atoi(e) : DM_GAME_FPS_TARGET;
-        v = t == 120 && DM_GAME_FPS_MAX >= 120 && !dm_fps_state && dm_fps_lock_engine();
-        if (t == 120 && DM_GAME_FPS_MAX >= 120 && !v) LOG("[RED] [nvn] 120 fps: this main has %s, so it runs at 60", dm_fps_state ? "a frame step in whole vsyncs" : "no engine frame limit the host writes");
+        v = t == 120 && DM_GAME_FPS_MAX >= 120 && (dm_fps_fractional || (!dm_fps_state && dm_fps_lock_engine()));
+        if (dm_fps_fractional && (dm_detclock_enabled() || (getenv("DM_FRAME_DELTA") && !strcmp(getenv("DM_FRAME_DELTA"), "0")))) v = 0;
+        if (t == 120 && DM_GAME_FPS_MAX >= 120 && !v) LOG("[RED] [nvn] 120 fps: this main has %s, so it runs at 60", dm_fps_fractional ? "no enabled real-time fractional clock" : dm_fps_state ? "a frame step in whole vsyncs" : "no engine frame limit the host writes");
         __atomic_store_n(&g_fps_high, v, __ATOMIC_RELAXED);
     }
     return v;
@@ -1895,9 +1897,10 @@ static int fps_step_cap(void) {
     // Movies and a 30 fps target still need thermal samples: heat must reset the
     // calm interval, and cooling during those caps counts towards recovery.
     int thermal = thermal_capped();
+    if (dm_fps_fractional && fps_high() && !dm_movie_playing() && t > 30 && !thermal) return atomic_load(&g_high_cap);
     return dm_movie_playing() || t <= 30 || thermal ? 30 : 60;   // a movie: its player takes a picture per game frame, paced for the Switch's 30 (hle_movie.c)
 }
-static int fstep_on(void) { return fps_step_cap() != 0; }   // the host decides the steps in whole vsyncs
+static int fstep_on(void) { return !dm_fps_fractional && fps_step_cap() != 0; }   // the host decides the steps in whole vsyncs
 // Engine-native frame limiters have no frame-step state page. Their requested
 // cap still governs presentation, even when the profile uses display pacing.
 // Without a limiter the host writes (dm_fps_lock_engine) nothing makes the game
@@ -2096,7 +2099,19 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     if (dm_fps_state) __atomic_store_n((uint32_t *)(dm_fps_state + 4), (uint32_t)dm_movie_playing(), __ATOMIC_RELAXED);   // the stubs' copy of the movie state (hle.h)
     int c = fps_step_cap();
     if (dm_fps_state) { static int was; if (c != was) { LOG("[nvn] frame step cap %d → %d fps at present %llu%s", was, c, (unsigned long long)o->presents, c == 30 && was == 60 ? (dm_movie_playing() ? " (movie playing)" : thermal_capped() ? " (thermal state serious)" : "") : ""); was = c; } }
-    if (c) fstep_tick(o, c);
+    if (dm_fps_fractional) {
+        static nvn_fdelta fd;
+        float override = fps_high() ? (float)c : 0.0f;
+        uint32_t bits; memcpy(&bits, &override, sizeof bits);
+        __atomic_store_n((uint32_t *)(dm_fps_state + 0x44), bits, __ATOMIC_RELAXED);
+        const char *e = getenv("DM_FRAME_DELTA");
+        if (!dm_detclock_enabled() && (!e || strcmp(e, "0"))) {
+            float seconds = c > 0 ? nvn_fdelta_next_for_target(&fd, now_ns(), c) : 0;
+            memcpy(&bits, &seconds, sizeof bits);
+            __atomic_store_n((uint32_t *)(dm_fps_state + 0x38), bits, __ATOMIC_RELAXED);
+        }
+    }
+    if (c && !dm_fps_fractional) fstep_tick(o, c);
     dm_fps_lock_tick();   // after the frame step: at 120 fps the target follows the hold just decided
     static uint64_t prev_in, prev_out, prev_pass, prev_draw;
     present_cfg(o);

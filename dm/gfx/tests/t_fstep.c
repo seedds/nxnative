@@ -18,7 +18,37 @@ static void run(sim *m, int n, double w, int kmin, int kmax, int fixed) {
     }
 }
 
+static void fractional_clock_checks(void) {
+    // Exercise elapsed-time accounting with the same max(native step, elapsed)
+    // used by the fractional guest stub. Timing changes must not slow simulation.
+    for (int mode = 0; mode < 4; mode++) {
+        nvn_fdelta f = {0}; uint64_t now = 1000;
+        double game = 0, wall = 0;
+        nvn_fdelta_next_for_target(&f, now, 120);
+        for (int i = 0; i < 7200; i++) {
+            double target = 120, dt;
+            if (mode == 0) { const int rates[] = {120, 90, 60, 120}; dt = 1.0 / rates[(i / 600) % 4]; }
+            else if (mode == 1) dt = i % 2 ? 0.009666666666666667 : 0.007;
+            else if (mode == 2) { target = (i / 600) % 2 ? 60 : 120; dt = 1.0 / target; }
+            else dt = i % 120 == 119 ? 0.05 : 1.0 / 120;
+            uint64_t ns = (uint64_t)llround(dt * 1e9); now += ns;
+            wall += ns / 1e9;
+            game += fmax(1.0 / target, nvn_fdelta_next_for_target(&f, now, target));
+        }
+        char label[160];
+        snprintf(label, sizeof label, "fractional clock mode %d: game %.6f s / wall %.6f s", mode, game, wall);
+        // The final smoothing window can retain a small amount of elapsed time.
+        check(fabs(game - wall) < 0.05, label);
+    }
+    nvn_fdelta f = {0}; uint64_t now = 1000;
+    check(nvn_fdelta_next_for_target(&f, now, 120) == 0, "fractional clock: first sample has no elapsed interval");
+    for (int i = 0; i < 16; i++) nvn_fdelta_next_for_target(&f, now += 16666667, 60);
+    float step = nvn_fdelta_next_for_target(&f, now += 8333333, 120);
+    check(fabs(step - 1.0 / 120) < 1e-8, "fractional target transition discards old 60 Hz smoothing samples");
+}
+
 int main(void) {
+    fractional_clock_checks();
     {   // 120 fps (hle_nvn.c fps_high): kmin 1, kmax 2, in ticks of 1/120 s. The target follows the hold, so a hold above what frames take is the game at the right speed
         sim m = {0}; m.s.per_vsync = 2;
         run(&m, 120, 0.7, 1, 2, 0); check(m.s.k == 1, "120 fps: frames of 5.8 ms hold 120");

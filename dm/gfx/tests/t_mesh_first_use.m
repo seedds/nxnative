@@ -35,6 +35,7 @@ int main(void) { @autoreleasepool {
         "[[object]] void block(object_data Block& b [[payload]], mesh_grid_properties grid, uint otg [[threadgroup_position_in_grid]], constant uint* draw [[buffer(29)]]) {\n"
         "  uint base = otg * 1024u; b.first = draw[1] + base; grid.set_threadgroups_per_grid(uint3(min(draw[0] - base, 1024u), 1u, 1u)); }\n"
         "[[mesh]] void direct(Mesh m, const object_data Block& b [[payload]], uint tg [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]]) { if (!tid) triangle(m, b.first + tg); }\n"
+        "[[mesh]] void legacy_direct(Mesh m, uint tg [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]], constant uint* first [[buffer(29)]]) { if (!tid) triangle(m, first[0] + tg); }\n"
         "[[object]] void task(object_data Payload& p [[payload]], mesh_grid_properties grid, uint tid [[thread_index_in_threadgroup]], constant uint* draw [[buffer(29)]]) {\n"
         "  if (!tid) { p.first = draw[1]; grid.set_threadgroups_per_grid(uint3(1)); } }\n"
         // a workgroup's own pixel of a GW x GH target (its number modulo the pixels), at depth (number + 1) / 8192: a triangle around that pixel's centre and no other
@@ -51,13 +52,14 @@ int main(void) { @autoreleasepool {
     if (!library) fprintf(stderr, "%s\n", error.localizedDescription.UTF8String);
     require(library != nil, "synthetic task and mesh shaders compile");
     NvShader *ms = shader(library, @"direct", 4), *tasked = shader(library, @"tasked", 4), *ts = shader(library, @"task", 3), *fs = shader(library, @"color", 1);
-    NvShader *vs = shader(library, @"vertex_only", 0), *px = shader(library, @"pixel", 4);
-    ms->mesh_kind = tasked->mesh_kind = px->mesh_kind = 2; ms->mesh_notask = px->mesh_notask = 1; px->mesh_threads = 32;
+    NvShader *vs = shader(library, @"vertex_only", 0), *px = shader(library, @"pixel", 4), *leg = shader(library, @"legacy_direct", 4);
+    ms->mesh_kind = tasked->mesh_kind = px->mesh_kind = leg->mesh_kind = 2; ms->mesh_notask = px->mesh_notask = leg->mesh_notask = 1; px->mesh_threads = 32;
+    leg->mesh_legacy = 1; leg->mesh_threads = 32;
     ms->mesh_obj = px->mesh_obj = [library newFunctionWithName:@"block"]; require(ms->mesh_obj != nil, "the block object function exists");
     ms->mesh_threads = tasked->mesh_threads = ts->mesh_threads = 32; ts->mesh_kind = 1; ts->mesh_payload = 4; fs->rf.color_mask = 1;
-    prog_t programs[4] = {0};
-    for (int kind = 0; kind < 4; kind++) {
-        NvProg *p = [NvProg new]; p->sh[0] = kind == 3 ? vs : nil; p->sh[4] = kind == 3 ? nil : kind ? tasked : ms;
+    prog_t programs[5] = {0};
+    for (int kind = 0; kind < 5; kind++) {
+        NvProg *p = [NvProg new]; p->sh[0] = kind == 3 ? vs : nil; p->sh[4] = kind == 3 ? nil : kind == 4 ? leg : kind ? tasked : ms;
         p->sh[3] = kind == 1 || kind == 2 ? ts : nil; p->sh[1] = kind == 2 ? nil : fs;
         programs[kind].magic = MAGIC('P','R','O','G'); programs[kind].serial = nvn_new_serial(); serial_put(programs[kind].serial, p);
     }
@@ -80,8 +82,8 @@ int main(void) { @autoreleasepool {
     NVNdepthStencilState ds; P(nvnDepthStencilStateSetDefaults)(&ds); P(nvnDepthStencilStateSetDepthTestEnable)(&ds, 1);
     P(nvnDepthStencilStateSetDepthWriteEnable)(&ds, 1); P(nvnDepthStencilStateSetDepthFunc)(&ds, NVN_DEPTH_FUNC_LESS);
     const NVNtexture *colors[] = {(const NVNtexture *)&color}; const float viewport[] = {0, 0, W, H}, blue[] = {0, 0, 1, 1};
-    for (int kind = 0; kind < 4; kind++) for (int pass = 0; pass < 2; pass++) {
-        printf("%s, %s pipeline\n", kind == 0 ? "mesh only" : kind == 1 ? "task and mesh" : kind == 2 ? "depth only" : "ordinary vertex", pass ? "cached" : "first use");
+    for (int kind = 0; kind < 5; kind++) for (int pass = 0; pass < 2; pass++) {
+        printf("%s, %s pipeline\n", kind == 0 ? "mesh only" : kind == 1 ? "task and mesh" : kind == 2 ? "depth only" : kind == 3 ? "ordinary vertex" : "legacy mesh only", pass ? "cached" : "first use");
         P(nvnCommandBufferBeginRecording)(&command);
         P(nvnCommandBufferSetRenderTargets)(&command, kind == 2 ? 0 : 1, colors, NULL, (const NVNtexture *)&depth, NULL);
         P(nvnCommandBufferSetViewports)(&command, 0, 1, viewport); P(nvnCommandBufferSetScissor)(&command, 0, 0, W, H);

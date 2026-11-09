@@ -5,6 +5,9 @@
 #include "hle.h"
 #include <AudioToolbox/AudioToolbox.h>
 #include <TargetConditionals.h>
+#if !TARGET_OS_IPHONE
+#include <CoreAudio/CoreAudio.h>   // the system's default input device and its changes (the HAL; macOS only)
+#endif
 #include <dispatch/dispatch.h>
 #include <stdatomic.h>
 #include <unistd.h>
@@ -719,30 +722,444 @@ typedef struct { int64_t a, b, c; } os_stats;
 HLE_FORCE("_ZN2nn5audio25GetOutputStreamStatisticsEPNS0_16OutputStreamTypeEb", "stream statistics: none kept", os_stats, h_os_Stats, void *g, bool reset) {
     (void)g; (void)reset; os_stats s = {0}; return s;
 }
-// SDK 21's input streams (a microphone, GameChat; Star Fox imports them), as AudioIn above: no device is listed and an open fails, so the calls that need an open stream are never reached;
-// they still answer without touching the guest object, in case a game ignores the open's result
-HLE_FORCE("_ZN2nn5audio23ListVirtualInputDevicesEPNS0_15AudioDeviceNameEi", "connect to auddmg:u; the host has no microphone: no device", int, h_is_List, void *names, int n) { (void)names; (void)n; return 0; }
-HLE_FORCE("_ZN2nn5audio31GetVirtualInputDevicePropertiesEPNS0_23VirtualDevicePropertiesERKNS0_15AudioDeviceNameE", "connect to auddmg:u; no such device", Result, h_is_Props, void *props, const char *name) { (void)props; (void)name; return RES_FAIL; }
-HLE_FORCE("_ZN2nn5audio15OpenInputStreamEPNS0_15InputStreamTypeEPvmRKNS0_15AudioDeviceNameERKNS0_12StreamFormatEi", "connect to auddmg:u; no microphone on the host: fails", Result, h_is_Open,
-          void *g, void *buf, size_t size, const char *dev, const void *fmt, int frames) { (void)g; (void)buf; (void)size; (void)dev; (void)fmt; (void)frames; return RES_FAIL; }
-HLE_FORCE("_ZN2nn5audio16CloseInputStreamEPNS0_15InputStreamTypeE", "input stream, never open", void, h_is_Close, void *g) { (void)g; }
-HLE_FORCE("_ZN2nn5audio16StartInputStreamEPNS0_15InputStreamTypeE", "input stream, never open", Result, h_is_Start, void *g) { (void)g; return RES_FAIL; }
-HLE_FORCE("_ZN2nn5audio15StopInputStreamEPNS0_15InputStreamTypeE", "input stream, never open", void, h_is_Stop, void *g) { (void)g; }
-HLE_FORCE("_ZN2nn5audio15ReadInputStreamEPNS0_15InputStreamTypeEPvi", "input stream, never open: nothing read", int, h_is_Read, void *g, void *buf, int frames) { (void)g; (void)buf; (void)frames; return 0; }
-HLE_FORCE("_ZN2nn5audio30GetInputStreamFilledFrameCountEPKNS0_15InputStreamTypeE", "input stream, never open: nothing captured", int, h_is_Filled, const void *g) { (void)g; return 0; }
+// ---------- SDK 21 / 22's input streams: the Mac's microphone ----------
+// ListVirtualInputDevices names the devices a game may open with OpenInputStream; GetTrueRawAudioInputDevice names the unprocessed capture of the same microphone. The Legend of Zelda:
+// Ocarina of Time lists them when its audio starts (main+0xf48124), opens the first listed device and the raw one, each as PCM16 mono 48 kHz with a capacity of 4800 frames
+// (format at main+0x3f11464), starts both when the player takes out the ocarina, reads at most 256 frames at a time while GetInputStreamFilledFrameCount is above 0
+// (main+0x336d7d0, main+0x336ddc0), and stops, purges and starts both again between songs. States as the SDK keeps them (InputStreamImpl +0x110): 0 not open, 1 stopped, 2 started.
+// Host: one capture of the Mac's default input device, or of the built-in microphone when that is a Bluetooth headset the sound also plays on (mic_choose) (an AudioQueue, which converts from the device's own rate to 48 kHz mono PCM16; recreated when the default input device changes
+// or its device goes away, mic_restart), running while any stream is started, copied into
+// each started stream's ring; a full ring drops its oldest frames, so a stream the game does not read (one of the two) keeps the latest 100 ms. A read converts to the stream's format
+// and channel count and applies its gain (no ramp). The guest's work buffer is not used. DM_MIC=0 lists no device (the game then skips its input streams, as before the host had a
+// microphone); on by default with real audio output on the Mac, off on iOS (its audio session and Info.plist do not ask for the microphone)
+enum { IS_RATE = RATE, IS_FMT_PCM16 = 2, IS_FMT_FLOAT = 5, IS_NONE = 0, IS_STOPPED = 1, IS_STARTED = 2, ISMAX = 8, MIC_BUF_FRAMES = 480, MIC_NBUF = 3 };
+static const char IS_DEVICE[] = "AudioVirtualInput", IS_RAW_DEVICE[] = "AudioTrueRawInput";   // names of the host's, as GetDefaultVirtualOutputDevice's
+typedef struct {
+    pthread_mutex_t m;
+    int state, fmt, ch, cap;   // cap: frames the ring holds
+    float gain;
+    void *event;               // signaled when captured frames arrive (the overload with an event)
+    int16_t *ring; int head, filled;   // mono 48 kHz frames; head: the oldest
+    uint64_t dropped;          // frames dropped from a full ring
+    int id;                    // open sequence number (DM_MIC_DUMP's file names)
+    FILE *dump; uint32_t dump_bytes;   // DM_MIC_DUMP: what the game read from this stream, as a WAV
+} istream;
+static istream *g_is[ISMAX];
+static int g_is_started;                                       // streams in state 2: the capture runs while this is above 0
+static pthread_mutex_t g_is_lock = PTHREAD_MUTEX_INITIALIZER;  // g_is and g_is_started; the capture callback takes it, so the capture is never stopped under it
+static pthread_mutex_t g_mic_lock = PTHREAD_MUTEX_INITIALIZER; // serializes starting and stopping the capture (taken before g_is_lock)
+typedef struct { int (*start)(void); void (*stop)(void); } mic_source;   // the capture; tests put a fake one in its place
+static int mic_aq_start(void); static void mic_aq_stop(void);
+static int mic_default_start(void); static void mic_default_stop(void);
+static mic_source g_mic = { mic_default_start, mic_default_stop };
+
+static int mic_enabled(void) {
+    const char *e = getenv("DM_MIC");
+    if (getenv("DM_MIC_WAV") && !(e && !atoi(e))) return 1;   // a file in place of the device: no microphone, no permission, on every platform
+#if TARGET_OS_IPHONE
+    static _Atomic int once; if (e && atoi(e) && !atomic_exchange(&once, 1)) LOG("[RED] DM_MIC=1: the microphone is not supported on iOS yet, no input device is listed");
+    return 0;
+#else
+    return e ? atoi(e) != 0 : real_audio();
+#endif
+}
+static istream *is_of(const void *g) { istream *s = objmap_get(g); if (!s) die("InputStream %p was not opened by the host", g); return s; }
+
+// Captured mono 48 kHz PCM16 into every started stream (the capture's thread; tests call it directly)
+static void is_feed(const int16_t *pcm, int n) {
+    if (n <= 0) return;
+    pthread_mutex_lock(&g_is_lock);
+    for (int i = 0; i < ISMAX; i++) {
+        istream *s = g_is[i]; if (!s) continue;
+        pthread_mutex_lock(&s->m);
+        if (s->state == IS_STARTED) {
+            const int16_t *src = pcm; int k = n;
+            if (k > s->cap) { s->dropped += (uint64_t)(k - s->cap); src += k - s->cap; k = s->cap; }
+            int over = s->filled + k - s->cap;
+            if (over > 0) { s->head = (s->head + over) % s->cap; s->filled -= over; s->dropped += (uint64_t)over; }
+            for (int j = 0, w = (s->head + s->filled) % s->cap; j < k; j++, w = w + 1 == s->cap ? 0 : w + 1) s->ring[w] = src[j];
+            s->filled += k;
+            if (s->event) hle_signal_system_event(s->event);
+        }
+        pthread_mutex_unlock(&s->m);
+    }
+    pthread_mutex_unlock(&g_is_lock);
+}
+
+// The capture's device changed or went away: while any stream is started, stop the capture and start it again, which takes the system's default input device as it is now.
+// The streams, their states and their rings stay as they are; frames captured during the switch are lost. Returns whether it restarted (tests call it directly)
+static int mic_restart(const char *why) {
+    pthread_mutex_lock(&g_mic_lock);
+    pthread_mutex_lock(&g_is_lock); int on = g_is_started > 0; pthread_mutex_unlock(&g_is_lock);
+    if (on) { LOG("microphone: %s, capturing the default input device again", why); g_mic.stop(); g_mic.start(); }
+    pthread_mutex_unlock(&g_mic_lock);
+    return on;
+}
+
+// An AudioQueue input binds to the default input device when it is created and stays on it: it does not follow a new choice in System Settings (AirPods, the built-in microphone,
+// a USB interface), and when its device disappears (AirPods disconnecting) it stops. So the host listens for the system's default input device changing and for its queue stopping
+// by itself, and recreates the queue on the default device then (mic_restart, on a serial queue of its own: never on the audio threads that report the change). It listens for the
+// default output device changing too, since a Bluetooth input that is also the output is not captured (mic_choose)
+static AudioQueueRef g_aq;       // changed only under g_mic_lock
+static _Atomic int g_aq_run;
+static dispatch_queue_t g_mic_q;
+static void mic_aq_input(void *ud, AudioQueueRef q, AudioQueueBufferRef b, const AudioTimeStamp *t, UInt32 npk, const AudioStreamPacketDescription *d) {
+    (void)ud; (void)t; (void)npk; (void)d;
+    if (!atomic_load(&g_aq_run)) return;
+    is_feed(b->mAudioData, (int)(b->mAudioDataByteSize / 2));
+    AudioQueueEnqueueBuffer(q, b, 0, NULL);
+}
+static void mic_default_changed(void *ctx) { (void)ctx; mic_restart("the default input device changed"); }
+static void mic_output_changed(void *ctx) { (void)ctx; mic_restart("the default output device changed"); }
+static void mic_aq_lost(void *q) {   // only the queue that is current: a late notice from a queue already replaced is ignored
+    pthread_mutex_lock(&g_mic_lock); int current = q == g_aq && atomic_load(&g_aq_run); pthread_mutex_unlock(&g_mic_lock);
+    if (current) mic_restart("the input device stopped (disconnected?)");
+}
+static void mic_aq_running(void *ud, AudioQueueRef q, AudioQueuePropertyID id) {
+    (void)ud; (void)id;
+    UInt32 running = 1, size = sizeof running;
+    if (!AudioQueueGetProperty(q, kAudioQueueProperty_IsRunning, &running, &size) && !running && atomic_load(&g_aq_run)) dispatch_async_f(g_mic_q, q, mic_aq_lost);
+}
+#if !TARGET_OS_IPHONE
+// Which device the capture takes. A Bluetooth headset's microphone (AirPods) switches the headset to its two-way call profile while it captures, so the game's sound on that
+// headset drops to call quality until the capture stops. When the default input device is a Bluetooth device that is also the default output device (the same device, or the
+// same Bluetooth address: the UID before its first ':'), the capture takes the built-in microphone instead, and nothing when the Mac has none. Any other input is taken as it is
+typedef struct { AudioDeviceID id; uint32_t transport; const char *uid; } mic_dev;   // uid: kAudioDevicePropertyDeviceUID, "" when unknown
+enum { MIC_TAKE_DEFAULT, MIC_TAKE_BUILTIN, MIC_TAKE_NONE };
+static int mic_same_device(const mic_dev *a, const mic_dev *b) {
+    if (a->id != kAudioObjectUnknown && a->id == b->id) return 1;
+    size_t na = strcspn(a->uid, ":"), nb = strcspn(b->uid, ":");
+    return na && na == nb && !strncmp(a->uid, b->uid, na);
+}
+static int mic_pick(const mic_dev *in, const mic_dev *out, int have_builtin) {   // tests call it directly
+    int bluetooth = in->transport == kAudioDeviceTransportTypeBluetooth || in->transport == kAudioDeviceTransportTypeBluetoothLE;
+    if (!bluetooth || !mic_same_device(in, out)) return MIC_TAKE_DEFAULT;
+    return have_builtin ? MIC_TAKE_BUILTIN : MIC_TAKE_NONE;
+}
+static OSStatus mic_hal_changed(AudioObjectID obj, UInt32 n, const AudioObjectPropertyAddress *addr, void *ud) {
+    (void)obj; (void)n; (void)ud;
+    dispatch_async_f(g_mic_q, NULL, addr->mSelector == kAudioHardwarePropertyDefaultOutputDevice ? mic_output_changed : mic_default_changed);
+    return noErr;
+}
+static AudioDeviceID mic_default_device(AudioObjectPropertySelector sel) {
+    AudioObjectPropertyAddress a = { sel, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+    AudioDeviceID dev = kAudioObjectUnknown; UInt32 size = sizeof dev;
+    return AudioObjectGetPropertyData(kAudioObjectSystemObject, &a, 0, NULL, &size, &dev) ? kAudioObjectUnknown : dev;
+}
+static uint32_t mic_transport(AudioDeviceID dev) {
+    AudioObjectPropertyAddress a = { kAudioDevicePropertyTransportType, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+    uint32_t t = kAudioDeviceTransportTypeUnknown; UInt32 size = sizeof t;
+    return dev == kAudioObjectUnknown || AudioObjectGetPropertyData(dev, &a, 0, NULL, &size, &t) ? kAudioDeviceTransportTypeUnknown : t;
+}
+static CFStringRef mic_string(AudioDeviceID dev, AudioObjectPropertySelector sel) {   // a device's name or UID (the caller releases it), or NULL
+    AudioObjectPropertyAddress a = { sel, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+    CFStringRef v = NULL; UInt32 size = sizeof(CFStringRef);
+    if (dev == kAudioObjectUnknown || AudioObjectGetPropertyData(dev, &a, 0, NULL, &size, &v)) return NULL;
+    return v;
+}
+static void mic_cstr(CFStringRef v, char *out, size_t n, const char *fallback) {
+    if (!v || !CFStringGetCString(v, out, (CFIndex)n, kCFStringEncodingUTF8)) snprintf(out, n, "%s", fallback);
+}
+static void mic_device_name(AudioDeviceID dev, char *out, size_t n) {
+    CFStringRef name = mic_string(dev, kAudioObjectPropertyName);
+    if (dev == kAudioObjectUnknown) snprintf(out, n, "none");
+    else { char id[32]; snprintf(id, sizeof id, "device %u", dev); mic_cstr(name, out, n, id); }
+    if (name) CFRelease(name);
+}
+static AudioDeviceID mic_builtin_input(void) {   // the built-in microphone: a built-in device with input streams
+    AudioObjectPropertyAddress a = { kAudioHardwarePropertyDevices, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+    UInt32 size = 0; AudioDeviceID found = kAudioObjectUnknown, devs[64];
+    if (AudioObjectGetPropertyDataSize(kAudioObjectSystemObject, &a, 0, NULL, &size)) return found;
+    if (size > sizeof devs) size = sizeof devs;
+    if (AudioObjectGetPropertyData(kAudioObjectSystemObject, &a, 0, NULL, &size, devs)) return found;
+    AudioObjectPropertyAddress in = { kAudioDevicePropertyStreams, kAudioObjectPropertyScopeInput, kAudioObjectPropertyElementMain };
+    for (UInt32 i = 0; i < size / sizeof devs[0] && found == kAudioObjectUnknown; i++) {
+        UInt32 streams = 0;
+        if (mic_transport(devs[i]) == kAudioDeviceTransportTypeBuiltIn && !AudioObjectGetPropertyDataSize(devs[i], &in, 0, NULL, &streams) && streams) found = devs[i];
+    }
+    return found;
+}
+// The device to capture: its name in dev, and in *uid the UID to set on the queue when it is not the default input (NULL: the default). Returns MIC_TAKE_*
+static int mic_choose(char *dev, size_t n, CFStringRef *uid) {
+    *uid = NULL;
+    AudioDeviceID in_id = mic_default_device(kAudioHardwarePropertyDefaultInputDevice), out_id = mic_default_device(kAudioHardwarePropertyDefaultOutputDevice);
+    CFStringRef in_uid = mic_string(in_id, kAudioDevicePropertyDeviceUID), out_uid = mic_string(out_id, kAudioDevicePropertyDeviceUID);
+    char in_u[256], out_u[256]; mic_cstr(in_uid, in_u, sizeof in_u, ""); mic_cstr(out_uid, out_u, sizeof out_u, "");
+    if (in_uid) CFRelease(in_uid);
+    if (out_uid) CFRelease(out_uid);
+    mic_dev in = { in_id, mic_transport(in_id), in_u }, out = { out_id, mic_transport(out_id), out_u };
+    AudioDeviceID builtin = mic_pick(&in, &out, 1) == MIC_TAKE_DEFAULT ? kAudioObjectUnknown : mic_builtin_input();
+    int take = mic_pick(&in, &out, builtin != kAudioObjectUnknown);
+    char in_name[128]; mic_device_name(in_id, in_name, sizeof in_name);
+    if (take == MIC_TAKE_DEFAULT) { snprintf(dev, n, "%s", in_name); return take; }
+    if (take == MIC_TAKE_NONE) {
+        LOG("microphone: not capturing: the default input device (%s) is the Bluetooth device the game's sound plays on, capturing it would switch it to its call profile (call-quality sound), "
+            "and this Mac has no built-in microphone; the input streams stay silent until the default input or output device changes", in_name);
+        return take;
+    }
+    mic_device_name(builtin, dev, n);
+    *uid = mic_string(builtin, kAudioDevicePropertyDeviceUID);
+    LOG("microphone: the default input device (%s) is the Bluetooth device the game's sound plays on, and capturing it would switch it to its call profile (call-quality sound): "
+        "capturing the built-in microphone (%s) instead", in_name, dev);
+    return take;
+}
+#endif
+static void mic_watch_init(void) {
+    g_mic_q = dispatch_queue_create("dm.microphone", DISPATCH_QUEUE_SERIAL);
+#if !TARGET_OS_IPHONE
+    AudioObjectPropertyAddress a = { kAudioHardwarePropertyDefaultInputDevice, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+    OSStatus st = AudioObjectAddPropertyListener(kAudioObjectSystemObject, &a, mic_hal_changed, NULL);
+    if (st) LOG("[RED] microphone: cannot listen for the default input device changing (OSStatus %d); the capture stays on the device it started on", (int)st);
+    a.mSelector = kAudioHardwarePropertyDefaultOutputDevice;   // the choice above depends on the output too
+    st = AudioObjectAddPropertyListener(kAudioObjectSystemObject, &a, mic_hal_changed, NULL);
+    if (st) LOG("[RED] microphone: cannot listen for the default output device changing (OSStatus %d); the capture keeps the device it chose at its start", (int)st);
+#endif
+}
+static int mic_aq_start(void) {
+    static pthread_once_t watch = PTHREAD_ONCE_INIT; pthread_once(&watch, mic_watch_init);
+    AudioStreamBasicDescription f = { .mSampleRate = IS_RATE, .mFormatID = kAudioFormatLinearPCM, .mFormatFlags = kLinearPCMFormatFlagIsSignedInteger | kLinearPCMFormatFlagIsPacked,
+                                      .mBytesPerPacket = 2, .mFramesPerPacket = 1, .mBytesPerFrame = 2, .mChannelsPerFrame = 1, .mBitsPerChannel = 16 };
+    char dev[128]; CFStringRef uid = NULL;
+#if !TARGET_OS_IPHONE
+    if (mic_choose(dev, sizeof dev, &uid) == MIC_TAKE_NONE) return 0;   // the streams stay started and silent; a device change starts it again
+#else
+    snprintf(dev, sizeof dev, "the default input device");
+#endif
+    // no run loop: the queue calls back on a thread of its own. The first start asks for microphone access (TCC); without it the queue runs and captures silence
+    OSStatus st = AudioQueueNewInput(&f, mic_aq_input, NULL, NULL, NULL, 0, &g_aq);
+    if (!st && uid) st = AudioQueueSetProperty(g_aq, kAudioQueueProperty_CurrentDevice, &uid, sizeof(CFStringRef));
+    if (uid) CFRelease(uid);
+    if (!st) st = AudioQueueAddPropertyListener(g_aq, kAudioQueueProperty_IsRunning, mic_aq_running, NULL);
+    for (int i = 0; !st && i < MIC_NBUF; i++) {
+        AudioQueueBufferRef b;
+        st = AudioQueueAllocateBuffer(g_aq, MIC_BUF_FRAMES * 2, &b);
+        if (!st) st = AudioQueueEnqueueBuffer(g_aq, b, 0, NULL);
+    }
+    atomic_store(&g_aq_run, 1);
+    if (!st) st = AudioQueueStart(g_aq, NULL);
+    if (st) {
+        atomic_store(&g_aq_run, 0);
+        LOG("[RED] microphone: the capture of %s cannot start (OSStatus %d); the input streams get nothing until the default device changes", dev, (int)st);
+        if (g_aq) { AudioQueueDispose(g_aq, true); g_aq = NULL; }
+        return -1;
+    }
+    LOG("microphone: capturing %s, 48 kHz mono", dev);
+    return 0;
+}
+static void mic_aq_stop(void) {
+    if (!g_aq) return;
+    atomic_store(&g_aq_run, 0);
+    AudioQueueStop(g_aq, true); AudioQueueDispose(g_aq, true); g_aq = NULL;
+    LOG("microphone: capture stopped");
+}
+
+// DM_MIC_WAV=<file>: a WAV file (16-bit PCM, 48 kHz, mono or stereo: the first channel is taken) in place of the device, looped and fed at real-time pace in 10 ms blocks
+// from a thread of its own, for headless tests of a game's microphone use
+static pthread_t g_wav_th; static _Atomic int g_wav_run; static int g_wav_on;
+static int16_t *g_wav; static int g_wav_frames;
+static int wav_load(const char *path) {
+    if (g_wav) return 0;
+    FILE *f = fopen(path, "rb"); if (!f) { LOG("[RED] DM_MIC_WAV: cannot open %s", path); return -1; }
+    uint8_t h[12]; int ok = fread(h, 1, 12, f) == 12 && !memcmp(h, "RIFF", 4) && !memcmp(h + 8, "WAVE", 4);
+    int ch = 0, rate = 0, bits = 0, fmt = 0; uint8_t *data = NULL; uint32_t dsize = 0;
+    while (ok) {
+        uint8_t c[8]; if (fread(c, 1, 8, f) != 8) break;
+        uint32_t n; memcpy(&n, c + 4, 4);
+        if (!memcmp(c, "fmt ", 4)) { uint8_t b[16]; if (n < 16 || fread(b, 1, 16, f) != 16) { ok = 0; break; } fmt = b[0] | b[1] << 8; ch = b[2] | b[3] << 8; memcpy(&rate, b + 4, 4); bits = b[14] | b[15] << 8; fseek(f, (long)n - 16 + (long)(n & 1), SEEK_CUR); }
+        else if (!memcmp(c, "data", 4)) { data = malloc(n ? n : 1); dsize = (uint32_t)fread(data, 1, n, f); break; }
+        else fseek(f, (long)n + (long)(n & 1), SEEK_CUR);
+    }
+    fclose(f);
+    if (!ok || !data || fmt != 1 || bits != 16 || rate != IS_RATE || ch < 1 || dsize < (uint32_t)ch * 2) {
+        LOG("[RED] DM_MIC_WAV %s: format %d, %d channels, %d bits, %d Hz: only 16-bit PCM at 48 kHz is taken", path, fmt, ch, bits, rate);
+        free(data); return -1;
+    }
+    g_wav_frames = (int)(dsize / 2 / (uint32_t)ch);
+    g_wav = malloc((size_t)g_wav_frames * 2);
+    for (int i = 0; i < g_wav_frames; i++) memcpy(&g_wav[i], data + (size_t)i * ch * 2, 2);
+    free(data);
+    LOG("DM_MIC_WAV: %s, %.2f s, looped in place of the microphone", path, g_wav_frames / (double)IS_RATE);
+    return 0;
+}
+static void *wav_feed(void *p) {
+    (void)p; dm_host_helper_qos(QOS_CLASS_USER_INTERACTIVE);
+    int pos = 0; uint64_t next = now_ns();
+    while (atomic_load(&g_wav_run)) {
+        int16_t blk[MIC_BUF_FRAMES];
+        for (int i = 0; i < MIC_BUF_FRAMES; i++) { blk[i] = g_wav[pos]; if (++pos == g_wav_frames) pos = 0; }
+        is_feed(blk, MIC_BUF_FRAMES);
+        next += (uint64_t)MIC_BUF_FRAMES * 1000000000ull / IS_RATE;   // absolute deadlines: no drift
+        uint64_t t = now_ns(); if (next > t) usleep((useconds_t)((next - t) / 1000));
+    }
+    return NULL;
+}
+static int mic_default_start(void) {
+    const char *w = getenv("DM_MIC_WAV");
+    if (!w) { g_wav_on = 0; return mic_aq_start(); }
+    if (wav_load(w)) return -1;
+    atomic_store(&g_wav_run, 1); g_wav_on = 1;
+    pthread_create(&g_wav_th, NULL, wav_feed, NULL);
+    LOG("microphone: feeding %s", w);
+    return 0;
+}
+static void mic_default_stop(void) {
+    if (!g_wav_on) { mic_aq_stop(); return; }
+    atomic_store(&g_wav_run, 0); pthread_join(g_wav_th, NULL); g_wav_on = 0;
+    LOG("microphone: file feed stopped");
+}
+
+// DM_MIC_DUMP=<file.wav>: the samples each read returns, per stream, as <file>.<stream>.wav (the stream's own format), and one line per read in <file>.tsv:
+// milliseconds since the first dumped read, stream, frames asked, frames returned, frames that were waiting
+static void wav_header(FILE *f, int fmt, int ch, uint32_t bytes) {
+    int bits = fmt == IS_FMT_FLOAT ? 32 : 16; uint16_t tag = fmt == IS_FMT_FLOAT ? 3 : 1;
+    uint32_t rate = IS_RATE, br = rate * (uint32_t)ch * (uint32_t)bits / 8, riff = 36 + bytes; uint16_t align = (uint16_t)(ch * bits / 8), c16 = (uint16_t)ch, b16 = (uint16_t)bits; uint32_t fl = 16;
+    fseek(f, 0, SEEK_SET);
+    fwrite("RIFF", 1, 4, f); fwrite(&riff, 4, 1, f); fwrite("WAVEfmt ", 1, 8, f); fwrite(&fl, 4, 1, f); fwrite(&tag, 2, 1, f); fwrite(&c16, 2, 1, f);
+    fwrite(&rate, 4, 1, f); fwrite(&br, 4, 1, f); fwrite(&align, 2, 1, f); fwrite(&b16, 2, 1, f); fwrite("data", 1, 4, f); fwrite(&bytes, 4, 1, f);
+}
+static FILE *g_dump_tsv; static uint64_t g_dump_t0; static int g_dump_on = -1;   // DM_MIC_DUMP read once (tests reset it)
+static void is_dump(istream *s, const void *buf, int asked, int got, int waiting) {   // under s->m
+    static const char *path;
+    if (g_dump_on < 0) { path = getenv("DM_MIC_DUMP"); g_dump_on = path && path[0]; }
+    if (!g_dump_on || !path) return;
+    if (!s->dump) {
+        char p[1024]; size_t n = strlen(path); int ext = n > 4 && !strcmp(path + n - 4, ".wav");
+        snprintf(p, sizeof p, "%.*s.%d.wav", (int)(ext ? n - 4 : n), path, s->id);
+        if (!(s->dump = fopen(p, "w+b"))) { LOG("[RED] DM_MIC_DUMP cannot open %s", p); g_dump_on = 0; return; }
+        wav_header(s->dump, s->fmt, s->ch, 0);
+        static pthread_mutex_t tl = PTHREAD_MUTEX_INITIALIZER;
+        pthread_mutex_lock(&tl);
+        if (!g_dump_tsv) { snprintf(p, sizeof p, "%.*s.tsv", (int)(ext ? n - 4 : n), path); g_dump_tsv = fopen(p, "w"); g_dump_t0 = now_ns(); if (g_dump_tsv) fputs("ms\tstream\tasked\tgot\twaiting\n", g_dump_tsv); }
+        pthread_mutex_unlock(&tl);
+    }
+    size_t bytes = (size_t)got * (size_t)s->ch * (s->fmt == IS_FMT_FLOAT ? 4 : 2);
+    if (got > 0) { fseek(s->dump, 0, SEEK_END); fwrite(buf, 1, bytes, s->dump); s->dump_bytes += (uint32_t)bytes; wav_header(s->dump, s->fmt, s->ch, s->dump_bytes); fflush(s->dump); }
+    if (g_dump_tsv) { fprintf(g_dump_tsv, "%.1f\t%d\t%d\t%d\t%d\n", (now_ns() - g_dump_t0) / 1e6, s->id, asked, got, waiting); fflush(g_dump_tsv); }
+}
+
+static int is_name(char *name) { memset(name, 0, 0x100); strlcpy(name, IS_DEVICE, 0x100); return 1; }
+HLE_FORCE("_ZN2nn5audio23ListVirtualInputDevicesEPNS0_15AudioDeviceNameEi", "connect to auddmg:u; the Mac's microphone as one device (none with DM_MIC=0)", int, h_is_List, char *names, int n) {
+    if (!mic_enabled() || n < 1 || !names) return 0;
+    return is_name(names);
+}
+HLE_FORCE("_ZN2nn5audio28GetDefaultVirtualInputDeviceEPNS0_15AudioDeviceNameE", "connect to auddmg:u; the host's input device", void, h_is_DefaultDev, char *name) { is_name(name); }
+HLE_FORCE("_ZN2nn5audio26GetTrueRawAudioInputDeviceEPNS0_15AudioDeviceNameE", "connect to auddmg:u; the unprocessed capture of the same microphone", void, h_is_RawDev, char *name) {
+    memset(name, 0, 0x100); strlcpy(name, IS_RAW_DEVICE, 0x100);
+}
+// VirtualDeviceProperties: the name (0x100 bytes) and two fields of the device's profile (+0x100, 8 bytes; +0x108, 4 bytes) whose meaning is not known: no game seen asks, so it still fails
+HLE_FORCE("_ZN2nn5audio31GetVirtualInputDevicePropertiesEPNS0_23VirtualDevicePropertiesERKNS0_15AudioDeviceNameE", "connect to auddmg:u; the profile is not known: fails", Result, h_is_Props, void *props, const char *name) {
+    (void)props; (void)name; return RES_FAIL;
+}
+static int is_format_ok(const int32_t *fmt) { return (fmt[0] == IS_FMT_PCM16 || fmt[0] == IS_FMT_FLOAT) && (fmt[1] == 1 || fmt[1] == 2) && fmt[2] == IS_RATE; }
+HLE_FORCE("_ZN2nn5audio41IsVirtualInputDeviceStreamFormatSupportedERKNS0_15AudioDeviceNameERKNS0_12StreamFormatE", "PCM16 or float, 1 or 2 channels, 48 kHz", bool, h_is_FmtOk, const char *name, const int32_t *fmt) {
+    (void)name; return mic_enabled() && is_format_ok(fmt);
+}
+static Result is_open(void *g, void *ev, const char *dev, const int32_t *fmt, int frames, void *lr) {
+    char sb[64];
+    if (!mic_enabled()) return RES_FAIL;
+    if (!is_format_ok(fmt) || frames <= 0) {
+        LOG("[RED] InputStream %s: format %d, %d channels, %d Hz, %d frames: not supported (PCM16 or float, 1 or 2 channels, 48 kHz), the open fails", dev, fmt[0], fmt[1], fmt[2], frames);
+        return RES_FAIL;
+    }
+    istream *s = calloc(1, sizeof *s); if (!s) die("InputStream calloc");
+    s->ring = calloc((size_t)frames, sizeof *s->ring); if (!s->ring) die("InputStream ring calloc");
+    static _Atomic int nopen; s->id = atomic_fetch_add(&nopen, 1);
+    pthread_mutex_init(&s->m, NULL); s->state = IS_STOPPED; s->fmt = fmt[0]; s->ch = fmt[1]; s->cap = frames; s->gain = 1.0f; s->event = ev;
+    if (ev) hle_bind_system_event(ev, 1);
+    pthread_mutex_lock(&g_is_lock);
+    int slot = -1; for (int i = 0; i < ISMAX; i++) if (!g_is[i]) { slot = i; break; }
+    if (slot >= 0) g_is[slot] = s;
+    pthread_mutex_unlock(&g_is_lock);
+    if (slot < 0) { LOG("[RED] more than %d InputStreams open at once, the open fails", ISMAX); pthread_mutex_destroy(&s->m); free(s->ring); free(s); return RES_FAIL; }
+    objmap_put(g, s);
+    LOG("InputStream open on %s: %s, %d channel%s, 48 kHz, %d frames (call site %s)", dev && dev[0] ? dev : "(no name)", s->fmt == IS_FMT_FLOAT ? "float" : "PCM16", s->ch, s->ch == 1 ? "" : "s", frames, site(lr, sb, sizeof sb));
+    return RES_OK;
+}
+HLE_FORCE("_ZN2nn5audio15OpenInputStreamEPNS0_15InputStreamTypeEPvmRKNS0_15AudioDeviceNameERKNS0_12StreamFormatEi", "connect to auddmg:u; a ring of the host's fed from the microphone", Result, h_is_Open,
+          void *g, void *buf, size_t size, const char *dev, const int32_t *fmt, int frames) { (void)buf; (void)size; return is_open(g, NULL, dev, fmt, frames, __builtin_return_address(0)); }
+// the last argument's meaning is not known (a notification threshold, as the output stream's?): the event fires whenever captured frames arrive
+HLE_FORCE("_ZN2nn5audio15OpenInputStreamEPNS0_15InputStreamTypeEPNS_2os11SystemEventEPvmRKNS0_15AudioDeviceNameERKNS0_12StreamFormatEii", "connect to auddmg:u; a ring of the host's, its event signaled as frames arrive",
+          Result, h_is_OpenEv, void *g, void *ev, void *buf, size_t size, const char *dev, const int32_t *fmt, int frames, int unknown) {
+    (void)buf; (void)size; (void)unknown; return is_open(g, ev, dev, fmt, frames, __builtin_return_address(0));
+}
+// state changes: the capture starts with the first started stream and stops with the last (outside g_is_lock: stopping the queue waits for its callback, which takes it)
+static void is_set_state(istream *s, int state) {
+    pthread_mutex_lock(&g_mic_lock);
+    pthread_mutex_lock(&g_is_lock); pthread_mutex_lock(&s->m);
+    int was = s->state == IS_STARTED, now = state == IS_STARTED;
+    s->state = state;
+    pthread_mutex_unlock(&s->m);
+    g_is_started += now - was;
+    int start = now && !was && g_is_started == 1, stop = was && !now && g_is_started == 0;
+    pthread_mutex_unlock(&g_is_lock);
+    if (start) g_mic.start();
+    if (stop) g_mic.stop();
+    pthread_mutex_unlock(&g_mic_lock);
+}
+HLE_FORCE_BIG("_ZN2nn5audio16StartInputStreamEPNS0_15InputStreamTypeE", "start the capture into the stream", Result, h_is_Start, void *g) {
+    istream *s = objmap_get(g); if (!s) return RES_FAIL;
+    is_set_state(s, IS_STARTED); return RES_OK;
+}
+HLE_FORCE_BIG("_ZN2nn5audio15StopInputStreamEPNS0_15InputStreamTypeE", "stop the capture into the stream (what it holds stays)", void, h_is_Stop, void *g) {
+    istream *s = objmap_get(g); if (s) is_set_state(s, IS_STOPPED);
+}
+HLE_FORCE_BIG("_ZN2nn5audio16CloseInputStreamEPNS0_15InputStreamTypeE", "close the stream", void, h_is_Close, void *g) {
+    istream *s = objmap_get(g); if (!s) return;
+    is_set_state(s, IS_NONE);
+    pthread_mutex_lock(&g_is_lock);
+    for (int i = 0; i < ISMAX; i++) if (g_is[i] == s) g_is[i] = NULL;
+    pthread_mutex_unlock(&g_is_lock);
+    if (s->dump) fclose(s->dump);
+    objmap_del(g); pthread_mutex_destroy(&s->m); free(s->ring); free(s);
+}
+HLE_FORCE("_ZN2nn5audio19GetInputStreamStateEPKNS0_15InputStreamTypeE", "0 not open, 1 stopped, 2 started", int, h_is_State, const void *g) {
+    istream *s = objmap_get(g); if (!s) return IS_NONE;
+    pthread_mutex_lock(&s->m); int st = s->state; pthread_mutex_unlock(&s->m); return st;
+}
+HLE_FORCE("_ZN2nn5audio15ReadInputStreamEPNS0_15InputStreamTypeEPvi", "the oldest captured frames, in the stream's format, with its gain", int, h_is_Read, void *g, void *buf, int frames) {
+    istream *s = objmap_get(g);
+    if (!s || frames <= 0 || !buf) return 0;
+    pthread_mutex_lock(&s->m);
+    int n = frames < s->filled ? frames : s->filled;
+    for (int i = 0; i < n; i++) {
+        float v = s->ring[(s->head + i) % s->cap] * s->gain;
+        for (int c = 0; c < s->ch; c++) {
+            if (s->fmt == IS_FMT_FLOAT) ((float *)buf)[i * s->ch + c] = v / 32768.0f;   // NOLINT(clang-analyzer-security.ArrayBound): s->ch is 1 or 2 (is_format_ok at open), and the caller's buffer holds frames * ch samples
+            else ((int16_t *)buf)[i * s->ch + c] = (int16_t)(v > 32767.0f ? 32767 : v < -32768.0f ? -32768 : v);
+        }
+    }
+    int waiting = s->filled;
+    s->head = (s->head + n) % s->cap; s->filled -= n;
+    is_dump(s, buf, frames, n, waiting);
+    pthread_mutex_unlock(&s->m);
+    return n;
+}
+static int is_count(const void *g, int free_count) {
+    istream *s = is_of(g);
+    pthread_mutex_lock(&s->m); int n = free_count ? s->cap - s->filled : s->filled; pthread_mutex_unlock(&s->m);
+    return n;
+}
+HLE_FORCE("_ZN2nn5audio30GetInputStreamFilledFrameCountEPKNS0_15InputStreamTypeE", "captured frames not yet read", int, h_is_Filled, const void *g) { return objmap_get(g) ? is_count(g, 0) : 0; }
+HLE_FORCE("_ZN2nn5audio28GetInputStreamFreeFrameCountEPKNS0_15InputStreamTypeE", "room left in the ring", int, h_is_Free, const void *g) { return objmap_get(g) ? is_count(g, 1) : 0; }
+HLE_FORCE("_ZN2nn5audio32GetInputStreamCapacityFrameCountEPKNS0_15InputStreamTypeE", "the capacity the stream opened with", int, h_is_Capacity, const void *g) { istream *s = objmap_get(g); return s ? s->cap : 0; }
 typedef struct { int32_t format, channels, rate; } os_format;   // nn::audio::StreamFormat, 12 bytes: returned in registers
-HLE_FORCE("_ZN2nn5audio20GetInputStreamFormatEPKNS0_15InputStreamTypeE", "input stream, never open: 48 kHz mono PCM16", os_format, h_is_Format, const void *g) { (void)g; return (os_format){OS_PCM16, 1, RATE}; }
-// The rest of the input stream calls. The SDK passes them to the stream'"'"'s Impl pointer, which is null for a type that never opened (sdk+0x1f7040 reads [Impl+0x340] first: SIGSEGV at address 0x340),
-// and only GetInputStreamState answers a null Impl itself (0, closed; sdk+0x1f6020). The Legend of Zelda: Ocarina of Time asks the state of its two microphone streams, purges them when they are not
-// started (main+0x336ee7c, the crash when a song is played), and reads their statistics each update (main+0x336d5d4); it opens them only when a virtual input device is listed, so here never.
-// The state is closed, a purge does nothing, the statistics are zero (InputStreamImpl::GetStatistics zeroes its result first, sdk+0x1f6ff4), the free and capacity counts 0, the gain 1
-HLE_FORCE("_ZN2nn5audio19GetInputStreamStateEPKNS0_15InputStreamTypeE", "input stream, never open: closed (0)", int, h_is_State, const void *g) { (void)g; return 0; }
-HLE_FORCE("_ZN2nn5audio16PurgeInputStreamEPNS0_15InputStreamTypeE", "input stream, never open: nothing buffered", void, h_is_Purge, void *g) { (void)g; }
-HLE_FORCE("_ZN2nn5audio24GetInputStreamStatisticsEPNS0_15InputStreamTypeEb", "input stream, never open: zero", os_stats, h_is_Stats, void *g, bool reset) { (void)g; (void)reset; os_stats s = {0}; return s; }
-HLE_FORCE("_ZN2nn5audio28GetInputStreamFreeFrameCountEPKNS0_15InputStreamTypeE", "input stream, never open: none", int, h_is_Free, const void *g) { (void)g; return 0; }
-HLE_FORCE("_ZN2nn5audio32GetInputStreamCapacityFrameCountEPKNS0_15InputStreamTypeE", "input stream, never open: none", int, h_is_Capacity, const void *g) { (void)g; return 0; }
-HLE_FORCE("_ZN2nn5audio18GetInputStreamGainEPKNS0_15InputStreamTypeE", "input stream, never open: 1", float, h_is_GetGain, const void *g) { (void)g; return 1.0f; }
-HLE_FORCE("_ZN2nn5audio18SetInputStreamGainEPNS0_15InputStreamTypeEfNS_8TimeSpanE", "input stream, never open: nothing to ramp", void, h_is_SetGain, void *g, float gain, int64_t ramp_ns) { (void)g; (void)gain; (void)ramp_ns; }
+HLE_FORCE("_ZN2nn5audio20GetInputStreamFormatEPKNS0_15InputStreamTypeE", "the format the stream opened with (48 kHz mono PCM16 if not open)", os_format, h_is_Format, const void *g) {
+    istream *s = objmap_get(g); return s ? (os_format){s->fmt, s->ch, IS_RATE} : (os_format){IS_FMT_PCM16, 1, IS_RATE};
+}
+HLE_FORCE("_ZN2nn5audio16PurgeInputStreamEPNS0_15InputStreamTypeE", "drop the frames not yet read", void, h_is_Purge, void *g) {
+    istream *s = objmap_get(g); if (!s) return;
+    pthread_mutex_lock(&s->m); s->head = 0; s->filled = 0; pthread_mutex_unlock(&s->m);
+}
+// The statistics, 24 bytes through x8 as the output stream's. The game reads only +8 and does nothing with it (main+0x336d5d8); the meaning of the fields is not known, so the host reports none
+HLE_FORCE("_ZN2nn5audio24GetInputStreamStatisticsEPNS0_15InputStreamTypeEb", "none kept", os_stats, h_is_Stats, void *g, bool reset) { (void)g; (void)reset; os_stats s = {0}; return s; }
+HLE_FORCE("_ZN2nn5audio18GetInputStreamGainEPKNS0_15InputStreamTypeE", "the stream's gain (1 at open)", float, h_is_GetGain, const void *g) {
+    istream *s = objmap_get(g); if (!s) return 1.0f;
+    pthread_mutex_lock(&s->m); float v = s->gain; pthread_mutex_unlock(&s->m); return v;
+}
+HLE_FORCE("_ZN2nn5audio18SetInputStreamGainEPNS0_15InputStreamTypeEfNS_8TimeSpanE", "the stream's gain, applied as frames are read (no ramp)", void, h_is_SetGain, void *g, float gain, int64_t ramp_ns) {
+    (void)ramp_ns; istream *s = objmap_get(g); if (!s) return;
+    pthread_mutex_lock(&s->m); s->gain = gain; pthread_mutex_unlock(&s->m);
+}
 
 // Host-internal PCM output (used by the in-process audio renderer, see hle_audren.c): the same AudioOut machinery (real output / silent sink / background take-over), keyed by a host-allocated dummy object
 void *dm_pcmout_open(int ch) {

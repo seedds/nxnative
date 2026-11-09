@@ -109,6 +109,11 @@ def make_icns(jpg, out):   # the game's icon (256x256 JPEG) at every size an .ic
         run(['iconutil', '-c', 'icns', s, '-o', out])
 
 
+# macOS shows this when a game first opens the microphone (SDK 21 / 22 input streams, hle_audio.c; DM_MIC=0 never opens it). TCC asks on behalf of the app that launched the host:
+# the packed app's launcher, or the terminal app when a shell starts the host
+MIC_USAGE = 'The game listens to the microphone where the console would, such as playing the ocarina by blowing or humming into it.'
+
+
 def settings_rules(listed):   # DMSettings: what the launcher accepts as each setting's saved choice (docs/frontends.md, Saved choices)
     rules = []
     for s in listed:
@@ -124,7 +129,7 @@ def info_plist(a, minos, icon):
          'CFBundleVersion': a.version or '1.0', 'CFBundleShortVersionString': a.version or '1.0', 'CFBundlePackageType': 'APPL', 'CFBundleExecutable': EXE,
          'CFBundleInfoDictionaryVersion': '6.0', 'LSMinimumSystemVersion': minos, 'LSArchitecturePriority': ['arm64'], 'NSHighResolutionCapable': True,
          'NSBluetoothAlwaysUsageDescription': 'Connect Switch 2 Joy-Con and Pro Controllers over Bluetooth.',
-         'LSApplicationCategoryType': a.category or 'public.app-category.games', 'LSSupportsGameMode': False, 'DMTitleID': a.title_id.upper(), 'DMRomfsMarker': a.marker or '', 'DMLanguage': a.lang or 'en-US', 'DMSaveSyncChoice': 1}
+         'LSApplicationCategoryType': a.category or 'public.app-category.games', 'LSSupportsGameMode': False, 'NSMicrophoneUsageDescription': MIC_USAGE, 'DMTitleID': a.title_id.upper(), 'DMRomfsMarker': a.marker or '', 'DMLanguage': a.lang or 'en-US', 'DMSaveSyncChoice': 1}
     if icon: p['CFBundleIconFile'] = 'AppIcon'
     if a.settings:
         listed = json.loads(Path(a.settings).read_text(encoding='utf-8'))['settings']

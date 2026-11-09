@@ -105,6 +105,8 @@ The game's vibration, on the phone or on a connected controller.
 
 How strong the game's vibration is, from 0 to 300 %.
 
+On the Mac, the USB DualSense waveform output starts at twice its base amplitude at the default 100 %. The slider multiplies that level, up to the waveform output limit.
+
 ### Rumble cutoff
 
 A controller's vibration weaker than this stays off, and the rest is spread over the full range. Off (0 %) by default. A controller with rotating motors can rumble all the time in a game that sends a quiet texture: Mario Kart 8 Deluxe needs about 45 % to rumble only on crashes and drifts. The phone's own vibration is not affected.

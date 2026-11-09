@@ -238,6 +238,48 @@ static IOReturn test_device_report(IOHIDDeviceRef d, IOHIDReportType t, CFIndex 
     return kIOReturnSuccess;
 }
 static void drain(void) { dispatch_sync(queue, ^{}); dispatch_sync(queue, ^{}); }
+static void check_dualsense_pcm(void) {
+    // Select the real PCM adapter without opening a hardware AudioUnit.
+    ds_usb.unit = (AudioUnit)(uintptr_t)1;
+    dm_haptic_state state = {
+        .player = 0, .epoch = dm_haptics_epoch(0),
+        .motor = {{.2f, 160, .1f, 320}, {.3f, 200, .1f, 400}},
+    };
+    float pcm[DS_RAMP * DS_CHANNELS];
+    apply(state); drain();
+    ds_usb_pcm(&ds_usb, pcm, DS_RAMP, ds_usb.events[0].time);
+    assert(fabsf(ds_usb.tone[0][0].amplitude - .2f) < 1e-6f);
+    assert(fabsf(ds_usb.tone[0][1].amplitude - .1f) < 1e-6f);
+    assert(ds_usb.tone[1][0].frequency == 200 && ds_usb.tone[1][1].frequency == 400);
+    for (unsigned i = 0; i < DS_RAMP; i++) {
+        assert(pcm[4*i] == 0 && pcm[4*i+1] == 0);
+        assert(isfinite(pcm[4*i+2]) && isfinite(pcm[4*i+3]));
+    }
+    assert(pcm[4*32+2] != pcm[4*32+3]);
+
+    gain = 2;
+    state.motor[1].amplitude_low = .8f;
+    state.motor[1].amplitude_high = .4f;
+    apply(state); drain();
+    ds_usb_pcm(&ds_usb, pcm, DS_RAMP, ds_usb.events[1].time);
+    assert(fabsf(ds_usb.tone[0][0].amplitude - .4f) < 1e-6f);
+    assert(fabsf(ds_usb.tone[0][1].amplitude - .2f) < 1e-6f);
+    assert(fabsf(ds_usb.tone[1][0].amplitude - 2.f/3) < 1e-6f);
+    assert(fabsf(ds_usb.tone[1][1].amplitude - 1.f/3) < 1e-6f);
+    for (unsigned i = 0; i < DS_RAMP * DS_CHANNELS; i++) assert(fabsf(pcm[i]) <= 1.f);
+
+    rumble_min = .65f;
+    apply(state); drain();
+    ds_usb_pcm(&ds_usb, pcm, DS_RAMP, ds_usb.events[2].time);
+    assert(ds_usb.tone[0][0].amplitude == 0 && ds_usb.tone[0][1].amplitude == 0);
+    assert(ds_usb.tone[1][0].amplitude > 0);
+    ds_usb_clear(&ds_usb);
+    ds_usb_pcm(&ds_usb, pcm, DS_RAMP, ds_usb.events[2].time);
+    for (unsigned i = 0; i < DS_RAMP * DS_CHANNELS; i++) assert(pcm[i] == 0);
+    ds_usb = (DsUsb){0};
+    gain = 1;
+    rumble_min = 0;
+}
 static void advance(NSTimeInterval seconds) {
     uint64_t end = testTime + (uint64_t)llround(seconds * NSEC_PER_SEC);
     for (;;) {
@@ -460,6 +502,7 @@ int main(void) { @autoreleasepool {
     dm_haptics_apple_controller(0, nil); dm_haptics_apple_controller(1, nil); drain();
     assert(back.closes == 1 && second.closes == 1 && objects == 0);   // every iterator and service released
     assert(ds4_crc((const uint8_t *)"123456789", 9) == 0xCBF43926u);   // the report's CRC32 (IEEE, reflected)
+    check_dualsense_pcm();
     dm_haptics_apple_shutdown();
     puts("Apple haptics: channels, pulses, idle release, startup handlers, engine replacement, backoff, stale callbacks, plain players, level cutoff and the DualShock 4 route passed");
 } }

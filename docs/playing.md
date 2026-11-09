@@ -20,6 +20,8 @@ In portrait (an iPad, an iPhone Duo's inner screen) the picture sits above the c
 
 Game vibration uses the iPhone's haptic engine or a compatible connected controller. Controllers with separate left/right haptic outputs keep those effects separate. The settings screen's **Game rumble** and **Rumble strength** control it independently of **Touch feedback**. Phone rumble approximates the Switch's effects; physical feel and controller compatibility still need device testing.
 
+On the Mac, a single USB DualSense or DualSense Edge assigned to player 1 can play the game's low and high frequency bands separately in each grip. When the USB output is unavailable, the controller uses Core Haptics. Set `DM_DUALSENSE_USB=0` in the game's `env.txt` to select Core Haptics over USB.
+
 ## Motion (gyro)
 
 A controller that supplies gyro data through Apple's controller support (DualSense, DualShock 4) drives the game's motion controls, on the Mac and the iPhone: aiming and tilt puzzles in games that read the controller's motion, such as Breath of the Wild with its Motion Controls option on. A controller without one (Backbone One, Razer Kishi and other controllers the phone mounts in) uses the iPhone's own gyro, as a Switch in handheld. Motion follows the controller in docked mode, the default.

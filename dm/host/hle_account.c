@@ -43,7 +43,9 @@ HLE_FORCE("_ZN2nn7account8OpenUserEPNS0_10UserHandleERKNS0_3UidE", "open user; t
     h->v[0] = uid->v[0]; h->v[1] = uid->v[1]; h->v[2] = HANDLE_MAGIC; return RES_OK;
 }
 HLE_FORCE("_ZN2nn7account9GetUserIdEPNS0_3UidERKNS0_10UserHandleE", "gets the Uid from the handle", Result, h_acc_GetUserId, Uid *out, const UserHandle *h) {
-    if (h->v[2] != HANDLE_MAGIC) die("account::GetUserId: the handle was not issued by the host (%#llx)", h->v[2]);
+   // The Patrick Star Game (main+0x3f1ccc0) passes a zero-initialized UserHandle during early initialization without calling TryOpenPreselectedUser first;
+   // returning the local user UID instead of aborting avoids an immediate crash and permits execution to enter the title screen and gameplay 
+   if (h->v[2] != HANDLE_MAGIC) { *out = k_uid; return RES_OK; }
     out->v[0] = h->v[0]; out->v[1] = h->v[1]; return RES_OK;
 }
 // nn::account::Nickname = struct { char name[33]; }, UTF-8

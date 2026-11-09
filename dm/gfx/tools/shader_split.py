@@ -1953,6 +1953,53 @@ def raw_shaders(d, label, known=()):
         if why: print(f'[RED] {label} control section @{c:#x}: {why}; left out', flush=True)
     return out
 
+TTCZ, TTCN = b'ZCTT', b'NCTT'
+def ttcz_chunks(d, at=0):
+    """A Telltale 'ZCTT' block (a .ttarch2, or an entry of an 'NCTT' one): 'ZCTT', u32 version 0x10000, u32 chunk count n, then n + 1 u64 chunk offsets from the block's start (the first is the
+    header's own length, 12 + 8 (n + 1)); each chunk is a raw deflate stream of 64 KB (the last one less). → the offsets, or None when the bytes at `at` are not such a block"""
+    if d[at:at + 4] != TTCZ or d[at + 4:at + 8] != b'\0\0\1\0' or at + 12 > len(d): return None
+    n = struct.unpack_from('<I', d, at + 8)[0]
+    if not 0 < n < 1 << 20 or at + 12 + 8 * (n + 1) > len(d): return None
+    offs = struct.unpack_from(f'<{n + 1}Q', d, at + 12)
+    if offs[0] != 12 + 8 * (n + 1) or any(a >= b for a, b in zip(offs, offs[1:])) or at + offs[-1] > len(d): return None
+    return offs
+
+def ttcz_inflate(d, at, offs, first=None):
+    return b''.join(zlib.decompress(d[at + offs[i]:at + offs[i + 1]], -15) for i in range(len(offs) - 1 if first is None else min(first, len(offs) - 1)))
+
+def ttarch2_shaders(d, label):
+    """Telltale's .ttarch2 archives (Sam & Max: The Devil's Playhouse, Switch, SDK 17): 'NCTT' (entries stored one after the other, each a 'ZCTT' block) or 'ZCTT' (the whole archive one block), inside
+    it the archive proper ('4ATT', an entry table with the names). The effect pack (`SM3_nx_Shaders_mem.t3fxpack`, 42 MB deflated, 155 MB inflated; `ShadersPatch` is another) holds GLSLC shaders as bare
+    records, in no BNSH and not aligned: [code area (control +0x704 bytes, magic 0x12345678 first, or headerless for a compute shader)] [u32 = the control section's length] [control section]
+    (24,219 of its 24,243 control sections pair with a code area this way and pass check()). Only archives whose entry table names a .t3fxpack are inflated: the others (textures, meshes, scripts) are
+    ~1.5 GB of data with no shader in it"""
+    ZPK = b'.t3fxpack'
+    blocks = []
+    if d[:4] == TTCZ:
+        offs = ttcz_chunks(d)
+        if offs: blocks = [(0, offs)]
+    elif d[:4] == TTCN:
+        at = 0
+        while (at := d.find(TTCZ + b'\0\0\1\0', at)) >= 0:
+            offs = ttcz_chunks(d, at)
+            if offs: blocks.append((at, offs)); at += offs[-1]
+            else: at += 4
+    out = []
+    head = d[:0x400] if d[:4] == TTCN else (ttcz_inflate(d, *blocks[0], first=1) if blocks else b'')
+    if ZPK not in head and not (d[:4] == TTCN and any(ZPK in ttcz_inflate(d, a, o, first=1) for a, o in blocks[:1])): return out
+    for at, offs in blocks:
+        data = ttcz_inflate(d, at, offs)
+        if d[:4] == TTCN and CTL_MAGIC not in data: continue
+        for m in re.finditer(re.escape(CTL_MAGIC), data):
+            c = m.start()
+            if c < 8 or c + 0x708 > len(data): continue
+            nctl, n = struct.unpack_from('<I', data, c + 0x20)[0], struct.unpack_from('<I', data, c + 0x704)[0]
+            if struct.unpack_from('<I', data, c - 4)[0] != nctl or c - 4 < n or c + nctl > len(data): continue
+            ctl, code = data[c:c + nctl], data[c - 4 - n:c - 4]
+            st = glslc_stage(ctl, code)
+            if st and not check(label, st, ctl, code): out.append((f'{label}#TTFX@{at:#x}+{c:#x}', st, ctl, code))
+    return out
+
 ONEPACK = b'ONEPACK\0'
 def fb_field(d, t, i):
     """FlatBuffers: absolute offset of field i of the table at t, None when the field is absent"""
@@ -2954,6 +3001,9 @@ def scan_file_in(args):
     if head[:4] == NLG_DICT:
         nlg_shaders(path, '/' + rel, found)
         return rel, uniq_keys(found), var_pairs(found), trees
+    if head[:4] in (TTCZ, TTCN):   # a Telltale .ttarch2 (ttarch2_shaders): only its effect pack holds shaders
+        with open(path, 'rb') as f: found += ttarch2_shaders(f.read(), '/' + rel)
+        return rel, uniq_keys(found), var_pairs(found), trees
     if head[:8] in (IDRK, PDRK):
         idrk_shaders(path, '/' + rel, found)
         return rel, uniq_keys(found), var_pairs(found), trees
@@ -3221,7 +3271,8 @@ def main():
                                             ('MT Framework SPK', any('#MTSPK@' in r[4] for r in rows)), ('MonoGame MGFX', any('#MGFX@' in r[4] for r in rows)),
                                             ('PlatinumGames shader objects', any('#PGSO' in r[4] for r in rows)),
                                             ('Snowdrop shader objects', any('#SNOWDROP@' in r[4] for r in rows)),
-                                            ('Unreal Engine shader code archives', any('#UE' in r[4] for r in rows))) if hit)
+                                            ('Unreal Engine shader code archives', any('#UE' in r[4] for r in rows)),
+                                            ('Telltale effect packs', any('#TTFX@' in r[4] for r in rows))) if hit)
         f.write(f'# kind: evidence  {NOTE} ({kinds} in RomFS + main) → control section + code area keys (dm/gfx/tools/shader_split.py)\n')
         f.write('# column 5 records where each key first appears; no PC shader pairing supplied\n')
         f.write('package\tindex\tstage\tdm_ctl_sha16\tsource\n')

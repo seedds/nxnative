@@ -35,6 +35,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [FINAL FANTASY X/X-2 HD Remaster](../../dm/games/0100BC300CB48000/README.md); base and both supplied DLC packs yield 5,752 unique shaders.
 - **Check:** `test_vbf.py` covers raw and zlib blocks, shared/missing members, truncation, unaligned effects, loose shader keys and inconsistent lengths. All 5,752 programs translate on the Mac.
 
+### Telltale effect packs in ttarch2 archives
+
+- **Symptom:** `[RED] the shader split found no shaders in main or the RomFS`, the split's log ending in `shaders: 0`, on a game whose RomFS is `.ttarch2` archives (Telltale Tool) and whose `main` has no `glslcCompile` import and names `*.t3fxpack`. No `BNSH`, `BAHS` or control-section magic appears in the RomFS.
+- **Cause:** a `.ttarch2` is `NCTT` (entries stored one after the other) or `ZCTT` (the whole archive one block), and the archive proper (`4ATT`, an entry table with names) sits inside. A `ZCTT` block is `ZCTT`, `u32` version 0x10000, `u32` chunk count n, n + 1 `u64` chunk offsets from the block's start, then n raw-deflate chunks of 64 KB (no zlib header, no key: the archives are not encrypted). The effect pack (`SM3_nx_Shaders_mem.t3fxpack`, 42 MB deflated, 155 MB inflated; `SM3_nx_ShadersPatch.ttarch2` is a second one) holds GLSLC shaders as bare records, in no BNSH and not 4-byte aligned: the code area (control +0x704 bytes, the magic `0x12345678` first, none for a compute shader), a `u32` with the control section's length, then the control section.
+- **Fix:** `ttarch2_shaders` (`shader_split.py`) reads an `NCTT` or `ZCTT` file, inflates its blocks only when the entry table (the file's first 0x400 bytes, or the first chunk of its first block) names a `.t3fxpack`, finds each control section by its magic at any alignment, takes the code area right before the length word, and keeps the pair when `check()` agrees (stage from `glslc_stage`). The other archives (textures, meshes, scripts: 1.5 GB) are not inflated.
+- **Found on:** [Sam & Max: The Devil's Playhouse](../../dm/games/0100D5501857E000/README.md): 24,243 shaders in the base pack and 2,213 in `ShadersPatch`, all of them pairing with a code area and passing `check()`; the split's total is 24,243, so every patch record has a key (a hash of control section and code area) the base pack already has and the patch adds none. The Mac libraries build for all.
+- **Check:** `test_ttarch2.py` builds blocks and a pack without game data: deflate chunks, both container forms, unaligned records, a compute record without a header, and an archive that names no `.t3fxpack` left alone.
+
 ### A file no reader reads
 
 - **Symptom:** the shader split stops on one archive with a Python traceback (an `IndexError` or `struct.error` naming no file), or a reader's `[RED]` line about a format it does not know, and nothing is written; the NSP script loses the build at the split.

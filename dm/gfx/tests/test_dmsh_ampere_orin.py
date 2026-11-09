@@ -45,13 +45,13 @@ KNOWN = {
     'f2fp_pack_bf16x2': 'F2FP.BF16.PACK_AB packs f16, not bf16', 'f2fp_pack_f16x2_relu': 'F2FP.RELU: negative results are not clamped to 0',
     'i2f_s64': 'I2F.S64 rounds twice (the high and low words apart)',
     'fmax': 'FMNMX: Ampere orders -0 below +0 (max(+0, -0) is +0); Metal returns either', 'hmax2': '(as fmax, HMNMX2)',
-    'hadd2_ftz': 'HADD2 / HMUL2 .FTZ: f16 denormals are not flushed (Metal keeps them)', 'hmul2_ftz': '(as hadd2_ftz)',
+    'hadd2_ftz': 'HADD2 / HMUL2 / HFMA2 .FTZ: f16 denormals are not flushed (Metal keeps them)', 'hmul2_ftz': '(as hadd2_ftz)',
+    'hfma2_ftz': '(as hadd2_ftz)',
     'hmma_16816_f32': 'HMMA.16816.F32: the f32 accumulator does not add the products as the tensor core does (about 1 ULP)',
     # the translator refuses these
-    'hfma2': 'HFMA2.MMA (0x235) is not implemented', 'hfma2_ftz': '(as hfma2)', 'hfma2_sat': '(as hfma2)', 'hfma2_relu': '(as hfma2)',
-    'mufu_rcp': 'HFMA2.MMA with an immediate (0x435) is not implemented', 'f2f_tf32': '(as mufu_rcp)', 'idiv_u32': '(as mufu_rcp)',
-    'idiv_u32_by_7': '(as mufu_rcp)', 'irem_s32': '(as mufu_rcp)', 'fdiv_rn': '(as mufu_rcp)', 'f2i_s64': '(as mufu_rcp)', 'iadd64': '(as mufu_rcp)',
-    'isub64': '(as mufu_rcp)', 'imul64': '(as mufu_rcp)', 'imul24': '(as mufu_rcp)', 'dadd': '(as mufu_rcp; then DADD)', 'dmul': '(as mufu_rcp; then DMUL)',
+    'fdiv_rn': 'FCHK (0x302) is not implemented; its slow path is a CALL.ABS into the CUDA driver (as frcp_rn)',
+    'f2i_s64': 'F2I.S64 (signed 64-bit, 0x311) is not implemented: only the unsigned truncation of an F32 is',
+    'dadd': 'DADD (0x229) is not implemented', 'dmul': 'DMUL (0x228) is not implemented',
     'hmin2_nan': 'HMNMX2.NAN is not implemented', 'bmin2': 'HMNMX2.BF16_V2 is not implemented', 'bmax2_nan': '(as bmin2)',
     'bfma2': 'HFMA2.BF16_V2 is not implemented', 'hmma_16816_bf16': 'HMMA .BF16 is not implemented', 'hmma_1688_tf32': 'HMMA .TF32 is not implemented',
     'imma_16832_s8': 'IMMA is not implemented', 'dp4a_u32': 'IDP.4A is not implemented', 'dp4a_s32': '(as dp4a_u32)', 'dp4a_su': '(as dp4a_u32)',
@@ -63,7 +63,7 @@ KNOWN = {
     'frcp_rn': 'not testable: CALL.ABS into the CUDA driver', 'fsqrt_rn': '(as frcp_rn)',
 }
 # Ops that run Metal's own approximation (MUFU, and the divisions built on it): compared and reported, never failed
-APPROX = {'mufu_ex2', 'mufu_ex2_ftz', 'mufu_lg2', 'mufu_lg2_ftz', 'mufu_rcp_ftz', 'mufu_rsqrt', 'mufu_rsqrt_ftz', 'mufu_sqrt', 'mufu_sqrt_ftz', 'mufu_sin',
+APPROX = {'mufu_ex2', 'mufu_ex2_ftz', 'mufu_lg2', 'mufu_lg2_ftz', 'mufu_rcp', 'mufu_rcp_ftz', 'mufu_rsqrt', 'mufu_rsqrt_ftz', 'mufu_sqrt', 'mufu_sqrt_ftz', 'mufu_sin',
           'mufu_cos', 'mufu_ex2_f16x2', 'fdiv_full', 'fdiv_approx',
           # HMMA with an f16 accumulator: one block of 8 rounded once (PR #1897) matches 99.97 %; the rest are 1-2 ULP where the sum nearly cancels
           'hmma_16816_f16', 'hmma_1688_f16'}

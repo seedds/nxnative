@@ -39,6 +39,9 @@ namespace Ryujinx.Graphics.Shader.Instructions
             alu(0x030, InstName.Hadd2, AHadd2);
             alu(0x032, InstName.Hmul2, AHmul2);
             alu(0x031, InstName.Hfma2, AHfma2);
+            // HFMA2.MMA: HFMA2 issued on the tensor pipe, with the same fields (only opcode bit 2 differs). ptxas emits it for fma.rn.f16x2 and, most often,
+            // as a move of a 32-bit constant: HFMA2.MMA Rd, -RZ, RZ, 0, imm (nvdisasm shows the immediate's high half first)
+            alu(0x035, InstName.Hfma2, AHfma2);
             alu(0x002, InstName.Mov, AMov);
             alu(0x007, InstName.Sel, ASel);
             alu(0x087, InstName.Sel, ASel, uniform: true);
@@ -606,8 +609,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
             return (a, x.Form is 1 or 4 or 5 or 6 ? b : c);
         }
 
-        // The result: two halves packed, or with .F32 (78) the low lane as one float. HFMA2 / HMUL2 (sm_86): .RELU (79) clamps at zero; .BF16_V2 (85)
-        // is not handled.
+        // The result: two halves packed, or with .F32 (78) the low lane as one float. HFMA2 / HFMA2.MMA / HMUL2 (sm_86): .RELU (79) clamps at zero but keeps a NaN result
+        // (PTX: a NaN result becomes the canonical NaN; a plain max with zero gave 0 for it); .BF16_V2 (85) is not handled.
         private static void AHalfResult(EmitterContext context, AmpereOp x, Operand lo, Operand hi)
         {
             bool sat = x.Bit(77);
@@ -617,10 +620,10 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 throw AFail(context, "BF16 half pair");
             }
 
-            if (x.Bit(79) && (x.Opcode & 0x1ff) is 0x031 or 0x032)
+            if (x.Bit(79) && (x.Opcode & 0x1ff) is 0x031 or 0x032 or 0x035)
             {
-                lo = context.FPMaximum(lo, ConstF(0));
-                hi = context.FPMaximum(hi, ConstF(0));
+                lo = context.ConditionalSelect(context.IsNan(lo), lo, context.FPMaximum(lo, ConstF(0)));
+                hi = context.ConditionalSelect(context.IsNan(hi), hi, context.FPMaximum(hi, ConstF(0)));
             }
 
             if (x.Bit(78))

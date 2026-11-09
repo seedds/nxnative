@@ -11,6 +11,16 @@ The NSO rewriter (`dm/tools/patch_nso.py`) and its per-build tables (`dm/tools/s
 - **Fix:** install `capstone>=5,<6` (README and CI). `patch_nso.py` checks the major version (`cs_version()`) before it disassembles anything, and the NSP script checks it before building or surveying, so the extraction is not wasted; both print the install command for the Python that runs them. Capstone 6 is not supported.
 - **Found on:** [Celeste](../../dm/games/01002B30028F6000/README.md#found-on-this-game).
 
+## Patch discovery
+
+### Repository patches missing under bracketed paths
+
+- **Symptom:** a build made from a checkout or folder under a name such as `Game [0400486024DEC000][v131072]` silently loses the repository's per-game cuts, observation gates and frame-step stubs, although its build ID is registered; no error, as the SDK and engine patch files, named directly, still load. Under the same kind of folder, `nso_match.py --registered` finds no cuts, a provisional profile is guessed with no host hooks, and the shader split finds no NRO captured from a boot (`DM_NRO_DIR`, in the NSP folder): no CRA file table, no shaders from NROs.
+- **Cause:** these tools passed a folder path to `glob.glob` unescaped, and glob reads `[...]` in it as a character class, so the search matched nothing. The `DM_GAMES_DIR` search already escaped its folders.
+- **Fix:** every folder given to `glob.glob` is escaped (`glob.escape`) before its pattern is joined: `patch_nso.py`'s `PATCH_FILES`, `nso_match.registered_cuts`, `nso_syms.host_hooks` and `shader_split.boot_nros`. The wildcards still select the same files under a plain path. `pathlib`'s `Path.glob`, which the other tools use, never reads the folder as a pattern. `boot_nros` also returns nothing without `DM_NRO_DIR`; the CRA lookup searched the working folder then.
+- **Check:** `test_patches.ExternalRegistry.test_repository_patches_under_bracketed_directory` loads a frame-step registration through the registry under a bracketed parent; `test_bracketed_paths.py` checks the other three. The first three fail without the fix.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game), a build in a bracketed folder ([PR #1826](https://github.com/seedds/nxnative/pull/1826)).
+
 ## Patches across updates
 
 ### Function-matched cuts for unregistered builds

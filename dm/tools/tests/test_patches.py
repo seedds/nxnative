@@ -186,6 +186,16 @@ class ExternalRegistry(unittest.TestCase):
         tables, _ = self.registry()
         self.assertEqual(tables['SDK_MATCH_CUTS'], {'sdk': ['sdk rule', 'engine sdk rule'], 'main': ['engine rule']})
 
+    def test_repository_patches_under_bracketed_directory(self):
+        tools = self.tmp / 'game [0400486024DEC000][v131072]' / 'dm/tools'; tools.mkdir(parents=True)
+        for f in ('sdk_patches.py', 'engine_patches.py'): (tools / f).write_text('')
+        bid = '6a' * 16
+        patch = self.patch_file(tools.parent / 'games', f"FRAME_STEP = {{'{bid}': lambda ctx: None}}\n")
+        with mock.patch.object(self, 'tools', tools):
+            tables, where = self.registry()
+        self.assertIn(bid, tables['FRAME_STEP'])
+        self.assertEqual(Path(where['FRAME_STEP', bid]).resolve(), patch.resolve())
+
     def test_derived_profile_keeps_repository_match_rules(self):
         self.patch_file(self.tools.parent / 'games', "MATCH_CUTS = {'main': ['repository']}\n")
         self.patch_file(self.external, "MATCH_CUTS = {'main': ['external']}\n")

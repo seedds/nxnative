@@ -4009,6 +4009,225 @@
         /*0240*/                   EXIT ;
         /*0250*/                   BRA 0x250;
 
+// == i2f_f16_rz
+// base register R8
+// nop 0x0000..0x0140: the JIT's barrier set-up
+// nop 0x0140 (feeds only the removed addressing): MOV R1, c[0x0][0x28]
+// nop 0x0160 (feeds only the removed addressing): HFMA2.MMA R5, -RZ, RZ, 0, 2.384185791015625e-07
+// nop 0x0170 (feeds only the removed addressing): ULDC.64 UR4, c[0x0][0x118]
+// nop 0x0190 (feeds only the removed addressing): LEA R4, R3, R4, 0x5
+// nop 0x01a0 (feeds only the removed addressing): IMAD.WIDE.U32 R2, R4, R5, c[0x0][0x160]
+// nop 0x01c0 (feeds only the removed addressing): IMAD.WIDE.U32 R4, R4, R5, c[0x0][0x168]
+        /*0000*/                   S2R R8, SR_TID.X ;
+        /*0010*/                   IMAD.SHL.U32 R8, R8, 0x8, RZ ;
+        /*0020*/                   NOP ;
+        ...   (19 more NOPs)
+        /*0160*/                   NOP ;
+        /*0170*/                   S2R R4, SR_TID.X ;
+        /*0180*/                   NOP ;
+        /*0190*/                   NOP ;
+        /*01a0*/                   S2R R3, SR_CTAID.X ;
+        /*01b0*/                   NOP ;
+        /*01c0*/                   NOP ;
+        /*01d0*/                   LDS R2, [R8] ;
+        /*01e0*/                   NOP ;
+        /*01f0*/                   I2F.F16.RZ R7, R2 ;
+        /*0200*/                   STS [R8+0x4], R7 ;
+        /*0210*/                   EXIT ;
+        /*0220*/                   BRA 0x220;
+
+// == f2f_f16_rzx
+// base register R8
+// nop 0x0000..0x0140: the JIT's barrier set-up
+// nop 0x0140 (feeds only the removed addressing): MOV R1, c[0x0][0x28]
+// nop 0x0160 (feeds only the removed addressing): HFMA2.MMA R5, -RZ, RZ, 0, 2.384185791015625e-07
+// nop 0x0170 (feeds only the removed addressing): ULDC.64 UR4, c[0x0][0x118]
+// nop 0x0190 (feeds only the removed addressing): LEA R4, R3, R4, 0x5
+// nop 0x01a0 (feeds only the removed addressing): IMAD.WIDE.U32 R2, R4, R5, c[0x0][0x160]
+// nop 0x01c0 (feeds only the removed addressing): IMAD.WIDE.U32 R4, R4, R5, c[0x0][0x168]
+        /*0000*/                   S2R R8, SR_TID.X ;
+        /*0010*/                   IMAD.SHL.U32 R8, R8, 0x8, RZ ;
+        /*0020*/                   NOP ;
+        ...   (19 more NOPs)
+        /*0160*/                   NOP ;
+        /*0170*/                   S2R R4, SR_TID.X ;
+        /*0180*/                   NOP ;
+        /*0190*/                   NOP ;
+        /*01a0*/                   S2R R3, SR_CTAID.X ;
+        /*01b0*/                   NOP ;
+        /*01c0*/                   NOP ;
+        /*01d0*/                   LDS R2, [R8] ;
+        /*01e0*/                   NOP ;
+        /*01f0*/                   F2F.F16.F32.RZ R7, R2 ;
+        /*0200*/                   STS [R8+0x4], R7 ;
+        /*0210*/                   EXIT ;
+        /*0220*/                   BRA 0x220;
+
+// == i2f_f16_rm
+// base register R8
+// nop 0x0000..0x0140: the JIT's barrier set-up
+// nop 0x0140 (feeds only the removed addressing): MOV R1, c[0x0][0x28]
+// nop 0x0160 (feeds only the removed addressing): HFMA2.MMA R5, -RZ, RZ, 0, 2.384185791015625e-07
+// nop 0x0170 (feeds only the removed addressing): ULDC.64 UR4, c[0x0][0x118]
+// nop 0x0190 (feeds only the removed addressing): LEA R4, R3, R4, 0x5
+// nop 0x01a0 (feeds only the removed addressing): IMAD.WIDE.U32 R2, R4, R5, c[0x0][0x160]
+// nop 0x01c0 (feeds only the removed addressing): IMAD.WIDE.U32 R4, R4, R5, c[0x0][0x168]
+        /*0000*/                   S2R R8, SR_TID.X ;
+        /*0010*/                   IMAD.SHL.U32 R8, R8, 0x8, RZ ;
+        /*0020*/                   NOP ;
+        ...   (19 more NOPs)
+        /*0160*/                   NOP ;
+        /*0170*/                   S2R R4, SR_TID.X ;
+        /*0180*/                   NOP ;
+        /*0190*/                   NOP ;
+        /*01a0*/                   S2R R3, SR_CTAID.X ;
+        /*01b0*/                   NOP ;
+        /*01c0*/                   NOP ;
+        /*01d0*/                   LDS R2, [R8] ;
+        /*01e0*/                   NOP ;
+        /*01f0*/                   I2F.F16.RM R7, R2 ;
+        /*0200*/                   STS [R8+0x4], R7 ;
+        /*0210*/                   EXIT ;
+        /*0220*/                   BRA 0x220;
+
+// == f2f_f16_rmx
+// base register R8
+// nop 0x0000..0x0140: the JIT's barrier set-up
+// nop 0x0140 (feeds only the removed addressing): MOV R1, c[0x0][0x28]
+// nop 0x0160 (feeds only the removed addressing): HFMA2.MMA R5, -RZ, RZ, 0, 2.384185791015625e-07
+// nop 0x0170 (feeds only the removed addressing): ULDC.64 UR4, c[0x0][0x118]
+// nop 0x0190 (feeds only the removed addressing): LEA R4, R3, R4, 0x5
+// nop 0x01a0 (feeds only the removed addressing): IMAD.WIDE.U32 R2, R4, R5, c[0x0][0x160]
+// nop 0x01c0 (feeds only the removed addressing): IMAD.WIDE.U32 R4, R4, R5, c[0x0][0x168]
+        /*0000*/                   S2R R8, SR_TID.X ;
+        /*0010*/                   IMAD.SHL.U32 R8, R8, 0x8, RZ ;
+        /*0020*/                   NOP ;
+        ...   (19 more NOPs)
+        /*0160*/                   NOP ;
+        /*0170*/                   S2R R4, SR_TID.X ;
+        /*0180*/                   NOP ;
+        /*0190*/                   NOP ;
+        /*01a0*/                   S2R R3, SR_CTAID.X ;
+        /*01b0*/                   NOP ;
+        /*01c0*/                   NOP ;
+        /*01d0*/                   LDS R2, [R8] ;
+        /*01e0*/                   NOP ;
+        /*01f0*/                   F2F.F16.F32.RM R7, R2 ;
+        /*0200*/                   STS [R8+0x4], R7 ;
+        /*0210*/                   EXIT ;
+        /*0220*/                   BRA 0x220;
+
+// == i2f_f16_rp
+// base register R8
+// nop 0x0000..0x0140: the JIT's barrier set-up
+// nop 0x0140 (feeds only the removed addressing): MOV R1, c[0x0][0x28]
+// nop 0x0160 (feeds only the removed addressing): HFMA2.MMA R5, -RZ, RZ, 0, 2.384185791015625e-07
+// nop 0x0170 (feeds only the removed addressing): ULDC.64 UR4, c[0x0][0x118]
+// nop 0x0190 (feeds only the removed addressing): LEA R4, R3, R4, 0x5
+// nop 0x01a0 (feeds only the removed addressing): IMAD.WIDE.U32 R2, R4, R5, c[0x0][0x160]
+// nop 0x01c0 (feeds only the removed addressing): IMAD.WIDE.U32 R4, R4, R5, c[0x0][0x168]
+        /*0000*/                   S2R R8, SR_TID.X ;
+        /*0010*/                   IMAD.SHL.U32 R8, R8, 0x8, RZ ;
+        /*0020*/                   NOP ;
+        ...   (19 more NOPs)
+        /*0160*/                   NOP ;
+        /*0170*/                   S2R R4, SR_TID.X ;
+        /*0180*/                   NOP ;
+        /*0190*/                   NOP ;
+        /*01a0*/                   S2R R3, SR_CTAID.X ;
+        /*01b0*/                   NOP ;
+        /*01c0*/                   NOP ;
+        /*01d0*/                   LDS R2, [R8] ;
+        /*01e0*/                   NOP ;
+        /*01f0*/                   I2F.F16.RP R7, R2 ;
+        /*0200*/                   STS [R8+0x4], R7 ;
+        /*0210*/                   EXIT ;
+        /*0220*/                   BRA 0x220;
+
+// == f2f_f16_rpx
+// base register R8
+// nop 0x0000..0x0140: the JIT's barrier set-up
+// nop 0x0140 (feeds only the removed addressing): MOV R1, c[0x0][0x28]
+// nop 0x0160 (feeds only the removed addressing): HFMA2.MMA R5, -RZ, RZ, 0, 2.384185791015625e-07
+// nop 0x0170 (feeds only the removed addressing): ULDC.64 UR4, c[0x0][0x118]
+// nop 0x0190 (feeds only the removed addressing): LEA R4, R3, R4, 0x5
+// nop 0x01a0 (feeds only the removed addressing): IMAD.WIDE.U32 R2, R4, R5, c[0x0][0x160]
+// nop 0x01c0 (feeds only the removed addressing): IMAD.WIDE.U32 R4, R4, R5, c[0x0][0x168]
+        /*0000*/                   S2R R8, SR_TID.X ;
+        /*0010*/                   IMAD.SHL.U32 R8, R8, 0x8, RZ ;
+        /*0020*/                   NOP ;
+        ...   (19 more NOPs)
+        /*0160*/                   NOP ;
+        /*0170*/                   S2R R4, SR_TID.X ;
+        /*0180*/                   NOP ;
+        /*0190*/                   NOP ;
+        /*01a0*/                   S2R R3, SR_CTAID.X ;
+        /*01b0*/                   NOP ;
+        /*01c0*/                   NOP ;
+        /*01d0*/                   LDS R2, [R8] ;
+        /*01e0*/                   NOP ;
+        /*01f0*/                   F2F.F16.F32.RP R7, R2 ;
+        /*0200*/                   STS [R8+0x4], R7 ;
+        /*0210*/                   EXIT ;
+        /*0220*/                   BRA 0x220;
+
+// == i2f_f16_u32_rz
+// base register R8
+// nop 0x0000..0x0140: the JIT's barrier set-up
+// nop 0x0140 (feeds only the removed addressing): MOV R1, c[0x0][0x28]
+// nop 0x0160 (feeds only the removed addressing): HFMA2.MMA R5, -RZ, RZ, 0, 2.384185791015625e-07
+// nop 0x0170 (feeds only the removed addressing): ULDC.64 UR4, c[0x0][0x118]
+// nop 0x0190 (feeds only the removed addressing): LEA R4, R3, R4, 0x5
+// nop 0x01a0 (feeds only the removed addressing): IMAD.WIDE.U32 R2, R4, R5, c[0x0][0x160]
+// nop 0x01c0 (feeds only the removed addressing): IMAD.WIDE.U32 R4, R4, R5, c[0x0][0x168]
+        /*0000*/                   S2R R8, SR_TID.X ;
+        /*0010*/                   IMAD.SHL.U32 R8, R8, 0x8, RZ ;
+        /*0020*/                   NOP ;
+        ...   (19 more NOPs)
+        /*0160*/                   NOP ;
+        /*0170*/                   S2R R4, SR_TID.X ;
+        /*0180*/                   NOP ;
+        /*0190*/                   NOP ;
+        /*01a0*/                   S2R R3, SR_CTAID.X ;
+        /*01b0*/                   NOP ;
+        /*01c0*/                   NOP ;
+        /*01d0*/                   LDS R2, [R8] ;
+        /*01e0*/                   NOP ;
+        /*01f0*/                   I2F.F16.U32.RZ R7, R2 ;
+        /*0200*/                   STS [R8+0x4], R7 ;
+        /*0210*/                   EXIT ;
+        /*0220*/                   BRA 0x220;
+
+// == f2fp_pack_f16x2_rz
+// base register R8
+// nop 0x0000..0x0140: the JIT's barrier set-up
+// nop 0x0140 (feeds only the removed addressing): MOV R1, c[0x0][0x28]
+// nop 0x0160 (feeds only the removed addressing): HFMA2.MMA R5, -RZ, RZ, 0, 4.76837158203125e-07
+// nop 0x0170 (feeds only the removed addressing): ULDC.64 UR4, c[0x0][0x118]
+// nop 0x0190 (feeds only the removed addressing): LEA R4, R3, R4, 0x5
+// nop 0x01a0 (feeds only the removed addressing): IMAD.WIDE.U32 R2, R4, R5, c[0x0][0x160]
+// nop 0x01d0 (feeds only the removed addressing): HFMA2.MMA R5, -RZ, RZ, 0, 2.384185791015625e-07
+// nop 0x01e0 (feeds only the removed addressing): IMAD.WIDE.U32 R4, R4, R5, c[0x0][0x168]
+        /*0000*/                   S2R R8, SR_TID.X ;
+        /*0010*/                   IMAD.U32 R8, R8, 0xc, RZ ;
+        /*0020*/                   NOP ;
+        ...   (19 more NOPs)
+        /*0160*/                   NOP ;
+        /*0170*/                   S2R R4, SR_TID.X ;
+        /*0180*/                   NOP ;
+        /*0190*/                   NOP ;
+        /*01a0*/                   S2R R3, SR_CTAID.X ;
+        /*01b0*/                   NOP ;
+        /*01c0*/                   NOP ;
+        /*01d0*/                   LDS R0, [R8] ;
+        /*01e0*/                   LDS R7, [R8+0x4] ;
+        /*01f0*/                   NOP ;
+        /*0200*/                   NOP ;
+        /*0210*/                   F2FP.PACK_AB.RZ R7, R0, R7 ;
+        /*0220*/                   STS [R8+0x8], R7 ;
+        /*0230*/                   EXIT ;
+        /*0240*/                   BRA 0x240;
+
 // == i2i_s8_sat
 // base register R8
 // nop 0x0000..0x0140: the JIT's barrier set-up
@@ -8736,6 +8955,68 @@
         /*01f0*/                   LOP3.LUT R7, R5, 0x1f, RZ, 0xc0, !PT ;
         /*0200*/                   NOP ;
         /*0210*/                   SHFL.DOWN P0, R7, R0, R7, 0x1f ;
+        /*0220*/                   SEL R9, RZ, 0x1, !P0 ;
+        /*0230*/                   STS [R10+0x8], R7 ;
+        /*0240*/                   STS [R10+0xc], R9 ;
+        /*0250*/                   EXIT ;
+        /*0260*/                   BRA 0x260;
+
+// == shfl_up_clamp
+// base register R10
+// nop 0x0000..0x0140: the JIT's barrier set-up
+// nop 0x0140 (feeds only the removed addressing): MOV R1, c[0x0][0x28]
+// nop 0x0160 (feeds only the removed addressing): HFMA2.MMA R9, -RZ, RZ, 0, 4.76837158203125e-07
+// nop 0x0170 (feeds only the removed addressing): ULDC.64 UR4, c[0x0][0x118]
+// nop 0x0190 (feeds only the removed addressing): LEA R4, R3, R4, 0x5
+// nop 0x01a0 (feeds only the removed addressing): IMAD.WIDE.U32 R2, R4, R9, c[0x0][0x160]
+// nop 0x01e0 (feeds only the removed addressing): IMAD.WIDE.U32 R4, R4, R9, c[0x0][0x168]
+        /*0000*/                   S2R R10, SR_TID.X ;
+        /*0010*/                   IMAD.SHL.U32 R10, R10, 0x10, RZ ;
+        /*0020*/                   NOP ;
+        ...   (19 more NOPs)
+        /*0160*/                   NOP ;
+        /*0170*/                   S2R R4, SR_TID.X ;
+        /*0180*/                   NOP ;
+        /*0190*/                   NOP ;
+        /*01a0*/                   S2R R3, SR_CTAID.X ;
+        /*01b0*/                   NOP ;
+        /*01c0*/                   NOP ;
+        /*01d0*/                   LDS R0, [R10] ;
+        /*01e0*/                   LDS R5, [R10+0x4] ;
+        /*01f0*/                   LOP3.LUT R7, R5, 0x1f, RZ, 0xc0, !PT ;
+        /*0200*/                   NOP ;
+        /*0210*/                   SHFL.UP P0, R7, R0, R7, 0x10 ;
+        /*0220*/                   SEL R9, RZ, 0x1, !P0 ;
+        /*0230*/                   STS [R10+0x8], R7 ;
+        /*0240*/                   STS [R10+0xc], R9 ;
+        /*0250*/                   EXIT ;
+        /*0260*/                   BRA 0x260;
+
+// == shfl_up_seg
+// base register R10
+// nop 0x0000..0x0140: the JIT's barrier set-up
+// nop 0x0140 (feeds only the removed addressing): MOV R1, c[0x0][0x28]
+// nop 0x0160 (feeds only the removed addressing): HFMA2.MMA R9, -RZ, RZ, 0, 4.76837158203125e-07
+// nop 0x0170 (feeds only the removed addressing): ULDC.64 UR4, c[0x0][0x118]
+// nop 0x0190 (feeds only the removed addressing): LEA R4, R3, R4, 0x5
+// nop 0x01a0 (feeds only the removed addressing): IMAD.WIDE.U32 R2, R4, R9, c[0x0][0x160]
+// nop 0x01e0 (feeds only the removed addressing): IMAD.WIDE.U32 R4, R4, R9, c[0x0][0x168]
+        /*0000*/                   S2R R10, SR_TID.X ;
+        /*0010*/                   IMAD.SHL.U32 R10, R10, 0x10, RZ ;
+        /*0020*/                   NOP ;
+        ...   (19 more NOPs)
+        /*0160*/                   NOP ;
+        /*0170*/                   S2R R4, SR_TID.X ;
+        /*0180*/                   NOP ;
+        /*0190*/                   NOP ;
+        /*01a0*/                   S2R R3, SR_CTAID.X ;
+        /*01b0*/                   NOP ;
+        /*01c0*/                   NOP ;
+        /*01d0*/                   LDS R0, [R10] ;
+        /*01e0*/                   LDS R5, [R10+0x4] ;
+        /*01f0*/                   LOP3.LUT R7, R5, 0x1f, RZ, 0xc0, !PT ;
+        /*0200*/                   NOP ;
+        /*0210*/                   SHFL.UP P0, R7, R0, R7, 0x1808 ;
         /*0220*/                   SEL R9, RZ, 0x1, !P0 ;
         /*0230*/                   STS [R10+0x8], R7 ;
         /*0240*/                   STS [R10+0xc], R9 ;

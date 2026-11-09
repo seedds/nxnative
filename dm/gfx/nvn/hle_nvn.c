@@ -1799,6 +1799,7 @@ __attribute__((weak)) void dm_thread_cpu(char *out, size_t n, double secs) { (vo
 void mtl_res_stats(char *out, size_t n);
 void mtl_barrier_stats(uint64_t *skip, uint64_t *full);
 extern uint32_t mtl_present_qos(void);
+__attribute__((weak)) void dm_frame_thread_qos(void) {}   // hle_thread.c: the presenting thread's QoS class; graphics unit tests have no host
 static _Atomic uint64_t g_frame;
 static uint64_t g_acq_wait_ns, g_pq_wait_ns;   // Accumulated display-link wait / wait for the present queue to return inside acquire, recorded per frame at present (there can be several acquires within one frame)
 static uint64_t g_fs_start, g_fs_wait;   // frame step (fstep_tick): when the first acquire after a present returned (the frame's start, 0 = none yet), and its pacing wait
@@ -2387,6 +2388,7 @@ static const int *present_crop(const int win[4], int tw, int th, int lc[4]) {
 }
 NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     (void)q; win_t *o = (win_t *)w; o->presents++;
+    dm_frame_thread_qos();
     dm_ue_cvar_tick();
     if (fps_high()) high_cap_tick();
     if (dm_fps_state) __atomic_store_n((uint32_t *)(dm_fps_state + 4), (uint32_t)dm_movie_playing(), __ATOMIC_RELAXED);   // the stubs' copy of the movie state (hle.h)

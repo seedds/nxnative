@@ -25,6 +25,7 @@ static int observed_wait(pthread_cond_t *cv, pthread_mutex_t *mu) {
 void dm_audio_suspend(int on) { (void)on; }
 void guest_clock_freeze_for(int reason, int on) { (void)reason; (void)on; }
 void dm_gfx_suspend(int on) { (void)on; }
+static qos_class_t self_qos(void) { qos_class_t q = QOS_CLASS_UNSPECIFIED; pthread_get_qos_class_np(pthread_self(), &q, NULL); return q; }
 static void timeout(int sig) { (void)sig; const char message[] = "[RED] notification scheduler test timed out\n"; write(2, message, sizeof message - 1); _exit(99); }
 static void notify(uint64_t unused) {
     (void)unused;
@@ -62,7 +63,17 @@ int main(int argc, char **argv) {
     unsetenv("DM_OE_SCRIPT");
     setenv("DM_PREEMPT", argc > 1 ? "1" : "0", 1);
     svc_thread_main_init();
-    thr_t *self=cur();self->mask=1;self->core=0;self->prio=44;
+    thr_t *self=cur();self->mask=1;self->core=0;
+    if (g_qos_map) {   // the presenting thread is user-interactive at a priority the map makes user-initiated (Ocarina of Time's is 45; 50 here), unless DM_FRAME_QOS=0
+        const char *fq = getenv("DM_FRAME_QOS"); int off = fq && !strcmp(fq, "0");
+        self->prio = 50; pthread_mutex_lock(&G); qos_apply(self); pthread_mutex_unlock(&G);
+        assert(self_qos() == QOS_CLASS_USER_INITIATED);
+        dm_frame_thread_qos();
+        assert(self_qos() == (off ? QOS_CLASS_USER_INITIATED : QOS_CLASS_USER_INTERACTIVE));
+        if (!off) { pthread_mutex_lock(&G); self->prio = 55; qos_apply(self); pthread_mutex_unlock(&G);   // a SetThreadPriority re-applies the map: the class stays
+            assert(self_qos() == QOS_CLASS_USER_INTERACTIVE); }
+    }
+    self->prio=44;
     uint64_t r[32] = {0, (uint64_t)notify, 0, 0, 28, 0};
     assert(svc_thread(0x08, r) && r[0] == 0);
     uint32_t handle = (uint32_t)r[1];

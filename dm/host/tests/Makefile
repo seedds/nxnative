@@ -359,6 +359,8 @@ $(B)/t_notify_sched: t_notify_sched.c t_condvar_stub.c ../hle_thread.c ../hle_oe
 notify-scheduler: $(B)/t_notify_sched
 	$(B)/t_notify_sched
 	$(B)/t_notify_sched --all-peers
+	DM_QOS_MAP=1 $(B)/t_notify_sched
+	DM_QOS_MAP=1 DM_FRAME_QOS=0 $(B)/t_notify_sched
 run: notify-scheduler
 
 # Sanitizer builds (../../sanitizers/sanitizers.mk): make asan runs every test of run under ASan and UBSan; make tsan-threads runs the tests that start threads under TSan
@@ -392,6 +394,7 @@ tsan-threads-run: $(addprefix $(B)/,$(TSAN_T))
 	$(B)/t_sync_wait
 	DM_QOS_MAP=1 $(B)/t_notify_sched
 	DM_QOS_MAP=1 $(B)/t_notify_sched --all-peers
+	DM_QOS_MAP=1 DM_FRAME_QOS=0 $(B)/t_notify_sched
 $(B)/t_pad_hid: t_pad_hid.c ../pad_hid.h ../dm_input.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_pad_hid.c
 run: $(B)/t_pad_pro

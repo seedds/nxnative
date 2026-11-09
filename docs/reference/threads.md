@@ -124,6 +124,14 @@ Guest threads, their synchronization and how the host schedules them. Each entry
 - **Fix:** spawn `/usr/bin/sample` directly with the PID, one-second duration, `-f` and the unchanged path as separate arguments. Spawn file actions redirect stdout and stderr to `/dev/null`. Setup, spawn, wait, nonzero exit and signal failures retain the failure log; an interrupted wait resumes. The watchdog still exits with `128 + SIGALRM` after sampling.
 - **Found on:** the [static-analysis audit in issue #313](https://github.com/seedds/nxnative/issues/313#issuecomment-6543080671), reproduced with synthetic paths; no game-specific failure is claimed.
 
+### The presenting thread under `DM_QOS_MAP`
+
+- **Symptom:** with `DM_QOS_MAP=1`, Hyrule Field in Ocarina of Time (1,500-2,600 draws a frame) took 13-19 ms to record and submit on an iPhone 18 Pro Max, 41-55 fps, with the GPU at 11-13 ms.
+- **Cause:** the thread that presents the frames has a guest priority (45) the map turns into user-initiated (QoS 0x19, which the host runs at base priority 37). The phone kept it on the efficiency cores at about 1.6 GHz, against 3.7 GHz on a performance core. Without the map every guest thread is user-interactive, so only the map case is affected.
+- **Fix:** `dm_frame_thread_qos` (`hle_thread.c`), called at each `nvnQueuePresentTexture`, marks the calling thread and keeps it user-interactive: when first called, and again whenever a `SetThreadPriority` has re-applied the map. `DM_FRAME_QOS=0` leaves the map's class.
+- **Check:** `t_notify_sched` with `DM_QOS_MAP=1` puts the thread at priority 50 (user-initiated), calls `dm_frame_thread_qos` and reads the class back with `pthread_get_qos_class_np`: user-interactive, still so after a priority change to 55. With `DM_FRAME_QOS=0` it stays user-initiated. The frame rate itself was not measured by us; the numbers above are HookLink's, from an iPhone 18 Pro Max.
+- **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md#frame-rate), by [HookLink](https://github.com/dsi-hub/HookLink) (commit 70b8c1f0 on its `hooklink` branch).
+
 ## Synchronization and address arbitration
 
 ### `SignalToAddress` type 2 with count ≤ 0

@@ -85,6 +85,7 @@ typedef struct thr {
     mach_port_t mport;         // Host thread port (to get CPU time)
     _Atomic int qos_pending;   // SetThreadPriority from another thread changed prio: the thread applies the new class at its next SVC (only a thread can set its own QoS)
     uint32_t qos;
+    int frame_thread;          // presents the game's frames (dm_frame_thread_qos): user-interactive whatever its priority
     // Pausing (SetThreadActivity, used by IL2CPP's garbage collector to stop the world): pause_req = requested, paused = stopped for the current request; when stopped inside an SVC the context comes from the gate frame svc_regs (registered on SVC entry),
     // when stopped in guest code the signal handler saves it into ctx_*; pcv lets the requester wait for "stopped" and the paused thread wait for "resume"
     _Atomic int pause_req; int paused;
@@ -339,12 +340,26 @@ static qos_class_t prio_qos(int prio) {
     return prio <= g_qos_e1 ? QOS_CLASS_USER_INTERACTIVE : prio <= g_qos_e2 ? QOS_CLASS_USER_INITIATED : QOS_CLASS_UTILITY;
 }
 static void qos_apply(thr_t *t) {   // on the thread itself, holding G (prio and qos are shared with scheduler readers)
-    qos_class_t q = prio_qos(t->prio);
+    qos_class_t q = t->frame_thread ? QOS_CLASS_USER_INTERACTIVE : prio_qos(t->prio);
     if ((uint32_t)q != t->qos && !pthread_set_qos_class_self_np(q, 0)) t->qos = (uint32_t)q;
+}
+static const char *thr_name(thr_t *t, char *buf, size_t n);
+// The thread that presents the game's frames runs user-interactive under DM_QOS_MAP whatever its priority. Ocarina of Time presents from a thread the map made user-initiated (guest priority 45:
+// QoS 0x19, which the host runs at base priority 37): on an iPhone 18 Pro Max the system kept it on the efficiency cores at about 1.6 GHz, against 3.7 GHz on a performance core, and Hyrule Field's 1,500-2,600 draws a
+// frame took 13-19 ms to record and submit (41-55 fps, GPU 11-13 ms). Called on that thread at each present (nvnQueuePresentTexture); it acts only the first time and when the class
+// was changed since (a SetThreadPriority re-applies the map). DM_FRAME_QOS=0 leaves the map's class
+void dm_frame_thread_qos(void) {
+    static int on = -1; if (on < 0) { const char *e = getenv("DM_FRAME_QOS"); on = !(e && !strcmp(e, "0")); }
+    if (!on || !g_qos_map) return;
+    thr_t *t = pthread_getspecific(g_keythr); if (!t) return;
+    if (t->frame_thread && t->qos == (uint32_t)QOS_CLASS_USER_INTERACTIVE) return;
+    pthread_mutex_lock(&G);
+    uint32_t was = t->qos; int first = !t->frame_thread; t->frame_thread = 1; qos_apply(t);
+    pthread_mutex_unlock(&G);
+    static int nl; if (first || nl < 4) { nl++; char nb[48]; LOG("frame thread %#x %s (priority %d): QoS %#x → %#x (user-interactive while it presents frames)", t->handle, thr_name(t, nb, sizeof nb), t->prio, was, t->qos); }
 }
 // A host helper thread (audio notify / silent sink, vsync, movie decode) created from a guest thread inherits that thread's class; under DM_QOS_MAP it sets its own instead
 void dm_host_helper_qos(qos_class_t q) { if (g_qos_map) pthread_set_qos_class_self_np(q, 0); }
-static const char *thr_name(thr_t *t, char *buf, size_t n);
 static void *thread_main(void *p) {
     thr_t *t = p;
     pthread_setspecific(g_keythr, t);

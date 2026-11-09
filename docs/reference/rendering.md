@@ -292,6 +292,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Found on:** [DRAGON QUEST VII Reimagined](../../dm/games/0100A9D01C446000/README.md) (GitHub issue #589). The rewriter finds the pool in every Unreal main on the drive: OCTOPATH TRAVELER and Yoshi's Crafted World (UE 4.1x, UTF-32), Pikmin 4 (4.26), OCTOPATH TRAVELER II and DRAGON QUEST VII Reimagined (4.27), Octopath Traveler 0 (UE 5) and FINAL FANTASY RESONANCE (5.6).
 - **Check:** `t_uecvar` (the variable named in main's table, or not; the value raised, kept and left); the search itself, `test_ue_cvar.py`. On a Mac run, `DM_CTL` `cvari <main offset> <MB>` sets the pool while the game runs, for an A/B at one spot.
 
+### Float slots on integer textures
+
+- **Symptom:** a pass that writes and samples an integer texture as float (an occlusion pyramid of depths) reads values that are not what was written; here the instance cull let none of its instances through, and no mesh draw got a count.
+- **Cause:** NVN reads and writes the bits through a float view of the texture (the descriptor's format). Metal, handed the integer texture itself for a float slot, converts the value or reads undefined. An earlier check ([Integer textures and images through float declarations keep their bits](shaders.md#integer-textures-and-images-through-float-declarations-keep-their-bits)) found such reads keeping their bits on the GPU it ran on; this pyramid did not, and with the view it does.
+- **Fix:** a float-typed slot, sampled or image, on an integer texture of 4, 8 or 16 bytes a texel gets an R32Float, RG32Float or RGBA32Float view of the same texture (`img_fit`, which already does the opposite for integer slots). 1- and 2-byte formats are left alone, since a float written to them would convert. `DM_NVN_FLOAT_VIEW=0` binds them as before.
+- **Found on:** [PRAGMATA](../../dm/games/0400C76024710000/README.md): the occlusion pyramid (an NVN R32UI texture, 384x216, 9 levels) written with float min depths by `95656724c5b02299` through `texture2d<float, access::write>` and sampled as float by the instance cull `5318516d206dba46`, which let none of 8,192 instances through.
+
 ## Render targets, passes and clears
 
 ### Transient render targets shared by storage

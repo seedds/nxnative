@@ -4,7 +4,7 @@ Play your own Nintendo Switch and Switch 2 games natively on Apple silicon Macs,
 
 It is not an emulator: the game's own code runs directly on the Apple chip, with Switch graphics rebuilt on Metal. Nothing from any game is in this repository, and the project is not affiliated with Nintendo or any game publisher.
 
-[Games](#games) · [Requirements](#requirements) · [How to play](#how-to-play) · [Discussions](#discussions) · [For developers](#for-developers)
+[Games](#games) · [Community front ends](#community-front-ends) · [Requirements](#requirements) · [How to play](#how-to-play) · [Discussions](#discussions) · [For developers](#for-developers)
 
 ## Games
 
@@ -24,6 +24,16 @@ These Switch 2 games have passed Mac gameplay testing. Build them from a [`.nup`
 - [The Legend of Zelda: Ocarina of Time](dm/games/0400486024DEC000/README.md)
 - [Yoshi and the Mysterious Book](dm/games/0400245021D2C000/README.md)
 
+## Community front ends
+
+Community projects build on nxnative with tools to turn your games into apps for your iPhone, iPad or Mac without the command line, and libraries to organize and launch them. They are separate projects: questions and bugs about them go to their own pages.
+
+- [NX2Apple](https://github.com/LNPANDY/NX2Apple) — Mac builder with a shared iPhone/iPad game library.
+- [NX Play](https://github.com/varyform/nx-native-wrapper) — Mac library with device installs and save sync.
+- [NxNative Launcher](https://github.com/rennan101/nxnative_Launcher) — Mac launcher with guided builds and controller mapping.
+- [LumaNX](https://github.com/Xc1Ym/LumaNX) — Mac game builder with IPA export.
+- [GameCase](https://github.com/Tiaoge-tou/GameCase) — iOS game library based on LiveContainer.
+
 ## Requirements
 
 - **Mac:** Apple silicon, macOS 26.6 or later. Building games requires Xcode 27.2.
@@ -37,16 +47,6 @@ For a game without a profile, the script writes a survey and tries a provisional
 ## How to play
 
 Switch 2 games are built from one `.nup` file or a folder of their files, not from NSPs, and are tested on the Mac only: see [Switch 2 games](#switch-2-games).
-
-### Community front ends
-
-Community projects build on nxnative with tools to turn your games into apps for your iPhone, iPad or Mac without the command line, and libraries to organize and launch them. They are separate projects: questions and bugs about them go to their own pages.
-
-- [NX2Apple](https://github.com/LNPANDY/NX2Apple) — Mac builder with a shared iPhone/iPad game library.
-- [NX Play](https://github.com/varyform/nx-native-wrapper) — Mac library with device installs and save sync.
-- [NxNative Launcher](https://github.com/rennan101/nxnative_Launcher) — Mac launcher with guided builds and controller mapping.
-- [LumaNX](https://github.com/Xc1Ym/LumaNX) — Mac game builder with IPA export.
-- [GameCase](https://github.com/Tiaoge-tou/GameCase) — iOS game library based on LiveContainer.
 
 ### Build from the command line
 

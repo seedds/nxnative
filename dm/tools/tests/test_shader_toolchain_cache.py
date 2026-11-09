@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import types
 from typing import Any
 import unittest
@@ -230,12 +231,14 @@ class ShaderCache(unittest.TestCase):
             self.ns['publish_cache'](key, key + '-digest', 'rule', 'source')
             return key, 'ok', '', refl
 
-        # the batches, then the loop that translates and finishes them (the translator and fin substituted)
-        start = next(i for i, n in enumerate(self.tree.body) if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'batches' for t in n.targets))
-        end = next(i for i, n in enumerate(self.tree.body) if i > start and isinstance(n, ast.With)) + 1
+        # the phases, the chunks and the loop that translates and finishes them, in this process (the translator and fin substituted)
+        start = next(i for i, n in enumerate(self.tree.body) if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'CHUNK' for t in n.targets))
+        end = next(i for i, n in enumerate(self.tree.body) if i > start and isinstance(n, ast.Expr) and 'res.sort' in ast.unparse(n)) + 1
         work = Path(self.tmp.name) / 'work'
-        def translate(batch): work.mkdir(exist_ok=True); return str(work)
-        self.ns.update(cf=cf, NJ=1, BATCH=1, keys=keys, fin=lambda key, wb: finish_key(key), translate=translate)
+        def translate_chunk(chunk): work.mkdir(exist_ok=True); return str(work)
+        self.ns.update(cf=cf, NJ=1, keys=keys, fin=lambda key, wb: finish_key(key), translate_chunk=translate_chunk, tempfile=tempfile, w=self.tmp.name,
+                       PROCS=1, cache_hits=set(), rec_of=lambda key: ('package', b''), collections=collections, PROGRESS=None, MTL=None, sys=sys, time=time,
+                       **{n: collections.Counter() for n in ('PRE_STATS', 'VIN_STATS', 'PULL_STATS', 'SIDE_STATS', 'BF_STATS')})
         exec(compile(ast.Module(body=self.tree.body[start:end], type_ignores=[]), str(TOOLS / 'dmsh_build.py'), 'exec'), self.ns)
         self.assertEqual(built, [pixel, vertex])
         self.assertIn('dm_pad7 [[user(locn7)]]', (out / (vertex + '_b.metal')).read_text())

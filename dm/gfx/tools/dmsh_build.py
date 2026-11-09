@@ -1752,7 +1752,16 @@ def finish(key, w, j, c1):
 keys = build_keys(want, loc, PAIRS)
 if want: want = set(keys)   # dependency outputs are cleaned too, so a failed pixel build cannot leave old MSL for padding
 NJ = int(os.environ.get('J', '8'))
-BATCH = 4 * NJ   # shaders translated and finished together: the next batch is translated while this one is finished, and a shader's working files go when it is (fin).
+# A build runs as several processes. Each shader needs about 40 ms of this file's own Python (the rewrites, its outputs, the cache), which one process runs one shader at a time
+# whatever J is: on Ocarina of Time's cold build on an 18-core Mac that Python was busy the whole build while the cores were half idle. PROCS copies of this run (workers, DMSH_SHARD:
+# their index, their count, the phase and the file of their results) each build a share of a phase's shaders with their own threads and stage the outputs in the same cache under this
+# folder's name, as one process would; this run then reads their results and writes the library as before. DMSH_PROCS sets the count (1: no workers)
+SHARD = os.environ.get('DMSH_SHARD')
+PROCS = 1 if SHARD else max(1, int(os.environ.get('DMSH_PROCS') or -(-NJ // 3)))   # one process per 3 of J: 6 for J=18 measured best (193 s → 101 s on a 1,714-shader sample)
+SHARD_OUT = ''
+if SHARD:
+    _si, _sn, _sph, SHARD_OUT = SHARD.split('/', 3)
+    keys = [k for k in keys if (k in PAIRS) == (_sph == '2')][int(_si)::int(_sn)]
 # Minecraft Dungeons II, 15,826 shaders: at most 3,279 files under the build folder with batches of 256 removed whole, 68,230 before batches (Octopath Traveler 0's stopped build)
 # A full build starts from no shader outputs, a partial one from none of the keys it builds, so what a run leaves is what it built: every output is restored from the cache anyway.
 # The chain version is the same whatever the profile's tables, so a key that left the map, a shader that no longer builds or a variant no longer made would keep an old library.
@@ -1764,6 +1773,9 @@ STAMP_BEFORE = shader_lib.read_stamp(out).get('inputs')
 OLD_IMAGE = {}
 for _label, _d in (('mac', out), ('ios', IOSOUT)):
     if not _d: continue
+    if SHARD:   # the build that started this worker cleared the folder
+        if want and os.path.isfile(shader_lib.image_of(_d)): OLD_IMAGE[_label] = romfs.Path(shader_lib.image_of(_d))
+        continue
     if not want:
         shutil.rmtree(_d, ignore_errors=True); shader_lib.remove_image(_d)
     elif os.path.isfile(shader_lib.image_of(_d)): OLD_IMAGE[_label] = romfs.Path(shader_lib.image_of(_d))
@@ -1772,7 +1784,7 @@ for _label, _d in (('mac', out), ('ios', IOSOUT)):
         _m = OUT_KEY.match(_n)
         if _m and _m.group(1) in want: os.unlink(os.path.join(_d, _n))
     if STAMP_BEFORE != INPUTS and os.path.exists(os.path.join(_d, dmsh_chain.STAMP)): os.unlink(os.path.join(_d, dmsh_chain.STAMP))
-STORE.delete_prefix(STAGE + '/')   # what a stopped build of this folder staged
+if not SHARD: STORE.delete_prefix(STAGE + '/')   # what a stopped build of this folder staged
 
 def sweep_work(root):
     """The working folders (dmsh_*) a build left that is no longer running: each holds the process ID of its build (pid), one from before that is taken after a day.
@@ -1794,7 +1806,7 @@ w = tempfile.mkdtemp(prefix='dmsh_', dir=_work)
 with open(os.path.join(w, 'pid'), 'w') as _f: _f.write(str(os.getpid()))
 MTL = dmsh_mtlcache.Cache(STORE, {'mac': ('macosx', MAC_RECORD, mac_compile), **({'ios': ('iphoneos', ios_metal.RECORD, ios_metal.compile)} if IOSOUT else {})}, w)
 # first take the libraries earlier chain versions left on disk: the b-*/ and b-*.img beside the output (iOS: the folder of the same name) and the roots DMSH_PREFILL lists
-for _spec in [cache_root + ('=' + os.path.dirname(IOSOUT) if IOSOUT else '')] + [x for x in os.environ.get('DMSH_PREFILL', '').split(os.pathsep) if x]:
+for _spec in [] if SHARD else [cache_root + ('=' + os.path.dirname(IOSOUT) if IOSOUT else '')] + [x for x in os.environ.get('DMSH_PREFILL', '').split(os.pathsep) if x]:
     _mac, _, _ios = _spec.partition('=')
     for _b in sorted(os.listdir(_mac)) if os.path.isdir(_mac) else []:
         if _b.startswith('b-') and os.path.realpath(shader_lib.folder_of(os.path.join(_mac, _b))) != os.path.realpath(out):
@@ -1837,7 +1849,7 @@ def plain_digest(k):   # a paired pixel shader's key, also when it is not built 
     return shader_key(k, *rec_of(k)) if k in loc else 'missing'
 for key in keys:
     if PAIRS.get(key): digests[key] = pair_keyed(digests[key], [plain_digest(p) for p in sorted(PAIRS[key])])
-for i, key in enumerate(keys):
+for i, key in enumerate(keys if PROCS == 1 else ()):   # with workers, each looks up its own share
     name = loc[key][0]
     rule_fps[key] = hashlib.sha256(shader_rule_source(name) + ','.join(sorted(PAIRS.get(key, ()))).encode()).hexdigest()   # the vertex shader must be rebuilt when its pairs change (vs_pad)
     hit, cache_reasons[key] = cache_lookup(key, digests[key], rule_fps[key], CODE_FP)
@@ -1849,17 +1861,6 @@ def xlate_errors(r):
     for ln in r.stderr.splitlines():
         m = re.match(r'\[RED\] (\w+): (.*)', ln)
         if m: xerr[m.group(1)] = m.group(2)[:160]
-def translate(batch):
-    """A batch's misses translated into a working folder of its own (removed once the batch is finished) → that folder"""
-    wb = tempfile.mkdtemp(prefix='batch_', dir=w)
-    miss = [k for k in batch if k not in cache_hits]
-    for k in miss: jobs[k], c1s[k] = job_for(k, loc[k][0], rec_of(k)[1], wb)
-    def xl(ch):
-        jp = os.path.join(wb, f'job_{abs(hash(ch[0]))}.json'); json.dump([jobs[k] for k in ch], open(jp, 'w'))
-        return subprocess.run([XLATE, jp, wb], capture_output=True, text=True)
-    with cf.ThreadPoolExecutor(NJ) as ex:
-        for r in ex.map(xl, [c for c in (miss[i::NJ] for i in range(NJ)) if c]): xlate_errors(r)
-    return wb
 def restored(key, wb):
     """A cache hit's outputs back on disk while it is finished. When another build pruned them since the look (cache_lookup), the shader is translated now, in the batch's folder: False"""
     if restore_cache(key, digests[key]): return True
@@ -1888,17 +1889,90 @@ def fin(key, wb):
                 if e.name.startswith((key, 'job1_' + key)) and e.is_file(): os.unlink(e.path)
         with _prog['lock']: DONE['n'] += 1; n = DONE['n']
         progress('compiling', n, len(keys), cached=len(cache_hits), misses=NMISS)
-# Two phases: paired vertex shaders read their pixel shaders' MSL (vs_pad), so they go last, in batches of their own. The next batch is translated while this one is finished
-batches = [b[i:i + BATCH] for b in ([k for k in keys if k not in PAIRS], [k for k in keys if k in PAIRS]) for i in range(0, len(b), BATCH)]
+# Two phases: paired vertex shaders read their pixel shaders' MSL (vs_pad), so they go last, after every other shader is finished. Within a phase nothing waits for a batch:
+# the misses are translated in chunks of CHUNK, largest record first, and each shader is finished as soon as its own chunk is translated. Batches finished together used to
+# hold every worker until the batch's slowest shader was done (Ocarina of Time's full build left the CPU about half idle). A chunk's working folder goes when its last shader
+# is finished, and at most WINDOW chunks are translated but not yet finished, which bounds the files under the build folder as the batches did
+def translate_chunk(ch):
+    """A chunk of misses translated by one translator run into a working folder of its own (removed once its last shader is finished) → that folder"""
+    wb = tempfile.mkdtemp(prefix='chunk_', dir=w)
+    for k in ch: jobs[k], c1s[k] = job_for(k, loc[k][0], rec_of(k)[1], wb)
+    jp = os.path.join(wb, 'job.json'); json.dump([jobs[k] for k in ch], open(jp, 'w'))
+    xlate_errors(subprocess.run([XLATE, jp, wb], capture_output=True, text=True))
+    return wb
+CHUNK = int(os.environ.get('DMSH_CHUNK', '8'))
+WINDOW = 2 * NJ
+order = {k: (k in PAIRS, i) for i, k in enumerate(keys)}   # results in the order the phases run, as the batches gave them
+def run_phase(phase):
+    hits = [k for k in phase if k in cache_hits]
+    miss = sorted((k for k in phase if k not in cache_hits), key=lambda k: -len(rec_of(k)[1]))
+    chunks = [miss[i:i + CHUNK] for i in range(0, len(miss), CHUNK)]
+    out_res, left, lock, room = [], {}, threading.Lock(), threading.Semaphore(WINDOW)
+    def done_one(wb):
+        with lock:
+            left[wb] -= 1; last = not left[wb]
+        if last: shutil.rmtree(wb, ignore_errors=True); room.release()
+    with cf.ThreadPoolExecutor(NJ) as tx, cf.ThreadPoolExecutor(NJ) as ex:
+        fins, errs, chunk_of = [], [], {}
+        def fin_in(k, wb):
+            try: return fin(k, wb)
+            finally: done_one(wb)
+        def start(wb, ks):   # a folder's shaders, handed to the finishing workers
+            with lock:
+                left[wb] = len(ks); fins.extend(ex.submit(fin_in, k, wb) for k in ks)
+        def translated(f):   # in the translating worker, once its chunk is translated
+            try: start(f.result(), chunk_of[f])
+            except BaseException as e: errs.append(e); room.release()
+        if hits:
+            room.acquire(); start(tempfile.mkdtemp(prefix='hits_', dir=w), hits)
+        for ch in chunks:
+            room.acquire()   # released when a chunk's last shader is finished
+            if errs: break
+            f = tx.submit(translate_chunk, ch)
+            with lock: chunk_of[f] = ch
+            f.add_done_callback(translated)   # after chunk_of has it: a chunk translated already runs its callback here
+        tx.shutdown(wait=True)
+        if errs: raise errs[0]
+        with lock: todo = list(fins)
+        out_res = [f.result() for f in todo]
+    return out_res
+STAT_SETS = {'pre': PRE_STATS, 'vin': VIN_STATS, 'pull': PULL_STATS, 'side': SIDE_STATS, 'bf': BF_STATS}
+def run_procs():
+    """The phases as PROCS workers each → the results of every shader, with the workers' counts added to this run's"""
+    out_res = []
+    for ph in ('1', '2'):
+        n = min(PROCS, sum(1 for k in keys if (k in PAIRS) == (ph == '2')))
+        if not n: continue
+        base, procs = len(out_res), []
+        for i in range(n):
+            rj = os.path.join(w, f'worker_{ph}_{i}.json')
+            env = dict(os.environ, DMSH_SHARD=f'{i}/{n}/{ph}/{rj}', J=str(-(-3 * NJ // (2 * n))), **({'DMSH_PROGRESS': rj + '.progress'} if PROGRESS else {}))
+            procs.append((subprocess.Popen(sys.orig_argv, env=env), rj))
+        while any(p.poll() is None for p, _ in procs):   # the workers' progress as one
+            done = 0
+            for _, rj in procs:
+                try:
+                    with open(rj + '.progress') as f: done += json.load(f).get('done', 0)
+                except (OSError, ValueError): pass
+            progress('compiling', base + done, len(keys)); time.sleep(0.5)
+        for p, rj in procs:
+            if p.returncode: sys.exit(f'[RED] shader build worker {rj} stopped ({p.returncode}); its messages are above')
+            with open(rj) as f: r = json.load(f)
+            out_res += [tuple(x) for x in r['res']]
+            for name, c in r['stats'].items(): STAT_SETS[name].update(c)
+            for what, n_ in r['mtl']: MTL.count(tuple(what) if isinstance(what, list) else what, n_)
+    return out_res
 res = []
-with cf.ThreadPoolExecutor(1) as tx, cf.ThreadPoolExecutor(NJ) as ex:
-    nxt = tx.submit(translate, batches[0]) if batches else None
-    for i, batch in enumerate(batches):
-        assert nxt is not None
-        wb = nxt.result()
-        nxt = tx.submit(translate, batches[i + 1]) if i + 1 < len(batches) else None
-        res += list(ex.map(lambda k, wb=wb: fin(k, wb), batch))
-        shutil.rmtree(wb, ignore_errors=True)
+if PROCS > 1: res = run_procs()
+else:
+    for phase in ([k for k in keys if k not in PAIRS], [k for k in keys if k in PAIRS]): res += run_phase(phase)
+res.sort(key=lambda r: order[r[0]])
+if SHARD:   # a worker: its results for the run that started it, which writes the library
+    with open(SHARD_OUT + '.tmp', 'w') as f:
+        json.dump({'res': res, 'stats': {k: dict(v) for k, v in STAT_SETS.items()}, 'mtl': [[list(k) if isinstance(k, tuple) else k, n] for k, n in MTL.stats.items()]}, f, default=list)
+    os.replace(SHARD_OUT + '.tmp', SHARD_OUT)
+    shutil.rmtree(w, ignore_errors=True)
+    sys.exit(0)
 # Passthrough geometry as mesh shaders (dmsh_mesh.py): <vertex key>_<geometry key>_m3 for each pair in the profile's geo_mesh.tsv whose two libraries exist; the host
 # draws a lean triangle-list geometry draw with it when its pair has one, and through the compute path otherwise (nvn_geometry.inc geo_mesh_draw)
 MESH_STATS = collections.Counter()

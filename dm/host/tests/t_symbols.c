@@ -34,6 +34,7 @@ int svc_nro_deactivate(module_t *m) { m->loaded = 0; return 1; }   // no memory 
 void thr_svc_enter(uint64_t *r, uint64_t a) { (void)r; (void)a; }
 void thr_svc_leave(void) {}
 void dm_spin_wait(uint64_t r, uint64_t a) { (void)r; (void)a; }
+int dm_gfx_scale(void) { return 0; }   // loader.c's render scale divides by the graphics tier's picture (hle_oe.c)
 uint64_t svc_dispatch(int n, uint64_t *r, uint64_t a) { (void)n; (void)r; (void)a; return 0; }
 static const char *wrap_kind, *wrap_name;
 static unsigned wraps;

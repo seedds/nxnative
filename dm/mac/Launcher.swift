@@ -1,9 +1,9 @@
 // Mac app launcher: the settings window shown before the game starts, in the launcher's own process (launcher.c calls dm_mac_launcher before it starts the host). Its settings come from the
 // app's Resources/dm/launcher.json (dm/games/settings.py with SETTINGS_PLATFORM=mac); the model and the rows are the iOS launcher's (dm/ios/Sources/LauncherSettings.swift, LauncherRow.swift),
-// and so is the store: launcher.<VAR> in the app's preferences, which launcher.c reads when the window is not shown (docs/frontends.md, Saved choices). Basic settings (level basic) come
-// first, the others under Advanced settings, each in the list's sections. Play puts the settings into this process's environment, which the host inherits; Quit and closing the window end the
-// app without the game. "Show this window at launch" off: no window unless Option is held at launch, and launcher.c applies the saved choices. The window never takes focus by itself: an app
-// opened in the background (open -g) keeps its window behind until the player switches to it
+// and so is the store: launcher.<VAR> in the app's preferences, which launcher.c reads when the window is not shown (docs/frontends.md, Saved choices). Each of the list's sections is a tab,
+// with its basic settings (level basic) first, and Cloud saves is the last tab; the window keeps one height, and a tab whose rows do not fit scrolls. Play puts the settings into this process's
+// environment, which the host inherits; Quit and closing the window end the app without the game. "Show this window at launch" off: no window unless Option is held at launch, and launcher.c
+// applies the saved choices. The window never takes focus by itself: an app opened in the background (open -g) keeps its window behind until the player switches to it
 import AppKit
 import QuartzCore
 import SwiftUI
@@ -13,45 +13,53 @@ private func info(_ key: String) -> String? { Bundle.main.object(forInfoDictiona
 struct LauncherView: View {
     @ObservedObject var m: LauncherModel
     let done: (Bool) -> Void
-    let fit: (CGFloat) -> Void
+    var overflow: (CGFloat) -> Void = { _ in }
     @AppStorage("window.show") private var show = true
-    @AppStorage("window.advanced") private var advanced = false
+    @AppStorage("window.tab") private var savedTab = ""
+
+    static let cloudTab = "Cloud saves"
+    static let height: CGFloat = 560
+    private var tabs: [String] { m.sections + [Self.cloudTab] }
+    private var tab: String { tabs.contains(savedTab) ? savedTab : tabs[0] }
 
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
-                Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 64, height: 64).accessibilityHidden(true)
+                Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 48, height: 48).accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(info("CFBundleName") ?? "Game").font(.title2.weight(.semibold))
+                    Text(info("CFBundleName") ?? "Game").font(.title3.weight(.semibold))
                     Text("Version \(info("CFBundleShortVersionString") ?? "1.0")").foregroundStyle(.secondary)
                 }
                 Spacer()
             }
             .padding([.horizontal, .top], 20)
+            Picker("Settings", selection: Binding(get: { tab }, set: { savedTab = $0 })) {
+                ForEach(tabs, id: \.self) { Text($0).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .fixedSize()
+            .padding(.top, 14)
+            .background { tabShortcuts }
             Form {
-                settingSections(basic: true)
-                CloudSavesSection()
-                Section {
-                    DisclosureGroup("Advanced settings", isExpanded: $advanced) {}
-                }
-                if advanced {
-                    settingSections(basic: false)
-                    Section {
-                        Button("Reset to tested defaults") { m.reset() }
-                            .disabled(!m.changed)
-                    } footer: {
-                        Text("Brings back all settings this game was tested with.")
-                    }
+                if tab == Self.cloudTab {
+                    CloudSavesSection()
+                } else {
+                    rowSection(m.rows(in: tab, basic: true))
+                    rowSection(m.rows(in: tab, basic: false))
                 }
             }
             .formStyle(.grouped)
             .onScrollGeometryChange(for: CGFloat.self) {
                 $0.contentSize.height + $0.contentInsets.top + $0.contentInsets.bottom - $0.containerSize.height
             } action: { _, extraHeight in
-                fit(extraHeight)
+                overflow(extraHeight)
             }
             HStack {
-                Toggle("Show this window at launch", isOn: $show).toggleStyle(.checkbox)
+                Button("Restore Defaults") { m.reset() }
+                    .disabled(!m.changed)
+                    .help("Brings back all settings this game was tested with.")
+                Toggle("Show this window at launch", isOn: $show).toggleStyle(.checkbox).padding(.leading, 8)
                 Spacer()
                 Button("Quit") { done(false) }
                 Button("Play") { done(true) }.keyboardShortcut(.defaultAction)
@@ -61,15 +69,22 @@ struct LauncherView: View {
         .frame(minWidth: 520, idealWidth: 560)
     }
 
-    @ViewBuilder private func settingSections(basic: Bool) -> some View {
-        ForEach(m.sections(basic: basic), id: \.self) { section in
-            let rows = m.rows(in: section, basic: basic)
-            if !rows.isEmpty {
-                Section(section) {
-                    ForEach(rows) { SettingRow(s: $0, m: m) }
-                }
+    @ViewBuilder private func rowSection(_ rows: [Setting]) -> some View {
+        if !rows.isEmpty {
+            Section {
+                ForEach(rows) { SettingRow(s: $0, m: m) }
             }
         }
+    }
+
+    private var tabShortcuts: some View {
+        ZStack {
+            ForEach(Array(tabs.prefix(9).enumerated()), id: \.offset) { i, t in
+                Button(t) { savedTab = t }.keyboardShortcut(KeyEquivalent(Character(String(i + 1))), modifiers: .command)
+            }
+        }
+        .opacity(0)
+        .accessibilityHidden(true)
     }
 }
 
@@ -131,15 +146,15 @@ private final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate 
         app.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         app.addItem(withTitle: "Quit \(name)", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         item.submenu = app; menu.addItem(item); NSApp.mainMenu = menu
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 660), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: LauncherView.height), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         w.title = name; w.isReleasedWhenClosed = false; w.delegate = self
-        w.contentMinSize = NSSize(width: 520, height: 0)
+        w.contentMinSize = NSSize(width: 520, height: 380)
         window = w
         if let screen = w.screen ?? NSScreen.main {
             w.setFrameTopLeftPoint(NSPoint(x: screen.visibleFrame.midX - w.frame.width / 2, y: screen.visibleFrame.maxY))
         }
-        let host = NSHostingView(rootView: LauncherView(m: model, done: { [weak self] in self?.finish($0) }, fit: { [weak self] in self?.fit($0) }))
-        host.sizingOptions = []   // the Form's measured scroll content owns the height, including after collapse
+        let host = NSHostingView(rootView: LauncherView(m: model, done: { [weak self] in self?.finish($0) }))
+        host.sizingOptions = []
         w.contentView = host
         host.layoutSubtreeIfNeeded()
         // no activation and no ordering in front of another app's windows: LaunchServices activates an app opened from Finder or the Dock (applicationDidBecomeActive), open -g does not
@@ -152,12 +167,6 @@ private final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate 
     }
     func windowWillClose(_ n: Notification) { finish(false) }
 
-    func fit(_ extraHeight: CGFloat) {
-        guard let w = window, let screen = w.screen else { return }
-        let frame = LauncherWindowLayout.fitted(w.frame, extraHeight: extraHeight, visible: screen.visibleFrame)
-        if abs(frame.height - w.frame.height) > 0.5 { w.setFrame(frame, display: true) }
-    }
-
     func finish(_ play: Bool) {
         guard let w = window else { return }
         window = nil; self.play = play
@@ -167,14 +176,6 @@ private final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate 
         w.delegate = nil; w.orderOut(nil)
         NSApp.stop(nil)
         NSApp.postEvent(NSEvent.otherEvent(with: .applicationDefined, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil, subtype: 0, data1: 0, data2: 0)!, atStart: true)   // run returns at the next event
-    }
-}
-
-enum LauncherWindowLayout {
-    static func fitted(_ frame: NSRect, extraHeight: CGFloat, visible: NSRect) -> NSRect {
-        let top = min(frame.maxY, visible.maxY)
-        let height = min(frame.height + extraHeight, top - visible.minY)
-        return NSRect(x: frame.minX, y: top - height, width: frame.width, height: height)
     }
 }
 

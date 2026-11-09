@@ -40,6 +40,11 @@
 // compute's c0 push region there); one block for the graphics stages, one for compute
 #define DMSH_PUSH_BANK 24
 #define DMSH_PUSH_SIZE 0x100             // bytes of a block
+
+// Uniform bounds: a read of a game uniform slot (c[3 + reg]) past the size the game bound gives 0, as Maxwell's constant buffers do. The translator reads each slot's bound size from
+// a table in a bank of its own (TranslationFlags.MetalUniformBounds, Ryujinx Constants.NxUniformSizesBank), which the host fills from the current bindings
+#define DMSH_CBSIZE_BANK 25
+#define DMSH_CBSIZE_SLOTS 14             // a u32 for each of uniform slots 0 to 13, as four uint4: 64 bytes
 #define DMSH_C0_POINT_SIZE 0x610         // graphics stages: the largest point size, to which GLSLC clamps a shader-written gl_PointSize (Super Mario Odyssey's point sprites)
 #define DMSH_C0_SAMPLE_TABLE 0x620       // pixel stage: GLSLC's sample position table, one byte per (pixel of the location grid, sample): x and y in 1/16 pixel, low and high nibble
 #define DMSH_C0_SAMPLE_BYTES 16          // bytes of that table
@@ -50,6 +55,7 @@
 #define DMSH_KIND_CBUF "cbuf"            // uniform buffer slot reg (c[3 + reg])
 #define DMSH_KIND_C1 "c1"                // the shader's own constant segment c[1] (its bytes are the json's c1)
 #define DMSH_KIND_DRVCB "drvcb"          // a driver segment, c[bank] (bank 0 or 2): NVN_RB_DRV0 / NVN_RB_DRV2
+#define DMSH_KIND_CBSIZE "cbsize"        // the uniform slots' bound sizes, c[DMSH_CBSIZE_BANK]: NVN_RB_CBSIZE
 #define DMSH_KIND_SUPPORT "support"      // the translator's support buffer
 #define DMSH_KIND_GEOMETRY "geometry"    // one of the geometry lowering's helper buffers, reg = its index (dmsh_geometry.py HELPERS)
 #define DMSH_KIND_SBUF "sbuf"            // storage buffer slot reg, its address in the stage's c0 table; rw = the shader writes it
@@ -105,7 +111,6 @@
 // Its function constants: bool, colour target n is attached (the variant reads it only then), at this index + n (nvn_mtl.m lo_fn specializes the entry point per pass's targets)
 #define DMSH_LOGIC_FC 200
 // Compute shared memory past Metal's limit (dm/gfx/tools/dmsh_build.py tg_spill): a kernel whose threadgroup arrays exceed DMSH_TG_MAX bytes takes them from a device buffer at this compute
-// buffer index, one slice of the reflection's tg_spill bytes per workgroup, the workgroup's index in the dispatch modulo DMSH_TG_GROUPS (nvn_mtl.m dispatch binds DMSH_TG_GROUPS slices at most)
+// buffer index, one slice of the reflection's tg_spill bytes per workgroup, at the workgroup's index in the whole grid (nvn_mtl.m dispatch binds a slice for every workgroup of the dispatch)
 #define DMSH_TG_SLOT 30
 #define DMSH_TG_MAX 0x8000
-#define DMSH_TG_GROUPS 512

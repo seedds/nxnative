@@ -98,7 +98,10 @@ def chain_rewrites():
     for n in tree.body:
         pure = isinstance(n, ast.Assign) and all(isinstance(t, ast.Name) for t in n.targets) and not any(
             isinstance(c, ast.Call) and getattr(c.func, 'attr', '') != 'compile' for c in ast.walk(n.value))
-        if isinstance(n, ast.FunctionDef) or pure:
+        # the script's imports of standard modules too (struct, math, ...), which a rewrite may use; its own modules are imported above or not needed
+        stdlib = isinstance(n, (ast.Import, ast.ImportFrom)) and all(
+            (a.name if isinstance(n, ast.Import) else (n.module or '')).split('.')[0] in sys.stdlib_module_names for a in n.names)
+        if isinstance(n, ast.FunctionDef) or pure or stdlib:
             try:
                 exec(compile(ast.Module(body=[n], type_ignores=[]), str(path), 'exec'), scope)
             except Exception:   # a constant built from what only a build has (the game, the chain version) is not needed here

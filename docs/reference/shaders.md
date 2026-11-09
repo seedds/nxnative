@@ -1484,6 +1484,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Check:** `DMSH_TEST_XLATE=dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate python3 dm/gfx/tests/test_dmsh_ampere_orin.py` (about 5 s on an M5 Max); it prints every op's differing lanes by cause. `AMPERE_ORIN_ONLY=<ops or families>` runs some, `AMPERE_ORIN_REPORT=<file>` writes the results as JSON. To record again: `python3 dm/gfx/tools/ampere_orin/capture.py --host <user@machine> [--arch sm_86]`, with NVIDIA's `nvdisasm` (the `cuda_nvdisasm` redistributable) in `~/ampere_orin` on that machine.
 - **Found on:** no game; a Jetson Orin's results. The HMMA comparison it extends is PR #1897's.
 
+### SHFL takes its lane from the low 5 bits
+
+- **Symptom:** a warp shuffle whose lane comes from a register with bits above bit 4 set gives a thread its own value instead of the other lane's: on the Orin, lane 2 running `shfl.sync.idx.b32` with lane `0xdaa06cd7` reads lane 23 (`0xd7 & 31`), and the translation returned lane 2's value.
+- **Cause:** SHFL uses only b[4:0] as its lane in every mode (PTX: `bval = b[4:0]`), but the shuffle helpers the translator builds (`HelperFunctionManager.cs`, `GenerateShuffle*`) took the whole register. In IDX and BFLY mode the high bits went into the source lane, which then failed the clamp check, so the helper kept the thread's own value. The Ampere (`AShfl`) and Maxwell (`InstEmitWarp.Shfl`) emitters both lower to these helpers; the c operand was already split right (clamp c[4:0], segment mask c[12:8]).
+- **Fix:** each of the four helpers (IDX, UP, DOWN, BFLY) masks the lane to `& 31` first, so both the Ampere and the Maxwell path get it. That's one more AND per shuffle.
+- **Check:** `test_dmsh_ampere_orin.py`: `shfl_idx` 207 of 1,024 lanes differed before and 0 after, `shfl_bfly` 196 and 0, `shfl_idx_seg` (segment mask 0x18, clamp 7) 179 and 0; `shfl_up`, `shfl_down` and `shfl_bfly_imm`, whose PTX masks the lane or uses an immediate, still match.
+- **Found on:** no game; a Jetson Orin's results ([Ampere instructions checked against an Ampere GPU](#ampere-instructions-checked-against-an-ampere-gpu)).
+
 ### The NDVE movie network by the host
 
 - **Symptom:** a Switch 2 game's movies and the title behind them run below 60 fps on a Mac with a smaller GPU, and the GPU profile (`DM_NVN_GPUPROF`) shows almost all of the frame in a dozen compute dispatches of `nn::ndve`'s movie network: Ocarina of Time's title at about 24 fps and 38 ms of GPU a frame on an M1 Pro with 16 GPU cores, 24.8 ms on an M1 Max ([issue 1375](https://github.com/seedds/nxnative/issues/1375)), 18.9 ms of compute on an M4 with 8 ([HMMA chains keep their matrices in the SIMD-group](#hmma-chains-keep-their-matrices-in-the-simd-group)); 11-14 ms of the 16.7 on an M6, an M4 Pro or an M5 Max.

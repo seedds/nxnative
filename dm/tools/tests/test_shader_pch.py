@@ -2,6 +2,7 @@
 again without it when it fails, so what a failure reports is the plain compile's, and DMSH_PCH=0 turns it off. With a Metal compiler (each SDK skipped without one), synthetic shaders
 compile to byte-identical output with and without it, in the flags of the real builds; a shader with an error raises as a plain compile does. The source goes on standard input, so a
 library does not depend on its file's name. No game files."""
+import ast
 import os
 from pathlib import Path
 import shutil
@@ -17,7 +18,7 @@ sys.path.insert(0, str(REPO / 'dm/ios/tools'))
 import dmsh_pch  # noqa: E402
 import ios_metal  # noqa: E402
 
-MAC = ['xcrun', '-sdk', 'macosx', 'metal', '-c', '-O1', '-fpreserve-invariance']   # dmsh_build.py MAC_METAL (that file is a script that runs a build when imported)
+MAC = ['xcrun', '-sdk', 'macosx', 'metal', '-c', '-O1', '-fpreserve-invariance', '-fwrapv']   # dmsh_build.py MAC_METAL (that file is a script that runs a build when imported)
 SHADERS = {
     'vertex': 'vertex float4 main0(uint v [[vertex_id]], constant float4* c [[buffer(0)]]) { return c[v]; }\n',
     'fragment_many': dmsh_pch.PROBE.split('using namespace metal;\n')[1],
@@ -146,6 +147,36 @@ class RealCompiler(Tmp):
         with mock.patch.dict(dmsh_pch._headers, {tuple(MAC): str(self.tmp / 'gone.pch')}):
             dmsh_pch.compile(MAC, str(src), str(self.tmp / 'ok.air'))
         self.assertTrue((self.tmp / 'ok.air').is_file())
+
+
+class BracketDepth(Tmp):
+    """-fbracket-depth=1024 in every library compile (dmsh_build.py METAL_DEPTH, ios_metal.DEPTH): Ocarina of Time's compute shaders 1f78730053feb036 and e172bd7ec218ab8e nest 259
+    brackets deep, past the front end's 256. The records do not name it, so it must change no output of a source within the default limit"""
+    DEEP = '#include <metal_stdlib>\nusing namespace metal;\nkernel void main0(device uint* o [[buffer(0)]]) { o[0] = ' + '(' * 300 + '1u' + ')' * 300 + '; }\n'
+
+    def test_the_build_and_ios_take_the_same_depth(self):   # dmsh_build.py is a script, so its value is read from its source
+        tree = ast.parse((REPO / 'dm/gfx/tools/dmsh_build.py').read_text())
+        mac = next(ast.literal_eval(n.value) for n in ast.walk(tree) if isinstance(n, ast.Assign) and [getattr(t, 'id', None) for t in n.targets] == ['METAL_DEPTH'])
+        self.assertEqual(mac, ios_metal.DEPTH)
+        self.assertNotIn('bracket', ios_metal.RECORD)
+
+    def check(self, metal):
+        deep = self.tmp / 'deep.metal'; deep.write_text(self.DEEP)
+        with self.assertRaises(subprocess.CalledProcessError): subprocess.run([*metal, '-x', 'metal', str(deep), '-o', str(self.tmp / 'deep0.air')], check=True, capture_output=True)
+        dmsh_pch.compile(metal + ios_metal.DEPTH, str(deep), str(self.tmp / 'deep.air'))
+        self.assertTrue((self.tmp / 'deep.air').is_file())
+        for name, body in SHADERS.items():   # within the limit: the same bytes
+            src = self.tmp / f'{name}.metal'; src.write_text('#include <metal_stdlib>\nusing namespace metal;\n' + body)
+            out = []
+            for extra in ([], ios_metal.DEPTH):
+                with open(src, 'rb') as f: out.append(subprocess.run([*metal, *extra, '-x', 'metal', '-', '-o', '-'], stdin=f, check=True, capture_output=True).stdout)
+            self.assertEqual(out[0], out[1], name)
+
+    @unittest.skipUnless(has_sdk('macosx'), 'no macOS Metal compiler')
+    def test_mac(self): self.check(MAC)
+
+    @unittest.skipUnless(has_sdk('iphoneos'), 'no iOS Metal compiler')
+    def test_ios(self): self.check(ios_metal.METAL)
 
 
 if __name__ == '__main__':

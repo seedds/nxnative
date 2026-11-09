@@ -6,6 +6,7 @@
 # Usage: dm/ios/tools/build_ipa.sh [output.ipa | --prepare-xcode]; --prepare-xcode generates the project without building, signing or packing.
 #   Environment: GAME=game profile (dm/games/<base game title ID>, or one in DM_GAMES_DIR; required), W=the game's work folder (required: <NSP folder>/<title ID>-work, never the home folder), PATCHED / ROMFS / MSL_IOS can each be overridden
 #   DM_COPY_ROMFS=NO leaves the game files (RomFS) out of the IPA, as it does for the Xcode build phase: the package then stays small (a large game's full package can exceed what iOS extracts), and the app takes the files from Documents/romfs.img (scripts/push_romfs.sh); default: they are packed
+#   DM_SHADER_FILES=1 packs an NVN game's shader library as its separate files, msl/b-<chain>/, not as the one file b-<chain>.img, for install tools that cannot copy a large file (AltServer; pack_ipa.py --shader-files); default: off
 #   DM_ENTITLEMENTS=<plist> is the unsigned IPA's entitlements, signed ad-hoc into the executable (default: Increased Memory Limit; an empty string = none)
 #   AOC=add-on content directory (default $W/data/aoc; when it exists it goes to DmIOS.app/aoc/<index>/; an empty string = none), GFXAPI=nvn / vulkan (default: by the shader libraries in MSL_IOS)
 #   The app name is the game name in the base NSP's control data ($W/data/v0/control.nacp, else the one next to the RomFS), the app version is the display version in the packed game's control data (the one next to the RomFS:
@@ -131,7 +132,7 @@ if [ -n "${PROGRAMS_TSV:-}" ]; then
   prog_back
   LJ=Gen/dm/p0/launcher.json
 else TD=Gen/dm; program_tables; LJ=Gen/dm/launcher.json; fi
-# The pipeline archive made offline (dm/gfx/tools/pso_offline.py): the base of every shader pair, compiled here by metal-tt for each GPU architecture in DM_PSO_GPUS (comma-separated:
+# The pipeline archive made offline (dm/gfx/tools/pso_offline.py): the base of every shader pair and a pipeline per compute shader of the shader map, compiled here by metal-tt for each GPU architecture in DM_PSO_GPUS (comma-separated:
 # g18p = A19 / A19 Pro; another family's device has its own architecture, applegpu_g19p = the family after the A19 (its archive compiles with the current toolchain); none = no archive), so the device
 # does not build them on its first start (Breath of the Wild: 15,767 bases, 7-8 minutes on an iPhone 17 Pro Max).
 # Only the Metal 4 path reads it, which iOS turns on for a game whose profile sets pso_mtl4 on: the default is what the profile's pso_gpu key names (whitespace-separated architectures, joined for
@@ -263,13 +264,11 @@ MAPS+=("$P/msl/$MSLDIR=$MSL_IOS/$MSLDIR" "$P=$APP")
   if [ -d "$(dirname "$ROMFS")/jit" ]; then MAPS+=("$P/jit=$(dirname "$ROMFS")/jit"); t "nn::jit image: $(dirname "$ROMFS")/jit"; fi
 fi
 t "pack IPA (already-compressed game files stored, everything else deflated)"
-# The pulling vertex libraries (<key>_bp, dm/gfx/tools/dmsh_pull.py) serve the hybrid pipelines. Default to the same pso_mtl4 setting compiled by gen_build.py; IOS_PULL=0 / 1 overrides it.
-# The pipeline archive's bases are made of them, so an IPA with an archive (pso/) always carries them, whatever IOS_PULL says (an Xcode build copies them always).
-if [ -n "${PROGRAMS_TSV:-}" ]; then PULL=0   # no program of such a game sets pso_mtl4 so far (the macro is a table's there, not a number)
-else PULL=$(sed -n 's/^#define DM_GAME_PSO_MTL4 //p' "$DM/host/gen/$GAME/game_profile.h") || die "read game profile header"
-case "$PULL" in 0|1) ;; *) die "no DM_GAME_PSO_MTL4 in generated game profile";; esac; fi
+# The device can enable Metal 4/prebuild at run time even when the profile defaults it off. Without an offline archive, its prebuild needs these pulling vertex libraries just as the hybrid pipelines do.
+# IOS_PULL=0 explicitly omits them; an IPA with an offline archive (pso/) always carries them, whatever IOS_PULL says (an Xcode build copies them always).
 # Keep this array nonempty: macOS Bash 3.2 treats an empty array as unset under set -u.
 ZS=$(gp zip_store); [ -z "${PROGRAMS_TSV:-}" ] || ZS=$(for g in $(prog_rows | cut -f2); do python3 "$DM/games/game.py" "$g" zip_store; done | tr ':' '\n' | sort -u | paste -sd: -)   # every program's
-PACK_OPTS=(--store "$ZS"); [ -n "${PSO:-}" ] || [ "${IOS_PULL:-$PULL}" = 1 ] || PACK_OPTS+=(--skip-suffix _bp.metallib)
+PACK_OPTS=(--store "$ZS"); [ -n "${PSO:-}" ] || [ "${IOS_PULL:-1}" = 1 ] || PACK_OPTS+=(--skip-suffix _bp.metallib)
+[ "${DM_SHADER_FILES:-0}" != 1 ] || PACK_OPTS+=(--shader-files)
 python3 tools/pack_ipa.py "$OUT_IPA" "${PACK_OPTS[@]}" "${SKIP[@]}" "${MAPS[@]}" || die "pack_ipa"
 t "done: $OUT_IPA ($(du -h "$OUT_IPA" | cut -f1))"

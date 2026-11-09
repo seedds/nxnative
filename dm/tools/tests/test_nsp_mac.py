@@ -215,11 +215,11 @@ class Nvn(Base):
             return types.SimpleNamespace(get=lambda k, d='': {'pso_mtl4': mtl4, 'pso_gpu': gpu}.get(k, d), table=lambda n: self.tmp / ('c1_full.tsv' if pairs else 'absent'))
         want = nsp.ios_wants_pulling
         self.build(True)   # the stand-in writes the file that stands for a game's shader pairs here
-        self.assertFalse(want(g(), 'none', False, {}))
+        self.assertTrue(want(g(), 'none', False, {}))   # the player can turn on Metal 4/prebuild on the device
         self.assertTrue(want(g(), 'none', True, {}))   # the Xcode copy phase takes them always
         self.assertTrue(want(g('on'), 'none', False, {})); self.assertFalse(want(g('on'), 'none', False, {'IOS_PULL': '0'})); self.assertTrue(want(g(), 'none', False, {'IOS_PULL': '1'}))
         self.assertTrue(want(g(pairs=True), 'g18p', False, {}))   # the archive is made of them
-        self.assertFalse(want(g(), 'g18p', False, {}))   # no pairs: build_ipa.sh makes no archive
+        self.assertTrue(want(g(), 'g18p', False, {}))   # no offline archive: runtime lists can still need pulling entries
         self.assertEqual(nsp.ios_gpus('', g()), 'none'); self.assertEqual(nsp.ios_gpus('', g('on')), 'g18p'); self.assertEqual(nsp.ios_gpus('', g('on', gpu='g18p g17p')), 'g18p,g17p'); self.assertEqual(nsp.ios_gpus('g16p', g()), 'g16p')
 
     def test_old_chain_images_go_too(self):
@@ -319,12 +319,15 @@ class Nvn(Base):
             self.build(True); self.assertEqual(len(self.ran), 1)
             self.build(True); self.assertEqual(self.ran, [])
 
-    def test_shader_watch_finishes_extra_pairs_last(self):
-        (self.tmp / 'shader_map.tsv').write_text('p.bin\t0\tvs\ta\tsrc\np.bin\t1\tps\tb\tsrc\np.bin\t2\tvs\tc\tsrc\n')
-        (self.tmp / 'shader_pairs.tsv').write_text('c\tb\n')
-        pso = self.tmp / 'pso_pairs.tsv'; pso.write_text('a\tb\n')
-        watch = nsp.ShaderWatch(self.g, self.tmp, self.tmp, pso)
-        self.assertEqual(list(watch.pos), ['b', 'a', 'c'])
+    def test_shader_watch_reads_the_progress_file(self):   # dmsh_build.py DMSH_PROGRESS
+        p = self.tmp / 'progress.json'; watch = nsp.ShaderWatch(p)
+        self.assertIsNone(watch())   # not written yet
+        p.write_text('{"step": "cache check", "done": 3, "total": 10, "cached": 2}')
+        self.assertEqual(watch(), {'step': 'cache check', 'done': 3, 'total': 10, 'unit': 'shaders', 'note': '2 cached'})
+        p.write_text('{"step": "compiling", "done": 7, "total": 10, "cached": 6, "misses": 4}')
+        self.assertEqual(watch(), {'step': 'compiling', 'done': 7, 'total': 10, 'unit': 'shaders', 'note': '4 not cached'})
+        p.write_text('{"step": "comp')   # half written: no progress this time, not an error
+        self.assertIsNone(watch())
 
 
 class EnvFile(Base):

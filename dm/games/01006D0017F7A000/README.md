@@ -50,7 +50,7 @@ On the Mac, on the small layout, through the first battle: 4.2 GB resident with 
 
 ## Sound
 
-Three outputs: renderer 0 (48 kHz, 32 voices, `main+0x358ca1c`), whose frames are not silent only during the movie; Wwise's own AudioOut (`main+0x365061c`, beside `AK::EventManager` in `main`); and Unreal's mixer on renderer 1 (32 kHz, 64 voices, `main+0x30a4ff0`), silent through all 108,000 frames of the movie, the field and the battle. With the renderers silent in the field, the sound there is Wwise's: no clipping, RMS about 1,000 in `DM_AUDIO_DUMP`, which interleaves all three outputs. The sound itself is still to be listened to.
+Three outputs: renderer 0 (48 kHz, 32 voices, `main+0x358ca1c`), whose frames are not silent only during the movie; Wwise's own AudioOut (`main+0x365061c`, beside `AK::EventManager` in `main`); and Unreal's mixer on renderer 1 (32 kHz, 64 voices, `main+0x30a4ff0`), silent through all 108,000 frames of the movie, the field and the battle. With the renderers silent in the field, the sound there is Wwise's: no clipping, RMS about 1,000 in `DM_AUDIO_DUMP`, which interleaves all three outputs. The sound itself is still to be listened to. Those measurements predate [per-renderer blocks](../../../docs/reference/audio.md#two-renderers-overwriting-each-others-queued-blocks): the movie's frames on renderer 0 could then be overwritten by renderer 1's silence before they played, which has not been checked on this game.
 
 ## Input
 

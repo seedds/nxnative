@@ -160,8 +160,21 @@ namespace Ryujinx.Graphics.Shader.Translation
 
         internal int GetDepthRegister()
         {
-            // The depth register is always two registers after the last color output.
-            return BitOperations.PopCount((uint)Definitions.OmapTargets) + 1;
+            // nxnative: the colours are read four registers per render target with any component enabled (component c of the n-th
+            // such target in R(4n + c), as PrepareForReturn reads them), then the sample mask register, then the depth. Upstream
+            // counted enabled components, which agrees only when every enabled target has all four: Ocarina of Time's agl_common
+            // depth pass (OmapTargets 0x10f, RT0 RGBA and RT2 R) computes its depth into R9, and R6, which was read, holds a step before it
+            int targets = 0;
+
+            for (int rt = 0; rt < 8; rt++)
+            {
+                if ((Definitions.OmapTargets & (0xf << (rt * 4))) != 0)
+                {
+                    targets++;
+                }
+            }
+
+            return targets * 4 + 1;
         }
 
         public void SetLayerOutputAttribute(int attr)
@@ -383,6 +396,8 @@ namespace Ryujinx.Graphics.Shader.Translation
         private ResourceManager CreateResourceManager(bool vertexAsCompute)
         {
             ResourceManager resourceManager = new(Definitions.Stage, GpuAccessor, GetResourceReservations());
+
+            resourceManager.UniformBounds = Options.Flags.HasFlag(TranslationFlags.MetalUniformBounds);   // nxnative: before any uniform slot gets its binding
 
             if (IsTransformFeedbackEmulated)
             {

@@ -84,6 +84,7 @@ typedef struct {
     int32_t tex_base, samp_base;         // Host-table bases of the texture / sampler pool this command buffer last bound (hle_nvn.c dpool_add; 0 = the first pool of its kind)
     size_t ctl_size;                     // Bytes in the last control memory block supplied by the game (the host records no control commands)
     int64_t copy_row, copy_image;        // SetCopyRowStride / SetCopyImageStride: state of the command buffer, written into each buffer <-> texture copy (p_copy_strides), not recorded
+    size_t cmd_size;                     // GetCommandMemorySize: the bytes the game last passed to AddCommandMemory, as in NVN; a host-lent segment leaves it (see there)
 } cmd_t;                                                                                   FITS(cmd_t, NVNcommandBuffer);
 
 // ---------- State objects (defaults follow the NVN / GL defaults) ----------

@@ -258,8 +258,9 @@ def shared_store_msl(msl):
 # Compute shared memory past Metal's limit: Apple's GPUs give a kernel 32 KB of threadgroup memory (maxThreadgroupMemoryLength), and Metal refuses a pipeline that declares more, while Ampere
 # gives up to 100 KB. Mario Kart World's DrivePassShaderDefault has 168 compute shaders of 48 KB (spvUnsafeArray<uint, 12288>), seven of them run on the way to the first race; refused, their
 # dispatches were skipped. Such a kernel takes its threadgroup arrays from a device buffer the host binds (abi.TG_SLOT): one slice of the arrays' total per workgroup, at the workgroup's index in
-# the dispatch modulo abi.TG_GROUPS (an indirect dispatch's count is not known on the CPU; workgroups that far apart are not on the GPU together). Its threadgroup barriers order device memory
-# too, and threadgroup atomics become device atomics. Returns the shader and the bytes per workgroup (0: unchanged)
+# the whole grid, so no two workgroups of a dispatch share one (the host sizes the buffer from the grid: nvn_mtl.m dispatch). A slice index modulo 512 shared them: Apple's GPUs start workgroups in
+# no order, and an M6 ran groups 512 apart at the same time from 1,024 groups up (shaders.md, Compute shared memory past 32 KB). Its threadgroup barriers order device memory too, and threadgroup
+# atomics become device atomics. Returns the shader and the bytes per workgroup (0: unchanged)
 TG_DECL = re.compile(r'^([ \t]*)threadgroup (spvUnsafeArray<(\w+), (\d+)>|\w+) (\w+)(?:\[(\d+)\])?;[ \t]*$', re.M)
 TG_BYTES = {'uint': 4, 'int': 4, 'float': 4, 'uint2': 8, 'int2': 8, 'float2': 8, 'uint3': 16, 'int3': 16, 'float3': 16, 'uint4': 16, 'int4': 16, 'float4': 16,
             'half': 2, 'short': 2, 'ushort': 2, 'half2': 4, 'half4': 8, 'char': 1, 'uchar': 1}
@@ -283,7 +284,7 @@ def tg_spill(msl):
     for k, (d, off) in enumerate(decls):
         out.append(msl[at:d.start()])
         t = d.group(2) + (f'[{d.group(6)}]' if d.group(6) else '')
-        if k == 0: out.append(f'{d.group(1)}ulong dm_tgbase = ulong((({gid}.z * dm_ntg.y + {gid}.y) * dm_ntg.x + {gid}.x) % {abi.TG_GROUPS}u) * {total}ul;\n')
+        if k == 0: out.append(f'{d.group(1)}ulong dm_tgbase = ((ulong({gid}.z) * dm_ntg.y + {gid}.y) * dm_ntg.x + {gid}.x) * {total}ul;\n')   # in 64 bits: past 87,381 workgroups of 48 KB the byte offset takes more than 32
         if d.group(6): out.append(f'{d.group(1)}device {d.group(2)} (&{d.group(5)})[{d.group(6)}] = *(device {d.group(2)} (*)[{d.group(6)}])(dm_tg + dm_tgbase + {off});')
         else: out.append(f'{d.group(1)}device {t}& {d.group(5)} = *(device {t}*)(dm_tg + dm_tgbase + {off});')
         at = d.end()

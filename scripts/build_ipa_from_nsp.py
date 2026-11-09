@@ -137,6 +137,7 @@ class Progress:
 
     def __init__(self, mode='off'):
         self.mode, self.lock, self.k, self.n, self.cur, self.shown, self.ticker, self.tstop = mode, threading.RLock(), 0, 0, None, 0, None, None
+        self.stages, self.stale = [], None   # every stage ended, for report(); the shaders_stale event's fields, the reason the shaders were built again
 
     def plan(self, n):   # the next n stages are numbered 1..n
         with self.lock: self.k, self.n = 0, n
@@ -208,6 +209,7 @@ class Progress:
             st, self.cur = self.cur, None
             if not st: return
             if st.pstop: st.pstop.set()
+            self.stages.append({'name': st.name, 'elapsed': round(time.time() - st.t0, 3), 'summary': summary, 'ok': ok, 'warn': warn, 'reused': self.is_reused(summary)})
             if self.mode == 'json':
                 self._json_progress(st, force=True)   # the last count, if it was held back
                 self._json({'ev': 'stage_end', 'k': self.k, 'name': st.name, 'ok': ok, 'summary': summary, 'elapsed': round(time.time() - st.t0, 3), **({'warn': True} if warn else {})})
@@ -216,7 +218,33 @@ class Progress:
 
     def event(self, ev, **fields):   # a build event beside the stage lines (json mode only: the human modes get the message that goes with it from say())
         with self.lock:
+            if ev == 'shaders_stale': self.stale = dict(fields)
             if self.mode == 'json': self._json({'ev': ev, **fields})
+
+    @staticmethod
+    def is_reused(summary):   # a stage whose end line says its output was reused: "reused", "…, reused (inputs unchanged)", "0 converted, 3 reused (…)"
+        return bool(re.search(r'(^|, )reused\b', summary) or re.match(r'0 converted, \d+ reused', summary))
+
+    def report(self):
+        """After a build: which stages ran and which were reused, with the time of each that ran, and why the shaders were built again when they were (the shaders_stale event):
+        the stage lines say this one by one over a long log, and one line at the end shows whether a full rebuild was needed (GitHub issue #1181). json mode: the summary event"""
+        with self.lock:
+            if not self.stages: return
+            ran = [x for x in self.stages if not x['reused']]; kept = [x for x in self.stages if x['reused']]
+            total = sum(x['elapsed'] for x in self.stages); spent = sum(x['elapsed'] for x in ran)
+            st = self.stale or {}; reason, old, new = str(st.get('reason', '')), str(st.get('old', '')), str(st.get('new', ''))
+            why = {'chain': f'the chain changed: {old} → {new}', 'inputs': f'the profile inputs changed ({old[:8]} → {new[:8]})'}.get(reason, '')
+            if self.mode == 'json':
+                self._json({'ev': 'summary', 'ran': [{'name': x['name'], 'elapsed': x['elapsed']} for x in ran], 'reused': [x['name'] for x in kept], 'elapsed': round(total, 3),
+                            **({'shaders': {'reason': reason, 'why': why}} if why else {})})
+                return
+            def one(x):
+                shader = why and 'shader' in x['name'].lower()
+                return f'{x["name"]} ({hms(x["elapsed"])}{", " + why if shader else ""})'
+            if not ran: head = f'every stage reused ({hms(total)})'
+            elif not kept: head = f'all {len(ran)} stages ran ({hms(total)}): ' + ', '.join(map(one, ran))
+            else: head = f'{len(ran)} of {len(self.stages)} stages ran ({hms(spent)} of {hms(total)}): ' + ', '.join(map(one, ran))
+            self._out(f'build summary: {head}' + (f'; reused: {", ".join(x["name"] for x in kept)}' if kept and ran else ''))
 
     def say(self, msg):
         with self.lock:
@@ -3246,6 +3274,7 @@ def cli(argv):   # returns the exit code: 0 done, 1 error, 130 interrupted
     environ = dict(os.environ)
     try:
         main(parse_args(argv))
+        PROG.report()
         if NSP_FOLDER:   # a developer's work folder, which a player's NSP folder does not have (tree_tar.py)
             for w in NSP_FOLDER.glob('*-work'):
                 if re.fullmatch(r'[0-9A-Fa-f]{16}-work', w.name): tree_tar.pack_quiet(w, say)

@@ -541,7 +541,8 @@ int main(int argc, char **argv) { @autoreleasepool {
         g_arch_period_max = 4; int seed = !strcmp(argv[1], "--cold-seed"), cut = !strcmp(argv[1], "--cold-cut-seed"), after_cut = !strcmp(argv[1], "--cold-after-cut");
         int quit = !strcmp(argv[1], "--cold-quit-seed"), after_quit = !strcmp(argv[1], "--cold-after-quit");
         // a crashed compaction's marker, left by an earlier run: the quit's write must not take it away
-        if (quit) [arch_compact_stamp() writeToFile:[@(argv[2]) stringByAppendingPathComponent:@"compacting"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        NSString *cold_dir = @(argv[2]); if (!cold_dir) return 1;   // not UTF-8
+        if (quit) [arch_compact_stamp() writeToFile:[cold_dir stringByAppendingPathComponent:@"compacting"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
         pso4_init();
         EXPECT("cold restart: no compaction", 0, g_compact_enabled);
         uint64_t arch0 = g_pb_archived, built0 = g_pb_built, asks0 = g_arch_asks;

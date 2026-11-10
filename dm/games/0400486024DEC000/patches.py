@@ -79,7 +79,7 @@ def dynamic_resolution(ctx):
 # init (main+0x1087b70, the size from its config struct) and the mode change (main+0x6502e0: a level's size × its scale, capped by a table). The dynamic resolution scales from the
 # output height by one factor for both axes (main+0x31d3f64..), so its sizes follow the output's shape. The stub scales the requested size by the factors (the width for a wider
 # screen, the height for a taller one); when that is more than 1.5 times the requested size's pixels (beyond 2.67:1 or 1.19:1, a portrait window) it scales both sides down to
-# 1.5 times, so the pixel count stays in bounds whatever the shape. Each side is rounded to a multiple of 8, into state +0xb0 (scratch, never the caller's struct: the init passes
+# 1.5 times, so the pixel count stays in bounds whatever the shape. Each side is rounded to a multiple of 8, into state +0xe0 (scratch, never the caller's struct: the init passes
 # its config), and the setter runs on it. It also copies the camera's multipliers for that shape (state +0xc4 / +0xc8, from the loader) to +0xb8 / +0xbc (0 at 16:9): the camera
 # (camera_projection) follows the size the game renders at, not the shape the host asks for, as the game sets its size only at its init, at a mode change and when shape_change
 # asks it to. A leaf: x9 / x10 / x16 / s16..s19 are free (the setter loads w8..w11 before it reads them; s16..s19 are caller-saved), x1 an argument it only reads
@@ -90,7 +90,7 @@ size_stub = (   # size_stub.s, assembled with clang; x16 the state page (the ADR
     0x1e330a52, 0x1e2f1013, 0x1e330a52, 0x1e310a13, 0x1e322260, 0x540000ad,   # more than 1.5 × the requested pixels?
     0x1e331a52, 0x1e21c252, 0x1e320a10, 0x1e320a31,   # both sides × sqrt(limit / pixels)
     0x1e390209, 0x11001129, 0x121d7129, 0x1e39022a, 0x1100114a, 0x121d714a,   # each to a multiple of 8
-    0x29162a09, 0x9102c201)                           # into state +0xb0; x1 -> it
+    0x291c2a09, 0x91038201)                           # into state +0xe0; x1 -> it
 def screen_shape(ctx):
     here, emit, fs_site, fs_put, FS_STATE_OFF = ctx.here, ctx.emit, ctx.site, ctx.put, ctx.state
     site = ctx.others.get('output size')

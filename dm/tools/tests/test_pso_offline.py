@@ -28,7 +28,7 @@ CHAIN = '0123456789ab'
 def tag(name, data): return name + struct.pack('<H', len(data)) + data
 
 
-def metallib(funcs, layer=False):
+def metallib(funcs, layer=False):   # layer: the layer's name in the library, as a library with a function that writes it holds it
     """A .metallib header as the Metal compiler writes it: the function list (count, then per function its size counting the size field, NAME, ENDT) and the public metadata
     (per function its size not counting the size field, a CNST tag for a function with constants, ENDT); funcs: [(name, has constants)]"""
     fl = struct.pack('<I', len(funcs))
@@ -101,7 +101,7 @@ class Plan(unittest.TestCase):
         self.shader('pull', {'entry_z': 'main0_z', 'pull': {'entry': 'main0'}, 'vertex_inputs': [{'location': 0}]}, {'_b': vz, '_bp': vz})
         self.shader('plain', {'entry_z': 'main0_z', 'vertex_inputs': []}, {'_b': vz})
         self.shader('inputs', {'vertex_inputs': [{'location': 0}]}, {'_b': vz})
-        self.shader('layer', {'pull': {}}, {'_b': vz, '_bp': (vz, True)})
+        self.shader('layer', {'pull': {}, 'layer_out': True}, {'_b': (vz, True), '_bp': (vz, True)})   # main0 writes the layer: no base
         self.shader('other', {'chain': 'fedcba987654'}, {'_b': vz})
         self.shader('nolib', {'pull': {}}, {'_b': vz})   # no _bp
         self.shader('fs', {}, {'_b': [('main0', False)]})
@@ -109,10 +109,13 @@ class Plan(unittest.TestCase):
         self.shader('fsx', {'entry': 'main1'}, {'_b': [('main0', False)]})
         self.shader('fsp', {'raster': {'primitive_id': 1}}, {'_b': [('main0', False)]})   # reads the primitive ID: no base
         self.shader('mesh', {'entry_z': 'main0_z', 'mesh_stage': {'kind': 'ms'}}, {'_b': vz})   # a mesh shader's pair (for its padding): built at the draw, no base
+        # Layer entry points of its own (dmsh_build.py vs_layer_entry): the library names the layer, but main0 writes none (no layer_out). Ocarina of Time's effect vertex shaders, with
+        # no stage inputs and so no stand-in, were left out when the layer's name anywhere in the library counted, and compiled at their first draw
+        self.shader('layered', {'entry_z': 'main0_z', 'entry_layer': 'main0_l', 'vertex_inputs': []}, {'_b': (vz + [('main0_l', False)], True)})
         pairs = [('pull', 'fs'), ('plain', 'fs'), ('inputs', 'fs'), ('layer', 'fs'), ('other', 'fs'), ('nolib', 'fs'), ('pull', 'fsc'), ('pull', 'fsx'), ('pull', 'gone'), ('pull', 'fs'),
-                 ('plain', 'fsp'), ('mesh', 'fs')]
+                 ('plain', 'fsp'), ('mesh', 'fs'), ('layered', 'fs')]
         bases, rest, left = po.plan(self.d, CHAIN, pairs, False)
-        self.assertEqual(bases, [('pull_bp', 'main0', 'fs_b', 'main0'), ('plain_b', 'main0', 'fs_b', 'main0')])
+        self.assertEqual(bases, [('pull_bp', 'main0', 'fs_b', 'main0'), ('plain_b', 'main0', 'fs_b', 'main0'), ('layered_b', 'main0', 'fs_b', 'main0')])
         self.assertEqual(rest, [('pull', 'fsc')])
         self.assertEqual(left, {'reflection': 2, 'mesh': 1, 'stage inputs': 1, 'library': 1, 'layer': 1, 'primitive ID': 1, 'entry': 1})
         bases, _, _ = po.plan(self.d, CHAIN, pairs[:2], True)   # near = 0: the entry_z entries

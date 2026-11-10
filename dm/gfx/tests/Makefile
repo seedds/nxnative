@@ -346,6 +346,8 @@ check_t_rt_range: t_rt_range
 	DM_NVN_UNWRITTEN_DC=0 MTL_DEBUG_LAYER=1 ./t_rt_range --sample-attachment --both-flags
 t_rec_draws: t_rec_draws.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_rec_draws.m $(MTL_T_SRC) $(FW)
+t_ubc_wait: t_ubc_wait.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_ubc_wait.m $(MTL_T_SRC) $(FW)
 t_rt_depth_ro: t_rt_depth_ro.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_rt_depth_ro.m $(MTL_T_SRC) $(FW)
 t_pso_pending: t_pso_pending.m $(MTL_T_DEP)
@@ -506,6 +508,9 @@ check_t_image_usage: RUN_ENV = MTL_DEBUG_LAYER=1
 t_image_type: t_image_type.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_image_type.m $(MTL_T_SRC) $(FW)
 check_t_image_type: RUN_ENV = MTL_DEBUG_LAYER=1
+t_image_srgb: t_image_srgb.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_image_srgb.m $(MTL_T_SRC) $(FW)
+check_t_image_srgb: RUN_ENV = MTL_DEBUG_LAYER=1
 t_stencil_view: t_stencil_view.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_stencil_view.m $(MTL_T_SRC) $(FW)
 check_t_stencil_view: RUN_ENV = MTL_DEBUG_LAYER=1
@@ -542,6 +547,9 @@ check_t_zsnap: t_zsnap
 # MUFU.SIN / COS lowered from turns through the fraction (InstEmitAmpereAlu.cs ATurnsToRadians), on the GPU against a double-precision reference
 t_mufu_turns: t_mufu_turns.m
 	clang -O1 -g -Wall -fobjc-arc -o $@ t_mufu_turns.m -framework Metal -framework Foundation
+# Compute threads that return before a barrier count as arrived on the Mac's GPU, as on NVIDIA's (no translator change needed)
+t_barrier_exit: t_barrier_exit.m
+	clang -O1 -g -Wall -fobjc-arc -o $@ t_barrier_exit.m -framework Metal -framework Foundation
 # Native task/mesh draws must render on the first pipeline use, with direct and threaded Metal encoding.
 t_mesh_first_use: t_mesh_first_use.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_mesh_first_use.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)

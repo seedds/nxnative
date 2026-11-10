@@ -16,11 +16,11 @@ A Switch 2 game: update v65536 over the base game, SDK 21.4.4 built for the Swit
 
 - Built from a dump folder (`base/`, `updates/65536/`). The display version `v65536` is a placeholder: no control data gave a better one.
 - Update RomFS: 46,354 files, 13 GB.
-- Shaders: 27,195 in [`shader_map.tsv`](shader_map.tsv), from `Shader/*.Nin_Ounce_NVN2.bfsha.zs`, `Sample.Nin_Ounce_NVN2.release.sarc.zs` and `Lib/agl/*`. A full build takes about 34 minutes from scratch, 13 with the Metal cache. 22,147 pipeline pairs prebuild with none failing, in about 200 s.
+- Shaders: 27,192 in [`shader_map.tsv`](shader_map.tsv), from `Shader/*.Nin_Ounce_NVN2.bfsha.zs`, `Sample.Nin_Ounce_NVN2.release.sarc.zs` and `Lib/agl/*`. A full build takes about 34 minutes from scratch, 13 with the Metal cache. 22,147 pipeline pairs prebuild with none failing, in about 200 s.
 
 ## Shaders
 
-27,192 of 27,195 build on chain `9bb5d8678204`. The 3 that do not (current): 1 on instruction 0x481, and 2 compute shaders of `agl_technique_pfx` that Metal refuses (`bracket nesting level exceeded`). `fa072659664b2d38` in `agl_common`, which the game asks for at boot, builds now.
+27,192 of 27,195 built on chain `9bb5d8678204`. Of the 3 that did not, the one on instruction 0x481 was a false row, gone from the tables since they were split again (resolved, below); the other 2, compute shaders of `agl_technique_pfx` that Metal refused (`bracket nesting level exceeded`), have not been built since 04df08d4 raised Metal's bracket depth (unchecked). `fa072659664b2d38` in `agl_common`, which the game asks for at boot, builds now.
 
 ## Rendering
 
@@ -41,13 +41,13 @@ The work folder's `run/drive.sh <name> <secs> "<sec> <control line>"…` boots i
 - An IPA: the 16 GB alias region is over iOS's limit until the SDK 21 cuts are ported.
 - A crash dump once hung in `flockfile` under `shader_load`, with the log contended.
 - `dm/games/profile_guess.py` does not recognise `Generic_21_4_4`. `pl::IsRunningOnOunce` answers false.
-- The shader tables need splitting again: `shader_map.tsv` holds rows that are no shaders ([A control section's words read as a BAHS entry](../../../docs/reference/shaders.md#a-control-sections-words-read-as-a-bahs-entry); at least the agl keys `68bbe98b3bfd9876`, `18be578dfdaaffa0`, `7a4936fccf82094e`, as in Ocarina of Time), and the NSP script stops at the table check until the split's tables replace them.
 
 ## Found on this game
 
 - [Naming the shaders of a GPU fault](../../../docs/reference/rendering.md#naming-the-shaders-of-a-gpu-fault): added for the address fault above, which names no pass.
 - [Compatible views for a mismatched declared texture type](../../../docs/reference/rendering.md#compatible-views-for-a-mismatched-declared-texture-type): resolved, a cube in a cube array slot. `d0ce73e71074df85_b` (NigoProc, layer index a literal 0) read texture ID 428 as `texture type mismatch … declares slot 0 as Metal type 6, … is type 5`, 180 binds at frame 0 and none after. With the view the count is 0. The opening looks the same, though the two runs are not frame-aligned, so no pixel comparison was possible.
 - [The split shader tables differ from a game profile's](../../../docs/reference/packing.md#the-split-shader-tables-differ-from-a-game-profiles): NigoProc's `800215a0f8d0c44d` is a mesh shader, and every pack stopped until its row was split again ([issue #1263](https://github.com/seedds/nxnative/issues/1263)).
+- [A control section's words read as a BAHS entry](../../../docs/reference/shaders.md#a-control-sections-words-read-as-a-bahs-entry): resolved, 2026-11-10. Three rows of `agl_resource.Nin_Ounce_NVN2.debug.sarc.zs` were no shaders (`cs_other` `68bbe98b3bfd9876` in `agl_common`, `ps_other` `18be578dfdaaffa0` in `agl_technique`, `vs_other` `7a4936fccf82094e` in `agl_technique_pfx`), and every NSP build stopped at the table check after 04df08d4 ([issue #1613](https://github.com/seedds/nxnative/issues/1613)). The tables were split again from the update: those rows and one fact went, the later rows of each package moved down one index, and nothing else changed.
 - [Storage words read one by one](../../../docs/reference/shaders.md#storage-words-read-one-by-one): the lit pass on an M1, 70 → 16 ms.
 - [A blocked audio device start freezes the game](../../../docs/reference/audio.md#a-blocked-audio-device-start-freezes-the-game) when the selected HDMI device refuses to play.
 

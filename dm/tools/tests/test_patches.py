@@ -44,7 +44,7 @@ def builds_of(g):   # {build ID: module name} of a profile's build rows (a profi
 
 class Registry(unittest.TestCase):
     def test_no_build_claimed_twice(self):
-        for kind in ('CUTS', 'OBS', 'FRAME_STEP', 'CAPABILITIES'):
+        for kind in ('CUTS', 'OBS', 'FRAME_STEP', 'STUBS', 'CAPABILITIES'):
             seen = {}
             for p, m in MODS.items():
                 for bid in getattr(m, kind, {}):
@@ -59,13 +59,14 @@ class Registry(unittest.TestCase):
             for bid, gates in getattr(m, 'OBS', {}).items():
                 for off, oid, word, why in gates:
                     self.assertTrue(isinstance(off, int) and isinstance(oid, int) and HEX.match(word) and len(word) == 8 and why, f'{p} {bid} {off:#x}')
-            for bid, fn in getattr(m, 'FRAME_STEP', {}).items():
-                self.assertTrue(callable(fn), f'{p} {bid}')
+            for kind in ('FRAME_STEP', 'STUBS'):
+                for bid, fn in getattr(m, kind, {}).items():
+                    self.assertTrue(callable(fn), f'{p} {kind} {bid}')
             for bid, names in getattr(m, 'CAPABILITIES', {}).items():
                 self.assertRegex(bid, r'^[0-9a-f]{32}$')
                 self.assertEqual(len(names), len(set(names)))
                 for name in names: self.assertRegex(name, r'^[A-Z][A-Z0-9_]*$')
-            self.assertFalse({k for k in vars(m) if k.isupper() and k not in ('CUTS', 'OBS', 'FRAME_STEP', 'CAPABILITIES', 'MATCH_CUTS', 'MATCH_FRAME_STEP', 'BINDING')} - set(dir(__import__('nso_asm'))),
+            self.assertFalse({k for k in vars(m) if k.isupper() and k not in ('CUTS', 'OBS', 'FRAME_STEP', 'STUBS', 'CAPABILITIES', 'MATCH_CUTS', 'MATCH_FRAME_STEP', 'BINDING')} - set(dir(__import__('nso_asm'))),
                              f'{p}: a table patch_nso.py does not read')
             # every patch file states each patch's binding (docs_patches.py "Binding"), and no goal is tighter than the binding now
             self.assertTrue(getattr(m, 'BINDING', None), f'{p}: no BINDING (docs/agents/game-patches.md, "Binding")')
@@ -148,7 +149,7 @@ class Registry(unittest.TestCase):
         for p, m in MODS.items():
             if p.name != 'patches.py' or not (p.parent / 'game.tsv').is_file(): continue
             own = builds_of(p.parent.name)
-            for kind in ('CUTS', 'OBS', 'FRAME_STEP', 'CAPABILITIES'):
+            for kind in ('CUTS', 'OBS', 'FRAME_STEP', 'STUBS', 'CAPABILITIES'):
                 for bid in getattr(m, kind, {}):
                     self.assertIn(bid, own, f'{p}: {kind} of {bid}, which is no build of profile {p.parent.name}')
                     self.assertNotEqual(own[bid], 'sdk', f'{p}: {bid} is an sdk build; its patches go in dm/tools/sdk_patches.py')
@@ -156,7 +157,7 @@ class Registry(unittest.TestCase):
     def test_sdk_file_names_sdk_builds(self):
         sdk = {bid for g in game.all_games() for bid, m in builds_of(g).items() if m == 'sdk'}
         m = MODS[REPO / 'dm/tools/sdk_patches.py']
-        self.assertFalse(getattr(m, 'OBS', {}) or getattr(m, 'FRAME_STEP', {}))
+        self.assertFalse(getattr(m, 'OBS', {}) or getattr(m, 'FRAME_STEP', {}) or getattr(m, 'STUBS', {}))
         for bid in m.CUTS: self.assertIn(bid, sdk, f'sdk_patches.py: {bid} is no sdk build of any profile')
 
 

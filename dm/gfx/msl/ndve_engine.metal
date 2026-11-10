@@ -1,5 +1,5 @@
 // nn::ndve's movie network (Ocarina of Time's title and opening movies) in place of its translated dispatches (nvn_mtl.m ndve_*, DM_NDVE_ENGINE=1; shaders.md, "The NDVE movie
-// network by the host"). The same arithmetic as the translated shaders in the same order, so the same bits: each HMMA.16816.F16 is what dmsh_build.py's HMMA_BODY makes of it,
+// network by the host"). The same arithmetic as the translated shaders in the same order, so the same bits: each HMMA.16816.F16 is what dmsh_rewrite.py's HMMA_BODY makes of it,
 // two simdgroup_multiply_accumulate from simdgroup_half8x8 into an f32 matrix (input channels 0-7 of a 16-channel block, then 8-15), each rounded to the f16 accumulator, a
 // zero C for a chain's first call; a chain runs over the taps, then the 16-channel blocks, as the game's code does. Epilogues as the game's: f16 D plus the f16 bias in f32, ReLU, one rounding.
 // Tensors: f16 NHWC with a one-pixel zero border: element (x, y, c) of a W x H x C tensor at ((y + 1) * (W + 2) + x + 1) * C + c, with spare zero rows below (the last row

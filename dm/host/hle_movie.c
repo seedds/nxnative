@@ -238,6 +238,12 @@ static void md_dims(const mdec_t *d, int *w, int *h, int *stride, int *slice) {
 // ---------- Host decoding thread ----------
 enum { MDJ_NONE, MDJ_DECODE, MDJ_CLOSE, MDJ_QUIT, MDJ_TAKE };
 static int md_threads(void) { long n = sysconf(_SC_NPROCESSORS_ONLN); return n >= 8 ? 4 : 2; }
+vpx_codec_err_t md_vpx_open(vpx_codec_ctx_t *ctx, int vp9, unsigned w, unsigned h) {
+    vpx_codec_dec_cfg_t cfg = { .threads = (unsigned)md_threads(), .w = w, .h = h };
+    vpx_codec_err_t e = vpx_codec_dec_init(ctx, vp9 ? vpx_codec_vp9_dx() : vpx_codec_vp8_dx(), &cfg, 0);
+    if (!e && vp9) vpx_codec_control(ctx, VP9D_SET_ROW_MT, 1);
+    return e;
+}
 // I420 → NV12 (stride = width, plane height = height); a smaller picture is padded with black, a larger one cropped
 void md_nv12(const vpx_image_t *im, uint8_t *dst, int w, int h) {
     int cw = (int)im->d_w < w ? (int)im->d_w : w, ch = (int)im->d_h < h ? (int)im->d_h : h;
@@ -276,13 +282,10 @@ void md_rgba(const vpx_image_t *im, uint8_t *dst, int w, int h) {
 static int md_vpx(mdec_t *d, const uint8_t *p, int n, int slot) {
     const char *codec = d->type == MD_TYPE_VP8 ? "VP8" : "VP9";
     if (!d->vpx_on) {
-        vpx_codec_dec_cfg_t cfg = { .threads = (unsigned)md_threads(), .w = (unsigned)d->w, .h = (unsigned)d->h };
-        vpx_codec_iface_t *iface = d->type == MD_TYPE_VP8 ? vpx_codec_vp8_dx() : vpx_codec_vp9_dx();
-        vpx_codec_err_t e = vpx_codec_dec_init(&d->vpx, iface, &cfg, 0);
+        vpx_codec_err_t e = md_vpx_open(&d->vpx, d->type == MD_TYPE_VP9, (unsigned)d->w, (unsigned)d->h);
         if (e) { LOG("[RED] movie: libvpx failed to create the %s decoder: %s", codec, vpx_codec_err_to_string(e)); return 0; }
-        if (d->type == MD_TYPE_VP9) vpx_codec_control(&d->vpx, VP9D_SET_ROW_MT, 1);
         d->vpx_on = 1;
-        LOG("[movie] libvpx %s: %s decoder, %d threads", vpx_codec_version_str(), codec, cfg.threads);
+        LOG("[movie] libvpx %s: %s decoder, %d threads", vpx_codec_version_str(), codec, md_threads());
     }
     if (vpx_codec_decode(&d->vpx, p, (unsigned)n, NULL, 0)) {
         if (!d->red_dec++) LOG("[RED] movie: %s decode error (first case, %d bytes): %s %s", codec, n, vpx_codec_error(&d->vpx), vpx_codec_error_detail(&d->vpx) ? vpx_codec_error_detail(&d->vpx) : "");

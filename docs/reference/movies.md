@@ -309,6 +309,15 @@ A decoder hands out as many outputs as it has slots, and while every slot is tak
 - **Check:** `t_codec_video`.
 - **Found on:** [Mario Tennis Fever](../../dm/games/0400D4201C6EA000/README.md), every movie.
 
+### One libvpx setup for both decoder paths
+
+- **Symptom:** a movie's sound is chopped: gaps of 60 to 80 ms every second or two, with the picture playing on. The log has no underrun (`0 underruns, 0.0 ms zero-padded`) and no red line. With `DM_AUDIO_DUMP`, the game's mix has exact zeros in whole renderer frames (multiples of 240 samples) inside the music (Mario Tennis Fever's opening, VP9 2560x1440 at 60 fps with Vorbis).
+- **Cause:** `nn::codec` decodes a packet on the game's own movie thread (`cv_dec_submit`, called from `MovieVideoHandler`). Its libvpx decoder had 2 threads and no row threading, while `movie::Decoder`'s (`hle_movie.c`) had 4 threads on 8 cores or more and `VP9D_SET_ROW_MT`. At 2560x1440 that left the thread in libvpx for 46% of a `sample` of the movie, and the game's player, which feeds the sound from the same source, stopped the audio voice whenever the picture fell behind.
+- **Fix:** general: both paths make their decoders with `md_vpx_open` (`hle_movie.c`, declared in `hle_movie_yuv.h`): 4 threads on a machine with 8 cores or more (2 below), and row threading for VP9.
+- **Check:** with `DM_AUDIO=1 DM_AUDIO_MUTE=1 DM_AUDIO_DUMP=<file>`, the exact-zero runs of 2 ms or more in the mix. Mario Tennis Fever's opening, 30 s windowed on an M4 Max: 11 short gaps before (60 to 80 ms), 1 and 2 after, all within about 3 s of the sound starting; the four runs of 330 to 505 ms are in the movie itself (the same places every run).
+- **Found on:** [Mario Tennis Fever](../../dm/games/0400D4201C6EA000/README.md), the opening movie.
+- **Open:** the one short gap left near the movie's start, at a different time each run.
+
 ### AV1 movies through SDK 22's decoder
 
 - **Symptom:** a crash in `nn::codec::video::InitializeAv1DecoderByTransferMemory` when a movie starts.

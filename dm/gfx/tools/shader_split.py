@@ -45,6 +45,8 @@
 #       Mac host), each a VNVN record with one code area and control section (frostbite.py), see frostbite_jobs and frostbite_shaders
 #   · PDAT (the engine with the namespace phx, Kirby Air Riders): flatbuffer records tagged PMAP, zstd frames in the .dat archives, each holding a program's control sections and code areas, see pdat_jobs and pdat_shaders
 #   · Unreal Engine 3 (Batman: Arkham Knight): shader records in its global shader cache (BMSG) and in the packages (the combined shader cache), whose compressed chunks are Oodle blocks decoded by the game's own decoder in the Mac host, see ue3_body and ue3_shaders
+#   · CIVBSF (Firaxis's ShaderAutoGen, Civilization VII): one .bs file at the RomFS root holding every shader, each block a code area (graphics or compute), 0x880 control bytes and the shader's
+#       NV assembly source together, see civbsf_shaders. No run-time compile feeds these: the game submits the binaries as they are (and a 4 KB NRR registers its JIT code, not shaders)
 # Code area: 0x30 header + (graphics) 0x50 SPH + instructions; header magic 0x12345678 for graphics, 0x12345679 for compute. The control section starts with 0x98761234, +0x704 = code area length,
 #   +0x700 = start of the c1 constant segment within the code area; for compute +0x748 thread group xyz (u32 ×3), +0x754 shared memory bytes (checked one by one against PC reflection on D2R's 22 compute shaders).
 # Stage: BNSH uses the stage slot; BAHS uses bits 10..13 of SPH word 0 (1 vertex 2 hull 3 domain 4 geometry 5 pixel), and a compute header means compute.
@@ -2111,6 +2113,35 @@ def frostbite_shaders(path, rel, ents, out):
             if why: print(f'[RED] {label}: {why}; left out', flush=True); continue
             out.append((label, st, ctl, code))
 
+def civbsf_shaders(path, label, out):
+    """Firaxis's ShaderAutoGen pack (Civilization VII: rom:/ShaderAutoGen_Linux_NVN_FinalRelease.bs, 11.4 MB, the only file of the format). 'CIVBSF\\0\\0', u32@8 = 0x1218, u32@0xC = the whole
+    file's size, u32@0x18 = 7 section starts (u64 each at +0x20, an 8th ending them); section 1's records at its start are 80 bytes each: {u64 source text (0 when the shader has none: a
+    PSSL variant for another platform), u64 block header, u64 block header + 0x10, u64 stage, u64 hash, u64 0, u32 0x00010001, ...}, the count derived from the section's bounds (801). The
+    header the record names is {u64 block offset, u64 block length}; a block is {u32 0xff00ff00, u32 code length, u32 control self-length, u32 0} + the code area + 0x880 control bytes + the
+    shader's NV assembly source ('!!NVvp5.0 ...'). No run-time compile feeds these: the game submits the binaries as they are. Labels: /<rel>#<index>"""
+    d = open(path, 'rb').read()
+    where = f'{label} CIVBSF'
+    size, s1, s2 = field(d, '<I', 0xc, where)[0], field(d, '<Q', 0x20, where)[0], field(d, '<Q', 0x28, where)[0]
+    if size != len(d): red(f'{where}: header size {size:#x} does not match the file ({len(d):#x} bytes)')
+    n = (s2 - s1) // 80
+    if not 0 < n <= 0x100000 or s1 + 80 * n > len(d): red(f'{where}: section 1 is {n} records, none readable')
+    heads = [field(d, '<Q', s1 + 80 * i + 8, f'{where} record {i}')[0] for i in range(n)]
+    for a, b in zip(heads, heads[1:]):
+        if not s2 <= a < b or b + 0x10 > len(d): red(f'{where}: records out of order (block header {a:#x} then {b:#x})')
+    for i, h in enumerate(heads):
+        label_i = f'{label}#{i}'
+        bo, bl = field(d, '<QQ', h, f'{where} record {i} block')
+        if not s2 <= bo < bo + bl <= len(d): red(f'{where}: record {i} block {bo:#x}+{bl:#x} outside the data')
+        blk = d[bo:bo + bl]
+        tag, clen = field(d, '<II', bo, f'{where} record {i} block')
+        if tag != 0xff00ff00 or not 0x30 <= clen <= bl - 0x10 or bl - 0x10 - clen < 0x24:
+            print(f'[RED] {label_i}: not a shader block (tag {tag:#x}, code length {clen:#x} in {bl:#x}); left out', flush=True); continue
+        code, ctl = blk[0x10:0x10 + clen], blk[0x10 + clen:0x10 + clen + 0x880]
+        st = glslc_stage(ctl, code)
+        why = check(label_i, st, ctl, code) if st else 'no stage in the code area header'
+        if why: print(f'[RED] {label_i}: {why}; left out', flush=True); continue
+        out.append((label_i, st, ctl, code))
+
 def smash_arc_jobs(files, parts=128):
     """Super Smash Bros. Ultimate's data.arc (17.6 GB, smash_arc.py): the game's current files, in ranges of about equal stored size. → ([(path, rel, entries), …], the paths taken)"""
     import smash_arc
@@ -3092,6 +3123,10 @@ def scan_file_in(args):
         return rel, uniq_keys(found), var_pairs(found), trees
     if head[:4] == RFRM:   # a Retro Studios form or pack (rfrm_shaders)
         found += rfrm_shaders(open(path, 'rb').read(), '/' + rel)
+    if head[:8] == b'CIVBSF\0\0':   # Firaxis's ShaderAutoGen pack (civbsf_shaders): every shader of the game in one file
+        civbsf_shaders(path, '/' + rel, found)
+        return rel, uniq_keys(found), var_pairs(found), trees
+
         return rel, uniq_keys(found), var_pairs(found), trees
     if head[:4] == b'BERG':   # Snowdrop's SDF data slices: shader objects in individual compressed records
         with open(path, 'rb') as f: found += snowdrop_shaders(f.read(), '/' + rel)

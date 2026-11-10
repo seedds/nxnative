@@ -10,12 +10,80 @@ import SwiftUI
 
 private func info(_ key: String) -> String? { Bundle.main.object(forInfoDictionaryKey: key) as? String }
 
+/// The host's report of the two saves (dm/host/save_sync.c). This launcher links save_sync.o but imports no C header (dm/mac/pack_app.py builds it
+/// with swiftc and no bridging header), so the symbol is declared here rather than imported.
+@_silgen_name("save_sync_report")
+private func save_sync_report(_ save: UnsafePointer<CChar>, _ cloud: UnsafePointer<CChar>, _ title: UnsafePointer<CChar>,
+                              _ out: UnsafeMutablePointer<CChar>, _ n: Int) -> Int32
+
+/// A save that changed on both this Mac and the cloud: what the settings window asks before the game starts
+/// (dm/host/save_sync.h save_sync_report; the answer is DM_SAVE_SYNC_CHOICE, docs/frontends.md). The iOS launcher has its own copy of this
+/// (dm/ios/Sources/Launcher.swift): the two front ends are separate processes and share no Swift module.
+struct SaveSyncConflict {
+    var localHash = "", cloudHash = "", cloudDevice = ""
+    var localSaved = Date(timeIntervalSince1970: 0), cloudSaved = Date(timeIntervalSince1970: 0)
+    var localFiles = 0, cloudFiles = 0
+    var cloudRead = false, conflict = false
+
+    /// The two saves as the host compares them; nil with no cloud folder, no title ID, or a save that cannot be read. Blocks while an
+    /// iCloud item that is only listed downloads (10 s at most): call it off the main thread.
+    static func report() -> SaveSyncConflict? {
+        // getenv, not ProcessInfo.environment: that is a snapshot taken before launcher.c reads env.txt and the saved choices
+        guard let save = getenv("DM_SAVE") else { fputs("launcher: save sync: no DM_SAVE\n", stderr); return nil }
+        let folder = getenv("DM_SAVE_SYNC").map { String(cString: $0) }
+            ?? (UserDefaults.standard.string(forKey: "cloudSaves.folder") ?? "")
+        guard !folder.isEmpty, !folder.hasPrefix("icloud") else { fputs("launcher: save sync: no cloud folder\n", stderr); return nil }
+        guard let id = info("DMTitleID"), !id.isEmpty else { fputs("launcher: save sync: no title ID\n", stderr); return nil }
+        let cloud = folder + "/" + id + "/save.dmsync"
+        var buf = [CChar](repeating: 0, count: 1024)
+        guard save_sync_report(save, cloud, id, &buf, buf.count) == 0 else {
+            fputs("launcher: the save sync report could not be read\n", stderr)
+            return nil
+        }
+        var f: [String: String] = [:]
+        for pair in String(cString: buf).split(separator: " ") {
+            let kv = pair.split(separator: "=", maxSplits: 1)
+            // the report ends its line with \n: an untrimmed value makes "1" into "1\n" and every flag reads false
+            if kv.count == 2 { f[String(kv[0])] = String(kv[1].filter { !$0.isWhitespace }) }
+        }
+        guard f["sametitle"] != "0" else { return nil }   // the cloud's file is another game's save
+        var c = SaveSyncConflict()
+        c.localHash = f["local"] == "-" ? "" : (f["local"] ?? "")
+        c.cloudHash = f["chash"] == "-" ? "" : (f["chash"] ?? "")
+        c.cloudDevice = f["cdevice"] == "-" ? "" : (f["cdevice"] ?? "")
+        c.localSaved = Date(timeIntervalSince1970: Double(f["saved"] ?? "0") ?? 0)
+        c.cloudSaved = Date(timeIntervalSince1970: Double(f["csaved"] ?? "0") ?? 0)
+        c.localFiles = Int(f["files"] ?? "0") ?? 0
+        c.cloudFiles = Int(f["cfiles"] ?? "0") ?? 0
+        c.cloudRead = f["cloud"] == "1"
+        c.conflict = f["conflict"] == "1"
+        return c
+    }
+
+    private static func when(_ d: Date) -> String {
+        let f = DateFormatter()
+        f.dateStyle = .short
+        f.timeStyle = .short
+        return f.string(from: d)
+    }
+
+    var localLabel: String { localFiles == 0 ? "This Mac has no save — use the cloud's" : "This Mac — saved \(Self.when(localSaved))" }
+    var cloudLabel: String {
+        guard cloudRead, cloudFiles > 0 else { return "iCloud has no save — use this Mac's" }
+        return cloudDevice.isEmpty ? "iCloud — saved \(Self.when(cloudSaved))" : "iCloud from \(cloudDevice) — saved \(Self.when(cloudSaved))"
+    }
+    var message: String {
+        "Played on both without syncing in between, so neither replaces the other until you pick one. The one you do not pick is kept in the save's backups folder."
+    }
+}
+
 struct LauncherView: View {
     @ObservedObject var m: LauncherModel
     let done: (Bool) -> Void
     let fit: (CGFloat) -> Void
     @AppStorage("window.show") private var show = true
     @AppStorage("window.advanced") private var advanced = false
+    @State private var checking = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -54,11 +122,52 @@ struct LauncherView: View {
                 Toggle("Show this window at launch", isOn: $show).toggleStyle(.checkbox)
                 Spacer()
                 Button("Quit") { done(false) }
-                Button("Play") { done(true) }.keyboardShortcut(.defaultAction)
+                Button("Play") { start() }.keyboardShortcut(.defaultAction)
             }
             .padding(20)
         }
         .frame(minWidth: 520, idealWidth: 560)
+    }
+
+    /// Play, after the cloud's save is compared with this Mac's (dm/host/save_sync.h save_sync_report): a save that changed on both sides is the
+    /// player's call, not the newer file's. Anything else passes `ask` and leaves the host's own decision as it was.
+    private func start() {
+        guard !checking else { return }
+        checking = true
+        DispatchQueue.global(qos: .userInitiated).async {
+            let c = SaveSyncConflict.report()
+            DispatchQueue.main.async {
+                checking = false
+                // A report that could not be read leaves DM_SAVE_SYNC_CHOICE alone: `ask` with nothing compared would keep the cloud's
+                // save out of this session, which is the one behaviour the player must never get by accident.
+                guard let c else { fputs("launcher: no report; playing as before\n", stderr); done(true); return }
+                if c.conflict {
+                    fputs("launcher: both saves changed; asking\n", stderr)
+                    let a = NSAlert()
+                    a.messageText = "Both saves changed"
+                    a.informativeText = c.message
+                    a.addButton(withTitle: c.localLabel)     // first button = the default (Return)
+                    a.addButton(withTitle: c.cloudLabel)
+                    a.addButton(withTitle: "Cancel")
+                    a.alertStyle = .warning
+                    switch a.runModal() {
+                    case .alertFirstButtonReturn: choose(local: true, c)
+                    case .alertSecondButtonReturn: choose(local: false, c)
+                    default: break                            // Cancel: back to the window, no choice made
+                    }
+                    return
+                }
+                setenv("DM_SAVE_SYNC_CHOICE", "ask", 1)
+                done(true)
+            }
+        }
+    }
+
+    private func choose(local useLocal: Bool, _ c: SaveSyncConflict) {
+        let choice = useLocal ? "local:" + c.localHash : "cloud:" + c.cloudHash
+        setenv("DM_SAVE_SYNC_CHOICE", choice, 1)
+        fputs("launcher: the player chose \(choice)\n", stderr)
+        done(true)
     }
 
     @ViewBuilder private func settingSections(basic: Bool) -> some View {

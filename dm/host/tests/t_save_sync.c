@@ -314,6 +314,41 @@ int main(void) {
     backup_of(X, "cloud", back, sizeof back); snprintf(q, sizeof q, "%s/save/game.dat", back);
     CHECK(*back && same(q, "y3"), "and the iPhone's save it replaced is kept on the Mac (%s)", back);
 
+    printf("(15) the report a front end reads before it plays\n");
+    char R1[1200], R2[1200], cloud4[1200], cf4[1400], line[2048];
+    snprintf(R1, sizeof R1, "%s/mac6/save", root); snprintf(R2, sizeof R2, "%s/iphone4/save", root);
+    snprintf(cloud4, sizeof cloud4, "%s/iCloud Drive/Fourth Saves", root);
+    mkd(R1); mkd(R2); mkd(cloud4); snprintf(cf4, sizeof cf4, "%s/%s/save.dmsync", cloud4, id);
+    CHECK(!save_sync_report(R1, cf4, DM_GAME_ID, line, sizeof line) && strstr(line, "cloud=0 ") && strstr(line, "local=- ") && strstr(line, "conflict=0"),
+          "no save here, none in the cloud: no conflict, nothing to replace (%s)", line);
+    snprintf(p, sizeof p, "%s/game.dat", R1); put(p, "r1");
+    CHECK(!save_sync_report(R1, cf4, DM_GAME_ID, line, sizeof line) && strstr(line, "files=1") && strstr(line, "chash=- ") && strstr(line, "conflict=0"),
+          "a save here, the cloud's empty: no conflict, the mount sends it (%s)", line);
+    CHECK(session(R1, cloud4, NULL, NULL) == 0 && cloud_has(cf4, root, "game.dat", "r1"), "the session sends it");
+    CHECK(!save_sync_report(R1, cf4, DM_GAME_ID, line, sizeof line) && strstr(line, "cloud=1 ") && strstr(line, "sametitle=1 ") && strstr(line, "conflict=0") && !strstr(line, "cdevice=- "),
+          "the same save here and in the cloud: no conflict, the cloud's device named (%s)", line);
+    snprintf(p, sizeof p, "%s/game.dat", R2);
+    CHECK(!save_sync_report(R2, cf4, DM_GAME_ID, line, sizeof line) && strstr(line, "local=- ") && strstr(line, "cfiles=1 ") && strstr(line, "conflict=0"),
+          "the cloud has one and this device none: it comes in, no conflict (%s)", line);
+    CHECK(session(R2, cloud4, NULL, NULL) == 0 && same(p, "r1"), "and the session brings it in");
+    CHECK(session(R2, NULL, "game.dat", "r2") == 0 && same(p, "r2"), "the iPhone plays with sync off and saves r2");
+    set_mtime(p, time(NULL) - 100);
+    CHECK(session(R1, cloud4, "game.dat", "r3") == 0 && cloud_has(cf4, root, "game.dat", "r3"), "then the Mac saves r3 and sends it");
+    CHECK(!save_sync_report(R2, cf4, DM_GAME_ID, line, sizeof line) && strstr(line, "conflict=1") && strstr(line, "cfiles=1 ") && strstr(line, "cdevice=Mac"),
+          "both changed: the report says conflict, with the cloud's device (%s)", line);
+    {   // the player is told which is newer by the two dates, so they have to be each save's own
+        char *cs = strstr(line, "csaved="), *sv = strstr(line, " saved=");
+        CHECK(cs && sv && atoll(cs + 7) > atoll(sv + 7), "the cloud's date is the newer of the two (%s)", line);
+    }
+    chmod(cf4, 0);
+    CHECK(!save_sync_report(R2, cf4, DM_GAME_ID, line, sizeof line) && strstr(line, "cloud=-1 ") && strstr(line, "chash=- ") && strstr(line, "conflict=0"),
+          "the cloud cannot be read: said so, and no conflict to offer (%s)", line);
+    chmod(cf4, 0644);
+    setenv("DM_SAVE_SYNC", "0", 1);
+    CHECK(!save_sync_report(R2, cf4, DM_GAME_ID, line, sizeof line) && strstr(line, "cloud=-1 ") && !strstr(line, "local=- "),
+          "sync off (DM_SAVE_SYNC=0): the local save alone is reported (%s)", line);
+    unsetenv("DM_SAVE_SYNC");
+
     printf("== save sync: %d checks, %d failed ==\n", checks, fails);
     if (!fails) { char c[1200]; snprintf(c, sizeof c, "rm -rf '%s'", root); system(c); }
     return fails != 0;

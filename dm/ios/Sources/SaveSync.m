@@ -8,6 +8,8 @@
 #include <unistd.h>
 #include "save_sync.h"
 
+#define MATERIALIZE_S 25   // how long a read waits for an iCloud item that is listed but not on this device to download
+
 int front_save_sync_fetch(const char *cloud, const char *local) {
     @autoreleasepool {
         NSFileManager *fm = [NSFileManager new];
@@ -15,7 +17,20 @@ int front_save_sync_fetch(const char *cloud, const char *local) {
         // Not there, not even as the placeholder iCloud lists for a file it has not downloaded (.<name>.icloud): no save in the cloud yet
         NSString *placeholder = [src.URLByDeletingLastPathComponent URLByAppendingPathComponent:[NSString stringWithFormat:@".%@.icloud", src.lastPathComponent]].path;
         if (![fm fileExistsAtPath:src.path] && ![fm fileExistsAtPath:placeholder]) return 0;
-        [fm startDownloadingUbiquitousItemAtURL:src error:nil];   // asked for now; the coordinated read waits for it (save_sync.c gives it a time limit)
+        // Listed but not on this device: the coordinated read alone is not enough — it can come back with nothing before the download lands,
+        // which is what made a first start play the local save and the next start (download finished) bring it in. Ask for it and wait for the file.
+        if (![fm fileExistsAtPath:src.path]) {
+            NSDate *start = [NSDate date];
+            [fm startDownloadingUbiquitousItemAtURL:src error:nil];
+            NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:MATERIALIZE_S];
+            while (![fm fileExistsAtPath:src.path] && [deadline timeIntervalSinceNow] > 0) usleep(150 * 1000);
+            if (![fm fileExistsAtPath:src.path]) {
+                fprintf(stderr, "[dm] save sync: the cloud's save is still downloading after %.0f s; playing on with this device's\n",
+                        -[start timeIntervalSinceNow]);
+                return -1;
+            }
+            fprintf(stderr, "[dm] save sync: the cloud's save downloaded in %.1f s\n", -[start timeIntervalSinceNow]);
+        }
         __block int r = -1;
         NSError *error = nil;
         [[[NSFileCoordinator alloc] initWithFilePresenter:nil] coordinateReadingItemAtURL:src options:0 error:&error byAccessor:^(NSURL *u) {

@@ -11,6 +11,7 @@
 // one last synced, damaged, or the one the start chose against. A cloud that changed since (or that the start could not read) waits for the next start.
 // Every save this replaces, here or in the cloud, is kept first in <DM_SAVE>-backups/<date> <side>; the newest 10 of each side stay.
 #pragma once
+#include <stddef.h>
 #include <stdint.h>
 
 #define SS_HASH 32   // hex digits of a save's hash: the first 16 bytes of a SHA-256
@@ -34,6 +35,19 @@ typedef enum { SS_KEEP, SS_PULL, SS_PUSH, SS_ASK } ss_way;
 // Which way, from the three hashes ("" for none: no save here, no sync yet, nothing in the cloud). *both = both changed: then SS_ASK when a front end asks the
 // player (`ask`), else the newer one by the times (the same time: this device's)
 ss_way ss_decide(const char *local, const char *base, const char *remote, int64_t local_saved, int64_t remote_saved, int ask, int *both);
+
+// ---- what a front end asks the player with (docs/frontends.md, The cloud saves folder) ----
+// One line of key=value pairs, for the settings screen before the start:
+//   cloud=<1 read | 0 no file there | -1 unreadable> local=<hash|-> saved=<secs> files=<n> chash=<hash|-> csaved=<secs> cfiles=<n>
+//   cdevice=<hostname, '_' for a space> sametitle=<0|1> conflict=<0|1>
+// conflict = both this device's save and the cloud's changed since the last sync (or this device's save has never synced and both exist):
+// exactly the case a front end shows the two saves for and answers with DM_SAVE_SYNC_CHOICE. `save` is the committed save folder (DM_SAVE),
+// `cloud` the packed file (<folder>/<title ID>/save.dmsync), `title` the title ID. 0 on success, -1 when the arguments do not fit or the save cannot be read.
+int save_sync_report(const char *save, const char *cloud, const char *title, char *out, size_t n);
+
+// The title ID of this build (dm/host/gen/<title>/game_profile.h), which the cloud folder and file are named after; "" when the build has no profile header
+// (the Mac launcher, which reads the app's Info.plist DMTitleID instead).
+const char *dm_save_sync_title_id(void);
 
 // ---- the host ----
 void save_sync_mount(const char *save, const char *title);   // the game's first save mount (hle_fs.c): brings the cloud's save in when it is the one to keep, starts the sender

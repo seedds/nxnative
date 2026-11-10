@@ -119,6 +119,24 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Check:** `dm/host/tests/t_fs.c` section 9. On Link's Awakening on the Mac, one save renamed to the old form: every file shows New Game without the fix, and File 1 with it, the file unchanged. Through a cloud folder, old names that come in are renamed, the renamed save goes out, and the next mount is in step.
 - **Found on:** [The Legend of Zelda: Link's Awakening](../../dm/games/01006BB00C6F0000/README.md) ([GitHub issue #905](https://github.com/seedds/nxnative/issues/905), diagnosed in [LNPANDY/NX2Apple#461](https://github.com/LNPANDY/NX2Apple/pull/461)).
 
+### Both saves changed is the player's choice, not the newest file's
+
+- **Symptom:** after playing on two devices, one of them ignores the other's newer save and keeps its own; in the worst case a save started fresh on the other device a minute later wins and the real one disappears from the cloud.
+- **Cause:** without a front end that asks, the host's rule is newest wins, and "newest" is the newest file date in the save. A new-game save written 45 s after a real one has the later date with none of the progress, so it replaced a 54-minute save in the cloud (the real one survived only in that device's `save-backups/<date> cloud`). `DM_SAVE_SYNC_CHOICE=ask` existed in `save_sync.h` but nothing set it, so the player was never told what had been chosen.
+- **Fix:** `save_sync_report()` (`dm/host/save_sync.c`) compares this device's save with the cloud's through the same front-end fetch the mount uses and answers one line: `cloud=<-1|0|1> local=<hash|-> saved=<date> files=<n> chash=<hash|-> csaved=<date> cfiles=<n> cdevice=<host> sametitle=<0|1> conflict=<0|1>`, where `-1` means the cloud's save could not be read. The iPhone and Mac launchers read it when Play is pressed, and on `conflict=1` show both saves with their dates and devices and set `DM_SAVE_SYNC_CHOICE=local:<hash>` or `cloud:<hash>` from the player's pick; Cancel returns to the launcher without spending a choice. With no conflict they set `ask`. A report that cannot be read leaves the variable unset, so a failed comparison plays on as before rather than holding the cloud's save back.
+- **Limits:** `ask` is set on a successful report only; a front end that sets it without comparing stops every mount from replacing either side until the player chooses. The report ends its line with a newline, so a front end that parses it must trim each value (`conflict=1\n` is not `1`).
+- **Check:** `dm/host/tests/t_save_sync.c` section 15: nothing anywhere, a save only here, in step, only in the cloud, both changed (with the cloud's date the newer), the cloud unreadable, and sync off.
+- **Found on:** Cadence of Hyrule (`01000B900D8B0000`, 1.5.0) on an iPhone (iPhone19,4) and a Mac mini M2 Pro: the phone's brand-new slot, saved at 11:43:55, beat the Mac's 11:43:10 save and went to the cloud; with the prompt the two dates are shown and the player picks.
+
+### The cloud's save is listed but not downloaded
+
+- **Symptom:** the first start after the other device saved plays this device's save; start it, quit, start again, and the cloud's save comes in.
+- **Cause:** iCloud keeps `<title ID>/save.dmsync` as a placeholder (`.save.dmsync.icloud`) until something asks for it, and the coordinated read can come back empty before the download lands. The host's fetch waits `FETCH_MS` (20 s), which was 10 s, so the first start gave up and the next one found the download finished.
+- **Fix:** `front_save_sync_fetch` (`dm/ios/Sources/SaveSync.m`) starts the download and waits for the file itself (25 s) before the coordinated read, logging `the cloud's save downloaded in N s`; a read that still fails returns `-1`, which the host treats as unreadable — it plays this device's save and sends nothing, so a slow iCloud cannot replace the cloud's progress. The launchers show "Checking the cloud save…" while that wait runs.
+- **Limits:** the launcher's wait is what usually lands the file before the mount; with no launcher (`DM_LAUNCHER=0`) the host's 20 s applies, and a download slower than that still needs a second start.
+- **Check:** a planted `.save.dmsync.icloud` in a scratch cloud folder with `DM_LAUNCHER=0`: the log shows `the cloud's save did not come within 20 s` from the host and `still downloading after 25 s` from the front end, with nothing written to the cloud or the save.
+- **Found on:** Cadence of Hyrule on an iPhone (iPhone19,4), after a save from a Mac mini M2 Pro (macOS 26.6).
+
 ### An unhooked `fs::ReadFile` overload falls through to the SDK's own
 
 - **Symptom:** a fault inside `sdk` at boot, right after the save data is mounted: `ldr w8, [x0, #0x24]` with `x0` holding a host file handle (SD GUNDAM G GENERATION CROSS RAYS: `sdk+0x62a78`, `x0 = 0x4000000000000390`), while `GetFileSize` on the same handle answered just before.

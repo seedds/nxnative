@@ -28,8 +28,14 @@
 #define SLOG(...) do { fprintf(stderr, "[dm] save sync: " __VA_ARGS__); fputc('\n', stderr); } while (0)
 #define SRED(...) do { fprintf(stderr, "[dm] [RED] save sync: " __VA_ARGS__); fputc('\n', stderr); } while (0)
 #define GUEST_NAME "org.d2rmobile.guest-name"   // hle_fs.c FS_GUEST_NAME: a file's guest name when its host name had to differ (a case collision); part of the save
+#if __has_include("game_profile.h")   // the iOS build's -I reaches the generated profile; the Mac launcher compiles this file alone (dm/mac/pack_app.py) and has none
+#include "game_profile.h"
+#define SS_TITLE_ID DM_GAME_ID
+#else
+#define SS_TITLE_ID ""
+#endif
 #define QUIET_MS 3000    // a game often commits several times in a row: the sender waits until it has been quiet this long
-#define FETCH_MS 10000   // the longest the game waits for the cloud's copy (a download); then it plays on with this device's save, which is not sent until the two have been compared
+#define FETCH_MS 20000   // the longest the game waits for the cloud's copy (an iCloud download: the phone's front end also waits for the file, SaveSync.m)
 #define KEEP_BACKUPS 10  // backups kept of each side (local, cloud); older ones are removed when a new one is made
 enum { HDR = 8 + 4 + 4 + SS_HASH + 8 + 24 + 64, ENT = 24, CHUNK = 1 << 16 };   // header bytes, entry header bytes, the copy buffer
 static const char MAGIC[8] __attribute__((nonstring)) = "DMSYNC1\n", END[8] __attribute__((nonstring)) = "DMSYNCE\n";
@@ -559,6 +565,38 @@ static void mount_once(const char *save, const char *title) {
     pthread_detach(th);
     atomic_store(&g_on, 1);
 }
+
+// ---------- what a front end asks the player with ----------
+// The two saves and the one last synced, as ss_decide sees them with a front end that asks (dm/host/save_sync.h). It fetches the cloud's file the way the mount does,
+// so on the iPhone the read downloads a file iCloud has only listed; no game runs yet, so <save>.sync-tmp is free (the mount clears it anyway).
+int save_sync_report(const char *save, const char *cloud, const char *title, char *out, size_t n) {
+    char dd[PATH_MAX], tmp[PATH_MAX], theirs[PATH_MAX], base[SS_HASH + 1], dev[64], line[512];
+    ss_meta mine, other; int got = -1, both = 0, same = 1;
+    memset(&mine, 0, sizeof mine); memset(&other, 0, sizeof other); base[0] = 0;
+    if (!save || !*save || !cloud || !*cloud) return -1;
+    snprintf(dd, sizeof dd, "%s", save); size_t L = strlen(dd); while (L > 1 && dd[L - 1] == '/') dd[--L] = 0;
+    if (ss_scan(dd, &mine)) return -1;
+    read_base(dd, base);
+    if (!strcmp(getenv("DM_SAVE_SYNC") ? getenv("DM_SAVE_SYNC") : "", "0")) { got = -1; }   // off: report the local save alone
+    else {
+        snprintf(tmp, sizeof tmp, "%s.sync-tmp", dd); snprintf(theirs, sizeof theirs, "%s/front.dmsync", tmp);
+        if (!mkdirs(tmp)) {
+            got = fetch_timed(cloud, theirs, FETCH_MS);
+            if (got > 0 && ss_read(theirs, NULL, &other)) { SRED("the cloud's save %s cannot be read", cloud); got = -1; }
+            unlink(theirs); rmdir(tmp);
+        }
+    }
+    if (got > 0 && other.title[0] && strcasecmp(other.title, title)) same = 0;
+    ss_decide(mine.hash, base, got > 0 && other.files && same ? other.hash : "", mine.saved, other.saved, 1, &both);
+    snprintf(dev, sizeof dev, "%s", other.device); for (char *s = dev; *s; s++) if (*s == ' ') *s = '_';
+    snprintf(line, sizeof line, "cloud=%d local=%s saved=%lld files=%d chash=%s csaved=%lld cfiles=%d cdevice=%s sametitle=%d conflict=%d",
+             got, *mine.hash ? mine.hash : "-", (long long)mine.saved, mine.files,
+             got > 0 && *other.hash ? other.hash : "-", (long long)other.saved, other.files, *dev ? dev : "-", same, both && same);
+    if (snprintf(out, n, "%s\n", line) >= (int)n) return -1;
+    return 0;
+}
+
+const char *dm_save_sync_title_id(void) { return SS_TITLE_ID; }
 
 void save_sync_mount(const char *save, const char *title) {   // the first mount does it; a second one (the device save) waits for it
     pthread_mutex_lock(&g_mount_mu);

@@ -541,12 +541,12 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Fix:** `long_pass_split_due`: with `DM_NVN_PASS_SPLIT` draws (1536) in the pass, or `DM_NVN_PASS_SPLIT_FIRST` (384) while nothing is in flight, and every earlier segment completed (`DM_NVN_PASS_SPLIT_IDLE`), the pass ends and the next draw continues it in a new encoder; `sub_cut` commits the part so far. Geometry mesh draws are split before them (`long_pass_split_geo`). A busy GPU gains nothing from a split, which stores and loads the attachments again (35 MB at 2304x1296), so none is made then.
 - **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md): its zoomed-out map docked from 30 fps (33.3 ms) to 18.3 ms, its lighting pass's splits from 5 to the idle ones (GPU 15.8 → 15.1 ms).
 
-### Uniform-only rebinds patch the previous argument block
+### The deferred-update conflict check looked at every binding on each uniform rebind
 
-- **Symptom:** the submit thread's samples in `encode_args_` and `ubd_conflict_sh` for draw loops that rebind one uniform block per draw.
-- **Cause:** each such draw encoded all of the shader's bindings again (Bananza: 47 fragment bindings, 12,000 draws a pass) and looked at every binding for a deferred-update conflict.
-- **Fix:** `g_args_dirty` 2 marks a stage whose only change since its last block is uniform bindings (`args_dirty_ubo`); a shader whose bindings allow it (`ab_patchable`) gets a copy of its previous block with those slots made again. `ubd_conflict_sh` keeps its last answer of no conflict with the state it held for and looks again only at the slots that changed; the vertex streams' check is kept as well.
-- **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md), with the store-witness set and pool cache below, the encode thread (`DM_NVN_ENC_THREAD=1`) and an -O2 host: submit 21 → 14 ms a frame in its later layers.
+- **Symptom:** the submit thread's samples in `ubd_conflict_sh` for draw loops that rebind one uniform block per draw.
+- **Cause:** each such draw looked at every binding of the shader for a conflict with the inline updates deferred in the pass (Bananza: 47 fragment bindings, 12,000 draws a pass).
+- **Fix:** `ubd_conflict_sh` keeps its last answer of no conflict with the state it held for and looks again only at the slots that changed; the vertex streams' check is kept as well. The argument block of such a draw is patched rather than encoded again: [Argument blocks encoded again when only a uniform buffer moved](#argument-blocks-encoded-again-when-only-a-uniform-buffer-moved).
+- **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md), with the argument-block patch, the store-witness set and pool cache below, the encode thread (`DM_NVN_ENC_THREAD=1`) and an -O2 host: submit 21 → 14 ms a frame in its later layers.
 
 ### The store-witness set overflowed
 
@@ -568,6 +568,13 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Cause:** with many memory pools alive, the lookups scanned them all for every buffer binding of every draw.
 - **Fix:** they try the last hit, then a binary search over pools sorted by start address (`pool_find`, rebuilt when pools are added or removed).
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md): about 1,760 memory pools alive; a CPU sample of the submit thread had about 1,000 of its samples under those scans. Host submit time in the shrine went from 21 ms to 7 ms per frame (p50), the median frame from 38 ms to 21 ms.
+
+### Argument blocks encoded again when only a uniform buffer moved
+
+- **Symptom:** a submit thread busy in `encode_args` with few blocks reused: the per-frame TSV's `@args_enc` close to `@draws`, though most draws keep their textures and samplers.
+- **Cause:** binding a uniform buffer marked the stage's arguments dirty (`g_args_dirty`), and a dirty stage encodes its whole block again: every texture, sampler, image and storage slot, though only the CBUF slots moved. A game that binds a new uniform buffer between most draws paid for a full encode at nearly every draw. An inline update deferred inside a pass that overlaps a bound uniform buffer (`ubd_dirty`: the draws after it read a shadow) did the same.
+- **Fix:** in `nvn_mtl.m`, for every NVN game. A change of what a stage's uniform slots point at, a binding (`OP_BIND_UBO`) or a deferred update over one (`ubd_dirty`), sets its own flag (`g_args_ubo`). When nothing else is dirty, the block of the same pass is still reusable, and the shader reads its uniform buffers only as uniforms (`args_cbuf_only`: an allow-list of binding kinds, decided once per shader; handles or addresses read out of a uniform buffer keep the full encode), the old block is copied to a new arena slot and only its uniform slots and their size table are written again. Both paths take a slot from `cbuf_slot` (the binding, a deferred update's shadow, a [zero-padded copy of a short binding](shaders.md#reads-past-a-uniform-bindings-size), or the zero bank) and the table from `cbsize_table`, so a patched block is the one a full encode would write. The resource check, a pass dump and stage 5 keep the full encode. `@args_patch` counts patched blocks.
+- **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md#found-on-this-game), in the first form (binding changes only, no size table; [PR #1611](https://github.com/seedds/nxnative/pull/1611)): 7,094 full encodes a frame fell to 1,489 (5,645 patched); submit-thread instructions per draw 14.4k to 13.6k, 60 fps on both (M3 Pro, `scripts/bench.py`, 3 runs each, an early-game route the submit thread does not limit). The reuse was measured first in [issue #1290](https://github.com/seedds/nxnative/issues/1290). **Open:** the form here, with the size table and the deferred updates, is not measured on Bananza; the deferred updates matter most in Breath of the Wild (221 small updates of a uniform block a frame).
 
 ### Main guest thread keeps inherited default QoS
 

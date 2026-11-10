@@ -1,32 +1,17 @@
-"""dmsh_build.py pool_arrays and reflect on synthetic MSL: Ryujinx's arrays for a handle traced to no slot, sized to the whole texture / sampler ID ranges (Program.cs), become pointers to
+"""dmsh_reflect.py pool_arrays and reflect on synthetic MSL: Ryujinx's arrays for a handle traced to no slot, sized to the whole texture / sampler ID ranges (Program.cs), become pointers to
 the pools the replay keeps (nvn_mtl.m pool_gpu), declared with one element and read through a pointer to it with the run-time bound; the argument IDs are renumbered as the host lays the buffer out; 32-entry slot arrays stay; members with
 attributes after their id (raster_order_group) are read; a member or a use the rewrite cannot read stops the shader instead of leaving the host's argument buffer longer than the reflection."""
-import ast
 from pathlib import Path
 import re
 import sys
-import types
 import unittest
 
 TOOLS = Path(__file__).resolve().parents[2] / 'gfx/tools'
 sys.path.insert(0, str(TOOLS))
 import dmsh_abi as abi   # noqa: E402
+import dmsh_reflect   # noqa: E402
 
-FUNCS = {'decode_tex', 'const_sampler', 'decode_ubo_tex', 'decode_ubo_img', 'c2_array', 'pool_arrays', 'reflect', 'has_word', 'in_word'}
-NAMES = {'POOL_MIN', 'POOL_MARK', 'TEX_BASE', 'SSBO'}
-
-
-def load():
-    tree = ast.parse((TOOLS / 'dmsh_build.py').read_text())
-    nodes: list[ast.stmt] = [n for n in tree.body if (isinstance(n, ast.FunctionDef) and n.name in FUNCS)
-             or (isinstance(n, ast.Assign) and any(isinstance(t, (ast.Name, ast.Tuple)) and {getattr(e, 'id', None) for e in (t.elts if isinstance(t, ast.Tuple) else [t])} & NAMES for t in n.targets))]
-    ns = {'re': re, 'abi': abi, 'dmsh_geometry': types.SimpleNamespace(HELPERS={})}
-    exec(compile(ast.Module(body=nodes, type_ignores=[]), str(TOOLS / 'dmsh_build.py'), 'exec'), ns)
-    assert FUNCS <= set(ns), FUNCS - set(ns)
-    return ns
-
-
-NS = load()
+NS = vars(dmsh_reflect)
 MSL = '''struct spvDescriptorSetBuffer0
 {
     constant _10* support_buffer [[id(0)]];
@@ -57,6 +42,12 @@ class PoolArrays(unittest.TestCase):
         self.assertIn('(&spvDescriptorSet0.fp_t2d_cb0_40000000->e[0])[dm_pool_mark(spvDescriptorSet0.fp_t2d_cb0_40000000, min(uint(int(_9[2u])), spvDescriptorSet0.fp_t2d_cb0_40000000->n))]', out)
         self.assertLess(out.index('dm_pool_mark(constant P* p'), out.index('struct spvPool_'))
         self.assertIn('.sample((&spvDescriptorSet0.fp_s_cb0_40000000->e[0])[min(uint(int(_7)), spvDescriptorSet0.fp_s_cb0_40000000->n)], uv)', out)
+
+    def test_mark_tests_with_a_plain_load(self):
+        # an atomic load goes to the shared cache every time, and a pass's pixels queue on the few words its IDs share (frame-rate.md); only a clear bit takes the atomic
+        mark = NS['POOL_MARK']
+        self.assertNotIn('atomic_load', mark)
+        self.assertIn('if (!(*w & b)) atomic_fetch_or_explicit(', mark)
 
     def test_mark_keeps_depth_test_early(self):
         pool = 'struct spvDescriptorSetBuffer0\n{\n    array<texture2d<float>, 1048576> fp_t_cb0_40000000 [[id(0)]];\n};\n'

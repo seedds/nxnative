@@ -1,7 +1,7 @@
 // nn::ndve's movie network (Ocarina of Time's title and opening movies) in place of its translated dispatches (nvn_mtl.m ndve_*, DM_NDVE_ENGINE=1; shaders.md, "The NDVE movie
-// network by the host"). The same arithmetic as the translated shaders in the same order, so the same bits: each HMMA.16816.F16 is what dmsh_build.py's HMMA_BODY makes of it,
-// two simdgroup_multiply_accumulate on simdgroup_half8x8 (input channels 0-7 of a 16-channel block, then 8-15) on the f16 accumulator, simdgroup_multiply for a chain's
-// first call (C = 0); a chain runs over the taps, then the 16-channel blocks, as the game's code does. Epilogues as the game's: f16 D plus the f16 bias in f32, ReLU, one rounding.
+// network by the host"). The same arithmetic as the translated shaders in the same order, so the same bits: each HMMA.16816.F16 is what dmsh_rewrite.py's HMMA_BODY makes of it,
+// two simdgroup_multiply_accumulate from simdgroup_half8x8 into an f32 matrix (input channels 0-7 of a 16-channel block, then 8-15), each rounded to the f16 accumulator, a
+// zero C for a chain's first call; a chain runs over the taps, then the 16-channel blocks, as the game's code does. Epilogues as the game's: f16 D plus the f16 bias in f32, ReLU, one rounding.
 // Tensors: f16 NHWC with a one-pixel zero border: element (x, y, c) of a W x H x C tensor at ((y + 1) * (W + 2) + x + 1) * C + c, with spare zero rows below (the last row
 // tile may run past H). Writers store only the interior, so the border stays zero (the 3x3 convolutions' padding).
 // Safe math: the epilogues' additions stay in the game's order (the picture plus D, then the bias) and nothing is contracted into an FMA the game does not have
@@ -13,11 +13,18 @@ typedef simdgroup_half8x8 hmat;
 
 struct LayerArgs { uint W, H; uint tiles_x, tiles_y; };   // output size (pixels), tiles of 8 x RY
 
-// one HMMA.16816 for an 8-pixel by 8-channel slice: a0/a1 = input channels 0-7 / 8-15 of the block, b0/b1 the matching weight rows; first: C = 0
+// one HMMA.16816 for an 8-pixel by 8-channel slice: a0/a1 = input channels 0-7 / 8-15 of the block, b0/b1 the matching weight rows; first: C = 0. Each block of 8
+// products is summed in f32 onto the f16 accumulator and rounded once to f16, as Ampere does (shaders.md, "HMMA rounds its f16 accumulator once per 8 products").
+// The rounding builds a new matrix: writing the rounded halves into acc's own thread_elements() (an element of the callers' accumulator arrays) made the layers
+// 15 to 50 times slower on an M6
+static inline hmat hmma_round(simdgroup_float8x8 f) { hmat h; h.thread_elements()[0] = half(f.thread_elements()[0]); h.thread_elements()[1] = half(f.thread_elements()[1]); return h; }
 static inline void hmma(thread hmat &acc, hmat a0, hmat a1, hmat b0, hmat b1, bool first) {
-    if (first) simdgroup_multiply(acc, a0, b0);
-    else simdgroup_multiply_accumulate(acc, a0, b0, acc);
-    simdgroup_multiply_accumulate(acc, a1, b1, acc);
+    simdgroup_float8x8 f;
+    if (first) simdgroup_multiply(f, a0, b0);
+    else simdgroup_multiply_accumulate(f, a0, b0, acc);
+    const hmat c = hmma_round(f);
+    simdgroup_multiply_accumulate(f, a1, b1, c);
+    acc = hmma_round(f);
 }
 // lane -> (row, first of two columns) of an 8x8 simdgroup matrix (Apple7 layout, measured)
 static inline ushort2 lane_rc(uint l) { return ushort2(((l >> 4) & 1) * 4 + ((l >> 1) & 3), ((l >> 3) & 1) * 4 + (l & 1) * 2); }

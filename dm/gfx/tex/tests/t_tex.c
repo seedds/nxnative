@@ -246,6 +246,38 @@ int main(void) {
               (unsigned long long)nvn_tex_level_offset(&d, 1), (unsigned long long)L.size);
     }
 
+    // ---------- P pick: every step-th block of every step-th block row (nvn_deswizzle_pick), against the level decoded whole, in both GOB orders ----------
+    printf("P pick (every step-th block, against the whole level)\n");
+    for (int sw2 = 0; sw2 < 2; sw2++) {
+        nvn_gob_switch2 = sw2;
+        static const struct { int target, fmt; uint32_t w, h, depth, levels; unsigned level, layer; uint32_t step; } c[] = {
+            {1, 0x4D, 1048, 1088, 1, 1, 0, 0, 17}, {4, 0x50, 524, 544, 3, 1, 0, 2, 9}, {1, 0x42, 256, 256, 1, 9, 1, 0, 4}, {1, 0x25, 64, 40, 1, 1, 0, 0, 2}, {1, 0x25, 200, 320, 1, 3, 2, 0, 3}, {4, 0x4B, 2448, 3056, 2, 1, 0, 1, 48}};
+        for (unsigned k = 0; k < sizeof c / sizeof c[0]; k++) {
+            nvn_texdesc d = {c[k].target, c[k].fmt, 0, 0, c[k].w, c[k].h, c[k].depth, c[k].levels, 0, 0};
+            nvn_texlayout L; nvn_tex_layout(&d, &L);
+            uint8_t *st = malloc(L.size); for (uint64_t i = 0; i < L.size; i++) st[i] = rnd();
+            uint32_t rb, rows, sl; dims(&d, c[k].level, &rb, &rows, &sl);
+            int bw, bh, bpb = nvn_fmt_bpb(d.format, &bw, &bh); uint32_t bx = rb / (uint32_t)bpb, nx = bx / c[k].step, ny = rows / c[k].step;
+            uint8_t *lin = malloc((size_t)rb * rows), *got = malloc((size_t)nx * ny * (size_t)bpb + 16); memset(got + (size_t)nx * ny * (size_t)bpb, 0xAB, 16);
+            CHECK(!nvn_deswizzle(&d, c[k].level, c[k].layer, st, lin, rb), "P case %u decode failed", k);
+            CHECK(!nvn_deswizzle_pick(&d, c[k].level, c[k].layer, st, c[k].step, got, nx, ny), "P case %u pick failed", k);
+            int ok = 1;
+            for (uint32_t j = 0; j < ny; j++) for (uint32_t i = 0; i < nx; i++)
+                ok &= !memcmp(got + ((size_t)j * nx + i) * (size_t)bpb, lin + (size_t)(j * c[k].step + c[k].step / 2) * rb + (size_t)(i * c[k].step + c[k].step / 2) * (size_t)bpb, (size_t)bpb);
+            for (int i = 0; i < 16; i++) ok &= got[(size_t)nx * ny * (size_t)bpb + (size_t)i] == 0xAB;
+            CHECK(ok && nx && ny, "P case %u (GOB order %d): %ux%u format %#x level %u layer %u step %u: a picked block is not the level's", k, sw2, c[k].w, c[k].h, c[k].fmt, c[k].level, c[k].layer, c[k].step);
+            free(st); free(lin); free(got);
+        }
+    }
+    nvn_gob_switch2 = 0;
+    {   // refused: a block size that is not 1, 2, 4, 8 or 16 bytes (RGB8), a 3D texture, step 0
+        uint8_t st[4096] = {0}, out[64];
+        nvn_texdesc rgb = {1, 0x19, 0, 0, 8, 8, 1, 1, 0, 0}, vol = {2, 0x25, 0, 0, 8, 8, 4, 1, 0, 0}, ok8 = {1, 0x25, 0, 0, 8, 8, 1, 1, 0, 0};
+        int bw, bh; CHECK(nvn_fmt_bpb(0x19, &bw, &bh) == 3, "P format 0x19 (RGB8) is expected to be 3 bytes a texel");
+        CHECK(nvn_deswizzle_pick(&rgb, 0, 0, st, 2, out, 4, 4) == -1 && nvn_deswizzle_pick(&vol, 0, 0, st, 2, out, 4, 4) == -1 && nvn_deswizzle_pick(&ok8, 0, 0, st, 0, out, 4, 4) == -1
+              && !nvn_deswizzle_pick(&ok8, 0, 0, st, 2, out, 4, 4), "P pick refuses a 3-byte block, a 3D texture and step 0, and takes RGBA8");
+    }
+
     printf("%s: %d/%d checks passed\n", fails ? "RED" : "all passed", checks - fails, checks);
     return fails ? 1 : 0;
 }

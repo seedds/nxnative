@@ -1,7 +1,5 @@
 """The builder's text rewrites found by text where a pattern tried every character of the source (dm/gfx/tools/dmsh_build.py, dmsh_fetch.py, dmsh_side.py, dmsh_atomic.py, GitHub
 issue #1036): each gives the answer the pattern gave, at the edges of a word and of the source. No game files, no Metal compiler."""
-import ast
-import collections
 from pathlib import Path
 import random
 import re
@@ -15,11 +13,12 @@ REPO = Path(__file__).resolve().parents[3]
 TOOLS = REPO / 'dm/gfx/tools'
 sys.path.insert(0, str(TOOLS))
 import dmsh_atomic  # noqa: E402
+import dmsh_entry  # noqa: E402
 import dmsh_fetch  # noqa: E402
+import dmsh_reflect  # noqa: E402
 import dmsh_side  # noqa: E402
 
-ns: dict[str, Any] = {'re': re, 'collections': collections, 'dmsh_side': dmsh_side, 'dmsh_fetch': dmsh_fetch}   # dmsh_build.py is a script that runs a build when imported
-exec(compile(ast.Module(body=[n for n in ast.parse((TOOLS / 'dmsh_build.py').read_text()).body if isinstance(n, ast.FunctionDef) and n.name in {'attributes', 'in_word', 'has_word', 'int_outputs', 'fs_uint'}], type_ignores=[]), 'dmsh_build', 'exec'), ns)
+ns: dict[str, Any] = {**vars(dmsh_reflect), **vars(dmsh_entry)}
 attributes, has_word, fs_uint = ns['attributes'], ns['has_word'], ns['fs_uint']
 
 

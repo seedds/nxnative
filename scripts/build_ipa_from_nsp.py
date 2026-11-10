@@ -1397,6 +1397,15 @@ def nro_modules(g, exe_dir, nros):
     mods = sorted(set(g.words('modules')) | set(add), key=pg.load_order)
     why = ', '.join(f'{m} ({k})' for m, k in add.items())
     say(f'modules {" ".join(mods)}: the NROs the game loads import from {why}')
+    # the build rows name each module's build, and the host loads the build row's modules for main's build (game.py build_modules, main.c profile_modules): a module added to modules
+    # alone stayed unloaded (Mario Golf: Super Rush: movie::Extractor's constructor a stub, the game black at its opening movie)
+    tsv = g.dir / 'game.tsv'; lines = tsv.read_text(encoding='utf-8').splitlines(); changed = False
+    for k, line in enumerate(lines):
+        if line.split('\t', 1)[0] != 'build': continue
+        for m in add:
+            if any(w.startswith(m + '=') for w in line.split('\t')) or not (Path(exe_dir) / m).is_file(): continue
+            lines[k] = line = f'{line}\t{m}={pg.nso(Path(exe_dir) / m)[1]}'; changed = True
+    if changed: atomic_text(tsv, '\n'.join(lines) + '\n')
     return set_keys(g, {'modules': (' '.join(mods), f'the NROs the game loads at run time import from {why}, which main does not')}, 'After the NRO collection')
 
 

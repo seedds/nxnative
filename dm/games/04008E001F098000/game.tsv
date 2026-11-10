@@ -1,6 +1,6 @@
 # Nintendo Switch Sports Resort (Switch 2, update v65536). Work in progress: boots to its title, menus, golf and tennis on the Mac with the PRs its note lists.
 # Nintendo EPD's engine (sead / agl / gsys, Phive, Havok), SDK 22 (NVN 22.2.10), NVN2; modules main + subsdk0 + sdk. Packed from a dump folder by scripts/build_ipa_from_nsp.py.
-# The values below are the survey's (dm/games/profile_guess.py) and the NSP script's heap check, unchanged after play, except nvn_draw_ctl at the end.
+# The values below are the survey's (dm/games/profile_guess.py) and the NSP script's heap check, unchanged after play.
 
 # ---- Identity ----
 title_id	04008E001F098000
@@ -45,6 +45,3 @@ depth_mode	zero
 # heap check: 2026-11-09, the heap request did not fit, then heap 7.47 GB; set mem_reserve, depth_mode
 
 # address regions: 2026-11-09, no address regions (rewrite 306446fa2620)
-
-# Four-byte command tickets for a lone direct indexed draw (PR #1609): without them the game initializes a buffer in no memory pool after the title movie and crashes in nvnMemoryPoolGetFlags, as Drag x Drive did
-nvn_draw_ctl	on

@@ -480,6 +480,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Check:** every menu, the cards, the map's drag and flick worked by touch with it. `DM_TOUCH_LOG=1` logs each gesture entry, and a `DM_CTL` line `drag <x0> <y0> <x1> <y1> [seconds]` moves a finger for testing pans and swipes on the Mac.
 - **Found on:** [Taiko Risshiden V DX](../../dm/games/0100346017304000/README.md) (SDK 12.3.3, Koei Tecmo's KTGL).
 
+### Touch sampling numbers across docked and handheld
+
+- **Symptom:** a game started docked takes no touch after it is switched to handheld (the in-game menu on the iPad, `DM_OE_SCRIPT=opmode=0@…` on the Mac), though `DM_TOUCH_LOG=1` logs its reads with the touch points. Started handheld, the same game takes taps.
+- **Cause:** docked reads of `GetTouchScreenState(s)` were numbered from the npad sampling counter (from 65536) and handheld reads from `hle_touch.c`'s own count (from 1). Unity's touch reader takes a state only if its sampling number is above the last one it took, and it takes the docked reads' empty states too (Aokana `main+0xd2bde0`; the last number is cleared at init, `main+0xd2b588`, and stored at `main+0xd2bdec`). After the switch every handheld state fell below the docked numbers and was dropped. Started handheld and then docked and back, the same happened.
+- **Fix:** `touch_read` (`hle_hid.c`) numbers every state from the shared counter, in both modes, so the numbers keep rising whatever the mode. For every game.
+- **Check:** `dm/host/tests/t_hid.c` (`t_touch_sampling`) reads docked, handheld, docked and handheld again, through both `GetTouchScreenState` and `GetTouchScreenStates`, and requires each sampling number to be above the last. In Aokana on the Mac (headless, a tap every 1.5 s from 20 s), a tap during the opening movie stops it and the title comes up: before the fix only when started handheld; with it, also started docked and switched with `DM_OE_SCRIPT=opmode=0@12`, and started handheld, docked at 12 s and back at 24 s.
+- **Found on:** Aokana - Four Rhythms Across the Blue (`0100990011866000`, Unity 2018.4.22f1 IL2CPP; profile in PR #1372), on the iPad: started docked, then handheld and Tap in the in-game menu, and no tap reached the game.
+
 ### Mac pointer stays over the game
 
 - **Symptom:** on the Mac, the mouse pointer stays over the game picture while playing with a controller or the keyboard, in a window and in fullscreen ([issue #675](https://github.com/seedds/nxnative/issues/675)).

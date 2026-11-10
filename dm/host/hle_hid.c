@@ -1116,12 +1116,16 @@ HLE_FORCE("_ZN2nn3hid28ShowControllerFirmwareUpdateERKNS0_27ControllerFirmwareUp
 
 // Touch screen: TouchScreenState<N> = { int64 sampling number; int32 count; int32 reserved; TouchState[N] }, filled from the front end's touch points (hle_touch.c touch_fill_n:
 // the Mac's mouse, the iPhone touches no gamepad control takes, DM_KEYS taps) in handheld mode, as on the Switch, whose screen is out of reach when docked: a game may read touches
-// without checking the mode, so in console mode the state stays empty (only the header is written). Super Mario Galaxy's pointer is the touch screen in handheld mode
+// without checking the mode, so in console mode the state stays empty (only the header is written). Super Mario Galaxy's pointer is the touch screen in handheld mode.
+// One counter numbers the states in both modes, so the numbers keep rising across a mode change: Unity's touch reader (Aokana main+0xd2bde0) takes a state only if its number
+// is above the last one it took, docked empty states included, so a game started docked dropped every touch after leaving the dock while handheld reads were numbered apart
+// from 1 (hle_touch.c's own count)
 int touch_fill_n(void *out, int max, uint64_t now_ns);
 static void touch_read(void *s, int n) {
     keys_sync();   // DM_KEYS frame steps due in this frame (their touches), before the read
-    if (dm_opmode() == 0) { touch_fill_n(s, n, now_ns()); return; }
-    int64_t *p = s; p[0] = atomic_fetch_add(&g_sampling, 1) + 1; ((int32_t *)s)[2] = 0; ((int32_t *)s)[3] = 0;
+    if (dm_opmode() == 0) touch_fill_n(s, n, now_ns());
+    else { ((int32_t *)s)[2] = 0; ((int32_t *)s)[3] = 0; }
+    int64_t *p = s; p[0] = atomic_fetch_add(&g_sampling, 1) + 1;
 }
 HLE_FORCE("_ZN2nn3hid21InitializeTouchScreenEv", "connect to the hid touch screen; the host takes touch points from the front end", void, h_hid_InitTouch, void) {}
 // SDK 18 overload with two ints (Super Mario Galaxy); the SDK's own one opens the hid service and aborts in sm::Initialize

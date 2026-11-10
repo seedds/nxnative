@@ -48,7 +48,8 @@ void dm_touch_script(const dm_touch *t, int n) { touch_apply(t, n); }
 
 static int32_t clampi(float v, int hi) { int32_t r = (int32_t)(v * (float)(hi + 1)); return r < 0 ? 0 : r > hi ? hi : r; }
 // Fill one TouchScreenState<max> (out is 0x10 + 0x28 · max bytes; max 1–16); now_ns is used for delta_time. Returns the number of touch points written.
-// Fingers beyond max are left for a later read (their Start / End is not used up)
+// Fingers beyond max are left for a later read (their Start / End is not used up). The sample number written here (and in DM_TOUCH_LOG) counts this file's reads; the game
+// sees hle_hid.c's, which numbers docked and handheld reads from one counter
 int touch_fill_n(void *out, int max, uint64_t now_ns) {
     if (max < 1) max = 1; else if (max > 16) max = 16;
     uint8_t *o = out; memset(o, 0, 0x10 + 0x28 * (size_t)max);

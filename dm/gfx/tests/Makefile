@@ -378,6 +378,9 @@ t_pso_warm: t_pso_warm.m $(MTL_T_DEP)
 check_t_pso_warm: t_pso_warm
 	DM_PSO_MTL4=0 MTL_DEBUG_LAYER=1 ./t_pso_warm
 	DM_PSO_MTL4=1 MTL_DEBUG_LAYER=1 ./t_pso_warm
+t_shload_lite: t_shload_lite.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_shload_lite.m $(MTL_T_SRC) $(FW)
+check_t_shload_lite: RUN_ENV = MTL_DEBUG_LAYER=1
 t_pso_skey: t_pso_skey.m ../nvn/nvn_pso_skey.h ../nvn/nvn_obj.h
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_skey.m -framework Foundation
 t_view_swizzle: t_view_swizzle.m $(MTL_T_DEP)

@@ -5780,6 +5780,15 @@ static NSString *lib_name(NSString *path) {
     NSString *dir = g_msl_dir ? [g_msl_dir stringByAppendingString:@"/"] : nil;
     return dir && [path hasPrefix:dir] ? [path substringFromIndex:dir.length] : path.lastPathComponent;
 }
+// DM_NVN_SHLOAD_LITE=1 (default off): a shader load asks Metal's compiler for no reflection. The argument buffer's length comes from the reflection json (8 bytes per argument ID,
+// what shader_load checks the encoder's length against) instead of an argument encoder, whose reflection request (newArgumentEncoderWithBufferIndex) takes the compiler's
+// file-system cache lock (MTLCompilerFSCache::getElementImpl, which hashes the element under it); the pulling, shadow-input, alpha and logic side libraries skip the same check.
+// Ocarina of Time's title-to-gameplay load: the prefetch queues spent ~15 % of their time in that lock while the replay thread, building pipelines inside the load's submission, waited on it
+static int g_shload_lite = -1;
+static int shload_lite(void) {
+    if (g_shload_lite < 0) { const char *e = getenv("DM_NVN_SHLOAD_LITE"); g_shload_lite = e && *e == '1'; if (g_shload_lite) MLOG("DM_NVN_SHLOAD_LITE=1: shader libraries load without argument-encoder reflection"); }
+    return g_shload_lite;
+}
 static id<MTLLibrary> lib_from_file_(NSString *path, NSError **err);
 static id<MTLLibrary> lib_from_file(NSString *path, NSError **err) { return lib_tag(lib_from_file_(path, err), lib_name(path)); }
 static id<MTLLibrary> lib_from_file_(NSString *path, NSError **err) {
@@ -5958,10 +5967,10 @@ static NvShader *shader_load(NSString *pc, int stage, int layer) {
         if (o->fn_d) o->fn_d = spec(lib, j[@"entry_d"], cv, &fe);
     }
     if (o->rf.nb) {
-        o->ae = [o->fn newArgumentEncoderWithBufferIndex:o->rf.abi];
         int max_aid = -1;
         for (int i = 0; i < o->rf.nb; i++) max_aid = MAX(max_aid, o->rf.b[i].aid + (o->rf.b[i].n ? o->rf.b[i].n - 1 : 0));   // an array takes n entries
-        o->arg_len = o->ae.encodedLength;
+        if (shload_lite()) o->arg_len = 8 * (NSUInteger)(max_aid + 1);   // no encoder (encode_args_ takes arg_len): see shload_lite
+        else { o->ae = [o->fn newArgumentEncoderWithBufferIndex:o->rf.abi]; o->arg_len = o->ae.encodedLength; }
         if (o->arg_len != (NSUInteger)(8 * (max_aid + 1)) || (o->arg_len & 7) || max_aid >= NVN_REFL_MAXARG)
             MDIE("shader %s has an unexpected argument buffer layout: encodedLength=%lu maxAid=%d", o->key, (unsigned long)o->arg_len, max_aid);
     }
@@ -7381,7 +7390,7 @@ static id<MTLFunction> vin_fn(NvShader *vs) {   // the shadow-input entry point,
         NSError *e = nil; id<MTLLibrary> lib = lib_from_file(path, &e); id<MTLFunction> f = lib && vs->ventry ? fn4_note([lib newFunctionWithName:vs->ventry], lib, vs->ventry, nil) : nil;
         if (f && f.functionConstantsDictionary.count) f = fn_spec(lib, vs->ventry, [MTLFunctionConstantValues new], &e);   // as shader_load
         const char *why = !lib ? "no library" : !f ? "no entry point" : NULL;
-        if (f && vs->rf.nb && [f newArgumentEncoderWithBufferIndex:vs->rf.abi].encodedLength != vs->arg_len) { why = "its argument buffer differs from the base library's"; f = nil; }
+        if (f && vs->rf.nb && !shload_lite() && [f newArgumentEncoderWithBufferIndex:vs->rf.abi].encodedLength != vs->arg_len) { why = "its argument buffer differs from the base library's"; f = nil; }
         if (f) { vs->vfn = f; vs->vfn_state = 1; g_vin_loaded++; }
         else if (g_vin_failed++ < 8) MLOG("[RED] shadow-input library of %s not usable (%s%s%s): its integer inputs keep the CPU conversion", vs->key, why, e ? ": " : "", e ? e.localizedDescription.UTF8String : "");
     }
@@ -7400,7 +7409,7 @@ static void pull_load(NvShader *vs) {
         NSError *e = nil; id<MTLLibrary> lib = lib_from_file(path, &e); id<MTLFunction> f = lib && vs->ventry ? fn4_note([lib newFunctionWithName:vs->ventry], lib, vs->ventry, nil) : nil;
         if (f && f.functionConstantsDictionary.count) f = fn_spec(lib, vs->ventry, [MTLFunctionConstantValues new], &e);
         const char *why = !lib ? "no library" : !f ? "no entry point" : NULL;
-        if (f && vs->rf.nb && [f newArgumentEncoderWithBufferIndex:vs->rf.abi].encodedLength != vs->arg_len) { why = "its argument buffer differs from the base library's"; f = nil; }
+        if (f && vs->rf.nb && !shload_lite() && [f newArgumentEncoderWithBufferIndex:vs->rf.abi].encodedLength != vs->arg_len) { why = "its argument buffer differs from the base library's"; f = nil; }
         if (f) { vs->pfn = f; vs->pfn_state = 1; }
         else { static _Atomic int n; if (n++ < 8) MLOG("[RED] pulling library of %s not usable (%s%s%s): its draws wait for their pipelines", vs->key, why, e ? ": " : "", e ? e.localizedDescription.UTF8String : ""); }
     }
@@ -7710,7 +7719,7 @@ static id<MTLFunction> at_fn(NvShader *fs, id<MTLFunction> base) {   // the side
             NSString *name = [own[i].name stringByAppendingString:@"_a"]; id<MTLFunction> f = fn4_note([lib newFunctionWithName:name], lib, name, nil);
             if (f && f.functionConstantsDictionary.count) f = fn_spec(lib, name, [MTLFunctionConstantValues new], &e);   // as shader_load
             if (!f) why = "no entry point";
-            else if (fs->rf.nb && [f newArgumentEncoderWithBufferIndex:fs->rf.abi].encodedLength != fs->arg_len) why = "its argument buffer differs from the base library's";
+            else if (fs->rf.nb && !shload_lite() && [f newArgumentEncoderWithBufferIndex:fs->rf.abi].encodedLength != fs->arg_len) why = "its argument buffer differs from the base library's";
             else fs->afn[i] = f;
         }
         if (!why) { fs->afn_state = 1; static int n; if (++n <= 3 || !(n & (n - 1))) MLOG("alpha test: side library of %s loaded (%d shaders so far)", fs->key, n); }
@@ -7799,7 +7808,7 @@ static id<MTLFunction> lo_fn(NvShader *fs, id<MTLFunction> base, uint32_t target
         NSString *name = [base.name stringByAppendingString:@"_l"];
         f = fn4_note([fs->llib newFunctionWithName:name constantValues:cv error:&e], fs->llib, name, cv);
         if (!f) why = "no entry point";
-        else if (fs->rf.nb && [f newArgumentEncoderWithBufferIndex:fs->rf.abi].encodedLength != fs->arg_len) { why = "its argument buffer differs from the base library's"; f = nil; }
+        else if (fs->rf.nb && !shload_lite() && [f newArgumentEncoderWithBufferIndex:fs->rf.abi].encodedLength != fs->arg_len) { why = "its argument buffer differs from the base library's"; f = nil; }
         if (f) fs->lfn[k] = f; else fs->lfn_state = 2;
     }
     if (why) { static int n; if (n++ < 8) MLOG("[RED] logic operation entry points of %s not usable (%s%s%s): its draws go with COPY", fs->key, why, e ? ": " : "", e ? e.localizedDescription.UTF8String : ""); }
@@ -10516,7 +10525,7 @@ static int encode_args(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, in
 static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, int metal_vertex) {
     if (nvn_stage == 1 && !metal_vertex && sh->has_alpha && atest_on()) at_bind(en);   // also for a shader without bindings
     if (nvn_stage == 1 && !metal_vertex && sh->has_logic && lop_on()) lo_bind(en);
-    if (!sh->ae) return 1;
+    if (!sh->ae && !sh->arg_len) return 1;   // no bindings (DM_NVN_SHLOAD_LITE leaves ae nil with an arg_len)
     args_sync_dirty();
     if (!passdump() && !g_args_dirty[nvn_stage] && sh->ab_buf && sh->ab_pass == g_pass.serial && nvn_stage != 5 && !(sh->rf.drv_read[0] && sh->ab_binst != g_draw_binst) && !((sh->rf.pool || sh->rf.htab) && sh->ab_pgen != g_psnap_gen)) {
         bind_args(en, nvn_stage, metal_vertex, sh->ab_buf, sh->ab_gpu, sh->ab_off, sh->rf.abi);

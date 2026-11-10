@@ -41,6 +41,8 @@ The first boot shows the language list: `A`, `LUp`, `A` picks English. The chara
 
 ## Found on this game
 
+- [Compiled shader cache entries grew after chain changes](../../../docs/reference/shaders.md#compiled-shader-cache-entries-grew-after-chain-changes): stale compiled entries are pruned after successful full builds; synthetic tests cover retention of live outputs and concurrent builds. Game-sized disk savings and first-build peak usage remain unmeasured.
+
 - [One compile for a pixel shader's side entry points](../../../docs/reference/shaders.md#one-compile-for-a-pixel-shaders-side-entry-points): 57% of the map's compiles were `_ba` and `_bl` libraries; a cold build of 1,021 shaders now takes 48% of the CPU on the Mac's flags and 47% on the iPhone's.
 - [KTGL on NVN2: Switch 2 GLSLC outputs and LD_ / LI_ LINKDATA](../../../docs/reference/shaders.md#ktgl-on-nvn2-switch-2-glslc-outputs-and-ld_--li_-linkdata): the split found almost none of its shaders.
 - [HADD2 and HMUL2 with an immediate](../../../docs/reference/shaders.md#hadd2-and-hmul2-with-an-immediate): the GPU hang and 88 ms frames.

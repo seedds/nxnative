@@ -499,7 +499,9 @@ def chain_build_locked(tree, g, a, v, inp, key, out):
             command = [sys.executable, entry, g.build / 'shader/pkg', out]
             if cas.suffix == '.db':
                 command = [sys.executable, REPO / 'dm/tools/shader_cache.py', '--run', '--readonly', g.build / 'shader/cache/cas.db', entry, g.build / 'shader/pkg', out]
-                rc, paused = run_heavy(command, log, tree.path, env, a, f'{g.id} shader build')
+                # Hold the writable cache for older baseline builders too.
+                with shader_cache.lease(cas):
+                    rc, paused = run_heavy(command, log, tree.path, env, a, f'{g.id} shader build')
             else:
                 tree_tar.unpack(cas, say)
                 rc, paused = run_heavy(command, log, tree.path, env, a, f'{g.id} shader build')

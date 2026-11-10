@@ -11,6 +11,7 @@
 // DM_PAD_MERGE=1 merges every controller into player 1 instead, DM_KBD_PLAYER=own makes the keyboard player 1 on its own, with the controllers from player 2 on.
 #import <Cocoa/Cocoa.h>
 #import <QuartzCore/CAMetalLayer.h>
+#include <stdatomic.h>
 #import <Metal/Metal.h>
 #import <GameController/GameController.h>
 #include "dm.h"
@@ -36,6 +37,47 @@ static void merge_rumble_to_s2(int on);
 #include <sys/stat.h>
 
 static CAMetalLayer *g_layer;
+// Whether the window's screen can show EDR at all (its potential headroom is above 1; hle_vi.c answers HDR only then): -1 until the first read, taken as yes.
+// Read four times a second on the main thread while the HDR layer is on, so it follows the window to another screen (an external SDR monitor beside the built-in XDR screen)
+static _Atomic int g_hdr_screen = -1;
+int front_hdr_screen(void) { return atomic_load(&g_hdr_screen) != 0; }
+// The screen's current EDR headroom (maximumExtendedDynamicRangeColorComponentValue), read with the potential one: hle_vi.c's automatic peak (DM_HDR_PEAK=auto) is 100 nits times it, at least twice the paper white.
+// 1.0 until the first read and without the HDR layer. The system grants the headroom while the window is in front, whatever range the game declares, so the automatic peak does not
+// hold itself down: on the XDR panel it read 1.2 when the layer was made and 16 by the game's first query, then followed the brightness slider both ways (16 at low brightness,
+// 3.2 = 1600 / 500 nits at full). In a window behind others it stays at 1.2 with any declared range. Polled, as the system offers no notification for it; the game asks every frame,
+// so a change reaches it within a quarter second
+static _Atomic float g_hdr_headroom = 1.0f;
+float front_hdr_headroom(void) { return atomic_load(&g_hdr_headroom); }
+static void front_hdr_screen_read(NSScreen *s) {
+    // In a reference mode (an XDR preset) the reference headroom is the limit the system keeps to (0 when the screen has none)
+    double cur = s.maximumExtendedDynamicRangeColorComponentValue, ref = s.maximumReferenceExtendedDynamicRangeColorComponentValue;
+    atomic_store(&g_hdr_headroom, (float)(ref > 0 && ref < cur ? ref : cur));
+    double pot = s.maximumPotentialExtendedDynamicRangeColorComponentValue;
+    int can = pot > 1.0;
+    if (atomic_exchange(&g_hdr_screen, can) != can) LOG("front end: the window's screen %s EDR (%s, potential headroom %.2f)", can ? "can show" : "cannot show", s.localizedName.UTF8String, pot);
+}
+// The HDR layer's HDR10 metadata (CAEDRMetadata), only with DM_HDR_META=1 (hle_vi.c dm_hdr_meta; off by default on the Mac): Core Animation maps the layer's range into the
+// screen's current headroom by it. The range is the one the game declares
+// (0 to 1000 nits until it says, hle_vi.c front_hdr_content_range). opticalOutputScale is passed the paper white, but for a normalized format such as the PQ layer's RGB10A2
+// Core Animation takes it as 10,000 (CAEDRMetadata.h), and it made no difference in a measurement. macOS shows PQ relative to the
+// screen's white (100 nits = EDR 1.0) and passes it through while the range fits in 100 x headroom, and compresses the whole picture when it does not (docs/reference/rendering.md).
+// Off by default because, in fullscreen, the layer with metadata of any range showed rectangles of older frames under GPU load, and the mapping made the game's white follow the
+// brightness slider; without it the automatic peak keeps the game within the screen and the present rolls off the rest
+int dm_hdr_meta(void);   // hle_vi.c: DM_HDR_META
+void dm_hdr_layer_meta_set(int on);   // hle_vi.c: what the roll-off and the present's order follow
+static _Atomic int g_hdr_meta;   // the layer has the metadata (DM_HDR_META=1, and CAEDRMetadata is available); written on the main thread when the layer is made
+static _Atomic uint32_t g_hdr_range = 1000u << 16;   // the declared range: low nits in bits 0-15, high in 16-31
+static void front_hdr_metadata(void) {   // main thread
+    uint32_t r = atomic_load(&g_hdr_range);
+    g_layer.EDRMetadata = [CAEDRMetadata HDR10MetadataWithMinLuminance:(float)(r & 0xffff) maxLuminance:(float)(r >> 16) opticalOutputScale:dm_hdr_paper_white()];
+}
+void front_hdr_content_range(unsigned lo, unsigned hi) {
+    if (!atomic_load(&g_hdr_meta) || hi <= lo || hi > 65535) return;
+    uint32_t r = lo | hi << 16;
+    if (atomic_exchange(&g_hdr_range, r) == r) return;
+    LOG("front end: HDR10 metadata: the game's range %u..%u nits", lo, hi);
+    dispatch_async(dispatch_get_main_queue(), ^{ front_hdr_metadata(); });
+}
 static uint64_t g_btn;
 static int g_w, g_a, g_s, g_d;
 static int g_rl, g_ru, g_rr, g_rd;   // arrow keys pressed with Shift held: the right stick (each goes back up as it went down, whatever Shift does meanwhile)
@@ -1528,6 +1570,24 @@ void front_run(void (*guest)(void)) {
         g_layer = [CAMetalLayer layer];
         g_layer.device = MTLCreateSystemDefaultDevice();
         g_layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+        // DM_HDR=1 (the HDR mode): an HDR layer whatever the window's screen, without HDR10 metadata unless DM_HDR_META=1 (front_hdr_metadata); a screen without headroom shows
+        // the SDR range. The layer is RGB10A2 in BT.2100 PQ: the game's HDR10 window goes in as it is, an SDR source is encoded as HDR10 at the paper white (nvn_mtl.m
+        // present_mode). Not an RGBA16Float extended linear layer, which showed black blocks over flat areas while the game's frames were clean (docs/reference/rendering.md, the status query and the present for an HDR window)
+        dm_hdr_layer_meta_set(0);   // an SDR layer has none (set again below for the HDR layer)
+        if (getenv("DM_HDR") && atoi(getenv("DM_HDR"))) {
+            g_layer.pixelFormat = MTLPixelFormatRGB10A2Unorm;
+            CGColorSpaceRef ecs = CGColorSpaceCreateWithName(kCGColorSpaceITUR_2100_PQ);
+            g_layer.colorspace = ecs; CGColorSpaceRelease(ecs);
+            g_layer.wantsExtendedDynamicRangeContent = YES;
+            if (!dm_hdr_meta()) LOG("front end: no HDR10 metadata on the HDR layer (the default; DM_HDR_META=1 adds it): PQ is shown as it is, the present rolls off a range above the screen's");
+            else if (CAEDRMetadata.available) { atomic_store(&g_hdr_meta, 1); front_hdr_metadata(); }
+            else LOG("[RED] front end: no EDR metadata on this Mac (CAEDRMetadata): values above the screen's headroom clip");
+            dm_hdr_layer_meta_set(atomic_load(&g_hdr_meta));
+            LOG("front end: HDR output on (DM_HDR): the window's layer is RGB10A2 in BT.2100 PQ%s; the screen's headroom %.2f now, at most %.2f", atomic_load(&g_hdr_meta) ? ", with HDR10 metadata" : "",
+                (win.screen ?: NSScreen.mainScreen).maximumExtendedDynamicRangeColorComponentValue, (win.screen ?: NSScreen.mainScreen).maximumPotentialExtendedDynamicRangeColorComponentValue);
+            front_hdr_screen_read(win.screen ?: NSScreen.mainScreen);
+            [NSTimer scheduledTimerWithTimeInterval:0.25 repeats:YES block:^(NSTimer *t) { (void)t; front_hdr_screen_read(win.screen ?: NSScreen.mainScreen); }];
+        }
         g_layer.contentsScale = win.backingScaleFactor;
         // Apple's HUD over the game (frame rate, frame and GPU time, memory): front_hud_env turns it on before the first device. The layer's developerHUDProperties
         // stay unset: mode=default forces this layer's HUD on, so the Metal HUD menu's Hide HUD left it on screen

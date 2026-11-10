@@ -20,6 +20,13 @@ int front_screen_max_fps(void);
 int front_display_pixels(int *w, int *h);
 // Whether the window's current screen mode supports variable refresh (Mac front_mac.m; none on iOS). Any thread
 int front_screen_variable_refresh(void);
+// HDR output (DM_HDR=1; front_mac.m, front_ios.m): whether the window's screen can show EDR at all (its potential headroom is above 1: hle_vi.c answers HDR only then), and the
+// game's declared extended luminance range in nits, for the layer's HDR10 metadata. hle_vi.c has weak defaults for runs without a front end
+int front_hdr_screen(void);
+void front_hdr_content_range(unsigned lo, unsigned hi);
+float dm_hdr_paper_white(void);   // hle_vi.c: the paper white in nits (DM_HDR_PAPER_WHITE, default 100), the luminance the picture's SDR white has
+int dm_hdr_mode(void);            // hle_vi.c: the HDR mode, 0 off, 1 by the screen (DM_HDR at start)
+void dm_hdr_set_mode(int m);      // hle_vi.c: change it while the game runs (the iOS in-game menu); the game switches its window on its next status query
 // The frame rate the display link paces the game at (60, 30, 120; nvn_mtl.m link_sync): in fullscreen, a screen whose refresh rate is not a multiple of it is switched, while the game runs,
 // to a mode of the same size whose rate is, and back when the window leaves fullscreen or that screen (front_mac.m; none on iOS). Called from the present thread
 void front_screen_match(int fps);

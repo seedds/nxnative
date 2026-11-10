@@ -758,7 +758,7 @@ void mtl_init(void) {
     g_present_args = [g_dev newArgumentTableWithDescriptor:pad error:&ate];
     if (!g_present_args) MDIE("failed to create the present argument table: %s", ate.localizedDescription.UTF8String);
     for (int i = 0; i < 3; i++) {
-        g_present_uv[i] = [g_dev newBufferWithLength:sizeof(float) * 8 options:MTLResourceStorageModeShared];
+        g_present_uv[i] = [g_dev newBufferWithLength:sizeof(float) * 12 options:MTLResourceStorageModeShared];
         if (!g_present_uv[i]) MDIE("failed to create present UV buffer[%d]", i);
         res_add(g_present_uv[i]);
     }
@@ -16316,7 +16316,7 @@ static void shot(id<MTLTexture> src, const char *path, int screen, const int cro
         read = out;
     }
     if (read.pixelFormat != MTLPixelFormatRGBA8Unorm && read.pixelFormat != MTLPixelFormatRGBA8Unorm_sRGB &&
-        read.pixelFormat != MTLPixelFormatBGRA8Unorm && read.pixelFormat != MTLPixelFormatBGRA8Unorm_sRGB) { MLOG("[RED] screenshot does not support format %lu", (unsigned long)read.pixelFormat); return; }
+        read.pixelFormat != MTLPixelFormatBGRA8Unorm && read.pixelFormat != MTLPixelFormatBGRA8Unorm_sRGB && read.pixelFormat != MTLPixelFormatRGB10A2Unorm) { MLOG("[RED] screenshot does not support format %lu", (unsigned long)read.pixelFormat); return; }
     size_t w = read.width, h = read.height, row = w * 4;
     id<MTLBuffer> buf = [g_dev newBufferWithLength:row * h options:MTLResourceStorageModeShared];
     id<MTLCommandBuffer> cb = q_cb();
@@ -16327,10 +16327,21 @@ static void shot(id<MTLTexture> src, const char *path, int screen, const int cro
     if (screen && read == src && atomic_load_explicit(&g_origin_ll, memory_order_relaxed)) {   // lower-left origin: the window image is stored bottom-up (see g_origin_ll)
         uint8_t *p = buf.contents, *tmp = malloc(row);
         if (tmp) { for (size_t y = 0; y < h / 2; y++) { memcpy(tmp, p + y * row, row); memcpy(p + y * row, p + (h - 1 - y) * row, row); memcpy(p + (h - 1 - y) * row, tmp, row); } free(tmp); } }
+    // An RGB10A2 frame (a 10-bit window: the HDR window with DM_HDR=1, or any other 10-bit window): the PNG holds each channel's top 8 bits as the code values, not decoded; path.raw keeps the 32-bit words (R bits 0-9, G 10-19, B 20-29) for analysis
+    uint8_t *pix = buf.contents, *c8 = NULL;
+    if (read.pixelFormat == MTLPixelFormatRGB10A2Unorm) {
+        const uint32_t *s = buf.contents;
+        c8 = malloc(w * h * 4);
+        if (!c8) { MLOG("[RED] screenshot %s: no memory for the 10-bit conversion", path); return; }
+        { for (size_t i = 0; i < w * h; i++) { uint32_t v = s[i]; c8[4 * i] = (v & 0x3ff) >> 2; c8[4 * i + 1] = ((v >> 10) & 0x3ff) >> 2; c8[4 * i + 2] = ((v >> 20) & 0x3ff) >> 2; c8[4 * i + 3] = 255; } pix = c8; }
+        char rawp[1024]; snprintf(rawp, sizeof rawp, "%s.raw", path);
+        FILE *rf = fopen(rawp, "wb");
+        if (rf) { fprintf(rf, "rgb10a2 %zu %zu\n", w, h); fwrite(buf.contents, 4, w * h, rf); fclose(rf); }
+    }
     int bgra = read.pixelFormat == MTLPixelFormatBGRA8Unorm || read.pixelFormat == MTLPixelFormatBGRA8Unorm_sRGB;
     CGColorSpaceRef cs = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
     CGBitmapInfo bi = bgra ? (kCGImageAlphaNoneSkipFirst | kCGBitmapByteOrder32Little) : (CGBitmapInfo)kCGImageAlphaNoneSkipLast;
-    CGContextRef ctx = CGBitmapContextCreate(buf.contents, w, h, 8, row, cs, bi);
+    CGContextRef ctx = CGBitmapContextCreate(pix, w, h, 8, row, cs, bi);
     CGImageRef img = ctx ? CGBitmapContextCreateImage(ctx) : NULL;
     CFURLRef url = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8 *)path, strlen(path), false);
     CGImageDestinationRef dst = url ? CGImageDestinationCreateWithURL(url, (__bridge CFStringRef)UTTypePNG.identifier, 1, NULL) : NULL;
@@ -16338,7 +16349,7 @@ static void shot(id<MTLTexture> src, const char *path, int screen, const int cro
     int ok = 0;
     if (!ctx || !img || !dst) MLOG("[RED] screenshot %s failed: %s", path, !ctx ? "cannot create the bitmap context" : !img ? "cannot get the image" : "cannot write (directory missing or not writable)");
     else { CGImageDestinationAddImage(dst, img, NULL); ok = CGImageDestinationFinalize(dst); }
-    if (dst) CFRelease(dst); if (url) CFRelease(url); CGImageRelease(img); CGContextRelease(ctx); CGColorSpaceRelease(cs);
+    if (dst) CFRelease(dst); if (url) CFRelease(url); CGImageRelease(img); CGContextRelease(ctx); CGColorSpaceRelease(cs); free(c8);
     MLOG("screenshot %zux%zu format %lu → %s %s", w, h, (unsigned long)read.pixelFormat, path, ok ? "ok" : "failed");
     if (g_defer_ab >= 0 && getenv("DM_NVN_DEFER_AB") && !strcmp(getenv("DM_NVN_DEFER_AB"), "1") && ok) { static int shots; if (++shots == 2) { g_defer_ab_on = 1; MLOG("DM_NVN_DEFER_AB: second screenshot written; deferred pass merging on"); } }
     if (g_udc_ab >= 0 && getenv("DM_NVN_UDC_AB") && !strcmp(getenv("DM_NVN_UDC_AB"), "1") && ok) {
@@ -16583,6 +16594,7 @@ static void present_pipeline(MTLPixelFormat format) {
         id<MTLLibrary> lib = host_lib("present", &e);
         if (!lib) MDIE("present shader compile failed %s", e.localizedDescription.UTF8String);
         MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
+        // Every target, the PQ HDR layer (RGB10A2) included, is drawn by fs (present_encode and present_encode_m4 set the mode)
         pd.vertexFunction = [lib newFunctionWithName:@"vs"]; pd.fragmentFunction = [lib newFunctionWithName:@"fs"];
         pd.colorAttachments[0].pixelFormat = format;
         g_blit_pso = [g_dev newRenderPipelineStateWithDescriptor:pd error:&e];
@@ -16640,6 +16652,33 @@ static int present_crop_rect(id<MTLTexture> src, const int crop[4], NSUInteger r
     }
     r[0] = crop[0]; r[1] = crop[1]; r[2] = crop[2]; r[3] = crop[3]; return 1;
 }
+// The Crop mode (present.metal): how the source is encoded. An RGB10A2 source is the game's HDR10 window (SMPTE ST 2084 code values in BT.2020 primaries) once its status query has answered HDR on; an 8-bit gamma source (BT.709, sRGB) drawn into the extended-range BT.2020 layer is decoded and converted to BT.2020
+__attribute__((weak)) int vi_hdr_answered(void) { return 0; }   // hle_vi.c; the graphics unit tests have no vi service
+static float present_mode(MTLPixelFormat src, MTLPixelFormat dst) {
+    // An RGB10A2 window is PQ code values only once the game's status query has answered HDR on (vi_hdr_answered); any other RGB10A2 window is gamma-coded SDR: into the PQ layer it is decoded and encoded at the paper white (2), elsewhere it is read as stored
+    // Not answered: an SDR 10-bit window, gamma-coded like the 8-bit ones, so it is decoded to linear light for an HDR layer
+    int pq_win = src == MTLPixelFormatRGB10A2Unorm && vi_hdr_answered();
+    // The PQ HDR layer (RGB10A2 in BT.2100 PQ, front_mac.m and front_ios.m): the game's HDR10 window goes in as it is (0); a float source is linear BT.709, encoded as HDR10 (3);
+    // any other is gamma-coded BT.709, decoded and encoded as HDR10 (2), its white at the paper white either way
+    if (dst == MTLPixelFormatRGB10A2Unorm)
+        return pq_win ? 0.0f : src == MTLPixelFormatRGBA16Float || src == MTLPixelFormatRGBA32Float || src == MTLPixelFormatRG11B10Float || src == MTLPixelFormatRGB9E5Float ? 3.0f : 2.0f;
+    // An SDR drawable or a screenshot: an HDR10 window brought to SDR (1); anything else as stored, the sRGB-typed sources sampled through a non-sRGB view (present_raw_src)
+    return pq_win ? 1.0f : 0.0f;
+}
+// The paper white in nits: the luminance of the picture's SDR white, the value nn::vi answers the game (hle_vi.c dm_hdr_paper_white: DM_HDR_PAPER_WHITE, default 100); 100 in the graphics unit tests, which have no vi service
+__attribute__((weak)) float dm_hdr_paper_white(void) { return 100.0f; }
+__attribute__((weak)) int dm_hdr_layer_meta(void) { return 0; }   // hle_vi.c: whether the front end gave the HDR layer HDR10 metadata
+__attribute__((weak)) float dm_hdr_sdr_white(void) { return 100.0f; }   // hle_vi.c: the paper white while the game is answered HDR, else 100
+// The white of the picture for the present mode: an SDR or float source into the PQ layer (modes 2, 3) at dm_hdr_sdr_white, an HDR10 window brought to SDR (1) at its paper white
+static float present_white(float mode) { return mode > 1.5f && mode < 3.5f ? dm_hdr_sdr_white() : dm_hdr_paper_white(); }
+// The roll-off of a game that declares more than the screen shows, for the PQ layer without metadata (hle_vi.c dm_hdr_rolloff; present.metal mode 4); none in the graphics unit tests
+__attribute__((weak)) int dm_hdr_rolloff(float *knee, float *target) { (void)knee; (void)target; return 0; }
+static int present_rolloff(float *knee, float *target) {
+    int on = dm_hdr_rolloff(knee, target); static int was = -1; static float wk, wt;
+    if (on != was || (on && (fabsf(*knee - wk) > 1 || fabsf(*target - wt) > 1))) { was = on; if (on) { wk = *knee; wt = *target; }
+        if (on) MLOG("present: the HDR10 window rolled off above %.0f nits into %.0f (the game declares more than the screen shows, no HDR10 metadata)", *knee, *target); else MLOG("present: no roll-off"); }
+    return on;
+}
 static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTexture> dst, const int crop[4]) {
     NSUInteger r[4]; if (!present_crop_rect(src, crop, r)) return 0;
     NSUInteger cx = r[0], cy = r[1], cw = r[2], ch = r[3];
@@ -16661,8 +16700,10 @@ static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTex
     id<MTLRenderCommandEncoder> en = [cb renderCommandEncoderWithDescriptor:rp];
     [en setViewport:vp];
     [en setRenderPipelineState:g_blit_pso]; [en setFragmentTexture:present_raw_src(src) atIndex:0]; [en setFragmentSamplerState:g_blit_samp atIndex:0];
-    float uv[8] = {(float)cx / src.width, (float)cy / src.height, (float)cw / src.width, (float)ch / src.height,
-                   (cx + 0.5f) / src.width, (cy + 0.5f) / src.height, (cx + cw - 0.5f) / src.width, (cy + ch - 0.5f) / src.height};
+    float md = present_mode(src.pixelFormat, dst.pixelFormat);
+    float uv[12] = {(float)cx / src.width, (float)cy / src.height, (float)cw / src.width, (float)ch / src.height,
+                   (cx + 0.5f) / src.width, (cy + 0.5f) / src.height, (cx + cw - 0.5f) / src.width, (cy + ch - 0.5f) / src.height, md, present_white(md), 0, 0};
+    { float k, t; if (uv[8] == 0.0f && dst.pixelFormat == MTLPixelFormatRGB10A2Unorm && present_rolloff(&k, &t)) { uv[8] = 4.0f; uv[10] = k; uv[11] = t; } }
     if (atomic_load_explicit(&g_origin_ll, memory_order_relaxed)) { uv[1] += uv[3]; uv[3] = -uv[3]; }   // lower-left origin: the window image is stored bottom-up
     [en setFragmentBytes:uv length:sizeof uv atIndex:0];
     [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
@@ -16909,12 +16950,15 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
     int full = vp.originX == 0 && vp.originY == 0 && vp.width == dw && vp.height == dh;
     int flipped = atomic_load_explicit(&g_origin_ll, memory_order_relaxed), wrote = 0;
     static int direct_ok = -1; if (direct_ok < 0) { const char *e = getenv("DM_FX_DIRECT"); direct_ok = !(e && !strcmp(e, "0")); }
-    // The picture fills dst unflipped: MetalFX may write dst itself, as the pass would only copy its output 1:1 (fx_encode)
-    id<MTLTexture> tex = present_raw_src(src), up = fx ? fx_encode(fx, cb, tex, r, vp, dst.pixelFormat, fx == &g_fx_present, direct_ok && full && !flipped ? dst : nil, &wrote) : nil;
+    // Crop.mode.x (present.metal present_mode): how the source is encoded, and so how it is converted for the target (the PQ HDR layer, an SDR drawable, a screenshot)
+    float mode = present_mode(src.pixelFormat, dst.pixelFormat), knee = 0, target = 0;
+    if (mode == 0.0f && dst.pixelFormat == MTLPixelFormatRGB10A2Unorm && present_rolloff(&knee, &target)) mode = 4.0f;
+    // The picture fills dst unflipped and needs no conversion: MetalFX may write dst itself, as the pass would only copy its output 1:1 (fx_encode)
+    id<MTLTexture> tex = present_raw_src(src), up = fx ? fx_encode(fx, cb, tex, r, vp, dst.pixelFormat, fx == &g_fx_present, direct_ok && full && !flipped && mode == 0.0f ? dst : nil, &wrote) : nil;
     if (wrote) return PRESENT_METALFX;
     if (up && fx == &g_fx_present) { static int once; if (!once++)
         MLOG("present upscaling: the present pass draws MetalFX's output into the drawable: %s (drawable %lux%lu format %lu usage %#lx, picture %lux%lu)",
-             !direct_ok ? "DM_FX_DIRECT=0" : !full ? "the picture does not fill it" : flipped ? "the lower-left origin flips it" : "the scaler cannot write it",
+             !direct_ok ? "DM_FX_DIRECT=0" : !full ? "the picture does not fill it" : flipped ? "the lower-left origin flips it" : mode != 0.0f ? "the pass converts it for the target" : "the scaler cannot write it",
              (unsigned long)dst.width, (unsigned long)dst.height, (unsigned long)dst.pixelFormat, (unsigned long)dst.usage, (unsigned long)up.width, (unsigned long)up.height); }
     if (up) { tex = up; r[0] = r[1] = 0; r[2] = up.width; r[3] = up.height; }   // the scaled picture, the viewport's size: drawn 1:1
     MTL4RenderPassDescriptor *rp = [MTL4RenderPassDescriptor new];
@@ -16931,6 +16975,7 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
     float *uv = uvb.contents; NSUInteger tw = tex.width, th = tex.height, cx = r[0], cy = r[1], cw = r[2], ch = r[3];
     uv[0] = (float)cx / tw; uv[1] = (float)cy / th; uv[2] = (float)cw / tw; uv[3] = (float)ch / th;
     uv[4] = (cx + 0.5f) / tw; uv[5] = (cy + 0.5f) / th; uv[6] = (cx + cw - 0.5f) / tw; uv[7] = (cy + ch - 0.5f) / th;
+    uv[8] = mode; uv[9] = present_white(mode); uv[10] = knee; uv[11] = target;
     if (flipped) { uv[1] += uv[3]; uv[3] = -uv[3]; }   // lower-left origin: the window image is stored bottom-up
     [g_present_args setAddress:uvb.gpuAddress atIndex:0];
     [en setViewport:vp]; [en setRenderPipelineState:g_blit_pso];
@@ -16942,7 +16987,7 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
 // returns whether it was submitted. Completion reports the encoding kind, or PRESENT_FAILED on a GPU error. Resources remain resident and retained until GPU completion.
 static int present_offscreen_m4(id<MTLTexture> src, const int crop[4], id<MTLTexture> out, void (^done)(int)) {
     id<MTL4CommandAllocator> al = [g_dev newCommandAllocator]; id<MTL4CommandBuffer> cb = [g_dev newCommandBuffer];
-    id<MTLBuffer> uvb = [g_dev newBufferWithLength:sizeof(float) * 8 options:MTLResourceStorageModeShared];
+    id<MTLBuffer> uvb = [g_dev newBufferWithLength:sizeof(float) * 12 options:MTLResourceStorageModeShared];
     if (!al || !cb || !uvb) { MLOG("[RED] offscreen present: no command allocator or buffer"); return 0; }
     id<MTLTexture> raw = present_raw_src(src);
     fx_state fx = {0};
@@ -16980,6 +17025,46 @@ static void present_gpu_note(double s, int fx) {
     n[fx] = 0;
 }
 static double g_link_it_tin;   // Enqueue time of the frame the display-link callback is presenting (read and written only on the display-link thread)
+// DM_PRESENT_SHOWN=1: how long the system takes to put a frame on screen, from the drawable's presentedTime (the time it really appeared, CACurrentMediaTime base).
+// Every 300 frames one line: from the present call to on screen, and from the display-link tick the frame was meant for to on screen (display-link pacing only), p50 / p90 / max,
+// and the frames the system dropped; with the layer's format and whether it has EDR metadata (DM_HDR), to compare HDR with SDR
+__attribute__((unused)) static int present_shown_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_PRESENT_SHOWN"); v = e && atoi(e) != 0; } return v; }
+__attribute__((unused)) static int present_shown_cmp(const void *a, const void *b) { double x = *(const double *)a, y = *(const double *)b; return (x > y) - (x < y); }
+__attribute__((unused)) static void present_shown_note(double shown, double call, double target, CAMetalLayer *layer) {   // the drawable's presented handler (any thread)
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER; static double c[300], t[300]; static int n, nt, dropped;
+    pthread_mutex_lock(&mu);
+    if (!(shown > 0)) dropped++;
+    else { c[n++] = (shown - call) * 1000.0; if (target > 0) t[nt++] = (shown - target) * 1000.0; }
+    if (n == 300) {
+        qsort(c, 300, sizeof *c, present_shown_cmp); if (nt) qsort(t, (size_t)nt, sizeof *t, present_shown_cmp);
+        char tgt[96] = "no display-link target"; if (nt) snprintf(tgt, sizeof tgt, "p50 %.2f / p90 %.2f / max %.2f ms", t[nt / 2], t[nt * 9 / 10], t[nt - 1]);
+        MLOG("present shown (DM_PRESENT_SHOWN), 300 frames: present call to on screen p50 %.2f / p90 %.2f / max %.2f ms; display-link target to on screen %s; dropped %d; layer format %lu, %s",
+             c[150], c[270], c[299], tgt, dropped, (unsigned long)layer.pixelFormat, layer.EDRMetadata ? "with EDR metadata" : "no EDR metadata");
+        n = nt = dropped = 0;
+    }
+    pthread_mutex_unlock(&mu);
+}
+// DM_PRESENT_AFTER_GPU: hand the drawable to the system only once the display command buffer has completed on the GPU, and without Metal 4's signalDrawable. A workaround
+// for an open macOS fault: a fullscreen PQ layer with HDR10 metadata (CAEDRMetadata, whatever its range) and nothing over it shows rectangles of older frames with Apple's
+// documented Metal 4 order (waitForDrawable, commit, signalDrawable, present) while the present pass still waits on the GPU for the game's frame (Ocarina of Time, and a
+// standalone app with no game). Without the metadata, the default on the Mac (dm_hdr_meta), the same order shows none, so the default
+// is on only for the Mac's HDR layer in fullscreen while it carries metadata (DM_HDR_META=1), off otherwise and on iOS; 0 / 1 force it. It costs: in the standalone app at
+// 12 ms of GPU a frame, 839 of about 1,800 frames reached the screen a refresh late, against none in Apple's order without metadata. With signalDrawable a frame presented
+// after completion often reached the screen a refresh late; without it, on time. Skipping signalDrawable is not what Apple documents (MTL4CommandQueue.h: the caller is
+// responsible for signalDrawable after the last commit that writes the drawable and before present) (docs/reference/rendering.md, "A fullscreen HDR layer shows rectangles of
+// older frames")
+#if !TARGET_OS_SIMULATOR
+int front_fullscreen(void);   // front_mac.m (weak stand-in below)
+static int present_after_gpu(CAMetalLayer *layer) {
+    (void)layer;
+    static int env = -2, was = -1;
+    if (env == -2) { const char *e = getenv("DM_PRESENT_AFTER_GPU"); env = e && *e ? atoi(e) != 0 : -1; }
+    int on = env >= 0 ? env : TARGET_OS_OSX && dm_hdr_layer_meta() && front_fullscreen();   // the front end's record (1 only for the HDR layer with metadata), not the layer's properties, read off the main thread
+    if (on != was) { was = on; MLOG("present: the drawable goes to the system %s (DM_PRESENT_AFTER_GPU%s)", on ? "after its GPU work completes, without signalDrawable" : "right after signalDrawable",
+                                    env >= 0 ? "" : on ? " unset: on for the Mac's HDR layer with HDR10 metadata in fullscreen" : " unset: off"); }
+    return on;
+}
+#endif
 static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t ticket, const int crop[4], id<CAMetalDrawable> supplied, double target_ts) {
     if (g_present_stall_ns) { struct timespec ts = {0, (long)g_present_stall_ns}; nanosleep(&ts, NULL); }
     g_present_n++;
@@ -17063,9 +17148,34 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     if (!kind) { [cb endCommandBuffer]; [g_q4 signalDrawable:dr]; return 0; }
     int fx_kind = kind == PRESENT_METALFX;
     [cb endCommandBuffer];
+    // The drawable's hand-over to the system: right after signalDrawable, or with DM_PRESENT_AFTER_GPU only once the display command buffer has completed, without signalDrawable (present_after_gpu)
+#if TARGET_OS_SIMULATOR   // The iOS simulator SDK has no presentation-time callback and no minimum display duration (used only for picture acceptance, display-link ticks are not counted)
+    int late = 0;
+    dispatch_block_t show = ^{ (void)period; [dr present]; };
+#else
+    int late = present_after_gpu(layer);
+    __block double shown_call = CACurrentMediaTime(); double shown_target = target_ts;   // DM_PRESENT_SHOWN: when the frame was handed to the system (set again by show), and the display-link tick it was meant for
+    uint64_t pn = ticket;   // Record the present time by the game's present sequence number (ticket number): hle's present statistics are taken by "the game's nth present"; in the display link path the actual present count != the game's present count (old frames get merged and dropped)
+    [dr addPresentedHandler:^(id<MTLDrawable> d) {   // Actual presentation time (the time this frame is really put on screen, CACurrentMediaTime base)
+        CFTimeInterval tt = d.presentedTime;
+        g_pres[pn % PRING] = (pres_ent){pn, tt > 0 ? tt : -1};
+        if (present_shown_on()) present_shown_note(tt, shown_call, shown_target, layer);
+    }];
+    // Each frame is displayed for at least one present period, which avoids the paired "25 ms + 8.33 ms" stutter when the GPU completion time jitters around a 120 Hz refresh boundary
+    dispatch_block_t show = ^{
+        shown_call = CACurrentMediaTime();
+        if (target_ts > 0) [dr present];
+        else if (period > 0) [dr presentAfterMinimumDuration:period]; else [dr present];
+    };
+#endif
+    // Late: the feedback handler presents once the GPU has completed the pass; the count of 2 also orders that present after this thread's last use of the frame below.
+    // The presents keep the frames' order as long as the feedback handlers come in commit order: observed (none out of order in tens of thousands of presents), not documented
+    _Atomic int *need = late ? malloc(sizeof *need) : NULL;
+    if (need) atomic_init(need, 2);
     MTL4CommitOptions *o = [MTL4CommitOptions new];
     [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) {
         if (f.error) { MLOG("[RED] display command buffer error: %s", f.error.description.UTF8String); gpu_lost_check(f.error, "display"); }
+        if (need && atomic_fetch_sub(need, 1) == 1) { free(need); show(); }
         pthread_mutex_lock(&g_pq_mu); if (ticket > g_pq_done) g_pq_done = ticket; if (ticket > g_present_alloc_done[alloc_i]) g_present_alloc_done[alloc_i] = ticket; g_pq_inflight--; pthread_cond_broadcast(&g_pq_cv);
         NSArray *retire = nil; if (!g_pq_inflight && g_ext_retire.count) { retire = g_ext_retire; g_ext_retire = nil; }   // every present committed before their release has completed
         present_gpu_note(f.GPUEndTime - f.GPUStartTime, fx_kind); pthread_mutex_unlock(&g_pq_mu);
@@ -17089,20 +17199,10 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
                  (unsigned long long)g_link_dropped, a[149], a[0], b[149], b[0], b[299]);
         }
     }
-    [g_q4 signalDrawable:dr];
+    if (!need) [g_q4 signalDrawable:dr];   // late: no signalDrawable, which made the completed frame a refresh late on the fullscreen HDR layer (present_after_gpu)
     g_present_alloc_fence[alloc_i] = ticket;
-#if TARGET_OS_SIMULATOR   // The iOS simulator SDK has no presentation-time callback and no minimum display duration (used only for picture acceptance, display-link ticks are not counted)
-    (void)period; [dr present];
-#else
-    uint64_t pn = ticket;   // Record the present time by the game's present sequence number (ticket number): hle's present statistics are taken by "the game's nth present"; in the display link path the actual present count != the game's present count (old frames get merged and dropped)
-    [dr addPresentedHandler:^(id<MTLDrawable> d) {   // Actual presentation time (the time this frame is really put on screen, CACurrentMediaTime base)
-        CFTimeInterval tt = d.presentedTime;
-        g_pres[pn % PRING] = (pres_ent){pn, tt > 0 ? tt : -1};
-    }];
-    // Each frame is displayed for at least one present period: when the GPU completion time jitters around a 120 Hz refresh boundary, the paired "25 ms + 8.33 ms" stutter no longer appears
-    if (target_ts > 0) [dr present];
-    else if (period > 0) [dr presentAfterMinimumDuration:period]; else [dr present];
-#endif
+    if (!need) show();
+    else if (atomic_fetch_sub(need, 1) == 1) { free(need); show(); }
     (void)frame;
     return 1;
 }

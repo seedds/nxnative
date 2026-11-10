@@ -1904,6 +1904,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [The Legend of Zelda: Echoes of Wisdom](../../dm/games/01008CF01BAAC000/README.md#rendering-and-shaders), update 1.1.0: a 308.4 ms frame, 283.5 ms of it pipeline acquisition and 5.9 ms GPU work; with the tables the offline prebuild built all 7,495 bases. [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md#pipelines-on-a-cold-start): frames of 100–546 ms before, none of its bases compiled on the first start after.
 - **Check:** `test_nsp_mac_app`: `App.test_pipeline_pair_tables`, `App.test_split_pso_pairs` and `App.test_layout` fail without the tables in the packer; `Script.test_pack_command` checks the split's copy is passed only when the profile has no `pso_pairs.tsv`.
 
+### Uniform tables of another library
+
+- **Symptom:** `[RED] c1_full.tsv is stale or missing (...)` and `cb_extent.tsv is stale or missing` at every start, though a full `dmsh_build.py` run made the library the host loads.
+- **Cause:** the host takes `c1_full.tsv` and `cb_extent.tsv` only when their first line names the loaded library's chain and inputs. It read them from the profile folder beside `DM_NVN_SHMAP` only, which holds one copy, made by the profile's last full build. A host pointed (`DM_MSL_DIR`) at another library of the same game, another chain or another build of the profile, found that copy stale: every c1 got 64 KiB of its own and every uniform binding was copied whole.
+- **Fix:** a copy beside the library, `<library>.<table>` (`b-<chain>.c1_full.tsv` next to `b-<chain>.img`), is taken when the profile's copy names another library; the profile's copy wins when both name it (`nvn_table_pick` in `dm/gfx/nvn/nvn_tables.h`). The log line of each table names the copy taken.
+- **Found on:** PRAGMATA (r11 library tests: 779 shaders on the title route took dedicated c1 banks, about 48 MiB where the shared banks take about 5).
+- **Check:** `t_tables` (8 checks): the profile's copy when both name the library; the library's copy when the profile's is from another chain or other inputs, or missing; none when neither names it (every c1 its own 64 KiB, as before), and none for a library without a stamp. Without the fix the three "the library's copy" cases fail.
+
 ### Offline pipeline archive missing for the device GPU
 
 - **Symptom:** `pipeline archive bundled with the app: none for this GPU (...)`: the device builds the bases itself although the app carries an offline archive.

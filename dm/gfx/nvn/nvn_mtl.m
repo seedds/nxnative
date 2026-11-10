@@ -34,6 +34,7 @@
 #include "nvn_border.h"
 #include "nvn_primitive.h"
 #include "nvn_timestamp.h"
+#include "nvn_tables.h"
 #include "msl_image.h"
 #include "dmsh_chain.h"   // DMSH_CHAIN: the translation chain version of the B shader library expected by this source tree, one for every game (beside this file, tools/dmsh_chain.py --header)
 #include "game_profile.h"   // game profile constants (profile id, the profile's switches)
@@ -5632,25 +5633,31 @@ static void shmap_read(void) {
     if (!st_inputs) MLOG("[RED] shader library %s has no stamp (inputs.tsv): no full dmsh_build.py run made it as it is, so c1_full.tsv and cb_extent.tsv are not taken", g_msl_dir.UTF8String);
     else if (st_game && ![st_game isEqual:@(DM_GAME_ID)]) MLOG("[RED] shader library %s was built for game %s, not %s", g_msl_dir.UTF8String, st_game.UTF8String, DM_GAME_ID);
     else MLOG("shader library stamp: game %s, inputs %s", st_game.UTF8String, st_inputs.UTF8String);
-    NSString *cp = [[path stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"c1_full.tsv"];   // Same directory as the mapping table (Mac: dm/games/<id>; iOS: dm/ inside the App, copied along by build_ipa.sh)
-    NSString *ct = cp ? [NSString stringWithContentsOfFile:cp encoding:NSUTF8StringEncoding error:nil] : nil;
-    NSString *head = ct ? [[ct componentsSeparatedByString:@"\n"] firstObject] : nil;
     NSString *want = [NSString stringWithFormat:@"# chain b-%s inputs %@ ", DMSH_CHAIN, st_inputs ?: @"-"];   // a library without a stamp matches no table
-    if (!head || ![head hasPrefix:want]) {
-        MLOG("[RED] c1_full.tsv is stale or missing (its header must name this library's chain and inputs; a full dmsh_build.py run makes it); every c1 gets its own 64 KiB");
+    // Each table from the profile folder beside the shader map (Mac: dm/games/<id>; iOS: dm/ inside the App, copied along by build_ipa.sh), or else from beside the library
+    // (<library>.<table>): the profile's copy fits one library only, the one its last full build made (nvn_tables.h)
+    NSString *(^table)(NSString *, NSString **) = ^NSString *(NSString *name, NSString **from) {
+        NSString *paths[2] = {[[path stringByDeletingLastPathComponent] stringByAppendingPathComponent:name], [g_msl_dir stringByAppendingFormat:@".%@", name]}, *texts[2], *firsts[2]; const char *heads[2];   // firsts keeps each header line alive while its UTF8String is read
+        for (int i = 0; i < 2; i++) { texts[i] = [NSString stringWithContentsOfFile:paths[i] encoding:NSUTF8StringEncoding error:nil];
+            firsts[i] = texts[i] ? [[texts[i] componentsSeparatedByString:@"\n"] firstObject] : nil; heads[i] = firsts[i].UTF8String; }
+        int k = nvn_table_pick(heads, 2, want.UTF8String); if (k < 0) return nil;
+        *from = paths[k]; return texts[k];
+    };
+    NSString *cfrom = nil, *ct = table(@"c1_full.tsv", &cfrom);
+    if (!ct) {
+        MLOG("[RED] c1_full.tsv is stale or missing (its header must name this library's chain and inputs; a full dmsh_build.py run makes it, beside the shader map or as %s.c1_full.tsv); every c1 gets its own 64 KiB", g_msl_dir.UTF8String);
     } else {
         g_c1_full_valid = 1; g_c1_full = [NSMutableSet set];
         for (NSString *line in [ct componentsSeparatedByString:@"\n"]) if (line.length && ![line hasPrefix:@"#"]) [g_c1_full addObject:[line stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet]];
+        MLOG("c1 guard table: %lu shaders get 64 KiB of their own (%s)", (unsigned long)g_c1_full.count, cfrom.UTF8String);
     }
     {   // cb_extent.tsv (tools/cb_extent.py), beside c1_full.tsv: without it a uniform block updated in part inside a pass is copied whole, up to 64 KB (ubp_get)
-        NSString *xp = [[path stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"cb_extent.tsv"];
-        NSString *xt = [NSString stringWithContentsOfFile:xp encoding:NSUTF8StringEncoding error:nil];
-        NSString *xh = xt ? [[xt componentsSeparatedByString:@"\n"] firstObject] : nil;
-        if (!xh || ![xh hasPrefix:want]) MLOG("cb_extent.tsv is stale or missing: uniform reads are taken to reach the whole binding");
+        NSString *xfrom = nil, *xt = table(@"cb_extent.tsv", &xfrom);
+        if (!xt) MLOG("cb_extent.tsv is stale or missing: uniform reads are taken to reach the whole binding");
         else { NSMutableDictionary *d = [NSMutableDictionary dictionary];
             for (NSString *line in [xt componentsSeparatedByString:@"\n"]) { if (!line.length || [line hasPrefix:@"#"]) continue;
                 NSRange t = [line rangeOfString:@"\t"]; if (t.location != NSNotFound) d[[line substringToIndex:t.location]] = [line substringFromIndex:t.location + 1]; }
-            g_cb_ext = d; MLOG("uniform read extents: %lu shaders (cb_extent.tsv)", (unsigned long)d.count); }
+            g_cb_ext = d; MLOG("uniform read extents: %lu shaders (%s)", (unsigned long)d.count, xfrom.UTF8String); }
     }
     MLOG("shader route B (translated Switch originals): shader map %lu entries (%s), metallib directory %s", (unsigned long)g_shmap.count, path.UTF8String, g_msl_dir.UTF8String);
 }

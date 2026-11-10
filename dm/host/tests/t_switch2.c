@@ -176,6 +176,8 @@ int main(void) {
         CHECK(s2_user_cal_marked(blk) && !memcmp(blk + 2, b, 9));
         s2_cal back; CHECK(s2_cal_parse(blk + 2, 9, &back) && back.cx == c.cx && back.miny == c.miny);   // what readCal reads at 0x1FC042
         CHECK(S2_ADDR_USER_CAL_SECTOR + S2_USER_STICK1_OFF + 2 == S2_ADDR_USER_STICK1);
+        // The second stick slot's user calibration is at 0x1FC080 (SDL and Linux read it there), its 9 bytes after the marker at 0x1FC082
+        CHECK(S2_ADDR_USER_STICK2 == 0x001FC082u && S2_ADDR_USER_CAL_SECTOR + s2_user_slot_off(1) + 2 == S2_ADDR_USER_STICK2 && s2_user_slot_off(0) == S2_USER_STICK1_OFF);
         // A new centre keeps the end stops: 2095 + 1175 = 3270 and 2095 - 1181 = 914 still read full tilt
         s2_cal rc; CHECK(s2_cal_recentre(&c, 2140.4f, 1980.f, &rc) && rc.cx == 2140 && rc.cy == 1980 && rc.maxx == 1130 && rc.minx == 1226 && rc.maxy == 1244 && rc.miny == 1110);
         s2_cal_apply(&rc, 3270, 1980, 40, &x, &y); CHECK(x == 1.f && y == 0.f);

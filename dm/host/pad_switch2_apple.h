@@ -59,7 +59,7 @@ int dm_switch2_on(void);                                   // dm_switch2_start r
 int dm_switch2_controllers(dm_sw2_info *out, int max);     // connected controllers whose handshake finished, oldest connection first, at most max; returns the count
 // The tester's hooks (one observer; NULL blocks remove it): changed = a controller came, went, finished its handshake or a save began or ended; report = a new input report of controller id
 void dm_switch2_observe(void (^changed)(void), void (^report)(uint32_t id));
-// cal as controller id's user calibration of slot (s2op_save_user_cal with s2op_backup_dir()). Refused at once (S2CalNoBackup, nil path, a log line) for slot != 0, an unknown id, a save already running on it,
+// cal as controller id's user calibration of slot (s2op_save_user_cal with s2op_backup_dir()). Refused at once (S2CalNoBackup, nil path, a log line) for a slot the controller has no stick in (1 only on a Pro Controller 2), an unknown id, a save already running on it,
 // or an invalid cal. After any other outcome the session re-reads that slot's calibration (user, else factory) into the pad the game reads before done runs. done on the main queue, after this returns
 void dm_switch2_save(uint32_t id, int slot, s2_cal cal, void (^done)(S2CalOutcome outcome, NSString *backupPath));
 void dm_switch2_set_dead_zone(float counts);              // the dead zone the game applies from now on (dm_switch2_dead_zone returns it)

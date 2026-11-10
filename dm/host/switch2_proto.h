@@ -33,7 +33,7 @@ enum { S2_SUB_MEMORY_READ = 0x04, S2_SUB_LEDS_SET = 0x07, S2_SUB_FEATURE_SET = 0
 // 0x12 are int16 position counters that wrap (x right, y toward the player), 0x14 and 0x16 jump from about 1,600 and 150 on a surface to about 4,600 and 3,200 when lifted
 #define S2_FEATURE_MOUSE 0x10
 #define S2_MOUSE_SURFACE_MAX 1000   // 0x16 below this: on a surface
-enum { S2_ADDR_INFO = 0x00013000u, S2_ADDR_FACTORY_STICK1 = 0x000130A8u, S2_ADDR_FACTORY_STICK2 = 0x000130E8u, S2_ADDR_USER_STICK1 = 0x001FC042u, S2_ADDR_USER_STICK2 = 0x001FC062u };
+enum { S2_ADDR_INFO = 0x00013000u, S2_ADDR_FACTORY_STICK1 = 0x000130A8u, S2_ADDR_FACTORY_STICK2 = 0x000130E8u, S2_ADDR_USER_STICK1 = 0x001FC042u, S2_ADDR_USER_STICK2 = 0x001FC082u };
 
 // Raw button bits (32-bit little endian at report offset 4; the top three bits are always set). The right Joy-Con's rail buttons are 0x10 / 0x20 and the left's 0x100000 / 0x200000
 // (the Switch 1 order: SR before SL).
@@ -161,8 +161,9 @@ static inline int s2_cal_pick(const s2_cal *user, int has_user, const s2_cal *fa
 }
 
 // ---- Writing a user stick calibration (DM_SW2_CALIBRATE: switch2_ops_apple.m) ----
-// The user calibration of the first stick slot is 11 bytes at 0x1FC040: the marker B2 A1 (Switch 1's user-calibration marker), then the 9 bytes s2_cal_parse reads, which is why
-// the read starts at 0x1FC042 (SDL's SDL_hidapi_switch2.c and Linux's hid-nintendo.c check the marker the same way; both read the second slot at 0x1FC080, not 0x1FC062). Its
+// The user calibration of a stick slot is 11 bytes, the first slot's at 0x1FC040 and the second's at 0x1FC080: the marker B2 A1 (Switch 1's user-calibration marker), then the
+// 9 bytes s2_cal_parse reads, which is why the reads start at 0x1FC042 and 0x1FC082 (SDL's SDL_hidapi_switch2.c and Linux's hid-nintendo.c read both there and check the marker
+// the same way; no console-calibrated controller has been seen to confirm the second: a Pro Controller 2 never calibrated on a console holds 0xFF at both). Its
 // sector 0x1FC000..0x1FCFFF holds only user calibration (ndeadly/switch2_controller_research memory_layout.md: motion at 0x1FC000, the sticks after it), all 0xFF until a
 // calibration is written. Command 0x02: subcommand 0x05 writes (length, 0x7E, 0, 0, address, data; addresses below 0x1F5000 are refused), 0x03 erases the 0x1000-byte sector
 // holding an address to 0xFF (0, 0, 0, 0, address). Whether a write over bytes that are not 0xFF needs the erase first is documented nowhere, so the host writes straight only
@@ -172,6 +173,8 @@ enum { S2_SUB_MEMORY_ERASE = 0x03, S2_SUB_MEMORY_WRITE = 0x05 };
 #define S2_ADDR_USER_CAL_SECTOR 0x001FC000u
 #define S2_SECTOR_SIZE 0x1000u
 #define S2_USER_STICK1_OFF 0x40u   // the first stick slot's block in the sector (marker at 0x1FC040, calibration at S2_ADDR_USER_STICK1)
+#define S2_USER_STICK2_OFF 0x80u   // the second's (marker at 0x1FC080, calibration at S2_ADDR_USER_STICK2)
+static inline uint32_t s2_user_slot_off(int slot) { return slot ? S2_USER_STICK2_OFF : S2_USER_STICK1_OFF; }
 #define S2_USER_CAL_LEN 11
 static inline int s2_all_ff(const uint8_t *d, size_t n) { for (size_t i = 0; i < n; i++) if (d[i] != 0xFF) return 0; return 1; }
 // A calibration as the 9 bytes s2_cal_parse reads: centre, travel above, travel below, each pair packed x | y << 12, little endian

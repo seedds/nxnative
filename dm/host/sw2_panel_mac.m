@@ -5,7 +5,7 @@
 // works on one controller and stick at a time (a picker with two or more, Left / Right on a Pro Controller 2): the whole range, the centre zoomed 12x with the dead zone drawn as
 // the square s2_cal_axis applies (per axis), a marker where the stick came to rest after each release (orange inside the dead zone, red where the game would see it move), the
 // readouts and tally, the dead zone slider (live, and saved as the launcher's choice) and the guided calibration: let go (the rest becomes the centre), edges (two turns at the
-// edge give the travel, judged against the factory calibration), review and save. Only the first stick slot is saved (a Pro Controller 2's right stick is test only), and a
+// edge give the travel, judged against the factory calibration), review and save (either stick of a Pro Controller 2), and a
 // save's outcome stays on screen, naming the controller, whichever controller is shown or connected, until Done. While the panel is open the game gets nothing from Switch 2
 // controllers (front_mac.m asks sw2_panel_open), so circles drawn here never move a character
 #import "sw2_panel_mac.h"
@@ -200,7 +200,7 @@ static DmControllerPanel *g_panel;   // created on the first Show Controller Win
 - (s2_cal)calibration { const dm_sw2_info *d = [self device]; s2_cal c; if (d && d->cal[[self slot]].valid) c = d->cal[[self slot]]; else s2_cal_default(&c); return c; }
 - (BOOL)otherSaving { const dm_sw2_info *d = [self device]; return d && d->saving; }   // a save on this controller runs that this panel did not start (DM_SW2_CALIBRATE's), and a second is refused
 - (BOOL)canCalibrate { const dm_sw2_info *d = [self device]; return d && d->cal[[self slot]].valid && !d->saving; }
-- (BOOL)canSave { return ![self rightStick] && ![self otherSaving]; }
+- (BOOL)canSave { return ![self otherSaving]; }
 - (BOOL)busy { return _step == ST_SAVING; }
 - (BOOL)holdsOutcome { return _step == ST_SAVING || _step == ST_RESULT; }   // stays on screen until Done, whichever controller is shown or connected
 - (BOOL)calibrating { return _step == ST_LETGO || _step == ST_EDGES || _step == ST_REVIEW || _step == ST_SAVING; }
@@ -575,7 +575,6 @@ static void hide(NSArray<NSView *> *vs) { for (NSView *v in vs) v.hidden = YES; 
         y = place(_text, in, y, w, 0, 8);
         if ([self otherSaving]) [small addObject:@"A save on this controller is still running."];
         else if ([self device] && ![self canCalibrate]) [small addObject:@"This stick's calibration could not be read, so it cannot be calibrated here."];
-        if ([self rightStick]) [small addObject:@"Right stick: test only for now"];
         break;
     case ST_LETGO:
         _big.stringValue = @"Let go of the stick and leave it still."; y = place(_big, in, y, w, 0, 8);
@@ -592,7 +591,6 @@ static void hide(NSArray<NSView *> *vs) { for (NSView *v in vs) v.hidden = YES; 
         _foot.stringValue = @"Travel in counts from the centre. Save backs up the controller's calibration memory first, then writes and reads it back; if it does not read back as written, the backup goes back in.";
         y = place(_foot, in, y, w, 0, 8);
         if ([self otherSaving]) [small addObject:@"A save on this controller is still running."];
-        if ([self rightStick]) [small addObject:@"Right stick: test only for now"];
         break;
     case ST_SAVING:
         _whoLabel.stringValue = _who ?: @""; y = place(_whoLabel, in, y, w, 0, 6);

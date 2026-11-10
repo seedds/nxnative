@@ -237,10 +237,10 @@ static s2_pad *s2_pad_for(uint16_t pid) {   // a Joy-Con joins a pad that has th
     __weak S2Session *w = self;
     [self saveCal:cal slot:0 done:^(S2CalOutcome o, NSString *path) { (void)o; (void)path; S2Session *s = w; if (s) s->_calStep = 0; }];
 }
-// cal as the user calibration of slot 0 (s2op_save_user_cal), then the session's calibration of that slot read again from the controller whatever came of it, so the game and the
+// cal as the user calibration of slot (0, or 1 for a Pro Controller 2's right stick: s2op_save_user_cal), then the session's calibration of that slot read again from the controller whatever came of it, so the game and the
 // tester use what the controller now holds (a failed restore may have left it blank). Refused at once when one is running, the link is gone or cal is no calibration. done after it returns
 - (void)saveCal:(s2_cal)cal slot:(int)slot done:(void (^)(S2CalOutcome, NSString *))done {
-    NSString *why = slot != 0 ? @"only the first stick slot can be saved (where the second slot's user calibration lives is not settled)" : _closed || !_live ? @"the controller is no longer connected"
+    NSString *why = slot != 0 && (slot != 1 || _pid != S2_PID_PRO) ? @"that controller has no such stick" : _closed || !_live ? @"the controller is no longer connected"
                   : _saving ? @"a save on it is still running" : !cal.valid ? @"that is not a calibration the controller would read" : nil;
     if (why) {
         LOG("[sw2] %s: nothing saved: %s", s2_kind(_pid), why.UTF8String);
@@ -248,10 +248,10 @@ static s2_pad *s2_pad_for(uint16_t pid) {   // a Joy-Con joins a pad that has th
         return;
     }
     _saving = YES; g_saving++;
-    LOG("[sw2] %s %s: saving centre %.0f, %.0f, travel %.0f, %.0f up and %.0f, %.0f down as its user calibration", s2_kind(_pid), _serial, cal.cx, cal.cy, cal.maxx, cal.maxy, cal.minx, cal.miny);
+    LOG("[sw2] %s %s: saving centre %.0f, %.0f, travel %.0f, %.0f up and %.0f, %.0f down as stick %d's user calibration", s2_kind(_pid), _serial, cal.cx, cal.cy, cal.maxx, cal.maxy, cal.minx, cal.miny, slot + 1);
     if (g_changed) g_changed();
     S2Session *me = self;   // held until the save ends: the operation holds its commander, and a controller that went away still answers
-    s2op_save_user_cal(self, _serial, cal, s2op_backup_dir(), [self opsLog], ^(S2CalOutcome o, NSString *path) {
+    s2op_save_user_cal(self, _serial, slot, cal, s2op_backup_dir(), [self opsLog], ^(S2CalOutcome o, NSString *path) {
         if (o == S2CalSaved) { me->_cal[slot] = cal; if (me->_pad) s2_dev_of(me->_pad, me->_pid)->cal[slot] = cal; }   // what a re-read that gets no answer leaves
         [me readCal:slot keep:YES done:^{
             me->_saving = NO; g_saving--;
@@ -353,8 +353,8 @@ static s2_pad *s2_pad_for(uint16_t pid) {   // a Joy-Con joins a pad that has th
         }];
     }];
 }
-// Read only, once per connection: which of the user calibration sector's stick slots carry the marker (B2 A1), and their bytes. Where the second stick's user calibration lives
-// (0x1FC060 as this host reads it, or 0x1FC080 as SDL and Linux do) is not settled; a controller whose right stick was calibrated on a console answers it
+// Read only, once per connection: which of the user calibration sector's stick slots carry the marker (B2 A1), and their bytes. The second stick's is read and written at
+// 0x1FC080 as SDL and Linux do, unconfirmed by a console-calibrated controller (0x1FC060 is logged as well: one that carries the marker there would say otherwise)
 - (void)logUserSlots {
     s2op_read(self, S2_ADDR_USER_CAL_SECTOR + 0x40, 0x60, S2_CAL_TRIES, [self opsLog], ^(NSData *d) {
         void (^log)(NSString *) = [self opsLog];

@@ -28,10 +28,10 @@ typedef NS_ENUM(NSInteger, S2CalOutcome) {
 NSURL *s2op_backup_dir(void);   // Application Support/<bundle id or "nxnative">/Switch 2 calibration
 // n bytes from addr in reads of 0x40, each tried up to tries times (S2_CAL_TRIES for a save; 1 for the handshake's bounded wait) and taken only when the reply carries the read's length and address; nil when one never answers. log (may be nil) gets each refused reply and each read given up
 void s2op_read(id<S2Commander> c, uint32_t addr, NSUInteger n, int tries, void (^log)(NSString *), void (^done)(NSData *));
-// cal as the user calibration of the first stick slot (0x1FC040). The sector is backed up to a file in dir named after serial first; a blank block is written straight,
+// cal as the user calibration of stick slot slot (0: 0x1FC040, 1: 0x1FC080; any other slot is refused, S2CalNoBackup, nothing read or written). The sector is backed up to a file in dir named after serial first; a blank block is written straight,
 // otherwise the sector is erased and written back whole; it is then read back, and put back from the backup when it does not read as written. Nothing is written after an
 // erase unless the sector then reads blank (an erase answered is not an erase done). log gets each step's line; done (once) the outcome and the backup's path (nil with
 // S2CalNoBackup)
-void s2op_save_user_cal(id<S2Commander> c, const char *serial, s2_cal cal, NSURL *dir, void (^log)(NSString *), void (^done)(S2CalOutcome, NSString *backupPath));
+void s2op_save_user_cal(id<S2Commander> c, const char *serial, int slot, s2_cal cal, NSURL *dir, void (^log)(NSString *), void (^done)(S2CalOutcome, NSString *backupPath));
 // Bonds the controller to host (its Bluetooth address, little endian) with fresh keys, as the console does (switch2_proto.h, Bonding); done(NO) when a step got no answer
 void s2op_bond(id<S2Commander> c, const uint8_t host[6], void (^log)(NSString *), void (^done)(BOOL));

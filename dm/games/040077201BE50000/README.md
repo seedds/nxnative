@@ -37,6 +37,7 @@ Moving objects get their ambient light from eight values per object in a storage
 
 ## Found on this game
 
+- [A shader loop that never ends hangs the GPU](../../../docs/reference/shaders.md#a-shader-loop-that-never-ends-hangs-the-gpu): its particle simulation, about a minute into a race; which loop and which value is open.
 - [PMAP records in phx's PDAT archives](../../../docs/reference/shaders.md#pmap-records-in-phxs-pdat-archives): its shaders, and a loose NDSR file.
 - [A guard band cull in every vertex shader (0x80d)](../../../docs/reference/shaders.md#a-guard-band-cull-in-every-vertex-shader-0x80d).
 - [Ampere forms with a handle in a register](../../../docs/reference/shaders.md#ampere-forms-with-a-handle-in-a-register-and-sureds-other-operations): TMML (0xf69, 0x36a) in 4,776 pixel shaders.

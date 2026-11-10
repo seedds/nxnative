@@ -24,6 +24,30 @@ def mul_extended(msl):
                      for t, w in (('uint', 'ulong'), ('int', 'long')))
     return msl[:found[0].end()] + scalar + msl[found[0].end():]
 
+# Loop guard: every loop in a shader also ends once the function has run LOOP_CAP iterations in all, so a loop that never ends on the host (a wrong translation,
+# an uninitialized bound, a value the replay does not fill) cannot hang the GPU. On macOS a command buffer that never completes is not always reclaimed when the
+# process exits: PRAGMATA's first frames left one and the whole Mac stopped (WindowServer watchdog) minutes later, twice. One counter per function, so nested loops
+# cannot multiply past the cap; 2^18 iterations per invocation is far beyond what a frame's shader does (PRAGMATA's longest bounded loop: 255)
+# A defence, not a fix: the runaway loop ends and its dispatch computes wrong instead of hanging the GPU, so a hang it stops still needs its cause found
+# (docs/reference/shaders.md, A shader loop that never ends hangs the GPU; Kirby Air Riders' particle simulation is open)
+LOOP_CAP = 1 << 18
+def loop_guard(msl):
+    lines, out, bodies, used = msl.split('\n'), [], [], set()
+    cap = f'++dm_lg < {LOOP_CAP}u'
+    for i, l in enumerate(lines):
+        if l == '{' and i and lines[i - 1].rstrip().endswith(')'):   # a function body (SPIRV-Cross puts its brace alone in column 0; a struct's header does not end in ')')
+            out.append(l); bodies.append(len(out)); continue
+        g = l
+        if (m := re.fullmatch(r'(\s*)\} while \((.*)\);\s*', l)): l = f'{m.group(1)}}} while (({m.group(2)}) && {cap});'
+        elif (m := re.fullmatch(r'(\s*)for \(;;\)\s*', l)): l = f'{m.group(1)}for (; {cap};)'
+        elif (m := re.fullmatch(r'(\s*)while \((.*)\)\s*', l)): l = f'{m.group(1)}while (({m.group(2)}) && {cap})'
+        elif (m := re.fullmatch(r'(\s*)for \(([^;]*);([^;]*);([^;]*)\)\s*', l)): l = f'{m.group(1)}for ({m.group(2)}; ({m.group(3).strip() or "true"}) && {cap};{m.group(4)})'
+        if l != g and bodies: used.add(bodies[-1])
+        out.append(l)
+    # the counter only in a function with a loop, one declaration alone on its line: dmsh_meshstage.py's _KERNEL takes the statements before the stage memory one per line
+    for at in sorted(used, reverse=True): out.insert(at, '    uint dm_lg = 0u;')
+    return '\n'.join(out)
+
 # Ampere HMMA.16816 with an f16 accumulator (agl's upscaler networks, the NDVE video networks) reaches the MSL as calls of dmsh_hmma16816_f16(lane, block, A0..A3, B0, B1, C0, C1,
 # flags, A's LDSM address, A0..A3's offsets, A's row stride, out D1) → D0, the subgroup's 256-word block of the scratch shared memory as the last argument (InstEmitAmpereTensor.AHmma,
 # TensorPass, HelperFunctionManager.GenerateHmma16816F16). The translator's body computes D lane by lane from the block; here it becomes simdgroup_matrix code over the same block:

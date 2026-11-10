@@ -19,7 +19,24 @@ typedef struct {
     float axis[PH_AXES];       // -1..1 (a trigger rests at -1)
     uint8_t has[PH_AXES];      // the device has the axis
     uint8_t map[16];           // Switch button bit (dm_input.h order) -> HID button usage, 0 none
+    float reach[PH_AXES][2];   // the furthest each stick axis has gone since the pad connected, negative / positive side (pad_hid_set_axis), from PAD_HID_REACH0
 } pad_hid;
+
+// Stick reach: a PowerA for Switch 2 ("Lic3 Pro Controller") reaches only X 8,400..56,464 and Y 3,823..58,943 of 0..65,535 (measured 27.10. for Super Smash Bros.
+// Ultimate, MacNativeGames 7ae830b), so a full push read 0.66-0.71 after the dead zone and Ocarina of Time's Link walked where the keyboard made him run. Each stick
+// direction is scaled by the furthest it has reached since the pad connected, from PAD_HID_REACH0, as Smash's gamepad_hid_reach does; a pad that reaches its whole range
+// grows to 1 at its first full push and reads as before from then on
+#define PAD_HID_REACH0 0.65f
+static void pad_hid_set_axis(pad_hid *h, int a, float v) {
+    h->axis[a] = v;
+    if (a >= PH_BRAKE) return;   // triggers keep their range
+    int side = v > 0; float m = v > 0 ? v : -v;
+    if (m > h->reach[a][side]) h->reach[a][side] = m > 1 ? 1 : m;
+}
+static float pad_hid_reached(const pad_hid *h, int a) {   // the axis as a share of its reach on that side, -1..1
+    float v = h->axis[a], r = h->reach[a][v > 0]; if (r <= 0) r = 1;
+    v /= r; return v < -1 ? -1 : v > 1 ? 1 : v;
+}
 
 static const char *const pad_hid_names[16] = {"A", "B", "X", "Y", "LS", "RS", "L", "R", "ZL", "ZR", "PLUS", "MINUS", "LEFT", "UP", "RIGHT", "DOWN"};
 
@@ -32,7 +49,7 @@ static inline int pad_dupes_want(int n, int listed, int read, int due) { return 
 static void pad_hid_init(pad_hid *h, const char *map) {
     static const uint8_t def[16] = {2, 1, 5, 4, 14, 15, 7, 8, 9, 10, 12, 11};
     memset(h, 0, sizeof *h); h->hat = -1; memcpy(h->map, def, sizeof def);
-    for (int a = 0; a < PH_AXES; a++) h->axis[a] = a >= PH_BRAKE ? -1 : 0;
+    for (int a = 0; a < PH_AXES; a++) { h->axis[a] = a >= PH_BRAKE ? -1 : 0; h->reach[a][0] = h->reach[a][1] = PAD_HID_REACH0; }
     for (const char *s = map; s && *s; s = strchr(s, ',') ? strchr(s, ',') + 1 : "") {
         const char *eq = strchr(s, '='), *end = strchr(s, ','); if (!eq || (end && eq > end)) continue;
         int u = atoi(eq + 1);
@@ -68,6 +85,6 @@ static uint64_t pad_hid_buttons(const pad_hid *h) {
 }
 static void pad_hid_sticks(const pad_hid *h, int32_t s[4]) {   // lx, ly, rx, ry; HID's Y grows downward, the Switch's upward
     int z = h->has[PH_Z];
-    pad_hid_stick(h->axis[PH_X], -h->axis[PH_Y], &s[0], &s[1]);
-    pad_hid_stick(h->axis[z ? PH_Z : PH_RX], -h->axis[z ? PH_RZ : PH_RY], &s[2], &s[3]);
+    pad_hid_stick(pad_hid_reached(h, PH_X), -pad_hid_reached(h, PH_Y), &s[0], &s[1]);
+    pad_hid_stick(pad_hid_reached(h, z ? PH_Z : PH_RX), -pad_hid_reached(h, z ? PH_RZ : PH_RY), &s[2], &s[3]);
 }

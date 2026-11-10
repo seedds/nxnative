@@ -926,7 +926,9 @@ static uint64_t mtk_pair_mix(uint64_t h, uint64_t v) { h ^= v; h *= 0x100000001b
 // The geometry of a task / mesh draw (0: none known, the draw is not paired). With a task shader: its key and the uniform and storage buffers its reflection reads (a stage
 // may have more bound: Ocarina of Time's colour pass binds another uniform slot 5 than its pre-pass, which its task shader does not read). With none: the largest storage buffer
 // the mesh shader reads, as the pre-pass and colour pass have their own mesh shaders and bind the same vertex data in other slots (Ocarina of Time: 7180476000+9b040 at slot 0
-// of the pre-pass's mesh shader 0c1ffecd, slot 2 of the colour pass's eed1add7). Objects that share it share notes: a draw of any of them counts for all (more waits, not fewer)
+// of the pre-pass's mesh shader 0c1ffecd, slot 2 of the colour pass's eed1add7). Objects that share it share notes and partner entries. A depth pass drawn by any of them makes
+// the others' cold colour passes wait (more waits), but one's skipped depth passes also skip another's built colour pass, and one's skipped colour pass holds another's built depth passes, for up
+// to MTK_PAIR_FRAMES frames while its build runs. No game has shown this; the draw's {count, first} could narrow the no-task key once runs show a pair shares it
 static uint64_t mtk_pair_geo(NvShader *ts, NvShader *ms) {
     uint64_t h = 0xcbf29ce484222325ull;
     if (ts) {

@@ -24,7 +24,7 @@ assert spec is not None and spec.loader is not None
 patch = importlib.util.module_from_spec(spec); spec.loader.exec_module(patch)
 
 
-def camera(r, cap=1):
+def camera(r, cap: float = 1.0):
     """The camera's x / y multipliers the loader writes for a shape (loader.c screen_camera), upright held to the vertical angle of a picture of shape cap (screen_upright_cap,
     DM_SCREEN_UPRIGHT_FOV: 1 by default, 0 off)"""
     if not r: return (1, 1)
@@ -139,7 +139,7 @@ class CameraProjection(unittest.TestCase):
 
     emit, put = OutputSize.emit, OutputSize.put
 
-    def shape(self, ratio, asked=None, cap=1):
+    def shape(self, ratio, asked=None, cap: float = 1.0):
         """The factors the output size was made with (state +0xb8 / +0xbc, 0 = 16:9) and, apart, the shape the host asks for now (+0xa0..: the camera ignores it)"""
         f = lambda r: (r, max(r * 9 / 16, 1), max(16 / (9 * r), 1)) if r else (0, 1, 1)
         self.u.mem_write(self.state + 0xa0, struct.pack('<3f', *f(ratio if asked is None else asked)))

@@ -190,10 +190,10 @@ t_present_crop: t_present_crop.m ../nvn/hle_nvn.c ../../host/crash.c ../../host/
 	clang $(CFLAGS) -fobjc-arc -o $@ t_present_crop.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
 .PHONY: check_t_present_crop
 check_t_present_crop: t_present_crop
-	DM_PRESENT_SNAP=0 DM_NVN_ENC_THREAD=0 ./t_present_crop
-	DM_PRESENT_SNAP=0 DM_NVN_ENC_THREAD=1 ./t_present_crop
-	DM_PRESENT_SNAP=1 DM_NVN_ENC_THREAD=0 ./t_present_crop
-	DM_PRESENT_SNAP=1 DM_NVN_ENC_THREAD=1 ./t_present_crop
+	DM_PRESENT_SNAP=0 DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_present_crop
+	DM_PRESENT_SNAP=0 DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_present_crop
+	DM_PRESENT_SNAP=1 DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_present_crop
+	DM_PRESENT_SNAP=1 DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_present_crop
 t_present_rescue: t_present_rescue.m t_present_rescue_focus.c $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_present_rescue.m t_present_rescue_focus.c $(MTL_T_SRC) $(FW)
 .PHONY: check_t_present_rescue
@@ -485,19 +485,19 @@ check_t_rt_recycle: t_rt_recycle
 t_upscaler_mfx: t_upscaler_mfx.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_upscaler_mfx.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_upscaler_mfx
-# (MetalFX's Metal 4 scaler stops under Metal validation on a barrier-stage setting of its own that has no public API, "_outputTextureBarrierStages not set": its run is without it)
+# (under Metal validation: MetalFX's Metal 4 scalers stop there without a fence of their own, "_outputTextureBarrierStages not set")
 check_t_upscaler_mfx: t_upscaler_mfx
-	DM_NVN_ENC_THREAD=0 DM_UPSCALER=metalfx ./t_upscaler_mfx
-	DM_NVN_ENC_THREAD=1 DM_UPSCALER=metalfx ./t_upscaler_mfx
+	DM_NVN_ENC_THREAD=0 DM_UPSCALER=metalfx MTL_DEBUG_LAYER=1 ./t_upscaler_mfx
+	DM_NVN_ENC_THREAD=1 DM_UPSCALER=metalfx MTL_DEBUG_LAYER=1 ./t_upscaler_mfx
 	MTL_DEBUG_LAYER=1 ./t_upscaler_mfx
-# NVN2's DLSS on MetalFX's temporal scaler, with and without the encoding thread (MetalFX encodes into the real command buffer; validation stops its Metal 4 scalers, as above)
+# NVN2's DLSS on MetalFX's temporal scaler, with and without the encoding thread (MetalFX encodes into the real command buffer), under Metal validation as above
 t_dlss_mfx: t_dlss_mfx.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_dlss_mfx.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_dlss_mfx
 # With zombie objects: a scaler released under its encoders is then a message to a deallocated instance at the commit, every time (without them it depends on what took its memory)
 check_t_dlss_mfx: t_dlss_mfx
-	NSZombieEnabled=YES DM_NVN_ENC_THREAD=0 ./t_dlss_mfx
-	NSZombieEnabled=YES DM_NVN_ENC_THREAD=1 ./t_dlss_mfx
+	NSZombieEnabled=YES DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_dlss_mfx
+	NSZombieEnabled=YES DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_dlss_mfx
 t_image_usage: t_image_usage.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_image_usage.m $(MTL_T_SRC) $(FW)
 check_t_image_usage: RUN_ENV = MTL_DEBUG_LAYER=1

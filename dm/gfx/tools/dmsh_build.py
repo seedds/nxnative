@@ -12,7 +12,7 @@
 # Environment IOSOUT=dir: the same MSL also goes through dm/ios/tools/ios_metal.compile to produce an iphoneos metallib + reflection (chain_metal records the iOS compile convention)
 # Final summary: success / failure counts and the distribution of reasons; distribution of driver segment read offsets (those outside the range the replay layer can fill are listed separately);
 # a [RED] line per shader that built but lost something (shader_regressions.report_losses), which does not change the exit status
-import atexit, bisect, inspect, os, re, sys, json, mmap, struct, hashlib, shutil, subprocess, tempfile, time, collections, threading, concurrent.futures as cf
+import atexit, bisect, inspect, itertools, os, re, sys, json, mmap, struct, hashlib, shutil, subprocess, tempfile, time, collections, threading, concurrent.futures as cf
 import dmsh_geometry, dmsh_atomic, dmsh_wide, dmsh_meshstage, dmsh_abi as abi   # abi: the driver segment layout and the binding kinds the host shares (dm/gfx/nvn/dmsh_abi.h)
 DM_ROOT = os.environ.get('DM_ROOT') or os.path.expanduser('~/dm-work')   # Workspace root (game files, build outputs and run artifacts are all under it)
 HOME = os.path.expanduser('~')
@@ -84,11 +84,12 @@ HMMA_BODY = '''{
     threadgroup half* h = (threadgroup half*)s;
     const int f = int(%(fl)s), k = (f >> 8) * 2;
     const bool areuse = f & 1, cslot = f & 2, dslot = f & 4, czero = f & 8, adirect = %(adirect)s;
+    const bool btake = bmode >= 0 && (bmode & 1), bfill = bmode >= 0 && !(bmode & 1); const int bk = (bmode >> 1) * 2;
     uint g = uint(%(lane)s) >> 2, t = uint(%(lane)s) & 3;
     if (!areuse && !adirect) { s[g * 8 + t] = uint(%(a0)s); s[(g + 8) * 8 + t] = uint(%(a1)s); s[g * 8 + 4 + t] = uint(%(a2)s); s[(g + 8) * 8 + 4 + t] = uint(%(a3)s); }
-    s[128 + g * 8 + t] = uint(%(b0)s); s[128 + g * 8 + 4 + t] = uint(%(b1)s);
+    if (!btake) { s[128 + g * 8 + t] = uint(%(b0)s); s[128 + g * 8 + 4 + t] = uint(%(b1)s); }
     if (!cslot && !czero) { s[192 + g * 4 + t] = uint(%(acc0)s); s[192 + (g + 8) * 4 + t] = uint(%(acc1)s); }
-    simdgroup_barrier(mem_flags::mem_threadgroup);
+    if (!btake || (!areuse && !adirect) || (!cslot && !czero)) simdgroup_barrier(mem_flags::mem_threadgroup);
     if (!areuse && adirect) {
         threadgroup half* x = %(shm_base)s + (int(simd_broadcast(uint(%(aaddr)s), ushort(0))) >> 1);
         const ulong st = ulong(uint(%(astr)s) >> 1); const bool tr = f & 32;
@@ -108,7 +109,8 @@ HMMA_BODY = '''{
     // made the network twice as slow (NDSR's fa3033d05c0a41d6: 0.59 ms against 0.32 on an M5 Max). dm/gfx/msl/ndve_engine.metal's hmma() rounds the same way
     simdgroup_half8x8 b0, b1, c0, c1;
     simdgroup_float8x8 f0, f1;
-    simdgroup_load(b0, h + 256, 16, ulong2(0, 0), true); simdgroup_load(b1, h + 256, 16, ulong2(8, 0), true);
+    if (btake) { b0 = bm[bk]; b1 = bm[bk + 1]; }
+    else { simdgroup_load(b0, h + 256, 16, ulong2(0, 0), true); simdgroup_load(b1, h + 256, 16, ulong2(8, 0), true); if (bfill) { bm[bk] = b0; bm[bk + 1] = b1; } }
     if (czero) { c0 = make_filled_simdgroup_matrix<half, 8, 8>(0.0h); c1 = c0; }
     else if (cslot) { c0 = acc[k]; c1 = acc[k + 1]; }
     else { simdgroup_load(c0, h + 384, 8, ulong2(0, 0)); simdgroup_load(c1, h + 384, 8, ulong2(0, 8)); }
@@ -143,6 +145,53 @@ def block_end(src, start):   # the index of the brace closing the block opened a
         depth += 1 if b.group() == '{' else -1
         if depth == 0: return b.start()
     raise ValueError('dmsh_hmma16816_f16: block not closed')
+# B kept in the SIMD-group (hmma_bslots). The lanes hold B in registers and the matrix hardware fills its matrices only from memory: a lane writing its elements through
+# thread_elements() from SIMD shuffles (the 8x8 lane layout measured on an M6: lane l holds row (l/16)*4 + (l/2)%4, columns 2(l%2) + 4((l/8)%2) and the next) took a chain of
+# calls 1.716 ms against 1.448 through the scratch, and every operand that way 8.9 ms. So B's trip through the block (2 stores, a barrier, 2 loads) cannot get cheaper; it can only
+# be left out where it repeats. B's trip is a fifth of a chain whose A and C stay in the SIMD-group (1.147 ms with none, 24 threadgroups of 4 SIMD-groups, as these networks run)
+HMMA_COPY = re.compile(r'(?:as_type<\w+>|int|uint|float|half|short|ushort)?\((\w+)\)|(\w+)')
+HMMA_DECL = re.compile(r'^[ \t]*(?:const[ \t]+)?[A-Za-z_]\w*(?:<[^<>;]*>)?[ \t]+(\w+)[ \t]*=[ \t]*([^;\n]+);', re.M)
+HMMA_WRITE = re.compile(r'\b(\w+)[ \t]*(?:<<|>>|[-+*/%&|^])?=(?!=)|\+\+[ \t]*(\w+)|\b(\w+)[ \t]*\+\+|--[ \t]*(\w+)|\b(\w+)[ \t]*--|&[ \t]*(\w+)')
+def hmma_bslots(msl, open_at, end, fcalls, writers):
+    """The calls of one function (open_at, end: its braces; fcalls: (match, arguments) in text order) → {call start: slot * 2 (keeps its B) or slot * 2 + 1 (takes it)}.
+    Two calls have the same B when their B arguments are the same variables after following copies (x, as_type<T>(x), int(x) ...) down to a variable written once in the function
+    and declared at its top level, so that its value is the same everywhere after its declaration. A variable a call writes (an out argument: the helper's D1, an argument of a
+    function with a non-const thread reference, one whose address is taken) is written more than once by that count. The first call of a B that stands at the function's top level
+    keeps its two matrices in a slot, and the calls of that B after it in the text take them: a statement at the top level runs before everything written after it"""
+    body = msl[open_at:end]
+    writes = collections.Counter(next(g for g in w.groups() if g) for w in HMMA_WRITE.finditer(body))
+    for c, args in fcalls: writes[args[HMMA_ARGS.index('d1')]] += 1
+    for name in writers:
+        for w in re.finditer(r'\b%s\(' % name, body):
+            depth, j = 1, w.end()
+            while depth and j < len(body): depth += {'(': 1, ')': -1}.get(body[j], 0); j += 1
+            writes.update(re.findall(r'\b[A-Za-z_]\w*\b', body[w.end():j]))
+    braces = [(b.start() + open_at, 1 if b.group() == '{' else -1) for b in BRACE.finditer(body)]
+    at, depth_after = [p for p, _ in braces], list(itertools.accumulate(d for _, d in braces))
+    def depth(pos): k = bisect.bisect_left(at, pos) - 1; return depth_after[k] if k >= 0 else 0   # 1: the function's top level
+    decls = {}
+    for d in HMMA_DECL.finditer(body): decls.setdefault(d.group(1), (d.group(2).strip(), d.start(1) + open_at))
+    def canon(name):
+        for _ in range(64):
+            if writes[name] != 1 or name not in decls: return None
+            init, pos = decls[name]
+            m = HMMA_COPY.fullmatch(init)
+            inner = m and (m.group(1) or m.group(2))
+            if not inner or inner[0].isdigit(): return name if depth(pos) == 1 else None
+            name = inner
+        return None
+    by_b = collections.defaultdict(list)
+    for c, args in fcalls:
+        k = (canon(args[HMMA_ARGS.index('b0')]), canon(args[HMMA_ARGS.index('b1')]))
+        if None not in k: by_b[k].append(c.start())
+    modes, slot = {}, 0
+    for starts in by_b.values():
+        first = next((i for i, st in enumerate(starts) if depth(st) == 1), None)
+        if first is None or first == len(starts) - 1: continue
+        modes[starts[first]] = slot * 2
+        modes.update((st, slot * 2 + 1) for st in starts[first + 1:])
+        slot += 1
+    return modes
 def hmma_msl(msl):
     m = re.search(r'\n(\w+) dmsh_hmma16816_f16\(([^)]*)\)\n\{', msl)
     if not m: return msl
@@ -176,12 +225,18 @@ def hmma_msl(msl):
     if not calls: return msl
     shared = set(callers.values())
     direct = len(shared) == 1 and None not in shared
-    extra = ', thread simdgroup_half8x8 (&acc)[16], thread simdgroup_half8x8 (&am)[4]' + (', threadgroup %s& dm_shm' % next(iter(shared))[0] if direct else '')
+    writers = {f.group(1) for f in re.finditer(r'\b(\w+)\(([^()]*)\)\s*\{', msl) if re.search(r'\bthread (?!const\b)[\w<>, ]+&', f.group(2)) and f.group(1) != 'dmsh_hmma16816_f16'}
+    modes = {}
+    for open_at in callers:
+        modes.update(hmma_bslots(msl, open_at, ends[open_at], [(c, split_params(c.group(1))) for c, o in calls if o == open_at], writers))
+    nb = max([2] + [(v // 2 + 1) * 2 for v in modes.values()])
+    extra = (', thread simdgroup_half8x8 (&acc)[16], thread simdgroup_half8x8 (&am)[4], thread simdgroup_half8x8 (&bm)[%d], const int bmode' % nb
+             + (', threadgroup %s& dm_shm' % next(iter(shared))[0] if direct else ''))
     v.update(adirect='(f & 16) != 0' if direct else 'false', shm_base='(threadgroup half*)&dm_shm[0]' if direct else '(threadgroup half*)nullptr')
     # Edits of the original text, applied from its end: the helper itself, each call's added arguments (the caller's matrices and shared memory), each caller's matrices
     edits = [(m.start(), body_end + 1, '\n%s dmsh_hmma16816_f16(%s%s)\n%s' % (m.group(1), m.group(2), extra, HMMA_BODY % v))]   # spirv-cross has it inlined (always_inline, the line before)
-    edits += [(c.end() - 1, c.end() - 1, ', dm_acc, dm_am' + (', ' + callers[open_at][1] if direct else '')) for c, open_at in calls]
-    edits += [(open_at + 2, open_at + 2, '    simdgroup_half8x8 dm_acc[16], dm_am[4];\n') for open_at in callers]
+    edits += [(c.end() - 1, c.end() - 1, ', dm_acc, dm_am, dm_bm, %d' % modes.get(c.start(), -1) + (', ' + callers[open_at][1] if direct else '')) for c, open_at in calls]
+    edits += [(open_at + 2, open_at + 2, '    simdgroup_half8x8 dm_acc[16], dm_am[4], dm_bm[%d];\n' % nb) for open_at in callers]
     for a, b, text in sorted(edits, key=lambda e: e[0], reverse=True):
         msl = msl[:a] + text + msl[b:]
     return msl

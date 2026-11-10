@@ -46,7 +46,7 @@ Used at `DM_FPS_TARGET=0` and for the interval the framework keeps while the VFR
 
 ### Output resolution on the Mac
 
-`DM_OUTPUT_SIZE` (the launcher's **Output resolution**: 1080p, 1440p, 4K or 5K, docked; its first option, 1600x900, is `off`, the game's own 900p scene scaled to 1080p) draws the game natively at that size. Needed together, all in `patches.py` and read from the state page written by `loader.c`: the output's width and height (+0x30c, +0x48), the 115 MB and 60 MB render pools at `main+0x12616d4` times +0x308 (at 1.5 x 1600x900 the 115 MB pool ran out and a null target crashed at `main+0xed7128`), and the 3D views at a factor of 1.2, as their scale divides by a fixed 1920. The render pools need a larger heap ([Memory on the Mac](#memory-on-the-mac)), so the launcher offers each size only from the Game memory it needs (`settings.tsv` `option_needs`), and the loader keeps the game's own picture, with a `[RED]` line, when a size comes with less (a saved choice with the window skipped, an env file).
+`DM_OUTPUT_SIZE` (the launcher's **Output resolution**: 1080p, 1440p, 4K or 5K, docked; its first option, 1600x900, is `off`, the game's own 900p scene scaled to 1080p) draws the game natively at that size. Needed together, all in `patches.py` and read from the state page written by `loader.c`: the output's width and height (+0x30c, +0x48), the 115 MB and 60 MB render pools at `main+0x12616d4` times +0x308 (at 1.5 x 1600x900 the 115 MB pool ran out and a null target crashed at `main+0xed7128`), and the 3D views at a factor of 1.2, as their scale divides by a fixed 1920. The render pools need a larger heap ([Memory on the Mac](#memory-on-the-mac)), so the launcher lets each size be chosen only from the Game memory it needs (`settings.tsv` `option_needs`; the others are listed greyed out with what they need), and the loader keeps the game's own picture, with a `[RED]` line, when a size comes with less (a saved choice with the window skipped, an env file).
 
 Measured on an M5 Max in the opening scene only (GPU p50): 2560x1440 6.3 ms at 60 fps, 5.3 ms holding 120; 5120x2880 8.4-9.4 ms at 60, and mostly 60 when asked for 120. A render pass dump shows targets at the output's size. `MemoryPoolInitialize: non-virtual pool has no storage`, of the swapchain's size, is logged at these sizes and has shown no effect. Not measured: handheld mode.
 
@@ -60,7 +60,7 @@ The game memory each size needs (M5 Max, macOS 27.2.1, in a window from a save o
 | 5120x2880 | 6 GB | standing still: ran to frame 6,300; running laps: a failed command buffer at about frame 10,200, with a GPU lockup report (WindowServer blamed) |
 | 5120x2880 | 8 GB | running laps: ran to frame 15,300, no GPU error |
 
-So 1440p needs 4 GB and 5K 8 GB. 4K (3840x2160) was not run; it is offered from 8 GB like 5K, rather than risk the GPU failure seen at 6 GB. A size larger than 5K (`DM_OUTPUT_SIZE` takes up to 7680 wide) is held to 12 GB, unmeasured.
+So 1440p needs 4 GB and 5K 8 GB. 4K (3840x2160) was not run; it needs 8 GB like 5K, rather than risk the GPU failure seen at 6 GB. A size larger than 5K (`DM_OUTPUT_SIZE` takes up to 7680 wide) is held to 12 GB, unmeasured.
 
 ### Memory on the Mac
 

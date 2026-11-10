@@ -42,7 +42,8 @@ final class LauncherModel: ObservableObject {
     let fixed: Set<String>      // set by an env file or by the launch environment: shown, not changed
     let fromLaunch: Set<String>   // of those, the ones the launch environment set (a front end's launch overrides, Xcode; DM_ENV_LAUNCH_KEYS from launcher.c or main.m)
     let ignoreSaved: Bool   // DM_SAVED_CHOICES=0: start from the defaults, and leave the saved choices as they are
-    @Published var values: [String: String] = [:] { didSet { settle() } }
+    @Published var values: [String: String] = [:] { didSet { if !loading { settle() } } }
+    private var loading = true   // while init reads the saved choices: a choice is checked against the others once all are read, not against the ones read before it (Output resolution comes before Game memory)
 
     private let defaults: UserDefaults
 
@@ -59,6 +60,7 @@ final class LauncherModel: ObservableObject {
             let saved = ignoreSaved ? nil : defaults.object(forKey: "launcher." + s.env) as? String   // a string, as launcher.c reads it: not string(forKey:), which turns a number into one
             values[s.env] = saved.flatMap { s.accepts($0) ? $0 : nil } ?? s.def   // a saved choice the game no longer offers: its default
         }
+        loading = false
         settle()
     }
 
@@ -70,6 +72,13 @@ final class LauncherModel: ObservableObject {
         return cur >= lo - 1e-6
     }
     func options(_ s: Setting) -> [[String]] { (s.options ?? []).filter { offers(s, $0[0]) } }
+    // What an option not offered yet needs, for its greyed-out entry: "needs 8 GB of Game memory" (the range's own label and unit); nil when it is offered
+    func needLabel(_ s: Setting, _ v: String) -> String? {
+        guard !offers(s, v), let need = s.optionNeeds?[v] else { return nil }
+        let p = need.components(separatedBy: ">=")
+        guard p.count == 2, let n = Double(p[1]), let r = settings.first(where: { $0.env == p[0] }) else { return "not available" }
+        return "needs \(r.unit != nil ? "\(Int(n.rounded())) \(r.unit!)" : rangeLabel(r, n)) of \(r.label)"
+    }
     // A choice whose option stopped being offered (Game memory lowered below what 5K needs) goes back to its default, or to its first offered option; a value fixed by an env file
     // or at launch stays, and the host checks it (loader.c DM_OUTPUT_SIZE)
     private func settle() {

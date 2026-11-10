@@ -19,7 +19,7 @@ META = {
     'needs': r'DM_[A-Z0-9_]+=[^;=]+',        # <VAR>=<value>: a sub-setting, drawn only while the row that sets <VAR> has that value
     'unit': r'[A-Za-z]+',                     # a range shown as a number of this unit instead of a percentage
     'first': r'[^;=]+',                      # a range's lowest value shown as this label
-    'option_needs': r'[^:,;]+:DM_[A-Z0-9_]+>=[0-9.]+(,[^:,;]+:DM_[A-Z0-9_]+>=[0-9.]+)*',   # <value>:<VAR>>=<n>,...: a choice's option offered only while that range is at least n
+    'option_needs': r'[^:,;]+:DM_[A-Z0-9_]+>=[0-9.]+(,[^:,;]+:DM_[A-Z0-9_]+>=[0-9.]+)*',   # <value>:<VAR>>=<n>,...: a choice's option selectable only while that range is at least n (greyed out until then)
 }
 
 

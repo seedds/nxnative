@@ -41,7 +41,7 @@ Hades II goes up to 300 %: it renders its whole picture, the HUD and text includ
 
 The size the game draws at, on the Mac and in docked mode, for games the app can resize: **1600x900 (standard)**, the game's own picture (Breath of the Wild draws its 3D scene at 1600x900 and scales it to a 1080p output, as on a docked Switch), then 1080p, 1440p, 4K or 5K. At those four the 3D picture and the HUD are drawn at that size, and **Render scale** is then a share of it: 100 % is the size chosen here. Larger sizes need far more GPU time, so a 120 fps target may fall back to 60.
 
-They also need more [Game memory](#game-memory): 1440p is offered from 4 GB, and 4K and 5K from 8 GB. Lowering Game memory below what the chosen size needs sets Output resolution back to 1600x900.
+They also need more [Game memory](#game-memory): 1440p from 4 GB, and 4K and 5K from 8 GB. Every size is listed; one that needs more memory than Game memory is set to is greyed out and says what it needs ("4K — needs 8 GB of Game memory"). Lowering Game memory below what the chosen size needs sets Output resolution back to 1600x900.
 
 ### Console mode
 

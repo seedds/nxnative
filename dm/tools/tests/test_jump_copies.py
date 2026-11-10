@@ -21,7 +21,7 @@ from nso_asm import ADRP, ADDI, ADDR, B, BEQ, BLR, BR, NOP
 tree = ast.parse((TOOLS / 'patch_nso.py').read_text())
 IMG = bytearray(0x5000); tabjumps = {}; jumps = {}   # the globals the recognizers read: the module image and the jump tables resolved so far in the function
 scope = {'re': re, 'struct': struct, 'ARM64_OP_IMM': ARM64_OP_IMM, 'IMG': IMG, 'tabjumps': tabjumps, 'jumps': jumps}
-exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ('num', 'written_w', 'writes_reg', 'null_base', 'writes_reg_any', 'half_count', 'copied_base', 'table_base', 'table_cands', 'forward_table_base', 'guarded_count', 'check_before_copy', 'jump_offsets', 'jump_adr_offsets', 'jump_zero_extended', 'jump_masked_pred', 'jump_masked_not')], type_ignores=[]), str(TOOLS / 'patch_nso.py'), 'exec'), scope)
+exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ('num', 'written_w', 'writes_reg', 'null_base', 'writes_reg_any', 'half_count', 'copied_base', 'table_base', 'table_cands', 'forward_table_base', 'guarded_count', 'check_before_copy', 'jump_offsets', 'jump_adr_offsets', 'jump_zero_extended', 'jump_masked_pred', 'jump_masked_not', 'jump_adr_far_check')], type_ignores=[]), str(TOOLS / 'patch_nso.py'), 'exec'), scope)
 
 
 def mov(dst, src, wide=True): return (0xaa0003e0 if wide else 0x2a0003e0) | src << 16 | dst
@@ -541,6 +541,136 @@ class ZeroExtendedIndex(unittest.TestCase):
                 self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
                 rows = [line.split('\t') for line in (Path(tmp) / 'nro0.sites.tsv').read_text().splitlines()]
                 self.assertEqual([[int(t, 0) for t in row[2].split()] for row in rows if row[1] == 'T'], [targets])
+
+
+class AdrFarCheck(unittest.TestCase):
+    """The adr-relative dispatch whose bounds check the compiler scheduled far before its b.hi (Yakuza Kiwami 1.01 main+0x91b24c): the check is the instruction whose flags the b.hi reads."""
+    TABLE = 0x4040
+    ANCHOR = 116   # the adr x18,#. at word 29
+    TARGETS = [152, 144, 160, 144]   # entry 1 and 3 share a case block, as in Yakuza Kiwami's table
+    BR = 35        # the br x18
+
+    def setUp(self):
+        tabjumps.clear(); jumps.clear()
+        for i, target in enumerate(self.TARGETS): struct.pack_into('<i', IMG, self.TABLE + 4 * i, target - self.ANCHOR)
+        struct.pack_into('<i', IMG, self.TABLE + 16, 0x1000)   # not a fifth entry
+
+    def words(self, at=0, table=None, **over):
+        # cmp w21,#3; 23 float / bitfield instructions writing neither w21 nor the flags; b.hi exit; mov w16,w21; adrp x17 + add x17; adr x18,#.; ldrsw x0,[x17,x16,lsl #2];
+        # add x18,x18,x0; br x18; three case blocks; the exit. Words 26, 30, 32 and 34 are spare slots inside the dispatch; 43 to 51 lie outside the run.
+        table = self.TABLE if table is None else table
+        words = [0x71000ebf, 0x1e270122, 0x1e220821, 0x1e39002b, 0x5301218f, 0x5293d3c9, 0x53185dee] + [NOP] * 17 + [
+                 bhi(at + 96, at + 168), mov(16, 21, False), NOP, ADRP(17, at + 108, table), ADDI(17, 17, table & 0xfff), 0x10000012, NOP,
+                 0xb8a07800 | 16 << 16 | 17 << 5, NOP, ADDR(18, 18, 0), NOP, BR(18), NOP, RET, NOP, RET, NOP, RET, RET] + [NOP] * 9
+        for k, v in over.items(): words[int(k[1:])] = v
+        return words
+
+    def decode(self, words):
+        md = Cs(CS_ARCH_ARM64, CS_MODE_ARM); md.detail = True
+        return [p for i, word in enumerate(words) for p in md.disasm(struct.pack('<I', word), 4 * i)]
+
+    def run_site(self, words, fn='jump_adr_far_check'):
+        ins = self.decode(words)
+        return scope[fn](ins, next(i for i, p in enumerate(ins) if p.address == 4 * self.BR))
+
+    def mnemonic(self, word):
+        ins = self.decode([word]); self.assertEqual(len(ins), 1, hex(word)); return ins[0].mnemonic
+
+    def test_check_found_by_its_flags_far_back(self):
+        words = self.words()
+        self.assertEqual([p.mnemonic for p in self.decode(words)[:7]], ['cmp', 'fmov', 'fmul', 'fcvtzu', 'ubfx', 'mov', 'lsl'])
+        self.assertEqual(self.run_site(words), self.TARGETS)
+        for older in ('jump_offsets', 'jump_adr_offsets', 'jump_zero_extended', 'jump_masked_pred', 'jump_masked_not'):   # the reason for the fallback: the check is out of their reach
+            with self.subTest(older=older):
+                self.assertIsNone(self.run_site(words, older))
+
+    def test_a_near_check_stays_with_jump_adr_offsets(self):
+        words = self.words(w0=NOP, w23=0x71000ebf)   # cmp w21,#3 just before the b.hi: the older form, same targets
+        self.assertEqual(self.run_site(words, 'jump_adr_offsets'), self.TARGETS)
+        self.assertEqual(self.run_site(words), self.TARGETS)
+
+    def test_the_nearest_flag_writer_is_the_bound(self):
+        self.assertEqual(self.run_site(self.words(w10=0x71000abf)), self.TARGETS[:3])   # cmp w21,#2 nearer the b.hi: three entries
+        self.assertEqual(self.run_site(self.words(w0=0xf1000ebf)), self.TARGETS)   # cmp x21,#3: the full register bounds the same table
+
+    def test_other_flag_writers_between_check_and_branch_are_refused(self):
+        for word, name in ((0x1e212000, 'fcmp'), (0x31000529, 'adds'), (0xf1000529, 'subs'), (0x7200013f, 'tst'), (0x72000129, 'ands'), (0x7100053f, 'cmp'),
+                           (0x3100053f, 'cmn'), (0x7a401924, 'ccmp'), (0x6b0a03e9, 'negs'), (0xd51b4200, 'msr'), (0x1e210400, 'fccmp')):
+            with self.subTest(insn=name):
+                self.assertEqual(self.mnemonic(word), name)
+                self.assertIsNone(self.run_site(self.words(w10=word)))
+
+    def test_the_check_must_compare_the_index_with_an_immediate(self):
+        for word in (0x71000d3f, 0x6b0902bf, 0x714006bf):   # cmp w9,#3; cmp w21,w9; cmp w21,#1,lsl #12
+            with self.subTest(word=hex(word)):
+                self.assertIsNone(self.run_site(self.words(w0=word)))
+
+    def test_the_checked_index_and_the_copy_must_hold(self):
+        for slot, word in ((10, mov(21, 0, False)), (10, mov(21, 0)), (10, 0xb9400015), (10, 0x110006b5), (26, mov(16, 0, False)), (26, mov(16, 0)), (30, mov(16, 0, False))):
+            with self.subTest(slot=slot, word=hex(word)):
+                self.assertIsNone(self.run_site(self.words(**{f'w{slot}': word})))
+        self.assertEqual(self.run_site(self.words(w26=mov(21, 0, False))), self.TARGETS)   # the source is dead after the copy
+
+    def test_entry_adr_base_table_base_and_x18_must_hold(self):
+        for slot, reg in ((32, 0), (34, 18), (30, 18), (30, 17)):
+            for wide in (False, True):
+                with self.subTest(slot=slot, reg=reg, wide=wide):
+                    self.assertIsNone(self.run_site(self.words(**{f'w{slot}': mov(reg, 1, wide)})))
+
+    def test_calls_traps_and_other_control_flow_are_refused(self):
+        for slot in (10, 26, 30, 32, 34):
+            for word in (0x94000040, BLR(0), RET, B(slot * 4, slot * 4 + 4), BEQ(slot * 4, 168), cbz_w18(slot * 4, 168), bhi(slot * 4, 168),
+                         0xd4000001, 0xd4000521, 0xd4200000, 0xd4400000):
+                with self.subTest(slot=slot, word=hex(word)):
+                    self.assertIsNone(self.run_site(self.words(**{f'w{slot}': word})))
+
+    def test_the_branch_must_be_b_hi_out_of_the_run(self):
+        for word in (NOP, 0x54000502 | 0, BEQ(96, 168), 0x54000541, bhi(96, 40), bhi(96, 140)):   # none, b.hs, b.eq, b.ne, b.hi into the run
+            with self.subTest(word=hex(word)):
+                self.assertIsNone(self.run_site(self.words(w24=word)))
+
+    def test_incoming_edges_cannot_bypass_the_check(self):
+        for target in (4, 40, 96, 100, 104, 116, 124, 132, 140):
+            for word in (B(180, target), B(180, target) | 0x80000000, bhi(180, target)):
+                with self.subTest(target=target, word=hex(word)):
+                    self.assertIsNone(self.run_site(self.words(w45=word)))
+        self.assertEqual(self.run_site(self.words(w45=B(180, 0))), self.TARGETS)   # an entry at the check itself passes it
+        tabjumps[0x1000] = [100]
+        self.assertIsNone(self.run_site(self.words()))
+        tabjumps.clear(); jumps[0x1000] = (100, 1)
+        self.assertIsNone(self.run_site(self.words()))
+
+    def test_undecodable_words_break_the_proof(self):
+        for slot in (10, 26, 30, 32, 34):
+            with self.subTest(slot=slot):
+                self.assertIsNone(self.run_site(self.words(**{f'w{slot}': 0xe7ffdefe})))
+
+    def test_table_extent_and_targets_are_validated(self):
+        self.assertIsNone(self.run_site(self.words(w0=0x710012bf)))   # cmp w21,#4: a fifth entry that is no target
+        self.assertIsNone(self.run_site(self.words(table=0x5000)))
+        for target in (100, 145, 0x1000, -4):
+            with self.subTest(target=target):
+                struct.pack_into('<i', IMG, self.TABLE + 8, target - self.ANCHOR)
+                self.assertIsNone(self.run_site(self.words()))
+
+    def test_real_rewriter_resolves_the_site(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from test_nso_match import image
+        with tempfile.TemporaryDirectory() as tmp:
+            table, at = 0x2040, 0x100
+            raw = image({at: self.words(at=at, table=table)})
+            for i, target in enumerate(self.TARGETS): struct.pack_into('<i', raw, table + 4 * i, target - self.ANCHOR)
+            # Give the synthetic MOD0 image an NRO header, keeping its unwind metadata outside the header (as ZeroExtendedIndex does).
+            raw[0x1100:0x111c] = raw[0x20:0x3c]; struct.pack_into('<I', raw, 4, 0x1100)
+            struct.pack_into('<ii', raw, 0x1110, 0x3000 - 0x1100, 0x3014 - 0x1100)
+            raw[0x10:0x14] = b'NRO0'; struct.pack_into('<I', raw, 0x18, len(raw))
+            struct.pack_into('<6I', raw, 0x20, 0, 0x1000, 0x1000, 0x2000, 0x3000, 0x1000); struct.pack_into('<I', raw, 0x38, 0)
+            src = Path(tmp) / 'input.nro'; src.write_bytes(raw)
+            run = subprocess.run([sys.executable, str(TOOLS / 'patch_nso.py'), str(src), tmp, 'nro0'],
+                                 env=os.environ | {'DM_GAME': '010015100B514000', 'DM_REWRITE_J': '1'}, capture_output=True, text=True)
+            self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+            rows = [line.split('\t') for line in (Path(tmp) / 'nro0.sites.tsv').read_text().splitlines()]
+            self.assertEqual([[int(t, 0) for t in row[2].split()] for row in rows if row[1] == 'T'], [[at + t for t in self.TARGETS]])
 
 
 class MaskedPredecessor(unittest.TestCase):

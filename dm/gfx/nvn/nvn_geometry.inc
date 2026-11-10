@@ -668,7 +668,7 @@ static int mtk_bind_may_write(const nvn_rbind *b) {
     switch (b->kind) {
         case NVN_RB_CBUF: case NVN_RB_SAMP: case NVN_RB_TEX: case NVN_RB_SAMPT: case NVN_RB_SAMPI: case NVN_RB_UBOP: case NVN_RB_SUPPORT: case NVN_RB_C1: case NVN_RB_DRV0:
         case NVN_RB_DRV2: case NVN_RB_BORDER: case NVN_RB_PUSH: case NVN_RB_TEXU: case NVN_RB_SAMPU: case NVN_RB_TEXD: case NVN_RB_SAMPD: case NVN_RB_TEXA: case NVN_RB_SAMPA:
-        case NVN_RB_TEXP: case NVN_RB_SAMPP: case NVN_RB_TEXH: case NVN_RB_SAMPH: return 0;   // uniforms, driver tables, textures and samplers by any handle: reads (what the code does with them is the MSL check)
+        case NVN_RB_TEXP: case NVN_RB_SAMPP: case NVN_RB_TEXH: case NVN_RB_SAMPH: case NVN_RB_CBSIZE: return 0;   // uniforms (CBSIZE: the uniform slots' bound sizes, c[DMSH_CBSIZE_BANK], which the host writes), driver tables, textures and samplers by any handle: reads (what the code does with them is the MSL check)
         case NVN_RB_SBUFP: case NVN_RB_SBUFU: case NVN_RB_GMEM: return b->rw != 0;
         default: return 1;   // IMG / IMGU (write views), TBUF / TBUFU (the reflection never sets their rw), GMEML (the store log), GEOMETRY, any kind not listed
     }

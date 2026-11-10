@@ -245,7 +245,7 @@ int main(void) { @autoreleasepool {
         {"IMGU (mesh) waits", NVN_RB_IMGU, 0, 0, 0, 0, 4, reader, 0}, {"GMEML (mesh) waits", NVN_RB_GMEML, 0, 0, 0, 0, 4, reader, 0},
         // read-only bindings with read-only code: skipped (OoT's 990 ms mesh pipeline: read-only GMEM in the mesh stage, texture / sampler pools in the pixel stage)
         {"read-only GMEM (mesh) skips", NVN_RB_GMEM, 0, 0, 0, 0, 4, reader, 1}, {"read-only SBUFU (mesh) skips", NVN_RB_SBUFU, 0, 0, 0, 0, 4, reader, 1},
-        {"TEXA (pixel) skips", NVN_RB_TEXA, 0, 0, 0, 0, 1, reader, 1}, {"SAMPA (mesh) skips", NVN_RB_SAMPA, 0, 0, 0, 0, 4, reader, 1},
+        {"TEXA (pixel) skips", NVN_RB_TEXA, 0, 0, 0, 0, 1, reader, 1}, {"CBSIZE (mesh) skips: the uniform slots' bound sizes are read only", NVN_RB_CBSIZE, 0, 0, 0, 0, 4, reader, 1}, {"CBSIZE (task) skips", NVN_RB_CBSIZE, 0, 0, 0, 0, 3, reader, 1}, {"SAMPA (mesh) skips", NVN_RB_SAMPA, 0, 0, 0, 0, 4, reader, 1},
         {"bindless reader (mesh) skips", 0, 0, 1, 0, 0, 4, reader, 1}, {"dyn reader (pixel) skips", 0, 0, 0, 1, 0, 1, reader, 1},
         {"texture / sampler pool reader (pixel) skips", NVN_RB_TEXP, 0, 0, 0, 1, 1, reader, 1}, {"loop guard writes only (task) skips", 0, 0, 0, 0, 0, 3, reader, 1},
         // read-only bindings, code that writes: waits

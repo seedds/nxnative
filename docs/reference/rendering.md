@@ -74,6 +74,16 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** views are now also kept by texture serial and view parameters (4 per texture), checked against the current base texture on each hit, and dropped when the texture or its pool is finalized; a registration identical to what the ID holds keeps its view and the registration generation (`vc_get` in `nvn_mtl.m`).
 - **Found on:** [Hyrule Warriors: Age of Calamity](../../dm/games/01002B00111A2000/README.md): 2,036 views were made in a 15-minute Mac battle run, 211 million reused; the replay before the cutscene went from 14.3 to 10.8 ms a frame.
 
+### Texture views re-made for finalized textures every submission
+
+- **Symptom:** `newTextureViewWithPixelFormat` stays a large share of the submit thread although the view cache hits. Ocarina of Time (Switch 2) made about 330 views a frame in Kokiri Forest, about 310 of them for the same textures again.
+- **Cause:** the view cache ([Texture views cached by texture and view parameters](#texture-views-cached-by-texture-and-view-parameters)) kept views only for live textures. A texture the game has finalized while one of its IDs is still registered resolves through `g_ghost`, and `vc_set_for` refused its set because nothing dropped it later. So every submission that read the ID made a transient view, released at the submission's end (`treg_finish_submission`), and the next submission made it again.
+- **Fix:** a finalized texture that `g_ghost` still holds keeps its view set, marked as a finalized texture's. Once a frame, `vc_ghost_sweep` drops the sets of the serials `g_ghost` has let go. The ring evicts under `g_smu`, which can't take `g_rmu`, so eviction can't drop them directly. The views hold the texture only as long as `g_ghost` already does, plus up to a frame. `DM_NVN_VC_KEEP` (default 1) turns it off with 0 and alternates it with the `DM_AB` phases with `ab`.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md). In-run A/B on its Kokiri Forest route (M2 Air, 20 pairs):
+  - views made 330–347 → 38 a frame, none of them evictions;
+  - submit thread −1.72 M cycles a frame (−6 %), −5.4 M instructions;
+  - frame time within noise, because the GPU was the limit.
+
 ### Compatible views for a mismatched declared texture type
 
 - **Symptom:** daylight scenes washed out to white (every read of a texture returned one fixed value); `texture type mismatch` red lines, among them `declares slot … as Metal type 6, texture ID … is type 5` (a cube in a cube array slot).

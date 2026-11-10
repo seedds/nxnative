@@ -244,6 +244,7 @@ DM_NVN_VCONV_CHECK	diagnostic	`=1` scans the indices again at every reuse of a c
 DM_NVN_VCONV_CPU	switch	`=1` converts integer vertex inputs fed formats of another class on the CPU, as before, instead of through the shader's shadow inputs (`<key>_bv`)
 DM_NVN_VCONV_KEEP	switch	`=0` turns off the kept vertex conversions (`vk_get`); `=<n>` sets the smallest range kept, in vertices (default 4096, which `=1` also gives)
 DM_NVN_VCONV_RANGE	switch	`0` / `1` overrides the profile's `vconv_range`: CPU vertex conversion only over the vertices each draw reads instead of the whole bound range
+DM_NVN_VC_KEEP	switch	`1` (default) keeps the texture-view set of a finalized texture that a registered ID still resolves through the ghost table, until the owner lets the serial go (vc_ghost_sweep, once a frame); `0` refuses such sets, so each submission that reads the ID makes its view again; `ab` alternates it with the DM_AB phases
 DM_NVN_VLOG	diagnostic	Set: logs each NVN memory pool as it is created (address, memory, size, flags) with a backtrace
 DM_NVN_VSDUMP	path	Output file for post-vertex captures; used with DM_NVN_VSDUMP_KEY and the frame/count bounds
 DM_NVN_VSDUMP_FROM	diagnostic	First presented frame eligible for a post-vertex capture (default 0)

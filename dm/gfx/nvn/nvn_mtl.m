@@ -6397,10 +6397,11 @@ static void treg_finish_submission(void) {
 // Texture views by texture serial and view parameters, beside the per-ID view: KTGL (Age of Calamity) registers a texture into the next ID of a ring before every bind (about 21,000
 // registrations a frame in battle after the first cutscene, 5 in 6 of them a different texture than the ID held), so the per-ID view was rebuilt for nearly every bind: half the
 // registrations ended in a new Metal texture view, 45% of the replay's time. A hit is checked against the current base texture (re-uploads and format-view upgrades replace it).
-// Only live textures are cached; entries go when the texture is finalized (mtl_tex_release) or its pool is (treg_drop_pool_views), and all of them past VC_MAX textures. Under g_rmu
+// Live textures are cached, and finalized ones that a registered ID still resolves through g_ghost (vc_keep_on). Entries go when a live texture is finalized (mtl_tex_release), when
+// g_ghost lets a finalized one go (vc_ghost_sweep, once a frame), when the pool is finalized (treg_drop_pool_views), and all of them past VC_MAX textures. Under g_rmu
 typedef struct { uint32_t pf, l0, nl, s0, ns; uint8_t tt, sw[4], pad[3]; } vc_key;
 enum { VC_WAYS = 4, VC_MAX = 16384 };
-typedef struct { const void *pool; unsigned next; vc_key k[VC_WAYS]; void *view[VC_WAYS];   // view: retained
+typedef struct { const void *pool; unsigned next; uint8_t ghost; vc_key k[VC_WAYS]; void *view[VC_WAYS];   // view: retained; ghost: the set of a finalized texture (vc_keep_on)
                  void *rows, *rows_of; uint64_t rows_rid, rows_n;   // rows: a texture buffer as 2D rows (tbuf_as_2d; retained, resident), rows_of / rows_n: the buffer texture it was made from and its element count
                  void *tbv; uint64_t tbv_rid; } vc_set;   // tbv: a buffer image from the aligned boundary below its offset (tbias_view; retained, resident)
 static nvn_hmap g_vc = {.klen = 8};   // texture serial → vc_set
@@ -6413,8 +6414,17 @@ static void vc_set_free(void *p) {
     vc_rows_drop(s); vc_tbv_drop(s);
     free(s);
 }
+// A finalized texture's views (DM_NVN_VC_KEEP, default 1; 0 turns it off, ab alternates it with the DM_AB phases). A texture the game has finalized while one of its IDs is still
+// registered resolves through g_ghost. Its set used to be refused (nothing dropped it), so every submission that read the ID made a transient Metal view, released at the submission's
+// end (treg_finish_submission), and the next submission made it again: Ocarina of Time (Switch 2) made about 330 views a frame in Kokiri Forest, at about 30 us each on the submit thread.
+// Its set now lives until g_ghost lets the serial go, which vc_ghost_sweep checks once a frame (the owner evicts idle ghost entries under g_smu, own_ghost_trim, which cannot take
+// g_rmu). The checks look at the ghost table without using the entry (own_ghost_has), so a cached view does not keep its serial in the table. The views hold the texture only
+// as long as g_ghost already does, plus up to a frame
+static int vc_keep_mode(void) { static int m = -1; if (m < 0) m = sw_mode("DM_NVN_VC_KEEP", 1); return m; }
+static inline int vc_keep_on(void) { return sw_on(vc_keep_mode()); }
+static uint64_t *g_vcg; static unsigned g_vcg_n, g_vcg_cap; static uint64_t g_vcg_frame = ~0ull;   // serials of the finalized textures' sets, for vc_ghost_sweep
 static id<MTLTexture> vc_get(uint64_t ser, const vc_key *k, id<MTLTexture> base) {
-    vc_set *s = nvn_hm_get(&g_vc, &ser); if (!s) return nil;
+    vc_set *s = nvn_hm_get(&g_vc, &ser); if (!s || (s->ghost && !vc_keep_on())) return nil;
     for (int i = 0; i < VC_WAYS; i++) if (s->view[i] && !memcmp(&s->k[i], k, sizeof *k)) {
         id<MTLTexture> v = (__bridge id<MTLTexture>)s->view[i];
         if (v.parentTexture == base) { g_vc_hit++; return v; }
@@ -6422,16 +6432,33 @@ static id<MTLTexture> vc_get(uint64_t ser, const vc_key *k, id<MTLTexture> base)
     }
     return nil;
 }
-static vc_set *vc_set_for(uint64_t ser, const void *pool) {   // the texture's entry, made if needed; NULL for a texture already finalized (resolved through g_ghost): nothing would drop the entry
-    int live = own_tex_live(ser);
-    if (!live) return NULL;
+static vc_set *vc_set_for(uint64_t ser, const void *pool) {   // the texture's entry, made if needed; for a finalized texture (resolved through g_ghost) only with vc_keep_on, and vc_ghost_sweep drops it
+    int keep = vc_keep_on();
+    int live = own_tex_live(ser), ghost = !live && keep && own_ghost_has(ser);   // own_ghost_has: a look that is not a use (the entry's place in the ghost list stays)
+    if (!live && !ghost) return NULL;
     vc_set *s = nvn_hm_get(&g_vc, &ser);
+    if (s && s->ghost && !keep) return NULL;
     if (!s) {
         if (g_vc.n >= VC_MAX) nvn_hm_clear(&g_vc, vc_set_free);
         if (!(s = calloc(1, sizeof *s))) return NULL;
-        s->pool = pool; nvn_hm_put(&g_vc, &ser, s);
+        s->pool = pool; s->ghost = (uint8_t)ghost; nvn_hm_put(&g_vc, &ser, s);
+        if (ghost) { if (g_vcg_n == g_vcg_cap) { g_vcg_cap = g_vcg_cap ? 2 * g_vcg_cap : 256; g_vcg = realloc_or_die(g_vcg, g_vcg_cap * sizeof *g_vcg, "the finalized textures' view sets"); } g_vcg[g_vcg_n++] = ser; }
     }
     return s;
+}
+// Once a frame (from tex_by_id, under g_rmu): drop the sets of finalized textures g_ghost no longer holds, and forget the serials whose sets went otherwise (VC_MAX, a pool's views)
+static void vc_ghost_sweep(void) {
+    uint64_t f = atomic_load(&g_cur_frame); if (f == g_vcg_frame) return;
+    g_vcg_frame = f; if (!g_vcg_n) return;
+    unsigned o = 0, nd = 0; vc_set *drop[64];
+    pthread_mutex_lock(&g_smu);
+    for (unsigned i = 0; i < g_vcg_n; i++) { uint64_t ser = g_vcg[i]; vc_set *s = nvn_hm_get(&g_vc, &ser);
+        if (!s || !s->ghost) continue;
+        if (own_ghost_has_locked(ser) || nd == 64) g_vcg[o++] = ser;   // still held (or left for the next sweep)
+        else { nvn_hm_del(&g_vc, &ser); drop[nd++] = s; } }
+    pthread_mutex_unlock(&g_smu);
+    g_vcg_n = o;
+    for (unsigned i = 0; i < nd; i++) vc_set_free(drop[i]);   // the views' releases outside g_smu
 }
 static void vc_put(uint64_t ser, const void *pool, const vc_key *k, id<MTLTexture> v) {
     vc_set *s = vc_set_for(ser, pool); if (!s) return;
@@ -6699,6 +6726,7 @@ static id<MTLTexture> tex_by_id(int tid) {   // Caller holds g_rmu
     if (rp->view && rp->view_ser == sg && (!rp->view_pkg || rp->view_dirty == dg)) return (__bridge id<MTLTexture>)rp->view;
     // A packaged texture whose pages nobody wrote since its upload stamp is what tex_mtl_ would find clean (the same test): keep the view without the serial table lookup
     if (rp->view && rp->view_ser == sg && rp->view_span && !nvn_dirty_since_span(rp->view_span, rp->t.mem, rp->t.L.size, rp->view_stamp)) { rp->view_dirty = dg; return (__bridge id<MTLTexture>)rp->view; }
+    vc_ghost_sweep();   // once a frame
     id<MTLTexture> v = (__bridge id<MTLTexture>)rp->view;
     // Guest writes (nvn_dirty_now) matter only to CPU-written textures: a texture that becomes CPU-written later bumps g_ser_gen once (mtl_tex_cpu_written), which sends its ID through here again.
     // Before, every guest write to any protected page sent every texture ID, render targets included, down this path

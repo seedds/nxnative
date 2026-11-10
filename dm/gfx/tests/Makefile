@@ -1033,3 +1033,6 @@ t_pool_cow_residency: t_pool_cow_residency.m $(MTL_T_DEP)
 check_t_pool_cow_residency: t_pool_cow_residency
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./t_pool_cow_residency
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./t_pool_cow_residency
+t_tex_drop_mip: t_tex_drop_mip.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_tex_drop_mip.m $(MTL_T_SRC) $(FW)
+check_t_tex_drop_mip: RUN_ENV = MTL_DEBUG_LAYER=1

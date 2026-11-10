@@ -564,6 +564,15 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Open:** the main pass at about 763x429 is a low resolution, and the GPU at about 17 ms is still a little over budget, so the frame rate is not locked.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md).
 
+
+### Compute pipelines built at their first dispatch
+
+- **Symptom:** frames of 150 ms to more than a second in play, long after the prewarm finished, with `[longframe]` lines naming new pipelines and the `pipelines up to frame` line showing compute pipelines `built` on the submit thread; a game with thousands of compute shaders hits them at every new effect.
+- **Cause:** the prewarm built the compute pipelines its lists name (`C` rows of `pso_manifest.tsv` and the device's `pso_user.tsv`). A list holds what a recording reached: Kirby Air Riders' seed list, recorded over an hour of play, has 2,238 of its 8,092 compute shaders, and each of the others was built at its first dispatch, about 180 ms on the submit thread. A compute pipeline has no state but its shader, unlike a render pipeline, so nothing about it has to be recorded.
+- **Fix:** the prewarm adds every compute shader of the shader map that no list names (`warm_parse`; `DM_PSO_ALL_COMPUTE=0` turns it off). On Kirby Air Riders (M4 Pro), compute pipelines built in play went from 54 in 3,900 frames (9.8 s on the submit thread, 13.2 s with the render pipelines) to none in 10,500 frames, and frames over 100 ms from 72 to 23. The cost is at the first start only, and after a chain change: with no pipeline archive and no Metal cache, the prepare step took 146 s with the lists' 2,506 compute pipelines and 330 s with all 8,092; with the archive it takes 0.9 s. Resident memory in a race was about 0.5-0.9 GB higher with all of them loaded (not a controlled comparison).
+- **Checked:** `t_pso_warm` (`all_compute`: the listed shader once, the unlisted one added, `DM_PSO_ALL_COMPUTE=0` the lists alone).
+- **Found on:** [Kirby Air Riders](../../dm/games/040077201BE50000/README.md).
+
 ### Dynamic resolution at its floor while the GPU has time to spare
 
 - **Symptom:** after a loading screen the game's resolution stays at its lowest (Ocarina of Time: 683x384) for minutes while it holds 60 fps with GPU time well under the frame, and climbs back only slowly or not at all.

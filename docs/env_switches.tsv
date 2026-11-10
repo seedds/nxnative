@@ -277,6 +277,7 @@ DM_PROBE_X2	diagnostic	`=<bytes>` (hex): probe hits also dump that many bytes of
 DM_PROGRAM	switch	`=<index>`: the program of a game of several programs that a host over their profiles runs (default 0; `main.c` `dm_game_cur`)
 DM_PROGRAMS	path	Table of a game's programs on the Mac (`programs.tsv`: index, host, modules, run folder, environment): `oe::ExecuteProgram` starts the named one in this process's place; the NSP script's run command and the Mac app set it
 DM_PROGRAM_ID	switch	`=<hex>`: the program ID the host reports from `svcGetInfo(ProgramId)` (default: the profile's `program_id`)
+DM_PSO_ALL_COMPUTE	switch	`0`: the prewarm builds only the compute pipelines its lists name, not every compute shader of the shader map (on by default: a compute pipeline is its shader alone, and one no list named was built at its first dispatch)
 DM_PSO_ARCHIVE	path	The folder of the per-game Metal 4 pipeline archive of pipeline bases (default `pso_archive/` beside `pso_user.tsv`); `off` keeps no archive
 DM_PSO_BUNDLE	path	The pipeline archive made offline (`<GPU architecture>.mtl4a`, `prebuilt.tsv`), read only; the iOS app and Mac launcher set it to their `pso/` folder; `off` ignores it
 DM_PSO_GPUS	switch	`build_ipa.sh`: the GPU architectures, comma-separated, to build the offline pipeline archive for (`none` builds none); unset, a profile with `pso_mtl4 on` gets its `pso_gpu` list or `g18p` when absent; profiles with `pso_mtl4 off` get none

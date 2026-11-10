@@ -316,6 +316,23 @@ static void native_mesh(NSString *dir) {
     g_warm_t0 = bp_now(); warm_finish();
 }
 
+// Every compute shader of the shader map is prewarmed, named by a list or not (warm_parse): a compute pipeline is its shader alone
+static void all_compute(NSString *dir) {
+    NSMutableDictionary *map = g_shmap; g_shmap = map.mutableCopy; g_shmap[@"warm-cs-a"] = @"compute"; g_shmap[@"warm-cs-b"] = @"compute";
+    NSString *manifest = [dir stringByAppendingPathComponent:@"compute.tsv"];
+    EXPECT("compute manifest written", 1, [@"S\twarm-vs\t0\nC\twarm-cs-a_b\n" writeToFile:manifest atomically:YES encoding:NSUTF8StringEncoding error:nil]);
+    long lines = 0; NSArray<WarmTask *> *tasks = warm_parse(@[manifest], &lines);
+    int listed = 0, added = 0, other = 0;
+    for (WarmTask *t in tasks) { if (t->kind != 2) continue; if ([t->key isEqualToString:@"warm-cs-a_b"]) listed++; else if ([t->key isEqualToString:@"warm-cs-b_b"]) added++; else other++; }
+    EXPECT("the list's lines and the compute shader no list names", 3, lines);
+    EXPECT("the listed compute shader once", 1, listed);
+    EXPECT("the compute shader no list names", 1, added);
+    EXPECT("no other compute task", 0, other);
+    EXPECT("the added task has the compute stage", 1, tasks.count == 3 && ((WarmTask *)tasks[2])->kind == 2 && ((WarmTask *)tasks[2])->stage == 5);
+    setenv("DM_PSO_ALL_COMPUTE", "0", 1); lines = 0; tasks = warm_parse(@[manifest], &lines); unsetenv("DM_PSO_ALL_COMPUTE");
+    EXPECT("DM_PSO_ALL_COMPUTE=0: the list's lines alone", 2, lines);
+    g_shmap = map;
+}
 int main(void) { @autoreleasepool {
     alarm(60);   // A regression in owner/waiter progress must fail rather than hang the suite.
     setenv("DM_PSO_ARCHIVE", "off", 1); setenv("DM_NVN_PREDICT", "0", 1);
@@ -328,6 +345,7 @@ int main(void) { @autoreleasepool {
     singleflight(@(dir));
     scenario(@(dir), 0); scenario(@(dir), 1);
     native_mesh(@(dir));
+    all_compute(@(dir));
     const char *mode = getenv("DM_PSO_MTL4");
     if (mode) EXPECT("requested compiler path selected", strcmp(mode, "0") != 0, g_comp4 != nil);
     [NSFileManager.defaultManager removeItemAtPath:@(dir) error:nil];

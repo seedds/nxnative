@@ -110,6 +110,15 @@ class ControlFlow(unittest.TestCase):
         self.assert_no_loop(msl)
         self.assertEqual(len(re.findall(r'== (?:\w+\()?\d+', msl)), 2, msl)
 
+    def test_table_word_past_the_code_ends_the_table(self):
+        # 0: LDC R1, c1[R2 + 0]; 1: BRX R1 to 2 or 3; 2: jump to 4; 3: work; 4: exit. The third word points far past the code (PRAGMATA's cc188a20e7544ee7: 0x3000000 after
+        # its four targets): it ends the table, where reading the code there threw ArgumentOutOfRangeException
+        anchor = 2 * SIZE
+        program = [ldc(1, 2, 0), branch(0x949, 0, ra=1), bra(2, 4), WORK, EXIT]
+        msl = self.translate(program, struct.pack('<3i', 2 * SIZE - anchor, 3 * SIZE - anchor, 0x3000000))
+        self.assertEqual(len(re.findall(r'== (?:\w+\()?\d+', msl)), 1, msl)
+
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -123,6 +123,12 @@ namespace Ryujinx.Graphics.Shader.Instructions
             {
                 srcB = context.BitwiseAnd(srcB, Const(maxShiftConst - 1));
             }
+            else if (!isLongShift)
+            {
+                // nxnative: a 32-bit funnel shift clamps the amount to 32 (PTX shf.clamp, Eden integer_funnel_shift.cpp), so SHF.L by >= 32 yields A and
+                // SHF.R yields C; it used to yield 0
+                srcB = context.IMinimumU32(srcB, Const(32));
+            }
 
             Operand res;
 
@@ -159,7 +165,18 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 }
             }
 
-            if (!mask)
+            // nxnative: a shift by 0 used "A >> 32" / "C << 32" for the other word, which SPIR-V and Metal leave undefined (a GPU that masks the amount
+            // ORs the other word in whole); a shift by exactly 32 is the other word
+            res = context.ConditionalSelect(context.ICompareEqual(srcB, Const(0)), left ? srcC : srcA, res);
+
+            if (!isLongShift)
+            {
+                if (!mask)
+                {
+                    res = context.ConditionalSelect(context.ICompareEqual(srcB, Const(32)), left ? srcA : srcC, res);
+                }
+            }
+            else if (!mask)
             {
                 // Clamped shift value.
                 Operand isLessThanMax = context.ICompareLessUnsigned(srcB, Const(maxShiftConst));

@@ -1007,9 +1007,22 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
 
             // Derivatives (X and Y).
-            for (int dIndex = 0; dIndex < 2 * coordsCount; dIndex++)
+            // nxnative: the derivative registers are interleaved per coordinate (dPdx.x, dPdy.x, dPdx.y, dPdy.y), as Eden reads them (texture_gradient.cpp, and
+            // emit_spirv_image.cpp: X = d[2i], Y = d[2i + 1]) and nouveau writes them (handleTXD); the texture operation takes all of dPdx, then all of dPdy.
+            // Upstream read dPdx = (Rb, Rb + 1), dPdy = (Rb + 2, Rb + 3), which mixes the axes of every 2D gradient (Donkey Kong Bananza: 272 TXD in 60 pixel shaders)
+            Operand[] derivatives = new Operand[2 * coordsCount];
+
+            for (int dIndex = 0; dIndex < derivatives.Length; dIndex++)
             {
-                sourcesList.Add(Rb());
+                derivatives[dIndex] = Rb();
+            }
+
+            for (int axis = 0; axis < 2; axis++)
+            {
+                for (int index = 0; index < coordsCount; index++)
+                {
+                    sourcesList.Add(derivatives[index * 2 + axis]);
+                }
 
                 if (is1DTo2D)
                 {

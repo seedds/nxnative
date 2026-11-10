@@ -278,12 +278,16 @@ namespace Ryujinx.Graphics.Shader.Decoders
                     case 0x9a8:
                     case 0x3a8:
                     case 0x9a9:
-                    case 0x59f:
+                    case 0x3a9:
                     case 0xb9b:
                     case 0x99b:
                     case 0x99d:
                     case 0x9a0:
                     case 0x9a2:
+                    case 0x593:   // SUATOM (an image atomic writes)
+                    case 0x59f:   // SURED
+                    case 0x394:   // SUATOM, handle in a register
+                    case 0x99c:   // SUST, handle in a register
                         context.SetUsedFeature(FeatureFlags.Store);
                         break;
                 }

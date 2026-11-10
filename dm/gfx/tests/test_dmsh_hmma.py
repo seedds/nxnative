@@ -501,7 +501,7 @@ class TranslatorFlags(unittest.TestCase):
         copies = dict(re.findall(r'int (_\d+) = (_\d+);', msl))   # spirv-cross passes each argument through a copy of its own
         root = lambda a: root(copies[a]) if a in copies else a
         self.assertEqual(root(calls[0][11]), root(calls[1][11]))                                                        # the LDSM's row address
-        self.assertRegex(msl, r'int %s = as_type<int>\(\w+\) \* 16;' % root(calls[0][11]))                              # R2
+        self.assertRegex(msl, r'int %s = (?:as_type<int>\(\w+\) \* 16|int\(as_type<uint>\(\w+\) \* 16u\));' % root(calls[0][11]))   # R2 (either spelling: wrapping uint or int)
 
 
 if __name__ == '__main__':

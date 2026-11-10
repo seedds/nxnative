@@ -328,6 +328,12 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             Operand res = context.IAdd(srcA, srcB);
 
+            if (avgMode == AvgMode.PlusOne)
+            {
+                // nxnative: both negate bits set encode .PO, which adds one (Eden integer_add.cpp); it was dropped
+                res = context.IAdd(res, Const(1));
+            }
+
             if (extended)
             {
                 res = context.IAdd(res, context.BitwiseAnd(GetCF(), Const(1)));

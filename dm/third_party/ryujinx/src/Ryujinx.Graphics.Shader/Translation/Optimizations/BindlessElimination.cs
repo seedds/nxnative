@@ -98,6 +98,8 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
         // Engine 5.4 on the Switch 2 keeps its handles in c[3] and builds them under a guard (R = c[3][a]; R |= c[3][b]) for a read under a guard Utils.FindLastOperation cannot tie to it: !UP0
         // and !P0 with UP0 the vote of P0, P4 and P5 with P5 = P4 && !P1, and P6 and a branch over !P6. The phi then also takes the handle's first word and what the register held before.
         // With the OR unguarded the phi lies on its source, not on the handle
+        // When none of those is found, a second pass also takes a word of any constant buffer alone, or ORed with a sampler word of another bank (Orbitals, see IsTableWord):
+        // the read was removed otherwise
         private enum TableHandle { None, Set, Deferred }
 
         private static TableHandle TryTableHandle(BasicBlock block, ResourceManager resourceManager, IGpuAccessor gpuAccessor, TextureOperation texOp, LinkedListNode<INode> node, bool deferSeveral)
@@ -111,30 +113,38 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
 
             List<(Operand Texture, Operand Sampler)> found = new();
 
-            foreach (Operand leaf in PhiLeaves(handle))
+            // The rules above first: a c[2] word alone, or a texture word ORed with a sampler word of its bank or a constant sampler. Only when they find none, a second pass takes a word
+            // of any constant buffer alone, or ORed with a sampler word of any bank (see IsTableWord), so a shader those rules translate translates as before
+            for (int pass = 0; pass < 2 && found.Count == 0; pass++)
             {
-                if (IsTableWord(leaf))
-                {
-                    AddCandidate(found, leaf, null);
-                }
-                else if (!texOp.Inst.IsImage() && leaf.AsgOp is Operation orOp && orOp.Inst == Instruction.BitwiseOr)
-                {
-                    foreach (Operand texture in PhiLeaves(orOp.GetSource(0)))
-                    {
-                        foreach (Operand sampler in PhiLeaves(orOp.GetSource(1)))
-                        {
-                            (Operand t, Operand sm) = IsSamplerWord(texture) && !IsSamplerWord(sampler) ? (sampler, texture) : (texture, sampler);   // either order, as TryConvertBindless
+                bool anyBuffer = pass == 1;
 
-                            if (t.Type == OperandType.ConstantBuffer && !IsSamplerWord(t) && (IsSameBankWord(sm, t) || (sm.Type == OperandType.Constant && (sm.Value & 0xfffff) == 0)))
+                foreach (Operand leaf in PhiLeaves(handle))
+                {
+                    if (IsTableWord(leaf, anyBuffer))
+                    {
+                        AddCandidate(found, leaf, null);
+                    }
+                    else if (!texOp.Inst.IsImage() && leaf.AsgOp is Operation orOp && orOp.Inst == Instruction.BitwiseOr)
+                    {
+                        foreach (Operand texture in PhiLeaves(orOp.GetSource(0)))
+                        {
+                            foreach (Operand sampler in PhiLeaves(orOp.GetSource(1)))
                             {
-                                AddCandidate(found, t, sm);
+                                (Operand t, Operand sm) = IsSamplerWord(texture) && !IsSamplerWord(sampler) ? (sampler, texture) : (texture, sampler);   // either order, as TryConvertBindless
+
+                                // a texture word of any bank with a sampler word of its bank or a constant sampler; in the second pass a sampler word of any constant buffer too
+                                if (IsTableWord(t, true) && (IsSameBankWord(sm, t) || (anyBuffer && sm.Type == OperandType.ConstantBuffer) || (sm.Type == OperandType.Constant && (sm.Value & 0xfffff) == 0)))
+                                {
+                                    AddCandidate(found, t, sm);
+                                }
                             }
                         }
                     }
-                }
-                else if (leaf.AsgOp is Operation load && load.Inst == Instruction.Load)
-                {
-                    return TableHandle.None;   // a handle loaded from memory or an input is a real bindless access (GenerateBindlessAccess)
+                    else if (leaf.AsgOp is Operation load && load.Inst == Instruction.Load)
+                    {
+                        return TableHandle.None;   // a handle loaded from memory or an input is a real bindless access (GenerateBindlessAccess)
+                    }
                 }
             }
 
@@ -252,9 +262,18 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             return combined;
         }
 
-        private static bool IsTableWord(Operand operand)   // a c[2] word that can name a texture (not one of the separate sampler table: a sampler word alone, on a path the read does not take, is no candidate)
+        // A word that can name a texture: one of c[2] (not one of the separate sampler table: a sampler word alone, on a path the read does not take, is no candidate), or with anyBuffer
+        // one of any constant buffer. nxnative: NVN keeps the bound handles in c[2]; Unreal Engine 5's bindless handles on NVN2 are words of its own uniform buffers (Orbitals:
+        // a separate texture word ORed with a sampler word of c3, under a predicate, merged by a phi with whatever the register held on the other path). Both bind as the handle at
+        // that word (TryConvertBindless; the replay reads uniform-buffer handles at the draw, TEXU / SAMPU). Limited to c[2], those reads were removed and gave 0 (173 of Orbitals' shaders)
+        private static bool IsTableWord(Operand operand, bool anyBuffer)
         {
-            return operand.Type == OperandType.ConstantBuffer && operand.GetCbufSlot() == NvnTextureBufferIndex && !IsSamplerWord(operand);
+            return IsHandleWord(operand, anyBuffer) && !IsSamplerWord(operand);
+        }
+
+        private static bool IsHandleWord(Operand operand, bool anyBuffer)
+        {
+            return operand.Type == OperandType.ConstantBuffer && (anyBuffer || operand.GetCbufSlot() == NvnTextureBufferIndex);
         }
 
         private static bool IsSamplerWord(Operand operand)
@@ -357,7 +376,14 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
 
             Operand bindlessHandle = texOp.GetSource(0);
 
-            if (!IsBindlessHandleAllowed(bindlessHandle))
+            // nxnative: a sampled texture other than a buffer texture is indexed in the game's whole texture and sampler pools (the replay binds them by ID: dmsh_build.py pool_arrays,
+            // nvn_mtl.m pool_gpu), so its arrays take the pool lengths. Buffer textures and images keep arrays of NvnSlotArrayLength, which the replay binds slot by slot (tex_dyn_slots)
+            bool pooled = !texOp.Inst.IsImage() && (texOp.Type & SamplerType.Mask) != SamplerType.TextureBuffer;
+
+            // nxnative: Ryujinx accepts a run-time handle only from a uniform, storage or input load (it binds every texture of the pool for one, and limits the cost). The replay
+            // binds the pools whole anyway, so a pooled read takes any handle the shader computed: the ID clamp below keeps it inside the pool. Refused, the read was removed and gave 0
+            // (371 of Orbitals' shaders, Unreal Engine 5.6: 345 2D and 26 2D-array reads, most in its global pixel shaders)
+            if (!pooled && !IsBindlessHandleAllowed(bindlessHandle))
             {
                 return false;
             }
@@ -368,10 +394,6 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
 
             block.Operations.AddBefore(node, new Operation(Instruction.BitwiseAnd, textureHandle, bindlessHandle, OperandHelper.Const(0xfffff)));
             block.Operations.AddBefore(node, new Operation(Instruction.ShiftRightU32, samplerHandle, bindlessHandle, OperandHelper.Const(20)));
-
-            // nxnative: a sampled texture other than a buffer texture is indexed in the game's whole texture and sampler pools (the replay binds them by ID: dmsh_build.py pool_arrays,
-            // nvn_mtl.m pool_gpu), so its arrays take the pool lengths. Buffer textures and images keep arrays of NvnSlotArrayLength, which the replay binds slot by slot (tex_dyn_slots)
-            bool pooled = !texOp.Inst.IsImage() && (texOp.Type & SamplerType.Mask) != SamplerType.TextureBuffer;
 
             int texturePoolLength = pooled ? Math.Max(BindlessToArray.MinimumArrayLength, gpuAccessor.QueryTextureArrayLengthFromPool()) : NvnSlotArrayLength;
 

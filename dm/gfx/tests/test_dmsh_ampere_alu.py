@@ -10,6 +10,11 @@ from test_dmsh_ampere_mem import EXIT, Translated, inst
 STORE = (0x000fe8000000c800, 0x0000080609008388)   # STS.U32 [R9 * 16 + 8], R6 (Mario Kart World f94552a2a2bff505): the sink, R9 the thread index
 
 
+# A result's bits stepped by one, as SPIRV-Cross spells an integer add of 1 / -1 on int (_7 = _5 + 1;) or on uint (int(uint(_5) + 1u))
+STEP_UP = r'\b_\d+ \+ 1;|\buint\(_\d+\) \+ 1u\)'
+STEP_DOWN = r'\b_\d+ \+ \(-1\);|\buint\(_\d+\) \+ 4294967295u\)'
+
+
 def waiting(i): return (i[0] | 0x3f << 52, i[1])   # the instruction waits on every scoreboard (control bits 116..121): it reads what an S2R before it wrote
 def s2r_tid(rd): return (0x000e260000002100, 0x0000000000007919 | rd << 16)   # S2R Rd, SR_TID.X (Mario Kart World's encoding, write barrier 0)
 
@@ -44,6 +49,15 @@ class DeadChannel(Translated):
         msl = self.translate(b''.join(inst(*waiting(i)) for i in (s2r_tid(1), s2r_tid(6), s2r_tid(9), self.Y_MINUS_1, self.SULD, self.STORE_Y)) + inst(*EXIT), shared=0x1000)
         self.assertRegex(msl, r'\+ \(-1\)|- 1\b')
         self.assertNotRegex(msl, r'(?m)^\s+int (_\d+);\n\s+int _\d+ = \1;')
+
+
+class Csmtest(Alu):
+    """0x80d other than Kirby's guard band cull is CSMTEST, the clip state test (ACsmtest): PRAGMATA's vertex shaders hold this form (3,734 of them stopped translating when
+    main's guard band handler took the decoder slot). It translates in any stage, and its test never passes"""
+    CSMTEST = (0x000fc80003fe0000, 0x800000070000780d)   # PRAGMATA's form: immediate 0x80000007, Pd0 = Pd1 = PT, P = PT
+
+    def test_pragmata_form_translates(self):
+        self.assertIn('kernel', self.kept(self.CSMTEST))
 
 
 class Brev(Alu):
@@ -228,7 +242,7 @@ class DirectedRounding(Alu):
     def test_i2f_rp_checks_against_the_integer(self):
         msl = self.kept(self.I2F_RP, srcs=(19,))
         self.assertIn('4294967296', msl)                     # the bound above which the rounded float is above every u32
-        self.assertRegex(msl, r'as_type<int>\(_\d+\) \+ 1\b')   # the float's bits stepped up
+        self.assertRegex(msl, r'as_type<u?int>\(_\d+\) \+ 1u?\b')   # the float's bits stepped up (integer adds are emitted on uint, so they wrap)
 
     def test_i2f_to_nearest_is_plain(self):
         self.assertNotIn('4294967296', self.kept(self.I2F_RN, srcs=(19,)))
@@ -238,6 +252,15 @@ class DirectedRounding(Alu):
 
     def test_f2f_to_nearest_is_plain(self):
         self.assertNotIn('& 65535', self.kept(self.F2F_RN, srcs=(19,)))
+class I2fImmediate(Alu):
+    """I2F.F16 Rd, imm (form 4): bits 60..62 are the top of the 32-bit immediate, not a byte select. nvdisasm reads 000e620000200c00fffffffe000f7906 as I2F.F16 R15, -0x2
+    (PRAGMATA 0cea2c520ed3ab04, here into R6); it was refused as a byte select of a 32-bit source"""
+    I2F = (0x000e620000200c00, 0xfffffffe00067906)
+
+    def test_negative_immediate_to_a_half(self):
+        msl = self.kept(self.I2F)
+        self.assertRegex(msl, r'float\(-2\)|-2\.0')
+        self.assertIn('half2', msl)
 
 
 class CompareFtz(Alu):
@@ -285,6 +308,71 @@ class Vote(Alu):
     def test_vote_writes_the_lane_predicate(self):
         self.assertIn('simd_any', self.kept(self.FSETP, self.VOTE, self.MOV_P0, srcs=(6, 19, 20)))
 
+
+class SingleInstructionSemantics(Alu):
+    """Constant inputs the translator folds, the result stored (R6). Found by an offline per-instruction tester (single instructions with
+    nvdisasm-checked encodings run on the GPU against an interpreter on Mesa NAK's folds); each encoding below was checked with nvdisasm 13.4 (sm_86).
+    - SETP's two results: Pd1 reads the accumulator P as it was, also when Pd0 is P (Pd1 was computed after Pd0 had been written).
+    - IMAD has no negation of B: bit 63 (B a register, constant or uniform register) and bit 75 (B the 64-slot register of forms 2, 3, 7) are not printed
+      by nvdisasm and are not modifiers; B was negated.
+    - I2F's directed roundings (.RM / .RP, and every one to F16) were rounded to nearest; F2FP.PACK_AB.RZ and F2F.F16.F32's .RM / .RP / .RZ too (65520 became
+      infinity, not 65504)."""
+    SEL_P0 = (0x000fc200040000ff, 0x00000001ff067807)   # SEL R6, RZ, 0x1, !P0: R6 = P0 ? 1 : 0
+    P2_TRUE = (0x000fc20003f42070, 0x000000ffff00720c)  # ISETP.EQ.U32.AND P2, PT, RZ, RZ, PT: P2 = true
+
+    def stored(self, *code):
+        m = re.findall(r'\] = (\w+);', self.kept(*code))
+        return m[-1] if m else None
+
+    def test_isetp_second_result_reads_the_old_accumulator(self):
+        isetp = (0x000fc2000104507f, 0x000000ffffff720c)   # ISETP.NE.U32.AND P2, P0, RZ, RZ, P2: P2 = false AND P2, P0 = true AND the old P2 (true)
+        self.assertEqual(self.stored(self.P2_TRUE, isetp, self.SEL_P0), '1u')
+
+    def test_fsetp_second_result_reads_the_old_accumulator(self):
+        fsetp = (0x000fc200010450ff, 0x000000ffffff720b)   # FSETP.NE.AND P2, P0, RZ, RZ, P2
+        self.assertEqual(self.stored(self.P2_TRUE, fsetp, self.SEL_P0), '1u')
+
+    MOV_R5_3 = (0x000fc20000000fff, 0x00000003ff057802)  # MOV R5, 0x3
+
+    def test_imad_bit_63_is_no_negation(self):
+        imad = (0x000fc200078e02ff, 0x8000000505067224)    # IMAD R6, R5, R5, RZ with bit 63 set: 9, not -9
+        self.assertEqual(self.stored(self.MOV_R5_3, imad), '9u')
+
+    def test_imad_bit_75_of_the_c_slot_forms_is_no_negation(self):
+        imad = (0x000fc200078e0a05, 0x0000000105067424)    # IMAD R6, R5, R5, 0x1 (form 2) with bit 75 set: 10, not -8
+        self.assertEqual(self.stored(self.MOV_R5_3, imad), '10u')
+
+    def test_i2f_rounds_toward_plus_infinity(self):
+        mov = (0x000fc20000000fff, 0x8839e130ff057802)     # MOV R5, 0x8839e130 (-2009472720)
+        i2f = (0x000fc200002094ff, 0x00000005ff067306)     # I2F.RP R6, R5: -2009472640.0 (0xceef8c3d, truncated), not the nearest -2009472768.0
+        msl = self.kept(mov, i2f)
+        # 32-bit source to F32 takes main's path (DirectedRounding): the nearest conversion, then its bits stepped toward zero when it came out above the value (- 1, in
+        # SPIRV-Cross's int or uint spelling); otherwise the truncation, with the bits under the 24 kept cleared (spvFindUMSB)
+        if re.search(r'float\(-2009472720\)', msl):
+            self.assertRegex(msl, r'as_type<int>\(_\d+\) \+ \(-1\);|as_type<uint>\(_\d+\) \+ 4294967295u')
+        else:
+            self.assertIn('spvFindUMSB', msl)
+
+    def test_i2f_to_half_rounds_toward_zero(self):
+        mov = (0x000fc20000000fff, 0xbae909efff057802)     # MOV R5, 0xbae909ef
+        i2f = (0x000fc2000020c8ff, 0x00000005ff067306)     # I2F.F16.U32.RZ R6, R5: 65504 (0x7bff), not infinity
+        msl = self.kept(mov, i2f)
+        self.assertRegex(msl, r'uint\(_\d+\) < uint\(_\d+\);')   # the magnitude of the half compared with that of the value it came from, as bits
+        self.assertRegex(msl, STEP_DOWN)                       # and the half stepped down one where it came out larger
+
+    def test_f2f_to_half_rounds_toward_plus_infinity(self):
+        mov = (0x000fc20000000fff, 0x00800000ff057802)     # MOV R5, 0x800000 (FLT_MIN)
+        f2f = (0x000fc200002088ff, 0x00000005ff067304)     # F2F.F16.F32.RP R6, R5: the smallest half denormal (0x0001), not 0
+        msl = self.kept(mov, f2f)
+        self.assertRegex(msl, r'_\d+ < 8388608;')           # the half's value key below FLT_MIN's bits (0x800000): an integer compare (Metal's fast math
+        self.assertRegex(msl, STEP_UP)                      # folded the float one), and the half stepped up
+
+    def test_f2fp_rz_overflow_is_the_largest_half(self):
+        mov = (0x000fc20000000fff, 0x477ff000ff057802)     # MOV R5, 0x477ff000 (65520.0)
+        f2fp = (0x000fc200000180ff, 0x00000005ff06723e)    # F2FP.PACK_AB.RZ R6, RZ, R5: 0x00007bff (65504), not 0x7c00
+        msl = self.kept(mov, f2fp)
+        self.assertIn('1199566848u < uint(', msl)   # 65520.0's bits (0x477ff000) against the half's magnitude
+        self.assertRegex(msl, STEP_DOWN)
 
 if __name__ == '__main__':
     unittest.main()

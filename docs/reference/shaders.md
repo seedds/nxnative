@@ -1309,6 +1309,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** `EmitOpsAmpere` keeps the guard as it was at issue in a shadow register of its own and commits only where it held. A predicated last instruction of a block no longer branches straight to the next block when writes are pending, which skipped their commits. A later guarded write no longer discards an earlier pending one, which may still be the one that lands.
 - **Found on:** [Yoshi and the Mysterious Book](../../dm/games/0400245021D2C000/README.md): the first light's falloff, 65,000 in R11G11B10 on leaves and eggs. [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md) (GitHub issue 1100): DK and Pauline white between Hilltop's rocks. The terrain capture shader `7612419c02d496b9` picks its material with `@P0 IPA R8` then `@!P0 MOV R8` as a block's last instruction, and always got material 0, a placeholder with an emissive scale of 30, so the environment cube's red mean reached 53 against about 1.2 elsewhere. A hand patch of that one selection, on the old chain, brought it to 0.45 at the spot with DK normal. On chain 3dd02e581c0c the shader's MSL has the right selection; the spot itself was not revisited on that chain.
 
+### Ampere SETP pairs on their own accumulator, IMAD's B, and directed roundings to F16
+
+- **Symptom:** none met in a game yet: found by the per-instruction tester (single instructions with nvdisasm-checked encodings, run through the translator on an Apple GPU and compared with an interpreter on Mesa NAK's folds). `ISETP.GE.AND P0, P1, R2, R3, P0` giving P1 from the new P0; `IMAD R4, R8, R9, R10` with an unprinted bit 63 computing `R8 * -R9 + R10`; `I2F.RP` / `.RM`, any directed `I2F.F16`, `F2F.F16.F32.RZ` / `.RM` / `.RP` and `F2FP.PACK_AB.RZ` rounded to nearest (65520 to infinity where 65504 is right).
+- **Cause:** ISETP, FSETP, HSETP2 and CSMTEST computed their second result after writing the first, and a predicate register is read where it is used, so with the first destination equal to the accumulator the second saw the new value. IMAD negated B from bit 63 (forms 1, 5, 6) or bit 75 (forms 2, 3, 7); IMAD has a negation of C only, at whichever of the two C sits in (nvdisasm prints neither bit for B). I2F's directed roundings were only handled for a 32-bit `.RZ` to F32; F2F and F2FP packed to F16 to nearest whatever the mode.
+- **Fix:** `ASetPredPair` writes both results after computing both; `AImadSrcs` drops B's modifiers; `AI2fDirected` (truncation, then one ulp away from zero for an inexact RM / RP of the matching sign) and `AF32ToF16Directed` (the nearest half, stepped by one where it went the wrong way, compared as bits: as float compares Metal's fast math folded `float(half(x)) < x` to false) in `InstEmitAmpereAlu.cs`.
+- **Found on:** no game: neither PRAGMATA's nor Ocarina of Time's shader library uses these forms (a scan of their SASS).
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_alu.py` (`SingleInstructionSemantics`).
+
 ### Ampere forms with a handle in a register, and SURED's other operations
 
 - **Symptom:** `Ampere instruction f63` (or `f6c`, `364`, `367`) `is not implemented`, or `SURED form 0310e000`, in the build.
@@ -1320,8 +1328,31 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 
 - **Symptom:** `Ampere instruction 21b at … is not implemented` (`…0405721b`) or `Ampere instruction 925 at 0x0 is not implemented` (`040e0200000e4000 …7925`) in the build.
 - **Cause:** 0x21b, beside SGXT's 0x21a, is BMSK: a mask of b bits from bit a. Star Fox's `58046f286de779e1` takes it from two bytes of a word, ANDs it with the value shifted by the same a and hands the result to an atomic, a bit field written into a word. 0x925 has no name in the tables at hand (the part of CuAssembler's sm_80 table read so far; Mesa's NAK encoder could not be fetched); what it reads comes from its two shaders, quad efficiency views. They rebuild its value at the quad's three other pixels through SHFL and FSWZADD and add the four: one indexes a 4-entry palette with the sum minus 1, so a shaded pixel's sum is at least 1, and the other draws 0.03125 + 0.15625 sum in red. So it is 1 for a covered pixel and 0 for a helper invocation.
-- **Fix:** `ABmsk` follows PTX's `bmsk` definition, its `.W` at bit 75 as SGXT's (only the clamping form has been seen). `APixelCovered` loads a new `IoVariable.HelperInvocation`, Metal's `simd_is_helper_thread()`, as an integer; any other form of 0x925 stays refused (chain change). `test_dmsh_ampere_mem.py` covers both.
+- **Fix:** `ABmsk` follows PTX's `bmsk` definition, its `.W` at bit 75 as SGXT's (only the clamping form has been seen). `APixelCovered` loads a new `IoVariable.HelperInvocation`, Metal's `simd_is_helper_thread()`, as an integer; any other form of 0x925 stays refused (chain change). The instruction is PIXLD.COVMASK, now read from `[[sample_mask]]` ([next entry](#pixldcovmask-is-the-pixels-coverage-mask)). `test_dmsh_ampere_mem.py` covers both.
 - **Found on:** [Star Fox](../../dm/games/0400E88025B1A000/README.md): 1 compute and 2 pixel shaders, none asked for in play so far, so neither instruction has run. Neither opcode is in the shaders of Donkey Kong Bananza, Splatoon Raiders, Mario Tennis Fever or Pokopia.
+
+### PIXLD.COVMASK is the pixel's coverage mask
+
+- **Symptom:** on a multisampled target, a pixel shader's `gl_SampleMaskIn` (PIXLD.COVMASK) read 1 for every covered pixel, whatever samples the primitive covered. No game has shown this yet; on a single-sample target the value was already right.
+- **Cause:** 0x925 is PIXLD. Its pixel value is in bits 78..80 (Mesa NAK `sm70_encode.rs` `OpPixLd`, `ir.rs` `PixVal`: MSCOUNT 0, COVMASK 1, CENTROID_OFFSET 2, MY_INDEX 3, INNER_COVERAGE 4) and its predicate output in 81..83. The form `APixelCovered` read as "1 for a covered pixel, 0 for a helper invocation" ([previous entry](#ampere-bmsk-and-the-read-of-a-covered-pixel)) is COVMASK. NAK lowers `gl_SampleMaskIn` to it, and it is the coverage of the whole pixel, not just of the invocation: under sample shading NAK ANDs it with `1 << sample id` itself (`nak_nir_lower_fs_inputs.c`). So it is 1 only with one sample.
+- **Fix:** `APixelCovered` loads a new `IoVariable.SampleMask` (SPIR-V `SampleMask`, an array of one word; GLSL `gl_SampleMaskIn`). SPIRV-Cross makes it Metal's `uint gl_SampleMaskIn [[sample_mask]]`. A helper invocation still reads 0, since Metal leaves its mask unspecified.
+  - **Where Metal and NVN agree:**
+    - The value is the rasterizer's coverage before the depth test. Metal's post-depth form is `[[post_depth_coverage]]`, which the translation does not use.
+    - Alpha-to-coverage applies after the shader in both, so it is not in the value.
+    - In a per-sample function (one that also reads MY_INDEX), the value is still the whole pixel's mask. SPIRV-Cross adds no `& (1 << gl_SampleID)`, and Metal reportedly passes every covered sample (gpuweb issue 5457). NVIDIA's PIXLD.COVMASK does the same.
+  - **Not modelled:**
+    - The state set by `nvnCommandBufferSetSampleMask`. The host ignores it (`hle_nvn.c`), and Metal pipelines have no sample mask to AND in.
+    - Post-depth coverage.
+  - **Values left refused** (`0x925 form N`):
+    - MSCOUNT: the target's sample count. SPIR-V has no input for it, and Metal's `get_num_samples()` has no SPIR-V form; it would need a driver word.
+    - CENTROID_OFFSET.
+    - INNER_COVERAGE: conservative raster, which Metal does not have.
+- **Found on:** no game here. The packages of PRAGMATA (36,779 records, 157 PIXLD), Orbitals (23,432 records, 7) and Donkey Kong Bananza (22,852 records, 0) hold only MY_INDEX. Star Fox's two quad efficiency views (`46040940ce0fd49b`, `826168691af2e211`) read COVMASK; on a single-sample target they read what they read before.
+- **Check:** `test_dmsh_ampere_mem.py` `PixelCovered`:
+  - the `[[sample_mask]]` read and the helper's 0;
+  - that a per-sample function keeps the whole mask;
+  - that the MSL compiles;
+  - that the other values are refused.
 
 ### VOTEU writes the uniform predicate
 
@@ -1345,7 +1376,8 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Cause:** the compiler builds a handle in a register under a guard (`R = word`; `R |= sampler word`) and reads through it under a guard of its own. The register's phi then merges the handle, its first word and what the register held before. `Utils.FindLastOperation` picks the phi's input only when both guards are the same operand in the same branch form, which misses `!UP0` with UP0 the vote of `P0` against a read under `!P0`, `P4` against a read under `P5 = P4 && !P1`, and `P6` against a read past `BRA.!P6`. `TryTableHandle` then took only c2 words, so a handle in another bank was deleted. In a register with no earlier value the first word's phi is (undefined, word): `FindLastOperation`'s rule that the one defined source of such a phi is its value was also applied to that phi inside the outer phi, so the first word came back as the whole handle.
 - **Fix:** in the vendored translator. `TryTableHandle` also takes a texture word ORed with a sampler word of the same bank or a constant sampler from any constant buffer, including when only the OR's source is a phi and the handle is not. A word of a game's uniform buffer alone is no candidate, as it may be other data, so the first word and a float left in the register drop out without a look at the guards. A c2 word alone that an ORed candidate also takes is that handle on its way, not a second candidate, which also saves a read chosen at run time. `FindLastOperation` applies the undefined rule only to the phi it was asked about. Proving the guards equal instead would take a boolean prover over predicate logic and the vote's meaning. A chain change.
 - **Found on:** [Yoshi and the Mysterious Book](../../dm/games/0400245021D2C000/README.md): of 128,113 translated shaders, 130 reads in 78 were deleted (the pool's water surface on Chapter 1's page) and 189 reads in 152 bound the texture word alone. SPIR-V of every shader against the translator before: those 230 change there; 364 of 22,072 in [DAVE THE DIVER](../../dm/games/010097F018538000/README.md) and 2,633 of 69,924 in [DRAGON QUEST I & II HD-2D Remake](../../dm/games/0100D7C01F254000/README.md), of which 319 and 1,780 bound the texture word alone and the others lose a second read; 16 of 13,980 in [OCTOPATH TRAVELER II](../../dm/games/0100A3501946E000/README.md), a second read. None of Fire Emblem Fortune's Weave's 16,888, nor of Blasphemous, NieR:Automata, Return of the Obra Dinn, Catherine: Full Body and FINAL FANTASY X/X-2. Only Yoshi's water was compared in a picture. FINAL FANTASY RESONANCE's 26 reads with [no c2 word](#bindless-reads-whose-handle-phi-also-carries-other-values) may be this form, not checked: its shaders are not split on disk.
-- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py` (the three guard forms, an unguarded OR, and a c2 handle read once).
+- **Note:** when these rules find no candidate, a second pass takes a word of any constant buffer alone, or a texture word ORed with a sampler word of another bank, since the read is deleted otherwise. Unreal Engine 5.6 on the Switch 2 builds such handles (Orbitals (`040004F027560000`)). A shader the first pass finds a handle in translates as with these rules alone.
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py` (the three guard forms, an unguarded OR, a c2 handle read once, and the second pass's two forms).
 
 ### Layer entry points with the point size passed by reference
 
@@ -1369,7 +1401,7 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 
 - **Symptom:** `Ampere instruction 80d ... (000fc80003fe0000c43211110000780d) is not implemented` for every vertex shader of the game, so nothing draws.
 - **Cause:** the compiler ends the position's computation with a test of its own. FSETP sets P0..P5 where x, y or z lies beyond +/- w times the system registers 30 and 31, which nothing else reads: a guard band. Two 0x80d follow, immediate 0xc4321111 with no predicate result, then immediate 0x80000000 with a result, and that predicate guards an EXIT before the shader writes its position and outputs. All 6,319 vertex shaders hold this once; no other game's do. What the instruction reads is not known: it is inferred from what surrounds it, and no other instruction reads its result.
-- **Fix:** `AGuardCull` in `InstEmitAmpereAlu.cs`: the result is false, so no vertex leaves early. Every vertex writes its outputs and clipping does the rest, as for a shader without this; only the optimization is lost. Any other form of 0x80d stops the shader.
+- **Fix:** `AGuardCull` in `InstEmitAmpereAlu.cs`: the result is false, so no vertex leaves early. Every vertex writes its outputs and clipping does the rest, as for a shader without this; only the optimization is lost. Every other form of 0x80d is the general clip state test (CSMTEST.RA / .A, as in PRAGMATA's vertex shaders, e.g. immediate 0x80000007 with no predicate result): `ACsmtest`, whose test never passes, so Pd0 = false bop P and Pd1 = true bop P. Main's Kirby entry had replaced that handler in the decoder table, and 3,734 PRAGMATA shaders stopped translating.
 - **Found on:** [Kirby Air Riders](../../dm/games/040077201BE50000/README.md).
 - **Open:** the instruction's real meaning. A vertex output at `a[0x5c]`, written by 4,771 vertex shaders (`Attribute offset 0x5C is not valid`), is dropped; it has no known meaning either.
 - **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py`.
@@ -1403,6 +1435,40 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** PRAGMATA (no profile; 156 of its compute shaders return before a barrier) and Orbitals ([PR #1783](https://github.com/seedds/nxnative/pull/1783)), as PR #1774 reports; neither game's files were run here. Not [Ocarina of Time](../../dm/games/0400486024DEC000/README.md)'s GPU hang: none of its 520 task and mesh shaders has a barrier in its body. Only 12 of its compute kernels return before a barrier, none of them in the pass that hangs.
 - **Check:** `make -C dm/gfx/tests GAME=<id> t_barrier_exit && dm/gfx/tests/t_barrier_exit`.
 
+### Ampere instructions of Unreal Engine 5.6's Switch 2 shaders
+
+- **Symptom:** most of a game's shaders are left out of the build: `Ampere instruction f60 at 0x… is not implemented`, then 593 (`SUATOM` with its handle in bank 3), 925, 59f, 394 and others. The game draws black backgrounds and missing effects.
+- **Cause:** Unreal Engine 5.6's Switch 2 shaders use Ampere forms the translator had no entry for:
+  - TEX / TLD / TLD4 / TXD / TXQ with the handle in a uniform register (bit 91, opcodes with 0x400) or in a register after the operands (`.B`, bit 59);
+  - SUATOM and SURED with the handle in another bank or a register, SUST.B;
+  - images whose handle is in the game's own uniform buffer (`cp_i_cb3_*`);
+  - FRND.F16, F2FP.MERGE_C with `.H1` (c's high half), PIXLD.MY_INDEX;
+  - NVN2's per-stage storage buffer banks 25..29;
+  - bindless constant buffers.
+- **Fix:** each form in `InstEmitAmpere*.cs`, with its encoding taken from a game and checked against Eden's Ampere frontend and NAK's encoder where they have it. Also:
+  - the TXD derivative order, I2F / I2FP `.RZ`, the FSWZADD sign and the SHFL.UP clamp;
+  - IMAD.WIDE's carry out, the MEMBAR scope, and LDL / STL without the shared stride;
+  - Ampere results kept on predicated paths;
+  - a bindless 1D integer fetch read as 2D rows (`fetch1d` on a `tex_ubo` binding, `nvn_mtl.m` `tbuf_as_2d`).
+
+  A 64-bit SURED is refused, not faked.
+- **Found on:** Orbitals (`040004F027560000`): 3,712 of 23,432 shaders translated on the translator of 2026-11-01, 23,432 with these.
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py` and `test_dmsh_ampere_alu.py`.
+
+### Ampere forms of PRAGMATA's shaders
+
+- **Symptom:** `Ampere instruction … is not implemented`, or a refused form, in the build; or values that read 0 (barycentric coordinates) or come out at the pixel centre (an interpolation at an offset).
+- **Cause and fix,** each in `InstEmitAmpere*.cs` unless noted:
+  - **I2F with an immediate:** in form 4 bits 60..62 are the top of the 32-bit immediate, not a byte select: `I2F.F16 R15, -0x2` was refused (`0cea2c520ed3ab04`, `b1b18486119a5612`, `f7d2cce8f20873c3`).
+  - **ISBERD `.O`:** the mode bits are 0x80 `.O`, 0x40 `.SKEW`, 0x30 `.ATTR`, 0x08 `.32` (nvdisasm), so modes 0xf8 and 0xb8 read back a word the shader's own ISBEWR of the same mode wrote in the stage output area. The terrain's mesh shaders (`5aab38bb5ba67ef7`, `28ef097c07ceb429`) read each triangle's positions back this way and swap two indices by the sign of their determinant (a mirrored instance's winding).
+  - **SUATOM.CAS (0x595, bindless 0x396):** the compare value in Rb, the new one in Rb + 1 (NAK's packed form). `50fece0d891feba4` adds a float to a 3D image texel with SULD, FADD and one compare-and-swap.
+  - **Barycentric coordinates:** attributes 0x3a8 (no perspective) and 0x3b4 (NAK's `NAK_ATTR_BARY_COORD_NO_PERSP` / `NAK_ATTR_BARY_COORD`) had no map entry and read as 0; now `BaryCoordNoPerspNV` / `BaryCoordNV`, which SPIRV-Cross makes `[[barycentric_coord]]`. IPA reads the perspective set divided by w.
+  - **IPA.OFFSET:** the offset register holds x in its low half and y in its high one, each a signed 12-bit value in 1/4096 pixel. What IPA.PASS returns is linear in screen space, so its value at the offset is the centre's plus the derivatives times the offset, exactly. `4a9d4507eea6c837` interpolates w and its barycentric coordinates at its sample's position.
+  - **FMNMX.NAN** (bit 81): a pair with a NaN gives the canonical NaN instead of the other operand (first seen in Eglantine).
+  - **One-lane subgroups for domain shaders** (`dmsh_build.py`): post-tessellation vertex functions have no SIMD-group attributes in Metal, so SPIRV-Cross refused `SubgroupLocalInvocationId` (`859225c91a5fe2b2`, `f1ad8f78c6c1551e`); they get the one-lane rewrite of [Subgroup operations rewritten for a one-lane subgroup](#subgroup-operations-rewritten-for-a-one-lane-subgroup), which now declares a `uvec4` type when the module has none.
+- **Found on:** [PRAGMATA](../../dm/games/0400C76024710000/README.md).
+- **Check:** `test_dmsh_ampere_mem.py` and `test_dmsh_ampere_alu.py` (the I2F, ISBERD, SUATOM.CAS, IPA.OFFSET and barycentric cases, the first pixel-stage translator test, and a domain shader with no `uvec4` type); they fail on the translator before.
+
 ### Barrier moves around warp shuffles
 
 - **Symptom:** `Ampere instruction f55 at 0x… (000fe20000000000000000001a0f7f55) is not implemented` in the shader build; those shaders are left out.
@@ -1418,6 +1484,7 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** `ALdc` lowers `.IS` / `.ISL` to that bank and offset, and the load selects among the banks the shader can reach: its own constant segment c1, the instruction's bank and every bank its other constant reads name, but not c0 (`ARuntimeBanks`, from a scan of the decoded program; `InstEmitAmpereAlu.cs`). The host fills the driver segment only at offsets known when the shader is built and does not load a shader that indexes it at run time (`dmsh_reflect.py` `unfillable`): with c0 among the candidates, the pixel shader below, which reads c0 elsewhere, translated but was not loaded. Maxwell shaders are unchanged. A run-time bank 0 in a compute shader is not remapped as a constant one is (`AMapC0`).
 - **Found on:** [Hyrule Warriors: Age of Imprisonment](../../dm/games/04003F40232DE000/README.md#shaders): vertex shader `cc679c7b4d3e703c` reads its quad corners (−1,1), (1,1), (0,0), (−1,−1), (1,−1) from c1 by vertex index % 5, and pixel shader `059a0a910ff87a26` reads c1 from 0x60 (chain 316fb82e2f22). The vertex shader is also [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md#shaders)'s.
 - **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py` (`LdcIndexedBank`; it fails on the translator before).
+- **Also:** Ra = RZ reads as 0 (not R255), and `c0` stays out of the run-time banks also when the instruction itself names bank 0: every LDC `.IS` in [PRAGMATA](../../dm/games/0400C76024710000/README.md) (3 vertex and 78 compute shaders) has bank field 0 with 0x10000 in Ra, and reads c1 (`LdcIndexedBank.test_pragmata_reads_c1_at_the_immediate_offset`; see also [A deferred write under a false guard](#a-deferred-write-under-a-false-guard)).
 
 ### IMAD.HI adds a register pair, and IMAD.X its carry
 

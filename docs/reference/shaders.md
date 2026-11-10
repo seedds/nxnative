@@ -1147,6 +1147,20 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md#rendering): 4,558 of its 27,155 shaders change. On an M1 in the opening dialogue scene, the lit pass's median GPU time went from 70.2 to 15.6 ms and the frame's from 91.5 to 30.1 ms (`DM_NVN_GPUPROF=every:60`, 15 and 35 profiled frames in the scene); the 40 shaders that did not build before are the only ones that fail.
 - **Check:** `python3 dm/gfx/tests/test_dmsh_wide.py`.
 
+## Vulkan shader table
+
+`dm/gfx/tools/vk_shaders.py` writes one row per translated module to `vk_shaders.tsv`. The stage is `vert`, `frag`, or `comp:x,y,z`; the latter records the compute kernel's fixed local size. Resource entries use `kind:set.binding=slot[*count]`.
+
+| Kind | Meaning |
+|---|---|
+| `u`, `b`, `t`, `s`, `c` | Discrete uniform buffer, storage buffer, image, sampler, or combined image sampler. `slot` is the Metal resource slot; `*count` is a consecutive descriptor array. |
+| `p` | Push-constant bytes, bound at `slot`. |
+| `U`, `B`, `T`, `S` | Uniform buffer, storage buffer, image, or sampler member in an argument buffer. `slot` is the argument buffer's Metal buffer slot; `set.binding` is the member ID, with array elements using consecutive IDs. On iOS, `maxArgumentBufferSamplerCount` is 96 unique argument-buffer samplers. |
+| `o` | The index in the dynamic-offset table for the buffer at `set.binding`. |
+| `q` | The Metal buffer slot for that dynamic-offset table. |
+
+The Vulkan layer requires Metal Tier2 for argument-buffer pipelines. Sets move into argument buffers only when a stage exceeds Apple's per-stage limits (31 buffers, 31 textures, the Apple2/3 minimum, or 16 samplers); see [Metal Feature Set Tables](https://developer.apple.com/metal/Metal-Feature-Set-Tables.pdf). Only samplers in an argument-buffer set receive an argument-buffer-capable twin.
+
 ## Bindings and handles
 
 - **Note:** the layout of NVN's driver segments `c0` and `c2` (the handle tables, the storage and uniform buffer tables, the words the host fills) and the binding kinds of the reflection JSON have one definition, `dm/gfx/nvn/dmsh_abi.h`. The host includes it (`nvn_mtl.m`, `nvn_refl.m`, `nvn_obj.h`); `dmsh_build.py` reads it through `dm/gfx/tools/dmsh_abi.py`, which stops on any line it cannot read. Both files are part of the chain version. `dm/tools/tests/test_dmsh_abi.py` checks that the tables fit together, that the host converts every kind the build may write, that the translator's own copy of the `c2` layout (`Program.cs`) agrees, and that the values do not come back as literals in the host or the build. The entries below cite the offsets.

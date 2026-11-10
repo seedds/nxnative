@@ -513,6 +513,12 @@ check_t_stencil_view: RUN_ENV = MTL_DEBUG_LAYER=1
 # The Vulkan layer (#included) over the whole NVN layer, whose device and present path it uses
 t_vk_desc: t_vk_desc.m ../vk/hle_vk.m $(MTL_T_DEP)
 	clang $(CFLAGS) -I../../third_party/vulkan-headers/include -fobjc-arc -o $@ t_vk_desc.m $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
+t_vk_cmds: t_vk_cmds.m ../vk/hle_vk.m $(MTL_T_DEP)
+	clang $(CFLAGS) -I../../third_party/vulkan-headers/include -fobjc-arc -o $@ t_vk_cmds.m $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
+t_vk_compute: t_vk_compute.m ../vk/hle_vk.m $(MTL_T_DEP)
+	clang $(CFLAGS) -I../../third_party/vulkan-headers/include -fobjc-arc -o $@ t_vk_compute.m $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
+t_vk_argbuf: t_vk_argbuf.m ../vk/hle_vk.m $(MTL_T_DEP)
+	clang $(CFLAGS) -I../../third_party/vulkan-headers/include -fobjc-arc -o $@ t_vk_argbuf.m $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
 t_gl_imports: t_gl_imports.m ../gl/hle_gl.m ../../host/hle.c ../../host/hle.h $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_gl_imports.m ../../host/hle.c $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
 .PHONY: check_t_gl_imports gl-imports
@@ -521,6 +527,9 @@ check_t_gl_imports: t_gl_imports
 	./t_gl_imports --stubs
 gl-imports: check_t_gl_imports
 check_t_vk_desc: RUN_ENV = MTL_DEBUG_LAYER=1
+check_t_vk_cmds: RUN_ENV = MTL_DEBUG_LAYER=1
+check_t_vk_compute: RUN_ENV = MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1
+check_t_vk_argbuf: RUN_ENV = MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1
 # Float32 missing components retain float padding through integer shader inputs.
 t_float_pad: t_float_pad.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_float_pad.m $(MTL_T_SRC) $(FW)

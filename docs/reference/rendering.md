@@ -1480,7 +1480,7 @@ The Vulkan layer (`dm/gfx/vk/hle_vk.m`) was written for Hades; Super Mario Galax
 
 - **Symptom:** Metal refuses the pipeline: "Fragment shader does not write to render target color(0), index(1)".
 - **Cause:** the GX shaders write the second blend source as an ordinary output at location 1 (no `Index` decoration), and pipelines blend with `SRC1` factors; NVIDIA's hardware feeds MRT 1 to source 1.
-- **Fix:** `vk_shaders.py` builds a variant `vk_<key>_d` with that output at `[[color(0), index(1)]]`, which the host takes for pipelines whose blend reads source 1.
+- **Fix:** `vk_shaders.py` builds a variant `vk_<key>_d` with that output at `[[color(0), index(1)]]`, which the host takes for pipelines whose blend reads source 1. Only for outputs 0 and 1 of the same type and none at location 2 or more ([SPIR-V compiled by DXC](#spir-v-compiled-by-dxc)).
 - **Found on:** [Super Mario Galaxy](../../dm/games/010099C022B96000/README.md).
 
 ### Scaled and three-component vertex formats
@@ -1573,6 +1573,53 @@ The Vulkan layer (`dm/gfx/vk/hle_vk.m`) was written for Hades; Super Mario Galax
 - **Cause:** two geometry shaders (GX points and lines expanded to quads) are not translated (Metal has no geometry stage).
 - **Found on:** [Super Mario Galaxy](../../dm/games/010099C022B96000/README.md).
 
+### SPIR-V compiled by DXC
+
+- **Symptom:** `vk_shaders.py` stops with `spirv-cross failed: SPIRV-Cross threw an exception: Entry point does not exist.`; a shader with push constants gets no `p:` row in the table, so the host never sets them; a pipeline Metal refuses with "Fragment shader does not write to render target color(0), index(1)" for a shader whose second output is a real render target.
+- **Cause:** an HLSL-compiled shader names its entry point itself (`PSMain`, `ps_*`) where the translator renamed `main`; DXC names the push-constant block's type `type.PushConstant.<name>`, which SPIRV-Cross writes into the MSL with every character C does not allow as `_`, so the translator looked for a type of another name; and the dual-source variant was made for any shader with an output at location 1, though a second output of another type (Re:ZERO: a float2 beside a float4 colour) is a render target of its own, which dual-source blending (two outputs of one type) cannot be.
+- **Fix:** `vk_shaders.py` renames the entry point the SPIR-V declares (`--rename-entry-point <its name> vk_<key>`), finds the push-constant argument under the sanitized type name, and makes the `_d` variant only when outputs 0 and 1 have the same type and there is no output at location 2 or more. `profile_guess.py` takes a `main` that imports only `vkGetInstanceProcAddr`, no EGL and no `nvnBootstrapLoader`, with SPIR-V files in the RomFS, as a Vulkan game (Re:ZERO gets every Vulkan function through it), unless an NRO the game loads draws with NVN.
+- **Found on:** Re:ZERO -Starting Life in Another World- The Prophecy of the Throne (`01000B20117B8000`, The Forge renderer on Vulkan, SDK 9.5.0).
+- **Check:** `dm/tools/tests/test_vk_shaders.py` assembles fragment shaders with `spirv-as` and translates them with the committed SPIRV-Cross: an entry point named `PSMain`, a push-constant block of type `type.PushConstant.RootConstants` beside a uniform buffer, and outputs of one type, of two types and three. `test_nro_graphics.py` takes the loader-only `main` as Vulkan with SPIR-V files, and as GL beside EGL (Balatro), NVN without SPIR-V files and NVN with NVN NROs. Against the code before, five of the new tests fail.
+### A pipeline whose fragment shader is missing is not built
+
+- **Symptom:** a game's 2D batches draw nothing and the frames stay black while the log has no error.
+- **Cause:** `pipe_make` built a pipeline from the stages it could translate. A fragment function missing from the shader library left the pipeline without its fragment stage, and Metal builds a pipeline with no fragment function as a depth-only one: each draw wrote no colour and nothing said so.
+- **Fix:** a fragment stage the pipeline requests whose Metal function is missing from the library (`lacking`) refuses the pipeline. Its draws are skipped in `pre_draw`, counted (`g_n_skip`, the frame line's `(skipped N)`) and reported once per pipeline with the keys of its shaders: `[RED] draws skipped: the pipeline of shaders … was not built`. The rule is requested and not available: refused; not requested: built. A pipeline with no fragment stage at all (a depth-only pass) is built as before, and so is one with a stage Metal has none of (a geometry stage): that stage is reported (`shader stage … not implemented`) and left out, as before.
+- **Found on:** Re:ZERO -Starting Life in Another World- The Prophecy of the Throne (`01000B20117B8000`, The Forge renderer on Vulkan, SDK 9.5.0): its 2D batches drew nothing with 0 errors, as their fragment shaders were not in the library.
+- **Check:** `t_vk_cmds` builds a pipeline whose fragment module has no function and checks it is refused, its draws counted as skipped and not drawn, and the target left as cleared; the depth-only pipeline and one with a geometry stage are built and the depth-only draw runs. With the refusal left out, four of its checks fail; with it applied to every pipeline that has no fragment function, two.
+- **Changes behaviour:** a Vulkan game whose pipeline names a fragment shader the library lacks used to get it built without that stage; now its draws are skipped and named (Hades, Super Mario Galaxy and the 3D All-Stars games were not rerun with this).
+
+### Commands the Vulkan layer lacked
+
+- **Symptom:** `DM_VK_LOG=1` shows `lookup vkCmdFillBuffer → none (returns null)` (or another name below); a game that does not check the lookup calls address 0, as in the `VK_EXT_debug_report` entry above.
+- **Cause:** the layer implemented what Hades and the Galaxies recorded. A renderer that uses The Forge's full command set also records indirect draws, buffer fills and updates, resolves, blits, secondary command buffers, events and query copies, and sets blend constants and depth bias dynamically.
+- **Fix:** `vkCmdDrawIndirect` and `vkCmdDrawIndexedIndirect` (a Metal indirect draw per command, `C_DRAWIND`); `vkCmdFillBuffer` (a byte pattern is a Metal fill, a four-byte pattern comes from a buffer filled with it) and `vkCmdUpdateBuffer` (the bytes are copied when recorded, then into the buffer in order); `vkCmdResolveImage` (a render pass that only resolves; a part of an image is reported and skipped); `vkCmdBlitImage` (a blit encoder copy for a same-size, same-format, unmirrored blit, others reported and skipped); `vkCmdExecuteCommands` (a secondary buffer is recorded like a primary one and replayed in place; the submit's slot count includes theirs); `vkCmdCopyQueryPoolResults` (written when the submit completes, from the same tickets `vkGetQueryPoolResults` reads); `vkCmdSetBlendConstants` and `vkCmdSetDepthBias` (a pipeline that lists them as dynamic takes them from the command); `vkCmdSetLineWidth`, `vkCmdSetDepthBounds` (reported) and `vkCmdSetDeviceMask`. `vkCmdClearAttachments` and `vkCmdNextSubpass` are reported and do nothing.
+- **Found on:** Re:ZERO -Starting Life in Another World- The Prophecy of the Throne (`01000B20117B8000`, SDK 9.5.0): the commands its frames record that the layer lacked.
+- **Check:** `t_vk_cmds` reads back a fill (both forms, `VK_WHOLE_SIZE`), an update, a resolve, a same-size blit and a refused scaled one, direct and indexed indirect draws, a dynamic blend constant, a draw and a fill in secondary buffers, events and 32- and 64-bit query copies. It does not compile against the layer without these commands.
+
+### Texel buffers translated as 2D textures
+
+- **Symptom:** with `MTL_DEBUG_LAYER=1` the first dispatch aborts: `incorrect type of texture (MTLTextureTypeTextureBuffer) bound at Texture binding at index 0 (expect MTLTextureType2D)`. Without validation, the shader reads garbage from the buffer.
+- **Cause:** spirv-cross emulates a uniform or storage texel buffer as a 2D texture 4096 texels wide (`spvTexelBufferCoord`) unless asked otherwise, while the layer binds a buffer view as a real buffer texture (`bview_tex`).
+- **Fix:** `vk_shaders.py` translates with `--msl-texture-buffer-native`, so the MSL declares `texture_buffer<T>` and reads it by index.
+- **Found on:** Re:ZERO -Starting Life in Another World- The Prophecy of the Throne (`01000B20117B8000`): its clustered-light kernel (`ClusteredLight.cs`) reads its lights from a texel buffer. It is the only one of the game's 41 modules that uses one.
+- **Check:** `test_vk_shaders.py` translates a compute shader that fetches from a texel buffer and checks that the MSL declares a `texture_buffer`; against the old flags it gets the 2D emulation.
+
+### Barriers and events
+
+- **Model:** `vkCmdPipelineBarrier`, `vkCmdWaitEvents` and semaphores order nothing in the layer. One serial queue replays commands in order, and Metal tracks hazards between passes, blits and compute encoders. A dispatch runs outside a render pass, ending an open render encoder; consecutive dispatches share one compute encoder until a render or blit encoder begins.
+- **Argument buffers:** descriptor sets that exceed Metal's per-stage slots are encoded as argument buffers and re-encoded when their descriptor-set generation changes. They need argument-buffer tier 2; on a tier 1 device such a pipeline is refused and its draws or dispatches are counted as skipped. A sampler gets an argument-buffer twin only when a set encoded so uses it, because Apple limits the unique argument-buffer samplers per app (96 on iOS, 1024 or more on macOS).
+- **Events:** `vkSetEvent` / `vkResetEvent` change an event for the host at once; `vkCmdSetEvent` / `vkCmdResetEvent` change it when their submit has been replayed and read as set once that submit has completed (`vkGetEventStatus`, the same ticket as a fence).
+- **Limits:**
+  - A GPU wait (`vkCmdWaitEvents`) on an event the host sets later is not honoured. The queue does not stop, so a command after the wait may read what the host has not written yet.
+  - A barrier inside one render pass is not honoured either. Metal tracks hazards between encoders, not between the draws of one encoder, so a storage write a later draw of the same pass reads needs a memory barrier.
+  - A dependency from a dispatch to a draw inside one render pass, or between compute dispatches through untracked memory, is not honoured. Metal's encoder hazard tracking covers tracked resources between encoders, not these cases.
+  - Resources reachable only through an argument buffer must be declared with `useResources`; without it, Metal's hazard tracker does not know about them.
+  - Storage-image formats are advertised only when the device's Metal read-write texture tier supports them; sRGB, compressed and depth/stencil formats are not advertised.
+  - A reset recorded in a command buffer shows to the host when its submit is replayed, which can be before the GPU reaches it.
+  - A wait on an event that an earlier command of the queue sets is met by the queue's order. `t_vk_cmds` records a wait on an event nothing sets and checks that the queue continues.
+- **Check:** `make -C dm/gfx/tests GAME=010015100B514000 check_t_vk_compute check_t_vk_argbuf` covers dispatch ordering, argument-buffer residency, format support, lazy samplers and generation invalidation; `python3 -m unittest dm/tools/tests/test_vk_shaders.py` checks shader-table resource selection.
+
 ## OpenGL layer
 
 Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.4.0) and Balatro (LÖVE 11.4, "love-nx", with SDL and LuaJIT) render with **NVIDIA's desktop OpenGL 4.5 core profile through EGL**, not NVN. The host implements GL itself on Metal (`dm/gfx/gl/hle_gl.m`), as it does Vulkan for Hades; NVIDIA's GL driver (`subsdk0`) is not loaded. Balatro's graphics module is LÖVE's own OpenGL backend, so its choices follow what the context reports.
@@ -1603,7 +1650,7 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 
 - **Symptom:** the NSP script's provisional profile said Vulkan, and the capture boot crashed in the GL layer.
 - **Cause:** `main` imports `vkGetInstanceProcAddr` for SDL's Vulkan loader, which nothing uses; the game draws with EGL and GL.
-- **Fix:** `profile_guess.py` decides `graphics gl` when `main` imports `eglCreateWindowSurface` and names `glShaderSource`, and now leaves `vkGetInstanceProcAddr` out of its Vulkan count.
+- **Fix:** `profile_guess.py` decides `graphics gl` when `main` imports `eglCreateWindowSurface` and names `glShaderSource`, and leaves `vkGetInstanceProcAddr` out of its Vulkan count. One exception: a `main` that imports `vkGetInstanceProcAddr` and no Vulkan function else, no EGL and no `nvnBootstrapLoader`, with SPIR-V files in the RomFS and no NRO that draws with NVN, loads every Vulkan function through it (the Vulkan loader of SDK 9.x) and is Vulkan. Re:ZERO's `main` is that; Balatro's SDL loader comes with EGL, and a game whose NROs draw with NVN stays NVN.
 - **Found on:** [Digimon Story Cyber Sleuth: Complete Edition](../../dm/games/010014E00DB56000/README.md): `main` imports `nvnBootstrapLoader` and 13 EGL functions. Its graphics setup (`main+0x5ed8f0`) makes an NVN device first, which only a helper beside the movie player uses (`main+0x528000`–`+0x52c400`: a memory pool and four textures next to the movie's GL textures). Then `eglGetDisplay`, `eglBindAPI(EGL_OPENGL_API)`, a 4.5 core context, a window surface on `vi::CreateLayer(w, h)` and a glad loader (`main+0x52c460`). Of the 22 games extracted here (at the time), only Digimon matches the rule. [Balatro](../../dm/games/0100CD801CE5E000/README.md) (SDK 18.3.2, LÖVE 11.4 on OpenGL with SDL and LuaJIT; one boot): `main` imports the EGL functions and `vkGetInstanceProcAddr`, SDL's Vulkan loader, which nothing calls (`subsdk1` is NVIDIA's Vulkan driver); Hades and both Galaxies import 99 or 100 Vulkan functions, `vkCreateInstance` among them.
 - **Note:** [Absolum](../../dm/games/0100A83022A22000/README.md) imports the same EGL functions (SDL3) but renders with NVN and names no GL function.
 

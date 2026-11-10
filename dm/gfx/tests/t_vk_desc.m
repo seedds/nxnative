@@ -56,7 +56,7 @@ int main(void) {
         for (int i = 0; i < 4096; i++) { size_t n = 8 + 8 * (i % 8); junk[i] = malloc(n); memset(junk[i], 0xa5, n); }
         CHECK(wtex && wsmp && wbuf, "the descriptors keep the texture, sampler state and buffer alive");
         const desc_t *e = &ds->d[L->b[L->idx[0]].base + 1], *u = &ds->d[L->b[L->idx[1]].base];
-        CHECK(e->tex == wtex && e->smp == wsmp, "element 1 holds the view's texture and the sampler state");
+        CHECK(e->tex == wtex && e->smp && e->smp.state == wsmp, "element 1 holds the view's texture and its sampler wrapper's state");
         CHECK(u->buf == wbuf && u->off == 512 + 64, "the buffer descriptor holds the memory's buffer at the buffer's offset plus its own");
 
         // A fragment shader taking c:0.0=0*8 and u:0.1=0, bound for a draw as pre_draw does
@@ -66,7 +66,7 @@ int main(void) {
         rpd.colorAttachments[0].texture = [g_dev newTextureWithDescriptor:td]; rpd.colorAttachments[0].loadAction = MTLLoadActionClear;
         shinfo si = {.key = "t_vk_desc", .frag = 1, .nres = 2, .res = {{'c', 0, 0, 8, 0}, {'u', 0, 0, 1, 1}}};
         rs_t s = {0}; s.cb = [g_q commandBuffer]; s.re = [s.cb renderCommandEncoderWithDescriptor:rpd]; s.set[0].s = ds;
-        bind_res(&s, &si, 1);
+        bind_res(&s, NULL, &si, ST_FRAG);
         [s.re endEncoding]; s.re = nil; [s.cb commit]; [s.cb waitUntilCompleted];
         CHECK(s.cb.status == MTLCommandBufferStatusCompleted, "the bound pass completed");
         s.cb = nil;

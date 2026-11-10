@@ -19,6 +19,28 @@ static void run(sim *m, int n, double w, int kmin, int kmax, int fixed) {
 }
 
 int main(void) {
+    {   // A frame step counted in ticks of 1/120 s (nvn_fstep.top, Breath of the Wild at 120 fps): frames that fit hold 120, late ones step to what they cost, and the step comes back
+        sim m = {0}; m.s.top = FSTEP_TICKS_MAX; m.s.per_vsync = 2;
+        run(&m, 60, 0.5, 1, FSTEP_TICKS_MAX, 0);
+        check(m.s.k == 1 && m.next == 1, "ticks: frames that fit hold one tick of 1/120 s");
+        run(&m, 10, 3.6, 1, FSTEP_TICKS_MAX, 0);
+        check(m.s.k == 4, "ticks: late frames step up to their cost, 4 ticks (30 fps), past the vsync limit of 3");
+        run(&m, 10, 7.5, 1, FSTEP_TICKS_MAX, 0);
+        check(m.s.k == FSTEP_TICKS_MAX, "ticks: the hold stops at FSTEP_TICKS_MAX (20 fps)");
+        {   // no probes in ticks: a step up after a long run at one tick stays where the cost put it until a trial fits
+            sim p = {0}; p.s.top = FSTEP_TICKS_MAX; p.s.per_vsync = 2;
+            run(&p, 1200, 0.5, 1, FSTEP_TICKS_MAX, 0); run(&p, 6, 1.6, 1, FSTEP_TICKS_MAX, 0);
+            int k = p.s.k; uint64_t pr = p.s.probes; run(&p, 600, 1.6, 1, FSTEP_TICKS_MAX, 0);
+            check(k == 2 && p.s.k == 2 && p.s.probes == pr, "ticks: frames of 1.6 ticks hold 2 ticks steadily, with no probe back to 1");
+        }
+        sim f = {0}; f.s.top = FSTEP_TICKS_MAX; f.s.per_vsync = 2;
+        run(&f, 3, 0.5, 1, FSTEP_TICKS_MAX, 4);
+        check(f.s.k == 4, "ticks: the game's own step of 2 vsyncs holds 4 ticks");
+        run(&f, 3, 0.5, 1, FSTEP_TICKS_MAX, 0);
+        check(f.s.k == 1, "ticks: when the game's own step ends the hold starts again from kmin");
+        check(nvn_fstep_interval(1) == 1 && nvn_fstep_interval(2) == 1 && nvn_fstep_interval(3) == 2 && nvn_fstep_interval(4) == 2 && nvn_fstep_interval(6) == 3, "ticks: the whole interval the game reads is at least 1 vsync");
+        check(nvn_fstep_ratio(1) == 0.25f && nvn_fstep_ratio(2) == 0.5f && nvn_fstep_ratio(4) == 1.0f, "ticks: the ratio is in 1/30 s ticks");
+    }
     {   // 120 fps (hle_nvn.c fps_high): kmin 1, kmax 2, in ticks of 1/120 s. The target follows the hold, so a hold above what frames take is the game at the right speed
         sim m = {0}; m.s.per_vsync = 2;
         run(&m, 120, 0.7, 1, 2, 0); check(m.s.k == 1, "120 fps: frames of 5.8 ms hold 120");

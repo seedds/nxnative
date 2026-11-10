@@ -317,7 +317,8 @@ static void install_fps_state(module_t *m) {
 void dm_fps_state_apply(void) {
     if (!dm_fps_state) return;
     const char *e = getenv("DM_FPS_TARGET"); int t = e ? atoi(e) : DM_GAME_FPS_TARGET;
-    if (t != 0 && t != 30 && t != 60) { LOG("[RED] DM_FPS_TARGET=%s: must be 0, 30 or 60; using the game's own frame step", e); t = 0; }
+    if (t == 120 && DM_GAME_FPS_MAX < 120) { LOG("[RED] DM_FPS_TARGET=120: this game's speed at 120 fps is not checked (profile fps_max); running at 60"); t = 60; }
+    if (t != 0 && t != 30 && t != 60 && t != 120) { LOG("[RED] DM_FPS_TARGET=%s: must be 0, 30, 60 or 120; using the game's own frame step", e); t = 0; }
     float f = (float)t; memcpy(dm_fps_state, &f, sizeof f);
     // Render scale of the 3D views (the stubs at Tears of the Kingdom's main+0xd5cc0, Breath of the Wild's main+0x1266880, Hades II's render size): 1.0 keeps the game's own size
     // and dynamic resolution; another factor fixes the size at that fraction (DM_RENDER_SCALE, 0.5 to the stub's largest scale: 1.0, or above for a stub that also raises it,

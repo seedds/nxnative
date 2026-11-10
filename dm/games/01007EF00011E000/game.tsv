@@ -24,6 +24,8 @@ gpu_timestamps	segment
 # patches.py FRAME_STEP); 30 when 60 does not hold, game time = real time. DM_FPS_TARGET=30 (Documents/env.txt on the iPhone) saves power; 0 runs the game's own
 # interval controller (with the 60 fps cuts, which also serve while the game's VFR override is set)
 fps_target	60
+# 120 on the Mac when chosen (Frame rate; patches.py 120 fps, hle_nvn.c fps_high): the frame step counts ticks of 1/120 s and the game takes them as a float ratio
+fps_max	120
 # Tested defaults for this game (iPhone 17 Pro Max, iOS 27.0.1, docked, 60 fps target; GitHub issues #142 / #159): present snapshots keep the GPU from idling between frames,
 # which iOS's clock governor reads as headroom (30 fps without them, a steady 60 for 300 s with them and the encode thread); render pipelines through MTL4Compiler give the
 # pipeline archive, the prepare step and the hybrid pipelines on the iPhone too (5,100 prewarm lines prepared in 0.28 s at start instead of compiling on first use)

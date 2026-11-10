@@ -77,7 +77,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [Super Mario 3D All-Stars: Super Mario Sunshine](#super-mario-3d-all-stars-super-mario-sunshine) | 2 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Super Smash Bros. Ultimate](#super-smash-bros-ultimate) | 11 | 0 | 0 | 1 | 0 | `game` |
 | [Taiko Risshiden V DX](#taiko-risshiden-v-dx) | 1 | 0 | 0 | 2 | 0 | `game` |
-| [The Legend of Zelda: Breath of the Wild](#the-legend-of-zelda-breath-of-the-wild) | 7 | 0 | 43 | 0 | 0 | `build` → `game` ×2 |
+| [The Legend of Zelda: Breath of the Wild](#the-legend-of-zelda-breath-of-the-wild) | 7 | 0 | 53 | 0 | 0 | `build` → `game` ×2 |
 | [The Legend of Zelda: Link's Awakening](#the-legend-of-zelda-links-awakening) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [The Legend of Zelda: Ocarina of Time](#the-legend-of-zelda-ocarina-of-time) | 0 | 0 | 2 | 0 | 0 | `game` ×2 |
 | [The Legend of Zelda: Tears of the Kingdom](#the-legend-of-zelda-tears-of-the-kingdom) | 0 | 0 | 9 | 0 | 0 | `game` |
@@ -502,14 +502,18 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - cut `+0x1126794`: stepping down stops at < 3 → at < 2: cmp w9,#3 → cmp w9,#2
   - cut `+0x112691c`: interval controller always takes the GPU time path (CPU span timing): cbz x0,#0x1126934 → b #0x1126928
   - cut `+0x1126974`: interval controller always takes the GPU time path (takes max(CPU span, GPU time)): cbz x0,#0x112698c → b #0x1126980
-  <details><summary>43 frame-step sites</summary>
+  <details><summary>53 frame-step sites</summary>
 
   - frame step `+0x27ae0`: Pane::Calculate: a HUD widget at the edge moved to the taller screen's edge with its children, full-screen backgrounds stretched (duo_anchor.c)
   - frame step `+0x2df28`: projected texture fitted to the layout: a pane as tall as the taller screen maps its whole height
+  - frame step `+0x5830d8`: a duration in frames: twice the frames at 120 fps (state +0x304; 0 = original)
+  - frame step `+0x5d268c`: a counter of int(deltaFrame x 2): every other frame at 120 fps so it keeps counting (state +0x304; 0 = original)
   - frame step `+0xc61ef4`: output size static, nnMain: 1920x1080 → the host's height
   - frame step `+0xc61f28`: output size static, nnMain (second path)
   - frame step `+0xc61f5c`: layout size static, nnMain: 1280x720 → the host's layout height
   - frame step `+0xde85dc`: 720.0 with 1280.0 (screen position in layout space)
+  - frame step `+0xde8f90`: per-frame blend: its acceleration scaled to the frame step at 120 fps (state +0x304; 0 = original)
+  - frame step `+0xde8fdc`: per-frame blend: its speed limit scaled to the frame step at 120 fps (state +0x304; 0 = original)
   - frame step `+0xdea070`: 720.0 with 1280.0 (screen position / layout size)
   - frame step `+0xdea678`: 720.0 with 1280.0
   - frame step `+0xdf19ac`: 720.0: output size / layout size (the layout scale)
@@ -534,6 +538,8 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - frame step `+0x10ee094`: main camera fovy getter: widened like the projection (culling tests)
   - frame step `+0x10ee0cc`: main camera fovy getter in degrees: widened like the projection
   - frame step `+0x11269b8`: setWaitVsyncInterval: the host's step unless the VFR override is set (state page target fps; 0 = the game's interval)
+  - frame step `+0x11ea8d8`: a factor per halving of the frame time: once more at 120 fps (state +0x304; 0 = original)
+  - frame step `+0x125f128`: fade: steps by the frame step at 120 fps (state +0x304; 0 = original)
   - frame step `+0x12618c4`: output size static, its getter
   - frame step `+0x1261920`: layout size static, its getter
   - frame step `+0x12660d4`: docked display size 1920x1080
@@ -544,9 +550,13 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - frame step `+0x126686c`: scale apply block taken every frame when the host render scale is not 1.0
   - frame step `+0x1266880`: 3D view scale = the host render scale (1.0 = the game's dynamic resolution)
   - frame step `+0x127a2f8`: map footprint trail: its viewport and projection at the 720 pane's half-height, not the taller frame's
+  - frame step `+0x1280ee4`: UI animation: steps by the frame step at 120 fps (state +0x304; 0 = original)
   - frame step `+0x13f9704`: 1280x720 passed as a size
   - frame step `+0x151d3d0`: VFR::updateInterval: its own override published for the host (state page target fps; 0 = original)
+  - frame step `+0x151d48c`: VFR::calc: the ratio follows the frame step in ticks of 1/120 s (state +0x304; 0 = original)
+  - frame step `+0x151d580`: time multiplier ramp: every fourth frame at 120 fps, 30 steps a second as at 60 (state +0x304; 0 = original)
   - frame step `+0x1544644`: 720.0 with 1280.0
+  - frame step `+0x1551004`: the floor of a ratio passed on: 0.25 at 120 fps (state +0x304; 0 = original)
 
   </details>
 

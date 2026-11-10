@@ -293,6 +293,34 @@ HLE_FORCE("_ZN2nn2oe22SetCpuOverclockEnabledEb", "CPU overclock switch (through 
 HLE_FORCE("_ZN2nn2oe23GetCurrentGraphicsScaleEv", "graphics scale (Switch 2, through am): 0 handheld, 1 console", int, h_oe_GfxScale, void) { return opmode() == 1; }
 HLE_FORCE("_ZN2nn2oe42SetGraphicsScaleChangedNotificationEnabledEb", "graphics scale change notification (Switch 2, through am); the scale changes only with the operation mode",
           void, h_oe_GfxScaleNotify, unsigned on) { (void)on; }
+// The Switch 2 SDK's GPU time of a frame (nn::oe -> nn::gs::sdk::QueryApplicationGpuTimeSpan; Nintendo Switch 2 Welcome Tour asks every frame, for its dynamic resolution):
+// the SDK's reaches the gs service's session lock through null (sdk+0x151fb0). By default the host answers a fixed 8 ms, which keeps such a game at full resolution, as the
+// player's Dynamic resolution off does for the games with that capability: the host's GPU time fed to a game's own dynamic resolution held Ocarina of Time at its floor on the
+// Mac (docs/reference/frame-rate.md, "Dynamic resolution at its floor while the GPU has time to spare"), and the GPU time of a host frame is not the Switch 2's. With
+// DM_DYNAMIC_RESOLUTION=1 it answers the GPU time of its newest frame whose GPU work has completed (mtl_gpu_ms, up to 8 frames back, as hle_nvn.c's frame step reads it),
+// else 8 ms; that reading has not been run with a game yet. Which frame the two words name is not known; one frame's GPU busy time is the reading here
+__attribute__((weak)) double mtl_gpu_ms(uint64_t f) { (void)f; return -1; }   // (host unit tests without a graphics backend)
+__attribute__((weak)) uint64_t dm_nvn_frame_count(void) { return 0; }
+HLE_FORCE("_ZN2nn2oe27QueryApplicationGpuTimeSpanEPNS_8TimeSpanEmm", "GPU time of a frame (Switch 2, gs): 8 ms; the host's newest measurement with DM_DYNAMIC_RESOLUTION=1", Result, h_oe_GpuTimeSpan,
+          int64_t *out, uint64_t a, uint64_t b) {
+    static int measured = -1;
+    if (measured < 0) { const char *e = getenv("DM_DYNAMIC_RESOLUTION"); measured = e && !strcmp(e, "1"); }
+    double ms = -1; uint64_t n = measured ? dm_nvn_frame_count() : 0;
+    for (uint64_t f = n; f-- > 0 && n - f <= 8 && !(ms > 0);) ms = mtl_gpu_ms(f);
+    if (!(ms > 0 && ms < 1000)) ms = 8;
+    if (out) *out = (int64_t)(ms * 1e6);
+    static atomic_int once; if (!atomic_exchange(&once, 1)) LOG("oe::QueryApplicationGpuTimeSpan(%#llx, %#llx): %s (%.1f ms now)", (unsigned long long)a, (unsigned long long)b,
+                                                                measured ? "the host's GPU time of a frame (DM_DYNAMIC_RESOLUTION=1)" : "a fixed 8 ms, for full resolution (DM_DYNAMIC_RESOLUTION=1: the host's GPU time)", ms);
+    return RES_OK; }
+// Native memory handles of the Switch 2's gs (CreateNativeMemory: a game memory range the graphics system may use; Welcome Tour imports both): the host's graphics layer reads game
+// memory in place, so the handle is the range's address and nothing is registered. Seen only as imports so far, never called: the 8-byte handle (NativeMemoryHandle's size
+// and what a game does with it) is not checked yet
+HLE_FORCE("_ZN2nn2gs3sdk18CreateNativeMemoryEPNS0_18NativeMemoryHandleEPvmNS_2os16MemoryPermissionENS0_3cpu18MemoryCacheabilityE", "gs native memory handle: the range itself (Switch 2)",
+          Result, h_gs_NativeMem, uint64_t *handle, void *mem, uint64_t size, int perm, int cache) {
+    (void)perm; (void)cache; if (handle) *handle = (uint64_t)(uintptr_t)mem;
+    static atomic_int once; if (!atomic_exchange(&once, 1)) LOG("gs::sdk::CreateNativeMemory %p +%#llx: the handle is the address (nothing to register on the host)", mem, (unsigned long long)size);
+    return RES_OK; }
+HLE_FORCE("_ZN2nn2gs3sdk19DestroyNativeMemoryENS0_18NativeMemoryHandleE", "gs native memory handle released: nothing was registered", Result, h_gs_NativeMemFree, uint64_t handle) { (void)handle; return RES_OK; }
 // The frame length the game aims at (Switch 2 SDKs): oe::SetGraphicsTargetFrameRate maps up to 59 fps to mode 1, up to 119 to mode 2 and above to mode 3, SetGraphicsTargetFrameRateAuto
 // to mode 0, and both call this, which locks the gs graphics server's context and sends it the mode. The host has no graphics server (nv::InitializeGraphics), so the context is null and
 // the lock crashed: Hyrule Warriors: Age of Imprisonment sets 60 / its present interval at boot (main+0x1e5d244). The host paces by the window's present interval, so the mode is only noted

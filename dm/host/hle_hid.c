@@ -908,6 +908,12 @@ HLE_FORCE("_ZN2nn3hid44IsUnintendedHomeButtonInputProtectionEnabledERKj", "Home 
           const uint32_t *id) { return id && (atomic_load(&g_home_protect) & id_bit(*id)); }
 // The system setting for the mouse pointer's speed (System Settings, Mouse): the default, 1
 HLE_FORCE("_ZN2nn3hid25GetMousePointerSpeedScaleEv", "mouse pointer speed setting: the default, 1.0", float, h_hid_MouseSpeed, void) { return 1.0f; }
+// Switch 2 SDK calls Nintendo Switch 2 Welcome Tour makes that the SDK answers from the hid service, which the host does not serve (sf abort 0xe15 at sdk+0x65cfdc): the GL / GR
+// buttons' configuration (the Switch 2 Pro Controller's back buttons): none assigned; the private-app scene id: nothing to tell (whether the SDK's returns void or a
+// Result is not known: a Result of 0 is safe either way)
+HLE_FORCE("_ZN2nn3hid24GetGlGrButtonConfigStateEPbS1_j", "GL / GR button configuration (Switch 2 Pro Controller): not assigned", Result, h_hid_GlGr, uint8_t *gl, uint8_t *gr, uint32_t npad) {
+    (void)npad; if (gl) *gl = 0; if (gr) *gr = 0; return RES_OK; }
+HLE_FORCE("_ZN2nn3hid23SetSceneIdForPrivateAppEi", "scene id for a private app: nothing to tell on the host", Result, h_hid_SceneId, int id) { (void)id; return RES_OK; }
 // The Switch 2's pointer on top of those sensors (Nmouse; Fire Emblem Fortune's Weave initializes it at boot with the 1920x1080 screen it maps the pointer to, main+0x650a24). InitializeNmouse opens the
 // hid service as InitializeJcms does (its Result aborts: sdk+0x6d5340). No controller of the host has the sensor, so there are no handles, and the calls on a handle have nothing to do
 HLE_FORCE("_ZN2nn3hid16InitializeNmouseEPvmii", "Joy-Con mouse pointer: no hid service; front ends may turn the sensors on", void, h_hid_NmouseInit, void *work, uint64_t size, int w, int h) { (void)work; (void)size; (void)w; (void)h; atomic_fetch_or(&g_jcms_wanted, 2u); }

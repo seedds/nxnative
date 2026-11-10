@@ -73,6 +73,7 @@ typedef struct thr {
     int last_svc; uint64_t last_lr;
     int closed, sync_refs;      // Reclaim only after handle close, thread exit and the final synchronization wait reference
     uint64_t nsvc;             // SVC count (for the state dump)
+    _Atomic uint64_t nsvc_by[128], nblock[5]; uint64_t *clock_reads;   // DM_SVC_STATS, written only by this thread: SVCs by number, waits that blocked by kind; its dm_clock_reads (hle_os.c)
     uint64_t nyield, nyield_seen, nbackoff, nbackoff_seen;   // Yields (SleepThread 0/-1/-2) and those the back-off turned into short sleeps, with both counts at the last power report (dm_yield_top)
     uint64_t nclkyield, nclkyield_seen;       // Yields of clock waits (thr_yield), and their count at the last power report
     uint64_t nspin, nspin_seen, spin_site; const char *spin_mod;   // Spin wait passes (dm_spin_wait; those that yield count in nyield too) and where the last one was
@@ -100,6 +101,15 @@ static thr_t *g_all;
 extern __thread _Atomic int dm_host_work;   // declared in hle.h too; defined in hle_nvn.c
 static _Atomic uint64_t g_preempt_n, g_preempt_ns;   // same-core handoffs: count and total wait (svc_thread)
 static int g_core_preempt;   // also check already-runnable peers after every thread SVC (profile / DM_PREEMPT)
+static int g_svc_stats;      // DM_SVC_STATS=<frames> (svc_stats_line); 0: off, and nothing is counted
+#define CNT(x) atomic_store_explicit(&(x), atomic_load_explicit(&(x), memory_order_relaxed) + 1, memory_order_relaxed)   // a load and a store: only the owning thread writes
+typedef struct { uint64_t svc[128], block[5], clock; } svc_stats_t;
+static svc_stats_t g_stats_dead;   // the counts of threads that exited, so the totals only grow (holding G)
+static void svc_stats_add(svc_stats_t *s, thr_t *t) {   // holding G
+    for (int i = 0; i < 128; i++) s->svc[i] += atomic_load_explicit(&t->nsvc_by[i], memory_order_relaxed);
+    for (int i = 0; i < 5; i++) s->block[i] += atomic_load_explicit(&t->nblock[i], memory_order_relaxed);
+    if (t->clock_reads) s->clock += __atomic_load_n(t->clock_reads, __ATOMIC_RELAXED);
+}
 
 static pthread_mutex_t G = PTHREAD_MUTEX_INITIALIZER;
 #define MAX_H 4096
@@ -271,6 +281,7 @@ static void wake(thr_t *t, int64_t res) {
 }
 // Suspend until woken or timed out (ns<0 infinite, 0 immediate timeout); returns wres or R_TIMEOUT
 static int64_t block(thr_t *t, int kind, int64_t ns) {
+    if (g_svc_stats && ns) CNT(t->nblock[kind]);
     t->wkind = kind; t->woke = 0; t->next = g_wait; g_wait = t; t->wseq = ++g_wseq;
     if (ns == 0) { wait_unlink(t); t->wkind = 0; return R_TIMEOUT; }
     hand_leave(t);
@@ -353,7 +364,7 @@ static void *thread_main(void *p) {
     pthread_set_qos_class_self_np(prio_qos(t->prio), 0);
     qos_class_t qc = QOS_CLASS_UNSPECIFIED; int rp = 0;
     pthread_get_qos_class_np(pthread_self(), &qc, &rp); t->qos = (uint32_t)qc;
-    t->mport = pthread_mach_thread_np(pthread_self()); t->host_work = &dm_host_work;
+    t->mport = pthread_mach_thread_np(pthread_self()); t->host_work = &dm_host_work; t->clock_reads = &dm_clock_reads;
     pthread_mutex_unlock(&G);
     crash_thread_init();
     guest_thread_init(); guest_thread_set_id(t->id);
@@ -378,6 +389,8 @@ static void thread_exit(thr_t *t) {
     // No logging here: the exit happens on the guest thread's own stack (some are only a dozen or so KiB), and a printf with floating point would blow the stack (real-device smoke test: SIGBUS when LibcurlResolver exits, backtrace fprintf → __dtoa). Only the time is recorded, and it is printed later in the state dump
     pthread_mutex_lock(&G);
     t->exited = 1;
+    if (g_svc_stats) svc_stats_add(&g_stats_dead, t);
+    t->clock_reads = NULL;   // its thread-local counter goes with the pthread
     wake_sync_waiters(t);   // Complete synchronization waits on this thread
     pthread_setspecific(g_keythr, NULL);
     if (t->closed && !t->sync_refs) thr_free(t);
@@ -541,10 +554,12 @@ uint32_t svc_thread_main_init(void) {
     { const char *e = getenv("DM_PREEMPT"); g_core_preempt = e ? atoi(e) != 0 : DM_GAME_CORE_PREEMPT; }
     pause_install();
     hitch_init();
+    { const char *e = getenv("DM_SVC_STATS"); g_svc_stats = e && atoi(e) > 0 ? atoi(e) : 0;
+      if (g_svc_stats) LOG("DM_SVC_STATS=%d: SVCs, system counter reads and blocked waits per frame are logged every %d presents", g_svc_stats, g_svc_stats); }
     thr_t *t = calloc(1, sizeof *t);
     pthread_cond_init(&t->cv, NULL); pthread_cond_init(&t->pcv, NULL);
     // Its affinity is its ideal core alone, as Horizon creates every thread (Mesosphere KThread::Initialize); it was 7, which a same-core handoff now takes for a thread that can run elsewhere (dm_yield_to_core_peers)
-    t->started = t->entered = 1; t->prio = 44; t->core = 0; t->mask = 1; t->pt = pthread_self(); t->mport = pthread_mach_thread_np(t->pt); t->host_work = &dm_host_work;
+    t->started = t->entered = 1; t->prio = 44; t->core = 0; t->mask = 1; t->pt = pthread_self(); t->mport = pthread_mach_thread_np(t->pt); t->host_work = &dm_host_work; t->clock_reads = &dm_clock_reads;
     // The iOS boot pthread inherits default QoS. Apply the guest policy before
     // publishing the main thread, just as workers do before running guest code.
     qos_apply(t);
@@ -994,6 +1009,44 @@ void dm_thread_cpu(char *out, size_t n, double secs) {
     if (!top[0] && o < n) snprintf(out + o, n - o, "none");
     pthread_mutex_unlock(&G);
 }
+// DM_SVC_STATS=<frames> (diagnostic): every that many presents (every graphics API, nvn_mtl.m present_enqueue), what the guest asked of the host per frame since the last line:
+// its SVCs and the four most frequent, its reads of the system counter (the cntpct and cntvct gate, GetSystemTick), and its waits that blocked, by kind (a wait that ended at once is not
+// counted). Every SVC and every cntpct read is a call into the host and every blocked wait a host condition-variable wait behind G, so the line shows what a frame's host CPU time
+// goes to. Each thread counts its own with relaxed stores; the line sums them under G. Off, an SVC and a blocked wait each test g_svc_stats once
+static const char *svc_name(int n) {
+    switch (n) {
+    case 0x0B: return "SleepThread"; case 0x18: return "WaitSynchronization"; case 0x1A: return "ArbitrateLock"; case 0x1B: return "ArbitrateUnlock";
+    case 0x1C: return "WaitProcessWideKeyAtomic"; case 0x1D: return "SignalProcessWideKey"; case 0x1E: return "GetSystemTick"; case 0x21: return "SendSyncRequest";
+    case 0x34: return "WaitForAddress"; case 0x35: return "SignalToAddress"; default: return NULL; }
+}
+static void svc_stats_line(char *out, size_t n, double frames) {   // per frame since the previous call
+    static svc_stats_t prev; svc_stats_t s; uint64_t d[128], tot = 0, b[5]; int top[4] = {-1, -1, -1, -1};
+    pthread_mutex_lock(&G);
+    s = g_stats_dead;
+    for (thr_t *t = g_all; t; t = t->all) if (!t->exited) svc_stats_add(&s, t);
+    for (int i = 0; i < 128; i++) {
+        d[i] = s.svc[i] - prev.svc[i]; tot += d[i];
+        for (int j = 0; j < 4; j++) if (d[i] && (top[j] < 0 || d[i] > d[top[j]])) { for (int k = 3; k > j; k--) top[k] = top[k - 1]; top[j] = i; break; }
+    }
+    for (int k = 0; k < 5; k++) b[k] = s.block[k] - prev.block[k];
+    uint64_t clk = s.clock - prev.clock, cnt = clk > d[0x1E] ? clk - d[0x1E] : 0;   // dm_clock_reads counts both kinds of read
+    prev = s;
+    pthread_mutex_unlock(&G);
+    size_t o = (size_t)snprintf(out, n, "SVCs %.0f (", tot / frames);
+    for (int j = 0; j < 4 && top[j] >= 0 && o < n; j++) {
+        const char *nm = svc_name(top[j]);
+        o += nm ? (size_t)snprintf(out + o, n - o, "%s%s %.0f", j ? ", " : "", nm, d[top[j]] / frames) : (size_t)snprintf(out + o, n - o, "%s%#x %.0f", j ? ", " : "", top[j], d[top[j]] / frames);
+    }
+    if (o < n) snprintf(out + o, n - o, "); system counter reads %.0f (cntpct %.0f, GetSystemTick %.0f); waits that blocked %.0f (lock %.0f, condition %.0f, address %.0f, handles %.0f)",
+        clk / frames, cnt / frames, d[0x1E] / frames, (b[1] + b[2] + b[3] + b[4]) / frames, b[1] / frames, b[2] / frames, b[3] / frames, b[4] / frames);
+}
+void dm_svc_stats_present(void) {
+    if (!g_svc_stats) return;
+    static _Atomic uint64_t presents; uint64_t p = atomic_fetch_add(&presents, 1);
+    if (p % (uint64_t)g_svc_stats) return;
+    char line[640]; svc_stats_line(line, sizeof line, g_svc_stats);
+    if (p) LOG("SVC stats, per frame over the last %d presents: %s", g_svc_stats, line);   // the first present only takes the baseline
+}
 // Sleep until dl (host monotonic ns) on time: macOS nanosleep / mach_wait_until carry timer slack; measured, 33 ms sleeps take about 36.4 ms, 5 ms take 6.1 ms, 1 ms take 1.26 ms (the same at any QoS).
 // Metroid Dread's sound thread sleeps "33 ms minus this round's work" (main+0xf95b0), and on the host its period became 36.9 ms; cutscenes render a frame whenever the audio play position that thread updates moves, so they ran at about 27 fps (30 on the Switch).
 // Each step sleeps only 3/4 of the remaining time (the slack is at most about 25%, so it never oversleeps), looping until within 20 µs: a 33 ms sleep takes about 4 system calls with an error of tens of microseconds, and nothing spins
@@ -1038,7 +1091,7 @@ int svc_thread(int num, uint64_t *regs) {
     return r;
 }
 static int svc_thread_impl(int num, uint64_t *regs) {
-    { thr_t *me = pthread_getspecific(g_keythr); if (me) { me->last_svc = num; me->last_lr = regs[30]; me->nsvc++; } }
+    { thr_t *me = pthread_getspecific(g_keythr); if (me) { me->last_svc = num; me->last_lr = regs[30]; me->nsvc++; if (g_svc_stats) CNT(me->nsvc_by[num & 127]); } }
     if (g_flag.thr && num != 0x0B) { thr_t *me = pthread_getspecific(g_keythr); LOG("[%#x] svc %#x x0=%#llx x1=%#llx x2=%#llx x3=%#llx", me ? me->handle : 0, num, regs[0], regs[1], regs[2], regs[3]); }
     switch (num) {
     case 0x08: {  // CreateThread(→w1 handle; x1 entry, x2 argument, x3 stack top, w4 priority, w5 core)

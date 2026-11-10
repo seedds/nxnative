@@ -90,7 +90,7 @@ static pthread_cond_t g_gfz_cv = PTHREAD_COND_INITIALIZER; static _Atomic int g_
 // Each read also counts on the reading thread: a run of yields whose passes read the clock is a wait for a time, which the yield back-off sleeps from its start (hle_thread.c thr_yield)
 __thread uint64_t dm_clock_reads;
 void guest_clock_read_wait(void) {
-    dm_clock_reads++;
+    __atomic_store_n(&dm_clock_reads, dm_clock_reads + 1, __ATOMIC_RELAXED);   // a plain increment; DM_SVC_STATS reads it from another thread (hle_thread.c svc_stats_line)
     if (!atomic_load(&g_gfz_bg) || atomic_load(&dm_host_work)) return;
     pthread_mutex_lock(&g_gfz_mu);
     while (g_gfz_reasons & 2u) pthread_cond_wait(&g_gfz_cv, &g_gfz_mu);

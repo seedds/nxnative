@@ -15,7 +15,7 @@
 // JoyDual npad or two single ones as it asks; a game that supports no Joy-Con style reads the pad as a Pro Controller. Motion comes from the Pro Controller 2's
 // sensor, the right Joy-Con's of a pair (DM_SW2_MOTION_SIDE=L for the left) or the single Joy-Con's, as the game's six-axis sensor of that player (dm_motion_set_hid).
 // DM_SW2_HOST=aa:bb:cc:dd:ee:ff names this Mac's Bluetooth address when it cannot be read; DM_SW2_VERBOSE=1 logs the first report of each second; DM_SW2_MAP=a,b,c,d,e,f and
-// DM_SW2_GYRO_DPS=<degrees per second per count> adjust the motion axes and scale (switch2_proto.h s2_motion). On a Pro Controller 2, pairing, buttons, sticks and Home are checked on hardware; its motion map and scale are not measured.
+// DM_SW2_GYRO_DPS=<degrees per second per count> adjust the motion axes and scale (switch2_proto.h s2_motion). On a Pro Controller 2, pairing, buttons, sticks and Home are checked on hardware; its axes are the Joy-Con 2 pair's (from its accelerometer at rest), its gyro scale the Joy-Con 2's (not measured on it).
 #pragma once
 #include "switch2_proto.h"
 #include "hle_haptics.h"
@@ -24,7 +24,7 @@ typedef struct s2_pad { s2_pad_state st; char name[48]; struct s2_pad *next; } s
 
 // The front end's side. All calls come on the main queue.
 typedef struct {
-    void (*attach)(s2_pad *p);   // a new pad: take it a player slot (player() then names it, -1 for none)
+    int (*attach)(s2_pad *p);    // a new pad: take it a player slot (player() then names it), or keep it waiting for its first press (DM_PAD_PRESS_TO_JOIN, player() -1 until then); 0: refused, every player taken
     void (*detach)(s2_pad *p);   // the pad's last controller went: it is already off the list and is freed after the call
     void (*read)(s2_pad *p);     // the pad's state changed
     int (*player)(s2_pad *p);    // 0-based player, -1 without one

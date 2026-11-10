@@ -352,6 +352,34 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** reject a non-finite sensor sample before priming or changing any state. A non-finite time step skips integration, and a non-finite gain disables tilt correction. Do not commit an overflowing rotation step or angle; normal finite samples keep the same arithmetic and coordinate conventions.
 - **Found on:** synthetic `t_motion` samples, not a reproduced game or controller fault. Tests cover each sensor axis before/after priming, subsequent valid input, invalid timing/gain, finite overflow, all 48 signed frame maps and small-angle accumulation. No device or gameplay result is claimed for this change.
 
+### Six-axis history at the sensor's 200 Hz
+
+- **Symptom:** with a Pro Controller 2 on a Mac, Breath of the Wild's motion aiming moved the view only until the right stick or a button was used; later, after a dead-zone fix, it worked for a whole aim or not at all, and while the controller turned the view stepped back and forth (flicker).
+- **Cause:** `GetSixAxisSensorStates` returned the newest sample in every history entry, numbered by time. The game's six-axis update (`main+0x10ff21c`, 1.9.0) takes the entries whose sampling numbers are new since its last read, so it saw one change and then equal entries; a Switch 2 controller reports every 30 ms on a Mac, against the console sensor's 5 ms. Filling the entries from the source's samples afresh at each read (turned on past the newest one) then showed the game a prediction and, a read later, the measurement that replaced it.
+- **Fix:** each source keeps its last 32 samples (`live_motion.hist`), and each handle has its own 200 Hz stream (`six_stream_fill` in `hle_hid.c`): sampling number n is the state of n - 1 moved on 5 ms (`motion_update`) at the rate and gravity the source shows at that time (`motion_at`: blended between two samples, the newest one's held past it). An entry the game may have read is never changed; the stream starts over when the source changes or starts over, or after 32 entries without a read. `DM_MOTION_STREAM=0` gives back the newest sample in every entry. `t_hid` checks distinct entries, 30 ms samples, a late sample that disagrees and the switch.
+- **Found on:** [Breath of the Wild](../../dm/games/01007EF00011E000/README.md) (1.9.0) with a Pro Controller 2 on a Mac: motion aiming on every aim with no flicker (reported by the player). Other motion sources (GameController, the phone, Joy-Con 2s, the Pro Controller's HID reports) go through the same stream; not rechecked on their games.
+
+### A Switch 2 controller's stick at rest off its centre
+
+- **Symptom:** a game reads a small constant deflection from a released stick some of the time; [Breath of the Wild](../../dm/games/01007EF00011E000/README.md) left motion aiming off for the whole aim when the right stick had come to rest that way.
+- **Cause:** the dead zone was 40 raw counts (about 3 % of the travel), and past it the output jumped to the full 40 counts' share. A Pro Controller 2's right stick came to rest 0 to 60 counts from its calibrated centre (raw y 2186 to 2211 between releases), so it read 0 or 3 to 5 % depending on the release.
+- **Fix:** `s2_cal_axis` takes a dead zone of a tenth of each side's travel (`S2_DEADZONE`, at least 40 counts) and scales the output from its edge, so it grows from 0. `DM_SW2_DEADZONE=<share>` (0 to 0.5) sets another; 0 keeps 40 counts without the jump. `t_switch2` checks a stick at rest off its centre and the edge.
+- **Found on:** [Breath of the Wild](../../dm/games/01007EF00011E000/README.md) (1.9.0), a Pro Controller 2 on a Mac. The console's own dead zone for these controllers is not measured; a tenth is the size the Switch 1 controllers' factory stick parameters give.
+
+### A Switch 2 controller waiting for its first press
+
+- **Symptom:** with *Press a button to join* on (`DM_PAD_PRESS_TO_JOIN=1`), a Switch 2 controller paired and connected, then the log said `no free player, not used` and `all players are taken`, and it disconnected before a button could be pressed.
+- **Cause:** the front end leaves a new pad without a player until its first press, and `attachPad` (`pad_switch2_apple.m`) read no player as every player taken.
+- **Fix:** the front end's `attach` returns whether it refused the pad (`pad_switch2_apple.h`); a pad waiting for its first press stays connected, and takes its npad's Joy-Con sides when it joins.
+- **Found on:** [Breath of the Wild](../../dm/games/01007EF00011E000/README.md) (1.9.0), a Pro Controller 2 on a Mac.
+
+### The Pro Controller 2's motion axes
+
+- **Symptom:** a Pro Controller 2 held in both hands read as rolled about 50 degrees to one side; pitching it turned into a roll.
+- **Cause:** its axis map was the Pro Controller 1's, borrowed without a measurement. Its raw frame is the Joy-Con 2 pair's (x right, y forward, z up): flat and still it read accel `-164,-584,4193`, held with its top tipped toward the screen `-73,3227,2597`.
+- **Fix:** `s2_map_pro` is the pair's map (`switch2_proto.h`); `t_switch2` checks both recorded poses. Its gyro scale is still the Joy-Con 2's, not measured on it. `scripts/sw2_gyro.sh` shows a controller's motion without a game.
+- **Found on:** [Breath of the Wild](../../dm/games/01007EF00011E000/README.md) (1.9.0), a Pro Controller 2 on a Mac.
+
 ### The phone's motion in the picture's frame
 
 - **Symptom:** on iPhone Duo's inner display the phone's gyro is turned a quarter turn: tilting up and down moves the pointer left and right, and the other way round ([GitHub issue #569](https://github.com/seedds/nxnative/issues/569)); the outer display is right.

@@ -134,13 +134,18 @@ static inline int s2_cal_parse(const uint8_t *d, size_t n, s2_cal *c) {
     c->valid = c->maxx > 100 && c->maxy > 100 && c->minx > 100 && c->miny > 100;
     return c->valid;
 }
+// dead: the dead zone as a share of each side's travel (at least S2_DEADZONE_MIN raw counts); past it the output grows from 0, so a stick that comes to rest a little off its
+// centre reads 0 as on the console, whose own dead zone is about a tenth of the travel. With 40 counts and no rescale (before), a Pro Controller 2's right stick came to rest
+// 0 to 60 counts off its centre and read a constant 3 to 5 %: Breath of the Wild took the stick as in use and left motion aiming off for the whole aim, about half of the time
+#define S2_DEADZONE_MIN 40.f
 static inline float s2_cal_axis(float v, float centre, float up, float down, float dead) {
     float s = v - centre;
-    if (s > dead) return up > 0 ? fminf(s / up, 1.f) : 0.f;
-    if (s < -dead) return down > 0 ? -fminf(-s / down, 1.f) : 0.f;
+    float du = fmaxf(dead * up, S2_DEADZONE_MIN), dd = fmaxf(dead * down, S2_DEADZONE_MIN);
+    if (s > du) return up > du ? fminf((s - du) / (up - du), 1.f) : 0.f;
+    if (s < -dd) return down > dd ? -fminf((-s - dd) / (down - dd), 1.f) : 0.f;
     return 0.f;
 }
-// A stick in -1..1 (x right, y up), a deadzone of dead raw counts around the centre
+// A stick in -1..1 (x right, y up), with a dead zone of dead (a share of the travel) around the centre
 static inline void s2_cal_apply(const s2_cal *c, uint16_t rawx, uint16_t rawy, float dead, float *x, float *y) {
     s2_cal d; if (!c || !c->valid) { s2_cal_default(&d); c = &d; }
     *x = s2_cal_axis((float)rawx, c->cx, c->maxx, c->minx, dead);
@@ -169,13 +174,19 @@ static inline uint64_t s2_buttons(uint32_t b, int joycon, int alone) {
     return m;
 }
 
-#define S2_DEADZONE 40.f   // raw counts around the centre
+#define S2_DEADZONE 0.10f   // a share of each side's travel around the centre (s2_cal_axis)
+// The dead zone the pads use: S2_DEADZONE, or DM_SW2_DEADZONE (a share of the travel, 0 to 0.5; 0 leaves the S2_DEADZONE_MIN counts of before, without their jump)
+static inline float s2_deadzone(void) {
+    static float d = -1; if (d >= 0) return d;
+    const char *e = getenv("DM_SW2_DEADZONE"); float v = e ? strtof(e, NULL) : S2_DEADZONE;
+    return d = v >= 0 && v <= 0.5f ? v : S2_DEADZONE;
+}
 
 // The pad's buttons and sticks (-32767..32767, y up): a Pro Controller 2's as they are; two Joy-Cons together are a Pro Controller (the left's stick is the left stick, the
 // right's the right stick); one Joy-Con alone is used sideways. Returns 0 when the pad holds no controller.
 static inline int s2_pad_input(const s2_pad_state *p, uint64_t *buttons, int32_t st[4]) {
     float x, y; uint64_t m = 0; st[0] = st[1] = st[2] = st[3] = 0;
-#define STICK(i, dev, c, rx_, ry_) do { s2_cal_apply(&(dev)->cal[c], rx_, ry_, S2_DEADZONE, &x, &y); st[i] = (int32_t)lrintf(x * DM_STICK_MAX); st[(i) + 1] = (int32_t)lrintf(y * DM_STICK_MAX); } while (0)
+#define STICK(i, dev, c, rx_, ry_) do { s2_cal_apply(&(dev)->cal[c], rx_, ry_, s2_deadzone(), &x, &y); st[i] = (int32_t)lrintf(x * DM_STICK_MAX); st[(i) + 1] = (int32_t)lrintf(y * DM_STICK_MAX); } while (0)
     if (p->pro.have) {
         m = s2_buttons(p->pro.r.buttons, 0, 0);
         STICK(0, &p->pro, 0, p->pro.r.lx, p->pro.r.ly); STICK(2, &p->pro, 1, p->pro.r.rx, p->pro.r.ry);
@@ -314,7 +325,7 @@ static inline uint64_t s2_joy_buttons(uint32_t b, int right) {
     return m;
 }
 static inline void s2_joy_stick(const s2_dev *d, int right, int32_t out[2]) {
-    float x, y; s2_cal_apply(&d->cal[0], right ? d->r.rx : d->r.lx, right ? d->r.ry : d->r.ly, S2_DEADZONE, &x, &y);
+    float x, y; s2_cal_apply(&d->cal[0], right ? d->r.rx : d->r.lx, right ? d->r.ry : d->r.ly, s2_deadzone(), &x, &y);
     out[0] = (int32_t)lrintf(x * DM_STICK_MAX); out[1] = (int32_t)lrintf(y * DM_STICK_MAX);
 }
 
@@ -353,11 +364,13 @@ static inline const s2_dev *s2_pad_motion_dev(const s2_pad_state *p, int want_ri
 // Measured on a right Joy-Con 2 held upright (stick on top, face toward the ceiling): raw x right, y forward, z up, and the gyro channels are right-handed rotations about the same
 // axes (tilting the top away: gyro x -83 degrees; turning left: gyro z +115; leaning the right side down: gyro y +104). So the pair's map is the identity for rotation and
 // the negated specific force for gravity. A Joy-Con held alone is turned a quarter turn about the up axis: the right one with its top to the player's left (the Pro Controller 1
-// map of motion_pro.h), the left one with its top to the right. The Pro Controller 2's frame is not measured: it takes the Pro Controller 1's map.
+// map of motion_pro.h), the left one with its top to the right. The Pro Controller 2's raw frame is the pair's (2026-11-10, Breath of the Wild on a Mac): flat and still it read
+// accel -164,-584,4193 (z up); held in both hands with its top tipped toward the screen, -73,3227,2597 (+0.79 G on y, forward). The Pro Controller 1's map it took before
+// turned that forward tilt into a roll of about 50 degrees and a pitch into a roll, so motion aiming went wrong. Its gyro signs follow the pair's (not measured on their own).
 static const int8_t s2_map_pair[6] = {-1, -2, -3, 4, 5, 6};
 static const int8_t s2_map_right_alone[6] = {2, -1, -3, -5, 4, 6};
 static const int8_t s2_map_left_alone[6] = {-2, 1, -3, 5, -4, 6};
-static const int8_t s2_map_pro[6] = {2, -1, -3, -5, 4, 6};
+static const int8_t s2_map_pro[6] = {-1, -2, -3, 4, 5, 6};
 static inline const int8_t *s2_pad_map(const s2_pad_state *p, const s2_dev *dev) {
     if (p->pro.have) return s2_map_pro;
     if (p->left.have && p->right.have) return s2_map_pair;

@@ -2,7 +2,8 @@
 // 1920x1080 image is replaced by the spatial scaler, which fills the whole image with the texture's colour; equal sizes, another shader, and DM_UPSCALER unset
 // (the last run) leave the dispatch to the shader. Runs under any profile: the named shader is the profile's first upscaler (DM_GAME_UPSCALER_KEYS), and a profile with
 // none swaps no shader; the MetalFX draw itself (up_mfx_encode) does not look at the key. The colour (up_mfx_color) comes from synthetic code holding the curves' constants: a variant with sRGB input
-// comes out decoded to linear, and one whose output stays encoded is left to its shader
+// comes out decoded to linear, and one whose output stays encoded is left to its shader. Ocarina of Time's variable-ratio variants (UP_COLOR_SQRT: signed squares in half precision, no curve)
+// take their rectangles from other push-constant words (up_mfx_rect_vr) and their square-root-encoded input comes out squared
 #include "../nvn/nvn_mtl.m"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
@@ -49,6 +50,21 @@ static int color_of(const float *f32, int n32, const float *f16, int n16) {
     }
     return up_mfx_color(code, sizeof code);
 }
+// The same with signed squares among them: HMUL2 R4, R2, |R2| (lo, hi: the halves selected, or'ed in), nsq of them, from byte 2048
+static int color_sq(const float *f32, int n32, int nsq, uint64_t lo_or, uint64_t hi_or) {
+    uint8_t code[4096]; size_t o = 0;
+    for (int i = 0; i < (int)sizeof code; i++) code[i] = (uint8_t)(i * 37 + 11);
+    for (int r = 0; r < 12; r++) for (int i = 0; i < n32; i++) { memcpy(code + o, &f32[i], 4); o += 16; }
+    for (int i = 0; i < nsq; i++) {
+        uint64_t lo = 0x232ull | 4ull << 16 | 2ull << 24 | 2ull << 32 | 1ull << 62 | lo_or, hi = hi_or;
+        memcpy(code + 2048 + 16 * i, &lo, 8); memcpy(code + 2048 + 16 * i + 8, &hi, 8);
+    }
+    return up_mfx_color(code, sizeof code);
+}
+static void push_vr(unsigned ox, unsigned oy, unsigned ow, unsigned oh, float su, float sv) {   // a variable-ratio variant's c[24]: output origin (words 4, 5), size (24, 25), input scale (26, 27)
+    uint32_t *w = (uint32_t *)S.push[1]; memset(w, 0, 32 * 4);
+    w[4] = ox; w[5] = oy; w[24] = ow; w[25] = oh; memcpy(&w[26], &su, 4); memcpy(&w[27], &sv, 4);
+}
 static NvShader *upscaler(const char *key) {
     NvShader *s = [NvShader new]; snprintf(s->key, sizeof s->key, "%s", key); s->up_color = UP_COLOR_LINEAR;
     s->rf.nb = 2; s->rf.b[0] = (nvn_rbind){.kind = NVN_RB_TEX, .dtt = MTLTextureType2D, .dpf = NVN_DPF_FLOAT, .reg = 0};
@@ -66,6 +82,23 @@ int main(void) { @autoreleasepool {
     CHECK(color_of(dec, 2, NULL, 0) == UP_COLOR_KEEP, "a shape no pack has shown (a decode in floats, no encode): the shader runs");
     CHECK(color_of(NULL, 0, (const float[4]){0.040435791015625f, 2.3984375f, 0.07745361328125f, enc16[0]}, 4) == UP_COLOR_KEEP, "a half float encode must not read as encoded input: the shader runs");
     CHECK(up_mfx_color(rare, sizeof rare) == UP_COLOR_KEEP, "a constant used once is chance, not a curve");
+    CHECK(color_sq(NULL, 0, 12, 0, 0) == UP_COLOR_SQRT, "signed squares and no curve: square-root-encoded input, linear output (Ocarina of Time's agl_ndsr_vr_light)");
+    CHECK(color_sq(NULL, 0, 12, 2ull << 60, 2ull << 10) == UP_COLOR_SQRT, "signed squares of the high halves count too");
+    CHECK(color_sq(enc, 2, 12, 0, 0) == UP_COLOR_KEEP, "signed squares, then an sRGB encode: the output stays encoded, the shader runs");
+    CHECK(color_sq(NULL, 0, 7, 0, 0) == UP_COLOR_KEEP, "fewer than 8 signed squares are chance");
+    CHECK(color_sq(NULL, 0, 12, 1ull << 63, 0) == UP_COLOR_KEEP, "x * -|x| is not the decode");
+    CHECK(color_sq(NULL, 0, 12, 0, 2ull << 10) == UP_COLOR_KEEP, "a low half times a high half is not a square");
+    CHECK(color_sq(NULL, 0, 12, 1ull << 32, 0) == UP_COLOR_KEEP, "two registers multiplied are not a square");
+    {   // the rectangles of a variable-ratio variant: 640x360 of a 976x548 texture from its origin → 1280x720 at 13, 9 of a 1920x1080 image
+        NVNcopyRegion ir = {0}, orr = {0}; uint32_t w[32] = {0}; float su = 640.0f / (976 * 1280), sv = 360.0f / (548 * 720);
+        w[4] = 13; w[5] = 9; w[24] = 1280; w[25] = 720; memcpy(&w[26], &su, 4); memcpy(&w[27], &sv, 4);
+        CHECK(up_mfx_rect_vr(w, 976, 548, 1920, 1080, &ir, &orr) && !ir.xoffset && !ir.yoffset && ir.width == 640 && ir.height == 360 && orr.xoffset == 13 && orr.yoffset == 9 &&
+              orr.width == 1280 && orr.height == 720, "a variable-ratio variant's rectangles: the input from the texture's origin, the output at its origin");
+        w[24] = 1920; CHECK(!up_mfx_rect_vr(w, 976, 548, 1920, 1080, &ir, &orr), "an output past the image refuses"); w[24] = 1280;
+        su = 640.5f / (976 * 1280); memcpy(&w[26], &su, 4); CHECK(!up_mfx_rect_vr(w, 976, 548, 1920, 1080, &ir, &orr), "an input that is not whole texels refuses");
+        su = 1000.0f / (976 * 1280); memcpy(&w[26], &su, 4); CHECK(!up_mfx_rect_vr(w, 976, 548, 1920, 1080, &ir, &orr), "an input wider than its texture refuses");
+        w[25] = 0; CHECK(!up_mfx_rect_vr(w, 976, 548, 1920, 1080, &ir, &orr), "an empty output refuses");
+    }
     const char *up = getenv("DM_UPSCALER"); int on = up && !strcmp(up, "metalfx");
     tex_t in = texture(77, 960, 540, NVN_FORMAT_RGBA16F), out = texture(78, 1920, 1080, NVN_FORMAT_RGBA16F), same = texture(79, 960, 540, NVN_FORMAT_RGBA16F);
     out.d.flags |= NVN_TEXTURE_FLAGS_IMAGE; same.d.flags |= NVN_TEXTURE_FLAGS_IMAGE;
@@ -129,6 +162,24 @@ int main(void) { @autoreleasepool {
         CHECK(up_mfx_encode(named), "linear input after sRGB at the same sizes");
         CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "the second linear submission completes");
         CHECK(matches(written, colour, MTLRegionMake2D(0, 0, 1920, 1080), black), "the same sizes in linear colour are not decoded: each colour has its own scaler");
+        // Square-root-encoded input, linear output (Ocarina of Time): the whole texture into the whole image, straight out, then a packed subrectangle with a highlight
+        // into an offset rectangle, both squared
+        named->up_color = UP_COLOR_SQRT;
+        const float squared[4] = {0.25f, 0.0625f, 0.5625f, 1.0f}, hdr_sq[4] = {2.25f, 0.25f, 0.0625f, 1.0f};
+        fill(tex_mtl(&in), MTLClearColorMake(colour[0], colour[1], colour[2], colour[3])); fill(written, MTLClearColorMake(0, 0, 0, 1));
+        push_vr(0, 0, 1920, 1080, 1.0f / 1920, 1.0f / 1080); S.tex[5][0] = 701; S.img[5][1] = 702; mtl_sub_begin();
+        CHECK(up_mfx_encode(named), "MetalFX takes square-root-encoded input");
+        CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "the square-root submission completes");
+        CHECK(matches(written, squared, MTLRegionMake2D(0, 0, 1920, 1080), black), "the square-root-encoded input comes out squared");
+        fill(tex_mtl(&packed), MTLClearColorMake(1.5, 0.5, 0.25, 1)); fill(written, MTLClearColorMake(0, 0, 0, 1));
+        push_vr(13, 9, 1280, 720, 640.0f / (976 * 1280), 360.0f / (548 * 720)); S.tex[5][0] = 704; mtl_sub_begin();
+        CHECK(up_mfx_encode(named), "MetalFX takes a packed square-root-encoded subrectangle");
+        CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "the packed square-root submission completes");
+        CHECK(matches(written, hdr_sq, MTLRegionMake2D(13, 9, 1280, 720), black), "the packed input comes out squared, above 1.0 too, in its destination rectangle only");
+        push_vr(13, 9, 1280, 720, 640.5f / (976 * 1280), 360.0f / (548 * 720)); mtl_sub_begin(); { uint64_t k0 = g_up_mfx_kept;
+        CHECK(!up_mfx_encode(named) && g_up_mfx_kept == k0 + 1, "an input that is not whole texels leaves the dispatch to the shader"); }
+        mtl_wait(mtl_sub_commit(), 5000000000ull);
+        named->up_color = UP_COLOR_LINEAR;
         NvShader *encoded_out = upscaler(key); encoded_out->up_color = UP_COLOR_KEEP;
         CHECK(!up_mfx_wanted(encoded_out), "a named shader whose output stays encoded is left to its shader");
         S.tex[5][0] = 701;

@@ -101,8 +101,9 @@ def by_build(main_id):   # the profile whose build rows register this main build
     return next((g for g in all_games() if any(b.get('main') == main_id for b in g.builds().values())), None)
 
 
-# agl's upscaler network (NDSR), by where the shader map found each key: the compute shaders of agl_ndsr.pck (Donkey Kong Bananza's 24 in its release library, Splatoon Raiders' 20 in its debug one)
-UPSCALER_SOURCE = re.compile(r'/agl_ndsr\.pck#')
+# agl's upscaler network (NDSR), by where the shader map found each key: the compute shaders of agl_ndsr.pck (Donkey Kong Bananza's 24 in its release library, Splatoon Raiders' 20 in its debug one),
+# and of its variable-ratio packs agl_ndsr_vr.pck and agl_ndsr_vr_light.pck (Ocarina of Time: 59 in all three; the host draws only the variants whose colour it reads, nvn_mtl.m up_mfx_color)
+UPSCALER_SOURCE = re.compile(r'/agl_ndsr(_vr)?(_light)?\.pck#')
 
 
 def upscaler_keys(g):

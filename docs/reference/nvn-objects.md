@@ -359,6 +359,13 @@ Games read this count as a position in their own command memory and size their h
 - **Fix:** ready queue continuations replay under one lock (`g_sub_mu` in `hle_nvn.c`); submission copies its command stream and descriptors under the same lock. Queue dependencies determine which continuation can run ([GPU event waits](#gpu-event-waits-order-work-across-queues)). Replay takes the lock before the graphics gate ([Going to the background during the prepare step](#going-to-the-background-during-the-prepare-step)).
 - **Found on:** [Fire Emblem: Three Houses](../../dm/games/010055D009F78000/README.md).
 
+### A first start prepares a whole playthrough's pipelines before the title
+
+- **Symptom:** a first start (or the first after the Metal cache is dropped) stays on "Preparing shaders" for minutes, with `pipeline prepare: <n> lines ... bases <thousands> compiled` (issue #1747).
+- **Cause:** the prepare step builds every line of the prewarm lists before the first frame. A seed list recorded over a whole playthrough holds pipelines for scenes hours away: Ocarina of Time's 40,155-line list (PR #1732) compiled 10,737 bases in 170 s on an M4 Pro, against 880 bases in 48 s for the 9,625 lines of the title and Kokiri Forest.
+- **Fix:** general (`nvn_mtl.m` `warm_parse`, `warm_start`, `warm_later`). The lines after a list's `#@after_first_frame` line are built after the first frame, in the background, while hybrid draws stand in. Two kinds of start prepare everything as before: one without hybrid draws, and one that compacts the archive. A draw that stands in with its pair's pulling pipeline while the pair is still queued moves the pair's task to the front of the background list (`wl_bump`, `wl_next`), so the area the player is in builds first. `t_warm_later` checks the parse's two parts and the order (a bumped pair first, bumps in the order asked, every task built once under 4 workers and a bumping thread).
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) (issue #1747). **Open:** the list's mark itself goes with PR #1732's rows (after main's 9,625); time to first frame and the frame rate while the later lines build are not measured yet.
+
 ### Going to the background during the prepare step
 
 - **Symptom:** going to the background (iOS `sceneDidEnterBackground`, minimizing the Mac window) while the "Preparing shaders" or "Preparing pipelines" screen is up blocks the main thread until the step ends: minutes on a first start, long enough for iOS to end the app. The log's `[nvn] graphics suspended` line comes only after the `pipeline prepare:` line.

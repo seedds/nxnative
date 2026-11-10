@@ -8872,6 +8872,7 @@ static MTLRenderPipelineDescriptor *pso_desc_pull(const pso_key *k, NvShader *vs
     d.vertexFunction = pf; d.vertexDescriptor = [MTLVertexDescriptor vertexDescriptor];
     return d;
 }
+static int wl_bump(const char *vkey, const char *fkey);   // warm_later's order
 static __unsafe_unretained id<MTLRenderPipelineState> hybrid_get(const pso_key *k, NvShader *vs, NvShader *fs) {
     __unsafe_unretained id<MTLRenderPipelineState> h = hm_get_id(&g_pso_hy, k);
     if (h) return h;
@@ -9216,6 +9217,7 @@ static __unsafe_unretained id<MTLRenderPipelineState> pso_get_(NvProg *pr, MTLRe
                 __unsafe_unretained id<MTLRenderPipelineState> h = hybrid_get(&k, vs, fs);
                 if (h) {
                     if (st == 0) pso_pend_demand(&k, vs, fs);
+                    wl_bump(vs->key, fs ? fs->key : "");   // the pair's task in warm_later's list, if still queued, builds next (also when the pipeline is already pending)
                     g_pso_pull = 1; g_hy_ns += bp_now() - bt;
                     if (g_pp_submit_mark != g_sub_serial) { g_pp_submit_mark = g_sub_serial; uint64_t t0 = bp_now(); pso_predict_rest(); g_bp_pso_ns += bp_now() - t0; }
                     return h;
@@ -9256,7 +9258,7 @@ static NSString *warm_key(const char *s, size_t n) {
 // The prewarm runs the lines of its lists as tasks: a shader (S), a compute pipeline (C), or every render pipeline (R) of one shader pair. The pipelines of a pair share their
 // bases, so one worker builds them one after the other. A native mesh pipeline (M) is a separate task. The tasks keep the lists' order (a render pair at its first line).
 // Shaders share one dictionary. Only one worker prepares a key, including its pulling entry; a failed warm load stays NSNull for this prewarm only.
-@interface WarmTask : NSObject { @public int kind, stage; NSString *key, *vkey, *fkey, *tkey; NSMutableArray<NSData *> *rs; } @end
+@interface WarmTask : NSObject { @public int kind, stage; NSString *key, *vkey, *fkey, *tkey; NSMutableArray<NSData *> *rs; _Atomic int wl_st; } @end   // wl_st (warm_later): 0 queued, 1 bumped, 2 taken by a worker
 @implementation WarmTask @end
 static NSMutableDictionary *g_warm_dict; static os_unfair_lock g_warm_dict_lock = OS_UNFAIR_LOCK_INIT;
 @interface WarmLoad : NSObject { @public dispatch_group_t done; id shader; } @end
@@ -9310,16 +9312,30 @@ static void warm_enqueue(WarmItem *item) {
     os_unfair_lock_unlock(&g_warm_lock);
 }
 // The lists' lines as tasks; *lines: the lines they hold
-static NSArray<WarmTask *> *warm_parse(NSArray<NSString *> *paths, long *lines) {
+// A list's line WARM_LATER_MARK: its lines after it are built after the game's first frame (warm_start), behind every list's lines before such a line. Ocarina of Time's seed list holds
+// the title and Kokiri Forest (9,625 lines) and then a playthrough to the Forest Temple (30,530 more): before the first frame, a first start compiled 10,737 bases in 170 s (issue #1747)
+#define WARM_LATER_MARK @"#@after_first_frame"
+static NSArray<WarmTask *> *warm_parse(NSArray<NSString *> *paths, long *lines, long *first_tasks) {
     NSMutableArray<WarmTask *> *tasks = [NSMutableArray array]; NSMutableDictionary<NSString *, WarmTask *> *pairs = [NSMutableDictionary dictionary];
     NSMutableSet<NSString *> *seen = [NSMutableSet set], *stale = [NSMutableSet set]; long n = 0;
     NSMutableSet<NSData *> *seen_k = [NSMutableSet set];   // rows recorded before pso_key_norm that are one pipeline now
-    for (NSString *path in paths) {
-        NSString *txt = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
-        if (!txt) { MLOG("[RED] cannot read prewarm list: %s", path.UTF8String); continue; }
-        { unsigned long nl = 0; for (NSString *l in [txt componentsSeparatedByString:@"\n"]) nl += l.length && ![l hasPrefix:@"#"];
-          MLOG("pipeline prewarm list %s: %lu lines", path.UTF8String, nl); }   // Diagnostics: how many lines each manifest gave (when a device warms up 0, shows which one was missing)
-        for (NSString *line in [txt componentsSeparatedByString:@"\n"]) {
+    NSMutableArray<NSString *> *later = [NSMutableArray array];   // the lines after WARM_LATER_MARK, parsed after every list
+    for (NSUInteger pi = 0; pi <= paths.count; pi++) {
+        NSArray<NSString *> *list;
+        if (pi < paths.count) {
+            NSString *path = paths[pi], *txt = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
+            if (!txt) { MLOG("[RED] cannot read prewarm list: %s", path.UTF8String); continue; }
+            list = [txt componentsSeparatedByString:@"\n"];
+            NSUInteger mark = [list indexOfObjectPassingTest:^BOOL(NSString *l, NSUInteger i, BOOL *stop) { (void)i; (void)stop;
+                return [[l stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] isEqualToString:WARM_LATER_MARK]; }];
+            { unsigned long nl = 0, nb = 0; for (NSUInteger i = 0; i < list.count; i++) { int row = list[i].length && ![list[i] hasPrefix:@"#"]; nl += row; nb += row && mark != NSNotFound && i > mark; }
+              MLOG("pipeline prewarm list %s: %lu lines%s", path.UTF8String, nl, nb ? [NSString stringWithFormat:@", %lu of them after its first frame mark", nb].UTF8String : ""); }   // Diagnostics: how many lines each manifest gave (when a device warms up 0, shows which one was missing)
+            if (mark != NSNotFound) { [later addObjectsFromArray:[list subarrayWithRange:NSMakeRange(mark + 1, list.count - mark - 1)]]; list = [list subarrayWithRange:NSMakeRange(0, mark)]; }
+        } else {
+            *first_tasks = (long)tasks.count;   // a pair's rows after the mark join its task among these (warm_lines)
+            list = later;
+        }
+        for (NSString *line in list) {
             if (!line.length || [line hasPrefix:@"#"] || [seen containsObject:line]) continue;
             [seen addObject:line];
             NSArray<NSString *> *c = [line componentsSeparatedByString:@"\t"];
@@ -9355,6 +9371,10 @@ static NSArray<WarmTask *> *warm_parse(NSArray<NSString *> *paths, long *lines) 
         }
     }
     *lines = n; return tasks;
+}
+static long warm_lines(NSArray<WarmTask *> *tasks, long from, long to) {   // the list lines tasks [from, to) build: one each, a pair's render pipelines one per row
+    long n = 0; for (long i = from; i < to; i++) n += tasks[(NSUInteger)i]->kind == 1 ? (long)tasks[(NSUInteger)i]->rs.count : 1;
+    return n;
 }
 static void warm_task(WarmTask *t) {
     @autoreleasepool {
@@ -9495,6 +9515,85 @@ static void prepare_prebuild(void) {
     if (left > 0) MLOG("pipeline prepare: every shader pair handed out after %.1f s; %d compiles still under way finish in the background", (bp_now() - t0) / 1e9, left);
     if (shown) front_progress(NULL, n, n);
 }
+// The background list's order. Workers take the next task of the list, but a task a draw asked for (wl_bump: the draw has its shader pair's pulling stand-in because the pair's
+// pipelines are still queued here) goes first, so the area the player is in builds before the rest of the playthrough. A task is built once: wl_st goes to 2 by exchange, whoever
+// gets it from 0 or 1 builds it. The table of pairs is built once and only read afterwards (the draw thread takes no lock unless it bumps a task that was still queued)
+typedef struct { uint64_t h; __unsafe_unretained WarmTask *t; char *v, *f; } wl_slot;   // the pair's keys are copied: the draw thread compares C strings, no message sends
+typedef struct { size_t mask; wl_slot s[]; } wl_table;
+static _Atomic(wl_table *) g_wl_tab; static NSArray<WarmTask *> *g_wl_rest; static _Atomic long g_wl_next; static _Atomic int g_wl_live, g_wl_nbump;
+static os_unfair_lock g_wl_lock = OS_UNFAIR_LOCK_INIT; static NSMutableArray<WarmTask *> *g_wl_bumps; static NSUInteger g_wl_bhead; static _Atomic uint64_t g_wl_bumped, g_wl_miss;
+static uint64_t wl_hash(const char *v, const char *f) { uint64_t h = 1469598103934665603ull; for (; *v; v++) h = (h ^ (uint8_t)*v) * 1099511628211ull; h = (h ^ 0xff) * 1099511628211ull; for (; f && *f; f++) h = (h ^ (uint8_t)*f) * 1099511628211ull; return h | 1; }
+static wl_slot *wl_find(wl_table *tb, const char *v, const char *f) {   // the pair's slot, or the empty slot where it would go
+    if (!v) v = "";   // a key's UTF8String is nullable
+    uint64_t h = wl_hash(v, f); size_t i = h & tb->mask;
+    while (tb->s[i].h && !(tb->s[i].h == h && !strcmp(tb->s[i].v, v) && !strcmp(tb->s[i].f, f ? f : ""))) i = (i + 1) & tb->mask;
+    return &tb->s[i];
+}
+// Once per list, before any worker or bump. The table is published whole; an older one (a second list in a test) stays allocated, as a draw may still be probing it
+static void wl_init(NSArray<WarmTask *> *rest) {
+    atomic_store(&g_wl_live, 0); g_wl_rest = rest; atomic_store(&g_wl_next, 0); atomic_store(&g_wl_nbump, 0); atomic_store(&g_wl_bumped, 0); atomic_store(&g_wl_miss, 0); g_wl_bumps = [NSMutableArray array]; g_wl_bhead = 0;
+    size_t cap = 16; while (cap < rest.count * 2) cap <<= 1;
+    wl_table *tb = calloc(1, sizeof *tb + cap * sizeof(wl_slot)); tb->mask = cap - 1;
+    for (WarmTask *t in rest) {
+        atomic_store(&t->wl_st, 0);
+        if (t->kind != 1) continue;
+        wl_slot *sl = wl_find(tb, t->vkey.UTF8String, t->fkey.UTF8String);
+        if (!sl->h) { sl->h = wl_hash(t->vkey.UTF8String, t->fkey.UTF8String); sl->t = t; sl->v = strdup(t->vkey.UTF8String); sl->f = strdup(t->fkey.UTF8String); }   // a pair named twice stays one task (warm_parse joins its rows)
+    }
+    atomic_store(&g_wl_tab, tb); atomic_store(&g_wl_live, 1);
+}
+static WarmTask *wl_next(void) {   // the next task to build, nil at the end of the list
+    for (;;) {
+        if (atomic_load(&g_wl_nbump) > 0) {
+            WarmTask *b = nil; os_unfair_lock_lock(&g_wl_lock);
+            if (g_wl_bhead < g_wl_bumps.count) { b = g_wl_bumps[g_wl_bhead++]; atomic_fetch_sub(&g_wl_nbump, 1); }   // in the order the draws asked (the first ask is the nearest draw); no ask starves
+            if (g_wl_bhead == g_wl_bumps.count) { [g_wl_bumps removeAllObjects]; g_wl_bhead = 0; }
+            os_unfair_lock_unlock(&g_wl_lock);
+            if (b) { if (atomic_exchange(&b->wl_st, 2) == 2) continue; return b; }
+        }
+        long i = atomic_fetch_add(&g_wl_next, 1); if (i >= (long)g_wl_rest.count) return nil;
+        WarmTask *t = g_wl_rest[(NSUInteger)i]; if (atomic_exchange(&t->wl_st, 2) == 2) continue;   // already built as a bumped task
+        return t;
+    }
+}
+// A draw falls back to its pair's pulling pipeline: move the pair's task to the front if it is still queued. Returns 1 when it was moved. Safe from any thread
+static int wl_bump(const char *vkey, const char *fkey) {
+    if (!atomic_load(&g_wl_live)) return 0;
+    wl_slot *sl = wl_find(atomic_load(&g_wl_tab), vkey, fkey);
+    WarmTask *t = sl->h ? sl->t : nil; if (!t) { atomic_fetch_add(&g_wl_miss, 1); return 0; }   // a pair the list does not hold (built before the mark, or in no list)
+    int z = 0; if (!atomic_compare_exchange_strong(&t->wl_st, &z, 1)) return 0;   // taken or bumped already
+    os_unfair_lock_lock(&g_wl_lock); [g_wl_bumps addObject:t]; atomic_fetch_add(&g_wl_nbump, 1); os_unfair_lock_unlock(&g_wl_lock);
+    atomic_fetch_add(&g_wl_bumped, 1); return 1;
+}
+// The lines after the lists' WARM_LATER_MARK, built after the game's first frame: as the background prewarm builds without a prepare step, but on half the performance cores at
+// utility QoS, as pso_prebuild_bg builds, so the game keeps its frame rate meanwhile; a draw whose pipeline is not built yet draws with its shader pair's pulling pipeline (hybrid),
+// whose bases the prepare step's prebuild made. Only on a start that does not compact the archive (warm_start): the prewarm stays running (g_warm_running) until warm_finish at
+// the end, which matters to the archive only while compacting (the recapture and the held flushes), so what it builds is captured as any compile at run time is
+static void warm_later(NSArray<WarmTask *> *rest, long rest_lines) {
+    int pc = 0; size_t sz = sizeof pc; if (sysctlbyname("hw.perflevel0.physicalcpu", &pc, &sz, NULL, 0) || pc <= 1) pc = 4;
+    int workers = pc > 4 ? pc / 2 : 2; uint64_t t0 = bp_now();
+    MLOG("pipeline prewarm: %ld lines after the first frame, on %d workers", rest_lines, workers);
+    wl_init(rest);
+    dispatch_group_t g = dispatch_group_create();
+    for (int w = 0; w < workers; w++) dispatch_group_async(g, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        for (;;) { @autoreleasepool { WarmTask *t = wl_next(); if (!t) break; warm_task(t); t->rs = nil; } }   // a built task keeps nothing (the table holds the task and its keys)
+    });
+    dispatch_group_notify(g, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ @autoreleasepool {
+        atomic_store(&g_wl_live, 0);
+        MLOG("pipeline prewarm: the %ld lines after the first frame done in %.1f s (%llu pairs moved to the front by draws; %llu stand-in pipelines named a pair the list does not hold)", rest_lines, (bp_now() - t0) / 1e9, (unsigned long long)atomic_load(&g_wl_bumped), (unsigned long long)atomic_load(&g_wl_miss));
+        warm_finish();
+    } });
+}
+// How many tasks the prepare step builds before the first frame: the lines after a WARM_LATER_MARK wait for it only with hybrid draws (a pulling pipeline stands in meanwhile) and on a
+// start that does not compact the archive. A compaction recaptures every base the prewarm finds before it removes the old files, and such a start finds them all in the archive, which
+// takes seconds; deferring part of it was left out (a crash inside Metal's compiler on a compacting start, the #342 family)
+static long warm_first_part(long first, long total, int hybrid) {
+    if (first < total && (!hybrid || g_compact_enabled)) {
+        MLOG("pipeline prepare: the lines after the first frame mark are prepared too (%s)", g_compact_enabled ? "this start compacts the pipeline archive" : "no hybrid draws");
+        return total;
+    }
+    return first;
+}
 static void warm_start(void) {
     if (g_warm_started++) return;
     const char *e = getenv("DM_PSO_MANIFEST");
@@ -9520,16 +9619,23 @@ static void warm_start(void) {
     g_warm_t0 = bp_now();
     atomic_store(&g_warm_running, 1);
     if (prepare_on()) {
-        long lines = 0; NSArray<WarmTask *> *tasks = warm_parse(paths, &lines);
-        if (lines) warm_prepare(tasks, lines);
-        else MLOG("pipeline prepare: the prewarm lists hold nothing to build");
-        warm_finish();
-        @autoreleasepool { prepare_prebuild(); }   // then the bases every shader pair's hybrid draws need, before the first frame too (once)
+        long lines = 0, first = 0; NSArray<WarmTask *> *tasks = warm_parse(paths, &lines, &first);
+        first = warm_first_part(first, (long)tasks.count, hybrid_on());
+        long first_lines = first == (long)tasks.count ? lines : warm_lines(tasks, 0, first);
+        if (first_lines) warm_prepare(first == (long)tasks.count ? tasks : [tasks subarrayWithRange:NSMakeRange(0, (NSUInteger)first)], first_lines);
+        else if (!lines) MLOG("pipeline prepare: the prewarm lists hold nothing to build");
+        if (first == (long)tasks.count) {
+            warm_finish();
+            @autoreleasepool { prepare_prebuild(); }   // then the bases every shader pair's hybrid draws need, before the first frame too (once)
+            return;
+        }
+        @autoreleasepool { prepare_prebuild(); }   // the pulling bases before the first frame, as above; no compaction holds its flushes
+        warm_later([tasks subarrayWithRange:NSMakeRange((NSUInteger)first, tasks.count - (NSUInteger)first)], lines - first_lines);
         return;
     }
     dispatch_queue_attr_t attr = dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INITIATED, 0);   // Not optional background work: it decides whether the pipelines are ready before the player enters a run
     dispatch_queue_t q = dispatch_queue_create("dm.nvn.pso-warm", attr);
-    dispatch_async(q, ^{ @autoreleasepool { long lines = 0; for (WarmTask *t in warm_parse(paths, &lines)) warm_task(t); warm_finish(); } });
+    dispatch_async(q, ^{ @autoreleasepool { long lines = 0, first = 0; for (WarmTask *t in warm_parse(paths, &lines, &first)) warm_task(t); warm_finish(); } });
 }
 static id<MTLDepthStencilState> dss_get(int has_depth, int has_stencil) {
     struct { ds_st ds; uint32_t vm[2], wm[2]; int hd, hs; } k;

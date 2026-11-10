@@ -2964,6 +2964,10 @@ def main(args=None):
     if not want_lang: raise BuildError(f'unknown game language {lang_in!r}; give one of {language_list([c for c, _ in nacp.LANGUAGES])}, by code or by name')
     env = tool_env()
     env.setdefault('USER', getpass.getuser())   # xcodegen fails without USER (Couldn't find current username)
+    # TMPDIR for every child: .NET 10 on macOS keeps the named mutex its first-run configure takes (NuGet-Migrations) under $TMPDIR/.dotnet/shm, and a child
+    # environment built from scratch (a GUI front end's, or a launch that strips it) has no TMPDIR, so the runtime stats "" and dies before any project is read:
+    # 'NuGet-Migrations' + lstat("") == ENOENT in nx_extract_build.log, seen with HOME present and valid. tempfile.gettempdir() answers /tmp when the environment has none.
+    if not env.get('TMPDIR') or not os.path.isdir(env['TMPDIR']): env['TMPDIR'] = os.environ['TMPDIR'] = tempfile.gettempdir()
     configure_dotnet(env)
     env.setdefault('J', str(os.cpu_count() or 8))   # shader_split.py's and dmsh_build.py's workers (their default is 8)
     py = sys.executable

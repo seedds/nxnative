@@ -174,6 +174,34 @@ static void t_npads(void) {
 }
 
 
+// The console mode at run time (dm_set_opmode → dm_hid_opmode_changed): player 1 moves between No1 and Handheld and both npads' style events are signalled, Handheld's too
+// (GitHub issue #2143); a pair of Joy-Cons split over two npads gives up the second one in handheld mode, and that npad's event is signalled as well
+static void t_opmode(void) {
+    static uint8_t e0[0x40], e1[0x40], eh[0x40];
+    g_mode = 1; ids((uint32_t[]){0, 1, NPAD_HANDHELD}, 3); dm_pad_players(1); h_hid_SetStyles(0xffffffffu);
+    g_signals = 0; h_hid_BindStyleEv(&(uint32_t){0}, e0, 0);
+    CHECK(g_signals == 1 && g_signalled == e0, "binding No1 docked: signalled once for its controller");
+    h_hid_BindStyleEv(&(uint32_t){NPAD_HANDHELD}, eh, 0); h_hid_BindStyleEv(&(uint32_t){1}, e1, 0);
+    CHECK(g_signals == 1, "binding Handheld and No2 docked: no controller, no signal");
+    dm_hid_opmode_changed(); CHECK(g_signals == 1, "no mode change, no style change: no signal");
+    g_signals = 0; g_signalled = NULL; g_mode = 0; dm_hid_opmode_changed();
+    CHECK(g_signals == 2 && g_signalled == eh, "to handheld: No1 and Handheld signalled");
+    CHECK(h_hid_GetStyle(&(uint32_t){0}) == 0 && h_hid_GetStyle(&(uint32_t){NPAD_HANDHELD}) == STYLE_HANDHELD, "player 1 is on Handheld");
+    g_signals = 0; g_mode = 1; dm_hid_opmode_changed();
+    CHECK(g_signals == 2 && h_hid_GetStyle(&(uint32_t){0}) == STYLE_FULLKEY && h_hid_GetStyle(&(uint32_t){NPAD_HANDHELD}) == 0, "back to console: both signalled again, player 1 on No1");
+    // A split pair: left on No1, right on No2 while docked; handheld takes both back
+    dm_joy_attach(0, 3); h_hid_JoySingle(&(uint32_t){0});
+    CHECK(h_hid_GetStyle(&(uint32_t){0}) == STYLE_JOYLEFT && h_hid_GetStyle(&(uint32_t){1}) == STYLE_JOYRIGHT, "a split pair docked: JoyLeft on No1, JoyRight on No2");
+    g_signals = 0; g_mode = 0; dm_hid_opmode_changed();
+    CHECK(g_signals == 3 && h_hid_GetStyle(&(uint32_t){1}) == 0, "to handheld with a split pair: No1, No2 and Handheld signalled, No2 empty");
+    g_signals = 0; g_mode = 1; dm_hid_opmode_changed();
+    CHECK(g_signals == 3 && h_hid_GetStyle(&(uint32_t){1}) == STYLE_JOYRIGHT, "back to console: the three again, the right Joy-Con on No2");
+    h_hid_JoyDual(&(uint32_t){0}); dm_joy_attach(0, 0);
+    // An npad bound while its controller is there is told that style by the bind: the next report signals nothing for it
+    static uint8_t e0b[0x40]; h_hid_BindStyleEv(&(uint32_t){0}, e0b, 0);
+    g_signals = 0; dm_pad_players(1); dm_hid_opmode_changed(); CHECK(g_signals == 0, "nothing changed since the bind: no signal");
+}
+
 // Joy-Cons as devices of their own (dm_joy_attach / dm_joy_set): nothing changes until a front end reports a Joy-Con half; then the pair is a JoyDual npad, splits into JoyLeft and
 // JoyRight when the game asks for single assignment (or the controller applet needs another player), keeps the rail buttons, and has vibration handles per Joy-Con. Handheld: unchanged.
 static void t_joycons(void) {
@@ -182,8 +210,10 @@ static void t_joycons(void) {
     CHECK(h_hid_GetStyle(&(uint32_t){0}) == STYLE_FULLKEY, "no Joy-Con reported: player 1 is full-key, as before");
     { int m; CHECK(vib_targets(0x0003, &m) && m == 0, "and its full-key vibration handle reaches it"); }
     dm_haptics_route(0, 1);
+    static uint8_t ev0[0x40]; h_hid_BindStyleEv(&(uint32_t){0}, ev0, 0);
     g_signals = 0; dm_joy_attach(0, 3);
-    CHECK(g_signals > 0 && h_hid_GetStyle(&(uint32_t){0}) == STYLE_JOYDUAL, "a left and a right Joy-Con on player 1: one JoyDual npad, the style event signalled");
+    CHECK(g_signals == 1 && g_signalled == ev0 && h_hid_GetStyle(&(uint32_t){0}) == STYLE_JOYDUAL, "a left and a right Joy-Con on player 1: one JoyDual npad, No1's style event signalled and no other");
+    g_signals = 0; dm_joy_attach(0, 3); CHECK(g_signals == 0, "the same Joy-Cons reported again: no signal");
     dm_joy_set(0, 0, DM_BTN_UP | DM_BTN_LSL, -20000, 0); dm_joy_set(0, 1, DM_BTN_A | DM_BTN_RSR, 0, 15000);
     NpadState st = npad_of(0, STYLE_JOYDUAL);
     CHECK((st.buttons & (DM_BTN_UP | DM_BTN_A | DM_BTN_LSL | DM_BTN_RSR)) == (DM_BTN_UP | DM_BTN_A | DM_BTN_LSL | DM_BTN_RSR), "JoyDual: both Joy-Cons' buttons, the rail buttons kept");
@@ -614,6 +644,7 @@ int main(void) {
     t_npads();
     t_script();
     t_vibration();
+    t_opmode();
     t_joycons();
     t_jcms();
     t_rumble_log();

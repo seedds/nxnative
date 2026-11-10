@@ -299,6 +299,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** the host now signals it once when it is bound for a connected controller, and again when a player's controller connects or goes away.
 - **Found on:** [The Legend of Zelda: Link's Awakening](../../dm/games/01006BB00C6F0000/README.md) (SDK 8.2.0).
 
+### No input after the console mode changes at run time
+
+- **Symptom:** the game runs on but takes no input, from the touch gamepad or a controller, after the console mode is switched at run time (to handheld and back to docked), until it is restarted.
+- **Cause:** a mode change moves player 1 between the Handheld npad and No1, as taking the Joy-Cons off the console's rails or putting them back does, and the hid service signals the style update event of every npad whose controller came or went. The host pushed notification 30 and signalled none, and it kept no event bound to Handheld (0x20) at all. A game that waits for those events stays on the npad it has: Hades II, sent to Handheld by the controller applet in handheld mode, kept reading it once docked, where it is empty.
+- **Fix:** one function, `styles_sync` (`hle_hid.c`), signals the bound event of each npad (No1..No8 and Handheld) whose style is no longer the one the game was last told, and everything a style depends on calls it after its change: the console mode (`dm_set_opmode`, before the notification), the players and their Joy-Cons, the ids and styles the game supports, its Joy-Con assignment. A split pair's second npad, which handheld mode takes back, is signalled with the rest. `t_hid.c` (`t_opmode`) and `t_oe.c` cover it.
+- **Found on:** [Hades II](../../dm/games/0100A00019DE0000/README.md) ([issue #2143](https://github.com/seedds/nxnative/issues/2143)); on the Mac, `DM_OE_SCRIPT="opmode=0@15,opmode=1@21.5"` on the note's route reproduces it (the applet answers at the press between the two).
+
 ### Six-axis sensors
 
 - **Symptom:** motion moves never happen; shaking does nothing (Super Mario Odyssey: cap throws by shaking).

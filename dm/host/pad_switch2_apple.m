@@ -349,8 +349,25 @@ static s2_pad *s2_pad_for(uint16_t pid) {   // a Joy-Con joins a pad that has th
             S2Session *t = w; if (!t) return;
             if (!r2) { [t fail:@"enabling the features was refused"]; return; }
             [t attachPad];
+            [t logUserSlots];
         }];
     }];
+}
+// Read only, once per connection: which of the user calibration sector's stick slots carry the marker (B2 A1), and their bytes. Where the second stick's user calibration lives
+// (0x1FC060 as this host reads it, or 0x1FC080 as SDL and Linux do) is not settled; a controller whose right stick was calibrated on a console answers it
+- (void)logUserSlots {
+    s2op_read(self, S2_ADDR_USER_CAL_SECTOR + 0x40, 0x60, S2_CAL_TRIES, [self opsLog], ^(NSData *d) {
+        void (^log)(NSString *) = [self opsLog];
+        if (!d) { log(@"user calibration slots: the read of 0x1FC040-0x1FC09F got no answer"); return; }
+        const uint8_t *b = d.bytes;
+        log([NSString stringWithFormat:@"user calibration slots: marker at 0x1FC040 %s, 0x1FC060 %s, 0x1FC080 %s", s2_user_cal_marked(b) ? "yes" : "no", s2_user_cal_marked(b + 0x20) ? "yes" : "no",
+             s2_user_cal_marked(b + 0x40) ? "yes" : "no"]);
+        for (int row = 0; row < 3; row++) {
+            NSMutableString *h = [NSMutableString string];
+            for (int i = 0; i < 0x20; i++) [h appendFormat:@"%02x%s", b[row * 0x20 + i], i % 8 == 7 ? "  " : " "];
+            log([NSString stringWithFormat:@"user calibration 0x%06x: %@", S2_ADDR_USER_CAL_SECTOR + 0x40 + row * 0x20, h]);
+        }
+    });
 }
 - (void)attachPad {
     s2_pad *p = s2_pad_for(_pid);

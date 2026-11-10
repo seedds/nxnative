@@ -310,8 +310,8 @@ int nvn_dirty_since_cached(const void **span, const void *addr, size_t len, uint
 }
 int nvn_dirty_since_span(const void *span, const void *addr, size_t len, uint64_t stamp) { return nvn_dirty_since_cached(&span, addr, len, stamp); }
 int nvn_dirty_since(const void *addr, size_t len, uint64_t stamp) { return nvn_dirty_since_span(NULL, addr, len, stamp); }
-// A page counts unless it holds a byte of an excepted range: the host wrote those pages itself (a GPU copy's bytes written into the storage, nvn_mtl.m pkg_copy_absorb), and the caller
-// judges any other write into them (none can be told from the host's own by the page's generation)
+// A page counts unless it holds a byte of an excepted range: a write the caller accounts for itself and judges any other write into those pages (none can be told from it by
+// the page's generation). nvn_mtl.m's DM_NVN_REUPLOADS line counts with no exception
 size_t nvn_dirty_since_except(const void *span, const void *addr, size_t len, uint64_t stamp, const uintptr_t (*ex)[2], int nex, uintptr_t *first) {
     if (!len) return 0;
     range_t *r = (range_t *)span; uintptr_t a = (uintptr_t)addr;

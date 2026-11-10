@@ -583,6 +583,21 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** `ndsr_shaders` in `shader_split.py` scores up to 16 complete records at each start and takes the start with more pointers to NVN2 control sections. The two starts can leave different numbers of trailing bytes in a short pack; those partial records are excluded from the score, as from the subsequent record walk.
 - **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md).
 
+### RAGE RPF6 archives and `rgxd` effects
+
+- **Symptom:** the NSP script's split finds no shaders in a RomFS made of `.rpf` files; after a first reader, `[RED]` lines name groups of files that could not be read.
+- **How it is stored:** Rockstar's RPF6 (big-endian, as on the PS3 and Xbox 360): a 16-byte header {`RPF6`, entry count, name table offset / 8, tag `0xfffffffd` = encrypted}, 20-byte entries, then a name table. The entry and name tables are AES-256 ECB decrypted 16 times over, with a key in `main`'s data segment. Entry 0 is the root directory; a directory's children are consecutive entries; a name hash is Jenkins one-at-a-time of the lower-case name, found by hashing every string in the name table. A plain file's data is raw, one zstd frame, a zlib stream, or raw deflate (`audio_switch.rpf`'s config files). A resource (flags bit 31) keeps its type in the offset word's low byte, so its offset is `(word & 0x7fffff00) × 8`, and its data starts with an `RSC\x05` header (12 bytes) or, when the flags are bit 31 alone, an `RSC\x85` header (16 bytes); `.wsc` scripts are AES encrypted like the tables as well. The shaders are RAGE effects (`.nvn` in `shaders.rpf`, and effects in `main`): `rgxd`, the parameter names, then one record per shader {u32, GLSLC's magic 0x19866891, u32 code length, u32 control length}, the code area, then the control section. A control section may carry bytes past its own length (`+0x20`), so it is compared at that length.
+- **Fix:** `dm/gfx/tools/rpf6.py` reads the archives: `find_key` tries `main`'s 4-aligned 32-byte windows with at least 24 distinct bytes on an archive's first entry until it decrypts to the root directory (the key is never printed or written). Update 1.0.4 has the same key but not in one piece: its key setup loads the eight key words, each a big-endian u32 zero-extended to 64 bits, from four 16-byte constants, so `key_from_setup` follows the setup's loads and stores (it starts `cmp w1, #0; mov w8, #-3; csel w8, w8, w1, eq; cmn w8, #3` in both builds). `shader_split.py` reads every archive's files in parallel ranges (`rpf_jobs`, `rpf_shaders`), and `rgxd_shaders` reads effects in files and in `main`. Reading resources as plain files gave 145 groups of unreadable files; with the resource offsets, both headers, zlib, raw deflate and the scripts' encryption, none.
+- **Found on:** [Red Dead Redemption](../../dm/games/01007820196A6000/README.md): 134 archives (11 GB), 3,413 shaders from 131 effects in `shaders.rpf` and 168 from `main`.
+- **Check:** `rpf6.py <main NSO> <file.rpf>` lists an archive; the fuzz harness has an `rgxd` seed (`dm/tools/fuzz/fuzz_shader_split.py`).
+
+### Double Eleven `.pkdswitch` packs
+
+- **Symptom:** after the RPF6 archives are read, the first screen's two shaders are still `[RED] shader … is not in the shader map`.
+- **How it is stored:** Double Eleven's resource pack: the members one after another in `.pkdswitch`, and an index `.pkiswitch` beside it: u32 version 3, u32 0, u32 member count, then 16-byte entries {length, stored length, offset in the data file, name hash}; a member whose stored length differs from its length is one zlib stream. The shaders are whole GLSLC outputs (`langselect`: members 4 and 5, the screen's pixel and vertex shader); the other members are textures (`DFvN`) and fonts (`BMF`).
+- **Fix:** `d11_pack_shaders` in `shader_split.py` reads a `.pkdswitch` through its index and scans each member for shaders.
+- **Found on:** [Red Dead Redemption](../../dm/games/01007820196A6000/README.md): `d11extra/langselect.pkdswitch`, the language selection shown before the game.
+
 ## Control sections and code
 
 ### Code area and control section layout

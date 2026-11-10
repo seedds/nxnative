@@ -33,6 +33,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | `build` → `game` | malloc region 60 GB → 4 GB and its first arena | address space | gap | judgement | 1 | [Xenoblade Chronicles 3](../../dm/games/010074F013262000/README.md) | Monolith's own allocator; its constants span two functions (a multi-function rule). The cause, an iPhone's address space, is a platform limit |
 | `build` → `game` | PhysX completion task release | race | gap | judgement | 1 | [The Legend of Zelda: Link's Awakening](../../dm/games/01006BB00C6F0000/README.md) | a lifetime race in the game's own completion task (its release slot serves this one vtable) |
 | `build` → `game` | render intervals, the forced-interval flag and the render-wait timeout | frame rate | gap | judgement | 1 | [Fire Emblem: Three Houses](../../dm/games/010055D009F78000/README.md) | the game's own tables, flag and timeout |
+| `build` → `game` | Super Smash Bros. Ultimate's render size, written to the state page for its stubs (hle_render_size.c) | rendering | gap | judgement | 1 | [Super Smash Bros. Ultimate](../../dm/games/01006A800016E000/README.md) | only this build's stubs read the size from the state page (patches.py): on another build nothing would read it, so the host refuses the setting there |
 | `build` → `game` | task ring push and pop barriers | race | gap | judgement | 1 | [Batman: Arkham Knight](../../dm/games/0100ACD0163D0000/README.md) | a data race in the game's own task ring |
 | `build` → `game` | UE3's GMalloc setup skipped, the host allocator in (hle_uemalloc.c) | address space | gap | judgement | 1 | [Batman: Arkham Knight](../../dm/games/0100ACD0163D0000/README.md) | UE3 inlines the allocator's constructor into the GMalloc setup and has its own vtable layout (25 slots, 32-bit sizes), so the Unreal 4/5 discovery does not apply |
 | `build` → `game` | unused 272-byte slot pool: 4,194,304 → 65,536 slots | address space | gap | judgement | 1 | [Mario + Rabbids® Sparks of Hope](../../dm/games/0100317013770000/README.md) | Sparks of Hope's own init (Kingdom Battle has none) |
@@ -43,6 +44,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | `build` → `engine` | RE Engine's frame limit at a fixed pointer | frame rate | blocked: one RE Engine game here | judgement | 1 | [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md) | engine code other RE Engine games ship |
 | `build` → `engine` | Unity's constant-buffer table locked on the shared device | race | blocked: the stubs have no function-matched form yet, and no other Unity 2018.4 main on the drive shares these functions (Ori and the Blind Forest 1.0.2: no fingerprint match) | checked: probes of both threads inserting the same key and of the table API's callers by thread; Blind Forest main compared with nso_fnmap | 1 | [Ori and the Will of the Wisps](../../dm/games/01008DD013200000/README.md) | Unity 2018.4's threaded GfxDevice: the main thread registers layouts on the real device while the render thread uses the same table; any Unity 2018.4 build with this code has the race |
 | `build` → `game` | 60 fps frame step on 1.3.0 (the same stub at its known addresses) | frame rate | blocked: 1.3.0's main is on neither drive to fingerprint (v458752 is the update on them) | judgement | 1 | [Hyrule Warriors: Age of Calamity](../../dm/games/01002B00111A2000/README.md) | the stub above, placed at 1.3.0's addresses: the matched rule would serve it once its functions are fingerprinted |
+| `build` → `game` | docked render size 2K (DM_RENDER_SIZE; 25 stubs and 4 gates) | rendering | blocked: only 13.0.1 was available to check; 13.0.2 and 13.0.5 hold the same words at other addresses and were not run here | checked: 13.0.1 by disassembly, word by word, and played in scripted sessions | 1 | [Super Smash Bros. Ultimate](../../dm/games/01006A800016E000/README.md) | the sizes are the game's own constants, spread over its render setup; function fingerprints could carry them to the builds that keep the code |
 | `build` → `game` | screen shape: the sizes, the view, the layouts' projection and their edge widgets (DM_SCREEN_ASPECT) | rendering | blocked: the stubs have no function-matched form yet | judgement | 1 | [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md) | the output size is the host's, but where the game takes its sizes, its cameras and its layouts are this build's code |
 | `build` → `game` | 60 fps intervals and dynamic-resolution constants | frame rate | kept: 1.0.3 (v131072) is the newest update of both releases and likely their last: a function match would serve no other build; the rewriter would also need matched rules that write fixups and declare capabilities, a new mechanism (2026-11-09) | checked: both releases' mains, where the host's rows for them were found; the global main's sites mapped into ASTRAL CHAIN and Bayonetta 1-3 (2026-11-09) | 2 | [NieR:Automata The End of YoRHa Edition (010056B015FE8000)](../../dm/games/010056B015FE8000/README.md); [NieR:Automata The End of YoRHa Edition (0100B8E016F76000)](../../dm/games/0100B8E016F76000/README.md) | the game's own constants; the Asian release's function is the global one's 0x13c0 further on, so one function-matched rule could serve both releases. No PlatinumGames sibling shares the code: none of its sites has an exact match in ASTRAL CHAIN or Bayonetta 1-3 (nso_fnmap, 2026-11-09) |
 | `build` → `game` | NieR's frame interval and dynamic-resolution floor at fixed addresses | frame rate | kept: 1.0.3 (v131072) is the newest update of both releases and likely their last: a function match would serve no other build; the rewriter would also need matched rules that write fixups and declare capabilities, a new mechanism (2026-11-09) | checked: both releases' mains, where these rows were found; the global main's sites mapped into ASTRAL CHAIN and Bayonetta 1-3 (2026-11-09) | 2 | [NieR:Automata The End of YoRHa Edition (010056B015FE8000)](../../dm/games/010056B015FE8000/README.md); [NieR:Automata The End of YoRHa Edition (0100B8E016F76000)](../../dm/games/0100B8E016F76000/README.md) | the game's own display object; the Asian release's function is the global one's 0x13c0 further on, so the rewriter's function match could give the host both releases' addresses. No PlatinumGames sibling shares the code: none of its sites has an exact match in ASTRAL CHAIN or Bayonetta 1-3 (nso_fnmap, 2026-11-09) |
@@ -75,7 +77,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [Paper Mario: The Thousand-Year Door](#paper-mario-the-thousand-year-door) | 1 | 0 | 1 | 0 | 0 | `build` → `game` |
 | [Pokémon Legends: Arceus](#pokémon-legends-arceus) | 0 | 0 | 0 | 1 | 0 | `game` |
 | [Super Mario 3D All-Stars: Super Mario Sunshine](#super-mario-3d-all-stars-super-mario-sunshine) | 2 | 0 | 0 | 0 | 0 | `build` → `game` |
-| [Super Smash Bros. Ultimate](#super-smash-bros-ultimate) | 11 | 0 | 0 | 1 | 0 | `game` |
+| [Super Smash Bros. Ultimate](#super-smash-bros-ultimate) | 11 | 4 | 25 | 1 | 1 | `game`, `build` → `game` ×2 |
 | [Taiko Risshiden V DX](#taiko-risshiden-v-dx) | 1 | 0 | 0 | 2 | 0 | `game` |
 | [The Legend of Zelda: Breath of the Wild](#the-legend-of-zelda-breath-of-the-wild) | 7 | 0 | 43 | 0 | 0 | `build` → `game` ×2 |
 | [The Legend of Zelda: Link's Awakening](#the-legend-of-zelda-links-awakening) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
@@ -461,8 +463,10 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 [Super Smash Bros. Ultimate](../../dm/games/01006A800016E000/README.md), `01006A800016E000`, [patches.py](../../dm/games/01006A800016E000/patches.py).
 
 - **`game`**, address space, at goal, checked: MATCH_CUTS enrolled on its builds: engine region 62 GB → 4 GB (11 cuts in four functions). Function-matched for builds of the same code (MATCH_CUTS); the region and its node pool are the nu:: engine's own
+- **`build` → `game`**, rendering, blocked: only 13.0.1 was available to check; 13.0.2 and 13.0.5 hold the same words at other addresses and were not run here, checked: 13.0.1 by disassembly, word by word, and played in scripted sessions: docked render size 2K (DM_RENDER_SIZE; 25 stubs and 4 gates). The sizes are the game's own constants, spread over its render setup; function fingerprints could carry them to the builds that keep the code
+- **`build` → `game`**, rendering, gap, judgement: Super Smash Bros. Ultimate's render size, written to the state page for its stubs (hle_render_size.c). Only this build's stubs read the size from the state page (patches.py): on another build nothing would read it, so the host refuses the setting there
 
-- **13.0.5 `main`** `21450c64…` ([patches.py:10](../../dm/games/01006A800016E000/patches.py#L10))
+- **13.0.5 `main`** `21450c64…` ([patches.py:12](../../dm/games/01006A800016E000/patches.py#L12))
   - cut `+0x37c9a5c`: AllocateAddressRegion size mov x1,#0xf80000000 → mov x1,#0x100000000 (62 GB → 4 GB)
   - cut `+0x37c9a6c`: node pool top check, low part mov x9,#0xffffffff0 → mov x9,#0xfff0
   - cut `+0x37c9a70`: node pool start mov x11,#0x7f200000 → mov x11,#0xff200000
@@ -474,6 +478,43 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - cut `+0x37c9c50`: node pool bound: region end mov x9,#0xf80000000 → mov x9,#0x100000000
   - cut `+0x37ca3cc`: node pool bound: region end mov x8,#0xf80000000 → mov x8,#0x100000000
   - cut `+0x37caf68`: node pool bound: region end mov x9,#0xf80000000 → mov x9,#0x100000000
+- **13.0.1 `main`** `b9b166df…` ([patches.py:48](../../dm/games/01006A800016E000/patches.py#L48))
+  - gate 5659 at `+0x3821260`: framebuffer record copy: ldr w9, [x22, #8]
+  - gate 4891 at `+0x3821390`: framebuffer record copy: ldr w8, [x19, #8]
+  - gate 4891 at `+0x3821450`: framebuffer record copy: ldr w9, [x19, #8]
+  - gate 5660 at `+0x3834340`: viewport record read: ldp x8, x9, [x22, #8] (x, y, width, height)
+  <details><summary>25 frame-step sites</summary>
+
+  - frame step `+0x1534c08`: the UI's factor in shader constants (first place): width / the host width
+  - frame step `+0x153c138`: the UI's factor in shader constants (second place)
+  - frame step `+0x35b3400`: an object default
+  - frame step `+0x36112e8`: viewport scale divisor: width
+  - frame step `+0x36112f4`: viewport scale divisor: height
+  - frame step `+0x3613e58`: screen size: pipeline setup
+  - frame step `+0x3613e88`: size event height: pipeline setup
+  - frame step `+0x3613e8c`: size event width: pipeline setup
+  - frame step `+0x363b944`: screen width to index: compared with the host width
+  - frame step `+0x36e4058`: an object default: width
+  - frame step `+0x36e405c`: an object default: height
+  - frame step `+0x37407c4`: screen height
+  - frame step `+0x37407c8`: screen width
+  - frame step `+0x3742be0`: screen size: nuGraphics' first
+  - frame step `+0x3742c54`: screen width 1920.0 in four globals
+  - frame step `+0x3742c60`: screen height 1080.0 in four globals
+  - frame step `+0x37432dc`: render target configuration: width and width (the height follows from it)
+  - frame step `+0x3746cdc`: window crop width
+  - frame step `+0x3746ce8`: window crop height
+  - frame step `+0x378dc28`: the UI's width
+  - frame step `+0x378dc3c`: the UI's height
+  - frame step `+0x378e0a8`: the UI's factor for its pixel rectangles (scissor and mask): width / 1920
+  - frame step `+0x37cab48`: screen size: the OperationModeChanged handler
+  - frame step `+0x37cab78`: size event height: the OperationModeChanged handler
+  - frame step `+0x37cab7c`: size event width: the OperationModeChanged handler
+
+  </details>
+
+  - launcher capabilities: RENDER_SIZE
+  - host [hle_render_size.c:63](../../dm/host/hle_render_size.c#L63): build check
 - **function-matched** (`main` of builds without CUTS): engine region 62 GB → 4 GB (11 instructions in four functions): 4 functions, 11 cuts
 
 ### Taiko Risshiden V DX

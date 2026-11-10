@@ -57,6 +57,14 @@ Most service calls can be found before they crash, before the first boot or the 
 
 ## SDK names that changed between versions
 
+### Mission events through `mnpp:app`
+
+- **Symptom:** `[RED] sf: the game connects to service mnpp:app itself, which the host does not serve`, then an `nn::diag` abort with Result 0xe15 (`main+0x37080`) when a game is started.
+- **Cause:** `mnpp:app` (BCAT services, 13.0.0+) takes an application's registration (command 0) and its "mission events" (command 1: a `Uid` and a buffer), which the system uploads to Nintendo later; `main` links its client and aborts when `sm` refuses the connection ([Game-linked HIPC clients of system services](#game-linked-hipc-clients-of-system-services)).
+- **Fix:** `hle_sf.c` serves `mnpp:app` like `olsc:u`: every request succeeds with no output, so the events stay unsent, as offline.
+- **Found on:** Super Nintendo Entertainment System – Nintendo Classics (`01008D300C50C000`, 6.0.0, SDK 20.5.21: starting a game from the list; its profile is not in this repository).
+- **Check:** `t_sf` (`dm/host/tests`) connects and sends a mission event.
+
 ### Older SDK names for the same calls
 
 - **Symptom:** a call the host hooks under its newer name reaches the SDK's own code on an older game.

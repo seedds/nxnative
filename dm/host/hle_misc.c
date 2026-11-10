@@ -110,6 +110,15 @@ HLE_FORCE("_ZN2nn2ec19ShopServiceAccessor13AsyncResponse7GetSizeEPm", "shop asyn
 HLE_FORCE("_ZN2nn2ec19ShopServiceAccessor13AsyncResponse3GetEPvm", "shop async response: no data (cut)", Result, h_ec_ArGet, void *self, void *buf, size_t n) { (void)self; (void)buf; (void)n; return RES_FAIL; }
 // DRAGON QUEST VII Reimagined (Unreal Engine 4.27) also imports these three: the library's finalize (its SDK version closes the ec session the init never opened) and two response calls
 HLE_FORCE("_ZN2nn2ec31FinalizeForShopServiceAccessorsEv", "shop service accessors' library finalize: nothing was set up", void, h_ec_FinSsa, void) {}
+// Minecraft Bedrock's entitlement sync: the SDK's nn::ec::InitializePurchasedEvent creates an OS event through the ec
+// service the host does not serve and SIGSEGVs on the service object. It takes no parameter (the stale x0 holds
+// garbage), and the game then fetches the event through GetPurchasedEvent to wait on it: bind a never-signalled
+// SystemEvent, as the aoc notification events do, and report the purchase list empty
+static _Alignas(16) uint8_t g_ec_ev[0x100];
+HLE_FORCE("_ZN2nn2ec24InitializePurchasedEventEv", "purchased-event change notification; offline it never changes: created, never signalled", Result, h_ec_InitPurchasedEvent0, void) { hle_bind_system_event(g_ec_ev, 0); return RES_OK; }
+HLE_FORCE("_ZN2nn2ec17GetPurchasedEventEv", "the purchased-event; bound, never signalled offline", void *, h_ec_GetPurchasedEvent, void) { return g_ec_ev; }
+HLE_FORCE("_ZN2nn2ec20PopPurchasedItemInfoEPNS0_17PurchasedItemInfoE", "purchase list drain; offline the list is empty", unsigned, h_ec_PopItem, void *out) { (void)out; return 0; }
+
 HLE_FORCE("_ZN2nn2ec19ShopServiceAccessor13AsyncResponse6CancelEv", "shop async response: nothing to cancel (cut)", void, h_ec_ArCancel, void *self) { (void)self; }
 HLE_FORCE("_ZNK2nn2ec19ShopServiceAccessor13AsyncResponse12GetErrorCodeEv", "shop async response: no error code (cut)", uint64_t, h_ec_ArErr, const void *self) { (void)self; return 0; }
 // The "add-on content lost" error screen is an applet too: logged only

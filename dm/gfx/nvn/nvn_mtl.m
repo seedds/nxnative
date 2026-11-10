@@ -34,6 +34,7 @@
 #include "nvn_border.h"
 #include "nvn_primitive.h"
 #include "nvn_timestamp.h"
+#include "nvn_cbmiss.h"
 #include "msl_image.h"
 #include "dmsh_chain.h"   // DMSH_CHAIN: the translation chain version of the B shader library expected by this source tree, one for every game (beside this file, tools/dmsh_chain.py --header)
 #include "game_profile.h"   // game profile constants (profile id, the profile's switches)
@@ -10605,7 +10606,13 @@ static uint64_t cbuf_slot(NvShader *sh, int nvn_stage, const nvn_rbind *b, __str
     int reg = b->reg; const p_bind_buf *u = reg < 16 ? &S.ubo[nvn_stage][reg] : NULL;
     void *mb; uint64_t mo, gpu;
     if (!u || !u->addr || !mtl_gpu_addr(u->addr, u->size ? u->size : 1, &mb, &mo, &gpu)) {   // reads 0 (the all-zero bank), as an unbound texture slot does, instead of through a null pointer
-        RED_ONCE(16, "stage %d cb%d has no uniform buffer bound", nvn_stage, reg); *use = zero_bank(); return zero_bank_gpu(); }
+        int cs = nvn_cb_state(u ? reg : -1, u ? u->addr : 0, 0);   // unbound (the game's own state) or lost (nvn_cbmiss.h)
+        if (cs == CB_SLOT) RED_ONCE(16, "stage %d cb%d of %s: a slot past the 16 the replay keeps, the shader reads 0", nvn_stage, reg, sh->key);
+        else if (cs == CB_LOST) RED_ONCE(161, "stage %d cb%d of %s: bound at %#llx (size %llu), in no memory pool; the shader reads 0 there", nvn_stage, reg, sh->key, (unsigned long long)u->addr, (unsigned long long)u->size);
+        else { static unsigned nu; static char seen[8][28];
+            if (nu < 8) { char id[28]; snprintf(id, sizeof id, "%d.%d.%.20s", nvn_stage, reg, sh->key); unsigned q = 0; while (q < nu && strcmp(seen[q], id)) q++;
+                if (q == nu) { memcpy(seen[nu++], id, sizeof id); MLOG("stage %d cb%d of %s is not bound (address 0): it reads the zero bank, the game's own state (first 8 shaders)", nvn_stage, reg, sh->key); } } }
+        *use = zero_bank(); return zero_bank_gpu(); }
     if (__builtin_expect(u->size < 4u * b->fixw, 0))   // bound shorter than the shader reads it at fixed offsets: those reads give 0, as on Maxwell
         return ub_padded(sh, nvn_stage, reg, u, 4u * b->fixw, (const uint8_t *)[(__bridge id<MTLBuffer>)mb contents] + mo, use);
     *use = (__bridge id<MTLBuffer>)mb;

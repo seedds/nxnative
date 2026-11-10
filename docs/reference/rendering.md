@@ -1311,9 +1311,9 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 
 ### An unbound uniform slot reads the zero bank
 
-- **Symptom:** `stage 0 cb5 has no uniform buffer bound` (or another stage and slot, such as `stage 0 cb0`), once per run.
+- **Symptom:** `stage 0 cb5 of <shader> is not bound (address 0): it reads the zero bank, the game's own state` (or another stage and slot, such as `stage 0 cb0`), a plain line for the first 8 shaders. Before, the same case printed `[RED] stage 0 cb5 has no uniform buffer bound`, without the shader, once per run.
 - **Cause:** the argument buffer kept a null pointer for the unbound slot. The game draws with nothing bound there; the host misses no bind. What the Switch reads from an unbound slot is not known.
-- **Fix:** the slot now reads the all-zero bank, as an unbound texture slot reads the zero texture.
+- **Fix:** the slot now reads the all-zero bank, as an unbound texture slot reads the zero texture. `nvn_cbmiss.h` (`nvn_cb_state`, test `t_cbmiss`) keeps this case apart from a binding the host lost: an address in no memory pool (`[RED] stage N cbK of <shader>: bound at <address> (size <n>), in no memory pool`) or a slot past the 16 the replay keeps stays `[RED]` and names the shader. The binding is the same in every case.
 - **Found on:** [Paper Mario: The Thousand-Year Door](../../dm/games/0100ECD018EBE000/README.md) (at the title); [Batman: Arkham Knight](../../dm/games/0100ACD0163D0000/README.md#files-and-shaders) (`stage 0 cb0`, at boot: the first command buffer draws before the game has bound any uniform buffer).
 - **Check:** a pass dump of the frame (`DM_NVN_PASSDUMP=<frame>`, frame 0 for the boot) shows the draw (`j` line) and its stage's `K` line with no `B … cb` line, and the frame's `[nvn]` call counts show whether the game called `CommandBufferBindUniformBuffer` at all.
 

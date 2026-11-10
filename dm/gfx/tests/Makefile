@@ -521,6 +521,11 @@ check_t_gl_imports: t_gl_imports
 	./t_gl_imports --stubs
 gl-imports: check_t_gl_imports
 check_t_vk_desc: RUN_ENV = MTL_DEBUG_LAYER=1
+# DM_VK_PASSDUMP (frame selection, the lines of one submit): the Vulkan layer as t_vk_desc builds it
+t_vk_passdump: t_vk_passdump.m ../vk/hle_vk.m $(MTL_T_DEP)
+	clang $(CFLAGS) -I../../third_party/vulkan-headers/include -fobjc-arc -o $@ t_vk_passdump.m $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
+# MallocScribble: a freed image reads as 0x55 bytes, so a view that followed its destroyed image would show
+check_t_vk_passdump: RUN_ENV = MTL_DEBUG_LAYER=1 MallocScribble=1
 # Float32 missing components retain float padding through integer shader inputs.
 t_float_pad: t_float_pad.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_float_pad.m $(MTL_T_SRC) $(FW)

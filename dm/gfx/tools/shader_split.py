@@ -616,6 +616,116 @@ def linkdata_shaders(path, rel, rng, out):
             off, n, stored, comp = struct.unpack_from('<QQQQ', idx, i * 32)
             if n: kt_shaders(d[off:off + (stored if comp else n)], f'/{rel}#{i}', out)
 
+LSPK = b'LSPK'
+LSPK_LIMIT = 1 << 30   # bound each file list, archive member and decoded .bshd before allocation
+
+def lspk_block(data, size, method, label):
+    """One stored, zlib or LZ4 block with an exact decoded size, never an unbounded inflate."""
+    import lz4.block
+    if size > LSPK_LIMIT: red(f'{label}: LSPK decoded size {size:#x} exceeds the byte budget')
+    try:
+        if method == 0: out = data
+        elif method == 1:
+            stream = zlib.decompressobj()
+            out = stream.decompress(data, size + 1)
+            if not stream.eof or stream.unused_data or stream.unconsumed_tail:
+                red(f'{label}: LSPK zlib stream is truncated, oversized or has trailing bytes')
+        elif method == 2:
+            # A raw LZ4 block expands by less than 255 bytes per input byte;
+            # reject an impossible declared size before the decoder allocates it.
+            if size > 255 * len(data): red(f'{label}: LSPK LZ4 decoded size cannot fit its compressed block')
+            out = lz4.block.decompress(data, uncompressed_size=size)
+        else: red(f'{label}: LSPK compression {method} is not read')
+    except (ValueError, lz4.block.LZ4BlockError, zlib.error) as e: red(f'{label}: invalid LSPK compressed block ({e})')
+    if len(out) != size: red(f'{label}: LSPK block decoded {len(out)} bytes, expected {size}')
+    return out
+
+def lspk_entries(path):
+    """Larian v13: footer {u32 header size, LSPK}, 32-byte header, LZ4 list of 280-byte FileEntry10 records.
+    Layout: Norbyte/lslib PackageFormat.cs LSPKHeader13/FileEntry10; .bshd wrapper reported in issue #1679."""
+    with open(path, 'rb') as f:
+        f.seek(0, 2); length = f.tell()
+        if length < 8: return None
+        f.seek(length - 8); hsize, magic = struct.unpack('<I4s', f.read(8))
+        if magic != LSPK:
+            f.seek(0); head = f.read(8)
+            if head[:4] == LSPK: red(f'{path}: LSPK version {int.from_bytes(head[4:], "little")}: only footer-based version 13 is read')
+            return None
+        if hsize != 40 or length < hsize: red(f'{path}: invalid LSPK header size {hsize}')
+        f.seek(length - hsize); version, off, size, parts, flags, _ = struct.unpack('<IIIHBB', f.read(16))
+        if version != 13: red(f'{path}: LSPK version {version}: only 13 is read')
+        if flags & 4: red(f'{path}: solid LSPK archives are not read')
+        if not parts: red(f'{path}: LSPK has no archive parts')
+        if size < 4 or off + size > length - hsize: red(f'{path}: LSPK file list lies outside the data area')
+        if size > LSPK_LIMIT: red(f'{path}: LSPK file list exceeds the byte budget')
+        f.seek(off); count = struct.unpack('<I', f.read(4))[0]
+        table = lspk_block(f.read(size - 4), count * 280, 2, f'{path}: file list')
+    entries = []
+    for name, at, stored, decoded, part, method, _crc in struct.iter_unpack('<256s6I', table):
+        try: name = name.split(b'\0', 1)[0].decode('utf-8')
+        except UnicodeDecodeError: red(f'{path}: invalid UTF-8 name in LSPK file list')
+        if part >= parts: red(f'{path}#{name}: LSPK part {part} exceeds the part count {parts}')
+        if part == 0 and at + stored > off: red(f'{path}#{name}: LSPK entry overlaps its file list or header')
+        entries.append((name, at, stored, decoded, part, method))
+    return parts, entries
+
+def lspk_part(path, part):
+    stem, ext = os.path.splitext(path)
+    return f'{stem}_{part}{ext}' if part else path
+
+def lspk_jobs(files, parts=64):
+    """Split only .bshd entries into jobs; archive parts and shaderless archives are not scanned whole."""
+    jobs, owned, archives = [], set(), []
+    for path, rel in files:
+        if not path.lower().endswith('.pak'): continue
+        try: info = lspk_entries(path)
+        except (Exception, SystemExit):
+            # Preserve scan_file's unreadable accounting and filename diagnostics.
+            jobs.append((path, rel, (LSPK, None))); owned.add(path); continue
+        if info is None: continue
+        count, entries = info
+        owned.update(lspk_part(path, i) for i in range(count))
+        archives.append((path, rel, [e for e in entries if e[0].lower().endswith('.bshd')]))
+    step = max(1, sum(e[2] for _, _, entries in archives for e in entries) // max(1, parts))
+    for path, rel, entries in archives:
+        group, size = [], 0
+        for e in entries:
+            group.append(e); size += e[2]
+            if size >= step: jobs.append((path, rel, (LSPK, tuple(group)))); group, size = [], 0
+        if group: jobs.append((path, rel, (LSPK, tuple(group))))
+    return jobs, owned
+
+def lspk_shaders(path, rel, entries, out):
+    """Archive-member compression, then a .bshd's big-endian size/flag and zlib-wrapped GLSLC program."""
+    import contextlib
+    if entries is None:
+        info = lspk_entries(path)   # reproduce a malformed list's diagnostic inside scan_file
+        if info is None: red(f'/{rel}: LSPK header disappeared')
+        entries = [e for e in info[1] if e[0].lower().endswith('.bshd')]
+    with contextlib.ExitStack() as stack:
+        handles = {}
+        for name, off, stored, decoded, part, flags in entries:
+            label = f'/{rel}#{name}'
+            if stored > LSPK_LIMIT: red(f'{label}: LSPK stored size exceeds the byte budget')
+            src = lspk_part(path, part)
+            try:
+                if src not in handles: handles[src] = stack.enter_context(open(src, 'rb'))
+                f = handles[src]; f.seek(0, 2)
+                if off + stored > f.tell(): red(f'{label}: LSPK entry lies outside archive part {part}')
+                f.seek(off); raw = f.read(stored)
+            except OSError as e: red(f'{label}: cannot read LSPK part {part} ({e})')
+            how = flags & 15
+            data = lspk_block(raw, decoded if how else stored, how, label)
+            if len(data) < 4: red(f'{label}: truncated LSPK .bshd header')
+            size = int.from_bytes(data[:4], 'big')
+            if not size & 0x80000000: red(f'{label}: LSPK .bshd is not zlib-wrapped')
+            data = lspk_block(data[4:], size & 0x7fffffff, 1, label)
+            found = glslc_shaders(data, label, need=False)
+            if sorted(st for _, st, _, _ in found) == ['ps', 'vs']:
+                found = [(f'{label}#GLSLC#var', st, ctl, code) for _, st, ctl, code in found]
+            out.extend(found)
+
+
 KPKA = b'KPKA'
 KPKA_BLOCKS = 0x20         # header feature: a block table follows the entries
 KPKA_IN_BLOCKS = 0x1000000   # entry attribute: the entry's data is in the block table's blocks
@@ -3222,6 +3332,9 @@ def scan_file_in(args):
     if ext in ('.data', '.patch', '.debug', '.nxpc') and os.path.exists(stem + '.dict'): return rel, {}, set(), {}   # read through its Next Level Games index (nlg_shaders)
     with open(path, 'rb') as f: head = f.read(16)
     found = []; trees = {}
+    if len(args) > 2 and args[2][0] == LSPK:
+        lspk_shaders(path, rel, args[2][1], found)
+        return rel, uniq_keys(found), var_pairs(found), trees
     if len(args) > 2 and args[2][0] == b'ARH1':
         arh_shaders(path, rel, args[2][1], found)
         return rel, uniq_keys(found), var_pairs(found), trees
@@ -3455,8 +3568,9 @@ def main():
     fb_jobs, fbs = frostbite_jobs(files)   # EA SPORTS FC 27's Frostbite bundles, Oodle Leviathan decoded by the game's own decoder in the Mac host
     pd_jobs, pdats = pdat_jobs(files)   # Kirby Air Riders' PDAT archives: the PMAP records in byte ranges
     rp_jobs, rpfs = rpf_jobs(files, main_v)   # Red Dead Redemption's RPF6 archives, their tables decrypted with the key in main (rpf6.py)
-    big += pak_jobs + tr_jobs + ue_jobs + bd_jobs + arc_jobs + pz_jobs + ck_jobs + d3_jobs + ca_jobs + cr_jobs + zp_jobs + ah_jobs + fb_jobs + pd_jobs + rp_jobs
-    files = [(p, r) for p, r in files if not linkdata_jobs(p, r) and p not in paks and p not in trp and p not in uep and p not in bdts and p not in arcs and p not in pkzs and p not in cpks and p not in d3s and p not in cascs and p not in cras and p not in zips and p not in arhs and p not in fbs and p not in pdats and p not in rpfs]
+    ls_jobs, lspks = lspk_jobs(files)   # Divinity: Original Sin 2's Larian archives: only the compiled .bshd shaders
+    big += pak_jobs + tr_jobs + ue_jobs + bd_jobs + arc_jobs + pz_jobs + ck_jobs + d3_jobs + ca_jobs + cr_jobs + zp_jobs + ah_jobs + fb_jobs + pd_jobs + rp_jobs + ls_jobs
+    files = [(p, r) for p, r in files if not linkdata_jobs(p, r) and p not in paks and p not in lspks and p not in trp and p not in uep and p not in bdts and p not in arcs and p not in pkzs and p not in cpks and p not in d3s and p not in cascs and p not in cras and p not in zips and p not in arhs and p not in fbs and p not in pdats and p not in rpfs]
     with cf.ProcessPoolExecutor(J, initializer=_pool_init, initargs=(common, {}, zdicts)) as ex:
         n = len(big) + len(files)
         results += pooled(ex, big, n) + pooled(ex, files, n, len(big), chunk=16)

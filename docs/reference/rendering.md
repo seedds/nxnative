@@ -1558,6 +1558,33 @@ The Vulkan layer (`dm/gfx/vk/hle_vk.m`) was written for Hades; Super Mario Galax
 - **Cause:** two geometry shaders (GX points and lines expanded to quads) are not translated (Metal has no geometry stage).
 - **Found on:** [Super Mario Galaxy](../../dm/games/010099C022B96000/README.md).
 
+### A pipeline whose fragment shader is missing is not built
+
+- **Symptom:** a game's 2D batches draw nothing and the frames stay black while the log has no error.
+- **Cause:** `pipe_make` built a pipeline from the stages it could translate. A fragment function missing from the shader library left the pipeline without its fragment stage, and Metal builds a pipeline with no fragment function as a depth-only one: each draw wrote no colour and nothing said so.
+- **Fix:** a fragment stage the pipeline requests whose Metal function is missing from the library (`lacking`) refuses the pipeline. Its draws are skipped in `pre_draw`, counted (`g_n_skip`, the frame line's `(skipped N)`) and reported once per pipeline with the keys of its shaders: `[RED] draws skipped: the pipeline of shaders … was not built`. The rule is requested and not available: refused; not requested: built. A pipeline with no fragment stage at all (a depth-only pass) is built as before, and so is one with a stage Metal has none of (a geometry stage): that stage is reported (`shader stage … not implemented`) and left out, as before.
+- **Found on:** Re:ZERO -Starting Life in Another World- The Prophecy of the Throne (`01000B20117B8000`, The Forge renderer on Vulkan, SDK 9.5.0): its 2D batches drew nothing with 0 errors, as their fragment shaders were not in the library.
+- **Check:** `t_vk_cmds` builds a pipeline whose fragment module has no function and checks it is refused, its draws counted as skipped and not drawn, and the target left as cleared; the depth-only pipeline and one with a geometry stage are built and the depth-only draw runs. With the refusal left out, four of its checks fail; with it applied to every pipeline that has no fragment function, two.
+- **Changes behaviour:** a Vulkan game whose pipeline names a fragment shader the library lacks used to get it built without that stage; now its draws are skipped and named (Hades, Super Mario Galaxy and the 3D All-Stars games were not rerun with this).
+
+### Commands the Vulkan layer lacked
+
+- **Symptom:** `DM_VK_LOG=1` shows `lookup vkCmdFillBuffer → none (returns null)` (or another name below); a game that does not check the lookup calls address 0, as in the `VK_EXT_debug_report` entry above.
+- **Cause:** the layer implemented what Hades and the Galaxies recorded. A renderer that uses The Forge's full command set also records indirect draws, buffer fills and updates, resolves, blits, secondary command buffers, events and query copies, and sets blend constants and depth bias dynamically.
+- **Fix:** `vkCmdDrawIndirect` and `vkCmdDrawIndexedIndirect` (a Metal indirect draw per command, `C_DRAWIND`); `vkCmdFillBuffer` (a byte pattern is a Metal fill, a four-byte pattern comes from a buffer filled with it) and `vkCmdUpdateBuffer` (the bytes are copied when recorded, then into the buffer in order); `vkCmdResolveImage` (a render pass that only resolves; a part of an image is reported and skipped); `vkCmdBlitImage` (a blit encoder copy for a same-size, same-format, unmirrored blit, others reported and skipped); `vkCmdExecuteCommands` (a secondary buffer is recorded like a primary one and replayed in place; the submit's slot count includes theirs); `vkCmdCopyQueryPoolResults` (written when the submit completes, from the same tickets `vkGetQueryPoolResults` reads); `vkCmdSetBlendConstants` and `vkCmdSetDepthBias` (a pipeline that lists them as dynamic takes them from the command); `vkCmdSetLineWidth`, `vkCmdSetDepthBounds` (reported) and `vkCmdSetDeviceMask`. `vkCmdClearAttachments` and `vkCmdNextSubpass` are reported and do nothing.
+- **Found on:** Re:ZERO -Starting Life in Another World- The Prophecy of the Throne (`01000B20117B8000`, SDK 9.5.0): the commands its frames record that the layer lacked.
+- **Check:** `t_vk_cmds` reads back a fill (both forms, `VK_WHOLE_SIZE`), an update, a resolve, a same-size blit and a refused scaled one, direct and indexed indirect draws, a dynamic blend constant, a draw and a fill in secondary buffers, events and 32- and 64-bit query copies. It does not compile against the layer without these commands.
+
+### Barriers and events
+
+- **Model:** `vkCmdPipelineBarrier`, `vkCmdWaitEvents` and semaphores order nothing in the layer. That holds because one queue runs every submit and every command in recorded order, the device resources a command buffer writes are hazard-tracked by Metal between the passes and blits it encodes, and each encoder runs after the one before it.
+- **Events:** `vkSetEvent` / `vkResetEvent` change an event for the host at once; `vkCmdSetEvent` / `vkCmdResetEvent` change it when their submit has been replayed and read as set once that submit has completed (`vkGetEventStatus`, the same ticket as a fence).
+- **Limits:**
+  - A GPU wait (`vkCmdWaitEvents`) on an event the host sets later is not honoured. The queue does not stop, so a command after the wait may read what the host has not written yet.
+  - A barrier inside one render pass is not honoured either. Metal tracks hazards between encoders, not between the draws of one encoder, so a storage write a later draw of the same pass reads needs a memory barrier.
+  - A reset recorded in a command buffer shows to the host when its submit is replayed, which can be before the GPU reaches it.
+  - A wait on an event that an earlier command of the queue sets is met by the queue's order. `t_vk_cmds` records a wait on an event nothing sets and checks that the queue continues.
+
 ## OpenGL layer
 
 Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.4.0) and Balatro (LÖVE 11.4, "love-nx", with SDL and LuaJIT) render with **NVIDIA's desktop OpenGL 4.5 core profile through EGL**, not NVN. The host implements GL itself on Metal (`dm/gfx/gl/hle_gl.m`), as it does Vulkan for Hades; NVIDIA's GL driver (`subsdk0`) is not loaded. Balatro's graphics module is LÖVE's own OpenGL backend, so its choices follow what the context reports.

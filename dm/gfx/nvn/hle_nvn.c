@@ -380,6 +380,21 @@ static void sparse_layout(const nvn_texdesc *d, NVNtextureSparseTileLayout *o) {
 NVN(nvnTextureBuilderGetSparseTileLayout, void, const NVNtextureBuilder *b, NVNtextureSparseTileLayout *o) { sparse_layout(&((const tex_builder_t *)b)->d, o); }
 #define TX(t) ((tex_t *)(t))
 #define CTX(t) ((const tex_t *)(t))
+// The profile keys render_cond, tex_flush_upload and tex_dirty_upload, with a switch each that overrides the profile's value for a run (DM_NVN_RENDER_COND, DM_NVN_TEX_FLUSH_UPLOAD,
+// DM_NVN_TEX_DIRTY_UPLOAD = 0 / 1; unset = the profile): a compatibility run A/Bs a workaround without rebuilding the host. Read on first use, not at start: the iOS app applies its
+// env.txt after the host's constructors. tex_dirty_upload registers textures only through tex_flush_upload, so it needs that on as well
+static int key_env(const char *name, int profile) { const char *e = getenv(name); return e && *e ? atoi(e) != 0 : profile; }
+// The game threads (ft_add) and the submit thread can ask first, so the cache is atomic and only the thread whose value is kept logs it
+static int key_get(_Atomic int *cache, const char *name, int profile, const char *what) {
+    int v = atomic_load(cache), unset = -1;
+    if (v >= 0) return v;
+    v = key_env(name, profile);
+    if (atomic_compare_exchange_strong(cache, &unset, v)) LOG("[nvn] %s: %s", what, v ? "on" : "off");
+    return atomic_load(cache);
+}
+int nvn_render_cond(void) { static _Atomic int v = -1; return key_get(&v, "DM_NVN_RENDER_COND", DM_GAME_RENDER_COND, "conditional rendering evaluated at replay (render_cond)"); }
+int nvn_tex_flush_upload(void) { static _Atomic int v = -1; return key_get(&v, "DM_NVN_TEX_FLUSH_UPLOAD", DM_GAME_TEX_FLUSH_UPLOAD, "flushed textures uploaded (tex_flush_upload)"); }
+int nvn_tex_dirty_upload(void) { static _Atomic int v = -1; return key_get(&v, "DM_NVN_TEX_DIRTY_UPLOAD", DM_GAME_TEX_DIRTY_UPLOAD, "CPU-written textures uploaded (tex_dirty_upload)"); }
 // Textures the CPU fills in place (profile tex_flush_upload): Tears of the Kingdom streams its textures (TexToGo, already in the GPU's block-linear layout) straight into
 // CPU-cached memory pools and publishes each with nvnMemoryPoolFlushMappedRange (9,436 calls at boot), without a packaged layout or WriteTexels. They stayed GPU-only
 // textures with content 0, and the G-buffer's base colour came out black. Textures that can hold such data (not render targets, not linear, no packaged layout, in a pool
@@ -431,19 +446,19 @@ static void ft_add(const tex_t *t) {
     // background never appeared). A CPU_NO_ACCESS pool keeps the exclusion: there the compression tags may really be there.
     // A sparse pool's addresses are no memory the CPU writes or flushes, and no range nvn_dirty tracks, so they read as dirty at once: every texture in one, a render target too, came out CPU-written at its first
     // use in a profile with tex_dirty_upload. What the CPU wrote into the physical pages behind one is seen through the page table instead (tex_from_storage, sparse_look)
-    if (!DM_GAME_TEX_FLUSH_UPLOAD || !t->mem || !t->pool || t->pool->vp || t->has_layout || t->d.target == NVN_TEXTURE_TARGET_BUFFER || (t->pool->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) ||
+    if (!nvn_tex_flush_upload() || !t->mem || !t->pool || t->pool->vp || t->has_layout || t->d.target == NVN_TEXTURE_TARGET_BUFFER || (t->pool->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) ||
         (t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET))) return;
     flush_tex f = {t->mem, t->L.size, *t, nvn_dirty_now(), NULL, {0, 0}, 0};
-    if (DM_GAME_TEX_DIRTY_UPLOAD) nvn_dirty_protect(t->mem, t->L.size);   // see nvn_ft_written
+    if (nvn_tex_dirty_upload()) nvn_dirty_protect(t->mem, t->L.size);   // see nvn_ft_written
     f.span = nvn_dirty_span(t->mem, t->L.size);
-    if (DM_GAME_TEX_DIRTY_UPLOAD) ft_edges_take(&f);
+    if (nvn_tex_dirty_upload()) ft_edges_take(&f);
     pthread_mutex_lock(&g_ft_mu);
     if (g_nft == g_cft && !(g_ft = realloc(g_ft, (g_cft = g_cft ? 2 * g_cft : 1024) * sizeof *g_ft))) die("flush_tex allocation failed");
     g_ft[g_nft++] = f;
     pthread_mutex_unlock(&g_ft_mu);
 }
 static void ft_del(uint64_t serial) {
-    if (!DM_GAME_TEX_FLUSH_UPLOAD || !serial) return;
+    if (!nvn_tex_flush_upload() || !serial) return;
     pthread_mutex_lock(&g_ft_mu);
     for (size_t i = 0; i < g_nft; i++) if (g_ft[i].t.serial == serial) { g_ft[i] = g_ft[--g_nft]; break; }
     pthread_mutex_unlock(&g_ft_mu);
@@ -452,7 +467,7 @@ static void ft_del(uint64_t serial) {
 // natively; its 121-layer ASTC terrain material arrays, 42 MB each). They stayed GPU-only textures with content 0, which ASTC decodes as the error colour, and the cave came out magenta.
 // ft_add write-protects a registered texture's pages, and on its first resolution (tex_mtl, submit thread) a write since then makes it CPU-written like a flushed one
 int nvn_ft_written(const tex_t *t) {
-    if (!DM_GAME_TEX_DIRTY_UPLOAD || !t->serial) return 0;
+    if (!nvn_tex_dirty_upload() || !t->serial) return 0;
     int r = 0; pthread_mutex_lock(&g_ft_mu);
     for (size_t i = 0; i < g_nft; i++) if (g_ft[i].t.serial == t->serial) {
         if (ft_written(&g_ft[i])) { r = 1; g_ft[i] = g_ft[--g_nft]; }
@@ -462,7 +477,7 @@ int nvn_ft_written(const tex_t *t) {
     return r;
 }
 int nvn_ft_tracked(uint64_t serial) {   // registered and not resolved yet: its storage holds whatever the CPU has written, and the GPU's writes (nvn_mtl.m gsb_store)
-    if (!DM_GAME_TEX_FLUSH_UPLOAD || !serial) return 0;
+    if (!nvn_tex_flush_upload() || !serial) return 0;
     int r = 0; pthread_mutex_lock(&g_ft_mu);
     for (size_t i = 0; i < g_nft; i++) if (g_ft[i].t.serial == serial) { r = 1; break; }
     pthread_mutex_unlock(&g_ft_mu);
@@ -479,7 +494,7 @@ int nvn_ft_tracked(uint64_t serial) {   // registered and not resolved yet: its 
 // Checking every texture at every submission cost TOTK 0.4 ms of submit CPU per frame on the Mac; this way a texture is picked up a few submissions later at most
 enum { FT_POLL_BYTES = 128 << 20 };
 void nvn_ft_poll(void) {
-    if (!DM_GAME_TEX_DIRTY_UPLOAD) return;
+    if (!nvn_tex_dirty_upload()) return;
     static uint64_t gen; static size_t cur, left;
     static struct { tex_t t; size_t at; int how; } *hit; static size_t chit; size_t nhit = 0;
     uint64_t now = nvn_dirty_now(), scanned = 0;
@@ -521,7 +536,7 @@ void nvn_ft_poll(void) {
     pthread_mutex_unlock(&g_ft_mu);
 }
 static void ft_flush(const uint8_t *a, uint64_t n) {
-    if (!DM_GAME_TEX_FLUSH_UPLOAD || !a || !n) return;
+    if (!nvn_tex_flush_upload() || !a || !n) return;
     pthread_mutex_lock(&g_ft_mu);
     for (size_t i = 0; i < g_nft;)
         if (g_ft[i].mem < a + n && a < g_ft[i].mem + g_ft[i].size) { mtl_tex_cpu_written(&g_ft[i].t); g_ft[i] = g_ft[--g_nft]; } else i++;
@@ -3267,11 +3282,11 @@ NVN(nvnCommandBufferClearBuffer, void, NVNcommandBuffer *c, NVNbufferAddress a, 
 // State the replay layer does not have yet: logged once (conditional rendering is treated as "always draw")
 // Render enable (profile render_cond, see OP_RENDER_COND in nvn_mtl.m): recorded and evaluated at replay; without the key everything draws, as before
 NVN(nvnCommandBufferSetRenderEnable, void, NVNcommandBuffer *c, uint32_t en) {
-    if (DM_GAME_RENDER_COND) *REC(c, OP_RENDER_COND, p_render_cond) = (p_render_cond){(en & 0xff) ? 2 : 3, 0, 0};
+    if (nvn_render_cond()) *REC(c, OP_RENDER_COND, p_render_cond) = (p_render_cond){(en & 0xff) ? 2 : 3, 0, 0};
     else if (!(en & 0xff)) ONCE_LOG("[RED] SetRenderEnable(false): the host draws anyway for now");
 }
 NVN(nvnCommandBufferSetRenderEnableConditional, void, NVNcommandBuffer *c, NVNconditionalRenderMode m, NVNbufferAddress a) {
-    if (DM_GAME_RENDER_COND) *REC(c, OP_RENDER_COND, p_render_cond) = (p_render_cond){(int)m & 1, 0, a};
+    if (nvn_render_cond()) *REC(c, OP_RENDER_COND, p_render_cond) = (p_render_cond){(int)m & 1, 0, a};
     else ONCE_LOG("[RED] SetRenderEnableConditional: the host draws anyway for now");
 }
 // Fire Emblem: Three Houses turns depth clamp on for its scenes; ignored, the ground right under its close-up battle cameras was clipped away and the lighting pass painted the sky's fog colour there

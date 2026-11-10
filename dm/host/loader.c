@@ -317,7 +317,7 @@ static void install_fps_state(module_t *m) {
 }
 // Screen shape for a profile whose stubs take any shape (game.tsv screen_aspect any, DM_GAME_SCREEN_ASPECT 2: Ocarina of Time's patches.py), wider or taller than 16:9, and follow it
 // while the game runs. State +0xa0 float the screen's width / height (0 = 16:9: the stubs run the game's own code), +0xa4 float the width factor (the ratio over 16:9, at least 1),
-// +0xa8 float the height factor (16:9 over the ratio, at least 1), +0xac u32 a count bumped at each change, +0xc4 / +0xc8 floats the camera's x / y multipliers (below). A wider screen keeps the game's height and vertical angle and shows more
+// +0xa8 float the height factor (16:9 over the ratio, at least 1; both lowered by one number under DM_SCREEN_PIXELS: screen_pixels_cap), +0xac u32 a count bumped at each change, +0xc4 / +0xc8 floats the camera's x / y multipliers (below). A wider screen keeps the game's height and vertical angle and shows more
 // at the sides; a taller one keeps its width and horizontal angle and shows more above and below, whatever the shape, as a PC game in a window does: a portrait window too (the
 // profile's stubs keep the picture's pixel count in bounds and grow the window textures). The bounds below only keep a degenerate window (a few pixels high) out
 #define SCREEN_MIN 0.25
@@ -350,12 +350,30 @@ static double screen_upright_cap(void) {
     }
     return g_upright_cap = v;
 }
+// The picture's pixels in a shape other than 16:9 (DM_SCREEN_PIXELS, read once): at most that many times those of the size the game asks for, 0.5 to 1.5. Unset (or 1.5) the
+// profile's stub alone bounds them (Ocarina of Time's output size: 1.5, so a phone upright renders 1200x2600 for the game's handheld 1920x1080, and the upscaler and the
+// output-resolution passes run at that size). Lower, both size factors (+0xa4 / +0xa8) are scaled by one number so their product is the bound: the stub keeps the shape and
+// rounds each side to a multiple of 8 as before, under its own bound (1.0 upright: 976x2120). The camera (+0xc4 / +0xc8) and the shape are unchanged: the same picture with
+// fewer pixels, which the presenter scales to the view
+static double g_screen_pixels = -1;
+static double screen_pixels_cap(void) {
+    if (g_screen_pixels >= 0) return g_screen_pixels;
+    const char *e = getenv("DM_SCREEN_PIXELS"); double v = 0;
+    if (e && *e) {
+        char *end; v = strtod(e, &end);
+        if (end == e || *end || !(v >= 0.5 && v <= 1.5)) { LOG("[RED] DM_SCREEN_PIXELS=%s: 0.5 to 1.5 times the game's own pixels; keeping the profile's bound", e); v = 0; }
+        else if (v == 1.5) v = 0;   // the stub's own bound
+    }
+    return g_screen_pixels = v;
+}
 static void screen_any_write_(double a, const char *why) {
     if (!dm_fps_state) return;
     double r = a < SCREEN_MIN ? SCREEN_MIN : a > SCREEN_MAX ? SCREEN_MAX : a;
     if (fabs(r / (16.0 / 9.0) - 1) < 0.005) r = 0;   // 16:9 within half a percent: the game's own picture
     if (r == g_screen_ratio) return;
     float f[3] = {(float)r, r ? (float)fmax(r * 9 / 16, 1) : 1, r ? (float)fmax(16 / (9 * r), 1) : 1};
+    double px = screen_pixels_cap(), area = (double)f[1] * f[2]; int fewer = 0;
+    if (r && px && area > px) { double s = sqrt(px / area); f[1] = (float)(f[1] * s); f[2] = (float)(f[2] * s); fewer = 1; }   // screen_pixels_cap
     memcpy(dm_fps_state + 0xa0, f, sizeof f);
     // +0xc4 / +0xc8: the camera's x / y multipliers (the projection's rows; screen_camera), upright capped (screen_upright_cap). The size stub copies them with the size it sets
     // (patches.py screen_shape), and the HUD's follow from them
@@ -366,9 +384,11 @@ static void screen_any_write_(double a, const char *why) {
     uint32_t gen; memcpy(&gen, dm_fps_state + 0xac, 4); gen++; memcpy(dm_fps_state + 0xac, &gen, 4);
     extern void mtl_present_screen(uint32_t w, uint32_t h); mtl_present_screen(r ? (uint32_t)(r * 10000 + 0.5) : 0, r ? 10000 : 0);   // the picture's shape for a crop of that shape (nvn_mtl.m present_shape)
     int first = g_screen_ratio < 0; g_screen_ratio = r;
-    if (r) LOG("%s: screen shape %.3f (%s%s): %s, picture %.3f x %.3f of 16:9, camera x %.3f y %.3f%s", g_fps_mod, r, why, a != r && a > 0 ? ", held to 0.25..6" : "",
-               r > 16.0 / 9 ? "more at the sides" : "more above and below", f[1], f[2], c[0], c[1], capped ? ", upright cap" : "");
-    else LOG("%s: screen shape 16:9 (%s)", g_fps_mod, why);
+    if (r) {
+        LOG("%s: screen shape %.3f (%s%s): %s, picture %.3f x %.3f of 16:9, camera x %.3f y %.3f%s", g_fps_mod, r, why, a != r && a > 0 ? ", held to 0.25..6" : "",
+            r > 16.0 / 9 ? "more at the sides" : "more above and below", f[1], f[2], c[0], c[1], capped ? ", upright cap" : "");
+        if (fewer) LOG("%s: picture held to %.2f of the game's pixels (DM_SCREEN_PIXELS)", g_fps_mod, px);
+    } else LOG("%s: screen shape 16:9 (%s)", g_fps_mod, why);
     if (capped) LOG("%s: upright: vertical angle held to a %.2f picture's (DM_SCREEN_UPRIGHT_FOV)", g_fps_mod, cap);
     if (!first) { void dm_display_changed(void); dm_display_changed(); }   // the game lays its picture out again (hle_oe.c)
 }

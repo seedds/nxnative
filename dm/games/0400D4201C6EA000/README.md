@@ -56,3 +56,5 @@ The work folder `0400D4201C6EA000-work` beside the dump has `run/boot.sh <log> <
 - [The submission-ready event counted as packets](../../../docs/reference/movies.md#the-submission-ready-event-counted-as-packets): black movies, then corrupt frames.
 - [A passthrough geometry shader that writes the layer](../../../docs/reference/shaders.md#a-passthrough-geometry-shader-that-writes-the-layer): a blue wash over every 3D scene with atmosphere.
 - [Null vertex buffers bound past stream 15](../../../docs/reference/rendering.md#null-vertex-buffers-bound-past-stream-15).
+- [A discarded fragment that returns early is written](../../../docs/reference/shaders.md#a-discarded-fragment-that-returns-early-is-written): black dots in Donkey Kong's fur (`ec0405e7fb48caf8`), resolved by `frag_kill`.
+- [One libvpx setup for both decoder paths](../../../docs/reference/movies.md#one-libvpx-setup-for-both-decoder-paths): chopped sound in the opening movie, resolved; one short gap near its start is open.

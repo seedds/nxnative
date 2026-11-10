@@ -769,6 +769,7 @@ def finish(key, w, j, c1):
     src = dmsh_wide.wide_loads(src)   # storage words the translator split, read whole again (see dmsh_wide.py)
     src = dmsh_rewrite.border_emu(src)   # border colours Metal lacks (see border_emu)
     if j['stage'] == 'ps': src = dmsh_rewrite.frag_z_snap(src)[0]   # gl_FragCoord.z against a depth of its own surface (see frag_z_snap)
+    if j['stage'] == 'ps': src = dmsh_rewrite.frag_kill(src)[0]   # a discarded fragment runs to main0's last return (see dmsh_rewrite.frag_kill)
     open(msl, 'w').write(src)
     first, spill = [], 0
     mesh = j.get('mesh_stage')

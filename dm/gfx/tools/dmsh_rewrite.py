@@ -2,7 +2,7 @@
 # The rewrites dmsh_build.py makes in a translated shader's MSL before it compiles it, where Metal or the translator falls short of what the Switch code does: precise
 # arithmetic (precise), 64-bit products (mul_extended), Ampere's HMMA as simdgroup matrices (hmma_msl), first stores and shared-memory stores (first_store,
 # shared_store_msl), threadgroup memory past Metal's limit (tg_spill), texture gathers with offsets (gather_offsets), border colours Metal has no sampler state for
-# (border_emu) and a pixel shader's depth snapped to its position (frag_z_snap). Functions of the MSL text and the library ABI only, with no build state, so tests import
+# (border_emu), a pixel shader's depth snapped to its position (frag_z_snap) and a discarded fragment kept discarded past an early return (frag_kill). Functions of the MSL text and the library ABI only, with no build state, so tests import
 # them. Part of the translation chain (dmsh_chain.FILES) and of every shader's cache key (dmsh_build.py CODE_FP).
 import bisect, collections, itertools, re
 import dmsh_abi as abi, dmsh_side
@@ -495,3 +495,31 @@ def frag_z_snap(msl):
     body = f'\n    float {ZSNAP_WIDTH} = fwidth(gl_FragCoord.z);' + '\n'.join(lines)   # in uniform control flow, before anything the body does
     msl = msl[:first] + body + msl[end - 1:]
     return msl.replace('using namespace metal;\n', 'using namespace metal;\n\n' + ZSNAP, 1), n
+
+# A discarded fragment runs to main0's final return. Maxwell's and Ampere's KILL ends the thread, and NVIDIA's compiler often follows it with an exit of its own on the same predicate
+# (@P KILL, then @P zeroes the outputs and EXITs), which the translator keeps as a second test and an early return. Metal's discard_fragment() does not end the thread (the fragment goes on as
+# a helper), so the discarded fragment took that return, and Apple's GPU wrote what it returned at some pixels: where every fragment of a 2x2 quad was discarded, under a pipeline that tests
+# and writes depth and stencil (Mario Tennis Fever's Donkey Kong fur, shells drawn ten times over: black dots of the zeros along the strands; macOS 27.0.1, Apple M4 Max). A discarded fragment
+# that runs on to the function's last return is dropped there, and that path is the one every quad takes. So each discard in main0's body sets dm_killed, and an early return returns only
+# while it is false; its last return stays as it was. A discarded fragment then runs the code a live one would, as a helper, as it did before the early return. Discards in another function of
+# the source (a Switch subroutine) are left alone. Tests: dm/gfx/tests/test_dmsh_kill.py
+KILL_FLAG = 'dm_killed'
+def frag_kill(msl):
+    """→ (msl with each discard_fragment() in main0's body also setting dm_killed, and each of its returns but the last taken only while dm_killed is false, the number of returns guarded).
+    main0's body is dm_body_main0's when it has one (dmsh_side.shared_body)"""
+    if 'discard_fragment()' not in msl: return msl, 0
+    shared = dmsh_side.body(msl)
+    try: e = None if shared else dmsh_side.entry(msl, 'main0')
+    except ValueError: return msl, 0
+    if shared: head, end = shared[1:]
+    elif e: head, end = e['head'], e['end']
+    else: return msl, 0
+    first = msl.find('{', head) + 1
+    body = msl[first:end - 1]
+    if 'discard_fragment()' not in body: return msl, 0
+    last = re.search(r'\n    return(?: out)?;\n$', body)   # the final return, at the body's own level (a void function may have none)
+    lead, tail = (body[:last.start()], body[last.start():]) if last else (body, '')
+    lead, n = re.subn(r'\breturn(?: out)?;', lambda m: f'{{ if (!{KILL_FLAG}) {m.group(0)} }}', lead)
+    if not n: return msl, 0
+    lead = re.sub(r'\bdiscard_fragment\(\);', f'{{ discard_fragment(); {KILL_FLAG} = true; }}', lead)
+    return msl[:first] + f'\n    bool {KILL_FLAG} = false;' + lead + tail + msl[end - 1:], n

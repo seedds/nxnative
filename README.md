@@ -114,6 +114,8 @@ A NUP without the base game also works, when its base package is empty or it has
   dlc/040074a01bf13001/0/romfs/   the DLC's title ID
 ```
 
+Any `romfs/` may be a `romfs.img` instead: a RomFS image an earlier build made (`extract/<version>/RomFS.img`, `aoc/<n>.img`), taken as it is rather than unpacked and packed again.
+
 ```
 python3 scripts/build_ipa_from_nsp.py ~/Games/DonkeyKongBananza --platform mac-app
 ```

@@ -43,6 +43,7 @@ import shader_lib   # the shader libraries as one file, read in place
 import shader_cache   # the compile cache as one file, read in place
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import pack_dump   # a folder of a game's files instead of NSPs
+import romfs_image   # the RomFS images the host reads; a dump's romfs.img is one
 import pack_nup   # a game in a NUP container instead of NSPs
 
 # ---- Settings ----
@@ -716,11 +717,34 @@ def code_modules(fam, k, dst):   # the ExeFS of a NUP package or a dump's versio
 
 def package_size(fam, k):   # (name, bytes) of a package for the survey report: an NSP file, a NUP package (its files' size), or a dump's folder (its code and RomFS: the folder of a flat dump also holds the build)
     if fam.get('nup'): return k.name, fam['nup'].tree_bytes(k.root)
-    if fam.get('dump'): return k.name, sum(tree_size(d)[1] for d in (k / 'exefs', k / 'romfs')) or tree_size(k)[1]
+    if fam.get('dump'): return k.name, tree_size(k / 'exefs')[1] + dump_romfs_size(k) or tree_size(k)[1]
     return k.name, k.stat().st_size
 
 
 MANIFEST_HEAD = '# path\tbytes\tfirst 32 bytes (hex)\n'   # nx_extract --manifest's header
+
+
+def dump_romfs_size(k):   # the bytes of a dump version's RomFS: its tree's, or its image's
+    r = pack_dump.romfs_of(k)
+    return 0 if r is None else r.stat().st_size if r.is_file() else tree_size(r)[1]
+
+
+def dump_romfs_files(roms):   # (path, size, first 32 bytes) of a dump's RomFS files, from its tree or from its image (romfs_image's index)
+    if roms.is_dir():
+        yield from pg.romfs_files(roms); return
+    with open(roms, 'rb') as f:
+        for path, (isdir, off, size) in sorted(romfs_image.read_index(roms).items()):
+            if isdir: continue
+            f.seek(off); yield '/' + path, size, f.read(min(32, size))
+
+
+def dump_romfs_copy(roms, path, o):   # one file of a dump's RomFS (path as the manifest lists it) into o: a clone from the tree, or the bytes from the image
+    if roms.is_dir(): pack_dump.clone(roms / path.lstrip('/'), o); return
+    _, off, size = romfs_image.read_index(roms)[path.lstrip('/')]
+    with open(roms, 'rb') as f, open(o, 'wb') as w:
+        f.seek(off)
+        while size > 0:
+            b = f.read(min(size, 8 << 20)); w.write(b); size -= len(b)
 
 
 def survey_dump(src, out):
@@ -728,12 +752,12 @@ def survey_dump(src, out):
     if not pack_dump.is_version(src): raise BuildError(f'{src}: no exefs/main.npdm and romfs')
     out.mkdir(parents=True)
     pack_dump.exefs(src / 'exefs', out / 'ExeFS')
-    rows = []
-    for p, size, head in pg.romfs_files(src / 'romfs'):
+    rows = []; roms = pack_dump.romfs_of(src)
+    for p, size, head in dump_romfs_files(roms):
         rows.append(f'{p}\t{size}\t{head.hex()}\n')
         if p.lower().endswith('.nro'):
             o = out / 'romfs_nro' / p.lstrip('/'); o.parent.mkdir(parents=True, exist_ok=True)
-            pack_dump.clone(src / 'romfs' / p.lstrip('/'), o)
+            dump_romfs_copy(roms, p, o)
     (out / 'romfs_manifest.tsv').write_text(MANIFEST_HEAD + ''.join(rows))
     return len(rows)
 
@@ -1301,7 +1325,7 @@ def extract_dump(ex, name, src, app):   # one version of a dump folder (src: bas
     def poll():
         try: return {'done': part.stat().st_size}
         except OSError: return None
-    PROG.stage(f'pack {name}', poll=poll, unit='B', total=tree_size(src / 'romfs')[1], est=True)
+    PROG.stage(f'pack {name}', poll=poll, unit='B', total=dump_romfs_size(src), est=True)
     try: pack_dump.pack_version(src, app, dst, say=lambda s: None)
     except pack_dump.Error as e: raise BuildError(str(e)) from e
     PROG.end(amount((dst / 'RomFS.img').stat().st_size, 'B'))

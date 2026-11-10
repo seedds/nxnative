@@ -366,7 +366,7 @@ python3 scripts/build_ipa_from_nsp.py ~/Games/MarioWonder -k ~/keys/prod.keys --
 # keep this game's build folder elsewhere (used as given, not extended with the title ID; WORK_DIR in Spyder); the IPA then defaults to the folder holding it
 python3 scripts/build_ipa_from_nsp.py ~/Games/MarioWonder -k ~/keys/prod.keys --work-dir /Volumes/Builds/MarioWonder
 
-# a folder of the game's files instead of NSPs (a dump: base/, updates/<version>/, dlc/; scripts/pack_dump.py lists the layout): no prod.keys; an update without base/ is the whole game, and exefs/ and romfs/ directly in the folder count as base/; a game with no profile is surveyed from the files and gets a provisional profile named after the folder; no icon, as a dump has no control data, unless --icon <image> (ICON) gives one
+# a folder of the game's files instead of NSPs (a dump: base/, updates/<version>/, dlc/, each romfs/ a tree or a romfs.img already packed; scripts/pack_dump.py lists the layout): no prod.keys; an update without base/ is the whole game, and exefs/ and romfs/ directly in the folder count as base/; a game with no profile is surveyed from the files and gets a provisional profile named after the folder; no icon, as a dump has no control data, unless --icon <image> (ICON) gives one
 python3 scripts/build_ipa_from_nsp.py ~/Games/DonkeyKongBananza --platform mac-app
 
 # the same game in one NUP container (https://github.com/a55uka/nup; scripts/pack_nup.py): the .nup file, or a folder that holds one; no prod.keys; a game with no profile is surveyed from the container's own files (code modules, RomFS file headers, NROs), as NSPs are by nx_extract's manifest pass.

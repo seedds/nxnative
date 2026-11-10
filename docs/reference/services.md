@@ -825,6 +825,15 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Found on:** the synthetic socket regression test, without game files.
 - **Check:** `t_net` supplies four-byte address capacities to UDP receive, socket-name lookup and TCP accept, checking the returned length and the untouched bytes beyond each capacity.
 
+### A guest socket address is BSD: `sin_len`, then the family
+
+- **Symptom:** with `DM_NET=1`, every `Bind`, `Connect` and `SendTo` fails with EAFNOSUPPORT, and the game reports a network fault: Mario Kart 8 Deluxe shows "A communication error has occurred." on entering LAN Play, after all four of its `Bind` calls fail.
+- **Cause:** Horizon's `SockAddrIn` is the BSD one, `{u8 sin_len, u8 sin_family, u16 port, u32 address, u8 zero[8]}` (Atmosphere's `socket_types.hpp`), and a game fills it as `{16, 2, …}`. The host read a u16 family at offset 0, so `{16, 2}` was 0x0210 and not AF_INET. Going back it wrote `{2, 0}`, which the game reads as length 2 and family 0, in `Accept`, `GetSockName`, `GetPeerName` and `RecvFrom`. `t_net` built its addresses the same way, so it passed.
+- **Fix:** the family is byte 1 going in, and an address goes back as `{16, 2, port, address}` (`sk_addr_ok`, `sk_guest_addr` in `hle_net.c`). The game's `sin_len` is not relied on.
+- **Found on:** [Mario Kart 8 Deluxe](../../dm/games/0100152000022000/README.md) 4.0.1 (SDK 4.4.0) in LAN Play, two instances on one Mac (Apple M5 Max, macOS 27.2), reported by CatPawPrint on PR #565 with the cause. With the family read from byte 1 the game bound UDP 30000, 40000 and 49152 and opened the LAN lobby; with the error numbers changed as well (the report's second fault), the two instances found each other's room, joined, voted and raced. That run was the reporter's build with their own two changes; no game was run on this one.
+- **Check:** `t_net` sends `{16, 2, …}` to `Bind`, `Connect` and `SendTo` and expects `{16, 2, …}` with the right port and address from `GetSockName`, `GetPeerName`, `RecvFrom` and `Accept`, at full and at four-byte capacity; an address with family byte 0 is refused. Without the fix its first `Bind` fails.
+- **Open:** a room outside the game's own /24 is not listed. `nifm` reports the host's real address with a 255.255.255.0 mask (`dm_net_ipconfig`), and addresses reach the game untranslated, so two peers in different subnets, as on a tailnet, receive each other's search replies (`DM_NET_PEERS`) and the game ignores them (the same report: 1361-byte replies on UDP 30000 arrived, no room appeared; reporting one shared virtual subnet to both and translating addresses made it appear). Not addressed here. A run between two devices is also open.
+
 ## Settings, languages and fonts
 
 ### Language codes

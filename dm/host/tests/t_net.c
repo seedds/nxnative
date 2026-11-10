@@ -39,9 +39,9 @@ static void *hook(const char *name) {
     CHECK(count == 1 && fn, name);
     return fn;
 }
-static void guest_addr(void *g, uint32_t ip, uint16_t port) {   // Horizon SockAddrIn: family 2, port big-endian, address
+static void guest_addr(void *g, uint32_t ip, uint16_t port) {   // Horizon SockAddrIn as a game fills it: sin_len 16, family 2, port big-endian, address
     memset(g, 0, 16);
-    ((uint8_t *)g)[0] = 2;
+    ((uint8_t *)g)[0] = 16; ((uint8_t *)g)[1] = 2;
     uint16_t p = htons(port); memcpy((char *)g + 2, &p, 2);
     uint32_t a = htonl(ip); memcpy((char *)g + 4, &a, 4);
 }
@@ -71,8 +71,9 @@ int main(void) {
     uint8_t any[16]; guest_addr(any, 0, 0);
     CHECK(bind_(a, any, 16) == 0, "Bind");
     uint8_t name[16]; unsigned nl = 16;
-    CHECK(gname(a, name, &nl) == 0 && name[0] == 2 && ((name[2] << 8) | name[3]) != 0, "GetSockName");
+    CHECK(gname(a, name, &nl) == 0 && nl == 16 && name[0] == 16 && name[1] == 2 && ((name[2] << 8) | name[3]) != 0, "GetSockName returns {sin_len 16, family 2}");
     uint16_t port = (uint16_t)((name[2] << 8) | name[3]);
+    if (fails) { printf("net: %d checks, %d failed (no bound socket: the receives below would block)\n", checks, fails); return 1; }
 
     uint8_t dst[16]; guest_addr(dst, 0x7f000001, port);   // 127.0.0.1
     CHECK(sendto_(a, "hello", 5, 0, dst, 16) == 5, "SendTo loopback");
@@ -80,7 +81,9 @@ int main(void) {
     CHECK(poll_(&pf, 1, 500) == 1 && (pf.revents & 1), "Poll readable");
     uint8_t buf[64]; uint8_t from[16]; unsigned fl = 16;
     long r = recvfrom_(a, buf, sizeof buf, 0, from, &fl);
-    CHECK(r == 5 && !memcmp(buf, "hello", 5) && from[0] == 2, "RecvFrom");
+    CHECK(r == 5 && !memcmp(buf, "hello", 5), "RecvFrom");
+    CHECK(fl == 16 && from[0] == 16 && from[1] == 2 && from[2] == name[2] && from[3] == name[3] && from[4] == 127 && from[7] == 1,
+          "RecvFrom's source is {sin_len 16, family 2, the sender's port, 127.0.0.1}");
     CHECK(lasterr() == 0, "GetLastError");
 
     uint8_t short_from[16]; memset(short_from, 0xa5, sizeof short_from);
@@ -88,11 +91,14 @@ int main(void) {
     CHECK(sendto_(a, "short", 5, 0, dst, 16) == 5, "SendTo for truncated address");
     CHECK(recvfrom_(a, buf, sizeof buf, 0, short_from, &short_len) == 5 && short_len == 16,
           "RecvFrom reports the full source address length");
-    CHECK(short_from[0] == 2 && short_from[4] == 0xa5 && short_from[15] == 0xa5,
+    CHECK(short_from[0] == 16 && short_from[1] == 2 && short_from[4] == 0xa5 && short_from[15] == 0xa5,
           "RecvFrom respects the source address capacity");
     memset(short_from, 0xa5, sizeof short_from); short_len = 4;
-    CHECK(gname(a, short_from, &short_len) == 0 && short_len == 16 && short_from[0] == 2 && short_from[4] == 0xa5,
+    CHECK(gname(a, short_from, &short_len) == 0 && short_len == 16 && short_from[0] == 16 && short_from[1] == 2 && short_from[4] == 0xa5,
           "GetSockName truncates to the capacity and reports the full length");
+
+    uint8_t u16fam[16] = {2};   // a u16 family at offset 0, which no game sends: family byte 0
+    CHECK(sendto_(a, "x", 1, 0, u16fam, 16) == -1 && bind_(a, u16fam, 16) == -1, "an address whose family byte is not AF_INET is refused");
 
     int fl0 = fcntl_(a, 3, 0);   // F_GETFL
     CHECK(fl0 >= 0, "Fcntl GETFL");
@@ -157,8 +163,11 @@ int main(void) {
     CHECK(dm_sk_connect(client, dst, sizeof dst) == 0, "TCP connect");
     memset(short_from, 0xa5, sizeof short_from); short_len = 4;
     int accepted = dm_sk_accept(listener, short_from, &short_len);
-    CHECK(accepted >= 0 && short_len == 16 && short_from[0] == 2 && short_from[4] == 0xa5,
+    CHECK(accepted >= 0 && short_len == 16 && short_from[0] == 16 && short_from[1] == 2 && short_from[4] == 0xa5,
           "Accept truncates to the capacity and reports the full length");
+    uint8_t peer[16]; unsigned pl = sizeof peer;
+    CHECK(dm_sk_name(client, peer, &pl, 1) == 0 && pl == 16 && peer[0] == 16 && peer[1] == 2 && !memcmp(peer + 2, dst + 2, 6),
+          "GetPeerName returns the listener as {sin_len 16, family 2, port, address}");
     CHECK(dm_sk_close(accepted) == 0 && dm_sk_close(client) == 0 && dm_sk_close(listener) == 0, "TCP close");
 
 

@@ -122,10 +122,10 @@ static int efd_ready(sk_pollfd *p, uint64_t n, uint64_t open) {
 }
 
 // ---------- DM_NET=1: real sockets (the default stays offline: without the flag every game keeps the behaviour above) ----------
-// The guest descriptor is a host descriptor. Horizon's SockAddr has no sin_len — family u16 at 0 (AF_INET = 2, the host's
-// own number), the port big-endian at 2, the address at 4 — where the host's has sin_len first, so addresses cross through
-// an explicit conversion. PollFd and the fd_set bits match the host's layouts, and the host is BSD, so the errno numbering
-// is the guest's. DM_NET_PEERS=ip,ip,… replicates a send to a broadcast-style address (255.255.255.255, the interface's own
+// The guest descriptor is a host descriptor. Horizon's SockAddrIn is the BSD one: sin_len (u8) at 0, the family (u8,
+// AF_INET = 2) at 1, the port big-endian at 2, the address at 4 (Atmosphere's socket_types.hpp; Mario Kart 8 Deluxe sends
+// {16, 2}). Addresses still cross through an explicit conversion, which checks the family and holds an output to the
+// caller's capacity. PollFd and the fd_set bits match the host's layouts. DM_NET_PEERS=ip,ip,… replicates a send to a broadcast-style address (255.255.255.255, the interface's own
 // IP, or its /24's .255) as unicast to each peer: a Tailscale tailnet carries no L2 broadcast, so a game's LAN discovery
 // rides on this. nifm (below) reports the probed interface with a /24 subnet, which puts a game's directed-broadcast
 // address inside the same patterns.
@@ -187,15 +187,15 @@ void dm_net_ipconfig(uint32_t *ip, uint32_t *mask, uint32_t *gw, uint32_t *d0, u
     if (d1) *d1 = 0;
 }
 
-static void sk_host_addr(struct sockaddr_in *h, const void *g) {   // Horizon SockAddr → the host's (which has sin_len first)
+static void sk_host_addr(struct sockaddr_in *h, const void *g) {   // Horizon SockAddrIn → the host's; the game's sin_len is not relied on
     memset(h, 0, sizeof *h);
     h->sin_len = sizeof *h; h->sin_family = AF_INET;
     memcpy(&h->sin_port, (const char *)g + 2, 2);
     memcpy(&h->sin_addr, (const char *)g + 4, 4);
 }
-static void sk_guest_addr(void *g, unsigned *gl, const struct sockaddr_in *h) {   // and back (family 2, no sin_len)
+static void sk_guest_addr(void *g, unsigned *gl, const struct sockaddr_in *h) {   // and back: {sin_len 16, family 2, port, address}
     uint8_t o[16] = {0};
-    o[0] = 2;   // AF_INET as the guest's u16 family
+    o[0] = sizeof o; o[1] = 2;   // read as a u16 family, {2, 0} was length 2 and family 0 to the game
     memcpy(o + 2, &h->sin_port, 2);
     memcpy(o + 4, &h->sin_addr, 4);
     unsigned capacity = gl ? *gl : 0;
@@ -217,7 +217,7 @@ int dm_sk_socket(int fam, int type, int proto) {
     t_skerr = 0; return s;
 }
 static int sk_addr_ok(const void *a, unsigned n, struct sockaddr_in *h) {
-    if (n < 8 || ((const uint16_t *)a)[0] != 2) { t_skerr = 47; return 0; }
+    if (n < 8 || ((const uint8_t *)a)[1] != 2) { t_skerr = 47; return 0; }   // the family is byte 1; byte 0 is sin_len (a u16 read sees {16, 2} as 0x0210)
     sk_host_addr(h, a); return 1;
 }
 int dm_sk_bind(int s, const void *a, unsigned n) {

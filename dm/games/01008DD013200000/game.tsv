@@ -1,0 +1,42 @@
+# Game profile of Ori and the Will of the Wisps (Switch, base game v0 + update 1.2.1 = v196608). Brought up on the Mac from the provisional profile; the memory partition is profile_guess.py's
+# Format: see dm/games/README.md
+# Unity 2018.4.24f1 (IL2CPP) with Wwise, SDK 9.4.0: the shaders are Shader objects in UnityFS bundles and data_*.unity3d (read by shader_split.py through unityfs.py)
+
+# ---- Identity ----
+title_id	01008DD013200000
+program_id	01008DD013200000
+
+# ---- App ----
+# Game name: only a label for profile listings and the Mac window title; the iOS app name is the game name in the base NSP, and the bundle ID comes from the base game title ID (build_ipa.sh / NSP script)
+name	Ori and the Will of the Wisps
+ipa	OriAndTheWillOfTheWisps.ipa
+app_category	public.app-category.action-games
+
+# ---- Versions ----
+# only the merged 1.2.1 copy is extracted; the base game's own build IDs are added when needed
+build	v196608	1.2.1	main=11c33c7c2dbd3c5491841f67495c7ee8	subsdk0=8bdabfabc6964cd9e55b7079659f51f1	sdk=014256a5d58180219805a7d05fba02e4
+package	v196608
+shader_versions	v196608
+
+# ---- Files ----
+# load order as on Horizon: main, subsdk*, sdk (subsdk0 = NintendoSDK_movie)
+modules	main subsdk0 sdk
+romfs_marker	Data/data_1.unity3d
+zip_store	.bnk:.dat:.resource:.unity3d:.wmv:.metallib
+
+# ---- Memory ----
+# The NPDM declares 0 MB of system resource, so IsVirtualAddressMemoryEnabled is false and the game sets a heap: the 4 GB layout,
+# its heap region the pool − 64 MB − 4 MB of bss (counted as used memory), 3328 MB. Not yet measured in play
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x0
+# used memory for the rewritten 1.2.1 modules (more than the default 64 MB)
+mem_used	0x9d6c000
+
+# ---- Shader split (shader_split.py; Unity Shader objects, read by unityfs.py) ----
+shader_groups	/Data/=data
+shader_note	Ori and the Will of the Wisps shaders
+# the NVN depth mode the game sets (nvnDeviceSetDepthMode near = 0): the pipeline archive made offline holds the main0_z vertex entries (dm/gfx/tools/pso_offline.py)
+depth_mode	zero

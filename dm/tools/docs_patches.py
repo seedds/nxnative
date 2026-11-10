@@ -180,12 +180,12 @@ OTHER_BASE = 0x8000000   # where the dry run puts a MATCH_FRAME_STEP rule's othe
                           # within a b's reach (128 MB) of a main's sites below it and of up to six other functions above
 
 
-def frame_step_sites(fn, base=0, others=()):   # (offset, reason) of each site a FRAME_STEP function (or a MATCH_FRAME_STEP stub, its function at base) writes, whether it marks a
+def frame_step_sites(fn, base=0, others=(), found=None):   # (offset, reason) of each site a FRAME_STEP function (or a MATCH_FRAME_STEP stub, its function at base) writes, whether it marks a
     pos, puts = [0x6000000], []                    # render-scale stub, the sites in each of the rule's other functions ({label: [(offset, reason)]}) and the capabilities it declares
     def emit(w): pos[0] += 4
     at = {label: OTHER_BASE + i * 0x1000000 for i, label in enumerate(others)}
     ctx = types.SimpleNamespace(here=lambda: pos[0], emit=emit, site=lambda off, orig: None, put=lambda off, words, why: puts.append((off, why)), state=0x9000000, render_scale=0, base=base,
-                                others=at, capabilities=set(), address=lambda off: 0)
+                                others=at, found=found, capabilities=set(), address=lambda off: 0)
     fn(ctx)
     in_others = {label: sorted((off - a, why) for off, why in puts if a <= off < a + 0x1000000) for label, a in at.items()}
     return sorted((off, why) for off, why in puts if off < OTHER_BASE), ctx.render_scale, in_others, sorted(ctx.capabilities)
@@ -317,6 +317,12 @@ def page():
                 lines.append(f'- **function-matched** (`{module}` of builds without CUTS): {r["name"]}: {len(fns)} function{"s" * (len(fns) > 1)}, {ncut} cut{"s" * (ncut > 1)}')
         for module, rules in mfs.items():
             for i, r in enumerate(rules):
+                if 'calls' in r:   # anchored: its sites on the reviewed builds
+                    got = [frame_step_sites(r['stub'], found=f) for f in r['reviewed']]; n_fs += len(got[0][0]) * (i == 0); caps_a = got[0][3]
+                    lines.append(f'- **anchored frame step** (`{module}` of builds without FRAME_STEP): {r["name"]}: the one function that calls `{r["calls"]}`, its sites checked in each build\'s code; '
+                                 + 'on the reviewed builds ' + '; '.join(', '.join(f'`+{off:#x}`' for off, _ in g[0]) for g in got) + ' in it'
+                                 + (f'; launcher capabilities: {", ".join(caps_a)}' if caps_a else ''))
+                    continue
                 sites, _, in_others, fs_caps = frame_step_sites(r['stub'], others=r.get('others', {})); n_fs += (len(sites) + sum(map(len, in_others.values()))) * (i == 0)
                 lines.append(f'- **function-matched frame step** (`{module}` of builds without FRAME_STEP): {r["name"]}: a function of {r["size"]:#x} bytes, '
                              + ', '.join(f'`+{off:#x}`' for off, _ in sites) + ' in it'

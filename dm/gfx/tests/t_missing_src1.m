@@ -1,5 +1,5 @@
 // An unwritten second blend source uses zero; compare the folded descriptor with a shader that explicitly writes that zero. A written output 1 is the second source through the
-// shader's dual-source entry point (dmsh_build.py fs_dual), and without one counts as zero too.
+// shader's dual-source entry point (dmsh_entry.py fs_dual), and without one counts as zero too.
 #include "../nvn/nvn_mtl.m"
 
 void *front_metal_layer(void) { return NULL; }

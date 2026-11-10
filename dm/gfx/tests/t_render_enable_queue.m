@@ -2,8 +2,10 @@
 // Every path uses public NVN recording; the last case gates only GPU completion.
 #include "game_profile.h"
 #define nvn_game_fps nvn_game_fps_mtl_default
+#define nvn_fstep_fine nvn_fstep_fine_mtl_default
 #include "../nvn/nvn_mtl.m"
 #undef nvn_game_fps
+#undef nvn_fstep_fine
 #define g_ft g_ft_hle
 #include "../nvn/hle_nvn.c"
 #undef g_ft

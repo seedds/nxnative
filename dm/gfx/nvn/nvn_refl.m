@@ -60,7 +60,8 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
                 else FAIL("B binding %s: dynamic handle array of %s", nm.UTF8String, el.UTF8String);
                 r->n = (uint8_t)n; o->dyn = 1; o->nb++; continue;
             }
-            if ([k isEqualToString:@DMSH_KIND_CBUF]) r->kind = NVN_RB_CBUF;
+            if ([k isEqualToString:@DMSH_KIND_CBUF]) { int fx = [b[@"fixed"] intValue]; if (fx < 0 || fx > 65536 || fx % 4) FAIL("B binding %s: %d bytes read at fixed offsets", nm.UTF8String, fx);
+                r->kind = NVN_RB_CBUF; r->fixw = (uint16_t)(fx / 4); }
             else if ([k isEqualToString:@DMSH_KIND_SAMP]) r->kind = NVN_RB_SAMP;
             else if ([k isEqualToString:@DMSH_KIND_SAMP_TEX]) r->kind = NVN_RB_SAMPT;
             else if ([k isEqualToString:@DMSH_KIND_TEX]) { r->kind = NVN_RB_TEX; dummy_kind(b[@"msl_type"], &r->dtt, &r->dpf); r->f1d = [b[@"fetch1d"] boolValue]; }

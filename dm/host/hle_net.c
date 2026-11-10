@@ -205,10 +205,12 @@ HLE_FORCE("_ZN2nn6socket12SetAllocatorEPNS_14MemoryResourceE", "socket library a
 // The C library's poll (SDK 21's nnmusl, Star Fox): it needs the socket state of the initialization cut above and fails with EFAULT without it, which the game's loop takes as fatal, so it goes
 // to the host's Poll too
 SKF("poll", h_libc_Poll, void *f, unsigned long n, int t) { return dm_net_guest_errno(dm_sk_poll(f, n, t)); }
-// EventFd works offline (a host counter descriptor; a garbage collector of the game's own wakes its pollers, Ocarina of Time at startup): explicit LAN mode has no eventfd ABI, so it fails there
-HLE_FORCE("_ZN2nn6socket7EventFdEmNS0_12EventFdFlagsE", "offline: a host counter descriptor; explicit LAN mode has no eventfd transport", int, h_sk_EventFd, unsigned long v, int f) { int rv = dm_net_enabled() ? sk_fail() : efd_create(v, f); return rv; }
-HLE_FORCE("_ZN2nn6socket11EventFdReadEiPm", "reads the host counter; a transport-side descriptor fails as sockets do", int, h_sk_EventFdRead, int s, unsigned long *v) { uint64_t c = 0; int rv = efd_read(s, &c); if (!rv && v) *v = c; if (rv < 0 && dm_net_enabled()) { rv = sk_fail(); } return rv; }
-HLE_FORCE("_ZN2nn6socket12EventFdWriteEim", "adds to the host counter and wakes its pollers; a transport-side descriptor fails as sockets do", int, h_sk_EventFdWrite, int s, unsigned long v) { int rv = efd_write(s, v); if (rv < 0 && dm_net_enabled()) { rv = sk_fail(); } return rv; }
+// EventFd works in every mode. Offline it is the counter table above (a garbage collector of the game's own wakes its pollers, Ocarina of Time at startup). In a network mode it is a
+// descriptor of the transport's socket table (dm_net_eventfd, hle_net_backend.c), numbered with the sockets, so the transport's Poll and Select see both: gRPC polls its sockets and
+// its wakeup descriptor together (nn::npln). A blocking read waits as the host's other waits do: dm_guest_cond_wait_ns offline, the transport's bracketed host waits otherwise
+HLE_FORCE("_ZN2nn6socket7EventFdEmNS0_12EventFdFlagsE", "a counter descriptor: the host's table offline, the transport's socket table in a network mode", int, h_sk_EventFd, unsigned long v, int f) { int rv = dm_net_enabled() ? dm_net_eventfd(v, f) : efd_create(v, f); return (int)dm_net_guest_errno(rv); }
+HLE_FORCE("_ZN2nn6socket11EventFdReadEiPm", "reads the counter; blocks unless the descriptor never blocks", int, h_sk_EventFdRead, int s, unsigned long *v) { uint64_t c = 0; int rv = dm_net_enabled() ? dm_net_eventfd_read(s, &c) : efd_read(s, &c); if (!rv && v) *v = c; return (int)dm_net_guest_errno(rv); }
+HLE_FORCE("_ZN2nn6socket12EventFdWriteEim", "adds to the counter and wakes its pollers", int, h_sk_EventFdWrite, int s, unsigned long v) { int rv = dm_net_enabled() ? dm_net_eventfd_write(s, v) : efd_write(s, v); return (int)dm_net_guest_errno(rv); }
 // Resolver options (nn::socket::ResolverOption: its key is the first word). The host resolver has none to apply: setting one is accepted and not applied, and reading one fails,
 // as there is no value to give. Each key is logged once, so a game that depends on one shows it
 static int sk_res_option(const void *o, int key, int set) {

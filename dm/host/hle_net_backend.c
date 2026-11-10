@@ -44,7 +44,10 @@ _Static_assert(sizeof(nx_addr) == 16, "Horizon sockaddr_in");
 _Static_assert(sizeof(dm_net_addrinfo) == 48 && offsetof(dm_net_addrinfo, addr) == 24, "Horizon addrinfo");
 _Static_assert(sizeof(dm_net_addrinfo_legacy) == 48 && offsetof(dm_net_addrinfo_legacy, addr) == 32, "SDK 4 addrinfo");
 _Static_assert(sizeof(dm_net_pollfd) == 8, "Horizon pollfd");
-typedef struct { int native, used, nonblock, type; uint64_t generation; int64_t send_ms, recv_ms; } net_slot;
+// type is the socket's (1 stream, 2 datagram) or NET_EVENT for an event descriptor (dm_net_eventfd below): native is then the read end of a local socket pair, peer its
+// write end, and count / efd_flags the counter and its Horizon flags
+enum { NET_EVENT = 0x10 };
+typedef struct { int native, used, nonblock, type; uint64_t generation; int64_t send_ms, recv_ms; int peer; uint64_t count; int efd_flags; } net_slot;
 typedef struct { int fd, guest, nonblock, type; uint64_t generation; int64_t send_ms, recv_ms; } net_ref;
 static net_slot g_sockets[NET_MAX];
 static _Atomic(dm_net_dns_provider) g_dns_provider;
@@ -171,16 +174,20 @@ static void net_trace(const char *op, int fd, long result) {
 }
 // Each operation borrows a duplicate while under the lock. Close removes the guest slot first;
 // a generation check in every bounded wait prevents an old waiter touching a subsequently reused slot.
-static int net_borrow(int guest, net_ref *r) {
+// Poll and Select take any descriptor (net_borrow_any); every socket operation takes only a socket, and an event descriptor fails it with ENOTSOCK (net_borrow)
+static int net_borrow_kind(int guest, net_ref *r, int any) {
     if (!net_gate()) return -1;
     pthread_mutex_lock(&g_net_lock);
     if (guest < 0 || guest >= NET_MAX || !g_sockets[guest].used) { pthread_mutex_unlock(&g_net_lock); return net_error(9); }
+    if (!any && g_sockets[guest].type == NET_EVENT) { pthread_mutex_unlock(&g_net_lock); return net_error(88); }
     net_slot s = g_sockets[guest];
     int fd = fcntl(s.native, F_DUPFD_CLOEXEC, 0), err = errno;
     pthread_mutex_unlock(&g_net_lock);
     if (fd < 0) return net_error(net_errno(err));
     *r = (net_ref){fd, guest, s.nonblock, s.type, s.generation, s.send_ms, s.recv_ms}; return 0;
 }
+static int net_borrow(int guest, net_ref *r) { return net_borrow_kind(guest, r, 0); }
+static int net_borrow_any(int guest, net_ref *r) { return net_borrow_kind(guest, r, 1); }
 int dm_net_dup_native(int guest) {
     return dm_net_dup_native_generation(guest, NULL);
 }
@@ -202,7 +209,7 @@ static int net_register(int fd, int type, int nonblock) {
     if (setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one) < 0) { int e = errno; close(fd); return net_error(net_errno(e)); }
     pthread_mutex_lock(&g_net_lock);
     int i; for (i = 0; i < NET_MAX && g_sockets[i].used; i++) {}
-    if (i < NET_MAX) { uint64_t gen = g_sockets[i].generation + 1; g_sockets[i] = (net_slot){fd, 1, nonblock, type, gen, -1, -1}; }
+    if (i < NET_MAX) { uint64_t gen = g_sockets[i].generation + 1; g_sockets[i] = (net_slot){.native = fd, .used = 1, .nonblock = nonblock, .type = type, .generation = gen, .send_ms = -1, .recv_ms = -1, .peer = -1}; }
     pthread_mutex_unlock(&g_net_lock);
     if (i == NET_MAX) { close(fd); return net_error(24); }
     return i;
@@ -252,9 +259,10 @@ static int net_close_owned(int guest, int check_generation, uint64_t generation)
         (check_generation && g_sockets[guest].generation != generation)) {
         pthread_mutex_unlock(&g_net_lock); return net_error(9);
     }
-    int fd = g_sockets[guest].native; uint64_t old_generation = g_sockets[guest].generation; g_sockets[guest].used = 0;
+    int fd = g_sockets[guest].native, peer = g_sockets[guest].peer; uint64_t old_generation = g_sockets[guest].generation; g_sockets[guest].used = 0;
     pthread_mutex_unlock(&g_net_lock);
     net_discovery_cancel(guest, old_generation);
+    if (peer >= 0) close(peer);   // an event descriptor's write end
     shutdown(fd, SHUT_RDWR); int result = close(fd), err = errno;
     return net_host_result(result, err);
 }
@@ -264,6 +272,65 @@ int dm_net_socket_type(int guest) {
     return type;
 }
 int dm_net_close_generation(int guest, uint64_t generation) { return net_close_owned(guest, 1, generation); }
+// An event descriptor in a network mode (nn::socket::EventFd; gRPC wakes its pollers with one while they poll its sockets, nn::npln). It takes a slot of the socket table, so the
+// sockets and the event descriptors share one numbering, lowest free first, and Poll, Select, Close and the generation checks treat it as any descriptor. Its host descriptor is
+// the read end of a local socket pair that holds one byte while the counter is above zero, so a poll sees it readable exactly then; it is always writable. The flags are Horizon's:
+// bit 0 reads one at a time (a semaphore), bits 1 and 2 never block. The counter's lock is the table's.
+static int net_event(int guest, uint64_t generation, net_slot **out) {   // with g_net_lock held
+    if (guest < 0 || guest >= NET_MAX || !g_sockets[guest].used || (generation && g_sockets[guest].generation != generation)) return net_error(9);
+    if (g_sockets[guest].type != NET_EVENT) return net_error(22);
+    *out = &g_sockets[guest]; return 0;
+}
+int dm_net_eventfd(uint64_t initial, int flags) {
+    if (!net_gate()) return -1;
+    int pair[2]; if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair) < 0) return net_error(net_errno(errno));
+    if (fcntl(pair[1], F_SETFL, O_NONBLOCK) < 0 || fcntl(pair[1], F_SETFD, FD_CLOEXEC) < 0) { int e = errno; close(pair[0]); close(pair[1]); return net_error(net_errno(e)); }
+    int guest = net_register(pair[0], NET_EVENT, !!(flags & 6));   // closes pair[0] if it fails
+    if (guest < 0) { close(pair[1]); return -1; }
+    pthread_mutex_lock(&g_net_lock);
+    g_sockets[guest].peer = pair[1]; g_sockets[guest].count = initial; g_sockets[guest].efd_flags = flags;
+    if (initial) (void)send(pair[1], "", 1, 0);
+    pthread_mutex_unlock(&g_net_lock);
+    net_trace("eventfd", guest, guest); return guest;
+}
+int dm_net_eventfd_read(int guest, uint64_t *value) {
+    if (!net_gate()) return -1;
+    uint64_t generation = 0;
+    for (;;) {
+        pthread_mutex_lock(&g_net_lock);
+        net_slot *e; if (net_event(guest, generation, &e)) { pthread_mutex_unlock(&g_net_lock); return -1; }
+        generation = e->generation;
+        if (e->count) {
+            uint64_t take = e->efd_flags & 1 ? 1 : e->count; e->count -= take;
+            if (!e->count) { char byte; (void)recv(e->native, &byte, 1, 0); }
+            pthread_mutex_unlock(&g_net_lock);
+            if (value) *value = take; return 0;
+        }
+        int nonblock = e->nonblock; pthread_mutex_unlock(&g_net_lock);
+        if (nonblock) return net_error(11);
+        net_ref r; if (net_borrow_any(guest, &r)) return -1;
+        if (r.generation != generation) { close(r.fd); return net_error(9); }
+        int waited = net_wait(&r, POLLIN, -1, net_ms()); close(r.fd);
+        if (waited) return -1;   // closed while waiting: EBADF
+    }
+}
+int dm_net_eventfd_write(int guest, uint64_t value) {
+    if (!net_gate()) return -1;
+    if (value == UINT64_MAX) return net_error(22);
+    uint64_t generation = 0;
+    for (;;) {
+        pthread_mutex_lock(&g_net_lock);
+        net_slot *e; if (net_event(guest, generation, &e)) { pthread_mutex_unlock(&g_net_lock); return -1; }
+        generation = e->generation;
+        if (value <= UINT64_MAX - 1 - e->count) {   // the counter's largest value is UINT64_MAX - 1
+            if (!e->count && value) (void)send(e->peer, "", 1, 0);
+            e->count += value; pthread_mutex_unlock(&g_net_lock); return 0;
+        }
+        int nonblock = e->nonblock; pthread_mutex_unlock(&g_net_lock);
+        if (nonblock) return net_error(11);
+        dm_guest_host_wait_begin(); (void)poll(NULL, 0, NET_SLICE_MS); dm_guest_host_wait_end();   // a full counter waits for a read
+    }
+}
 void dm_net_finalize(void) { net_resolver_finalize(); for (int i = 0; i < NET_MAX; i++) { pthread_mutex_lock(&g_net_lock); int used = g_sockets[i].used; pthread_mutex_unlock(&g_net_lock); if (used) net_close_owned(i, 0, 0); } }
 int dm_net_bind(int guest, const void *addr, unsigned len) {
     if (!net_gate()) return -1;
@@ -512,8 +579,8 @@ int dm_net_poll(void *fds, uint64_t count, int timeout_ms) {
     for (uint64_t i = 0; i < count; i++) {
         refs[i].fd = host[i].fd = -1; guest[i].revents = 0;
         if (guest[i].fd < 0) continue;
-        if ((uint16_t)guest[i].events & ~0x1ffu) { net_error(22); goto done; }
-        if (net_borrow(guest[i].fd, &refs[i])) { if (t_net_errno != 9) goto done; guest[i].revents = 32; invalid = 1; }
+        if ((uint16_t)guest[i].events & (uint16_t)~0x1ffu) { net_error(22); goto done; }
+        if (net_borrow_any(guest[i].fd, &refs[i])) { if (t_net_errno != 9) goto done; guest[i].revents = 32; invalid = 1; }
         else { host[i].fd = refs[i].fd; host[i].events = net_poll_events((uint16_t)guest[i].events); }
     }
     uint64_t start = net_ms();

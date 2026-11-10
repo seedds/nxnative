@@ -187,6 +187,41 @@ static void udp(void) {
 }
 typedef struct { int socket; int result; int error; } blocked_call;
 static void *blocked_recv(void *opaque) { blocked_call *c = opaque; char byte; c->result = (int)RECV(c->socket, &byte, 1, 0, NULL, NULL); c->error = dm_net_errno(); return NULL; }
+typedef int (*fn_efd)(unsigned long, int);
+typedef int (*fn_efd_read)(int, unsigned long *);
+typedef int (*fn_efd_write)(int, unsigned long);
+#define EFD GET(fn_efd, "_ZN2nn6socket7EventFdEmNS0_12EventFdFlagsE")
+#define EFD_READ GET(fn_efd_read, "_ZN2nn6socket11EventFdReadEiPm")
+#define EFD_WRITE GET(fn_efd_write, "_ZN2nn6socket12EventFdWriteEim")
+static void *blocked_efd_read(void *opaque) { blocked_call *c = opaque; unsigned long v = 0; c->result = EFD_READ(c->socket, &v) == 0 ? (int)v : -1; c->error = dm_net_errno(); return NULL; }
+// A network mode's event descriptors are slots of the transport's socket table (dm_net_eventfd): one numbering, and Poll and Select see sockets and event descriptors together
+static void eventfd_net(void) {
+    int udp = SOCKET(2, 2, 17), efd = EFD(0, 6);
+    CHECK(udp >= 0 && efd >= 0 && efd != udp && efd < 1024, "a network-mode event descriptor takes a number of the socket table");
+    dm_net_pollfd p[2] = {{udp, 1, 0}, {efd, 1 | 4, 0}};
+    CHECK(POLL(p, 2, 0) == 1 && !p[0].revents && p[1].revents == 4, "an unsignaled event descriptor is writable, not readable, beside a quiet socket");
+    unsigned long v = 0;
+    CHECK(EFD_READ(efd, &v) < 0 && dm_net_errno() == 11, "a nonblocking read of a zero counter is EAGAIN");
+    guest_errno = 0; CHECK(EFD_READ(efd, &v) < 0 && guest_errno == 11, "a failed event read sets the game's own errno too (gRPC checks errno for EAGAIN after its wakeup read)");
+    CHECK(EFD_WRITE(efd, 2) == 0 && EFD_WRITE(efd, 3) == 0, "writes add to the counter");
+    p[0].revents = p[1].revents = 0;
+    CHECK(POLL(p, 2, 1000) == 1 && (p[1].revents & 1) && !p[0].revents, "a written counter wakes Poll, the quiet socket stays quiet");
+    uint64_t read[16] = {0}; read[efd >> 6] |= 1ull << (efd & 63); read[udp >> 6] |= 1ull << (udp & 63); int64_t tv[2] = {0, 0}; int top = (efd > udp ? efd : udp) + 1;
+    CHECK(SELECT(top, read, NULL, NULL, tv) == 1 && (read[efd >> 6] >> (efd & 63) & 1) && !(read[udp >> 6] >> (udp & 63) & 1), "Select sees the event descriptor beside the socket");
+    CHECK(EFD_READ(efd, &v) == 0 && v == 5, "a counter read takes the whole count");
+    p[1].revents = 0; CHECK(POLL(&p[1], 1, 0) == 1 && !(p[1].revents & 1), "a drained counter is no longer readable");
+    CHECK(SEND(efd, "x", 1, 0, NULL, 0) < 0 && dm_net_errno() == 88, "a socket operation on an event descriptor fails with ENOTSOCK");
+    CHECK(CLOSE(efd) == 0 && EFD_WRITE(efd, 1) < 0 && dm_net_errno() == 9, "close frees the event descriptor");
+    int sem = EFD(2, 1);
+    CHECK(sem >= 0 && EFD_READ(sem, &v) == 0 && v == 1 && EFD_READ(sem, &v) == 0 && v == 1, "a semaphore descriptor reads one at a time");
+    blocked_call call = {.socket = sem}; pthread_t t; CHECK(pthread_create(&t, NULL, blocked_efd_read, &call) == 0, "start a blocked event read");
+    dm_guest_sleep_ns(30000000); CHECK(EFD_WRITE(sem, 1) == 0, "write while a reader waits");
+    CHECK(pthread_join(t, NULL) == 0 && call.result == 1, "the blocked read wakes with the written count");
+    call = (blocked_call){.socket = sem}; CHECK(pthread_create(&t, NULL, blocked_efd_read, &call) == 0, "start a second blocked event read");
+    dm_guest_sleep_ns(30000000); CHECK(CLOSE(sem) == 0, "close while a reader waits");
+    CHECK(pthread_join(t, NULL) == 0 && call.result < 0 && call.error == 9, "the reader of a closed event descriptor fails with EBADF");
+    CHECK(CLOSE(udp) == 0, "the socket beside them closes");
+}
 static void concurrency(void) {
     int guest = SOCKET(2, 2, 17); address a = addr(htonl(0x7f000001), 0); CHECK(BIND(guest, &a, 16) == 0, "blocking socket bound");
     blocked_call call = {.socket = guest}; pthread_t t; CHECK(pthread_create(&t, NULL, blocked_recv, &call) == 0, "start blocked guest recv");
@@ -301,7 +336,7 @@ static void discovery_peer(void) {
 }
 int main(int argc, char **argv) {
     struct sigaction sa = {.sa_handler = sigpipe}; sigemptyset(&sa.sa_mask); sigaction(SIGPIPE, &sa, NULL);
-    offline(); nifm(); udp(); concurrency(); tcp(); errors_and_resolver(); discovery_peer();
+    offline(); nifm(); udp(); eventfd_net(); concurrency(); tcp(); errors_and_resolver(); discovery_peer();
     if (argc == 2 && !strcmp(argv[1], "--no-broadcast")) puts("broadcast test skipped explicitly (requires local-network permission for this test executable)"); else broadcast();
     GET(fn_vvoid, "_ZN2nn6socket8FinalizeEv")();
     CHECK(atomic_load(&waits) > 0 && atomic_load(&wait_balance) == 0, "all host waits yield and restore guest execution");

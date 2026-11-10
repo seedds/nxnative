@@ -924,6 +924,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Check:** `t_net_eventfd` (`make -C dm/host/tests GAME=<id> run`).
 - **Found on:** Minecraft (Bedrock Edition, 1.21.120).
 
+### `EventFd` in a network mode shares the socket numbering
+
+- **Symptom:** with `DM_NETWORK` set to a network mode, a game that uses gRPC (`nn::npln`) aborts in `grpc_init` as it does offline without event descriptors, or its poller never wakes while it polls its sockets.
+- **Cause:** a network mode sends sockets to the transport (`hle_net_backend.c`), which numbers them from 0 in its own table, while the host's event descriptors had a second table, also from 0. In a network mode `EventFd` failed, so gRPC had no wakeup descriptor, and if it had made one, its number could have been a socket's: `Poll` goes to the transport, which knew nothing of it.
+- **Fix:** in a network mode an event descriptor is a slot of the transport's socket table (`dm_net_eventfd`): one numbering for both, lowest free first, and `Poll`, `Select`, `Close` and the generation checks treat it as any descriptor. Its host descriptor is the read end of a local socket pair that holds one byte while the counter is above zero, so a poll sees it readable exactly then. Socket operations on it fail with ENOTSOCK. Offline the counter table above is unchanged.
+- **Check:** `t_net` (`make -C dm/host/tests GAME=<id> run`): an event descriptor and a UDP socket in one `Poll` and one `Select`, the semaphore and nonblocking flags, a read blocked across a write, close and reuse.
+- **Found on:** planned for Super Mario Bros. Wonder online (`nn::npln`); no game has run this path yet.
+
 ### The local user's profile image
 
 - **Symptom:** `Break#1 reason=0 Result=0` right after the first save is created, then exit 42; the stack has `nn::diag::detail::OnAssertionFailure` under `nn::image::JpegDecoder::Decode` (`sdk+0x394e4`), called from the game (Burnout Paradise Remastered, SDK 9.3).

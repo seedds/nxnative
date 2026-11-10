@@ -432,6 +432,14 @@
 - **Fix:** `nx_extract --html` (`dm/tools/nx_extract/Program.cs`) reads the NCA's header: a data section with a relocation table (`IsPatchSection`) is a patch, read over the base game's Manual NCAs, and any other is read alone, once, so damage in it is reported as damage. The header does not say which base NCA a patch is over (HtmlDocument and LegalInformation are both Manual), so `Try` reads over each in turn and undoes a read that adds files that fail the hash check (it deletes the folder and takes the entries off the list). A patch that reads over none is reported with `[RED] an HtmlDocument NCA of the update patches none of the base game's`, and the log names each patched read (`html<n>: a patch of the base game's NCA`).
 - **Found on:** [Super Smash Bros. Ultimate](../../dm/games/01006A800016E000/README.md#found-on-this-game) update 13.0.5 (`v2031616`) ([PR #1215](https://github.com/seedds/nxnative/pull/1215)): 1,641 of the NCA's files failed alone; read through the base, 2,798 files (122.2 MB) and none damaged, and the game packed and played a battle on the Mac at 60 fps. Balatro's update has a full Manual NCA: it is read alone, as before. `IsPatchSection` checked on Balatro's update: true on the Program NCA's RomFS, false on its ExeFS, its Manual NCA and every base section.
 
+### A reused Mac app reports an earlier source commit
+
+- **Symptom:** packing after a checkout-only change reports `reused (inputs unchanged)`, but `Info.plist` still names the earlier `DMCommit`; build-provenance checks reject the app.
+- **Cause:** `pack_app.py` included selected runtime files, options and tools in its reuse key, but not the checkout identity it writes into the bundle. Identical runtime files can belong to different commits, or to clean, dirty and non-Git source states.
+- **Fix:** read source identity once, include it in the reuse key and use that same snapshot for `DMCommit`. An unchanged identity still reuses the complete app. A changed identity repacks and signs through the existing atomic replacement path. This does not prove that the source tree stayed unchanged throughout packaging.
+- **Check:** `PackReuse.test_source_identity_invalidates_reuse_and_matches_metadata` calls the real pack entry point with synthetic files and fake external compiler/signing tools. Changed commit, dirty state and missing Git provenance must repack with matching metadata; each unchanged state must reuse without compiling or signing. The old key fails this regression.
+- **Found on:** local [Ocarina of Time](../../dm/games/0400486024DEC000/README.md) candidate packaging after a documentation-only commit. No game-data or rendering change is needed to reproduce it.
+
 ## Sparse base games
 
 ### The survey's build ID lookup stops on the base game alone with a hash error

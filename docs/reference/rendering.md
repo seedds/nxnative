@@ -1693,3 +1693,12 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 - **Fix:** the present reports the shape of the frame it draws ([the layer's](#a-crop-only-picks-texels-the-picture-has-the-layers-shape)) whenever its width / height changes (`nvn_mtl.m` `present_now` → `front.h` `front_picture_shape`; every graphics API presents there). The iOS front end lays the game's view out in that shape (`DmLayout.h` takes it as a parameter: the overlay, the split, Fill and the TV alike), so a 1.43:1 picture fills a 1.43:1 screen in Fit and touches are normalized on the picture as drawn; the Mac maps the mouse on the picture's own rectangle. A 16:9 game reports 16:9 and keeps its layout, and a size change of the same shape (1280x720 handheld, 1920x1080 docked) is not reported.
 - **Check:** the [Duo harness](../../dm/ios/tests/duo/README.md) tests the taller picture in Fit, in Fill and on a wider screen, and the production root view following a reported shape and returning to 16:9. Not yet run on a device.
 - **Found on:** [Breath of the Wild](../../dm/games/01007EF00011E000/README.md#screen-shape-dm_screen_aspect-current) and [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md#screen-shape-dm_screen_aspect-current) with `DM_SCREEN_ASPECT=1.43`.
+
+
+### Independent buffer dispatches serialize inside the copy encoder
+
+- **Symptom:** buffer-only compute dispatches serialize even when their complete read/write ranges are disjoint.
+- **Cause:** the shared copy/compute encoder treats every dispatch as an unbounded write.
+- **Fix:** opt-in `DM_NVN_CS_RANGES=1` tracks resolved uniform/storage-buffer ranges and preserves RAW, WAR and WAW dependencies with copies and dispatches. Unknown bindings, indirect dispatch, image access, sparse aliases, unresolved dummy-buffer bindings and capacity exhaustion retain conservative ordering. `ab` uses the existing A/B phases.
+- **Check:** `check_t_cs_ranges` passes 6,986 checks in each encoding mode under Metal validation on upstream `e3ad8255`. Historical game measurements predate this extraction; no new full gameplay regression is claimed.
+- **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md#bounded-compute-ordering-experimental).

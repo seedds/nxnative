@@ -13502,6 +13502,77 @@ static id<MTL4ComputeCommandEncoder> dispatch_enc(void) {
     args_dirty_all();
     return e;
 }
+// Buffer-only dispatches can share the copy encoder without a barrier when
+// their complete guest-memory access sets are disjoint. Any unbounded access,
+// sparse alias, image/texture binding or indirect dispatch keeps full ordering.
+static int cs_range_add(csh_rng *ranges, int *count, uint64_t address, uint64_t size) {
+    if (!address || !size || size > UINT64_MAX - address || *count == BW_MAX
+        || nvn_sparse_alias(address, address + size)) return 0;
+    // An unresolved binding uses shared dummy storage in encode_args; two
+    // distinct guest addresses would then alias. Keep full ordering instead.
+    void *buffer; uint64_t offset;
+    if (!mtl_addr(address, size, &buffer, &offset)) return 0;
+    ranges[(*count)++] = (csh_rng){address, address + size};
+    return 1;
+}
+static int cs_buffer_ranges(NvShader *cs, const p_dispatch *dp, csh_rng *reads, int *nr, csh_rng *writes, int *nw) {
+    if (!cs || cs->builtin || dp->ind || cs->rf.tg_spill) return 0;
+    uint32_t seen_u = 0, seen_s = 0;
+    for (int i = 0; i < cs->rf.nb; i++) {
+        const nvn_rbind *binding = &cs->rf.b[i]; unsigned reg = binding->reg;
+        switch (binding->kind) {
+            case NVN_RB_CBUF: case NVN_RB_UBOP:
+                if (reg >= 16) return 0;
+                if (seen_u & (1u << reg)) break;
+                seen_u |= 1u << reg;
+                if (!cs_range_add(reads, nr, S.ubo[5][reg].addr, S.ubo[5][reg].size)) return 0;
+                break;
+            case NVN_RB_SBUFP:
+                if (reg >= 16) return 0;
+                // Always include reads; a read_write declaration does not prove
+                // a pure store. Repeated declarations retain the union of writes.
+                if (!(seen_s & (1u << reg))) {
+                    seen_s |= 1u << reg;
+                    if (!cs_range_add(reads, nr, S.ssbo[5][reg].addr, S.ssbo[5][reg].size)) return 0;
+                }
+                if (binding->rw && !(cs->sb_ro & (1u << reg))
+                    && !cs_range_add(writes, nw, S.ssbo[5][reg].addr, S.ssbo[5][reg].size)) return 0;
+                break;
+            case NVN_RB_SUPPORT: case NVN_RB_C1: case NVN_RB_DRV0: case NVN_RB_DRV2:
+                break; // immutable or per-dispatch host-owned argument storage
+            default: return 0;
+        }
+    }
+    return 1;
+}
+static id<MTL4ComputeCommandEncoder> dispatch_buffer_enc(NvShader *cs, const p_dispatch *dp) {
+    static int mode = -1;
+    if (mode < 0) mode = sw_mode("DM_NVN_CS_RANGES", 0);
+    if (!sw_on(mode)) return dispatch_enc();
+    csh_rng reads[BW_MAX], writes[BW_MAX]; int nr = 0, nw = 0;
+    static uint64_t considered, eligible, skipped, reported_frame;
+    considered++;
+    if (!cs_buffer_ranges(cs, dp, reads, &nr, writes, &nw)) return dispatch_enc();
+    eligible++;
+    g_blit_alias = 1;
+    id<MTL4ComputeCommandEncoder> encoder = blit_open(); g_gp_disp++;
+    int conflict = g_bw_n + nw > BW_MAX || g_br_n + nr > BW_MAX;
+    for (int i = 0; i < nr && !conflict; i++) conflict = bw_hit(reads[i].lo, reads[i].hi);
+    for (int i = 0; i < nw && !conflict; i++) conflict = bw_hit(writes[i].lo, writes[i].hi) || br_hit(writes[i].lo, writes[i].hi);
+    if (g_blit_ops && conflict) blit_barrier();
+    else if (g_blit_ops) skipped++;
+    for (int i = 0; i < nr; i++) { g_br_lo[g_br_n] = reads[i].lo; g_br_hi[g_br_n++] = reads[i].hi; }
+    for (int i = 0; i < nw; i++) { g_bw_lo[g_bw_n] = writes[i].lo; g_bw_hi[g_bw_n++] = writes[i].hi; }
+    g_blit_ops++;
+    if (!g_blit_ct) { [encoder setArgumentTable:g_ct]; g_blit_ct = 1; }
+    args_dirty_all();
+    uint64_t frame = atomic_load(&g_cur_frame);
+    if (frame && frame % 600 == 0 && frame != reported_frame) {
+        reported_frame = frame;
+        MLOG("compute range ordering: %llu considered, %llu bounded, %llu independent barriers skipped", (unsigned long long)considered, (unsigned long long)eligible, (unsigned long long)skipped);
+    }
+    return encoder;
+}
 static void dispatch(const p_dispatch *dp) {
     zskip_clear();
     g_wr_epoch++; g_mdx_epoch++;
@@ -13570,7 +13641,7 @@ static void dispatch(const p_dispatch *dp) {
     // or before dispatch_enc's copy-to-dispatch barrier: otherwise the upgrade opens a second encoder, or its copy races the dispatch (#1743).
     encode_args(nil, cs, 5, 0);
     if (own && g_blit) { enc_b_end(g_blit); g_blit = nil; }
-    id<MTLComputeCommandEncoder> ce = own ? pg_compute() : (id<MTLComputeCommandEncoder>)dispatch_enc();
+    id<MTLComputeCommandEncoder> ce = own ? pg_compute() : (id<MTLComputeCommandEncoder>)dispatch_buffer_enc(cs, dp);
     enc_c_pso(ce, ps);
     if (tg_groups) {
         __strong id<MTLBuffer> tb = nil; size_t to = arena_alloc((size_t)(tg_groups * cs->rf.tg_spill), &tb);

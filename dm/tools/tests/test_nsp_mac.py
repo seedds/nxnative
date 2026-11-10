@@ -288,7 +288,7 @@ class Nvn(Base):
         self.cas(LIVE, OLD); s = self.store(); s.put('index/k.json', b'{}', 0); s.put('metallib/mac/m.metallib', b'l' * 1000, 0)
         build(False)
         self.assertEqual(self.entries(), {LIVE}); self.assertEqual(self.store().names('index/'), {'index/k.json'})   # not slim: only the unlisted entry goes
-        img = self.sh / 'cache' / f'b-{CHAIN}.img'; before = {n: p.read_bytes() for n, p in nsp.shader_lib.romfs.Path(img).iterdir_items()} if False else img.read_bytes()
+        img = self.sh / 'cache' / f'b-{CHAIN}.img'; before = img.read_bytes()
         said = []
         with mock.patch.object(nsp, 'say', said.append): build(True)
         self.assertEqual(self.ran, []); self.assertEqual(self.entries(), set()); self.assertEqual(self.store().names('index/'), set())

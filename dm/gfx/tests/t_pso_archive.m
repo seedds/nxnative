@@ -398,8 +398,8 @@ static void concurrent_bases(int fail) {
         }
     });
     EXPECT("concurrent: first compiler entered", 0, dispatch_semaphore_wait(gate->entered, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)));
-    // An unrelated key must complete while the first remains blocked.
-    MTLRenderPipelineDescriptor *other = [ds[0] copy]; other.vertexDescriptor = [other.vertexDescriptor copy]; other.vertexDescriptor.layouts[16].stride = 1024;
+    // An unrelated key must complete while the first remains blocked: one with another vertex function (builds that share one are made one at a time, DM_PSO_VS_SERIAL)
+    MTLRenderPipelineDescriptor *other = [ds[0] copy]; other.vertexDescriptor = [other.vertexDescriptor copy]; other.vertexDescriptor.layouts[16].stride = 1024; other.vertexFunction = test_fn(g_lib, @"vs0", 1);
     dispatch_group_t separate = dispatch_group_create();
     dispatch_group_async(separate, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ @autoreleasepool { pso_build(other, NULL); } });
     EXPECT("concurrent: unrelated base progresses", 0, dispatch_group_wait(separate, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)));

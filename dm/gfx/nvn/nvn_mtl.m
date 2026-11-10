@@ -8726,6 +8726,66 @@ static MTL4RenderPipelineDescriptor *spec_desc(id base, _Atomic int *own) {   //
 static _Atomic int g_spec_own;
 // The pipeline pso_desc describes: its base (built, from the archive or already made), then specialized with its colour state. Called on several threads.
 // compile 0: nil on an archive miss (*e untouched), with no MTLDevice fallback. Prewarm compaction may still refresh a found base for serialization.
+// Apple's G16X driver keeps one entry per vertex program variant. The thread that creates a variant compiles it, or reads it from an archive, and a completion block stores the result and leaves the
+// entry's dispatch group. With several threads building pipelines of one vertex function at once (a prewarm worker's whole pipeline beside others' bases, a compacting start's recaptures) that
+// block has run for an entry already left or emptied: SIGTRAP "unbalanced call to dispatch_group_leave" or SIGSEGV at 0x30 in createVertexProgramVariant's block, in three Ocarina of Time runs.
+// Why the driver does this is not known; builds that share a vertex function are made one at a time (DM_PSO_VS_SERIAL, on unless 0), through one of VS_STRIPES locks picked by the function's
+// library name and entry name (lib_tag, as the archive's key names them, so one file loaded twice is one function; a specialized function by the function it specializes). Builds of other vertex
+// functions stay parallel. The waits are bounded, so a guard can only slow a build, never stop one: a lookup that must not compile (compile 0) never waits, a game thread (user-interactive QoS)
+// waits 50 ms at most and then goes on unguarded, and any other thread waits VS_WAIT_NS; one that waited that long marks the stripe stalled (a [RED] line) and its builds go on unguarded until
+// the holder returns. A specialization of a base compiles no vertex function and a mesh pipeline has none: not guarded
+enum { VS_STRIPES = 1024 };
+static uint64_t g_vs_wait_ns = 20ull * 1000000000ull, g_vs_game_ns = 50ull * 1000000;
+static dispatch_semaphore_t g_vs_sem[VS_STRIPES]; static _Atomic int g_vs_stalled[VS_STRIPES], g_vs_in[VS_STRIPES];
+static _Atomic uint64_t g_vs_guarded, g_vs_waited, g_vs_skipped, g_vs_unguarded, g_vs_stalls, g_vs_max_in;
+typedef struct { int idx; int held; } vs_guard_t;   // idx < 0: not guarded; held: the stripe is ours to leave
+static int vs_serial(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_PSO_VS_SERIAL"); v = !(e && !strcmp(e, "0")); if (!v) MLOG("pipelines that share a vertex function are built in parallel (DM_PSO_VS_SERIAL=0)"); } return v; }
+static uint64_t vs_fnv(uint64_t h, const char *s) { for (; s && *s; s++) h = (h ^ (uint8_t)*s) * 1099511628211ull; return (h ^ 0xff) * 1099511628211ull; }
+// The stripe of a pipeline's vertex function, -1 for none (a descriptor with no vertex function, or one of another kind)
+static int vs_stripe_of(MTL4PipelineDescriptor *d) {
+    if (![d isKindOfClass:MTL4RenderPipelineDescriptor.class]) return -1;
+    MTL4FunctionDescriptor *f = ((MTL4RenderPipelineDescriptor *)d).vertexFunctionDescriptor;
+    while ([f isKindOfClass:MTL4SpecializedFunctionDescriptor.class]) f = ((MTL4SpecializedFunctionDescriptor *)f).functionDescriptor;
+    if (![f isKindOfClass:MTL4LibraryFunctionDescriptor.class]) return -1;
+    MTL4LibraryFunctionDescriptor *l = (MTL4LibraryFunctionDescriptor *)f;
+    NSString *lib = l.library ? objc_getAssociatedObject(l.library, &g_lib_tag) : nil;
+    uint64_t h = 14695981039346656037ull;
+    if (lib) h = vs_fnv(h, lib.UTF8String);
+    else if (l.library) { uintptr_t a = (uintptr_t)(__bridge const void *)l.library; h = (h ^ a) * 1099511628211ull; }   // an unnamed library: the object
+    else return -1;
+    h = vs_fnv(h, l.name.UTF8String);
+    return (int)((h ^ (h >> 32)) % VS_STRIPES);
+}
+// compile 0: take the stripe only if it is free. Otherwise wait as above. go 0 only for compile 0 that found the stripe busy: the caller leaves the build to the one in flight
+static vs_guard_t vs_enter(MTL4PipelineDescriptor *d, int compile, int *go) {
+    vs_guard_t g = {-1, 0}; *go = 1;
+    if (!vs_serial()) return g;
+    int i = vs_stripe_of(d); if (i < 0) return g;
+    static dispatch_once_t once; dispatch_once(&once, ^{ for (int k = 0; k < VS_STRIPES; k++) g_vs_sem[k] = dispatch_semaphore_create(1); });
+    atomic_fetch_add(&g_vs_guarded, 1);
+    if (atomic_load(&g_vs_stalled[i])) { atomic_fetch_add(&g_vs_unguarded, 1); return g; }
+    uint64_t cap = !compile ? 0 : qos_class_self() == QOS_CLASS_USER_INTERACTIVE ? g_vs_game_ns : g_vs_wait_ns;
+    if (dispatch_semaphore_wait(g_vs_sem[i], DISPATCH_TIME_NOW)) {   // busy
+        if (!compile) { atomic_fetch_add(&g_vs_skipped, 1); *go = 0; return g; }
+        atomic_fetch_add(&g_vs_waited, 1);
+        if (dispatch_semaphore_wait(g_vs_sem[i], dispatch_time(DISPATCH_TIME_NOW, (int64_t)cap))) {
+            atomic_fetch_add(&g_vs_unguarded, 1);
+            if (cap >= g_vs_wait_ns && !atomic_exchange(&g_vs_stalled[i], 1)) {
+                atomic_fetch_add(&g_vs_stalls, 1);
+                MLOG("[RED] a build of a vertex function (stripe %d) has held its stripe for %.0f s: the builds that share it go on in parallel until it returns (the driver can crash then, see DM_PSO_VS_SERIAL)", i, cap / 1e9);
+            }
+            return g;
+        }
+    }
+    int in = atomic_fetch_add(&g_vs_in[i], 1) + 1; uint64_t m = atomic_load(&g_vs_max_in); while ((uint64_t)in > m && !atomic_compare_exchange_weak(&g_vs_max_in, &m, (uint64_t)in)) {}
+    g.idx = i; g.held = 1; return g;
+}
+static void vs_leave(vs_guard_t g) {
+    if (!g.held) return;
+    atomic_fetch_sub(&g_vs_in[g.idx], 1);
+    atomic_store(&g_vs_stalled[g.idx], 0);   // the holder returned: the stripe guards again
+    dispatch_semaphore_signal(g_vs_sem[g.idx]);
+}
 static id<MTLRenderPipelineState> pso_build_ex(MTLRenderPipelineDescriptor *d, NSError **e, int compile) {
     // Do not send conflicting or non-renderable aspect formats to Metal, which can
     // abort instead of returning an NSError (also on the MTLDevice fallback).
@@ -8742,7 +8802,12 @@ static id<MTLRenderPipelineState> pso_build_ex(MTLRenderPipelineDescriptor *d, N
     // ambient occlusion draws 4 triangles and writes the array layer of each one's primitive ID: every one wrote layer 0, so 3 pixels in 4 had no sun light. A platform limit: the ID has no other source
     if (rast && g_comp4 && [d.label isEqualToString:PSO_WHOLE]) {
         MTL4RenderPipelineDescriptor *whole = pso_desc4(d, 0);
-        if (whole) { if (!compile) return nil; return [g_comp4 newRenderPipelineStateWithDescriptor:whole compilerTaskOptions:nil error:e]; }
+        if (whole) {
+            if (!compile) return nil;
+            int go; vs_guard_t vg = vs_enter(whole, 1, &go); (void)go;
+            id<MTLRenderPipelineState> wps = [g_comp4 newRenderPipelineStateWithDescriptor:whole compilerTaskOptions:nil error:e];
+            vs_leave(vg); return wps;
+        }
     }
     MTL4RenderPipelineDescriptor *b = g_comp4 ? pso_desc4(d, rast) : nil;   // with rasterization off there is no colour state to leave open: the base is the pipeline
     if (!b) { if (!compile) return nil; g_pb_legacy++; return pso_build_dev(d, e); }
@@ -8767,6 +8832,11 @@ static id<MTLRenderPipelineState> pso_build_ex(MTLRenderPipelineDescriptor *d, N
     }
     if (base) g_pb_reused++;
     else {
+        int vsgo; vs_guard_t vsg = vs_enter(b, compile, &vsgo);
+        if (!vsgo) {   // a build of this vertex function is in flight and this lookup may not compile: left to a caller that can (the loop above builds it there), nothing recorded as missing
+            os_unfair_lock_lock(&g_pbase_lock); job->ps = nil; hm_rel(nvn_hm_del(&g_pbase_pending, &bk)); dispatch_group_leave(job->done); os_unfair_lock_unlock(&g_pbase_lock);
+            return nil;
+        }
         uint64_t t0 = bp_now();
         int vd = 0; for (int i = 0; i < 31 && !vd; i++) vd = bk.va[i][0] != 0;   // a vertex layout (MTLVertexFormatInvalid is 0)
         int from_run = 0; base = known ? nil : arch_lookup(b, vd, &from_run);
@@ -8789,6 +8859,7 @@ static id<MTLRenderPipelineState> pso_build_ex(MTLRenderPipelineDescriptor *d, N
             }
         }
         if (base || compile) g_pb_base_ns += bp_now() - t0;
+        vs_leave(vsg);
         os_unfair_lock_lock(&g_pbase_lock);
         job->ps = base;
         if (base) hm_put_id(&g_pbase, &bk, base);
@@ -9055,8 +9126,10 @@ static void pre_pair(NSString *vk, NSString *fk, int zero) {
         if (g_pre_known.count && g_pre_known[[NSString stringWithFormat:@"%@\t%@", vk, fk]]) { g_pre_skipped++; g_pre_known_n++; return; }
         MTL4RenderPipelineDescriptor *m = pre_desc(vk, fk, zero);
         if (!m) { g_pre_skipped++; return; }
-        if (arch_lookup(m, 0, NULL)) { g_pre_archived++; return; }
+        int go; vs_guard_t vg = vs_enter(m, 1, &go); (void)go;
+        if (arch_lookup(m, 0, NULL)) { vs_leave(vg); g_pre_archived++; return; }
         NSError *e = nil; id ps = arch_capture(m, &e, 0, NULL);
+        vs_leave(vg);
         if (ps) g_pre_built++;
         else {
             if (g_pre_failed++ < 4) MLOG("[RED] pipeline prebuild: the base of %s + %s failed: %s", vk.UTF8String, fk.UTF8String, e.localizedDescription.UTF8String);
@@ -9114,7 +9187,7 @@ static int pso_bundle_covers(NSArray<NSArray<NSString *> *> *pairs, NSString *wa
         NSArray<NSString *> *p = cand[k * n / MIN(n, (NSUInteger)PRE_PROBE)];
         MTL4RenderPipelineDescriptor *m = pre_desc(p[0], p[1], zero);
         if (!m) continue;
-        probed++; found += [g_arch_bundle newRenderPipelineStateWithDescriptor:m error:nil] != nil;
+        probed++; int go; vs_guard_t vg = vs_enter(m, 1, &go); (void)go; found += [g_arch_bundle newRenderPipelineStateWithDescriptor:m error:nil] != nil; vs_leave(vg);
     }
     int ok = probed > 0 && found == probed;   // skipped samples give no evidence that this system can take a base from the archive
     MLOG("pipeline archive bundled with the app: %s (%d of %d probed bases found, %.1f ms)%s", ok ? "holds the bases of every shader pair" : "this system does not take its bases",

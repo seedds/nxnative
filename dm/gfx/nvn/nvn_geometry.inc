@@ -631,9 +631,9 @@ static void mtk_claim(pso_key *k, NvShader *ts, NvShader *ms, NvShader *fs, id<M
 //  - a skipped draw inside occlusion-query counting marks the counter (g_vis_forced), so the next samples-passed report is at least 1 (visible) instead of hiding the object;
 //  - the finished pipeline is published on the submit thread (mtk_async_take), so draws encoded after that use it; the draw's pipeline state (lmap / fsfn / fz) is reset on a skip
 //    as on a draw (draw_), so the next draw does not inherit it;
-//  - at most MTK_ASYNC_MAX builds run at once on their own queue; past that a draw is skipped without starting its build (a later draw starts it). A build still running after
+//  - at most mtk_async_cap() builds run at once on their own queue; past that a key waits in arrival order (g_mtk_async_fifo) and starts when a slot frees, oldest first. A build still running after
 //    g_mtk_async_slow_s gives its slot back (mtk_async_sweep: [RED], counted as abandoned), so wedged builds cannot hold the cap; if it returns later its pipeline is still published.
-//    While MTK_ASYNC_MAX abandoned builds have not returned (each holds a queue thread), no build starts and new readers' draws stay skipped ([RED] once): a build at the draw
+//    While mtk_async_cap() abandoned builds have not returned (each holds a queue thread), no build starts and new readers' draws stay skipped ([RED] once): a build at the draw
 //    could wedge the frame the same way. Writers and stages whose proof is not known yet still wait for a build at the draw (as without the switch);
 //  - logged: the first skip of a key, its skip count at each power of two, the build time and the frames its draws were skipped, and the [RED] abandon line above.
 //    DM_PSO_MESH_ASYNC_LOG=1 logs every skip.
@@ -641,7 +641,13 @@ static void mtk_claim(pso_key *k, NvShader *ts, NvShader *ms, NvShader *fs, id<M
 // Concurrency: mtk_build is what the prewarm workers already run beside the submit thread (warm_task kind 3); a mesh pipeline has no vertex function, so the AGX vertex-variant
 // guard (vs_stripe_of) has nothing to serialize; pso_desc's lazy alpha-test / logic entry points take their locks (at_fn, g_at_lock).
 // DM_PSO_MESH_ASYNC unset or anything else: the draw waits for the build (the behaviour before)
-enum { MTK_ASYNC_MAX = 2 };
+static int g_mtk_async_max;   // builds at once: DM_PSO_MESH_ASYNC_MAX, default max(2, performance cores / 2) (mtk_async_cap)
+static int mtk_async_cap(void) {
+    if (!g_mtk_async_max) { const char *e = getenv("DM_PSO_MESH_ASYNC_MAX"); int v = e ? atoi(e) : 0;
+        if (v <= 0) { int pc = 0; size_t sz = sizeof pc; if (sysctlbyname("hw.perflevel0.physicalcpu", &pc, &sz, NULL, 0) || pc <= 0) pc = 4; v = pc / 2 > 2 ? pc / 2 : 2; }
+        g_mtk_async_max = v > 16 ? 16 : v; }
+    return g_mtk_async_max;
+}
 static double g_mtk_async_slow_s = 10; static useconds_t g_mtk_async_test_delay_us;   // the tests lower the deadline and slow the builds down
 static int mtk_async_on(void) {
     static int v = -1;
@@ -797,7 +803,8 @@ static NSMutableDictionary<NSData *, MtkAsync *> *g_mtk_async;   // submit threa
 static NSMutableArray<MtkAsync *> *g_mtk_async_done; static os_unfair_lock g_mtk_async_lock = OS_UNFAIR_LOCK_INIT;   // finished builds, handed to the submit thread
 static _Atomic int g_mtk_async_ready, g_mtk_async_running, g_mtk_async_lost;   // lost: builds abandoned at the deadline that have not returned (each holds a queue thread)
 static uint64_t g_mtk_async_skips, g_mtk_async_builds, g_mtk_async_waits, g_mtk_async_abandoned;
-static NSMutableArray<MtkAsync *> *g_mtk_async_live;   // submit thread: started builds whose slot is held (for the deadline sweep)
+static NSMutableArray<MtkAsync *> *g_mtk_async_live;
+static NSMutableArray<MtkAsync *> *g_mtk_async_fifo;   // submit thread: keys skipped but not started yet, oldest first   // submit thread: started builds whose slot is held (for the deadline sweep)
 static dispatch_queue_t mtk_async_queue(void) {
     static dispatch_queue_t q; static dispatch_once_t once;
     dispatch_once(&once, ^{ q = dispatch_queue_create("dm.nvn.mesh-async", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_CONCURRENT, QOS_CLASS_USER_INITIATED, 0)); });
@@ -818,8 +825,15 @@ static void mtk_async_sweep(void) {   // submit thread: builds past the deadline
         [g_mtk_async_live removeObjectAtIndex:(NSUInteger)i];
     }
 }
+static void mtk_async_start(MtkAsync *a);
+static void mtk_async_pump(void) {   // submit thread: start the oldest waiting keys while slots are free (none while mtk_async_cap() abandoned builds hold threads)
+    while (g_mtk_async_fifo.count && atomic_load(&g_mtk_async_running) < mtk_async_cap() && atomic_load(&g_mtk_async_lost) < mtk_async_cap()) {
+        MtkAsync *a = g_mtk_async_fifo[0]; [g_mtk_async_fifo removeObjectAtIndex:0];
+        if (!a->started) mtk_async_start(a);
+    }
+}
 static void mtk_async_take(void) {   // submit thread: publish finished builds
-    mtk_async_sweep();
+    mtk_async_sweep(); mtk_async_pump();
     if (!atomic_load_explicit(&g_mtk_async_ready, memory_order_acquire)) return;
     os_unfair_lock_lock(&g_mtk_async_lock); NSArray<MtkAsync *> *done = g_mtk_async_done; g_mtk_async_done = nil; atomic_store(&g_mtk_async_ready, 0); os_unfair_lock_unlock(&g_mtk_async_lock);
     for (MtkAsync *a in done) {
@@ -864,8 +878,9 @@ static id<MTLRenderPipelineState> mtk_async_skip(const pso_key *k, NvShader *ts,
         hm_put_id(&g_pso_mtk, k, g_mtk_async_mark);
         MLOG("task / mesh pipeline async: task %s mesh %s fragment %s first skipped at frame %llu; its draws are skipped until it is built", ts ? ts->key : "-", ms->key, fs ? fs->key : "-", (unsigned long long)fr);
     }
-    if (!a->started && atomic_load(&g_mtk_async_running) < MTK_ASYNC_MAX && atomic_load(&g_mtk_async_lost) < MTK_ASYNC_MAX) mtk_async_start(a);
-    else if (!a->started && atomic_load(&g_mtk_async_lost) >= MTK_ASYNC_MAX) { static int once; if (!once++) MLOG("[RED] task / mesh pipeline async: %d builds never returned; new task / mesh pipelines are not built and their draws stay skipped until one returns", MTK_ASYNC_MAX); }
+    if (!a->started && ![g_mtk_async_fifo containsObject:a]) { if (!g_mtk_async_fifo) g_mtk_async_fifo = [NSMutableArray array]; [g_mtk_async_fifo addObject:a]; }
+    mtk_async_pump();   // oldest first: this key starts only when every key skipped before it has started
+    if (!a->started && atomic_load(&g_mtk_async_lost) >= mtk_async_cap()) { static int once; if (!once++) MLOG("[RED] task / mesh pipeline async: %d builds never returned; new task / mesh pipelines are not built and their draws stay skipped until one returns", mtk_async_cap()); }
     a->skips++; a->last_frame = fr; g_mtk_async_skips++;
     if (a->skips >= 2 && !(a->skips & (a->skips - 1)))
         MLOG("task / mesh pipeline async: mesh %s fragment %s still skipped: %llu draws over %llu frames, build %s", ms->key, fs ? fs->key : "-", (unsigned long long)a->skips,

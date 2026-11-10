@@ -84,6 +84,8 @@ static id<MTLRenderPipelineState> mtk_pso_for(NvShader *ts, NvShader *ms, NvShad
 int main(void) { @autoreleasepool {
     setenv("DM_PSO_MESH_ASYNC", "skip", 0);   // DM_PSO_MESH_ASYNC=0 from outside runs the same checks without the switch (they must fail)
     mtl_init(); NSError *error = nil;
+    CHECK(mtk_async_cap() >= 2, "the default cap is at least 2 (max(2, performance cores / 2))");
+    g_mtk_async_max = 2;   // the cap and lost-cap checks below are written for 2
     char tmpl[] = "/tmp/t_mesh_async.XXXXXX"; require(mkdtemp(tmpl) != NULL, "fixture folder made"); fixture = @(tmpl); g_msl_dir = fixture;
     source = @"#include <metal_stdlib>\nusing namespace metal;\n"
         "struct V { float4 position [[position]]; }; struct Payload { uint first; };\n"
@@ -302,18 +304,37 @@ int main(void) { @autoreleasepool {
           g_msl_dir = keep; } }
 
     // 6. the cap: three new pipelines in one submission start two builds at once (two concurrent mesh builds); the third starts once a slot is free
-    printf("cap: at most %d builds at once\n", MTK_ASYNC_MAX);
+    printf("cap: at most %d builds at once\n", mtk_async_cap());
     NvShader *cm[3]; prog_t cp[3];
     for (int i = 0; i < 3; i++) { cm[i] = shader(library, @"direct", 4, [NSString stringWithFormat:@"_cap%d", i].UTF8String); cm[i]->mesh_kind = 2; cm[i]->mesh_threads = 32; cm[i]->mesh_notask = 1; cp[i] = make_program(nil, cm[i], fs2); }
     g_mtk_async_test_delay_us = 400000; uint64_t b0 = g_mtk_async_builds;
     CHECK(!submit(&cp[0], 1, (opts){.more = {&cp[1], &cp[2]}}), "three new pipelines in one submission are all skipped");
-    CHECK(g_mtk_async_builds - b0 == 2 && atomic_load(&g_mtk_async_running) == MTK_ASYNC_MAX, "two builds run at once, the third waits for a slot");
+    CHECK(g_mtk_async_builds - b0 == 2 && atomic_load(&g_mtk_async_running) == mtk_async_cap(), "two builds run at once, the third waits for a slot");
     usleep(700000);
     submit(&cp[0], 1, (opts){.more = {&cp[1], &cp[2]}});
     CHECK(g_mtk_async_builds - b0 == 3, "the third build starts once a slot is free");
     g_mtk_async_test_delay_us = 0;
     n = 0; for (int i = 1; i <= 1000 && !n; i++) { int all = 1; for (int j = 0; j < 3; j++) all &= submit(&cp[j], 1, (opts){0}); if (all) n = i; else usleep(10000); }
     CHECK(n > 0, "all three draw once built");
+
+    // 6b. FIFO: with one slot, keys start in the order they were first skipped, whichever key is drawn when a slot frees
+    printf("fifo: oldest first\n");
+    NvShader *fq[3]; prog_t fp[3];
+    for (int i = 0; i < 3; i++) { fq[i] = shader(library, @"direct", 4, [NSString stringWithFormat:@"_fifo%d", i].UTF8String); fq[i]->mesh_kind = 2; fq[i]->mesh_threads = 32; fq[i]->mesh_notask = 1; fp[i] = make_program(nil, fq[i], fs2); }
+    g_mtk_async_max = 1; g_mtk_async_test_delay_us = 300000;
+    CHECK(!submit(&fp[0], 1, (opts){.more = {&fp[1], &fp[2]}}), "three new pipelines skipped in order A, B, C");
+    MtkAsync *fa = nil, *fb = nil, *fc = nil;
+    for (MtkAsync *a in g_mtk_async.allValues) { if (a->ms == fq[0]) fa = a; else if (a->ms == fq[1]) fb = a; else if (a->ms == fq[2]) fc = a; }
+    CHECK(fa && fb && fc && fa->started && !fb->started && !fc->started, "with one slot only A started");
+    for (int i = 0; i < 100 && atomic_load(&g_mtk_async_running); i++) usleep(10000);
+    submit(&fp[2], 1, (opts){0});   // only C is drawn when the slot frees
+    CHECK(fb->started && !fc->started, "the freed slot went to B (the oldest), not to C (the one drawn)");
+    for (int i = 0; i < 100 && atomic_load(&g_mtk_async_running); i++) usleep(10000);
+    submit(&fp[2], 1, (opts){0});
+    CHECK(fc->started, "then C");
+    g_mtk_async_test_delay_us = 0; g_mtk_async_max = 2;
+    n = 0; for (int i = 1; i <= 1000 && !n; i++) { int all = 1; for (int j = 0; j < 3; j++) all &= submit(&fp[j], 1, (opts){0}); if (all) n = i; else usleep(10000); }
+    CHECK(n > 0, "all three draw");
 
     // 7. a build past the deadline gives its slot back (a compile that does not return must not hold the cap); its late result is still used
     printf("deadline: a slow build gives its slot back\n");
@@ -329,14 +350,14 @@ int main(void) { @autoreleasepool {
     CHECK(atomic_load(&g_mtk_async_running) == 0, "the late return does not give the slot back twice");
     CHECK(atomic_load(&g_mtk_async_lost) == 0, "the late return took the abandoned build off the lost count");
 
-    // 7b. the lost cap: MTK_ASYNC_MAX builds that never return stop new builds; draws of a new pipeline are skipped, not built at the draw, until one returns
+    // 7b. the lost cap: mtk_async_cap() builds that never return stop new builds; draws of a new pipeline are skipped, not built at the draw, until one returns
     printf("lost cap\n");
     NvShader *lm2[3]; prog_t lp2[3];
     for (int i = 0; i < 3; i++) { lm2[i] = shader(library, @"direct", 4, [NSString stringWithFormat:@"_lost%d", i].UTF8String); lm2[i]->mesh_kind = 2; lm2[i]->mesh_threads = 32; lm2[i]->mesh_notask = 1; lp2[i] = make_program(nil, lm2[i], fs2); }
     g_mtk_async_test_delay_us = 1500000; uint64_t lb0 = g_mtk_async_builds;
     CHECK(!submit(&lp2[0], 1, (opts){.more = {&lp2[1]}}), "two slow pipelines are skipped");
     usleep(300000); submit(&lp2[0], 1, (opts){.more = {&lp2[1]}});
-    CHECK(atomic_load(&g_mtk_async_lost) == MTK_ASYNC_MAX && atomic_load(&g_mtk_async_running) == 0, "both are abandoned and counted as lost");
+    CHECK(atomic_load(&g_mtk_async_lost) == mtk_async_cap() && atomic_load(&g_mtk_async_running) == 0, "both are abandoned and counted as lost");
     uint64_t lw0 = g_mtk_async_waits;
     CHECK(!submit(&lp2[2], 1, (opts){0}), "at the lost cap a new pipeline's draw is skipped (not built at the draw)");
     CHECK(g_mtk_async_builds - lb0 == 2 && g_mtk_async_waits == lw0, "no build started for it, and nothing waited");
@@ -351,7 +372,7 @@ int main(void) { @autoreleasepool {
     printf("teardown with a build in flight\n");
     CHECK(!submit(&at_end, 1, (opts){0}), "a last new pipeline is skipped");
     printf("  builds still running at teardown: %d\n", atomic_load(&g_mtk_async_running));
-    CHECK(atomic_load(&g_mtk_async_running) <= MTK_ASYNC_MAX, "no more than MTK_ASYNC_MAX builds run at once");
+    CHECK(atomic_load(&g_mtk_async_running) <= mtk_async_cap(), "no more than mtk_async_cap() builds run at once");
 
     P(nvnQueueFinish)(&queue); mtl_drain();
     P(nvnCommandBufferFinalize)(&command); mtl_tex_release(&color); mtl_tex_release(&depth);

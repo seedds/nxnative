@@ -20,7 +20,7 @@
 #        shader_lib.py cat <lib> <name>                one file's bytes on standard output
 #        shader_lib.py subset <lib> <out.img> [--skip-suffix S]...  a new image without .metal sources and build reports, as an app carries it
 # <lib> is the path b-<chain>, with or without .img.
-import argparse, builtins, os, shutil, sys
+import argparse, builtins, hashlib, io, os, shutil, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import romfs
@@ -71,26 +71,47 @@ def _names(folder):
     return out
 
 
+def _digest(f):
+    h, size = hashlib.blake2b(digest_size=32), 0
+    while b := f.read(8 << 20): h.update(b); size += len(b)
+    return size, h.digest()
+
+
+def _same(out, offset, source, size):
+    out.seek(offset); source.seek(0)
+    while size:
+        n = min(size, 8 << 20)
+        if out.read(n) != source.read(n): return False
+        size -= n
+    return source.read(1) == b''   # a path can grow between hashing and comparison, including an empty file
+
+
 def write(files, dst):
     """files: {name: path to read (a romfs path may name a file inside an image), the bytes, or a function returning them (read only when its file is written: dmsh_build.py's outputs staged in the
-    shader cache, so that no library is held in memory whole)} → the image dst, by way of dst.part. A stopped write leaves only the .part, and an image is whole or absent"""
+    shader cache, so that no library is held in memory whole)} → the image dst, by way of dst.part. Identical files share a range, with every name preserved. Hashes select candidates;
+    bytes must match before a range is reused. Read paths a chunk at a time, twice for a new payload, so duplicates never take temporary disk space. A stopped write leaves only the .part,
+    and an image is whole or absent"""
     part = dst + '.part'
     names = sorted((n.encode() for n in files))
-    ents, off = [], romfs.HEAD.size
-    with builtins.open(part, 'wb') as out:
+    ents, off, seen = [], romfs.HEAD.size, {}
+    with builtins.open(part, 'w+b') as out:
         out.write(b'\0' * off)
         for name in names:
-            off += -off % ALIGN
-            out.seek(off)
-            n, source = 0, files[name.decode()]
+            source = files[name.decode()]
             if callable(source): source = source()
             if source is None: raise OSError(f'{name.decode()}: no bytes to write')
-            if isinstance(source, bytes): out.write(source); n = len(source)
-            elif not isinstance(source, (str, os.PathLike)): raise TypeError(f'{name.decode()}: {type(source).__name__} is not a path, bytes or a function')
-            else:
-                with romfs.open(source, 'rb') as f:
-                    while b := f.read(8 << 20): out.write(b); n += len(b)
-            ents.append((name, off, n)); off += n
+            if not isinstance(source, (bytes, str, os.PathLike)): raise TypeError(f'{name.decode()}: {type(source).__name__} is not a path, bytes or a function')
+            with io.BytesIO(source) if isinstance(source, bytes) else romfs.open(source, 'rb') as f:
+                n, digest = _digest(f)
+                candidates = seen.setdefault((n, digest), [])
+                at = next((a for a in candidates if _same(out, a, f, n)), None)
+                if at is None:
+                    at = off + -off % ALIGN; out.seek(at); f.seek(0)
+                    h, copied = hashlib.blake2b(digest_size=32), 0
+                    while b := f.read(8 << 20): out.write(b); h.update(b); copied += len(b)
+                    if (copied, h.digest()) != (n, digest): raise OSError(f'{name.decode()}: changed while writing the shader library')
+                    candidates.append(at); off = at + n
+                ents.append((name, at, n))
         out.seek(off)
         pool, idx = bytearray(), bytearray(romfs.ENT.pack(1, len(names), 0, 0, 0, 0))   # entry 0, the root: its children are every other entry
         for name, a, b in ents:

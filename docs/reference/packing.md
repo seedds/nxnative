@@ -193,6 +193,13 @@
 - **Measured** on Skyward Sword HD, on an external drive, warm cache: 10,017 files to one: copy 3.72 s to 0.18 s, delete 0.40 s to 0.02 s, 150 MB to 131 MB on disk. Reading all 2,470 shaders' reflection and libraries 100 ms to 28 ms. The map must be `MAP_SHARED`: on a file this size a private mapping costs about 80 µs, against 0.9 µs. A cold read has not been measured, as the cache cannot be emptied without an administrator.
 - **Found on:** [Skyward Sword HD](../../dm/games/01002DA013484000/README.md#found-on-this-game).
 
+### Identical shader files repeated inside library images
+
+- **Symptom:** even a first shader build expands one compiled payload stored once in `cas.db` into a separate full copy for every shader filename in `b-<chain>.img`. The temporary image grows by the same copies while the cache remains on disk.
+- **Cause:** `shader_lib.write` assigned a fresh data range to every name. The compile cache already shared identical bytes, and both the Python and native image readers already supported several names pointing at one range, but image publication lost that sharing.
+- **Fix:** `dm/tools/shader_lib.py` groups inputs by size and a content digest, compares their complete bytes before sharing a range, and preserves every filename and its contents. Paths are read in bounded chunks; a new payload takes two reads, and a changed input aborts publication. Duplicate payloads are not written even temporarily. The image format, shader contents, chain version and readers are unchanged. Full builds, partial updates and app subsets use the same writer. This reduces image payload storage; the compile cache, a previous image during replacement, unique payloads and index metadata still need space. Hashing and comparison cost CPU and input reads.
+- **Found on:** investigation of [Pokémon Pokopia's first-build disk growth, issue #1174](../../dm/games/0400A3A01EE4C000/README.md#found-on-this-game), reproduced with authored cache entries and the real staging and image writer. Pokopia's duplicate fraction and full-build peak remain unmeasured without game files.
+
 ### A shader build leaves a file per shader output while it runs or after a stop
 
 - **Symptom:** a game's build folder holds tens of thousands of small files while its shaders build, and keeps them when the build stops: Octopath Traveler 0's `_build`, stopped in its compile, held 68,230 files (38,376 in `tmp/dmsh_*`, 29,757 in `shader/cache/b-<chain>/`), against 105 once a build finished. Every later build made another `tmp/dmsh_*` beside the old one.

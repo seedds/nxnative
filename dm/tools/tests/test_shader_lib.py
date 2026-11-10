@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # A game's shader libraries as one file (dm/tools/shader_lib.py): the folder and image states, and a read by the host's C reader (dm/gfx/nvn/msl_image.h, dm/host/romfs_image.h).
-import os, subprocess, sys, tempfile, unittest
+import io, os, subprocess, sys, tempfile, unittest
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO / 'dm/tools'))
@@ -163,6 +164,106 @@ class AppSubset(Base):
         with self.assertRaises(ValueError): shader_lib.subset(self.lib, self.root / 'app.img')
 
 
+class SharedPayloads(Base):
+    def test_mixed_sources_share_bytes_without_losing_names(self):
+        payload = b'same compiled shader' * 100
+        source = self.root / 'source.metallib'; source.write_bytes(payload)
+        old = self.root / 'old.img'; shader_lib.write({'old': payload}, str(old))
+        calls = []
+        def staged(): calls.append(1); return payload
+        files = {'a_b.metallib': payload, 'b_b.metallib': source, 'c_b.metallib': staged,
+                 'd_b.metallib': str(romfs.Path(old) / 'old'), 'e_b.metallib': payload + b'different'}
+        shader_lib.write(files, str(self.image))
+        image = romfs.Image(self.image)
+        entries = [image.entry(image.find(n))[:2] for n in list(files)[:4]]
+        self.assertEqual(len(set(entries)), 1, 'identical files must share one payload in the image')
+        self.assertNotEqual(image.entry(image.find('e_b.metallib'))[:2], entries[0])
+        self.assertEqual(calls, [1], 'a staged output is fetched once')
+        for name in files:
+            self.assertEqual((romfs.Path(self.image) / name).read_bytes(), payload + (b'different' if name.startswith('e_') else b''))
+
+    def test_duplicate_payloads_do_not_accumulate_in_the_temporary_image(self):
+        payload = b'x' * (256 << 10)
+        real_open, peak = open, [0]
+        class Measured:
+            def __init__(self, f): self.f = f
+            def __enter__(self): self.f.__enter__(); return self
+            def __exit__(self, *args): return self.f.__exit__(*args)
+            def __getattr__(self, name): return getattr(self.f, name)
+            def write(self, data):
+                n = self.f.write(data); self.f.flush()
+                peak[0] = max(peak[0], os.fstat(self.f.fileno()).st_size)
+                return n
+        def opened(path, mode='r', *args, **kwargs):
+            f = real_open(path, mode, *args, **kwargs)
+            return Measured(f) if str(path) == str(self.image) + '.part' and 'w' in mode else f
+        files = {f'{i:016x}_b.metallib': payload for i in range(16)}
+        with mock.patch.object(shader_lib.builtins, 'open', side_effect=opened): shader_lib.write(files, str(self.image))
+        self.assertLessEqual(peak[0], len(payload) + 4096, 'duplicates must not consume temporary payload space')
+        self.assertLess(self.image.stat().st_size, len(payload) + 4096)
+
+    def test_digest_collisions_compare_every_byte_and_keep_distinct_ranges(self):
+        first = b'x' * (8 << 20) + b'a'; other = first[:-1] + b'b'
+        with mock.patch.object(shader_lib.hashlib, 'blake2b') as hashed:
+            hashed.return_value.digest.return_value = b'forced collision'
+            shader_lib.write({'a': first, 'b': other, 'c': first}, str(self.image))
+        image = romfs.Image(self.image)
+        self.assertNotEqual(image.entry(image.find('a'))[:2], image.entry(image.find('b'))[:2])
+        self.assertEqual(image.entry(image.find('a'))[:2], image.entry(image.find('c'))[:2])
+        self.assertEqual((romfs.Path(self.image) / 'b').read_bytes(), other)
+
+    def test_streamed_paths_stay_bounded_and_are_not_reopened(self):
+        payload = b'x' * (9 << 20)
+        class Bounded(io.BytesIO):
+            def read(self, n=-1):
+                if not 0 < n <= 8 << 20: raise AssertionError('unbounded input read')
+                return super().read(n)
+        with mock.patch.object(shader_lib.romfs, 'open', return_value=Bounded(payload)) as opened:
+            shader_lib.write({'large': self.root / 'large'}, str(self.image))
+        self.assertEqual(opened.call_count, 1)
+        self.assertEqual((romfs.Path(self.image) / 'large').read_bytes(), payload)
+
+    def test_an_input_changed_between_passes_cannot_replace_a_complete_image(self):
+        shader_lib.write({'old': b'published'}, str(self.image)); before = self.image.read_bytes()
+        class Changing(io.BytesIO):
+            def seek(self, offset, whence=0):
+                if offset == 0 and whence == 0 and self.tell():
+                    super().seek(0); self.write(b'new')
+                return super().seek(offset, whence)
+        with mock.patch.object(shader_lib.romfs, 'open', return_value=Changing(b'old')):
+            with self.assertRaisesRegex(OSError, 'changed while writing'):
+                shader_lib.write({'new': self.root / 'changing'}, str(self.image))
+        self.assertEqual(self.image.read_bytes(), before)
+
+    def test_a_duplicate_that_grows_between_passes_cannot_publish_its_prefix(self):
+        for initial in (b'prefix', b''):
+            with self.subTest(initial=initial):
+                shader_lib.write({'old': b'published'}, str(self.image)); before = self.image.read_bytes()
+                class Growing(io.BytesIO):
+                    grew = False
+                    def seek(self, offset, whence=0):
+                        if offset == 0 and whence == 0 and not self.grew:
+                            super().seek(0, 2); self.write(b' appended'); self.grew = True
+                        return super().seek(offset, whence)
+                with mock.patch.object(shader_lib.romfs, 'open', return_value=Growing(initial)):
+                    with self.assertRaisesRegex(OSError, 'changed while writing'):
+                        shader_lib.write({'a': initial, 'b': self.root / 'growing'}, str(self.image))
+                self.assertEqual(self.image.read_bytes(), before)
+
+    def test_a_partial_rebuild_can_replace_one_shared_file(self):
+        self.folder(a_b__metallib=b'same', b_b__metallib=b'same'); self.pack()
+        self.folder(stamp=False, a_b__metallib=b'new'); self.pack()
+        self.assertEqual((shader_lib.view(self.lib) / 'a_b.metallib').read_bytes(), b'new')
+        self.assertEqual((shader_lib.view(self.lib) / 'b_b.metallib').read_bytes(), b'same')
+
+    def test_app_subset_preserves_shared_payloads(self):
+        self.folder(a_b__metallib=b'same', b_b__metallib=b'same', a_b__metal=b'source'); self.pack()
+        app = self.root / 'app.img'; shader_lib.subset(self.lib, app)
+        image = romfs.Image(app)
+        self.assertEqual(image.entry(image.find('a_b.metallib'))[:2], image.entry(image.find('b_b.metallib'))[:2])
+        self.assertEqual((romfs.Path(app) / 'b_b.metallib').read_bytes(), b'same')
+
+
 class HostReader(Base):
     def reader(self):
         exe = self.root / 'msl_read'; src = self.root / 'msl_read.c'; src.write_text(READER)
@@ -179,6 +280,14 @@ class HostReader(Base):
         got = subprocess.run([self.reader(), self.image, *asked], capture_output=True, check=True).stdout
         want = b''.join(names[n] + b'\n' if n in names else b'missing\n' for n in asked)
         self.assertEqual(got, want)
+
+    def test_the_host_maps_shared_payloads_by_every_name(self):
+        names = {f'{i:016x}_b.metallib': b'shared shader' for i in range(12)}
+        shader_lib.write(names, str(self.image))
+        image = romfs.Image(self.image)
+        self.assertEqual(len({image.entry(image.find(n))[:2] for n in names}), 1)
+        got = subprocess.run([self.reader(), self.image, *names], capture_output=True, check=True).stdout
+        self.assertEqual(got, b'shared shader\n' * len(names))
 
     def test_the_host_refuses_a_cut_copy(self):
         self.folder(k_b__metallib=b'lib' * 100); self.pack()

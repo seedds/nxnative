@@ -70,6 +70,7 @@ PER_PIPELINE_S = 10   # the default of --time-limit: a group of 1,000 bases may 
                       # 89f44f9b6bb0 921 s alone), so this stops only a run that is swapping or stuck: that game's group of 1,000 bases at chain 89f44f9b6bb0 drove the Mac into swap
                       # for 8 h 51 min before the kernel killed the compiler
 WATCH_S = 5   # how often run_logged looks at a run under way (its time; the work volume's free space, compile_archive)
+POLL_S = 0.1   # how often run_logged looks whether the tool has ended
 DISK_LOW = 1 << 30   # a run that fails with less free than this on the work volume at any moment failed for the disk, not for a pipeline
 LEFT_OUT_MAX, LEFT_OUT_SHARE, LEFT_OUT_FEW = 50, 0.1, 5   # more pipelines left out than LEFT_OUT_MAX, or more than LEFT_OUT_FEW that are more than LEFT_OUT_SHARE of them, stop the build
                                                          # (--allow-left-out packs the archive without them): that many is a broken build, not a few pipelines the compiler cannot take
@@ -352,34 +353,60 @@ def time_limit(count, per_pipeline):
     return RUN_BASE_S + count * per_pipeline if per_pipeline else None
 
 
-LIVE, LIVE_LOCK = set(), threading.Lock()   # the process groups of the tools running now (run_logged), which stop_all stops
+LIVE, LIVE_LOCK = set(), threading.RLock()   # the process groups of the tools running now (run_logged), which stop_all stops; reentrant, as a signal handler on the main
+                                             # thread may take it while that thread holds it
+STOPPING = threading.Event()   # set by stop_all: no tool is started any more, and a tool it stopped raises Stopping, not CompileFailed (no failure is kept for it)
+
+
+class Stopping(BaseException):
+    """The build is stopping (stop_all: an interruption, SIGTERM, SIGHUP, or another group that stopped it): what a stopped tool raises in place of its failure, so that
+    nothing is recorded as failed, split further or counted towards GIVE_UP. Not an Exception, so no handler of failures catches it"""
+
+
+def check_stopping():
+    if STOPPING.is_set(): raise Stopping()
 
 
 def run_logged(cmd, log_path, env, timeout=None, watch=None):
     """Run a tool with its output in log_path: its exit status, or None when it ran past timeout seconds. The tool runs in a process group of its own (so that a terminal's
     Ctrl-C reaches this script alone, which stops every group under way: stop_all), and that group is stopped whole when the tool returns, runs past its time or is interrupted:
-    metal-tt hands the work to air-tt and applegpu-nt, which would go on compiling without it. watch: called every WATCH_S seconds while it runs"""
+    metal-tt hands the work to air-tt and applegpu-nt, which would go on compiling without it. The group is stopped before the tool is reaped, while its process ID cannot
+    name another process (exited). watch: called every WATCH_S seconds while it runs. Raises Stopping when the build is stopping, before the tool starts or after it ends"""
+    check_stopping()
     with log_path.open('w') as log:
         p = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, env=env, start_new_session=True)
         with LIVE_LOCK: LIVE.add(p.pid)
         try:
-            end = time.time() + timeout if timeout else None
-            while True:
-                try: return p.wait(timeout=WATCH_S if end is None else max(0, min(WATCH_S, end - time.time())))
-                except subprocess.TimeoutExpired:
-                    if watch: watch()
-                    if end is not None and time.time() >= end: return None
+            now = time.time(); end = now + timeout if timeout else None; look = now + WATCH_S; late = False
+            while not exited(p):
+                now = time.time()
+                if watch and now >= look: watch(); look = now + WATCH_S
+                if end is not None and now >= end: late = True; break
+                time.sleep(POLL_S)
         finally:
             kill_group(p.pid)   # what is left of it: the tool's own children after it returned, or all of it
             p.wait()
             with LIVE_LOCK: LIVE.discard(p.pid)
+    check_stopping()
+    return None if late else p.returncode
+
+
+def exited(p):
+    """Whether the tool has ended, without reaping it where the system can say so (os.waitid, WNOWAIT): its process ID, and so its group's, stays its own until p.wait().
+    A Python without waitid (macOS's /usr/bin/python3) reaps it here, and its group is stopped just after"""
+    if not hasattr(os, 'waitid'): return p.poll() is not None
+    try: return os.waitid(os.P_PID, p.pid, os.WEXITED | os.WNOWAIT | os.WNOHANG) is not None
+    except ChildProcessError: return True
 
 
 def kill_group(pgid):
     with contextlib.suppress(ProcessLookupError, PermissionError): os.killpg(pgid, signal.SIGKILL)
 
 
-def stop_all():   # stop every tool under way (an interruption, SIGTERM or SIGHUP): their waits return, and the threads waiting on them end
+def stop_all():
+    """Stop every tool under way and start no other (an interruption, SIGTERM, SIGHUP, or a group that stops the build): their waits return, and the threads waiting on them
+    raise Stopping. Called from a signal handler too, hence the reentrant lock"""
+    STOPPING.set()
     with LIVE_LOCK: groups = list(LIVE)
     for g in groups: kill_group(g)
 
@@ -396,7 +423,8 @@ def compile_archive(js, part, work, arch, platform, osmin, count, timeout=None):
     least = [free]
     def watch(): least[0] = min(least[0], shutil.disk_usage(work).free)
     t0 = time.time()
-    code = run_logged(cmd, log_path, dict(os.environ, TMPDIR=str(work)), timeout, watch)
+    try: code = run_logged(cmd, log_path, dict(os.environ, TMPDIR=str(work)), timeout, watch)
+    except Stopping: clear_temporaries(work); part.unlink(missing_ok=True); raise
     if code or code is None or not part.is_file() or not part.stat().st_size:
         watch(); free = least[0]
         clear_temporaries(work); part.unlink(missing_ok=True)
@@ -431,6 +459,7 @@ def compile_batch(lib_dir, bases, work, arch, platform, osmin, toolchain, comput
     failure under its key (failed.<arch>: the key, then how it failed and under what time limit, then the reason), so the next run with the same inputs goes straight to its parts
     instead of compiling it whole again; a run past its time limit is tried again under a longer limit or none. A single pipeline is always tried again, so a failure of the
     moment (a loaded Mac past the time limit, a toolchain since repaired) does not leave it out for good"""
+    check_stopping()
     work.mkdir(parents=True, exist_ok=True)
     configuration = script(lib_dir, bases, computes)
     js = work / 'bases.mtl4-json'; write_script(js, configuration)
@@ -446,11 +475,15 @@ def compile_batch(lib_dir, bases, work, arch, platform, osmin, toolchain, comput
     write_script(js, script(real_libraries(lib_dir, bases, work, computes), bases, computes))
     try: compile_archive(js, part, work, arch, platform, osmin, count, limit)
     except CompileFailed as e:
-        if count > 1: ff.write_text(f'{key}\n{"timeout" if e.timed_out else "failed"}\t{e.limit or 0:.0f}\n{e}\n')
+        if count > 1: remember_failure(ff, key, e)
         raise
     finally: clear_real_libraries(work)
     os.replace(part, dst); kf.write_text(key + '\n')
     return dst, False
+
+
+def remember_failure(path, key, e):   # a failed group's record for known_failure (never a stopped run's: Stopping is not a CompileFailed)
+    path.write_text(f'{key}\n{"timeout" if e.timed_out else "failed"}\t{e.limit or 0:.0f}\n{e}\n')
 
 
 def known_failure(path, key, limit):
@@ -489,6 +522,7 @@ def compile_split(lib_dir, bases, work, arch, platform, osmin, toolchain, comput
     as any group). Every part of a level is tried before the parts that failed are split further, so a pipeline that compiles is found before the failures of a cluster of bad
     ones add up to GIVE_UP. A pipeline that fails alone is left out of the archive, so one pipeline the compiler rejects or cannot finish costs the archive that pipeline,
     not all of it. Returns ([archive pieces], [(base or compute pipeline left out, reason)])"""
+    check_stopping()
     tally = tally or Tally()
     try:
         if failed: raise failed
@@ -646,10 +680,14 @@ def main(argv=None):
                     f'(default {PER_PIPELINE_S}; 0: no limit)')
     ap.add_argument('--allow-left-out', action='store_true', help=f'publish an archive with more than {LEFT_OUT_MAX} pipelines (or {LEFT_OUT_SHARE * 100:.0f}%% of them) left out that metal-tt did not compile alone')
     a = ap.parse_args(argv)
+    STOPPING.clear(); before = {}
     for sig in (signal.SIGTERM, signal.SIGHUP):   # a parent stopping this build (the NSP script terminates it on Ctrl-C) stops the compilers under way, which run detached from it
-        with contextlib.suppress(ValueError): signal.signal(sig, on_signal)   # ValueError: not the main thread (a test)
+        with contextlib.suppress(ValueError): before[sig] = signal.signal(sig, on_signal)   # ValueError: not the main thread (a test)
     try: return build(a, ap)
+    except Stopping: sys.exit('[RED] pso_offline: stopped')   # stop_all was called with nothing else on its way out
     except BaseException: stop_all(); raise
+    finally:
+        for sig, handler in before.items(): signal.signal(sig, handler)
 
 
 def on_signal(sig, frame):
@@ -711,12 +749,16 @@ def build(a, ap):
         args = (lib_dir, bases, work, part, arch, a.platform, osmin, tv)
         if a.batch_size and len(groups_of(bases, computes, a.batch_size)) > 1:
             gone = compile_batches(*args, a.batch_size, computes, a.jobs, per_pipeline=a.time_limit)
-        else:
-            n = len(bases) + len(computes)
+        else:   # one compiler run of everything; when it fails (kept in failed.<arch> under the archive's key, as compile_batch keeps a group's), straight to its parts
+            n = len(bases) + len(computes); limit = time_limit(n, a.time_limit); ff = work / f'failed.{arch}'
             try:
+                cached = known_failure(ff, key, limit) if n > 1 else None
+                if cached: raise cached
+                ff.unlink(missing_ok=True)
                 write_script(js, script(real_libraries(lib_dir, bases, work, computes), bases, computes))
-                compile_archive(js, part, work, arch, a.platform, osmin, n, time_limit(n, a.time_limit)); gone = []
-            except CompileFailed as e:   # straight to its parts: the same group is not compiled whole again
+                compile_archive(js, part, work, arch, a.platform, osmin, n, limit); gone = []
+            except CompileFailed as e:   # the same group is not compiled whole again
+                if n > 1 and not ff.is_file(): remember_failure(ff, key, e)
                 clear_real_libraries(work)
                 gone = compile_batches(*args, 0, computes, a.jobs, per_pipeline=a.time_limit, failed=e)
             finally: clear_real_libraries(work)

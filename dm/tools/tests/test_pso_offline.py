@@ -11,10 +11,12 @@ import re
 import types
 from pathlib import Path
 import shutil
+import signal
 import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import tracemalloc
@@ -24,6 +26,7 @@ REPO = Path(__file__).resolve().parents[3]
 spec = importlib.util.spec_from_file_location('pso_offline', REPO / 'dm/gfx/tools/pso_offline.py')
 po = importlib.util.module_from_spec(spec); spec.loader.exec_module(po)
 CHAIN = '0123456789ab'
+REAL_RUN_LOGGED = po.run_logged   # the Build tests replace it; the tests of stopping need real processes
 
 
 def tag(name, data): return name + struct.pack('<H', len(data)) + data
@@ -667,7 +670,7 @@ class Build(unittest.TestCase):
 
     def test_left_out_list_is_written_before_the_archive(self):   # a stop between them makes the archive again rather than publish it without its list
         bases = [('v_bp', f'vertex{i}', 'f_b', 'main0') for i in range(3)]
-        runner, _ = self.batched_runner(fail_compile='vertex1')
+        runner, _ = self.batched_runner(fail_compile=('vertex1',))
         real_replace = os.replace
         def replace(src, dst):
             if str(dst).endswith('applegpu_g18p.mtl4a') and Path(dst).parent == self.out: raise KeyboardInterrupt
@@ -684,6 +687,41 @@ class Build(unittest.TestCase):
         self.assertIsNone(po.known_failure(ff, 'K', None)); self.assertIsNone(po.known_failure(ff, 'K', 4000))   # no limit, or a longer one: try it again
         self.assertTrue(po.known_failure(ff, 'K', 1830).timed_out); self.assertIsNone(po.known_failure(ff, 'other key', 1830))
         ff.write_text('K\nfailed\t1830\nexit 1\n'); self.assertIsNotNone(po.known_failure(ff, 'K', None))   # a failure is kept whatever the limit
+
+    def test_sigterm_stops_every_run_and_records_nothing(self):   # --jobs 2: stop_all kills both runs; neither is taken for a failure, split or followed by another run
+        bin_, runs = self.t / 'bin', self.t / 'runs'; bin_.mkdir(); runs.write_text('')
+        (bin_ / 'xcrun').write_text(f'#!/bin/sh\ncase " $* " in *" -version "*) echo "AIR-TT 1.0"; exit 0;; esac\nsleep 60 & echo $! >> {runs}\nwait\n'); (bin_ / 'xcrun').chmod(0o755)
+        rows = ''.join(f'cs\t{i}\tcompute\tk{i}\tx\n' for i in range(20))   # two compute groups, 16 and 4, run 2 at a time
+        (self.prof / 'shader_map.tsv').write_text('package\tindex\tstage\tkey\tsource\n' + rows); (self.prof / 'shader_pairs.tsv').write_text('v\tc\n')
+        for i in range(20):
+            (self.lib / f'k{i}_b.json').write_text(json.dumps({'chain': CHAIN, 'stage': 'cs', 'entry': 'main0'})); (self.lib / f'k{i}_b.metallib').write_bytes(metallib([('main0', False)]))
+        def stop():   # SIGTERM to this process once both runs are under way, as the NSP script sends it on Ctrl-C
+            for _ in range(300):
+                if len(runs.read_text().split()) >= 2: break
+                time.sleep(0.1)
+            os.kill(os.getpid(), signal.SIGTERM)
+        before, t0 = signal.getsignal(signal.SIGTERM), time.time()
+        threading.Thread(target=stop, daemon=True).start()
+        with mock.patch.object(po, 'run_logged', REAL_RUN_LOGGED), mock.patch.dict(os.environ, PATH=f'{bin_}:{os.environ["PATH"]}', DM_GAMES_DIR=str(self.prof.parent)), \
+                contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
+            po.main(['--game', '0100000000001000', '--msl', str(self.lib), '--out', str(self.out), '--work', str(self.work), '--os-min', '27.0', '--jobs', '2'])
+        self.assertEqual(e.exception.code, 128 + signal.SIGTERM); self.assertLess(time.time() - t0, 30)
+        pids = [int(x) for x in runs.read_text().split()]
+        self.assertEqual(len(pids), 2)   # no run started after the stop
+        for pid in pids:
+            with self.assertRaises(ProcessLookupError): os.kill(pid, 0)
+        self.assertFalse(list(self.work.rglob('failed.*'))); self.assertFalse(list(self.work.rglob('split'))); self.assertEqual(po.LIVE, set())
+        self.assertFalse(list(self.out.glob('*.mtl4a'))); self.assertIs(signal.getsignal(signal.SIGTERM), before)   # the handler restored
+
+    def test_failed_single_run_is_kept_and_not_compiled_whole_again(self):
+        bases = [('v_bp', f'vertex{i}', 'f_b', 'main0') for i in range(3)]
+        runner, observed = self.batched_runner(fail_compile=('vertex1',))
+        with mock.patch.object(self, 'fake_run', runner), mock.patch.object(po, 'plan', return_value=(bases, [], {})):
+            self.main('--os-min', '27.0', '--jobs', '1')
+            self.assertEqual(observed[0], ('compile', ['vertex0', 'vertex1', 'vertex2'])); self.assertTrue((self.work / 'failed.applegpu_g18p').is_file())
+            observed.clear(); (self.out / 'applegpu_g18p.mtl4a').unlink()
+            self.main('--os-min', '27.0', '--jobs', '1')
+        self.assertEqual(observed, [('compile', ['vertex1']), ('merge', 2)])   # not the whole run again: its parts from their caches, the lone failure tried again
 
     def test_gives_up_when_nothing_compiles(self):   # a broken toolchain fails every pipeline: stop after GIVE_UP of them alone, not after trying each
         bases = [('v_bp', f'vertex{i}', 'f_b', 'main0') for i in range(40)]
@@ -830,7 +868,9 @@ class Build(unittest.TestCase):
 
 class RunLogged(unittest.TestCase):
     """po.run_logged with real processes: a run past its time limit is stopped with the processes it started (metal-tt's air-tt and applegpu-nt go on compiling otherwise)"""
-    def setUp(self): self.t = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, self.t)
+    def setUp(self):
+        self.t = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, self.t)
+        po.STOPPING.clear(); self.addCleanup(po.STOPPING.clear)
 
     def test_exit_status_and_log(self):
         self.assertEqual(po.run_logged(['sh', '-c', 'echo made; exit 3'], self.t / 'log', dict(os.environ)), 3)
@@ -855,13 +895,18 @@ class RunLogged(unittest.TestCase):
 
     def test_stop_all_stops_the_runs_under_way(self):   # Ctrl-C or SIGTERM with --jobs above 1: the groups run detached from the terminal
         pid, result = self.t / 'pid', []
-        t = po.threading.Thread(target=lambda: result.append(po.run_logged(['sh', '-c', f'sleep 30 & echo $! > {pid}; wait'], self.t / 'log', dict(os.environ))))
+        def run():
+            try: result.append(po.run_logged(['sh', '-c', f'sleep 30 & echo $! > {pid}; wait'], self.t / 'log', dict(os.environ)))
+            except po.Stopping: result.append('stopping')
+        t = po.threading.Thread(target=run)
         t.start()
         for _ in range(300):   # a loaded Mac may take a while to start the shell
             if pid.is_file() and pid.read_text().strip(): break
             time.sleep(0.1)
         po.stop_all(); t.join(30)
-        self.assertFalse(t.is_alive()); self.assertNotEqual(result, [0]); self.assertTrue(self.gone(int(pid.read_text()))); self.assertEqual(po.LIVE, set())
+        self.assertFalse(t.is_alive()); self.assertEqual(result, ['stopping']); self.assertTrue(self.gone(int(pid.read_text()))); self.assertEqual(po.LIVE, set())
+        with self.assertRaises(po.Stopping): po.run_logged(['sh', '-c', f'echo started > {self.t / "late"}'], self.t / 'log', dict(os.environ))   # nothing starts any more
+        self.assertFalse((self.t / 'late').exists())
 
     def gone(self, child):
         for _ in range(200):

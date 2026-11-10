@@ -48,6 +48,21 @@ def patched(**at):
 
 
 class SpinWaits(unittest.TestCase):
+    def test_lock_poll_without_clrex(self):
+        # Same queue, older compiler: acquire retries its load directly;
+        # release retries its compare directly. Padding keeps branch offsets.
+        w = patched(o18=0x35ffffee, o1c=0x880e7d2a, o20=0x35ffffae,
+                    o24=0xd503201f, o28=0xd503201f, o74=0x54ffffc1)
+        g = region(w, 0, [0x80])
+        self.assertIsNotNone(g)
+        self.assertEqual(g['valid'], {0x80})
+        self.assertNotIn(0x5c, g['R'])
+        # A missing release, a different lock address, or a failed store
+        # that does not retry must not be accepted as a balanced poll.
+        for off, word in [(0x4c, 0x540001a1), (0x78, 0x880ffd5f), (0x20, 0x35ffff8e)]:
+            broken = list(w); broken[off // 4] = word
+            self.assertIsNone(region(broken, 0, [0x80]))
+
     def test_lock_poll_is_a_wait(self):
         g = region(POLL, 0, [0x80])
         self.assertIsNotNone(g)

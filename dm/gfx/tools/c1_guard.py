@@ -189,7 +189,7 @@ def c1_span(json_path):
 
 def definitions_of(source):
     """Integer temporaries written only where they are declared. A variable assigned again (a loop counter, a value merged from branches) is left out, so it reads as unbounded.
-    A name may be declared more than once with the same text: vertex shaders carry a copy of the main function (main0_z, dmsh_build.py vs_depth); differing declarations are left out too"""
+    A name may be declared more than once with the same text: vertex shaders carry a copy of the main function (main0_z, dmsh_entry.py vs_depth); differing declarations are left out too"""
     writes, decls = {}, {}
     for m in ASSIGNMENT.finditer(source):
         name = m.group(1) or m.group(2) or m.group(3); writes[name] = writes.get(name, 0) + 1

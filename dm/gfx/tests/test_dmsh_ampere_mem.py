@@ -440,8 +440,9 @@ class Pokopia(Translated):
     MEMBAR = (0x000fec0000005000, 0x0000000000007992)
     ERRBAR = (0x000fc00000000000, 0x00000000000079ab)
 
-    def msl(self, *code):
-        return self.translate(b''.join(inst(*c) for c in code) + inst(*SUATOM) + inst(*EXIT))
+    def msl(self, *code):   # the uniform words read bare: the translator bounds each read by the slot's size (dmsh_fetch.unguard, test_dmsh_fetch), which these tests do not look at
+        sys.path.insert(0, str(TOOLS)); import dmsh_fetch
+        return dmsh_fetch.unguard(self.translate(b''.join(inst(*c) for c in code) + inst(*SUATOM) + inst(*EXIT)))
 
     def test_merge_shifts_c_into_the_high_half(self):   # word 6, converted first, ends in the high half; word 5 in the low one
         msl = self.msl(self.MERGE_FIRST, self.MERGE_SECOND)

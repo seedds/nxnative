@@ -49,7 +49,7 @@ General changes first needed here; each applies to every game:
 
 - **Bezel Engine 2.9 archives** (`bea_members` reads inline entries): [Bezel Engine 2.9 archives keep their entries inline](../../../docs/reference/shaders.md#bezel-engine-29-archives-keep-their-entries-inline).
 - **Native-texture `GetOutputBuffer` returns the output index**, and a release of an index the client does not hold changes nothing (`hle_movie.c`): [`GetOutputBuffer` returns the output index in native-texture mode](../../../docs/reference/movies.md#getoutputbuffer-returns-the-output-index-in-native-texture-mode).
-- **The base instance of indirect draws from Metal** (`dmsh_build.py` `vs_base_instance`): [The base instance of indirect draws comes from Metal](../../../docs/reference/shaders.md#the-base-instance-of-indirect-draws-comes-from-metal).
+- **The base instance of indirect draws from Metal** (`dmsh_entry.py` `vs_base_instance`): [The base instance of indirect draws comes from Metal](../../../docs/reference/shaders.md#the-base-instance-of-indirect-draws-comes-from-metal).
 - **Bezel's memory setups** (profile data only): [Bezel Engine's two memory setups](../../../docs/reference/memory.md#bezel-engines-two-memory-setups).
 
 ## Open

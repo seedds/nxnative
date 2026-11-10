@@ -480,6 +480,9 @@ BINDING = [
     {'what': 'interval controller: the lower bound and the GPU-time path', 'now': 'build', 'goal': 'game', 'purpose': 'frame rate',
      'why': "sead::GameFrameworkNx's interval controller in this build; Tears of the Kingdom shares sead but not this code"},
     {'what': '60 fps frame step and render scale (ksys::VFR)', 'now': 'build', 'goal': 'game', 'purpose': 'frame rate',
-     'why': "the game's own frame code; the frame-step state page is general",
-     'blocked': 'a function-matched frame step (MATCH_FRAME_STEP) covers one function; these stubs span several'},
+     'why': "the game's own frame code; the frame-step state page is general. No engine sibling shares it: none of its 34 functions has an exact match in Tears of the "
+            'Kingdom, SMO, MK8D, ACNH, Splatoon 2 / 3, Kirby, Mario Party, Ocarina, Smash, Metroid Dread or Origami King (only the widescreen stubs\' sead::PerspectiveProjection '
+            'functions recur)',
+     'checked': 'nso_fnmap of its 44 sites into those 13 mains (2026-11-09)',
+     'kept': '44 sites in 34 functions to fingerprint for an update that may not come (1.9.0, the Switch 2 Edition release); convert when a new build appears'},
 ]

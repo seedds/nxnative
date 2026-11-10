@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Shared memory byte and half-word stores as Metal byte stores (dmsh_build.py shared_store_msl): the rewrite of the translator's helpers dmsh_shared_store8_<id> and
+"""Shared memory byte and half-word stores as Metal byte stores (dmsh_rewrite.py shared_store_msl): the rewrite of the translator's helpers dmsh_shared_store8_<id> and
 dmsh_shared_store16_<id> as spirv-cross writes them, its refusals, the device form tg_spill gives a kernel past Metal's 32 KB, and on this Mac's GPU 64 threads storing
 neighbouring bytes and half-words into one array (every word as the stores leave it) and all of them storing one byte (one of their values, never a mix). With DMSH_TEST_XLATE (the
 translator), a task or mesh shader's index byte through the translator and the rewrite."""
@@ -17,13 +17,7 @@ TOOLS = Path(__file__).resolve().parents[1] / 'tools'
 sys.path.insert(0, str(TOOLS))
 import dmsh_abi as abi   # tg_spill's slot and limits
 
-NAMES = {'shared_store_msl', 'split_params', 'block_end', 'BRACE', 'SHARED_STORE', 'SHARED_ALIAS', 'tg_spill', 'TG_DECL', 'TG_BYTES'}
-tree = ast.parse((TOOLS / 'dmsh_build.py').read_text())
-selected = [n for n in tree.body if (isinstance(n, ast.FunctionDef) and n.name in NAMES)
-            or (isinstance(n, ast.Assign) and any(getattr(t, 'id', None) in NAMES for t in n.targets))]
-scope = {'re': re, 'abi': abi}
-exec(compile(ast.Module(body=selected, type_ignores=[]), str(TOOLS / 'dmsh_build.py'), 'exec'), scope)
-shared_store_msl, tg_spill = scope['shared_store_msl'], scope['tg_spill']
+from dmsh_rewrite import shared_store_msl, tg_spill   # noqa: E402
 
 HEAD = '''#include <metal_stdlib>
 #include <simd/simd.h>

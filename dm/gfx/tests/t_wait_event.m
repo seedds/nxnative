@@ -17,17 +17,13 @@ uint64_t now_ns(void) { return bp_now(); }
 static int checks, fails;
 #define CHECK(c,label) do { int ok=!!(c); checks++; fails+=!ok; printf("%s: %s\n",ok?"PASS":"FAIL",label); fflush(stdout); } while(0)
 // Observe the exact release boundary, then call the real event publisher. This
-// avoids a timing race between a CPU polling thread and a very small readback.
+// avoids a timing race between a CPU polling thread and a very small store into storage.
 static _Atomic uintptr_t event_test_storage;
 static _Atomic uint32_t event_test_pixel;
-static _Atomic int event_test_deferred_mirror;
 void event_test_publish(volatile uint32_t *word,unsigned mode,uint32_t value,uint64_t fence) {
     uintptr_t storage=atomic_load(&event_test_storage);
     if(storage && value==11) {
         atomic_store(&event_test_pixel,*(volatile uint32_t *)storage);
-        post_rec *r=&g_postr[fence%POST_RING]; int signal=-1,mirror=-1;
-        for(int i=0;i<r->n;i++) { if(r->ops[i].kind==1) signal=i; if(r->ops[i].kind==4) mirror=i; }
-        atomic_store(&event_test_deferred_mirror,signal>=0 && mirror>signal);
     }
     nvn_event_publish_gpu(word,mode,value,fence);
 }
@@ -281,14 +277,14 @@ static void receipt_tests(void) {
     receipt_unrelated_completion(); receipt_snapshot(0); receipt_snapshot(1); receipt_wait_only(0); receipt_wait_only(1); receipt_unfenced(0); receipt_unfenced(1);
 }
 static void event_mirror_publication(void) {
-    printf("CASE terminal event waits for render-pass mirror publication\n");
+    printf("CASE terminal event publishes after the render pass's store into storage\n");
     NVNtextureBuilder tb; NVNtexture texture; P(nvnTextureBuilderSetDefaults)(&tb);
     P(nvnTextureBuilderSetDevice)(&tb,&device); P(nvnTextureBuilderSetWidth)(&tb,8); P(nvnTextureBuilderSetHeight)(&tb,4);
     P(nvnTextureBuilderSetFormat)(&tb,NVN_FORMAT_RGBA8); P(nvnTextureBuilderSetStorage)(&tb,&pool,98304);
     NVNpackagedTextureLayout layout={{1,0,0,0,7,0,1,0}}; P(nvnTextureBuilderSetPackagedTextureLayout)(&tb,&layout);
     CHECK(P(nvnTextureInitialize)(&texture,&tb),"storage-backed render target initializes");
     memset(memory+98304,0xee,(size_t)P(nvnTextureGetStorageSize)(&texture));
-    atomic_store(&event_test_pixel,0); atomic_store(&event_test_deferred_mirror,0); atomic_store(&event_test_storage,(uintptr_t)(memory+98304));
+    atomic_store(&event_test_pixel,0); atomic_store(&event_test_storage,(uintptr_t)(memory+98304));
     P(nvnEventSignal)(&event,NVN_EVENT_SIGNAL_MODE_WRITE,0);
     NVNsync fence; P(nvnSyncInitialize)(&fence,&device);
     begin_cmd(0); const NVNtexture *colors[]={&texture}; float rgba[]={0.2f,0.4f,0.6f,1.f};
@@ -299,7 +295,6 @@ static void event_mirror_publication(void) {
     job submitted; enqueue(&submitted,&queues[0],P(nvnCommandBufferEndRecording)(&commands[0])); int sr=returned(&submitted,250000000ull);
     require_returned(&submitted,sr); int done=landed(&fence,5000000000ull);
     CHECK(done,"render clear and terminal signal complete"); if(!done) _Exit(2);
-    CHECK(atomic_load(&event_test_deferred_mirror),"pass teardown appended the mirror after the recorded event post-op");
     CHECK(atomic_load(&event_test_pixel)==0xff996633u,"rendered bytes are already in guest storage when the event is published");
     CHECK(P(nvnEventGetValue)(&event)==11,"the terminal event publishes once the storage is visible");
     atomic_store(&event_test_storage,0); P(nvnSyncFinalize)(&fence); P(nvnTextureFinalize)(&texture);

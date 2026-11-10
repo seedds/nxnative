@@ -111,6 +111,8 @@ From an empty save: at about 45 s `A` (title), `A` (New Game), then the movie. F
 
 ## Found on this game
 
+- [Validated back-off settings and long host sleeps](../../../docs/reference/threads.md#validating-yield-back-off-durations): CPU-only source-review regressions; no game failure or performance gain claimed. The existing integration already published settings with once initialization.
+
 - [Concurrent first use of scheduler settings](../../../docs/reference/threads.md#concurrent-first-use-of-scheduler-settings): synthetic source-review tests reproduce partial cap/start publication and concurrent first-use races; no gameplay hitch or rendering artifact has been attributed to these races.
 - [The 60 Hz link at 40 fps in fullscreen on a ProMotion screen](../../../docs/reference/frame-rate.md#the-60-hz-link-at-40-fps-in-fullscreen-on-a-promotion-screen): 40 fps in fullscreen on an M5 Pro MacBook Pro with the GPU at 10 ms of the 16.7, every present one 120 Hz refresh late and every other display-link tick skipped; the screen's fixed 60 Hz mode held 60.0 fps there and fullscreen now switches to it, with the 120 Hz link (59 fps) for screens with no such mode.
 - [The shader package and the shader map come from different splits](../../../docs/reference/packing.md#the-shader-package-and-the-shader-map-come-from-different-splits): resolved, a black screen with sound in a build through NX2Apple ([issue #1841](https://github.com/seedds/nxnative/issues/1841)); the present pass was translated from a terrain shader's record. Records now carry their keys, and the shader build finds them by key.

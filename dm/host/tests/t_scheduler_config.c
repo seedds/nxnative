@@ -17,27 +17,31 @@ static pthread_cond_t init_cv = PTHREAD_COND_INITIALIZER;
 static int controlled, parsing_start, release_parse, second_waiting, second_done;
 static __thread int init_role;
 static long long test_atoll(const char *);
+static long long test_strtoll(const char *, char **, int);
 static int test_once(pthread_once_t *, void (*)(void));
 #define now_ns test_now_ns
 #define nanosleep test_nanosleep
 #define sched_yield test_sched_yield
 #define atoll test_atoll
+#define strtoll test_strtoll
 #define pthread_once test_once
 #include "../hle_thread.c"
 #undef now_ns
 #undef nanosleep
 #undef sched_yield
 #undef atoll
+#undef strtoll
 #undef pthread_once
 
-static long long test_atoll(const char *text) {
+static void test_parse_gate(const char *text) {
     if (controlled && init_role == 1 && !strcmp(text, "500")) {
         pthread_mutex_lock(&init_mu); parsing_start = 1; pthread_cond_broadcast(&init_cv);
         while (!release_parse) pthread_cond_wait(&init_cv, &init_mu);
         pthread_mutex_unlock(&init_mu);
     }
-    return atoll(text);
 }
+static long long test_atoll(const char *text) { test_parse_gate(text); return atoll(text); }
+static long long test_strtoll(const char *text, char **end, int base) { test_parse_gate(text); return strtoll(text, end, base); }
 static int test_once(pthread_once_t *once, void (*fn)(void)) {
     if (controlled && init_role == 2) {
         pthread_mutex_lock(&init_mu); second_waiting = 1; pthread_cond_broadcast(&init_cv); pthread_mutex_unlock(&init_mu);

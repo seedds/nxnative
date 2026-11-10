@@ -12,6 +12,7 @@
 #include <unistd.h>
 #include "dm.h"
 #include <errno.h>
+#include <ctype.h>
 #include <sched.h>
 #include <signal.h>
 #include <sys/mman.h>
@@ -792,9 +793,24 @@ static int svc_thread_impl(int num, uint64_t *regs);
 // environment snapshot once, including all fields, before a caller can use it.
 static pthread_once_t g_backoff_once = PTHREAD_ONCE_INIT;
 static int64_t g_bo_cap, g_bo_start;
+// Parse nonnegative microseconds without overflowing the nanosecond fields.
+// Trailing whitespace is allowed; the caller checks the separator/end itself.
+static int backoff_us(const char *text, const char **end, int64_t *ns) {
+    char *tail; int saved_errno = errno; errno = 0;
+    long long us = strtoll(text, &tail, 10); int error = errno; errno = saved_errno;
+    if (tail == text || error || us < 0 || us > INT64_MAX / 1000) return 0;
+    while (isspace((unsigned char)*tail)) tail++;
+    *end = tail; *ns = us * 1000; return 1;
+}
 static void yield_backoff_init(void) {
     const char *e = getenv("DM_YIELD_BACKOFF"); g_bo_cap = 250000; g_bo_start = 2000000;
-    if (e && *e) { g_bo_cap = atoll(e) * 1000; const char *c = strchr(e, ':'); if (c) g_bo_start = atoll(c + 1) * 1000; }
+    if (e && *e) {
+        int64_t cap, start = 2000000; const char *end;
+        int valid = backoff_us(e, &end, &cap);
+        if (valid && *end == ':') valid = backoff_us(end + 1, &end, &start);
+        if (valid && !*end) { g_bo_cap = cap; g_bo_start = start; }
+        else LOG("DM_YIELD_BACKOFF: invalid value; using default 250:2000 microseconds");
+    }
     if (!g_bo_cap) LOG("DM_YIELD_BACKOFF=0: no back-off on repeated yields (plain sched_yield spin)");
     else if (e && *e) LOG("DM_YIELD_BACKOFF: back off after %lld µs of repeated yields, sleeping at most %lld µs at a time", (long long)(g_bo_start / 1000), (long long)(g_bo_cap / 1000));
 }
@@ -809,7 +825,7 @@ static uint64_t yield_backoff_ns(uint64_t run_ns, int clock) {
 }
 static void sleep_precise(uint64_t dl);
 // One back-off sleep of bo ns, counted for the power line
-static void backoff_sleep(thr_t *me, uint64_t bo) { me->nbackoff++; me->sleeping = 1; struct timespec ts = {0, (long)bo}; nanosleep(&ts, 0); me->sleeping = 0; }
+static void backoff_sleep(thr_t *me, uint64_t bo) { me->nbackoff++; me->sleeping = 1; struct timespec ts = {(time_t)(bo / 1000000000), (long)(bo % 1000000000)}; nanosleep(&ts, 0); me->sleeping = 0; }
 // sched_yield, or a short sleep once the wait has lasted run_ns past the back-off's start
 static void yield_for(thr_t *me, uint64_t run_ns, int clock) {
     uint64_t bo = yield_backoff_ns(run_ns, clock);

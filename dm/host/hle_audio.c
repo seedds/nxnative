@@ -627,16 +627,20 @@ static void au_watchdog_output(aout *a, uint64_t t, uint64_t gap) {
         au_retry(a, t);
     }
 }
+// One registry tick; the caller holds g_aos_lock and reads t after taking it.
+static void au_watchdog_tick(uint64_t t, uint64_t gap) {
+    for (int i = 0; i < AOMAX; i++) {
+        aout *a = g_aos[i]; if (!a || !a->au) continue;
+        au_watchdog_output(a, t, gap);
+    }
+}
 static void *au_watchdog(void *p) {
     (void)p; uint64_t last = now_ns();
     for (;;) {
         usleep(WD_TICK_MS * 1000);
         pthread_mutex_lock(&g_aos_lock);
         uint64_t t = now_ns(), gap = t - last; last = t;
-        for (int i = 0; i < AOMAX; i++) {
-            aout *a = g_aos[i]; if (!a || !a->au) continue;
-            au_watchdog_output(a, t, gap);
-        }
+        au_watchdog_tick(t, gap);
         pthread_mutex_unlock(&g_aos_lock);
         stats_drain();
     }

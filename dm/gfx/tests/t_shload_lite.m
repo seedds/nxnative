@@ -63,8 +63,13 @@ int main(void) { @autoreleasepool {
     }
     EXPECT("the old path: a layer-writing vertex shader", 1, full[0]->layer_out);
     EXPECT("the lite path: the same layer output", 1, lite[0]->layer_out);
-    // encode_args_ with an arg_len and no encoder writes the argument buffer: a nil encoder must not read as "no bindings"
-    EXPECT("encode_args_ gate: lite shader has bindings", 1, !(!lite[1]->ae && !lite[1]->arg_len));
+    // encode_args_ encodes a shader's arguments only when shader_has_args says it has some: a lite shader's nil encoder must not read as "no bindings"
+    for (int st = 0; st < 2; st++) {
+        EXPECT("encode_args_ gate: the lite shader has bindings", 1, shader_has_args(lite[st]));
+        EXPECT("encode_args_ gate: the old shader has bindings", 1, shader_has_args(full[st]));
+    }
+    NvShader *none = [NvShader new];
+    EXPECT("encode_args_ gate: a shader with no bindings has none", 0, shader_has_args(none));
     [NSFileManager.defaultManager removeItemAtPath:dir error:nil];
     printf("t_shload_lite: %d checks, %d failed\n", checks, failed);
     return failed != 0;

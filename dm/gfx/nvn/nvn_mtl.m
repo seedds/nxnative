@@ -5784,11 +5784,16 @@ static NSString *lib_name(NSString *path) {
 // what shader_load checks the encoder's length against) instead of an argument encoder, whose reflection request (newArgumentEncoderWithBufferIndex) takes the compiler's
 // file-system cache lock (MTLCompilerFSCache::getElementImpl, which hashes the element under it); the pulling, shadow-input, alpha and logic side libraries skip the same check.
 // Ocarina of Time's title-to-gameplay load: the prefetch queues spent ~15 % of their time in that lock while the replay thread, building pipelines inside the load's submission, waited on it
-static int g_shload_lite = -1;
+static _Atomic int g_shload_lite = -1;   // read on the prefetch queues and the replay thread: the first to read the switch logs it
 static int shload_lite(void) {
-    if (g_shload_lite < 0) { const char *e = getenv("DM_NVN_SHLOAD_LITE"); g_shload_lite = e && *e == '1'; if (g_shload_lite) MLOG("DM_NVN_SHLOAD_LITE=1: shader libraries load without argument-encoder reflection"); }
-    return g_shload_lite;
+    int v = atomic_load_explicit(&g_shload_lite, memory_order_relaxed);
+    if (v < 0) { const char *e = getenv("DM_NVN_SHLOAD_LITE"); int on = e && *e == '1', was = -1;
+        if (atomic_compare_exchange_strong(&g_shload_lite, &was, on) && on) MLOG("DM_NVN_SHLOAD_LITE=1: shader libraries load without argument-encoder reflection");
+        v = atomic_load_explicit(&g_shload_lite, memory_order_relaxed); }
+    return v;
 }
+// Whether a shader has an argument buffer to encode: with DM_NVN_SHLOAD_LITE its encoder is nil and arg_len alone says so (encode_args_)
+static inline int shader_has_args(NvShader *sh) { return sh->ae != nil || sh->arg_len != 0; }
 static id<MTLLibrary> lib_from_file_(NSString *path, NSError **err);
 static id<MTLLibrary> lib_from_file(NSString *path, NSError **err) { return lib_tag(lib_from_file_(path, err), lib_name(path)); }
 static id<MTLLibrary> lib_from_file_(NSString *path, NSError **err) {
@@ -10525,7 +10530,7 @@ static int encode_args(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, in
 static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, int metal_vertex) {
     if (nvn_stage == 1 && !metal_vertex && sh->has_alpha && atest_on()) at_bind(en);   // also for a shader without bindings
     if (nvn_stage == 1 && !metal_vertex && sh->has_logic && lop_on()) lo_bind(en);
-    if (!sh->ae && !sh->arg_len) return 1;   // no bindings (DM_NVN_SHLOAD_LITE leaves ae nil with an arg_len)
+    if (!shader_has_args(sh)) return 1;   // no bindings (DM_NVN_SHLOAD_LITE leaves ae nil with an arg_len)
     args_sync_dirty();
     if (!passdump() && !g_args_dirty[nvn_stage] && sh->ab_buf && sh->ab_pass == g_pass.serial && nvn_stage != 5 && !(sh->rf.drv_read[0] && sh->ab_binst != g_draw_binst) && !((sh->rf.pool || sh->rf.htab) && sh->ab_pgen != g_psnap_gen)) {
         bind_args(en, nvn_stage, metal_vertex, sh->ab_buf, sh->ab_gpu, sh->ab_off, sh->rf.abi);

@@ -55,18 +55,23 @@ dm/gfx/gl/*	api:gl	OpenGL on Metal
 dm/gfx/tools/dmsh_atomic.py	shader:image_atomic*	image atomics in the MSL
 dm/gfx/tools/dmsh_wide.py	shader:stage:*	storage buffer reads in the MSL: every NVN game
 dm/gfx/tools/dmsh_build.py:vs_tf|tf_layout	shader:transform_feedback	transform feedback capture
-dm/gfx/tools/dmsh_build.py:gs_slice|geometry_finish|vs_layer|_ep_drop	shader:stage:gs	geometry shaders
-dm/gfx/tools/dmsh_build.py:vs_layer|vs_layer_entry|layer_out	shader:layer_output	layer output
-dm/gfx/tools/dmsh_build.py:fs_uint	shader:integer_outputs	integer fragment outputs
-dm/gfx/tools/dmsh_build.py:int_inputs|vin_finish	shader:integer_vertex_inputs	integer vertex inputs
+dm/gfx/tools/dmsh_build.py:gs_slice|geometry_finish|_ep_drop	shader:stage:gs	geometry shaders
+dm/gfx/tools/dmsh_entry.py:vs_layer	shader:stage:gs	geometry shaders
+dm/gfx/tools/dmsh_entry.py:vs_layer|vs_layer_entry|layer_out	shader:layer_output	layer output
+dm/gfx/tools/dmsh_entry.py:fs_uint	shader:integer_outputs	integer fragment outputs
+dm/gfx/tools/dmsh_build.py:vin_finish	shader:integer_vertex_inputs	integer vertex inputs
+dm/gfx/tools/dmsh_entry.py:int_inputs	shader:integer_vertex_inputs	integer vertex inputs
 dm/gfx/tools/dmsh_build.py:pull_finish	shader:pulling_vertex_inputs	pulling vertex inputs
 dm/gfx/tools/dmsh_build.py:ps_libraries	shader:readable_tile	readable tiles (cut from the pixel shader's one compile)
 dm/gfx/tools/dmsh_build.py:vs_pad	shader:vs_pad	padded vertex outputs
-dm/gfx/tools/dmsh_build.py:drv_reads|unfillable|DRV_FILL	shader:driver_read_*	driver constant segments
+dm/gfx/tools/dmsh_reflect.py:drv_reads|unfillable|DRV_FILL	shader:driver_read_*	driver constant segments
 dm/gfx/tools/dmsh_build.py:spv_single_lane|SG_	shader:simd	subgroup operations
 dm/gfx/tools/dmsh_build.py:vertex_ab	shader:stage:vs	VertexA / VertexB programs
-dm/gfx/tools/dmsh_build.py:reflect|decode_	shader:stage:*	the reflection every shader's bindings come from
+dm/gfx/tools/dmsh_reflect.py:reflect|decode_	shader:stage:*	the reflection every shader's bindings come from
 dm/gfx/tools/dmsh_build.py	shader:stage:*	the shader build: every NVN game
+dm/gfx/tools/dmsh_rewrite.py	shader:stage:*	the MSL rewrites of every NVN shader
+dm/gfx/tools/dmsh_reflect.py	shader:stage:*	the reflection of every NVN shader
+dm/gfx/tools/dmsh_entry.py	shader:stage:*	the entry points of every NVN shader
 dm/gfx/tools/dmsh_vin.py	shader:integer_vertex_inputs	integer vertex inputs
 dm/gfx/tools/dmsh_pull.*	shader:pulling_vertex_inputs	pulling vertex inputs
 dm/gfx/tools/dmsh_fetch.py	shader:readable_tile	readable tiles

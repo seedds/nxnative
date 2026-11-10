@@ -1,4 +1,4 @@
-"""Ampere HMMA.16816 with an f16 accumulator through simdgroup_matrix (dmsh_build.py hmma_msl): the rewrite of the translator's helper dmsh_hmma16816_f16 as spirv-cross
+"""Ampere HMMA.16816 with an f16 accumulator through simdgroup_matrix (dmsh_rewrite.py hmma_msl): the rewrite of the translator's helper dmsh_hmma16816_f16 as spirv-cross
 writes it, its arguments and scratch array, the matrices and shared memory it gives the functions that call it, the compile with the chain's Metal flags, and on this Mac's
 GPU the rewritten body against a CPU reference of PTX mma.m16n8k16 (f16 sources and accumulator): one call on random fragments, four SIMD-groups a threadgroup, and a run
 of calls with TensorPass's flags (an accumulator kept in its slot between calls, A kept from the call before, C = 0, A loaded from shared memory where an LDSM read it,
@@ -19,13 +19,10 @@ import tempfile
 import unittest
 
 TOOLS = Path(__file__).resolve().parents[1] / 'tools'
-NAMES = {'hmma_msl', 'hmma_bslots', 'split_params', 'block_end', 'BRACE', 'FUNC_OPEN', 'HMMA_BODY', 'HMMA_ARGS', 'HMMA_CALL', 'HMMA_COPY', 'HMMA_DECL', 'HMMA_WRITE', 'TG_ARRAY'}
-tree = ast.parse((TOOLS / 'dmsh_build.py').read_text())
-selected = [n for n in tree.body if (isinstance(n, ast.FunctionDef) and n.name in NAMES)
-            or (isinstance(n, ast.Assign) and any(getattr(t, 'id', None) in NAMES for t in n.targets))]
-scope = {'re': re, 'bisect': bisect, 'collections': collections, 'itertools': itertools}
-exec(compile(ast.Module(body=selected, type_ignores=[]), str(TOOLS / 'dmsh_build.py'), 'exec'), scope)
-hmma_msl = scope['hmma_msl']
+sys.path.insert(0, str(TOOLS))
+import dmsh_rewrite   # noqa: E402
+from dmsh_rewrite import hmma_msl   # noqa: E402
+scope = vars(dmsh_rewrite)
 
 HEAD = '''#include <metal_stdlib>
 #include <simd/simd.h>
@@ -172,7 +169,7 @@ static void run(id<MTLDevice> dev, id<MTLComputePipelineState> ps, id<MTLBuffer>
 }
 '''
 # The GPU check: 64 threadgroups of 128 lanes, random halves in [-1, 1]; the reference is Ampere's: C, then k 0-7 summed in float in order and rounded once to f16,
-# then k 8-15 the same way (dmsh_build.py HMMA_BODY), and every output must match it bit for bit
+# then k 8-15 the same way (dmsh_rewrite.py HMMA_BODY), and every output must match it bit for bit
 RUNNER = HALF + r'''
 int main(int argc, char **argv) {
     @autoreleasepool {

@@ -227,7 +227,7 @@ class Stage(unittest.TestCase):
 
 
 class IntegerPassThrough(unittest.TestCase):
-    """dmsh_build.py fs_uint: a pixel shader that passes a flat input through to an integer target needs the integer entry point: Mario Kart World's dcb0504c844f1ecc, whose R8Uint output
+    """dmsh_entry.py fs_uint: a pixel shader that passes a flat input through to an integer target needs the integer entry point: Mario Kart World's dcb0504c844f1ecc, whose R8Uint output
     comes from its mesh stage's per-primitive attribute. A smooth input is not integer data"""
     SRC = """struct main0_out
 {
@@ -250,13 +250,8 @@ fragment main0_out main0(main0_in in [[stage_in]])
 
     @classmethod
     def setUpClass(cls):
-        import ast, re
-        tools = Path(__file__).resolve().parents[1] / 'tools'
-        tree = ast.parse((tools / 'dmsh_build.py').read_text())
-        sys.path.insert(0, str(tools)); import dmsh_side   # fs_uint's entry points call main0's shared body
-        scope = {'re': re, 'collections': __import__('collections'), 'dmsh_side': dmsh_side}
-        exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ('fs_uint', 'int_outputs', 'in_word')], type_ignores=[]), 'dmsh_build.py', 'exec'), scope)
-        cls.fs_uint = staticmethod(scope['fs_uint'])
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools')); import dmsh_entry
+        cls.fs_uint = staticmethod(dmsh_entry.fs_uint)
 
     def test_flat_input_through_a_local(self):
         src, mask = self.fs_uint(self.SRC % (', flat', '_26'))

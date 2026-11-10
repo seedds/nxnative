@@ -1206,6 +1206,15 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
   - on the Mac, it says `returned retained`.
 - **Found on:** Axiom Verge 1.0.3 (`0100052004384000`, its profile a separate change) with the launcher's **Metal 4 pipelines** on: an iPhone 16 Pro Max (iOS 26.0, LiveContainer) and an iPad Pro 11-inch (M4, iPadOS 26.0, from Xcode and in LiveContainer) crashed the same way.
 
+### Integer bits in a float colour output in a specialized Metal 4 pipeline
+
+- **Symptom:** a model drawn black or dark, or loading dark and then popping in: over it, some G-buffer targets stay zero while another (the normals) is written, so the lights add nothing.
+- **Cause:** a fragment shader whose float entry point returns integer register bits as floats in some outputs (`as_type<float>(int)`: the outputs the mixed entry point returns as integers, the reflection's `mask_m`) into colour targets of a non-integer format. In a Metal 4 pipeline specialized from a base with open colour state, the pipeline wrote zeros to several of its targets; the same pipeline built whole, or through the `MTLDevice` (`DM_PSO_MTL4=0`), writes the values, and so does the specialized one when that output is written as `0.0`. A small probe with a few outputs does not reproduce it, so the trigger inside Metal's specialization is not known (open; macOS 26.1, M4 Pro).
+- **Fix:** `pso_intbits_whole` in `nvn_mtl.m` names such pipelines (an integer-bit output into a non-integer target, merged passes through `lmap`), and `pso_desc` labels them whole, as for [`[[primitive_id]]`](#primitive_id-in-a-specialized-metal-4-pipeline). They give up the specialization's compile time: in Orbitals' stage 2, 22 base-pass fragment shaders have such outputs (masks 128, 132, 140). `DM_PSO_INTBITS_WHOLE=0` turns the rule off; `DM_PSO_WHOLE=<key prefixes>|all` builds chosen pipelines whole, which is how this was bisected.
+- **Prebuild:** the prebuild still makes bases for such pairs (no draw uses them); leaving them out, as for `[[primitive_id]]`, is not done yet.
+- **Found on:** Orbitals (`040004F027560000`): the player ship's base pass `e97d65cf4844ecdb` (`M_Cel_Base_PlayerShip`) writes GBufferB's blue channel (BGRA8Unorm) from an integer register; GBufferB, C and D came out zero over the ship. Bisected with `DM_PSO_WHOLE` over the frame's fragment keys (0-7 and 8-b still dark, e fixed, `e97d65cf` alone fixed). With the rule, the ship was dark in 3 of 24 screenshots of an engagement, against 21 of 24 with `DM_PSO_INTBITS_WHOLE=0`.
+- **Check:** `make -C dm/gfx/tests GAME=<id> check_t_pso_intbits` (10 checks: the decision, and that a named pipeline builds whole and writes the bits' unorm value with its other outputs intact; 3 fail with the rule off).
+
 ### NVN2's DLSS on MetalFX
 
 - **Symptom:** a Switch 2 game calls `nvnCommandBufferEvaluateDlss` and its builder functions, which the host did not have.

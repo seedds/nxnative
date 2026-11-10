@@ -7845,6 +7845,20 @@ static void lo_bind(id<MTLCommandEncoder> en) {
     enc_r_args((id<MTL4RenderCommandEncoder>)en, MTLRenderStageFragment, gpu, DMSH_LOGIC_BUFFER);
 }
 #define PSO_WHOLE @"built whole"   // pso_desc's label for pso_build_ex: no base, see there
+// Integer bits in a float colour output: a fragment shader whose float entry point returns, in some outputs, integer register bits as floats (as_type<float>: the outputs the
+// mixed entry point returns as integers, mask_m) into colour targets of a non-integer format gets a pipeline built whole, as one reading [[primitive_id]] does. Specialized
+// from a base with open colour state, such a pipeline wrote zeros where its whole build (and the MTLDevice build) writes the values: Orbitals' player ship (M_Cel_Base_PlayerShip,
+// e97d65cf4844ecdb) writes the GBufferB blue channel from an integer register (as_type<float>(int)), and on the Metal 4 path GBufferB, GBufferC and GBufferD came out zero over
+// the ship (snapshots, stage 2): no base colour, so the sun light left it black while engaging, and the ship "loaded dark". Writing 0.0 there instead (the unorm value of
+// those bits) or building whole cured it; the cause inside Metal's specialization is not known (a probe with a few outputs does not show it, macOS 26.1, M4 Pro).
+// DM_PSO_INTBITS_WHOLE=0 turns the rule off (A/B)
+static int pso_intbits_whole(const pso_key *k, uint8_t mask, int merged) {   // merged: output lmap[i] goes to attachment i
+    static int on = -1; if (on < 0) { const char *e = getenv("DM_PSO_INTBITS_WHOLE"); on = !(e && !strcmp(e, "0")); if (!on) MLOG("DM_PSO_INTBITS_WHOLE=0: pipelines with integer bits in float colour outputs are specialized from bases"); }
+    if (!on) return 0;
+    for (int i = 0; i < 8; i++) { int l = merged ? k->lmap[i] : i; if (l >= 0 && l < 8 && (mask >> l & 1) && k->cfmt[i] && !pf_int_kind((MTLPixelFormat)k->cfmt[i])) return 1; }
+    return 0;
+}
+static int pso_key_prefix(const char *key, const char *p) { while (*p) if (*key++ != *p++) return 0; return 1; }   // DM_PSO_WHOLE: key starts with p
 static MTLRenderPipelineDescriptor *pso_desc(const pso_key *k, NvShader *vs, NvShader *fs, id<MTLFunction> fsfn, int merged) {
     MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
     d.vertexFunction = vs && vs->mesh_kind != 2 ? vs->fn : nil; d.fragmentFunction = fsfn ? fsfn : fs ? fs->fn : nil;   // mtk_pso copies the raster state only: a mesh function is not a vertex function
@@ -7893,6 +7907,15 @@ static MTLRenderPipelineDescriptor *pso_desc(const pso_key *k, NvShader *vs, NvS
     d.rasterSampleCount = k->samples ? k->samples : 1;
     d.alphaToCoverageEnabled = k->a2c;
     if (fs && fs->rf.reads_prim_id) d.label = PSO_WHOLE;
+    if (fs && fs->mask_m && pso_intbits_whole(k, fs->mask_m, merged)) d.label = PSO_WHOLE;
+    // DM_PSO_WHOLE=all | <fragment key prefix> | v<vertex key prefix> | - (no fragment shader)[,...] (diagnostic): these pipelines are compiled whole through the Metal 4 compiler, with no base specialized with the colour state
+    // (pso_build_ex), to tell a base / specialization difference from the rest of the Metal 4 path (DM_PSO_MTL4=0 changes the archive, the hybrids and the compiler too)
+    { static int nw = -1; static char wk[64][18];
+      if (nw < 0) { nw = 0; for (const char *q = getenv("DM_PSO_WHOLE"); q && *q && nw < 64; q = strchr(q, ',') ? strchr(q, ',') + 1 : q + strlen(q)) { size_t n = strcspn(q, ","); if (n > 17) n = 17; memcpy(wk[nw], q, n); wk[nw++][n] = 0; }
+                    if (nw) MLOG("DM_PSO_WHOLE: %d fragment key prefixes (or all) get whole pipelines (diagnostic)", nw); }
+      for (int i = 0; i < nw; i++) {   // "v<prefix>" matches the vertex shader's key, "-" a pipeline with no fragment shader
+          const char *w = wk[i]; int hit = !strcmp(w, "all") || (!strcmp(w, "-") && !fs) || (w[0] == 'v' && vs && pso_key_prefix(vs->key, w + 1)) || (fs && pso_key_prefix(fs->key, w));
+          if (hit) { d.label = PSO_WHOLE; break; } } }
     for (int i = 0; i < 8; i++) {
         if (!k->cfmt[i]) continue;
         MTLRenderPipelineColorAttachmentDescriptor *c = d.colorAttachments[i];

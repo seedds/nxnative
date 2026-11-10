@@ -257,6 +257,10 @@ def guarded(src):   # FS_POS with its two c[6] words bounded, and the size table
     return src.replace('struct spvDescriptorSetBuffer0', 'struct _23\n{\n    uint4 _m0[4];\n};\n\nstruct spvDescriptorSetBuffer0').replace(
         '    sampler fp_t_tcb_8Smplr_w [[id(5)]];', '    sampler fp_t_tcb_8Smplr_w [[id(5)]];\n    constant _23* fp_c%d [[id(6)]];' % dmsh_abi.CBSIZE_BANK)
 
+# A read at a computed offset, as spirv-cross writes the translator's: the size comparison a value of its own, which chooses row 0 for the index and 0 for the value when out of bounds
+COMPUTED = ('bool _5 = ((uint(_3) << 2u) | uint(_4)) < ((*spvDescriptorSet0.fp_c%d)._m0[2].w >> 2u);\n'
+            'float _6 = _5 ? (*spvDescriptorSet0.fp_c14)._m0[_5 ? _3 : 0][_4] : 0.0;' % dmsh_abi.CBSIZE_BANK)
+
 class UniformBounds(unittest.TestCase):
     def test_unguard(self):
         read = '(*spvDescriptorSet0.vp_c5)._m0[29].y'
@@ -267,9 +271,53 @@ class UniformBounds(unittest.TestCase):
             with self.subTest(why=why): self.assertEqual(dmsh_fetch.unguard(src), want)
 
     def test_a_computed_offset_stays(self):   # its guard is a value of its own, and the read's index chooses row 0 when out of bounds
-        src = ('bool _5 = ((uint(_3) << 2u) | uint(_4)) < ((*spvDescriptorSet0.fp_c%d)._m0[2].w >> 2u);\n'
-               'float _6 = _5 ? (*spvDescriptorSet0.fp_c14)._m0[_5 ? _3 : 0][_4] : 0.0;' % dmsh_abi.CBSIZE_BANK)
-        self.assertEqual(dmsh_fetch.unguard(src), src)
+        self.assertEqual(dmsh_fetch.unguard(COMPUTED), COMPUTED)
+        self.assertEqual(dmsh_fetch.unguard(dmsh_fetch.select_guards(COMPUTED)), dmsh_fetch.select_guards(COMPUTED))
+
+    def test_select_guards(self):   # every bounded read as a load and a select (GitHub PR #2127); unguard reads both forms the same
+        read = '(*spvDescriptorSet0.vp_c5)._m0[29].y'
+        tern = GUARD.format(w=117, r=read).replace('fp_c', 'vp_c'); cond = tern[1:-1].split(' ? ')[0]
+        for why, src, want in (('in parentheses', 'float _1 = _2 * %s;' % tern, 'float _1 = _2 * select(0.0, %s, %s);' % (read, cond)),
+                               ('a function argument', 'float _1 = fma(_2, %s, _3);' % tern[1:-1], 'float _1 = fma(_2, select(0.0, %s, %s), _3);' % (read, cond)),
+                               ('bit-cast', 'int _1 = as_type<int>(%s) << 6;' % tern[1:-1], 'int _1 = as_type<int>(select(0.0, %s, %s)) << 6;' % (read, cond)),
+                               ('an unsigned word', 'uint _1 = %s;' % tern.replace('0.0)', '0u)'), 'uint _1 = select(0u, %s, %s);' % (read, cond)),
+                               ('the other side of a choice', 'float _1 = _2 ? 0.0 : %s;' % tern, 'float _1 = _2 ? 0.0 : select(0.0, %s, %s);' % (read, cond)),
+                               ('two in one call', 'float _1 = fma(%s, %s, _3);' % (tern[1:-1], tern[1:-1]), 'float _1 = fma(select(0.0, {0}, {1}), select(0.0, {0}, {1}), _3);'.format(read, cond))):
+            with self.subTest(why=why):
+                got = dmsh_fetch.select_guards(src)
+                self.assertEqual(got, want)
+                self.assertEqual(dmsh_fetch.unguard(got), dmsh_fetch.unguard(src))
+                self.assertEqual(dmsh_fetch.select_guards(got), got, 'a second pass changes nothing')
+
+    def test_select_guards_at_a_computed_offset(self):   # the index keeps its row-0 choice, so the load is inside the binding without a branch
+        row = '(*spvDescriptorSet0.fp_c14)._m0[_5 ? _3 : 0]'
+        self.assertEqual(dmsh_fetch.select_guards(COMPUTED).split('\n')[1], 'float _6 = select(0.0, %s[_4], _5);' % row)
+        for why, a, b in (('in parentheses', 'float _6 = _5 ? %s[_4] : 0.0;' % row, 'float _6 = _7 * (_5 ? %s[_4] : 0.0);' % row),
+                          ('a fixed component', '[_4] : 0.0;', '.z : 0.0;'), ('an unsigned word', '[_4] : 0.0;', '[_4] : 0u;')):
+            with self.subTest(why=why):
+                got = dmsh_fetch.select_guards(COMPUTED.replace(a, b))
+                self.assertNotIn(' : 0.0', got); self.assertNotIn(' : 0u', got); self.assertEqual(got.count('select('), 1)
+        other = COMPUTED + '\nfloat _9 = _8 ? (*spvDescriptorSet0.fp_c14)._m0[_8 ? _3 : 0][_4] : 0.0;'   # _8 is no size comparison: the game's own choice
+        self.assertTrue(dmsh_fetch.select_guards(other).endswith(other.split('\n')[2]))
+
+    def test_select_guards_leaves_none(self):   # a bounded read in a form it does not know is an error, not a branch left in the shader
+        tern = GUARD.format(w=117, r='(*spvDescriptorSet0.fp_c5)._m0[29].y')
+        for why, src in (('another zero', 'float _1 = %s;' % tern.replace(': 0.0', ': -0.0')),
+                         ('a read of two components', 'float2 _1 = %s;' % tern.replace('.y :', '.xy :')),
+                         ('a computed offset with another index', COMPUTED.replace('[_5 ? _3 : 0]', '[_3]')),
+                         ('a size comparison used as a choice elsewhere', COMPUTED + '\nfloat _9 = _5 ? _7 : 0.0;')):
+            with self.subTest(why=why):
+                with self.assertRaisesRegex(ValueError, 'not written as a select'): dmsh_fetch.select_guards(src)
+        self.assertEqual(dmsh_fetch.select_guards('float _1 = _2 ? _3 : 0.0;'), 'float _1 = _2 ? _3 : 0.0;', 'no descriptor set')
+
+    def test_select_guards_compile(self):
+        v, _ = dmsh_fetch.fold(dmsh_fetch.select_guards(guarded(FS_POS)), BINDINGS)
+        self.assertEqual(v.count('select(0.0, (*spvDescriptorSet0.fp_c3)._m0[6].'), 2); self.assertNotIn(' ? (*spvDescriptorSet0.fp_c3)', v)
+        with tempfile.TemporaryDirectory() as d:
+            for sdk in ('macosx', 'iphoneos'):
+                with self.subTest(sdk=sdk):
+                    try: compile_lib(v, pathlib.Path(d), 'selected_' + sdk, sdk)
+                    except subprocess.CalledProcessError as e: self.fail(e.stderr)
 
     def test_compiles_on_both_platforms(self):
         v, _ = dmsh_fetch.fold(guarded(FS_POS), BINDINGS)

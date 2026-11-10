@@ -595,8 +595,7 @@ static id<MTLRenderPipelineState> mtk_build(const pso_key *k, NvShader *ts, NvSh
     MTL4MeshRenderPipelineDescriptor *m4 = g_comp4 ? mtk_desc4(d, ts, ms, ff) : nil;
     if (m4) {
         id<MTLRenderPipelineState> ps = nil; int from_run = 0;
-        for (id<MTL4Archive> a in g_arch4p) if ((ps = [a newRenderPipelineStateWithDescriptor:m4 error:nil])) break;   // a period of mesh pipelines alone is a p file (no vertex layout)
-        if (!ps) for (id<MTL4Archive> a in g_arch4) if ((ps = [a newRenderPipelineStateWithDescriptor:m4 error:nil])) { from_run = 1; break; }
+        ps = arch_lookup(m4, 0, &from_run);   // a period of mesh pipelines alone is a p file (no vertex layout)
         if (ps) {
             g_mtk_arch++; if (archived) *archived = 1;
             if (from_run && g_compact_enabled && atomic_load(&g_warm_running)) arch_harvest(m4, 1);

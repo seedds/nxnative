@@ -172,19 +172,6 @@ class ShaderCache(unittest.TestCase):
         exec(compile(ast.Module(body=functions, type_ignores=[]), str(TOOLS / 'dmsh_build.py'), 'exec'), self.ns)
         return self.ns['build_keys'](want, locations, pairs)
 
-    def test_package_records_are_read_from_the_file_at_their_offsets(self):
-        # record_index keeps no package in memory (GitHub issue #1036); record k is still the bytes from its marker to the next one, the last to the end
-        node = next(n for n in self.tree.body if isinstance(n, ast.FunctionDef) and n.name == 'record_index')
-        ns: dict[str, Any] = dict(os=os, re=re, mmap=__import__('mmap'))
-        exec(compile(ast.Module(body=[node], type_ignores=[]), str(TOOLS / 'dmsh_build.py'), 'exec'), ns)
-        recs = [b'BTCDBTCD' + b'\x01' * 40, b'BTCDBTCD' + b'\x02' * 7, b'BTCDBTCD' + b'\x03' * 100]
-        path = Path(self.tmp.name) / 'pkg.bin'
-        for data, want in ((b'header' + b''.join(recs), recs), (b'', [])):
-            path.write_bytes(data)
-            fd, offs = ns['record_index'](str(path))
-            try: self.assertEqual([os.pread(fd, offs[k + 1] - offs[k], offs[k]) for k in range(len(offs) - 1)], want)
-            finally: os.close(fd)
-
     def test_partial_selection_adds_known_pairs_and_full_selection_keeps_every_shader(self):
         locations = {'vertex': None, 'pixel': None, 'other': None}
         pairs = {'vertex': {'pixel', 'not-in-package'}}

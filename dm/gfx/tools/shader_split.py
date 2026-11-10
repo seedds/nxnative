@@ -50,7 +50,8 @@
 # Stage: BNSH uses the stage slot; BAHS uses bits 10..13 of SPH word 0 (1 vertex 2 hull 3 domain 4 geometry 5 pixel), and a compute header means compute.
 # Key = sha256(first 0x880 bytes of the control section (its own length when control +0x20 says it is shorter, see ctl_len) + code area)[:16], the same as the host's prog_get: in this game many shaders share a control section but differ in code
 #   (SecredUber's 16600 stage shaders have only 3079 distinct control sections, with 6367 cases of same control, different code), so hashing the control alone picks the wrong library.
-# Output: <package dir>/<stage>_<source group>.bin, each record = 'BTCDBTCD' + header (+0x28 control length, +0x2c code length) padded to 0x38 + code area + control section, one copy per key;
+# Output: <package dir>/<stage>_<source group>.bin, each record = 'BTCDBTCD' + header (+0x08 the key's 8 bytes, +0x28 control length, +0x2c code length) padded to 0x38 + code area + control section, one copy per key
+#   (dmsh_build.py finds a map row's record by that key, not by the row's index: a package from another split than the map stops it instead of translating a neighbour's bytes, issue #1841);
 #   map rows have the same columns as D2R's shader_map.tsv (column 5 records where the key first appeared); the answer table has one row per compute shader {"local", "shared"} (shared memory rounded up to 16 bytes, as D2R did).
 # Usage: shader_split.py <RomFS dir> <ExeFS main> <output package dir> <output map> <output answer table> [<output pair table> [<output pipeline pair table (pso_pairs.tsv)> [<DLC RomFS dirs, comma-separated>]]]   Environment J=concurrency (default 8)
 #   With an update: give RomFS and main as comma-separated lists (base game first, e.g. data/v0/RomFS,data/v327680/RomFS); the output is the union of both versions (see main())
@@ -719,6 +720,75 @@ def pkz_shaders(path, rel, ents, out):
             if len(d) != usz: red(f'/{rel}/{name}: {len(d)} bytes decoded, the entry says {usz}')
             scan_blob(d, f'/{rel}/{name}', out)
 
+RPF6, RGXD = b'RPF6', b'rgxd'
+def rpf_jobs(files, mains, parts=64):
+    """Every file of every Rockstar RPF6 archive in ranges of about equal stored length (Red Dead Redemption: 134 archives, 11 GB; its shaders are the .nvn effects in shaders.rpf, but no
+    file name is relied on). The entry and name tables are AES encrypted with a key in main (rpf6.py find_key): the first main that opens the first archive gives it.
+    → ([(path, rel, (RPF6, key, entries)), …], the RPF6 paths)"""
+    import rpf6
+    rp = [(p, r) for p, r in files if rpf6.header(p) is not None]
+    if not rp: return [], set()
+    key = next((k for m in mains if (k := rpf6.find_key(m, rp[0][0])) is not None), None)
+    if key is None: red(f'/{rp[0][1]}: an encrypted RPF6 archive, and no 32-byte window of main decrypts its first entry to the root directory')
+    arcs = [(p, r, rpf6.Rpf(p, key).files) for p, r in rp]
+    jobs, step = [], max(1, sum(e[2] for _, _, es in arcs for e in es) / parts)
+    for p, r, es in arcs:
+        cur, size = [], 0
+        for e in es:
+            cur.append(e); size += e[2]
+            if size >= step: jobs.append((p, r, (RPF6, key, tuple(cur)))); cur, size = [], 0
+        if cur: jobs.append((p, r, (RPF6, key, tuple(cur))))
+    return jobs, {p for p, _ in rp}
+
+def rpf_shaders(path, rel, key, ents, out):
+    """A range of RPF6 files (rpf_jobs), each zstd-decoded and scanned like a loose file"""
+    import rpf6
+    r = rpf6.Rpf.__new__(rpf6.Rpf); r.path, r.key = path, key   # the entries came with the job; only read() is needed
+    z = zstd_mod()
+    with open(path, 'rb') as f:
+        for e in ents: scan_blob(r.read(f, e, z), f'/{rel}/{e[0]}', out)
+
+def rgxd_shaders(d, label):
+    """A RAGE effect ('rgxd', Red Dead Redemption's .nvn files in shaders.rpf: 131 effects, 3,413 shaders, 2,089 vertex and 1,324 pixel): after the effect's parameter names, each shader is a
+    record {u32 length, u32 0x19866891 (GLSLC's magic), u32 code length, u32 control length}, then the code area, then the control section. The records are packed (not 4-aligned).
+    919 of the 3,413 control sections are 12·n bytes longer than their own length (control +0x20, n = 1…11); the extra bytes stay with the section (ctl_len keys on its own length).
+    The first word is not the record's own length (0x2df8 for a 0x500 + 0x880 shader); it is not needed to find the shaders"""
+    out, n = [], d.count(CTL_MAGIC)
+    for m in re.finditer(b'\x91\x68\x86\x19', d):
+        h = m.start() - 4
+        if h < 0 or h + 16 > len(d): continue
+        _, _, nk, nc = struct.unpack_from('<4I', d, h)
+        if h + 16 + nk + nc > len(d): continue
+        code, ctl = d[h + 16:h + 16 + nk], d[h + 16 + nk:h + 16 + nk + nc]
+        st = glslc_stage(ctl, code) if ctl[:4] == CTL_MAGIC and len(ctl) >= 0x760 else None
+        if st and not check(label, st, ctl, code): out.append((f'{label}#RGXD@{h:#x}', st, ctl, code))
+    if len(out) != n: print(f'[RED] {label}: {n} control sections, {len(out)} shader records read; the rest are left out', flush=True)
+    return out
+
+def d11_pack_shaders(path, label, out):
+    """Double Eleven's resource pack (Red Dead Redemption's d11extra/langselect.pkdswitch, the language selection shown before the game): the data file holds the members one after another, its
+    index beside it (.pkiswitch) is u32 version 3, u32 0, u32 member count (22), then per member {u32 length, u32 stored length, u32 offset in the data file, u32 name hash}; a member whose stored
+    length differs from its length is one zlib stream. Members 4 and 5 are whole GLSLC outputs, the screen's pixel and vertex shader (98664fb56b9c9fdf, 70d4dd8068044bb5): without them the host
+    found no vertex shader for the first program the game draws with. The others are textures ('DFvN') and fonts ('BMF')"""
+    with open(path[:-len('.pkdswitch')] + '.pkiswitch', 'rb') as f: idx = f.read()
+    with open(path, 'rb') as f: d = f.read()
+    if len(idx) < 12: red(f'{label}: the pack index is cut short ({len(idx)} bytes)')
+    ver, _, n = struct.unpack_from('<3I', idx)
+    if ver != 3: red(f'{label}: pack index version {ver}: only 3 is known')
+    if 12 + 16 * n > len(idx): red(f'{label}: the pack index lists {n} members but holds {(len(idx) - 12) // 16}')
+    for k in range(n):
+        size, stored, off, h = struct.unpack_from('<4I', idx, 12 + 16 * k)
+        if off + stored > len(d): red(f'{label}: member {k} runs past the end of the data file')
+        m = d[off:off + stored]
+        if stored != size:
+            try: m = zlib.decompress(m)
+            except zlib.error as e: red(f'{label}: member {k} ({h:08x}) is no zlib stream: {e}')
+            if len(m) != size: red(f'{label}: member {k} ({h:08x}) inflates to {len(m)} bytes, the index says {size}')
+        lb = f'{label}#{h:08x}'
+        found = []; scan_blob(m, lb, found)
+        if not found: found = glslc_shaders(m, lb, need=False)
+        out.extend(found)
+
 CPK = b'CPK '
 def cpk_jobs(files, parts=64):
     """Every entry of every CRI CPK archive in ranges of about equal length (Bayonetta 2: six in the RomFS root, 9.5 GB, 6,091 files, 12 GB of them CRILAYLA-compressed; its shaders are BNSH
@@ -751,6 +821,13 @@ def cpk_shaders(path, rel, ents, out):
         scan_blob(d, f'/{rel}/{e[0]}', out)
 
 CRA = b'CRA.'
+def boot_nros():
+    """The NROs captured from a boot (DM_NRO_DIR, which the NSP script sets), sorted; none without it. The folder is escaped: it lies in the NSP folder, whose name often has
+    brackets (`Game [id][v0]`), and glob would read them as a character class and find nothing"""
+    d = os.environ.get('DM_NRO_DIR')
+    return sorted(glob.glob(os.path.join(glob.escape(d), '*.nro'))) if d else []
+
+
 def cra_jobs(files, parts=64):
     """Every file of Camelot's archive in ranges of about equal length (Mario Tennis Fever: the whole game in rom:/42, 8,671 files, 7.6 GB; cra.py). Its index is in the NRO the game decodes at run time,
     which DM_NRO_DIR holds (the NSP script's capture). → ([(path, rel, entries), …], the archive paths)"""
@@ -760,7 +837,7 @@ def cra_jobs(files, parts=64):
         if h != CRA: continue
         import cra
         idx = None
-        for n in sorted(glob.glob(os.path.join(os.environ.get('DM_NRO_DIR', ''), '*.nro'))):
+        for n in boot_nros():
             try: idx = cra.Index(open(n, 'rb').read()); break
             except cra.Error: continue
         if idx is None: red(f'/{r}: a CRA archive, and no NRO in DM_NRO_DIR ({os.environ.get("DM_NRO_DIR")}) holds its file table')
@@ -2746,6 +2823,7 @@ def scan_blob(d, label, out, depth=0, left=None):
         for i, m in enumerate(cra.narc_members(d, label)): scan_blob(cra.undo(m), f'{label}/{i}', out, depth + 1)
         return
     if d[:4] == b'BAHS': out.extend(bahs_shaders(d, label)); return
+    if d[:4] == RGXD: out.extend(rgxd_shaders(d, label)); return
     if d[:4] == b'NDSR': out.extend(ndsr_shaders(d, label)); return
     if d[:4] == b'NDVE': out.extend(ndve_shaders(d, label)); return
     if shaders := sead_prim_shaders(d, label): out.extend(shaders); return
@@ -2946,6 +3024,9 @@ def scan_file_in(args):
     if head[:4] == NLG_DICT:
         nlg_shaders(path, '/' + rel, found)
         return rel, uniq_keys(found), var_pairs(found), trees
+    if path.endswith('.pkdswitch') and os.path.exists(path[:-len('.pkdswitch')] + '.pkiswitch'):   # Double Eleven's resource pack, read through its index (d11_pack_shaders)
+        d11_pack_shaders(path, '/' + rel, found)
+        return rel, uniq_keys(found), var_pairs(found), trees
     if head[:8] in (IDRK, PDRK):
         idrk_shaders(path, '/' + rel, found)
         return rel, uniq_keys(found), var_pairs(found), trees
@@ -2966,6 +3047,9 @@ def scan_file_in(args):
         return rel, uniq_keys(found), var_pairs(found), lost or trees
     if len(args) > 2 and args[2][0] == FB_CAS:   # CompiledBytecode resources of a Frostbite cas file (frostbite_jobs)
         frostbite_shaders(path, rel, args[2][1], found)
+        return rel, uniq_keys(found), var_pairs(found), trees
+    if len(args) > 2 and head[:4] == RPF6 and args[2][0] == RPF6:   # files of a Rockstar RPF6 archive (rpf_jobs)
+        rpf_shaders(path, rel, args[2][1], args[2][2], found)
         return rel, uniq_keys(found), var_pairs(found), trees
     if len(args) > 2 and head[:4] == PKZL:   # entries of a PlatinumGames PKZ (pkz_jobs)
         pkz_shaders(path, rel, args[2], found)
@@ -3117,10 +3201,11 @@ def main():
         found += glslc_shaders(img, 'main' + ('@' + tag if tag else ''), need=False)
         found += tfxo_streams(img, 'main' + ('@' + tag if tag else ''))   # YEBIS's effect file, a zlib stream in main (Pokémon Sword)
         found += retro_main_forms(img, 'main' + ('@' + tag if tag else ''))   # Retro's startup material archive, LZSS in main (Donkey Kong Country: Tropical Freeze)
-        found += raw_shaders(img, 'main' + ('@' + tag if tag else ''), {c for _, _, c, _ in found})
+        if RGXD in img: found += rgxd_shaders(img, 'main' + ('@' + tag if tag else ''))   # RAGE's built-in effects (Red Dead Redemption: 20 in main's data, 168 shaders that shaders.rpf lacks)
+        found += raw_shaders(img, 'main' + ('@' + tag if tag else ''), {c[:struct.unpack_from('<I', c, 0x20)[0]] for _, _, c, _ in found})   # compared at their own length, as raw_shaders reads them
         # NROs the game decodes at run time (Mario Tennis Fever: main is a boot stub, and the real code's data holds 11 shaders the game draws its UI and sky with): scanned like main, as no RomFS file holds them
         if not i:
-            for n in sorted(glob.glob(os.path.join(os.environ.get('DM_NRO_DIR', ''), '*.nro'))) if os.environ.get('DM_NRO_DIR') else []:
+            for n in boot_nros():
                 scan_blob(open(n, 'rb').read(), f'main/{os.path.basename(n)}', found)
         # GLSLC outputs the game compiles at run time, captured on the Mac (hle_glslc.c): <version dir>/glslc_capture, or DM_GLSLC_CAPTURE. A game needs them when main holds GLSL sources and
         # calls glslcCompile in a module it loads (Fire Emblem: Three Houses; profile_guess.py shader_sources). Captain Toad: Treasure Tracker imports it with agl's GLSL sources, but no module defines it
@@ -3156,8 +3241,9 @@ def main():
     ah_jobs, arhs = arh_jobs(files)   # Monolith's ARH1/ARD archives and embedded XBC1/HCPS programs
     fb_jobs, fbs = frostbite_jobs(files)   # EA SPORTS FC 27's Frostbite bundles, Oodle Leviathan decoded by the game's own decoder in the Mac host
     pd_jobs, pdats = pdat_jobs(files)   # Kirby Air Riders' PDAT archives: the PMAP records in byte ranges
-    big += pak_jobs + tr_jobs + ue_jobs + bd_jobs + arc_jobs + pz_jobs + ck_jobs + cr_jobs + zp_jobs + ah_jobs + fb_jobs + pd_jobs
-    files = [(p, r) for p, r in files if not linkdata_jobs(p, r) and p not in paks and p not in trp and p not in uep and p not in bdts and p not in arcs and p not in pkzs and p not in cpks and p not in cras and p not in zips and p not in arhs and p not in fbs and p not in pdats]
+    rp_jobs, rpfs = rpf_jobs(files, main_v)   # Red Dead Redemption's RPF6 archives, their tables decrypted with the key in main (rpf6.py)
+    big += pak_jobs + tr_jobs + ue_jobs + bd_jobs + arc_jobs + pz_jobs + ck_jobs + cr_jobs + zp_jobs + ah_jobs + fb_jobs + pd_jobs + rp_jobs
+    files = [(p, r) for p, r in files if not linkdata_jobs(p, r) and p not in paks and p not in trp and p not in uep and p not in bdts and p not in arcs and p not in pkzs and p not in cpks and p not in cras and p not in zips and p not in arhs and p not in fbs and p not in pdats and p not in rpfs]
     with cf.ProcessPoolExecutor(J, initializer=_pool_init, initargs=(common, {}, zdicts)) as ex:
         n = len(big) + len(files)
         results += pooled(ex, big, n) + pooled(ex, files, n, len(big), chunk=16)
@@ -3194,8 +3280,8 @@ def main():
     for key in sorted(keys, key=lambda k: (group(keys[k][0]), keys[k][0], k)):   # the same input gives byte-identical output
         where, st, ctl, code = keys[key]
         name = f'{st}_{group(where)}.bin'
-        rec = bytearray(b'BTCDBTCD' + bytes(0x30)); struct.pack_into('<2I', rec, 0x28, len(ctl), len(code)); rec += code + ctl
-        if rec.find(CTL_MAGIC) != 0x38 + len(code): red(f'key {key}: the control magic appears in the code area, dmsh_build would split the record wrongly')
+        rec = bytearray(b'BTCDBTCD' + bytes.fromhex(key) + bytes(0x28)); struct.pack_into('<2I', rec, 0x28, len(ctl), len(code)); rec += code + ctl
+        if rec.find(CTL_MAGIC, 0x38) != 0x38 + len(code): red(f'key {key}: the control magic appears in the code area, dmsh_build would split the record wrongly')
         if rec.count(b'BTCDBTCD') != 1: red(f'key {key}: the record separator appears inside the record')
         rows.append((name, len(recs[name]), STAGE_NAME[st], key, where)); recs[name].append(bytes(rec)); stat[st] += 1
         if st == 'cs':

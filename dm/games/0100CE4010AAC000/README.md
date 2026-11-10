@@ -1,6 +1,6 @@
 # FINAL FANTASY CRYSTAL CHRONICLES Remastered Edition (`0100CE4010AAC000`)
 
-Update 1.0.3 (v196608) over the base cartridge (v0 = 1.0.0, whose control data says display version 1.0.1), SDK 8.2.1. Unity 2018.4.2f1 IL2CPP with FMOD, on NVN. Modules `main`, `subsdk0` (the movie module) and `sdk`. Brought up on the Mac on 2026-10-25: boot, intro movies and in-engine cutscenes, title, the village, field and dungeon play with Mog carrying the chalice, at 30 fps. Not tried on an iPhone; an IPA has not been built and its size is not yet measured. The Mac app (`--platform mac-app`) is 5.34 GB (RomFS 3.9 GiB and Mac shader libraries 1.1 GiB); the README gallery picture is a Mac frame of field play (2026-10-26).
+Update 1.0.3 (v196608) over the base cartridge (v0 = 1.0.0, whose control data says display version 1.0.1), SDK 8.2.1. Unity 2018.4.2f1 IL2CPP with FMOD, on NVN. Modules `main`, `subsdk0` (the movie module) and `sdk`. Brought up on the Mac on 2026-10-25: boot, intro movies and in-engine cutscenes, title, the village, field and dungeon play with Mog carrying the chalice, at 30 fps. Not tried on an iPhone; an IPA has not been built and its size is not yet measured. The Mac app (`--platform mac-app`) is 5.34 GB (RomFS 3.9 GiB and Mac shader libraries 1.1 GiB). A Mac screenshot of field play was captured on 2026-10-26.
 
 Build IDs (first 16 hex digits, as cheat files name them): 1.0.0 `DF154E1D08E39646`, 1.0.1 `687AB956C7A3914B`, 1.0.2 `1369AD3EA91E2C40`, 1.0.3 `E1D8B399B787AE41` (the version table of [switch-cheats-db](https://github.com/HamletDuFromage/switch-cheats-db/blob/master/versions/0100CE4010AAC000.json)). Only 1.0.0 and 1.0.3 were on hand.
 
@@ -47,4 +47,4 @@ General changes first needed here; each applies to every game:
 
 - The ThreadedStreamBuffer load-acquires on 1.0.1 and 1.0.2: the engine-wide rule matched 1.0.0 and 1.0.3 (2026-11-09); the two between were not on the drives to check.
 - 60 fps: find and cut the frame step.
-- iPhone: not tried; build an unsigned IPA and record its packaged size for the README gallery.
+- iPhone: not tried; build an unsigned IPA and record its packaged size in this note.

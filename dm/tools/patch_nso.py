@@ -4,6 +4,7 @@
 #   x18 read/write      → thread slot K18 (TSD, via tpidrro_el0)
 #   mrs tpidr_el0       → read thread slot KTLS; msr tpidr_el0 → write KTLS
 #   mrs tpidrro_el0     → read thread slot KTLR (Horizon ThreadLocalRegion pointer)
+#   any of these with x18 as its register → a copy between thread slots, K18 among them (site_slot_copy; the host gate writes K18 for mrs x18, cntpct_el0)
 #   svc #n, mrs cntpct_el0 → host gate (gate address taken from thread slot KGATE; once in C, gates.tsv is looked up by return point)
 #   sub sp, sp, xN      → xN rounded up to 16 first (Apple's kernel faults on a misaligned sp, Horizon does not; site_sp_align)
 #   ldxr* / ldxp → ldaxr* / ldaxp, stxr* / stxp → stlxr* / stlxp: every exclusive access gets acquire or release ordering (exclusive_order_sites; the games ran on the Switch's Cortex-A57 without it, Apple cores need it)
@@ -82,10 +83,13 @@ else:
 #   OBS = {build ID: [(offset, number, original instruction word, reason)]}: observation gates. Numbers match OBS_* in the host's hle.h; the original instruction must be position
 #     independent (no PC-relative / branch / anything involving x18 or tpidr), asserted offline; when the host has no callback attached the gate block goes in and out once and returns
 #   FRAME_STEP = {build ID: function(ctx)}: the frame step stubs of a main ("Frame step in whole vsyncs" below)
+#   STUBS = {build ID: function(ctx)}: code a fix needs in the patch area, branched to from its sites ("Stubs" below)
 #   MATCH_FRAME_STEP = {'main': [{name, size, fingerprints, stub}, ...]}: the frame step stubs of any main without FRAME_STEP, placed by the function they patch (nso_match.locate_stub:
 #     one complete unwind function of that size and fingerprint, or no stubs and a red line); stub(ctx) writes its sites at ctx.base + offsets inside that function. Rules are
 #     one patch's reviewed implementations (one name). Only the profile selected by DM_GAME participates, as for MATCH_CUTS. A rule's others = {label: {size, fingerprints}}
 #     are more functions its stub patches or depends on, found the same way: ctx.others[label] is the start of each, or None (a red line) when it does not match, and the stub leaves that part out
+#     An anchored rule {name, calls, find, stub, reviewed} is found instead as the one function that calls the imported symbol calls; find(fn) (nso_match.Function) checks the code there
+#     and returns what the stub needs (ctx.found: its sites, registers), or raises MatchError (a red line, no stubs); reviewed lists what find returned on the builds checked by hand. It holds over updates that change the function elsewhere
 #   MATCH_CUTS = {module name: [nso_match rule, ...]}: fallback for modules without registered CUTS. Only the profile selected by DM_GAME participates; a derived profile uses
 #     the repository's rules, an external-only provisional profile its own. Missing or ambiguous matches are reported and skipped; known builds retain their exact CUTS.
 #     A rule of several functions applies whole or not at all. For such a module <name>.match.tsv lists the cuts of the profile's registered builds of it and each patch's result,
@@ -97,7 +101,8 @@ else:
 #   CAPABILITIES = {build ID: (name,...)}: verified main-build features exposed by fixups metadata to the launcher
 #   BINDING = [{what, now, goal, purpose, why[, blocked or kept][, checked]}]: not read here; each patch's binding now and the loosest it could have (dm/tools/docs_patches.py "Binding", docs/agents/game-patches.md)
 SHARED = ('sdk_patches.py', 'engine_patches.py')   # rules for every game's module of a kind: Nintendo's SDK, and engine code (their MATCH_CUTS, keyed by module name)
-PATCH_FILES = [os.path.join(os.path.dirname(os.path.abspath(__file__)), f) for f in SHARED] + sorted(glob.glob(os.path.join(os.path.dirname(os.path.abspath(__file__)), '../games/*/patches.py')))
+PATCH_FILES = [os.path.join(os.path.dirname(os.path.abspath(__file__)), f) for f in SHARED] + sorted(glob.glob(os.path.join(glob.escape(os.path.dirname(os.path.abspath(__file__))), '../games/*/patches.py')))
+# Every folder given to glob is escaped: brackets in a parent folder (`Game [0400486024DEC000][v131072]`) are a character class to glob, and the search would find nothing
 # Profiles outside the repository (DM_GAMES_DIR, folders separated by os.pathsep, which is ':' as in dm/games/game.py: the NSP script's provisional profile of a game being brought up) may have a
 # patches.py of their own builds too; they are loaded after the repository's, under the same rule (a build ID claimed twice stops the rewrite)
 PATCH_FILES += [p for d in os.environ.get('DM_GAMES_DIR', '').split(os.pathsep) if d for p in sorted(glob.glob(os.path.join(glob.escape(d), '*', 'patches.py')))]
@@ -105,7 +110,7 @@ patch_paths = {}
 for path in PATCH_FILES: patch_paths.setdefault(os.path.realpath(path), path)   # repeated roots and symlinks name the same file, not competing build claims
 PATCH_FILES = list(patch_paths.values())
 def load_patches():
-    tables, where = {'CUTS': {}, 'OBS': {}, 'FRAME_STEP': {}, 'MATCH_CUTS': {}, 'MATCH_FRAME_STEP': {}, 'SDK_MATCH_CUTS': {}, 'CAPABILITIES': {}}, {}
+    tables, where = {'CUTS': {}, 'OBS': {}, 'FRAME_STEP': {}, 'STUBS': {}, 'MATCH_CUTS': {}, 'MATCH_FRAME_STEP': {}, 'SDK_MATCH_CUTS': {}, 'CAPABILITIES': {}}, {}
     for n, path in enumerate(PATCH_FILES):
         spec = importlib.util.spec_from_file_location(f'patches_{n}', path); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
         for kind, table in tables.items():
@@ -158,6 +163,11 @@ FS_MATCH = None
 if NAME == 'main' and BUILD_ID not in PATCHES['FRAME_STEP']:
     from nso_match import locate_stub
     FS_MATCH = locate_stub(IMG, TEXT_END, PATCHES['MATCH_FRAME_STEP'].get(os.path.basename(os.environ.get('DM_GAME', '').rstrip('/')), {}).get(NAME, []))
+# The frame step state page is the page after the key page. An appended patch area starts on the first 64 KB boundary after the key page, which is that page itself when the key
+# page ends on such a boundary (Hades II's v0 main): a main that gets the state page then starts its patch area 64 KB later. Nothing has been written to the patch area yet, and
+# every other module keeps its layout
+if (BUILD_ID in PATCHES['FRAME_STEP'] or FS_MATCH) and NAME == 'main' and not FAR and PATCH_OFF < KEY_PAGE_OFF + 0x4000 + 0x1000:
+    PATCH_OFF += 0x10000
 for off, ob, nb, why in cuts:
     ob, nb = bytes.fromhex(ob), bytes.fromhex(nb)
     assert len(ob) == len(nb) and IMG[off:off + len(ob)] == ob, f'cut original bytes mismatch {off:#x}: {bytes(IMG[off:off + len(ob)]).hex()}'
@@ -440,9 +450,23 @@ def site_br_call(ins):
     emit(MRS_TPIDRRO(16)); emit_slot_addr(16, 17, 'K18'); emit(LDRX(16, 16)); emit(BR(16))
     return start
 
+def site_slot_copy(ins, src, dst):
+    """A system register access whose general-purpose register is x18: the guest's x18 is the thread slot K18, so the access becomes a copy from one thread slot to another
+    (mrs x18, tpidr_el0: KTLS → K18; mrs x18, tpidrro_el0: KTLR → K18; msr tpidr_el0, x18: K18 → KTLS), or src is a word that puts the value in x15 (mrs x18, ctr_el0).
+    The Apple kernel may change x18 at any instruction, so the value never passes through it: x15 carries it, and x16 / x17 form the slot addresses, all three saved in the red zone"""
+    start = here()
+    emit(STP(16, 17, 31, -16)); emit(STUR(15, 31, -24))
+    if isinstance(src, str): emit(MRS_TPIDRRO(16)); emit_slot_addr(16, 17, src); emit(LDRX(15, 16))
+    else: emit(src)
+    emit(MRS_TPIDRRO(16)); emit_slot_addr(16, 17, dst); emit(STRX(15, 16))
+    emit(LDUR(15, 31, -24)); emit(LDP(16, 17, 31, -16))
+    emit(B(here(), ins.address + 4))
+    return start
+
 def site_sysreg_read(ins, kind):
     """mrs xN, tpidr_el0 / tpidrro_el0 → xN = thread slot value."""
     N = ins.bytes[0] & 31
+    if N == 18: return site_slot_copy(ins, kind, 'K18')
     tmp = 16 if N != 16 else 17
     start = here()
     emit(STUR(tmp, 31, -16)); emit(MRS_TPIDRRO(N)); emit_slot_addr(N, tmp, kind); emit(LDRX(N, N)); emit(LDUR(tmp, 31, -16))   # tmp is saved by borrowing the red zone
@@ -451,6 +475,7 @@ def site_sysreg_read(ins, kind):
 
 def site_tpidr_write(ins):
     N = struct.unpack('<I', ins.bytes)[0] & 31
+    if N == 18: return site_slot_copy(ins, 'K18', 'KTLS')
     (T,) = pick({N}, 1)
     start = here()
     emit(0xF81F0000 | (31 << 5) | T)           # stur xT,[sp,#-16]
@@ -1475,9 +1500,9 @@ for a in sorted(kinds):
     elif k == 'svc': st = site_gate(ins, 'svc', arg); stat(k)
     elif k in ('cntpct', 'cntvct'): st = site_gate(ins, k, arg); stat(k)
     elif k == 'sp_align': st = site_sp_align(ins, arg); stat(k)
-    elif k == 'ctr':   # replaced in place by a constant: DminLine = 4 (64-byte lines); movz xN, #4, lsl #16
-        assert arg != 18, f'{a:x} mrs x18, ctr_el0'
-        struct.pack_into('<I', IMG, a, 0xD2A00080 | arg); stat(k); continue
+    elif k == 'ctr':   # a constant: DminLine = 4 (64-byte lines); movz xN, #4, lsl #16, in place, or into the slot K18 for x18
+        if arg == 18: st = site_slot_copy(ins, 0xD2A00080 | 15, 'K18'); stat(k)
+        else: struct.pack_into('<I', IMG, a, 0xD2A00080 | arg); stat(k); continue
     put_branch(a, st)
 
 obs = list(PATCHES['OBS'].get(BUILD_ID, []))
@@ -1555,11 +1580,13 @@ obs += region_obs
 # its first stub (0 = off), +0x30 u64 vsyncs stepped (the stubs; logged by the host to check the game's speed), +0x40 u32 1 = the game's own dynamic resolution runs, 0 = its
 # stub holds full resolution (DM_DYNAMIC_RESOLUTION, written by the loader; the stub declares the DYNAMIC_RESOLUTION capability). Stub bodies assembled with clang
 # A build's stubs are FRAME_STEP[build ID](ctx) in its patches.py: ctx.here() / ctx.emit(word) assemble into the patch area, ctx.site(offset, original bytes) asserts a site and that it is
-# no rewrite site, ctx.put(offset, words, reason) writes it (listed with the cuts), ctx.state is the state page's offset, ctx.render_scale = 1 marks a render-scale stub,
-# ctx.others the other functions a MATCH_FRAME_STEP rule names, and ctx.capabilities.add(name) declares a launcher capability the stubs provide (written as CAPABILITIES are)
+# no rewrite site, ctx.put(offset, words, reason) writes it (listed with the cuts), ctx.state is the state page's offset, ctx.render_scale = n marks a render-scale stub that takes scales up to n (1: it only lowers the game's size),
+# ctx.others the other functions a MATCH_FRAME_STEP rule names, ctx.found what an anchored rule's find returned, ctx.address(offset) the data address an adrp there and the add / load / store after it make (in the original
+# text: the fingerprints mask those pages, so a matched stub reads the globals it needs from its functions), and ctx.capabilities.add(name) declares a launcher capability the
+# stubs provide (written as CAPABILITIES are)
 FRAME_STEP = PATCHES['FRAME_STEP']
 FS_STATE_OFF = 0
-RENDER_SCALE = 0   # 1 = the build has a render-scale stub (state +0x10): the fixups table says so (RENDER_SCALE), and the iOS launcher offers the setting (dm/games/settings.tsv)
+RENDER_SCALE = 0   # n = the build has a render-scale stub (state +0x10) that takes scales up to n: the fixups table says so (RENDER_SCALE n), the loader holds DM_RENDER_SCALE to it and the launcher offers the setting up to it (dm/games/settings.tsv)
 FS_CAPABILITIES = set()   # capabilities the frame step stubs declare (ctx.capabilities)
 if (BUILD_ID in FRAME_STEP or FS_MATCH) and NAME == 'main':
     FS_STATE_OFF = KEY_PAGE_OFF + 0x4000
@@ -1568,19 +1595,42 @@ if (BUILD_ID in FRAME_STEP or FS_MATCH) and NAME == 'main':
         # Reserve the frame state after the key page there too; stubs reach it by ADRP.
         IMAGE_SIZE = FS_STATE_OFF + 0x4000
     assert FS_STATE_OFF % 0x1000 == 0 and (FAR or FS_STATE_OFF + 0x40 <= PATCH_OFF) and not any(IMG[FS_STATE_OFF:]), 'frame step state page'
-    def fs_site(off, orig):
-        ob = bytes.fromhex(orig)
-        assert IMG[off:off + len(ob)] == ob, f'frame step original bytes mismatch {off:#x}: {bytes(IMG[off:off + len(ob)]).hex()}'
-        for o in range(off, off + len(ob), 4):
-            assert o not in kinds and not any(seg[0].address <= o < seg[-1].address + 4 for seg in windows), f'frame step site is a rewrite site {o:#x}'
-    def fs_put(off, words, why):
-        old = bytes(IMG[off:off + 4 * len(words)])
-        for i, w in enumerate(words): struct.pack_into('<I', IMG, off + 4 * i, w)
-        cuts.append((off, old.hex(), bytes(IMG[off:off + 4 * len(words)]).hex(), why + (' [function match]' if FS_MATCH else ''))); stat('frame_step')
+# What frame step and stub code (STUBS below) may write: a site whose original bytes match and that holds no rewrite site, the cuts list (<name>.cuts.tsv) that names it, and
+# data addresses read from the original text
+def stub_site(off, orig, what):
+    ob = bytes.fromhex(orig)
+    assert IMG[off:off + len(ob)] == ob, f'{what} original bytes mismatch {off:#x}: {bytes(IMG[off:off + len(ob)]).hex()}'
+    for o in range(off, off + len(ob), 4):
+        assert o not in kinds and not any(seg[0].address <= o < seg[-1].address + 4 for seg in windows), f'{what} site is a rewrite site {o:#x}'
+def stub_put(off, words, why, kind):
+    old = bytes(IMG[off:off + 4 * len(words)])
+    for i, w in enumerate(words): struct.pack_into('<I', IMG, off + 4 * i, w)
+    cuts.append((off, old.hex(), bytes(IMG[off:off + 4 * len(words)]).hex(), why)); stat(kind)
+def stub_address(off, what):   # the data address the adrp at off and the add / unsigned-offset load or store right after it (on the adrp's register) make, from the original text
+    a, b = struct.unpack_from('<2I', ORIG_TEXT, off)
+    assert a & 0x9f000000 == 0x90000000, f'{what}: no adrp at {off:#x}'
+    imm = (((a >> 5) & 0x7ffff) << 2 | (a >> 29) & 3) << 12
+    page = (off & ~0xfff) + (imm - (1 << 33) if imm & 1 << 32 else imm)
+    assert (b >> 5) & 31 == a & 31, f'{what}: the instruction after the adrp at {off:#x} does not use its register'
+    if b & 0xffc00000 == 0x91000000: return page + ((b >> 10) & 0xfff)                       # add xD, xN, #imm
+    assert b & 0x3b000000 == 0x39000000, f'{what}: no add, load or store after the adrp at {off:#x}'
+    return page + ((b >> 10) & 0xfff) * (1 << (b >> 30)) * (16 if b & 0x04800000 == 0x04800000 and b >> 30 == 0 else 1)   # scaled by the access size (q: 16)
 if FS_STATE_OFF:   # the build's stubs (FRAME_STEP of its patches.py), or those placed by their function (MATCH_FRAME_STEP: ctx.base is its start)
-    use_area(0); fs = types.SimpleNamespace(here=here, emit=emit, site=fs_site, put=fs_put, state=FS_STATE_OFF, render_scale=0, base=FS_MATCH[1] if FS_MATCH else 0,
-                                            others=FS_MATCH[2] if FS_MATCH else {}, capabilities=set())
+    use_area(0); fs = types.SimpleNamespace(here=here, emit=emit, site=lambda off, orig: stub_site(off, orig, 'frame step'),
+                                            put=lambda off, words, why: stub_put(off, words, why + (' [function match]' if FS_MATCH else ''), 'frame_step'),
+                                            state=FS_STATE_OFF, render_scale=0, base=FS_MATCH[1] if FS_MATCH else 0, others=FS_MATCH[2] if FS_MATCH else {},
+                                            found=FS_MATCH[3] if FS_MATCH else None, capabilities=set(), address=lambda off: stub_address(off, 'frame step'))
     (FS_MATCH[0]['stub'] if FS_MATCH else FRAME_STEP[BUILD_ID])(fs); RENDER_SCALE = fs.render_scale; FS_CAPABILITIES = fs.capabilities
+
+# ---- Stubs (the modules whose patch file has STUBS of their build) ----
+# A fix of the game's own code that needs more instructions than its sites hold: STUBS[build ID](ctx) in its patches.py assembles them into the patch area and branches there from
+# its sites, with the frame step's ctx (here / emit / site / put / address, above) and no state page, so the host's pacing does not change (FRAME_STEP would also make the host take
+# the main for one with a frame step). A stub's code must hold nothing the rewriter would rewrite (x18, svc, tpidr, exclusive pairs), since it is not scanned.
+# Ori and the Will of the Wisps 1.2.1 serializes the users of Unity's shared constant-buffer table this way (its patches.py)
+STUBS = PATCHES['STUBS']
+if BUILD_ID in STUBS:
+    use_area(0); STUBS[BUILD_ID](types.SimpleNamespace(here=here, emit=emit, site=lambda off, orig: stub_site(off, orig, 'stub'),
+                                                       put=lambda off, words, why: stub_put(off, words, why, 'stub'), address=lambda off: stub_address(off, 'stub')))
 
 # ---- Spin waits (every module) ----
 # A guest loop that polls memory until another thread changes it fills only its own core on the Switch, where any higher-priority thread pinned there preempts it, so the
@@ -1916,7 +1966,9 @@ with open(P('fixups.tsv'), 'w') as f:
     if 'target' in UNITY_FPS: f.write(f"# UNITY_TARGET_FPS\t{UNITY_FPS['target']:#x}\n")   # Unity's Application.targetFrameRate (unity_fps.py)
     if 'qs' in UNITY_FPS: f.write(''.join(f'# UNITY_QS_{k}\t{v:#x}\n' for k, v in zip(('PTR', 'IDX', 'ARR', 'SIZE', 'VSYNC'), UNITY_FPS['qs'])))   # its QualitySettings' vSyncCount (unity_fps.py)
     for n, o in UE_CVARS.items(): f.write(f'# UE_CVAR:{n}\t{o:#x}\n')   # Unreal console variables (ue_cvar.py): the TAutoConsoleVariable registered under each name
-    if RENDER_SCALE: f.write('# RENDER_SCALE\t1\n')   # a render-scale stub reads state +0x10 (the loader ignores the key; dm/games/settings.py offers the setting by it)
+    if RENDER_SCALE:   # a render-scale stub reads state +0x10, up to this scale (the loader holds DM_RENDER_SCALE to it; dm/games/settings.py offers the setting up to it)
+        assert isinstance(RENDER_SCALE, int) and 1 <= RENDER_SCALE <= 9, f'render scale stub: ctx.render_scale is a whole largest scale, 1 to 9: {RENDER_SCALE!r}'
+        f.write(f'# RENDER_SCALE\t{RENDER_SCALE}\n')
     if NAME == 'main':
         for capability in sorted(set(PATCHES['CAPABILITIES'].get(BUILD_ID, ())) | FS_CAPABILITIES):
             assert re.fullmatch(r'[A-Z][A-Z0-9_]*', capability), f'invalid capability {capability}'

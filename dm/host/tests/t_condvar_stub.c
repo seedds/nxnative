@@ -11,7 +11,10 @@ void guest_gate_stack(int own_stack) { (void)own_stack; }
 void dm_thread_enter(uint64_t entry, uint64_t arg, uint64_t sp) { (void)entry; (void)arg; (void)sp; abort(); }
 #endif
 void *guest_sym(const char *name) { (void)name; return NULL; }
+// The pause tests supply a module_of that reports guest code per thread (the SIGUSR2 handler declines to stop host code).
+#ifndef DM_TEST_MODULE_OF
 module_t *module_of(const void *p) { (void)p; return NULL; }
+#endif
 #include <mach/mach_time.h>
 uint64_t now_ns(void) { static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb); return mach_absolute_time() * tb.numer / tb.denom; }
 uint64_t guest_ns(void) { return now_ns(); }

@@ -33,7 +33,7 @@ Status: brought up on the Mac through the opening movie, the title (name entry, 
 - **Resolved: the screen came out a flat blue.** Unreal Engine 4.18 builds its 32×32×32 colour-grading LUT with `WriteToSliceMainVS` + `FWriteToSliceGS`, one slice per instance; Metal has no geometry stage, so the tone mapper read an empty LUT. The slice-writing geometry shader is now folded into its vertex shader's layer entry points (`dmsh_build.py` `gs_slice`, `vs_layer_entry`; `nvn_mtl.m` `prog_fold_gs`). The other 22 geometry shaders (one-pass cube shadows that emit transformed triangles) do not build.
 - **Resolved: an abort in `MTLTextureDescriptor` validation when the prologue movie ends** (`arrayLength (510) … greater than the max allowed size (341)`). Its cube-map array of 510 faces (85 cubes) needed NVN's layer-face count: the host took the depth as a cube count in the Metal texture, the upload's layer count and the guest layout (`nvn_tex.c` `shape`). A cube array is now created as a 2D array of all its faces, and `tex_fit` makes the cube-array view a shader asks for.
 - The flushed-before-first-use texture fill (`tex_init_fill`) filled no texture in this game (title, free play, menus; 300 s).
-- NVN calls new with Unreal Engine 4.18: `nvnTextureGetTextureAddress` (pool address + offset, as `nvnMemoryPoolGetBufferAddress`) and `nvnCommandBufferGetCommandMemorySize` (used + free, as in NVN; `GetCommandMemoryFree` is what is left in the current segment).
+- NVN calls new with Unreal Engine 4.18: `nvnTextureGetTextureAddress` (pool address + offset, as `nvnMemoryPoolGetBufferAddress`) and `nvnCommandBufferGetCommandMemorySize` (the bytes the game last added, as in NVN; `GetCommandMemoryFree` is what is left in the current segment).
 
 ## Files and shaders
 

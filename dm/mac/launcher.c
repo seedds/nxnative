@@ -10,6 +10,7 @@
 // Before the host starts, the settings window (dm/mac/Launcher.swift dm_mac_launcher, linked in by pack_app.py) runs in this process and puts the player's settings into the environment; it keeps
 // what the launch environment and the env files set (DM_ENV_LAUNCH_KEYS, DM_ENV_FILE_KEYS). DM_LAUNCHER=0 or --no-launcher (open <app> --args --no-launcher) starts the game without the window,
 // with the saved choices; so does "Show this window at launch" turned off.
+#include <CoreServices/CoreServices.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <ctype.h>
 #include <errno.h>
@@ -205,6 +206,17 @@ int main(int argc, char **argv) {
     if (!shown) return 0;   // Quit: no game
     if (shown == 2) saved_choices();
     cloud_saves_folder();
+    // Game Mode (settings.tsv DM_GAME_MODE): the host from the nested bundle that allows it (pack_app.py game_mode_helper, bundle ID <this app's>.gamemode). macOS remembers an app
+    // it has run in Game Mode (frame-rate.md, macOS Game Mode holds the GPU at its lowest clock), so this app's own ID, packed with LSSupportsGameMode false, never runs in it
+    const char *gm = getenv("DM_GAME_MODE");
+    if (gm && !strcmp(gm, "1")) {
+        char helper[PATH_MAX], h[PATH_MAX]; snprintf(helper, sizeof helper, "%s/Helpers/Game Mode.app", contents); snprintf(h, sizeof h, "%s/Contents/MacOS/dmhost", helper);
+        if (!access(h, X_OK)) {
+            CFURLRef u = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8 *)helper, (CFIndex)strlen(helper), true);   // LaunchServices learns the copy's keys before the window server asks
+            if (u) { OSStatus e = LSRegisterURL(u, false); CFRelease(u); if (e) fprintf(stderr, "launcher: Game Mode: LSRegisterURL %d\n", (int)e); }
+            snprintf(host, sizeof host, "%s", h); fprintf(stderr, "launcher: Game Mode allowed (DM_GAME_MODE=1): host %s\n", host);
+        } else fprintf(stderr, "[RED] launcher: DM_GAME_MODE=1, but this app has no %s: pack it again; the game runs without Game Mode\n", h);
+    }
     setenv("DM_ROOT", sup, 0); setenv("DM_ROMFS", romfs, 0); setenv("DM_SAVE", save, 0); setenv("DM_TEMP", temp, 0);
     snprintf(p, sizeof p, "%s/msl", res); setenv("DM_MSL_DIR", p, 0);
     snprintf(p, sizeof p, "%s/font", dm); setenv("DM_FONT_DIR", p, 0);

@@ -185,7 +185,7 @@ Built in the background while playing instead, the stand-ins took an iPhone 17 P
 
 ### Encode thread
 
-The app turns the game's graphics commands into Metal commands on a thread of its own instead of the game's submitting thread, so the game's thread can go on sooner (in Breath of the Wild about 4 ms per frame instead of 8). Frame buffering needs it for games that present their frames from another thread than the one that draws them. It is on by default on the iPhone; on the Mac it is off, where it lowered the typical frame time but made the slowest frames slower.
+The app turns the game's graphics commands into Metal commands on a thread of its own instead of the game's submitting thread, so the game's thread can go on sooner (in Breath of the Wild about 4 ms per frame instead of 8). Frame buffering needs it for games that present their frames from another thread than the one that draws them. It is on by default on the iPhone; on the Mac it is off, where it lowered the typical frame time but made the slowest frames slower, except for games whose profile turns it on (Breath of the Wild, where it raised the lows while the world streams in).
 
 - **When to change it:** leave it on unless a game misbehaves with it; turning it off is a diagnostic step.
 

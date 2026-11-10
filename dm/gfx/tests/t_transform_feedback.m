@@ -85,5 +85,57 @@ int main(int argc,char **argv) { @autoreleasepool {
     emit(OP_TF_STATE,&end,sizeof end);emit(OP_END,NULL,0);mtl_exec(commands);finish();
     CHECK(ctl[0]==60&&ctl[4]==3,"rasterized draw records feedback through command replay");
     for(unsigned i=0;i<3;i++)record(output+5*i,i+1);
+    // Scarlet and Violet's skinning: a begin, one array capture and an end with no control buffer per mesh. With the state known on the CPU the captures need no tf_prepare
+    // and share one pass, until one reads or writes what an earlier one of the pass wrote. DM_NVN_TF_CPU=0 (the test's second run): the same bytes, a pass each
+    state_reset();memset(&R,0,sizeof R);S.rast_discard=1;memset(output,0,2048);   // the interleaved shader of the replay above (a new one could take a freed shader's address, and its pipeline)
+    float *o1=output+256,*o2=output+288,*o3=output+320,*o4=output+352;uint64_t t0[3],t1[3],t2[3],t3[3];int on=tf_cpu_on();
+    mtl_sub_begin();mtl_tf_stats(t0);dw.count=3;dw.instances=1;
+    bind(o1,60);state(0,NULL);dw.first=2;tf_draw(pr,&dw,NULL);state(1,NULL);
+    bind(o2,60);state(0,NULL);dw.first=5;tf_draw(pr,&dw,NULL);state(1,NULL);
+    bind(o3,60);state(0,NULL);dw.first=8;tf_draw(pr,&dw,NULL);state(1,NULL);
+    mtl_tf_stats(t1);
+    CHECK(on?t1[0]-t0[0]==3&&t1[1]==t0[1]&&t1[2]-t0[2]==1&&g_tf_enc!=nil:t1[0]==t0[0]&&t1[1]-t0[1]==3&&t1[2]-t0[2]==3&&!g_tf_enc,"three sessions into separate ranges: no tf_prepare and one pass with the state on the CPU");
+    S.vbuf[0].address=(uint64_t)o1;S.vbuf[0].size=60;   // a vertex stream that is the first capture's output
+    bind(o4,60);state(0,NULL);dw.first=11;tf_draw(pr,&dw,NULL);state(1,NULL);
+    mtl_tf_stats(t2);CHECK(t2[2]-t1[2]==1,"a capture that reads what a capture of the open pass wrote starts another pass");
+    S.vbuf[0].address=0;S.vbuf[0].size=0;
+    bind(o2,60);state(0,NULL);dw.first=20;tf_draw(pr,&dw,NULL);state(1,NULL);   // written in the pass that ended: joins
+    bind(o4,60);state(0,NULL);dw.first=30;tf_draw(pr,&dw,NULL);state(1,NULL);   // written in the open pass: another pass, so the later capture's bytes stay
+    mtl_tf_stats(t3);CHECK(on?t3[2]-t2[2]==1:t3[2]-t2[2]==2,"a capture into a range the open pass wrote starts another pass, one into an ended pass's range joins");
+    finish();
+    for(unsigned i=0;i<3;i++){record(o1+5*i,i+2);record(o2+5*i,i+20);record(o3+5*i,i+8);record(o4+5*i,i+30);}
+    CHECK(!g_tf_enc,"the capture pass ends with its command buffer");
+    // Scarlet ends each capture with a control buffer: the saves wait for the pass's end, and a capture that reads one ends the pass
+    uint32_t *c4=ctl+48,*c5=ctl+64,*c6=ctl+80;memset(c4,0,3*64);
+    mtl_sub_begin();mtl_tf_stats(t0);dw.count=3;
+    bind(o1,60);state(0,NULL);dw.first=40;tf_draw(pr,&dw,NULL);state(1,c4);
+    bind(o2,60);state(0,NULL);dw.first=50;dw.count=2;tf_draw(pr,&dw,NULL);state(1,c5);dw.count=3;
+    mtl_tf_stats(t1);CHECK(on?t1[2]-t0[2]==1&&g_tf_enc!=nil&&g_tf_nsave==2:t1[2]-t0[2]==2,"ends with control buffers leave the capture pass open, their saves waiting");
+    S.vbuf[0].address=(uint64_t)c5;S.vbuf[0].size=32;   // a vertex stream that is a saved state
+    bind(o3,60);state(0,NULL);dw.first=60;tf_draw(pr,&dw,NULL);state(2,c6);
+    mtl_tf_stats(t2);CHECK(t2[2]-t1[2]==1,"a capture that reads a control buffer saved in the open pass starts another pass, after the saves");
+    S.vbuf[0].address=0;S.vbuf[0].size=0;finish();
+    CHECK(c4[0]==60&&c4[4]==3&&c4[5]==1&&c5[0]==40&&c5[4]==2&&c6[0]==60&&c6[4]==3,"each control buffer holds its own capture's offsets and count");
+    for(unsigned i=0;i<3;i++){record(o1+5*i,i+40);record(o3+5*i,i+60);}record(o2,50);record(o2+5,51);
+    mtl_sub_begin();bind(o1,100);state(0,NULL);dw.first=2;dw.count=3;tf_draw(pr,&dw,NULL);dw.first=7;dw.count=4;tf_draw(pr,&dw,NULL);state(1,ctl3);finish();
+    CHECK(ctl3[0]==100&&ctl3[4]==5&&ctl3[5]==1,"an end with a control buffer saves the state the CPU kept: offsets, the count clipped to the buffer");
+    record(o1+15,7);record(o1+20,8);
+    // An inline update made while the capture pass is open is deferred: a capture that reads it or writes over it starts another pass, after the update has landed
+    uint8_t *upd=(uint8_t *)memory+12288,bytes[64];memset(bytes,0x5a,sizeof bytes);memset(upd,0,64);
+    mtl_sub_begin();mtl_tf_stats(t0);dw.count=3;
+    bind(o1,60);state(0,NULL);dw.first=70;tf_draw(pr,&dw,NULL);state(1,NULL);
+    mtl_sub_update(bytes,(uint64_t)upd,64);
+    bind(o2,60);state(0,NULL);dw.first=80;tf_draw(pr,&dw,NULL);state(1,NULL);
+    mtl_tf_stats(t1);CHECK(on?t1[2]-t0[2]==1&&g_nubd==1:t1[2]-t0[2]==2,"an inline update that no capture reads leaves the capture pass open");
+    S.vbuf[0].address=(uint64_t)upd;S.vbuf[0].size=64;   // a vertex stream the update wrote
+    bind(o3,60);state(0,NULL);dw.first=90;tf_draw(pr,&dw,NULL);state(1,NULL);
+    mtl_tf_stats(t2);CHECK(t2[2]-t1[2]==1&&!g_nubd,"a capture that reads an inline update deferred in the open pass starts another pass, after the update");
+    S.vbuf[0].address=0;S.vbuf[0].size=0;
+    mtl_sub_update(bytes,(uint64_t)o4,60);
+    bind(o4,60);state(0,NULL);dw.first=100;tf_draw(pr,&dw,NULL);state(1,NULL);
+    mtl_tf_stats(t3);CHECK(t3[2]-t2[2]==1,"a capture into a range an inline update deferred in the open pass wrote starts another pass");
+    finish();
+    for(unsigned i=0;i<3;i++){record(o1+5*i,i+70);record(o2+5*i,i+80);record(o3+5*i,i+90);record(o4+5*i,i+100);}
+    CHECK(upd[0]==0x5a&&upd[63]==0x5a,"the inline update landed");
     printf("feedback: %d checks, %d failed\n",checks,fails);return fails!=0;
 } }

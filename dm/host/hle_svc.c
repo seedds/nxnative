@@ -26,7 +26,26 @@
 // about 4.2 GB in total; on iOS without the "extended virtual addressing" entitlement a single reservation can be at most 6 GB
 // (read on a real device: 6 GB succeeds, 7 GB fails), so it cannot be made any wider --
 // with an 8 GB reservation, builds from developer accounts that cannot sign that entitlement (free accounts) would exit at this step.
-#define RESERVE DM_GAME_MEM_RESERVE   // SMBW: the heap needs only 1.47 GB, so the block stays at 5 GB (the total proven on a real device; a single 6 GB block can be reserved, but Metal etc. still need address space)
+#define RESERVE dm_mem_reserve()   // SMBW: the heap needs only 1.47 GB, so the block stays at 5 GB (the total proven on a real device; a single 6 GB block can be reserved, but Metal etc. still need address space)
+// The player's game memory (DM_MEMORY_GB, the Mac launcher's Game memory slider; Mac only): an application pool of that many GB in place of the profile's app_pool when it is
+// larger, with the reservation grown by as much, so the profile's layout around the heap stays. A game uses it only where its stubs hand the heap to it (fixups GAME_HEAP,
+// loader.c); for any other the larger pool is only what GetInfo reports. Read once; the profile's sizes when unset, not a number, not larger, or on iOS (a reservation there is
+// at most 6 GB without the extended virtual addressing entitlement)
+#define MEMORY_GB_MAX 12   // at 16 GB (M5 Max, macOS 27.2.1) the GPU locked up twice within 80 s and WindowServer, waiting on it, was restarted by the watchdog; 12 GB ran without it
+static uint64_t g_pool_set, g_reserve_set;
+static void mem_sizes(void) {
+    if (g_pool_set) return;
+    uint64_t pool = DM_GAME_APP_POOL, res = DM_GAME_MEM_RESERVE;
+#if !TARGET_OS_IPHONE
+    const char *e = getenv("DM_MEMORY_GB"); char *end = NULL; double v = e && *e ? strtod(e, &end) : 0; long gb = (long)v;   // the launcher's slider writes "4.00"
+    if (e && *e && (end == e || *end || v != (double)gb || gb < 1 || gb > MEMORY_GB_MAX)) LOG("[RED] [mem] DM_MEMORY_GB=%s: a whole number of GB from 1 to %d; using the game's own %.2f GB", e, MEMORY_GB_MAX, pool / 1073741824.0);
+    else if (gb && (uint64_t)gb << 30 > pool) { uint64_t want = (uint64_t)gb << 30; res += want - pool; pool = want;
+        LOG("[mem] game memory %ld GB (DM_MEMORY_GB): application pool %.2f GB in place of the game's %.2f GB", gb, pool / 1073741824.0, DM_GAME_APP_POOL / 1073741824.0); }
+#endif
+    g_reserve_set = res; g_pool_set = pool;
+}
+uint64_t dm_app_pool(void) { mem_sizes(); return g_pool_set; }
+static uint64_t dm_mem_reserve(void) { mem_sizes(); return g_reserve_set; }
 static uint8_t *g_as;              // ASLR region base = the whole block
 static size_t g_reserve;           // its size: RESERVE less the profile's alias region plus the one in use (mem_init_once)
 static uint8_t *g_heap; static _Atomic size_t g_heap_cur; static size_t g_heap_cap;
@@ -268,10 +287,10 @@ static void guest_file_init(void) {
     const double G = 1073741824.0; const char *e = getenv("DM_GUEST_FILE"), *d = getenv("DM_GUEST_FILE_DIR"), *mf = getenv("DM_GUEST_FILE_MIN_FREE");
 #if TARGET_OS_IPHONE
     uint64_t room = os_proc_available_memory();
-    int want = guest_file_wanted(e, DM_GAME_APP_POOL, room);
-    LOG("[mem] guest memory: memory pool %.2f GB, room to the memory limit %.2f GB, DM_GUEST_FILE %s: %s", DM_GAME_APP_POOL / G, room / G, e && *e ? e : "unset", want ? "in files" : "anonymous");
+    int want = guest_file_wanted(e, dm_app_pool(), room);
+    LOG("[mem] guest memory: memory pool %.2f GB, room to the memory limit %.2f GB, DM_GUEST_FILE %s: %s", dm_app_pool() / G, room / G, e && *e ? e : "unset", want ? "in files" : "anonymous");
 #else
-    int want = guest_file_wanted(e, DM_GAME_APP_POOL, 0);
+    int want = guest_file_wanted(e, dm_app_pool(), 0);
 #endif
     if (!want) return;
     g_gf_min_free = mf && *mf ? env_size("DM_GUEST_FILE_MIN_FREE", 0, 0x100000) : (uint64_t)2 << 30;
@@ -288,8 +307,8 @@ static void guest_file_init(void) {
     LOG("[mem] guest memory: %d files of %.2f GB in %s (unlinked, sparse, shared), %.2f GB in all, on the %s volume, %.1f GB free on it (%.1f with what the system can purge); holes punched where the game gives memory back: %s",
         n, chunk / G, dir, g_reserve / G, fs.f_fstypename, avail / G, imp / G, g_gf_punch ? "on" : "off (DM_GUEST_FILE_PUNCH=0)");
     // The files take up to what the game touches, at most about its memory pool while what it gives back is punched out
-    if (g_gf_min_free && most < DM_GAME_APP_POOL + g_gf_min_free)
-        LOG("[RED] [mem] guest file: the files may take up to the memory pool, %.1f GB, and %.1f GB is free: the game is stopped if under %.1f GB is left", DM_GAME_APP_POOL / G, most / G, g_gf_min_free / G);
+    if (g_gf_min_free && most < dm_app_pool() + g_gf_min_free)
+        LOG("[RED] [mem] guest file: the files may take up to the memory pool, %.1f GB, and %.1f GB is free: the game is stopped if under %.1f GB is left", dm_app_pool() / G, most / G, g_gf_min_free / G);
     if (strcmp(fs.f_fstypename, "apfs") || !(fs.f_flags & MNT_LOCAL)) LOG("[RED] [mem] guest file: not on a local APFS volume, where it may not be sparse, or be slow");
     pthread_t th; int rc = pthread_create(&th, NULL, guest_file_thread, NULL);
     if (!rc) pthread_detach(th);
@@ -349,7 +368,7 @@ static void mem_init(void) {
 // and hands the whole block to its own StandardAllocator (main+0x32137a0) -- so heap size = pool − image footprint, it has only as much as the host reports.
 // Previously 3 GB was reported here and SetHeapSize never failed: the heap was about 150 MB smaller than on the real device, at the run entry peak the main heap had only about 18 MB left, and under high local load a timing shift made a 128 KB request return null,
 // which the guest writes to without a null check (CRASH main+0x1b36138, re-verified after merge with inv_tap).
-#define APP_POOL DM_GAME_APP_POOL   // game profile app_pool (Mario 0xCD500000)
+#define APP_POOL dm_app_pool()   // game profile app_pool (Mario 0xCD500000), or the player's game memory (mem_sizes)
 static size_t image_bytes(void) { size_t n = 0; for (int i = 0; i < g_nmod; i++) if (!g_mod[i].nro) n += g_mod[i].size;   // an NRO lives in memory the game allocated (its image and bss buffers)
     return (n + 0x1fffff) & ~(size_t)0x1fffff; }
 // Giant bss (modules with the patch area before the base, patch_nso.py FAR): the image bytes beyond the file part. Used memory was reported as "heap + 64 MB", where the 64 MB covers ordinary modules' code and data (Mario's two modules are about 74 MB together,

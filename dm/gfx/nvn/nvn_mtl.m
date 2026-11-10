@@ -2821,7 +2821,11 @@ static uint64_t g_soft_released;
 static void tex_soft_release(const tex_t *t) {   // on the submit thread, as soft_sweep: when it has lived SOFT_WAIT frames
     size_t pg = (size_t)getpagesize(); uint64_t l1 = nvn_tex_level_offset(&t->d, 1);
     if (l1 <= pg) return;
-    if (g_nsoft_pend == g_soft_pend_cap && !(g_soft_pend = realloc(g_soft_pend, (g_soft_pend_cap = g_soft_pend_cap ? g_soft_pend_cap * 2 : 256) * sizeof *g_soft_pend))) MDIE("soft texture list allocation failed");
+    if (g_nsoft_pend == g_soft_pend_cap) {
+        uint32_t cap = g_soft_pend_cap ? g_soft_pend_cap * 2 : 256; soft_pend *p = realloc(g_soft_pend, cap * sizeof *g_soft_pend);
+        if (!p) MDIE("soft texture list allocation failed");
+        g_soft_pend = p; g_soft_pend_cap = cap;
+    }
     g_soft_pend[g_nsoft_pend++] = (soft_pend){t->serial, atomic_load(&g_cur_frame), l1 - pg, t->mem};
 }
 enum { SOFT_WAIT = 300 };

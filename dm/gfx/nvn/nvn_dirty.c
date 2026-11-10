@@ -345,7 +345,7 @@ void nvn_dirty_mp_stats(uint64_t *calls, uint64_t *pages, uint64_t *ns) {
 // reclaiming it at once (all zeros), which gets the host's copy back. The memory goes at the system's next need: until then the page still reads as before. A write later faults
 // (it is read-only) and madvises the page's bytes back (MADV_FREE_REUSE). (Ported from the kartnative/plumber-racer-2 line's same-named path, credited there; the locking and the
 // descriptor lifetime follow this file's own rules.)
-__attribute__((weak)) int dm_guest_file_backed(void) { return 0; }   // hle_svc.c: guest memory in a file (DM_GUEST_FILE_BACKED) is not the process's: nothing to give back
+__attribute__((weak)) int dm_guest_file_backed(void) { return 0; }   // hle_svc.c: guest memory in a file (DM_GUEST_FILE) is not the process's: nothing to give back
 static _Atomic uint64_t g_released;
 size_t nvn_dirty_release(const void *addr, size_t len, const void *expect) {
     uintptr_t a = (uintptr_t)addr; size_t freed = 0;

@@ -133,17 +133,33 @@ HLE_FORCE("_ZN2nn2vi23SetDisplayVrrCapabilityEPNS0_7DisplayEb", "display VRR cap
 // The largest display buffer (vi2 through the SDK, sdk+0x5e10c0, which the host does not serve: Result 0x272 and the output left as the game set it). BufferMaxResolution is
 // 0 1280x720, 1 1920x1080, 2 2560x1440, 3 3840x2160 (Fire Emblem Fortune's Weave's own table, main+0x1abc2c0 / +0x1abc050). Fire Emblem Fortune's Weave sets 0 first, so the failed call
 // told it 720p: it chose its 1280x720 DLSS network and rendered at 640x360, and the host scaled that to the window. Answered as a Switch 2 would: in handheld mode its own 1920x1080
-// screen; docked, the largest of the four the display it is shown on holds (front_display_pixels), 1920x1080 when that is not known
+// screen; docked, the largest of the four the display it is shown on holds (front_display_pixels), 1920x1080 when that is not known. DM_DISPLAY_RES (720, 1080, 1440 or 2160) fixes
+// the docked answer instead, as a Switch 2's TV output resolution setting does; auto or unset keeps the display's
 __attribute__((weak)) int front_display_pixels(int *w, int *h) { (void)w; (void)h; return 0; }   // front_mac.m, front_ios.m; graphics unit tests have none
+static const int k_buf_res[4][2] = {{1280, 720}, {1920, 1080}, {2560, 1440}, {3840, 2160}};
+static int tv_res_index(void) {   // DM_DISPLAY_RES's entry of k_buf_res; -1 for auto, unset or a value not in the table
+    const char *e = getenv("DM_DISPLAY_RES");
+    if (!e || !*e || !strcmp(e, "auto")) return -1;
+    for (int i = 0; i < 4; i++) if (atoi(e) == k_buf_res[i][1]) return i;
+    static atomic_int bad; if (!atomic_exchange(&bad, 1)) LOG("[RED] DM_DISPLAY_RES=%s is not 720, 1080, 1440, 2160 or auto: the display's size is used", e);
+    return -1;
+}
+int dm_tv_size(int *w, int *h) {
+    int i = dm_opmode() == 1 ? tv_res_index() : -1;
+    if (i < 0) return 0;
+    *w = k_buf_res[i][0]; *h = k_buf_res[i][1]; return 1;
+}
 HLE_FORCE("_ZN2nn2vi31QueryDisplayBufferMaxResolutionEPNS0_19BufferMaxResolutionEPKNS0_7DisplayE", "largest display buffer: the Switch 2's screen handheld, the host display's docked",
           Result, h_vi_BufMaxRes, uint32_t *out, const void *disp) {
-    (void)disp; static const int k[4][2] = {{1280, 720}, {1920, 1080}, {2560, 1440}, {3840, 2160}};
-    uint32_t r = 1; int w = 0, h = 0;
-    if (dm_opmode() == 1 && front_display_pixels(&w, &h)) {
+    (void)disp; const int (*k)[2] = k_buf_res;
+    uint32_t r = 1; int w = 0, h = 0, fixed = dm_opmode() == 1 ? tv_res_index() : -1;
+    if (fixed >= 0) r = (uint32_t)fixed;
+    else if (dm_opmode() == 1 && front_display_pixels(&w, &h)) {
         if (w < h) { int t = w; w = h; h = t; }
         r = 0; for (uint32_t i = 0; i < 4; i++) if (w >= k[i][0] && h >= k[i][1]) r = i;
     }
-    static atomic_int once; if (!atomic_exchange(&once, 1)) LOG("vi::QueryDisplayBufferMaxResolution: %dx%d (%s, display %dx%d)", k[r][0], k[r][1], dm_opmode() == 1 ? "docked" : "handheld", w, h);
+    static atomic_int once; if (!atomic_exchange(&once, 1)) LOG("vi::QueryDisplayBufferMaxResolution: %dx%d (%s, %s %dx%d)", k[r][0], k[r][1], dm_opmode() == 1 ? "docked" : "handheld",
+                                                                fixed >= 0 ? "DM_DISPLAY_RES, display" : "display", w, h);
     if (out) *out = r; return RES_OK;
 }
 // The extended swap interval asks for a presentation rate between whole vsync intervals (VRR); without VRR the swap interval NVN sets stays in effect

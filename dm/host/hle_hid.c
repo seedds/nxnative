@@ -229,7 +229,7 @@ void hid_keys_init(void) {
 //   Look at a screen, decide, press, look again: menus whose timing moves from run to run (loading) need no blind timed script
 static void *ctl_main(void *arg) {
     const char *path = arg; long off = 0; char line[1100];
-    if (getenv("DM_PREV_PROGRAM")) {   // oe::ExecuteProgram started this program in the last one's place: that program acted on what the file holds
+    if (getenv("DM_PREV_PROGRAM") || getenv("DM_RELAUNCH")) {   // oe::ExecuteProgram or oe::RequestToRelaunchApplication started this program in the last one's place: that program acted on what the file holds
         FILE *f0 = fopen(path, "r"); if (f0) { if (!fseek(f0, 0, SEEK_END)) off = ftell(f0); fclose(f0); }
     }
     for (;;) {

@@ -9,6 +9,10 @@
 #include <errno.h>
 #include <TargetConditionals.h>
 #include <unistd.h>
+#if !TARGET_OS_IPHONE
+#include <crt_externs.h>
+#include <mach-o/dyld.h>
+#endif
 static _Atomic int g_opmode = -1;
 int dm_opmode(void) {
     int m = g_opmode;
@@ -165,7 +169,7 @@ static int prog_row_sets(const char *row, const char *kv) {
     for (const char *f = strchr(row, '\t'); f && f[1]; f = strchr(f + 1, '\t')) if (!strncmp(f + 1, kv, kl) && f[1 + kl] == '=') return 1;
     return 0;
 }
-static int prog_plan_make(char *tsv, int index, prog_plan *out, const void *param, size_t n) {
+static int prog_plan_make(char *tsv, int index, prog_plan *out, const void *param, size_t n, int relaunch) {
     extern char **environ;
     char *rows[64]; int nr = 0, hit = -1, cur = (int)(DM_GAME_PROGRAM_ID & 0xf);   // the program index is the program ID less the application's
     for (char *ln = strtok(tsv, "\n"); ln && nr < 64; ln = strtok(NULL, "\n")) {
@@ -177,7 +181,7 @@ static int prog_plan_make(char *tsv, int index, prog_plan *out, const void *para
     size_t ne = 0; while (environ[ne]) ne++;
     char **env = calloc(ne + 68, sizeof *env); size_t k = 0;
     for (size_t i = 0; i < ne; i++) {
-        int drop = !strncmp(environ[i], "DM_LAUNCH_PARAM=", 16) || !strncmp(environ[i], "DM_PREV_PROGRAM=", 16);
+        int drop = !strncmp(environ[i], "DM_LAUNCH_PARAM=", 16) || !strncmp(environ[i], "DM_PREV_PROGRAM=", 16) || !strncmp(environ[i], "DM_RELAUNCH=", 12);
         for (int r = 0; r < nr && !drop; r++) drop = prog_row_sets(rows[r], environ[i]);
         if (!drop) env[k++] = environ[i];
     }
@@ -191,6 +195,7 @@ static int prog_plan_make(char *tsv, int index, prog_plan *out, const void *para
         else if (strchr(f, '=') && k < ne + 64) env[k++] = f;
     }
     if (!out->exe || !out->arg || !out->cwd) { LOG("[RED] oe::ExecuteProgram: DM_PROGRAMS's row of program %d lacks exe=, arg= or cwd=", index); free(env); return 0; }
+    if (relaunch) { env[k++] = "DM_RELAUNCH=1"; env[k] = NULL; out->env = env; return 1; }   // oe::RequestToRelaunchApplication: no parameter, no previous program
     char *pp = NULL, *pe = NULL, *pv = NULL;
     if (asprintf(&pp, "%s/launch_param.bin", out->cwd) < 0 || asprintf(&pe, "DM_LAUNCH_PARAM=%s", pp) < 0 || asprintf(&pv, "DM_PREV_PROGRAM=%d", cur) < 0) die("oe::ExecuteProgram: out of memory");
     FILE *po = fopen(pp, "wb");
@@ -227,10 +232,10 @@ void dm_oe_execute(int index, const void *param, size_t n) {
             memcpy(rows2, tsv, (size_t)sz);
         } else LOG("[RED] oe::ExecuteProgram: cannot read DM_PROGRAMS %s", pf);
         if (fp) fclose(fp);
-        if (tsv && (have = prog_plan_make(tsv, index, &P, param, n))) LOG("oe::ExecuteProgram(%d, %zu bytes of parameters:%s): this program ends, %s starts", index, n, hex, P.exe);
+        if (tsv && (have = prog_plan_make(tsv, index, &P, param, n, 0))) LOG("oe::ExecuteProgram(%d, %zu bytes of parameters:%s): this program ends, %s starts", index, n, hex, P.exe);
         else if (rows2) {
             LOG("[RED] oe::ExecuteProgram(%d, %zu bytes of parameters:%s): this application has no such program here; its first program starts instead", index, n, hex);
-            have = prog_plan_make(rows2, 0, &P, NULL, 0);
+            have = prog_plan_make(rows2, 0, &P, NULL, 0, 0);
         }
     }
 #endif
@@ -251,6 +256,62 @@ void dm_oe_execute(int index, const void *param, size_t n) {
     for (;;) pause();   // another thread is ending the host
 }
 HLE_FORCE("_ZN2nn2oe14ExecuteProgramEiPKvm", "end this program and start another of the application (DM_PROGRAMS on the Mac); never returns", void, h_oe_ExecProgram, int index, const void *param, size_t n) { dm_oe_execute(index, param, n); }
+// oe::RequestToRelaunchApplication: Horizon ends the application and starts it again from its first program, with no launch parameter (oe::GetPreviousProgramIndex -1, as from
+// HOME). The SDK asks the am application proxy, which the host never opens: applet::RequestToLaunchApplication reads through the null proxy (sdk+0x804c8, SIGSEGV at address 0).
+// Super Smash Bros. Ultimate 13.0.5 calls it after Options > Language > Yes ("the software will restart"), once the new language is saved. The call never returns.
+// The plan is made before the graceful exit, then only execve runs. On the Mac a multi-program application (DM_PROGRAMS) starts its first program's row, a program run by itself
+// its own host with the same arguments; both get this environment less DM_LAUNCH_PARAM and DM_PREV_PROGRAM, plus DM_RELAUNCH=1 (DM_CTL then resumes at the end of its file, as
+// after oe::ExecuteProgram, instead of replaying the presses that led here). The iPhone cannot start a process: an app holding several programs records program 0 (DM_EXEC_OUT,
+// as oe::ExecuteProgram does); a lone program's app just ends.
+#if !TARGET_OS_IPHONE
+typedef struct { char exe[4096]; char **argv, **env; } relaunch_plan;
+static int relaunch_plan_make(relaunch_plan *R) {
+    uint32_t sz = sizeof R->exe;
+    if (_NSGetExecutablePath(R->exe, &sz)) { LOG("[RED] oe::RequestToRelaunchApplication: the host's path does not fit"); return 0; }
+    char **env0 = *_NSGetEnviron(); size_t ne = 0; while (env0[ne]) ne++;
+    if (!(R->env = calloc(ne + 2, sizeof *R->env))) return 0;
+    size_t k = 0;
+    for (size_t i = 0; i < ne; i++)
+        if (strncmp(env0[i], "DM_LAUNCH_PARAM=", 16) && strncmp(env0[i], "DM_PREV_PROGRAM=", 16) && strncmp(env0[i], "DM_RELAUNCH=", 12)) R->env[k++] = env0[i];
+    R->env[k++] = "DM_RELAUNCH=1"; R->env[k] = NULL;
+    R->argv = *_NSGetArgv();   // main leaves its argv as it was given
+    return 1;
+}
+static void relaunch_exec(void *p) {
+    const relaunch_plan *R = p;
+    execve(R->exe, R->argv, R->env);
+    LOG("[RED] oe::RequestToRelaunchApplication: cannot start %s again (errno %d)", R->exe, errno);
+    _exit(1);
+}
+#endif
+HLE_FORCE("_ZN2nn2oe28RequestToRelaunchApplicationEv", "end this application and start it again from its first program, no launch parameter (on the Mac an execve of the host); never returns", void, h_oe_Relaunch, void) {
+#if !TARGET_OS_IPHONE
+    const char *pf = getenv("DM_PROGRAMS");
+    if (pf && *pf) {
+        static prog_plan P; char *tsv = NULL; FILE *fp = fopen(pf, "rb");
+        long sz = fp && !fseek(fp, 0, SEEK_END) ? ftell(fp) : -1;
+        if (sz >= 0 && (tsv = calloc(1, (size_t)sz + 1))) { fseek(fp, 0, SEEK_SET); if (fread(tsv, 1, (size_t)sz, fp) != (size_t)sz) tsv[0] = 0; }
+        if (fp) fclose(fp);
+        if (tsv && prog_plan_make(tsv, 0, &P, NULL, 0, 1)) {
+            LOG("oe::RequestToRelaunchApplication: the application starts again from its first program, %s", P.exe);
+            dm_host_shutdown_then("oe::RequestToRelaunchApplication", prog_exec, &P);
+            for (;;) pause();
+        }
+        LOG("[RED] oe::RequestToRelaunchApplication: DM_PROGRAMS %s has no usable row for program 0; this host starts again instead", pf);
+    }
+    static relaunch_plan R;
+    if (relaunch_plan_make(&R)) {
+        LOG("oe::RequestToRelaunchApplication: this program ends and starts again");
+        dm_host_shutdown_then("oe::RequestToRelaunchApplication", relaunch_exec, &R);
+    } else dm_host_shutdown("oe::RequestToRelaunchApplication");
+#else
+    const char *rec = getenv("DM_EXEC_OUT");
+    if (rec && *rec) { LOG("oe::RequestToRelaunchApplication: the app records its first program and ends"); dm_oe_execute(0, NULL, 0); }
+    LOG("[RED] oe::RequestToRelaunchApplication: the app cannot start itself again; it ends");
+    dm_host_shutdown("oe::RequestToRelaunchApplication");
+#endif
+    for (;;) pause();   // another thread is ending the host
+}
 HLE_FORCE("_ZN2nn2oe16DisableRecordingEv", "video recording switch; the host has no system recording", void, h_oe_DisableRec, void) {}
 // Silence the game's sound in system video captures (through am; FINAL FANTASY RESONANCE imports both): the host records nothing
 HLE_FORCE("_ZN2nn2oe13MuteRecordingEv", "mute the sound of system video recording; the host has no system recording", void, h_oe_MuteRec, void) {}

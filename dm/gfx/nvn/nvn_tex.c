@@ -3,6 +3,7 @@
 //   one GOB = 64 bytes × 8 rows = 512 bytes; the block height (tileH, in GOBs) is picked by 'height×1.5'; levels are accumulated with block alignment.
 // The game's packaged textures (SetPackagedTextureLayout) carry 8 bytes of layout parameters: byte 0's low nibble = log2 of the block height (derived by comparing 16 cases
 // from the real game, 4 of which differ from the automatic algorithm), its high nibble = log2 of the block depth (3D); when present they take precedence.
+// Byte 1 low nibble is log2 width alignment in GOBs (Bayonetta Origins SDK: SetPackagedTextureLayout stores H/D/W; its layout arithmetic pads full tiles and aligns array layers).
 // Linear storage counts pixel rows, also for block-compressed formats. The block depth nibble and the pixel rows were found by digitalhivehub against the original
 // NVN driver (nxnative PR #11) and taken from MacNativeGames 3c482a7, with the shapes of t_tex_layout.
 #include "nvn_tex.h"
@@ -34,6 +35,10 @@ int nvn_fmt_bpb(int f, int *bw, int *bh) { fmt_t t = fmt_of(f); if (bw) *bw = t.
 static uint32_t mip(uint32_t s, unsigned l) { s >>= l; return s ? s : 1; }
 static uint32_t blk(uint32_t s, uint32_t b) { return (s + b - 1) / b; }
 static unsigned pick_tile(uint32_t gobs) { return gobs >= 16 ? 4 : gobs >= 8 ? 3 : gobs >= 4 ? 2 : gobs >= 2 ? 1 : 0; }
+// Width-alignment log2 follows the H/D nibbles; pkg_block_h stores the layout bits plus one.
+static unsigned packaged_width_log2(const nvn_texdesc *d) {
+    return d->pkg_block_h ? ((unsigned)(d->pkg_block_h - 1) >> 8) & 0xf : 0;
+}
 // The automatic block height (no packaged layout): NVN truncates height in blocks × 1.5 / 8 before picking the power of two (found by MacNativeGames; Touchable checked
 //   16 such textures of Rhythm Heaven Groove). Rounding it up, as this file did until then, gave one step more at 6–10, 17–21, 38–42 and 81–85 block rows: Rhythm Heaven
 //   Groove's 672×160 and 1232×160 BC7 textures (40 block rows) need 4 GOBs, not 8 (the calibration screen's beat numbers came out torn); its 112×112, 288×208 and 880×432 agree
@@ -96,8 +101,11 @@ static uint64_t level_walk(const nvn_texdesc *d, unsigned level, unsigned dpl, u
                            unsigned tileH, unsigned tileD, fmt_t t, uint32_t *gobs) {
     uint32_t sx, sy; samples_xy(d->samples, &sx, &sy);
     unsigned sh = tile_shape_h(d, dpl, t, tileH);
-    uint32_t tw = 128u >> (sh + tileD); if (!tw) tw = 1;   // GOB columns of a 64 KB tile
-    int tiled = sparse_of(d);   // still in a sparse texture's tiled levels
+    unsigned pw = packaged_width_log2(d);
+    uint32_t tw = pw ? 1u << pw : 128u >> (sh + tileD); if (!tw) tw = 1;
+    // Packaged width alignment is independent of SPARSE. The original driver stores
+    // layout nibbles H/D/W, and pads full tiles until the first smaller mip.
+    int tiled = sparse_of(d) || pw;   // still in a sparse texture's tiled levels
     uint64_t off = 0;
     for (unsigned i = 0;; i++) {
         uint32_t lw = blk(mip(w * sx, i), t.bw);
@@ -124,7 +132,8 @@ static uint64_t layer_bytes(const nvn_texdesc *d, unsigned dpl, int layered, uin
         uint32_t hh = blk(h, t.bh); unsigned th = tileH, td = tileD;
         while (th && hh <= (8u << (th - 1))) th--;
         while (td && z <= (1u << (td - 1))) td--;
-        unsigned sh = th + td + 9; uint64_t g = ls >> sh;
+        unsigned pw = packaged_width_log2(d);
+        unsigned sh = pw ? pw + tileH + tileD + 9 : th + td + 9; uint64_t g = ls >> sh;
         if (ls != g << sh) ls = (g + 1) << sh;
     }
     return ls;

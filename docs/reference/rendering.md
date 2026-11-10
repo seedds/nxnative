@@ -225,6 +225,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** `nvn_tex.c` `level_walk`: a level at least one tile wide, high and deep is laid out with its width padded to whole tiles, the levels from the first smaller one on form the mip tail (packed as usual), and the storage is whole tiles, 64 KB aligned.
 - **Found on:** [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md): laid out unpadded, the 1024×1024 ASTC 6×6 clothes of Hinoa and Minoto (43 GOBs wide instead of 48, level 1 at 0x81000 instead of 0x90000) read 2,183 all-zero blocks in level 0 and 3,043 in level 1, which ASTC decodes as its error colour: their trousers, sleeves and gloves were magenta, worst in Kamura Village.
 
+### Packaged textures carry width alignment as well as height and depth
+
+- **Symptom:** a fixed magenta rectangle covers part of a packaged ASTC UI background while its card is open.
+- **Cause:** `SetPackagedTextureLayout` kept only byte 0 in the texture description. The original driver consumes height, depth and width-alignment log2 nibbles from the first 12 bits. Width alignment pads full tiles until the mip tail independently of the API `SPARSE` flag. Dropping it changes row pitch, mip offsets and array-layer alignment; zero padding read as ASTC decodes magenta.
+- **Fix:** preserve all three nibbles in the existing description integer, retaining its plus-one explicit-layout sentinel. Use the width alignment for packaged full tiles and array layers. Public flags, sparse-tile reporting, W0 layouts and the shader translation chain are unchanged. The texture-sharing key already includes the description.
+- **Found on:** Bayonetta Origins: Cereza and the Lost Demon (`0100CF5010FEC000`), using an unregistered provisional profile. The introduction-card background is 2052x1026 ASTC 6x6, H3/D0/W4: native storage is `0x120000`, with 96 GOB columns; the old result is `0x102000`, with 86. At source y384 the wrong pitch reads ten zero padding columns, matching the observed 240-pixel-wide magenta area. Original-asset GPU replay reproduces the error and its correction. The user confirms the original purple block no longer appears on Duo; this is a same-scene user report, not full-game or cross-game validation.
+- **Check:** `t_tex_layout` covers W0/W4, mip-tail and array/cube cases; `t_nvn` covers builder propagation and unchanged flags/sparse reporting. A separate local comparison against the original SDK arithmetic passed 37,296 shape/format/layout cases, and local original-asset GPU replay passed 76 checks. Those local checks require privately owned game material and are not distributed as repository test fixtures.
+
 ### Sparse textures take the block height of their 64 KB tile
 
 - **Symptom:** a CPU-filled texture shuffled into a patchwork of rectangles (OCTOPATH TRAVELER's world map on the traveler selection).

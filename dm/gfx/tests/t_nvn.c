@@ -991,6 +991,24 @@ int main(void) {
         P(nvnTextureFinalize)(&mt[0]); P(nvnTextureFinalize)(&mt[1]); P(nvnMemoryPoolFinalize)(&mp);
     }
 
+    // Packaged H/D/W nibbles describe physical pitch independently of API SPARSE.
+    {
+        NVNtextureBuilder b = {0}; NVNpackagedTextureLayout layout={{3,4,0,0,0,0,0,0}};
+        P(nvnTextureBuilderSetDevice)(&b,&dev);
+        P(nvnTextureBuilderSetDefaults)(&b); P(nvnTextureBuilderSetSize2D)(&b,2052,1026);
+        P(nvnTextureBuilderSetFormat)(&b,NVN_FORMAT_RGBA_ASTC_6x6); P(nvnTextureBuilderSetFlags)(&b,NVN_TEXTURE_FLAGS_IMAGE);
+        P(nvnTextureBuilderSetPackagedTextureLayout)(&b,&layout);
+        EXPECT("packaged width nibble reaches description",0x404,((tex_builder_t*)&b)->d.pkg_block_h);
+        EXPECT("packaged full tiles use padded pitch",0x120000,P(nvnTextureBuilderGetStorageSize)(&b));
+        EXPECT("packaged pitch leaves public flags unchanged",NVN_TEXTURE_FLAGS_IMAGE,P(nvnTextureBuilderGetFlags)(&b));
+        NVNtextureSparseTileLayout sparse; P(nvnTextureBuilderGetSparseTileLayout)(&b,&sparse);
+        EXPECT("packaged pitch does not advertise sparse tiles",0,sparse.numTiledLevels);
+        layout.layout[1]=0; P(nvnTextureBuilderSetPackagedTextureLayout)(&b,&layout);
+        EXPECT("ordinary packaged pitch remains unpadded",0x102000,P(nvnTextureBuilderGetStorageSize)(&b));
+        P(nvnTextureBuilderSetPackagedTextureLayout)(&b,NULL);
+        EXPECT("clearing packaged layout clears width too",0,((tex_builder_t*)&b)->d.pkg_block_h);
+    }
+
     // 6c. Write-protected dirty pages: after a packaged texture is uploaded its pool pages are read-only; game write → page fault → mark dirty → re-upload on next use; a direct host read() write needs prepare first
     {
         static uint8_t wb_[256 << 10] __attribute__((aligned(16384)));

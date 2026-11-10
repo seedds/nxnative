@@ -40,3 +40,4 @@ shader_note	Kirby Air Riders shaders
 # The game fills textures from the CPU in place while it plays, with no NVN call over the texels: without both keys some props and panels stay all-zero ASTC, which Metal decodes as magenta
 tex_flush_upload	on
 tex_dirty_upload	on
+dispatch_barriers	game

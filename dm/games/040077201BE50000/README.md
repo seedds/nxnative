@@ -12,6 +12,7 @@ A Switch 2 game: update v458752 (display version 1.3.3), SDK 20.5.26 built for t
 | `romfs_marker Asset/assets.cat` | `game.tsv` | the archives' catalog |
 | `shader_groups /Asset/=shader /Bin/=shader` | `game.tsv` | where the shaders are |
 | `tex_flush_upload`, `tex_dirty_upload` | `game.tsv` | textures the CPU fills while the game plays, without an NVN call over the texels: without them some props and panels are magenta (all-zero ASTC blocks). Binding `game`: no general rule tells a texture written this way from one a shader writes, whose content an upload would replace ([`tex_flush_upload`](../README.md)) |
+| `dispatch_barriers game` | `game.tsv` | its particle systems are about 230 compute dispatches a frame, which the host ran one at a time: 6.6-9.8 ms of GPU time a race frame, 0.4-1.2 ms ordered by the game's own barriers ([Compute dispatches that wait for each other](../../../docs/reference/frame-rate.md#compute-dispatches-that-wait-for-each-other)) |
 
 There is no game-specific patch, and only v458752's build row: the base game, v0, has not been run. The binding of this bring-up is `build` only for that row.
 
@@ -37,6 +38,7 @@ Moving objects get their ambient light from eight values per object in a storage
 
 ## Found on this game
 
+- [Compute dispatches that wait for each other](../../../docs/reference/frame-rate.md#compute-dispatches-that-wait-for-each-other): its particle systems.
 - [PMAP records in phx's PDAT archives](../../../docs/reference/shaders.md#pmap-records-in-phxs-pdat-archives): its shaders, and a loose NDSR file.
 - [A guard band cull in every vertex shader (0x80d)](../../../docs/reference/shaders.md#a-guard-band-cull-in-every-vertex-shader-0x80d).
 - [Ampere forms with a handle in a register](../../../docs/reference/shaders.md#ampere-forms-with-a-handle-in-a-register-and-sureds-other-operations): TMML (0xf69, 0x36a) in 4,776 pixel shaders.

@@ -2054,6 +2054,15 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Check:** Donkey Kong Bananza's scripted route, both runs with the drive idle: the first frame's 4 libraries (22 ms on the submit thread) no longer load there; the level opening's 3 still do (0.5-3.9 ms), its programs made just before their draws.
 - **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md#found-on-this-game): 3 to 7 libraries a new area, which took up to 4 s a frame in a session with the drive slowed by other work.
 
+### Shader loads holding Metal's compiler cache lock at a scene load
+
+- **Symptom:** a scene load takes a frame of hundreds of milliseconds whose wall time is far above its CPU time; a time profile (`sample`, Instruments) of the load shows the shader prefetch queues (`dm.nvn.pso-bg`, `mtl_prog_prefetch → shader_load`) and the replay thread both in `MTLCompilerFSCache::getElementImpl`, under `newArgumentEncoderWithBufferIndex → reflectionWithOptions` on the queues' side.
+- **Cause:** `shader_load` made an argument encoder for each shader with bindings only to read its `encodedLength`, which it already checks against 8 bytes per argument ID from the reflection json; the side libraries (pulling, shadow-input, alpha, logic) made one each for the same check. Each encoder is a reflection request to Metal's compiler, which takes the compiler's file-system cache lock and hashes the element under it, so the prefetch queues held the lock that the replay thread's pipeline and driver-program builds inside the same load wait on.
+- **Fix:** `DM_NVN_SHLOAD_LITE=1` (off by default): `shader_load` takes the argument buffer's length from the reflection (`8 × (max argument ID + 1)`) and makes no encoder (`ae` stays nil; `encode_args_` encodes whenever `arg_len` is set), and the side libraries skip the encoder length check.
+- **Check:** `make -C dm/gfx/tests GAME=0400486024DEC000 check_t_shload_lite`: a vertex and a fragment shader with three bindings load with and without the switch; the lite path makes no encoder, gives the same length as the encoder (24 bytes), keeps the reflection's layer output, and leaves `encode_args_` encoding. It does not build without the change.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) (Mac, the title-to-gameplay load): the prefetch queues' samples in the lock 2,228 → 0, their CPU −31 %, the replay thread's wait in that lock gone; the load frame 445 → 392 ms on average (409–490 vs 343–413 ms, the ranges overlap).
+- **Note:** a side library whose argument layout drifted from its base library is no longer refused under the switch; all of them are built from the same reflection. The rest of that load frame is CPU texture deswizzles, upload-slot waits and, on a loaded machine, time not running.
+
 ### The prepare step inside the shader map's once
 
 - **Symptom:** at boot, `CRASH sig=5 … pc=_dispatch_once_wait.cold.1` right after the `pipeline bases so far` line, with `bt: pso_prebuild __shmap_load_block_invoke … mtl_prog_prefetch h_nvnProgramSetShaders`.

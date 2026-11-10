@@ -285,9 +285,11 @@ DM_PSO_MANIFEST	path	The prewarm manifest to use instead of the profile's `pso_m
 DM_PSO_MTL4	player	`0` builds render pipelines through the `MTLDevice` with no bases and no archive; `1` uses MTL4Compiler with the archive, hybrid pipelines and prebuild (default on on the Mac, the profile's `pso_mtl4` on iOS)
 DM_PSO_PAIRS	path	The prebuild's second shader pair table (default: `pso_pairs.tsv` beside the shader map)
 DM_PSO_PREBUILD	player	`0` turns off the prebuild of every known shader pair's pulling base into the pipeline archive (on by default); `tool` runs the prebuild alone on the Mac and exits
+DM_PSO_PREBUILD_WARM	switch	`0` makes the prebuild (`DM_PSO_PREBUILD=tool`) build only every shader pair's pulling base, as before; by default it then builds the prewarm lists too (the profile's `pso_manifest.tsv` and this device's `pso_user.tsv`, or `DM_PSO_MANIFEST`), waiting for every line, and writes them into the pipeline archive, so the first start after a chain change loads them instead of compiling them
 DM_PSO_PREBUILD_DEPTH	switch	`zero`: the prebuild tool (`DM_PSO_PREBUILD=tool`) builds bases for the near = 0 depth mode; the NSP script sets it from the profile's `depth_mode`
 DM_PSO_PREBUILD_THREADS	switch	`=<n>`: the workers of the prebuild tool (`DM_PSO_PREBUILD=tool`; default: Metal's concurrent compiles, `maximumConcurrentCompilationTaskCount`)
 DM_PSO_PREPARE	switch	`0` runs the prewarm in the background while the game starts, as without a window; `1` makes the first submission wait for the prewarm lists also without a window
+DM_PSO_PREPARE_INTERLEAVE	switch	`0` hands the prepare step its prewarm list's tasks in list order, as before; by default they go out in turn by vertex shader, so that two workers rarely compile pipelines of one stage function at once (which `arch_fn_take` keeps apart, issue #815)
 DM_PSO_PREPARE_THREADS	switch	`=<n>`: the workers of the prepare step that builds the prewarm lists before the first frame (default: the device's active cores)
 DM_PSO_PULL_ALL	diagnostic	`=1`: every draw that has a pulling pipeline draws with it, never with the pipeline for its vertex layout
 DM_PSO_RECORD	path	`=<file>`: appends the shaders and pipelines used in the run to that file, for re-recording the prewarm manifest

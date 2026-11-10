@@ -9126,14 +9126,28 @@ static int pso_prebuild(int threads, int wait, dispatch_qos_class_t qos) {
     return n;
 }
 // DM_PSO_PREBUILD=tool: the prebuild alone (the host's other environment as for a run: DM_NVN_SHMAP, DM_MSL_DIR, DM_SAVE or DM_PSO_ARCHIVE), then exit; DM_PSO_PREBUILD_DEPTH=zero for
-// a game that sets the near=0 depth mode, DM_PSO_PREBUILD_THREADS=<n> workers (default: compile_tasks). Returns 0 when not asked for
+// a game that sets the near=0 depth mode, DM_PSO_PREBUILD_THREADS=<n> workers (default: compile_tasks). Returns 0 when not asked for.
+// Then the prewarm lists too (the profile's pso_manifest.tsv and this device's pso_user.tsv, or DM_PSO_MANIFEST), in the prepare step's form that waits for every line, and the archive
+// written: a first start after a chain change found only the pulling bases in the archive and compiled the rest of its lists behind the progress screen (Ocarina of Time's 78,258
+// lines: about 4 minutes on an M5 Max), and now loads them. DM_PSO_PREBUILD_WARM=0 builds the pulling bases alone, as before
 int mtl_pso_prebuild_tool(void) {
     const char *e = getenv("DM_PSO_PREBUILD"); if (!e || strcmp(e, "tool")) return 0;
-    setenv("DM_PSO_MANIFEST", "off", 1);   // no prewarm (loading the shader map starts it)
+    const char *w = getenv("DM_PSO_PREBUILD_WARM"), *m = getenv("DM_PSO_MANIFEST"); int warm = !(w && !strcmp(w, "0")) && !(m && !strcmp(m, "off"));
+    char *manifest = m ? strdup(m) : NULL;
+    if (warm) setenv("DM_PSO_PREPARE", "1", 1);   // before anything reads it (prepare_on keeps its first answer): the prewarm below waits for every line
+    setenv("DM_PSO_MANIFEST", "off", 1);   // no prewarm while the pairs build (loading the shader map starts it)
     mtl_init(); const char *z = getenv("DM_PSO_PREBUILD_DEPTH"); if (z && !strcmp(z, "zero")) atomic_store(&g_depth_zero, 1);
     int threads = getenv("DM_PSO_PREBUILD_THREADS") ? atoi(getenv("DM_PSO_PREBUILD_THREADS")) : 0;
     if (threads <= 0) threads = compile_tasks();
     if (pso_prebuild(threads, 1, QOS_CLASS_USER_INITIATED) < 0) MLOG("pipeline prebuild: nothing to do (no archive, no shader_pairs.tsv, prebuilt.tsv says it is done, or the archive bundled with the app holds every base)");
+    if (warm) {
+        if (manifest) setenv("DM_PSO_MANIFEST", manifest, 1); else unsetenv("DM_PSO_MANIFEST");
+        uint64_t t0 = bp_now();
+        g_warm_started = 0; @autoreleasepool { warm_start(); }   // the prepare form: returns once every line is built (and the pairs, which the stamp now says are done)
+        arch_flush_wait();
+        MLOG("pipeline prebuild: the prewarm lists are in the pipeline archive too (%.1f s)", (bp_now() - t0) / 1e9);
+    }
+    free(manifest);
     return 1;
 }
 static int prepare_on(void);
@@ -9452,7 +9466,19 @@ static int prepare_workers(void) {
     if (n <= 0) { size_t sz = sizeof n; if (sysctlbyname("hw.activecpu", &n, &sz, NULL, 0) || n < 2) n = 2; }
     return n;
 }
-static void warm_prepare(NSArray<WarmTask *> *tasks, long lines) {
+// The tasks in turn by vertex shader (one of each vertex shader's tasks, then the next of each): two compiles of one stage function never run at once (arch_fn_take, issue #815), so
+// tasks handed out in list order, where one vertex shader's pairs follow each other (Ocarina of Time's predicted pipelines: up to 996 of one vertex shader), held every other
+// worker at that function's slot: its 78,258-line list ran on about 2 of 18 cores, the compiler service at about 200% CPU. Within a vertex shader the order stays the list's
+static NSArray<WarmTask *> *warm_interleave(NSArray<WarmTask *> *tasks) {
+    NSMutableDictionary<NSString *, NSMutableArray<WarmTask *> *> *by = [NSMutableDictionary dictionary]; NSMutableArray<NSMutableArray<WarmTask *> *> *groups = [NSMutableArray array];
+    for (WarmTask *t in tasks) { NSString *k = t->vkey ?: t->key ?: @""; NSMutableArray *g = by[k]; if (!g) { g = [NSMutableArray array]; by[k] = g; [groups addObject:g]; } [g addObject:t]; }
+    if (groups.count == tasks.count) return tasks;
+    NSMutableArray<WarmTask *> *out = [NSMutableArray arrayWithCapacity:tasks.count];
+    for (NSUInteger round = 0; out.count < tasks.count; round++) for (NSMutableArray<WarmTask *> *g in groups) if (round < g.count) [out addObject:g[round]];
+    return out;
+}
+static void warm_prepare(NSArray<WarmTask *> *listed, long lines) {
+    const char *ie = getenv("DM_PSO_PREPARE_INTERLEAVE"); NSArray<WarmTask *> *tasks = ie && !strcmp(ie, "0") ? listed : warm_interleave(listed);
     int workers = prepare_workers(); long n = (long)tasks.count;
     uint64_t t0 = bp_now(), built0 = g_pb_built, arch0 = g_pb_archived, reused0 = g_pb_reused, spec0 = g_pb_spec;
     __block _Atomic long next = 0;

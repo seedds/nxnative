@@ -1167,6 +1167,24 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **See also:** [Metal's archiver store filled by one flush period](#metals-archiver-store-filled-by-one-flush-period).
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) on an M4 (16 GB, macOS 27.2 26B123).
 
+### The prebuild left the prewarm lists to the first start
+
+- **Symptom:** the first start after a chain change, or on another Mac, shows "Preparing shaders" for minutes, though the build's pipeline prebuild ran; later starts take seconds.
+- **Cause:** the prebuild (`DM_PSO_PREBUILD=tool`) built every shader pair's pulling base and turned the prewarm off, so the pipelines of the prewarm lists (the profile's `pso_manifest.tsv` and the device's `pso_user.tsv`: vertex layouts, pass states, mesh pipelines) were compiled at the first start instead.
+- **Fix:** the tool then runs the prewarm lists too, in the prepare step's form that waits for every line, and writes the pipeline archive; `DM_PSO_PREBUILD_WARM=0` builds the pulling bases alone, as before.
+- **Measurement:** Ocarina of Time on an M5 Max (18 cores), a 78,310-line list (the profile's with predicted pipelines added): after the prebuild, a start's prepare step took 3.0 s for all of it.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game).
+- **Check:** `t_pso_warm`; a build, then a start's `pipeline prepare:` line.
+
+### The prepare step's workers wait on one stage function
+
+- **Symptom:** "Preparing shaders" takes minutes with the CPU mostly idle: the Metal compiler service at about two cores of an 18-core Mac.
+- **Cause:** two compiles of one stage function never run at once (`arch_fn_take`, issue #815), and the prepare step handed its tasks out in list order, where one vertex shader's pipelines follow each other: the workers queued at that function's slot (about 92% of each worker's samples were in `arch_fn_take`).
+- **Fix:** `warm_interleave` hands the tasks out in turn by vertex shader, the list's order kept within each; `DM_PSO_PREPARE_INTERLEAVE=0` keeps the list order. The guard is unchanged: one function's compiles still never overlap, so a few large groups at the end still run one compile at a time.
+- **Measurement:** 6,000 of Ocarina of Time's predicted render pipelines from an empty archive on an M5 Max (18 workers, 3,354 bases compiled each time, about 10 s of it reading the list's 24,811 shaders): 123.0 s in list order, 52.8 s in turn by vertex shader. A selection that also skipped tasks whose pixel or task shader another worker was compiling measured the same (52.4 s), so it was not kept.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game).
+- **Check:** `t_pso_warm`.
+
 ### Metal's archiver store filled by one flush period
 
 - **Symptom:** hundreds of `[RED] background render pipeline creation failed: error: cannot commit transaction no. '50463' on '…/com.apple.gpuarchiver/gpuarchiver-…/PersistentState': MDB_MAP_FULL: Environment mapsize limit reached` (or `cannot write 'UNITSMAPPINGS' database: MDB_MAP_FULL`), then `pipeline archive: compaction left the old files (the flush failed)`; the draws of those pipelines are missing and the frame rate falls (Ocarina of Time's Kakariko Village at 30-70 ms a frame, 1,502 such lines in one session).

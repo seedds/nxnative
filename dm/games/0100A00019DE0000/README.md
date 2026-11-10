@@ -1,6 +1,6 @@
 # Hades II (`0100A00019DE0000`)
 
-Base game v0 (the NACP's display version is 0.0.126424), SDK 19.3.9. Supergiant Games' engine on **NVN**, unlike Hades ([0100535012974000](../0100535012974000/README.md)), which renders with Vulkan. The ExeFS holds only `main` and `sdk`; this `sdk` is byte-identical to FINAL FANTASY TACTICS - The Ivalice Chronicles' ([010038B015560000](../010038B015560000/README.md)). The NSP script's provisional profile booted it on the Mac with no host change: the title, a new save, the opening and Erebus at 60 fps. Plays on the iPhone. Update 1.0.141667 (v655360) boots on the Mac from a derived profile, through the opening into Erebus.
+Base game v0 (the NACP's display version is 0.0.126424), SDK 19.3.9, and update 1.0.141667 (v655360), SDK 20.5.15; both are registered ([Versions](#versions)). Supergiant Games' engine on **NVN**, unlike Hades ([0100535012974000](../0100535012974000/README.md)), which renders with Vulkan. The ExeFS holds only `main` and `sdk`; this `sdk` is byte-identical to FINAL FANTASY TACTICS - The Ivalice Chronicles' ([010038B015560000](../010038B015560000/README.md)). The NSP script's provisional profile booted it on the Mac with no host change: the title, a new save, the opening and Erebus at 60 fps. Plays on the iPhone.
 
 ## What it needs
 
@@ -10,6 +10,11 @@ Base game v0 (the NACP's display version is 0.0.126424), SDK 19.3.9. Supergiant 
 | 4 GB layout: `mem_reserve 0x100000000`, `mem_alias 0x10000000`, `mem_stack 0x10000000`, `app_pool 0xCD500000` | `game.tsv` | no system resource; the 3.25 GB heap region holds the 3.10 GB heap the game asks for |
 | `pad_layout full` | `game.tsv` | the 3D gamepad layout: the right stick aims (the weapons with `ManualAiming` in `Game/Weapons/PlayerWeapons.sjson`) |
 | `shader_groups /Shaders/=shaders` | `game.tsv` | the shader split's group for `Shaders/NVN/bin` |
+
+## Versions
+
+- **Current: v0 and 1.0.141667 registered.** `game.tsv` has a `build` row for each (1.0.141667: main `a862861fa2eeedea1d873c94324fca7b`, sdk `190030518b5d64e5d87b84bc54661af9`, read from the update's own ExeFS), so the NSP script packs either from the profile as it is, without the red line for unregistered modules. `package` and `shader_versions` stay v0: the update's 55 shaders all have keys among v0's 88 (its shader split gave a subset of v0's `shader_map.tsv`, and neither version has facts, pairs or `bf_want` rows), so v0's tables are already the union of both. The update's `main` gets the render size stub by its fingerprint ([Rendering](#rendering)); its `sdk` gets the SDK-wide AddressRegionManager node area patch, and the SDK 20 alignment patch has no reviewed implementation for it, as before.
+- 1.0.141667 ran on the Mac through the opening into Erebus at 60 fps, from a derived profile and again from this one (2026-11-10); an iPhone run is not recorded. 1.0.131248 and 1.0.137848 (PR #485) are not registered: no copies here.
 
 ## Memory
 
@@ -53,4 +58,3 @@ General host changes first needed here; each applies to every game:
 - `game.tsv` says values marked "Mario's" are not measured for this game; none of its rows is marked so.
 - The iPhone retest of the movie backgrounds (#1956). The game is on this Mac since 2026-11-10 (v0 and 1.0.141667), but only a Mac run was made then.
 - Render size: no iPhone run above 1.0 yet (GPU time and heat there), no play past the first Erebus room at a raised size, 1.0.131248 and 1.0.137848 not enrolled (no copies here).
-- 1.0.141667 has no `build` row: the NSP script packs it from a derived profile, with a red line for its unregistered modules (PR #485 adds 1.0.137848's).

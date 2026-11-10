@@ -66,6 +66,20 @@ def imported(name, plt=0x1800, slot=0x2500):
     return out
 
 
+def two_callers(name):
+    out = imported(name)
+    return image_with(out, 0x800, caller(0x800, 0x1800), keep=0x100)
+
+
+def image_with(img, start, words, keep=None):
+    """img (from imported()) with its function replaced by words at start, or with a second function there (keep: the first one's start)"""
+    out = image({**({keep: caller(keep, 0x1800)} if keep else {}), start: words})
+    out[0x2000:0x3000] = img[0x2000:0x3000]   # the dynamic table, relocations, symbols and names
+    out[0x1800:0x1810] = img[0x1800:0x1810]   # the PLT entry
+    struct.pack_into('<i', out, 0x24, 0x2100 - 0x20)
+    return out
+
+
 class Matching(unittest.TestCase):
     def setUp(self):
         self.original = image({0x100: caller(0x100, 0x500), 0x500: [0xd2800020, RET]})
@@ -169,13 +183,13 @@ class Matching(unittest.TestCase):
         stub = dict(name='step', size=self.rule['size'], fingerprints=self.rule['fingerprints'], stub=lambda ctx: None)
         moved = image({0x800: caller(0x800, 0x1200, 0x2980), 0x1200: [0xd2800020, RET]})
         messages = []
-        self.assertEqual(locate_stub(moved, 0x2000, [stub], messages.append), (stub, 0x800, {}))
+        self.assertEqual(locate_stub(moved, 0x2000, [stub], messages.append), (stub, 0x800, {}, None))
         self.assertFalse([m for m in messages if m.startswith('[RED]')], messages)
         # others: more functions the stub patches, found the same way; one that does not match is left out with a red line, the frame step itself still goes in
         leaf = Image(moved, 0x2000).fingerprint(0x1200)
         found = dict(stub, others={'leaf': dict(size=8, fingerprints=[leaf]), 'gone': dict(size=12, fingerprints=[leaf])})
         messages = []
-        self.assertEqual(locate_stub(moved, 0x2000, [found], messages.append), (found, 0x800, {'leaf': 0x1200, 'gone': None}))
+        self.assertEqual(locate_stub(moved, 0x2000, [found], messages.append), (found, 0x800, {'leaf': 0x1200, 'gone': None}, None))
         self.assertEqual([m for m in messages if m.startswith('[RED]')], ["[RED] frame step 'step': gone left out: 0 matching functions (need exactly one)"])
         with self.assertRaisesRegex(ValueError, 'needs size and fingerprints'): locate_stub(moved, 0x2000, [dict(stub, others={'leaf': dict(size=8)})], messages.append)
         duplicate = image({0x100: caller(0x100, 0x500), 0x800: caller(0x800, 0x500), 0x500: [0xd2800020, RET]})
@@ -187,6 +201,53 @@ class Matching(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'one frame step'): locate_stub(moved, 0x2000, [stub, dict(stub, name='other')], messages.append)
         with self.assertRaisesRegex(ValueError, 'stub'): locate_stub(moved, 0x2000, [dict(stub, stub=None)], messages.append)
         with self.assertRaisesRegex(ValueError, 'name, size'): locate_stub(moved, 0x2000, [dict(stub, cuts=[])], messages.append)
+
+    def test_anchored_frame_step_finds_the_one_caller_or_nothing(self):
+        # an anchored rule: the one function that calls the import, whatever its size or fingerprint, and what its find returned; find refusing, no caller or two give a red
+        # line and no stub
+        from nso_match import locate_stub
+        def find(fn): return fn.calls
+        stub = dict(name='step', calls='nn::vi::CreateLayer', find=find, stub=lambda ctx: None, reviewed=[[12]])
+        img = imported('nn::vi::CreateLayer')   # the function at 0x100 calls it at +12
+        messages = []
+        self.assertEqual(locate_stub(img, 0x2000, [stub], messages.append), (stub, 0x100, {}, [12]))
+        self.assertFalse([m for m in messages if m.startswith('[RED]')], messages)
+        def refuse(fn): raise MatchError('not this code')
+        for rule, img, why in ((dict(stub, find=refuse), imported('nn::vi::CreateLayer'), 'not this code'), (stub, imported('nn::vi::Other'), '0 functions call'),
+                               (stub, two_callers('nn::vi::CreateLayer'), '2 functions call')):
+            messages = []
+            self.assertIsNone(locate_stub(img, 0x2000, [rule], messages.append))
+            self.assertIn(why, messages[0]); self.assertTrue(messages[0].startswith('[RED] frame step'), messages)
+        for bad in (dict(stub, reviewed=[]), dict(stub, size=8), {k: v for k, v in stub.items() if k != 'reviewed'}, dict(stub, find=None)):
+            with self.assertRaises(ValueError): locate_stub(img, 0x2000, [bad], messages.append)
+
+    def test_function_view_reads_registers_and_branches(self):
+        from nso_match import Function
+        img = image({0x100: [0xaa1003e0, 0x1e300a31, 0x54000040, NOP, RET]})   # mov x0,x16; fmul s17,s17,s16; b.eq +8
+        fn = Function(Image(img, 0x2000), 0x100, [])
+        self.assertEqual(fn.uses({'x16', 'x17', 'v16', 'v17', 'v18'}), {'x16', 'v16', 'v17'})
+        self.assertEqual(fn.branch_targets(), {0x110})
+
+    def test_hades2_render_size_checks_its_site(self):
+        # Hades II's find (its patches.py): the one 1280x720 pair after the CreateLayer call, once in the text, no branch onto its movk, none of the stub's registers used
+        spec = importlib.util.spec_from_file_location('hades2_patches', TOOLS.parent / 'games/0100A00019DE0000/patches.py'); assert spec and spec.loader
+        h = importlib.util.module_from_spec(spec); spec.loader.exec_module(h)
+        rule, = h.MATCH_FRAME_STEP['main']
+        size = [0xd280a008, 0xf2c05a08]   # mov x8,#0x500; movk x8,#0x2d0,lsl #32
+        def build(after, before=()):
+            img = imported('_ZN2nn2vi11CreateLayerEPPNS0_5LayerEPNS0_7DisplayE')
+            words = [*before, *caller(0x100 + 4 * len(before), 0x1800)[:4], *after, RET]   # ... bl CreateLayer at +12 (after before), then the code after it
+            return image_with(img, 0x100, words)
+        messages = []
+        from nso_match import locate_stub
+        ok = build([*size, 0xf9000668])   # str x8,[x19,#8]
+        got = locate_stub(ok, 0x2000, [rule], messages.append); assert got
+        self.assertEqual(got[3], (16, 8))
+        for img, why in ((build([0xaa1003e0, *size]), 'uses x16'), (build([*size, *size]), '2 1280x720 sizes in the function'),
+                         (build([NOP], before=size), 'does not follow'), (build([*size, 0x54ffffe0]), 'lands on the movk')):   # b.eq back onto the movk
+            messages = []
+            self.assertIsNone(locate_stub(img, 0x2000, [rule], messages.append))
+            self.assertIn(why, messages[0])
 
     def test_overlapping_rules_are_rejected(self):
         other = dict(self.rule, name='another patch')

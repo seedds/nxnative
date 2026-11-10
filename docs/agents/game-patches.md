@@ -301,10 +301,9 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 
 [Hades II](../../dm/games/0100A00019DE0000/README.md), `0100A00019DE0000`, [patches.py](../../dm/games/0100A00019DE0000/patches.py).
 
-- **`game`**, rendering, at goal, checked: v0 and 1.0.141667 mains: one function with each fingerprint, the constant unique in main, the site and its free registers read by disassembly (2026-11-10): render size: 1280x720 times the host's render scale. The game's own size constant in its init, found by the function's fingerprint on any build that keeps the function; the game asks no service for a size, and no other game in the repository runs Supergiant's NVN engine (Hades is Vulkan)
+- **`game`**, rendering, at goal, checked: v0 and 1.0.141667 mains: the anchor finds the reviewed site (+0x190, x8) in each, the constant once in main, the stub's registers unused in the function (2026-11-10): render size: 1280x720 times the host's render scale. The game's own size constant, found in the one function that calls nn::vi::CreateLayer on any build whose code there passes the stub's checks (no fingerprint); the game asks no service for a size, and no other game in the repository runs Supergiant's NVN engine (Hades is Vulkan)
 
-- **function-matched frame step** (`main` of builds without FRAME_STEP): render size from the host's render scale: a function of 0x350 bytes, `+0x190` in it
-- **function-matched frame step** (`main` of builds without FRAME_STEP): render size from the host's render scale: a function of 0x350 bytes, `+0x190` in it
+- **anchored frame step** (`main` of builds without FRAME_STEP): render size from the host's render scale: the one function that calls `_ZN2nn2vi11CreateLayerEPPNS0_5LayerEPNS0_7DisplayE`, its sites checked in each build's code; on the reviewed builds `+0x190` in it
 
 ### Hyrule Warriors: Age of Calamity
 

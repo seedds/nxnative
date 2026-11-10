@@ -56,7 +56,7 @@ static void hidpad_value(void *ctx, IOReturn result, void *sender, IOHIDValueRef
         d->st.hat = pad_hid_hat(x, min, max);
     } else {
         int a = pad_hid_axis_of(page, usage); if (a < 0) return;
-        d->st.axis[a] = pad_hid_norm(x, min, max);
+        pad_hid_set_axis(&d->st, a, pad_hid_norm(x, min, max));   // keeps the stick's reach (pad_hid.h)
     }
     hidpad_read(d);
 }

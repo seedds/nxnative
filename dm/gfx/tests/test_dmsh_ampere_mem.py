@@ -443,10 +443,14 @@ class Pokopia(Translated):
     def msl(self, *code):
         return self.translate(b''.join(inst(*c) for c in code) + inst(*SUATOM) + inst(*EXIT))
 
+    @staticmethod
+    def guarded_c3_word(word):   # c3's word is read only inside the binding length; otherwise it is zero
+        return re.escape(f'({word}u < ((*spvDescriptorSet0.cp_c25)._m0[0].x >> 2u)) ? (*spvDescriptorSet0.cp_c3)._m0[{word // 4}].{"xyzw"[word % 4]} : 0.0')
+
     def test_merge_shifts_c_into_the_high_half(self):   # word 6, converted first, ends in the high half; word 5 in the low one
         msl = self.msl(self.MERGE_FIRST, self.MERGE_SECOND)
-        high = re.search(r'uint (_\d+) = as_type<uint>\(half2\(float2\(\(\*spvDescriptorSet0\.cp_c3\)\._m0\[1\]\.z, 0\.0\)\)\);', msl)
-        low = re.search(r'uint (_\d+) = as_type<uint>\(half2\(float2\(\(\*spvDescriptorSet0\.cp_c3\)\._m0\[1\]\.y, 0\.0\)\)\);', msl)
+        high = re.search(rf'uint (_\d+) = as_type<uint>\(half2\(float2\({self.guarded_c3_word(6)}, 0\.0\)\)\);', msl)
+        low = re.search(rf'uint (_\d+) = as_type<uint>\(half2\(float2\({self.guarded_c3_word(5)}, 0\.0\)\)\);', msl)
         self.assertTrue(high and low, msl)
         shifted = re.search(rf'int (_\d+) = int\({high.group(1)}\) << 16;', msl)
         self.assertTrue(shifted, msl)
@@ -454,12 +458,12 @@ class Pokopia(Translated):
 
     def test_merge_with_rz_in_c_is_the_low_half_alone(self):
         msl = self.msl(self.MERGE_FIRST)
-        self.assertRegex(msl, r'as_type<uint>\(half2\(float2\(\(\*spvDescriptorSet0\.cp_c3\)\._m0\[1\]\.z, 0\.0\)\)\)')
+        self.assertRegex(msl, rf'as_type<uint>\(half2\(float2\({self.guarded_c3_word(6)}, 0\.0\)\)\)')
         self.assertNotIn('<< 16', msl)
 
     def test_f2i_reads_the_selected_half(self):   # the merge left its float in the low half and zero in the high one; the translator folds the pack and unpack
         self.assertIn('trunc(0.0)', self.msl(self.MERGE_FIRST, self.F2I_HIGH))
-        self.assertRegex(self.msl(self.MERGE_FIRST, self.F2I_LOW), r'trunc\(\(\*spvDescriptorSet0\.cp_c3\)\._m0\[1\]\.z\)')
+        self.assertRegex(self.msl(self.MERGE_FIRST, self.F2I_LOW), rf'trunc\({self.guarded_c3_word(6)}\)')
 
     def test_1d_fetch_wraps_into_rows(self):   # a texture buffer in the slot is bound as rows of 16384 texels (nvn_mtl.m tbuf_as_2d); a 1D texture, one row, reads the same texel
         msl = self.msl(self.MERGE_FIRST, self.TLD_1D)

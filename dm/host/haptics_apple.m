@@ -10,6 +10,7 @@
 #import <AppKit/AppKit.h>
 #import <IOKit/IOKitLib.h>
 #import <IOKit/hid/IOHIDDevice.h>
+#import "dualsense_usb.h"
 #endif
 #include <math.h>
 #include <pthread.h>
@@ -260,6 +261,35 @@ static void report(NSError *e, NSString *target, const char *stage) {
 // handle engines of a server without advanced players, the report keeps the strong (left) and weak (right) motor apart.
 typedef struct { IOHIDDeviceRef dev; uint64_t id; BOOL bluetooth; uint8_t motor[2], sent[2]; } ds4_out;   // id: its registry entry
 static ds4_out ds4[DM_PLAYERS];
+static DsUsb ds_usb;   // one unambiguous USB DualSense in player one's slot
+static bool ds_gc(GCController *controller) {
+    NSString *name = controller.vendorName;
+    return [controller.productCategory isEqualToString:GCProductCategoryDualSense] ||
+           [name isEqualToString:@"DualSense Wireless Controller"] ||
+           [name isEqualToString:@"DualSense Edge Wireless Controller"];
+}
+static bool ds_usb_route(GCController *controller) {
+    const char *opt = getenv("DM_DUALSENSE_USB");
+    if (!controller || !ds_gc(controller) || (opt && !atoi(opt))) return false;
+    unsigned count = 0;
+    for (GCController *c in GCController.controllers) count += ds_gc(c);
+    if (count != 1) return false;
+    AudioDeviceID device = ds_usb_device();
+    if (!device) return false;
+    OSStatus err = ds_usb_open(&ds_usb, device);
+    if (err) {
+        fprintf(stderr, "haptics: DualSense USB audio setup failed (%d); using normal controller haptics\n", err);
+        return false;
+    }
+    IOReturn mode = ds_usb_enable_pcm(device);
+    if (mode != kIOReturnSuccess) {
+        fprintf(stderr, "haptics: DualSense USB HID setup failed (0x%x); using normal controller haptics\n", mode);
+        ds_usb_close(&ds_usb);
+        return false;
+    }
+    fprintf(stderr, "haptics: player 1 DualSense USB PCM, 48000 Hz, grips on channels 3 and 4 (HID mode 0x%x)\n", mode);
+    return true;
+}
 static uint32_t ds4_crc(const uint8_t *p, size_t n) {
     uint32_t c = ~0u;
     while (n--) { c ^= *p++; for (int k = 0; k < 8; k++) c = c >> 1 ^ (0xEDB88320u & -(c & 1)); }
@@ -348,6 +378,11 @@ static void apply(dm_haptic_state s) {
         if (sinks[s.player]) { sink_apply(s); return; }   // the player is in range, as channels[] below assumes (hle_haptics.c)
         NSArray<DmRumbleChannel *> *out = channels[s.player];
 #if !TARGET_OS_IPHONE
+        if (s.player == 0 && ds_usb.unit) {
+            // USB PCM is quiet at the original scale. Keep the user's slider relative to this route's 2x base.
+            ds_usb_submit(&ds_usb, s, 2.f * gain, rumble_min);
+            return;
+        }
         if ([out.firstObject isKindOfClass:DmDs4Channel.class]) { ds4_apply(s); return; }
 #endif
         for (NSUInteger i = 0; i < out.count; i++) {
@@ -369,9 +404,13 @@ static void default_controller(int p, GCDeviceHaptics *h, NSTimeInterval retryAf
 static void configure(int p, GCController *controller) {
     for (DmRumbleChannel *c in channels[p]) [c stop];
     channels[p] = [NSMutableArray new];
+#if !TARGET_OS_IPHONE
+    if (!p) ds_usb_close(&ds_usb);
+    ds4_release(p);
+#endif
     if (sinks[p]) { sink_silence(p); dm_haptics_route(p, 1); return; }
 #if !TARGET_OS_IPHONE
-    ds4_release(p);
+    if (!p && ds_usb_route(controller)) { dm_haptics_route(p, 1); return; }
     if (controller && ds4_route(p, controller)) { dm_haptics_route(p, 1); return; }   // the report first, as SDL drives it
 #endif
     if (controller) {
@@ -435,12 +474,20 @@ void dm_haptics_apple_controller(int p, GCController *controller) {
 static void suspend(unsigned reason, BOOL on) {
     dm_haptics_suspend(reason, on);
     void (^stop)(void) = ^{
+#if !TARGET_OS_IPHONE
+        if (ds_usb.unit) ds_usb_clear(&ds_usb);
+#endif
         for (int p = 0; p < DM_PLAYERS; p++) { for (DmRumbleChannel *c in channels[p]) [c stop]; sink_silence(p); }
     };
     if (on) { if (dispatch_get_specific(&queue)) stop(); else dispatch_sync(queue, stop); }
 }
 void dm_haptics_apple_shutdown(void) {
-    if (queue) suspend(DM_HAPTICS_INACTIVE, YES);
+    if (!queue) return;
+    suspend(DM_HAPTICS_INACTIVE, YES);
+#if !TARGET_OS_IPHONE
+    void (^close_usb)(void) = ^{ ds_usb_close(&ds_usb); };
+    if (dispatch_get_specific(&queue)) close_usb(); else dispatch_sync(queue, close_usb);
+#endif
 }
 void dm_haptics_apple_init(void) {
     static dispatch_once_t once;

@@ -467,6 +467,13 @@ class Pack(Base):
         nac = bytearray(nac); struct.pack_into('<I', nac, 0x302C, 0b11); (u / 'control.nacp').write_bytes(nac)
         self.assertEqual(nsp.languages_control(u, b), u / 'control.nacp')
 
+    def test_fallback_icon_is_a_front_ends_file_that_exists(self):   # a NUP or a dump has no control data, so no icon; a front end may name a stand-in
+        with tempfile.TemporaryDirectory() as tmp:
+            icon = Path(tmp) / 'stand-in.jpg'; icon.write_bytes(b'jpg')
+            with mock.patch.dict(os.environ, {'NX_FALLBACK_ICON': str(icon)}): self.assertEqual(nsp.fallback_icon(), icon)
+            with mock.patch.dict(os.environ, {'NX_FALLBACK_ICON': str(Path(tmp) / 'gone.jpg')}): self.assertIsNone(nsp.fallback_icon())
+            with mock.patch.dict(os.environ, {'NX_FALLBACK_ICON': ''}): self.assertIsNone(nsp.fallback_icon())
+
     def test_ipa_settings_read_the_picked_file_and_the_version_the_packed_one(self):   # build_ipa.sh's own lines: CONTROL is the NSP script's languages_control
         self.assertIn('CONTROL=str(control)', (REPO / 'scripts/build_ipa_from_nsp.py').read_text(encoding='utf-8'))
         script = (REPO / 'dm/ios/tools/build_ipa.sh').read_text(encoding='utf-8')

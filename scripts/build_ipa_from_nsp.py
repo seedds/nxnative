@@ -2752,6 +2752,13 @@ def mac_app_name(name):   # the app's file name: the game name with the characte
     return re.sub(r'\s*[:/]\s*', ' - ', name).strip(' .-') or 'nxnative'
 
 
+def fallback_icon():
+    """A front end's stand-in icon for a Mac app whose game carries no control data (a NUP, a dump folder): the 256x256 JPEG that NX_FALLBACK_ICON names, when the file exists.
+    The game's own icon always wins, and the iOS app and the shared shell never use it (their icon is the shell's)"""
+    path = os.environ.get('NX_FALLBACK_ICON', '')
+    return Path(path) if path and Path(path).is_file() else None
+
+
 def mac_app(py, repo, out, app, work, game, patched, host, font, msl, aoc, gfx, lang, g, name, version, bundle_id, icon, sign, env, logs, env_file='', gpus='', programs=None, control=None):
     """The last stage of PLATFORM 'mac-app': pack the Mac app (dm/mac/pack_app.py) from what a Mac-only build made: the Mac host and font (mac_host), the packed version's RomFS and rewritten
     modules, the Mac shader libraries (msl: <shader>/cache, whose b-<chain> goes in, or a Vulkan or GL game's <shader>, whose vk / gl goes in), the DLC, the profile's tables (with the shader pairs
@@ -3177,8 +3184,10 @@ def main(args=None):
             rmtree(work / 'tmp'); return {'patched': patched, 'romfs': rfs.source(game), 'msl': ios / (f'b-{chain_of(repo)}' if gfx == 'nvn' else 'vk' if gfx == 'vulkan' else 'gl'), 'tables': g.table('shader_map.tsv').parent, 'html': game / 'html', 'gfx': gfx}
         host, font = mac_host(py, repo, work, env, logs, g)
         programs = other_programs(args, g)
-        if not icon: say(('no game icon: the NUP carries none' if nup else 'no game icon: a dump folder has no control data') + '; the app\'s icon will be blank; --icon / ICON gives it one' if dump else '[RED] no game icon in the extraction (an older extraction did not save it: delete extract/ and run again); the app\'s icon will be blank')
-        mac_app(py, repo, out_ipa, app, work, game, patched, host, font, ios, aoc, gfx, lang, g, app_name, app_version, bundle_id, icon, args.mac_sign or MAC_SIGN, env, logs, env_file,
+        stand_in = None if icon else fallback_icon()
+        if stand_in: say(f'no game icon in the control data: the app takes the front end\'s stand-in icon {stand_in}')
+        elif not icon: say(('no game icon: the NUP carries none' if nup else 'no game icon: a dump folder has no control data') + '; the app\'s icon will be blank; --icon / ICON gives it one' if dump else '[RED] no game icon in the extraction (an older extraction did not save it: delete extract/ and run again); the app\'s icon will be blank')
+        mac_app(py, repo, out_ipa, app, work, game, patched, host, font, ios, aoc, gfx, lang, g, app_name, app_version, bundle_id, icon or stand_in, args.mac_sign or MAC_SIGN, env, logs, env_file,
                 (args.gpu or PSO_GPUS).strip(), programs, control)
         rmtree(work / 'tmp')
         say(f'done: {out_ipa} ({tree_size(out_ipa)[1] / 2**30:.1f} GB); '

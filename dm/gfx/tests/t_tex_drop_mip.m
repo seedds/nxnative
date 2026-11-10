@@ -1,7 +1,7 @@
 // Smaller textures on small devices (nvn_mtl.m DM_NVN_TEX_DROP_MIP, docs/reference/memory.md): where Metal's working set is under 6 GB, a large sampled texture made from the game's
 // data leaves out its largest level, so Metal level k holds the game's level k+1. Only sampling sees it: any other use makes it whole again. Checks: the device rule; level k of a
 // dropped texture equals the guest's level k+1, by the CPU and by the GPU deswizzle (the direct path writes every level, so a dropped texture is staged instead); a re-upload after a
-// guest write stays dropped and shows the new data; small, single-level, render-target and linear textures are not dropped; a use other than sampling makes the texture whole with
+// guest write stays dropped and shows the new data; small, single-level and render-target textures are not dropped, image-flagged ones are; a use other than sampling makes the texture whole with
 // every level and it stays whole; a sampled view's levels shift by one. Forced on (g_drop_on) wherever it runs
 #include "../nvn/nvn_mtl.m"
 void *front_metal_layer(void) { return NULL; }
@@ -90,6 +90,15 @@ static void kept_case(const char *name, int target, int format, unsigned bpp, un
     char msg[160]; snprintf(msg, sizeof msg, "%s: not dropped", name);
     CHECK(msg, m && g_drop_n == n0 && m.width == w && m.mipmapLevelCount == levels);
 }
+// The image flag does not keep a texture whole (Ocarina of Time gives it to its material textures): sampled it is dropped; put to any other use (an image slot goes through tex_mtl
+// as this does) it is made whole, and keeps the write usage
+static void image_case(uint64_t serial) {
+    gtex g; gtex_new(&g, serial, NVN_TEXTURE_TARGET_2D, NVN_FORMAT_RGBA8, 4, 512, 512, 1, 3, NVN_TEXTURE_FLAGS_IMAGE); gtex_fill(&g, 1);
+    uint64_t n0 = g_drop_n; id<MTLTexture> m = sampled(&g.t);
+    CHECK("an image-flagged texture is dropped when sampled", m && g_drop_n == n0 + 1 && m.width == 256 && m.mipmapLevelCount == 2 && level_is(m, 0, &g, 1));
+    id<MTLTexture> u = used(&g.t);
+    CHECK("an image-flagged texture is made whole, with its write usage, for any other use", u && u.width == 512 && u.mipmapLevelCount == 3 && (u.usage & MTLTextureUsageShaderWrite) && level_is(u, 0, &g, 0));
+}
 int main(void) { @autoreleasepool {
     CHECK("the M1 iPad's and the iPhone 17's working set (5,461 MB) is in", drop_wants(5461ull << 20));
     CHECK("6 GB of working set or more, or none known, keeps every level", !drop_wants(6144ull << 20) && !drop_wants(12124ull << 20) && !drop_wants(0));
@@ -105,7 +114,7 @@ int main(void) { @autoreleasepool {
     kept_case("RGBA8 2D 256x256, 4 levels (under the threshold)", NVN_TEXTURE_TARGET_2D, NVN_FORMAT_RGBA8, 4, 256, 256, 4, 0, 991300);
     kept_case("RGBA8 2D 512x512, 1 level", NVN_TEXTURE_TARGET_2D, NVN_FORMAT_RGBA8, 4, 512, 512, 1, 0, 991400);
     kept_case("RGBA8 2D 512x512, 3 levels, compressible (a render target)", NVN_TEXTURE_TARGET_2D, NVN_FORMAT_RGBA8, 4, 512, 512, 3, NVN_TEXTURE_FLAGS_COMPRESSIBLE, 991500);
-    kept_case("RGBA8 2D 512x512, 3 levels, image", NVN_TEXTURE_TARGET_2D, NVN_FORMAT_RGBA8, 4, 512, 512, 3, NVN_TEXTURE_FLAGS_IMAGE, 991600);
+    image_case(991600);
     g_drop_on = 0;
     kept_case("RGBA8 2D 512x512, 4 levels, switch off", NVN_TEXTURE_TARGET_2D, NVN_FORMAT_RGBA8, 4, 512, 512, 4, 0, 991700);
     printf("t_tex_drop_mip: %d checks, %d failed\n", checks, failed);

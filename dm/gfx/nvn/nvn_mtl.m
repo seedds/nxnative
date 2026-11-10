@@ -3118,7 +3118,8 @@ static char g_drop_key;   // set on a dropped Metal texture (and carried by tex_
 static __thread int t_drop_ok;   // tex_mtl's caller samples the texture (treg_tex)
 static __thread int t_drop_off;   // pkg_upload_ makes the texture whole (tex_undrop)
 static NSMutableSet *g_drop_full;   // storage of textures made whole again: they stay whole (submit thread)
-static uint64_t g_drop_n, g_drop_bytes, g_drop_full_n, g_drop_cand_n[4], g_drop_cand_b[4];   // dropped, bytes saved, made whole; candidates by largest side 256 / 512 / 1024 / 2048+
+static uint64_t g_drop_n, g_drop_bytes, g_drop_full_n, g_drop_cand_n[4], g_drop_cand_b[4];
+static uint64_t g_drop_no[8]; static uint32_t g_drop_no_flags;   // first uploads of 256 and more that no rule lets drop, by the first rule they fail (pkg_upload_), and the flags of those refused for flags   // dropped, bytes saved, made whole; candidates by largest side 256 / 512 / 1024 / 2048+
 static struct { int line; uint64_t n; } g_drop_why[8];
 static int tex_dropped(id<MTLTexture> m) { return m && (objc_getAssociatedObject(m, &g_drop_key) || (m.parentTexture && objc_getAssociatedObject(m.parentTexture, &g_drop_key))); }
 // A sampled view of a dropped texture: from level 0 it starts at Metal level 0 with one level fewer (at least one), from level k at Metal level k-1
@@ -3528,10 +3529,22 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
     d.usage |= keep & (MTLTextureUsageRenderTarget | MTLTextureUsagePixelFormatView);
     int rb_shift = rb_packed_shift(t->d.format);   // the RGB565 family is repacked into Metal's order on the CPU (rb_packed_shift)
     int linear = (t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)) != 0;   // linear storage no view could take (linear_fit): its rows are copied on the CPU
-    // Smaller textures on small devices (drop_on): a sampled 2D texture of the game's data, of 2 levels or more, leaves out its largest level. Nothing that renders into it or writes it
+    // Smaller textures on small devices (drop_on): a sampled 2D texture of the game's data, of 2 levels or more, leaves out its largest level; nothing made to be rendered into. The image flag
+    // does not keep it whole: Ocarina of Time gives it to its material textures (611 of 766 refused at its title for that), and a shader can write one only through an image slot, which
+    // makes it whole first (img_binding → tex_undrop), as an attachment does
     unsigned drop = 0;
+    // The first rule a texture fails, counted for the memory report (g_drop_no): 0 type, 1 levels, 2 samples / linear / CPU repack, 3 sparse pool, 4 render-target or write usage, 5 flags, 6 depth, 7 made whole before
+    int no = -1;
+    if (drop_on() && !t_drop_off && !reuse) {
+        no = !(d.textureType == MTLTextureType2D || d.textureType == MTLTextureType2DArray) ? 0 : d.mipmapLevelCount < 2 ? 1 : (d.sampleCount != 1 || linear || rb_shift) ? 2
+           : (t->pool && nvn_sparse_pool(t->pool)) ? 3 : (d.usage & MTLTextureUsageRenderTarget) ? 4
+           : (t->d.flags & (NVN_TEXTURE_FLAGS_COMPRESSIBLE | NVN_TEXTURE_FLAGS_DISPLAY | NVN_TEXTURE_FLAGS_VIDEO_DECODE)) ? 5
+           : (d.pixelFormat == MTLPixelFormatDepth16Unorm || d.pixelFormat == MTLPixelFormatDepth32Float || d.pixelFormat == MTLPixelFormatDepth32Float_Stencil8 || d.pixelFormat == MTLPixelFormatStencil8) ? 6
+           : [g_drop_full containsObject:@((uintptr_t)t->mem)] ? 7 : -1;
+        if (no >= 0 && MAX(t->d.width, t->d.height) >= 256) { g_drop_no[no]++; if (no == 5) g_drop_no_flags |= t->d.flags; }
+    }
     if (drop_on() && !t_drop_off && (d.textureType == MTLTextureType2D || d.textureType == MTLTextureType2DArray) && d.mipmapLevelCount >= 2 && d.sampleCount == 1 && !linear && !rb_shift
-        && !(t->pool && nvn_sparse_pool(t->pool)) && !(d.usage & (MTLTextureUsageRenderTarget | MTLTextureUsageShaderWrite)) && !(t->d.flags & (NVN_TEXTURE_FLAGS_IMAGE | NVN_TEXTURE_FLAGS_COMPRESSIBLE | NVN_TEXTURE_FLAGS_DISPLAY | NVN_TEXTURE_FLAGS_VIDEO_DECODE))
+        && !(t->pool && nvn_sparse_pool(t->pool)) && !(d.usage & MTLTextureUsageRenderTarget) && !(t->d.flags & (NVN_TEXTURE_FLAGS_COMPRESSIBLE | NVN_TEXTURE_FLAGS_DISPLAY | NVN_TEXTURE_FLAGS_VIDEO_DECODE))
         && d.pixelFormat != MTLPixelFormatDepth16Unorm && d.pixelFormat != MTLPixelFormatDepth32Float && d.pixelFormat != MTLPixelFormatDepth32Float_Stencil8 && d.pixelFormat != MTLPixelFormatStencil8 && ![g_drop_full containsObject:@((uintptr_t)t->mem)]) {
         unsigned side = MAX(t->d.width, t->d.height), k = side >= 2048 ? 3 : side >= 1024 ? 2 : side >= 512 ? 1 : 0;
         int bw0, bh0, bpb0 = nvn_fmt_bpb(t->d.format, &bw0, &bh0); unsigned ly = d.textureType == MTLTextureType2DArray ? (unsigned)d.arrayLength : 1;
@@ -5003,6 +5016,8 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long rss_mb) {
              (unsigned long long)g_drop_n, (unsigned long long)(g_drop_bytes >> 20), (unsigned long long)g_drop_full_n, o ? why : "none",
              (unsigned long long)g_drop_cand_n[0], (unsigned long long)(g_drop_cand_b[0] >> 20), (unsigned long long)g_drop_cand_n[1], (unsigned long long)(g_drop_cand_b[1] >> 20),
              (unsigned long long)g_drop_cand_n[2], (unsigned long long)(g_drop_cand_b[2] >> 20), (unsigned long long)g_drop_cand_n[3], (unsigned long long)(g_drop_cand_b[3] >> 20));
+        MLOG("[mem] large sampled textures kept whole, by the first rule they fail (256 and more): type %llu, one level %llu, samples / linear / repack %llu, sparse pool %llu, render-target usage %llu, flags %llu (%#x), depth %llu, made whole before %llu",
+             (unsigned long long)g_drop_no[0], (unsigned long long)g_drop_no[1], (unsigned long long)g_drop_no[2], (unsigned long long)g_drop_no[3], (unsigned long long)g_drop_no[4], (unsigned long long)g_drop_no[5], g_drop_no_flags, (unsigned long long)g_drop_no[6], (unsigned long long)g_drop_no[7]);
     }
 }
 void mtl_pkg_stats(uint64_t *uploads, uint64_t *reuploads) { *uploads = g_pkg_uploads; *reuploads = g_pkg_reuploads; }

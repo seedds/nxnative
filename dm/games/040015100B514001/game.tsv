@@ -42,6 +42,3 @@ mem_reserve	0x278000000
 # NVN conditional rendering gates AG L shadow-mask clears. Without this, a
 # depth-masked R8 pass clears to black and the world/fountain grade is wrong.
 render_cond	on
-# The generic four-byte NVN direct indexed-draw control tickets (#1609) keep
-# the Edition's BFRES model scratch recordings within original RESTBL budgets.
-nvn_draw_ctl	on

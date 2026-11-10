@@ -687,22 +687,26 @@ static int shaking(uint64_t t) { return t >= atomic_load(&g_shake_t0) && t < ato
 // Live motion (dm_motion_set: a controller's gyro and accelerometer, front_mac.m / DmGamepad.m through motion_apple.h; dm_motion_set_switch: the iPhone's own, already in the
 // Switch frame, DmGamepad.m): while a player's samples keep arriving (within
 // MOTION_STALE_NS on the host clock) their six-axis sensor reports them (motion_fusion.h) instead of lying flat; a shake (DM_BTN_SHAKE) still adds its side-to-side acceleration.
-// Every history entry is the newest sample, numbered by time. DM_MOTION=0 ignores live motion; DM_MOTION_AXES / DM_MOTION_ACC_SIGN map Apple's axes (motion_fusion.h);
+// The history entries follow the source's own recent samples, one entry every 5 ms numbered by time as the console's: between two samples the orientation turned on at the
+// rate the later one measured, past the newest one at its rate for up to 50 ms (motion_at); older than the kept samples, the oldest kept one. Repeating the newest sample in all of them (as before) left Breath of the Wild's camera on the stick for good once the stick moved
+// it: the game's gyro takes over again only from the motion it sees across a read's entries. DM_MOTION=0 ignores live motion; DM_MOTION_AXES / DM_MOTION_ACC_SIGN map Apple's axes (motion_fusion.h);
 // DM_MOTION_GAIN sets the tilt correction (default 0.5); DM_MOTION_LOG=1 logs player 1's mapped sample once a second, for checking the axes
-enum { MOTION_STALE_NS = 300000000 };
-typedef struct { pthread_mutex_t mu; motion_state st; uint64_t last_ns, received_ns, logged; } live_motion;
+enum { MOTION_STALE_NS = 300000000, MOTION_HIST = 32 };
+typedef struct { motion_state st[MOTION_HIST]; uint64_t t[MOTION_HIST]; int n; const void *src; unsigned gen; } motion_hist;   // newest first; t on the host clock; src, gen: the source copied and how often it started over
+typedef struct { pthread_mutex_t mu; motion_state st; uint64_t last_ns, received_ns, logged; motion_state hist[MOTION_HIST]; uint64_t hist_t[MOTION_HIST]; int hist_n, hist_i; unsigned gen; } live_motion;
 static live_motion g_motion[DM_PLAYERS] = {[0 ... DM_PLAYERS - 1] = {.mu = PTHREAD_MUTEX_INITIALIZER}};
 static live_motion g_hid_motion[DM_PLAYERS] = {[0 ... DM_PLAYERS - 1] = {.mu = PTHREAD_MUTEX_INITIALIZER}};
 static live_motion g_joy_motion[DM_PLAYERS][2] = {[0 ... DM_PLAYERS - 1] = {[0 ... 1] = {.mu = PTHREAD_MUTEX_INITIALIZER}}};   // each Joy-Con's own sensor (dm_motion_set_joy)
 static live_motion g_phone_motion = {.mu = PTHREAD_MUTEX_INITIALIZER};
 static pthread_once_t g_motion_once = PTHREAD_ONCE_INIT;
-static motion_map g_motion_map; static float g_motion_gain = 0.5f; static int g_motion_off, g_motion_log, g_phone_mode;
+static motion_map g_motion_map; static float g_motion_gain = 0.5f; static int g_motion_off, g_motion_log, g_phone_mode, g_motion_stream = 1;
 static void motion_env(void) {
     const char *e = getenv("DM_MOTION"); g_motion_off = e && !atoi(e);
     if (!motion_map_parse(&g_motion_map, getenv("DM_MOTION_AXES"))) LOG("[hid] DM_MOTION_AXES='%s' is not like \"x,-z,y\": using x,y,z", getenv("DM_MOTION_AXES"));
     if ((e = getenv("DM_MOTION_ACC_SIGN")) && atof(e) < 0) g_motion_map.acc_sign = -1;
     if ((e = getenv("DM_MOTION_GAIN"))) g_motion_gain = (float)atof(e);
     g_motion_log = (e = getenv("DM_MOTION_LOG")) && atoi(e);
+    g_motion_stream = !((e = getenv("DM_MOTION_STREAM")) && !strcmp(e, "0"));   // 0: every history entry the newest sample, as before the 200 Hz stream (six_stream_fill)
     e = getenv("DM_PHONE_MOTION"); g_phone_mode = !e || !strcmp(e, "auto") ? -1 : !!atoi(e);
 }
 static void motion_set_to(live_motion *m, int p, const float acc[3], const float rot[3], int source, uint64_t sample_ns);
@@ -717,7 +721,7 @@ static void motion_set_to(live_motion *m, int p, const float acc[3], const float
     uint64_t now = now_ns(), t = sample_ns ? sample_ns : now;
     if (!t || t > now || now - t > MOTION_STALE_NS) return;
     pthread_mutex_lock(&m->mu);
-    if (!m->last_ns || now - m->received_ns > MOTION_STALE_NS) { motion_reset(&m->st); m->last_ns = 0; }
+    if (!m->last_ns || now - m->received_ns > MOTION_STALE_NS) { motion_reset(&m->st); m->last_ns = 0; m->hist_n = 0; m->gen++; }
     if (m->last_ns && t <= m->last_ns) { pthread_mutex_unlock(&m->mu); return; }
     float dt = m->last_ns && t > m->last_ns ? (float)((double)(t - m->last_ns) / 1e9) : 0;
     motion_update(&m->st, source ? &identity : &g_motion_map, acc, rot, dt, g_motion_gain);
@@ -727,6 +731,7 @@ static void motion_set_to(live_motion *m, int p, const float acc[3], const float
             source == 1 ? "phone" : source == 2 ? "controller HID" : "controller", m->st.acc[0], m->st.acc[1], m->st.acc[2], m->st.gyro[0], m->st.gyro[1], m->st.gyro[2]);
     }
     m->last_ns = t; m->received_ns = now;
+    m->hist_i = (m->hist_i + 1) % MOTION_HIST; m->hist[m->hist_i] = m->st; m->hist_t[m->hist_i] = t; if (m->hist_n < MOTION_HIST) m->hist_n++;
     pthread_mutex_unlock(&m->mu);
 }
 void dm_motion_set(int p, const float acc[3], const float rot[3]) { motion_set(p, acc, rot, 0, 0); }
@@ -747,22 +752,40 @@ void dm_motion_clear_hid(int p) {
     if (p < 0 || p >= DM_PLAYERS) return;
     pthread_mutex_lock(&g_hid_motion[p].mu); g_hid_motion[p].last_ns = 0; pthread_mutex_unlock(&g_hid_motion[p].mu);
 }
-static uint64_t motion_copy(live_motion *m, motion_state *out) {   // copies a source while it is fresh; returns its timestamp
+static uint64_t motion_copy(live_motion *m, motion_hist *out) {   // copies a source's recent samples while it is fresh; returns its timestamp
     uint64_t t;
     pthread_mutex_lock(&m->mu);
     t = m->last_ns && now_ns() - m->received_ns <= MOTION_STALE_NS ? m->last_ns : 0;
-    if (t) *out = m->st;
+    if (t) {
+        out->src = m; out->gen = m->gen; out->n = m->hist_n;
+        for (int k = 0; k < m->hist_n; k++) { int j = (m->hist_i - k + MOTION_HIST) % MOTION_HIST; out->st[k] = m->hist[j]; out->t[k] = m->hist_t[j]; }
+        if (!out->n) { out->n = 1; out->st[0] = m->st; out->t[0] = t; }
+    }
     pthread_mutex_unlock(&m->mu);
     return t;
 }
-static int motion_live(int p, motion_state *out) {
+// The state at host time t: from the newest kept sample at or before it, turned on to t at the rate of the sample after it (as motion_update integrates it), with the
+// acceleration and reported rate blended between the two; past the newest sample, turned on at its own rate for up to MOTION_AHEAD_NS (a sample is due every 30 ms from a
+// Switch 2 controller on a Mac, up to 60 ms when one is lost). Before the oldest kept sample: the oldest
+enum { MOTION_AHEAD_NS = 50000000 };
+static void motion_at(const motion_hist *h, uint64_t t, motion_state *out) {
+    int k = 0; while (k < h->n && h->t[k] > t) k++;
+    if (k == h->n) { *out = h->st[h->n - 1]; return; }
+    const motion_state *a = &h->st[k];
+    if (!k) { uint64_t d = t - h->t[0]; if (d > MOTION_AHEAD_NS) d = MOTION_AHEAD_NS; motion_advance(out, a, a->gyro, a->acc, (float)((double)d / 1e9)); return; }
+    const motion_state *b = &h->st[k - 1]; float span = (float)((double)(h->t[k - 1] - h->t[k]) / 1e9), dt = (float)((double)(t - h->t[k]) / 1e9), f = span > 0 ? dt / span : 0;
+    float acc[3], gyro[3]; for (int i = 0; i < 3; i++) { acc[i] = a->acc[i] + (b->acc[i] - a->acc[i]) * f; gyro[i] = a->gyro[i] + (b->gyro[i] - a->gyro[i]) * f; }
+    motion_advance(out, a, b->gyro, acc, dt);
+    for (int i = 0; i < 3; i++) out->gyro[i] = gyro[i];
+}
+static int motion_live(int p, motion_hist *out) {
     if (p < 0 || p >= DM_PLAYERS) return 0;
     pthread_once(&g_motion_once, motion_env);
     if (!p && g_phone_mode > 0) return motion_copy(&g_phone_motion, out) != 0;
     // Match the button path: in a one-player game, a controller in another slot also drives player 1.
     uint32_t src = p ? 1u << p : 1u | merged_players(); uint64_t newest = 0;
     for (int i = 0; i < DM_PLAYERS; i++) if (src >> i & 1) {
-        motion_state st; uint64_t t = motion_copy(&g_motion[i], &st);
+        static _Thread_local motion_hist st; uint64_t t = motion_copy(&g_motion[i], &st);
         if (!t) t = motion_copy(&g_hid_motion[i], &st);
         if (t > newest) { newest = t; *out = st; }
     }
@@ -770,9 +793,46 @@ static int motion_live(int p, motion_state *out) {
     return !p && g_phone_mode < 0 && motion_copy(&g_phone_motion, out);
 }
 // One Joy-Con's sensor: its own stream while fresh, else the pad's merged one (a controller that reports no per-Joy-Con motion)
-static int motion_joy(int p, int side, motion_state *out) {
+static int motion_joy(int p, int side, motion_hist *out) {
     if (p >= 0 && p < DM_PLAYERS && (side == 0 || side == 1)) { pthread_once(&g_motion_once, motion_env); if (!g_motion_off && motion_copy(&g_joy_motion[p][side], out)) return 1; }
     return motion_live(p, out);
+}
+// The sensor's own 200 Hz stream, per handle: each sampling number's state is the one before it moved on 5 ms at the rate (and toward the gravity) the source shows at that
+// time (motion_at: between two of its samples, or held past the newest), and an entry the game may have read is never changed. Taking each entry from the source's samples
+// afresh instead (turned on past the newest one) showed the game a prediction, then the measurement that replaced it: a Pro Controller 2 reports every 30 ms on a Mac, and
+// Breath of the Wild's camera stepped back and forth while the controller turned (flicker). The stream starts over from the source's samples when the source changes or
+// after a gap
+enum { SIX_RING = 32, SIX_STREAMS = 2 * DM_PLAYERS + 2 };   // two sensors per npad (a Joy-Con pair), and the handheld's two
+typedef struct { uint32_t h; int used; int64_t last; const void *src; unsigned gen; motion_state ring[SIX_RING]; } six_stream;
+static six_stream g_streams[SIX_STREAMS];
+static pthread_mutex_t g_streams_mu = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t six_host_time(int64_t m, uint64_t gnow, uint64_t hnow) { uint64_t back = gnow - (uint64_t)m * SIX_PERIOD_NS; return back < hnow ? hnow - back : 0; }
+static void six_stream_fill(uint32_t h, const motion_hist *ms, int64_t samp, int n, motion_state *out) {   // out[i]: sampling number samp - i, i < n <= SIX_RING
+    static const motion_map identity = {{0, 1, 2}, {1, 1, 1}, 1, 1};
+    uint64_t gnow = guest_ns(), hnow = now_ns();
+    pthread_mutex_lock(&g_streams_mu);
+    six_stream *s = NULL;
+    for (int k = 0; k < SIX_STREAMS && !s; k++) if (g_streams[k].used && g_streams[k].h == h) s = &g_streams[k];
+    for (int k = 0; k < SIX_STREAMS && !s; k++) if (!g_streams[k].used) s = &g_streams[k];
+    if (!s) s = &g_streams[h % SIX_STREAMS];   // more handles than streams: one starts over
+    if (!s->used || s->h != h || s->src != ms->src || s->gen != ms->gen || samp < s->last || samp - s->last >= SIX_RING) {
+        for (int i = 0; i < SIX_RING; i++) motion_at(ms, six_host_time(samp - i, gnow, hnow), &s->ring[(uint64_t)(samp - i) % SIX_RING]);
+        s->used = 1; s->h = h; s->src = ms->src; s->gen = ms->gen;
+    } else for (int64_t m = s->last + 1; m <= samp; m++) {
+        motion_state seen, *next = &s->ring[(uint64_t)m % SIX_RING];
+        motion_at(ms, six_host_time(m, gnow, hnow), &seen);
+        float rot[3] = {seen.gyro[0] * 2 * (float)M_PI, seen.gyro[1] * 2 * (float)M_PI, seen.gyro[2] * 2 * (float)M_PI};
+        *next = s->ring[(uint64_t)(m - 1) % SIX_RING];
+        motion_update(next, &identity, seen.acc, rot, SIX_PERIOD_NS / 1e9f, g_motion_gain);
+    }
+    s->last = samp;
+    for (int i = 0; i < n; i++) out[i] = s->ring[(uint64_t)(samp - i) % SIX_RING];
+    pthread_mutex_unlock(&g_streams_mu);
+}
+static void six_stream_drop(uint32_t h) {
+    pthread_mutex_lock(&g_streams_mu);
+    for (int k = 0; k < SIX_STREAMS; k++) if (g_streams[k].used && g_streams[k].h == h) g_streams[k].used = 0;
+    pthread_mutex_unlock(&g_streams_mu);
 }
 static void six_sample_live(SixAxisState *s, int64_t samp, const motion_state *ms, int shakes) {
     memset(s, 0, sizeof *s);
@@ -799,23 +859,41 @@ static void six_sample(SixAxisState *s, int64_t samp, int shakes) {
 // SixAxisSensorHandle: byte 0 the style's bit number, byte 1 the npad id, byte 2 the device (left / right Joy-Con of a pair). The styles made of two Joy-Cons (handheld, dual) have
 // two sensors, the others one. A handle reads as connected while its controller is connected in that style; otherwise its entries are zero (not connected) and the count 0.
 // Only player 1's controller shakes (DM_BTN_SHAKE comes from the keyboard, the iPhone and DM_KEYS, all player 1)
+// DM_MOTION_LOG=1: what the game reads, once a second per handle (the handle, whether a live controller drives it, the newest entry)
+static void six_log(uint32_t h, const SixAxisState *s, int live, int n) {
+    pthread_once(&g_motion_once, motion_env); if (!g_motion_log) return;
+    static _Atomic uint64_t last[4]; static _Atomic uint32_t seen[4]; uint64_t t = now_ns(); int k = 0;
+    for (; k < 4; k++) { uint32_t v = atomic_load(&seen[k]); if (v == h + 1) break; if (!v) { uint32_t z = 0; if (atomic_compare_exchange_strong(&seen[k], &z, h + 1) || z == h + 1) break; } }
+    if (k == 4 || t - atomic_load(&last[k]) < 1000000000ull) return;
+    atomic_store(&last[k], t);
+    LOG("[hid] six-axis read: handle %#x (style bit %u, npad %u, device %u; the npad's styles now %#x), %s, %d entries: acc %+.2f %+.2f %+.2f G, gyro %+.3f %+.3f %+.3f rev/s, angle %+.3f %+.3f %+.3f rev",
+        h, h & 0xff, h >> 8 & 0xff, h >> 16 & 0xff, style_of(h >> 8 & 0xff), !s->attributes ? "not connected" : live ? "live" : "at rest (no live motion)", n,
+        s->acc[0], s->acc[1], s->acc[2], s->gyro[0], s->gyro[1], s->gyro[2], s->angle[0], s->angle[1], s->angle[2]);
+}
 static int six_connected(uint32_t h) { return (h & 0xff) < 32 && (style_of(h >> 8 & 0xff) >> (h & 0xff) & 1); }
 static int six_states(SixAxisState *out, int n, uint32_t h) {
     if (n <= 0) return 0;
-    if (!six_connected(h)) { memset(out, 0, sizeof *out * (size_t)n); return 0; }
+    if (!six_connected(h)) { memset(out, 0, sizeof *out * (size_t)n); six_log(h, out, 0, n); return 0; }
     int64_t samp = (int64_t)(guest_ns() / SIX_PERIOD_NS);
     npad_ref ref = npad_resolve(h >> 8 & 0xff);
     int pl = ref.kind >= KIND_DUAL ? ref.pad : player_of(h >> 8 & 0xff), shakes = pl == 0 && ref.kind < KIND_DUAL;
-    motion_state ms;
+    static _Thread_local motion_hist ms;
     int live = ref.kind >= KIND_DUAL ? motion_joy(ref.pad, ref.kind == KIND_LEFT ? 0 : ref.kind == KIND_RIGHT ? 1 : (int)(h >> 16 & 1), &ms) : motion_live(pl, &ms);
-    if (live) { for (int i = 0; i < n; i++) six_sample_live(&out[i], samp - i, &ms, shakes); return n; }
-    for (int i = 0; i < n; i++) six_sample(&out[i], samp - i, shakes);
+    // Entry i is sampling number samp - i, at guest time (samp - i) * 5 ms: on the host clock, that far before now as it is before the guest's now (six_host_time)
+    if (live && !g_motion_stream) for (int i = 0; i < n; i++) six_sample_live(&out[i], samp - i, &ms.st[0], shakes);
+    else if (live) {
+        static _Thread_local motion_state st[SIX_RING]; int m = n < SIX_RING ? n : SIX_RING;
+        six_stream_fill(h, &ms, samp, m, st);
+        for (int i = 0; i < n; i++) six_sample_live(&out[i], samp - i, &st[i < m ? i : m - 1], shakes);
+    } else { six_stream_drop(h); for (int i = 0; i < n; i++) six_sample(&out[i], samp - i, shakes); }
+    six_log(h, out, live, n);
     return n;
 }
 HLE_FORCE("_ZN2nn3hid23GetSixAxisSensorHandlesEPNS0_19SixAxisSensorHandleEiRKjNS_4util10BitFlagSetILi32ENS0_12NpadStyleTagEEE", "six-axis sensor handles: two for handheld / dual Joy-Cons, one otherwise",
           int, h_hid_SixHandles, uint32_t *h, int n, const uint32_t *id, uint32_t style) {
     int k = style & (STYLE_HANDHELD | STYLE_JOYDUAL) ? 2 : 1; if (k > n) k = n;
     for (int i = 0; i < k; i++) h[i] = (uint32_t)(style ? __builtin_ctz(style) : 0) | (*id & 0xff) << 8 | (uint32_t)i << 16;
+    pthread_once(&g_motion_once, motion_env); if (g_motion_log) LOG("[hid] six-axis handles for npad %#x, styles %#x: %d, the first %#x", *id, style, k, k > 0 ? h[0] : 0);
     return k > 0 ? k : 0;
 }
 HLE_FORCE("_ZN2nn3hid18StartSixAxisSensorERKNS0_19SixAxisSensorHandleE", "six-axis sensor; always sampling on the host", void, h_hid_SixStart, const uint32_t *h) { (void)h; }
@@ -1142,8 +1220,8 @@ HLE_FORCE("_ZN2nn3hid16GetGestureStatesEPNS0_12GestureStateEi", "gesture states,
 HLE_FORCE("_ZN2nn3hid17StopSixAxisSensorERKNS0_19SixAxisSensorHandleE", "six-axis sensor; always sampling on the host", void, h_hid_SixStop, const uint32_t *h) { (void)h; }
 HLE_FORCE("_ZN2nn3hid21GetSixAxisSensorStateEPNS0_18SixAxisSensorStateERKNS0_19SixAxisSensorHandleE", "six-axis sensor current state", void, h_hid_SixState, SixAxisState *s, const uint32_t *h) { six_states(s, 1, *h); }
 HLE_FORCE("_ZN2nn3hid21IsSixAxisSensorAtRestERKNS0_19SixAxisSensorHandleE", "six-axis sensor at rest: yes unless player 1's is shaking or a live controller is turning", unsigned, h_hid_SixRest, const uint32_t *h) {
-    int pl = player_of(*h >> 8 & 0xff); motion_state ms;
-    if (motion_live(pl, &ms)) return fabsf(ms.gyro[0]) + fabsf(ms.gyro[1]) + fabsf(ms.gyro[2]) < 0.01f && !(pl == 0 && shaking(guest_ns()));
+    int pl = player_of(*h >> 8 & 0xff); static _Thread_local motion_hist mh;
+    if (motion_live(pl, &mh)) { const motion_state *ms = &mh.st[0]; return fabsf(ms->gyro[0]) + fabsf(ms->gyro[1]) + fabsf(ms->gyro[2]) < 0.01f && !(pl == 0 && shaking(guest_ns())); }
     return pl != 0 || !shaking(guest_ns());
 }
 // The console's own six-axis sensor (SevenSixAxisSensor, the body's orientation in handheld mode; The Legend of Zelda: Breath of the Wild): takes a work buffer and is switched through the hid service. The host provides none: switching succeeds, 0 states

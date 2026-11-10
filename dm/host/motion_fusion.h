@@ -117,6 +117,23 @@ static inline void motion_update(motion_state *s, const motion_map *m, const flo
         if (dt > 0 && dt <= 0.25f) { float angle = s->angle[i] + wraw[i] * dt; if (isfinite(angle)) s->angle[i] = angle; }
     }
 }
+// The state dt seconds after `from`, turning at gyro (revolutions / s) with acceleration acc meanwhile: the orientation turned and the angle advanced, nothing else measured.
+// For sensor history entries between a source's samples (hle_hid.c): a controller that reports every 30 ms (a Switch 2 controller on a Mac) still gives the game one
+// entry every 5 ms that moves, as the console's 200 Hz sensor does, instead of six equal entries and a jump
+static inline void motion_advance(motion_state *out, const motion_state *from, const float gyro[3], const float acc[3], float dt) {
+    *out = *from;
+    for (int i = 0; i < 3; i++) { out->gyro[i] = gyro[i]; out->acc[i] = acc[i]; }
+    if (!isfinite(dt) || dt <= 0) return;
+    float w[3] = {gyro[0] * 2 * (float)M_PI, gyro[1] * 2 * (float)M_PI, gyro[2] * 2 * (float)M_PI}, th = sqrtf(w[0] * w[0] + w[1] * w[1] + w[2] * w[2]) * dt;
+    for (int i = 0; i < 3; i++) { float a = out->angle[i] + gyro[i] * dt; if (isfinite(a)) out->angle[i] = a; }
+    if (!isfinite(th) || th <= 1e-9f) return;
+    float u[3] = {w[0] * dt / th, w[1] * dt / th, w[2] * dt / th}, c = cosf(th), sn = sinf(th), v = 1 - c;
+    float E[3][3] = {
+        {c + u[0] * u[0] * v,        u[0] * u[1] * v - u[2] * sn, u[0] * u[2] * v + u[1] * sn},
+        {u[1] * u[0] * v + u[2] * sn, c + u[1] * u[1] * v,        u[1] * u[2] * v - u[0] * sn},
+        {u[2] * u[0] * v - u[1] * sn, u[2] * u[1] * v + u[0] * sn, c + u[2] * u[2] * v}};
+    m3_mul(out->R, out->R, E); m3_orthonormalize(out->R);
+}
 // The SixAxisSensorState fields from the state: acc[3], gyro[3], angle[3], dir[9] (rows = the controller's x, y, z axes in the world)
 static inline void motion_fill(const motion_state *s, float acc[3], float gyro[3], float angle[3], float dir[9]) {
     for (int i = 0; i < 3; i++) { acc[i] = s->acc[i]; gyro[i] = s->gyro[i]; angle[i] = s->angle[i]; }

@@ -111,13 +111,16 @@ int main(void) {
     s2_cal c; n = unhex("2ff87c97944c9d9446ffff", b);
     CHECK(!s2_cal_blank(b, n) && s2_cal_parse(b, n, &c) && c.cx == 2095 && c.cy == 1999 && c.maxx == 1175 && c.maxy == 1225 && c.minx == 1181 && c.miny == 1129);
     float x, y;
-    s2_cal_apply(&c, 3270, 1999, 40, &x, &y); CHECK(x == 1.f && y == 0.f);
-    s2_cal_apply(&c, 2095 + 20, 1999 - 20, 40, &x, &y); CHECK(x == 0.f && y == 0.f);       // inside the dead zone
-    s2_cal_apply(&c, 2095 - 1181, 1999 + 2000, 40, &x, &y); CHECK(x == -1.f && y == 1.f);   // past the travel clamps
-    s2_cal_apply(NULL, 2048, 2048, 40, &x, &y); CHECK(x == 0.f && y == 0.f);
+    s2_cal_apply(&c, 3270, 1999, S2_DEADZONE, &x, &y); CHECK(x == 1.f && y == 0.f);
+    s2_cal_apply(&c, 2095 + 20, 1999 - 20, S2_DEADZONE, &x, &y); CHECK(x == 0.f && y == 0.f);       // inside the dead zone
+    s2_cal_apply(&c, 2095 - 1181, 1999 + 2000, S2_DEADZONE, &x, &y); CHECK(x == -1.f && y == 1.f);   // past the travel clamps
+    s2_cal_apply(NULL, 2048, 2048, S2_DEADZONE, &x, &y); CHECK(x == 0.f && y == 0.f);
+    // A stick at rest a little off its centre reads 0, and the output grows from 0 past the dead zone (no jump to a few percent at its edge)
+    { s2_cal r = {2048, 2048, 1200, 1200, 1200, 1200, 1}; s2_cal_apply(&r, 2048 + 60, 2048 - 100, S2_DEADZONE, &x, &y); CHECK(x == 0.f && y == 0.f);
+      s2_cal_apply(&r, 2048 + 121, 2048, S2_DEADZONE, &x, &y); CHECK(x > 0.f && x < 0.002f); }
     s2_cal blank; n = unhex("ffffffffffffffffffffff", b); s2_cal_default(&blank);
     CHECK(s2_cal_blank(b, n) && !s2_cal_parse(b, n, &blank) && !blank.valid);
-    s2_cal_apply(&blank, 2048 + 1200, 2048, 40, &x, &y); CHECK(x == 1.f);   // an uncalibrated stick uses the typical travel
+    s2_cal_apply(&blank, 2048 + 1200, 2048, S2_DEADZONE, &x, &y); CHECK(x == 1.f);   // an uncalibrated stick uses the typical travel
 
     // Pads
     s2_pad_state pad; uint64_t m; int32_t st[4];
@@ -125,7 +128,7 @@ int main(void) {
     // A Pro Controller 2: its own buttons, both sticks
     pad.pro.have = 1; pad.pro.pid = S2_PID_PRO; s2_cal_default(&pad.pro.cal[0]); s2_cal_default(&pad.pro.cal[1]);
     pad.pro.r.buttons = S2_A | S2_ZL | S2_SL_L; pad.pro.r.lx = 2048 + 1200; pad.pro.r.ly = 2048; pad.pro.r.rx = 2048; pad.pro.r.ry = 2048 - 600;
-    CHECK(s2_pad_input(&pad, &m, st) && m == (DM_BTN_A | DM_BTN_ZL) && st[0] == DM_STICK_MAX && st[1] == 0 && st[2] == 0 && st[3] == -(int32_t)lrintf(600.f / 1200.f * DM_STICK_MAX));
+    CHECK(s2_pad_input(&pad, &m, st) && m == (DM_BTN_A | DM_BTN_ZL) && st[0] == DM_STICK_MAX && st[1] == 0 && st[2] == 0 && st[3] == -(int32_t)lrintf((600.f - 120.f) / (1200.f - 120.f) * DM_STICK_MAX));
     CHECK(s2_pad_motion_dev(&pad, 1) == &pad.pro && s2_pad_motion_dev(&pad, 0) == &pad.pro);
     // Two Joy-Cons: the left's d-pad and stick, the right's face buttons and stick
     memset(&pad, 0, sizeof pad);
@@ -156,6 +159,9 @@ int main(void) {
     pad.left.have = 1; CHECK(s2_pad_map(&pad, &pad.right) == s2_map_pair && s2_pad_map(&pad, &pad.left) == s2_map_pair);
     pad.right.have = 0; CHECK(s2_pad_map(&pad, &pad.left) == s2_map_left_alone);
     pad.pro.have = 1; CHECK(s2_pad_map(&pad, &pad.pro) == s2_map_pro);
+    // A Pro Controller 2's recorded samples: flat and still, gravity straight down; held with its top tipped toward the screen, gravity toward the player (-y) and down, no roll
+    int16_t pf[6] = {-164, -584, 4193, 0, 0, 0}; s2_motion(pf, s2_map_pro, NULL, S2_GYRO_RAD, acc, rot); CHECK(fabsf(acc[2] + 1.02f) < 0.02f && fabsf(acc[0]) < 0.05f && fabsf(acc[1]) < 0.15f);
+    int16_t ph[6] = {-73, 3227, 2597, 0, 0, 0}; s2_motion(ph, s2_map_pro, NULL, S2_GYRO_RAD, acc, rot); CHECK(acc[1] < -0.7f && acc[2] < -0.5f && fabsf(acc[0]) < 0.05f);
     // Rest offset: a second of nearly constant samples is learned, motion resets, a large offset is not rest
     s2_rest rs; memset(&rs, 0, sizeof rs); int16_t q[6] = {0, 0, 4096, 18, -20, -4};
     for (int i = 0; i < S2_REST_N - 1; i++) { q[3] = 18 + (i & 1); s2_rest_update(&rs, q); }

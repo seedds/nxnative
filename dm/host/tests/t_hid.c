@@ -26,7 +26,8 @@ static int hid_clock_gettime(clockid_t clock, struct timespec *ts) { (void)clock
 static int hid_usleep(useconds_t usec) { (void)usec; if (script_hold) script_hold(); return 0; }
 #define CHECK(c, msg) do { checks++; if (!(c)) { fails++; fprintf(stderr, "FAIL: %s (line %d)\n", msg, __LINE__); } } while (0)
 int dm_opmode(void) { return g_mode; }
-uint64_t guest_ns(void) { return 1000000000ull; }
+static uint64_t guest_now = 1000000000ull;
+uint64_t guest_ns(void) { return guest_now; }
 uint64_t now_ns(void) { return motion_now; }
 static uint64_t test_frame;   // presented frames (t_rec moves it)
 uint64_t dm_guest_frame(void) { return test_frame; }
@@ -593,7 +594,7 @@ static void t_motion_hid(void) {
     h_hid_SixStates(&st, 1, &h);
     CHECK(st.acc[0] == .5f && st.angle[2] == 0, "HID: usable GC motion takes over with its independent orientation");
     dm_motion_clear(0); h_hid_SixStates(&st, 1, &h);
-    CHECK(st.acc[0] == 0 && fabsf(st.angle[2] - .01f) < 1e-6f, "HID: GC removal reveals raw source's independent orientation");
+    CHECK(st.acc[0] == 0 && fabsf(st.angle[2] - .011f) < 1e-6f, "HID: GC removal reveals raw source's independent orientation (turned on 1 ms past its newest sample)");
     dm_motion_clear_hid(0); h_hid_SixStates(&st, 1, &h);
     CHECK(st.acc[0] == 0 && st.acc[2] == -1 && st.angle[2] == 0, "HID: removing both controller sources returns to flat");
     dm_motion_set_hid(0, flat, turn, motion_now); h_hid_SixStates(&st, 1, &h);
@@ -606,6 +607,47 @@ static void t_motion_hid(void) {
     h_hid_SixStates(&st, 1, &h); CHECK(st.acc[1] == -1, "HID: forced phone selection still wins");
     dm_motion_clear_hid(0); dm_motion_clear_hid(1); dm_motion_clear(0); g_phone_motion.last_ns = 0;
     dm_pad_players(1); g_phone_mode = -1;
+}
+// A read's entries are the source's own recent samples, one per 5 ms by sampling number (the newest at or before each entry's time), not the newest one repeated: Breath of the Wild
+// hands its camera back to the gyro only from the motion it sees across a read's entries
+static void t_motion_history(void) {
+    g_mode = 1; dm_pad_players(1); g_phone_mode = 0;
+    uint32_t h = 0; SixAxisState st[4];
+    float flat[3] = {0, 0, -1};
+    motion_now += 1000000000;
+    dm_motion_clear(0); dm_motion_clear_hid(0);
+    for (int i = 0; i < 3; i++) dm_motion_set_hid(0, flat, (float[]){0, 0, (float)(i + 1)}, motion_now - (2 - i) * 5000000);
+    CHECK(h_hid_SixStates(st, 4, &h) == 4, "history: every entry");
+    float r = 1 / (2 * (float)M_PI);
+    CHECK(fabsf(st[0].gyro[2] - 3 * r) < 1e-4f && fabsf(st[1].gyro[2] - 2 * r) < 1e-4f && fabsf(st[2].gyro[2] - r) < 1e-4f, "history: each entry its own sample, newest first");
+    CHECK(fabsf(st[3].gyro[2] - r) < 1e-4f, "history: older than the kept samples, the oldest kept");
+    CHECK(st[0].angle[2] > st[1].angle[2] && st[1].angle[2] > st[2].angle[2], "history: the angle as it was at each entry");
+    CHECK(st[0].sampling == st[1].sampling + 1 && st[1].sampling == st[2].sampling + 1, "history: numbered by time");
+    // A source that reports every 30 ms (a Switch 2 controller on a Mac): every 5 ms entry moves, between the samples and past the newest one, instead of six equal entries
+    float spin[3] = {0, 0, 2 * (float)M_PI};   // one revolution a second about z
+    motion_now += 1000000000; dm_motion_clear_hid(0);
+    dm_motion_set_hid(0, flat, spin, motion_now - 50000000); dm_motion_set_hid(0, flat, spin, motion_now - 20000000);
+    SixAxisState sp[10]; h_hid_SixStates(sp, 10, &h);
+    int moving = 1; for (int i = 0; i < 9; i++) moving &= sp[i].angle[2] > sp[i + 1].angle[2] + 0.004f && sp[i].angle[2] < sp[i + 1].angle[2] + 0.006f;
+    CHECK(moving, "30 ms samples: each 5 ms entry turned 0.005 revolutions on from the one before");
+    CHECK(fabsf(sp[4].angle[2] - sp[0].angle[2] + 0.02f) < 1e-4f && fabsf(sp[4].gyro[2] - 1) < 1e-4f, "30 ms samples: the newest sample's entry, and 20 ms past it turned on at its rate");
+    CHECK(fabsf(sp[0].dir[0] - cosf(2 * (float)M_PI * sp[0].angle[2])) < 0.01f, "30 ms samples: the orientation turned with the angle");
+    // Time passes and the next sample says the controller stopped: the entries the game read keep their values, and the angle goes on from them, never back
+    float still[3] = {0, 0, 0};
+    motion_now += 30000000; guest_now += 30000000;
+    dm_motion_set_hid(0, flat, still, motion_now - 20000000);
+    SixAxisState nx[16]; h_hid_SixStates(nx, 16, &h);
+    int kept = 1; for (int i = 0; i < 10; i++) kept &= nx[i + 6].sampling == sp[i].sampling && nx[i + 6].angle[2] == sp[i].angle[2];
+    CHECK(kept, "stream: an entry the game read is not changed by a later sample");
+    int onward = 1; for (int i = 0; i < 15; i++) onward &= nx[i].angle[2] >= nx[i + 1].angle[2];
+    CHECK(onward, "stream: the angle never steps back");
+    CHECK(fabsf(nx[0].gyro[2]) < 1e-4f && nx[0].angle[2] == nx[1].angle[2], "stream: past the stopped sample, at rest");
+    // DM_MOTION_STREAM=0: every entry the newest sample, as before the stream
+    g_motion_stream = 0; h_hid_SixStates(nx, 4, &h);
+    CHECK(nx[0].angle[2] == nx[3].angle[2] && nx[0].sampling == nx[3].sampling + 3, "DM_MOTION_STREAM=0: the newest sample in every entry");
+    g_motion_stream = 1;
+    guest_now = 1000000000ull;
+    dm_motion_clear_hid(0); g_phone_mode = -1;
 }
 
 int main(void) {
@@ -620,6 +662,7 @@ int main(void) {
     t_motion_threads();
     t_motion_live();
     t_motion_hid();
+    t_motion_history();
     t_rec();
     {   // Nmouse with no device (SDK 21's forms): the pointer range is kept, the merged handle 0 takes settings, the standard mouse and the handle queries report nothing
         int w = 0, h = 0; uint64_t std = 7; uint32_t npad = 9;

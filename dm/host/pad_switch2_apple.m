@@ -277,11 +277,12 @@ static s2_pad *s2_pad_for(uint16_t pid) {   // a Joy-Con joins a pad that has th
     _pad = p; _live = YES; _handshaken = YES;
     s2_rumble_timer();
     if (fresh) {
-        if (g_front.attach) g_front.attach(p);
-        if (s2_player(p) < 0) { LOG("[sw2] %s: no free player, not used", s2_kind(_pid)); [self fail:@"all players are taken"]; return; }
+        // A pad waiting for its first press (DM_PAD_PRESS_TO_JOIN) has no player yet and stays connected: dropping it for that left a Pro Controller 2 unusable with the setting on
+        if (g_front.attach ? !g_front.attach(p) : s2_player(p) < 0) { LOG("[sw2] %s: no free player, not used", s2_kind(_pid)); [self fail:@"all players are taken"]; return; }
     } else if (g_front.read) g_front.read(p);
     s2_sync_sides(p);
-    LOG("[sw2] %s connected: player %d%s", s2_kind(_pid), s2_player(p) + 1, fresh ? "" : " (joined the Joy-Con already there)");
+    if (s2_player(p) < 0) LOG("[sw2] %s connected: it takes a player at its first button press (DM_PAD_PRESS_TO_JOIN)", s2_kind(_pid));
+    else LOG("[sw2] %s connected: player %d%s", s2_kind(_pid), s2_player(p) + 1, fresh ? "" : " (joined the Joy-Con already there)");
     [self setLEDs:nil];
     [_peripheral setNotifyValue:YES forCharacteristic:_inp];
     __weak S2Session *w = self;   // the link drops after about ten seconds without a write from the host, so the LEDs are written once a second
@@ -324,8 +325,10 @@ static s2_pad *s2_pad_for(uint16_t pid) {   // a Joy-Con joins a pad that has th
     if (_rest.have && (!had || was[0] != _rest.bias[0] || was[1] != _rest.bias[1] || was[2] != _rest.bias[2]) && ts - _restSaved > 30000000000ull) { [self saveRest]; _restSaved = ts; }
     if (g_verbose && _reports % 33 == 1)
         LOG("[sw2] %s: clock %u ms, %llu reports lost so far; buttons 0x%08x sticks %u,%u %u,%u accel %d,%d,%d gyro %d,%d,%d battery %u mV mouse %d,%d %u,%u", s2_kind(_pid), r.clock_ms, (unsigned long long)_lost, r.buttons, r.lx, r.ly, r.rx, r.ry, r.raw[0], r.raw[1], r.raw[2], r.raw[3], r.raw[4], r.raw[5], r.battery_mv, r.mouse_x, r.mouse_y, r.mouse_q, r.mouse_s);
+    int before = s2_player(_pad);
     if (g_front.read) g_front.read(_pad);
     int player = s2_player(_pad), blocked = s2_blocked();
+    if (before < 0 && player >= 0) s2_sync_sides(_pad);   // it just joined at its first press: its npad takes the Joy-Cons it holds
     if (g_motion && !blocked && player >= 0 && s2_pad_motion_dev(&_pad->st, g_motion_right) == dev) {
         const int8_t *map = g_map_set ? g_map : s2_pad_map(&_pad->st, dev);
         float acc[3], rot[3]; s2_motion(r.raw, map, _rest.have ? _rest.bias : NULL, g_gyro, acc, rot);

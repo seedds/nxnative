@@ -194,6 +194,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Found on:** [Metroid Prime Remastered](../../dm/games/010012101468C000/README.md): the clustered lighting's R32Uint light grid (`fde1a3e769219a77` and the other world materials). Reported and fixed by nobz226.
 - **Check:** `t_int_float_view` reads small integers (denormal floats), NaN patterns and negatives through the R32Float view in a compute shader and takes back every bit.
 
+### Private buffer texture fallbacks must not query CPU contents
+
+- **Symptom:** Metal API validation aborts in `validateCPUWriteable` before an unsupported buffer-texture copy can report its fallback.
+- **Cause:** `tbuf_shadow` and `tbuf_rows_copy` tested `!buffer.contents` to detect CPU-inaccessible storage. Calling `contents` on a private `MTLBuffer` is itself invalid; it is not a safe capability query.
+- **Fix:** check `storageMode` before querying `contents`. Keep the existing warning and unsupported result: the shadow leaves the original view unchanged, while the row copy returns nil. This avoids the invalid API call; it does not make GPU-written snapshots coherent or make private misaligned textures render correctly.
+- **Check:** `make -C dm/gfx/tests GAME=<id> check_t_tbuf_access` uses real private Metal allocations under API validation. The row case uses a real aligned texture with a larger requested row alignment; the shadow case supplies metadata only because creating a real offset-4 buffer texture is already invalid. Both old helper paths abort; the guards preserve their explicit fallback without a CPU-access query. The fixture does not submit an unsupported texture to the GPU.
+- **Found on:** synthetic tests during [Ocarina of Time](../../dm/games/0400486024DEC000/README.md) source review; no Ocarina crash or rendering artifact is attributed to this path.
+
 ### Buffer textures at offsets below 16 bytes
 
 - **Symptom:** particle effects drawn at the wrong scale or place, or flickering, where the particle data is a buffer texture at a pool offset that is not a multiple of 16; log line `buffer texture at pool offset …, below Metal's 16-byte alignment`.

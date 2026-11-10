@@ -6348,7 +6348,8 @@ static struct { __unsafe_unretained id<MTLTexture> src, view; uint64_t epoch, ri
 static id<MTLTexture> tbuf_rows_copy(id<MTLTexture> t, MTLPixelFormat pf, uint32_t w, uint32_t h, uint32_t row, NSUInteger al, uint64_t *rid) {
     id<MTLBuffer> src = t.buffer; size_t off = t.bufferOffset;
     if (!src || off >= src.length) return nil;
-    if (!src.contents) { RED_ONCE(137, "texture buffer at pool offset %#zx (not a multiple of the %lu-byte linear-texture alignment) in a pool the CPU cannot access: the slot reads 0", off, (unsigned long)al); return nil; }
+    // Querying contents itself is invalid for private storage under Metal validation.
+    if (src.storageMode == MTLStorageModePrivate || !src.contents) { RED_ONCE(137, "texture buffer at pool offset %#zx (not a multiple of the %lu-byte linear-texture alignment) in a pool the CPU cannot access: the slot reads 0", off, (unsigned long)al); return nil; }
     unsigned k = (unsigned)(((uintptr_t)(__bridge void *)t >> 4) % TB2_STAGE);
     if (g_tb2_stage[k].src == t && g_tb2_stage[k].epoch == g_fence + 1) { *rid = g_tb2_stage[k].rid; return g_tb2_stage[k].view; }   // copied for this submission already
     while (h > 1 && off + (uint64_t)row * h > src.length) h--;   // as the aligned rows: a last row running past the pool buffer
@@ -9679,7 +9680,8 @@ static id<MTLTexture> tbuf_shadow(id<MTLTexture> t, uint64_t *rid) {
     id<MTLTexture> root = t; while (root.parentTexture) root = root.parentTexture;   // a swizzled view keeps its parent's buffer
     id<MTLBuffer> src = root.buffer; NSUInteger off = root.bufferOffset, row = root.bufferBytesPerRow;
     if (!src || !(off & 15) || off >= src.length) return t;
-    if (!src.contents) { RED_ONCE(117, "buffer texture at pool offset %#lx (not 16-byte aligned) in a pool the CPU cannot access: read from the 16-byte boundary below", (unsigned long)off); return t; }
+    // Preserve the unsupported-storage fallback without making an invalid CPU-access query.
+    if (src.storageMode == MTLStorageModePrivate || !src.contents) { RED_ONCE(117, "buffer texture at pool offset %#lx (not 16-byte aligned) in a pool the CPU cannot access: read from the 16-byte boundary below", (unsigned long)off); return t; }
     unsigned k = (unsigned)(((uintptr_t)(__bridge void *)t >> 4) % TBS_CACHE);
     if (g_tbs_cache[k].src == t && g_tbs_cache[k].epoch == g_fence + 1) { *rid = g_tbs_cache[k].rid; return g_tbs_cache[k].copy; }
     size_t n = row < src.length - off ? row : src.length - off, need = (n + 255u) & ~(size_t)255u;

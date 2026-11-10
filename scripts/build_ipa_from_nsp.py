@@ -2728,6 +2728,9 @@ def mac_gpu_arch(work, env, logs):
     return arch
 
 
+PSO_LEFT_OUT = 3   # pso_offline.py's exit status for an archive made with pipelines left out (its LEFT_OUT_EXIT): a good archive, kept
+
+
 def mac_pso(py, repo, work, lib, g, gpus, env, logs):
     """PLATFORM 'mac-app', an NVN game with shader pairs: its pipeline archive made offline for this Mac's GPU (dm/gfx/tools/pso_offline.py --platform macos, metal-tt), which the app carries as
     Resources/pso and the launcher hands to the host as DM_PSO_BUNDLE, as the iOS app does (docs/development.md, The pipeline archive made offline): the app's first start builds no base,
@@ -2747,7 +2750,12 @@ def mac_pso(py, repo, work, lib, g, gpus, env, logs):
     cmd = [py, repo / 'dm/gfx/tools/pso_offline.py', '--game', g.id, '--msl', lib, '--out', out, '--work', work / 'pso/mac-work', '--gpu', arch, '--platform', 'macos']
     if not g.table('pso_pairs.tsv').is_file() and (work / 'shader/pso_pairs.tsv').is_file():   # the split's copy, as the app gets it (--pso-pairs)
         cmd += ['--pairs', g.table('shader_pairs.tsv'), '--pairs', work / 'shader/pso_pairs.tsv']
-    if run(cmd, logs / 'pso_offline_mac.log', env=env, fatal=False):   # an optimization: the app builds the bases on its first start without it
+    code = run(cmd, logs / 'pso_offline_mac.log', env=env, fatal=False)
+    if code == PSO_LEFT_OUT and any(out.glob('*.mtl4a')):   # an archive without the pipelines metal-tt did not compile alone: the app builds those (rest_pairs.tsv, first dispatch)
+        PROG.end(f'{arch}, {amount(tree_size(out)[1], "B")}, some pipelines left out', warn=True)
+        say(f'[RED] pipeline archive: pso_offline.py left out pipelines metal-tt did not compile alone (see {logs / "pso_offline_mac.log"}); the app builds those on the device')
+        return out
+    if code:   # an optimization: the app builds the bases on its first start without it
         shutil.rmtree(out, ignore_errors=True)
         PROG.end('failed, the app is packed without one', warn=True)
         say(f'[RED] pipeline archive: pso_offline.py failed (see {logs / "pso_offline_mac.log"}); the app is packed without one and builds its pipeline bases on its first start (--gpu none skips this step)')

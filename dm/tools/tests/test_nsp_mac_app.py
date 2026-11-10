@@ -736,6 +736,8 @@ class Script(unittest.TestCase):
                 o = Path(cmd[cmd.index('--out') + 1]); o.mkdir(parents=True, exist_ok=True)
                 if kw.get('pso_fail'):   # metal-tt failed
                     self.assertFalse(fatal); (o / 'applegpu_g14s.mtl4a.partial').write_bytes(b'half'); return 1
+                if kw.get('pso_left_out'):   # an archive without some pipelines (pso_offline.py LEFT_OUT_EXIT)
+                    self.assertFalse(fatal); (o / 'applegpu_g14s.mtl4a').write_bytes(b'arch'); return 3
                 if not kw.get('no_bases'): (o / f'{cmd[cmd.index("--gpu") + 1]}.mtl4a').write_bytes(b'arch')
                 return
             (out / 'Contents/MacOS').mkdir(parents=True); (out / 'Contents/MacOS/dmhost').write_bytes(b'x')
@@ -798,6 +800,15 @@ class Script(unittest.TestCase):
         self.assertNotIn(mock.call(ok=False), self.prog.end.call_args_list)
         self.assertTrue(any(m.startswith('[RED] pipeline archive: pso_offline.py failed') for m in self.said))
         self.assertFalse((tmp / 'pso/mac').exists())   # no half archive left to be picked up
+
+    def test_pso_archive_with_pipelines_left_out_is_kept(self):   # exit status 3: an archive, without the pipelines metal-tt did not compile alone, which the app builds
+        tmp = Path(tempfile.mkdtemp(dir=TEST_ROOT)); self.addCleanup(shutil.rmtree, tmp)
+        (tmp / 'profile').mkdir(); (tmp / 'profile/shader_pairs.tsv').write_text('v\tf\n')
+        o, _ = self.pack_cmd('nvn', work=tmp, pso_left_out=True)
+        self.assertEqual(o['--pso'], str(tmp / 'pso/mac'))
+        self.assertTrue(any(c.args and c.args[0].endswith('some pipelines left out') and c.kwargs.get('warn') for c in self.prog.end.call_args_list))
+        self.assertTrue(any(m.startswith('[RED] pipeline archive: pso_offline.py left out pipelines') for m in self.said))
+        self.assertEqual(nsp.PSO_LEFT_OUT, po_exit())
 
     def test_ipa_build_says_its_archive_failed(self):   # build_ipa.sh's output goes to a log: the console shows this line, which the build going on would otherwise hide
         tmp = Path(tempfile.mkdtemp(dir=TEST_ROOT)); self.addCleanup(shutil.rmtree, tmp); said = []
@@ -940,3 +951,8 @@ class SeenShaders(unittest.TestCase):   # --seen-shaders: the keys, the partial 
 
 if __name__ == '__main__':
     unittest.main()
+
+
+def po_exit():   # pso_offline.py's exit status for an archive with pipelines left out, which the NSP script and build_ipa.sh keep
+    spec = importlib.util.spec_from_file_location('pso_offline_exit', REPO / 'dm/gfx/tools/pso_offline.py')
+    m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m); return m.LEFT_OUT_EXIT

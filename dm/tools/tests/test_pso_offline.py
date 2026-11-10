@@ -257,7 +257,7 @@ class Compute(unittest.TestCase):
         self.assertEqual([(n, len(x), len(y)) for n, x, y in po.groups_of([], c, 5, 0)], [('c00001', 0, 3)])
 
 
-def run_logged_through_run(cmd, log_path, env, timeout=None):
+def run_logged_through_run(cmd, log_path, env, timeout=None, watch=None):
     """po.run_logged by way of subprocess.run, which the tests replace: no compiler runs; a runner that returns None as its exit status stands for a run past its time limit"""
     with log_path.open('w') as log: return subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT, env=env).returncode
 
@@ -580,7 +580,7 @@ class Build(unittest.TestCase):
         self.assertEqual(observed[-1], ('merge', 3))
         self.assertIn(('compile', ['vertex2']), observed)   # the second group's archive, without the base that fails
         self.assertEqual((self.out / 'rest_pairs.tsv').read_text(), 'v\tf\n')
-        self.assertEqual(po.read_left_out(self.work / 'left_out.applegpu_g18p.tsv', (self.work / 'key.applegpu_g18p').read_text().strip()), [('v_bp', 'vertex3', 'f_b', 'main0')])
+        self.assertEqual(po.read_left_out(self.work / 'left_out.applegpu_g18p.tsv', (self.work / 'key.applegpu_g18p').read_text().strip()), [('base', ('v_bp', 'vertex3', 'f_b', 'main0'))])
 
     def test_a_pipeline_that_fails_alone_is_left_out(self):   # Nintendo Switch Sports Resort: one failing pipeline lost the whole archive after hours
         bases = [('v_bp', f'vertex{i}', 'f_b', 'main0') for i in range(5)]
@@ -591,7 +591,7 @@ class Build(unittest.TestCase):
         # the failed group in halves: vertex2 fails alone and is left out, vertex3 compiles; one archive of the rest
         self.assertEqual(observed, [('compile',['vertex0','vertex1']),('compile',['vertex2','vertex3']),('compile',['vertex2']),('compile',['vertex3']),('compile',['vertex4']),('merge',3)])
         self.assertTrue((self.out/'applegpu_g18p.mtl4a').is_file()); self.assertTrue((self.out/'prebuilt.tsv').is_file())
-        self.assertEqual((self.work/'left_out.applegpu_g18p.tsv').read_text().split('\n')[1:], ['v_bp\tvertex2\tf_b\tmain0', ''])
+        self.assertEqual((self.work/'left_out.applegpu_g18p.tsv').read_text().split('\n')[1:], ['base\tv_bp\tvertex2\tf_b\tmain0', ''])
         self.assertIn('failed\t1 bases', (self.out/'archive.tsv').read_text())
         self.assertFalse(list(self.work.rglob('*.partial')))
         observed.clear()   # unchanged inputs: the archive and its list reused
@@ -616,10 +616,74 @@ class Build(unittest.TestCase):
             if 'metal-pack' in cmd: Path(cmd[cmd.index('-o') + 1]).write_bytes(b'merged'); return subprocess.CompletedProcess(cmd, 0)
             return self.fake_run(cmd, **kw)
         with mock.patch.object(po.subprocess, 'run', run), mock.patch.dict(os.environ, DM_GAMES_DIR=str(self.prof.parent)), contextlib.redirect_stdout(io.StringIO()):
-            po.main(['--game', '0100000000001000', '--msl', str(self.lib), '--out', str(self.out), '--work', str(self.work), '--os-min', '27.0', '--jobs', '1'])
-        self.assertEqual(compiles, [['f_b', 'g_b', 'v_bp'], ['f_b', 'g_b', 'v_bp'], ['f_b', 'v_bp'], ['g_b', 'v_bp']])   # whole, its group in parts, then the halves
+            code = po.main(['--game', '0100000000001000', '--msl', str(self.lib), '--out', str(self.out), '--work', str(self.work), '--os-min', '27.0', '--jobs', '1'])
+        self.assertEqual(code, po.LEFT_OUT_EXIT)   # an archive, but not of everything
+        self.assertEqual(compiles, [['f_b', 'g_b', 'v_bp'], ['f_b', 'v_bp'], ['g_b', 'v_bp']])   # whole once, then straight to its halves
         self.assertEqual((self.out / 'rest_pairs.tsv').read_text(), 'v\tc\nv\tg\n')   # function constants, then the pair left out
         self.assertIn('rest\t2\n', (self.out / 'archive.tsv').read_text())
+
+    def test_a_cluster_of_bad_pipelines_first_does_not_give_up(self):   # 10 bad pipelines first, in one group: their lone failures pass GIVE_UP before a good one is tried
+        bases = [('v_bp', f'vertex{i}', 'f_b', 'main0') for i in range(40)]
+        bad = {f'vertex{i}' for i in range(10)}
+        runner, observed = self.batched_runner()
+        def run(cmd, **kw):
+            cmd = [str(c) for c in cmd]
+            if 'metal-tt' in cmd and '-o' in cmd:
+                names = {f['name'] for f in json.loads(next(Path(p) for p in cmd if p.endswith('.mtl4-json')).read_text())['function_descriptors']['library_function_descriptors']}
+                if names & bad: observed.append(('fail', len(names))); return subprocess.CompletedProcess(cmd, 1)
+            return runner(cmd, **kw)
+        out = io.StringIO()
+        with mock.patch.object(self, 'fake_run', run), mock.patch.object(po, 'plan', return_value=(bases, [], {})), contextlib.redirect_stdout(out):
+            self.assertEqual(self.main('--batch-size','40','--os-min','27.0','--jobs','1','--allow-left-out'), po.LEFT_OUT_EXIT)   # 10 of 40: past the share, allowed here
+        self.assertTrue((self.out/'applegpu_g18p.mtl4a').is_file())
+        self.assertEqual(sorted(kind_x[1][1] for kind_x in po.read_left_out(self.work/'left_out.applegpu_g18p.tsv', (self.work/'key.applegpu_g18p').read_text().strip())), sorted(bad))
+        self.assertNotIn('the compiler itself', out.getvalue())
+
+    def test_give_up_only_after_the_probe(self):   # the order-dependent case the probe settles: the first lone failures all bad, the rest of the list sound
+        tally, probes = po.Tally(probe=lambda: probes.append(1) or True), []
+        for _ in range(po.GIVE_UP + 3): tally.fail('a', 'x')   # GIVE_UP and more lone failures with nothing compiled: the probe finds one that compiles, the build goes on
+        self.assertTrue(tally.compiled); self.assertEqual(probes, [1])
+        broken = po.Tally(probe=lambda: False)
+        for _ in range(po.GIVE_UP - 1): broken.fail('a', 'x')
+        with self.assertRaises(SystemExit): broken.fail('a', 'x')
+
+    def test_too_many_left_out_stops_unless_allowed(self):
+        bases = [('v_bp', f'vertex{i}', 'f_b', 'main0') for i in range(20)]
+        bad = {f'vertex{i}' for i in range(6, 13)}   # 7 of 20: more than LEFT_OUT_FEW and LEFT_OUT_SHARE
+        runner, observed = self.batched_runner()
+        def run(cmd, **kw):
+            cmd = [str(c) for c in cmd]
+            if 'metal-tt' in cmd and '-o' in cmd:
+                names = {f['name'] for f in json.loads(next(Path(p) for p in cmd if p.endswith('.mtl4-json')).read_text())['function_descriptors']['library_function_descriptors']}
+                if names & bad: return subprocess.CompletedProcess(cmd, 1)
+            return runner(cmd, **kw)
+        with mock.patch.object(self, 'fake_run', run), mock.patch.object(po, 'plan', return_value=(bases, [], {})), self.assertRaises(SystemExit) as e:
+            self.main('--batch-size','10','--os-min','27.0','--jobs','1')
+        self.assertIn('--allow-left-out', str(e.exception)); self.assertFalse(list(self.out.glob('*.mtl4a'))); self.assertFalse((self.work/'key.applegpu_g18p').exists())
+        with mock.patch.object(self, 'fake_run', run), mock.patch.object(po, 'plan', return_value=(bases, [], {})):
+            self.assertEqual(self.main('--batch-size','10','--os-min','27.0','--jobs','1','--allow-left-out'), po.LEFT_OUT_EXIT)
+        self.assertTrue((self.out/'applegpu_g18p.mtl4a').is_file())
+        self.assertTrue(po.too_many_left_out(51, 100000)); self.assertFalse(po.too_many_left_out(5, 6)); self.assertTrue(po.too_many_left_out(6, 50)); self.assertFalse(po.too_many_left_out(6, 61))
+
+    def test_left_out_list_is_written_before_the_archive(self):   # a stop between them makes the archive again rather than publish it without its list
+        bases = [('v_bp', f'vertex{i}', 'f_b', 'main0') for i in range(3)]
+        runner, _ = self.batched_runner(fail_compile='vertex1')
+        real_replace = os.replace
+        def replace(src, dst):
+            if str(dst).endswith('applegpu_g18p.mtl4a') and Path(dst).parent == self.out: raise KeyboardInterrupt
+            return real_replace(src, dst)
+        with mock.patch.object(self, 'fake_run', runner), mock.patch.object(po, 'plan', return_value=(bases, [], {})), mock.patch.object(po.os, 'replace', replace), \
+                self.assertRaises(KeyboardInterrupt):
+            self.main('--batch-size','2','--os-min','27.0','--jobs','1')
+        self.assertTrue((self.work/'left_out.applegpu_g18p.tsv').is_file()); self.assertFalse((self.work/'key.applegpu_g18p').exists())
+        self.assertFalse(list(self.work.glob('left_out.*.partial')))
+
+    def test_a_timed_out_group_is_tried_again_under_a_longer_limit(self):
+        ff = self.t / 'failed.a'
+        ff.write_text('K\ntimeout\t1830\nran past its limit\n')
+        self.assertIsNone(po.known_failure(ff, 'K', None)); self.assertIsNone(po.known_failure(ff, 'K', 4000))   # no limit, or a longer one: try it again
+        self.assertTrue(po.known_failure(ff, 'K', 1830).timed_out); self.assertIsNone(po.known_failure(ff, 'other key', 1830))
+        ff.write_text('K\nfailed\t1830\nexit 1\n'); self.assertIsNotNone(po.known_failure(ff, 'K', None))   # a failure is kept whatever the limit
 
     def test_gives_up_when_nothing_compiles(self):   # a broken toolchain fails every pipeline: stop after GIVE_UP of them alone, not after trying each
         bases = [('v_bp', f'vertex{i}', 'f_b', 'main0') for i in range(40)]
@@ -631,14 +695,14 @@ class Build(unittest.TestCase):
         with mock.patch.object(self, 'fake_run', fail), mock.patch.object(po, 'plan', return_value=(bases, [], {})), self.assertRaises(SystemExit) as e:
             self.main('--batch-size','20','--os-min','27.0','--jobs','1')
         self.assertIn('compiler itself', str(e.exception))
-        self.assertLess(len(calls), 30)
+        self.assertLess(len(calls), 50)   # the first group's parts, GIVE_UP pipelines alone and the probes, not each pipeline
         self.assertFalse(list(self.out.glob('*.mtl4a')))
 
     def test_a_run_past_its_time_limit_is_compiled_in_parts(self):
         bases = [('v_bp', f'vertex{i}', 'f_b', 'main0') for i in range(2)]
         runner, observed = self.batched_runner()
         limits = []
-        def slow(cmd, log_path, env, timeout=None):   # the run of both pipelines does not finish in time
+        def slow(cmd, log_path, env, timeout=None, watch=None):   # the run of both pipelines does not finish in time
             limits.append(timeout)
             if sum('vertex' in line for line in Path(next(c for c in cmd if str(c).endswith('.mtl4-json'))).read_text().split('\n') if '"name"' in line) > 1:
                 log_path.write_text(''); return None
@@ -647,7 +711,7 @@ class Build(unittest.TestCase):
         with mock.patch.object(po.subprocess, 'run', runner), mock.patch.object(po, 'plan', return_value=(bases, [], {})), mock.patch.object(po, 'run_logged', slow), \
                 mock.patch.dict(os.environ, DM_GAMES_DIR=str(self.prof.parent)), contextlib.redirect_stdout(out):
             po.main(['--game', '0100000000001000', '--msl', str(self.lib), '--out', str(self.out), '--work', str(self.work), '--os-min', '27.0', '--time-limit', '30', '--jobs', '1'])
-        self.assertEqual(limits, [po.RUN_BASE_S + 60, po.RUN_BASE_S + 60, po.RUN_BASE_S + 30, po.RUN_BASE_S + 30])
+        self.assertEqual(limits, [po.RUN_BASE_S + 60, po.RUN_BASE_S + 30, po.RUN_BASE_S + 30])   # the group once, then its halves: not the same group whole again
         self.assertIn('ran past its limit', out.getvalue())
         self.assertEqual(po.time_limit(1000, po.PER_PIPELINE_S), po.RUN_BASE_S + 1000 * po.PER_PIPELINE_S); self.assertIsNone(po.time_limit(1000, 0))
         self.assertTrue((self.out / 'applegpu_g18p.mtl4a').is_file())
@@ -784,6 +848,30 @@ class RunLogged(unittest.TestCase):
         else: self.fail('the grandchild outlived the time limit')
 
 
+    def test_a_tool_s_children_are_stopped_when_it_returns(self):   # air-tt / applegpu-nt left behind by a metal-tt that returned
+        pid = self.t / 'pid'
+        self.assertEqual(po.run_logged(['sh', '-c', f'sleep 30 & echo $! > {pid}'], self.t / 'log', dict(os.environ)), 0)
+        self.assertTrue(self.gone(int(pid.read_text())))
+
+    def test_stop_all_stops_the_runs_under_way(self):   # Ctrl-C or SIGTERM with --jobs above 1: the groups run detached from the terminal
+        pid, result = self.t / 'pid', []
+        t = po.threading.Thread(target=lambda: result.append(po.run_logged(['sh', '-c', f'sleep 30 & echo $! > {pid}; wait'], self.t / 'log', dict(os.environ))))
+        t.start()
+        for _ in range(300):   # a loaded Mac may take a while to start the shell
+            if pid.is_file() and pid.read_text().strip(): break
+            time.sleep(0.1)
+        po.stop_all(); t.join(30)
+        self.assertFalse(t.is_alive()); self.assertNotEqual(result, [0]); self.assertTrue(self.gone(int(pid.read_text()))); self.assertEqual(po.LIVE, set())
+
+    def gone(self, child):
+        for _ in range(200):
+            try: os.kill(child, 0)
+            except ProcessLookupError: return True
+            if subprocess.run(['ps', '-o', 'stat=', '-p', str(child)], capture_output=True, text=True).stdout.strip().startswith('Z'): return True
+            time.sleep(0.1)
+        return False
+
+
 class IpaFallback(unittest.TestCase):
     """build_ipa.sh's own archive step with a pso_offline.py that fails: a [RED] line, no archive folder, and the build goes on (an optimization: the device builds the bases)"""
 
@@ -806,6 +894,11 @@ class IpaFallback(unittest.TestCase):
     def test_made_archive_goes_into_the_app(self):
         out = self.step('mkdir -p "$W/build/ios/pso/bundle"; exit 0\n')
         self.assertNotIn('[RED]', out); self.assertIn('/build/ios/pso/bundle]', out); self.assertIn('folder', out)
+
+    def test_archive_with_pipelines_left_out_goes_into_the_app(self):   # exit status LEFT_OUT_EXIT: a good archive without them; the device builds those
+        out = self.step(f'mkdir -p "$W/build/ios/pso/bundle"; exit {po.LEFT_OUT_EXIT}\n')
+        self.assertIn('[RED] pipeline archive: pso_offline.py left out pipelines', out); self.assertIn('/build/ios/pso/bundle]', out); self.assertIn('folder', out)
+        self.assertNotIn('pso_offline.py failed', out)
 
 
 class Default(unittest.TestCase):

@@ -434,7 +434,26 @@ def swap_in(tmp, dst):   # swap the new output in as a whole (the old one is unt
 
 def free_gb(p):
     while not p.exists(): p = p.parent
-    return shutil.disk_usage(p).free / 2**30
+    free = shutil.disk_usage(p).free
+    if sys.platform == 'darwin':
+        try:
+            cf, b = ctypes.CDLL(None), os.fsencode(p.resolve())
+            cf.CFURLCreateFromFileSystemRepresentation.restype = ctypes.c_void_p
+            cf.CFURLCreateFromFileSystemRepresentation.argtypes = (ctypes.c_void_p, ctypes.c_char_p, ctypes.c_ssize_t, ctypes.c_bool)
+            cf.CFURLCopyResourcePropertyForKey.restype = ctypes.c_bool
+            cf.CFURLCopyResourcePropertyForKey.argtypes = (ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)
+            cf.CFNumberGetValue.restype = ctypes.c_bool
+            cf.CFNumberGetValue.argtypes = (ctypes.c_void_p, ctypes.c_ssize_t, ctypes.c_void_p)
+            cf.CFRelease.argtypes = (ctypes.c_void_p,)
+            k = ctypes.c_void_p.in_dll(cf, 'kCFURLVolumeAvailableCapacityForImportantUsageKey')
+            u, v, n = cf.CFURLCreateFromFileSystemRepresentation(None, b, len(b), True), ctypes.c_void_p(), ctypes.c_int64()
+            if u:
+                if cf.CFURLCopyResourcePropertyForKey(u, k, ctypes.byref(v), None) and v:
+                    if cf.CFNumberGetValue(v, 4, ctypes.byref(n)): free = max(free, n.value)
+                    cf.CFRelease(v)
+                cf.CFRelease(u)
+        except (AttributeError, OSError, ValueError): pass
+    return free / 2**30
 
 
 def tool_env(environ=os.environ):

@@ -354,7 +354,7 @@ DM_SHADER_FILES	switch	`1` packs an NVN game's shader library into the unsigned 
 DM_SHAKE_G	switch	`=<G>`: on iOS, the acceleration beyond gravity above which a flick of the phone shakes the controller's six-axis sensor (default 1.5)
 DM_SHARED_FONT	path	Font file served for every shared-font type except the Nintendo extension (default `$DM_FONT_DIR/standard.ttf`, then macOS's Arial Unicode)
 DM_SHARED_FONT_EXT	path	Font file served for shared-font type 5, the Nintendo extension with the button icons (default `$DM_FONT_DIR/nintendo_ext.ttf`, made by `make_ext_font.py`)
-DM_SHOW_FPS	player	`1` shows the frame-rate counter on the iPhone (frames put on screen per second, top left); at IPA build it sets `DMShowFPS` in `Info.plist`, which `Documents/env.txt` overrides
+DM_SHOW_FPS	player	`1` shows the frame-rate counter on the iPhone and in the Mac window (frames put on screen per second, top left); at IPA build it sets `DMShowFPS` in `Info.plist`, which `Documents/env.txt` overrides
 DM_SIX_DELAY	switch	`=0` (the default), `=auto` or `=<ms>` (up to 40): `DM_IMU_DELAY`'s playout delay for the six-axis states (`GetSixAxisSensorStates`) instead of the IMU samples. None by default: a Switch 1 game reads the newest state each frame (aiming, steering), so a delay only adds latency. Also through `DM_CTL`'s `env`
 DM_SLOWFRAME	diagnostic	`=1` writes the per-frame timing breakdown to the log only for dropped frames (kept in a ring of the last 16 frames, judged 8 frames late)
 DM_SPIN	switch	`0` makes the rewriter's spin gate return at once, so guest poll loops spin with no sleep; the gate stays (on by default)

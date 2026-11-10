@@ -2802,6 +2802,7 @@ def parse_args(argv):
                     'it must be one the game supports, which the console lists')
     ap.add_argument('--keep-extracted', action=argparse.BooleanOptionalAction, help='keep the extracted game files after the IPA is built, for the next build (default: the KEEP_EXTRACTED setting, on)')
     ap.add_argument('--work-dir', help='the game\'s build folder, used as it is (default: the WORK_DIR setting, else <title ID>_build in the NSP folder); the extracted files, shader cache and temporary files live there, and the IPA or Mac app defaults to the folder holding it')
+    ap.add_argument('--reuse-extracted', action='store_true', help='rebuild from existing <work-dir>/extract/v<version>/{ExeFS,RomFS.img} without a NUP or dump source; requires --title-id, --package and --work-dir, and skips unpacking and NUP hash validation')
     ap.add_argument('--env-file', help='environment switches for a diagnostic build (one KEY=VALUE per line)')
     ap.add_argument('--gpu', help='NVN games: GPU architectures the app gets its pipeline archive for, made on this Mac with metal-tt, comma-separated: g18p (A19 / A19 Pro), or the name a device\'s log gives when the app has no archive for its GPU; '
                     'none = no archive, the device builds the bases on its first start (default: the PSO_GPUS setting; when that is empty, a profile with pso_mtl4 on uses its pso_gpu key or g18p, and other profiles use none). '
@@ -2930,12 +2931,26 @@ def main(args=None):
     if romfs_mode == 'separate' and not keep: raise BuildError('--romfs separate requires --keep-extracted: the image must remain available for the one-time transfer to the phone')
     shader_files = SHADER_FILES if args.shader_files is None else args.shader_files
     if shader_files and (mac or prepare_xcode): raise BuildError('SHADER_FILES / --shader-files shapes the IPA for install tools that cannot copy a large file: it cannot be combined with ' + (f'--platform {platform}' if mac else '--prepare-xcode, which Xcode installs'))
-    nsp_dir = Path(os.path.expanduser(args.nsp_dir or NSP_DIR or ask('NSP folder: ', 'the NSP folder'))).resolve()
-    if not nsp_dir.exists(): raise BuildError(f'not a folder: {nsp_dir}')
-    nup = nup_file(nsp_dir)   # a NUP file given in place of the folder: its folder is the NSP folder (the build folder and the IPA go there)
-    if nsp_dir.is_file(): nsp_dir = nsp_dir.parent
-    global NSP_FOLDER; NSP_FOLDER = nsp_dir
-    dump = 'nup' if nup else 'folder' if dump_folder(nsp_dir) else None   # their files are not encrypted, so they need no keys
+    if args.reuse_extracted:
+        if not (args.title_id or TITLE_ID) or not (args.package or PACKAGE) or not args.work_dir:
+            raise BuildError('--reuse-extracted requires --title-id, --package and --work-dir')
+        nsp_dir = Path(os.path.expanduser(args.work_dir)).resolve()
+        if not nsp_dir.is_dir(): raise BuildError(f'not a build folder: {nsp_dir}')
+        nup = None
+        dump = 'reuse'
+        app = int(args.title_id or TITLE_ID, 16)
+        version = args.package or PACKAGE
+        version = version.removeprefix('v')
+        if not version.isdigit(): raise BuildError(f'--reuse-extracted needs a numeric package version, got {version!r}')
+        fam = {'base': None, 'updates': [(int(version), None)], 'dlc': [], 'dump': True, 'reuse': True}
+        say(f'reusing extracted game files for {app:016X} v{version}; NUP scan, unpack and hash validation skipped')
+    else:
+        nsp_dir = Path(os.path.expanduser(args.nsp_dir or NSP_DIR or ask('NSP folder: ', 'the NSP folder'))).resolve()
+        if not nsp_dir.exists(): raise BuildError(f'not a folder: {nsp_dir}')
+        nup = nup_file(nsp_dir)   # a NUP file given in place of the folder: its folder is the NSP folder (the build folder and the IPA go there)
+        if nsp_dir.is_file(): nsp_dir = nsp_dir.parent
+        global NSP_FOLDER; NSP_FOLDER = nsp_dir
+        dump = 'nup' if nup else 'folder' if dump_folder(nsp_dir) else None   # their files are not encrypted, so they need no keys
     keys = None if dump else Path(os.path.expanduser(args.keys or PROD_KEYS or ask('path of prod.keys: ', 'prod.keys (-k)'))).resolve()
     if keys and not keys.is_file(): raise BuildError(f'no such file: {keys}')
     user_icon = Path(os.path.expanduser(args.icon or ICON)).resolve() if args.icon or ICON else None   # checked now, not after the extraction: build_ipa.sh would only log a missing one
@@ -2954,7 +2969,9 @@ def main(args=None):
     if want and not re.fullmatch(r'[0-9A-Fa-f]{16}', want): raise BuildError(f'--title-id / TITLE_ID takes a title ID, 16 hex digits: {want}')
     if PROGRAM_INDEX and dump: raise BuildError('--program / PROGRAM_INDEX picks a program from a multi-program application\'s NSPs; '
                                                      + ('a NUP' if nup else 'a dump folder') + ' is read as one program\'s files')
-    if nup:
+    if args.reuse_extracted:
+        pass  # app and fam came from the explicit title and version above
+    elif nup:
         app, fam = scan_nup(nup, int(want, 16) if want else None)
         say(f'a NUP: {nup.name}, {app:016X}, {len(fam["updates"])} update(s), {len(fam["dlc"])} DLC')
         if fam['base'] is None: say(pack_nup.NO_BASE)
@@ -3044,7 +3061,12 @@ def main(args=None):
     dirs = {}
     for ver in versions:   # each merged version streams directly into its own image
         b, u = picks[ver]
-        dirs[ver] = extract_nup(ex, ver, u or b, b, app, fam['nup']) if nup else extract_dump(ex, ver, u or b, app) if dump else extract(nx, keys, ex, ver, b, u, None, logs, g, app)
+        if args.reuse_extracted:
+            dirs[ver] = ex / ver
+            if not (dirs[ver] / 'ExeFS/main').is_file() or not (dirs[ver] / 'RomFS.img').is_file():
+                raise BuildError(f'--reuse-extracted requires {dirs[ver]}/ExeFS/main and RomFS.img')
+        else:
+            dirs[ver] = extract_nup(ex, ver, u or b, b, app, fam['nup']) if nup else extract_dump(ex, ver, u or b, app) if dump else extract(nx, keys, ex, ver, b, u, None, logs, g, app)
         if not nup and not dump: extract_html(nx, keys, dirs[ver], b, u, logs, app)
     check_formats(dirs)
     check_versions_aarch64(dirs, logs, g, nacp.name(dirs[versions[0]] / 'control.nacp') or f'{app:016X}')   # before build_mismatch, derive_profile and build_sources read the modules

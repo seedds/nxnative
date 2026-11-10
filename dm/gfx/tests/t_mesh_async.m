@@ -472,6 +472,24 @@ int main(void) { @autoreleasepool {
     for (int i = 0; i < 300 && atomic_load(&g_mtk_async_running); i++) usleep(10000);
     CHECK(frame_pair(&p9d, &c9d, 0, NULL) == 1, "the expiry pair keeps drawing after the background build returns");
 
+    // 9e. the geometry key: a task draw is keyed by the buffers its task shader reads (Ocarina of Time's colour pass binds another uniform slot 5 than its pre-pass, unread);
+    // a mesh draw with no task by the largest storage buffer its mesh shader reads, in whatever slot (the pre-pass and colour pass have their own mesh shaders)
+    { NvShader *gt = shader(library, @"task", 3, "_geo"), *gm1 = shader(library, @"direct", 4, "_geo1"), *gm2 = shader(library, @"direct", 4, "_geo2"), *gm3 = shader(library, @"direct", 4, "_geo3");
+      gt->rf.nb = 2; gt->rf.b[0].kind = NVN_RB_CBUF; gt->rf.b[0].reg = 1; gt->rf.b[1].kind = NVN_RB_SBUFP; gt->rf.b[1].reg = 0;
+      gm1->rf.nb = 2; gm1->rf.b[0].kind = NVN_RB_SBUFP; gm1->rf.b[0].reg = 0; gm1->rf.b[1].kind = NVN_RB_SBUFP; gm1->rf.b[1].reg = 1;
+      gm2->rf.nb = 2; gm2->rf.b[0].kind = NVN_RB_SBUFP; gm2->rf.b[0].reg = 2; gm2->rf.b[1].kind = NVN_RB_SBUFP; gm2->rf.b[1].reg = 3;
+      p_bind_buf ub[16], sb[16], ub4[16], sb4[16]; memcpy(ub, S.ubo[3], sizeof ub); memcpy(sb, S.ssbo[3], sizeof sb); memcpy(ub4, S.ubo[4], sizeof ub4); memcpy(sb4, S.ssbo[4], sizeof sb4);
+      memset(S.ubo[3], 0, sizeof ub); memset(S.ssbo[3], 0, sizeof sb); memset(S.ubo[4], 0, sizeof ub4); memset(S.ssbo[4], 0, sizeof sb4);
+      S.ubo[3][1] = (p_bind_buf){3, 1, 0x1000, 0x100}; S.ssbo[3][0] = (p_bind_buf){3, 0, 0x8000, 0x4000}; S.ubo[3][5] = (p_bind_buf){3, 5, 0xa000, 0x100};
+      uint64_t g1 = mtk_pair_geo(gt, tasked); S.ubo[3][5].addr = 0xb000; uint64_t g2 = mtk_pair_geo(gt, tasked); S.ubo[3][1].addr = 0x1100; uint64_t g3 = mtk_pair_geo(gt, tasked);
+      CHECK(g1 && g1 == g2, "a task draw's geometry ignores a uniform slot its task shader does not read (the colour pass's slot 5)");
+      CHECK(g3 != g1, "a task draw's geometry follows a uniform slot its task shader reads (another chunk)");
+      S.ssbo[4][0] = (p_bind_buf){4, 0, 0x20000, 0x9b040}; S.ssbo[4][1] = (p_bind_buf){4, 1, 0x30000, 0x8bfc0}; uint64_t m1 = mtk_pair_geo(nil, gm1);
+      memset(S.ssbo[4], 0, sizeof sb4); S.ssbo[4][2] = (p_bind_buf){4, 2, 0x20000, 0x9b040}; S.ssbo[4][3] = (p_bind_buf){4, 3, 0x40, 0xc0}; uint64_t m2 = mtk_pair_geo(nil, gm2);
+      CHECK(m1 && m1 == m2, "a mesh draw with no task: keyed by its largest storage buffer, in any slot of its own mesh shader");
+      CHECK(mtk_pair_geo(nil, gm3) == 0, "a mesh shader that reads no storage buffer has no geometry key (its colour pass waits)");
+      memcpy(S.ubo[3], ub, sizeof ub); memcpy(S.ssbo[3], sb, sizeof sb); memcpy(S.ubo[4], ub4, sizeof ub4); memcpy(S.ssbo[4], sb4, sizeof sb4); }
+
     // 8. teardown with a build in flight: a fresh key is skipped and the test ends at once; the process must exit cleanly (the build holds its own references)
     printf("teardown with a build in flight\n");
     CHECK(!submit(&at_end, 1, (opts){0}), "a last new pipeline is skipped");

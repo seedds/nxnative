@@ -894,8 +894,8 @@ static id<MTLRenderPipelineState> mtk_async_skip(const pso_key *k, NvShader *ts,
 // pre-pass depth with no colour over it: white silhouettes, the shape of issue #1720 (reported in PR #2084). So:
 //  - a draw with depth testing on is a depth pass when it writes depth (and is not EQUAL), a colour pass over earlier depth when it tests EQUAL, or tests without writing depth
 //    and blends nothing (mtk_pair_role); blended draws (no depth write) are neither and skip as before;
-//  - depth passes are noted per frame (drawn or skipped), keyed by the geometry (the task shader's key and its stage's uniform / storage buffers; a mesh shader with no task:
-//    the mesh shader's) and the depth target; a texture copy hands the notes of its source to its destination (mtk_pair_copy), so the copied depth still matches its colour pass.
+//  - depth passes are noted per frame (drawn or skipped), keyed by the geometry (mtk_pair_geo: the task shader's key and the buffers it reads; with no task, the largest
+//    storage buffer the mesh shader reads) and the depth target; a texture copy hands the notes of its source to its destination (mtk_pair_copy), so the copied depth still matches its colour pass.
 //    Notes of this frame and the one before count (the frame number moves at present, on another thread, so a frame's draws may straddle it);
 //  - a colour pass whose pipeline is not built yet is skipped only when its geometry's depth passes on that target were noted and none drew; otherwise it waits for its
 //    build at the draw, as without the switch (also when its build already runs in the background). A colour pass that is built but whose depth passes were all skipped is
@@ -923,10 +923,24 @@ static int mtk_pair_role(void) {   // 0 neither, 1 depth pass, 2 colour pass ove
     return S.color.blend_en ? 0 : 2;
 }
 static uint64_t mtk_pair_mix(uint64_t h, uint64_t v) { h ^= v; h *= 0x100000001b3ull; return h ^ (h >> 29); }
-static uint64_t mtk_pair_geo(NvShader *ts, NvShader *ms) {   // the geometry: the task shader (else the mesh shader) by key, and its stage's buffers
-    NvShader *g = ts ?: ms; int st = ts ? 3 : 4; uint64_t h = 0xcbf29ce484222325ull;
-    for (const char *p = g->key; *p; p++) h = mtk_pair_mix(h, (uint8_t)*p);
-    for (int i = 0; i < 16; i++) { h = mtk_pair_mix(h, S.ubo[st][i].addr); h = mtk_pair_mix(h, S.ubo[st][i].size); h = mtk_pair_mix(h, S.ssbo[st][i].addr); h = mtk_pair_mix(h, S.ssbo[st][i].size); }
+// The geometry of a task / mesh draw (0: none known, the draw is not paired). With a task shader: its key and the uniform and storage buffers its reflection reads (a stage
+// may have more bound: Ocarina of Time's colour pass binds another uniform slot 5 than its pre-pass, which its task shader does not read). With none: the largest storage buffer
+// the mesh shader reads, as the pre-pass and colour pass have their own mesh shaders and bind the same vertex data in other slots (Ocarina of Time: 7180476000+9b040 at slot 0
+// of the pre-pass's mesh shader 0c1ffecd, slot 2 of the colour pass's eed1add7). Objects that share it share notes: a draw of any of them counts for all (more waits, not fewer)
+static uint64_t mtk_pair_geo(NvShader *ts, NvShader *ms) {
+    uint64_t h = 0xcbf29ce484222325ull;
+    if (ts) {
+        for (const char *p = ts->key; *p; p++) h = mtk_pair_mix(h, (uint8_t)*p);
+        for (int i = 0; i < ts->rf.nb; i++) { const nvn_rbind *b = &ts->rf.b[i]; if (b->reg >= 16) continue;
+            const p_bind_buf *u = b->kind == NVN_RB_CBUF || b->kind == NVN_RB_UBOP ? &S.ubo[3][b->reg] : b->kind == NVN_RB_SBUFP ? &S.ssbo[3][b->reg] : NULL;
+            if (u) { h = mtk_pair_mix(h, (uint64_t)b->kind << 8 | b->reg); h = mtk_pair_mix(h, u->addr); h = mtk_pair_mix(h, u->size); } }
+        return h ? h : 1;
+    }
+    const p_bind_buf *big = NULL;
+    for (int i = 0; i < ms->rf.nb; i++) { const nvn_rbind *b = &ms->rf.b[i];
+        if (b->kind == NVN_RB_SBUFP && b->reg < 16 && S.ssbo[4][b->reg].addr && (!big || S.ssbo[4][b->reg].size > big->size)) big = &S.ssbo[4][b->reg]; }
+    if (!big) return 0;
+    h = mtk_pair_mix(mtk_pair_mix(h, big->addr), big->size);
     return h ? h : 1;
 }
 static mtk_note *mtk_note_at(uint64_t fr, uint64_t geo, uint64_t tgt, int add) {   // the note of (geo, tgt) in frame fr (this or the previous one); add: made if missing (NULL when full)
@@ -995,6 +1009,7 @@ static id<MTLRenderPipelineState> mtk_pso(NvProg *raster) {
     if (!mtk_async_on()) { if (ps) return ps == NSNull.null ? nil : ps; }
     else {
         int role = mtk_pair_role(); uint64_t geo = role ? mtk_pair_geo(ts, ms) : 0, tgt = role ? R.rt.depth->serial : 0;
+        if (!geo && role == 1) role = 0;   // a depth pass with no known geometry is not noted; a colour pass with none finds no note and waits
         const char *why = mtk_async_state_why() ?: mtk_async_why(&k, ts, ms, fs);
         int building = ps && ps == g_mtk_async_mark;
         if (ps && !building) {   // built (or failed)

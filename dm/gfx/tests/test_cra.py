@@ -94,6 +94,68 @@ class Scramble(unittest.TestCase):
         with self.assertRaises(cra.Error): cra.read(f, (0, path, 25, 16, good[4] ^ 1))
 
 
+def rev8(b): return bytes(int(f'{x:08b}'[::-1], 2) for x in b)
+
+
+class Image2021:
+    """An NRO with the code index_2021 looks for and a table of (how far back the prefix's record is, prefix length, own text, size, offset, checksum); the first record is the empty one"""
+    TABLE = 0x10000
+
+    def __init__(self, rows):
+        n = len(rows) + 1; d = bytearray(0x20000)
+        d[0x10:0x14] = b'NRO0'
+        struct.pack_into('<I', d, 0x24, 0x1000)
+        at = 0x100
+        words = adrp_add(at, 10, self.TABLE) + [0xb8a07800 | 9 << 16 | 10 << 5 | 8, 0x52800000 | 0x2eca << 5 | 12, 0x72a00000 | 0xce46 << 5 | 12]
+        struct.pack_into(f'<{len(words)}I', d, at, *words)
+        o = self.TABLE + 4 * n
+        struct.pack_into('<i', d, self.TABLE, self.TABLE - o); o += 0x12
+        for i, (back, plen, text, size, off, want) in enumerate(rows, 1):
+            struct.pack_into('<i', d, self.TABLE + i * 4, self.TABLE - o)
+            rec = bytearray(0x11)
+            struct.pack_into('<HB', rec, 0, back, plen)
+            struct.pack_into('<II', rec, 4, size ^ 0xce462eca, want)
+            rec[0xc:0x11] = (off ^ 0x46f636762a).to_bytes(5, 'little')
+            body = bytes(rec) + rev8(bytes(c ^ ((i & 15) + 1) for c in text.encode())) + b'\0'
+            d[o:o + len(body)] = body; o += len(body)
+        self.bytes = bytes(d)
+
+
+def scramble_2021(path, plain):   # what the archive holds for a file: its bits reversed in each byte, then xored with the 16 key bytes over each block
+    last = path.rsplit('/', 1)[-1].split('.')[0]
+    k = int.from_bytes(rev8((last * 8)[:8].encode()), 'big')
+    ks = (k ^ 0x4adfc980eae9731b).to_bytes(8, 'little') + (k ^ 0xfbccb4fac6ff003e).to_bytes(8, 'little')
+    return bytes(a ^ ks[i & 15] for i, a in enumerate(rev8(plain)))
+
+
+class Layout2021(unittest.TestCase):
+    def test_paths(self):
+        rows = [(0, 0, 'shader/grass.narc', 0x20, 0x100, 5), (1, 7, 'font/font.bin', 0x10, 0x4000000200, 6), (1, 12, 'x', 3, 0x300, 7)]
+        idx = cra.Index(Image2021(rows).bytes)
+        self.assertIsInstance(idx, cra.Index2021)                               # Index takes the layout the NRO's code reads
+        self.assertEqual((idx.table, idx.count), (Image2021.TABLE, 4))
+        fs = idx.files()                                                        # the empty first record is left out; a prefix can run through two records
+        self.assertEqual([e[1] for e in fs], ['shader/grass.narc', 'shader/font/font.bin', 'shader/font/x'])
+        self.assertEqual([e[2:] for e in fs], [(0x20, 0x100, 5, 2021), (0x10, 0x4000000200, 6, 2021), (3, 0x300, 7, 2021)])
+
+    def test_keys(self):
+        self.assertEqual(cra.keys_2021('a/ab.c'), cra.keys_2021('b/abababab'))  # a short name is read again from its start, at its end or before a '.'
+        self.assertEqual(cra.keys_2021('abcdefgh'), cra.keys_2021('x/abcdefghij.narc'))   # 8 characters at most, of the last element
+        self.assertNotEqual(cra.keys_2021('a/ab'), cra.keys_2021('ab/a'))
+        with self.assertRaises(cra.Error): cra.keys_2021('a/')
+
+    def test_read_checks(self):
+        for path, n in (('shader/grass.narc', 37), ('a/b', 16), ('x/abcdefghij', 5)):
+            plain = bytes((i * 7 + 1) & 0xff for i in range(n))
+            raw = scramble_2021(path, plain)
+            self.assertNotEqual(raw, plain)
+            good = (1, path, n, 16, zlib.crc32(plain) ^ 0x12345678, 2021)
+            f = io.BytesIO(bytes(16) + raw + bytes(16))
+            self.assertEqual(cra.read(f, good), plain)                          # the size is not rounded up to a block
+            self.assertEqual(cra.head(f, good), plain[:16])
+            with self.assertRaises(cra.Error): cra.read(f, good[:4] + (good[4] ^ 1, 2021))
+
+
 def narc(members):
     fat = b'BTAF' + struct.pack('<II', 12 + 8 * len(members), len(members)); data = b''
     for m in members:

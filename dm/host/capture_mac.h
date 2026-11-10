@@ -36,7 +36,7 @@ static NSString *capture_stderr_path(void) {
 
 static NSDictionary *capture_metadata(void) {
     NSMutableDictionary *settings = [NSMutableDictionary dictionary];
-    for (NSString *key in @[@"DM_FPS_TARGET", @"DM_DYNAMIC_RESOLUTION", @"DM_UPSCALER", @"DM_PRESENT_LINK", @"DM_PRESENT_UPSCALE", @"DM_FULLSCREEN", @"DM_NVN_ENC_THREAD", @"DM_NVN_FB_DSNAP", @"DM_NVN_FAMILY_NOCOMPRESS", @"DM_NVN_PASSDUMP_ALL"])
+    for (NSString *key in @[@"DM_FPS_TARGET", @"DM_DYNAMIC_RESOLUTION", @"DM_UPSCALER", @"DM_PRESENT_LINK", @"DM_PRESENT_UPSCALE", @"DM_FULLSCREEN", @"DM_NVN_ENC_THREAD", @"DM_NVN_FAMILY_NOCOMPRESS", @"DM_NVN_PASSDUMP_ALL"])
         { const char *s = getenv(key.UTF8String); if (s) settings[key] = [NSString stringWithUTF8String:s] ?: @"invalid UTF-8"; }
     NSDictionary *info = NSBundle.mainBundle.infoDictionary;
     return @{@"title_id": @DM_GAME_ID, @"commit": info[@"DMCommit"] ?: @"not recorded", @"shader_chain": info[@"DMChain"] ?: @"not recorded",

@@ -264,6 +264,19 @@ $(B)/t_pollwait: t_pollwait.c t_condvar_stub.c ../hle_thread.c ../dm.h $(GAME_H)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_pollwait.c t_condvar_stub.c
 $(B)/t_clockwait: t_clockwait.c t_condvar_stub.c ../hle_thread.c ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_clockwait.c t_condvar_stub.c
+$(B)/t_scheduler_config: t_scheduler_config.c t_condvar_stub.c ../hle_thread.c ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_scheduler_config.c t_condvar_stub.c
+.PHONY: scheduler-config scheduler-config-tsan
+scheduler-config: $(B)/t_scheduler_config
+	$(B)/t_scheduler_config partial
+	$(B)/t_scheduler_config default
+	$(B)/t_scheduler_config custom
+	$(B)/t_scheduler_config off
+	$(B)/t_scheduler_config empty
+scheduler-config-tsan:
+	$(MAKE) B=$(B)/scheduler-tsan SAN="$(TSAN_FLAGS)" scheduler-config
+run: scheduler-config
+tsan-threads-run: scheduler-config
 $(B)/t_preempt: t_preempt.c t_condvar_stub.c ../hle_thread.c ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_preempt.c t_condvar_stub.c
 # the pause tests supply module_of (the stub's reports no guest code) through DM_TEST_MODULE_OF

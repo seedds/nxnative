@@ -1278,6 +1278,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) (GitHub issues #534 and #598, shrines, MacBook Air M2 and M3). The Shrine of Resurrection save shows the load burst: the 300 frames around the world load had 1,200 refusals and 107 load-all store-all passes, now 0 and 47; `DM_NVN_UBP_CHECK=1` found 146,000 shadows equal to the GPU's memory, 0 different. The reporter's log shows the same burst at each load, and 240 refusals a frame in its slow stretches.
 - **Check:** `make -C dm/gfx/tests GAME=<id> check_t_sbw` (16 checks: the size-0 outputs of that dispatch do not hit the uniform block's pool, a write of no known size still stops the tracking, the interval list's limit, and the next submission's view through `gw_live`).
 
+### Counter reports falsely block other bytes on their page
+
+- **Symptom:** partly covered uniform shadows are refused as `earlier submission running` although only disjoint counter reports on the same page are unfinished; each refusal ends a render pass.
+- **Cause:** a report writes 16 bytes when its submission completes, but `gw_commit` recorded its entire 4 KB page as an unknown write. Uniform blocks sharing that page were unnecessarily refused.
+- **Fix:** retain report byte ranges with their submission fences. Both GPU-write ledgers consult these ranges, including CPU copy-source reads of the report's timestamp field. Real GPU writes still claim pages. At most 256 reports per submission enter the 1,024-record ring; if any new record would replace a live one, or the submission's report list overflows, that submission keeps the old conservative page hazards. Completed records retire only after their report bytes have landed and `g_done` advances.
+- **Found on:** [Ori and the Will of the Wisps, issue #1660](https://github.com/seedds/nxnative/issues/1660): two timestamp reports share a page with uniform blocks. No repository profile exists yet. The exact-range rule is validated with synthetic commands; the reported gameplay frame-rate improvement has not been independently measured.
+
 ### Inline updates of a running submission refused uniform shadows
 
 - **Symptom:** the `residency set` line shows `passes ended to land them for a read` in the tens of thousands, every one `refused … earlier submission running`. The slower the GPU, the more passes, and each pass makes it slower: a scene stays at a very low frame rate once it falls in.

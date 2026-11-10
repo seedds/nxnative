@@ -1259,6 +1259,8 @@ static int sbw_slot(uint64_t pg, int add) {   // open addressing; −1 = not the
     return -1;
 }
 enum { SBW_GPU = 1, SBW_REPORT = 2 };
+enum { REP_N = 256 };
+static struct { uint64_t lo, hi; } g_rep[REP_N]; static unsigned g_nrep;   // exact report ranges this submission; REP_N + 1 means use the page fallback
 static uint32_t g_sbw_gen;   // bumped by every write noted that this submission's shadows must respect (a cached shadow made before it is checked again)
 static void drw_note(uint64_t lo, uint64_t n);   // the writes since the last drain (below g_wr_epoch)
 static void sbw_note(uint64_t lo, uint64_t n, int src) {
@@ -1266,6 +1268,10 @@ static void sbw_note(uint64_t lo, uint64_t n, int src) {
     if (src == SBW_GPU) { g_sbw_gen++; drw_note(lo, n); }
     if (!n) { if (src == SBW_GPU) g_sbw_over = 1; return; }
     uint64_t hi = lo + n;
+    if (src == SBW_REPORT) {
+        if (g_nrep < REP_N) { g_rep[g_nrep].lo = lo; g_rep[g_nrep].hi = hi; }
+        if (g_nrep <= REP_N) g_nrep++;
+    }
     if (src == SBW_GPU && ((hi - 1) >> 12) - (lo >> 12) >= SBW_WPAGES) {   // a report is 16 bytes, never wide
         for (int i = 0; i < g_nsbw_w; i++) if (lo <= g_sbw_whi[i] && g_sbw_wlo[i] <= hi) { g_sbw_wlo[i] = MIN(lo, g_sbw_wlo[i]); g_sbw_whi[i] = MAX(hi, g_sbw_whi[i]); return; }
         if (g_nsbw_w == SBW_WN) { g_sbw_over = 1; return; }
@@ -1284,7 +1290,7 @@ static int sbw_hits(uint64_t lo, uint64_t hi) {
 // a binding counted as a write anywhere, and every partly covered uniform shadow after it in the submission was refused (BotW shrines: about 240 more passes a frame, GitHub issue #534)
 static uint64_t sbw_len(uint64_t size, void *mb, uint64_t mo) { if (size) return size; uint64_t len = ((__bridge id<MTLBuffer>)mb).length; return len > mo ? len - mo : 0; }
 static inline unsigned pend_bucket(uint64_t page) { return (unsigned)((page * 0x9E3779B97F4A7C15ull) >> (64 - PEND_HB_BITS)); }
-static void pend_reset(void) { g_npend = g_pend_over = g_nupd = g_npnode = g_nwide = g_nsbw = g_nsbw_w = g_sbw_over = 0; if (!++g_pend_gen) { memset(g_pend_hgen, 0, sizeof g_pend_hgen); memset(g_sbwp, 0, sizeof g_sbwp); g_pend_gen = 1; } }
+static void pend_reset(void) { g_nrep = 0; g_npend = g_pend_over = g_nupd = g_npnode = g_nwide = g_nsbw = g_nsbw_w = g_sbw_over = 0; if (!++g_pend_gen) { memset(g_pend_hgen, 0, sizeof g_pend_hgen); memset(g_sbwp, 0, sizeof g_sbwp); g_pend_gen = 1; } }
 static void vc_gpu_write(uint64_t dst, uint64_t n);   // kept index ranges under the written range are not trusted again (ix_range)
 static int pend_add(uint64_t dst, uint64_t n, int kind) {
     vc_gpu_write(dst, n); drw_note(dst, n ? n : 1);
@@ -1848,8 +1854,23 @@ static void gw_put_in(gw_ent *t, uint64_t lo, uint64_t hi, uint64_t fence, uint6
         if (fence > t[s].fence) t[s].fence = fence; }
 }
 static void gw_put(uint64_t lo, uint64_t hi, uint64_t fence, uint64_t done) { gw_put_in(g_gw, lo, hi, fence, done); gw_put_in(g_gwx, lo, hi, fence, done); }
+// Reports land on the CPU before g_done advances. Only their 16 bytes are unknown until then:
+// claiming their whole page refused unrelated uniform shadows (Ori and the Will of the Wisps).
+// The submit thread owns this ring; fences are inserted in submission order. Never replace a live slot.
+enum { GR_N = 1024 };
+static struct { uint64_t lo, hi, fence; } g_gr[GR_N]; static unsigned g_gr_next, g_gr_n;
+static int gr_live(uint64_t lo, uint64_t hi, uint64_t done) {
+    if (hi <= lo) return 0;
+    for (unsigned i = 0; i < g_gr_n; i++) {
+        unsigned q = (g_gr_next + GR_N - 1 - i) % GR_N;
+        if (g_gr[q].fence <= done) break;
+        if (lo < g_gr[q].hi && g_gr[q].lo < hi) return 1;
+    }
+    return 0;
+}
 static int gw_live_in(const gw_ent *t, uint64_t lo, uint64_t hi) {
     uint64_t done = g_done;   // read without the lock as elsewhere: a stale value only refuses more
+    if (gr_live(lo, hi, done)) return 1;   // both ledgers, including rc_source's reads of report timestamp bytes
     if (g_gw_all > done) return 1;
     for (int i = 0; i < GWW_N; i++) if (g_gww[i].fence > done && lo < g_gww[i].hi && g_gww[i].lo < hi) return 1;
     for (uint64_t pg = lo >> 12; pg <= (hi - 1) >> 12; pg++) { unsigned s = gw_slot(pg); if ((t[s].page == pg || t[s].page == ~0ull) && t[s].fence > done) return 1; }
@@ -1882,7 +1903,14 @@ static void gw_commit(uint64_t fence) {
         gw_put_in(g_gw, g_pend_lo[e], g_pend_hi[e], fence, done);
         if (g_pend_kind[e] == 1 && g_pend_upd[e] && um_on()) { const upd_ent *u = &g_upd[g_pend_upd[e] - 1]; um_put(g_pend_lo[e], g_pend_hi[e], (const uint8_t *)u->buf.contents + u->off + (g_pend_lo[e] - u->lo), fence, done); }
         else gw_put_in(g_gwx, g_pend_lo[e], g_pend_hi[e], fence, done); }
-    if (g_nsbw) for (int i = 0; i < SBW_N; i++) if (g_sbwp[i].gen == g_pend_gen) gw_put(g_sbwp[i].page << 12, (g_sbwp[i].page + 1) << 12, fence, done);
+    int rep_exact = g_nrep <= REP_N;
+    for (unsigned i = 0; rep_exact && i < g_nrep; i++) if (g_gr[(g_gr_next + i) % GR_N].fence > done) rep_exact = 0;
+    if (rep_exact) for (unsigned i = 0; i < g_nrep; i++) {
+        g_gr[g_gr_next].lo = g_rep[i].lo; g_gr[g_gr_next].hi = g_rep[i].hi; g_gr[g_gr_next].fence = fence;
+        g_gr_next = (g_gr_next + 1) % GR_N; if (g_gr_n < GR_N) g_gr_n++;
+    }
+    // Overflow leaves all this submission's report pages conservative; actual GPU writes always remain by page.
+    if (g_nsbw) for (int i = 0; i < SBW_N; i++) if (g_sbwp[i].gen == g_pend_gen && (!rep_exact || (g_sbwp[i].src & SBW_GPU))) gw_put(g_sbwp[i].page << 12, (g_sbwp[i].page + 1) << 12, fence, done);
     for (int i = 0; i < g_nsbw_w; i++) gw_put(g_sbw_wlo[i], g_sbw_whi[i], fence, done);
 }
 // Whether um_overlay lays a remembered byte over [lo, hi): ubp_get then copies that shadow here, since the overlay waits for its copy (queued and waited for at once, on every such shadow)

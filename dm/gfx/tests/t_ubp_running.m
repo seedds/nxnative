@@ -109,6 +109,61 @@ int main(void) { @autoreleasepool {
         commit_as_running();
     }
 
+    // Ori's two 16-byte reports share a page with uniform blocks. Only their bytes are unknown,
+    // not the rest of that page; the report timestamp is protected from CPU source reads too.
+    g_done = running; running += 1000; g_fence = running;
+    memset(mem + 0x14000, 0x55, 0x3000);
+    uint64_t base = (uint64_t)mem + 0x14000;
+    mtl_sub_counter(base + 0x40, 0); mtl_sub_counter(base + 0x80, 0); commit_as_running();
+    update(0x14004, 0x76543210, 4);
+    { const uint32_t want[] = {0x55555555, 0x76543210, 0x55555555}; words(made_shadow(0x14000, 12), want, 3, "a disjoint uniform beside two unfinished reports stays eligible"); }
+    CHECK(!made_shadow(0x14038, 32), "a uniform intersecting a report is refused");
+    CHECK(gw_live(base + 0x40, base + 0x41) && gw_live(base + 0x8f, base + 0x90), "both complete report records remain live");
+    CHECK(!gw_live(base + 0x30, base + 0x40) && !gw_live(base + 0x50, base + 0x60), "touching either report boundary is disjoint");
+    { uint8_t out[8]; int unreliable = 0;
+      CHECK(rc_source(base + 0x48, 8, out, &unreliable) == 0, "a report timestamp cannot be read as completed CPU memory");
+      CHECK(rc_source(base + 0x60, 8, out, &unreliable) == 255, "disjoint CPU source bytes on the report page are readable"); }
+    commit_as_running();
+    uint64_t first_report = running;
+    running++; g_fence = running;
+    mtl_sub_counter(base + 0xc0, 0); commit_as_running();
+    g_done = first_report;
+    CHECK(!gw_live(base + 0x40, base + 0x50), "the earlier report retires at its own fence");
+    CHECK(gw_live(base + 0xc0, base + 0xd0), "a later report on that page stays live");
+    // A report crossing a page protects both pieces, without claiming neighboring bytes.
+    mtl_sub_counter(base + 0xff8, 0); commit_as_running();
+    CHECK(gw_live(base + 0xff8, base + 0xff9) && gw_live(base + 0x1007, base + 0x1008), "a crossing report protects both pages");
+    CHECK(!gw_live(base + 0xfe8, base + 0xff8) && !gw_live(base + 0x1008, base + 0x1018), "crossing-report neighbors stay disjoint");
+    // Real GPU writes still claim their page even when a report is also there.
+    sbw_note(base + 0x2040, 16, SBW_REPORT); sbw_note(base + 0x2080, 16, SBW_GPU); commit_as_running();
+    CHECK(gw_live(base + 0x2000, base + 0x2010), "a mixed report/GPU page keeps its full hazard");
+    g_done = running; running += 1000; g_fence = running;
+    // Many reports must retain every hazard, whether listed exactly or conservatively by page.
+    for (int i = 0; i < 2048; i++) mtl_sub_counter(base + (uint64_t)(i % 128) * 16, 0);
+    commit_as_running();
+    for (int i = 0; i < 128; i++) CHECK(gw_live(base + (uint64_t)i * 16, base + (uint64_t)i * 16 + 16), "overflow never loses an unfinished report");
+    g_done = running;
+    CHECK(!gw_live(base, base + 0x3000), "completed overflow and mixed-page hazards retire");
+    // Fill the cross-submission ring while every fence remains live. The next submission must
+    // fall back without overwriting any earlier record, then reuse only slots whose fence finished.
+    uint64_t ring_first = running + 1;
+    for (unsigned chunk = 0; chunk < GR_N / REP_N; chunk++) {
+        running++; g_fence = running;
+        for (unsigned i = 0; i < REP_N; i++) mtl_sub_counter(base + ((uint64_t)chunk * REP_N + i) * 32, 0);
+        commit_as_running();
+    }
+    CHECK(!gw_live(base + 16, base + 32), "a full exact ring still leaves disjoint bytes readable");
+    running++; g_fence = running; mtl_sub_counter(base + 0x9000, 0); commit_as_running();
+    CHECK(gw_live(base + 0x9010, base + 0x9020), "a full live ring falls back to the new report's page");
+    for (unsigned i = 0; i < GR_N; i++) CHECK(gw_live(base + (uint64_t)i * 32, base + (uint64_t)i * 32 + 16), "ring overflow preserves all older reports");
+    g_done = ring_first;
+    CHECK(!gw_live(base, base + 16), "only the first batch has retired");
+    CHECK(gw_live(base + REP_N * 32, base + REP_N * 32 + 16), "the next batch is still unfinished");
+    running++; g_fence = running; mtl_sub_counter(base + 0xa000, 0); commit_as_running();
+    CHECK(gw_live(base + 0xa000, base + 0xa010) && !gw_live(base + 0xa010, base + 0xa020), "a retired ring slot can hold a new exact report");
+    g_done = running;
+    CHECK(!gw_live(base, base + 0xb000), "all report hazards retire after completion");
+
     pend_reset(); g_nubd = 0;
     printf("t_ubp_running: %d checks, %d failed\n", checks, failed); fflush(stdout);
     _exit(failed != 0);

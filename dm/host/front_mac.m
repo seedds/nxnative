@@ -11,6 +11,7 @@
 // DM_PAD_MERGE=1 merges every controller into player 1 instead, DM_KBD_PLAYER=own makes the keyboard player 1 on its own, with the controllers from player 2 on.
 #import <Cocoa/Cocoa.h>
 #import <QuartzCore/CAMetalLayer.h>
+#include <stdatomic.h>
 #import <Metal/Metal.h>
 #import <GameController/GameController.h>
 #include "dm.h"
@@ -39,6 +40,80 @@ static void merge_rumble_to(void (*sink)(const dm_haptic_state *));
 #include <sys/stat.h>
 
 static CAMetalLayer *g_layer;
+// HDR output (DM_HDR=1, Switch 2 games). The window's layer is the SDR one of origin/main (BGRA8Unorm, no color space) until hle_vi.c's dm_hdr_layer_tick asks for the HDR layer: once a
+// Switch 2 game asks for its status with HDR on and the window's screen can show EDR. The HDR layer is RGB10A2 in BT.2100 PQ: the game's HDR10 window goes in as it is, an SDR source
+// is encoded as HDR10 at the paper white (nvn_mtl.m present_mode). Not an RGBA16Float extended linear layer, which showed black blocks over flat areas while the game's frames were
+// clean (docs/reference/rendering.md, the status query and the present for an HDR window). The tick runs on the main thread four times a second (in every run loop mode, so a window
+// dragged to another screen or a menu held open does not pause it) and on screen changes; it takes the screen's potential headroom (can it show EDR at all), its current headroom, and
+// the layer the window has
+static _Atomic float g_hdr_headroom = 1.0f;
+// The screen's current EDR headroom (maximumExtendedDynamicRangeColorComponentValue, read at each tick): hle_vi.c's automatic peak (DM_HDR_PEAK=auto) is 100 nits times it, and the
+// roll-off's target follows it. 1.0 unless a layer on the screen asks for EDR (NSScreen.h), so it means something only while the window has the HDR layer: on the XDR panel it read 1.2
+// when the layer was made and 16 two seconds later, then followed the brightness slider both ways (16 at low brightness, 3.2 = 1600 / 500 nits at full); in a window behind others
+// it stays at 1.2. A change posts NSApplicationDidChangeScreenParametersNotification (NSScreen.h), which ticks too
+float front_hdr_headroom(void) { return atomic_load(&g_hdr_headroom); }
+// The HDR layer's HDR10 metadata (CAEDRMetadata), only with DM_HDR_META=1 (hle_vi.c dm_hdr_meta; off by default on the Mac): Core Animation maps the layer's range into the
+// screen's current headroom by it. The range is the one the game declares
+// (0 to 1000 nits until it says, hle_vi.c front_hdr_content_range). opticalOutputScale is passed the paper white, but for a normalized format such as the PQ layer's RGB10A2
+// Core Animation takes it as 10,000 (CAEDRMetadata.h), and it made no difference in a measurement. Core Animation shows PQ relative to the screen's white (100 nits = EDR 1.0,
+// CAEDRMetadata.h for HDR10 metadata) and passes it through while the range fits in 100 x headroom, and compresses the whole picture when it does not (docs/reference/rendering.md).
+// Off by default because, in fullscreen, the layer with metadata of any range showed rectangles of older frames under GPU load, and the mapping made the game's white follow the
+// brightness slider; without it the automatic peak keeps the game within the screen and the present rolls off the rest
+int dm_hdr_meta(void);   // hle_vi.c: DM_HDR_META
+void dm_hdr_layer_meta_set(int on);   // hle_vi.c: what the roll-off and the present's order follow
+int dm_hdr_layer_tick(int can, float headroom, int layer_pq, int64_t now_ms);   // hle_vi.c: the layer the window should have
+static _Atomic int g_hdr_meta;   // the layer has the metadata (DM_HDR_META=1, and CAEDRMetadata is available); written on the main thread when the layer is made
+static _Atomic uint32_t g_hdr_range = 1000u << 16;   // the declared range: low nits in bits 0-15, high in 16-31
+static int g_hdr_layer_pq;   // the window has the HDR layer (main thread)
+static void front_hdr_metadata(void) {   // main thread
+    if (!g_hdr_layer_pq || !atomic_load(&g_hdr_meta)) return;
+    uint32_t r = atomic_load(&g_hdr_range);
+    g_layer.EDRMetadata = [CAEDRMetadata HDR10MetadataWithMinLuminance:(float)(r & 0xffff) maxLuminance:(float)(r >> 16) opticalOutputScale:dm_hdr_paper_white()];
+}
+void front_hdr_content_range(unsigned lo, unsigned hi) {
+    if (!dm_hdr_meta() || hi <= lo || hi > 65535) return;
+    uint32_t r = lo | hi << 16;
+    if (atomic_exchange(&g_hdr_range, r) == r) return;
+    LOG("front end: HDR10 metadata: the game's range %u..%u nits", lo, hi);
+    dispatch_async(dispatch_get_main_queue(), ^{ front_hdr_metadata(); });
+}
+// The SDR layer's color space (front.h front_sdr_colorspace_create): sRGB, set when the layer is made and when it comes back from the HDR layer; DM_SDR_COLORSPACE picks a power
+// curve instead, for comparisons
+static CGColorSpaceRef front_sdr_colorspace(void) {
+    static int said; CGColorSpaceRef cs = front_sdr_colorspace_create();
+    if (getenv("DM_SDR_COLORSPACE") && !said++) LOG("front end: the SDR layer's color space from DM_SDR_COLORSPACE=%s", getenv("DM_SDR_COLORSPACE"));
+    return cs;
+}
+static void front_hdr_layer_set(int on) {   // main thread. A drawable already taken keeps its format; the present draws each frame by its drawable's format (nvn_mtl.m present_mode)
+    if (on == g_hdr_layer_pq) return;
+    g_hdr_layer_pq = on;
+    if (!on) {
+        g_layer.EDRMetadata = nil; g_layer.wantsExtendedDynamicRangeContent = NO; CGColorSpaceRef cs = front_sdr_colorspace(); g_layer.colorspace = cs; if (cs) CGColorSpaceRelease(cs);
+        g_layer.pixelFormat = MTLPixelFormatBGRA8Unorm; atomic_store(&g_hdr_meta, 0); dm_hdr_layer_meta_set(0); atomic_store(&g_hdr_headroom, 1.0f);
+        LOG("front end: the window's layer is the SDR one (BGRA8Unorm)"); return;
+    }
+    g_layer.pixelFormat = MTLPixelFormatRGB10A2Unorm;
+    CGColorSpaceRef ecs = CGColorSpaceCreateWithName(kCGColorSpaceITUR_2100_PQ);
+    g_layer.colorspace = ecs; CGColorSpaceRelease(ecs);
+    g_layer.wantsExtendedDynamicRangeContent = YES;
+    if (!dm_hdr_meta()) atomic_store(&g_hdr_meta, 0);
+    else if (CAEDRMetadata.available) { atomic_store(&g_hdr_meta, 1); front_hdr_metadata(); }
+    else { atomic_store(&g_hdr_meta, 0); LOG("[RED] front end: no EDR metadata on this Mac (CAEDRMetadata): values above the screen's headroom clip"); }
+    dm_hdr_layer_meta_set(atomic_load(&g_hdr_meta));
+    LOG("front end: the window's layer is the HDR one: RGB10A2 in BT.2100 PQ, %s", atomic_load(&g_hdr_meta) ? "with HDR10 metadata" : "no HDR10 metadata (the default; DM_HDR_META=1 adds it): PQ is shown as it is, the present rolls off what the screen cannot show");
+}
+static NSWindow *g_win;   // the game's window
+static void front_hdr_tick(void) {   // main thread
+    if (!g_layer || (!dm_hdr_mode() && !g_hdr_layer_pq)) return;
+    NSScreen *s = g_win.screen ?: NSScreen.mainScreen;
+    // In a reference mode (an XDR preset) the reference headroom is the limit the system keeps to (0 when the screen has none)
+    double cur = s.maximumExtendedDynamicRangeColorComponentValue, ref = s.maximumReferenceExtendedDynamicRangeColorComponentValue, pot = s.maximumPotentialExtendedDynamicRangeColorComponentValue;
+    float h = (float)(ref > 0 && ref < cur ? ref : cur);
+    if (g_hdr_layer_pq) atomic_store(&g_hdr_headroom, h);
+    static double last_pot = -1; if (pot != last_pot) { last_pot = pot; LOG("front end: the window's screen: %s, potential EDR headroom %.2f", s.localizedName.UTF8String, pot); }
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+    front_hdr_layer_set(dm_hdr_layer_tick(pot > 1.0, h, g_hdr_layer_pq, (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000));
+}
 static uint64_t g_btn;
 static int g_w, g_a, g_s, g_d;
 static int g_rl, g_ru, g_rr, g_rd;   // arrow keys pressed with Shift held: the right stick (each goes back up as it went down, whatever Shift does meanwhile)
@@ -76,7 +151,7 @@ int front_fullscreen(void) { return g_fullscreen; }   // nvn_mtl.m link_latency:
 // rate is a multiple: there the display link at 60 Hz missed its targets (every present a 120 Hz refresh late and every other tick skipped, 40 fps on an M5 Pro at frame latency 2;
 // 1 → 2 → 3 vsync steps at latency 1, issue #347), and the fixed 60 Hz mode held 60.0 fps at latency 1 (docs/reference/frame-rate.md). A screen with no such mode keeps its rate, and
 // the 120 Hz link paces it (nvn_mtl.m link_vrr_120)
-static NSWindow *g_win; static _Atomic int g_match_want;   // the game's window; the frame rate to match (0 = not known yet), written by the present thread only
+static _Atomic int g_match_want;   // the game's window; the frame rate to match (0 = not known yet), written by the present thread only
 static CGDirectDisplayID g_match_id; static CGDisplayModeRef g_match_orig; static int g_match_orig_vrr;   // main thread: the screen this host switched, its own mode (NULL = none switched) and whether that mode is variable-refresh
 static double mode_hz(CGDisplayModeRef m) { double hz = CGDisplayModeGetRefreshRate(m); return hz > 0 ? hz : 0; }   // 0 = not known (older built-in screens report none)
 static int hz_multiple(double hz, int fps) { double k = round(hz / fps); return k >= 1 && fabs(hz / fps - k) < 0.01; }   // 59.94 Hz counts as 60
@@ -1606,6 +1681,8 @@ void front_run(void (*guest)(void)) {
         g_layer = [CAMetalLayer layer];
         g_layer.device = MTLCreateSystemDefaultDevice();
         g_layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+        dm_hdr_layer_meta_set(0);   // the SDR layer has no HDR10 metadata; DM_HDR=1 makes the HDR layer when a Switch 2 game asks for its status (front_hdr_tick)
+        { CGColorSpaceRef cs = front_sdr_colorspace(); g_layer.colorspace = cs; CGColorSpaceRelease(cs); }   // sRGB, not left to the pixel format's default
         g_layer.contentsScale = win.backingScaleFactor;
         // Apple's HUD over the game (frame rate, frame and GPU time, memory): front_hud_env turns it on before the first device. The layer's developerHUDProperties
         // stay unset: mode=default forces this layer's HUD on, so the Metal HUD menu's Hide HUD left it on screen
@@ -1615,6 +1692,10 @@ void front_run(void (*guest)(void)) {
         [win makeKeyAndOrderFront:nil];
         screen_refresh(win.screen ?: NSScreen.mainScreen);
         g_win = win;
+        if (dm_hdr_mode()) {   // HDR output (DM_HDR=1): the layer follows the game's status queries and the window's screen (front_hdr_tick), in every run loop mode
+            front_hdr_tick();
+            [NSRunLoop.mainRunLoop addTimer:[NSTimer timerWithTimeInterval:0.25 repeats:YES block:^(NSTimer *t) { (void)t; front_hdr_tick(); }] forMode:NSRunLoopCommonModes];
+        }
         [NSApp activateIgnoringOtherApps:YES];
         // A host another process starts (scripts/regress.py) is not activated (its focus state stays 2), so its window opened wherever it landed in the window order, and behind
         // another app's window macOS fires its display link about once a second: Breath of the Wild stepped up to 3 vsyncs at boot and never came back (20 fps runs).
@@ -1688,8 +1769,8 @@ void front_run(void (*guest)(void)) {
         // Lifecycle (hle.h / dm.h): focus lost → 2, focus regained → 1; minimized → 3 + audio paused + GPU suspended, restored → resume (followed by focus regained → 1).
         // Input is released when the window stops being key (and when it is minimized) and taken up again when it is key again
         NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
-        [nc addObserverForName:NSWindowDidChangeScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; screen_refresh(win.screen); if (win.screen) g_layer.contentsScale = win.backingScaleFactor; screen_match_apply(); }];
-        [nc addObserverForName:NSApplicationDidChangeScreenParametersNotification object:nil queue:nil usingBlock:^(NSNotification *n) { (void)n; screen_refresh(win.screen); }];
+        [nc addObserverForName:NSWindowDidChangeScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; screen_refresh(win.screen); if (win.screen) g_layer.contentsScale = win.backingScaleFactor; screen_match_apply(); front_hdr_tick(); }];
+        [nc addObserverForName:NSApplicationDidChangeScreenParametersNotification object:nil queue:nil usingBlock:^(NSNotification *n) { (void)n; screen_refresh(win.screen); front_hdr_tick(); }];   // also posted when the EDR headroom changes (NSScreen.h)
         // Entering and leaving fullscreen: the layer is layer-backed, so its frame (and with it the drawable) follows the
         // content view by itself; only the scale factor has to be carried over to the screen the window ended up on. The screen's rate is matched in fullscreen only (screen_match_apply)
         [nc addObserverForName:NSWindowDidEnterFullScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; screen_refresh(win.screen); g_fullscreen = 1; g_layer.contentsScale = win.backingScaleFactor; screen_match_apply(); }];

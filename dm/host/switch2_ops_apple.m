@@ -109,8 +109,10 @@ static void s2op_settle(id<S2Commander> c, NSData *want, NSData *old, NSString *
         });
     });
 }
-void s2op_save_user_cal(id<S2Commander> c, const char *serial, s2_cal cal, NSURL *dir, void (^log)(NSString *), void (^done)(S2CalOutcome, NSString *)) {
+void s2op_save_user_cal(id<S2Commander> c, const char *serial, int slot, s2_cal cal, NSURL *dir, void (^log)(NSString *), void (^done)(S2CalOutcome, NSString *)) {
     void (^finish)(S2CalOutcome, NSString *) = ^(S2CalOutcome o, NSString *p) { if (done) done(o, p); };
+    if (slot != 0 && slot != 1) { s2op_log(log, @"stick slot %d is no stick's: nothing written", slot); finish(S2CalNoBackup, nil); return; }
+    const uint32_t off = s2_user_slot_off(slot);
     NSString *ser = serial && *serial ? @(serial) : @"unknown";   // copied: the caller's buffer need not outlive the call
     uint8_t b[S2_USER_CAL_LEN]; s2_user_cal_block(&cal, b);
     NSData *blk = [NSData dataWithBytes:b length:sizeof b];
@@ -121,9 +123,9 @@ void s2op_save_user_cal(id<S2Commander> c, const char *serial, s2_cal cal, NSURL
         const uint8_t *o = old.bytes;
         s2op_log(log, @"user calibration backed up to %@; marker B2 A1 at 0x1FC040 %s, 0x1FC060 %s, 0x1FC080 %s", path,
                  s2_user_cal_marked(o + 0x40) ? "yes" : "no", s2_user_cal_marked(o + 0x60) ? "yes" : "no", s2_user_cal_marked(o + 0x80) ? "yes" : "no");
-        NSMutableData *want = [old mutableCopy]; [want replaceBytesInRange:NSMakeRange(S2_USER_STICK1_OFF, S2_USER_CAL_LEN) withBytes:blk.bytes];
+        NSMutableData *want = [old mutableCopy]; [want replaceBytesInRange:NSMakeRange(off, S2_USER_CAL_LEN) withBytes:blk.bytes];
         void (^check)(BOOL) = ^(BOOL ok) { if (!ok) s2op_log(log, @"a write got no answer"); s2op_settle(c, want, old, path, cal, log, finish); };
-        if (s2_all_ff(o + S2_USER_STICK1_OFF, S2_USER_CAL_LEN)) s2op_write(c, blk, S2_ADDR_USER_CAL_SECTOR + S2_USER_STICK1_OFF, 0, NO, check);
+        if (s2_all_ff(o + off, S2_USER_CAL_LEN)) s2op_write(c, blk, S2_ADDR_USER_CAL_SECTOR + off, 0, NO, check);
         else s2op_erase_sector(c, log, ^(NSData *erased) {
             if (!s2op_blank(erased)) {   // the final check says whether anything changed: nothing, when the sector still reads as the backup
                 s2op_log(log, @"the sector %@ after the erase: nothing written", erased ? @"does not read blank" : @"could not be read");

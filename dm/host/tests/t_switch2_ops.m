@@ -104,6 +104,7 @@ static void cal_block(const s2_cal *c, uint8_t out[S2_USER_CAL_LEN]) { s2_user_c
 static NSData *with_block(NSData *before);
 typedef struct { BOOL finished; S2CalOutcome outcome; int calls; } save_result;
 static int g_scenario;
+static int g_slot;   // the stick slot save_in saves (0: 0x1FC040, 1: 0x1FC080)
 #define CHECK_IN(name, c) do { checks++; if (!(c)) { fails++; printf("FAIL %s:%d %s: %s\n", __FILE__, __LINE__, name, #c); } } while (0)
 // One save into f (into dir, or a fresh backup folder when dir is nil); the outcome, the backup path and the log lines. Every save is held to the same rules: done comes
 // exactly once, nothing is written or erased outside the sector, and the sector ends as it was, as written, or blank (the factory calibration): never anything else
@@ -115,7 +116,7 @@ static save_result save_in(FakeFlash *f, const char *name, NSURL *dir, NSString 
     NSData *before = f.sector;
     NSMutableArray<NSString *> *log = [NSMutableArray new];
     __block save_result res = {NO, S2CalNoBackup, 0}; __block NSString *p = nil;
-    s2op_save_user_cal(f, "HCW1234567890X", g_cal, dir, ^(NSString *m) { [log addObject:m]; },
+    s2op_save_user_cal(f, "HCW1234567890X", g_slot, g_cal, dir, ^(NSString *m) { [log addObject:m]; },
                        ^(S2CalOutcome o, NSString *backup) { res.outcome = o; p = backup; res.finished = YES; res.calls++; });
     BOOL done = run_until(&res.finished);
     if (!done) printf("FAIL %s: the save never finished\n", name);
@@ -143,7 +144,7 @@ static void older(FakeFlash *f) {
 }
 static NSData *with_block(NSData *before) {
     NSMutableData *m = [before mutableCopy]; uint8_t b[S2_USER_CAL_LEN]; cal_block(&g_cal, b);
-    [m replaceBytesInRange:NSMakeRange(S2_USER_STICK1_OFF, S2_USER_CAL_LEN) withBytes:b];
+    [m replaceBytesInRange:NSMakeRange(s2_user_slot_off(g_slot), S2_USER_CAL_LEN) withBytes:b];
     return m;
 }
 
@@ -161,6 +162,33 @@ int main(void) {
             CHECK(backup_is(path, dir, before) && [path.lastPathComponent hasPrefix:@"HCW1234567890X-1FC000-"]);
             CHECK(logged(lines, @"user calibration backed up to") && logged(lines, @"written and read back"));
             [NSFileManager.defaultManager removeItemAtURL:dir error:nil];
+        }
+        {   // The second stick slot (a Pro Controller 2's right stick) into a blank sector: its block at 0x1FC080, written straight, the first slot left blank
+            FakeFlash *f = [FakeFlash new]; NSData *before = f.sector; g_slot = 1;
+            r = save(f, "blank slot 1", &path, &lines, &dir);
+            CHECK(r.finished && r.outcome == S2CalSaved && [f.sector isEqualToData:with_block(before)] && f.erases == 0 && f.writes == 1);
+            CHECK(s2_user_cal_marked(f.mem + 0x80) && s2_all_ff(f.mem + 0x40, S2_USER_CAL_LEN));
+            g_slot = 0; [NSFileManager.defaultManager removeItemAtURL:dir error:nil];
+        }
+        {   // The second slot blank beside the first slot's block: written straight, the first slot's block and the motion bytes kept
+            FakeFlash *f = [FakeFlash new]; older(f); NSData *before = f.sector; g_slot = 1;
+            r = save(f, "beside slot 0", &path, &lines, &dir);
+            CHECK(r.finished && r.outcome == S2CalSaved && [f.sector isEqualToData:with_block(before)] && f.erases == 0 && f.writes == 1);
+            CHECK(!memcmp(f.mem, before.bytes, 0x40 + S2_USER_CAL_LEN) && s2_user_cal_marked(f.mem + 0x80));
+            g_slot = 0; [NSFileManager.defaultManager removeItemAtURL:dir error:nil];
+        }
+        {   // An older second-slot block: the sector is erased and written back whole, the first slot's block and the motion bytes kept
+            FakeFlash *f = [FakeFlash new]; older(f); memcpy(f.mem + S2_USER_STICK2_OFF, f.mem + S2_USER_STICK1_OFF, S2_USER_CAL_LEN); NSData *before = f.sector; g_slot = 1;
+            r = save(f, "older slot 1", &path, &lines, &dir);
+            CHECK(r.finished && r.outcome == S2CalSaved && [f.sector isEqualToData:with_block(before)] && f.erases == 1);
+            CHECK(!memcmp(f.mem, before.bytes, 0x40 + S2_USER_CAL_LEN) && s2_user_cal_marked(f.mem + 0x80));
+            g_slot = 0; [NSFileManager.defaultManager removeItemAtURL:dir error:nil];
+        }
+        {   // A slot that is not a stick's: refused before anything is read or written
+            FakeFlash *f = [FakeFlash new]; NSData *before = f.sector; g_slot = 2;
+            r = save(f, "slot 2", &path, &lines, &dir);
+            CHECK(r.finished && r.outcome == S2CalNoBackup && !path && f.writes == 0 && f.erases == 0 && [f.sector isEqualToData:before]);
+            g_slot = 0;
         }
         {   // An older block and motion bytes: the sector is erased and written back whole, the motion bytes kept
             FakeFlash *f = [FakeFlash new]; f.chunk = 48; older(f); NSData *before = f.sector;

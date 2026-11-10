@@ -8,7 +8,12 @@ DM_AOC_OWNED	switch	`0` reports no add-on content even when `DM_AOC_DIR` has som
 DM_APP_DM	path	Set by the iOS app of a game of several programs: the running program's `dm/p<N>` folder, where the settings screen finds its `launcher.json`
 DM_APP_VERSION	switch	Overrides the IPA's version in `build_ipa.sh`; by default it is the packed game's display version from its control data (the update's when one is packed)
 DM_AUDIO	switch	`1` plays audio through Core Audio, `0` uses the silent sink; real output is the default on iOS, the silent sink on the Mac (the Mac launcher sets `1`)
+DM_AUDIO_CAPTURE	test	`=<file>`: `tests/t_audio_live.c` records the output device's input (a loopback device such as BlackHole) there as 32-bit float samples, for `dm/tools/audio_channel_check.py`
+DM_AUDIO_CAPTURE_CH	test	`=<n>`: the channels `tests/t_audio_live.c` records with `DM_AUDIO_CAPTURE` (6 by default)
+DM_AUDIO_CAPTURE_DEVICE	test	`=<part of a device name>`: `tests/t_audio_live.c` records that device instead of the one playing at start (the target of a switch)
+DM_AUDIO_DEVICE	diagnostic	`=<part of a device name>` (Mac) plays the audio on the output device with that name (a virtual device such as BlackHole 16ch, for tests); the default output otherwise
 DM_AUDIO_DUMP	diagnostic	`=<file>` writes every PCM block the game appends as is (16-bit, 48 kHz, channel count as in the OpenAudioOut log), to judge whether a sound played
+DM_AUDIO_LIVE_PCM	test	`=<file>`: `tests/t_audio_live.c` plays that file (16-bit, 48 kHz, six channels interleaved in the guest's order) instead of its test tones
 DM_AUDIO_MUTE	switch	`=1` runs the real Core Audio output path (callback pacing, background take-over) with the output silenced, for lifecycle tests on the Mac without noise
 DM_AUDREN_TRACE	diagnostic	When set, the CPU audio renderer logs every update with the number of frames rendered since the previous one
 DM_AV1_DAV1D	switch	`=1` decodes AV1 movies with dav1d even where VideoToolbox decodes AV1 (Apple M3 and A17 Pro on), to compare the two or to check the path older chips take (`hle_movie_av1.c`)

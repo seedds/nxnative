@@ -94,14 +94,15 @@ typedef struct {
     uint8_t *sys;                            // its AudioRenderSystem, from its first render or update (ar_of_sys)
     _Atomic int open;
     void *render_tt;                         // the render thread (ThreadType from dm_guest_thread_spawn): Close joins it before the SDK tears the renderer down
-    int16_t frame[FRAME_MAX * 2]; int frame_n;   // the latest frame (stereo int16)
+    int oc;                                  // output channels: 6 on a six-channel route, else 2 (dm_audio_route when the renderer opened)
+    int16_t frame[FRAME_MAX * 6]; int frame_n;   // the latest frame (oc interleaved int16 channels per sample)
     _Atomic uint64_t frames, nonsilent, updates, renders, catchups;
     uint64_t last_r; int updated;            // the render count at the last update, once there was one
-    int16_t cq[CQ][FRAME_MAX * 2]; int cq_n[CQ]; _Atomic uint32_t cq_head, cq_tail;   // output queue of catch-up frames
+    int16_t cq[CQ][FRAME_MAX * 6]; int cq_n[CQ]; _Atomic uint32_t cq_head, cq_tail;   // output queue of catch-up frames
     pthread_mutex_t cq_mu; pthread_cond_t cq_cv;   // the render thread signals each frame it takes off the queue (catch-up pacing)
     int sink_logged;
-    int32_t up_buf[2 * (15 + FRAME_MAX)]; uint32_t up_pos;   // up_3_2's last samples and position
-    int16_t pcm[NBUF][FRAME_MAX * 2]; gbuf bufs[NBUF];   // the blocks its output plays from: AudioOut queues only the pointer and copies the samples when the sound card asks (issue #1336)
+    int32_t up_buf[6 * (15 + FRAME_MAX)]; uint32_t up_pos;   // up_3_2's last samples and position
+    int16_t pcm[NBUF][FRAME_MAX * 6]; gbuf bufs[NBUF];   // the blocks its output plays from (oc channels): AudioOut queues only the pointer and copies the samples when the sound card asks (issue #1336)
 } ar_t;
 static ar_t g_ar[AR_MAX];
 static pthread_mutex_t g_ar_mu = PTHREAD_MUTEX_INITIALIZER;   // the slots' handle and sys fields
@@ -122,10 +123,12 @@ static ar_t *ar_of_sys(uint8_t *sys) {
     return found;
 }
 
+static int ar_oc(const ar_t *a) { return a->oc == 6 ? 6 : 2; }   // the renderer's output channels; one not opened by ar_open (no route read) is stereo
 static void render_main(void *arg) {
     ar_t *a = arg; t_ar = a;
     void (*exec)(void *, void *) = gsym("_ZN2nn5audio29ExecuteAudioRendererRenderingENS0_19AudioRendererHandleE");
-    void *out = dm_pcmout_open(2);
+    const int oc = ar_oc(a);
+    void *out = dm_pcmout_open(oc);
     gbuf *free_list[NBUF]; int nfree = NBUF;
     for (int i = 0; i < NBUF; i++) { a->bufs[i] = (gbuf){a->pcm[i], sizeof a->pcm[i], 0}; free_list[i] = &a->bufs[i]; }
     dm_pcmout_start(out);
@@ -144,8 +147,9 @@ static void render_main(void *arg) {
         else { a->frame_n = 0; exec(a->handle[0], a->handle[1]); src = a->frame; got = a->frame_n; }   // SDK: generate commands → CPU processing (output taken in the host takeover) → signal the game's renderer event
         int n = got ? got : 240;
         gbuf *b = free_list[--nfree];
-        if (got) memcpy(b->ptr, src, (size_t)n * 4); else memset(b->ptr, 0, (size_t)n * 4);
-        b->size = (uint64_t)n * 4;
+        size_t bytes = (size_t)n * oc * 2;
+        if (got) memcpy(b->ptr, src, bytes); else memset(b->ptr, 0, bytes);
+        b->size = bytes;
         if (!dm_pcmout_append(out, b)) free_list[nfree++] = b;
     }
     dm_pcmout_close(out);   // the output would otherwise keep its sound card callback or silent sink running and hold one of the AudioOut slots after the renderer closes
@@ -239,6 +243,7 @@ static Result ar_open(void **handle, void *ev, const uint8_t *param, void *work,
     pthread_mutex_unlock(&g_ar_mu);
     LOG("audren: renderer %d opened from %s+%#llx", a ? ar_index(a) : -1, m ? m->name : "host", m ? (unsigned long long)((uint8_t *)ra - m->base) : 0ULL);
     if (!a) { LOG("[RED] audren: more than %d renderers: this one is not rendered", AR_MAX); return r; }
+    a->oc = dm_audio_route();
     a->render_tt = dm_guest_thread_spawn(render_main, a, 9, 0x10000);
     return r;
 }
@@ -307,7 +312,7 @@ HLE_FORCE("_ZN2nn5audio6server16UpsamplerManager8AllocateEv", "upsampler for a D
     return mgr ? orig(mgr) : NULL;
 }
 enum { RS_T = 16 };
-static uint32_t up_3_2(ar_t *a, const int32_t *in, uint32_t n, int32_t *out) {
+static uint32_t up_3_2(ar_t *a, const int32_t *in, uint32_t n, int32_t *out, int nch) {   // nch interleaved channels
     static float h[3][RS_T]; int32_t *buf = a->up_buf; uint32_t pos = a->up_pos;   // pos: the next output's position in thirds of an input sample, from the frame start
     if (!h[0][RS_T / 2 - 1]) {
         for (int p = 0; p < 3; p++) {
@@ -320,18 +325,21 @@ static uint32_t up_3_2(ar_t *a, const int32_t *in, uint32_t n, int32_t *out) {
             for (int k = 0; k < RS_T; k++) h[p][k] = (float)(w[k] / sum);
         }
     }
-    memcpy(buf + 2 * (RS_T - 1), in, (size_t)n * 8);   // the frame after the last RS_T - 1 samples of the one before (copied first: out may be in)
+    memcpy(buf + nch * (RS_T - 1), in, (size_t)n * nch * 4);   // the frame after the last RS_T - 1 samples of the one before (copied first: out may be in)
     uint32_t m = 0;
     for (; pos < 3 * n; pos += 2, m++) {
-        const int32_t *x = buf + 2 * (pos / 3); const float *c = h[pos % 3]; float l = 0, r = 0;
-        for (int k = 0; k < RS_T; k++) { l += c[k] * (float)x[2 * k]; r += c[k] * (float)x[2 * k + 1]; }
-        out[2 * m] = (int32_t)lrintf(l); out[2 * m + 1] = (int32_t)lrintf(r);
+        const int32_t *x = buf + nch * (pos / 3); const float *c = h[pos % 3];
+        for (int j = 0; j < nch; j++) {
+            float v = 0;
+            for (int k = 0; k < RS_T; k++) v += c[k] * (float)x[nch * k + j];
+            out[nch * m + j] = (int32_t)lrintf(v);
+        }
     }
     a->up_pos = pos - 3 * n;
-    memmove(buf, buf + 2 * n, (RS_T - 1) * 8);
+    memmove(buf, buf + nch * n, (RS_T - 1) * nch * 4);
     return m;
 }
-static int capture(ar_t *a, const uint8_t *cl, size_t len, int16_t *dst) {
+static int capture(ar_t *a, const uint8_t *cl, size_t len, int16_t *dst) {   // writes a->oc channels per sample
     if (len < 0x20) return 0;
     uint32_t ncmd = *(const uint32_t *)(cl + 4), samples = *(const uint32_t *)(cl + 0x14), rate = *(const uint32_t *)(cl + 0x18);
     const int32_t *mix = *(const int32_t *const *)(cl + 8); const uint8_t *cend = cl + len;
@@ -397,17 +405,24 @@ static int capture(ar_t *a, const uint8_t *cl, size_t len, int16_t *dst) {
             for (uint32_t j = 0; j < k; j++) ch[j] = mix + (size_t)in[j] * samples;
             // Channel order front-left front-right center LFE back-left back-right; 6 → 2 with the system default downmix coefficients (front 1.0, center 0.707, LFE 0.251, back 0.707, Q15)
             enum { CF = 32768, CC = 23167, CL = 8224, CB = 23167 };
-            static int32_t st[FRAME_MAX * 2];   // the stereo downmix before clamping (capture runs under g_render_mu)
+            static int32_t st[FRAME_MAX * 6];   // the output before clamping, a->oc channels per sample (capture runs under g_render_mu)
+            const int oc = ar_oc(a);
             for (uint32_t s = 0; s < samples; s++) {
+                if (oc == 6) {   // the six channels as the sink names them; a sink of fewer plays its front pair as on stereo (mono on both), and the other four are silent
+                    if (k >= 6) for (uint32_t j = 0; j < 6; j++) st[6 * s + j] = ch[j][s];
+                    else { st[6 * s] = ch[0][s]; st[6 * s + 1] = k > 1 ? ch[1][s] : ch[0][s]; for (uint32_t j = 2; j < 6; j++) st[6 * s + j] = 0; }
+                    continue;
+                }
+                // Stereo: 6 → 2 with the system default downmix coefficients (front 1.0, center 0.707, LFE 0.251, back 0.707, Q15)
                 int32_t l, r;
                 if (k >= 6) { int64_t c = (int64_t)ch[2][s] * CC + (int64_t)ch[3][s] * CL;
                               l = (int32_t)(((int64_t)ch[0][s] * CF + c + (int64_t)ch[4][s] * CB) >> 15); r = (int32_t)(((int64_t)ch[1][s] * CF + c + (int64_t)ch[5][s] * CB) >> 15); }
                 else { l = ch[0][s]; r = k > 1 ? ch[1][s] : l; }
                 st[2 * s] = l; st[2 * s + 1] = r;
             }
-            uint32_t nout = rate == 48000 ? samples : up_3_2(a, st, samples, st);
+            uint32_t nout = rate == 48000 ? samples : up_3_2(a, st, samples, st, oc);
             uint64_t loud = 0;
-            for (uint32_t s = 0; s < 2 * nout; s++) {
+            for (uint32_t s = 0; s < nout * oc; s++) {
                 int32_t v = st[s]; v = v > 32767 ? 32767 : v < -32768 ? -32768 : v;
                 dst[s] = (int16_t)v; loud |= (uint64_t)v;
             }
@@ -584,7 +599,7 @@ HLE_FORCE("_ZN2nn5audio30GetActiveAudioOutputDeviceNameEPNS0_15AudioDeviceNameE"
 // The SDK 12 names (Engage): the same service, the same answers
 HLE_FORCE("_ZN2nn5audio19ListAudioDeviceNameEPNS0_15AudioDeviceNameEi", "output device list (SDK 12 name): 1 built-in speaker", int, h_ad_List12, char *names, int n) { return h_ad_List(names, n); }
 HLE_FORCE("_ZN2nn5audio24GetActiveAudioDeviceNameEPNS0_15AudioDeviceNameE", "active output device (SDK 12 name): built-in speaker", void, h_ad_Active12, char *name) { out_devname(name); }
-HLE_FORCE("_ZN2nn5audio41GetActiveAudioDeviceChannelCountForOutputEv", "output channel count: 2", int, h_ad_Channels, void) { return 2; }
+HLE_FORCE("_ZN2nn5audio41GetActiveAudioDeviceChannelCountForOutputEv", "output channel count: the route's (6 on a six-channel device, else 2)", int, h_ad_Channels, void) { return dm_audio_route(); }
 // Device volume: kept and read back (DRAGON QUEST VII Reimagined reads it at boot, main+0xee8edc), not applied: the host's output has the system's own volume
 static _Atomic float g_dev_vol = 1.0f;
 HLE_FORCE("_ZN2nn5audio26SetAudioDeviceOutputVolumeEPKNS0_15AudioDeviceNameEf", "device volume; kept for the getter, not applied by the host", void, h_ad_SetVol, const char *name, float v) { (void)name; atomic_store(&g_dev_vol, v); }
@@ -620,4 +635,4 @@ HLE_FORCE("_ZN2nn5audio38AcquireAudioDeviceNotificationForInputEPNS_2os11SystemE
 }
 // SDK 7 names of the two above (Super Mario Odyssey): the device-switch event and the active channel count
 HLE_FORCE("_ZN2nn5audio36AcquireAudioDeviceSwitchNotificationEPNS_2os11SystemEventE", "output device switch notification (SDK 7 name): bound, never signaled", void, h_ad_Notify7, void *ev) { hle_bind_system_event(ev, 0); }
-HLE_FORCE("_ZN2nn5audio21GetActiveChannelCountEv", "output channel count (SDK 7 name): 2", int, h_ad_Channels7, void) { return 2; }
+HLE_FORCE("_ZN2nn5audio21GetActiveChannelCountEv", "output channel count (SDK 7 name): the route's", int, h_ad_Channels7, void) { return dm_audio_route(); }

@@ -1379,6 +1379,15 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md): its deferred lighting `635061c90d75a8d1` normalises four depth-weighted half-resolution samples by `1 / sum` only where `FSETP.NEU.FTZ` says the sum is not zero. No Switch 1 game has shown the symptom; Maxwell's comparisons follow for the same semantics (the flag is on all of them in the 8 Switch 1 games counted).
 - **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_alu.py` (`CompareFtz`, on the game's encoding) and `test_dmsh_maxwell_ftz.py`.
 
+### Compute threads that return before a barrier
+
+- **Symptom:** none on the Mac. Suspected as a cause of GPU hangs (`kIOGPUCommandBufferCallbackErrorHang`) in compute, task and mesh shaders that return before a `threadgroup_barrier`.
+- **Cause (checked, not a bug):** on NVIDIA's GPUs a thread that has exited counts as arrived at a barrier, and Switch compute shaders rely on it (`if (lid * 4 >= count) return;`, then a barrier). Metal's specification wants every thread of the threadgroup at each barrier, and the translator keeps the return in the MSL. On an Apple M6 a returned thread counts as arrived too. Seven shapes all complete with every remaining thread's value right: whole simdgroups returning, all but the last simdgroup returning, half the lanes of every simdgroup, returns between two barriers, a barrier loop after the returns, threads leaving a barrier loop at different iterations, half the lanes before a `simdgroup_barrier`. Each ran with 4,096 threadgroups of 1,024 threads, 280 dispatches in all with no hang.
+- **Fix:** none: the translator keeps the return. A pass that kept a returned thread arriving at every later barrier (`BarrierExits.cs`, [PR #1774](https://github.com/seedds/nxnative/pull/1774)) was not taken. It fixes nothing measured: PRAGMATA's hang went away only together with a cap on every shader loop. That hang was its cloth solver's loop, which never ends when the iteration count it reads is 0, and the cap hid it.
+- **Limit:** measured on an M6 only. M1 to M5 have not run it. A failure of `t_barrier_exit` on one of them would bring the pass back for those GPUs.
+- **Found on:** PRAGMATA (no profile; 156 of its compute shaders return before a barrier) and Orbitals ([PR #1783](https://github.com/seedds/nxnative/pull/1783)), as PR #1774 reports; neither game's files were run here. Not [Ocarina of Time](../../dm/games/0400486024DEC000/README.md)'s GPU hang: none of its 520 task and mesh shaders has a barrier in its body. Only 12 of its compute kernels return before a barrier, none of them in the pass that hangs.
+- **Check:** `make -C dm/gfx/tests GAME=<id> t_barrier_exit && dm/gfx/tests/t_barrier_exit`.
+
 ### Barrier moves around warp shuffles
 
 - **Symptom:** `Ampere instruction f55 at 0x… (000fe20000000000000000001a0f7f55) is not implemented` in the shader build; those shaders are left out.

@@ -495,3 +495,37 @@ def frag_z_snap(msl):
     body = f'\n    float {ZSNAP_WIDTH} = fwidth(gl_FragCoord.z);' + '\n'.join(lines)   # in uniform control flow, before anything the body does
     msl = msl[:first] + body + msl[end - 1:]
     return msl.replace('using namespace metal;\n', 'using namespace metal;\n\n' + ZSNAP, 1), n
+
+
+# A colour output's rgb where its alpha is exactly 0 and the rgb is not finite. NVIDIA's blender takes a zero factor times anything as 0 (Direct3D's rule: 0 × Inf = 0 × NaN = 0), so a pixel
+# shader may leave garbage in the colour of a pixel it means to add nothing to and say so with alpha 0: with SRC_ALPHA blending the target keeps its value. Apple's blender multiplies as IEEE
+# does (0 × NaN = NaN), stores the NaN, and every later pass that reads the target spreads it.
+# Ocarina of Time's half-resolution light shader 5ad65c0eefd09c7f averages hit positions over a fog layer whose density is 0 there (a positive hit count, a weight sum of 0: 1/0 × 0 = NaN; its
+# FMULs carry no .FMZ, so the translation is exact) and writes them with alpha 0 into an RGBA16F light target blended SRC_ALPHA / ONE_MINUS_SRC_ALPHA. The fog pass carried the NaN into the
+# scene and bloom turned each into a white cloud over the ferns at the camera, coming and going as they swayed across the fog volume's surface.
+# So main0, the entry a pipeline with float colour targets takes, returns a non-finite rgb as 0 where alpha is 0: a finite output is never changed, and neither are the integer entry points
+# (main0_u / main0_m: dm_body_main0, dmsh_side.shared_body), whose outputs are bits. Outside SRC_ALPHA blending the change only touches outputs that were NaN or Inf already.
+# The guard has to reach the library, not only this file. When main0 calls the shared body, dmsh_side.unit keeps main0 as it is, and main0's alpha test and logic operation versions and
+# main0_f (dmsh_fetch.fold), which call the body themselves, take the same guard (dmsh_side.az_cols); a library built without its extra entry points is built from the plain source with
+# the guard as well (without_extras)
+BLEND_ZERO = ('static inline __attribute__((always_inline)) float4 dm_az(float4 c)   // see blend_zero\n'
+              '{\n    return c.w == 0.0f ? float4(select(c.xyz, float3(0.0f), isnan(c.xyz) || isinf(c.xyz)), c.w) : c;\n}\n')
+def blend_zero(msl):
+    """→ (msl with each `return out;` line of main0 preceded by out.<m> = dm_az(out.<m>); for its float4 colour outputs and BLEND_ZERO before main0, the number of returns guarded).
+    Unchanged (0) when main0 has no float4 colour output, is not of a shape dmsh_side.entry knows, or returns other than on a line of its own"""
+    st = re.search(r'struct main0_out\s*\{(.*?)\};', msl, re.S)
+    cols = [nm for ty, nm, at in re.findall(r'^\s*(\w+)\s+(\w+)\s*(\[\[[^\]]*\]\])?;', st.group(1), re.M) if ty == 'float4' and 'color(' in at] if st else []
+    if not cols or 'dm_az(' in msl: return msl, 0
+    try: e = dmsh_side.entry(msl, 'main0')
+    except ValueError: return msl, 0
+    if not e or e['ret'] != 'main0_out': return msl, 0
+    body = msl[e['head']:e['end']]
+    n = len(re.findall(r'\breturn out;', body))
+    guard = ' '.join(f'out.{c} = dm_az(out.{c});' for c in cols)
+    body, k = re.subn(r'^([ \t]*)return out;$', lambda m: f'{m.group(1)}{guard}\n{m.group(1)}return out;', body, flags=re.M)
+    if not k or k != n: return msl, 0
+    return msl[:e['start']] + BLEND_ZERO + msl[e['start']:e['head']] + body + msl[e['end']:], k
+
+
+def without_extras(stage, plain):   # the source a library that does not build with its extra entry points is built from: a pixel shader's with blend_zero's guard, as with them
+    return blend_zero(plain)[0] if stage == 'ps' else plain

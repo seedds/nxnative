@@ -267,4 +267,5 @@ def fold(msl, bindings, om_only_ok=False):
     put = ''.join(f'    if (OM_{j}_{k}) out.{n}_at{k} = r.{n};\n' for j, (t, n, c) in enumerate(outs) for k in range(NFB))
     main0_f = (f'\nstruct main0_out_f\n{{\n{members}}};\n\n{e["attr"]}fragment main0_out_f main0_f({", ".join(e["params"] + fbs)})\n{{\n'
                f'{load}    main0_out r = dm_body_main0({args});\n    main0_out_f out = {{}};\n{put}    return out;\n}}\n')
+    main0_f = dmsh_side.az_after(main0_f, 'r', dmsh_side.az_cols(msl))   # a main0 that calls the shared body guards its result (dmsh_rewrite.py blend_zero): main0_f calls the body too
     return lead + sig + ''.join(out_parts) + text[pos:] + rest + main0_f, {'calls': calls, 'mixed_regs': mixed, 'outputs': [{'color': c, 'type': t} for t, n, c in outs]}

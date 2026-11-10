@@ -62,6 +62,24 @@ def entry(msl, name):   # one entry point as entries() gives it, None when there
 # and each entry point is a module of its own in the library anyway (metallib)
 _BODY = re.compile(r'static (__attribute__\(\(always_inline\)\) )?main0_out dm_body_main0\(')
 BODY = 'static __attribute__((always_inline)) main0_out dm_body_main0('
+# dmsh_rewrite.py blend_zero guards what main0 returns (out.<colour> = dm_az(out.<colour>); before each return). When main0 calls the shared body, the guard sits in main0, not in the body, as the
+# integer entry points call the body too and their bits must stay bits. Every other float entry point that calls the body itself (main0's alpha test and logic operation versions, here, and
+# main0_f, dmsh_fetch.fold) then takes the same guard on its own result (az_cols, az_after)
+_AZ = re.compile(r'\bout\.(\w+) = dm_az\(out\.\1\);')
+
+
+def az_cols(msl):   # the colours blend_zero guards in a main0 that calls the shared body, in order; [] when main0 does not call it (the guard is then in the body) or has none
+    try: e = entry(msl, 'main0')
+    except ValueError: return []
+    if not e: return []
+    b = msl[e['head']:e['end']]
+    return list(dict.fromkeys(_AZ.findall(b))) if 'dm_body_main0(' in b else []
+
+
+def az_after(text, var, cols):   # text with the guard on var's colours after its first `main0_out <var> = dm_body_main0(...);`
+    if not cols: return text
+    g = ' '.join(f'{var}.{c} = dm_az({var}.{c});' for c in cols)
+    return re.sub(r'(\bmain0_out %s = dm_body_main0\([^;]*\);)' % re.escape(var), lambda m: m.group(1) + ' ' + g, text, count=1)
 
 
 def body(msl):   # dm_body_main0's definition: (its start, the end of its parameter list, the end of its body), None when there is none
@@ -95,12 +113,15 @@ def unit(msl) -> tuple[str | None, dict]:
     if not all(alpha.values()): alpha, no_alpha = {}, 'an entry point without a colour 0'   # the host needs one for each of the shader's own (at_fn)
     logic = {e['name'] + '_l': o for e in es if (o := None if no_logic else dmsh_logic.entry(msl, e))}
     if not alpha and not logic: return None, {'why': no_alpha or no_logic or 'no colour output'}
-    thin = [a for a in alpha.values() if a] + [o[0] for o in logic.values()]; targets = set().union(*(o[1] for o in logic.values()))
+    shared = bool(_BODY.search(msl))   # main0 already calls dm_body_main0 (shared_body): it is kept below as it is
+    az = az_cols(msl) if shared else []   # blend_zero's guard after main0's call of the body: main0's own alpha test and logic operation versions call the body and take it too
+    thin = [az_after(a, 'dm_r', az) for a in alpha.values() if a] + [az_after(o[0], 'dm_r', az) for o in logic.values()]; targets = set().union(*(o[1] for o in logic.values()))
     src, at = [], es[0]['start']
-    shared = bool(_BODY.search(msl))   # main0 already calls dm_body_main0 (shared_body): it is made again below as it is
     for e in es:
         src += [msl[at:e['start']]] + ([] if shared and e['name'] == 'main0' else [f'static {e["ret"]} dm_body_{e["name"]}({e["decl"]})', msl[e['head']:e['end']]]); at = e['end']
-    plain = [f'{e["attr"]}fragment {e["ret"]} {e["name"]}({", ".join(e["params"])})\n{{\n    return dm_body_{e["name"]}({e["args"]});\n}}\n' for e in es]
+    # each entry point as a call of its body; a shared main0 as it is, with what blend_zero put after its call of the body (written as a plain call it lost the guard)
+    plain = [msl[e['start']:e['end']] + '\n' if shared and e['name'] == 'main0' else
+             f'{e["attr"]}fragment {e["ret"]} {e["name"]}({", ".join(e["params"])})\n{{\n    return dm_body_{e["name"]}({e["args"]});\n}}\n' for e in es]
     return msl[:es[0]['start']] + dmsh_alpha.HELPER + dmsh_logic.HELPER + dmsh_logic.constants(targets) + ''.join(src) + msl[at:] + '\n' + ''.join(plain + thin), {'alpha': list(alpha), 'logic': list(logic)}
 
 

@@ -655,9 +655,13 @@ Most service calls can be found before they crash, before the first boot or the 
 ### The startup logo
 
 - **Symptom:** abort in `nn::sm::Initialize` under `nn::oe::FinishStartupLogo`, right after the first frames.
+- **Symptom:** SDK 21 `oe::EnableStartupLogoDisappearedMessage` reads null at `sdk+0x403fe0`, after `am::GetCommonStateGetter` returns null (Fit Boxing 3 2.0.0, SDK build `148394139d9d26ca8afd5c9ba5d30601`).
 - **Cause:** it reaches the applet proxy through `am::GetApplicationFunctions`.
-- **Fix:** the host has no startup logo: a no-op hook (`hle_oe.c`).
+- **Fix:** the host has no startup logo: `FinishStartupLogo` is a no-op hook (`hle_oe.c`). The SDK 21 notification registration reaches `am::GetCommonStateGetter` instead. Its hook immediately queues `StartupLogoDisappeared` (message 95) through the existing notification queue and event, because the logo is already absent. This supplies the completion notification instead of leaving the SDK to access an uninitialized console service.
+- **Check:** `t_oe` covers no unsolicited completion, message 95 after registration, and notification-event signalling and clearing. Existing focus, mode and queue-order tests remain in the same suite.
 - **Found on:** [Metroid Dread](../../dm/games/010093801237C000/README.md).
+- **Found on:** Fit Boxing 3 2.0.0 (`0100AC101BFA2000`, provisional profile, Unity IL2CPP / SDK 21.4.4). This is the startup-logo failure, distinct from SDK 17's later `MapAliasStack` abort in [issue #1809](https://github.com/seedds/nxnative/issues/1809). No registered playable profile is claimed.
+- **Local verification (2026-11-09):** Apple M1, macOS 27.2, Xcode 27.2. The original host reproduced the null read at `sdk+0x403fe0` (exit 139). With the hook, the game popped notification 95 and continued past frame 3,300 during a 65-second run, stopped deliberately. It repeatedly requested a compatible controller with none connected; no workout or motion-calibration result is claimed. Copied saves and existing game/shader resources were used. `t_oe` passed all 56 checks.
 
 ### Copyright frame buffer overlay
 

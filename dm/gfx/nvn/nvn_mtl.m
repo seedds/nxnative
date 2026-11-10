@@ -10535,6 +10535,10 @@ static void cbs_feedback(cbs_list *l, NSError *err, const char *where) {   // fr
 // translator used to compare every read with the size (GitHub issue #2066: a fifth of the GPU's time in Donkey Kong Bananza); a read at a computed offset is still compared in the
 // shader (NVN_RB_CBSIZE). The bytes are the ones the slot would have pointed at: the deferred updates' when they cover the binding, a partly updated block's copy, else the memory.
 // Paper Mario: The Thousand-Year Door binds 16 bytes to a slot read up to byte 0x930, and the GPU hung on the light count it read at 0x900 (GitHub issue #1860)
+// A Switch 2 game (dm_sdk_ounce) gets no such bound: no zero padding, and every bound slot 64 KB in the size table, as before 26062f9e. The Switch 2 does not seem to stop a read at the
+// size the game binds: with the bound, Ocarina of Time read zeros past its bindings and the vertices of its horses, of Link's slingshot and of the ReDeads stretched to the origin or
+// flickered; taking the sizes as 4-byte words fixed the stretching but not the flicker, and only no bound fixed both (GitHub issue #2218)
+static int ub_unbounded(void) { static int v = -1; if (v < 0) { v = dm_sdk_ounce(); if (v) MLOG("uniform reads are not bounded by the binding's size (a Switch 2 game)"); } return v; }
 static uint64_t g_ub_short;
 static uint64_t ub_padded(NvShader *sh, int st, int reg, const p_bind_buf *u, uint32_t need, const uint8_t *mem, __strong id<MTLBuffer> *buf) {
     size_t off = arena_alloc(need, buf); uint8_t *d = (uint8_t *)g_cur_arena->cpu + off; uint64_t lo = u->addr, hi = lo + u->size, g; const uint8_t *c;
@@ -10555,7 +10559,7 @@ static uint64_t cbuf_slot(NvShader *sh, int nvn_stage, const nvn_rbind *b, __str
     void *mb; uint64_t mo, gpu;
     if (!u || !u->addr || !mtl_gpu_addr(u->addr, u->size ? u->size : 1, &mb, &mo, &gpu)) {   // reads 0 (the all-zero bank), as an unbound texture slot does, instead of through a null pointer
         RED_ONCE(16, "stage %d cb%d has no uniform buffer bound", nvn_stage, reg); *use = zero_bank(); return zero_bank_gpu(); }
-    if (__builtin_expect(u->size < 4u * b->fixw, 0))   // bound shorter than the shader reads it at fixed offsets: those reads give 0, as on Maxwell
+    if (__builtin_expect(u->size < 4u * b->fixw, 0) && !ub_unbounded())   // bound shorter than the shader reads it at fixed offsets: those reads give 0, as on Maxwell
         return ub_padded(sh, nvn_stage, reg, u, 4u * b->fixw, (const uint8_t *)[(__bridge id<MTLBuffer>)mb contents] + mo, use);
     *use = (__bridge id<MTLBuffer>)mb;
     uint64_t ul = cb_len(sh, reg, u->size);   // what the shader can read of it
@@ -10570,7 +10574,7 @@ static uint64_t cbuf_slot(NvShader *sh, int nvn_stage, const nvn_rbind *b, __str
 static uint64_t cbsize_table(int nvn_stage, __strong id<MTLBuffer> *use) {
     size_t off = arena_alloc(16 * ((DMSH_CBSIZE_SLOTS + 3) / 4), use); uint32_t *d = (uint32_t *)(void *)(g_cur_arena->cpu + off);
     memset(d, 0, 16 * ((DMSH_CBSIZE_SLOTS + 3) / 4));
-    for (int r = 0; r < DMSH_CBSIZE_SLOTS; r++) { const p_bind_buf *u = &S.ubo[nvn_stage][r]; if (u->addr) d[r] = u->size < 65536 ? (uint32_t)u->size : 65536; }
+    for (int r = 0; r < DMSH_CBSIZE_SLOTS; r++) { const p_bind_buf *u = &S.ubo[nvn_stage][r]; if (u->addr) d[r] = u->size < 65536 && !ub_unbounded() ? (uint32_t)u->size : 65536; }
     return g_cur_arena->gpu + off;
 }
 // Whether a block of sh can be patched when only what the uniform bindings point at changed: every binding that reads through a uniform buffer is a plain CBUF slot (no handles or

@@ -138,6 +138,8 @@ DM_NVN_DEPTHOVR	diagnostic	`=<fragment shader key prefix>,…`: those draws comp
 DM_NVN_DIRECT_UPLOAD	switch	0 disables bounded direct RGBA16F array uploads and keeps staged copies; on by default for supported non-sparse textures.
 DM_NVN_DIRTYCHECK	diagnostic	`=1` fully hashes pool content on every use to find changes the dirty-page tracking missed
 DM_NVN_DISPATCH_OWN	switch	`=1` gives every compute dispatch a compute encoder of its own with full barriers, as before (by default dispatches share the copy encoder); `DM_NVN_PASSGPU` does the same
+DM_NVN_DRAW_CLAMP	switch	`=1` copies every plain indirect draw record before its render pass and draws nothing for one of more than `DM_NVN_DRAW_CLAMP_MAX` vertices (count x instances), a record that would otherwise hang the GPU; off by default
+DM_NVN_DRAW_CLAMP_MAX	switch	`=<vertices>`: the count x instances above which `DM_NVN_DRAW_CLAMP=1` draws a plain indirect record as nothing (default 2^28)
 DM_NVN_DUAL_WANT	path	`=<file>`: appends the key of each pixel shader a pipeline blends with its output 1 as the second source, while it has no dual-source entry point, to that file, once per key (the profile's `dual_want.tsv`)
 DM_NVN_ENC_LABEL	diagnostic	`=1` labels every render encoder `p<pass in frame> <width>x<height> <first 8 digits of the first draw's fragment key> d<draws>` for Instruments traces
 DM_NVN_ENC_THREAD	player	`1` runs the replay's Metal encoding on a thread of its own while the submit thread goes on translating; on by default on iOS (`0` turns it off), off on macOS

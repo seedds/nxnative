@@ -5289,6 +5289,7 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex(int clear_only);
 static NSUInteger g_rp_aw; static int g_rp_whole;
 static id<MTL4RenderCommandEncoder> rp_begin(void) { if (g_enc && g_rp_aw) rp_end(); g_rp_whole = 1; id<MTL4RenderCommandEncoder> e = rp_begin_ex(0); g_rp_whole = 0; return e; }   // the callers draw anywhere in the target (see g_rp_aw)
 static id<MTL4RenderCommandEncoder> rp_begin_ex_(int clear_only);
+static void dcl_prepass(void);   // DM_NVN_DRAW_CLAMP: the pass's indirect records bounded before it opens
 static id<MTL4RenderCommandEncoder> rp_begin_ex(int clear_only) { AP_B; id<MTL4RenderCommandEncoder> e = rp_begin_ex_(clear_only); AP_E(1); return e; }
 static void bare_dims(NSUInteger *w, NSUInteger *h);
 static id<MTL4RenderCommandEncoder> rp_begin_ex_(int clear_only) {
@@ -5297,6 +5298,7 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex_(int clear_only) {
     g_enc_mode = clear_only; g_enc_geo_nocolor = g_geo_omit_colors; g_pass_swrite = g_pass_order = g_pass_late_res = 0; g_sm_pass = 0;
     if (!R.has_rt) { RED_ONCE(3, "no render target set before the draw"); return nil; }
     if (g_imfit_npend) img_fit_upgrade();   // no pass is open here: the upgrade's copy may run (img_fit)
+    if (clear_only != 1) dcl_prepass();   // likewise the indirect draw clamp's compute pass (DM_NVN_DRAW_CLAMP), so no draw inside the pass splits it
     // The version of the attachment-range candidate is taken before capturing any attachment; if it changes during setup, there is no continuation.
     uint64_t reg0 = 0, ser0 = 0, dirty0 = 0;
     if (rt_range_on()) { reg0 = g_reg_gen; ser0 = g_ser_gen; }
@@ -12856,6 +12858,106 @@ static void ixc_run(const p_draw *dw, const p_draw_idx *di) {
         int prim = e->prim, it = e->itype; unsigned long long fr = (unsigned long long)atomic_load(&g_cur_frame), pass = g_stat_pass, splits = g_ixc_splits; id<MTLBuffer> keep = ab;
         [g_commit_blocks addObject:^{ (void)keep; MLOG("indirect draw conversion frame %llu pass %llu: primitive %d index type %d record %u,%u,%u,%u → arguments %u,%u,%u,%d,%u (splits so far %llu)", fr, pass, prim, it, src[0], src[1], src[2], src[3], arg[0], arg[1], arg[2], (int)arg[3], arg[4], splits); }]; }
 }
+// ---------- Indirect draw records bounded on the GPU (DM_NVN_DRAW_CLAMP=1, off by default) ----------
+// Plain DrawArraysIndirect / DrawElementsIndirect draws read the guest's record as it is (the converted ones above cap their count). NVIDIA recovers from a runaway draw through
+// its channel watchdog; Metal draws what the record says until macOS resets the GPU, or the GPU wedges until a reboot. A record of count x instances near 2^32 is one such
+// hang. What would write one is open: no game has been seen to (a record read before its writer, a stale page or a record of another kind would). This guard bounds the
+// damage: with DM_NVN_DRAW_CLAMP=1, ixc.metal dcl_clamp copies each such record into the frame arena, and a count x instances over DM_NVN_DRAW_CLAMP_MAX (2^28 vertices, far
+// above a real draw and far below a hang) draws nothing; every other record is copied unchanged.
+// The copies are made in one compute pass just before a render pass opens (rp_begin_ex_ → dcl_prepass), for the draw being replayed and every such draw after it up to the
+// next buffer write, game barrier, multi-draw or target change; each copy belongs to its draw's op, so a draw past those stops never takes an earlier draw's copy. A render
+// pass is never split for it: a draw met inside an open pass with no copy (past a stop, past DCL_MAX draws, or replayed outside the op stream) reads its record as written and
+// is counted. Multi-draws and mesh / geometry draws are not covered
+#define DCL_MAX 256
+typedef struct { uint64_t rec, out, hits; uint32_t words, maxtotal; } dcl_job;   // ixc.metal cjob
+typedef struct { const uint8_t *op; uint64_t ind; uint64_t out; } dcl_ent;   // the draw's op and record; out 0: no copy (the record is in no pool)
+static dcl_ent g_dcl[DCL_MAX]; static int g_dcl_n; static uint64_t g_dcl_epoch, g_dcl_sub, g_dcl_runs, g_dcl_draws, g_dcl_inpass; static uint32_t g_dcl_sbw, g_dcl_seen, g_dcl_max = 1u << 28;
+static id<MTLBuffer> g_dcl_hits; static const void *g_dcl_cb; static const uint8_t *g_dcl_scanned; static int g_dcl_skip; static uint64_t g_dcl_rep_fence;
+// (g_dcl_sub / g_dcl_cb: the submission and command buffer of the copies, so a commit inside the submission (mdi_wait, sub_cut) ends them; g_dcl_scanned: where the last scan
+// started; g_dcl_skip: draw_multi's elements)
+static int dcl_on(void) {
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("DM_NVN_DRAW_CLAMP"); v = e && !strcmp(e, "1");
+        const char *m = getenv("DM_NVN_DRAW_CLAMP_MAX"); if (m && strtoul(m, NULL, 0) > 0) g_dcl_max = (uint32_t)MIN(strtoul(m, NULL, 0), 0xffffffffull);
+        if (v) MLOG("DM_NVN_DRAW_CLAMP=1: a plain indirect draw record of more than %u vertices (count x instances) draws nothing (bounded on the GPU before the render pass)", g_dcl_max); }
+    return v;
+}
+static int dcl_wanted(const p_draw *dw, const p_draw_idx *di) {
+    if (!dcl_on() || g_dcl_skip) return 0;   // (a multi-draw's elements are not covered)
+    return dw ? dw->ind && !dw->mdi_cnt && !ixc_wanted(dw, NULL) : di->ind && !di->mdi_cnt && !ixc_wanted(NULL, di);
+}
+// The copies hold while no buffer write (g_wr_epoch) or new submission or command buffer came after them; a storage-buffer write by a draw (g_sbw_gen) makes the next pass copy again
+static int dcl_live(void) { return g_dcl_epoch == g_wr_epoch && g_dcl_sub == g_sub_serial && g_dcl_cb == (__bridge const void *)g_cb; }
+static dcl_ent *dcl_find(const uint8_t *op, uint64_t ind) {
+    for (int i = 0; i < g_dcl_n; i++) if (g_dcl[i].op == op && g_dcl[i].ind == ind) return &g_dcl[i];
+    return NULL;
+}
+static void dcl_report(void) {   // the GPU's count of bounded records, read after a submission that ran clamps has completed (it may lag by a frame)
+    if (!g_dcl_hits) return;
+    uint64_t done = atomic_load(&g_done); if (done < g_dcl_rep_fence) return;
+    g_dcl_rep_fence = atomic_load(&g_fence) + 1;
+    const volatile uint32_t *h = (const volatile uint32_t *)g_dcl_hits.contents; uint32_t n = h[0];
+    if (n == g_dcl_seen) return;
+    // The words are the first bounded record's, written after its count: a clamp still running in a later submission can leave them 0 here
+    if (!g_dcl_seen) MLOG("[RED] indirect draw clamp: a draw record of more than %u vertices was drawn as nothing: count %u instances %u first %u word3 %u word4 %u (frame %llu; DM_NVN_DRAW_CLAMP=1; %u so far)",
+                          g_dcl_max, h[1], h[2], h[3], h[4], h[5], (unsigned long long)atomic_load(&g_cur_frame), n);
+    else if ((n ^ g_dcl_seen) > g_dcl_seen) MLOG("indirect draw clamp: %u records drawn as nothing so far (frame %llu)", n, (unsigned long long)atomic_load(&g_cur_frame));   // at each new power of two
+    g_dcl_seen = n;
+}
+// A render pass is about to open (rp_begin_ex_): copies for the draw being replayed and every plain indirect draw after it in replay order, up to the next buffer write, game
+// barrier, multi-draw or target change (they may write a record or commit the command buffer: mdi_wait, sub_cut), in one compute pass
+static void dcl_prepass(void) {
+    static id<MTLComputePipelineState> ps; static id<MTL4ArgumentTable> at; static int failed;
+    if (!dcl_on() || g_dcl_skip || failed || g_enc || !g_cb || !g_exec_cur || g_ret_n > 8) return;   // (only in the op stream: g_exec_cur is the op being replayed, a draw or a clear)
+    ubd_land_compute();   // deferred inline updates land now, before the copies are judged (a landing is a buffer write) and made
+    int fresh = dcl_live() && g_dcl_sbw == g_sbw_gen;   // a draw since the copies may have rewritten a record through a storage buffer: copy again
+    if (fresh && g_exec_cur == g_dcl_scanned) return;   // scanned from here already (a pass reopened for the same draw)
+    if (!fresh || g_dcl_n > DCL_MAX - 8) g_dcl_n = 0;
+    g_dcl_epoch = g_wr_epoch; g_dcl_sub = g_sub_serial; g_dcl_sbw = g_sbw_gen; g_dcl_cb = (__bridge const void *)g_cb; g_dcl_scanned = g_exec_cur;
+    if (!at) { NSError *e = nil; id<MTLLibrary> lib = host_lib("ixc", &e); id<MTLFunction> f = lib ? [lib newFunctionWithName:@"dcl_clamp"] : nil;
+        ps = f ? [g_dev newComputePipelineStateWithFunction:f error:&e] : nil;
+        MTL4ArgumentTableDescriptor *ad = [MTL4ArgumentTableDescriptor new]; ad.maxBufferBindCount = 1; at = ps ? rec_table([g_dev newArgumentTableWithDescriptor:ad error:&e]) : nil;
+        if (at && !g_dcl_hits) { g_dcl_hits = [g_dev newBufferWithLength:32 options:MTLResourceStorageModeShared]; if (g_dcl_hits) { memset(g_dcl_hits.contents, 0, 32); res_add(g_dcl_hits); res_commit(); } }
+        if (!at || !g_dcl_hits) { failed = 1; MLOG("[RED] indirect draw clamp: cannot create its compute pipeline %s (plain indirect draws read their records unbounded)", e.localizedDescription.UTF8String); return; } }
+    dcl_report();
+    int n0 = g_dcl_n;
+    fz_cursor cur = {.p = g_exec_cur, .ret_n = g_ret_n}; memcpy(cur.ret, g_ret, sizeof(*g_ret) * (size_t)g_ret_n);   // from the draw being replayed (current list → callers → the rest of this submission), as ixc_run
+    const uint8_t *q; op_hdr h; const void *a;
+    for (int guard = 0; guard < 200000 && g_dcl_n < DCL_MAX && fz_next(&cur, &q, &h, &a); guard++) {
+        if (h.op == OP_DISPATCH || h.op == OP_COPY_B2B || h.op == OP_UPDATE_UB || h.op == OP_CLEAR_BUF || h.op == OP_COPY_T2B || h.op == OP_MULTI_DRAW || h.op == OP_SET_RT) break;
+        if (h.op == OP_BARRIER) { int32_t bits; memcpy(&bits, a, 4); if (bits) break; }   // a game barrier: what comes after may read what the draws before it wrote
+        p_draw dt; p_draw_idx it; const p_draw *d = h.op == OP_DRAW ? draw_rec(a, h.size, &dt) : NULL; const p_draw_idx *x = h.op == OP_DRAW_IDX ? draw_idx_rec(a, h.size, &it) : NULL;
+        if ((d && d->mdi_cnt) || (x && x->mdi_cnt)) break;   // a counted multi-draw may commit the submission to read its count (mdi_wait)
+        uint64_t ind = d && d->ind && !ixc_wanted(d, NULL) ? d->ind : x && x->ind && !ixc_wanted(NULL, x) ? x->ind : 0;
+        if (ind && !dcl_find(q, ind)) g_dcl[g_dcl_n++] = (dcl_ent){q, ind, 0};
+    }
+    int n = g_dcl_n - n0; if (n <= 0) return;
+    id<MTLBuffer> ab; size_t ao = arena_alloc((size_t)n * (32 + sizeof(dcl_job)), &ab); uint64_t ag = ab.gpuAddress + ao;   // n copies (32 bytes apart), then the jobs
+    dcl_job *jb = (dcl_job *)((uint8_t *)ab.contents + ao + (size_t)n * 32); int na = 0;
+    for (int i = 0; i < n; i++) {
+        dcl_ent *e = &g_dcl[n0 + i]; void *mb; uint64_t mo, rec; op_hdr oh; memcpy(&oh, e->op, sizeof oh); int indexed = oh.op == OP_DRAW_IDX; e->out = 0;
+        if (!mtl_gpu_addr(e->ind, indexed ? 20 : 16, &mb, &mo, &rec)) continue;   // the draw reports it (RED_ONCE 88)
+        e->out = ag + 32 * (uint64_t)i;
+        jb[na++] = (dcl_job){rec, e->out, g_dcl_hits.gpuAddress, indexed ? 5u : 4u, g_dcl_max};
+    }
+    if (!na) return;   // no record in a pool: the draws report it
+    if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
+    { id<MTL4ComputeCommandEncoder> ce = enc_c_begin(NULL); [ce setArgumentTable:at]; [at setAddress:ag + (uint64_t)n * 32 atIndex:0]; [ce setComputePipelineState:ps];
+        [ce dispatchThreadgroups:MTLSizeMake((NSUInteger)na, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)]; enc_c_end(ce); args_dirty_all(); }
+    g_dcl_epoch = g_wr_epoch;   // (enc_c_begin found nothing left to land: ubd_land_compute ran above)
+    if (!g_dcl_runs++) MLOG("indirect draw clamp: first time, %d draws (their records are copied, and bounded, in a compute pass before the render pass)", na);
+    else if (g_dcl_runs % 3600 == 0) MLOG("indirect draw clamp: %llu passes, %llu draws read a copy, %llu met inside an open render pass read their record as written, %u records drawn as nothing",
+                                          (unsigned long long)g_dcl_runs, (unsigned long long)g_dcl_draws, (unsigned long long)g_dcl_inpass, g_dcl_seen);
+}
+// The copy of the record of the draw being encoded (0: none, the draw reads the guest's): the pass is open, so a draw with none is not bounded (never a split for it)
+static uint64_t dcl_get(const p_draw *dw, const p_draw_idx *di) {
+    const dcl_ent *e = g_exec_next && dcl_live() ? dcl_find(g_exec_cur, dw ? dw->ind : di->ind) : NULL;
+    if (!e || !e->out) {
+        if (!g_dcl_inpass++) MLOG("indirect draw clamp: first draw with no copy of its record (pass %llu): it reads the record as written", g_stat_pass);
+        return 0; }
+    g_dcl_draws++;
+    return e->out;
+}
 // ---------- 8-bit indices written by the GPU earlier in the submission ----------
 // Metal has no 8-bit index type, so draw widens 8-bit indices to 16-bit on the CPU at replay. When a buffer write encoded earlier in this submission (copy / update / fill,
 // see pend_hits) covers them, the CPU reads the bytes from before that write (Tears of the Kingdom). Those draws are widened on the GPU instead: a compute pass reads the
@@ -13342,12 +13444,13 @@ static void draw_multi(const p_multi_draw *m) {
         n = MIN(n, mdi_count(m->cnt));
         arr.mdi_cnt = idx.mdi_cnt = 0; g_md_counted_calls++; g_md_counted += n;
     }
+    g_dcl_skip = 1;   // DM_NVN_DRAW_CLAMP: not these elements
     for (uint32_t i = 0; i < n; i++) {
         arr.mdi_i = idx.mdi_i = (int32_t)i;
         arr.ind = idx.ind = m->ind + (uint64_t)i * (uint64_t)m->stride;
         draw(dw, di);
     }
-    g_mdx_range = NULL;
+    g_dcl_skip = 0; g_mdx_range = NULL;
     g_mdxc.next = NULL;
 }
 static void draw_(const p_draw *dw, const p_draw_idx *di);
@@ -13654,12 +13757,13 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
         // base vertex, base instance} have the layouts of MTLDrawPrimitivesIndirectArguments and MTLDrawIndexedPrimitivesIndirectArguments; quads, fans and 8-bit indices use the converted ones (ixc_run)
         const ixc_ent *e = ixc_wanted(dw, di) ? ixc_find(dw, di) : NULL; void *mb, *ab; uint64_t mo, ao, ig;
         uint64_t ind = dw ? dw->ind : di->ind;
+        uint64_t dclx = !mdx && !geo_drawing() && dcl_wanted(dw, di) ? dcl_get(dw, di) : 0;   // DM_NVN_DRAW_CLAMP: the bounded copy of a plain indirect record (dcl_prepass)
         if (ixc_wanted(dw, di)) { if (e && e->args) enc_r_draw_indexed_indirect(en, mp, MTLIndexTypeUInt32, e->ixb, e->ixlen, e->args); else RED_ONCE(88, "indirect draw skipped: the arguments for primitive %d were not converted (argument address %#llx is in no memory pool, or the conversion pipeline was not created)", prim, (unsigned long long)ind); }
         else if (!mdx && !mtl_addr(ind, dw ? 16 : 20, &ab, &ao)) RED_ONCE(88, "indirect draw skipped: argument address %#llx is in no memory pool", (unsigned long long)ind);
-        else if (dw) { enc_r_draw_indirect(en, mp, mdx ? mdx : ((__bridge id<MTLBuffer>)ab).gpuAddress + ao); if (mdx) mdx_chain(dw->mdi_cnt, dw->mdi_i, mp, MTLIndexTypeUInt32, 0, 0); }
+        else if (dw) { enc_r_draw_indirect(en, mp, mdx ? mdx : dclx ? dclx : ((__bridge id<MTLBuffer>)ab).gpuAddress + ao); if (mdx) mdx_chain(dw->mdi_cnt, dw->mdi_i, mp, MTLIndexTypeUInt32, 0, 0); }
         else if (!mtl_gpu_addr(di->ibuf, 1, &mb, &mo, &ig)) RED_ONCE(22, "index buffer is in no memory pool");
         else { MTLIndexType ty = di->itype == 1 ? MTLIndexTypeUInt16 : MTLIndexTypeUInt32; uint64_t il = ((__bridge id<MTLBuffer>)mb).length - mo;
-            enc_r_draw_indexed_indirect(en, mp, ty, ig, il, mdx ? mdx : ((__bridge id<MTLBuffer>)ab).gpuAddress + ao); if (mdx) mdx_chain(di->mdi_cnt, di->mdi_i, mp, ty, ig, il); }
+            enc_r_draw_indexed_indirect(en, mp, ty, ig, il, mdx ? mdx : dclx ? dclx : ((__bridge id<MTLBuffer>)ab).gpuAddress + ao); if (mdx) mdx_chain(di->mdi_cnt, di->mdi_i, mp, ty, ig, il); }
     } else if (dw && prim == 7) {   // Quads: shared indices 0,1,2,0,2,3
         quad_ib_make();
         if (dw->count >= 4) enc_r_draw_indexed(en, mp, (dw->count / 4) * 6, MTLIndexTypeUInt32, g_quad_gpu, g_quad_ib.length, dw->instances > 0 ? dw->instances : 1, dw->first, dw->base_instance);

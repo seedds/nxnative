@@ -46,6 +46,7 @@ DM_FPS_TARGET	player	Frame-rate cap: `30` or `60`, `120` for a game whose profil
 DM_FS	diagnostic	When set, logs file opens, paths not found or not mounted, and a read summary every 64 MiB or 1000 reads
 DM_FSLOG	diagnostic	`=<file>` writes one TSV line per ReadFile: seconds since boot, guest path, offset, length and guest buffer address
 DM_FSLOG_HASH	diagnostic	With `DM_FSLOG`, adds a column with the FNV-1a 64 hash of the bytes read
+DM_FSTEP_LAG_PROBE	switch	`=1` (default off): with DM_NVN_FRAME_LAG, the frame step probes a hold above the cap that only the frame-lag wait explains (GPU fits k − 1, the frame's own CPU time without the wait fits too); failed probes back off as nvn_fstep_unpaced's
 DM_FSTEP_PROBE_RAMP	switch	`0` ends a frame-step probe's grace after its 30 frames as before; by default the grace is renewed while the probe's frames keep getting cheaper (macOS raises the GPU clock for the shorter deadline over seconds); `ab` alternates with `DM_AB`
 DM_FULLSCREEN	player	`1` (any value but `0`) starts the Mac window in fullscreen; `0` or unset, a window. The Mac settings window's Display mode
 DM_GAME	switch	Selects the game profile (a title ID under `dm/games` or `DM_GAMES_DIR`) for the Python tools and the rewriter; there is no default

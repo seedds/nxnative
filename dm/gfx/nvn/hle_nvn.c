@@ -2374,6 +2374,9 @@ static void fstep_tick(const win_t *o, int c) {
     g_fs.ramp = mtl_probe_ramp_on();
     g_fs.per_vsync = fstep_hz() / 60;
     g_fs.gpu_on = gpu_on; g_fs.gpu = gpu;   // an idle GPU's late frames do not step up; a hold the GPU does not explain is probed (nvn_fstep.h)
+    // DM_FSTEP_LAG_PROBE=1 (default off): a hold only the frame-lag wait explains is probed (nvn_fstep.h nvn_fstep_lagged); the wait this frame spent (g_lag_ns, reset at the present's row)
+    { static int lp = -1; if (lp < 0) { const char *e = getenv("DM_FSTEP_LAG_PROBE"); lp = e && atoi(e) > 0; if (lp) LOG("[nvn] DM_FSTEP_LAG_PROBE=1: a hold only the frame-lag wait explains is probed"); }
+      g_fs.lag_probe = lp && frame_lag() >= 0; g_fs.lagw = g_lag_ns / v; }
     int n = nvn_fstep_next(&g_fs, shown, cost, kmin, kmax, fixed, cslow || gslow);
     if (dm_fps_state) __atomic_store_n((uint32_t *)(dm_fps_state + 0x20), (uint32_t)n, __ATOMIC_RELAXED);
     atomic_store(&g_fs_k, g_fs.k);
@@ -2389,7 +2392,7 @@ static void fstep_tick(const win_t *o, int c) {
         if (w >= (int)sizeof why) w = sizeof why - 1;
         if (nvn_fstep_same(&g_fs)) w += snprintf(why + w, sizeof why - w, ", cost %.2f× the cost that held hold %d", g_fs.ccur / g_fs.cref, kmin);
         if (w >= (int)sizeof why) w = sizeof why - 1;   // snprintf returns the length it would have written
-        if (g_fs.uprobe) snprintf(why + w, sizeof why - w, ", GPU fits a shorter hold, frames not waiting in the pacing");
+        if (g_fs.uprobe) snprintf(why + w, sizeof why - w, nvn_fstep_lagged(&g_fs) && !nvn_fstep_unpaced(&g_fs) ? ", GPU fits a shorter hold, the rest is the frame-lag wait" : ", GPU fits a shorter hold, frames not waiting in the pacing");
         if (g_fs.k > k0 && g_fs.cref > 0) snprintf(held, sizeof held, "; hold %d held at %.2f", kmin, g_fs.cref);   // what a probe compares the longer hold's cost with
         LOG("[nvn] frame step: hold %d → %d %s at present %llu (%s; cost %.2f, GPU %.2f%s)%s", k0, g_fs.k, fps_high() ? "ticks of 1/120 s" : "vsyncs", (unsigned long long)o->presents,
             fixed ? "the game's own step" : kmin0 > FSTEP_MAX ? "the game's own step ended" : kmin != kmin0 ? "the cap changed" : g_fs.k > k0 ? (g_fs.up_idle ? "30 late frames, some with the GPU idle" : "3 late frames") : g_fs.probes != probes0 ? why : "trial", cost, gpu, held, ++nlog == 40 ? "; further changes only counted below" : "");

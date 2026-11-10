@@ -30,6 +30,16 @@ static void rung(sim *m, int n, double cpu, double gpu, int paced, int kmin, int
     }
 }
 
+// DM_FSTEP_LAG_PROBE: a game at lag 0 left at hold 2 by a spike, with a stale cref; frames at hold 2 cost lagw + own CPU, at hold 1 they take the larger of GPU and CPU
+static int lag_case(int probe, double gpu, double own, int n) {
+    nvn_fstep s = {0}; s.k = s.step = 2; s.kmin = 1; s.ckmin = 1; s.cref = s.cref_at[1] = 0.25; s.hold = s.uhold = FSTEP_HOLD0; s.lag_probe = probe;
+    for (int i = 0; i < n; i++) {
+        int k = s.k; double lagw = gpu - own > 0 ? gpu + 0.05 - own : 0, cost = k > 1 ? own + lagw : (gpu > own ? gpu : own) + 0.08, shown = k > 1 ? 2 : (cost > 1 ? cost : 1);
+        s.gpu_on = 1; s.gpu = gpu; s.lagw = k > 1 ? lagw : 0.7;
+        nvn_fstep_next(&s, shown, cost, 1, FSTEP_MAX, 0, 0);
+    }
+    return s.k;
+}
 int main(void) {
     {   // 120 fps (hle_nvn.c fps_high): kmin 1, kmax 2, in ticks of 1/120 s. The target follows the hold, so a hold above what frames take is the game at the right speed
         sim m = {0}; m.s.per_vsync = 2;
@@ -426,6 +436,10 @@ int main(void) {
         snprintf(b, sizeof b, "host-paced game at 2.95 vsyncs: game/real %.3f (probes %llu, failed %llu)", (m.game - g0) / (m.real - r0), (unsigned long long)m.s.probes, (unsigned long long)m.s.failed);
         check((m.game - g0) / (m.real - r0) >= 0.985 && m.s.probes <= 24, b);
     }
+    check(lag_case(0, 0.95, 0.30, 900) == 2, "lag 0, GPU 0.95, CPU 0.3: without DM_FSTEP_LAG_PROBE it stays at hold 2");
+    check(lag_case(1, 0.95, 0.30, 900) == 1, "lag 0, GPU 0.95, CPU 0.3: DM_FSTEP_LAG_PROBE probes hold 1, which holds");
+    check(lag_case(1, 1.20, 0.30, 900) == 2, "lag probe: a GPU that does not fit 1 vsync stays at hold 2");
+    check(lag_case(1, 0.95, 0.95, 900) == 2, "lag probe: a CPU whose own work does not fit stays at hold 2");
     printf("== %d checks, %d failed ==\n", checks, fail);
     return fail != 0;
 }

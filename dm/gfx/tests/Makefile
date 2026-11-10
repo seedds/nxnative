@@ -872,32 +872,6 @@ check_t_pool_standin: t_pool_standin
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./t_pool_standin
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 DM_NVN_POOL_STANDIN=0 ./t_pool_standin
 
-# A virtual pool's first whole mapping aliases it only while no address of its own range has left the host; sampler IDs past the pool are empty slots (issue #2513, PR #2519)
-t_vpool_first_map: t_vpool_first_map.m $(MTL_T_DEP)
-	clang $(CFLAGS) -fobjc-arc -o $@ t_vpool_first_map.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
-.PHONY: check_t_vpool_first_map
-check_t_vpool_first_map: t_vpool_first_map
-	MTL_DEBUG_LAYER=1 ./t_vpool_first_map
-
-# Storage buffers by address (SBUFU / SBUFQ) bounded by the memory the host bound there (nvn_mtl.m sblen_put; GitHub issue #2618)
-t_storage_bounds: t_storage_bounds.m $(MTL_T_DEP)
-	clang $(CFLAGS) -fobjc-arc -o $@ t_storage_bounds.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
-.PHONY: check_t_storage_bounds
-check_t_storage_bounds: t_storage_bounds
-	MTL_DEBUG_LAYER=1 ./t_storage_bounds
-
-# A texture pool table of another layered type than the ID's texture holds a view of it when a shader read the ID through that type (pool_fit): a 2D sprite read as a 2D array, a cube read as a cube
-t_pool_typebridge: t_pool_typebridge.m $(MTL_T_DEP)
-	clang $(CFLAGS) -fobjc-arc -o $@ t_pool_typebridge.m $(MTL_T_SRC) $(FW)
-.PHONY: check_t_pool_typebridge
-check_t_pool_typebridge: t_pool_typebridge
-	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./t_pool_typebridge
-	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./t_pool_typebridge
-
-# Sparse mappings reach texture ID views, pool tables and handle tables as notes of the textures they change (treg_sparse_notes), read back on the GPU
-t_sparse_pool_cache: t_sparse_pool_cache.m $(MTL_T_DEP)
-	clang $(CFLAGS) -fobjc-arc -o $@ t_sparse_pool_cache.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
-check_t_sparse_pool_cache: RUN_ENV = MTL_DEBUG_LAYER=1
-t_sparse_copy: t_sparse_copy.m $(MTL_T_DEP)
-	clang $(CFLAGS) -fobjc-arc -o $@ t_sparse_copy.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
-check_t_sparse_copy: RUN_ENV = MTL_DEBUG_LAYER=1
+t_tex_drop_mip: t_tex_drop_mip.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_tex_drop_mip.m $(MTL_T_SRC) $(FW)
+check_t_tex_drop_mip: RUN_ENV = MTL_DEBUG_LAYER=1

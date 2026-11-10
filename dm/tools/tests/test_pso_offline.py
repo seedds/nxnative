@@ -109,7 +109,7 @@ class Plan(unittest.TestCase):
         self.shader('fsx', {'entry': 'main1'}, {'_b': [('main0', False)]})
         self.shader('fsp', {'raster': {'primitive_id': 1}}, {'_b': [('main0', False)]})   # reads the primitive ID: no base
         self.shader('mesh', {'entry_z': 'main0_z', 'mesh_stage': {'kind': 'ms'}}, {'_b': vz})   # a mesh shader's pair (for its padding): built at the draw, no base
-        # Layer entry points of its own (dmsh_build.py vs_layer_entry): the library names the layer, but main0 writes none (no layer_out). Ocarina of Time's effect vertex shaders, with
+        # Layer entry points of its own (dmsh_entry.py vs_layer_entry): the library names the layer, but main0 writes none (no layer_out). Ocarina of Time's effect vertex shaders, with
         # no stage inputs and so no stand-in, were left out when the layer's name anywhere in the library counted, and compiled at their first draw
         self.shader('layered', {'entry_z': 'main0_z', 'entry_layer': 'main0_l', 'vertex_inputs': []}, {'_b': (vz + [('main0_l', False)], True)})
         pairs = [('pull', 'fs'), ('plain', 'fs'), ('inputs', 'fs'), ('layer', 'fs'), ('other', 'fs'), ('nolib', 'fs'), ('pull', 'fsc'), ('pull', 'fsx'), ('pull', 'gone'), ('pull', 'fs'),

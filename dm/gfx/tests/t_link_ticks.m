@@ -98,6 +98,8 @@ int main(int argc, char **argv) { @autoreleasepool {
     acquire_ticks(90, 1, 1, 4. / 3, "display 90 Hz preserves fractional ticks");
     acquire_ticks(75, 1, 1, 1.6, "display 75 Hz preserves fractional ticks");
     acquire_ticks(120, 0, 2, 4, "game mode keeps interval 2 in 60 Hz vsyncs");
+    acquire_ticks(60, 0, 0, 0, "game interval 0 waits for no tick (no vsync on Horizon)");
+    acquire_ticks(60, 1, 0, 2, "display mode paces interval 0 at 60 Hz: two ticks of a 120 Hz link");
     acquire_ticks(60, 1, 2, 2, "display 60 Hz ignores the game's interval");
     acquire_ticks(240, 1, 1, 1, "a rate above the link's waits one tick");
     setenv("DM_FPS_TARGET", "30", 1); g_present_cap = -1;
@@ -109,6 +111,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     setenv("DM_FPS_TARGET", "0", 1); g_present_cap = -1;
     _Alignas(8) float state[10] = {60}; dm_fps_state = (uint8_t *)state;   // include the fixed-step flag at +0x24 read by rt_period_ns
     acquire_ticks(120, 1, 1, 2, "the 60 fps frame step keeps 60 Hz vsyncs");
+    acquire_ticks(60, 0, 0, 2, "the 60 fps frame step paces game interval 0: two 120 Hz ticks");
     state[0] = 30;
     acquire_ticks(120, 1, 1, 4, "the 30 fps frame step keeps two 60 Hz vsyncs");
     dm_fps_state = NULL;

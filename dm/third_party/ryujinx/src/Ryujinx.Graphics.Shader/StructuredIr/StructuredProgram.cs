@@ -109,6 +109,15 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
                 else if (storageKind == StorageKind.ConstantBuffer && operation.GetSource(0).Type == OperandType.Constant)
                 {
                     context.ResourceManager.SetUsedConstantBufferBinding(operation.GetSource(0).Value);
+
+                    // nxnative: uniform bounds
+                    if (inst == Instruction.Load && operation.SourcesCount == 4)
+                    {
+                        Operand vec = operation.GetSource(2), elem = operation.GetSource(3);
+                        bool fixedOffset = vec.Type == OperandType.Constant && elem.Type == OperandType.Constant;
+
+                        context.ResourceManager.NoteUniformRead(operation.GetSource(0).Value, fixedOffset, fixedOffset ? vec.Value * 4 + elem.Value : 0);
+                    }
                 }
             }
 

@@ -60,7 +60,6 @@ The shaders are built with Xcode 27.2's Metal compiler. Select it before step 1:
 xcodebuild -downloadComponent MetalToolchain
 git clone https://github.com/seedds/nxnative.git && cd nxnative
 brew install xcodegen zstd glslang
-brew install --cask dotnet-sdk
 python3 -m pip install lz4 "capstone>=5,<6" fonttools nsz zbic "backports.zstd; python_version < '3.14'"
 ```
 

@@ -60,7 +60,8 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
                 else FAIL("B binding %s: dynamic handle array of %s", nm.UTF8String, el.UTF8String);
                 r->n = (uint8_t)n; o->dyn = 1; o->nb++; continue;
             }
-            if ([k isEqualToString:@DMSH_KIND_CBUF]) r->kind = NVN_RB_CBUF;
+            if ([k isEqualToString:@DMSH_KIND_CBUF]) { int fx = [b[@"fixed"] intValue]; if (fx < 0 || fx > 65536 || fx % 4) FAIL("B binding %s: %d bytes read at fixed offsets", nm.UTF8String, fx);
+                r->kind = NVN_RB_CBUF; r->fixw = (uint16_t)(fx / 4); }
             else if ([k isEqualToString:@DMSH_KIND_SAMP]) r->kind = NVN_RB_SAMP;
             else if ([k isEqualToString:@DMSH_KIND_SAMP_TEX]) r->kind = NVN_RB_SAMPT;
             else if ([k isEqualToString:@DMSH_KIND_TEX]) { r->kind = NVN_RB_TEX; dummy_kind(b[@"msl_type"], &r->dtt, &r->dpf); r->f1d = [b[@"fetch1d"] boolValue]; }
@@ -105,7 +106,7 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
             else if ([k isEqualToString:@DMSH_KIND_DRVCB]) r->kind = [b[@"bank"] intValue] == DMSH_PUSH_BANK ? NVN_RB_PUSH : [b[@"bank"] intValue] == 2 ? NVN_RB_DRV2 : NVN_RB_DRV0;
             else if ([k isEqualToString:@DMSH_KIND_BORDER]) { if (o->border) FAIL("two border colour blocks"); r->kind = NVN_RB_BORDER; o->border = (uint8_t)(o->nb + 1); }
             else FAIL("B binding kind %s not implemented (%s)", k.UTF8String, [b[@"msl_name"] UTF8String]);
-            id bb = b[@"border_bit"];   // a twin sampler (dmsh_build.py border_emu)
+            id bb = b[@"border_bit"];   // a twin sampler (dmsh_rewrite.py border_emu)
             if (bb) { int bit = [bb intValue]; if (bit < 0 || bit >= DMSH_BORDER_SAMPLERS || (r->kind != NVN_RB_SAMP && r->kind != NVN_RB_SAMPT && r->kind != NVN_RB_SAMPU && r->kind != NVN_RB_SAMPI) || r->n)
                     FAIL("B binding %s: border colour twin %d of a binding that is not one sampler", nm.UTF8String, bit);
                 r->bw = (uint8_t)(bit + 1); }

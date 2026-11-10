@@ -80,11 +80,17 @@ class LoopGuard(unittest.TestCase):
         self.assertIn(f'while ((b < s.n) && {cap})', msl)
         self.assertIn(f'for (; {cap};)', msl)
         self.assertIn(f'for (uint i = 0u; (i < v) && {cap}; i++)', msl)
-        self.assertEqual(msl.count('uint dm_lg = 0u; (void)dm_lg;'), 2)   # helper and main0, not the struct
+        self.assertEqual(msl.count('    uint dm_lg = 0u;\n'), 2)   # helper and main0, not the struct
 
-    def test_a_shader_with_no_loop_only_gains_its_counter(self):
+    def test_a_shader_with_no_loop_is_unchanged(self):
         src = 'kernel void main0(device uint* out [[buffer(0)]])\n{\n    out[0] = 1u;\n}\n'
-        self.assertEqual(loop_guard(src).replace('    uint dm_lg = 0u; (void)dm_lg;\n', ''), src)
+        self.assertEqual(loop_guard(src), src)
+
+    def test_a_mesh_kernel_keeps_its_stage_memory_findable(self):   # a task or mesh shader with a loop failed dmsh_meshstage.to_stage (Nintendo Switch Sports Resort)
+        import dmsh_meshstage
+        src = ('kernel void main0(uint3 gl_LocalInvocationID [[thread_position_in_threadgroup]])\n{\n    threadgroup spvUnsafeArray<uint, 64> _18;\n'
+               '    for (uint i = 0u; i < 4u; i++)\n    {\n        _18[i] = i;\n    }\n}\n')
+        self.assertIsNotNone(dmsh_meshstage._KERNEL.search(loop_guard(src)))
 
     @unittest.skipUnless(shutil.which('xcrun') and shutil.which('clang'), 'needs Xcode and Metal')
     def test_gpu_a_loop_with_no_end_stops_at_the_cap(self):

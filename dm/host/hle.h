@@ -111,3 +111,6 @@ void dm_audio_reset(void);   // iOS media services reset: recreate the AudioUnit
 typedef struct { void *next; void *ptr; uint64_t cap, size, offset; } aout_buf;   // next, data, buffer_size, data_size, data_offset
 _Static_assert(sizeof(aout_buf) == 40 && offsetof(aout_buf, ptr) == 0x08 && offsetof(aout_buf, cap) == 0x10 && offsetof(aout_buf, size) == 0x18 && offsetof(aout_buf, offset) == 0x20,
                "nn::audio::AudioOutBuffer layout");
+void dm_audio_route_changed(void);   // the output route changed: outputs whose unit takes another channel count than the route get a new unit (hle_audio.c)
+int dm_audio_output_channels(void);   // the output route: 6 when the device takes six channels, else 2 (hle_audio.c); reads the device, on a host thread
+int dm_audio_route(void);             // the same for a game thread: the last route read, or one read on a helper thread (hle_audio.c)

@@ -96,6 +96,8 @@ void dm_guest_thread_join(void *tt) {
 uint64_t now_ns(void) { return 0; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 void *dm_pcmout_open(int ch) { (void)ch; return NULL; }
+int dm_audio_output_channels(void) { return 2; }   // the renderer tests here take the stereo route
+int dm_audio_route(void) { return 2; }
 void dm_pcmout_close(void *k) { (void)k; }
 void dm_pcmout_start(void *k) { (void)k; }
 int dm_pcmout_append(void *k, void *b) { (void)k; (void)b; return 0; }

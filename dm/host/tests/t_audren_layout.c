@@ -26,6 +26,8 @@ void dm_guest_thread_join(void *tt) { (void)tt; }
 uint64_t now_ns(void) { return 0; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 void *dm_pcmout_open(int ch) { (void)ch; return NULL; }
+int dm_audio_output_channels(void) { return 2; }   // the stereo route; the six-channel resampler is checked directly below
+int dm_audio_route(void) { return 2; }
 void dm_pcmout_close(void *k) { (void)k; }
 void dm_pcmout_start(void *k) { (void)k; }
 int dm_pcmout_append(void *k, void *b) {
@@ -196,10 +198,37 @@ static void test_two_renderers(void) {
     int32_t quiet[2 * 160] = {0}, loud[2 * 160], out[2 * 240];
     for (int i = 0; i < 2 * 160; i++) loud[i] = 20000;
     memset(g_ar, 0, sizeof g_ar);
-    assert(up_3_2(&g_ar[0], loud, 160, out) == 240);
-    assert(up_3_2(&g_ar[1], quiet, 160, out) == 240);
+    assert(up_3_2(&g_ar[0], loud, 160, out, 2) == 240);
+    assert(up_3_2(&g_ar[1], quiet, 160, out, 2) == 240);
     for (int i = 0; i < 2 * 240; i++) assert(out[i] == 0);
+    // Six channels (the 5.1 route): each channel resamples on its own; an LFE-only block stays on the LFE
+    int32_t six_in[6 * 160] = {0}, six_out[6 * 240];
+    for (int i = 0; i < 160; i++) six_in[6 * i + 3] = 20000;
     memset(g_ar, 0, sizeof g_ar);
+    assert(up_3_2(&g_ar[2], six_in, 160, six_out, 6) == 240);
+    for (int m = 0; m < 240; m++) for (int j = 0; j < 6; j++) if (j != 3) assert(six_out[6 * m + j] == 0);
+    assert(six_out[6 * 100 + 3] == 20000);
+    memset(g_ar, 0, sizeof g_ar);
+}
+
+// Six channels (the 5.1 route, SDK 16's layout): the sink's six inputs come out in order, six int16 per sample; an output of 2 keeps the stereo downmix
+static void test_six_channels(void) {
+    g_sink_id = 0x13;
+    for (int j = 0; j < 6; j++) for (int s = 0; s < SAMPLES; s++) mix[j * SAMPLES + s] = 1000 * (j + 1);
+    size_t n = build(16, NCMD);
+    uint8_t *sink = list + 0x20 + (NCMD - 1) * 0x40;   // build() puts the sink after NCMD - 1 filler commands
+    *(uint32_t *)(sink + 0x130) = 6;
+    for (int j = 0; j < 6; j++) ((int16_t *)(sink + 0x134))[j] = (int16_t)j;
+    static int16_t out[FRAME_MAX * 6];
+    g_ar[0].oc = 6;
+    assert(capture(&g_ar[0], list, n, out) == SAMPLES);
+    assert(!g_hdr6 && !g_hdr21 && !g_sink4);
+    for (int s = 0; s < SAMPLES; s++) for (int j = 0; j < 6; j++) assert(out[6 * s + j] == 1000 * (j + 1));
+    // A mono sink on the six-channel output: on the front pair, as on stereo; the other four silent
+    *(uint32_t *)(sink + 0x130) = 1;
+    assert(capture(&g_ar[0], list, n, out) == SAMPLES);
+    for (int s = 0; s < SAMPLES; s++) for (int j = 0; j < 6; j++) assert(out[6 * s + j] == (j < 2 ? 1000 : 0));
+    puts("audren six channels: the sink's six inputs in order, six per sample; a mono sink on the front pair");
 }
 
 // Issue #1336: AudioOut queues a block's pointer and copies its samples when the sound card asks, so a block is the renderer's own until it comes back released.
@@ -290,6 +319,9 @@ int main(int argc, char **argv) {
         int status; assert(waitpid(pid, &status, 0) == pid);
         assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
     }
+    pid_t six = fork(); assert(six >= 0);
+    if (!six) { test_six_channels(); fflush(stdout); _exit(0); }
+    int status6; assert(waitpid(six, &status6, 0) == six && WIFEXITED(status6) && WEXITSTATUS(status6) == 0);
     test_histogram();
     puts("audren layout: update lock read off Update or UpdateImpl, renderers' own blocks, bounded histograms, malformed-list rejection, unaligned and truncated headers, SDK 4/5/6/16/21 stereo PCM and empty/incomplete startup recovery passed");
     return 0;

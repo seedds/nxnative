@@ -630,7 +630,7 @@ def finish(work, out):
 def lslg(s):
     """A decoded Switch shader (LSLG): 'LSLG', a stage tag (SV vertex, SP pixel, SC compute, ...), a header with the shader's source name, then u32 code length, the code area,
     u32 control length and the control section (0x880 bytes), and a short tail (24 or 29 bytes). → (tag, control section, code area), or None if the layout differs"""
-    if s[:4] != b'LSLG': return None
+    if s[:4] != b'LSLG': return nvn2_record(s)
     k = s.find(b'\x34\x12\x76\x98')
     if k < 8 or k + 0x708 > len(s): return None
     nctl, ncode = struct.unpack_from('<I', s, k - 4)[0], struct.unpack_from('<I', s, k + 0x704)[0]
@@ -672,6 +672,20 @@ def shader_map_entries(d, proved=None):
             rows.append((p + 4, n, raw, f)); p = q + 5
         if len(rows) == count and (proved is None or proved(rows[0])): out += rows; end = p
     return out
+
+def nvn2_record(s):
+    """A decoded Switch 2 shader (SF_GLSL_SWITCH2, Orbitals' Unreal Engine 5.6.1): the LSLG record's layout without 'LSLG' and the stage tag in front (the stage is the archive entry's
+    frequency): a header with a hash and the shader's source name, then u32 code length, the code area (the Switch 2's 0x80-byte SPH and Ampere code), u32 control length, the NVN2
+    control section (magic 0x98761234, version 0xc9; mostly 0xe0 to 0x148 bytes, up to 116 KB in a few big compute shaders; its length in front) and a 22-byte tail. → ('', control section, code area), or None.
+    The control magic is taken where the lengths agree (the code area may hold its bytes too), the code area's length from control +0x44, checked against the u32 in front of it"""
+    k = len(s)
+    while (k := s.rfind(b'\x34\x12\x76\x98', 0, k)) >= 8:
+        nctl = struct.unpack_from('<I', s, k - 4)[0]
+        if k + 0x48 > len(s) or s[k + 4] != 0xc9 or nctl < 0x48 or not 0 <= len(s) - (k + nctl) < 64: continue   # a magic too near the end for a control section's fields is none
+        e, ncode = k - 4, struct.unpack_from('<I', s, k + 0x44)[0]   # the control section names the code area's length at +0x44 (as in BNSH files, shader_split.py check)
+        c = e - ncode
+        if 0x80 <= ncode and c >= 4 and struct.unpack_from('<I', s, c - 4)[0] == ncode: return '', s[k:k + nctl], s[c:e]
+    return None
 
 if __name__ == '__main__':
     try:

@@ -511,4 +511,24 @@ class OodleTables(unittest.TestCase):
         self.assertEqual((rel, len(keys), extra), ('Game.pak', 1, ('unreadable', '/Game.pak#A: why', 3)))
 
 
+class Switch2Record(unittest.TestCase):   # uepak.nvn2_record: a Switch 2 shader record (no LSLG, no stage tag; the code area's length at control +0x44)
+    def record(self, code, decoy=False):
+        ctl = bytearray(0xe0); ctl[:4] = b'\x34\x12\x76\x98'; ctl[4] = 0xc9; struct.pack_into('<I', ctl, 0x44, len(code))
+        head = bytes(0x2c) + bytes(16) + b'Global/FShader_Test/0:/Engine/Private/Test.usf|MainPS\0' + (struct.pack('<I', len(code) + 4 + len(code)) if decoy else b'')
+        return head + struct.pack('<I', len(code)) + code + struct.pack('<I', len(ctl)) + bytes(ctl) + bytes(22), bytes(ctl)
+
+    def test_reads(self):
+        code = bytes(0x80) + b'\x34\x12\x76\x98' + bytes(0x7c)   # the control magic inside the code area too
+        rec, ctl = self.record(code, decoy=True)
+        self.assertEqual(uepak.lslg(rec), ('', ctl, code))
+
+    def test_refuses_other_lengths(self):
+        rec, _ = self.record(bytes(0x100))
+        self.assertIsNone(uepak.lslg(rec[:-30]))   # the control section runs past the record
+
+    def test_a_magic_at_the_very_end_is_no_record(self):   # its version byte would lie past the record: None, not an IndexError that stops the split
+        for tail in (b'\x34\x12\x76\x98', b'\x34\x12\x76\x98\xc9'):
+            self.assertIsNone(uepak.lslg(bytes(0x40) + tail))
+
+
 if __name__ == '__main__': unittest.main()

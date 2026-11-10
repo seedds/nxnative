@@ -2981,7 +2981,7 @@ def ue_shaders(d, label):
         if size != raw: red(f'{label}: shader {i} is still compressed (an archive the NSP script has not decoded)')
         rec = uepak.lslg(d[a['code'] + off:a['code'] + off + size])
         if not rec: red(f'{label}: shader {i} is not an LSLG record')
-        tag, ctl, code = rec; st = UE_TAG.get(tag)
+        tag, ctl, code = rec; st = UE_TAG.get(tag) if tag else uepak.FREQ.get(fr)   # a Switch 2 record has no stage tag (uepak.nvn2_record)
         if not st or uepak.FREQ.get(fr) != st: red(f'{label}: shader {i} has tag {tag} but frequency {fr}')
         why = check(label, st, ctl, code)
         if why: red(f'{label}: shader {i} ({st}): {why}')

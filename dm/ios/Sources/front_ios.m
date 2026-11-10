@@ -32,8 +32,14 @@ static void front_ios_power_watch(void);
 static void front_ios_audio_watch(void);
 static UILabel *front_ios_fps_label(void);
 
+// The highest refresh rate of the screen the game's view is on (front.h front_screen_max_fps): the phone's or iPad's own, a TV's while the picture is there (tv_attach), the screen an
+// iPad's window was moved to. Written on the main thread ([DmGameView screenChanged]) and read by the game's and the present thread; 0 until the view is in a window
+static _Atomic int g_screen_fps;
+int front_screen_max_fps(void) { return g_screen_fps; }
+
 @interface DmGameView : UIView
 @property (nonatomic) CGFloat maxPixelWidth;   // 0: the screen's own pixels; a TV caps the drawable at 1920 across (tv_attach)
+- (void)screenChanged;
 @end
 @implementation DmGameView
 + (Class)layerClass { return CAMetalLayer.class; }
@@ -49,7 +55,12 @@ static UILabel *front_ios_fps_label(void);
     }
     return self;
 }
-- (void)didMoveToWindow { [super didMoveToWindow]; [self setNeedsLayout]; }   // the phone's screen or a TV's (DmTVSceneDelegate)
+- (void)didMoveToWindow { [super didMoveToWindow]; [self screenChanged]; [self setNeedsLayout]; }   // the phone's screen or a TV's (DmTVSceneDelegate)
+- (void)screenChanged {   // the view joined a window, or its window's scene went to another screen (front_ios_scene_changed)
+    UIScreen *screen = self.window.windowScene.screen; if (!screen) return;   // off every window: the last screen's rate stays
+    int hz = (int)screen.maximumFramesPerSecond, was = g_screen_fps;
+    g_screen_fps = hz; if (hz != was) LOG("front end: the game's screen shows up to %d Hz", hz);
+}
 - (void)layoutSubviews {   // render at the pixels of the screen the view is on (an iPad window can move to another), at most maxPixelWidth across
     [super layoutSubviews];
     CAMetalLayer *l = (CAMetalLayer *)self.layer;
@@ -232,6 +243,9 @@ static void launcher_done(void) { [g_root startGame]; }
 - (UIInterfaceOrientationMask)supportedInterfaceOrientations { return UIInterfaceOrientationMaskAll; }
 @end
 UIViewController *front_ios_root(void) { return [DmRootVC new]; }
+void front_ios_scene_changed(UIWindowScene *scene) {   // main.m: the app's scene changed its geometry, which UIKit also reports when the scene moves to another screen
+    if (g_root.game.window.windowScene == scene) [g_root.game screenChanged];
+}
 
 // A TV (cable or AirPlay): iOS gives the app the TV as a scene of its own instead of mirroring the phone. The game's view moves there, 16:9 fills the TV, and the game is
 // docked as a Switch on its dock (1080p, the operation mode change notification); the phone keeps the pad. Unplugging puts the view back and the mode the game had before

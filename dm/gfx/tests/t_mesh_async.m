@@ -28,7 +28,9 @@ static void put_msl(NvShader *s, NSString *code) {   // the stage's MSL in the f
 static NvShader *shader(id<MTLLibrary> library, NSString *name, int stage, const char *tag) {
     NvShader *s = [NvShader new]; s->fn = [library newFunctionWithName:name]; s->stage = stage;
     snprintf(s->key, sizeof s->key, "mesh_async_%s%s", name.UTF8String, tag);
-    require(s->fn != nil, "test shader function exists"); put_msl(s, source); return s;
+    require(s->fn != nil, "test shader function exists");
+    if ([name isEqualToString:@"direct"]) { s->mesh_obj = [library newFunctionWithName:@"block"]; require(s->mesh_obj != nil, "the block object function exists"); }   // a mesh shader with no task: its object function (main's mesh ABI)
+    put_msl(s, source); return s;
 }
 enum { W = 8, H = 8, CMD = 65536, POOL = 131072 };
 static NVNqueue queue; static NVNcommandBuffer command; static tex_t color, depth; static NVNdepthStencilState ds; static uint8_t *memory;
@@ -88,14 +90,18 @@ int main(void) { @autoreleasepool {
     g_mtk_async_max = 2;   // the cap and lost-cap checks below are written for 2
     char tmpl[] = "/tmp/t_mesh_async.XXXXXX"; require(mkdtemp(tmpl) != NULL, "fixture folder made"); fixture = @(tmpl); g_msl_dir = fixture;
     source = @"#include <metal_stdlib>\nusing namespace metal;\n"
-        "struct V { float4 position [[position]]; }; struct Payload { uint first; };\n"
+        "struct V { float4 position [[position]]; }; struct Payload { uint first; }; struct Block { uint first; };\n"
         "using Mesh = metal::mesh<V, void, 3, 1, metal::topology::triangle>;\n"
         "void triangle(Mesh m, uint first) { float z = float(first) * 0.125f;\n"
         "  m.set_vertex(0, V{float4(-1,-1,z,1)}); m.set_vertex(1, V{float4(3,-1,z,1)}); m.set_vertex(2, V{float4(-1,3,z,1)});\n"
         "  m.set_index(0,0); m.set_index(1,1); m.set_index(2,2); m.set_primitive_count(1); }\n"
-        "[[mesh]] void direct(Mesh m, uint tid [[thread_index_in_threadgroup]], constant uint& first [[buffer(29)]]) { if (!tid) triangle(m, first); }\n"
-        "[[object]] void task(object_data Payload& p [[payload]], mesh_grid_properties grid, uint tid [[thread_index_in_threadgroup]], constant uint& first [[buffer(29)]]) {\n"
-        "  if (!tid) { p.first = first; grid.set_threadgroups_per_grid(uint3(1)); } }\n"
+        // As dmsh_meshstage.py emits them (as t_mesh_first_use): the task and object functions read the draw's {count, first} at buffer 29; a mesh shader with no task has its own
+        // object function (mesh_obj) that hands each block's first workgroup to the mesh stage
+        "[[object]] void block(object_data Block& b [[payload]], mesh_grid_properties grid, uint otg [[threadgroup_position_in_grid]], constant uint* draw [[buffer(29)]]) {\n"
+        "  uint base = otg * 1024u; b.first = draw[1] + base; grid.set_threadgroups_per_grid(uint3(min(draw[0] - base, 1024u), 1u, 1u)); }\n"
+        "[[mesh]] void direct(Mesh m, const object_data Block& b [[payload]], uint tg [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]]) { if (!tid) triangle(m, b.first + tg); }\n"
+        "[[object]] void task(object_data Payload& p [[payload]], mesh_grid_properties grid, uint tid [[thread_index_in_threadgroup]], constant uint* draw [[buffer(29)]]) {\n"
+        "  if (!tid) { p.first = draw[1]; grid.set_threadgroups_per_grid(uint3(1)); } }\n"
         "[[mesh]] void tasked(Mesh m, const object_data Payload& p [[payload]], uint tid [[thread_index_in_threadgroup]]) { if (!tid) triangle(m, p.first); }\n"
         "fragment float4 color() { return float4(0,1,0,1); }\n"
         "fragment float4 color2() { return float4(0,1,0,1); }\n";

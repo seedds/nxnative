@@ -1,4 +1,4 @@
-// DM_NVN_CAPTURE=<frame>:1:<path>: capture one frame at the replay boundary (nvnQueueSubmitCommands → mtl_exec) into one file, for dm/gfx/tests/nvn_replay to replay against
+// DM_NVN_CAPTURE=<frame>:1:<path> (or =ctl:<path>, armed until DM_NVN_CAPTURE_GO is set, e.g. by a DM_CTL "env" line: then two presents later): capture one frame at the replay boundary (nvnQueueSubmitCommands → mtl_exec) into one file, for dm/gfx/tests/nvn_replay to replay against
 // the current replay code. Included at the end of nvn_mtl.m: it reads the replay layer's tables (pools, texture and sampler registries, host textures). File format: nvn_capture.h.
 //
 // From the frame's first submit until its present: every live pool's bytes, the registries, the programs' stage keys, the contents of every texture whose content lives only
@@ -27,11 +27,21 @@ static uint32_t g_cap_ntex, g_cap_nprog, g_cap_ndpol, g_cap_nsync, g_cap_npool;
 static cap_buf g_cap_tobj, g_cap_pobj, g_cap_progb, g_cap_dpolb, g_cap_kind;   // objects interned since the last flush
 static treg_t *g_cap_treg0; static int g_cap_ntreg0; static samp_par *g_cap_sreg0; static uint8_t *g_cap_sreg0_ok; static int g_cap_nsreg0;   // the registries as last written
 
+static int g_cap_armed;   // DM_NVN_CAPTURE=ctl:<path>: frames are counted, and the frame is chosen when DM_NVN_CAPTURE_GO appears (DM_CTL "env DM_NVN_CAPTURE_GO=1")
 static int nvn_cap_enabled(void) {
+    if (g_cap_armed && !g_cap_done && g_cap_frame == INT_MAX) {
+        const char *go = getenv("DM_NVN_CAPTURE_GO");
+        if (go && *go && strcmp(go, "0")) { g_cap_frame = (int)g_cap_presents + 2; MLOG("DM_NVN_CAPTURE: triggered, capturing frame %d into %s", g_cap_frame, g_cap_path); }
+    }
     if (g_cap_frame >= 0) return g_cap_frame > 0 && !g_cap_done;
     g_cap_frame = 0;
     const char *e = getenv("DM_NVN_CAPTURE"); int f = 0, n = 0, used = 0;
     if (!e || !*e) return 0;
+    if (!strncmp(e, "ctl:", 4) && e[4]) {   // armed: the frame comes from the trigger, the path from here
+        strlcpy(g_cap_path, e + 4, sizeof g_cap_path); g_cap_frame = INT_MAX; g_cap_armed = 1;
+        MLOG("DM_NVN_CAPTURE: armed, capturing into %s two frames after DM_NVN_CAPTURE_GO is set", g_cap_path);
+        return 1;
+    }
     if (sscanf(e, "%d:%d:%n", &f, &n, &used) < 2 || !used || f < 1 || !e[used]) { MLOG("[RED] DM_NVN_CAPTURE=%s: expected <frame>:1:<path>; capture off", e); return 0; }
     if (n != 1) MLOG("[RED] DM_NVN_CAPTURE: %d frames asked, step 1 captures one; capturing frame %d only", n, f);
     strlcpy(g_cap_path, e + used, sizeof g_cap_path); g_cap_frame = f;

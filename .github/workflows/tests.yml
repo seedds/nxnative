@@ -70,6 +70,11 @@ jobs:
             if [ "$rc" != 0 ]; then echo "::error::$t failed"; failed=1; fi
           done
           exit $failed
+      - name: Coherent presentation history (no GPU)
+        run: |
+          make -C dm/gfx/tests GAME="$GAME" t_present_history
+          dm/gfx/tests/t_present_history 2>&1 | tee logs/present-history.log
+          make -C dm/gfx/tests GAME="$GAME" present-history-tsan 2>&1 | tee logs/present-history-tsan.log
       - name: Direct OpenGL imports and EGL lookup (no GPU)
         run: make -C dm/gfx/tests GAME="$GAME" gl-imports 2>&1 | tee logs/gl-imports.log
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

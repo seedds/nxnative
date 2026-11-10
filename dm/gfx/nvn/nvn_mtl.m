@@ -759,6 +759,8 @@ static void udc_selftest(void) {
         MLOG("UDC self-check %s %s %lux%lu first value %08x, values differing from it %lu / %lu", g_dev.name.UTF8String, depth ? "Depth32F_S8" : "RGBA8", (unsigned long)w, (unsigned long)h, px[0], (unsigned long)bad, (unsigned long)(w * h));
     }
 }
+#include "nvn_res_probe.inc"   // DM_RES_PROBE=1: what an access through a pointer to a buffer outside the residency set gets, on this device (mtl_init)
+static void res_probe_say(const char *s) { MLOG("[res-probe] %s", s); }
 void mtl_init(void) {
     if (g_dev) return;
     const char *vbc = getenv("DM_NVN_VBUF_CACHE"); g_vbuf_cache = !(vbc && !strcmp(vbc, "0"));
@@ -804,6 +806,7 @@ void mtl_init(void) {
     if (!g_dev.supportsBCTextureCompression) MDIE("the Metal device %s has no BC texture formats, which the games' textures use and the host does not decompress: an iPhone needs an A17 Pro or later, an iPad an M1 or later", g_dev.name.UTF8String);
     [g_q addResidencySet:g_res];
     [g_q4 addResidencySet:g_res];
+    if (getenv("DM_RES_PROBE") && atoi(getenv("DM_RES_PROBE")) > 0) res_probe(g_dev, 2, res_probe_say);   // diagnostic, before the game: its own queue and residency set
     { void crash_set_wait_dump(void (*fn)(void)); void mtl_wait_state_dump(void); crash_set_wait_dump(mtl_wait_state_dump); }
     g_alloc_n = 3;
     for (int i = 0; i < 3; i++) {

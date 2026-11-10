@@ -675,3 +675,5 @@ check_t_pool_standin: t_pool_standin
 t_tex_drop_mip: t_tex_drop_mip.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_tex_drop_mip.m $(MTL_T_SRC) $(FW)
 check_t_tex_drop_mip: RUN_ENV = MTL_DEBUG_LAYER=1
+t_res_absent: t_res_absent.m ../nvn/nvn_res_probe.inc
+	clang -O1 -g -Wall -fobjc-arc -o $@ t_res_absent.m -framework Metal -framework Foundation

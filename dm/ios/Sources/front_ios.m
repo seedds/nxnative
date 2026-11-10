@@ -109,6 +109,12 @@ static void view_shape(CGSize sz, int notify) {
     uint64_t n = ++g_view_change;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 300 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{ if (n == g_view_change) dm_screen_view_changed(a); });
 }
+// Portrait layout (DM_PORTRAIT_LAYOUT): full (the default) or split. Full screen needs a picture that takes the screen's shape: a profile with screen_aspect any following the view
+// (DM_SCREEN_ASPECT auto); any other picture stays above the controls, where a 16:9 one centred on an upright screen would sit under them
+static BOOL portrait_full(void) {
+    const char *a = getenv("DM_SCREEN_ASPECT"), *p = getenv("DM_PORTRAIT_LAYOUT");
+    return DM_GAME_SCREEN_ASPECT == 2 && (!a || !*a || !strcmp(a, "auto")) && !(p && !strcmp(p, "split"));
+}
 static void launcher_done(void) { [g_root startGame]; }
 @implementation DmRootVC
 - (void)loadView { self.view = [DmRootView new]; }
@@ -213,12 +219,13 @@ static void launcher_done(void) { [g_root startGame]; }
     UIEdgeInsets gameInsets = dm_game_safe_insets(b, self.view.safeAreaInsets, duoPortrait);
     BOOL onTV = self.game.superview != self.view;   // the TV's view lays the picture out; the phone is all pad
     DmLayout layout = dm_layout(b, gameInsets, self.partiallyOpen, division, g_picture_aspect);
-    if (dm_gamepad_off(self.pad)) layout = dm_layout_controls_hidden(layout, b, gameInsets, self.partiallyOpen, division, g_picture_aspect);
+    if (portrait_full()) layout = dm_layout_full_picture(layout, b, self.partiallyOpen, division, g_picture_aspect);
+    else if (dm_gamepad_off(self.pad)) layout = dm_layout_controls_hidden(layout, b, gameInsets, self.partiallyOpen, division, g_picture_aspect);
     layout = onTV ? dm_layout_pad_only(b) : dm_layout_picture(layout, b, self.fill, g_picture_aspect);
     view_shape(onTV ? self.game.superview.bounds.size : layout.area.size, 1);
     if (!onTV) self.game.frame = layout.game;
     layout.topSafeOnly = duoPortrait;
-    NSString *line = [NSString stringWithFormat:@"%@, hinge %ld%s, divisions %@, picture %@, controls %@", onTV ? @"pad only (picture on the TV)" : layout.separated ? @"split" : self.fill ? @"overlay, Fill" : @"overlay",
+    NSString *line = [NSString stringWithFormat:@"%@, hinge %ld%s, divisions %@, picture %@, controls %@", onTV ? @"pad only (picture on the TV)" : layout.separated ? (CGRectIntersectsRect(layout.game, layout.controls) ? @"portrait full screen, controls over the picture" : @"split") : self.fill ? @"overlay, Fill" : @"overlay",
                       (long)self.hingeStatus, self.partiallyOpen ? " (half open)" : "", regionLog, NSStringFromCGRect(layout.game), NSStringFromCGRect(layout.controls)];
     if (![line isEqualToString:self.layoutLog]) { self.layoutLog = line; LOG("front end: layout %s", line.UTF8String); }
     self.pad.frame = b;
@@ -338,6 +345,7 @@ bool dm_setting_live(const char *env, const char *value) {
         return true;
     }
     if (!strcmp(env, "DM_ROTATION")) { if (value) dm_rotation_set(value); return true; }
+    if (!strcmp(env, "DM_PORTRAIT_LAYOUT")) { if (value) { [g_root.view setNeedsLayout]; LOG("front end: portrait layout %s (in-game menu)", value); } return true; }
     if (!strcmp(env, "DM_SHOW_FPS")) { if (value) [g_root showFPS:atoi(value) != 0]; return true; }
     if (!strcmp(env, "DM_TOUCH_HAPTICS")) { if (value) dm_gamepad_touch_feedback(atoi(value) != 0); return true; }
     if (!strcmp(env, "DM_RUMBLE")) { if (value) { dm_haptics_set_enabled(atoi(value) != 0); LOG("front end: game rumble %s (in-game menu)", atoi(value) ? "on" : "off"); } return true; }

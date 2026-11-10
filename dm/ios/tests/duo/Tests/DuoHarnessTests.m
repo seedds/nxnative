@@ -1405,6 +1405,7 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
     UIViewController *root = [self harnessRootViewController];
     XCTAssertNotNil(root);
     UIView *game = [root valueForKey:@"game"];
+    setenv("DM_PORTRAIT_LAYOUT", "split", 1);   // Picture above controls; Full screen below
     dm_setting_live("DM_ROTATION", "portrait");
     [self waitForRoot:root portrait:YES];
     XCTAssertEqual(root.supportedInterfaceOrientations, UIInterfaceOrientationMaskPortrait | UIInterfaceOrientationMaskPortraitUpsideDown);
@@ -1422,6 +1423,19 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
     [root.view setNeedsLayout]; [root.view layoutIfNeeded];
     XCTAssertEqualWithAccuracy(game.frame.size.width, l.area.size.width, 1.0, @"%@ in %@", NSStringFromCGRect(game.frame), NSStringFromCGRect(l.area));
     XCTAssertEqualWithAccuracy(game.frame.size.height, l.area.size.height, 1.0);
+    // Full screen (the default): the picture covers the view, the controls stay in the lower half, over it
+    setenv("DM_PORTRAIT_LAYOUT", "full", 1); XCTAssertTrue(dm_setting_live("DM_PORTRAIT_LAYOUT", "full"));
+    [root.view layoutIfNeeded];
+    XCTAssertEqualWithAccuracy(front_view_aspect(), b.size.width / b.size.height, 1e-3, @"the whole view's shape");
+    front_picture_shape((int)(b.size.width / b.size.height * 10000), 10000);
+    XCTestExpectation *full = [self expectationWithDescription:@"full shape applied"];
+    dispatch_async(dispatch_get_main_queue(), ^{ [full fulfill]; });
+    [self waitForExpectations:@[full] timeout:2];
+    [root.view setNeedsLayout]; [root.view layoutIfNeeded];
+    XCTAssertEqualWithAccuracy(game.frame.size.width, b.size.width, 1.0, @"%@", NSStringFromCGRect(game.frame));
+    XCTAssertEqualWithAccuracy(game.frame.size.height, b.size.height, 1.0);
+    XCTAssertTrue(CGRectGetMaxY(game.frame) > CGRectGetMidY(b) + 100, @"the picture runs under the controls");
+    unsetenv("DM_PORTRAIT_LAYOUT");
     front_picture_shape(1920, 1080);
     dm_setting_live("DM_ROTATION", "landscape");
     [self waitForRoot:root portrait:NO];
@@ -1445,6 +1459,25 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
     DmLayout own = dm_layout(up, upInsets, NO, CGRectNull, a);
     XCTAssertEqualWithAccuracy(own.game.size.width, 402, 1); XCTAssertEqualWithAccuracy(own.game.size.height, 375, 1);
     XCTAssertTrue(CGRectEqualToRect(dm_layout_pad_only(up).area, CGRectZero));
+}
+
+// Portrait layout Full screen: the picture covers the view under the controls, which keep their lower-half rectangle; landscape and a half-folded Duo stay
+- (void)testFullScreenPortraitPutsTheControlsOverThePicture {
+    CGRect land = CGRectMake(0, 0, 874, 402), up = CGRectMake(0, 0, 402, 874);
+    UIEdgeInsets upInsets = UIEdgeInsetsMake(62, 0, 34, 0);
+    CGFloat a = up.size.width / up.size.height;
+    DmLayout split = dm_layout(up, upInsets, NO, CGRectNull, a);
+    DmLayout l = dm_layout_full_picture(split, up, NO, CGRectNull, a);
+    XCTAssertTrue(CGRectEqualToRect(l.area, up), @"%@", NSStringFromCGRect(l.area));
+    XCTAssertEqualWithAccuracy(l.game.size.width, 402, 1); XCTAssertEqualWithAccuracy(l.game.size.height, 874, 1);
+    XCTAssertTrue(l.separated && CGRectEqualToRect(l.controls, split.controls), @"the controls keep their portrait arrangement");
+    XCTAssertTrue(CGRectContainsRect(l.game, l.controls), @"and are drawn over the picture");
+    DmLayout over = dm_layout(land, UIEdgeInsetsZero, NO, CGRectNull, DM_PICTURE_16_9);
+    DmLayout same = dm_layout_full_picture(over, land, NO, CGRectNull, DM_PICTURE_16_9);
+    XCTAssertTrue(CGRectEqualToRect(same.game, over.game) && CGRectEqualToRect(same.area, over.area), @"landscape as it was");
+    DmLayout half = dm_layout(up, upInsets, YES, CGRectNull, a);
+    DmLayout halfFull = dm_layout_full_picture(half, up, YES, CGRectNull, a);
+    XCTAssertTrue(CGRectEqualToRect(halfFull.game, half.game) && CGRectEqualToRect(halfFull.area, half.area), @"a half-folded Duo keeps its split");
 }
 
 // A controller hides the touch controls: upright the picture takes the whole safe area; landscape and a half-folded Duo's split stay

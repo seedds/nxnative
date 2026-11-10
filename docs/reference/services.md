@@ -1107,6 +1107,14 @@ Most service calls can be found before they crash, before the first boot or the 
   - `DM_JCMS_LOG=1` logs the game's sensor and pointer calls, at most once a second each kind.
 - **Found on:** Nintendo Switch 2 Welcome Tour (040057C02159A000; its note and profile are their own pull request): its cursor and its mouse exhibits, with a left and a right Joy-Con 2. `t_hid` checks the states, the handles and their order, and the styles.
 
+### Home button protection on a Switch 2 controller
+
+- **Symptom:** a Switch 2 game crashes as a Joy-Con 2 joins: `[RED] sf: the game connects to service hid itself, which the host does not serve`, then `CRASH sig=11 addr=0` at `sdk+0x63ce10`, called from `nn::hid::EnableUnintendedHomeButtonInputProtection`.
+- **Cause:** `nn::hid::EnableUnintendedHomeButtonInputProtection(const NpadIdType&, bool)` turns on a guard against a Home press made by accident on that controller. It returns nothing; the SDK's own sets the flag through the hid service, which the host does not serve, and calls through the null session.
+- **Fix:** the host answers it (`hle_hid.c`), records the setting per npad (No 1-8, Other, Handheld) and logs it (`hid: EnableUnintendedHomeButtonInputProtection npad 0 on`). The question, `IsUnintendedHomeButtonInputProtectionEnabled(const NpadIdType&)`, whose SDK function asks the service too, answers what the game set, off by default. The host handles the Home button itself ([home_quit.h](../../dm/host/home_quit.h)), so nothing else changes.
+- **Found on:** Drag x Drive (040041601D83A000, v196608, SDK 20; no profile in the repository yet): 43 s in, as player 1's Joy-Con 2 pair joined (`main+0x2c80c4`). Nintendo Switch Sports Resort (`04008E001F098000`, v65536; no profile yet) asks the question at boot: the SDK's own aborted on its error (`Result 0x58cca` at `sdk+0x6ca40c`).
+- **Check:** `make -C dm/host/tests GAME=<id> run` (`t_hid`).
+
 ### GameShare guest displays
 
 - **Symptom:** a crash at boot in `nn::vi` under `nn::streamplay::CreateIndividualDisplays`.

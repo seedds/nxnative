@@ -368,8 +368,8 @@ static void screen_any_write_(double a, const char *why) {
     int first = g_screen_ratio < 0; g_screen_ratio = r;
     if (r) LOG("%s: screen shape %.3f (%s%s): %s, picture %.3f x %.3f of 16:9, camera x %.3f y %.3f%s", g_fps_mod, r, why, a != r && a > 0 ? ", held to 0.25..6" : "",
                r > 16.0 / 9 ? "more at the sides" : "more above and below", f[1], f[2], c[0], c[1], capped ? ", upright cap" : "");
-    if (r && capped) LOG("%s: upright: vertical angle held to a %.2f picture's (DM_SCREEN_UPRIGHT_FOV)", g_fps_mod, cap);
     else LOG("%s: screen shape 16:9 (%s)", g_fps_mod, why);
+    if (capped) LOG("%s: upright: vertical angle held to a %.2f picture's (DM_SCREEN_UPRIGHT_FOV)", g_fps_mod, cap);
     if (!first) { void dm_display_changed(void); dm_display_changed(); }   // the game lays its picture out again (hle_oe.c)
 }
 static void screen_any_apply(const char *as) {

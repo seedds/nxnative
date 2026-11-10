@@ -199,6 +199,9 @@ int main(void) {
     CHECK(h_fs_Commit("save") == RES_OK, "Commit");
     CHECK(same(p, "new"), "after Commit the committed directory is new");
     snprintf(p, sizeof p, "%s.new", save); CHECK(access(p, F_OK) != 0, "the swapped-out old version is deleted (no .new left)");
+    CHECK(h_fs_MountSaveRO("ro", DM_GAME_PROGRAM_ID, NULL) == RES_OK && read_fs("ro:/a", got, sizeof got) && !strcmp(got, "new"), "this game's own save data mounts read-only: the committed version");
+    { uint64_t h; CHECK(h_fs_OpenFile(&h, "ro:/a", MODE_WRITE) == RES_FAIL, "and refuses writes"); }
+    CHECK(h_fs_MountSaveRO("other", DM_GAME_PROGRAM_ID ^ 1, NULL) == 0x7d402u, "another program's save data is not found");
 
     printf("④ DM_TEST_FS_FAIL=write:5:28\n");
     CHECK(write_save("save:/b", "4") == RES_PATH_NOT_FOUND, "(b does not exist: open fails, not counted as a write)");

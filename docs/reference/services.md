@@ -207,6 +207,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** cache storage: `OpenCacheStorageList` / `ReadCacheStorageList` report none, `CreateCacheStorage` / `MountCacheStorage` use a host folder beside the temporary storage. `fs::IsSaveDataExisting(ApplicationId, Uid)` for another title (it asks for Breath of the Wild's save: none) and `MountSaveDataReadOnly`.
 - **Found on:** [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md) (1.4.3, the same `sdk` build as Breath of the Wild 1.9.0).
 
+### A read-only mount of the game's own save data
+
+- **Symptom:** `[RED] fs read-only mount of another program's save data …: program <the game's own ID>, the host has none`; the game treats a user who has played as new (Nintendo Switch Sports Resort's Select User offers Begin Career), and may abort on its own save check afterwards (there, `SaveDataError occurred: […], SaveDataErrorType::UpdateOrderForNotUsable`, `nn::diag` abort at `main+0x3917270`).
+- **Cause:** `MountSaveDataReadOnly(name, ApplicationId, Uid)` answered "not found" for every program, the game's own too, while `IsSaveDataExisting` says yes to the game's own ([Cache storage and other titles' save data](#cache-storage-and-other-titles-save-data)). Nintendo Switch Sports Resort reads each user's save this way on its Select User screen; with no career found, Begin Career reset the career's item lists over the save already loaded. The items' own states stayed, so granting the default items changed none of them, nothing went back into the usable lists, and the game's check before saving found a selected item that was not usable.
+- **Fix:** `h_fs_MountSaveRO` (`hle_fs.c`) mounts `DM_SAVE`'s committed directory read-only for the game's own program ID (`DM_GAME_PROGRAM_ID`), not the transaction's work directory, as a read-only view of committed data; another program's still answers `ResultTargetNotFound`.
+- **Found on:** Nintendo Switch Sports Resort (`04008E001F098000`, v65536; no profile yet): the career shows on Select User, and the abort after the Joy-Con calibration is gone, on the Mac.
+- **Check:** `make -C dm/host/tests GAME=<id> run` (`t_fs`: the game's own save mounts read-only with its committed content and refuses writes; another program's is not found).
+
 ### Device save data on the account save's directory
 
 - **Symptom:** the island lives in device save data, which the host did not mount.

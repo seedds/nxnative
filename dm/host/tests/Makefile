@@ -268,6 +268,7 @@ $(B)/t_scheduler_config: t_scheduler_config.c t_condvar_stub.c ../hle_thread.c .
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_scheduler_config.c t_condvar_stub.c
 .PHONY: scheduler-config scheduler-config-tsan
 scheduler-config: $(B)/t_scheduler_config
+	$(B)/t_scheduler_config partial
 	$(B)/t_scheduler_config default
 	$(B)/t_scheduler_config custom
 	$(B)/t_scheduler_config off

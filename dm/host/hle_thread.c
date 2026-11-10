@@ -791,18 +791,18 @@ static int svc_thread_impl(int num, uint64_t *regs);
 // These helpers run without G on several guest threads. Publish each immutable
 // environment snapshot once, including all fields, before a caller can use it.
 static pthread_once_t g_backoff_once = PTHREAD_ONCE_INIT;
-static int64_t g_backoff_cap, g_backoff_start;
+static int64_t g_bo_cap, g_bo_start;
 static void yield_backoff_init(void) {
-    const char *e = getenv("DM_YIELD_BACKOFF"); g_backoff_cap = 250000; g_backoff_start = 2000000;
-    if (e && *e) { g_backoff_cap = atoll(e) * 1000; const char *c = strchr(e, ':'); if (c) g_backoff_start = atoll(c + 1) * 1000; }
-    if (!g_backoff_cap) LOG("DM_YIELD_BACKOFF=0: no back-off on repeated yields (plain sched_yield spin)");
-    else if (e && *e) LOG("DM_YIELD_BACKOFF: back off after %lld µs of repeated yields, sleeping at most %lld µs at a time", (long long)(g_backoff_start / 1000), (long long)(g_backoff_cap / 1000));
+    const char *e = getenv("DM_YIELD_BACKOFF"); g_bo_cap = 250000; g_bo_start = 2000000;
+    if (e && *e) { g_bo_cap = atoll(e) * 1000; const char *c = strchr(e, ':'); if (c) g_bo_start = atoll(c + 1) * 1000; }
+    if (!g_bo_cap) LOG("DM_YIELD_BACKOFF=0: no back-off on repeated yields (plain sched_yield spin)");
+    else if (e && *e) LOG("DM_YIELD_BACKOFF: back off after %lld µs of repeated yields, sleeping at most %lld µs at a time", (long long)(g_bo_start / 1000), (long long)(g_bo_cap / 1000));
 }
-// The new short-sleep getter shares the complete once-published settings.
-static uint64_t yield_backoff_cap(void) { pthread_once(&g_backoff_once, yield_backoff_init); return (uint64_t)g_backoff_cap; }
+// Both getters share the complete once-published cap/start pair.
+static uint64_t yield_backoff_cap(void) { pthread_once(&g_backoff_once, yield_backoff_init); return (uint64_t)g_bo_cap; }
 static uint64_t yield_backoff_ns(uint64_t run_ns, int clock) {
     pthread_once(&g_backoff_once, yield_backoff_init);
-    int64_t cap = g_backoff_cap, start = g_backoff_start;
+    int64_t cap = g_bo_cap, start = g_bo_start;
     if (!cap || (!clock && run_ns < (uint64_t)start)) return 0;
     uint64_t s = run_ns / 8; if (s < 10000) s = 10000;
     return s < (uint64_t)cap ? s : (uint64_t)cap;

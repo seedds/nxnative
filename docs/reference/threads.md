@@ -8,9 +8,9 @@ Guest threads, their synchronization and how the host schedules them. Each entry
 
 - **Symptom:** ThreadSanitizer reports races when guest threads first yield or enter rewritten spin waits together. No gameplay hitch or hang has been attributed to these races.
 - **Cause:** `hle_thread.c` lazily initialized the shared yield cap/start, clock-wait mode and spin enable/poll interval without synchronization. Those paths do not hold the scheduler lock; a caller could observe partially initialized settings.
-- **Fix:** separate `pthread_once` initializers publish each immutable environment snapshot on its first use. Defaults, parsing, logging and scheduling decisions are unchanged.
-- **Check:** `make -C dm/host/tests GAME=<id> scheduler-config-tsan` runs eight simultaneous callers in fresh processes for defaults, custom settings, disabled features and empty environment values. The unmodified helpers reproduce races; all four cases pass after the fix without suppressions. Existing clock-wait and short-poll regressions also pass.
-- **Found on:** synthetic host scheduler tests on Apple silicon; no game files or GPU work.
+- **Fix:** separate `pthread_once` initializers publish each immutable environment snapshot on its first use. Both the backoff-duration getter and the short-sleep cap getter use the same initializer, so neither can publish only part of the cap/start pair. Defaults, parsing, logging and scheduling decisions are unchanged.
+- **Check:** `make -C dm/host/tests GAME=<id> scheduler-config-tsan` runs eight simultaneous callers alternating the cap and duration entry points in fresh processes for defaults, custom settings, disabled features and empty environment values. A controlled fifth process pauses initialization between parsing the cap and start and checks that the other getter cannot return early. The unmodified helpers return a partially initialized result and reproduce a TSan race; all five fixed cases pass without suppressions. Existing clock-wait and short-poll regressions also pass.
+- **Found on:** synthetic host scheduler tests during [Ocarina of Time](../../dm/games/0400486024DEC000/README.md) source review on Apple silicon; no game files or GPU work, and no gameplay artifact attributed to these races.
 
 ### Publishing a new thread's scheduler fields
 

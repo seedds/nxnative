@@ -71,3 +71,4 @@ The work folder `04008E001F098000-work` beside the dump has `run/boot.sh <log> <
 - [A render-target view of another class: the texture is upgraded, not drawn in its base format](../../../docs/reference/rendering.md#a-render-target-view-of-another-class-the-texture-is-upgraded-not-drawn-in-its-base-format)
 - [Conditional rendering evaluated at replay](../../../docs/reference/rendering.md#conditional-rendering-evaluated-at-replay)
 - [Tests of one uniform word folded into switches](../../../docs/reference/shaders.md#tests-of-one-uniform-word-folded-into-switches) and [Specialized second functions in the offline pipeline archive](../../../docs/reference/shaders.md#specialized-second-functions-in-the-offline-pipeline-archive)
+- [One group that metal-tt cannot finish costs the whole archive](../../../docs/reference/shaders.md#one-group-that-metal-tt-cannot-finish-costs-the-whole-archive)

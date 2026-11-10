@@ -24,7 +24,7 @@
 #   prebuilt.tsv     what the archives cover, in the host's stamp format (pso_prebuild): chain version, depth mode, the pair lists' size and SHA-256. The host skips its prebuild when
 #                    it matches and a probe of a few bases finds them in the archive
 #   rest_pairs.tsv   the pairs the device still builds (only when there are any): those whose functions declare other constants, and those whose base metal-tt cannot compile
-#                    (compile_isolating: found by halving the group that failed, left out of the archive with a red line each, so one such base no longer costs the whole archive)
+#                    (compile_split, below: left out of the archive with a red line each, so one such base no longer costs the whole archive)
 #   archive.tsv      what was built: architectures, OS minimum, toolchain, bases, compute pipelines (for people and logs; the host does not read it)
 # Each archive is made again only when its compiler inputs change (key.<arch> in the work folder): the complete pipeline configuration without library locations,
 # the referenced libraries' bytes, architecture, platform, minimum OS and metal-tt version. Chain/profile stamps are validated and refreshed independently.
@@ -32,16 +32,21 @@
 # Super Mario Odyssey's 32,864 bases runs an 8 GB Mac out of paging space (docs/reference/shaders.md, Bounded groups for the offline pipeline compiler). The output is the same single file.
 # With compute pipelines, they and the bases are separate groups (batches.<arch>/c<index>/ and <index>/) merged the same way, so new pairs leave the compute pipelines compiled, and the
 # reverse. The compute groups are small (COMPUTE_BATCH) and run --jobs at a time: one metal-tt keeps about three cores busy.
+# A group metal-tt makes no archive of (it failed, or ran past its time limit) is compiled again in parts (SPLIT pipelines, then halves, one after the other) down to the
+# pipelines that fail alone, which are left out (left_out.<arch>.tsv in the work folder): a left-out base's pairs go into rest_pairs.tsv for the device to build, and a left-out
+# compute pipeline is built at its first dispatch, as without an archive (docs/reference/shaders.md, One group that metal-tt cannot finish costs the whole archive).
 # Usage: pso_offline.py --msl <b-<chain> folder> --out <folder> --work <folder> [--game <id>] [--pairs <shader_pairs.tsv> [--pairs <pso_pairs.tsv>]] [--gpu g18p[,g17p]]
 #          [--depth gl|zero] [--platform ios|macos] [--os-min 27.0] [--script-only] [--batch-size N] [--shader-map <shader_map.tsv>] [--manifest <pso_manifest.tsv>] [--no-compute] [--jobs N]
+#          [--time-limit S]
 #   --game: the profile (DM_GAMES_DIR as for game.py) whose shader_pairs.tsv and pso_pairs.tsv are the pairs, whose shader_map.tsv and pso_manifest.tsv name the compute shaders, and
 #   whose depth_mode key the depth mode, unless --pairs / --shader-map / --manifest / --depth say; --no-compute: bases only; --jobs: metal-tt runs at a time for compute groups;
+#   --time-limit: a metal-tt run is stopped past RUN_BASE_S and S seconds per pipeline (default PER_PIPELINE_S), and its group compiled in parts (0: no limit);
 #   --gpu: architectures, with or without the applegpu_ prefix (default g18p); --depth: the game's NVN depth mode (gl = near -w, NVN's default; zero = near 0, which the game sets
 #   with nvnDeviceSetDepthMode: the host knows it only at run time, so the profile says it; a wrong one costs the device its own prebuild, as without the archive);
 #   --os-min: the archives' system (default: for iOS the SDK's major version, e.g. 27.0; for macOS the major version this Mac runs, since the Mac app is built for the Mac that builds it).
 #   A device opens only an archive of its own major version (macOS 27.2 refused archives made for 26.0 and 26.6 and opened those for 27.0 and 27.2), and builds the bases itself
 #   otherwise: the SDK's version on a Mac whose system is older than its Xcode's SDK (macOS 26.6 with Xcode 27.1) left that Mac without them (GitHub issue #673)
-import argparse, concurrent.futures, filecmp, hashlib, json, os, shutil, struct, subprocess, sys, time
+import argparse, concurrent.futures, contextlib, filecmp, hashlib, json, os, shutil, signal, struct, subprocess, sys, threading, time
 from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'tools'))
@@ -54,9 +59,13 @@ import dmsh_abi as abi, dmsh_side
 HOST_CONSTANTS = {'dm_border_off': (abi.BORDER_FC, True)}
 
 BATCH = 1000   # bases per metal-tt run: Odyssey's largest compiler lifetime footprint at this size was 2.065 GiB on an 8 GB M2
-MAX_FAILED = 8   # pipelines of one group metal-tt may fail on before the run counts as failed (compile_isolating)
 COMPUTE_BATCH = 16   # compute pipelines per metal-tt run, JOBS runs at a time: one metal-tt keeps about 2-3 cores busy: Star Fox's 233 took 268 s in 16 groups against 453 s in one run (M5 Pro, background priority, a loaded Mac)
 JOBS = max(1, (os.cpu_count() or 2) // 2)
+SPLIT = 16   # a group metal-tt makes no archive of is compiled again in parts of this many pipelines (smaller ones in halves), down to the pipelines that fail alone (compile_split)
+RUN_BASE_S = 600   # a metal-tt run's time limit: this, then --time-limit seconds per pipeline (time_limit)
+PER_PIPELINE_S = 5   # the default of --time-limit: a group of 1,000 bases may take 1 h 33 min, of 16 compute pipelines 11 min, one pipeline 10 min. Most pipelines take well under a
+                     # second; Nintendo Switch Sports Resort's group of 1,000 bases at chain 89f44f9b6bb0 drove the Mac into swap for 8 h 51 min before the kernel killed the compiler
+GIVE_UP = 8   # single pipelines that fail before any has compiled: metal-tt fails on everything (a toolchain problem), so the build stops instead of trying each pipeline alone
 COLOUR = ('pixel_format', 'write_mask', 'blending_state', 'alpha_blend_operation', 'rgb_blend_operation', 'destination_alpha_blend_factor', 'destination_rgb_blend_factor',
           'source_alpha_blend_factor', 'source_rgb_blend_factor')
 
@@ -307,86 +316,66 @@ def os_min_default(platform):
     return v.split('.')[0] + '.0'
 
 
-def compile_archive(js, part, work, arch, platform, osmin, count):
-    """One compiler invocation, with its temporaries on the work volume. Never publish a failed output."""
-    part.unlink(missing_ok=True)
-    clear_temporaries(work)
-    need, free = space_needed(count), shutil.disk_usage(work).free
-    if free < need: sys.exit(f'[RED] pso_offline: {free / 2**30:.1f} GB free on the volume of {work}, metal-tt needs about {need / 2**30:.0f} GB for {count} bases: free some space and run again')
-    cmd = ['xcrun', '-sdk', sdk(platform), 'metal-tt', '-arch', arch, f'-{platform}-version-min', osmin, str(js), '-o', str(part)]
-    log_path = work / f'metal-tt.{arch}.log'
-    with log_path.open('w') as log:
-        r = subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT, env=dict(os.environ, TMPDIR=str(work)))
-    if r.returncode or not part.is_file() or not part.stat().st_size:
-        free = shutil.disk_usage(work).free
-        clear_temporaries(work); part.unlink(missing_ok=True)
-        text = f'[RED] pso_offline: metal-tt failed for {arch} (exit {r.returncode})'
-        if free < 1 << 30: sys.exit(f'{text} ({free / 2**30:.1f} GB free on the volume of {work} when it failed: likely out of disk space): {log_path.read_text()[-2000:]}')
-        raise CompileFailed(f'{text}: {log_path.read_text()[-2000:]}')   # with room on the volume: the caller looks for the pipelines it stops on (compile_isolating)
-
-
-class CompileFailed(Exception): pass
+class CompileFailed(Exception):
+    """metal-tt made no archive of a group, with room on the disk: it failed (Apple's GPU compiler rejecting or crashing on a pipeline says no more than `applegpu-nt command failed`)
+    or ran past its time limit. Its halves may still compile (compile_split)"""
 
 
 def pair_of(base):   # a base's pair as the pair lists name it: its libraries are <vertex key>_bp or _b and <pixel key>_b
     return base[0].rsplit('_', 1)[0], base[2].rsplit('_', 1)[0]
 
 
-def failed_file(work, arch): return Path(work) / f'failed.{arch}.tsv'
+def left_out_line(arch, item, e):
+    """The red line of a pipeline left out of the archive (a CompileFailed of it alone): the pair (or compute shader) and metal-tt's own line without compile_archive's lead,
+    or for a run past its time limit that lead"""
+    kind, x = item; why = str(e); lines = why.splitlines()
+    line = next((ln for ln in lines if 'ERROR' in ln or 'error' in ln), lines[-1] if lines else '')
+    detail = why.split(': ', 1)[0] if getattr(e, 'timed_out', False) else line.split(': ', 1)[-1].strip() or why
+    what = f'the base of {" + ".join(pair_of(x))} ({x[0]}.{x[1]}, {x[2]}.{x[3]})' if kind == 'b' else f'the compute pipeline of {x[0]}.{x[1]}'
+    return f'[RED] pso_offline: {arch}: metal-tt cannot compile {what} ({detail.strip()[:200]}): left out of the archive, the device builds it'
 
 
-def read_failed(work, arch):
-    """The pipelines a compile left out (compile_isolating), kept beside its key so that a reused archive still names them: ([base], [compute pipeline])"""
-    f = failed_file(work, arch); bases, computes = [], []
-    for row in (ln.split('\t') for ln in f.read_text().splitlines()) if f.is_file() else ():
-        (bases if row[0] == 'base' else computes).append(tuple(row[1:]))
-    return bases, computes
+def time_limit(count, per_pipeline):
+    """Seconds one metal-tt run of count pipelines may take before it is stopped (None: no limit): RUN_BASE_S, then per_pipeline seconds for each. A pipeline usually takes about
+    a second (PER_PIPELINE_S)"""
+    return RUN_BASE_S + count * per_pipeline if per_pipeline else None
 
 
-def write_failed(work, arch, bases, computes):
-    f = failed_file(work, arch)
-    if bases or computes: f.write_text(''.join('\t'.join(('base', *b)) + '\n' for b in bases) + ''.join('\t'.join(('compute', *c)) + '\n' for c in computes))
-    else: f.unlink(missing_ok=True)
+def run_logged(cmd, log_path, env, timeout=None):
+    """Run a tool with its output in log_path: its exit status, or None when it ran past timeout seconds. The tool runs in a process group of its own, which is stopped whole
+    on a timeout or an interruption: metal-tt hands the work to air-tt and applegpu-nt, which would go on compiling without it"""
+    with log_path.open('w') as log:
+        p = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, env=env, start_new_session=True)
+        try: return p.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            stop_group(p); return None
+        except BaseException: stop_group(p); raise
 
 
-def compile_isolating(lib_dir, bases, computes, js, part, work, arch, platform, osmin):
-    """compile_archive on the bases and compute pipelines; when metal-tt fails with room on the volume, the pipelines it cannot compile are found and left out, and the rest
-    compiled. → (bases left out, compute pipelines left out), with their reason printed. One pipeline the GPU compiler stops on ends the whole run (PRAGMATA's pixel shader
-    c4ac3ca598cea32e, in three of its 48,957 bases: "LLVM ERROR: Failed to encode." for every GPU up to applegpu_g17), which cost the app its archive: every base built on
-    the device at its first start. Found by halving: a half that compiles is clean, so the other holds a failure; a single pipeline is tried alone before it is named, and a
-    run in which nothing compiles, or more than MAX_FAILED pipelines fail, is the tool's failure and stops as before"""
-    def run(items):
-        write_script(js, script(real_libraries(lib_dir, [x for k, x in items if k == 'b'], work, [x for k, x in items if k == 'c']), [x for k, x in items if k == 'b'], [x for k, x in items if k == 'c']))
-        try: compile_archive(js, part, work, arch, platform, osmin, len(items)); return None
-        except CompileFailed as e: return str(e)
-        finally: clear_real_libraries(work)
-    items = [('b', b) for b in bases] + [('c', c) for c in computes]
-    first = run(items)
-    if first is None: return [], []
-    bad, compiled = [], [False]
-    def search(sub, why):   # sub fails as a whole
-        if len(sub) == 1:
-            why = run(sub)
-            if why is None: sys.exit(first + '\n[RED] pso_offline: the failure does not repeat on one pipeline alone')
-            bad.append((sub[0], why))
-            if len(bad) > MAX_FAILED: sys.exit(first + f'\n[RED] pso_offline: more than {MAX_FAILED} pipelines of one group fail')
-            return
-        mid = len(sub) // 2; left = run(sub[:mid])
-        if left is None: compiled[0] = True; search(sub[mid:], why); return   # the failure is in the other half
-        search(sub[:mid], left)
-        right = run(sub[mid:])
-        if right is None: compiled[0] = True
-        else: search(sub[mid:], right)
-    if len(items) > 1: search(items, first)
-    if not compiled[0]: sys.exit(first)   # nothing compiled: metal-tt itself, not a pipeline
-    out = {x for x, _ in bad}; keep = [x for x in items if x not in out]
-    for (kind, x), why in bad:
-        line = next((ln for ln in why.splitlines() if 'ERROR' in ln or 'error' in ln), why.splitlines()[-1] if why.splitlines() else '').split('): ', 1)[-1]   # metal-tt's own line, without compile_archive's lead
-        what = f'the base of {" + ".join(pair_of(x))} ({x[0]}.{x[1]}, {x[2]}.{x[3]})' if kind == 'b' else f'the compute pipeline of {x[0]}.{x[1]}'
-        print(f'[RED] pso_offline: {arch}: metal-tt cannot compile {what} ({line.strip()[:200]}): left out of the archive, the device builds it', flush=True)
-    again = run(keep)   # not empty: something compiled
-    if again is not None: sys.exit(again)
-    return [x for (k, x), _ in bad if k == 'b'], [x for (k, x), _ in bad if k == 'c']
+def stop_group(p):
+    with contextlib.suppress(ProcessLookupError, PermissionError): os.killpg(p.pid, signal.SIGKILL)
+    p.wait()
+
+
+def compile_archive(js, part, work, arch, platform, osmin, count, timeout=None):
+    """One compiler invocation, with its temporaries on the work volume. Never publish a failed output. A failure with the volume nearly full stops the build (smaller groups
+    would not help); any other failure, or a run past timeout seconds, raises CompileFailed"""
+    part.unlink(missing_ok=True)
+    clear_temporaries(work)
+    need, free = space_needed(count), shutil.disk_usage(work).free
+    if free < need: sys.exit(f'[RED] pso_offline: {free / 2**30:.1f} GB free on the volume of {work}, metal-tt needs about {need / 2**30:.0f} GB for {count} bases: free some space and run again')
+    cmd = ['xcrun', '-sdk', sdk(platform), 'metal-tt', '-arch', arch, f'-{platform}-version-min', osmin, str(js), '-o', str(part)]
+    log_path = work / f'metal-tt.{arch}.log'
+    t0 = time.time()
+    code = run_logged(cmd, log_path, dict(os.environ, TMPDIR=str(work)), timeout)
+    if code or code is None or not part.is_file() or not part.stat().st_size:
+        free = shutil.disk_usage(work).free
+        clear_temporaries(work); part.unlink(missing_ok=True)
+        if free < 1 << 30: sys.exit(f'[RED] pso_offline: metal-tt failed for {arch} (exit {code}) ({free / 2**30:.1f} GB free on the volume of {work} when it failed: likely out of disk space): {log_path.read_text()[-2000:]}')
+        what = f'ran past its limit of {timeout:.0f} s for {count} pipelines' if code is None else f'failed (exit {code}) after {time.time() - t0:.0f} s'
+        said = ' '.join(log_path.read_text()[-2000:].split())
+        hint = ' (only this: when the kernel log says it killed air-nt due to low-swap, the group took more memory than the Mac has)' if said.endswith('air-tt command failed') else ''
+        raise CompileFailed(f'metal-tt {what} for {arch}: {said}{hint}')
 
 
 def real_libraries(lib_dir, bases, work, computes=()):
@@ -408,20 +397,90 @@ def real_libraries(lib_dir, bases, work, computes=()):
 def clear_real_libraries(work): shutil.rmtree(Path(work) / 'libraries', ignore_errors=True)
 
 
-def compile_batch(lib_dir, bases, work, arch, platform, osmin, toolchain, computes=()):
-    """Cache one bounded group by its actual libraries and descriptors; also used for an isolated pilot. The pipelines it left out are in read_failed(work, arch)"""
+def compile_batch(lib_dir, bases, work, arch, platform, osmin, toolchain, computes=(), per_pipeline=0):
+    """Cache one bounded group by its actual libraries and descriptors; also used for an isolated pilot. A group of more than one pipeline that metal-tt failed on keeps that
+    failure under its key (failed.<arch>: the key, then the reason), so the next run with the same inputs goes straight to its parts instead of compiling it whole again.
+    A single pipeline is tried again, so a failure of the moment (a loaded Mac past the time limit, a toolchain since repaired) does not leave it out for good"""
     work.mkdir(parents=True, exist_ok=True)
     configuration = script(lib_dir, bases, computes)
     js = work / 'bases.mtl4-json'; write_script(js, configuration)
     key = archive_key(configuration, library_digest(lib_dir, bases, computes), arch, platform, osmin, toolchain)
     del configuration
-    dst, kf = work / f'{arch}.mtl4a', work / f'key.{arch}'
+    dst, kf, ff = work / f'{arch}.mtl4a', work / f'key.{arch}', work / f'failed.{arch}'
     if dst.is_file() and dst.stat().st_size and kf.is_file() and kf.read_text().strip() == key: return dst, True
-    kf.unlink(missing_ok=True)
+    failed = ff.read_text().split('\n', 1) if ff.is_file() else []
+    if len(failed) == 2 and failed[0] == key: raise CompileFailed(f'{failed[1].strip()} (in an earlier run with the same inputs; remove {ff} to try it again)')
+    kf.unlink(missing_ok=True); ff.unlink(missing_ok=True)
     part = work / f'{arch}.mtl4a.partial'
-    write_failed(work, arch, *compile_isolating(lib_dir, bases, computes, js, part, work, arch, platform, osmin))
+    count = len(bases) + len(computes)
+    write_script(js, script(real_libraries(lib_dir, bases, work, computes), bases, computes))
+    try: compile_archive(js, part, work, arch, platform, osmin, count, time_limit(count, per_pipeline))
+    except CompileFailed as e:
+        if count > 1: ff.write_text(f'{key}\n{e}\n')
+        raise
+    finally: clear_real_libraries(work)
     os.replace(part, dst); kf.write_text(key + '\n')
     return dst, False
+
+
+class Tally:
+    """compile_split's count, shared by its threads, of the groups compiled and the single pipelines that failed: when GIVE_UP pipelines fail alone before anything has
+    compiled, metal-tt fails on everything (a missing toolchain component, an option this one does not take), and trying each pipeline alone would take hours"""
+    def __init__(self): self.lock, self.compiled, self.failed, self.first = threading.Lock(), 0, 0, None
+
+    def ok(self):
+        with self.lock: self.compiled += 1
+
+    def fail(self, arch, reason):
+        with self.lock:
+            self.failed += 1; self.first = self.first or reason
+            if not self.compiled and self.failed >= GIVE_UP:
+                sys.exit(f'[RED] pso_offline: {arch}: metal-tt failed on each of {self.failed} pipelines compiled alone and compiled none: not a pipeline it rejects but the compiler itself: {self.first}')
+
+
+def compile_split(lib_dir, bases, work, arch, platform, osmin, toolchain, computes=(), per_pipeline=0, say=print, tally=None):
+    """compile_batch, and when metal-tt makes no archive of the group (CompileFailed), its parts instead, down to single pipelines: a group of more than SPLIT pipelines in
+    parts of SPLIT, a smaller one in halves, one after the other, since the group may have taken the Mac's memory (work/split/<n>/, cached as any group). A pipeline that
+    fails alone is left out of the archive, so one pipeline the compiler rejects or cannot finish costs the archive that pipeline, not all of it.
+    Returns ([archive pieces], [(base or compute pipeline left out, reason)])"""
+    tally = tally or Tally()
+    try:
+        piece = compile_batch(lib_dir, bases, work, arch, platform, osmin, toolchain, computes, per_pipeline)[0]
+    except CompileFailed as e:
+        items = [*(('b', b) for b in bases), *(('c', c) for c in computes)]
+        if len(items) == 1:
+            tally.fail(arch, str(e))
+            say(left_out_line(arch, items[0], e)); return [], [(items[0][1], str(e))]
+        size = SPLIT if len(items) > 2 * SPLIT else (len(items) + 1) // 2
+        parts = [items[i:i + size] for i in range(0, len(items), size)]
+        say(f'[RED] pso_offline: {arch}: {e}: compiling its {len(items)} pipelines again in {len(parts)} parts, to leave out only those that fail alone')
+        for old in (work / 'split').glob('*'):   # the parts of a longer group; the others are cached by their inputs
+            if not old.name.isdigit() or not 1 <= int(old.name) <= len(parts): shutil.rmtree(old)
+        def part(n, its):
+            out = compile_split(lib_dir, [x for k, x in its if k == 'b'], work / 'split' / f'{n:05d}', arch, platform, osmin, toolchain,
+                                [x for k, x in its if k == 'c'], per_pipeline, say, tally)
+            say(f'pso_offline: {arch}: {work.name}: part {n}/{len(parts)}: {len(its) - len(out[1])} of {len(its)} pipelines ready')
+            return out
+        done = [part(n, its) for n, its in enumerate(parts, 1)]
+        return [p for ps, _ in done for p in ps], [x for _, xs in done for x in xs]
+    tally.ok()
+    shutil.rmtree(work / 'split', ignore_errors=True)   # the parts of an earlier failure of this group, whose inputs have changed since
+    return [piece], []
+
+
+def run_all(fn, todo, jobs):
+    """[fn(*args) for args in todo], jobs at a time. A call that stops the build (a full disk, metal-tt failing on everything) does so once the calls under way have
+    finished (their pieces stay cached), without starting the others"""
+    if jobs <= 1: return [fn(*args) for args in todo]
+    pool = concurrent.futures.ThreadPoolExecutor(jobs)
+    try: return [f.result() for f in [pool.submit(fn, *args) for args in todo]]
+    except BaseException: pool.shutdown(cancel_futures=True); raise
+    finally: pool.shutdown()
+
+
+def item_name(item):   # a base or a compute pipeline of compile_split, for the log
+    kind, x = item
+    return f'base {x[0]}.{x[1]} + {x[2]}.{x[3]}' if kind == 'b' else f'compute pipeline {x[0]}.{x[1]}'
 
 
 def groups_of(bases, computes, batch_size, compute_size=COMPUTE_BATCH):
@@ -436,32 +495,34 @@ def groups_of(bases, computes, batch_size, compute_size=COMPUTE_BATCH):
     return groups
 
 
-def compile_batches(lib_dir, bases, work, part, arch, platform, osmin, toolchain, batch_size, computes=(), jobs=1, compute_size=COMPUTE_BATCH):
+def compile_batches(lib_dir, bases, work, part, arch, platform, osmin, toolchain, batch_size, computes=(), jobs=1, compute_size=COMPUTE_BATCH, per_pipeline=0):
     """Limit compiler input size, then combine every completed group into the usual single archive.
 
     This bounds input count, not memory: a single pipeline can still exceed Apple's compiler resources.
     On M2, merged archives passed archive-only lookups of two synthetic pipelines and all 32,864 Odyssey bases.
     Other workloads and compiler versions can have different resource use.
     The groups of bases run one after the other, as before; the compute groups, small, jobs at a time, each in its own folder (its TMPDIR).
+    A group metal-tt makes no archive of is compiled again in parts (compile_split), which leaves out only the pipelines that fail alone.
+    Returns what was left out, [(base or compute pipeline, reason)]; with nothing compiled at all, there is no archive (part is not written).
     """
     groups = groups_of(bases, computes, batch_size, compute_size); total = len(groups); names = {name for name, _, _ in groups}
-    failed = ([], [])   # what the groups left out (compile_isolating), returned
     for old in [*(work / f'batches.{arch}').glob('[0-9]*'), *(work / f'batches.{arch}').glob('c[0-9]*')]:   # the groups of a longer list than this one
         if old.name not in names: shutil.rmtree(old)
     def one(index, name, group, cgroup):
         print(f'pso_offline: {arch}: batch {index}/{total}: {f"{len(group)} bases" if group else f"{len(cgroup)} compute pipelines"}, compiling or checking cache', flush=True)
-        piece, reused = compile_batch(lib_dir, group, work / f'batches.{arch}' / name, arch, platform, osmin, toolchain, cgroup)
-        print(f'pso_offline: {arch}: batch {index}/{total}: ready ({"reused" if reused else "compiled"})', flush=True)
-        fb, fc = read_failed(work / f'batches.{arch}' / name, arch); failed[0].extend(fb); failed[1].extend(fc)
-        return piece
-    pieces = [one(i, *g) for i, g in enumerate(groups, 1) if g[1]]
-    with concurrent.futures.ThreadPoolExecutor(max(1, jobs)) as pool:   # a failed group stops the build once the others under way have finished (their pieces stay cached)
-        futures = [pool.submit(one, i, *g) for i, g in enumerate(groups, 1) if not g[1]]
-        pieces += [f.result() for f in futures]
+        pieces, left = compile_split(lib_dir, group, work / f'batches.{arch}' / name, arch, platform, osmin, toolchain, cgroup, per_pipeline, say, tally)
+        print(f'pso_offline: {arch}: batch {index}/{total}: ready' + (f', {len(left)} pipelines left out' if left else ''), flush=True)
+        return pieces, left
+    def say(text): print(text, flush=True)
+    tally = Tally()
+    def each(i, g): return one(i, *g)
+    done = run_all(each, [(i, g) for i, g in enumerate(groups, 1) if g[1]], 1) + run_all(each, [(i, g) for i, g in enumerate(groups, 1) if not g[1]], jobs)
+    pieces, left = [p for ps, _ in done for p in ps], [x for _, xs in done for x in xs]
     part.unlink(missing_ok=True)
+    if not pieces: print(f'[RED] pso_offline: {arch}: metal-tt compiled none of the {len(bases) + len(computes)} pipelines: no archive', flush=True); return left
     need, free = max(2 << 30, sum(p.stat().st_size for p in pieces)), shutil.disk_usage(work).free
     if free < need: sys.exit(f'[RED] pso_offline: {free / 2**30:.1f} GB free before merging; need at least {need / 2**30:.1f} GB')
-    print(f'pso_offline: {arch}: merging {total} batches', flush=True)
+    print(f'pso_offline: {arch}: merging {len(pieces)} pieces of {total} batches', flush=True)
     cmd = ['xcrun', '-sdk', sdk(platform), 'metal-pack', '-nthreads', '1', *map(str, pieces), '-o', str(part)]
     log_path = work / f'metal-pack.{arch}.log'
     with log_path.open('w') as log:
@@ -469,7 +530,21 @@ def compile_batches(lib_dir, bases, work, part, arch, platform, osmin, toolchain
     if r.returncode or not part.is_file() or not part.stat().st_size:
         part.unlink(missing_ok=True)
         sys.exit(f'[RED] pso_offline: metal-pack failed for {arch} (exit {r.returncode}): {log_path.read_text()[-2000:]}')
-    return failed
+    return left
+
+
+def write_left_out(path, key, items):
+    """The pipelines an archive was made without (compile_split), under its key: a base is four columns, a compute pipeline two"""
+    path.write_text(f'key\t{key}\n' + ''.join('\t'.join(x) + '\n' for x in items))
+
+
+def read_left_out(path, key):
+    """write_left_out's list for this key; None for a list of another key (the archive is made again). No list: an archive of an earlier version of this tool, which made none
+    without every pipeline"""
+    if not path.is_file(): return []
+    lines = path.read_text().split('\n')
+    if lines[0] != f'key\t{key}': return None
+    return [tuple(line.split('\t')) for line in lines[1:] if line]
 
 
 def main(argv=None):
@@ -489,8 +564,11 @@ def main(argv=None):
     ap.add_argument('--manifest', action='append', help='pso_manifest.tsv: its C rows first (default: the profile\'s)')
     ap.add_argument('--no-compute', action='store_true', help='no compute pipelines, the bases alone')
     ap.add_argument('--jobs', type=int, default=JOBS, help=f'metal-tt runs at a time for the compute pipelines (default {JOBS}, half the logical CPUs)')
+    ap.add_argument('--time-limit', type=float, default=PER_PIPELINE_S, metavar='S', help=f'stop a metal-tt run past {RUN_BASE_S} s and S seconds per pipeline, and compile its group again in parts '
+                    f'(default {PER_PIPELINE_S}; 0: no limit)')
     a = ap.parse_args(argv)
     if a.batch_size < 0: ap.error('--batch-size must be zero or positive')
+    if a.time_limit < 0: ap.error('--time-limit must be zero or positive')
     if a.game:
         sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'games')); import game
         g = game.load(a.game)
@@ -529,32 +607,44 @@ def main(argv=None):
     libraries = library_digest(lib_dir, bases, computes)
     keys = {arch: archive_key(configuration, libraries, arch, a.platform, osmin, tv) for arch in archs}
     del configuration   # the compiler reads the script from disk
-    failed_bases, failed_computes = [], []   # what metal-tt could not compile for some architecture (compile_isolating): those pairs go to the device with rest
+    dropped = set()   # the pipelines left out of the archive of any architecture (compile_split): a base's pair goes to the device with rest
     for arch, key in keys.items():
-        dst, kf = out / f'{arch}.mtl4a', work / f'key.{arch}'
+        dst, kf, lf = out / f'{arch}.mtl4a', work / f'key.{arch}', work / f'left_out.{arch}.tsv'
         if dst.is_file() and kf.is_file() and kf.read_text().strip() == key:
-            print(f'pso_offline: {arch}: reused ({dst.stat().st_size / 2**20:.0f} MB)')
-            fb, fc = read_failed(work, arch); failed_bases += fb; failed_computes += fc; continue
-        kf.unlink(missing_ok=True); dst.unlink(missing_ok=True)
+            gone = read_left_out(lf, key)
+            if gone is not None:
+                dropped |= set(gone)
+                print(f'pso_offline: {arch}: reused ({dst.stat().st_size / 2**20:.0f} MB)' + (f', {len(gone)} pipelines left out' if gone else '')); continue
+        kf.unlink(missing_ok=True); dst.unlink(missing_ok=True); lf.unlink(missing_ok=True)
         part = work / f'{arch}.mtl4a.partial'; part.unlink(missing_ok=True)
         t1 = time.time(); print(f'pso_offline: {arch}: metal-tt, {len(bases)} bases, {len(computes)} compute pipelines (minutes) ...', flush=True)
+        args = (lib_dir, bases, work, part, arch, a.platform, osmin, tv)
         if a.batch_size and len(groups_of(bases, computes, a.batch_size)) > 1:
-            fb, fc = compile_batches(lib_dir, bases, work, part, arch, a.platform, osmin, tv, a.batch_size, computes, a.jobs)
+            gone = compile_batches(*args, a.batch_size, computes, a.jobs, per_pipeline=a.time_limit)
         else:
-            fb, fc = compile_isolating(lib_dir, bases, computes, js, part, work, arch, a.platform, osmin)
-        write_failed(work, arch, fb, fc); failed_bases += fb; failed_computes += fc
-        os.replace(part, dst); kf.write_text(key + '\n')
-        print(f'pso_offline: {arch}: {dst.stat().st_size / 2**20:.0f} MB in {time.time() - t1:.0f} s')
+            n = len(bases) + len(computes)
+            try:
+                write_script(js, script(real_libraries(lib_dir, bases, work, computes), bases, computes))
+                compile_archive(js, part, work, arch, a.platform, osmin, n, time_limit(n, a.time_limit)); gone = []
+            except CompileFailed as e:
+                print(f'[RED] pso_offline: {arch}: {e}: compiling its {n} pipelines again in parts', flush=True)
+                gone = compile_batches(*args, SPLIT, computes, a.jobs, SPLIT, a.time_limit)
+            finally: clear_real_libraries(work)
+        if not part.is_file(): sys.exit(f'[RED] pso_offline: {arch}: metal-tt compiled none of the {len(bases) + len(computes)} pipelines: {gone[0][1] if gone else "no archive"}')
+        os.replace(part, dst); kf.write_text(key + '\n'); write_left_out(lf, key, [x for x, _ in gone])
+        dropped |= {x for x, _ in gone}
+        print(f'pso_offline: {arch}: {dst.stat().st_size / 2**20:.0f} MB in {time.time() - t1:.0f} s'
+              + (f'; {len(gone)} pipelines metal-tt did not compile alone are left out, listed in {lf}' if gone else ''))
+    rest = list(dict.fromkeys([*rest, *(pair_of(b) for b in bases if b in dropped)]))   # those with function constants, then the bases left out: the host's probe of the archive skips them
     for f in out.glob('*.mtl4a'):   # architectures no longer asked for
         if f.stem not in archs: f.unlink()
     (out / 'prebuilt.tsv').write_text(st)
-    rest = list(dict.fromkeys([*rest, *map(pair_of, failed_bases)]))   # the pairs the device still builds: those with function constants, then those metal-tt failed on
     rp = out / 'rest_pairs.tsv'
     if rest: rp.write_text(''.join(f'{v}\t{f}\n' for v, f in rest))
     else: rp.unlink(missing_ok=True)
     (out / 'archive.tsv').write_text(f'# the pipeline archive made offline (dm/gfx/tools/pso_offline.py); the host reads prebuilt.tsv, not this file\narch\t{" ".join(archs)}\n'
                                      f'platform\t{a.platform}\t{osmin}\ntoolchain\t{tv}\nbases\t{len(bases)}\nrest\t{len(rest)}\ncompute\t{len(computes)}\n'
-                                     f'failed\t{len(set(failed_bases))} bases, {len(set(failed_computes))} compute pipelines (metal-tt could not compile them: left to the device)\n')
+                                     + (f'failed\t{sum(len(x) == 4 for x in dropped)} bases, {sum(len(x) == 2 for x in dropped)} compute pipelines (metal-tt could not compile them: left to the device)\n' if dropped else ''))
     return 0
 
 

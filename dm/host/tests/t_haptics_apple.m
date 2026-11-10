@@ -483,6 +483,20 @@ int main(void) { @autoreleasepool {
     send_pair(0, 0); drain();
     dm_haptics_apple_controller(0, nil); dm_haptics_apple_controller(1, nil); drain();
     assert(back.closes == 1 && second.closes == 1 && objects == 0);   // every iterator and service released
+    // Split Joy-Con single-locality routing: Player 1 takes LeftHandle, Player 2 takes RightHandle on the same GCController
+    TestController *jc = [TestController new]; jc.haptics = [TestHaptics new];
+    jc.haptics.supportedLocalities = [NSSet setWithObjects:GCHapticsLocalityDefault, GCHapticsLocalityLeftHandle, GCHapticsLocalityRightHandle, nil];
+    dm_haptics_apple_controller_locality(0, (id)jc, GCHapticsLocalityLeftHandle);
+    dm_haptics_apple_controller_locality(1, (id)jc, GCHapticsLocalityRightHandle);
+    drain();
+    assert(channels[0].count == 1 && channels[1].count == 1);
+    dm_vibration_update ujc[] = {{0, 0, {0.6f, 160, 0.6f, 320}}, {0, 1, {0.6f, 160, 0.6f, 320}},
+                                 {1, 0, {0.4f, 160, 0.4f, 320}}, {1, 1, {0.4f, 160, 0.4f, 320}}};
+    dm_haptics_send(ujc, 4); drain();
+    assert(jc.haptics.attempts == 2);
+    assert([jc.haptics.requestedLocalities[0] isEqual:GCHapticsLocalityLeftHandle]);
+    assert([jc.haptics.requestedLocalities[1] isEqual:GCHapticsLocalityRightHandle]);
+    dm_haptics_apple_controller(0, nil); dm_haptics_apple_controller(1, nil); drain();
     assert(ds4_crc((const uint8_t *)"123456789", 9) == 0xCBF43926u);   // the report's CRC32 (IEEE, reflected)
     dm_haptics_apple_shutdown();
     puts("Apple haptics: channels, pulses, idle release, startup handlers, engine replacement, backoff, stale callbacks, plain players, the DualSense's handles, level cutoff and the DualShock 4 route passed");

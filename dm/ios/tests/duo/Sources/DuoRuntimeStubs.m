@@ -103,6 +103,7 @@ void dm_haptics_set_enabled(int on) { g_rumble = on; }
 int duo_harness_rumble(void) { return g_rumble; }
 void dm_haptics_apple_init(void) {}
 void dm_haptics_apple_controller(int player, GCController *controller) { (void)player; (void)controller; }
+void dm_haptics_apple_controller_locality(int player, GCController *controller, GCHapticsLocality locality) { (void)player; (void)controller; (void)locality; }
 
 int front_ios_boot_ok(void) { return 1; }
 void front_ios_boot(void) {}

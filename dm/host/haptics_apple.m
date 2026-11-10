@@ -39,6 +39,7 @@
 static dispatch_queue_t queue;
 static NSMutableArray<DmRumbleChannel *> *channels[DM_PLAYERS];
 static GCController *controllers[DM_PLAYERS];
+static GCHapticsLocality controllerLocalities[DM_PLAYERS];
 #if TARGET_OS_IPHONE
 static BOOL phoneSupported;
 #endif
@@ -367,18 +368,31 @@ static void default_controller(int p, GCDeviceHaptics *h, NSTimeInterval retryAf
     add_engine(p, -1, @"controller default", ^CHHapticEngine *(NSError **e) { (void)e; return [h createEngineWithLocality:GCHapticsLocalityDefault]; });
     channels[p].lastObject.retryAfter = retryAfter;
 }
-static void configure(int p, GCController *controller) {
+static void configure(int p, GCController *controller, GCHapticsLocality locality) {
     for (DmRumbleChannel *c in channels[p]) [c stop];
     channels[p] = [NSMutableArray new];
     if (sinks[p]) { sink_silence(p); dm_haptics_route(p, 1); return; }
 #if !TARGET_OS_IPHONE
     ds4_release(p);
-    if (controller && ds4_route(p, controller)) { dm_haptics_route(p, 1); return; }   // the report first, as SDL drives it
+    if (controller && !locality && ds4_route(p, controller)) { dm_haptics_route(p, 1); return; }   // the report first, as SDL drives it
 #endif
     if (controller) {
         GCDeviceHaptics *h = controller.haptics;
         NSSet *localities = h.supportedLocalities;
-        if ([localities containsObject:GCHapticsLocalityLeftHandle] && [localities containsObject:GCHapticsLocalityRightHandle]) {
+        if (locality && [localities containsObject:locality]) {
+            NSString *label = [locality isEqualToString:GCHapticsLocalityLeftHandle] ? @"controller left handle" :
+                              ([locality isEqualToString:GCHapticsLocalityRightHandle] ? @"controller right handle" : @"controller handle");
+            add_engine(p, -1, label, ^CHHapticEngine *(NSError **e) { (void)e; return [h createEngineWithLocality:locality]; });
+            __weak NSArray *route = channels[p];
+            for (DmRumbleChannel *c in channels[p]) c.fallback = ^(NSTimeInterval retryAfter) {
+                if (!route || channels[p] != route) return;
+                for (DmRumbleChannel *old in channels[p]) [old stop];
+                channels[p] = [NSMutableArray new];
+                default_controller(p, h, retryAfter);
+                dm_haptics_route(p, 1);
+                fprintf(stderr, "haptics: player %d retrying with the default controller locality\n", p + 1);
+            };
+        } else if ([localities containsObject:GCHapticsLocalityLeftHandle] && [localities containsObject:GCHapticsLocalityRightHandle]) {
             add_engine(p, 0, @"controller left handle", ^CHHapticEngine *(NSError **e) { (void)e; return [h createEngineWithLocality:GCHapticsLocalityLeftHandle]; });
             add_engine(p, 1, @"controller right handle", ^CHHapticEngine *(NSError **e) { (void)e; return [h createEngineWithLocality:GCHapticsLocalityRightHandle]; });
             // Advertised handle localities can still fail to start. Fall back to the standard
@@ -421,18 +435,23 @@ void dm_haptics_apple_set_sink(int p, void (*sink)(const dm_haptic_state *)) {
     if (!queue || p < 0 || p >= DM_PLAYERS) return;
     pthread_mutex_lock(&routeLock);
     dm_haptics_route(p, 0);   // invalidate queued work before changing the output
-    dispatch_sync(queue, ^{ sink_silence(p); sinks[p] = sink; configure(p, controllers[p]); });
+    dispatch_sync(queue, ^{ sink_silence(p); sinks[p] = sink; configure(p, controllers[p], controllerLocalities[p]); });
+    pthread_mutex_unlock(&routeLock);
+}
+void dm_haptics_apple_controller_locality(int p, GCController *controller, GCHapticsLocality locality) {
+    if (!queue || p < 0 || p >= DM_PLAYERS) return;
+    pthread_mutex_lock(&routeLock);
+    BOOL sameLoc = (controllerLocalities[p] == locality) || (locality && [controllerLocalities[p] isEqualToString:locality]);
+    if (controllers[p] != controller || !sameLoc) {
+        controllers[p] = controller;
+        controllerLocalities[p] = locality;
+        dm_haptics_route(p, 0);   // invalidate queued work before changing hardware
+        dispatch_sync(queue, ^{ configure(p, controller, locality); });
+    }
     pthread_mutex_unlock(&routeLock);
 }
 void dm_haptics_apple_controller(int p, GCController *controller) {
-    if (!queue || p < 0 || p >= DM_PLAYERS) return;
-    pthread_mutex_lock(&routeLock);
-    if (controllers[p] != controller) {
-        controllers[p] = controller;
-        dm_haptics_route(p, 0);   // invalidate queued work before changing hardware
-        dispatch_sync(queue, ^{ configure(p, controller); });
-    }
-    pthread_mutex_unlock(&routeLock);
+    dm_haptics_apple_controller_locality(p, controller, nil);
 }
 static void suspend(unsigned reason, BOOL on) {
     dm_haptics_suspend(reason, on);
@@ -458,7 +477,7 @@ void dm_haptics_apple_init(void) {
 #if TARGET_OS_IPHONE
         phoneSupported = CHHapticEngine.capabilitiesForHardware.supportsHaptics;
 #endif
-        dispatch_sync(queue, ^{ configure(0, nil); });
+        dispatch_sync(queue, ^{ configure(0, nil, nil); });
         NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
 #if TARGET_OS_IPHONE
         [nc addObserverForName:UIApplicationWillResignActiveNotification object:nil queue:nil usingBlock:^(NSNotification *n) { (void)n; suspend(DM_HAPTICS_INACTIVE, YES); }];

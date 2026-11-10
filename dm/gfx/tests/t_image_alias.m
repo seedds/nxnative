@@ -240,6 +240,24 @@ int main(void) { @autoreleasepool {
         dispatch_sync(g_feedback_q,^{}); defer_drain();
     } }
     CHECK(g_image_heap_n==0,"repeated destruction leaves no heap owner");
+    if (barrier_game()) { @autoreleasepool {   // DM_NVN_BARRIER=game with a family alive (the check target's third run): only a pass that attached one of its textures ends with the full barrier (enc_r_end_pass)
+        pool_t pool={.magic=MAGIC('P','O','O','L'),.flags=NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS|NVN_MEMORY_POOL_FLAGS_GPU_CACHED|NVN_MEMORY_POOL_FLAGS_COMPRESSIBLE,.mem=mem,.size=16<<20};
+        tex_t a=image(&pool,994000,512,512), b=image(&pool,994001,1024,512), c=image(&pool,994002,256,256); c.off=8<<20; c.mem=(uint8_t *)mem+c.off;
+        mtl_tex_init(&a); mtl_tex_init(&b); mtl_tex_init(&c); mtl_sub_begin();
+        id<MTLTexture> ta=tex_mtl(&a), tb=tex_mtl(&b), tc=tex_mtl(&c); (void)tb;   // made on first use
+        CHECK(g_image_heap_n==1 && objc_getAssociatedObject(ta,&g_image_heap_owner_key) && !objc_getAssociatedObject(tc,&g_image_heap_owner_key),"one family heap; the single description at another offset is outside it");
+        state_reset(); memset(&R,0,sizeof R); R.has_rt=1; R.rt.n=1;
+        R.rt.color[0]=&c; R.clear_c[0]=1; CHECK(rp_begin()!=nil,"a pass into the plain texture opens"); rp_end();
+        CHECK(g_last_end_relaxed,"a pass that attached no family texture ends relaxed while a family is alive");
+        uint64_t skip=g_bar_skip, full=g_bar_full, alias=g_bar_alias;
+        R.rt.color[0]=&a; R.clear_c[0]=1; CHECK(rp_begin()!=nil && g_bar_skip==skip+1,"the pass after it starts without the full barrier"); rp_end();
+        CHECK(!g_last_end_relaxed && g_bar_alias==alias+1,"a pass that attached a family texture ends as other encoders do");
+        R.rt.color[0]=&c; R.clear_c[0]=1; CHECK(rp_begin()!=nil && g_bar_full==full+1,"and the next pass starts with the full barrier and its alias flush"); rp_end();
+        mtl_sub_commit(); mtl_drain(); CHECK(!mtl_last_commit_error(),"those passes complete without GPU error");
+        ta=tb=tc=nil; mtl_tex_release(&a); mtl_tex_release(&b); mtl_tex_release(&c); mtl_alias_drop_pool(&pool);
+        mtl_sub_begin(); mtl_sub_commit(); mtl_drain(); mtl_sub_begin(); mtl_sub_commit(); mtl_drain(); dispatch_sync(g_feedback_q,^{}); defer_drain();
+        CHECK(g_image_heap_n==0,"the family's heap is released");
+    } }
     CHECK(g_dev.currentAllocatedSize<=settled+(3<<20),"repeated families do not retain their old physical allocations");
     free(mem);
     printf("image aliases: %d checks, %d failed\n",checks,failed); return failed!=0;

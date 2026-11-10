@@ -1428,7 +1428,7 @@ static int g_pass_late_res; // a draw of the open pass reads memory in a stage a
 static uint64_t g_order_vbar;   // ordering barriers kept inside the pass as a vertex-to-vertex barrier (prog_swrites)
 static void img_fit_upgrade(void); static int g_imfit_npend;   // textures an image slot needs a format view of (img_fit), upgraded before the next draw pass opens
 static int g_last_end_relaxed, g_game_barrier;   // the last encoder ended was a draw pass with the relaxed end barrier (nothing else since); the game issued nvnCommandBufferBarrier since the last draw pass began
-static uint64_t g_bar_skip, g_bar_full;            // draw passes begun without / with the consumer barrier (DM_NVN_BARRIER=game)
+static uint64_t g_bar_skip, g_bar_full, g_bar_alias;            // draw passes begun without / with the consumer barrier (DM_NVN_BARRIER=game); ended in full after they may have written aliasing textures (enc_r_end_pass)
 static void gp_end(id e);
 // An encoder's end barrier flushes to the device coherence point only. MTL4VisibilityOptionResourceAlias (aliased virtual addresses: overlapping large-pool chunks, image family heaps,
 // resource_vis) costs a command allocator about 100 KB per encoder on the end barrier (barrierAfterStages:beforeQueueStages:) and nothing on the start barrier, measured on an M3 Pro:
@@ -1452,7 +1452,7 @@ static inline void m4_end(id e) {
 // DM_NVN_BARRIER=ab... alternates game and full with the DM_AB phases (measurement)
 static int sw_mode(const char *name, int dflt); static inline int sw_on(int m);
 static int barrier_game(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_BARRIER"); v = e && !strncmp(e, "ab", 2) ? sw_mode("DM_NVN_BARRIER", 0) : e ? !strcmp(e, "game") : DM_GAME_DRAW_BARRIERS_GAME; if (v == 1) MLOG("DM_NVN_BARRIER=game: draw passes are ordered by the game's own barriers (fragment work still has barriers between passes; vertex work may overlap the previous pass's fragments)"); } return sw_on(v); }
-void mtl_barrier_stats(uint64_t *skip, uint64_t *full) { *skip = g_bar_skip; *full = g_bar_full; }
+void mtl_barrier_stats(uint64_t *skip, uint64_t *full, uint64_t *alias) { *skip = g_bar_skip; *full = g_bar_full; *alias = g_bar_alias; }
 uint64_t mtl_cut_count(void);
 // DM_NVN_GPUPROF=first frame[-last frame] (diagnostic): GPU time of every encoder of the main command buffers in those frames. A relaxed timestamp is written into a counter heap when an
 // encoder begins (before its first draw or dispatch) and when it ends (after its fragment stage); nothing is serialized beyond the barriers the replay already sets, so the frame runs
@@ -1533,14 +1533,19 @@ static void gp_report(int n, gp_lab *lab, uint64_t frame) {   // the frame's las
 }
 static inline id<MTL4RenderCommandEncoder> enc_r_begin_pass(MTL4RenderPassDescriptor *d) { g_cm_enc++; cm_enc_mark(2);   // the draw passes (rp_begin_ex); see barrier_game
     id<MTL4RenderCommandEncoder> e = [g_cb renderCommandEncoderWithDescriptor:d]; cm_enc_mark(0);
-    if (g_last_end_relaxed && !g_game_barrier && barrier_game() && !g_image_heap_n) g_bar_skip++;
+    if (g_last_end_relaxed && !g_game_barrier && barrier_game()) g_bar_skip++;
     else { [e barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:resource_vis()]; g_bar_full++; }
     g_game_barrier = 0;
     [e setArgumentTable:g_vt atStages:MTLRenderStageVertex]; [e setArgumentTable:g_ft atStages:MTLRenderStageFragment]; gp_begin(e, 'R', d); return e;
 }
+// While image family heaps exist (textures that share memory, image_texture), a pass that may have written one of them (an attachment in a heap, or a draw that writes images)
+// ends as any other encoder does, so the next pass starts with the full barrier and its alias flush: what one of those textures holds is seen through the others from there on.
+// A pass that wrote none keeps the relaxed end, and flushes to the device only. Before this every pass took the full barrier while one such heap lived: Breath of the Wild has one
+// (its resolution family), so DM_NVN_BARRIER=game ordered nothing there (pass-entry barriers full 142 a frame, saved 0)
+static int g_pass_alias;
 static inline void enc_r_end_pass(id e) {
-    if (!barrier_game() || g_image_heap_n) { m4_end(e); return; }
-    gp_end(e); [(id<MTL4CommandEncoder>)e barrierAfterStages:MTLStageVertex | MTLStageMesh | MTLStageFragment beforeQueueStages:MTLStageFragment | MTLStageDispatch | MTLStageBlit visibilityOptions:resource_vis()];
+    if (!barrier_game() || g_pass_alias) { g_bar_alias += g_pass_alias; m4_end(e); return; }
+    gp_end(e); [(id<MTL4CommandEncoder>)e barrierAfterStages:MTLStageVertex | MTLStageMesh | MTLStageFragment beforeQueueStages:MTLStageFragment | MTLStageDispatch | MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice | (g_big_n ? MTL4VisibilityOptionResourceAlias : 0)];
     [e endEncoding]; g_last_end_relaxed = 1;
 }
 static inline id<MTL4RenderCommandEncoder> enc_r_begin(MTL4RenderPassDescriptor *d) { g_cm_enc++; cm_enc_mark(2); id<MTL4RenderCommandEncoder> e = [g_cb renderCommandEncoderWithDescriptor:d]; cm_enc_mark(0); [e barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:resource_vis()]; [e setArgumentTable:g_vt atStages:MTLRenderStageVertex]; [e setArgumentTable:g_ft atStages:MTLRenderStageFragment]; gp_begin(e, 'R', d); return e; }
@@ -5106,6 +5111,7 @@ static void attach(MTLRenderPassAttachmentDescriptor *a, const tex_t *t, const v
     // A texture made without render-target use (packaged or CPU-written, uploaded from its storage) drawn into: give it that use, as a clear of one does (clear_tex). Metal's validation
     // stops at such an attachment; without it Tears of the Kingdom drew its terrain normal maps into textures made for reading only
     if (base && !(base.usage & MTLTextureUsageRenderTarget) && !mtl_fmt_block(base.pixelFormat) && base.sampleCount == 1) base = tex_upgrade(t, base, MTLTextureUsageRenderTarget, base.pixelFormat);
+    if (g_image_heap_n && base && objc_getAssociatedObject(base.parentTexture ?: base, &g_image_heap_owner_key)) g_pass_alias = 1;   // see enc_r_end_pass
     a.texture = base;
     if (has_v && v->set_levels) a.level = v->base_level;
     if (has_v && v->set_layers) { if (t->d.target == 2) a.depthPlane = v->min_layer; else a.slice = v->min_layer; }
@@ -5136,7 +5142,7 @@ static void bare_dims(NSUInteger *w, NSUInteger *h);
 static id<MTL4RenderCommandEncoder> rp_begin_ex_(int clear_only) {
     if (g_enc) return g_enc;
     memset(g_zskip_cand_ok, 0, sizeof g_zskip_cand_ok);
-    g_enc_mode = clear_only; g_enc_geo_nocolor = g_geo_omit_colors; g_pass_swrite = g_pass_order = g_pass_late_res = 0; g_sm_pass = 0;
+    g_enc_mode = clear_only; g_enc_geo_nocolor = g_geo_omit_colors; g_pass_swrite = g_pass_order = g_pass_late_res = 0; g_sm_pass = 0; g_pass_alias = 0;
     if (!R.has_rt) { RED_ONCE(3, "no render target set before the draw"); return nil; }
     if (g_imfit_npend) img_fit_upgrade();   // no pass is open here: the upgrade's copy may run (img_fit)
     // The version of the attachment-range candidate is taken before capturing any attachment; if it changes during setup, there is no continuation.
@@ -6932,6 +6938,7 @@ static void udc_note_draw(NvProg *pr, uint32_t raster_mask) {
         if (image_write) break;
     }
     if (pr && !pr->c_iw) pr->c_iw = (int8_t)(image_write + 1);
+    if (image_write && g_image_heap_n) g_pass_alias = 1;   // see enc_r_end_pass
     if (R.has_rt) for (int i = 1; i < R.rt.n && i < 8; i++)   // a slot attached twice (left unattached) really written: the writes are lost (see rt_dup_slot)
         if ((shader_color_mask >> i & 1) && ((S.chmask.mask >> (4 * i)) & 0xf) && rt_dup_slot(&R.rt, i))
             RED_ONCE(79, "color slot %d holds the same texture as an earlier slot (ser=%llu) and this draw writes it (mask %#x): these writes are lost", i, (unsigned long long)R.rt.color[i]->serial, (S.chmask.mask >> (4 * i)) & 0xf);

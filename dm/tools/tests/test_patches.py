@@ -170,17 +170,17 @@ class Registry(unittest.TestCase):
                 elif last is not None and end > last and area[end] >> 26 == 0b000101: break
                 end += 4
                 if last is not None and end - last > 4 * 40: break
-            self.assertIsNotNone(last, why)
-            def same(at, word, was):
+            self.assertIsNotNone(last, why); assert last is not None
+            def same(at, word, was, old):   # old: where the word stood in the game's code, for an adrp's page
                 if is_adrp(word) or is_adrp(was):
-                    return is_adrp(word) and is_adrp(was) and word & 0x1f == was & 0x1f and page(word, at) == page(was, off + 4 * i)
+                    return is_adrp(word) and is_adrp(was) and word & 0x1f == was & 0x1f and page(word, at) == page(was, old)
                 return word == was
             # one-word stubs run the original first or last; a sequence runs it just before the branch back
             if len(orig) == 1: self.assertIn(orig[0], [area[a] for a in range(start, last, 4)], why)
             else:
                 for i, was in enumerate(orig):
                     at = last - 4 * (len(orig) - i)
-                    self.assertTrue(same(at, area[at], was), f'{why}: word {i} at {at:#x}')
+                    self.assertTrue(same(at, area[at], was, off + 4 * i), f'{why}: word {i} at {at:#x}')
         # the state page is reached from the patch area wherever a stub loads it
         self.assertTrue(any(is_adrp(w) and page(w, a) == state for a, w in area.items()))
         # the gates name the upper bits' register for the host (x19 or x22), and the capability opens the setting

@@ -572,7 +572,6 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **The game's own model:** with the timer right, Ocarina's controller still stayed at its floor. It extrapolates the measured cost to other resolutions as if it grew with the pixel count, which its Switch 2 constants assume. On Apple GPUs this game's cost hardly depends on resolution, so full size was predicted at about five times its real cost. A controller that extrapolates from pixel count can go wrong on any host GPU whose cost has a different shape; Ocarina's was replaced by a climb on the load measured at each level, which reaches full size on an M4 Pro at 60 fps (game note).
 - **Ruled out:** the GPU clock. With macOS's `mactop` sampling during play, the GPU held about 1,562 MHz at 94% active on the M4 Pro with and without moving presentation to its own Metal queue, which removed 6 ms of idle per frame but did not change GPU time.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#dynamic-resolution), M4 Pro. Its controller and the switch that holds it at full size are in the game note.
-- **Also:** a Switch 2 game that asks the system for its frame's GPU time (`nn::oe::QueryApplicationGpuTimeSpan`) gets a fixed 8 ms unless `DM_DYNAMIC_RESOLUTION=1`, for the same reason ([services.md](services.md#switch-2-sdk-calls-whose-service-the-host-does-not-serve-vrr-refresh-rates-gl--gr-gpu-time-native-memory)).
 
 ### A full table of running GPU writes ends passes for nothing
 

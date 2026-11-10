@@ -1164,17 +1164,15 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** `SetGraphicsFrameLengthMode` is hooked and logs the mode once per change; both `oe` paths reach it. The host paces by the window's present interval (`hle_oe.c`).
 - **Found on:** [Hyrule Warriors: Age of Imprisonment](../../dm/games/04003F40232DE000/README.md): 60 / its present interval at boot.
 
-### Switch 2 SDK calls whose service the host does not serve: VRR, refresh rates, GL / GR, GPU time, native memory
+### Switch 2 SDK calls whose service the host does not serve: refresh rates, GL / GR, native memory
 
-- **Symptom:** a Switch 2 game stops at start-up: a null read in `nn::os::SdkMutexType::Lock` under `nn::vi::sdk::Initialize` (from `nn::vi::InitializeWithVrrLfcEnabled`) or under `nn::gs::sdk::QueryApplicationGpuTimeSpan`, an `sf` abort (`0xe15`) under the hid calls below, or a crash with a corrupted frame pointer after `nn::vi::QueryDisplayCurrentRefreshRate`.
-- **Cause:** each SDK body talks to a system service (vi, hid, gs) whose session the host never opens. The refresh rate is one 32-bit Hz value and a bool: an answer of two 64-bit words overwrote the caller's saved frame pointer.
+- **Symptom:** a Switch 2 game stops at start-up: an `sf` abort (`0xe15`) under `nn::hid::GetGlGrButtonConfigState`, or a crash with a corrupted frame pointer after `nn::vi::QueryDisplayCurrentRefreshRate`.
+- **Cause:** each SDK body talks to a system service (vi, hid) whose session the host never opens. The refresh rate is one 32-bit Hz value and a bool: an answer of two 64-bit words overwrote the caller's saved frame pointer.
 - **Fix:**
-  - `hle_vi.c`: `InitializeWithVrrLfcEnabled` is the same no-op as `Initialize` (the host has no VRR). `QueryDisplayCurrentRefreshRate` answers 60 Hz, the display's own. `QueryDisplayAvailableRefreshRates` lists 60 Hz alone. `SetDisplay120HzRefreshRateCapability` is logged and does nothing.
-  - `hle_hid.c`: `GetGlGrButtonConfigState` answers no GL / GR button assigned. `SetSceneIdForPrivateApp` does nothing.
-  - `hle_oe.c`: `QueryApplicationGpuTimeSpan` answers a fixed 8 ms, so a game's own dynamic resolution stays at full size, as with the player's Dynamic resolution off. With `DM_DYNAMIC_RESOLUTION=1` it answers the GPU time of the host's newest frame whose GPU work has completed (`mtl_gpu_ms`, up to 8 frames back), else 8 ms; that reading has not been run with a game yet, and the host's GPU time held Ocarina of Time's controller at its floor ([Dynamic resolution at its floor while the GPU has time to spare](frame-rate.md#dynamic-resolution-at-its-floor-while-the-gpu-has-time-to-spare)). Which frame its two arguments name is not known.
+  - `hle_vi.c`: `QueryDisplayCurrentRefreshRate` answers 60 Hz, the display's own. `QueryDisplayAvailableRefreshRates` lists 60 Hz alone. `SetDisplay120HzRefreshRateCapability` is logged and does nothing.
+  - `hle_hid.c`: `GetGlGrButtonConfigState` answers no GL / GR button assigned.
   - `hle_oe.c`: `gs::sdk::CreateNativeMemory` gives the range's address as its handle (the host reads game memory in place), and `DestroyNativeMemory` does nothing. Both are only seen as imports so far, never called, so the 8-byte handle is not checked yet.
-  - `InitializeWithVrrLfcEnabled` and `SetSceneIdForPrivateApp` return a Result of 0: whether the SDK's return void or a Result is not known, and 0 in `w0` is safe either way.
-- **Found on:** Nintendo Switch 2 Welcome Tour (`040057C02159A000`, SDK 20.5.29) in DeathKhan/nx2android on an Ayn Odin 3 (Android; taken into DroidPlay Core as enjoyerofslop/droidplay-core#158), at start-up: it asks for the refresh rates at `main+0x307a0` (`tcn::tdemo::Is60Hz`) and its GPU time every frame for its dynamic resolution. That fork answered what amounted to a fixed 8 ms. With these and the answer to `nvnDeviceCalculateAccelerationStructureMemoryRequirements` (a separate change) it reaches its title screen there.
+- **Found on:** Nintendo Switch 2 Welcome Tour (`040057C02159A000`, SDK 20.5.29) in DeathKhan/nx2android on an Ayn Odin 3 (Android; taken into DroidPlay Core as enjoyerofslop/droidplay-core#158), at start-up: it asks for the refresh rates at `main+0x307a0` (`tcn::tdemo::Is60Hz`). The other calls it stopped on there (`vi::InitializeWithVrrLfcEnabled`, `hid::SetSceneIdForPrivateApp`, `oe::QueryApplicationGpuTimeSpan`) come with seedds/nxnative#1425, its profile's PR.
 
 ### The display's largest buffer
 

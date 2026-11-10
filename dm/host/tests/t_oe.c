@@ -155,10 +155,8 @@ int main(void) {
     h_oe_SetFocusMode(3); dm_applet_enter("test");
     CHECK(empty() && h_oe_GetFocus() == 2, "focus mode 3: an applet changes the state without a notification");
     dm_applet_leave(); CHECK(empty() && h_oe_GetFocus() == 1, "focus mode 3: back to 1 without a notification");
-    // Switch 2 gs calls the host answers itself: a fixed 8 ms of GPU time without DM_DYNAMIC_RESOLUTION=1 (the game's dynamic resolution at full size), and native memory
-    // handles that are the range's address
-    { unsetenv("DM_DYNAMIC_RESOLUTION"); int64_t ns = -1; CHECK(h_oe_GpuTimeSpan(&ns, 1, 2) == 0 && ns == 8000000, "QueryApplicationGpuTimeSpan: a fixed 8 ms by default");
-      static char range[64]; uint64_t h = 0;
+    // Switch 2 gs native memory handles the host answers itself: the range's address
+    { static char range[64]; uint64_t h = 0;
       CHECK(h_gs_NativeMem(&h, range, sizeof range, 3, 0) == 0 && h == (uint64_t)(uintptr_t)range && h_gs_NativeMemFree(h) == 0, "CreateNativeMemory: the handle is the range's address"); }
     printf("== oe %d checks, %d failed ==\n", checks, fails); return fails != 0;
 }

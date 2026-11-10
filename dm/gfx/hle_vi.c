@@ -7,10 +7,6 @@ static struct { uint32_t magic; } g_display = {0x50534944}, g_layer = {0x5259414
 static struct { uint32_t magic; void *layer; } g_native = {0x4e49574e, 0};
 
 HLE_FORCE("_ZN2nn2vi10InitializeEv", "display service init; the host has no vi service", void, h_vi_Init, void) {}
-// The Switch 2 SDK's variant (Nintendo Switch 2 Welcome Tour, SDK 20.5.29): Initialize with VRR low-framerate compensation. Not taken over, its SDK body reached the vi
-// service's session lock through null (nn::os::SdkMutexType::Lock from nn::vi::sdk::Initialize, sdk+0x151fb0). The host has no VRR: nothing to do, as for Initialize.
-// Whether the SDK's returns void or a Result is not known: a Result of 0 in w0 is safe either way
-HLE_FORCE("_ZN2nn2vi27InitializeWithVrrLfcEnabledEv", "display service init with VRR LFC (Switch 2); the host has no vi service and no VRR", Result, h_vi_InitVrrLfc, void) { return RES_OK; }
 HLE_FORCE("_ZN2nn2vi18OpenDefaultDisplayEPPNS0_7DisplayE", "open default display; the host returns a static object", Result, h_vi_OpenDisp, void **out) {
     *out = &g_display; return RES_OK;
 }

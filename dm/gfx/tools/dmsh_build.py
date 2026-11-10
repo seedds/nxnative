@@ -868,8 +868,10 @@ def early_fragment_tests(ctl, code):
     the sdk of all 21 games here; Ryujinx gets it as the 3D engine's EarlyZForce). On the Switch such a shader is tested against depth before it runs; Metal otherwise tests a shader that
     stores to memory after it, and the late depth differs by an ulp from a prepass's along contours, so an EQUAL pass fails there (MacNativeGames ae8f4f4: Tears of the Kingdom's dotted
     lattice on the Great Sky Island; 1,677 of its 13,646 pixel shaders set it, none writes depth). A shader whose SPH (code, after the 0x30 header) writes depth (word 19 bit 1, OmapDepth)
-    is left as it is: tested early, the depth it computes would not be the one tested"""
-    return len(ctl) > 0x718 and ctl[0x718] != 0 and len(code) >= 0x50 and not struct.unpack_from('<I', code, 19 * 4)[0] & 2
+    is left as it is: tested early, the depth it computes would not be the one tested. NVN2 (Switch 2) keeps the flag at control +0x5b (dmsh_ampere.early_fragment_tests), its
+    0x80-byte SPH starting the code as here, with word 19 where Maxwell's has it"""
+    flag = dmsh_ampere.early_fragment_tests(ctl) if dmsh_ampere.is_nvn2(ctl) else len(ctl) > 0x718 and ctl[0x718] != 0
+    return flag and len(code) >= 0x50 and not struct.unpack_from('<I', code, 19 * 4)[0] & 2
 
 def ps_omap(code):
     """A pixel shader's output map: SPH word 18 (Maxwell's 0x50-byte SPH and NVN2's 0x80-byte one alike, at the start of the job's code; Ryujinx ShaderHeader OmapTargets),
@@ -883,8 +885,8 @@ def job_for(key, name, rec, w):
     extra = {}
     if dmsh_ampere.is_nvn2(rec[ci:]):
         # NVN2 (Switch 2): Ampere code (a 0x80-byte SPH for the graphics stages, then the instructions, control +0x38 long), which the translator's Ampere
-        # frontend reads (job arch sm86); its c1 segment lies between control +0x40 and +0x44. The NVN control fields the steps below read (VertexA / B,
-        # transform feedback, early fragment tests) are not in an NVN2 section
+        # frontend reads (job arch sm86); its c1 segment lies between control +0x40 and +0x44. The NVN control fields the NVN1 branch reads (VertexA / B,
+        # transform feedback) are not in an NVN2 section; early fragment tests are, at +0x5b (early_fragment_tests, after both branches)
         c1 = dmsh_ampere.c1_segment(rec[ci:], code)
         code = code[:dmsh_ampere.inst_len(rec[ci:])]
         extra['arch'] = 'sm86'
@@ -912,7 +914,7 @@ def job_for(key, name, rec, w):
             code = code[0x100:]
         tf = tf_layout(key, rec[ci:]) if stage in ('vs', 'gs') else None
         if tf: extra['tf'] = tf
-        if stage == 'ps' and early_fragment_tests(rec[ci:], code): extra['early_fragment_tests'] = True
+    if stage == 'ps' and early_fragment_tests(rec[ci:], code): extra['early_fragment_tests'] = True
     cp = os.path.join(w, key + '.bin'); open(cp, 'wb').write(code)
     j = {'key': key, 'stage': stage, 'code': cp, 'tex': {}, 'img': {}, 'attr': {}, 'fout': {}, 'c1': c1.hex(), **extra,
          'debug': os.environ.get('XLATE_DEBUG', '1') != '0', 'reduced': os.environ.get('XLATE_REDUCED', '1') == '1'}   # translation options (see dmsh_xlate/Program.cs); relaxed precision is on by default (GPU float last-bit error does not enter game state, whole frame −26% on the second Mac)   # c1: used by the translator to read indirect jump tables

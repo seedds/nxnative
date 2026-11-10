@@ -77,6 +77,7 @@ dm/gfx/tools/dmsh_geometry.py	shader:stage:gs	geometry shaders
 dm/gfx/tools/dmsh_facts.py	shader:stage:*	the translator's answer table
 dm/gfx/tools/dmsh_chain.*	shader:stage:*	the chain version: every NVN game's libraries are rebuilt
 dm/gfx/tools/dmsh_abi.py	shader:stage:*	the reader of the shader library ABI: every NVN game's libraries
+dm/gfx/tools/dmsh_ampere.py	shader:stage:*	the Switch 2 (NVN2) control section fields the build reads (code length, c1, early fragment tests): every NVN2 game's libraries
 dm/gfx/tools/dmsh_mtlcache.py	shader:stage:*	the Metal compile cache
 dm/gfx/tools/own_compilers.py	shader:stage:*	the tested-compiler build guard
 dm/gfx/tools/tool_lock.py	shader:stage:*	the tool lock check every NVN shader build runs first (not part of the chain version)

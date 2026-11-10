@@ -56,11 +56,21 @@ static int read_fs(const char *path, char *out, size_t n) { uint64_t h; size_t g
 // A stand-in for the SDK's own mount table: one RAM disk, and what the host asks of it (Unmount of an SDK-owned mount, GitHub issue #1012)
 extern void *(*t_guest_sym)(const char *);
 static int g_sdk_cache_mounted, g_sdk_asked, g_sdk_unmounts, g_sdk_no_is_mounted;
-static int sdk_is_mounted(const char *name) { g_sdk_asked++; return g_sdk_cache_mounted && !strcmp(name, "cache"); }
+static int g_sdk_vtapi, g_sdk_opens, g_sdk_reads, g_sdk_closes, g_sdk_types;   // a second RAM disk, "vtapi" (Nintendo Switch Sports Resort's VoiceText), and its file calls
+#define SDK_FH 0x5d0000ull   // the handle the SDK's OpenFile hands out
+static int sdk_is_mounted(const char *name) { g_sdk_asked++; return (g_sdk_cache_mounted && !strcmp(name, "cache")) || (g_sdk_vtapi && !strcmp(name, "vtapi")); }
+static Result sdk_open_file(uint64_t *out, const char *path, int mode) { (void)mode; g_sdk_opens++; if (strncmp(path, "vtapi:/", 7)) abort(); *out = SDK_FH; return RES_OK; }
+static Result sdk_read_file(size_t *out, uint64_t h, int64_t off, void *buf, size_t sz) { (void)off; g_sdk_reads++; if (h != SDK_FH || sz < 3) abort(); memcpy(buf, "sdk", 3); *out = 3; return RES_OK; }
+static void sdk_close_file(uint64_t h) { g_sdk_closes++; if (h != SDK_FH) abort(); }
+static Result sdk_entry_type(int32_t *out, const char *path) { g_sdk_types++; if (strncmp(path, "vtapi:/", 7)) abort(); *out = ENT_DIR; return RES_OK; }
 static void sdk_unmount(const char *name) { g_sdk_unmounts++; if (!g_sdk_cache_mounted || strcmp(name, "cache")) abort(); g_sdk_cache_mounted = 0; }   // as the SDK's: not mounted aborts
 static void *sdk_sym(const char *name) {
     if (!strcmp(name, "_ZN2nn2fs9IsMountedEPKc")) return g_sdk_no_is_mounted ? NULL : (void *)sdk_is_mounted;
     if (!strcmp(name, "_ZN2nn2fs7UnmountEPKc")) return (void *)sdk_unmount;
+    if (!strcmp(name, "_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci")) return (void *)sdk_open_file;
+    if (!strcmp(name, "_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm")) return (void *)sdk_read_file;
+    if (!strcmp(name, "_ZN2nn2fs9CloseFileENS0_10FileHandleE")) return (void *)sdk_close_file;
+    if (!strcmp(name, "_ZN2nn2fs12GetEntryTypeEPNS0_18DirectoryEntryTypeEPKc")) return (void *)sdk_entry_type;
     return NULL;
 }
 
@@ -301,6 +311,19 @@ int main(void) {
         g_sdk_cache_mounted = 1; g_sdk_no_is_mounted = 1; h_fs_Unmount("cache");
         CHECK(g_sdk_unmounts == 1 && g_sdk_cache_mounted, "an SDK without an IsMounted symbol: no blind Unmount");
         t_guest_sym = NULL;
+    }
+
+    {   // A mount only the SDK holds (nn::fs::MountRamDisk, which the host does not take over): its paths and the handles opened there go to the SDK's own functions
+        t_guest_sym = sdk_sym; g_sdk_vtapi = 1; g_sdk_no_is_mounted = 0; g_sdk_cache_mounted = 0;
+        CHECK(h_fs_IsMounted("vtapi"), "a RAM disk in the SDK's table is mounted");
+        uint64_t h = 0; size_t n = 0; char b[8] = {0}; int32_t t = -1;
+        CHECK(h_fs_OpenFile(&h, "vtapi:/VoiceText/vt/vtpath.ini", MODE_READ) == RES_OK && h == SDK_FH && g_sdk_opens == 1, "opening a path on it goes to the SDK");
+        CHECK(h_fs_ReadFile(&n, h, 0, b, sizeof b) == RES_OK && n == 3 && !memcmp(b, "sdk", 3) && g_sdk_reads == 1, "its handle reads through the SDK");
+        h_fs_CloseFile(h); CHECK(g_sdk_closes == 1, "and closes through the SDK");
+        CHECK(h_fs_GetEntryType(&t, "vtapi:/VoiceText") == RES_OK && t == ENT_DIR && g_sdk_types == 1, "a path call on it goes to the SDK");
+        CHECK(h_fs_GetEntryType(&t, "save:/") == RES_OK && t == ENT_DIR && g_sdk_types == 1 && g_sdk_opens == 1, "a host mount's paths stay with the host");
+        CHECK(h_fs_GetEntryType(&t, "nowhere:/x") != RES_OK && g_sdk_types == 1, "a name in neither table reaches no SDK file call");
+        t_guest_sym = NULL; g_sdk_vtapi = 0;
     }
 
     printf("⑨ saves named by a host before backslash paths\n");

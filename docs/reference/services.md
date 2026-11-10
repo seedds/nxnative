@@ -207,6 +207,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** cache storage: `OpenCacheStorageList` / `ReadCacheStorageList` report none, `CreateCacheStorage` / `MountCacheStorage` use a host folder beside the temporary storage. `fs::IsSaveDataExisting(ApplicationId, Uid)` for another title (it asks for Breath of the Wild's save: none) and `MountSaveDataReadOnly`.
 - **Found on:** [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md) (1.4.3, the same `sdk` build as Breath of the Wild 1.9.0).
 
+### File calls on a mount only the SDK holds
+
+- **Symptom:** a game that mounts a RAM disk (`nn::fs::MountRamDisk`) or another file system the host does not take over aborts on a path there being "not found": Nintendo Switch Sports Resort at boot, `Result 0x202` at `main+0x414dbc`, after `vtapi:/VoiceText/vt/vtpath.ini` failed to open.
+- **Cause:** a mount call the host does not take over runs in `sdk`, and its file system lives in the SDK's own mount table; the host's file calls (`OpenFile`, `GetEntryType`, …) answered from the host's table only. Nintendo Switch Sports Resort copies its VoiceText dictionaries from `content:/VoiceText` into a RAM disk it mounts as `vtapi` and reads them back from there.
+- **Fix:** `sdk_mount` (`hle_fs.c`): a path whose mount name the host does not hold but the SDK's `IsMounted` does goes to the SDK's own function (`guest_sym`, the module's definition rather than the host's take-over), and so does every file or directory handle such an open returned until it is closed (`sdkh_*`, up to 256 open). `IsMounted` answers for both tables. No host lock is held across the SDK's calls.
+- **Found on:** Nintendo Switch Sports Resort (`04008E001F098000`, v65536; no profile yet): boots past VoiceText to its title, on the Mac.
+- **Check:** `make -C dm/host/tests GAME=<id> run` (`t_fs`: a RAM disk in the SDK's table, its open, read, close and path calls through the SDK, host mounts untouched).
+
 ### Device save data on the account save's directory
 
 - **Symptom:** the island lives in device save data, which the host did not mount.

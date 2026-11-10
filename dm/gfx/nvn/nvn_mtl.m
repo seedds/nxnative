@@ -2063,19 +2063,42 @@ void mtl_counter_stats(uint64_t rep[32], uint64_t rst[32]) { memcpy(rep, g_cnt_r
 // They used to come from CLOCK_MONOTONIC, which keeps running while the Mac sleeps while the guest clock (mach_absolute_time) does not, so the two differed by the sleep time; once timestamps were converted to ns, Mario halved its frame rate. Graphics unit tests have a weak definition on the same clock (below)
 uint64_t guest_ns(void);
 static uint64_t gpu_ticks(void) { return nvn_timestamp_from_ns(guest_ns()); }
-// Counter timestamps by segment (profile gpu_timestamps segment; DM_NVN_GPU_TS=segment / submission overrides it). On hardware a timestamp report is written when the GPU reaches it, so two reports of one submission bracket the GPU work between them.
-// The host writes all reports of a submission in its completion handler; with one time for all of them a game that measures its GPU time that way reads 0 (Breath of the Wild: frame-interval controller and dynamic resolution).
-// In segment mode a report takes the GPU time of the segment it was encoded in (sub_cut): TIMESTAMP_TOP (0x10) that segment's GPU start, other types its GPU end. The writes stay in the last segment's handler, before the fence,
+// Counter timestamps by segment, for every game (DM_NVN_GPU_TS=submission / segment_gaps for A/B runs). On hardware a timestamp report is written when the GPU reaches it, so two reports of one submission bracket the GPU work between them.
+// The host writes all reports of a submission in its completion handler; with one time for all of them a game that measures its GPU time that way reads 0 (Breath of the Wild: frame-interval controller and dynamic resolution;
+// Mario Kart World and Donkey Kong Bananza kept their full render size however long the GPU took, Splatoon Raiders too: GitHub PR #1229, issue #1064).
+// A report takes the GPU time of the segment it was encoded in (sub_cut): TIMESTAMP_TOP (0x10) that segment's GPU start, other types its GPU end. The writes stay in the last segment's handler, before the fence,
 // so a game that waits for the fence reads one submission's reports together; a segment whose feedback has not arrived by then takes the last segment's times
 #define SEG_CLK_N 1024
-struct seg_clk { _Atomic int refs; _Atomic uint64_t t[SEG_CLK_N][2]; uint32_t nb; uint16_t b[SEG_CLK_N + 1]; uint64_t begin; };   // per submission (g_sclk, allocated at its first cut): guest ns of each cut segment's GPU start / end (0 = no feedback yet); b: with ts_on, the heap slots of the segment boundaries, segment k from b[k] to b[k + 1]
-static int seg_ts(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_GPU_TS"); v = e && *e ? !strcmp(e, "segment") : DM_GAME_GPU_TS_SEGMENT; MLOG("counter timestamps: %s (profile key gpu_timestamps; DM_NVN_GPU_TS=segment / submission)", v ? "GPU start / end time of their segment" : "one time for the whole submission"); } return v; }
+struct seg_clk { _Atomic int refs; _Atomic uint64_t t[SEG_CLK_N][2]; uint32_t nb, ncm; uint16_t b[SEG_CLK_N + 1], cm[SEG_CLK_N]; uint64_t begin; };   // per submission (g_sclk, allocated at its first report, boundary or cut): guest ns of each cut segment's GPU start / end (0 = no feedback yet); b: with ts_on, the heap slots of the segment boundaries, segment k from b[k] to b[k + 1]; cm: the segments that ended a command buffer (sub_cut's commits), in order
+static int ts_mode(void) {   // 0 submission, 1 segment (the default), 2 segment with the GPU's idle gaps kept (seg_idle_before)
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("DM_NVN_GPU_TS"); v = 1;
+        if (e && *e) { if (!strcmp(e, "submission")) v = 0; else if (!strcmp(e, "segment_gaps")) v = 2; else if (strcmp(e, "segment")) MLOG("[RED] DM_NVN_GPU_TS=%s: not segment, segment_gaps or submission; segment stands", e); }
+        MLOG("counter timestamps: %s (DM_NVN_GPU_TS=segment / segment_gaps / submission)", v == 0 ? "one time for the whole submission" : v == 1 ? "GPU start / end time of their segment, without the GPU's idle time between command buffers" : "GPU start / end time of their segment, the GPU's idle time between command buffers included"); }
+    return v;
+}
+static int seg_ts(void) { return ts_mode() > 0; }
 static void seg_clk_put(seg_clk *c) { if (c && atomic_fetch_sub(&c->refs, 1) == 1) free(c); }
 static uint64_t gpu_s_guest_ns(double s) {   // a feedback GPU time (seconds on the mach absolute time base) on the guest clock; 0 when unknown
     uint64_t now = now_ns();
     uint64_t g = guest_ns_at_host_time(now);
     double age = (double)now - s * 1e9;
     return s > 0 && age >= 0 && age < (double)g ? g - (uint64_t)age : 0;
+}
+// The GPU's idle time in a submission before a time on the guest clock: the gaps between its command buffers. A Switch GPU runs a submission's commands back to back; here it waits at each
+// of sub_cut's commits while the host translates up to the next one (a commit is made only once the GPU has run out of work), and a game that times its GPU work as the difference of two
+// reports read that wait as GPU time. agl's dynamic resolution (Mario Kart World, Donkey Kong Bananza, Splatoon Raiders) then saw its budget exceeded, stepped its render size down and up
+// again from frame to frame, and thin distant geometry flickered (Mario Kart World's mountains and bridges, 5-6 ms of gaps a frame on an M5: GitHub PR #1350; Splatoon Raiders read 16 ms
+// where the GPU worked 8: issue #1290). Lowering the resolution cannot shorten the host's translation, so the gaps are left out. A gap counts once the time is past its middle: a boundary's
+// heap stamp is written either in the command buffer before the commit or at the start of the next, never inside the gap. A command buffer with no feedback yet gives no gap.
+// c0: the GPU start of the submission's last command buffer
+static uint64_t seg_idle_before(seg_clk *sc, uint64_t ns, uint64_t c0) {
+    uint64_t idle = 0;
+    for (uint32_t i = 0; i < sc->ncm; i++) {
+        uint64_t e = atomic_load(&sc->t[sc->cm[i]][1]), s = i + 1 < sc->ncm ? atomic_load(&sc->t[sc->cm[i + 1]][0]) : c0;
+        if (e && s > e && ns >= e + (s - e) / 2) idle += s - e;
+    }
+    return idle;
 }
 static uint64_t rep_ticks(const post_op *o, seg_clk *sc, uint32_t last, uint64_t c0, uint64_t c1) {   // the time a counter report records (614.4 MHz); c0 / c1: the last segment's GPU start / end on the guest clock
     int top = o->type == 0x10; uint64_t ns = 0;
@@ -2088,10 +2111,10 @@ static uint64_t rep_ticks(const post_op *o, seg_clk *sc, uint32_t last, uint64_t
         // A stamp from before the submission began is a slot it did not write, the ring's last value there: an encoder with no work writes no relaxed timestamp (Ocarina of Time's
         // frame-start TIMESTAMP_TOP, alone in its submission, read 1.7 s early and its dynamic resolution kept its floor). Its segment's feedback time stands instead
         if (ns && sc->begin && ns + 500000 < sc->begin) ns = 0;
-        if (ns) return nvn_timestamp_from_ns(ns);
     }
-    if (sc && o->seg < last && o->seg < SEG_CLK_N) ns = atomic_load(&sc->t[o->seg][!top]);
+    if (!ns && sc && o->seg < last && o->seg < SEG_CLK_N) ns = atomic_load(&sc->t[o->seg][!top]);
     if (!ns) ns = top ? c0 : c1;
+    if (ns && sc && ts_mode() == 1) { uint64_t idle = seg_idle_before(sc, ns, c0); if (idle < ns) ns -= idle; }
     return ns ? nvn_timestamp_from_ns(ns) : gpu_ticks();
 }
 
@@ -2295,8 +2318,8 @@ static void post_complete(uint64_t fence, uint64_t c0, uint64_t c1) {
         post_rec *r = &g_postr[f % POST_RING];
         if (!post_claim(r, f)) continue;
         uint64_t start = r->t_commit;
-        if (r->sc && r->seg_last > 0 && r->seg_last <= SEG_CLK_N) {
-            uint64_t pe = atomic_load(&r->sc->t[r->seg_last - 1][1]); if (pe > start) start = pe;
+        if (r->sc && r->sc->ncm) {   // nor before the command buffer committed before it ended
+            uint64_t pe = atomic_load(&r->sc->t[r->sc->cm[r->sc->ncm - 1]][1]); if (pe > start) start = pe;
         }
         if (start > now) start = now;
         post_run(r, f == fence && c1 ? c0 : seg_ts() ? start : 0, f == fence && c1 ? c1 : seg_ts() ? now : 0);
@@ -4574,13 +4597,14 @@ static void rr_snap(const p_draw *, const p_draw_idx *);
 static void rr_reset(void);
 #endif
 static id<MTL4RenderCommandEncoder> g_enc;
-// Segment timestamps retain the existing GPU boundaries every cut_draws() draws, even when sub_cut keeps the command buffer open.
-// The encode-thread path keeps its existing feedback-based segment fallback; its exact BOTTOM stamps are recorded by DmRecCB independently of this heap.
+// Segment timestamps keep a GPU boundary every cut_draws() draws, a relaxed timestamp in a counter heap, even when sub_cut keeps the command buffer open (it commits only once the GPU
+// has run out of work). With the encode thread the timestamp writes are recorded with the encoder's other commands (nvn_rec.h RO_R_TS / RO_C_TS) and run in order, so the heap serves it too:
+// without it every boundary had to stay a commit, and as segment timestamps are every game's, every iPhone game (the encode thread is on there) would have committed every 64 draws
 enum { TS_SLOTS = 4096 };   // the largest timestamp heap Metal makes
 static uint32_t g_ts_next; static int g_ts_state, g_ts_s0;   // state: 0 not tried, 1 on, -1 off; s0: the slot of this submission's first boundary
 static int ts_on(void) {
     if (!g_ts_state) { g_ts_state = -1;
-        if (seg_ts() && !rec_on()) { MTL4CounterHeapDescriptor *hd = [MTL4CounterHeapDescriptor new]; hd.type = MTL4CounterHeapTypeTimestamp; hd.count = TS_SLOTS; NSError *er = nil;
+        if (seg_ts()) { MTL4CounterHeapDescriptor *hd = [MTL4CounterHeapDescriptor new]; hd.type = MTL4CounterHeapTypeTimestamp; hd.count = TS_SLOTS; NSError *er = nil;
             g_ts_heap = [g_dev newCounterHeapWithDescriptor:hd error:&er];
             if (g_ts_heap) g_ts_state = 1; else MLOG("[RED] counter timestamps: no counter heap (%s): every segment boundary stays a commit", er.description.UTF8String); } }
     return g_ts_state > 0;
@@ -14640,7 +14664,7 @@ static void sub_cut(void) {
     up_flush();
     uint64_t f = atomic_load(&g_cur_frame); gpu_tag_begin(f);
     uint32_t k = g_seg++; seg_clk *sc = NULL;   // reports encoded so far keep this segment's GPU times (seg_ts)
-    if (seg_ts()) { if (!g_sclk) { g_sclk = calloc(1, sizeof *g_sclk); atomic_store(&g_sclk->refs, 1); } sc = g_sclk; atomic_fetch_add(&sc->refs, 1); }
+    if (seg_ts()) { if (!g_sclk) { g_sclk = calloc(1, sizeof *g_sclk); if (!g_sclk) MDIE("segment clock allocation failed"); atomic_store(&g_sclk->refs, 1); } sc = g_sclk; atomic_fetch_add(&sc->refs, 1); if (k < SEG_CLK_N) sc->cm[sc->ncm++] = (uint16_t)k; }   // this command buffer ends with segment k (seg_idle_before)
     cbs_list *cbs = cbs_take(); uint64_t cbs_fence = g_fence + 1;
     MTL4CommitOptions *o = [MTL4CommitOptions new];
     atomic_fetch_add(&g_seg_inflight, 1);

@@ -37,8 +37,9 @@ static void target(recording *r,const tex_t *t,int lv,int slot,const tex_t *othe
 }
 static void finish(recording *r) {
     NVNcommandHandle h=h_nvnCommandBufferEndRecording(&r->cb);state_reset();memset(&R,0,sizeof R);
-    mtl_sub_begin();mtl_exec(nvn_rec_linear(h, NULL));
+    uint8_t *commands=nvn_rec_linear(h, NULL);mtl_sub_begin();mtl_exec(commands);
     int done=mtl_wait(mtl_sub_commit(),5000000000ull);EXPECT("production GPU done",1,done);if(!done)abort();EXPECT("no error in commit feedback",0,mtl_last_commit_error());
+    free(commands);   // nvn_rec_linear returns an owned copy; keep it until replay and GPU completion.
     mtl_pool_del(r->mem);free(r->mem);
 }
 static void seed(const tex_t *t) {

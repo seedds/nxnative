@@ -104,6 +104,17 @@ static void t_npads(void) {
     CHECK(buttons_of(0, STYLE_FULLKEY) == DM_BTN_Y && lx_of(0) == 0, "player 1 does not see player 2");
     CHECK(buttons_of(1, STYLE_HANDHELD) == 0, "player 2 is not a handheld controller");
     CHECK(h_hid_Led(&(uint32_t){0}) == 0x1 && h_hid_Led(&(uint32_t){1}) == 0x3 && h_hid_Led(&(uint32_t){7}) == 0x6, "player LED patterns");
+    {   // Switch 2 (SDK 22): the controller icons' colours and the controller IMU, which the SDK's own read from the hid service the host does not serve
+        uint32_t col[2] = {0}, ic[3] = {0}, l[3] = {0}, r[3] = {0};
+        h_hid_Color(col, &(uint32_t){0});
+        CHECK(h_hid_IconColor(ic, &(uint32_t){0}) == RES_OK && ic[0] == col[0] && ic[1] == col[1] && ic[2] == col[0], "icon colours: the controller's body and buttons, the body again third");
+        CHECK(h_hid_IconColor2(l, r, &(uint32_t){0}) == RES_OK && !memcmp(l, ic, sizeof ic) && !memcmp(r, ic, sizeof ic), "left and right Joy-Con icons the same colours");
+        CHECK(!h_hid_ImuIsOn(), "the controller IMU starts off");
+        uint8_t work[64]; uint8_t samples[256];
+        CHECK(h_hid_ImuOn(work, sizeof work) == RES_OK && h_hid_ImuIsOn(), "EnableNpadImu turns it on");
+        CHECK(h_hid_ImuSamples(samples, 4, 0) == 0, "and the host gives no samples (open: its motion as NpadImuSample entries)");
+        CHECK(h_hid_ImuOff() == RES_OK && !h_hid_ImuIsOn(), "DisableNpadImu turns it off");
+    }
     int32_t info[2]; int8_t arg[8] = {1, 4};
     CHECK(h_hid_ShowCtrl(info, arg) == RES_OK && info[0] == 2 && info[1] == 0, "the controller applet reports two players, player 1 selected");
     CHECK(applet_opens == 1 && applet_depth == 0 && applet_closes_at_depth0 == 1, "the controller applet opens and closes once around its answer (focus 2, then 1)");

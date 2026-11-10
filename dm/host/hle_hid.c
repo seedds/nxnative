@@ -1095,6 +1095,13 @@ HLE_FORCE("_ZN2nn3hid19GetPlayerLedPatternERKj", "player LED: the Switch's patte
 static void ctrl_color(uint32_t *c) { c[0] = 0xff828282u; c[1] = 0xff0f0f0fu; }
 HLE_FORCE("_ZN2nn3hid22GetNpadControllerColorEPNS0_19NpadControllerColorERKj", "controller color", Result, h_hid_Color, uint32_t *c, const uint32_t *id) { (void)id; ctrl_color(c); return RES_OK; }
 HLE_FORCE("_ZN2nn3hid22GetNpadControllerColorEPNS0_19NpadControllerColorES2_RKj", "left and right Joy-Con colors", Result, h_hid_Color2, uint32_t *l, uint32_t *r, const uint32_t *id) { (void)id; ctrl_color(l); ctrl_color(r); return RES_OK; }
+// The colours a Switch 2 game draws its controller icons in (SDK 22), 12 bytes: the SDK's own reads them from the npad's shared-memory state, which the host does not keep, and
+// aborted on the error (Nintendo Switch Sports Resort: Result 0x58cca at sdk+0x6cab6c). The controller colours above, the body's again as the third
+static void icon_color(uint32_t *c) { ctrl_color(c); c[2] = c[0]; }
+HLE_FORCE("_ZN2nn3hid29GetNpadJoyIconDecorationColorEPNS0_26NpadJoyIconDecorationColorERKj", "controller icon colours: the controller colours", Result, h_hid_IconColor,
+          uint32_t *c, const uint32_t *id) { (void)id; icon_color(c); return RES_OK; }
+HLE_FORCE("_ZN2nn3hid29GetNpadJoyIconDecorationColorEPNS0_26NpadJoyIconDecorationColorES2_RKj", "left and right Joy-Con icon colours: the controller colours", Result, h_hid_IconColor2,
+          uint32_t *l, uint32_t *r, const uint32_t *id) { (void)id; icon_color(l); icon_color(r); return RES_OK; }
 HLE_FORCE("_ZN2nn3hid21ShowControllerSupportERKNS0_20ControllerSupportArgE", "controller applet (no result wanted); the host answers as the overload above", Result, h_hid_ShowCtrl0, const int8_t *arg) { DM_APPLET("controller support"); return ctrl_support(NULL, arg); }
 HLE_FORCE("_ZN2nn3hid24ShowControllerStrapGuideEv", "strap guide applet; not shown by the host", Result, h_hid_Strap, void) { DM_APPLET("controller strap guide"); return RES_OK; }
 HLE_FORCE("_ZN2nn3hid24ShowControllerStrapGuideERKNS0_13StrapGuideArgE", "strap guide applet with its argument (SDK 22); not shown by the host", Result, h_hid_StrapArg, const void *arg) { DM_APPLET("controller strap guide"); (void)arg; return RES_OK; }
@@ -1148,6 +1155,20 @@ HLE_FORCE("_ZN2nn3hid17GetDebugPadStatesEPNS0_13DebugPadStateEi", "debug pad sta
     int64_t top = atomic_fetch_add(&g_sampling, 1) + 1;
     for (int i = 0; i < n; i++) { memset(s + 32 * i, 0, 32); *(int64_t *)(s + 32 * i) = top - i; }
     return n > 0 ? n : 0;
+}
+// The IMU of a Switch 2 controller (SDK 22): EnableNpadImu hands a work buffer to the hid service as transfer memory, which the service fills with samples that GetNpadImuSamples
+// reads per controller; the SDK's sensor fusion (InitializeSensorFusion, GetSensorFusionOrientations) runs on top of them in sdk. The host serves no hid, so the SDK's own aborted
+// (Nintendo Switch Sports Resort: Result 0xe15 at sdk+0x6d6948, InitializeSensorFusion's call). The host records the setting and gives no samples yet: fusion keeps its first
+// orientation (open: the host's motion as NpadImuSample entries)
+static _Atomic int g_npad_imu;
+HLE_FORCE("_ZN2nn3hid13EnableNpadImuEPvm", "controller IMU: on, the host fills no samples", Result, h_hid_ImuOn, void *buf, size_t sz) {
+    if (!atomic_exchange(&g_npad_imu, 1)) LOG("hid: EnableNpadImu (work buffer %zu bytes): on, with no samples from the host", sz);
+    (void)buf; return RES_OK;
+}
+HLE_FORCE("_ZN2nn3hid14DisableNpadImuEv", "controller IMU: off", Result, h_hid_ImuOff, void) { atomic_store(&g_npad_imu, 0); return RES_OK; }
+HLE_FORCE("_ZN2nn3hid16IsNpadImuEnabledEv", "controller IMU: as the game set it", bool, h_hid_ImuIsOn, void) { return atomic_load(&g_npad_imu) != 0; }
+HLE_FORCE("_ZN2nn3hid17GetNpadImuSamplesEPNS0_13NpadImuSampleEiNS0_13NpadImuHandleE", "controller IMU samples: none", int, h_hid_ImuSamples, void *out, int n, uint32_t h) {
+    (void)out; (void)n; (void)h; return 0;
 }
 HLE_FORCE("_ZN2nn3hid20FinalizeSensorFusionEv", "end of sensor fusion (SDK 22): the host keeps no IMU state to disable", void, h_hid_FusionFin, void) {}
 HLE_FORCE("_ZN2nn3hid25EnableSixAxisSensorFusionERKNS0_19SixAxisSensorHandleEb", "six-axis sensor fusion; ignored by the host", void, h_hid_SixFusionOn, const uint32_t *h, uint32_t on) { (void)h; (void)on; }

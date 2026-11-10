@@ -307,6 +307,15 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Found on:** [Super Mario Odyssey](../../dm/games/0100000000010000/README.md): it reads all 16 history entries per sensor and ignores the count, like its npad history ([History reads fill every requested entry](#history-reads-fill-every-requested-entry)).
 - **Note:** find a game's swing detector by probing the accelerometer value it reads (`DM_PROBE=main:626248@x8+10` in Odyssey 1.4.1).
 
+### Switch 2 controller icon colours and IMU calls
+
+- **Symptom:** a Switch 2 game aborts at boot inside the SDK's hid calls: Nintendo Switch Sports Resort with `Result 0x58cca` at `sdk+0x6cab6c` (`GetNpadJoyIconDecorationColor`) and, past that, `Result 0xe15` at `sdk+0x6d6948` (`InitializeSensorFusion`'s call to `EnableNpadImu`).
+- **Cause:** SDK 22's `GetNpadJoyIconDecorationColor` reads the npad's shared-memory state, and `EnableNpadImu` hands a work buffer to the hid service as transfer memory for it to fill with the controller's IMU samples; the host keeps neither and serves no hid, so the SDK's own functions failed.
+- **Fix:** `hle_hid.c` answers the icon colours (both overloads) with the controller colours `GetNpadControllerColor` gives, the body's again as the third, and records `EnableNpadImu` / `DisableNpadImu` for `IsNpadImuEnabled`. `GetNpadImuSamples` returns no samples, so the SDK's sensor fusion keeps its first orientation.
+- **Open:** the host's controller motion ([Live controller motion](#live-controller-motion)) as `NpadImuSample` entries; until then a Switch 2 game's motion controls and its Joy-Con calibration do not work (Nintendo Switch Sports Resort's calibration cannot finish and is skipped).
+- **Found on:** Nintendo Switch Sports Resort (`04008E001F098000`, v65536; no profile yet): boots to its title and menus, on the Mac.
+- **Check:** `make -C dm/host/tests GAME=<id> run` (`t_hid`).
+
 ### Switch 2 controllers over Bluetooth LE
 
 - **Symptom:** a Joy-Con 2 or Pro Controller 2 does not appear in the Mac's Bluetooth menu, or as a GameController or HID device; the game sees no controller.

@@ -60,8 +60,11 @@ class OutputSize(unittest.TestCase):
     def put(self, off, words, why):
         self.u.mem_write(self.base + off, struct.pack('<' + 'I' * len(words), *words))
 
-    def shape(self, ratio):
+    def shape(self, ratio, pixels=0):
+        """The loader's factors for a shape (loader.c screen_any_write_), both lowered by one number to a pixel bound (screen_pixels_cap, DM_SCREEN_PIXELS; 0 the stub's own)"""
         f = (ratio, max(ratio * 9 / 16, 1), max(16 / (9 * ratio), 1)) if ratio else (0, 1, 1)
+        if ratio and pixels and f[1] * f[2] > pixels:
+            s = (pixels / (f[1] * f[2])) ** 0.5; f = (ratio, f[1] * s, f[2] * s)
         self.u.mem_write(self.state + 0xa0, struct.pack('<3f', *f))
         self.u.mem_write(self.state + 0xc4, struct.pack('<2f', *camera(ratio)))
 
@@ -112,6 +115,28 @@ class OutputSize(unittest.TestCase):
             self.assertGreater(w * h, 1.5 * 2048 * 1152 * 0.97, ratio)   # scaled down only as far as the bound
             self.assertLess(abs(w / h / ratio - 1), 0.01, ratio)
             self.assertEqual((w % 8, h % 8), (0, 0))
+
+    def test_a_phone_upright(self):
+        # The iPhone 17 upright (screen shape 0.460, the game's handheld 1920x1080): 1200x2600 at the stub's 1.5x bound (the device log's "present: picture shape 1200x2600"),
+        # 976x2120 with DM_SCREEN_PIXELS=1
+        self.shape(0.460)
+        self.assertEqual(self.call(1920, 1080)[1], (1200, 2600))
+        self.shape(0.460, 1.0)
+        self.assertEqual(self.call(1920, 1080)[1], (976, 2120))
+
+    def test_a_lower_pixel_bound_from_the_loader(self):
+        for pixels in (0.5, 1.0, 1.25):
+            for ratio in (1179 / 2556, 0.460, 0.75, 1.3, 2.174, 3.0):
+                for req in ((1920, 1080), (2048, 1152), (1536, 864)):
+                    self.shape(ratio); full = self.call(*req)[1]
+                    self.shape(ratio, pixels); _, (w, h) = self.call(*req)
+                    if full[0] * full[1] <= pixels * req[0] * req[1] * 1.01:
+                        self.assertLessEqual(abs(w - full[0]) + abs(h - full[1]), 8, (pixels, ratio, req))   # under the bound already: as it is
+                        continue
+                    self.assertLessEqual(w * h, pixels * req[0] * req[1] * 1.02, (pixels, ratio, req))
+                    self.assertGreater(w * h, pixels * req[0] * req[1] * 0.96, (pixels, ratio, req))   # down to the bound only
+                    self.assertLess(abs(w / h / ratio - 1), 0.012, (pixels, ratio, req))   # the same shape
+                    self.assertEqual((w % 8, h % 8), (0, 0))
 
     def test_the_shape_holds_to_a_multiple_of_8(self):
         for ratio in (1.3, 1.43, 1.6, 2.0, 2.2, 2.4):

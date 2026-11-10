@@ -1521,6 +1521,9 @@ void front_run(void (*guest)(void)) {
         g_layer = [CAMetalLayer layer];
         g_layer.device = MTLCreateSystemDefaultDevice();
         g_layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+        // The SDR layer says its picture is sRGB: untagged, macOS takes it as the screen's own colour space. Fullscreen on a 4K HDR TV over HDMI in HDR mode, with nothing over the layer,
+        // showed a magenta band that came and went, gone with the menu bar shown or the screen mirrored, so on the path where the system shows the layer without compositing it
+        { CGColorSpaceRef srgb = CGColorSpaceCreateWithName(kCGColorSpaceSRGB); g_layer.colorspace = srgb; CGColorSpaceRelease(srgb); }
         g_layer.contentsScale = win.backingScaleFactor;
         // Apple's HUD over the game (frame rate, frame and GPU time, memory): front_hud_env turns it on before the first device. The layer's developerHUDProperties
         // stay unset: mode=default forces this layer's HUD on, so the Metal HUD menu's Hide HUD left it on screen

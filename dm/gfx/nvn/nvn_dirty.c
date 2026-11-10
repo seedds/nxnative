@@ -342,8 +342,9 @@ void nvn_dirty_mp_stats(uint64_t *calls, uint64_t *pages, uint64_t *ns) {
 // take them from the page itself while it is still read-only). Only pages still protected since the upload are given (a page the game wrote since holds what the host has not taken
 // yet), and only those of a single tracked range (a page shared by two pools is left). The page is BUSY meanwhile, so a fault waits; it is writable only for madvise (which refuses
 // read-only pages) and read-only again before it is looked at: a byte that changed in between was a game write, which keeps the page and dirties it as a fault would, or the system
-// reclaiming it at once (all zeros), which gets the host's copy back. The memory goes at the system's next need: until then the page still reads as before. A write later faults
-// (it is read-only) and madvises the page's bytes back (MADV_FREE_REUSE). (Ported from the kartnative/plumber-racer-2 line's same-named path, credited there; the locking and the
+// reclaiming it at once (all zeros), which gets the host's copy back. The memory goes at the system's next need: until then the page still reads as before, and after it the page
+// reads as zeros: nothing puts the old bytes back, so a caller gives only what the game no longer has to read from its own memory (soft_sweep: a texture's finest level after its grace). A
+// write later faults as a write to any protected page does and dirties it; the only MADV_FREE_REUSE is the one below, for a page that changed during the release. (Ported from the kartnative/plumber-racer-2 line's same-named path, credited there; the locking and the
 // descriptor lifetime follow this file's own rules.)
 __attribute__((weak)) int dm_guest_file_backed(void) { return 0; }   // hle_svc.c: guest memory in a file (DM_GUEST_FILE) is not the process's: nothing to give back
 static _Atomic uint64_t g_released;

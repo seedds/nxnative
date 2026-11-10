@@ -2798,9 +2798,9 @@ static int tex_atomic_alias(id<MTLTexture> base) {
 // Soft textures (the kartnative/plumber-racer-2 feature, ported on their terms into this tree): a large block-compressed packed texture loaded by the game is kept without its
 // finest level, on the GPU and in guest memory: its host texture is that of level 1 (half the size, one level less, sampled through the same normalized coordinates), and the pages
 // only level 0 holds go back to the system (tex_soft_release, then soft_sweep after a wait) and are never read again. About three quarters of a texture's bytes, twice over
-// (Mario Kart World's game streams its 8192x8192 terrain arrays; the game's own copy sources are kept whole, soft_harden). Level numbers the game names (views, copies) are one
+// (Mario Kart World's game streams its 8192x8192 terrain arrays; a texture a GPU copy reads or writes is made whole, soft_harden). In one that stays soft, a level the game names in a copy is one
 // lower here: tex_soft_level. Reads of the size in a shader see the smaller size. The gate: DM_NVN_TEX_SOFT=1 (profile tex_soft in the source line; here only the env row for now)
-static nvn_hmap g_soft_hard = {.klen = 8};   // storage of textures the game copies from (soft_harden): those stay whole, as the copy needs what the game has at that level; under g_smu
+static nvn_hmap g_soft_hard = {.klen = 8};   // storage of textures a GPU copy reads or writes (soft_harden): those stay whole, as the copy needs what the game has at that level; under g_smu
 static id<MTLTexture> pkg_upload(const tex_t *t, uint64_t *stamp, id<MTLTexture> reuse, MTLTextureUsage keep);
 static int tex_soft(const tex_t *t) {
     static int on = -1; if (on < 0) { const char *e = getenv("DM_NVN_TEX_SOFT"); on = e && *e ? atoi(e) != 0 : 0; if (on) MLOG("large block-compressed textures kept without their finest level (DM_NVN_TEX_SOFT=1)"); }
@@ -2844,14 +2844,16 @@ static void soft_sweep(void) {
     g_nsoft_pend = keep; g_soft_released += freed;
     static unsigned n; if (freed && (n++ < 4 || !(n & (n - 1)))) MLOG("soft textures: %llu MB of finest levels' storage given back so far", (unsigned long long)(g_soft_released >> 20));
 }
-// The game copies from this texture: if it is soft, it goes whole from here on, uploaded again now with its finest level. Its storage still holds that level unless the texture has
-// lived SOFT_WAIT frames unused as a source (a released one's copy of that level is skipped and its keys scored as dropped)
+// A GPU copy reads or writes this texture: if it is soft, it goes whole from here on, uploaded again now with its finest level, so the copy takes the ordinary path at the level the
+// game names and a copy into it reaches its storage (gsb_store refuses a half-size host texture). Its storage still holds the finest level unless DM_NVN_TEX_RELEASE gave it back
+// after SOFT_WAIT frames: that texture stays soft, and the copy takes the level one lower in its host texture, or is skipped at level 0, which is nowhere (tex_soft_level).
+// The upload here waits for no held GPU store (gsb_held, as tex_mtl_ does): a soft texture's storage has none, since gsb_store refuses it and every copy into it comes here first
 static void soft_harden(const tex_t *t) {
     if (!t || !tex_soft(t) || (t->pool && t->pool->magic != MAGIC('P', 'O', 'O', 'L'))) return;
     id have = tex_get(t->serial); NvPkg *pk = [have isKindOfClass:[NvPkg class]] ? have : nil;
-    if (pk && pk->released) { static uint64_t n; if (!n++) MLOG("[RED] copy from a soft texture whose finest level has gone back (first case ser=%llu %ux%u format %#x): copy of that level skipped", (unsigned long long)t->serial, t->d.width, t->d.height, t->d.format); return; }
+    if (pk && pk->released) { static uint64_t n; if (!n++) MLOG("[RED] GPU copy from or into a soft texture whose finest level has gone back (first case ser=%llu %ux%u format %#x): it stays soft, a copy of that level is skipped", (unsigned long long)t->serial, t->d.width, t->d.height, t->d.format); return; }
     uint64_t k = (uint64_t)(uintptr_t)t->mem; pthread_mutex_lock(&g_smu); nvn_hm_put(&g_soft_hard, &k, (void *)1); pthread_mutex_unlock(&g_smu);
-    static uint64_t nh; if (nh++ < 4 || !(nh & (nh - 1))) MLOG("soft textures: kept whole, the game copies from it: ser=%llu %ux%ux%u format %#x (%llu so far)", (unsigned long long)t->serial, t->d.width, t->d.height, t->d.depth, t->d.format, (unsigned long long)nh);
+    static uint64_t nh; if (nh++ < 4 || !(nh & (nh - 1))) MLOG("soft textures: kept whole, the game copies from or into it: ser=%llu %ux%ux%u format %#x (%llu so far)", (unsigned long long)t->serial, t->d.width, t->d.height, t->d.depth, t->d.format, (unsigned long long)nh);
     if (!pk) return;
     uint64_t st; id<MTLTexture> nt = pkg_upload(t, &st, nil, pk->tex.usage);
     if (!nt) return;
@@ -3398,7 +3400,7 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
                 size_t srow = t->L.layer_size / (t->d.height ? t->d.height : 1);
                 if (l || y || z != 1 || srow < pitch || srow * rows > t->L.size) { RED_ONCE(153, "linear texture upload: %ux%u format %#x target %d levels %u is not one 2D level of rows (stride %zu)", t->d.width, t->d.height, t->d.format, t->d.target, t->d.levels, srow); break; }
                 for (size_t r = 0; r < rows; r++) memcpy((uint8_t *)stg.contents + off + r * pitch, src + r * srow, pitch);
-            } else if (nvn_deswizzle(&t->d, l, y, src, (uint8_t *)stg.contents + off, pitch)) { RED_ONCE(9, "deswizzle failed format %#x target %d", t->d.format, t->d.target); break; }
+            } else if (nvn_deswizzle(&t->d, l + sk, y, src, (uint8_t *)stg.contents + off, pitch)) { RED_ONCE(9, "deswizzle failed format %#x target %d", t->d.format, t->d.target); break; }
             if (rb_shift) rb_swap_rows((uint8_t *)stg.contents + off, pitch, rows, z, pitch, pitch * rows, rb_shift);
             if (zb && l < 16) { const uint64_t *q = (const uint64_t *)((const uint8_t *)stg.contents + off); size_t nb = pitch * rows * z / 16;
                 for (size_t i = 0; i < nb; i++) g_zb[l] += !(q[2 * i] | q[2 * i + 1]);
@@ -13982,11 +13984,13 @@ static void copy_t2b(const p_copy_b2t *c, uint32_t size) {
     rp_flush();   // Materialize pending clears before reading, matching copy_t2t.
     g_wr_epoch++; g_mdx_epoch++;
     if (c->tex) xv_check(c->tex->serial, c->has_view && c->view.set_levels ? c->view.base_level : 0, c->has_view && c->view.set_layers ? c->view.min_layer : 0, "texture-to-buffer copy");
+    if (!c->tex) return;   // no texture, no host texture below
     soft_harden(c->tex);
     id<MTLTexture> t = tex_mtl(c->tex);
     if (!t) return;
     int bw, bh, bpb = nvn_fmt_bpb(c->tex->d.format, &bw, &bh);
     unsigned level = c->has_view && c->view.set_levels ? c->view.base_level : 0, layer0 = c->has_view && c->view.set_layers ? c->view.min_layer : 0;
+    if (!tex_soft_level(c->tex, &level)) return;   // still soft (soft_harden: its finest level has gone back): the level in its host texture, none for level 0
     if (!tex_level_ok(t, level, "texture-to-buffer copy")) return;
     const p_copy_strides *cs = copy_strides(c, size); int64_t rs = cs ? cs->row : S.copy_stride, is = cs ? cs->image : S.copy_img_stride;   // S: OP_COPY_STRIDE of an older capture
     size_t row = rs ? (size_t)rs : (size_t)((c->r.width + bw - 1) / bw) * bpb;
@@ -14093,11 +14097,14 @@ static size_t mtl_pf_block_bytes(MTLPixelFormat pf) {   // bytes per texel, or p
 }
 static void copy_b2t(const p_copy_b2t *c, uint32_t size) {
     if (c->tex) zskip_del(c->tex->serial);
+    if (!c->tex) return;   // no texture, no host texture below
+    soft_harden(c->tex);   // a soft texture a GPU copy writes into is made whole first, as one it reads: in the half-size host texture the copy landed one level off
     id<MTLTexture> t = tex_mtl(c->tex); sparse_gpu_wrote(c->tex);
     if (!t) { PD("C ser=%llu (no host texture)", c->tex->serial); return; }
     int bw, bh, bpb = nvn_fmt_bpb(c->tex->d.format, &bw, &bh);
     unsigned level = c->has_view && c->view.set_levels ? c->view.base_level : 0, layer0 = c->has_view && c->view.set_layers ? c->view.min_layer : 0;
-    if (!tex_level_ok(t, level, "buffer-to-texture copy")) return;
+    unsigned hl = level;   // the level in the host texture: the game's, but for a texture that stays soft (soft_harden), where level 0 is nowhere and the copy is skipped
+    if (!tex_soft_level(c->tex, &hl) || !tex_level_ok(t, hl, "buffer-to-texture copy")) return;
     const p_copy_strides *cs = copy_strides(c, size); int64_t rs = cs ? cs->row : S.copy_stride, is = cs ? cs->image : S.copy_img_stride;   // S: OP_COPY_STRIDE of an older capture
     size_t row = rs ? (size_t)rs : (size_t)((c->r.width + bw - 1) / bw) * bpb;
     size_t rows = (c->r.height + bh - 1) / bh, img = is ? (size_t)is : row * rows;   // per layer: SetCopyImageStride, else tightly packed
@@ -14120,10 +14127,10 @@ static void copy_b2t(const p_copy_b2t *c, uint32_t size) {
     }
     id<MTL4ComputeCommandEncoder> b = blit();
     if (is3d)
-        enc_b_copy_buffer_texture(b, sb, mo, row, img, MTLSizeMake(c->r.width, c->r.height, nz), t, 0, level, MTLOriginMake(c->r.xoffset, c->r.yoffset, c->r.zoffset));
+        enc_b_copy_buffer_texture(b, sb, mo, row, img, MTLSizeMake(c->r.width, c->r.height, nz), t, 0, hl, MTLOriginMake(c->r.xoffset, c->r.yoffset, c->r.zoffset));
     else
         for (int z = 0; z < nz; z++)
-            enc_b_copy_buffer_texture(b, sb, mo + z * img, row, img, MTLSizeMake(c->r.width, c->r.height, 1), t, layer0 + c->r.zoffset + z, level, MTLOriginMake(c->r.xoffset, c->r.yoffset, 0));
+            enc_b_copy_buffer_texture(b, sb, mo + z * img, row, img, MTLSizeMake(c->r.width, c->r.height, 1), t, layer0 + c->r.zoffset + z, hl, MTLOriginMake(c->r.xoffset, c->r.yoffset, 0));
     // The copy writes the texture's storage too, as the hardware's does, when the CPU can read it: stored on the GPU after it, from the same source bytes (gsb_store_buf). Yoshi's Crafted
     // World's texture streamer (Unreal's RHIAsyncReallocateTexture2D) copies resident levels on the GPU into a texture it fills from the CPU, uploaded from its storage; Star Fox streams
     // BC7 arrays a level of a layer per copy; LEGO Star Wars: The Skywalker Saga fills BC6H volumes a slice per copy and moves them by copying their storage (GitHub #1856)
@@ -14296,6 +14303,7 @@ static int bc_alias_copy(const p_copy_t2t *c, id<MTLTexture> s, unsigned sl, uns
         if (!g_treg[i].ok || g_treg[i].gone || t->mem != dt->mem || t->serial == dt->serial || t->d.target != NVN_TEXTURE_TARGET_2D) continue;
         if ((t->d.width + 3) / 4 != dt->d.width || (t->d.height + 3) / 4 != dt->d.height) continue;
         uint32_t mf = 0; if (!nvn_fmt_to_mtl(t->d.format, &mf, NULL) || bc_block_bytes((MTLPixelFormat)mf) != (int)tb) continue;
+        soft_harden(t); if (tex_soft(t)) continue;   // the copy writes into the compressed texture: made whole first; one that stays soft (soft_harden) is not written through the alias
         id<MTLTexture> m = tex_mtl(t); while (m.parentTexture) m = m.parentTexture;
         if (m && bc_block_bytes(m.pixelFormat) == (int)tb) { bc = m; bser = t->serial; }
     }
@@ -14340,10 +14348,11 @@ static id<MTLTexture> copy_t2t_enc(const p_copy_t2t *c) {
     if (!s || !c->dst) return nil;
     unsigned sl = c->has_sv && c->sv.set_levels ? c->sv.base_level : 0, dl = c->has_dv && c->dv.set_levels ? c->dv.base_level : 0;
     unsigned sz0 = c->has_sv && c->sv.set_layers ? c->sv.min_layer : 0, dz0 = c->has_dv && c->dv.set_layers ? c->dv.min_layer : 0;
-    if (!tex_level_ok(s, sl, "texture copy source")) return nil;
+    if (!tex_soft_level(c->src, &sl) || !tex_level_ok(s, sl, "texture copy source")) return nil;   // sl, dl: the levels in the host textures, the game's but for a texture that stays soft (soft_harden)
     if (bc_alias_copy(c, s, sl, sz0, dl, dz0)) return nil;   // the destination aliases a compressed texture: the bytes go there, and the alias's own texture is not made (see bc_alias_copy)
+    soft_harden(c->dst);   // a soft destination is made whole first, as the source is: in the half-size host texture the copy landed one level off and gsb_store refused it
     id<MTLTexture> d = tex_mtl(c->dst); sparse_gpu_wrote(c->dst);
-    if (!d || !tex_level_ok(d, dl, "texture copy destination")) return nil;
+    if (!d || !tex_soft_level(c->dst, &dl) || !tex_level_ok(d, dl, "texture copy destination")) return nil;
     if (c->flags & DM_COPY_RESOLVE) {   // Downsample: multisample resolve into the single-sample destination (depth takes sample 0); with equal sample counts it is a plain whole copy
         if (s.sampleCount == d.sampleCount && s.pixelFormat == d.pixelFormat && s.width == d.width && s.height == d.height) {
             enc_b_copy_texture(blit(), s, sz0, sl, MTLOriginMake(0, 0, 0), MTLSizeMake(s.width, s.height, 1), d, dz0, dl, MTLOriginMake(0, 0, 0));

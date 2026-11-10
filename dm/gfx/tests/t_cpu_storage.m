@@ -35,6 +35,18 @@ static uint8_t first_red(id<MTLTexture> image) {   // the red of texel (3, 5), r
     CHECK("readback completes", cb.status == MTLCommandBufferStatusCompleted);
     return *(uint8_t *)out.contents;
 }
+static uint8_t stored_red(const tex_t *t) {   // the red of texel (3, 5) of level 0, as the storage holds it
+    uint8_t *linear = malloc((size_t)t->d.width * t->d.height * 4);
+    CHECK("fixture deswizzle succeeds", !nvn_deswizzle(&t->d, 0, 0, t->mem, linear, t->d.width * 4));
+    uint8_t red = linear[(5 * t->d.width + 3) * 4];
+    free(linear);
+    return red;
+}
+static void gpu_clear(tex_t *t, float red) {   // a texture clear: recorded (the storage's span is stamped), replayed, completed
+    mtl_tex_gpu_written(t);
+    p_clear_tex c = {.tex = t, .r = {0, 0, 0, (int)t->d.width, (int)t->d.height, 1}, .mask = 15, .c.f = {red, 0, 0, 1}};
+    mtl_sub_begin(); clear_tex(&c); finish();
+}
 static id<MTLTexture> resolve(tex_t *t) { mtl_sub_begin(); id<MTLTexture> image = tex_mtl(t); CHECK("texture resolves", image != nil); finish(); return image; }
 typedef struct { void *mem; pool_t pool; tex_t t; } fixture;
 static tex_t texture_at(fixture *f, uint64_t serial, uint64_t off, uint32_t size, int format, uint32_t tex_flags) {
@@ -209,6 +221,71 @@ int main(void) {
             CHECK(left_out[i].label, !tex_cpu_content(&f.t));
             teardown(&f);
         }
+
+        // What the GPU writes into a GPU texture in storage the CPU can read reaches that storage, written there on the GPU in the same submission (gsb_store): Ocarina of Time moves
+        // the terrain normal maps the GPU drew with memcpy and re-creates them at the new address
+        atomic_store(&g_cur_frame, 100);
+        setup(&f, 7060, CACHED, NVN_FORMAT_RGBA8, 0);
+        large = texture_at(&f, 7061, 0x40000, 128, NVN_FORMAT_RGBA8, 0);
+        uintptr_t llo = (uintptr_t)large.mem, lhi = llo + large.L.size;
+        uint64_t stores = g_gsb_stores;
+        gpu_clear(&large, 0.2f);
+        CHECK("a clear of a GPU texture reaches its storage", stored_red(&large) == 51 && g_gsb_stores == stores + 1);
+        CHECK("which stays the GPU's: the GPU's write is not the CPU's", gws_owned(llo, lhi) && !tex_cpu_written(large.serial) && mtl_tex_cpu_rewritten(&large) == MTL_REWRITE_GPU_NOW);
+        tex_t moved = texture_at(&f, 7062, 0x60000, 128, NVN_FORMAT_RGBA8, 0);
+        dm_guest_write_prepare(moved.mem, moved.L.size); memcpy(moved.mem, large.mem, large.L.size);
+        CHECK("its storage moved with memcpy: a texture made there holds the clear", first_red(resolve(&moved)) == 51 && tex_cpu_written(moved.serial));
+        // written in consecutive frames: every write is in the storage once its submission completes, and a copy right after the second finds the second (no quiet period)
+        atomic_store(&g_cur_frame, 101); gpu_clear(&large, 0.4f);
+        CHECK("a write the frame after another is in the storage at once", stored_red(&large) == 102);
+        atomic_store(&g_cur_frame, 102); gpu_clear(&large, 0.6f);
+        CHECK("and so is the next one", stored_red(&large) == 153 && g_gsb_stores == stores + 3 && gws_owned(llo, lhi));
+        tex_t moved2 = texture_at(&f, 7068, 0x80000, 128, NVN_FORMAT_RGBA8, 0);
+        dm_guest_write_prepare(moved2.mem, moved2.L.size); memcpy(moved2.mem, large.mem, large.L.size);
+        CHECK("a memcpy right after the second write gives a texture with the second write", first_red(resolve(&moved2)) == 153);
+        // a region: only its texels are written
+        p_clear_tex part = {.tex = &large, .r = {8, 8, 0, 40, 24, 1}, .mask = 15, .c.f = {0.8f, 0, 0, 1}};
+        mtl_tex_gpu_written(&large); mtl_sub_begin(); clear_tex(&part); finish();
+        { uint8_t *lin = malloc(128 * 128 * 4); int bad = nvn_deswizzle(&large.d, 0, 0, large.mem, lin, 128 * 4);
+          for (int y = 0; y < 128 && !bad; y++) for (int x = 0; x < 128; x++) bad += lin[(y * 128 + x) * 4] != ((x >= 8 && x < 48 && y >= 8 && y < 32) ? 204 : 153);
+          CHECK("a cleared region reaches the storage, and only its texels", !bad); free(lin); }
+        // another writer over the storage after the GPU texture's write: nothing of the GPU texture lands later over it, however many frames pass
+        tex_t first = texture_at(&f, 7064, 0xa0000, 128, NVN_FORMAT_RGBA8, 0), image = texture_at(&f, 7065, 0xa0000, 128, NVN_FORMAT_RGBA8, NVN_TEXTURE_FLAGS_IMAGE);
+        atomic_store(&g_cur_frame, 110); gpu_clear(&first, 0.2f);
+        atomic_store(&g_cur_frame, 111); gpu_clear(&first, 0.4f);
+        CHECK("a GPU texture drawn in two frames in a row holds the second in its storage", stored_red(&first) == 102);
+        mtl_tex_release(&first);
+        dm_guest_write_prepare(first.mem, first.L.size); fill(&first, first.mem, 77);   // the game reuses the storage
+        for (int k = 112; k < 120; k++) { atomic_store(&g_cur_frame, (uint64_t)k); mtl_sub_begin(); finish(); }
+        tex_t after = texture_at(&f, 7066, 0xa0000, 128, NVN_FORMAT_RGBA8, 0);
+        CHECK("nothing of the older texture lands over the CPU's bytes, however many frames pass: a texture made there holds them", stored_red(&first) == 77 && first_red(resolve(&after)) == 77);
+        mtl_tex_release(&after);
+        uint64_t before = g_gsb_stores;
+        gpu_clear(&image, 0.6f);   // a texture the rule leaves out (an image) drawn over it: its draw stays in its host texture
+        CHECK("an image's clear is not stored", g_gsb_stores == before && stored_red(&first) == 77);
+        mtl_tex_release(&image);
+        // a texture smaller than a page
+        mtl_tex_init(&f.t);
+        gpu_clear(&f.t, 0.2f);
+        CHECK("a texture smaller than a page is written into its storage", stored_red(&f.t) == 51);
+        // Ocarina of Time's normal tiles: 260x260 RG8, 9 levels, each drawn on its own; its rows (520 bytes) are no multiple of 16, its small levels have lower block heights
+        fixture g; setup(&g, 7069, CACHED, NVN_FORMAT_RGBA8, 0);
+        tex_t tile = texture_at(&g, 7067, 0x40000, 260, NVN_FORMAT_RG8, 0); tile.d.levels = 9; nvn_tex_layout(&tile.d, &tile.L);
+        CHECK("the tile fits in the pool", tile.off + tile.L.size <= POOL);
+        mtl_tex_gpu_written(&tile); mtl_sub_begin();
+        for (unsigned lv = 0; lv < 9; lv++) {
+            p_clear_tex tc = {.tex = &tile, .has_view = 1, .r = {0, 0, 0, (int)MAX(260u >> lv, 1u), (int)MAX(260u >> lv, 1u), 1}, .mask = 15, .c.f = {(float)(lv + 1) / 51.f, 0.2f, 0, 1}};
+            tc.view.set_levels = 1; tc.view.base_level = lv; clear_tex(&tc);
+        }
+        finish();
+        { uint8_t *lin = malloc(260 * 260 * 2); int bad = 0;
+          for (unsigned lv = 0; lv < 9; lv++) { unsigned w = MAX(260u >> lv, 1u);
+              memset(lin, 0xEE, 260 * 260 * 2); bad += nvn_deswizzle(&tile.d, lv, 0, tile.mem, lin, w * 2) ? 1000 : 0;
+              for (unsigned i = 0; i < w * w; i++) bad += lin[i * 2] != (lv + 1) * 5 || lin[i * 2 + 1] != 51; }
+          CHECK("every level of a 260x260 RG8 tile reaches its storage, every texel", !bad); free(lin); }
+        CHECK("none of it through the tables of textures uploaded from their storage", !g_nabs && !g_nabsp && !g_mrb_n && !g_mrb_untracked);
+        mtl_tex_release(&tile); teardown(&g); mtl_tex_release(&moved2); mtl_tex_release(&moved); mtl_tex_release(&large);
+        teardown(&f);
     }
     printf("t_cpu_storage: %d checks, %d failed\n", checks, failed);
     return failed != 0;

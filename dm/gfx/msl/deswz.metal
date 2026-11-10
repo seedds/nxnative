@@ -18,3 +18,18 @@ kernel void deswz_direct(device const uchar *src [[buffer(0)]], constant D& p [[
  off+=p.gob2?((x&63u)>>5)*256u+((y&7u)>>2)*128u+((x&31u)>>4)*64u+((y&3u)>>1)*32u+(y&1u)*16u+(x&15u):((x&63u)>>5)*256u+((y&7u)>>1)*64u+((x&31u)>>4)*32u+(y&1u)*16u+(x&15u);
  dst.write(uint4(*(device const ushort4*)(src+off)),id.xy,id.z,p.level);
 }
+// The other way: a region of one level of a block-linear texture, linear in src (pitch apart, slices img apart, from column x0 & ~15), written into its storage in dst (nvn_mtl.m gsb_store,
+// a GPU texture's content into the storage the game may read). One thread per 16 bytes of a row: within a GOB they are contiguous, so a whole segment is one 16-byte store. Only bytes in
+// [x0, x1) of rows [y0, y0 + rows) are written: the rest of the storage (other texels, GOB padding, a neighbour's bytes) keeps what it holds
+struct W { ulong src_off, dst_off, base, pitch, img, layer_stride; uint x0, x1, y0, rows, th, gobs_x, gob2; };
+kernel void swz(device const uchar *src [[buffer(0)]], device uchar *dst [[buffer(1)]], constant W& p [[buffer(2)]], uint3 id [[thread_position_in_grid]]) {
+ uint xs = (p.x0 & ~15u) + (id.x << 4), y = p.y0 + id.y;
+ if (xs >= p.x1 || id.y >= p.rows) return;
+ uint bh = 1u << p.th, gy = y >> 3;
+ ulong o = p.dst_off + p.base + (ulong)id.z * p.layer_stride + ((ulong)(gy >> p.th) * p.gobs_x + (xs >> 6)) * (512ul * bh) + (ulong)(gy & (bh - 1u)) * 512ul;
+ o += p.gob2 ? ((xs & 63u) >> 5) * 256u + ((y & 7u) >> 2) * 128u + ((xs & 31u) >> 4) * 64u + ((y & 3u) >> 1) * 32u + (y & 1u) * 16u
+             : ((xs & 63u) >> 5) * 256u + ((y & 7u) >> 1) * 64u + ((xs & 31u) >> 4) * 32u + (y & 1u) * 16u;
+ ulong s = p.src_off + (ulong)id.z * p.img + (ulong)id.y * p.pitch + (ulong)(id.x << 4);
+ if (xs >= p.x0 && xs + 16u <= p.x1 && ((o | s) & 15ul) == 0ul) { *(device uint4 *)(dst + o) = *(device const uint4 *)(src + s); return; }
+ for (uint i = 0; i < 16u; i++) if (xs + i >= p.x0 && xs + i < p.x1) dst[o + i] = src[s + i];
+}

@@ -10,7 +10,6 @@ A Switch 2 game: update v131072, SDK 22.2.8 (`Ounce`). Nintendo EPD's engine (se
 | `mem_map_limit on` | [`game.tsv`](game.tsv) | a map past the application pool fails with ResultLimitReached, as on Horizon. The SDK's allocator keeps freed pages mapped until a map fails, then gives them back ([PR 1444](https://github.com/seedds/nxnative/pull/1444) reports a black screen leaving the Deku Tree without it; not reached here) |
 | `sys_resource 0x3000000` | `game.tsv` | 48 MB, as the NPDM declares |
 | `render_cond on` | `game.tsv` | agl clears a copy of the prepass depth again under a render condition the console skips. Run unconditionally, the opaque pass's `EQUAL` test fails everywhere ([PR 1299](https://github.com/seedds/nxnative/pull/1299)'s finding) |
-| `gpu_timestamps segment` | `game.tsv` | the game's dynamic resolution decides from GPU timestamps, and with one time per submission it never lowers its resolution ([why](../../../docs/reference/frame-rate.md#dynamic-resolution-that-never-moves-and-draw-passes-that-wait-for-each-other)) |
 | `fps_hold off` | `game.tsv` | late frames are shown as soon as they are ready rather than held for 2 vsyncs (30 fps), avoiding 30/60 fps lock oscillation while the frame step pays back elapsed time |
 | Dynamic-resolution stub | [`patches.py`](patches.py) (frame step rule, `others`) | full resolution unless the launcher's Dynamic resolution is on ([Dynamic resolution](#dynamic-resolution)) |
 | `draw_barriers game` | `game.tsv` | about 180 full barriers a frame NVN does not ask for: GPU 25 → 18 ms at full resolution |

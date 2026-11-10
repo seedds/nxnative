@@ -1257,7 +1257,7 @@ static int pend_room(int nodes) {
 // Other writes to guest memory in this submission, which the pend list does not hold: writable storage buffers bound to a shader, texture→buffer copies, counter reports (ubp_get).
 // Kept by 4 KB page (Breath of the Wild's particle dispatches bind about ten storage buffers each, hundreds a frame): a set of pages tagged with the submission (g_pend_gen) and with what
 // wrote them. A counter report does not count against this submission's shadows: the host writes reports on the CPU when the whole submission has completed, so no draw of it reads one
-// (Fire Emblem Engage writes its query reports into the page of a uniform block); it counts for later submissions while this one runs (gw_commit).
+// (Fire Emblem Engage writes its query reports into the page of a uniform block); for later submissions it counts by its own 16 bytes while this one runs (hw_note, hw_live).
 // A GPU write over more than SBW_WPAGES pages is kept as an interval instead (overlapping ones merge): a storage buffer bound with size 0 counts as the rest of its Metal buffer (sbw_len)
 enum { SBW_N = 16384, SBW_WPAGES = 64, SBW_WN = 64 };
 static struct { uint64_t page; uint32_t gen; uint8_t src; } g_sbwp[SBW_N]; static int g_nsbw, g_sbw_over;   // src: SBW_* bits; pages in the set this submission; over: a write could not be kept (set full, size not known)
@@ -1270,6 +1270,7 @@ static int sbw_slot(uint64_t pg, int add) {   // open addressing; −1 = not the
     return -1;
 }
 enum { SBW_GPU = 1, SBW_REPORT = 2 };
+static uint64_t *g_hw_sub; static int g_nhw_sub, g_hw_cap;   // the 16-byte records this submission's completion writes (hw_note), in order
 static uint32_t g_sbw_gen;   // bumped by every write noted that this submission's shadows must respect (a cached shadow made before it is checked again)
 static void drw_note(uint64_t lo, uint64_t n);   // the writes since the last drain (below g_wr_epoch)
 static void sbw_note(uint64_t lo, uint64_t n, int src) {
@@ -1295,7 +1296,7 @@ static int sbw_hits(uint64_t lo, uint64_t hi) {
 // a binding counted as a write anywhere, and every partly covered uniform shadow after it in the submission was refused (BotW shrines: about 240 more passes a frame, GitHub issue #534)
 static uint64_t sbw_len(uint64_t size, void *mb, uint64_t mo) { if (size) return size; uint64_t len = ((__bridge id<MTLBuffer>)mb).length; return len > mo ? len - mo : 0; }
 static inline unsigned pend_bucket(uint64_t page) { return (unsigned)((page * 0x9E3779B97F4A7C15ull) >> (64 - PEND_HB_BITS)); }
-static void pend_reset(void) { g_npend = g_pend_over = g_nupd = g_npnode = g_nwide = g_nsbw = g_nsbw_w = g_sbw_over = 0; if (!++g_pend_gen) { memset(g_pend_hgen, 0, sizeof g_pend_hgen); memset(g_sbwp, 0, sizeof g_sbwp); g_pend_gen = 1; } }
+static void pend_reset(void) { g_nhw_sub = 0; g_npend =g_pend_over = g_nupd = g_npnode = g_nwide = g_nsbw = g_nsbw_w = g_sbw_over = 0; if (!++g_pend_gen) { memset(g_pend_hgen, 0, sizeof g_pend_hgen); memset(g_sbwp, 0, sizeof g_sbwp); g_pend_gen = 1; } }
 static void vc_gpu_write(uint64_t dst, uint64_t n);   // kept index ranges under the written range are not trusted again (ix_range)
 static int pend_add(uint64_t dst, uint64_t n, int kind) {
     vc_gpu_write(dst, n); drw_note(dst, n ? n : 1);
@@ -1844,7 +1845,7 @@ static gw_ent g_gw[GW_N];   // page ~0: two live pages met in the slot, so any p
 static gw_ent g_gwx[GW_N];  // the same without the inline updates the host remembers (um_ent): what a uniform shadow cannot read from memory
 static uint64_t g_gw_all;                            // every page counts as written until this fence completes (a submission whose writes could not all be listed)
 static uint64_t g_ubp_made, g_ubp_reused, g_ubp_refused;   // partial shadows made / taken from the cache / refused (the pass ended), for the residency set line
-static uint64_t g_ubp_why[5];   // why ubp_get refused: 0 too large or off, 1 other GPU writes in this submission (sbw), 2 GPU writes of an earlier submission still running, 3 a copy, fill or feedback write queued, 4 unreadable or too many writes
+static uint64_t g_ubp_why[6];   // why ubp_get refused: 0 too large or off, 1 other GPU writes in this submission (sbw), 2 GPU writes of an earlier submission still running, 3 a copy, fill or feedback write queued, 4 unreadable or too many writes, 5 a report of an earlier submission still to land (hw_live)
 static inline unsigned gw_slot(uint64_t pg) { return (unsigned)((pg * 0x9E3779B97F4A7C15ull) >> 48) & (GW_N - 1); }
 // Writes of GW_PAGES pages or more, kept whole. They used to count as a write anywhere (g_gw_all): one storage binding over 16 MB in each submission (Splatoon Raiders) refused every uniform shadow of the next one, and the
 // pass ended for each. The same range comes back every submission, so few are live at a time; only when none of the slots is free does it still count as a write anywhere
@@ -1872,7 +1873,28 @@ static int gw_live_in(const gw_ent *t, uint64_t lo, uint64_t hi) {
     for (uint64_t pg = lo >> 12; pg <= (hi - 1) >> 12; pg++) { unsigned s = gw_slot(pg); if ((t[s].page == pg || t[s].page == ~0ull) && t[s].fence > done) return 1; }
     return 0;
 }
-static int gw_live(uint64_t lo, uint64_t hi) { return gw_live_in(g_gw, lo, hi); }
+// The records the host writes into guest memory when a submission completes (post_run): counter reports and samples-passed results, 16 bytes each. Until then memory holds what was there
+// before, and only those 16 bytes: the GPU does not write them. They used to count as GPU writes of their whole 4 KB page, so every partly covered uniform shadow over that page was refused
+// while their submission ran, and each refusal ended a pass. A game whose reports share a page with uniform blocks then ended a pass for each such block once the GPU fell a frame behind
+// (a slow frame at a load), which kept it behind: Ori and the Will of the Wisps writes two timestamp reports a frame into such a page, and fell from 60 to 15-18 fps in the same scene
+// (issue #1660). A record is kept by its own bytes in a ring with its submission's fence, and its page in g_gwr only to pass over the ring for every other page. The records of a
+// submission that do not fit in the ring's finished slots go into the page tables as before. Samples-passed results used to count nowhere. DM_NVN_REPORT_EXACT=0 refuses by page as before
+enum { HW_N = 4096 };
+static struct { uint64_t lo, fence; } g_hwr[HW_N]; static uint64_t g_nhwr;   // fences grow along the ring
+static gw_ent g_gwr[GW_N];   // the pages of the records in the ring
+static int hw_exact_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_REPORT_EXACT"); v = !(e && !strcmp(e, "0")); if (!v) MLOG("DM_NVN_REPORT_EXACT=0: a counter report of a running submission refuses uniform shadows over its whole page"); } return v; }
+static void hw_note(uint64_t addr) {
+    if (g_nhw_sub == g_hw_cap) { int c = g_hw_cap ? g_hw_cap * 2 : 256; uint64_t *p = realloc(g_hw_sub, (size_t)c * sizeof *p); if (!p) { g_sbw_over = 1; return; } g_hw_sub = p; g_hw_cap = c; }   // over: every page counts as written (gw_commit)
+    g_hw_sub[g_nhw_sub++] = addr;
+}
+static int hw_live(uint64_t lo, uint64_t hi) {
+    if (!gw_live_in(g_gwr, lo, hi)) return 0;
+    if (!hw_exact_on()) return 1;
+    uint64_t done = g_done, n0 = g_nhwr > HW_N ? g_nhwr - HW_N : 0;
+    for (uint64_t j = g_nhwr; j-- > n0;) { unsigned q = (unsigned)(j % HW_N); if (g_hwr[q].fence <= done) break; if (lo < g_hwr[q].lo + 16 && g_hwr[q].lo < hi) return 1; }   // newest first: the older ones have landed
+    return 0;
+}
+static int gw_live(uint64_t lo, uint64_t hi) { return gw_live_in(g_gw, lo, hi) || hw_live(lo, hi); }
 // Inline updates of submissions still running, remembered by byte. A partly covered uniform shadow takes the rest from memory, and memory does not hold them until their submission has run, so they used to refuse
 // the shadow and end the pass. A game that updates a block every frame refused it for as long as the last frame's work was running, and the slower the GPU the longer: each refusal is one more pass, which made the GPU
 // slower still. Splatoon Raiders updates 0x00..0x14 and 0x18..0x70 of its ink query block before each of about 150 queries a frame while the shader reads 0x00..0x70: 150 passes on a 6400x6400 target, about 6 fps.
@@ -1899,8 +1921,12 @@ static void gw_commit(uint64_t fence) {
         gw_put_in(g_gw, g_pend_lo[e], g_pend_hi[e], fence, done);
         if (g_pend_kind[e] == 1 && g_pend_upd[e] && um_on()) { const upd_ent *u = &g_upd[g_pend_upd[e] - 1]; um_put(g_pend_lo[e], g_pend_hi[e], (const uint8_t *)u->buf.contents + u->off + (g_pend_lo[e] - u->lo), fence, done); }
         else gw_put_in(g_gwx, g_pend_lo[e], g_pend_hi[e], fence, done); }
-    if (g_nsbw) for (int i = 0; i < SBW_N; i++) if (g_sbwp[i].gen == g_pend_gen) gw_put(g_sbwp[i].page << 12, (g_sbwp[i].page + 1) << 12, fence, done);
+    if (g_nsbw) for (int i = 0; i < SBW_N; i++) if (g_sbwp[i].gen == g_pend_gen && (g_sbwp[i].src & SBW_GPU)) gw_put(g_sbwp[i].page << 12, (g_sbwp[i].page + 1) << 12, fence, done);   // reports: below
     for (int i = 0; i < g_nsbw_w; i++) gw_put(g_sbw_wlo[i], g_sbw_whi[i], fence, done);
+    int ring = g_nhw_sub <= HW_N && (!g_nhw_sub || g_hwr[(g_nhwr + (uint64_t)g_nhw_sub - 1) % HW_N].fence <= done);   // the slots they take have finished (the farthest is the newest of them)
+    for (int i = 0; i < g_nhw_sub; i++) { uint64_t a = g_hw_sub[i];
+        if (ring) { unsigned q = (unsigned)(g_nhwr++ % HW_N); g_hwr[q].lo = a; g_hwr[q].fence = fence; gw_put_in(g_gwr, a, a + 16, fence, done); }
+        else gw_put(a, a + 16, fence, done); }
 }
 // Whether um_overlay lays a remembered byte over [lo, hi): ubp_get then copies that shadow here, since the overlay waits for its copy (queued and waited for at once, on every such shadow)
 static int um_hits(uint64_t lo, uint64_t hi) {
@@ -1952,7 +1978,7 @@ static uint8_t rc_source(uint64_t a, unsigned n, uint8_t *out, int *unreliable) 
         }
         int kind, page=sbw_slot(p>>12,0);
         if (pend_read(p,1,&out[b],&kind)) known|=(uint8_t)(1u<<b);
-        else if (!pend_hits(p,1) && !g_sbw_over && !sbw_hits(p,p+1) && (page<0 || !g_sbwp[page].src) && !gw_live_in(g_gw,p,p+1) && nvn_host_readable(p,1)) {
+        else if (!pend_hits(p,1) && !g_sbw_over && !sbw_hits(p,p+1) && (page<0 || !g_sbwp[page].src) && !gw_live(p,p+1) && nvn_host_readable(p,1)) {
             out[b]=*(const uint8_t *)p; known|=(uint8_t)(1u<<b);
         }
     }
@@ -1974,6 +2000,7 @@ static int ubp_get(uint64_t lo, uint64_t hi, uint64_t *gpu, const uint8_t **cpu)
     if (c && c->npend == g_npend) { g_ubp_reused++; *gpu = c->gpu; *cpu = c->cpu; g_ubp_ready = c->ready; return 1; }
     int since = c ? c->npend : 0;
     if (!c && gw_live_in(g_gwx, lo, hi)) { g_ubp_why[2]++; return 0; }
+    if (!c && hw_live(lo, hi)) { g_ubp_why[5]++; return 0; }
     if (!c && !nvn_host_readable(lo, hi - lo)) { g_ubp_why[4]++; return 0; }
     int n = pend_since(lo, hi, since, g_ubp_idx); if (n < 0) { g_ubp_why[4]++; return 0; }
     // Newest first, keep the writes that still show through somewhere (a write only newer ones cover is never read, whatever wrote it); stop once they cover the range
@@ -2006,7 +2033,7 @@ static int ubp_get(uint64_t lo, uint64_t hi, uint64_t *gpu, const uint8_t **cpu)
     *gpu = c->gpu; *cpu = d; g_ubp_ready = ready; return 1;
 }
 void mtl_ubp_stats(uint64_t *made, uint64_t *reused, uint64_t *refused) { *made = g_ubp_made; *reused = g_ubp_reused; *refused = g_ubp_refused; }
-void mtl_ubp_why(uint64_t w[5]) { memcpy(w, g_ubp_why, sizeof g_ubp_why); }
+void mtl_ubp_why(uint64_t w[6]) { memcpy(w, g_ubp_why, sizeof g_ubp_why); }
 void mtl_sub_update(const void *data, uint64_t dst, uint64_t n) {
     if (!n) return;
     rc_write(dst,n,data,0);
@@ -2068,26 +2095,49 @@ static void vis_take(void) {
 }
 void mtl_sub_event(volatile uint32_t *val, uint32_t mode, uint32_t v) { post((post_op){1, val, mode, v, 0, 0, NULL}); }
 static void ts_clk(void);
-void mtl_sub_counter(uint64_t addr, uint32_t type) { sbw_note(addr, 16, SBW_REPORT); post((post_op){2, NULL, 0, 0, addr, type, NULL, g_seg}); ts_clk(); }
+void mtl_sub_counter(uint64_t addr, uint32_t type) { sbw_note(addr, 16, SBW_REPORT); hw_note(addr); post((post_op){2, NULL, 0, 0, addr, type, NULL, g_seg}); ts_clk(); }
 void mtl_counter_stats(uint64_t rep[32], uint64_t rst[32]) { memcpy(rep, g_cnt_report, sizeof g_cnt_report); memcpy(rst, g_cnt_reset, sizeof g_cnt_reset); }
 
 // Counter timestamps (614.4 MHz) are taken from the guest clock (hle_os.c guest_ns, the same epoch as svc GetSystemTick / cntpct, whose ticks are 19.2 MHz, 31.25 MHz on the Switch 2: guest_ticks).
 // They used to come from CLOCK_MONOTONIC, which keeps running while the Mac sleeps while the guest clock (mach_absolute_time) does not, so the two differed by the sleep time; once timestamps were converted to ns, Mario halved its frame rate. Graphics unit tests have a weak definition on the same clock (below)
 uint64_t guest_ns(void);
 static uint64_t gpu_ticks(void) { return nvn_timestamp_from_ns(guest_ns()); }
-// Counter timestamps by segment (profile gpu_timestamps segment; DM_NVN_GPU_TS=segment / submission overrides it). On hardware a timestamp report is written when the GPU reaches it, so two reports of one submission bracket the GPU work between them.
-// The host writes all reports of a submission in its completion handler; with one time for all of them a game that measures its GPU time that way reads 0 (Breath of the Wild: frame-interval controller and dynamic resolution).
-// In segment mode a report takes the GPU time of the segment it was encoded in (sub_cut): TIMESTAMP_TOP (0x10) that segment's GPU start, other types its GPU end. The writes stay in the last segment's handler, before the fence,
+// Counter timestamps by segment, for every game (DM_NVN_GPU_TS=submission / segment_gaps for A/B runs). On hardware a timestamp report is written when the GPU reaches it, so two reports of one submission bracket the GPU work between them.
+// The host writes all reports of a submission in its completion handler; with one time for all of them a game that measures its GPU time that way reads 0 (Breath of the Wild: frame-interval controller and dynamic resolution;
+// Mario Kart World and Donkey Kong Bananza kept their full render size however long the GPU took, Splatoon Raiders too: GitHub PR #1229, issue #1064).
+// A report takes the GPU time of the segment it was encoded in (sub_cut): TIMESTAMP_TOP (0x10) that segment's GPU start, other types its GPU end. The writes stay in the last segment's handler, before the fence,
 // so a game that waits for the fence reads one submission's reports together; a segment whose feedback has not arrived by then takes the last segment's times
 #define SEG_CLK_N 1024
-struct seg_clk { _Atomic int refs; _Atomic uint64_t t[SEG_CLK_N][2]; uint32_t nb; uint16_t b[SEG_CLK_N + 1]; uint64_t begin; };   // per submission (g_sclk, allocated at its first cut): guest ns of each cut segment's GPU start / end (0 = no feedback yet); b: with ts_on, the heap slots of the segment boundaries, segment k from b[k] to b[k + 1]
-static int seg_ts(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_GPU_TS"); v = e && *e ? !strcmp(e, "segment") : DM_GAME_GPU_TS_SEGMENT; MLOG("counter timestamps: %s (profile key gpu_timestamps; DM_NVN_GPU_TS=segment / submission)", v ? "GPU start / end time of their segment" : "one time for the whole submission"); } return v; }
+struct seg_clk { _Atomic int refs; _Atomic uint64_t t[SEG_CLK_N][2]; uint32_t nb, ncm; uint16_t b[SEG_CLK_N + 1], cm[SEG_CLK_N]; uint64_t begin; };   // per submission (g_sclk, allocated at its first report, boundary or cut): guest ns of each cut segment's GPU start / end (0 = no feedback yet); b: with ts_on, the heap slots of the segment boundaries, segment k from b[k] to b[k + 1]; cm: the segments that ended a command buffer (sub_cut's commits), in order
+static int ts_mode(void) {   // 0 submission, 1 segment (the default), 2 segment with the GPU's idle gaps kept (seg_idle_before)
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("DM_NVN_GPU_TS"); v = 1;
+        if (e && *e) { if (!strcmp(e, "submission")) v = 0; else if (!strcmp(e, "segment_gaps")) v = 2; else if (strcmp(e, "segment")) MLOG("[RED] DM_NVN_GPU_TS=%s: not segment, segment_gaps or submission; segment stands", e); }
+        MLOG("counter timestamps: %s (DM_NVN_GPU_TS=segment / segment_gaps / submission)", v == 0 ? "one time for the whole submission" : v == 1 ? "GPU start / end time of their segment, without the GPU's idle time between command buffers" : "GPU start / end time of their segment, the GPU's idle time between command buffers included"); }
+    return v;
+}
+static int seg_ts(void) { return ts_mode() > 0; }
 static void seg_clk_put(seg_clk *c) { if (c && atomic_fetch_sub(&c->refs, 1) == 1) free(c); }
 static uint64_t gpu_s_guest_ns(double s) {   // a feedback GPU time (seconds on the mach absolute time base) on the guest clock; 0 when unknown
     uint64_t now = now_ns();
     uint64_t g = guest_ns_at_host_time(now);
     double age = (double)now - s * 1e9;
     return s > 0 && age >= 0 && age < (double)g ? g - (uint64_t)age : 0;
+}
+// The GPU's idle time in a submission before a time on the guest clock: the gaps between its command buffers. A Switch GPU runs a submission's commands back to back; here it waits at each
+// of sub_cut's commits while the host translates up to the next one (a commit is made only once the GPU has run out of work), and a game that times its GPU work as the difference of two
+// reports read that wait as GPU time. agl's dynamic resolution (Mario Kart World, Donkey Kong Bananza, Splatoon Raiders) then saw its budget exceeded, stepped its render size down and up
+// again from frame to frame, and thin distant geometry flickered (Mario Kart World's mountains and bridges, 5-6 ms of gaps a frame on an M5: GitHub PR #1350; Splatoon Raiders read 16 ms
+// where the GPU worked 8: issue #1290). Lowering the resolution cannot shorten the host's translation, so the gaps are left out. A gap counts once the time is past its middle: a boundary's
+// heap stamp is written either in the command buffer before the commit or at the start of the next, never inside the gap. A command buffer with no feedback yet gives no gap.
+// c0: the GPU start of the submission's last command buffer
+static uint64_t seg_idle_before(seg_clk *sc, uint64_t ns, uint64_t c0) {
+    uint64_t idle = 0;
+    for (uint32_t i = 0; i < sc->ncm; i++) {
+        uint64_t e = atomic_load(&sc->t[sc->cm[i]][1]), s = i + 1 < sc->ncm ? atomic_load(&sc->t[sc->cm[i + 1]][0]) : c0;
+        if (e && s > e && ns >= e + (s - e) / 2) idle += s - e;
+    }
+    return idle;
 }
 static uint64_t rep_ticks(const post_op *o, seg_clk *sc, uint32_t last, uint64_t c0, uint64_t c1) {   // the time a counter report records (614.4 MHz); c0 / c1: the last segment's GPU start / end on the guest clock
     int top = o->type == 0x10; uint64_t ns = 0;
@@ -2100,10 +2150,10 @@ static uint64_t rep_ticks(const post_op *o, seg_clk *sc, uint32_t last, uint64_t
         // A stamp from before the submission began is a slot it did not write, the ring's last value there: an encoder with no work writes no relaxed timestamp (Ocarina of Time's
         // frame-start TIMESTAMP_TOP, alone in its submission, read 1.7 s early and its dynamic resolution kept its floor). Its segment's feedback time stands instead
         if (ns && sc->begin && ns + 500000 < sc->begin) ns = 0;
-        if (ns) return nvn_timestamp_from_ns(ns);
     }
-    if (sc && o->seg < last && o->seg < SEG_CLK_N) ns = atomic_load(&sc->t[o->seg][!top]);
+    if (!ns && sc && o->seg < last && o->seg < SEG_CLK_N) ns = atomic_load(&sc->t[o->seg][!top]);
     if (!ns) ns = top ? c0 : c1;
+    if (ns && sc && ts_mode() == 1) { uint64_t idle = seg_idle_before(sc, ns, c0); if (idle < ns) ns -= idle; }
     return ns ? nvn_timestamp_from_ns(ns) : gpu_ticks();
 }
 
@@ -2307,8 +2357,8 @@ static void post_complete(uint64_t fence, uint64_t c0, uint64_t c1) {
         post_rec *r = &g_postr[f % POST_RING];
         if (!post_claim(r, f)) continue;
         uint64_t start = r->t_commit;
-        if (r->sc && r->seg_last > 0 && r->seg_last <= SEG_CLK_N) {
-            uint64_t pe = atomic_load(&r->sc->t[r->seg_last - 1][1]); if (pe > start) start = pe;
+        if (r->sc && r->sc->ncm) {   // nor before the command buffer committed before it ended
+            uint64_t pe = atomic_load(&r->sc->t[r->sc->cm[r->sc->ncm - 1]][1]); if (pe > start) start = pe;
         }
         if (start > now) start = now;
         post_run(r, f == fence && c1 ? c0 : seg_ts() ? start : 0, f == fence && c1 ? c1 : seg_ts() ? now : 0);
@@ -4625,13 +4675,14 @@ static void rr_snap(const p_draw *, const p_draw_idx *);
 static void rr_reset(void);
 #endif
 static id<MTL4RenderCommandEncoder> g_enc;
-// Segment timestamps retain the existing GPU boundaries every cut_draws() draws, even when sub_cut keeps the command buffer open.
-// The encode-thread path keeps its existing feedback-based segment fallback; its exact BOTTOM stamps are recorded by DmRecCB independently of this heap.
+// Segment timestamps keep a GPU boundary every cut_draws() draws, a relaxed timestamp in a counter heap, even when sub_cut keeps the command buffer open (it commits only once the GPU
+// has run out of work). With the encode thread the timestamp writes are recorded with the encoder's other commands (nvn_rec.h RO_R_TS / RO_C_TS) and run in order, so the heap serves it too:
+// without it every boundary had to stay a commit, and as segment timestamps are every game's, every iPhone game (the encode thread is on there) would have committed every 64 draws
 enum { TS_SLOTS = 4096 };   // the largest timestamp heap Metal makes
 static uint32_t g_ts_next; static int g_ts_state, g_ts_s0;   // state: 0 not tried, 1 on, -1 off; s0: the slot of this submission's first boundary
 static int ts_on(void) {
     if (!g_ts_state) { g_ts_state = -1;
-        if (seg_ts() && !rec_on()) { MTL4CounterHeapDescriptor *hd = [MTL4CounterHeapDescriptor new]; hd.type = MTL4CounterHeapTypeTimestamp; hd.count = TS_SLOTS; NSError *er = nil;
+        if (seg_ts()) { MTL4CounterHeapDescriptor *hd = [MTL4CounterHeapDescriptor new]; hd.type = MTL4CounterHeapTypeTimestamp; hd.count = TS_SLOTS; NSError *er = nil;
             g_ts_heap = [g_dev newCounterHeapWithDescriptor:hd error:&er];
             if (g_ts_heap) g_ts_state = 1; else MLOG("[RED] counter timestamps: no counter heap (%s): every segment boundary stays a commit", er.description.UTF8String); } }
     return g_ts_state > 0;
@@ -14714,7 +14765,7 @@ static void sub_cut(void) {
     up_flush();
     uint64_t f = atomic_load(&g_cur_frame); gpu_tag_begin(f);
     uint32_t k = g_seg++; seg_clk *sc = NULL;   // reports encoded so far keep this segment's GPU times (seg_ts)
-    if (seg_ts()) { if (!g_sclk) { g_sclk = calloc(1, sizeof *g_sclk); atomic_store(&g_sclk->refs, 1); } sc = g_sclk; atomic_fetch_add(&sc->refs, 1); }
+    if (seg_ts()) { if (!g_sclk) { g_sclk = calloc(1, sizeof *g_sclk); if (!g_sclk) MDIE("segment clock allocation failed"); atomic_store(&g_sclk->refs, 1); } sc = g_sclk; atomic_fetch_add(&sc->refs, 1); if (k < SEG_CLK_N) sc->cm[sc->ncm++] = (uint16_t)k; }   // this command buffer ends with segment k (seg_idle_before)
     cbs_list *cbs = cbs_take(); uint64_t cbs_fence = g_fence + 1;
     MTL4CommitOptions *o = [MTL4CommitOptions new];
     atomic_fetch_add(&g_seg_inflight, 1);
@@ -14927,7 +14978,7 @@ void mtl_exec(const uint8_t *p) {
                     if (!g_vis_on) {   // a report with no reset before it: the counter runs from the queue's creation, so counting starts here (Occlusion queries)
                         g_vis_on = 1; g_vis_counting = 1; MLOG("occlusion queries: samples passed reported with no ResetCounter before it: counting from this report");
                         if (g_enc && !g_enc_has_vis) { PD("M %llu occlusion query counting starts at a report: render pass split here", g_stat_pass); rp_end(); } }
-                    post((post_op){3, NULL, VIS_REPORT, 0, ad, (uint32_t)t, vis_snapshot()}); vis_clear(); }
+                    hw_note(ad); post((post_op){3, NULL, VIS_REPORT, 0, ad, (uint32_t)t, vis_snapshot()}); vis_clear(); }   // written at completion, as a counter report
                 else mtl_sub_counter(ad, (uint32_t)t);
                 break; }
             case OP_RENDER_COND: { const p_render_cond *rc = a;   // recorded only with the profile key render_cond (hle_nvn.c)

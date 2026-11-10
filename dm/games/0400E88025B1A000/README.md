@@ -27,7 +27,7 @@ There is no game-specific patch, and only v131072's build row: the base game, v0
 
 ## The picture
 
-Every 3D target is 768x432 from the first frame of the title to the tutorial: MetalFX stands in for DLSS at 768x432 to 768x432, the game's NDSR compute networks take that to 1536x864, and the result reaches the 3840x2160 swap chain, whose top-left 1920x1080 holds the picture. The game's own defaults give the reason for the figure, not the cause: `render.dynres_min_scale_x` is 0.5 and `max` 1.0, so 768x432 is the minimum of a 1536x864 base, at 6 to 11 ms of GPU time a frame on the M4 Pro. `gpu_timestamps segment` changes nothing. Whether a console stays there too is not known.
+Every 3D target is 768x432 from the first frame of the title to the tutorial: MetalFX stands in for DLSS at 768x432 to 768x432, the game's NDSR compute networks take that to 1536x864, and the result reaches the 3840x2160 swap chain, whose top-left 1920x1080 holds the picture. The game's own defaults give the reason for the figure, not the cause: `render.dynres_min_scale_x` is 0.5 and `max` 1.0, so 768x432 is the minimum of a 1536x864 base, at 6 to 11 ms of GPU time a frame on the M4 Pro. Segment timestamps (the profile key `gpu_timestamps segment` then, the host's default since) changed nothing, with the GPU's idle gaps still counted. Whether a console stays there too is not known.
 
 ## Driving it on the Mac
 

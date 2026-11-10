@@ -112,6 +112,11 @@ int main(void) {
     CHECK(!motion_map_parse(&m, "x,x,z") && m.det == 1, "a repeated axis is refused (identity)");
     CHECK(!motion_map_parse(&m, "x,y") , "two entries are refused");
 
+    CHECK(motion_shake_threshold(NULL) == 1.5 && motion_shake_threshold("") == 1.5 && motion_shake_threshold("abc") == 1.5, "no shake threshold is 1.5 G");
+    CHECK(motion_shake_threshold("0.8") == 0.8 && motion_shake_threshold("3") == 3 && motion_shake_threshold("0.1") == 0.1 && motion_shake_threshold("10") == 10, "a threshold in range is taken as it is");
+    CHECK(motion_shake_threshold("0.05") == 0.1 && motion_shake_threshold("11") == 10 && motion_shake_threshold("12") == 10 && motion_shake_threshold("1e9") == 10, "a threshold out of range is kept at the nearest end, as a positive one was taken before");
+    CHECK(motion_shake_threshold("0") == 1.5 && motion_shake_threshold("-2") == 1.5 && motion_shake_threshold("nan") == 1.5, "0, a negative number and nan are 1.5 G");
+
     // flat and still: identity orientation, acc (0,0,-1), no rotation
     motion_map id; motion_map_parse(&id, NULL);
     motion_state s; motion_reset(&s);

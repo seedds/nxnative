@@ -14535,6 +14535,8 @@ static unsigned mtl_pf_chmask(MTLPixelFormat pf) {
 // Whole level and whole face, all four channels written -> open one clear-only render pass per layer / depth slice (the hardware converts the clear value by the texture format, including integer and depth);
 // View with changed format: clear on that view. Partial colour regions / channel masks use a triangle and preserve everything else.
 static void clear_tex_tri(id<MTLTexture> t, unsigned lv, unsigned l0, const p_clear_tex *c);
+static uint64_t g_clear_blit_n, g_clear_blit_layers;   // DM_NVN_CLEAR_BLIT: clears done as one copy, layers covered
+static int clear_blit_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_CLEAR_BLIT"); v = e && atoi(e) > 0; if (v) MLOG("DM_NVN_CLEAR_BLIT=1: whole-level zero clears of several layers are one copy from a zero buffer, not a render pass per layer"); } return v; }
 static void clear_tex(const p_clear_tex *c) {
     if (c->tex) zskip_del(c->tex->serial);
     id<MTLTexture> t = tex_mtl(c->tex); sparse_gpu_wrote(c->tex);
@@ -14569,6 +14571,24 @@ static void clear_tex(const p_clear_tex *c) {
         RED_ONCE(44, "texture clear case not implemented: region %d,%d %dx%d (level size %lux%lu) mask %#x render-target capable %d (format %#x flags %#x)", c->r.xoffset, c->r.yoffset, c->r.width, c->r.height,
                  (unsigned long)w, (unsigned long)h, c->mask, !!(t.usage & MTLTextureUsageRenderTarget), c->tex->d.format, c->tex->d.flags);
         return;
+    }
+    // DM_NVN_CLEAR_BLIT=1 (off by default): a whole-level zero clear of several layers / depth planes of a colour texture is one copy from the shared zero buffer
+    // in the copy encoder instead of one render pass per layer. PRAGMATA clears a 128-layer 128x192 R32Uint texture every frame: 128 empty passes, 0.24 ms of GPU work spread over
+    // ~3.1 ms of the frame (encoder start/end ~22 us each, pm2 GPUPROF). Zero bits = the clear value for every non-block colour format the copy covers (uint, float +0, unorm, snorm).
+    if (nz > 1 && !depth && !stencil && clear_blit_on() && t.sampleCount == 1 && !mtl_fmt_block(pf) && t.textureType != MTLTextureTypeCube && t.textureType != MTLTextureTypeCubeArray) {
+        size_t bpp = mtl_pf_bytes(pf); int zero = 1;
+        int chm = mtl_pf_chmask(pf); for (int i = 0; i < 4; i++) if ((chm >> i & 1) && c->c.u[i]) zero = 0;   // a bit test (uint or float) of the format's channels only (PRAGMATA's R32Uint clear leaves junk in g/b/a); -0.0f is not taken as zero
+        size_t row = bpp * w, img = row * h, need = is3d ? img * (size_t)nz : img;
+        id<MTLBuffer> zb = bpp && zero && need <= ((size_t)64 << 20) ? zero_buf(need) : nil;
+        if (zb) {
+            id<MTL4ComputeCommandEncoder> e = blit();
+            if (is3d) enc_b_copy_buffer_texture(e, zb, 0, row, img, MTLSizeMake(w, h, nz), t, 0, lv, MTLOriginMake(0, 0, c->r.zoffset));
+            else for (int z = 0; z < nz; z++) enc_b_copy_buffer_texture(e, zb, 0, row, img, MTLSizeMake(w, h, 1), t, l0 + c->r.zoffset + z, lv, MTLOriginMake(0, 0, 0));
+            if (!g_clear_blit_n++) MLOG("DM_NVN_CLEAR_BLIT: first multi-layer zero clear as one copy: ser %llu %lux%lu x%d %s format %lu", c->tex ? c->tex->serial : 0ull, (unsigned long)w, (unsigned long)h, nz, is3d ? "3D" : "layers", (unsigned long)pf);
+            g_clear_blit_layers += (uint64_t)nz;
+            return;
+        }
+        static int said; if (!said++) MLOG("DM_NVN_CLEAR_BLIT: a multi-layer clear stays one pass per layer (value %#x %#x %#x %#x, %zu bytes a pixel, %d layers): only zero clears are copied", c->c.u[0], c->c.u[1], c->c.u[2], c->c.u[3], bpp, nz);
     }
     rp_end(); if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
     for (int z = 0; z < nz; z++) {

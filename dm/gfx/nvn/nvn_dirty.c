@@ -134,9 +134,15 @@ static void prep_write(void *addr, size_t len) {
     }
 }
 
+static pthread_once_t g_init_once = PTHREAD_ONCE_INIT;
+static void dirty_init(void) {
+    g_pg = (uintptr_t)getpagesize(); g_shift = __builtin_ctzl(g_pg); mach_timebase_info(&g_tb);
+    dm_fault_hook_register(on_fault); dm_guest_write_prep_register(prep_write);
+}
 void nvn_dirty_add_range(const void *mem, size_t size) {
-    static int inited;
-    if (!inited) { inited = 1; g_pg = (uintptr_t)getpagesize(); g_shift = __builtin_ctzl(g_pg); mach_timebase_info(&g_tb); dm_fault_hook_register(on_fault); dm_guest_write_prep_register(prep_write); }
+    // Concurrent first pool registrations must all see complete geometry and hooks
+    // before publishing ranges. This once is never entered from the fault handler.
+    pthread_once(&g_init_once, dirty_init);
     atomic_fetch_add(&g_adds_total, 1);
     pthread_mutex_lock(&g_slot_mu);
     int n = atomic_load(&g_nr);

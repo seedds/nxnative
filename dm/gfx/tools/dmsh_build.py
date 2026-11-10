@@ -308,7 +308,22 @@ def tg_spill(msl):
     return '\n'.join(lines), total
 # textureGatherOffsets: spirv-cross's spvGatherConstOffsets passes coffsets[i] from a loop to gather(), whose offset Metal takes only as a constant expression. At -O1 the loop stays and
 # the compiler takes it anyway: the gathers then read texels at offsets that differ between lanes and between runs, with no error. agl's NDSR upscaler builds its input tile this way, so
-# some of its lanes saw zeros and the network drew dotted rows in smooth areas of the picture (the same frame, three pictures). Each call becomes its four gathers, offsets written out
+# some of its lanes saw zeros and the network drew dotted rows in smooth areas of the picture (the same frame, three pictures). Each call becomes its four gathers, offsets written out.
+# Offsets that form a 2x2 square (b, b+(1,0), b+(0,1), b+(1,1), in any order) take one gather at b instead: each offset's texel is the (i0, j0) corner of its own footprint, and with
+# integer offsets those corners are the four texels of b's footprint, each wrapped on its own either way (Metal's order: x (i0, j1), y (i1, j1), z (i1, j0), w (i0, j0)). agl's NDSR
+# networks build their input tile from such squares: 27 of Ocarina of Time's 32 shaders with gather offsets, all compute, 3 to 15 squares each
+GATHER_QUAD = {(0, 0): 'w', (1, 0): 'z', (0, 1): 'x', (1, 1): 'y'}
+def gather_quad(off):
+    """off: the four offsets as written (int2(a), int2(a, b)) → (the square's corner b as MSL, the swizzle that puts its texels in the offsets' order), or None"""
+    xy = []
+    for o in off:
+        m = re.fullmatch(r'int2\(\s*(-?\d+)\s*(?:,\s*(-?\d+)\s*)?\)', o)
+        if not m: return None
+        xy.append((int(m.group(1)), int(m.group(2) if m.group(2) is not None else m.group(1))))
+    bx, by = min(x for x, _ in xy), min(y for _, y in xy)
+    rel = [(x - bx, y - by) for x, y in xy]
+    if sorted(rel) != sorted(GATHER_QUAD): return None
+    return f'int2({bx}, {by})', ''.join(GATHER_QUAD[r] for r in rel)
 GATHER4 = 'template<typename T> static inline __attribute__((always_inline)) vec<T, 4> dm_gather4(T a, T b, T c, T d) { return vec<T, 4>(a, b, c, d); }\n'
 def gather_offsets(msl):
     if not re.search(r'\bspvGather(Compare)?ConstOffsets\(spvDesc|= spvGather(Compare)?ConstOffsets\(', msl): return msl
@@ -331,10 +346,13 @@ def gather_offsets(msl):
         tex, smp, off, rest = args[0], args[1], arrays[args[2]], ', '.join(args[base:])
         tail = '' if cmp else ', ' + args[3]
         fn = 'gather_compare' if cmp else 'gather'
-        out += [msl[i:m.start()], 'dm_gather4(' + ', '.join(f'{tex}.{fn}({smp}, {rest}, {o}{tail}).w' for o in off) + ')']
+        quad = gather_quad(off)
+        if quad: out += [msl[i:m.start()], f'({tex}.{fn}({smp}, {rest}, {quad[0]}{tail}).{quad[1]})']
+        else: out += [msl[i:m.start()], 'dm_gather4(' + ', '.join(f'{tex}.{fn}({smp}, {rest}, {o}{tail}).w' for o in off) + ')']
         i = j
     out.append(msl[i:])
     msl = ''.join(out)
+    if 'dm_gather4(' not in msl: return msl
     k = msl.index('\n', msl.index('using namespace metal;')) + 1
     return msl[:k] + GATHER4 + msl[k:]
 # Border colours: Maxwell's sampler takes any RGBA border colour, Metal's only transparent black, opaque black or opaque white, and the host's sampler gets the nearest of them

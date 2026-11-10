@@ -1,16 +1,16 @@
-"""A vertex shader's layer_out (dm/gfx/tools/dmsh_build.py layer_out): whether main0 writes the layer, the one fact the host (shader_load, pre_desc) and pso_offline.py read for it.
+"""A vertex shader's layer_out (dm/gfx/tools/dmsh_entry.py layer_out): whether main0 writes the layer, the one fact the host (shader_load, pre_desc) and pso_offline.py read for it.
 Layer entry points (vs_layer_entry) name the layer in the library without main0 writing it: Ocarina of Time's effect vertex shaders were left out of the pipeline archive while the
 layer's name anywhere in the library counted. No game files, no Metal compiler."""
-import ast
 from pathlib import Path
-import re
+import sys
 from typing import Any
 import unittest
 
 TOOLS = Path(__file__).resolve().parents[3] / 'dm/gfx/tools'
-ns: dict[str, Any] = {'re': re}   # dmsh_build.py is a script that runs a build when imported
-exec(compile(ast.Module(body=[n for n in ast.parse((TOOLS / 'dmsh_build.py').read_text()).body if isinstance(n, ast.FunctionDef)
-                              and n.name in {'layer_out', 'vs_layer', 'vs_layer_entry', 'drop_point_size', 'vs_depth'}], type_ignores=[]), 'dmsh_build.py', 'exec'), ns)
+sys.path.insert(0, str(TOOLS))
+import dmsh_entry  # noqa: E402
+
+ns: dict[str, Any] = dict(vars(dmsh_entry))
 layer_out, vs_layer, vs_layer_entry, vs_depth = ns['layer_out'], ns['vs_layer'], ns['vs_layer_entry'], ns['vs_depth']
 
 HEAD = '#include <metal_stdlib>\nusing namespace metal;\n\n'

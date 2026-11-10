@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Writes docs/agents/game-patches.md, the index of game-specific code: per game, the rewriter's patches of its builds (CUTS, OBS, FRAME_STEP sites, MATCH_CUTS and CAPABILITIES of its
+# Writes docs/agents/game-patches.md, the index of game-specific code: per game, the rewriter's patches of its builds (CUTS, OBS, FRAME_STEP and STUBS sites, MATCH_CUTS and CAPABILITIES of its
 # dm/games/<id>/patches.py, with each patch's reason), the host's rows keyed by its build IDs (32-hex string literals in dm/host and dm/gfx), and each patch's binding (below); then the SDK
 # cuts of dm/tools/sdk_patches.py by sdk build and the games that ship it, the SDK-wide function-matched rules, translator rules keyed by a shader's code hash, and the profile keys that switch
 # host behaviour away from their default, with the games that set them. The gaps (patches bound tighter than they could be) are listed first: the work list. Frame-step sites are found by running each
@@ -98,7 +98,6 @@ DEFAULT_SOON = 'a default for every game after `regress.py check` on the games'
 SWITCH_BINDING = [
     ('render_cond', '', {'what': 'NVN conditional rendering', 'now': 'game', 'goal': 'host', 'purpose': 'rendering',
      'why': f'what the GPU does; off by default only because other games drew everything before: {DEFAULT_SOON}'}),
-    ('gpu_timestamps', '', {'what': 'timestamp reports per segment', 'now': 'game', 'goal': 'host', 'purpose': 'rendering', 'why': f'what hardware records: {DEFAULT_SOON}'}),
     ('draw_barriers', '', {'what': 'draw passes ordered by the game\'s own barriers', 'now': 'game', 'goal': 'host', 'purpose': 'frame rate', 'why': f'what NVN specifies: {DEFAULT_SOON}'}),
     ('mem_map_limit', '', {'what': 'MapPhysicalMemory limited to the application pool', 'now': 'game', 'goal': 'host', 'purpose': 'memory',
      'why': "Horizon's limit; off by default because Ace Attorney Investigations Collection maps a little more than its profile's 1 GB pool, which is the thing to fix"}),
@@ -285,8 +284,8 @@ def page():
         m = mods.get(g.id)
         if not m and g.id not in host_games: continue
         text = files[g.id].read_text() if m else ''
-        cuts, obs, fs, mc, mfs, caps = (getattr(m, k, {}) for k in ('CUTS', 'OBS', 'FRAME_STEP', 'MATCH_CUTS', 'MATCH_FRAME_STEP', 'CAPABILITIES'))
-        bids = list(dict.fromkeys([*cuts, *obs, *fs, *caps, *sorted(host_games.get(g.id, ()))]))
+        cuts, obs, fs, st, mc, mfs, caps = (getattr(m, k, {}) for k in ('CUTS', 'OBS', 'FRAME_STEP', 'STUBS', 'MATCH_CUTS', 'MATCH_FRAME_STEP', 'CAPABILITIES'))
+        bids = list(dict.fromkeys([*cuts, *obs, *fs, *st, *caps, *sorted(host_games.get(g.id, ()))]))
         n_fs = 0; lines = [f'### {name(g)}', '', f'{note(g)}, `{g.id}`' + (f', {link(files[g.id])}' if m else '') + '.', '']
         es = list(bound(m, rel(files[g.id]), own=True)) if m else []
         for b in sorted(host_games.get(g.id, ())):
@@ -309,6 +308,9 @@ def page():
                 for off, why in sites: lines.append(f'  - frame step `+{off:#x}`: {why}')
                 if fold: lines += ['', '  </details>', '']
                 if scale: lines.append('  - render scale stub (the launcher offers DM_RENDER_SCALE)')
+            if bid in st:
+                st_sites = frame_step_sites(st[bid])[0]; n_fs += len(st_sites)
+                for off, why in st_sites: lines.append(f'  - stub `+{off:#x}`: {why}')
             if caps.get(bid) or (bid in fs and fs_caps): lines.append(f'  - launcher capabilities: {", ".join(sorted(set(caps.get(bid, ())) | set(fs_caps if bid in fs else ())))}')
             for p, n, what, _ in host.get(bid, []): lines.append(f'  - host {link(p, n)}: {what}')
         for module, rules in mc.items():
@@ -397,7 +399,7 @@ def page():
          '| Now → goal | Patch | Purpose | Status | Evidence | Games | Where | Why |', '|---|---|---|---|---|---|---|---|',
          *[f'| {arrow(e)} | {e["what"]} | {e["purpose"]} | {status(e)} | {checked(e)} | {len(ids) or "—"} | {"; ".join(w)} | {e["why"]} |' for e, w, ids in gaps], '',
          '## Summary', '',
-         '| Game | Cuts | Gates | Frame-step sites | Function-matched rules | Host rows | Binding |', '|---|---|---|---|---|---|---|',
+         '| Game | Cuts | Gates | Frame-step and stub sites | Function-matched rules | Host rows | Binding |', '|---|---|---|---|---|---|---|',
          *summary, '',
          '## Games', '', *sections,
          '## SDK cuts', '',

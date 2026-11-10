@@ -1,6 +1,6 @@
 # Red Dead Redemption (`01007820196A6000`)
 
-Base game 1.0.0 and updates 1.0.4 (v262144) and 1.0.7 (v458752), SDK 15.3.2, on NVN (3,628 shaders over the builds, RAGE effects). 1.0.7 changes only the RomFS: its `main` and `sdk` are 1.0.4's, and so are its shaders. Modules `main` and `sdk`. Rockstar's RAGE engine in Double Eleven's Switch port (the survey's Unreal marker is a false match). All of the RomFS but two Bink movies and one Double Eleven pack is in 134 Rockstar RPF6 archives (11 GB, encrypted tables). The profile is the NSP script's provisional one with `render_cond on` added ([What it needs](#what-it-needs)). Getting it to run needed a reader for its archives and effects in `shader_split.py` ([Found on this game](#found-on-this-game)); its second audio renderer, for the movies, plays through the host's support for several renderers. All three versions are registered; the NSP script packs 1.0.7 from the profile as it is (its shader tables are made from 1.0.0 and 1.0.7), and 1.0.4 from a profile derived from it.
+Base game 1.0.0 and updates 1.0.4 (v262144) and 1.0.7 (v458752), SDK 15.3.2, on NVN (3,628 shaders over the builds, RAGE effects). 1.0.7 changes only the RomFS: its `main` and `sdk` are 1.0.4's, and so are its shaders. Modules `main` and `sdk`. Rockstar's RAGE engine in Double Eleven's Switch port (the survey's Unreal marker is a false match). All of the RomFS but two Bink movies and one Double Eleven pack is in 134 Rockstar RPF6 archives (11 GB, encrypted tables). The profile is the NSP script's provisional one with `render_cond on` added, and 60 fps (30 on the Switch) by `fps_target 60` with `present_interval display` ([Frame rate](#frame-rate)). Getting it to run needed a reader for its archives and effects in `shader_split.py` ([Found on this game](#found-on-this-game)); its second audio renderer, for the movies, plays through the host's support for several renderers. All three versions are registered; the NSP script packs 1.0.7 from the profile as it is (its shader tables are made from 1.0.0 and 1.0.7), and 1.0.4 from a profile derived from it.
 
 On the Mac (2026-11-07, headless, 5 minutes driven with `DM_KEYS`): language selection, the Rockstar Games logo movie, the title, the autosave notice, the difficulty menu, the opening train cutscene and control of John Marston at Armadillo Station with the HUD and the minimap, with no `[RED]` line. It runs at the game's 30 fps (frame time p50 33.3 ms, p95 34.0 ms, max 35.7 ms; GPU p50 10.6 ms). The sound was not listened to (headless runs). The unsigned IPA is built but not tested on an iPhone.
 
@@ -16,9 +16,16 @@ Update 1.0.7 on the Mac (2026-11-10, Apple M6 16 GB, macOS 27.2, main at 47773ed
 | `sys_resource 0x0` | `game.tsv` | the NPDM declares 0 MB of system resource: `IsVirtualAddressMemoryEnabled` is false, as on Horizon |
 | `mem_used 0x4ca4000` | `game.tsv` | 1.0.0's rewritten modules exceed the default 64 MB (1.0.4's fit in it) |
 | `modules main sdk` | `game.tsv` | `main` imports only from `sdk`; the Bink movies are decoded by `main` |
+| `fps_target 60`, `present_interval display` | `game.tsv`, `hle_nvn.c` | 60 fps (30 on the Switch); the player's **Frame rate** picks 30 or 60 ([Frame rate](#frame-rate)) |
 | `render_cond on` | `game.tsv` | the game draws under `SetRenderEnableConditional` (its only `[RED]` line before the key); without it small black squares showed in the title scene and the opening cutscene |
 | `shader_groups` (one per RomFS folder) | `game.tsv` | the provisional guess, kept |
 | `zip_store .bk2:.pkdswitch:.rpf:.metallib` | `game.tsv` | the archives and movies are already compressed |
+
+## Frame rate
+
+- **Current: 60 fps** (30 on the Switch), 30 with the player's **Frame rate** (`DM_FPS_TARGET=30`). The game asks for present interval 2 once (`main+0x38ea0`, before the language selection) and has no other limit: with presents at one a display tick (`present_interval display`) the language selection, the title scene and the opening ran at 16.67 ms frames on an Apple M6 (GPU p50 5.5 to 6.6 ms, 7.3 to 7.7 at 30). The cap is applied by the present interval alone ([A present interval that is the game's only limit, in display mode](../../../docs/reference/frame-rate.md#a-present-interval-that-is-the-games-only-limit-in-display-mode)), so the profile names no address and the setting holds for every build.
+- **Speed (2026-11-10, 1.0.7, the same presses from a save with no progress):** the opening cutscene, shot every 2 s from 2 to 92 s after A on Normal at 30 and at 60: each 30 fps shot matches a 60 fps shot 0 to 2 s earlier, the same lead from the first to the last (the 60 run started the cutscene a moment sooner); a game counting frames would gain a second a second. After control at Armadillo Station, 4 s of the left stick forward ends at the station's porch steps at both rates. Rockstar's update 1.03 for the PS4 release (Double Eleven's port too) added a 60 fps mode on the PS5.
+- Not checked at 60: riding, gunfights, Bink movies after the logo, and the iPhone (where the 2.5 GB footprint and heat may not hold 60).
 
 ## Files
 
@@ -47,6 +54,7 @@ Update 1.0.7 on the Mac (2026-11-10, Apple M6 16 GB, macOS 27.2, main at 47773ed
 
 - Resolved: light square blocks, 8×8 pixels and flickering, in the sky over the distant ridge (1.0.0 and 1.0.4): the cloud fog `rdr2_clouds_fog` (`c0ab3c051753e36d`) sampled the depth attachment its pass had just written → fixed in [PR #1866](https://github.com/seedds/nxnative/pull/1866), on `main` since 81906931 as half of one depth rule (its reference entry: Depth sampled after a draw of its pass wrote it). 1.0.7's arrival at Armadillo shows no blocks over the hills.
 - Resolved: characters a few metres away drawn as their hats and props only (their shadows had bodies): the character occlusion queries (`rage::CharacterVisQueries`) never reset the samples-passed counter, every query read 0 and every character counted as hidden → [Samples-passed reports with no reset before them](../../../docs/reference/rendering.md#samples-passed-reports-with-no-reset-before-them).
+- Resolved: 30 fps with spare time, the player's Frame rate without effect: the present interval 2 is the game's only limit, and the host applied a cap only with an engine limiter it writes → [A present interval that is the game's only limit, in display mode](../../../docs/reference/frame-rate.md#a-present-interval-that-is-the-games-only-limit-in-display-mode).
 
 Otherwise it runs on mechanisms found on other games, including SDK 15.3.2's NVN and services.
 

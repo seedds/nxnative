@@ -69,7 +69,8 @@ FITS(win_builder_t, NVNwindowBuilder);
 typedef struct { uint32_t magic; void *native; int32_t ntex, interval, next, crop[4]; NVNtexture *tex[4]; uint64_t presents, avail[4], pace, ticket[4]; int32_t nactive; } win_t;   // ticket[i]: ticket of the most recent present of image i; nactive as in win_builder_t
 FITS(win_t, NVNwindow);
 
-// Command buffer: commands are written into the command memory given by the game (AddCommandMemory), handle = segment start address; when it runs out, the game is called back for more memory
+// Command buffer: commands are written into the command memory given by the game (AddCommandMemory), and the list that strings a recording's pieces together into its control memory
+// (AddControlMemory), as in NVN; the handle is the address of that list (ctl_e below). When either runs out, the game is called back for more memory
 typedef struct {
     uint32_t magic, recording;
     uint8_t *cur;                        // Write pointer of the current command memory segment
@@ -77,14 +78,19 @@ typedef struct {
                                          // +0x10 is left to the game: its inlined NVN header code writes byte 1 here after AddCommandMemory and before BeginRecording / CallCommands (an internal flag of real NVN; main+0x4da5c, main+0xb8dec etc.).
                                          // This used to be the low byte of end: rewritten to 01 it cut the segment end by up to 254 bytes, and SMBW's material setup handles (512-byte blocks at minimum) kept overflowing into host segments at the iPhone's addresses
     uint8_t *end;                        // End of the current command memory segment
-    uint8_t *begin;                      // First record of this recording (its handle); recording 2 = not written yet
+    uint8_t *begin;                      // First record of this recording; recording 2 = not written yet (host-lent segments hang off the recording's guest bytes from here)
     PFNNVNCOMMANDBUFFERMEMORYCALLBACKPROC cb; void *cb_data;
     NVNdevice *dev;
-    uint64_t used;                       // Bytes written since the game last added command memory, across recordings and host segments, including segment-switch JUMPs (returned by GetCommandMemoryUsed)
+    uint64_t used;                       // Record bytes written since the game last added command memory, across recordings and host segments (returned by GetCommandMemoryUsed)
     int32_t tex_base, samp_base;         // Host-table bases of the texture / sampler pool this command buffer last bound (hle_nvn.c dpool_add; 0 = the first pool of its kind)
-    size_t ctl_size;                     // Bytes in the last control memory block supplied by the game (the host records no control commands)
     int64_t copy_row, copy_image;        // SetCopyRowStride / SetCopyImageStride: state of the command buffer, written into each buffer <-> texture copy (p_copy_strides), not recorded
     size_t cmd_size;                     // GetCommandMemorySize: the bytes the game last passed to AddCommandMemory, as in NVN; a host-lent segment leaves it (see there)
+    uint8_t *ctl_mem;                    // The control memory block the game last added (aligned to 8), or a host-lent one when the game gave none (hle_nvn.c ctl_put)
+    uint32_t ctl_size, ctl_used;         // Its bytes, and the bytes of control entries written into it (GetControlMemorySize / Used, which also count the entries in ctl_q)
+    uint64_t ctl_q[2];                   // The recording's control entries not written yet (0 = none): the last waits for the next one or the END (CTL_LAST); a piece closed by AddCommandMemory waits
+                                         // for the next record, so that the game's control-memory callback never runs inside its own command-memory callback (hle_nvn.c ctl_push)
+    uint8_t *ctl_list;                   // The recording's first control entry once written: its handle (NULL before)
+    uint8_t *chunk;                      // Start of the recording's piece of records in the current segment not yet in a CTL_CHUNK entry (NULL = none open)
 } cmd_t;                                                                                   FITS(cmd_t, NVNcommandBuffer);
 
 // ---------- State objects (defaults follow the NVN / GL defaults) ----------
@@ -105,6 +111,53 @@ typedef struct { uint32_t stride, divisor; } vs_st;                             
 
 // ---------- Command records: {op, size (including header, aligned to 8)} + payload ----------
 typedef struct { uint32_t op, size; } op_hdr;
+// A recording's control list (NVN's control memory, hle_nvn.c EndRecording): 8-byte entries, the handle is the first. Command memory holds only the records, as the driver's holds
+// only GPU commands: the end of a recording and the link to its next piece when command memory ran out take no command memory, so they take none of what GetCommandMemoryUsed
+// reports and games size their command memory by (docs/reference/memory.md, "Model heaps sized by the host's command record sizes"). CallCommands copies the called list's
+// pieces into the caller's list, as the driver copies a command set's GPU FIFO entries: the called recording's control memory may be given out again once the call is recorded,
+// its command memory not before the caller has run (Donkey Kong Bananza resets the arena of its control memory twice per arena of command memory).
+//   bits 63-62 kind: CTL_CHUNK records at addr, len bytes; CTL_LINK the list goes on at addr (its control memory ran out). Kinds 0 and 2 are never written.
+//   bit 61 CTL_LAST: the list ends after this entry (not on a LINK). bits 60-44 len / 8 (CTL_CHUNK: at most CTL_CHUNK_MAX bytes; CTL_ONE = one record, as long as its header says).
+//   bits 43-0 addr / 8 (every address is 8-aligned, below 2^47)
+enum { CTL_CHUNK = 1, CTL_LINK = 3 };
+#define CTL_LAST (UINT64_C(1) << 61)
+#define CTL_ONE (((UINT64_C(1) << 17) - 1) * 8)
+#define CTL_CHUNK_MAX (CTL_ONE - 8)
+static inline uint64_t ctl_e(unsigned kind, const void *addr, uint64_t len) { return (uint64_t)kind << 62 | (len >> 3) << 44 | (uint64_t)(uintptr_t)addr >> 3; }
+static inline unsigned ctl_kind(uint64_t e) { return (unsigned)(e >> 62); }
+static inline const uint8_t *ctl_addr(uint64_t e) { return (const uint8_t *)(uintptr_t)((e & ((UINT64_C(1) << 44) - 1)) << 3); }
+static inline uint64_t ctl_len(uint64_t e) { return (e >> 44 & ((UINT64_C(1) << 17) - 1)) << 3; }
+static inline size_t ctl_chunk_bytes(uint64_t e) { uint64_t n = ctl_len(e); if (n == CTL_ONE) { op_hdr h; memcpy(&h, ctl_addr(e), sizeof h); n = h.size; } return (size_t)n; }
+// Compact records: forms only command memory holds, as small as the driver's command for the same call or close to it where the 8-byte header allows (docs/reference/memory.md,
+// "Model heaps sized by the host's command record sizes"). The queue's flatten expands each into the canonical records (hle_nvn.c rec_expand), so replay and capture never see them.
+// Header: op = OPC_* in the low 8 bits (canonical ops are below 64) and small arguments in the upper 24; payload below.
+enum {
+    OPC_BASE = 0x80,
+    OPC_DRAW = OPC_BASE,   // prim | first, count (i32)                                  → OP_DRAW, one instance
+    OPC_DRAW_INST,         // prim | first, count, base instance, instances              → OP_DRAW
+    OPC_DRAW_IND,          // prim | ind (u64)                                           → OP_DRAW, indirect
+    OPC_DRAW_IDX,          // prim, index type << 8 | count, base vertex, ibuf (u64)     → OP_DRAW_IDX, one instance
+    OPC_DRAW_IDX_INST,     // prim, index type << 8 | count, base vertex, base instance, instances, ibuf
+    OPC_DRAW_IDX_IND,      // prim, index type << 8 | ibuf, ind (u64)                    → OP_DRAW_IDX, indirect
+    OPC_VIEWPORTS,         // first, n << 8 | n × {x, y, w, h} (f32)                     → OP_VIEWPORTS
+    OPC_STENCIL,           // face, which << 2, value << 4 (20 bits) | none              → OP_STENCIL
+    OPC_HANDLES,           // op, stage << 6, first << 9, n << 17 | n × handle (u32)     → op (OP_BIND_TEX / _SAMP / _IMG), handles already moved to the bound pools
+    OPC_BUFS,              // op, stage << 6, first << 9, n << 17 | n × {addr (u64), size (u32)} → n records of op (OP_BIND_UBO_SMALL / OP_BIND_SSBO)
+    OPC_VBUFS,             // first, n << 8 | n × {addr (u64), size (u32)}               → OP_BIND_VBUF
+    OPC_VATTR,             // n | n × attribute state (u32)                              → OP_BIND_VATTR, from 0
+    OPC_VSTREAM,           // n | n × stream state (8 bytes)                             → OP_BIND_VSTREAM, from 0
+    OPC_UBO,               // stage, first << 3, n << 7 | n × (addr >> 8 | size << 40)   → n OP_BIND_UBO_SMALL (addresses 256-aligned, sizes below 2^18)
+    OPC_STATE,             // kind, value << 3 (21 bits) | none                          → OP_BIND_STATE of a 4-byte state
+    OPC_STATE8,            // kind | the 8-byte state                                    → OP_BIND_STATE
+    OPC_BARRIER,           // bits (24) | none                                           → OP_BARRIER
+    OPC_PRIM_RESTART,      // on, all-ones index << 1, index << 2 (22 bits) | none       → OP_PRIM_RESTART
+    OPC_SCISSOR,           // none | x, y, w, h (u16)                                    → OP_SCISSOR
+    OPC_END_
+};
+#define REC_EXPAND_MAX 4096   // the most canonical bytes one compact record expands to
+static inline int rec_compact(uint32_t op) { return (op & 0xff) >= OPC_BASE; }
+// A recording's records in order, as one block ending in OP_END (malloc'd; hle_nvn.c): for tests that replay a handle with mtl_exec, and diagnostics
+uint8_t *nvn_rec_linear(uint64_t handle, size_t *len);
 enum {
     OP_END, OP_JUMP, OP_BEGIN, OP_CALL,                                             // OP_BEGIN is no longer recorded (hle_nvn.c BeginRecording)
     OP_SIGNAL_EVENT, OP_REPORT_COUNTER, OP_COPY_B2B, OP_UPDATE_UB,                 // CPU-visible side effects
@@ -205,6 +258,9 @@ static inline const p_copy_strides *copy_strides(const void *a, uint32_t size) {
 }
 // NVN2's DLSS evaluation: the parameters at the time of the call, each texture snapped after the record (hle_nvn.c "NVN2's DLSS", nvn_mtl.m dlss_eval)
 enum { DLSS_COLOR, DLSS_DEPTH, DLSS_MOTION, DLSS_OUTPUT, DLSS_BIAS, DLSS_EXPOSURE, DLSS_TEXTURES };
+// NVN2's DLSS network as the host keeps it in the game's memory (hle_nvn.c): what it was built with, and the serial its evaluations carry (p_dlss.net), new at each Initialize
+typedef struct { int32_t w, h, method, preset; uint32_t flags; } dlss_builder_t;
+typedef struct { dlss_builder_t b; uint64_t serial; } dlss_net_t;
 typedef struct { const tex_t *tex[DLSS_TEXTURES]; uint64_t net; int32_t iw, ih, ow, oh, base[DLSS_TEXTURES][2]; float mv[2], jitter[2], pre_exposure; uint32_t flags, reset; } p_dlss;
 typedef struct { uint64_t addr, size; uint32_t value, _pad; } p_clear_buf;   // buffer filled with a 32-bit value (ClearBuffer)
 typedef struct { float rgba[4]; } p_blend_color;
@@ -234,7 +290,7 @@ void mtl_sub_index(const uint64_t *h, int n);   // Start of submission: build th
 void xv_test_counts(int *dc, int *viol);
 int mtl_gpu_span(uint64_t f, uint64_t *t0, uint64_t *t1);   // The frame's earliest GPUStart / latest GPUEnd (mach absolute time, ns); returns 0 if not all complete or there is no GPU time
 void mtl_stats(uint64_t *passes, uint64_t *draws);
-void mtl_args_stats(uint64_t *enc, uint64_t *reuse);
+void mtl_args_stats(uint64_t *enc, uint64_t *reuse, uint64_t *patch);
 void mtl_use_stats(uint64_t *call, uint64_t *skip);
 uint64_t mtl_ds_omit(void);   // Cumulative number of passes with no depth attachment because the lookahead proved depth-stencil unused
 uint64_t mtl_drawable_ns_take(void);   // Take and zero: cumulative ns spent waiting for nextDrawable in present   // Cumulative useResource calls actually issued / skipped by same-encoder dedup   // Cumulative argument buffer new-encode / reuse counts
@@ -261,7 +317,6 @@ void mtl_tex_unpin(uint64_t serial);
 void mtl_pkg_stats(uint64_t *uploads, uint64_t *reuploads);
 unsigned mtl_cpu_tex_count(void);   // live textures the CPU writes (retired snapshots are excluded)
 uint64_t mtl_pkg_edge_skips(void);   // packaged texture checks that found only writes beside the texture (pkg_edges_clean)
-uint64_t mtl_pkg_copy_absorbs(void);   // GPU copies into a packaged texture whose bytes, written into its storage too, were not taken as a change to upload (pkg_copy_absorb)
 uint64_t mtl_pkg_miss(void);
 uint64_t mtl_upload_ns_take(void);   // Take and zero: time spent uploading packaged textures on the submit thread since last time   // DM_NVN_DIRTYCHECK diagnostic: number of missed detections   // Packaged textures: number of first uploads, number of re-uploads due to pool content changes
 uint64_t mtl_upload_gpu_ns_take(void);   // Take and zero: GPU execution time of upload command buffers (sum of GPUEndTime − GPUStartTime)
@@ -278,13 +333,8 @@ void mtl_tex_gpu_written(const tex_t *t);   // a GPU write into the texture's st
 int mtl_tex_gpu_owned(uint64_t serial);                                  // its host texture is a render target or shader-writable: GPU content, never re-uploaded from guest memory
 enum { MTL_REWRITE_UPLOADED, MTL_REWRITE_GPU, MTL_REWRITE_GPU_NOW };     // mtl_tex_cpu_rewritten: uploaded from its storage / left to the GPU for good / until the CPU rewrites it
 int mtl_tex_cpu_rewritten(const tex_t *t);                               // nvn_ft_poll: the CPU wrote a registered texture's pages after its first use (MTL_REWRITE_*)
-// hle_nvn.c: a texture tex_flush_upload / tex_dirty_upload registered and has not resolved yet; GPU copies written into the destination texture's storage as well (see there)
+// hle_nvn.c: a texture tex_flush_upload / tex_dirty_upload registered and has not resolved yet; what the GPU writes into it is stored into its storage as well (nvn_mtl.m gsb_store)
 int nvn_ft_tracked(uint64_t serial);
-// The storage ranges a copy's mirror made writable and wrote, as addresses [lo, hi): the host's own write, which pkg_copy_absorb (nvn_mtl.m) excepts. The caller sets n = 0;
-// n = −1 when there were more than fit (that copy is then not absorbed)
-typedef struct { int n; uintptr_t r[64][2]; } mspan_t;
-int nvn_tex_mirror_b2t(const tex_t *t, unsigned level, unsigned layer0, const NVNcopyRegion *r, const uint8_t *src, size_t row, size_t img, mspan_t *ms);
-int nvn_tex_mirror_t2t(const tex_t *s, unsigned sl, unsigned ss, const NVNcopyRegion *sr, const tex_t *d, unsigned dl, unsigned ds, const NVNcopyRegion *dr, mspan_t *ms);
 int nvn_tex_level_range(const tex_t *t, unsigned level, unsigned layer, uint64_t *lo, uint64_t *hi);   // one level of one layer in the texture's storage, as offsets; −1 out of range
 // A program's per-stage shader key (hle_nvn.c): the first 8 bytes of sha256(first 0x880 bytes of the control section (its own length when shorter) + code area). Computed at SetShaders (NVN lets the caller free the control section once it returns, and Unity does);
 // a stage whose code area was not yet in any memory pool then is computed the first time it is asked for, from the host's copy of its control section. The keys belong to

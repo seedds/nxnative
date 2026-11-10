@@ -16,7 +16,8 @@ namespace Ryujinx.Graphics.Shader.Translation
         // and 128-bit instructions, decoded and emitted by the Ampere frontend.
         Ampere = 1 << 4,
         // Offline Metal: a read of a game uniform slot (c[3] to c[16]) past the size the game bound gives 0, as Maxwell's constant buffers do; Metal has no bounds
-        // of its own, so the read reached the guest memory past the binding (Constants.NxUniformSizesBank)
+        // of its own, so the read reached the guest memory past the binding. A read at a computed offset is compared with the size (Constants.NxUniformSizesBank);
+        // the reads at fixed offsets are reported as an extent of the slot (BufferDescriptor.FixedSize), which the host makes readable
         MetalUniformBounds = 1 << 5,
     }
 }

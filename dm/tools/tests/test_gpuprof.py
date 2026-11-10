@@ -55,6 +55,25 @@ class GpuProf(unittest.TestCase):
         self.assertEqual(self.flines[600], {'render_ms': 0.71, 'compute_ms': 0.03, 'encoders': 5, 'span_ms': 0.76})
         self.assertEqual(self.flines[1200]['span_ms'], 0.91)
 
+    def test_geom(self):
+        # DM_NVN_GPUPROF_GEOM: a pass line ending in its geometry time parses and is grouped; lines without it give None and no column
+        self.assertIsNone(self.frames[600][0].geom); self.assertEqual(gpuprof.geom_means(self.frames), {})
+        frames, _ = gpuprof.parse([rp(600, 0, 300.0, 24, 1600, 900, 1, 1, 50, 0.0, 5625, 5625, 92, 252) + ' geom 120.5',
+                                   rp(600, 1, 100.0, 25, 1600, 900, 1, 0, 1, 300.0, 5625, 5625, 115, 0)])
+        e = frames[600][0]
+        self.assertEqual((e.geom, e.dfmt, e.draws), (120.5, 252, 50))
+        self.assertIsNone(frames[600][1].geom)
+        self.assertEqual(gpuprof.geom_means(frames), {'1600x900 1c+d RG11B10Float/Depth32Float': 120.5})
+        out = io.StringIO()
+        with tempfile.NamedTemporaryFile('w', suffix='.log', delete=False) as f: f.write('\n'.join(LOG[:1] + [rp(600, 0, 300.0, 24, 1600, 900, 1, 1, 50, 0.0, 5625, 5625, 92, 252) + ' geom 120.5']) + '\n')
+        try:
+            with contextlib.redirect_stdout(out): self.assertEqual(gpuprof.main([f.name, '--timeline', '600']), 0)
+            self.assertIn('geometry 120.5 us, after it 179.5 us', out.getvalue())
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out): self.assertEqual(gpuprof.main([f.name]), 0)
+            self.assertIn('geom ms', out.getvalue()); self.assertIn('    0.12', out.getvalue())
+        finally: os.unlink(f.name)
+
     def test_frame_stats(self):
         s = gpuprof.frame_stats(self.frames[600])
         self.assertEqual((s['encoders'], s['passes'], s['draws']), (5, 4, 802))

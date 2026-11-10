@@ -74,6 +74,7 @@ Each step below stopped the boot before its fix:
 
 ## Found on this game
 
+- Calls copy the called list's pieces: its control memory comes from one arena reset twice per arena of command memory, so a call that pointed at the called list replayed overwritten entries: [A recording's end and links are in control memory](../../../docs/reference/nvn-objects.md#a-recordings-end-and-links-are-in-control-memory).
 - [Early fragment tests from the control section](../../../docs/reference/shaders.md#early-fragment-tests-from-the-control-section): 2,855 of its 13,546 pixel shaders set the NVN2 flag (control +0x5b), none of them writes depth; before, no NVN2 shader got the attribute.
 - [A control section's words read as a BAHS entry](../../../docs/reference/shaders.md#a-control-sections-words-read-as-a-bahs-entry): checked, 2026-11-10 ([issue #1613](https://github.com/seedds/nxnative/issues/1613)). The update v458752, split again without the DLC (whose tables are derived), gives all four tables byte for byte as the profile has them: no false entry, and the NSP script's table check passes.
 - [A prebuild pool sized from the Super cores](../../../docs/reference/shaders.md#a-prebuild-pool-sized-from-the-super-cores): the pipeline prebuild of its 21,225 shader pairs, M5 Pro, 393-452 s on 4 workers against 187-272 s on Metal's 14 (resolved).

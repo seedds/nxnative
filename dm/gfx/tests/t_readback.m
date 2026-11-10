@@ -179,7 +179,7 @@ static void packed_copies(int format, int tid) {
     NVNsync sync; h_nvnSyncInitialize(&sync, NULL);
     h_nvnCommandBufferFenceSync(&cmd, &sync, NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE, 0);
     NVNcommandHandle h = h_nvnCommandBufferEndRecording(&cmd);
-    state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin(); mtl_exec((const uint8_t *)h); mtl_sub_commit();
+    state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin(); mtl_exec(nvn_rec_linear(h, NULL)); mtl_sub_commit();
     int wait = h_nvnSyncWait(&sync, 5000000000ull); EXPECT("packed copies fence wait", 1, wait == 0 || wait == 1);
     char n[160]; const char *f = rgba4 ? "RGBA4" : b565 ? "RGB565" : a1 ? "RGB5A1" : "RGB5";
     mtl_reg_tex(tid, TX(&copied), NULL); float s[8]; sample2(tid, s);
@@ -236,7 +236,7 @@ static void mirror_completion(void) {
     c->poolRelease = dispatch_semaphore_create(0); c->waiterExited = dispatch_semaphore_create(0);
     state_reset(); memset(&R, 0, sizeof R); readback_pool_drop(); mtl_sub_begin();
     ReadbackDevice *device = [ReadbackDevice new]; device.device = g_dev; device.observedLength = 4096; g_dev = (id)device;   // the 128-byte readback's size (mrbuf_get)
-    mtl_exec((const uint8_t *)handle);
+    mtl_exec(nvn_rec_linear(handle, NULL));
     g_dev = device.device;
     [g_commit_blocks addObject:^{
         dispatch_semaphore_signal(c->feedbackEntered);
@@ -388,7 +388,7 @@ static void copy_stream(void) { @autoreleasepool {
     NVNsync sync; h_nvnSyncInitialize(&sync, NULL);
     h_nvnCommandBufferFenceSync(&cmd, &sync, NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE, 0);
     NVNcommandHandle h = h_nvnCommandBufferEndRecording(&cmd);
-    state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin(); mtl_exec((const uint8_t *)h); mtl_sub_commit();
+    state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin(); mtl_exec(nvn_rec_linear(h, NULL)); mtl_sub_commit();
     int wait = h_nvnSyncWait(&sync, 5000000000ull); EXPECT("stream fence wait", 1, wait == 0 || wait == 1);
     EXPECT("stream GPU success", 0, mtl_last_commit_error());
     EXPECT("9 copies into a texture uploaded from its storage: one re-upload (the CPU write before them)", 1, (int)(g_pkg_reuploads - r0));
@@ -453,7 +453,7 @@ static void copy_stream_3d(void) { @autoreleasepool {
     NVNsync sync; h_nvnSyncInitialize(&sync, NULL);
     h_nvnCommandBufferFenceSync(&cmd, &sync, NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE, 0);
     NVNcommandHandle h = h_nvnCommandBufferEndRecording(&cmd);
-    state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin(); mtl_exec((const uint8_t *)h); mtl_sub_commit();
+    state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin(); mtl_exec(nvn_rec_linear(h, NULL)); mtl_sub_commit();
     int wait = h_nvnSyncWait(&sync, 5000000000ull); EXPECT("volume fence wait", 1, wait == 0 || wait == 1);
     EXPECT("volume GPU success", 0, mtl_last_commit_error());
     EXPECT("8 slice copies into a volume uploaded from its storage: no re-upload", 0, (int)(g_pkg_reuploads - r0));
@@ -495,7 +495,7 @@ static void gpu_storage(void) {
     NVNsync sync; h_nvnSyncInitialize(&sync, NULL);
     h_nvnCommandBufferFenceSync(&cmd, &sync, NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE, 0);
     NVNcommandHandle h = h_nvnCommandBufferEndRecording(&cmd);
-    state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin(); mtl_exec((const uint8_t *)h); mtl_sub_commit();
+    state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin(); mtl_exec(nvn_rec_linear(h, NULL)); mtl_sub_commit();
     int wait = h_nvnSyncWait(&sync, 5000000000ull); EXPECT("GPU storage fence wait", 1, wait == 0 || wait == 1);
     EXPECT("GPU success", 0, mtl_last_commit_error());
     static const uint8_t expected[] = {51, 102, 153, 255}, expected2[] = {204, 153, 102, 255};
@@ -596,7 +596,7 @@ int main(void) { @autoreleasepool {
     NVNsync sync; h_nvnSyncInitialize(&sync, NULL);
     h_nvnCommandBufferFenceSync(&cmd, &sync, NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE, 0);
     NVNcommandHandle h = h_nvnCommandBufferEndRecording(&cmd);
-    state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin(); mtl_exec((const uint8_t *)h); mtl_sub_commit();
+    state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin(); mtl_exec(nvn_rec_linear(h, NULL)); mtl_sub_commit();
     int wait = h_nvnSyncWait(&sync, 5000000000ull); EXPECT("recorded fence wait", 1, wait == 0 || wait == 1);
     EXPECT("GPU success", 0, mtl_last_commit_error());
     int bad = 0;

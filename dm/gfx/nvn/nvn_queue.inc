@@ -176,24 +176,38 @@ static void nq_start(void) { pthread_t t; if(pthread_create(&t,NULL,nq_worker,NU
 static nq_node *nq_append(nq_job *j,unsigned kind) { nq_node *n=calloc(1,sizeof *n); if(!n) die("queue continuation allocation failed"); n->kind=kind; if(j->last) j->last->next=n; else j->first=n; j->last=n; return n; }
 static void nq_bytes(nq_node *n,const void *bytes,size_t length) { if(n->length+length>n->capacity) { n->capacity=(n->length+length+4095)&~(size_t)4095; n->bytes=realloc(n->bytes,n->capacity); if(!n->bytes) die("queue commands allocation failed"); } memcpy(n->bytes+n->length,bytes,length); n->length+=length; } // NOLINT(bugprone-suspicious-realloc-usage): allocation failure aborts, so the old buffer cannot leak into a continuing process
 static void nq_end(nq_job *j) { if(j->last && j->last->kind==NQ_COMMANDS && !j->last->closed) { op_hdr end={OP_END,8}; nq_bytes(j->last,&end,8); j->last->closed=1; } }
-static void nq_flatten(nq_job *j,const uint8_t *p,unsigned depth) {
-    if(depth>64) die("NVN command call nesting exceeds64");
-    for(;;) {
-        op_hdr h; memcpy(&h,p,8); if(h.size<8 || h.size&7) die("invalid NVN command size"); const uint8_t *a=p+8;
-        if(h.op==OP_END) return;
-        if(h.op==OP_JUMP) { memcpy(&p,a,8); continue; }
-        if(h.op==OP_CALL) { const uint8_t *called; memcpy(&called,a,8); nq_flatten(j,called,depth+1); p+=h.size; continue; }
-        if(h.op==OP_WAIT_EVENT || h.op==OP_WAIT_SYNC || h.op==OP_FENCE_SYNC) {
-            nq_end(j); nq_node *n=nq_append(j,h.op==OP_WAIT_EVENT?NQ_EVENT:h.op==OP_WAIT_SYNC?NQ_SYNC:NQ_FENCE);
-            if(h.op==OP_WAIT_EVENT) { memcpy(&n->event,a,8); memcpy(&n->mode,a+8,4); memcpy(&n->value,a+12,4); }
-            else { memcpy(&n->sync_source,a,8); if(h.op==OP_FENCE_SYNC) n->receipt=nq_new(); }
-        } else {
-            nq_node *n=j->last; if(!n || n->kind!=NQ_COMMANDS || n->closed) n=nq_append(j,NQ_COMMANDS);
-            size_t offset=n->length; nq_bytes(n,p,h.size);
-            if(!cap_rec_fields(h.op,n->bytes+offset+8,h.size,&nq_snapshot_ops,j)) die("queue snapshot: unknown command %u",h.op);
-            if(h.op==OP_SIGNAL_EVENT) { memcpy(&n->event,a,8); memcpy(&n->mode,a+8,4); memcpy(&n->value,a+12,4); nq_end(j); nq_append(j,NQ_FENCE)->receipt=nq_new(); }
-        }
-        p+=h.size;
+// One record of a recording, copied into the job (its object pointers snapshotted); waits and fences cut the job
+static void nq_record_one(nq_job *j,const uint8_t *p,op_hdr h) {
+    const uint8_t *a=p+8;
+    if(h.op==OP_END || h.op==OP_JUMP || h.op==OP_CALL) die("NVN command list: a %s record inside a recording's piece at %p",h.op==OP_END?"END":h.op==OP_JUMP?"JUMP":"CALL",(const void *)p);
+    if(h.op==OP_WAIT_EVENT || h.op==OP_WAIT_SYNC || h.op==OP_FENCE_SYNC) {
+        nq_end(j); nq_node *n=nq_append(j,h.op==OP_WAIT_EVENT?NQ_EVENT:h.op==OP_WAIT_SYNC?NQ_SYNC:NQ_FENCE);
+        if(h.op==OP_WAIT_EVENT) { memcpy(&n->event,a,8); memcpy(&n->mode,a+8,4); memcpy(&n->value,a+12,4); }
+        else { memcpy(&n->sync_source,a,8); if(h.op==OP_FENCE_SYNC) n->receipt=nq_new(); }
+    } else {
+        nq_node *n=j->last; if(!n || n->kind!=NQ_COMMANDS || n->closed) n=nq_append(j,NQ_COMMANDS);
+        size_t offset=n->length; nq_bytes(n,p,h.size); if(!n->bytes) die("queue commands: a record of %u bytes",h.size);
+        if(!cap_rec_fields(h.op,n->bytes+offset+8,h.size,&nq_snapshot_ops,j)) die("queue snapshot: unknown command %u",h.op);
+        if(h.op==OP_SIGNAL_EVENT) { memcpy(&n->event,a,8); memcpy(&n->mode,a+8,4); memcpy(&n->value,a+12,4); nq_end(j); nq_append(j,NQ_FENCE)->receipt=nq_new(); }
+    }
+}
+// A compact record (nvn_obj.h OPC_*) goes into the job as the canonical records it stands for
+static void nq_record(nq_job *j,const uint8_t *p,op_hdr h) {
+    if(!rec_compact(h.op)) { nq_record_one(j,p,h); return; }
+    uint8_t x[REC_EXPAND_MAX] __attribute__((aligned(8))); size_t n=rec_expand(p,x);
+    for(size_t o=0;o<n;) { op_hdr c; memcpy(&c,x+o,8); nq_record_one(j,x+o,c); o+=c.size; }
+}
+// A handle is the recording's control list (nvn_obj.h ctl_e): its pieces of records, its links to more control memory. Calls were copied in when they were recorded
+static void nq_flatten(nq_job *j,const uint8_t *list) {
+    for(const uint8_t *e=list;;e+=8) {
+        uint64_t v; memcpy(&v,e,8); unsigned k=ctl_kind(v);
+        if(k==CTL_LINK) { e=ctl_addr(v)-8; continue; }
+        if(k!=CTL_CHUNK) die("NVN command list %p: corrupt control entry %#llx at %p",(const void *)list,(unsigned long long)v,(const void *)e);
+        const uint8_t *p=ctl_addr(v),*pe=p+ctl_chunk_bytes(v);
+        while(p<pe) { op_hdr h; memcpy(&h,p,8);
+            if(h.size<8 || h.size&7 || h.size>(size_t)(pe-p)) die("NVN command list %p: record {op %u, size %u} at %p, %zu bytes into its piece of %zu at %p",(const void *)list,h.op,h.size,(const void *)p,(size_t)(p-ctl_addr(v)),ctl_chunk_bytes(v),(const void *)ctl_addr(v));
+            nq_record(j,p,h); p+=h.size; }
+        if(v&CTL_LAST) return;
     }
 }
 static void nq_enqueue(nq_queue *q,nq_job *j) { if(q->last) q->last->next=j; else q->first=j; q->last=j; nq_put(q->tail); q->tail=j->receipt; q->tail->refs++; pthread_cond_broadcast(&nq_cv); }
@@ -202,7 +216,7 @@ void nvn_queue_submit(queue_t *q,int count,const uint64_t *handles) {
     j->objects.klen=16; j->frame=dm_nvn_frame_count();
     // No scheduler lock while copying descriptors or resolving shader libraries.
     dm_host_mutex_lock(&g_sub_mu); void *pool=objc_autoreleasePoolPush(); dm_host_work++; mtl_prepare(); dm_host_work--; nq_cost cost=nq_cost_begin();
-    for(int i=0;i<count;i++) nq_flatten(j,(const uint8_t *)(uintptr_t)handles[i],0); nq_end(j);
+    for(int i=0;i<count;i++) nq_flatten(j,(const uint8_t *)(uintptr_t)handles[i]); nq_end(j);
     nq_cost_end(cost); objc_autoreleasePoolPop(pool); pthread_mutex_unlock(&g_sub_mu);
     int waits=0; for(nq_node *node=j->first;node;node=node->next) waits|=node->kind==NQ_EVENT || node->kind==NQ_SYNC;
     nvn_cap_queue(q->serial,waits);

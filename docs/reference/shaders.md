@@ -2010,6 +2010,7 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
   - **M1, cold cache:** a 300 s walk built 47 pipelines at their draws, 103.5 s in all, the longest 12.76 s. With the rows and a fork's archive, 58 were prewarmed in 7.3 s on 8 workers.
   - **iPad Pro (M5):** 1.9-5 s per pipeline with a cold cache, 0.1-45 ms cached.
   - **M4 Pro:** with the rows, 0 built in play, against 56 without.
+  - **M4 Pro, 18 areas of a save:** a sweep that started with no `M` rows built 62 pipelines at their draws in the first area and 0-14 in each later one as its own list grew; it recorded 246, 84 of them not among the 164 here. With all 248 prepared before the first frame, Kokiri Forest, Hyrule Field, Zora's Domain and Kakariko Village built none at a draw (Kakariko's load: 251 pipelines built, 56 of them task / mesh, worst frame 8.3 s on the sweep's run; 1 and 339 ms with the rows and a warmed archive). Measured on a host with the first frame mark of PR #1940.
 - **Check:**
   - `t_pso_skey`: mesh keys round-trip, and malformed or incompatible rows are refused.
   - `t_pso_warm` (`native_mesh`, on both compiler paths): only the canonical row loads, the warm task publishes a pipeline, duplicate live objects claim it without a build, a different depth entry is not claimed and builds its own, and the warmed and demanded pipelines draw the same pixels.

@@ -26,6 +26,8 @@ romfs_marker	Audio/Switch/Music.bank
 zip_store	.bank:.bik:.fsb:.gpk:.nro:.pkg:.xnb:.metallib
 
 # ---- Graphics ----
+# The render size stub (patches.py) scales the game's 1280x720, the same docked and handheld, by DM_RENDER_SCALE up to 3.0: the launcher shows the size in pixels
+render_base	1280x720 1280x720
 
 # ---- Memory ----
 # The NPDM declares no system resource (META +0x14 = 0): the game uses SetHeapSize. It asks for 3.10 GB (pool − used memory), which the 3.25 GB heap region of

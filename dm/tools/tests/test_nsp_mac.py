@@ -283,6 +283,19 @@ class Nvn(Base):
         with mock.patch.object(nsp, 'say', said.append): self.build(False)
         self.assertEqual(self.ran, []); self.assertNotIn(OLD, self.entries()); self.assertIn(NEW, self.entries())
 
+    def test_slim_cache(self):   # SLIM_CACHE: the listed entries and the index go too, once the build succeeded; the image and metallib/ stay, and the image reads the same
+        def build(slim): self.ran.clear(); return nsp.build_shaders(sys.executable, REPO, self.sh, REPO / 'dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate', {'WORK': str(self.tmp), 'IOSOUT': '/elsewhere'}, self.logs, self.g, pkg_key='P', mac=False, slim=slim)
+        self.cas(LIVE, OLD); s = self.store(); s.put('index/k.json', b'{}', 0); s.put('metallib/mac/m.metallib', b'l' * 1000, 0)
+        build(False)
+        self.assertEqual(self.entries(), {LIVE}); self.assertEqual(self.store().names('index/'), {'index/k.json'})   # not slim: only the unlisted entry goes
+        img = self.sh / 'cache' / f'b-{CHAIN}.img'; before = {n: p.read_bytes() for n, p in nsp.shader_lib.romfs.Path(img).iterdir_items()} if False else img.read_bytes()
+        said = []
+        with mock.patch.object(nsp, 'say', said.append): build(True)
+        self.assertEqual(self.ran, []); self.assertEqual(self.entries(), set()); self.assertEqual(self.store().names('index/'), set())
+        self.assertEqual(self.store().get('metallib/mac/m.metallib'), b'l' * 1000); self.assertEqual(img.read_bytes(), before)
+        self.assertEqual([m for m in said if 'shader cache entries' in m], ['removed all shader cache entries: 1 (0.1 KB)'])
+        self.assertEqual(build(True), self.sh / 'ios'); self.assertEqual(self.ran, [])   # reused still: a build reads neither
+
     def test_prune_shader_cache_needs_success_and_the_list(self):   # a failed build, or libraries from before the list, keep every entry
         self.build(False); self.cas(OLD)
         (self.sh / 'ios' / f'b-{CHAIN}.key').unlink()   # not reused: the step runs, and fails

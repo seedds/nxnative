@@ -1253,6 +1253,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Check:** `DM_NVN_BLIT_ORDER=0` turns the barriers off to reproduce.
 - **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md).
 
+### An indirect dispatch read its group counts before the dispatch that wrote them
+
+- **Symptom:** a GPU-driven cull drops whole groups of objects in some frames, at random, with the camera still: in Ocarina of Time's Hyrule Castle courtyard the flower bushes showed their dark inner body through holes where front leaves and flowers should be, in about 40 % of frames (M1 Max).
+- **Cause:** the cull is a chain of compute dispatches in which a later one is indirect, its group counts written by an earlier one. Dispatches share the copy encoder, each after a barrier inside it ([Metal 4 does not order operations inside one encoder](#metal-4-does-not-order-operations-inside-one-encoder)), and that barrier did not order an indirect dispatch's counts after the earlier dispatch: some frames ran it with fewer workgroups. Measured on the leaf list the GPU left (its count read once each submission completed): 1,749 leaves in 59 % of frames, 1,584 / 1,680 / 1,488 in the rest, each frame independent of the one before; the cull's own list 276 clusters, or 260 / 268 / 250. Every uniform and small storage input of the five cull shaders was dumped each frame for 662 frames: none followed the drops (|r| ≤ 0.12). Which of Metal's reads misses the barrier, the indirect-argument fetch or the copy of the counts into the driver segment, is not known.
+- **Fix:** `dispatch` in `nvn_mtl.m` (`ind_split`): an indirect dispatch does not join a copy encoder that already holds work; the encoder ends and the dispatch goes into the next one, which begins with a queue barrier (`blit_open`). Direct dispatches keep sharing it.
+- **Check:** `DM_NVN_IND_SPLIT=0` brings the old order back. Ocarina of Time standing still in Hyrule Castle's courtyard, the leaf list's count read when each submission completed, 240 to 300 frames a setting, the settings flipped live in one session by lab switches that are not part of this change: the old order 39 %, 41 %, 47 % of frames short; this change 0 of 600; an encoder of its own for every dispatch 0; for the direct dispatches only 41 %. 24 shots: 0 with holes, 9 with `DM_NVN_IND_SPLIT=0`. A synthetic pair (a dispatch that writes the counts, an indirect one that reads them, in a small pool and through two chunk buffers of a large one) did not fail with the old order either (0 of 100 runs each), so what in the game's chain lets the old order fail is not pinned down.
+- **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md).
+
 ### Buffer copies through aliased Metal addresses
 
 - **Symptom:** a buffer copy, inline update or fill completes, but a following copy through another Metal buffer over the same allocation reads stale bytes.

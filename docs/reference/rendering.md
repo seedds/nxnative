@@ -992,6 +992,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** those draws are widened on the GPU (`wide_run`): a compute pass reads the indices from a 16-byte-aligned address, with the byte shift as a constant, and writes 16-bit ones into the frame arena. As in `ixc_run`, the first such draw widens every such draw after it up to the next buffer write outside a render pass, so only a draw met inside an open render pass with no widening yet would split it. Draws whose indices no write covers keep the CPU widening. Log line `8-bit index GPU expansion`.
 - **Found on:** [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md): about one draw per widening, up to a dozen widenings a frame on the title and load screens, no pass split.
 
+### A 16-bit index buffer that starts and ends off 4-byte alignment loses its last index (macOS 26)
+
+- **Symptom:** none seen in a game yet: an indexed draw whose last triangle or point is missing.
+- **Cause:** macOS 26's Metal 4 indexed draws (`drawIndexedPrimitives:…indexBuffer:indexBufferLength:`) drop the last index when the index buffer's address and its end are both off a 4-byte boundary, i.e. 16-bit indices at an address = 2 mod 4 with a length that is a multiple of 4 (M4 Pro, macOS 26.6.2: 4 indices at offset 2 draw 3, 2 draw 1; an aligned start, an aligned end, 32-bit indices or the indirect form draw them all). KosmicKrisp (Mesa's Vulkan on Metal) lists it as `KK_WORKAROUND_12`, fixed in macOS 27.
+- **Fix:** `kk12_len` in `enc_r_draw_indexed` (`nvn_mtl.m`) extends a length that ends off a 4-byte boundary to the next one (`align(addr + len, 4) - addr`, KosmicKrisp's form; harmless where the bug does not bite); the indirect form loses no index and is left as it is. The callers' buffers all have those bytes: arena blocks are 256-byte aligned and sized, the other lengths end where their buffer ends. Today only 8-bit indices widened to 16 bits with an odd count end off a boundary, from an aligned start (a shape that loses nothing), so no draw has the losing shape; the guard keeps a future caller (or another chip or 26.x build) from losing an index. On by default before macOS 27 (a log line says on or off and why, at the first length that ends off a boundary), `DM_NVN_KK12=0` turns it off and any other value on; the first draw of the losing shape (start and end both off) is logged (`KK_WORKAROUND_12: index buffer …`).
+- **Found on:** none yet (a latent bug: by the callers' arithmetic no draw of ours meets it).
+- **Check:** `make GAME=<id> check_t_kk12` (`dm/gfx/tests/t_kk12.m`, run with the guard forced on and at the OS default): 16-bit indices drawn as points through the two wrappers, the losing shape included; with `DM_NVN_KK12=0` on macOS 26 the losing cases fail.
+
 ### Triangle fans and indexed quads
 
 - **Cause:** Metal has neither triangle fans nor quads.

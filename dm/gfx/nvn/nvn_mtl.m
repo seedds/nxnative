@@ -1583,7 +1583,26 @@ static inline void enc_r_args(id<MTL4RenderCommandEncoder> e, MTLRenderStages s,
 static inline void enc_r_draw(id<MTL4RenderCommandEncoder> e, MTLPrimitiveType p, NSUInteger v, NSUInteger n) { g_cm_mdraws++; [e drawPrimitives:p vertexStart:v vertexCount:n]; }
 static inline void enc_r_draw_instanced(id<MTL4RenderCommandEncoder> e, MTLPrimitiveType p, NSUInteger v, NSUInteger n, NSUInteger i, NSUInteger b) { g_cm_mdraws++; [e drawPrimitives:p vertexStart:v vertexCount:n instanceCount:i baseInstance:b]; }
 static inline void enc_r_draw_indirect(id<MTL4RenderCommandEncoder> e, MTLPrimitiveType p, uint64_t gpu) { g_cm_mdraws++; [e drawPrimitives:p indirectBuffer:gpu]; }
-static inline void enc_r_draw_indexed(id<MTL4RenderCommandEncoder> e, MTLPrimitiveType p, NSUInteger n, MTLIndexType t, uint64_t gpu, NSUInteger len, NSUInteger i, NSInteger bv, NSUInteger bi) { g_cm_mdraws++; [e drawIndexedPrimitives:p indexCount:n indexType:t indexBuffer:gpu indexBufferLength:len instanceCount:i baseVertex:bv baseInstance:bi]; }
+// KK_WORKAROUND_12 (KosmicKrisp, Mesa docs/drivers/kosmickrisp/workarounds.rst; fixed in macOS 27): macOS 26's Metal 4 indexed draws drop the last index when the index buffer starts
+// and ends off a 4-byte boundary (16-bit indices at an address = 2 mod 4 with a length that is a multiple of 4: dm/gfx/tests/t_kk12.m, M4 Pro, macOS 26.6.2; the indirect form
+// draws them all). KosmicKrisp's form: a length that ends off a 4-byte boundary runs to the next one (align(addr + len, 4) - addr); the extra bytes are not drawn. Every caller's
+// buffer has them (arena blocks are 256-byte aligned and sized, the other lengths end where their buffer ends: NVN pools, page multiples). Today only 8-bit indices widened to
+// 16 bits with an odd count end off a boundary, from an aligned start (a shape that loses nothing); no draw of ours meets the losing shape, and the guard keeps a future caller
+// from losing an index. DM_NVN_KK12=0 off, any other value on whatever the OS; default: on before macOS 27 (logged once, at the first length that ends off a boundary)
+static int kk12_on(void) {
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("DM_NVN_KK12"); int fixed = 0; if (@available(macOS 27.0, iOS 27.0, *)) fixed = 1;
+        v = e && *e ? strcmp(e, "0") != 0 : !fixed;
+        MLOG("KK_WORKAROUND_12 (index buffer end aligned to 4 bytes): %s%s", v ? "on" : "off", e && *e ? " (DM_NVN_KK12)" : " (macOS default)"); }
+    return v;
+}
+static inline NSUInteger kk12_len(uint64_t gpu, NSUInteger len) {
+    if (!((gpu + len) & 3) || !kk12_on()) return len;   // an aligned end costs one test
+    NSUInteger l = (NSUInteger)(((gpu + len + 3) & ~(uint64_t)3) - gpu);
+    static int logged; if ((gpu & 3) && !logged) { logged = 1; MLOG("KK_WORKAROUND_12: index buffer %#llx + %lu bytes starts and ends off a 4-byte boundary, length %lu (first case)", (unsigned long long)gpu, (unsigned long)len, (unsigned long)l); }
+    return l;
+}
+static inline void enc_r_draw_indexed(id<MTL4RenderCommandEncoder> e, MTLPrimitiveType p, NSUInteger n, MTLIndexType t, uint64_t gpu, NSUInteger len, NSUInteger i, NSInteger bv, NSUInteger bi) { g_cm_mdraws++; len = kk12_len(gpu, len); [e drawIndexedPrimitives:p indexCount:n indexType:t indexBuffer:gpu indexBufferLength:len instanceCount:i baseVertex:bv baseInstance:bi]; }
 static inline void enc_r_draw_indexed_indirect(id<MTL4RenderCommandEncoder> e, MTLPrimitiveType p, MTLIndexType t, uint64_t gpu, NSUInteger len, uint64_t ind) { g_cm_mdraws++; [e drawIndexedPrimitives:p indexType:t indexBuffer:gpu indexBufferLength:len indirectBuffer:ind]; }
 static void ubd_land_compute(void);
 static inline id<MTL4ComputeCommandEncoder> enc_c_begin(MTLComputePassDescriptor *d) { g_cm_enc++; (void)d; ubd_land_compute(); cm_enc_mark(3); id<MTL4ComputeCommandEncoder> e = [g_cb computeCommandEncoder]; cm_enc_mark(1); [e barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:resource_vis()]; [e setArgumentTable:g_ct]; gp_begin(e, 'C', nil); return e; }

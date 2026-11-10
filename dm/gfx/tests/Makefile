@@ -234,6 +234,12 @@ t_ub: t_ub.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_ub.m $(MTL_T_SRC) $(FW)
 t_gpuprof: t_gpuprof.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_gpuprof.m $(MTL_T_SRC) $(FW)
+t_kk12: t_kk12.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_kk12.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_kk12
+check_t_kk12: t_kk12
+	DM_NVN_KK12=1 MTL_DEBUG_LAYER=1 ./t_kk12
+	MTL_DEBUG_LAYER=1 ./t_kk12
 t_dispatch_own: t_dispatch_own.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_dispatch_own.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_dispatch_own

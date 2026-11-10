@@ -2,8 +2,9 @@
 """Summarise the host's GPU profile lines in a log (Mac run log or the iPhone's Documents/log.txt).
 
 DM_NVN_GPUPROF=<frame>[-<frame>] or every:<n> prints one "[gpuprof]" line per encoder of the profiled frames (render pass: size, colour attachments, depth, draws,
-attachment load / store KB, Metal pixel formats; compute / copy: copies, uniform updates, dispatches) and a "frame" line per frame. DM_AB=<frames> prints one "[ab]"
-line per phase. This tool reads both:
+attachment load / store KB, Metal pixel formats; compute / copy: copies, uniform updates, dispatches) and a "frame" line per frame. With DM_NVN_GPUPROF_SPLIT=<n> a render
+pass line ends with " fs <key> vs <key>", the shaders of the first draw of its group of n draws; this tool reads such a line as any other and leaves the tail out (grep the
+log for a key). DM_AB=<frames> prints one "[ab]" line per phase. This tool reads both:
 
   gpuprof.py log.txt                       per-frame totals, then the mean per frame of each pass shape (size, colours, depth, formats), by GPU time
   gpuprof.py log.txt --by class            the same by size class relative to the frame's largest colour pass (full, half, quarter ... per axis: the same for every game)

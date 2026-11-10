@@ -17,6 +17,7 @@ from pathlib import Path
 SCHEMA = ('CREATE TABLE IF NOT EXISTS blob(id INTEGER PRIMARY KEY, hash BLOB UNIQUE NOT NULL, data BLOB NOT NULL)',
           'CREATE TABLE IF NOT EXISTS entry(name TEXT PRIMARY KEY, blob INTEGER NOT NULL, mtime REAL NOT NULL) WITHOUT ROWID')
 SHADER_ENTRY = re.compile(r'shader/([0-9a-f]{64})/')
+COMPILED_ENTRY = re.compile(r'(metallib/(?:mac|ios)/[0-9a-f]{64})(?:_x[0-9]*)?\.metallib$|(variant/[0-9a-f]{64})/[^/]+$')
 WAIT = 600   # seconds another process's write may hold this one up
 _DAMAGED = ('malformed', 'not a database', 'disk image')
 DBMOVED = 1032   # SQLITE_READONLY_DBMOVED, an error's sqlite_errorcode (Python 3.11+)
@@ -38,13 +39,36 @@ def generations(folder):
     return gens + ([os.path.join(folder, LEGACY)] if LEGACY in names else [])
 
 
+@contextlib.contextmanager
+def lease(path):
+    """Share a cache while a build uses it, including an older revision launched by regress.py.
+    Lock its directory: no extra file, and replacing a damaged database does not lose the lock.
+    Readers and writers share it; compiled-entry pruning and generation retirement need it exclusively. A drive without
+    flock can still build, but cannot do that prune or retire generations. Independent older clients must not share
+    a cache while a current NSP build prunes it: only regress.py can lease on their behalf."""
+    parent = os.path.dirname(os.path.abspath(path)); os.makedirs(parent, exist_ok=True)
+    fd = os.open(parent, os.O_RDONLY)
+    try:
+        try: fcntl.flock(fd, fcntl.LOCK_SH)
+        except OSError: os.close(fd); fd = None
+        yield fd
+    finally:
+        if fd is not None: os.close(fd)
+
+
+
 class _ReadOnly:
     """Live SQLite readers of other compile cache files, asked in order: mode=ro sees a writer's committed WAL, never migrates, repairs or writes them. Mutable index/stage bookkeeping is local to each build.
     prefixes: the names they serve (an older generation serves only its Metal compiles: a per-shader entry of another chain never hits)"""
     def __init__(self, paths, say, prefixes=('shader/', 'variant/', 'metallib/')):
         self.say, self.lock, self.prefixes, self.dbs = say, threading.RLock(), prefixes, []
+        self.leases = contextlib.ExitStack()
+        leased = set()
         for p in map(os.fspath, paths):
             if not os.path.isfile(p): continue
+            parent = os.path.dirname(os.path.abspath(p))
+            if parent not in leased:
+                self.leases.enter_context(lease(p)); leased.add(parent)
             try: self.dbs.append((p, sqlite3.connect(Path(p).resolve().as_uri() + '?mode=ro', uri=True, timeout=WAIT, check_same_thread=False, isolation_level=None)))
             except sqlite3.Error as e: self.say(f'[RED] the read-only shader cache {p} cannot be read and is ignored: {e}')
 
@@ -79,6 +103,7 @@ class _ReadOnly:
             for _, db in self.dbs:
                 with contextlib.suppress(sqlite3.Error): db.close()
             self.dbs = []
+            self.leases.close()
 
 
 class _Files:   # an entry from or to a file, by get and put
@@ -124,7 +149,13 @@ class Store(_Files):
         self.readonly = _ReadOnly([p for p in sources if os.path.realpath(p) != own], say) if source else None
         older = [p for p in map(os.fspath, older) if os.path.realpath(p) != own]
         self.older = _ReadOnly(older, say, ('metallib/',)) if older else None
-        self._open()
+        self._lease = lease(self.path); self.lease_fd = self._lease.__enter__()
+        try: self._open()
+        except BaseException:
+            for r in (self.readonly, self.older):
+                if r: r.close()
+            if self.use_lock: self.use_lock.close()
+            self._lease.__exit__(None, None, None); raise
 
     def _connect(self): return sqlite3.connect(self.path, timeout=WAIT, check_same_thread=False, isolation_level=None)
 
@@ -273,6 +304,39 @@ class Store(_Files):
         self._run('PRAGMA incremental_vacuum')
         return len(gone), sum(size.get(d, 0) for d in gone)
 
+    def prune_compiled(self, keep_hashes, since):
+        """Remove obsolete compiled groups, retaining every split piece when any piece is live.
+        keep_hashes is a lazy iterable of current output hashes, read only under an exclusive
+        lease. Other cache references and entries published since the full build also stay.
+        Returns (entries removed, distinct bytes freed), or nothing removed while a build uses
+        this cache. SQLite's write transaction keeps the metadata scan and deletion atomic."""
+        with self.lock:
+            if self.lease_fd is None: return 0, 0
+            try: fcntl.flock(self.lease_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                # A failed upgrade may have dropped the shared lease (BSD flock).
+                fcntl.flock(self.lease_fd, fcntl.LOCK_SH)
+                return 0, 0
+            try:
+                keep = set(keep_hashes)
+                with self.batch():
+                    rows = self.db.execute('SELECT e.name, e.mtime, e.blob, b.hash FROM entry e JOIN blob b ON b.id=e.blob').fetchall()
+                    groups, rooted = {}, set()
+                    for name, mtime, blob, digest in rows:
+                        match = COMPILED_ENTRY.fullmatch(name)
+                        if match: groups.setdefault(match.group(1) or match.group(2), []).append((name, mtime, blob, digest))
+                        else: rooted.add(blob)
+                    gone = [row for group in groups.values() if all(mtime < since and blob not in rooted and digest not in keep
+                                                                 for _, mtime, blob, digest in group) for row in group]
+                    if not gone: return 0, 0
+                    self.db.executemany('DELETE FROM entry WHERE name=?', ((r[0],) for r in gone))
+                    size = self.db.execute('SELECT coalesce(sum(length(data)), 0) FROM blob WHERE id NOT IN (SELECT blob FROM entry)').fetchone()[0]
+                    self.db.execute('DELETE FROM blob WHERE id NOT IN (SELECT blob FROM entry)')
+                self._run('PRAGMA incremental_vacuum')
+                return len(gone), size
+            finally: fcntl.flock(self.lease_fd, fcntl.LOCK_SH)
+
+
     def delete_prefix(self, prefix):
         """Remove every entry whose name starts with prefix, and the bytes nothing names any more, giving their pages back (dmsh_build.py's staged outputs once its image is written)"""
         with self.lock:
@@ -316,6 +380,9 @@ class Store(_Files):
             if r: r.close()
         if self.use_lock:
             self.use_lock.close(); self.use_lock = None
+
+        if self._lease is not None:
+            self._lease.__exit__(None, None, None); self._lease = None; self.lease_fd = None
 
     def trim(self, limit):
         """Bound the physical database size, oldest-written groups first; split libraries, shader outputs and variants leave whole. Called only with no builders using this regression cache."""
@@ -549,18 +616,24 @@ def drop_generations(folder, chain, say=print, remove=None):
                     break
         if store.full: return []
     finally: store.close()
-    gone, size = [], 0
-    for p in others:
-        n = _file_size(p)
-        try:
-            for s in ('', '-wal'):
-                if os.path.exists(p + s): (remove or os.unlink)(p + s)
-            for s in ('-shm', '-journal', '.lock'):
-                with contextlib.suppress(FileNotFoundError): os.unlink(p + s)
-        except OSError as e: say(f'[RED] could not remove the old shader compile cache {p}: {e}'); continue
-        gone.append(os.path.basename(p)); size += n
-    if gone: say(f'removed old shader compile caches {", ".join(gone)} ({size / 1e9:.2f} GB){" to obsolete/" if remove else ""}')
-    return gone
+    # The copy is complete and its stores are closed. Retire only when no builder
+    # or read-only source still leases any generation in this cache directory.
+    with lease(cur) as fd:
+        if fd is None: return []
+        try: fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError: return []
+        gone, size = [], 0
+        for p in others:
+            n = _file_size(p)
+            try:
+                for s in ('', '-wal'):
+                    if os.path.exists(p + s): (remove or os.unlink)(p + s)
+                for s in ('-shm', '-journal', '.lock'):
+                    with contextlib.suppress(FileNotFoundError): os.unlink(p + s)
+            except OSError as e: say(f'[RED] could not remove the old shader compile cache {p}: {e}'); continue
+            gone.append(os.path.basename(p)); size += n
+        if gone: say(f'removed old shader compile caches {", ".join(gone)} ({size / 1e9:.2f} GB){" to obsolete/" if remove else ""}')
+        return gone
 
 
 def main():

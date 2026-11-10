@@ -3197,6 +3197,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md#found-on-this-game) (resolved).
 - **Check:** `test_nsp_mac.py` (`test_prune_shader_cache`, `test_prune_shader_cache_needs_success_and_the_list`).
 
+### Obsolete compiled shader cache groups within one chain
+
+- **Symptom:** compiled `metallib/` and legacy `variant/` groups accumulate in the current `shader/cache/cas-<chain>.db` after profile-input changes, even after unused per-shader entries leave. The original Ocarina of Time breakdown in [issue #1174](https://github.com/seedds/nxnative/issues/1174) recorded 13.1 GB of Metal libraries and 3.9 GB of variants; that older cross-chain accumulation is addressed separately by per-chain databases.
+- **Cause:** generation retirement removes other chains, while `prune_shaders` removes only obsolete `shader/` groups in the current file. Compiled keys depend on MSL and compiler conventions, so unused compiled groups can survive an input change within the same chain.
+- **Fix:** after a successful full build or reuse, hash the completed Mac/iOS libraries and prune recognized old compiled groups absent from those outputs and surviving references. Keep split siblings when any member is live, newer and unknown entries, and blobs referenced elsewhere. Directory leases defer compiled pruning and generation retirement while builders or source readers use the cache; the generation copier and its other-target retention remain in use. Unsupported locks or unreadable/unstamped outputs leave compiled entries alone. The bounded regression cache remains separate.
+- **Compatibility:** independently launched older builders predate these leases and must use a separate cache while a current NSP build cleans up. The regression harness leases for its older child builders. This does not establish lower first-build peak disk use or change shader output.
+- **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md) opened the disk-growth report; its later [Ocarina of Time](../../dm/games/0400486024DEC000/README.md) breakdown isolated retained compiled entries. Game-sized space savings and hashing overhead remain unmeasured.
+
 ### A shader build that keeps its packages in memory runs one worker at a time
 
 - **Symptom:** the NSP script's Mac or iOS shader step for a game with very large shader packages runs at one or two shaders a second whatever `J` is. Its Python process sits at one full core, mostly system time, while few `metal` compiles run. Pokémon Pokopia (4.4 GB of packages, 131,426 shaders): players reported ETAs of 20 to 200 hours ([seedds/nxnative#1036](https://github.com/seedds/nxnative/issues/1036)).

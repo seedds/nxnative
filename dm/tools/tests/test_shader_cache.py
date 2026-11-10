@@ -507,6 +507,33 @@ class Prune(Base):
         self.assertEqual(self.blobs(), before - 1)   # D2's source; its library's bytes stay under metallib/
         self.assertEqual(self.store.get('metallib/mac/m.metallib'), b'L' + D2.encode())
 
+    def test_read_only_regression_reuse_defers_normal_cache_pruning(self):
+        name = f'metallib/mac/{D1}.metallib'
+        self.store.put(name, b'normal compile', 1)
+        reader = shader_cache.Store(self.root / 'regress/cas.db', readonly=self.path)
+        try:
+            self.assertEqual(reader.get(name), b'normal compile')
+            self.assertEqual(self.store.prune_compiled([], time.time()), (0, 0))
+            self.assertEqual(reader.get(name), b'normal compile')
+            self.assertFalse(reader.db.execute('SELECT 1 FROM entry').fetchall())
+        finally: reader.close()
+        self.assertEqual(self.store.prune_compiled([], time.time()), (1, len(b'normal compile')))
+
+    def test_failed_exclusive_upgrade_restores_the_shared_lease(self):
+        original = shader_cache.fcntl.flock
+        def upgrade(fd, operation):
+            if operation & shader_cache.fcntl.LOCK_EX:
+                # BSD flock conversion can drop LOCK_SH even when LOCK_EX fails.
+                original(fd, shader_cache.fcntl.LOCK_UN)
+                raise BlockingIOError('another reader')
+            return original(fd, operation)
+        with mock.patch.object(shader_cache.fcntl, 'flock', upgrade):
+            self.assertEqual(self.store.prune_compiled([], time.time()), (0, 0))
+        fd = os.open(self.root, os.O_RDONLY)
+        try:
+            with self.assertRaises(BlockingIOError): original(fd, shader_cache.fcntl.LOCK_EX | shader_cache.fcntl.LOCK_NB)
+        finally: os.close(fd)
+
     def test_the_file_gives_back_its_pages(self):
         now = time.time()
         for i in range(40): self.store.put(f'shader/{i:064x}/mac/k_b.metal', os.urandom(100000), now - 100)
@@ -557,6 +584,42 @@ class Generations(unittest.TestCase):   # one file per chain: a build writes its
         self.assertEqual(self.names(self.d / f'cas-{self.A}.db'), {'metallib/mac/a.metallib', 'metallib/ios/i.metallib', f'shader/{D2}/mac/k_b.metal'})   # iOS, which it compiled none of, kept
         self.assertIn('kept 1 ios Metal compiles of cas.db: this build compiled none for ios', self.said)
         self.assertEqual(shader_cache.drop_generations(self.d, self.A, self.said.append), [])
+
+    def test_active_generation_defers_retirement(self):
+        older = self.d / f'cas-{self.B}.db'
+        self.file(older.name, {'metallib/ios/old.metallib': b'ios'}, 1)
+        self.file(f'cas-{self.A}.db', {'metallib/mac/current.metallib': b'mac'}, 2)
+        owner = shader_cache.Store(older)
+        try:
+            self.assertEqual(shader_cache.drop_generations(self.d, self.A), [])
+            self.assertTrue(older.exists())
+            self.assertEqual(owner.get('metallib/ios/old.metallib'), b'ios')
+        finally: owner.close()
+        self.assertEqual(shader_cache.drop_generations(self.d, self.A), [older.name])
+        current = shader_cache.Store(self.d / f'cas-{self.A}.db')
+        try: self.assertEqual(current.get('metallib/ios/old.metallib'), b'ios')
+        finally: current.close()
+
+    def test_read_only_source_generations_defer_retirement(self):
+        older = self.d / f'cas-{self.B}.db'
+        self.file(older.name, {'metallib/ios/old.metallib': b'ios'}, 1)
+        self.file(f'cas-{self.A}.db', {'metallib/mac/current.metallib': b'mac'}, 2)
+        reader = shader_cache.Store(self.d / 'regress/cas.db', readonly=self.d)
+        try:
+            self.assertEqual(shader_cache.drop_generations(self.d, self.A), [])
+            self.assertEqual(reader.get('metallib/ios/old.metallib'), b'ios')
+            self.assertTrue(older.exists())
+        finally: reader.close()
+        self.assertEqual(shader_cache.drop_generations(self.d, self.A), [older.name])
+
+    def test_generation_retirement_without_locks_is_deferred(self):
+        older = self.d / f'cas-{self.B}.db'
+        self.file(older.name, {'metallib/ios/old.metallib': b'ios'}, 1)
+        self.file(f'cas-{self.A}.db', {'metallib/mac/current.metallib': b'mac'}, 2)
+        with mock.patch.object(shader_cache.fcntl, 'flock', side_effect=OSError('no locks')):
+            self.assertEqual(shader_cache.drop_generations(self.d, self.A), [])
+        self.assertTrue(older.exists())
+        self.assertEqual(shader_cache.drop_generations(self.d, self.A), [older.name])
 
     def test_a_folder_as_the_read_only_cache(self):   # regress.py's fallback reads the player's generations, never copying them
         now = time.time()

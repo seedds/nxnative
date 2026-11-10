@@ -43,6 +43,8 @@ The first boot shows the language list: `A`, `LUp`, `A` picks English. The chara
 ## Found on this game
 
 - [Separate DLC for a NUP](../../../docs/reference/packing.md#separate-dlc-for-a-nup): the build omitted the marker add-on (resolved).
+
+- [Obsolete compiled shader cache groups within one chain](../../../docs/reference/shaders.md#obsolete-compiled-shader-cache-groups-within-one-chain): completed builds prune obsolete compiled groups in the current chain after profile-input changes. Game-sized savings and first-build peak usage remain unmeasured.
 - [An iOS build stops when the profile has no prewarm seed list](../../../docs/reference/packing.md#an-ios-build-stops-when-the-profile-has-no-prewarm-seed-list): the framework packaging step required an optional recorded list (resolved).
 
 - [One compile for a pixel shader's side entry points](../../../docs/reference/shaders.md#one-compile-for-a-pixel-shaders-side-entry-points): 57% of the map's compiles were `_ba` and `_bl` libraries; a cold build of 1,021 shaders now takes 48% of the CPU on the Mac's flags and 47% on the iPhone's.

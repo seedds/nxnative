@@ -293,7 +293,7 @@ class Nvn(Base):
         other = nsp.shader_cache.Store(self.sh / 'cache/cas-fedcba987654.db'); other.put('metallib/mac/m.metallib', b'mac'); other.close()
         self.build(False)
         self.assertTrue((self.sh / 'cache/cas.db').exists())   # the chain has no file of its own yet
-        self.store().put('metallib/mac/a.metallib', b'a')
+        seed = self.store(); seed.put('metallib/mac/a.metallib', b'a'); seed.close()   # the seed writer is finished before the build retires other generations
         (self.sh / 'ios' / f'b-{CHAIN}.key').unlink()   # not reused: the step runs, and fails
         def failing(cmd, log, env=None, cwd=None, on_line=None): raise nsp.BuildError('translator failed')
         with mock.patch.object(nsp, 'run', failing), self.assertRaises(nsp.BuildError): self.build(False)
@@ -328,6 +328,29 @@ class Nvn(Base):
         nsp.shader_lib.expand(self.sh / 'cache' / f'b-{CHAIN}'); (self.sh / 'cache' / f'b-{CHAIN}' / '_b_cas.txt').unlink(); self.cas(OLD)
         self.build(False)
         self.assertEqual(self.ran, []); self.assertIn(OLD, self.entries())
+
+    def test_parent_image_removal_and_child_build_hold_a_cache_lease(self):
+        (self.sh / 'cache').mkdir(parents=True)
+        original_remove, original_run = nsp.shader_lib.remove_image, nsp.run
+        def leased(call, *args, **kwargs):
+            fd = nsp.os.open(self.sh / 'cache', nsp.os.O_RDONLY)
+            try:
+                with self.assertRaises(BlockingIOError): nsp.shader_cache.fcntl.flock(fd, nsp.shader_cache.fcntl.LOCK_EX | nsp.shader_cache.fcntl.LOCK_NB)
+            finally: nsp.os.close(fd)
+            return call(*args, **kwargs)
+        with mock.patch.object(nsp.shader_lib, 'remove_image', lambda *a, **k: leased(original_remove, *a, **k)), \
+                mock.patch.object(nsp, 'run', lambda *a, **k: leased(original_run, *a, **k)):
+            self.build(False)
+
+    def test_failed_build_keeps_compiled_cache_until_a_full_build_succeeds(self):
+        self.build(False)
+        name = f'metallib/mac/{OLD}.metallib'
+        store = self.store(); store.put(name, b'old compile', 1); store.close()
+        (self.sh / 'ios' / f'b-{CHAIN}.key').unlink()
+        with mock.patch.object(nsp, 'run', side_effect=nsp.BuildError('translator failed')), self.assertRaises(nsp.BuildError): self.build(False)
+        store = self.store(); self.assertEqual(store.get(name), b'old compile'); store.close()
+        self.build(False)
+        store = self.store(); self.assertIsNone(store.get(name)); store.close()
 
     def test_no_stamp(self):   # Mac libraries no full build stamped (an interrupted one): no table can name them, so neither key reuses them
         self.build(False)

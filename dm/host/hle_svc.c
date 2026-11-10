@@ -78,7 +78,7 @@ int proc_pid_rusage(int pid, int flavor, rusage_info_t *buffer);   // libproc.h,
 #define GF_MAX 1024
 static int g_gf_tab[GF_MAX];       // the files, open for reading and writing
 static int g_gf_n;                 // how many; 0 while the guest is anonymous. Set by mem_init_once, whose pthread_once orders it before every reader
-int dm_guest_file_backed(void) { return g_gf_n != 0; }   // nvn_dirty_release reads this through its weak symbol: nothing to give back while the guest is anonymous
+int dm_guest_file_backed(void) { return g_gf_n != 0; }   // nvn_dirty_release reads this through its weak symbol: it gives nothing back while the guest is in files
 static size_t g_gf_chunk;          // each file's size; the last one holds the rest of the block
 static uint64_t g_gf_min_free;     // DM_GUEST_FILE_MIN_FREE in bytes: the free space on the files' disk, less what the dirty pages may still take, under which the game is stopped; 0 = never
 static int g_gf_punch = 1;         // DM_GUEST_FILE_PUNCH=0: what the game gives back keeps its disk blocks (only PROT_NONE), as before

@@ -266,6 +266,27 @@ class UniformBounds(unittest.TestCase):
                                ('bit-cast', 'bool _1 = 0 >= as_type<int>(%s);' % bare, 'bool _1 = 0 >= as_type<int>(%s);' % read)):
             with self.subTest(why=why): self.assertEqual(dmsh_fetch.unguard(src), want)
 
+    def test_select_guards(self):   # the guard as select(0, read, cond), the translator's own form; unguard reads both forms the same
+        read = '(*spvDescriptorSet0.vp_c5)._m0[29].y'
+        cond = GUARD.format(w=117, r=read).replace('fp_c', 'vp_c')[1:-1].split(' ? ')[0]
+        for why, src, want in (('in parentheses', 'float _1 = _2 * %s;' % GUARD.format(w=117, r=read).replace('fp_c', 'vp_c'), 'float _1 = _2 * select(0.0, %s, %s);' % (read, cond)),
+                               ('a function argument', 'float _1 = fma(_2, %s ? %s : 0.0, _3);' % (cond, read), 'float _1 = fma(_2, select(0.0, %s, %s), _3);' % (read, cond)),
+                               ('an integer word', 'uint _1 = %s ? as_type<uint>(%s) : 0u;' % (cond, read), 'uint _1 = %s ? as_type<uint>(%s) : 0u;' % (cond, read)),
+                               ('a uint read', 'uint _1 = (%s ? %s : 0u);' % (cond, read.replace('_m0[29].y', '_m0[29].y')), 'uint _1 = select(0u, %s, %s);' % (read, cond))):
+            with self.subTest(why=why):
+                got = dmsh_fetch.select_guards(src)
+                self.assertEqual(got, want)
+                self.assertEqual(dmsh_fetch.unguard(got), dmsh_fetch.unguard(src))
+
+    def test_select_guards_compile(self):
+        v, _ = dmsh_fetch.fold(guarded(FS_POS), BINDINGS); v = dmsh_fetch.select_guards(v)
+        self.assertIn('select(', v)
+        with tempfile.TemporaryDirectory() as d:
+            for sdk in ('macosx', 'iphoneos'):
+                with self.subTest(sdk=sdk):
+                    try: compile_lib(v, pathlib.Path(d), 'selected_' + sdk, sdk)
+                    except subprocess.CalledProcessError as e: self.fail(e.stderr)
+
     def test_a_computed_offset_stays(self):   # its guard is a value of its own, and the read's index chooses row 0 when out of bounds
         src = ('bool _5 = ((uint(_3) << 2u) | uint(_4)) < ((*spvDescriptorSet0.fp_c%d)._m0[2].w >> 2u);\n'
                'float _6 = _5 ? (*spvDescriptorSet0.fp_c14)._m0[_5 ? _3 : 0][_4] : 0.0;' % dmsh_abi.CBSIZE_BANK)

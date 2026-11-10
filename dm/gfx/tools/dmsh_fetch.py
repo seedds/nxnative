@@ -52,8 +52,25 @@ _GCOND = r'\(\d+u < \(\(\*spvDescriptorSet0\.[a-z]+_c%d\)\._m0\[\d\]\.[xyzw] >> 
 _GREAD = r'(\(\*spvDescriptorSet0\.[a-z]+_c\d+\)\._m0\[\d+\]\.[xyzw])'
 _GUARDED = re.compile(r'(?<![\w>])\(%s \? %s : 0(?:\.0|u)?\)|%s \? %s : 0(?:\.0|u)?(?![\w.])' % (_GCOND, _GREAD, _GCOND, _GREAD))   # parentheses after a name or > are a call's
 
+_GSELECT = re.compile(r'select\(0(?:\.0|u)?, %s, %s\)' % (_GREAD, _GCOND))   # the same read after select_guards
+
 def unguard(msl):
-    return _GUARDED.sub(lambda m: m.group(1) or m.group(2), msl) if 'spvDescriptorSet0' in msl else msl
+    if 'spvDescriptorSet0' not in msl: return msl
+    return _GSELECT.sub(lambda m: m.group(1), _GUARDED.sub(lambda m: m.group(1) or m.group(2), msl))
+
+# The translator reads such a word unconditionally and chooses it or 0 (OpLoad, then OpSelect: "Metal reads it as before" at a fixed offset), but spirv-cross forwards the load
+# into a conditional expression, cond ? read : 0. On an M1 Pro (macOS 26) the Metal compiler's -O1 builds OCTOPATH TRAVELER's tree material (pixel shader 040208cd98c2ac2f) in that
+# form so that its volumetric lightmap word, written to G-buffer target 5, comes out wrong whenever a tree dither-fades: the lighting turned it into NaN pixels, which depth of field
+# spread into blue, green and white blocks, while every guard was true (all bindings full size; the same shader at -O0, without the guards, or with the guards as select was right).
+# select_guards writes each guard as select(0, read, cond), the translator's own semantics: the read happens, as at a fixed offset it always did, and the guard only chooses its value
+_GSEL_SRC = re.compile(r'(?<![\w>])\((?P<c1>%s) \? %s : (?P<z1>0(?:\.0|u)?)\)|(?P<c2>%s) \? %s : (?P<z2>0(?:\.0|u)?)(?![\w.])' % (_GCOND, _GREAD, _GCOND, _GREAD))
+
+def select_guards(msl):
+    if 'spvDescriptorSet0' not in msl: return msl
+    def sub(m):
+        if m.group('c1'): return 'select(%s, %s, %s)' % (m.group('z1'), m.group(2), m.group('c1'))
+        return 'select(%s, %s, %s)' % (m.group('z2'), m.group(5), m.group('c2'))
+    return _GSEL_SRC.sub(sub, msl)
 _SCALE = '(*spvDescriptorSet0.support_buffer)._m5[0].x'   # the support buffer's render scale (Ryujinx's layout), which the host fills with 1 (nvn_mtl.m support buffer)
 
 def _frag_pos(msl, var, comp):

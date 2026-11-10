@@ -1810,6 +1810,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 
 ## Shaders compiled at run time
 
+### Bounded uniform reads written as select
+
+- **Symptom:** on an M1 Pro (macOS 26) only, blue, green and white blocks for one or two frames on trees that dither-fade (OCTOPATH TRAVELER's S'warkii, walking behind a tree); a texture dump shows NaN pixels in the scene colour and holes in the normal G-buffer target, which depth of field spreads into blocks. Not seen on an iPhone or on newer Macs.
+- **Cause:** the translator reads a bounded uniform word unconditionally and chooses it or 0 ([Reads past a uniform binding's size](#reads-past-a-uniform-bindings-size): OpLoad, then OpSelect), but spirv-cross forwards the load into a conditional expression, `cond ? read : 0.0`. The Metal compiler's -O1 build of OCTOPATH TRAVELER's tree material (pixel shader `040208cd98c2ac2f`) in that form gives its volumetric lightmap word (G-buffer target 5) a wrong value, which the lighting turns into NaN, although every guard is true (all its bindings are full size). The same shader at -O0, without the guards, or with the guards as `select` is right; `-fno-fast-math` does not help. Found by bisecting upstream (`26062f9e` is the first bad commit, its parent clean: 5 against 0 of 96 shots) and then the shaders and the guards inside the one shader.
+- **Fix:** every game, a chain change. `dmsh_fetch.select_guards` (called by `dmsh_build.py` after spirv-cross, also on the geometry and layer readers) writes each fixed-offset guard as `select(0, read, cond)`, the translator's own semantics: the read happens, as at a fixed offset it always did, and the guard only chooses its value. `unguard` reads both forms. Computed-offset reads keep their row-0 index fallback.
+- **Found on:** [OCTOPATH TRAVELER](../../dm/games/010057D006492000/README.md) (an M1 Pro; the user's iPhone build showed none).
+- **Check:** `python3 dm/gfx/tests/test_dmsh_fetch.py UniformBounds` (`test_select_guards`: the rewrite, and the same `unguard` result for both forms; `test_select_guards_compile`: Mac and iPhone compiles). On the M1 Pro, the dog route in S'warkii (walking up and down behind the tree left of the dog by the weapon shop): 5 to 14 of 96 shots with blocks before, 0 of 96 after.
+
 ### A GLSL language preamble is not a complete shader
 
 - **Symptom:** the NSP script stops with `captured only 0 run-time shaders` although the game reaches its frame loop with precompiled shaders.

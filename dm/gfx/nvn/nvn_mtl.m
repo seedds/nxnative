@@ -3820,7 +3820,10 @@ static void tex_zero_fill(id<MTLTexture> mt);
 // texture whole first (tex_undrop), after which it stays whole (g_drop_full). Shaders that fetch texels, ask the size or pick an explicit level read the smaller texture. DM_NVN_TEX_DROP_MIP=0/1
 // forces it off or on
 enum { DROP_MIN = 512 };   // both sides at least this, and 2 levels or more
-static int drop_wants(uint64_t working_set) { return working_set && working_set < (6ull << 30); }
+// Small devices: Metal's working set under 6 GB (the iPhone 17 and the M1 iPad, 5,461 MB; 8 GB Macs too). The rule for smaller textures here, for upload staging released (up_reuse)
+// and for the sweep of idle uploaded textures (pkg_sweep)
+static int small_working_set(uint64_t working_set) { return working_set && working_set < (6ull << 30); }
+static int drop_wants(uint64_t working_set) { return small_working_set(working_set); }
 static int g_drop_on = -1;
 static int drop_on(void) {
     if (g_drop_on < 0) { const char *e = getenv("DM_NVN_TEX_DROP_MIP"); g_drop_on = e && *e ? atoi(e) > 0 : drop_wants(g_dev ? g_dev.recommendedMaxWorkingSetSize : 0);
@@ -3934,7 +3937,9 @@ static unsigned g_up_seq;
 #define UP_BLOCK_SIZE (32u * 1024u * 1024u)
 // Each upload slot keeps its staging resident until its next batch (up_begin waits for the previous batch). Grow the first block to the slot's previous batch demand, not just its first texture:
 // a small first texture followed by a large one otherwise allocates and retires a fresh 32 MB overflow every frame. Keep one overflow as well, at most 64 MB per slot / 192 MB across all three.
-// Bursts beyond that budget and individual uploads larger than UP_BLOCK_SIZE still use temporary blocks, retired only after their GPU work. DM_NVN_UPLOAD_REUSE=0 keeps the original one-block policy.
+// Bursts beyond that budget and individual uploads larger than UP_BLOCK_SIZE still use temporary blocks, retired only after their GPU work. Small devices (small_working_set, as smaller
+// textures) keep the original one-block policy, each batch's staging released once its GPU work is done: in play a game uploads 1-6 MB per 300 frames, and on the iPhone 17 the retained
+// blocks cost Ocarina of Time 125 MB of resident memory for no speed (docs/reference/memory.md, "Upload staging kept for reuse on small devices"). DM_NVN_UPLOAD_REUSE=0 / 1 forces either
 #define UP_SLOT_BLOCK (4u * 1024u * 1024u)
 static __strong id<MTLBuffer> g_up_slot_blk[3], g_up_slot_over[3]; static unsigned g_up_cur_slot;
 static size_t g_up_slot_want[3], g_up_batch_bytes; static int g_up_over_used;
@@ -3949,7 +3954,13 @@ static size_t up_src_budget(void) {
     }
     return bytes;
 }
-static int up_reuse(void) { static int on = -1; if (on < 0) { const char *e = getenv("DM_NVN_UPLOAD_REUSE"); on = !e || atoi(e); } return on; }
+static int up_reuse_wants(uint64_t working_set) { return !small_working_set(working_set); }
+static int up_reuse(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("DM_NVN_UPLOAD_REUSE"); on = e && *e ? atoi(e) > 0 : up_reuse_wants(g_dev ? g_dev.recommendedMaxWorkingSetSize : 0);
+        if (!on && !(e && *e)) MLOG("upload staging is released after each batch, not kept for reuse (Metal's working set under 6 GB; DM_NVN_UPLOAD_REUSE=1 keeps it)"); }
+    return on;
+}
 static int up_retained(id<MTLBuffer> b, unsigned slot) { return b && (b == g_up_slot_blk[slot] || b == g_up_slot_over[slot]); }
 static size_t up_slot_block_size(size_t demand) {
     size_t want = UP_SLOT_BLOCK;
@@ -14699,8 +14710,7 @@ static uint64_t pkg_evict_idle(unsigned *n_out) { @autoreleasepool {
     return bytes;
 } }
 // Small devices (Metal recommended working set under 6 GB: 8 GB iPhones, M1 iPads, 8 GB Macs): sweep idle uploaded textures every PKG_SWEEP_DS without waiting for OS memory pressure so
-// an area's copies leave once the game has left it (docs/reference/memory.md). Elsewhere memory pressure alone frees them. DM_NVN_TEX_EVICT_IDLE=0 / 1 forces it
-static int small_working_set(uint64_t working_set) { return working_set && working_set < (6ull << 30); }
+// an area's copies leave once the game has left it (docs/reference/memory.md). Elsewhere memory pressure alone frees them (small_working_set, the rule of smaller textures). DM_NVN_TEX_EVICT_IDLE=0 / 1 forces it
 static int g_sweep_on = -1; static uint32_t g_sweep_last;
 static void pkg_sweep(void) {
     if (g_sweep_on < 0) {

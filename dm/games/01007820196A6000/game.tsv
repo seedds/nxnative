@@ -42,3 +42,9 @@ shader_note	Red Dead Redemption shaders (RAGE effects in shaders.rpf and main, D
 mem_used	0x4ca4000
 # render_cond: the game draws under SetRenderEnableConditional (its only [RED] line in a 5-minute run); without the key small black squares showed in the title scene and the opening cutscene
 render_cond	on
+
+# ---- Frame rate ----
+# 60 fps (30 on the Switch): the game asks for present interval 2 once (main+0x38ea0) and has no other limit; it steps by the time that passed (the opening cutscene's
+# shots at the same seconds at 30 and 60, README.md Frame rate). Display mode presents at the cap by the present interval alone; the player's Frame rate picks 30 or 60
+fps_target	60
+present_interval	display

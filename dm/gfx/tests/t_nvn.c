@@ -142,6 +142,22 @@ int main(void) {
       EXPECT("a frame step page needs no limiter",60,fps_present_cap());
       dm_fps_state=NULL;unsetenv("DM_FPS_TARGET");g_present_cap=-1;g_engine_stub=1;nvn_present_config(0,0);
     }
+    // Display mode with no engine limiter (Red Dead Redemption: interval 2 set once, steps by time): the cap is the present interval alone
+    { win_t w={.interval=2};nvn_present_config(60,1);dm_fps_state=NULL;g_engine_stub=0;
+      setenv("DM_FPS_TARGET","60",1);g_present_cap=-1;
+      EXPECT("display mode, no limiter: the 60 cap is applied",60,fps_present_cap());
+      EXPECT("display mode, no limiter: one vsync a frame",1,present_itv(&w));
+      EXPECT("display mode, no limiter: the game reads back 1",1,window_interval(&w));
+      setenv("DM_FPS_TARGET","30",1);g_present_cap=-1;
+      EXPECT("display mode, no limiter: the 30 cap is applied",30,fps_present_cap());
+      EXPECT("display mode, no limiter: two vsyncs a frame",2,present_itv(&w));
+      EXPECT("display mode, no limiter: 30 Hz display-link target",30,nvn_game_fps());
+      setenv("DM_FPS_TARGET","0",1);g_present_cap=-1;
+      EXPECT("display mode, no limiter, no cap: one frame per tick",1,present_itv(&w));
+      nvn_present_config(-1,0);setenv("DM_PRESENT_INTERVAL","display",1);setenv("DM_FPS_TARGET","30",1);g_present_cap=-1;
+      EXPECT("the cap asked for before the window's first interval: display mode from the environment",30,fps_present_cap());
+      unsetenv("DM_PRESENT_INTERVAL");unsetenv("DM_FPS_TARGET");g_present_cap=-1;g_engine_stub=1;nvn_present_config(0,0);
+    }
     crash_install();   // the same SIGSEGV / SIGBUS handling as production (the page-fault hook is dispatched from within it)
     // 1. Bootstrap address lookup: bootstrap gets GetProcAddress, then uses it to get all the names
     PFNNVNBOOTSTRAPLOADERPROC boot = (PFNNVNBOOTSTRAPLOADERPROC)h_nvnBootstrapLoader;

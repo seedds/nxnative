@@ -299,6 +299,13 @@
 - **Fix:** on `ENOTSUP` or `EOPNOTSUPP`, `swap_by_moves` makes the state the swap leaves with three renames (the old app to `<app>.old`, the new one to `<app>`, the old one to `<app>.partial`), so the key write and its rollback do not change. A rename that fails undoes the ones before it. These volumes cannot make it atomic: a process killed between the first two renames leaves no app at `<app>`, with the old one at `<app>.old` until the next replacement clears it. APFS still swaps. Tests: `dm/tools/tests/test_nsp_mac_app.py` `test_volume_without_atomic_swap_replaces_by_moves`, `test_fallback_restores_the_old_app_when_a_move_fails` and `test_fallback_clears_an_old_app_a_killed_build_left_aside`.
 - **Found on:** a user's rebuild onto an external Mac OS Extended (Journaled) drive ([LNPANDY/NX2Apple#595](https://github.com/LNPANDY/NX2Apple/issues/595), [PR #1190](https://github.com/seedds/nxnative/pull/1190)); reproduced on HFS+ and exFAT disk images made with `hdiutil create`, where the `PackReuse` tests stop with the real errno without the change and reach the fallback with it. Applies to every game's Mac app.
 
+### Volume free-space check stops on APFS purgeable space
+
+- **Symptom:** `[RED] less than N GB free on the volume of <build folder>` before extraction or packaging, even when macOS Finder and Storage settings report ample available space (e.g. 96 GB available, but the script reports less than 30 GB free).
+- **Cause:** `free_gb()` relied solely on `shutil.disk_usage()`, which calls POSIX `statvfs()` (`f_bavail * f_frsize`). On macOS APFS volumes, `statvfs()` counts only raw unallocated blocks and ignores purgeable space (local Time Machine snapshots `com.apple.TimeMachine.*.local`, temporary caches, and system-purgeable extents). macOS purges these dynamically on demand as writes occur, but the pre-check aborted before any write was attempted.
+- **Fix:** on macOS (`sys.platform == 'darwin'`), `free_gb()` queries Apple's CoreFoundation URL volume capacity via `NSURLVolumeAvailableCapacityForImportantUsageKey` (taking the maximum of that and `statvfs()`), reflecting space macOS can purge for user operations. In addition, the script adds `SKIP_SPACE_CHECK = False` in Settings, `--skip-space-check` on the CLI, and `DM_SKIP_SPACE_CHECK=1` in the environment to allow bypassing the check entirely when needed.
+- **Found on:** an APFS drive with local Time Machine snapshots and purgeable space. Applies to every game built on macOS.
+
 ### External shader directories contain AppleDouble metadata
 
 - **Symptom:** on an exFAT or FAT drive, shader splitting stops with `ValueError: not a version 2 shader code archive` or `[RED] /glslc_capture/._…: no GLSLC output`.

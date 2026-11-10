@@ -48,8 +48,8 @@
 #define FSTEP_PROBE_MAX 180   // grace frames a probe may take in all (3 s at 60 fps): a clock that keeps rising without reaching the hold is not waited for longer
 #define FSTEP_GPU_IDLE 0.05   // GPU time (in the frame's unit) under which nothing is being drawn: 0.8 ms at 60 fps (Ocarina of Time's progress screen 0.2–0.3 ms, its scenes 12 ms)
 // A hold above kmin that only the host's own frame lag explains (DM_FSTEP_LAG_PROBE=1, nvn_fstep.lag_probe; off by default): with DM_NVN_FRAME_LAG the frame's CPU time includes
-// the wait for the previous frame's GPU work (lagw), so a GPU-bound game's cost at hold 2 is that wait plus its own work and never fits k − 1, and a stale cref (the
-// load screen's 0.25) makes no same-cost probe either. Ocarina of Time at lag 0 stepped 1 → 2 on one GPU spike right after gameplay began (GPU 1.11 vsyncs, 3 late frames),
+// the wait for the previous frame's GPU work (lagw), so a GPU-bound game's cost at hold 2 is that wait plus its own work and never fits k − 1, and a stale cref (a lighter
+// scene's: 0.28, 0.79) makes no same-cost probe either. Ocarina of Time at lag 0 stepped 1 → 2 on one GPU spike right after gameplay began (GPU 1.11 vsyncs, 3 late frames),
 // its probe failed once, and it stayed at 30 fps with GPU 0.95 and CPU 0.3 vsyncs. FSTEP_RUN frames in a row whose GPU fits k − 1 (FSTEP_LAG_GPU) and whose cost without
 // the lag wait fits it too (FSTEP_FIT) start a probe after the uhold hold-off, which doubles after each failed one as for nvn_fstep_unpaced
 #define FSTEP_LAG_GPU 1.0

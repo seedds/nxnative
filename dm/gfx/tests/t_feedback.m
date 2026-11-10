@@ -466,12 +466,6 @@ static void reuse_tables_case(void) {
     CHECK(d != a && d.length == 0x20000, "a larger table is its own buffer");
     pool_table_give(b); pool_table_give(c); pool_table_give(d);
     g_done = done0; g_fence = fence0;
-    id<MTLBuffer> big[16]; for (int i = 0; i < 16; i++) big[i] = mrbuf_get(1u << 20);
-    for (int i = 0; i < 16; i++) mrbuf_put(big[i]);
-    CHECK(g_mrbuf_n == 16 && g_mrbuf_bytes == (size_t)16 << 20, "the cache is full of one size");
-    id<MTLBuffer> small = mrbuf_get(4096); mrbuf_put(small);
-    CHECK(g_mrbuf_n == 16 && g_mrbuf[15] == small, "a new size makes room with the oldest");
-    CHECK(mrbuf_get(4096) == small, "and is found again");
 }
 // A cut with earlier work still running stays a boundary for the game's timestamps, and commits only when the GPU has run out; a report after it takes that boundary's time
 static void cut_boundary_case(void) {

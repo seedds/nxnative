@@ -1102,9 +1102,12 @@ int main(void) {
         P(nvnMemoryPoolFinalize)(&wtp);
     }
 
-    // 6c3. GPU copies mirrored into the destination's storage (nvn_tex_mirror_t2t / nvn_tex_mirror_b2t, the streamer's level copies): a region of a level copied from a texture of other
-    //      dimensions (another block height) and a whole level, byte-identical to "decode the source level → patch the destination level → re-encode", with the rest of the pool untouched;
-    //      RGBA8 and BC1; the same regions from a linear buffer with a padded row stride
+    // 6c3. GPU copies stored into the destination's storage on the GPU (nvn_mtl.m gsb_store / gsb_store_buf, the streamer's level copies), run through the queue: a region of a level
+    //      copied from a texture of other dimensions (another block height) and a whole level, leaving the pool byte-identical to "decode the source level → patch the destination level →
+    //      re-encode", the rest of it untouched; RGBA8 and BC1; the same regions from a buffer in the pool with a padded row stride. The pool is filled
+    //      from the generator's high bits: its low byte repeats every 256 bytes, and copies between level-aligned regions then moved bytes equal to those they replaced
+    #define STORE_RUN(rec) do { P(nvnCommandBufferBeginRecording)(&cb); P(nvnCommandBufferSetCopyRowStride)(&cb, 0); P(nvnCommandBufferSetCopyImageStride)(&cb, 0); rec; \
+        NVNcommandHandle hh = P(nvnCommandBufferEndRecording)(&cb); P(nvnQueueSubmitCommands)(&q, 1, &hh); P(nvnQueueFinish)(&q); } while (0)
     {
         static uint8_t mmem[1 << 18] __attribute__((aligned(16384)));
         NVNmemoryPoolBuilder mb; NVNmemoryPool mp; P(nvnMemoryPoolBuilderSetDevice)(&mb, &dev); P(nvnMemoryPoolBuilderSetDefaults)(&mb);
@@ -1124,29 +1127,33 @@ int main(void) {
                 unsigned sl = (unsigned)k, dl = (unsigned)k + 1; int sx = cs[c].rg[k][0], sy = cs[c].rg[k][1], dx = cs[c].rg[k][2], dy = cs[c].rg[k][3], w = cs[c].rg[k][4], h = cs[c].rg[k][5];
                 size_t slp = (size_t)(((cs[c].sw >> sl) + bw - 1) / bw) * bpb, dlp = (size_t)(((cs[c].dw >> dl) + bw - 1) / bw) * bpb, wbb = (size_t)((w + bw - 1) / bw) * bpb, hbb = (size_t)(h + bh - 1) / bh;
                 NVNcopyRegion sr = {sx, sy, 0, w, h, 1}, dr = {dx, dy, 0, w, h, 1};
-                for (size_t i = 0; i < sizeof mmem; i++) mmem[i] = (uint8_t)(seed = seed * 1103515245u + 12345u) >> 3;
+                for (size_t i = 0; i < sizeof mmem; i++) mmem[i] = (uint8_t)((seed = seed * 1103515245u + 12345u) >> 16);
                 memcpy(want, mmem, sizeof mmem);
                 nvn_deswizzle(&ts->d, sl, 0, ts->mem, slin, slp); nvn_deswizzle(&td->d, dl, 0, td->mem, dlin, dlp);
                 for (size_t r = 0; r < hbb; r++) memcpy(dlin + ((size_t)dy / bh + r) * dlp + (size_t)(dx / bw) * bpb, slin + ((size_t)sy / bh + r) * slp + (size_t)(sx / bw) * bpb, wbb);
                 nvn_swizzle(&td->d, dl, 0, dlin, dlp, want + 0x20000);
-                n++; if (nvn_tex_mirror_t2t(ts, sl, 0, &sr, td, dl, 0, &dr, NULL) || memcmp(want, mmem, sizeof mmem)) bad++;
-                for (size_t i = 0; i < sizeof mmem; i++) mmem[i] = (uint8_t)(seed = seed * 1103515245u + 12345u) >> 3;
+                NVNtextureView sv, dv; P(nvnTextureViewSetDefaults)(&sv); P(nvnTextureViewSetLevels)(&sv, (int)sl, 1); P(nvnTextureViewSetDefaults)(&dv); P(nvnTextureViewSetLevels)(&dv, (int)dl, 1);
+                STORE_RUN(P(nvnCommandBufferCopyTextureToTexture)(&cb, &s, &sv, &sr, &d, &dv, &dr, 0));
+                n++; if (memcmp(want, mmem, sizeof mmem)) { bad++; printf("2D case %u.%d texture copy differs\n", c, k); }
+                for (size_t i = 0; i < sizeof mmem; i++) mmem[i] = (uint8_t)((seed = seed * 1103515245u + 12345u) >> 16);
+                size_t row = wbb + 16; uint8_t *bsrc = mmem + 0x30000; for (size_t i = 0; i < row * hbb; i++) bsrc[i] = src[i] = (uint8_t)((seed = seed * 1103515245u + 12345u) >> 20);
                 memcpy(want, mmem, sizeof mmem);
-                size_t row = wbb + 16; for (size_t i = 0; i < row * hbb; i++) src[i] = (uint8_t)(seed = seed * 1103515245u + 12345u) >> 5;
                 nvn_deswizzle(&td->d, dl, 0, td->mem, dlin, dlp);
                 for (size_t r = 0; r < hbb; r++) memcpy(dlin + ((size_t)dy / bh + r) * dlp + (size_t)(dx / bw) * bpb, src + r * row, wbb);
                 nvn_swizzle(&td->d, dl, 0, dlin, dlp, want + 0x20000);
-                n++; if (nvn_tex_mirror_b2t(td, dl, 0, &dr, src, row, row * hbb, NULL) || memcmp(want, mmem, sizeof mmem)) bad++;
+                STORE_RUN(P(nvnCommandBufferSetCopyRowStride)(&cb, (ptrdiff_t)row); P(nvnCommandBufferSetCopyImageStride)(&cb, (ptrdiff_t)(row * hbb));
+                          P(nvnCommandBufferCopyBufferToTexture)(&cb, (NVNbufferAddress)bsrc, &d, &dv, &dr, 0));
+                n++; if (memcmp(want, mmem, sizeof mmem)) { bad++; printf("2D case %u.%d buffer copy differs\n", c, k); }
             }
             P(nvnTextureFinalize)(&s); P(nvnTextureFinalize)(&d);
         }
-        EXPECT("copies mirrored into the destination's storage, byte-identical to a level round trip (8 cases)", 0, bad); EXPECT("copy mirror case count", 8, n);
+        EXPECT("copies stored into the destination's storage on the GPU, byte-identical to a level round trip (8 cases)", 0, bad); EXPECT("copy store case count", 8, n);
         P(nvnMemoryPoolFinalize)(&mp);
     }
 
     // 6c4. The same into 3D textures, slice by slice (GitHub #1856: LEGO Star Wars fills BC6H light-probe volumes a slice at a time): a buffer copy into a BC6H MINIMAL_LAYOUT volume (padded row
-    //      and image strides) and into level 1 of an RGBA8 volume with a deeper block, a 3D → 3D texture copy and a 3D WriteTexels region (now written in place, without the whole-level
-    //      round trip), each byte-identical to "decode the 3D level → patch its slices → re-encode", with the rest of the pool untouched
+    //      and image strides) and into level 1 of an RGBA8 volume with a deeper block (its planes interleave in the block), and a 3D → 3D texture copy, each stored on the GPU; and a 3D
+    //      WriteTexels region (written in place on the CPU); each byte-identical to "decode the 3D level → patch its slices → re-encode", with the rest of the pool untouched
     {
         static uint8_t vmem[1 << 20] __attribute__((aligned(16384))), want[1 << 20], dlin[1 << 18], slin[1 << 18], src[1 << 16];
         NVNmemoryPoolBuilder mb; NVNmemoryPool mp; P(nvnMemoryPoolBuilderSetDevice)(&mb, &dev); P(nvnMemoryPoolBuilderSetDefaults)(&mb);
@@ -1170,22 +1177,28 @@ int main(void) {
             unsigned lv = cs[c].level; uint32_t lw = t->d.width >> lv, lh = t->d.height >> lv; uint64_t toff = (uint64_t)(t->mem - vmem);
             size_t lp = (size_t)((lw + bw - 1) / bw) * bpb, lr = (lh + bh - 1) / bh, wbb = (size_t)((r->width + bw - 1) / bw) * bpb, hbb = (size_t)(r->height + bh - 1) / bh;
             size_t row = cs[c].kind == 0 ? wbb + 16 : wbb, img = cs[c].kind == 0 ? row * hbb + 32 : row * hbb;
-            for (size_t i = 0; i < sizeof vmem; i++) vmem[i] = (uint8_t)(seed = seed * 1103515245u + 12345u) >> 3;
+            for (size_t i = 0; i < sizeof vmem; i++) vmem[i] = (uint8_t)((seed = seed * 1103515245u + 12345u) >> 16);
             if (cs[c].kind == 1) {   // the source's bytes are the source volume's own, region at (sx, sy, sz)
                 size_t slp = (size_t)vsrc->d.width * 4, slr = vsrc->d.height;
                 nvn_deswizzle(&vsrc->d, 0, 0, vsrc->mem, slin, slp);
                 for (int z = 0; z < r->depth; z++) for (size_t y = 0; y < hbb; y++) memcpy(src + z * img + y * row, slin + ((size_t)(cs[c].sz + z) * slr + (size_t)cs[c].sy + y) * slp + (size_t)cs[c].sx * 4, wbb);
-            } else for (size_t i = 0; i < img * (size_t)r->depth; i++) src[i] = (uint8_t)(seed = seed * 1103515245u + 12345u) >> 5;
+            } else for (size_t i = 0; i < img * (size_t)r->depth; i++) src[i] = (uint8_t)((seed = seed * 1103515245u + 12345u) >> 20);
+            uint8_t *bsrc = vmem + 0xe0000; if (cs[c].kind == 0) memcpy(bsrc, src, img * (size_t)r->depth);   // the copy's source, in the pool
             memcpy(want, vmem, sizeof vmem);
             nvn_deswizzle(&t->d, lv, 0, t->mem, dlin, lp);
             for (int z = 0; z < r->depth; z++) for (size_t y = 0; y < hbb; y++)
                 memcpy(dlin + ((size_t)(r->zoffset + z) * lr + (size_t)r->yoffset / bh + y) * lp + (size_t)(r->xoffset / bw) * bpb, src + z * img + y * row, wbb);
             nvn_swizzle(&t->d, lv, 0, dlin, lp, want + toff);
             NVNcopyRegion sr = {cs[c].sx, cs[c].sy, cs[c].sz, r->width, r->height, r->depth};
-            int rc = cs[c].kind == 0 ? nvn_tex_mirror_b2t(t, lv, 0, r, src, row, img, NULL) : cs[c].kind == 1 ? nvn_tex_mirror_t2t(vsrc, 0, 0, &sr, t, lv, 0, r, NULL) : (write_texels(t, NULL, r, src, row, img), 0);
-            n++; if (rc || memcmp(want, vmem, sizeof vmem)) bad++;
+            NVNtextureView v; P(nvnTextureViewSetDefaults)(&v); P(nvnTextureViewSetLevels)(&v, (int)lv, 1);
+            if (cs[c].kind == 0) STORE_RUN(P(nvnCommandBufferSetCopyRowStride)(&cb, (ptrdiff_t)row); P(nvnCommandBufferSetCopyImageStride)(&cb, (ptrdiff_t)img);
+                                           P(nvnCommandBufferCopyBufferToTexture)(&cb, (NVNbufferAddress)bsrc, (const NVNtexture *)t, &v, r, 0));
+            else if (cs[c].kind == 1) STORE_RUN(P(nvnCommandBufferCopyTextureToTexture)(&cb, &tv[2], NULL, &sr, (const NVNtexture *)t, &v, r, 0));
+            else write_texels(t, NULL, r, src, row, img);
+            n++; if (memcmp(want, vmem, sizeof vmem)) { bad++; printf("3D case %u differs\n", c); }
         }
-        EXPECT("copies into 3D textures mirrored slice by slice, byte-identical to a level round trip (5 cases)", 0, bad); EXPECT("3D copy mirror case count", 5, n);
+        EXPECT("copies into 3D textures stored slice by slice, byte-identical to a level round trip (5 cases)", 0, bad); EXPECT("3D copy store case count", 5, n);
+        #undef STORE_RUN
         for (int i = 0; i < 3; i++) P(nvnTextureFinalize)(&tv[i]);
         P(nvnMemoryPoolFinalize)(&mp);
     }

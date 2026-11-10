@@ -72,6 +72,12 @@ class LauncherSettingsTests(unittest.TestCase):
         s = build(BOTW, 'nvn')['DM_SHOW_FPS']
         self.assertEqual((s['on'], s['off']), ('1', '0'))
 
+    def test_portrait_layout_only_for_a_picture_of_any_shape_on_the_iphone(self):   # a shown condition of two parts (<cond>&<cond>): screen_aspect any, and iOS
+        oot = '0400486024DEC000'   # Ocarina of Time: screen_aspect any
+        self.assertEqual(build(oot, 'nvn')['DM_PORTRAIT_LAYOUT']['default'], 'full')
+        self.assertNotIn('DM_PORTRAIT_LAYOUT', build(oot, 'nvn', 'mac'))
+        self.assertNotIn('DM_PORTRAIT_LAYOUT', build(BOTW, 'nvn'))   # screen_aspect on: a 16:9 or taller picture stays above the controls
+
     def test_iphone_switches_only_on_the_iphone(self):   # the frame-rate counter and touch feedback are the iOS front end's (front_ios.m, DmGamepad.m)
         ios, mac = build(BOTW, 'nvn'), build(BOTW, 'nvn', 'mac')
         self.assertEqual(build(BOTW, 'nvn', 'ios').keys(), ios.keys())   # ios when unset

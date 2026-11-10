@@ -73,6 +73,15 @@ static inline DmLayout dm_layout(CGRect b, UIEdgeInsets insets, BOOL partiallyOp
     return l;
 }
 
+// Portrait layout Full screen (DM_PORTRAIT_LAYOUT=full, the default, for a profile whose picture takes any shape: front_ios.m portrait_full): upright with no fold to split at,
+// the picture covers the whole view and the touch controls, still arranged in the lower half as in the split, are drawn over it, as they are over the picture in landscape.
+// Touches above the controls go to the game's touch screen as in the split. A half-folded Duo keeps its split at the fold
+static inline DmLayout dm_layout_full_picture(DmLayout l, CGRect b, BOOL partiallyOpen, CGRect division, CGFloat aspect) {
+    if (!l.separated || CGRectIsEmpty(b) || b.size.height <= b.size.width || partiallyOpen || !CGRectIsNull(dm_horizontal_division(b, division))) return l;
+    l.game = dm_aspect_fit(b, aspect); l.area = b;
+    return l;
+}
+
 // The touch controls are hidden (a controller is connected, DmGamepad.m dm_gamepad_off): upright with no fold to split at, the picture takes the whole screen inside its safe area
 // instead of the half above controls that are not there. Landscape, and a half-folded Duo's split at its fold, stay as dm_layout makes them
 static inline DmLayout dm_layout_controls_hidden(DmLayout l, CGRect b, UIEdgeInsets insets, BOOL partiallyOpen, CGRect division, CGFloat aspect) {

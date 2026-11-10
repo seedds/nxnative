@@ -2460,6 +2460,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
         pl = l; pst = st; pf = fu; pudc = udc;
         static uint64_t pae, par, pap; uint64_t ae_, ar_, ap_; mtl_args_stats(&ae_, &ar_, &ap_);
         trow(f, "@args_enc", (double)(ae_ - pae)); trow(f, "@args_reuse", (double)(ar_ - par)); trow(f, "@args_patch", (double)(ap_ - pap)); pae = ae_; par = ar_; pap = ap_;
+        static uint64_t prf; uint64_t rf_ = mtl_args_refused(); trow(f, "@args_refused", (double)(rf_ - prf)); prf = rf_;
         static uint64_t puc, pus; uint64_t uc_, us_; mtl_use_stats(&uc_, &us_);
         static uint64_t pdo; uint64_t do_ = mtl_ds_omit(); trow(f, "@ds_omit", (double)(do_ - pdo)); pdo = do_;
         trow(f, "@use_call", (double)(uc_ - puc)); trow(f, "@use_skip", (double)(us_ - pus)); puc = uc_; pus = us_;

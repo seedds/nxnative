@@ -1382,6 +1382,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** `gp_begin` records the encoder it stamped, and `gp_end` ignores any other encoder, so the open pass keeps its label until its own end.
 - **Found on:** [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md) with `DM_NVN_GPUPROF=every:300` on the Mac (issue #531; one run in four, about frame 23,000). `t_gpuprof` ends an upload encoder inside a profiled pass; it runs in CPU CI. Not rerun in the game.
 
+### An argument block reused after another variant of its program encoded
+
+- **Symptom:** none seen in a game. A draw could bind a texture or uniform from before a binding change, the second time a program's variant drew in a pass. [#1898](https://github.com/seedds/nxnative/pull/1898)'s author found the cause by reading; `t_args_last_sh` reproduces it.
+- **Cause:** a stage's dirty flags (`g_args_dirty`, `g_args_ubo`) say what changed since the stage last encoded an argument block, not since a given shader did. A program switch dirties every stage, but a variant of the same program (an alpha, border or logic library) is another `NvShader` with a block of its own and no program switch between. Variant A encodes, a binding changes, variant B encodes and clears the flags, A draws again with nothing flagged: its block, or its copy patched for uniforms only, predates the change.
+- **Fix:** each stage remembers the shader whose block it last encoded, patched or reused (`g_last_sh`, forgotten by `args_dirty_all`), and `encode_args_` reuses or patches a block only for that shader. A refusal is counted (`@args_refused` in the trace rows, `mtl_args_refused`); it is an upper bound, since it also counts refusals where nothing changed.
+- **Found on:** reading ([#1898](https://github.com/seedds/nxnative/pull/1898), commit 56e7ee16); `t_args_last_sh` fails without the change (the second dispatch of A writes the old binding) and passes with it. No game failure reported.
+
 ## Conditional rendering and queries
 
 ### Conditional rendering evaluated at replay

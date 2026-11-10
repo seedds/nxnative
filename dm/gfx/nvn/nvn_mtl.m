@@ -14392,11 +14392,11 @@ static void copy_t2t(const p_copy_t2t *c) {
 // vectors at the input's size, inverted depth, with 0x40 for its DLSSAutoExposure). Where MetalFX takes no scaler for the formats, or a depth or motion texture is missing, the input is scaled
 // bilinearly into the output with a red line: the frame stays whole, without the temporal gain
 enum { DLSS_F_DEPTH_INVERTED = 1 << 3, DLSS_F_AUTO_EXPOSURE = 1 << 6 };
-typedef struct { uint64_t net; id<MTL4FXTemporalScaler> sc; NSUInteger key[9]; int fresh; } dlss_scaler;
+typedef struct { uint64_t net; id<MTL4FXTemporalScaler> sc; NSUInteger key[10]; int fresh; } dlss_scaler;
 static dlss_scaler g_dlss[4];
 static id<MTL4Compiler> g_dlss_comp;
-static dlss_scaler *dlss_scaler_for(const p_dlss *c, id<MTLTexture> col, id<MTLTexture> dep, id<MTLTexture> mot, id<MTLTexture> out, NSUInteger iw, NSUInteger ih) {
-    NSUInteger key[9] = {col.pixelFormat, dep.pixelFormat, mot.pixelFormat, out.pixelFormat, iw, ih, out.width, out.height, c->flags};
+static dlss_scaler *dlss_scaler_for(const p_dlss *c, id<MTLTexture> col, id<MTLTexture> dep, id<MTLTexture> mot, id<MTLTexture> out, id<MTLTexture> bias, NSUInteger iw, NSUInteger ih) {
+    NSUInteger key[10] = {col.pixelFormat, dep.pixelFormat, mot.pixelFormat, out.pixelFormat, bias.pixelFormat, iw, ih, out.width, out.height, c->flags};
     dlss_scaler *e = NULL, *spare = NULL;
     for (int i = 0; i < 4 && !e; i++) { if (g_dlss[i].net == c->net) e = &g_dlss[i]; else if (!g_dlss[i].net && !spare) spare = &g_dlss[i]; }
     if (!e) { e = spare ? spare : &g_dlss[0]; e->net = c->net; e->sc = nil; memset(e->key, 0, sizeof e->key); }
@@ -14409,6 +14409,7 @@ static dlss_scaler *dlss_scaler_for(const p_dlss *c, id<MTLTexture> col, id<MTLT
     d.colorTextureFormat = col.pixelFormat; d.depthTextureFormat = dep.pixelFormat; d.motionTextureFormat = mot.pixelFormat; d.outputTextureFormat = out.pixelFormat;
     d.inputWidth = iw; d.inputHeight = ih; d.outputWidth = out.width; d.outputHeight = out.height;
     d.autoExposureEnabled = (c->flags & DLSS_F_AUTO_EXPOSURE) != 0;
+    if (bias) { d.reactiveMaskTextureEnabled = YES; d.reactiveMaskTextureFormat = bias.pixelFormat; }
     d.inputContentPropertiesEnabled = YES; d.inputContentMinScale = scale; d.inputContentMaxScale = scale;
     e->sc = g_dlss_comp && [MTLFXTemporalScalerDescriptor supportsMetal4FX:g_dev] ? [d newTemporalScalerWithDevice:g_dev compiler:g_dlss_comp] : nil;
     if (!e->sc) MLOG("[RED] DLSS: MetalFX makes no temporal scaler for colour format %lu, depth %lu, motion %lu, output %lu, %lux%lu → %lux%lu; scaling bilinearly", (unsigned long)col.pixelFormat, (unsigned long)dep.pixelFormat,
@@ -14420,12 +14421,17 @@ static dlss_scaler *dlss_scaler_for(const p_dlss *c, id<MTLTexture> col, id<MTLT
 static void dlss_eval(const p_dlss *c) {
     rp_flush();   // the passes before it land first: they write its inputs
     id<MTLTexture> col = c->tex[DLSS_COLOR] ? tex_mtl(c->tex[DLSS_COLOR]) : nil, dep = c->tex[DLSS_DEPTH] ? tex_mtl(c->tex[DLSS_DEPTH]) : nil, mot = c->tex[DLSS_MOTION] ? tex_mtl(c->tex[DLSS_MOTION]) : nil,
-                   out = c->tex[DLSS_OUTPUT] ? tex_mtl(c->tex[DLSS_OUTPUT]) : nil;
+                   out = c->tex[DLSS_OUTPUT] ? tex_mtl(c->tex[DLSS_OUTPUT]) : nil, bias = c->tex[DLSS_BIAS] ? tex_mtl(c->tex[DLSS_BIAS]) : nil;
     if (!col || !out) { static int once; if (!once++) MLOG("[RED] DLSS evaluated without %s", col ? "an output" : "an input colour"); return; }
     zskip_del(c->tex[DLSS_OUTPUT]->serial); sparse_gpu_wrote(c->tex[DLSS_OUTPUT]);
     NSUInteger iw = c->iw > 0 ? (NSUInteger)c->iw : col.width, ih = c->ih > 0 ? (NSUInteger)c->ih : col.height;
     rp_end(); if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
-    dlss_scaler *e = dep && mot ? dlss_scaler_for(c, col, dep, mot, out, iw, ih) : NULL;
+    if (bias && (c->base[DLSS_BIAS][0] < 0 || c->base[DLSS_BIAS][1] < 0 || (NSUInteger)c->base[DLSS_BIAS][0] + iw > bias.width || (NSUInteger)c->base[DLSS_BIAS][1] + ih > bias.height)) {
+        static int once; if (!once++) MLOG("[RED] DLSS: the bias mask's %lux%lu texture does not cover the %lux%lu input at %d,%d; the mask is not used", (unsigned long)bias.width, (unsigned long)bias.height,
+                                      (unsigned long)iw, (unsigned long)ih, c->base[DLSS_BIAS][0], c->base[DLSS_BIAS][1]);
+        bias = nil;
+    }
+    dlss_scaler *e = dep && mot ? dlss_scaler_for(c, col, dep, mot, out, bias, iw, ih) : NULL;
     if (!e) {
         NVNcopyRegion sr = {c->base[DLSS_COLOR][0], c->base[DLSS_COLOR][1], 0, (int)iw, (int)ih, 1}, dr = {c->base[DLSS_OUTPUT][0], c->base[DLSS_OUTPUT][1], 0, (int)out.width, (int)out.height, 1};
         if (!(out.usage & MTLTextureUsageRenderTarget) && !mtl_fmt_block(out.pixelFormat) && !fmt_int_or_ds(out.pixelFormat)) out = tex_upgrade(c->tex[DLSS_OUTPUT], out, MTLTextureUsageRenderTarget, out.pixelFormat);
@@ -14437,6 +14443,15 @@ static void dlss_eval(const p_dlss *c) {
     if ((dep.usage & sc.depthTextureUsage) != sc.depthTextureUsage) dep = tex_upgrade(c->tex[DLSS_DEPTH], dep, sc.depthTextureUsage, dep.pixelFormat);
     if ((mot.usage & sc.motionTextureUsage) != sc.motionTextureUsage) mot = tex_upgrade(c->tex[DLSS_MOTION], mot, sc.motionTextureUsage, mot.pixelFormat);
     if ((out.usage & sc.outputTextureUsage) != sc.outputTextureUsage) out = tex_upgrade(c->tex[DLSS_OUTPUT], out, sc.outputTextureUsage, out.pixelFormat);
+    if (bias) {
+        MTLTextureUsage usage;
+        if (@available(macOS 27.0, iOS 27.0, *)) usage = sc.reactiveMaskTextureUsage;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"   // The property is the pre-27 name and remains the only one those systems expose
+        else usage = sc.reactiveTextureUsage;
+#pragma clang diagnostic pop
+        if ((bias.usage & usage) != usage) bias = tex_upgrade(c->tex[DLSS_BIAS], bias, usage, bias.pixelFormat);
+    }
     id<MTLTexture> expo = c->tex[DLSS_EXPOSURE] ? tex_mtl(c->tex[DLSS_EXPOSURE]) : nil;
     if (g_blit) { enc_b_end(g_blit); g_blit = nil; }   // a usage upgrade copies through it
     ubd_land_compute();
@@ -14444,19 +14459,20 @@ static void dlss_eval(const p_dlss *c) {
     [ce barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageBlit visibilityOptions:resource_vis()];
     [ce barrierAfterStages:MTLStageBlit beforeQueueStages:MTLStageAll visibilityOptions:resource_vis()];
     [ce endEncoding];
-    if (@available(macOS 27.0, iOS 27.0, *)) {} else if (c->base[DLSS_COLOR][0] || c->base[DLSS_COLOR][1] || c->base[DLSS_DEPTH][0] || c->base[DLSS_DEPTH][1] || c->base[DLSS_MOTION][0] || c->base[DLSS_MOTION][1] || c->base[DLSS_OUTPUT][0] || c->base[DLSS_OUTPUT][1]) {
+    if (@available(macOS 27.0, iOS 27.0, *)) {} else if (c->base[DLSS_COLOR][0] || c->base[DLSS_COLOR][1] || c->base[DLSS_DEPTH][0] || c->base[DLSS_DEPTH][1] || c->base[DLSS_MOTION][0] || c->base[DLSS_MOTION][1] || c->base[DLSS_OUTPUT][0] || c->base[DLSS_OUTPUT][1] || (bias && (c->base[DLSS_BIAS][0] || c->base[DLSS_BIAS][1]))) {
         static int once; if (!once++) MLOG("[RED] DLSS: rectangles away from the origin need macOS / iOS 27's MetalFX; taken from the origin");
     }
     const p_dlss a = *c; const int reset = c->reset || e->fresh; e->fresh = 0;
     // On the real command buffer, the scaler's state set with it: on the encoding thread when it runs (the recording's stand-in has none of MetalFX's calls), where a later
     // evaluation through the same scaler may already have been recorded
     rec_cb_block(g_cb, ^(id<MTL4CommandBuffer> cb) {
-        sc.colorTexture = col; sc.depthTexture = dep; sc.motionTexture = mot; sc.outputTexture = out; sc.exposureTexture = expo;
+        sc.colorTexture = col; sc.depthTexture = dep; sc.motionTexture = mot; sc.outputTexture = out; sc.exposureTexture = expo; sc.reactiveMaskTexture = bias;
         sc.inputContentWidth = iw; sc.inputContentHeight = ih;
         if (@available(macOS 27.0, iOS 27.0, *)) {   // the rectangles' corners: all at the origin on the game seen, so an older system loses nothing there
             sc.colorContentOffsetX = (NSUInteger)a.base[DLSS_COLOR][0]; sc.colorContentOffsetY = (NSUInteger)a.base[DLSS_COLOR][1];
             sc.depthContentOffsetX = (NSUInteger)a.base[DLSS_DEPTH][0]; sc.depthContentOffsetY = (NSUInteger)a.base[DLSS_DEPTH][1];
             sc.motionContentOffsetX = (NSUInteger)a.base[DLSS_MOTION][0]; sc.motionContentOffsetY = (NSUInteger)a.base[DLSS_MOTION][1];
+            if (bias) { sc.reactiveMaskContentOffsetX = (NSUInteger)a.base[DLSS_BIAS][0]; sc.reactiveMaskContentOffsetY = (NSUInteger)a.base[DLSS_BIAS][1]; }
             sc.outputOffsetX = (NSUInteger)a.base[DLSS_OUTPUT][0]; sc.outputOffsetY = (NSUInteger)a.base[DLSS_OUTPUT][1];
         }
         sc.motionVectorScaleX = a.mv[0]; sc.motionVectorScaleY = a.mv[1];
@@ -14466,7 +14482,6 @@ static void dlss_eval(const p_dlss *c) {
         sc.reset = reset;
         [sc encodeToCommandBuffer:cb];
     });
-    if (c->tex[DLSS_BIAS]) { static int once; if (!once++) MLOG("[RED] DLSS: the game's bias mask (a reactive mask for MetalFX) is not passed on"); }
 }
 
 // The colour channels a Metal format has, as a channel write mask: a clear whose mask covers them all writes every texel whole (FINAL FANTASY TACTICS - The Ivalice Chronicles clears an

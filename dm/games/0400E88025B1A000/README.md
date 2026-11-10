@@ -42,6 +42,7 @@ Every 3D target is 768x432 from the first frame of the title to the tutorial: Me
 - [sRGB textures loaded and stored raw through an image](../../../docs/reference/rendering.md#srgb-textures-loaded-and-stored-raw-through-an-image): the pale picture with grey blacks (the upscaler network's encoded store was encoded again); measured on a build of our fork, not on `main`.
 - [A GPU copy into a texture uploaded from its storage uploaded all of it again](../../../docs/reference/nvn-objects.md#a-gpu-copy-into-a-texture-uploaded-from-its-storage-uploaded-all-of-it-again): 7.6 s and 10 s frames at the prologue's scene changes; measured on a build of our fork, not on `main`.
 - [The DLSS network resized](../../../docs/reference/rendering.md#the-dlss-network-resized): `nvnDlssNetworkResize`.
+- [NVN2's DLSS on MetalFX](../../../docs/reference/rendering.md#nvn2s-dlss-on-metalfx): the prologue exposed temporal trails in moving fur and translucent edges because its DLSS bias-current-colour mask did not reach MetalFX's reactive-mask input.
 - [TXD through a uniform register kept no handle](../../../docs/reference/shaders.md#txd-through-a-uniform-register-kept-no-handle): 281 pixel shaders, the fur shells among them.
 - [A handle pair ORed sampler word first](../../../docs/reference/shaders.md#a-handle-pair-ored-sampler-word-first): 62 pixel shaders.
 - [NVN2 compute's separate handles in c\[0\]](../../../docs/reference/shaders.md#nvn2-computes-separate-handles-in-c0): `1002069a331ceded`, dispatched in the prologue.
@@ -52,7 +53,6 @@ Every 3D target is 768x432 from the first frame of the title to the tutorial: Me
 ## Open
 
 - [The picture](#the-picture): why the 3D stays at 768x432.
-- `[RED] DLSS: the game's bias mask (a reactive mask for MetalFX) is not passed on`.
 - The game's wake-up eventfd fails (the host refuses `nn::socket::EventFd`), so its HTTP thread polls without a wake-up; harmless offline.
 - A `pso_manifest.tsv` has not been recorded; `render_cond` not tried; the later levels and combat, and iOS, not tested.
 - Mario Kart World 1.8.0 has not been run with the camera answers changed for this game.

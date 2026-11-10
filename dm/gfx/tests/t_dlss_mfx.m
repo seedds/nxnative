@@ -35,12 +35,13 @@ static int flat(id<MTLTexture> t, const float want[3]) {   // the middle half of
 int main(void) { @autoreleasepool {
     mtl_init();
     tex_t col = texture(90, 960, 540, NVN_FORMAT_RGBA16F), col2 = texture(91, 960, 540, NVN_FORMAT_RGBA16F), dep = texture(92, 960, 540, NVN_FORMAT_DEPTH32F),
-          mot = texture(93, 960, 540, NVN_FORMAT_RG16F), out = texture(94, 1920, 1080, NVN_FORMAT_RGBA16F), out2 = texture(95, 1920, 1080, NVN_FORMAT_RGBA16F);
-    mtl_tex_init(&col); mtl_tex_init(&col2); mtl_tex_init(&dep); mtl_tex_init(&mot); mtl_tex_init(&out); mtl_tex_init(&out2);
+          mot = texture(93, 960, 540, NVN_FORMAT_RG16F), out = texture(94, 1920, 1080, NVN_FORMAT_RGBA16F), out2 = texture(95, 1920, 1080, NVN_FORMAT_RGBA16F),
+          bias = texture(96, 960, 540, NVN_FORMAT_R8);
+    mtl_tex_init(&col); mtl_tex_init(&col2); mtl_tex_init(&dep); mtl_tex_init(&mot); mtl_tex_init(&out); mtl_tex_init(&out2); mtl_tex_init(&bias);
     const float a[3] = {0.5f, 0.25f, 0.75f}, b[3] = {0.125f, 0.625f, 0.25f};
     fill(tex_mtl(&col), MTLClearColorMake(a[0], a[1], a[2], 1), 0); fill(tex_mtl(&col2), MTLClearColorMake(b[0], b[1], b[2], 1), 0);
-    fill(tex_mtl(&dep), MTLClearColorMake(0, 0, 0, 0), 1); fill(tex_mtl(&mot), MTLClearColorMake(0, 0, 0, 0), 0);
-    p_dlss c = {.tex = {&col, &dep, &mot, &out}, .net = 1, .iw = 960, .ih = 540, .ow = 1920, .oh = 1080, .mv = {1, 1}, .pre_exposure = 1, .flags = DLSS_F_DEPTH_INVERTED, .reset = 1};
+    fill(tex_mtl(&dep), MTLClearColorMake(0, 0, 0, 0), 1); fill(tex_mtl(&mot), MTLClearColorMake(0, 0, 0, 0), 0); fill(tex_mtl(&bias), MTLClearColorMake(0, 0, 0, 0), 0);
+    p_dlss c = {.tex = {&col, &dep, &mot, &out, &bias}, .net = 1, .iw = 960, .ih = 540, .ow = 1920, .oh = 1080, .mv = {1, 1}, .pre_exposure = 1, .flags = DLSS_F_DEPTH_INVERTED, .reset = 1};
     p_dlss c2 = c; c2.tex[DLSS_COLOR] = &col2; c2.tex[DLSS_OUTPUT] = &out2;
     for (int frame = 0; frame < 4; frame++) {   // the temporal scaler settles over a few frames of the same input
         mtl_sub_begin(); dlss_eval(&c); dlss_eval(&c2);
@@ -48,6 +49,8 @@ int main(void) { @autoreleasepool {
         c.reset = c2.reset = 0;
     }
     CHECK(g_dlss[0].sc != nil, "MetalFX made a temporal scaler for these formats");
+    CHECK(g_dlss[0].sc.reactiveMaskTexture != nil, "the DLSS bias-current-colour mask reaches MetalFX as its reactive mask");
+    CHECK(g_dlss[0].sc.reactiveMaskTextureFormat == MTLPixelFormatR8Unorm, "the reactive mask keeps the game's format");
     CHECK(flat(tex_mtl(&out), a), "the first evaluation's output holds its own colour");
     CHECK(flat(tex_mtl(&out2), b), "the second evaluation through the same scaler holds its own");
     printf("t_dlss_mfx (encoding thread %s): %d checks, %d failed\n", rec_on() ? "on" : "off", checks, failed);

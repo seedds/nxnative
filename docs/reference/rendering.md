@@ -1208,12 +1208,12 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 
 ### NVN2's DLSS on MetalFX
 
-- **Symptom:** a Switch 2 game calls `nvnCommandBufferEvaluateDlss` and its builder functions, which the host did not have.
+- **Symptom:** a Switch 2 game calls `nvnCommandBufferEvaluateDlss` and its builder functions, which the host did not have; or its fast-moving and translucent objects leave temporal trails while UI composed afterward stays sharp.
 - **Cause:** NVN2 has DLSS as a part of the API, a neural network that runs on NVIDIA's GPU, with no counterpart on the Mac.
-- **Fix:** `hle_nvn.c` takes the builder, the network and the parameters (the network's texture IDs and storage are the driver's own needs and are dropped), and answers `GetOptimalSettings` from the method (0: 2x, 1: 3x, 2: 1x). The replay's `OP_DLSS` runs MetalFX's temporal scaler (`dlss_eval`, `nvn_mtl.m`) over colour, depth and motion vectors, with the jitter and a history reset, falling back to a bilinear draw when there is no scaler. This replaces the upscaler, so the picture is close to the game's, not the same.
+- **Fix:** `hle_nvn.c` takes the builder, the network and the parameters (the network's texture IDs and storage are the driver's own needs and are dropped), and answers `GetOptimalSettings` from the method (0: 2x, 1: 3x, 2: 1x). The replay's `OP_DLSS` runs MetalFX's temporal scaler (`dlss_eval`, `nvn_mtl.m`) over colour, depth and motion vectors, with the jitter and a history reset, falling back to a bilinear draw when there is no scaler. DLSS's bias-current-colour mask is MetalFX's reactive mask: both values select how strongly the current pixel should replace temporal history, so the scaler is made for its format and receives its texture and subrectangle. This replaces the upscaler, so the picture is close to the game's, not the same.
 - **Encoding thread:** with `DM_NVN_ENC_THREAD` (the iOS default) the replay's command buffer is the recording's stand-in, which has none of MetalFX's calls: the host stopped at the first evaluation (`deferred encoding: DmRecCB has no stand-in for -useResidencySet:`). The scaler's state and its encode are a block run on the encoding thread with the real command buffer (`rec_cb_block` in `nvn_rec.h`), as for [a game's own upscaler](#a-games-own-upscaler-drawn-by-metalfx). Check: `make -C dm/gfx/tests GAME=040074A01BF12000 check_t_dlss_mfx` (two evaluations through one scaler in a submission, the thread off and on). Not run on a game with the thread.
-- **Open:** the jitter's sign has not been checked and the bias mask is only logged; no ghosting has been seen.
-- **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md): `gfxa::TaskDLSS`, 1024x576 to 2048x1152.
+- **Open:** the jitter's sign has not been checked.
+- **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md): `gfxa::TaskDLSS`, 1024x576 to 2048x1152; [Star Fox](../../dm/games/0400E88025B1A000/README.md): the bias mask in its 768x432 DLSS path was dropped and moving fur and translucent edges left trails across the prologue while its later subtitle composite stayed sharp.
 
 ### The DLSS network resized
 

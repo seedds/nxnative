@@ -32,16 +32,20 @@ def mul_extended(msl):
 # (docs/reference/shaders.md, A shader loop that never ends hangs the GPU; Kirby Air Riders' particle simulation is open)
 LOOP_CAP = 1 << 18
 def loop_guard(msl):
-    lines, out = msl.split('\n'), []
+    lines, out, bodies, used = msl.split('\n'), [], [], set()
     cap = f'++dm_lg < {LOOP_CAP}u'
     for i, l in enumerate(lines):
         if l == '{' and i and lines[i - 1].rstrip().endswith(')'):   # a function body (SPIRV-Cross puts its brace alone in column 0; a struct's header does not end in ')')
-            out += [l, '    uint dm_lg = 0u; (void)dm_lg;']; continue
+            out.append(l); bodies.append(len(out)); continue
+        g = l
         if (m := re.fullmatch(r'(\s*)\} while \((.*)\);\s*', l)): l = f'{m.group(1)}}} while (({m.group(2)}) && {cap});'
         elif (m := re.fullmatch(r'(\s*)for \(;;\)\s*', l)): l = f'{m.group(1)}for (; {cap};)'
         elif (m := re.fullmatch(r'(\s*)while \((.*)\)\s*', l)): l = f'{m.group(1)}while (({m.group(2)}) && {cap})'
         elif (m := re.fullmatch(r'(\s*)for \(([^;]*);([^;]*);([^;]*)\)\s*', l)): l = f'{m.group(1)}for ({m.group(2)}; ({m.group(3).strip() or "true"}) && {cap};{m.group(4)})'
+        if l != g and bodies: used.add(bodies[-1])
         out.append(l)
+    # the counter only in a function with a loop, one declaration alone on its line: dmsh_meshstage.py's _KERNEL takes the statements before the stage memory one per line
+    for at in sorted(used, reverse=True): out.insert(at, '    uint dm_lg = 0u;')
     return '\n'.join(out)
 
 # Ampere HMMA.16816 with an f16 accumulator (agl's upscaler networks, the NDVE video networks) reaches the MSL as calls of dmsh_hmma16816_f16(lane, block, A0..A3, B0, B1, C0, C1,

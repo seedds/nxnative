@@ -434,6 +434,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix (resolved):** the handles no longer wait for a routed output: with rumble on and an output sink installed (`dm_haptics_enabled`), a connected npad style gets its two handles; `vib_send` checks for an output at each send (`hle_hid.c`). No sink, rumble off or a disconnected npad still get none, and `IsVibrationPermitted` still follows the routed outputs. `DM_RUMBLE_LOG=1` logs the handle requests and, once a second, the values sent, those with no routed output and the peak amplitude. Each input value is counted separately, including mixed batches; a mutex protects the diagnostic totals across game threads. `t_hid` covers cached startup handles delivering a nonzero value after routing, mixed-batch diagnostics and concurrent sends; `t_hid_tsan` checks those sends for data races.
 - **Found on:** [Unicorn Overlord](../../dm/games/010069401ADB8000/README.md) (the Asian release, `010054B01AD92000`), in the log only: the game has no rumble of its own (it sends amplitude 0 throughout), so nothing could be felt before or after. Not yet checked on a game that rumbles.
 
+### More controllers than the controller applet's maximum
+
+- **Symptom:** the game opens the controller applet again and again (Orbitals' lobby with a third controller connected).
+- **Cause:** the applet returned with more controllers connected than its maximum; a game checks the count and opens it again.
+- **Fix:** `hle_hid.c` disconnects the controllers past the applet's maximum when it returns.
+- **Found on:** Orbitals (`040004F027560000`).
+
 ### Controller haptic engines without advanced players
 
 - **Symptom:** a controller (an Xbox Wireless Controller, a GameSir Super Nova, a GameSir Cyclone) never vibrates in a game on the Mac or the iPhone, though iOS Settings' Identify buzzes it; the log repeats `[RED] haptics: controller left handle create player: Couldn’t communicate with a helper application. (NSCocoaErrorDomain 4097)`. The engine itself starts.
@@ -640,6 +647,19 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** the host answers an all-zero identifier (`hle_vi.c`).
 - **Note:** a passed TV latency calibration in this game is saved per TV panel identity, the host's all-zero one included ([TV latency calibration's late, beat-timed listening window](game-state.md#tv-latency-calibrations-late-beat-timed-listening-window)).
 - **Found on:** [Rhythm Heaven Groove](../../dm/games/0100D9F01D474000/README.md) (SDK 21.4.0, one boot).
+
+### Unreal Engine 5.6's Switch 2 platform layer at start
+
+- **Symptom:** an Unreal Engine 5.6 Switch 2 game stops before its first frame: `game called nn::diag abort` right after `nn::chat::Initialize`, or its RHI reads zeros back from NVN2's window and queue builders.
+- **Cause:**
+  - `nn::chat::Initialize` returns a Result, and the host's hook was `void`, which left x0 as it was.
+  - The RHI reads NVN2's window builder back (present interval, native window, textures) and the queue builder's memory sizes.
+- **Fix:**
+  - `hle_misc.c`: `nn::chat::Initialize` answers success.
+  - `hle_nvn.c`: the builder getters.
+
+  Its vsync thread's `nn::vi::ListFrameHistory` is the [Layer frame history](#layer-frame-history) above.
+- **Found on:** Orbitals (`040004F027560000`).
 
 ### oe calls answered without an applet proxy
 

@@ -95,14 +95,14 @@ class OutputSize(unittest.TestCase):
     def test_wider_keeps_the_height(self):
         for ratio, docked, handheld in ((2.2, (2536, 1152), (1904, 864)), (2.4, (2768, 1152), (2072, 864)), (21 / 9, (2688, 1152), (2016, 864))):
             self.shape(ratio)
-            self.assertEqual(self.call(2048, 1152), (self.state + 0xb0, docked), ratio)
-            self.assertEqual(self.call(1536, 864), (self.state + 0xb0, handheld), ratio)
+            self.assertEqual(self.call(2048, 1152), (self.state + 0xe0, docked), ratio)
+            self.assertEqual(self.call(1536, 864), (self.state + 0xe0, handheld), ratio)
 
     def test_taller_keeps_the_width(self):
         for ratio, docked, handheld in ((1.43, (2048, 1432), (1920, 1344)), (1.3, (2048, 1576), (1920, 1480)), (4 / 3, (2048, 1536), (1920, 1440))):
             self.shape(ratio)
-            self.assertEqual(self.call(2048, 1152), (self.state + 0xb0, docked), ratio)
-            self.assertEqual(self.call(1920, 1080), (self.state + 0xb0, handheld), ratio)
+            self.assertEqual(self.call(2048, 1152), (self.state + 0xe0, docked), ratio)
+            self.assertEqual(self.call(1920, 1080), (self.state + 0xe0, handheld), ratio)
 
     def test_any_shape_keeps_the_pixels_in_bounds(self):
         for ratio in (1179 / 2556, 0.75, 1.0, 3.0, 5.0):   # an iPhone held upright, a portrait window, a square, ultrawide beyond 21:9

@@ -3,6 +3,8 @@ using System.Buffers.Binary;
 using System.Linq;
 using System.Text;
 using System.IO;
+using System.Reflection;
+using Path = System.IO.Path;
 using LibHac.Common;
 using LibHac.Fs;
 using LibHac.Fs.Fsa;
@@ -51,6 +53,44 @@ class Pfs0StorageTests {
             try { P.PackageStorage(storage); throw new Exception("invalid header accepted"); }
             catch (InvalidDataException) { }
         }
+        foreach (bool terminated in new[] {true, false}) {
+            byte[] shortPayload = Package(terminated)[..^1];
+            using var shortStorage = new MemoryStorage(shortPayload);
+            try { P.PackageStorage(shortStorage); throw new Exception("truncated PFS0 payload accepted"); }
+            catch (InvalidDataException e) { Check(e.Message.Contains("entry 1")); }
+            foreach (var range in new[] {(7UL, 0UL), (5UL, 2UL), (ulong.MaxValue, 1UL), (1UL, ulong.MaxValue)}) {
+                byte[] bad = Package(terminated);
+                BinaryPrimitives.WriteUInt64LittleEndian(bad.AsSpan(40), range.Item1);
+                BinaryPrimitives.WriteUInt64LittleEndian(bad.AsSpan(48), range.Item2);
+                using var storage = new MemoryStorage(bad);
+                try { P.PackageStorage(storage); throw new Exception("out-of-bounds PFS0 entry accepted"); }
+                catch (InvalidDataException) { }
+            }
+            byte[] edge = Package(terminated);
+            BinaryPrimitives.WriteUInt64LittleEndian(edge.AsSpan(40), 6);
+            BinaryPrimitives.WriteUInt64LittleEndian(edge.AsSpan(48), 0);
+            using var edgeStorage = new MemoryStorage(edge);
+            using var accepted = P.PackageStorage(edgeStorage); // empty file exactly at EOF is valid
+        }
+        // Exercise the production CLI entry, not just its parser, without game files or keys.
+        string tmp = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString()); Directory.CreateDirectory(tmp);
+        TextWriter saved = Console.Out;
+        try {
+            string keys = Path.Combine(tmp, "empty.keys"), nsp = Path.Combine(tmp, "truncated.nsp");
+            File.WriteAllText(keys, "");
+            foreach (byte[] bad in new[] {Package(true)[..^1], Package(false)[..^1], "PFS0"u8.ToArray()}) {
+                File.WriteAllBytes(nsp, bad);
+                foreach (bool allow in new[] {false, true}) {
+                    string[] args = new[] {keys, "--aoc", nsp, Path.Combine(tmp, "out")};
+                    if (allow) args = args.Append("--allow-damaged").ToArray();
+                    using var log = new StringWriter(); Console.SetOut(log);
+                    int rc = (int)typeof(P).GetMethod("Main", BindingFlags.NonPublic | BindingFlags.Static).Invoke(null, new object[] {args});
+                    Console.SetOut(saved);
+                    Check(rc == 3 && log.ToString().Contains("[RED] the NSP is damaged") && log.ToString().Contains("truncated.nsp"));
+                    Check(!Directory.Exists(Path.Combine(tmp, "out")));
+                }
+            }
+        } finally { Console.SetOut(saved); Directory.Delete(tmp, true); }
         Console.WriteLine("PFS0 storage checks passed");
     }
 }

@@ -4,6 +4,12 @@
 // VideoToolbox wants a format description built from SPS / PPS and NAL units with 4-byte length prefixes. Decoding is synchronous and yields pictures in decode order; MediaCodec yields them
 // in presentation order, so pictures wait in a queue sorted by coded sequence then presentation time and leave it once more than `depth` are queued,
 // once their sequence is complete, or all at the end of the stream.
+// A picture also leaves as soon as it is the next one in presentation order: its time follows the last picture handed out (in the same coded sequence) by one frame interval
+// (the smallest gap between pictures of a sequence seen, with a quarter of it as slack for rounded times), so no picture can still come between them. Holding `depth`
+// pictures until more arrive kept a stream's last ones until its end-of-stream packet, and some players never send one: Cozy Land's Unity 2023.2 player sends end of stream
+// only when the extractor still reports a sample time after its last sample, which it does not (NuMediaExtractor::getSampleTime returns ERROR_END_OF_STREAM), so its 4.3 s
+// splash movie (High profile, I B B P, pic_order_cnt_type 0, no bitstream_restriction in the VUI) waited for its last four pictures, its playback clock stopped and the game
+// stayed on the movie's last frame. Pictures in order with one frame of delay let it reach the title
 // SPS pic_order_cnt_type 2 has decode order equal to output order: even High profile needs no reorder queue in that case
 #include "hle.h"
 #include <VideoToolbox/VideoToolbox.h>
@@ -16,6 +22,7 @@ struct mavc {
     CMVideoFormatDescriptionRef fd; VTDecompressionSessionRef vs;
     struct { CVPixelBufferRef pb; int64_t pts; uint64_t sequence; } q[QMAX]; int nq, depth;
     uint64_t sequence; int saw_picture;
+    int64_t last_out, step; uint64_t last_seq; int have_last;   // the last picture handed out and its sequence; step: the smallest gap between two picture times of a sequence (0 = none yet)
     uint8_t *au; size_t aucap;   // length-prefixed copy of the access unit being decoded
     int red, rgba;               // rgba: pictures as 4-byte RGBA (native texture mode, Monster Hunter Rise) instead of NV12
 };
@@ -30,7 +37,7 @@ static void close_session(mavc *a) {
     if (a->vs) { VTDecompressionSessionWaitForAsynchronousFrames(a->vs); VTDecompressionSessionInvalidate(a->vs); CFRelease(a->vs); a->vs = NULL; }
     if (a->fd) { CFRelease(a->fd); a->fd = NULL; }
 }
-void mavc_drop(mavc *a) { for (int i = 0; i < a->nq; i++) CVPixelBufferRelease(a->q[i].pb); a->nq = 0; a->sequence = 0; a->saw_picture = 0; }
+void mavc_drop(mavc *a) { for (int i = 0; i < a->nq; i++) CVPixelBufferRelease(a->q[i].pb); a->nq = 0; a->sequence = 0; a->saw_picture = 0; a->have_last = 0; }
 void mavc_free(mavc *a) { if (!a) return; close_session(a); mavc_drop(a); free(a->au); free(a); }
 int mavc_queued(const mavc *a) { return a->nq; }
 
@@ -133,7 +140,17 @@ static void on_frame(void *ref, void *src, OSStatus st, VTDecodeInfoFlags fl, CV
     while (k > 0 && (a->q[k - 1].sequence > sequence ||
                     (a->q[k - 1].sequence == sequence && a->q[k - 1].pts > t))) { a->q[k] = a->q[k - 1]; k--; }
     a->q[k].pb = CVPixelBufferRetain(img); a->q[k].pts = t; a->q[k].sequence = sequence; a->nq++;
+    int64_t gap[3] = {k > 0 && a->q[k - 1].sequence == sequence ? t - a->q[k - 1].pts : 0, k + 1 < a->nq && a->q[k + 1].sequence == sequence ? a->q[k + 1].pts - t : 0,
+                      a->have_last && a->last_seq == sequence ? t - a->last_out : 0};
+    for (int i = 0; i < 3; i++) if (gap[i] > 0 && (!a->step || gap[i] < a->step)) a->step = gap[i];
 }
+// the head of the queue is the next picture in presentation order: one frame interval after the last one handed out, in the same coded sequence
+static int next_in_order(const mavc *a) {
+    if (!a->nq || !a->have_last || !a->step || a->q[0].sequence != a->last_seq) return 0;
+    int64_t g = a->q[0].pts - a->last_out;
+    return g > 0 && g <= a->step + a->step / 4;
+}
+int mavc_ready(const mavc *a) { return a->nq && (a->nq > a->depth || a->q[0].sequence != a->sequence || next_in_order(a)); }
 static int open_session(mavc *a) {
     close_session(a);
     if (!a->nsps || !a->npps) { if (!a->red++) LOG("[RED] movie: AVC has no SPS / PPS, outputting black frames"); return 0; }
@@ -200,8 +217,9 @@ static void take_rgba(CVPixelBufferRef pb, uint8_t *dst, int w, int h) {
     }
 }
 int mavc_take(mavc *a, int flush, uint8_t *dst, int w, int h, int64_t *pts_us) {
-    if (!a->nq || (!flush && a->nq <= a->depth && a->q[0].sequence == a->sequence)) return 0;
+    if (!a->nq || (!flush && !mavc_ready(a))) return 0;
     CVPixelBufferRef pb = a->q[0].pb; if (pts_us) *pts_us = a->q[0].pts;
+    a->last_out = a->q[0].pts; a->last_seq = a->q[0].sequence; a->have_last = 1;
     memmove(a->q, a->q + 1, --a->nq * sizeof a->q[0]);
     CVPixelBufferLockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);
     if (a->rgba) { take_rgba(pb, dst, w, h); CVPixelBufferUnlockBaseAddress(pb, kCVPixelBufferLock_ReadOnly); CVPixelBufferRelease(pb); return 1; }

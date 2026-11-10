@@ -159,6 +159,53 @@ static void sequence_boundaries(void) {
     }
     synthetic_free(a);
 }
+// No end-of-stream packet (Cozy Land's Unity 2023.2 player): a High-profile I B B P stream whose last pictures still come out, each once it is the next one in
+// presentation order; a picture with a gap before it waits for the reorder depth, and a new coded sequence does not continue the previous one's order
+static void in_order_no_eos(void) {
+    static const int decode[] = {0, 3, 1, 2, 6, 4, 5, 9, 7, 8, 11, 10};
+    mavc *a = synthetic_avc(); uint8_t out[16 * 16 * 3 / 2]; int64_t pts; int got = 0;
+    for (int i = 0; i < 12; i++) {
+        submit_picture(a, 1, !i, 16 + decode[i], decode[i] * 1000);
+        if (mavc_take(a, 0, out, 16, 16, &pts)) { assert(pts == got * 1000 && out[0] == 16 + got); got++; }
+    }
+    assert(got < 12 && mavc_ready(a));
+    while (mavc_ready(a)) { assert(mavc_take(a, 0, out, 16, 16, &pts) && pts == got * 1000 && out[0] == 16 + got); got++; }
+    assert(got == 12 && !mavc_queued(a));
+    submit_picture(a, 1, 0, 50, 13000);   // 11000 was the last: 12000 may still come
+    assert(!mavc_ready(a) && !mavc_take(a, 0, out, 16, 16, &pts));
+    submit_picture(a, 1, 0, 49, 12000);
+    assert(mavc_take(a, 0, out, 16, 16, &pts) && pts == 12000 && mavc_take(a, 0, out, 16, 16, &pts) && pts == 13000 && !mavc_queued(a));
+    submit_picture(a, 1, 1, 60, 14000);   // an IDR: a new sequence waits for its own lookahead, even one frame on
+    assert(!mavc_ready(a));
+    mavc_drop(a);
+    assert(!a->have_last);
+    synthetic_free(a);
+}
+// The pump hands out a picture that became due with no packet queued, in a free slot of its own; with every slot taken, a release brings it out
+static void pump_due(void) {
+    static mdec_t d; d = (mdec_t){ .type = MD_TYPE_AVC, .fmt = MD_FMT_NV12, .nout = 1, .started = 1, .w = 16, .h = 16 };
+    pthread_mutex_init(&d.mu, NULL); pthread_mutex_init(&d.dmu, NULL); pthread_mutex_init(&d.wmu, NULL); pthread_cond_init(&d.wcv, NULL);
+    assert(!pthread_create(&d.wk, NULL, md_worker, &d));
+    d.avc = synthetic_avc();
+    static const int decode[] = {0, 2, 1};
+    for (int i = 0; i < 3; i++) submit_picture(d.avc, 1, !i, 16 + decode[i], decode[i] * 1000);
+    uint8_t out[16 * 16 * 3 / 2]; int64_t pts;
+    assert(!mavc_ready(d.avc));
+    d.avc->depth = 2; assert(mavc_take(d.avc, 0, out, 16, 16, &pts) && pts == 0); d.avc->depth = 4;   // as a packet's output would have
+    assert(mavc_ready(d.avc));
+    d.out[0].used = d.out[0].cli = 1;   // the client holds the only slot
+    md_pump(&d);
+    assert(!d.noutq && d.avc_due);
+    void *self[2] = { NULL, &d }; int idx, left; uint32_t flags;
+    assert(md_rel(&d, 0) && d.avc_due);   // without a pump thread the release pumps at once; the next picture is due and waits for the slot again
+    assert(d.noutq == 1 && !h_movie_AcqOut(self, &idx, &pts, &flags, &left) && d.out[idx].pic && pts == 1000 && !flags);
+    assert(md_rel(&d, idx) && d.noutq == 1 && !h_movie_AcqOut(self, &idx, &pts, &flags, &left) && pts == 2000);
+    assert(!mavc_queued(d.avc) && !d.avc_due);
+    md_defer_drop(&d);
+    synthetic_free(d.avc); d.avc = NULL;   // before the worker's close, which would invalidate the test's sentinel session
+    md_job(&d, MDJ_QUIT); pthread_join(d.wk, NULL);
+    for (int i = 0; i < MD_NOUT; i++) free(d.out[i].frm);
+}
 // End of stream with three pictures held for reordering (POC type 0): an end-of-stream packet without data, nout output slots of which the client
 // returns each one it takes. Every picture comes out without the end-of-stream flag, then one output without a picture carries it with the packet's time
 static void drain(int nout) {
@@ -202,6 +249,8 @@ int main(void) {
     loop_order(1); loop_order(0);
     puts("AVC loops: all 36 pictures ordered through packet parsing and callback refcons, with 3- and 4-byte start codes");
     annex_b_only();
+    in_order_no_eos(); pump_due();
+    puts("AVC without end of stream: each picture leaves once it is next in presentation order, also from the pump in a slot of its own");
     puts("AVC framing: leading zeros before the first start code are skipped; packets and parameter sets without a start code are refused, not read as NAL lengths");
     sequence_boundaries();
     puts("AVC boundaries: short sequences drain, non-IDR timestamps and SEI retain lookahead, Flush discards, zero-depth output stays immediate");

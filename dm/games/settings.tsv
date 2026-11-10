@@ -14,10 +14,12 @@
 #   label, note  the setting's name and the line under it (may be empty; only for a setting with a cost: latency, memory, heat)
 #   meta      optional, key=value pairs separated by ; (settings.py META lists the keys; docs/frontends.md, The settings list, describes them):
 #             level=basic  a setting a front end shows first;  needs=<VAR>=<value>  a sub-setting, drawn only while the row that sets <VAR> has that value
+#             option_needs=<value>:<VAR>>=<n>,...  a choice's option offered only while the range that sets <VAR> is at least n (Output resolution's sizes and Game memory);
 #             unit=<unit>  a range shown as a number of that unit instead of a percentage;  first=<label>  a range's lowest value shown as that label (Game memory's Default, the game's own size)
 DM_FPS_TARGET	choice	30=30 fps,60=60 fps,120=120 fps?DM_GAME_FPS_MAX==120&platform:mac	DM_GAME_FPS_TARGET	DM_GAME_FPS_TARGET!=0	Game	Frame rate		level=basic
 DM_DYNAMIC_RESOLUTION	toggle	-	0	fixups:DYNAMIC_RESOLUTION	Game	Dynamic resolution	Lets the game lower its resolution under load. Turn off to keep full resolution for the selected console mode.
 DM_RENDER_SCALE	range	0.5:1.0:0.05	1.0	fixups:RENDER_SCALE	Game	Render scale		level=basic
+DM_OUTPUT_SIZE	choice	off=1080p (standard)?platform:ios,1920x1080=1080p?platform:mac,2560x1440=1440p?platform:mac,3840x2160=4K?platform:mac,5120x2880=5K?platform:mac	off|1920x1080	fixups:OUTPUT_SIZE	Game	Output resolution	Draws the game at this size. Docked only. 1440p needs 4 GB of Game memory, 4K and 5K 8 GB; above 1080p needs far more GPU time, so a 120 fps target may fall back to 60.	level=basic;option_needs=2560x1440:DM_MEMORY_GB>=4,3840x2160:DM_MEMORY_GB>=8,5120x2880:DM_MEMORY_GB>=8
 DM_OPMODE	choice	1=Docked,0=Handheld	DM_GAME_OPMODE	always	Game	Console mode		level=basic
 DM_PRESENT_UPSCALE	choice	off=Standard,metalfx=MetalFX	off	always	Game	Upscaling	Uses more GPU time and can increase heat.
 DM_UPSCALER	choice	game=Game's own,metalfx=MetalFX	game	DM_GAME_UPSCALER_N!=0	Game	Game's upscaler

@@ -44,6 +44,24 @@ Used at `DM_FPS_TARGET=0` and for the interval the framework keeps while the VFR
 - The same GPU time drives the dynamic resolution (`main+0x1267070`): a running average as a percentage of a 60 Hz frame scales the resolution down above 175% (29 ms) and back up below 150% (25 ms). With 0 it always sat at its maximum, and it still does whenever the game holds 30.
 - **Resolved: Link's move pace speeding up when pressing B (iPhone).** Sprinting flaps between interval 1 and 2 for runs of 6 or more frames, and the VFR step at interval 2 is a whole 30 fps tick. The acquire waited one display-link tick per frame whatever the interval, so the game kept producing frames every 16.7 ms while the screen held each interval-2 frame for 33 ms and dropped the one between (`old frames dropped by merging`): those runs went at double speed. `mtl_link_wait_tick` now waits as many ticks as the present interval.
 
+### Output resolution on the Mac
+
+`DM_OUTPUT_SIZE` (the launcher's **Output resolution**: 1440p, 4K or 5K, docked) draws the game natively at that size. Needed together, all in `patches.py` and read from the state page written by `loader.c`: the output's width and height (+0x30c, +0x48), the 115 MB and 60 MB render pools at `main+0x12616d4` times +0x308 (at 1.5 x 1600x900 the 115 MB pool ran out and a null target crashed at `main+0xed7128`), and the 3D views at a factor of 1.2, as their scale divides by a fixed 1920. The render pools need a larger heap ([Memory on the Mac](#memory-on-the-mac)), so the launcher offers each size only from the Game memory it needs (`settings.tsv` `option_needs`), and the loader keeps 1920x1080, with a `[RED]` line, when a size comes with less (a saved choice with the window skipped, an env file).
+
+Measured on an M5 Max in the opening scene only (GPU p50): 2560x1440 6.3 ms at 60 fps, 5.3 ms holding 120; 5120x2880 8.4-9.4 ms at 60, and mostly 60 when asked for 120. A render pass dump shows targets at the output's size. `MemoryPoolInitialize: non-virtual pool has no storage`, of the swapchain's size, is logged at these sizes and has shown no effect. Not measured: handheld mode.
+
+The game memory each size needs (M5 Max, macOS 27.2.1, in a window from a save outdoors on the Great Plateau, one run each):
+
+| Output | Game memory | Result |
+|---|---|---|
+| 2560x1440 | Default (3.2 GB) | crashed at load, within 600 frames (`main+0x153da8c`) |
+| 2560x1440 | 4 GB | ran to frame 15,300 at 60 fps, no `[RED]` line beyond the pool's, no GPU error (Link stuck climbing a ruin, so less streaming than the 5K run) |
+| 5120x2880 | 4 GB | crashed at load: a null render target (`main+0xed7128`) |
+| 5120x2880 | 6 GB | standing still: ran to frame 6,300; running laps: a failed command buffer at about frame 10,200, with a GPU lockup report (WindowServer blamed) |
+| 5120x2880 | 8 GB | running laps: ran to frame 15,300, no GPU error |
+
+So 1440p needs 4 GB and 5K 8 GB. 4K (3840x2160) was not run; it is offered from 8 GB like 5K, rather than risk the GPU failure seen at 6 GB. A size larger than 5K (`DM_OUTPUT_SIZE` takes up to 7680 wide) is held to 12 GB, unmeasured.
+
 ### Memory on the Mac
 
 `nninitStartup` (`main+0x710`) asks for a fixed heap of 3.05 GB and `nnMain` (`main+0xc617c0`) hands the framework a root arena of that less 32 MB, whatever the application pool. Two stubs in `patches.py` take the heap and the arena from the state page instead (+0x310 / +0x318) when the host writes them, and declare the `GAME_HEAP` capability, which offers the Mac launcher's **Game memory** slider (`DM_MEMORY_GB`, Default then 4 to 12 GB). The host's application pool is then that size (`hle_svc.c` `mem_sizes`, the reservation grown by as much), and the heap the pool less 512 MB for the modules (`loader.c`). At Default, or on iOS, the host writes 0 and the game keeps its own heap. An output above 1080p needs more: at 5K the game's own heap returned null for a 328 MB request. The slider stops at 12 GB: at 16 GB (M5 Max, macOS 27.2.1, fullscreen, the save outdoors) the GPU locked up twice within 80 s (`gpuEvent` firmware-detected lockup, the game's process blamed; two failed command buffers in the log) and WindowServer, waiting on the GPU, was restarted by the watchdog. The cause is not found.

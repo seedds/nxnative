@@ -19,6 +19,7 @@ META = {
     'needs': r'DM_[A-Z0-9_]+=[^;=]+',        # <VAR>=<value>: a sub-setting, drawn only while the row that sets <VAR> has that value
     'unit': r'[A-Za-z]+',                     # a range shown as a number of this unit instead of a percentage
     'first': r'[^;=]+',                      # a range's lowest value shown as this label
+    'option_needs': r'[^:,;]+:DM_[A-Z0-9_]+>=[0-9.]+(,[^:,;]+:DM_[A-Z0-9_]+>=[0-9.]+)*',   # <value>:<VAR>>=<n>,...: a choice's option offered only while that range is at least n
 }
 
 
@@ -113,6 +114,7 @@ def build(gid, patched, control):
             can = table[need]
             if can is not None and want not in can: sys.exit(f'settings.tsv:{n}: needs a value {need} never takes: {want} (it takes {", ".join(sorted(can))})')
         if ('unit' in m or 'first' in m) and kind != 'range': sys.exit(f'settings.tsv:{n}: unit and first are for a range')
+        if 'option_needs' in m and kind != 'choice': sys.exit(f'settings.tsv:{n}: option_needs is for a choice')
         if not all(shown(c, n) for c in cond.split('&')): continue
         s = {'env': var, 'kind': kind, 'section': section, 'label': label, 'note': note, 'default': value(default, n), **m}
         if var == 'DM_RENDER_SCALE' and base: s['base'] = base   # the render scale in pixels, for the console mode chosen
@@ -121,6 +123,15 @@ def build(gid, patched, control):
             if any(len(o) != 2 for o in opts): sys.exit(f'settings.tsv:{n}: choice values are value=label,...')
             if s['default'] not in [o[0] for o in opts]: s['default'] = opts[0][0]   # a default the game does not offer (a language it lacks): its first
             s['options'] = opts
+            if 'option_needs' in m:   # {value: "<VAR>>=<n>"} for the options this list offers; the range they name must be a row (a front end without it offers none of them)
+                rules = {}
+                for r in m['option_needs'].split(','):
+                    v, need = r.split(':', 1); var2, lo = need.split('>=')
+                    if v not in {o.split('?', 1)[0].split('=', 1)[0] for o in values.split(',')}: sys.exit(f'settings.tsv:{n}: option_needs names an option the row lacks: {v}')
+                    if table.get(var2, 0) is not None or var2 not in table: sys.exit(f'settings.tsv:{n}: option_needs names no range row: {var2}')
+                    if v in [o[0] for o in opts]: rules[v] = need
+                if rules: s['option_needs'] = rules
+                else: del s['option_needs']
             if values == 'languages' and not have: s['note'] = UNKNOWN_LANGUAGES
         elif kind == 'range':
             lo, hi, st = (float(x) for x in values.split(':'))

@@ -26,6 +26,7 @@
         "min": {"description": "range: the lowest value.", "type": "number"},
         "max": {"description": "range: the highest value.", "type": "number"},
         "step": {"description": "range: the step between values.", "type": "number"},
+        "option_needs": {"description": "choice: option value to \"<VAR>>=<n>\", offered only while the range that sets <VAR> is at least n (Output resolution and Game memory); absent for most choices.", "type": "object", "additionalProperties": {"type": "string", "pattern": "^DM_[A-Z0-9_]+>=[0-9.]+$"}},
         "unit": {"description": "range: shown as a number of this unit (Game memory: GB) instead of a percentage; absent for most ranges.", "type": "string"},
         "first": {"description": "range: the label of its lowest value (Game memory: Default, with the game's own size); absent for most ranges.", "type": "string"},
         "on": {"description": "toggle: the value the switch takes when on.", "type": "string"},

@@ -605,3 +605,11 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Check:** `python3 dm/tools/tests/test_dmsh_pool_arrays.py`.
 - **Result on Ocarina of Time, an M6:** no measurable change. Its 4,758 marked pixel shaders were rebuilt with each load over the same library (chain `f9f01e4f9994`), and the game was measured standing on the Kokiri Forest deck, 40 s a run. GPU p50 was 14.38 ms with either load (5 runs plain, 13.99–14.88; 4 atomic, 14.28–15.34). The pictures matched within run-to-run noise. The gain the contributor measured is on an iPad Pro M5 and is not checked here.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md), reported with the iPad figures by a contributor in [discussion #1789](https://github.com/seedds/nxnative/discussions/1789).
+
+### CPU phase profiling reported on the wrong thread
+
+- **Symptom:** `DM_NVN_CPUPROF=1` prints periodic headers without replay phase measurements, despite command replay doing work.
+- **Cause:** `g_cp_*` accumulators are thread-local and updated by replay. `mtl_stats`, called by the guest statistics reader, reported its own unrelated TLS rather than the replay thread's counters.
+- **Fix:** call `cp_report` at the end of `mtl_sub_commit`, on the thread that owns the accumulated phase costs. Statistics reads no longer report or reset TLS. Counters remain thread-local; diagnostics still read no phase clocks when disabled. Nested phase times remain inclusive and must not be summed as exclusive costs.
+- **Check:** `t_cpuprof` parks a worker after seven real `mtl_sub_index` calls, reads statistics from another thread, then commits and fences the worker's real GPU submission. An elapsed report-window timestamp avoids sleeps. It checks the counter/window reset at production commit, not a direct call to `cp_report`. The standalone fixture passes nine checks with Metal validation in both encoder modes and emits a populated `index 7 calls` report. Restoring only the original reporting site fails three ownership/reset assertions.
+- **Found on:** native load-time profiling of [Ocarina of Time](../../dm/games/0400486024DEC000/README.md), where the integrated correction changes empty headers into populated replay phase reports. The proposed standalone fixture uses no game data; no frame-rate or rendering improvement is claimed.

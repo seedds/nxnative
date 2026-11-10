@@ -136,7 +136,7 @@ sequenceDiagram
     Game->>GPU: frame 2
     Note over Game,Screen: Frame buffering on
     Game->>GPU: frame 1, then a copy into the buffer
-    Note over Game: image free at once
+    Note over Game: image free once copied
     Game->>GPU: frame 2
     GPU->>Screen: frame 1 from the buffer, at the next refresh
     Note over GPU: keeps working: frame 2 while frame 1 is on screen

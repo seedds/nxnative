@@ -274,6 +274,7 @@ void mtl_exec_rest(const uint64_t *handles, int n);   // Tells which handles in 
 // Present: draw the swapchain texture to the front-end CAMetalLayer (only counts when there is no window)
 uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]);   // Enqueue a present and return the ticket immediately; period_s: minimum time this image is displayed (= present period, 0 = unlimited)
 void mtl_present_wait(uint64_t ticket);                    // Wait until the present with this ticket has been processed (blit committed to the GPU queue)
+void mtl_present_wait_texture(uint64_t ticket);   // the next acquire of a presented texture: a snapshot present's copy has run on the GPU, else as mtl_present_wait
 void mtl_present_flush(void);                              // Wait until all enqueued presents have been processed
 void mtl_present_test_stall(uint64_t ns);                  // Unit test: extra pause in ns before each present on the present thread
 int mtl_display_hz(void);                                   // Maximum refresh rate of the screen (Hz) when there is a window, 0 without a window

@@ -244,7 +244,7 @@ void nvn_queue_present_release(uint64_t ticket) {
 void nvn_queue_present_wait(uint64_t ticket) {
     if(!ticket) return; nq_receipt *r=(nq_receipt *)(uintptr_t)ticket;
     pthread_mutex_lock(&nq_mu); while(!r->published) pthread_cond_wait(&nq_cv,&nq_mu); uint64_t physical=r->present; pthread_mutex_unlock(&nq_mu);
-    if(physical) mtl_present_wait(physical);
+    if(physical) mtl_present_wait_texture(physical);   // the texture's next acquire: a snapshot's copy, else the present itself
 }
 void nvn_queue_fence(queue_t *q,sync_t *s) {
     pthread_mutex_lock(&nq_mu); nq_queue *p=nq_get(q);

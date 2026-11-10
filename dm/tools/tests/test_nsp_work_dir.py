@@ -43,7 +43,7 @@ class WorkDir(unittest.TestCase):
         def stop(env, *a): seen.update(env); raise Stop()
         with mock.patch.object(nsp, 'find_repo', return_value=REPO), mock.patch.object(nsp, 'scan_nsps', return_value=(TID, fam)), \
              mock.patch.object(nsp, 'decompress_nsz', return_value=fam) as nsz, mock.patch.object(nsp, 'nsp_versions', return_value={'v0': fam['base']}), \
-             mock.patch.object(nsp, 'configure_dotnet'), mock.patch.object(nsp, 'WORK_DIR', setting), mock.patch.object(nsp, 'check_prereqs', side_effect=stop), \
+             mock.patch.object(nsp, 'WORK_DIR', setting), mock.patch.object(nsp, 'check_prereqs', side_effect=stop), \
              mock.patch.object(nsp, 'say', side_effect=said.append):
             with self.assertRaises(Stop): nsp.main(args)
         self.nsz_work = nsz.call_args.args[5]

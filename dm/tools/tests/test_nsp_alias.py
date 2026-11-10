@@ -45,11 +45,11 @@ class Alias(unittest.TestCase):
         def fake_run(cmd, log, env=None, cwd=None, on_line=None, ok=()):   # nx_extract: the update's main is another build, the base game's is the profile's
             seen.append(cmd[3]); nso(Path(cmd[4]) / 'ExeFS/main', UPD_BID if cmd[3] != '-' else BID)
         fam = {'base': self.tmp / 'base.nsp', 'updates': [(65536, self.tmp / 'upd.nsp')], 'dlc': []}
-        with mock.patch.object(nsp, 'build_nx_extract', lambda *a: 'nx'), mock.patch.object(nsp, 'run', fake_run):
+        with mock.patch.object(nsp, 'find_nx_extract', lambda *a: 'nx'), mock.patch.object(nsp, 'run', fake_run):
             g, ver, bid = nsp.same_build(self.tmp, OTHER, fam, self.tmp / 'prod.keys', REPO, {})
         self.assertEqual((g.id, ver, bid), (f'{PROFILE:016X}', 'v0', BID))
         self.assertEqual(seen, [fam['updates'][0][1], '-'])
-        with mock.patch.object(nsp, 'build_nx_extract', lambda *a: 'nx'), mock.patch.object(nsp, 'run', lambda cmd, log, **k: nso(Path(cmd[4]) / 'ExeFS/main', UPD_BID)):
+        with mock.patch.object(nsp, 'find_nx_extract', lambda *a: 'nx'), mock.patch.object(nsp, 'run', lambda cmd, log, **k: nso(Path(cmd[4]) / 'ExeFS/main', UPD_BID)):
             self.assertIsNone(nsp.same_build(self.tmp, OTHER, fam, self.tmp / 'prod.keys', REPO, {}))
 
     def test_same_build_goes_on_past_a_sparse_base(self):
@@ -59,7 +59,7 @@ class Alias(unittest.TestCase):
             if cmd[3] != '-': nso(Path(cmd[4]) / 'ExeFS/main', UPD_BID)
             elif 4 not in ok: raise nsp.BuildError('nx_extract exit code 4')
         fam = {'base': self.tmp / 'base.nsp', 'updates': [(65536, self.tmp / 'upd.nsp')], 'dlc': []}
-        with mock.patch.object(nsp, 'build_nx_extract', lambda *a: 'nx'), mock.patch.object(nsp, 'run', fake_run):
+        with mock.patch.object(nsp, 'find_nx_extract', lambda *a: 'nx'), mock.patch.object(nsp, 'run', fake_run):
             self.assertIsNone(nsp.same_build(self.tmp, OTHER, fam, self.tmp / 'prod.keys', REPO, {}))
         self.assertEqual([c for c, _ in seen], [fam['updates'][0][1], '-'])
 

@@ -62,7 +62,6 @@ Each step below stopped the boot before its fix:
 
 ## Open
 
-- **Shader tables:** split them again with this game's files and compare: `shader_map.tsv` may hold agl rows that are no shaders ([A control section's words read as a BAHS entry](../../../docs/reference/shaders.md#a-control-sections-words-read-as-a-bahs-entry); `bahs_variations` already met one stray entry in `agl_common`), and if so the NSP script stops at the table check until the split's tables replace them.
 - **Video decoding:** the guide movies are VP9 and play (a 180-picture clip on loop in the tutorial's panel, read back as NV12). The player also imports the VP8, H.264 and AV1 decoders: VP8 and H.264 are served too (checked by `t_codec_video` only), AV1 is not ([`nn::codec` video decoders taken over](../../../docs/reference/movies.md#nncodec-video-decoders-taken-over)).
 - **The gameplay picture:** the mining tunnel matches a YouTube capture of the same spot ([Rendering](#rendering) 7); nothing past the tunnel's first minute has been compared.
 - Full shader build (about 75 minutes on the Mac from an empty cache): 22,852 of 22,852 shaders on chain 6f41726ef36d (SUATOM decoded; 22,850 on chain 3c66991eb439). Chain 9a0726336e9d had 22,834: the Metal compiler refused 11 (too deeply nested jump tables) and 5 used BRXU or REDUX ([Ampere shader code](../../../docs/reference/shaders.md#ampere-shader-code-switch-2)); 2 still do not translate (0x593).
@@ -75,6 +74,8 @@ Each step below stopped the boot before its fix:
 
 ## Found on this game
 
+- [Early fragment tests from the control section](../../../docs/reference/shaders.md#early-fragment-tests-from-the-control-section): 2,855 of its 13,546 pixel shaders set the NVN2 flag (control +0x5b), none of them writes depth; before, no NVN2 shader got the attribute.
+- [A control section's words read as a BAHS entry](../../../docs/reference/shaders.md#a-control-sections-words-read-as-a-bahs-entry): checked, 2026-11-10 ([issue #1613](https://github.com/seedds/nxnative/issues/1613)). The update v458752, split again without the DLC (whose tables are derived), gives all four tables byte for byte as the profile has them: no false entry, and the NSP script's table check passes.
 - [A prebuild pool sized from the Super cores](../../../docs/reference/shaders.md#a-prebuild-pool-sized-from-the-super-cores): the pipeline prebuild of its 21,225 shader pairs, M5 Pro, 393-452 s on 4 workers against 187-272 s on Metal's 14 (resolved).
 - [A depth clear over the whole target with a partial stencil mask](../../../docs/reference/rendering.md#a-depth-clear-over-the-whole-target-with-a-partial-stencil-mask): 22.8 MB of depth and stencil loaded a frame for a stencil mask of 1 (resolved).
 - [No Game language row in an app packed from a NUP or a dump](../../../docs/reference/packing.md#no-game-language-row-in-an-app-packed-from-a-nup-or-a-dump): reported by testers; this folder's dump has no control data.

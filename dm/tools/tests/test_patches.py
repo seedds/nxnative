@@ -114,6 +114,12 @@ class Registry(unittest.TestCase):
                 self.assertTrue(rules); self.assertEqual(len({r['name'] for r in rules}), 1, f'{p}: a main has one frame step')
                 for rule in rules:
                     validate_stub(rule)
+                    if 'calls' in rule:   # anchored: with each reviewed result of its find, the stub writes at the function's start plus the offset it found
+                        for found in rule['reviewed']:
+                            sites, _, _, _ = docs_patches.frame_step_sites(rule['stub'], base=0x100000, found=found)
+                            self.assertTrue(sites, f'{p}: {rule["name"]} writes no site')
+                            self.assertTrue(all(0x100000 <= off < 0x100000 + 0x100000 for off, _ in sites), f'{p}: {rule["name"]} writes outside its function')
+                        continue
                     sites, _, in_others, _ = docs_patches.frame_step_sites(rule['stub'], base=0x100000, others=rule.get('others', {}))
                     self.assertTrue(sites, f'{p}: {rule["name"]} writes no site')
                     for off, why in sites: self.assertTrue(0x100000 <= off < 0x100000 + rule['size'], f'{p}: {rule["name"]} site {off:#x} outside its function')

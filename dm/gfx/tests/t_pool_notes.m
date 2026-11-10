@@ -1,7 +1,7 @@
 // The tables of handles traced to no slot (pool_gpu) over noted changes: a pool added or removed records REG_POOL and no ID, so a table built before keeps its buffer when nothing
 // it holds changed, takes again an ID whose storage came with a new pool, and the IDs of a finalized pool go to the dummy through notes of their own (treg_gone). A new submission
 // takes again only the IDs whose entries were views of retired registrations, which went at the end of the last one, and a storage takeover builds nothing. A patch follows the
-// walk's rules: past the budget an unread texture stays the dummy, and a view the shader-read scan writes in place is taken again at the next submission. Each patched table holds
+// walk's rules: past the budget an unread texture is not made (its entry is its stand-in, pool_stand), and a view the shader-read scan writes in place is taken again at the next submission. Each patched table holds
 // what a table built whole holds.
 // Ocarina of Time maps and unmaps virtual pool runs dozens of times a second and registers something between most of its draws; each of those walked its 33,025-entry texture table
 #define nvn_game_fps nvn_game_fps_mtl_default
@@ -137,7 +137,7 @@ int main(void) { @autoreleasepool {
     CHECK(g_stat_pool_builds == builds && entry(b11, 4) != dummy_of(b11), "the next submission takes ID 4 again without building the table");
     same_as_whole(b11, "the patched table holds what a table built whole does (takeover)");
 
-    // Past the budget: a texture registered since the walk that no shader has read stays the dummy, as in a walk, and the table is patched rather than built whole. ID 6 names a
+    // Past the budget: a texture registered since the walk that no shader has read is not made, as in a walk (its entry is its stand-in, or the dummy with DM_NVN_POOL_STANDIN=0), and the table is patched rather than built whole. ID 6 names a
     // texture the game finalized before anything made it. Once a shader reads ID 6, the scan of the read bitmap makes it whatever the budget and writes it into the table in place:
     // a view of a retired registration, which the table lists, so the next submission takes it again
     mtl_reg_tex(3, NULL, NULL); mtl_reg_tex(4, NULL, NULL); table(); table();   // no retired IDs left: the table lists none
@@ -150,9 +150,10 @@ int main(void) { @autoreleasepool {
     builds = g_stat_pool_builds; patched = g_stat_pool_patched; kept = g_stat_pool_kept;
     id<MTLBuffer> b12 = table();
     CHECK(g_stat_pool_builds == builds && g_stat_pool_patched + g_stat_pool_kept > patched + kept, "a registration past the budget patches the table");
-    CHECK(entry(b12, 6) == dummy_of(b12) && snap()->left > 0 && !snap()->left_req, "the unread texture is left out");
+    #define LEFT_OUT(buf, i) (!g_treg[i].view && (stand_on() ? g_treg[i].stand && entry(buf, i) == g_treg[i].stand_rid : entry(buf, i) == dummy_of(buf)))   // not the texture: its stand-in
+    CHECK(LEFT_OUT(b12, 6) && snap()->left > 0 && !snap()->left_req, "the unread texture is left out");
     h_nvnTextureFinalize(&t6); table();
-    CHECK(g_treg[6].retired && !tex_get(((const tex_t *)&t6)->serial) && entry(snap()->buf, 6) == dummy_of(snap()->buf), "finalized, it is still left out: nothing made it");
+    CHECK(g_treg[6].retired && !tex_get(((const tex_t *)&t6)->serial) && LEFT_OUT(snap()->buf, 6), "finalized, it is still left out: nothing made it");
     ((uint32_t *)g_seen_buf.contents)[6 / 32] |= 1u << (6 % 32);
     mtl_sub_begin(); os_unfair_lock_lock(&g_rmu); pool_seen_scan();
     pool_snap *s = snap(); id<MTLBuffer> b13 = s->buf;

@@ -6,8 +6,8 @@
 #   · the vertex shader's pulling library <key>_bp (a vertex shader without stage inputs: its own <key>_b), entry `entry`, or `entry_z` for the near = 0 depth mode, from its reflection
 #     <key>_b.json; the pixel shader's <key>_b, entry `entry` (main0); no vertex descriptor, one sample, every colour attachment unspecialized
 #   · left out as the host leaves them out (to the draws): a reflection of another chain version or none, a vertex shader with stage inputs and no pulling library, a vertex library that
-#     writes the layer (render_target_array_index), a pixel shader that reads the primitive ID (its reflection's raster.primitive_id: the host builds its pipelines whole, since
-#     through a base every primitive reads 0), a missing library or entry point
+#     writes the layer (its reflection's layer_out, dmsh_build.py layer_out: its pipelines take an input primitive class), a pixel shader that reads the primitive ID (its reflection's
+#     raster.primitive_id: the host builds its pipelines whole, since through a base every primitive reads 0), a missing library or entry point
 #   · a pair whose functions declare function constants is left to the device (rest_pairs.tsv): the host specializes such functions with an empty set of values, and metal-tt makes
 #     no specialized function from a library (applegpu-nt: "cannot find private metadata"), nor the function unspecialized ("cannot lower module with unresolved function constants")
 # And a compute pipeline per compute shader, which depends on its function alone (the host makes it from the function, cps_new in nvn_mtl.m; the threadgroup size is the dispatch's):
@@ -41,7 +41,6 @@ from pathlib import Path
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'tools'))
 import romfs, shader_lib   # the libraries may be one file (shader_lib.py), read in place; metal-tt alone needs files of its own (real_libraries)
 
-LAYER = b'render_target_array_index'
 BATCH = 1000   # bases per metal-tt run: Odyssey's largest compiler lifetime footprint at this size was 2.065 GiB on an 8 GB M2
 COMPUTE_BATCH = 16   # compute pipelines per metal-tt run, JOBS runs at a time: one metal-tt keeps about 2-3 cores busy: Star Fox's 233 took 268 s in 16 groups against 453 s in one run (M5 Pro, background priority, a loaded Mac)
 JOBS = max(1, (os.cpu_count() or 2) // 2)
@@ -114,7 +113,7 @@ def functions(path):
 
 def plan(lib_dir, chain, pairs, zero):
     """The bases the archive holds: [(vertex library, vertex entry, pixel library, pixel entry)], the pairs left to the device (function constants), and counts of the pairs left out"""
-    lib_dir = romfs.Path(lib_dir); js, fns, layer = {}, {}, {}
+    lib_dir = romfs.Path(lib_dir); js, fns = {}, {}
     def refl(key):
         if key not in js:
             try: js[key] = json.loads((lib_dir / f'{key}_b.json').read_bytes())
@@ -125,9 +124,6 @@ def plan(lib_dir, chain, pairs, zero):
             try: fns[lib] = functions(lib_dir / f'{lib}.metallib')
             except (OSError, ValueError): fns[lib] = None
         return fns[lib]
-    def writes_layer(lib):
-        if lib not in layer: layer[lib] = LAYER in (lib_dir / f'{lib}.metallib').read_bytes()
-        return layer[lib]
     bases, rest, seen, left = [], [], set(), dict.fromkeys(('reflection', 'mesh', 'stage inputs', 'library', 'layer', 'primitive ID', 'entry'), 0)
     for vk, fk in pairs:
         vj, fj = refl(vk), refl(fk)
@@ -136,11 +132,11 @@ def plan(lib_dir, chain, pairs, zero):
         ventry = vj['entry_z'] if zero and vj.get('entry_z') else vj.get('entry'); fentry = fj.get('entry') or 'main0'
         pull = isinstance(vj.get('pull'), dict)
         if not pull and vj.get('vertex_inputs'): left['stage inputs'] += 1; continue
+        if vj.get('layer_out'): left['layer'] += 1; continue
         if (fj.get('raster') or {}).get('primitive_id'): left['primitive ID'] += 1; continue
         vl, fl = vk + ('_bp' if pull else '_b'), fk + '_b'
         vf, ff = fn(vl), fn(fl)
         if vf is None or ff is None: left['library'] += 1; continue
-        if writes_layer(vl): left['layer'] += 1; continue
         if ventry not in vf or fentry not in ff: left['entry'] += 1; continue
         if vf[ventry] or ff[fentry]: rest.append((vk, fk)); continue
         b = (vl, ventry, fl, fentry)

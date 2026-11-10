@@ -971,14 +971,14 @@ int main(void) {
                 nvn_deswizzle(&ts->d, sl, 0, ts->mem, slin, slp); nvn_deswizzle(&td->d, dl, 0, td->mem, dlin, dlp);
                 for (size_t r = 0; r < hbb; r++) memcpy(dlin + ((size_t)dy / bh + r) * dlp + (size_t)(dx / bw) * bpb, slin + ((size_t)sy / bh + r) * slp + (size_t)(sx / bw) * bpb, wbb);
                 nvn_swizzle(&td->d, dl, 0, dlin, dlp, want + 0x20000);
-                n++; if (nvn_tex_mirror_t2t(ts, sl, 0, &sr, td, dl, 0, &dr) || memcmp(want, mmem, sizeof mmem)) bad++;
+                n++; if (nvn_tex_mirror_t2t(ts, sl, 0, &sr, td, dl, 0, &dr, NULL) || memcmp(want, mmem, sizeof mmem)) bad++;
                 for (size_t i = 0; i < sizeof mmem; i++) mmem[i] = (uint8_t)(seed = seed * 1103515245u + 12345u) >> 3;
                 memcpy(want, mmem, sizeof mmem);
                 size_t row = wbb + 16; for (size_t i = 0; i < row * hbb; i++) src[i] = (uint8_t)(seed = seed * 1103515245u + 12345u) >> 5;
                 nvn_deswizzle(&td->d, dl, 0, td->mem, dlin, dlp);
                 for (size_t r = 0; r < hbb; r++) memcpy(dlin + ((size_t)dy / bh + r) * dlp + (size_t)(dx / bw) * bpb, src + r * row, wbb);
                 nvn_swizzle(&td->d, dl, 0, dlin, dlp, want + 0x20000);
-                n++; if (nvn_tex_mirror_b2t(td, dl, 0, &dr, src, row, row * hbb) || memcmp(want, mmem, sizeof mmem)) bad++;
+                n++; if (nvn_tex_mirror_b2t(td, dl, 0, &dr, src, row, row * hbb, NULL) || memcmp(want, mmem, sizeof mmem)) bad++;
             }
             P(nvnTextureFinalize)(&s); P(nvnTextureFinalize)(&d);
         }
@@ -1024,7 +1024,7 @@ int main(void) {
                 memcpy(dlin + ((size_t)(r->zoffset + z) * lr + (size_t)r->yoffset / bh + y) * lp + (size_t)(r->xoffset / bw) * bpb, src + z * img + y * row, wbb);
             nvn_swizzle(&t->d, lv, 0, dlin, lp, want + toff);
             NVNcopyRegion sr = {cs[c].sx, cs[c].sy, cs[c].sz, r->width, r->height, r->depth};
-            int rc = cs[c].kind == 0 ? nvn_tex_mirror_b2t(t, lv, 0, r, src, row, img) : cs[c].kind == 1 ? nvn_tex_mirror_t2t(vsrc, 0, 0, &sr, t, lv, 0, r) : (write_texels(t, NULL, r, src, row, img), 0);
+            int rc = cs[c].kind == 0 ? nvn_tex_mirror_b2t(t, lv, 0, r, src, row, img, NULL) : cs[c].kind == 1 ? nvn_tex_mirror_t2t(vsrc, 0, 0, &sr, t, lv, 0, r, NULL) : (write_texels(t, NULL, r, src, row, img), 0);
             n++; if (rc || memcmp(want, vmem, sizeof vmem)) bad++;
         }
         EXPECT("copies into 3D textures mirrored slice by slice, byte-identical to a level round trip (5 cases)", 0, bad); EXPECT("3D copy mirror case count", 5, n);

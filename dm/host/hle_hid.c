@@ -892,6 +892,20 @@ HLE_FORCE("_ZN2nn3hid13GetJcmsStatesEPNS0_9JcmsStateEiRKNS0_10JcmsHandleE", "Joy
 // hid::detail::GetJcmsState): with no sensor, a cleared state (sampling number 0, no movement, attributes 0: not connected)
 HLE_FORCE("_ZN2nn3hid12GetJcmsStateEPNS0_9JcmsStateERKNS0_10JcmsHandleE", "Joy-Con mouse sensor state: the newest (cleared until a front end reports the sensor)",
           void, h_hid_JcmsState, void *out, const uint32_t *h) { if (out) { memset(out, 0, 32); if (h) jcms_copy(out, 1, *h); } }
+// A Switch 2 SDK's guard against a Home press made by accident on a controller (Drag x Drive turns it on for player 1's Joy-Con 2 as they connect, main+0x2c80c4). The SDK's own
+// opens the hid service, which the host does not serve, and calls through the null session (sdk+0x63ce10). It sets a flag in hid and returns nothing; the host handles Home itself
+// (home_quit.h: a 2 s hold, then a confirm), so the setting is recorded for the question below and logged, and changes nothing else
+static _Atomic uint32_t g_home_protect;   // the setting per npad, in id_bit's bits, as the game left it; off until it turns it on
+HLE_FORCE("_ZN2nn3hid41EnableUnintendedHomeButtonInputProtectionERKjb", "Home button protection: recorded and logged, the host handles Home itself", void, h_hid_HomeProtect,
+          const uint32_t *id, bool on) {
+    uint32_t b = id ? id_bit(*id) : 0;
+    if (on) atomic_fetch_or(&g_home_protect, b); else atomic_fetch_and(&g_home_protect, ~b);
+    LOG("hid: EnableUnintendedHomeButtonInputProtection npad %#x %s", id ? *id : 0xffffffffu, on ? "on" : "off");
+}
+// The question (Nintendo Switch Sports Resort asks it at boot): the SDK's own asks the hid service, which the host does not serve, and aborted on its error (Result 0x58cca at
+// sdk+0x6ca40c). The answer is what the game set, off by default
+HLE_FORCE("_ZN2nn3hid44IsUnintendedHomeButtonInputProtectionEnabledERKj", "Home button protection: what the game set (off by default)", bool, h_hid_HomeProtectOn,
+          const uint32_t *id) { return id && (atomic_load(&g_home_protect) & id_bit(*id)); }
 // The system setting for the mouse pointer's speed (System Settings, Mouse): the default, 1
 HLE_FORCE("_ZN2nn3hid25GetMousePointerSpeedScaleEv", "mouse pointer speed setting: the default, 1.0", float, h_hid_MouseSpeed, void) { return 1.0f; }
 // The Switch 2's pointer on top of those sensors (Nmouse; Fire Emblem Fortune's Weave initializes it at boot with the 1920x1080 screen it maps the pointer to, main+0x650a24). InitializeNmouse opens the

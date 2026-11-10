@@ -327,7 +327,7 @@ def find_games(want=None):
 
 # ---------------------------------------------------------------- chain: build and manifest
 
-def dotnet_env(env):
+def dotnet_env(env):   # for a revision before GitHub issue #1853, whose translator is a framework-dependent .NET apphost; a native one ignores DOTNET_ROOT
     if env.get('DOTNET_ROOT'): return env
     for d in (GAMES.parent / 'tools/dotnet', Path('/usr/local/share/dotnet'), Path.home() / '.dotnet', Path('/opt/homebrew/opt/dotnet/libexec')):
         if (d / 'dotnet').exists(): return dict(env, DOTNET_ROOT=str(d), PATH=f'{d}{os.pathsep}{env.get("PATH", "")}')

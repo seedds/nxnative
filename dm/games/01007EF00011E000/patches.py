@@ -38,7 +38,9 @@ def frame_step(ctx):
     here, emit, fs_site, fs_put, FS_STATE_OFF = ctx.here, ctx.emit, ctx.site, ctx.put, ctx.state
     fs_site(0x11269b8, 'fd7bbea9'); fs_site(0x151d3d0, 'fd7bbea9')
     start = here(); emit(ADRP(16, here(), FS_STATE_OFF))
-    for w in (0xb9400211,   # ldr w17,[x16]          target fps (0 = off)
+    for w in (0xb9430211,   # ldr w17,[x16,#0x300]   the host's ratio with variable refresh (0 = none)
+              0xb9030611,   # str w17,[x16,#0x304]   latched once a frame, before any branch: the override's ratio is the host's too
+              0xb9400211,   # ldr w17,[x16]          target fps (0 = off)
               0x34000191):  # cbz w17,orig (+12)
         emit(w)
     emit(ADRP(17, here(), 0x1e93890)); emit(LDRX(17, 17, 0x890 // 8))   # the VFR
@@ -81,6 +83,72 @@ def frame_step(ctx):
         emit(w)
     emit(B(here(), 0xeb0f8c))   # back
     fs_put(0xeb0f88, [B(0xeb0f88, start)], 'held-button counts step by the VFR ratio (menu repeat in game time at any frame step)')
+    # A fractional step (hle_nvn.c vrr_tick, fstep_tick): with variable refresh a frame takes as long as it takes, which the framework's interval, a whole number of 1/60 s vsyncs,
+    # cannot say. The host also writes state +0x300, a float: the game time the next frame adds in 1/30 s ticks (0.5 for 1/60 s, 0.6 for a 20 ms frame, 1.0 for 1/30 s). The setter
+    # stub above latches it at +0x304 once a frame, so the two VFR calls of a frame and the sites below agree. 0, always without variable refresh, runs each site's original instructions.
+    # The VFR's float getters (deltaFrame main+0x56fcd0, 1,330 calls; ratio main+0x59c788; deltaTime main+0x5abcfc; raw delta time main+0x7613c8) all derive from +0x3c, so one site
+    # moves them; physics too, at round(6 x ratio) substeps (main+0x156f930). The held-button stub above reads the same ratio. The integer interval (main+0x583118, min 1) is the
+    # host's step rounded to whole vsyncs; its per-frame readers that scale by it take the ratio at their own sites below. Every word a stub relies on is asserted, the neighbours included
+    def words(off, *ws):
+        fs_site(off, b''.join(struct.pack('<I', w) for w in ws).hex())
+    LATCHED_X16 = 0xb9430610   # ldr w16,[x16,#0x304]
+    # ksys::VFR::calc joins its ratio paths here: fcmp s1,s0 (old ratio), and b.eq skips the store of s1 to +0x3c. With a ratio the store always runs. cbz leaves the fcmp's flags for
+    # the original b.eq, which is out of range of the patch area and so goes through a branch of its own. x9 is reloaded at main+0x151d4a4 before any read
+    words(0x151d484, 0x1e202020, 0x3900a268, 0x54000040, 0xbd003e61)
+    start = here(); emit(ADRP(9, here(), FS_STATE_OFF))
+    for w in (0xb9430529,   # ldr w9,[x9,#0x304]     the latched ratio
+              0x34000069,   # cbz w9,orig (+3)       off
+              0x1e270121):  # fmov s1,w9
+        emit(w)
+    emit(B(here(), 0x151d490))
+    emit(0x54000040)   # orig: b.eq +8
+    emit(B(here(), 0x151d490)); emit(B(here(), 0x151d494))
+    fs_put(0x151d48c, [B(0x151d48c, start)], 'VFR::calc: the ratio follows the host\'s fractional step (state +0x304; 0 = original)')
+    # Two take the ratio in place of an instruction just before a use. x16 is free at each: a bl precedes the site within the words asserted, none of them writes x16, and its value
+    # after a call is undefined, so nothing after the site can depend on it
+    def ratio_site(site, orig, take, why):
+        start = here(); emit(orig); emit(ADRP(16, here(), FS_STATE_OFF))
+        for w in (LATCHED_X16, 0x34000050, take):   # cbz w16,back (+2); the ratio
+            emit(w)
+        emit(B(here(), site + 4))
+        fs_put(site, [B(site, start)], why)
+    FMOV_S0_W16 = 0x1e270200   # fmov s0,w16
+    # The fade adds max(interval, 1) x 0.5 x 0.2 per frame: s0 becomes the ratio before the x 0.2 (s1 is reloaded right after the site)
+    words(0x125f114, 0x97cc9001, 0x1e230000, 0x1e2c1001, 0xd0002208, 0xbd42d662, 0x1e210800, 0xbd417101, 0x1e210801)
+    ratio_site(0x125f128, 0x1e210800, FMOV_S0_W16, 'fade: steps by the frame step (state +0x304; 0 = original)')
+    # The UI's animation step, max(interval, 1) x 0.5 into +0xb20 of the layout system
+    words(0x1280ec8, 0x97cc0894, 0x1e230000, 0xf0005db3, 0x9112e273, 0x1e2c1001, 0x2a1f03e0, 0xf9400268, 0x1e210800, 0xbd0b2100)
+    ratio_site(0x1280ee4, 0x1e210800, FMOV_S0_W16, 'UI animation: steps by the frame step (state +0x304; 0 = original)')
+    # A 0-1 blend integrated per frame (main+0xde8f60: step and half-step in s10 / s9, then a clamped speed from a table, all picked by interval == 1). At a fractional step the
+    # steps, which are accelerations, take (ratio x 2)^2 and the speed limit ratio x 2, both 1 at a ratio of 0.5. w20 keeps the interval; s16 is free after the bl
+    words(0xde8f80, 0x2a0003f4, 0xbd44c900, 0x79455668, 0x1e210c09, 0x36300188, 0xaa1303e0)
+    start = here(); emit(ADRP(16, here(), FS_STATE_OFF))
+    for w in (LATCHED_X16,
+              0x34000110,   # cbz w16,orig (+8)
+              0x7100069f,   # cmp w20,#1
+              0x540000c1,   # b.ne orig (+6)
+              0x1e270210,   # fmov s16,w16
+              0x1e302a10,   # fadd s16,s16,s16       ratio x 2
+              0x1e300a10,   # fmul s16,s16,s16       squared
+              0x1e30094a,   # fmul s10,s10,s16
+              0x1e300929,   # fmul s9,s9,s16
+              0x36300048):  # orig: tbz w8,#6,+2
+        emit(w)
+    emit(B(here(), 0xde8f94)); emit(B(here(), 0xde8fc0))
+    fs_put(0xde8f90, [B(0xde8f90, start)], 'per-frame blend: its acceleration scaled to the frame step (state +0x304; 0 = original)')
+    words(0xde8fd4, 0xbc695901, 0x1e222942, 0x1e214020, 0x1e202040)
+    start = here(); emit(ADRP(16, here(), FS_STATE_OFF))
+    for w in (LATCHED_X16,
+              0x340000d0,   # cbz w16,orig (+6)
+              0x7100069f,   # cmp w20,#1
+              0x54000081,   # b.ne orig (+4)
+              0x1e270210,   # fmov s16,w16
+              0x1e302a10,   # fadd s16,s16,s16       ratio x 2
+              0x1e300821,   # fmul s1,s1,s16
+              0x1e214020):  # orig: fneg s0,s1
+        emit(w)
+    emit(B(here(), 0xde8fe0))
+    fs_put(0xde8fdc, [B(0xde8fdc, start)], 'per-frame blend: its speed limit scaled to the frame step (state +0x304; 0 = original)')
     # Render scale (state +0x10, float written by the loader: DM_RENDER_SCALE, 1.0 by default; independent of the frame step). The dynamic-resolution method (main+0x12666e4) keeps a
     # scale in 0.8–1.0 rounded to 0.05 steps (+0x1218, main+0x1266818), or the game's forced 0.75 / 0.5 (+0x284 & 0x1800), in s8; from main+0x1266880 it applies s8: each view's
     # scale (+0x28a0 / +0x28a4 = s8 × base width (+0x1214: 1600 docked, 1280 handheld) / output width), from which the scene buffers are sized each frame (main+0x106340c), the

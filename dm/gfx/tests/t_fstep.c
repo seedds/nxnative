@@ -19,6 +19,8 @@ static void run(sim *m, int n, double w, int kmin, int kmax, int fixed) {
 }
 
 int main(void) {
+    check(nvn_fstep_vrr_steps(1.3, 1.5, 3) == 1.4 && nvn_fstep_vrr_steps(0.4, 0, 3) == 0.4 && nvn_fstep_vrr_steps(0.1, 0.1, 3) == 0.25 && nvn_fstep_vrr_steps(30, 30, 3) == 3, "variable refresh: the step is the last frames' real time, held to its range");
+    check(nvn_fstep_vrr_interval(1.2) == 1 && nvn_fstep_vrr_interval(0.6) == 1 && nvn_fstep_vrr_interval(1.6) == 2 && nvn_fstep_vrr_ratio(1.2) == 0.6f && nvn_fstep_vrr_ratio(2) == 1.0f, "variable refresh: the nearest whole interval, at least 1, and the ratio in 1/30 s ticks");
     {   // 120 fps (hle_nvn.c fps_high): kmin 1, kmax 2, in ticks of 1/120 s. The target follows the hold, so a hold above what frames take is the game at the right speed
         sim m = {0}; m.s.per_vsync = 2;
         run(&m, 120, 0.7, 1, 2, 0); check(m.s.k == 1, "120 fps: frames of 5.8 ms hold 120");

@@ -59,6 +59,13 @@ typedef struct {
     uint64_t late, paid, ups, downs, failed, probes; double dropped;   // statistics for the log
 } nvn_fstep;
 
+// Variable refresh: a frame takes as long as it takes. Its step is the time the last two frames really took, in the frame step's units (their average steadies the motion, and over time the
+// steps still add up to the time passed), held to at most top so a hitch is not replayed; a frame shorter than a unit counts as it is down to a quarter, or game time would run ahead
+static inline double nvn_fstep_vrr_steps(double last, double before, double top) { double t = before > 0 ? (last + before) / 2 : last; return t < 0.25 ? 0.25 : t > top ? top : t; }
+// The step in 1/60 s vsyncs as the game takes it: a whole interval for its integer readers (the nearest, at least 1), and in 1/30 s ticks for the state page's ratio (+0x300)
+static inline int nvn_fstep_vrr_interval(double vsyncs) { int n = (int)(vsyncs + 0.5); return n < 1 ? 1 : n; }
+static inline float nvn_fstep_vrr_ratio(double vsyncs) { return (float)(vsyncs / 2); }
+
 // Whether the cost at the longer hold is the cost that held kmin (a probe without a slowed report)
 static inline int nvn_fstep_same(const nvn_fstep *s) { return s->cref > 0 && s->cn >= FSTEP_RUN && s->ccur <= FSTEP_SAME * s->cref; }
 

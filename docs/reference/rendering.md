@@ -733,6 +733,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Check:** `t_present_crop`: a 5:4 crop fills a 16:9 canvas and keeps bars on a 16:10 one on the classic and Metal 4 presents, a sized layer's shape, both `DM_SCREEN_ASPECT` cases and the shape a real present reports.
 - **Found on:** [Super Mario Galaxy 2](../../dm/games/0100FD8022DAA000/README.md#rendering) ([issue #949](https://github.com/seedds/nxnative/issues/949)).
 
+### The SDR layer without a colour space
+
+- **Symptom:** fullscreen on an external screen in HDR mode (a 4K HDR TV over HDMI), a magenta band comes and goes across the picture most of the time. It never shows while the menu bar or the window's title bar is over the game, or with the screen mirrored, and never on the Mac's own screen.
+- **Cause:** the Mac front end's `CAMetalLayer` (BGRA8, SDR) was given no colour space, so macOS took its pixels as the screen's own. Composited, the system converts them, and the picture is right; in fullscreen with nothing over the layer, the system shows it on the screen without compositing, and a screen in HDR mode then got 8-bit values that were never meant for its colour space.
+- **Fix:** `front_mac.m` tags the SDR layer `kCGColorSpaceSRGB`, which the picture is, so every path converts it the same way. The HDR layer (`DM_HDR`) keeps its own colour space.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game) on a 4K HDR TV over HDMI, fullscreen (M5 Max, macOS 27): the band went with the tag. Any game shows it the same way.
+- **Check:** by eye on such a screen in fullscreen; no test reaches the display path.
+
 ### Setting the same targets again continues the pass
 
 - **Symptom:** one-draw passes on one target, hundreds of times a frame, with the same attachments each time (a `DM_NVN_GPUPROF` frame: `load` and `store` of the whole target in every line); a low frame rate that follows the target's size.

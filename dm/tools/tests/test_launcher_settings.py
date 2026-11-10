@@ -133,7 +133,9 @@ class LauncherSettingsTests(unittest.TestCase):
         s = listed('mac', '# GAME_HEAP\t1\n# OUTPUT_SIZE\t1\n')['DM_OUTPUT_SIZE']
         self.assertEqual(s['option_needs'], {'2560x1440': 'DM_MEMORY_GB>=4', '3840x2160': 'DM_MEMORY_GB>=8', '5120x2880': 'DM_MEMORY_GB>=8'})
         self.assertNotIn('1920x1080', s['option_needs'])
-        self.assertNotIn('option_needs', listed('ios', '# OUTPUT_SIZE\t1\n').get('DM_OUTPUT_SIZE', {}))   # iOS offers only 1080p
+        self.assertEqual([o[0] for o in s['options']], ['off', '1920x1080', '2560x1440', '3840x2160', '5120x2880'])   # the game's own 1600x900 first
+        self.assertEqual((s['default'], s['options'][0][1]), ('off', '1600x900 (standard)'))
+        self.assertNotIn('option_needs', listed('ios', '# OUTPUT_SIZE\t1\n').get('DM_OUTPUT_SIZE', {}))   # iOS offers only the game's own picture
 
     def test_option_needs_is_checked(self):
         for bad in ['option_needs=2560x1440', 'option_needs=2560x1440:DM_MEMORY_GB=4', 'option_needs=:DM_MEMORY_GB>=4']:

@@ -39,9 +39,9 @@ Hades II goes up to 300 %: it renders its whole picture, the HUD and text includ
 
 ### Output resolution
 
-The size the game draws at, on the Mac and in docked mode, for games the app can resize: 1080p (the Switch's own output), 1440p, 4K or 5K. The 3D picture and the HUD are drawn at that size, and **Render scale** is then a share of it: 100 % is the size chosen here. Larger sizes need far more GPU time, so a 120 fps target may fall back to 60.
+The size the game draws at, on the Mac and in docked mode, for games the app can resize: **1600x900 (standard)**, the game's own picture (Breath of the Wild draws its 3D scene at 1600x900 and scales it to a 1080p output, as on a docked Switch), then 1080p, 1440p, 4K or 5K. At those four the 3D picture and the HUD are drawn at that size, and **Render scale** is then a share of it: 100 % is the size chosen here. Larger sizes need far more GPU time, so a 120 fps target may fall back to 60.
 
-They also need more [Game memory](#game-memory): 1440p is offered from 4 GB, and 4K and 5K from 8 GB. Lowering Game memory below what the chosen size needs sets Output resolution back to 1080p.
+They also need more [Game memory](#game-memory): 1440p is offered from 4 GB, and 4K and 5K from 8 GB. Lowering Game memory below what the chosen size needs sets Output resolution back to 1600x900.
 
 ### Console mode
 
@@ -279,7 +279,7 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 |---|---|---|
 | Frame rate | `DM_FPS_TARGET` | `30`, `60`, `120` (Mac, games with `fps_max 120`) |
 | Render scale | `DM_RENDER_SCALE` | `0.5` to `1.0` (Hades II: to `3.0`) |
-| Output resolution | `DM_OUTPUT_SIZE` | `off`, `1920x1080`, `2560x1440`, `3840x2160`, `5120x2880` |
+| Output resolution | `DM_OUTPUT_SIZE` | `off` (1600x900, the game's own), `1920x1080`, `2560x1440`, `3840x2160`, `5120x2880` |
 | Console mode | `DM_OPMODE` | `1` docked, `0` handheld |
 | Game language | `DM_LANG` | a language code, such as `ja` |
 | Display mode (Mac) | `DM_FULLSCREEN` | `1` fullscreen, `0` a window |

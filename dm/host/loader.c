@@ -334,13 +334,13 @@ void dm_fps_state_apply(void) {
     const char *os = getenv("DM_OUTPUT_SIZE"); uint32_t ow = 0, oph = 0; float native = 0;
     const char *om = getenv("DM_OPMODE"); int docked = om ? atoi(om) != 0 : DM_GAME_OPMODE != 0;   // the output sizes are the docked ones
     if (os && strcmp(os, "off") && DM_GAME_SCREEN_ASPECT && docked) {
-        if (sscanf(os, "%ux%u", &ow, &oph) != 2 || ow < 1280 || ow > 7680 || ow % 8 || oph % 8 || (uint64_t)ow * 9 != (uint64_t)oph * 16) { LOG("[RED] DM_OUTPUT_SIZE=%s: <width>x<height>, 16:9, multiples of 8; keeping 1920x1080", os); ow = oph = 0; }
+        if (sscanf(os, "%ux%u", &ow, &oph) != 2 || ow < 1280 || ow > 7680 || ow % 8 || oph % 8 || (uint64_t)ow * 9 != (uint64_t)oph * 16) { LOG("[RED] DM_OUTPUT_SIZE=%s: <width>x<height>, 16:9, multiples of 8; keeping the game's own picture (1600x900 scaled to 1080p)", os); ow = oph = 0; }
         // The game memory a size needs (M5 Max, a save outdoors, Link running): above 1080p the game's own 3.2 GB crashed at load (a null render target, main+0xed7128); 1440p ran at
         // 4 GB, 5K at 8 GB (at 6 GB it loaded but the GPU failed while the world streamed in); 4K is held to 5K's 8 GB, unmeasured. Larger than 5K is not measured: 12 GB, the most there is. The launcher offers the sizes
         // by the same rule (settings.tsv option_needs); this catches a choice that came another way (a saved choice with the window skipped, an env file)
         else if ((uint64_t)ow * oph > 1920u * 1080u) {
             uint64_t area = (uint64_t)ow * oph, need = area <= 2560u * 1440u ? 4 : area <= 5120u * 2880u ? 8 : 12, have = dm_app_pool() >> 30;
-            if (have < need) { LOG("[RED] DM_OUTPUT_SIZE=%s needs %llu GB of game memory and the game has %.1f GB (DM_MEMORY_GB, the launcher's Game memory); keeping 1920x1080", os,
+            if (have < need) { LOG("[RED] DM_OUTPUT_SIZE=%s needs %llu GB of game memory and the game has %.1f GB (DM_MEMORY_GB, the launcher's Game memory); keeping the game's own picture (1600x900 scaled to 1080p)", os,
                                    (unsigned long long)need, dm_app_pool() / 1073741824.0); ow = oph = 0; }
         }
         if (ow) {

@@ -140,6 +140,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Found on:** [Super Monkey Ball Banana Rumble](../../dm/games/010031F019294000/README.md#files-and-shaders): URP's `CopyDepth` (`a3d53d20b89e6015`) reads the multisample depth buffer at the title.
 - **Check:** `make -C dm/gfx/tests GAME=<id> check_t_ms_slot`: the reflection of each multisample type, the multisample dummies of every pixel class, the 1D dummy beside the multisample array's, and a kernel reading the float, uint and depth dummies through multisample arguments under Metal API validation (all samples 0).
 
+### NVN's multisample enable in a multisampled pass
+
+- **Symptom:** none seen. A multisample state with enable 0 (or samples ≤ 1) bound for a 4x target rasterizes with 4 samples on the Mac, where NVN would rasterize at the pixel centre and give that coverage and depth to every sample.
+- **Cause:** NVN2's `nvnCommandBufferBindMultisampleState` hands the GPU the effective flag "enable and samples > 1" (read from PRAGMATA's `sdk`; its macro was not decoded, so that the flag reaches the anti-aliasing enable is the plain reading, not proven). The host keeps only alpha to coverage from the state (`S.ms.a2c`); the pass's sample count comes from its attachments. Metal has no such switch: sample positions all at the centre would emulate it at the same cost. Eden ignores the flag too.
+- **Fix:** none: no game here needs it. In the recorded pipelines of PRAGMATA, Ocarina of Time, Donkey Kong Bananza and Orbitals (about 140,000 render rows) the only multisampled ones are PRAGMATA's four in its 128x64 D32F 4x occlusion pass, depth only. That pass takes 0.0167 ms a frame on an M4 Pro, and its depth is never read later (only the per-instance visibility flags its pixel shader writes are), so the flag could change at most which objects count as visible at sub-pixel margins of that grid.
+- **Found on:** PRAGMATA (no profile here), M4 Pro, macOS 26.6.2, 2026-11-10.
+
 ### Integer views for images a shader declares uint or int
 
 - **Symptom:** translucent UI (frosted text bands, button guides, dialog headers) yellow and white.

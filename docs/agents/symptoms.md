@@ -183,6 +183,8 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 
 ## Threads
 
+- ThreadSanitizer reports races when guest threads first yield or enter rewritten spin waits together. No gameplay hitch or hang has been attributed to these races. → [Concurrent first use of scheduler settings](../reference/threads.md#concurrent-first-use-of-scheduler-settings)
+- a malformed `DM_YIELD_BACKOFF` value can classify long positive sleeps as polling waits; a valid cap of one second or longer can leave a busy loop instead of a host sleep. → [Validating yield back-off durations](../reference/threads.md#validating-yield-back-off-durations)
 - TSan reports `thread_main` writing `host_work` while `thr_runnable` reads it during a same-core yield (`t_notify_sched`, issue #411). → [Publishing a new thread's scheduler fields](../reference/threads.md#publishing-a-new-threads-scheduler-fields)
 - a parent returns from `StartThread` before a newly runnable higher-priority child pinned to its core finishes its work (deterministic regression, not attributed to a game failure). → [Starting a higher-priority thread on the caller's core](../reference/threads.md#starting-a-higher-priority-thread-on-the-callers-core)
 - a crash at the very start of a new thread, reading through a null pointer it took from its argument (`main+0x1dc0`, in a boot stub's last thread, about once in a dozen boots), with the starter still in its next few calls. → [A thread's arguments in slots its starter reuses after connecting to a service](../reference/threads.md#a-threads-arguments-in-slots-its-starter-reuses-after-connecting-to-a-service)

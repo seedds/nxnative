@@ -3,7 +3,7 @@
 The screen before the game starts shows the settings the game supports. A setting that only matters while another is on appears under it and disappears when that one is turned off. Tap **Play** to start; the app remembers your choices for the next start. All settings are on one scrollable screen, under **Game**, **Controls** and **Performance**. Tap a menu or move a slider there; no settings page needs opening. **Upscaling** is in **Game**, beside **Console mode**. A Mac app shows the same settings in a [window of its own](#the-mac-settings-window).
 
 - [Tested defaults](#tested-defaults)
-- [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Game's upscaler](#games-upscaler), [Game language](#game-language), [Picture](#picture), [Frame-rate counter](#frame-rate-counter)
+- [Game](#game): [Frame rate](#frame-rate), [Frame generation](#frame-generation), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Game's upscaler](#games-upscaler), [Game language](#game-language), [Picture](#picture), [Frame-rate counter](#frame-rate-counter)
 - [Controls](#controls): [Touch feedback](#touch-feedback), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff), [Press a button to join](#press-a-button-to-join)
 - [Performance](#performance): [Frame buffering](#frame-buffering), [Metal 4 pipelines](#metal-4-pipelines), [Pipeline prebuild](#pipeline-prebuild), [Encode thread](#encode-thread), [Hold frames when late](#hold-frames-when-late), [Performance HUD](#performance-hud), [Reset to tested defaults](#reset-to-tested-defaults)
 - [The Mac settings window](#the-mac-settings-window): [Display mode](#display-mode)
@@ -26,6 +26,15 @@ A Mac app carries the same list (`Contents/Resources/dm/launcher.json`), without
 Games whose speed the app controls (Breath of the Wild, Tears of the Kingdom and a few others) offer **30 fps** or **60 fps**. 60 is smoother; 30 is what the Switch ran and uses less power, so the phone stays cooler and the battery lasts longer. The game runs at real speed either way.
 
 On a Mac, a game checked at that speed (Fire Emblem Fortune's Weave, Mario & Luigi: Brothership) also offers **120 fps**. It needs a screen that shows 120 Hz, and uses more GPU and power. When frames do not fit, during movies, or on a slower screen, the game drops to 60 for a while, so it keeps its real speed. If you see the frame rate move between 60 and 120 and would rather it stayed still, choose 60.
+
+### Frame generation
+
+Offered with **30 fps**, for games drawn with NVN. The game draws 30 frames a second and the screen shows 60: between each two of the game's frames, MetalFX (Apple's frame interpolation) makes the one halfway and shows it first. Motion looks like 60 fps for about the work and heat of 30.
+
+- **Cost:** some GPU time for each made frame (a few milliseconds), and more input delay than real 60 fps: each frame waits half a frame (about 17 ms) for the one made before it. Against plain 30 fps the delay can even be shorter, as the screen then updates every 17 ms instead of every 33. Fast motion can smear or wobble, mostly at the edges of moving things; the HUD can too when a lot moves behind it.
+- **When frames drop** (a hot phone, a busy scene), it pauses and shows the game's own frames until they come in time again, so the picture does not flicker between made and real frames.
+- **When to use it:** when 60 fps makes the phone hot or drops frames, and 30 looks too choppy. It needs iOS 26 or macOS 26 and a device with MetalFX frame interpolation; without it the game shows its own 30 frames.
+- **On a Mac:** the same, on a 60 Hz screen or one that runs at a multiple of 60.
 
 ### Dynamic resolution
 

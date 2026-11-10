@@ -130,6 +130,8 @@ static _Atomic uint64_t g_done;                 // highest value whose command b
 static pthread_mutex_t g_qmu = PTHREAD_MUTEX_INITIALIZER, g_done_mu = PTHREAD_MUTEX_INITIALIZER, g_mem_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_done_cv = PTHREAD_COND_INITIALIZER;
 static _Atomic uint64_t g_n_draw, g_n_pass, g_n_submit, g_n_copy, g_n_pso, g_mem_bytes;
+static _Atomic uint64_t g_gpu_ns;   // the GPU time of the frames since the last frame record, summed over their command buffers: they can overlap, so it is not wall time
+static _Atomic uint64_t g_frames;   // presents so far (vkQueuePresentKHR, frame_end): the index of the frame in progress; a submission is tagged with it (subq_t.frame)
 
 // Shader table (<DM_MSL_DIR>/vk/vk_shaders.tsv): resource kind u / b / t / s / c, its (set, binding) in the game's SPIR-V and the Metal slot it was moved to;
 // kind p is the push-constant block (set and binding 0), whose bytes are set straight into its buffer slot
@@ -1197,7 +1199,38 @@ VK(vkCmdPipelineBarrier, void, VkCommandBuffer cb, VkPipelineStageFlags s, VkPip
 // Queries of one submit: its event value (the ticket every query it writes gets) and, when it has occlusion queries, a visibility buffer that every render pass
 // of the submit counts into (one 8-byte slot per BeginQuery), copied to the pools when the submit completes
 typedef struct { VkQueryPool q; uint32_t idx, slot; } occ_t;
-typedef struct { uint64_t v; id<MTLBuffer> vis; uint32_t nvis, cap; occ_t *occ; } subq_t;
+typedef struct dco_pass dco_pass_t;
+typedef struct {
+    __strong id<MTLTexture> real, probe;
+    __strong id<MTLBuffer> real_bytes, probe_bytes;
+    uint32_t w, h, bytes, index;
+    MTLPixelFormat format;
+    VkAttachmentLoadOp load;
+    VkAttachmentStoreOp store;
+    char aspect;
+    int combined;
+} dco_attachment_t;
+struct dco_pass {
+    dco_pass_t *next;
+    uint64_t frame, lease;
+    uint32_t index, n;
+    __strong id<MTLTexture> color[8], ds;
+    dco_attachment_t att[10];
+};
+typedef struct dco_scratch {
+    struct dco_scratch *next;
+    __strong id<MTLTexture> tex;
+    MTLPixelFormat format;
+    MTLTextureType type;
+    NSUInteger w, h, d, samples, levels, arrays;
+    MTLTextureUsage usage;
+    uint64_t lease;
+} dco_scratch_t;
+typedef struct {
+    uint64_t v; id<MTLBuffer> vis; uint32_t nvis, cap; occ_t *occ;
+    uint64_t frame;   // g_frames when the submission was made (DM_VK_DONTCARE=ab)
+    dco_pass_t *dco_head, **dco_tail; int dco_active;   // DM_VK_DCORACLE: the passes to compare when the submission completes
+} subq_t;
 typedef struct {
     id<MTLCommandBuffer> cb; id<MTLRenderCommandEncoder> re; id<MTLBlitCommandEncoder> be;
     VkPipeline pipe, applied; uint32_t rt_w, rt_h;
@@ -1212,9 +1245,91 @@ typedef struct {
     MTLRenderPassDescriptor *rpd; MTLStoreAction st_col[8], st_d, st_s; int cut;
     VkQueryPool aq; uint32_t aq_first;   // the occlusion query running (occ_start)
     uint32_t sdyn[3][2]; int sdyn_set[3], s_dirty;   // dynamic stencil compare mask / write mask / reference, front and back (C_STENCIL)
+    dco_pass_t *dco_pass;
+    uint64_t dco_frame;
+    int dco_enabled, dco_initialized, dco_probe, dco_reference;
+    _Atomic uint64_t *draw_count, *pass_count;
 } rs_t;
 #define DONE_RING 1024
 static uint64_t g_done_ns[DONE_RING];   // completion time of submit v at [v % DONE_RING] (timestamp query results)
+static _Atomic uint64_t g_dcoracle_probe_draws, g_dcoracle_probe_passes;   // a probe pass counts here, so the frame line counts each pass once
+// DM_VK_DCORACLE=<frame> or <first>-<last>: every render pass of those frames that opens an attachment with DONT_CARE runs twice. First into scratch copies, the DONT_CARE
+// attachments cleared to a fixed pattern (a stand-in for undefined contents), then into the real images with everything loaded (the reference, DM_VK_DONTCARE=all). The
+// stored results are compared in the completion handler: identical means the pass's output does not depend on the old contents, for this frame and pattern.
+// g_dcoracle_on (-1 not read, 0 off, 1 on) keeps the off path to one atomic load per submission and frame; the rest is under g_dcoracle_mu
+static _Atomic int g_dcoracle_on = -1;
+static pthread_mutex_t g_dcoracle_mu = PTHREAD_MUTEX_INITIALIZER;
+static int g_dcoracle_configured, g_dcoracle_valid, g_dcoracle_ended, g_dcoracle_reported;
+static uint64_t g_dcoracle_first, g_dcoracle_last, g_dcoracle_pending;
+static uint64_t g_dcoracle_passes, g_dcoracle_identical, g_dcoracle_differing, g_dcoracle_skipped;
+static uint64_t g_dcoracle_index_frame, g_dcoracle_next_pass, g_dcoracle_lease;
+static dco_scratch_t *g_dcoracle_scratch;
+
+static int dcoracle_number(const char **p, uint64_t *out) {
+    const char *s = *p;
+    if (*s < '0' || *s > '9') return 0;
+    uint64_t n = 0;
+    do {
+        unsigned d = (unsigned)(*s++ - '0');
+        if (n > (UINT64_MAX - d) / 10) return 0;
+        n = n * 10 + d;
+    } while (*s >= '0' && *s <= '9');
+    if (!n) return 0;
+    *p = s; *out = n; return 1;
+}
+static void dcoracle_configure(void) {
+    pthread_mutex_lock(&g_dcoracle_mu);
+    if (!g_dcoracle_configured) {
+        g_dcoracle_configured = 1;
+        const char *s = getenv("DM_VK_DCORACLE");
+        if (s && *s) {
+            const char *p = s; uint64_t first = 0, last = 0; int ok = dcoracle_number(&p, &first);
+            if (ok) {
+                last = first;
+                if (*p == '-') { p++; ok = dcoracle_number(&p, &last); }
+                ok = ok && !*p && last >= first;
+            }
+            if (ok) { g_dcoracle_first = first; g_dcoracle_last = last; g_dcoracle_valid = 1; }
+            else LOG("[vk] [RED] DM_VK_DCORACLE: expected <frame> or <first>-<last>; oracle disabled");
+        }
+        atomic_store(&g_dcoracle_on, g_dcoracle_valid);
+    }
+    pthread_mutex_unlock(&g_dcoracle_mu);
+}
+static inline int dcoracle_on(void) {
+    int v = atomic_load_explicit(&g_dcoracle_on, memory_order_relaxed);
+    if (v < 0) { dcoracle_configure(); v = atomic_load(&g_dcoracle_on); }
+    return v;
+}
+static int dcoracle_active(uint64_t frame) {
+    if (!dcoracle_on()) return 0;
+    pthread_mutex_lock(&g_dcoracle_mu);
+    int active = g_dcoracle_valid && frame >= g_dcoracle_first && frame <= g_dcoracle_last;
+    pthread_mutex_unlock(&g_dcoracle_mu);
+    return active;
+}
+static void dcoracle_test_range(uint64_t first, uint64_t last) {
+    pthread_mutex_lock(&g_dcoracle_mu);
+    g_dcoracle_configured = 1; g_dcoracle_valid = first && last >= first; atomic_store(&g_dcoracle_on, g_dcoracle_valid);
+    g_dcoracle_first = first; g_dcoracle_last = last; g_dcoracle_ended = g_dcoracle_reported = 0;
+    g_dcoracle_pending = g_dcoracle_passes = g_dcoracle_identical = g_dcoracle_differing = g_dcoracle_skipped = 0;
+    g_dcoracle_index_frame = g_dcoracle_next_pass = g_dcoracle_lease = 0;
+    pthread_mutex_unlock(&g_dcoracle_mu);
+}
+// The Mac's DM_CTL "dcoracle n" (hle_hid.c): the n frames after the one being recorded, for a scene a fixed DM_VK_DCORACLE range cannot be timed to; n <= 0 turns the oracle off.
+// Submissions of an earlier range still in flight keep their count (g_dcoracle_pending), so its passes complete before the new range's summary. A range cut short this way prints
+// no summary of its own (its passes still in flight count in the next one's), and the scratch copies stay allocated until a later range completes: the replay owns that list under g_qmu
+void dm_vk_dcoracle_next(long n) {
+    pthread_mutex_lock(&g_dcoracle_mu);   // the frame is read under the lock: a submission that checked the range before it is installed belongs to frame f or earlier
+    uint64_t f = atomic_load(&g_frames) + 1;   // the frame being recorded
+    g_dcoracle_configured = 1; g_dcoracle_valid = n > 0;
+    if (n > 0) { g_dcoracle_first = f + 1; g_dcoracle_last = f + (uint64_t)n; }
+    g_dcoracle_ended = g_dcoracle_reported = 0;
+    g_dcoracle_passes = g_dcoracle_identical = g_dcoracle_differing = g_dcoracle_skipped = 0;
+    atomic_store(&g_dcoracle_on, g_dcoracle_valid);
+    pthread_mutex_unlock(&g_dcoracle_mu);
+    if (n > 0) LOG("[vk] [dcoracle] DM_CTL: frames F%llu-F%llu", (unsigned long long)(f + 1), (unsigned long long)(f + (uint64_t)n));
+}
 static void end_blit(rs_t *s) { if (s->be) { [s->be endEncoding]; s->be = nil; } }
 static MTLStoreAction keep(MTLStoreAction a) { return a == MTLStoreActionMultisampleResolve || a == MTLStoreActionStoreAndMultisampleResolve ? MTLStoreActionStoreAndMultisampleResolve : MTLStoreActionStore; }
 static void end_rp(rs_t *s, int final) {   // final: the pass's own store actions; otherwise everything is stored, to be loaded again when the pass resumes
@@ -1250,34 +1365,218 @@ static void resume_rp(rs_t *s) {
     s->applied = NULL; s->vp_dirty = s->sc_dirty = 1;
     occ_start(s);
 }
-static MTLLoadAction load_a(VkAttachmentLoadOp o) { return o == VK_ATTACHMENT_LOAD_OP_CLEAR ? MTLLoadActionClear : o == VK_ATTACHMENT_LOAD_OP_LOAD ? MTLLoadActionLoad : MTLLoadActionDontCare; }
+// An attachment opened with LOAD_OP_DONT_CARE is loaded, colour, depth and stencil alike: Vulkan leaves its contents undefined, the Switch's driver does no colour discard
+// on the path examined and for depth and stencil only drops the ZCULL hints, so they survive there, and games read them. Re:ZERO's pfx pass blends its effects layer over
+// the copy the pass before wrote into the same image, both opened with DONT_CARE; a DontCare load starts Apple's tiles empty, and the 3D world came out black. Its particle
+// pass reopens the half-res depth with DONT_CARE and STORE, draws nothing, and the pfx pass samples that depth: a DontCare load stores whatever the tiles held
+// (t_vk_dontcare; docs/reference/rendering.md, "Attachments opened with LOAD_OP_DONT_CARE")
+// DM_VK_DONTCARE=colour loads colour only, depth and stencil start undefined; =none maps every DONT_CARE back to DontCare, colour included, the mapping before colour
+// loaded (A/B and oracle runs). Unset is all. CLEAR and LOAD are never affected.
+// =ab:<m>,<m>[,...] (m is none, colour or all; 2 to 4 of them) with DM_AB=<frames> runs the modes in turn in one process: frame f is in phase f / DM_AB and phase p runs
+// mode list[p % n], so the GPU cost of the modes is measured in the same scene and thermal state (cross-process GPU times at low load are not comparable: the GPU clock follows
+// the load). The layer replays at vkQueueSubmit, so a submission is tagged with the frame in progress (g_frames) and every pass of it takes that frame's phase: one submission
+// never mixes modes. An [ab] line per phase (dc_ab_report) has the format of nvn_mtl.m's, which dm/tools/gpuprof.py --ab reads
+// Read once at the first pass; -1 means not read, so a test can set the mode before one (t_vk_dontcare resets it to DC_ALL between cases)
+enum { DC_NONE, DC_COLOUR, DC_ALL, DC_AB };
+enum { DC_MAXAB = 4, DC_RING = 64 };
+static _Atomic int g_vk_dontcare = -1;
+static uint8_t g_dc_ab[DC_MAXAB]; static int g_dc_ab_n; static long g_dc_ab_len;   // the modes of DC_AB, in phase order, and DM_AB
+static const char *const g_dc_name[] = {"none", "colour", "all"};
+// The modes of an ab list, or 0 entries when it is malformed
+static int dc_parse_ab(const char *s, uint8_t out[DC_MAXAB]) {
+    int n = 0;
+    for (;;) {
+        size_t len = strcspn(s, ","); int m = -1;
+        for (int i = 0; i < DC_AB; i++) if (strlen(g_dc_name[i]) == len && !strncmp(s, g_dc_name[i], len)) m = i;
+        if (m < 0 || n == DC_MAXAB) return 0;
+        out[n++] = (uint8_t)m;
+        if (!s[len]) return n;
+        s += len + 1;
+    }
+}
+static int dontcare_mode(void) {
+    int m = atomic_load_explicit(&g_vk_dontcare, memory_order_acquire);
+    if (m >= 0) return m;
+    m = DC_ALL;
+    const char *v = getenv("DM_VK_DONTCARE");
+    if (v) {
+        if (!strcmp(v, "all")) m = DC_ALL;
+        else if (!strcmp(v, "colour")) m = DC_COLOUR;
+        else if (!strcmp(v, "none")) m = DC_NONE;
+        else if (!strncmp(v, "ab:", 3)) {
+            const char *e = getenv("DM_AB"); char *ee = NULL; long len = e ? strtol(e, &ee, 10) : 0; uint8_t l[DC_MAXAB] = {0}; int n = dc_parse_ab(v + 3, l);
+            if (e && (ee == e || *ee)) len = 0;   // "2junk" or "" is no phase length
+            if (n < 2) RED1("DM_VK_DONTCARE=%s: expected ab:<m>,<m>[,...], two to four of none, colour, all; using the default", v);
+            else if (len <= 0) RED1("DM_VK_DONTCARE=%s needs DM_AB=<frames>, the length of a phase; using the default", v);
+            else {
+                memcpy(g_dc_ab, l, sizeof l); g_dc_ab_n = n; g_dc_ab_len = len; m = DC_AB;
+                VLOG("DM_VK_DONTCARE=%s: the modes alternate every %ld frames (phase 0 runs %s)", v, len, g_dc_name[l[0]]);
+            }
+        }
+        else RED1("DM_VK_DONTCARE=%s: expected all, colour, none or ab:<m>,<m>[,...]; using the default", v);
+    }
+    atomic_store_explicit(&g_vk_dontcare, m, memory_order_release);
+    return m;
+}
+// The mode a pass of a submission made in frame <frame> runs with (m is dontcare_mode())
+static inline int dc_pass_mode(int m, uint64_t frame) { return m == DC_AB ? g_dc_ab[(frame / (uint64_t)g_dc_ab_len) % (uint64_t)g_dc_ab_n] : m; }
+static MTLLoadAction dc_load(VkAttachmentLoadOp o, int colour, int m) {
+    if (o == VK_ATTACHMENT_LOAD_OP_CLEAR) return MTLLoadActionClear;
+    if (o == VK_ATTACHMENT_LOAD_OP_LOAD) return MTLLoadActionLoad;
+    return (colour ? m != DC_NONE : m == DC_ALL) ? MTLLoadActionLoad : MTLLoadActionDontCare;
+}
+// Per frame of a DM_VK_DONTCARE=ab run, at [frame % DC_RING]: the GPU time of its submissions (completion handlers), the attachment bytes loaded and stored and the passes
+// begun (begin_rp). Ring slots are read and cleared DC_AB_LATE frames after the frame, when its command buffers have completed
+static _Atomic uint64_t g_dc_gpu[DC_RING], g_dc_ld[DC_RING], g_dc_st[DC_RING], g_dc_np[DC_RING];
+// The bytes of an attachment's pass-wide image (framebuffer size x format x samples), what a Load or Store action moves between tile memory and the image
+static uint64_t dc_att_bytes(VkFramebuffer fb, VkFormat fmt, id<MTLTexture> t) { const fmt_t *f = fmt_of(fmt); return f ? (uint64_t)fb->w * fb->h * f->bytes * t.sampleCount : 0; }
 static MTLStoreAction store_a(VkAttachmentStoreOp o) { return o == VK_ATTACHMENT_STORE_OP_DONT_CARE ? MTLStoreActionDontCare : MTLStoreActionStore; }
+static void dcoracle_release_scratch(void) {
+    dco_scratch_t *e = g_dcoracle_scratch; g_dcoracle_scratch = NULL;
+    while (e) { dco_scratch_t *n = e->next; e->tex = nil; free(e); e = n; }
+}
+static void dcoracle_report_if_ready(void) {
+    uint64_t first = 0, last = 0, passes = 0, identical = 0, differing = 0, skipped = 0; int report = 0;
+    pthread_mutex_lock(&g_dcoracle_mu);
+    if (g_dcoracle_ended && !g_dcoracle_pending && !g_dcoracle_reported) {
+        g_dcoracle_reported = 1; first = g_dcoracle_first; last = g_dcoracle_last;
+        passes = g_dcoracle_passes; identical = g_dcoracle_identical; differing = g_dcoracle_differing; skipped = g_dcoracle_skipped;
+        dcoracle_release_scratch(); report = 1;
+    }
+    pthread_mutex_unlock(&g_dcoracle_mu);
+    if (report) LOG("[vk] [dcoracle] F%llu-F%llu: %llu passes checked, attachments %llu identical, %llu differing, %llu skipped",
+                    (unsigned long long)first, (unsigned long long)last, (unsigned long long)passes, (unsigned long long)identical,
+                    (unsigned long long)differing, (unsigned long long)skipped);
+}
+static void dcoracle_frame_end(uint64_t frame) {
+    if (!dcoracle_on()) return;
+    pthread_mutex_lock(&g_dcoracle_mu);
+    if (g_dcoracle_valid && frame == g_dcoracle_last) g_dcoracle_ended = 1;
+    pthread_mutex_unlock(&g_dcoracle_mu);
+    dcoracle_report_if_ready();
+}
+static int dcoracle_submission_begin(uint64_t frame) {
+    if (!dcoracle_active(frame)) return 0;
+    pthread_mutex_lock(&g_dcoracle_mu); g_dcoracle_pending++; pthread_mutex_unlock(&g_dcoracle_mu);
+    return 1;
+}
+static void dcoracle_submission_end(void) {
+    pthread_mutex_lock(&g_dcoracle_mu); if (g_dcoracle_pending) g_dcoracle_pending--; pthread_mutex_unlock(&g_dcoracle_mu);
+    dcoracle_report_if_ready();
+}
+static void dcoracle_count(int kind, uint64_t n) {
+    pthread_mutex_lock(&g_dcoracle_mu);
+    if (kind == 0) g_dcoracle_passes += n;
+    else if (kind == 1) g_dcoracle_identical += n;
+    else if (kind == 2) g_dcoracle_differing += n;
+    else g_dcoracle_skipped += n;
+    pthread_mutex_unlock(&g_dcoracle_mu);
+}
+static uint32_t dcoracle_next_pass(uint64_t frame) {
+    if (g_dcoracle_index_frame != frame) { g_dcoracle_index_frame = frame; g_dcoracle_next_pass = 0; }
+    return (uint32_t)g_dcoracle_next_pass++;
+}
+static dco_scratch_t *dcoracle_scratch(id<MTLTexture> src, uint64_t lease) {
+    for (dco_scratch_t *e = g_dcoracle_scratch; e; e = e->next)
+        if (e->lease != lease && e->format == src.pixelFormat && e->type == src.textureType && e->w == src.width && e->h == src.height &&
+            e->d == src.depth && e->samples == src.sampleCount && e->levels == src.mipmapLevelCount && e->arrays == src.arrayLength && e->usage == src.usage) {
+            e->lease = lease; return e;
+        }
+    MTLTextureDescriptor *td = [MTLTextureDescriptor new];
+    td.pixelFormat = src.pixelFormat; td.textureType = src.textureType; td.width = src.width; td.height = src.height; td.depth = src.depth;
+    td.mipmapLevelCount = src.mipmapLevelCount; td.sampleCount = src.sampleCount; td.arrayLength = src.arrayLength;
+    td.usage = src.usage; td.storageMode = MTLStorageModePrivate;
+    id<MTLTexture> t = [g_dev newTextureWithDescriptor:td];
+    if (!t) return NULL;
+    dco_scratch_t *e = zalloc(sizeof *e); e->tex = t; e->format = src.pixelFormat; e->type = src.textureType;
+    e->w = src.width; e->h = src.height; e->d = src.depth; e->samples = src.sampleCount; e->levels = src.mipmapLevelCount; e->arrays = src.arrayLength;
+    e->usage = src.usage; e->lease = lease; e->next = g_dcoracle_scratch; g_dcoracle_scratch = e; return e;
+}
+static int dcoracle_copy_texture(rs_t *s, id<MTLTexture> src, id<MTLTexture> dst) {
+    if (!src || !dst) return 0;
+    id<MTLBlitCommandEncoder> be = s->be ?: (s->be = [s->cb blitCommandEncoder]);
+    [be copyFromTexture:src sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
+             sourceSize:MTLSizeMake(src.width, src.height, src.depth) toTexture:dst destinationSlice:0 destinationLevel:0
+       destinationOrigin:MTLOriginMake(0, 0, 0)];
+    return 1;
+}
+static MTLClearColor dcoracle_color(const fmt_t *f) {
+    return f && f->kind == K_INT ? MTLClearColorMake(0x5a, 0xa5, 0x3c, 0xc3) : MTLClearColorMake(1, 0, 1, 1);
+}
+static MTLLoadAction dcoracle_load(rs_t *s, VkAttachmentLoadOp op, int colour, int m) {
+    if (op != VK_ATTACHMENT_LOAD_OP_DONT_CARE) return dc_load(op, colour, m);
+    return s->dco_probe ? MTLLoadActionClear : s->dco_reference ? MTLLoadActionLoad : dc_load(op, colour, m);
+}
+static int dcoracle_add_attachment(dco_pass_t *p, id<MTLTexture> real, id<MTLTexture> probe, VkFormat fmt,
+                                   VkAttachmentLoadOp load, VkAttachmentStoreOp store, char aspect, uint32_t index) {
+    if (!real || !probe || p->n == sizeof p->att / sizeof *p->att) return 0;
+    const fmt_t *f = fmt_of(fmt);
+    uint32_t b = aspect == 'd' ? (real.pixelFormat == MTLPixelFormatDepth16Unorm ? 2 : 4) : aspect == 's' ? 1 : f ? f->bytes : 0;   // a depth plane reads back as 2 or 4 bytes
+    if (!b) return 0;
+    dco_attachment_t *a = &p->att[p->n++];
+    a->real = real; a->probe = probe; a->w = (uint32_t)real.width; a->h = (uint32_t)real.height; a->bytes = b;
+    a->format = real.pixelFormat; a->load = load; a->store = store; a->aspect = aspect; a->index = index; a->combined = f && f->kind == K_DS;
+    return 1;
+}
+static void dcoracle_free_pass(dco_pass_t *p) {
+    for (uint32_t i = 0; i < 8; i++) p->color[i] = nil;
+    p->ds = nil;
+    for (uint32_t i = 0; i < p->n; i++) p->att[i] = (dco_attachment_t){0};
+    free(p);
+}
 static void begin_rp(rs_t *s, const c_brp *c) {
     end_blit(s);
     end_rp(s, 1); s->cut = 0;
     VkRenderPass rp = c->rp; VkFramebuffer fb = c->fb;
     MTLRenderPassDescriptor *d = [MTLRenderPassDescriptor renderPassDescriptor];
+    int dm = dontcare_mode(), ab = dm == DC_AB && !s->dco_probe; dm = dc_pass_mode(dm, s->sq->frame);   // fixed here for the whole pass (resume_rp loads everything); a probe pass is not A/B traffic
+    uint64_t ld = 0, st = 0;   // DM_VK_DONTCARE=ab: the bytes the pass's load and store actions move, as begun (a pass split for a copy is counted once)
     uint32_t w = fb->w, h = fb->h;
     for (uint32_t i = 0; i < rp->ncol; i++) {
         int a = rp->col[i]; if (a < 0 || (uint32_t)a >= fb->n) continue;
         const ratt *at = &rp->att[a]; MTLRenderPassColorAttachmentDescriptor *ca = d.colorAttachments[i];
-        ca.texture = fb->v[a]->tex; w = umin(w, (uint32_t)ca.texture.width); h = umin(h, (uint32_t)ca.texture.height);
-        ca.loadAction = load_a(at->load); s->st_col[i] = store_a(at->store); ca.storeAction = MTLStoreActionUnknown;
+        ca.texture = s->dco_probe && s->dco_pass ? s->dco_pass->color[i] : fb->v[a]->tex;
+        w = umin(w, (uint32_t)ca.texture.width); h = umin(h, (uint32_t)ca.texture.height);
+        ca.loadAction = dcoracle_load(s, at->load, 1, dm);
+        s->st_col[i] = s->dco_probe ? MTLStoreActionStore : store_a(at->store); ca.storeAction = MTLStoreActionUnknown;
         if (at->load == VK_ATTACHMENT_LOAD_OP_CLEAR && (uint32_t)a < c->nclear) { const float *f = c->clear[a].color.float32; ca.clearColor = MTLClearColorMake(f[0], f[1], f[2], f[3]); }
+        else if (s->dco_probe && at->load == VK_ATTACHMENT_LOAD_OP_DONT_CARE) ca.clearColor = dcoracle_color(fmt_of(at->fmt));
         int r = rp->res[i];
-        if (r >= 0 && (uint32_t)r < fb->n) { ca.resolveTexture = fb->v[r]->tex; s->st_col[i] = at->store == VK_ATTACHMENT_STORE_OP_DONT_CARE ? MTLStoreActionMultisampleResolve : MTLStoreActionStoreAndMultisampleResolve; }
+        id<MTLTexture> rt = nil;
+        if (r >= 0 && (uint32_t)r < fb->n) { rt = ca.resolveTexture = fb->v[r]->tex; s->st_col[i] = at->store == VK_ATTACHMENT_STORE_OP_DONT_CARE ? MTLStoreActionMultisampleResolve : MTLStoreActionStoreAndMultisampleResolve; }
+        if (ab) {
+            uint64_t b = dc_att_bytes(fb, at->fmt, ca.texture);
+            if (ca.loadAction == MTLLoadActionLoad) ld += b;
+            if (s->st_col[i] == MTLStoreActionStore || s->st_col[i] == MTLStoreActionStoreAndMultisampleResolve) st += b;
+            if (rt) st += dc_att_bytes(fb, at->fmt, rt);   // the resolve writes the single-sample image too
+        }
     }
     if (rp->depth >= 0 && (uint32_t)rp->depth < fb->n) {
-        int a = rp->depth; const ratt *at = &rp->att[a]; const fmt_t *f = fmt_of(at->fmt); id<MTLTexture> t = fb->v[a]->tex;
+        int a = rp->depth; const ratt *at = &rp->att[a]; const fmt_t *f = fmt_of(at->fmt);
+        id<MTLTexture> t = s->dco_probe && s->dco_pass ? s->dco_pass->ds : fb->v[a]->tex;
         w = umin(w, (uint32_t)t.width); h = umin(h, (uint32_t)t.height);
         if (fmt_has_depth(f)) {
-            d.depthAttachment.texture = t; d.depthAttachment.loadAction = load_a(at->load); s->st_d = store_a(at->store); d.depthAttachment.storeAction = MTLStoreActionUnknown;
-            if ((uint32_t)a < c->nclear) d.depthAttachment.clearDepth = c->clear[a].depthStencil.depth;
+            d.depthAttachment.texture = t; d.depthAttachment.loadAction = dcoracle_load(s, at->load, 0, dm);
+            s->st_d = s->dco_probe ? MTLStoreActionStore : store_a(at->store); d.depthAttachment.storeAction = MTLStoreActionUnknown;
+            if (at->load == VK_ATTACHMENT_LOAD_OP_CLEAR && (uint32_t)a < c->nclear) d.depthAttachment.clearDepth = c->clear[a].depthStencil.depth;
+            else if (s->dco_probe && at->load == VK_ATTACHMENT_LOAD_OP_DONT_CARE) d.depthAttachment.clearDepth = 0.5;
         }
         if (fmt_has_stencil(f)) {
-            d.stencilAttachment.texture = t; d.stencilAttachment.loadAction = load_a(at->sload); s->st_s = store_a(at->sstore); d.stencilAttachment.storeAction = MTLStoreActionUnknown;
-            if ((uint32_t)a < c->nclear) d.stencilAttachment.clearStencil = c->clear[a].depthStencil.stencil;
+            d.stencilAttachment.texture = t; d.stencilAttachment.loadAction = dcoracle_load(s, at->sload, 0, dm);
+            s->st_s = s->dco_probe ? MTLStoreActionStore : store_a(at->sstore); d.stencilAttachment.storeAction = MTLStoreActionUnknown;
+            if (at->sload == VK_ATTACHMENT_LOAD_OP_CLEAR && (uint32_t)a < c->nclear) d.stencilAttachment.clearStencil = c->clear[a].depthStencil.stencil;
+            else if (s->dco_probe && at->sload == VK_ATTACHMENT_LOAD_OP_DONT_CARE) d.stencilAttachment.clearStencil = 0x5a;
         }
+        if (ab) {
+            uint64_t b = dc_att_bytes(fb, at->fmt, t); int dl = fmt_has_depth(f) && d.depthAttachment.loadAction == MTLLoadActionLoad, sl = fmt_has_stencil(f) && d.stencilAttachment.loadAction == MTLLoadActionLoad;
+            int ds = fmt_has_depth(f) && s->st_d == MTLStoreActionStore, ss = fmt_has_stencil(f) && s->st_s == MTLStoreActionStore;
+            if (dl || sl) ld += b;
+            if (ds || ss) st += b;
+        }
+    }
+    if (ab) {
+        size_t k = s->sq->frame % DC_RING;
+        atomic_fetch_add_explicit(&g_dc_ld[k], ld, memory_order_relaxed); atomic_fetch_add_explicit(&g_dc_st[k], st, memory_order_relaxed); atomic_fetch_add_explicit(&g_dc_np[k], 1, memory_order_relaxed);
     }
     if (!rp->ncol && rp->depth < 0) { d.renderTargetWidth = fb->w; d.renderTargetHeight = fb->h; d.defaultRasterSampleCount = 1; }
     if (s->sq->vis) d.visibilityResultBuffer = s->sq->vis;
@@ -1288,7 +1587,6 @@ static void begin_rp(rs_t *s, const c_brp *c) {
     if (!s->have_vp) s->vp = (VkViewport){0, 0, (float)w, (float)h, 0, 1};
     if (!s->have_sc) s->sc = (VkRect2D){{0, 0}, {w, h}};
     s->vp_dirty = s->sc_dirty = 1;
-    g_n_pass++;
     occ_start(s);
 }
 static void bind_res(rs_t *s, const shinfo *si, int frag) {
@@ -1345,7 +1643,7 @@ static int pre_draw(rs_t *s) {
     VkPipeline p = s->pipe; id<MTLRenderCommandEncoder> re = s->re;
     if (!re) { RED1("draw outside a render pass"); return 0; }
     if (!p || !p->pso) return 0;
-    if (p->logic) { static uint64_t n; if (!n++) LOG("[vk] [RED] logic op %d not implemented: the pipeline draws with its shader's colour", p->logic); if (!(n % 1000)) LOG("[vk] logic op draws so far: %llu", (unsigned long long)n); }
+    if (p->logic && !s->dco_probe) { static uint64_t n; if (!n++) LOG("[vk] [RED] logic op %d not implemented: the pipeline draws with its shader's colour", p->logic); if (!(n % 1000)) LOG("[vk] logic op draws so far: %llu", (unsigned long long)n); }
     if (s->applied != p) {
         [re setRenderPipelineState:p->pso]; [re setDepthStencilState:p->dss ? p->dss : g_dss_off];
         [re setCullMode:p->cull]; [re setFrontFacingWinding:p->wind]; [re setTriangleFillMode:p->fill]; [re setDepthClipMode:p->clip];
@@ -1395,12 +1693,198 @@ static int pre_draw(rs_t *s) {
         }
     return 1;
 }
-static void replay(rs_t *s, VkCommandBuffer cb) {
-    for (size_t o = 0; o < cb->n;) {
+static void replay_commands(rs_t *s, VkCommandBuffer cb, size_t start, size_t end, int finish);
+static const char *dcoracle_load_name(VkAttachmentLoadOp load) {
+    return load == VK_ATTACHMENT_LOAD_OP_DONT_CARE ? "DONT_CARE" : load == VK_ATTACHMENT_LOAD_OP_LOAD ? "LOAD" : "CLEAR";
+}
+static const char *dcoracle_aspect_name(const dco_attachment_t *a, char out[16]) {
+    if (a->aspect == 'c') snprintf(out, 16, "c%u", a->index);
+    else snprintf(out, 16, "%c", a->aspect);
+    return out;
+}
+static uint32_t dcoracle_output_count(VkRenderPass rp, VkFramebuffer fb) {
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < rp->ncol; i++) if (rp->col[i] >= 0 && (uint32_t)rp->col[i] < fb->n) n++;
+    if (rp->depth >= 0 && (uint32_t)rp->depth < fb->n) {
+        const fmt_t *f = fmt_of(rp->att[rp->depth].fmt);
+        n += !!fmt_has_depth(f) + !!fmt_has_stencil(f);
+    }
+    return n;
+}
+static int dcoracle_has_dontcare(VkRenderPass rp, VkFramebuffer fb) {
+    for (uint32_t i = 0; i < rp->ncol; i++) {
+        int a = rp->col[i]; if (a >= 0 && (uint32_t)a < fb->n && rp->att[a].load == VK_ATTACHMENT_LOAD_OP_DONT_CARE) return 1;
+    }
+    if (rp->depth >= 0 && (uint32_t)rp->depth < fb->n) {
+        const ratt *a = &rp->att[rp->depth]; const fmt_t *f = fmt_of(a->fmt);
+        return (fmt_has_depth(f) && a->load == VK_ATTACHMENT_LOAD_OP_DONT_CARE) ||
+               (fmt_has_stencil(f) && a->sload == VK_ATTACHMENT_LOAD_OP_DONT_CARE);
+    }
+    return 0;
+}
+static int dcoracle_multisampled_or_resolved(VkRenderPass rp, VkFramebuffer fb) {
+    for (uint32_t i = 0; i < rp->ncol; i++) {
+        int a = rp->col[i];
+        if (rp->res[i] >= 0) return 1;
+        if (a >= 0 && (uint32_t)a < fb->n && fb->v[a]->tex.sampleCount > 1) return 1;
+    }
+    return rp->depth >= 0 && (uint32_t)rp->depth < fb->n && fb->v[rp->depth]->tex.sampleCount > 1;
+}
+static int dcoracle_storage_shader(const shinfo *si, VkDescriptorSet sets[8]) {
+    if (!si) return 0;
+    for (int i = 0; i < si->nres; i++) {
+        const shres *r = &si->res[i];
+        if (r->kind == 'b') return 1;
+        if (r->kind != 't' || r->set >= 8 || !sets[r->set]) continue;
+        VkDescriptorSetLayout l = sets[r->set]->L; int bi = r->binding < 128 ? l->idx[r->binding] : -1;
+        if (bi >= 0 && (l->b[bi].type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE || l->b[bi].type == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER)) return 1;
+    }
+    return 0;
+}
+static int dcoracle_pipeline_storage(VkPipeline p, VkDescriptorSet sets[8]) {
+    // The Vulkan shader table distinguishes storage buffers, but not shader read/write access. Treat any storage binding as potentially writable;
+    // storage-image descriptor types come from the bound layout, since the table's image kind also includes sampled images.
+    return p && (dcoracle_storage_shader(p->vs, sets) || dcoracle_storage_shader(p->fs, sets));
+}
+static const char *dcoracle_skip_reason(rs_t *s, VkCommandBuffer cb, size_t start, size_t *end, VkRenderPass rp, VkFramebuffer fb) {
+    int split = 0, query = 0, storage = 0, found_end = 0;
+    VkPipeline pipe = s->pipe; VkDescriptorSet sets[8];
+    for (uint32_t i = 0; i < 8; i++) sets[i] = s->set[i].s;
+    const chdr *first = (const chdr *)(cb->buf + start);
+    for (size_t o = start + first->size; o < cb->n;) {
+        const chdr *h = (const chdr *)(cb->buf + o); const void *c = h + 1; o += h->size;
+        if (h->op == C_ERP) { *end = o; found_end = 1; break; }
+        switch (h->op) {
+            case C_COPYB: case C_COPYB2I: case C_COPYI: case C_COPYI2B: case C_CLEARI: split = 1; break;
+            case C_QRESET: case C_QTS: case C_QBEGIN: case C_QEND: query = 1; break;
+            case C_PIPE: pipe = ((const c_pipe *)c)->p; break;
+            case C_SETS: {
+                const c_sets *x = c;
+                for (uint32_t i = 0; i < x->n && x->first + i < 8; i++) sets[x->first + i] = x->s[i];
+                break;
+            }
+            case C_DRAW: { const c_draw *x = c; if (x->count && x->inst) storage |= dcoracle_pipeline_storage(pipe, sets); break; }
+            case C_DRAWI: { const c_drawi *x = c; if (x->count && x->inst) storage |= dcoracle_pipeline_storage(pipe, sets); break; }
+            default: break;
+        }
+    }
+    if (!found_end) return "render pass has no end command";
+    if (split) return "pass is split by a copy";
+    if (query) return "occlusion or timestamp query in pass";
+    if (s->sq && s->sq->vis) return "submission has a visibility buffer";
+    if (dcoracle_multisampled_or_resolved(rp, fb)) return "multisampled attachment or resolve";
+    if (storage) return "pipeline may write storage resources";
+    return NULL;
+}
+static void dcoracle_skip_pass(uint64_t frame, uint32_t index, uint32_t attachments, const char *reason) {
+    dcoracle_count(3, attachments);
+    LOG("[vk] [dcoracle] F%llu p%u: not checked: %s", (unsigned long long)frame, index, reason);
+}
+static int dcoracle_prepare_pass(rs_t *s, VkCommandBuffer cb, const c_brp *c, uint32_t index, size_t start, size_t end) {
+    VkRenderPass rp = c->rp; VkFramebuffer fb = c->fb;
+    dco_pass_t *p = zalloc(sizeof *p); p->frame = s->dco_frame; p->index = index; p->lease = ++g_dcoracle_lease;
+    int ok = 1;
+    for (uint32_t i = 0; i < rp->ncol && ok; i++) {
+        int a = rp->col[i]; if (a < 0 || (uint32_t)a >= fb->n) continue;
+        id<MTLTexture> real = fb->v[a]->tex; dco_scratch_t *e = dcoracle_scratch(real, p->lease);
+        ok = e && dcoracle_add_attachment(p, real, e->tex, rp->att[a].fmt, rp->att[a].load, rp->att[a].store, 'c', i);
+        if (ok) p->color[i] = e->tex;
+    }
+    if (ok && rp->depth >= 0 && (uint32_t)rp->depth < fb->n) {
+        int a = rp->depth; const ratt *at = &rp->att[a]; const fmt_t *f = fmt_of(at->fmt); id<MTLTexture> real = fb->v[a]->tex;
+        if (fmt_has_depth(f) || fmt_has_stencil(f)) {
+            dco_scratch_t *e = dcoracle_scratch(real, p->lease); ok = e != NULL;
+            if (ok) p->ds = e->tex;
+            if (ok && fmt_has_depth(f)) ok = dcoracle_add_attachment(p, real, e->tex, at->fmt, at->load, at->store, 'd', 0);
+            if (ok && fmt_has_stencil(f)) ok = dcoracle_add_attachment(p, real, e->tex, at->fmt, at->sload, at->sstore, 's', 0);
+        }
+    }
+    if (!ok) {
+        dcoracle_free_pass(p); dcoracle_skip_pass(s->dco_frame, index, dcoracle_output_count(rp, fb), "scratch attachment unavailable");
+        return 0;
+    }
+    end_blit(s);
+    for (uint32_t i = 0; i < rp->ncol; i++) {
+        int a = rp->col[i]; if (a < 0 || (uint32_t)a >= fb->n || rp->att[a].load != VK_ATTACHMENT_LOAD_OP_LOAD) continue;
+        id<MTLTexture> src = fb->v[a]->tex, dst = p->color[i];
+        if (!dcoracle_copy_texture(s, src, dst)) {
+            dcoracle_free_pass(p); dcoracle_skip_pass(s->dco_frame, index, dcoracle_output_count(rp, fb), "scratch attachment unavailable"); return 0;
+        }
+    }
+    if (rp->depth >= 0 && (uint32_t)rp->depth < fb->n) {
+        int a = rp->depth; const ratt *at = &rp->att[a]; const fmt_t *f = fmt_of(at->fmt); id<MTLTexture> real = fb->v[a]->tex;
+        int load_ds = (fmt_has_depth(f) && at->load == VK_ATTACHMENT_LOAD_OP_LOAD) ||
+                      (fmt_has_stencil(f) && at->sload == VK_ATTACHMENT_LOAD_OP_LOAD);
+        if (load_ds) {
+            if (!dcoracle_copy_texture(s, real, p->ds)) {
+                dcoracle_free_pass(p); dcoracle_skip_pass(s->dco_frame, index, dcoracle_output_count(rp, fb), "scratch attachment unavailable"); return 0;
+            }
+        }
+    }
+    end_blit(s);
+    rs_t saved = *s;
+    s->dco_pass = p; s->dco_probe = 1; s->draw_count = &g_dcoracle_probe_draws; s->pass_count = &g_dcoracle_probe_passes;
+    replay_commands(s, cb, start, end, 0);
+    *s = saved; s->dco_pass = p;
+    dcoracle_count(0, 1);
+    return 1;
+}
+static void dcoracle_try_pass(rs_t *s, VkCommandBuffer cb, size_t start, uint32_t index) {
+    const c_brp *c = (const c_brp *)(cb->buf + start + sizeof(chdr));
+    VkRenderPass rp = c->rp; VkFramebuffer fb = c->fb;
+    if (!dcoracle_has_dontcare(rp, fb)) return;
+    s->dco_reference = 1;
+    size_t pass_end = 0; const char *reason = dcoracle_skip_reason(s, cb, start, &pass_end, rp, fb);
+    if (reason) { dcoracle_skip_pass(s->dco_frame, index, dcoracle_output_count(rp, fb), reason); return; }
+    dcoracle_prepare_pass(s, cb, c, index, start, pass_end);
+}
+static void dcoracle_end_pass(rs_t *s) {
+    dco_pass_t *p = s->dco_pass; s->dco_pass = NULL; int queued = 0;
+    for (uint32_t i = 0; i < p->n; i++) {
+        dco_attachment_t *a = &p->att[i];
+        if (a->store == VK_ATTACHMENT_STORE_OP_DONT_CARE) {
+            char name[16];
+            LOG("[vk] [dcoracle] F%llu p%u %s %lu %ux%u load %s: not compared (store DONT_CARE)",
+                (unsigned long long)p->frame, p->index, dcoracle_aspect_name(a, name), (unsigned long)a->format, a->w, a->h, dcoracle_load_name(a->load));
+            dcoracle_count(3, 1); continue;
+        }
+        NSUInteger row = (NSUInteger)a->w * a->bytes, length = row * a->h;
+        a->probe_bytes = [g_dev newBufferWithLength:length options:MTLResourceStorageModeShared];
+        a->real_bytes = [g_dev newBufferWithLength:length options:MTLResourceStorageModeShared];
+        if (!a->probe_bytes || !a->real_bytes) {
+            char name[16];
+            LOG("[vk] [dcoracle] F%llu p%u %s %lu %ux%u load %s: not compared (readback buffer unavailable)",
+                (unsigned long long)p->frame, p->index, dcoracle_aspect_name(a, name), (unsigned long)a->format, a->w, a->h, dcoracle_load_name(a->load));
+            dcoracle_count(3, 1); a->probe_bytes = a->real_bytes = nil; continue;
+        }
+        MTLBlitOption opt = a->combined ? a->aspect == 's' ? MTLBlitOptionStencilFromDepthStencil : MTLBlitOptionDepthFromDepthStencil : MTLBlitOptionNone;
+        id<MTLBlitCommandEncoder> be = s->be ?: (s->be = [s->cb blitCommandEncoder]);
+        [be copyFromTexture:a->probe sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(a->w, a->h, 1)
+                    toBuffer:a->probe_bytes destinationOffset:0 destinationBytesPerRow:row destinationBytesPerImage:length options:opt];
+        [be copyFromTexture:a->real sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(a->w, a->h, 1)
+                    toBuffer:a->real_bytes destinationOffset:0 destinationBytesPerRow:row destinationBytesPerImage:length options:opt];
+        queued = 1;
+    }
+    if (queued && s->sq->dco_tail) {
+        p->next = NULL; *s->sq->dco_tail = p; s->sq->dco_tail = &p->next;
+    } else dcoracle_free_pass(p);
+}
+static void replay_commands(rs_t *s, VkCommandBuffer cb, size_t start, size_t end, int finish) {
+    for (size_t o = start; o < end;) {
+        size_t command_start = o;
         const chdr *h = (const chdr *)(cb->buf + o); const void *c = h + 1; o += h->size;
         switch (h->op) {
-            case C_BRP: begin_rp(s, c); break;
-            case C_ERP: end_rp(s, 1); s->cut = 0; s->rpd = nil; break;
+            case C_BRP:
+                if (s->dco_enabled && !s->dco_probe) {
+                    uint32_t index = dcoracle_next_pass(s->dco_frame);
+                    dcoracle_try_pass(s, cb, command_start, index);
+                }
+                atomic_fetch_add(s->pass_count, 1);
+                begin_rp(s, c); break;
+            case C_ERP:
+                end_rp(s, 1);
+                if (!s->dco_probe && s->dco_pass) dcoracle_end_pass(s);
+                s->cut = 0; s->rpd = nil; s->dco_reference = 0; break;
             case C_PIPE: s->pipe = ((const c_pipe *)c)->p; break;
             case C_SETS: {
                 const c_sets *x = c; uint32_t k = 0;
@@ -1420,7 +1904,7 @@ static void replay(rs_t *s, VkCommandBuffer cb) {
                 if (!s->ib || !s->ib->mem) { RED1("index buffer not bound"); break; }
                 [s->re drawIndexedPrimitives:s->pipe->prim indexCount:x->count indexType:s->it indexBuffer:mem_buf(s->ib->mem)
                            indexBufferOffset:s->ib->off + s->ibo + (VkDeviceSize)x->first * s->isz instanceCount:x->inst baseVertex:x->voff baseInstance:x->first_inst];
-                g_n_draw++;
+                atomic_fetch_add(s->draw_count, 1);
                 break;
             }
             case C_COPYB: {
@@ -1454,7 +1938,7 @@ static void replay(rs_t *s, VkCommandBuffer cb) {
                 const c_draw *x = c;
                 if (!x->count || !x->inst || !pre_draw(s)) break;
                 [s->re drawPrimitives:s->pipe->prim vertexStart:x->first vertexCount:x->count instanceCount:x->inst baseInstance:x->first_inst];
-                g_n_draw++;
+                atomic_fetch_add(s->draw_count, 1);
                 break;
             }
             case C_PUSH: { const c_push *x = c; memcpy(s->pc + x->off, x->data, x->size); break; }
@@ -1549,11 +2033,58 @@ static void replay(rs_t *s, VkCommandBuffer cb) {
             default: LOG("[vk] [RED] unknown command %u in the command buffer", h->op); return;
         }
     }
-    if (s->re || s->cut) { RED1("render pass not ended when the command buffer ended"); end_rp(s, 1); s->cut = 0; }
-    end_blit(s);
+    if (finish) {
+        if (s->re || s->cut) { RED1("render pass not ended when the command buffer ended"); end_rp(s, 1); s->cut = 0; }
+        end_blit(s);
+    }
+}
+static void replay(rs_t *s, VkCommandBuffer cb) {
+    if (!s->dco_initialized) {
+        s->dco_frame = g_frames + 1; s->dco_enabled = dcoracle_active(s->dco_frame); s->dco_initialized = 1;
+    }
+    if (!s->draw_count) s->draw_count = &g_n_draw;
+    if (!s->pass_count) s->pass_count = &g_n_pass;
+    replay_commands(s, cb, 0, cb->n, 1);
 }
 
 // ---------- Queue, fences, semaphores ----------
+static void dcoracle_complete_pass(dco_pass_t *p, int command_error) {
+    for (uint32_t i = 0; i < p->n; i++) {
+        dco_attachment_t *a = &p->att[i]; if (a->store == VK_ATTACHMENT_STORE_OP_DONT_CARE) continue;
+        const uint8_t *probe = a->probe_bytes.contents, *real = a->real_bytes.contents;
+        if (command_error || !probe || !real) {
+            char name[16];
+            LOG("[vk] [dcoracle] F%llu p%u %s %lu %ux%u load %s: not compared (%s)",
+                (unsigned long long)p->frame, p->index, dcoracle_aspect_name(a, name), (unsigned long)a->format, a->w, a->h,
+                dcoracle_load_name(a->load), command_error ? "command buffer error" : "readback unavailable");
+            dcoracle_count(3, 1); continue;
+        }
+        uint64_t texels = (uint64_t)a->w * a->h, differing = 0; unsigned max = 0;
+        for (uint64_t t = 0; t < texels; t++) {
+            int different = 0;
+            for (uint32_t b = 0; b < a->bytes; b++) {
+                int delta = (int)probe[t * a->bytes + b] - real[t * a->bytes + b];
+                if (delta) { different = 1; unsigned magnitude = (unsigned)(delta < 0 ? -delta : delta); if (magnitude > max) max = magnitude; }
+            }
+            differing += different;
+        }
+        if (differing) {
+            char name[16];
+            LOG("[vk] [dcoracle] F%llu p%u %s %lu %ux%u load %s: differs %llu / %llu texels (max byte difference %u)",
+                (unsigned long long)p->frame, p->index, dcoracle_aspect_name(a, name), (unsigned long)a->format, a->w, a->h,
+                dcoracle_load_name(a->load), (unsigned long long)differing, (unsigned long long)texels, max);
+            dcoracle_count(2, 1);
+        } else {
+            char name[16];
+            LOG("[vk] [dcoracle] F%llu p%u %s %lu %ux%u load %s: identical",
+                (unsigned long long)p->frame, p->index, dcoracle_aspect_name(a, name), (unsigned long)a->format, a->w, a->h, dcoracle_load_name(a->load));
+            dcoracle_count(1, 1);
+        }
+    }
+}
+static void dcoracle_complete(dco_pass_t *p, int command_error) {
+    while (p) { dco_pass_t *next = p->next; dcoracle_complete_pass(p, command_error); dcoracle_free_pass(p); p = next; }
+}
 static int fence_done(VkFence f) { uint64_t v = atomic_load(&f->val); return v != FENCE_NONE && atomic_load(&g_done) >= v; }
 static void done_advance(uint64_t v) {
     pthread_mutex_lock(&g_done_mu);
@@ -1567,7 +2098,9 @@ VKB(vkQueueSubmit, VkResult, VkQueue q, uint32_t n, const VkSubmitInfo *si, VkFe
         conv_sync();
         pthread_mutex_lock(&g_qmu);
         id<MTLCommandBuffer> cb = [g_q commandBuffer];
-        subq_t *sq = zalloc(sizeof *sq); sq->v = g_ev_val + 1; uint32_t nsplit = 0;
+        subq_t *sq = zalloc(sizeof *sq); sq->v = g_ev_val + 1; sq->dco_tail = &sq->dco_head; uint32_t nsplit = 0;
+        sq->frame = atomic_load_explicit(&g_frames, memory_order_relaxed); int ab = dontcare_mode() == DC_AB;   // every pass of this submission takes the phase of this frame
+        uint64_t dco_frame = sq->frame + 1; sq->dco_active = dcoracle_submission_begin(dco_frame);   // DM_VK_DCORACLE numbers a frame by its present, as frame_end counts
         for (uint32_t i = 0; i < n; i++)   // occlusion queries need a visibility buffer before the first render pass is encoded
             for (uint32_t j = 0; j < si[i].commandBufferCount; j++) {
                 VkCommandBuffer c = si[i].pCommandBuffers[j];
@@ -1582,20 +2115,31 @@ VKB(vkQueueSubmit, VkResult, VkQueue q, uint32_t n, const VkSubmitInfo *si, VkFe
             sq->occ = zalloc(sq->cap * sizeof *sq->occ);
         }
         for (uint32_t i = 0; i < n; i++)
-            for (uint32_t j = 0; j < si[i].commandBufferCount; j++) { rs_t s = {0}; s.cb = cb; s.sq = sq; replay(&s, si[i].pCommandBuffers[j]); }
+            for (uint32_t j = 0; j < si[i].commandBufferCount; j++) {
+                rs_t s = {0}; s.cb = cb; s.sq = sq; s.dco_frame = dco_frame; s.dco_enabled = sq->dco_active; s.dco_initialized = 1; replay(&s, si[i].pCommandBuffers[j]);
+            }
         uint64_t v = ++g_ev_val;
         [cb encodeSignalEvent:g_ev value:v];
         if (f) atomic_store(&f->val, v);
         [cb addCompletedHandler:^(id<MTLCommandBuffer> c) {
-            if (c.error) { static int k; if (k++ < 20) LOG("[vk] [RED] command buffer error (submission %llu): %s", (unsigned long long)v, c.error.localizedDescription.UTF8String); }
-            g_done_ns[v % DONE_RING] = now_ns();
-            if (sq->nvis) {   // a query that spans several encoders has a slot in each
-                const uint64_t *r = sq->vis.contents;
-                for (uint32_t k = 0; k < sq->nvis; k++) sq->occ[k].q->val[sq->occ[k].idx] = 0;
-                for (uint32_t k = 0; k < sq->nvis; k++) sq->occ[k].q->val[sq->occ[k].idx] += r[sq->occ[k].slot];
+            @autoreleasepool {
+                if (c.error) { static int k; if (k++ < 20) LOG("[vk] [RED] command buffer error (submission %llu): %s", (unsigned long long)v, c.error.localizedDescription.UTF8String); }
+                g_done_ns[v % DONE_RING] = now_ns();
+                if (c.GPUStartTime > 0 && c.GPUEndTime > 0) {   // the frame line's GPU time: this frame's command buffers, summed (in an oracle frame it includes the probe passes)
+                    uint64_t ns = (uint64_t)((c.GPUEndTime - c.GPUStartTime) * 1e9);
+                    atomic_fetch_add(&g_gpu_ns, ns);
+                    if (ab) atomic_fetch_add_explicit(&g_dc_gpu[sq->frame % DC_RING], ns, memory_order_relaxed);   // the A/B phases' per-frame GPU time
+                }
+                if (sq->nvis) {   // a query that spans several encoders has a slot in each
+                    const uint64_t *r = sq->vis.contents;
+                    for (uint32_t k = 0; k < sq->nvis; k++) sq->occ[k].q->val[sq->occ[k].idx] = 0;
+                    for (uint32_t k = 0; k < sq->nvis; k++) sq->occ[k].q->val[sq->occ[k].idx] += r[sq->occ[k].slot];
+                }
+                dcoracle_complete(sq->dco_head, c.error != nil);
+                if (sq->dco_active) dcoracle_submission_end();
+                sq->vis = nil; free(sq->occ); free(sq);
+                done_advance(v);   // after the results: a query is read as available once g_done reaches its ticket
             }
-            sq->vis = nil; free(sq->occ); free(sq);
-            done_advance(v);   // after the results: a query is read as available once g_done reaches its ticket
         }];
         [cb commit];
         g_n_submit++;
@@ -1714,14 +2258,50 @@ VKB(vkAcquireNextImageKHR, VkResult, VkDevice d, VkSwapchainKHR sc, uint64_t tim
     if (f) atomic_store(&f->val, 0);
     *idx = i; return VK_SUCCESS;
 }
-static uint64_t g_frames;
+// The [ab] lines of DM_VK_DONTCARE=ab: a phase is reported once its frames' GPU times have arrived, DC_AB_LATE frames after its last frame, from the last three quarters of its
+// frames (the first quarter is left out while the GPU clock and the frame step settle): p50 / p90 / mean of the GPU time and of the frame time, and per frame the attachment
+// traffic and passes. All frames of the phase count for the traffic, which does not wait for the clock
+enum { DC_AB_LATE = 8, DC_AB_MAXF = 4096 };
+static float g_dc_gms[DC_AB_MAXF], g_dc_fms[DC_AB_MAXF], g_dc_ftms[DC_RING];   // the phase's samples, and each frame's time between presents
+static int g_dc_nf; static long g_dc_ph = -1; static uint64_t g_dc_sum[3], g_dc_nfr;   // frames in g_dc_gms; the phase so far; load bytes, store bytes, passes; all its frames
+static int dc_flt_cmp(const void *a, const void *b) { float x = *(const float *)a, y = *(const float *)b; return x < y ? -1 : x > y; }
+static void dc_ab_report(long ph) {
+    int skip = g_dc_nf / 4, m = g_dc_nf - skip; if (m < 1) return;
+    float *g = malloc(sizeof(float) * (size_t)m), *fr = malloc(sizeof(float) * (size_t)m); double gs = 0, fs = 0;
+    for (int i = 0; i < m; i++) { g[i] = g_dc_gms[skip + i]; fr[i] = g_dc_fms[skip + i]; gs += g[i]; fs += fr[i]; }
+    qsort(g, (size_t)m, sizeof *g, dc_flt_cmp); qsort(fr, (size_t)m, sizeof *fr, dc_flt_cmp);
+    double nf = g_dc_nfr ? (double)g_dc_nfr : 1;
+    VLOG("[ab] phase %ld VK_DONTCARE=%s: %d frames, GPU p50 %.2f / p90 %.2f / mean %.2f ms, frame p50 %.2f / p90 %.2f / mean %.2f ms; per frame: attachments load %.0f MB store %.0f MB, passes %.1f",
+         ph, g_dc_name[g_dc_ab[ph % g_dc_ab_n]], m, g[m / 2], g[m * 9 / 10], gs / m, fr[m / 2], fr[m * 9 / 10], fs / m,
+         (double)g_dc_sum[0] / nf / 1048576.0, (double)g_dc_sum[1] / nf / 1048576.0, (double)g_dc_sum[2] / nf);
+    free(g); free(fr);
+}
+static void dc_ab_frame(uint64_t fi) {   // frame fi has been presented: its time, and the frame DC_AB_LATE before it
+    static uint64_t prev; uint64_t now = now_ns();
+    g_dc_ftms[fi % DC_RING] = prev ? (float)((double)(now - prev) / 1e6) : 0;   // the first frame has no earlier present to measure from and is left out
+    prev = now;
+    if (fi < DC_AB_LATE) return;
+    uint64_t k = fi - DC_AB_LATE; size_t i = k % DC_RING; long ph = (long)(k / (uint64_t)g_dc_ab_len);
+    if (ph != g_dc_ph) {
+        if (g_dc_ph >= 0) dc_ab_report(g_dc_ph);
+        g_dc_ph = ph; g_dc_nf = 0; g_dc_nfr = 0; memset(g_dc_sum, 0, sizeof g_dc_sum);
+    }
+    float gms = (float)((double)atomic_exchange(&g_dc_gpu[i], 0) / 1e6), fms = g_dc_ftms[i];
+    g_dc_sum[0] += atomic_exchange(&g_dc_ld[i], 0); g_dc_sum[1] += atomic_exchange(&g_dc_st[i], 0); g_dc_sum[2] += atomic_exchange(&g_dc_np[i], 0); g_dc_nfr++;
+    if (fms > 0 && g_dc_nf < DC_AB_MAXF) { g_dc_gms[g_dc_nf] = gms; g_dc_fms[g_dc_nf] = fms; g_dc_nf++; }
+}
 static void frame_end(void) {
     static uint64_t pd, pp, ps, pc;
-    uint64_t f = ++g_frames, dr = g_n_draw, pa = g_n_pass, su = g_n_submit, co = g_n_copy;
-    if (f <= 3 || f % 300 == 0)
-        VLOG("frame %llu: draws %llu, passes %llu, submits %llu, copies %llu (since the last record, %llu frames); pipelines so far %llu, buffer memory %.1f MB", (unsigned long long)f, (unsigned long long)(dr - pd),
-             (unsigned long long)(pa - pp), (unsigned long long)(su - ps), (unsigned long long)(co - pc), (unsigned long long)(f <= 3 ? 1 : 300), (unsigned long long)g_n_pso, g_mem_bytes / 1048576.0);
-    if (f <= 3 || f % 300 == 0) { pd = dr; pp = pa; ps = su; pc = co; }
+    uint64_t f = atomic_fetch_add(&g_frames, 1) + 1, dr = g_n_draw, pa = g_n_pass, su = g_n_submit, co = g_n_copy;
+    if (dontcare_mode() == DC_AB) dc_ab_frame(f - 1);
+    if (f <= 3 || f % 300 == 0) {
+        uint64_t nf = f <= 3 ? 1 : 300, gpu = atomic_exchange(&g_gpu_ns, 0);   // the frames' command buffers, summed: they can overlap
+        VLOG("frame %llu: draws %llu, passes %llu, submits %llu, copies %llu (since the last record, %llu frames); GPU %.2f ms/frame, pipelines so far %llu, buffer memory %.1f MB",
+             (unsigned long long)f, (unsigned long long)(dr - pd), (unsigned long long)(pa - pp), (unsigned long long)(su - ps), (unsigned long long)(co - pc),
+             (unsigned long long)nf, (double)gpu / 1e6 / (double)nf, (unsigned long long)g_n_pso, g_mem_bytes / 1048576.0);
+        pd = dr; pp = pa; ps = su; pc = co;
+    }
+    dcoracle_frame_end(f);
     dm_guest_frame_tick();
 }
 VKB(vkQueuePresentKHR, VkResult, VkQueue q, const VkPresentInfoKHR *pi) {

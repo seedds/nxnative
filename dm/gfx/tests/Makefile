@@ -517,6 +517,23 @@ check_t_gl_imports: t_gl_imports
 	./t_gl_imports --stubs
 gl-imports: check_t_gl_imports
 check_t_vk_desc: RUN_ENV = MTL_DEBUG_LAYER=1
+# An attachment opened with LOAD_OP_DONT_CARE keeps what the image held, colour, depth and stencil (Re:ZERO's post chain)
+t_vk_dontcare: t_vk_dontcare.m ../vk/hle_vk.m $(MTL_T_DEP)
+	clang $(CFLAGS) -I../../third_party/vulkan-headers/include -fobjc-arc -o $@ t_vk_dontcare.m $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
+# The validation layer fills every DontCare load with a pattern, so a DontCare load fails the check whatever the tile memory happens to hold
+check_t_vk_dontcare: RUN_ENV = MTL_DEBUG_LAYER=1 MTL_DEBUG_LAYER_VALIDATE_LOAD_ACTIONS=1
+# The "[vk] frame" line gives the GPU time of the frames' command buffers (they can overlap, so it is their sum)
+t_vk_gputime: t_vk_gputime.m ../vk/hle_vk.m $(MTL_T_DEP)
+	clang $(CFLAGS) -I../../third_party/vulkan-headers/include -fobjc-arc -o $@ t_vk_gputime.m $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
+check_t_vk_gputime: RUN_ENV = MTL_DEBUG_LAYER=1
+# DM_VK_DONTCARE=ab:<m>,<m> with DM_AB=<frames>: the modes alternate by phase, each submission keeps its frame's mode, an [ab] line per phase (gpuprof.py --ab reads it)
+t_vk_dontcare_ab: t_vk_dontcare_ab.m ../vk/hle_vk.m $(MTL_T_DEP)
+	clang $(CFLAGS) -I../../third_party/vulkan-headers/include -fobjc-arc -o $@ t_vk_dontcare_ab.m $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
+check_t_vk_dontcare_ab: RUN_ENV = MTL_DEBUG_LAYER=1 MTL_DEBUG_LAYER_VALIDATE_LOAD_ACTIONS=1
+# Same-process Vulkan DONT_CARE scratch/reference comparison for selected present frames
+t_vk_dcoracle: t_vk_dcoracle.m ../vk/hle_vk.m $(MTL_T_DEP)
+	clang $(CFLAGS) -I../../third_party/vulkan-headers/include -fobjc-arc -o $@ t_vk_dcoracle.m $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
+check_t_vk_dcoracle: RUN_ENV = MTL_DEBUG_LAYER=1 MTL_DEBUG_LAYER_VALIDATE_LOAD_ACTIONS=1
 # Float32 missing components retain float padding through integer shader inputs.
 t_float_pad: t_float_pad.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_float_pad.m $(MTL_T_SRC) $(FW)

@@ -889,6 +889,101 @@ static id<MTLRenderPipelineState> mtk_async_skip(const pso_key *k, NvShader *ts,
     if (g_vis_counting) g_vis_forced = 1;   // this draw would have added samples: the next report must not read "occluded" because of the skip
     return nil;
 }
+// Depth pre-pass pairs (DM_PSO_MESH_ASYNC=skip). Ocarina of Time draws each foliage chunk twice: a depth pre-pass (LESS, depth write, no colour, inside an occlusion query), then a
+// colour pass (EQUAL, no depth write) over a copy of that depth (copy_t2t into the colour pass's depth target). Skipping only the colour pass while its pipeline builds left the
+// pre-pass depth with no colour over it: white silhouettes, the shape of issue #1720 (reported in PR #2084). So:
+//  - a draw with depth testing on is a depth pass when it writes depth (and is not EQUAL), a colour pass over earlier depth when it tests EQUAL, or tests without writing depth
+//    and blends nothing (mtk_pair_role); blended draws (no depth write) are neither and skip as before;
+//  - depth passes are noted per frame (drawn or skipped), keyed by the geometry (the task shader's key and its stage's uniform / storage buffers; a mesh shader with no task:
+//    the mesh shader's) and the depth target; a texture copy hands the notes of its source to its destination (mtk_pair_copy), so the copied depth still matches its colour pass.
+//    Notes of this frame and the one before count (the frame number moves at present, on another thread, so a frame's draws may straddle it);
+//  - a colour pass whose pipeline is not built yet is skipped only when its geometry's depth passes on that target were noted and none drew; otherwise it waits for its
+//    build at the draw, as without the switch (also when its build already runs in the background). A colour pass that is built but whose depth passes were all skipped is
+//    skipped as well (EQUAL over depth without its geometry draws nothing right);
+//  - once a colour pass is skipped its geometry enters the partner table (g_mtk_pairs), and its depth passes are skipped too, even when their own pipeline is ready, until every
+//    skipped colour pipeline of it is built or MTK_PAIR_FRAMES frames have passed (then the depth passes draw and the colour pass waits). A forced skip marks an occlusion query
+//    over it as a build skip does;
+//  - a draw that writes stencil always waits (mtk_async_state_why), as one that may write memory does.
+#define MTK_PAIR_FRAMES 60
+#define MTK_NOTES 2048
+typedef struct { uint64_t geo, tgt, frame; uint32_t drawn, skipped; } mtk_note;   // frame 0: empty
+static mtk_note g_mtk_notes[2][MTK_NOTES];   // by frame parity: this frame's and the previous one's
+static uint64_t g_mtk_notes_frame[2] = {UINT64_MAX, UINT64_MAX};
+static uint64_t g_mtk_pair_waits, g_mtk_pair_nonote, g_mtk_pair_depth_skips, g_mtk_pair_colour_skips, g_mtk_pair_expired, g_mtk_pair_released, g_mtk_pair_copies, g_mtk_pair_added;
+@interface MtkPair : NSObject { @public uint64_t frame; NSMutableArray<NSData *> *keys; } @end   // a skipped colour pass's geometry: since frame, its colour pipelines (keys)
+@implementation MtkPair @end
+static NSMutableDictionary<NSNumber *, MtkPair *> *g_mtk_pairs;   // submit thread: by geometry
+static void mtk_pair_count(uint64_t *c, const char *what) {   // the pair counters, logged at each power of two
+    if (!(++*c & (*c - 1))) MLOG("task / mesh pipeline async: %llu %s (depth pre-pass pairs)", (unsigned long long)*c, what);
+}
+static int mtk_pair_role(void) {   // 0 neither, 1 depth pass, 2 colour pass over earlier depth
+    if (!R.rt.depth || !g_pass.hd || !S.ds.dt || S.ds.df == NVN_DEPTH_FUNC_ALWAYS) return 0;
+    if (S.ds.df == NVN_DEPTH_FUNC_EQUAL) return 2;
+    if (S.ds.dw) return 1;
+    return S.color.blend_en ? 0 : 2;
+}
+static uint64_t mtk_pair_mix(uint64_t h, uint64_t v) { h ^= v; h *= 0x100000001b3ull; return h ^ (h >> 29); }
+static uint64_t mtk_pair_geo(NvShader *ts, NvShader *ms) {   // the geometry: the task shader (else the mesh shader) by key, and its stage's buffers
+    NvShader *g = ts ?: ms; int st = ts ? 3 : 4; uint64_t h = 0xcbf29ce484222325ull;
+    for (const char *p = g->key; *p; p++) h = mtk_pair_mix(h, (uint8_t)*p);
+    for (int i = 0; i < 16; i++) { h = mtk_pair_mix(h, S.ubo[st][i].addr); h = mtk_pair_mix(h, S.ubo[st][i].size); h = mtk_pair_mix(h, S.ssbo[st][i].addr); h = mtk_pair_mix(h, S.ssbo[st][i].size); }
+    return h ? h : 1;
+}
+static mtk_note *mtk_note_at(uint64_t fr, uint64_t geo, uint64_t tgt, int add) {   // the note of (geo, tgt) in frame fr (this or the previous one); add: made if missing (NULL when full)
+    int t = (int)(fr & 1);
+    if (g_mtk_notes_frame[t] != fr) { if (!add) return NULL; memset(g_mtk_notes[t], 0, sizeof g_mtk_notes[t]); g_mtk_notes_frame[t] = fr; }
+    uint32_t i = (uint32_t)mtk_pair_mix(geo, tgt) & (MTK_NOTES - 1);
+    for (int n = 0; n < MTK_NOTES; n++, i = (i + 1) & (MTK_NOTES - 1)) {
+        mtk_note *e = &g_mtk_notes[t][i];
+        if (!e->frame) { if (!add) return NULL; e->geo = geo; e->tgt = tgt; e->frame = fr + 1; return e; }
+        if (e->geo == geo && e->tgt == tgt) return e;
+    }
+    return NULL;
+}
+static void mtk_pair_note(uint64_t geo, uint64_t tgt, int drawn) {
+    mtk_note *e = mtk_note_at(atomic_load(&g_cur_frame), geo, tgt, 1); if (!e) return;   // full: the colour pass finds no note and waits
+    if (drawn) e->drawn++; else e->skipped++;
+}
+// 1: every depth pass of the geometry on tgt this frame (and the one before) was skipped; 0: one drew, or none was noted
+static int mtk_pair_depth_skipped(uint64_t geo, uint64_t tgt, int *noted) {
+    uint64_t fr = atomic_load(&g_cur_frame); uint32_t d = 0, s = 0;
+    for (int b = 0; b < 2; b++) { if (b && !fr) break; mtk_note *e = mtk_note_at(fr - (uint64_t)b, geo, tgt, 0); if (e) { d += e->drawn; s += e->skipped; } }
+    *noted = d || s; return !d && s;
+}
+// copy_t2t: the destination's depth now holds the source's, so it takes the source's notes (added to its own: a draw noted on either side counts)
+static void mtk_pair_copy(uint64_t src, uint64_t dst) {
+    if (!mtk_async_on() || src == dst) return;
+    uint64_t fr = atomic_load(&g_cur_frame); mtk_note got[64]; int n = 0;
+    for (int b = 0; b < 2; b++) { uint64_t f = fr - (uint64_t)b; if (b && !fr) break; int t = (int)(f & 1); if (g_mtk_notes_frame[t] != f) continue;
+        for (int i = 0; i < MTK_NOTES && n < 64; i++) { mtk_note *e = &g_mtk_notes[t][i]; if (e->frame && e->tgt == src) got[n++] = *e; } }
+    for (int i = 0; i < n; i++) { mtk_note *e = mtk_note_at(fr, got[i].geo, dst, 1); if (e) { e->drawn += got[i].drawn; e->skipped += got[i].skipped; } }
+    if (n) g_mtk_pair_copies++;
+}
+// A depth pass of geo: 1 while a skipped colour pass of it is still building (the depth pass is skipped too); the entry ends when they are built or after MTK_PAIR_FRAMES frames
+static int mtk_pair_hold(uint64_t geo) {
+    if (!g_mtk_pairs.count) return 0;
+    NSNumber *gk = @(geo); MtkPair *p = g_mtk_pairs[gk]; if (!p) return 0;
+    int building = 0;
+    for (NSData *kd in p->keys) { pso_key k; memcpy(&k, kd.bytes, sizeof k); if (hm_get_id(&g_pso_mtk, &k) == g_mtk_async_mark) building = 1; }
+    uint64_t fr = atomic_load(&g_cur_frame);
+    if (!building) { mtk_pair_count(&g_mtk_pair_released, "partner entries ended: their colour passes were built"); [g_mtk_pairs removeObjectForKey:gk]; return 0; }
+    if (fr - p->frame >= MTK_PAIR_FRAMES) {
+        mtk_pair_count(&g_mtk_pair_expired, "partner entries expired"); [g_mtk_pairs removeObjectForKey:gk];
+        static int ne; if (ne < 16) { ne++; MLOG("task / mesh pipeline async: a colour pass still builds after %d frames; its depth passes draw again and the colour pass waits for its build", MTK_PAIR_FRAMES); }
+        return 0;
+    }
+    return 1;
+}
+static void mtk_pair_add(uint64_t geo, const pso_key *k) {
+    if (!g_mtk_pairs) g_mtk_pairs = [NSMutableDictionary dictionary];
+    NSNumber *gk = @(geo); MtkPair *p = g_mtk_pairs[gk];
+    if (!p) { p = [MtkPair new]; p->frame = atomic_load(&g_cur_frame); p->keys = [NSMutableArray array]; g_mtk_pairs[gk] = p; mtk_pair_count(&g_mtk_pair_added, "colour passes skipped with their depth passes (partner entries)"); }
+    NSData *kd = [NSData dataWithBytes:k length:sizeof *k]; if (![p->keys containsObject:kd]) [p->keys addObject:kd];
+}
+static const char *mtk_async_state_why(void) {   // NULL: the draw's fixed-function state lets it be skipped
+    if (g_pass.hs && S.ds.st && (S.st_wmask[0] || S.st_wmask[1])) return "it writes stencil";
+    return NULL;
+}
 static id<MTLRenderPipelineState> mtk_pso(NvProg *raster) {
     if (!raster || !g_mtk.ms || !g_mtk.ms->fn) return nil;
     NvShader *ts = g_mtk.ts, *ms = g_mtk.ms, *fs = raster->sh[1];
@@ -897,14 +992,41 @@ static id<MTLRenderPipelineState> mtk_pso(NvProg *raster) {
     mtk_bind_key(&k, ts, ms, fs);
     if (g_mtk_async) mtk_async_take();
     id ps = hm_get_id(&g_pso_mtk, &k);
-    if (ps && ps == g_mtk_async_mark) {
-        MtkAsync *a = g_mtk_async[[NSData dataWithBytes:&k length:sizeof k]];
-        return mtk_async_skip(&k, ts, ms, fs);   // started or not: a build that never returns holds no thread here (a build at the draw would wedge the frame instead)
-    }
-    if (ps) return ps == NSNull.null ? nil : ps;
-    if (mtk_async_on()) {
-        const char *why = mtk_async_why(&k, ts, ms, fs);
-        if (!why) { if (!g_mtk_async_mark) g_mtk_async_mark = [NSObject new]; return mtk_async_skip(&k, ts, ms, fs); }   // at the lost cap it is skipped and not built (mtk_async_skip)
+    if (!mtk_async_on()) { if (ps) return ps == NSNull.null ? nil : ps; }
+    else {
+        int role = mtk_pair_role(); uint64_t geo = role ? mtk_pair_geo(ts, ms) : 0, tgt = role ? R.rt.depth->serial : 0;
+        const char *why = mtk_async_state_why() ?: mtk_async_why(&k, ts, ms, fs);
+        int building = ps && ps == g_mtk_async_mark;
+        if (ps && !building) {   // built (or failed)
+            if (ps == NSNull.null) return nil;
+            if (role == 1) {
+                if (!why && mtk_pair_hold(geo)) {   // its colour pass is skipped while it builds: the depth goes with it
+                    mtk_pair_note(geo, tgt, 0); mtk_pair_count(&g_mtk_pair_depth_skips, "built depth passes skipped with their colour pass"); if (g_vis_counting) g_vis_forced = 1;
+                    if (mtk_async_log_all()) MLOG("task / mesh pipeline async: depth pass of task %s mesh %s skipped with its colour pass", ts ? ts->key : "-", ms->key);
+                    return nil;
+                }
+                mtk_pair_note(geo, tgt, 1);
+            } else if (role == 2 && !why) {
+                int noted; if (mtk_pair_depth_skipped(geo, tgt, &noted)) { mtk_pair_count(&g_mtk_pair_colour_skips, "built colour passes skipped: their depth passes were skipped"); if (g_vis_counting) g_vis_forced = 1; return nil; }   // its depth passes were all skipped
+            }
+            return ps;
+        }
+        // not built yet (building in the background, or never asked for)
+        int noted = 0;
+        if (!why && role == 2 && !mtk_pair_depth_skipped(geo, tgt, &noted)) {
+            why = noted ? "a depth pass of its geometry drew this frame" : "no depth pass of its geometry was noted on its depth target";
+            if (noted) mtk_pair_count(&g_mtk_pair_waits, "colour passes waited: a depth pass of theirs drew"); else mtk_pair_count(&g_mtk_pair_nonote, "colour passes waited: no depth pass noted");
+        }
+        if (!why) {
+            if (!g_mtk_async_mark) g_mtk_async_mark = [NSObject new];
+            if (role == 1) mtk_pair_note(geo, tgt, 0); else if (role == 2) mtk_pair_add(geo, &k);
+            return mtk_async_skip(&k, ts, ms, fs);   // started or not: a build that never returns holds no thread here (a build at the draw would wedge the frame instead); at the lost cap it is skipped and not built
+        }
+        if (building) {   // it waits after all: built here; the background build's result is dropped (mtk_async_take), and one not started yet is taken off the queue
+            NSData *kd = [NSData dataWithBytes:&k length:sizeof k]; MtkAsync *a = g_mtk_async[kd];
+            if (a && !a->started) { [g_mtk_async_fifo removeObject:a]; [g_mtk_async removeObjectForKey:kd]; }
+        }
+        if (role == 1) mtk_pair_note(geo, tgt, 1);
         g_mtk_async_waits++;
         static int nw; if (nw < 64) { nw++; MLOG("task / mesh pipeline async: task %s mesh %s fragment %s waits for its build (%s)", ts ? ts->key : "-", ms->key, fs ? fs->key : "-", why); }
     }

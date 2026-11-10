@@ -75,6 +75,49 @@ static prog_t make_program(NvShader *ts, NvShader *ms, NvShader *fs) {
     NvProg *p = [NvProg new]; p->sh[4] = ms; p->sh[3] = ts; p->sh[1] = fs;
     prog_t pr = {0}; pr.magic = MAGIC('P','R','O','G'); pr.serial = nvn_new_serial(); serial_put(pr.serial, p); return pr;
 }
+// Depth pre-pass pairs: one frame (g_cur_frame + 1) of [the pre-pass program: LESS with depth write, red, inside a samples-passed query], [a copy of its depth into depth2,
+// the colour pass's target], [the colour program: EQUAL, no depth write, green], over the same geometry (same task shader, z from the same first). Returns 0 nothing drawn (blue),
+// 1 green (both, or the colour pass alone over its depth), 2 red (the pre-pass depth without its colour: the white-silhouette case), -1 mixed
+static tex_t depth2; static NVNdepthStencilState ds_eq; static uint64_t test_frame = 1000;
+static int frame_pair(prog_t *pre, prog_t *col, int copy, uint64_t *report) {
+    atomic_store(&g_cur_frame, ++test_frame);
+    const NVNtexture *colors[] = {(const NVNtexture *)&color}; const float viewport[] = {0, 0, W, H}, blue[] = {0, 0, 1, 1};
+    P(nvnCommandBufferBeginRecording)(&command);
+    P(nvnCommandBufferSetRenderTargets)(&command, 1, colors, NULL, (const NVNtexture *)&depth, NULL);
+    P(nvnCommandBufferSetViewports)(&command, 0, 1, viewport); P(nvnCommandBufferSetScissor)(&command, 0, 0, W, H);
+    P(nvnCommandBufferSetDepthRange)(&command, 0, 1); P(nvnCommandBufferBindDepthStencilState)(&command, &ds);
+    P(nvnCommandBufferClearDepthStencil)(&command, 1, 1, 0, 0); P(nvnCommandBufferClearColor)(&command, 0, blue, 15);
+    if (report) { report[0] = 0xdead; P(nvnCommandBufferResetCounter)(&command, NVN_COUNTER_TYPE_SAMPLES_PASSED); }
+    if (pre) { P(nvnCommandBufferBindProgram)(&command, (const NVNprogram *)pre, 0xc3); mesh_draw(&command, 1, 1); }
+    if (report) P(nvnCommandBufferReportCounter)(&command, NVN_COUNTER_TYPE_SAMPLES_PASSED, (NVNbufferAddress)(uintptr_t)report);
+    if (copy) { NVNcopyRegion r = {0, 0, 0, W, H, 1};
+        P(nvnCommandBufferCopyTextureToTexture)(&command, (const NVNtexture *)&depth, NULL, &r, (const NVNtexture *)&depth2, NULL, &r, 0);
+        P(nvnCommandBufferSetRenderTargets)(&command, 1, colors, NULL, (const NVNtexture *)&depth2, NULL); }
+    if (col) { P(nvnCommandBufferBindDepthStencilState)(&command, &ds_eq); P(nvnCommandBufferBindProgram)(&command, (const NVNprogram *)col, 0xc3); mesh_draw(&command, 1, 1); }
+    NVNcommandHandle handle = P(nvnCommandBufferEndRecording)(&command);
+    P(nvnQueueSubmitCommands)(&queue, 1, &handle); P(nvnQueueFinish)(&queue);
+    id<MTLBuffer> pixels = [g_dev newBufferWithLength:W * H * 4 options:MTLResourceStorageModeShared]; res_add(pixels);
+    mtl_sub_begin();
+    enc_b_copy_texture_buffer(blit(), tex_mtl(&color), 0, 0, MTLOriginMake(0,0,0), MTLSizeMake(W,H,1), pixels, 0, W * 4, W * H * 4);
+    require(mtl_wait(mtl_sub_commit(), 5000000000ull), "readback finishes"); CHECK(!mtl_last_commit_error(), "Metal reports no execution error");
+    const uint8_t want[3][4] = {{0, 0, 255, 255}, {0, 255, 0, 255}, {255, 0, 0, 255}}; int all[3] = {1, 1, 1};
+    for (int i = 0; i < W * H; i++) for (int c = 0; c < 3; c++) all[c] &= !memcmp((const uint8_t *)pixels.contents + i * 4, want[c], 4);
+    res_remove(pixels);
+    return all[0] ? 0 : all[1] ? 1 : all[2] ? 2 : -1;
+}
+static void make_pair(id<MTLLibrary> library, const char *tag, prog_t *pre, prog_t *col) {   // fresh keys: a task shader shared by a red pre-pass and a green colour pass
+    NvShader *t = shader(library, @"task", 3, [NSString stringWithFormat:@"_pt%s", tag].UTF8String); t->mesh_kind = 1; t->mesh_threads = 32; t->mesh_payload = 4;
+    NvShader *md = shader(library, @"tasked", 4, [NSString stringWithFormat:@"_pd%s", tag].UTF8String), *mc = shader(library, @"tasked", 4, [NSString stringWithFormat:@"_pc%s", tag].UTF8String);
+    md->mesh_kind = mc->mesh_kind = 2; md->mesh_threads = mc->mesh_threads = 32;
+    NvShader *fr = shader(library, @"red", 1, [NSString stringWithFormat:@"_pr%s", tag].UTF8String), *fg = shader(library, @"color2", 1, [NSString stringWithFormat:@"_pg%s", tag].UTF8String);
+    fr->rf.color_mask = fg->rf.color_mask = 1;
+    *pre = make_program(t, md, fr); *col = make_program(t, mc, fg);
+}
+// Frames of a pair until it draws green (at most n frames, gap us apart); *red counts frames that showed the pre-pass alone
+static int pair_until_green(prog_t *pre, prog_t *col, int copy, int n, int gap, int *red) {
+    for (int i = 1; i <= n; i++) { int r = frame_pair(pre, col, copy, NULL); if (r == 2) (*red)++; if (r == 1) return i; usleep((useconds_t)gap); }
+    return 0;
+}
 // mtk_pso straight, as draw_ calls it for a task / mesh draw: the colour / depth formats of the test's pass. Returns its pipeline (nil = the draw is skipped)
 static id<MTLRenderPipelineState> mtk_pso_for(NvShader *ts, NvShader *ms, NvShader *fs) {
     memset(g_pass.cfmt, 0, sizeof g_pass.cfmt); g_pass.cfmt[0] = MTLPixelFormatRGBA8Unorm; g_pass.dfmt = MTLPixelFormatDepth32Float; g_pass.sfmt = 0; g_pass.samples = 1;
@@ -104,7 +147,8 @@ int main(void) { @autoreleasepool {
         "  if (!tid) { p.first = draw[1]; grid.set_threadgroups_per_grid(uint3(1)); } }\n"
         "[[mesh]] void tasked(Mesh m, const object_data Payload& p [[payload]], uint tid [[thread_index_in_threadgroup]]) { if (!tid) triangle(m, p.first); }\n"
         "fragment float4 color() { return float4(0,1,0,1); }\n"
-        "fragment float4 color2() { return float4(0,1,0,1); }\n";
+        "fragment float4 color2() { return float4(0,1,0,1); }\n"
+        "fragment float4 red() { return float4(1,0,0,1); }\n";
     id<MTLLibrary> library = [g_dev newLibraryWithSource:source options:nil error:&error];
     if (!library) fprintf(stderr, "%s\n", error.localizedDescription.UTF8String);
     require(library != nil, "synthetic task and mesh shaders compile");
@@ -132,8 +176,11 @@ int main(void) { @autoreleasepool {
     color = (tex_t){.magic = MAGIC('T','E','X',0), .serial = nvn_new_serial()}; depth = (tex_t){.magic = MAGIC('T','E','X',0), .serial = nvn_new_serial()};
     color.d = (nvn_texdesc){.target = NVN_TEXTURE_TARGET_2D, .format = NVN_FORMAT_RGBA8, .width = W, .height = H, .depth = 1, .levels = 1, .samples = 1};
     depth.d = color.d; depth.d.format = NVN_FORMAT_DEPTH32F;
+    depth2 = (tex_t){.magic = MAGIC('T','E','X',0), .serial = nvn_new_serial()}; depth2.d = depth.d;
     P(nvnDepthStencilStateSetDefaults)(&ds); P(nvnDepthStencilStateSetDepthTestEnable)(&ds, 1);
     P(nvnDepthStencilStateSetDepthWriteEnable)(&ds, 1); P(nvnDepthStencilStateSetDepthFunc)(&ds, NVN_DEPTH_FUNC_LESS);
+    P(nvnDepthStencilStateSetDefaults)(&ds_eq); P(nvnDepthStencilStateSetDepthTestEnable)(&ds_eq, 1);
+    P(nvnDepthStencilStateSetDepthWriteEnable)(&ds_eq, 0); P(nvnDepthStencilStateSetDepthFunc)(&ds_eq, NVN_DEPTH_FUNC_EQUAL);
     uint64_t *report = (uint64_t *)(memory + CMD + 256); uint32_t *rec = (uint32_t *)(memory + CMD + 1024);   // the report, then the indirect record
 
     // 1. mesh only: the first draw is skipped (the submission does not wait for the build), later ones draw once it is published
@@ -374,6 +421,56 @@ int main(void) { @autoreleasepool {
     n = 0; for (int i = 1; i <= 1000 && !n; i++) { int all = 1; for (int j = 0; j < 3; j++) all &= submit(&lp2[j], 1, (opts){0}); if (all) n = i; else usleep(10000); }
     CHECK(n > 0 && g_mtk_async_builds - lb0 == 3, "then the third builds and all three draw");
     g_mtk_async_slow_s = slow0;
+
+    // 9. depth pre-pass + EQUAL colour pass (PR #2084 review): the colour pass is never skipped while its geometry's depth pass draws (that leaves the pre-pass depth with no
+    // colour: Ocarina of Time's white foliage silhouettes, issue #1720), and once it is skipped its depth passes are skipped with it until it is built
+    printf("depth pre-pass pairs\n");
+    prog_t p9a, c9a, p9b, c9b, p9c, c9c, p9c2, c9c2, p9d, c9d;
+    make_pair(library, "a", &p9a, &c9a); make_pair(library, "b", &p9b, &c9b); make_pair(library, "c", &p9c, &c9c); make_pair(library, "c2", &p9c2, &c9c2); make_pair(library, "d", &p9d, &c9d);
+    // 9a. both cold: both skipped; with one slot the pre-pass builds first, and while the colour pass still builds the ready pre-pass is skipped with it (never red)
+    g_mtk_async_max = 1; g_mtk_async_test_delay_us = 300000;
+    uint64_t ds0 = g_mtk_pair_depth_skips;
+    int r = frame_pair(&p9a, &c9a, 0, report);
+    CHECK(r == 0, "both passes cold: nothing drawn (both skipped, no pre-pass depth without its colour)");
+    CHECK(g_mtk_pairs.count >= 1, "the skipped colour pass entered the partner table");
+    usleep(400000);   // the pre-pass's build returns; the colour pass's starts at the next draw
+    r = frame_pair(&p9a, &c9a, 0, report);
+    CHECK(r == 0 && g_mtk_pair_depth_skips > ds0, "the built pre-pass is skipped while its colour pass still builds");
+    CHECK(report[0] >= 1 && report[0] != 0xdead, "an occlusion query over the pre-pass skipped with its colour pass reports visible");
+    int red = 0; n = pair_until_green(&p9a, &c9a, 0, 1000, 10000, &red);
+    CHECK(n > 0, "the pair draws once the colour pass is built");
+    CHECK(red == 0, "no frame showed the pre-pass without its colour pass");
+    // 9b. the pre-pass is built and draws: its colour pass, not built yet, waits for its build instead of being skipped
+    g_mtk_async_max = 2; g_mtk_async_test_delay_us = 0;
+    n = 0; for (int i = 1; i <= 1000 && !n; i++) { if (frame_pair(&p9b, NULL, 0, NULL) == 2) n = i; else usleep(10000); }
+    CHECK(n > 0, "the pre-pass alone draws (its depth, red)");
+    uint64_t pw0 = g_mtk_pair_waits; r = frame_pair(&p9b, &c9b, 0, NULL);
+    CHECK(r == 1, "pre-pass drawn: the cold colour pass waits for its build and draws in the same frame (no red silhouette)");
+    CHECK(g_mtk_pair_waits == pw0 + 1, "the colour pass's wait is counted as a pair wait");
+    // 9c. the colour pass reads a copy of the pre-pass depth (copy_t2t into depth2): the copy carries the notes
+    g_mtk_async_max = 1; g_mtk_async_test_delay_us = 300000;
+    uint64_t nn0 = g_mtk_pair_nonote, aw0 = g_mtk_async_waits;
+    r = frame_pair(&p9c, &c9c, 1, NULL);
+    CHECK(r == 0 && g_mtk_pair_nonote == nn0 && g_mtk_async_waits == aw0, "over a copy of the skipped pre-pass depth the colour pass is skipped too (the copy carried the notes)");
+    red = 0; n = pair_until_green(&p9c, &c9c, 1, 1000, 10000, &red);
+    CHECK(n > 0 && red == 0, "through the copy: drawn once built, never the pre-pass alone");
+    g_mtk_async_max = 2; g_mtk_async_test_delay_us = 0;
+    n = 0; for (int i = 1; i <= 1000 && !n; i++) { if (frame_pair(&p9c2, NULL, 1, NULL) == 2) n = i; else usleep(10000); }
+    pw0 = g_mtk_pair_waits; r = frame_pair(&p9c2, &c9c2, 1, NULL);
+    CHECK(n > 0 && r == 1 && g_mtk_pair_waits == pw0 + 1, "through the copy: pre-pass drawn, the cold colour pass waits and draws");
+    // 9d. expiry: a colour pass still building after MTK_PAIR_FRAMES frames lets its depth passes draw again, and then it waits for its build
+    g_mtk_async_max = 1; g_mtk_async_test_delay_us = 1500000;
+    r = frame_pair(&p9d, &c9d, 0, NULL); CHECK(r == 0, "expiry pair: both skipped");
+    usleep(1700000);   // the pre-pass's build returns, the colour pass's starts at the next draw (1.5 s)
+    ds0 = g_mtk_pair_depth_skips; r = frame_pair(&p9d, &c9d, 0, NULL);
+    CHECK(r == 0 && g_mtk_pair_depth_skips == ds0 + 1, "expiry pair: the built pre-pass is held while the colour pass builds");
+    uint64_t ex0 = g_mtk_pair_expired; test_frame += MTK_PAIR_FRAMES;
+    r = frame_pair(&p9d, &c9d, 0, NULL);
+    CHECK(g_mtk_pair_expired == ex0 + 1, "after MTK_PAIR_FRAMES frames the partner entry expires");
+    CHECK(r == 1, "after the expiry the pre-pass draws and the colour pass waits for its build (green, not red)");
+    g_mtk_async_test_delay_us = 0; g_mtk_async_max = 2;
+    for (int i = 0; i < 300 && atomic_load(&g_mtk_async_running); i++) usleep(10000);
+    CHECK(frame_pair(&p9d, &c9d, 0, NULL) == 1, "the expiry pair keeps drawing after the background build returns");
 
     // 8. teardown with a build in flight: a fresh key is skipped and the test ends at once; the process must exit cleanly (the build holds its own references)
     printf("teardown with a build in flight\n");

@@ -104,6 +104,16 @@ static void t_npads(void) {
     CHECK(buttons_of(0, STYLE_FULLKEY) == DM_BTN_Y && lx_of(0) == 0, "player 1 does not see player 2");
     CHECK(buttons_of(1, STYLE_HANDHELD) == 0, "player 2 is not a handheld controller");
     CHECK(h_hid_Led(&(uint32_t){0}) == 0x1 && h_hid_Led(&(uint32_t){1}) == 0x3 && h_hid_Led(&(uint32_t){7}) == 0x6, "player LED patterns");
+    {   // Home button protection: what the game set, per npad, off by default (Nintendo Switch Sports Resort asks at boot)
+        uint32_t no1 = 0, no8 = 7, other = 0x10, handheld = 0x20, bad = 9;
+        CHECK(!h_hid_HomeProtectOn(&no1) && !h_hid_HomeProtectOn(&handheld), "Home protection starts off");
+        h_hid_HomeProtect(&no1, true); h_hid_HomeProtect(&handheld, true);
+        CHECK(h_hid_HomeProtectOn(&no1) && h_hid_HomeProtectOn(&handheld) && !h_hid_HomeProtectOn(&no8) && !h_hid_HomeProtectOn(&other), "on for the npads the game turned it on for");
+        h_hid_HomeProtect(&no1, false);
+        CHECK(!h_hid_HomeProtectOn(&no1) && h_hid_HomeProtectOn(&handheld), "off again for No1, Handheld kept");
+        h_hid_HomeProtect(&bad, true); CHECK(!h_hid_HomeProtectOn(&bad) && !h_hid_HomeProtectOn(NULL), "an id that is no npad: off");
+        h_hid_HomeProtect(&handheld, false);
+    }
     int32_t info[2]; int8_t arg[8] = {1, 4};
     CHECK(h_hid_ShowCtrl(info, arg) == RES_OK && info[0] == 2 && info[1] == 0, "the controller applet reports two players, player 1 selected");
     CHECK(applet_opens == 1 && applet_depth == 0 && applet_closes_at_depth0 == 1, "the controller applet opens and closes once around its answer (focus 2, then 1)");

@@ -616,6 +616,16 @@ The guest address space, heaps, pools, virtual address memory and the allocators
 - **Check:** `make -C dm/gfx/tests GAME=<id> check_t_tex_drop_mip`: the device rule, the level shift by the CPU and the GPU upload paths, a 2D array, a re-upload, whole again after another use, an image-flagged texture dropped when sampled and made whole with its write usage, textures kept whole, view levels.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#for-an-iphone-or-ipad-build).
 
+### Upload staging kept for reuse on small devices
+
+- **Symptom:** on a device whose Metal working set is 5,461 MB (the iPhone 17), the host's resident memory holds about 125 MB of upload staging through play, while the game uploads only a few MB per 300 frames.
+- **Cause:** each of the three upload slots ([the slots and their batch budget](#upload-staging-grows-within-one-rendering-submission)) keeps its staging after a batch completes: a primary block grown to the slot's largest batch and one 32 MB overflow, up to 192 MB, so that a burst of uploads does not allocate and retire blocks every frame. Loading a scene fills them; in play they stay, unused.
+- **Fix:** general, for small devices (`nvn_mtl.m` `up_reuse`, `up_reuse_wants`): where Metal's working set is under 6 GB, the rule of [smaller textures](#large-sampled-textures-leave-out-their-largest-level-on-small-devices) (`small_working_set`), a batch's staging is released once its GPU work is done, the policy before reuse; elsewhere it is kept as before. A log line says so at the first upload. `DM_NVN_UPLOAD_REUSE=0` / `1` forces either.
+- **Result on Ocarina of Time** on the iPhone 17 (`r1_base` against `r1_reuse0`, `DM_NVN_UPLOAD_REUSE=0`, landscape 2352x1080, 30 fps cap, dynamic resolution on, frames 6,000-22,500, with smaller textures on): resident 2,709 → 2,584 MB, footprint 2.63 → 2.51 GB, headroom to the memory limit +125 MB; speed unchanged (29.1 against 29.2 fps, frame p50 34.0 ms in both, 19 against 18 late frames per 300). That device build was the same change on an earlier base, as a default off on every device; the rule here keeps the Mac's default.
+- **Open:** release the staging only once uploads have gone quiet (after a scene's load), which would keep the reuse for loads on small devices too.
+- **Check:** `make -C dm/gfx/tests GAME=<id> check_t_upload_slots`: the 6 GB rule, then staging reuse forced on and off over batches in flight; `check_t_upload_budget` the staging left after a burst either way.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#for-an-iphone-or-ipad-build).
+
 ### Repeated GPU out-of-memory failures end the game
 
 - **Symptom:** the Mac grows unresponsive for hours, then panics, with the host still submitting work that fails.

@@ -12162,7 +12162,9 @@ static inline int fb_live(const fb_cache_t *e) { return e->ser && e->bar == g_fb
 // The snapshot of an attachment's level and layer: the cached one (valid: *fresh = 0) or a texture to copy into (*fresh = 1; the entry is then valid from this barrier and submission on).
 // A new key takes an entry whose texture already has its format and size, one no later draw can reuse first, else the least recently used. Taking the entries in turn made a texture for
 // nearly every snapshot when a frame snapshots several sizes: Tears of the Kingdom's 4-5 a frame (1600x896 down to 400x224) each made one, 4-6 GB of textures every 300 frames on the Mac
-// and a residency commit for each texture added and each removed (GitHub #931)
+// and a residency commit for each texture added and each removed (GitHub #931). The callers copy after rp_flush, not only after the open pass ends: a clear with no draw after it waits
+// to be the load action of the pass this draw opens (R.clear_c / clear_d), so a copy taken before it held what the attachment had before the clear, which a game sees only up to its clear
+// (a clear, a barrier, then a draw that samples and writes the target; from issue #1932's patch)
 static fb_cache_t *fb_snap(uint64_t ser, int lv, int sl, MTLPixelFormat pf, NSUInteger w, NSUInteger h, int force, int *fresh) {
     fb_cache_t *e = NULL;
     for (int i = 0; i < 8 && !e; i++) if (g_fbc[i].snap && g_fbc[i].ser == ser && g_fbc[i].lv == lv && g_fbc[i].sl == sl) e = &g_fbc[i];
@@ -12304,7 +12306,8 @@ static int fb_depth_snap(NvShader *fs, const nvn_rbind *b, int tid, uint64_t ser
     id<MTLTexture> use = same ? e->snap : [e->snap newTextureViewWithPixelFormat:t.pixelFormat textureType:MTLTextureType2D levels:NSMakeRange(0, 1) slices:NSMakeRange(0, 1) swizzle:sw];
     if (!use) { e->ser = 0; RED_ONCE(163, "same-pass depth sampling: cannot create the snapshot view (format %lu); left as is", (unsigned long)t.pixelFormat); return 0; }
     if (fresh) {
-        if (g_enc) { g_fb_split++; rp_end(); }
+        if (g_enc) g_fb_split++;
+        rp_flush();   // the same for a clear still waiting (see fb_snap)
         enc_b_copy_texture(blit(), base, (NSUInteger)sl, (NSUInteger)lv, MTLOriginMake(0, 0, 0), MTLSizeMake(w, h, 1), e->snap, 0, 0, MTLOriginMake(0, 0, 0));
         fb_pass_sync();
     } else g_fb_dsnap_reuse++;
@@ -12424,7 +12427,7 @@ static void fb_prepare(NvProg *pr) {
             fb_cache_t *e = fb_snap(ser, lv, sl, base.pixelFormat, w, h, g_fb_mode == 2, &fresh); if (!e) continue;
             id<MTLTexture> snap = e->snap;
             if (fresh) {
-                if (g_enc) rp_end();
+                rp_flush();   // ends the pass, or lands a clear still waiting to be its load action: the snapshot holds the cleared content (fb_snap)
                 id<MTL4ComputeCommandEncoder> be = blit(); enc_b_copy_texture(be, base, (NSUInteger)sl, (NSUInteger)lv, MTLOriginMake(0, 0, 0), MTLSizeMake(w, h, 1), snap, 0, 0, MTLOriginMake(0, 0, 0));
             } else if (g_enc && (g_fb_rmask >> k & 1)) rp_end();   // an earlier draw of this pass read the attachment directly: it must not see this pass's writes
             if (!g_enc) fb_pass_sync();

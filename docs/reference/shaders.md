@@ -2211,6 +2211,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md#found-on-this-game).
 - **Check:** `t_pso_warm` checks that the tool's default follows Metal's count.
 
+### Uniform words a run never changes, folded into hot shaders
+
+- **Symptom:** hot shaders at the 96-register cap, or spilling, branch on uniform words that stay the same for a whole run; Metal's compiler keeps both sides of each branch and the registers they need.
+- **Cause:** the words are in uniform buffers, so the compiler cannot know them. A host probe compared each uniform buffer bound for a listed shader with the first one it saw (one route a game, M4 Pro, macOS 26.6.2, a fork's host, chain `784be5412349`, 2026-11-09). Ocarina of Time's scene bank (c3) changed in about a third of its words and the per-draw c4 changed, while its large c5 and c6 tables hardly did. PRAGMATA's per-draw c3 changed in about 80% of its words, and its hot compute shaders branch on the push and driver banks (c24, c0, c1), which are not uniform slots.
+- **Fix:** none taken. Folding the unchanging words into the MSL as literals cut code and registers in some shaders (natsize, -O1 `-fpreserve-invariance`): Ocarina of Time's foliage task shader `47f9b38490dcf9a2` 96 → 70 registers and 26.9% less code, its pixel shader `a1a56cf6d62ae798` 96 → 69 registers and spill 32 → 0 bytes, its mist pixel shader `5ad65c0eefd09c7f` 47.3% less code; PRAGMATA's `e82d42d4ed400f35` 87.4% less code, 44 → 23 registers. The main mesh shader and PRAGMATA's 96-register compute kernels did not change. On the GPU, one interleaved pair on PRAGMATA's cabin route: GPU median 16.61 → 16.50 ms, inside run-to-run spread. The Ocarina of Time pair was not scored: its side libraries had been built with another maths mode than the library under them. A form for this repository needs what the prototype lacked: the words as function constants, with the generic code where a constant is not set; a check at each encode that binds the generic pipeline when a folded word differs (the prototype only logged it; in 51,498 and 186,548 checked encodes every word held); pipeline caching keyed by the constant values; and a per-game table of the values, where a stale row gives the generic path rather than a wrong picture. [PR #1929](https://github.com/seedds/nxnative/pull/1929)'s function constants are the nearest plumbing.
+- **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md) and PRAGMATA (no profile here).
+
 ### Function constants specialized at load
 
 - **Symptom:** `fragmentFunction main0 cannot be used to build a pipeline state` (a Metal validation assertion).

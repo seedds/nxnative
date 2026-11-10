@@ -125,10 +125,12 @@ static int efd_ready(sk_pollfd *p, uint64_t n, uint64_t open) {
 // The guest descriptor is a host descriptor. Horizon's SockAddrIn is the BSD one: sin_len (u8) at 0, the family (u8,
 // AF_INET = 2) at 1, the port big-endian at 2, the address at 4 (Atmosphere's socket_types.hpp; Mario Kart 8 Deluxe sends
 // {16, 2}). Addresses still cross through an explicit conversion, which checks the family and holds an output to the
-// caller's capacity. PollFd and the fd_set bits match the host's layouts. DM_NET_PEERS=ip,ip,… replicates a send to a broadcast-style address (255.255.255.255, the interface's own
-// IP, or its /24's .255) as unicast to each peer: a Tailscale tailnet carries no L2 broadcast, so a game's LAN discovery
-// rides on this. nifm (below) reports the probed interface with a /24 subnet, which puts a game's directed-broadcast
-// address inside the same patterns.
+// caller's capacity. PollFd and the fd_set bits match the host's layouts. The error numbers do not: GetLastErrno returns
+// Horizon's, which are Linux's, so the host's errno crosses through sk_errno where it is captured.
+// DM_NET_PEERS=ip,ip,… replicates a send to a broadcast-style address (255.255.255.255, the interface's own IP, or its
+// /24's .255) as unicast to each peer: a Tailscale tailnet carries no L2 broadcast, so a game's LAN discovery rides on
+// this. nifm (below) reports the probed interface with a /24 subnet, which puts a game's directed-broadcast address
+// inside the same patterns.
 int dm_net_online(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NET"); v = e && atoi(e); } return v; }
 enum { SK_MAX_PEERS = 16 };
 static in_addr_t sk_peers[SK_MAX_PEERS];
@@ -208,92 +210,120 @@ static int sk_is_broadcast(const struct sockaddr_in *d) {   // 255.255.255.255 /
     return own && (ip == own || ((ip & htonl(0xffffff00u)) == (own & htonl(0xffffff00u)) && (ip & htonl(0x000000ffu)) == htonl(0x000000ffu)));
 }
 
+// The host's errno as Horizon's number. nn::socket's Errno is Linux's table (Atmosphere's socket_errno.hpp: EAGAIN 11, EMSGSIZE 90, ENETDOWN 100, EISCONN 106, EINPROGRESS 115),
+// not the BSD one the host has: Mario Kart 8 Deluxe compares GetLastErrno with 100, 11, 115 and 106 (main+0x9d5484), and the host's EAGAIN, 35, sent every empty non-blocking
+// receive to its error branch. 1-34 are the same in both but for 11 (the host's EDEADLK). t_skerr always holds the game's number: the host's is translated here, where it is
+// captured, and nnsocketSetLastErrno stores the game's own unchanged. An errno with no row is EIO, logged once.
+// The offline constants above (SK_ENETDOWN 50, SK_EAGAIN 35) are host numbers too; they are main's and every offline game's, and are left as they are here.
+enum { SK_EAFNOSUPPORT = 97, SK_ENOPROTOOPT = 92 };
+static int sk_errno(int host) {
+    switch (host) {
+    case 0: return 0;
+    case EPERM: return 1; case ENOENT: return 2; case ESRCH: return 3; case EINTR: return 4; case EIO: return 5; case ENXIO: return 6; case E2BIG: return 7;
+    case ENOEXEC: return 8; case EBADF: return 9; case ECHILD: return 10; case EAGAIN: return 11; case ENOMEM: return 12; case EACCES: return 13; case EFAULT: return 14;
+    case ENOTBLK: return 15; case EBUSY: return 16; case EEXIST: return 17; case EXDEV: return 18; case ENODEV: return 19; case ENOTDIR: return 20; case EISDIR: return 21;
+    case EINVAL: return 22; case ENFILE: return 23; case EMFILE: return 24; case ENOTTY: return 25; case ETXTBSY: return 26; case EFBIG: return 27; case ENOSPC: return 28;
+    case ESPIPE: return 29; case EROFS: return 30; case EMLINK: return 31; case EPIPE: return 32; case EDOM: return 33; case ERANGE: return 34; case EDEADLK: return 35;
+    case ENAMETOOLONG: return 36; case ENOLCK: return 37; case ENOSYS: return 38; case ENOTEMPTY: return 39; case ELOOP: return 40; case ENOMSG: return 42; case EIDRM: return 43;
+    case ENOSTR: return 60; case ENODATA: return 61; case ETIME: return 62; case ENOSR: return 63; case EREMOTE: return 66; case ENOLINK: return 67; case EPROTO: return 71;
+    case EMULTIHOP: return 72; case EBADMSG: return 74; case EOVERFLOW: return 75; case EILSEQ: return 84; case EUSERS: return 87;
+    case ENOTSOCK: return 88; case EDESTADDRREQ: return 89; case EMSGSIZE: return 90; case EPROTOTYPE: return 91; case ENOPROTOOPT: return SK_ENOPROTOOPT;
+    case EPROTONOSUPPORT: return 93; case ESOCKTNOSUPPORT: return 94; case ENOTSUP: return 95; case EOPNOTSUPP: return 95; case EPFNOSUPPORT: return 96;
+    case EAFNOSUPPORT: return SK_EAFNOSUPPORT; case EADDRINUSE: return 98; case EADDRNOTAVAIL: return 99; case ENETDOWN: return 100; case ENETUNREACH: return 101;
+    case ENETRESET: return 102; case ECONNABORTED: return 103; case ECONNRESET: return 104; case ENOBUFS: return 105; case EISCONN: return 106; case ENOTCONN: return 107;
+    case ESHUTDOWN: return 108; case ETOOMANYREFS: return 109; case ETIMEDOUT: return 110; case ECONNREFUSED: return 111; case EHOSTDOWN: return 112;
+    case EHOSTUNREACH: return 113; case EALREADY: return 114; case EINPROGRESS: return 115; case ESTALE: return 116; case EDQUOT: return 122; case ECANCELED: return 125;
+    case EOWNERDEAD: return 130; case ENOTRECOVERABLE: return 131;
+    default: { static _Atomic int once; if (!atomic_exchange(&once, 1)) LOG("[RED] net: host errno %d has no Horizon number, reported as EIO (5)", host); return 5; }
+    }
+}
+
 int dm_sk_socket(int fam, int type, int proto) {
     if (!dm_net_online()) { t_skerr = SK_ENETDOWN; return -1; }
-    if (fam != 2) { t_skerr = 47; return -1; }   // EAFNOSUPPORT: AF_INET for now (a game's Inet6 is not wired)
+    if (fam != 2) { t_skerr = SK_EAFNOSUPPORT; return -1; }   // EAFNOSUPPORT: AF_INET for now (a game's Inet6 is not wired)
     int s = (int)socket(AF_INET, type, proto ? proto : 0);
-    if (s < 0) { t_skerr = errno; return -1; }
+    if (s < 0) { t_skerr = sk_errno(errno); return -1; }
     if (type == 2) { int one = 1; setsockopt(s, SOL_SOCKET, SO_BROADCAST, &one, sizeof one); }   // a game sending to 255.255.255.255 expects that to work as on hardware
     t_skerr = 0; return s;
 }
 static int sk_addr_ok(const void *a, unsigned n, struct sockaddr_in *h) {
-    if (n < 8 || ((const uint8_t *)a)[1] != 2) { t_skerr = 47; return 0; }   // the family is byte 1; byte 0 is sin_len (a u16 read sees {16, 2} as 0x0210)
+    if (n < 8 || ((const uint8_t *)a)[1] != 2) { t_skerr = SK_EAFNOSUPPORT; return 0; }   // the family is byte 1; byte 0 is sin_len (a u16 read sees {16, 2} as 0x0210)
     sk_host_addr(h, a); return 1;
 }
 int dm_sk_bind(int s, const void *a, unsigned n) {
     if (!dm_net_online()) { t_skerr = SK_ENETDOWN; return -1; }
     struct sockaddr_in h; if (!sk_addr_ok(a, n, &h)) return -1;
     int rc = bind(s, (struct sockaddr *)&h, sizeof h);
-    t_skerr = rc < 0 ? errno : 0; return rc;
+    t_skerr = rc < 0 ? sk_errno(errno) : 0; return rc;
 }
 int dm_sk_connect(int s, const void *a, unsigned n) {
     if (!dm_net_online()) { t_skerr = SK_ENETDOWN; return -1; }
     struct sockaddr_in h; if (!sk_addr_ok(a, n, &h)) return -1;
     int rc = connect(s, (struct sockaddr *)&h, sizeof h);
-    t_skerr = rc < 0 ? errno : 0; return rc;
+    t_skerr = rc < 0 ? sk_errno(errno) : 0; return rc;
 }
 int dm_sk_listen(int s, int n) {
     if (!dm_net_online()) { t_skerr = SK_ENETDOWN; return -1; }
-    int rc = listen(s, n); t_skerr = rc < 0 ? errno : 0; return rc;
+    int rc = listen(s, n); t_skerr = rc < 0 ? sk_errno(errno) : 0; return rc;
 }
 int dm_sk_accept(int s, void *a, unsigned *n) {
     if (!dm_net_online()) { t_skerr = SK_ENETDOWN; return -1; }
     struct sockaddr_in h = {0}; socklen_t l = sizeof h;
     int r = (int)accept(s, (struct sockaddr *)&h, &l);
     if (r >= 0) { t_skerr = 0; if (a && n) sk_guest_addr(a, n, &h); }
-    else t_skerr = errno;
+    else t_skerr = sk_errno(errno);
     return r;
 }
 int dm_sk_close(int s) {
     if (!dm_net_online()) return efd_close(s);   // offline the only descriptors are the host's event descriptors (0-63, as the bsd service numbers them); with DM_NET=1 the numbers are the host's own, and those win
-    int rc = close(s); t_skerr = rc < 0 ? errno : 0; return rc;
+    int rc = close(s); t_skerr = rc < 0 ? sk_errno(errno) : 0; return rc;
 }
 int dm_sk_shutdown(int s, int how) {
     if (!dm_net_online()) { t_skerr = SK_ENETDOWN; return -1; }
-    int rc = shutdown(s, how); t_skerr = rc < 0 ? errno : 0; return rc;
+    int rc = shutdown(s, how); t_skerr = rc < 0 ? sk_errno(errno) : 0; return rc;
 }
 int dm_sk_name(int s, void *a, unsigned *n, int peer) {   // GetPeerName (1) / GetSockName (0)
     if (!dm_net_online()) { t_skerr = SK_ENETDOWN; return -1; }
     struct sockaddr_in h = {0}; socklen_t l = sizeof h;
     int rc = peer ? getpeername(s, (struct sockaddr *)&h, &l) : getsockname(s, (struct sockaddr *)&h, &l);
     if (rc >= 0) { t_skerr = 0; if (a && n) sk_guest_addr(a, n, &h); }
-    else t_skerr = errno;
+    else t_skerr = sk_errno(errno);
     return rc;
 }
 int dm_sk_sockopt(int s, int l, int o, const void *v, unsigned *n, int set) {
     if (!dm_net_online()) { t_skerr = SK_ENETDOWN; return -1; }
-    if (l != 0xffff) { t_skerr = 42; return -1; }   // ENOPROTOOPT: nn::socket::Level Socket = 0xffff = the host's SOL_SOCKET; the other levels (IP options) are not wired
+    if (l != 0xffff) { t_skerr = SK_ENOPROTOOPT; return -1; }   // ENOPROTOOPT: nn::socket::Level Socket = 0xffff = the host's SOL_SOCKET; the other levels (IP options) are not wired
     socklen_t hl = n ? *n : 0;
     int rc = set ? setsockopt(s, SOL_SOCKET, o, v, n ? *n : 0) : getsockopt(s, SOL_SOCKET, o, (void *)v, &hl);
     if (!set && n) *n = hl;
-    t_skerr = rc < 0 ? errno : 0; return rc;
+    t_skerr = rc < 0 ? sk_errno(errno) : 0; return rc;
 }
 int dm_sk_fcntl(int s, int c, long a) {
     if (!dm_net_online()) { t_skerr = SK_ENETDOWN; return -1; }
     if (c == 3) {   // F_GETFL: O_NONBLOCK is 0x800 on Horizon, 4 here
         int rc = fcntl(s, F_GETFL);
-        if (rc < 0) { t_skerr = errno; return -1; }
+        if (rc < 0) { t_skerr = sk_errno(errno); return -1; }
         t_skerr = 0; return (rc & O_NONBLOCK) ? (rc & ~O_NONBLOCK) | 0x800 : rc;
     }
     if (c == 4) {   // F_SETFL
         int rc = fcntl(s, F_SETFL, (a & 0x800) ? O_NONBLOCK : 0);
-        t_skerr = rc < 0 ? errno : 0; return rc;
+        t_skerr = rc < 0 ? sk_errno(errno) : 0; return rc;
     }
     t_skerr = 22; return -1;   // EINVAL: the other commands are not wired
 }
 long dm_sk_send(int s, const void *b, unsigned long n, int f) {
     if (!dm_net_online()) { t_skerr = SK_ENETDOWN; return -1; }
-    long r = send(s, b, n, f); t_skerr = r < 0 ? errno : 0; return r;
+    long r = send(s, b, n, f); t_skerr = r < 0 ? sk_errno(errno) : 0; return r;
 }
 long dm_sk_recv(int s, void *b, unsigned long n, int f) {
     if (!dm_net_online()) { t_skerr = SK_ENETDOWN; return -1; }
-    long r = recv(s, b, n, f); t_skerr = r < 0 ? errno : 0; return r;
+    long r = recv(s, b, n, f); t_skerr = r < 0 ? sk_errno(errno) : 0; return r;
 }
 long dm_sk_sendto(int s, const void *b, unsigned long n, int f, const void *a, unsigned al) {
     if (!dm_net_online()) { t_skerr = SK_ENETDOWN; return -1; }
     struct sockaddr_in d; if (!sk_addr_ok(a, al, &d)) return -1;
     long r = sendto(s, b, n, f, (struct sockaddr *)&d, sizeof d);
-    int err = r < 0 ? errno : 0;
+    int err = r < 0 ? sk_errno(errno) : 0;
     int peers = sk_peer_count();
     if (peers && sk_is_broadcast(&d)) {
         for (int i = 0; i < peers; i++) {
@@ -301,7 +331,7 @@ long dm_sk_sendto(int s, const void *b, unsigned long n, int f, const void *a, u
             struct sockaddr_in p = {0}; p.sin_len = sizeof p; p.sin_family = AF_INET;
             p.sin_port = d.sin_port; p.sin_addr.s_addr = sk_peers[i];
             long copy = sendto(s, b, n, f, (struct sockaddr *)&p, sizeof p);
-            if (r < 0) { r = copy; err = copy < 0 ? errno : 0; }
+            if (r < 0) { r = copy; err = copy < 0 ? sk_errno(errno) : 0; }
         }
         // A tailnet may have no broadcast route; a successful peer copy still delivers the datagram. Keep failures when none was sent.
     }
@@ -313,7 +343,7 @@ long dm_sk_recvfrom(int s, void *b, unsigned long n, int f, void *a, unsigned *a
     struct sockaddr_in d = {0}; socklen_t l = sizeof d;
     long r = recvfrom(s, b, n, f, a ? (struct sockaddr *)&d : NULL, a ? &l : NULL);
     if (r >= 0) { t_skerr = 0; if (a && al) sk_guest_addr(a, al, &d); }
-    else t_skerr = errno;
+    else t_skerr = sk_errno(errno);
     return r;
 }
 int dm_sk_last_error(void) { return t_skerr; }
@@ -322,7 +352,7 @@ int dm_sk_poll(void *fds, uint64_t n, int ms) {   // also hle_offline.c's plain 
     sk_pollfd *p = fds;
     if (dm_net_online()) {
         int rc = poll((struct pollfd *)p, (nfds_t)n, ms);
-        t_skerr = rc < 0 ? errno : 0;
+        t_skerr = rc < 0 ? sk_errno(errno) : 0;
         return rc;
     }
     uint64_t open = 0;   // EFD_MAX is 64: one bit per descriptor
@@ -385,7 +415,7 @@ int dm_sk_select(int nfds, uint64_t *r, uint64_t *w, uint64_t *e, const int64_t 
     struct timeval t = {0, 0};
     if (tv) { t.tv_sec = (time_t)tv[0]; t.tv_usec = (suseconds_t)tv[1]; }
     int rc = select(nfds > 0 ? nfds : 1, h[0], h[1], h[2], tv ? &t : NULL);
-    t_skerr = rc < 0 ? errno : 0;
+    t_skerr = rc < 0 ? sk_errno(errno) : 0;
     if (rc >= 0) for (int k = 0; k < 3; k++) if (sets[k]) {   // the results go back into the guest's bit sets (Horizon's fd_set is 1024 bits)
         uint64_t *g = (uint64_t *)sets[k];
         memset(g, 0, 128);

@@ -1,7 +1,8 @@
-// The socket layer with DM_NET=1 (hle_net.c): a UDP socket driven through the game's own nn::socket calls — Socket, Bind,
-// GetSockName, SendTo, Poll, RecvFrom, GetLastError, the Fcntl non-blocking round trip, Select, Close — and the broadcast
-// replication to DM_NET_PEERS (the Tailscale path: a tailnet carries no L2 broadcast). The host functions are looked up in
-// the swforce registrations, as the game calls them.
+// The socket layer with DM_NET=1 (hle_net.c), driven through the game's own nn::socket calls: a UDP socket (Socket, Bind,
+// GetSockName, SendTo, Poll, RecvFrom, the Fcntl non-blocking round trip, Select, Close), a TCP pair (Connect, Accept,
+// GetPeerName), the broadcast replication to DM_NET_PEERS (the Tailscale path: a tailnet carries no L2 broadcast), the
+// address layout a game sends and reads back, and the error numbers GetLastErrno returns. The host functions are looked
+// up in the swforce registrations, as the game calls them.
 #include "../hle_net.c"
 #include <mach-o/getsect.h>
 #include <string.h>
@@ -61,6 +62,7 @@ int main(void) {
     int (*fcntl_)(int, int, long) = hook("_ZN2nn6socket5FcntlEiNS0_12FcntlCommandEz");
     int (*close_)(int) = hook("_ZN2nn6socket5CloseEi");
     int (*lasterr)(void) = hook("_ZN2nn6socket12GetLastErrorEv");
+    int (*lasterrno)(void) = hook("_ZN2nn6socket12GetLastErrnoEv");   // the one Mario Kart 8 Deluxe reads
     int (*select_)(int, void *, void *, void *, void *) = hook("_ZN2nn6socket6SelectEiPNS0_5FdSetES2_S2_PNS0_7TimeValE");
     int (*netavail)(void) = hook("_ZN2nn4nifm18IsNetworkAvailableEv");
     Result (*ipcfg)(uint32_t *, uint32_t *, uint32_t *, uint32_t *, uint32_t *) = hook("_ZN2nn4nifm22GetCurrentIpConfigInfoEP7in_addrS2_S2_S2_S2_");
@@ -99,11 +101,18 @@ int main(void) {
 
     uint8_t u16fam[16] = {2};   // a u16 family at offset 0, which no game sends: family byte 0
     CHECK(sendto_(a, "x", 1, 0, u16fam, 16) == -1 && bind_(a, u16fam, 16) == -1, "an address whose family byte is not AF_INET is refused");
+    CHECK(lasterr() == 97 && lasterrno() == 97, "the refused address is Horizon's EAFNOSUPPORT (97; the host's is 47)");
+    CHECK(sock(28, 2, 0) == -1 && lasterrno() == 97, "Socket with a family that is not wired is Horizon's EAFNOSUPPORT");
+    int one = 1; unsigned one_len = sizeof one;
+    CHECK(dm_sk_sockopt(a, 6, 1, &one, &one_len, 1) == -1 && lasterrno() == 92, "SetSockOpt at a level that is not wired is Horizon's ENOPROTOOPT (92; the host's is 42)");
 
     int fl0 = fcntl_(a, 3, 0);   // F_GETFL
     CHECK(fl0 >= 0, "Fcntl GETFL");
     CHECK(fcntl_(a, 4, (long)(fl0 | 0x800)) == 0, "Fcntl SETFL non-blocking");   // Horizon's O_NONBLOCK = 0x800
     CHECK((fcntl_(a, 3, 0) & 0x800) != 0, "Fcntl GETFL has O_NONBLOCK");
+    fl = 16;   // a game polls its sockets this way (Mario Kart 8 Deluxe in its LAN lobby) and takes anything but 11 as a fault
+    CHECK(recvfrom_(a, buf, sizeof buf, 0, from, &fl) == -1 && lasterrno() == 11 && lasterr() == 11,
+          "an empty non-blocking RecvFrom is Horizon's EAGAIN (11; the host's is 35)");
     CHECK(fcntl_(a, 4, (long)(fl0 & ~0x800)) == 0, "Fcntl SETFL back");
 
     uint8_t bc[16]; guest_addr(bc, 0xffffffff, port);   // 255.255.255.255 → replicated to the peer (127.0.0.1 here)
@@ -114,7 +123,7 @@ int main(void) {
 
     static char too_large[65536];   // beyond IPv4 UDP's maximum payload: neither the broadcast nor any peer copy can succeed
     CHECK(sendto_(a, too_large, sizeof too_large, 0, bc, 16) == -1, "SendTo broadcast preserves total failure");
-    CHECK(lasterr() == EMSGSIZE, "GetLastError after failed broadcast");
+    CHECK(lasterr() == 90 && lasterrno() == 90, "an oversized datagram is Horizon's EMSGSIZE (90; the host's is 40)");
 
     int b = sock(2, 2, 0);
     CHECK(b >= 0, "Socket 2");
@@ -143,7 +152,7 @@ int main(void) {
     CHECK(atomic_load(&waker.error) == 0 && poll_signal_seen, "the polling thread received its signal");
     printf("Poll signal: received=%d sender_error=%d return=%d host_errno=%d guest_errno=%d\n", (int)poll_signal_seen, atomic_load(&waker.error), interrupted, host_error, poll_error);
     CHECK(interrupted == -1, "Poll interrupted by a signal on its own thread");
-    CHECK(poll_error == EINTR, "GetLastError after interrupted Poll");
+    CHECK(poll_error == 4, "GetLastError after interrupted Poll (EINTR, 4 in both tables)");
     pthread_sigmask(SIG_SETMASK, &old_mask, NULL); sigaction(SIGUSR1, &old_action, NULL);
     CHECK(poll_(NULL, 0, 0) == 0 && lasterr() == 0, "successful Poll clears the previous error");
 
@@ -168,7 +177,20 @@ int main(void) {
     uint8_t peer[16]; unsigned pl = sizeof peer;
     CHECK(dm_sk_name(client, peer, &pl, 1) == 0 && pl == 16 && peer[0] == 16 && peer[1] == 2 && !memcmp(peer + 2, dst + 2, 6),
           "GetPeerName returns the listener as {sin_len 16, family 2, port, address}");
+    CHECK(dm_sk_connect(client, dst, sizeof dst) == -1 && lasterrno() == 106, "Connect on a connected socket is Horizon's EISCONN (106; the host's is 56)");
     CHECK(dm_sk_close(accepted) == 0 && dm_sk_close(client) == 0 && dm_sk_close(listener) == 0, "TCP close");
+    client = dm_sk_socket(2, 1, 0);   // the listener is closed, so its loopback port refuses
+    CHECK(client >= 0 && dm_sk_connect(client, dst, sizeof dst) == -1 && lasterrno() == 111, "Connect to a closed port is Horizon's ECONNREFUSED (111; the host's is 61)");
+    CHECK(dm_sk_close(client) == 0 && lasterrno() == 0, "a successful call clears the error");
+    CHECK(dm_sk_close(client) == -1 && lasterrno() == 9, "Close of a closed descriptor is EBADF (9 in both tables)");
+    // The numbers Mario Kart 8 Deluxe compares GetLastErrno with (main+0x9d5484), and one the table has no row for
+    CHECK(sk_errno(ENETDOWN) == 100 && sk_errno(EAGAIN) == 11 && sk_errno(EWOULDBLOCK) == 11 && sk_errno(EINPROGRESS) == 115 && sk_errno(EISCONN) == 106,
+          "ENETDOWN, EAGAIN, EINPROGRESS and EISCONN map to 100, 11, 115 and 106");
+    CHECK(sk_errno(EADDRINUSE) == 98 && sk_errno(ECONNRESET) == 104 && sk_errno(ETIMEDOUT) == 110 && sk_errno(EHOSTUNREACH) == 113 && sk_errno(ENOTCONN) == 107 && sk_errno(EPIPE) == 32,
+          "the errors a send, a receive and a connect return map to Horizon's numbers");
+    CHECK(sk_errno(0) == 0 && sk_errno(9999) == 5, "no error stays 0; an errno with no Horizon number is EIO");
+    void (*seterrno)(int) = hook("nnsocketSetLastErrno");
+    if (seterrno) { seterrno(115); CHECK(lasterrno() == 115, "nnsocketSetLastErrno stores the game's own number unchanged"); }
 
 
     CHECK(handle_error() == 0, "online nifm network screen did not resolve the error");

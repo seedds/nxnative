@@ -226,11 +226,6 @@ class PixelPositionSample(unittest.TestCase):
         src = FS_POS.replace('    float _47 = _43 / _45;\n', '').replace('_47 * (*spvDescriptorSet0.fp_c3)._m0[6].x', '(*spvDescriptorSet0.fp_c3)._m0[6].x * _43')
         self.assertEqual(self.calls(src)[0]['frag_pos'], [[0, 6, 0], [0, 6, 1]])
 
-    def test_through_the_uniform_bounds(self):   # the translator's bounded read (TranslationFlags.MetalUniformBounds, GitHub issue #1860), in parentheses as a product writes it
-        v, meta = dmsh_fetch.fold(guarded(FS_POS), BINDINGS)
-        self.assertEqual(meta['calls'], [{'fc': 0, 'tex_reg': 0, 'frag_pos': [[0, 6, 0], [0, 6, 1]]}])
-        self.assertIn(GUARD.format(w=24, r='(*spvDescriptorSet0.fp_c3)._m0[6].x'), v, 'the compiled source keeps the guard')
-
     def test_not_rewritten(self):
         for why, src in (('y from x', FS_POS.replace('float _49 = gl_FragCoord.y;', 'float _49 = gl_FragCoord.x;')),
                          ('divided by a uniform', FS_POS.replace('float _45 = (*spvDescriptorSet0.support_buffer)._m5[0].x;', 'float _45 = (*spvDescriptorSet0.fp_c3)._m0[1].x;')),
@@ -249,35 +244,36 @@ class PixelPositionSample(unittest.TestCase):
                     except subprocess.CalledProcessError as e: self.fail(e.stderr)
 
 
-# A uniform read as the translator bounds it: the word when the slot's size in words (the size table, bank DMSH_CBSIZE_BANK) holds its index w, else 0
-GUARD = '(({w}u < ((*spvDescriptorSet0.fp_c%d)._m0[0].x >> 2u)) ? {r} : 0.0)' % dmsh_abi.CBSIZE_BANK
-
-def guarded(src):   # FS_POS with its two c[6] words bounded, and the size table declared
-    for c, w in (('x', 24), ('y', 25)): src = src.replace('(*spvDescriptorSet0.fp_c3)._m0[6].%s' % c, GUARD.format(w=w, r='(*spvDescriptorSet0.fp_c3)._m0[6].%s' % c))
-    return src.replace('struct spvDescriptorSetBuffer0', 'struct _23\n{\n    uint4 _m0[4];\n};\n\nstruct spvDescriptorSetBuffer0').replace(
-        '    sampler fp_t_tcb_8Smplr_w [[id(5)]];', '    sampler fp_t_tcb_8Smplr_w [[id(5)]];\n    constant _23* fp_c%d [[id(6)]];' % dmsh_abi.CBSIZE_BANK)
+# A read at a computed offset, as spirv-cross writes the translator's: the size comparison (with the slot's size in words from the size table, bank DMSH_CBSIZE_BANK) a value of its
+# own, which chooses row 0 for the index and 0 for the value when out of bounds. Reads at fixed offsets are not bounded in the shader (the host's zeros, GitHub issue #2066)
+COMPUTED = ('bool _5 = ((uint(_3) << 2u) | uint(_4)) < ((*spvDescriptorSet0.fp_c%d)._m0[2].w >> 2u);\n'
+            'float _6 = _5 ? (*spvDescriptorSet0.fp_c14)._m0[_5 ? _3 : 0][_4] : 0.0;' % dmsh_abi.CBSIZE_BANK)
 
 class UniformBounds(unittest.TestCase):
-    def test_unguard(self):
-        read = '(*spvDescriptorSet0.vp_c5)._m0[29].y'
-        bare = GUARD.format(w=117, r=read)[1:-1].replace('fp_c', 'vp_c')
-        for why, src, want in (('in parentheses', 'float _1 = _2 * %s;' % GUARD.format(w=117, r=read).replace('fp_c', 'vp_c'), 'float _1 = _2 * %s;' % read),
-                               ('a function argument', 'float _1 = fma(_2, %s, _3);' % bare, 'float _1 = fma(_2, %s, _3);' % read),
-                               ('bit-cast', 'bool _1 = 0 >= as_type<int>(%s);' % bare, 'bool _1 = 0 >= as_type<int>(%s);' % read)):
-            with self.subTest(why=why): self.assertEqual(dmsh_fetch.unguard(src), want)
+    def test_select_guards_at_a_computed_offset(self):   # a load and a select (GitHub PR #2127); the index keeps its row-0 choice, so the load is inside the binding without a branch
+        row = '(*spvDescriptorSet0.fp_c14)._m0[_5 ? _3 : 0]'
+        got = dmsh_fetch.select_guards(COMPUTED)
+        self.assertEqual(got.split('\n')[1], 'float _6 = select(0.0, %s[_4], _5);' % row)
+        self.assertEqual(dmsh_fetch.select_guards(got), got, 'a second pass changes nothing')
+        for why, a, b in (('in parentheses', 'float _6 = _5 ? %s[_4] : 0.0;' % row, 'float _6 = _7 * (_5 ? %s[_4] : 0.0);' % row),
+                          ('a fixed component', '[_4] : 0.0;', '.z : 0.0;'), ('an unsigned word', '[_4] : 0.0;', '[_4] : 0u;')):
+            with self.subTest(why=why):
+                got = dmsh_fetch.select_guards(COMPUTED.replace(a, b))
+                self.assertNotIn(' : 0.0', got); self.assertNotIn(' : 0u', got); self.assertEqual(got.count('select('), 1)
+        other = COMPUTED + '\nfloat _9 = _8 ? (*spvDescriptorSet0.fp_c14)._m0[_8 ? _3 : 0][_4] : 0.0;'   # _8 is no size comparison: the game's own choice
+        self.assertTrue(dmsh_fetch.select_guards(other).endswith(other.split('\n')[2]))
 
-    def test_a_computed_offset_stays(self):   # its guard is a value of its own, and the read's index chooses row 0 when out of bounds
-        src = ('bool _5 = ((uint(_3) << 2u) | uint(_4)) < ((*spvDescriptorSet0.fp_c%d)._m0[2].w >> 2u);\n'
-               'float _6 = _5 ? (*spvDescriptorSet0.fp_c14)._m0[_5 ? _3 : 0][_4] : 0.0;' % dmsh_abi.CBSIZE_BANK)
-        self.assertEqual(dmsh_fetch.unguard(src), src)
-
-    def test_compiles_on_both_platforms(self):
-        v, _ = dmsh_fetch.fold(guarded(FS_POS), BINDINGS)
-        with tempfile.TemporaryDirectory() as d:
-            for sdk in ('macosx', 'iphoneos'):
-                with self.subTest(sdk=sdk):
-                    try: compile_lib(v, pathlib.Path(d), 'bounded_' + sdk, sdk)
-                    except subprocess.CalledProcessError as e: self.fail(e.stderr)
+    def test_select_guards_leaves_none(self):   # a bounded read in a form it does not know is an error, not a branch left in the shader
+        fixed = '((117u < ((*spvDescriptorSet0.fp_c%d)._m0[0].x >> 2u)) ? (*spvDescriptorSet0.fp_c5)._m0[29].y : 0.0)' % dmsh_abi.CBSIZE_BANK   # the translator bounds no fixed offset now
+        for why, src in (('a fixed offset compared in the shader', 'float _1 = %s;' % fixed),
+                         ('a computed offset with another index', COMPUTED.replace('[_5 ? _3 : 0]', '[_3]')),
+                         ('another zero', COMPUTED.replace(': 0.0', ': -0.0')),
+                         ('a size comparison used as a choice elsewhere', COMPUTED + '\nfloat _9 = _5 ? _7 : 0.0;')):
+            with self.subTest(why=why):
+                with self.assertRaisesRegex(ValueError, 'not written as a select'): dmsh_fetch.select_guards(src)
+        self.assertEqual(dmsh_fetch.select_guards('float _1 = _2 ? _3 : 0.0;'), 'float _1 = _2 ? _3 : 0.0;', 'no descriptor set')
+        bare = 'float _1 = (*spvDescriptorSet0.fp_c5)._m0[29].y;'
+        self.assertEqual(dmsh_fetch.select_guards(bare), bare, 'a read at a fixed offset is left as it is')
 
 class ScreenVaryings(unittest.TestCase):
     def test_both_spellings_after_a_branch(self):
@@ -337,7 +333,7 @@ def tile_library(src, root, name, side=frozenset(), sdk='macosx'):
     return libs
 
 
-# A pixel shader with two outputs, as the dual-source entry point main0_d wants (dmsh_build.py fs_dual), with FS's projective sample
+# A pixel shader with two outputs, as the dual-source entry point main0_d wants (dmsh_entry.py fs_dual), with FS's projective sample
 FS2 = FS.replace('    float4 m_46 [[color(0)]];\n', '    float4 m_46 [[color(0)]];\n    float4 m_47 [[color(1)]];\n').replace('    return out;', '    out.m_47 = _84;\n    return out;')
 
 

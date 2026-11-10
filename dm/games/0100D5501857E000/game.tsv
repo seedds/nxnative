@@ -1,0 +1,38 @@
+# Game profile of Sam & Max: The Devil's Playhouse (Switch, update 1.8.0 = v524288 on the base game v0). Runs on the Mac: reaches its frame loop and draws with its own shaders, sound and controller, no red line. See README.md
+# Format: see dm/games/README.md
+# Telltale Tool (SM3_nx_*.ttarch2 archives, Lua scripts), FMOD sound, SDK 17.5.6, NVN. The shaders are in an effect pack inside SM3_nx_Shaders_mem.ttarch2 and SM3_nx_ShadersPatch.ttarch2 (shader_split.py ttarch2_shaders).
+# Every value below is still the provisional profile's guess (profile_guess.py from the survey): the game ran with it and none needed changing.
+
+# ---- Identity ----
+title_id	0100D5501857E000
+program_id	0100D5501857E000
+
+# ---- App ----
+# Game name: only a label for profile listings and the Mac window title; the iOS app name is the game name in the base NSP, and the bundle ID comes from the base game title ID (build_ipa.sh / NSP script)
+name	Sam & Max: The Devil's Playhouse
+ipa	SamMaxTheDevilsPlayhouse.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v524288	1.8.0	main=f7ef9f90e1c79c3b8a6b2d8ca46fba2a	sdk=38873c89d24e5d11020e8d0aafe51cab
+package	v524288
+shader_versions	v524288
+
+# ---- Files ----
+# every module main imports from
+modules	main sdk
+romfs_marker	SM3_nx_Common_compressed.ttarch2
+zip_store	.ttarch2:.metallib
+
+# ---- Memory ----
+# main sets a heap of at most the pool − 64 MB: a 3328 MB heap region
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 0 MB of system resource: IsVirtualAddressMemoryEnabled is false, as on Horizon (Big Brain Academy: Brain vs. Brain sets a heap only then)
+sys_resource	0x0
+
+# ---- Shader split ----
+shader_groups	/=romfs
+shader_note	Sam & Max: The Devil's Playhouse shaders

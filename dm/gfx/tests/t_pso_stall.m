@@ -76,6 +76,7 @@ int main(void) { @autoreleasepool {
     setenv("DM_PSO_ARCHIVE", arch.UTF8String, 1); setenv("DM_PSO_MANIFEST", "off", 1);
     mtl_init(); pso4_init();
     if (!g_comp4 || !g_arch_cap) { printf("t_pso_stall: no Metal 4 compiler, not run\n"); return 0; }
+    g_vs_wait_ns = 300ull * 1000000;   // the held compile holds its vertex function's stripe: the other pairs of that function wait this long for it (20 s in the app), then go on
 
     ArchEpoch *ep1 = g_ep; HoldCompiler *hold = [HoldCompiler new]; hold->compiler = ep1->comp;
     hold->entered = dispatch_semaphore_create(0); hold->release = dispatch_semaphore_create(0); ep1->comp = (id<MTL4Compiler>)hold;
@@ -83,6 +84,7 @@ int main(void) { @autoreleasepool {
     EXPECT("held: the compile of f1 entered", 0, dispatch_semaphore_wait(hold->entered, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC)));
     EXPECT("held: every pair handed out (the prepare step stops waiting)", 1, until(^{ return (int)(atomic_load(&g_pre_next) >= 3); }, 10));
     EXPECT("held: the other pairs built", 1, until(^{ return (int)(g_pre_done == 2); }, 10));
+    EXPECT("held: they waited the stripe's time and marked it stalled once", 1, atomic_load(&g_vs_stalls) == 1);
     EXPECT("held: the prebuild not done", 1, g_pre_running);
 
     // a flush hands the held period over and returns; a draw's compile in the next period goes through, and that period's flush writes its file

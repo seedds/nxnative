@@ -16,6 +16,7 @@
 #include "nvn_mtl.h"
 #include "nvn_pace.h"
 #include "nvn_fstep.h"
+#include "nvn_lag.h"
 #include "nvn_timestamp.h"
 #include "../../host/front.h"
 #include "nvn_dirty.h"
@@ -1803,9 +1804,40 @@ static _Atomic uint64_t g_frame;
 static uint64_t g_acq_wait_ns, g_pq_wait_ns;   // Accumulated display-link wait / wait for the present queue to return inside acquire, recorded per frame at present (there can be several acquires within one frame)
 static uint64_t g_fs_start, g_fs_wait;   // frame step (fstep_tick): when the first acquire after a present returned (the frame's start, 0 = none yet), and its pacing wait
 uint64_t dm_nvn_frame_count(void) { return g_frame; }
+// DM_NVN_FRAME_LAG=<k> (nvn_lag.h; off by default): a frame starts only once the GPU has completed the work presented k presents before the newest one; k = 0: no CPU / GPU
+// overlap across frames (the previous frame's GPU work is done before the next frame's CPU work starts), still overlapping within a frame. DM_NVN_FRAME_LAG_MS bounds the wait (default 250)
+static nvn_lag g_lag; static uint64_t g_lag_ns; static _Atomic int g_lag_armed;   // armed by each present, taken by the next acquire
+static int frame_lag(void) { static int v = -2; if (v == -2) { const char *e = getenv("DM_NVN_FRAME_LAG"); v = e && *e ? atoi(e) : -1; if (v >= 0) LOG("[nvn] DM_NVN_FRAME_LAG=%d: a frame starts once the GPU has finished the work presented %d present(s) before the newest", v, v); } return v; }
+// The ring holds present receipts (nvn_queue.inc), not fences: submissions are encoded on the queue worker, so a present's fence is known only once the worker has replayed it.
+// Each ring entry keeps a reference to its receipt; the entry it overwrites gives its reference back. g_lag_mu: present and acquire may run on different threads, so the
+// ring is read and written under it, and the wait takes its own reference to the receipt it waits on. The fence a receipt publishes is the presenting queue's last commit
+// (q->physical): with several queues FRAME_LAG paces the present queue's work only. The wait for the worker to publish is bounded by one frame (DM_NVN_FRAME_LAG_PUB_MS,
+// default 17): a queue parked on a guest event the game signals after this acquire publishes late, and the frame then starts without the wait
+static pthread_mutex_t g_lag_mu = PTHREAD_MUTEX_INITIALIZER; static uint64_t g_lag_unpub;
+static void frame_lag_note(uint64_t ticket) {
+    if (!ticket) return;
+    uint64_t held = nvn_queue_present_hold(ticket), old = 0;
+    pthread_mutex_lock(&g_lag_mu);
+    if (g_lag.n >= NVN_LAG_RING) old = g_lag.fence[g_lag.n % NVN_LAG_RING];
+    nvn_lag_present(&g_lag, held); g_lag_armed = 1;
+    pthread_mutex_unlock(&g_lag_mu);
+    nvn_queue_present_release(old);
+}
+static void frame_lag_wait(void) {
+    int k = frame_lag();
+    pthread_mutex_lock(&g_lag_mu); uint64_t tk = nvn_queue_present_hold(nvn_lag_fence(&g_lag, k)); pthread_mutex_unlock(&g_lag_mu);
+    if (!tk) return;
+    static long ms = -1, pub = -1; if (ms < 0) { const char *e = getenv("DM_NVN_FRAME_LAG_MS"); ms = e ? atol(e) : 250; e = getenv("DM_NVN_FRAME_LAG_PUB_MS"); pub = e ? atol(e) : 17; }
+    uint64_t t0 = now_ns(), f = nvn_queue_ticket_fence(tk, (uint64_t)(pub < ms ? pub : ms) * 1000000ull);
+    nvn_queue_present_release(tk);
+    if (!f) { uint64_t nu = ++g_lag_unpub; if (!(nu & (nu - 1))) LOG("[nvn] DM_NVN_FRAME_LAG: the present's receipt was not published within %ld ms (its queue waits on the guest): %llu frames started without the wait", pub, (unsigned long long)g_lag_unpub); }
+    else if (mtl_completed_fence() < f) { uint64_t used = now_ns() - t0, budget = (uint64_t)ms * 1000000ull; mtl_wait(f, used < budget ? budget - used : 0); }
+    g_lag_ns += now_ns() - t0;
+}
 extern uint64_t g_t0_ns;   // Host process start point (main.c; same base as the UIMSG timestamps)
 NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsync *s, int *idx) {
     win_t *o = (win_t *)w;
+    if (atomic_exchange(&g_lag_armed, 0)) frame_lag_wait();   // DM_NVN_FRAME_LAG: at the frame's start (the first acquire after a present), before the texture's own pacing
     int n = window_active(o);
     *idx = n ? o->next++ % n : 0;
     // Vsync blocks here (real-device NVN: when all textures in the swapchain are waiting for display, wait for the next one to be released), not in present -- the game often calls present while holding a lock
@@ -2419,6 +2451,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
         const tex_t *t = CTX(o->tex[idx]); int lc[4]; const int *crop = present_crop(o->crop, (int)t->d.width, (int)t->d.height, lc);
         nvn_queue_present_release(o->ticket[idx]);
         o->ticket[idx] = nvn_queue_present((queue_t *)q,t,present_period(o) / 1e9,crop);
+        if (frame_lag() >= 0) frame_lag_note(o->ticket[idx]);   // DM_NVN_FRAME_LAG: the ring holds its own reference to the present's receipt
     }
     gfx_leave();
     atomic_fetch_add(&g_nvn_ns, now_ns() - t0);
@@ -2443,7 +2476,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
         tpush(0, fr); tpush(1, wk); tpush(2, nv);
         trow(f, "@frame_ms", fr); trow(f, "@work_ms", wk); trow(f, "@nvn_ms", nv); trow(f, "@sync_ms", atomic_exchange(&g_sync_ns, 0) / 1e6); trow(f, "@itv", (double)present_itv(o));
         // Slow-frame attribution (taken only when DM_NVN_TSV is on): this frame's present-thread CPU time (−1 if the thread changed), CPU of all threads in the process, acquire wait accumulated per frame, present call time (same base as the GPU / on-screen present times: ms since process start)
-        trow(f, "@wait_ms", g_acq_wait_ns / 1e6); trow(f, "@pq_wait_ms", g_pq_wait_ns / 1e6);
+        trow(f, "@wait_ms", g_acq_wait_ns / 1e6); if (frame_lag() >= 0) { trow(f, "@lag_ms", g_lag_ns / 1e6); g_lag_ns = 0; } trow(f, "@pq_wait_ms", g_pq_wait_ns / 1e6);
         if (frame_rec()) {
             static pthread_t pth; static uint64_t pcpu, pproc;
             uint64_t c = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID); pthread_t th = pthread_self();

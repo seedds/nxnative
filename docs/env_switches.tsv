@@ -149,6 +149,9 @@ DM_NVN_FB_SNAP	switch	Draws that sample a colour attachment of their own render 
 DM_NVN_FB_TILE	switch	`0` makes such draws that sample the attachment at their own pixel (a projective sample at the vertex shader's screen varying) read a snapshot too, instead of the tile
 DM_NVN_FLUSH_FILL	switch	`0` starts a new GPU texture in a CPU-writable pool as zeros; by default one whose storage the game flushed before its first use is filled from that storage once
 DM_NVN_FRAMES	diagnostic	`=<N>` prints the NVN call table frame by frame for the first N frames (default 3)
+DM_NVN_FRAME_LAG	switch	`=<k>`: a frame starts (the first AcquireTexture after a present) only once the GPU has completed the work presented k presents before the newest; `0` = no CPU / GPU overlap across frames (off by default; `@lag_ms` per frame in `DM_NVN_TSV`)
+DM_NVN_FRAME_LAG_MS	switch	`=<ms>`: the longest `DM_NVN_FRAME_LAG` waits at a frame start (default 250)
+DM_NVN_FRAME_LAG_PUB_MS	switch	`=<ms>`: how long `DM_NVN_FRAME_LAG` waits for the queue worker to replay the present it paces before the frame starts without the wait (default 17)
 DM_NVN_FUSE_CHECK	diagnostic	`=1` checks pass merging in the same frame: renders the merged passes again apart and logs the comparison of the attachments every time
 DM_NVN_GEOMETRY_COLOR	switch	full retains inactive geometry color attachments; default omits them only when attachment bounds and state prove equivalence.
 DM_NVN_GEOMETRY_COMPUTE	diagnostic	split ends the geometry compute encoder after each stage for comparison; default combines compatible stages.

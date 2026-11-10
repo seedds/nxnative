@@ -326,6 +326,7 @@ int main(void) { @autoreleasepool {
     MtkAsync *fa = nil, *fb = nil, *fc = nil;
     for (MtkAsync *a in g_mtk_async.allValues) { if (a->ms == fq[0]) fa = a; else if (a->ms == fq[1]) fb = a; else if (a->ms == fq[2]) fc = a; }
     CHECK(fa && fb && fc && fa->started && !fb->started && !fc->started, "with one slot only A started");
+    if (!(fa && fb && fc)) { fa = fb = fc = [MtkAsync new]; }   // without the switch there are no entries: keep going on a dummy (the checks above and below fail, as they should)
     for (int i = 0; i < 100 && atomic_load(&g_mtk_async_running); i++) usleep(10000);
     submit(&fp[2], 1, (opts){0});   // only C is drawn when the slot frees
     CHECK(fb->started && !fc->started, "the freed slot went to B (the oldest), not to C (the one drawn)");

@@ -12,6 +12,7 @@
 #   spin wait loops     → a copy whose back-edges pass a spin gate (the host yields there; a busy poll costs nothing on the Switch, see "Spin waits")
 #   Registered cuts (CUTS of the patch files, restricted by NSO build ID, see "Registered patches"): before rewriting, the original bytes are asserted one by one and any mismatch aborts; results are listed in <name>.cuts.tsv
 #   Function-matched cuts (MATCH_CUTS of the selected game's patches.py): unknown builds only, unique complete-function and direct-callee fingerprints, then original-byte assertions
+#   Community ExeFS patches (DM_EXEFS_PATCHES=<folder>; dm/tools/exefs_patches.py): the IPS, IPS32 and .pchtxt files of this module's build ID, written after every cut above and before the scan, so their words are rewritten like the game's own; one that overlaps a cut, a gate or the NSO header, two that disagree, or one that puts a word the scan rewrites where it does not scan, stop the rewrite; listed in <name>.exefs_patches.tsv
 #   Registered observation gates (OBS of the patch files, restricted by build ID): one instruction at the entry is replaced with "enter the host observation callback → execute the original instruction → jump back", so diagnostics modify zero code at runtime; listed in <name>.obs.tsv
 # The key page only stores "actual key number × 8" at the end of the data segment, and patch code fetches thread slots indirectly through the key page: the loader may use any key number.
 # Output: <name>.patched.bin (key page and patch area appended after the image at PATCH_OFF; when that would start beyond 112 MB the patch area sits before the base, see FAR; a text longer than a B reaches adds a second one after the image, see TWO), <name>.fixups.tsv (layout and key page index header), <name>.gates.tsv, <name>.sites.tsv, <name>.cuts.tsv, <name>.obs.tsv, <name>.changed.tsv (the text words whose instructions no longer run as the file has them)
@@ -22,7 +23,7 @@ if capstone.cs_version()[0] != 5:   # the rewriter uses Capstone 5's names (CS_A
     sys.exit(f'[RED] Capstone {capstone.__version__} is unsupported; the rewriter requires Capstone 5.x. Run: {shlex.join([sys.executable, "-m", "pip", "install", "capstone>=5,<6"])}')
 from capstone import *
 from capstone.arm64 import ARM64_OP_IMM, ARM64_OP_MEM, ARM64_OP_REG
-import nso, nso_asm
+import nso, nso_asm, exefs_patches
 from nso_asm import *   # the instruction encoders (B, ADRP, LDRX, ...), shared with the per-build patch files
 
 # The NSP script terminates a failed or cancelled rewrite with SIGTERM. Exit through the pool's context manager so it reaps the workers too.
@@ -254,6 +255,21 @@ if UE_RING is not None:
     struct.pack_into('<I', IMG, UE_RING, UE_RING_NEW)
     print(f'{NAME}: {ue_ring_why}')
 elif ue_ring_why.startswith('[RED] '): print(f'[RED] {NAME}: {ue_ring_why[6:]}: its dynamic buffers keep 3 copies')
+
+# ---- Community ExeFS patches (DM_EXEFS_PATCHES=<folder>: the player's own files, never the repository's; dm/tools/exefs_patches.py) ----
+# After every cut and before the scan below, so a patched word is rewritten like any other (an x18 use, an svc, an exclusive access's ordering). A record over a cut or a registered
+# observation gate stops here, one over a gate or stub site found later stops after the stubs, and one that puts a word the scan rewrites where it does not scan stops after the scan
+EXEFS_DIR = os.environ.get('DM_EXEFS_PATCHES', '')
+exefs_files, exefs_writes = [], []
+if EXEFS_DIR:
+    try:
+        with open(src, 'rb') as f: nro = f.read(0x14)[0x10:] == b'NRO0'   # an NRO's patches count from its start, an NSO's from after its header
+        exefs_files, exefs_writes = exefs_patches.load(EXEFS_DIR, MOD.build_id.hex(), DATA_OFF + MOD.segments[2][1], 0 if nro else exefs_patches.NSO_HEADER)
+        exefs_patches.overlap(exefs_writes, [(off, len(ob) // 2, f'a cut ({why})') for off, ob, _, why in cuts] + [(off, 4, 'an observation gate') for off, *_ in PATCHES['OBS'].get(BUILD_ID, [])])
+    except exefs_patches.Error as e: sys.exit(f'[RED] {NAME}: ExeFS patch {e}')
+    for off, data, _ in exefs_writes: IMG[off:off + len(data)] = data
+    for name, n, nb in exefs_files: print(f'{NAME}: build {BUILD_ID}: ExeFS patch {name} applied ({n} records, {nb} bytes)')
+    if not exefs_files: print(f'{NAME}: build {BUILD_ID}: no ExeFS patch names this build')
 
 md = Cs(CS_ARCH_ARM64, CS_MODE_ARM); md.detail = True
 patch = bytearray(); fix = []; gates = []; stats = {}
@@ -808,6 +824,13 @@ for o in (o for s, e in CODE_RANGES for o in range(s, e, 4)):
     # sub sp, sp, xN (extended register, LSL #0): sp may end up misaligned, which Horizon allows and Apple's kernel does not (site_sp_align); with x18 it is an x18 site (site_sp)
     if w & 0xFFE0FFFF == 0xCB2063FF and (w >> 16) & 31 != 18: kinds[o] = ('sp_align', (w >> 16) & 31); continue
     if o in x18: kinds[o] = ('x18', None)
+# A patched word in the text that the scan above did not sweep (a data block, or a cave nso_code.py took for one) and that it would rewrite there (the masks above, or x18) would run as written
+for off, data, name in exefs_writes:
+    for o in range(off & ~3, min(off + len(data), TEXT_END), 4):
+        w = struct.unpack_from('<I', IMG, o)[0]
+        if not any(s <= o < e for s, e in CODE_RANGES) and (w & 0xFFE0001F == 0xD4000001 or w & 0xFFFFFFE0 in (0xD53BD040, 0xD51BD040, 0xD53BD060, 0xD53BE020, 0xD53BE040, 0xD53B0020)
+                                                           or w & 0xFFE0FFFF == 0xCB2063FF or x18_words(o, o + 4)):
+            sys.exit(f'[RED] {NAME}: ExeFS patch {name}: the word at {o:#x} ({w:08x}) is an svc, a system register access, sub sp or an x18 use in a data block of the text, which is not rewritten')
 
 # Take the instruction table per function, find the windows and jump tables
 import bisect
@@ -1599,6 +1622,8 @@ if (BUILD_ID in FRAME_STEP or FS_MATCH) and NAME == 'main':
 # data addresses read from the original text
 def stub_site(off, orig, what):
     ob = bytes.fromhex(orig)
+    try: exefs_patches.overlap(exefs_writes, [(off, len(ob), f'a {what} site')])   # before the original bytes are asserted: a patch there is named, not a mismatch
+    except exefs_patches.Error as e: sys.exit(f'[RED] {NAME}: ExeFS patch {e}')
     assert IMG[off:off + len(ob)] == ob, f'{what} original bytes mismatch {off:#x}: {bytes(IMG[off:off + len(ob)]).hex()}'
     for o in range(off, off + len(ob), 4):
         assert o not in kinds and not any(seg[0].address <= o < seg[-1].address + 4 for seg in windows), f'{what} site is a rewrite site {o:#x}'
@@ -1631,6 +1656,10 @@ STUBS = PATCHES['STUBS']
 if BUILD_ID in STUBS:
     use_area(0); STUBS[BUILD_ID](types.SimpleNamespace(here=here, emit=emit, site=lambda off, orig: stub_site(off, orig, 'stub'),
                                                        put=lambda off, words, why: stub_put(off, words, why, 'stub'), address=lambda off: stub_address(off, 'stub')))
+# The cuts and gates are complete now (the address region gates, the frame step and the stubs added theirs): none may lie over a patch
+try: exefs_patches.overlap(exefs_writes, [(off, len(ob) // 2, f'a cut ({why})') for off, ob, _, why in cuts] + [(off, 4, f'an observation gate ({why})') for off, _, _, why in obs]
+                          + ([(UE_REGION_X1, 4, 'the engine region\'s size mov')] if UE_REGION is not None and UE_REGION_X1 is not None else []))
+except exefs_patches.Error as e: sys.exit(f'[RED] {NAME}: ExeFS patch {e}')
 
 # ---- Spin waits (every module) ----
 # A guest loop that polls memory until another thread changes it fills only its own core on the Switch, where any higher-priority thread pinned there preempts it, so the
@@ -1953,7 +1982,7 @@ else:
     open(P('patched.bin'), 'wb').write(IMG + bytearray(PATCH_OFF - len(IMG)) + patch)
 import hashlib
 with open(os.path.join(outdir, 'build_src.sha256'), 'w') as f:   # the same for every module: the rewriter and every patch file, by path from dm/tools
-    for src_ in (os.path.abspath(__file__), nso.__file__, nso_code.__file__, nso_asm.__file__, ue_cvar.__file__, ue_malloc.__file__, fps_target.__file__, ue_fixed_rate.__file__, unity_fps.__file__, unity_bucket.__file__, ue_region.__file__, ue_ring.__file__, snowdrop_pools.__file__, os.path.join(os.path.dirname(ue_malloc.__file__), 'loader_census.py'), *PATCH_FILES): f.write(hashlib.sha256(open(src_, 'rb').read()).hexdigest() + f'  {os.path.relpath(os.path.abspath(src_), os.path.dirname(os.path.abspath(__file__)))}\n')
+    for src_ in (os.path.abspath(__file__), nso.__file__, nso_code.__file__, nso_asm.__file__, ue_cvar.__file__, ue_malloc.__file__, fps_target.__file__, ue_fixed_rate.__file__, unity_fps.__file__, unity_bucket.__file__, ue_region.__file__, exefs_patches.__file__, ue_ring.__file__, snowdrop_pools.__file__, os.path.join(os.path.dirname(ue_malloc.__file__), 'loader_census.py'), *PATCH_FILES): f.write(hashlib.sha256(open(src_, 'rb').read()).hexdigest() + f'  {os.path.relpath(os.path.abspath(src_), os.path.dirname(os.path.abspath(__file__)))}\n')
 with open(P('fixups.tsv'), 'w') as f:
     f.write(f'# PATCH_OFF\t{PATCH_OFF:#x}\n# KEY_PAGE_OFF\t{KEY_PAGE_OFF:#x}\n# KEY_PAGE_SIZE\t0x4000\n# TEXT_END\t{TEXT_END:#x}\n# RO_OFF\t{RO_OFF:#x}\n# DATA_OFF\t{DATA_OFF:#x}\n')
     if FAR: f.write(f'# IMAGE_SIZE\t{IMAGE_SIZE:#x}\n# FILE_IMAGE_LEN\t{FILE_IMAGE_LEN:#x}\n')   # patch area before the base (negative PATCH_OFF): whole image size, length of the image part of the file
@@ -1986,6 +2015,11 @@ with open(P('sites.tsv'), 'w') as f:
 with open(P('cuts.tsv'), 'w') as f:
     f.write(f'# BUILD_ID\t{BUILD_ID}\n')
     for off, ob, nb, why in cuts: f.write(f'{off:#x}\t{ob}\t{nb}\t{why}\n')   # Columns: offset, original bytes, new bytes, reason
+if EXEFS_DIR:
+    with open(P('exefs_patches.tsv'), 'w') as f:
+        f.write(f'# BUILD_ID\t{BUILD_ID}\n')
+        for name, n, nb in exefs_files: f.write(f'file\t{name}\t{n}\t{nb}\n')   # Columns: file (relative to the folder), records, bytes
+        for off, data, name in exefs_writes: f.write(f'record\t{off:#x}\t{len(data):#x}\t{name}\n')   # Columns: image offset, length, file
 # The text words whose instructions no longer run as the file has them: every word this rewriter changed (sites, cuts,
 # jump tables; not an exclusive access that only gained ordering), the windows whose copies in the patch area run instead, and the spin waits' instructions, which run
 # from their copies after the first pass. Runs of offset and length; the host's cheat engine refuses a write into any of them

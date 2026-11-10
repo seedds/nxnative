@@ -121,6 +121,14 @@ python3 scripts/cheat_anchor.py check FFCC.cheats.toml --nso <ExeFS/main>    # t
   - `import` refuses a file named after another build unless `--assume-build`; its unanchored cheats then stay bound to the file's own build. A file named after the game's title ID names no build, so it is taken as written for the NSO's build. `import` also counts the writes into the code that put back the word already there (restore entries): evidence that the file belongs to the NSO's build.
 - **Not yet:** `min` / `max` and never-decrease through pointer chains, anchors by IL2CPP names. Validation on FFCC and 13 Sentinels: [Cheats carried across game updates](reference/rewriter.md#cheats-carried-across-game-updates).
 
+## ExeFS patches
+
+Community ExeFS patches (60 fps, resolution and quality mods made for Atmosphère, Ryujinx and the yuzu family) go into the rewrite: `--exefs-patches <folder>` (`EXEFS_PATCHES`) of the NSP script, or `DM_EXEFS_PATCHES=<folder>` for `patch_nso.py`, names a folder of the player's own patch files, read at any depth (Atmosphère's `exefs_patches/<name>/<build ID>.ips` layout works as it is). Nothing is fetched, and patch files never go into the repository. `dm/tools/exefs_patches.py` reads three formats, its parsers ported from Ryujinx's (MIT): IPS (`PATCH` … `EOF`, 24-bit offsets, RLE records) and IPS32 (`IPS32` … `EEOF`, 32-bit offsets), matched by the file's name, and IPSwitch's `.pchtxt` (`@nsobid-<build ID>`, `@enabled` / `@disabled` sections of `<offset> <hex bytes>` or `<offset> "string"`, `@flag offset_shift`, `@stop`), matched by its `@nsobid-` line; each against the module's build ID with trailing zeros removed. Offsets count an NSO's 0x100-byte header and an NRO's start, as Atmosphère and Ryujinx apply them. Every module (`main`, the `subsdk`s, the NROs) takes the files of its own build.
+
+`patch_nso.py` writes them after every cut (the registered and function-matched ones, and those the engine finders make) and before its scan, so a patched word is rewritten like the game's own: an x18 use, an svc or a timer read goes through its site, and an exclusive load or store gets its [ordering](reference/threads.md#exclusive-accesses-without-ordering). The rewrite stops with a `[RED]` line, never skipping a patch, when a record starts in the NSO header or ends past the data segment, when two records write different bytes to the same byte (the same bytes twice are fine), when a record lies over a cut, an observation gate or a frame step or stub site, and when it writes a word the scan rewrites (x18, svc, a system register, `sub sp`) into a data block of the text, which the scan leaves alone. Patched text words are in `changed.tsv`, so cheats do not write over them. `<module>.exefs_patches.tsv` lists the files and each record's image offset and length, and the NSP script names on the console the files each module took, or that none names its build; the rewrite is reused only while the patch files are unchanged.
+
+A patch is the community's, not checked here: a 60 fps patch that only changes the frame limiter leaves a game that steps its logic per frame running at double speed, and a resolution patch can cost more GPU time than the device has. Check the game with and without it.
+
 ## Guest memory SVCs
 
 `dm/host/hle_svc.c` serializes heap resizing, physical map/unmap, stack
@@ -382,6 +390,9 @@ python3 scripts/build_ipa_from_nsp.py ~/Games/MarioWonder -k ~/keys/prod.keys --
 
 # no motion controls, for when they misbehave: DM_MOTION=0 is built in (with --env-file's switches; also for --platform mac and mac-app); on the iPhone, DM_MOTION=1 in Documents/env.txt turns it back on
 python3 scripts/build_ipa_from_nsp.py ~/Games/BreathOfTheWild -k ~/keys/prod.keys --no-motion
+
+# community ExeFS patches (60 fps, resolution; IPS, IPS32 or .pchtxt in Atmosphère's <name>/<build ID>.ips layout) written into the modules whose build ID they name before the rewrite (EXEFS_PATCHES in Spyder): see ExeFS patches
+python3 scripts/build_ipa_from_nsp.py ~/Games/MarioWonder -k ~/keys/prod.keys --exefs-patches ~/Games/MarioWonder/exefs_patches
 
 # a diagnostic build with environment switches baked in (one KEY=VALUE per line)
 python3 scripts/build_ipa_from_nsp.py ~/Games/MarioWonder -k ~/keys/prod.keys --env-file diag_env.txt

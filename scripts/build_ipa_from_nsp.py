@@ -76,6 +76,7 @@ PSO_GPUS = ''                           # NVN games: GPU architectures the app g
                                         #   else 'g18p' for a game without the key, and 'none' without pso_mtl4 on
                                         #   PLATFORM 'mac-app': the Mac app's archive (Resources/pso), empty = this Mac's GPU (e.g. 'g14s' for an M2 Max), 'none' = the app builds its bases on its first start
 SHOW_FPS = True                         # True shows the game's frame rate on the iPhone (frames on screen per second, top left); DM_SHOW_FPS=0 / 1 in the app's Documents/env.txt changes it without a rebuild
+EXEFS_PATCHES = ''                      # a folder of community ExeFS patches (Atmosphère's exefs_patches layout, <name>/<build ID>.ips; IPS, IPS32 or .pchtxt): the rewriter writes those of each module's build ID into it first (DM_EXEFS_PATCHES; empty = none)
 MOTION = True                           # True passes a gyro controller's motion (on iOS also the phone's own) to games that read it; False builds with DM_MOTION=0, for when motion misbehaves (DM_MOTION=1 in the app's Documents/env.txt turns it back on without a rebuild)
 SURVEY_ONLY = False                     # a game with no profile in dm/games: only write the survey, no provisional profile and no IPA
 PROFILE_OUT = ''                        # where a provisional profile goes (empty = <build folder>/profile, i.e. <NSP folder>/<title ID>_build/profile unless WORK_DIR is set; the profile is <this>/<title ID>/)
@@ -1421,8 +1422,10 @@ def rewrite(py, repo, exe_dir, out, env, logs, g, provisional=False):
     # the repository profile's build rows decide which builds the rewriter treats as the game's own (SDK-wide function patches skip those), and its snowdrop_pools the sizes of those cuts, so they are inputs too
     try: own = [l for l in (repo / 'dm/games' / Path(env.get('DM_GAME') or '-').name / 'game.tsv').read_text(encoding='utf-8').splitlines() if l.startswith(('build\t', 'snowdrop_pools\t'))]
     except OSError: own = []
-    key = fingerprint(('files', [repo / 'dm/tools' / f for f in ('patch_nso.py', 'nso.py', 'nso_code.py', 'nso_asm.py', 'nso_match.py', 'ue_cvar.py', 'ue_malloc.py', 'ue_region.py', 'ue_ring.py', 'snowdrop_pools.py', 'loader_census.py', 'fps_target.py', 'ue_fixed_rate.py', 'unity_fps.py', 'unity_bucket.py')] + patch_files(repo, exe_dir, mods, env.get('DM_GAME')) + list(src.values()) + ([manifest] if manifest.is_file() else [])), names, capstone.__version__,
-                      {k: env.get(k) for k in ('DM_PATCH_FRONT', 'DM_GAME')}, own)
+    # the ExeFS patch files (DM_EXEFS_PATCHES) by name and content: an edited, added or removed one rewrites again
+    xp = sorted(p for p in Path(env['DM_EXEFS_PATCHES']).rglob('*') if p.is_file() and p.suffix.lower() in ('.ips', '.pchtxt')) if env.get('DM_EXEFS_PATCHES') else []
+    key = fingerprint(('files', [repo / 'dm/tools' / f for f in ('patch_nso.py', 'nso.py', 'nso_code.py', 'nso_asm.py', 'nso_match.py', 'ue_cvar.py', 'ue_malloc.py', 'ue_region.py', 'ue_ring.py', 'snowdrop_pools.py', 'loader_census.py', 'fps_target.py', 'ue_fixed_rate.py', 'unity_fps.py', 'unity_bucket.py', 'exefs_patches.py')] + patch_files(repo, exe_dir, mods, env.get('DM_GAME')) + list(src.values()) + ([manifest] if manifest.is_file() else [])), names, capstone.__version__,
+                      {k: env.get(k) for k in ('DM_PATCH_FRONT', 'DM_GAME', 'DM_EXEFS_PATCHES')}, own, ('files', xp), [str(p.relative_to(env['DM_EXEFS_PATCHES'])) for p in xp])
     if all((out / f'{m}.patched.bin').is_file() for m in names) and reused(kf, key) is not None:
         PROG.end(f'{", ".join(mods)}{f" and {len(nros)} NROs" if nros else ""}, reused (inputs unchanged)')
         return capture_nro(py, repo, exe_dir, out, nro_dir, env, logs, g, provisional)
@@ -2809,6 +2812,7 @@ def parse_args(argv):
     ap.add_argument('--seen-shaders', action=argparse.BooleanOptionalAction, help='--platform mac or mac-app: build only the shaders the profile\'s playtests used (its shader_seen.tsv) and those the last runs\' logs reported missing, not the whole map: '
                     'minutes instead of hours, but areas the list does not cover draw without the rest until this runs again (default: the SEEN_SHADERS setting, off)')
     ap.add_argument('--show-fps', action=argparse.BooleanOptionalAction, help='show the game\'s frame rate on the iPhone, frames on screen per second at the top left (default: the SHOW_FPS setting, on)')
+    ap.add_argument('--exefs-patches', help='a folder of community ExeFS patches (Atmosphère\'s exefs_patches layout, <name>/<build ID>.ips; IPS, IPS32 or .pchtxt): those of each module\'s build ID are written into it before the rewrite (default: the EXEFS_PATCHES setting, none)')
     ap.add_argument('--motion', action=argparse.BooleanOptionalAction, help='pass a gyro controller\'s motion (on iOS also the phone\'s own) to games that read it; --no-motion builds with DM_MOTION=0, for when motion misbehaves (default: the MOTION setting, on)')
     ap.add_argument('--survey-only', action='store_true', help='a game with no profile: only the survey, no provisional profile and no IPA')
     ap.add_argument('--program', type=int, default=None, help='a multi-program application (Super Mario 3D All-Stars): pack program N of the NSPs as a game of its own, title ID = the application\'s + N (default: the PROGRAM_INDEX setting, 0; a game whose profile lists programs packs them all as one from program 0: this is for bring-up)')
@@ -2839,6 +2843,15 @@ def say_push_romfs(image, bundle_id):
     PROG.say(f'  scripts/push_romfs.sh <device UDID> {bundle_id} "{image}"')
     # the file on disk, as build_ipa.sh's [ -f "$ROMFS" ] decides whether romfs.id is written: rfs.source() is a romfs.Path, whose is_dir() is True for an image's root (GitHub issue #530)
     if not os.path.isfile(image): say('[RED] the extraction holds a RomFS folder, not an image: this build carries no identity for it, and push_romfs.sh packs the folder first (delete extract/ and build again for an image)')
+
+
+def report_exefs_patches(patched):
+    """Which ExeFS patch files the rewriter wrote into which module (its <module>.exefs_patches.tsv), or that none names a module's build"""
+    for t in sorted(patched.glob('*.exefs_patches.tsv')):
+        m, rows = t.name.removesuffix('.exefs_patches.tsv'), [l.split('\t') for l in t.read_text().splitlines()]
+        bid, files = rows[0][1], [r[1:] for r in rows if r[0] == 'file']
+        for name, n, nb in files: say(f'ExeFS patch {name}: {m} (build {bid}), {n} records, {nb} bytes')
+        if not files: say(f'ExeFS patches: none names {m} (build {bid})')
 
 
 def report_fix_coverage(patched, mods, reg):
@@ -3031,6 +3044,11 @@ def main(args=None):
     xlate = repo / 'dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate'
     # DM_GAME picks the profile; DM_ROOT / WORK point at <id>_build: the tools' default paths and temporary directories all stay inside it
     env.update(DM_GAME=g.id, DM_ROOT=str(work), WORK=str(work / 'tmp'))
+    env.pop('DM_EXEFS_PATCHES', None)   # only --exefs-patches / EXEFS_PATCHES give the rewriter patches, never the caller's environment
+    if xp := args.exefs_patches or EXEFS_PATCHES:
+        xp = Path(os.path.expanduser(xp)).resolve()
+        if not xp.is_dir(): raise BuildError(f'--exefs-patches / EXEFS_PATCHES is not a folder: {xp}')
+        env['DM_EXEFS_PATCHES'] = str(xp); say(f'ExeFS patches from {xp}: a frame rate patch can change the game\'s speed, check it in the game')
     logs = work / 'logs'
     check_prereqs(env, xlate, mac)
     picks = pick_nsps(fam, have, versions)
@@ -3105,6 +3123,7 @@ def main(args=None):
 
     patched = work / f'patched_{pkg_ver}'
     g = rewrite(py, repo, game / 'ExeFS', patched, env, logs, g, provisional)
+    if env.get('DM_EXEFS_PATCHES'): report_exefs_patches(patched)
     if nd := captured_nros(patched): env = dict(env, DM_NRO_DIR=str(nd))
     chain_header(py, repo, env, logs)   # before any host is built
     if provisional or derived:   # the keys that need the rewritten modules, then (provisional) the heap check (both only change keys the host is built with, not the rewrite or the shader steps)

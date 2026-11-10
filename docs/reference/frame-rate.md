@@ -598,3 +598,11 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Check:** `python3 dm/tools/tests/test_dmsh_pool_arrays.py`.
 - **Result on Ocarina of Time, an M6:** no measurable change. Its 4,758 marked pixel shaders were rebuilt with each load over the same library (chain `f9f01e4f9994`), and the game was measured standing on the Kokiri Forest deck, 40 s a run. GPU p50 was 14.38 ms with either load (5 runs plain, 13.99–14.88; 4 atomic, 14.28–15.34). The pictures matched within run-to-run noise. The gain the contributor measured is on an iPad Pro M5 and is not checked here.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md), reported with the iPad figures by a contributor in [discussion #1789](https://github.com/seedds/nxnative/discussions/1789).
+
+### Coherent presentation-history snapshots
+
+- **Symptom:** timing readers can combine one present's sequence number with another present's timestamp or display-link fields. A delayed callback for an older ring wrap can also replace a newer record. No particular visual artifact or frame-rate change is attributed to this race.
+- **Cause:** drawable callbacks, queue-drop paths and timing readers accessed ordinary multi-field history records without synchronization.
+- **Fix:** `nvn_present_history.h` publishes and reads each record under one private mutex, rejects older wrapped generations and returns unknown for a missing sequence. The helpers acquire no renderer or queue locks, so callbacks and drops cannot invert those locks through a reader. Existing present, drop and timing API results are preserved; rendering and pacing policies are unchanged.
+- **Check:** the CPU-only `t_present_history` fixture covers missing records, explicit drops, old callbacks after ring wrap and 48,000 publications from four writers with four concurrent readers. `present-history-tsan` instruments the same helper. The standalone normal and ThreadSanitizer runs pass; removing only the helper synchronization produces a ThreadSanitizer data race. These checks establish coherent snapshots, not a frame-rate gain.
+- **Found on:** source review and synthetic concurrency checks while investigating [Ocarina of Time](../../dm/games/0400486024DEC000/README.md). This is a general synchronization finding, not a proven cause of its lighting artifacts.

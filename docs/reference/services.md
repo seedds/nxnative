@@ -874,6 +874,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Found on:** [Super Mario 3D All-Stars](../../dm/games/010049900F546000/README.md): the launcher starts [Super Mario 64](../../dm/games/010049900F546001/README.md) and [Super Mario Sunshine](../../dm/games/010049900F546002/README.md) with 16 bytes (language code and two volume floats), and each game's Return to title selection calls `ExecuteProgram(0)`. [ROMANCE OF THE THREE KINGDOMS 8 REMAKE](../../dm/games/0100C2A01A730000/README.md) and [Octopath Traveler 0](../../dm/games/01005270232F2000/README.md) import it; neither was seen to call it.
 - **Note:** `DM_CTL` `program <n>` calls it with no parameters ([05, Scripted input](../agents/05-debugging.md#scripted-input-and-thread-scheduling)). The iPhone path compiles and packs; it has not run on a device.
 
+### `oe::RequestToRelaunchApplication`: the application starts again
+
+- **Symptom:** `CRASH sig=11 addr=0` in the SDK's `applet::RequestToLaunchApplication` (Super Smash Bros. Ultimate 13.0.5: `pc=sdk+0x804c8`) right after a game asks to restart itself, for example after a language change.
+- **Cause:** `oe::RequestToRelaunchApplication` was not hooked. The SDK's version reads through the am application proxy, which the host never opens.
+- **Fix:** hooked (`hle_oe.c` `h_oe_Relaunch`); it never returns. The plan is made first, then the graceful exit (`dm_host_shutdown_then`) runs only `execve`. On the Mac, a program run by itself `execve`s its own host with the same arguments, and a multi-program application program 0's row ([`oe::ExecuteProgram`](#multi-program-applications-oeexecuteprogram)) with no launch parameter; both get this environment less `DM_LAUNCH_PARAM` and `DM_PREV_PROGRAM`, plus `DM_RELAUNCH=1`, which makes `DM_CTL` resume at the end of its file. On the iPhone, an app holding several programs records program 0 (`DM_EXEC_OUT`); a lone program cannot start itself again: a red line, and the app ends.
+- **Note:** the multi-program and iPhone paths have not run; tested on the Mac with a program run by itself.
+- **Found on:** [Super Smash Bros. Ultimate](../../dm/games/01006A800016E000/README.md) (13.0.5: Options > Language > Yes).
+
 ### Offline HTML pages in a web view
 
 - **Symptom:** a null read in `applet::StartLibraryAppletImmediately` under `web::OfflineWebSession::Start` at boot; a game's pause menu, an offline page, never shows, or the game waits for a message from it.

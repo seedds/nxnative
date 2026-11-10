@@ -16,6 +16,12 @@ threadgroups (nvn_geometry.inc mtk_encode). The task and object functions read t
                 or a mesh shader's attributes (0xf8): all blocks of 32 vertices (the components the SPH's OMAP enables, 0x80 bytes each, a word per vertex), followed by all blocks of 32
                 primitives (the components the per-primitive SPH's OMAP enables, 0x80 bytes each, a word per primitive)
   primitives    a mesh shader's primitive bytes: the count at +3 (0x88), index bytes from +4 (0x80, control +0x5f per primitive: 1 point, 2 line, 3 triangle)
+
+A payload past Metal's (abi.MESH_PAYLOAD_MAX, 16 KB) goes through a device buffer the host binds at abi.MESH_SPILL_SLOT in both stages (spill): word 0 its slots, then a slice of the
+payload's words (rounded to 4) for each of the draw's task workgroups. The task stores its payload in its threadgroup's slice and hands its mesh threadgroups the slice's number in the
+Metal payload; the mesh shader's input is not in its stage memory then but a shared memory of its own (job stage_memory's fifth entry, the translator's dm_stage_in), read from the
+slice. Nintendo Switch Sports Resort's task shaders hand 21-28 KB to their mesh shaders: with the payload in Metal's payload and the mesh shader's input in its threadgroup memory,
+both stages were past Metal's limits and the build refused their six shaders. A task's stage memory has no input area either (a task reads no ISBERD 0x38): its outputs follow word 0
 """
 import re
 import struct
@@ -27,6 +33,16 @@ TOPOLOGY = {1: 'point', 2: 'line', 3: 'triangle'}
 METAL_MAX_VERTICES, METAL_MAX_PRIMITIVES = 256, 512   # a Metal mesh's limits
 METAL_MAX_GRID = abi.MESH_GRID   # mesh threadgroups an object threadgroup may launch
 METAL_MAX_SHARED = 0x8000   # threadgroup memory of a Metal function
+
+
+def spill(i):
+    """Whether a task or mesh shader's payload goes through the device buffer (the module's docstring)."""
+    return i['payload'] > abi.MESH_PAYLOAD_MAX
+
+
+def spill_words(i):
+    """The words of one task workgroup's slice of that buffer."""
+    return (i['payload'] + 15 & ~15) >> 2
 
 
 def is_stage(ctl):
@@ -60,9 +76,10 @@ def info(ctl, area):
 
 def memory(i):
     """(the stage memory's offsets for the translator: the workgroup's number, the input, the outputs, the primitive bytes; the shared memory's bytes)."""
-    out = INPUT + (i['payload'] + 15 & ~15)
     if i['kind'] == 'ts':
+        out = INPUT
         return [WORKGROUP, INPUT, out, out + i['payload']], out + (i['payload'] + 3 & ~3)
+    out = INPUT if spill(i) else INPUT + (i['payload'] + 15 & ~15)
     # The guest's attribute stores: all vertex blocks of 32 vertices first, then all primitive blocks of 32 primitives, each block its own SPH's components (Ocarina of Time's
     # ee4ef51a4fddc28e, 128 vertices of 6 components and 64 primitives of 4, writes vertex v at (v / 32) * 768 + (v % 32) * 4 and primitive p at 3072 + (p / 32) * 512 + (p % 32) * 4)
     v_blocks = (max(i['max_v'], 1) + BLOCK - 1) // BLOCK
@@ -70,7 +87,7 @@ def memory(i):
     prim = out + max(v_blocks * len(i['vertex']) + p_blocks * len(i['primitive']), 1) * BLOCK * 4
     # The guest writes the index bytes of primitive min(count - 1, lane + 32k) in each of its primitive blocks, and a meshlet count of 0 wraps count - 1, so every lane of every primitive
     # block writes: the bytes are reserved for whole blocks of 32 primitives, a primitive's vertices each (a mesh with max_p 126 wrote past 4 + 3 * 126, into the next workgroup's memory)
-    return [WORKGROUP, INPUT, out, prim], prim + (4 + i.get('verts', 3) * p_blocks * BLOCK + 3 & ~3)
+    return [WORKGROUP, INPUT, out, prim] + ([spill_words(i)] if spill(i) else []), prim + (4 + i.get('verts', 3) * p_blocks * BLOCK + 3 & ~3)
 
 
 def own_shared(code):
@@ -82,6 +99,8 @@ def own_shared(code):
 # The kernel, its parameters, the thread variables spirv-cross declares ahead of the threadgroup memory (a private variable's initializer: GlobalToStorage.TryGenerateRawStorageOp's last entry,
 # uint _N = 0u;), and its stage memory, the first threadgroup array
 _KERNEL = re.compile(r'kernel\s+void\s+main0\s*\(((?:[^()]|\([^()]*\))*)\)\s*\{\s*((?:(?!threadgroup\b)[^\n{};]+;\n\s*)*)threadgroup\s+spvUnsafeArray<uint,\s*(\d+)>\s+(\w+);\n')
+# A spill mesh shader's input (the translator's dm_stage_in), the threadgroup array that follows the stage memory
+_STAGE_IN = re.compile(r'\s*threadgroup\s+spvUnsafeArray<uint,\s*\d+>\s+(\w+);\n')
 _NAME = re.compile(r'(\w+)\s*(?:\[\[.*\]\])?$')
 _THREAD = re.compile(r'(uint3?)\s+(\w+)\s*\[\[(thread_position_in_threadgroup|threadgroup_position_in_grid)\]\]$')
 
@@ -141,11 +160,20 @@ def to_stage(msl, i, reads=None):
     params, local, words, mem = _params(m[1]), m[2].strip(), int(m[3]), m[4]
     names = [_name(p) for p in params]
     plain = [re.sub(r'\s*\[\[.*\]\]$', '', p) for p in params]
+    sp, rest = spill(i), msl[m.end():]
+    # A spill mesh shader's input: its array leaves the body, which reads the task's slice through dm_in_t instead (word 0 its workgroup's number, as the hardware leaves it)
+    sin = None
+    if sp and kind == 'ms' and i['task']:
+        n = _STAGE_IN.match(rest)
+        if n: sin, rest = n[1], rest[n.end():]
+    body_params = plain + [f'threadgroup spvUnsafeArray<uint, {words}>& {mem}'] + ([f'dm_in_t {sin}'] if sin else [])
     # The kernel's body, called with the stage memory the wrapper owns: its early returns (a thread with nothing to write) come back to the wrapper's copy of the outputs. Its thread variables
     # stay in it: one call a thread, as the kernel ran
-    src = (msl[:m.start()] + f'static inline __attribute__((always_inline)) void dm_stage_body({", ".join(plain + [f"threadgroup spvUnsafeArray<uint, {words}>& {mem}"])})\n{{\n' +
-           (f'    {local}\n' if local else '') + msl[m.end():])
-    call = f'dm_stage_body({", ".join(names + [mem])});'
+    in_t = ('struct dm_in_t { const device uint* p; uint w0; uint operator[](int k) const { return k ? p[k] : w0; } uint operator[](uint k) const { return k ? p[k] : w0; } };\n'
+            if sin else '')
+    src = (msl[:m.start()] + in_t + f'static inline __attribute__((always_inline)) void dm_stage_body({", ".join(body_params)})\n{{\n' +
+           (f'    {local}\n' if local else '') + rest)
+    call = f'dm_stage_body({", ".join(names + [mem] + (["dm_in"] if sin else []))});'
     # The thread's and the threadgroup's numbers: the kernel's parameters where it has them (an attribute may appear once in a function), else parameters of the wrapper's own
     own = {t[3]: t[2] + ('.x' if t[1] == 'uint3' else '') for t in map(_THREAD.match, params) if t}
     lid, tg = own.get('thread_position_in_threadgroup', 'dm_lid'), own.get('threadgroup_position_in_grid', 'dm_tg')
@@ -156,16 +184,23 @@ def to_stage(msl, i, reads=None):
     start = (f'    threadgroup spvUnsafeArray<uint, {words}> {mem};\n'
              f'    for (uint i = {lid}; i < {words}u; i += {thr}u) {mem}[i] = 0u;\n'
              '    threadgroup_barrier(mem_flags::mem_threadgroup);\n')
-    head = f'struct dm_payload_t {{ uint w[{max(pay, 1)}]; }};\n'
-    sig = ', '.join(params + extra)
+    slice_w = spill_words(i)
+    head = 'struct dm_payload_t { uint slot; };\n' if sp else f'struct dm_payload_t {{ uint w[{max(pay, 1)}]; }};\n'
+    sig = ', '.join(params + extra + ([f'{"device" if kind == "ts" else "const device"} uint* dm_spill [[buffer({abi.MESH_SPILL_SLOT})]]'] if sp else []))
     draw = f'constant uint* dm_draw [[buffer({abi.MESH_DRAW_SLOT})]]'   # the draw's {count, first}, which the host binds (nvn_geometry.inc mtk_encode)
     if kind == 'ts':
+        # A spill task past the buffer's slots launches nothing (the host sizes it to the draw; an indirect draw's count is not known when it is encoded)
+        store = (f'    if ({tg} >= dm_spill[0]) {{ if ({lid} == 0u) dm_grid.set_threadgroups_per_grid(uint3(0u, 1u, 1u)); return; }}\n'
+                 f'    device uint* dm_slice = dm_spill + 4u + {tg} * {slice_w}u;\n'
+                 f'    for (uint i = {lid}; i < {pay}u; i += {thr}u) dm_slice[i] = {mem}[{out}u + i];\n'
+                 '    threadgroup_barrier(mem_flags::mem_device);\n'
+                 f'    if ({lid} == 0u) dm_payload.slot = {tg};\n') if sp else f'    for (uint i = {lid}; i < {pay}u; i += {thr}u) dm_payload.w[i] = {mem}[{out}u + i];\n'
         return src + '\n' + head + (
             f'[[object]] void main0({sig}, object_data dm_payload_t& dm_payload [[payload]], mesh_grid_properties dm_grid, {draw})\n{{\n{start}'
             f'    if ({lid} == 0u) {mem}[{wg}] = dm_draw[1] + {tg};\n'
-            f'    threadgroup_barrier(mem_flags::mem_threadgroup);\n    {call}\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n'
-            f'    for (uint i = {lid}; i < {pay}u; i += {thr}u) dm_payload.w[i] = {mem}[{out}u + i];\n'
+            f'    threadgroup_barrier(mem_flags::mem_threadgroup);\n    {call}\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n' + store +
             f'    if ({lid} == 0u) dm_grid.set_threadgroups_per_grid(uint3(min({mem}[{out + 1}], {METAL_MAX_GRID}u), 1u, 1u));\n}}\n')
+    if sp and not sin: raise ValueError('ms: a payload past Metal\'s with no task, or no dm_stage_in array after the stage memory')
     vertex, primitive = i['vertex'], i['primitive']
     max_v, max_p = i['max_v'], i['max_p']
     verts = i.get('verts', 3)
@@ -202,7 +237,8 @@ def to_stage(msl, i, reads=None):
 
     def entry(name, gl):
         # With a task the payload is the input, its word 0 the workgroup's number among the task's launches, as the hardware leaves it (+0 is not a word the task writes: it starts at +4)
-        fill = (f'    for (uint i = {lid}; i < {pay}u; i += {thr}u) {mem}[{inp}u + i] = dm_payload.w[i];\n'
+        fill = (f'    dm_in_t dm_in = {{ dm_spill + 4u + dm_payload.slot * {slice_w}u, {tg} }};\n    if ({lid} == 0u) {mem}[{wg}] = {tg};\n' if sin else
+                f'    for (uint i = {lid}; i < {pay}u; i += {thr}u) {mem}[{inp}u + i] = dm_payload.w[i];\n'
                 '    threadgroup_barrier(mem_flags::mem_threadgroup);\n'
                 f'    if ({lid} == 0u) {{ {mem}[{wg}] = {tg}; {mem}[{inp}] = {tg}; }}\n') if i['task'] else f'    if ({lid} == 0u) {mem}[{wg}] = dm_block.first + {tg};\n'
         return (f'[[mesh]] void {name}({sig}, dm_mesh_t dm_out' + (', const object_data dm_payload_t& dm_payload [[payload]]' if i['task'] else ', const object_data dm_block_t& dm_block [[payload]]') +

@@ -142,6 +142,19 @@ namespace Ryujinx.Graphics.Shader.Instructions
                     throw AFail(context, $"ISBERD mode {mode:x2} in a task or mesh shader");
                 }
 
+                if (mode == 0x38 && stage.Length > 4 && stage[4] > 0)
+                {
+                    // The input kept apart (ResourceManager.GetStageInputMemoryId): a word of its own shared memory, which the wrapper reads from the task's device buffer
+                    if (x.Rd < RegisterConsts.RegisterZeroIndex)
+                    {
+                        int id = context.ResourceManager.GetStageInputMemoryId(stage[4]);
+                        Operand byteOffset = context.IAdd(AGpr(x.Ra), Const((int)x.SignedField(40, 64)));
+                        context.Copy(Register(x.Rd, RegisterType.Gpr), context.Load(StorageKind.SharedMemory, id, context.ShiftRightU32(byteOffset, Const(2))));
+                    }
+
+                    return;
+                }
+
                 Operand addr = mode == 0x78 ? Const(stage[0]) : context.IAdd(AGpr(x.Ra), Const(stage[mode == 0xb8 ? 2 : 1] + (int)x.SignedField(40, 64)));
                 EmitLoad(context, StorageKind.SharedMemory, LsSize2.B32, addr, x.Rd, 0);
                 return;

@@ -142,6 +142,21 @@ namespace Ryujinx.Graphics.Shader.Translation
             return HmmaScratchMemoryId;
         }
 
+        // nxnative: a mesh shader's stage input (ISBERD mode 0x38, the payload its task wrote) as a shared memory of its own, when the job keeps it apart from the stage memory
+        // (QueryAmpereStageMemory's fifth entry: its words). dmsh_meshstage.py replaces it with the device buffer the task stored its payload in: Metal hands an object
+        // function's payload to its mesh threadgroups only up to 16 KB, and with the input in the stage memory a mesh shader's threadgroup memory went past 32 KB
+        public int StageInputMemoryId { get; private set; } = -1;
+
+        public int GetStageInputMemoryId(int words)
+        {
+            if (StageInputMemoryId < 0)
+            {
+                StageInputMemoryId = Properties.AddSharedMemory(new MemoryDefinition("dm_stage_in", AggregateType.Array | AggregateType.U32, words));
+            }
+
+            return StageInputMemoryId;
+        }
+
         public void SetVertexAsComputeLocalMemories(ShaderStage stage, InputTopology inputTopology)
         {
             LocalVertexDataMemoryId = AddMemoryDefinition("local_vertex_data", AggregateType.Array | AggregateType.FP32, Reservations.OutputSizePerInvocation);

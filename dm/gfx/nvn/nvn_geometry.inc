@@ -556,6 +556,11 @@ static void geo_mesh_encode(id<MTLRenderCommandEncoder> en_) {
 // equivalent fallback: the demanded pipeline must finish compiling before its first draw, so each one built at a draw is recorded as an M row (pso_user.tsv) and the prewarm builds
 // the rows before the game reaches them (docs/reference/shaders.md, Native mesh pipelines compiled at their first draw)
 static struct { int on, miss; NvShader *ts, *ms; uint32_t first, count; uint64_t ind, ind_rec; } g_mtk;   // ind: an indirect draw's threadgroups (mdx_mask), ind_rec: its {count, first} record
+// A task shader's payload past Metal's object payload (DMSH_MESH_PAYLOAD_MAX) goes through a buffer at DMSH_MESH_SPILL_SLOT of both stages (dmsh_meshstage.py spill): the Metal payload is
+// the slot's number only. The buffer has a slice for each task workgroup of the draw, up to MTK_SPILL_MAX; an indirect draw's count is written on the GPU, so it gets MTK_SPILL_MAX
+enum { MTK_SPILL_MAX = 1024 };
+static int mtk_spill(const NvShader *ts) { return ts && ts->mesh_payload > DMSH_MESH_PAYLOAD_MAX; }
+static NSUInteger mtk_payload_len(const NvShader *ts) { return !ts ? 16 : mtk_spill(ts) ? 16 : (ts->mesh_payload + 15u) & ~15u; }
 static void draw_(const p_draw *dw, const p_draw_idx *di);
 static uint64_t g_mtk_n, g_mtk_wait;
 static nvn_hmap g_pso_mtk = {.klen = sizeof(pso_key)};   // only the submit thread uses it: prewarm workers build pipelines (mtk_build) and the submit thread claims them (warm_claim)
@@ -574,7 +579,7 @@ static MTL4MeshRenderPipelineDescriptor *mtk_desc4(MTLRenderPipelineDescriptor *
     if (!mf || !of || !f4) return nil;
     MTL4MeshRenderPipelineDescriptor *m = [MTL4MeshRenderPipelineDescriptor new];
     m.meshFunctionDescriptor = mf; m.fragmentFunctionDescriptor = f4; m.maxTotalThreadsPerMeshThreadgroup = ms->mesh_threads;
-    m.objectFunctionDescriptor = of; m.payloadMemoryLength = ts ? (ts->mesh_payload + 15u) & ~15u : 16; m.maxTotalThreadsPerObjectThreadgroup = ts ? ts->mesh_threads : 1;   // with no task: a block's first workgroup, one thread a block
+    m.objectFunctionDescriptor = of; m.payloadMemoryLength = mtk_payload_len(ts); m.maxTotalThreadsPerObjectThreadgroup = ts ? ts->mesh_threads : 1;   // with no task: a block's first workgroup, one thread a block
     m.rasterSampleCount = d.rasterSampleCount; m.alphaToCoverageState = d.alphaToCoverageEnabled ? MTL4AlphaToCoverageStateEnabled : MTL4AlphaToCoverageStateDisabled;
     for (int i = 0; i < 8; i++) pso_col4(m.colorAttachments[i], d.colorAttachments[i]);
     return m;
@@ -604,7 +609,7 @@ static id<MTLRenderPipelineState> mtk_build(const pso_key *k, NvShader *ts, NvSh
     }
     MTLMeshRenderPipelineDescriptor *m = [MTLMeshRenderPipelineDescriptor new];
     m.meshFunction = fn_dev(ms->fn); m.fragmentFunction = fn_dev(ff); m.maxTotalThreadsPerMeshThreadgroup = ms->mesh_threads;
-    m.objectFunction = fn_dev(ts ? ts->fn : ms->mesh_obj); m.payloadMemoryLength = ts ? (ts->mesh_payload + 15u) & ~15u : 16; m.maxTotalThreadsPerObjectThreadgroup = ts ? ts->mesh_threads : 1;
+    m.objectFunction = fn_dev(ts ? ts->fn : ms->mesh_obj); m.payloadMemoryLength = mtk_payload_len(ts); m.maxTotalThreadsPerObjectThreadgroup = ts ? ts->mesh_threads : 1;
     m.rasterSampleCount = d.rasterSampleCount; m.alphaToCoverageEnabled = d.alphaToCoverageEnabled;
     for (int i = 0; i < 8; i++) m.colorAttachments[i] = d.colorAttachments[i];
     m.depthAttachmentPixelFormat = d.depthAttachmentPixelFormat; m.stencilAttachmentPixelFormat = d.stencilAttachmentPixelFormat;
@@ -659,6 +664,15 @@ static void mtk_encode(id<MTLRenderCommandEncoder> en_) {
     if (rec_on()) rec_table_op(RO_T_ADDR, g_ot, draw_gpu, DMSH_MESH_DRAW_SLOT); else [g_ot setAddress:draw_gpu atIndex:DMSH_MESH_DRAW_SLOT];
     g_args_dirty[4] = 1; encode_args(en, ms, 4, 1);
     // A task shader's threadgroups are the draw's workgroups; with no task, the object function's are blocks of DMSH_MESH_GRID of them (mdx_mask writes their count at +16)
+    if (mtk_spill(ts)) {   // the task's payload slices: word 0 their count, the slices from word 4
+        uint32_t words = ((ts->mesh_payload + 15u) & ~15u) >> 2, cap = g_mtk.ind ? MTK_SPILL_MAX : MIN(g_mtk.count, (uint32_t)MTK_SPILL_MAX);
+        if (!g_mtk.ind && g_mtk.count > MTK_SPILL_MAX) { static int n; if (n++ < 4) MLOG("[RED] task shader %s: %u workgroups, payload slices for %u: the rest launch no mesh workgroups", ts->key, g_mtk.count, cap); }
+        id<MTLBuffer> sb; size_t so = arena_alloc(16 + (size_t)MAX(cap, 1u) * words * 4, &sb); *(uint32_t *)((uint8_t *)sb.contents + so) = cap;
+        uint64_t sg = sb.gpuAddress + so;
+        if (rec_on()) { rec_table_op(RO_T_ADDR, g_ot, sg, DMSH_MESH_SPILL_SLOT); rec_table_op(RO_T_ADDR, g_vt, sg, DMSH_MESH_SPILL_SLOT); }
+        else { [g_ot setAddress:sg atIndex:DMSH_MESH_SPILL_SLOT]; [g_vt setAddress:sg atIndex:DMSH_MESH_SPILL_SLOT]; }
+        static int said; if (!said++) MLOG("task shader %s: its %u-byte payload goes through a buffer (%u workgroups, %u-byte slices)", ts->key, ts->mesh_payload, g_mtk.ind ? 0 : g_mtk.count, words * 4);
+    }
     MTLSize to = MTLSizeMake(ts ? ts->mesh_threads : 1, 1, 1), tm = MTLSizeMake(ms->mesh_threads, 1, 1);
     if (g_mtk.ind) [en drawMeshThreadgroupsWithIndirectBuffer:g_mtk.ind + (ts ? 0 : 16) threadsPerObjectThreadgroup:to threadsPerMeshThreadgroup:tm];
     else [en drawMeshThreadgroups:MTLSizeMake(ts ? g_mtk.count : (g_mtk.count + DMSH_MESH_GRID - 1) / DMSH_MESH_GRID, 1, 1) threadsPerObjectThreadgroup:to threadsPerMeshThreadgroup:tm];

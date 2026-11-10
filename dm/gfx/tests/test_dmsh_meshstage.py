@@ -33,6 +33,16 @@ kernel void main0(constant spvDescriptorSetBuffer0& spvDescriptorSet0 [[buffer(0
     _23[%d] = (*spvDescriptorSet0.cp_c3)._m0[0];
 }
 """
+# A spill mesh shader's kernel: the translator's dm_stage_in follows the stage memory, and the body reads it (ISBERD 0x38)
+KERNEL_IN = HEAD + """
+kernel void main0(constant spvDescriptorSetBuffer0& spvDescriptorSet0 [[buffer(0)]], uint3 gl_LocalInvocationID [[thread_position_in_threadgroup]])
+{
+    threadgroup spvUnsafeArray<uint, %d> _23;
+    threadgroup spvUnsafeArray<uint, %d> _24;
+    if (gl_LocalInvocationID.x != 0u) return;
+    _23[%d] = _24[int(gl_LocalInvocationID.x) + 1] + _24[0];
+}
+"""
 
 
 def sph(pos=0xf0, generics=b''):
@@ -61,9 +71,18 @@ class Facts(unittest.TestCase):
         self.assertEqual((i['kind'], i['threads'], i['payload'], i['task'], i['max_v'], i['max_p'], i['primitive']), ('ms', 8, 1408, True, 32, 16, [(0, 0)]))
         self.assertEqual(ms.info(control(7, max_v=128, max_p=64), area)['primitive'], [])
 
-    def test_task_memory(self):   # the payload's bytes hold the mesh count at +4, as the game's stores do
+    def test_task_memory(self):   # the payload's bytes hold the mesh count at +4, as the game's stores do. A task reads no input: its outputs follow word 0's block
         lay, size = ms.memory(ms.info(control(6), bytes(0x80)))
-        self.assertEqual(lay, [0, 0x10, 0x110, 0x210]); self.assertEqual(size, 0x210)
+        self.assertEqual(lay, [0, 0x10, 0x10, 0x110]); self.assertEqual(size, 0x110)
+
+    def test_spill_memory(self):   # Nintendo Switch Sports Resort's 07abb052a670b8ba / d60092d7424cb5b4: 27,904 payload bytes, past Metal's 16 KB
+        t = ms.info(control(6, payload=27904), bytes(0x80))
+        self.assertTrue(ms.spill(t)); self.assertFalse(ms.spill(ms.info(control(6, payload=abi.MESH_PAYLOAD_MAX), bytes(0x80))))
+        self.assertEqual(ms.memory(t), ([0, 0x10, 0x10, 0x10 + 27904], 0x10 + 27904))
+        m = ms.info(control(7, payload=27904, task=1, max_v=64, max_p=126), sph(0xf0, b'\x30'))
+        lay, size = ms.memory(m)
+        self.assertEqual(lay[2], 0x10); self.assertEqual(lay[4], 27904 // 4); self.assertLessEqual(size, ms.METAL_MAX_SHARED)   # the input is not in the stage memory
+        self.assertEqual(ms.spill_words(m), 6976)
 
     def test_mesh_memory(self):   # 128 vertices: four blocks of 32. Six components a block, 0x80 bytes each; the primitive bytes follow, 3 a triangle after the count's word
         i = ms.info(control(7, payload=128, max_v=128, max_p=64), sph(0xf0, b'\x30'))
@@ -93,9 +112,15 @@ class Facts(unittest.TestCase):
 
 
 class Stage(unittest.TestCase):
-    def task(self):
-        i = ms.info(control(6), bytes(0x80))
+    def task(self, payload=256):
+        i = ms.info(control(6, payload=payload), bytes(0x80))
         return ms.to_stage(KERNEL % (ms.memory(i)[1] // 4, ms.memory(i)[0][2] // 4 + 1), i), i
+
+    def spill_mesh(self, with_input=True):
+        i = ms.info(control(7, payload=27904, task=1, max_v=64, max_p=126), sph(0xf0, b'\x30'))
+        lay, size = ms.memory(i)
+        src = KERNEL_IN % (size // 4, lay[4], lay[3] // 4) if with_input else KERNEL % (size // 4, lay[3] // 4)
+        return ms.to_stage(src, i), i
 
     def mesh(self, task=False, primitive=False, vertices=128, primitives=64, pos=0xf0, verts=0, reads=None):
         area = sph(pos, b'\x30') + (sph(0, b'\x01') if primitive else b'')
@@ -134,6 +159,27 @@ class Stage(unittest.TestCase):
         src, i = self.mesh(); prim = ms.memory(i)[0][3]
         self.assertIn(f'uint np = min(_23[{prim >> 2}] >> 24, 64u);', src)
         self.assertIn(f'uint at = {prim + 4}u + n;', src)
+
+    def test_spill_task_stores_its_payload_in_its_slice(self):
+        src, i = self.task(payload=27904); out = ms.memory(i)[0][2] // 4
+        self.assertIn(f'device uint* dm_spill [[buffer({abi.MESH_SPILL_SLOT})]]', src)
+        self.assertIn('struct dm_payload_t { uint slot; };', src)
+        self.assertIn('if (dm_tg >= dm_spill[0])', src)   # past the host's slices: no launch
+        self.assertIn('device uint* dm_slice = dm_spill + 4u + dm_tg * 6976u;', src)
+        self.assertIn(f'dm_slice[i] = _23[{out}u + i];', src)
+        self.assertIn('dm_payload.slot = dm_tg;', src)
+        self.assertNotIn('dm_payload.w', src)
+
+    def test_spill_mesh_reads_its_input_from_the_slice(self):
+        src, i = self.spill_mesh()
+        self.assertNotIn('threadgroup spvUnsafeArray<uint, 6976> _24;', src)   # the array left the body
+        self.assertIn('dm_in_t _24)', src)
+        self.assertIn('dm_in_t dm_in = { dm_spill + 4u + dm_payload.slot * 6976u, dm_tg };', src)   # word 0: the workgroup's number among its task's launches
+        self.assertIn(', _23, dm_in);', src)
+        self.assertIn(f'const device uint* dm_spill [[buffer({abi.MESH_SPILL_SLOT})]]', src)
+
+    def test_spill_mesh_without_its_input_refused(self):
+        with self.assertRaises(ValueError): self.spill_mesh(with_input=False)
 
     def test_mesh_with_a_task_reads_its_number_from_the_payload(self):
         src = self.mesh(task=True)[0]
@@ -217,7 +263,7 @@ class Stage(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which('xcrun') and subprocess.run(['xcrun', '-sdk', 'macosx', '-f', 'metal'], capture_output=True).returncode == 0, 'no Metal compiler')
     def test_compiles(self):
-        cases = [self.task()[0], self.mesh()[0], self.mesh(task=True)[0], self.mesh(primitive=True)[0], self.mesh(vertices=32, primitives=32, pos=0xf8, verts=1, reads={5: 0x7})[0], self.mesh(primitive=True, reads={0: 1, 1: 0xf, 5: 0xf})[0], self.local_word()]
+        cases = [self.task()[0], self.task(payload=27904)[0], self.spill_mesh()[0], self.mesh()[0], self.mesh(task=True)[0], self.mesh(primitive=True)[0], self.mesh(vertices=32, primitives=32, pos=0xf8, verts=1, reads={5: 0x7})[0], self.mesh(primitive=True, reads={0: 1, 1: 0xf, 5: 0xf})[0], self.local_word()]
         with tempfile.TemporaryDirectory() as d:
             for n, src in enumerate(cases):
                 f = Path(d, f's{n}.metal'); f.write_text(src)

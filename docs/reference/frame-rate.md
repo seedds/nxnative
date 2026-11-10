@@ -516,6 +516,14 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Fix:** the declaration also covers 1.1 × the window's peak (`rt_comp_tick` in `hle_nvn.c`): 5.6 ms here, 60.0 fps, 99th percentile 21 ms.
 - **Found on:** [DARK SOULS: REMASTERED](../../dm/games/01004AB00A260000/README.md), in the Asylum cell.
 
+### A time-constraint budget sampled per acquire or across threads
+
+- **Symptom:** the automatic CPU budget underestimates a frame with several texture acquires. Changing acquire threads can omit the new thread's initial policy or inflate its estimate to the cap.
+- **Cause:** `rt_comp_tick` treated every acquire as a frame and shared its CPU-clock baseline and sample window across threads. The declared budget and period cache were shared too, although Mach policies and `CLOCK_THREAD_CPUTIME_ID` belong to individual threads.
+- **Fix:** sample the first acquire after the frame counter advances, keeping the whole frame's CPU interval, and keep declarations, period tracking and CPU history per thread. The existing margins, 120-frame window, fixed and disabled modes, and 90-percent cap stay in effect.
+- **Found on:** synthetic production-path tests while investigating [Ocarina of Time](../../dm/games/0400486024DEC000/README.md) [issue #1985](https://github.com/seedds/nxnative/issues/1985). The report does not establish multiple acquires or thread changes, so its Castle Town slowdown and fountain pacing remain unverified; no game files were used.
+- **Check:** `t_rt_comp` gives the actual acquire path 6 ms of CPU work per frame split across two acquires. Before the fix it declares 3.750 ms, afterward 7.500 ms. A new thread independently learns 1.250 ms from 1 ms frames instead of inheriting the first thread's state or subtracting its clock. Fixed/disabled modes, period changes and the cap are covered too.
+
 ### A shader that writes a whole frame through raw global memory
 
 - **Symptom:** a movie or full-screen compute pass far slower than the same work should be, nearly all of it GPU time: `GPU p50` near the frame time with `submit+present` under 1 ms. `[RED] raw global memory: a write log ran out of slots` on older chains. With `DM_NVN_GPUPROF` a relaxed timestamp can put the time before the compute encoder's reported start, so the encoder itself looks short and the gap before it is what is long.

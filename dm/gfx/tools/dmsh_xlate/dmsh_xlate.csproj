@@ -1,12 +1,12 @@
-<!-- Switch shader → SPIR-V translation tool. It references the Ryujinx shader translator source kept in the repository (dm/third_party/ryujinx); -p:RyuSrc=<dir> points it at another copy. -->
+<!-- Switch shader → SPIR-V translation tool (built with dm/tools/native_tools.sh). It references the Ryujinx shader translator source kept in the repository (dm/third_party/ryujinx); -p:RyuSrc=<dir> points it at another copy. -->
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>disable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <!-- AnyCPU under any -r: a build for a runtime ID otherwise ties the dll to that architecture, and the universal launcher's x86_64 half cannot load an arm64 dll (GitHub issue #803) -->
-    <PlatformTarget>AnyCPU</PlatformTarget>
+    <!-- A native executable (NativeAOT), so running it needs no .NET (GitHub issue #1853): dm/tools/native_tools.sh publishes it for arm64 and x86_64 and joins them into dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate -->
+    <PublishAot>true</PublishAot>
     <RyuSrc Condition="'$(RyuSrc)' == ''">$(MSBuildThisFileDirectory)../../../third_party/ryujinx</RyuSrc>
   </PropertyGroup>
   <ItemGroup>

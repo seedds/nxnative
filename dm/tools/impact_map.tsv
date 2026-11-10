@@ -110,6 +110,7 @@ dm/tools/shader_cache.py	*:*	the compile cache as one file: every NVN game build
 dm/tools/tree_tar.py	*:*	one tar in place of Xcode's derived data and quiet work folders: every game build
 dm/tools/nro_collect.py	*:*	NRO discovery from game resources during packing
 dm/tools/nx_extract/*	*:*	NSP extraction: every game's resource inputs
+dm/tools/nx_extract_bin/*	*:*	fallback: the extractor binary, when its sources are not in the range
 dm/mac/launcher.c	*:*	Mac app resource discovery and host launch
 dm/mac/Launcher.swift	*:*	the Mac settings window, linked into every Mac app
 dm/mac/pack_app.py	*:*	Mac app packaging: every game's bundled resources

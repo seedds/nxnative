@@ -185,7 +185,7 @@ jobs:
       # Metal (DMSH_TEST_METAL=1) and running it on the GPU (DMSH_TEST_GPU=1) stay local.
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
-          dotnet-version: '10.0.x'   # dm/gfx/tools/dmsh_xlate_bin targets net10.0
+          dotnet-version: '10.0.x'   # the committed translator and nx_extract are native (no .NET); test_pfs0_storage and test_romfs_read build nx_extract's own code
       - name: Install spirv-val   # spirv-cross is the in-repo build (dm/gfx/tools/spirv_cross_bin)
         env:
           HOMEBREW_NO_AUTO_UPDATE: 1

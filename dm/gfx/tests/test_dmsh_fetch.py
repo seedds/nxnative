@@ -337,7 +337,7 @@ def tile_library(src, root, name, side=frozenset(), sdk='macosx'):
     return libs
 
 
-# A pixel shader with two outputs, as the dual-source entry point main0_d wants (dmsh_build.py fs_dual), with FS's projective sample
+# A pixel shader with two outputs, as the dual-source entry point main0_d wants (dmsh_entry.py fs_dual), with FS's projective sample
 FS2 = FS.replace('    float4 m_46 [[color(0)]];\n', '    float4 m_46 [[color(0)]];\n    float4 m_47 [[color(1)]];\n').replace('    return out;', '    out.m_47 = _84;\n    return out;')
 
 

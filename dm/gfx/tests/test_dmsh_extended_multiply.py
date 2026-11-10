@@ -1,19 +1,17 @@
-"""Extended multiplication (dmsh_build.py mul_extended): scalar spvMulExtended calls reach overloads outside spirv-cross's optnone template, and on this Mac's GPU their low and
+"""Extended multiplication (dmsh_rewrite.py mul_extended): scalar spvMulExtended calls reach overloads outside spirv-cross's optnone template, and on this Mac's GPU their low and
 high halves match 64-bit products for literal (power of two or not) and variable multipliers, unsigned and signed, including overflow; vector calls keep the template."""
 import ast
 from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
 TOOLS = Path(__file__).resolve().parents[1] / 'tools'
-tree = ast.parse((TOOLS / 'dmsh_build.py').read_text())
-nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'mul_extended']
-scope = {'re': re}
-exec(compile(ast.Module(body=nodes, type_ignores=[]), str(TOOLS / 'dmsh_build.py'), 'exec'), scope)
-mul_extended = scope['mul_extended']
+sys.path.insert(0, str(TOOLS))
+from dmsh_rewrite import mul_extended   # noqa: E402
 
 # spirv-cross's helper as it writes it, and its result structs
 HEAD = '''#include <metal_stdlib>

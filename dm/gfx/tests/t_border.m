@@ -1,4 +1,4 @@
-// Border colours Metal has no sampler state for (nvn_border.h, dmsh_build.py border_emu): nvn_border's choice of Metal colours and factors, the production sampler registry's twin
+// Border colours Metal has no sampler state for (nvn_border.h, dmsh_rewrite.py border_emu): nvn_border's choice of Metal colours and factors, the production sampler registry's twin
 // (mtl_reg_samp, samp_by_id), and, given the path of a shader border_emu rewrote (test_dmsh_border.py writes it), the GPU: samples through the sampler, its twin and the block come
 // out as Maxwell's do, bilinear between the texels and the border colour, and with the block's mask clear as Metal's nearest colour
 #include "../nvn/nvn_mtl.m"

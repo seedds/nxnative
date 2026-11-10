@@ -131,7 +131,7 @@ def _type(width):
 
 
 def to_stage(msl, i, reads=None):
-    """The translated kernel as the object function main0 (kind 'ts'), or the mesh functions main0 and main0_z (kind 'ms': the two depth conventions, as dmsh_build.py vs_depth gives a
+    """The translated kernel as the object function main0 (kind 'ts'), or the mesh functions main0 and main0_z (kind 'ms': the two depth conventions, as dmsh_entry.py vs_depth gives a
     vertex shader, near = -w and near = 0). reads: {user(locnN) location: component mask} of what a mesh shader's paired pixel shaders read (pixel_reads), None when not known.
     A location its SPHs do not enable becomes a vertex output of (0,0,0,1), what the hardware gives a pixel shader input no stage wrote (dmsh_build.py vs_pad does the same for a
     vertex shader), since Metal links no pixel input the mesh stage does not write; each output is declared as wide as those readers can see (_width)."""

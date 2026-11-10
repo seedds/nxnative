@@ -290,6 +290,35 @@ static void event_signal_no_cut(void) {
     CHECK(P(nvnEventGetValue)(&event)==1 && P(nvnEventGetValue)(&second)==7,"both events hold their signalled values");
     P(nvnSyncFinalize)(&produced); P(nvnSyncFinalize)(&consumed); P(nvnEventFinalize)(&second);
 }
+// The submissions of one frame share a command allocator, and one that counts no samples takes no visibility buffer (PR #2090): 24 of them with the GPU held, three times
+// the pool, all encode without a wait for the GPU, which would never return here
+static void frame_shares_allocator(void) {
+    enum { N=24 };
+    printf("CASE a frame's submissions share a command allocator\n");
+    *source=before; *result=sentinel;
+    id<MTLSharedEvent> gate=[g_dev newSharedEvent];
+    if (!gate) abort();
+    pthread_mutex_lock(&g_sub_mu); pthread_mutex_lock(&g_res_mu); [g_q4 waitForEvent:gate value:1];
+    uint64_t waits=g_alloc_waits, shares=g_alloc_shares; int pool=g_alloc_n, ring=g_vis_ring_n; pthread_mutex_unlock(&g_res_mu); pthread_mutex_unlock(&g_sub_mu);
+    static NVNsync fences[N]; static job jobs[N]; int submitted=0, encoded=0;
+    for(int i=0;i<N;i++) {
+        P(nvnSyncInitialize)(&fences[i],&device); enqueue(&jobs[i],&queues[0],consumer(0,0,&fences[i],0));
+        if(!returned(&jobs[i],2000000000ull) || !receipt_encoded(&fences[i],2000000000ull)) break;
+        submitted++; encoded++;
+    }
+    CHECK(submitted==N && encoded==N,"24 submissions encode while the GPU is held");
+    pthread_mutex_lock(&g_sub_mu);
+    CHECK(g_alloc_waits==waits,"none waited for the GPU to free an allocator");
+    CHECK(g_alloc_n<=pool+1 && g_alloc_shares-shares>=N-2,"they share the frame's allocator");
+    CHECK(g_vis_ring_n==ring,"none took a visibility buffer");
+    pthread_mutex_unlock(&g_sub_mu);
+    CHECK(*result==sentinel,"nothing has run while the gate holds the GPU");
+    gate.signaledValue=1;   // always release the GPU before cleanup, including assertion failures
+    if(submitted<N) { fprintf(stderr,"a submission waited for the held GPU\n"); _Exit(2); }
+    int done=1; for(int i=0;i<N;i++) done&=landed(&fences[i],5000000000ull);
+    CHECK(done && *result==before,"all of them complete once the GPU runs"); if(!done) _Exit(2);
+    for(int i=0;i<N;i++) P(nvnSyncFinalize)(&fences[i]);
+}
 // A wait on a sync no fence has reached when it is submitted is already satisfied: the queue's own later work, its fence included, runs (issue #1808)
 static void receipt_unfenced(int command_wait) {
     printf("CASE %s wait on a never-fenced sync does not park its queue\n",command_wait?"command-buffer":"queue");
@@ -357,6 +386,7 @@ int main(void) { @autoreleasepool {
     event_queued_write(NVN_EVENT_SIGNAL_MODE_WRITE);
     event_queued_write(NVN_EVENT_SIGNAL_MODE_ADD);
     event_signal_no_cut();
+    frame_shares_allocator();
     receipt_tests();
     event_mirror_publication();
     pthread_mutex_lock(&jobs_mu); jobs_stop=1; pthread_cond_signal(&jobs_cv); pthread_mutex_unlock(&jobs_mu); pthread_join(worker,NULL);

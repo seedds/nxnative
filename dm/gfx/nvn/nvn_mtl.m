@@ -1202,6 +1202,7 @@ typedef struct { __strong id<MTLBuffer> buf; uint64_t fence; } vis_buf;
 enum { VIS_RING = ALLOC_MAX };
 static vis_buf g_vis_ring[VIS_RING]; static int g_vis_ring_n, g_vis_ring_i = -1;
 static id<MTLBuffer> g_vis; static uint32_t g_vis_n;   // This submission's visibility buffer and number of slots used
+static void vis_take(void);
 static int vis_in_ring(id<MTLBuffer> b) { for (int i = 0; i < g_vis_ring_n; i++) if (g_vis_ring[i].buf == b) return 1; return 0; }
 static int g_vis_on, g_vis_counting, g_vis_cur = -1; static uint64_t g_vis_cur_pass;
 static vis_slot *g_vs; static int g_nvs, g_vscap;      // Slots since the last report or reset, in this submission
@@ -1335,6 +1336,13 @@ enum { GSR_N = 16384 };
 static struct { uint64_t fence, lo, hi; } g_gsr[GSR_N]; static uint64_t g_gsr_n; static int g_gml_on;
 static pthread_mutex_t g_gsr_mu = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t g_alloc_fence[ALLOC_MAX]; static uint64_t g_alloc_waits, g_alloc_grown;
+// The submissions of one frame share an allocator: Metal lets an allocator serve command buffers one after another and asks only that all of them are complete before its reset
+// (MTL4CommandBuffer.h), which is what its fence, the last one's, says. So the pool holds an allocator per frame in flight, not per submission. Since the queue replays a guest
+// submission in pieces (nvn_queue.inc), a game makes many small ones a frame: Ocarina of Time's 28-37 took the pool's 8 about once a frame, and the submit thread waited for the
+// GPU (PR #2090). ALLOC_SHARE bounds an allocator's memory while no frame ends (a loading screen): after that many submissions the next takes another
+enum { ALLOC_SHARE = 64 };
+static _Atomic uint64_t g_cur_frame;
+static uint64_t g_alloc_frame, g_alloc_shared, g_alloc_shares; static int g_alloc_used;   // the current allocator: the frame it was taken in, the submissions it has served since its reset; submissions that shared one so far
 int mtl_wait(uint64_t fence, uint64_t timeout_ns);
 static int mtl_wait_at(uint64_t fence, uint64_t timeout_ns, int site);
 static void up_flush(void);
@@ -1386,8 +1394,10 @@ void mtl_sub_begin(void) {
     g_cb = rec_cb_new();
     // Do not wait for the GPU mid-frame (hot real device: with a fixed rotation of 3, when the GPU cannot keep up every frame blocks here, and the submit thread runs at low frequency after waking, instruction count −18% but CPU time +49%):
     // pick an allocator the GPU has finished with; if all are in use create a new one; only at the cap wait for the oldest one. How far ahead it runs is bounded by the wait where the game acquires the swapchain texture, same as the old interface.
-    int alloc_i = -1; uint64_t done = g_done;
-    for (int i = 0; i < g_alloc_n; i++) if (g_alloc_fence[i] <= done) { alloc_i = i; break; }
+    int alloc_i = -1; uint64_t done = g_done, alloc_frame = atomic_load(&g_cur_frame);
+    int alloc_share = g_alloc_used && g_alloc_frame == alloc_frame && g_alloc_shared < ALLOC_SHARE && allocprof_level() != 2;
+    if (alloc_share) alloc_i = g_alloc_cur;
+    for (int i = 0; alloc_i < 0 && i < g_alloc_n; i++) if (g_alloc_fence[i] <= done) { alloc_i = i; break; }
     if (alloc_i < 0 && g_alloc_n < ALLOC_MAX) { NSError *ae = nil; MTL4CommandAllocatorDescriptor *ad = [MTL4CommandAllocatorDescriptor new];
         g_alloc4[g_alloc_n] = [g_dev newCommandAllocatorWithDescriptor:ad error:&ae]; if (!g_alloc4[g_alloc_n]) MDIE("failed to create a new MTL4CommandAllocator: %s", ae.localizedDescription.UTF8String);
         alloc_i = g_alloc_n++; g_alloc_grown++; }
@@ -1400,7 +1410,8 @@ void mtl_sub_begin(void) {
         g_alloc4[alloc_i] = [g_dev newCommandAllocatorWithDescriptor:[MTL4CommandAllocatorDescriptor new] error:nil]; g_cm_last = 0;
     }
     g_alloc_cur = alloc_i;
-    [g_alloc4[alloc_i] reset];
+    if (alloc_share) { g_alloc_shared++; g_alloc_shares++; }
+    else { [g_alloc4[alloc_i] reset]; g_alloc_frame = alloc_frame; g_alloc_shared = 1; g_alloc_used = 1; }
     [g_cb beginCommandBufferWithAllocator:g_alloc4[alloc_i]];
     ts_sub_begin();
     g_commit_blocks = [NSMutableArray array];
@@ -1408,13 +1419,7 @@ void mtl_sub_begin(void) {
     if (g_vis && !vis_in_ring(g_vis)) defer_obj_release(g_vis);
     g_npost = 0; g_vis = nil; g_vis_n = 0; g_vis_cur = -1; pend_reset();
     zskip_clear(); g_zskip_count = 0;
-    int pick = -1;
-    for (int i = 0; i < g_vis_ring_n; i++) if (g_vis_ring[i].fence <= g_done) { pick = i; break; }
-    if (pick < 0 && g_vis_ring_n < VIS_RING) pick = g_vis_ring_n++;
-    if (pick < 0) { uint64_t oldest = UINT64_MAX; for (int i = 0; i < VIS_RING; i++) if (g_vis_ring[i].fence < oldest) { oldest = g_vis_ring[i].fence; pick = i; } if (oldest > g_done) mtl_wait_at(oldest, UINT64_MAX, WS_VIS); }
-    g_vis_ring_i = pick; g_vis_ring[pick].fence = UINT64_MAX;
-    if (!g_vis_ring[pick].buf) { g_vis_ring[pick].buf = [g_dev newBufferWithLength:VIS_SLOTS * 8 options:MTLResourceStorageModeShared]; res_add(g_vis_ring[pick].buf); }
-    g_vis = g_vis_ring[pick].buf;
+    g_vis_ring_i = -1;   // its visibility buffer is taken by its first pass that counts samples (vis_take)
     void pg_sub_begin_ext(uint64_t fence); pg_sub_begin_ext(g_fence + 1);
     void arena_begin(void); arena_begin();
 }
@@ -2035,6 +2040,19 @@ void mtl_sub_fill(uint64_t dst, uint64_t n, uint32_t value) {
 static void post(post_op o) {
     if (g_npost == g_postcap) { g_postcap = g_postcap ? g_postcap * 2 : 64; g_post = realloc_or_die(g_post, g_postcap * sizeof *g_post, "the deferred operations"); }
     g_post[g_npost++] = o;
+}
+// A submission's visibility buffer, taken from the ring at its first pass that counts samples: most submissions count none (a compute piece, a copy, a piece between two waits),
+// and one buffer each at their start kept the ring's 8 in flight as the allocators were. With none free the pass takes a buffer of its own (rp_begin_ex), retired after the
+// submission as an overflow buffer is: it does not wait for the GPU inside a submission
+static void vis_take(void) {
+    if (g_vis_ring_i >= 0) return;
+    int pick = -1;
+    for (int i = 0; i < g_vis_ring_n; i++) if (g_vis_ring[i].fence <= g_done) { pick = i; break; }
+    if (pick < 0 && g_vis_ring_n < VIS_RING) pick = g_vis_ring_n++;
+    if (pick < 0) return;
+    g_vis_ring_i = pick; g_vis_ring[pick].fence = UINT64_MAX;
+    if (!g_vis_ring[pick].buf) { g_vis_ring[pick].buf = [g_dev newBufferWithLength:VIS_SLOTS * 8 options:MTLResourceStorageModeShared]; res_add(g_vis_ring[pick].buf); }
+    g_vis = g_vis_ring[pick].buf; g_vis_n = 0;
 }
 void mtl_sub_event(volatile uint32_t *val, uint32_t mode, uint32_t v) { post((post_op){1, val, mode, v, 0, 0, NULL}); }
 static void ts_clk(void);
@@ -5462,6 +5480,7 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex_(int clear_only) {
     }
     if (g_vis_on) {
         // Slots used up (one submission exceeds VIS_SLOTS counting passes): continue in a new overflow buffer. A ring buffer must not be retired (it is still used in rotation, and retiring removes it from the residency set); only a previous overflow buffer is
+        if (!g_vis) vis_take();
         if (!g_vis || g_vis_n >= VIS_SLOTS) { if (g_vis && !vis_in_ring(g_vis)) defer_obj_release(g_vis); g_vis = [g_dev newBufferWithLength:VIS_SLOTS * 8 options:MTLResourceStorageModeShared]; res_add(g_vis); g_vis_n = 0; }
         pd.visibilityResultBuffer = g_vis;
     }
@@ -16257,6 +16276,7 @@ void mtl_wait_state_dump(void) {
          atomic_load(&g_up_pending), atomic_load(&g_up_alloc_busy[0]), atomic_load(&g_up_alloc_busy[1]), atomic_load(&g_up_alloc_busy[2]), g_up_seq, g_up_cb != nil,
          (unsigned long long)g_pq_in, (unsigned long long)g_pq_done, g_cb != nil, atomic_load(&g_sub_thread_set));
 }
+uint64_t mtl_alloc_shares(void) { return g_alloc_shares; }   // main submissions that began in the allocator of the one before them
 void mtl_alloc_stats(uint64_t *waits, uint64_t *grown, int *n) { *waits = g_alloc_waits; *grown = g_alloc_grown; *n = g_alloc_n; }   // Main submit allocator pool: how many times it waited, how many times it grew, how many exist now
 // Memory census for restop (diagnostic): residency-set textures by Metal format; which of them anything still names (serial tables, sharing table, descriptor views) and which only the
 // deferred-release queue or nothing holds; and game textures at one storage address held as several Metal textures. Under no lock of the caller's

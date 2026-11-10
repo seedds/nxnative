@@ -1595,12 +1595,15 @@ uint64_t mtl_cut_count(void);
 // A render pass line also gives what it loaded and stored of its attachments (KB, the bandwidth ledger's view: DontCare stores are not counted) and the Metal pixel formats of
 // colour attachment 0 and of the depth / stencil attachment (0: none)
 enum { GP_MAX = 4096 };   // the largest timestamp heap Metal makes
-typedef struct { char kind; uint16_t w, h; uint8_t nc, depth, loads; uint32_t draws, seg; uint64_t pass; uint32_t ld_kb, st_kb; uint16_t cfmt, dfmt; } gp_lab;   // seg: the command buffer (segment) of the submission it is in
+typedef struct { char kind; uint16_t w, h; uint8_t nc, depth, loads; uint32_t draws, seg; uint64_t pass; uint32_t ld_kb, st_kb; uint16_t cfmt, dfmt; char fs[17], vs[17]; } gp_lab;   // seg: the command buffer (segment) of the submission it is in
 static id<MTL4CounterHeap> g_gp_heap; static gp_lab g_gp_lab[GP_MAX / 2]; static int g_gp_n, g_gp_state, g_gp_cur = -1; static long g_gp_f0 = -2, g_gp_f1, g_gp_every; static uint64_t g_gp_frame;
 static const void *g_gp_e;   // the encoder g_gp_cur belongs to: m4_end also ends the upload / diagnostics / present encoders, which may end while a profiled pass is open (#531)
 static _Atomic int g_gp_busy;   // a periodic profile's report has not been printed yet: the heap is still being read
 static uint64_t g_bw_load, g_bw_store, g_gp_bw_l0, g_gp_bw_s0;   // the bandwidth ledger (defined with the pass statistics below) and its values at the last render pass end
 static uint64_t g_stat_pass, g_stat_draw; static _Atomic uint64_t g_cur_frame; static uint32_t g_seg; static uint32_t g_gp_copies, g_gp_disp, g_gp_ubd;   // copies / dispatches encoded (for the compute encoders' labels)
+// DM_NVN_GPUPROF_SPLIT=<n>: in a profiled frame a render pass ends after n draws and the next draw opens another, so the lines time groups of n draws; each line then ends
+// with the fragment and vertex shader of its first draw. The passes it adds load and store their attachments: read the times as shares, not as the frame's
+static int g_gp_split = -1;
 static int gp_active(void) {
     if (__builtin_expect(g_gp_f0 == -1, 1)) return 0;
     if (g_gp_f0 == -2) { const char *e = getenv("DM_NVN_GPUPROF");
@@ -1658,7 +1661,7 @@ static void gp_report(int n, gp_lab *lab, uint64_t frame) {   // the frame's las
         double us = (b - a) * tick_ns / 1e3; const gp_lab *l = &lab[i]; tot[l->kind != 'R'] += us;
         if (!t0 || a < t0) t0 = a; if (b > t1) t1 = b;
         if (l->kind == 'R') { np++; ld += l->ld_kb; st += l->st_kb;
-            MLOG("[gpuprof] F%llu %4d %8.1f us render pass %llu %ux%u colors %u depth %u loads %u draws %u start %+.1f seg %u load %u KB store %u KB fmt %u/%u", (unsigned long long)frame, i, us, (unsigned long long)l->pass, l->w, l->h, l->nc, l->depth, l->loads, l->draws, (a - t[0]) * tick_ns / 1e3, l->seg, l->ld_kb, l->st_kb, l->cfmt, l->dfmt); }
+            MLOG("[gpuprof] F%llu %4d %8.1f us render pass %llu %ux%u colors %u depth %u loads %u draws %u start %+.1f seg %u load %u KB store %u KB fmt %u/%u%s%s%s%s", (unsigned long long)frame, i, us, (unsigned long long)l->pass, l->w, l->h, l->nc, l->depth, l->loads, l->draws, (a - t[0]) * tick_ns / 1e3, l->seg, l->ld_kb, l->st_kb, l->cfmt, l->dfmt, l->fs[0] ? " fs " : "", l->fs, l->fs[0] ? " vs " : "", l->vs); }
         else MLOG("[gpuprof] F%llu %4d %8.1f us compute / copy after pass %llu start %+.1f seg %u copies %u (uniform updates %u) dispatches %u", (unsigned long long)frame, i, us, (unsigned long long)l->pass, (a - t[0]) * tick_ns / 1e3, l->seg, l->draws, l->h, l->w); }
     span = (t1 - t0) * tick_ns / 1e3;
     MLOG("[gpuprof] frame %llu: render %.2f ms, compute / copy %.2f ms over %d encoders (%d render passes, attachments load %.1f MB store %.1f MB), first start to last end %.2f ms", (unsigned long long)frame, tot[0] / 1e3, tot[1] / 1e3, n, np, ld / 1024.0, st / 1024.0, span / 1e3);
@@ -14434,6 +14437,10 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
         g_fz_fallback++; rp_end(); }
     if (g_enc && g_vis_counting && g_vis_n >= VIS_SLOTS) rp_end();   // this draw's query needs a slot and the buffer is bound for the whole pass: the next pass begins with a new one (rp_begin_ex)
     if (g_enc && g_rp_aw && (!R.has_sc || (long)R.sc.x + R.sc.w > (long)g_rp_aw || (long)R.sc.y + R.sc.h > (long)g_rp_ah)) rp_end();   // leaves the pass's render area
+    if (g_gp_split) {   // DM_NVN_GPUPROF_SPLIT
+        if (g_gp_split < 0) { const char *e = getenv("DM_NVN_GPUPROF_SPLIT"); g_gp_split = e ? atoi(e) : 0; if (g_gp_split < 0) g_gp_split = 0; if (g_gp_split) MLOG("DM_NVN_GPUPROF_SPLIT: profiled frames end a render pass every %d draws", g_gp_split); }
+        if (g_gp_split && g_enc && g_gp_cur >= 0 && g_gp_lab[g_gp_cur].kind == 'R' && (uint32_t)g_stat_draw - g_gp_lab[g_gp_cur].draws >= (uint32_t)g_gp_split && !g_fz.active && !g_defer_replaying) rp_end();
+    }
     fb_prepare(pr);   // same-pass feedback sampling: copy the snapshot first (see fb_prepare)
     if (R.has_sc && !g_enc && !S.rast_discard) {
         NSUInteger tw0 = 0, th0 = 0; rt_dims(&tw0, &th0);
@@ -14576,6 +14583,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
         }
     }
     g_stat_draw++;
+    if (g_gp_cur >= 0 && g_gp_split > 0 && !g_gp_lab[g_gp_cur].fs[0] && g_gp_lab[g_gp_cur].kind == 'R') { if (pr->sh[1]) memcpy(g_gp_lab[g_gp_cur].fs, pr->sh[1]->key, 16); else g_gp_lab[g_gp_cur].fs[0] = '-'; if (pr->sh[0]) memcpy(g_gp_lab[g_gp_cur].vs, pr->sh[0]->key, 16); }
     if (enc_label_on() && !g_el_draws++ && pr->sh[1]) { memcpy(g_el_key, pr->sh[1]->key, 8); g_el_key[8] = 0; }
     if (passdump()) {   // Characteristics of a render pass's first draw (to judge whether the load can be omitted: full screen, no blending, writes all channels, does not depend on depth); with DM_NVN_PASSDUMP_ALL every draw is recorded
         static uint64_t last_pass = ~0ull; static int all = -1; if (all < 0) all = getenv("DM_NVN_PASSDUMP_ALL") != NULL;

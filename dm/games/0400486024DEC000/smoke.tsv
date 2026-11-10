@@ -1,0 +1,10 @@
+# Empty save to the title: the pipeline prepare of a cold start (265 s for 14,748 pipelines on an M4 in quick mode, no game frame meanwhile), the logos, then the title
+# with its movie (compute-heavy: the frame step and the movie clock at work). No input. quick has no prebuild, so it pays the prepare too; the full mode prebuilds first.
+save	new
+keys	
+secs	400
+quick	400
+reach	900@360
+window	340	50
+shots	350,385
+hang	30

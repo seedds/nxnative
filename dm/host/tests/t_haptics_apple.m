@@ -167,8 +167,9 @@ static void test_dispatch_after(dispatch_time_t when, dispatch_queue_t target, d
 // A HID device in the fake registry: its entry (one per connection), and the handles made on it
 @interface TestHid : NSObject
 @property io_service_t service;
-@property int product, opens, closes;
+@property int vendor, product, opens, closes;
 @property BOOL bluetooth, failOpen;
+@property NSString *transport;   // instead of Bluetooth or USB
 @property NSData *report;
 @end
 @implementation TestHid
@@ -178,34 +179,36 @@ static void test_dispatch_after(dispatch_time_t when, dispatch_queue_t target, d
 @end
 @implementation TestHandle
 @end
-#define SONY_ITERATOR 77
+#define HID_ITERATOR 77
 static NSMutableArray<TestHid *> *registry;
 static NSArray<TestHid *> *listed;   // what the open iterator walks
 static NSUInteger listedNext;
 static int objects;   // iterators and services not released yet
 static TestHid *hid_add(int product) {
     static io_service_t next = 1000;
-    TestHid *h = [TestHid new]; h.service = next++; h.product = product; h.bluetooth = YES;
+    TestHid *h = [TestHid new]; h.service = next++; h.vendor = 0x054C; h.product = product; h.bluetooth = YES;
     [registry addObject:h]; return h;
 }
 static TestHid *hid_of(int player) {
-    __block IOHIDDeviceRef d; dispatch_sync(queue, ^{ d = ds4[player].dev; });
+    __block IOHIDDeviceRef d; dispatch_sync(queue, ^{ d = pads_out[player] ? pads_out[player]->dev : NULL; });
     return d ? ((__bridge TestHandle *)d).hid : nil;
 }
 static kern_return_t test_matching_services(mach_port_t port, CFDictionaryRef match, io_iterator_t *it) {
     (void)port;
-    assert(!listed && [(__bridge NSNumber *)CFDictionaryGetValue(match, CFSTR(kIOHIDVendorIDKey)) intValue] == 0x054C);
+    assert(!listed);
+    int vendor = [(__bridge NSNumber *)CFDictionaryGetValue(match, CFSTR(kIOHIDVendorIDKey)) intValue];
     CFRelease(match);
-    listed = [registry copy]; listedNext = 0; objects++; *it = SONY_ITERATOR;
+    listed = [registry filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(TestHid *h, NSDictionary *b) { (void)b; return h.vendor == vendor; }]];
+    listedNext = 0; objects++; *it = HID_ITERATOR;
     return KERN_SUCCESS;
 }
 static io_object_t test_iterator_next(io_iterator_t it) {
-    assert(it == SONY_ITERATOR);
+    assert(it == HID_ITERATOR);
     if (listedNext == listed.count) return 0;
     objects++; return listed[listedNext++].service;
 }
 static kern_return_t test_object_release(io_object_t o) {
-    objects--; if (o == SONY_ITERATOR) listed = nil;
+    objects--; if (o == HID_ITERATOR) listed = nil;
     return KERN_SUCCESS;
 }
 static TestHid *hid_listed(io_service_t s) {
@@ -222,7 +225,7 @@ static CFTypeRef test_device_property(IOHIDDeviceRef d, CFStringRef key) {
     TestHid *h = ((__bridge TestHandle *)d).hid;
     if (CFEqual(key, CFSTR(kIOHIDProductIDKey))) return (__bridge CFTypeRef)@(h.product);
     assert(CFEqual(key, CFSTR(kIOHIDTransportKey)));
-    return (__bridge CFTypeRef)(h.bluetooth ? @"Bluetooth" : @"USB");
+    return (__bridge CFTypeRef)(h.transport ?: h.bluetooth ? @"Bluetooth" : @"USB");
 }
 static IOReturn test_device_open(IOHIDDeviceRef d, IOOptionBits o) {
     TestHid *h = ((__bridge TestHandle *)d).hid; assert(o == kIOHIDOptionsTypeNone);
@@ -237,7 +240,20 @@ static IOReturn test_device_report(IOHIDDeviceRef d, IOHIDReportType t, CFIndex 
     h.report = [NSData dataWithBytes:r length:n];
     return kIOReturnSuccess;
 }
-static void drain(void) { dispatch_sync(queue, ^{}); dispatch_sync(queue, ^{}); }
+// The rumble queue, then the reports it queued (pad_set)
+static void drain(void) { dispatch_sync(queue, ^{}); dispatch_sync(queue, ^{}); dispatch_sync(padQueue, ^{}); }
+// A stand-in for IOHIDDeviceSetReport: records the report's first six bytes, waits for the gate when one is set
+static NSMutableArray<NSString *> *test_written;
+static dispatch_semaphore_t test_write_gate;
+static _Atomic bool test_writing;
+static IOReturn test_write_result = kIOReturnSuccess;
+static IOReturn test_pad_write(IOHIDDeviceRef dev, IOHIDReportType type, CFIndex id, const uint8_t *r, CFIndex n) {
+    (void)dev; assert(type == kIOHIDReportTypeOutput && id == r[0] && n >= 6);
+    atomic_store(&test_writing, true);
+    if (test_write_gate) dispatch_semaphore_wait(test_write_gate, DISPATCH_TIME_FOREVER);
+    [test_written addObject:[NSString stringWithFormat:@"%02x %02x %02x %02x %02x %02x", r[0], r[1], r[2], r[3], r[4], r[5]]];
+    return test_write_result;
+}
 static void advance(NSTimeInterval seconds) {
     uint64_t end = testTime + (uint64_t)llround(seconds * NSEC_PER_SEC);
     for (;;) {
@@ -265,6 +281,7 @@ static int made;   // engines the test factories made
 int main(void) { @autoreleasepool {
     queue = dispatch_queue_create("test.rumble", DISPATCH_QUEUE_SERIAL);
     dispatch_queue_set_specific(queue, &queue, &queue, NULL);
+    padQueue = dispatch_queue_create("test.rumble.hid", DISPATCH_QUEUE_SERIAL);
     timers = [NSMutableArray new];
     dm_haptics_init(apply, 1); drain();
     TestEngine *left = [TestEngine new], *right = [TestEngine new];
@@ -427,7 +444,7 @@ int main(void) { @autoreleasepool {
     TestHid *first = hid_add(0x05C4);
     TestController *ds1 = [TestController new]; ds1.haptics = [TestHaptics new]; ds1.productCategory = GCProductCategoryDualShock4;
     dm_haptics_apple_controller(0, (id)ds1); drain();
-    assert(hid_of(0) == first && first.opens == 1 && channels[0].count == 2 && [channels[0][0] isKindOfClass:DmDs4Channel.class]);
+    assert(hid_of(0) == first && first.opens == 1 && channels[0].count == 2 && [channels[0][0] isKindOfClass:DmPadChannel.class]);
     // A controller that connects long after the first gets its own device, not the first one's and not Core Haptics (issue #1165)
     TestController *ds2 = [TestController new]; ds2.haptics = [TestHaptics new]; ds2.productCategory = GCProductCategoryDualShock4;
     dm_haptics_apple_controller(1, (id)ds2); drain();
@@ -459,7 +476,39 @@ int main(void) { @autoreleasepool {
     send_pair(0, 0); drain();
     dm_haptics_apple_controller(0, nil); dm_haptics_apple_controller(1, nil); drain();
     assert(back.closes == 1 && second.closes == 1 && objects == 0);   // every iterator and service released
+    // A Luna controller gets its output report on a device of its own vendor: never a free DualShock 4 device, and no DualShock 4 takes its device
+    TestHid *luna = hid_add(0x0419); luna.vendor = 0x0171; luna.transport = @"Bluetooth Low Energy";
+    TestController *lc = [TestController new]; lc.haptics = [TestHaptics new]; lc.vendorName = @"Luna Gamepad";
+    dm_haptics_apple_controller(0, (id)lc); drain();
+    assert(hid_of(0) == luna && luna.opens == 1 && second.opens == 1 && [channels[0][0] isKindOfClass:DmPadChannel.class] && lc.haptics.attempts == 0);
+    dm_haptics_apple_controller(1, (id)ds1); drain();
+    assert(hid_of(1) == second && luna.opens == 1);
+    dm_vibration_update u2[] = {{0, 0, {1, 160, 0, 320}}, {0, 1, {0, 160, 0, 320}}};
+    dm_haptics_send(u2, 2); drain();
+    assert(luna.report.length == 9 && !memcmp(luna.report.bytes, (const uint8_t[9]){0x03, 0x0F, 0, 0, 85, 0, 0xFF, 0x00, 0xEB}, 9));   // 0.85 of 100
+    dm_haptics_apple_controller(0, nil); dm_haptics_apple_controller(1, nil); drain();
+    assert(luna.closes == 1 && ((const uint8_t *)luna.report.bytes)[4] == 0 && second.closes == 2 && objects == 0);   // stopped, then closed
     assert(ds4_crc((const uint8_t *)"123456789", 9) == 0xCBF43926u);   // the report's CRC32 (IEEE, reflected)
+    // The Luna report: magnitudes 0-100 at bytes 4 (left) and 5 (right), as SDL sends it
+    uint8_t r[78]; assert(pad_report(PAD_LUNA, YES, (const uint8_t[2]){60, 20}, r) == 9);
+    assert(!memcmp(r, (const uint8_t[9]){0x03, 0x0F, 0, 0, 60, 20, 0xFF, 0x00, 0xEB}, 9));
+    // The reports go out on their own queue: levels set while one is out are merged into the next, and a device that times out gets no more
+    test_written = [NSMutableArray new]; test_write_gate = dispatch_semaphore_create(0);
+    pad_write = test_pad_write;
+    DmPadOutput *o = [DmPadOutput new]; o->kind = PAD_LUNA;
+    pad_set(o, (const uint8_t[2]){10, 0});   // blocks in the fake write until the gate opens
+    while (!test_writing) usleep(1000);
+    pad_set(o, (const uint8_t[2]){20, 0}); pad_set(o, (const uint8_t[2]){30, 5});
+    dispatch_semaphore_signal(test_write_gate); dispatch_semaphore_signal(test_write_gate);
+    dispatch_sync(padQueue, ^{});
+    assert(test_written.count == 2 && [test_written[0] isEqual:@"03 0f 00 00 0a 00"] && [test_written[1] isEqual:@"03 0f 00 00 1e 05"]);
+    pad_set(o, (const uint8_t[2]){30, 5}); dispatch_sync(padQueue, ^{});
+    assert(test_written.count == 2);   // unchanged levels are not sent again
+    test_write_result = kIOReturnTimeout;
+    pad_set(o, (const uint8_t[2]){0, 0}); dispatch_semaphore_signal(test_write_gate); dispatch_sync(padQueue, ^{});
+    test_write_result = kIOReturnSuccess;
+    pad_set(o, (const uint8_t[2]){40, 0}); dispatch_sync(padQueue, ^{});
+    assert(test_written.count == 3 && !atomic_load(&o->busy));   // nothing after the timeout
     dm_haptics_apple_shutdown();
-    puts("Apple haptics: channels, pulses, idle release, startup handlers, engine replacement, backoff, stale callbacks, plain players, level cutoff and the DualShock 4 route passed");
+    puts("Apple haptics: channels, pulses, idle release, startup handlers, engine replacement, backoff, stale callbacks, plain players, level cutoff and the HID report route (DualShock 4, Luna) passed");
 } }

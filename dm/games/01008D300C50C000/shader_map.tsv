@@ -1,0 +1,26 @@
+# kind: evidence  Super Nintendo Entertainment System – Nintendo Classics shaders (provisional profile) (GLSLC in RomFS + main) → control section + code area keys (dm/gfx/tools/shader_split.py)
+# column 5 records where each key first appears; this game has no PC version to pair with
+package	index	stage	dm_ctl_sha16	source
+ps_bootapp.bin	0	pixel	10f69b818a880085	/bootapp/resources/shaders/alphamask.nvnc#GLSLC@0x0#var
+vs_bootapp.bin	0	vertex	2d58d2e82e4991dd	/bootapp/resources/shaders/alphamask.nvnc#GLSLC@0x0#var
+ps_bootapp.bin	1	pixel	59d1e437c4f2a169	/bootapp/resources/shaders/antialias.nvnc#GLSLC@0x0#var
+vs_bootapp.bin	1	vertex	705a069ef83f5117	/bootapp/resources/shaders/antialias.nvnc#GLSLC@0x0#var
+vs_bootapp.bin	2	vertex	5d27372ccdbb7da4	/bootapp/resources/shaders/bicubicsharp.nvnc#GLSLC@0x0#var
+ps_bootapp.bin	2	pixel	fac2f5f605add778	/bootapp/resources/shaders/bicubicsharp.nvnc#GLSLC@0x0#var
+vs_bootapp.bin	3	vertex	450d682f1763a113	/bootapp/resources/shaders/bicubicsmooth.nvnc#GLSLC@0x0#var
+ps_bootapp.bin	3	pixel	a7f14c659ebeef74	/bootapp/resources/shaders/bicubicsmooth.nvnc#GLSLC@0x0#var
+ps_bootapp.bin	4	pixel	8c380aa506b86899	/bootapp/resources/shaders/bicubicsmoothrounded.nvnc#GLSLC@0x0#var
+vs_bootapp.bin	4	vertex	ef10e2682333a6ff	/bootapp/resources/shaders/bicubicsmoothrounded.nvnc#GLSLC@0x0#var
+vs_bootapp.bin	5	vertex	041b060afabae209	/bootapp/resources/shaders/bilinear.nvnc#GLSLC@0x0#var
+ps_bootapp.bin	5	pixel	dd98db447ca5591e	/bootapp/resources/shaders/bilinear.nvnc#GLSLC@0x0#var
+ps_bootapp.bin	6	pixel	02fa3038c355821d	/bootapp/resources/shaders/blur.nvnc#GLSLC@0x0#var
+vs_bootapp.bin	6	vertex	1d369d3afc8a100b	/bootapp/resources/shaders/blur.nvnc#GLSLC@0x0#var
+ps_bootapp.bin	7	pixel	6767467e0ece0a7f	/bootapp/resources/shaders/crtfilter.nvnc#GLSLC@0x0#var
+vs_bootapp.bin	7	vertex	c1367bfd06327dcf	/bootapp/resources/shaders/crtfilter.nvnc#GLSLC@0x0#var
+ps_bootapp.bin	8	pixel	4aff0ac25a352bd7	/bootapp/resources/shaders/downscale2.nvnc#GLSLC@0x0#var
+vs_bootapp.bin	8	vertex	aa14b7f84810d173	/bootapp/resources/shaders/downscale2.nvnc#GLSLC@0x0#var
+vs_bootapp.bin	9	vertex	3954dbdb73d4ab7d	/bootapp/resources/shaders/downscale5.nvnc#GLSLC@0x0#var
+ps_bootapp.bin	9	pixel	e44b62fcabf18acd	/bootapp/resources/shaders/downscale5.nvnc#GLSLC@0x0#var
+vs_sysdata.bin	0	vertex	38512a395e9afe74	/sysdata/shaders/mesh.glslc#GLSLC@0x0#var
+ps_sysdata.bin	0	pixel	a6f3e7c3df94928c	/sysdata/shaders/mesh.glslc#GLSLC@0x0#var
+vs_sysdata.bin	1	vertex	3a24b5ced1f9e727	/sysdata/shaders/sprite.glslc#GLSLC@0x0#var

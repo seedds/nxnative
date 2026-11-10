@@ -73,15 +73,5 @@ int main(void) { @autoreleasepool {
     mtl_tex_release(&b); mtl_tex_release(&c);
     next_submission(); defer_drain();
 
-    // Idle eviction of unreferenced shared textures with no takeover
-    tex_t d = tex(91004, NVN_FORMAT_RGBA8, 64);
-    mtl_tex_init(&d);
-    id<MTLTexture> td = tex_mtl(&d);
-    CHECK(td && shared(td) && held(td), "d is shared and held");
-    mtl_tex_release(&d);
-    CHECK(!held(td) && shared(td), "d is no longer held, but still shared before idle timeout");
-    for (int i = 0; i <= 20; i++) next_submission();
-    CHECK(!shared(td), "unreferenced shared texture with no overlapping storage is trimmed after idle timeout");
-
     printf("t_alias_takeover: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

@@ -239,6 +239,33 @@ The yield back-off (`DM_YIELD_BACKOFF`) and the rewriter's spin waits (`patch_ns
 - **Found on:** [Fire Emblem: Three Houses](../../dm/games/010055D009F78000/README.md#frame-rate), whose frame limiter (`main+0x5be430`) had a per-build cut that made it sleep; the cut is removed. On the Mac in a window, 100 s from the boot to the title: without the cut, the old back-off 59.4–59.5 fps, frame p50 16.80–16.85 ms, 0.28–0.79 W of CPU; backing off from the start alone 59.4–59.5 fps, 0.19–0.35 W; with the predicted sleep 59.8–60.0 fps, 16.67–16.81 ms in most windows (up to 17.06), 0.09–0.16 W, about 1,330 wakeups a second, 294–300 of every 300 waits slept to their predicted end. With the cut it was 59.9 fps, 16.68 ms, 0.11–0.49 W.
 - **Check:** `make -C dm/host/tests GAME=<id> build/t_clockwait && dm/host/tests/build/t_clockwait`, on a test clock that only sleeps and yields advance: a yield loop that reads the clock backs off from its start and one that does not after 2 ms; a limiter at a steady period sleeps to its predicted end and ends within a few yields of its deadline; a longer period never makes a wait later than the back-off's own lateness; a shorter period costs two late waits, then the waits end on time again.
 
+## The deterministic clock
+
+`DM_DETCLOCK=<step ns>` makes the guest clock advance by presents instead of the wall clock, and the entropy a fixed-seed stream, for replays and screenshot tests ([Recording input](../development.md#recording-input-dm_rec)). `DM_DETCLOCK_PACE=1` gives each frame at least its steps of wall time.
+
+### A game stops at its first frames under the deterministic clock
+
+- **Symptom:** with `DM_DETCLOCK` the game presents one or two frames and nothing after them; the hitch dump (`DM_HITCH_DUMP`) shows the main thread in `SleepThread` (`dm_guest_sleep_ns`) and the job system's workers in short sleeps too. Without the switch it plays.
+- **Cause:** every sleep and timed wait of a step or less waited on the guest clock, which moves only at presents. A job system that polls with short sleeps (workers waiting for work, the main thread waiting for their jobs) then never finished the frame whose present would have moved the clock. The clock also moved one step per present whatever the present interval, so a frame paced for two vsyncs (a game's 30 fps mode) slept for a time that never came.
+- **Fix:** under the deterministic clock a sleep or timed wait shorter than one step is a poll on the wall clock (`dm_detclock_waits_guest` in `hle_os.c`, used by `block` and `dm_guest_sleep_ns` in `hle_thread.c`); longer ones, such as frame pacing, still wait on the guest clock. The guest reads only the deterministic clock either way; only how many times a polling loop goes round follows the machine. A present advances the clock one step per vsync of the present interval the game set (`dm_guest_frame_tick_n`; `det_vsyncs` in `hle_nvn.c`, 1 to 4).
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md): it stopped at its second frame, the `WorkerMgr` workers sleeping at `main+0xe33730` and the main thread waiting for their jobs at `main+0x1907cc` (v0), right after it set present interval 2. With the fix it plays at 60 fps under `DM_DETCLOCK=16666667 DM_DETCLOCK_PACE=1`, frame p50 16.67 ms and GPU time as without the switch.
+- **Check:** `make -C dm/gfx/tests GAME=<id> t_counter_clock && dm/gfx/tests/t_counter_clock`: a present of two vsyncs advances two steps, a wait under one step is a poll and one of a step or more waits on the guest clock.
+
+### The host's frame step under the deterministic clock
+
+- **Symptom:** under `DM_DETCLOCK` a game with a frame-step stub plays at 35-40 fps where it holds 60 without the switch, the log showing `frame step: hold 1 → 3 vsyncs` after its first slow frames and no step back; with `DM_DETCLOCK_PACE=1` alone it holds 57 fps (frame p50 17.6 ms).
+- **Cause:** the host's frame step follows the wall clock, and under the deterministic clock each frame looks exactly on time, so the hold raised by start-up's slow frames never came down; the game then paced 2-vsync frames. A step chosen from the wall clock also made the game run differently from machine to machine. The pace waited one step from the end of the previous wait, so each wakeup's lateness (about 1 ms) added up.
+- **Fix:** under the deterministic clock the host decides no step (`fstep_tick` in `hle_nvn.c` writes 0, "not decided", to the state page), and a frame-step stub runs the game's own choice, whose clock reads are the deterministic clock. The pace counts each frame's steps from the previous frame's deadline, and starts again from now after a late frame.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md): frame p50 26-30 ms under the clock before, 17.6 ms with the pace from the wait's end, 16.67 ms with both changes.
+
+### Tick values that follow the Mac's uptime under the deterministic clock
+
+- **Symptom:** two runs from the same save under `DM_DETCLOCK` (and `DM_FIXED_TIME`) differ from their first frames, though their input and frame count are the same.
+- **Cause:** the guest clock is the Mac's uptime (`mach_absolute_time`), and the deterministic count started at the first present from that value, so every tick the game read differed between runs by how long the Mac had been on, before the first present and after it. The steady clocks (`StandardSteadyClock`, the C library's monotonic clock) read the host's monotonic clock, another uptime.
+- **Fix:** under `DM_DETCLOCK` the guest clock reads 10 s plus the time since the host started (`DET_ORIGIN_NS`, a constructor in `hle_os.c`), and the first present starts the count at 130 s (`DET_FIRST_NS`; a start-up longer than that keeps its own value and logs a red line). The steady clocks take the guest clock (`hle_time.c`).
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md): seeds taken before the first present are now the same in every run (probes at its 22 random-generator seeds from `GetSystemTick`).
+- **Note (open):** what a game seeds from the clock on a loading thread still differs: the thread takes its tick at a frame that follows loading speed. Mario Kart World's title spot and later its race start (about 16 frames apart between two replays) differ that way; fixing the ticks of those 22 call sites made the title's first spot repeat, but that is a list for one build of one game, kept out of the host.
+
 ## Events and notifications
 
 ### Synchronization waits retain objects and completed notifications

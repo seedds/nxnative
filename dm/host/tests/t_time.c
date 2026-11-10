@@ -4,6 +4,7 @@
 #include <mach-o/getsect.h>
 
 uint64_t guest_ns(void) { return clock_gettime_nsec_np(CLOCK_MONOTONIC); }
+int dm_detclock_configured(void) { return 0; }   // the steady clocks read the host's monotonic clock, as without DM_DETCLOCK
 static int checks, fails;
 extern const struct mach_header_64 _mh_execute_header;
 #define CHECK(c, msg) do { checks++; if (!(c)) { fails++; fprintf(stderr, "FAIL: %s\n", msg); } } while (0)

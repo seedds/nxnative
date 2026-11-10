@@ -1517,6 +1517,7 @@ static void sleep_until_ns(uint64_t dl);
 static uint64_t present_period(const win_t *o);
 static uint64_t rt_period_ns(const win_t *o, uint64_t period);
 static int present_itv(const win_t *o);
+static int det_vsyncs(const win_t *o);
 static int link_wait(const win_t *o, uint64_t timeout_ns);
 __attribute__((weak)) void dm_main_yield_stats(uint64_t *n, uint64_t *ns) { *n = 0; *ns = 0; }   // The host's hle_thread.c provides the ground truth; 0 in graphics unit tests
 __attribute__((weak)) uint32_t dm_guest_work_qos(unsigned *count) { if (count) *count = 0; return QOS_CLASS_UNSPECIFIED; }
@@ -1553,7 +1554,9 @@ NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsyn
                // When the machine is fully loaded frames only get slower and the background only gets more wall clock, so the picture captured at "the Nth frame after the message" is independent of load
         static int pace = -1; static uint64_t step, last;
         if (pace < 0) { const char *e = getenv("DM_DETCLOCK_PACE"), *d = getenv("DM_DETCLOCK"); step = d ? strtoull(d, 0, 0) : 0; pace = e && atoi(e) && step; }
-        if (pace) { if (last && now_ns() < last + step) sleep_until_ns(last + step); last = now_ns(); }
+        // n steps for a frame the clock counts as n vsyncs, from the last frame's deadline rather than from when its wait ended: the wakeup's lateness (about 1 ms) added up,
+        // and Mario Kart World paced at 17.6 ms (57 fps) where the step is 16.67. A frame later than its deadline starts the count again from now
+        if (pace) { uint64_t d = step * (uint64_t)det_vsyncs(o), t = now_ns(); if (last && t < last + d) { sleep_until_ns(last + d); last += d; } else last = t; }
     }
     pace_ns += mtl_snap_acquire_wait();   // ring capacity is waited for at acquire, where the game does not hold its present lock
     g_acq_wait_ns += wait; trow(g_frame, "@late_ms", wait ? (now_ns() - at) / 1e6 : 0);
@@ -1576,6 +1579,9 @@ NVN(nvnQueueAcquireTexture, NVNqueueAcquireTextureResult, NVNqueue *q, NVNwindow
 // Frame boundary: on each present, print / write to disk the call count of each NVN function for this frame
 static uint64_t g_prev[NVN_NFUNC];
 static FILE *g_tsv;
+// Vsyncs the deterministic clock (DM_DETCLOCK) counts for a present: the present interval the game set (1 to 4), never the host's frame step, which follows the wall clock
+static int det_vsyncs(const win_t *o) { int v = o ? o->interval : 1; return v < 1 ? 1 : v > 4 ? 4 : v; }
+static int g_det_vsyncs = 1;   // this present's, set by the present before dump_frame
 static void dump_frame(void) {
     static int inited, nframes = 3, calls = 1;
     if (!inited) {
@@ -1607,7 +1613,7 @@ counts_done:
         if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vi, &cnt) == KERN_SUCCESS) { unsigned long long mb = (unsigned long long)(vi.phys_footprint >> 20); void mtl_mem_stat(unsigned long long, unsigned long long); mtl_mem_stat(g_frame, mb);
             static long cap = -1; if (cap < 0) { const char *e = getenv("DM_MEM_CAP_GB"); cap = e ? atol(e) : DM_MEM_CAP_DEFAULT_GB; }
             if (cap > 0 && mb > (unsigned long long)cap * 1024) { LOG("[RED] memory watchdog: resident %llu MB over the limit of %ld GB (frame %llu), exiting", mb, cap, (unsigned long long)g_frame); _exit(86); } } }
-    dm_guest_frame_tick();   // Deterministic guest clock (DM_DETCLOCK, host hle_os.c): each present advances a fixed step; a no-op when not enabled
+    dm_guest_frame_tick_n(g_det_vsyncs);   // Deterministic guest clock (DM_DETCLOCK, host hle_os.c): each present advances a fixed step per vsync of its present interval; a no-op when not enabled
     dm_cheats_present();   // Atmosphère cheat files (hle_cheats.c): enabled cheats apply once per presented frame; the ~60 Hz idle thread only covers gaps
 }
 // ---------- Timing instrumentation (per-frame rows written to DM_NVN_TSV: frame / @metric / value; every 300 frames a summary of p50 / p95 / max) ----------
@@ -2020,6 +2026,14 @@ static int fstep_hold(void) {
 // Cost = max(CPU: the time between the frames' starts without the pacing wait, GPU: the latest finished frame's GPU time), in vsyncs
 static void fstep_tick(const win_t *o, int c) {
     static uint64_t prev, t0, v0, fixed_sum, held[FSTEP_MAX + 1]; static int nlog;
+    // Under the deterministic clock (DM_DETCLOCK) the host decides no step: its steps follow the wall clock, so the game would run differently from machine to machine and run to
+    // run. The state page says "not decided" (0), and a frame-step stub runs the game's own choice, whose clock reads are the deterministic clock. Mario Kart World held 3 vsyncs
+    // after its first slow frames and never came back: its frames under the clock took 26-30 ms on a Mac that holds 60 fps (DM_DETCLOCK_PACE=1 paces the screen instead)
+    if (dm_detclock_enabled()) {
+        static int said; if (!said++) LOG("[nvn] frame step: the host decides no steps under DM_DETCLOCK; the game's own choice runs");
+        if (dm_fps_state) __atomic_store_n((uint32_t *)(dm_fps_state + 0x20), 0u, __ATOMIC_RELAXED);
+        atomic_store(&g_fs_k, 0); return;
+    }
     const double v = 1e9 / fstep_hz();
     uint64_t st = g_fs_start ? g_fs_start : now_ns(), pw = g_fs_wait; g_fs_start = g_fs_wait = 0;
     double shown = prev ? (st - prev) / v : 0, gpu = 0; prev = st;
@@ -2207,6 +2221,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
               dm_longframe_note(b); } }
         uint64_t g0, g1; if (frame_rec() && mtl_gpu_span(f - 8, &g0, &g1)) { trow(f - 8, "@gpu_beg_ms", (g0 - g_t0_ns) / 1e6); trow(f - 8, "@gpu_end_ms", (g1 - g_t0_ns) / 1e6); } }
     prev_in = t0; prev_pass = ps; prev_draw = dr;
+    g_det_vsyncs = det_vsyncs(o);
     dump_frame();
     { void dm_vi_frame_queued(uint64_t); dm_vi_frame_queued(g_frame); }   // the layer's frame history (hle_vi.c), numbered as GetLatestFrameNumber
     if (g_frame % TWIN == 0) tsummary(g_frame);

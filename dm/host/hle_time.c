@@ -19,7 +19,8 @@ HLE_FORCE("_ZN2nn4time10InitializeEv", "connect to the time service; clocks come
 HLE_FORCE("_ZN2nn4time13IsInitializedEv", "the time service is taken over, always initialized", int, h_time_IsInitialized, void) { return 1; }
 // Steady clock (seconds since boot + a clock source ID, a 16-byte UUID): the host's monotonic seconds with a fixed source ID. GetSpanBetween runs as is in sdk: it subtracts only when the source IDs match
 HLE_FORCE("_ZN2nn4time19StandardSteadyClock19GetCurrentTimePointEPNS0_20SteadyClockTimePointE", "steady clock → host monotonic clock (seconds), fixed source ID", Result, h_time_SteadyNow, uint8_t *out) {
-    int64_t s = (int64_t)(clock_gettime_nsec_np(CLOCK_MONOTONIC) / 1000000000ull);
+    // Under DM_DETCLOCK the guest clock's seconds: the host's monotonic clock is the Mac's uptime, a different value in every run
+    int64_t s = (int64_t)((dm_detclock_configured() ? guest_ns() : clock_gettime_nsec_np(CLOCK_MONOTONIC)) / 1000000000ull);
     memcpy(out, &s, 8); memcpy(out + 8, "dmhost-steady-01", 16); return RES_OK;
 }
 HLE_FORCE("_ZN2nn4time38GetStandardSteadyClockCurrentTimePointEPNS0_20SteadyClockTimePointE", "steady clock (the free function form, SDK 20) → host monotonic clock", Result, h_time_SteadyNowFn, uint8_t *out) { return h_time_SteadyNow(out); }
@@ -44,6 +45,7 @@ HLE_FORCE("_ZN2nn4time43GetAdjustableUserSystemClockCurrentTimespecEP8timespec",
 // shared memory, which the host never maps. Unbound, the call fails and std::chrono::steady_clock::now() throws std::system_error: Well Dweller reached that at its first frame timer read (sdk+0x5f2e58
 // → std::terminate). The host's monotonic clock is the steady clock here, so clock_gettime and the steadiness agree
 static int h_time_mono_timespec(int64_t *ts) {
+    if (dm_detclock_configured()) { uint64_t g = guest_ns(); ts[0] = (int64_t)(g / 1000000000ull); ts[1] = (int64_t)(g % 1000000000ull); return 0; }   // as the steady clock above
     struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); ts[0] = t.tv_sec; ts[1] = t.tv_nsec; return 0;
 }
 HLE_FORCE("_ZN2nn4time37GetStandardSteadyClockCurrentTimespecEP8timespec", "C library monotonic clock from the steady clock → host monotonic time", int, h_time_MonoTimespec, int64_t *ts) { return h_time_mono_timespec(ts); }

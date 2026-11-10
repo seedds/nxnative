@@ -133,7 +133,10 @@ void guest_clock_freeze(int on);
 void guest_clock_freeze_for(int reason, int on);   // Freeze by reason (1 background, 2 system keyboard); see hle_os.c
 void guest_clock_read_wait(void);     // A guest read of the system counter: counts it in dm_clock_reads and waits while the app is in the background (hle_os.c)
 extern __thread uint64_t dm_clock_reads;   // the calling thread's guest reads of the system counter (hle_os.c; thr_yield tells clock waits by them)
-void dm_guest_frame_tick(void);        // Called on every present (hle_nvn.c): when DM_DETCLOCK is on, advances the guest clock by one fixed step
+void dm_guest_frame_tick(void);        // Called on every present (hle_gl.m, hle_vk.m): when DM_DETCLOCK is on, advances the guest clock by one fixed step
+void dm_guest_frame_tick_n(int vsyncs);   // The same for a present shown for that many vsyncs (hle_nvn.c: the game's present interval): that many steps
+int dm_detclock_waits_guest(int64_t ns);   // DM_DETCLOCK on and a wait of ns at least one step: it waits on the guest clock; shorter ones are polls on the wall clock (hle_os.c)
+int dm_detclock_configured(void);   // DM_DETCLOCK is set (from host start; dm_detclock_enabled is from the first present on): the steady clocks follow the guest clock (hle_time.c)
 uint64_t dm_nvn_frame_count(void);
 uint64_t dm_nvn_sub_cpu_ns(void);     // Cumulative CPU nanoseconds of submit (excluding present)
 void dm_backtrace(uint64_t fp);

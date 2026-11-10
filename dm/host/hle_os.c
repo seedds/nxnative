@@ -52,6 +52,14 @@ static int detclock_cfg(void) {
     static int c = -1; if (c < 0) { const char *e = getenv("DM_DETCLOCK"); g_gdet_step = e ? strtoull(e, 0, 0) : 0; c = g_gdet_step > 0; }
     return c;
 }
+// The deterministic clock's own origin. Without it the guest clock is the Mac's uptime (g_glag 0: mach_absolute_time), which differs from run to run by however long the Mac
+// has been on, and so did every tick the game read, before the first present and after it (the count continued from that value): two runs of Mario Kart World from the same
+// save with the same fixed entropy and DM_FIXED_TIME showed different title scenes. Under DM_DETCLOCK the clock reads DET_ORIGIN_NS plus the time since the host started until
+// the first present, which starts the count at DET_FIRST_NS, a forward jump past any start-up, so every tick from then on is the same in every run
+#define DET_ORIGIN_NS 10000000000ull    // 10 s, a console's uptime when a game starts
+#define DET_FIRST_NS 130000000000ull    // 130 s: the first present's time (start-ups under two minutes)
+__attribute__((constructor)) static void detclock_origin(void) { const char *e = getenv("DM_DETCLOCK"); if (e && strtoull(e, 0, 0) > 0) atomic_store(&g_glag, now_ns() - DET_ORIGIN_NS); }   // the variable itself: detclock_cfg caches, and a test sets it later
+int dm_detclock_configured(void) { return detclock_cfg(); }
 static uint64_t wall_guest_ns(void) { return atomic_load(&g_gfz) ? atomic_load(&g_gfrozen) : now_ns() - atomic_load(&g_glag); }
 uint64_t guest_ns(void) { return atomic_load(&g_gdet_on) ? atomic_load(&g_gdet) : wall_guest_ns(); }
 uint64_t guest_ns_at_host_time(uint64_t host_ns) {
@@ -65,16 +73,28 @@ uint64_t guest_ns_at_host_time(uint64_t host_ns) {
 // same clock's GPU timestamps 1.63 times too late: Donkey Kong Bananza's frame-rate controller took its frame for seconds long and held it at 20 fps (present interval 3)
 uint64_t guest_ticks(void) { return dm_sdk_ounce() ? guest_ns() / 32 : guest_ns() * 12 / 625; }
 int dm_detclock_enabled(void) { return detclock_cfg() && atomic_load(&g_gdet_on); }
-void dm_guest_frame_tick(void) {
+// A sleep or timed wait shorter than one step is a poll under the deterministic clock: it waits on the wall clock, as without it. The guest clock moves only at presents, so a
+// poll that waited for guest time could end only at the next present, which the polling frame itself holds back. Mario Kart World's job system polls with short sleeps
+// (WorkerMgr workers at main+0xe33730, the main thread waiting for their jobs at main+0x1907cc on v0) and stopped at its second frame. The guest still reads only the
+// deterministic clock; only how many times such a loop goes round follows the machine
+int dm_detclock_waits_guest(int64_t ns) { return ns > 0 && dm_detclock_enabled() && (uint64_t)ns >= g_gdet_step; }
+// A present shown for n vsyncs (the game's present interval) advances the deterministic clock n steps, as that many vsyncs pass on the console. One step per present whatever
+// the interval stopped Mario Kart World at its second frame: at interval 2 its frame pacing (main+0x3a9f98 on v0) sleeps until two vsyncs after the last frame, and the clock
+// only moved one step per present, so the main thread slept for a time that never came and nothing presented again
+void dm_guest_frame_tick_n(int vsyncs) {
     crash_watch_frame();
     atomic_fetch_add(&g_guest_frame, 1);
     if (!detclock_cfg()) return;
     if (!atomic_load(&g_gdet_on)) {
-        atomic_store(&g_gdet, wall_guest_ns()); atomic_store(&g_gdet_on, 1);
-        LOG("DM_DETCLOCK: from the first present on, the guest clock advances by presents, step %llu ns", (unsigned long long)g_gdet_step); return;
+        uint64_t w = wall_guest_ns(), first = w < DET_FIRST_NS ? DET_FIRST_NS : w;
+        if (w >= DET_FIRST_NS) LOG("[RED] DM_DETCLOCK: the first present came %.1f s after the origin, past the fixed start of the count (%.0f s): ticks follow this start-up's length", w / 1e9, DET_FIRST_NS / 1e9);
+        atomic_store(&g_gdet, first); atomic_store(&g_gdet_on, 1);
+        LOG("DM_DETCLOCK: from the first present on (%.3f s), the guest clock counts from %.0f s by presents, step %llu ns per vsync of the present interval", w / 1e9, first / 1e9, (unsigned long long)g_gdet_step); return;
     }
-    if (!atomic_load(&g_gfz)) { atomic_fetch_add(&g_gdet, g_gdet_step); dm_guest_clock_advanced(); }
+    if (vsyncs < 1) vsyncs = 1;
+    if (!atomic_load(&g_gfz)) { atomic_fetch_add(&g_gdet, g_gdet_step * (uint64_t)vsyncs); dm_guest_clock_advanced(); }
 }
+void dm_guest_frame_tick(void) { dm_guest_frame_tick_n(1); }
 static void guest_clock_freeze_apply(int on) {
     if (on && !atomic_load(&g_gfz)) { atomic_store(&g_gfrozen, now_ns() - atomic_load(&g_glag)); atomic_store(&g_gfz, 1); }
     else if (!on && atomic_load(&g_gfz)) { atomic_store(&g_glag, now_ns() - atomic_load(&g_gfrozen)); atomic_store(&g_gfz, 0); }

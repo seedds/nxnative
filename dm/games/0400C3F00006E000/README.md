@@ -93,11 +93,15 @@ Update 1.8.0 (v917504, SDK 21.4.0) is not on this Mac. Pull request #1116 ported
 - **Mesh draws:** `DrawMeshTasks3D` and the indirect forms are not implemented; no run reached them.
 - `649e36162cad9e79`, a foliage shader with an 8x8 local size, keeps a first-invocation race: its setup loops over a uniform's count, so [the host cannot make it as stores](../../../docs/reference/shaders.md#a-store-only-a-dispatchs-first-invocation-makes). Its list's count read 0 in every one of 7,350 traced title frames, so the race had nothing to act on there; whether that list should be empty is not known.
 - The engine class screen offers 50, 100 and 150cc in this build.
+- **Replays under `DM_DETCLOCK`:** the game plays under the deterministic clock since [A game stops at its first frames under the deterministic clock](../../../docs/reference/threads.md#a-game-stops-at-its-first-frames-under-the-deterministic-clock) (60 fps with `DM_DETCLOCK_PACE=1`), but two runs from the same save still differ: 22 calls seed random generators from `GetSystemTick` (each a `GetSystemTick` call before sead's seed constant `0x6C078965`), and those on loading threads take their tick at a frame that follows loading speed ([Tick values that follow the Mac's uptime under the deterministic clock](../../../docs/reference/threads.md#tick-values-that-follow-the-macs-uptime-under-the-deterministic-clock)). The title's first spot, which the course map's cursor starts from, and the race start (about 16 frames apart in two replays of a Time Trials route) vary with them.
 
 ## Found on this game
 
 - [A fixed frame step plays in slow motion on a slow Mac](../../../docs/reference/frame-rate.md#a-fixed-frame-step-plays-in-slow-motion-on-a-slow-mac): the interval chosen from CPU time.
 - [Frame-step stubs placed by their function](../../../docs/reference/rewriter.md#frame-step-stubs-placed-by-their-function)
+- [A game stops at its first frames under the deterministic clock](../../../docs/reference/threads.md#a-game-stops-at-its-first-frames-under-the-deterministic-clock)
+- [The host's frame step under the deterministic clock](../../../docs/reference/threads.md#the-hosts-frame-step-under-the-deterministic-clock)
+- [Tick values that follow the Mac's uptime under the deterministic clock](../../../docs/reference/threads.md#tick-values-that-follow-the-macs-uptime-under-the-deterministic-clock)
 
 - [A NUP with complete standalone updates stops at "no base game"](../../../docs/reference/packing.md#a-nup-with-complete-standalone-updates-stops-at-no-base-game) (packing reproduced with the base dump; 1.8.0 gameplay remains untested)
 - [Large sparse textures as Metal placement sparse textures](../../../docs/reference/nvn-objects.md#large-sparse-textures-as-metal-placement-sparse-textures)

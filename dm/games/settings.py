@@ -110,7 +110,7 @@ def build(gid, patched, control):
             if need not in table: sys.exit(f'settings.tsv:{n}: needs names a variable no row sets: {m["needs"]}')
             can = table[need]
             if can is not None and want not in can: sys.exit(f'settings.tsv:{n}: needs a value {need} never takes: {want} (it takes {", ".join(sorted(can))})')
-        if not shown(cond, n): continue
+        if not all(shown(c, n) for c in cond.split('&')): continue   # every condition of <cond>&<cond>
         s = {'env': var, 'kind': kind, 'section': section, 'label': label, 'note': note, 'default': value(default, n), **m}
         if var == 'DM_RENDER_SCALE' and base: s['base'] = base   # the render scale in pixels, for the console mode chosen
         if kind == 'choice':

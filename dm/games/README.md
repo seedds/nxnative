@@ -130,6 +130,7 @@ One row per profile; the notes are each profile's `README.md`.
 | [Octopath Traveler 0](01005270232F2000/README.md) | `01005270232F2000` | 1.0.5 | 19.3.13 | Unreal Engine 5 | NVN |
 | [OCTOPATH TRAVELER II](0100A3501946E000/README.md) | `0100A3501946E000` | 1.1.1 | 12.3.2 | Unreal Engine 4.27 | NVN |
 | [ŌKAMI HD](0100276009872000/README.md) | `0100276009872000` | 1.0.0 (base) | 4.5.0 | Clover Studio's PS2 engine, remastered; CRIWARE | NVN |
+| [Ori and the Blind Forest: Definitive Edition](010061D00DB74000/README.md) | `010061D00DB74000` | 1.0.2 | 8.2.0 | Unity IL2CPP | NVN |
 | [Paper Mario: The Origami King](0100A3900C3E2000/README.md) | `0100A3900C3E2000` | 1.0.1 | 8.3.1 | Intelligent Systems' engine on NintendoWare | NVN |
 | [Paper Mario: The Thousand-Year Door](0100ECD018EBE000/README.md) | `0100ECD018EBE000` | 1.0.1 | 15.3.2 | Intelligent Systems' engine on NintendoWare | NVN |
 | [Patrick's Parabox](0100E44016C22000/README.md) | `0100E44016C22000` | 1.0.1 | 13.3.7 | Unity 2020.3.30f1 IL2CPP | NVN |

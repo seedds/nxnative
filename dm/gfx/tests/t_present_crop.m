@@ -126,6 +126,13 @@ int main(void) { @autoreleasepool {
             EXPECT("MetalFX only upscales the picture",sizes[i].upscale,fx_wanted(vp,sizes[i].cw,sizes[i].ch));
             EXPECT("picture width",sizes[i].w,(int)vp.width);EXPECT("picture height",sizes[i].h,(int)vp.height);
         }
+        {   // 1600 * (1710 / 1600) is 1710.0000000000002, so centring the unrounded size gave x = -1 and cut the picture's last column off the canvas
+            MTLViewport vp=present_viewport(1600,900,1710,1112);
+            EXPECT("size that rounds up a hair keeps the picture inside the canvas: x",0,(int)vp.originX);EXPECT("  y",75,(int)vp.originY);
+            EXPECT("  width",1710,(int)vp.width);EXPECT("  height",962,(int)vp.height);
+            vp=present_viewport(1280,720,3456,2234);   // 720 * 2.7 is 1944.0000000000002: the picture is 1944 high and centred on that, 145 rows from the top (144 from the unrounded size)
+            EXPECT("size that rounds down a hair is centred on the rounded size: y",145,(int)vp.originY);EXPECT("  height",1944,(int)vp.height);
+        }
         EXPECT("empty content is not upscaled",0,fx_wanted((MTLViewport){0,0,2868,1320,0,1},0,720));
     }
     if([MTLFXSpatialScalerDescriptor supportsMetal4FX:g_dev]) {   // the present pass through MetalFX into an offscreen canvas (present_offscreen_m4, as DM_NVN_SHOT_OUT uses it)

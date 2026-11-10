@@ -199,3 +199,10 @@ From an empty save: at about 45 s `A` (title), `A` (New Game), then the movie. F
 - [AV1 movies stop an M1 iPad with SIGILL in dav1d](../../../docs/reference/movies.md#av1-movies-stop-an-m1-ipad-with-sigill-in-dav1d): the title movie on an M1 iPad Pro.
 - [`devicectl` copies a large RomFS image through the Mac's memory](../../../docs/reference/packing.md#devicectl-copies-a-large-romfs-image-through-the-macs-memory): the 26.2 GB image's pushes to an iPad filled a 16 GB Mac's swap and failed; now sent over AFC.
 - [`devicectl`'s `--remove-existing-content` empties the app's whole container](../../../docs/reference/packing.md#devicectls---remove-existing-content-empties-the-apps-whole-container): the first complete copy of the image, deleted by the DLC step after it.
+
+
+### Indirect cache range extraction
+
+Found on this game: [disjoint mesh writes invalidate conversions](../../../docs/reference/rendering.md#disjoint-mesh-writes-invalidate-indirect-conversions). Historical November 8 M4 Max measurements on the combined playability branch: opposite-order forest pairs 92.37/99.00 and 94.87/98.83 FPS, GPU medians 10.052/9.592 and 9.823/9.629 ms, both at median 1578 MHz. A clean Market entrance pair was 100.97/102.90 FPS; a Field slope pair was 94.10/103.27 FPS. Earlier Market/Field pairs with compiler activity were excluded. Draw counts differed modestly; screenshots retained scene/HUD with animation differences, not pixel identity. These are short routes, not whole-game or 120 FPS proof.
+
+Chat evidence was cross-checked against `ixc-range-performance-review.json`, `ixc-range-market-review.json`, `ixc-range-field-review.json` and `ixc-full-regress/report.json`. The old full Ocarina regression passed in 269.73 seconds with unchanged shaders and no new runtime errors. The current extraction keeps upstream's newer mesh argument conversion and archive handling, so it deliberately omits the old synthetic mesh primitive path; the old speedups cannot be attributed unchanged to this smaller patch. Its 22 focused checks pass; renewed gameplay, performance and other-title validation remain pending.

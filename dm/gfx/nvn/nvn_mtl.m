@@ -12555,6 +12555,43 @@ static void ixc_run(const p_draw *dw, const p_draw_idx *di) {
         int prim = e->prim, it = e->itype; unsigned long long fr = (unsigned long long)atomic_load(&g_cur_frame), pass = g_stat_pass, splits = g_ixc_splits; id<MTLBuffer> keep = ab;
         [g_commit_blocks addObject:^{ (void)keep; MLOG("indirect draw conversion frame %llu pass %llu: primitive %d index type %d record %u,%u,%u,%u → arguments %u,%u,%u,%d,%u (splits so far %llu)", fr, pass, prim, it, src[0], src[1], src[2], src[3], arg[0], arg[1], arg[2], (int)arg[3], arg[4], splits); }]; }
 }
+// A native mesh draw's bounded storage writes need not invalidate conversions
+// of unrelated indirect records. Keep the global write epoch for every other
+// consumer; advance this cache alone only after proving all its inputs disjoint.
+// Unknown writes, sparse aliases and overlapping inputs retain full invalidation.
+static int ixc_range_disjoint(uint64_t lo, uint64_t n) {
+    if (!n || lo > UINT64_MAX - n || nvn_sparse_alias(lo, lo + n)) return 0;
+    for (int i = 0; i < g_ixc_n; i++) {
+        const ixc_ent *e = &g_ixc[i];
+        uint64_t nr = e->itype < 0 ? 16 : 20;
+        if (e->ind > UINT64_MAX - nr || nvn_sparse_alias(e->ind, e->ind + nr) || (lo < e->ind + nr && e->ind < lo + n)) return 0;
+        if (e->ibuf) {
+            // firstIndex is GPU-written: output capacity does not bound the
+            // input offset. Conservatively protect the whole remaining buffer.
+            void *mb; uint64_t mo;
+            if (!mtl_addr(e->ibuf, 1, &mb, &mo)) return 0;
+            uint64_t len = ((__bridge id<MTLBuffer>)mb).length;
+            if (mo >= len || e->ibuf > UINT64_MAX - (len - mo)) return 0;
+            uint64_t end = e->ibuf + len - mo;
+            if (nvn_sparse_alias(e->ibuf, end) || (lo < end && e->ibuf < lo + n)) return 0;
+        }
+    }
+    return 1;
+}
+static void ixc_mesh_written(NvProg *pr, uint64_t prior_epoch) {
+    if (!pr || !g_ixc_n || g_ixc_epoch != prior_epoch || g_ixc_sub != g_sub_serial || g_wr_epoch != prior_epoch + 1) return;
+    for (int st = 0; st < 6; st++) { NvShader *sh = pr->sh[st]; if (!sh) continue;
+        for (int i = 0; i < sh->rf.nb; i++) { const nvn_rbind *b = &sh->rf.b[i];
+            if (!b->rw) continue;
+            if (b->kind != NVN_RB_SBUFP || b->reg >= 16) return;
+            if (sh->sb_ro & (1u << b->reg)) continue; // same proven bound used by encode_args
+            const p_bind_buf *u = &S.ssbo[st][b->reg];
+            if (!u->addr) continue; // encode_args binds the host's dummy buffer
+            if (!ixc_range_disjoint(u->addr, u->size)) return;
+        }
+    }
+    g_ixc_epoch = g_wr_epoch;
+}
 // ---------- 8-bit indices written by the GPU earlier in the submission ----------
 // Metal has no 8-bit index type, so draw widens 8-bit indices to 16-bit on the CPU at replay. When a buffer write encoded earlier in this submission (copy / update / fill,
 // see pend_hits) covers them, the CPU reads the bytes from before that write (Tears of the Kingdom). Those draws are widened on the GPU instead: a compute pass reads the

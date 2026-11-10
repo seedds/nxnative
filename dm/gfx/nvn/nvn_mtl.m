@@ -5733,7 +5733,7 @@ static void shmap_read(void) {
     uint64_t mis[4];   // mis: texture slots 0-255 already reported for a type mismatch (tex_mis_note)
     NSString *ventry; id<MTLFunction> vfn; int vfn_state;
     id<MTLFunction> pfn; int pfn_state, has_pull;
-    id<MTLFunction> afn[4]; int afn_state, has_alpha;
+    id<MTLFunction> afn[4]; int afn_state, has_alpha, has_bz;   // has_bz: its entry points read the blend weight word (bz_bind)
     id<MTLLibrary> llib; NSMutableDictionary<NSNumber *, id<MTLFunction>> *lfn; int lfn_state, has_logic; } @end   // llib: the side library <key>_bx for logic operations, lfn: its fn_u / fn_m specialized per set of targets (lo_fn; lfn_state as afn_state; has_logic: the reflection names its entry points, dmsh_logic.py)   // afn: the alpha test entry points of fn, fn_u, fn_m, fn_d in the side library <key>_bx (at_fn; afn_state 0 untried, 1 loaded, 2 failed; has_alpha: the reflection names them, dmsh_alpha.py)   // pfn: the same entry of the pulling library <key>_bp (pull_fn; has_pull: the reflection names one, dmsh_pull.py)   // vertex: the entry point loaded (by the depth mode); vfn: the same entry of the shadow-input library <key>_bv (vin_fn; state 0 untried, 1 loaded, 2 failed)
 @implementation NvShader
 - (void)dealloc { free(rf.c1); free(geo_slot); }
@@ -6005,6 +6005,7 @@ static NvShader *shader_load(NSString *pc, int stage, int layer) {
     if (stage == 0) o->layer_out = layer || [j[@"layer_out"] boolValue];
     if (stage == 0 && !layer) o->has_pull = [j[@"pull"] isKindOfClass:[NSDictionary class]];
     if (stage == 1) o->has_alpha = [j[@"alpha"] isKindOfClass:[NSDictionary class]];
+    if (stage == 1) o->has_bz = [j[@"blend_zero"] boolValue];
     if (stage == 1) o->has_logic = [j[@"logic"] isKindOfClass:[NSDictionary class]];
     // A function that declares function constants cannot go into a pipeline until it is specialized, even when every constant is optional. SPIRV-Cross declares one for shaders that read a
     // texel buffer (spvLinearTextureAlignmentOverride, used only through is_function_constant_defined; one of Pokémon Legends: Z-A's imgui pixel shaders, 2bd5037003980716): an empty set of
@@ -7798,6 +7799,40 @@ static void at_bind(id<MTLCommandEncoder> en) {
         gpu = b.gpuAddress + off; pass = g_pass.serial; memcpy(last, v, sizeof v);
     }
     enc_r_args((id<MTL4RenderCommandEncoder>)en, MTLRenderStageFragment, gpu, DMSH_ALPHA_BUFFER);
+}
+// NVIDIA's float blender takes a term whose weight is 0 as 0 whatever the colour ("zero times anything is zero": SET_BLEND_FLOAT_OPTION, method 0x670 of the 3D engine, which NVN's
+// driver sets in its start-up command list, the word 0x80010670 in a game's sdk module); Apple's multiplies as IEEE does, so a NaN or Inf colour a game writes with a zero weight
+// (Ocarina of Time's mist: NaN at alpha 0 under SRC_ALPHA) reaches the target and spreads from there. Metal has no such option, so a pixel shader zeroes a non-finite source colour
+// itself where its weight is zero (dmsh_rewrite.py blend_zero), and which outputs have such a weight comes from here: DMSH_BLEND_ZERO_BITS bits per colour output, for a floating-point
+// target that blends by a sum or difference with a source colour factor of SRC_ALPHA (1: zero where alpha is 0) or ONE_MINUS_SRC_ALPHA (2: where alpha is 1). A factor of ZERO needs
+// nothing: Apple's blender leaves that term out, NaN or not (dm/gfx/tests/t_blend_zero.m measures each case). An output whose destination factor reads the
+// source colour keeps 0: zeroing the source would also change that term, where NVIDIA keeps the NaN. With blending off, MIN / MAX (no weights) and every other factor the bits are 0
+// and the shader returns its colour as it is. DM_NVN_BLEND_ZERO=0 gives 0 for every draw (Apple's blender as it is), for A/B runs
+static int bz_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_BLEND_ZERO"); v = !(e && !strcmp(e, "0")); if (!v) MLOG("DM_NVN_BLEND_ZERO=0: a non-finite colour with a zero blend weight is blended as Apple's blender does (NaN kept)"); } return v; }
+static uint32_t bz_word(void) {
+    if (!S.color.blend_en || !bz_on()) return 0;
+    uint32_t w = 0;
+    for (int i = 0; i < 8; i++) {
+        unsigned l = g_pso_lmap ? g_pso_lmap[i] : (unsigned)i;
+        if (l >= 8 || !g_pass.cfmt[i] || !(S.color.blend_en >> l & 1) || !pf_is_float((MTLPixelFormat)g_pass.cfmt[i])) continue;
+        blend_st b = adv_blend(S.blend[l]);
+        if (b.eq_rgb == NVN_BLEND_EQUATION_MIN || b.eq_rgb == NVN_BLEND_EQUATION_MAX) continue;
+        if (b.dst_rgb == NVN_BLEND_FUNC_SRC_COLOR || b.dst_rgb == NVN_BLEND_FUNC_ONE_MINUS_SRC_COLOR || blend_is_src1(b.dst_rgb)) continue;
+        uint32_t m = b.src_rgb == NVN_BLEND_FUNC_SRC_ALPHA ? 1 : b.src_rgb == NVN_BLEND_FUNC_ONE_MINUS_SRC_ALPHA ? 2 : 0;
+        w |= m << (DMSH_BLEND_ZERO_BITS * l);
+    }
+    return w;
+}
+// The word at fragment buffer DMSH_BLEND_BUFFER, for every draw of a shader that reads it: a copy in the frame arena per value and pass, as at_bind
+static void bz_bind(id<MTLCommandEncoder> en) {
+    static uint64_t gpu, pass; static uint32_t last;
+    uint32_t v = bz_word();
+    if (!gpu || pass != g_pass.serial || v != last) {
+        __strong id<MTLBuffer> b; size_t off = arena_alloc(16, &b); memset((uint8_t *)b.contents + off, 0, 16); memcpy((uint8_t *)b.contents + off, &v, sizeof v);
+        gpu = b.gpuAddress + off; pass = g_pass.serial; last = v;
+        if (v) { static uint64_t n; if (++n <= 3 || !(n & (n - 1))) MLOG("blend: a zero source weight on a floating-point target (outputs %#x): a non-finite colour is blended as 0 there, as NVIDIA's blender does (%llu passes or states so far)", v, (unsigned long long)n); }
+    }
+    enc_r_args((id<MTL4RenderCommandEncoder>)en, MTLRenderStageFragment, gpu, DMSH_BLEND_BUFFER);
 }
 // NVN's logic operations (ColorStateSetLogicOp: the bits a pixel shader writes combined with the target's, in place of blending; integer and normalized targets, as in OpenGL and Vulkan): Metal has none.
 // A pipeline drawn with an operation other than COPY takes its entry point (for fn, or fn_u / fn_m for unsigned integer targets) from the shader's side library <key>_bx instead
@@ -10650,6 +10685,7 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
 static int encode_args(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, int metal_vertex) { cbs_note(sh); AP_B; int r = encode_args_(en, sh, nvn_stage, metal_vertex); AP_E(3); return r; }
 static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, int metal_vertex) {
     if (nvn_stage == 1 && !metal_vertex && sh->has_alpha && atest_on()) at_bind(en);   // also for a shader without bindings
+    if (nvn_stage == 1 && !metal_vertex && sh->has_bz) bz_bind(en);
     if (nvn_stage == 1 && !metal_vertex && sh->has_logic && lop_on()) lo_bind(en);
     if (!sh->ae) return 1;
     args_sync_dirty();

@@ -102,6 +102,12 @@
 // The alpha test's state (dm/gfx/tools/dmsh_alpha.py, the _a entry points of the <key>_bx libraries): uint function (NVN_ALPHA_FUNC_*), float reference, at this fragment buffer index (nvn_mtl.m at_bind)
 #define DMSH_ALPHA_BUFFER 30             // the fragment argument table's last binding; translated shaders use only buffer 0 there
 
+// NVIDIA's "zero times anything is zero" float blend option, which NVN's driver switches on (SET_BLEND_FLOAT_OPTION; dm/gfx/tools/dmsh_rewrite.py blend_zero): a uint at this fragment buffer
+// index, DMSH_BLEND_ZERO_BITS bits per colour output from bit 0: 0 = the output's source colour weight is not known to be zero, 1 = it is zero where the output's alpha is 0 (SRC_ALPHA),
+// 2 = where its alpha is 1 (ONE_MINUS_SRC_ALPHA) (nvn_mtl.m bz_bind). A factor of ZERO needs none: Apple's blender leaves that term out (dm/gfx/tests/t_blend_zero.m)
+#define DMSH_BLEND_BUFFER 28
+#define DMSH_BLEND_ZERO_BITS 2
+
 // Border colours Metal has no sampler state for (it has transparent black, opaque black and opaque white): the build gives each sampler member a shader samples through a twin,
 // <member>_w, and the shader a block it reads per sample, r + (twin sample - r) * k when the sampler's bit is set (dmsh_rewrite.py border_emu, nvn_border.h)
 #define DMSH_BORDER_SAMPLERS 32          // sampler members one shader corrects (the bits of the block's mask word at byte 0; members past these keep Metal's nearest colour)

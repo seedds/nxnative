@@ -14,6 +14,7 @@
 #include <sys/sysctl.h>
 #include <fcntl.h>
 #include <TargetConditionals.h>
+#include <os/os_sync_wait_on_address.h>   // the uniform copy hand-off (nvn_rec.h ubc_wait)
 #if TARGET_OS_IPHONE
 #include <os/proc.h>   // os_proc_available_memory: for the memory readout line
 #endif
@@ -1884,6 +1885,15 @@ static void gw_commit(uint64_t fence) {
     if (g_nsbw) for (int i = 0; i < SBW_N; i++) if (g_sbwp[i].gen == g_pend_gen) gw_put(g_sbwp[i].page << 12, (g_sbwp[i].page + 1) << 12, fence, done);
     for (int i = 0; i < g_nsbw_w; i++) gw_put(g_sbw_wlo[i], g_sbw_whi[i], fence, done);
 }
+// Whether um_overlay lays a remembered byte over [lo, hi): ubp_get then copies that shadow here, since the overlay waits for its copy (queued and waited for at once, on every such shadow)
+static int um_hits(uint64_t lo, uint64_t hi) {
+    if (!g_um) return 0;
+    uint64_t done = g_done;
+    for (uint64_t at = lo, end; at < hi; at = end) { uint64_t pg = at >> 12; end = MIN((pg + 1) << 12, hi); const um_ent *m = &g_um[um_slot(pg)];
+        if (m->page != pg || m->fence <= done) continue;
+        for (uint64_t x = at; x < end; x++) if (m->f[x & 4095] > done) return 1; }
+    return 0;
+}
 // The remembered bytes of running submissions over a copy of memory (d holds [lo, hi); ready: the copy operations filling it, which must come first). Not left to the copy worker: the next commit changes these bytes
 static void um_overlay(uint64_t lo, uint64_t hi, uint8_t *d, uint64_t ready) {
     if (!g_um) return;
@@ -1965,7 +1975,7 @@ static int ubp_get(uint64_t lo, uint64_t hi, uint64_t *gpu, const uint8_t **cpu)
                    if (nc == 1 && cl[0] == lo && ch[0] == hi) break; } } }
     uint64_t len = hi - lo;
     id<MTLBuffer> ab; size_t o = arena_alloc((size_t)len, &ab); uint8_t *d = (uint8_t *)ab.contents + o;
-    int defer = len >= 512 && ubc_on(); uint64_t ready = 0;   // small ones (bindless handles read on the CPU) are copied here
+    int defer = len >= 512 && ubc_on() && (c || !um_hits(lo, hi)); uint64_t ready = 0;   // small ones (bindless handles read on the CPU), and those um_overlay writes into, are copied here
     if (defer) ready = ubc_push(d, c ? c->cpu : (const uint8_t *)(uintptr_t)lo, (size_t)len);   // the previous shadow's own copies are queued before these
     else { if (c) ubc_wait(c->ready); memcpy(d, c ? c->cpu : (const uint8_t *)(uintptr_t)lo, (size_t)len); }
     if (!c) um_overlay(lo, hi, d, ready);   // a shadow made from the previous one has them already

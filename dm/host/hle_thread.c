@@ -55,7 +55,7 @@ typedef struct thr {
     uint32_t handle; uint64_t id;
     uint64_t entry, arg, stack_top; int prio, core; uint64_t mask;
     uint64_t born_ns, exit_ns; uint32_t born_tick, exit_tick;   // Time of creation / exit and the game tick at that time (for the state dump: did the job worker exit before the stall)
-    int started, entered, exited, cancel;   // entered: its pthread has been dispatched and goes on to guest code
+    int started, entered, exited, cancel, is_main;   // entered: its pthread has been dispatched and goes on to guest code
     pthread_t pt; pthread_cond_t cv;
     // Current wait: kind 0=none 1=lock 2=condition 3=address 4=synchronization object
     int wkind, woke; uint64_t waddr, wkey; uint32_t wtag; int64_t wres;
@@ -337,12 +337,14 @@ static void qos_map_init(void) {
     if (g_qos_map) LOG("DM_QOS_MAP=1: guest threads get QoS by priority (≤%d interactive, ≤%d user-initiated, the rest utility)", g_qos_e1, g_qos_e2);
 }
 int dm_qos_map_on(void) { return g_qos_map; }
-static qos_class_t prio_qos(int prio) {
+static qos_class_t prio_qos(thr_t *t) {
     if (!g_qos_map) return QOS_CLASS_USER_INTERACTIVE;
-    return prio <= g_qos_e1 ? QOS_CLASS_USER_INTERACTIVE : prio <= g_qos_e2 ? QOS_CLASS_USER_INITIATED : QOS_CLASS_UTILITY;
+    if (t && (t->is_main || t->handle == 0x1001)) return QOS_CLASS_USER_INTERACTIVE;
+    int prio = t ? t->prio : 44;
+    return prio < g_qos_e1 ? QOS_CLASS_USER_INTERACTIVE : prio <= g_qos_e2 ? QOS_CLASS_USER_INITIATED : QOS_CLASS_UTILITY;
 }
 static void qos_apply(thr_t *t) {   // on the thread itself, holding G (prio and qos are shared with scheduler readers)
-    qos_class_t q = prio_qos(t->prio);
+    qos_class_t q = prio_qos(t);
     if ((uint32_t)q != t->qos && !pthread_set_qos_class_self_np(q, 0)) t->qos = (uint32_t)q;
 }
 // A host helper thread (audio notify / silent sink, vsync, movie decode) created from a guest thread inherits that thread's class; under DM_QOS_MAP it sets its own instead
@@ -353,7 +355,7 @@ static void *thread_main(void *p) {
     pthread_setspecific(g_keythr, t);
     // CreateThread may already have linked t into g_all: readers and SetThreadPriority hold G.
     pthread_mutex_lock(&G);
-    pthread_set_qos_class_self_np(prio_qos(t->prio), 0);
+    pthread_set_qos_class_self_np(prio_qos(t), 0);
     qos_class_t qc = QOS_CLASS_UNSPECIFIED; int rp = 0;
     pthread_get_qos_class_np(pthread_self(), &qc, &rp); t->qos = (uint32_t)qc;
     t->mport = pthread_mach_thread_np(pthread_self()); t->host_work = &dm_host_work;
@@ -545,6 +547,7 @@ uint32_t svc_thread_main_init(void) {
     pause_install();
     hitch_init();
     thr_t *t = calloc(1, sizeof *t);
+    t->is_main = 1;
     pthread_cond_init(&t->cv, NULL); pthread_cond_init(&t->pcv, NULL);
     // Its affinity is its ideal core alone, as Horizon creates every thread (Mesosphere KThread::Initialize); it was 7, which a same-core handoff now takes for a thread that can run elsewhere (dm_yield_to_core_peers)
     t->started = t->entered = 1; t->prio = 44; t->core = 0; t->mask = 1; t->pt = pthread_self(); t->mport = pthread_mach_thread_np(t->pt); t->host_work = &dm_host_work;
@@ -800,9 +803,15 @@ static void backoff_init(void) {
 }
 // The back-off's longest sleep (0: off)
 static uint64_t yield_backoff_cap(void) { backoff_init(); return (uint64_t)g_bo_cap; }
-static uint64_t yield_backoff_ns(uint64_t run_ns, int clock) {
+static uint64_t yield_backoff_ns(thr_t *me, uint64_t run_ns, int clock) {
     backoff_init();
-    if (!g_bo_cap || (!clock && run_ns < (uint64_t)g_bo_start)) return 0;
+    static int64_t worker_start = -1;
+    if (worker_start < 0) {
+        const char *w = getenv("DM_YIELD_WORKER_START");
+        worker_start = w && *w ? atoll(w) * 1000 : 100000;   // 100 µs default
+    }
+    uint64_t st = (me && (me->is_main || me->handle == 0x1001)) ? (uint64_t)g_bo_start : (uint64_t)worker_start;
+    if (!g_bo_cap || (!clock && run_ns < st)) return 0;
     uint64_t s = run_ns / 8; if (s < 10000) s = 10000;
     return s < (uint64_t)g_bo_cap ? s : (uint64_t)g_bo_cap;
 }
@@ -811,7 +820,7 @@ static void sleep_precise(uint64_t dl);
 static void backoff_sleep(thr_t *me, uint64_t bo) { me->nbackoff++; me->sleeping = 1; struct timespec ts = {0, (long)bo}; nanosleep(&ts, 0); me->sleeping = 0; }
 // sched_yield, or a short sleep once the wait has lasted run_ns past the back-off's start
 static void yield_for(thr_t *me, uint64_t run_ns, int clock) {
-    uint64_t bo = yield_backoff_ns(run_ns, clock);
+    uint64_t bo = yield_backoff_ns(me, run_ns, clock);
     if (bo) backoff_sleep(me, bo); else sched_yield();
 }
 // One yield SVC of the calling thread (me may be NULL); regs = the guest registers at the SVC.
@@ -928,7 +937,7 @@ static int64_t poll_wait_begin(int64_t ns) {
     uint64_t now = now_ns();
     if (me->yrun_svc + 1 != me->nsvc || now - me->poll_ret > SPIN_GAP_NS) me->yrun_t0 = now;   // a new run
     me->yrun_svc = me->nsvc;
-    uint64_t bo = yield_backoff_ns(now - me->yrun_t0, 0);
+    uint64_t bo = yield_backoff_ns(me, now - me->yrun_t0, 0);
     if (bo <= (uint64_t)ns) return ns;
     me->nyield++; me->nbackoff++;   // counted as a yield that backed off (the power line)
     return (int64_t)bo;
@@ -951,7 +960,7 @@ static void poll_sleep(thr_t *me, int64_t ns) {
     uint64_t now = now_ns();
     if (me->yrun_svc + 1 != me->nsvc || now - me->poll_ret > SPIN_GAP_NS) me->yrun_t0 = now;   // a new run
     me->yrun_svc = me->nsvc;
-    uint64_t bo = yield_backoff_ns(now - me->yrun_t0, 0);
+    uint64_t bo = yield_backoff_ns(me, now - me->yrun_t0, 0);
     if (bo > (uint64_t)ns) { me->nyield++; backoff_sleep(me, bo); }
     else dm_guest_sleep_ns(ns);
     me->poll_ret = now_ns();

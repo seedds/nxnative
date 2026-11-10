@@ -560,6 +560,132 @@ static void om_case(const char *dir) {
     CHECK(att1, "attachment 1 is magenta: OM_0_1 moved colour 0");
     printf("feedback output-mapping-only: %s\n", before == failed ? "PASS" : "FAIL");
 }
+// A draw that writes depth and samples its own depth attachment through a bound slot reads a copy taken after its pass ends (fb_depth_snap), reused without ending the pass until the
+// game's next barrier; a draw that leaves depth alone reads the attachment directly, as before. Only serials matter to the rule, as in reuse_case: the stand-in depth texture is RGBA8,
+// filled from the CPU
+static void depth_snap_case(NvProg *pr) {
+    int before = failed; NvShader *fs = pr->sh[1]; fs->rf.b[0].reg = 0;
+    tex_t output, depth; target(&output, 99920); id<MTLTexture> dtex = target(&depth, 99921); mtl_reg_tex(652, &depth, NULL);   // NOLINT(clang-analyzer-osx.cocoa.RetainCount): g_by_serial owns both textures until mtl_tex_release below, not a leak
+    uint8_t px[64]; for (int i = 0; i < 16; i++) { px[4 * i] = 10; px[4 * i + 1] = 20; px[4 * i + 2] = 30; px[4 * i + 3] = 40; }
+    [dtex replaceRegion:MTLRegionMake2D(0, 0, 4, 4) mipmapLevel:0 withBytes:px bytesPerRow:16];
+    id<MTLBuffer> result = [g_dev newBufferWithLength:1024 options:MTLResourceStorageModeShared]; res_add(result);
+    state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
+    R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &output; S.tex[1][0] = 652; S.chmask.mask = 0xffffffffu; S.ds.dt = 1; S.ds.dw = 1;
+    clear(MTLClearColorMake(0, 0, 0, 1)); R.rt.depth = &depth;
+    uint64_t copies = g_fb_dsnaps;
+    fb_prepare(pr);
+    CHECK(!g_enc && g_fb_n == 1 && g_fb_use[0] && g_fb_use[0] != dtex && g_fb_dsnaps == copies + 1, "a draw that writes depth and samples it reads a copy, taken after its pass ends");
+    CHECK(!g_fb_dread, "and does not count as reading the attachment");
+    id<MTLTexture> first = g_fb_use[0];
+    blit_barrier(); readback(first, result, 0);
+    R.rt.depth = NULL; clear(MTLClearColorMake(0, 0, 0, 1)); R.rt.depth = &depth;   // the pass that draw opens
+    fb_prepare(pr);
+    CHECK(g_enc && g_fb_n == 1 && g_fb_use[0] == first && g_fb_dsnaps == copies + 1, "the next such draw reuses the copy without ending the pass");
+    g_fb_bar++;
+    fb_prepare(pr);
+    CHECK(!g_enc && g_fb_n == 1 && g_fb_dsnaps == copies + 2, "a game barrier makes the next one take a fresh copy");
+    R.rt.depth = NULL; clear(MTLClearColorMake(0, 0, 0, 1)); rp_end();   // that draw writes depth in the pass it opens: the next case starts in a clean one
+    clear(MTLClearColorMake(0, 0, 0, 1)); R.rt.depth = &depth; S.ds.dw = 0;
+    fb_prepare(pr);
+    CHECK(g_enc && g_fb_n == 0 && g_fb_dread && g_fb_dsnaps == copies + 2, "a draw that leaves depth alone reads the attachment directly");
+    R.rt.depth = NULL; rp_end(); clear(MTLClearColorMake(0, 0, 0, 1)); R.rt.depth = &depth; S.ds.dw = 1; g_fb_depth_m = 0;
+    fb_prepare(pr);
+    CHECK(g_enc && g_fb_n == 0 && g_fb_dsnaps == copies + 2, "with DM_NVN_FB_DEPTH=0 a draw that writes depth reads it directly, as before");
+    g_fb_depth_m = 1; R.rt.depth = NULL; S.ds.dt = S.ds.dw = 0; S.tex[1][0] = 0; rp_end();
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "depth copy submission completed without error");
+    uint8_t want[4] = {10, 20, 30, 40}; pixels(result, 0, want, "the copy holds the attachment's content");
+    mtl_tex_release(&output); mtl_tex_release(&depth);
+    printf("depth copy: %s\n", before == failed ? "PASS" : "FAIL");
+}
+// A draw that samples the depth attachment after an earlier draw of its pass wrote depth, and writes none itself, ends the pass first (Red Dead Redemption's cloud fog); one that samples
+// it first in its pass leaves the pass open, and a later draw that writes depth then ends it (g_fb_dread)
+static void depth_after_write_case(NvProg *pr) {
+    int before = failed; NvShader *fs = pr->sh[1]; fs->rf.b[0].reg = 0;
+    tex_t output, depth; target(&output, 99940); target(&depth, 99941); mtl_reg_tex(654, &depth, NULL);   // NOLINT(clang-analyzer-osx.cocoa.RetainCount): g_by_serial owns both textures until mtl_tex_release below, not a leak
+    state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
+    R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &output; S.chmask.mask = 0xffffffffu;
+    clear(MTLClearColorMake(0, 0, 0, 1)); R.rt.depth = &depth;
+    uint64_t splits = g_fb_dsplit;
+    S.ds.dt = S.ds.dw = 1; S.tex[1][0] = 0;
+    fb_prepare(pr);
+    CHECK(g_enc && g_fb_dwrote && !g_fb_dread, "a draw that writes depth and samples nothing leaves the pass open");
+    S.ds.dw = 0; S.tex[1][0] = 654;
+    fb_prepare(pr);
+    CHECK(!g_enc && g_fb_n == 0 && g_fb_dsplit == splits + 1, "a draw that samples the depth an earlier draw of its pass wrote ends the pass first");
+    R.rt.depth = NULL; clear(MTLClearColorMake(0, 0, 0, 1)); R.rt.depth = &depth;   // the pass that draw opens
+    fb_prepare(pr);
+    CHECK(g_enc && g_fb_dread && g_fb_dsplit == splits + 1, "one that samples it first in its pass reads it there");
+    S.ds.dw = 1; S.tex[1][0] = 0;
+    fb_prepare(pr);
+    CHECK(!g_enc, "and a later draw that writes depth ends that pass");
+    R.rt.depth = NULL; clear(MTLClearColorMake(0, 0, 0, 1)); R.rt.depth = &depth; g_fb_depth_m = 0;
+    fb_prepare(pr); S.ds.dw = 0; S.tex[1][0] = 654;
+    fb_prepare(pr);
+    CHECK(g_enc && g_fb_dsplit == splits + 1, "with DM_NVN_FB_DEPTH=0 it reads it in the pass, as before");
+    g_fb_depth_m = 1; R.rt.depth = NULL; S.ds.dt = S.ds.dw = 0; S.tex[1][0] = 0; rp_end();
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "that submission completed without error");
+    mtl_tex_release(&output); mtl_tex_release(&depth);
+    printf("depth after a write: %s\n", before == failed ? "PASS" : "FAIL");
+}
+// The copy of an actual private Depth32Float attachment, or a Depth32Float_Stencil8 one (Octopath Traveler II's), cleared through the production render pass, in a pass with a colour
+// attachment and in a depth-only one: the stand-in above checks the rule, not a depth format, its store or its copy (the colour pass's case from akratch's review of PR #1917).
+// pending: the attachment holds 0.75 from an earlier pass, and the clear to 0.375 still waits to be the load action of the pass the draw opens (no pass is open): the copy lands it first
+static void real_depth_snap_case(NvProg *pr, int colour_pass, int stencil, int pending) {
+    int before = failed; NvShader *fs = pr->sh[1]; fs->rf.b[0].reg = 0;
+    tex_t colour, depth;
+    if (colour_pass) target(&colour, 99930);
+    depth = (tex_t){.magic=MAGIC('T','E','X',0), .serial=99931 + (uint64_t)colour_pass + 2 * (uint64_t)stencil};
+    depth.d = (nvn_texdesc){.target=NVN_TEXTURE_TARGET_2D, .format=stencil ? NVN_FORMAT_DEPTH32F_STENCIL8 : NVN_FORMAT_DEPTH32F, .width=4, .height=4, .depth=1, .levels=1, .samples=1};
+    id<MTLTexture> dt = [g_dev newTextureWithDescriptor:tex_desc(&depth, 0)];
+    CHECK(dt != nil, "real depth attachment allocates");
+    if (!dt) { if (colour_pass) mtl_tex_release(&colour); return; }
+    res_add(dt); mtl_tex_init(&depth); serial_put(depth.serial, dt);   // NOLINT(clang-analyzer-osx.cocoa.RetainCount): g_by_serial owns the texture until mtl_tex_release below, not a leak
+    mtl_reg_tex(655, &depth, NULL);
+    id<MTLBuffer> result = [g_dev newBufferWithLength:1024 options:MTLResourceStorageModeShared]; res_add(result);
+    state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
+    R.has_rt = 1; R.rt.n = colour_pass; if (colour_pass) R.rt.color[0] = &colour; R.rt.depth = &depth;
+    S.ds.dt = S.ds.dw = 1; S.tex[1][0] = 655;
+    if (pending) { R.clear_d = 1; R.cd = 0.75; CHECK(rp_begin() != nil, "the earlier clearing pass opens"); rp_end(); }
+    R.clear_d = 1; R.cd = 0.375;
+    if (pending) CHECK(!g_enc, "no pass is open: the clear waits for the draw's pass");
+    else if (colour_pass) clear(MTLClearColorMake(0, 0, 0, 1)); else CHECK(rp_begin() != nil, "production depth-only render pass opens");
+    uint64_t copies = g_fb_dsnaps;
+    fb_prepare(pr);
+    id<MTLTexture> snap = g_fb_n == 1 ? g_fb_use[0] : nil;
+    CHECK(!g_enc && snap && snap != dt && snap.pixelFormat == dt.pixelFormat && g_fb_dsnaps == copies + 1,
+          colour_pass ? "real depth feedback substitutes a snapshot in the attachment's format" : "in a depth-only pass too");
+    if (snap) { blit_barrier(); enc_b_copy_texture_buffer_opt(blit(), snap, 0, 0, MTLOriginMake(0, 0, 0), MTLSizeMake(4, 4, 1), result, 0, 256, 1024, stencil ? MTLBlitOptionDepthFromDepthStencil : MTLBlitOptionNone); }
+    R.rt.depth = NULL; S.ds.dt = S.ds.dw = 0; S.tex[1][0] = 0;
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "real depth copy and readback complete under Metal validation");
+    int valid = snap != nil;
+    for (int y = 0; y < 4; y++) for (int x = 0; x < 4; x++) valid &= *(const float *)((const uint8_t *)result.contents + y * 256 + x * 4) == 0.375f;
+    CHECK(valid, pending ? "every real depth sample holds the clear that was still waiting, not the earlier content" : "every real depth sample holds the attachment's clear");
+    if (colour_pass) mtl_tex_release(&colour);
+    mtl_tex_release(&depth);
+    printf("real depth copy (%s, %s%s): %s\n", stencil ? "Depth32Float_Stencil8" : "Depth32Float", colour_pass ? "colour pass" : "depth-only pass", pending ? ", clear waiting" : "", before == failed ? "PASS" : "FAIL");
+}
+// A colour snapshot taken while the attachment's clear still waits to be the load action of the pass the draw opens holds the clear: the attachment holds (10, 20, 30, 40) from the CPU,
+// the clear is red, and the draw writes the attachment it samples
+static void pending_clear_case(NvProg *pr) {
+    int before = failed; NvShader *fs = pr->sh[1]; fs->rf.b[0].reg = 0;
+    tex_t source; id<MTLTexture> st = target(&source, 99950); mtl_reg_tex(656, &source, NULL);   // NOLINT(clang-analyzer-osx.cocoa.RetainCount): g_by_serial owns the texture until mtl_tex_release below, not a leak
+    uint8_t px[64]; for (int i = 0; i < 16; i++) { px[4 * i] = 10; px[4 * i + 1] = 20; px[4 * i + 2] = 30; px[4 * i + 3] = 40; }
+    [st replaceRegion:MTLRegionMake2D(0, 0, 4, 4) mipmapLevel:0 withBytes:px bytesPerRow:16];
+    id<MTLBuffer> result = [g_dev newBufferWithLength:1024 options:MTLResourceStorageModeShared]; res_add(result);
+    state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
+    R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &source; S.tex[1][0] = 656; S.chmask.mask = 0xffffffffu;
+    R.clear_c[0] = 1; R.cc[0] = MTLClearColorMake(1, 0, 0, 1);
+    uint64_t snaps = g_fb_count;
+    fb_prepare(pr);
+    id<MTLTexture> snap = g_fb_n == 1 ? g_fb_use[0] : nil;
+    CHECK(!g_enc && snap && snap != st && g_fb_count == snaps + 1 && !R.clear_c[0], "a draw writing the attachment it samples takes a snapshot after the waiting clear lands");
+    if (snap) { blit_barrier(); readback(snap, result, 0); }
+    S.tex[1][0] = 0;
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "pending clear submission completed without error");
+    pixels(result, 0, (const uint8_t[]){255, 0, 0, 255}, "the snapshot holds the red clear, not the content before it");
+    mtl_tex_release(&source);
+    printf("snapshot after a waiting clear: %s\n", before == failed ? "PASS" : "FAIL");
+}
 int main(int argc, char **argv) { @autoreleasepool {
     setenv("DM_NVN_TBDR", "0", 1); setenv("DM_NVN_GPU_TS", "segment", 1);
     mtl_init(); NSError *error = nil;
@@ -585,6 +711,10 @@ int main(int argc, char **argv) { @autoreleasepool {
     const int slots[] = {0, 128, 255};
     for (int i = 0; i < 3; i++) slot_case(pr, pipeline, slots[i], i);
     reuse_case(pr);
+    depth_snap_case(pr);
+    depth_after_write_case(pr);
+    for (int pending = 0; pending < 2; pending++) for (int stencil = 0; stencil < 2; stencil++) { real_depth_snap_case(pr, 1, stencil, pending); real_depth_snap_case(pr, 0, stencil, pending); }
+    pending_clear_case(pr);
     shape_case();
     mip_chain_case(pr);
     fs->fn = [lib newFunctionWithName:@"mask"];

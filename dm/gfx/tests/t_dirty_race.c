@@ -58,6 +58,7 @@ int t_mprotect(void *a, size_t n, int prot) {
 // in a glyph cache). Thread C plays the last step of that unprotect 50 ms late
 static _Atomic uint8_t *g_c_state;
 static void *thread_c(void *arg) { (void)arg; usleep(50000); atomic_store(g_c_state, PG_NONE); return NULL; }
+static void *thread_c_unprotect(void *page) { usleep(50000); mprotect(page, (size_t)getpagesize(), PROT_READ | PROT_WRITE); atomic_store(g_c_state, PG_NONE); return NULL; }
 static void busy_protect(size_t pg) {
     uint8_t *page = mmap(NULL, pg, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     if (page == MAP_FAILED) { perror("mmap"); g_fail++; return; }
@@ -115,6 +116,56 @@ static void generation_publish(size_t pg, int batch) {
     nvn_dirty_remove_range(page); munmap(page, len);
 }
 
+// nvn_dirty_open / nvn_dirty_close, around making a pool buffer (issue #1591): the protected pages are opened without counting as written, and closing protects them again and counts
+// only those whose bytes changed. A write to an open page does not fault, so only its hash sees it. A host write into an open page (a file read) takes the page as it would a protected one:
+// stamped and left writable; protected again, the system call that follows would fail with EFAULT
+static void open_close(size_t pg) {
+    uint8_t *m = mmap(NULL, 3 * pg, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (m == MAP_FAILED) { perror("mmap"); g_fail++; return; }
+    nvn_dirty_add_range(m, 3 * pg);
+    range_t *r = find_span((uintptr_t)m, 3 * pg); uintptr_t p0 = ((uintptr_t)m - r->base) >> g_shift;
+    uint64_t stamp = nvn_dirty_now();
+    nvn_dirty_protect(m, 3 * pg);
+    uint64_t op0, oc0, op, oc; nvn_dirty_open_stats(&op0, &oc0);
+    nvn_dirty_open(m, 3 * pg);
+    printf("open pages around a pool buffer:\n");
+    EXPECT("opened: the pages are open", PG_OPEN, atomic_load(&r->state[p0 + 1]));
+    EXPECT("opened: not counted as written", 0, nvn_dirty_since(m, 3 * pg, stamp));
+    m[0] = 9;   // a guest write meanwhile: no fault
+    prep_write(m + pg, 16);   // a host write meanwhile
+    nvn_dirty_close();
+    nvn_dirty_open_stats(&op, &oc);
+    EXPECT("three pages opened, one changed while open", 3 * 1000 + 1, (op - op0) * 1000 + (oc - oc0));
+    EXPECT("written while open: protected again", PG_PROT, atomic_load(&r->state[p0]));
+    EXPECT("written while open: counted as written", 1, nvn_dirty_since(m, 16, stamp));
+    EXPECT("the host's page: left writable", PG_NONE, atomic_load(&r->state[p0 + 1]));
+    int fd = open("/dev/zero", O_RDONLY); ssize_t n = read(fd, m + pg, 16); close(fd);
+    EXPECT("the host's page: a file read after the close lands (no EFAULT)", 16, n);
+    EXPECT("the host's page: counted as written", 1, nvn_dirty_since(m + pg, 16, stamp));
+    EXPECT("unwritten page: protected again", PG_PROT, atomic_load(&r->state[p0 + 2]));
+    EXPECT("unwritten page: not counted as written", 0, nvn_dirty_since(m + 2 * pg, pg, stamp));
+    uint64_t later = nvn_dirty_now();
+    m[2 * pg] = 1;   // protected again: a write faults and is seen
+    EXPECT("unwritten page: a later write is seen", 1, nvn_dirty_since(m + 2 * pg, pg, later));
+    nvn_dirty_remove_range(m); munmap(m, 3 * pg);
+}
+// A page another thread is unprotecting (BUSY, still read-only) when nvn_dirty_open looks: the buffer must not be made over it while it is read-only, so the open waits for it
+static void open_waits_busy(size_t pg) {
+    uint8_t *m = mmap(NULL, pg, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (m == MAP_FAILED) { perror("mmap"); g_fail++; return; }
+    nvn_dirty_add_range(m, pg);
+    range_t *r = find_span((uintptr_t)m, pg); uintptr_t i = ((uintptr_t)m - r->base) >> g_shift;
+    nvn_dirty_protect(m, pg);
+    uint8_t st = PG_PROT; atomic_compare_exchange_strong(&r->state[i], &st, PG_BUSY);   // thread C plays the rest of the unprotect 50 ms late, its mprotect included
+    g_c_state = &r->state[i];
+    pthread_t tc; pthread_create(&tc, NULL, thread_c_unprotect, m);
+    nvn_dirty_open(m, pg);
+    EXPECT("open waits out a page being unprotected (state NONE)", PG_NONE, atomic_load(&r->state[i]));
+    nvn_dirty_close();
+    pthread_join(tc, NULL);
+    nvn_dirty_remove_range(m); munmap(m, pg);
+}
+
 int main(void) {
     crash_install();
     size_t pg = (size_t)getpagesize();
@@ -140,5 +191,7 @@ int main(void) {
     stamp_order(pg);
     generation_publish(pg, 0);
     generation_publish(pg, 1);
+    open_close(pg);
+    open_waits_busy(pg);
     printf("t_dirty_race: %s\n", g_fail ? "FAILED" : "all passed"); return g_fail != 0;
 }

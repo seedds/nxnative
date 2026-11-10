@@ -1,7 +1,7 @@
 // A large memory pool in chunks (nvn_mtl.m BIG_MIN): a lookup gets a zero-copy buffer that holds what it asked and starts at its stride, so only what lookups reach is wired. The buffers must
 // say the same memory as the guest address, a read of unknown extent must have BIG_UNKNOWN past it, a chunk asked for more is lengthened, a texture's upload wires no chunk (up_big_src),
 // raw global memory's pool table covers the whole pool (big_full), the pool's removal takes every entry, a smaller pool stays one buffer, and each kind of pool buffer made over a
-// write-protected page still takes the GPU's writes (pool_buf).
+// write-protected page still takes the GPU's writes without counting the page as written (pool_buf).
 #include "../nvn/nvn_mtl.m"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
@@ -40,8 +40,13 @@ int main(void) { @autoreleasepool {
     mtl_pool_add(mem, GB);
     CHECK("no buffer until a lookup", g_npool == pools0 && g_nbig == 1);
     CHECK("overlapping buffers: barriers carry alias visibility", resource_vis() & MTL4VisibilityOptionResourceAlias);
+    pthread_mutex_lock(&g_mu); int peeked = pool_peek(base + 100), peek_chunks = g_npool; pthread_mutex_unlock(&g_mu);
+    CHECK("asking where an address is (the pool walk's statistics) makes no chunk", peeked == -1 && peek_chunks == pools0);
     id<MTLBuffer> a = look(base + 100, 4096);
     CHECK("one chunk", g_npool == pools0 + 1);
+    pthread_mutex_lock(&g_mu); int in_stride = pool_peek(base + 9 * MB), other = pool_peek(base + 300 * MB), n_after = g_npool; pthread_mutex_unlock(&g_mu);
+    CHECK("peek finds the chunk of a stride that has one", in_stride >= 0 && g_pools[in_stride].buf == a);
+    CHECK("peek of a stride with none: -1, and still no new chunk", other == -1 && n_after == pools0 + 1);
     CHECK("a chunk is far smaller than the pool", a.length <= 3 * BIG_S);
     CHECK("the same stride: the same buffer", look(base + 200, 4096) == a);
     CHECK("no more chunks", g_npool == pools0 + 1);
@@ -166,8 +171,9 @@ int main(void) { @autoreleasepool {
         uint8_t *wp = mmap(NULL, GB, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0); if (wp == MAP_FAILED) abort();
         uint64_t wb = (uint64_t)(uintptr_t)wp;
         mtl_pool_add(wp, GB); nvn_dirty_add_range(wp, GB);
-        nvn_dirty_protect(wp + 40 * MB, 4096);   // a texture's page in the stride the lookup below makes a chunk for
+        uint64_t tst = nvn_dirty_now(); nvn_dirty_protect(wp + 40 * MB, 4096);   // a texture's page in the stride the lookup below makes a chunk for
         CHECK("a new chunk over a protected page takes GPU writes", gpu_fill_ok(wb + 41 * MB, 4096, 0x5a));
+        CHECK("the chunk does not make the texture's page written: it is not read again", !nvn_dirty_since(wp + 40 * MB, 4096, tst));
         (void)look(wb + 200 * MB, 64);   // a short chunk, made over writable pages
         nvn_dirty_protect(wp + 220 * MB, 4096);   // then a page past its end is protected, and a longer lookup lengthens it over that page
         CHECK("a lengthened chunk over a protected page takes GPU writes", gpu_fill_ok(wb + 200 * MB, 32 * MB, 0x6b));
@@ -199,10 +205,8 @@ int main(void) { @autoreleasepool {
         uint64_t st = nvn_dirty_now(); nvn_dirty_protect(two + pg, 4096);   // the first pool's last page, which the second pool starts in
         mtl_pool_add(two + half, 2 * MB); nvn_dirty_add_range(two + half, 2 * MB);
         CHECK("a pool made over its neighbour's protected page takes GPU writes", gpu_fill_ok((uint64_t)(uintptr_t)(two + half + MB), 4096, 0x8d));
-        CHECK("the page made writable counts as written: its texture is read again", nvn_dirty_since(two + pg, 4096, st));
-        st = nvn_dirty_now(); nvn_dirty_protect(two + pg, 4096);   // read again and protected: tracked as before (a host write; the test has no fault handler for a CPU one)
-        CHECK("protected again: unwritten", !nvn_dirty_since(two + pg, 4096, st));
-        dm_guest_write_prepare(two + pg, 4096); two[pg] = 1;
+        CHECK("the page opened for the buffer does not count as written", !nvn_dirty_since(two + pg, 4096, st));
+        dm_guest_write_prepare(two + pg, 4096); two[pg] = 1;   // protected again: tracked as before (a host write; the test has no fault handler for a CPU one)
         CHECK("protected again: a write is seen", nvn_dirty_since(two + pg, 4096, st));
         nvn_dirty_remove_range(two + half); mtl_pool_del(two + half); nvn_dirty_remove_range(two); mtl_pool_del(two);
         nvn_dirty_remove_range(wp); mtl_pool_del(wp); mtl_drain();

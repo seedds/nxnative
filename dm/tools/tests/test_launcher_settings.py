@@ -75,11 +75,22 @@ class LauncherSettingsTests(unittest.TestCase):
     def test_iphone_switches_only_on_the_iphone(self):   # the frame-rate counter and touch feedback are the iOS front end's (front_ios.m, DmGamepad.m)
         ios, mac = build(BOTW, 'nvn'), build(BOTW, 'nvn', 'mac')
         self.assertEqual(build(BOTW, 'nvn', 'ios').keys(), ios.keys())   # ios when unset
-        self.assertEqual(set(ios) - set(mac), {'DM_SHOW_FPS', 'DM_TOUCH_HAPTICS', 'DM_PICTURE_FIT'})
+        self.assertEqual(set(ios) - set(mac), {'DM_SHOW_FPS', 'DM_TOUCH_HAPTICS', 'DM_PICTURE_FIT', 'DM_CONTROLS_SCALE', 'DM_CONTROLS_OPACITY'})
         self.assertIn('DM_RUMBLE', mac); self.assertIn('DM_METAL_HUD', mac)
         self.assertEqual(set(mac) - set(ios), {'DM_FULLSCREEN', 'DM_SW2'})   # the Mac window's Display mode (front_mac.m reads 1 or 0); Switch 2 controllers (pad_switch2_apple.m, wired on the Mac only)
         s = mac['DM_FULLSCREEN']
         self.assertEqual((s['kind'], s['default'], s['options'], s['level']), ('choice', '0', [['0', 'Window'], ['1', 'Fullscreen']], 'basic'))
+
+    def test_controls_size_and_opacity_are_in_game_menu_choices_on_the_iphone(self):   # a choice, so the in-game menu offers it (it holds no sliders) and DmGamepad.m applies it at once
+        ios = build(BOTW, 'nvn')
+        size, opacity = ios['DM_CONTROLS_SCALE'], ios['DM_CONTROLS_OPACITY']
+        self.assertEqual((size['kind'], size['section'], size['default']), ('choice', 'Controls', '1.0'))
+        self.assertEqual((opacity['kind'], opacity['section'], opacity['default']), ('choice', 'Controls', '1.0'))
+        self.assertEqual((float(size['options'][0][0]), float(size['options'][-1][0])), (0.75, 1.35))   # DmGamepad.m K_SCALE_MIN, K_SCALE_MAX
+        self.assertEqual((float(opacity['options'][0][0]), float(opacity['options'][-1][0])), (0.3, 1.0))   # K_OPACITY_MIN, 1
+        self.assertNotIn('DM_CONTROLS_SCALE', build(BOTW, 'nvn', 'mac'))
+        order = list(ios)
+        self.assertEqual(order[order.index('DM_TOUCH_HAPTICS') + 1:][:2], ['DM_CONTROLS_SCALE', 'DM_CONTROLS_OPACITY'])
 
     def test_defaults_follow_each_platform_host(self):
         # nvn_mtl.m pso4_on: Mac defaults on, iOS follows the profile. nvn_rec.h rec_on: iOS on, Mac off.

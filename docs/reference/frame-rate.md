@@ -605,3 +605,11 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Check:** `python3 dm/tools/tests/test_dmsh_pool_arrays.py`.
 - **Result on Ocarina of Time, an M6:** no measurable change. Its 4,758 marked pixel shaders were rebuilt with each load over the same library (chain `f9f01e4f9994`), and the game was measured standing on the Kokiri Forest deck, 40 s a run. GPU p50 was 14.38 ms with either load (5 runs plain, 13.99–14.88; 4 atomic, 14.28–15.34). The pictures matched within run-to-run noise. The gain the contributor measured is on an iPad Pro M5 and is not checked here.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md), reported with the iPad figures by a contributor in [discussion #1789](https://github.com/seedds/nxnative/discussions/1789).
+
+### Upload GPU timing without a start timestamp
+
+- **Symptom:** `@upload_gpu_ms` can report an uptime-sized duration on an otherwise short texture-loading frame. The reported value is not usable as a hitch measurement.
+- **Cause:** the upload completion handler accepted `GPUEndTime - GPUStartTime` whenever positive. Feedback with a missing start of zero therefore contributed the whole end timestamp. Nonfinite and out-of-range results also reached a floating-to-integer conversion without validation.
+- **Fix:** `upload_gpu_note` accepts only positive, ordered, finite timestamp intervals whose nanoseconds fit `uint64_t`. Invalid or unavailable feedback contributes no duration. Submission, rendering and upload ownership are unchanged.
+- **Check:** the existing CPU-only `t_gpuprof` fixture exercises the production accumulator with zero/negative starts, reversed/equal intervals, NaN/infinite/overflow values, valid cumulative durations and reset-on-take. The standalone fixture passes 34 checks; removing only the positive-start guard fails the unavailable-timestamp assertion. This establishes the accumulator contract, not a loading-time improvement.
+- **Found on:** a private [Ocarina of Time](../../dm/games/0400486024DEC000/README.md) load-time diagnostic capture, then synthetic timestamp vectors. This corrects telemetry; it does not explain or remove the loading stall.

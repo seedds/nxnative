@@ -2940,6 +2940,14 @@ static id<MTLTexture> tex_upgrade_pfv(const tex_t *t, id<MTLTexture> base, MTLPi
 // the same queue executes in commit order ⇒ uploads are always finished before the first sample. Uploads outside a submission are flushed on the spot. The staging area is cut from 32 MB private blocks, held by the command buffer until completion.
 static _Atomic uint64_t g_upload_ns;   // Cumulative time of deswizzle + upload encoding on the submit thread (timing instrumentation)
 static _Atomic uint64_t g_upload_gpu_ns;
+static void upload_gpu_note(double start, double end) {
+    double ns = (end - start) * 1e9;
+    // Commit feedback can have an end time but no start. As in gpu_tag_done,
+    // that is unknown, not a duration equal to the system's entire uptime.
+    // Validate before converting to uint64_t (NaN/overflow conversions are UB).
+    if (start > 0 && isfinite(start) && isfinite(end) && ns > 0 && ns < 0x1p64)
+        atomic_fetch_add(&g_upload_gpu_ns, (uint64_t)ns);
+}
 static id<MTL4CommandBuffer> g_up_cb;
 static id<MTL4ComputeCommandEncoder> g_up_ce;
 static _Atomic int g_up_alloc_busy[3];
@@ -3027,8 +3035,7 @@ static void up_flush(void) {
             pthread_mutex_lock(&g_smu); g_ser_gen++; pthread_mutex_unlock(&g_smu);   // Make the view cache of every texture ID take the slow path once (on a cache hit tex_mtl is not passed through and this record is not seen)
             MLOG("%supload command buffer dropped: the %lu textures of this batch are marked unwritten and re-uploaded on next use (%d awaiting re-upload)", fake_lost ? "DM_TEST_UP_LOST: " : "", (unsigned long)dsts.count, n);
         }
-        double d = f.GPUEndTime - f.GPUStartTime;
-        if (d > 0) atomic_fetch_add(&g_upload_gpu_ns, (uint64_t)(d * 1e9));
+        upload_gpu_note(f.GPUStartTime, f.GPUEndTime);
         @autoreleasepool {
             for (id<MTLResource> obj in staging) res_remove(obj);
             [staging removeAllObjects];

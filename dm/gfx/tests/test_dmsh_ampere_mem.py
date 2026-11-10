@@ -24,6 +24,7 @@ class Translated(unittest.TestCase):
             r = subprocess.run([os.environ['DMSH_TEST_XLATE'], str(work / 'jobs.json'), d], capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
             self.assertTrue((work / 'k.spv').exists(), r.stdout + r.stderr)
+            self.res = json.loads((work / 'k.res.json').read_text())   # the translator's own report of the shader
             sys.path.insert(0, str(TOOLS)); import dmsh_geometry
             dmsh_geometry.flatten_sets(work / 'k.spv')
             r = subprocess.run([str(TOOLS / 'spirv_cross_bin/spirv-cross'), '--msl', '--msl-version', '20300', '--msl-argument-buffers', '--msl-texture-buffer-native',
@@ -440,9 +441,14 @@ class Pokopia(Translated):
     MEMBAR = (0x000fec0000005000, 0x0000000000007992)
     ERRBAR = (0x000fc00000000000, 0x00000000000079ab)
 
-    def msl(self, *code):   # the uniform words read bare: the translator bounds each read by the slot's size (dmsh_fetch.unguard, test_dmsh_fetch), which these tests do not look at
-        sys.path.insert(0, str(TOOLS)); import dmsh_fetch
-        return dmsh_fetch.unguard(self.translate(b''.join(inst(*c) for c in code) + inst(*SUATOM) + inst(*EXIT)))
+    def msl(self, *code):
+        return self.translate(b''.join(inst(*c) for c in code) + inst(*SUATOM) + inst(*EXIT))
+
+    def test_fixed_uniform_reads_are_bare_and_counted(self):   # TranslationFlags.MetalUniformBounds: no comparison and no size table for reads at fixed offsets; the host gets how far they go (GitHub issue #2066)
+        sys.path.insert(0, str(TOOLS)); import dmsh_abi
+        msl = self.msl(self.MERGE_FIRST, self.MERGE_SECOND)   # c[3] words 6 and 5
+        self.assertNotIn('_c%d' % dmsh_abi.CBSIZE_BANK, msl)
+        self.assertEqual([c['fixed'] for c in self.res['cbufs'] if c['slot'] == 3], [28])
 
     def test_merge_shifts_c_into_the_high_half(self):   # word 6, converted first, ends in the high half; word 5 in the low one
         msl = self.msl(self.MERGE_FIRST, self.MERGE_SECOND)

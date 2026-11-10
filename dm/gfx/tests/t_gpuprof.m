@@ -56,6 +56,17 @@ static int checks, failed;
 @end
 
 int main(void) { @autoreleasepool {
+    atomic_store(&g_upload_gpu_ns, 0);
+    upload_gpu_note(0, 628873.076197); // Observed uptime-sized upload telemetry.
+    upload_gpu_note(-1, 2); upload_gpu_note(4, 3); upload_gpu_note(3, 3);
+    upload_gpu_note(NAN, 4); upload_gpu_note(4, NAN);
+    upload_gpu_note(INFINITY, INFINITY); upload_gpu_note(1, INFINITY);
+    upload_gpu_note(1, 0x1p64);
+    CHECK(mtl_upload_gpu_ns_take() == 0, "unknown or invalid upload timestamps contribute no duration");
+    upload_gpu_note(1000, 1000.002); upload_gpu_note(1000, 1000.003);
+    uint64_t upload_ns = mtl_upload_gpu_ns_take();
+    CHECK(upload_ns >= 4999998 && upload_ns <= 5000002, "valid upload durations accumulate in nanoseconds");
+    CHECK(mtl_upload_gpu_ns_take() == 0, "upload timing take resets the completed total");
     ProfileHeap *heap = [ProfileHeap new]; ProfileEvent *event = [ProfileEvent new];
     g_gp_heap = (id)heap; g_dev = (id)[ProfileDevice new]; g_ev = (id)event;
     setenv("DM_NVN_GPUPROF", "every:1", 1);

@@ -75,12 +75,17 @@ static inline size_t s2_command(uint8_t *out, size_t cap, uint8_t cmd, uint8_t s
     if (n) memcpy(out + 8, payload, n);
     return 8 + n;
 }
-// Memory read payload: length, 0x7E, 0, 0, address (little endian). The reply is the 8-byte frame header, the same 8 bytes echoed (length, 0x7E, 0, 0, address), then the data.
+// Memory read payload: length, 0x7E, 0, 0, address (little endian). The reply is the 8-byte frame header, then 8 bytes starting with the length and ending with the address, then the data
 static inline void s2_memory_payload(uint8_t out[8], uint8_t len, uint32_t addr) {
     out[0] = len; out[1] = 0x7E; out[2] = out[3] = 0;
     out[4] = (uint8_t)addr; out[5] = (uint8_t)(addr >> 8); out[6] = (uint8_t)(addr >> 16); out[7] = (uint8_t)(addr >> 24);
 }
 #define S2_REPLY_DATA 16   // offset of the data in a memory-read reply
+// Whether a memory-read reply answers the read of len bytes at addr: its length and address (bytes 8 and 12-15). A reply that comes after its command timed out would otherwise be
+// taken for the next one's. Bytes 9-11 are not compared: a Pro Controller 2 does not echo the request's 0x7E there (comparing all 8 refused every read on hardware)
+static inline int s2_memory_reply_for(const uint8_t *d, size_t n, uint8_t len, uint32_t addr) {
+    return d && n >= S2_REPLY_DATA + len && d[8] == len && s2_u32(d + 12) == addr;
+}
 // A command reply is for command cmd when it starts with it and byte 1 is 1 (done) or 2 (status)
 static inline int s2_reply_is(const uint8_t *d, size_t n, uint8_t cmd) { return d && n >= 8 && d[0] == cmd && (d[1] == 1 || d[1] == 2); }
 
@@ -147,6 +152,162 @@ static inline void s2_cal_apply(const s2_cal *c, uint16_t rawx, uint16_t rawy, f
     *y = s2_cal_axis((float)rawy, c->cy, c->maxy, c->miny, dead);
 }
 
+// The calibration a stick is read with from its two blocks: the user's when it parses, else the factory's, else the defaults (valid 0); *fac is the factory block, or a copy of *cal
+// when that one did not read, so a travel is always judged against something. Returns cal->valid
+static inline int s2_cal_pick(const s2_cal *user, int has_user, const s2_cal *factory, int has_factory, s2_cal *cal, s2_cal *fac) {
+    if (has_user && user) *cal = *user; else if (has_factory && factory) *cal = *factory; else s2_cal_default(cal);
+    if (has_factory && factory) *fac = *factory; else *fac = *cal;
+    return cal->valid;
+}
+
+// ---- Writing a user stick calibration (DM_SW2_CALIBRATE: switch2_ops_apple.m) ----
+// The user calibration of the first stick slot is 11 bytes at 0x1FC040: the marker B2 A1 (Switch 1's user-calibration marker), then the 9 bytes s2_cal_parse reads, which is why
+// the read starts at 0x1FC042 (SDL's SDL_hidapi_switch2.c and Linux's hid-nintendo.c check the marker the same way; both read the second slot at 0x1FC080, not 0x1FC062). Its
+// sector 0x1FC000..0x1FCFFF holds only user calibration (ndeadly/switch2_controller_research memory_layout.md: motion at 0x1FC000, the sticks after it), all 0xFF until a
+// calibration is written. Command 0x02: subcommand 0x05 writes (length, 0x7E, 0, 0, address, data; addresses below 0x1F5000 are refused), 0x03 erases the 0x1000-byte sector
+// holding an address to 0xFF (0, 0, 0, 0, address). Whether a write over bytes that are not 0xFF needs the erase first is documented nowhere, so the host writes straight only
+// into a blank block and otherwise erases the sector and writes it back whole (only once the sector reads blank: an answered erase is not proof of one), then reads
+// everything back.
+enum { S2_SUB_MEMORY_ERASE = 0x03, S2_SUB_MEMORY_WRITE = 0x05 };
+#define S2_ADDR_USER_CAL_SECTOR 0x001FC000u
+#define S2_SECTOR_SIZE 0x1000u
+#define S2_USER_STICK1_OFF 0x40u   // the first stick slot's block in the sector (marker at 0x1FC040, calibration at S2_ADDR_USER_STICK1)
+#define S2_USER_CAL_LEN 11
+static inline int s2_all_ff(const uint8_t *d, size_t n) { for (size_t i = 0; i < n; i++) if (d[i] != 0xFF) return 0; return 1; }
+// A calibration as the 9 bytes s2_cal_parse reads: centre, travel above, travel below, each pair packed x | y << 12, little endian
+static inline void s2_cal_pack(const s2_cal *c, uint8_t out[9]) {
+    float v[6] = {c->cx, c->cy, c->maxx, c->maxy, c->minx, c->miny};
+    for (int i = 0; i < 3; i++) {
+        uint32_t x = (uint32_t)fminf(fmaxf(roundf(v[2 * i]), 0.f), 4095.f), y = (uint32_t)fminf(fmaxf(roundf(v[2 * i + 1]), 0.f), 4095.f), p = x | y << 12;
+        out[3 * i] = (uint8_t)p; out[3 * i + 1] = (uint8_t)(p >> 8); out[3 * i + 2] = (uint8_t)(p >> 16);
+    }
+}
+static inline void s2_user_cal_block(const s2_cal *c, uint8_t out[S2_USER_CAL_LEN]) { out[0] = 0xB2; out[1] = 0xA1; s2_cal_pack(c, out + 2); }
+static inline int s2_user_cal_marked(const uint8_t *d) { return d[0] == 0xB2 && d[1] == 0xA1; }
+// The calibration with its centre moved to (cx, cy) and the same end stops: travel is measured from the centre, so what the centre gains one side loses the other.
+// 0 when c is not a calibration read from the controller (the defaults are no travel of this stick's) or the new travel would not be one (s2_cal_parse's rule)
+static inline int s2_cal_recentre(const s2_cal *c, float cx, float cy, s2_cal *out) {
+    if (!c || !c->valid) return 0;
+    cx = roundf(cx); cy = roundf(cy);
+    float dx = cx - c->cx, dy = cy - c->cy;
+    out->cx = cx; out->cy = cy;
+    out->maxx = c->maxx - dx; out->minx = c->minx + dx; out->maxy = c->maxy - dy; out->miny = c->miny + dy;
+    out->valid = out->maxx > 100 && out->maxy > 100 && out->minx > 100 && out->miny > 100;
+    return out->valid;
+}
+// Where a released stick rests: S2_STICK_REST_MS of reports in which neither axis moved more than S2_STICK_REST_SPREAD counts (a touch starts it over), averaged.
+// Returns 1 with the rest in out
+#define S2_STICK_REST_MS 2000u
+#define S2_STICK_REST_SPREAD 24
+#define S2_STICK_REST_MAX 300.f    // a rest farther than this from the calibrated centre (a quarter of the travel) is a held stick, not drift: nothing is written
+typedef struct { int n; uint32_t t0; uint16_t lo[2], hi[2]; uint64_t sum[2]; } s2_stick_rest;
+// The same for hold_ms of reports (S2_STICK_REST_MS is the 2 s of the DM_SW2_CALIBRATE write)
+static inline int s2_stick_rest_update_for(s2_stick_rest *r, uint16_t x, uint16_t y, uint32_t ms, uint32_t hold_ms, float out[2]) {
+    uint16_t v[2] = {x, y};
+    if (r->n) for (int i = 0; i < 2; i++) {
+        uint16_t lo = v[i] < r->lo[i] ? v[i] : r->lo[i], hi = v[i] > r->hi[i] ? v[i] : r->hi[i];
+        if (hi - lo > S2_STICK_REST_SPREAD) { r->n = 0; break; }
+        r->lo[i] = lo; r->hi[i] = hi;
+    }
+    if (!r->n) { r->t0 = ms; for (int i = 0; i < 2; i++) { r->lo[i] = r->hi[i] = v[i]; r->sum[i] = 0; } }
+    r->n++; r->sum[0] += x; r->sum[1] += y;
+    if (ms - r->t0 < hold_ms || r->n < 10) return 0;
+    out[0] = (float)r->sum[0] / (float)r->n; out[1] = (float)r->sum[1] / (float)r->n;
+    return 1;
+}
+static inline int s2_stick_rest_update(s2_stick_rest *r, uint16_t x, uint16_t y, uint32_t ms, float out[2]) {
+    return s2_stick_rest_update_for(r, x, y, ms, S2_STICK_REST_MS, out);
+}
+static inline int s2_stick_rest_near(const s2_cal *c, float x, float y) { return fabsf(x - c->cx) <= S2_STICK_REST_MAX && fabsf(y - c->cy) <= S2_STICK_REST_MAX; }
+// A release for the stick tester: the stick goes more than S2_RELEASE_AWAY counts from c's centre on either axis, then rests closer than that for S2_RELEASE_HOLD_MS (milliseconds of the controller's clock).
+// Returns 1 once per release with the averaged rest in out, then waits for the next push; while the stick is away its rest window starts over
+#define S2_RELEASE_AWAY 300
+#define S2_RELEASE_HOLD_MS 300u
+typedef struct { int away; s2_stick_rest rest; } s2_release;
+static inline int s2_release_update(s2_release *r, const s2_cal *c, uint16_t x, uint16_t y, uint32_t ms, float out[2]) {
+    if (fabsf((float)x - c->cx) > S2_RELEASE_AWAY || fabsf((float)y - c->cy) > S2_RELEASE_AWAY) { r->away = 1; r->rest.n = 0; return 0; }
+    if (!r->away) { r->rest.n = 0; return 0; }
+    if (!s2_stick_rest_update_for(&r->rest, x, y, ms, S2_RELEASE_HOLD_MS, out)) return 0;
+    r->away = 0; r->rest.n = 0;
+    return 1;
+}
+// The edge of a stick for a new calibration: the furthest offset from c's centre in each direction, in counts (up: right and up, down: left and down; zero-initialised to start)
+#define S2_REACH_MIN_FRAC 0.7f     // a reach under this share of the limits' travel (the factory calibration's) in that direction is a stick not rotated all the way
+#define S2_REACH_MAX_FRAC 1.25f    // over this share of the limits' travel in any direction is not this stick's edge
+#define S2_REACH_TRIM 0.97f        // the new travel is this share of the reach, so the edge reads full tilt
+#define S2_REACH_SHORT_RIGHT 1
+#define S2_REACH_SHORT_LEFT 2
+#define S2_REACH_SHORT_UP 4
+#define S2_REACH_SHORT_DOWN 8
+#define S2_REACH_TOO_FAR 16
+typedef struct { float up[2], down[2]; } s2_reach;
+static inline void s2_reach_update(s2_reach *r, const s2_cal *c, uint16_t x, uint16_t y) {
+    float dx = (float)x - c->cx, dy = (float)y - c->cy;
+    if (dx > r->up[0]) r->up[0] = dx;
+    if (-dx > r->down[0]) r->down[0] = -dx;
+    if (dy > r->up[1]) r->up[1] = dy;
+    if (-dy > r->down[1]) r->down[1] = -dy;
+}
+// The S2_REACH_SHORT_ bits of the directions whose reach is under S2_REACH_MIN_FRAC of limits' travel that way (0: every way far enough)
+static inline int s2_reach_short(const s2_reach *r, const s2_cal *limits) {
+    int f = 0;
+    if (r->up[0] < S2_REACH_MIN_FRAC * limits->maxx) f |= S2_REACH_SHORT_RIGHT;
+    if (r->down[0] < S2_REACH_MIN_FRAC * limits->minx) f |= S2_REACH_SHORT_LEFT;
+    if (r->up[1] < S2_REACH_MIN_FRAC * limits->maxy) f |= S2_REACH_SHORT_UP;
+    if (r->down[1] < S2_REACH_MIN_FRAC * limits->miny) f |= S2_REACH_SHORT_DOWN;
+    return f;
+}
+// The calibration with c's centre (the one the reach was measured from) and the reach, trimmed, as travel; out is written only when this returns 0. Otherwise the S2_REACH_
+// bits of what is wrong, judged against limits' travel: the factory calibration's, since a stored user calibration may be the short travel being replaced (all four SHORT
+// bits when the result would not be a calibration by s2_cal_parse's rule)
+static inline int s2_reach_travel(const s2_reach *r, const s2_cal *c, const s2_cal *limits, s2_cal *out) {
+    int f = s2_reach_short(r, limits);
+    if (r->up[0] > S2_REACH_MAX_FRAC * limits->maxx || r->down[0] > S2_REACH_MAX_FRAC * limits->minx ||
+        r->up[1] > S2_REACH_MAX_FRAC * limits->maxy || r->down[1] > S2_REACH_MAX_FRAC * limits->miny) f |= S2_REACH_TOO_FAR;
+    if (f) return f;
+    s2_cal t; t.cx = c->cx; t.cy = c->cy;
+    t.maxx = r->up[0] * S2_REACH_TRIM; t.minx = r->down[0] * S2_REACH_TRIM; t.maxy = r->up[1] * S2_REACH_TRIM; t.miny = r->down[1] * S2_REACH_TRIM;
+    t.valid = t.maxx > 100 && t.maxy > 100 && t.minx > 100 && t.miny > 100;
+    if (!t.valid) return S2_REACH_SHORT_RIGHT | S2_REACH_SHORT_LEFT | S2_REACH_SHORT_UP | S2_REACH_SHORT_DOWN;
+    *out = t;
+    return 0;
+}
+// An offset from the centre as a share of the travel that way (d >= 0: up, else down; a travel under 1 count counts as 1)
+static inline float s2_share(float d, float up, float down) { return d / fmaxf(d >= 0 ? up : down, 1.f); }
+// The edges step's turns around the stick's edge: the angle swept while the stick is at least S2_TURN_SHARE of its travel out (x, y: s2_share each way, y up), signed so a
+// still stick's jitter and a turn back cancel out; a stick pulled in starts the angle over. Returns the most turns reached so far, at most S2_TURNS_WANTED
+#define S2_TURN_SHARE 0.6f
+#define S2_TURNS_WANTED 2.f
+typedef struct { int have; float last, winding, turns; } s2_turns;
+static inline float s2_turns_update(s2_turns *t, float x, float y) {
+    const float pi = 3.14159265f;
+    if (hypotf(x, y) < S2_TURN_SHARE) { t->have = 0; return t->turns; }
+    float a = atan2f(y, x);
+    if (t->have) {
+        float d = a - t->last;
+        if (d > pi) d -= 2 * pi; else if (d < -pi) d += 2 * pi;
+        t->winding += d;
+        float n = fminf(S2_TURNS_WANTED, fabsf(t->winding) / (2 * pi));
+        if (n > t->turns) t->turns = n;
+    }
+    t->last = a; t->have = 1;
+    return t->turns;
+}
+// Payloads of the write (returns its length, 0 when the data does not fit a command) and of the erase (1, or 0 when refused). Neither is built for an address below
+// S2_WRITE_FLOOR: the controller refuses those, and the host never sends one
+#define S2_WRITE_FLOOR 0x001F5000u
+static inline size_t s2_memory_write_payload(uint8_t *out, size_t cap, uint32_t addr, const uint8_t *data, size_t n) {
+    if (!out || !data || n == 0 || n > 0x80 || cap < 8 + n || 8 + n > 0xFF || addr < S2_WRITE_FLOOR) return 0;
+    s2_memory_payload(out, (uint8_t)n, addr); memcpy(out + 8, data, n);
+    return 8 + n;
+}
+static inline int s2_memory_erase_payload(uint8_t out[8], uint32_t addr) {
+    if (!out || addr < S2_WRITE_FLOOR) return 0;
+    out[0] = out[1] = out[2] = out[3] = 0;
+    out[4] = (uint8_t)addr; out[5] = (uint8_t)(addr >> 8); out[6] = (uint8_t)(addr >> 16); out[7] = (uint8_t)(addr >> 24);
+    return 1;
+}
+
 // Player LED patterns of the console for players 1..8
 static const uint8_t s2_led_pattern[8] = {0x01, 0x03, 0x07, 0x0F, 0x09, 0x05, 0x0D, 0x06};
 
@@ -170,12 +331,21 @@ static inline uint64_t s2_buttons(uint32_t b, int joycon, int alone) {
 }
 
 #define S2_DEADZONE 40.f   // raw counts around the centre
+#define S2_TRAVEL_NOMINAL 1200.f   // a stick's usual travel from its centre, in raw counts: what the dead zone setting is a share of
+
+// The dead zone in raw counts from the setting DM_SW2_DEADZONE (a share of the travel, 0..0.25); S2_DEADZONE when it is unset, not a number, or out of range
+static inline float s2_dead_counts(const char *setting) {
+    if (!setting || !*setting) return S2_DEADZONE;
+    char *end; double v = strtod(setting, &end);
+    if (end == setting || *end || !(v >= 0 && v <= 0.25)) return S2_DEADZONE;
+    return roundf((float)v * S2_TRAVEL_NOMINAL);   // whole counts: the settings row's default 0.0333 is 40, as S2_DEADZONE
+}
 
 // The pad's buttons and sticks (-32767..32767, y up): a Pro Controller 2's as they are; two Joy-Cons together are a Pro Controller (the left's stick is the left stick, the
 // right's the right stick); one Joy-Con alone is used sideways. Returns 0 when the pad holds no controller.
-static inline int s2_pad_input(const s2_pad_state *p, uint64_t *buttons, int32_t st[4]) {
+static inline int s2_pad_input(const s2_pad_state *p, float dead, uint64_t *buttons, int32_t st[4]) {
     float x, y; uint64_t m = 0; st[0] = st[1] = st[2] = st[3] = 0;
-#define STICK(i, dev, c, rx_, ry_) do { s2_cal_apply(&(dev)->cal[c], rx_, ry_, S2_DEADZONE, &x, &y); st[i] = (int32_t)lrintf(x * DM_STICK_MAX); st[(i) + 1] = (int32_t)lrintf(y * DM_STICK_MAX); } while (0)
+#define STICK(i, dev, c, rx_, ry_) do { s2_cal_apply(&(dev)->cal[c], rx_, ry_, dead, &x, &y); st[i] = (int32_t)lrintf(x * DM_STICK_MAX); st[(i) + 1] = (int32_t)lrintf(y * DM_STICK_MAX); } while (0)
     if (p->pro.have) {
         m = s2_buttons(p->pro.r.buttons, 0, 0);
         STICK(0, &p->pro, 0, p->pro.r.lx, p->pro.r.ly); STICK(2, &p->pro, 1, p->pro.r.rx, p->pro.r.ry);
@@ -313,8 +483,8 @@ static inline uint64_t s2_joy_buttons(uint32_t b, int right) {
     }
     return m;
 }
-static inline void s2_joy_stick(const s2_dev *d, int right, int32_t out[2]) {
-    float x, y; s2_cal_apply(&d->cal[0], right ? d->r.rx : d->r.lx, right ? d->r.ry : d->r.ly, S2_DEADZONE, &x, &y);
+static inline void s2_joy_stick(const s2_dev *d, int right, float dead, int32_t out[2]) {
+    float x, y; s2_cal_apply(&d->cal[0], right ? d->r.rx : d->r.lx, right ? d->r.ry : d->r.ly, dead, &x, &y);
     out[0] = (int32_t)lrintf(x * DM_STICK_MAX); out[1] = (int32_t)lrintf(y * DM_STICK_MAX);
 }
 

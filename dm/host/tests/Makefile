@@ -74,6 +74,7 @@ run: $(B)/t_mii $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_siz
 	$(B)/t_pad_hid_mac
 	$(B)/t_pad_pro
 	$(B)/t_switch2
+	$(B)/t_switch2_ops
 	$(B)/t_haptics
 	$(B)/t_haptics_apple
 	TMPDIR="$(abspath $(B))" $(B)/t_cheats $(QUIET)
@@ -415,6 +416,9 @@ $(B)/t_pad_pro: t_pad_pro.c ../pad_pro.h ../dm_input.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_pad_pro.c
 $(B)/t_switch2: t_switch2.c ../switch2_proto.h ../dm_input.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_switch2.c
+run: $(B)/t_switch2_ops
+$(B)/t_switch2_ops: t_switch2_ops.m ../switch2_ops_apple.m ../switch2_ops_apple.h ../switch2_proto.h ../dm_input.h | $(B)
+	$(CLANG) -O1 -g -fobjc-arc -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_switch2_ops.m ../switch2_ops_apple.m -framework Foundation
 
 # Line coverage (../../sanitizers/coverage.mk): make coverage builds every test of run into $(B)/cov with COV_FLAGS, runs them and writes $(B)/cov/coverage.lcov.
 # It measures, it does not test: make -i runs every test even after one fails (the plain run reports that), so the coverage of the others is kept.

@@ -17,6 +17,7 @@
 // DM_SW2_HOST=aa:bb:cc:dd:ee:ff names this Mac's Bluetooth address when it cannot be read; DM_SW2_VERBOSE=1 logs the first report of each second; DM_SW2_MAP=a,b,c,d,e,f and
 // DM_SW2_GYRO_DPS=<degrees per second per count> adjust the motion axes and scale (switch2_proto.h s2_motion). On a Pro Controller 2, pairing, buttons, sticks and Home are checked on hardware; its motion map and scale are not measured.
 #pragma once
+#import "switch2_ops_apple.h"   // S2CalOutcome, NSString
 #include "switch2_proto.h"
 #include "hle_haptics.h"
 
@@ -32,6 +33,7 @@ typedef struct {
     int (*blocked)(void);        // the game takes no controller input now (focus lost, the Home quit prompt open); NULL: never
 } dm_switch2_front;
 
+float dm_switch2_dead_zone(void);   // the sticks' dead zone in raw counts, DM_SW2_DEADZONE as dm_switch2_start read it (40 when unset)
 int dm_switch2_start(const dm_switch2_front *front);   // 1: started; 0: off (DM_SW2 is not 1, or the Info.plist has no Bluetooth usage description)
 void dm_switch2_active(int on);                         // focus lost (0): the sensors stop driving the game's; back (1): they continue
 s2_pad *dm_switch2_pads(void);                          // the pads, a list through next
@@ -39,3 +41,26 @@ s2_pad *dm_switch2_pads(void);                          // the pads, a list thro
 // pad's controllers as s2_rumble_pick says: every value the game sets plays once, in its own 5 ms sample (switch2_proto.h, Rumble timing), three to a packet every 15 ms while they
 // buzz, then a few packets of silence (a write without response can be lost).
 void dm_switch2_rumble(const dm_haptic_state *state);
+
+// The stick tester's side (the Controller panel): what the controllers' sessions hold and the one write they allow. All calls come on the main queue.
+typedef struct {
+    uint32_t id;              // this connection's id: a reconnect gets a new one
+    uint16_t pid;             // S2_PID_PRO, S2_PID_JOYCON_L, S2_PID_JOYCON_R
+    const char *kind;         // "Pro Controller 2", "Joy-Con 2 (L)", "Joy-Con 2 (R)"
+    char serial[15];
+    int player;               // 0-based, -1 without one
+    s2_cal cal[2];            // what the game uses now: the user calibration, else the factory one
+    s2_cal factory[2];        // the factory blocks; a copy of cal[i] when the factory block did not read
+    uint16_t stick[2][2];     // the latest raw 12-bit x, y of each stick (index 1 only on a Pro Controller 2)
+    uint32_t clock_ms;        // the controller's clock at that report (the s2_clock milliseconds the session already keeps)
+    int saving;               // a save on it is running
+} dm_sw2_info;
+int dm_switch2_on(void);                                   // dm_switch2_start returned 1
+int dm_switch2_controllers(dm_sw2_info *out, int max);     // connected controllers whose handshake finished, oldest connection first, at most max; returns the count
+// The tester's hooks (one observer; NULL blocks remove it): changed = a controller came, went, finished its handshake or a save began or ended; report = a new input report of controller id
+void dm_switch2_observe(void (^changed)(void), void (^report)(uint32_t id));
+// cal as controller id's user calibration of slot (s2op_save_user_cal with s2op_backup_dir()). Refused at once (S2CalNoBackup, nil path, a log line) for slot != 0, an unknown id, a save already running on it,
+// or an invalid cal. After any other outcome the session re-reads that slot's calibration (user, else factory) into the pad the game reads before done runs. done on the main queue, after this returns
+void dm_switch2_save(uint32_t id, int slot, s2_cal cal, void (^done)(S2CalOutcome outcome, NSString *backupPath));
+void dm_switch2_set_dead_zone(float counts);              // the dead zone the game applies from now on (dm_switch2_dead_zone returns it)
+int dm_switch2_saving(void);                               // some save is running (the quit wait)

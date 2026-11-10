@@ -235,6 +235,10 @@ Turn off **Show this window at launch** to start the game at once with your choi
 
 **Off** by default. On, the game takes Joy-Con 2 and Pro Controller 2 over Bluetooth: hold the small Sync button on one during the game, until its player lights sweep, to pair it with this Mac; after that a press of any of its buttons connects it ([Switch 2 controllers](playing.md#switch-2-controllers-mac)). macOS asks for Bluetooth access the first time, and again after the app is packed again. In an `env.txt`: `DM_SW2=1`.
 
+**Stick dead zone** (shown while Switch 2 controllers are on): how far a Switch 2 controller's stick must move from its centre before the game sees it, as a share of its full travel, `0` to `0.25`; the default is `0.0333`. Raise it if a character creeps with the stick let go. The game window's Controller panel has the same slider, which changes it at once and saves the choice for the next start unless an `env.txt` or the launch environment sets it (then it applies for this run only). In an `env.txt`: `DM_SW2_DEADZONE=0.05`.
+
+**Controller menu and panel** (in the game window, with Switch 2 controllers on; not yet run on hardware): the **Controller** menu lists the connected Switch 2 controllers, and **Show Controller Window** (⌘⇧P, or `DM_CONTROLLER_WINDOW=1` in an `env.txt` to open it at launch) opens a panel that shows a controller's stick live and marks where it comes to rest each time it is let go, red where the game would see it move with the current dead zone, which it can also change. It can also calibrate the stick's centre and reach and save them in the controller, with a backup first; the game uses the new calibration at once (a Pro Controller 2's right stick is test only for now). While the panel is open the game gets no input from Switch 2 controllers: close it to play. `DM_SW2_CALIBRATE=1` left on re-centres the stick at every start and so overrides a calibration saved from the panel: turn it off once the panel is used ([Switch 2 controllers over Bluetooth LE](reference/services.md#switch-2-controllers-over-bluetooth-le)).
+
 ### Cloud saves folder
 
 **Choose a folder…** picks the iCloud Drive folder the game's save is synced through, the one the iPhone app chose in its launcher's **Cloud saves**, or the game's own folder inside it, named after its title ID ([Cloud saves](#cloud-saves)); **Turn off** stops it. Off by default. macOS may ask once whether the app may open iCloud Drive; if the game log says `this app may not open iCloud Drive`, allow it in System Settings › Privacy & Security › Files and Folders. In an `env.txt`: `DM_SAVE_SYNC=<folder>`, or `DM_SAVE_SYNC=icloud` for iCloud Drive › nxnative Saves; the window then shows it fixed.
@@ -279,6 +283,7 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 | Rumble strength | `DM_RUMBLE_GAIN` | `0` to `3` |
 | Rumble cutoff | `DM_RUMBLE_MIN` | `0` to `0.9` |
 | Press a button to join | `DM_PAD_PRESS_TO_JOIN` | `1`, `0` |
+| Stick dead zone (Mac, Switch 2 controllers) | `DM_SW2_DEADZONE` | `0` to `0.25` |
 | Upscaling | `DM_PRESENT_UPSCALE` | `off`, `metalfx` |
 | Game's upscaler | `DM_UPSCALER` | `game`, `metalfx` |
 | Frame buffering | `DM_PRESENT_SNAP` | `1`, `0` |

@@ -13594,6 +13594,13 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
       int wi = (S.poly.front == NVN_FRONT_FACE_CCW) != g_queue_origin_ll ? MTLWindingCounterClockwise : MTLWindingClockwise;   // NVN's raster flip is captured when the queue is initialized, rather than when the device origin changes.
       int fi = S.poly.mode == NVN_POLYGON_MODE_LINE ? MTLTriangleFillModeLines : MTLTriangleFillModeFill, cl = !S.depth_clamp;   // depth clip off = SetDepthClamp
       float bi[3] = {0, 0, 0}; if (S.poly.offset_en & 4) { bi[0] = S.po.units; bi[1] = S.po.factor; bi[2] = S.po.clamp; }
+      // Depth on the far plane (docs/reference/rendering.md): a vertex shader with z = w puts every vertex at the far value, and NVIDIA's GPU fills such a triangle with exactly
+      // that value, but Apple's rasterizer gives many of its pixels a depth up to 2^-23 below it (an Apple M5: 43% of the pixels of z = w triangles). Two layers drawn there
+      // then fight: Mario Kart 8 Deluxe's Sky-High Sundae draws a red panorama and the blue sky over it there, and the blue lost the depth test by one step in blocks.
+      // This is the platform's rasterizer and cannot be fixed where it happens, so such a draw gets a constant bias of 16 units towards the far value and depth clamping, which
+      // lands every pixel on it exactly (2 units already did). A draw with the game's own polygon offset keeps it; a geometry or tessellation stage writes its own position
+      if (pr->sh[0] && pr->sh[0]->rf.pos_far && !pr->sh[2] && !pr->sh[3] && !pr->sh[4] && !(S.poly.offset_en & 4)) {
+          float zn = S.has_vp ? S.dr[0] : 0, zf = S.has_vp ? S.dr[1] : 1; bi[0] = zf >= zn ? 16 : -16; cl = 0; }
       if (!(g_ed.ok & ED_CULL) || g_ed.cull != cu) { enc_r_cull(en, (MTLCullMode)cu); g_ed.cull = cu; g_ed.ok |= ED_CULL; }
       if (!(g_ed.ok & ED_WIND) || g_ed.wind != wi) { enc_r_winding(en, (MTLWinding)wi); g_ed.wind = wi; g_ed.ok |= ED_WIND; }
       if (!(g_ed.ok & ED_FILL) || g_ed.fill != fi) { enc_r_fill(en, (MTLTriangleFillMode)fi); g_ed.fill = fi; g_ed.ok |= ED_FILL; }

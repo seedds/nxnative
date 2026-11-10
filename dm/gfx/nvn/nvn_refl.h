@@ -64,6 +64,7 @@ typedef struct {
     // fragment - may discard, writes sample_mask, bitmap of the color numbers written
     int8_t pos_attr; uint8_t pos_w1, may_discard, writes_smask, color_mask, color_known;   // color_known: the color list was recorded at packaging (color_mask can be trusted)
     uint8_t reads_prim_id;   // fragment: reads the primitive ID, so its pipelines are built whole (nvn_mtl.m pso_build_ex)
+    uint8_t pos_far;         // vertex: gl_Position z = w (dmsh_build.py far_plane): drawn with a depth bias towards the far value and depth clamping (nvn_mtl.m draw)
     // fragment: the SPH's output map (word 18, dmsh_build.py ps_omap): 4 bits per colour output, R G B A from the low bit; the GPU writes only these components of the target.
     // omap_known: recorded at packaging (libraries of an older chain have none and get no component mask)
     uint32_t omap; uint8_t omap_known;

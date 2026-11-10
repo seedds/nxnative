@@ -1,6 +1,6 @@
 # FAST Fusion (`040041E0212AE000`)
 
-Plays on the Mac at its own 60 fps: boot, the menus and races, in two sessions of about 9 minutes each (M4 Pro, macOS 27.2, docked), each ended by quitting. It needs [PR #1479](https://github.com/seedds/nxnative/pull/1479), which reads its shaders and fixes its rendering: main's shader split does not read its `SHN!D` files.
+Plays on the Mac at its own 60 fps with [PR #1479](https://github.com/seedds/nxnative/pull/1479): checked on main `6d9edb079` with #1479 (`494a9e568`) and this profile, from boot through the menus into a race (M4 Pro, macOS 27.2, docked); two earlier sessions of about 9 minutes each, on an older tree with the same fixes, ran menus and races and ended by quitting. It needs [PR #1479](https://github.com/seedds/nxnative/pull/1479), which reads its shaders and fixes its rendering: main's shader split does not read its `SHN!D` files.
 
 ## What it needs
 
@@ -18,12 +18,12 @@ Plays on the Mac at its own 60 fps: boot, the menus and races, in two sessions o
 
 ## Shaders
 
-- 2,948 shaders in Shin'en's `SHN!D` files, all of them translated and built (with PR #1479's reader and fixes).
-- `pso_manifest.tsv` is the host's per-device list from the sessions played (2,267 rows).
+- 2,976 shaders in Shin'en's `SHN!D` files, all of them translated and built on main with PR #1479 (its reader finds 28 more than an earlier reader did; the tables here are its split's).
+- `pso_manifest.tsv` is the host's per-device list from the earlier sessions (2,267 rows); all its shader keys are in this shader map. With it, the app prepares its pipelines in about 1.6 s at its first start, and no pipeline was built at a draw in the race.
 
 ## Frame rate
 
-- 60 fps: frame time p50 16.65 ms in 106 of the 107 windows of 300 frames of the second session (M4 Pro, docked); 147 of its 32,100 frames were dropped on screen.
+- 60 fps: on main with PR #1479, frame time p50 under 17 ms in all 41 windows of 300 frames (p95 16.9 ms in the race); the long frames are at scene changes (up to about 1 s, loading the next scene's textures). In the earlier 9-minute session, p50 16.65 ms in 106 of 107 windows, 147 of 32,100 frames dropped on screen.
 
 ## Found on this game
 
@@ -31,6 +31,6 @@ Plays on the Mac at its own 60 fps: boot, the menus and races, in two sessions o
 
 ## Open
 
-- The sessions here ran on a tree of 2026-11-03 (main `2c35f7b3e` with this game's fixes, those of PR #1479 but its DLSS scaler change), not on main with PR #1479 itself. Neither session reached the crash that change fixes.
-- Logged once in the second session, effect not seen: `[RED] NVN unimplemented function called: nvnCommandBufferSetProvokingVertexMode`, `[RED] stage 0 cb1 has no uniform buffer bound`, and a cube texture view of a one-face texture read as a 2D array.
+- On main with PR #1479 only a race's start was played (one track, Guriin Paaku); the longer sessions ran on a tree of 2026-11-03 with the same fixes but #1479's DLSS scaler change, and did not reach the crash it fixes.
+- Logged once, effect not seen: `[RED] NVN unimplemented function called: nvnCommandBufferSetProvokingVertexMode`, `nvnDlssParametersSetOverlayFullScreen` and `nvnDlssParametersSetOverlayDebugLayer`, `[RED] stage 0 cb1 has no uniform buffer bound`, and a cube texture view of a one-face texture read as a 2D array.
 - Online play, iOS: not tested.

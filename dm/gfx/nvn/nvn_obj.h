@@ -258,6 +258,9 @@ static inline const p_copy_strides *copy_strides(const void *a, uint32_t size) {
 }
 // NVN2's DLSS evaluation: the parameters at the time of the call, each texture snapped after the record (hle_nvn.c "NVN2's DLSS", nvn_mtl.m dlss_eval)
 enum { DLSS_COLOR, DLSS_DEPTH, DLSS_MOTION, DLSS_OUTPUT, DLSS_BIAS, DLSS_EXPOSURE, DLSS_TEXTURES };
+// NVN2's DLSS network as the host keeps it in the game's memory (hle_nvn.c): what it was built with, and the serial its evaluations carry (p_dlss.net), new at each Initialize
+typedef struct { int32_t w, h, method, preset; uint32_t flags; } dlss_builder_t;
+typedef struct { dlss_builder_t b; uint64_t serial; } dlss_net_t;
 typedef struct { const tex_t *tex[DLSS_TEXTURES]; uint64_t net; int32_t iw, ih, ow, oh, base[DLSS_TEXTURES][2]; float mv[2], jitter[2], pre_exposure; uint32_t flags, reset; } p_dlss;
 typedef struct { uint64_t addr, size; uint32_t value, _pad; } p_clear_buf;   // buffer filled with a 32-bit value (ClearBuffer)
 typedef struct { float rgba[4]; } p_blend_color;

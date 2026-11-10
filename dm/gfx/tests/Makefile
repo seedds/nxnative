@@ -411,6 +411,9 @@ check_t_linear_readback: t_linear_readback
 	MTL_DEBUG_LAYER=1 ./t_linear_readback
 t_pfv: t_pfv.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pfv.m $(MTL_T_SRC) $(FW)
+t_dlss_scaler: t_dlss_scaler.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_dlss_scaler.m $(MTL_T_SRC) $(FW)
+check_t_dlss_scaler: RUN_ENV = MTL_DEBUG_LAYER=1
 t_int_float_view: t_int_float_view.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_int_float_view.m $(MTL_T_SRC) $(FW)
 check_t_int_float_view: RUN_ENV = MTL_DEBUG_LAYER=1
@@ -491,9 +494,10 @@ check_t_upscaler_mfx: t_upscaler_mfx
 t_dlss_mfx: t_dlss_mfx.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_dlss_mfx.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_dlss_mfx
+# With zombie objects: a scaler released under its encoders is then a message to a deallocated instance at the commit, every time (without them it depends on what took its memory)
 check_t_dlss_mfx: t_dlss_mfx
-	DM_NVN_ENC_THREAD=0 ./t_dlss_mfx
-	DM_NVN_ENC_THREAD=1 ./t_dlss_mfx
+	NSZombieEnabled=YES DM_NVN_ENC_THREAD=0 ./t_dlss_mfx
+	NSZombieEnabled=YES DM_NVN_ENC_THREAD=1 ./t_dlss_mfx
 t_image_usage: t_image_usage.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_image_usage.m $(MTL_T_SRC) $(FW)
 check_t_image_usage: RUN_ENV = MTL_DEBUG_LAYER=1

@@ -317,6 +317,69 @@ def shared_store_msl(msl):
         if u < 0: raise ValueError('dmsh_shared_store: no using namespace metal')
         u += len('using namespace metal;\n'); src = src[:u] + SHARED_ALIAS + src[u:]
     return src
+# HFMA2 on Metal. The translator writes HFMA2 as `fma(a, b, c)` on the two halves unpacked to float and packs the result with half2(float2(..)): one rounding to float, then another to half. The Orin rounds the exact
+# a * b + c once, so when the float result lands on the middle of two halves and the exact one does not (the product is exact in float, the small addend is lost in the first rounding), Metal is one half ULP off.
+# Measured on a Jetson Orin (sm_87, PTX fma.rn.f16x2, 1,048,576 random triples with 15 percent denormals and 6 percent Inf / NaN): 70 of 2,097,152 lanes
+# differ (99.9967 percent identical, e.g. -3136 * -8.125 + 0.000124693: Orin 25488, Metal 25472). dmsh_hfma returns the float rounded to odd (the neighbour of the exact value that has an odd last bit, which is the
+# float itself when the sum was exact or already odd), and the conversion to half then rounds the exact value once: round to odd costs no double rounding when the float has two more bits than the half. The error of
+# the sum comes from a TwoSum of the exact product (11 bit halves: 22 bits) and the addend, which fast math folds away (a - (b - a) is 0 for it) unless the function is compiled in safe math mode and without contraction.
+# Only an fma whose three operands are halves (unpacked, negated, or a literal a half holds) and whose every use ends in a pack to half (through the saturate and the ReLU clamp) is rewritten: an FFMA that is
+# then converted with F2FP rounds twice on the hardware as well, and HFMA2.F32 keeps its float
+HFMA_HELPERS = """// HFMA2 rounded once to half (see hfma_msl)
+static inline float dmsh_hfma(float a, float b, float c)
+{
+  {   // the pragmas open a compound statement of their own: a rewrite that puts a line at the start of every function body (loop_guard) leaves them valid
+#pragma METAL fp math_mode(safe)
+#pragma METAL fp contract(off)
+    float p = a * b;
+    float s = fma(a, b, c);
+    float t = s - p;
+    float err = (p - (s - t)) + (c - t);
+    uint sb = as_type<uint>(s);
+    uint step = ((as_type<uint>(err) ^ sb) >> 31) != 0u ? 0xFFFFFFFFu : 1u;
+    bool odd = err != 0.0 && (sb & 1u) == 0u && (sb & 0x7F800000u) != 0x7F800000u;
+    return select(s, as_type<float>(sb + step), odd);
+  }
+}
+"""
+HFMA_DEF = re.compile(r'^([ \t]*float (_\d+) = )fma\(([^,()]+), ([^,()]+), ([^,()]+)\);$', re.M)
+HFMA_WRAP = re.compile(r'^[ \t]*float (_\d+) = (?:precise::clamp|clamp|fast::clamp|max|fmax|precise::max|fast::max)\((_\d+), [-\d.]+f?(?:, [-\d.]+f?)?\);$', re.M)
+def hfma_msl(msl):
+    defs = {}
+    for m in re.finditer(r'^[ \t]*float (_\d+) = ([^;]*);$', msl, re.M): defs.setdefault(m.group(1), []).append(m.group(2))
+    def is_half(x, depth=0):   # an operand that holds a half: an unpacked lane, a literal a half holds, or the negation or absolute value of one
+        x = x.strip()
+        if depth > 6: return False
+        if re.fullmatch(r'-?\d+\.\d*(?:e[-+]?\d+)?f?|-?\d+\.?', x) is not None:
+            try: v = float(x.rstrip('f')); return struct.unpack('<e', struct.pack('<e', v))[0] == v
+            except (OverflowError, struct.error): return False
+        if x.startswith('-'): return is_half(x[1:], depth + 1)
+        if x.startswith('abs(') and x.endswith(')'): return is_half(x[4:-1], depth + 1)
+        d = defs.get(x)
+        if not d or len(d) != 1: return False
+        return re.fullmatch(r'float2\(as_type<half2>\([^;]*\)\)\.[xy]', d[0]) is not None or is_half(d[0], depth + 1)
+    def packs(v, depth=0):   # every use of v is an argument of a pack to half, or of a clamp / max whose result is
+        uses = [l for l in msl.split('\n') if re.search(r'\b%s\b' % v, l) and not re.match(r'\s*float %s = ' % v, l)]
+        if not uses or depth > 4: return False
+        for l in uses:
+            if re.search(r'half2\(float2\((?:%s, [^;]*?|[^;]*?, %s)\)\)' % (v, v), l): continue
+            w = HFMA_WRAP.match(l)
+            if w and re.search(r'\(%s,' % v, l) and packs(w.group(1), depth + 1): continue
+            if re.fullmatch(r'\s*bool _\d+ = isnan\(%s\);' % v, l): continue   # .RELU keeping a NaN: isnan(v) ? v : max(v, 0)
+            sel = re.fullmatch(r'\s*float (_\d+) = _\d+ \? (_\d+) : (_\d+);', l)
+            if sel and v in sel.group(2, 3) and packs(sel.group(1), depth + 1): continue
+            return False
+        return True
+    out, last = [], 0
+    for m in HFMA_DEF.finditer(msl):
+        if len(defs.get(m.group(2), [])) == 1 and all(is_half(m.group(i)) for i in (3, 4, 5)) and packs(m.group(2)):
+            out.append(msl[last:m.start()] + m.group(1) + 'dmsh_hfma(%s, %s, %s);' % m.group(3, 4, 5)); last = m.end()
+    if not out: return msl
+    out = ''.join(out) + msl[last:]
+    u = out.find('using namespace metal;\n')
+    if u < 0: raise ValueError('hfma: no using namespace metal')
+    u += len('using namespace metal;\n')
+    return out[:u] + HFMA_HELPERS + out[u:]
 # Compute shared memory past Metal's limit: Apple's GPUs give a kernel 32 KB of threadgroup memory (maxThreadgroupMemoryLength), and Metal refuses a pipeline that declares more, while Ampere
 # gives up to 100 KB. Mario Kart World's DrivePassShaderDefault has 168 compute shaders of 48 KB (spvUnsafeArray<uint, 12288>), seven of them run on the way to the first race; refused, their
 # dispatches were skipped. Such a kernel takes its threadgroup arrays from a device buffer the host binds (abi.TG_SLOT): one slice of the arrays' total per workgroup, at the workgroup's index in
@@ -1756,6 +1819,8 @@ def finish(key, w, j, c1):
     except ValueError as e: return 'gather offsets rewrite failed', str(e)[:160], None
     try: src = hmma_msl(src)   # Ampere HMMA through simdgroup_matrix (see hmma_msl)
     except ValueError as e: return 'HMMA rewrite failed', str(e)[:160], None
+    try: src = hfma_msl(src)   # HFMA2 rounded once to half (see hfma_msl)
+    except ValueError as e: return 'HFMA2 rewrite failed', str(e)[:160], None
     try: src = shared_store_msl(src)   # shared memory byte and half-word stores as Metal byte stores (see shared_store_msl)
     except ValueError as e: return 'shared store rewrite failed', str(e)[:160], None
     try: src = pool_arrays(src)   # handles traced to no slot read the pools the replay keeps (see pool_arrays)

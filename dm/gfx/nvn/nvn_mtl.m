@@ -137,6 +137,17 @@ static int g_res_dirty;
 static id<MTLSharedEvent> g_ev;
 static _Atomic uint64_t g_fence;                // Highest committed fence value (incremented exclusively by the submit thread)
 static _Atomic int g_sub_on;                    // a submission is open: from mtl_sub_begin until its commit has taken its fence and encoded everything (mtl_pool_del reads it)
+// Shaders of recent work by the submission they went into, printed when a command buffer fails (a page fault names no shader): a ring of (fence the work goes into, kind, key)
+static struct { _Atomic uint64_t f; const char *key; char kind; } g_wk[8192]; static _Atomic uint32_t g_wk_i;
+static inline void wk_note(char kind, const char *key) { if (!key) return; uint32_t i = atomic_fetch_add_explicit(&g_wk_i, 1, memory_order_relaxed) & 8191; g_wk[i].key = key; g_wk[i].kind = kind; atomic_store_explicit(&g_wk[i].f, atomic_load_explicit(&g_fence, memory_order_relaxed) + 1, memory_order_release); }
+static void wk_dump(uint64_t fence) {   // the distinct shaders recorded for this fence and the one before it, newest first
+    char line[4096]; int o = 0, n = 0; const char *seen[256]; int ns = 0; uint32_t e = atomic_load(&g_wk_i);
+    for (uint32_t k = 0; k < 8192 && ns < 256; k++) { uint32_t i = (e - 1 - k) & 8191; uint64_t f = atomic_load_explicit(&g_wk[i].f, memory_order_acquire); const char *key = g_wk[i].key;
+        if (!key || (f != fence && f + 1 != fence)) continue; n++;
+        int dup = 0; for (int j = 0; j < ns; j++) if (seen[j] == key) { dup = 1; break; } if (dup) continue; seen[ns++] = key;
+        if (o < (int)sizeof line - 40) o += snprintf(line + o, sizeof line - o, " %c:%.16s%s", g_wk[i].kind, key, f == fence ? "" : "(prev)"); }
+    MLOG("[RED] shaders of the failed submission fence=%llu (%d records, %d distinct, newest first; v/f draw, c dispatch):%s", (unsigned long long)fence, n, ns, line);
+}
 static int g_cut_copy;                          // a buffer → texture copy was encoded since the last commit: the next pass boundary commits the segment (sub_cut)
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_cv = PTHREAD_COND_INITIALIZER;
@@ -2307,6 +2318,34 @@ static void post_complete(uint64_t fence, uint64_t c0, uint64_t c1) {
 static _Atomic int g_seg_inflight;   // main command buffers committed and not reported back yet (sub_cut)
 static void rt_preserve_bound(void);
 static void queue_program_preserve(void);
+// GPU watchdog: a committed command buffer that has not completed within DM_NVN_GPU_WATCHDOG seconds (default 4; 0 turns it off) ends the process at once, before
+// more work is queued behind it. Committed Metal work cannot be cancelled and exiting does not recall it (Apple, developer forums 839155), so this only keeps a hang
+// from growing: PRAGMATA's first real frame left a command buffer that never completed nor reported an error, and twice the Mac's WindowServer stopped minutes later
+static _Atomic uint64_t g_commit_ns[256];
+static void *gpu_watchdog_main(void *arg) {
+    uint64_t limit = (uint64_t)(uintptr_t)arg;
+    for (;;) {
+        usleep(250000);
+        uint64_t done = atomic_load(&g_done), f = atomic_load(&g_fence);
+        if (done >= f) continue;
+        uint64_t t = atomic_load(&g_commit_ns[(done + 1) & 255]), now = now_ns();
+        if (t && now > t + limit) {
+            MLOG("[RED] GPU watchdog: fence %llu committed %.1f s ago has not completed (committed up to %llu, last commit error %d); exiting so no more work is queued behind it (DM_NVN_GPU_WATCHDOG)",
+                 (unsigned long long)(done + 1), (now - t) / 1e9, (unsigned long long)f, (int)atomic_load(&g_last_commit_error));
+            wk_dump(done + 1);   // the shaders of the stuck submission (a hang reports no error of its own)
+            fflush(stderr); fflush(stdout); _exit(70);
+        }
+    }
+    return NULL;
+}
+static void gpu_watchdog_note(uint64_t fence) {
+    static int started; static uint64_t limit;
+    if (!started) {
+        started = 1; const char *e = getenv("DM_NVN_GPU_WATCHDOG"); double sec = e ? atof(e) : 4.0;
+        if (sec > 0) { limit = (uint64_t)(sec * 1e9); pthread_t th; pthread_create(&th, NULL, gpu_watchdog_main, (void *)(uintptr_t)limit); pthread_detach(th); MLOG("GPU watchdog: a command buffer not completed within %.1f s ends the process (DM_NVN_GPU_WATCHDOG)", sec); }
+    }
+    if (limit) atomic_store(&g_commit_ns[fence & 255], now_ns());
+}
 uint64_t mtl_sub_commit(void) {
     lc_land();   // clears still waiting (the command list ends with them)
     defer_fallback();   // Deferred merged pass: at the end of the submission there are still P draws not replayed (the normal path never gets here)
@@ -2319,7 +2358,7 @@ uint64_t mtl_sub_commit(void) {
     treg_finish_submission();   // Late descriptor views retire behind this submission's fence.
     rt_preserve_bound();   // The game may reuse completed command memory; queue bindings must not point into its texture snapshots.
     queue_program_preserve(); // Submitted metadata may retire while these programs remain bound.
-    uint64_t fence = ++g_fence;
+    uint64_t fence = g_fence + 1; gpu_watchdog_note(fence); g_fence = fence;   // the commit time first, so the watchdog never sees the fence without it
     if (g_nvs) { post((post_op){3, NULL, VIS_FOLD, 0, 0, 0, vis_snapshot()}); vis_clear(); }   // this submission's slots after its last report: read at its completion (Occlusion queries)
     gw_commit(fence); rc_commit(fence);
     if (g_vis_ring_i >= 0) g_vis_ring[g_vis_ring_i].fence = fence;
@@ -2370,6 +2409,8 @@ uint64_t mtl_sub_commit(void) {
 
 uint64_t mtl_completed_fence(void) { return atomic_load_explicit(&g_done,memory_order_acquire); }
 uint64_t mtl_last_fence(void) { return g_fence; }
+// A SyncWait that timed out: where the fence stands against what was committed and what the GPU completed (fence > committed: never submitted; else the GPU did not finish)
+void mtl_fence_report(uint64_t fence) { MLOG("[RED] SyncWait timed out on fence %llu: committed %llu, completed %llu, last commit error %d", (unsigned long long)fence, (unsigned long long)g_fence, (unsigned long long)g_done, (int)atomic_load(&g_last_commit_error)); }
 int mtl_last_commit_error(void) { return atomic_load(&g_last_commit_error); }
 
 static int fast_wake(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_FAST_WAKE"); v = !(e && !strcmp(e, "0")); MLOG("game SyncWaits wake on the GPU's signal of the fence%s (DM_NVN_FAST_WAKE)", v ? "" : ": off, on the feedback handler"); } return v; }
@@ -6095,6 +6136,9 @@ static __unsafe_unretained NvProg *prog_get(const prog_t *cp) {   // Called only
     if (!p) return nil;   // no program bound: nil, as the callers that test S.prog first get (draw_'s passdump line tests it, the lines after it did not)
     static const prog_t *lp; static uint64_t lser, lgen; static NvProg *lpr;   // Last result: same object, same serial and unchanged serial table means it is used directly
     uint64_t gen = g_ser_gen;
+    // Every caller passes a program (mtl_prog_snapshot's two callers skip a null one, nvn_queue.inc nq_snapshot_object and queue_program_preserve); the analyzer, which cannot see them,
+    // assumes a null cp with the cache's initial null lp. Reported once the watchdog's dispatch note changed its path budget
+    // NOLINTNEXTLINE(clang-analyzer-core.NullDereference)
     if (p == lp && p->serial == lser && gen == lgen && lpr) return lpr;
     __unsafe_unretained NvProg *have = p->serial ? serial_get(p->serial) : nil;
     if (have) { lp = p; lser = p->serial; lgen = gen; lpr = have; return have; }
@@ -13857,6 +13901,30 @@ static id<MTL4ComputeCommandEncoder> dispatch_enc(void) {
     args_dirty_all();
     return e;
 }
+// Indirect dispatch clamp (DM_NVN_DISPATCH_CLAMP, default on; =0 off): a GPU-written {x, y, z} of more than DPC_MAXTOTAL threadgroups in all dispatches nothing; any
+// other record passes unchanged. Real frames stay far below (PRAGMATA's largest direct dispatch: 96 x 54); a group count the GPU wrote from bad data would otherwise run
+// for ever, and committed work is not reclaimed when the process exits. No dimension is cut on its own: a 1D dispatch of more than 65535 groups is a real one, and cutting
+// it (as a first version did) left part of its work undone
+#define DPC_MAXTOTAL (1u << 22)
+static int dpc_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_DISPATCH_CLAMP"); v = !(e && !strcmp(e, "0")); } return v; }
+static int dpc_clamp_enc(id ce, uint64_t rec, __strong id<MTLBuffer> *ob, size_t *oo, uint64_t *og) {
+    static id<MTLComputePipelineState> ps; static id<MTL4ArgumentTable> at; static int failed;
+    if (failed) return 0;
+    if (!ps) { NSError *e = nil; id<MTLLibrary> lib = host_lib("ixc", &e); id<MTLFunction> f = [lib newFunctionWithName:@"dpc_clamp"];
+        ps = f ? [g_dev newComputePipelineStateWithFunction:f error:&e] : nil;
+        MTL4ArgumentTableDescriptor *ad = [MTL4ArgumentTableDescriptor new]; ad.maxBufferBindCount = 1; at = ps ? rec_table([g_dev newArgumentTableWithDescriptor:ad error:&e]) : nil;
+        if (!at) { failed = 1; MLOG("[RED] indirect dispatch clamp: cannot create its pipeline: %s (indirect dispatches run unclamped)", e.localizedDescription.UTF8String); return 0; }
+        MLOG("indirect dispatch clamp on: a GPU-written group count of more than %u threadgroups in all dispatches nothing (DM_NVN_DISPATCH_CLAMP=0 turns it off)", DPC_MAXTOTAL); }
+    typedef struct { uint64_t rec, out; uint32_t maxtotal; } djob;
+    size_t off = arena_alloc(16 + sizeof(djob), ob); uint8_t *p = (uint8_t *)(*ob).contents + off;
+    *oo = off; *og = (*ob).gpuAddress + off;
+    *(djob *)(p + 16) = (djob){rec, *og, DPC_MAXTOTAL};
+    id<MTL4ComputeCommandEncoder> e = (id<MTL4ComputeCommandEncoder>)ce;
+    [at setAddress:*og + 16 atIndex:0]; [e setArgumentTable:at]; [e setComputePipelineState:ps];
+    [e dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+    [e barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch | MTLStageBlit visibilityOptions:resource_vis()];
+    return 1;
+}
 static void dispatch(const p_dispatch *dp) {
     zskip_clear();
     g_wr_epoch++; g_mdx_epoch++;
@@ -13867,6 +13935,7 @@ static void dispatch(const p_dispatch *dp) {
     if (dp->ind) { static int once; if (!once++) MLOG("indirect dispatch: first time (the GPU reads the threadgroup counts from %#llx)", (unsigned long long)dp->ind); }
     NvShader *cs = prog_get(S.cprog)->sh[5];
     if (!cs) { RED_ONCE(28, "the dispatched program has no compute shader (or it is not mapped)"); return; }
+    wk_note('c', cs->key);   // the watchdog's ring of (fence, kind, key): the shaders of a stuck submission are named
     const void *k = (__bridge const void *)cs;
     id<MTLComputePipelineState> ps = hm_get_id(&g_cps, &k);
     if (!ps) {
@@ -13926,6 +13995,12 @@ static void dispatch(const p_dispatch *dp) {
     encode_args(nil, cs, 5, 0);
     if (own && g_blit) { enc_b_end(g_blit); g_blit = nil; }
     id<MTLComputeCommandEncoder> ce = own ? pg_compute() : (id<MTLComputeCommandEncoder>)dispatch_enc();
+    if (dp->ind && dpc_on()) {   // the GPU-written group counts, clamped into the frame arena first (see dpc_clamp); the dispatch and the c0 copy below read the clamped ones
+        uint64_t cg; id<MTLBuffer> cb_; size_t co;
+        if (dpc_clamp_enc(ce, ig, &cb_, &co, &cg)) { ib = (__bridge void *)cb_; io = co; ig = cg; }
+        if (own) [(id<MTL4ComputeCommandEncoder>)ce setArgumentTable:g_ct]; else { [(id<MTL4ComputeCommandEncoder>)ce setArgumentTable:g_ct]; g_blit_ct = 1; }
+        args_dirty_all();
+    }
     enc_c_pso(ce, ps);
     if (tg_groups) {
         __strong id<MTLBuffer> tb = nil; size_t to = arena_alloc((size_t)(tg_groups * cs->rf.tg_spill), &tb);

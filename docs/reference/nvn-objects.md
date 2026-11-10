@@ -374,6 +374,18 @@ Games read this count as a position in their own command memory and size their h
 - **Check:** GPU load from outside: `ioreg -r -d 1 -c IOAccelerator | grep 'Device Utilization'` at 100 % means a shader is looping forever. Find the shaders first used in the last frames (`DM_NVN_PASSDUMP`, compare the `K` keys) and look at their `.metal` for an empty `do {} while (true);` with no `return` (one such case: [Exact program start for the decoder](shaders.md#exact-program-start-for-the-decoder)).
 - **Found on:** no game named in the source (general).
 
+### The GPU watchdog and GPU-written dispatch counts
+
+- **Symptom:** the Mac's WindowServer freezes minutes after a game stalls; the GPU stays at 100% with no game process alive.
+- **Cause:** a Metal command buffer that never completes is not reclaimed at exit. The ways in seen:
+  - an indirect dispatch whose GPU-written counts were garbage (billions of threadgroups);
+  - a kernel that never ends.
+- **Fix:**
+  - `DM_NVN_GPU_WATCHDOG` (seconds, default 4) ends the process when a command buffer has not completed, before more work queues behind it. A ring of (fence, kind, shader key) per draw and dispatch (`wk_note`) lets the watchdog and a failed command buffer name that submission's shaders (`wk_dump`).
+  - A GPU-written dispatch count of more than 2^22 threadgroups in all dispatches nothing; any other passes unchanged (`DM_NVN_DISPATCH_CLAMP=0` turns it off).
+  - A SyncWait of a second or more prints `[RED] SyncWait timed out on fence N: committed M, completed K` (fence ≤ committed: the GPU did not finish).
+- **Found on:** Orbitals (`040004F027560000`) and PRAGMATA (not in the games table).
+
 ### The game's SyncWait wakes on the GPU's own signal of its fence
 
 - **Symptom:** the frame's blocking SyncWait on its newest fence wakes about 0.26–0.29 ms after the GPU end (M2 Max; the wait ledger, `DM_NVN_WAITS=1`), on the critical path of every frame.

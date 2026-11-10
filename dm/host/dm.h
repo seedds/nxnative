@@ -61,6 +61,10 @@ typedef struct {
     uint64_t unity_target_fps; // Unity's Application.targetFrameRate, an int32 at main + this (patch_nso.py, unity_fps.py; hle_fpslock.c); 0 = none
     uint64_t unity_qs_ptr;     // Unity's QualitySettings (main's offset of the global pointer); the current level's vSyncCount, an int32, is at
     uint32_t unity_qs_idx, unity_qs_arr, unity_qs_size, unity_qs_vsync;   // [obj + arr] + (int32)[obj + idx] * size + vsync; 0 = none
+    uint64_t hal_frame_ptr;    // HAL's frame interval, an int32 at [main + hal_frame_ptr] + hal_frame_field (patch_nso.py, hal_fps.py; hle_fpslock.c); 0 = none
+    uint32_t hal_frame_field;
+    uint64_t hal_dr_ptr;       // HAL's dynamic-resolution GPU frame-time bounds, two floats at [[[[main + hal_dr_ptr] + hop[0]] + hop[1]] + hop[2]] + hal_dr_field; 0 = none
+    uint32_t hal_dr_hop[3], hal_dr_field;
     uint64_t fps_state_off;    // frame step state page (patch_nso.py FRAME_STEP: Tears of the Kingdom 1.4.3 and Breath of the Wild 1.9.0 main); 0 = none
     uint32_t render_scale_max; // a render-scale stub's largest scale (the fixups table's RENDER_SCALE, patch_nso.py): DM_RENDER_SCALE is held to it; 0 = no such stub
     int64_t patch_off;         // patch area relative to the base; negative = before the base (image too large, see patch_nso.py FAR), and size does not include it

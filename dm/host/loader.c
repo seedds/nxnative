@@ -279,6 +279,11 @@ static void read_layout(module_t *m, const char *dir) {
         else if (!strcmp(key, "UNITY_QS_ARR")) m->unity_qs_arr = (uint32_t)v;
         else if (!strcmp(key, "UNITY_QS_SIZE")) m->unity_qs_size = (uint32_t)v;
         else if (!strcmp(key, "UNITY_QS_VSYNC")) m->unity_qs_vsync = (uint32_t)v;
+        else if (!strcmp(key, "HAL_FRAME_PTR")) m->hal_frame_ptr = v;
+        else if (!strcmp(key, "HAL_FRAME_FIELD")) m->hal_frame_field = (uint32_t)v;
+        else if (!strcmp(key, "HAL_DR_PTR")) m->hal_dr_ptr = v;
+        else if (!strncmp(key, "HAL_DR_HOP", 10) && key[10] >= '0' && key[10] <= '2' && !key[11]) m->hal_dr_hop[key[10] - '0'] = (uint32_t)v;
+        else if (!strcmp(key, "HAL_DR_FIELD")) m->hal_dr_field = (uint32_t)v;
         else if (!strncmp(key, "UE_CVAR:", 8)) {
             if (m->n_ue_cvar == (int)(sizeof m->ue_cvar / sizeof *m->ue_cvar) || strlen(key + 8) >= sizeof m->ue_cvar[0].name) die("%s: too many Unreal console variables, or too long a name: %s", path, key);
             strcpy(m->ue_cvar[m->n_ue_cvar].name, key + 8); m->ue_cvar[m->n_ue_cvar++].off = v;

@@ -17,7 +17,10 @@
 typedef Result (*sf_answer)(unsigned cmd, uint32_t *copy);
 static struct { char name[16]; int used, domain; unsigned seen; sf_answer answer; } g_sf[SF_MAX];
 static pthread_mutex_t g_sf_mu = PTHREAD_MUTEX_INITIALIZER;
-static const char *const sf_served[] = {"olsc:u", "caps:su", "caps:u", "caps:a", "caps:c", "caps:sc", "caps:ss"};
+// mnpp:app (BCAT services, 13.0.0+): an application registers its program ID (command 0) and submits "mission events" (command 1, a Uid and a buffer), which the system uploads to
+// Nintendo's event endpoint later; neither has output. Super Nintendo Entertainment System – Nintendo Classics 6.0.0 connects when a game is started from its list and aborts on
+// sm's refusal (0xe15, main+0x37080); offline the events stay unsent, which success with no output is
+static const char *const sf_served[] = {"olsc:u", "caps:su", "caps:u", "caps:a", "caps:c", "caps:sc", "caps:ss", "mnpp:app"};
 
 static int sf_slot(uint32_t h) {
     unsigned i = h - SF_H0;

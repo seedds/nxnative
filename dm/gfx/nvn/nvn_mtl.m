@@ -3100,6 +3100,29 @@ static MTLTextureDescriptor *tex_desc(const tex_t *t, int packaged) {
 // In-place upgrade: when the original texture was not created with PixelFormatView (off by default, to keep Apple GPU lossless compression) but a different-format view is needed, create a new one with the original spec + PixelFormatView, copy over every slice × level, and replace the registration.
 // Count: across the 4 screens character select / camp / wilderness / combat, 17473 textures needed a different-format view 0 times, so this is a fallback and does not rely on predicting which textures need it
 // The same upgrade adds render-target usage for a whole-level clear (clear_tex) of a texture made without it: Monster Hunter Rise clears a 32x80 packaged one
+// Smaller textures on small devices (docs/reference/memory.md, "Large sampled textures leave out their largest level on small devices"). Where Metal's working set is under 6 GB (the
+// iPhone 17 and the M1 iPad: 5,461 MB), a large texture made from the game's data (pkg_upload_) leaves out its largest level: the Metal texture is half the size with one level fewer,
+// and its level k holds the game's level k+1. Sampled with normalized coordinates, it gives the same texel density from the next level; only the closest views lose detail. Only
+// sampling may see it: tex_mtl hands it out only to the sampled-texture path (treg_tex, t_drop_ok), and every other use (attachments, copies, image slots, readbacks, upgrades) makes the
+// texture whole first (tex_undrop), after which it stays whole (g_drop_full). Shaders that fetch texels, ask the size or pick an explicit level read the smaller texture. DM_NVN_TEX_DROP_MIP=0/1
+// forces it off or on
+enum { DROP_MIN = 512 };   // both sides at least this, and 2 levels or more
+static int drop_wants(uint64_t working_set) { return working_set && working_set < (6ull << 30); }
+static int g_drop_on = -1;
+static int drop_on(void) {
+    if (g_drop_on < 0) { const char *e = getenv("DM_NVN_TEX_DROP_MIP"); g_drop_on = e && *e ? atoi(e) > 0 : drop_wants(g_dev ? g_dev.recommendedMaxWorkingSetSize : 0);
+        if (g_drop_on) MLOG("large sampled textures leave out their largest level (DM_NVN_TEX_DROP_MIP%s): sides of %d and more, 2 levels or more", e && *e ? "" : ", Metal's working set under 6 GB", DROP_MIN); }
+    return g_drop_on;
+}
+static char g_drop_key;   // set on a dropped Metal texture (and carried by tex_upgrade)
+static __thread int t_drop_ok;   // tex_mtl's caller samples the texture (treg_tex)
+static __thread int t_drop_off;   // pkg_upload_ makes the texture whole (tex_undrop)
+static NSMutableSet *g_drop_full;   // storage of textures made whole again: they stay whole (submit thread)
+static uint64_t g_drop_n, g_drop_bytes, g_drop_full_n, g_drop_cand_n[4], g_drop_cand_b[4];   // dropped, bytes saved, made whole; candidates by largest side 256 / 512 / 1024 / 2048+
+static struct { int line; uint64_t n; } g_drop_why[8];
+static int tex_dropped(id<MTLTexture> m) { return m && (objc_getAssociatedObject(m, &g_drop_key) || (m.parentTexture && objc_getAssociatedObject(m.parentTexture, &g_drop_key))); }
+// A sampled view of a dropped texture: from level 0 it starts at Metal level 0 with one level fewer (at least one), from level k at Metal level k-1
+static void drop_levels(NSUInteger *l0, NSUInteger *nl) { if (*l0) (*l0)--; else if (*nl > 1) (*nl)--; }
 static id<MTLTexture> tex_upgrade(const tex_t *t, id<MTLTexture> asked, MTLTextureUsage add, MTLPixelFormat view_pf) {
     id holder = tex_get(t->serial);
     // The serial holds an sRGB / linear view (tex_mtl_) of the asked texture, or the asked texture is that view: the parent is upgraded and the view made again on it, so the pair keeps sharing its bytes
@@ -3124,6 +3147,7 @@ static id<MTLTexture> tex_upgrade(const tex_t *t, id<MTLTexture> asked, MTLTextu
         if (upgraded) { res_add(raw); NvAtomicRaw *own = [NvAtomicRaw new]; own->raw = raw; objc_setAssociatedObject(upgraded, &g_atomic_raw_key, own, OBJC_ASSOCIATION_RETAIN_NONATOMIC); }
     } else upgraded = backing ? [backing newTextureWithDescriptor:d offset:base.bufferOffset bytesPerRow:base.bufferBytesPerRow] : [g_dev newTextureWithDescriptor:d];
     if (!upgraded) { RED_ONCE(45, "texture upgrade failed ser=%llu format %lu → %lu usage %#lx", t->serial, (unsigned long)base.pixelFormat, (unsigned long)view_pf, (unsigned long)d.usage); return base; }
+    if (objc_getAssociatedObject(base, &g_drop_key)) objc_setAssociatedObject(upgraded, &g_drop_key, @1, OBJC_ASSOCIATION_RETAIN_NONATOMIC);   // a sampled view's format: still dropped
     if (!reinterpret) res_add(upgraded);
     id<MTLTexture> upgraded_view = nil;
     id<MTL4ComputeCommandEncoder> b = backing ? nil : blit();   // shared backing already contains the pixels; copying it onto itself would overlap
@@ -3504,7 +3528,18 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
     d.usage |= keep & (MTLTextureUsageRenderTarget | MTLTextureUsagePixelFormatView);
     int rb_shift = rb_packed_shift(t->d.format);   // the RGB565 family is repacked into Metal's order on the CPU (rb_packed_shift)
     int linear = (t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)) != 0;   // linear storage no view could take (linear_fit): its rows are copied on the CPU
-    int direct = !linear && !rb_shift && stamp && direct_upload_on() && g_nvn_deswz_gpu && !(t->pool && nvn_sparse_pool(t->pool)) && nvn_deswz_gpu_direct_supported(&t->d);
+    // Smaller textures on small devices (drop_on): a sampled 2D texture of the game's data, of 2 levels or more, leaves out its largest level. Nothing that renders into it or writes it
+    unsigned drop = 0;
+    if (drop_on() && !t_drop_off && (d.textureType == MTLTextureType2D || d.textureType == MTLTextureType2DArray) && d.mipmapLevelCount >= 2 && d.sampleCount == 1 && !linear && !rb_shift
+        && !(t->pool && nvn_sparse_pool(t->pool)) && !(d.usage & (MTLTextureUsageRenderTarget | MTLTextureUsageShaderWrite)) && !(t->d.flags & (NVN_TEXTURE_FLAGS_IMAGE | NVN_TEXTURE_FLAGS_COMPRESSIBLE | NVN_TEXTURE_FLAGS_DISPLAY | NVN_TEXTURE_FLAGS_VIDEO_DECODE))
+        && d.pixelFormat != MTLPixelFormatDepth16Unorm && d.pixelFormat != MTLPixelFormatDepth32Float && d.pixelFormat != MTLPixelFormatDepth32Float_Stencil8 && d.pixelFormat != MTLPixelFormatStencil8 && ![g_drop_full containsObject:@((uintptr_t)t->mem)]) {
+        unsigned side = MAX(t->d.width, t->d.height), k = side >= 2048 ? 3 : side >= 1024 ? 2 : side >= 512 ? 1 : 0;
+        int bw0, bh0, bpb0 = nvn_fmt_bpb(t->d.format, &bw0, &bh0); unsigned ly = d.textureType == MTLTextureType2DArray ? (unsigned)d.arrayLength : 1;
+        uint64_t top = bpb0 ? (uint64_t)((t->d.width + bw0 - 1) / bw0) * bpb0 * ((t->d.height + bh0 - 1) / bh0) * ly : 0;   // what the largest level takes
+        if (side >= 256 && !reuse) { g_drop_cand_n[k]++; g_drop_cand_b[k] += top; }
+        if (t->d.width >= DROP_MIN && t->d.height >= DROP_MIN) { drop = 1; d.width = MAX(d.width >> 1, 1u); d.height = MAX(d.height >> 1, 1u); d.mipmapLevelCount -= 1; if (!reuse) g_drop_bytes += top; }
+    }
+    int direct = !drop && !linear && !rb_shift && stamp && direct_upload_on() && g_nvn_deswz_gpu && !(t->pool && nvn_sparse_pool(t->pool)) && nvn_deswz_gpu_direct_supported(&t->d);
     if (direct) d.usage |= MTLTextureUsageShaderWrite | MTLTextureUsagePixelFormatView;
     id<MTLTexture> mt = reuse && reuse.pixelFormat == d.pixelFormat && reuse.width == d.width && reuse.height == d.height && reuse.mipmapLevelCount == d.mipmapLevelCount && reuse.textureType == d.textureType
                         && (reuse.usage & d.usage) == d.usage
@@ -3515,21 +3550,23 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
              (unsigned long long)(mt.allocatedSize >> 20), t->pool && nvn_sparse_pool(t->pool) ? ", in a sparse virtual pool" : t->pool && (t->pool->flags & NVN_MEMORY_POOL_FLAGS_VIRTUAL) ? ", in a virtual pool" : ""); }
     if (g_allocprof > 0) { static int n; if (n++ < 30 || n % 500 == 0) MLOG("new texture (%s) #%d ser=%llu %ux%ux%u format %#x target %d levels %u storage %p", __func__, n, (unsigned long long)t->serial, t->d.width, t->d.height, t->d.depth, t->d.format, t->d.target, t->d.levels, (void *)t->mem); }
     res_add(mt);   // Both first upload and re-upload register residency here (Metal 4 does not make resources resident automatically; a missed registration = GPU address page fault)
+    if (drop) { objc_setAssociatedObject(mt, &g_drop_key, @1, OBJC_ASSOCIATION_RETAIN_NONATOMIC); if (!reuse) g_drop_n++; }
     int sparse = t->pool && nvn_sparse_pool(t->pool);
     if (stamp) {   // no stamp: a one-time upload of content the CPU will not change (tex_init_fill), with no write tracking
         *stamp = nvn_dirty_now();
         if (sparse) nvn_sparse_protect(t->pool, (uint64_t)(uintptr_t)t->mem, t->L.size); else nvn_dirty_protect(t->mem, t->L.size); }
     int bw, bh, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh);
     unsigned layers = (t->d.target == 4 || t->d.target == 9) ? t->d.depth : t->d.target == 8 ? 6 : t->d.target == 3 ? t->d.height : 1;   // a cube array's depth counts layer-faces (tex_desc)
-    // Taken after the stamp and the protect: a write that lands from here on faults and is found at the next look
+    // Taken after the stamp and the protect: a write that lands from here on faults and is found at the next look. A texture that leaves out its largest level (drop) is read
+    // whole: pkg_written and the copies count Metal levels from the game's level 0
     uint8_t *need = NULL; unsigned nimg = (unsigned)d.mipmapLevelCount * layers, nup = 0;
-    if (prev && prev != mt && stamp && !sparse && !linear && bpb && d.sampleCount <= 1 && prev.pixelFormat == mt.pixelFormat && prev.textureType == mt.textureType && prev.sampleCount == mt.sampleCount
+    if (prev && prev != mt && stamp && !sparse && !linear && !drop && bpb && d.sampleCount <= 1 && prev.pixelFormat == mt.pixelFormat && prev.textureType == mt.textureType && prev.sampleCount == mt.sampleCount
         && prev.width == mt.width && prev.height == mt.height && prev.depth == mt.depth && prev.arrayLength == mt.arrayLength && prev.mipmapLevelCount == mt.mipmapLevelCount)
         need = pkg_written(t, span, since, (unsigned)d.mipmapLevelCount, layers, &nup);
     if (need && nup == nimg) { free(need); need = NULL; }
     if (need && taken) *taken = nimg - nup;
     size_t total = 0;
-    for (unsigned l = 0; l < d.mipmapLevelCount; l++) {
+    for (unsigned l = drop; l < d.mipmapLevelCount + drop; l++) {   // the game's levels: from 1 for a dropped texture, Metal level l - drop
         uint32_t w = MAX(t->d.width >> l, 1u), h = MAX(t->d.height >> l, 1u), z = t->d.target == 2 ? MAX(t->d.depth >> l, 1u) : 1;
         unsigned n = layers; if (need) { n = 0; for (unsigned y = 0; y < layers; y++) n += need[l * layers + y]; }
         total += (size_t)((w + bw - 1) / bw) * bpb * ((h + bh - 1) / bh) * z * n;
@@ -3568,14 +3605,14 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
         // put its storage twice into the residency set (Switch Sports Resort's first court frame: 855 textures, 1.8 GB of source buffers for 908 MB of storage; t_upload_src)
         if (upsrc && g_up_seq != src_batch) { uint64_t mo2; id<MTLBuffer> u2 = up_big_src((uint64_t)t->mem, t->L.size, &mo2); if (u2) { upsrc = u2; mb = (__bridge void *)u2; mo = mo2; } }
         size_t off = 0; int enc_ok = g_up_ce != nil, nb0 = g_nup_blits;
-        for (unsigned l = 0; enc_ok && l < d.mipmapLevelCount; l++) {
+        for (unsigned l = drop; enc_ok && l < d.mipmapLevelCount + drop; l++) {
             uint32_t w = MAX(t->d.width >> l, 1u), h = MAX(t->d.height >> l, 1u), z = t->d.target == 2 ? MAX(t->d.depth >> l, 1u) : 1;
             size_t pitch = (size_t)((w + bw - 1) / bw) * bpb, rows = (h + bh - 1) / bh;
             for (unsigned y = 0; y < layers; y++) {
                 if (need && !need[l * layers + y]) { up_copy_add(prev, MTLSizeMake(w, h, z), mt, y, l); continue; }
                 size_t poff; id<MTLBuffer> params = up_param_alloc(&poff);   // Metal 4 has no setBytes: the parameter block of each deswizzle is cut from a shared block (no new GPU buffer each time)
                 if (nvn_deswz_gpu_encode_m4(g_up_ce, g_up_ct, params, poff, (__bridge id<MTLBuffer>)mb, mo, &t->d, l, y, stg, stg_off + off, pitch)) { enc_ok = 0; break; }
-                up_blit_add(stg, stg_off + off, pitch, pitch * rows, MTLSizeMake(w, h, z), mt, y, l);
+                up_blit_add(stg, stg_off + off, pitch, pitch * rows, MTLSizeMake(w, h, z), mt, y, l - drop);
                 off += pitch * rows * z;
             }
         }
@@ -3601,7 +3638,7 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
     res_add(stg); [g_up_keep addObject:stg];
     size_t off = 0;
     int zb = zblock_on() && t->d.format >= 0x79 && t->d.format <= 0x94; if (zb) { g_zb_ser = t->serial; g_zb_n = (int)MIN(d.mipmapLevelCount, 16u); memset(g_zb, 0, sizeof g_zb); memset(g_zb_tot, 0, sizeof g_zb_tot); }
-    for (unsigned l = 0; l < d.mipmapLevelCount; l++) {
+    for (unsigned l = drop; l < d.mipmapLevelCount + drop; l++) {
         uint32_t w = MAX(t->d.width >> l, 1u), h = MAX(t->d.height >> l, 1u), z = t->d.target == 2 ? MAX(t->d.depth >> l, 1u) : 1;
         size_t pitch = (size_t)((w + bw - 1) / bw) * bpb, rows = (h + bh - 1) / bh;
         for (unsigned y = 0; y < layers; y++) {
@@ -3615,7 +3652,7 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
             if (zb && l < 16) { const uint64_t *q = (const uint64_t *)((const uint8_t *)stg.contents + off); size_t nb = pitch * rows * z / 16;
                 for (size_t i = 0; i < nb; i++) g_zb[l] += !(q[2 * i] | q[2 * i + 1]);
                 g_zb_tot[l] += (uint32_t)nb; }
-            up_blit_add(stg, off, pitch, pitch * rows, MTLSizeMake(w, h, z), mt, y, l);
+            up_blit_add(stg, off, pitch, pitch * rows, MTLSizeMake(w, h, z), mt, y, l - drop);
             off += pitch * rows * z;
         }
     }
@@ -4486,7 +4523,6 @@ static void cpu_unc_drop(void) {
     free(ser);
 }
 static id<MTLTexture> tex_mtl_(const tex_t *ct);
-static id<MTLTexture> tex_mtl(const tex_t *ct) { AP_B; id<MTLTexture> r = tex_mtl_(ct); AP_E(4); return r; }
 // Diagnostic DM_NVN_REUPLOADS=1: a line for each re-upload of a texture taken from its storage (the first 400): its shape and size, how much of it was read from guest memory
 // (pkg_written), the time it took on the submit thread, the frame and the submission (a frame's replay is many, and each looks at the pages once), the pages written since its upload and where the first of them lies,
 // and the GPU writes stored into its storage since then (gsb_swz)
@@ -4505,6 +4541,27 @@ static void reup_note(const NvPkg *pk, const tex_t *t, unsigned taken, uint64_t 
          (unsigned long long)t->serial, t->d.width, t->d.height, t->d.depth, t->d.format, t->d.target, t->d.levels, t->L.size / 1048576.0, u, ns / 1e6, (unsigned long long)atomic_load(&g_cur_frame),
          (unsigned long long)g_sub_serial, w, pk->stored);
 }
+// A dropped texture (drop_on) put to a use other than sampling is made whole on the spot, and stays whole: uploaded again with every level into its packaged record, which every
+// serial and texture ID that names it follows (own_note, as tex_upgrade's replacement does). line: the caller's, counted in the memory report. Off the submit thread it is handed out as
+// it is (only the submit thread uploads; the present thread only shows render targets)
+static id<MTLTexture> tex_undrop(const tex_t *t, id<MTLTexture> r, int line) {
+    if (!tex_dropped(r) || (atomic_load(&g_sub_thread_set) && !on_sub_thread())) return r;
+    id h = tex_get(t->serial); NvPkg *pk = [h isKindOfClass:[NvPkg class]] ? h : nil;
+    if (!pk || pk->sparse || pk->ps) return r;
+    if (!g_drop_full) g_drop_full = [NSMutableSet set];
+    [g_drop_full addObject:@((uintptr_t)t->mem)];
+    uint64_t st, lg = atomic_load(&g_up_lost_gen); t_drop_off = 1; id<MTLTexture> nt = pkg_upload(t, &st, nil, pk->tex.usage, nil, NULL, 0, NULL); t_drop_off = 0;
+    if (!nt) { RED_ONCE(160, "a texture that left out its largest level could not be made whole again (ser=%llu %ux%u format %#x): kept smaller", (unsigned long long)t->serial, t->d.width, t->d.height, t->d.format); return r; }
+    id<MTLTexture> old = pk->tex; pk->tex = nt; pk->stored = 0; pk->part = 0; pk->lost_gen = lg; defer_obj_release(old);   // read whole
+    if (pk->spare) { defer_obj_release(pk->spare); pk->spare = nil; }   // of the smaller shape
+    pk->stamp = pk->seen = st; pk->span = nvn_dirty_span(t->mem, t->L.size); if (dirtycheck()) pk->hash = full_hash(t->mem, t->L.size);
+    own_note(t->serial); g_drop_full_n++;
+    int k = 0; while (k < 7 && g_drop_why[k].line && g_drop_why[k].line != line) k++;
+    if (!g_drop_why[k].n++) { g_drop_why[k].line = line; MLOG("a texture that left out its largest level is made whole for a use other than sampling (tex_mtl at line %d): ser=%llu %ux%u format %#x levels %u", line, (unsigned long long)t->serial, t->d.width, t->d.height, t->d.format, t->d.levels); }
+    return nt;
+}
+static id<MTLTexture> tex_mtl_at(const tex_t *ct, int line) { AP_B; id<MTLTexture> r = tex_mtl_(ct); if (r && g_drop_n && !t_drop_ok) r = tex_undrop(ct, r, line); AP_E(4); return r; }
+#define tex_mtl(ct) tex_mtl_at((ct), __LINE__)
 // A sparse texture is bound from its first level whose pages, and those of every smaller level, are all mapped: a view of levels [r, n) samples as with a minimum LOD of r.
 // The translator drops TEX's LOD clamp and residency predicate, so Monster Hunter Rise's streamed textures were sampled at levels it had not mapped yet; those read 0, which ASTC
 // decodes as its error colour (magenta clothes on the title screen). Single-layer 2D textures only; the view follows each upload, as the mappings change only with one
@@ -4940,6 +4997,13 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long rss_mb) {
         MLOG("GPU allocation growth by op: op%d %llu MB, op%d %llu MB, op%d %llu MB, op%d %llu MB", top[0], g_ap_bytes[top[0]] >> 20, top[1], g_ap_bytes[top[1]] >> 20, top[2], g_ap_bytes[top[2]] >> 20, top[3], g_ap_bytes[top[3]] >> 20); }
     { void mtl_gmem_words(uint64_t *, uint64_t *, uint64_t *); uint64_t gw, go, gb; mtl_gmem_words(&gw, &go, &gb);
       if (gw) MLOG("raw pool table words at commit: %llu, of them %llu held an older table than the current one and %llu the current one behind the pools", (unsigned long long)gw, (unsigned long long)go, (unsigned long long)gb); }
+    if (g_drop_on > 0) {   // smaller textures (drop_on): what was saved, what was made whole and where, and what each threshold would take (candidates by their largest side)
+        char why[160] = ""; size_t o = 0; for (int k = 0; k < 8 && g_drop_why[k].n && o < sizeof why - 24; k++) o += (size_t)snprintf(why + o, sizeof why - o, "%sline %d: %llu", k ? ", " : "", g_drop_why[k].line, (unsigned long long)g_drop_why[k].n);
+        MLOG("[mem] large sampled textures without their largest level: %llu, %llu MB saved; made whole again %llu (%s); candidates by largest side 256: %llu, %llu MB; 512: %llu, %llu MB; 1024: %llu, %llu MB; 2048+: %llu, %llu MB",
+             (unsigned long long)g_drop_n, (unsigned long long)(g_drop_bytes >> 20), (unsigned long long)g_drop_full_n, o ? why : "none",
+             (unsigned long long)g_drop_cand_n[0], (unsigned long long)(g_drop_cand_b[0] >> 20), (unsigned long long)g_drop_cand_n[1], (unsigned long long)(g_drop_cand_b[1] >> 20),
+             (unsigned long long)g_drop_cand_n[2], (unsigned long long)(g_drop_cand_b[2] >> 20), (unsigned long long)g_drop_cand_n[3], (unsigned long long)(g_drop_cand_b[3] >> 20));
+    }
 }
 void mtl_pkg_stats(uint64_t *uploads, uint64_t *reuploads) { *uploads = g_pkg_uploads; *reuploads = g_pkg_reuploads; }
 uint64_t mtl_pkg_edge_skips(void) { return g_pkg_edge_skips; }
@@ -7012,7 +7076,7 @@ void mtl_set_origin_lower_left(int on) { if (atomic_exchange(&g_origin_ll, on) !
 static int g_queue_origin_ll;   // SET_WINDOW_ORIGIN's raster flip is queue state, independent of later device-origin changes.
 void mtl_set_queue_origin_lower_left(int on) { g_queue_origin_ll = on != 0; }
 void mtl_set_tex_pool_n(int n) { g_tpool_n = n; }
-static id<MTLTexture> treg_tex(const treg_t *r) { return r->gone ? tex_made(&r->t) : tex_mtl(&r->t); }   // Caller holds g_rmu
+static id<MTLTexture> treg_tex(const treg_t *r) { if (r->gone) return tex_made(&r->t); t_drop_ok++; id<MTLTexture> m = tex_mtl(&r->t); t_drop_ok--; return m; }   // sampled: may be dropped (drop_on)   // Caller holds g_rmu
 // The upload stamp of the packaged texture an ID's view was made from (tex_by_id's guest-write shortcut); none for sparse ones (their page table changes too) or another base. Caller holds g_rmu
 static void treg_pkg_stamp(treg_t *rp, id<MTLTexture> base) {
     rp->view_span = NULL; if (!rp->view_pkg) return;
@@ -7094,6 +7158,7 @@ static id<MTLTexture> tex_by_id(int tid) {   // Caller holds g_rmu
             sg = treg_ep();
         }
         NSUInteger l0 = r.v.set_levels ? r.v.base_level : 0, nl = r.v.set_levels && r.v.nlevels ? r.v.nlevels : base.mipmapLevelCount - l0;
+        if (r.v.set_levels && g_drop_n && tex_dropped(base)) { drop_levels(&l0, &nl); if (!r.v.nlevels) nl = base.mipmapLevelCount - MIN(l0, base.mipmapLevelCount); }   // the game's level k is Metal's k-1
         if (l0 >= base.mipmapLevelCount) { RED_ONCE(109, "texture view id %d starts at mip %lu beyond %lu levels", tid, (unsigned long)l0, (unsigned long)base.mipmapLevelCount); return nil; }
         // A level count past the texture's levels is cut to those it has, as deko3d's Tegra descriptor writer clips the maximum level (Echoes of Wisdom: levels 1 + 7 of a seven-level texture,
         // which Metal's validation refuses)
@@ -10964,6 +11029,7 @@ static uint64_t dummy_buf_gpu(void) { static uint64_t gpu; if (!gpu) gpu = dummy
 static id<MTLTexture> img_binding(int tid, const nvn_rbind *b, uint64_t *rid, int *real) {
     void *tv = NULL; *rid = tid ? tex_fast_rid(tid, &tv) : 0;
     id<MTLTexture> t = (__bridge id<MTLTexture>)tv;
+    if (t && g_drop_n && tex_dropped(t) && tid > 0 && tid < g_ntreg && g_treg[tid].ok) { (void)tex_mtl(&g_treg[tid].t); tv = NULL; *rid = tex_fast_rid(tid, &tv); t = (__bridge id<MTLTexture>)tv; }   // an image slot reads texels: made whole (tex_undrop)
     int swz_only = t && !(t.usage & MTLTextureUsageShaderWrite) && (t.parentTexture.usage & MTLTextureUsageShaderWrite);
     if (t && (b->rw || b->atom) && !(t.usage & MTLTextureUsageShaderWrite) && !swz_only) {
         const tex_t *tt = tid > 0 && tid < g_ntreg && g_treg[tid].ok ? &g_treg[tid].t : NULL;

@@ -264,8 +264,9 @@ static void joycon_haptics_sync(GCController *gone) {
     for (joycon_pad *d = g_joycons; d; d = d->next) {
         if (d->partner && !d->primary) continue;
         int p = pad_slot_of(&g_slots, d); if (p < 0) continue;
-        if (d->partner) dm_haptics_apple_controller(p, jc);
-        else dm_haptics_apple_controller_locality(p, jc, d->st.pid == JOYCON_PID_L ? GCHapticsLocalityLeftHandle : GCHapticsLocalityRightHandle);
+        // A 1st-generation Joy-Con has no GCController haptics (jc above stays nil for it), so its motors are driven
+        // over HID output reports instead; pad_joycon_mac.h's sink takes the player from here
+        joycon_sink_bind(p, d);
     }
 }
 // DM_PAD_MERGE: whether a controller still plays player 1 (gone: one just removed, not counted), a GameController one or a raw HID pad (pad_hid_mac.h, pad_joycon_mac.h)
@@ -538,6 +539,7 @@ static void joycon_detach(joycon_pad *d) {
     dm_motion_clear_joy(p, side);
     if (d->partner) dm_motion_clear_joy(p, joycon_side(d->partner->st.pid));
     dm_haptics_apple_controller(p, nil);
+    joycon_sink_bind(p, NULL);
     dm_pad_set_player(p, 0, 0, 0, 0, 0);
     dm_joy_set(p, side, 0, 0, 0);
     if (d->partner) dm_joy_set(p, joycon_side(d->partner->st.pid), 0, 0, 0);

@@ -1046,11 +1046,24 @@ static void vib_send(const uint32_t *handles, const dm_vibration *values, int n)
     if (getenv("DM_RUMBLE_LOG")) {   // Count input values before deduplicating motors, including partially routed batches.
         static pthread_mutex_t log_lock = PTHREAD_MUTEX_INITIALIZER;
         static uint64_t sends, dropped, t0; static float peak; struct timespec ts;
+        // The frequencies of the values that carry one, so a run shows the range a game actually drives its two bands at
+        static float flo = 1e9f, fhi = 0, hlo = 1e9f, hhi = 0;
         pthread_mutex_lock(&log_lock);   // SDK sends can arrive from several game threads.
         clock_gettime(CLOCK_MONOTONIC, &ts);
         uint64_t now = ts.tv_sec; sends += n; dropped += unrouted;
-        for (int i = 0; i < n; i++) peak = fmaxf(peak, fmaxf(values[i].amplitude_low, values[i].amplitude_high));
-        if (now != t0) { LOG("rumble: %llu values sent, %llu with no output, peak amplitude %.2f, handle %#x", sends, dropped, peak, handles[0]); sends = dropped = 0; peak = 0; t0 = now; }
+        for (int i = 0; i < n; i++) {
+            peak = fmaxf(peak, fmaxf(values[i].amplitude_low, values[i].amplitude_high));
+            float lf = values[i].frequency_low, hf = values[i].frequency_high;
+            if (values[i].amplitude_low > 0 && lf > 0 && isfinite(lf)) { flo = fminf(flo, lf); fhi = fmaxf(fhi, lf); }
+            if (values[i].amplitude_high > 0 && hf > 0 && isfinite(hf)) { hlo = fminf(hlo, hf); hhi = fmaxf(hhi, hf); }
+        }
+        if (now != t0) {
+            LOG("rumble: %llu values sent, %llu with no output, peak amplitude %.2f, handle %#x", sends, dropped, peak, handles[0]);
+            if (flo <= fhi || hlo <= hhi) LOG("rumble: low band %s%.0f to %.0f Hz, high band %s%.0f to %.0f Hz",
+                                             flo <= fhi ? "" : "unused ", flo <= fhi ? flo : 0.0f, fhi,
+                                             hlo <= hhi ? "" : "unused ", hlo <= hhi ? hlo : 0.0f, hhi);
+            sends = dropped = 0; peak = 0; t0 = now; flo = hlo = 1e9f; fhi = hhi = 0;
+        }
         pthread_mutex_unlock(&log_lock);
     }
     dm_haptics_send(updates, count);

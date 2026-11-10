@@ -7,7 +7,7 @@
 // 960x540 (16 / 32 / 64 channels, HMMA.16816.F16 convolutions; the model's shaders are compiled for that size), 5a7d69b0 (the last convolution, added to the picture, into
 // an RGB10A2 image) and the resampler 4f41ccf2 (the model's 4/3, to 2560x1440). The host skips the eleven, computes the whole network at 5a7d69b0 from the picture the first
 // of them read, with the weights and biases the game bound, into the image 5a7d69b0 writes, and runs its own resampler at 4f41ccf2. 49dff010 stays the game's. The kernels
-// do the translated shaders' arithmetic in their order (each HMMA as dmsh_build.py's HMMA_BODY does it), so the output bits are theirs (dm/gfx/tests/test_ndve_engine.py).
+// do the translated shaders' arithmetic in their order (each HMMA as dmsh_rewrite.py's HMMA_BODY does it), so the output bits are theirs (dm/gfx/tests/test_ndve_engine.py).
 // Recognition: the keys in order, the weights and biases each dispatch binds at the offsets the graph gives from the first layer's, the picture and image sizes and formats,
 // the resampler's constants. Anything else (another model, the archive's second network, other bindings or sizes, a dispatch out of order, no library) leaves the game's
 // dispatches running, logged once; a deviation after some dispatches were skipped turns the host's network off for the rest of the run, and that frame's movie picture is

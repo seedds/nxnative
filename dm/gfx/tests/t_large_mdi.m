@@ -58,7 +58,7 @@ static int run(prog_t *pg, uint8_t *pool, int indexed, int maximum, int count, i
     uint32_t vertices = 3;
     h_nvnCommandBufferUpdateUniformBuffer(&parent, (uint64_t)(uintptr_t)sentinel, sizeof vertices, 0, sizeof vertices, &vertices);
     h_nvnCommandBufferCallCommands(&parent, 1, &draws);
-    uint64_t handle = h_nvnCommandBufferEndRecording(&parent);
+    uint64_t handle = (uintptr_t)nvn_rec_linear(h_nvnCommandBufferEndRecording(&parent), NULL);   // the recording's records with the call inlined, as the queue submits them
 
     tex_t rt = {.magic = MAGIC('T', 'E', 'X', 0), .serial = nvn_new_serial()};
     rt.d = (nvn_texdesc){.target = NVN_TEXTURE_TARGET_2D,

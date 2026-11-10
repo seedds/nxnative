@@ -94,6 +94,21 @@ int main(void) { @autoreleasepool {
     { const uint32_t want[] = {6199}; words(made_shadow(0x1c000, 4), want, 1, "and a shadow in it shows the last one"); }
     commit_as_running();
 
+    // A shadow of 512 bytes or more that a running submission's update is laid over (um_overlay) is copied here: queued to the copy thread it was waited for at once, on
+    // every such shadow (Ocarina of Time: half the replay thread's busy time in ubc_wait on one build). One without such bytes still goes to the copy thread
+    if (ubc_on()) {
+        update(0x1e010, 0xd5, 4); commit_as_running();
+        update(0x1e020, 0xd6, 4);
+        uint64_t h0 = ubc_head(); const uint32_t *got = made_shadow(0x1e000, 1024);
+        CHECK(got && ubc_head() == h0, "a large shadow with a running update over it queues no copy");
+        { const uint32_t want[] = {0x22222222, 0x22222222, 0x22222222, 0x22222222, 0xd5, 0x22222222, 0x22222222, 0x22222222, 0xd6}; words(got, want, 9, "and holds memory, the running update and the new one"); }
+        update(0x12020, 0xd7, 4);
+        h0 = ubc_head(); got = made_shadow(0x12000, 1024);
+        CHECK(got && ubc_head() > h0, "a large shadow without running updates still goes to the copy thread");
+        { const uint32_t want[] = {0x22222222, 0x22222222, 0x22222222, 0x22222222, 0x22222222, 0x22222222, 0x22222222, 0x22222222, 0xd7}; words(got, want, 9, "and holds memory and the new update"); }
+        commit_as_running();
+    }
+
     pend_reset(); g_nubd = 0;
     printf("t_ubp_running: %d checks, %d failed\n", checks, failed); fflush(stdout);
     _exit(failed != 0);

@@ -3,6 +3,10 @@
 def B(frm, to):
     off = to - frm; assert -(1 << 27) <= off < (1 << 27) and off % 4 == 0
     return 0x14000000 | ((off >> 2) & 0x3FFFFFF)
+def BL(frm, to): return B(frm, to) | 0x80000000
+def CBNZW(t, frm, to):   # cbnz wt, to
+    off = to - frm; assert -(1 << 20) <= off < (1 << 20) and off % 4 == 0
+    return 0x35000000 | (((off >> 2) & 0x7FFFF) << 5) | t
 def STP(t, t2, n, off): return 0xA9000000 | (((off // 8) & 0x7F) << 15) | (t2 << 10) | (n << 5) | t
 def LDP(t, t2, n, off): return 0xA9400000 | (((off // 8) & 0x7F) << 15) | (t2 << 10) | (n << 5) | t
 def STP_PRE(t, t2, n, off): return 0xA9800000 | (((off // 8) & 0x7F) << 15) | (t2 << 10) | (n << 5) | t

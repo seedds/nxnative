@@ -1,0 +1,46 @@
+# Game profile of Cozy Land (Switch, 1.0.0 = v0, the base game). Plays on the Mac
+# Format: see dm/games/README.md
+# Unity 2023.2.20f1 (IL2CPP) with FMOD, SDK 17.5.8; subsdk0 is the movie module, which plays the RedDeer.Games splash (H.264 + AAC inside sharedassets0.resource) and the title's background videos
+# The sdk build needs the node area cut (Ace Attorney Investigations Collection's SDK 17.5.3 constructor, at the same offsets: the SDK-wide rule of dm/tools/sdk_patches.py); the splash needed the H.264 decoder to hand pictures out
+# as soon as they are next in presentation order (dm/host/hle_movie_avc.c)
+# Controller: the left stick moves the cursor, A places, B goes back, Y opens the item list, L / R switch the category, the D-pad zooms (up / down) and changes the plot's shape (left / right): the 3D pad layout, which has a D-pad
+
+# ---- Identity ----
+title_id	0100777022394000
+program_id	0100777022394000
+
+# ---- App ----
+# Game name: only a label for profile listings and the Mac window title; the iOS app name is the game name in the base NSP, and the bundle ID comes from the base game title ID (build_ipa.sh / NSP script)
+name	Cozy Land
+ipa	CozyLand.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v0	1.0.0	main=e02ba7d3b0cd7c7baed30b5bca428571	subsdk0=29b829cc3bb8021bbd447c98f71a66f2	sdk=71b1a025aa30641a53aa4fc53ca742a6
+package	v0
+shader_versions	v0
+
+# ---- Files ----
+# load order as on Horizon: main, subsdk*, sdk (subsdk0 = NintendoSDK_movie)
+modules	main subsdk0 sdk
+romfs_marker	Data/resources.assets
+zip_store	.assets:.bundle:.dat:.resource:.ress:.metallib
+
+# ---- Memory ----
+# The NPDM declares 16 MB of system resource, so IsVirtualAddressMemoryEnabled is true: nninitStartup (main+0x907af0) hands application pool − used memory to StandardAllocator as
+# virtual address memory and never calls SetMemoryHeapSize. With the node area cut, the heap check found the hardware pool's region taking the alias region to +4.26 GB in
+# nninitStartup and set a 1 GB pool, as for Monster Train 2 and Ace Attorney Investigations Collection. Measured on the Mac over 7 minutes of building: 2.0 GB mapped, the alias
+# region's high-water mark +3.75 GB of 4.375 GB, 2.2–2.6 GB resident and 1.2–1.5 GB of Metal allocations
+sys_resource	0x1000000
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0x40000000
+
+# ---- Input ----
+pad_layout	full
+
+# ---- Shader split (shader_split.py; Unity Shader objects, read by unityfs.py) ----
+# everything is under Data/: the player's serialized files and the StreamingAssets Addressables bundles
+shader_groups	/Data/=data
+shader_note	Cozy Land shaders

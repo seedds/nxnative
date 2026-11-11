@@ -28,7 +28,13 @@ GLSLC_MAGIC = b'\x91\x68\x86\x19'   # GLSLC compiler outputs (shader_split.py gl
 GL_SRC = rb'\0#version [0-9]'      # a GLSL source string as dm/gfx/tools/gl_shaders.py takes it from main (Balatro's main has none, only glslang's messages that start with '#version:')
 def gl_name_count(img):   # how often main names glShaderSource: as C text, or as a UTF-16 managed string (Slay the Spire: libGDX ported to .NET, ahead-of-time compiled,
     return img.count(b'glShaderSource') + img.count('glShaderSource'.encode('utf-16-le'))   # resolves each GL function by that name through eglGetProcAddress)
-GL_FILES = ('.mvgl', '.vert', '.frag')   # the RomFS files gl_shaders.py reads GLSL from
+GL_FILES = ('.mvgl', '.vert', '.frag')   # the RomFS files gl_shaders.py reads GLSL from, and .vs / .fs where a folder holds both (gl_file_count)
+def gl_file_count(paths):   # the RomFS files gl_shaders.py reads GLSL from: GL_FILES, and libGDX's .vs / .fs in a folder that holds both kinds (Slay the Spire's shaders/<effect>/);
+    # a folder of .fs files alone is LÖVE's (Balatro's resources/shaders/), which are not whole shaders: LÖVE puts each together at run time (captured instead)
+    by_dir = collections.defaultdict(list)
+    for p in paths: d, n = os.path.split(p.lower()); by_dir[d].append(n)
+    return sum(sum(n.endswith(GL_FILES) for n in ns) + (sum(n.endswith(('.vs', '.fs')) for n in ns) if any(n.endswith('.vs') for n in ns) and any(n.endswith('.fs') for n in ns) else 0)
+               for ns in by_dir.values())
 APP_POOL = 0xCD500000               # the application memory pool of a 4 GB Switch (3285 MiB), what every profile but Engage's reports
 OUNCE_POOL = 0x240000000            # a Switch 2 game's (9 GB of 12 GB, not measured; Donkey Kong Bananza's heaps do not fit in a Switch 1 pool)
 MiB = 1 << 20
@@ -118,8 +124,9 @@ def facts_of(exefs, romfs):
     # RomFS: counts by top level (two levels: Unity keeps everything under Data/), extension and header magic
     R = F['romfs'] = {'n': 0, 'bytes': 0, 'tops': collections.Counter(), 'topb': collections.Counter(), 'exts': collections.Counter(), 'extb': collections.Counter(), 'extc': collections.Counter(),
                       'mags': collections.Counter(), 'magb': collections.Counter(), 'dirs': collections.Counter(), 'biggest': (0, ''), 'root': set()}
+    paths = []
     for path, size, h in romfs_files(romfs):
-        R['n'] += 1; R['bytes'] += size
+        R['n'] += 1; R['bytes'] += size; paths.append(path)
         parts = path.strip('/').split('/')
         top = '/'.join(parts[:2]) if len(parts) > 2 else parts[0] if len(parts) > 1 else '(root)'
         R['tops'][top] += 1; R['topb'][top] += size
@@ -131,6 +138,7 @@ def facts_of(exefs, romfs):
         mag = next((n for m, n in MAGICS if h.startswith(m)), None)
         if mag: R['mags'][mag] += 1; R['magb'][mag] += size
         if mag in PACKED: R['extc'][ext] += 1
+    R['gl_files'] = gl_file_count(paths)
     return F
 
 
@@ -331,7 +339,7 @@ def build_sources(exefs, romfs, modules):
         for n in names:
             if n.endswith('.trpfs'):
                 with open(os.path.join(d, n), 'rb') as f: trinity += f.read(8) == b'ONEPACK\0'
-    gl_files = sum(1 for _, _, names in os.walk(romfs) for n in names if n.lower().endswith(GL_FILES)) if 'eglCreateWindowSurface' in imports else 0
+    gl_files = gl_file_count(os.path.join(d, n) for d, _, names in os.walk(romfs) for n in names) if 'eglCreateWindowSurface' in imports else 0
     oodle_pkz = 0   # PlatinumGames PKZ archives whose name table (after the 0x20-byte entries) names Oodle Kraken: their entries are decoded with the game's own decoder
     for d, _, names in os.walk(romfs):
         for n in names:

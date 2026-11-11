@@ -72,6 +72,19 @@ int main(int argc, char **argv) {
     assert((h_eglGetProcAddress(missing) != NULL) == stubs);
     assert(resolve_import(NULL, missing) == (uint64_t)&unimpl_stubs[0]);
     assert(!strcmp(wrap_kind, "STUB"));
+    // A loader that passes every name in one reused buffer (Slay the Spire's MonoGame): each missing name counts once, by its text, and a stub keeps its own copy of the name
+    char buf[64]; int nmiss = g_nmiss; unsigned nstub = g_nstub;
+    strcpy(buf, "glMissingOneForTest"); void *one = h_eglGetProcAddress(buf);
+    strcpy(buf, "glMissingTwoForTest"); void *two = h_eglGetProcAddress(buf);
+    strcpy(buf, "glMissingOneForTest"); h_eglGetProcAddress(buf);
+    assert(g_nmiss == nmiss + 2);
+    assert(!strcmp(g_miss_name[nmiss], "glMissingOneForTest") && !strcmp(g_miss_name[nmiss + 1], "glMissingTwoForTest"));
+    if (stubs) {
+        assert(one && two && one != two && g_nstub >= nstub + 2);
+        assert(!strcmp(g_stub_name[nstub], "glMissingOneForTest") && !strcmp(g_stub_name[nstub + 1], "glMissingTwoForTest"));
+    } else assert(!one && !two);
+    // glGetActiveAttrib is a name the loader finds (libGDX's ShaderProgram.fetchAttributes calls it after every link)
+    assert(h_eglGetProcAddress("glGetActiveAttrib"));
     printf("GL imports: %u shared entries, shader handle/source, wrappers and missing names (DM_GL_STUBS=%d): OK\n", count, stubs);
     return 0;
 }

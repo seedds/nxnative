@@ -99,6 +99,24 @@ class GlslSources(unittest.TestCase):
             self.assertEqual(pg.romfs_glsl_files(root), 2)
 
 
+class GlNamesAndFiles(unittest.TestCase):
+    def test_gl_names_as_utf16_strings(self):   # Slay the Spire's main: .NET compiled ahead of time, its GL loader's names are managed (UTF-16) strings
+        self.assertEqual(pg.gl_name_count(b'\0glShaderSource\0'), 1)
+        self.assertEqual(pg.gl_name_count(b'x' + 'glShaderSource'.encode('utf-16-le') + b'y'), 1)
+        self.assertEqual(pg.gl_name_count(b'glShader'), 0)
+
+    def test_libgdx_shader_files_only_in_pairs(self):
+        sts = ['/shaders/spritebatch.vs', '/shaders/spritebatch.fs', '/shaders/blur/vertexShader.vs', '/shaders/blur/fragShader.fs']
+        self.assertEqual(pg.gl_file_count(sts), 4)
+        self.assertEqual(pg.gl_file_count(['/resources/shaders/CRT.fs', '/resources/shaders/dissolve.fs']), 0)   # LÖVE's (Balatro): put together at run time
+        self.assertEqual(pg.gl_file_count(['/a/x.vert', '/a/x.frag', '/b/y.mvgl', '/c/z.VS', '/c/z.FS']), 5)
+
+    def test_shader_files_decide_against_a_capture(self):
+        s = pg.shader_sources({'eglCreateWindowSurface'}, 0, [], 0, 0, gl_names=1, gl_files=14)
+        self.assertEqual(s['graphics'][0], 'gl')
+        self.assertFalse(s['gl_capture'][0])
+
+
 class Npdm(unittest.TestCase):
     def npdm(self, flags):
         d = bytearray(0x80); d[:4] = b'META'; d[0xc] = flags

@@ -1,0 +1,46 @@
+# Game profile of Slay the Spire (Switch, base game 1.0). Plays on the Mac (see README.md)
+# Format: see dm/games/README.md
+# Mega Crit's libGDX (Java) game on MonoGame.Switch, compiled ahead of time to native code by BRUTE (main holds the paths MonoGame.Switch/Brute/mono/mscorlib/... and the class
+# BRUTE.Runtime; its managed strings, com.badlogic.gdx among them, are UTF-16). It renders with NVIDIA's desktop OpenGL through EGL: main takes every GL call from eglGetProcAddress,
+# by names it keeps as UTF-16 strings (glShaderSource among them, never as C text), which the host's GL layer answers on Metal (dm/gfx/gl/hle_gl.m), so NVIDIA's GL driver (subsdk0)
+# is never loaded. SDK 7.3.2
+# The shaders are the GLSL files in the RomFS's shaders/ folder (7 .vs and 7 .fs, as libGDX names them; 11 distinct), which dm/gfx/tools/gl_shaders.py translates offline;
+# a capture run with an empty library showed the game compiles exactly these, so it needs no capture table
+
+# ---- Identity ----
+title_id	010026300BA4A000
+program_id	010026300BA4A000
+
+# ---- App ----
+name	Slay the Spire
+ipa	SlayTheSpire.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v0	1.0	main=21d02e7d96188cf43ebe71a8eb2228f0	sdk=fcf93a41b08c5193a1410d262602dc62
+package	v0
+shader_versions	v0
+
+# ---- Files ----
+# main imports the EGL functions only, so NVIDIA's GL driver (subsdk0, NintendoSDK_OpenGL) stays unloaded
+modules	main sdk
+romfs_marker	font/zhs/SourceHanSerifSC-Bold.otf
+zip_store	.exe:.ogg:.otf:.png:.ttf:.metallib
+
+# ---- Memory ----
+# main sets a heap of at most the pool − 64 MB: a 3328 MB heap region
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares no system resource, so IsVirtualAddressMemoryEnabled is false, as on hardware
+sys_resource	0x0
+
+# ---- Shader split ----
+# no NVN shaders: the profile's NVN tables stay empty and the GL library comes from gl_shaders.py (the RomFS's .vs / .fs files and gl_capture.tsv)
+shader_groups	/=romfs
+shader_note	Slay the Spire's shaders: libGDX's .vs / .fs files in the RomFS and its built-in ones, captured on the Mac; translated by gl_shaders.py, no NVN tables
+
+# ---- After the rewrite ----
+# used memory for the current rewritten modules, at least the default 64 MB
+mem_used	0x7600000

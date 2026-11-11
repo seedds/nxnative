@@ -353,7 +353,7 @@ def maintain(path, *, compress=False, decompress=False, workers=1, say=print):
     with _ownership(path, exclusive=compress or decompress):
         db = sqlite3.connect(path, timeout=0, isolation_level=None)
         part = path + ('.raw.part' if decompress else '.compressed.part')
-        metrics = None
+        metrics: dict[str, object] | None = None
         try:
             compressed = db.execute("SELECT type FROM sqlite_master WHERE name='blob'").fetchone() == ('view',)
             if not compressed and not compress: return

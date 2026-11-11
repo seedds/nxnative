@@ -161,8 +161,29 @@ static void scene_copy_test(void) {
     state_reset();memset(&R,0,sizeof R);g_temporal_depth_frame=UINT64_MAX;g_temporal_flow_n=0;g_temporal_game_depth=nil;
 }
 
+static void diagnostic_flush_test(void) {
+    char dir[]="/tmp/dm-framegen-flush-XXXXXX";CHECK(mkdtemp(dir)!=NULL,"diagnostic temporary directory is created");
+    const char *vars[]={"DM_FRAMEGEN_TIMES","DM_FRAMEGEN_ASYNC_GPU_TIMES","DM_FRAMEGEN_GPU_TIMES"};char paths[3][1024];
+    for(unsigned i=0;i<3;i++){snprintf(paths[i],sizeof paths[i],"%s/trace-%u.tsv",dir,i);setenv(vars[i],paths[i],1);}
+    setenv("DM_OOT_INTERPOLATION_PREVIEW","3",1);mtl_init();
+    framegen_presented(123,7,0,0);temporal_async_note_gpu(123,"generation",1,1.001);temporal_snap_feedback(123,nil);
+    for(unsigned i=0;i<3;i++){
+        FILE *f=fopen(paths[i],"r");CHECK(f!=NULL,"diagnostic stream opens its file");
+        CHECK(f && fgetc(f)==EOF,"a short diagnostic stream stays buffered during play");if(f)fclose(f);
+    }
+    // This is the graphics path SIGTERM reaches before the host calls _exit(0).
+    mtl_drain();
+    for(unsigned i=0;i<3;i++){
+        char bytes[512]={0};FILE *f=fopen(paths[i],"r");size_t n=f?fread(bytes,1,sizeof bytes-1,f):0;if(f)fclose(f);
+        CHECK(n && !strncmp(bytes,"frame\t",6) && strstr(bytes,"\n123\t"),"graphics drain persists the header and record before _exit");
+        unlink(paths[i]);
+    }
+    rmdir(dir);
+}
+
 int main(void){@autoreleasepool{
     alarm(45);int asynchronous=getenv("DM_TEST_ASYNC")!=NULL;
+    if(getenv("DM_TEST_FRAMEGEN_FLUSH")){diagnostic_flush_test();printf("t_framegen_trace_flush: %d checks, %d failures\n",checks,failed);return failed!=0;}
     test_ui_visible=!getenv("DM_TEST_NO_UI");
     if(getenv("DM_TEST_UI_COMPLETION"))setenv("DM_OOT_INTERPOLATION_PREVIEW","3",1);
     if(asynchronous){setenv("DM_OOT_INTERPOLATION_PREVIEW","3",1);setenv("DM_OOT_FRAMEGEN_ASYNC","1",1);}

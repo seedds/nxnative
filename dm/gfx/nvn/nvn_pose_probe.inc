@@ -1,7 +1,7 @@
 // Bounded diagnostic of effective vertex uniforms. No normal-frame history policy.
 static uint64_t g_pose_first=UINT64_MAX,g_pose_bytes;
 static unsigned g_pose_frames=8,g_pose_per_frame,g_pose_palette_bytes;
-static int g_pose_on,g_pose_done,g_pose_truncated,g_pose_copy_failed,g_pose_sync;
+static int g_pose_on,g_pose_done,g_pose_truncated,g_pose_copy_failed,g_pose_sync,g_pose_native,g_pose_native_incomplete;
 static uint64_t g_pose_stop=UINT64_MAX,g_pose_trigger=UINT64_MAX;
 static unsigned g_pose_target_width,g_pose_target_height;
 static const char *g_pose_arm,*g_pose_out,*g_pose_key;
@@ -10,6 +10,7 @@ static int pose_probe_active(void) { if(!g_pose_on||g_pose_done)return 0;uint64_
 static void pose_probe_frame(uint64_t frame) {
     static int configured;
     if(!configured){configured=1;g_pose_arm=getenv("DM_NVN_POSE_PROBE_ARM");g_pose_out=getenv("DM_NVN_POSE_PROBE_OUT");g_pose_key=getenv("DM_NVN_POSE_PROBE_KEY");g_pose_on=g_pose_arm&&*g_pose_arm&&g_pose_out&&*g_pose_out&&g_pose_key&&*g_pose_key;
+        const char *native=getenv("DM_NVN_POSE_PROBE_NATIVE");g_pose_native=native&&!strcmp(native,"1");
         const char *n=getenv("DM_NVN_POSE_PROBE_FRAMES");if(n)g_pose_frames=(unsigned)MAX(1,MIN(8,atoi(n)));const char *sync=getenv("DM_NVN_POSE_PROBE_SYNC_TEMPORAL");g_pose_sync=sync&&atoi(sync);if(g_pose_sync)g_pose_frames=32;const char *palette=getenv("DM_NVN_POSE_PROBE_PALETTE_BYTES");if(palette)g_pose_palette_bytes=(unsigned)MIN(65536,MAX(0,atoi(palette)));}
     if(!g_pose_on||g_pose_done)return;
     g_pose_per_frame=0;
@@ -20,14 +21,14 @@ static void pose_probe_frame(uint64_t frame) {
     [[NSFileManager defaultManager] createDirectoryAtPath:@(g_pose_out) withIntermediateDirectories:YES attributes:nil error:&error];
     int io_ok=error==nil;
     for(NSDictionary *record in g_pose_rows){NSMutableDictionary *row=[record mutableCopy];
-        for(NSString *category in @[@"bindings",@"geometry"]){NSMutableArray *saved=[NSMutableArray array];
+        for(NSString *category in @[@"bindings",@"geometry",@"native_bindings"]){NSMutableArray *saved=[NSMutableArray array];
         for(NSDictionary *binding in record[category]){NSMutableDictionary *b=[binding mutableCopy];id<MTLBuffer> data=b[@"buffer"];[b removeObjectForKey:@"buffer"];
-            if(complete&&!g_pose_copy_failed){NSString *kind=b[@"kind"]?:@"cb";NSNumber *slot=b[@"slot"]?:b[@"reg"];NSString *name=[NSString stringWithFormat:@"f%@-d%@-%@%@.bin",record[@"frame"],record[@"ordinal"],kind,slot];NSData *bytes=[NSData dataWithBytes:data.contents length:[b[@"size"] unsignedIntegerValue]];
+            if(data&&([category isEqual:@"native_bindings"]||(complete&&!g_pose_copy_failed))){NSString *kind=b[@"kind"]?:@"cb";NSNumber *slot=b[@"slot"]?:b[@"reg"];NSString *name=[NSString stringWithFormat:@"f%@-d%@-%@%@.bin",record[@"frame"],record[@"ordinal"],kind,slot];NSData *bytes=[NSData dataWithBytes:data.contents length:[b[@"size"] unsignedIntegerValue]];
                 if(![bytes writeToFile:[@(g_pose_out) stringByAppendingPathComponent:name] options:NSDataWritingAtomic error:&error])io_ok=0;b[@"file"]=name;}
-            if(complete)res_remove(data);else defer_obj_release(data);
+            if(data){if(complete||[category isEqual:@"native_bindings"])res_remove(data);else defer_obj_release(data);}
             [saved addObject:b];}
         row[category]=saved;}[rows addObject:row];}
-    NSDictionary *receipt=@{@"first_frame":@(g_pose_first),@"frames":@(g_pose_frames),@"stop_frame":@(g_pose_stop),@"temporal_trigger":@(g_pose_trigger),@"synchronized":@(g_pose_sync),@"synchronization_complete":@(!g_pose_sync||(g_pose_stop!=UINT64_MAX&&frame>=g_pose_stop)),@"complete":@(complete),@"copy_failed":@(g_pose_copy_failed),@"truncated":@(g_pose_truncated),@"io_ok":@(io_ok),@"bytes":@(g_pose_bytes),@"rows":rows};
+    NSDictionary *receipt=@{@"first_frame":@(g_pose_first),@"frames":@(g_pose_frames),@"stop_frame":@(g_pose_stop),@"temporal_trigger":@(g_pose_trigger),@"synchronized":@(g_pose_sync),@"synchronization_complete":@(!g_pose_sync||(g_pose_stop!=UINT64_MAX&&frame>=g_pose_stop)),@"complete":@(complete),@"copy_failed":@(g_pose_copy_failed),@"native_enabled":@(g_pose_native),@"native_incomplete":@(g_pose_native_incomplete),@"truncated":@(g_pose_truncated),@"io_ok":@(io_ok),@"bytes":@(g_pose_bytes),@"rows":rows};
     NSData *json=[NSJSONSerialization dataWithJSONObject:receipt options:NSJSONWritingPrettyPrinted error:&error];
     if(!json||![json writeToFile:[@(g_pose_out) stringByAppendingPathComponent:@"receipt.json"] options:NSDataWritingAtomic error:&error])io_ok=0;
     MLOG("%sPOSE_PROBE_DONE rows %lu bytes %llu complete=%d copy_failed=%d truncated=%d io_ok=%d",complete&&!g_pose_copy_failed&&io_ok?"":"[RED] ",(unsigned long)rows.count,(unsigned long long)g_pose_bytes,complete,g_pose_copy_failed,g_pose_truncated,io_ok);
@@ -52,6 +53,37 @@ static NSDictionary *pose_probe_geometry(uint64_t guest,uint64_t size,NSString *
     if(!data){g_pose_copy_failed=1;return nil;}res_add(data);g_pose_bytes+=size;
     NSDictionary *copy=@{@"kind":kind,@"slot":@(slot),@"guest_address":@(guest),@"effective_gpu":@(source),@"size":@(size),@"buffer":data};[g_pose_jobs addObject:copy];return copy;
 }
+// Native ranges never use the argument-buffer address: that can be a short prefix shadow.
+// Returned CPU-owned bytes are immutable at this draw and never enter g_pose_jobs.
+static NSDictionary *pose_probe_native_binding(NvShader *sh,unsigned reg) {
+    const p_bind_buf *u=&S.ubo[0][reg];int used=0;
+    for(int i=0;i<sh->rf.nb;i++)if(sh->rf.b[i].kind==NVN_RB_CBUF&&sh->rf.b[i].reg==reg){used=1;break;}
+    uint64_t n=u->size,prefix=used?MIN(cb_len(sh,reg,n),65536ull):0;
+    NSMutableDictionary *b=[@{@"kind":@"native_cb",@"stage":@0,@"reg":@(reg),@"native_address":@(u->addr),@"native_size":@(n),@"shader_prefix_size":@(prefix),
+        @"shader_used":@(used),@"binding_semantics":used?@"shader-used":@"unused-or-stale-binding",@"read_size":@0,@"size":@0,@"status":@"unbound"} mutableCopy];
+    if(!u->addr||!n){if(u->addr||n){b[@"status"]=@"incomplete-empty-binding";g_pose_native_incomplete=1;}return b;}
+    if(n>UBP_MAX_BYTES){b[@"status"]=@"incomplete-oversize";g_pose_truncated=g_pose_native_incomplete=1;return b;}
+    if(u->addr>UINT64_MAX-n){b[@"status"]=@"incomplete-range-overflow";g_pose_native_incomplete=1;return b;}
+    const uint64_t limit=64ull*1024*1024;
+    if(g_pose_bytes>limit||n>limit-g_pose_bytes){b[@"status"]=@"incomplete-byte-budget";g_pose_truncated=g_pose_native_incomplete=1;return b;}
+    id<MTLBuffer> data=[g_dev newBufferWithLength:(NSUInteger)n options:MTLResourceStorageModeShared];
+    if(!data){b[@"status"]=@"incomplete-allocation";g_pose_native_incomplete=1;return b;}
+    uint64_t hi=u->addr+n,gpu=0;const uint8_t *cpu=NULL;
+    if(g_nubd&&ubd_covers(u->addr,hi)) {
+        // Full immutable inline coverage supersedes earlier writes, including GPU-only ones.
+        ubd_read(u->addr,(size_t)n,data.contents);b[@"resolution"]=@"full-inline-updates";
+    } else {
+        uint64_t why[5];memcpy(why,g_ubp_why,sizeof why);
+        if(!ubp_get(u->addr,hi,&gpu,&cpu)) {
+            static NSString *const reasons[]={@"shadow-disabled",@"unknown-gpu-write",@"earlier-inflight-gpu-write",@"queued-copy-fill-or-feedback",@"unreadable-or-write-overflow"};
+            b[@"status"]=@"incomplete-shadow-unavailable";b[@"reason"]=@"unclassified";
+            for(unsigned i=0;i<5;i++)if(g_ubp_why[i]!=why[i]){b[@"reason"]=reasons[i];break;}
+            g_pose_native_incomplete=1;return b;
+        }
+        ubc_wait(g_ubp_ready);memcpy(data.contents,cpu,(size_t)n);b[@"resolution"]=@"full-range-shadow";b[@"resolved_gpu"]=@(gpu);
+    }
+    res_add(data);g_pose_bytes+=n;b[@"buffer"]=data;b[@"read_size"]=@(n);b[@"size"]=@(n);b[@"status"]=@"captured";return b;
+}
 static void pose_probe_note(NvProg *program,const p_draw *dw,const p_draw_idx *di,int pulled) {
     if(!pose_probe_active()||!program->sh[0]||!R.rt.depth||!g_pass.hd||!S.ds.dw)return;
     int seed=!strcmp(program->sh[0]->key,g_pose_key),candidate=0;
@@ -67,6 +99,8 @@ static void pose_probe_note(NvProg *program,const p_draw *dw,const p_draw_idx *d
         uint64_t source=slots[b->aid];if(!source){g_pose_copy_failed=1;continue;}
         id<MTLBuffer> data=[g_dev newBufferWithLength:(NSUInteger)n options:MTLResourceStorageModeShared];if(!data){g_pose_copy_failed=1;continue;}res_add(data);g_pose_bytes+=n;
         NSDictionary *binding=@{@"reg":@(b->reg),@"guest_address":@(u->addr),@"effective_gpu":@(source),@"size":@(n),@"buffer":data};[bindings addObject:binding];[g_pose_jobs addObject:binding];}
+    NSMutableArray *native_bindings=nil;
+    if(g_pose_native&&seed){native_bindings=[NSMutableArray array];for(unsigned reg=0;reg<4;reg++)[native_bindings addObject:pose_probe_native_binding(sh,reg)];}
     NSMutableArray *vertices=[NSMutableArray array],*attributes=[NSMutableArray array],*geometry=[NSMutableArray array];
     static int capture_geometry=-1;if(capture_geometry<0){const char *v=getenv("DM_NVN_POSE_PROBE_GEOMETRY");capture_geometry=v&&atoi(v);}
     NSString *geometry_status=@"disabled";
@@ -87,7 +121,7 @@ static void pose_probe_note(NvProg *program,const p_draw *dw,const p_draw_idx *d
         for(int v=0;v<sh->rf.nv;v++)if(sh->rf.v[v].nvn==i){used=1;converted=vconv_wanted(&sh->rf,v,NULL,vin_on(sh,NULL,S.rast_discard));}
         [attributes addObject:@{@"location":@(i),@"format":@(S.attr[i].fmt),@"offset":@(S.attr[i].offset),@"stream":@(S.attr[i].stream),@"used":@(used),@"converted":@(converted)}];}
     NSData *draw=[NSData dataWithBytes:dw?(const void *)dw:(const void *)di length:dw?sizeof(*dw):sizeof(*di)];
-    [g_pose_rows addObject:@{@"frame":@(atomic_load(&g_cur_frame)),@"ordinal":@(g_pose_rows.count),@"pass":@(g_stat_pass),@"draw":@(g_stat_draw+1),@"depth_serial":@(R.rt.depth->serial),@"width":@(g_pass.tw),@"height":@(g_pass.th),@"vertex":@(sh->key),@"seed":@(seed),@"indexed":@(di!=NULL),@"draw_struct_base64":[draw base64EncodedStringWithOptions:0],@"draw_struct_size":@(draw.length),@"vertices":vertices,@"attributes":attributes,@"bindings":bindings,@"geometry":geometry,@"geometry_status":geometry_status,@"pulled":@(pulled),
+    [g_pose_rows addObject:@{@"frame":@(atomic_load(&g_cur_frame)),@"ordinal":@(g_pose_rows.count),@"pass":@(g_stat_pass),@"draw":@(g_stat_draw+1),@"depth_serial":@(R.rt.depth->serial),@"width":@(g_pass.tw),@"height":@(g_pass.th),@"vertex":@(sh->key),@"seed":@(seed),@"indexed":@(di!=NULL),@"draw_struct_base64":[draw base64EncodedStringWithOptions:0],@"draw_struct_size":@(draw.length),@"vertices":vertices,@"attributes":attributes,@"bindings":bindings,@"native_bindings":native_bindings?:@[],@"native_enabled":@(g_pose_native&&seed),@"geometry":geometry,@"geometry_status":geometry_status,@"pulled":@(pulled),
         @"viewport":@[@(g_ed.vp.originX),@(g_ed.vp.originY),@(g_ed.vp.width),@(g_ed.vp.height),@(g_ed.vp.znear),@(g_ed.vp.zfar)],
         @"scissor":@[@(g_ed.sc.x),@(g_ed.sc.y),@(g_ed.sc.width),@(g_ed.sc.height)],@"cull":@(g_ed.cull),@"winding":@(g_ed.wind)}];g_pose_per_frame++;
 }

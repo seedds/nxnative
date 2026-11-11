@@ -136,13 +136,16 @@ static void temporal_snap_check_completed(temporal_snap_slot *s) {
     s->control=s->control_srgb=nil;
 }
 #include "nvn_temporal_async.inc"
+// Buffer diagnostic records: per-image disk flushes on completion/presented
+// callbacks can disturb cadence. Graphics drain flushes these before graceful _exit.
+static pthread_mutex_t g_framegen_snapshot_gpu_mu=PTHREAD_MUTEX_INITIALIZER;static FILE *g_framegen_snapshot_gpu_file;
 static void temporal_snap_feedback(uint64_t frame,id<MTL4CommitFeedback> feedback) {
     const char *path=getenv("DM_FRAMEGEN_GPU_TIMES");if(!path || !*path)return;
-    static pthread_mutex_t mu=PTHREAD_MUTEX_INITIALIZER;static FILE *file;static int opened;
-    pthread_mutex_lock(&mu);
-    if(!opened){opened=1;file=fopen(path,"w");if(file)fprintf(file,"frame\tgpu_start_s\tgpu_end_s\tgpu_ms\n");}
-    if(file){fprintf(file,"%llu\t%.9f\t%.9f\t%.6f\n",(unsigned long long)frame,feedback.GPUStartTime,feedback.GPUEndTime,(feedback.GPUEndTime-feedback.GPUStartTime)*1000);fflush(file);}
-    pthread_mutex_unlock(&mu);
+    static char trace_buffer[1u<<20];static int opened;
+    pthread_mutex_lock(&g_framegen_snapshot_gpu_mu);
+    if(!opened){opened=1;g_framegen_snapshot_gpu_file=fopen(path,"w");if(g_framegen_snapshot_gpu_file){setvbuf(g_framegen_snapshot_gpu_file,trace_buffer,_IOFBF,sizeof trace_buffer);fprintf(g_framegen_snapshot_gpu_file,"frame\tgpu_start_s\tgpu_end_s\tgpu_ms\n");}}
+    if(g_framegen_snapshot_gpu_file){fprintf(g_framegen_snapshot_gpu_file,"%llu\t%.9f\t%.9f\t%.6f\n",(unsigned long long)frame,feedback.GPUStartTime,feedback.GPUEndTime,(feedback.GPUEndTime-feedback.GPUStartTime)*1000);}
+    pthread_mutex_unlock(&g_framegen_snapshot_gpu_mu);
 }
 static uint64_t temporal_snap_encode_producer(id<MTL4CommandBuffer> cb,unsigned slot,id<MTLTexture> native,const int rect[4],uint64_t frame,uint64_t now,id<MTLTexture> world,id<MTLTexture> ui,id<MTLTexture> depth,nvn_camera_input camera,id<MTLSharedEvent> producer,uint64_t producer_value,const int present_crop[4]) {
     int asynchronous=temporal_async_on();

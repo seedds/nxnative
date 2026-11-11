@@ -51,13 +51,16 @@ static void temporal_async_wait_source(uint64_t serial) {
         if(v && ![g_temporal_async_done waitUntilSignaledValue:v timeoutMS:10000])MDIE("snapshot diagnostic: auxiliary producer did not complete");
     }
 }
+// Buffer diagnostic records: per-image disk flushes on completion/presented
+// callbacks can disturb cadence. Graphics drain flushes these before graceful _exit.
+static pthread_mutex_t g_framegen_async_gpu_mu=PTHREAD_MUTEX_INITIALIZER;static FILE *g_framegen_async_gpu_file;
 static void temporal_async_note_gpu(uint64_t frame,const char *kind,double begin,double end) {
     const char *path=getenv("DM_FRAMEGEN_ASYNC_GPU_TIMES");if(!path || !*path)return;
-    static pthread_mutex_t mu=PTHREAD_MUTEX_INITIALIZER;static FILE *file;static int opened;
-    pthread_mutex_lock(&mu);
-    if(!opened){opened=1;file=fopen(path,"w");if(file)fprintf(file,"frame\tkind\tgpu_start_s\tgpu_end_s\tgpu_ms\n");}
-    if(file){fprintf(file,"%llu\t%s\t%.9f\t%.9f\t%.6f\n",(unsigned long long)frame,kind,begin,end,(end-begin)*1000);fflush(file);}
-    pthread_mutex_unlock(&mu);
+    static char trace_buffer[1u<<20];static int opened;
+    pthread_mutex_lock(&g_framegen_async_gpu_mu);
+    if(!opened){opened=1;g_framegen_async_gpu_file=fopen(path,"w");if(g_framegen_async_gpu_file){setvbuf(g_framegen_async_gpu_file,trace_buffer,_IOFBF,sizeof trace_buffer);fprintf(g_framegen_async_gpu_file,"frame\tkind\tgpu_start_s\tgpu_end_s\tgpu_ms\n");}}
+    if(g_framegen_async_gpu_file){fprintf(g_framegen_async_gpu_file,"%llu\t%s\t%.9f\t%.9f\t%.6f\n",(unsigned long long)frame,kind,begin,end,(end-begin)*1000);}
+    pthread_mutex_unlock(&g_framegen_async_gpu_mu);
 }
 static id<MTLFXFrameInterpolator> temporal_async_create(NSUInteger w,NSUInteger h,NSUInteger iw,NSUInteger ih,MTLPixelFormat color,MTLPixelFormat ui) {
     if(!temporal_async_init() || !temporal_motion_pipeline())return nil;

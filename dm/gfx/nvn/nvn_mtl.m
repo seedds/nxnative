@@ -2437,7 +2437,8 @@ void mtl_present_flush(void);
 void mtl_finish(void) { mtl_finish_gpu_at(WS_FINISH); }
 static void present_drop_for_suspend(void);
 static void snap_drain(void);
-void mtl_drain(void) { present_drop_for_suspend(); mtl_present_flush(); snap_drain(); mtl_init(); id<MTLCommandBuffer> cb = q_cb(); [cb commit]; [cb waitUntilCompleted]; mtl_finish_gpu(); }
+static void framegen_diagnostics_flush(void);
+void mtl_drain(void) { present_drop_for_suspend(); mtl_present_flush(); snap_drain(); mtl_init(); id<MTLCommandBuffer> cb = q_cb(); [cb commit]; [cb waitUntilCompleted]; mtl_finish_gpu(); framegen_diagnostics_flush(); }
 
 // ================= Render replay =================
 #include "../../host/front.h"
@@ -15930,18 +15931,21 @@ static void present_complete(unsigned index,uint64_t display,uint64_t ticket,int
     if(display>g_present_alloc_done[index])g_present_alloc_done[index]=display;
     g_pq_inflight--;
 }
+// Buffer diagnostic records: per-image disk flushes on completion/presented
+// callbacks can disturb cadence. Graphics drain flushes these before graceful _exit.
+static pthread_mutex_t g_framegen_presented_mu=PTHREAD_MUTEX_INITIALIZER;static FILE *g_framegen_presented_file;
 static void framegen_presented(uint64_t frame,uint64_t ticket,int generated,double time) {
     if(temporal_preview_on()!=3 && !getenv("DM_FRAMEGEN_TIMES"))return;
-    static pthread_mutex_t mu=PTHREAD_MUTEX_INITIALIZER;static FILE *file;static int opened;static uint64_t originals,extras;
-    pthread_mutex_lock(&mu);
-    if(!opened){opened=1;const char *path=getenv("DM_FRAMEGEN_TIMES");if(path){file=fopen(path,"w");if(file)fprintf(file,"frame\tticket\tgenerated\tpresented_s\n");}}
-    if(file){fprintf(file,"%llu\t%llu\t%d\t%.9f\n",(unsigned long long)frame,(unsigned long long)ticket,generated,time);fflush(file);}
+    static char trace_buffer[1u<<20];static int opened;static uint64_t originals,extras;
+    pthread_mutex_lock(&g_framegen_presented_mu);
+    if(!opened){opened=1;const char *path=getenv("DM_FRAMEGEN_TIMES");if(path){g_framegen_presented_file=fopen(path,"w");if(g_framegen_presented_file){setvbuf(g_framegen_presented_file,trace_buffer,_IOFBF,sizeof trace_buffer);fprintf(g_framegen_presented_file,"frame\tticket\tgenerated\tpresented_s\n");}}}
+    if(g_framegen_presented_file){fprintf(g_framegen_presented_file,"%llu\t%llu\t%d\t%.9f\n",(unsigned long long)frame,(unsigned long long)ticket,generated,time);}
     if(time>0) {
         if(generated){if(!extras++)MLOG("first generated drawable presented (native frame %llu)",(unsigned long long)frame);}
         else originals++;
         if((originals+extras)%240==0)MLOG("frame generation actual presentations: native %llu, generated %llu",(unsigned long long)originals,(unsigned long long)extras);
     }
-    pthread_mutex_unlock(&mu);
+    pthread_mutex_unlock(&g_framegen_presented_mu);
 }
 static void temporal_async_wait_source(uint64_t serial);
 static int temporal_async_present(uint64_t serial,id<MTLTexture> src,double period,uint64_t frame,uint64_t ticket,const int crop[4],id<CAMetalDrawable> drawable,double target,int generated);
@@ -16402,6 +16406,19 @@ static id<MTLResidencySet> g_snap_res; static id<MTLSharedEvent> g_snap_ev; stat
 static _Atomic uint64_t g_snap_next, g_snap_cmt;   // g_snap_cmt: the last copy the encode thread has committed (its g_snap_v)
 static int g_snap_n = 2;
 #include "nvn_temporal_snapshot.inc"
+
+// SIGTERM's graceful host shutdown drains graphics, then uses _exit rather than
+// exit. Flush only our owned streams, under their writers' locks, outside play.
+static void framegen_diagnostics_flush(void) {
+    pthread_mutex_t *locks[]={&g_framegen_presented_mu,&g_framegen_async_gpu_mu,&g_framegen_snapshot_gpu_mu};
+    FILE **files[]={&g_framegen_presented_file,&g_framegen_async_gpu_file,&g_framegen_snapshot_gpu_file};
+    for(unsigned i=0;i<3;i++) {
+        pthread_mutex_lock(locks[i]);
+        if(*files[i] && fflush(*files[i]))MLOG("[RED] frame-generation diagnostic flush failed: %s",strerror(errno));
+        pthread_mutex_unlock(locks[i]);
+    }
+}
+
 int mtl_snap_on(void) {
     static int v = -1; if (v >= 0) return v;
     const char *e = getenv("DM_PRESENT_SNAP");

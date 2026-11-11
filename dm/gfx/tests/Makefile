@@ -620,6 +620,10 @@ check_t_temporal_preview: t_temporal_preview
 
 t_temporal_snapshot: t_temporal_snapshot.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_temporal_snapshot.m $(MTL_T_SRC) $(FW)
+check_t_framegen_trace_flush: t_temporal_snapshot
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 DM_TEST_FRAMEGEN_FLUSH=1 ./t_temporal_snapshot
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 DM_TEST_FRAMEGEN_FLUSH=1 ./t_temporal_snapshot
+
 check_t_temporal_snapshot: t_temporal_snapshot
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./t_temporal_snapshot
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./t_temporal_snapshot
@@ -683,7 +687,18 @@ t_pose_probe: t_pose_probe.m t_pixel_probe.m t_unwritten_store.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pose_probe.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_pose_probe
 check_t_pose_probe: t_pose_probe
-	MTL_DEBUG_LAYER=1 ./t_pose_probe
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./t_pose_probe
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 DM_TEST_POSE_NATIVE=1 ./t_pose_probe
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 DM_TEST_POSE_BROAD=1 ./t_pose_probe
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 DM_TEST_POSE_BROAD=1 DM_TEST_POSE_NATIVE=1 ./t_pose_probe
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 DM_TEST_POSE_SYNC=1 ./t_pose_probe
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 DM_TEST_POSE_SYNC=1 DM_TEST_POSE_NATIVE=1 ./t_pose_probe
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./t_pose_probe
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 DM_TEST_POSE_NATIVE=1 ./t_pose_probe
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 DM_TEST_POSE_BROAD=1 ./t_pose_probe
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 DM_TEST_POSE_BROAD=1 DM_TEST_POSE_NATIVE=1 ./t_pose_probe
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 DM_TEST_POSE_SYNC=1 ./t_pose_probe
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 DM_TEST_POSE_SYNC=1 DM_TEST_POSE_NATIVE=1 ./t_pose_probe
 
 t_native_upscale_capture: t_native_upscale_capture.m t_unwritten_store.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_native_upscale_capture.m $(MTL_T_SRC) $(FW)

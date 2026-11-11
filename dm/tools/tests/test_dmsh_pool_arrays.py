@@ -1,32 +1,17 @@
-"""dmsh_build.py pool_arrays and reflect on synthetic MSL: Ryujinx's arrays for a handle traced to no slot, sized to the whole texture / sampler ID ranges (Program.cs), become pointers to
+"""dmsh_reflect.py pool_arrays and reflect on synthetic MSL: Ryujinx's arrays for a handle traced to no slot, sized to the whole texture / sampler ID ranges (Program.cs), become pointers to
 the pools the replay keeps (nvn_mtl.m pool_gpu), declared with one element and read through a pointer to it with the run-time bound; the argument IDs are renumbered as the host lays the buffer out; 32-entry slot arrays stay; members with
 attributes after their id (raster_order_group) are read; a member or a use the rewrite cannot read stops the shader instead of leaving the host's argument buffer longer than the reflection."""
-import ast
 from pathlib import Path
 import re
 import sys
-import types
 import unittest
 
 TOOLS = Path(__file__).resolve().parents[2] / 'gfx/tools'
 sys.path.insert(0, str(TOOLS))
 import dmsh_abi as abi   # noqa: E402
+import dmsh_reflect   # noqa: E402
 
-FUNCS = {'decode_tex', 'const_sampler', 'decode_ubo_tex', 'decode_ubo_img', 'c2_array', 'pool_arrays', 'reflect', 'has_word', 'in_word'}
-NAMES = {'POOL_MIN', 'POOL_MARK', 'TEX_BASE', 'SSBO'}
-
-
-def load():
-    tree = ast.parse((TOOLS / 'dmsh_build.py').read_text())
-    nodes: list[ast.stmt] = [n for n in tree.body if (isinstance(n, ast.FunctionDef) and n.name in FUNCS)
-             or (isinstance(n, ast.Assign) and any(isinstance(t, (ast.Name, ast.Tuple)) and {getattr(e, 'id', None) for e in (t.elts if isinstance(t, ast.Tuple) else [t])} & NAMES for t in n.targets))]
-    ns = {'re': re, 'abi': abi, 'dmsh_geometry': types.SimpleNamespace(HELPERS={})}
-    exec(compile(ast.Module(body=nodes, type_ignores=[]), str(TOOLS / 'dmsh_build.py'), 'exec'), ns)
-    assert FUNCS <= set(ns), FUNCS - set(ns)
-    return ns
-
-
-NS = load()
+NS = vars(dmsh_reflect)
 MSL = '''struct spvDescriptorSetBuffer0
 {
     constant _10* support_buffer [[id(0)]];
@@ -84,7 +69,8 @@ class PoolArrays(unittest.TestCase):
 
 class Reflect(unittest.TestCase):
     def test_pools_and_attributes(self):
-        b = {e['msl_name']: e for e in NS['reflect']('k', 'ps', NS['pool_arrays'](MSL), {'sbufs': []})}
+        b = {e['msl_name']: e for e in NS['reflect']('k', 'ps', NS['pool_arrays'](MSL), {'sbufs': [], 'cbufs': [{'slot': 5, 'fixed': 64}]})}
+        self.assertEqual((b['fp_c5']['kind'], b['fp_c5']['reg'], b['fp_c5']['fixed']), (abi.KIND_CBUF, 2, 64))   # the translator's count of the slot's bytes read at fixed offsets
         self.assertEqual((b['fp_t2d_cb0_40000000']['kind'], b['fp_t2d_cb0_40000000']['elem'], b['fp_t2d_cb0_40000000']['arg_id']), (abi.KIND_TEX_POOL, 'texture2d<float>', 2))
         self.assertEqual((b['fp_s_cb0_40000000']['kind'], b['fp_s_cb0_40000000']['arg_id']), (abi.KIND_SAMP_POOL, 3))
         self.assertEqual((b['fp_i_cb2_48_rg32ui']['kind'], b['fp_i_cb2_48_rg32ui']['reg'], b['fp_i_cb2_48_rg32ui']['arg_id']), (abi.KIND_IMG, 0, 36))
@@ -108,13 +94,13 @@ kernel void main0(constant spvDescriptorSetBuffer0& spvDescriptorSet0 [[buffer(0
         self.assertNotIn('early_fragment_tests', NS['pool_arrays'](src.replace('kernel void', 'fragment main0_out')))   # nothing marked, nothing stored: the test stays where Metal puts it
         self.assertIn('(&spvDescriptorSet0.cp_t2da_cb196612_10570000Smplr->e[0])[min(uint(_7), spvDescriptorSet0.cp_t2da_cb196612_10570000Smplr->n)]', out)   # a sampler read does not
         self.assertIn('array<texture2d<float>, 32> fp_t2d_cb14_0 [[id(2)]];', out)   # a pointer takes one ID; an array of 32 stays an array (nothing in the game's buffers is that short now but images and buffer textures)
-        b = {e['msl_name']: e for e in NS['reflect']('k', 'cs', out, {'sbufs': []})}
+        b = {e['msl_name']: e for e in NS['reflect']('k', 'cs', out, {'sbufs': [], 'cbufs': []})}
         t, s = b['cp_t2da_cb196612_10570000'], b['cp_t2da_cb196612_10570000Smplr']
         self.assertEqual((t['kind'], t['elem'], t['reg'], t['off'], t['arg_id'], t.get('soff')), (abi.KIND_TEX_HTAB, 'texture2d_array<float>', 1, 0, 0, 0x570))
         self.assertEqual((s['kind'], s['reg'], s['off'], s['arg_id'], s['soff'], s['sreg']), (abi.KIND_SAMP_HTAB, 1, 0, 1, 0x570, abi.SREG_C2))
 
     def test_unreadable_member(self):
-        with self.assertRaises(ValueError): NS['reflect']('k', 'ps', MSL.replace('raster_order_group(0)', 'raster_order_group'), {'sbufs': []})
+        with self.assertRaises(ValueError): NS['reflect']('k', 'ps', MSL.replace('raster_order_group(0)', 'raster_order_group'), {'sbufs': [], 'cbufs': []})
 
 
 if __name__ == '__main__':

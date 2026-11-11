@@ -299,6 +299,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** the host now signals it once when it is bound for a connected controller, and again when a player's controller connects or goes away.
 - **Found on:** [The Legend of Zelda: Link's Awakening](../../dm/games/01006BB00C6F0000/README.md) (SDK 8.2.0).
 
+### No input after the console mode changes at run time
+
+- **Symptom:** the game runs on but takes no input, from the touch gamepad or a controller, after the console mode is switched at run time (to handheld and back to docked), until it is restarted.
+- **Cause:** a mode change moves player 1 between the Handheld npad and No1, as taking the Joy-Cons off the console's rails or putting them back does, and the hid service signals the style update event of every npad whose controller came or went. The host pushed notification 30 and signalled none, and it kept no event bound to Handheld (0x20) at all. A game that waits for those events stays on the npad it has: Hades II, sent to Handheld by the controller applet in handheld mode, kept reading it once docked, where it is empty.
+- **Fix:** one function, `styles_sync` (`hle_hid.c`), signals the bound event of each npad (No1..No8 and Handheld) whose style is no longer the one the game was last told, and everything a style depends on calls it after its change: the console mode (`dm_set_opmode`, before the notification), the players and their Joy-Cons, the ids and styles the game supports, its Joy-Con assignment. A split pair's second npad, which handheld mode takes back, is signalled with the rest. `t_hid.c` (`t_opmode`) and `t_oe.c` cover it.
+- **Found on:** [Hades II](../../dm/games/0100A00019DE0000/README.md) ([issue #2143](https://github.com/seedds/nxnative/issues/2143)); on the Mac, `DM_OE_SCRIPT="opmode=0@15,opmode=1@21.5"` on the note's route reproduces it (the applet answers at the press between the two).
+
 ### Six-axis sensors
 
 - **Symptom:** motion moves never happen; shaking does nothing (Super Mario Odyssey: cap throws by shaking).
@@ -393,6 +400,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Cause:** `IOHIDManager` hands a device over once per matching dictionary it meets, each time as a new `IOHIDDeviceRef` for the same I/O Registry entry. The Pro Controller meets both the GamePad usage dictionary and its own vendor / product one (added so identical pads are counted), and `hidpad_found` knew devices by reference only, so one pad counted as two pads of its model against GameController's one controller ([Identical controllers that GameController lists as one](#identical-controllers-that-gamecontroller-lists-as-one)).
 - **Fix:** `pad_hid_mac.h` knows a device by its registry entry ID (`hidpad_entry`): a second reference to a known entry is ignored in every list.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md), one Pro Controller over Bluetooth on the Mac: no music in Kokiri Forest gameplay or its cutscenes, back once the pad was read once.
+
+### A keyboard receiver that declares a gamepad takes player 1
+
+- **Symptom:** on the Mac, with a keyboard and mouse receiver plugged in, the log shows `controller '<receiver>' (HID) connected: player 1` and the real controller as player 2; a one-player game takes no input from it and opens the controller applet again and again (`hid controller applet: 1 to 1 players wanted, 2 connected`).
+- **Cause:** the receiver declares a Generic Desktop GamePad or Joystick collection, so it matches the raw HID pad filter (`hidpad_start`), and a raw HID pad took the lowest free player at its connection. A HID descriptor only claims a controller: nothing in it tells a receiver that never sends a report through that collection from a pad at rest. `+[GCController supportsHIDDevice:]` answers YES for this receiver and GameController never lists it, so since the two-second wait for such devices (463d21f7) it was read as HID; before that it was skipped.
+- **Fix:** a raw HID pad is a player from its first button press, not from its connection (`hidpad_first_press`, `front_mac.m`), through the path of [Press a button to join](../settings.md#press-a-button-to-join) but with the slot a connecting controller takes (`pad_slot_take`): the log says `press a button to play`, then `a button pressed: player N`. A device that never presses takes no player. Identical pads read here (twins) are models GameController lists and stay players at their connection.
+- **Open:** not run with such a receiver (none here): the issue stays open for the reporter's retest. The applet opening in a loop when a one-player game sees two players is a cause of its own ([issue #2237](https://github.com/seedds/nxnative/issues/2237)).
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md), a Keychron Link receiver (3434:d030) over USB and a Pro Controller over Bluetooth, macOS 27.0.1 ([issue #1657](https://github.com/seedds/nxnative/issues/1657)).
 
 ### SDK 20 six-axis sensor and amiibo (`nfp`) calls
 
@@ -1115,6 +1130,14 @@ Most service calls can be found before they crash, before the first boot or the 
   - The Switch 2 transport turns the sensor on with its own feature bit, `0x10` (`S2_FEATURE_MOUSE`, `switch2_proto.h`), only once the game has set up the sensors or the pointer (`InitializeJcms` / `InitializeNmouse`, `dm_joy_mouse_wanted`), as the console does for a game that uses them; a controller that connected before is sent the two feature commands again with the bit (not yet checked on hardware), and keeps it on while connected. Measured on a right Joy-Con 2 slid on a desk: report bytes 0x10 and 0x12 are 16-bit position counters that wrap (x right, y toward the player). 0x14 and 0x16 jump from about 1,600 and 150 on a surface to about 4,600 and 3,200 when lifted, and 0x16 under 1,000 counts as on a surface. While lifted, no movement is reported. The Pro Controller 2 has no sensor.
   - `DM_JCMS_LOG=1` logs the game's sensor and pointer calls, at most once a second each kind.
 - **Found on:** Nintendo Switch 2 Welcome Tour (040057C02159A000; its note and profile are their own pull request): its cursor and its mouse exhibits, with a left and a right Joy-Con 2. `t_hid` checks the states, the handles and their order, and the styles.
+
+### Home button protection on a Switch 2 controller
+
+- **Symptom:** a Switch 2 game crashes as a Joy-Con 2 joins: `[RED] sf: the game connects to service hid itself, which the host does not serve`, then `CRASH sig=11 addr=0` at `sdk+0x63ce10`, called from `nn::hid::EnableUnintendedHomeButtonInputProtection`.
+- **Cause:** `nn::hid::EnableUnintendedHomeButtonInputProtection(const NpadIdType&, bool)` turns on a guard against a Home press made by accident on that controller. It returns nothing; the SDK's own sets the flag through the hid service, which the host does not serve, and calls through the null session.
+- **Fix:** the host answers it (`hle_hid.c`), records the setting per npad (No 1-8, Other, Handheld) and logs it (`hid: EnableUnintendedHomeButtonInputProtection npad 0 on`). The question, `IsUnintendedHomeButtonInputProtectionEnabled(const NpadIdType&)`, whose SDK function asks the service too, answers what the game set, off by default. The host handles the Home button itself ([home_quit.h](../../dm/host/home_quit.h)), so nothing else changes.
+- **Found on:** Drag x Drive (040041601D83A000, v196608, SDK 20; no profile in the repository yet): 43 s in, as player 1's Joy-Con 2 pair joined (`main+0x2c80c4`). Nintendo Switch Sports Resort (`04008E001F098000`, v65536; no profile yet) asks the question at boot: the SDK's own aborted on its error (`Result 0x58cca` at `sdk+0x6ca40c`).
+- **Check:** `make -C dm/host/tests GAME=<id> run` (`t_hid`).
 
 ### GameShare guest displays
 

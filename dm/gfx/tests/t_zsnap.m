@@ -1,4 +1,4 @@
-// A fragment's gl_FragCoord.z against the depth the rasterizer stored for the same triangle (dmsh_build.py frag_z_snap). NVIDIA stores the z its pixel shader reads; Apple's GPU stores a value
+// A fragment's gl_FragCoord.z against the depth the rasterizer stored for the same triangle (dmsh_rewrite.py frag_z_snap). NVIDIA stores the z its pixel shader reads; Apple's GPU stores a value
 // at or below the [[position]].z its fragment shader reads, so a shader testing a fragment against a depth image of its own surface (Ocarina of Time's mist: discard when z > the stored
 // depth) fails at scattered pixels. This test draws non-overlapping triangles depth-only into a Depth32Float target, then the same triangles again with a fragment shader that reads the
 // stored depth at its pixel and counts: z above it (the failure, printed), z below it (none: the window dm_zsnap uses looks only below), and z through dm_zsnap above it (none). A second

@@ -171,7 +171,7 @@ class Reader(unittest.TestCase):
         if self.code and self.code not in ok: raise nsp.BuildError(f'nx_extract exit code {self.code} (full output: {log})')
 
     def reader(self):
-        cms = [mock.patch.object(nsp, 'build_nx_extract', lambda *a: 'nx'), mock.patch.object(nsp, 'run', self.fake_run)]
+        cms = [mock.patch.object(nsp, 'find_nx_extract', lambda *a: 'nx'), mock.patch.object(nsp, 'run', self.fake_run)]
         for cm in cms: cm.__enter__(); self.addCleanup(cm.__exit__, None, None, None)
         cm = nsp.package_reader(REPO, self.keys, {}); r = cm.__enter__(); self.addCleanup(cm.__exit__, None, None, None)
         return r
@@ -202,10 +202,9 @@ class Reader(unittest.TestCase):
         self.out = 'package 0 a.nsp\n'
         with self.assertRaisesRegex(nsp.BuildError, 'listed 1 of 2 packages'): self.reader().contents([self.tmp / 'a.nsp', self.tmp / 'b.nsp'])
 
-    def test_without_dotnet_says_what_to_do(self):
-        with mock.patch.object(nsp.shutil, 'which', lambda *a, **k: None), nsp.package_reader(REPO, self.keys, {}) as r:
-            with self.assertRaisesRegex(nsp.BuildError, r'needs dotnet'): r.contents([self.tmp / 'Game.nsp'])
-            r.check_keys({'base': self.tmp / 'Game.nsp', 'updates': [], 'dlc': []})   # the steps that need it say so
+    def test_nx_extract_that_does_not_start_says_so(self):
+        with mock.patch.object(nsp, 'NX_EXTRACT', 'dm/tools/nx_extract_bin/missing'), nsp.package_reader(REPO, self.keys, {}) as r:
+            with self.assertRaisesRegex(nsp.BuildError, r'nx_extract does not start'): r.contents([self.tmp / 'Game.nsp'])
 
     def test_keys_too_old_stop_before_the_packages_are_read(self):   # nx_extract --keys: every package once, a merged one too; its red line becomes the stop, other failures are left to later steps
         m, upd = self.tmp / 'm.nsz', self.tmp / 'u.nsp'

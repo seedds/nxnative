@@ -197,17 +197,38 @@ namespace Ryujinx.Graphics.Shader.Translation
                 string slotNumber = slot.ToString(CultureInfo.InvariantCulture);
                 AddNewConstantBuffer(setAndBinding.SetIndex, setAndBinding.Binding, $"{_stagePrefix}_c{slotNumber}");
 
-                // nxnative: a game uniform slot's reads are bounded by the size the host puts in the size table (Constants.NxUniformSizesBank)
+                // nxnative: a game uniform slot's reads are bounded by the size the game bound (NoteUniformRead)
                 if (UniformBounds && slot >= Constants.NxFirstUniformSlot && slot < Constants.NxFirstUniformSlot + Constants.NxUniformSlots)
                 {
-                    Properties.AddBoundedConstantBuffer(setAndBinding.Binding, slot - Constants.NxFirstUniformSlot, GetUniformSizesBinding());
+                    Properties.AddBoundedConstantBuffer(setAndBinding.Binding, slot - Constants.NxFirstUniformSlot);
                 }
             }
 
             return setAndBinding.Binding;
         }
 
-        // nxnative: the size table, bank Constants.NxUniformSizesBank: one u32 a game uniform slot, in uint4 data[4] (a std140 array of u32 would take 16 bytes an element)
+        // nxnative: each read of a game uniform slot, as the structured program meets it (TranslationFlags.MetalUniformBounds). A read at a fixed offset needs no code: the
+        // slot's extent of such reads goes to the host (BufferDescriptor.FixedSize), which gives a binding shorter than it zeros up to there. A read at a computed offset is
+        // compared with the slot's size in the size table, which only a shader with such a read declares (CodeGen/Spirv/Instructions.cs TryGenerateBoundedUniformLoad)
+        public void NoteUniformRead(int binding, bool fixedOffset, int word)
+        {
+            if (!Properties.BoundedConstantBuffers.TryGetValue(binding, out int sizeIndex))
+            {
+                return;
+            }
+
+            if (fixedOffset)
+            {
+                Properties.FixedUniformWords[sizeIndex] = Math.Max(Properties.FixedUniformWords[sizeIndex], word + 1);
+            }
+            else
+            {
+                Properties.UniformSizesBinding = GetUniformSizesBinding();
+            }
+        }
+
+        // nxnative: the size table, bank Constants.NxUniformSizesBank: one u32 a game uniform slot, in uint4 data[4] (a std140 array of u32 would take 16 bytes an element).
+        // Declared at the shader's first read of a game uniform slot at a computed offset (NoteUniformRead)
         private int GetUniformSizesBinding()
         {
             int slot = Constants.NxUniformSizesBank;
@@ -555,7 +576,10 @@ namespace Ryujinx.Graphics.Shader.Translation
 
                 if (setAndBinding.Binding >= 0 && _usedConstantBufferBindings.Contains(setAndBinding.Binding))
                 {
-                    descriptors[descriptorIndex++] = new BufferDescriptor(setAndBinding.SetIndex, setAndBinding.Binding, slot);
+                    // nxnative: the bytes of a game uniform slot read at fixed offsets (NoteUniformRead)
+                    int fixedSize = Properties.BoundedConstantBuffers.TryGetValue(setAndBinding.Binding, out int sizeIndex) ? Properties.FixedUniformWords[sizeIndex] * 4 : 0;
+
+                    descriptors[descriptorIndex++] = new BufferDescriptor(setAndBinding.SetIndex, setAndBinding.Binding, slot, fixedSize);
                 }
             }
 

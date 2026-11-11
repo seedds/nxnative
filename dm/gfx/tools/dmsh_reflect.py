@@ -138,6 +138,64 @@ def c2_array(name, ty):
     if h >> 28 == 1 and slots & 0xffff == 2 and (slots >> 16) - 1 == 2: return (h & 0x3fff) * 4, ((h >> 14) & 0x3fff) * 4
     return None
 
+def compute_handle_arrays(src, layout):
+    """Map indexed NVN2 compute combined handles from c0 to the host's c2 table.
+    The control block places these after push constants and buffer descriptors.
+    Scalar reads already use AMapC0 in the translator; indexed reads retain c0.
+    """
+    if not layout or len(layout) < 5:
+        return src
+    members = re.findall(r'array<(.+), (\d+)> (cp_t\w*_cb0_0(?:Smplr)?) \[\[id\(\d+\)\]\];', src)
+    if not members:
+        return src
+    ubos, ssbos, textures, size, push = layout[:5]
+    if not textures or any(layout[5:7]):
+        raise ValueError('indexed compute c0 handles with separate texture or sampler tables')
+    start = 0x10 + ((push + 15) & ~15) + 16 * (ubos + ssbos)
+    if start + textures * abi.C2_ROW > size:
+        raise ValueError('compute c0 combined handles exceed the control block size')
+    shift = (abi.C2_TEX - start) // abi.C2_ROW
+    count = (abi.C2_SAMP + abi.C2_ROW * abi.C2_SEP_SLOTS) // abi.C2_ROW
+    for element, length, name in members:
+        if element != 'sampler' and not element.startswith(('texture', 'depth')):
+            raise ValueError(f'{name}: unsupported compute handle array element {element}')
+        new_name = name.replace('_cb0_0', '_cb2_0')
+        if re.search(r'\b' + re.escape(new_name) + r'\b', src):
+            raise ValueError(f'{name}: compute c0 array shares an existing c2 binding')
+        # Indices may contain nested array subscripts.
+        pieces, pos = [], 0
+        for m in re.finditer(r'([\w.]+)\.' + re.escape(name) + r'\[', src):
+            depth, end = 1, m.end()
+            while depth:
+                if end >= len(src):
+                    raise ValueError(f'{name}: unbalanced compute handle index')
+                depth += {'[': 1, ']': -1}.get(src[end], 0)
+                end += 1
+            index = src[m.end():end - 1]
+            index = f'uint({index})' if not shift else f'(uint({index}) + uint({shift}))'
+            pieces.append(src[pos:m.start()] + f'{m.group(1)}.{new_name}[min({index}, {count - 1}u)]')
+            pos = end
+        src = ''.join(pieces) + src[pos:]
+        old = f'array<{element}, {length}> {name}'
+        if src.count(old) != 1 or len(re.findall(r'\b' + re.escape(name) + r'\b', src)) != 1:
+            raise ValueError(f'{name}: unsupported compute handle array use')
+        src = src.replace(old, f'array<{element}, {count}> {new_name}')
+    # Changing an array's length moves all following Metal argument IDs.
+    body = re.search(r'struct spvDescriptorSetBuffer0\s*\{(.*?)\};', src, re.S)
+    if not body:
+        raise ValueError('compute handle arrays without an argument buffer')
+    aid = 0
+    def renumber(m):
+        nonlocal aid
+        ty, name = m.group(1), m.group(2)
+        array = re.fullmatch(r'array<.+, (\d+)>', ty.strip())
+        out = f'{ty} {name} [[id({aid}){m.group(4)}]];'
+        aid += int(array.group(1)) if array else 1
+        return out
+    text = re.sub(r'([^;\n]+?)\s+(\w+) \[\[id\((\d+)\)((?:, [^]]+)?)\]\];', renumber, body.group(1))
+    return src[:body.start(1)] + text + src[body.end(1):]
+
+
 POOL_MIN = 33   # arrays at least this long are pools: Program.cs sizes Ryujinx's handle fallback by the pools, the vendored BindlessElimination keeps 32-entry slot arrays (NvnSlotArrayLength)
 
 # The test is a plain load: an atomic one, even relaxed, goes to the shared cache every time, and the reads of a pass name a few IDs, so its pixels queue on the same word.

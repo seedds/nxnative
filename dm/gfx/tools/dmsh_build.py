@@ -764,6 +764,8 @@ def finish(key, w, j, c1):
     except ValueError as e: return 'HMMA rewrite failed', str(e)[:160], None
     try: src = dmsh_rewrite.shared_store_msl(src)   # shared memory byte and half-word stores as Metal byte stores (see shared_store_msl)
     except ValueError as e: return 'shared store rewrite failed', str(e)[:160], None
+    try: src = dmsh_reflect.compute_handle_arrays(src, j.get('nvn2_cs')) if j['stage'] == 'cs' else src
+    except ValueError as e: return 'compute handle rewrite failed', str(e)[:160], None
     try: src = dmsh_reflect.pool_arrays(src)   # handles traced to no slot read the pools the replay keeps (see pool_arrays)
     except ValueError as e: return 'pool rewrite failed', str(e)[:160], None
     src = dmsh_wide.wide_loads(src)   # storage words the translator split, read whole again (see dmsh_wide.py)

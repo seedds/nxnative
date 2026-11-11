@@ -160,6 +160,7 @@ One row per profile; the notes are each profile's `README.md`.
 | [Sea of Stars](01008C0016544000/README.md) | `01008C0016544000` | 2.0.59001 | 16.2.0 | Unity 2021.3.25f1 IL2CPP | NVN |
 | [SHIN MEGAMI TENSEI V: Vengeance](010069C01AB82000/README.md) | `010069C01AB82000` | 1.0.3 | 15.3.2 | Unreal Engine 4.27 | NVN |
 | [Silver Pines](0100D5B026844000/README.md) | `0100D5B026844000` | 1.0.0 (base) | 21.4.7 | Unity 6000.3.15f1 IL2CPP | NVN |
+| [Slay the Spire](010026300BA4A000/README.md) | `010026300BA4A000` | 1.0 (base) | 7.3.2 | libGDX on MonoGame.Switch (BRUTE) | OpenGL |
 | [Sonic Superstars](01008F701C074000/README.md) | `01008F701C074000` | 1.1.8 | 16.2.0 | Unity 2021.3.25f1 IL2CPP, CRIWARE, FMOD | NVN |
 | [STEINS;GATE RE:BOOT](01008BC024FDE000/README.md) | `01008BC024FDE000` | 1.0.3 | 20.5.17 | M2's ADV engine | NVN |
 | [Stardew Valley](0100E65002BB8000/README.md) | `0100E65002BB8000` | 1.6.15.13 | 20.5.27 | MonoGame (C# → C++ by BRUTE) | NVN |

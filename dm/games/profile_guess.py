@@ -26,7 +26,15 @@ MARKERS = [(b'nvnBootstrapLoader', 'NVN'), (b'vkCreateInstance', 'Vulkan'), (b'e
            (b'MonoGame.Framework', 'MonoGame'), (b'FMOD mixer', 'FMOD')]
 GLSLC_MAGIC = b'\x91\x68\x86\x19'   # GLSLC compiler outputs (shader_split.py glslc_shaders)
 GL_SRC = rb'\0#version [0-9]'      # a GLSL source string as dm/gfx/tools/gl_shaders.py takes it from main (Balatro's main has none, only glslang's messages that start with '#version:')
-GL_FILES = ('.mvgl', '.vert', '.frag')   # the RomFS files gl_shaders.py reads GLSL from
+def gl_name_count(img):   # how often main names glShaderSource: as C text, or as a UTF-16 managed string (Slay the Spire: libGDX ported to .NET, ahead-of-time compiled,
+    return img.count(b'glShaderSource') + img.count('glShaderSource'.encode('utf-16-le'))   # resolves each GL function by that name through eglGetProcAddress)
+GL_FILES = ('.mvgl', '.vert', '.frag')   # the RomFS files gl_shaders.py reads GLSL from, and .vs / .fs where a folder holds both (gl_file_count)
+def gl_file_count(paths):   # the RomFS files gl_shaders.py reads GLSL from: GL_FILES, and libGDX's .vs / .fs in a folder that holds both kinds (Slay the Spire's shaders/<effect>/);
+    # a folder of .fs files alone is LÖVE's (Balatro's resources/shaders/), which are not whole shaders: LÖVE puts each together at run time (captured instead)
+    by_dir = collections.defaultdict(list)
+    for p in paths: d, n = os.path.split(p.lower()); by_dir[d].append(n)
+    return sum(sum(n.endswith(GL_FILES) for n in ns) + (sum(n.endswith(('.vs', '.fs')) for n in ns) if any(n.endswith('.vs') for n in ns) and any(n.endswith('.fs') for n in ns) else 0)
+               for ns in by_dir.values())
 APP_POOL = 0xCD500000               # the application memory pool of a 4 GB Switch (3285 MiB), what every profile but Engage's reports
 OUNCE_POOL = 0x240000000            # a Switch 2 game's (9 GB of 12 GB, not measured; Donkey Kong Bananza's heaps do not fit in a Switch 1 pool)
 MiB = 1 << 20
@@ -105,7 +113,7 @@ def facts_of(exefs, romfs):
             if pat in img: F['markers'].setdefault(name, []).append(p.name)
         if p.name == 'main':
             F['unity'] = {v.decode() for v in re.findall(rb'20[12][0-9]\.[0-9]+\.[0-9]+f[0-9]', img)}
-            F['glslc'], F['glsl_src'], F['gl_names'] = img.count(GLSLC_MAGIC), glsl_sources(img), img.count(b'glShaderSource')
+            F['glslc'], F['glsl_src'], F['gl_names'] = img.count(GLSLC_MAGIC), glsl_sources(img), gl_name_count(img)
             F['gl_src'] = len(re.findall(GL_SRC, img))
             F['main_markers'] = {name for pat, name in MARKERS if pat in img}
         m['kind'] = {'main': 'the game', 'sdk': 'nnSdk', 'rtld': 'rtld'}.get(p.name) or kind(m)
@@ -116,8 +124,9 @@ def facts_of(exefs, romfs):
     # RomFS: counts by top level (two levels: Unity keeps everything under Data/), extension and header magic
     R = F['romfs'] = {'n': 0, 'bytes': 0, 'tops': collections.Counter(), 'topb': collections.Counter(), 'exts': collections.Counter(), 'extb': collections.Counter(), 'extc': collections.Counter(),
                       'mags': collections.Counter(), 'magb': collections.Counter(), 'dirs': collections.Counter(), 'biggest': (0, ''), 'root': set()}
+    paths = []
     for path, size, h in romfs_files(romfs):
-        R['n'] += 1; R['bytes'] += size
+        R['n'] += 1; R['bytes'] += size; paths.append(path)
         parts = path.strip('/').split('/')
         top = '/'.join(parts[:2]) if len(parts) > 2 else parts[0] if len(parts) > 1 else '(root)'
         R['tops'][top] += 1; R['topb'][top] += size
@@ -129,6 +138,7 @@ def facts_of(exefs, romfs):
         mag = next((n for m, n in MAGICS if h.startswith(m)), None)
         if mag: R['mags'][mag] += 1; R['magb'][mag] += size
         if mag in PACKED: R['extc'][ext] += 1
+    R['gl_files'] = gl_file_count(paths)
     return F
 
 
@@ -244,7 +254,7 @@ def modules_supplying(exefs, want, modules, hooks=None):   # the modules left ou
 # ---- Shader sources: decided from the game files at every build, not kept in the profile (scripts/build_ipa_from_nsp.py; shader_split.py reads what those steps write) ----
 def shader_sources(imports, glsl_src, glslc_mods, spirv, unreal_paks, trinity_packs=0, legacy_paks=0, gl_names=0, gl_src=0, gl_files=0, oodle_pkz=0, nro_imports=frozenset(), oodle_gfpak=0, oodle_ue3=0, frostbite=False, romfs_glsl=0):
     """{name: (value, reason)}: graphics (vulkan when main imports Vulkan functions and not nvnBootstrapLoader; gl when it imports eglCreateWindowSurface and names glShaderSource, so it compiles
-    GLSL through OpenGL (gl_names: how often main has that name; Absolum imports the same EGL functions for SDL3 but renders with NVN and names no GL function); else nvn; vkGetInstanceProcAddr
+    GLSL through OpenGL (gl_names: how often main has that name, as C text or a UTF-16 string; Absolum imports the same EGL functions for SDL3 but renders with NVN and names no GL function); else nvn; vkGetInstanceProcAddr
     alone is SDL's Vulkan loader, which Balatro's LÖVE links and never uses), vk_capture (a Vulkan game without SPIR-V files generates its shaders at run time), gl_capture (an OpenGL game with no
     GLSL source where gl_shaders.py looks, gl_src strings in main and gl_files files in the RomFS: it puts its shaders together at run time, LÖVE from its Lua), glslc_capture (main holds GLSL sources and calls glslcCompile in a module the game loads: it compiles some shaders at run time), ue_decode (Unreal paks keep the shaders Oodle-compressed
     in their shader code archives, which only the game's own Oodle decodes), oodle_packs (Trinity packs, oodle_pkz PlatinumGames PKZ archives, oodle_gfpak Game Freak GFPAK archives with Oodle Kraken entries, oodle_ue3 Unreal Engine 3 packages with Oodle chunks
@@ -312,7 +322,7 @@ def romfs_glsl_files(romfs):
 def build_sources(exefs, romfs, modules):
     """shader_sources from an extraction (its ExeFS and RomFS folders) and the modules the profile loads"""
     exefs = Path(exefs); main = nso(exefs / 'main')[0]
-    imports = {s for s, defined, _ in nso_syms.dynsyms(main) if not defined}; glsl_src = glsl_sources(main); gl_names = main.count(b'glShaderSource'); gl_src = len(re.findall(GL_SRC, main))
+    imports = {s for s, defined, _ in nso_syms.dynsyms(main) if not defined}; glsl_src = glsl_sources(main); gl_names = gl_name_count(main); gl_src = len(re.findall(GL_SRC, main))
     nro_imp = romfs_nro_imports(romfs)
     defines = lambda m: (exefs / m).exists() and any(s == 'glslcCompile' and defined for s, defined, _ in nso_syms.dynsyms(nso(exefs / m)[0]))
     # GLSL source files in the RomFS that the game compiles itself with GLSLC (Turrican Anthology Vol. I: shaders/*.vert / *.frag, no GLSL string in main)
@@ -329,7 +339,7 @@ def build_sources(exefs, romfs, modules):
         for n in names:
             if n.endswith('.trpfs'):
                 with open(os.path.join(d, n), 'rb') as f: trinity += f.read(8) == b'ONEPACK\0'
-    gl_files = sum(1 for _, _, names in os.walk(romfs) for n in names if n.lower().endswith(GL_FILES)) if 'eglCreateWindowSurface' in imports else 0
+    gl_files = gl_file_count(os.path.join(d, n) for d, _, names in os.walk(romfs) for n in names) if 'eglCreateWindowSurface' in imports else 0
     oodle_pkz = 0   # PlatinumGames PKZ archives whose name table (after the 0x20-byte entries) names Oodle Kraken: their entries are decoded with the game's own decoder
     for d, _, names in os.walk(romfs):
         for n in names:

@@ -1782,6 +1782,7 @@ GL(glGetProgramiv, void, GLuint pr, GLenum p, GLint *v) {
         case GL_ACTIVE_UNIFORM_MAX_LENGTH: { int m = 0; for (int i = 0; i < x->nu; i++) m = (int)umax(m, (uint32_t)strlen(x->u[i].name) + 4); *v = m; return; }
         case GL_ATTACHED_SHADERS: *v = (x->vs != 0) + (x->fs != 0); return;
         case GL_ACTIVE_ATTRIBUTES: *v = x->si[0] ? x->si[0]->na : 0; return;
+        case GL_ACTIVE_ATTRIBUTE_MAX_LENGTH: { int m = 0; for (int i = 0; x->si[0] && i < x->si[0]->na; i++) m = (int)umax(m, (uint32_t)strlen(x->si[0]->a[i].name) + 1); *v = m; return; }
         case GL_DELETE_STATUS: *v = 0; return;
     }
     RED1("glGetProgramiv(%#x) not implemented", p); *v = 0;
@@ -1804,6 +1805,17 @@ GL(glGetActiveUniform, void, GLuint pr, GLuint index, GLsizei size, GLsizei *len
     if (len) *len = name && size > 0 ? (GLsizei)umin((uint32_t)strlen(nm), (uint32_t)size - 1) : 0;
     if (count) *count = u->count ? u->count : 1;
     if (type) *type = g_tenums[u->type];
+}
+// The vertex inputs in the order of the vertex shader's table: libGDX's ShaderProgram.fetchAttributes reads each one's name after linking (Slay the Spire, through MonoGame's GL
+// loader, which keeps a null delegate for a name eglGetProcAddress does not have and throws NullReferenceException when it is called)
+GL(glGetActiveAttrib, void, GLuint pr, GLuint index, GLsizei size, GLsizei *len, GLint *count, GLenum *type, GLchar *name) {
+    prog_t *p = prog_of(pr);
+    if (!p || !p->linked || index >= (GLuint)p->si[0]->na) { if (len) *len = 0; if (name && size > 0) name[0] = 0; return; }
+    const shattr *a = &p->si[0]->a[index];
+    if (name && size > 0) strlcpy(name, a->name, (size_t)size);
+    if (len) *len = name && size > 0 ? (GLsizei)umin((uint32_t)strlen(a->name), (uint32_t)size - 1) : 0;
+    if (count) *count = 1;
+    if (type) *type = g_tenums[a->type];
 }
 GL(glGetShaderPrecisionFormat, void, GLenum stage, GLenum prec, GLint *range, GLint *precision) {   // every precision is a 32-bit float or int
     (void)stage; int fl = prec <= 0x8df2;   // LOW / MEDIUM / HIGH_FLOAT, then the INTs
@@ -2043,17 +2055,19 @@ extern const char gl_stubs[];   // 8 bytes a stub
 static void *gl_stub(const char *name) {
     static int on = -1; if (on < 0) on = getenv("DM_GL_STUBS") && atoi(getenv("DM_GL_STUBS"));
     if (!on || g_nstub == NSTUB) return NULL;
-    g_stub_name[g_nstub] = name;   // the game's own string (its loader's name table)
+    g_stub_name[g_nstub] = strdup(name);   // a copy: the loader may reuse one buffer for every name (note_miss)
     return (void *)(gl_stubs + 8 * g_nstub++);
 }
 // A name the loader asks for and the layer does not implement gets a null pointer, which is the documented meaning of "not there" (many loaders ask for the
 // whole GL 4.6 list and only call a few). The cost is that calling one jumps to address 0 with nothing in the log to say which: `[RED] CRASH sig=11 addr=0
 // pc=0 lr=<the blr's return address>` is that mistake. DM_GL_MISSES=1 prints every missing name once, and DM_GL_STUBS=1 replaces them with stubs that report
 // their first call, which names the one the game actually calls (GameMaker's runner asks for 215 names it does not implement and calls glFlush).
-static const char *g_miss_name[512]; static int g_nmiss;
+// Each missing name is kept as a copy and compared by its text: a loader may pass every name in one reused buffer (Slay the Spire's MonoGame encodes each into the same
+// array), which compared by address made every miss after the first look like a repeat, so the count stayed at 1 and DM_GL_MISSES named only the first
+static char *g_miss_name[512]; static int g_nmiss;
 static void note_miss(const char *name) {
-    for (int i = 0; i < g_nmiss; i++) if (g_miss_name[i] == name) return;
-    if (g_nmiss < 512) g_miss_name[g_nmiss++] = name;
+    for (int i = 0; i < g_nmiss; i++) if (!strcmp(g_miss_name[i], name)) return;
+    if (g_nmiss < 512) g_miss_name[g_nmiss++] = strdup(name);
     if (getenv("DM_GL_MISSES")) GLOG("[RED] eglGetProcAddress(%s): not implemented, the game gets a null pointer", name);
 }
 EGL(eglGetProcAddress, void *, const char *name) {

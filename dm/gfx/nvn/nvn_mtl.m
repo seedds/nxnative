@@ -16321,6 +16321,7 @@ static int up_mfx_encode(NvShader *cs) {
     }
     args_dirty_all();
     if (!direct) fg_frame(sc, color, out, &orr, cw, ch);   // scratch (DM_FRAMEGEN)
+    else if (fg_on()) { static int once; if (!once++) MLOG("[RED] frame generation: MetalFX scales straight between the game's own textures here (%s), which the scratch build does not hook; frames are shown as the game draws them", cs->key); }
     if (!g_up_mfx_n++) MLOG("upscaler: first dispatch of %s drawn by MetalFX, %dx%d at %d,%d of %lux%lu (format %lu) → %dx%d at %d,%d of %lux%lu (format %lu)%s", cs->key, ir.width, ir.height, ir.xoffset, ir.yoffset,
                             (unsigned long)in.width, (unsigned long)in.height, (unsigned long)in.pixelFormat, orr.width, orr.height, orr.xoffset, orr.yoffset, (unsigned long)out.width, (unsigned long)out.height,
                             (unsigned long)out.pixelFormat, direct ? ", straight" : srgb ? ", through RGBA16F, decoded from sRGB" : sq ? ", through RGBA16F, squared on the way in" : ", through RGBA16F");

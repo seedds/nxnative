@@ -21,6 +21,7 @@ static double g_fg_tin[64];   // by ticket: when the game queued the present (pr
 #define FG_WIN 3
 static int g_fg_seen, g_fg_view, g_fg_flip, g_fg_pause = 1;
 static int g_fg_upto = 9;   // DM_FRAMEGEN_UPTO=<n>, to split the cost in play: 0 nothing drawn, 1 the three copies, 2 + motion pass, 3 + interpolation, 4 + second upscale, 5 + window picture (not shown), 9 all
+static _Atomic int g_fg_hooked;   // the hook was reached: an upscale of the game's was drawn by MetalFX (up_mfx_encode_from -> fg_frame)
 static struct {
     id<MTL4FXFrameInterpolator> fi; NSUInteger iw, ih, ow, oh; MTLPixelFormat cvf; int bad;
     id<MTLTexture> c[2], d[2], mv, gen, gen_up, cv0, cv, depth_last, win[FG_WIN];
@@ -149,6 +150,7 @@ static void fg_barrier(void) {   // as up_mfx_encode: MetalFX opens encoders of 
 // After the game's upscale of this frame (up_mfx_encode): color = the scene, linear RGBA16F (the scaler's input), out = the canvas the upscaled scene was just drawn into
 static void fg_frame(id<MTL4FXSpatialScaler> sc, id<MTLTexture> color, id<MTLTexture> out, const NVNcopyRegion *orr, NSUInteger cw, NSUInteger ch) {
     if (!fg_on()) return;
+    atomic_store(&g_fg_hooked, 1);
     long f = (long)atomic_load(&g_cur_frame); NSUInteger ow = (NSUInteger)orr->width, oh = (NSUInteger)orr->height;
     if (orr->xoffset || orr->yoffset || ow != out.width || oh != out.height || cw != color.width || ch != color.height) {
         static int once; if (!once++) MLOG("[RED] frame generation: the upscale is not whole textures (%lux%lu of %lux%lu into %lux%lu of %lux%lu); frames are shown as the game draws them",
@@ -268,6 +270,12 @@ static uint64_t fg_compose(const tex_t *t, const int crop[4], int *slot) {
 static int fg_pace(double t_in, double period, int waiting) {
     static double prev; static int steady;
     double per = period > 0 ? period : 1.0 / 30; int late = prev > 0 && t_in - prev > per * 1.25; prev = t_in;
+    // The hook is the game's upscale drawn by MetalFX. Without one nothing is generated, and that was silent (seedds/nxnative#2279, devMlGUE: 0 generated on main,
+    // where Ocarina of Time's agl_ndsr_vr upscaler was not recognised): say so after 600 presents, and again every 3,600 while it lasts
+    { static uint64_t n; if (g_fg_mode > 0 && !atomic_load(&g_fg_hooked) && (++n == 600 || !(n % 3600)))
+        MLOG("[RED] frame generation (DM_FRAMEGEN=1): %llu presents and no upscale of the game's was drawn by MetalFX, so no frame is generated. It needs DM_UPSCALER=metalfx and "
+             "the game's upscaler among the profile's upscaler keys (the log then has \"upscaler: first dispatch of ... drawn by MetalFX\"); %llu upscaler dispatches were left to the game's shader",
+             (unsigned long long)n, (unsigned long long)g_up_mfx_kept); }
     if (g_fg_upto < 9) return 0;
     if (!g_fg_pause) return 1;
     if (late || waiting > 2) { steady = 0; if (late) FG.late++; else FG.behind++; return 0; }

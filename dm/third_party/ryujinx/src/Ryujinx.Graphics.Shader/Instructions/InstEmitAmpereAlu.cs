@@ -730,12 +730,31 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
         }
 
+        // Special register 0x84, read only by pixel shaders: its bytes 1 and 2 are the fragment's size in pixels under variable-rate shading (inferred from use: Nintendo
+        // Switch Sports Resort's 612 reads, all S2UR, take bytes 1 and 2 with PRMT, multiply them and divide by the product). The host shades every pixel, so the
+        // fragment is 1 x 1. Read as 0 (EmitSReg's default), 1 / (0 x 0) was +Inf: the sea's pixel shaders made NaN at the horizon, which the auto-exposure spread
+        // over the whole picture (a black sea and blocks of noise above it in the main-menu island)
+        private const int SRegFragmentSize = 0x84;
+        private const int FragmentSizeOneByOne = 0x00010100;
+
         // S2R Rd, SR / S2UR URd, SR (72..80)
         public static void AS2r(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
+            int sr = x.Bits(72, 80);
 
-            ASet(context, x, EmitSReg(context, (SReg)x.Bits(72, 80)), AUniform(context));
+            if (sr == SRegFragmentSize)
+            {
+                ASet(context, x, Const(FragmentSizeOneByOne), AUniform(context));
+                return;
+            }
+
+            if (!Enum.IsDefined(typeof(SReg), sr))
+            {
+                context.TranslatorContext.GpuAccessor.Log($"S2R of special register 0x{sr:x2}, which the translator does not know: read as 0");
+            }
+
+            ASet(context, x, EmitSReg(context, (SReg)sr), AUniform(context));
         }
 
         // ULDC URd, c[bank][offset] (0xab9) or c[bank][URa + offset] (0xabb, URa at 24..30): a byte, short, word or word pair (size 73..76)

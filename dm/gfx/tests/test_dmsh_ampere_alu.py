@@ -347,5 +347,24 @@ class SingleInstructionSemantics(Alu):
         self.assertEqual(self.stored(self.MOV_R5_3, imad), '10u')
 
 
+class FragmentSize(Alu):
+    """S2UR of special register 0x84, which only pixel shaders read: Nintendo Switch Sports Resort's sea shader 01a6b85e2f6ea3d4 takes its bytes 1 and 2 (the fragment's width and
+    height under variable-rate shading), multiplies them and divides by the product. Read as 0 the division gave +Inf, the sea's NaN spread over the picture and the island's sea was
+    black. The host shades every pixel: a 1 x 1 fragment, so the product is 1. The encodings are the game's (+0x29b0, +0x2c40, +0x2c80, +0x2ca0)"""
+    S2UR = (0x000ea20000008400, 0x00000000000479c3)    # S2UR UR4, SR 0x84
+    BYTE2 = (0x004fe2000800003f, 0x0000777204057896)   # UPRMT UR5, UR4, 0x7772: byte 2
+    BYTE1 = (0x000fc4000800003f, 0x0000777104047896)   # UPRMT UR4, UR4, 0x7771: byte 1
+    PRODUCT = (0x000fe2000f8e023f, 0x00000004050472a4)   # UIMAD UR4, UR5, UR4, URZ
+    MOV_UR4 = (0x000fe20000000f00, 0x0000000400067c02)   # MOV R6, UR4: the value stored
+
+    def test_one_pixel_fragment(self):
+        msl = self.kept(self.S2UR, self.BYTE2, self.BYTE1, self.PRODUCT, self.MOV_UR4)
+        self.assertRegex(msl, r'= 1u;')   # the product, folded to the 1 x 1 fragment
+        self.assertNotRegex(msl, r'= 0u;')
+
+    def test_register_value(self):   # the whole register: bytes 1 and 2 are 1, the others 0
+        self.assertIn('65792u', self.kept(self.S2UR, self.MOV_UR4))
+
+
 if __name__ == '__main__':
     unittest.main()

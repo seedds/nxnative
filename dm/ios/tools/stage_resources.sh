@@ -14,6 +14,10 @@ resource_dm=$(python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).re
 check_program() {   # RomFS, marker, shader libraries, shader folder
     python3 "$resource_dm/tools/romfs.py" "$1" "$2" || die "Game files unavailable: $1/$2"
     [ -d "$3" ] || [ -f "$3" ] || die "Shader libraries unavailable: $3"
+    # An app's image is plain (pack_ipa.py): a decoded library would count against the iPhone's memory limit, where a mapped one is page cache
+    if [ -f "$3" ] && python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import shader_lib; sys.exit(0 if shader_lib.is_compressed(sys.argv[2]) else 1)' "$resource_dm/tools" "$3"; then
+        die "The shader library $3 is compressed (shader_lib.py compress): run python3 dm/tools/shader_lib.py decompress ${3%.img}, then build again"
+    fi
     # The host is compiled from the repository's current sources and loads only msl/b-<its chain version>: after a chain change (a pull, dmsh_chain.py --header) the prepared shaders are another chain's
     case "$4" in b-*)
         [ -f "$DM_RESOURCE_CHAIN_H" ] || die "No chain version header: $DM_RESOURCE_CHAIN_H (a project prepared before the chain version moved to dm/gfx/nvn: prepare the game again, build_ipa_from_nsp.py --prepare-xcode)"

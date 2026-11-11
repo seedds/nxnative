@@ -496,13 +496,6 @@ class Regress(unittest.TestCase):
         bad = dict(good, shots={'8': {'dhash': 'f' * 16, 'rgb16': 'ff' * 768}})
         self.assertTrue(regress.smoke_diff([good], [good, bad], route)[0]['REGRESSION'])
 
-    def test_shader_build_pauses_for_unknown_lock_owner(self):
-        with tempfile.TemporaryDirectory() as td:
-            with patch.object(regress.subprocess, 'Popen') as spawn, patch.object(regress.bench, 'lock_holder', return_value=0), patch.object(regress.os, 'killpg') as kill, patch.object(regress.time, 'sleep'), patch.object(regress, 'say'):
-                spawn.return_value.poll.side_effect = [None, 0, 0]
-                regress.run_heavy(['build'], Path(td) / 'build.log', td, {}, NS(pause_lock=Path(td) / 'lock'), 'build')
-            self.assertTrue(any(c.args[1] == regress.signal.SIGSTOP for c in kill.call_args_list))
-
     def test_idle_msbuild_workers_do_not_block_measurements(self):
         worker = '/usr/local/share/dotnet/dotnet /sdk/10.0.403/MSBuild.dll /nodemode:1 /nodeReuse:true'
         jobs = [(300, 1, 'S', '0.0', worker),

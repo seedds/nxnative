@@ -87,6 +87,7 @@ def load_module(name, path):   # a module from a file (another script, or a tool
 bench = load_module('bench', REPO / 'scripts/bench.py')
 shader_regressions = load_module('shader_regressions', REPO / 'dm/gfx/tools/shader_regressions.py')
 usage = load_module('usage', REPO / 'dm/tools/usage.py')   # usage manifests and change impact (regress.py usage / impact)
+proc_group = load_module('proc_group', REPO / 'dm/tools/proc_group.py')   # a heavy job in a process group of its own, stopped whole (run_heavy)
 tree_tar = load_module('tree_tar', REPO / 'dm/tools/tree_tar.py')   # a work folder's quiet folders as one file each, and an old revision's compile cache
 shader_cache = load_module('shader_cache', REPO / 'dm/tools/shader_cache.py')   # the player's build keeps the compile cache this shares as one file, read in place
 shader_lib = load_module('shader_lib', REPO / 'dm/tools/shader_lib.py')   # a chain build's libraries as one file, read in place
@@ -793,24 +794,31 @@ def take_lock(lock, what):
     bench.wait_lock(lock, f'regress.py {what}')
 
 
+HEAVY_POLL = 2   # seconds between looks at the measuring lock while a heavy job runs
+
+
 def run_heavy(cmd, log, cwd, env, a, what):
     """A heavy job (a shader build) in its own process group, stopped (SIGSTOP) while another process holds the measuring lock and resumed when it is free, so it never
-    skews someone else's measurement (the shared rule: heavy jobs wait for the lock). → (exit status, seconds paused)"""
-    with open(log, 'w') as f: p = subprocess.Popen([str(c) for c in cmd], cwd=cwd, env=env, stdout=f, stderr=subprocess.STDOUT, start_new_session=True)
+    skews someone else's measurement (the shared rule: heavy jobs wait for the lock). The group is proc_group's: an interrupt, a SIGTERM (main) or an error here stops all of
+    it, resumed first; a process of the group still running proc_group.DRAIN s after the job's own exit is stopped and fails the job (exit status 1 when the job's own was 0;
+    its line ends the log: what it writes may be incomplete). → (exit status, seconds paused)"""
     paused, t_pause = 0.0, None
-    try:
-        while p.poll() is None:
+    with open(log, 'w') as f, proc_group.Group(cmd, cwd=cwd, env=env, stdout=f, stderr=subprocess.STDOUT) as g:
+        while g.p.poll() is None:
             held = bench.lock_holder(a.pause_lock) if a.pause_lock else None
             if held is not None and t_pause is None:
-                os.killpg(p.pid, signal.SIGSTOP); t_pause = time.time(); say(f'    {what}: paused while process {held} holds the measuring lock')
+                g.pause(); t_pause = time.time(); say(f'    {what}: paused while process {held} holds the measuring lock')
             elif held is None and t_pause is not None:
-                os.killpg(p.pid, signal.SIGCONT); paused += time.time() - t_pause; t_pause = None; say(f'    {what}: resumed')
-            time.sleep(2)
-    finally:
-        if p.poll() is None:
-            try: os.killpg(p.pid, signal.SIGCONT); os.killpg(p.pid, signal.SIGTERM); p.wait(10)
-            except (ProcessLookupError, subprocess.TimeoutExpired): p.kill()
-    return p.returncode, round(paused)
+                g.resume(); paused += time.time() - t_pause; t_pause = None; say(f'    {what}: resumed')
+            try: g.p.wait(HEAVY_POLL)
+            except subprocess.TimeoutExpired: pass
+        if t_pause is not None: paused += time.time() - t_pause   # it ended while stopped (killed from outside)
+        rc = g.finish()
+        if g.stragglers:   # at the log's end (the job's descriptor shares its offset), where the caller's message reads it
+            msg = f'[RED] the job exited, but {proc_group.describe(g.stragglers)} still ran {g.drain:g} s later and was stopped: what it writes may be incomplete\n'
+            os.write(f.fileno(), msg.encode())
+    if g.stragglers: say(f'    {what}: ' + msg.removeprefix('[RED] ').rstrip()); rc = rc or 1
+    return rc, round(paused)
 
 
 # ---------------------------------------------------------------- one game run

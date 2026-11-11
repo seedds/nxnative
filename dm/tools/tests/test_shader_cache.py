@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # The compile cache as one file (dm/tools/shader_cache.py): entries in and out, bytes stored once, several threads and processes, a damaged file, pruning, and taking in a cache from before it.
-import os, subprocess, sys, tarfile, tempfile, threading, time, unittest
+import contextlib, json, os, sqlite3, subprocess, sys, tarfile, tempfile, threading, time, unittest
+from unittest import mock
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[3]
@@ -62,9 +63,37 @@ class Entries(Base):
 
     def test_one_file_is_left(self):
         self.store.put('x', b'1'); self.store.close()
-        self.assertEqual(os.listdir(self.root), ['cas.db'])
+        self.assertEqual(set(os.listdir(self.root)), {'cas.db', 'cas.db.lock'})
         again = shader_cache.Store(self.path); self.addCleanup(again.close)
         self.assertEqual(again.get('x'), b'1')
+
+
+def enable_compression(path):
+    db = sqlite3.connect(path, isolation_level=None)
+    try:
+        db.enable_load_extension(True); db.load_extension(str(shader_cache.ZSTD_LIBRARY)); db.enable_load_extension(False)
+        db.execute('SELECT zstd_enable_transparent(?)', ('{"table":"blob","column":"data","compression_level":3,"dict_chooser":"\'[nodict]\'"}',)).fetchall()
+    finally: db.close()
+
+
+class CompressedEntries(Entries):
+    def setUp(self):
+        super().setUp(); self.store.close(); enable_compression(self.path)
+        self.store = shader_cache.Store(self.path, self.said.append); self.addCleanup(self.store.close)
+
+    def test_distinct_insert_ids(self):
+        for name, data in [('a', b'A'), ('b', b'B'), ('c', b'C'), ('alias', b'B')]: self.store.put(name, data)
+        self.assertEqual([self.store.get(n) for n in ('a', 'b', 'c', 'alias')], [b'A', b'B', b'C', b'B'])
+        self.assertEqual(self.blobs(), 3)
+
+    def test_missing_extension_preserves_source(self):
+        self.store.put('keep', b'precious'); self.store.close()
+        before = self.path.read_bytes()
+        with mock.patch.object(shader_cache, 'ZSTD_LIBRARY', self.root / 'absent.dylib'):
+            with self.assertRaisesRegex(RuntimeError, 'sqlite-zstd'): shader_cache.Store(self.path)
+        self.assertEqual(self.path.read_bytes(), before)
+        s = shader_cache.Store(self.path); self.addCleanup(s.close)
+        self.assertEqual(s.get('keep'), b'precious')
 
 
 class Writers(Base):
@@ -171,7 +200,7 @@ class Adopt(unittest.TestCase):
         self.assertEqual(s.names(''), {'metallib/mac/abcd.metallib', 'metallib/mac/abcd_x.metallib', 'metallib/ios/cdef.metallib'})
         self.assertEqual(s.get('metallib/mac/abcd.metallib'), b'compiled')
         s.close()
-        self.assertEqual(sorted(os.listdir(self.root)), ['cas.db'])
+        self.assertEqual(sorted(os.listdir(self.root)), ['cas.db', 'cas.db.lock'])
 
     def test_a_folder(self):
         self.fill(); self.assertEqual(shader_cache.adopt(self.old, self.path, self.said.append), 3); self.check()
@@ -196,6 +225,365 @@ class Adopt(unittest.TestCase):
         Path(f'{self.old}.tar.part').write_bytes(b'1')
         shader_cache.adopt(self.old, self.path, self.said.append)
         self.assertEqual(os.listdir(self.root), [])
+
+
+class CompressedWriters(Writers):
+    def setUp(self):
+        super().setUp(); self.store.close(); enable_compression(self.path)
+        self.store = shader_cache.Store(self.path, self.said.append); self.addCleanup(self.store.close)
+
+
+class CompressedPrune(Prune):
+    def setUp(self):
+        super().setUp(); self.store.close(); enable_compression(self.path)
+        self.store = shader_cache.Store(self.path, self.said.append); self.addCleanup(self.store.close)
+
+
+class Maintenance(Base):
+    def test_opt_in_compression_metrics_include_sizes_workers_and_stages(self):
+        self.fill(); before = self.snapshot()
+        with mock.patch.dict(os.environ, {'DM_SHADER_CACHE_COMPRESSION_METRICS': '1'}):
+            shader_cache.maintain(self.path, compress=True, workers=2, say=self.said.append)
+        prefix = 'shader cache compression metrics: '
+        metrics, = [json.loads(line[len(prefix):]) for line in self.said if line.startswith(prefix)]
+        self.assertEqual(metrics['raw_payload_bytes'], sum(len(row[2]) for row in before[0]))
+        self.assertEqual(metrics['blob_count'], len(before[0]))
+        with contextlib.closing(sqlite3.connect(self.path)) as db:
+            encoded, = db.execute('SELECT sum(length(data)) FROM _blob_zstd').fetchone()
+        self.assertEqual(metrics['compressed_payload_bytes'], encoded)
+        self.assertEqual(metrics['payload_bytes_saved'], metrics['raw_payload_bytes'] - encoded)
+        self.assertAlmostEqual(metrics['payload_compression_ratio'], metrics['raw_payload_bytes'] / encoded, places=5)
+        self.assertEqual(metrics['workers_requested'], 2)
+        self.assertGreater(metrics['batch_count'], 1)
+        self.assertGreater(metrics['workers_used'], 0)
+        for name in ('worker_result_wait_s', 'blob_inserts_s', 'entry_copy_s', 'commit_s', 'output_setup_s',
+                     'batch_boundary_reads_s', 'source_checkpoint_and_install_s', 'worker_cpu_s', 'worker_busy_wall_s'):
+            self.assertGreaterEqual(metrics[name], 0)
+        self.assertEqual(metrics['database_after_bytes'], self.path.stat().st_size)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_compression_metrics_default_off_and_empty_cache(self):
+        self.store.close()
+        with mock.patch.dict(os.environ, {'DM_SHADER_CACHE_COMPRESSION_METRICS': '0'}):
+            shader_cache.maintain(self.path, compress=True, say=self.said.append)
+        self.assertFalse(any('compression metrics:' in line for line in self.said))
+        shader_cache.maintain(self.path, decompress=True, say=self.said.append)
+        with mock.patch.dict(os.environ, {'DM_SHADER_CACHE_COMPRESSION_METRICS': '1'}):
+            shader_cache.maintain(self.path, compress=True, say=self.said.append)
+        prefix = 'shader cache compression metrics: '
+        metrics, = [json.loads(line[len(prefix):]) for line in self.said if line.startswith(prefix)]
+        self.assertEqual(metrics['blob_count'], 0)
+        self.assertEqual(metrics['batch_count'], 0)
+        self.assertIsNone(metrics['payload_compression_ratio'])
+        self.assertEqual(metrics['average_active_worker_jobs'], 0)
+
+    def test_compression_writes_ready_batch_before_unfinished_oldest(self):
+        first, ready = shader_cache.cf.Future(), shader_cache.cf.Future()
+        first.result = mock.Mock(side_effect=AssertionError('waited for oldest batch'))
+        rows = [(2, b'hash', b'encoded')]; ready.set_result(rows)
+        source, cursor, out = mock.Mock(), mock.MagicMock(), mock.MagicMock()
+        source.execute.return_value = cursor
+        cursor.fetchone.side_effect = [(1, 8 * 1024**2), (2, 8 * 1024**2), None]
+        def observe(sql, batch):
+            self.assertEqual(batch, rows)
+            raise RuntimeError('observed ready batch')
+        out.executemany.side_effect = observe
+        with mock.patch.object(shader_cache.sqlite3, 'connect', return_value=out), mock.patch.object(shader_cache, '_load_zstd'), mock.patch.object(shader_cache.cf, 'ThreadPoolExecutor') as executor:
+            executor.return_value.__enter__.return_value.submit.side_effect = [first, ready]
+            with self.assertRaisesRegex(RuntimeError, 'observed ready batch'):
+                shader_cache._compressed_copy(source, str(self.path), str(self.path) + '.compressed.part', 2)
+        first.result.assert_not_called()
+
+    def test_initial_compression_skips_reclamation_and_handles_sparse_ids(self):
+        self.fill()
+        with contextlib.closing(sqlite3.connect(self.path)) as db, db:
+            db.execute('UPDATE blob SET id=-4 WHERE id=1')
+            db.execute('UPDATE entry SET blob=-4 WHERE blob=1')
+            db.execute('UPDATE blob SET id=9999 WHERE id=2')
+            db.execute('UPDATE entry SET blob=9999 WHERE blob=2')
+        before = self.snapshot()
+        with mock.patch.object(shader_cache, '_reclaim', side_effect=AssertionError('reclaimed initial conversion')):
+            shader_cache.maintain(self.path, compress=True, workers=4, say=self.said.append)
+        self.assertEqual(self.snapshot(), before)
+        with contextlib.closing(sqlite3.connect(self.path)) as db:
+            self.assertEqual(db.execute('PRAGMA freelist_count').fetchone(), (0,))
+        self.assertFalse(Path(f'{self.path}.compressed.part').exists())
+
+    def test_failed_compressed_replacement_preserves_raw_source(self):
+        self.fill(); before = self.snapshot()
+        Path(f'{self.path}.compressed.part').write_bytes(b'abandoned')
+        with mock.patch.object(shader_cache.os, 'replace', side_effect=OSError('disk full')):
+            with self.assertRaisesRegex(OSError, 'disk full'):
+                shader_cache.maintain(self.path, compress=True, workers=2, say=self.said.append)
+        self.assertEqual(self.snapshot(), before)
+        self.assertFalse(Path(f'{self.path}.compressed.part').exists())
+        with contextlib.closing(sqlite3.connect(self.path)) as db:
+            self.assertEqual(db.execute("SELECT type FROM sqlite_master WHERE name='blob'").fetchone(), ('table',))
+
+    def test_compressed_partial_write_failure_preserves_source(self):
+        self.fill(); before = self.snapshot()
+        def fail_write(db, path, part, workers):
+            Path(part).write_bytes(b'partial'); raise OSError('no space')
+        with mock.patch.object(shader_cache, '_compressed_copy', side_effect=fail_write):
+            with self.assertRaisesRegex(OSError, 'no space'):
+                shader_cache.maintain(self.path, compress=True, workers=2, say=self.said.append)
+        self.assertEqual(self.snapshot(), before)
+        self.assertFalse(Path(f'{self.path}.compressed.part').exists())
+
+    def test_compressed_worker_failure_preserves_source(self):
+        self.fill(); before = self.snapshot()
+        with mock.patch.object(shader_cache.cf, 'ThreadPoolExecutor') as executor:
+            executor.return_value.__enter__.return_value.submit.side_effect = RuntimeError('worker failed')
+            with self.assertRaisesRegex(RuntimeError, 'worker failed'):
+                shader_cache.maintain(self.path, compress=True, workers=2, say=self.said.append)
+        self.assertEqual(self.snapshot(), before)
+        self.assertFalse(Path(f'{self.path}.compressed.part').exists())
+
+    def test_compression_does_not_scan_output_for_quality_checks(self):
+        self.fill(); before = self.snapshot(); statements = []; load = shader_cache._load_zstd
+        def observe(db):
+            load(db); db.set_trace_callback(statements.append)
+        with mock.patch.object(shader_cache, '_load_zstd', side_effect=observe):
+            shader_cache.maintain(self.path, compress=True, workers=2, say=self.said.append)
+        self.assertFalse(any('quick_check' in sql.lower() for sql in statements))
+        self.assertFalse(any(sql.startswith('SELECT id,hash FROM blob') for sql in statements))
+        self.assertEqual(self.snapshot(), before)
+
+    def test_private_compression_uses_rollback_journal_then_installs_wal(self):
+        self.fill(); before = self.snapshot(); seen = []; load = shader_cache._load_zstd
+        def observe(db):
+            load(db)
+            if db.execute('PRAGMA database_list').fetchone()[2].endswith('.compressed.part'):
+                seen.append((db.execute('PRAGMA journal_mode').fetchone()[0], db.execute('PRAGMA synchronous').fetchone()[0]))
+        with mock.patch.object(shader_cache, '_load_zstd', side_effect=observe):
+            shader_cache.maintain(self.path, compress=True, workers=2, say=self.said.append)
+        self.assertEqual(seen, [('delete', 1)])
+        with contextlib.closing(sqlite3.connect(self.path)) as db:
+            self.assertEqual(db.execute('PRAGMA journal_mode').fetchone(), ('wal',))
+        self.assertEqual(self.snapshot(), before)
+
+    def test_wal_maintenance_uses_store_sync_policy(self):
+        self.fill(); seen = []; compress = shader_cache._compressed_copy
+        def observe(db, *args):
+            seen.append((db.execute('PRAGMA journal_mode').fetchone()[0], db.execute('PRAGMA synchronous').fetchone()[0]))
+            return compress(db, *args)
+        with mock.patch.object(shader_cache, '_compressed_copy', side_effect=observe):
+            shader_cache.maintain(self.path, compress=True, workers=4, say=self.said.append)
+        self.assertEqual(seen, [('wal', 1)])
+
+    def test_decompression_metrics_and_mixed_pending_payloads(self):
+        self.fill()
+        shader_cache.maintain(self.path, compress=True, workers=2, say=self.said.append)
+        s = shader_cache.Store(self.path); s.put('pending', b'raw pending' * 10000); s.close()
+        before = self.snapshot()
+        with mock.patch.dict(os.environ, {'DM_SHADER_CACHE_COMPRESSION_METRICS': '1'}):
+            shader_cache.maintain(self.path, decompress=True, workers=4, say=self.said.append)
+        prefix = 'shader cache decompression metrics: '
+        metrics, = [json.loads(line[len(prefix):]) for line in self.said if line.startswith(prefix)]
+        self.assertEqual(metrics['operation'], 'decompression')
+        self.assertEqual(metrics['workers_requested'], 4)
+        self.assertEqual(metrics['output_payload_bytes'], sum(len(row[2]) for row in before[0]))
+        self.assertEqual(metrics['blob_count'], len(before[0]))
+        self.assertGreater(metrics['output_payload_bytes'], metrics['input_payload_bytes'])
+        self.assertGreaterEqual(metrics['worker_cpu_s'], 0)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_reversal_reads_on_workers_without_payload_rescans(self):
+        self.fill(); before = self.snapshot()
+        shader_cache.maintain(self.path, compress=True, workers=4, say=self.said.append)
+        with mock.patch.object(shader_cache, '_parallel_blobs', side_effect=AssertionError('coordinator decoded blobs')):
+            shader_cache.maintain(self.path, decompress=True, workers=4, say=self.said.append)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_parallel_conversion_round_trip(self):
+        self.fill(); before = self.snapshot()
+        for workers in (2, 4):
+            shader_cache.maintain(self.path, compress=True, workers=workers, say=self.said.append)
+            self.assertEqual(self.snapshot(), before)
+            shader_cache.maintain(self.path, decompress=True, workers=workers, say=self.said.append)
+            self.assertEqual(self.snapshot(), before)
+
+    def fill(self):
+        for i in range(12): self.store.put(f'item/{i}', bytes([i]) + b'shader source' * 80000, when=123 + i)
+        self.store.put('alias', bytes([3]) + b'shader source' * 80000, when=456)
+        self.store.put('empty', b'', when=789)
+        self.store.close()
+
+    def snapshot(self):
+        s = shader_cache.Store(self.path)
+        try: return (s.db.execute('SELECT id,hash,data FROM blob ORDER BY id').fetchall(), s.db.execute('SELECT * FROM entry ORDER BY name').fetchall())
+        finally: s.close()
+
+    def test_round_trip_and_reclamation(self):
+        self.fill(); before = self.snapshot(); size = self.path.stat().st_size
+        shader_cache.maintain(self.path, compress=True, say=self.said.append)
+        self.assertLess(self.path.stat().st_size, size // 3)
+        self.assertEqual(self.snapshot(), before)
+        shader_cache.maintain(self.path, decompress=True, say=self.said.append)
+        self.assertEqual(self.snapshot(), before)
+        with contextlib.closing(sqlite3.connect(self.path)) as db:
+            self.assertEqual(db.execute("SELECT type FROM sqlite_master WHERE name='blob'").fetchone(), ('table',))
+        self.assertFalse(Path(f'{self.path}.raw.part').exists())
+
+    def test_maintenance_compresses_only_new_rows(self):
+        self.fill(); shader_cache.maintain(self.path, compress=True, say=self.said.append)
+        def backing():
+            with contextlib.closing(sqlite3.connect(self.path)) as db: return db.execute('SELECT id,data,_data_dict FROM _blob_zstd ORDER BY id').fetchall()
+        before = backing(); shader_cache.maintain(self.path, say=self.said.append)
+        self.assertEqual(backing(), before)
+        s = shader_cache.Store(self.path); s.put('new', b'new' * 100000); s.close()
+        self.assertIsNone(backing()[-1][2])
+        shader_cache.maintain(self.path, say=self.said.append)
+        self.assertIsNotNone(backing()[-1][2]); self.assertEqual(backing()[:-1], before)
+
+    def test_empty_only_cache_and_appended_empty_blob(self):
+        self.store.put('empty', b''); self.store.close()
+        shader_cache.maintain(self.path, compress=True, say=self.said.append)
+        shader_cache.maintain(self.path, say=self.said.append)
+        self.assertEqual(self.snapshot()[0][0][2], b'')
+        s = shader_cache.Store(self.path); s.delete_prefix('empty'); s.put('normal', b'data' * 1000); s.close()
+        shader_cache.maintain(self.path, say=self.said.append)
+        s = shader_cache.Store(self.path); s.put('empty', b''); s.close()
+        shader_cache.maintain(self.path, say=self.said.append)
+        s = shader_cache.Store(self.path)
+        try: self.assertEqual(s.get('empty'), b''); self.assertEqual(s.get('normal'), b'data' * 1000)
+        finally: s.close()
+        shader_cache.maintain(self.path, decompress=True, say=self.said.append)
+        self.assertEqual(len(self.snapshot()[0]), 2)
+
+    def test_earlier_compressed_cache_handles_empty_pending_blobs(self):
+        self.store.put('empty', b''); self.store.close(); enable_compression(self.path)
+        shader_cache.maintain(self.path, say=self.said.append)
+        self.assertEqual(self.snapshot()[0][0][2], b'')
+        s = shader_cache.Store(self.path)
+        try:
+            sql = "SELECT '[nodict]',count(*),sum(length(data)) FROM _blob_zstd WHERE _data_dict IS NULL GROUP BY 1"
+            plan = s.db.execute('EXPLAIN QUERY PLAN ' + sql).fetchall()
+            self.assertTrue(any('USING COVERING INDEX blob_pending_size' in row[3] for row in plan), plan)
+            ops = s.db.execute('EXPLAIN ' + sql).fetchall()
+            root = s.db.execute("SELECT rootpage FROM sqlite_master WHERE name='_blob_zstd'").fetchone()[0]
+            table_cursors = {r[2] for r in ops if r[1] == 'OpenRead' and r[3] == root}
+            self.assertFalse(any(r[1] == 'Column' and r[2] in table_cursors and r[3] == 2 for r in ops), 'pending grouping must not read payload bytes')
+        finally: s.close()
+
+    def test_default_leaves_raw_and_missing_cache_absent(self):
+        self.fill(); shader_cache.maintain(self.path, say=self.said.append)
+        with contextlib.closing(sqlite3.connect(self.path)) as db: self.assertEqual(db.execute("SELECT type FROM sqlite_master WHERE name='blob'").fetchone(), ('table',))
+        with self.assertRaises(FileNotFoundError): shader_cache.maintain(self.root / 'missing', compress=True)
+        self.assertFalse((self.root / 'missing').exists())
+
+    def test_busy_in_process_then_close_releases(self):
+        self.store.put('keep', b'x')
+        with self.assertRaisesRegex(RuntimeError, 'busy'): shader_cache.maintain(self.path, compress=True)
+        self.store.close(); self.store.close()
+        shader_cache.maintain(self.path, compress=True, say=self.said.append)
+
+    def test_busy_across_processes(self):
+        self.store.close()
+        code = "import sys; sys.path.insert(0,sys.argv[1]); import shader_cache; s=shader_cache.Store(sys.argv[2]); print('ready',flush=True); sys.stdin.read()"
+        p = subprocess.Popen([sys.executable, '-c', code, str(REPO / 'dm/tools'), str(self.path)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        try:
+            assert p.stdout
+            self.assertEqual(p.stdout.readline().strip(), 'ready')
+            start = time.monotonic()
+            with self.assertRaisesRegex(RuntimeError, 'busy'): shader_cache.maintain(self.path, compress=True)
+            self.assertLess(time.monotonic() - start, 2)
+        finally: p.communicate('')
+        shader_cache.maintain(self.path, compress=True, say=self.said.append)
+
+    def test_reversal_failure_and_abandoned_output_preserve_source(self):
+        self.fill(); before = self.snapshot(); shader_cache.maintain(self.path, compress=True, say=self.said.append)
+        with mock.patch.object(shader_cache.os, 'replace', side_effect=OSError('disk full')):
+            with self.assertRaisesRegex(OSError, 'disk full'): shader_cache.maintain(self.path, decompress=True)
+        self.assertEqual(self.snapshot(), before); self.assertFalse(Path(f'{self.path}.raw.part').exists())
+        Path(f'{self.path}.raw.part').write_bytes(b'abandoned')
+        shader_cache.maintain(self.path, decompress=True, say=self.said.append)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_failed_compression_is_recoverable(self):
+        self.fill(); before = self.snapshot(); enable_compression(self.path)
+        with mock.patch.object(shader_cache, '_reclaim', side_effect=OSError('disk full')):
+            with self.assertRaisesRegex(OSError, 'disk full'): shader_cache.maintain(self.path, compress=True)
+        self.assertEqual(self.snapshot(), before)
+        shader_cache.maintain(self.path, say=self.said.append)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_sqlite_without_extension_loading_reports_actionable_error(self):
+        db = mock.Mock()
+        db.enable_load_extension.side_effect = NotImplementedError('disabled in this Python')
+        with self.assertRaisesRegex(RuntimeError, 'sqlite-zstd.*Python'): shader_cache._load_zstd(db)
+
+    def test_unsupported_locking_does_not_break_raw_but_refuses_conversion(self):
+        self.store.close()
+        with mock.patch.object(shader_cache.fcntl, 'flock', side_effect=OSError('not supported')):
+            s = shader_cache.Store(self.path); s.put('keep', b'x'); s.close()
+            with self.assertRaisesRegex(OSError, 'not supported'): shader_cache.maintain(self.path, compress=True)
+        self.assertEqual(self.snapshot()[0][0][2], b'x')
+
+    def test_reversal_cleans_partial_writes_and_preserves_source(self):
+        self.fill(); shader_cache.maintain(self.path, compress=True, say=self.said.append)
+        before = self.snapshot()
+        def fail_write(db, part):
+            Path(part).write_bytes(b'half output'); raise OSError('no space')
+        with mock.patch.object(shader_cache, '_raw_copy', side_effect=fail_write):
+            with self.assertRaisesRegex(OSError, 'no space'): shader_cache.maintain(self.path, decompress=True)
+        self.assertFalse(Path(f'{self.path}.raw.part').exists()); self.assertEqual(self.snapshot(), before)
+        with contextlib.closing(sqlite3.connect(self.path)) as db, db:
+            db.execute('UPDATE _blob_zstd SET data=? WHERE id=1', (b'not zstd',))
+        damaged_source = self.path.read_bytes()
+        with self.assertRaises(sqlite3.Error): shader_cache.maintain(self.path, decompress=True, workers=4)
+        self.assertEqual(self.path.read_bytes(), damaged_source)
+        self.assertFalse(Path(f'{self.path}.raw.part').exists())
+
+    def test_killed_reversal_retains_wal_and_retry_cleans_part(self):
+        self.fill(); before = self.snapshot(); shader_cache.maintain(self.path, compress=True, say=self.said.append)
+        code = "import os,sys; sys.path.insert(0,sys.argv[1]); import shader_cache\ndef stop(db,part):\n open(part,'wb').write(b'partial'); os.kill(os.getpid(),9)\nshader_cache._raw_copy=stop\nshader_cache.maintain(sys.argv[2],decompress=True)"
+        p = subprocess.run([sys.executable, '-c', code, str(REPO / 'dm/tools'), str(self.path)], capture_output=True)
+        self.assertEqual(p.returncode, -9); self.assertTrue(Path(f'{self.path}.raw.part').exists())
+        self.assertEqual(self.snapshot(), before)
+        shader_cache.maintain(self.path, decompress=True, say=self.said.append)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_reversal_includes_committed_wal_from_killed_writer(self):
+        self.store.close(); shader_cache.maintain(self.path, compress=True, say=self.said.append)
+        code = "import os,sys; sys.path.insert(0,sys.argv[1]); import shader_cache; s=shader_cache.Store(sys.argv[2]); s.put('committed',b'from WAL'); os.kill(os.getpid(),9)"
+        p = subprocess.run([sys.executable, '-c', code, str(REPO / 'dm/tools'), str(self.path)], capture_output=True)
+        self.assertEqual(p.returncode, -9); self.assertTrue(Path(f'{self.path}-wal').is_file())
+        shader_cache.maintain(self.path, decompress=True, say=self.said.append)
+        self.assertEqual(self.snapshot()[0][0][2], b'from WAL')
+
+    def test_failed_extension_enablement_preserves_raw(self):
+        self.fill(); before = self.path.read_bytes()
+        with mock.patch.object(shader_cache, '_load_zstd', side_effect=RuntimeError('sqlite-zstd missing')):
+            with self.assertRaisesRegex(RuntimeError, 'missing'): shader_cache.maintain(self.path, compress=True)
+        self.assertEqual(self.path.read_bytes(), before)
+
+    def test_large_reclamation_checkpoints_between_bounded_batches(self):
+        for i in range(40): self.store.put(f'large/{i}', bytes([i]) + b'x' * 1024**2)
+        self.store.close(); enable_compression(self.path); reclaim = shader_cache._reclaim; batches = []; wal_sizes = []
+        def observe(db):
+            db.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchall()
+            def trace(sql):
+                if sql.startswith('PRAGMA incremental_vacuum'): batches.append(sql)
+                if sql.startswith('PRAGMA wal_checkpoint'):
+                    wal = Path(f'{self.path}-wal'); wal_sizes.append(wal.stat().st_size if wal.exists() else 0)
+            db.set_trace_callback(trace)
+            try: reclaim(db)
+            finally: db.set_trace_callback(None)
+        with mock.patch.object(shader_cache, '_reclaim', side_effect=observe): shader_cache.maintain(self.path, compress=True, say=self.said.append)
+        self.assertGreater(len(batches), 1)
+        self.assertLess(max(wal_sizes), 64 * 1024**2)
+        self.assertLess(self.path.stat().st_size, 1024**2)
+
+    def test_maintenance_does_not_wait_for_writer(self):
+        self.store.close(); shader_cache.maintain(self.path, compress=True, say=self.said.append)
+        s = shader_cache.Store(self.path); self.addCleanup(s.close)
+        s.put('committed pending', b'needs compression' * 1000)
+        s.db.execute('BEGIN IMMEDIATE'); s.put('pending', b'bytes' * 1000)
+        start = time.monotonic()
+        with self.assertRaises(sqlite3.OperationalError): shader_cache.maintain(self.path, say=self.said.append)
+        self.assertLess(time.monotonic() - start, 2)
+        s.db.rollback()
 
 
 if __name__ == '__main__': unittest.main()

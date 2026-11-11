@@ -8,6 +8,8 @@ import importlib.util
 import struct
 import subprocess
 import sys
+import sqlite3
+import contextlib
 import unittest
 
 REPO = Path(__file__).resolve().parents[3]
@@ -51,6 +53,18 @@ def nsp_script():
 
 
 class NativeTools(unittest.TestCase):
+    def test_sqlite_zstd_universal(self):
+        lib = REPO / 'dm/tools/sqlite_zstd_bin/libsqlite_zstd.dylib'
+        self.assertEqual(macho_archs(lib.read_bytes()), ['arm64', 'x86_64'])
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'loads the Mac extension')
+    def test_sqlite_zstd_loads(self):
+        with contextlib.closing(sqlite3.connect(':memory:')) as db:
+            db.enable_load_extension(True)
+            db.load_extension(str(REPO / 'dm/tools/sqlite_zstd_bin/libsqlite_zstd.dylib'))
+            db.enable_load_extension(False)
+            self.assertEqual(db.execute("SELECT zstd_decompress(zstd_compress(?, 3), 0)", (b'cache' * 100,)).fetchone()[0], b'cache' * 100)
+
     def test_universal(self):
         for exe in (XLATE, NX):
             with self.subTest(exe=exe.name):

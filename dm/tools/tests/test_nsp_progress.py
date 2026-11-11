@@ -32,6 +32,17 @@ class Json(unittest.TestCase):
     def events(self, ev=None):
         return [e for e in map(json.loads, self.out.getvalue().splitlines()) if ev in (None, e['ev'])]
 
+    def test_shader_cache_maintenance_uses_existing_json_events(self):
+        self.prog.plan(1); self.prog.stage('Mac shaders')
+        def maintain(path, **kw): kw['say']('shader compile cache: reclaimed pages')
+        with mock.patch.object(nsp.shader_cache, 'exists', return_value=True), mock.patch.object(nsp.shader_cache, 'maintain', side_effect=maintain):
+            nsp.maintain_shader_cache(Path('cas.db'), True)
+        self.assertFalse(self.events('stage_end'))
+        self.prog.end('ready')
+        events = self.events()
+        self.assertEqual(events[-1]['ev'], 'stage_end')
+        self.assertTrue(any(e['ev'] == 'step' and 'compile cache' in e['step'] for e in events))
+
     def test_warned_stage_end(self):   # a stage that finished without what it makes (the pipeline archive): ok, with a warn flag the launcher can show
         self.prog.plan(2)
         self.prog.stage('Pipeline archive'); self.prog.end('failed, the app is packed without one', warn=True)

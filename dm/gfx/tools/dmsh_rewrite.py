@@ -405,10 +405,17 @@ static inline __attribute__((always_inline)) float4 dm_bmix(float4 r, float4 w, 
 static inline __attribute__((always_inline)) float dm_bmix(float r, float w, float4 k) {{ return r + (w - r) * k.x; }}
 template<typename V, typename T, typename... A> static inline __attribute__((always_inline)) V dm_bs(V r, constant dm_border_t* b, uint i, T t, sampler w, A... a)
 {{
-    if (b->mask >> i & 1u) r = dm_bmix(r, t.sample(w, a...), b->k[i]);
+    if (DM_BORDER_LIVE && (b->mask >> i & 1u)) r = dm_bmix(r, t.sample(w, a...), b->k[i]);
     return r;
 }}
 '''
+
+# The corrections also depend on the function constant abi.BORDER_FC: the host sets it (true: off) for a pipeline whose draw or dispatch binds no sampler with a twin, the usual case,
+# and the twin samples are compiled out with the registers they kept live. A uniform branch still costs them: Ocarina of Time's 1080p material passes spilled 300-400 bytes a thread,
+# 1.5 ms of a 26.7 ms frame on a MacBook Air M4, and its kernels, NDSR's network among them, 0.25 ms more (PR #1929); Splatoon Raiders' c0ae76e0ca76b574 spilled 592 bytes a thread
+# and none without them (PR #1203). A pipeline the host does not specialize leaves the constant undefined: every sample corrects as its bit says
+BORDER_LIVE_FC = (f'constant bool dm_border_off [[function_constant({abi.BORDER_FC})]];\n'
+                  'constant bool dm_border_live = !is_function_constant_defined(dm_border_off) || !dm_border_off;\n#define DM_BORDER_LIVE dm_border_live\n')
 
 def border_emu(msl):
     """The samples of the argument buffer's textures through its sampler members, T.sample(S, args) → dm_bs(T.sample(S, args), block, bit, T, S_w, args) (see BORDER_HELPERS);
@@ -437,7 +444,7 @@ def border_emu(msl):
         args = msl[m.end():i - 1]
         twin = f'spvDescriptorSet0.{m.group(2)}{abi.BORDER_TWIN}'
         msl = msl[:m.start()] + f'dm_bs({msl[m.start():i]}, spvDescriptorSet0.{abi.BORDER_MEMBER}, {bit[m.group(2)]}u, spvDescriptorSet0.{m.group(1)}, {twin}, {args})' + msl[i:]
-    return msl.replace('using namespace metal;\n', 'using namespace metal;\n' + BORDER_HELPERS, 1)
+    return msl.replace('using namespace metal;\n', 'using namespace metal;\n' + BORDER_LIVE_FC + BORDER_HELPERS, 1)
 
 # gl_FragCoord.z against a depth the shader read. NVIDIA stores a fragment's depth as the z its pixel shader reads, so a shader can test a fragment against a depth image of its own surface and
 # find them equal. Apple's GPU stores a value below the [[position]].z its fragment shader reads at some pixels: by up to one ulp of z plus a fraction of the depth's step across a pixel
@@ -495,3 +502,52 @@ def frag_z_snap(msl):
     body = f'\n    float {ZSNAP_WIDTH} = fwidth(gl_FragCoord.z);' + '\n'.join(lines)   # in uniform control flow, before anything the body does
     msl = msl[:first] + body + msl[end - 1:]
     return msl.replace('using namespace metal;\n', 'using namespace metal;\n\n' + ZSNAP, 1), n
+
+
+# NVIDIA's float blender with "zero times anything is zero" on. The 3D engine has a method for it (SET_BLEND_FLOAT_OPTION, 0x670, bit ZERO_TIMES_ANYTHING_IS_ZERO in NVIDIA's published class
+# headers), and NVN's driver sets it in its start-up command list: the word 0x80010670 (an immediate write of 1) is in the sdk module of Ocarina of Time and of 12 of 14 other games looked at.
+# So a blend term whose weight is 0 is 0 whatever the colour, where IEEE (and Direct3D 11, which wants the NaN kept "including 0.0 blend weights") gives 0 x NaN = 0 x Inf = NaN: a pixel
+# shader may leave NaN in the colour of a pixel it adds nothing to and say so with alpha 0, and under SRC_ALPHA blending the target keeps its value. Apple's blender multiplies as IEEE does,
+# stores the NaN (0 x Inf too; only a factor of ZERO itself leaves its term out: dm/gfx/tests/t_blend_zero.m, on an M6), and every later pass that reads the target spreads it.
+# Ocarina of Time's half-resolution mist shader 5ad65c0eefd09c7f averages hit positions over a layer whose density is 0 there (a positive hit count, a weight sum of 0: 1/0 x 0; its FMULs
+# carry no .FMZ, so the translation is exact) and writes them with alpha 0 into an RGBA16F target blended SRC_ALPHA / ONE_MINUS_SRC_ALPHA. The mist composite carried the NaN into the scene
+# and bloom turned each into a white cloud.
+# The rule belongs to the blender, so it depends on the draw's blend state, which a shader does not know: the host gives it (nvn_mtl.m bz_bind) as a word at fragment buffer
+# DMSH_BLEND_BUFFER, DMSH_BLEND_ZERO_BITS bits per colour output: where the output's source colour weight is zero (dmsh_abi.h has the cases), a non-finite rgb is returned as 0, which is
+# what the zero weight makes of it. With blending off, on a target that is not floating point, or with a weight the alpha does not make zero, the output's bits are 0 and it is returned as
+# it is: NVIDIA stores that NaN or Inf too. A finite colour is never changed, nor the alpha.
+# Not covered, as a shader cannot see it: a NaN or Inf already in the target under a zero destination weight, and a non-finite weight on a colour of 0.
+# The guard goes into main0 before the build makes its other entry points, so each of them has it: they call main0's body (dmsh_side.shared_body: main0_u / main0_m, main0_d, main0_f and
+# the side library's) and take main0's parameters, the word's among them. It is written as a call, not as stores to out, which dmsh_entry.fs_uint reads to tell what a shader writes
+BLEND_ZERO = '''struct dm_blend_state { uint zero; };   // see dmsh_rewrite.py blend_zero
+static inline __attribute__((always_inline)) float4 dm_bz(float4 c, uint m)
+{
+    m &= %du;
+    if (!((m == 1u && c.w == 0.0f) || (m == 2u && c.w == 1.0f))) return c;
+    return float4(select(c.xyz, float3(0.0f), (as_type<uint3>(c.xyz) & uint3(0x7f800000u)) == uint3(0x7f800000u)), c.w);   // NaN or Inf by its bits: fast math may assume there is none
+}
+static inline __attribute__((always_inline)) void dm_blend0(thread main0_out& dm_o, constant dm_blend_state& dm_s)
+{
+    uint m = dm_s.zero;
+    if (m == 0u) return;
+%s}
+'''
+BLEND_ZERO_PARAM = f'constant dm_blend_state& dm_blend [[buffer({abi.BLEND_BUFFER})]]'
+
+
+def blend_zero(msl):
+    """→ (msl with dm_blend0(out, dm_blend); before each `return out;` line of main0, the word as main0's last parameter and the helpers before main0, the number of returns guarded).
+    Unchanged (0) when main0 has no float4 colour output, is not of a shape dmsh_side.entry knows, has its body shared already, or returns other than on a line of its own"""
+    st = re.search(r'struct main0_out\s*\{(.*?)\};', msl, re.S)
+    cols = [(nm, int(c)) for ty, nm, c in re.findall(r'^\s*(\w+)\s+(\w+)\s*\[\[color\((\d+)\)\]\];', st.group(1), re.M) if ty == 'float4'] if st else []   # not index(1): a second blend source
+    if not cols or 'dm_blend0(' in msl or f'[[buffer({abi.BLEND_BUFFER})]]' in msl or dmsh_side.body(msl): return msl, 0
+    try: e = dmsh_side.entry(msl, 'main0')
+    except ValueError: return msl, 0
+    if not e or e['ret'] != 'main0_out': return msl, 0
+    body = msl[e['head']:e['end']]
+    n = len(re.findall(r'\breturn\b', body))
+    body, k = re.subn(r'^([ \t]*)return out;$', lambda m: f'{m.group(1)}dm_blend0(out, dm_blend);\n{m.group(1)}return out;', body, flags=re.M)
+    if not k or k != n: return msl, 0
+    bits = abi.BLEND_ZERO_BITS
+    helper = BLEND_ZERO % ((1 << bits) - 1, ''.join(f'    dm_o.{nm} = dm_bz(dm_o.{nm}, m >> {bits * c}u);\n' for nm, c in cols))
+    return msl[:e['start']] + helper + '\n' + msl[e['start']:e['head'] - 1] + (', ' if e['params'] else '') + BLEND_ZERO_PARAM + ')' + body + msl[e['end']:], k

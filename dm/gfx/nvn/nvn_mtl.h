@@ -59,3 +59,4 @@ uint64_t mtl_present_ext(uint64_t serial, double period, void *ev, uint64_t ev_v
 void mtl_present_layer(uint32_t w, uint32_t h);   // a sized vi layer (hle_vi.c): the picture's shape instead of the display's 16:9
 void mtl_present_screen(uint32_t w, uint32_t h);   // a screen taller than 16:9 (loader.c, DM_SCREEN_ASPECT): the picture's shape for a texture of that shape
 void mtl_present_wait(uint64_t ticket);   // as in nvn_obj.h: wait until that present has been handed to the GPU
+void mtl_present_wait_texture(uint64_t ticket, uint64_t copy);   // the next acquire of a presented texture, or a queue finish: with a snapshot (copy, from mtl_present) its copy has run on the GPU, else as mtl_present_wait

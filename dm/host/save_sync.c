@@ -151,7 +151,7 @@ static int pack_entry(void *c, const char *abs, const char *rel, const struct st
     }
     close(fd);
     if (left) return -1;   // a failed read, or a file shorter than its size (the save is a clone no Commit touches, so not one being written)
-    k->m->files++;
+    k->m->files++; k->m->bytes += (int64_t)size;
     if (mt > k->m->saved) k->m->saved = mt;
     return 0;
 }
@@ -242,7 +242,7 @@ int ss_read(const char *bundle, const char *into, ss_meta *m) {
             struct timespec t[2] = {{(time_t)mt, 0}, {(time_t)mt, 0}}; futimens(fd, t);
             int bad = close(fd); fd = -1; if (bad) goto done;
         }
-        if (h[0] == 2) m->files++;
+        if (h[0] == 2) m->files++, m->bytes += (int64_t)size;
     }
     if (fread(end, 1, sizeof end, f) != sizeof end || memcmp(end, END, sizeof end) || fgetc(f) != EOF) goto done;
     CC_SHA256_Final(d, &sha); hex(d, m->hash);
@@ -252,7 +252,7 @@ int ss_read(const char *bundle, const char *into, ss_meta *m) {
 done:
     if (fd >= 0) close(fd);
     free(buf); fclose(f);
-    if (r) m->files = 0, m->hash[0] = 0;
+    if (r) m->files = 0, m->bytes = 0, m->hash[0] = 0;
     return r;
 }
 
@@ -347,9 +347,9 @@ static int backup_dir(const char *save, const char *side, char *out, size_t n) {
     return 0;
 }
 
-// DM_SAVE_SYNC → <folder>/<title ID>/save.dmsync; 0 when sync is off
-static int cloud_file(const char *title, char *out, size_t n) {
-    const char *v = getenv("DM_SAVE_SYNC"); char dir[PATH_MAX], id[24];
+// A DM_SAVE_SYNC value → <folder>/<title ID>/save.dmsync; 0 when sync is off
+static int cloud_path(const char *v, const char *title, char *out, size_t n) {
+    char dir[PATH_MAX], id[24];
     if (!v || !*v || !strcmp(v, "0")) return 0;
     if (!strcmp(v, "icloud")) {
 #if TARGET_OS_OSX
@@ -374,6 +374,7 @@ static int cloud_file(const char *title, char *out, size_t n) {
     if (!strcasecmp(last ? last + 1 : dir, id)) return snprintf(out, n, "%s/save.dmsync", dir) < (int)n;
     return snprintf(out, n, "%s/%s/save.dmsync", dir, id) < (int)n;
 }
+static int cloud_file(const char *title, char *out, size_t n) { return cloud_path(getenv("DM_SAVE_SYNC"), title, out, n); }
 
 // The platform's fetch, given at most `ms`: a download iCloud never finishes must not hold the game at its first save mount. One that comes too late is dropped
 typedef struct { pthread_mutex_t mu; pthread_cond_t cv; int done, abandoned, result; char cloud[PATH_MAX], local[PATH_MAX]; } fetch_job;
@@ -408,25 +409,54 @@ static int fetch_timed(const char *cloud, const char *local, int ms) {   // fron
 }
 
 // ---------- the two directions ----------
-// The cloud's save replaces this one. It is unpacked beside it first, so a pull that fails leaves this save as it was; then each folder is swapped in at once
-// (renamex_np, as a Commit swaps), and the one it replaced goes to the backups. kept: that backup, "" when this device had no save
+// The cloud's save replaces this one. It is unpacked beside it first (<save>.sync-tmp/in). Each of its folders is then moved into this device's backup folder and
+// swapped from there with the live one (renamex_np, as a Commit swaps): one step puts the cloud's folder in place and leaves this device's in the backups, so the
+// staging folder, which every start clears, never holds the only copy of this device's save, not even when the app is killed between two steps. A folder the
+// cloud's save does not have goes to the backups too, so both hold the same. When a step fails, the folders already done are put back in reverse order (act[]),
+// so the save is this device's again, whole. kept: the backup of this device's save, "" when it had none.
+// 0: the cloud's save is in place. -1: this device's save is as it was. -2: it could not be put back whole: kept holds this device's folders that are not in place.
+// errno: the first failure's
+enum { PL_NONE, PL_SWAPPED, PL_MOVED_OUT, PL_PLACED };   // what was done to a folder: swapped from the backups, moved to them, put where none was
 static int pull(const char *save, const char *bundle, ss_meta *r, char *kept, size_t kn) {
-    char tmp[PATH_MAX]; snprintf(tmp, sizeof tmp, "%s.sync-tmp/in", save);
+    char tmp[PATH_MAX], here[2][PATH_MAX], incoming[2][PATH_MAX], old[2][PATH_MAX];
+    int fresh[2], had[2], act[2] = {PL_NONE, PL_NONE}, e = 0, whole = 1;
+    snprintf(tmp, sizeof tmp, "%s.sync-tmp/in", save);
     kept[0] = 0;
-    if (rm_tree(tmp) || mkdirs(tmp) || ss_read(bundle, tmp, r)) { rm_tree(tmp); return -1; }
+    if (rm_tree(tmp) || mkdirs(tmp) || ss_read(bundle, tmp, r)) { e = errno; rm_tree(tmp); errno = e; return -1; }
     for (int i = 0; i < 2; i++) {
-        char here[PATH_MAX], incoming[PATH_MAX], old[PATH_MAX];
-        folder_path(save, i, here, sizeof here); snprintf(incoming, sizeof incoming, "%s/%s", tmp, FOLDERS[i]);
-        int fresh = !access(incoming, F_OK), had = has_entries(here);
-        if (had && !*kept && backup_dir(save, "local", kept, kn)) return -1;
-        snprintf(old, sizeof old, "%s/%s", kept, FOLDERS[i]);
-        if (fresh && !access(here, F_OK)) {   // swapped: here holds the cloud's, incoming this device's
-            if (renamex_np(incoming, here, RENAME_SWAP) || (had ? rename(incoming, old) : rm_tree(incoming))) return -1;
-        } else if (fresh) { if (rename(incoming, here)) return -1; }
-        else if (had && rename(here, old)) return -1;   // a folder the cloud's save does not have: this device's goes, so both hold the same
+        folder_path(save, i, here[i], sizeof here[i]); snprintf(incoming[i], sizeof incoming[i], "%s/%s", tmp, FOLDERS[i]);
+        fresh[i] = !access(incoming[i], F_OK); had[i] = has_entries(here[i]);
+    }
+    if ((had[0] || had[1]) && backup_dir(save, "local", kept, kn)) { e = errno; kept[0] = 0; goto undo; }   // made before any folder moves
+    for (int i = 0; i < 2; i++) {
+        snprintf(old[i], sizeof old[i], "%s/%s", kept, FOLDERS[i]);
+        if (had[i] && fresh[i]) {
+            if (rename(incoming[i], old[i])) { e = errno; goto undo; }
+            if (renamex_np(old[i], here[i], RENAME_SWAP)) { e = errno; if (rename(old[i], incoming[i])) rm_tree(old[i]); goto undo; }   // nothing swapped: old holds the cloud's
+            act[i] = PL_SWAPPED;
+        } else if (had[i]) {
+            if (rename(here[i], old[i])) { e = errno; goto undo; }
+            act[i] = PL_MOVED_OUT;
+        } else if (fresh[i]) {   // no save in this folder: an empty one (the host makes DM_SAVE at every mount) is swapped into the staging folder, which is cleared
+            if (access(here[i], F_OK) ? rename(incoming[i], here[i]) : renamex_np(incoming[i], here[i], RENAME_SWAP)) { e = errno; goto undo; }
+            act[i] = PL_PLACED;
+        }
     }
     rm_tree(tmp);
     return 0;
+undo:
+    for (int i = 1; i >= 0; i--) {
+        if (act[i] == PL_SWAPPED) {   // this device's back in place, the cloud's out of the backups
+            if (renamex_np(old[i], here[i], RENAME_SWAP)) whole = 0; else if (rename(old[i], incoming[i])) rm_tree(old[i]);
+        } else if (act[i] == PL_MOVED_OUT) { if (rename(old[i], here[i])) whole = 0; }
+        else if (act[i] == PL_PLACED) {
+            if (access(incoming[i], F_OK) ? rename(here[i], incoming[i]) : renamex_np(incoming[i], here[i], RENAME_SWAP)) whole = 0;
+        }
+    }
+    if (whole && *kept) rmdir(kept);   // nothing of this device's save is in it now
+    rm_tree(tmp);   // the cloud's save only (and an empty folder this device had): nothing of this device's save is ever here
+    errno = e;
+    return whole ? -1 : -2;
 }
 
 // What this device committed goes to the cloud, unless the cloud already has it. It replaces only what it was compared against: no save, the save last synced
@@ -510,7 +540,7 @@ static void mount_once(const char *save, const char *title) {
     if (ss_scan(save, &mine)) { SRED("this device's save %s cannot be read (errno=%d): off", save, errno); return; }
     read_base(save, base);
     choice_kind choice = read_choice(chosen);
-    int got = choice == CH_OFFLINE ? -1 : fetch_timed(cloud, theirs, FETCH_MS), both = 0, failed = 0;
+    int got = choice == CH_OFFLINE ? -1 : fetch_timed(cloud, theirs, FETCH_MS), both = 0, failed = 0, pr;
     if (got > 0 && ss_read(theirs, NULL, &other)) { SRED("the cloud's save %s is damaged: playing on with this device's, which replaces it (the damaged file is kept)", cloud); got = 0; }
     else if (got > 0 && strcasecmp(other.title, title)) { SRED("the cloud's save %s is %s's, not %s's: not used", cloud, other.title, title); got = -1; }
     if (got < 0) { SLOG("playing on with this device's save; it is not sent until it has been compared with the cloud's"); failed = 1; }
@@ -525,7 +555,11 @@ static void mount_once(const char *save, const char *title) {
     switch (way) {
     case SS_PULL:
         when(other.saved, t, sizeof t);
-        if (pull(save, theirs, &other, kept, sizeof kept)) { SRED("bringing the cloud's save in failed (errno=%d): playing on with this device's", errno); failed = 1; break; }
+        if ((pr = pull(save, theirs, &other, kept, sizeof kept))) {
+            if (pr == -1) SRED("bringing the cloud's save in failed (errno=%d): playing on with this device's", errno);
+            else SRED("bringing the cloud's save in failed (errno=%d), and this device's could not all be put back: what is not in %s is kept in %s", errno, save, kept);
+            failed = 1; break;
+        }
         write_base(save, other.hash);
         SLOG("brought in the cloud's save (from %s, saved %s%s)%s%s", other.device, t, choice == CH_CLOUD ? ", the player's choice" : both ? ", the newer of two that both changed" : "", *kept ? "; this device's is kept in " : "", kept);
         break;
@@ -558,6 +592,37 @@ static void mount_once(const char *save, const char *title) {
     if (pthread_create(&th, NULL, sender, NULL)) { SRED("cannot start the sender: saves are not sent this session"); return; }
     pthread_detach(th);
     atomic_store(&g_on, 1);
+}
+
+// ---------- what a front end asks the player with ----------
+// The two saves and the one last synced, as the mount will see them (dm/host/save_sync.h). The cloud's file is found as the mount finds it (cloud_path) and fetched
+// through the same front-end call, so on the iPhone the report is what downloads a file iCloud has only listed. It goes to a file of its own under <save>.sync-tmp:
+// a report the front end stopped waiting for may still be fetching when the next one starts, or when the game's mount clears the folder.
+int save_sync_report(const char *save, const char *title, const char *folder, int wait_ms, char *out, size_t n) {
+    char dd[PATH_MAX], cloud[PATH_MAX], tmp[PATH_MAX], theirs[PATH_MAX], base[SS_HASH + 1], dev[64];
+    static _Atomic int seq;
+    ss_meta mine, other; int got = -1, both = 0, same = 1, on;
+    memset(&other, 0, sizeof other); base[0] = 0;
+    if (!save || !*save || !title || !*title || !out || !n) return -1;
+    snprintf(dd, sizeof dd, "%s", save); size_t L = strlen(dd); while (L > 1 && dd[L - 1] == '/') dd[--L] = 0;
+    if (ss_scan(dd, &mine)) return -1;
+    read_base(dd, base);
+    if ((on = cloud_path(folder ? folder : getenv("DM_SAVE_SYNC"), title, cloud, sizeof cloud))) {
+        snprintf(tmp, sizeof tmp, "%s.sync-tmp", dd);
+        snprintf(theirs, sizeof theirs, "%s/report-%d-%d.dmsync", tmp, (int)getpid(), atomic_fetch_add(&seq, 1));
+        if (!mkdirs(tmp)) {
+            got = fetch_timed(cloud, theirs, wait_ms > 0 ? wait_ms : FETCH_MS);
+            if (got > 0 && ss_read(theirs, NULL, &other)) { SRED("the cloud's save %s is damaged", cloud); got = 0; memset(&other, 0, sizeof other); }   // the mount replaces it
+            unlink(theirs); rmdir(tmp);
+        }
+        if (got > 0 && strcasecmp(other.title, title)) same = 0;
+    }
+    if (got >= 0 && same) ss_decide(mine.hash, base, got > 0 ? other.hash : "", mine.saved, other.saved, 1, &both);
+    snprintf(dev, sizeof dev, "%s", other.device); for (char *s = dev; *s; s++) if (*s == ' ' || *s == '=') *s = '_';
+    int w = snprintf(out, n, "sync=%d cloud=%d local=%s saved=%lld files=%d size=%lld chash=%s csaved=%lld cfiles=%d csize=%lld cdevice=%s sametitle=%d conflict=%d",
+                     on, on ? got : 0, *mine.hash ? mine.hash : "-", (long long)mine.saved, mine.files, (long long)mine.bytes,
+                     got > 0 && *other.hash ? other.hash : "-", (long long)other.saved, other.files, (long long)other.bytes, *dev ? dev : "-", same, both);
+    return w < 0 || w >= (int)n ? -1 : 0;
 }
 
 void save_sync_mount(const char *save, const char *title) {   // the first mount does it; a second one (the device save) waits for it

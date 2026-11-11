@@ -50,6 +50,18 @@ fragment main0_out main0(main0_in in [[stage_in]], constant spvDescriptorSetBuff
 
 
 class Regress(unittest.TestCase):
+    def test_run_env_cloud_saves_off(self):   # an inherited DM_SAVE_SYNC would sync a route's scratch save with the player's cloud save (docs/reference/services.md)
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            g = NS(id='0100000000000000', folder=root, build=root / 'build', kind='nvn', romfs=lambda: root / 'romfs')
+            art = {'lib': root / 'lib', 'profile': root / 'profile'}
+            route = {'save': 'new'}
+            with patch.dict(os.environ, DM_SAVE_SYNC=str(root / 'cloud')):
+                env, src = regress.run_env(g, art, route, root / 'run', NS(env=[], no_hud=True))
+                self.assertEqual((env['DM_SAVE_SYNC'], env['DM_SAVE'], src), ('0', str(root / 'run/save'), None))
+                with self.assertRaises(regress.HarnessError): regress.run_env(g, art, route, root / 'run', NS(env=[f'DM_SAVE_SYNC={root}/cloud'], no_hud=True))
+                self.assertEqual(regress.run_env(g, art, route, root / 'run', NS(env=['DM_SAVE_SYNC=0'], no_hud=True))[0]['DM_SAVE_SYNC'], '0')
+
     def test_impact_without_machine_paths(self):
         env = {k: v for k, v in regress.os.environ.items() if k not in ('REGRESS_ROOT', 'REGRESS_GAMES')}
         with tempfile.TemporaryDirectory() as td:

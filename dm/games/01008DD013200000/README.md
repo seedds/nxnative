@@ -23,7 +23,7 @@ Update 1.2.1 (v196608) over the base game, SDK 9.4.0. Moon Studios' game (publis
 ## Frame rate
 
 - **60 fps, as on the Switch.** The game presents at interval 1; `fps_target` is not set.
-- **Measured** (windowed, Apple M6, 60 Hz screen, Swallow's Nest): frame time p50 16.66 / p95 16.80 ms, GPU about 6 ms a frame, NVN submit and present about 3 ms, CPU 66–105% of one core. Behind the dense foliage just past the area title, one 5-second stretch was GPU-bound (GPU p50 18 ms, frame p50 18.4 ms).
+- **Measured** (windowed, Apple M6, 60 Hz screen, Swallow's Nest): frame time p50 16.66 / p95 16.80 ms, GPU about 6 ms a frame, NVN submit and present about 3 ms, CPU 66–105% of one core. Behind the dense foliage just past the area title, one 5-second stretch was GPU-bound (GPU p50 18 ms, frame p50 18.4 ms). Resolved: that stretch was the host refusing uniform shadows over the page of the game's two timestamp reports a frame ([Counter reports of a running submission refused uniform shadows by page](../../../docs/reference/rendering.md#counter-reports-of-a-running-submission-refused-uniform-shadows-by-page), issue #1660). Since the fix, the new-game route into Swallow's Nest holds frame time p50 16.67 ms in every 300 frames with GPU p50 at most 6.0 ms; before it, the same route spent about 15 s at 25–28 ms.
 - 120 fps is not tried. The rewriter finds Unity's `Application.targetFrameRate` (`main+0x74f8ad0`) through the internal-call table, but not the `vSyncCount` getter (`main+0x3b51a0`, `[RED] … not read` from `unity_fps.py`), so the host could not write that.
 
 ## Memory
@@ -62,3 +62,4 @@ Update 1.2.1 (v196608) over the base game, SDK 9.4.0. Moon Studios' game (publis
 ## Found on this game
 
 - [Unity's constant-buffer table changed by two threads at once](../../../docs/reference/threads.md#unitys-constant-buffer-table-changed-by-two-threads-at-once): the boot crash in the first second of shader loading.
+- [Counter reports of a running submission refused uniform shadows by page](../../../docs/reference/rendering.md#counter-reports-of-a-running-submission-refused-uniform-shadows-by-page): seconds at 35–40 fps (15–18 fps on an M3 Max) after a slow frame, issue #1660.

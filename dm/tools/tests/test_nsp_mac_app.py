@@ -854,11 +854,11 @@ class SeenShaders(unittest.TestCase):   # --seen-shaders: the keys, the partial 
     def test_cache_maintenance_on_partial_and_reuse(self):
         cas = self.sh / 'cache/cas.db'; cas.parent.mkdir(); cas.touch()
         a, = self.keys('a')
-        with mock.patch.object(nsp.shader_cache, 'maintain') as maintain:
+        with mock.patch.object(nsp.shader_cache, 'maintain') as maintain, mock.patch.object(nsp.os, 'cpu_count', return_value=7):
             self.build([a], compress=True)
-            maintain.assert_called_once_with(cas, compress=True, say=nsp.say)
+            maintain.assert_called_once_with(cas, compress=True, workers=7, say=nsp.say)
             maintain.reset_mock(); self.build([a])
-            maintain.assert_called_once_with(cas, compress=False, say=nsp.say)
+            maintain.assert_called_once_with(cas, compress=False, workers=7, say=nsp.say)
             self.assertFalse(self.ran, 'same fingerprint reuses outputs even when compression option changes')
 
     def test_cache_failure_warns_and_shader_failure_skips_maintenance(self):
@@ -878,7 +878,7 @@ class SeenShaders(unittest.TestCase):   # --seen-shaders: the keys, the partial 
         with mock.patch.object(nsp, 'chain_tables', return_value=True), mock.patch.object(nsp, 'stale_shaders', return_value=None), mock.patch.object(nsp, 'prune_stale_chains'), \
              mock.patch.object(nsp, 'prune_shader_cache', side_effect=lambda *a: calls.append('pruned')), mock.patch.object(nsp.shader_cache, 'maintain', side_effect=maintain) as operation:
             self.build(compress=True)
-            operation.assert_called_once_with(cas, compress=True, say=nsp.say)
+            operation.assert_called_once_with(cas, compress=True, workers=nsp.os.cpu_count() or 1, say=nsp.say)
         nsp.PROG.end.assert_called_once()
 
     def test_option(self):

@@ -2378,7 +2378,7 @@ def ios_wants_pulling(g, gpus, prepare_xcode, env):
 def maintain_shader_cache(cas, compress):
     if not shader_cache.exists(cas): return
     PROG.set(step='maintaining the shader compile cache')
-    try: shader_cache.maintain(cas, compress=compress, say=say)
+    try: shader_cache.maintain(cas, compress=compress, workers=os.cpu_count() or 1, say=say)
     except Exception as e: say(f'[RED] shader compile cache maintenance failed; game outputs are kept: {e}')
 
 

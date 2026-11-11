@@ -435,6 +435,8 @@ The compile cache is one file too, `shader/cache/cas.db` (`dm/tools/shader_cache
 
 `--compress-shader-cache` (`COMPRESS_SHADER_CACHE = True` in Spyder) enables sqlite-zstd compression of the build-time compile cache after a successful shader step, including one that reuses its shader outputs. Raw SQLite remains the default. Initial compression builds, commits and checkpoints a compact replacement beside the original cache before atomically replacing it; allow temporary space for the replacement and its WAL. Worker connections read and compress separate blob ranges, and one writer creates the replacement without a reclamation pass. Once compressed, the cache stays compressed and subsequent successful shader steps compress new retained blobs and reclaim free pages automatically; `--no-compress-shader-cache` does not reverse its format. Sources in the shader-library image and game runtime loading are unaffected.
 
+Build-time compression and the standalone compression command default to the OS-reported CPU count, falling back to one if unavailable. The standalone command accepts `--workers N` or `--workers max` to override the count. Decompression retains its one-worker default.
+
 To convert an existing cache without a build, or restore raw SQLite:
 
 ```sh

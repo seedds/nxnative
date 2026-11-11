@@ -16,6 +16,7 @@ PY=${PY:-$( [ -x "$HOME/games/venv/bin/python" ] && echo "$HOME/games/venv/bin/p
 OUT="$NSP/010019A01E2F2000-work/manual-test/$MODE-$(date +%m%d-%H%M%S)"; mkdir -p "$OUT"
 # DUMP=every:<n> sets the pass-dump interval (every:150 catches a scan held for a few seconds); input.rec is player 1's input as the game's reads saw it (DM_REC), replayable with DM_KEYS=@<file>
 printf 'DM_INTERNAL_RESOLUTION=%s\nDM_PRESENT_UPSCALE=off\nDM_METAL_HUD=1\nDM_NVN_PASSDUMP=%s\nDM_REC=%s\nDM_RUMBLE_LOG=1\n' "$MODE" "${DUMP:-every:1800}" "$OUT/input.rec" > "$OUT/env.txt"
+[ -n "${ANISO:-}" ] && echo "DM_NVN_ANISO=$ANISO" >> "$OUT/env.txt"   # ANISO=<2..16>: the anisotropy floor of the surface samplers (DM_NVN_ANISO), for an A/B against a run without it
 echo "== build (partial shaders; the first time a few thousand shaders compile) -> $OUT/build.log"
 "$PY" "$REPO/scripts/build_ipa_from_nsp.py" "$NSP" -k "$IMG/prod.keys" --package v131072 --platform mac \
     --seen-shaders --work-dir "$WORK" --env-file "$OUT/env.txt" --progress lines 2>&1 | tee "$OUT/build.log"
@@ -38,7 +39,7 @@ for f, keys, n in re.findall(r'f(\d+):([^~]*)~f(\d+)', rec):
     else: spans.append([f, f + n, 0])
 print(f'ZL holds seen by the game: {len(spans)}; longest {max((b - a for a, b, _ in spans), default=0)} frames; holds of 1 s or more: '
       + (', '.join(f'f{a}-f{b} ({(b - a) / 60:.1f} s, {g} short gaps)' for a, b, g in spans if b - a >= 60) or 'none') if rec else 'ZL holds: no input recording')
-for l in re.findall(r'^.*runtime patches.*$', log, re.M)[:2]: print(l)
+for l in re.findall(r'^.*(?:runtime patches|DM_NVN_ANISO:).*$', log, re.M)[:3]: print(l)
 miss = {a or b for a, b in re.findall(r'\[RED\] (?:shader ([0-9a-f]{16}) \([^)]*\) failed to load:|failed to load shader ([0-9a-f]{16})_b:)', log)}   # the build's SHADER_MISSING: geometry shaders too
 print(f'missing shaders: {len(miss)} distinct (the next run of this script compiles them)')
 att = collections.Counter(re.findall(r'^\[pass\] F\d+ P \d+ (c0|d) ser=\d+ fmt=(\d+) (\d+x\d+)', log, re.M))

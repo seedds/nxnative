@@ -78,6 +78,8 @@ t_refl: t_refl.m ../nvn/nvn_refl.m ../nvn/nvn_refl.h ../nvn/dmsh_chain.h
 	clang -O1 -g -Wall -I../nvn -fobjc-arc -o $@ t_refl.m ../nvn/nvn_refl.m -framework Metal -framework Foundation
 t_hmap: t_hmap.c ../nvn/nvn_hmap.h
 	clang -O1 -Wall -o $@ t_hmap.c
+t_aniso: t_aniso.c ../nvn/nvn_aniso.h
+	clang -O1 -Wall -Werror -o $@ t_aniso.c
 t_cover: t_cover.c ../nvn/nvn_cover.h
 	clang -O1 -Wall -o $@ t_cover.c
 t_pace: t_pace.c ../nvn/nvn_pace.h

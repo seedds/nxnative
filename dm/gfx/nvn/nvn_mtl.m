@@ -18,6 +18,7 @@
 #if TARGET_OS_IPHONE
 #include <os/proc.h>   // os_proc_available_memory: for the memory readout line
 #endif
+#include "nvn_aniso.h"
 #include "nvn_mtl.h"
 #include "nvn_queue.h"
 #include <mach/mach.h>
@@ -6924,7 +6925,9 @@ static id<MTLSamplerState> samp_by_id(int sid) {   // Caller holds g_rmu
     d.sAddressMode = wrapm(p.ws); d.tAddressMode = wrapm(p.wt); d.rAddressMode = wrapm(p.wr);
     d.lodMinClamp = p.lod_min < 0 ? 0 : p.lod_min; d.lodMaxClamp = p.lod_max;
     d.lodBias = p.lod_bias < -16 ? -16 : p.lod_bias > 15.99f ? 15.99f : p.lod_bias;   // SetLodBias: Maxwell's sampler bias, Metal 26's range [-16, 15.99]
-    d.maxAnisotropy = p.aniso < 1 ? 1 : p.aniso > 16 ? 16 : (NSUInteger)p.aniso;
+    static int aniso_floor = -1; if (aniso_floor < 0) { aniso_floor = nvn_aniso_env(getenv("DM_NVN_ANISO")); if (aniso_floor) MLOG("DM_NVN_ANISO: surface samplers filter with anisotropy %d or more", aniso_floor); }
+    float aniso = nvn_aniso_floor(p.minf, p.magf, p.cmp_mode, p.reduction, p.lod_min, p.lod_max, p.aniso, aniso_floor);   // nvn_aniso.h: a floor for the game's surface samplers, off by default
+    d.maxAnisotropy = aniso < 1 ? 1 : aniso > 16 ? 16 : (NSUInteger)aniso;
     if (p.cmp_mode) d.compareFunction = (MTLCompareFunction)(p.cmp_func - 1);
     // Reduction (NVN 1 min / 2 max): the minimum or maximum of the texels a filtered sample covers, per channel (Metal 26). Pokémon Legends: Z-A builds its depth pyramid with a min sampler
     // (151607c7a92386cc reads the level above at an explicit LOD) and tests occlusion boxes against it; averaged, the pyramid is nearer than the scene at depth edges. Metal ignores the reduction

@@ -16199,7 +16199,7 @@ static int up_mfx_sqrt_named(NvShader *cs) {
     for (const char *k = DM_GAME_UPSCALER_SQRT_KEYS; *k; k += k[16] == ',' ? 17 : 16) if (!strncmp(k, cs->key, 16)) return 1;
     return 0;
 }
-// How much of MetalFX's own picture the game's image gets (DM_UPSCALER_SHARPNESS, the launcher's Upscaler sharpness; the profile's upscaler_sharpness when unset; 1 = all of it): the rest
+// How much of MetalFX's own picture the game's image gets (DM_UPSCALER_SHARPNESS, the launcher's Game's upscaler sharpness; the profile's upscaler_sharpness when unset; 1 = all of it): the rest
 // is the scaler's input scaled bilinearly, blended in by the draw into the game's image. MetalFX's spatial scaler has no strength of its own (its one setting is the colour mode), and
 // agl's networks give a softer picture than it does. Not for sRGB-encoded input, whose result is decoded only by that draw
 static float g_up_sharp = -1;

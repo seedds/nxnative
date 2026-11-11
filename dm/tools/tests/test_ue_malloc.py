@@ -1,5 +1,5 @@
 """Unreal's FMallocBinned3 found without a build ID (dm/tools/ue_malloc.py) on synthetic images, no game files: the name, its getter, the vtable (in place or through
-relative relocations), the constructor and its one call; a broken link changes nothing, with a [RED] reason once the name is there."""
+relative relocations), the constructor and its calls; a broken link changes nothing, with a [RED] reason once the name is there."""
 import struct
 import sys
 import unittest
@@ -45,11 +45,11 @@ def find(img): return ue_malloc.find(bytes(img), TEXT, RO, DATA)
 class FindTest(unittest.TestCase):
     def test_found_in_place(self):
         call, vt, slot, why = find(image())
-        self.assertEqual((call, vt, slot), (CALLER + 4, VT, 19), why)
+        self.assertEqual((call, vt, slot), ((CALLER + 4,), VT, 19), why)
 
     def test_found_through_relocations(self):
         call, vt, slot, why = find(image(slot=26, relocated=True))
-        self.assertEqual((call, vt, slot), (CALLER + 4, VT, 26), why)
+        self.assertEqual((call, vt, slot), ((CALLER + 4,), VT, 26), why)
 
     def test_no_name_is_not_red(self):
         call, _, _, why = find(image(name=False))
@@ -61,10 +61,15 @@ class FindTest(unittest.TestCase):
         self.assertIsNone(call)
         self.assertTrue(why.startswith('[RED] ') and 'slot 20' in why, why)
 
-    def test_two_calls_are_red(self):
-        call, _, _, why = find(image(calls=2))
+    def test_every_call_is_cut(self):   # DRAGON BALL Sparking! ZERO: one lazy construction inlined twice
+        call, vt, slot, why = find(image(calls=2))
+        self.assertEqual((call, vt, slot), ((CALLER + 4, CALLER + 12), VT, 19), why)
+
+    def test_a_jump_to_the_constructor_is_red(self):   # a tail call: a nop there would fall through
+        img = image(); put(img, CALLER + 16, B(CALLER + 16, CTOR))
+        call, _, _, why = find(img)
         self.assertIsNone(call)
-        self.assertTrue(why.startswith('[RED] ') and '2 calls' in why, why)
+        self.assertTrue(why.startswith('[RED] ') and '1 calls and 1 jumps' in why, why)
 
 
 if __name__ == '__main__':

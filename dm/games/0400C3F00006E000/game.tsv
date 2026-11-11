@@ -38,6 +38,12 @@ sys_resource	0x4000000
 shader_groups	/Shader/=shader /Effect/=effect /Lib/=lib /Layout/=layout
 shader_note	Mario Kart World shaders
 
+# ---- Frame rate ----
+# The framework picks each frame's interval (1 or 2 vsyncs, which the game steps by) from the frame's CPU time alone, so frames that wait on the GPU kept interval 1 and played in
+# slow motion. The interval takes the host's frame step instead (MATCH_FRAME_STEP in patches.py, found by its function on any build that keeps it), at most 2; the game's own
+# 30 fps mode stays its own
+fps_target	60
+
 # ---- Graphics ----
 # agl wraps its clears in render conditions on Donkey Kong Bananza and Splatoon Raiders; the same library here, to be confirmed on this game
 render_cond	on

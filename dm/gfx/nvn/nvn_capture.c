@@ -33,7 +33,7 @@ CAP_SIZE(p_render_cond, 16); CAP_OFF(p_render_cond, mode, 0); CAP_OFF(p_render_c
 CAP_SIZE(p_multi_draw, 48); CAP_OFF(p_multi_draw, ind, 0); CAP_OFF(p_multi_draw, cnt, 8); CAP_OFF(p_multi_draw, ibuf, 16);
 CAP_OFF(p_multi_draw, stride, 24); CAP_OFF(p_multi_draw, max, 32); CAP_OFF(p_multi_draw, prim, 36); CAP_OFF(p_multi_draw, itype, 40);
 _Static_assert(OP_MULTI_DRAW == 55, "keep existing capture op numbers stable");
-_Static_assert(OP_COUNT_ == 56, "nvn_capture.c: a record op was added or removed: give it a case in cap_rec_fields");
+_Static_assert(OP_COUNT_ == 58, "nvn_capture.c: a record op was added or removed: give it a case in cap_rec_fields");
 
 #define MULTI_DRAW_LAYOUT "op 55 p_multi_draw 48 ind 0 cnt 8 ibuf 16 stride 24 max 32 prim 36 itype 40\n"
 // Copy strides travel after a copy's texture snapshot (p_copy_strides) instead of as OP_COPY_STRIDE records; the replay still takes OP_COPY_STRIDE from older captures
@@ -55,6 +55,25 @@ int cap_layout_matches(const char *layout, size_t n) {
     const char *current = cap_layout();
     size_t full = strlen(current), no_strides = full - (sizeof COPY_STRIDES_LAYOUT - 1), no_multi = no_strides - (sizeof MULTI_DRAW_LAYOUT - 1);
     return (n == full || n == no_strides || n == no_multi) && !memcmp(layout, current, n);
+}
+
+const char *cap_record_unsupported(uint32_t op) {
+    if (op == OP_WAIT_EVENT) return "format 1 cannot replay event waits";
+    if (op == OP_WAIT_SYNC) return "format 1 cannot replay sync receipt waits";
+    return NULL;
+}
+void cap_queue_note(cap_queue_state *state, uint64_t serial, int waits) {
+    uint64_t first = 0;
+    atomic_compare_exchange_strong_explicit(&state->first, &first, serial, memory_order_relaxed, memory_order_relaxed);
+    unsigned flags = waits ? CAP_QUEUE_WAIT : 0;
+    if (first && first != serial) flags |= CAP_QUEUE_MULTIPLE;
+    if (flags) atomic_fetch_or_explicit(&state->unsupported, flags, memory_order_relaxed);
+}
+const char *cap_queue_unsupported(const cap_queue_state *state) {
+    unsigned flags = atomic_load_explicit(&state->unsupported, memory_order_relaxed);
+    if (flags & CAP_QUEUE_WAIT) return "format 1 cannot capture logical event or sync waits";
+    if (flags & CAP_QUEUE_MULTIPLE) return "format 1 cannot capture multiple logical NVN queues";
+    return NULL;
 }
 
 // One 8-byte field at byte offset off of the payload, present only when the record is long enough to hold it
@@ -79,10 +98,11 @@ int cap_rec_fields(uint32_t op, uint8_t *payload, uint32_t size, const cap_ops *
             return 1;
         case OP_JUMP: case OP_CALL: return HAS(0) && ops->obj(ctx, CAP_K_SEG, F(0), payload, (uint32_t)plen);
         case OP_SIGNAL_EVENT: return HAS(0) && ops->addr(ctx, F(0), 4, 1);   // volatile uint32_t *val, mode, value
+        case OP_WAIT_EVENT: return HAS(0) && ops->addr(ctx, F(0), 4, 0);
         case OP_REPORT_COUNTER: return HAS(8) && ops->addr(ctx, F(8), 16, 1);  // type, address of the 16-byte report
         case OP_COPY_B2B: { if (!HAS(16)) return 0; uint64_t n = u64_at(payload + 16); return ops->addr(ctx, F(0), n, 0) & ops->addr(ctx, F(8), n, 1); }
         case OP_UPDATE_UB: { if (!HAS(8)) return 0; return ops->addr(ctx, F(0), u64_at(payload + 8), 1); }   // dst, n, inline data
-        case OP_FENCE_SYNC: return HAS(0) && ops->obj(ctx, CAP_K_SYNC, F(0), payload, (uint32_t)plen);
+        case OP_FENCE_SYNC: case OP_WAIT_SYNC: return HAS(0) && ops->obj(ctx, CAP_K_SYNC, F(0), payload, (uint32_t)plen);
         case OP_SET_RT: {
             int32_t n = HAS(0) ? i32_at(payload) : -1; if (n < 0 || n > 8 || !HAS(offsetof(p_set_rt, depth))) return 0;
             for (int i = 0; i < n; i++) ok &= ops->obj(ctx, CAP_K_TEX, F(offsetof(p_set_rt, color) + 8 * (size_t)i), payload, (uint32_t)plen);

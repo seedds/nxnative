@@ -8,10 +8,12 @@ from nso_asm import ADRP, B, NOP, STP_PRE
 # sites) the same, which the consumers read. Until the host has decided a step (the first frames) the step is the measured frame time (timing frame +0xd8, 19.2 MHz
 # ticks), clamped to [1 / cap, 1 / 15 s]; game time that ran ahead after a short frame (the "lead", at most 0.25 s; totk-mobile) is paid back by later frames. Prerendered movies hold 30 (the host's movie flag, state +4, hle_movie.c
 # dm_movie_playing), the D-pad menu fade starts at full rate (FPSLocker's fix at main+0x1fbc80) and the swapchain argument at main+0xbe14a8 becomes 1 as in FPSLocker
-def frame_step(ctx):
+def stub(ctx, step, read1, read2, fade, swap, view):
+    """The frame step at the frame-step function (step), the two readers of the integer fps (read1, read2), the D-pad menu fade (fade), the swapchain argument (swap) and
+    the view render size (view): each patched at its own offsets"""
     here, emit, fs_site, fs_put, FS_STATE_OFF = ctx.here, ctx.emit, ctx.site, ctx.put, ctx.state
     # frame step (replaces ldrb w9,[x0,#0x58], the first instruction after the prologue)
-    fs_site(0x2db18c, '09604139')
+    fs_site(step + 0x18, '09604139')
     start = here(); emit(ADRP(16, here(), FS_STATE_OFF))
     for w in (0xbd400200,   # ldr s0,[x16]           target fps
               0x1e202008,   # fcmp s0,#0.0
@@ -30,7 +32,7 @@ def frame_step(ctx):
               0x8b224084,   # add x4,x4,w2,uxtw
               0xf9001a04):  # str x4,[x16,#0x30]     vsyncs stepped
         emit(w)
-    emit(B(here(), 0x2db284))                                       # the original epilogue
+    emit(B(here(), step + 0x110))                                       # the original epilogue
     for w in (0xf9406c22,   # elapsed: ldr x2,[x1,#0xd8]  last frame time in 19.2 MHz ticks
               0x9e630041,   # ucvtf d1,x2
               0x529f0003,   # mov w3,#0xf800
@@ -66,11 +68,11 @@ def frame_step(ctx):
               0x1e672a73,   # fadd d19,d19,d7
               0xfd000e13):  # str d19,[x16,#0x18]    game seconds stepped
         emit(w)
-    emit(B(here(), 0x2db284))                                       # the original epilogue
-    emit(0x39416009); emit(B(here(), 0x2db190))                     # off: ldrb w9,[x0,#0x58]; back
-    fs_put(0x2db18c, [B(0x2db18c, start)], 'frame step from the host in whole vsyncs, by elapsed time until it has decided one (state page target fps; 0 = original interval logic)')
+    emit(B(here(), step + 0x110))                                       # the original epilogue
+    emit(0x39416009); emit(B(here(), step + 0x1c))                     # off: ldrb w9,[x0,#0x58]; back
+    fs_put(step + 0x18, [B(step + 0x18, start)], 'frame step from the host in whole vsyncs, by elapsed time until it has decided one (state page target fps; 0 = original interval logic)')
     # the two readers of the integer fps: float fps when on; the scvtf a few instructions later moves into the stub (s0 is not touched in between)
-    for site, cvt, r in ((0x2daa54, 0x2daa6c, 19), (0x3e562c, 0x3e5638, 22)):
+    for site, cvt, r in ((read1 + 0x34, read1 + 0x4c, 19), (read2 + 0x4c, read2 + 0x58, 22)):
         fs_site(site, struct.pack('<I', 0xbd425000 | r << 5).hex()); fs_site(cvt, '00d8215e')
         start = here(); emit(STP_PRE(16, 17, 31, -16)); emit(ADRP(16, here(), FS_STATE_OFF))
         for w in (0xb9400211,                # ldr w17,[x16]
@@ -85,7 +87,7 @@ def frame_step(ctx):
         fs_put(site, [B(site, start)], 'game step reads the float fps (original integer fps and scvtf when off)')
         fs_put(cvt, [NOP], 'scvtf moved into the stub at the load')
     # D-pad menu fade (w8 is overwritten right after the site)
-    fs_site(0x1fbc80, '0820201e0a04081f')
+    fs_site(fade + 0x130, '0820201e0a04081f')
     start = here(); emit(ADRP(8, here(), FS_STATE_OFF))
     for w in (0xb9400108, 0x340001a8,       # ldr w8,[x8]; cbz w8,off (+52)
               0x1e202028, 0x54000101,       # fcmp s1,#0.0; b.ne go
@@ -95,19 +97,19 @@ def frame_step(ctx):
               0x1f08040a, 0x1e202008, 0x14000003,   # go: fmadd s10,s0,s8,s1; fcmp s0,#0.0; b end
               0x1e202008, 0x1f08040a):      # off: the original fcmp s0,#0.0; fmadd s10,s0,s8,s1
         emit(w)
-    emit(B(here(), 0x1fbc88))
-    fs_put(0x1fbc80, [B(0x1fbc80, start), NOP], 'D-pad menu fade starts at full rate under fractional steps (FPSLocker)')
+    emit(B(here(), fade + 0x138))
+    fs_put(fade + 0x130, [B(fade + 0x130, start), NOP], 'D-pad menu fade starts at full rate under fractional steps (FPSLocker)')
     # swapchain argument (x16 is dead before the bl that follows)
-    fs_site(0xbe14a8, '61a24039')
+    fs_site(swap + 0x1a4, '61a24039')
     start = here(); emit(ADRP(16, here(), FS_STATE_OFF))
     for w in (0xb9400210, 0x34000070, 0x52800021, 0x14000002, 0x3940a261):   # ldr w16,[x16]; cbz w16,off; mov w1,#1; b end; off: ldrb w1,[x19,#0x28]
         emit(w)
-    emit(B(here(), 0xbe14ac))
-    fs_put(0xbe14a8, [B(0xbe14a8, start)], 'swapchain argument 1 when on (FPSLocker)')
+    emit(B(here(), swap + 0x1a8))
+    fs_put(swap + 0x1a4, [B(swap + 0x1a4, start)], 'swapchain argument 1 when on (FPSLocker)')
     # Render scale (state +0x10, float written by the loader: DM_RENDER_SCALE, 1.0 by default). main+0xd5c24 sizes each view: screen size x the view's scale (5/6 for the scene: 1600x896
     # docked) x the dynamic-resolution multiplier, clamped to 8..16384 and floored to the view's alignment. The stub multiplies both extents by the factor (s6, w8 and the flags are dead
     # at main+0xd5cc0: s6 is set to 8.0 right after); any factor but 1.0 also replaces the dynamic multiplier (main+0xd5d80) with 1, so the size is fixed. 1.0 = bit-exact original
-    fs_site(0xd5cc0, '08d0a8524008251e6108241e0401271e'); fs_site(0xd5d80, '062940bd')
+    fs_site(view + 0x9c, '08d0a8524008251e6108241e0401271e'); fs_site(view + 0x15c, '062940bd')
     start = here(); emit(ADRP(8, here(), FS_STATE_OFF))
     for w in (0xbd401106,   # ldr s6,[x8,#0x10]   render scale
               0x1e250840,   # fmul s0,s2,s5       (original)
@@ -119,8 +121,8 @@ def frame_step(ctx):
               0x52a8d008,   # skip: mov w8,#0x46800000 (original)
               0x1e270104):  # fmov s4,w8          (original)
         emit(w)
-    emit(B(here(), 0xd5cd0))
-    fs_put(0xd5cc0, [B(0xd5cc0, start)], 'view render size x the host render scale (1.0 = original)'); ctx.render_scale = 1
+    emit(B(here(), view + 0xac))
+    fs_put(view + 0x9c, [B(view + 0x9c, start)], 'view render size x the host render scale (1.0 = original)'); ctx.render_scale = 1
     start = here(); emit(0xbd402906); emit(ADRP(8, here(), FS_STATE_OFF))   # ldr s6,[x8,#0x28] (original: the dynamic multiplier); x8 is dead after it
     for w in (0xbd401107,   # ldr s7,[x8,#0x10]
               0x1e2e1010,   # fmov s16,#1.0
@@ -130,15 +132,34 @@ def frame_step(ctx):
               0x5400004d,   # b.le done (+8)      not set
               0x1e204206):  # fmov s6,s16         a fixed scale: no dynamic multiplier
         emit(w)
-    emit(B(here(), 0xd5d84))
-    fs_put(0xd5d80, [B(0xd5d80, start)], 'dynamic resolution only at render scale 1.0')
+    emit(B(here(), view + 0x160))
+    fs_put(view + 0x15c, [B(view + 0x15c, start)], 'dynamic resolution only at render scale 1.0')
 
-FRAME_STEP = {'277178b7dba1b6d4949a84778d4abc58': frame_step}
+def matched_frame_step(ctx):
+    """Any build whose six functions match: all or nothing, as the readers without the step (or the step without them) run the game at the wrong speed (the locator prints a
+    red line for the one not found)"""
+    o = ctx.others
+    parts = [o.get(k) for k in ('game step reader 1', 'game step reader 2', 'menu fade', 'swapchain argument', 'view render size')]
+    if None in parts: return
+    stub(ctx, ctx.base, *parts)
+
+# Placed by the functions they patch, on any build that keeps all six (checked on 1.4.3, 2026-11-09: rewritten byte-identical to the build entry it had until then,
+# FRAME_STEP of build 277178b7…, at main+0x2db174, +0x2daa20, +0x3e55e0, +0x1fbb50, +0xbe1304 and +0xd5c24)
+MATCH_FRAME_STEP = {'main': [
+    {'name': '60 fps frame step and render scale', 'size': 664, 'fingerprints': ['568aa53f9c6cfb840d42343952d0607b8f591bd03371888da644cbff748c16a1'],   # 1.4.3 main+0x2db174
+     'stub': matched_frame_step,
+     'others': {'game step reader 1': {'size': 856, 'fingerprints': ['7bdc3508ead27be8afedb9ae131f5b84787fd8554014d7a84cffa445dfff560a']},   # main+0x2daa20
+                'game step reader 2': {'size': 2076, 'fingerprints': ['52c8386b11109040366aa12d2bc2495893b58acd0eab2b1e8fbd603654ca0814']},   # main+0x3e55e0
+                'menu fade': {'size': 956, 'fingerprints': ['ae7e76274536fcebaad185597bf35b805cc25290e73893eb1759627154390244']},   # main+0x1fbb50
+                'swapchain argument': {'size': 2236, 'fingerprints': ['06b4cd07e8d1b00273acd822e623077bb88368e4b85183f7ee5d0f279fee1c35']},   # main+0xbe1304
+                'view render size': {'size': 504, 'fingerprints': ['dbff3ac3e5a0cef5da139724cdb066bbff275cbe476afe82b1025246cbd7c18f']}}},   # main+0xd5c24
+]}
 
 # How general each patch is and could be (dm/tools/docs_patches.py "Binding", listed in docs/agents/game-patches.md): what, its binding now, the loosest it could have (goal),
 # purpose, why; blocked or kept: why the gap stays open (cannot close yet, or left open on purpose); checked: what was checked on game files (else a judgement)
 BINDING = [
-    {'what': '60 fps frame step and render scale', 'now': 'build', 'goal': 'game', 'purpose': 'frame rate',
-     'why': "the game's own timing object",
-     'blocked': 'frame-step stubs have no function-matched form yet'},
+    {'what': '60 fps frame step and render scale', 'now': 'game', 'goal': 'game', 'purpose': 'frame rate',
+     'why': "the game's own timing object, found by its six functions' fingerprints on any build that keeps them; no engine sibling shares the code (BotW, SMO, MK8D, ACNH, "
+            'Splatoon 2 / 3, Kirby, Mario Party, Ocarina, Smash, Metroid Dread, Origami King: no exact match, 2026-11-09)',
+     'checked': '1.4.3 main: one function of each fingerprint; the rule rewrites it byte-identical to its former build entry (2026-11-09)'},
 ]

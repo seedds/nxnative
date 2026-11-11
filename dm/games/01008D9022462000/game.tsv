@@ -1,0 +1,50 @@
+# Game profile of The Rogue Prince of Persia (Switch, update 1.1.0 = v262144). Plays on the Mac
+# Format: see dm/games/README.md
+# Evil Empire's game on Unity 6000.0.64f1 IL2CPP with FMOD, SDK 20.5.29, NVN. The NSP script's provisional profile, unchanged in its keys: no rewriter cut, no host change of its own
+
+# ---- Identity ----
+title_id	01008D9022462000
+program_id	01008D9022462000
+
+# ---- App ----
+# Game name: only a label for profile listings and the Mac window title; the iOS app name is the game name in the base NSP, and the bundle ID comes from the base game title ID (build_ipa.sh / NSP script)
+name	The Rogue Prince of Persia
+ipa	TheRoguePrinceOfPersia.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v262144	1.1.0	main=292cbdeb9e2b141bec2ddd8504c747b1	subsdk0=1e59dde5383b9cfb60f3e67e92add78b	sdk=a5813da32d12ef17099152ca79c9b24d
+package	v262144
+shader_versions	v262144
+
+# ---- Files ----
+# every module main imports from (subsdk0 = the SDK's movie library)
+modules	main subsdk0 sdk
+romfs_marker	Data/StreamingAssets/aa/Switch/global_assets_all.bundle
+zip_store	.assets:.bank:.bin:.bundle:.dat:.nro:.ress:.metallib
+
+# ---- Memory ----
+# the NPDM declares 16 MB of system resource (virtual address memory) and main never sets a heap: a 5 GB block with a 4.375 GB alias region, where the game maps its memory itself
+# (up to 1.77 GB mapped from the title through the first level)
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x1000000
+
+# ---- Shader split ----
+# every shader is under Data/ (41,629) or in main (11); the .nrr and Plugins groups find none but stay, as shader_* keys are in every shader's cache key
+shader_groups	/Data/=data /.nrr/=nrr /Plugins/=plugins
+shader_note	The Rogue Prince of Persia shaders
+
+# ---- Frame rate ----
+# 60 fps (30 on the Switch), up to 120 on the Mac: the game sets Unity's QualitySettings.vSyncCount to 2, which Unity hands to NVN as present interval 2, and steps by the time that
+# really passed. The rewriter finds vSyncCount and Application.targetFrameRate through Unity's internal-call table in any build it reads (dm/tools/unity_fps.py), the host writes the
+# target there (hle_fpslock.c) and presents at it. 120 needs the display's vsync event at 120 too (hle_nvn.c nvn_vsync_hz): Unity's NVN device waits for each vblank.
+# The speed checked at 30, 60 (a timed walk) and 120 (the user's play test)
+fps_target	60
+fps_max	120
+
+# ---- Graphics ----
+# the game calls nvnDeviceSetDepthMode with near = 0: the pipeline bases made before it runs are made for that mode
+depth_mode	zero

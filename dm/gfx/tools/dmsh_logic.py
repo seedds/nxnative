@@ -2,7 +2,7 @@
 # blending; as in OpenGL and Vulkan it applies to integer and normalized targets. Metal has none. Xenoblade Chronicles 2 builds its per-pixel light probe lists with OR: each probe's box draws its index
 # into the next free byte of an RG32Uint target and every other fragment writes 0, so without the operation every fragment replaced the list and the lighting showed hard-edged dark boxes.
 # Skyward Sword HD's Dof_FogToAlpha ORs (0, 0, 0, fog) into the frame's RGBA8Unorm target to put fog in its alpha: as a plain write it blacked out the colours, a brown cast over the distance.
-# The entry points main0, main0_u and main0_m (dmsh_build.py fs_uint) each get a thin entry point that runs the shader's body, reads each colour output's attachment (framebuffer fetch, [[color(n)]]) and
+# The entry points main0, main0_u and main0_m (dmsh_entry.py fs_uint) each get a thin entry point that runs the shader's body, reads each colour output's attachment (framebuffer fetch, [[color(n)]]) and
 # combines it with the output by the operation and per-target channel masks at fragment buffer DMSH_LOGIC_BUFFER. A float output goes through its target's stored bits:
 # rounded to them as the target would store it, combined, and normalized again; a mask of zero (a floating-point or sRGB target, which the operation does not apply to) passes it through.
 # An output whose target the pass lacks has no attachment to read, and Metal refuses a pipeline that reads one: each read depends on the function constant DMSH_LOGIC_FC + n. The operation

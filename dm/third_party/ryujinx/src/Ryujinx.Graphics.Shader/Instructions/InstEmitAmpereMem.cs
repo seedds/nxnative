@@ -311,6 +311,11 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 context.BranchIfFalse(lblSkip, pred);
             }
 
+            // The words of one LDG.64 / LDG.128 are marked as one access (Operation.GlobalVectorCount): an address the translator ties to no storage buffer then takes one pool
+            // table lookup and one vector load for all of them, where each word took its own (Ocarina of Time's foliage mesh shaders: 4.6 ms of a 683x384 frame, 464 of 506 loads)
+            bool vector = count > 1 && storageKind == StorageKind.GlobalMemory && x.Rd + count <= RegisterConsts.RegisterZeroIndex;
+            int group = vector ? ++context.GlobalVectorGroups : 0;
+
             for (int index = 0; index < count; index++)
             {
                 if (x.Rd + index >= RegisterConsts.RegisterZeroIndex)
@@ -318,7 +323,16 @@ namespace Ryujinx.Graphics.Shader.Instructions
                     break;
                 }
 
-                context.Copy(Register(x.Rd + index, RegisterType.Gpr), context.Load(storageKind, los[index], his[index]));
+                Operand value = context.Load(storageKind, los[index], his[index]);
+
+                if (vector && value.AsgOp is Operation load)
+                {
+                    load.GlobalVectorCount = count;
+                    load.GlobalVectorWord = index;
+                    load.GlobalVectorGroup = group;
+                }
+
+                context.Copy(Register(x.Rd + index, RegisterType.Gpr), value);
             }
 
             if (lblSkip != null)

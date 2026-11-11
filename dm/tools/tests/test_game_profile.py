@@ -40,6 +40,14 @@ class PsoGPU(unittest.TestCase):
             self.assertIn(': pso_gpu takes 1-4 whitespace-separated GPU architectures', out, rows)
 
 
+class AudioLimit(unittest.TestCase):
+    def test_rejected_values(self):   # on / off only, as the other switches (the launcher and DM_AUDIO_LIMIT take 1 / 0)
+        for value in ('1', 'yes', 'On', ''):
+            rc, out = header(f'audio_limit\t{value}\n')
+            self.assertNotEqual(rc, 0, value)
+            self.assertIn(': audio_limit must be on or off', out, value)
+
+
 
 MAP = ('# kind: evidence  Test shaders\n# column 5 records where each key first appears\npackage\tindex\tstage\tdm_ctl_sha16\tsource\n'
        'cs_other.bin\t1\tcompute\tc56db3d5a0f1b5af\t/Lib/agl/agl_resource.Nin_Ounce_NVN2.release.sarc.zs/agl_ndsr.pck#NDSR@0x124900\n'

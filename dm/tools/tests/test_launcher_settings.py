@@ -72,6 +72,12 @@ class LauncherSettingsTests(unittest.TestCase):
         s = build(BOTW, 'nvn')['DM_SHOW_FPS']
         self.assertEqual((s['on'], s['off']), ('1', '0'))
 
+    def test_audio_limiter_is_a_game_toggle_for_every_game_off_unless_the_profile_says_on(self):   # the host reads DM_AUDIO_LIMIT as 1 / 0 (hle_audren.c)
+        for api, gid in [('nvn', BOTW), ('vulkan', '0100535012974000'), ('gl', '010014E00DB56000')]:
+            with self.subTest(api=api):
+                s = build(gid, api)['DM_AUDIO_LIMIT']
+                self.assertEqual((s['kind'], s['section'], s['on'], s['off'], s['default']), ('toggle', 'Game', '1', '0', '0'))
+
     def test_iphone_switches_only_on_the_iphone(self):   # the frame-rate counter and touch feedback are the iOS front end's (front_ios.m, DmGamepad.m)
         ios, mac = build(BOTW, 'nvn'), build(BOTW, 'nvn', 'mac')
         self.assertEqual(build(BOTW, 'nvn', 'ios').keys(), ios.keys())   # ios when unset

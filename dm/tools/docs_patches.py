@@ -140,6 +140,7 @@ SWITCH_BINDING = [
     ('jit_route', '', {'what': 'a route for the nn::jit capture', 'now': 'game', 'goal': 'game', 'purpose': 'runtime', 'why': "the game's own menus, for the image an iPhone serves"}),
     ('jit_out_code', '', {'what': 'where a nn::jit output lists the code it made', 'now': 'game', 'goal': 'game', 'purpose': 'runtime', 'why': "the layout of the game's own output buffer, for the image an iPhone serves"}),
     ('op_mode', '', {'what': 'the operation mode at start', 'now': 'game', 'goal': 'game', 'purpose': 'runtime', 'why': "the game's controls (handheld: the touch screen instead of a gyro pointer)"}),
+    ('audio_limit', '', {'what': 'a limiter on the final audio mix', 'now': 'game', 'goal': 'game', 'purpose': 'runtime', 'why': 'an enhancement: the Switch clips a mix over int16 as the host does, so a game that mixes with no headroom chooses it'}),
 ]
 
 

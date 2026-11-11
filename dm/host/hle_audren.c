@@ -10,7 +10,7 @@
 //      The local SDK uses a different command format whose storage can exceed the service's budget; that backend storage is supplied by the host. Explicit CPU renderers keep the SDK contract;
 //   2. A render thread (a guest thread started by the host): renders one frame whenever the output hands back a 5 ms buffer, so pacing follows the sound card clock;
 //   3. Takes over AudioRendererImpl::ExecuteAudioRendererRendering (reached through the PLT): generates commands and runs CommandListProcessor like the original,
-//      then finds the DeviceSink command in the command list (a no-op for the CPU processor) and clamps its input mix buffers (int32 holding 16-bit range) to int16 stereo for AudioOut (hle_audio.c).
+//      then finds the DeviceSink command in the command list (a no-op for the CPU processor) and clamps its input mix buffers (int32 holding 16-bit range) to int16 stereo for AudioOut (hle_audio.c; a peak limiter first when audio_limit / DM_AUDIO_LIMIT asks for one).
 // Command list format (SDK 16): header +0x04 command count, +0x08 mix buffer address, +0x10 buffer count, +0x14 samples per frame, +0x18 sample rate, commands from +0x20;
 //   each command +0x00 magic 0xcafebabe, +0x04 enabled, +0x05 command ID (DeviceSink = 0x13), +0x06 size; DeviceSink +0x128 upsampler buffer, +0x130 input count, +0x134 input indices (s16).
 #include "hle.h"
@@ -89,6 +89,7 @@ HLE_FORCE("_ZN2nn5audio30GetAudioRendererWorkBufferSizeERKNS0_22AudioRendererPar
 // globals: a second renderer's updates rendered catch-up frames into the first one's output queue, about 10% of its frames (Mario & Luigi: Brothership), and its own frames were never rendered otherwise
 enum { CQ = 4, AR_MAX = 4 };   // AR_MAX as g_rev below
 typedef struct { void *ptr; uint64_t cap, size; } gbuf;       // same as the front of hle_audio.c's AudioOutBuffer
+typedef struct { double dip, held; uint32_t left; } lim_t;   // limit_stereo's state: the gain's reduction (gain = 1 - dip), and the hold of a peak at the end of the last call: gain held for left more frames
 typedef struct {
     void *handle[2];                         // AudioRendererHandle (renderer object, client state); handle[0] NULL: a free slot
     uint8_t *sys;                            // its AudioRenderSystem, from its first render or update (ar_of_sys)
@@ -102,6 +103,7 @@ typedef struct {
     int sink_logged;
     int32_t up_buf[2 * (15 + FRAME_MAX)]; uint32_t up_pos;   // up_3_2's last samples and position
     int16_t pcm[NBUF][FRAME_MAX * 2]; gbuf bufs[NBUF];   // the blocks its output plays from: AudioOut queues only the pointer and copies the samples when the sound card asks (issue #1336)
+    lim_t lim;                               // the output limiter's state (limit_stereo); a cleared slot starts at unity with no hold
 } ar_t;
 static ar_t g_ar[AR_MAX];
 static pthread_mutex_t g_ar_mu = PTHREAD_MUTEX_INITIALIZER;   // the slots' handle and sys fields
@@ -331,6 +333,50 @@ static uint32_t up_3_2(ar_t *a, const int32_t *in, uint32_t n, int32_t *out) {
     memmove(buf, buf + 2 * n, (RS_T - 1) * 8);
     return m;
 }
+// Whether the output limiter is on (profile audio_limit, DM_AUDIO_LIMIT=1 / 0 overrides), read once: capture runs under g_render_mu. A game that mixes every voice at 1.0 passes int16 by up to 4 dB (Axiom Verge 1.0.3) and the clamp
+// below flat-tops its peaks, heard as crackle; the console clamps the same way, so this is an enhancement and off by default
+static int audio_limit_on(void) {
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("DM_AUDIO_LIMIT"); on = e ? atoi(e) > 0 : DM_GAME_AUDIO_LIMIT;
+        if (on) LOG("audren: output limiter on (%s)", e ? "DM_AUDIO_LIMIT" : "game profile audio_limit");
+    }
+    return on;
+}
+// Peak limiter over interleaved stereo (int32 at the output rate), in place: peaks are turned down before they reach the ceiling, not flat-topped at it. One gain for both channels (the stereo image holds) with a lookahead of 1 ms (L frames)
+// inside the block it is given, so no latency is added: the renderer hands over the whole 5 ms block. Each frame needs a gain of at most req = 32767 / its larger channel. req is held over the L - 1 frames before it and after it
+// (after, so the gain does not start to recover before the peak has passed), and the gain ramps down to that hold by at most 1 / L per frame, so it is already low when the peak arrives. The gain returns to 1.0
+// exponentially (50 ms time constant), the lower of the two being used. Only the lookahead before a peak stops at a block's start (the block before is already output): an overshoot in a block's first L frames meets a steeper ramp.
+// The hold after a peak runs on into the next call (lm->left frames at the gain lm->held; the lowest gain and the longest time of the peaks near the end, a little more than each alone needs). A longer call runs in blocks of FRAME_MAX.
+// The state also has the gain's reduction, dip = 1 - gain, 0 at unity: a mix under the ceiling with dip 0 and no hold left is not touched, and a release below half an LSB of full scale snaps to 0 (so unity is reached exactly,
+// and the output is again bit-identical to the unlimited one). The gain never exceeds req and stays positive: no sample passes the ceiling, no sign flips. The caller's clamp stays as the safety net
+static void limit_stereo(lim_t *lm, int32_t *st, uint32_t frames, uint32_t rate) {
+    const double ceil_ = 32767, release = exp(-1.0 / (0.05 * rate)); const uint32_t look = rate / 1000 ? rate / 1000 : 1;
+    static double env[FRAME_MAX]; double g = 1 - lm->dip, held = lm->held;   // env: the gain each frame may have at most, from its own and the coming frames' peaks; static like capture's st (8 KB, and the render thread has 64 KB of stack; capture runs under g_render_mu)
+    uint32_t left = lm->left;
+    for (uint32_t n; frames; frames -= n, st += 2 * n) {
+        n = frames < FRAME_MAX ? frames : FRAME_MAX;
+        for (uint32_t s = 0; s < n; s++) env[s] = s < left ? held : 1;   // the hold of the peaks before this block
+        double next = 1; uint32_t next_left = left > n ? left - n : 0;   // and what of the holds reaches past its end
+        if (next_left) next = held;
+        for (uint32_t s = 0; s < n; s++) {
+            double pk = fmax(fabs((double)st[2 * s]), fabs((double)st[2 * s + 1]));
+            if (pk <= ceil_) continue;
+            double req = ceil_ / pk;
+            for (uint32_t j = s >= look ? s - look + 1 : 0; j < n && j < s + look; j++) if (req < env[j]) env[j] = req;   // the hold: look - 1 frames either side of s
+            if (s + look > n) { if (req < next) next = req; if (s + look - n > next_left) next_left = s + look - n; }
+        }
+        for (uint32_t s = n; s-- > 1;) if (env[s] + 1.0 / look < env[s - 1]) env[s - 1] = env[s] + 1.0 / look;
+        for (uint32_t s = 0; s < n; s++) {
+            g = 1 - (1 - g) * release; if (1 - g < 1.0 / 65536) g = 1;
+            if (env[s] < g) g = env[s];
+            if (g != 1) { st[2 * s] = (int32_t)lrint(st[2 * s] * g); st[2 * s + 1] = (int32_t)lrint(st[2 * s + 1] * g); }
+        }
+        held = next; left = next_left;
+    }
+    lm->dip = 1 - g; if (lm->dip < 1.0 / 65536) lm->dip = 0;
+    lm->held = held; lm->left = left;
+}
 static int capture(ar_t *a, const uint8_t *cl, size_t len, int16_t *dst) {
     if (len < 0x20) return 0;
     uint32_t ncmd = *(const uint32_t *)(cl + 4), samples = *(const uint32_t *)(cl + 0x14), rate = *(const uint32_t *)(cl + 0x18);
@@ -406,6 +452,7 @@ static int capture(ar_t *a, const uint8_t *cl, size_t len, int16_t *dst) {
                 st[2 * s] = l; st[2 * s + 1] = r;
             }
             uint32_t nout = rate == 48000 ? samples : up_3_2(a, st, samples, st);
+            if (audio_limit_on()) limit_stereo(&a->lim, st, nout, 48000);
             uint64_t loud = 0;
             for (uint32_t s = 0; s < 2 * nout; s++) {
                 int32_t v = st[s]; v = v > 32767 ? 32767 : v < -32768 ? -32768 : v;

@@ -7,6 +7,7 @@
 # It only saves work: a damaged file costs the work it held and is made anew, and a full drive is one [RED] line. An entry is written and read whole, so its file is never seen half written.
 # Names, as in the folder this replaces: metallib/<target>/<digest>[_x].metallib (dmsh_mtlcache.py), shader/<digest>/<mac|ios>/<output>, index/<key>.json, variant/<digest>/<file> (dmsh_build.py).
 # Not part of the translation chain: it decides no output (dmsh_chain.py), like dmsh_mtlcache.py.
+from pathlib import Path
 import collections, concurrent.futures as cf, contextlib, fcntl, hashlib, itertools, json, os, re, shutil, sqlite3, tarfile, threading, time
 
 SCHEMA = ('CREATE TABLE IF NOT EXISTS blob(id INTEGER PRIMARY KEY, hash BLOB UNIQUE NOT NULL, data BLOB NOT NULL)',
@@ -263,6 +264,48 @@ def _raw_copy(db, part, workers=1):
     finally: out.close()
 
 
+def _compressed_copy(db, path, part, workers):
+    """Read and compress on worker connections; write a compact replacement once."""
+    local, connections = threading.local(), []
+    def init():
+        local.db = sqlite3.connect(Path(path).as_uri() + '?mode=ro', uri=True, timeout=0, check_same_thread=False)
+        connections.append(local.db); _load_zstd(local.db)
+    def work(span):
+        return local.db.execute('SELECT id,hash,zstd_compress_col(data,3,-1,1) FROM blob WHERE id>=? AND id<=? ORDER BY id', span).fetchall()
+    def spans():
+        cur = db.execute('SELECT id,length(data) FROM blob ORDER BY id')
+        first, size, count = None, 0, 0
+        try:
+            for ident, length in cur:
+                if first is None: first = ident
+                size += length; count += 1
+                if size >= 8 * 1024**2 or count >= 256:
+                    yield first, ident
+                    first, size, count = None, 0, 0
+            if first is not None: yield first, ident
+        finally: cur.close()
+    out = sqlite3.connect(part)
+    try:
+        out.execute('PRAGMA page_size=16384'); out.execute('PRAGMA auto_vacuum=INCREMENTAL')
+        for sql in SCHEMA: out.execute(sql)
+        out.execute('PRAGMA journal_mode=WAL'); out.execute('PRAGMA synchronous=NORMAL')
+        _load_zstd(out)
+        out.execute('SELECT zstd_enable_transparent(?)', (json.dumps({'table': 'blob', 'column': 'data', 'compression_level': 3, 'dict_chooser': "'[nodict]'"}),)).fetchall()
+        with cf.ThreadPoolExecutor(workers, initializer=init) as pool, out:
+            pending = collections.deque()
+            for span in spans():
+                pending.append(pool.submit(work, span))
+                if len(pending) >= workers:
+                    out.executemany('INSERT INTO _blob_zstd(id,hash,data,_data_dict) VALUES(?,?,?,-1)', pending.popleft().result())
+            while pending:
+                out.executemany('INSERT INTO _blob_zstd(id,hash,data,_data_dict) VALUES(?,?,?,-1)', pending.popleft().result())
+            out.executemany('INSERT INTO entry VALUES(?,?,?)', db.execute('SELECT name,blob,mtime FROM entry'))
+        if out.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone()[0]: raise RuntimeError('shader cache is busy; compressed conversion was not installed')
+    finally:
+        out.close()
+        for connection in connections: connection.close()
+
+
 def maintain(path, *, compress=False, decompress=False, workers=1, say=print):
     """Maintain a compressed cache, optionally convert its format. Errors propagate: builds warn, the standalone command fails."""
     if compress and decompress: raise ValueError('choose compression or decompression, not both')
@@ -272,13 +315,20 @@ def maintain(path, *, compress=False, decompress=False, workers=1, say=print):
     start, before = time.monotonic(), os.stat(path).st_blocks * 512
     with _ownership(path, exclusive=compress or decompress):
         db = sqlite3.connect(path, timeout=0, isolation_level=None)
-        part = path + '.raw.part'
+        part = path + ('.raw.part' if decompress else '.compressed.part')
         try:
             compressed = db.execute("SELECT type FROM sqlite_master WHERE name='blob'").fetchone() == ('view',)
             if not compressed and not compress: return
             if db.execute('PRAGMA journal_mode').fetchone()[0].lower() == 'wal': db.execute('PRAGMA synchronous=NORMAL')
             _load_zstd(db)
-            if decompress:
+            if compress and not compressed:
+                say(f'compressing shader compile cache into a compact replacement for {path}')
+                _remove_raw_part(part)
+                _compressed_copy(db, path, part, workers)
+                if db.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone()[0]: raise RuntimeError('shader cache is busy; compressed conversion was not installed')
+                db.close(); db = None
+                os.replace(part, path)
+            elif decompress:
                 say(f'restoring raw shader compile cache {path}')
                 _remove_raw_part(part)
                 if workers == 1: _raw_copy(db, part)
@@ -289,9 +339,6 @@ def maintain(path, *, compress=False, decompress=False, workers=1, say=print):
                 db = sqlite3.connect(path, timeout=0, isolation_level=None)
                 db.execute('PRAGMA journal_mode=WAL').fetchall()
             else:
-                if not compressed:
-                    say(f'enabling sqlite-zstd compression for {path}')
-                    db.execute('SELECT zstd_enable_transparent(?)', (json.dumps({'table': 'blob', 'column': 'data', 'compression_level': 3, 'dict_chooser': "'[nodict]'"}),)).fetchall()
                 # Otherwise the extension's GROUP BY sorts whole uncompressed payloads into temporary files.
                 db.execute('CREATE INDEX IF NOT EXISTS blob_pending_size ON _blob_zstd(_data_dict,length(data)) WHERE _data_dict IS NULL')
                 # v0.3.5 divides by average pending size; use its own compact/nodict encoding for the one deduplicated empty blob first.
@@ -303,7 +350,7 @@ def maintain(path, *, compress=False, decompress=False, workers=1, say=print):
                 _reclaim(db)
         finally:
             if db is not None: db.close()
-            if decompress: _remove_raw_part(part)
+            if compress or decompress: _remove_raw_part(part)
     after = os.stat(path).st_blocks * 512
     say(f'shader compile cache: {before / 2**20:.1f} -> {after / 2**20:.1f} MiB on disk, {time.monotonic() - start:.1f} s')
 

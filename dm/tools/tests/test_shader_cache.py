@@ -240,12 +240,67 @@ class CompressedPrune(Prune):
 
 
 class Maintenance(Base):
+    def test_initial_compression_skips_reclamation_and_handles_sparse_ids(self):
+        self.fill()
+        with contextlib.closing(sqlite3.connect(self.path)) as db, db:
+            db.execute('UPDATE blob SET id=-4 WHERE id=1')
+            db.execute('UPDATE entry SET blob=-4 WHERE blob=1')
+            db.execute('UPDATE blob SET id=9999 WHERE id=2')
+            db.execute('UPDATE entry SET blob=9999 WHERE blob=2')
+        before = self.snapshot()
+        with mock.patch.object(shader_cache, '_reclaim', side_effect=AssertionError('reclaimed initial conversion')):
+            shader_cache.maintain(self.path, compress=True, workers=4, say=self.said.append)
+        self.assertEqual(self.snapshot(), before)
+        with contextlib.closing(sqlite3.connect(self.path)) as db:
+            self.assertEqual(db.execute('PRAGMA freelist_count').fetchone(), (0,))
+        self.assertFalse(Path(f'{self.path}.compressed.part').exists())
+
+    def test_failed_compressed_replacement_preserves_raw_source(self):
+        self.fill(); before = self.snapshot()
+        Path(f'{self.path}.compressed.part').write_bytes(b'abandoned')
+        with mock.patch.object(shader_cache.os, 'replace', side_effect=OSError('disk full')):
+            with self.assertRaisesRegex(OSError, 'disk full'):
+                shader_cache.maintain(self.path, compress=True, workers=2, say=self.said.append)
+        self.assertEqual(self.snapshot(), before)
+        self.assertFalse(Path(f'{self.path}.compressed.part').exists())
+        with contextlib.closing(sqlite3.connect(self.path)) as db:
+            self.assertEqual(db.execute("SELECT type FROM sqlite_master WHERE name='blob'").fetchone(), ('table',))
+
+    def test_compressed_partial_write_failure_preserves_source(self):
+        self.fill(); before = self.snapshot()
+        def fail_write(db, path, part, workers):
+            Path(part).write_bytes(b'partial'); raise OSError('no space')
+        with mock.patch.object(shader_cache, '_compressed_copy', side_effect=fail_write):
+            with self.assertRaisesRegex(OSError, 'no space'):
+                shader_cache.maintain(self.path, compress=True, workers=2, say=self.said.append)
+        self.assertEqual(self.snapshot(), before)
+        self.assertFalse(Path(f'{self.path}.compressed.part').exists())
+
+    def test_compressed_worker_failure_preserves_source(self):
+        self.fill(); before = self.snapshot()
+        with mock.patch.object(shader_cache.cf, 'ThreadPoolExecutor') as executor:
+            executor.return_value.__enter__.return_value.submit.side_effect = RuntimeError('worker failed')
+            with self.assertRaisesRegex(RuntimeError, 'worker failed'):
+                shader_cache.maintain(self.path, compress=True, workers=2, say=self.said.append)
+        self.assertEqual(self.snapshot(), before)
+        self.assertFalse(Path(f'{self.path}.compressed.part').exists())
+
+    def test_compression_does_not_scan_output_for_quality_checks(self):
+        self.fill(); before = self.snapshot(); statements = []; load = shader_cache._load_zstd
+        def observe(db):
+            load(db); db.set_trace_callback(statements.append)
+        with mock.patch.object(shader_cache, '_load_zstd', side_effect=observe):
+            shader_cache.maintain(self.path, compress=True, workers=2, say=self.said.append)
+        self.assertFalse(any('quick_check' in sql.lower() for sql in statements))
+        self.assertFalse(any(sql.startswith('SELECT id,hash FROM blob') for sql in statements))
+        self.assertEqual(self.snapshot(), before)
+
     def test_wal_maintenance_uses_store_sync_policy(self):
-        self.fill(); seen = []; compress = shader_cache._compress_parallel
-        def observe(db, workers):
+        self.fill(); seen = []; compress = shader_cache._compressed_copy
+        def observe(db, *args):
             seen.append((db.execute('PRAGMA journal_mode').fetchone()[0], db.execute('PRAGMA synchronous').fetchone()[0]))
-            return compress(db, workers)
-        with mock.patch.object(shader_cache, '_compress_parallel', side_effect=observe):
+            return compress(db, *args)
+        with mock.patch.object(shader_cache, '_compressed_copy', side_effect=observe):
             shader_cache.maintain(self.path, compress=True, workers=4, say=self.said.append)
         self.assertEqual(seen, [('wal', 1)])
 
@@ -363,7 +418,7 @@ class Maintenance(Base):
         self.assertEqual(self.snapshot(), before)
 
     def test_failed_compression_is_recoverable(self):
-        self.fill(); before = self.snapshot()
+        self.fill(); before = self.snapshot(); enable_compression(self.path)
         with mock.patch.object(shader_cache, '_reclaim', side_effect=OSError('disk full')):
             with self.assertRaisesRegex(OSError, 'disk full'): shader_cache.maintain(self.path, compress=True)
         self.assertEqual(self.snapshot(), before)
@@ -419,7 +474,7 @@ class Maintenance(Base):
 
     def test_large_reclamation_checkpoints_between_bounded_batches(self):
         for i in range(40): self.store.put(f'large/{i}', bytes([i]) + b'x' * 1024**2)
-        self.store.close(); reclaim = shader_cache._reclaim; batches = []; wal_sizes = []
+        self.store.close(); enable_compression(self.path); reclaim = shader_cache._reclaim; batches = []; wal_sizes = []
         def observe(db):
             db.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchall()
             def trace(sql):

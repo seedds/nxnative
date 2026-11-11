@@ -85,7 +85,7 @@ static void finalized_upload(int write_after_record) {
     CHECK(!g_treg[1].view && !g_treg[2].view && !g_treg[2].alt, "finalization retires every descriptor's cached views");
     // Reuse the API object: commands and registered descriptors must use their snapshots.
     memset(&tex, 0xa5, sizeof tex);
-    state_reset(); memset(&R,0,sizeof R); mtl_sub_begin(); mtl_exec((const uint8_t *)handle);
+    state_reset(); memset(&R,0,sizeof R); mtl_sub_begin(); mtl_exec(nvn_rec_linear(handle, NULL));
     CHECK(mtl_wait(mtl_sub_commit(),5000000000ull), "recorded texture readback completed");
     CHECK(!mtl_last_commit_error(), "recorded texture readback has no GPU error");
     CHECK(!memcmp(mem+131072, pixels, sizeof pixels), "finalized command snapshot uploads CPU-written pixels");
@@ -95,7 +95,7 @@ static void finalized_upload(int write_after_record) {
     CHECK(mtl_wait(mtl_sub_commit(),5000000000ull), "registered descriptor upload completed");
     CHECK(!g_treg[1].view && !g_treg[2].view && !g_treg[2].alt, "late descriptor views retire at submission end");
     // Resolve again: a retired serial may already hold an NvPkg in the ghost cache.
-    mtl_sub_begin(); mtl_exec((const uint8_t *)handle);
+    mtl_sub_begin(); mtl_exec(nvn_rec_linear(handle, NULL));
     CHECK(mtl_wait(mtl_sub_commit(),5000000000ull), "recorded snapshot can be replayed again");
     CHECK(!memcmp(mem+131072, pixels, sizeof pixels), "replayed retired snapshot keeps its CPU content");
     mtl_reg_tex(1,NULL,NULL); mtl_reg_tex(2,NULL,NULL); h_nvnCommandBufferFinalize(&cmd);

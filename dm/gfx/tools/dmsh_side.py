@@ -57,7 +57,7 @@ def entry(msl, name):   # one entry point as entries() gives it, None when there
     return next((_entry(msl, m) for m in _ENTRY.finditer(msl) if m.group(3) == name), None)
 
 
-# main0's body once, as a function the entry points that return what it computes call: main0 itself, main0_u / main0_m (dmsh_build.py fs_uint), main0_d (fs_dual) and main0_f (dmsh_fetch.fold).
+# main0's body once, as a function the entry points that return what it computes call: main0 itself, main0_u / main0_m (dmsh_entry.py fs_uint), main0_d (fs_dual) and main0_f (dmsh_fetch.fold).
 # Each of them used to be a copy of the body, which the compiler built again for each. always_inline: a caller that passes constants (main0's literals for main0_f's tile read) gets them folded,
 # and each entry point is a module of its own in the library anyway (metallib)
 _BODY = re.compile(r'static (__attribute__\(\(always_inline\)\) )?main0_out dm_body_main0\(')

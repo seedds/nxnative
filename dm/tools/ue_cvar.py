@@ -4,8 +4,9 @@ and the host writes the variables the profile decides on (hle_fpslock.c: the fra
 ue_texture_pool).
 A TAutoConsoleVariable is a global in main's data: its static constructor loads the name (adrp + add), registers it through IConsoleManager (a blr), takes the object's address (adrp + add)
 and stores the variable's value pointer at +0x10 (str x0, [xN, #0x10]); the value holds the game thread's copy, then the render thread's. The same sequence registers every variable in the
-Unreal games here: OCTOPATH TRAVELER and Yoshi's Crafted World (UE 4.1x, UTF-32 names), Pikmin 4 (4.26), OCTOPATH TRAVELER II and DRAGON QUEST VII Reimagined (4.27, UTF-16), OCTOPATH
-TRAVELER 0 (UE 5, a base constructor called between the address and the store) and FINAL FANTASY RESONANCE (5.6). A name registered at two objects gives none, with a [RED] reason.
+Unreal games here: Yoshi's Crafted World (UE 4.1x, UTF-32 names), Pikmin 4 (4.26), OCTOPATH TRAVELER II and DRAGON QUEST VII Reimagined (4.27, UTF-16), OCTOPATH TRAVELER 0 (UE 5, a
+base constructor called between the address and the store) and FINAL FANTASY RESONANCE (5.6); OCTOPATH TRAVELER (4.18) inlines it, addressing the objects from a page base made far
+before the name (registered_at, base_of). A name registered at two objects gives none, with a [RED] reason.
 Usage on its own: ue_cvar.py <module>... (the objects of NAMES in each)"""
 import re, struct, sys, os
 
@@ -23,14 +24,68 @@ def add_imm(w):   # add Xd, Xn, #imm (64-bit, optionally shifted by 12): (d, n, 
     if (w & 0xFF800000) != 0x91000000: return None
     return w & 31, (w >> 5) & 31, ((w >> 10) & 0xFFF) << (12 * ((w >> 22) & 1))
 
+def writes(u, r):
+    """Whether the instruction u may write general register r (r < 31). Errs towards yes: a write it cannot rule out stops base_of's search, which then finds nothing"""
+    d, n, t2 = u & 31, (u >> 5) & 31, (u >> 10) & 31
+    if (u & 0x7C000000) == 0x14000000: return (u >> 31) and r == 30                                   # b, bl: bl writes x30 (base_of stops at the calls it does not cross)
+    if (u & 0x1C000000) == 0x10000000: return d == r                                                  # data processing, immediate
+    if (u & 0x0E000000) == 0x0A000000: return d == r                                                  # data processing, register
+    if (u & 0x0A000000) == 0x08000000:                                                                # loads and stores
+        if (u & 0x3F000000) == 0x08000000: return r in (d, t2, (u >> 16) & 31)                        # exclusives: the loaded registers, a store's status
+        if (u & 0x3A000000) == 0x28000000:                                                            # pairs: loads write both, pre- and post-index the base
+            return bool((u >> 22) & 1 and not (u >> 26) & 1 and r in (d, t2)) or ((u >> 23) & 3 in (1, 3) and r == n)
+        if (u & 0x3B000000) == 0x18000000: return d == r                                              # load literal
+        if (u & 0x3B000000) == 0x38000000:                                                            # single register
+            if (u >> 21) & 1 and (u >> 10) & 3 == 0: return d == r                                    # atomics (ldadd, swp, ...)
+            if not (u >> 21) & 1 and (u >> 10) & 1 and r == n: return True                            # pre- and post-index
+            return ((u >> 22) & 3) != 0 and d == r and not (u >> 26) & 1                              # a load into a general register
+        if (u & 0x3B000000) == 0x39000000: return ((u >> 22) & 3) != 0 and d == r and not (u >> 26) & 1   # unsigned offset
+        return False
+    if (u & 0x0E000000) == 0x0E000000: return (u & 0x5F20FC00) == 0x1E200000 and d == r               # FP / SIMD: only the moves and conversions to a general register
+    if (u & 0xFFF00000) == 0xD5300000: return d == r                                                  # mrs
+    return False
+
+def branch_target(u, s):
+    """The target of the direct branch u at s (b, bl, b.cond, cbz / cbnz, tbz / tbnz), or None"""
+    def sx(v, bits): return v - (1 << bits) if v >> (bits - 1) else v
+    if (u & 0x7C000000) == 0x14000000: return s + 4 * sx(u & 0x3FFFFFF, 26)
+    if (u & 0xFF000010) == 0x54000000 or (u & 0x7E000000) == 0x34000000: return s + 4 * sx((u >> 5) & 0x7FFFF, 19)
+    if (u & 0x7E000000) == 0x36000000: return s + 4 * sx((u >> 5) & 0x3FFF, 14)
+    return None
+
+def base_of(word, text_end, r, t):
+    """The address in xr at byte offset t when the code before t made it by adrp xr (+ add xr, xr) with no other write to xr since, and every path to t passes there: UE 4.18's inlined
+    static constructors take a page base once and address many variables from it, with if / else blocks between (a forward b over the else block). The search back crosses a forward b
+    that lands at or before t, and stops (None) at a ret, a br, any other b, a call that may overwrite xr (x0-x18), any other write to xr or 4,096 instructions. Then no direct branch
+    from outside [adrp, t) within 1 MB (a conditional branch's reach) may land in (adrp, t], or there is a path to t that skips the adrp"""
+    lo = None
+    for s in range(t - 4, max(-4, t - 4 * 4096), -4):
+        u = word(s)
+        if u == RET or (u & 0xFFFFFC1F) == 0xD61F0000: return None                                        # ret, br
+        if (u & 0xFC000000) == 0x14000000:                                                           # b, but not over an else block
+            target = branch_target(u, s)
+            if target is None or not s < target <= t: return None
+        if r < 19 and ((u & 0xFC000000) == 0x94000000 or (u & 0xFFFFFC1F) == 0xD63F0000): return None    # bl, blr: x0-x18 may change
+        if not writes(u, r): continue
+        if is_adrp(u) and u & 31 == r: break
+        if lo is None and (a := add_imm(u)) and a[0] == a[1] == r: lo = a[2]; continue
+        return None
+    else: return None
+    for b in range(max(0, s - 0x100000), min(text_end, t + 0x100000), 4):
+        if not s <= b < t and (x := branch_target(word(b), b)) is not None and s < x <= t: return None
+    return adrp_page(u, s) + (lo or 0)
+
 def registered_at(word, text_end, j):
     """The object registered under the name whose reference ends at byte offset j (add x1, the name, of the registration's call), or None. The first call after it, with the name still in
     x1, decides: a bl with x0 an address made by adrp + add is the variable's constructor (UE 4.18: TAutoConsoleVariable's, which registers it), and x0 is the object; a blr is
     IConsoleManager's register call (UE 4.2x and 5), and the object is the address made by adrp + add that the value pointer it returns is then stored into, str x0, [xN, #0x10] (UE 5
-    calls a base constructor between the two). Anything else (a lookup by name, a log line) is no registration. Registers are followed from the last call or branch before the name (UE
-    4.18 loads the object first); those a call or a load overwrites are forgotten, and an adrp x1 after the registration (the next variable's name) ends the search"""
+    calls a base constructor between the two). UE 4.18 also inlines that constructor into a long static initializer, addressing every object from one page base made far before the
+    name (OCTOPATH TRAVELER: str xV, [x22, #k] the vtable, then, after the call that returns the value pointer, str x0, [x22, #k + 0x10]); the object is then base_of(x22) + k.
+    Anything else (a lookup by name, a log line) is no registration. Registers are followed from the last call or branch before the name (UE 4.18 loads the object first); those a call
+    or a load overwrites are forgotten, and an adrp x1 after the registration (the next variable's name) ends the search"""
     if not (name_add := add_imm(word(j))) or name_add[0] != 1: return None
     val, name, registered = {}, False, False   # val: register → address made by adrp + add (or copied by mov); name: x1 holds the name
+    stored, after = set(), 0                   # stored: (xN, offset) of the 64-bit stores since the registration; after: the calls since it
     for t in range(max(0, j - 64), min(text_end, j + 192), 4):
         u = word(t)
         call = (u & 0xFC000000) == 0x94000000 or (u & 0xFFFFFC1F) == 0xD63F0000                       # bl, blr
@@ -40,10 +95,17 @@ def registered_at(word, text_end, j):
                 if not name: return None
                 if u >> 26 == 0x25: return val.get(0)                                                  # the variable's constructor
                 registered = True
+            else: after += 1
             for r in range(19): val.pop(r, None)                                                       # what the call may overwrite
+            stored = {(n, k) for n, k in stored if n >= 19}
             name = False; continue
         if (u & 0xFC000000) == 0x14000000 or u == RET: break                                          # b, ret: the constructor ended
-        if registered and (u & 0xFFC0001F) == 0xF9000000 and (u >> 10) & 0xFFF == 2 and (u >> 5) & 31 in val: return val[(u >> 5) & 31]   # str x0, [xN, #0x10]
+        if registered and (u & 0xFFC00000) == 0xF9000000:                                              # str xT, [xN, #k]
+            n, k = (u >> 5) & 31, ((u >> 10) & 0xFFF) * 8
+            if u & 31 == 0 and k == 0x10 and n in val: return val[n]                                   # str x0, [xN, #0x10]
+            if u & 31 == 0 and after and n not in val and (n, k - 0x10) in stored:                     # the inlined constructor
+                return None if (b := base_of(word, text_end, n, t)) is None else b + k - 0x10
+            stored.add((n, k)); continue
         a, d, v = add_imm(u), u & 31, None   # d: the register the instruction writes, v: the address it then holds (None: unknown)
         if is_adrp(u):
             if registered and d == 1: break                                                            # the next variable's name

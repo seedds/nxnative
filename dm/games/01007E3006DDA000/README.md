@@ -61,5 +61,6 @@ No code of the game is cut, and no run-time key is set. The game asks for presen
 ## Found on this game
 
 - [`nv12-colorspace` picks the game's YUV matrix](../../../docs/reference/movies.md#nv12-colorspace-picks-the-games-yuv-matrix).
+- [H.264 packets are Annex B, not NAL lengths](../../../docs/reference/movies.md#h264-packets-are-annex-b-not-nal-lengths): its `ImageMovie.mp4` has 167 samples whose first NAL length begins `00 00 01`, and plays in full, so its packets come as Annex B.
 - [Integer outputs told from float bits](../../../docs/reference/shaders.md#integer-outputs-told-from-float-bits).
 - [A pipeline archive on an external drive is read into memory](../../../docs/reference/memory.md#a-pipeline-archive-on-an-external-drive-is-read-into-memory).

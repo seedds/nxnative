@@ -25,16 +25,58 @@ else
 fi
 python3 -I "$(dirname "$0")/../dm/tools/romfs.py" "$img" "${DM_RESOURCE_MARKER:-}"
 echo "identity: $(python3 -I "$(dirname "$0")/../dm/tools/romfs_image.py" --identity "$img")"
-xcrun devicectl device copy to --device "$dev" --domain-type appDataContainer --domain-identifier "$id" --source "$img" --destination Documents/romfs.img -q
-# Add-on content (DLC): <index>.img files or legacy <index>/ trees. devicectl merges directories by default, retaining removed DLC that the host would still report owned.
-# resources.env describes the complete DLC set. An empty set replaces old content with an empty directory, which also takes precedence over bundled DLC at startup.
-if [ "$sync_aoc" = 1 ]; then
-    aoc=$DM_RESOURCE_AOC
-    if [ -z "$aoc" ]; then
-        aoc=$(mktemp -d "${TMPDIR:-/tmp}/nxnative-aoc.XXXXXX")
-        trap 'rmdir "$aoc"' EXIT
+# The image goes over AFC (house_arrest, the channel of Finder's file sharing; libimobiledevice's afcclient), which streams it. devicectl's copy has the Mac's CoreDeviceService read
+# the whole file into its own memory: a 26 GB image filled a 16 GB Mac's swap, macOS asked to quit applications and killed the service ("The connection was interrupted";
+# docs/reference/packing.md). AFC writes Documents/romfs.img.part, which main.m never takes, and renames it once the device holds all of it: afcclient exits 0 even when a
+# command fails, so the size on the device decides. ROMFS_PUSH_VIA=afc / devicectl chooses (default: afc when afcclient is installed).
+size=$(stat -f %z "$img")
+via=${ROMFS_PUSH_VIA:-auto}
+if [ "$via" = auto ]; then if command -v afcclient > /dev/null; then via=afc; else via=devicectl; fi; fi
+if [ "$via" = afc ]; then
+    afc() { afcclient -u "$dev" --container "$id" -- "$@"; }
+    remote_size() { afc info "$1" 2> /dev/null | sed -n 's/^ *"st_size": *\([0-9][0-9]*\).*/\1/p'; }
+    remote_type() { afc info "$1" 2> /dev/null | sed -n 's/^ *"st_ifmt": *"\([A-Z_]*\)".*/\1/p'; }
+    # afcclient finds a device only by its UDID, over USB (devicectl also takes its own identifier or the device's name, and Wi-Fi): check that it opens the app's
+    # Documents before copying, so a wrong ID or a Wi-Fi-only device is named as such instead of ending as an incomplete copy.
+    [ "$(remote_type /Documents)" = S_IFDIR ] || { echo "[RED] afcclient cannot open Documents of $id on device $dev: it needs the device's UDID (idevice_id -l lists the connected ones; devicectl's identifier and the device's name do not work), a USB connection, and the app installed. ROMFS_PUSH_VIA=devicectl copies through devicectl instead" >&2; exit 1; }
+    echo "copying $((size >> 20)) MB over AFC (about 30 MB/s over USB)"
+    afc put -f "$img" /Documents/romfs.img.part
+    got=$(remote_size /Documents/romfs.img.part)
+    [ "$got" = "$size" ] || { echo "[RED] the copy is incomplete: Documents/romfs.img.part holds ${got:-nothing} of $size bytes (a full device, or the cable); Documents/romfs.img is unchanged. Run this again" >&2; exit 1; }
+    afc rm /Documents/romfs.img > /dev/null 2>&1 || true
+    afc mv /Documents/romfs.img.part /Documents/romfs.img
+    got=$(remote_size /Documents/romfs.img)
+    [ "$got" = "$size" ] || { echo "[RED] Documents/romfs.img.part was not renamed to romfs.img (romfs.img holds ${got:-nothing} of $size bytes). Run this again" >&2; exit 1; }
+elif [ "$via" = devicectl ]; then
+    mem=$(sysctl -n hw.memsize)
+    if [ -z "${ROMFS_PUSH_VIA:-}" ] && [ "$size" -gt $((mem / 2)) ]; then
+        echo "[RED] the image ($((size >> 20)) MB) is larger than half this Mac's memory ($((mem >> 20)) MB): devicectl copies it through memory and can fill the swap. Install afcclient (brew install libimobiledevice) and run this again, or set ROMFS_PUSH_VIA=devicectl to copy it anyway" >&2
+        exit 1
     fi
-    xcrun devicectl device copy to --device "$dev" --domain-type appDataContainer --domain-identifier "$id" --source "$aoc" --destination Documents/aoc --remove-existing-content true -q
-    echo "DLC on the phone: $id"
+    xcrun devicectl device copy to --device "$dev" --domain-type appDataContainer --domain-identifier "$id" --source "$img" --destination Documents/romfs.img -q
+else echo "ROMFS_PUSH_VIA is afc or devicectl, not $via" >&2; exit 1; fi
+# Add-on content (DLC): <index>.img files or legacy <index>/ trees. resources.env describes the complete DLC set, so Documents/aoc is replaced, not merged (a merge would keep
+# removed DLC that the host still reports owned). An empty set leaves an empty Documents/aoc, which also takes precedence over bundled DLC at startup. Over AFC only: devicectl's
+# --remove-existing-content true, given Documents/aoc, empties the app's whole data container, saves included, and then fails with "Failed to retrieve the file node for
+# Documents/aoc" (CoreDevice 651.32; docs/reference/packing.md), so devicectl never syncs DLC here.
+if [ "$sync_aoc" = 1 ]; then
+    if [ "$via" = afc ]; then
+        if [ -n "$(remote_type /Documents/aoc)" ]; then afc rm -rf /Documents/aoc < /dev/null > /dev/null; fi
+        [ -z "$(remote_type /Documents/aoc)" ] || { echo "[RED] the old Documents/aoc could not be removed; the DLC on the phone is unchanged. Run this again" >&2; exit 1; }
+        afc mkdir /Documents/aoc
+        missing=
+        if [ -n "$DM_RESOURCE_AOC" ]; then
+            for f in "$DM_RESOURCE_AOC"/*; do
+                [ -e "$f" ] || continue
+                n=$(basename "$f"); afc put -r -f "$f" "/Documents/aoc/$n" > /dev/null
+                [ -n "$(remote_type "/Documents/aoc/$n")" ] || missing="$missing $n"
+            done
+        fi
+        [ "$(remote_type /Documents/aoc)" = S_IFDIR ] && [ -z "$missing" ] || { echo "[RED] the DLC did not all reach Documents/aoc (missing:${missing:- the folder}). Run this again" >&2; exit 1; }
+        echo "DLC on the phone: $id"
+    elif [ -n "$DM_RESOURCE_AOC" ]; then
+        echo "[RED] the DLC was not copied: devicectl's --remove-existing-content empties the whole app container, saves included, so it needs afcclient (brew install libimobiledevice). The game files were copied" >&2
+        exit 1
+    else echo "no DLC in this build; Documents/aoc left as it is (afcclient would empty it)"; fi
 fi
 echo "game files on the phone: $id"

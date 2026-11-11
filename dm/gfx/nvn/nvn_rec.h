@@ -14,35 +14,59 @@
 // goes on; one worker makes them in the same order (a shadow may start from the previous one). The GPU reads shadows only after its command buffer is committed, and every commit first
 // waits for the copies queued before it (ubc_wait, from the encode thread when Metal encoding is deferred); a CPU read of a shadow waits for its own copies. DM_NVN_UB_COPY_THREAD=0
 // copies on the submit thread as before
+// Hand-off: the copy thread sleeps on g_ubc_head and a waiter on g_ubc_done (os_sync_wait_on_address: the kernel compares the word, so a change before the sleep is not lost),
+// each woken only by the thread that advanced that word, after it did. A waker never clears the sleeper's flag; the sleeper does, once awake. A push whose wake call comes late
+// can meet the flag the thread set for its next sleep, on a word that already includes that push: had the call taken the flag, the thread would sleep with it clear, the next
+// push would not wake it and every later wait would hang (the waiting thread's commit never made, its fence never signalled). Waiters are counted for the same reason.
+// No mutex: before, ubc_wait locked a mutex and signalled a condition on every spin while the thread slept, and the woken thread could not get that mutex back. Ocarina of
+// Time on one build: the replay thread spent half its busy time there, the copy thread waited for the mutex 9 times as long as it copied, and translation took 170-330k
+// instructions a draw against 32-48k
 typedef struct { void *d; const void *s; size_t n; } ubc_op;
-enum { UBC_N = 8192 };
+enum { UBC_N = 8192, UBC_SPIN = 4096 };   // UBC_SPIN: a waiter's spins before it sleeps (the copies it waits for are usually a few KB)
 static ubc_op g_ubc[UBC_N];
-static _Atomic uint64_t g_ubc_head, g_ubc_done;   // ops queued / made (monotonic)
-static _Atomic int g_ubc_sleeping;
-static pthread_mutex_t g_ubc_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_ubc_cv = PTHREAD_COND_INITIALIZER;
+static _Alignas(128) _Atomic uint64_t g_ubc_head;   // ops queued (monotonic; the copy thread sleeps on it)
+static _Alignas(128) _Atomic uint64_t g_ubc_done;   // ops made (a waiter sleeps on it)
+static _Alignas(128) _Atomic uint32_t g_ubc_sleeping, g_ubc_waiting;   // the copy thread is asleep or about to be (it clears this itself) / waiters asleep or about to be
+static _Atomic uint64_t g_ubc_wakes;   // wake calls made, both ways (t_ubc_wait)
+#ifndef UBC_T_SLEEPING   // t_ubc_wait: holds the copy thread on its way to sleep, so that a late wake call lands there
+#define UBC_T_SLEEPING() ((void)0)
+#endif
 static int ubc_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_UB_COPY_THREAD"); v = !(e && !strcmp(e, "0")); } return v; }
+// Wake the copy thread if it sleeps; only ubc_push, after its store to g_ubc_head (pushes between the wake and the thread clearing its flag make a call each, harmless)
+static inline void ubc_kick(void) {
+    if (atomic_load(&g_ubc_sleeping)) { atomic_fetch_add_explicit(&g_ubc_wakes, 1, memory_order_relaxed); os_sync_wake_by_address_any(&g_ubc_head, sizeof g_ubc_head, OS_SYNC_WAKE_BY_ADDRESS_NONE); }
+}
 static void *ubc_thread(void *arg) {
     (void)arg; pthread_setname_np("dm-ub-copy"); pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
     for (uint64_t t = 0;;) {
         uint64_t h = atomic_load_explicit(&g_ubc_head, memory_order_acquire);
-        if (t == h) {
-            for (int spin = 0; spin < 2000 && t == h; spin++) h = atomic_load_explicit(&g_ubc_head, memory_order_acquire);   // a submission queues copies in bursts: stay awake a moment
-            if (t == h) { pthread_mutex_lock(&g_ubc_mu); atomic_store(&g_ubc_sleeping, 1);
-                while ((h = atomic_load_explicit(&g_ubc_head, memory_order_acquire)) == t) pthread_cond_wait(&g_ubc_cv, &g_ubc_mu);
-                atomic_store(&g_ubc_sleeping, 0); pthread_mutex_unlock(&g_ubc_mu); }
+        for (int spin = 0; spin < 2000 && t == h; spin++) h = atomic_load_explicit(&g_ubc_head, memory_order_acquire);   // a submission queues copies in bursts: stay awake a moment
+        while (t == h) {   // the flag first, then the word (both sequentially consistent, as the pusher's store and flag load): a push sees the flag or this sees the push
+            atomic_store(&g_ubc_sleeping, 1);
+            if ((h = atomic_load(&g_ubc_head)) != t) break;
+            UBC_T_SLEEPING();
+            os_sync_wait_on_address(&g_ubc_head, t, sizeof g_ubc_head, OS_SYNC_WAIT_ON_ADDRESS_NONE);   // returns at once if the word is no longer t; EINTR and spurious returns loop
+            atomic_store(&g_ubc_sleeping, 0);   // awake: set again before the next sleep's look at the word
+            h = atomic_load(&g_ubc_head);
         }
+        atomic_store_explicit(&g_ubc_sleeping, 0, memory_order_relaxed);   // also when the look found a push
         for (; t < h; t++) { const ubc_op *o = &g_ubc[t % UBC_N]; memcpy(o->d, o->s, o->n); }
-        atomic_store_explicit(&g_ubc_done, t, memory_order_release);
+        atomic_store(&g_ubc_done, t);
+        if (atomic_load(&g_ubc_waiting)) { atomic_fetch_add_explicit(&g_ubc_wakes, 1, memory_order_relaxed); os_sync_wake_by_address_all(&g_ubc_done, sizeof g_ubc_done, OS_SYNC_WAKE_BY_ADDRESS_NONE); }
     }
     return NULL;
 }
-// Wait until the first seq ops are made
+// Wait until the first seq ops are made (the replay thread, or the encode thread at a commit): spin a moment, then sleep on g_ubc_done
 static void ubc_wait(uint64_t seq) {
     if (atomic_load_explicit(&g_ubc_done, memory_order_acquire) >= seq) return;
     uint64_t w0 = ws_t0();
-    while (atomic_load_explicit(&g_ubc_done, memory_order_acquire) < seq) {
-        if (atomic_load(&g_ubc_sleeping)) { pthread_mutex_lock(&g_ubc_mu); pthread_cond_signal(&g_ubc_cv); pthread_mutex_unlock(&g_ubc_mu); }
-        __builtin_arm_yield();
+    for (int spin = 0;; spin++) {   // the copies are queued, so the copy thread is awake or woken by their push
+        if (spin < UBC_SPIN) { __builtin_arm_yield(); if (atomic_load_explicit(&g_ubc_done, memory_order_acquire) >= seq) break; continue; }
+        atomic_fetch_add(&g_ubc_waiting, 1);   // counted first, then the word (as the copy thread's store and count load): it sees this waiter or this sees its store
+        uint64_t d = atomic_load(&g_ubc_done);
+        if (d < seq) os_sync_wait_on_address(&g_ubc_done, d, sizeof g_ubc_done, OS_SYNC_WAIT_ON_ADDRESS_NONE);
+        atomic_fetch_sub(&g_ubc_waiting, 1);
+        if (atomic_load_explicit(&g_ubc_done, memory_order_acquire) >= seq) break;
     }
     if (ws_on()) ws_put(WS_UBC, w0, 1);
 }
@@ -54,8 +78,8 @@ static uint64_t ubc_push(void *d, const void *s, size_t n) {
     uint64_t h = atomic_load_explicit(&g_ubc_head, memory_order_relaxed);
     if (h - atomic_load_explicit(&g_ubc_done, memory_order_acquire) >= UBC_N) ubc_wait(h - UBC_N + 1);
     g_ubc[h % UBC_N] = (ubc_op){d, s, n};
-    atomic_store_explicit(&g_ubc_head, h + 1, memory_order_release);
-    if (atomic_load(&g_ubc_sleeping)) { pthread_mutex_lock(&g_ubc_mu); pthread_cond_signal(&g_ubc_cv); pthread_mutex_unlock(&g_ubc_mu); }
+    atomic_store(&g_ubc_head, h + 1);
+    ubc_kick();
     return h + 1;
 }
 

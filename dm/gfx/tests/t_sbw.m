@@ -56,7 +56,31 @@ int main(void){@autoreleasepool{
     CHECK("a query's report stays unknown",!rc_value(0x7100000000ull+8999*16,&x)&&!rc_value(0x7100000000ull,&x));
     (void)q;for(uint64_t i=0;i<300;i++)rc_note((uint64_t)&big+0x1000+i,1);
     CHECK("more timestamp reports than the first table held",rc_value((uint64_t)&big+0x1000,&x)&&x==0);
-    g_rc_npend=0;}
+    rc_forget();}
+    // Sparse report pages arrive out of address order. A large write must visit
+    // just its intersections, including an unaligned counter on the prior page.
+    {const uint64_t start=0x7200100000ull, span=0x800000, addresses[]={start+span,start-3,start+0x700000,start-16,start+32,start+0x100000};
+    const uint8_t fill=0xab;uint64_t x=0;
+    for(unsigned i=0;i<sizeof addresses/sizeof *addresses;i++)rc_note(addresses[i],1);
+    rc_write(start,span,&fill,1);
+    CHECK("wide write excludes the counter at its end",rc_value(addresses[0],&x)&&x==0);
+    CHECK("wide write forwards partial counter bytes across a page",rc_value(addresses[1],&x)&&x==0xababababab000000ull);
+    CHECK("wide write reaches distant intersecting report pages",rc_value(addresses[2],&x)&&x==0xababababababababull);
+    CHECK("wide write excludes counters before its start",rc_value(addresses[3],&x)&&x==0);
+    CHECK("wide write reaches another counter on its first page",rc_value(addresses[4],&x)&&x==0xababababababababull);
+    CHECK("wide write reaches a page inserted last",rc_value(addresses[5],&x)&&x==0xababababababababull);
+    rc_forget();rc_note(start+32,1);rc_write(start,span,&fill,1);
+    CHECK("report page index resets before address reuse",rc_value(start+32,&x)&&x==0xababababababababull);
+    rc_forget();}
+    // An unbounded shader store may replace a completed report before the word
+    // becomes a query operand. Copy forwarding must not read its stale CPU bytes.
+    {static uint64_t rec[2];uint8_t bytes[8];int unreliable=0;uint64_t x=1;
+    uint64_t completed=atomic_load(&g_rc_complete);rc_note((uint64_t)rec,1);rc_commit(completed+1);atomic_store(&g_rc_complete,completed+1);
+    sbw_note(0,0,SBW_GPU);
+    CHECK("a copy after an unbounded writer cannot forward completed timestamp bytes",!rc_source((uint64_t)rec,8,bytes,&unreliable)&&unreliable);
+    rc_note((uint64_t)rec,1);
+    CHECK("a later timestamp restores known zero after the opaque writer",rc_value((uint64_t)rec,&x)&&x==0);
+    rc_forget();atomic_store(&g_rc_complete,completed);}
     pend_reset();
     printf("t_sbw: %d checks, %d failed\n",checks,failed);return failed!=0;
 }}

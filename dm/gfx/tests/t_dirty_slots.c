@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 
 module_t *g_mod;
@@ -99,5 +100,28 @@ int main(void) {
     EXPECT("B no longer tracked after destroying B", 0, nvn_dirty_tracked(pb, tex));
     nvn_dirty_remove_range(pa);
     munmap(blk, 4 * pg);
+
+    // Written pages but those holding a byte of the host's own write (nvn_dirty_since_except: a GPU copy's bytes the host wrote into a texture's storage, nvn_mtl.m pkg_copy_absorb)
+    uint8_t *st8 = mmap(NULL, 8 * pg, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (st8 == MAP_FAILED) { perror("mmap"); exit(2); }
+    nvn_dirty_add_range(st8, 8 * pg);
+    const void *span = nvn_dirty_span(st8, 8 * pg);
+    nvn_dirty_protect(st8, 8 * pg);
+    stamp = nvn_dirty_now();
+    uintptr_t ex[2][2] = {{(uintptr_t)st8 + pg + 0x100, (uintptr_t)st8 + 3 * pg - 0x100}, {(uintptr_t)st8 + 6 * pg + 0x800, (uintptr_t)st8 + 6 * pg + 0x900}}, first = 0;
+    EXPECT("nothing written: no page but the host's", 0, (long long)nvn_dirty_since_except(span, st8, 8 * pg, stamp, (const uintptr_t (*)[2])ex, 2, &first));
+    dm_guest_write_prepare(st8 + pg + 0x100, 2 * pg - 0x200); memset(st8 + pg + 0x100, 6, 2 * pg - 0x200);
+    dm_guest_write_prepare(st8 + 6 * pg + 0x800, 0x100); memset(st8 + 6 * pg + 0x800, 7, 0x100);
+    EXPECT("only the host's own writes: none counted", 0, (long long)nvn_dirty_since_except(span, st8, 8 * pg, stamp, (const uintptr_t (*)[2])ex, 2, &first));
+    EXPECT("the same writes without the exception: 3 pages", 3, (long long)nvn_dirty_since_except(span, st8, 8 * pg, stamp, NULL, 0, &first));
+    EXPECT("... the first of them is page 1", 1, (long long)((first - (uintptr_t)st8) / pg));
+    st8[4 * pg + 8] = 8;   // a game write beside them
+    first = 0;
+    EXPECT("a game write on another page is counted", 1, (long long)nvn_dirty_since_except(span, st8, 8 * pg, stamp, (const uintptr_t (*)[2])ex, 2, &first));
+    EXPECT("... and found there", 4, (long long)((first - (uintptr_t)st8) / pg));
+    EXPECT("a span the write is not in: none", 0, (long long)nvn_dirty_since_except(span, st8 + 5 * pg, 3 * pg, stamp, (const uintptr_t (*)[2])ex, 2, NULL));
+    EXPECT("an untracked span: SIZE_MAX", 1, nvn_dirty_since_except(NULL, &stamp, sizeof stamp, 0, NULL, 0, NULL) == SIZE_MAX);
+    nvn_dirty_remove_range(st8);
+    munmap(st8, 8 * pg);
     return g_fail != 0;
 }

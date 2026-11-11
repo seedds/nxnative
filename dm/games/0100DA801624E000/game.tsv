@@ -1,0 +1,49 @@
+# Game profile of TUNIC (Switch, update 1.0.3 = v196608). Plays on the Mac
+# Format: see dm/games/README.md
+# Andrew Shouldice's game (Finji) on Unity 2020.3.36f1 IL2CPP with FMOD, SDK 14.3.0, NVN. The NSP script's provisional profile, its keys unchanged but fps_target: no rewriter cut, no host change of its own
+
+# ---- Identity ----
+title_id	0100DA801624E000
+program_id	0100DA801624E000
+
+# ---- App ----
+# Game name: only a label for profile listings and the Mac window title; the iOS app name is the game name in the base NSP, and the bundle ID comes from the base game title ID (build_ipa.sh / NSP script)
+name	TUNIC
+ipa	Tunic.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v196608	1.0.3	main=0909b4ac280d9d77ecd1fae840e4b295	subsdk0=c781dd63daf0ddcdb9975da50a198f93	sdk=2aef2cffb104ee7c9e212fd2f4c731e9
+package	v196608
+shader_versions	v196608
+
+# ---- Files ----
+# every module main imports from (subsdk0 = the SDK's movie library)
+modules	main subsdk0 sdk
+romfs_marker	Data/resources.assets.resS
+zip_store	.assets:.bank:.dat:.png:.resource:.ress:.metallib
+
+# ---- Memory ----
+# the NPDM declares 16 MB of system resource (virtual address memory) and main never sets a heap: a 5 GB block with a 4.375 GB alias region, where the game maps its memory itself
+# (up to +3.02 GB of it from the title through the beach and the cliffs above it)
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+# a 1 GB pool, so StandardAllocator's region leaves the game room for its own (the heap check: with the hardware pool the alias region was used up to +4.26 GB of 4.38 GB)
+app_pool	0x40000000
+sys_resource	0x1000000
+
+# ---- Shader split ----
+# every shader is under Data/ (35,742) or in main (11)
+shader_groups	/Data/=data
+shader_note	Tunic shaders
+
+# ---- Frame rate ----
+# 60 fps (30 on the Switch): the game sets Unity's QualitySettings.vSyncCount to 2, which Unity hands to NVN as present interval 2, and steps by the time that really passed.
+# The rewriter finds vSyncCount and Application.targetFrameRate through Unity's internal-call table (dm/tools/unity_fps.py), the host writes the target there (hle_fpslock.c).
+# The speed checked at 30 and 60 by a timed walk (the same 3 s of the stick end at the same place); 120 not measured (fps_max stays 60)
+fps_target	60
+
+# ---- Graphics ----
+# the game calls nvnDeviceSetDepthMode with near = 0: the pipeline bases made before it runs are made for that mode
+depth_mode	zero

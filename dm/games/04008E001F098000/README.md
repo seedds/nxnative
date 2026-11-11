@@ -9,8 +9,20 @@ Work in progress. With the pull requests below, it boots on the Mac and plays to
 - [PR #2106](https://github.com/seedds/nxnative/pull/2106): the controller icon colours and the IMU's enable state, which the SDK's own functions ask the hid service the host does not serve (`Result 0xe15` at boot).
 - [PR #2103](https://github.com/seedds/nxnative/pull/2103): the fragment's shading-rate size (system register 0x84) reads 1 x 1. 612 of its pixel shaders read it; without it the sea is black on the title screen and in the menus (chain change).
 - [PR #2264](https://github.com/seedds/nxnative/pull/2264): six task and mesh shaders whose payload is past Metal's 16 KB ([Shaders](#shaders)).
+- [PR #2271](https://github.com/seedds/nxnative/pull/2271): integer reads of game uniforms as volatile loads. On main some of its material pipelines take Metal's compiler minutes and gigabytes each, the prebuild runs `MTLCompilerService` out of memory, and the pipeline archive loses whole files, so the game compiles pipelines for minutes at every start.
+- [PR #2273](https://github.com/seedds/nxnative/pull/2273): a colour clear under a partial channel mask leaves the other channels. Without it outfits are black in the menus (Customize, Select User) while they are right in play.
+- [PR #2274](https://github.com/seedds/nxnative/pull/2274), for Miis: the player's own Mii head models (system data `0400000000000849`) and Mii database (system save `8000000000000030`), from `DM_SYSTEM_DIR` ([Miis](#miis)). The game runs without them, with no Mii heads and only the six default Miis.
 - [PR #2104](https://github.com/seedds/nxnative/pull/2104): a read-only mount of the game's own save. Without it Select User offers Begin Career to a user who has a career, and the game aborts on its own save check (`SaveDataErrorType::UpdateOrderForNotUsable`) the next time it saves.
 - The rest of the profile is the survey's guess (`dm/games/profile_guess.py`) and the NSP script's heap check (a 7.47 GB heap, `mem_reserve`; `depth_mode zero`), unchanged after play.
+
+## Miis
+
+The game draws Mii heads from system data `0400000000000849` and lists the console's Miis from the mii service's database; both come from the player's own console, never from the app ([PR #2274](https://github.com/seedds/nxnative/pull/2274)):
+
+- `~/Library/Application Support/nxnative/system/sysdata/0400000000000849/`: the archive's files (`ShapeMid.dat`, `ShapeHigh.dat` and six `OunceTexture*.dat`). The Switch's MiiModel archive (`0100000000000802`) does not do: the game reads only the `OunceTexture*` files.
+- `~/Library/Application Support/nxnative/system/save/8000000000000030/MiiDatabase.dat`: the Mii database, the same file as on the Switch.
+
+With both in place the Miis are listed first on Select User and their heads draw in the menus and in play.
 
 ## Files
 
@@ -30,14 +42,17 @@ Work in progress. With the pull requests below, it boots on the Mac and plays to
 - [File calls on a mount only the SDK holds](https://github.com/seedds/nxnative/pull/2105) (PR #2105).
 - [Switch 2 controller icon colours and IMU calls](https://github.com/seedds/nxnative/pull/2106) (PR #2106).
 - [A task shader's payload past Metal's 16 KB](https://github.com/seedds/nxnative/pull/2264) (PR #2264).
+- [Integer reads of game uniforms and Metal's compile time](https://github.com/seedds/nxnative/pull/2271) (PR #2271).
+- [A colour clear under a partial channel mask leaves the other channels](https://github.com/seedds/nxnative/pull/2273) (PR #2273).
+- [A console's own Mii database and system data](https://github.com/seedds/nxnative/pull/2274) (PR #2274).
 
 ## Open
 
-- Golf: past the fairway, the ground and the sea draw as one flat pale blue, so trees and cliffs look as if they float. Not found yet. The draws there have sane positions, the refused mesh shaders are not drawn in golf, and the far ground's own shader covers only the green areas that do show. The golf frame also renders a top-down map of the course into 1280x1280 render targets in sparse pools, which held stale memory on main.
+- Golf: past the fairway, the ground and the sea drew as one flat pale blue on main, so trees and cliffs looked as if they float. On a tree with the Ampere accuracy series of issue #2040 merged (#2041 to #2067) they draw right (one hole checked); which of those PRs fixes it is not narrowed down.
 - Golf: the minimap has black squares at its corners.
 - Tennis: on the VS screen, the left player's partner is drawn with horizontal stripes.
 - The title and menus show a faint vertical seam down the middle of the sky.
 - Gameplay is letterboxed (black bars above and below); not checked whether that is the game's own framing.
 - Motion: the host gives the controller IMU no samples ([PR #2106](https://github.com/seedds/nxnative/pull/2106)), so the Joy-Con calibration cannot finish (it can be skipped) and motion controls do not work.
-- Miis: the game opens the system Mii editor (`AppendMii`), which the host answers as cancelled, so no Mii can be made; the host's database has only the six default Miis. The game mounts Mii model system data `0400000000000849` (`[RED] fs mount system data MiiResource: the host has no 0400000000000849`), which the host does not serve.
+- Miis: with [PR #2274](https://github.com/seedds/nxnative/pull/2274) and the player's files ([Miis](#miis)) the console's Miis are listed and drawn. The game's "Add User" opens the system Mii editor (`AppendMii`), which the host still answers as cancelled, so no new Mii can be made in the game. Not checked: the boxing arms an earlier run lacked, with the head models now in place.
 - Online play, iOS: not tested.

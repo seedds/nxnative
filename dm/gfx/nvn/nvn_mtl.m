@@ -16443,8 +16443,6 @@ static CAFrameRateRange link_range(int mode) {
 __attribute__((weak)) int front_fullscreen(void) { return 0; }   // front_mac.m; graphics unit tests and iOS have none
 __attribute__((weak)) int front_screen_variable_refresh(void) { return 0; }   // front_mac.m; graphics unit tests and iOS have none
 // CAMetalDisplayLink accepts only 1 or 2. Compare its readback with the supported request, or an oversized override rewrites and logs every frame.
-static int link_latency(void) { return g_present_latency > 0 ? MIN(g_present_latency, 2) : front_fullscreen() && front_screen_variable_refresh() ? 2 : 1; }
-static const char *link_latency_why(void) { return g_present_latency > 0 ? "DM_PRESENT_LATENCY" : !front_fullscreen() ? "window" : front_screen_variable_refresh() ? "fullscreen, variable refresh" : "fullscreen, fixed refresh"; }
 // The 30 Hz link at a 30 fps target, except in fullscreen on a fixed-rate screen. There the link skipped ticks: Ocarina of Time at a 30 fps cap on a MacBook Air M4 (60 Hz) got
 // 16.5-25 callbacks a second over stretches of 300 frames, also on frames with under 1 ms of GPU, and each skipped tick kept a frame on screen 66.7 ms (a 180 s walk: 388 and 996
 // frames over 50 ms; 3-4 in a window, where the same link held 30.0). Why is open (docs/reference/frame-rate.md). The 60 Hz link paces the 30 through the present interval, as it
@@ -16458,6 +16456,13 @@ static int link_30hz(void) { return !front_fullscreen() || front_screen_variable
 // no such mode or with DM_SCREEN_MATCH=0: the 120 Hz link held 59.2 fps, about 2% of frames up 25 ms. A window keeps the 60 Hz link, where every present lands on its
 // target (docs/reference/frame-rate.md)
 static int link_vrr_120(void) { int hz = front_screen_max_fps(); return !g_present_link_env && front_fullscreen() && front_screen_variable_refresh() && hz >= 120 && hz % 120 == 0; }
+// At a 30 fps cap a game profile may ask for latency 2 (link_latency30 2): where the link runs at 30 Hz (link_30hz) latency 1 left a frame about 33 ms from its
+// submission to its display. An iPhone lowers the GPU clock at 30 fps until the work fills most of the frame (Ocarina of Time, iPhone 18 Pro, render scale 0.25: GPU p50 12 ms at
+// 60 fps, 29-30 ms at 30, p95 33-38 ms), so every frame over 33 ms missed its refresh and showed 50 ms (a 40 s log: 195 of 300 frames over 33.3 ms, p99 64 ms). At latency 2 the
+// GPU has two ticks, 66 ms, and a frame over 33 ms is absorbed while the mean fits, for one 30 Hz frame more of input lag at the 30 fps cap only
+static int link_lat30(void) { return DM_GAME_LINK_LATENCY30 >= 2 && mtl_fps_target() == 30 && link_30hz(); }
+static int link_latency(void) { return g_present_latency > 0 ? MIN(g_present_latency, 2) : link_lat30() || (front_fullscreen() && front_screen_variable_refresh()) ? 2 : 1; }
+static const char *link_latency_why(void) { return g_present_latency > 0 ? "DM_PRESENT_LATENCY" : link_lat30() ? "30 fps cap, game profile link_latency30" : !front_fullscreen() ? "window" : front_screen_variable_refresh() ? "fullscreen, variable refresh" : "fullscreen, fixed refresh"; }
 static int g_link_mode = 1;   // Current mode of the display link object: 1 / 2 same as g_dm_present_link, 3 = power-saving mode 30 Hz
 static void *link_main(void *arg) {   // Display link thread: started when switching to display-link mode, exits when switching back to 0
     (void)arg;

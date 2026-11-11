@@ -102,6 +102,14 @@ int main(void) {
         run(&m, 300, 3.5, 2, 2, 0);
         check(m.s.k == 2, "  frames longer than the hold at the 30 cap: hold stays 2 (the 30 Hz link holds only even counts)");
     }
+    {   sim m = {0}; m.s.nopay = 1; run(&m, 300, 0.5, 2, 2, 0);   // fps_payback off (Ocarina of Time): a late frame's time is let go, not paid back
+        m.real += 3; m.game += m.next; m.next = nvn_fstep_next(&m.s, 3, 3, 2, 2, 0, 0);
+        int three = 0; for (int i = 0; i < 10; i++) { int st = m.next; run(&m, 1, 0.5, 2, 2, 0); three += st == 3; }
+        snprintf(b, sizeof b, "no payback: a late frame at the 30 cap gives no step of 3 (%d), the game is %.0f vsync behind", three, m.real - m.game);
+        check(three == 0 && m.s.k == 2 && m.real - m.game == 1 && m.s.dropped == 1 && m.s.debt == 0, b);
+        run(&m, 300, 1.9, 2, 2, 0);
+        check(m.s.k == 2 && m.next == 2 && m.real - m.game == 1, "  no payback: frames that fit afterwards step 2 and hold 2");
+    }
     {   sim m = {0}; run(&m, 60, 0.5, 1, 3, 0); run(&m, 1, 0.5, 2, 3, 0);
         check(m.s.k == 2, "movie flag (kmin 2): hold 2 at once");
         run(&m, 120, 0.5, 2, 3, 0); run(&m, 1, 0.5, 1, 3, 0);

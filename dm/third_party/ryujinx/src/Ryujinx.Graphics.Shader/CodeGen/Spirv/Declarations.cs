@@ -232,8 +232,17 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
 
                 Dim dim = GetDim(image.Type);
 
+                bool wide = image.Format == TextureFormat.R64Uint;
+                if (wide)
+                {
+                    context.AddCapability(Capability.Int64);
+                    context.AddCapability(Capability.Int64Atomics);
+                    context.AddCapability(Capability.Int64ImageEXT);
+                    context.AddExtension("SPV_EXT_shader_image_int64");
+                }
+
                 SpvInstruction imageType = context.TypeImage(
-                    context.GetType(image.Format.GetComponentType()),
+                    wide ? context.TypeInt(64, false) : context.GetType(image.Format.GetComponentType()),
                     dim,
                     image.Type.HasFlag(SamplerType.Shadow),
                     image.Type.HasFlag(SamplerType.Array),
@@ -301,6 +310,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                 TextureFormat.R16Sint => ImageFormat.R16i,
                 TextureFormat.R32Float => ImageFormat.R32f,
                 TextureFormat.R32Uint => ImageFormat.R32ui,
+                TextureFormat.R64Uint => ImageFormat.R64ui,
                 TextureFormat.R32Sint => ImageFormat.R32i,
                 TextureFormat.R8G8Unorm => ImageFormat.Rg8,
                 TextureFormat.R8G8Snorm => ImageFormat.Rg8Snorm,

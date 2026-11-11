@@ -634,6 +634,14 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
             ImageDeclaration declaration = context.Images[texOp.GetTextureSetAndBinding()];
             SpvInstruction image = declaration.Image;
 
+            bool wide = texOp.Format == TextureFormat.R64Uint;
+            if (wide && (texOp.Type != SamplerType.Texture2D ||
+                (texOp.Flags & TextureFlags.AtomicMask) != TextureFlags.Maximum ||
+                !texOp.Flags.HasFlag(TextureFlags.AtomicDiscardResult)))
+            {
+                throw new NotSupportedException("64-bit image atomics require a discard-result 2D unsigned maximum.");
+            }
+
             bool bounded = context.HostCapabilities.MetalImageAtomics;
             // CAS is a native texture compare-exchange on Metal (SPIRV-Cross loops
             // atomic_compare_exchange_weak into a strong one), so it takes the same guard.
@@ -647,12 +655,12 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
             if (bounded && (declaration.IsIndexed ||
                 (texOp.Type != SamplerType.TextureBuffer && texOp.Type != SamplerType.Texture2D &&
                  texOp.Type != (SamplerType.Texture2D | SamplerType.Array) && texOp.Type != SamplerType.Texture3D) ||
-                (texOp.Format != TextureFormat.R32Uint && texOp.Format != TextureFormat.R32Sint)))
+                (!wide && texOp.Format != TextureFormat.R32Uint && texOp.Format != TextureFormat.R32Sint)))
             {
                 throw new NotSupportedException("Metal image atomics support non-indexed 32-bit buffer/2D/2D-array/3D images only.");
             }
 
-            SpvInstruction resultType = context.GetType(componentType);
+            SpvInstruction resultType = wide ? context.TypeInt(64, false) : context.GetType(componentType);
             SpvInstruction imagePointerType = context.TypePointer(StorageClass.Image, resultType);
 
             if (declaration.IsIndexed)
@@ -686,7 +694,10 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                 pCoords = Src(AggregateType.S32);
             }
 
-            SpvInstruction value = Src(componentType);
+            SpvInstruction value = wide
+                ? context.Bitcast(resultType, context.CompositeConstruct(context.TypeVector(context.TypeU32(), 2),
+                    Src(AggregateType.U32), Src(AggregateType.U32)))
+                : Src(componentType);
 
             SpvInstruction merge = null;
             SpvInstruction valid = null;
@@ -748,7 +759,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                 if (texOp.Flags.HasFlag(TextureFlags.AtomicDiscardResult))
                 {
                     context.AddLabel(merge);
-                    result = context.Constant(resultType, 0);
+                    result = context.Constant(context.GetType(componentType), 0);
                 }
                 else
                 {

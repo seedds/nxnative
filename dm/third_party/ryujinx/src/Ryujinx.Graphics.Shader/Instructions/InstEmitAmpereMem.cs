@@ -578,14 +578,21 @@ namespace Ryujinx.Graphics.Shader.Instructions
         {
             AmpereOp x = new(context.CurrOp);
 
-            if ((x.Bits(64, 96) & ~(0xf << 23)) != 0x0010e000 || x.Bits(59, 61) != 0)
+            int form = x.Bits(64, 96) & ~(0xf << 23);
+            SuDim dim = (SuDim)x.Bits(61, 64);
+            RedOp op = (RedOp)x.Bits(87, 91);
+            bool max64 = form == 0x0010e400 && op == RedOp.Max && dim == SuDim._2d &&
+                context.TranslatorContext.Options.Flags.HasFlag(TranslationFlags.MetalImageAtomics);
+
+            if ((form != 0x0010e000 && !max64) || x.Bits(59, 61) != 0)
             {
                 throw AFail(context, $"SURED form {x.Bits(64, 96):x8}");
             }
 
             (int handle, int cbufSlot) = ATexHandle(context, x);
 
-            EmitSured(context, (SuDim)x.Bits(61, 64), 0, (RedOp)x.Bits(87, 91), SuatomSize.U32, handle, x.Ra, x.Rb, 0, false, isBindless: false, cbufSlot: cbufSlot);
+            EmitSured(context, dim, Clamp.Ign, op, max64 ? SuatomSize.U64 : SuatomSize.U32,
+                handle, x.Ra, x.Rb, 0, false, isBindless: false, cbufSlot: cbufSlot);
         }
 
         // SUATOM Rd, [Ra], Rb (0x593): an atomic on an image through a handle, laid out as SUST's (handle 40..59, dimension 61..64) and as ATOMG's (operation

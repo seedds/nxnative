@@ -127,6 +127,9 @@ int own_note_at(uint64_t gen, uint64_t *serial);                 // the serial n
 typedef struct { uint32_t live, live_cap, ghost, retire_wait; uint64_t ghost_puts; } own_stats;
 own_stats own_stats_locked(void);
 void own_each_locked(void (^fn)(uint64_t serial, id o, int ghost));
+// Every entry, live or ghost, whose object gone() names goes (each serial noted, its ring slot freed, its object dropped as serial_del drops it); each(serial) is told of
+// each. The replay layer's eviction of idle uploaded textures at memory pressure (nvn_mtl.m pkg_evict_idle). → how many went
+uint32_t own_drop_where_locked(int (^gone)(id o), void (^each)(uint64_t serial));
 
 // ---- What the replay layer provides (nvn_mtl.m). Called with g_smu held
 void own_hook_drop(id o, int keep_resident);   // an object the owner lets go: released after the submission in flight (keep_resident: it stays in the residency set, as something else holds it)

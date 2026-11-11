@@ -306,6 +306,9 @@ t_ubp_running: t_ubp_running.m $(MTL_T_DEP)
 .PHONY: check_t_ubp_running
 check_t_ubp_running: t_ubp_running
 	./t_ubp_running
+t_pkg_evict: t_pkg_evict.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_pkg_evict.m $(MTL_T_SRC) $(FW)
+check_t_pkg_evict: RUN_ENV = MTL_DEBUG_LAYER=1
 t_pkg_spare: t_pkg_spare.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pkg_spare.m $(MTL_T_SRC) $(FW)
 check_t_pkg_spare: RUN_ENV = MTL_DEBUG_LAYER=1

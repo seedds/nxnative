@@ -6833,6 +6833,16 @@ static int treg_swizzle(const treg_t *r, MTLPixelFormat base_pf, int in_place, u
     }
     return need_sw;
 }
+// A game's own level range on a sparse package (sv_game_range): sparse_view binds the package from its first mapped level (vbase), and the game hides its unmapped levels itself
+// with a view whose base is the number of levels it has not mapped (the texture header's minimum mip level: PRAGMATA's streamed textures). That view is made from the package's
+// whole texture, from the later of the two bases to the end of the game's range. Applied on top of sparse_view's view, which already starts at vbase, the base counted twice:
+// PRAGMATA's streamed textures were sampled from level 2 instead of 1 (1024x512 ones from 4 instead of 2), a level or two too blurry. sparse_view stays the clamp for a texture
+// bound whole (Monster Hunter Rise). gb / gn: the game's base and count (0 = to the end); n: the texture's levels; a range wholly unmapped gives its last (smallest) level, as sparse_view's fallback
+static void sv_game_range(unsigned gb, unsigned gn, unsigned vbase, unsigned n, unsigned *l0, unsigned *nl) {
+    unsigned end = gn ? gb + gn : n; if (end > n) end = n;
+    unsigned a = gb > vbase ? gb : vbase; if (a >= end) a = end ? end - 1 : 0;
+    *l0 = a; *nl = end > a ? end - a : 1;
+}
 static id<MTLTexture> tex_by_id(int tid) {   // Caller holds g_rmu
     if (g_tpool_n && tid >= g_tpool_n) { if (!g_stat_tex_oob++) MLOG("texture ID %d outside the pool (capacity %d) treated as an empty slot: reads 0", tid, g_tpool_n); return nil; }
     if (tid < 0 || tid >= g_ntreg || !g_treg[tid].ok) { RED_ONCE(10, "texture ID %d not registered", tid); return nil; }
@@ -6850,7 +6860,17 @@ static id<MTLTexture> tex_by_id(int tid) {   // Caller holds g_rmu
         // cur is nil when the ID has no texture now (a gone texture not made again, a texture that could not be made): a cached base texture has no parent either, so nil == nil
         // used to keep the cached texture and mark it valid again, and the fast paths (tex_fast_rid) gave the pool tables its resource ID after the host had released it and dropped
         // its residency: GPU page faults in the shaders that sample it (docs/reference/rendering.md, "A texture ID with no texture kept its cached view")
-        if (cur && (cur == v || v.parentTexture == cur)) { rp->view_ser = sg; rp->view_dirty = dg; treg_pkg_stamp(rp, cur); return v; }
+        // A game view on a sparse package is made from the package's whole texture (sv_game_range), while cur is sparse_view's view of it (or the texture, all mapped): kept
+        // while it is a view of that texture starting where sparse_view's base now puts it (a re-upload that maps more levels moves sparse_view's base, and with it the view's)
+        int same = cur && (cur == v || v.parentTexture == cur);
+        if (cur && rp->has_v && rp->v.set_levels) {
+            id h = tex_get(rp->t.serial); NvPkg *pk = [h isKindOfClass:[NvPkg class]] ? h : nil;
+            if (pk && pk->sparse && pk->tex && v.parentTexture == pk->tex && (cur == pk->tex || cur == pk->view)) {
+                unsigned a, c; sv_game_range(rp->v.base_level, rp->v.nlevels, pk->view ? (unsigned)pk->vbase : 0, (unsigned)pk->tex.mipmapLevelCount, &a, &c);
+                same = v.parentRelativeLevel == a;
+            }
+        }
+        if (same) { rp->view_ser = sg; rp->view_dirty = dg; treg_pkg_stamp(rp, cur); return v; }
         defer_obj_unref(v); CFRelease(rp->view); rp->view = NULL; rp->view_rid = 0; v = nil;
     }
     treg_t r = *rp;
@@ -6884,6 +6904,13 @@ static id<MTLTexture> tex_by_id(int tid) {   // Caller holds g_rmu
             sg = treg_ep();
         }
         NSUInteger l0 = r.v.set_levels ? r.v.base_level : 0, nl = r.v.set_levels && r.v.nlevels ? r.v.nlevels : base.mipmapLevelCount - l0;
+        if (r.v.set_levels) {   // the game's own level range on a sparse package: from its whole texture, not stacked on sparse_view's view (sv_game_range)
+            id h = tex_get(rp->t.serial); NvPkg *pk = [h isKindOfClass:[NvPkg class]] ? h : nil;
+            if (pk && pk->sparse && pk->view && base == pk->view && pk->tex) {
+                unsigned a, c; sv_game_range(r.v.base_level, r.v.nlevels, (unsigned)pk->vbase, (unsigned)pk->tex.mipmapLevelCount, &a, &c);
+                base = pk->tex; l0 = a; nl = c;
+            }
+        }
         if (l0 >= base.mipmapLevelCount) { RED_ONCE(109, "texture view id %d starts at mip %lu beyond %lu levels", tid, (unsigned long)l0, (unsigned long)base.mipmapLevelCount); return nil; }
         // A level count past the texture's levels is cut to those it has, as deko3d's Tegra descriptor writer clips the maximum level (Echoes of Wisdom: levels 1 + 7 of a seven-level texture,
         // which Metal's validation refuses)

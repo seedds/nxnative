@@ -287,6 +287,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** a sparse texture is bound as a view starting at its first level whose pages, and those of every smaller level, are all mapped (`sparse_view` in `nvn_mtl.m`). That samples exactly as a minimum LOD would; the view follows each upload.
 - **Found on:** [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md).
 
+### A game's level range on a sparse texture counted from the first mapped level
+
+- **Symptom:** streamed textures a level or two blurrier than they should be while their finest levels are not mapped yet (PRAGMATA's suits and faces, the cabin's streamed textures), sharp again once every level is mapped.
+- **Cause:** the game hides its unmapped levels itself: it binds the texture through a view whose base level is the number of levels it has not mapped (the texture header's minimum mip level). `tex_by_id` made that view from what `tex_mtl` returned, which for a sparse texture is [`sparse_view`](#sparse-textures-bound-from-their-first-mapped-level)'s view, already starting at the first mapped level. The base counted twice: a texture with level 0 unmapped and a view from level 1 was sampled from level 2; a 1024x512 one with levels 0 and 1 unmapped and a view from level 2, from level 4.
+- **Fix:** a view the game sets levels on, over a sparse texture `sparse_view` clamps, is made from the whole texture, from the later of the game's base and `sparse_view`'s to the end of the game's range (`sv_game_range`; a range wholly unmapped gives its last level, as `sparse_view` does). A texture bound whole keeps `sparse_view`'s view. The cached view is kept while it still starts where that rule puts it, and is made again when an upload moves `sparse_view`'s base.
+- **Check:** `make -C dm/gfx/tests GAME=<id> check_t_sparse_view_game` (Metal validation): the rule's arithmetic, a game view from level 1 over a texture with level 0 unmapped (level 1 of the texture, 256 wide, not level 2), the texture bound whole, the cached view, and a view from level 0 that starts at level 1 and moves to level 0 once level 0 is mapped and uploaded. Before this, 3 of its 22 checks fail.
+- **Found on:** [PRAGMATA](../../dm/games/0400C76024710000/README.md): a trace of its sparse textures' binds showed its streamed textures bound from level 2 or 4 where the game's views asked for 1 or 2.
+
 ### Sampler reduction (min / max)
 
 - **Cause:** a sampler built with `SamplerBuilderSetReductionFilter` (min / max) was averaged by the host. Metal 26 has the same thing (`MTLSamplerDescriptor.reductionMode`), but ignores it with a nearest or no mip filter.

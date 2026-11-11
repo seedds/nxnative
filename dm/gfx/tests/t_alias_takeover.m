@@ -29,6 +29,7 @@ static int has(const alias_key *k) { return nvn_hm_get(&g_alias, k) != NULL; }
 static void next_submission(void) { CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "submission completes"); mtl_sub_begin(); }
 
 int main(void) { @autoreleasepool {
+    setenv("DM_NVN_ALIAS_IDLE", "16", 1);
     mtl_init(); mtl_sub_begin();
     tex_t a = tex(91001, NVN_FORMAT_RGBA8, 64), b = tex(91002, NVN_FORMAT_R32F, 64), c = tex(91003, NVN_FORMAT_RG16F, 64);
     mtl_tex_init(&a); mtl_tex_init(&b); mtl_tex_init(&c);
@@ -135,5 +136,6 @@ int main(void) { @autoreleasepool {
     }
     mtl_tex_release(&b); mtl_tex_release(&c);
     next_submission(); defer_drain();
+
     printf("t_alias_takeover: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

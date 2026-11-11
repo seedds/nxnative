@@ -147,7 +147,14 @@ def read_index(img):   # for tests and checks: {guest path: (is dir, offset, siz
 # File names that promise a format, and the first bytes that format starts with. A file whose name promises one and whose bytes start with none of its heads is damaged:
 # a NUP or a dump folder carries no NCA hashes, so this is the check its extraction has. A zstd stream starts with a frame (28 b5 2f fd) or a skippable frame (5? 2a 4d 18).
 # Found on a NUP of Ocarina of Time whose three .zs textures began with 12,288 zero bytes: the game asked for one again on every pass of its background loader (PR #1530).
-FORMAT_HEADS = {'.zs': ((b'\x28\xb5\x2f\xfd', b'\xff\xff\xff\xff'), (b'\x50\x2a\x4d\x18', b'\xf0\xff\xff\xff'))}   # suffix: ((bytes, mask), ...)
+FORMAT_HEADS = {   # suffix: ((bytes, mask), ...)
+    '.zs': ((b'\x28\xb5\x2f\xfd', b'\xff\xff\xff\xff'), (b'\x50\x2a\x4d\x18', b'\xf0\xff\xff\xff')),
+    '.extm': ((b'TARB', b'\xff\xff\xff\xff'),),
+    '.hght': ((b'TARB', b'\xff\xff\xff\xff'),),
+    '.mate': ((b'TARB', b'\xff\xff\xff\xff'),),
+    '.bgyml': ((b'YB\x07\x00', b'\xff\xff\xff\xff'), (b'BY\x00\x07', b'\xff\xff\xff\xff')),
+    '.bwav': ((b'BWAV', b'\xff\xff\xff\xff'),),
+}
 
 
 def format_mismatches(img, progress=None):   # [(guest path, size, first 4 bytes)] of the image's files whose bytes do not start as their name promises (FORMAT_HEADS); empty files are left out. progress(done, total): every 4,096 files

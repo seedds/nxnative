@@ -22,6 +22,13 @@ static void run(sim *m, int n, double w, int kmin, int kmax, int fixed) {
 // frames among frames on time are paid back by the step and keep hold 1 (below)
 static void hitch(sim *m) { run(m, 6, 1.6, 1, 3, 0); }
 
+// Frames of work w, every sixth taking spike, until the hold changes or n frames have run; returns the frames run
+static int run_spiked(sim *m, int n, double w, double spike) {
+    int k = m->s.k, i = 0;
+    for (; i < n && m->s.k == k; i++) run(m, 1, i % 6 == 5 ? spike : w, 1, 3, 0);
+    return i;
+}
+
 int main(void) {
     {   // 120 fps (hle_nvn.c fps_high): kmin 1, kmax 2, in ticks of 1/120 s. The target follows the hold, so a hold above what frames take is the game at the right speed
         sim m = {0}; m.s.per_vsync = 2; m.s.no_payback = 1;
@@ -341,6 +348,33 @@ int main(void) {
             snprintf(b, sizeof b, what[c], at1, m.game, m.real, (unsigned long long)m.s.probes);
             check(at1 < 100 && gap >= FSTEP_HOLD_MAX && m.real - m.game - m.s.debt > -1.01 && m.real - m.game - m.s.debt < 1.01, b);
         }
+    }
+    // Ocarina of Time on an M4: 26 ms frames at hold 3 with a 30 ms p95, over the fit of 1.7 vsyncs (28.3 ms)
+    const double scene = 1.56, over_fit = 1.8, past_leak = 1.9, streaming = 2.7; // 26, 30, 31.7 and 45 ms
+    {   sim m = {0}; run(&m, 60, 0.5, 1, 3, 0); run(&m, 3, 3.5, 1, 3, 0);
+        int frames = run_spiked(&m, 3000, scene, over_fit);
+        snprintf(b, sizeof b, "hold 3, one frame in six just over the fit: hold 2 after %d frames (k %d)", frames, m.s.k);
+        check(m.s.k == 2 && frames < 120, b);
+        run(&m, 600, scene, 1, 3, 0);
+        check(m.s.k == 2 && m.s.failed == 0, "  and hold 2 holds");
+    }
+    {   sim m = {0}; run(&m, 60, 0.5, 1, 3, 0); run(&m, 3, 3.5, 1, 3, 0);
+        run_spiked(&m, 3000, scene, past_leak);
+        snprintf(b, sizeof b, "  one frame in six past FSTEP_LEAK: hold 3 stays (k %d, downs %llu)", m.s.k, (unsigned long long)m.s.downs);
+        check(m.s.k == 3 && m.s.downs == 0, b);
+    }
+    {   // a probe from hold 2 that fails on a 45 ms streaming frame
+        sim m = {0}; run(&m, 60, 0.5, 1, 3, 0); run(&m, 3, 1.6, 1, 3, 0);
+        m.slow = 1;   // a slowed report starts a probe
+        for (int i = 0; i < 600 && m.s.probe != 1; i++) run(&m, 1, scene, 1, 3, 0);
+        check(m.s.probe == 1 && m.s.k == 1, "a probe from hold 2 starts at hold 1");
+        for (int i = 0; i < 600 && m.s.probe == 1; i++) run(&m, 1, m.s.late_run == 2 ? streaming : scene, 1, 3, 0);
+        snprintf(b, sizeof b, "  it fails on a 45 ms frame: back to hold 2, the hold it left (k %d, failed %llu)", m.s.k, (unsigned long long)m.s.failed);
+        check(m.s.k == 2 && m.s.failed == 1, b);
+    }
+    {   sim m = {0}; run(&m, 60, 0.5, 1, 3, 0); run(&m, 4, 1.8, 1, 3, 0);   // four 30 ms frames: 3.2 of the 3.0 vsyncs short_of_k needs, to hold 2
+        run(&m, 5, streaming, 1, 3, 0);   // then five 45 ms frames at hold 2: 3.5, to hold 3
+        check(m.s.k == 3 && m.s.probes == 0, "  without a probe, four 30 ms frames then five 45 ms step 1 → 2 → 3");
     }
     {   // 165 Hz with virtual ticks (nvn_mtl.m link_range): cheap frames show on the refreshes nearest their slots, 12.1 / 18.2 ms at hold 1, 30.3 / 36.4 at 2, 48.5 / 54.5 at 3
         for (int sl = 1; sl >= 0; sl--) {

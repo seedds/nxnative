@@ -93,6 +93,13 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md#the-frame-step-current) (Mac M5 Pro, fullscreen, present snapshots, the host's profiler); resolved there: in a 470 s run with the rule switched every 30 s, every probe with it held (11 in a row).
 - **Note:** what shortens the serial chain itself, so the GPU's occupancy at a GPU-bound hold is higher and the clock rises faster: Metal encoding on its own thread (`DM_NVN_ENC_THREAD=1`, the profile's `enc_thread on`; the submit thread's translation 6.5 → about 4 ms a frame, measured on an M4 Pro and for Need for Speed), and a smaller first segment. Neither can start the GPU before the game's own work after its wait, and neither was measured on this symptom yet.
 
+### The frame step holds 20 fps where 30 fits
+
+- **Symptom:** a game at `fps_target 60` holds 20 fps (frame p50 49.8 ms) for seconds to minutes while its GPU time fits 30 (GPU p50 19–26 ms in `[nvn] timing up to frame …`).
+- **Cause:** in `nvn_fstep_next`, any frame over the fit (`FSTEP_FIT` of k − 1, 28.3 ms at hold 3) restarted the run of 30 fits that starts a trial, so a scene at 26 ms with a 30 ms p95 rarely tried hold 2. And a failed probe stepped up to its third late frame's cost, so one 45 ms frame sent a probe from hold 2 to hold 3.
+- **Fix:** a frame within `FSTEP_LEAK` (1.08) of the fit shortens the run instead of restarting it, and a failed probe goes back to the hold it left (`probe_from`). Same route and settings, one run each: 20 fps 13% → 8% of the time, and 3 of 4 stretches at 20 fps ended by the trial to 30 (1 of 6 before).
+- **Check:** `make -C dm/gfx/tests GAME=0400486024DEC000 t_fstep && dm/gfx/tests/t_fstep`.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) (Mac M4). Open: a probe that held but fell back within 8s still steps up to its frame's cost; most probes there fail, as a heavier scene looks like a slowed GPU.
 
 ### A derived profile drops the frame step its build lacks
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # The compile cache as one file (dm/tools/shader_cache.py): entries in and out, bytes stored once, several threads and processes, a damaged file, pruning, and taking in a cache from before it.
-import contextlib, os, sqlite3, subprocess, sys, tarfile, tempfile, threading, time, unittest
+import contextlib, json, os, sqlite3, subprocess, sys, tarfile, tempfile, threading, time, unittest
 from unittest import mock
 from pathlib import Path
 
@@ -240,6 +240,60 @@ class CompressedPrune(Prune):
 
 
 class Maintenance(Base):
+    def test_opt_in_compression_metrics_include_sizes_workers_and_stages(self):
+        self.fill(); before = self.snapshot()
+        with mock.patch.dict(os.environ, {'DM_SHADER_CACHE_COMPRESSION_METRICS': '1'}):
+            shader_cache.maintain(self.path, compress=True, workers=2, say=self.said.append)
+        prefix = 'shader cache compression metrics: '
+        metrics, = [json.loads(line[len(prefix):]) for line in self.said if line.startswith(prefix)]
+        self.assertEqual(metrics['raw_payload_bytes'], sum(len(row[2]) for row in before[0]))
+        self.assertEqual(metrics['blob_count'], len(before[0]))
+        with contextlib.closing(sqlite3.connect(self.path)) as db:
+            encoded, = db.execute('SELECT sum(length(data)) FROM _blob_zstd').fetchone()
+        self.assertEqual(metrics['compressed_payload_bytes'], encoded)
+        self.assertEqual(metrics['payload_bytes_saved'], metrics['raw_payload_bytes'] - encoded)
+        self.assertAlmostEqual(metrics['payload_compression_ratio'], metrics['raw_payload_bytes'] / encoded, places=5)
+        self.assertEqual(metrics['workers_requested'], 2)
+        self.assertGreater(metrics['batch_count'], 1)
+        self.assertGreater(metrics['workers_used'], 0)
+        for name in ('worker_result_wait_s', 'blob_inserts_s', 'entry_copy_s', 'commit_s', 'output_setup_s',
+                     'batch_boundary_reads_s', 'source_checkpoint_and_install_s', 'worker_cpu_s', 'worker_busy_wall_s'):
+            self.assertGreaterEqual(metrics[name], 0)
+        self.assertEqual(metrics['database_after_bytes'], self.path.stat().st_size)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_compression_metrics_default_off_and_empty_cache(self):
+        self.store.close()
+        with mock.patch.dict(os.environ, {'DM_SHADER_CACHE_COMPRESSION_METRICS': '0'}):
+            shader_cache.maintain(self.path, compress=True, say=self.said.append)
+        self.assertFalse(any('compression metrics:' in line for line in self.said))
+        shader_cache.maintain(self.path, decompress=True, say=self.said.append)
+        with mock.patch.dict(os.environ, {'DM_SHADER_CACHE_COMPRESSION_METRICS': '1'}):
+            shader_cache.maintain(self.path, compress=True, say=self.said.append)
+        prefix = 'shader cache compression metrics: '
+        metrics, = [json.loads(line[len(prefix):]) for line in self.said if line.startswith(prefix)]
+        self.assertEqual(metrics['blob_count'], 0)
+        self.assertEqual(metrics['batch_count'], 0)
+        self.assertIsNone(metrics['payload_compression_ratio'])
+        self.assertEqual(metrics['average_active_worker_jobs'], 0)
+
+    def test_compression_writes_ready_batch_before_unfinished_oldest(self):
+        first, ready = shader_cache.cf.Future(), shader_cache.cf.Future()
+        first.result = mock.Mock(side_effect=AssertionError('waited for oldest batch'))
+        rows = [(2, b'hash', b'encoded')]; ready.set_result(rows)
+        source, cursor, out = mock.Mock(), mock.MagicMock(), mock.MagicMock()
+        source.execute.return_value = cursor
+        cursor.fetchone.side_effect = [(1, 8 * 1024**2), (2, 8 * 1024**2), None]
+        def observe(sql, batch):
+            self.assertEqual(batch, rows)
+            raise RuntimeError('observed ready batch')
+        out.executemany.side_effect = observe
+        with mock.patch.object(shader_cache.sqlite3, 'connect', return_value=out), mock.patch.object(shader_cache, '_load_zstd'), mock.patch.object(shader_cache.cf, 'ThreadPoolExecutor') as executor:
+            executor.return_value.__enter__.return_value.submit.side_effect = [first, ready]
+            with self.assertRaisesRegex(RuntimeError, 'observed ready batch'):
+                shader_cache._compressed_copy(source, str(self.path), str(self.path) + '.compressed.part', 2)
+        first.result.assert_not_called()
+
     def test_initial_compression_skips_reclamation_and_handles_sparse_ids(self):
         self.fill()
         with contextlib.closing(sqlite3.connect(self.path)) as db, db:

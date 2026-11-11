@@ -444,6 +444,14 @@ python3 scripts/compress_shader_cache.py "<title ID>_build"
 python3 scripts/compress_shader_cache.py "<title ID>_build" --decompress
 ```
 
+For an initial raw-to-compressed conversion, set `DM_SHADER_CACHE_COMPRESSION_METRICS=1` to add one `shader cache compression metrics:` JSON summary to the normal log. The same environment setting works with the build script. It is off by default and does not add quality scans or files:
+
+```sh
+DM_SHADER_CACHE_COMPRESSION_METRICS=1 python3 scripts/compress_shader_cache.py "<title ID>_build"
+```
+
+The summary includes unique blob and batch counts, raw/compressed payload bytes, compression ratio (`raw / compressed`), payload bytes saved, and actual database logical/allocated sizes. It also reports stage durations, requested/used workers, per-worker batch-count bounds, aggregate worker CPU and busy wall time, average active jobs, and completion-order bypasses. Worker time overlaps coordinator time; those values must not be added together. `average_worker_cpu_cores` is aggregate worker CPU seconds divided by the worker-phase elapsed time, not active-job count. This summary covers initial compression; decompression and incremental maintenance do not emit it.
+
 Conversion reports busy immediately while another build uses the cache. Reversal needs temporary space for a complete raw database; failure keeps the source. A failed optional compression/reclamation step warns and keeps successful game outputs. The bundled universal extension is `dm/tools/sqlite_zstd_bin/libsqlite_zstd.dylib`; only rebuilding that tool needs Rust through rustup and Xcode (`dm/tools/sqlite_zstd_bin/build.sh <scratch-folder>`). Python must support SQLite extension loading. Older checkouts cannot read compressed caches: reverse before giving one to historical tools, including regression baselines, and stop old tools or direct SQLite clients before conversion because they do not honor the new ownership lock. See [Compile-cache compression](reference/packing.md#the-compile-cache-keeps-uncompressed-build-artifacts) for storage, maintenance and recovery details.
 
 

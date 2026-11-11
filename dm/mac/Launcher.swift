@@ -19,28 +19,35 @@ struct LauncherView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 12) {
-                Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 64, height: 64).accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(info("CFBundleName") ?? "Game").font(.title2.weight(.semibold))
-                    Text("Version \(info("CFBundleShortVersionString") ?? "1.0")").foregroundStyle(.secondary)
+            // The header takes the title bar's place, beside the close buttons (the window draws no title bar of its own: fullSizeContentView, hidden title), so the settings start higher
+            HStack(spacing: 10) {
+                Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 40, height: 40).accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(info("CFBundleName") ?? "Game").font(.headline)
+                    Text(version).font(.subheadline).foregroundStyle(.secondary)
                 }
                 Spacer()
             }
-            .padding([.horizontal, .top], 20)
+            .padding(.leading, 70).padding(.trailing, 20).padding(.top, 8).padding(.bottom, 4)
             Form {
                 settingSections(basic: true)
                 CloudSavesSection()
-                Section {
-                    DisclosureGroup("Advanced settings", isExpanded: $advanced) {}
-                }
-                if advanced {
-                    settingSections(basic: false)
-                    Section {
-                        Button("Reset to tested defaults") { m.reset() }
-                            .disabled(!m.changed)
-                    } footer: {
-                        Text("Brings back all settings this game was tested with.")
+                Section {   // the advanced settings open inside their own card, under the row that opens them: each section as a heading over its rows, then the reset (issue #874)
+                    DisclosureGroup("Advanced settings", isExpanded: $advanced) {
+                        ForEach(m.sections(basic: false), id: \.self) { section in
+                            let rows = m.rows(in: section, basic: false)
+                            if !rows.isEmpty {
+                                Text(section).font(.headline).frame(maxWidth: .infinity, alignment: .leading).padding(.top, 8).padding(.bottom, 2)
+                                ForEach(rows) { SettingRow(s: $0, m: m) }
+                            }
+                        }
+                        LabeledContent {
+                            Button("Reset to tested defaults") { m.reset() }
+                                .disabled(!m.changed)
+                        } label: {
+                            Text("Brings back all settings this game was tested with.").font(.footnote).foregroundStyle(.secondary)
+                        }
+                        .padding(.top, 4)
                     }
                 }
             }
@@ -59,6 +66,11 @@ struct LauncherView: View {
             .padding(20)
         }
         .frame(minWidth: 520, idealWidth: 560)
+    }
+
+    private var version: String {   // the game's version and the nxnative checkout that packed the app (Info.plist DMCommit, from pack_app.py: scripts/bug_report.py reads the same key, and a bug report needs it)
+        let v = "Version \(info("CFBundleShortVersionString") ?? "1.0")"
+        return info("DMCommit").map { "\(v) · nxnative \($0)" } ?? v
     }
 
     @ViewBuilder private func settingSections(basic: Bool) -> some View {
@@ -131,8 +143,9 @@ private final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate 
         app.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         app.addItem(withTitle: "Quit \(name)", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         item.submenu = app; menu.addItem(item); NSApp.mainMenu = menu
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 660), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 660), styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
         w.title = name; w.isReleasedWhenClosed = false; w.delegate = self
+        w.titlebarAppearsTransparent = true; w.titleVisibility = .hidden; w.isMovableByWindowBackground = true   // the view's header stands where the title bar was (issue #874); the title stays for the Window menu and accessibility
         w.contentMinSize = NSSize(width: 520, height: 0)
         window = w
         if let screen = w.screen ?? NSScreen.main {

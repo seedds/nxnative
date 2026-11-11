@@ -272,6 +272,9 @@ static void ws_report(uint64_t frame, uint64_t frames) {
     MLOG("[waits] up to frame %llu, per frame:%s", (unsigned long long)frame, o ? line : " none");
 }
 #include "nvn_rec.h"   // deferred encoding (DM_NVN_ENC_THREAD)
+#define FG_PART 0
+#include "nvn_framegen.inc"   // scratch: frame generation (DM_FRAMEGEN)
+#undef FG_PART
 static NSHashTable *g_res_objects;
 static _Atomic unsigned g_image_heap_n, g_big_n;   // g_big_n: large pools in chunks, whose buffers overlap (BIG_MIN)
 static inline MTL4VisibilityOptions resource_vis(void) { return MTL4VisibilityOptionDevice | (g_image_heap_n || g_big_n ? MTL4VisibilityOptionResourceAlias : 0); }
@@ -11088,6 +11091,7 @@ static uint64_t cbuf_slot(NvShader *sh, int nvn_stage, const nvn_rbind *b, __str
         uint64_t g; const uint8_t *c; if (ubd_covers(u->addr, u->addr + ul)) gpu = ubd_shadow(u->addr, u->addr + ul);
         else if (ubp_get(u->addr, u->addr + ul, &g, &c)) gpu = g;
         else RED_ONCE(92, "a uniform update deferred inside the pass covers only part of the binding (stage %d cb%d): the content before the update is read", nvn_stage, reg); }
+    if (g_fg_mode && nvn_stage == 0 && reg == 0 && u->size == 13568) fg_cam_note((const float *)u->addr);   // scratch (DM_FRAMEGEN): Ocarina of Time's camera block
     return gpu;
 }
 // The uniform slots' bound sizes (DMSH_CBSIZE_BANK), which the translator's reads at computed offsets compare with: one past its slot's size, rounded up to 256 bytes (ub_bound), gives 0, as on Maxwell. 0 for an unbound slot,
@@ -14530,6 +14534,12 @@ static void dispatch(const p_dispatch *dp) {
     rp_flush();   // A full clear with no draw after it waits for the next pass on its targets, but it comes before this dispatch, which may read or write them as images: land it first, as copy_t2t does
     image_prepare(prog_get(S.cprog), 0x20);
     if (ndve_engine_dispatch(cs, dp)) return;   // nn::ndve's movie network as the host's kernels (DM_NDVE_ENGINE=1)
+    {   // DM_NVN_SKIP_CS=<compute key>[,…] (diagnostic, up to 16): drops the dispatches of those compute shaders, to measure what one costs inside an encoder that holds several; what it writes stays stale
+        static char sk[16][20]; static int nsk = -1;
+        if (nsk < 0) { nsk = 0; for (const char *q = getenv("DM_NVN_SKIP_CS"); q && *q && nsk < 16; q = strchr(q, ',') ? strchr(q, ',') + 1 : q + strlen(q)) { size_t n = strcspn(q, ","); if (n > 16) n = 16; memcpy(sk[nsk], q, n); sk[nsk++][n] = 0; }
+                       if (nsk) MLOG("DM_NVN_SKIP_CS: dropping the dispatches of %d compute shaders (diagnostic; the picture is wrong)", nsk); }
+        for (int i = 0; i < nsk; i++) if (!strncmp(cs->key, sk[i], strlen(sk[i]))) return;
+    }
     if (up_mfx_wanted(cs) && !dp->ind && up_mfx_encode(cs)) return;   // the game's upscaler, drawn by MetalFX instead (DM_UPSCALER=metalfx)
     // Threadgroup memory past Metal's 32 KB, in a device buffer (dmsh_rewrite.py tg_spill): a slice for every workgroup of the grid. An indirect dispatch's grid is in GPU memory, written earlier
     // in the frame: the replay waits for the GPU (as an indirect-count multi-draw does, mdi_wait) and reads it. Mario Kart World's spilled dispatches are all direct, of 1 to 3 workgroups
@@ -14764,31 +14774,34 @@ static int fmt_int_or_ds(MTLPixelFormat f) {
         default: return 0;
     }
 }
+enum { COPY_DRAW_UP = 1 << 30 };   // in mirror, beside NVN's MIRROR bits: drawn by copy.metal fsup with g_copy_up's parameters, bilinear
+static struct { float mix, square; __unsafe_unretained id<MTLTexture> t1; } g_copy_up;   // set by up_mfx_encode around each such copy
 static int copy_t2t_draw(id<MTLTexture> s, id<MTLTexture> d, unsigned sl, unsigned ss, unsigned dl, unsigned ds, const NVNcopyRegion *sr, const NVNcopyRegion *dr, int linear, int mirror) {
-    static NSMutableDictionary<NSNumber *, id<MTLRenderPipelineState>> *pso; static id<MTLFunction> vf, ff, fd, fds; static id<MTLSamplerState> samp[2]; static id<MTL4ArgumentTable> at; static id<MTLDepthStencilState> dss, dss_s; static int failed;
+    static NSMutableDictionary<NSNumber *, id<MTLRenderPipelineState>> *pso; static id<MTLFunction> vf, ff, fd, fds, fup; static id<MTLSamplerState> samp[2]; static id<MTL4ArgumentTable> at; static id<MTLDepthStencilState> dss, dss_s; static int failed;
     if (failed || sr->width <= 0 || sr->height <= 0 || dr->width <= 0 || dr->height <= 0) return 0;
     int depth = (s.pixelFormat == MTLPixelFormatDepth32Float || s.pixelFormat == MTLPixelFormatDepth32Float_Stencil8 || s.pixelFormat == MTLPixelFormatDepth16Unorm) && d.pixelFormat == s.pixelFormat, stencil = depth && d.pixelFormat == MTLPixelFormatDepth32Float_Stencil8;
     if (!depth && (fmt_int_or_ds(s.pixelFormat) || fmt_int_or_ds(d.pixelFormat))) return 0;
     if (mtl_fmt_block(d.pixelFormat) || !(d.usage & MTLTextureUsageRenderTarget) || s.sampleCount > 1 || d.sampleCount > 1) return 0;
     if (!pso) {
         NSError *e = nil; id<MTLLibrary> lib = host_lib("copy", &e);
-        vf = [lib newFunctionWithName:@"vs"]; ff = [lib newFunctionWithName:@"fs"]; fd = [lib newFunctionWithName:@"fsd"]; fds = [lib newFunctionWithName:@"fsds"];
+        vf = [lib newFunctionWithName:@"vs"]; ff = [lib newFunctionWithName:@"fs"]; fd = [lib newFunctionWithName:@"fsd"]; fds = [lib newFunctionWithName:@"fsds"]; fup = [lib newFunctionWithName:@"fsup"];
         MTLDepthStencilDescriptor *dd = [MTLDepthStencilDescriptor new]; dd.depthCompareFunction = MTLCompareFunctionAlways; dd.depthWriteEnabled = YES; dss = [g_dev newDepthStencilStateWithDescriptor:dd];
         MTLStencilDescriptor *sd_ = [MTLStencilDescriptor new]; sd_.stencilCompareFunction = MTLCompareFunctionAlways; sd_.depthStencilPassOperation = MTLStencilOperationReplace;   // Replace writes the [[stencil]] output
         dd.frontFaceStencil = dd.backFaceStencil = sd_; dss_s = [g_dev newDepthStencilStateWithDescriptor:dd];
         MTL4ArgumentTableDescriptor *ad = [MTL4ArgumentTableDescriptor new]; ad.maxTextureBindCount = 2; ad.maxSamplerStateBindCount = 1; ad.maxBufferBindCount = 1; at = rec_table([g_dev newArgumentTableWithDescriptor:ad error:&e]);
         for (int i = 0; i < 2; i++) { MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new]; sd.minFilter = sd.magFilter = i ? MTLSamplerMinMagFilterLinear : MTLSamplerMinMagFilterNearest;
             sd.sAddressMode = sd.tAddressMode = MTLSamplerAddressModeClampToEdge; sd.supportArgumentBuffers = YES; samp[i] = [g_dev newSamplerStateWithDescriptor:sd]; }
-        if (!vf || !ff || !fd || !fds || !dss || !dss_s || !at || !samp[0] || !samp[1]) { failed = 1; MLOG("[RED] cannot create the pipelines for format-converting / scaling texture copies: %s", e.localizedDescription.UTF8String); return 0; }
+        if (!vf || !ff || !fd || !fds || !fup || !dss || !dss_s || !at || !samp[0] || !samp[1]) { failed = 1; MLOG("[RED] cannot create the pipelines for format-converting / scaling texture copies: %s", e.localizedDescription.UTF8String); return 0; }
         pso = [NSMutableDictionary dictionary];
     }
     // Stencil: read through a stencil-only view of the source (one per layer below); without one it is cleared to 0
     id<MTLTexture> stv0 = stencil && s.pixelFormat == MTLPixelFormatDepth32Float_Stencil8 ? [s newTextureViewWithPixelFormat:MTLPixelFormatX32_Stencil8 textureType:MTLTextureType2D levels:NSMakeRange(sl, 1) slices:NSMakeRange(ss + sr->zoffset, 1)] : nil;
     int scopy = stv0 != nil;
-    NSNumber *pk = @(d.pixelFormat * 2 + scopy);
+    int up = !depth && !!(mirror & COPY_DRAW_UP);
+    NSNumber *pk = @(d.pixelFormat * 4 + scopy + 2 * up);
     id<MTLRenderPipelineState> ps = pso[pk];
     if (!ps) {
-        MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new]; pd.vertexFunction = vf; pd.fragmentFunction = depth ? (scopy ? fds : fd) : ff;
+        MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new]; pd.vertexFunction = vf; pd.fragmentFunction = depth ? (scopy ? fds : fd) : up ? fup : ff;
         if (depth) { pd.depthAttachmentPixelFormat = d.pixelFormat; if (stencil) pd.stencilAttachmentPixelFormat = d.pixelFormat; } else pd.colorAttachments[0].pixelFormat = d.pixelFormat;
         NSError *e = nil; ps = [g_dev newRenderPipelineStateWithDescriptor:pd error:&e];
         if (!ps) { RED_ONCE(83, "format-converting / scaling texture copy: cannot create the pipeline for destination format %lu: %s", (unsigned long)d.pixelFormat, e.localizedDescription.UTF8String); return 0; }
@@ -14800,12 +14813,14 @@ static int copy_t2t_draw(id<MTLTexture> s, id<MTLTexture> d, unsigned sl, unsign
     rp_end(); if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
     for (int z = 0; z < nz; z++) {
         id<MTLTexture> sv = [s newTextureViewWithPixelFormat:s.pixelFormat textureType:MTLTextureType2D levels:NSMakeRange(sl, 1) slices:NSMakeRange(ss + sr->zoffset + z, 1)];
-        id<MTLBuffer> pb; size_t po = arena_alloc(32, &pb);   // parameters in the frame arena (resident already): a fresh 32-byte buffer per copy was a residency add, a commit and a release (Link's Awakening, about 11 a frame)
+        id<MTLBuffer> pb; size_t po = arena_alloc(48, &pb);   // parameters in the frame arena (resident already): a fresh 32-byte buffer per copy was a residency add, a commit and a release (Link's Awakening, about 11 a frame)
         if (!sv || !pb) { RED_ONCE(84, "format-converting / scaling texture copy: cannot create the source view / argument block"); return z > 0; }
         float *p = (float *)((uint8_t *)pb.contents + po); p[0] = sr->xoffset; p[1] = sr->yoffset; p[2] = (float)sr->width / dr->width; p[3] = (float)sr->height / dr->height;
         if (mirror & NVN_COPY_FLAGS_MIRROR_X_BIT) { p[0] += sr->width; p[2] = -p[2]; }   // mirrored: walk the source region from its far edge
         if (mirror & NVN_COPY_FLAGS_MIRROR_Y_BIT) { p[1] += sr->height; p[3] = -p[3]; }
         p[4] = dr->xoffset; p[5] = dr->yoffset; p[6] = sw; p[7] = sh;
+        id<MTLTexture> t1 = up ? g_copy_up.t1 : nil;
+        p[8] = t1 ? g_copy_up.mix : 0; p[9] = up ? g_copy_up.square : 0; p[10] = 1.0f / sr->width; p[11] = 1.0f / sr->height;
         MTL4RenderPassDescriptor *rp = [MTL4RenderPassDescriptor new];
         MTLRenderPassAttachmentDescriptor *a = depth ? (MTLRenderPassAttachmentDescriptor *)rp.depthAttachment : (MTLRenderPassAttachmentDescriptor *)rp.colorAttachments[0];
         int whole = !dr->xoffset && !dr->yoffset && (unsigned)dr->width == dw && (unsigned)dr->height == dh;   // the copy draws every pixel of the level (no blending, no discard): its old content is not loaded (Link's Awakening copies its scene this way every frame)
@@ -14815,7 +14830,7 @@ static int copy_t2t_draw(id<MTLTexture> s, id<MTLTexture> d, unsigned sl, unsign
         ser_gate(); id<MTL4RenderCommandEncoder> en = enc_r_begin(rp);
         if (depth) [en setDepthStencilState:scopy ? dss_s : dss];
         [en setArgumentTable:at atStages:MTLRenderStageFragment];
-        [at setTexture:sv.gpuResourceID atIndex:0]; if (stv) [at setTexture:stv.gpuResourceID atIndex:1]; [at setSamplerState:samp[!!linear && !depth].gpuResourceID atIndex:0]; [at setAddress:pb.gpuAddress + po atIndex:0];
+        [at setTexture:sv.gpuResourceID atIndex:0]; if (stv) [at setTexture:stv.gpuResourceID atIndex:1]; if (up) [at setTexture:(t1 ?: sv).gpuResourceID atIndex:1]; [at setSamplerState:samp[(!!linear || up) && !depth].gpuResourceID atIndex:0]; [at setAddress:pb.gpuAddress + po atIndex:0];
         [en setViewport:(MTLViewport){dr->xoffset, dr->yoffset, dr->width, dr->height, 0, 1}];
         [en setScissorRect:(MTLScissorRect){(NSUInteger)dr->xoffset, (NSUInteger)dr->yoffset, (NSUInteger)dr->width, (NSUInteger)dr->height}];
         [en setRenderPipelineState:ps]; [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; enc_r_end(en);
@@ -15754,6 +15769,7 @@ static void td_dump(void);
 // DM_NVN_TEXDUMP=size=WxH:path instead picks the frame by content: the first frame that opens a render pass whose first color attachment level is WxH (for one-off work whose frame differs between runs)
 static unsigned g_td_w, g_td_h;
 void td_note(MTL4RenderPassDescriptor *pd, NSUInteger nc) {
+    fg_depth_note(pd);   // scratch (DM_FRAMEGEN)
     if (g_td_frame == -2) { const char *e = getenv("DM_NVN_TEXDUMP"), *c = e ? strchr(e, ':') : NULL; g_td_frame = c ? atol(e) : -1; g_td_path = c ? c + 1 : NULL; g_td_list = [NSMutableArray array];
         if (c && !strncmp(e, "size=", 5) && sscanf(e + 5, "%ux%u", &g_td_w, &g_td_h) == 2) g_td_frame = LONG_MAX;
         if (c && !strncmp(e, "layers=", 7)) { g_td_layers = atoi(e + 7); g_td_frame = (long)atomic_load(&g_cur_frame); } }
@@ -16162,7 +16178,7 @@ static int up_mfx_on(void) {
 // Bananza's all encode linear input (0.0031308, 1 / 2.4 as floats) and come in threes: no decode at the end (the output stays encoded), a decode clamped to 0-1, a decode up to 128. Splatoon Raiders' all read colour that is encoded
 // already and come in twos: no decode, a decode clamped to 0-1 (as half floats: 0.04045, 2.4 and 1 / 12.92 rounded to 0.0404358, 2.3984375 and 0.0774536). Only the variants with linear output are drawn, in these two shapes; a variant
 // with encoded output, or any other shape (no pack has shown one), keeps the game's shader. A constant counts from 8 uses, far fewer than a curve per channel of every output tile: two bytes also match by chance
-enum { UP_COLOR_UNREAD, UP_COLOR_LINEAR, UP_COLOR_SRGB, UP_COLOR_KEEP };   // linear in and out: HDR mode; sRGB in, linear out: perceptual mode, then decoded; UP_COLOR_KEEP, UP_COLOR_UNREAD: the game's shader
+enum { UP_COLOR_UNREAD, UP_COLOR_LINEAR, UP_COLOR_SRGB, UP_COLOR_KEEP, UP_COLOR_SQRT };   // linear in and out: HDR mode; sRGB in, linear out: perceptual mode, then decoded; square-root input, linear out: squared into the scaler's input, HDR mode; UP_COLOR_KEEP, UP_COLOR_UNREAD: the game's shader
 static int up_mfx_uses(const void *code, size_t n, const void *v, size_t w) {
     const uint8_t *p = code, *end = p + n; int hits = 0;
     while (hits < 8 && (p = memmem(p, end - p, v, w))) { hits++; p += w; }
@@ -16182,8 +16198,26 @@ static int up_mfx_named(NvShader *cs) {
     for (const char *k = DM_GAME_UPSCALER_KEYS; *k; k += k[16] == ',' ? 17 : 16) if (!strncmp(k, cs->key, 16)) return 1;
     return 0;
 }
+// A third shape has no constant to find: agl_ndsr_vr_light.pck's upscale step (Ocarina of Time) samples colour the dispatch before it stored as square roots (HDR, packed as RGB9E5) and writes
+// v * |v|, linear. The profile names such shaders (upscaler_sqrt, DM_GAME_UPSCALER_SQRT_KEYS), read from their translated code
+static int up_mfx_sqrt_named(NvShader *cs) {
+    for (const char *k = DM_GAME_UPSCALER_SQRT_KEYS; *k; k += k[16] == ',' ? 17 : 16) if (!strncmp(k, cs->key, 16)) return 1;
+    return 0;
+}
+// How much of MetalFX's own picture the game's image gets (DM_UPSCALER_SHARPNESS, the launcher's Game's upscaler sharpness; the profile's upscaler_sharpness when unset; 1 = all of it): the rest
+// is the scaler's input scaled bilinearly, blended in by the draw into the game's image. MetalFX's spatial scaler has no strength of its own (its one setting is the colour mode), and
+// agl's networks give a softer picture than it does. Not for sRGB-encoded input, whose result is decoded only by that draw
+static float g_up_sharp = -1;
+static float up_mfx_sharpness(void) {
+    if (g_up_sharp >= 0) return g_up_sharp;
+    const char *e = getenv("DM_UPSCALER_SHARPNESS"); float v = e && *e ? strtof(e, NULL) : DM_GAME_UPSCALER_SHARPNESS;
+    g_up_sharp = v >= 0 && v <= 1 ? v : 1;
+    if (g_up_sharp < 1) MLOG("upscaler sharpness %.2f: MetalFX's picture blended with %.0f %% of a bilinear one", g_up_sharp, 100 * (1 - g_up_sharp));
+    return g_up_sharp;
+}
 static void up_mfx_read_color(NvShader *cs, const NVNshaderData *sd) {
     if (cs->up_color || !DM_GAME_UPSCALER_N || !up_mfx_on() || !up_mfx_named(cs)) return;
+    if (up_mfx_sqrt_named(cs)) { cs->up_color = UP_COLOR_SQRT; MLOG("upscaler %s: square-root input, linear output (the profile's upscaler_sqrt), MetalFX in HDR mode on the squared input", cs->key); return; }
     uint32_t nctl, ncode = 0; if (sd->control) nvn_ctl_lens(sd->control, &nctl, &ncode);
     cs->up_color = sd->data && ncode && ncode < (1u << 24) ? up_mfx_color((const void *)(uintptr_t)sd->data, ncode) : UP_COLOR_KEEP;
     MLOG("upscaler %s: %s", cs->key, cs->up_color == UP_COLOR_LINEAR ? "linear input and output, MetalFX in HDR mode" : cs->up_color == UP_COLOR_SRGB ? "sRGB-encoded input, linear output, MetalFX in perceptual mode" : "neither of the colour shapes MetalFX draws; the game's shader runs");
@@ -16193,7 +16227,7 @@ static int up_mfx_wanted(NvShader *cs) {
     if (cs->up_mfx) return cs->up_mfx == 1;
     cs->up_mfx = 2;
     if (!DM_GAME_UPSCALER_N || !up_mfx_on()) return 0;
-    if (up_mfx_named(cs) && (cs->up_color == UP_COLOR_LINEAR || cs->up_color == UP_COLOR_SRGB)) cs->up_mfx = 1;
+    if (up_mfx_named(cs) && (cs->up_color == UP_COLOR_LINEAR || cs->up_color == UP_COLOR_SRGB || cs->up_color == UP_COLOR_SQRT)) cs->up_mfx = 1;
     return cs->up_mfx == 1;
 }
 static up_mfx_scaler *up_mfx_scaler_for(NSUInteger iw, NSUInteger ih, NSUInteger ow, NSUInteger oh, int srgb) {
@@ -16230,6 +16264,9 @@ static int up_mfx_rect(const uint32_t v[4], NSUInteger w, NSUInteger h, NVNcopyR
     if (v[0] > INT_MAX || v[1] > INT_MAX || rw > INT_MAX || rh > INT_MAX || (uint64_t)v[0] + rw > w || (uint64_t)v[1] + rh > h) return 0;
     *r = (NVNcopyRegion){(int)v[0], (int)v[1], 0, (int)rw, (int)rh, 1}; return 1;
 }
+#define FG_PART 1
+#include "nvn_framegen.inc"
+#undef FG_PART
 // The dispatch of upscaler cs as MetalFX's spatial scaler from its texture slot's rectangle to its image slot's (see above): 1 when drawn, 0 to run the shader
 static int up_mfx_encode(NvShader *cs) {
     int ti = -1, oi = -1;
@@ -16252,11 +16289,12 @@ static int up_mfx_encode(NvShader *cs) {
     if (!in || !out || in == out || in.textureType != MTLTextureType2D || out.textureType != MTLTextureType2D || in.sampleCount != 1 || out.sampleCount != 1 ||
         fmt_int_or_ds(in.pixelFormat) || fmt_int_or_ds(out.pixelFormat) || mtl_fmt_block(out.pixelFormat) || !up_mfx_rect(v, in.width, in.height, &ir) || !up_mfx_rect(v + 4, out.width, out.height, &orr) ||
         orr.width < ir.width || orr.height < ir.height || (orr.width == ir.width && orr.height == ir.height)) { g_up_mfx_kept++; return 0; }
-    int srgb = cs->up_color == UP_COLOR_SRGB;
+    int srgb = cs->up_color == UP_COLOR_SRGB, sq = cs->up_color == UP_COLOR_SQRT;
+    float soft = srgb ? 0 : 1 - up_mfx_sharpness();
     up_mfx_scaler *e = up_mfx_scaler_for((NSUInteger)ir.width, (NSUInteger)ir.height, (NSUInteger)orr.width, (NSUInteger)orr.height, srgb); if (!e) { g_up_mfx_kept++; return 0; }
     id<MTL4FXSpatialScaler> sc = e->sc;
     // Straight in and out when MetalFX can take the game's textures as they are; through the scaler's own textures otherwise
-    int direct = !srgb && (NSUInteger)ir.width == in.width && (NSUInteger)ir.height == in.height && out.storageMode == MTLStorageModePrivate &&
+    int direct = !srgb && !sq && soft <= 0 && (NSUInteger)ir.width == in.width && (NSUInteger)ir.height == in.height && out.storageMode == MTLStorageModePrivate &&
                  in.pixelFormat == MTLPixelFormatRGBA16Float && out.pixelFormat == MTLPixelFormatRGBA16Float && !ir.xoffset && !ir.yoffset && !orr.xoffset && !orr.yoffset && (NSUInteger)orr.width == out.width &&
                  (NSUInteger)orr.height == out.height && (in.usage & sc.colorTextureUsage) == sc.colorTextureUsage && (out.usage & sc.outputTextureUsage) == sc.outputTextureUsage;
     if (!direct && !(out.usage & MTLTextureUsageRenderTarget)) { g_up_mfx_kept++; return 0; }
@@ -16265,7 +16303,8 @@ static int up_mfx_encode(NvShader *cs) {
     ubd_land_compute();
     NVNcopyRegion at0 = {0, 0, 0, ir.width, ir.height, 1}, at0o = {0, 0, 0, orr.width, orr.height, 1};
     id<MTLTexture> color = direct ? in : e->in, result = direct ? out : e->out;
-    if (!direct && !copy_t2t_draw(in, color, 0, 0, 0, 0, &ir, &at0, 0, 0)) { g_up_mfx_kept++; return 0; }   // into RGBA16F at the origin (a nearest draw: same size)
+    g_copy_up.mix = 0; g_copy_up.square = 1; g_copy_up.t1 = nil;
+    if (!direct && !copy_t2t_draw(in, color, 0, 0, 0, 0, &ir, &at0, 0, sq ? COPY_DRAW_UP : 0)) { g_up_mfx_kept++; return 0; }   // into RGBA16F at the origin (a nearest draw: same size)
     id<MTL4ComputeCommandEncoder> ce = [g_cb computeCommandEncoder];   // as dlss_eval: MetalFX opens encoders of its own, which take no barrier
     [ce barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageBlit visibilityOptions:resource_vis()];
     [ce barrierAfterStages:MTLStageBlit beforeQueueStages:MTLStageAll visibilityOptions:resource_vis()];
@@ -16276,13 +16315,17 @@ static int up_mfx_encode(NvShader *cs) {
         [sc encodeToCommandBuffer:cb];
     });
     g_last_end_relaxed = 0;   // the next pass waits for the scaler whole (enc_r_begin_pass)
-    if (!direct && !copy_t2t_draw(e->read, out, 0, 0, 0, 0, &at0o, &orr, 0, 0)) {
+    g_copy_up.mix = soft; g_copy_up.square = 0; g_copy_up.t1 = color;   // the softer picture: the scaler's own input, linear as its result is
+    if (!direct && !copy_t2t_draw(e->read, out, 0, 0, 0, 0, &at0o, &orr, 0, soft > 0 ? COPY_DRAW_UP : 0)) {
         args_dirty_all(); g_up_mfx_kept++; return 0;   // only the scratch image was scaled; the game's shader can still produce the output
     }
     args_dirty_all();
+    if (!direct) { g_fg_soft = soft; fg_frame(sc, color, out, &orr, cw, ch); }   // scratch (DM_FRAMEGEN)
+    else if (fg_on()) { static int once; if (!once++) MLOG("[RED] frame generation: MetalFX scales straight between the game's own textures here (%s), which the scratch build does not hook; frames are shown as the game draws them", cs->key); }
     if (!g_up_mfx_n++) MLOG("upscaler: first dispatch of %s drawn by MetalFX, %dx%d at %d,%d of %lux%lu (format %lu) → %dx%d at %d,%d of %lux%lu (format %lu)%s", cs->key, ir.width, ir.height, ir.xoffset, ir.yoffset,
                             (unsigned long)in.width, (unsigned long)in.height, (unsigned long)in.pixelFormat, orr.width, orr.height, orr.xoffset, orr.yoffset, (unsigned long)out.width, (unsigned long)out.height,
-                            (unsigned long)out.pixelFormat, direct ? ", straight" : srgb ? ", through RGBA16F, decoded from sRGB" : ", through RGBA16F");
+                            (unsigned long)out.pixelFormat, direct ? ", straight" : srgb ? ", through RGBA16F, decoded from sRGB" : sq ? ", through RGBA16F, squared on the way in" : ", through RGBA16F");
+    g_copy_up.t1 = nil;
     return 1;
 }
 // The present pass: src's valid rectangle drawn into dst (the drawable, or a screenshot's texture) as present_encode draws it, through MetalFX first where fx_encode takes it
@@ -16470,10 +16513,12 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
 #if TARGET_OS_SIMULATOR   // The iOS simulator SDK has no presentation-time callback and no minimum display duration (used only for picture acceptance, display-link ticks are not counted)
     (void)period; [dr present];
 #else
+    double fg_adj = g_fg_pres_adj;   // scratch (DM_FRAMEGEN): a real frame held behind its generated frame reads as shown when it would have been without (after framegen-stage1-v4's pres_adj)
     uint64_t pn = ticket;   // Record the present time by the game's present sequence number (ticket number): hle's present statistics are taken by "the game's nth present"; in the display link path the actual present count != the game's present count (old frames get merged and dropped)
     [dr addPresentedHandler:^(id<MTLDrawable> d) {   // Actual presentation time (the time this frame is really put on screen, CACurrentMediaTime base)
         CFTimeInterval tt = d.presentedTime;
-        g_pres[pn % PRING] = (pres_ent){pn, tt > 0 ? tt : -1};
+        g_pres[pn % PRING] = (pres_ent){pn, tt > 0 ? tt + fg_adj : -1};
+        fg_shown(0, tt, g_fg_tin[pn % 64]);   // scratch (DM_FRAMEGEN)
     }];
     // Each frame is displayed for at least one present period: when the GPU completion time jitters around a 120 Hz refresh boundary, the paired "25 ms + 8.33 ms" stutter no longer appears
     if (target_ts > 0) [dr present];
@@ -16482,6 +16527,9 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     (void)frame;
     return 1;
 }
+#define FG_PART 2
+#include "nvn_framegen.inc"
+#undef FG_PART
 // ---------- Present thread ----------
 // NVN semantics: QueuePresentTexture only queues the present and returns immediately (the game often calls it while holding a lock; iOS real device: synchronously waiting for nextDrawable inside it
 // takes about 30 ms, the lock is held about 90% of the time, and the loading thread starves). Taking the drawable, blit and present are all done on this thread in enqueue order.
@@ -16489,7 +16537,7 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
 // Swapchain texture return: before AcquireTexture gets a texture it waits for the ticket of that texture's previous present to be processed (mtl_present_wait), after which the commands the game draws into it
 // are necessarily ordered after that blit on the GPU queue.
 #define PQ 8
-typedef struct { tex_t t; double period; uint64_t frame; int crop[4]; double t_in; uint64_t ev_val, snap_v; } pq_item;   // snap_v: the snapshot copy this present shows (snap_commit_wait)   // t_in: the time the game handed this frame into the present queue (CACurrentMediaTime); ev_val: see g_ext_ev
+typedef struct { tex_t t; double period; uint64_t frame; int crop[4]; double t_in; uint64_t ev_val, snap_v, gen; } pq_item;   // gen: the generated frame shown before this one (fg_compose), 0 = none   // snap_v: the snapshot copy this present shows (snap_commit_wait)   // t_in: the time the game handed this frame into the present queue (CACurrentMediaTime); ev_val: see g_ext_ev
 // External producer (the Vulkan layer, dm/gfx/vk) renders on its own queue and signals this event when a frame's rendering is done: the present of that frame waits for the value on g_q4
 static id<MTLSharedEvent> g_ext_ev;
 static void ext_wait(uint64_t v) { if (v && g_ext_ev) [g_q4 waitForEvent:g_ext_ev value:v]; }
@@ -16698,11 +16746,20 @@ static void *present_main(void *arg) {
         pthread_mutex_lock(&g_pq_mu);
         while (g_pq_read == g_pq_in || g_link_owns_layer) pthread_cond_wait(&g_pq_cv, &g_pq_mu);   // In display-link mode the display-link callback takes them; an empty queue is judged by "taken"; "done" has to wait for the feedback of the present submit and lags behind taken
         pq_item it = g_pq[g_pq_read % PQ];
+        int fg_waiting = (int)(g_pq_in - g_pq_read);
         uint64_t ticket = ++g_pq_read; g_classic_busy = 1;
         pthread_mutex_unlock(&g_pq_mu);
         int submitted;
         ext_wait(it.ev_val); snap_commit_wait(it.snap_v);
-        @autoreleasepool { submitted = present_now(&it.t, it.period, it.frame, ticket, it.crop, nil, 0); mtl_tex_unpin(it.t.serial); }
+        // scratch (DM_FRAMEGEN): the generated frame first, then the real one, each for half the period
+        int fg_show = 0; tex_t fg_t; memset(&fg_t, 0, sizeof fg_t); fg_t.magic = MAGIC('T', 'E', 'X', 0); fg_t.serial = it.gen;
+        fg_on(); g_fg_tin[ticket % 64] = it.t_in;
+        if (it.gen) fg_shots(it.frame, &fg_t, &it.t, it.crop);
+        if (it.gen && fg_pace(it.t_in, it.period, fg_waiting)) { @autoreleasepool { fg_show = present_gen(&fg_t, it.period * 0.5, it.crop); } }
+        else if (!it.gen) fg_pace(it.t_in, it.period, fg_waiting);
+        g_fg_pres_adj = fg_show ? -(it.period > 0 ? it.period * 0.5 : 1.0 / 60) : 0;
+        @autoreleasepool { submitted = present_now(&it.t, fg_show ? it.period * 0.5 : it.period, it.frame, ticket, it.crop, nil, 0); mtl_tex_unpin(it.t.serial); }
+        g_fg_pres_adj = 0;
         pthread_mutex_lock(&g_pq_mu); g_classic_busy = 0; pthread_cond_broadcast(&g_pq_cv); pthread_mutex_unlock(&g_pq_mu);
         if (!submitted) {
             pthread_mutex_lock(&g_pq_mu);
@@ -16864,6 +16921,8 @@ static uint64_t present_enqueue(const tex_t *t, double period, const int crop[4]
         else if (st == 2 && now - t0 >= at + dur) { st = 3; mtl_link_pause(0); MLOG("DM_TEST_LINK_STALL: resuming the display link (frame %llu)", (unsigned long long)atomic_load(&g_cur_frame)); }
     }
     if (ws_on()) { static uint64_t f0; uint64_t f = atomic_load(&g_cur_frame); if (!f0) f0 = f; else if (f >= f0 + 300) { ws_report(f, f - f0); f0 = f; } }
+    uint64_t fg_gen = 0; int fg_slot = 0;
+    if (!ev_val) fg_gen = fg_compose(t, crop, &fg_slot);   // scratch (DM_FRAMEGEN): from the game's own texture, before a snapshot replaces it
     tex_t snap; uint64_t ss = 0; int slot = 0;
     if (!ev_val && mtl_snap_on()) {
         slot = (int)(atomic_load(&g_snap_next) % (uint64_t)g_snap_n);
@@ -16875,6 +16934,7 @@ static uint64_t present_enqueue(const tex_t *t, double period, const int crop[4]
     pq_item *it = &g_pq[g_pq_in % PQ]; *it = (pq_item){*t, period, atomic_load(&g_cur_frame), {0}, CACurrentMediaTime(), ev_val, ss ? g_snap[slot].ev : 0};
     if (crop) memcpy(it->crop, crop, sizeof it->crop);   // The current frame's state is enqueued with the ticket number, rather than reading the mutable window late on the present thread
     uint64_t tk = ++g_pq_in;
+    if (fg_gen) { it->gen = fg_gen; FG.win_ticket[fg_slot] = tk; FG.win_next++; }
     if (ss) { g_snap[slot].ticket = tk; atomic_fetch_add(&g_snap_next, 1); if (copy) *copy = g_snap[slot].ev; }
     pthread_cond_broadcast(&g_pq_cv);
     pthread_mutex_unlock(&g_pq_mu);

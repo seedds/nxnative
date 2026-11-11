@@ -108,11 +108,19 @@ UPSCALER_SOURCE = re.compile(r'/agl_ndsr\.pck#')
 def upscaler_keys(g):
     """the game's own upscaler shaders, from its shader map (shader_split.py's source column): sorted 16-digit keys, none without a map"""
     p = g.table('shader_map.tsv')
-    if not p.exists(): return []
+    if not p.exists(): return upscaler_sqrt_keys(g)
     keys = set()
     for line in p.read_text(encoding='utf-8').splitlines():
         c = line.split('\t')
         if len(c) >= 5 and c[2] == 'compute' and UPSCALER_SOURCE.search(c[4]) and re.fullmatch(r'[0-9a-f]{16}', c[3]): keys.add(c[3])
+    return sorted(keys | set(upscaler_sqrt_keys(g)))
+
+
+def upscaler_sqrt_keys(g):
+    """upscaler shaders outside agl_ndsr.pck whose colour is no sRGB curve but a square root: the profile's upscaler_sqrt (comma-separated 16-digit keys), read from each shader's translated code"""
+    keys = [k for k in g.get('upscaler_sqrt', '').split(',') if k]
+    for k in keys:
+        if not re.fullmatch(r'[0-9a-f]{16}', k): sys.exit(f'{g.id}: upscaler_sqrt must be comma-separated 16-digit shader keys: {k}')
     return sorted(keys)
 
 
@@ -203,6 +211,8 @@ def header_one(g):
     if vcr not in ('on', 'off'): sys.exit(f'{g.id}: vconv_range must be on or off: {vcr}')
     mml = g.get('mem_map_limit', 'off')   # MapPhysicalMemory refused beyond the application pool, as on Horizon (hle_svc.c): on / off
     if mml not in ('on', 'off'): sys.exit(f'{g.id}: mem_map_limit must be on or off: {mml}')
+    ush = g.get('upscaler_sharpness', '1.0')   # DM_UPSCALER=metalfx: the share of MetalFX's own picture, the rest a bilinear one (nvn_mtl.m up_mfx_sharpness; DM_UPSCALER_SHARPNESS overrides): 0.0-1.0
+    if not re.fullmatch(r'[01]\.\d{1,2}', ush) or float(ush) > 1: sys.exit(f'{g.id}: upscaler_sharpness must be 0.0 to 1.0: {ush}')
     ups = upscaler_keys(g)   # the game's own upscaler shaders, which DM_UPSCALER=metalfx (the launcher's Game's upscaler) replaces with MetalFX's spatial scaler (nvn_mtl.m up_mfx_encode)
     dbr = g.get('draw_barriers', 'full')   # how draw passes are ordered (nvn_mtl.m barrier_game): full = each waits for all earlier GPU work, game = by the game's own barriers, so vertex work overlaps the previous pass's fragments
     if dbr not in ('full', 'game'): sys.exit(f'{g.id}: draw_barriers must be full or game: {dbr}')
@@ -260,7 +270,8 @@ def header_one(g):
          f'#define DM_GAME_TEX_DIRTY_UPLOAD {int(tdu == "on")}',
          f'#define DM_GAME_TEX_DYN_SLOTS {int(tds == "on")}',
          f'#define DM_GAME_DRAW_BARRIERS_GAME {int(dbr == "game")}',
-         f'#define DM_GAME_UPSCALER_KEYS {q(",".join(ups))}', f'#define DM_GAME_UPSCALER_N {len(ups)}',
+         f'#define DM_GAME_UPSCALER_KEYS {q(",".join(ups))}', f'#define DM_GAME_UPSCALER_N {len(ups)}', f'#define DM_GAME_UPSCALER_SQRT_KEYS {q(",".join(upscaler_sqrt_keys(g)))}',
+         f'#define DM_GAME_UPSCALER_SHARPNESS {ush}',
          f'#define DM_GAME_VCONV_RANGE {int(vcr == "on")}',
          *([f'#define DM_GAME_NVN_API_MAJOR {api.split(".")[0]}', f'#define DM_GAME_NVN_API_MINOR {api.split(".")[1]}'] if g.get('device_api', '') else []),   # without the key: by the SDK version (hle_nvn.c nvn_api)
          '']

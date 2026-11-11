@@ -25,10 +25,10 @@ class ProfilePackTests(unittest.TestCase):
             with zipfile.ZipFile(root / 'x.ipa') as archive: self.assertIn('Payload/DmIOS.app/msl/b-fixture.img', archive.namelist())
             self.assertEqual([n for n in os.listdir(root) if '.msl-' in n], [])
 
-    def test_pulling_libraries_follow_compiled_profile_and_explicit_override(self):
+    def test_pulling_libraries_survive_runtime_prebuild_without_an_archive(self):
         # (game, IOS_PULL, with a pipeline archive, _bp libraries packed): an archive's bases are made of the pulling libraries, so an IPA with one carries them whatever IOS_PULL says
-        cases = [('01007EF00011E000', None, False, True), ('010015100B514000', None, False, False),
-                 ('01007EF00011E000', '0', False, False), ('010015100B514000', '1', False, True),
+        cases = [('01007EF00011E000', None, False, True), ('010015100B514000', None, False, True), ('01008CF01BAAC000', None, False, True),
+                 ('01007EF00011E000', '0', False, False), ('01008CF01BAAC000', '0', False, False), ('010015100B514000', '1', False, True),
                  ('010015100B514000', None, True, True), ('01007EF00011E000', '0', True, True)]
         for gid, override, with_pso, included, packed in [c + (p,) for c in cases for p in (False, True)]:
             with self.subTest(game=gid, IOS_PULL=override, archive=with_pso, one_file=packed), tempfile.TemporaryDirectory() as temporary:

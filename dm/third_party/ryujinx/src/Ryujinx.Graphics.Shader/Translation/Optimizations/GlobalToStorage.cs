@@ -415,7 +415,8 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
 
         // nxnative: the first word of a 64- or 128-bit global load whose address goes through the pool table (Operation.GlobalVectorCount) calls the vector helper, which leaves
         // the other words in the shader's gmem_vec local memory; the loads of those words, which follow in the block, read them from there right after the call. A word whose
-        // load is gone (unused) is not read. The scan stops at any other memory access or call, so nothing writes gmem_vec in between
+        // load is gone (unused) is not read. The scan stops at any other memory access or call, so nothing writes gmem_vec in between, and at a word of another LDG
+        // (GlobalVectorGroup): with this load's later words unused and the next LDG's word 0 unused too, that LDG's word would otherwise read this one's gmem_vec
         private static LinkedListNode<INode> GenerateRawVectorLoad(ResourceManager resourceManager, LinkedListNode<INode> node, Operation operation, int functionId)
         {
             int count = operation.GlobalVectorCount;
@@ -435,6 +436,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                 if (follower.Inst == Instruction.Load &&
                     follower.StorageKind == StorageKind.GlobalMemory &&
                     follower.GlobalVectorCount == count &&
+                    follower.GlobalVectorGroup == operation.GlobalVectorGroup &&
                     follower.GlobalVectorWord > 0)
                 {
                     Operand word = Local();
@@ -1104,6 +1106,12 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
 
             if (returnsValue)
             {
+                // A miss reads 0 in every word of a vector load, as the word loads it replaces did: gmem_vec has no initial value, and the caller reads its words after the call
+                for (int k = 0; k < vectorCount - 1; k++)
+                {
+                    context.Store(StorageKind.LocalMemory, resourceManager.GetRawVectorMemory(), Const(k), Const(0));
+                }
+
                 context.Return(Const(0));
             }
             else

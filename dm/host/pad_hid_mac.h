@@ -1,5 +1,6 @@
 // Mac: raw HID gamepads that GameController does not list (pad_hid.h, GitHub issue #637), read on the main run loop alongside front_mac.m's GameController players.
-// Each device takes a player slot as a GameController controller does; front_mac.m defines the slot side (hidpad_attach / hidpad_detach / hidpad_read / hidpad_motion).
+// Each device takes a player slot at its first button press (front_mac.m hidpad_first_press: a keyboard receiver that declares a GamePad collection never presses one, GitHub
+// issue #1657); front_mac.m defines the slot side (hidpad_attach / hidpad_detach / hidpad_read / hidpad_motion).
 // Skipped, so no controller is read twice: GameController's synthetic devices, and a device GameController lists itself. +[GCController supportsHIDDevice:] is only a hint for
 // that: it answers YES for the 8BitDo Ultimate 2C (2dc8:301b), which GameController then never lists (GitHub issue #965). So a device it says YES for waits HIDPAD_GC_WAIT
 // seconds for a GCController of its name; without one it is read as HID, and given back if that GCController connects later. Microsoft's, Sony's and Nintendo's pads

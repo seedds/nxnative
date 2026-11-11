@@ -36,7 +36,7 @@ module_t *g_mod; int g_nmod;
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 void svc_thread_dump(void) {}
-uint64_t now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000ull + t.tv_nsec; }
+uint64_t now_ns(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }   // the host's clock (hle_os.c: Mach absolute time), which Metal's timestamps are on
 
 static dispatch_semaphore_t preparing, second_waiting, finish_prepare, prepared, suspended, returned, committed;
 static __thread int second_submit;
@@ -71,10 +71,12 @@ void test_set_frame(uint64_t frame) { (void)frame; }
 void test_drain(void) { atomic_fetch_add(&drains, 1); }
 
 static NVNqueue queues[2];
-static const op_hdr work[] = {{OP_BEGIN, 8}, {OP_END, 8}};
+static const op_hdr work[] __attribute__((aligned(8))) = {{OP_BEGIN, 8}};
+static uint64_t work_list;   // its control list: one piece (nvn_obj.h ctl_e)
 static void *submit(void *which) {
     second_submit = which != NULL;
-    NVNcommandHandle handle = (uintptr_t)work;
+    work_list = ctl_e(CTL_CHUNK, work, sizeof work) | CTL_LAST;
+    NVNcommandHandle handle = (uintptr_t)&work_list;
     h_nvnQueueSubmitCommands(&queues[second_submit], 1, &handle);
     dispatch_semaphore_signal(returned);
     return NULL;
@@ -127,10 +129,11 @@ int main(void) {
     // An unencoded wait must not make suspend wait for a future producer.
     // Releasing that event in the background must still respect the closed gate.
     _Atomic uint32_t word = 0;
-    struct { op_hdr wait; volatile uint32_t *word; uint32_t mode, value; op_hdr begin, end; } parked = {
-        {OP_WAIT_EVENT, 24}, (volatile uint32_t *)&word, 0, 1, {OP_BEGIN, 8}, {OP_END, 8}
+    struct { op_hdr wait; volatile uint32_t *word; uint32_t mode, value; op_hdr begin; } parked __attribute__((aligned(8))) = {
+        {OP_WAIT_EVENT, 24}, (volatile uint32_t *)&word, 0, 1, {OP_BEGIN, 8}
     };
-    NVNcommandHandle parked_handle = (uintptr_t)&parked;
+    static uint64_t parked_list; parked_list = ctl_e(CTL_CHUNK, &parked, sizeof parked) | CTL_LAST;
+    NVNcommandHandle parked_handle = (uintptr_t)&parked_list;
     h_nvnQueueSubmitCommands(&queues[0], 1, &parked_handle);
     pthread_create(&background, NULL, suspend_graphics, NULL);
     if (!reached(suspended, "suspend returns with an unresolved queue event")) return 1;

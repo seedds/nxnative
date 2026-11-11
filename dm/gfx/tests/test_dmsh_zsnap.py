@@ -1,4 +1,4 @@
-"""dmsh_build.py frag_z_snap on synthetic MSL in the translator's shapes: a gl_FragCoord.z read of main0 that meets a value read from a texture in one comparison (Ocarina of Time's mist:
+"""dmsh_rewrite.py frag_z_snap on synthetic MSL in the translator's shapes: a gl_FragCoord.z read of main0 that meets a value read from a texture in one comparison (Ocarina of Time's mist:
 z > d after the denormal flush; its foliage: z * k > d * k; a body moved to dm_body_main0) takes dm_zsnap(gl_FragCoord.z, d, dm_zw), with dm_zw = fwidth(gl_FragCoord.z) first in the body
 and the helper once; z against constants or uniforms, a texture value read after z or in a block z does not see, and z read outside main0's body stay as they were. The rewritten source
 compiles where xcrun is. With --fixture <dir>, writes the helper as zsnap.h for t_zsnap.m (make check_t_zsnap), which tests it on the GPU against the depth the rasterizer stores."""
@@ -18,12 +18,8 @@ import dmsh_side   # noqa: E402
 
 
 def load():
-    tree = ast.parse((TOOLS / 'dmsh_build.py').read_text())
-    nodes: list[ast.stmt] = [n for n in tree.body if (isinstance(n, ast.FunctionDef) and n.name == 'frag_z_snap')
-                             or (isinstance(n, ast.Assign) and any(getattr(t, 'id', None) in ('ZSNAP', 'ZSNAP_WIDTH') for t in n.targets))]
-    ns = {'re': re, 'dmsh_side': dmsh_side}
-    exec(compile(ast.Module(body=nodes, type_ignores=[]), str(TOOLS / 'dmsh_build.py'), 'exec'), ns)
-    return ns
+    import dmsh_rewrite
+    return vars(dmsh_rewrite)
 
 
 NS = load()

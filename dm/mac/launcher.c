@@ -134,16 +134,45 @@ static void saved_choices(void) {   // after the env files, before the bundle's 
     }
 }
 
+static int pref_string(const char *key, char *out, size_t n) {   // a string preference of this app ('' and 0 when unset or not a string)
+    CFStringRef domain = CFBundleGetIdentifier(CFBundleGetMainBundle()); out[0] = 0;
+    if (!domain) return 0;
+    CFStringRef k = CFStringCreateWithCString(NULL, key, kCFStringEncodingUTF8); CFPropertyListRef v = CFPreferencesCopyAppValue(k, domain); CFRelease(k);
+    int ok = v && CFGetTypeID(v) == CFStringGetTypeID() && CFStringGetCString(v, out, n, kCFStringEncodingUTF8) && *out;
+    if (v) CFRelease(v);
+    if (!ok) out[0] = 0;
+    return ok;
+}
+
+static int profile_name_ok(const char *s) {   // a save profile's name, a folder name that is nothing else: letters, digits, spaces, - and _, 1 to 32 bytes, no leading dot or space, no trailing space (Launcher.swift checks the same)
+    size_t n = strlen(s);
+    if (!n || n > 32 || s[0] == '.' || s[0] == ' ' || s[n - 1] == ' ') return 0;
+    for (size_t i = 0; i < n; i++) if (!isalnum((unsigned char)s[i]) && s[i] != ' ' && s[i] != '-' && s[i] != '_') return 0;
+    return 1;
+}
+
+// Save profiles (Launcher.swift SaveProfileSection, save.profile in the app's preferences; GitHub issue #1748): a named profile's save is <support>/profiles/<name>/save, kept apart from
+// the default save/ and from the other profiles'; the game calls the player by the name (DM_NICK) unless an env file set one, and the pipeline list built on the spot stays the shared
+// one (DM_PSO_USER: the host would keep it beside the profile's save otherwise). A DM_SAVE the environment or an env.txt set wins: the profile is not applied. Returns the name, or ''
+static const char *save_profile(const char *sup, char *save, size_t cap) {
+    static char name[64]; char p[PATH_MAX];
+    if (!pref_string("save.profile", name, sizeof name)) return "";
+    if (!profile_name_ok(name)) { fprintf(stderr, "launcher: save profile \"%s\" ignored: not a profile name (letters, digits, spaces, - and _, up to 32)\n", name); name[0] = 0; return ""; }
+    if (getenv("DM_SAVE")) { fprintf(stderr, "launcher: save profile %s not used: DM_SAVE=%s is set (environment or env.txt)\n", name, getenv("DM_SAVE")); name[0] = 0; return ""; }
+    snprintf(save, cap, "%s/profiles/%s/save", sup, name); mkdirs(save);
+    setenv("DM_NICK", name, 0);
+    snprintf(p, sizeof p, "%s/pso_user.tsv", sup); setenv("DM_PSO_USER", p, 0);
+    fprintf(stderr, "launcher: save profile %s (%s)\n", name, save);
+    return name;
+}
+
 // Cloud saves: the folder chosen in the settings window (Launcher.swift CloudSavesSection, cloudSaves.folder in the app's preferences) becomes DM_SAVE_SYNC
 // (dm/host/save_sync.h), with or without the window; a DM_SAVE_SYNC the launch environment or an env file set wins. A front end may write the key too (docs/frontends.md, The cloud saves folder)
-static void cloud_saves_folder(void) {
-    CFStringRef domain = CFBundleGetIdentifier(CFBundleGetMainBundle());
-    if (getenv("DM_SAVE_SYNC") || !domain) return;
-    CFPropertyListRef v = CFPreferencesCopyAppValue(CFSTR("cloudSaves.folder"), domain); char s[PATH_MAX];
-    if (v && CFGetTypeID(v) == CFStringGetTypeID() && CFStringGetCString(v, s, sizeof s, kCFStringEncodingUTF8) && *s) {
-        setenv("DM_SAVE_SYNC", s, 1); fprintf(stderr, "launcher: cloud saves through %s\n", s);
-    }
-    if (v) CFRelease(v);
+static void cloud_saves_folder(const char *profile) {   // a named save profile syncs through profiles/<name> under the folder, so two profiles never overwrite one cloud save
+    char s[PATH_MAX];
+    if (getenv("DM_SAVE_SYNC") || !pref_string("cloudSaves.folder", s, sizeof s)) return;
+    if (*profile) { size_t n = strlen(s); while (n > 1 && s[n - 1] == '/') s[--n] = 0; snprintf(s + n, sizeof s - n, "/profiles/%s", profile); }
+    setenv("DM_SAVE_SYNC", s, 1); fprintf(stderr, "launcher: cloud saves through %s\n", s);
 }
 
 // A game of several programs (Super Mario 3D All-Stars): pack_app.py's table of them, with this app's paths filled in (it may move), for oe::ExecuteProgram (DM_PROGRAMS, hle_oe.c)
@@ -204,7 +233,8 @@ int main(int argc, char **argv) {
     int shown = window ? dm_mac_launcher() : 2;
     if (!shown) return 0;   // Quit: no game
     if (shown == 2) saved_choices();
-    cloud_saves_folder();
+    const char *profile = save_profile(sup, save, sizeof save);
+    cloud_saves_folder(profile);
     setenv("DM_ROOT", sup, 0); setenv("DM_ROMFS", romfs, 0); setenv("DM_SAVE", save, 0); setenv("DM_TEMP", temp, 0);
     snprintf(p, sizeof p, "%s/msl", res); setenv("DM_MSL_DIR", p, 0);
     snprintf(p, sizeof p, "%s/font", dm); setenv("DM_FONT_DIR", p, 0);

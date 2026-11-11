@@ -30,6 +30,7 @@ struct LauncherView: View {
             .padding([.horizontal, .top], 20)
             Form {
                 settingSections(basic: true)
+                SaveProfileSection()
                 CloudSavesSection()
                 Section {
                     DisclosureGroup("Advanced settings", isExpanded: $advanced) {}
@@ -70,6 +71,62 @@ struct LauncherView: View {
                 }
             }
         }
+    }
+}
+
+/// Save profiles (GitHub issue #1748): a named profile keeps its own save tree, <Application Support>/nxnative/<title ID>/profiles/<name>/save, apart from the default save/ and from the other
+/// profiles', so two people on one Mac, or two playthroughs, share no option.sav or account.sav. The choice is kept in this app's preferences as save.profile ('' = the default save), which
+/// launcher.c reads before the host starts, with the window or without it: it sets DM_SAVE to the profile's folder, DM_NICK to its name unless set, keeps the shared pipeline list
+/// (DM_PSO_USER) and gives cloud saves a folder of the profile's own. Switching needs the game quit: the save is read once at start
+enum SaveProfiles {
+    static var root: URL { URL(fileURLWithPath: NSHomeDirectory() + "/Library/Application Support/nxnative/" + (info("DMTitleID") ?? "unknown") + "/profiles", isDirectory: true) }
+    static func list() -> [String] {   // the profiles that exist, by name
+        ((try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isDirectoryKey])) ?? [])
+            .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true && valid($0.lastPathComponent) }.map(\.lastPathComponent).sorted()
+    }
+    static func valid(_ name: String) -> Bool {   // a folder name that is nothing else: letters, digits, spaces, - and _, 1 to 32 characters, no leading dot or space (launcher.c checks the same)
+        !name.isEmpty && name.count <= 32 && !name.hasPrefix(".") && !name.hasPrefix(" ") && !name.hasSuffix(" ")
+            && name.unicodeScalars.allSatisfy { CharacterSet.alphanumerics.contains($0) || $0 == " " || $0 == "-" || $0 == "_" }
+    }
+    static func folder(_ name: String) -> URL { root.appendingPathComponent(name, isDirectory: true) }
+    static func create(_ name: String) -> Bool { (try? FileManager.default.createDirectory(at: folder(name).appendingPathComponent("save"), withIntermediateDirectories: true)) != nil }
+}
+
+struct SaveProfileSection: View {
+    @AppStorage("save.profile") private var profile = ""
+    @State private var names = SaveProfiles.list()
+
+    var body: some View {
+        Section {
+            Picker(selection: $profile) {
+                Text("Default").tag("")
+                ForEach(names, id: \.self) { Text($0).tag($0) }
+            } label: {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Save profile")
+                    Text(profile.isEmpty ? "The save in the game's own folder." : "Its own save, apart from the default one; the game calls the player \(profile).").font(.footnote).foregroundStyle(.secondary)
+                }
+            }
+            .pickerStyle(.menu)
+            HStack {
+                Button("New profile…", action: create)
+                if !profile.isEmpty { Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([SaveProfiles.folder(profile)]) } }
+            }
+        } footer: {
+            Text("A profile keeps its own save, apart from the default one and from the other profiles', so two people on this Mac (or two playthroughs) share nothing, not even the game's options. Quit the game to switch.")
+        }
+        .onAppear { if !profile.isEmpty && !names.contains(profile) { profile = "" } }   // a profile whose folder went away: the default again
+    }
+
+    private func create() {
+        let alert = NSAlert(); alert.messageText = "New save profile"; alert.informativeText = "A name: letters, digits, spaces, - and _ (up to 32). The game calls the player by it."
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 24)); field.placeholderString = "Name"; alert.accessoryView = field
+        alert.addButton(withTitle: "Create"); alert.addButton(withTitle: "Cancel"); alert.window.initialFirstResponder = field
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let name = field.stringValue.trimmingCharacters(in: .whitespaces)
+        guard SaveProfiles.valid(name) else { let bad = NSAlert(); bad.messageText = "Not a profile name"; bad.informativeText = "Letters, digits, spaces, - and _, 1 to 32 characters."; bad.runModal(); return }
+        guard SaveProfiles.create(name) else { let bad = NSAlert(); bad.messageText = "The profile's folder cannot be made"; bad.informativeText = SaveProfiles.folder(name).path; bad.runModal(); return }
+        names = SaveProfiles.list(); profile = name
     }
 }
 

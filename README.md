@@ -118,7 +118,9 @@ A NUP without the base game also works, when its base package is empty or it has
 python3 scripts/build_ipa_from_nsp.py ~/Games/DonkeyKongBananza --platform mac-app
 ```
 
-An update's folder alone will do (no `base/`), and so will `exefs/` and `romfs/` directly in the folder, as `nup extract` writes them, which count as `base/`. The app has no icon, because the folder holds none; `--icon <image>` (`ICON` in Spyder) gives it one. To turn such a folder into a NUP: `nup pack ~/Games/DonkeyKongBananza game.nup`.
+An update's folder alone will do (no `base/`), and so will `exefs/` and `romfs/` directly in the folder, as `nup extract` writes them, which count as `base/`.
+
+An update can also be an **update pack**: `updates/<version>/romfs/` with only the files the update changed or added, and `romfs_removed.txt` beside it listing the base files it drops. The build lays it over `base/romfs`. `python3 scripts/nup_update_pack.py game.nup ~/Games/Game` writes one from a `.nup` (add `--base` to write `base/` too) without unpacking the update's whole RomFS, so the `.nup` can be deleted afterwards. `-p v<version>` picks which update to pack, the newest by default. Short of disk space? `--romfs-format folder` (Mac builds) keeps the game files as APFS clones of the dump's, instead of writing a RomFS image as big as the game. The app has no icon, because the folder holds none; `--icon <image>` (`ICON` in Spyder) gives it one. To turn such a folder into a NUP: `nup pack ~/Games/DonkeyKongBananza game.nup`.
 
 ## Discussions
 

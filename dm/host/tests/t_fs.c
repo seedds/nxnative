@@ -81,6 +81,45 @@ int main(void) {
     CHECK(h_fs_OpenFile(&rh, "rom:/data/base", MODE_READ) == RES_OK && rh && !(rh & 15), "a folder file's handle is 16-byte aligned, as a Horizon FileAccessor pointer is (%#llx)", (unsigned long long)rh); h_fs_CloseFile(rh);
     g_nmnt = 0;
     unsetenv("DM_ROMFS_OVERLAY");
+    printf("LayeredFS mods\n");
+    {   // <mods>/<name>/romfs in name order, a disabled one skipped, the Atmosphère tree after them, DM_ROMFS_OVERLAY before them all; the base rom/data has same, base
+        char mods[1100], d[1400]; snprintf(mods, sizeof mods, "%s/mods", root); mkdir(mods, 0755);
+        const char *tree[] = {"a mod", "a mod/romfs", "a mod/romfs/data", "b mod", "b mod/RomFS", "b mod/RomFS/data", "c off", "c off/romfs", "c off/romfs/data", "no romfs",
+                              "atmosphere", "atmosphere/contents", "atmosphere/contents/%016llX", "atmosphere/contents/%016llX/romfs", "atmosphere/contents/%016llX/romfs/data", ".hidden", ".hidden/romfs"};
+        for (size_t i = 0; i < sizeof tree / sizeof *tree; i++) { char rel[200]; snprintf(rel, sizeof rel, tree[i], (unsigned long long)DM_GAME_PROGRAM_ID); snprintf(d, sizeof d, "%s/%s", mods, rel); mkdir(d, 0755); }
+        snprintf(fn, sizeof fn, "%s/a mod/romfs/data/same", mods); put(fn, "mod a");
+        snprintf(fn, sizeof fn, "%s/b mod/RomFS/data/same", mods); put(fn, "mod b");
+        snprintf(fn, sizeof fn, "%s/b mod/RomFS/data/b only", mods); put(fn, "from b");
+        snprintf(fn, sizeof fn, "%s/c off/romfs/data/same", mods); put(fn, "mod c");
+        snprintf(fn, sizeof fn, "%s/c off/romfs/data/c only", mods); put(fn, "from c");
+        snprintf(fn, sizeof fn, "%s/atmosphere/contents/%016llX/romfs/data/base", mods, (unsigned long long)DM_GAME_PROGRAM_ID); put(fn, "atmosphere");
+        snprintf(fn, sizeof fn, "%s/atmosphere/contents/%016llX/romfs/data/same", mods, (unsigned long long)DM_GAME_PROGRAM_ID); put(fn, "atmo same");
+        snprintf(fn, sizeof fn, "%s/disabled.txt", mods); put(fn, "# a comment\n\n  c off  \n");
+        setenv("DM_ROMFS", rom, 1); setenv("DM_MODS", mods, 1);
+        CHECK(h_fs_MountRom("rom", NULL, 0) == RES_OK, "mount RomFS with mods");
+        CHECK(read_fs("rom:/data/same", got, sizeof got) && !strcmp(got, "mod a"), "the first mod by name wins (%s)", got);
+        CHECK(read_fs("rom:/data/b only", got, sizeof got) && !strcmp(got, "from b"), "a later mod's own file reads, its romfs folder in any letter case");
+        CHECK(!read_fs("rom:/data/c only", got, sizeof got), "a mod named in disabled.txt is off");
+        CHECK(read_fs("rom:/data/base", got, sizeof got) && !strcmp(got, "atmosphere"), "the Atmosphère tree is a layer, under the named mods");
+        CHECK(read_fs("rom:/data/over", got, sizeof got) == 0, "nothing else appears");
+        uint64_t h; DirectoryEntry de[8]; int64_t cnt = 0;
+        CHECK(h_fs_OpenDirectory(&h, "rom:/data", DIRMODE_FILE) == RES_OK && h_fs_ReadDirectory(&cnt, de, h, 8) == RES_OK && cnt == 3, "the listing merges the mods and the game, once each (%lld)", (long long)cnt);
+        h_fs_CloseDirectory(h);
+        g_nmnt = 0;
+        setenv("DM_MODS_DISABLED", "a mod, x", 1);
+        CHECK(h_fs_MountRom("rom", NULL, 0) == RES_OK && read_fs("rom:/data/same", got, sizeof got) && !strcmp(got, "mod b"), "DM_MODS_DISABLED turns a mod off (%s)", got);
+        g_nmnt = 0; unsetenv("DM_MODS_DISABLED");
+        setenv("DM_ROMFS_OVERLAY", overlay, 1);
+        CHECK(h_fs_MountRom("rom", NULL, 0) == RES_OK && read_fs("rom:/data/same", got, sizeof got) && !strcmp(got, "overlay") && read_fs("rom:/data/b only", got, sizeof got), "DM_ROMFS_OVERLAY comes before the mods, which still apply");
+        g_nmnt = 0; unsetenv("DM_ROMFS_OVERLAY");
+        setenv("DM_MODS", "off", 1);
+        CHECK(h_fs_MountRom("rom", NULL, 0) == RES_OK && read_fs("rom:/data/same", got, sizeof got) && !strcmp(got, "base"), "DM_MODS=off leaves the game's RomFS alone");
+        g_nmnt = 0; unsetenv("DM_MODS");
+        setenv("DM_ROOT", root, 1);   // the mods folder made above is <root>/mods
+        CHECK(h_fs_MountRom("rom", NULL, 0) == RES_OK && read_fs("rom:/data/same", got, sizeof got) && !strcmp(got, "mod a"), "the default mods folder is <DM_ROOT>/mods");
+        g_nmnt = 0; unsetenv("DM_ROOT");
+        snprintf(d, sizeof d, "%s/mods.off", root); rename(mods, d);   // later checks mount without mods
+    }
     {   // game files that are neither a folder nor a file (a stale path, a fifo) stop the rom mount with a FATAL line, in a child so the abort does not end this test
         char gone[1200], fifo[1200], out[1200]; snprintf(gone, sizeof gone, "%s/RomFS", root); snprintf(fifo, sizeof fifo, "%s/fifo", root); snprintf(out, sizeof out, "%s/fatal.txt", root);
         mkfifo(fifo, 0644);

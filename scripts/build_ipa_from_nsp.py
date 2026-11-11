@@ -57,6 +57,8 @@ BUNDLE_ID = ''                          # the app's bundle ID (empty = saved per
 ICON = ''                               # the app icon, a JPEG or PNG of any size (empty = the game's icon from its control data; a dump has none, a NUP may have none)
 ROMFS = 'bundle'                        # 'bundle' = the game files go into the IPA (or the Xcode app), as always; 'separate' = they stay out (DM_COPY_ROMFS=NO): the IPA is small, and its rebuilds do not pack or send the RomFS again.
                                         #   Copy it to the phone once per game version with the scripts/push_romfs.sh command printed at the end (the app checks that the image is the one it was built for)
+ROMFS_FORMAT = 'image'                  # a dump folder's RomFS: 'image' = one file, RomFS.img, as always; 'folder' = a folder of APFS clones of the dump's files, which takes almost no disk space
+                                        #   on the dump's volume (a Mac build only: PLATFORM 'mac' or 'mac-app'). A NUP or NSPs are always unpacked into an image
 SHADER_FILES = False                    # True = an NVN game's shader library goes into the IPA as its separate files, for install tools that cannot copy a large file (AltServer: 2 GiB; the game files
                                         #   then need ROMFS 'separate' too). False = the library is one file, which installs faster and other install tools take whatever its size
 PREPARE_XCODE = False                   # prepare a per-game Xcode project and add it to the workspace instead of packing an IPA; requires KEEP_EXTRACTED
@@ -723,17 +725,26 @@ def package_size(fam, k):   # (name, bytes) of a package for the survey report: 
 MANIFEST_HEAD = '# path\tbytes\tfirst 32 bytes (hex)\n'   # nx_extract --manifest's header
 
 
-def survey_dump(src, out):
+def survey_dump(src, out, base=None):
     """A dump's version folder as survey_nup leaves a NUP package's, with no control data (a dump has none). Returns the files listed"""
-    if not pack_dump.is_version(src): raise BuildError(f'{src}: no exefs/main.npdm and romfs')
+    if not pack_dump.has_code(src) or not (src / 'romfs').is_dir(): raise BuildError(f'{src}: no exefs/main.npdm and romfs')
+    roots = [src / 'romfs']
+    if pack_dump.is_pack(src):   # an update pack: its own files over the base's, without the ones it drops
+        if not (base and (base / 'romfs').is_dir()): raise BuildError(f'{src} is an update pack (romfs_removed.txt): it needs the base game\'s RomFS, base/romfs')
+        roots.append(base / 'romfs')
+    drop = pack_dump.removed(src) if len(roots) > 1 else set()
     out.mkdir(parents=True)
     pack_dump.exefs(src / 'exefs', out / 'ExeFS')
-    rows = []
-    for p, size, head in pg.romfs_files(src / 'romfs'):
-        rows.append(f'{p}\t{size}\t{head.hex()}\n')
-        if p.lower().endswith('.nro'):
-            o = out / 'romfs_nro' / p.lstrip('/'); o.parent.mkdir(parents=True, exist_ok=True)
-            pack_dump.clone(src / 'romfs' / p.lstrip('/'), o)
+    rows, seen = [], set()
+    for i, root in enumerate(roots):
+        for p, size, head in pg.romfs_files(root):
+            rel = p.lstrip('/')
+            if rel in seen or (i and any(rel == r or rel.startswith(r + '/') for r in drop)): continue
+            seen.add(rel)
+            rows.append(f'{p}\t{size}\t{head.hex()}\n')
+            if p.lower().endswith('.nro'):
+                o = out / 'romfs_nro' / rel; o.parent.mkdir(parents=True, exist_ok=True)
+                pack_dump.clone(root / rel, o)
     (out / 'romfs_manifest.tsv').write_text(MANIFEST_HEAD + ''.join(rows))
     return len(rows)
 
@@ -791,7 +802,7 @@ def survey(nsp_dir, app, fam, keys, repo, py, env):
         except OSError: return None
     PROG.stage('survey: RomFS manifest', poll=None if files else listed)
     say(f'extracting the code modules and a RomFS manifest (no game files written) → {ex}')
-    if files: say(f'  {survey_nup(nup, upd or fam["base"], fam["base"], tmp) if nup else survey_dump(upd or fam["base"], tmp):,} RomFS files listed')
+    if files: say(f'  {survey_nup(nup, upd or fam["base"], fam["base"], tmp) if nup else survey_dump(upd or fam["base"], tmp, fam["base"]):,} RomFS files listed')
     else: run([nx, keys, fam['base'], upd or '-', tmp, '--manifest'] + extract_flags(app), logs / 'extract.log')
     swap_in(tmp, ex)
     PROG.stage('survey: code modules', step='reading')
@@ -1273,13 +1284,19 @@ def check_formats(dirs):
     import romfs_image
     for ver, d in dirs.items():
         img = d / 'RomFS.img'; stamp = d / 'RomFS.img.formats'
-        st = img.stat(); ident = f'{st.st_size} {st.st_mtime_ns}'
+        if not img.is_file() and (d / 'RomFS').is_dir():   # a folder of clones (--romfs-format folder): its stamp names the inputs it was made from
+            img = d / 'RomFS'; stamp = d / 'RomFS.formats'
+            try: ident = (d / 'RomFS.inputs.json').read_text()
+            except OSError: ident = ''
+            ident = 'folder ' + hashlib.sha256(ident.encode()).hexdigest()
+        else: st = img.stat(); ident = f'{st.st_size} {st.st_mtime_ns}'
         try: lines = stamp.read_text().splitlines()
         except OSError: lines = []
         if lines and lines[0] == ident: bad = [ln.split('\t') for ln in lines[1:]]
         else:
             PROG.add(1); PROG.stage(f'check {ver} files', step='reading file heads', unit='files')
-            bad = [(p, str(size), head.hex()) for p, size, head in romfs_image.format_mismatches(img, lambda done, total: PROG.set(done=done, total=total))]
+            mismatches = romfs_image.folder_format_mismatches if img.is_dir() else romfs_image.format_mismatches
+            bad = [(p, str(size), head.hex()) for p, size, head in mismatches(img, lambda done, total: PROG.set(done=done, total=total))]
             stamp.write_text('\n'.join([ident] + ['\t'.join(b) for b in bad]) + '\n')
             PROG.end(f'{len(bad)} damaged' if bad else 'ok')
         if not bad: continue
@@ -1296,15 +1313,18 @@ def scan_dump(dump, want=None):   # a dump folder as scan_nsps gives a folder of
     return app, {'base': pack_dump.base_of(dump), 'updates': sorted(vers.items()), 'dlc': [(tid, None, roms) for tid, roms in dlc.items()], 'dump': True}
 
 
-def extract_dump(ex, name, src, app):   # one version of a dump folder (src: base/ or updates/<version>/) into the layout extract makes; the code modules and the image are kept while unchanged
-    dst = ex / name; part = dst / 'RomFS.img.part'
+def extract_dump(ex, name, src, app, base=None, fmt='image'):
+    """one version of a dump folder (src: base/ or updates/<version>/) into the layout extract makes; the code modules and the image are kept while unchanged. An update pack
+    (pack_dump.is_pack) is laid over base/romfs; fmt 'folder' writes RomFS/, APFS clones, instead of RomFS.img"""
+    dst = ex / name; part = dst / 'RomFS.img.part'; fpart = dst / 'RomFS.partial'
     def poll():
-        try: return {'done': part.stat().st_size}
+        try: return {'done': part.stat().st_size} if fmt == 'image' else {'done': tree_size(fpart)[0], 'unit': 'files'}
         except OSError: return None
-    PROG.stage(f'pack {name}', poll=poll, unit='B', total=tree_size(src / 'romfs')[1], est=True)
-    try: pack_dump.pack_version(src, app, dst, say=lambda s: None)
+    total = tree_size(src / 'romfs')[1] + (tree_size(base / 'romfs')[1] if base and pack_dump.is_pack(src) else 0)
+    PROG.stage(f'pack {name}', poll=poll, unit='B', total=total, est=True) if fmt == 'image' else PROG.stage(f'clone {name}', poll=poll, unit='files')
+    try: pack_dump.pack_version(src, app, dst, say=lambda s: None, base=base, fmt=fmt)
     except pack_dump.Error as e: raise BuildError(str(e)) from e
-    PROG.end(amount((dst / 'RomFS.img').stat().st_size, 'B'))
+    PROG.end(amount((dst / 'RomFS.img').stat().st_size, 'B') if fmt == 'image' else f'{tree_size(dst / "RomFS")[0]:,} files, APFS clones')
     return dst
 
 
@@ -2736,7 +2756,7 @@ def mac_app_name(name):   # the app's file name: the game name with the characte
     return re.sub(r'\s*[:/]\s*', ' - ', name).strip(' .-') or 'nxnative'
 
 
-def mac_app(py, repo, out, app, work, game, patched, host, font, msl, aoc, gfx, lang, g, name, version, bundle_id, icon, sign, env, logs, env_file='', gpus='', programs=None, control=None):
+def mac_app(py, repo, out, app, work, game, patched, host, font, msl, aoc, gfx, lang, g, name, version, bundle_id, icon, sign, env, logs, env_file='', gpus='', programs=None, control=None, dump_dir=None):
     """The last stage of PLATFORM 'mac-app': pack the Mac app (dm/mac/pack_app.py) from what a Mac-only build made: the Mac host and font (mac_host), the packed version's RomFS and rewritten
     modules, the Mac shader libraries (msl: <shader>/cache, whose b-<chain> goes in, or a Vulkan or GL game's <shader>, whose vk / gl goes in), the DLC, the profile's tables (with the shader pairs
     the pipeline prebuild reads), the pipeline archive made offline for this Mac (mac_pso; gpus: --gpu / PSO_GPUS), the launcher settings and an environment file.
@@ -2753,7 +2773,7 @@ def mac_app(py, repo, out, app, work, game, patched, host, font, msl, aoc, gfx, 
     split_pairs = work / 'shader/pso_pairs.tsv'   # the split's copy of pso_pairs.tsv, for a profile without the table (as mac_run's DM_PSO_PAIRS)
     for opt, v in (('--version', version), ('--category', g.get('app_category')), ('--marker', g.get('romfs_marker')), ('--aoc', aoc), ('--icon', icon),
                    ('--pso', pso), ('--pso-pairs', split_pairs if gfx == 'nvn' and not g.table('pso_pairs.tsv').is_file() and split_pairs.is_file() else None),
-                   ('--env-file', Path(os.path.expanduser(env_file)).resolve() if env_file else None), ('--settings', settings)):
+                   ('--env-file', Path(os.path.expanduser(env_file)).resolve() if env_file else None), ('--settings', settings), ('--dump-folder', dump_dir)):
         if v: cmd += [opt, v]
     for n, r in (programs or {}).items(): cmd += ['--program', f'{n}\t{r["patched"]}\t{r["romfs"]}\t{r["msl"]}\t{r["tables"]}\t{r["html"]}']
     if (game / 'html').is_dir(): cmd += ['--html', game / 'html']
@@ -2788,6 +2808,8 @@ def parse_args(argv):
     ap.add_argument('--bundle-id', help='the app\'s bundle ID (default: saved Xcode ID when preparing again, else org.nxnative.<base game title ID in lowercase>)')
     ap.add_argument('--romfs', choices=('bundle', 'separate'), help='bundle = the game files go into the IPA (default: the ROMFS setting, bundle); separate = they stay out of the IPA and the Xcode app: the build is small and fast, and the RomFS image '
                     'is copied to the phone once per game version with the scripts/push_romfs.sh command printed at the end (the app refuses an image of another version)')
+    ap.add_argument('--romfs-format', choices=pack_dump.FORMATS, help='a dump folder\'s RomFS: image = RomFS.img, one file (default: the ROMFS_FORMAT setting, image); folder = a folder of APFS clones of the dump\'s files, '
+                    'which takes almost no disk space on the dump\'s volume (a Mac build only: --platform mac or mac-app)')
     ap.add_argument('--shader-files', action=argparse.BooleanOptionalAction, help='an NVN game\'s shader library goes into the IPA as its separate files, not as one file, for install tools that cannot copy '
                     'a large file (AltServer: 2 GiB; the game files then need --romfs separate too) (default: the SHADER_FILES setting, off)')
     ap.add_argument('--prepare-xcode', action='store_true', help='prepare a per-game Xcode project and add it to the shared workspace instead of packing an IPA (requires keeping extracted files)')
@@ -2936,6 +2958,10 @@ def main(args=None):
     if nsp_dir.is_file(): nsp_dir = nsp_dir.parent
     global NSP_FOLDER; NSP_FOLDER = nsp_dir
     dump = 'nup' if nup else 'folder' if dump_folder(nsp_dir) else None   # their files are not encrypted, so they need no keys
+    romfs_format = args.romfs_format or ROMFS_FORMAT
+    if romfs_format not in pack_dump.FORMATS: raise BuildError(f'ROMFS_FORMAT / --romfs-format must be {" or ".join(pack_dump.FORMATS)}: {romfs_format}')
+    if romfs_format == 'folder' and dump != 'folder': raise BuildError('--romfs-format folder clones a dump folder\'s files; ' + ('a NUP' if nup else 'NSPs') + ' are unpacked into an image (RomFS.img)')
+    if romfs_format == 'folder' and not mac: raise BuildError(f'--romfs-format folder is for a Mac build (--platform mac or mac-app): an iPhone app carries its game files as one image, not --platform {platform}')
     keys = None if dump else Path(os.path.expanduser(args.keys or PROD_KEYS or ask('path of prod.keys: ', 'prod.keys (-k)'))).resolve()
     if keys and not keys.is_file(): raise BuildError(f'no such file: {keys}')
     user_icon = Path(os.path.expanduser(args.icon or ICON)).resolve() if args.icon or ICON else None   # checked now, not after the extraction: build_ipa.sh would only log a missing one
@@ -3036,7 +3062,7 @@ def main(args=None):
     picks = pick_nsps(fam, have, versions)
 
     ex = work / 'extract'; ex.mkdir(parents=True, exist_ok=True); (work / 'tmp').mkdir(exist_ok=True)
-    gb = (sum(fam['nup'].tree_bytes(pack_nup.romfs_of(u or b, b)) for b, u in picks.values()) if nup else sum(tree_size((u or b) / 'romfs')[1] for b, u in picks.values()) if dump else extract_bytes(picks, False)) / 2**30 + 6   # every merged image is complete, including on APFS; shader cache + slack
+    gb = (sum(fam['nup'].tree_bytes(pack_nup.romfs_of(u or b, b)) for b, u in picks.values()) if nup else 0 if romfs_format == 'folder' else sum(tree_size((u or b) / 'romfs')[1] + (tree_size(b / 'romfs')[1] if u and pack_dump.is_pack(u) else 0) for b, u in picks.values()) if dump else extract_bytes(picks, False)) / 2**30 + 6   # every merged image is complete, including on APFS; shader cache + slack
     if free_gb(work) < gb and not all((ex / v).exists() for v in versions): raise BuildError(f'less than {gb:.0f} GB free on the volume of {work}')
     heapck = provisional and HEAP_CHECK and not args.no_heap_check and not heap_checked(g)   # the heap check, when the game needs one (once per provisional profile: it stamps the profile)
     PROG.plan(len(versions) + bool(fam['dlc']) + 4 - (prepare_xcode or (mac and not mac_pack)))   # prepare Xcode (a Mac-only build: the Mac host) replaces app build + IPA pack with one stage (a Mac app: Mac host + Mac app)
@@ -3044,7 +3070,7 @@ def main(args=None):
     dirs = {}
     for ver in versions:   # each merged version streams directly into its own image
         b, u = picks[ver]
-        dirs[ver] = extract_nup(ex, ver, u or b, b, app, fam['nup']) if nup else extract_dump(ex, ver, u or b, app) if dump else extract(nx, keys, ex, ver, b, u, None, logs, g, app)
+        dirs[ver] = extract_nup(ex, ver, u or b, b, app, fam['nup']) if nup else extract_dump(ex, ver, u or b, app, b, romfs_format) if dump else extract(nx, keys, ex, ver, b, u, None, logs, g, app)
         if not nup and not dump: extract_html(nx, keys, dirs[ver], b, u, logs, app)
     check_formats(dirs)
     check_versions_aarch64(dirs, logs, g, nacp.name(dirs[versions[0]] / 'control.nacp') or f'{app:016X}')   # before build_mismatch, derive_profile and build_sources read the modules
@@ -3157,7 +3183,7 @@ def main(args=None):
         programs = other_programs(args, g)
         if not icon: say(('no game icon: the NUP carries none' if nup else 'no game icon: a dump folder has no control data') + '; the app\'s icon will be blank; --icon / ICON gives it one' if dump else '[RED] no game icon in the extraction (an older extraction did not save it: delete extract/ and run again); the app\'s icon will be blank')
         mac_app(py, repo, out_ipa, app, work, game, patched, host, font, ios, aoc, gfx, lang, g, app_name, app_version, bundle_id, icon, args.mac_sign or MAC_SIGN, env, logs, env_file,
-                (args.gpu or PSO_GPUS).strip(), programs, control)
+                (args.gpu or PSO_GPUS).strip(), programs, control, nsp_dir if dump == 'folder' else None)
         rmtree(work / 'tmp')
         say(f'done: {out_ipa} ({tree_size(out_ipa)[1] / 2**30:.1f} GB); '
             f'open it from Finder. Its save is in ~/Library/Application Support/nxnative/{app:016X}/, its log in ~/Library/Logs/nxnative/{app:016X}.log')

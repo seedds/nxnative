@@ -61,6 +61,10 @@ Joy-Con 2 and the Pro Controller 2 do not appear in macOS's Bluetooth settings: 
 
 The mouse pointer hides when you press a key or a controller button, or move a stick, while it is over the game picture. Moving the mouse shows it again, as does switching to another window or app.
 
+## Mods
+
+RomFS mods (LayeredFS) go in the game's `mods` folder: `~/Library/Application Support/nxnative/<title ID>/mods` on the Mac, `mods` in the app's Documents on the iPhone. Each mod is a folder with a `romfs` folder in it, as mod pages ship them for Atmosphère or the yuzu-family emulators (`mods/<mod name>/romfs/...`); an SD card's `atmosphere/contents/<title ID>/romfs` tree works too. Where two mods change the same file, the one whose folder name sorts first wins. To turn a mod off without deleting it, put its folder name on a line of `mods/disabled.txt`. Mods take effect at the next start. Code patches (a mod's `exefs` folder) are not supported: the log says so. [More](development.md#layeredfs-mods).
+
 ## Shaders on first sight
 
 Short stutters the first time a new scene appears are normal: the app compiles graphics for it once and remembers them for the next launch. What it remembered, and what the game's list names, is built before the game starts, behind "Preparing shaders" and a progress bar when that takes more than half a second.

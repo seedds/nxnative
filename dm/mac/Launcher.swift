@@ -31,6 +31,7 @@ struct LauncherView: View {
             Form {
                 settingSections(basic: true)
                 CloudSavesSection()
+                FoldersSection()
                 Section {
                     DisclosureGroup("Advanced settings", isExpanded: $advanced) {}
                 }
@@ -115,6 +116,44 @@ struct CloudSavesSection: View {
     static func shown(_ path: String) -> String {
         guard path == drive || path.hasPrefix(drive + "/") else { return path }
         return (["iCloud Drive"] + path.dropFirst(drive.count).split(separator: "/").map(String.init)).joined(separator: " › ")
+    }
+}
+
+/// Folders: the game's folders in the Finder. The save and the LayeredFS mods are the host's (launcher.c DM_ROOT and DM_SAVE, which an env file may set; hle_fs.c rom_layers DM_MODS), under
+/// ~/Library/Application Support/nxnative/<title ID>/; the mods folder is made when it is opened. The base game and its update packs are the dump folder the app was built from (Info.plist
+/// DMDumpFolder, pack_app.py --dump-folder, scripts/pack_dump.py), which the game reads only when the app is built again: a button is off when the app has none or it is gone
+struct FoldersSection: View {
+    struct Folder: Identifiable { let id: String; let path: String?; let make: Bool }
+
+    static let folders: [Folder] = {
+        let env = ProcessInfo.processInfo.environment
+        let root = env["DM_ROOT"] ?? (NSHomeDirectory() + "/Library/Application Support/nxnative/" + (info("DMTitleID") ?? ""))
+        let m = env["DM_MODS"] ?? "", mods: String? = ["0", "off"].contains(m.lowercased()) ? nil : m.isEmpty ? root + "/mods" : m   // DM_MODS=0 / off: no mods
+        let dump = info("DMDumpFolder").flatMap { $0.isEmpty ? nil : $0 }
+        return [Folder(id: "Saves", path: env["DM_SAVE"] ?? root + "/save", make: true), Folder(id: "Mods (LayeredFS)", path: mods, make: true),
+                Folder(id: "Base game", path: dump.map { $0 + "/base" }, make: false), Folder(id: "Updates", path: dump.map { $0 + "/updates" }, make: false)]
+    }()
+
+    var body: some View {
+        Section {
+            HStack {
+                ForEach(Self.folders) { f in
+                    Button(f.id) { Self.open(f) }
+                        .disabled(f.path == nil || (!f.make && !FileManager.default.fileExists(atPath: f.path!)))
+                        .help(f.path ?? "Off")
+                }
+            }
+        } header: {
+            Text("Folders")
+        } footer: {
+            Text("Each mod goes in Mods (LayeredFS) as <mod name>/romfs/. When two mods change the same file, the one whose name sorts first wins. The base game and updates are the files this app was built from: a change there takes a new build.")
+        }
+    }
+
+    static func open(_ f: Folder) {
+        guard let path = f.path else { return }
+        if f.make { try? FileManager.default.createDirectory(atPath: path, withIntermediateDirectories: true) }
+        NSWorkspace.shared.open(URL(fileURLWithPath: path, isDirectory: true))
     }
 }
 

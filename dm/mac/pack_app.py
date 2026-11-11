@@ -6,7 +6,7 @@
 # and dm/ (the rewritten modules and their rewriter tables, nro.tsv, the profile's shader_map.tsv / pso_manifest.tsv / c1_full.tsv / cb_extent.tsv / shader_pairs.tsv / pso_pairs.tsv, font/, env.txt,
 # launcher.json: the game's launcher settings, dm/games/settings.py, which the settings window and Mac front ends show),
 # plus AppIcon.icns from the game's icon (sips, iconutil) and the Info.plist keys the launcher reads (DMTitleID, DMRomfsMarker, DMLanguage).
-# The large folders are APFS clones (cp -c) when the app is on the same APFS volume as the build, so they take no space; plain copies otherwise.
+# The large folders, and an NVN game's library image, are APFS clones (cp -c) when the app is on the same APFS volume as the build, so they take no space; plain copies otherwise (copy_msl).
 # Signing: the inner host first, then the bundle (codesign --force --sign <identity>; '-' = ad-hoc), without the hardened runtime: the host maps the game's code executable, which the hardened
 # runtime refuses without entitlements, and so the app cannot be notarized. The bundle is stripped of its "._name" files first: on exFAT (an external drive for the build or the app) every
 # file's extended attributes live in such a file beside it, and codesign reads each one as a code object that is not signed, which fails the whole bundle.
@@ -126,6 +126,7 @@ def info_plist(a, minos, icon):
          'NSBluetoothAlwaysUsageDescription': 'Connect Switch 2 Joy-Con and Pro Controllers over Bluetooth.',
          'LSApplicationCategoryType': a.category or 'public.app-category.games', 'LSSupportsGameMode': False, 'DMTitleID': a.title_id.upper(), 'DMRomfsMarker': a.marker or '', 'DMLanguage': a.lang or 'en-US', 'DMSaveSyncChoice': 1}
     if icon: p['CFBundleIconFile'] = 'AppIcon'
+    if a.dump_folder: p['DMDumpFolder'] = str(Path(a.dump_folder).resolve())   # the settings window's Base game and Updates buttons (Launcher.swift FoldersSection)
     if a.settings:
         listed = json.loads(Path(a.settings).read_text(encoding='utf-8'))['settings']
         p['DMSettings'] = settings_rules(listed)
@@ -195,8 +196,15 @@ def msl_inputs(msl):
     return files if any(p.suffix == '.metallib' for p in files) else []
 
 
-def copy_msl(msl, msls, dst, clone):
-    """The shader libraries to dst, msl/<their name> in the app: an NVN game's as the one file dst.img, of what the host reads. Writing it costs the space of a copy, not a clone, as it leaves out the Mac build's sources"""
+def clones_image(msl, clone, subset):   # whether an NVN game's library goes in as an APFS clone of its image, sources and all, rather than as a written subset
+    return clone and not subset and is_chain_library(msl) and str(shader_lib.view(msl)).endswith('.img')
+
+
+def copy_msl(msl, msls, dst, clone, subset=False):
+    """The shader libraries to dst, msl/<their name> in the app: an NVN game's as the one file dst.img. On the build's volume that is a clone of the build's image, which takes no space: the host
+    reads its files by name, so the Mac build's .metal sources and report in it are only bytes it never reads (Ocarina of Time: a 10 GB library that a written copy would need room for twice).
+    Otherwise, or with subset (--msl-subset, an app to share), a new image of only what the host reads, which costs the space of a copy"""
+    if clones_image(msl, clone, subset): copy([Path(shader_lib.image_of(msl))], Path(f'{dst}.img'), True); return
     if is_chain_library(msl): shader_lib.subset(msl, f'{dst}.img'); return
     dst.mkdir(parents=True); copy(msls, dst, clone)
 
@@ -309,7 +317,7 @@ def pack(a):
     # each source is probed on its own, as they may lie on different volumes; cp -c copies what it cannot clone, so a probe decides only the free-space check and the step line
     trees, lists = {'romfs': romfs, 'aoc': aoc}, {'mods': mods, 'msl': msls, 'pso': pso}
     clone = {k: bool(d) and can_clone(d, res) for k, d in trees.items()} | {k: bool(ps) and can_clone(ps[0], res) for k, ps in lists.items()}
-    if is_chain_library(msl): clone['msl'] = False   # copy_msl writes it, which the free-space check below counts
+    if is_chain_library(msl) and not clones_image(msl, clone['msl'], a.msl_subset): clone['msl'] = False   # copy_msl writes it, which the free-space check below counts
     need = sum(tree_bytes(d) for k, d in trees.items() if d and not clone[k]) + sum(p.stat().st_size for k, ps in lists.items() if not clone[k] for p in ps)
     if need:
         free = shutil.disk_usage(res).free
@@ -323,7 +331,7 @@ def pack(a):
     if fonts: copy(fonts, dm / 'font', False)
     if a.env_file: shutil.copyfile(a.env_file, dm / 'env.txt')
     if a.settings: shutil.copyfile(a.settings, dm / 'launcher.json')
-    step('shader libraries'); msl_dst = res / 'msl' / (a.msl_name or msl.name); msl_dst.parent.mkdir(exist_ok=True); copy_msl(msl, msls, msl_dst, clone['msl'])
+    step('shader libraries'); msl_dst = res / 'msl' / (a.msl_name or msl.name); msl_dst.parent.mkdir(exist_ok=True); copy_msl(msl, msls, msl_dst, clone['msl'], a.msl_subset)
     if aoc: step('add-on content'); copy([aoc], res / 'aoc', clone['aoc'])
     if pso: step('pipeline archive'); (res / 'pso').mkdir(); copy(pso, res / 'pso', clone['pso'])
     step('game files'); copy([romfs], res / ('romfs.img' if romfs.is_file() else 'romfs'), clone['romfs'])
@@ -374,6 +382,8 @@ def parse(argv):
     ap.add_argument('--romfs', required=True, help='the RomFS of the packed version')
     ap.add_argument('--msl', required=True, help='the Mac shader libraries: <shader>/cache/b-<chain>, or a Vulkan or GL game\'s <shader>/vk or gl')
     ap.add_argument('--msl-name', help='its folder name in the app (default: its own)')
+    ap.add_argument('--msl-subset', action='store_true', help='an NVN game\'s library as a new image of only what the host reads, also on the build\'s volume, where it is otherwise a clone of the build\'s image with '
+                    'the Mac build\'s .metal sources in it: for an app to share, at the cost of the library\'s space')
     ap.add_argument('--tables', required=True, help='the game profile folder (shader_map.tsv and the tables beside it)')
     ap.add_argument('--font', required=True, help='the folder of the shared-font stand-ins (nintendo_ext.ttf)')
     ap.add_argument('--aoc', help='the DLC RomFS images or folders by index')
@@ -381,6 +391,7 @@ def parse(argv):
     ap.add_argument('--pso-pairs', help='pso_pairs.tsv for a profile that has none (the shader split\'s copy)')
     ap.add_argument('--html', help='the offline HTML pages (nx_extract --html), which go beside the RomFS')
     ap.add_argument('--program', action='append', help='another program of a game of several programs: index, rewritten modules, RomFS, Mac shader libraries, tables, offline pages (tab-separated)')
+    ap.add_argument('--dump-folder', help='the dump folder the app was built from (scripts/pack_dump.py: base/, updates/), which the settings window opens in the Finder (Info.plist DMDumpFolder)')
     ap.add_argument('--env-file', help='environment switches baked in (Resources/dm/env.txt)')
     ap.add_argument('--settings', help='the game\'s launcher settings (dm/games/settings.py output; Resources/dm/launcher.json, which the Mac front end reads)')
     ap.add_argument('--title-id', required=True); ap.add_argument('--name', required=True)

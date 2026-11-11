@@ -126,6 +126,118 @@ def pack(src, dst, reuse=False):
     return len(ents)
 
 
+# Layered RomFS trees: an update pack (pack_dump.py: updates/<version>/romfs holding only the files the update adds or changes, and romfs_removed.txt the base files it drops)
+# laid over the base game's RomFS. roots[0] wins: a file there hides the same path in the roots after it, and a folder merges with the same folder in them. removed lists guest paths
+# ('Voice/USen/x.bwav', no leading slash) that the roots after the first lose, a folder with everything under it; the first root keeps a removed path it holds itself.
+# A folder that had files and lost all of them to the removals goes too, as it would from the update's own tree; an empty folder in a root stays.
+def removed_paths(lines):   # the guest paths of a romfs_removed.txt's lines: blank lines and # comments left out, a leading slash or romfs/ dropped, backslashes as slashes
+    out = set()
+    for line in lines:
+        p = line.strip().replace('\\', '/')
+        if not p or p.startswith('#'): continue
+        p = p.lstrip('/')
+        if p.startswith('romfs/'): p = p[len('romfs/'):]
+        out.add(p.rstrip('/'))
+    return out
+
+
+def _merge(dirs, rel, removed):   # dirs: the host folders of one guest folder, top root first, as (layer, path) → (sorted [(name, host path, is dir, merged children)], whether removals emptied it)
+    kids, lost = {}, False
+    for layer, d in dirs:
+        for name, path, isdir in children(d):
+            r = rel + '/' + name.decode('utf-8', 'surrogateescape') if rel else name.decode('utf-8', 'surrogateescape')
+            if layer and r in removed: lost = True; continue
+            k = kids.get(name)
+            if k is None: kids[name] = [path, isdir, [(layer, path)] if isdir else None, r]
+            elif k[1] and isdir: k[2].append((layer, path))
+    out = []
+    for name in sorted(kids):
+        path, isdir, sub, r = kids[name]
+        if isdir:
+            merged, emptied = _merge(sub, r, removed)
+            if emptied and not merged: lost = True; continue
+            out.append((name, path, True, merged))
+        else: out.append((name, path, False, None))
+    return out, lost and not out
+
+
+def layered_entries(roots, removed=()):
+    """entries() of the roots laid over each other: [name, host path, is dir, a, b], breadth-first, with each entry's guest path in a sixth field"""
+    roots = [os.fspath(r) for r in roots]
+    top, _ = _merge(list(enumerate(roots)), '', set(removed))
+    ents, subs, i = [[b'', roots[0], True, 0, 0, '']], [top], 0
+    while i < len(ents):
+        if ents[i][2]:
+            kids = subs[i]
+            ents[i][3], ents[i][4] = len(ents), len(kids)
+            for name, path, isdir, merged in kids:
+                ents.append([name, path, isdir, 0, 0, (ents[i][5] + '/' if ents[i][5] else '') + name.decode('utf-8', 'surrogateescape')]); subs.append(merged)
+        else: subs[i] = None
+        i += 1
+    return ents
+
+
+def layered_digest(roots, removed, ents):
+    h = hashlib.sha256(Path(__file__).read_bytes())
+    for r in roots: h.update(os.fsencode(os.path.realpath(r)) + b'\0')
+    for p in sorted(removed): h.update(p.encode('utf-8', 'surrogateescape') + b'\0')
+    for name, path, isdir, *_ in ents:
+        h.update(struct.pack('<I?', len(name), isdir)); h.update(name)
+        h.update(json.dumps(file_identity(path)).encode() + b'\0')
+    return h.hexdigest()
+
+
+def pack_layers(roots, dst, removed=(), reuse=False):   # pack() of the roots laid over each other; returns the number of entries
+    roots, dst, removed = [os.fspath(r) for r in roots], os.fspath(dst), set(removed)
+    if len(roots) == 1 and not removed: return pack(roots[0], dst, reuse)
+    ents = layered_entries(roots, removed)
+    digest = layered_digest(roots, removed, ents)
+    if reuse and reusable(dst, digest): return len(ents)
+    part = write([e[:5] for e in ents], dst, copy_file)
+    if layered_digest(roots, removed, layered_entries(roots, removed)) != digest:
+        os.unlink(part)
+        raise RuntimeError('RomFS changed while packing; run the packer again when its files are stable')
+    publish(part, dst, digest)
+    return len(ents)
+
+
+def _clonefile():   # libc's clonefile(2): an APFS copy-on-write clone of one file, which takes no space of its own; None off macOS
+    try:
+        import ctypes, ctypes.util
+        f = ctypes.CDLL(ctypes.util.find_library('c'), use_errno=True).clonefile
+        f.argtypes, f.restype = (ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint32), ctypes.c_int
+        return f
+    except (OSError, AttributeError): return None
+
+
+def clone_tree(roots, dst, removed=(), reuse=False):
+    """The roots laid over each other as a folder at dst, each file an APFS clone of its source (a copy when the volume cannot clone): a RomFS folder the host reads as it reads
+    an image (DM_ROMFS), at almost no disk space when the sources are on the same APFS volume. Written as <dst>.partial and renamed; reused while the stamp beside it matches.
+    Returns (entries, files cloned, files copied)"""
+    import shutil
+    roots, dst, removed = [os.fspath(r) for r in roots], os.fspath(dst).rstrip('/'), set(removed)
+    ents = layered_entries(roots, removed)
+    digest = layered_digest(roots, removed, ents)
+    if reuse and os.path.isdir(dst) and reusable(dst, digest): return len(ents), 0, 0
+    part = dst + '.partial'
+    if os.path.lexists(part): shutil.rmtree(part)
+    os.makedirs(part)
+    clone, cloned, copied = _clonefile(), 0, 0
+    for name, path, isdir, _, _, rel in ents[1:]:
+        out = os.path.join(part, rel)
+        if os.path.lexists(out): raise RuntimeError(f'{rel}: another name in the RomFS differs from it only in letter case, which this volume cannot keep apart; pack an image instead')
+        if isdir: os.mkdir(out); continue
+        if clone and clone(os.fsencode(path), os.fsencode(out), 0) == 0: cloned += 1
+        else: shutil.copy2(path, out); copied += 1
+    if layered_digest(roots, removed, layered_entries(roots, removed)) != digest:
+        shutil.rmtree(part)
+        raise RuntimeError('RomFS changed while packing; run the packer again when its files are stable')
+    if os.path.lexists(dst): shutil.rmtree(dst)
+    os.replace(part, dst)
+    stamp(dst, digest, file_identity(dst))
+    return len(ents), cloned, copied
+
+
 def read_index(img):   # for tests and checks: {guest path: (is dir, offset, size)}
     with open(img, 'rb') as f:
         magic, ioff, isz, n = HEAD.unpack(f.read(HEAD.size))
@@ -159,6 +271,23 @@ def format_mismatches(img, progress=None):   # [(guest path, size, first 4 bytes
             f.seek(off); head = f.read(min(size, 4))   # not into the next file's bytes
             if not any(len(head) == 4 and all(h & m == w & m for h, w, m in zip(head, want, mask)) for want, mask in FORMAT_HEADS[os.path.splitext(p)[1].lower()]):
                 bad.append((p, size, head))
+    return bad
+
+
+def folder_format_mismatches(folder, progress=None):   # format_mismatches of a RomFS folder (clone_tree's): [(guest path, size, first 4 bytes)]
+    files = []
+    for d, _, names in os.walk(folder):
+        for n in names:
+            if os.path.splitext(n)[1].lower() in FORMAT_HEADS: files.append(os.path.join(d, n))
+    files.sort()
+    bad = []
+    for k, path in enumerate(files):
+        if progress and not k % 4096: progress(k, len(files))
+        size = os.path.getsize(path)
+        if not size: continue
+        with open(path, 'rb') as f: head = f.read(4)
+        if not any(len(head) == 4 and all(h & m == w & m for h, w, m in zip(head, want, mask)) for want, mask in FORMAT_HEADS[os.path.splitext(path)[1].lower()]):
+            bad.append((os.path.relpath(path, folder), size, head))
     return bad
 
 

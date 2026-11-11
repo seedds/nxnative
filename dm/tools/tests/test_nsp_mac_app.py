@@ -68,6 +68,26 @@ class Copy(unittest.TestCase):
                     self.assertLess(size, 8192)
                 self.assertEqual(copied, srcs)
 
+    def test_library_image_clone(self):   # on the build's volume the app's library is a clone of the build's image, sources and all; --msl-subset, or no clone, writes only what the host reads
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1])); import romfs
+        t = Path(tempfile.mkdtemp(dir=TEST_ROOT)).resolve()
+        try:
+            lib = t / 'cache/b-0123456789ab'; lib.mkdir(parents=True)
+            for n, b in (('k_b.metallib', b'lib'), ('k_b.json', b'{}'), ('k_b.metal', b'msl'), ('_b_build.json', b'[]'), ('inputs.tsv', b'# stamp\n')): (lib / n).write_bytes(b)
+            with contextlib.redirect_stdout(io.StringIO()): pack_app.shader_lib.pack(str(lib))
+            image = Path(pack_app.shader_lib.image_of(lib)); self.assertTrue(image.is_file())
+            msls = pack_app.msl_inputs(lib); self.assertEqual(msls, [image])
+            for clone, subset, names in ((True, False, ['_b_build.json', 'inputs.tsv', 'k_b.json', 'k_b.metal', 'k_b.metallib']), (True, True, ['inputs.tsv', 'k_b.json', 'k_b.metallib']),
+                                         (False, False, ['inputs.tsv', 'k_b.json', 'k_b.metallib'])):
+                with self.subTest(clone=clone, subset=subset):
+                    dst = t / f'app-{clone}-{subset}/msl/b-0123456789ab'; dst.parent.mkdir(parents=True)
+                    pack_app.copy_msl(lib, msls, dst, clone and pack_app.can_clone(image, dst.parent), subset)
+                    out = Path(f'{dst}.img')
+                    self.assertEqual(sorted(p.name for p in romfs.Path(out).iterdir()), names)
+                    self.assertEqual((romfs.Path(out) / 'k_b.metallib').read_bytes(), b'lib')
+                    self.assertEqual(out.read_bytes() == image.read_bytes(), clone and not subset)
+        finally: shutil.rmtree(t)
+
     def test_no_room_for_source(self):
         with mock.patch.object(os, 'sysconf', return_value=4096), mock.patch.dict(os.environ, {'PACK_APP_TEST': 'x' * 4096}, clear=True), mock.patch.object(pack_app, 'run') as run:
             with self.assertRaisesRegex(SystemExit, 'copy arguments exceed ARG_MAX'):
@@ -519,6 +539,12 @@ class App(unittest.TestCase):
             self.assertEqual(pack_app.info_plist(a, '14.0', None)['DMLanguage'], 'ja')   # --lang fr
             a.settings = None
             self.assertEqual(pack_app.info_plist(a, '14.0', None)['DMLanguage'], 'fr')   # no list: --lang as given
+
+    def test_dump_folder(self):   # the settings window's Base game and Updates buttons open <DMDumpFolder>/base and /updates; no key without --dump-folder
+        a = types.SimpleNamespace(**vars(self.args))
+        self.assertNotIn('DMDumpFolder', pack_app.info_plist(a, '14.0', None))
+        a.dump_folder = str(self.tmp)
+        self.assertEqual(pack_app.info_plist(a, '14.0', None)['DMDumpFolder'], str(self.tmp))
 
     def test_saved_choices(self):
         """launcher.<VAR> in the app's preferences domain, as a front end or a settings window saves it: used from Finder or the Dock, checked against this build's settings,

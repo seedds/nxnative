@@ -121,6 +121,22 @@ python3 scripts/cheat_anchor.py check FFCC.cheats.toml --nso <ExeFS/main>    # t
   - `import` refuses a file named after another build unless `--assume-build`; its unanchored cheats then stay bound to the file's own build. A file named after the game's title ID names no build, so it is taken as written for the NSO's build. `import` also counts the writes into the code that put back the word already there (restore entries): evidence that the file belongs to the NSO's build.
 - **Not yet:** `min` / `max` and never-decrease through pointer chains, anchors by IL2CPP names. Validation on FFCC and 13 Sentinels: [Cheats carried across game updates](reference/rewriter.md#cheats-carried-across-game-updates).
 
+## LayeredFS mods
+
+RomFS mods, as Atmosphère's LayeredFS and the yuzu-family emulators apply them: files laid over the game's RomFS at the paths the game reads, the game's own files untouched (`dm/host/hle_fs.c`, `rom_layers`). The mods folder is `DM_MODS`, else `<DM_ROOT>/mods`: on the Mac `~/Library/Application Support/nxnative/<title ID>/mods`, on iOS `Documents/mods`. It holds:
+
+```
+mods/
+  00 Better HUD/romfs/UI/...                     one folder per mod: its romfs/ (any letter case) holds the files it replaces or adds
+  10 Texture pack/romfs/Model/...
+  atmosphere/contents/<title ID>/romfs/...       an SD card's Atmosphère tree, as cheat sites and mod pages ship it
+  disabled.txt                                   mods left off, one folder name a line (# starts a comment)
+```
+
+Each rom mount (`h_fs_MountRom` and its overloads) takes its layers once: `DM_ROMFS_OVERLAY`'s folders first, then the mods in byte order of their folder names, then the Atmosphère tree, then the game's RomFS (an image or a folder). For a path the first layer that has it wins; a directory lists the names of every layer once, with the size and type of the layer that wins. So a mod named `00 …` wins over one named `10 …` where both have a file, as the yuzu family orders them. `DM_MODS_DISABLED=<a>,<b>` leaves mods off as `disabled.txt` does, and `DM_MODS=0` (or `off`) turns all of them off. The log names each layer (`mods: RomFS layer …`). A mod cannot delete a game file, as on a Switch.
+
+A mod's `exefs/` (IPS or IPSwitch code patches, replaced NSOs) is not applied, and the log says so with a `[RED]` line: the game's code is rewritten for Apple's kernel when the app is built (`dm/tools/patch_nso.py`), so a code patch has to go in before that step, against the build ID the profile registers. Cheats are separate ([Cheats](#cheats)).
+
 ## Guest memory SVCs
 
 `dm/host/hle_svc.c` serializes heap resizing, physical map/unmap, stack
@@ -365,6 +381,16 @@ python3 scripts/build_ipa_from_nsp.py ~/Games/MarioWonder -k ~/keys/prod.keys --
 
 # keep this game's build folder elsewhere (used as given, not extended with the title ID; WORK_DIR in Spyder); the IPA then defaults to the folder holding it
 python3 scripts/build_ipa_from_nsp.py ~/Games/MarioWonder -k ~/keys/prod.keys --work-dir /Volumes/Builds/MarioWonder
+
+# an update pack in a dump folder: updates/<version>/ with the update's whole exefs/, a romfs/ of only the files the update adds or changes, and romfs_removed.txt listing the base files it drops.
+# Its RomFS is base/romfs with romfs/ laid over it, those paths left out (romfs_image.py layered_entries); -p v<version> picks it as it picks a whole update. scripts/nup_update_pack.py writes one from a NUP by the
+# SHA-256 the container stores for each file, reading only the files that differ (Ocarina of Time v131072: 2,285 files, 350 MB of a 26.3 GB RomFS); --base writes the base game too, else the folder's base/ is checked against the container
+python3 scripts/nup_update_pack.py ~/Games/Ocarina.nup ~/Games/Ocarina
+python3 scripts/build_ipa_from_nsp.py ~/Games/Ocarina --platform mac-app -p v131072
+
+# a dump folder's RomFS as a folder of APFS clones of its files, not a RomFS.img (ROMFS_FORMAT in Spyder): almost no disk space on the dump's volume, where the image is as big as the game. A Mac build only
+# (--platform mac or mac-app; the iPhone app carries one image); the app's game files are clones too (pack_app.py)
+python3 scripts/build_ipa_from_nsp.py ~/Games/Ocarina --platform mac-app --romfs-format folder
 
 # a folder of the game's files instead of NSPs (a dump: base/, updates/<version>/, dlc/; scripts/pack_dump.py lists the layout): no prod.keys; an update without base/ is the whole game, and exefs/ and romfs/ directly in the folder count as base/; a game with no profile is surveyed from the files and gets a provisional profile named after the folder; no icon, as a dump has no control data, unless --icon <image> (ICON) gives one
 python3 scripts/build_ipa_from_nsp.py ~/Games/DonkeyKongBananza --platform mac-app

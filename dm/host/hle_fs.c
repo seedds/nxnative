@@ -202,8 +202,6 @@ static Result mount_ex(const char *name, const char *dir, int ro, int txn) {
     g_mnt[g_nmnt].txn_root = -1;
     atomic_store(&g_mnt[g_nmnt].poison, 0);
     atomic_store(&g_mnt[g_nmnt].first_write_ns, 0);
-    const char *overlay = !strcmp(name, "rom") ? getenv("DM_ROMFS_OVERLAY") : NULL;
-    if (overlay) strlcpy(g_mnt[g_nmnt].overlay, overlay, sizeof g_mnt[0].overlay);
     // The transaction directory cannot be set up (leftovers cannot be cleared / clone failed, which really happens on a full disk): do not exit; mount the committed directory read-only -- saves still read, every write fails, commits are no-ops, the committed version is untouched, and the front end is told
     // (each of these three failures used to call die: with the phone's storage full the game exited as soon as it mounted its saves)
     int txn_err = 0, k = 0;
@@ -405,6 +403,107 @@ static int rom_overlay_path(const mount_t *m, const char *rest, char *out, size_
     if (found) return 1;
     errno = ENOENT; return 0;
 }
+// LayeredFS: RomFS mods in folders, laid over the game's RomFS without touching it, as Atmosphère and the yuzu-family emulators do. The mods folder is DM_MODS
+// (DM_MODS=0 or off: no mods), else <DM_ROOT>/mods (the Mac app's ~/Library/Application Support/nxnative/<title ID>/mods), else Documents/mods on iOS (beside DM_SAVE).
+// It holds one folder per mod, <mods>/<mod name>/romfs/ (a mod's files at the paths the game reads), and the Atmosphère tree, <mods>/atmosphere/contents/<title ID>/romfs/.
+// The layers, first match wins: DM_ROMFS_OVERLAY's folders, then the mods in byte order of their names (so "00 base fix" wins over "10 texture pack"), then the
+// Atmosphère tree, then the game's RomFS. A mod is off when its name is a line of <mods>/disabled.txt or an item of DM_MODS_DISABLED (comma-separated).
+// A mod's exefs/ is not applied: the game's code is rewritten when the app is built (dm/tools/patch_nso.py), so a code patch must go in at that step, not here.
+static int sub_caseless(const char *dir, const char *name, char *out, size_t n) {   // dir/<name> in any letter case, as a folder
+    DIR *d = opendir(dir); if (!d) return 0;
+    struct dirent *e; int found = 0; struct stat st;
+    while (!found && (e = readdir(d)))
+        if (!strcasecmp(e->d_name, name) && snprintf(out, n, "%s/%s", dir, e->d_name) < (int)n && !stat(out, &st) && S_ISDIR(st.st_mode)) found = 1;
+    closedir(d);
+    return found;
+}
+static void mods_add(char *out, size_t n, const char *root, const char *what) {
+    size_t len = strlen(out), k = strlen(root);
+    if (strchr(root, ':')) { LOG("[RED] mods: %s is not used: its path has a ':', which separates the RomFS layers", root); return; }
+    if (len + (len ? 1 : 0) + k + 1 > n) { LOG("[RED] mods: %s is not used: the RomFS layers' paths are longer than %zu bytes in all", root, n - 1); return; }
+    if (len) out[len++] = ':';
+    memcpy(out + len, root, k + 1);
+    LOG("mods: RomFS layer %s (%s)", root, what);
+}
+static int mods_disabled(const char *name, const char *list) {   // whether DM_MODS_DISABLED or disabled.txt's lines (list) name the mod
+    const char *e = getenv("DM_MODS_DISABLED");
+    if (e && *e) {
+        size_t k = strlen(name);
+        const char *s = e; while (*s == ' ') s++;
+        while (*s) {
+            size_t m = strcspn(s, ","); while (m && s[m - 1] == ' ') m--;
+            if (m == k && !memcmp(s, name, k)) return 1;
+            s += strcspn(s, ","); if (*s) s++; while (*s == ' ') s++;
+        }
+    }
+    for (const char *s = list; s && *s; s += strlen(s) + 1) if (!strcmp(s, name)) return 1;
+    return 0;
+}
+static char *mods_disabled_file(const char *path) {   // the lines of disabled.txt as consecutive NUL-terminated names (blank lines and # comments left out); NULL when there is none
+    FILE *f = fopen(path, "r"); if (!f) return NULL;
+    size_t cap = 4096, len = 0; char *out = malloc(cap), line[1024];
+    if (!out) die("mods: allocation failed");
+    while (fgets(line, sizeof line, f)) {
+        size_t k = strcspn(line, "\r\n"); line[k] = 0;
+        char *s = line; while (*s == ' ' || *s == '\t') s++;
+        k = strlen(s); while (k && (s[k - 1] == ' ' || s[k - 1] == '\t')) s[--k] = 0;
+        if (!k || *s == '#') continue;
+        while (len + k + 2 > cap) if (!(out = realloc(out, cap *= 2))) die("mods: allocation failed");
+        memcpy(out + len, s, k + 1); len += k + 1;
+    }
+    fclose(f); out[len] = 0;
+    return out;
+}
+static int mods_name_cmp(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
+// The RomFS layers of a rom mount into out (n bytes): DM_ROMFS_OVERLAY's folders, then the mods' RomFS folders, ':'-separated; empty when there are none
+static void rom_layers(char *out, size_t n) {
+    out[0] = 0;
+    const char *ov = getenv("DM_ROMFS_OVERLAY");
+    if (ov && *ov) { if (strlen(ov) >= n) LOG("[RED] fs DM_ROMFS_OVERLAY is longer than %zu bytes: not used", n - 1); else strlcpy(out, ov, n); }
+    const char *md = getenv("DM_MODS"); char dir[1024]; int asked = md && *md;
+    if (asked && (!strcmp(md, "0") || !strcasecmp(md, "off"))) { LOG("mods: off (DM_MODS=%s)", md); return; }
+    if (asked) strlcpy(dir, md, sizeof dir);
+    else if (getenv("DM_ROOT") && *getenv("DM_ROOT")) snprintf(dir, sizeof dir, "%s/mods", getenv("DM_ROOT"));
+    else if (getenv("DM_SAVE") && *getenv("DM_SAVE")) {   // iOS: DM_SAVE is Documents/save, and the mods go beside it
+        strlcpy(dir, getenv("DM_SAVE"), sizeof dir);
+        char *slash = strrchr(dir, '/'); if (!slash) return;
+        strlcpy(slash, "/mods", sizeof dir - (size_t)(slash - dir));
+    } else return;
+    DIR *d = opendir(dir);
+    if (!d) { if (asked) LOG("[RED] mods: DM_MODS=%s cannot be opened (errno=%d)", dir, errno); return; }
+    size_t cap = 16, nn = 0; char **names = malloc(cap * sizeof *names); struct dirent *e;
+    if (!names) die("mods: allocation failed");
+    while ((e = readdir(d))) {
+        if (e->d_name[0] == '.') continue;
+        char p[1280]; struct stat st;
+        if (snprintf(p, sizeof p, "%s/%s", dir, e->d_name) >= (int)sizeof p || stat(p, &st) || !S_ISDIR(st.st_mode)) continue;
+        if (nn == cap && !(names = realloc(names, (cap *= 2) * sizeof *names))) die("mods: allocation failed");
+        if (!(names[nn++] = strdup(e->d_name))) die("mods: allocation failed");
+    }
+    closedir(d);
+    qsort(names, nn, sizeof *names, mods_name_cmp);
+    char dpath[1100]; snprintf(dpath, sizeof dpath, "%s/disabled.txt", dir);
+    char *off = mods_disabled_file(dpath);
+    char tid[17]; snprintf(tid, sizeof tid, "%016llX", (unsigned long long)DM_GAME_PROGRAM_ID);
+    int used = 0;
+    for (int atmo = 0; atmo < 2; atmo++)   // the named mods first, then the Atmosphère tree
+        for (size_t i = 0; i < nn; i++) {
+            char mod[1280], rom[1400], c[1400], t[1400];
+            int is_atmo = !strcasecmp(names[i], "atmosphere");
+            if (is_atmo != atmo) continue;
+            snprintf(mod, sizeof mod, "%s/%s", dir, names[i]);
+            if (is_atmo) {   // atmosphere/contents/<title ID>/romfs: the title ID in either case
+                if (!sub_caseless(mod, "contents", c, sizeof c) || !sub_caseless(c, tid, t, sizeof t)) continue;
+                strlcpy(mod, t, sizeof mod);
+            }
+            if (mods_disabled(names[i], off)) { LOG("mods: %s is off (disabled.txt or DM_MODS_DISABLED)", names[i]); continue; }
+            if (sub_caseless(mod, "romfs", rom, sizeof rom)) { mods_add(out, n, rom, names[i]); used++; }
+            if (sub_caseless(mod, "exefs", c, sizeof c)) LOG("[RED] mods: %s/exefs is not applied: the game's code is rewritten when the app is built, so code patches go in at that step", names[i]);
+        }
+    if (used) LOG("mods: %d RomFS mod%s from %s, over the game's RomFS", used, used == 1 ? "" : "s", dir);
+    for (size_t i = 0; i < nn; i++) free(names[i]);
+    free(names); free(off);
+}
 // The path after the mount name is normalized lexically as Horizon's PathNormalizer does: "." is dropped, ".." goes up one level, and going above the root is an error (ResultDirectoryUnobtainable on hardware, reported here as not found).
 // Metroid Dread's stream sound paths are "rom:/system/snd/../../sounds/streams/...": ".." used to be reported as not found, and Atk's stream load task got an unexpected error code and aborted (main+0x1225a8c)
 static int norm_rest(const char *rest, char *out, size_t n) {
@@ -525,16 +624,19 @@ static Result err_res(const char *op, const char *path) {
 #define RW_CREATE() if (ro) { if (!access(hp, F_OK)) return RES_PATH_EXISTS; LOG("fs write to a read-only mount: %s", hp); return RES_FAIL; }
 
 // ---------- Mount ----------
+static int host_mounted(const char *name);
 HLE_FORCE("_ZN2nn2fs22QueryMountRomCacheSizeEPm", "fsp-srv; rom reads the host directory directly, the cache gets only the minimum size", Result, h_fs_QueryRomCache, size_t *out) { *out = 0x1000; return RES_OK; }
 HLE_FORCE("_ZN2nn2fs8MountRomEPKcPvm", "fsp-srv; rom → host RomFS directory", Result, h_fs_MountRom, const char *name, void *cache, size_t sz) { dm_thread_service_request();
     (void)cache; (void)sz; char b[1024];
+    if (host_mounted(name)) return RES_OK;   // mounted already: its layers stay as they were
     Result r = mount(name, envdir("DM_ROMFS", "romfs", b, sizeof b), 1);
-    const char *overlay = getenv("DM_ROMFS_OVERLAY");
-    if (r == RES_OK && overlay) {
+    char layers[sizeof g_mnt[0].overlay]; rom_layers(layers, sizeof layers);   // DM_ROMFS_OVERLAY, then the mods (LayeredFS)
+    if (r == RES_OK && layers[0]) {
         PATH_LOCK();
         for (int i = 0; i < g_nmnt; i++) if (mnt_named(&g_mnt[i], name)) {
-            strlcpy(g_mnt[i].overlay, overlay, sizeof g_mnt[i].overlay); break;
+            strlcpy(g_mnt[i].overlay, layers, sizeof g_mnt[i].overlay); break;
         }
+        LOG("fs mount %s: RomFS layers over it: %s", name, layers);
     }
     return r;
 }

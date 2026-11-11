@@ -49,6 +49,8 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                 IoVariable.VertexIndex => (BuiltIn.VertexIndex, AggregateType.S32),
                 IoVariable.ViewportIndex => (BuiltIn.ViewportIndex, AggregateType.S32),
                 IoVariable.ViewportMask => (BuiltIn.ViewportMaskNV, AggregateType.Array | AggregateType.S32),
+                IoVariable.BaryCoord => (BuiltIn.BaryCoordNV, AggregateType.Vector3 | AggregateType.FP32),
+                IoVariable.BaryCoordNoPersp => (BuiltIn.BaryCoordNoPerspNV, AggregateType.Vector3 | AggregateType.FP32),
                 _ => (default, AggregateType.Invalid),
             };
         }

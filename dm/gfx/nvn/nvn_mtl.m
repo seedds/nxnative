@@ -31,6 +31,7 @@
 #include "nvn_depth_clear.h"
 #include "nvn_refl.h"
 #include "nvn_cover.h"
+#include "nvn_sample.h"
 #include "nvn_border.h"
 #include "nvn_primitive.h"
 #include "nvn_timestamp.h"
@@ -10973,14 +10974,15 @@ static __unsafe_unretained id<MTLBuffer> g_c0_dim_buf; static size_t g_c0_dim_of
 // {mask, log2 samples, z, w} at 0x630; each byte holds the sample's x (low nibble) and y (high nibble) in 1/16 pixel. Metroid Prime Remastered's G-buffer shaders pack it into an
 // integer target (30 of its pixel shaders read it); left at 0, every sample sat in the pixel's corner instead of its centre (0x88 for one sample). Metal rasterizes at its default
 // positions, the same for every pixel, so the grid masks stay 0 and the table holds those positions. Only one sample was met: the nibble order for several is the hardware's
-// (nouveau's sample locations), not seen in a game
+// (nouveau's sample locations), not seen in a game. On NVN2 the nibbles are signed offsets from the centre (nvn_sample.h)
 static void c0_sample_rows(uint8_t *d, uint32_t samples) {
     static uint8_t table[17][DMSH_C0_SAMPLE_BYTES]; static uint32_t made;   // per sample count, made on first use
     if (samples < 1 || samples > DMSH_C0_SAMPLE_BYTES) samples = 1;
     if (!(made >> samples & 1)) {
-        if (samples == 1) table[1][0] = 0x88;
+        int centred = dm_sdk_ounce();
+        if (samples == 1) table[1][0] = nvn_sample_byte(0.5f, 0.5f, centred);
         else { MTLSamplePosition pos[DMSH_C0_SAMPLE_BYTES]; [g_dev getDefaultSamplePositions:pos count:samples];
-               for (uint32_t i = 0; i < samples; i++) table[samples][i] = (uint8_t)(((int)(pos[i].x * 16) & 15) | ((int)(pos[i].y * 16) & 15) << 4); }
+               for (uint32_t i = 0; i < samples; i++) table[samples][i] = nvn_sample_byte(pos[i].x, pos[i].y, centred); }
         made |= 1u << samples;
     }
     uint32_t info[4] = { samples - 1, (uint32_t)__builtin_ctz(samples), 0, 0 };

@@ -79,11 +79,11 @@ namespace Ryujinx.Graphics.Shader.Instructions
         {
             AmpereOp x = new(context.CurrOp);
             int addr = x.Bits(64, 72) << 2;
+            bool atOffset = x.Bits(76, 78) == 2;
 
-            if (x.Bits(76, 78) == 2)
-            {
-                throw AFail(context, "IPA at an offset");
-            }
+            // IPA.OFFSET Rd, a[addr], Rb (32..40): Rb holds the offset from the pixel's centre, x in its low half and y in its high one, each a signed 12-bit fixed-point
+            // number of 1/4096 pixel (NAK nak_nir_lower_fs_inputs.c load_barycentric_offset). Read before Rd is written, which may be the same register
+            Operand offset = atOffset ? context.Copy(x.Rb < RegisterConsts.RegisterZeroIndex ? Register(x.Rb, RegisterType.Gpr) : Const(0)) : null;
 
             Operand idxAddress = null;
 
@@ -95,6 +95,28 @@ namespace Ryujinx.Graphics.Shader.Instructions
             IpaOp ipaOp = x.Bits(78, 80) == 1 ? IpaOp.Constant : IpaOp.Pass;
 
             EmitIpa(context, idxAddress, addr, ipaOp, RegisterConsts.RegisterZeroIndex, false, x.Rd);
+
+            if (atOffset && ipaOp == IpaOp.Pass && x.Rd < RegisterConsts.RegisterZeroIndex)
+            {
+                // What IPA.PASS returns is linear in screen space across the triangle: a perspective attribute divided by w, or a[0x7c], 1 / w (the shader divides one by
+                // the other itself). So its value at the offset is the centre's plus the screen derivatives times the offset, exactly (helper lanes extrapolate the same
+                // plane). The IR has no interpolation at an offset, and SPIR-V's needs the input variable, not a loaded value. Window y runs the other way under YNegate.
+                // PRAGMATA's pixel shader 4a9d4507eea6c837 interpolates a[0x7c], a[0x3b4] and a[0x3b8] at its sample's position this way (the offset from the c0 + 0x620
+                // sample table, PIXLD.MY_INDEX)
+                Operand ox = context.FPMultiply(context.IConvertS32ToFP32(context.BitfieldExtractS32(offset, Const(0), Const(12))), ConstF(1f / 4096f));
+                Operand oy = context.FPMultiply(context.IConvertS32ToFP32(context.BitfieldExtractS32(offset, Const(16), Const(12))), ConstF(1f / 4096f));
+
+                if (context.TranslatorContext.Definitions.YNegateEnabled)
+                {
+                    oy = context.FPNegate(oy);
+                }
+
+                Operand v = Register(x.Rd, RegisterType.Gpr);
+                Operand ddx = context.Add(Instruction.Ddx, Local(), v);
+                Operand ddy = context.Add(Instruction.Ddy, Local(), v);
+
+                context.Copy(v, context.FPFusedMultiplyAdd(ddy, oy, context.FPFusedMultiplyAdd(ddx, ox, v)));
+            }
         }
 
         // Geometry and tessellation stages. OUT (opcode 0x124 in the ALU forms): Rd = the new output handle, Ra the old, the stream in the second source; 78..80 emit (1),

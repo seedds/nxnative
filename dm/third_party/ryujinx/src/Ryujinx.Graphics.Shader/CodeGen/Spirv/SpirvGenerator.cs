@@ -126,6 +126,14 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                 context.AddCapability(Capability.ShaderViewportIndexLayerEXT);
             }
 
+            if (context.Info.IoDefinitions.Contains(new IoDefinition(StorageKind.Input, IoVariable.BaryCoord)) ||
+                context.Info.IoDefinitions.Contains(new IoDefinition(StorageKind.Input, IoVariable.BaryCoordNoPersp)))
+            {
+                // the same numbers as SPV_KHR_fragment_shader_barycentric's; SPIRV-Cross makes them [[barycentric_coord]]
+                context.AddExtension("SPV_NV_fragment_shader_barycentric");
+                context.AddCapability(Capability.FragmentBarycentricNV);
+            }
+
             if (context.Info.IoDefinitions.Contains(new IoDefinition(StorageKind.Output, IoVariable.ViewportMask)))
             {
                 context.AddExtension("SPV_NV_viewport_array2");

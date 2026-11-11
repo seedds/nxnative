@@ -59,6 +59,29 @@ static void *frame_thread(void *unused) {
     CHECK(test_policy_calls == 1 && fabs(declared_ms() - 5.0) < 0.001, "a frame thread declares the acquire thread's period with its own computation, 1.25 x 4 ms");
     return NULL;
 }
+static void *present_only_thread(void *unused) {   // presents the frames another thread acquires (Ocarina of Time)
+    (void)unused; int n0 = atomic_load(&g_rtt_n);
+    test_cpu = 0; rt_present();
+    CHECK(atomic_load(&g_rtt_n) == n0 + 1 && t_rt_self && !t_rt_self->acq && !strcmp(t_rt_self->name, "presenting thread"), "a thread that presents without acquiring takes a slot of its own");
+    for (int i = 0; i < 119; i++) { test_cpu += 4000000; g_frame++; rt_present(); }
+    CHECK(test_policy_calls == 0, "the presenting thread declares nothing before its first window");
+    test_cpu += 4000000; g_frame++; rt_present();
+    CHECK(test_policy_calls == 1 && fabs(declared_ms() - 5.0) < 0.001, "the presenting thread declares with its own computation, 1.25 x 4 ms");
+    CHECK(atomic_load(&g_rtt_n) == n0 + 1, "presenting every frame keeps one slot");
+    return NULL;
+}
+static void *acquire_and_present_thread(void *unused) {
+    (void)unused; win_t w = {.interval = 1}; test_cpu = 0; acquire(&w); int n = atomic_load(&g_rtt_n);
+    for (int i = 0; i < 3; i++) { test_cpu += 1000000; g_frame++; acquire(&w); rt_present(); }
+    CHECK(atomic_load(&g_rtt_n) == n && t_rt_self && t_rt_self->acq, "a thread that acquires and presents keeps its one acquire slot");
+    return NULL;
+}
+static void *joined_and_present_thread(void *unused) {
+    (void)unused; void *h = nvn_rt_join("test frame thread"); int n = atomic_load(&g_rtt_n); test_cpu = 0;
+    for (int i = 0; i < 3; i++) { g_frame++; rt_present(); }
+    CHECK(h && atomic_load(&g_rtt_n) == n && t_rt_self == h, "a frame thread that presents takes no second slot");
+    return NULL;
+}
 static int self_run(const char *self, const char *mode) {
     pid_t pid; char *argv[] = {(char *)self, (char *)mode, NULL}; extern char **environ; int st = 0;
     if (posix_spawn(&pid, self, NULL, NULL, argv, environ)) return 1;
@@ -99,6 +122,9 @@ int main(int argc, char **argv) {
     for (int i = 0; i < 120; i++) frame(&w, 1, 20000000);
     CHECK(fabs(declared_ms() - 15.0) < 0.001, "the computation is capped at 0.9 x the period");
     CHECK(!pthread_create(&t, NULL, frame_thread, NULL), "start a frame thread"); pthread_join(t, NULL);
+    CHECK(!pthread_create(&t, NULL, present_only_thread, NULL), "start a presenting thread"); pthread_join(t, NULL);
+    CHECK(!pthread_create(&t, NULL, acquire_and_present_thread, NULL), "start an acquire and presenting thread"); pthread_join(t, NULL);
+    CHECK(!pthread_create(&t, NULL, joined_and_present_thread, NULL), "start a frame thread that presents"); pthread_join(t, NULL);
     printf("t_rt_comp auto: %d checks, %d failed\n", checks, failed);
     return failed != 0;
 }

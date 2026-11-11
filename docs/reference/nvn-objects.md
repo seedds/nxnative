@@ -679,6 +679,14 @@ Games read this count as a position in their own command memory and size their h
 - **Found on:** the source names no game.
 - **Check:** `t_dirty_slots` covers it.
 
+### A write missed while opening shared pool pages
+
+- **Symptom:** a CPU-written texture stays stale although its storage changed while the host made a zero-copy pool buffer.
+- **Cause:** `nvn_dirty_open` hashed and opened each pool range in turn. Adjacent 4 KB-aligned pools can share a 16 KB host page. Opening the first pool made the second pool's bytes writable before the second pool's hash was taken. A CPU write between those steps changed the first range's hash, but the second range's before/after hashes matched, leaving its texture clean with stale content. The race reaches only the host pages two pools share (a pool's first or last page): a write that also touches a texture's unshared pages faults there and marks it written, so only a texture, or a write, that lies wholly in a shared page is missed.
+- **Fix:** take and hash all protected ranges before making any of their pages writable. Closing still re-protects the pages and stamps only changed content; unchanged pages do not force texture uploads.
+- **Found on:** a synthetic reproduction while investigating [Ocarina of Time](../../dm/games/0400486024DEC000/README.md) [issue #2086](https://github.com/seedds/nxnative/issues/2086). Open: that issue's stale terrain map spans about 33 host pages, more than this race can reach by itself, so its cause is not found; one M2 Max run of 8 minutes saw Goron City's strobing ground stop with the fix, with no miss counts (PR #2136).
+- **Check:** `t_dirty_race` places two adjacent pools in one host page and makes a real store to the second pool immediately after the first becomes writable. Without the fix its texture is incorrectly clean; with the fix it is dirty. Opening and closing without a write stays clean. The existing fault, host-write, busy-page and pool-retirement tests also run without game files.
+
 ### Writes beside a packaged texture in a shared host page
 
 - **Symptom:** packaged textures re-uploaded at every use with unchanged content; upload staging and frame times rising.

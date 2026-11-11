@@ -64,6 +64,7 @@ One row per profile; the notes are each profile's `README.md`.
 | [Bayonetta](010076F0049A2000/README.md) | `010076F0049A2000` | 1.1 | 3.6.0 | PlatinumGames' engine (Wii U form) | NVN |
 | [Bayonetta 2](01007960049A0000/README.md) | `01007960049A0000` | 1.2 | 3.6.0 | PlatinumGames' engine (Wii U form) | NVN |
 | [Bayonetta 3](01004A4010FEA000/README.md) | `01004A4010FEA000` | 1.2.0 | 13.3.2 | PlatinumGames' engine | NVN |
+| [The Binding of Isaac: Rebirth](01009BC00C38A000/README.md) | `01009BC00C38A000` | 1.0 (base) | 5.5.0 | its own engine | NVN |
 | [Big Brain Academy: Brain vs. Brain](0100620012D6E000/README.md) | `0100620012D6E000` | 1.2.0 | 11.4.3 | NintendoWare Bezel Engine 1.56 | NVN |
 | [Blasphemous](0100698009C6E000/README.md) | `0100698009C6E000` | 1.0.8 | 8.3.1 | Unity 2017.4.28f1 IL2CPP, FMOD | NVN |
 | [Blasphemous 2](010040801A4C8000/README.md) | `010040801A4C8000` | 1.0.8 | 15.3.2 | Unity 2021.3.20f1 IL2CPP, FMOD | NVN |
@@ -119,6 +120,7 @@ One row per profile; the notes are each profile's `README.md`.
 | [Mario Party Superstars](01006FE013472000/README.md) | `01006FE013472000` | 1.1.1 | 11.4.3 | NintendoWare Bezel Engine 1.55 | NVN |
 | [Mario vs. Donkey Kong](0100B99019412000/README.md) | `0100B99019412000` | 1.0.1 (cartridge base) | 15.3.0 | Nintendo (sead / agl / gsys) | NVN |
 | [Metroid Dread](010093801237C000/README.md) | `010093801237C000` | 2.1.0 | 11.4.3 | MercurySteam's engine | NVN |
+| [Metroid Prime 4: Beyond](010019A01E2F2000/README.md) | `010019A01E2F2000` | 1.1.0 | 19.3.15 | Retro Studios' engine | NVN |
 | [Metroid Prime Remastered](010012101468C000/README.md) | `010012101468C000` | 1.0.0 (base) | 12.3.1 | Retro Studios' engine | NVN |
 | [Minecraft Dungeons II](0100A7C01B792000/README.md) | `0100A7C01B792000` | 1.1.3.0 | 20.5.15 | Unreal Engine 5, Wwise, Havok | NVN |
 | [Monster Hunter Rise](0100B04011742000/README.md) | `0100B04011742000` | 16.0.2 | 11.4.3 | Capcom's RE Engine | NVN |

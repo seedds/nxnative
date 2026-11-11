@@ -215,25 +215,27 @@ void nvn_dirty_open(const void *addr, size_t len) {
     pthread_mutex_lock(&g_slot_mu);
     g_nopen = 0;
     uintptr_t a = (uintptr_t)addr, e = a + len; int n = atomic_load(&g_nr);
+    // Every range's protected pages are hashed and taken before any page is opened, so each hash is of a read-only page: adjacent pools share their first / last host page, and opening one
+    // range's pages before hashing the next let a write to the shared page into that range's first hash, which then matched at the close (the write missed; t_dirty_race open_shared_page).
+    // The taken pages stay BUSY meanwhile: a fault or host write on one waits for the open below, and neither holds a BUSY page of its own while it waits
     for (int k = 0; len && k < n; k++) {
         range_t *r = rg(k);
         if (!live_at(k) || e <= r->base || a >= r->end) continue;
-        uintptr_t lo = a > r->base ? a : r->base, hi = e < r->end ? e : r->end, p = (lo - r->base) >> g_shift, q = (hi - 1 - r->base) >> g_shift, run = 0; int open = 0;
-        for (uintptr_t i = p; i <= q + 1; i++) {
-            // A protected page is read-only and, with g_slot_mu held, stays protected until someone unprotects it: hashed first, then taken; one unprotected meanwhile is not ours
-            uint8_t st = i <= q ? atomic_load(&r->state[i]) : PG_NONE; int took = 0;
+        uintptr_t lo = a > r->base ? a : r->base, hi = e < r->end ? e : r->end, p = (lo - r->base) >> g_shift, q = (hi - 1 - r->base) >> g_shift;
+        for (uintptr_t i = p; i <= q; i++) {
+            uint8_t st = atomic_load(&r->state[i]);
             if (st == PG_PROT) {
                 uint64_t h = page_hash((const void *)(r->base + (i << g_shift)));
-                if ((took = atomic_compare_exchange_strong(&r->state[i], &st, PG_BUSY))) open_add(r, i, h);
+                if (atomic_compare_exchange_strong(&r->state[i], &st, PG_BUSY)) open_add(r, i, h);
             }
-            if (took) { if (!open) { run = i; open = 1; } continue; }
-            if (open) {
-                mp(r->base + (run << g_shift), (i - run) << g_shift, PROT_READ | PROT_WRITE);
-                for (uintptr_t j = run; j < i; j++) atomic_store(&r->state[j], PG_OPEN);
-                open = 0;
-            }
-            if (st == PG_BUSY) busy_wait(r, i);   // being unprotected: writable once it is done (with g_slot_mu held nothing protects it), and the buffer must not be made before
+            if (st == PG_BUSY) busy_wait(r, i);   // another thread's unprotect: it finishes without taking g_slot_mu or waiting for another page
         }
+    }
+    for (size_t j = 0; j < g_nopen; ) {
+        range_t *r = g_open[j].r; size_t s = j++;
+        while (j < g_nopen && g_open[j].r == r && g_open[j].p == g_open[s].p + (j - s)) j++;
+        mp(r->base + (g_open[s].p << g_shift), (j - s) << g_shift, PROT_READ | PROT_WRITE);
+        for (size_t k = s; k < j; k++) atomic_store(&r->state[g_open[k].p], PG_OPEN);
     }
     atomic_fetch_add(&g_opened, g_nopen);
 }

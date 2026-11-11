@@ -54,6 +54,7 @@ DM_GAMES_DIR	path	Profile folders outside the repository, separated by `:`, sear
 DM_GAMES_FIRST	switch	`=1` searches `DM_GAMES_DIR` before `dm/games`, so a provisional or derived profile wins over the game's own (the NSP script's `--provisional`)
 DM_GAME_ENV	switch	`KEY=VALUE` pairs, separated by spaces, that the game's own `getenv` returns, in place of the profile's `game_env` (`hle_os.c`); any other name goes to the SDK's empty environment
 DM_GFX_FIXTURE_OUT	test	`=<dir>`: graphics tests write their raw result textures and buffers there
+DM_GFX_SCALE	diagnostic	The graphics scale tier `oe::GetCurrentGraphicsScale` answers: `0` (default, both modes), or `1` or `2`, the reduced tiers at which a Switch 2 game renders smaller
 DM_GLSLC_CAPTURE	path	`=<dir>` saves every GLSLC output the game compiles at run time; `shader_split.py` reads it (default `<version dir>/glslc_capture`)
 DM_GL_CAPTURE	path	`=<dir>`: the GL layer writes every shader source the game compiles (`<key>.vert` / `<key>.frag`) for `gl_shaders.py`; the NSP script uses it to capture run-time shaders
 DM_GL_DRAWLOG	diagnostic	`=<n>[:<seconds>]` logs the first `<n>` GL draws after `<seconds>`, each with its framebuffer, viewport, scissor box, program, uniforms, samplers and its vertex attributes' first vertices; `=1` or more also names samplers that have no texture
@@ -120,7 +121,9 @@ DM_NVN_API	switch	`=<major>.<minor>` overrides the NVN API version `nvnDeviceGet
 DM_NVN_BARRIER	switch	How draw passes are ordered: `full` (default) waits for all earlier GPU work, `game` only for the previous pass's fragment stage unless the game set a barrier, `ab` alternates with the `DM_AB` phases
 DM_NVN_BC_ALIAS	diagnostic	Set 0 to send copies to an uncompressed alias instead of its block-compressed storage, for an A/B check; default 1
 DM_NVN_BF_WANT	path	`=<file>`: appends the key of each fragment shader whose passes could not be merged for lack of a readable-tile version to that file, once per key
+DM_NVN_BLEND_ZERO	switch	`0` leaves a NaN or Inf colour under a zero blend weight to Apple's blender, which stores NaN; by default a pixel shader returns it as 0 where the draw's blend state gives its source colour a zero weight on a floating-point target, as NVIDIA's blender does with the option NVN's driver sets
 DM_NVN_BLIT_ORDER	diagnostic	`0` drops the barriers between dependent operations in the copy encoder, which reproduces the fountain's vertical stripes in Mario Wonder
+DM_NVN_BORDER_KEEP	diagnostic	1 keeps the border corrections in every pipeline, as before the DMSH_BORDER_FC specialization: a wrong border colour with the specialization, or its cost (ab with DM_AB)
 DM_NVN_CAPTURE	diagnostic	`=<frame>:1:<path>` writes that frame (from its first submit to its present) to one file: pool bytes, registries, program keys, the textures whose content lives only in Metal, each submission's records with pointers relocatable, and the presented frame's SHA-256 and pixels; `dm/gfx/tests/nvn_replay` replays it ([development.md](development.md#frame-capture-and-replay))
 DM_NVN_CBDUMP	diagnostic	`=<dir>`: saves each draw's whole uniform blocks as `F<frame>_p<pass>_st<stage>_cb<slot>_<address>.bin`, and the source bytes of buffer-to-3D-texture copies, with `DM_NVN_PASSDUMP`
 DM_NVN_CBDUMP_KEY	diagnostic	`=<shader key>`: limits `DM_NVN_CBDUMP` to draws using that shader; for a vertex shader key also saves the draw's vertex streams and index buffer
@@ -192,7 +195,7 @@ DM_NVN_RP_AREA	switch	`0` makes passes on targets of 16 M pixels or more cover t
 DM_NVN_RT_CONTINUE	switch	`0` ends the pass whenever the game sets render targets, as before; by default SetRenderTargets naming the open pass's targets continues the pass
 DM_NVN_RT_RANGE	switch	`=1` (experimental, off by default; with `DM_NVN_TBDR=1`) keeps the pass open when the game sets the same colour and depth target again with a view that differs only in its level count
 DM_NVN_RT_RANGE_CHECK	diagnostic	With `DM_NVN_RT_RANGE=1` and `DM_NVN_PASSDUMP`, renders a candidate pass both ways in the same frame and logs and writes the comparison (`CHECK_RESULTS.tsv`, `[RED]` on a difference)
-DM_NVN_RT_RECYCLE	switch	`0` makes each render target in a GPU-only pool its own Metal allocation, as before; by default it is placed in a heap of its own, and a freed one's heap is reused by the next target it fits (`ab` alternates it with the `DM_AB` phases)
+DM_NVN_RT_RECYCLE	switch	`0` makes each render target in a GPU-only pool, each feedback snapshot and each resolution family heap its own exact Metal allocation, freed with its texture, as before; by default they are placed in heaps from one free list, and a freed one's heap waits, resident, for the next texture it fits (`ab` alternates it with the `DM_AB` phases)
 DM_NVN_SHDUMP	diagnostic	`=<dir>` saves programs missing from the shader map as `<key>.ctl` (control section) and `<key>.code`, to find the files that hold them
 DM_NVN_SHMAP	path	The shader map (`shader_map.tsv`); `c1_full.tsv` and `pso_manifest.tsv` are taken from the same folder. Default: the game profile's folder on the Mac; the iOS app sets it
 DM_NVN_SHOT	diagnostic	`=<frame>[,<frame>…]:<path>` saves the swapchain texture as an image at those frames (`%d` in the path = frame number)
@@ -380,6 +383,7 @@ DM_THR	diagnostic	`=1` logs each SVC (except `SleepThread`) with its first four 
 DM_THRCPU	diagnostic	`=<tsv path>[,<seconds>]` writes each thread's CPU time (100% = one core) and the total every interval (default 10 s); on iOS a relative path is under `Documents`
 DM_TOUCH_HAPTICS	player	`0` turns off the light haptic tap when a touch control is pressed (on by default); launcher setting
 DM_TOUCH_LOG	diagnostic	`=1` logs each touch-screen read with touch points (sample, finger, position, attributes) and each gesture entry, up to 500 lines
+DM_T_DUMP	test	`tests/t_blend_zero.m` prints the red channel each draw stored, row by row
 DM_UDC_SELFTEST	diagnostic	`=1` runs a start-up check of DontCare load and store on private depth-stencil and RGBA8 textures (clear, Load + DontCare, read back) and logs one result line
 DM_UE_SHADERS	path	Folder of the Unreal shader code archives decoded by `uepak.py`, for `shader_split.py` (default `ue_shaders` beside the RomFS); needed when the RomFS has Unreal paks
 DM_UE_TEXTURE_POOL	switch	Megabytes Unreal's texture streaming pool (`r.Streaming.PoolSize`) is raised to, overriding the profile's `ue_texture_pool`; `0` keeps the game's own pool. On iOS only this switch turns it on (`Documents/env.txt`)

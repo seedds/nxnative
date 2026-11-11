@@ -36,13 +36,16 @@ static void touch_to(const dm_touch *t, int n) { if (n > 0) { touch_new |= !touc
 void (*_Atomic dm_touch_observer)(const dm_touch *t, int n);
 void dm_touch_set(const dm_touch *t, int n) { touch_to(t, n); void (*o)(const dm_touch *, int) = atomic_load(&dm_touch_observer); if (o) o(t, n); }
 void dm_touch_script(const dm_touch *t, int n) { touch_to(t, n); }
-int touch_fill_n(void *out, int max, uint64_t now) { (void)out; (void)max; (void)now; return 0; }
+static int64_t touch_samp; static int touch_points = -1;   // hle_touch.c numbers every read from 1; the last read's points argument
+int touch_fill_n(void *out, int max, uint64_t now, int points) { (void)max; (void)now; touch_points = points; memset(out, 0, 0x10); int64_t s = ++touch_samp; memcpy(out, &s, 8); return 0; }
 int gesture_fill(void *out, int n, uint64_t now) { (void)out; (void)n; (void)now; return 0; }
 void dm_gfx_shot_at(long frame, const char *path) { (void)frame; (void)path; }
 void hle_bind_system_event(void *g, int autoclear) { (void)g; (void)autoclear; }
 void hle_signal_system_event(void *g) { g_signalled = g; g_signals++; }
 int hle_signal_bound_system_event(void *g) { g_signalled = g; g_signals++; return 1; }
 void dm_gfx_texlist(int target) { (void)target; }
+// the guest address space (hle_svc.c): the unit test has none, so every stack is a host stack and the big-stack take-overs (the controller applet) run on it directly (hle_bigstack.c)
+int dm_guest_as_contains(uintptr_t a) { (void)a; return 0; }
 void dm_gfx_restop(void) {}
 void dm_gfx_texraw(uint64_t serial, const char *path) { (void)serial; (void)path; }
 void dm_ctl_peek(uint64_t a, int n) { (void)a; (void)n; }
@@ -174,6 +177,34 @@ static void t_npads(void) {
 }
 
 
+// The console mode at run time (dm_set_opmode → dm_hid_opmode_changed): player 1 moves between No1 and Handheld and both npads' style events are signalled, Handheld's too
+// (GitHub issue #2143); a pair of Joy-Cons split over two npads gives up the second one in handheld mode, and that npad's event is signalled as well
+static void t_opmode(void) {
+    static uint8_t e0[0x40], e1[0x40], eh[0x40];
+    g_mode = 1; ids((uint32_t[]){0, 1, NPAD_HANDHELD}, 3); dm_pad_players(1); h_hid_SetStyles(0xffffffffu);
+    g_signals = 0; h_hid_BindStyleEv(&(uint32_t){0}, e0, 0);
+    CHECK(g_signals == 1 && g_signalled == e0, "binding No1 docked: signalled once for its controller");
+    h_hid_BindStyleEv(&(uint32_t){NPAD_HANDHELD}, eh, 0); h_hid_BindStyleEv(&(uint32_t){1}, e1, 0);
+    CHECK(g_signals == 1, "binding Handheld and No2 docked: no controller, no signal");
+    dm_hid_opmode_changed(); CHECK(g_signals == 1, "no mode change, no style change: no signal");
+    g_signals = 0; g_signalled = NULL; g_mode = 0; dm_hid_opmode_changed();
+    CHECK(g_signals == 2 && g_signalled == eh, "to handheld: No1 and Handheld signalled");
+    CHECK(h_hid_GetStyle(&(uint32_t){0}) == 0 && h_hid_GetStyle(&(uint32_t){NPAD_HANDHELD}) == STYLE_HANDHELD, "player 1 is on Handheld");
+    g_signals = 0; g_mode = 1; dm_hid_opmode_changed();
+    CHECK(g_signals == 2 && h_hid_GetStyle(&(uint32_t){0}) == STYLE_FULLKEY && h_hid_GetStyle(&(uint32_t){NPAD_HANDHELD}) == 0, "back to console: both signalled again, player 1 on No1");
+    // A split pair: left on No1, right on No2 while docked; handheld takes both back
+    dm_joy_attach(0, 3); h_hid_JoySingle(&(uint32_t){0});
+    CHECK(h_hid_GetStyle(&(uint32_t){0}) == STYLE_JOYLEFT && h_hid_GetStyle(&(uint32_t){1}) == STYLE_JOYRIGHT, "a split pair docked: JoyLeft on No1, JoyRight on No2");
+    g_signals = 0; g_mode = 0; dm_hid_opmode_changed();
+    CHECK(g_signals == 3 && h_hid_GetStyle(&(uint32_t){1}) == 0, "to handheld with a split pair: No1, No2 and Handheld signalled, No2 empty");
+    g_signals = 0; g_mode = 1; dm_hid_opmode_changed();
+    CHECK(g_signals == 3 && h_hid_GetStyle(&(uint32_t){1}) == STYLE_JOYRIGHT, "back to console: the three again, the right Joy-Con on No2");
+    h_hid_JoyDual(&(uint32_t){0}); dm_joy_attach(0, 0);
+    // An npad bound while its controller is there is told that style by the bind: the next report signals nothing for it
+    static uint8_t e0b[0x40]; h_hid_BindStyleEv(&(uint32_t){0}, e0b, 0);
+    g_signals = 0; dm_pad_players(1); dm_hid_opmode_changed(); CHECK(g_signals == 0, "nothing changed since the bind: no signal");
+}
+
 // Joy-Cons as devices of their own (dm_joy_attach / dm_joy_set): nothing changes until a front end reports a Joy-Con half; then the pair is a JoyDual npad, splits into JoyLeft and
 // JoyRight when the game asks for single assignment (or the controller applet needs another player), keeps the rail buttons, and has vibration handles per Joy-Con. Handheld: unchanged.
 static void t_joycons(void) {
@@ -182,8 +213,10 @@ static void t_joycons(void) {
     CHECK(h_hid_GetStyle(&(uint32_t){0}) == STYLE_FULLKEY, "no Joy-Con reported: player 1 is full-key, as before");
     { int m; CHECK(vib_targets(0x0003, &m) && m == 0, "and its full-key vibration handle reaches it"); }
     dm_haptics_route(0, 1);
+    static uint8_t ev0[0x40]; h_hid_BindStyleEv(&(uint32_t){0}, ev0, 0);
     g_signals = 0; dm_joy_attach(0, 3);
-    CHECK(g_signals > 0 && h_hid_GetStyle(&(uint32_t){0}) == STYLE_JOYDUAL, "a left and a right Joy-Con on player 1: one JoyDual npad, the style event signalled");
+    CHECK(g_signals == 1 && g_signalled == ev0 && h_hid_GetStyle(&(uint32_t){0}) == STYLE_JOYDUAL, "a left and a right Joy-Con on player 1: one JoyDual npad, No1's style event signalled and no other");
+    g_signals = 0; dm_joy_attach(0, 3); CHECK(g_signals == 0, "the same Joy-Cons reported again: no signal");
     dm_joy_set(0, 0, DM_BTN_UP | DM_BTN_LSL, -20000, 0); dm_joy_set(0, 1, DM_BTN_A | DM_BTN_RSR, 0, 15000);
     NpadState st = npad_of(0, STYLE_JOYDUAL);
     CHECK((st.buttons & (DM_BTN_UP | DM_BTN_A | DM_BTN_LSL | DM_BTN_RSR)) == (DM_BTN_UP | DM_BTN_A | DM_BTN_LSL | DM_BTN_RSR), "JoyDual: both Joy-Cons' buttons, the rail buttons kept");
@@ -607,6 +640,24 @@ static void t_motion_hid(void) {
     dm_motion_clear_hid(0); dm_motion_clear_hid(1); dm_motion_clear(0); g_phone_motion.last_ns = 0;
     dm_pad_players(1); g_phone_mode = -1;
 }
+// Touch screen reads across docked <-> handheld: every read goes to hle_touch.c, which numbers the states of both modes from one count (t_touch checks the numbers), with
+// touch points asked for only in handheld mode. Numbered apart (docked from the npad counter, 65536; handheld from 1), a game started docked dropped every touch after
+// leaving the dock: Unity's touch reader (Aokana main+0xd2bde0) takes a state only if its sampling number is above the last one it took, empty states included.
+static void t_touch_sampling(void) {
+    uint8_t s[0x10 + 0x28 * 16]; int64_t prev = 0, v;
+    const int modes[] = {1, 1, 0, 0, 1, 0};
+    for (int i = 0; i < 6; i++) {
+        g_mode = modes[i]; memset(s, 0, sizeof s);
+        if (i & 1) CHECK(h_hid_TouchN_16(s, 1) == 1, "touch: GetTouchScreenStates gives one state");
+        else h_hid_Touch1_16(s);
+        memcpy(&v, s, 8);
+        CHECK(touch_points == !modes[i], "touch: touch points are asked for in handheld mode only");
+        CHECK(v > prev, i == 2 ? "touch: handheld after docked continues the sampling numbers" : i == 4 ? "touch: docked after handheld continues the sampling numbers"
+                                : i == 5 ? "touch: handheld again continues the sampling numbers" : "touch: sampling numbers increase");
+        prev = v;
+    }
+    g_mode = 1;
+}
 
 int main(void) {
     CHECK(setenv("DM_RUMBLE_LOG", "1", 1) == 0, "enable rumble diagnostics");
@@ -614,12 +665,14 @@ int main(void) {
     t_npads();
     t_script();
     t_vibration();
+    t_opmode();
     t_joycons();
     t_jcms();
     t_rumble_log();
     t_motion_threads();
     t_motion_live();
     t_motion_hid();
+    t_touch_sampling();
     t_rec();
     {   // Nmouse with no device (SDK 21's forms): the pointer range is kept, the merged handle 0 takes settings, the standard mouse and the handle queries report nothing
         int w = 0, h = 0; uint64_t std = 7; uint32_t npad = 9;

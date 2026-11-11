@@ -569,3 +569,11 @@ The guest address space, heaps, pools, virtual address memory and the allocators
 - **Cause:** a command buffer that fails with `Insufficient Memory` frees nothing, and the game submits the next one.
 - **Fix:** general (`nvn_mtl.m` `res_top_once`): 32 such failures within 60 s end the process with a red line, as the session cannot recover and the machine may not either.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md).
+
+### Render-target allocation and guest storage census
+
+- **Symptom:** `restop` and the memory line give texture totals by allocated size; several objects can share a family heap, while their guest intervals overlap too. Neither sum gives the physical storage needed for those targets.
+- **Cause:** GPU-only targets are shared by pool, offset and description, but Metal allocation size and NVN layout size differ. A descriptor lookup is also not evidence that the GPU wrote its storage.
+- **Fix:** diagnostic only, off by default: `DM_NVN_TEX_BREAKDOWN=1` adds `[rtbreakdown]` snapshots to `DM_CTL restop`. `python3 dm/tools/nvn_rt_breakdown.py <log>` reports nominal texture bytes, distinct Metal allocation bytes, union guest bytes per pool/format/sample count, existing family heaps and the NX2navi overwrite estimate. The estimate excludes equal offsets, a writer contained in the older range, unknown write times and targets written in the last two frames. A write through any view keeps its allocation recent. It observes recorded whole-texture writes and entries still in the sharing table, not render-area coverage or every holder; it is not permission to discard a texture. A heap counts as potentially releasable only when all its observed members qualify. Format `-1` accounts once for legacy pool heaps spanning several formats.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md), the Castle Town fixed-save walk on an M5 with 24 GB.
+- **Check:** `t_rt_breakdown` tests enabled/disabled write stamps, pool cleanup and absence of pool-buffer creation; `test_nvn_rt_breakdown.py` tests interval unions, allocation deduplication, overwrite exceptions and shared-heap retention.

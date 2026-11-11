@@ -2341,13 +2341,16 @@ static void post_run(post_rec *r, uint64_t c0, uint64_t c1) {
     // MTLBuffer.contents may autorelease its receiver; keep that lifetime inside the completed copy.
     @autoreleasepool {
     int n = r->n; post_op *ops = r->ops; seg_clk *sc = r->sc; uint32_t seg_last = r->seg_last;
+    // DM_NVN_VIS_ALL=1 (diagnostic, read here each time: DM_CTL "env DM_NVN_VIS_ALL=1" turns it on and off while the game runs): every samples-passed report says visible, to tell
+    // a game's occlusion culling from other causes of objects that come and go (Assassin's Creed II's background flicker)
+    const char *va = getenv("DM_NVN_VIS_ALL"); int vis_all = va && atoi(va);
     for (int i = 0; i < n; i++) {
         if (ops[i].kind == 1) continue;   // A terminal release publishes after every earlier GPU write has landed.
         else if (ops[i].kind == 3) {   // Samples passed: the running total, in submission order
             if (ops[i].mode == VIS_ZERO) { g_vis_acc = 0; continue; }
             vis_list *l = ops[i].vis;
             for (int k = 0; k < l->n; k++) { g_vis_acc += ((const uint64_t *)((__bridge id<MTLBuffer>)l->s[k].buf).contents)[l->s[k].slot]; CFRelease(l->s[k].buf); }
-            free(l); if (ops[i].mode == VIS_REPORT) { uint64_t rec[2] = {g_vis_acc, gpu_ticks()}; memcpy((void *)ops[i].addr, rec, sizeof rec); }
+            free(l); if (ops[i].mode == VIS_REPORT) { uint64_t rec[2] = {vis_all && g_vis_acc < 0x100000 ? 0x100000 : g_vis_acc, gpu_ticks()}; memcpy((void *)ops[i].addr, rec, sizeof rec); }
         }
         else { uint64_t t = rep_ticks(&ops[i], sc, seg_last, c0, c1), rec[2] = {(ops[i].type == 0 || ops[i].type == 0x10) && !DM_GAME_RENDER_COND ? t : 0, t}; memcpy((void *)ops[i].addr, rec, sizeof rec); }   // render_cond: a timestamp report's counter field is 0, as on the GPU (see rc_value)
     }
@@ -15509,7 +15512,7 @@ void mtl_res_counts(uint32_t tick, const char *why) {
         c.pools, (unsigned long long)c.pool_adds, c.sview_nonnull, dl, (unsigned long long)da, c.c1_bufs, (unsigned long long)c.c1_alloc, (unsigned long long)c.c1_data);
 }
 // Screenshot on request (used by DM_NVN_SHOT_UI): dm_gfx_shot_at(k, path) = take a screenshot at the kth frame after the current present frame; due requests are checked at every frame's present
-#define SHOTQ_MAX 8
+#define SHOTQ_MAX 72   // DM_CTL "shots" queues up to 64 frames in a row
 static struct { uint64_t frame; char path[1024]; } g_shotq[SHOTQ_MAX]; static int g_nshotq;
 static pthread_mutex_t g_shotq_mu = PTHREAD_MUTEX_INITIALIZER;
 static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTexture> dst, const int crop[4]);

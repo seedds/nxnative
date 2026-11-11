@@ -217,7 +217,8 @@ void hid_keys_init(void) {
 }
 
 // DM_CTL=<file> (Mac, for driving a game step by step from a shell): the host reads the lines appended to the file (polled every 100 ms) and acts on each at once:
-//   "key[+key][~hold]" presses as a DM_KEYS step does (hold 0.15 s by default), "shot <path>" saves the next presented frame as a PNG (dm_gfx_shot_at), "passdump <n>" dumps the
+//   "key[+key][~hold]" presses as a DM_KEYS step does (hold 0.15 s by default), "shot <path>" saves the next presented frame as a PNG (dm_gfx_shot_at), "shots <n> <folder>" the next n
+//   frames one after another (<folder>/1.png …, n up to 64: a flicker of a frame), "passdump <n>" dumps the
 //   render passes of the next n frames as DM_NVN_PASSDUMP does (to stderr, the run's log), "texdump <path with %d>" saves the colour targets of the next frame as DM_NVN_TEXDUMP does,
 //   "env KEY=VALUE" sets a switch read at the time of use (DM_NVN_SNAPRAW for the next texdump), "cvarf <main offset> <value>" sets an Unreal float console variable
 //   (hle_fpslock.c dm_ctl_cvar_f32; "cvari" an int one), "peek <address> <count>" logs that many floats of guest memory, "memdump <address> <bytes> <path>" saves guest memory
@@ -243,6 +244,11 @@ static void *ctl_main(void *arg) {
                 if (!strncmp(line, "program ", 8)) { void dm_oe_execute(int index, const void *param, size_t n); LOG("DM_CTL: oe::ExecuteProgram(%d)", atoi(line + 8)); dm_oe_execute(atoi(line + 8), NULL, 0); continue; }
                 if (!strncmp(line, "webshot ", 8)) { void front_web_shot(const char *path); front_web_shot(line + 8); continue; }
                 if (!strncmp(line, "shot ", 5)) { dm_gfx_shot_at(1, line + 5); LOG("DM_CTL: screenshot of the next frame → %s", line + 5); continue; }
+                if (!strncmp(line, "shots ", 6)) {   // "shots <n> <folder>": the next n presented frames, one after another, as <folder>/<k>.png (a flicker of one frame)
+                    char *e2; long n = strtol(line + 6, &e2, 10); while (*e2 == ' ') e2++;
+                    if (n < 1 || n > 64 || !*e2) { LOG("[RED] DM_CTL: shots takes a count from 1 to 64 and a folder"); continue; }
+                    for (long k = 1; k <= n; k++) { char p[1100]; snprintf(p, sizeof p, "%s/%ld.png", e2, k); dm_gfx_shot_at(k, p); }
+                    LOG("DM_CTL: screenshots of the next %ld frames → %s", n, e2); continue; }
                 if (!strncmp(line, "texlist ", 8)) { void dm_gfx_texlist(int target); dm_gfx_texlist(atoi(line + 8)); continue; }
                 if (!strcmp(line, "restop")) { void dm_gfx_restop(void); dm_gfx_restop(); continue; }   // what the residency set holds (nvn_mtl.m res_top)
                 if (!strncmp(line, "texraw ", 7)) { void dm_gfx_texraw(uint64_t serial, const char *path); char *e2; uint64_t s = strtoull(line + 7, &e2, 10); while (*e2 == ' ') e2++; dm_gfx_texraw(s, e2); continue; }

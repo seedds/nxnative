@@ -341,6 +341,10 @@ enum { MTL_REWRITE_UPLOADED, MTL_REWRITE_GPU, MTL_REWRITE_GPU_NOW };     // mtl_
 int mtl_tex_cpu_rewritten(const tex_t *t);                               // nvn_ft_poll: the CPU wrote a registered texture's pages after its first use (MTL_REWRITE_*)
 // hle_nvn.c: a texture tex_flush_upload / tex_dirty_upload registered and has not resolved yet; what the GPU writes into it is stored into its storage as well (nvn_mtl.m gsb_store)
 int nvn_ft_tracked(uint64_t serial);
+// hle_nvn.c: the profile keys render_cond, tex_flush_upload and tex_dirty_upload as the run uses them: the profile's value, or the one DM_NVN_RENDER_COND / DM_NVN_TEX_FLUSH_UPLOAD / DM_NVN_TEX_DIRTY_UPLOAD gives
+int nvn_render_cond(void);
+int nvn_tex_flush_upload(void);
+int nvn_tex_dirty_upload(void);
 int nvn_tex_level_range(const tex_t *t, unsigned level, unsigned layer, uint64_t *lo, uint64_t *hi);   // one level of one layer in the texture's storage, as offsets; −1 out of range
 // A program's per-stage shader key (hle_nvn.c): the first 8 bytes of sha256(first 0x880 bytes of the control section (its own length when shorter) + code area). Computed at SetShaders (NVN lets the caller free the control section once it returns, and Unity does);
 // a stage whose code area was not yet in any memory pool then is computed the first time it is asked for, from the host's copy of its control section. The keys belong to

@@ -141,7 +141,6 @@ static void finalize_during_walk(void) {
     mtl_reg_tex(1,NULL,NULL); h_nvnTextureFinalize(&tex);
     defer_drain(); munmap(mem,len);
 }
-#if DM_GAME_TEX_DIRTY_UPLOAD
 // nvn_ft_poll: a registered texture whose storage the GPU wrote after the CPU's rewrite is left to the GPU and stays registered, so the CPU's next rewrite is still uploaded
 static void poll_asks_again(void) {
     const size_t len = 1 << 20;
@@ -218,10 +217,6 @@ static void poll_beside(void) {
     h_nvnTextureFinalize(&a); h_nvnTextureFinalize(&b); h_nvnTextureFinalize(&c); h_nvnMemoryPoolFinalize((NVNmemoryPool *)&pool);
     defer_drain(); munmap(mem, len);
 }
-#else
-static void poll_asks_again(void) { printf("poll_asks_again: skipped, the profile has no tex_dirty_upload\n"); }
-static void poll_beside(void) { printf("poll_beside: skipped, the profile has no tex_dirty_upload\n"); }
-#endif
 static int resident(id o) { pthread_mutex_lock(&g_res_mu); int r = [g_res_objects containsObject:o]; pthread_mutex_unlock(&g_res_mu); return r; }
 static void settle(void) { for (int i = 0; i < 2; i++) { g_fence++; pthread_mutex_lock(&g_mu); g_done = g_fence; pthread_mutex_unlock(&g_mu); defer_drain(); } }   // the GPU passed every fence
 // The GPU's first write over a texture taken from its storage (cpu_unc_drop): every serial that held the package now holds its texture, the package goes, and the serials go one by
@@ -298,6 +293,6 @@ int main(int argc, const char **argv) { @autoreleasepool {
     own.serial = 900002; mtl_tex_init(&own); moved = own; own.magic = 0; mtl_tex_release(&moved);
     CHECK(!nvn_hm_get(&g_tex_live, &moved.serial), "a copy outliving the object it was initialized in ends the texture");
     retired_classification(); descriptor_replacement();
-    if (argc > 1 && !strcmp(argv[1], "--metal")) { mtl_init(); finalized_upload(0); finalized_upload(1); finalize_during_walk(); poll_asks_again(); poll_beside(); handover_holders(); }
+    if (argc > 1 && !strcmp(argv[1], "--metal")) { mtl_init(); finalized_upload(0); finalized_upload(1); finalize_during_walk(); if (nvn_tex_flush_upload() && nvn_tex_dirty_upload()) { poll_asks_again(); poll_beside(); } else printf("poll_asks_again, poll_beside: skipped, neither the profile nor DM_NVN_TEX_FLUSH_UPLOAD / DM_NVN_TEX_DIRTY_UPLOAD turns on tex_flush_upload and tex_dirty_upload\n"); handover_holders(); }
     printf("t_cpu_tex: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

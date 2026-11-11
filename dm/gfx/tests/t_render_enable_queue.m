@@ -1,10 +1,7 @@
 // Logical render-enable state and pending query values survive scheduler chunks.
 // Every path uses public NVN recording; the last case gates only GPU completion.
-// It checks the profile key render_cond's replay, so the key is on whatever profile GAME names:
+// It checks the profile key render_cond's replay, so the test turns the key on (DM_NVN_RENDER_COND=1) whatever profile GAME names:
 // without it the host draws every render-enable block and posts no pending counter values.
-#include "game_profile.h"
-#undef DM_GAME_RENDER_COND
-#define DM_GAME_RENDER_COND 1
 #define nvn_game_fps nvn_game_fps_mtl_default
 #include "../nvn/nvn_mtl.m"
 #undef nvn_game_fps
@@ -67,6 +64,7 @@ static NVNcommandHandle record(NVNtexture *texture, NVNprogram *program, int wai
     return P(nvnCommandBufferEndRecording)(&command);
 }
 int main(void) { @autoreleasepool {
+    setenv("DM_NVN_RENDER_COND", "1", 1);
     if (setvbuf(stdout, NULL, _IONBF, 0)) abort(); mtl_init(); NSError *error = nil;
     id<MTLLibrary> library = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
         "vertex float4 v(uint i [[vertex_id]]) { const float2 p[] = {float2(-1,-1),float2(3,-1),float2(-1,3)}; return float4(p[i],0.5,1); }\n"

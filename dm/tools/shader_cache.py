@@ -37,6 +37,10 @@ class Store:
 
     def forked(self):
         """A connection of its own in a forked process (dmsh_build.py's workers): SQLite's must not be used across a fork, not even closed, so the inherited one is only kept"""
+        # macOS's os_log, which libsqlite3 signposts through when it opens a database, can crash in a forked process: with a parent that opened a database before the fork, _os_log_preferences_refresh
+        # reads an address that does not exist in the child (macOS 27.3 beta 26C5035r: 14 of 30 forks of a script that opened one connection and then another died with SIGSEGV; all five workers
+        # of a shader build did). Activity logging off in this process, before it opens anything, takes that path out (0 of 30 died); nothing here reads the log
+        os.environ['OS_ACTIVITY_MODE'] = 'disable'
         self._inherited = self.db
         self.lock = threading.RLock()
         self._open()

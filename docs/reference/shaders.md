@@ -2380,6 +2380,16 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game).
 - **Check:** `test_shader_cache.py` (`test_forked_workers_share_it`), `test_shader_toolchain_cache.py` (the batch loop with a substituted translator).
 
+### A forked shader-build worker dies opening its database
+
+- **Symptom:** the shader build stops a few seconds into the Mac shader step with `concurrent.futures.process.BrokenProcessPool` (or the `[RED]` line for a worker that stopped), however much memory is free, and `DMSH_PROCS=0` goes through. Crash reports of the workers: `EXC_BAD_ACCESS` in `_os_log_preferences_refresh`, called from `os_signpost_enabled` in `libsqlite3`'s `openDatabase`, from `sqlite3.connect` in `Store.forked`. All of a build's workers died within 0.1 s of each other. [Issue #2354](https://github.com/seedds/nxnative/issues/2354) (a MacBook Air M4).
+- **Cause:** a platform fault, found by a script of ten lines: open one SQLite connection, `os.fork()`, open another in the child. On macOS 27.3 beta (26C5035r) the child died with SIGSEGV in 14 of 30 forks, as `libsystem_trace` (os_log) reads its logging preferences at the first signpost in the child, which `libsqlite3` makes when it opens a database, at an address that is not valid after the fork. A parent that never opened a database before the fork was not affected, and a child started with `exec` was not. The build's parent has opened `cas.db` before it forks the workers, and each worker opens its own connection ([`Store.forked`](../../dm/tools/shader_cache.py)). Only the macOS where it was seen is known; it may be older, or fixed in a later build.
+- **Fix:** `Store.forked` sets `OS_ACTIVITY_MODE=disable` in the worker before it opens its connection, which takes the preferences read out of the path: 0 of 30 forks died with it set in the child (also 0 of 30 with it set in the parent after its first connection). A workaround for a library the build cannot change; nothing in the build reads the activity log, and the compilers a worker starts inherit the setting, which only silences their os_log output.
+- **Open:** not reported to Apple (no Feedback filed). Whether macOS 26 and the final macOS 27 are affected is not known.
+- **Checked:** Ocarina of Time's whole Mac map (42,848 shaders, Metal compiles from the cache) built with the default `DMSH_PROCS` (18 workers) on an M5 Pro with macOS 27.3 (26C5035r) in 4 min 47 s for the shader step (every shader restored from the cache), no worker died; the same build crashed in all five workers within 0.1 s before the change.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game).
+- **Check:** `test_shader_cache.py` (`test_forked_workers_share_it`: it died on every run of the Mac above before the fix).
+
 ### A library that depends on its source's file name
 
 - **Symptom:** two builds of the same shaders give different `_bl` or `_bf` libraries for some keys, of the same size, 46 bytes apart, while their MSL is the same. A byte comparison of two library folders reports them, and `regress.py` can report them as changed variants.

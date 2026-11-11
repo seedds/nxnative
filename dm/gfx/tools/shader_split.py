@@ -45,6 +45,7 @@
 #       Mac host), each a VNVN record with one code area and control section (frostbite.py), see frostbite_jobs and frostbite_shaders
 #   · PDAT (the engine with the namespace phx, Kirby Air Riders): flatbuffer records tagged PMAP, zstd frames in the .dat archives, each holding a program's control sections and code areas, see pdat_jobs and pdat_shaders
 #   · Unreal Engine 3 (Batman: Arkham Knight): shader records in its global shader cache (BMSG) and in the packages (the combined shader cache), whose compressed chunks are Oodle blocks decoded by the game's own decoder in the Mac host, see ue3_body and ue3_shaders
+#   · Liquid Engine archives (11 bit studios, Frostpunk): one shader per entry of the .dat archive its .idx / .str index and name (zstd entries), see liquid_index and liquid_shaders
 # Code area: 0x30 header + (graphics) 0x50 SPH + instructions; header magic 0x12345678 for graphics, 0x12345679 for compute. The control section starts with 0x98761234, +0x704 = code area length,
 #   +0x700 = start of the c1 constant segment within the code area; for compute +0x748 thread group xyz (u32 ×3), +0x754 shared memory bytes (checked one by one against PC reflection on D2R's 22 compute shaders).
 # Stage: BNSH uses the stage slot; BAHS uses bits 10..13 of SPH word 0 (1 vertex 2 hull 3 domain 4 geometry 5 pixel), and a compute header means compute.
@@ -907,6 +908,65 @@ def pdat_shaders(path, rel, start, end, out):
         if not any(a <= c < b for a, b in frames):
             n = struct.unpack_from('<I', d, c + 0x30)[0] + struct.unpack_from('<I', d, c + 0x44)[0]
             program(d[c:c + n], start + c, f'/{rel}#PMAP')
+
+LIQUID_ARC, LIQUID_REC, LIQUID_SHADER = b'\0\5\2', struct.Struct('<IQQQB'), struct.pack('<I', 0xcdbe5660)
+
+def liquid_index(path):
+    """The entry count of a Liquid Engine archive's index (11 bit studios, Frostpunk), or None: <name>.idx beside <name>.str and <name>.dat, the index and the names starting with the same
+    11-byte header {u8 0, u8 5, u8 2, u32 entry count, u32 0}, then a 29-byte record per entry {u32 name hash, u64 stored length, u64 length, u64 offset in the .dat, u8 zstd}"""
+    if not path.endswith('.idx'): return None
+    stem = path[:-4]
+    if not (os.path.isfile(stem + '.str') and os.path.isfile(stem + '.dat')): return None
+    with open(path, 'rb') as f: h = f.read(11)
+    if len(h) < 11 or h[:3] != LIQUID_ARC: return None
+    n, z = struct.unpack_from('<II', h, 3)
+    return n if not z and os.path.getsize(path) == 11 + LIQUID_REC.size * n else None
+
+def liquid_names(s, n, label):
+    """{name hash: name} of a Liquid archive's .str: after the header, {u32 name hash, u32 length, name} per entry"""
+    if s[:3] != LIQUID_ARC or struct.unpack_from('<I', s, 3)[0] != n: red(f'{label}.str: its header does not match the index ({n} entries)')
+    names, p = {}, 11
+    while p + 8 <= len(s):
+        h, ln = struct.unpack_from('<II', s, p); names[h] = s[p + 8:p + 8 + ln].decode('utf-8', 'replace'); p += 8 + ln
+    if p != len(s) or len(names) != n: red(f'{label}.str: {len(names)} names in {p:#x} of {len(s):#x} bytes, for {n} entries')
+    return names
+
+def liquid_shader(d, label):
+    """One Liquid Engine shader (Frostpunk's shaders/compiled/<technique>/<hash>.<vs|hs|ds|gs|ps|cs>_5_0, HLSL compiled for NVN): a 0x24-byte header {magic 0xcdbe5660, u32 version 4,
+    two u64 file times, u32 code + control length + 8, u32 code length, u32 control length}, the code area, the control section (0x880 or 0x88c bytes), then the HLSL files it includes and
+    their times. One stage each, combined per draw: 2,550 in Frostpunk's common archive, 833 vertex, 1,577 pixel, 75 compute, 32 hull, 32 domain, 1 geometry"""
+    if len(d) < 0x24: red(f'{label}: {len(d)} bytes, shorter than a Liquid shader header')
+    ver, _, _, total, ncode, nctl = struct.unpack_from('<IQQIII', d, 4)
+    if ver != 4 or total != ncode + nctl + 8 or 0x24 + ncode + nctl > len(d): red(f'{label}: a Liquid shader of version {ver}, code {ncode:#x} and control {nctl:#x} bytes in {len(d):#x}, a layout this reader does not know')
+    code, ctl = d[0x24:0x24 + ncode], d[0x24 + ncode:0x24 + ncode + nctl]
+    st = glslc_stage(ctl, code)
+    if not st or (why := check(label, st, ctl, code)): red(f'{label}: not a shader: {why if st else "no stage"}')
+    return (f'{label}#LIQUID@0x24', st, ctl, code)
+
+def liquid_shaders(path, rel, out):
+    """The shaders of a Liquid Engine archive (liquid_index): every entry of its .dat that starts with the shader magic, found by what it is and not by its name (only the first bytes of each zstd
+    entry are inflated to tell; Frostpunk's 2 GB of textures are 4,238 entries). The names label them"""
+    zstd = zstd_mod(); stem, label = path[:-4], '/' + rel[:-4]
+    n = liquid_index(path) or 0   # scan_file_in calls this only for an index
+    with open(path, 'rb') as f: x = f.read()
+    with open(stem + '.str', 'rb') as f: names = liquid_names(f.read(), n, label)
+    size = os.path.getsize(stem + '.dat')
+    with open(stem + '.dat', 'rb') as f:
+        for i in range(n):
+            h, stored, length, off, packed = LIQUID_REC.unpack_from(x, 11 + LIQUID_REC.size * i)
+            where = f'{label}.dat/{names.get(h) or f"{h:08x}"}'
+            if off + stored > size or packed > 1: red(f'{where}: {stored:#x} bytes at {off:#x} (zstd {packed}) do not fit the {size:#x}-byte archive')
+            if length < 0x24: continue
+            f.seek(off); d = f.read(min(stored, PDAT_HEAD) if packed else 4)
+            try: head = zstd.ZstdDecompressor().decompress(d, max_length=4) if packed else d
+            except zstd.ZstdError as e: red(f'{where}: {e}')
+            if head != LIQUID_SHADER: continue
+            f.seek(off); d = f.read(stored)
+            if packed:
+                try: d = zstd.decompress(d)
+                except zstd.ZstdError as e: red(f'{where}: {e}')
+            if len(d) != length: red(f'{where}: {len(d):#x} bytes, the index says {length:#x}')
+            out.append(liquid_shader(d, where))
 
 ZIP = b'PK\x03\x04'
 VZIP = b'VZIP'   # Star Fox's data.zip: a zip archive behind the engine's own 18 MB index (its "vfs.zip.c"), which zipfile reads through its central directory as any other
@@ -2878,11 +2938,11 @@ def pixel_input_cover(shaders):
         k = min(ins, key=lambda k: (-len(ins[k] & left), k)); cover.append(k); left -= ins[k]
     return cover
 
-SINGLE_STAGE = ('#GLSLC@', '#VIPER', '#UE', '#MTSPK@', '#MGFX@', '#NLG', '#PGSO', '#RAW@', '#TFXO@', '#NEEDLE@', '#SNOWDROP@', '#PHYRE@', '#SUMO@', '#NVNSH@')   # sources whose every shader is a program of one stage: GLSLC outputs, Unreal's shader records, MT Framework's shader package (BNSH variations, Unity programs, MSHD and SDF pair theirs);
+SINGLE_STAGE = ('#GLSLC@', '#VIPER', '#UE', '#MTSPK@', '#MGFX@', '#NLG', '#PGSO', '#RAW@', '#TFXO@', '#NEEDLE@', '#SNOWDROP@', '#PHYRE@', '#SUMO@', '#NVNSH@', '#LIQUID@')   # sources whose every shader is a program of one stage: GLSLC outputs, Unreal's shader records, MT Framework's shader package (BNSH variations, Unity programs, MSHD and SDF pair theirs);
 # Unreal Engine 3's shader caches (ue3_shaders, '#UE3@'); MonoGame's effects, whose passes may name no vertex shader and keep the one bound (Celeste: 10 of its 13 effects draw through SpriteBatch's vertex shader, which is in main); Next Level Games'
 # archives (Luigi's Mansion 3 makes 5,317 programs of one stage each at boot); PlatinumGames' shader objects (Bayonetta 3: one stage each, pg_shader); control sections loose in main
 # (Advance Wars 1+2: Re-Boot Camp's Bink shaders, raw_shaders), which no file pairs; YEBIS's effect file (tfxo_shaders); and Sumo's Ninty_NX descriptors and NVNsh records, one stage
-# each (Team Sonic Racing: 2,116 vertex and 2,399 pixel programs, sumo_shaders)
+# each (Team Sonic Racing: 2,116 vertex and 2,399 pixel programs, sumo_shaders); and the Liquid Engine's shader files (Frostpunk: 833 vertex and 1,577 pixel shaders, liquid_shader)
 def separable_pairs(keys):
     """Single-stage programs (13 Sentinels: each GLSLC output becomes a program with one stage, and BindProgram's stage bits combine vertex and pixel programs per draw; Unreal combines its shaders per draw
     from the pipeline state) have their real pairs only at draw time. vs_pad uses only the union of the locations the paired pixel shaders read, so every single-stage vertex shader is paired with
@@ -3084,6 +3144,9 @@ def scan_file_in(args):
     if len(args) > 2:   # a range of LINKDATA entries (linkdata_jobs)
         linkdata_shaders(path, rel, args[2], found)
         return rel, uniq_keys(found), var_pairs(found), trees
+    if liquid_index(path) is not None:   # a Liquid Engine archive's index (Frostpunk): the shaders in its .dat (liquid_shaders)
+        liquid_shaders(path, rel, found)
+        return rel, uniq_keys(found), var_pairs(found), trees
     if head[:4] == BND2:   # a Criterion Bundle 2 (Need for Speed: Hot Pursuit Remastered's SHADERS.BNDL): GLSLC outputs in its zlib resources (bnd2_shaders)
         found += bnd2_shaders(open(path, 'rb').read(), '/' + rel)
         return rel, uniq_keys(found), var_pairs(found), trees
@@ -3255,8 +3318,9 @@ def main():
     fb_jobs, fbs = frostbite_jobs(files)   # EA SPORTS FC 27's Frostbite bundles, Oodle Leviathan decoded by the game's own decoder in the Mac host
     pd_jobs, pdats = pdat_jobs(files)   # Kirby Air Riders' PDAT archives: the PMAP records in byte ranges
     rp_jobs, rpfs = rpf_jobs(files, main_v)   # Red Dead Redemption's RPF6 archives, their tables decrypted with the key in main (rpf6.py)
+    liqs = {p[:-4] + e for p, _ in files if liquid_index(p) is not None for e in ('.str', '.dat')}   # Frostpunk's Liquid archives: read through their .idx (liquid_shaders)
     big += pak_jobs + tr_jobs + ue_jobs + bd_jobs + arc_jobs + pz_jobs + ck_jobs + cr_jobs + zp_jobs + ah_jobs + fb_jobs + pd_jobs + rp_jobs
-    files = [(p, r) for p, r in files if not linkdata_jobs(p, r) and p not in paks and p not in trp and p not in uep and p not in bdts and p not in arcs and p not in pkzs and p not in cpks and p not in cras and p not in zips and p not in arhs and p not in fbs and p not in pdats and p not in rpfs]
+    files = [(p, r) for p, r in files if not linkdata_jobs(p, r) and p not in paks and p not in trp and p not in uep and p not in bdts and p not in arcs and p not in pkzs and p not in cpks and p not in cras and p not in zips and p not in arhs and p not in fbs and p not in pdats and p not in rpfs and p not in liqs]
     with cf.ProcessPoolExecutor(J, initializer=_pool_init, initargs=(common, {}, zdicts)) as ex:
         n = len(big) + len(files)
         results += pooled(ex, big, n) + pooled(ex, files, n, len(big), chunk=16)
@@ -3312,6 +3376,7 @@ def main():
                                             ('MT Framework SPK', any('#MTSPK@' in r[4] for r in rows)), ('MonoGame MGFX', any('#MGFX@' in r[4] for r in rows)),
                                             ('PlatinumGames shader objects', any('#PGSO' in r[4] for r in rows)),
                                             ('Snowdrop shader objects', any('#SNOWDROP@' in r[4] for r in rows)),
+                                            ('Liquid Engine shaders', any('#LIQUID@' in r[4] for r in rows)),
                                             ('Unreal Engine shader code archives', any('#UE' in r[4] for r in rows))) if hit)
         f.write(f'# kind: evidence  {NOTE} ({kinds} in RomFS + main) → control section + code area keys (dm/gfx/tools/shader_split.py)\n')
         f.write('# column 5 records where each key first appears; no PC shader pairing supplied\n')

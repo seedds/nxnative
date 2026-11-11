@@ -13711,6 +13711,33 @@ static int lc_keeps(uint32_t op) {
         default: return 0;
     }
 }
+// Whether a clear target t (waiting, or pending in R) is one the bound compute program may touch: its textures and images by serial, its storage and uniform buffers by memory
+static int lc_cs_hits(NvShader *cs, const tex_t *t) {
+    if (!t) return 0;
+    for (int i = 0; i < cs->rf.nb; i++) { const nvn_rbind *b = &cs->rf.b[i]; uint64_t h = 0, a = 0, n = 0;
+        switch (b->kind) {
+            case NVN_RB_IMG: h = b->reg < 32 ? S.img[5][b->reg] : 0; break;
+            case NVN_RB_TEX: case NVN_RB_TBUF: h = tex_slot_h(S.tex[5], S.img[5], b->reg); break;
+            case NVN_RB_SBUFP: if (b->reg >= 16) return 1; a = S.ssbo[5][b->reg].addr; n = S.ssbo[5][b->reg].size; break;
+            case NVN_RB_CBUF: case NVN_RB_UBOP: if (b->reg >= 16) return 1; a = S.ubo[5][b->reg].addr; n = S.ubo[5][b->reg].size; break;
+            case NVN_RB_SBUFU: case NVN_RB_TEXU: case NVN_RB_TEXD: case NVN_RB_TEXA: case NVN_RB_GMEM: return 1;   // addresses or handles not known here
+            default: continue; }
+        if (h && h_ser(h) == t->serial) return 1;
+        if (a && n && t->mem && a < (uint64_t)t->mem + t->L.size && (uint64_t)t->mem < a + n) return 1; }
+    return 0;
+}
+// Whether the dispatch about to run leaves every clear that waits for a pass alone (then the clears wait across it): Ocarina of Time clears its 1440x810 scene targets, runs a compute
+// pass on a storage buffer and then draws into them; the clears used to land in a pass of their own there (store both, load both again), about three such passes a frame
+static int lc_dispatch_keeps(void) {
+    __unsafe_unretained NvProg *pr = S.cprog ? prog_get(S.cprog) : nil; __unsafe_unretained NvShader *cs = pr ? pr->sh[5] : nil;
+    if (!cs || cs->builtin || cs->rf.bindless || cs->rf.dyn) return 0;
+    for (int gi = 0; gi < g_nlc; gi++) { const lc_group *g = &g_lc[gi];
+        for (int k = 0; k < 8; k++) if (g->clear_c[k] && lc_cs_hits(cs, g->rt.color[k])) return 0;
+        if ((g->clear_d || g->clear_s) && lc_cs_hits(cs, g->rt.depth)) return 0; }
+    for (int k = 0; k < 8 && k < R.rt.n; k++) if (R.clear_c[k] && lc_cs_hits(cs, R.rt.color[k])) return 0;
+    if ((R.clear_d || R.clear_s) && lc_cs_hits(cs, R.rt.depth)) return 0;
+    return 1;
+}
 
 static void dispatch(const p_dispatch *dp);
 static int up_mfx_wanted(NvShader *cs); static int up_mfx_encode(NvShader *cs);   // a game's upscaler through MetalFX (see up_mfx_encode)
@@ -13727,7 +13754,8 @@ static int ndve_engine_dispatch(NvShader *cs, const p_dispatch *dp);   // nn::nd
 static int cshoist_on(void) { static int m = -1; if (m < 0) { const char *e = getenv("DM_NVN_CS_HOIST"); m = !(e && !strcmp(e, "0")); if (!m) MLOG("DM_NVN_CS_HOIST=0: compute dispatches between the draws of a pass end it"); } return m; }
 typedef struct { uint64_t lo, hi; } csh_rng;
 enum { CSH_RN = 1024, CSH_MAX = 64 };
-static const uint8_t *g_csh_op[CSH_MAX]; static int g_csh_n; static uint64_t g_csh_moved, g_csh_depth, g_csh_stop[8];   // dispatches run ahead and not yet met by replay; moved, of them sampling the pass's depth; why scans stopped
+static const uint8_t *g_csh_op[CSH_MAX]; static int g_csh_n; static uint64_t g_csh_moved, g_csh_depth, g_csh_stop[8], g_csh_stop_op[OP_COUNT_]; static uint32_t g_csh_pre_op;   // dispatches run ahead and not yet met by replay; moved, of them sampling the pass's depth; why scans stopped
+static int csh_bar_pass(void) { static int m = -1; if (m < 0) { const char *e = getenv("DM_NVN_CSH_BARRIER"); m = !(e && !strcmp(e, "0")); if (!m) MLOG("DM_NVN_CSH_BARRIER=0: game barriers between the draws of a pass stop the compute hoist's scan"); } return m; }   // see cs_hoist_try
 static int csh_take(const uint8_t *p) { for (int i = 0; i < g_csh_n; i++) if (g_csh_op[i] == p) { g_csh_op[i] = g_csh_op[--g_csh_n]; return 1; } return 0; }
 static int csh_add(csh_rng *r, int *n, uint64_t a, uint64_t sz) {
     if (!a) return 1;
@@ -13766,21 +13794,24 @@ static int csh_draw_reads(NvProg *pr, const p_draw *dw, const p_draw_idx *di, cs
                     if (!t.serial || !csh_add(r, n, (uint64_t)t.mem, t.L.size)) return 0;
                     break; }
                 case NVN_RB_TEXU: case NVN_RB_TEXD: case NVN_RB_TEXA: return 0;
-                case NVN_RB_SBUFP: case NVN_RB_SBUFU: case NVN_RB_IMG: case NVN_RB_TBUF: case NVN_RB_GMEM: return 0;   // may write memory, or reads memory not listed here
+                case NVN_RB_SBUFP: if (!b->rw && b->reg < 16) { if (!csh_add(r, n, S.ssbo[st][b->reg].addr, S.ssbo[st][b->reg].size)) return 0; break; } return 0;   // read-only: a read like a uniform buffer's (Ocarina of Time's scene draws)
+                case NVN_RB_SBUFU: case NVN_RB_IMG: case NVN_RB_TBUF: case NVN_RB_GMEM: return 0;   // may write memory, or reads memory not listed here
                 default: break; } } }
     return 1;
 }
 // A dispatch at its place in the stream (S as it is there): its storage buffers (counted as written), and whether it samples a colour attachment of the pass (1), only the depth (2)
-static int csh_cs(NvShader *cs, const p_dispatch *dp, csh_rng *w, int *nw, int *depth) {
+// rd (may be NULL): the memory it reads besides its storage buffers (uniform buffers and texture storage), to check against the occlusion reports it would move ahead of
+static int csh_cs(NvShader *cs, const p_dispatch *dp, csh_rng *w, int *nw, int *depth, csh_rng *rd, int *nrd) {
     if (!cs || cs->builtin || dp->ind || cs->rf.bindless || cs->rf.dyn) return 0;
     for (int i = 0; i < cs->rf.nb; i++) { const nvn_rbind *b = &cs->rf.b[i];
         switch (b->kind) {
             case NVN_RB_SBUFP: if (b->reg >= 16 || csh_attachment_hit(S.ssbo[5][b->reg].addr, S.ssbo[5][b->reg].size) || !csh_add(w, nw, S.ssbo[5][b->reg].addr, S.ssbo[5][b->reg].size)) return 0; break;
-            case NVN_RB_CBUF: case NVN_RB_UBOP: if (b->reg >= 16 || csh_attachment_hit(S.ubo[5][b->reg].addr, S.ubo[5][b->reg].size)) return 0; break;
+            case NVN_RB_CBUF: case NVN_RB_UBOP: if (b->reg >= 16 || csh_attachment_hit(S.ubo[5][b->reg].addr, S.ubo[5][b->reg].size)) return 0;
+                if (rd && !csh_add(rd, nrd, S.ubo[5][b->reg].addr, S.ubo[5][b->reg].size)) return 0; break;
             case NVN_RB_SBUFU: case NVN_RB_IMG: case NVN_RB_TEXU: case NVN_RB_TEXD: case NVN_RB_TEXA: case NVN_RB_GMEM: return 0;
             case NVN_RB_TEX: case NVN_RB_TBUF: { uint64_t h = tex_slot_h(S.tex[5], S.img[5], b->reg); int tid = (int)(h & 0xfffff); if (!tid) break;
                 os_unfair_lock_lock(&g_rmu); tex_t t = tid < g_ntreg && g_treg[tid].ok ? g_treg[tid].t : (tex_t){0}; os_unfair_lock_unlock(&g_rmu);
-                if (!t.serial) return 0;
+                if (!t.serial || (rd && !csh_add(rd, nrd, (uint64_t)t.mem, t.L.size))) return 0;
                 for (int k = 0; k < R.rt.n && k < 8; k++) if (tex_storage_overlap(&t, R.rt.color[k])) return 0;
                 if (tex_storage_overlap(&t, R.rt.depth)) *depth = 1;
                 break; }
@@ -13790,6 +13821,16 @@ static int csh_cs(NvShader *cs, const p_dispatch *dp, csh_rng *w, int *nw, int *
 // Whether a dispatch comes before the first op that would stop cs_hoist_try's scan, looking at op codes only. Most passes have none: the scan then saved and restored the
 // whole replay state (S, R) and marked every argument table dirty at each pass's first draw for nothing (BotW: 2.5% of the submit thread in those copies alone).
 // Ops it cannot rule out (draws whose reads may stop the full scan) count as passable, so a 1 here only means the full scan may move something
+// A render-target switch to the targets the pass already has, which replay continues the pass across (same-target continuation, rtc_on): a scan goes past it. Ocarina of
+// Time sets its 1440x810 scene targets again before each group of compute work between its draws, and nearly every scan stopped there (op 8 about 27,000 times per 300 frames),
+// so the dispatches after it split the pass each time (about 9 MB of colour and depth stored and loaded again per split). A switch replay would not continue (other targets, the
+// continuation off, a deferred pass's start) stops the scan as before
+static int csh_rt_same(const uint8_t *q, const void *aq) {
+    const p_set_rt *r = aq;
+    for (int i = 0; i < 4; i++) if (g_defer_slots[i].active && !g_defer_slots[i].at_q && g_defer_slots[i].q_op == q) return 0;
+    return R.has_rt && rtc_on() && r->n && rt_same(&R.rt, r);
+}
+static uint64_t g_csh_rt;   // render-target switches to the same targets the scans went past
 static int csh_dispatch_ahead(void) {
     fz_cursor cur = {.p = g_exec_next}; for (int k = 0; k < g_ret_n; k++) cur.ret[cur.ret_n++] = g_ret[k];
     for (int guard = 0; guard < 4096; guard++) {
@@ -13797,32 +13838,57 @@ static int csh_dispatch_ahead(void) {
         if (!fz_next(&cur, &q, &hq, &aq)) return 0;
         switch (hq.op) {
             case OP_DISPATCH: return 1;
-            case OP_BARRIER: { uint32_t bits; memcpy(&bits, aq, sizeof bits); if (bits) return 0; continue; }
+            case OP_BARRIER: { uint32_t bits; memcpy(&bits, aq, sizeof bits); if (bits && !csh_bar_pass()) { g_csh_pre_op = hq.op; return 0; } continue; }   // see cs_hoist_try
+            case OP_REPORT_COUNTER: case OP_RESET_COUNTER: { uint64_t t; memcpy(&t, aq, 8); if (t == NVN_COUNTER_TYPE_SAMPLES_PASSED) continue; g_csh_pre_op = hq.op; return 0; }   // see cs_hoist_try
+            case OP_RENDER_COND: case OP_UPDATE_UB: continue;
+            case OP_SET_RT: if (csh_rt_same(q, aq)) continue; g_csh_pre_op = hq.op; return 0;   // see csh_rt_same   // conditional rendering gates draws and clears, not dispatches; a uniform update a dispatch does not touch (see cs_hoist_try)
             case OP_DRAW: case OP_DRAW_IDX:
             case OP_ALPHA_REF: case OP_BIND_IMG: case OP_BIND_PROGRAM: case OP_BIND_SAMP: case OP_BIND_SSBO: case OP_BIND_STATE: case OP_BIND_TEX: case OP_BIND_TEX1:
             case OP_BIND_UBO: case OP_BIND_UBO_SMALL: case OP_BIND_VATTR: case OP_BIND_VBUF: case OP_BIND_VBUF1: case OP_BIND_VSTREAM: case OP_BLEND_COLOR: case OP_COPY_STRIDE:
             case OP_DEPTH_CLAMP: case OP_DEPTH_RANGE: case OP_POLY_OFFSET: case OP_PRIM_RESTART: case OP_PUSH_CONST: case OP_RAST_DISCARD: case OP_SCISSOR: case OP_SET_SAMP_POOL:
             case OP_SET_TEX_POOL: case OP_STENCIL: case OP_TF_BIND: case OP_VIEWPORTS: case OP_VP_SWIZZLE:
                 continue;
-            default: return 0;   // OP_TF_STATE and everything state_op does not take stop the full scan too
+            default: g_csh_pre_op = hq.op; return 0;   // OP_TF_STATE and everything state_op does not take stop the full scan too
         }
     }
     return 1;
 }
 static void cs_hoist_try(NvProg *pr0, const p_draw *dw0, const p_draw_idx *di0) {
-    if (!g_exec_next || g_ret_n > 8 || g_fz_checking || g_defer_replaying || g_nlc || R.clear_d || R.clear_s) return;
-    for (int i = 0; i < 8; i++) if (R.clear_c[i]) return;   // a clear this pass takes as its load action comes before anything a moved dispatch could read
+    if (!g_exec_next || g_ret_n > 8 || g_fz_checking || g_defer_replaying || g_nlc) return;
+    // A clear this pass takes as its load action lands when the pass begins, after a moved dispatch: csh_cs already refuses a dispatch that reads or writes a colour attachment's storage
+    // or writes an image, and a pending depth clear counts as depth written before it (below), so a dispatch that samples the depth stays
     { static int pre = -1; if (pre < 0) { const char *e = getenv("DM_NVN_CSH_PRESCAN"); pre = !(e && !strcmp(e, "0")); }
-      if (pre && !csh_dispatch_ahead()) { g_csh_stop[5]++; return; } }
+      if (pre && !csh_dispatch_ahead()) { g_csh_stop[5]++; if (g_csh_pre_op < OP_COUNT_) g_csh_stop_op[g_csh_pre_op]++; return; } }
     static csh_rng rd[CSH_RN]; int nrd = 0;
     if (!csh_draw_reads(pr0, dw0, di0, rd, &nrd)) { g_csh_stop[0]++; return; }
     fz_cursor cur = {.p = g_exec_next}; for (int k = 0; k < g_ret_n; k++) cur.ret[cur.ret_n++] = g_ret[k];
     static typeof(S) Ssave; memcpy(&Ssave, &S, sizeof S); typeof(R) Rsave = R; int pso_dirty = g_pso_dirty, dss_dirty = g_dss_dirty, moved = 0;
-    int dwrote = R.rt.depth && (S.ds.dw || S.ds.st);   // either plane: a compute texture view may read stencil
+    int dwrote = R.rt.depth && (S.ds.dw || S.ds.st || R.clear_d || R.clear_s);   // either plane: a compute texture view may read stencil; a pending clear writes it at the pass's start
+    // Occlusion queries (samples passed) between the draws: a dispatch draws no samples, so it moves past their resets and reports as long as it reads and writes none of the reports'
+    // memory (16 bytes each). Ocarina of Time resets and reports one around nearly every draw of its scene (58 in one pass), and every scan used to stop at the first
+    static csh_rng csh_rep[CSH_RN]; int nrep = 0;
     for (int guard = 0; guard < 4096; guard++) {
         const uint8_t *q; op_hdr hq; const void *aq;
         if (!fz_next(&cur, &q, &hq, &aq)) break;
-        if (hq.op == OP_BARRIER) { uint32_t bits; memcpy(&bits, aq, sizeof bits); if (bits) { g_csh_stop[5]++; break; } continue; }
+        // A game barrier between the draws (Ocarina of Time: about 70 a frame in its scene passes, the most common stop once uniform updates passed): it orders what ran before it
+        // against what runs after. What the moved dispatch could depend on is covered without it: the draws before it in the stretch write no memory (csh_draw_reads) and no
+        // attachment it samples (colour refused by csh_cs, depth by dwrote); dispatches moved ahead keep a barrier between each other (dispatch_enc records every dispatch as writing
+        // everything); and the pass that opens after them starts behind a full barrier (m4_end clears g_last_end_relaxed). Replay still runs the barrier where it was, for the draws
+        // after it. DM_NVN_CSH_BARRIER=0 stops the scan there as before
+        if (hq.op == OP_BARRIER) { uint32_t bits; memcpy(&bits, aq, sizeof bits); if (bits && !csh_bar_pass()) { g_csh_stop[5]++; g_csh_stop_op[hq.op]++; break; } continue; }
+        if (hq.op == OP_REPORT_COUNTER || hq.op == OP_RESET_COUNTER) { uint64_t t, ad = 0; memcpy(&t, aq, 8); if (hq.op == OP_REPORT_COUNTER) memcpy(&ad, (const uint8_t *)aq + 8, 8);
+            if (t != NVN_COUNTER_TYPE_SAMPLES_PASSED || (ad && !csh_add(csh_rep, &nrep, ad, 16))) { g_csh_stop[5]++; g_csh_stop_op[hq.op]++; break; }
+            continue; }
+        // Conditional rendering between the draws (Ocarina of Time draws each object only if its occlusion query passed): it skips draws and clears, never a dispatch, so a dispatch
+        // moves past it; one that writes the two counters the condition compares would change it, so their 32 bytes join the reports' memory
+        if (hq.op == OP_RENDER_COND) { const p_render_cond *rc = aq;
+            if (rc->mode < 2 && rc->addr && !csh_add(csh_rep, &nrep, rc->addr, 32)) { g_csh_stop[5]++; g_csh_stop_op[hq.op]++; break; }
+            continue; }
+        // A uniform-buffer update between the draws (Ocarina of Time writes about 80 a frame inside its scene passes): the moved dispatch runs before it, so it must neither read nor
+        // write the updated bytes; they join the reports' memory, which a dispatch that touches stops the scan
+        if (hq.op == OP_UPDATE_UB) { uint64_t d, n; memcpy(&d, aq, 8); memcpy(&n, (const uint8_t *)aq + 8, 8);
+            if (n && !csh_add(csh_rep, &nrep, d, n)) { g_csh_stop[5]++; g_csh_stop_op[hq.op]++; break; }
+            continue; }
         if (hq.op == OP_DRAW || hq.op == OP_DRAW_IDX) {
             p_draw tdw; p_draw_idx tdi; const p_draw *d = hq.op == OP_DRAW ? draw_rec(aq, hq.size, &tdw) : NULL; const p_draw_idx *x = hq.op == OP_DRAW_IDX ? draw_idx_rec(aq, hq.size, &tdi) : NULL;
             prog_resolve(); __unsafe_unretained NvProg *pr = S.prog ? prog_get(S.prog) : nil;
@@ -13831,17 +13897,23 @@ static void cs_hoist_try(NvProg *pr0, const p_draw *dw0, const p_draw_idx *di0) 
             continue; }
         if (hq.op == OP_DISPATCH) {
             const p_dispatch *dp = aq; __unsafe_unretained NvShader *cs = S.cprog && prog_get(S.cprog) ? prog_get(S.cprog)->sh[5] : nil;
-            static csh_rng wr[CSH_RN]; int nwr = 0, depth = 0;
-            if (!csh_cs(cs, dp, wr, &nwr, &depth)) { g_csh_stop[2]++; break; }
+            static csh_rng wr[CSH_RN], crd[CSH_RN]; int nwr = 0, ncrd = 0, depth = 0;
+            if (!csh_cs(cs, dp, wr, &nwr, &depth, crd, &ncrd)) { g_csh_stop[2]++; break; }
+            if (nrep && (csh_hit(wr, nwr, csh_rep, nrep) || csh_hit(crd, ncrd, csh_rep, nrep))) { g_csh_stop[3]++; break; }   // it reads or writes an occlusion report or uniform update it would pass
             if (depth && dwrote) { g_csh_stop[7]++; break; }   // it would miss depth the draws before it wrote
             if (csh_hit(wr, nwr, rd, nrd)) { g_csh_stop[3]++; break; }   // the draws before it read what it writes
             if (g_csh_n >= CSH_MAX) { g_csh_stop[4]++; break; }
             PD("H %llu dispatch %s moved ahead of the pass%s", g_stat_pass + 1, cs->key, depth ? " (samples the pass's depth, which no draw before it wrote)" : "");
-            dispatch(dp); g_csh_op[g_csh_n++] = q; g_csh_moved++; g_csh_depth += depth; moved++;
+            { typeof(R.clear_c) cc; memcpy(cc, R.clear_c, sizeof cc); int cd = R.clear_d, cst = R.clear_s;   // the pass's pending clears are its load actions: the moved dispatch must neither land nor queue them
+              memset(R.clear_c, 0, sizeof R.clear_c); R.clear_d = R.clear_s = 0;
+              dispatch(dp);
+              memcpy(R.clear_c, cc, sizeof cc); R.clear_d = cd; R.clear_s = cst; }
+            g_csh_op[g_csh_n++] = q; g_csh_moved++; g_csh_depth += depth; moved++;
             continue; }
-        if (hq.op == OP_TF_STATE) { g_csh_stop[5]++; break; }   // saves/restores counters in GPU memory
+        if (hq.op == OP_SET_RT && csh_rt_same(q, aq)) { g_csh_rt++; continue; }   // see csh_rt_same
+        if (hq.op == OP_TF_STATE) { g_csh_stop[5]++; g_csh_stop_op[hq.op]++; break; }   // saves/restores counters in GPU memory
         if (state_op(hq.op, aq)) continue;
-        g_csh_stop[5]++; break;   // anything else may end the pass, write memory or depend on the order (copies, updates, clears, targets, queries)
+        g_csh_stop[5]++; if (hq.op < OP_COUNT_) g_csh_stop_op[hq.op]++; break;   // anything else may end the pass, write memory or depend on the order (copies, updates, clears, targets, queries)
     }
     if (cur.bad) g_csh_stop[6]++;
     memcpy(&S, &Ssave, sizeof S); args_dirty_all(); R = Rsave; g_pso_dirty = pso_dirty || moved; g_dss_dirty = dss_dirty || moved; prog_resolve();
@@ -13849,6 +13921,14 @@ static void cs_hoist_try(NvProg *pr0, const p_draw *dw0, const p_draw_idx *di0) 
 }
 void mtl_geomesh_stats(uint64_t *n, uint64_t *wait, uint64_t *run_draws, uint64_t *runs, uint64_t ends[4]) { *n = g_geo_mesh_n; *wait = g_geo_mesh_wait; *run_draws = g_mrun_draws; *runs = g_mrun_runs; memcpy(ends, g_mrun_ends, sizeof g_mrun_ends); }
 void mtl_geohoist_stats(uint64_t *moved, uint64_t *runs, uint64_t *stops) { *moved = g_geo_hoisted; *runs = g_geo_hoist_runs; memset(stops, 0, 6 * sizeof *stops); stops[3] = g_geo_dependency_splits; }
+// The op codes (nvn_obj.h's op enum) that stopped the most scans since the last call, "op=count" for the top four: what to teach the scan next
+void mtl_cshoist_stop_ops(char *out, size_t n) {
+    static uint64_t prev[OP_COUNT_]; uint64_t d[OP_COUNT_]; for (int i = 0; i < OP_COUNT_; i++) { d[i] = g_csh_stop_op[i] - prev[i]; prev[i] = g_csh_stop_op[i]; }
+    size_t at = 0; out[0] = 0;
+    for (int k = 0; k < 4; k++) { int b = -1; for (int i = 0; i < OP_COUNT_; i++) if (d[i] && (b < 0 || d[i] > d[b])) b = i;
+        if (b < 0) break; at += (size_t)snprintf(out + at, at < n ? n - at : 0, "%s%d=%llu", k ? " " : "", b, (unsigned long long)d[b]); d[b] = 0; if (at >= n) break; }
+    { static uint64_t prt; if (g_csh_rt != prt && at < n) at += (size_t)snprintf(out + at, n - at, "%ssame-target switches passed %llu", at ? "; " : "", (unsigned long long)(g_csh_rt - prt)); prt = g_csh_rt; }
+}
 void mtl_cshoist_stats(uint64_t *moved, uint64_t *depth, uint64_t *stops) { *moved = g_csh_moved; *depth = g_csh_depth; for (int i = 0; i < 8; i++) stops[i] = g_csh_stop[i]; }
 // Physical color attachments the selected pipeline can write. A merged pass remaps logical outputs and channel masks; a specialized fragment's outputs are unknown here.
 static uint32_t draw_color_writes(NvProg *pr) {
@@ -14391,6 +14471,8 @@ static void dispatch(const p_dispatch *dp) {
     // A store the shader makes on its very first invocation only, before the others run on the Switch: the build takes it out of the shader (dmsh_rewrite.py first_store), as Apple's GPUs start workgroups in no order
     if (dp->ind || (dp->x && dp->y && dp->z)) for (int i = 0; i < cs->rf.nfirst; i++) { const p_bind_buf *u = &S.ssbo[5][cs->rf.first[i].reg]; if (u->addr) mtl_sub_fill(u->addr + 4ull * cs->rf.first[i].word, 4, cs->rf.first[i].value); }
     if (g_nubd && ubd_conflict_cs(cs, dp->ind)) { g_ubd_conflicts++; ubd_land(); }   // see ubd_conflict_cs
+    { int pend = R.clear_d || R.clear_s; for (int i = 0; i < 8; i++) pend |= R.clear_c[i];
+      if (pend && !g_enc && g_cb && lc_on() && lc_dispatch_keeps()) lc_push(); }   // clears this dispatch leaves alone wait for the next pass on their targets (lc_dispatch_keeps)
     rp_flush();   // A full clear with no draw after it waits for the next pass on its targets, but it comes before this dispatch, which may read or write them as images: land it first, as copy_t2t does
     image_prepare(prog_get(S.cprog), 0x20);
     if (ndve_engine_dispatch(cs, dp)) return;   // nn::ndve's movie network as the host's kernels (DM_NDVE_ENGINE=1)
@@ -15313,7 +15395,7 @@ void mtl_exec(const uint8_t *p) {
         if (g_allocprof) { static uint64_t last; static int prev = -1; uint64_t now = g_dev.currentAllocatedSize; if (prev >= 0 && prev < 64 && now > last) g_ap_bytes[prev] += now - last; last = now; prev = h.op; }
         if (g_hoist_n && hoist_take(p)) { if (g_fz.active && p == g_fz.rt2_op) { g_fz.phase = 2; g_rt_merged = 0; PD("F %llu merged pass enters the later pass's draws", g_stat_pass); } p += h.size; continue; }   // A pure-clear render pass already executed early / the start of a later pass already merged in   // Entering the later pass: the same-target continuation of the earlier pass ends here; the later pass reading the earlier pass's attachment is proven to be same-pixel by fz_p2_draw, and is no longer split by the continuation rule
         const void *a = p + 8;
-        if (g_nlc && !lc_keeps(h.op) && !(h.op == OP_END && g_ret_n)) lc_land();   // see lc_keeps (a sub-list's end returns to its caller)
+        if (g_nlc && !lc_keeps(h.op) && !(h.op == OP_END && g_ret_n) && !(h.op == OP_DISPATCH && lc_dispatch_keeps())) lc_land();   // see lc_keeps (a sub-list's end returns to its caller), lc_dispatch_keeps
         if (g_mrun.n && !geo_mesh_keeps(h.op) && !(h.op == OP_END && g_ret_n)) geo_mesh_flush();   // see geo_mesh_keeps
         switch (h.op) {
             case OP_END: g_exec_cur = NULL;

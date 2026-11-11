@@ -779,6 +779,13 @@ Games read this count as a position in their own command memory and size their h
 - **Found on:** code review of the shared tracker, from a fork's compatibility commit `587d5206` ported through [PR #686](https://github.com/seedds/nxnative/pull/686). No game is known to hit it: a game normally finalizes a pool only after the GPU is done with it.
 - **Check:** `t_dirty_retire_race` retires the pool between protect's lookup and its first page-state exchange, then reads 16 bytes into the pool with `read()`. Without the fix, retirement completes first and the read fails with `EFAULT`; with it, retirement waits for protection, unregisters the pool and the read returns 16. `t_dirty_race` and `t_dirty_slots` cover page-state publication and shared / reused pool slots.
 
+### Missing texture-copy objects crashed pass-dump diagnostics
+
+- **Symptom:** a texture copy with a missing source or destination crashes when its frame has pass-dump diagnostics enabled.
+- **Cause:** `copy_t2t_enc` conditionally handled missing objects, but the `PD` line read both serials before the existing missing-texture return. With diagnostics off, that expression was not evaluated.
+- **Fix:** reject a missing source or destination before resolving textures or evaluating diagnostics. Valid copies keep the same path. `t_copy_missing` checks all three missing-object combinations with diagnostics enabled, preserves both surviving textures' bytes, and checks a valid copy after rejection in the same submission.
+- **Found on:** synthetic backend regression on an Apple-silicon Mac; no gameplay crash or terrain defect is attributed to this case. Unmodified upstream crashes in each missing-object case; the guard passes all three with Metal validation.
+
 ## NVN entry points
 
 ### Integer sampler border colours

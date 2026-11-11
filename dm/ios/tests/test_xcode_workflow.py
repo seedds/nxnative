@@ -54,7 +54,7 @@ class XcodePipelineTests(unittest.TestCase):
 
             mocks = {}
             for name, value in {
-                'scan_nsps': (int(registered.id, 16), fam), 'check_prereqs': None, 'check_metal': None,
+                'scan_nsps': (int(registered.id, 16), fam), 'check_prereqs': None, 'check_metal': None, 'check_formats': None,
                 'free_gb': 10000, 'find_nx_extract': root / 'nx_extract',
                 'extract': extraction, 'check_formats': None, 'can_clone': False, 'build_mismatch': [],
                 'extract_aoc': None, 'rewrite': profile, 'split_shaders': 'fixture-key',

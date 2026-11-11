@@ -586,6 +586,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** `ndsr_shaders` in `shader_split.py` scores up to 16 complete records at each start and takes the start with more pointers to NVN2 control sections. The two starts can leave different numbers of trailing bytes in a short pack; those partial records are excluded from the score, as from the subsequent record walk.
 - **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md).
 
+### Alchemy IGA archives
+
+- **Symptom:** a game boots into its frame loop but draws next to nothing, and the host logs dozens of `[RED] shader … is not in the shader map` lines; the split found no shaders, and the bytes the host dumps (`DM_NVN_SHDUMP`) are in no game file. The RomFS is mostly `.pak` archives that start with `IGA\x1a`.
+- **Cause:** Vicarious Visions' and Toys for Bob's Alchemy engine keeps its data in IGA archives whose files are cut into 0x8000-byte blocks, nearly all LZMA-compressed, so no shader byte appears in the RomFS as stored. Its shaders are NVN control sections, each directly followed by its code area (the layout of YEBIS's `.tfxo`), inside the IGZ files of one archive.
+- **Fix:** `dm/gfx/tools/iga.py` reads version 13 archives: the file records, the u8 or u16 block table (chosen by the file's size: up to 0x7f sectors the u8 table, up to 0x7fff the u16 one; checked on all 74,311 files of the game's 401 archives, every IGZ file then starting with its magic), stored and LZMA blocks. `shader_split.py` reads every IGA archive's files in ranges (`iga_jobs`) and takes the control section / code area pairs of each file that holds a control section (`iga_shaders`, through `tfxo_shaders`), labelled `#IGZ@`, each a program of one stage. Another IGA version, another compression or a file past the u16 table is refused with a red line and the archive is scanned as one file, as before. `test_split_iga.py` covers synthetic archives (stored and LZMA files, refused layouts, a damaged block, the split).
+- **Found on:** Crash Team Racing Nitro-Fueled (`0100F9F00C696000`, update 1.0.15, no profile yet): 1,933 shaders in the 87 IGZ files of `archives/shaders_nx.pak`, none elsewhere. They cover 63 of the 71 shaders the game used up to its menus on the Mac; the other 8 are GLSLC outputs in `main` (6) and compiled at run time (2, captured on the Mac as in [Built-in shaders compiled with the game's own GLSLC](#built-in-shaders-compiled-with-the-games-own-glslc)).
+
 ### RAGE RPF6 archives and `rgxd` effects
 
 - **Symptom:** the NSP script's split finds no shaders in a RomFS made of `.rpf` files; after a first reader, `[RED]` lines name groups of files that could not be read.

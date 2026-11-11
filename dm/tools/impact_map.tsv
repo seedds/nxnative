@@ -121,6 +121,7 @@ dm/mac/Launcher.swift	*:*	the Mac settings window, linked into every Mac app
 dm/mac/pack_app.py	*:*	Mac app packaging: every game's bundled resources
 dm/gfx/tools/cpk.py	shader:stage:*	CRI archive input to shader scanning
 dm/gfx/tools/vbf.py	shader:stage:*	Virtuos archive input to shader scanning
+dm/gfx/tools/iga.py	shader:stage:*	Alchemy archive input to shader scanning
 dm/gfx/tools/dmsh_mesh.py	shader:stage:gs	passthrough geometry composed into a mesh shader
 dm/host/hle_fpslock.c	present:*	build-gated engine frame limits and dynamic resolution
 dm/host/hle_uecvar.c	present:*	Unreal console variables found by name; the texture pool (profile ue_texture_pool)

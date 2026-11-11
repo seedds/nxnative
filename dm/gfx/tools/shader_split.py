@@ -43,6 +43,7 @@
 #   · Heaps (Dead Cells): whole GLSLC outputs in base64 after the GLSL of the engine's shader cache (shaders.cache.nx), inside its PAK archive, see heaps_pak_files and heaps_shaders
 #   · Frostbite (EA SPORTS FC 27): the CompiledBytecode resources of the bundles its superbundle tables (.toc) list, in its cas files (Oodle Leviathan, decoded by the game's own decoder in the
 #       Mac host), each a VNVN record with one code area and control section (frostbite.py), see frostbite_jobs and frostbite_shaders
+#   · IGA (Alchemy, Crash Team Racing Nitro-Fueled): NVN control sections each followed by its code area in the IGZ files of the .pak archives (LZMA blocks, iga.py), see iga_jobs and iga_shaders
 #   · PDAT (the engine with the namespace phx, Kirby Air Riders): flatbuffer records tagged PMAP, zstd frames in the .dat archives, each holding a program's control sections and code areas, see pdat_jobs and pdat_shaders
 #   · Unreal Engine 3 (Batman: Arkham Knight): shader records in its global shader cache (BMSG) and in the packages (the combined shader cache), whose compressed chunks are Oodle blocks decoded by the game's own decoder in the Mac host, see ue3_body and ue3_shaders
 # Code area: 0x30 header + (graphics) 0x50 SPH + instructions; header magic 0x12345678 for graphics, 0x12345679 for compute. The control section starts with 0x98761234, +0x704 = code area length,
@@ -820,6 +821,39 @@ def cpk_shaders(path, rel, ents, out):
             print(f'[RED] /{rel}/{e[0]}: {x}; not scanned', flush=True); continue
         scan_blob(d, f'/{rel}/{e[0]}', out)
 
+IGA = b'IGA\x1a'
+def iga_jobs(files, parts=64):
+    """Every file of every Alchemy IGA archive (iga.py) in ranges of about equal length (Crash Team Racing Nitro-Fueled: 401 .pak archives, 9.4 GB, nearly all of them LZMA blocks; its shaders
+    are in the IGZ files of shaders_nx.pak, but no file name is relied on). → ([(path, rel, (IGA, entries)), …], the archive paths)"""
+    import iga
+    with_head = []
+    for p, r in files:
+        if p.lower().endswith('.pak'):
+            with open(p, 'rb') as f: h = f.read(4)
+            if h != IGA: continue
+            try: with_head.append((p, r, iga.files(p)))
+            except (ValueError, struct.error) as e:   # a layout iga.py does not read (another IGA version, another compression): scanned as a loose file
+                print(f'[RED] /{r}: the IGA archive cannot be read ({e}); scanned as one file', flush=True)
+    jobs, step = [], sum(e[2] for _, _, es in with_head for e in es) / parts
+    for p, r, es in with_head:
+        cur, size = [], 0
+        for e in es:
+            cur.append(e); size += e[2]
+            if size >= step: jobs.append((p, r, (IGA, tuple(cur)))); cur, size = [], 0
+        if cur: jobs.append((p, r, (IGA, tuple(cur))))
+    return jobs, {p for p, _, _ in with_head}
+
+def iga_shaders(path, rel, ents, out):
+    """A range of IGA files (iga_jobs), each decoded; an IGZ file that holds NVN control sections has each followed by its code area (Crash Team Racing's shaders_nx.pak: 87 files,
+    1,933 shaders, read as tfxo_shaders reads YEBIS's). The other files (textures, models, sounds) hold none and are not scanned further"""
+    import iga
+    with open(path, 'rb') as f:
+        for e in ents:
+            try: d = iga.read(path, e, f)
+            except ValueError as x:   # a block iga.py cannot decode: the file is left out, and the split goes on
+                print(f'[RED] /{rel}/{e[0]}: {x}; not scanned', flush=True); continue
+            if CTL_MAGIC in d: out += tfxo_shaders(d, f'/{rel}/{e[0]}', 'IGZ')
+
 CRA = b'CRA.'
 def boot_nros():
     """The NROs captured from a boot (DM_NRO_DIR, which the NSP script sets), sorted; none without it. The folder is escaped: it lies in the NSP folder, whose name often has
@@ -1129,10 +1163,11 @@ def bea_members(d, label):
         yield path, data
 
 TFXO = b'.tfxo file\0'
-def tfxo_shaders(d, label):
+def tfxo_shaders(d, label, tag='TFXO'):
     """YEBIS (Silicon Studio's post-effect library: bloom, glare, depth of field, SSAO …) keeps its compiled effects in one '.tfxo file' (Pokémon Sword 1.3.2: a 39.5 MB zlib stream in main,
     3,155 shaders, see tfxo_streams): a text header (the file length, the shader count, 'hlsl', 'TexUtil_NVN_NX', the technique list 'tech_…,vs_…,ps_…'), then the shaders, each a control section
-    (its own length at +0x20: 0x850 on SDK 7) directly followed by its code area (control +0x704 bytes). The effect sets each stage as a program of its own (separable_pairs)"""
+    (its own length at +0x20: 0x850 on SDK 7) directly followed by its code area (control +0x704 bytes). The effect sets each stage as a program of its own (separable_pairs).
+    Alchemy's IGZ shader files lay their shaders out the same way (iga_shaders, tag 'IGZ')"""
     out = []
     for m in re.finditer(re.escape(CTL_MAGIC), d):
         a = m.start()
@@ -1144,7 +1179,7 @@ def tfxo_shaders(d, label):
         if not st: red(f'{label}: the control section at {a:#x} is not followed by a code area')
         why = check(label, st, ctl, code)
         if why: red(f'{label}: shader at {a:#x}: {why}')
-        out.append((f'{label}#TFXO@{a:#x}', st, ctl, code))
+        out.append((f'{label}#{tag}@{a:#x}', st, ctl, code))
     return out
 
 def tfxo_streams(d, label):
@@ -2878,10 +2913,10 @@ def pixel_input_cover(shaders):
         k = min(ins, key=lambda k: (-len(ins[k] & left), k)); cover.append(k); left -= ins[k]
     return cover
 
-SINGLE_STAGE = ('#GLSLC@', '#VIPER', '#UE', '#MTSPK@', '#MGFX@', '#NLG', '#PGSO', '#RAW@', '#TFXO@', '#NEEDLE@', '#SNOWDROP@', '#PHYRE@', '#SUMO@', '#NVNSH@')   # sources whose every shader is a program of one stage: GLSLC outputs, Unreal's shader records, MT Framework's shader package (BNSH variations, Unity programs, MSHD and SDF pair theirs);
+SINGLE_STAGE = ('#GLSLC@', '#VIPER', '#UE', '#MTSPK@', '#MGFX@', '#NLG', '#PGSO', '#RAW@', '#TFXO@', '#IGZ@', '#NEEDLE@', '#SNOWDROP@', '#PHYRE@', '#SUMO@', '#NVNSH@')   # sources whose every shader is a program of one stage: GLSLC outputs, Unreal's shader records, MT Framework's shader package (BNSH variations, Unity programs, MSHD and SDF pair theirs);
 # Unreal Engine 3's shader caches (ue3_shaders, '#UE3@'); MonoGame's effects, whose passes may name no vertex shader and keep the one bound (Celeste: 10 of its 13 effects draw through SpriteBatch's vertex shader, which is in main); Next Level Games'
 # archives (Luigi's Mansion 3 makes 5,317 programs of one stage each at boot); PlatinumGames' shader objects (Bayonetta 3: one stage each, pg_shader); control sections loose in main
-# (Advance Wars 1+2: Re-Boot Camp's Bink shaders, raw_shaders), which no file pairs; YEBIS's effect file (tfxo_shaders); and Sumo's Ninty_NX descriptors and NVNsh records, one stage
+# (Advance Wars 1+2: Re-Boot Camp's Bink shaders, raw_shaders), which no file pairs; YEBIS's effect file (tfxo_shaders) and Alchemy's IGZ shader files (iga_shaders); and Sumo's Ninty_NX descriptors and NVNsh records, one stage
 # each (Team Sonic Racing: 2,116 vertex and 2,399 pixel programs, sumo_shaders)
 def separable_pairs(keys):
     """Single-stage programs (13 Sentinels: each GLSLC output becomes a program with one stage, and BindProgram's stage bits combine vertex and pixel programs per draw; Unreal combines its shaders per draw
@@ -3059,6 +3094,9 @@ def scan_file_in(args):
         return rel, uniq_keys(found), var_pairs(found), lost or trees
     if len(args) > 2 and args[2][0] == FB_CAS:   # CompiledBytecode resources of a Frostbite cas file (frostbite_jobs)
         frostbite_shaders(path, rel, args[2][1], found)
+        return rel, uniq_keys(found), var_pairs(found), trees
+    if len(args) > 2 and args[2][0] == IGA:   # files of an Alchemy IGA archive (iga_jobs)
+        iga_shaders(path, rel, args[2][1], found)
         return rel, uniq_keys(found), var_pairs(found), trees
     if len(args) > 2 and head[:4] == RPF6 and args[2][0] == RPF6:   # files of a Rockstar RPF6 archive (rpf_jobs)
         rpf_shaders(path, rel, args[2][1], args[2][2], found)
@@ -3252,11 +3290,12 @@ def main():
     cr_jobs, cras = cra_jobs(files)   # Mario Tennis Fever's CRA archive, its index in the NRO the game decodes at run time
     zp_jobs, zips = zip_jobs(files)   # Portal's game.zip (Deflate members)
     ah_jobs, arhs = arh_jobs(files)   # Monolith's ARH1/ARD archives and embedded XBC1/HCPS programs
+    ig_jobs, igas = iga_jobs(files)   # Crash Team Racing Nitro-Fueled's Alchemy IGA archives (LZMA blocks)
     fb_jobs, fbs = frostbite_jobs(files)   # EA SPORTS FC 27's Frostbite bundles, Oodle Leviathan decoded by the game's own decoder in the Mac host
     pd_jobs, pdats = pdat_jobs(files)   # Kirby Air Riders' PDAT archives: the PMAP records in byte ranges
     rp_jobs, rpfs = rpf_jobs(files, main_v)   # Red Dead Redemption's RPF6 archives, their tables decrypted with the key in main (rpf6.py)
-    big += pak_jobs + tr_jobs + ue_jobs + bd_jobs + arc_jobs + pz_jobs + ck_jobs + cr_jobs + zp_jobs + ah_jobs + fb_jobs + pd_jobs + rp_jobs
-    files = [(p, r) for p, r in files if not linkdata_jobs(p, r) and p not in paks and p not in trp and p not in uep and p not in bdts and p not in arcs and p not in pkzs and p not in cpks and p not in cras and p not in zips and p not in arhs and p not in fbs and p not in pdats and p not in rpfs]
+    big += pak_jobs + tr_jobs + ue_jobs + bd_jobs + arc_jobs + pz_jobs + ck_jobs + cr_jobs + zp_jobs + ah_jobs + fb_jobs + ig_jobs + pd_jobs + rp_jobs
+    files = [(p, r) for p, r in files if not linkdata_jobs(p, r) and p not in paks and p not in trp and p not in uep and p not in bdts and p not in arcs and p not in pkzs and p not in cpks and p not in cras and p not in zips and p not in arhs and p not in fbs and p not in igas and p not in pdats and p not in rpfs]
     with cf.ProcessPoolExecutor(J, initializer=_pool_init, initargs=(common, {}, zdicts)) as ex:
         n = len(big) + len(files)
         results += pooled(ex, big, n) + pooled(ex, files, n, len(big), chunk=16)

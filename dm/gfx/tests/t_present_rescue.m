@@ -181,10 +181,33 @@ static void metal_lifecycle(void) {
     CHECK("present thread can take a real drawable after rescue", drawable != nil);
     [drawable present]; g_link_started = 0;
 }
+static void late_feed(int presents, int every) {   // presents at one frame per tick; every > 0: one in `every` turns a refresh late after one on time
+    for (int i = 0; i < presents; i++) link_late_note(every > 0 && i % every == 0, 0);
+}
+static void late(void) {   // Fullscreen on a fixed-rate screen drops the display link only once presents keep turning late (link_late_note, link_late_mode).
+    reset(); g_present_latency = 0; g_present_link_env = 0; test_fullscreen = 1; test_variable_refresh = 0; atomic_store(&g_link_late_off, 0); link_late_reset();
+    late_feed(3 * LINK_LATE_WIN, 0); CHECK("presents on their targets keep the link", link_late_mode(1) == 1);
+    for (int i = 0; i < 3 * LINK_LATE_WIN; i++) link_late_note(1, 0);
+    CHECK("presents all a refresh late, steadily, keep the link", link_late_mode(1) == 1);
+    link_late_reset(); late_feed(LINK_LATE_WIN, 15); late_feed(LINK_LATE_WIN, 0); late_feed(LINK_LATE_WIN, 15);
+    CHECK("one window of late turns at a time keeps the link", link_late_mode(1) == 1);
+    link_late_reset(); for (int i = 0; i < 2 * LINK_LATE_WIN; i++) link_late_note(i % 15 == 0, 1);
+    CHECK("frames held for a present interval of 2 are not counted", link_late_mode(1) == 1);
+    g_present_latency = 1; late_feed(2 * LINK_LATE_WIN, 15); CHECK("a set DM_PRESENT_LATENCY is left alone", link_late_mode(1) == 1);
+    g_present_latency = 0; g_present_link_env = 1; late_feed(2 * LINK_LATE_WIN, 15); CHECK("a set DM_PRESENT_LINK is left alone", link_late_mode(1) == 1);
+    g_present_link_env = 0; test_fullscreen = 0; late_feed(2 * LINK_LATE_WIN, 15); test_fullscreen = 1;
+    CHECK("late presents in a window are not counted", link_late_mode(1) == 1);
+    link_late_reset(); late_feed(2 * LINK_LATE_WIN, 15);
+    CHECK("two windows of late turns in a row turn the 60 Hz link off", link_late_mode(1) == 0);
+    CHECK("the 120 Hz and 30 Hz links are left alone", link_late_mode(2) == 2 && link_late_mode(3) == 3 && link_late_mode(0) == 0);
+    late_feed(3 * LINK_LATE_WIN, 0); CHECK("the link stays off while the window is fullscreen", link_late_mode(1) == 0);
+    test_fullscreen = 0; g_dm_present_link = 0; link_sync(); g_dm_present_link = 1;   // mode 0 here: the test has no link thread to start
+    CHECK("leaving fullscreen gives the link back", link_late_mode(1) == 1 && !atomic_load(&g_link_late_off));
+}
 int main(int argc, char **argv) { @autoreleasepool {
     alarm(10); setbuf(stdout, NULL);
     if (argc > 2 || (argc == 2 && strcmp(argv[1], "--metal"))) return 2;
-    thresholds(); backoff(); settings(); lifecycle(); latency(); thirty(); vrr120();
+    thresholds(); backoff(); settings(); lifecycle(); latency(); late(); thirty(); vrr120();
     if (argc == 2) metal_lifecycle();
     printf("present rescue: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

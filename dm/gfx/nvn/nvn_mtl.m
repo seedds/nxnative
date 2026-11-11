@@ -15797,6 +15797,37 @@ int mtl_link_tick(uint64_t n, double *target, double *lead_ms, int *ticks, doubl
     link_ent e = g_link_ring[n % PRING]; if (e.n != n) return 0;
     *target = e.target; *lead_ms = e.lead_ms; *ticks = e.ticks; *gap_ms = e.gap_ms; return 1;
 }
+// Fullscreen on a fixed-rate screen runs the display link at frame latency 1 (link_latency). On some screens the system then shows presents a refresh after the link's target, on
+// and off: each present that turns late after one on time stays behind a frame shown 33 ms, and the next acquire waits a tick more. Ocarina of Time on an M5 Pro in fullscreen on an
+// external fixed 60 Hz 5K screen: 14-29 such turns per 300 presents, one frame in six over 25 ms; in a window, or at latency 2, 0-3 (docs/reference/frame-rate.md, "Fixed-rate
+// display-link delay remains at latency 1"). Late presents alone do no harm: a window showed 600 in a row a refresh late at a steady 16.7 ms. So the turns are counted, per
+// LINK_LATE_WIN presents at one frame per tick; two windows in a row with LINK_LATE_TURNS or more turn the link off until the window leaves fullscreen (link_sync, link_late_mode):
+// the present thread takes the drawables itself, as with DM_PRESENT_LINK=0, which had 103 frames over 25 ms on that walk against 950-1,245. Frame latency 2 did not help there
+// (950, set by an earlier version of this policy at frame 606). A workaround: why the system misses the target at a 32 ms lead is open. DM_PRESENT_LINK_AUTO=0 keeps the link;
+// a set DM_PRESENT_LINK or DM_PRESENT_LATENCY is left alone.
+enum { LINK_LATE_WIN = 300, LINK_LATE_TURNS = 8 };
+static _Atomic int g_link_late_off;   // fullscreen on this fixed-rate screen presents without the display link (link_late_mode)
+int front_fullscreen(void); int front_screen_variable_refresh(void); int front_screen_max_fps(void);
+static pthread_mutex_t g_link_late_mu = PTHREAD_MUTEX_INITIALIZER;
+static int g_link_late_n, g_link_late_turns, g_link_late_was, g_link_late_bad;
+static void link_late_reset(void) { pthread_mutex_lock(&g_link_late_mu); g_link_late_n = g_link_late_turns = g_link_late_was = g_link_late_bad = 0; pthread_mutex_unlock(&g_link_late_mu); }
+static int link_late_mode(int want) { return want == 1 && atomic_load(&g_link_late_off) ? 0 : want; }
+static void link_late_note(int late, int held) {   // a present's presented handler: late = shown over half a refresh after its tick's target; held = its frame's period is over a tick
+    static int on = -1; if (on < 0) { const char *e = getenv("DM_PRESENT_LINK_AUTO"); on = !(e && !strcmp(e, "0")); }
+    if (!on || g_present_latency > 0 || g_present_link_env || g_dm_present_link != 1 || atomic_load(&g_link_late_off) || !front_fullscreen() || front_screen_variable_refresh()) return;
+    pthread_mutex_lock(&g_link_late_mu);
+    if (held) g_link_late_was = late;   // a frame kept for its present interval says nothing about the link
+    else {
+        if (late && !g_link_late_was) g_link_late_turns++;
+        g_link_late_was = late;
+        if (++g_link_late_n == LINK_LATE_WIN) {
+            int turns = g_link_late_turns; g_link_late_bad = turns >= LINK_LATE_TURNS ? g_link_late_bad + 1 : 0; g_link_late_n = g_link_late_turns = 0;
+            if (g_link_late_bad == 2) { atomic_store(&g_link_late_off, 1); g_link_late_bad = 0;
+                MLOG("display link: %d of the last %d presents turned a refresh late in fullscreen, as in the %d before: off until the window leaves fullscreen, the present thread takes the drawables (DM_PRESENT_LINK_AUTO=0 keeps the link)", turns, LINK_LATE_WIN, LINK_LATE_WIN); }
+        }
+    }
+    pthread_mutex_unlock(&g_link_late_mu);
+}
 static _Atomic uint64_t g_drawable_ns;   // Accumulated wall clock waiting for nextDrawable in present (timing instrumentation)
 uint64_t mtl_drawable_ns_take(void) { return atomic_exchange(&g_drawable_ns, 0); }
 // Maximum refresh rate (Hz) of the screen when there is a window; returns 0 without a window. Mac uses CoreGraphics display modes (thread-safe C interface; the present configuration is read on the game thread)
@@ -16314,6 +16345,8 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     [dr addPresentedHandler:^(id<MTLDrawable> d) {   // Actual presentation time (the time this frame is really put on screen, CACurrentMediaTime base)
         CFTimeInterval tt = d.presentedTime;
         g_pres[pn % PRING] = (pres_ent){pn, tt > 0 ? tt : -1};
+        link_ent le = g_link_ring[pn % PRING]; int shz = front_screen_max_fps();   // the tick that took this present: was it shown on its target (link_late_note)
+        if (le.n == pn && tt > 0) link_late_note(tt - le.target > 0.5 / (shz > 0 ? shz : 60), period > 0.025);
     }];
     // Each frame is displayed for at least one present period: when the GPU completion time jitters around a 120 Hz refresh boundary, the paired "25 ms + 8.33 ms" stutter no longer appears
     if (target_ts > 0) [dr present];
@@ -16492,6 +16525,8 @@ static void link_sync(void) {   // Called every frame by the game's present thre
     static int vrr_was; int vrr = want == 1 && link_vrr_120();   // variable-refresh fullscreen that kept its mode: the 120 Hz link paces the 60 (link_vrr_120)
     if (vrr != vrr_was) { vrr_was = vrr; MLOG("display link: %s (frame %llu)", vrr ? "120 Hz in fullscreen on a variable-refresh screen, a frame every other tick (DM_PRESENT_LINK=1 keeps 60 Hz)" : "60 Hz again (window, fixed-rate screen or another frame rate)", (unsigned long long)atomic_load(&g_cur_frame)); }
     if (vrr) want = 2;
+    if (!front_fullscreen() || front_screen_variable_refresh()) { if (atomic_exchange(&g_link_late_off, 0)) { link_late_reset(); MLOG("display link: on again (the window left fullscreen or the fixed-rate screen; frame %llu)", (unsigned long long)atomic_load(&g_cur_frame)); } }
+    want = link_late_mode(want);   // this screen's presents kept turning late in fullscreen: the present thread takes the drawables (link_late_note)
     // The screen's rate changed (switched by front_screen_match, or another screen): the range again, virtual ticks or none. Taken only once the link object exists, so a change
     // while its thread starts (after link_main read the rate) is not lost
     static int hz_was; int hz = front_screen_max_fps(); CAMetalDisplayLink *lk = g_link;

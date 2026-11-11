@@ -186,7 +186,7 @@ A decoder hands out as many outputs as it has slots, and while every slot is tak
 ### Decoding into the client's NVN texture
 
 - **Cause:** the decoder is created with output format 3 and mode 2 (`DecoderMode_NativeTexture`). The client's `movie::Buffer` then carries the `NVNtexture` object itself as its data, 8 bytes of capacity (an `RGBX8_SRGB` texture embedded in the game's texture pool entry, `main+0x226c98`), plus `SetNvnDev` / `SetNvnSync`.
-- **Fix:** the host converts the VP9 picture to RGBA (BT.709 / BT.601 and range from the stream) and writes it into the texture's storage like `WriteTexels`, then marks the sync as signalled (`nvn_host_write_texture` / `nvn_host_signal_sync` in `hle_nvn.c`). The host writes the texture's block-linear storage on the CPU and the replay layer re-uploads the dirtied pages, as for `WriteTexels` ([nvn-objects.md](nvn-objects.md)).
+- **Fix:** the host converts the VP9 picture to RGBA (BT.709 / BT.601 and range from the stream) and writes it into the texture's storage like `WriteTexels`, then marks the sync as signalled (`nvn_host_write_texture` / `nvn_host_signal_sync` in `hle_nvn.c`). The host writes the texture's storage on the CPU in the texture's own layout, and the replay layer re-uploads the dirtied pages, as for `WriteTexels` ([nvn-objects.md](nvn-objects.md)). The layout is block-linear by address, or rows of the stride for a `LINEAR` output texture ([`WriteTexels` into a linear texture dropped the write](nvn-objects.md#writetexels-into-a-linear-texture-dropped-the-write)).
 - **Found on:** [Metroid Dread](../../dm/games/010093801237C000/README.md).
 
 ### SDK 4's `movie::Buffer` has no sync object

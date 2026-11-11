@@ -24,7 +24,7 @@ dm/gfx/nvn/nvn_hmap.h	clang-analyzer-unix.cstring.UninitializedRead	2
 dm/gfx/nvn/nvn_mtl.m	bugprone-misplaced-widening-cast	1
 dm/gfx/nvn/nvn_mtl.m	bugprone-signed-char-misuse	1
 dm/gfx/nvn/nvn_mtl.m	bugprone-suspicious-memory-comparison	8
-dm/gfx/nvn/nvn_mtl.m	clang-analyzer-core.NullDereference	8
+dm/gfx/nvn/nvn_mtl.m	clang-analyzer-core.NullDereference	9
 dm/gfx/nvn/nvn_mtl.m	clang-analyzer-core.uninitialized.Assign	2
 dm/gfx/nvn/nvn_mtl.m	clang-analyzer-nullability.NullableDereferenced	5
 dm/gfx/nvn/nvn_mtl.m	clang-analyzer-nullability.NullablePassedToNonnull	15

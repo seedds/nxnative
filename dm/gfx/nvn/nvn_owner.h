@@ -137,6 +137,8 @@ uint64_t own_hook_frame(void);                 // the frame being replayed (pres
 const void *own_live_ref_locked(uint64_t k);
 int serial_table_holds(const void *o);   // a live entry or a texture pin holds o (or a view of it)
 int entry_holds(const void *o);          // that, or a ghost entry
+int own_ghost_holds_locked(const void *o);              // a ghost entry holds o (or a view of it): the replay layer's census
+uint64_t own_alias_seen_locked(const alias_key *k);     // the submission of k's last lookup (0: none recorded): the census
 int tex_object_pinned(id o);
 int own_shared_locked(id o);             // the sharing table holds o
 id own_alias_get_locked(const alias_key *k);

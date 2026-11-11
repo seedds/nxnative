@@ -66,6 +66,7 @@ static nvn_hmap g_tex_pins = {.klen = 8}, g_tex_pin_objects = {.klen = sizeof(ui
 
 int serial_table_holds(const void *o) { uintptr_t k = (uintptr_t)o; return nvn_hm_get(&g_by_serial_held, &k) != NULL; }
 int entry_holds(const void *o) { uintptr_t k = (uintptr_t)o; return serial_table_holds(o) || (g_ghost_held.n && nvn_hm_get(&g_ghost_held, &k)); }
+int own_ghost_holds_locked(const void *o) { uintptr_t k = (uintptr_t)o; return g_ghost_held.n && nvn_hm_get(&g_ghost_held, &k) != NULL; }
 int tex_object_pinned(id o) { uintptr_t key = (uintptr_t)(__bridge void *)o; return o && nvn_hm_get(&g_tex_pin_objects, &key) != NULL; }
 int own_object_free(id o) { pthread_mutex_lock(&g_smu); int r = !entry_holds((__bridge void *)o); pthread_mutex_unlock(&g_smu); return r; }
 
@@ -166,6 +167,7 @@ static void alias_put(const alias_key *k, id o, uint64_t seen) {   // an entry k
     if (!g_alias_set) g_alias_set = CFSetCreateMutable(NULL, 0, NULL);
     hm_put_id(&g_alias, k, o); alias_index(k, 1); CFSetAddValue(g_alias_set, (__bridge const void *)o); if (seen) alias_seen(k, seen);
 }
+uint64_t own_alias_seen_locked(const alias_key *k) { return (uint64_t)(uintptr_t)nvn_hm_get(&g_alias_seen, k); }
 id own_alias_get_locked(const alias_key *k) { return hm_get_id(&g_alias, k); }
 id own_alias_peek(const alias_key *k) { pthread_mutex_lock(&g_smu); id o = hm_get_id(&g_alias, k); pthread_mutex_unlock(&g_smu); return o; }
 void own_alias_put_locked(const alias_key *k, id o, uint64_t seen) { alias_put(k, o, seen); }

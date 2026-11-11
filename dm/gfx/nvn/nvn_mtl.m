@@ -17674,11 +17674,13 @@ void mem_census(const char *why) { @autoreleasepool {
     // registered descriptors: their views' bases, and per storage address the distinct bases
     NSMapTable *by_mem = [NSMapTable mapTableWithKeyOptions:NSPointerFunctionsOpaqueMemory | NSPointerFunctionsOpaquePersonality valueOptions:NSPointerFunctionsStrongMemory];
     NSMapTable *by_flags = [NSMapTable mapTableWithKeyOptions:NSPointerFunctionsOpaqueMemory | NSPointerFunctionsOpaquePersonality valueOptions:NSPointerFunctionsStrongMemory];   // texture flags | pool flags << 32
+    NSCountedSet *v_live = [NSCountedSet set], *v_ret = [NSCountedSet set];   // the descriptors whose views name each base texture (live / retired), for the holders line
     os_unfair_lock_lock(&g_rmu);
     uint64_t nreg = 0, nretired = 0;
     for (int i = 1; i < g_ntreg; i++) { treg_t *r = &g_treg[i]; if (!r->ok) continue; nreg++; nretired += r->retired;
         void *vs[3] = {r->view, r->alt, r->im};
         for (int k = 0; k < 3; k++) if (vs[k]) { id<MTLTexture> b = census_base((__bridge id)vs[k]); if (!b) continue; [r->retired ? named_ret : named addObject:(__bridge id)(__bridge void *)b];
+            [r->retired ? v_ret : v_live addObject:b];
             if (k == 0 && r->t.mem) { const void *key = r->t.mem; NSHashTable *set = [by_mem objectForKey:(__bridge id)key];
                 if (!set) { set = [NSHashTable hashTableWithOptions:NSPointerFunctionsOpaqueMemory | NSPointerFunctionsOpaquePersonality]; [by_mem setObject:set forKey:(__bridge id)key]; }
                 [set addObject:(__bridge id)(__bridge void *)b];
@@ -17700,9 +17702,52 @@ void mem_census(const char *why) { @autoreleasepool {
         else if ([waiting containsObject:(__bridge id)(__bridge void *)t]) { n_wait++; b_wait += z; }
         else { n_none++; b_none += z; } }
     pthread_mutex_unlock(&g_res_mu);
-    uint64_t dup_addr = 0, dup_tex = 0, dup_b = 0;
+    // The memory a group takes beyond its largest allocation, counting each allocation once: textures placed in one heap (a resolution family's, a span's) share its bytes, so a group's
+    // placed textures count by their heaps. Summing each texture's allocatedSize counted a family of 36 sizes in one 15 MB heap as 490 MB (Ocarina of Time at the field's edge: 1,131 MB
+    // reported, 1,089 MB of it family members)
+    uint64_t dup_addr = 0, dup_tex = 0, dup_b = 0, dup_naive = 0;
     for (id key in by_mem) { NSHashTable *set = [by_mem objectForKey:key]; if (set.count < 2) continue; dup_addr++;
-        uint64_t biggest = 0, sum = 0; for (id b in set) { uint64_t z = ((id<MTLTexture>)b).allocatedSize; sum += z; if (z > biggest) biggest = z; } dup_tex += set.count - 1; dup_b += sum - biggest; }
+        uint64_t biggest = 0, sum = 0, nbig = 0, nsum = 0; NSHashTable *seen = [NSHashTable hashTableWithOptions:NSPointerFunctionsOpaqueMemory | NSPointerFunctionsOpaquePersonality];
+        for (id<MTLTexture> b in set) { uint64_t z = b.allocatedSize; nsum += z; if (z > nbig) nbig = z;
+            id<MTLHeap> h = b.heap; if (h) { if ([seen containsObject:h]) continue; [seen addObject:h]; z = h.size; }
+            sum += z; if (z > biggest) biggest = z; }
+        dup_tex += set.count - 1; dup_b += sum - biggest; dup_naive += nsum - nbig; }
+    {   // Who holds the textures of those groups: s a live serial (g_by_serial), g a finalized one (the ghost ring), p a pin, a the sharing table, v a live descriptor's view, r only a retired
+        // one's; R in the residency set (itself or its heap); and where its memory is: h a recycled heap of its own (rh_texture), f a resolution family's heap, w a span's heap, - its own
+        enum { NM = 32 }; struct { char k[16]; uint64_t n, b; } hm[NM]; int nhm = 0;
+        NSMutableArray *all = [NSMutableArray array]; for (id key in by_mem) { NSHashTable *set = [by_mem objectForKey:key]; if (set.count >= 2) for (id t in set) [all addObject:t]; }
+        char (*ks)[16] = calloc(all.count ? all.count : 1, 16);
+        pthread_mutex_lock(&g_smu);
+        for (NSUInteger i = 0; i < all.count; i++) { id t = all[i]; const void *p = (__bridge const void *)t; char *k = ks[i]; int o = 0;
+            if (serial_table_holds(p)) k[o++] = 's';
+            if (own_ghost_holds_locked(p)) k[o++] = 'g';
+            if (tex_object_pinned(t)) k[o++] = 'p';
+            if (own_shared_locked(t)) k[o++] = 'a';
+            k[o] = 0; }
+        uint64_t age_n[4] = {0}, age_b[4] = {0};   // their sharing-table entries by submissions since a lookup last found them: under ALIAS_IDLE, under 300, more, never recorded
+        { NSHashTable *in = [NSHashTable hashTableWithOptions:NSPointerFunctionsOpaqueMemory | NSPointerFunctionsOpaquePersonality]; for (id t in all) [in addObject:t];
+          uint64_t *an = age_n, *ab = age_b;   // (a block cannot capture an array)
+          own_alias_each_locked(^(const alias_key *ak2, id o) { if (![in containsObject:o]) return;
+              uint64_t seen = own_alias_seen_locked(ak2), age = g_fence + 1 - seen;
+              int c = !seen ? 3 : age < ALIAS_IDLE ? 0 : age < 300 ? 1 : 2; an[c]++; ab[c] += ((id<MTLTexture>)o).allocatedSize; }); }
+        pthread_mutex_unlock(&g_smu);
+        MLOG("%s census: their sharing-table entries by submissions since last found: under %d %llu, %llu MB; under 300 %llu, %llu MB; more %llu, %llu MB; never %llu, %llu MB", why, ALIAS_IDLE,
+             (unsigned long long)age_n[0], (unsigned long long)(age_b[0] >> 20), (unsigned long long)age_n[1], (unsigned long long)(age_b[1] >> 20), (unsigned long long)age_n[2], (unsigned long long)(age_b[2] >> 20), (unsigned long long)age_n[3], (unsigned long long)(age_b[3] >> 20));
+        pthread_mutex_lock(&g_res_mu);
+        for (NSUInteger i = 0; i < all.count; i++) { id<MTLTexture> t = all[i]; char *k = ks[i]; size_t o = strlen(k);
+            if ([v_live countForObject:t]) k[o++] = 'v'; else if ([v_ret countForObject:t]) k[o++] = 'r';
+            if ([g_res_objects containsObject:t.heap ? (id)t.heap : (id)t]) k[o++] = 'R';
+            NvImageHeap *ih = objc_getAssociatedObject(t, &g_image_heap_owner_key);
+            k[o++] = objc_getAssociatedObject(t, &g_rh_owner_key) ? 'h' : ih ? (ih->window ? 'w' : 'f') : '-'; k[o] = 0; }
+        pthread_mutex_unlock(&g_res_mu);
+        for (NSUInteger i = 0; i < all.count; i++) { int j = 0; while (j < nhm && strcmp(hm[j].k, ks[i])) j++;
+            if (j == nhm) { if (nhm == NM) continue; memcpy(hm[nhm].k, ks[i], 16); hm[nhm].n = hm[nhm].b = 0; nhm++; }
+            hm[j].n++; hm[j].b += ((id<MTLTexture>)all[i]).allocatedSize; }
+        free(ks);
+        for (int i = 0; i < nhm; i++) for (int j = i + 1; j < nhm; j++) if (hm[j].b > hm[i].b) { __typeof__(hm[0]) x = hm[i]; hm[i] = hm[j]; hm[j] = x; }
+        char hl[900]; size_t ho = 0; for (int i = 0; i < nhm && ho < sizeof hl; i++) ho += snprintf(hl + ho, sizeof hl - ho, "%s%s %llu, %llu MB", i ? "; " : "", hm[i].k, (unsigned long long)hm[i].n, (unsigned long long)(hm[i].b >> 20));
+        MLOG("%s census: textures at storage addresses with several, by holder (s live serial, g finalized serial, p pin, a sharing table, v live descriptor, r retired descriptor; R resident; memory h own recycled heap, f family heap, w span heap, - own): %s", why, nhm ? hl : "none");
+    }
     {   // the largest groups: each Metal texture over one storage address, so a reader can tell views made as copies from different images that reuse the memory
         NSMutableArray *groups = [NSMutableArray array];
         for (id key in by_mem) { NSHashTable *set = [by_mem objectForKey:key]; if (set.count >= 2) { [groups addObject:set]; objc_setAssociatedObject(set, &census_flags_key, [by_flags objectForKey:key], OBJC_ASSOCIATION_RETAIN_NONATOMIC); } }
@@ -17720,9 +17765,9 @@ void mem_census(const char *why) { @autoreleasepool {
     }
     for (int i = 0; i < nfm; i++) for (int j = i + 1; j < nfm; j++) if (fm[j].b > fm[i].b) { __typeof__(fm[0]) x = fm[i]; fm[i] = fm[j]; fm[j] = x; }
     char line[900]; size_t o = 0; for (int i = 0; i < nfm && i < 12 && o < sizeof line; i++) o += snprintf(line + o, sizeof line - o, "%s%lu: %llu, %llu MB", i ? "; " : "", fm[i].pf, (unsigned long long)fm[i].n, (unsigned long long)(fm[i].b >> 20));
-    MLOG("%s census: textures named by serials, sharing or live descriptors' views %llu, %llu MB; only by retired descriptors' views %llu, %llu MB; only in the deferred-release queue %llu, %llu MB; named by nothing %llu, %llu MB; buffers %llu, %llu MB; descriptors %llu (%llu retired); storage addresses with several Metal textures %llu (%llu extra textures, %llu MB)",
+    MLOG("%s census: textures named by serials, sharing or live descriptors' views %llu, %llu MB; only by retired descriptors' views %llu, %llu MB; only in the deferred-release queue %llu, %llu MB; named by nothing %llu, %llu MB; buffers %llu, %llu MB; descriptors %llu (%llu retired); storage addresses with several Metal textures %llu (%llu extra textures, %llu MB beyond each address's largest allocation, a heap counted once; %llu MB by each texture's own size)",
          why, (unsigned long long)n_named, (unsigned long long)(b_named >> 20), (unsigned long long)n_ret, (unsigned long long)(b_ret >> 20), (unsigned long long)n_wait, (unsigned long long)(b_wait >> 20), (unsigned long long)n_none, (unsigned long long)(b_none >> 20),
-         (unsigned long long)n_buf, (unsigned long long)(b_buf >> 20), (unsigned long long)nreg, (unsigned long long)nretired, (unsigned long long)dup_addr, (unsigned long long)dup_tex, (unsigned long long)(dup_b >> 20));
+         (unsigned long long)n_buf, (unsigned long long)(b_buf >> 20), (unsigned long long)nreg, (unsigned long long)nretired, (unsigned long long)dup_addr, (unsigned long long)dup_tex, (unsigned long long)(dup_b >> 20), (unsigned long long)(dup_naive >> 20));
     MLOG("%s census: textures by Metal format: %s", why, line);
     MLOG("%s census: residency objects of 64 KB or less: buffers shared %llu (%llu KB), private %llu (%llu KB); textures shared %llu (%llu KB), private %llu (%llu KB)", why,
          (unsigned long long)small_n[0][1], (unsigned long long)(small_b[0][1] >> 10), (unsigned long long)small_n[0][0], (unsigned long long)(small_b[0][0] >> 10),

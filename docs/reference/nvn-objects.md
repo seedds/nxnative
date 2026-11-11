@@ -202,6 +202,14 @@ A game may tell NVN objects apart by their bytes, without an NVN call. A host re
 - **Fix:** it grows in blocks of 1,024 (`nvn_dirty.c`, up to 262,144).
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md): the phone reached 4,006 pools (found while fixing GitHub issue #9: [Deferred-release drain without an autorelease pool](memory.md#deferred-release-drain-without-an-autorelease-pool)).
 
+### A pool registered over memory an earlier pool held counts older stamps as written
+
+- **Symptom:** content kept by its dirty-page stamp is used again after a load although the game wrote new data over it: the game destroyed a memory pool, wrote the next area's data into the same memory and made a new pool over it, and a copy taken from the old data stays, with no red line. A cold start into the same place is right. Not seen in a game on the Mac or iPhone yet; a fork that keeps vertex and index bytes on the GPU by these stamps drew Skyward Sword HD's Skyloft with the opening's meshes after a new game (crates one flat grey shape or missing, large flat green, grey or magenta shapes, flat grey sky).
+- **Cause:** `nvn_dirty_remove_range` makes a destroyed pool's pages writable and retires its range, so the game's next writes there fault nowhere. A pool registered over that memory reuses a slot with every page's generation back at 0, so a stamp taken in the old pool's time, or while no pool held the memory, saw no newer generation, and `nvn_dirty_since` and its variants answered "not written". On the Mac a caller that keeps a stamp past the pool's end meets it: the vertex conversion's kept index ranges (`nvn_mtl.m` `ix_range`) are keyed by address and outlive their pool.
+- **Fix:** each range keeps the clock at its registration (`born`, `nvn_dirty.c`), and `nvn_dirty_since_cached` (behind `nvn_dirty_since` and `nvn_dirty_since_span`) and `nvn_dirty_since_except` count a stamp older than it as written, through a kept handle too. A stamp taken after the registration is unaffected.
+- **Check:** `make -C dm/gfx/tests GAME=<id> t_dirty_slots`: a pool destroyed, a write with no pool registered, and a new pool over the same memory: the older stamp is dirty through `nvn_dirty_since`, a kept handle and `nvn_dirty_since_except` (all three clean without the fix), and a stamp taken after the new registration is clean.
+- **Found on:** [The Legend of Zelda: Skyward Sword HD](../../dm/games/01002DA013484000/README.md), from a new game into Skyloft, in a fork whose geometry cache keeps vertex and index bytes by these stamps; no game on the Mac yet.
+
 ### Dead texture serials kept in a ghost table
 
 - **Symptom:** the serial table grows by about 10 entries a frame (276,000 after 25,000 frames).

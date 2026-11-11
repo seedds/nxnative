@@ -3338,7 +3338,7 @@ static void zb_report(const tex_t *t, unsigned base, const char *why) {
             if (sp) { for (uint64_t o = 0; o < n; o += 0x1000) m[o >> 12] = (uint8_t)nvn_sparse_mapped(t->pool, (uint64_t)(uintptr_t)t->mem + o, 0x1000);
                 snprintf(fp, sizeof fp, "%s/zbm_%llu.bin", dir, (unsigned long long)t->serial); if ((f = fopen(fp, "wb"))) { fwrite(m, 1, n >> 12, f); fclose(f); } }
             free(m); }
-        MLOG("[zb] ser=%llu: block height log2 %d (packaged %d), stride %u, depth %u, target %d, samples %d", (unsigned long long)t->serial, (int)t->L.tileH, t->d.pkg_block_h, t->d.stride, t->d.depth, t->d.target, t->d.samples); }
+        MLOG("[zb] ser=%llu: block height log2 %d (packaged layout %#x), stride %u, depth %u, target %d, samples %d", (unsigned long long)t->serial, (int)t->L.tileH, t->d.pkg_layout, t->d.stride, t->d.depth, t->d.target, t->d.samples); }
 }
 // A packed 16-bit format that Metal has only with red and blue exchanged (RGB5, RGB5A1, RGB565: nvn_fmt_to_mtl's r/b swap): the bit position of red in Metal's format (blue is at bit 0); 4 for
 // RGBA4, whose four nibbles Metal's ABGR4 holds in reverse (nvn_fmt_to_mtl's reversed mapping); else 0.
@@ -4486,9 +4486,9 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
                     if (t->pool && nvn_sparse_pool(t->pool) && (part = malloc(t->L.size))) { nvn_sparse_copy(t->pool, part, (uint64_t)(uintptr_t)t->mem, t->L.size); m = part; }
                     for (uint64_t i = 0; i < t->L.size; i++) nz += m[i] != 0;
                     free(part); }
-                MLOG("TEXINFO ser=%llu swizzled=%d has_layout=%d mem=%p pool=%p(%#x) off=%#llx target=%d format=%#x flags=%#x samples=%d %ux%ux%u levels=%u stride=%u block_h=%d storage %llu bytes non-zero %llu",
+                MLOG("TEXINFO ser=%llu swizzled=%d has_layout=%d mem=%p pool=%p(%#x) off=%#llx target=%d format=%#x flags=%#x samples=%d %ux%ux%u levels=%u stride=%u pkg_layout=%#x storage %llu bytes non-zero %llu",
                      (unsigned long long)t->serial, packaged, t->has_layout, t->mem, t->pool, t->pool ? t->pool->flags : 0, (unsigned long long)t->off, t->d.target, t->d.format, t->d.flags, t->d.samples,
-                     t->d.width, t->d.height, t->d.depth, t->d.levels, t->d.stride, t->d.pkg_block_h, (unsigned long long)t->L.size, (unsigned long long)nz); }
+                     t->d.width, t->d.height, t->d.depth, t->d.levels, t->d.stride, t->d.pkg_layout, (unsigned long long)t->L.size, (unsigned long long)nz); }
         }
     }
     id have = tex_get(t->serial);

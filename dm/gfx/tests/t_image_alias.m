@@ -138,6 +138,15 @@ static void separate_storage(pool_t *pool, id<MTLHeap> original) {
     for (int i=0;i<8;i++) mtl_tex_release(&t[i]);
     mtl_alias_drop_pool(&other_pool); mtl_alias_drop_pool(&cpu_pool);
 }
+// Two families whose offsets lie in one 64 KB cell of the sharing table's index (alias_index): the owner lookup reads that cell and takes only the entries at its own offset
+static void same_cell(pool_t *pool) {
+    tex_t t[4];
+    for (int i=0;i<4;i++) { t[i]=image(pool,996000+i,(i%2+1)*64,64); t[i].off=(11<<20)+(i/2)*0x4000; t[i].mem=pool->mem+t[i].off; mtl_tex_init(&t[i]); }
+    id<MTLTexture> m[4]; for (int i=0;i<4;i++) m[i]=tex_mtl(&t[i]);
+    CHECK(m[0].heap && m[0].heap==m[1].heap && m[2].heap && m[2].heap==m[3].heap,"each family in the cell shares its own heap");
+    CHECK(m[0].heap!=m[2].heap,"an offset 16 KB further in the same cell is another family");
+    for (int i=0;i<4;i++) mtl_tex_release(&t[i]);
+}
 // A resolution family member read after another size wrote the shared storage sees that size's texels, misplaced but of the same format, as on the console (ASTRAL CHAIN, issue #1935)
 static void cross_size_read(void) {
     void *mem=NULL; posix_memalign(&mem,16384,16<<20); memset(mem,0,16<<20);
@@ -196,6 +205,7 @@ int main(void) { @autoreleasepool {
     CHECK(delta<max_size.size+(12<<20),"allocation is bounded by one image plus upload/readback scratch");
     pixels(big,0x55667788); pixels(tex_mtl(&a[63]),0xa1b2c3d4); pixels(small,0x76543210);
     separate_storage(&pool,small.heap);
+    same_cell(&pool);
     indirect_pixels(small,0x76543210);   // writes to other pools, offsets and formats left it intact
     atomic_colour(&pool);
     depth_planes(&pool);

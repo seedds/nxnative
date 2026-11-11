@@ -2124,7 +2124,7 @@ static void power_line(uint64_t frame) {
           if (tf[0] + tf[1] > ptf[0] + ptf[1]) LOG("[nvn] transform feedback up to frame %llu, per frame: %.1f captures with the state on the CPU, %.1f through tf_prepare, in %.1f passes with %.1f barriers inside them", frame, (tf[0] - ptf[0]) / nf, (tf[1] - ptf[1]) / nf, (tf[2] - ptf[2]) / nf, (tf[3] - ptf[3]) / nf);
           memcpy(ptf, tf, sizeof ptf); }
         { char ck[400]; dm_clock_top(ck, sizeof ck); if (ck[0]) LOG("[nvn] clock waits up to frame %llu: %s", frame, ck); }
-        char rs[400]; mtl_res_stats(rs, sizeof rs); static uint64_t pbs, pbf; uint64_t bs, bf; mtl_barrier_stats(&bs, &bf);
+        char rs[1400]; mtl_res_stats(rs, sizeof rs); static uint64_t pbs, pbf; uint64_t bs, bf; mtl_barrier_stats(&bs, &bf);
         uint64_t mtl_cut_count(void), mtl_copy_cut_count(void), mtl_blit_splits(void); void mtl_ubd_stats(uint64_t *, uint64_t *); static uint64_t pcut, pccut, pbsp, pud, puc; uint64_t cut = mtl_cut_count(), ccut = mtl_copy_cut_count(), bsp = mtl_blit_splits(), ud, uc; mtl_ubd_stats(&ud, &uc);
         void mtl_ubp_stats(uint64_t *, uint64_t *, uint64_t *); static uint64_t ppm, ppr, ppf; uint64_t pm, pr, pf_; mtl_ubp_stats(&pm, &pr, &pf_);
         void mtl_lc_stats(uint64_t *, uint64_t *); static uint64_t plt, pll; uint64_t lt, ll; mtl_lc_stats(&lt, &ll);

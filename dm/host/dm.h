@@ -93,6 +93,10 @@ typedef struct {
     uint8_t sha256[32];        // an NRO's SHA-256 (what the game's NRR registers; LoadModule finds the module by the image it passes)
     uint32_t nro_size;         // an NRO's file size (header +0x18), the bytes the hash covers
     uint8_t *pristine; size_t pristine_len;   // an NRO's initialized data as rewritten; reload restores this and zeroes its bss
+    // A text no B reaches (patch_nso.py: band sites through gap relays / the frame page, far jumps for the rest)
+    uint64_t gap2_off, gap2_len;   // the segment-gap page holding B relays to the back island's stubs (sealed after relocation)
+    uint64_t gap3_off, gap3_len;   // the file image pad's last partial page, the same for the highest sites
+    uint64_t *far_from, *far_to; unsigned nfar;   // far jumps: brk #0xA000 at a site, brk #0xA001 at a stub exit, the SIGTRAP handler jumps
     unsigned loads;            // how many times the game loaded it
 } module_t;
 

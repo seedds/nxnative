@@ -51,9 +51,17 @@ class _ReadOnly:
     """A live SQLite reader: mode=ro sees a normal build's committed WAL, never migrates, repairs or writes its database. Mutable index/stage bookkeeping is local to each build."""
     def __init__(self, path, say):
         self.db, self.say, self.path, self.lock = None, say, os.fspath(path), threading.RLock()
+        self.owner = None
         if not os.path.isfile(self.path): return
-        try: self.db = sqlite3.connect(Path(self.path).resolve().as_uri() + '?mode=ro', uri=True, timeout=WAIT, check_same_thread=False, isolation_level=None)
+        self.owner = _ownership(os.path.realpath(self.path))
+        self.owner.__enter__()
+        try:
+            self.db = sqlite3.connect(Path(self.path).resolve().as_uri() + '?mode=ro', uri=True, timeout=WAIT, check_same_thread=False, isolation_level=None)
+            if self.db.execute("SELECT type FROM sqlite_master WHERE name='blob'").fetchone() == ('view',): _load_zstd(self.db)
         except sqlite3.Error as e: self._failed(e)
+        except BaseException:
+            self.close()
+            raise
 
     def _failed(self, e):
         self.say(f'[RED] the read-only shader cache {self.path} cannot be read and is ignored: {e}')
@@ -82,6 +90,8 @@ class _ReadOnly:
             if self.db is not None:
                 with contextlib.suppress(sqlite3.Error): self.db.close()
                 self.db = None
+            if self.owner is not None:
+                self.owner.__exit__(None, None, None); self.owner = None
 
 
 class _Files:   # an entry from or to a file, by get and put
@@ -109,6 +119,7 @@ class Store(_Files):
         source = readonly if readonly is not None else READ_ONLY
         if source and os.path.realpath(source) == os.path.realpath(self.path): raise ValueError('the writable and read-only shader caches must differ')
         os.makedirs(os.path.dirname(os.path.abspath(self.path)), exist_ok=True)
+        # bounded() already owns the exclusive lease while it adopts and trims an idle cache.
         self.owner = contextlib.nullcontext() if _owned else _ownership(self.path)
         self.owner.__enter__()
         self.readonly = None
@@ -300,7 +311,7 @@ def bounded(path, limit, say=print, *, legacy=None):
             try: fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError: return
             try:
-                if legacy is not None: adopt(legacy, path, say)
+                if legacy is not None: adopt(legacy, path, say, _owned=True)
                 if path.is_file():
                     store = Store(path, say, _owned=True)
                     try: store.trim(limit() if callable(limit) else limit)
@@ -566,7 +577,7 @@ def maintain(path, *, compress=False, decompress=False, workers=1, say=print):
     with _ownership(path, exclusive=compress or decompress):
         db = sqlite3.connect(path, timeout=0, isolation_level=None)
         part = path + ('.raw.part' if decompress else '.compressed.part')
-        metrics = None
+        metrics: dict[str, object] | None = None
         try:
             compressed = db.execute("SELECT type FROM sqlite_master WHERE name='blob'").fetchone() == ('view',)
             if not compressed and not compress: return
@@ -622,7 +633,7 @@ def _adopted_name(name):
     return f'metallib/{m.group(1)}/{m.group(2)}' if m else None
 
 
-def adopt(old, path, say=print):
+def adopt(old, path, say=print, *, _owned=False):
     """A compile cache from before this file (the folder old, or old.tar: tree_tar.py) into the file path, and the old one removed, so a build folder converts by itself at its next build. A damaged tar costs the work it held.
     Returns the number of entries taken"""
     folder, tar = os.fspath(old), f'{os.fspath(old)}.tar'
@@ -633,7 +644,7 @@ def adopt(old, path, say=print):
         nonlocal n, store
         new = _adopted_name(name.removeprefix('./'))
         if new is None or os.path.basename(name).startswith('._'): return
-        store = store or Store(path, say)
+        store = store or Store(path, say, _owned=_owned)
         store.put(new, read()); n += 1
     def in_batches(items):
         for i, item in enumerate(items):

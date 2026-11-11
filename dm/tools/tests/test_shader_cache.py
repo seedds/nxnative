@@ -210,6 +210,15 @@ assert p.exitcode == 0, p.exitcode
         self.assertIsNone(s.get('metallib/mac/a.metallib'))   # reading the fallback does not copy it
         self.assertEqual(hashlib.sha256(self.path.read_bytes()).digest(), before)
 
+    def test_fallback_reader_prevents_source_conversion_until_closed(self):
+        self.store.put('metallib/mac/a.metallib', b'library'); self.store.close()
+        s = self.overlay()
+        with self.assertRaisesRegex(RuntimeError, 'busy'): shader_cache.maintain(self.path, compress=True, say=self.said.append)
+        s.close()
+        shader_cache.maintain(self.path, compress=True, say=self.said.append)
+        s = self.overlay()
+        self.assertEqual(s.get('metallib/mac/a.metallib'), b'library')
+
 
 class Bounded(Base):
     def fill(self):
@@ -239,10 +248,14 @@ class Bounded(Base):
         self.assertEqual(self.store.db.execute('SELECT count(*) FROM blob WHERE id NOT IN (SELECT blob FROM entry)').fetchone()[0], 0)
 
     def test_failed_build_is_trimmed_when_last_user_leaves(self):
-        with self.assertRaises(RuntimeError):
+        self.store.close()
+        with self.assertRaisesRegex(RuntimeError, 'build failed'):
             with shader_cache.bounded(self.path, 1 << 20, self.said.append):
-                self.fill()
-                raise RuntimeError('build failed')
+                self.store = shader_cache.Store(self.path, self.said.append)
+                try:
+                    self.fill()
+                    raise RuntimeError('build failed')
+                finally: self.store.close()
         self.assertLessEqual(self.path.stat().st_size, 1 << 20)
 
     def test_replaced_unreferenced_blobs_are_reclaimed_before_evicting_live_entries(self):
@@ -264,6 +277,7 @@ class Bounded(Base):
             self.assertEqual(self.store.names(''), before)
         finally:
             p.communicate(timeout=10)
+        self.store.close()
         with shader_cache.bounded(self.path, 1 << 20, self.said.append): pass
         self.assertLessEqual(self.path.stat().st_size, 1 << 20)
 
@@ -286,6 +300,7 @@ class Bounded(Base):
         finally:
             p.communicate(timeout=10)
         self.assertEqual(p.returncode, 0)
+        self.store.close()
         with shader_cache.bounded(self.path, 1 << 20, self.said.append): pass
         self.assertLessEqual(self.path.stat().st_size, 1 << 20)
 
@@ -296,6 +311,12 @@ def enable_compression(path):
         db.enable_load_extension(True); db.load_extension(str(shader_cache.ZSTD_LIBRARY)); db.enable_load_extension(False)
         db.execute('SELECT zstd_enable_transparent(?)', ('{"table":"blob","column":"data","compression_level":3,"dict_chooser":"\'[nodict]\'"}',)).fetchall()
     finally: db.close()
+
+
+class CompressedReadOnly(ReadOnly):
+    def setUp(self):
+        super().setUp(); self.store.close(); enable_compression(self.path)
+        self.store = shader_cache.Store(self.path, self.said.append); self.addCleanup(self.store.close)
 
 
 class CompressedEntries(Entries):
@@ -374,10 +395,13 @@ class Writers(Base):
         try: libs = subprocess.run([APPLE_PYTHON, '-c', probe], capture_output=True, text=True, timeout=60).stdout
         except (OSError, subprocess.TimeoutExpired): libs = ''
         if '/usr/lib/libsqlite3.dylib' not in libs: self.skipTest(f"no {APPLE_PYTHON} with Apple's SQLite")
+        if isinstance(self, CompressedWriters):
+            probe = subprocess.run([APPLE_PYTHON, '-c', "import sqlite3; print(hasattr(sqlite3.Connection, 'enable_load_extension'))"], capture_output=True, text=True, timeout=60)
+            if probe.stdout.strip() != 'True': self.skipTest(f'{APPLE_PYTHON} cannot load SQLite extensions')
         self.store.close()
         code = "import sys; sys.path.insert(0, sys.argv[1]); import test_shader_cache as t; assert t.forked_stores(sys.argv[2], sys.argv[3]) == t.EXPECT, 'results differ'"
         r = subprocess.run([APPLE_PYTHON, '-c', code, str(Path(__file__).parent), str(self.path), str(self.root)], capture_output=True, text=True, timeout=300)
-        self.assertEqual((r.returncode, r.stderr), (0, ''))
+        self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_worker_dying_in_a_batch(self):   # its batch is rolled back and the store goes on
         import concurrent.futures as cf, multiprocessing

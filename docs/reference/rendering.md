@@ -846,6 +846,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - `DM_NVN_DEPTHOVR` (depth test forced to `ALWAYS`) with `HILITE` tells "rejected by depth" from "never rasterized". `TEXSNAP` copies used to run before the pass they were meant to show (classic-queue command buffer committed ahead of the Metal 4 one); they now go through the replay's copy encoder.
 - **Found on:** [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md), tracing the tile lighting: the G-buffer class byte selects per-class half-resolution passes through a depth buffer of class values (`gl_FragDepth = mix(0.5, 1, nibble-swapped class / 255)`, then full-screen or per-tile quads with depth `EQUAL`).
 
+### Front and back stencil reference values
+
+- **Symptom:** ground decals are missing: the driving range's scoring target in Golf Adventure (a ring with a blue centre on the fairway) is not drawn, in the normal view or the top view; nothing in the log.
+- **Cause:** `SetStencilRef` takes a face, and the replay keeps both values, but sent Metal the front one for both faces (`setStencilReferenceValue:`). A draw of back faces whose test compares against its own value tested the front value. The game's decals are volumes drawn twice: front faces mark stencil bit 0x80 where the volume lies behind the ground, then back faces draw the colour where `stencil & 0x90` equals the back value 0x10 (the ground's mark, written by the terrain draws) while the front value is 0. With 0 for both, the colour draw passed nowhere on the ground.
+- **Fix:** `enc_r_stencil_ref` sends both values (`setStencilFrontReferenceValue:backReferenceValue:` when they differ), the per-encoder state cache compares both, and the deferred recorder (`nvn_rec.h` `RO_R_SREF`) carries both.
+- **Found on:** Mario Golf: Super Rush (4.0.0), Golf Adventure's driving-range lesson: pass with fragment shader `6f91c05c60985a33`, four draws of 384 indices (two decals, two draws each).
+
 ### Stencil-mode texture views read through `X32_Stencil8`
 
 - **Symptom:** striped lighting: black and white bands that follow depth on every lit surface, as if every pixel were in or out of shadow at random.

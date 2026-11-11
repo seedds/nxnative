@@ -8,7 +8,7 @@
 # Names, as in the folder this replaces: metallib/<target>/<digest>[_x].metallib (dmsh_mtlcache.py), shader/<digest>/<mac|ios>/<output>, index/<key>.json, variant/<digest>/<file> (dmsh_build.py).
 # Not part of the translation chain: it decides no output (dmsh_chain.py), like dmsh_mtlcache.py.
 from pathlib import Path
-import collections, concurrent.futures as cf, contextlib, fcntl, hashlib, itertools, json, os, re, shutil, sqlite3, tarfile, threading, time
+import collections, concurrent.futures as cf, contextlib, fcntl, hashlib, json, os, re, shutil, sqlite3, tarfile, threading, time
 
 SCHEMA = ('CREATE TABLE IF NOT EXISTS blob(id INTEGER PRIMARY KEY, hash BLOB UNIQUE NOT NULL, data BLOB NOT NULL)',
           'CREATE TABLE IF NOT EXISTS entry(name TEXT PRIMARY KEY, blob INTEGER NOT NULL, mtime REAL NOT NULL) WITHOUT ROWID')
@@ -244,28 +244,17 @@ def _compress_parallel(db, workers):
             db.executemany('UPDATE _blob_zstd SET data=?,_data_dict=-1 WHERE id=? AND hash=? AND _data_dict IS NULL', ((data, ident, digest) for ident, digest, data in batch))
 
 
-def _raw_copy(db, part, workers=1):
-    out = sqlite3.connect(part)
-    try:
-        out.execute('PRAGMA page_size=16384'); out.execute('PRAGMA auto_vacuum=INCREMENTAL')
-        for sql in SCHEMA: out.execute(sql)
-        with out:
-            out.executemany('INSERT INTO blob VALUES(?,?,?)', itertools.chain.from_iterable(_parallel_blobs(db, workers)) if workers > 1 else db.execute('SELECT id,hash,data FROM blob'))
-            out.executemany('INSERT INTO entry VALUES(?,?,?)', db.execute('SELECT name,blob,mtime FROM entry'))
-        # Check written bytes against the cache's content hashes without decoding the source again.
-        for src, dst in itertools.zip_longest(db.execute('SELECT id,hash FROM blob ORDER BY id'), out.execute('SELECT id,hash,data FROM blob ORDER BY id')):
-            if src is None or dst is None or src != dst[:2]: raise RuntimeError('raw shader cache validation failed: contents differ')
-            if hashlib.blake2b(dst[2], digest_size=16).digest() != dst[1]: raise RuntimeError('raw shader cache validation failed: blob hash differs')
-        sql = 'SELECT name,blob,mtime FROM entry ORDER BY name'
-        for src, dst in itertools.zip_longest(db.execute(sql), out.execute(sql)):
-            if src != dst: raise RuntimeError('raw shader cache validation failed: contents differ')
-        if out.execute('PRAGMA quick_check').fetchone() != ('ok',) or out.execute('SELECT 1 FROM entry e LEFT JOIN blob b ON b.id=e.blob WHERE b.id IS NULL LIMIT 1').fetchone():
-            raise RuntimeError('raw shader cache validation failed: database or entry references')
-    finally: out.close()
+def _raw_copy(db, part, workers=1, metrics=None):
+    path = db.execute('PRAGMA database_list').fetchone()[2]
+    return _converted_copy(db, path, part, workers, compress=False, metrics=metrics)
 
 
 def _compressed_copy(db, path, part, workers, metrics=None):
-    """Read and compress on worker connections; write a compact replacement once."""
+    return _converted_copy(db, path, part, workers, compress=True, metrics=metrics)
+
+
+def _converted_copy(db, path, part, workers, *, compress, metrics=None):
+    """Convert disjoint ranges on worker connections; write the replacement once."""
     local, connections, jobs = threading.local(), [], []
     def measured(name, fn, *args):
         if metrics is None: return fn(*args)
@@ -277,13 +266,17 @@ def _compressed_copy(db, path, part, workers, metrics=None):
         connections.append(local.db); _load_zstd(local.db)
     def work(span):
         if metrics is not None: start, cpu = time.perf_counter(), time.thread_time()
-        rows = local.db.execute('SELECT id,hash,zstd_compress_col(data,3,-1,1) FROM blob WHERE id>=? AND id<=? ORDER BY id', span).fetchall()
+        data = 'zstd_compress_col(data,3,-1,1)' if compress else 'data'
+        rows = local.db.execute(f'SELECT id,hash,{data} FROM blob WHERE id>=? AND id<=? ORDER BY id', span).fetchall()
         if metrics is not None:
             end, cpu = time.perf_counter(), time.thread_time() - cpu
             jobs.append((start, end, cpu, threading.get_ident(), sum(len(row[2]) for row in rows)))
         return rows
     def spans():
-        cur = measured('batch_boundary_reads_s', db.execute, 'SELECT id,length(data) FROM blob ORDER BY id')
+        # shortcut: reversal bounds encoded input, not decoded expansion; add an output budget for unusually large blobs.
+        table = 'blob' if compress else '_blob_zstd'
+        # Read encoded lengths on reversal so partitioning does not decode every blob again.
+        cur = measured('batch_boundary_reads_s', db.execute, f'SELECT id,length(data) FROM {table} ORDER BY id')
         first, size, count = None, 0, 0
         try:
             while True:
@@ -292,7 +285,7 @@ def _compressed_copy(db, path, part, workers, metrics=None):
                 ident, length = row
                 if metrics is not None:
                     metrics['blob_count'] = metrics.get('blob_count', 0) + 1
-                    metrics['raw_payload_bytes'] = metrics.get('raw_payload_bytes', 0) + length
+                    metrics['input_payload_bytes'] = metrics.get('input_payload_bytes', 0) + length
                 if first is None: first = ident
                 size += length; count += 1
                 if size >= 8 * 1024**2 or count >= 256:
@@ -307,8 +300,10 @@ def _compressed_copy(db, path, part, workers, metrics=None):
         for sql in SCHEMA: out.execute(sql)
         # Write the private output directly; enable WAL only after installation.
         out.execute('PRAGMA synchronous=NORMAL')
-        _load_zstd(out)
-        out.execute('SELECT zstd_enable_transparent(?)', (json.dumps({'table': 'blob', 'column': 'data', 'compression_level': 3, 'dict_chooser': "'[nodict]'"}),)).fetchall()
+        if compress:
+            _load_zstd(out)
+            out.execute('SELECT zstd_enable_transparent(?)', (json.dumps({'table': 'blob', 'column': 'data', 'compression_level': 3, 'dict_chooser': "'[nodict]'"}),)).fetchall()
+        insert = 'INSERT INTO _blob_zstd(id,hash,data,_data_dict) VALUES(?,?,?,-1)' if compress else 'INSERT INTO blob VALUES(?,?,?)'
         if metrics is not None: metrics['output_setup_s'] = time.perf_counter() - setup_start
         with cf.ThreadPoolExecutor(workers, initializer=init) as pool:
             pending = collections.deque()
@@ -322,22 +317,24 @@ def _compressed_copy(db, path, part, workers, metrics=None):
             for span in spans():
                 pending.append(pool.submit(work, span))
                 if len(pending) >= workers:
-                    measured('blob_inserts_s', out.executemany, 'INSERT INTO _blob_zstd(id,hash,data,_data_dict) VALUES(?,?,?,-1)', measured('worker_result_wait_s', take))
+                    measured('blob_inserts_s', out.executemany, insert, measured('worker_result_wait_s', take))
             while pending:
-                measured('blob_inserts_s', out.executemany, 'INSERT INTO _blob_zstd(id,hash,data,_data_dict) VALUES(?,?,?,-1)', measured('worker_result_wait_s', take))
+                measured('blob_inserts_s', out.executemany, insert, measured('worker_result_wait_s', take))
             measured('entry_copy_s', out.executemany, 'INSERT INTO entry VALUES(?,?,?)', db.execute('SELECT name,blob,mtime FROM entry'))
         measured('commit_s', out.commit)
     finally:
         measured('output_close_s', out.close)
         for connection in connections: connection.close()
     if metrics is not None:
-        raw = metrics.get('raw_payload_bytes', 0)
-        encoded = sum(job[4] for job in jobs)
+        input_bytes = metrics.get('input_payload_bytes', 0)
+        output_bytes = sum(job[4] for job in jobs)
+        raw, encoded = (input_bytes, output_bytes) if compress else (output_bytes, input_bytes)
         window = max(job[1] for job in jobs) - min(job[0] for job in jobs) if jobs else 0
         busy = sum(job[1] - job[0] for job in jobs)
         cpu = sum(job[2] for job in jobs)
         counts = collections.Counter(job[3] for job in jobs)
-        metrics.update(blob_count=metrics.get('blob_count', 0), raw_payload_bytes=raw, compressed_payload_bytes=encoded,
+        metrics.update(blob_count=metrics.get('blob_count', 0), input_payload_bytes=input_bytes, output_payload_bytes=output_bytes,
+                       payload_size_change_bytes=output_bytes - input_bytes, raw_payload_bytes=raw, compressed_payload_bytes=encoded,
                        payload_bytes_saved=raw - encoded, payload_compression_ratio=raw / encoded if encoded else None,
                        payload_space_saved_percent=100 * (raw - encoded) / raw if raw else None,
                        batch_count=len(jobs), workers_used=len(counts), min_batches_per_worker=min(counts.values(), default=0),
@@ -362,32 +359,27 @@ def maintain(path, *, compress=False, decompress=False, workers=1, say=print):
             if not compressed and not compress: return
             if db.execute('PRAGMA journal_mode').fetchone()[0].lower() == 'wal': db.execute('PRAGMA synchronous=NORMAL')
             _load_zstd(db)
-            if compress and not compressed:
-                say(f'compressing shader compile cache into a compact replacement for {path}')
+            if (compress and not compressed) or decompress:
+                operation = 'decompression' if decompress else 'compression'
+                say(f'restoring raw shader compile cache {path}' if decompress else f'compressing shader compile cache into a compact replacement for {path}')
                 _remove_raw_part(part)
                 if os.environ.get('DM_SHADER_CACHE_COMPRESSION_METRICS') == '1':
                     metrics = dict.fromkeys(('worker_result_wait_s', 'blob_inserts_s'), 0.0)
-                    metrics.update(workers_requested=workers, completion_order_bypasses=0, database_before_bytes=os.stat(path).st_size,
+                    metrics.update(operation=operation, workers_requested=workers, completion_order_bypasses=0, database_before_bytes=os.stat(path).st_size,
                                    database_before_allocated_bytes=before)
-                    _compressed_copy(db, path, part, workers, metrics=metrics)
+                if decompress:
+                    if metrics is not None: _raw_copy(db, part, workers, metrics=metrics)
+                    elif workers == 1: _raw_copy(db, part)
+                    else: _raw_copy(db, part, workers)
+                elif metrics is not None: _compressed_copy(db, path, part, workers, metrics=metrics)
                 else: _compressed_copy(db, path, part, workers)
                 if metrics is not None: install_start = time.perf_counter()
-                if db.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone()[0]: raise RuntimeError('shader cache is busy; compressed conversion was not installed')
+                if db.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone()[0]: raise RuntimeError('shader cache is busy; conversion was not installed')
                 db.close(); db = None
                 os.replace(part, path)
                 db = sqlite3.connect(path, timeout=0, isolation_level=None)
                 db.execute('PRAGMA journal_mode=WAL').fetchall()
                 if metrics is not None: metrics['source_checkpoint_and_install_s'] = time.perf_counter() - install_start
-            elif decompress:
-                say(f'restoring raw shader compile cache {path}')
-                _remove_raw_part(part)
-                if workers == 1: _raw_copy(db, part)
-                else: _raw_copy(db, part, workers)
-                if db.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone()[0]: raise RuntimeError('shader cache is busy; raw conversion was not installed')
-                db.close(); db = None
-                os.replace(part, path)
-                db = sqlite3.connect(path, timeout=0, isolation_level=None)
-                db.execute('PRAGMA journal_mode=WAL').fetchall()
             else:
                 # Otherwise the extension's GROUP BY sorts whole uncompressed payloads into temporary files.
                 db.execute('CREATE INDEX IF NOT EXISTS blob_pending_size ON _blob_zstd(_data_dict,length(data)) WHERE _data_dict IS NULL')
@@ -405,7 +397,7 @@ def maintain(path, *, compress=False, decompress=False, workers=1, say=print):
     if metrics is not None:
         metrics.update(total_elapsed_s=time.monotonic() - start, database_after_bytes=os.stat(path).st_size, database_after_allocated_bytes=after,
                        database_allocated_bytes_saved=before - after)
-        say('shader cache compression metrics: ' + json.dumps({k: round(v, 6) if isinstance(v, float) else v for k, v in metrics.items()}, sort_keys=True))
+        say(f'shader cache {operation} metrics: ' + json.dumps({k: round(v, 6) if isinstance(v, float) else v for k, v in metrics.items()}, sort_keys=True))
     say(f'shader compile cache: {before / 2**20:.1f} -> {after / 2**20:.1f} MiB on disk, {time.monotonic() - start:.1f} s')
 
 

@@ -11,9 +11,8 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('build_folder', type=Path, help='existing <title ID>_build folder')
     ap.add_argument('--decompress', action='store_true', help='replace the compressed cache with raw SQLite')
-    ap.add_argument('--workers', help='worker threads: positive count or max (default: OS CPU count for compression, 1 for decompression)')
+    ap.add_argument('--workers', default='max', help='worker threads: positive count or max (default: OS CPU count)')
     args = ap.parse_args(argv)
-    if args.workers is None: args.workers = '1' if args.decompress else 'max'
     try:
         workers = (os.cpu_count() or 1) if args.workers == 'max' else int(args.workers)
         shader_cache.maintain(args.build_folder.expanduser() / 'shader/cache/cas.db', compress=not args.decompress, decompress=args.decompress, workers=workers)

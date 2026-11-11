@@ -371,12 +371,28 @@ class Maintenance(Base):
             shader_cache.maintain(self.path, compress=True, workers=4, say=self.said.append)
         self.assertEqual(seen, [('wal', 1)])
 
-    def test_reversal_decodes_source_once(self):
+    def test_decompression_metrics_and_mixed_pending_payloads(self):
+        self.fill()
+        shader_cache.maintain(self.path, compress=True, workers=2, say=self.said.append)
+        s = shader_cache.Store(self.path); s.put('pending', b'raw pending' * 10000); s.close()
+        before = self.snapshot()
+        with mock.patch.dict(os.environ, {'DM_SHADER_CACHE_COMPRESSION_METRICS': '1'}):
+            shader_cache.maintain(self.path, decompress=True, workers=4, say=self.said.append)
+        prefix = 'shader cache decompression metrics: '
+        metrics, = [json.loads(line[len(prefix):]) for line in self.said if line.startswith(prefix)]
+        self.assertEqual(metrics['operation'], 'decompression')
+        self.assertEqual(metrics['workers_requested'], 4)
+        self.assertEqual(metrics['output_payload_bytes'], sum(len(row[2]) for row in before[0]))
+        self.assertEqual(metrics['blob_count'], len(before[0]))
+        self.assertGreater(metrics['output_payload_bytes'], metrics['input_payload_bytes'])
+        self.assertGreaterEqual(metrics['worker_cpu_s'], 0)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_reversal_reads_on_workers_without_payload_rescans(self):
         self.fill(); before = self.snapshot()
         shader_cache.maintain(self.path, compress=True, workers=4, say=self.said.append)
-        with mock.patch.object(shader_cache, '_parallel_blobs', wraps=shader_cache._parallel_blobs) as decode:
+        with mock.patch.object(shader_cache, '_parallel_blobs', side_effect=AssertionError('coordinator decoded blobs')):
             shader_cache.maintain(self.path, decompress=True, workers=4, say=self.said.append)
-            self.assertEqual(decode.call_count, 1)
         self.assertEqual(self.snapshot(), before)
 
     def test_parallel_conversion_round_trip(self):
@@ -504,7 +520,7 @@ class Maintenance(Base):
             with self.assertRaisesRegex(OSError, 'not supported'): shader_cache.maintain(self.path, compress=True)
         self.assertEqual(self.snapshot()[0][0][2], b'x')
 
-    def test_reversal_validates_content_and_cleans_partial_writes(self):
+    def test_reversal_cleans_partial_writes_and_preserves_source(self):
         self.fill(); shader_cache.maintain(self.path, compress=True, say=self.said.append)
         before = self.snapshot()
         def fail_write(db, part):
@@ -512,8 +528,11 @@ class Maintenance(Base):
         with mock.patch.object(shader_cache, '_raw_copy', side_effect=fail_write):
             with self.assertRaisesRegex(OSError, 'no space'): shader_cache.maintain(self.path, decompress=True)
         self.assertFalse(Path(f'{self.path}.raw.part').exists()); self.assertEqual(self.snapshot(), before)
-        s = shader_cache.Store(self.path); s.db.execute('UPDATE blob SET hash=? WHERE id=1', (b'wrong hash',)); s.close()
-        with self.assertRaisesRegex(RuntimeError, 'hash differs'): shader_cache.maintain(self.path, decompress=True)
+        with contextlib.closing(sqlite3.connect(self.path)) as db, db:
+            db.execute('UPDATE _blob_zstd SET data=? WHERE id=1', (b'not zstd',))
+        damaged_source = self.path.read_bytes()
+        with self.assertRaises(sqlite3.Error): shader_cache.maintain(self.path, decompress=True, workers=4)
+        self.assertEqual(self.path.read_bytes(), damaged_source)
         self.assertFalse(Path(f'{self.path}.raw.part').exists())
 
     def test_killed_reversal_retains_wal_and_retry_cleans_part(self):

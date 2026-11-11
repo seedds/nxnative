@@ -386,6 +386,9 @@ t_pso_skey: t_pso_skey.m ../nvn/nvn_pso_skey.h ../nvn/nvn_obj.h
 t_view_swizzle: t_view_swizzle.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_view_swizzle.m $(MTL_T_SRC) $(FW)
 check_t_view_swizzle: RUN_ENV = MTL_DEBUG_LAYER=1
+t_aniso: t_aniso.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_aniso.m $(MTL_T_SRC) $(FW)
+check_t_aniso: RUN_ENV = MTL_DEBUG_LAYER=1
 t_border: t_border.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_border.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_border

@@ -7126,6 +7126,18 @@ static MTLSamplerAddressMode wrapm(int w) {
         case 6: return MTLSamplerAddressModeMirrorRepeat; }
     return MTLSamplerAddressModeRepeat;
 }
+// Anisotropic filtering raised by the player (DM_ANISO=2..16, the launcher's Anisotropic filtering): a floor under the game's own level for the samplers that filter a mip chain linearly
+static uint64_t g_aniso_raised;
+uint64_t mtl_aniso_raised(void) { return g_aniso_raised; }
+static int aniso_floor(void) {
+    static int v = -1; if (v >= 0) return v;
+    const char *e = getenv("DM_ANISO"); int n = e ? atoi(e) : 0;
+    v = n >= 2 ? (n > 16 ? 16 : n) : 0;
+    if (e && *e && strcmp(e, "off") && strcmp(e, "0") && strcmp(e, "1") && (n < 2 || n > 16)) MLOG("[RED] DM_ANISO=%s: off or 2 to 16; %s", e, v ? "taking 16" : "keeping the game's own");
+    if (v) MLOG("anisotropic filtering (DM_ANISO): at least %dx on the game's mipmapped linear samplers", v);
+    return v;
+}
+static int aniso_raises(const samp_par *p) { return p->magf && (p->minf == 3 || p->minf == 5) && !p->cmp_mode && !p->reduction && p->lod_max > p->lod_min; }
 static id<MTLSamplerState> samp_by_id(int sid) {   // Caller holds g_rmu
     if (sid < 0 || sid >= g_nsreg || !g_sreg_ok[sid]) { RED_ONCE(12, "sampler ID %d not registered", sid); return nil; }
     if (g_sview[sid]) return (__bridge id<MTLSamplerState>)g_sview[sid];
@@ -7138,6 +7150,7 @@ static id<MTLSamplerState> samp_by_id(int sid) {   // Caller holds g_rmu
     d.lodMinClamp = p.lod_min < 0 ? 0 : p.lod_min; d.lodMaxClamp = p.lod_max;
     d.lodBias = p.lod_bias < -16 ? -16 : p.lod_bias > 15.99f ? 15.99f : p.lod_bias;   // SetLodBias: Maxwell's sampler bias, Metal 26's range [-16, 15.99]
     d.maxAnisotropy = p.aniso < 1 ? 1 : p.aniso > 16 ? 16 : (NSUInteger)p.aniso;
+    { int af = aniso_floor(); if (af && d.maxAnisotropy < (NSUInteger)af && aniso_raises(&p)) { d.maxAnisotropy = (NSUInteger)af; if (!g_aniso_raised++) MLOG("anisotropic filtering: first sampler raised to %dx (sampler %d, the game's %g)", af, sid, p.aniso); } }
     if (p.cmp_mode) d.compareFunction = (MTLCompareFunction)(p.cmp_func - 1);
     // Reduction (NVN 1 min / 2 max): the minimum or maximum of the texels a filtered sample covers, per channel (Metal 26). Pokémon Legends: Z-A builds its depth pyramid with a min sampler
     // (151607c7a92386cc reads the level above at an explicit LOD) and tests occlusion boxes against it; averaged, the pyramid is nearer than the scene at depth edges. Metal ignores the reduction

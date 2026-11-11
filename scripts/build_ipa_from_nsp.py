@@ -431,8 +431,19 @@ def find_nx_extract(repo, env):
     return nx
 
 
-def swap_in(tmp, dst):   # swap the new output in as a whole (the old one is untouched on failure)
-    rmtree(dst); tmp.rename(dst)
+def swap_in(tmp, dst):
+    """Publish the finished output tmp (a sibling of dst, so the same volume) as dst. dst is always the whole old output, the whole new one, or absent; never half deleted, which a
+    reuse check could take for a finished output: the old one is renamed aside first (<dst>.old.partial: as every unfinished folder, a name the build ignores), the new one renamed in,
+    and only then the old one deleted. A failure or an interrupt before the new one is in renames the old one back. Recoverable, not atomic: two renames, and a hard kill between
+    them leaves dst absent (the old output in the aside folder), which a rerun rebuilds. An aside folder an earlier run left is deleted before it is needed again"""
+    old = dst.with_name(dst.name + '.old.partial')
+    rmtree(old)
+    if not (dst.is_symlink() or dst.exists()): tmp.rename(dst); return
+    dst.rename(old)
+    try: tmp.rename(dst)
+    except BaseException:
+        old.rename(dst); raise   # an interrupt or SIGTERM too: the window is two renames
+    rmtree(old)
 
 
 def free_gb(p):

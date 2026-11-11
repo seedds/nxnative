@@ -24,6 +24,22 @@ def mul_extended(msl):
                      for t, w in (('uint', 'ulong'), ('int', 'long')))
     return msl[:found[0].end()] + scalar + msl[found[0].end():]
 
+# A game uniform read as an integer at a fixed offset (as_type<int>((*spvDescriptorSet0.fp_c5)._m0[40].x): a material's flags and counts, which its branches test) is read
+# through a volatile pointer. A fixed read is a plain load since the host bounds it once a binding (GitHub issue #2066), and Metal's backend then takes every read of a word as
+# one value: on a material shader that tests the same flags at each level of deeply nested branches (Nintendo Switch Sports Resort: 455 such reads, 36 levels) its compile
+# went from 0.6 s to 79 s and several GB (fbe6bb186641245c with 0eb245e18bea1bac, M4 Pro), and pipelines compiled side by side ran MTLCompilerService out of memory
+# (XPC_ERROR_CONNECTION_INTERRUPTED, the pipeline archive file under way lost with them). Read volatile, each read stays a load of its own, as the compared read was, with no
+# size table and no comparison: 1.1 s. Float reads are left alone (they did not slow it, and dmsh_fetch reads their text); c0 to c2 are the driver's banks
+_FLAG_READ = re.compile(r'as_type<(u?int)>\(\(\*spvDescriptorSet0\.([a-z]+_c(?:[3-9]|\d\d))\)\._m0\[(\d+)\]\.([xyzw])\)')
+_FLAG_HELPER = 'template<typename T> static inline __attribute__((always_inline)) T dm_vl(constant T& r) { return *(constant volatile T*)&r; }\n'
+def flag_reads(msl):
+    out, n = _FLAG_READ.subn(r'as_type<\1>(dm_vl((*spvDescriptorSet0.\2)._m0[\3]).\4)', msl)
+    if not n: return msl
+    at = out.find('using namespace metal;\n')
+    if at < 0: raise ValueError('no "using namespace metal;" to put dm_vl after')
+    at += len('using namespace metal;\n')
+    return out[:at] + _FLAG_HELPER + out[at:]
+
 # Ampere HMMA.16816 with an f16 accumulator (agl's upscaler networks, the NDVE video networks) reaches the MSL as calls of dmsh_hmma16816_f16(lane, block, A0..A3, B0, B1, C0, C1,
 # flags, A's LDSM address, A0..A3's offsets, A's row stride, out D1) → D0, the subgroup's 256-word block of the scratch shared memory as the last argument (InstEmitAmpereTensor.AHmma,
 # TensorPass, HelperFunctionManager.GenerateHmma16816F16). The translator's body computes D lane by lane from the block; here it becomes simdgroup_matrix code over the same block:

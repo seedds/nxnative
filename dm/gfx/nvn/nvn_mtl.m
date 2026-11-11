@@ -5055,7 +5055,7 @@ static int g_nbcrt; static void bcrt_flush(void);   // shadows of block-compress
 static struct { tex_t t; void *tex; unsigned level, slice, n; int att; } g_rtm[8]; static int g_nrtm;   // n: the layers the pass draws from slice on; att: the colour slot
 static int tex_storage_dst(const tex_t *t);
 static int mtl_fmt_depth(MTLPixelFormat f); static size_t mtl_pf_block_bytes(MTLPixelFormat pf); static int mtl_fmt_block(MTLPixelFormat f);
-static id<MTL4ComputeCommandEncoder> dispatch_enc(void); static int rb_copy_shift(const tex_t *t, id<MTLTexture> mt);
+@class NvShader; static id<MTL4ComputeCommandEncoder> dispatch_enc(NvShader *cs, uint64_t ind); static int rb_copy_shift(const tex_t *t, id<MTLTexture> mt);
 static int rb_swap_gpu(uint64_t src, size_t row, size_t img, uint64_t dst, size_t drow, size_t dimg, size_t wb, size_t rows, size_t nz, int shift);
 static uint64_t g_gsb_stores, g_gsb_bytes;
 void mtl_gsb_stats(uint64_t *n, uint64_t *bytes) { *n = g_gsb_stores; *bytes = g_gsb_bytes; }   // hle_nvn.c's power line
@@ -5132,7 +5132,7 @@ static void gsb_swz(const tex_t *t, const gsb_geo *g, unsigned n, uint64_t src, 
     _Static_assert(sizeof *p <= 128, "the swz parameters fit their arena slot");
     *p = (typeof(*p)){0, 0, g->base, pitch, img, g->layer_stride, e0n, e1s, e1n, g->xb0, g->xb1, g->by0, g->rows, g->th, g->gobs_x, (uint32_t)nvn_gob_switch2, g->td, g->z0, g->blocks_y, g->d3, g->lin};
     g_wr_epoch++; g_mdx_epoch++; sbw_note((uint64_t)(uintptr_t)t->mem, t->L.size, SBW_GPU);
-    id<MTL4ComputeCommandEncoder> e = dispatch_enc(); enc_c_pso(e, ps);
+    id<MTL4ComputeCommandEncoder> e = dispatch_enc(NULL, 0); enc_c_pso(e, ps);   // a host kernel: ordered after everything, and everything after it
     enc_c_args(e, src, 0); enc_c_args(e, pg, 1); enc_c_args(e, qb.gpuAddress + qo, 2); enc_c_args(e, eb ? eb.gpuAddress : pg, 3);
     uint32_t nx = (g->xb1 - (g->xb0 & ~15u) + 15) / 16;
     enc_c_dispatch(e, MTLSizeMake((nx + 31) / 32, g->rows, n), MTLSizeMake(32, 1, 1));

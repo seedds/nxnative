@@ -164,7 +164,7 @@ int main(void) { @autoreleasepool {
         d.vertexFunction = fn4_note([vl newFunctionWithName:@"main0"], vl, @"main0", nil); d.fragmentFunction = fn4_note([fl newFunctionWithName:@"main0"], fl, @"main0", nil);
         d.vertexDescriptor = [MTLVertexDescriptor vertexDescriptor]; d.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
         uint64_t built0 = g_pb_built, arch0 = g_pb_archived; int new0 = g_arch_new; NSError *err = nil;
-        EXPECT("covered draw: a pipeline", 1, pso_build(d, &err) != nil);
+        EXPECT("covered draw: a pipeline", 1, pso_build(d, 0, &err) != nil);
         EXPECT("covered draw: its base from the bundle", arch0 + 1, g_pb_archived);
         EXPECT("covered draw: none compiled", built0, g_pb_built);
         EXPECT("covered draw: nothing captured for the device's archive", new0, g_arch_new);

@@ -36,13 +36,16 @@ static void touch_to(const dm_touch *t, int n) { if (n > 0) { touch_new |= !touc
 void (*_Atomic dm_touch_observer)(const dm_touch *t, int n);
 void dm_touch_set(const dm_touch *t, int n) { touch_to(t, n); void (*o)(const dm_touch *, int) = atomic_load(&dm_touch_observer); if (o) o(t, n); }
 void dm_touch_script(const dm_touch *t, int n) { touch_to(t, n); }
-int touch_fill_n(void *out, int max, uint64_t now) { (void)out; (void)max; (void)now; return 0; }
+static int64_t touch_samp; static int touch_points = -1;   // hle_touch.c numbers every read from 1; the last read's points argument
+int touch_fill_n(void *out, int max, uint64_t now, int points) { (void)max; (void)now; touch_points = points; memset(out, 0, 0x10); int64_t s = ++touch_samp; memcpy(out, &s, 8); return 0; }
 int gesture_fill(void *out, int n, uint64_t now) { (void)out; (void)n; (void)now; return 0; }
 void dm_gfx_shot_at(long frame, const char *path) { (void)frame; (void)path; }
 void hle_bind_system_event(void *g, int autoclear) { (void)g; (void)autoclear; }
 void hle_signal_system_event(void *g) { g_signalled = g; g_signals++; }
 int hle_signal_bound_system_event(void *g) { g_signalled = g; g_signals++; return 1; }
 void dm_gfx_texlist(int target) { (void)target; }
+// the guest address space (hle_svc.c): the unit test has none, so every stack is a host stack and the big-stack take-overs (the controller applet) run on it directly (hle_bigstack.c)
+int dm_guest_as_contains(uintptr_t a) { (void)a; return 0; }
 void dm_gfx_restop(void) {}
 void dm_gfx_texraw(uint64_t serial, const char *path) { (void)serial; (void)path; }
 void dm_ctl_peek(uint64_t a, int n) { (void)a; (void)n; }
@@ -143,6 +146,34 @@ static void t_npads(void) {
     CHECK(applet_opens == 12 && applet_depth == 0, "every answer opened and closed its applet");
     arg[0] = 1;
     CHECK(six_connected(0x0100 | 0) && !six_connected(0x0200 | 0), "player 2 has a six-axis sensor, No3 none");
+    {   // GitHub issue #2237: more players than the game's maximum. The applet leaves the players past it out, so the game does not see them and open it again
+        arg[0] = 1; arg[1] = 1; g_signals = 0;
+        CHECK(h_hid_ShowCtrl(info, arg) == RES_OK && info[0] == 1 && dm_players_reported() == 1, "two players, one wanted: the applet answers one and one is reported");
+        CHECK(h_hid_GetStyle(&(uint32_t){1}) == 0 && buttons_of(1, STYLE_FULLKEY) == 0, "No2 reads as not connected");
+        CHECK(g_signals == 1 && g_signalled == ev1, "No2's style event tells the game");
+        CHECK(buttons_of(0, STYLE_FULLKEY) == (DM_BTN_Y | DM_BTN_B) && lx_of(0) == 300, "a maximum of one: the controller left out feeds player 1");
+        g_signals = 0;
+        CHECK(h_hid_ShowCtrl(info, arg) == RES_OK && info[0] == 1 && g_signals == 0, "asked again: the same answer, nothing changes");
+        h_hid_ShowCtrl(info, NULL); CHECK(info[0] == 1, "the applet without arguments reports the players the game sees");
+        dm_pad_players(0x1); dm_pad_players(0x3); dm_pad_set_player(1, DM_BTN_B, 300, 0, 0, 0);
+        CHECK(h_hid_GetStyle(&(uint32_t){1}) == STYLE_FULLKEY, "a controller that went away and came back is a player again, until the applet says otherwise");
+        CHECK(h_hid_ShowCtrl(info, arg) == RES_OK && h_hid_GetStyle(&(uint32_t){1}) == 0, "and the applet leaves it out again");
+        dm_pad_players(0x7); dm_pad_set_player(2, DM_BTN_X, 0, 0, 0, 0);
+        CHECK(h_hid_GetStyle(&(uint32_t){2}) == STYLE_FULLKEY, "a third controller connects: a player of its own, on No3");
+        arg[1] = 2;
+        CHECK(h_hid_ShowCtrl(info, arg) == RES_OK && info[0] == 2, "one to two players wanted, three connected: two");
+        CHECK(h_hid_GetStyle(&(uint32_t){1}) == STYLE_FULLKEY && h_hid_GetStyle(&(uint32_t){2}) == 0, "the lowest players stay: player 2 is back, player 3 is left out");
+        CHECK(buttons_of(0, STYLE_FULLKEY) == DM_BTN_Y && buttons_of(1, STYLE_FULLKEY) == DM_BTN_B, "a maximum above one: the controller left out feeds nobody");
+        arg[1] = 4;
+        CHECK(h_hid_ShowCtrl(info, arg) == RES_OK && info[0] == 3 && buttons_of(2, STYLE_FULLKEY) == DM_BTN_X, "the applet opened for up to four: all three play");
+        arg[1] = 1; h_hid_ShowCtrl(info, arg);
+        CHECK(h_hid_GetStyle(&(uint32_t){1}) == 0 && h_hid_GetStyle(&(uint32_t){2}) == 0, "one wanted: players 2 and 3 left out");
+        CHECK(buttons_of(0, STYLE_FULLKEY) == (DM_BTN_Y | DM_BTN_B | DM_BTN_X), "and both feed player 1");
+        ids((const uint32_t[]){0, 1, 2, NPAD_HANDHELD}, 4);
+        CHECK(h_hid_GetStyle(&(uint32_t){1}) == STYLE_FULLKEY && h_hid_GetStyle(&(uint32_t){2}) == STYLE_FULLKEY, "the game sets its supported npads again: everyone counts again");
+        ids((const uint32_t[]){0, 1, 2, 3, 4, 5, 6, 7, NPAD_HANDHELD}, 9);
+        dm_pad_players(0x3); arg[1] = 4;
+    }
 
     // A one-player game ({No1, Handheld}): player 2's controller plays as player 1, No2 reads as not connected
     g_signals = 0; ids((const uint32_t[]){0, NPAD_HANDHELD}, 2);
@@ -637,6 +668,24 @@ static void t_motion_hid(void) {
     dm_motion_clear_hid(0); dm_motion_clear_hid(1); dm_motion_clear(0); g_phone_motion.last_ns = 0;
     dm_pad_players(1); g_phone_mode = -1;
 }
+// Touch screen reads across docked <-> handheld: every read goes to hle_touch.c, which numbers the states of both modes from one count (t_touch checks the numbers), with
+// touch points asked for only in handheld mode. Numbered apart (docked from the npad counter, 65536; handheld from 1), a game started docked dropped every touch after
+// leaving the dock: Unity's touch reader (Aokana main+0xd2bde0) takes a state only if its sampling number is above the last one it took, empty states included.
+static void t_touch_sampling(void) {
+    uint8_t s[0x10 + 0x28 * 16]; int64_t prev = 0, v;
+    const int modes[] = {1, 1, 0, 0, 1, 0};
+    for (int i = 0; i < 6; i++) {
+        g_mode = modes[i]; memset(s, 0, sizeof s);
+        if (i & 1) CHECK(h_hid_TouchN_16(s, 1) == 1, "touch: GetTouchScreenStates gives one state");
+        else h_hid_Touch1_16(s);
+        memcpy(&v, s, 8);
+        CHECK(touch_points == !modes[i], "touch: touch points are asked for in handheld mode only");
+        CHECK(v > prev, i == 2 ? "touch: handheld after docked continues the sampling numbers" : i == 4 ? "touch: docked after handheld continues the sampling numbers"
+                                : i == 5 ? "touch: handheld again continues the sampling numbers" : "touch: sampling numbers increase");
+        prev = v;
+    }
+    g_mode = 1;
+}
 
 int main(void) {
     CHECK(setenv("DM_RUMBLE_LOG", "1", 1) == 0, "enable rumble diagnostics");
@@ -651,6 +700,7 @@ int main(void) {
     t_motion_threads();
     t_motion_live();
     t_motion_hid();
+    t_touch_sampling();
     t_rec();
     {   // Nmouse with no device (SDK 21's forms): the pointer range is kept, the merged handle 0 takes settings, the standard mouse and the handle queries report nothing
         int w = 0, h = 0; uint64_t std = 7; uint32_t npad = 9;

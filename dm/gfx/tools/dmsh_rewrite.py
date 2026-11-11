@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # The rewrites dmsh_build.py makes in a translated shader's MSL before it compiles it, where Metal or the translator falls short of what the Switch code does: precise
-# arithmetic (precise), 64-bit products (mul_extended), Ampere's HMMA as simdgroup matrices (hmma_msl), first stores and shared-memory stores (first_store,
+# arithmetic (precise), memory barriers as fences (membar_fence, tg_fence), 64-bit products (mul_extended), Ampere's HMMA as simdgroup matrices (hmma_msl), first stores and shared-memory stores (first_store,
 # shared_store_msl), threadgroup memory past Metal's limit (tg_spill), texture gathers with offsets (gather_offsets), border colours Metal has no sampler state for
 # (border_emu) and a pixel shader's depth snapped to its position (frag_z_snap). Functions of the MSL text and the library ABI only, with no build state, so tests import
 # them. Part of the translation chain (dmsh_chain.FILES) and of every shader's cache key (dmsh_build.py CODE_FP).
@@ -11,6 +11,36 @@ import dmsh_abi as abi, dmsh_side
 # and its saturation gives 0, as Metal's precise:: functions (IEEE fmin / fmax) do on every GPU. The M4 Pro's fast ones happen to agree, an A20 Pro's do not: Super Mario Galaxy 2's
 # GX lighting takes max(0, NaN) from light directions left at zero, and the half of Mario its fill light faces came out white on the iPhone (GitHub issue 72; vk_shaders.py PRECISE)
 def precise(msl): return re.sub(r'\bfast::(min|max|clamp)\(', r'precise::\1(', msl)
+_MEMBAR = 'threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup | mem_flags::mem_texture);'
+def membar_fence(msl):
+    """MEMBAR as a fence, not a barrier. The translator turns BAR.SYNC into OpControlBarrier (workgroup scope; SPIRV-Cross prints threadgroup_barrier(mem_flags::mem_threadgroup)) and
+    MEMBAR.GPU / .SYS into OpMemoryBarrier at device scope (Ryujinx CodeGen/Spirv/Instructions.cs GenerateMemoryBarrier), which SPIRV-Cross prints as a threadgroup_barrier with device,
+    threadgroup and texture memory: an execution barrier the Switch code does not have. Where the threads of a group are not converged it waits for threads that never come.
+    PRAGMATA's GPU culling queue 12a52b683eec95c1 has no BAR.SYNC at all, only MEMBAR.SC.GPU; ERRBAR inside its persistent work loop. Each becomes the fence it is,
+    atomic_thread_fence at device scope, sequentially consistent; two in a row (MEMBAR.SC and ERRBAR) become one. From uncraftablexd's PRAGMATA bring-up (PR #1407)"""
+    if _MEMBAR not in msl: return msl
+    fence = 'atomic_thread_fence(mem_flags::mem_device | mem_flags::mem_threadgroup | mem_flags::mem_texture, memory_order_seq_cst, thread_scope_device);   // MEMBAR (membar_fence)'
+    msl = re.sub(r'^([ \t]*)' + re.escape(_MEMBAR) + r'\n\1' + re.escape(_MEMBAR) + r'$', lambda m: m[1] + _MEMBAR, msl, flags=re.M)
+    return msl.replace(_MEMBAR, fence)
+
+TG_FENCE_DECL = re.compile(r'\bthreadgroup\s+(?:spvUnsafeArray<[^;&]*?>|[A-Za-z_][\w<>, ]*?)\s*&?\s*(\w+)\s*(?:\[[^\]]*\])?\s*[;,)]')
+TG_FENCE = 'atomic_thread_fence(mem_flags::mem_threadgroup, memory_order_seq_cst, thread_scope_simdgroup);'
+def tg_fence(src):
+    """A store to threadgroup memory followed by a load of another lane's word, with no barrier between them (Ampere compilers rely on lockstep warps for small
+    scans, e.g. Unreal's GPU radix sort downsweep d032ce5090303e01 at 0x2eb0: STS / LDS [x-4] / STS / LDS [x-8]): for one thread the load and the earlier store do not
+    alias, so Metal moves the load above the store and reads another lane's old value (Orbitals: Niagara's sorted index list wrong every frame, beams and particles broken).
+    A simdgroup-scope memory fence after each threadgroup store keeps the order; it is not an execution barrier, so it is safe in divergent code. Only kernels with a
+    threadgroup array are touched. A plain or compound assignment (SPIRV-Cross folds a load, an operation and a store of the same element into `_46[i] += 1u;`), also to a
+    member or component (`_39[i].x = v;`). From uncraftablexd's Orbitals bring-up (PR #1775)"""
+    names = {m.group(1) for m in TG_FENCE_DECL.finditer(src) if m.group(1) not in ('operator',)}
+    if not names: return src
+    store = re.compile(r'^(\s*)(?:%s)\s*\[[^\n;]*\](?:\.\w+)?\s*(?:[-+*/%%&|^]|<<|>>)?=(?!=)[^\n]*;\s*$' % '|'.join(map(re.escape, sorted(names))))
+    out = []
+    for ln in src.split('\n'):
+        out.append(ln)
+        m = store.match(ln)
+        if m: out.append(m.group(1) + TG_FENCE)
+    return '\n'.join(out)
 
 # spirv-cross writes OpUMulExtended / OpSMulExtended as calls of an optnone template, spvMulExtended, as Metal's compiler may fail on an inlined mulhi (spirv_msl.cpp,
 # SPVFuncImplMulExtended). The barrier keeps every product a call that is never folded: Switch 2 shaders divide by constants through the high word of a product (Ocarina of Time
@@ -405,10 +435,17 @@ static inline __attribute__((always_inline)) float4 dm_bmix(float4 r, float4 w, 
 static inline __attribute__((always_inline)) float dm_bmix(float r, float w, float4 k) {{ return r + (w - r) * k.x; }}
 template<typename V, typename T, typename... A> static inline __attribute__((always_inline)) V dm_bs(V r, constant dm_border_t* b, uint i, T t, sampler w, A... a)
 {{
-    if (b->mask >> i & 1u) r = dm_bmix(r, t.sample(w, a...), b->k[i]);
+    if (DM_BORDER_LIVE && (b->mask >> i & 1u)) r = dm_bmix(r, t.sample(w, a...), b->k[i]);
     return r;
 }}
 '''
+
+# The corrections also depend on the function constant abi.BORDER_FC: the host sets it (true: off) for a pipeline whose draw or dispatch binds no sampler with a twin, the usual case,
+# and the twin samples are compiled out with the registers they kept live. A uniform branch still costs them: Ocarina of Time's 1080p material passes spilled 300-400 bytes a thread,
+# 1.5 ms of a 26.7 ms frame on a MacBook Air M4, and its kernels, NDSR's network among them, 0.25 ms more (PR #1929); Splatoon Raiders' c0ae76e0ca76b574 spilled 592 bytes a thread
+# and none without them (PR #1203). A pipeline the host does not specialize leaves the constant undefined: every sample corrects as its bit says
+BORDER_LIVE_FC = (f'constant bool dm_border_off [[function_constant({abi.BORDER_FC})]];\n'
+                  'constant bool dm_border_live = !is_function_constant_defined(dm_border_off) || !dm_border_off;\n#define DM_BORDER_LIVE dm_border_live\n')
 
 def border_emu(msl):
     """The samples of the argument buffer's textures through its sampler members, T.sample(S, args) → dm_bs(T.sample(S, args), block, bit, T, S_w, args) (see BORDER_HELPERS);
@@ -437,7 +474,7 @@ def border_emu(msl):
         args = msl[m.end():i - 1]
         twin = f'spvDescriptorSet0.{m.group(2)}{abi.BORDER_TWIN}'
         msl = msl[:m.start()] + f'dm_bs({msl[m.start():i]}, spvDescriptorSet0.{abi.BORDER_MEMBER}, {bit[m.group(2)]}u, spvDescriptorSet0.{m.group(1)}, {twin}, {args})' + msl[i:]
-    return msl.replace('using namespace metal;\n', 'using namespace metal;\n' + BORDER_HELPERS, 1)
+    return msl.replace('using namespace metal;\n', 'using namespace metal;\n' + BORDER_LIVE_FC + BORDER_HELPERS, 1)
 
 # gl_FragCoord.z against a depth the shader read. NVIDIA stores a fragment's depth as the z its pixel shader reads, so a shader can test a fragment against a depth image of its own surface and
 # find them equal. Apple's GPU stores a value below the [[position]].z its fragment shader reads at some pixels: by up to one ulp of z plus a fraction of the depth's step across a pixel
@@ -519,7 +556,7 @@ static inline __attribute__((always_inline)) float4 dm_bz(float4 c, uint m)
     if (!((m == 1u && c.w == 0.0f) || (m == 2u && c.w == 1.0f))) return c;
     return float4(select(c.xyz, float3(0.0f), (as_type<uint3>(c.xyz) & uint3(0x7f800000u)) == uint3(0x7f800000u)), c.w);   // NaN or Inf by its bits: fast math may assume there is none
 }
-static inline __attribute__((always_inline)) void dm_blend0(main0_out& dm_o, constant dm_blend_state& dm_s)
+static inline __attribute__((always_inline)) void dm_blend0(thread main0_out& dm_o, constant dm_blend_state& dm_s)
 {
     uint m = dm_s.zero;
     if (m == 0u) return;

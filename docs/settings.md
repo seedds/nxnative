@@ -3,7 +3,7 @@
 The screen before the game starts shows the settings the game supports. A setting that only matters while another is on appears under it and disappears when that one is turned off. Tap **Play** to start; the app remembers your choices for the next start. All settings are on one scrollable screen, under **Game**, **Controls** and **Performance**. Tap a menu or move a slider there; no settings page needs opening. **Upscaling** is in **Game**, beside **Console mode**. A Mac app shows the same settings in a [window of its own](#the-mac-settings-window).
 
 - [Tested defaults](#tested-defaults)
-- [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Game's upscaler](#games-upscaler), [Game language](#game-language), [Picture](#picture), [Frame-rate counter](#frame-rate-counter)
+- [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Game's upscaler](#games-upscaler), [Game's upscaler sharpness](#games-upscaler-sharpness), [Game language](#game-language), [Picture](#picture), [Frame-rate counter](#frame-rate-counter)
 - [Controls](#controls): [Touch feedback](#touch-feedback), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff), [Press a button to join](#press-a-button-to-join)
 - [Performance](#performance): [Frame buffering](#frame-buffering), [Metal 4 pipelines](#metal-4-pipelines), [Pipeline prebuild](#pipeline-prebuild), [Encode thread](#encode-thread), [Hold frames when late](#hold-frames-when-late), [Performance HUD](#performance-hud), [Reset to tested defaults](#reset-to-tested-defaults)
 - [The Mac settings window](#the-mac-settings-window): [Display mode](#display-mode)
@@ -76,6 +76,13 @@ flowchart LR
 - **When to change it:** when the game falls short of its frame rate in busy scenes because of GPU time: Donkey Kong Bananza's upscaler is the largest single piece of a heavy frame on an M1 (3.5-5 ms of about 24 in handheld mode). Compare the look side by side before keeping it.
 - **Cost:** none in GPU time (it saves 2.5-4 ms a frame in that case); the picture is Apple's scaler's rather than the game's. Frames where the game renders at its output size are not upscaled and keep the game's shader either way. Devices without MetalFX keep the game's upscaler.
 - **Not the same as [Upscaling](#upscaling):** that one scales the finished picture, HUD included, to the screen; this one replaces the game's own step inside the frame. Both can be on.
+
+### Game's upscaler sharpness
+
+Shown under [Game's upscaler](#games-upscaler) while it is on **MetalFX**. MetalFX's spatial scaler gives a crisper picture than the networks games upscale with, and has no strength setting of its own, so the app blends its picture with a plain smooth one of the same input: 100 % is MetalFX's picture alone, lower values are softer. The starting value is the one tested against that game's own upscaler (70 % for The Legend of Zelda: Ocarina of Time; 100 % where none was tested).
+
+- **When to change it:** by taste. Lower it when edges and fine textures look harsher than with the game's own upscaler, raise it when the picture looks soft.
+- **Cost:** none measurable; it changes one draw the swap already makes.
 
 ### Game language
 
@@ -243,11 +250,11 @@ Turn off **Show this window at launch** to start the game at once with your choi
 
 The Mac app and the iPhone app of one game can share a save through iCloud Drive. Choose the same iCloud Drive folder on both: **Cloud saves** › **Choose a folder…** in the Mac settings window, and **Cloud saves** in the iPhone launcher (any folder, for instance one named **nxnative Saves**). Each game keeps one file there, `<title ID>/save.dmsync`, which holds the whole save.
 
-When the game starts, it brings the save from iCloud Drive in if only that one changed since the last sync; a few seconds after the game saves, it sends its save if only this one changed. The iPhone app also sends when it goes to the background, and the Mac app once the game has quit. If you played on both without the save getting across in between, the newer save wins.
+When the game starts, it brings the save from iCloud Drive in if only that one changed since the last sync; a few seconds after the game saves, it sends its save if only this one changed. The iPhone app also sends when it goes to the background, and the Mac app once the game has quit. If you played on both without the save getting across in between, **Play** asks which save to keep: each with its date and size, since the newer one is not always the one with more progress (a new game saved a minute later is newer). The one you don't pick is kept, as below. Without the settings screen (the Mac's `DM_LAUNCHER=0`), the newer save wins.
 
 A save that is replaced, on the device or in iCloud Drive, is kept first, beside the save in a folder named after it with `-backups` (on the iPhone `save-backups` in the Files app, under the app's name; on the Mac `~/Library/Application Support/nxnative/<title ID>/save-backups`): `<date> local` holds this device's save, `<date> cloud` the one that was in iCloud Drive. The newest 10 of each kind stay, and older ones are removed; other folders you put there are left alone.
 
-iCloud Drive takes a moment to carry a file from one device to the other. Quit the game on one device and give it a few seconds before you start it on the other. Without a connection, or when the save in iCloud Drive has not arrived in time, the game plays on with the save it has and sends it later. If the save in iCloud Drive changed meanwhile, the game sends nothing that session, and the next start decides between the two as above. The game log says what came in and what went out (lines starting with `save sync:`).
+iCloud Drive takes a moment to carry a file from one device to the other. Quit the game on one device and give it a few seconds before you start it on the other. **Play** waits for the save in iCloud Drive to download, with **Play Without It** to go on at once; without a connection, or when it has not come in a minute, it says so and offers this device's save or another try. The game then plays on with the save it has and sends it later. If the save in iCloud Drive changed meanwhile, the game sends nothing that session, and the next start decides between the two as above. The game log says what came in and what went out (lines starting with `save sync:`).
 
 ## In-game menu
 
@@ -281,6 +288,7 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 | Press a button to join | `DM_PAD_PRESS_TO_JOIN` | `1`, `0` |
 | Upscaling | `DM_PRESENT_UPSCALE` | `off`, `metalfx` |
 | Game's upscaler | `DM_UPSCALER` | `game`, `metalfx` |
+| Game's upscaler sharpness | `DM_UPSCALER_SHARPNESS` | `0.0` to `1.0` |
 | Frame buffering | `DM_PRESENT_SNAP` | `1`, `0` |
 | Metal 4 pipelines | `DM_PSO_MTL4` | `1`, `0` |
 | Pipeline prebuild | `DM_PSO_PREBUILD` | `1`, `0` |

@@ -158,7 +158,7 @@ static void invalid_descriptors(NvProg *p) {
     for (unsigned i = 0; i < sizeof cases / sizeof *cases; i++) for (int compile = 0; compile <= 1; compile++) {
         pso_key k = {.dfmt = cases[i][0], .sfmt = cases[i][1], .samples = 1}; k.cfmt[0] = 70;
         NSError *error = nil;
-        CHECK(!pso_build_ex(pso_desc(&k, p->sh[0], p->sh[1], nil, 0), &error, compile), "invalid descriptor is rejected before either Metal compiler path");
+        CHECK(!pso_build_ex(pso_desc(&k, p->sh[0], p->sh[1], nil, 0), 0, &error, compile), "invalid descriptor is rejected before either Metal compiler path");
         CHECK(error.code == 1 && [error.domain isEqual:@"nxnative.NVN.Pipeline"], "invalid descriptor reports an explicit input error");
     }
 }
@@ -189,7 +189,7 @@ static void prediction_made_base(id<MTLLibrary> lib) {
     NvProg *p = program(lib); static prog_t pg = {.serial = 980101}; serial_put(pg.serial, p);
     state_reset(); S.prog = &pg; memset(&g_pass, 0, sizeof g_pass); g_pass.cfmt[0] = 70; g_pass.dfmt = g_pass.sfmt = 260; g_pass.samples = 1;
     pso_key k, alt; pso_key_fill(&k, p->sh[0], p->sh[1], g_pass.cfmt, 260, 260, 1, 0); pso_key_fill(&alt, p->sh[0], p->sh[1], g_pass.cfmt, 0, 0, 1, 0);
-    NSError *error = nil; id<MTLRenderPipelineState> ps = pso_build(pso_desc(&k, p->sh[0], p->sh[1], nil, 0), &error);
+    NSError *error = nil; id<MTLRenderPipelineState> ps = pso_build(pso_desc(&k, p->sh[0], p->sh[1], nil, 0), !k.border, &error);
     CHECK(ps != nil, "the drawn pipeline builds"); if (!ps) return;
     hm_put_id(&g_pso, &k, ps);
     CHECK(pso_base_made(&alt, p->sh[0], p->sh[1]) == (g_comp4 != nil), "the attachment-free variant's base is the drawn pipeline's");
@@ -209,7 +209,7 @@ static void prediction_made_base(id<MTLLibrary> lib) {
         CHECK(hm_get_id(&g_pp_easy, &alt) != nil && g_pp_easy.n == easy + !round, "it is remembered once, and left out of the next prediction's candidates");
     }
     uint64_t built = g_pb_built;
-    if (g_comp4) CHECK(pso_build_ex(pso_desc(&alt, p->sh[0], p->sh[1], nil, 0), &error, 0) != nil && g_pb_built == built, "its draw takes the pipeline without compiling");
+    if (g_comp4) CHECK(pso_build_ex(pso_desc(&alt, p->sh[0], p->sh[1], nil, 0), !alt.border, &error, 0) != nil && g_pb_built == built, "its draw takes the pipeline without compiling");
 }
 
 int main(int argc, char **argv) { @autoreleasepool {

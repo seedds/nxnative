@@ -186,7 +186,7 @@ A decoder hands out as many outputs as it has slots, and while every slot is tak
 ### Decoding into the client's NVN texture
 
 - **Cause:** the decoder is created with output format 3 and mode 2 (`DecoderMode_NativeTexture`). The client's `movie::Buffer` then carries the `NVNtexture` object itself as its data, 8 bytes of capacity (an `RGBX8_SRGB` texture embedded in the game's texture pool entry, `main+0x226c98`), plus `SetNvnDev` / `SetNvnSync`.
-- **Fix:** the host converts the VP9 picture to RGBA (BT.709 / BT.601 and range from the stream) and writes it into the texture's storage like `WriteTexels`, then marks the sync as signalled (`nvn_host_write_texture` / `nvn_host_signal_sync` in `hle_nvn.c`). The host writes the texture's block-linear storage on the CPU and the replay layer re-uploads the dirtied pages, as for `WriteTexels` ([nvn-objects.md](nvn-objects.md)).
+- **Fix:** the host converts the VP9 picture to RGBA (BT.709 / BT.601 and range from the stream) and writes it into the texture's storage like `WriteTexels`, then marks the sync as signalled (`nvn_host_write_texture` / `nvn_host_signal_sync` in `hle_nvn.c`). The host writes the texture's storage on the CPU in the texture's own layout, and the replay layer re-uploads the dirtied pages, as for `WriteTexels` ([nvn-objects.md](nvn-objects.md)). The layout is block-linear by address, or rows of the stride for a `LINEAR` output texture ([`WriteTexels` into a linear texture dropped the write](nvn-objects.md#writetexels-into-a-linear-texture-dropped-the-write)).
 - **Found on:** [Metroid Dread](../../dm/games/010093801237C000/README.md).
 
 ### SDK 4's `movie::Buffer` has no sync object
@@ -299,6 +299,13 @@ A decoder hands out as many outputs as it has slots, and while every slot is tak
 - **Check:** `make -C dm/host/tests GAME=<id> run` runs `t_codec_video` (AddressSanitizer and UBSan): the buffer queue and its results, sync handles and sync point events, NV12 / RGBA readback of a synthetic VP9 key frame, packets refused while 4 pictures wait, end of stream, flush, a pool finalized while its buffer is still registered, a decoder finalized and made again in the same cleared memory, a VP8 key frame, a 64×64 H.264 baseline key frame decoded by VideoToolbox (ffmpeg's libx264, SEI removed), an unregistered buffer and AV1's refused Initialize.
 - **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md): 101 guide movies (`Movie/*.webm`, VP9 960×540, no sound); its player reads the pictures as NV12 (`ReadDecoderOutputImageNv12`, output format 3).
 - **Open:** AV1 (no decoder on the host: Initialize fails with a red line, so a client takes its error path instead of reaching the service), encrypted input, native image handles (the GPU route of decoded pictures), alias pools and the readback of part of a picture are not served (each prints a red line once). No game here plays VP8 or H.264 through this API yet: those paths are checked by the test only. Donkey Kong Bananza's player imports all four decoders; its movies are VP9.
+
+### H.264 parameter sets past the eighth argument
+
+- **Symptom:** every movie stays black; `[RED] nn::codec H.264: VideoToolbox could not decode a packet`, the packets starting with an SEI NAL unit, not a parameter set.
+- **Cause:** H.264's two `Initialize…Decoder` overloads end with the stream's parameter sets (SPS / PPS: a pointer and a size), the only place the game gives them. The host's shared entry points (`CV_FAMILY`) took the overloads without them, so VideoToolbox had no format. They are the ninth and tenth arguments of the longer overload: past the eight registers the guest's AAPCS64 gives each stack argument an 8-byte slot, where Apple's arm64 packs a 32-bit one into 4, so the argument before them had to be declared 64 bits wide.
+- **Fix:** both overloads take the parameter sets for every decoder type and pass them on for H.264 only; the red line prints a refused packet's first bytes, which show how its NAL units are framed.
+- **Found on:** [PRAGMATA](../../dm/games/0400C76024710000/README.md) (SDK 20.5.15): its opening movies.
 
 ### The submission-ready event counted as packets
 

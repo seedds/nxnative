@@ -280,6 +280,8 @@ def reflect(key, stage, msl, res):
                 e.update(kind=abi.KIND_GMEM_MAP, rw=any(re.search(r'operation "(Store|Atomic\w*)" traced to no storage buffer', n) for n in res.get('notes', ()))); continue
             if stage == 'cs' and off is not None and abi.C0_CS_UBO <= off < abi.C0_CS_UBO + abi.C0_ROW * abi.C0_CS_UBO_SLOTS and (off - abi.C0_CS_UBO) % abi.C0_ROW == 0:
                 e.update(kind=abi.KIND_UBO_PTR, reg=(off - abi.C0_CS_UBO) // abi.C0_ROW)   # compute-stage uniform slot r: address at c0[C0_CS_UBO + 0x10 r], read through global memory (checked against cs_lut_combine_c reading cb10[66])
+            elif b and b['cb_slot'] == abi.PUSH_BANK:   # the address is one the game pushed (c[24]; PRAGMATA's compute buffer entries in push block 1): the host reads it from its push blocks
+                e.update(kind=abi.KIND_SBUF_PUSH, off=b['cb_offset'] * 4)
             elif b and b['cb_slot'] >= 3:   # the address is in the game's own uniform buffer c[n] = uniform slot n - 3 (Monster Hunter Rise's compute shaders: c3 + 0x38); the replay reads it there
                 e.update(kind=abi.KIND_SBUF_UBO, reg=b['cb_slot'] - 3, off=b['cb_offset'] * 4)
             else: e['reg'] = (off - base) // abi.C0_ROW if off is not None and base is not None and 0 <= off - base < abi.C0_ROW * abi.C0_SSBO_SLOTS and (off - base) % abi.C0_ROW == 0 else None
@@ -289,14 +291,59 @@ def reflect(key, stage, msl, res):
 DRV_FILL = {0: [(b, b + abi.C0_ROW * abi.C0_SSBO_SLOTS) for k, b in sorted(SSBO.items(), key=lambda kv: kv[1]) if k not in ('ts', 'ms')],   # c0: storage buffer address tables (vertex / compute / geometry / pixel; a task or mesh stage's: unfillable())
             2: [(TEX_BASE, SEPTEX_BASE), (IMG_BASE, IMG_BASE + abi.C2_ROW * IMG_SLOTS), (SEPTEX_BASE, SAMP_BASE), (SAMP_BASE, SAMP_BASE + abi.C2_ROW * abi.C2_SEP_SLOTS)]}   # c2: the handle tables above, all filled by the replay layer
 
+INDEX_BUILTINS = {'gl_SampleID': (0, abi.C0_SAMPLE_BYTES - 1)}   # a computed index's inputs known to be bounded: the sample index, below the sample count (at most the table's bytes)
+INDEX_DEF = re.compile(r'^\s*(?:int|uint)\s+(_\d+)\s*=\s*([^;\n]+);', re.M)
+INDEX_SET = re.compile(r'^\s*(_\d+)\s*=', re.M)
+
+def index_range(src, expr):
+    """The range [lo, hi] of a computed vector index in the MSL, or None: an integer expression of literals and bounded builtins (INDEX_BUILTINS), through SPIRV-Cross's
+    single-assignment int / uint temporaries and bit-casts, with + - * & | ^ << >> on non-negative values. Anything else (a float operation, a uniform read, a temporary
+    assigned twice) gives None. PRAGMATA's 156 pixel shaders read the sample position table byte by byte at c0 0x620 + gl_SampleID (a689530d00090ebf: row 98)"""
+    defs, sets = {}, set(INDEX_SET.findall(src))   # a temporary assigned again after its declaration (a loop's phi) has no single value
+    for name, e in INDEX_DEF.findall(src): defs.setdefault(name, []).append(e)
+    float_defs = dict(re.findall(r'^\s*float\s+(_\d+)\s*=\s*as_type<float>\(([\w.]+)\);', src, re.M))   # a bit-cast of a builtin into a float temporary keeps its bits
+    import ast as _ast   # here, so the reflection tests can lift this function alone (test_dmsh_reflect.py builder_unfillable)
+    def ev(n, depth):
+        if depth > 64: return None
+        if isinstance(n, _ast.Constant) and isinstance(n.value, int): return (n.value, n.value)
+        if isinstance(n, _ast.Name):
+            if n.id in INDEX_BUILTINS: return INDEX_BUILTINS[n.id]
+            if n.id in float_defs and float_defs[n.id] in INDEX_BUILTINS and n.id not in sets: return INDEX_BUILTINS[float_defs[n.id]]
+            if len(defs.get(n.id, ())) != 1 or n.id in sets: return None
+            return parse(defs[n.id][0], depth + 1)
+        if isinstance(n, _ast.Call) and isinstance(n.func, _ast.Name) and n.func.id == '_c' and len(n.args) == 1 and not n.keywords: return ev(n.args[0], depth + 1)
+        if not isinstance(n, _ast.BinOp): return None
+        a, b = ev(n.left, depth + 1), ev(n.right, depth + 1)
+        if a is None or b is None: return None
+        op = type(n.op)
+        if op is _ast.Add: r = (a[0] + b[0], a[1] + b[1])
+        elif op is _ast.Sub: r = (a[0] - b[1], a[1] - b[0])
+        elif op is _ast.Mult: r = (a[0] * b[0], a[1] * b[1])
+        elif op is _ast.RShift and b[0] == b[1] and b[0] < 32: r = (a[0] >> b[0], a[1] >> b[0])
+        elif op is _ast.LShift and b[0] == b[1] and b[0] < 32: r = (a[0] << b[0], a[1] << b[0])
+        elif op is _ast.BitAnd: r = (0, min(a[1], b[1]))
+        elif op in (_ast.BitOr, _ast.BitXor): r = (0, (1 << max(a[1], b[1]).bit_length()) - 1)
+        else: return None
+        return r if 0 <= r[0] <= r[1] < 1 << 31 else None
+    def parse(e, depth):
+        e = re.sub(r'\b(?:as_type<\s*u?int\s*>|u?int)\s*\(', '_c(', e)   # integer casts and bit-casts keep a non-negative value's bits
+        e = re.sub(r'\b(\d+)u\b', r'\1', e)
+        try: tree = _ast.parse(e, mode='eval')
+        except SyntaxError: return None
+        return ev(tree.body, depth)
+    return parse(expr, 0)
+
 def drv_reads(src):
-    """Reads of driver segments c0 / c2 in the MSL: constant index → byte range; non-constant indices are recorded as dynamic"""
+    """Reads of driver segments c0 / c2 in the MSL: constant index → byte range; a computed index whose range is known (index_range) → the rows it can read;
+    any other non-constant index is recorded as dynamic"""
     out = {}
     for bank in (0, 2):
         offs, dyn = set(), False
         for m in re.finditer(r'fp_c%d\)\._m0\[([^\]]+)\]' % bank, src):
             idx = m.group(1).rstrip('u')
-            if idx.isdigit(): offs.add(int(idx) * 16)
+            if idx.isdigit(): offs.add(int(idx) * 16); continue
+            r = index_range(src, m.group(1))
+            if r and r[1] - r[0] < 16: offs.update(range(r[0] * 16, r[1] * 16 + 16, 16))
             else: dyn = True
         if offs or dyn: out[str(bank)] = {'vec4_offsets': sorted(offs), 'dynamic': dyn}
     return out
@@ -307,6 +354,7 @@ def unfillable(dr, stage):
     bad = []
     for bank, d in dr.items():
         fill = DRV_FILL[int(bank)] + (SAMPLE_ROWS if bank == '0' and stage == 'ps' else []) + ([(SSBO[stage], SSBO[stage] + abi.C0_ROW * abi.C0_SSBO_SLOTS)] if bank == '0' and stage in ('ts', 'ms') else [])
+        if bank == '0' and stage == 'cs': fill = fill + [(abi.C0_CS_UBO, abi.C0_CS_UBO + abi.C0_ROW * abi.C0_CS_UBO_SLOTS)]   # compute's uniform address table, which the host fills
         # a computed index into c2 reads one of its handle tables, which the replay layer fills whole (nvn_mtl.m DRV2: EA SPORTS FC 27's lights read the separate texture words
         # at 0x168 + 8i to test each light's handle); c0 is filled only in its tables and words above, so a computed index there may read what the replay does not write.
         # The one computed c0 index known is GLSLC's sample position lookup in a pixel shader: a byte of the table at 0x620, at an index made of the sample index (PIXLD.MYINDEX)

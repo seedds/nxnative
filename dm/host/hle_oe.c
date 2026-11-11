@@ -9,6 +9,10 @@
 #include <errno.h>
 #include <TargetConditionals.h>
 #include <unistd.h>
+#if !TARGET_OS_IPHONE
+#include <crt_externs.h>
+#include <mach-o/dyld.h>
+#endif
 static _Atomic int g_opmode = -1;
 int dm_opmode(void) {
     int m = g_opmode;
@@ -157,55 +161,101 @@ HLE_FORCE("_ZN2nn2oe23GetPreviousProgramIndexEv", "previous program index: the p
 // then the row's keys, DM_LAUNCH_PARAM=<cwd>/launch_param.bin and DM_PREV_PROGRAM.
 // The call never returns on Horizon, and the code after it is not code to run: a trap (Super Mario 3D All-Stars' launcher, main+0x10a58) or the next function (ROMANCE OF THE THREE KINGDOMS 8
 // REMAKE, main+0xa31914). A program with no row (Super Mario 3D All-Stars' Galaxy, 32-bit ARM, which Apple silicon cannot run): the application's first program starts instead, as after a
-// restart from HOME. No table (a program run by itself): the program just ends.
+// restart from HOME. No table (a program run by itself): ExecuteProgram of its own index starts this host again, with its own arguments and folder; another program cannot start, and this one ends.
+// oe::RequestToRelaunchApplication is the same start of program 0 with no parameter and no previous program (GetPreviousProgramIndex -1, as from HOME), and DM_RELAUNCH=1 instead of
+// DM_LAUNCH_PARAM and DM_PREV_PROGRAM (DM_CTL resumes at the end of its file after either, instead of replaying the presses that led here).
 // The iPhone cannot start a process: with DM_EXEC_OUT=<file> (main.m, an app holding several programs) the program index (4 bytes) and the parameters go to that file, the front end names the next
 // program and schedules a notification that opens the app (front_program_handoff), the app ends, and its next start reads the file and runs that program. A program the app lacks: its first
-typedef struct { const char *exe, *arg, *cwd; char **env; } prog_plan;
+// program, with no parameters. An app of one program cannot start itself again: the front end asks the player to open the app again (front_program_handoff with no DM_EXEC_OUT), and the app ends.
+#if !TARGET_OS_IPHONE
+typedef struct { const char *exe, *cwd; char **argv, **env; char *argv2[3]; char self[4096]; } prog_plan;   // cwd NULL: stay in this folder
 static int prog_row_sets(const char *row, const char *kv) {
     size_t kl = strcspn(kv, "=");
     for (const char *f = strchr(row, '\t'); f && f[1]; f = strchr(f + 1, '\t')) if (!strncmp(f + 1, kv, kl) && f[1 + kl] == '=') return 1;
     return 0;
 }
-static int prog_plan_make(char *tsv, int index, prog_plan *out, const void *param, size_t n) {
+static int prog_start_key(const char *kv) { return !strncmp(kv, "DM_LAUNCH_PARAM=", 16) || !strncmp(kv, "DM_PREV_PROGRAM=", 16) || !strncmp(kv, "DM_RELAUNCH=", 12); }
+// The plan of the program that starts: rows[hit] of the table (hit -1: this host itself, again). Its environment is this one less the keys a start sets and every key a row sets, then the
+// row's keys, then the start's own (DM_RELAUNCH=1, or DM_LAUNCH_PARAM and DM_PREV_PROGRAM with the parameters in <its folder>/launch_param.bin)
+static int prog_plan_make(char **rows, int nr, int hit, prog_plan *out, const void *param, size_t n, int relaunch, const char *call) {
     extern char **environ;
-    char *rows[64]; int nr = 0, hit = -1, cur = (int)(DM_GAME_PROGRAM_ID & 0xf);   // the program index is the program ID less the application's
-    for (char *ln = strtok(tsv, "\n"); ln && nr < 64; ln = strtok(NULL, "\n")) {
-        if (*ln < '0' || *ln > '9') continue;
-        if (atoi(ln) == index) hit = nr;
-        rows[nr++] = ln;
-    }
-    if (hit < 0) return 0;
+    memset(out, 0, sizeof *out);
     size_t ne = 0; while (environ[ne]) ne++;
     char **env = calloc(ne + 68, sizeof *env); size_t k = 0;
+    if (!env) die("%s: out of memory", call);
     for (size_t i = 0; i < ne; i++) {
-        int drop = !strncmp(environ[i], "DM_LAUNCH_PARAM=", 16) || !strncmp(environ[i], "DM_PREV_PROGRAM=", 16);
+        int drop = prog_start_key(environ[i]);
         for (int r = 0; r < nr && !drop; r++) drop = prog_row_sets(rows[r], environ[i]);
         if (!drop) env[k++] = environ[i];
     }
-    memset(out, 0, sizeof *out);
-    int field = 0;
-    for (char *f = strtok(rows[hit], "\t"); f; f = strtok(NULL, "\t")) {
-        if (!field++) continue;
-        if (!strncmp(f, "exe=", 4)) out->exe = f + 4;
-        else if (!strncmp(f, "arg=", 4)) out->arg = f + 4;
-        else if (!strncmp(f, "cwd=", 4)) out->cwd = f + 4;
-        else if (strchr(f, '=') && k < ne + 64) env[k++] = f;
+    char here[4096]; const char *dir = here;
+    if (hit >= 0) {
+        const char *arg = NULL; int field = 0, prog = atoi(rows[hit]);
+        for (char *f = strtok(rows[hit], "\t"); f; f = strtok(NULL, "\t")) {
+            if (!field++) continue;
+            if (!strncmp(f, "exe=", 4)) out->exe = f + 4;
+            else if (!strncmp(f, "arg=", 4)) arg = f + 4;
+            else if (!strncmp(f, "cwd=", 4)) out->cwd = f + 4;
+            else if (strchr(f, '=') && k < ne + 64) env[k++] = f;
+        }
+        if (!out->exe || !arg || !out->cwd) { LOG("[RED] %s: DM_PROGRAMS's row of program %d lacks exe=, arg= or cwd=", call, prog); free(env); return 0; }
+        out->argv2[0] = (char *)out->exe; out->argv2[1] = (char *)arg; out->argv = out->argv2; dir = out->cwd;
+    } else {
+        uint32_t sz = sizeof out->self;
+        if (_NSGetExecutablePath(out->self, &sz)) { LOG("[RED] %s: the host's path does not fit", call); free(env); return 0; }
+        if (!relaunch && !getcwd(here, sizeof here)) { LOG("[RED] %s: no current folder", call); free(env); return 0; }
+        out->exe = out->self; out->argv = *_NSGetArgv();   // main leaves its argv as it was given, and the host never changes folder
     }
-    if (!out->exe || !out->arg || !out->cwd) { LOG("[RED] oe::ExecuteProgram: DM_PROGRAMS's row of program %d lacks exe=, arg= or cwd=", index); free(env); return 0; }
-    char *pp = NULL, *pe = NULL, *pv = NULL;
-    if (asprintf(&pp, "%s/launch_param.bin", out->cwd) < 0 || asprintf(&pe, "DM_LAUNCH_PARAM=%s", pp) < 0 || asprintf(&pv, "DM_PREV_PROGRAM=%d", cur) < 0) die("oe::ExecuteProgram: out of memory");
-    FILE *po = fopen(pp, "wb");
-    if (!po || (n && fwrite(param, n, 1, po) != 1)) LOG("[RED] oe::ExecuteProgram: cannot write %s", pp);
-    if (po) fclose(po);
-    env[k++] = pe; env[k++] = pv; env[k] = NULL; out->env = env;
+    if (relaunch) env[k++] = "DM_RELAUNCH=1";
+    else {
+        char *pp = NULL, *pe = NULL, *pv = NULL;
+        if (asprintf(&pp, "%s/launch_param.bin", dir) < 0 || asprintf(&pe, "DM_LAUNCH_PARAM=%s", pp) < 0 || asprintf(&pv, "DM_PREV_PROGRAM=%d", (int)(DM_GAME_PROGRAM_ID & 0xf)) < 0) die("%s: out of memory", call);
+        FILE *po = fopen(pp, "wb");
+        if (!po || (n && fwrite(param, n, 1, po) != 1)) LOG("[RED] %s: cannot write %s", call, pp);
+        if (po) fclose(po);
+        free(pp); env[k++] = pe; env[k++] = pv;
+    }
+    env[k] = NULL; out->env = env;
+    return 1;
+}
+// The Mac's plan for starting program `index` in this one's place; 0: nothing can start, this program just ends
+static int oe_plan(int index, const void *param, size_t n, int relaunch, prog_plan *P, const char *call) {
+    int cur = (int)(DM_GAME_PROGRAM_ID & 0xf);   // the program index is the program ID less the application's
+    const char *pf = getenv("DM_PROGRAMS");
+    if (!pf || !*pf) {   // a program run by itself
+        if (!relaunch && index != cur) return 0;
+        if (!prog_plan_make(NULL, 0, -1, P, param, n, relaunch, call)) return 0;
+        LOG("%s: this program ends and starts again", call);
+        return 1;
+    }
+    static char *tsv; FILE *fp = fopen(pf, "rb");
+    long sz = fp && !fseek(fp, 0, SEEK_END) ? ftell(fp) : -1;   // -1: no file, or one that cannot seek
+    if (sz >= 0 && (tsv = calloc(1, (size_t)sz + 1))) { fseek(fp, 0, SEEK_SET); if (fread(tsv, 1, (size_t)sz, fp) != (size_t)sz) tsv[0] = 0; }
+    if (fp) fclose(fp);
+    if (!tsv) { LOG("[RED] %s: cannot read DM_PROGRAMS %s", call, pf); return 0; }
+    char *rows[64]; int nr = 0, hit = -1, first = -1;
+    for (char *ln = strtok(tsv, "\n"); ln && nr < 64; ln = strtok(NULL, "\n")) {
+        if (*ln < '0' || *ln > '9') continue;
+        if (atoi(ln) == index) hit = nr;
+        if (atoi(ln) == 0) first = nr;
+        rows[nr++] = ln;
+    }
+    if (hit < 0) {
+        LOG("[RED] %s: this application has no such program here; its first program starts instead", call);
+        hit = first; param = NULL; n = 0;
+    }
+    if (hit < 0 || !prog_plan_make(rows, nr, hit, P, param, n, relaunch, call)) return 0;
+    if (relaunch) LOG("%s: the application starts again from its first program, %s", call, P->exe);
+    else LOG("%s: this program ends, %s starts", call, P->exe);
     return 1;
 }
 static void prog_exec(void *p) {
-    const prog_plan *P = p; char *argv[] = {(char *)P->exe, (char *)P->arg, NULL};
-    if (chdir(P->cwd)) LOG("[RED] oe::ExecuteProgram: cannot enter %s", P->cwd);
-    execve(P->exe, argv, P->env);
-    LOG("[RED] oe::ExecuteProgram: cannot start %s (errno %d)", P->exe, errno);
+    const prog_plan *P = p;
+    if (P->cwd && chdir(P->cwd)) LOG("[RED] oe: cannot enter %s", P->cwd);
+    execve(P->exe, P->argv, P->env);
+    LOG("[RED] oe: cannot start %s (errno %d)", P->exe, errno);
 }
+#endif
 static const char *prog_name(int index) {   // the profile's name of a program of this app (game.py header_multi), NULL when it has no such program
 #ifdef DM_GAME_MULTI
     for (size_t i = 0; i < sizeof dm_games / sizeof *dm_games; i++) if (dm_games[i].program == index) return dm_games[i].name;
@@ -213,45 +263,38 @@ static const char *prog_name(int index) {   // the profile's name of a program o
     (void)index; return NULL;
 }
 __attribute__((weak)) void front_program_handoff(int index, const char *name) { (void)index; (void)name; }   // front.h; the iOS front end has it
-void dm_oe_execute(int index, const void *param, size_t n) {
-    char hex[3 * 32 + 1] = ""; for (size_t i = 0; i < n && i < 32; i++) snprintf(hex + 3 * i, 4, " %02x", ((const uint8_t *)param)[i]);
-    static prog_plan P; static char *tsv; int have = 0;
+// End this program and start program `index` with the parameters in its place (oe::ExecuteProgram), or the application's first program afresh (relaunch, oe::RequestToRelaunchApplication)
+static void oe_start(int index, const void *param, size_t n, int relaunch) {
+    if (relaunch) { index = 0; param = NULL; n = 0; }
+    const char *what = relaunch ? "oe::RequestToRelaunchApplication" : "oe::ExecuteProgram";
+    char hex[3 * 32 + 1] = "", call[192]; for (size_t i = 0; i < n && i < 32; i++) snprintf(hex + 3 * i, 4, " %02x", ((const uint8_t *)param)[i]);
+    if (relaunch) snprintf(call, sizeof call, "%s", what); else snprintf(call, sizeof call, "%s(%d, %zu bytes of parameters:%s)", what, index, n, hex);
+    int cur = (int)(DM_GAME_PROGRAM_ID & 0xf);
 #if !TARGET_OS_IPHONE
-    const char *pf = getenv("DM_PROGRAMS");
-    if (pf && *pf) {
-        FILE *fp = fopen(pf, "rb"); char *rows2 = NULL;
-        long sz = fp && !fseek(fp, 0, SEEK_END) ? ftell(fp) : -1;   // -1: no file, or one that cannot seek
-        if (sz >= 0) {
-            fseek(fp, 0, SEEK_SET);
-            tsv = calloc(1, (size_t)sz + 1); rows2 = calloc(1, (size_t)sz + 1);
-            if (fread(tsv, 1, (size_t)sz, fp) != (size_t)sz) tsv[0] = 0;
-            memcpy(rows2, tsv, (size_t)sz);
-        } else LOG("[RED] oe::ExecuteProgram: cannot read DM_PROGRAMS %s", pf);
-        if (fp) fclose(fp);
-        if (tsv && (have = prog_plan_make(tsv, index, &P, param, n))) LOG("oe::ExecuteProgram(%d, %zu bytes of parameters:%s): this program ends, %s starts", index, n, hex, P.exe);
-        else if (rows2) {
-            LOG("[RED] oe::ExecuteProgram(%d, %zu bytes of parameters:%s): this application has no such program here; its first program starts instead", index, n, hex);
-            have = prog_plan_make(rows2, 0, &P, NULL, 0);
-        }
-    }
+    static prog_plan P;
+    if (oe_plan(index, param, n, relaunch, &P, call)) { dm_host_shutdown_then(what, prog_exec, &P); for (;;) pause(); }
 #endif
     const char *rec = getenv("DM_EXEC_OUT");
-    if (!have && rec && *rec) {
+    if (rec && *rec) {   // the iPhone, an app holding several programs
         const char *name = prog_name(index); int32_t ix = name ? index : 0;
-        if (!name) LOG("[RED] oe::ExecuteProgram(%d, %zu bytes of parameters:%s): this application has no such program here; its first program starts instead", index, n, hex);
+        if (!name) LOG("[RED] %s: this application has no such program here; its first program starts instead", call);
         FILE *fp = fopen(rec, "wb");
-        if (!fp || fwrite(&ix, 4, 1, fp) != 1 || (name && n && fwrite(param, n, 1, fp) != 1)) LOG("[RED] oe::ExecuteProgram(%d): cannot write DM_EXEC_OUT %s", index, rec);
+        if (!fp || fwrite(&ix, 4, 1, fp) != 1 || (name && n && fwrite(param, n, 1, fp) != 1)) LOG("[RED] %s: cannot write DM_EXEC_OUT %s", call, rec);
         if (fp) fclose(fp);
-        LOG("oe::ExecuteProgram(%d, %zu bytes of parameters:%s): recorded, this program ends", index, n, hex);
+        LOG("%s: program %d recorded, this program ends", call, ix);
         front_program_handoff(ix, prog_name(ix));
-        dm_host_shutdown("oe::ExecuteProgram");
-        for (;;) pause();
-    }
-    if (!have) LOG("[RED] oe::ExecuteProgram(%d, %zu bytes of parameters:%s): the host has only this program; it ends", index, n, hex);
-    dm_host_shutdown_then("oe::ExecuteProgram", have ? prog_exec : NULL, &P);
+    } else if (relaunch || index == cur) {   // the iPhone, an app of one program
+        LOG("[RED] %s: this program cannot start itself again here; it ends", call);
+        front_program_handoff(cur, prog_name(cur));
+    } else LOG("[RED] %s: the host has only this program; it ends", call);
+    dm_host_shutdown(what);
     for (;;) pause();   // another thread is ending the host
 }
+void dm_oe_execute(int index, const void *param, size_t n) { oe_start(index, param, n, 0); }
 HLE_FORCE("_ZN2nn2oe14ExecuteProgramEiPKvm", "end this program and start another of the application (DM_PROGRAMS on the Mac); never returns", void, h_oe_ExecProgram, int index, const void *param, size_t n) { dm_oe_execute(index, param, n); }
+// Super Smash Bros. Ultimate 13.0.5 calls it after Options > Language > Yes ("the software will restart"), once the new language is saved. The SDK asks the am application proxy, which the
+// host never opens: applet::RequestToLaunchApplication read through the null proxy (sdk+0x804c8, SIGSEGV at address 0)
+HLE_FORCE("_ZN2nn2oe28RequestToRelaunchApplicationEv", "end this application and start it again from its first program, no launch parameter (on the Mac an execve of the host); never returns", void, h_oe_Relaunch, void) { oe_start(0, NULL, 0, 1); }
 HLE_FORCE("_ZN2nn2oe16DisableRecordingEv", "video recording switch; the host has no system recording", void, h_oe_DisableRec, void) {}
 // Silence the game's sound in system video captures (through am; FINAL FANTASY RESONANCE imports both): the host records nothing
 HLE_FORCE("_ZN2nn2oe13MuteRecordingEv", "mute the sound of system video recording; the host has no system recording", void, h_oe_MuteRec, void) {}
@@ -288,11 +331,17 @@ static unsigned char g_cpu_oc;
 HLE_FORCE("_ZN2nn2oe21IsCpuOverclockEnabledEv", "CPU overclock state (through apm): what SetCpuOverclockEnabled set, off at start", unsigned, h_oe_CpuOc, void) { return g_cpu_oc; }
 HLE_FORCE("_ZN2nn2oe22SetCpuOverclockEnabledEb", "CPU overclock switch (through apm); the host does not scale clocks", void, h_oe_SetCpuOc, unsigned on) { g_cpu_oc = on & 0xff; }
 // Switch 2 SDKs: the graphics scale, which the SDK takes from am's IGraphicsScalingParametersFunctions (a session the host never opened: null read in
-// oe::GetGraphicsScalingParameters). The SDK maps the parameter's first word 10 / 20 / 30 to scale 0 / 1 / 2. Donkey Kong Bananza keeps it as a quality tier: a byte of its graphics
-// settings (+0x1c7, main+0x549348, next to the handheld flag it takes from the operation mode at +0x1c4), and an index into {3, 12, 16} (main+0x1d1a604) whose value less 3 (0, 9, 13)
-// goes to a renderer parameter (main+0x549614). Which tier the console reports in which mode is not measured: the host answers 0 handheld and 1 console, following the operation mode
-HLE_FORCE("_ZN2nn2oe23GetCurrentGraphicsScaleEv", "graphics scale (Switch 2, through am): 0 handheld, 1 console", int, h_oe_GfxScale, void) { return opmode() == 1; }
-HLE_FORCE("_ZN2nn2oe42SetGraphicsScaleChangedNotificationEnabledEb", "graphics scale change notification (Switch 2, through am); the scale changes only with the operation mode",
+// oe::GetGraphicsScalingParameters). The SDK maps the parameter's first word 10 / 20 / 30 to scale 0 / 1 / 2. Which tier a console reports when is not measured. The games that
+// read it render at full size and count their whole GPU time with tier 0, and less with 1 and 2, so it is taken as how much of the GPU the game may use, not as the operation
+// mode (an inference from their code; a system that needs the GPU itself, as for GameChat's video, would lower it, which the host never does): the host answers 0 in both
+// modes. Donkey Kong Bananza takes it as its display manager's scale index (+0x1c7, main+0x549348): its frame buffer is the display's size times {1.0, 0.8, 2/3}[tier]
+// (main+0x30f840; docked 2304x1296 with tier 1, 2880x1620 with 0), and as an index into {3, 12, 16} (main+0x1d1a604) whose value less 3 (0, 9, 13) its dynamic resolution
+// adds to its GPU time (main+0x549614). Star Fox keeps only "tier 0" (byte +0xa of its event 5, main+0xba69970) and renders 0.8 times smaller below it: docked, 768x432 for
+// its 1920x1080 window where tier 0 gives 960x540, its handheld size. Ocarina of Time draws 2048x1152 with tier 1 and 2560x1440 with 0. The host answered 1 docked until
+// these were found. DM_GFX_SCALE sets a tier, to see what a game does with a reduced one
+static int gfx_scale(void) { const char *e = getenv("DM_GFX_SCALE"); int v = e ? atoi(e) : 0; return v >= 0 && v <= 2 ? v : 0; }
+HLE_FORCE("_ZN2nn2oe23GetCurrentGraphicsScaleEv", "graphics scale (Switch 2, through am): 0, the whole GPU (DM_GFX_SCALE sets 1 or 2)", int, h_oe_GfxScale, void) { return gfx_scale(); }
+HLE_FORCE("_ZN2nn2oe42SetGraphicsScaleChangedNotificationEnabledEb", "graphics scale change notification (Switch 2, through am); the host's scale never changes",
           void, h_oe_GfxScaleNotify, unsigned on) { (void)on; }
 // The frame length the game aims at (Switch 2 SDKs): oe::SetGraphicsTargetFrameRate maps up to 59 fps to mode 1, up to 119 to mode 2 and above to mode 3, SetGraphicsTargetFrameRateAuto
 // to mode 0, and both call this, which locks the gs graphics server's context and sends it the mode. The host has no graphics server (nv::InitializeGraphics), so the context is null and

@@ -15,9 +15,9 @@
 # SEEN_SHADERS / --seen-shaders, with PLATFORM 'mac' or 'mac-app': only the shaders the profile's shader_seen.tsv lists and the last runs' logs reported missing, in minutes instead of hours; the rest do not draw (build_shaders).
 # Two ways to run it: open this file in Spyder and press F5 (it uses the values under "Settings" below; an empty NSP folder or prod.keys is asked for at run time);
 #   or in a terminal: python3 scripts/build_ipa_from_nsp.py <NSP folder> -k <prod.keys> [options] (values given on the command line override "Settings", -h lists every option;
-#   without keyboard input a missing value is not asked for but reported as an error; exit code 0 on success, 1 on error, 130 when interrupted). Command-line options entered in Spyder's run configuration work the same way.
+#   without keyboard input a missing value is not asked for but reported as an error; exit code 0 on success, 1 on error, 130 when interrupted, 143 when stopped by SIGTERM). Command-line options entered in Spyder's run configuration work the same way.
 # Uses only three things: this repository, a folder holding one game's NSPs (the base game, with or without an update; DLC NSPs, when present, are packed too and unlock the add-on content already in the game), and prod.keys.
-#   Instead of NSPs, the folder may hold the game's files as a dump (base/, updates/<version>/, dlc/; scripts/pack_dump.py lists the layout): that needs no prod.keys. A game with no profile is surveyed from those files. A dump has no control data: the name comes from the profile (a provisional one takes the folder's name), and the app has no icon unless --icon / ICON gives it one.
+#   Instead of NSPs, the folder may hold the game's files as a dump (base/, updates/<version>/, dlc/; scripts/pack_dump.py lists the layout): that needs no prod.keys. A game with no profile is surveyed from those files. A dump has no control data: the name comes from the profile (a provisional one takes the folder's name), and the app has no icon unless --icon / ICON gives it one (--fallback-icon / FALLBACK_ICON: only when the game has none).
 #   Or the folder may hold the game as one NUP container (a .nup file: base game, updates and DLC; scripts/pack_nup.py), or the .nup file may be given in its place: it needs no prod.keys, like a dump; a game with no profile is surveyed from the container's files (its newest version's code modules and RomFS file headers),
 #   and its RomFS images are written straight from it; the name, display version and icon come from the NACP and icon it carries, else as for a dump (its name record is a packer's label, not the game's), and --icon / ICON gives the app an icon when it carries none.
 #   The newest version in the folder is packed. A version the profile registers (with every version in its shader_versions in the folder) is built from the profile as it is; any other
@@ -33,10 +33,11 @@
 # unless ALLOW_OTHER_METAL / --allow-other-metal. Issue #242 reported corruption with another compiler; the cause is still unconfirmed.
 # Python 3.12+ is required for bounded archive mappings inside images. The Python running this file needs lz4, capstone 5.x, fonttools and zbic (and backports.zstd before Python 3.14); also needed: Xcode, xcodegen, zstd. SPIRV-Cross is the in-repo build. A first run takes 2 (Metroid Dread) to 10 minutes (Breath of the Wild: 5 of them the shader split), longer when shader libraries must be compiled; a repeat run with unchanged inputs takes about 20 s (Metroid Dread), mostly packing the IPA. Key values are never printed.
 # The console shows one line per stage ([k/n] stage, with a bar, done/total, percent, elapsed time and ETA where the work can be counted); the tools' own output goes only to logs/ (PROGRESS / --progress). --progress json writes newline-delimited JSON events to stdout.
-import ast, collections, contextlib, ctypes, errno, getpass, hashlib, importlib.util, json, os, re, shlex, shutil, struct, subprocess, sys, tempfile, threading, time, types
+import ast, collections, contextlib, ctypes, errno, getpass, hashlib, importlib.util, json, os, re, shlex, shutil, signal, struct, subprocess, sys, tempfile, threading, time, types
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "dm/tools"))
 import romfs as rfs
+import proc_group   # a tool's run in a process group of its own, stopped whole
 import nso   # the code module loader: nso.Error is a damaged module (its file cut short or not what its header says)
 import tree_tar   # one file in place of a build's folders of many small files
 import shader_lib   # the shader libraries as one file, read in place
@@ -55,6 +56,7 @@ OUT_IPA = ''                            # output IPA (empty = <the profile's ipa
 APP_NAME = ''                           # app name on the home screen (empty = the game name in the base NSP)
 BUNDLE_ID = ''                          # the app's bundle ID (empty = saved per-game Xcode ID, else org.nxnative.<base game title ID in lowercase>)
 ICON = ''                               # the app icon, a JPEG or PNG of any size (empty = the game's icon from its control data; a dump has none, a NUP may have none)
+FALLBACK_ICON = ''                      # the app icon only when ICON is empty and the game has none of its own (a dump, a NUP without one); empty = such an app's icon is blank
 ROMFS = 'bundle'                        # 'bundle' = the game files go into the IPA (or the Xcode app), as always; 'separate' = they stay out (DM_COPY_ROMFS=NO): the IPA is small, and its rebuilds do not pack or send the RomFS again.
                                         #   Copy it to the phone once per game version with the scripts/push_romfs.sh command printed at the end (the app checks that the image is the one it was built for)
 SHADER_FILES = False                    # True = an NVN game's shader library goes into the IPA as its separate files, for install tools that cannot copy a large file (AltServer: 2 GiB; the game files
@@ -367,29 +369,30 @@ def ask(prompt, what):   # what: what is missing, for the error message
 def run(cmd, log, env=None, cwd=None, on_line=None, ok=(), fatal=True):
     """Run a subprocess with all its output written to log (the console shows the stage line instead: the shader build alone emits tens of thousands of compiler warnings);
     stop on a non-zero exit not in ok, printing the log's last lines. on_line: called with every output line (build_ipa.sh's own step lines move its stages on).
-    fatal False: such an exit only prints those lines and returns its code (the caller ends the stage and goes on without what the command makes)"""
+    fatal False: such an exit only prints those lines and returns its code (the caller ends the stage and goes on without what the command makes).
+    The command and everything it starts run in a process group of their own (proc_group): an interrupt, a SIGTERM (cli) or an error here (a log that cannot be written)
+    stops the whole group, not only the command; a process of the group still running proc_group.DRAIN s after the command's own exit is stopped, and the step fails
+    as for an exit code (what it writes may be incomplete; the code is 1 when the command's own was 0)"""
     cmd = [str(c) for c in cmd]
     log.parent.mkdir(parents=True, exist_ok=True)
     tail = collections.deque(maxlen=40)
-    p = subprocess.Popen(cmd, env=env, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors='replace', bufsize=1)
-    try:
-        with open(log, 'w') as f:
-            for line in p.stdout:
-                f.write(line); tail.append(line)
-                if on_line:
-                    try: on_line(line.rstrip('\n'))
-                    except Exception: pass   # progress never stops the build
-        p.wait()
-    except KeyboardInterrupt:
-        p.terminate(); p.wait(); raise
-    finally:
-        p.stdout.close()
-    if p.returncode and p.returncode not in ok:
+    with open(log, 'w') as f, proc_group.Group(cmd, env=env, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as g:
+        for line in g.lines():
+            f.write(line); tail.append(line)
+            if on_line:
+                try: on_line(line.rstrip('\n'))
+                except Exception: pass   # progress never stops the build (an interrupt raised in it does)
+        rc = g.finish()
+    bad = rc and rc not in ok
+    if bad or g.stragglers:
+        tool = Path(cmd[1] if cmd[0] in (sys.executable, 'bash') else cmd[0]).name
+        why = f'{tool} exit code {rc}' if bad else f'{tool} exited, but {proc_group.describe(g.stragglers)} still ran {g.drain:g} s later and was stopped: what it writes may be incomplete'
         if fatal: PROG.end(ok=False)
         PROG.say(f'---- last lines of {log} ----\n' + ''.join(tail).rstrip('\n'))
-        if not fatal: return p.returncode
-        tool = Path(cmd[1] if cmd[0] in (sys.executable, 'bash') else cmd[0]).name
-        raise BuildError(f'{tool} exit code {p.returncode} (full output: {log})')
+        if not fatal:
+            if not bad: PROG.say(f'[RED] {why}')
+            return rc if bad else 1
+        raise BuildError(f'{why} (full output: {log})')
     return 0
 
 
@@ -428,8 +431,19 @@ def find_nx_extract(repo, env):
     return nx
 
 
-def swap_in(tmp, dst):   # swap the new output in as a whole (the old one is untouched on failure)
-    rmtree(dst); tmp.rename(dst)
+def swap_in(tmp, dst):
+    """Publish the finished output tmp (a sibling of dst, so the same volume) as dst. dst is always the whole old output, the whole new one, or absent; never half deleted, which a
+    reuse check could take for a finished output: the old one is renamed aside first (<dst>.old.partial: as every unfinished folder, a name the build ignores), the new one renamed in,
+    and only then the old one deleted. A failure or an interrupt before the new one is in renames the old one back. Recoverable, not atomic: two renames, and a hard kill between
+    them leaves dst absent (the old output in the aside folder), which a rerun rebuilds. An aside folder an earlier run left is deleted before it is needed again"""
+    old = dst.with_name(dst.name + '.old.partial')
+    rmtree(old)
+    if not (dst.is_symlink() or dst.exists()): tmp.rename(dst); return
+    dst.rename(old)
+    try: tmp.rename(dst)
+    except BaseException:
+        old.rename(dst); raise   # an interrupt or SIGTERM too: the window is two renames
+    rmtree(old)
 
 
 def free_gb(p):
@@ -439,8 +453,9 @@ def free_gb(p):
 
 def tool_env(environ=os.environ):
     """The environment the build's tools run in: the caller's PATH first, so the tools it selects (a venv's python3, mise's zstd) are the ones that run,
-    then TOOL_PATHS for the tools it lacks (a GUI app such as Spyder gets only the system PATH, or none)."""
-    return dict(environ, PATH=os.pathsep.join([environ.get('PATH') or '/usr/bin:/bin:/usr/sbin:/sbin'] + TOOL_PATHS))
+    then TOOL_PATHS for the tools it lacks (a GUI app such as Spyder gets only the system PATH, or none). Cloud saves are off (DM_SAVE_SYNC=0): the build's host runs
+    (captures, checks, the prebuild) play on scratch saves, and one inherited from the shell would pull the player's cloud save into them and send theirs over it."""
+    return dict(environ, PATH=os.pathsep.join([environ.get('PATH') or '/usr/bin:/bin:/usr/sbin:/sbin'] + TOOL_PATHS), DM_SAVE_SYNC='0')
 
 
 # ---- NSP identification ----
@@ -841,7 +856,7 @@ def survey(nsp_dir, app, fam, keys, repo, py, env):
     nros = {p.name: p for p in sorted((ex / 'romfs_nro').rglob('*.nro')) if p.is_file()}   # files only: a RomFS folder may end in .nro (The Binding of Isaac: Afterbirth+). The manifest pass writes the NROs (their imports decide the API and the modules: Portal 2's main is SDL with EGL, its Source engine NROs draw with NVN)
     nro_add = pg.nro_modules(ex / 'ExeFS', nros, keep) if nros else {}
     S = pg.shader_sources(mods['main']['imports'], F['glsl_src'], [m for m in sorted({*keep, *nro_add}, key=pg.load_order) if 'glslcCompile' in mods[m]['exports']], rom['mags']['SPIR-V'],
-                          rom['exts'].get('.pak', 0) if F.get('main_markers', set()) & {'Unreal', 'Unreal 4'} else 0, rom['mags']['Trinity pack'], gl_names=F.get('gl_names', 0),
+                          rom['exts'].get('.pak', 0) if 'Unreal' in F.get('main_markers', set()) else 0, rom['mags']['Trinity pack'], gl_names=F.get('gl_names', 0),
                           gl_src=F.get('gl_src', 0), gl_files=sum(rom['exts'].get(e, 0) for e in pg.GL_FILES), oodle_pkz=rom['mags']['PlatinumGames PKZ'],   # the manifest has no name tables: every PKZ counts
                           nro_imports=frozenset(pg.romfs_nro_imports(ex / 'romfs_nro')))
     vulkan, gl = S['graphics'][0] == 'vulkan', S['graphics'][0] == 'gl'
@@ -860,6 +875,7 @@ def survey(nsp_dir, app, fam, keys, repo, py, env):
     if F['glslc']: notes.append(f'main has {F["glslc"]} GLSLC compiler output magics (0x19866891): shader_split.py takes those that are whole outputs (13 Sentinels and the KTGL games compile their shaders into main; Unity\'s player has 11 of its own)')
     if rom['mags']['Trinity pack']: notes.append('Trinity packs (Game Freak, arc/data.trpfs with its index data.trpfd): the shaders are BNSH inside Oodle Mermaid streams; shader_split.py decodes them with the game\'s own OodleLZ_Decompress in the Mac host, which dm/host/hle_oodle.c finds by the library\'s name string')
     elif rom['mags']['PlatinumGames PKZ']: notes.append('PlatinumGames PKZ archives (pkzl; Bayonetta 3): DAT archives inside, compressed per entry (OodleKraken, ZStandard or None); the shaders are shader objects (VSO / PSO / CSO …) in DATs, which shader_split.py reads (pkz_entries, pg_shader), Oodle Kraken through the game\'s own streaming decoder in the Mac host (dm/host/hle_oodle.c)')
+    elif rom['mags']['RE Engine PAK']: notes.append('RE Engine PAK archives (KPKA; Capcom: Monster Hunter Rise, Ghost Trick, PRAGMATA): file names only as hashes, entries zstd / deflate, PRAGMATA\'s large ones in a block table; the shaders are SDF definitions inside them, which shader_split.py reads (kpka_jobs, sdf_shaders)')
     elif rom['mags']['MT Framework ARC']: notes.append('MT Framework ARC archives (Capcom, The Great Ace Attorney Chronicles): the shaders are in a shader package (SPK) inside one of them, which shader_split.py reads (mtarc_members, mtspk_shaders)')
     elif rom['mags']['Bezel Engine archive']: notes.append('NintendoWare Bezel Engine archives (.bea, magic SCNE; Big Brain Academy: Brain vs. Brain): every entry is a zstd frame, and the shaders are BNSH in their .bfsha entries, which shader_split.py reads (bea_members)')
     elif rom['mags']['CRI CPK'] and not F['glslc']: notes.append('CRI CPK archives (Bayonetta 2; Vanillaware\'s and Atlus\'s games keep their shaders elsewhere): files compressed one by one with CRILAYLA; shader_split.py decodes every entry (dm/gfx/tools/cpk.py, cpk_jobs) and scans it as a loose file (Bayonetta 2: BNSH files in PlatinumGames DAT archives)')
@@ -2647,7 +2663,7 @@ def mac_run(work, game, patched, host, font, msl, aoc, gfx, lang, env, logs, g, 
         # of waiting for the Metal compiler. The host's tool mode skips it when pso_archive/prebuilt.tsv matches (chain version, depth mode, pair list): Breath of the Wild's
         # 12,755 pairs took about 3 minutes on an M2 Max the first time. It takes the depth mode from the profile's depth_mode key (default gl, NVN's); with a wrong one the game builds its bases again in the app
         PROG.add(1); PROG.stage('Pipeline prebuild', step='building')
-        penv = dict(env, **{k: str(v) for k, v in renv.items()}, DM_PSO_PREBUILD='tool')
+        penv = dict(env, **{k: str(v) for k, v in renv.items()}, DM_PSO_PREBUILD='tool', DM_SAVE_SYNC='0')   # the environment file's DM_SAVE_SYNC is for the player's runs
         if g.get('depth_mode', 'gl') == 'zero': penv['DM_PSO_PREBUILD_DEPTH'] = 'zero'   # a game that sets the near = 0 depth mode (the profile says so: the host learns it only at run time, which for a provisional or derived profile includes its check boots)
         run([host], logs / 'pso_prebuild.log', env=penv, cwd=rd)
         PROG.end()
@@ -2795,6 +2811,8 @@ def parse_args(argv):
                     'no iOS shaders, Xcode project or IPA), keep the extracted files and print the command that runs the game; mac-app = what mac builds, then a self-contained, double-clickable '
                     'Mac app of the game (default: <game name>.app in the NSP folder, -o names another) (default: the PLATFORM setting, ios)')
     ap.add_argument('--icon', help='the app icon, a JPEG or PNG of any size (default: the ICON setting, else the game\'s icon from its control data; a dump has none, a NUP may have none)')
+    ap.add_argument('--fallback-icon', help='the app icon only when --icon / ICON is not given and the game has none of its own (a dump, a NUP without one), a JPEG or PNG of any size: a game with its own icon '
+                    'keeps it, so a front end can pass a stand-in without knowing what the game carries (default: the FALLBACK_ICON setting, else such an app\'s icon is blank)')
     ap.add_argument('--mac-sign', help='--platform mac-app: the codesign identity for the app, e.g. "Developer ID Application: <name> (<team>)" (default: the MAC_SIGN setting, else ad-hoc)')
     ap.add_argument('--team-id', help='Apple developer team ID (default: TEAM_ID setting, DM_TEAM_ID environment, or saved Xcode selection)')
     ap.add_argument('--xcode-workspace', help='workspace collecting prepared games (default: NxNative.xcworkspace beside the NSP folder; use with --prepare-xcode)')
@@ -2825,9 +2843,24 @@ def parse_args(argv):
     return ap.parse_args(argv)
 
 
+def icon_file(value, option):
+    """The image an icon option or setting names, None when it is empty. Checked when the build starts, not after the extraction: build_ipa.sh would only log a missing one"""
+    if not value: return None
+    p = Path(os.path.expanduser(value)).resolve()
+    if not p.is_file(): raise BuildError(f'no such icon file ({option}): {p}')
+    return p
+
+
+def app_icon(given, spare, *dirs):
+    """The image the app is given, and whether it is the fallback: --icon / ICON (given), else the game icon nx_extract saved from the control data (English, icon.jpg; in dirs, the packed version's
+    first, then the base game's), which a dump never has and a NUP may lack, else --fallback-icon / FALLBACK_ICON (spare), which never replaces a game's own. None without any"""
+    own = next((d / 'icon.jpg' for d in dirs if (d / 'icon.jpg').exists()), None)
+    return given or own or spare, bool(spare and not (given or own))
+
+
 def say_game(app, name, version, bundle_id, out, icon):
     """Which game the app is, once its name, version and bundle ID are settled (before the shader stages): the event game for a front end (json mode; the base game's title ID as DMTitleID has it,
-    out = the IPA or Mac app, None for an Xcode project; icon = the image the app is given: --icon / ICON, else the extracted icon.jpg; None without one), then the message for people"""
+    out = the IPA or Mac app, None for an Xcode project; icon = the image the app is given: --icon / ICON, else the extracted icon.jpg, else --fallback-icon / FALLBACK_ICON; None without one), then the message for people"""
     PROG.event('game', title_id=f'{app:016X}', name=name, version=version, bundle_id=bundle_id, out=str(out) if out else None, icon=str(icon) if icon else None)
     say(f'app name: {name}; version: {version}; bundle ID: {bundle_id}' + (f'; app: {out}' if out and out.suffix == '.app' else ''))
 
@@ -2938,8 +2971,7 @@ def main(args=None):
     dump = 'nup' if nup else 'folder' if dump_folder(nsp_dir) else None   # their files are not encrypted, so they need no keys
     keys = None if dump else Path(os.path.expanduser(args.keys or PROD_KEYS or ask('path of prod.keys: ', 'prod.keys (-k)'))).resolve()
     if keys and not keys.is_file(): raise BuildError(f'no such file: {keys}')
-    user_icon = Path(os.path.expanduser(args.icon or ICON)).resolve() if args.icon or ICON else None   # checked now, not after the extraction: build_ipa.sh would only log a missing one
-    if user_icon and not user_icon.is_file(): raise BuildError(f'no such icon file (--icon / ICON): {user_icon}')
+    user_icon = icon_file(args.icon or ICON, '--icon / ICON'); spare_icon = icon_file(args.fallback_icon or FALLBACK_ICON, '--fallback-icon / FALLBACK_ICON')
     sys.path.insert(0, str(repo / 'dm/games')); import game as gamemod   # game profiles
     global pg; import profile_guess as pg   # dm/games: a provisional profile's keys from the game files and from the heap check
     sys.path.insert(0, str(repo / 'dm/tools')); global nacp; import nacp   # the game name in the NSP's control data
@@ -3092,9 +3124,9 @@ def main(args=None):
     # the app version is the packed game's display version: the update's control data when an update is packed (nx_extract saves it next to the RomFS), else the base game's
     app_version = nacp.version(game / 'control.nacp') or nacp.version(base / 'control.nacp')
     if mac_pack and not (args.out or OUT_IPA): out_ipa = work.parent / f'{mac_app_name(app_name)}{"-provisional" if shadowed else ""}.app'
-    # the app icon: --icon / ICON, else the game icon nx_extract saved from the control data (English, icon.jpg; the packed version's first, then the base game's), which a dump never has and a NUP may lack
-    icon = user_icon or next((d / 'icon.jpg' for d in (game, base) if (d / 'icon.jpg').exists()), None)
+    icon, stand_in = app_icon(user_icon, spare_icon, game, base)
     if (not mac or mac_pack) and getattr(args, 'in_programs', None) is None:   # an app is made, once: a program packed with the application's first (in_programs) is part of its app
+        if stand_in: say(f'no game icon: the app takes the fallback icon {spare_icon} (--fallback-icon / FALLBACK_ICON)')
         say_game(app, app_name, app_version or '1.0', bundle_id, None if prepare_xcode else out_ipa, icon)
     # the game language: Horizon gives the game one of the languages its control data lists (the packed version's, which an update may extend), so the one packed must be among them
     control = languages_control(game, base)
@@ -3155,7 +3187,7 @@ def main(args=None):
             rmtree(work / 'tmp'); return {'patched': patched, 'romfs': rfs.source(game), 'msl': ios / (f'b-{chain_of(repo)}' if gfx == 'nvn' else 'vk' if gfx == 'vulkan' else 'gl'), 'tables': g.table('shader_map.tsv').parent, 'html': game / 'html', 'gfx': gfx}
         host, font = mac_host(py, repo, work, env, logs, g)
         programs = other_programs(args, g)
-        if not icon: say(('no game icon: the NUP carries none' if nup else 'no game icon: a dump folder has no control data') + '; the app\'s icon will be blank; --icon / ICON gives it one' if dump else '[RED] no game icon in the extraction (an older extraction did not save it: delete extract/ and run again); the app\'s icon will be blank')
+        if not icon: say(('no game icon: the NUP carries none' if nup else 'no game icon: a dump folder has no control data') + '; the app\'s icon will be blank; --icon / ICON or --fallback-icon / FALLBACK_ICON gives it one' if dump else '[RED] no game icon in the extraction (an older extraction did not save it: delete extract/ and run again); the app\'s icon will be blank')
         mac_app(py, repo, out_ipa, app, work, game, patched, host, font, ios, aoc, gfx, lang, g, app_name, app_version, bundle_id, icon, args.mac_sign or MAC_SIGN, env, logs, env_file,
                 (args.gpu or PSO_GPUS).strip(), programs, control)
         rmtree(work / 'tmp')
@@ -3192,7 +3224,7 @@ def main(args=None):
     if shader_files: ipa_env['DM_SHADER_FILES'] = '1'; say('shader library: its separate files (DM_SHADER_FILES=1), for install tools that cannot copy a large file')
     if app_version: ipa_env['DM_APP_VERSION'] = app_version
     if icon: ipa_env['DM_ICON'] = str(icon); say(f'app icon: {icon}')   # app icon (found above)
-    else: say(('no game icon: the NUP carries none' if nup else 'no game icon: a dump folder has no control data') + '; the home-screen icon will be blank; --icon / ICON gives it one' if dump else '[RED] no game icon in the extraction (an older extraction did not save it: delete extract/ and run again); the home-screen icon will be blank')
+    else: say(('no game icon: the NUP carries none' if nup else 'no game icon: a dump folder has no control data') + '; the home-screen icon will be blank; --icon / ICON or --fallback-icon / FALLBACK_ICON gives it one' if dump else '[RED] no game icon in the extraction (an older extraction did not save it: delete extract/ and run again); the home-screen icon will be blank')
     if env_file: ipa_env['DM_ENV_FILE'] = str(Path(os.path.expanduser(env_file)).resolve())
     show_fps = SHOW_FPS if args.show_fps is None else args.show_fps
     ipa_env['DM_SHOW_FPS'] = '1' if show_fps else '0'
@@ -3240,10 +3272,21 @@ def main(args=None):
 NSP_FOLDER = None   # main's: the folder whose work folders cli tidies after a build that succeeded
 
 
-def cli(argv):   # returns the exit code: 0 done, 1 error, 130 interrupted
+class Stopped(BaseException):   # a SIGTERM, raised by cli's handler: not an Exception, so no `except Exception` on the way keeps it from cli
+    pass
+
+
+def _sigterm(sig, frame): raise Stopped()
+
+
+def cli(argv):   # returns the exit code: 0 done, 1 error, 130 interrupted, 143 stopped by SIGTERM
     # main points DM_GAMES_DIR (and DM_GAMES_FIRST) at this run's provisional or derived profile for its tools. Spyder runs the next F5 in the same process, where the game lookup
     # (game.py by_title) then found that profile and took it for a registered one: ASTRAL CHAIN's second run skipped every provisional step and stopped with no dmsh_chain.h
     environ = dict(os.environ)
+    # A SIGTERM (a front end's cancel) ends the build as an interrupt does: the running tool's process group stopped (run), the stage line ended, exit code 143. The handler
+    # is cli's only while it runs, and in the main thread only (Python's rule): Spyder's kernel, which runs the next F5 in the same process, gets its own back
+    main_thread = threading.current_thread() is threading.main_thread()
+    term = signal.signal(signal.SIGTERM, _sigterm) if main_thread else None
     try:
         main(parse_args(argv))
         if NSP_FOLDER:   # a developer's work folder, which a player's NSP folder does not have (tree_tar.py)
@@ -3253,11 +3296,14 @@ def cli(argv):   # returns the exit code: 0 done, 1 error, 130 interrupted
         PROG.close(ok=False); PROG.say(f'[RED] {e}'); return 1
     except KeyboardInterrupt:
         PROG.close(ok=False); PROG.say('[RED] interrupted'); return 130
+    except Stopped:
+        PROG.close(ok=False); PROG.say('[RED] stopped (SIGTERM)'); return 143
     except Exception as e:   # an unexpected error: end the stage line before the traceback (which goes to stderr; json mode also sends the error as a message)
         PROG.close(ok=False)
         if PROG.mode == 'json': PROG.say(f'[RED] {type(e).__name__}: {e}')
         raise
     finally:
+        if main_thread: signal.signal(signal.SIGTERM, signal.SIG_DFL if term is None else term)   # first: a SIGTERM in this cleanup is the caller's again (None: one not set from Python)
         PROG.close(ok=False)   # stop the ticker
         for k in os.environ.keys() - environ.keys(): del os.environ[k]
         os.environ.update(environ)

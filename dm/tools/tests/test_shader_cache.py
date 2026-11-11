@@ -8,6 +8,13 @@ sys.path.insert(0, str(REPO / 'dm/tools'))
 import shader_cache
 
 D1, D2, D3 = 'a' * 64, 'b' * 64, 'c' * 64
+FORKED = None   # the store test_forked_workers_share_it's workers inherit
+
+
+def forked_work(i):
+    s = FORKED; assert s is not None
+    for j in range(300): s.put(f'f{i}/{j}', f'{i}'.encode() * 1000); assert s.get(f'f{i}/{j}') == f'{i}'.encode() * 1000
+    return s.get('before')
 
 
 class Base(unittest.TestCase):
@@ -86,6 +93,15 @@ class Writers(Base):
         ps = [subprocess.Popen([sys.executable, '-c', code, str(REPO / 'dm/tools'), str(self.path), f'p{i}']) for i in range(4)]
         self.assertEqual([p.wait() for p in ps], [0, 0, 0, 0])
         self.assertEqual(len(self.store.names('p')), 1200)
+
+    def test_forked_workers_share_it(self):   # dmsh_build.py's worker processes: forks of a process that has the file open, each with a connection of its own
+        import concurrent.futures as cf, multiprocessing
+        global FORKED; FORKED = self.store
+        self.store.put('before', b'0')
+        with cf.ProcessPoolExecutor(4, mp_context=multiprocessing.get_context('fork'), initializer=self.store.forked) as ex:
+            self.assertEqual(list(ex.map(forked_work, range(4))), [b'0'] * 4)
+        self.assertEqual(len(self.store.names('f')), 1200)
+        self.store.put('after', b'1'); self.assertEqual(self.store.get('after'), b'1')   # the inherited connection still works here
 
     def test_a_killed_writer_loses_only_what_it_had_not_committed(self):
         code = ("import os, sys; sys.path.insert(0, sys.argv[1]); import shader_cache\ns = shader_cache.Store(sys.argv[2]); s.put('done', b'1')\n"

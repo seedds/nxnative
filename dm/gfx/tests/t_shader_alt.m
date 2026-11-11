@@ -23,15 +23,21 @@ int main(void) { @autoreleasepool {
     char tmp[PATH_MAX]; snprintf(tmp, sizeof tmp, "%s/t_shader_alt.XXXXXX", getenv("TMPDIR") ?: "/tmp"); if (!mkdtemp(tmp)) abort();
     NSString *root = @(tmp), *game = [root stringByAppendingPathComponent:@"game"], *alt = [root stringByAppendingPathComponent:@"alt"];
     NSString *f = @"#include <metal_stdlib>\nusing namespace metal;\nfragment float4 main0() { return float4(%d, %d, 0, 1); }\n";
+    NSString *kc = @"#include <metal_stdlib>\nusing namespace metal;\nkernel void main0(uint i [[thread_position_in_grid]]) { threadgroup_barrier(mem_flags::mem_none); if (i > %du) threadgroup_barrier(mem_flags::mem_none); }\n";
+    NSString *km = @"#include <metal_stdlib>\nusing namespace metal;\nstruct V { float4 p [[position]]; };\n[[mesh]] void main0(metal::mesh<V, void, 3, 1, topology::triangle> m, uint i [[thread_index_in_threadgroup]]) { if (i == 0) m.set_primitive_count(%du); }\n";
     NSString *fu = @"#include <metal_stdlib>\nusing namespace metal;\nfragment float4 main0() { return float4(1); }\nfragment uint4 main0_u() { return uint4(1); }\n";
     if (lib(game, @"f1_b", [NSString stringWithFormat:f, 1, 0]) || lib(alt, @"f1_b", [NSString stringWithFormat:f, 0, 1]) ||   // f1: a variant
         lib(game, @"f2_b", [NSString stringWithFormat:f, 1, 1]) ||                                                             // f2: none
         lib(game, @"fx_b", [NSString stringWithFormat:f, 1, 0]) || lib(game, @"fx_bx", [NSString stringWithFormat:f, 1, 0]) ||   // fx: the variant lacks the game's side library
         lib(alt, @"fx_b", [NSString stringWithFormat:f, 0, 1]) ||
-        lib(game, @"fu_b", fu) || lib(alt, @"fu_b", [NSString stringWithFormat:f, 0, 1])) {                                    // fu: the variant lacks an entry point
+        lib(game, @"fu_b", fu) || lib(alt, @"fu_b", [NSString stringWithFormat:f, 0, 1]) ||                                     // fu: the variant lacks an entry point
+        lib(game, @"c1_b", [NSString stringWithFormat:kc, 1]) || lib(alt, @"c1_b", [NSString stringWithFormat:kc, 2]) ||          // c1: a compute kernel with a variant
+        lib(game, @"m1_b", [NSString stringWithFormat:km, 1]) || lib(alt, @"m1_b", [NSString stringWithFormat:km, 0])) {           // m1: a mesh shader with a variant
         printf("t_shader_alt: no Metal compiler (xcrun metal), not run\n"); return 0; }
     for (NSString *k in @[@"f1", @"f2", @"fx"]) put([game stringByAppendingFormat:@"/%@_b.json", k], [NSString stringWithFormat:@"{\"chain\": \"%s\", \"route\": \"B\", \"entry\": \"main0\", \"bindings\": [], \"vertex_inputs\": []}", DMSH_CHAIN]);
     put([game stringByAppendingPathComponent:@"fu_b.json"], [NSString stringWithFormat:@"{\"chain\": \"%s\", \"route\": \"B\", \"entry\": \"main0\", \"entry_u\": \"main0_u\", \"bindings\": [], \"vertex_inputs\": []}", DMSH_CHAIN]);
+    put([game stringByAppendingPathComponent:@"c1_b.json"], [NSString stringWithFormat:@"{\"chain\": \"%s\", \"route\": \"B\", \"stage\": \"cs\", \"entry\": \"main0\", \"threadgroup_size\": [1, 1, 1], \"bindings\": [], \"vertex_inputs\": []}", DMSH_CHAIN]);
+    put([game stringByAppendingPathComponent:@"m1_b.json"], [NSString stringWithFormat:@"{\"chain\": \"%s\", \"route\": \"B\", \"stage\": \"ms\", \"entry\": \"main0\", \"mesh_stage\": {\"kind\": \"ms\", \"threads\": 32, \"payload\": 0, \"task\": false}, \"bindings\": [], \"vertex_inputs\": []}", DMSH_CHAIN]);
     setenv("DM_MSL_DIR", game.UTF8String, 1); setenv("DM_AB", "10", 1); setenv("DM_NVN_SHADER_ALT", alt.UTF8String, 1); setenv("DM_NVN_SHADER_ALT_AB", "ab", 1);
     mtl_init(); g_msl_dir = game;   // the fixture is the library directory itself (no b-<chain> folder)
     NvShader *s1 = shader_load(@"f1_b", 1, 0), *s2 = shader_load(@"f2_b", 1, 0), *sx = shader_load(@"fx_b", 1, 0), *su = shader_load(@"fu_b", 1, 0);
@@ -58,6 +64,22 @@ int main(void) { @autoreleasepool {
     CHECK(prog_get(&p2) == b2 && !s2->alt);   // no variant
     CHECK(prog_get(&px) == bx && !sx->alt);   // side libraries differ: refused
     CHECK(prog_get(&pu) == bu && !su->alt);   // entry points differ: refused
+    {   // a compute kernel: the dispatch takes prog_get(cprog)->sh[5], so its twin carries the variant, and the pipeline cache (g_cps, by shader object) gives it a pipeline of its own
+        NvShader *c1 = shader_load(@"c1_b", 5, 0); CHECK(c1 && c1->fn);
+        static prog_t pc; NvProg *bc = c1 ? prog_of(&pc, 98005, nil) : nil; if (bc) bc->sh[5] = c1;
+        NvProg *tc = bc ? prog_get(&pc) : nil;
+        CHECK(tc && tc != bc && tc->sh[5] == c1->alt && sh_alt(tc->sh[5]) && tc->sh[5]->fn && tc->sh[5]->fn != c1->fn);
+        CHECK([lib_name([alt stringByAppendingPathComponent:@"c1_b.metallib"]) isEqualToString:@"alt/c1_b.metallib"]);
+        NSError *ce = nil; id<MTLComputePipelineState> pg = c1 ? cps_new(c1->fn, &ce) : nil, pv = tc ? cps_new(tc->sh[5]->fn, &ce) : nil;
+        CHECK(pg && pv && pg != pv);   // two pipelines, the variant's from its own function
+        atomic_store(&g_ab_phase, 0); CHECK(!bc || prog_get(&pc) == bc); atomic_store(&g_ab_phase, 1);   // phase 0: the game's kernel
+    }
+    {   // a mesh shader: the mesh draw takes prog_get(prog)->sh[4] (nvn_geometry.inc), and mtk_pso keys its pipeline by the shader objects
+        NvShader *m1 = shader_load(@"m1_b", 4, 0); CHECK(m1 && m1->fn && m1->mesh_kind == 2);
+        static prog_t pm; NvProg *bm = m1 ? prog_of(&pm, 98006, nil) : nil; if (bm) bm->sh[4] = m1;
+        NvProg *tm = bm ? prog_get(&pm) : nil;
+        CHECK(tm && tm != bm && tm->sh[4] == m1->alt && sh_alt(tm->sh[4]) && tm->sh[4]->mesh_kind == 2 && tm->sh[4]->mesh_notask && tm->sh[4]->fn != m1->fn);
+    }
     atomic_store(&g_ab_phase, 2);
     CHECK(prog_get(&p1) == b1);   // back to the game's
     }

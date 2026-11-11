@@ -36,7 +36,8 @@ static void touch_to(const dm_touch *t, int n) { if (n > 0) { touch_new |= !touc
 void (*_Atomic dm_touch_observer)(const dm_touch *t, int n);
 void dm_touch_set(const dm_touch *t, int n) { touch_to(t, n); void (*o)(const dm_touch *, int) = atomic_load(&dm_touch_observer); if (o) o(t, n); }
 void dm_touch_script(const dm_touch *t, int n) { touch_to(t, n); }
-int touch_fill_n(void *out, int max, uint64_t now) { (void)out; (void)max; (void)now; return 0; }
+static int64_t touch_samp; static int touch_points = -1;   // hle_touch.c numbers every read from 1; the last read's points argument
+int touch_fill_n(void *out, int max, uint64_t now, int points) { (void)max; (void)now; touch_points = points; memset(out, 0, 0x10); int64_t s = ++touch_samp; memcpy(out, &s, 8); return 0; }
 int gesture_fill(void *out, int n, uint64_t now) { (void)out; (void)n; (void)now; return 0; }
 void dm_gfx_shot_at(long frame, const char *path) { (void)frame; (void)path; }
 void hle_bind_system_event(void *g, int autoclear) { (void)g; (void)autoclear; }
@@ -637,6 +638,24 @@ static void t_motion_hid(void) {
     dm_motion_clear_hid(0); dm_motion_clear_hid(1); dm_motion_clear(0); g_phone_motion.last_ns = 0;
     dm_pad_players(1); g_phone_mode = -1;
 }
+// Touch screen reads across docked <-> handheld: every read goes to hle_touch.c, which numbers the states of both modes from one count (t_touch checks the numbers), with
+// touch points asked for only in handheld mode. Numbered apart (docked from the npad counter, 65536; handheld from 1), a game started docked dropped every touch after
+// leaving the dock: Unity's touch reader (Aokana main+0xd2bde0) takes a state only if its sampling number is above the last one it took, empty states included.
+static void t_touch_sampling(void) {
+    uint8_t s[0x10 + 0x28 * 16]; int64_t prev = 0, v;
+    const int modes[] = {1, 1, 0, 0, 1, 0};
+    for (int i = 0; i < 6; i++) {
+        g_mode = modes[i]; memset(s, 0, sizeof s);
+        if (i & 1) CHECK(h_hid_TouchN_16(s, 1) == 1, "touch: GetTouchScreenStates gives one state");
+        else h_hid_Touch1_16(s);
+        memcpy(&v, s, 8);
+        CHECK(touch_points == !modes[i], "touch: touch points are asked for in handheld mode only");
+        CHECK(v > prev, i == 2 ? "touch: handheld after docked continues the sampling numbers" : i == 4 ? "touch: docked after handheld continues the sampling numbers"
+                                : i == 5 ? "touch: handheld again continues the sampling numbers" : "touch: sampling numbers increase");
+        prev = v;
+    }
+    g_mode = 1;
+}
 
 int main(void) {
     CHECK(setenv("DM_RUMBLE_LOG", "1", 1) == 0, "enable rumble diagnostics");
@@ -651,6 +670,7 @@ int main(void) {
     t_motion_threads();
     t_motion_live();
     t_motion_hid();
+    t_touch_sampling();
     t_rec();
     {   // Nmouse with no device (SDK 21's forms): the pointer range is kept, the merged handle 0 takes settings, the standard mouse and the handle queries report nothing
         int w = 0, h = 0; uint64_t std = 7; uint32_t npad = 9;

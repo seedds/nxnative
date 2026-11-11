@@ -37,6 +37,8 @@ The work folder is `<NSP folder>/010019A01E2F2000-work`: `host.sh` copies the wo
 
 General tool changes first needed here; each applies to every game:
 
+- **Version-validated Mac runtime code choices:** [runtime patch manifests](../../../docs/reference/rewriter.md#validated-mac-runtime-patch-manifests), introduced for the experimental internal scene size below.
+
 - **60-byte pack entries, zstd program records and `MTRL` forms, and program records whose control length is not a multiple of 0x40**, which the reader had skipped without a word in Metroid Prime Remastered too (28,479 of its shaders) (`rfrm_shaders`, `snvn_records`): [shaders.md](../../../docs/reference/shaders.md#snvn-program-records-in-retro-studios-rfrm-forms).
 
 ## Open
@@ -45,3 +47,164 @@ General tool changes first needed here; each applies to every game:
 - Only the opening and the first minute of Tanamaar have been played: combat, scanning, the Morph Ball, the psychic abilities, Sol Valley and Vi-O-La, bosses, saving at a station and loading a save are untested.
 - The base game 1.0.0 alone was not run (the NSP script packs it from a derived profile).
 - The runs of 32 ms frames ([Current](#current)).
+
+
+## Image quality investigation, 2026-11-11 (open)
+
+Investigation baseline: main `084f5aa5c59bbfbebfcab7ad1b1a3b9bc196a582`, also the upstream tip checked on this date. Experimental worktree: branch `codex/mp4-image-quality`. This section records an investigation, not a new gameplay milestone. At that investigation checkpoint, no game source, profile settings or shader-chain tool had changed and no local full shader build or gameplay run had been performed. The implementation below supersedes that checkpoint.
+
+### Local package and executable verification
+
+The local package folder contains a compressed base Application `010019a01e2f2000`, version 0, and a compressed Patch `010019a01e2f2800`, version 131072. These identities were read with `nx_extract --contents`, not inferred from filenames. The update was decompressed into the game's work folder; its control data reports **1.1.0**. Its complete ExeFS gives the following build IDs (the 20 nonzero bytes; the NSO's 32-byte fields end in 12 zero bytes):
+
+| Module | Build ID |
+|---|---|
+| main | `8275fbe1ec5191c279f3a943ad8524f4bab087a3` |
+| subsdk0 | `9c8b2c03854ffda4e33614d6f42d4a648aa53c8e` |
+| sdk | `0cc95d4d30133833d7df439a890414de87026609` |
+| rtld | `232335b2f5212e30d90415810cbdd276fade2fe1` |
+
+The first 16 bytes of main, subsdk0 and sdk match the registered profile. Only update executables and control data were extracted: the update-only command subsequently failed when trying to mount patch RomFS without its base. That failure is not evidence that the package is damaged; a complete merged RomFS and its integrity checks are still required. The base NSZ is not directly usable as an extracted Program NCA: the normal build must decompress it first. Metadata and logs are in `<NSP folder>/010019A01E2F2000-work/metadata/`; original dumps and installed apps were not changed.
+
+### PR disposition and dependencies
+
+GitHub open/closed state alone does not indicate whether main has the functionality:
+
+| PR | State on inspection | Current main and remaining action |
+|---|---|---|
+| [512](https://github.com/seedds/nxnative/pull/512) | open, unmerged | The required 60-byte pack directory and zstd SNVN/MTRL support is already in the common reader, from `430ace12`; retain it rather than add a parallel reader. |
+| [513](https://github.com/seedds/nxnative/pull/513) | closed, unmerged | Ported as `7c23cc03`: 16-byte aligned handles and normalization of backslashes across mounts, with broader coverage than the PR. |
+| [514](https://github.com/seedds/nxnative/pull/514) | closed, unmerged | Ported as `45a3c987`: indexed RomFS overloads and texture-builder swizzle getter. |
+| [515](https://github.com/seedds/nxnative/pull/515) | closed, superseded | General native-texture slot handling in `4e37a225` and `8bfc3a60`; do not restore the movie-specific profile key. See [movie slot ownership](../../../docs/reference/movies.md#getoutputbuffer-returns-the-output-index-in-native-texture-mode). |
+| [516](https://github.com/seedds/nxnative/pull/516) | closed, superseded | Main's `dual_want.tsv` / `main0_d` implementation (`ada029c5`) replaces `_bds` / `dsb.tsv`; this profile already lists `af84ccd3191eaf89`. See [secondary blend source](../../../docs/reference/rendering.md#a-written-secondary-blend-source-nvn-dual-source-blending). |
+| [517](https://github.com/seedds/nxnative/pull/517) | closed, superseded | `bcb18804` preserves writable-image vertex side effects under rasterizer discard. No chain change is needed to restore this fix. |
+| [518](https://github.com/seedds/nxnative/pull/518) | closed, ported | `148cc076` supports cloning a single RomFS image and probes each source independently. |
+| [519](https://github.com/seedds/nxnative/pull/519) | open, unmerged | Launch-time patch mechanism remains absent; it contains no Prime 4 resolution/FPS data. Reuse existing verified rewriter stubs where possible. If this mechanism is needed, review parsing, build gating, rewritten-site checks and rewrite-cache inputs before integrating. |
+| [520](https://github.com/seedds/nxnative/pull/520) | open, unmerged | Main already has the 1.1.0 profile and full shader tables from `430ace12`. The PR additionally enables CPU-written texture streaming keys; reproduce the reported magenta mip levels on current main before changing the profile. Its obsolete movie key and shader tables must not replace main's. |
+
+PR 520 declared dependencies on 515 and, for correct rendering, 512/513/514/516/517. Their underlying mechanisms are now present, though their implementations differ. The optional resolution/FPS choices additionally need 519 or a verified alternative plus game-specific code not included in these PRs. [Combined PR 579](https://github.com/seedds/nxnative/pull/579), closed and unmerged, fixed 519's unconditional access to `DM_GAMES_DIR` and added the generator to the rewrite cache key; those fixes matter if adapting 519. It did not establish gameplay validation of its combined branch.
+
+### Community patches and compatibility
+
+Inspected [Fl4sh9174's Prime 4 archive](https://github.com/Fl4sh9174/Switch-Emulator-Ultrawide-FPS-Mods/blob/main/Metroid%20Prime%204%20Beyond%20%5B010019A01E2F2000%5D%5Bmods%5D.zip), Git blob `010b786dfc68719da0bc300dd1836bfea76903bd`. The main patch targets the local main's 20-byte build ID; the FPS companion targets the local sdk's. This establishes identity compatibility, not compatibility with rewritten instructions or the native host's timing.
+
+The inspected archive offers 1920x1080, 3840x2160, 7680x4320, ultrawide variants, dynamic-resolution disable, LOD, and dynamic 120/240 FPS. It contains no dedicated 2560x1440 16:9 preset. Its instructions require the included input-dependent cheat for resolution mods: the scanning path changes dimensions while ZL is held. Applying only the code writes would leave that dependency unsatisfied. The FPS modification changes both game code and SDK behavior; a display-rate override alone cannot reproduce its timing behavior. PR 519 reports 1440p/120 and 4K/60 on the author's own branch, not on this baseline or this Mac.
+
+No LICENSE/COPYING file or grant was found inside the archive, and the repository README supplies no reuse license. Free downloads and author attribution do not establish permission to incorporate or adapt the patch code. No third-party patch was applied, committed or packaged. Integration needs a verified license grant, or an implementation derived from the game's own code and measured behavior. The latter must not be described as clean-room work: the community patch was inspected during this investigation.
+
+### Implementation scope and validation gates
+
+- **Low complexity, already available:** build and package a self-contained Mac app at the game's own resolution and 60 FPS; use a new output name and build folder.
+- **Medium complexity:** validate the texture-streaming report and the long-frame pacing issue on current main. Record a route through the cave, including the cannon, before changing upload policy.
+- **Medium to high complexity:** selectable 1920x1080, 2560x1440 and 3840x2160 internal sizes. Static inspection of local main confirms separate size initialization, viewport, screen-space constants and scan-related calculations. A window size setting cannot cover them. Verify original bytes and build IDs at every rewritten site and preserve the 16:9 layout.
+- **High complexity:** 120 FPS. Trace the frame limiter and game-time calculation, then compare the same timed movement, turning, combat and cutscene inputs at 60 and 120. Check behavior below target FPS and on a 60 Hz display before enabling `fps_max 120`.
+- **Optional, medium complexity:** anti-aliasing improvements. Start with higher internal resolution and compare still and moving edges. Forcing MSAA or temporal AA globally is unsupported by the present evidence; establish the game's buffers and sampling requirements first.
+
+Existing [present MetalFX scaling](../../../docs/reference/rendering.md#the-present-upscales-through-metalfx) can enlarge the completed image, but it does not raise internal render-target resolution or provide temporal anti-aliasing. The separate NVN2 DLSS and agl upscaler replacements have no established use in this Switch build. Keep present scaling off for native-size comparisons; assess it as an optional performance/quality tradeoff when rendering below the display size.
+
+Prove each internal mode with pass/attachment sizes and viewport logs, alongside game-frame captures and screen captures. Compare HUD placement, scan targeting, bloom, fog, shadows, depth-based effects, transparent geometry, movies and real-time cutscenes. Use fixed saves and identical inputs for timing. Later areas, bosses, Morph Ball, saving/loading and prolonged streaming remain untested locally. No large renderer refactor is justified by this investigation.
+
+### Local checks and build resources
+
+Hardware verified: M4 Max, 48 GB RAM, macOS 27.0; Xcode 27.2 and the Metal compiler match the chain lock. Baseline checks passed: 23 tests across `test_snvn_records`, `test_discard`, `test_game_profile`, `test_settings`, `test_docs`, using Python 3.14; `make -C dm/gfx/tests GAME=010019A01E2F2000 check_t_rast_discard check_t_missing_src1` on the M4 Max. These are synthetic tests, not game validation. The system Python 3.9 cannot import current shader helpers; use a recent Python. No regression-harness comparison was run because no implementation change or merged game build exists yet.
+
+The drive had approximately 258 GiB free after the user freed space. Plan for at least 140 GB of additional working storage, plus intermediate files and headroom: decompressed packages, merged RomFS, the shader library and pipeline data. The existing shader measurements above come from another Mac, not this M4 Max. PR 520 reports offline `metal-tt` memory above 79 GB for all pairs: prefer an initial `--gpu none` build on this 48 GB machine, with `DM_PSO_PREBUILD=0` in its build env file to avoid the long first-start prebuild. This incurs first-use pipeline compilation and may expose the long-frame pacing issue; do not promise a stutter-free app.
+
+A full baseline app build is reproducible with the following command once full compilation is wanted. It uses every shader, keeps game data beside the source packages, and gives the experimental app its own name. It does not implement the enhanced resolution/FPS choices described above. Create `<NSP folder>/010019A01E2F2000-work/quality.env` with `DM_PSO_PREBUILD=0` first. Put the installed NSZ executable (5.0 or newer, with `--keys`) on PATH if it is not installed in the selected Python.
+
+```sh
+/opt/homebrew/bin/python3.14 scripts/build_ipa_from_nsp.py \
+  "<NSP folder>" -k "<prod.keys>" \
+  --package v131072 --platform mac-app --gpu none \
+  --work-dir "<NSP folder>/010019A01E2F2000_build-experimental" \
+  --env-file "<NSP folder>/010019A01E2F2000-work/quality.env" \
+  --out "<NSP folder>/Metroid Prime 4 Beyond Experimental.app"
+```
+
+Full compilation remains deferred. No enhanced app has been built or claimed validated; subsequent runtime experiments are recorded below.
+
+
+## Experimental 1440p internal scene rendering (open)
+
+### Progress (2026-11-11)
+
+- **Implemented:** checkpoint A, the DMRT1 runtime manifest (PR 519's idea, rewritten: full build-ID check, original-byte check against the original and the rewritten image, all-or-nothing writes before the code is sealed, unknown choice or missing manifest rejected); choice `1440p` raises the scene's colour/depth targets and the second pooled target to 2560x1440. Display output, HUD and the 1600x900 composition targets stay the game's.
+- **Last verified:** `t_runtime_patch` 29 cases (gcc ASan/UBSan, Linux) and `test_runtime_patch` 7 tests, `test_docs`, 2026-11-11. Allocation evidence from the earlier scripted runs below; those runs lacked 2,975 shaders (GPU 0.45 ms a frame), so they show no picture worth judging.
+- **Current experiment:** checkpoint B, the first manual test of `1440p` with a usable partial shader library: [`manual_test.sh`](manual_test.sh) builds the host and a `--seen-shaders` library from [`shader_seen.tsv`](shader_seen.tsv) (2,984 keys the earlier runs drew or missed, grown each run by the missing keys in `run/host.log`), runs the game with its save in `<build>/run/save`, and writes `summary.txt` under `<NSP folder>/010019A01E2F2000-work/manual-test/`.
+- **Blockers:** a whole-map shader build (259,989 shaders) is not approved; areas past the tested route draw incomplete until the script runs again. 1440p output (HUD and final image) is not implemented, see below.
+- **Next after feedback:** fix what the 1440p scene shows wrong; then the output size (below), then 4K.
+
+### Output resolution: findings for the next step (static, unverified at run time)
+
+- The render-target pool `0x134470` (and `0x134850` / `0x134ddc`) keys targets by descriptor `+0` width, `+4` height, `+0x18` format. About 14 call sites build fixed 1600x900 descriptors (`mov x8,#1600; movk x8,#900,lsl #32`): `0xa1cd8`, `0x12e3a8`, `0x12f9a0`, `0x132458`, `0x133568`, `0x136edc`, `0x1f5990`, `0x3317ec`, `0x335d54`, `0x3e5060`, `0xa1e6e4`, `0xd315a4`, `0x137f4b0`; these are the 1600x900 composition/HUD targets of the pass logs (RGBA8 fmt 71 with D24S8).
+- `0xda3fd8` initializes the resolution policy table at `main+0x1832940`, `[mode][kind]` of 16 bytes: kind 0 1024x576, kind 1 1600x900. Dynamic resolution (`0x980118`) scales an entry by a float and clamps it to the size at `0x1826938`; `0x99fd10` / `0x99fd30` read it.
+- `0x80be60` (via `0x80be90` / `0x80be98`) returns the rectangle 0,0,1600,900 and `0xda3af4` the size 1600x900; `0xda3b04` / `0xda3b10` pair that size with a target's real size. This reads as a fixed 1600x900 virtual layout space mapped onto each target, so the HUD's layout should keep 1600x900 while the targets grow. `0xda2928` picks 1600x900 or 800x450 by the flag at `0x1832938`.
+- Open: where the window (present) textures, 1600x900 (`ser=2`), are sized. All targets one pass draws into must change together.
+
+Source is on `codex/mp4-image-quality`, based on `084f5aa5`. This is a Mac-only development option, not a validated launcher choice. `DM_INTERNAL_RESOLUTION=default` (or unset) applies **zero runtime writes**. `1440p` selects the manifest made from the registered 1.1.0 executable. No 1080p, 4K, 120 FPS, presets, new anti-aliasing or shadow changes are exposed. The game keeps its own 60 FPS timing. The profile's texture upload policy is unchanged.
+
+### How the internal size changes
+
+Derived from the local executable, not converted from community patch payloads:
+
+- `main+0x331474` loads input dimensions, and the code through `0x331708` computes an adaptive scene size. At `0x33170c`, `orr x21,x9,x8,lsl #32` packs width and height into a scene allocation descriptor; `0x3317e4` stores it at `sp+0x58`, and `0x3317e8` passes it to `0x134850`.
+- [`patches.py`](patches.py) reserves a three-instruction stub using the existing `STUBS` interface: construct `x21 = 2560 | (1440 << 32)` and branch back to `0x331710`. It changes no original site by itself. Only the selected runtime manifest replaces the original pack instruction with a branch to this stub. It preserves every other register and NZCV.
+- A second descriptor at `0x3317ec` / `0x3317f8`, stored at `sp+0x58` by `0x3317fc` after the scene target's pool request at `0x3317e8`, is a fixed 1600x900 target (descriptor `+0x18` = 30) that the same pool (`0x134470`) serves next. It is not a fallback for the adaptive path, as an earlier note here said: both run every time. The manifest raises it to 2560x1440 with the scene.
+- Both overrides occur at the allocation requests, after the dynamic-resolution calculation. The controller and its lifetime management still run; its output cannot lower these two requested sizes. This deliberately overrides the game's internal-resolution policy, as a requested enhancement. There is no skipped dynamic-resolution function, replacement frame limiter, scan-input cheat or SDK patch.
+- The display framebuffer and HUD coordinate system remain the game's own. This implementation is internal supersampling into the original output, not a claim of 1440p output or a larger window. Scanning, input targeting and every post effect still require visual/gameplay checks.
+
+[`runtime_patches.py`](runtime_patches.py) checks the full 32-byte NSO build ID, the rewriter layout, the new stub and all three original instruction sites against the rewritten image. Unknown builds, changed sites, missing stubs and unsupported layouts reject generation. The shared [runtime manifest loader](../../../docs/reference/rewriter.md#validated-mac-runtime-patch-manifests) validates the complete manifest before any write. Only default and experimental 1440p are accepted; a requested non-default mode without a manifest also rejects loading. The Mac packer carries the manifest; iOS signed code is not modified.
+
+### Local allocation evidence
+
+The first scripted run used only eight compiled boot stages, subsequently expanded to 44; its missing shaders make its picture unsuitable for visual validation. It nevertheless exercised the real game and Metal allocations. `runtime-test/run/route-1440.log` contains:
+
+```text
+[pass] F5580 O 21207   vp[0] = 0,0,2560,1440
+[pass] F5580 P 21208 c0 ser=3292 fmt=92 2560x1440 ms1 lv0 sl0 load mtl=0x7987db8c80
+[pass] F5580 P 21208 d ser=3734 fmt=260 2560x1440 load
+```
+
+`TEXINFO` also records 2560x1440 NVN allocations, including colour formats `0x38` / `0x3f` and depth/stencil `0x35`, with matching storage. This proves a change to internal colour/depth targets and scene viewport, independently of window scaling. The game-frame screenshot was still 1600x900. It does **not** establish correct shading, scanning, cutscenes or performance. The default comparison and the rerun using the complete captured subset are recorded separately below when complete.
+
+### Reproduce and verify
+
+All game-derived outputs stay under the NSP folder. The single reusable build is `<NSP folder>/010019A01E2F2000_build`; diagnostics and isolated test saves are under `<NSP folder>/010019A01E2F2000-work/runtime-test`. No installed app or original dump is changed. Merged extraction passed; the split's map, facts and pairs match the repository profile row for row. Only the stages requested by the route were compiled, into `shader/partial`, sharing `shader/cache/cas.db` with a future full build. The chain and shader inputs are unchanged. A partial library intentionally has no full-library stamp or c1/extent tables and logs that limitation.
+
+1. Build the host from this worktree: `make -C dm/host GAME=010019A01E2F2000`. Run the targeted tests below before any expensive build.
+2. Rewrite `main`, `subsdk0`, `sdk` from `extract/v131072/ExeFS` with `DM_GAME=010019A01E2F2000` and `dm/tools/patch_nso.py`, into `patched_v131072`. The existing NSP build's rewrite step now does this and generates `main.runtime.tsv` automatically. To regenerate just the manifest after rewriting:
+
+   ```sh
+   python3 dm/games/010019A01E2F2000/runtime_patches.py \
+     "<build>/extract/v131072/ExeFS/main" \
+     "<build>/patched_v131072/main.patched.bin" \
+     "<build>/patched_v131072/main.runtime.tsv"
+   ```
+
+3. In an isolated test-run folder, with an empty test save directory and a temporary directory, run the same route twice, first with `MODE=default`, then with `MODE=1440p`. `MODE` below is a shell variable. Use the compatible partial cache already prepared; this command does not compile shaders:
+
+   ```sh
+   DM_INTERNAL_RESOLUTION="$MODE" \
+   DM_ROMFS="<build>/extract/v131072/RomFS.img" \
+   DM_MSL_DIR="<build>/shader/partial" \
+   DM_NVN_SHMAP="<worktree>/dm/games/010019A01E2F2000/shader_map.tsv" \
+   DM_SAVE="<test-run>/save" DM_TEMP="<test-run>/temp" \
+   DM_PSO_PREBUILD=0 DM_METAL_HUD=1 DM_PRESENT_UPSCALE=off \
+   DM_NVN_PASSDUMP=every:600 DM_NVN_TEXINFO=2560x1440 \
+   DM_CTL="<test-run>/ctl.txt" \
+   DM_KEYS='65:A~0.4,70:A~0.3,75:A~0.3,80:A~0.3,230:LUp~1,234:A~0.3' \
+   "<worktree>/dm/host/dmhost" "<build>/patched_v131072" main subsdk0 sdk \
+     > "<test-run>/log.txt" 2>&1
+   ```
+
+4. Let the run reach the opening/first area. Append `shot <absolute PNG path>` to `ctl.txt` to capture the game's own frame. Compare `P` colour and depth attachment dimensions and `O` viewport dimensions in **scene** frames; a screenshot's pixel size or a `present` line alone is insufficient. Confirm actual draws have shaders/pipelines and are not skipped. Expected 1440p scene attachments and viewport are 2560x1440; the original output may remain 1600x900.
+5. Compare the same stationary scene, HUD proportions, depth/fog/bloom, shadows, transparency and cutscene framing. Exercise targeting/scanning and dynamic-resolution pressure, and check saving/loading and transitions. Missing-library lines invalidate visual conclusions. Capture frame-time/GPU distributions on an idle Mac with diagnostics off before claiming performance parity. Do not promote the setting to the launcher until these checks pass.
+
+Automated checks: `make -C dm/host/tests runtime-patch` (29 C cases, also passed with AddressSanitizer/UBSan); `python3 -m unittest dm.tools.tests.test_runtime_patch dm.tools.tests.test_nro_pack dm.tools.tests.test_patches dm.tools.tests.test_docs`; `test_nsp_mac_app` and `test_nsp_chain`. Use the shared recent-Python tool environment with Capstone installed. The Mac host builds. Focused clang-tidy on the loader and parser test has no findings above the existing baseline. Python lint has the same unrelated `dmsh_entry.py` unused import and dependency-related baseline discrepancies on main and this branch; no new finding from these changes remains.
+
+The regression harness was attempted with `check --games 010019A01E2F2000 --quick`, but refused discovery because this manually prepared partial build has no managed `tools/dmhost` Mac-build record. No harness comparison or cross-game gameplay claim is made. Its temporary source checkouts were removed. This change has one game-specific active path; other games without a runtime manifest take the no-op loader path, covered by focused tests. Full game shader compilation remains deferred.
+
+
+Actual host rejection checks also passed for five cases before `nnMain`: unsupported `4K` selection, wrong build ID even with default selected, a `SIZE_MAX` offset, mismatched expected instructions, and a missing manifest with 1440p requested. The tests linked the existing rewritten binaries into a small diagnostic folder; no code or original module file was modified. Results: `<NSP folder>/010019A01E2F2000-work/runtime-test/rejections/results.json`.
+
+Front-ends: new: Mac module bundles can contain `*.runtime.tsv`; preserve these files with the rewritten modules. Their presence is not evidence that a graphics choice is validated or should appear in the launcher.

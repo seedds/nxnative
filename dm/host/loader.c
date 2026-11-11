@@ -792,6 +792,23 @@ static uint8_t *slurp(const char *path, size_t *n) {
     close(fd); *n = st.st_size; return p;
 }
 
+#include "runtime_patch.h"
+static void runtime_patches(module_t *m, const char *dir) {
+    char path[1024]; snprintf(path, sizeof path, "%s/%s.runtime.tsv", dir, m->name);
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        if (errno != ENOENT) die("[RED] cannot open runtime patches: %s", path);
+        const char *v = getenv("DM_INTERNAL_RESOLUTION");
+        if (!strcmp(m->name, "main") && v && strcmp(v, "default")) die("[RED] DM_INTERNAL_RESOLUTION=%s: this build has no runtime patch manifest", v);
+        return;
+    }
+    char error[256]; unsigned applied;
+    int rc = runtime_patch_apply(f, m->build_id, m->text_end, m->base, m->size, error, sizeof error, &applied);
+    fclose(f);
+    if (rc) die("[RED] %s runtime patches rejected: %s", m->name, error);
+    LOG("%s runtime patches: %u writes applied (default applies none)", m->name, applied);
+}
+
 // Seal the code area immediately after copying into anonymous pages (16 KB pages): [0, text_end) and the patch area are read-only+execute, and from then on any write to the code area crashes on the spot;
 // what lies between (ro and data on the same page can only go together) is writable
 static void map_image(module_t *m, const char *dir) {
@@ -809,7 +826,7 @@ static void map_image(module_t *m, const char *dir) {
         if (a == MAP_FAILED) die("%s mmap %#llx", m->name, (unsigned long long)(pre + m->size));
         m->base = a + pre;
         memcpy(m->base, raw, fl); memcpy(a, raw + fl, sz - bl - fl); if (bl) memcpy(m->base + m->back_off, raw + sz - bl, bl);
-        free(raw); install_key_page(m);
+        free(raw); install_key_page(m); runtime_patches(m, dir);
         if (bl && mprotect(m->base + m->back_off, bl, PROT_READ | PROT_EXEC)) die("%s mprotect back patch", m->name);
         uint64_t rx = (m->text_end + 0x3FFF) & ~0x3FFFull;
         if (mprotect(m->base, rx, PROT_READ | PROT_EXEC)) die("%s mprotect text", m->name);
@@ -821,7 +838,7 @@ static void map_image(module_t *m, const char *dir) {
     uint8_t *slot = jit_slot(m, m->size, 0);
     m->base = mmap(slot, m->size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | (slot ? MAP_FIXED : 0), -1, 0);
     if (m->base == MAP_FAILED) die("%s mmap", m->name);
-    memcpy(m->base, raw, sz); free(raw); install_key_page(m);
+    memcpy(m->base, raw, sz); free(raw); install_key_page(m); runtime_patches(m, dir);
     uint64_t rx = (m->text_end + 0x3FFF) & ~0x3FFFull;
     if (mprotect(m->base, rx, PROT_READ | PROT_EXEC)) die("%s mprotect text", m->name);
     uint64_t po = m->patch_off & ~0x3FFFull;

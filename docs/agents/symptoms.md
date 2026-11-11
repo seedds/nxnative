@@ -120,6 +120,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - `regress.py check` stops before gameplay with `CUTS of build ... in both ...`, naming a revision profile and its copied harness profile. → [Regression rewrites register copied profiles twice](../reference/rewriter.md#regression-rewrites-register-copied-profiles-twice)
 - packing spends most of the rewrite step on the x18 scan and the spin-wait search, using one core per module. Cancelling a parallel rewrite can leave its workers running; `DM_REWRITE_J=0` or a negative value can silently omit spin gates, and the NSP script can ignore an explicit worker limit. → [Parallel scans preserve rewrite output](../reference/rewriter.md#parallel-scans-preserve-rewrite-output)
 - a rewrite never ends, using no CPU: `patch_nso.py` waits in `wait4` and one forked worker of the same command in `sem_wait`, in `multiprocessing/queues.py` `get`, having run no job. It is rare and needs small jobs (about 1 in 6,000 pools of tiny jobs under load). Separately, a SIGTERM could be ignored until the rewrite ended, or leave workers behind. → [A pool's shutdown hangs on a worker that has just started](../reference/rewriter.md#a-pools-shutdown-hangs-on-a-worker-that-has-just-started)
+- a build-specific graphics choice needs different instructions at launch, while changing only the Mac window size leaves the internal render targets unchanged. → [Validated Mac runtime patch manifests](../reference/rewriter.md#validated-mac-runtime-patch-manifests)
 
 ## Memory and address space
 

@@ -62,6 +62,25 @@ class NroPack(unittest.TestCase):
         self.assertFalse((self.tmp / 'nro_test').exists())
         self.assertEqual(self.rewrites, 2)
 
+    def test_runtime_generator_and_helper_invalidate_and_missing_manifest_regenerates(self):
+        self.g.dir = self.repo / 'dm/games/0100000000000001'
+        self.g.dir.mkdir(parents=True)
+        gen = self.g.dir / 'runtime_patches.py'; gen.write_text('v1')
+        helper = self.repo / 'dm/tools/runtime_patch.py'; helper.write_text('helper1')
+        original_run = self.collect
+        generated = []
+        def run(cmd, log, **kwargs):
+            if str(cmd[1]) == str(gen):
+                generated.append(1); Path(cmd[4]).write_text('manifest')
+            else:
+                original_run(cmd, log, **kwargs)
+        with mock.patch.object(nsp, 'run', run):
+            self.build(); self.build(); self.assertEqual(len(generated), 1)
+            gen.write_text('v2'); self.build(); self.assertEqual(len(generated), 2)
+            helper.write_text('helper2'); self.build(); self.assertEqual(len(generated), 3)
+            (self.out / 'main.runtime.tsv').unlink(); self.build(); self.assertEqual(len(generated), 4)
+            gen.unlink(); self.build(); self.assertFalse((self.out / 'main.runtime.tsv').exists())
+
     def test_unknown_build_reuse_counts_selected_rules_and_matcher(self):
         selected = self.repo / 'dm/games/0100000000000001/patches.py'
         foreign = self.repo / 'dm/games/0100000000000002/patches.py'

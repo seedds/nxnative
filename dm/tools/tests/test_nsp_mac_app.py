@@ -222,6 +222,16 @@ class PackReuse(unittest.TestCase):
                 p.with_name('added').rename(p.with_name('renamed')); self.assert_repacked()
         (self.tmp / 'romfs/new-empty').mkdir(); self.assert_repacked()
 
+    def test_runtime_manifest_is_bundled_and_invalidates_reuse(self):
+        src = self.tmp / 'patched/main.runtime.tsv'
+        src.write_text('DMRT1 fixture 1')
+        self.pack(); self.assert_reused()
+        dst = Path(self.args.out) / 'Contents/Resources/dm/main.runtime.tsv'
+        self.assertEqual(dst.read_text(), src.read_text())
+        src.write_text('DMRT1 fixture 2'); self.assert_repacked()
+        self.assertEqual(dst.read_text(), src.read_text())
+        src.unlink(); self.assert_repacked(); self.assertFalse(dst.exists())
+
     def test_image_is_copied_once_and_its_changes_invalidate_reuse(self):
         import romfs_image
         source = self.tmp / 'romfs'; image = self.tmp / 'RomFS.img'

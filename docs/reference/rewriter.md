@@ -472,3 +472,17 @@ To enroll a cut for any game's own module:
 ## Checking a rewriter change
 
 Rewrite every extracted module of every title with the old and the new `patch_nso.py` and compare all outputs; only `build_src.sha256` (the rewriter's own hash) may differ for titles the change is not meant for.
+
+
+## Runtime graphics configuration
+
+### Validated Mac runtime patch manifests
+
+- **Symptom:** a build-specific graphics choice needs different instructions at launch, while changing only the Mac window size leaves the internal render targets unchanged.
+- **Cause:** some engines encode scene allocation dimensions in their own code. The normal rewriter must preserve a working default and must not overwrite a site it moved for the host.
+- **Fix:** adapt the launch-time selection idea from [PR 519](https://github.com/seedds/nxnative/pull/519) as strict `DMRT1` manifests. A profile's `runtime_patches.py` runs after rewriting `main`, with original NSO, rewritten binary and output manifest paths. Both it and `dm/tools/runtime_patch.py` enter the rewrite cache key; removing the generator or manifest regenerates the output. Derived profiles of unregistered builds omit the generator. Mac packing copies `*.runtime.tsv` alongside the modules.
+- **Format:** header `DMRT1<TAB>build-id<TAB>text-end-hex<TAB>DM_VARIABLE`; `choice<TAB>value` rows, including `default`; then `write<TAB>value<TAB>offset-hex<TAB>expected-hex<TAB>replacement-hex` rows. Hex is lowercase without `0x`. Writes must be whole instructions (4-byte aligned, 4 to 64 bytes), inside original text, equal-length and non-overlapping within a choice. Default has no writes. The file allows at most 16 choices and 1,024 writes; it supports neither environment assignments nor unconditional writes.
+- **Validation:** the generator checks the complete original NSO build ID, registered fixup identity/layout and every original instruction against both original and rewritten images. `runtime_patch.h` parses and checks the complete manifest, including inactive rows, before any write; mismatched build/layout, unknown selection, unexpected bytes, malformed fields, overflow, overlap or out-of-text offsets reject loading. On the Mac it runs in both image layouts before executable protection is applied. Missing manifests are inert unless `DM_INTERNAL_RESOLUTION` requests a non-default mode, which rejects loading. iOS signed code is not modified.
+- **Stub exports:** a profile's `STUBS` callback may add a name and newly assembled entry offset to `ctx.runtime_exports`. The rewriter writes `# RUNTIME_<NAME>` in the fixup header. Reserving a stub does not require redirecting an original instruction: the runtime manifest can select that branch, leaving the default path unchanged. Generators verify the stub location and instructions too. These exports are metadata, not validated launcher capabilities.
+- **Check:** `make -C dm/host/tests runtime-patch` (selection, no-write default, transactional failure, mismatched identities/layouts, invalid/overflowed/unaligned/out-of-text offsets, overlaps, malformed hex and unsupported records); `test_runtime_patch.py` (generator and scene-descriptor ABI); `test_nro_pack.py` (generator/helper invalidation and missing/removed manifests).
+- **Found on:** [Metroid Prime 4: Beyond](../../dm/games/010019A01E2F2000/README.md#experimental-1440p-internal-scene-rendering-open), experimental 1.1.0 scene allocation. Gameplay validation remains in the game note.

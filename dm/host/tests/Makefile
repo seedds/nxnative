@@ -409,3 +409,11 @@ coverage:
 	rm -rf $(B)/cov/prof
 	LLVM_PROFILE_FILE="$(call cov_profile,$(B)/cov)" $(MAKE) -i B=$(B)/cov SAN="$(COV_FLAGS)" run
 	@$(call cov_export,$(B)/cov)
+
+# No game files, frameworks or profile needed.
+run: runtime-patch
+.PHONY: runtime-patch
+runtime-patch: $(B)/t_runtime_patch
+	$(B)/t_runtime_patch
+$(B)/t_runtime_patch: t_runtime_patch.c ../runtime_patch.h | $(B)
+	$(CLANG) -O1 -g -Wall -Wextra -Werror -o $@ $<

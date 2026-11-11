@@ -341,6 +341,8 @@ static void file_wire(id<MTLAllocation> r) {
     }
     g_fwire[g_nfwire].p = (void *)lo; g_fwire[g_nfwire++].n = hi - lo;
 }
+static uint64_t g_fwire_peak, g_res_peak;   // since the last residency line: the most file-backed bytes wired before one commit, the largest set after a commit
+static _Atomic uint64_t g_ubs_live, g_ubs_peak;   // bytes of the upload batches' buffers over guest memory (up_big_src) in the set now, and the most at once since the last residency line
 static void file_unwire(fwire_t *fw, size_t n) { for (size_t i = 0; i < n; i++) munlock(fw[i].p, fw[i].n); free(fw); }   // a range the game has mapped anew meanwhile fails, harmlessly
 // Both run on guest threads too (pool_res from mtl_addr, uploads), whose implicit autorelease pools never drain; containsObject: / removeObject: on a weak NSHashTable leave the object
 // autoreleased in the calling thread's pool (measured in a standalone test: the object outlived its last strong reference until the thread ended), so each has a pool of its own
@@ -576,13 +578,14 @@ static void res_commit(void) { @autoreleasepool {
     pthread_mutex_lock(&g_res_mu);
     res_op *q = g_res_q; size_t n = g_res_qn; g_res_q = NULL; g_res_qn = g_res_qcap = 0;
     fwire_t *fw = g_fwire; size_t nfw = g_nfwire; g_fwire = NULL; g_nfwire = g_cfwire = 0;   // the file pages wired for exactly these changes
+    { uint64_t b = 0; for (size_t i = 0; i < nfw; i++) b += fw[i].n; if (b > g_fwire_peak) g_fwire_peak = b; }
     pthread_mutex_unlock(&g_res_mu);
     if (n) {
         uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
         for (size_t i = 0; i < n; i++) { if (q[i].add) [g_res addAllocation:(__bridge id<MTLAllocation>)q[i].o]; else [g_res removeAllocation:(__bridge id<MTLAllocation>)q[i].o]; }
         [g_res commit];
-        uint64_t dt = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0;
-        pthread_mutex_lock(&g_res_mu); g_rs_commits++; g_rs_commit_ns += dt; pthread_mutex_unlock(&g_res_mu);
+        uint64_t dt = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0, z = g_res.allocatedSize;   // the set after the commit, read under g_res_commit_mu
+        pthread_mutex_lock(&g_res_mu); g_rs_commits++; g_rs_commit_ns += dt; if (z > g_res_peak) g_res_peak = z; pthread_mutex_unlock(&g_res_mu);
     }
     file_unwire(fw, nfw);   // after the commit that made those buffers resident; under g_res_commit_mu, so a later commit cannot run before them
     pthread_mutex_unlock(&g_res_commit_mu);
@@ -644,8 +647,10 @@ void mtl_res_stats(char *out, size_t n) {
     for (int i = 0; i < 4 && o < n; i++) { int best = -1; for (int k = 0; k < RS_SITES; k++) if (g_rs_site[k].n && (best < 0 || g_rs_site[k].bytes > g_rs_site[best].bytes)) best = k;
         if (best < 0) break; o += snprintf(out + o, n - o, "%sline %d: %llu, %.0f MB", i ? ", " : "", g_rs_site[best].line, (unsigned long long)g_rs_site[best].n, g_rs_site[best].bytes / 1048576.0); g_rs_site[best].n = 0; }
     if (o < n) snprintf(out + o, n - o, "), removed %llu, %lu allocations in the set (%.0f MB)", (unsigned long long)g_rs_rm, set_n, set_mb);
-    if (g_fwire_n + g_fwire_fail) { o = strlen(out); if (o < n) snprintf(out + o, n - o, ", file-backed buffers wired before their commit %llu, %.0f MB, %.1f ms (refused %llu)", (unsigned long long)g_fwire_n, g_fwire_bytes / 1048576.0, g_fwire_ns / 1e6, (unsigned long long)g_fwire_fail); }
-    g_fwire_n = g_fwire_bytes = g_fwire_ns = 0;
+    { o = strlen(out); if (o < n) snprintf(out + o, n - o, ", at most %.0f MB after a commit", g_res_peak / 1048576.0); }
+    if (g_fwire_n + g_fwire_fail) { o = strlen(out); if (o < n) snprintf(out + o, n - o, ", file-backed buffers wired before their commit %llu, %.0f MB, %.1f ms, at most %.0f MB before one commit (refused %llu)", (unsigned long long)g_fwire_n, g_fwire_bytes / 1048576.0, g_fwire_ns / 1e6, g_fwire_peak / 1048576.0, (unsigned long long)g_fwire_fail); }
+    { uint64_t pk = atomic_exchange(&g_ubs_peak, atomic_load(&g_ubs_live)); if (pk) { o = strlen(out); if (o < n) snprintf(out + o, n - o, ", upload reads over guest memory at most %.0f MB at once", pk / 1048576.0); } }
+    g_fwire_n = g_fwire_bytes = g_fwire_ns = g_fwire_peak = 0; g_res_peak = (uint64_t)(set_mb * 1048576.0);   // set_mb: the set's size main reads under g_res_commit_mu
     memset(g_rs_site, 0, sizeof g_rs_site); g_rs_rm = g_rs_commits = g_rs_commit_ns = 0;
     uint64_t held = g_res ? g_res.allocatedSize : 0;
     pthread_mutex_unlock(&g_res_mu);
@@ -3306,6 +3311,12 @@ static NSMutableArray *g_up_keep;
 // texture larger than the budget gets its own block (uploads are not tiled here).
 static size_t g_up_staging_bytes;
 #define UP_BATCH_BYTES (128u * 1024u * 1024u)
+// The same for the batch's zero-copy buffers over guest memory (up_big_src): each joins the residency set, which wires its pages, until the batch completes. With the guest's memory in
+// files (iOS, DM_GUEST_FILE) those are file pages, wired first by file_wire. Uncounted, Ocarina of Time's field load put 732 MB of them in the set on an iPhone 17 within seconds, 1,022 MB
+// of file pages wired before the commits, and the phone, 5.56 GB wired of 8, ended the app for thrashing. Past this budget the batch is flushed at the next texture's start, and up_begin
+// waits for a slot of three: at most about three budgets are wired at once. DM_NVN_UPLOAD_SRC_MB sets it (0: no budget)
+static size_t g_up_big_batch;   // bytes of up_big_src buffers in the open batch
+static size_t up_big_budget(void) { static long mb = -1; if (mb < 0) { const char *e = getenv("DM_NVN_UPLOAD_SRC_MB"); mb = e && *e ? atol(e) : 96; if (mb < 0) mb = 96; } return (size_t)mb << 20; }
 
 
 // The upload command buffer was discarded by the system (dropped along during GPU error recovery; the first frame on entering Travincal drops one every run): the objects of this batch of textures are built and the timestamps updated, but the content was never written in,
@@ -3341,6 +3352,7 @@ static void up_flush(void) {
     NSMutableArray *staging = g_up_keep;
     if (g_up_block && !up_retained(g_up_block, slot)) [staging addObject:g_up_block];
     NSMutableArray *views = g_up_views; g_up_views = nil;
+    uint64_t big = g_up_big_batch; g_up_big_batch = 0;
     g_up_keep = nil; g_up_block = nil;
     g_up_block_off = g_up_block_size = g_up_staging_bytes = 0;
     NSMutableSet *targets = [NSMutableSet setWithArray:g_up_texs]; for (int i = 0; i < g_nup_blits; i++) if (g_up_blits[i].dst) [targets addObject:g_up_blits[i].dst];
@@ -3361,6 +3373,7 @@ static void up_flush(void) {
         @autoreleasepool {
             for (id<MTLResource> obj in staging) res_remove(obj);
             [staging removeAllObjects];
+            atomic_fetch_sub(&g_ubs_live, big);
             [views removeAllObjects];   // upload-only integer views share their targets' residency
             res_commit();
         }
@@ -3589,17 +3602,21 @@ static void rb_swap_rows(uint8_t *p, size_t wb, size_t rows, size_t nz, size_t r
 // nil elsewhere (or if it is refused: the caller looks the address up as usual). The GPU only reads it, so it is made over the pages the upload has just protected, not through pool_buf,
 // which would make them writable again and the texture count as written at once
 static uint64_t g_up_src_made;   // source buffers made (t_upload_src)
-static id<MTLBuffer> up_big_src(uint64_t addr, uint64_t len, uint64_t *off) {
+static id<MTLBuffer> up_big_src(uint64_t addr, uint64_t len, uint64_t *off, int may_split) {   // may_split: called at a texture's start, so the batch may be flushed first (up_big_budget)
     // Not once the raw memory table holds the whole pool (big_full): the lookup finds that buffer. Ocarina of Time's first scene made 4,664 of these in one batch, 2.1 GB counted against the working set for pages already wired
     pthread_mutex_lock(&g_mu); int k = big_of(addr), in = k >= 0 && !g_big[k].full;
     if (k < 0 && len) { int i = pool_find(addr, len); in = i >= 0 && !g_pools[i].res && !addr_meets(g_pools[i].lo, g_pools[i].hi); }
     pthread_mutex_unlock(&g_mu);
     if (!in || !len) return nil;
     uintptr_t pg = (uintptr_t)getpagesize(), a = (uintptr_t)addr & ~(pg - 1), b = ((uintptr_t)addr + len + pg - 1) & ~(pg - 1);
+    if (may_split && g_up_big_batch && up_big_budget() && g_up_big_batch + (b - a) > up_big_budget()) { up_flush(); up_begin(); }
     id<MTLBuffer> buf = [g_dev newBufferWithBytesNoCopy:(void *)a length:b - a options:MTLResourceStorageModeShared deallocator:nil];
     if (!buf) return nil;
     g_up_src_made++;
     res_add(buf); [g_up_keep addObject:buf]; *off = (uint64_t)addr - a;
+    g_up_big_batch += b - a;
+    uint64_t live = atomic_fetch_add(&g_ubs_live, b - a) + (b - a), pk = atomic_load(&g_ubs_peak);
+    while (live > pk && !atomic_compare_exchange_weak(&g_ubs_peak, &pk, live)) {}
     return buf;
 }
 // A re-upload read every layer and level of a texture from guest memory when one page of it was written. Ocarina of Time fills a 1800x1380x8 RGBA8 array (38.5 MB) layer by layer
@@ -3687,7 +3704,7 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
     void *mb; uint64_t mo;
     // A texture in a large pool (BIG_MIN) or one that holds only textures is read through a buffer of its own, held by the upload batch: a one-time read must not leave that memory wired for good
     id<MTLBuffer> upsrc = nil; unsigned src_batch = 0;   // the upload batch that holds upsrc (g_up_seq)
-    if (!linear && !rb_shift && !sparse && g_nvn_deswz_gpu) { up_begin(); src_batch = g_up_seq; upsrc = up_big_src((uint64_t)t->mem, t->L.size, &mo); if (upsrc) mb = (__bridge void *)upsrc; }
+    if (!linear && !rb_shift && !sparse && g_nvn_deswz_gpu) { up_begin(); upsrc = up_big_src((uint64_t)t->mem, t->L.size, &mo, 1); src_batch = g_up_seq; if (upsrc) mb = (__bridge void *)upsrc; }   // up_big_src may flush and begin a batch (its budget)
     t_tex_upload_lookup = 1;
     int use_gpu = !linear && !rb_shift && !sparse && g_nvn_deswz_gpu && (upsrc || mtl_addr((uint64_t)t->mem, t->L.size, &mb, &mo));   // a sparse pool's texture is gathered through its page table on the CPU
     t_tex_upload_lookup = 0;
@@ -3715,7 +3732,7 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
         id<MTLBuffer> stg = up_alloc(total ? total : 16, &stg_off);
         // up_alloc may have flushed the batch that held the first source buffer: only then the new batch needs one of its own. Made for every texture, each staged upload from a large pool
         // put its storage twice into the residency set (Switch Sports Resort's first court frame: 855 textures, 1.8 GB of source buffers for 908 MB of storage; t_upload_src)
-        if (upsrc && g_up_seq != src_batch) { uint64_t mo2; id<MTLBuffer> u2 = up_big_src((uint64_t)t->mem, t->L.size, &mo2); if (u2) { upsrc = u2; mb = (__bridge void *)u2; mo = mo2; } }
+        if (upsrc && g_up_seq != src_batch) { uint64_t mo2; id<MTLBuffer> u2 = up_big_src((uint64_t)t->mem, t->L.size, &mo2, 0); if (u2) { upsrc = u2; mb = (__bridge void *)u2; mo = mo2; } }
         size_t off = 0; int enc_ok = g_up_ce != nil, nb0 = g_nup_blits;
         for (unsigned l = drop; enc_ok && l < d.mipmapLevelCount + drop; l++) {
             uint32_t w = MAX(t->d.width >> l, 1u), h = MAX(t->d.height >> l, 1u), z = t->d.target == 2 ? MAX(t->d.depth >> l, 1u) : 1;

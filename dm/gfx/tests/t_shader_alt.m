@@ -30,12 +30,13 @@ int main(void) { @autoreleasepool {
         lib(alt, @"fx_b", [NSString stringWithFormat:f, 0, 1]) ||
         lib(game, @"fu_b", fu) || lib(alt, @"fu_b", [NSString stringWithFormat:f, 0, 1])) {                                    // fu: the variant lacks an entry point
         printf("t_shader_alt: no Metal compiler (xcrun metal), not run\n"); return 0; }
-    for (NSString *k in @[@"f1", @"f2", @"fx"]) put([game stringByAppendingFormat:@"/%@_b.json", k], [NSString stringWithFormat:@"{\"chain\": \"%s\", \"entry\": \"main0\"}", DMSH_CHAIN]);
-    put([game stringByAppendingPathComponent:@"fu_b.json"], [NSString stringWithFormat:@"{\"chain\": \"%s\", \"entry\": \"main0\", \"entry_u\": \"main0_u\"}", DMSH_CHAIN]);
+    for (NSString *k in @[@"f1", @"f2", @"fx"]) put([game stringByAppendingFormat:@"/%@_b.json", k], [NSString stringWithFormat:@"{\"chain\": \"%s\", \"route\": \"B\", \"entry\": \"main0\", \"bindings\": [], \"vertex_inputs\": []}", DMSH_CHAIN]);
+    put([game stringByAppendingPathComponent:@"fu_b.json"], [NSString stringWithFormat:@"{\"chain\": \"%s\", \"route\": \"B\", \"entry\": \"main0\", \"entry_u\": \"main0_u\", \"bindings\": [], \"vertex_inputs\": []}", DMSH_CHAIN]);
     setenv("DM_MSL_DIR", game.UTF8String, 1); setenv("DM_AB", "10", 1); setenv("DM_NVN_SHADER_ALT", alt.UTF8String, 1); setenv("DM_NVN_SHADER_ALT_AB", "ab", 1);
     mtl_init(); g_msl_dir = game;   // the fixture is the library directory itself (no b-<chain> folder)
     NvShader *s1 = shader_load(@"f1_b", 1, 0), *s2 = shader_load(@"f2_b", 1, 0), *sx = shader_load(@"fx_b", 1, 0), *su = shader_load(@"fu_b", 1, 0);
     CHECK(s1 && s2 && sx && su);
+    if (!(s1 && s2 && sx && su)) { printf("t_shader_alt: %d checks, %d failed (the fixtures did not load)\n", checks, failed); return 1; }
     static prog_t p1, p2, px, pu; NvProg *b1 = prog_of(&p1, 98001, s1), *b2 = prog_of(&p2, 98002, s2), *bx = prog_of(&px, 98003, sx), *bu = prog_of(&pu, 98004, su);
     atomic_store(&g_ab_phase, 0);
     CHECK(prog_get(&p1) == b1);   // phase 0: the game's

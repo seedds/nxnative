@@ -816,6 +816,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** `SetDepthClamp` is recorded (`OP_DEPTH_CLAMP`) and replayed as Metal's depth clip mode (it used to be ignored).
 - **Found on:** [Fire Emblem: Three Houses](../../dm/games/010055D009F78000/README.md) (the game turns it on).
 
+### Depth on the far plane
+
+- **Symptom:** blocks of another sky layer in the sky, in stair-stepped squares and half squares that follow the dome's mesh. In Mario Kart 8 Deluxe's Sky-High Sundae, salmon-red blocks of the sunset panorama show through the blue sky, the same blocks every time from the same camera.
+- **Cause:** a vertex shader that stores one value in gl_Position z and w puts every vertex at the far value, the usual way to draw a sky. NVIDIA's GPU fills such a triangle with exactly that value. Apple's rasterizer does not: in a test on an Apple M5, 2,000 random triangles a frame with z = w into a `Depth32Float` target, 43 % of the pixels came out below 1.0, down to 1 − 2⁻²³. With the GL convention's z' = z/2 + w/2, which keeps z = w, 26 to 36 % did in two runs. Two layers drawn there then fight. Sundae draws a red panorama and then a blue dome over it, and where the panorama landed one step in front, the blue failed its depth test. The rounding is in the rasterizer, not in the translation: z and w are bit-identical at every vertex.
+- **Fix:** the build marks such vertex shaders (`dmsh_reflect.py` `far_plane`: the last stores to z and w are one register defined once, or one constant, with no branches; reflection `raster.far`, `nvn_refl` `pos_far`). The host draws them with a constant depth bias of 16 units towards the far value and depth clamping (`nvn_mtl.m` `draw`), which puts every pixel exactly on the far value: in the same test, 2 units already left none below it. The bias's sign follows the viewport's depth range. A draw that sets the game's own polygon offset keeps it, and a program with a geometry or tessellation stage is left alone. This is a workaround for the platform's rasterizer, which cannot be changed.
+- **Found on:** [Mario Kart 8 Deluxe](../../dm/games/0100152000022000/README.md#found-on-this-game) (245 of its 12,530 vertex shaders: the skies, and full-screen passes at depth 1).
+
 ### Telling depth rejection from no rasterization
 
 - `DM_NVN_DEPTHOVR` (depth test forced to `ALWAYS`) with `HILITE` tells "rejected by depth" from "never rasterized". `TEXSNAP` copies used to run before the pass they were meant to show (classic-queue command buffer committed ahead of the Metal 4 one); they now go through the replay's copy encoder.

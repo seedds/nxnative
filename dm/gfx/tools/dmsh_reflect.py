@@ -37,19 +37,37 @@ def has_word(src, text):
         i = src.find(text, i + 1)
     return False
 
+def far_plane(body):
+    """Whether a vertex shader's main function draws on the far plane: the last stores to gl_Position.z and .w are one value (a register or the same constant), with no branches,
+    no store of the whole position or of a swizzle, and the register defined once. z = w puts every vertex at depth 1, the usual way to draw a sky; the host draws these with a
+    depth bias towards the far value and depth clamping (nvn_mtl.m draw), because Apple's rasterizer gives such triangles depths up to 2^-23 below 1 (docs/reference/rendering.md,
+    Depth on the far plane). The GL convention's z' = z/2 + w/2 (vs_depth) is the last store of main0 and keeps z = w, so it is skipped"""
+    if re.search(r'\b(if|for|while|switch|do)\b', body) or re.search(r'out\.gl_Position(?:\.[xyzw]{2,})?\s*=[^=]', body): return False
+    last = {}
+    for m in re.finditer(r'out\.gl_Position\.([zw])\s*=\s*([^;]+);', body):
+        v = m.group(2).strip()
+        if m.group(1) == 'z' and v == 'fma(out.gl_Position.z, 0.5, out.gl_Position.w * 0.5)': continue
+        last[m.group(1)] = v
+    v = last.get('z')
+    if not v or v != last.get('w') or v in ('0.0', '-0.0'): return False
+    if re.fullmatch(r'_\d+', v): return len(re.findall(r'(?<![\w.])%s\s*=[^=]' % re.escape(v), body)) == 1
+    return re.fullmatch(r'-?\d+\.\d*(?:e[+-]?\d+)?', v) is not None
+
 def raster_facts(stage, src):
     """Static facts needed for the runtime proof that the load can be skipped (full-coverage first draw) (nvn_mtl.m first_draw_covers):
         Vertex: whether position x / y / z are taken unchanged from the .x / .y / .z of one and the same vertex attribute (w is the constant 1 or the same attribute's .w), with no branches and no clip distances in the main function - if so, pos_attr = attribute slot;
         Fragment: whether it may discard (discard_fragment), whether it writes sample_mask, and which color indices it writes. Anything unrecognized is treated as "unprovable" (pos_attr = -1 / discard = 1).
         Also, not for that proof: whether a fragment shader reads the primitive ID, which a specialized Metal 4 pipeline does not give it (nvn_mtl.m pso_build_ex), and a vertex shader's
-        clip → screen varyings (screen, dmsh_fetch.py screen_varyings), the vertex side of the same-pixel proof for a projective sample's tile read (nvn_mtl.m fb_tile_plan)"""
+        clip → screen varyings (screen, dmsh_fetch.py screen_varyings), the vertex side of the same-pixel proof for a projective sample's tile read (nvn_mtl.m fb_tile_plan), and whether it
+        draws on the far plane (far, far_plane)"""
     if stage == 'ps':
         out = re.search(r'struct main0_out\s*\{(.*?)\};', src, re.S)
         return {'discard': int('discard_fragment' in src), 'sample_mask': int('sample_mask' in (out.group(1) if out else '')), 'primitive_id': int('[[primitive_id]]' in src),
                 'colors': sorted({int(x) for x in re.findall(r'\[\[color\((\d+)\)\]\]', out.group(1) if out else '')})}
     if stage != 'vs': return {}
-    scr = {'screen': dmsh_fetch.screen_varyings(src)}   # clip → screen varyings (dmsh_fetch.py): the vertex side of a projective sample's tile read
+    scr: dict[str, object] = {'screen': dmsh_fetch.screen_varyings(src)}   # clip → screen varyings (dmsh_fetch.py): the vertex side of a projective sample's tile read
     body = re.search(r'\bvertex\s+\w+\s+\w+\s*\(.*?\)\s*\{(.*)\}\s*$', src, re.S)   # the main function is the last function in the file
+    if body and far_plane(body.group(1)): scr['far'] = 1
     if not body or re.search(r'\b(if|for|while|switch|do)\b|clip_distance|ClipDistance', body.group(1)): return {'pos_attr': -1, **scr}
     b = body.group(1)
     attr = {m.group(2): int(m.group(3)) for m in attributes(src)}

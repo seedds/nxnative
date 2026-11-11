@@ -61,6 +61,7 @@ The game builds Mii heads from the console's MiiModel system data, starting at b
 
 ## Found on this game
 
+- **Sky-High Sundae's sky in red blocks (resolved, Mac):** the blue dome lost its depth test against the sunset panorama under it by one rounding step: [Depth on the far plane](../../../docs/reference/rendering.md#depth-on-the-far-plane). A depth bias with clamping on the course's four dome shaders removed the blocks in an on/off test of the same frame; the fix covers every vertex shader with z = w, and the course was checked in play on an M5 MacBook Air.
 - **Display sleep during controller play on the Mac (resolved, player-confirmed):** [Mac display sleep during controller play](../../../docs/reference/services.md#mac-display-sleep-during-controller-play).
 - **Resolved in the sanitizer audit:** [Unaligned command headers during layout probing](../../../docs/reference/audio.md#unaligned-command-headers-during-layout-probing), reproduced with the SDK 4 command-list fixture.
 

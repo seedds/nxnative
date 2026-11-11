@@ -4,7 +4,7 @@
 # vs_layer, layer_out, vs_layer_entry), the depth entry point (vs_depth), and a pixel shader's integer and dual-source entry points (int_outputs, fs_uint, fs_dual). Functions of
 # the MSL text only, with no build state, so tests import them. Part of the translation chain (dmsh_chain.FILES) and of every shader's cache key (dmsh_build.py CODE_FP).
 import collections, re, sys
-import dmsh_fetch, dmsh_side
+import dmsh_side
 from dmsh_reflect import attributes, in_word
 
 def vs_writes(src, binds):

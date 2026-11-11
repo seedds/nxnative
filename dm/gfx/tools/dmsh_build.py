@@ -7,12 +7,12 @@
 # at the end (publish_library), so a build, stopped or not, leaves a few files and not one per shader output (Octopath Traveler 0, stopped in its compile: 68,230 files). The translator's
 # working files go into a folder per batch of shaders, removed when the batch is done; a working folder whose build is gone is removed at the next start (sweep_work).
 # A full build (no keys) also stamps both directories with the game and the digest of its profile inputs (inputs.tsv) and writes the profile's c1_full.tsv and cb_extent.tsv (c1_guard.py, cb_extent.py)
-# from its Mac outputs. One output directory per game: the chain version is the same for every game   Environment: DM_GAME=game profile (required, dm/games/<id>), XLATE=path to the translation tool (default the in-repo dmsh_xlate_bin), DMSH_CAS=the compile cache, one file (shader_cache.py; default <output cache dir>/cas.db), DMSH_PREFILL=Mac library root[=iOS library root] (separated by :, their b-*/ go into the MSL-keyed compile cache first; sibling b-*/ always do), J=concurrency
+# from its Mac outputs. One output directory per game: the chain version is the same for every game   Environment: DM_GAME=game profile (required, dm/games/<id>), XLATE=path to the translation tool (default the in-repo dmsh_xlate_bin), DMSH_CAS=the compile cache, one file (shader_cache.py; default <output cache dir>/cas.db), DMSH_PREFILL=Mac library root[=iOS library root] (separated by :, their b-*/ go into the MSL-keyed compile cache first; sibling b-*/ always do), J=concurrency, DMSH_PROCS=processes that finish shaders (default J; 0 = threads of this process, see fin_worker)
 # Build output: <key>_b.metallib, <key>_b.json (replay reflection, including drv_reads, the runtime read offsets into driver segments c0 / c2), <key>_b.metal (MSL)
 # Environment IOSOUT=dir: the same MSL also goes through dm/ios/tools/ios_metal.compile to produce an iphoneos metallib + reflection (chain_metal records the iOS compile convention)
 # Final summary: success / failure counts and the distribution of reasons; distribution of driver segment read offsets (those outside the range the replay layer can fill are listed separately);
 # a [RED] line per shader that built but lost something (shader_regressions.report_losses), which does not change the exit status
-import atexit, inspect, os, re, sys, json, mmap, struct, hashlib, shutil, subprocess, tempfile, time, collections, threading, concurrent.futures as cf
+import atexit, inspect, multiprocessing, os, re, sys, json, mmap, struct, hashlib, shutil, subprocess, tempfile, time, collections, threading, concurrent.futures as cf
 import dmsh_geometry, dmsh_atomic, dmsh_wide, dmsh_meshstage, dmsh_rewrite, dmsh_reflect, dmsh_entry, dmsh_abi as abi   # abi: the driver segment layout and the binding kinds the host shares (dm/gfx/nvn/dmsh_abi.h)
 DM_ROOT = os.environ.get('DM_ROOT') or os.path.expanduser('~/dm-work')   # Workspace root (game files, build outputs and run artifacts are all under it)
 HOME = os.path.expanduser('~')
@@ -847,6 +847,7 @@ def finish(key, w, j, c1):
 keys = build_keys(want, loc, PAIRS)
 if want: want = set(keys)   # dependency outputs are cleaned too, so a failed pixel build cannot leave old MSL for padding
 NJ = int(os.environ.get('J', '8'))
+PROCS = int(os.environ.get('DMSH_PROCS', NJ))   # processes that finish shaders (fin_worker); 0: NJ threads of this one
 BATCH = 4 * NJ   # shaders translated and finished together: the next batch is translated while this one is finished, and a shader's working files go when it is (fin).
 # Minecraft Dungeons II, 15,826 shaders: at most 3,279 files under the build folder with batches of 256 removed whole, 68,230 before batches (Octopath Traveler 0's stopped build)
 # A full build starts from no shader outputs, a partial one from none of the keys it builds, so what a run leaves is what it built: every output is restored from the cache anyway.
@@ -981,19 +982,70 @@ def fin(key, wb):
         with os.scandir(wb) as it:   # its working files (<key>.bin / .spv / .res.json / .metal, the geometry variants' <key>_g<n>.*, job1_<key>.json)
             for e in it:
                 if e.name.startswith((key, 'job1_' + key)) and e.is_file(): os.unlink(e.path)
-        with _prog['lock']: DONE['n'] += 1; n = DONE['n']
-        progress('compiling', n, len(keys), cached=len(cache_hits), misses=NMISS)
-# Two phases: paired vertex shaders read their pixel shaders' MSL (vs_pad), so they go last, in batches of their own. The next batch is translated while this one is finished
+        finished()
+def finished(*_):   # one more shader finished, for the progress
+    with _prog['lock']: DONE['n'] += 1; n = DONE['n']
+    progress('compiling', n, len(keys), cached=len(cache_hits), misses=NMISS)
+# The shaders are finished in worker processes (PROCS of them): fin's own Python, the rules that rewrite the MSL above all, holds the GIL, and with threads one core ran it for all of them
+# while the Metal compiles they waited on ran at about a third of the machine (Ocarina of Time, 16 cores: 104% CPU for this process, 4-5 cores busy in all). A worker is a fork of this
+# process, made before any thread starts, so it has every table and fingerprint read above; spawn would run this script again, its start removing the outputs. Each opens its own
+# database connection (SQLite's does not cross a fork), and its outputs and cache entries go into the shared file as a thread's did; what fin returns and what it counted come back here,
+# in the batch's order, so the results, the summary and every file written are those of the threads (DMSH_PROCS=0). The precompiled Metal headers (dmsh_pch.py) are made here before the
+# fork: a worker would make its own (three compiles for each target in each worker) in a folder that nothing removes, as a worker process ends without atexit. A worker that dies
+# (killed, out of memory) stops the build with one line
+COUNTERS = (PRE_STATS, VIN_STATS, PULL_STATS, SIDE_STATS, BF_STATS, MTL.stats)
+def worker_start():
+    global PROGRESS
+    STORE.forked()
+    PROGRESS = None   # this build writes it, as the workers' shaders finish
+def fin_worker(key, wb, job, err):
+    """fin in a worker process, given what translate left for the shader in this process (its job and c1, its translator error) → (fin's result, what it added to the counters)"""
+    jobs.clear(); c1s.clear(); xerr.clear()
+    if job: jobs[key], c1s[key] = job
+    if err is not None: xerr[key] = err
+    for c in COUNTERS: c.clear()
+    return fin(key, wb), [dict(c) for c in COUNTERS]
+def submit(batch, wb):   # a translated batch's shaders to finish → their futures
+    if not px: return [ex.submit(fin, k, wb) for k in batch]
+    fs = [px.submit(fin_worker, k, wb, (jobs.pop(k), c1s.pop(k)) if k in jobs else None, xerr.get(k)) for k in batch]
+    for f in fs: f.add_done_callback(finished)
+    return fs
+def results(fs):   # → what fin returned for them, in their order (a worker's counts added to this process's)
+    out = []
+    for f in fs:
+        r = f.result()
+        if px:
+            r, counts = r
+            for c, n in zip(COUNTERS, counts): c.update(n)
+        out.append(r)
+    return out
+px = cf.ProcessPoolExecutor(PROCS, mp_context=multiprocessing.get_context('fork'), initializer=worker_start) if PROCS and keys else None
+if px:
+    if 'mac' in TARGETS: dmsh_pch.header(MAC_RUN + METAL_DEPTH)
+    if IOSOUT: dmsh_pch.header(ios_metal.METAL + ios_metal.DEPTH)
+    px.submit(int).result()   # forks every worker now, while this process has no other thread
+# Two phases: paired vertex shaders read their pixel shaders' MSL (vs_pad), so they go last, in batches of their own, once every shader before them is finished. The next batch is
+# translated while this one is finished, and handed out before this one is done, so that no worker waits for the slowest shader of a batch; a batch's working folder goes when it is done
 batches = [b[i:i + BATCH] for b in ([k for k in keys if k not in PAIRS], [k for k in keys if k in PAIRS]) for i in range(0, len(b), BATCH)]
-res = []
-with cf.ThreadPoolExecutor(1) as tx, cf.ThreadPoolExecutor(NJ) as ex:
-    nxt = tx.submit(translate, batches[0]) if batches else None
-    for i, batch in enumerate(batches):
-        assert nxt is not None
-        wb = nxt.result()
-        nxt = tx.submit(translate, batches[i + 1]) if i + 1 < len(batches) else None
-        res += list(ex.map(lambda k, wb=wb: fin(k, wb), batch))
-        shutil.rmtree(wb, ignore_errors=True)
+res, busy = [], []   # busy: the batches handed out, oldest first: (working folder, futures)
+def collect(left):   # the results of the oldest batches handed out, until left are
+    while len(busy) > left:
+        wb, fs = busy.pop(0); res.extend(results(fs)); shutil.rmtree(wb, ignore_errors=True)
+try:
+    with cf.ThreadPoolExecutor(1) as tx, cf.ThreadPoolExecutor(NJ) as ex:
+        nxt = tx.submit(translate, batches[0]) if batches else None
+        for i, batch in enumerate(batches):
+            assert nxt is not None
+            wb = nxt.result()
+            nxt = tx.submit(translate, batches[i + 1]) if i + 1 < len(batches) else None
+            if batch[0] in PAIRS and i and batches[i - 1][0] not in PAIRS: collect(0)   # the first paired batch
+            busy.append((wb, submit(batch, wb)))
+            collect(1)
+        collect(0)
+except cf.process.BrokenProcessPool:
+    sys.exit(f'[RED] a shader build worker process stopped (killed, or out of memory) with {len(keys) - len(res)} of {len(keys)} shaders unfinished; run the build again, '
+             f'with fewer workers (DMSH_PROCS) if memory ran out: what it finished is in the cache')
+if px: px.shutdown()
 # Passthrough geometry as mesh shaders (dmsh_mesh.py): <vertex key>_<geometry key>_m3 for each pair in the profile's geo_mesh.tsv whose two libraries exist; the host
 # draws a lean triangle-list geometry draw with it when its pair has one, and through the compute path otherwise (nvn_geometry.inc geo_mesh_draw)
 MESH_STATS = collections.Counter()

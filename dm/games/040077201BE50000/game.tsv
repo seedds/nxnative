@@ -33,6 +33,8 @@ sys_resource	0x2000000
 
 # ---- Shader split ----
 # every shader is in /Asset/assets_a000.dat or /Bin/Nvn2-upper_left.ndsr
+# The game sets near-zero NVN depth (nvnDeviceSetDepthMode): pipeline bases made before it runs (the Mac app's archive, the Mac prebuild) use main0_z.
+depth_mode	zero
 shader_groups	/Asset/=shader /Bin/=shader
 shader_note	Kirby Air Riders shaders
 

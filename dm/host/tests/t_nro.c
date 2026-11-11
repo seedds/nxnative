@@ -104,8 +104,25 @@ int main(void) {
     memcpy(nrr + 0x350, g_mod[1].sha256, 32);
     assert(h_ro_RegisterModuleInfo(NULL, nrr) != 0);
     assert(h_ro_LoadModule(&handles[0], raw[0], NULL, 32, 1) != 0 && !g_mod[1].loaded);
+
+    // A JIT plugin is loaded alone (hle_jit.c), and a second CreateJitEnvironment after DestroyJitEnvironment loads it again: from its data as rewritten and a zero bss,
+    // relocated against itself only. Start from a module never loaded, as the plugin is.
+    module_t *alone = &g_mod[1]; free(alone->pristine); alone->pristine = NULL; alone->loads = 0; alone->loaded = 0;
+    memset(images[1].slots, 0, sizeof images[1].slots); images[1].value = 123; images[1].bss = 0;
+    uint64_t own = (uint64_t)&images[1].value;
+    nro_load_alone(alone);
+    assert(alone->pristine && alone->loads == 1 && alone->loaded);
+    assert(images[1].slots[0] == own + 8 && images[1].slots[1] == own && images[1].slots[2] == 0);
+    assert(!guest_sym("shared"));
+    images[1].value = 999; images[1].bss = 456; images[1].slots[0] = images[1].slots[1] = images[1].slots[2] = 7;
+    alone->loaded = 0;   // as h_jit_Destroy leaves it
+    nro_load_alone(alone);
+    assert(alone->loads == 2 && images[1].value == 123 && images[1].bss == 0);
+    assert(images[1].slots[0] == own + 8 && images[1].slots[1] == own && images[1].slots[2] == 0);
+    assert(!guest_sym("shared"));
+
     for (int i = 0; i < g_nmod; i++) { free(g_mod[i].symh); free(g_mod[i].pristine); }
     free(g_mod); free(g_loaded);
-    puts("NRO relocation, load order, lifecycle, weak symbols and refusal: OK");
+    puts("NRO relocation, load order, lifecycle, weak symbols, refusal and reloading alone: OK");
     return 0;
 }

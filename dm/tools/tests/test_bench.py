@@ -95,6 +95,24 @@ pathlib.Path('paths.json').write_text(json.dumps(paths))
                 bench.run_one(a, '01007EF00011E000', build, {'host': str(root / 'missing-host')}, {'keys': '0:A', 'from': 0, 'secs': 1}, root / 'out', lock)
             self.assertFalse(lock.exists(), 'a failed launch must not block the next benchmark')
 
+    def test_cloud_saves_off(self):   # an inherited DM_SAVE_SYNC would sync the run's scratch save with the player's cloud save (docs/reference/services.md)
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d); build = root / 'build'; (build / 'patched_v0').mkdir(parents=True); (build / 'extract/v0/RomFS').mkdir(parents=True)
+            save = root / 'source-save'; save.mkdir()
+            a = argparse.Namespace(save=save, pso_archive=None, fps=None, scale=None, env=[], no_hud=True, shots=None)
+            seen = {}
+            def popen(cmd, env, **kw): seen.update(env); raise FileNotFoundError(cmd[0])
+            route = {'keys': '0:A', 'from': 0, 'secs': 1}
+            with mock.patch.dict(os.environ, DM_SAVE_SYNC=str(root / 'cloud')), mock.patch.object(bench.subprocess, 'Popen', popen):
+                with self.assertRaises(FileNotFoundError): bench.run_one(a, '01007EF00011E000', build, {'host': str(root / 'host')}, route, root / 'out', None)
+                self.assertEqual(seen['DM_SAVE_SYNC'], '0')
+                with contextlib.redirect_stderr(io.StringIO()):
+                    for var, env in (({'host': str(root / 'host'), 'DM_SAVE_SYNC': str(root / 'cloud')}, []), ({'host': str(root / 'host')}, [f'DM_SAVE_SYNC={root}/cloud'])):
+                        with self.assertRaises(SystemExit): bench.run_one(argparse.Namespace(**{**vars(a), 'env': env}), '01007EF00011E000', build, var, route, root / 'out', None)
+                seen.clear()
+                with self.assertRaises(FileNotFoundError): bench.run_one(argparse.Namespace(**{**vars(a), 'env': ['DM_SAVE_SYNC=0']}), '01007EF00011E000', build, {'host': str(root / 'host')}, route, root / 'out', None)
+                self.assertEqual(seen['DM_SAVE_SYNC'], '0')
+
 
 if __name__ == '__main__':
     unittest.main()

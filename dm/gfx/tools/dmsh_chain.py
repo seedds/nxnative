@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Translation chain version of the B shader library: one version for every game, which the host is compiled with (dm/gfx/nvn/dmsh_chain.h). The build result must be determined by source alone.
 # Chain version V = first 12 digits of the sha256 of the contents of the following in-repo files + the translation options: this script, dmsh_build.py, dmsh_fetch.py (readable-tile version), dmsh_vin.py (shadow vertex inputs), dmsh_pull.py and dmsh_pull.metal (pulling vertex inputs),
-# dmsh_geometry.py, dmsh_facts.py, dmsh_rewrite.py, dmsh_reflect.py and dmsh_entry.py (a shader's MSL rewrites, reflection and entry points), the library ABI dm/gfx/nvn/dmsh_abi.h with its reader dmsh_abi.py, the dmsh_xlate sources (Program.cs, csproj), the iOS compile convention ios_metal.py, and the tool lock dmsh_chain.lock (measured fingerprints of the native translator, which holds the Ryujinx shader library / spirv-cross / metal compiler).
+# dmsh_geometry.py, dmsh_facts.py, dmsh_rewrite.py, dmsh_reflect.py and dmsh_entry.py (a shader's MSL rewrites, reflection and entry points), the library ABI dm/gfx/nvn/dmsh_abi.h with its reader dmsh_abi.py, the dmsh_xlate sources (Program.cs, csproj), the iOS compile convention ios_metal.py, the Mac host's minimum macOS dm/mac/min_os.mk (MAC_MIN), and the tool lock dmsh_chain.lock (measured fingerprints of the native translator, which holds the Ryujinx shader library / spirv-cross / metal compiler).
 # A game's own inputs are not part of V: its profile's shader tables and nvn_* / shader_* keys are in each shader's cache key (dmsh_build.py shader_key), so a change rebuilds the shaders it affects,
 # and their digest (inputs below) stamps the library: <cache dir>/b-<V>/inputs.tsv says which game and which inputs it was built from. c1_full.tsv / cb_extent.tsv name V and that digest in their
 # header (table_head), and the host takes them only when both match its library; build_ipa.sh packs a library only when its digest is the profile's.
@@ -23,6 +23,13 @@ FILES += ['../third_party/ryujinx/src/Ryujinx.Graphics.Shader/' + f for f in (
     'Translation/Transforms/GeometryToCompute.cs', 'Translation/TranslatorContext.cs', 'Translation/Translator.cs', 'Translation/EmitterContext.cs', 'Translation/ShaderDefinitions.cs', 'CodeGen/Spirv/Instructions.cs',
     'StructuredIr/ShaderProperties.cs', 'Translation/Optimizations/BindlessElimination.cs', 'Translation/Optimizations/Optimizer.cs',
     'Translation/Optimizations/GlobalToStorage.cs', 'CodeGen/Spirv/SpirvGenerator.cs')]
+FILES += ['../mac/min_os.mk']   # MAC_MIN below
+# The Mac libraries are compiled for the Mac host's minimum macOS (dm/mac/min_os.mk), as the host's own Metal libraries are (dm/host/Makefile MSL_MIN_macosx). The deployment target
+# sets the Metal language version: with none the compiler takes the build Mac's system, so one source compiled on macOS 27 and failed on macOS 26 (a reference parameter with no address
+# space, which the newer language accepts: GitHub issue #2272), and a library made on the newer system names a language version the older one does not load. The NVN chain
+# (dmsh_build.py MAC_METAL), vk_shaders.py and gl_shaders.py pass this flag on every Mac compile; the iPhone's is ios_metal.py's
+MAC_MIN = open(os.path.join(GFX, '../mac/min_os.mk')).read().split('MACOS_MIN := ')[1].split()[0]
+MAC_MIN_FLAG = f'-mmacosx-version-min={MAC_MIN}'
 INPUT_TABLES = ['shader_facts.tsv', 'shader_map.tsv', 'shader_map.tsv.conflicts.tsv', 'shader_pairs.tsv', 'pso_pairs.tsv', 'bf_want.tsv', 'geo_mesh.tsv', 'dual_want.tsv']   # in the game profile folder
 LOCK = os.path.join(HERE, 'dmsh_chain.lock'); HEADER = os.path.join(GFX, 'nvn/dmsh_chain.h')
 STAMP = 'inputs.tsv'   # in the library directory b-<V>/

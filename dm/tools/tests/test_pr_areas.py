@@ -20,6 +20,7 @@ class Labels(unittest.TestCase):
         (self.root / 'dm/games' / BOTW / 'game.tsv').write_text('')
         (self.root / 'dm/gfx/tools').mkdir(parents=True)
         shutil.copy(REPO / 'dm/gfx/tools/dmsh_chain.py', self.root / 'dm/gfx/tools')   # the real chain file list
+        (self.root / 'dm/mac').mkdir(); shutil.copy(REPO / 'dm/mac/min_os.mk', self.root / 'dm/mac')   # which dmsh_chain.py reads when run
         (self.root / 'dm/games/README.md').write_text(f'| [The Legend of Zelda: Breath of the Wild]({BOTW}/README.md) | `{BOTW}` |\n')
 
     def tearDown(self):

@@ -156,10 +156,15 @@ def int_outputs(src, body, cols):
     printed through the output's type. → the outputs with integers and no float bits, or, when none is that clean (a register reused by two branches), the outputs with integers"""
     types = {v: t for t, v in re.findall(r'^\s*(u?int\d?|float\d?|bool)\s+(_\d+)\b', body, re.M)}
     defs = collections.defaultdict(list)
-    for v, e in re.findall(r'^\s*(?:(?:u?int\d?|float\d?|bool)\s+)?(_\d+)\s*=\s*([^;]+);', body, re.M): defs[v].append(e.strip())
+    # An element of a local array (_30[0], a register the translator kept in one) is a local of its own: read as an expression it counted as a computed integer, and OCTOPATH
+    # TRAVELER II's 05af5b1924d3b8b7 got colour 2 (floats) as its integer output once a float local was followed to as_type<float>(_30[0])
+    for v, e in re.findall(r'^\s*(?:(?:u?int\d?|float\d?|bool)\s+)?(_\d+(?:\[\d+\])?)\s*=\s*([^;]+);', body, re.M): defs[v].append(e.strip())
     def kinds(e, seen):
-        if re.fullmatch(r'_\d+', e):
-            if types.get(e, '').startswith('float'): return {'float'}
+        if re.fullmatch(r'_\d+(?:\[\d+\])?', e):
+            if types.get(e, '').startswith('float'):   # a float local is float bits, unless every value it takes is a register's bits (as_type<float>(…)): PRAGMATA's visibility shaders
+                bits = [re.fullmatch(r'as_type<float\d?>\((.*)\)', x) for x in defs[e]]   # write float _n = as_type<float>(int(gl_PrimitiveID)) into an RG32Uint target
+                if not bits or not all(bits) or e in seen: return {'float'}
+                seen.add(e); return set().union(*(kinds(b[1].strip(), seen) for b in bits))
             if e in seen: return set()
             seen.add(e); return set().union(*(kinds(x, seen) for x in defs[e])) if defs[e] else set()
         if re.fullmatch(r'-?\d+u?', e): return {'int'} if 0 < abs(int(e.rstrip('u'))) < 0x800000 else set()
@@ -175,7 +180,7 @@ def int_outputs(src, body, cols):
             w = w.strip(); a = re.fullmatch(r'as_type<float\d?>\((.*)\)', w)
             if a: k |= kinds(a[1].strip(), set())
             elif re.fullmatch(r'-?[0-9.]+(?:e[-+]?\d+)?f?', w): k |= {'int'} if 0 < abs(float(w.rstrip('f'))) < 1.17549e-38 else set()
-            else: k.add('float')
+            else: k |= kinds(w, set()) if re.fullmatch(r'_\d+', w) else {'float'}   # a local: what it holds (a float local is float bits unless it holds a register's)
         found[nm] = k
     return {nm for nm, k in found.items() if k == {'int'}} or {nm for nm, k in found.items() if 'int' in k}
 
@@ -204,13 +209,15 @@ def fs_uint(src):
         w = w.strip(); d = re.fullmatch(r'\w+', w) and re.search(r'\bfloat\d? %s = (in\.\w+(?:\.\w+)?);' % w, src)
         i = re.fullmatch(r'in\.(\w+)(?:\.\w+)?', d[1] if d else w)
         return bool(i and i[1] in flat)
-    body = src[m.start():]; body = body[:body.find('return out;') + 1 or len(body)]
-    ints = int_outputs(src, body, cols)
-    if not from_int and not ints and not (writes and (all(re.fullmatch(r'-?[0-9.]+f?|float\d\([-0-9., ]*\)', w.strip()) for w in writes) or all(passed(w) for w in writes))): return None, 0
-    uty = lambda ty: 'u' + ty.replace('float', 'int')   # float4 → uint4, float → uint
     try: e = dmsh_side.entry(src, 'main0')
     except ValueError: e = None
     if not e: return None, 0
+    # main0's whole body: every return's writes. Up to the first return out; only, PRAGMATA's visibility shaders (a9c1f9ea0c76a54c: an early return writing 0.0 after a discard, then the
+    # primitive id's bits and the depth into an RG32Uint target) showed nothing but zeros, got no main0_u, and their mesh pipelines failed (float4 into RG32Uint): the 3D scene stayed black
+    body = src[e['start']:e['end']]
+    ints = int_outputs(src, body, cols)
+    if not from_int and not ints and not (writes and (all(re.fullmatch(r'-?[0-9.]+f?|float\d\([-0-9., ]*\)', w.strip()) for w in writes) or all(passed(w) for w in writes))): return None, 0
+    uty = lambda ty: 'u' + ty.replace('float', 'int')   # float4 → uint4, float → uint
     def entry(sfx, as_uint):   # main0_<sfx>: main0's body (dmsh_side.shared_body), its outputs in as_uint returned as the unsigned integer vectors of their bits
         struct = f'struct main0_out_{sfx}\n{{\n' + ''.join(f'    {uty(cols[nm]) if nm in as_uint else ty} {nm} {at};\n' for ty, nm, at in mem) + '};\n\n'
         conv = f'return main0_out_{sfx}{{' + ', '.join(f'as_type<{uty(cols[nm])}>(out.{nm})' if nm in as_uint else f'out.{nm}' for _, nm, _ in mem) + '};'

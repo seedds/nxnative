@@ -952,7 +952,7 @@ def save_digest(d):
 
 def smoke_context(g, art, route, a, hardware):
     """Reuse a baseline only for the same route, save bytes, build artifacts, machine and run settings. Old records without this context are recorded again."""
-    env = {k: v for k, v in os.environ.items() if k.startswith(('DM_', 'DMSH_', 'XLATE_'))}
+    env = {k: v for k, v in os.environ.items() if k.startswith(('DM_', 'DMSH_', 'XLATE_')) and not k.startswith('DM_SAVE_SYNC')}   # cloud saves are off in every run (run_env)
     # Version 2 also records pipeline_status: older cached runs cannot establish whether the profile matched runtime depth.
     return json.loads(json.dumps({'checks': 2, 'route': route, 'save': save_digest(save_source(g, route)), 'host': art['host_key'], 'modules': art['modules_key'], 'chain': art['manifest']['key'],
                                  'profile': digest(sorted(art['profile'].glob('*.tsv'))), 'machine': hardware, 'tools': a.tools_fp, 'env': env, 'overrides': a.env,
@@ -976,6 +976,9 @@ def run_env(g, art, route, outdir, a):
         if not (prof / 'pso_pairs.tsv').is_file() and (g.build / 'shader/pso_pairs.tsv').is_file(): env['DM_PSO_PAIRS'] = str(g.build / 'shader/pso_pairs.tsv')
     if (g.build / 'aoc').is_dir(): env['DM_AOC_DIR'] = str(g.build / 'aoc')
     for kv in a.env: k, _, v = kv.partition('='); env[k] = v
+    if env.get('DM_SAVE_SYNC', '0') not in ('', '0') and any(kv.partition('=')[0] == 'DM_SAVE_SYNC' for kv in a.env):
+        raise HarnessError('--env DM_SAVE_SYNC: a run does not sync its save with a cloud (dm/host/tests/t_save_sync.c covers cloud saves)')
+    env['DM_SAVE_SYNC'] = '0'   # cloud saves off: one inherited from the shell would pull the player's cloud save into the route and send the run's over it (save_sync.c names the file by title ID)
     return env, src_save
 
 

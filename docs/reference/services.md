@@ -145,6 +145,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Check:** `dm/host/tests/t_save_sync_metadata.c`, the pull cases: nothing fails, with and without the cloud's device save; the move into the backups fails; the device save's swap fails and the save is swapped back; the device save's move to the backups fails; the swap back fails too. After every rename and swap the staging folder is checked for this device's save. On the old `pull`, 22 of these checks fail, among them the reported loss. `t_save_sync` 101 checks.
 - **Found on:** no game; a report with an injected EIO on the move into the backups (a pull of the cloud's save chosen by the player).
 
+### Automated runs synced their scratch save with the player's cloud save
+
+- **Symptom:** none in a log. With `DM_SAVE_SYNC` exported in the shell, a `scripts/regress.py` route with `save=new` starts with the player's cloud save for that game, and the run's own progress then replaces it in the cloud.
+- **Cause:** `regress.py` (`run_env`), `bench.py` (`run_one`) and the NSP script's host runs (`tool_env`: the captures, checks and the pipeline prebuild) copied the caller's environment and replaced only `DM_SAVE` with a scratch folder. The host syncs whenever `DM_SAVE_SYNC` names a folder, and names the cloud file by title ID (`dm/host/save_sync.c`, `cloud_path`), so the scratch save was synced with the player's: with no `DM_SAVE_SYNC_CHOICE` the newer save wins, a save only in the cloud is pulled in, and the first commit after it is sent over it. The cloud save it replaced was kept in `<DM_SAVE>-backups`, inside the run folder, which the next run deletes.
+- **Fix:** every automated run sets `DM_SAVE_SYNC=0`, after the overrides it takes; `regress.py --env` or a `bench.py` variant or `--env` that names a folder is refused. `regress.py` leaves `DM_SAVE_SYNC*` out of a baseline's context, since no run reads them. The command the NSP script prints for the player's own run is unchanged. Cloud saves are checked by `dm/host/tests/t_save_sync.c` and `t_save_sync_metadata.c` on temporary folders.
+- **Found on:** no game; a report with a temporary cloud folder holding a synthetic save.
+
 ### An unhooked `fs::ReadFile` overload falls through to the SDK's own
 
 - **Symptom:** a fault inside `sdk` at boot, right after the save data is mounted: `ldr w8, [x0, #0x24]` with `x0` holding a host file handle (SD GUNDAM G GENERATION CROSS RAYS: `sdk+0x62a78`, `x0 = 0x4000000000000390`), while `GetFileSize` on the same handle answered just before.

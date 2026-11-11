@@ -1210,6 +1210,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md): 18 `Hoian_UBER` vertex shaders, 5 of them used at boot.
 - **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_control_flow.py`.
 
+### An Ampere jump table loaded in a block split later
+
+- **Symptom:** `BRX with no target found in the c1 jump table`, although the shader's `LDC` of the table's base is on the only path to the BRX.
+- **Cause:** `Block.Split` gives the right half the left half's successors but leaves their predecessor lists naming the left half. `FindBrxTableAmpere` walks those lists back to the `LDC`, so when the block holding the `LDC` was split after its successors were linked (a later branch lands inside it), the walk from the BRX started in the left half, before the load, and met another write of the register or the program's start.
+- **Fix:** `Block.Split` points the moved successors' predecessor entries at the right half, for both decoders: the Maxwell decoder's walk from a BRX (`FindBrxTargetRange`) reads the same lists. No other code reads them except for their count.
+- **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md): 16 pixel shaders (an `LDC c[0x1][R20+0x790]`, then a conditional BRA to the BRX).
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_control_flow.py` (`test_table_loaded_in_a_block_split_later`).
+
 ### MUFU.F16
 
 - **Symptom:** `Ampere instruction 308` refused; a neural upscaler's programs missing, so the frame never reaches the window (a black 3D scene).

@@ -1834,7 +1834,11 @@ NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsyn
     // The previous present of this texture has not yet been processed by the present thread (display cannot keep up, a whole swapchain round behind): wait for it to be returned, then hand it to the game to draw
     uint64_t tk = *idx < 4 ? o->ticket[*idx] : 0;
     if (tk) { uint64_t w0 = now_ns(); nvn_queue_present_wait(tk); nvn_queue_present_release(tk); o->ticket[*idx]=0; g_pq_wait_ns += now_ns() - w0; }
-    if (s) { nvn_sync_release((sync_t *)s); ((sync_t *)s)->fenced = 2; ((sync_t *)s)->fence = mtl_last_fence(); }   // The swapchain texture becomes available once the commits before this point have completed (fenced 2: an acquire sync, for the wait ledger)
+    // The acquire sync: NVN signals it when the image is released by the display, not when all the work submitted so far is done. The host used the latest fence, which made
+    // the game's wait on it (Donkey Kong Bananza waits every frame, main+0x204298) a wait for the frame it had just submitted: CPU and GPU took turns, 9 ms of a 17 ms frame in the
+    // wait. Now it is the fence of this image's own last present (the work that drew it and its present copy); the ticket wait above has the present taken. DM_NVN_ACQ_FENCE=last: the old one
+    static int acq_last = -1; if (acq_last < 0) { const char *e = getenv("DM_NVN_ACQ_FENCE"); acq_last = e && !strcmp(e, "last"); if (acq_last) LOG("[nvn] acquire sync: the latest fence (DM_NVN_ACQ_FENCE=last)"); }
+    if (s) { nvn_sync_release((sync_t *)s); ((sync_t *)s)->fenced = 2; ((sync_t *)s)->fence = !acq_last && *idx < 4 && o->pfence[*idx] ? o->pfence[*idx] : mtl_last_fence(); }   // The swapchain texture becomes available once the commits before this point have completed (fenced 2: an acquire sync, for the wait ledger)
     if (!g_fs_start) { g_fs_start = now_ns(); g_fs_wait = pace_ns; }   // the frame starts when the first acquire after a present returns: on a display-link tick when on time
     return NVN_WINDOW_ACQUIRE_TEXTURE_RESULT_SUCCESS;
 }
@@ -2419,6 +2423,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
         const tex_t *t = CTX(o->tex[idx]); int lc[4]; const int *crop = present_crop(o->crop, (int)t->d.width, (int)t->d.height, lc);
         nvn_queue_present_release(o->ticket[idx]);
         o->ticket[idx] = nvn_queue_present((queue_t *)q,t,present_period(o) / 1e9,crop);
+        o->pfence[idx] = mtl_last_fence();   // the image is free again once the work up to its present has completed (acq_fence)
     }
     gfx_leave();
     atomic_fetch_add(&g_nvn_ns, now_ns() - t0);

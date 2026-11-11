@@ -377,6 +377,21 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Check:** `test_nsp_mac_app.py` checks the key. To see a game's state: `/usr/bin/log show --last 10m --predicate 'process == "gamepolicyd"' --style compact | grep -E "Found game|Game mode|DPS"`.
 - **Not checked:** a game packed with the key false (the reporter's runs turned Game Mode off with the Game Overlay switch and with the category); other Apple chips; iOS, whose project still declares the key true (the same collapse is only suspected there, PR #314).
 
+### macOS lowers the GPU clock of a frame-paced GPU
+
+- **Symptom:** a GPU-bound game at 30 fps whose frames would fit 60 at full clock: Donkey Kong Bananza's later layers took about 23 ms of GPU a frame at 30 fps on an M4 MacBook Air (10 GPU cores) and 11.4 ms with the GPU kept busy; the game's frame-rate controller, which compares its frame with 1.2 vsyncs, stayed at interval 2.
+- **Cause:** macOS sets the GPU clock from how busy the GPU was. A frame that waits for the vsync leaves the GPU idle part of each frame, the clock drops, and the same work takes longer. A test program measured the same pass 23 ms when paced at 30 frames a second and 12.6 ms back to back.
+- **Fix:** the GPU clock keeper (`gpu_keep_main` in `nvn_mtl.m`, Mac only): a thread keeps one threadgroup of 32 threads spinning on its own queue for part of the time. Every half second its duty goes up while a frame's GPU time (`mtl_gpu_ms`, 8 frames back) is above 14 ms and down below 11.5 ms (`DM_GPU_KEEP_MS`), and it stops when no present came for 250 ms. `DM_GPU_KEEP=0` turns it off, `1` holds full duty.
+- **Limit:** at full duty the fanless Air heated until its CPU slowed (6 → 3 W after 10 minutes, 58 fps instead of 60); the duty-driven default takes only the clock the frames need and none while they fit.
+- **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md): later layers docked 30 → about 54 fps, handheld 60 held for two back-to-back 10-minute runs.
+
+### The acquire sync is the image's release, not the frame's end
+
+- **Symptom:** CPU and GPU take turns: the game's frame is the host's translation plus the whole GPU frame, with the game blocked about 9 ms of a 17 ms frame in `nvnSyncWait` on the sync `nvnWindowAcquireTexture` handed it.
+- **Cause:** NVN signals the acquire sync when the image is released by the display. The host gave it the latest fence, all work submitted so far, which includes the frame the game had just submitted.
+- **Fix:** the window keeps each image's fence at its present (`win_t.pfence`, `nvnQueuePresentTexture`), and the acquire sync takes the acquired image's fence; the ticket wait before it still has that present taken. `DM_NVN_ACQ_FENCE=last` gives the old fence.
+- **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md), which waits on it every frame (`main+0x204298`): the acquire wait went from about 9 ms to none; its own fence wait of the frame (`main+0x204280`) remains, so its frame time at 1080p was unchanged (17.0 ms) — that wait is the game's.
+
 ### A game opened from a fullscreen app stays a window
 
 - **Symptom:** a Mac game started with `DM_FULLSCREEN=1` from an app that is itself in fullscreen (the launcher's console mode) came up as a window.
@@ -524,6 +539,34 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Cause:** the staged upload path encodes a deswizzle dispatch and a copy for every face and mip. Face count can dominate encoding cost even when total pixel data is small.
 - **Fix:** mapped, non-sparse RGBA16F 2D/cube arrays with at least 32 faces and dimensions at most 64×64 write all faces in one dispatch per mip. An RGBA16Uint view preserves the exact stored component bits, including half-float NaN payloads, without floating-point conversion. Temporary views live until GPU completion; direct targets participate in dropped-upload recovery. Initial fills retain their original texture and usage contract. Large images, other formats, linear/compressible layouts, multisampling and unaligned sources keep the staged path. `DM_NVN_DIRECT_UPLOAD=0` restores it for all uploads. `t_direct_upload.m` compares all mip/face bits after CPU edits and spare reuse, checks fallback and initial fills, and injects a lost direct upload; Metal validation passes 26,384 checks normally and 26,388 with recovery injection.
 - **Found on:** [NieR:Automata US](../../dm/games/010056B015FE8000/README.md#small-light-probe-array-uploads). Its 16×16×768, five-mip RGBA16F array needs five direct dispatches instead of 3,840 staged dispatches and 3,840 copies. In an alternating warmed benchmark on M4 Pro, CPU upload encoding plus commit falls from 3.916 to 0.0275 ms and upload GPU time from 1.802 to 0.0355 ms. Gameplay and terminal-screen improvement remain unmeasured.
+
+### Long passes split while the GPU is idle
+
+- **Symptom:** the GPU idle at the start of a frame while the host translates one long pass: a segment is committed only between passes, so a pass of thousands of draws reached the GPU only once all of it was translated.
+- **Cause:** Donkey Kong Bananza's later layers draw 11,000-12,000 objects in one G-buffer pass, about 6 ms of translation; its map's depth prepass is 1,900-8,000 geometry-shader draws drawn as mesh draws, whose inner draw ran with `g_geo_program` set, where no split was made. The map's frame waited 3.4 ms for its first segment.
+- **Fix:** `long_pass_split_due`: with `DM_NVN_PASS_SPLIT` draws (1536) in the pass, or `DM_NVN_PASS_SPLIT_FIRST` (384) while nothing is in flight, and every earlier segment completed (`DM_NVN_PASS_SPLIT_IDLE`), the pass ends and the next draw continues it in a new encoder; `sub_cut` commits the part so far. Geometry mesh draws are split before them (`long_pass_split_geo`). A busy GPU gains nothing from a split, which stores and loads the attachments again (35 MB at 2304x1296), so none is made then.
+- **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md): its zoomed-out map docked from 30 fps (33.3 ms) to 18.3 ms, its lighting pass's splits from 5 to the idle ones (GPU 15.8 → 15.1 ms).
+
+### The deferred-update conflict check looked at every binding on each uniform rebind
+
+- **Symptom:** the submit thread's samples in `ubd_conflict_sh` for draw loops that rebind one uniform block per draw.
+- **Cause:** each such draw looked at every binding of the shader for a conflict with the inline updates deferred in the pass (Bananza: 47 fragment bindings, 12,000 draws a pass).
+- **Fix:** `ubd_conflict_sh` keeps its last answer of no conflict with the state it held for and looks again only at the slots that changed; the vertex streams' check is kept as well. The argument block of such a draw is patched rather than encoded again: [Argument blocks encoded again when only a uniform buffer moved](#argument-blocks-encoded-again-when-only-a-uniform-buffer-moved).
+- **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md), with the argument-block patch, the store-witness set and pool cache below, the encode thread (`DM_NVN_ENC_THREAD=1`) and an -O2 host: submit 21 → 14 ms a frame in its later layers.
+
+### The store-witness set overflowed
+
+- **Symptom:** the pass ended before each HUD draw (about 19 a frame, each loading and storing a 2304x1296 target) and partly covered uniform shadows were refused.
+- **Cause:** the set of pages a submission's raw stores may write (`SBW_N`) had 16,384 slots; Bananza's later layers note about 13,700, and at 84 % load a page found no free slot within 64 probes, so the set counted as a write anywhere.
+- **Fix:** 65,536 slots (1 MB), load near a fifth; the per-thread pool cache is allocated on a thread's first lookup and tries its last hit first (a larger table was slower: a cache miss a lookup).
+- **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md): pass ends before HUD draws 5,700 per 300 frames → 0, attachment traffic 750 → 457 MB a frame.
+
+### Mesh draws looked up their pipeline and run twin every draw
+
+- **Symptom:** in a geometry-shader prepass the submit thread's samples in `+[NSValue valueWithPointer:]`, dictionary lookups, `pso_key_fill` and the mesh pipeline table's lock.
+- **Cause:** each geometry mesh draw boxed its function for the run-twin lookup and hashed its pipeline key under a lock, also for draws that then drew alone.
+- **Fix:** `geo_mesh_pso_for` returns the last built pipeline when the key is the same; `geo_mesh_take` keeps the last function's twin until the twin table changes (`g_geo_mesh_runfn_gen`).
+- **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md)'s map: translation 9.7 → 9.0 ms a frame.
 
 ### Address to memory pool lookups by binary search
 

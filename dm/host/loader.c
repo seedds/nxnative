@@ -330,6 +330,9 @@ void dm_fps_state_apply(void) {
     const char *dr = getenv("DM_DYNAMIC_RESOLUTION"); uint32_t dyn = dr && !strcmp(dr, "1");
     if (dr && strcmp(dr, "0") && strcmp(dr, "1")) LOG("[RED] DM_DYNAMIC_RESOLUTION=%s: must be 0 or 1; keeping full resolution", dr);
     memcpy(dm_fps_state + 0x40, &dyn, sizeof dyn);
+    // +0x14: the same as an upscale rate, 1 / scale (Donkey Kong Bananza's stubs at its NDSR rate bounds, patches.py), 0 at 1.0: the game's own
+    // (rounded to 1/40, so that a rounded scale reaches its step exactly: 0.6667 → 1.5, 0.7273 → 1.375; the game draws only at its table's steps)
+    float rate = sc < 1.0f ? __builtin_roundf(40.0f / sc) / 40.0f : 0.0f; if (rate <= 1.0f) rate = sc < 1.0f ? 1.0f : 0.0f; memcpy(dm_fps_state + 0x14, &rate, sizeof rate);
     // Screen shape: DM_SCREEN_ASPECT, the screen's width / height between 1.3 and 1.77, makes the builds with screen-shape stubs
     // (Breath of the Wild 1.9.0's patches.py) render that shape: the output keeps its width (1920) and takes the height that gives the ratio, a multiple of 48 so the
     // 2/3-size layout space (1280 wide) stays whole: 1.43 → 1920x1344 and 1280x896. State +0x48 u32 output height, +0x4c u32 layout height, +0x50 its float; 0 = 16:9

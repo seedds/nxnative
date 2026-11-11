@@ -5869,13 +5869,14 @@ static void shmap_read(void) {
     MLOG("shader route B (translated Switch originals): shader map %lu entries (%s), metallib directory %s", (unsigned long)g_shmap.count, path.UTF8String, g_msl_dir.UTF8String);
 }
 
-@interface NvShader : NSObject { @public id<MTLFunction> fn, tf_fn, discard_fn, fn_u, fn_d, geo_fn; id<MTLLibrary> ulib; NSMutableDictionary *ufn;   // fn_u: the integer-output entry point (dmsh_entry.py fs_uint) as the library holds it, unspecialized: ufn holds it specialized per pipeline's integer targets (uint_fn; ulib: its library); fn_d: the dual-source one (dmsh_entry.py fs_dual)
+@class CpsJob;
+@interface NvShader : NSObject { @public CpsJob *cps_job[2]; id<MTLFunction> fn, tf_fn, discard_fn, fn_u, fn_d, geo_fn; id<MTLLibrary> ulib; NSMutableDictionary *ufn;   // fn_u: the integer-output entry point (dmsh_entry.py fs_uint) as the library holds it, unspecialized: ufn holds it specialized per pipeline's integer targets (uint_fn; ulib: its library); fn_d: the dual-source one (dmsh_entry.py fs_dual)
     uint16_t tf_stride[4]; uint32_t cb_ext[16], sb_ro; nvn_refl rf; id<MTLArgumentEncoder> ae; NSUInteger arg_len; int stage, range_ro, layer_out; const char *builtin; uint64_t logged; char key[24]; id<MTLBuffer> c1buf; uint64_t c1_gpu; size_t c1off;
     uint32_t geo_vertices, geo_invocations, geo_output, geo_stride, geo_index_stride;
     uint8_t mesh_kind, mesh_notask; uint16_t mesh_threads, mesh_payload;   // an NVN2 task (1) or mesh (2) shader, a mesh shader with no task, its workgroup's threads, its payload's bytes (dmsh_meshstage.py)
     id<MTLFunction> mesh_obj;   // a mesh shader with no task: the object function that launches its workgroups in blocks of DMSH_MESH_GRID (dmsh_meshstage.py main0_o)
     uint32_t tess_out_cp, tess_in_bytes, tess_md; int tess_ok;   // a hull / domain shader rewritten for replay (dmsh_tess.py, nvn_tess.inc); tess_md: a domain's mode (dmsh_tess.mode_bits)
-    id<MTLComputePipelineState> geo_pso; int geo_pso_failed, cps_failed;   // cps_failed: Metal refused this compute shader's pipeline (dispatch): its dispatches are skipped without asking again
+    id<MTLComputePipelineState> geo_pso; int geo_pso_failed, cps_failed;   // cps_failed: Metal refused this compute shader's pipeline (dispatch): its dispatches are skipped without asking again; cps_job: its pipelines being built off the submit thread (cps_get), with and without the border corrections
     int16_t *geo_slot; uint32_t geo_words;   // a lean passthrough kernel (dmsh_geometry.lean): capture word -> record slot (-1: not read), record words
     NvShader *geo_lean_v[5]; uint8_t geo_lean_tried;   // a geometry shader's lean kernels by input topology (looked up once)
     NvShader *geo_bg_v[5], *geo_bgv_v; uint8_t geo_bg_tried;   // its kernels by input topology (_bg<n>) and its reader (_bgv), looked up once (bit 7: the reader)
@@ -6067,6 +6068,13 @@ static MTL4FunctionDescriptor *fn4_of(id<MTLFunction> f) {
     if (!f) return nil;
     os_unfair_lock_lock(&g_fn4_lock); MTL4FunctionDescriptor *d = [g_fn4 objectForKey:f]; os_unfair_lock_unlock(&g_fn4_lock);
     return d;
+}
+// The shader a Metal 4 function descriptor comes from, for the log: its library's name (lib_tag) without .metallib, which is the shader key (<key>_b), else the function's name
+static NSString *fd_label(MTL4FunctionDescriptor *given) {
+    MTL4FunctionDescriptor *fd = [given isKindOfClass:MTL4SpecializedFunctionDescriptor.class] ? ((MTL4SpecializedFunctionDescriptor *)given).functionDescriptor : given;
+    if (![fd isKindOfClass:MTL4LibraryFunctionDescriptor.class]) return @"-";
+    MTL4LibraryFunctionDescriptor *ld = (MTL4LibraryFunctionDescriptor *)fd; NSString *lib = objc_getAssociatedObject(ld.library, &g_lib_tag);
+    return lib ? ([lib hasSuffix:@".metallib"] ? lib.stringByDeletingPathExtension : lib) : ld.name ?: @"-";
 }
 // A function that declares function constants, specialized with cv (an empty set keeps every default). On the Metal 4 path the pipeline's descriptor specializes it (fn4_note
 // records cv, and MTL4Compiler compiles it with the pipeline), so the MTLFunction stays unspecialized: its reflection and argument encoders are the same. MTLLibrary's
@@ -9115,6 +9123,31 @@ static void pso4_init(void) {
     });
 }
 static int pso4_compiler(void) { pso4_init(); return g_comp4 != nil; }   // render pipelines go through the Metal 4 compiler (fn_spec)
+// A compile that takes long, named in the log while it is under way: "[RED] <what> still compiling after N s" at SLOW_COMPILE_MS, then each time its time doubles, and
+// "<what> compiled after N s" when it returns. A compile Apple's compiler takes minutes over, or never returns from, showed in a hung game only as a thread inside
+// MTLCompilerScheduler::buildRequest (a `sample`; Nintendo Switch Sports Resort's compute shader, Super Mario Odyssey's base of GitHub issue #294), with nothing that
+// named the shader. A check costs one dispatch_after per compile, on a utility queue, and nothing when the compile returns in time. g_slow_ms: the tests lower it
+enum { SLOW_COMPILE_MS = 5000 };
+static int g_slow_ms = SLOW_COMPILE_MS;
+static _Atomic uint64_t g_slow_told;   // compiles named as slow
+@interface SlowWatch : NSObject { @public NSString *what; uint64_t t0; os_unfair_lock lock; int done, told; } @end
+@implementation SlowWatch @end
+static void slow_check(SlowWatch *w, int64_t after_ms) {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, after_ms * (int64_t)NSEC_PER_MSEC), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        os_unfair_lock_lock(&w->lock); int done = w->done; if (!done) w->told = 1; os_unfair_lock_unlock(&w->lock);
+        if (done) return;
+        uint64_t ns = bp_now() - w->t0; atomic_fetch_add(&g_slow_told, 1);
+        MLOG("[RED] %s still compiling after %.0f s", w->what.UTF8String, ns / 1e9);
+        slow_check(w, MAX((int64_t)(ns / 1000000), 1));   // next when its time has doubled (at least 1 ms on: g_slow_ms 0 would re-arm at once)
+    });
+}
+static SlowWatch *slow_begin(NSString *what) { SlowWatch *w = [SlowWatch new]; w->what = what; w->t0 = bp_now(); w->lock = OS_UNFAIR_LOCK_INIT; slow_check(w, g_slow_ms); return w; }
+static uint64_t slow_end(SlowWatch *w) {   // the compile's time
+    uint64_t ns = bp_now() - w->t0;
+    os_unfair_lock_lock(&w->lock); w->done = 1; int told = w->told; os_unfair_lock_unlock(&w->lock);
+    if (told) MLOG("%s compiled after %.1f s", w->what.UTF8String, ns / 1e9);
+    return ns;
+}
 // Compute pipelines from the archive bundled with the app: it holds one per compute shader of the shader map and of the prewarm list's C rows (pso_offline.py), made from <key>_b's
 // function alone. A compute pipeline depends on nothing else here: the MTLDevice builds it from the function (newComputePipelineStateWithFunction, no threadgroup size or other
 // option; the dispatch gives the threadgroup size), so the lookup names the function alone too, by the descriptor shader_load noted (fn4_note). One the bundle does not hold
@@ -9127,6 +9160,7 @@ static int pso4_compiler(void) { pso4_init(); return g_comp4 != nil; }   // rend
 // note. A miss costs a lookup of a fraction of a millisecond per file. g_cps_arch, g_cps_run, g_cps_built: compute pipelines taken from the
 // bundle, from this device's files, built (the prewarm's last lines); g_cps_look_ns, g_cps_build_ns: the time looking up, building
 static _Atomic uint64_t g_cps_arch, g_cps_run, g_cps_built, g_cps_look_ns, g_cps_build_ns;
+static _Atomic uint64_t g_cps_async, g_cps_skipped;   // dispatches' pipelines built off the submit thread, dispatches skipped while theirs was not built (cps_get)
 static void arch_note_new(void);
 static dispatch_queue_t arch_harvest_q(void) {   // one capture at a time, at utility QoS: a network shader's compile can take seconds, beside the game's frames
     static dispatch_queue_t q; static dispatch_once_t once;
@@ -9141,11 +9175,13 @@ static void arch_harvest(MTL4PipelineDescriptor *d, int compact) {
     if (compact) atomic_fetch_add(&g_compact_harvests, 1);
     dispatch_async(arch_harvest_q(), ^{ @autoreleasepool {
         NSError *ce = nil; int cap = 0, compute = [d isKindOfClass:MTL4ComputePipelineDescriptor.class];
+        MTL4FunctionDescriptor *fd = compute ? ((MTL4ComputePipelineDescriptor *)d).computeFunctionDescriptor : ((MTL4MeshRenderPipelineDescriptor *)d).meshFunctionDescriptor;
+        SlowWatch *w = slow_begin([NSString stringWithFormat:@"%s pipeline %@ (its capture for the pipeline archive)", compute ? "compute" : "task / mesh", fd_label(fd)]);
         id ps = compute ? (id)arch_capture_cs((MTL4ComputePipelineDescriptor *)d, &ce, &cap) : (id)arch_capture(d, &ce, 0, &cap);
+        slow_end(w);
         if (cap) { if (compact) g_compacted++; arch_note_new(); }
         else if (compact) g_compact_bad = 1;
         if (!ps) {
-            MTL4FunctionDescriptor *fd = compute ? ((MTL4ComputePipelineDescriptor *)d).computeFunctionDescriptor : ((MTL4MeshRenderPipelineDescriptor *)d).meshFunctionDescriptor;
             if ([fd isKindOfClass:MTL4SpecializedFunctionDescriptor.class]) fd = ((MTL4SpecializedFunctionDescriptor *)fd).functionDescriptor;
             MLOG("[RED] %s pipeline %s: the Metal 4 compiler refused it (%s): not kept in the pipeline archive", compute ? "compute" : "task / mesh",
                  [fd isKindOfClass:MTL4LibraryFunctionDescriptor.class] ? ((MTL4LibraryFunctionDescriptor *)fd).name.UTF8String : "(unnamed)", ce ? ce.localizedDescription.UTF8String : "no error given");
@@ -9164,6 +9200,34 @@ static long arch_harvest_wait(dispatch_time_t until) {
     dispatch_async(arch_harvest_q(), mark);
     return dispatch_block_wait(mark, until);
 }
+// A compute pipeline whose MTLDevice build took SLOW_COMPILE_MS or more, captured for the archive into a flush period of its own, on a serial queue of its own (arch_solo_q: a
+// capture that never returns holds back only the solo captures after it), and written as a
+// file of its own when the capture returns. Its capture compiles it whole again, which can take as long: in the shared period on the serial harvest queue it would hold back that
+// period's file (every pipeline captured beside it, up to ARCH_PERIOD_MAX) and every later capture of a compute or mesh pipeline. The period is handed to the writer only once the
+// compile has returned, so a quit (mtl_arch_save, which waits for g_arch_pending) never waits for it either. Such pipelines are few: a file each costs a lookup of a fraction
+// of a millisecond, and each period has its own serializer (its own gpuarchiver-* folder in the user cache folder, as every period has) and its file a .keys index. g_arch_solo:
+// such files written
+static _Atomic uint64_t g_arch_solo;
+static void arch_write(ArchEpoch *ep);
+static dispatch_queue_t arch_solo_q(void) {   // one such capture at a time: each is a whole compile of a shader the compiler takes long over, so a burst of them (Switch Sports: five within seconds) must not start as many at once beside the game
+    static dispatch_queue_t q; static dispatch_once_t once;
+    dispatch_once(&once, ^{ q = dispatch_queue_create("dm.nvn.arch-solo", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0)); });
+    return q;
+}
+static void arch_harvest_solo(MTL4ComputePipelineDescriptor *d, NSString *key) {
+    if (!d || !arch_capturing()) return;
+    dispatch_async(arch_solo_q(), ^{ @autoreleasepool {
+        ArchEpoch *ep = ep_new();
+        if (!ep) { MLOG("[RED] pipeline archive: Metal made no compiler for compute pipeline %s's own flush period: not kept in the pipeline archive", key.UTF8String); return; }
+        SlowWatch *w = slow_begin([NSString stringWithFormat:@"compute pipeline %@ (its capture for the pipeline archive)", key]);
+        ser_compile_begin(); NSError *ce = nil; id<MTLComputePipelineState> ps = [ep->comp newComputePipelineStateWithDescriptor:d compilerTaskOptions:nil error:&ce]; ser_compile_end();   // not beside an archive write (ser_begin)
+        slow_end(w);
+        if (!ps) { MLOG("[RED] compute pipeline %s: the Metal 4 compiler refused it (%s): not kept in the pipeline archive", key.UTF8String, ce ? ce.localizedDescription.UTF8String : "no error given"); return; }
+        ep_key(ep, d); atomic_store(&ep->n, 1); atomic_store(&ep->cs, 1); atomic_fetch_add(&g_arch_new, 1);
+        dispatch_group_enter(g_arch_pending);
+        dispatch_async(g_arch_q, ^{ @autoreleasepool { arch_write(ep); } atomic_fetch_add(&g_arch_solo, 1); dispatch_group_leave(g_arch_pending); });
+    } });
+}
 // A function the border corrections' constant specializes: its compute pipeline is in the bundle and the archive by that descriptor. Any other function with constants is built
 // from fn_dev's specialization and is not looked up or captured
 static int fd_border_fc(MTL4FunctionDescriptor *fd) {
@@ -9174,23 +9238,35 @@ static int fd_border_fc(MTL4FunctionDescriptor *fd) {
     // NOLINTNEXTLINE(clang-analyzer-nullability.NullablePassedToNonnull): the descriptor's name is set when it is made (fn4_note refuses a nil name, pre_fn takes the name its function was made from) and never changed
     return [l.library newFunctionWithName:l.name].functionConstantsDictionary[@"dm_border_off"] != nil;
 }
-static id<MTLComputePipelineState> cps_new_b(id<MTLFunction> f, int off, NSError **e) {   // off: without the border corrections (fn_off), the common dispatch's
+// A compute pipeline without a build: from the bundle or this device's files (*d: its Metal 4 descriptor, nil for a function with none); off: without the border corrections
+// (fn_off), the common dispatch's. On the thread that asks, at once
+static id<MTLComputePipelineState> cps_look(id<MTLFunction> f, int off, MTL4ComputePipelineDescriptor **d) {
     pso4_init();
-    MTL4FunctionDescriptor *fd = fn4_of_b(f, off); MTL4ComputePipelineDescriptor *d = nil; id<MTLComputePipelineState> ps = nil; uint64_t t0 = bp_now();
-    if ([fd isKindOfClass:MTL4LibraryFunctionDescriptor.class] || fd_border_fc(fd)) {   // a specialized one: fn_spec's or fn_off's, of a function with the border constant
-        d = [MTL4ComputePipelineDescriptor new]; d.computeFunctionDescriptor = fd;
-        if (g_arch_bundle && (ps = [g_arch_bundle newComputePipelineStateWithDescriptor:d error:nil])) atomic_fetch_add(&g_cps_arch, 1);
-        else { int from_run = 0; if ((ps = arch_lookup(d, 1, &from_run))) {   // arch_capture_cs writes them to plain files only
-            atomic_fetch_add(&g_cps_run, 1);
-            if (from_run && g_compact_enabled && atomic_load(&g_warm_running)) arch_harvest(d, 1);
-        } }
-        atomic_fetch_add(&g_cps_look_ns, bp_now() - t0);
-        if (ps) return ps;
-    }
-    uint64_t t1 = bp_now();
-    ps = [g_dev newComputePipelineStateWithFunction:fn_dev_b(f, off) error:e];
-    if (ps) { atomic_fetch_add(&g_cps_built, 1); atomic_fetch_add(&g_cps_build_ns, bp_now() - t1); arch_harvest(d, 0); }
+    MTL4FunctionDescriptor *fd = fn4_of_b(f, off); id<MTLComputePipelineState> ps = nil; uint64_t t0 = bp_now();
+    *d = nil;
+    if (![fd isKindOfClass:MTL4LibraryFunctionDescriptor.class] && !fd_border_fc(fd)) return nil;   // a specialized one is looked up only if it is fn_spec's or fn_off's, of a function with the border constant
+    *d = [MTL4ComputePipelineDescriptor new]; (*d).computeFunctionDescriptor = fd;
+    if (g_arch_bundle && (ps = [g_arch_bundle newComputePipelineStateWithDescriptor:*d error:nil])) atomic_fetch_add(&g_cps_arch, 1);
+    else { int from_run = 0; if ((ps = arch_lookup(*d, 1, &from_run))) {   // arch_capture_cs writes them to plain files only
+        atomic_fetch_add(&g_cps_run, 1);
+        if (from_run && g_compact_enabled && atomic_load(&g_warm_running)) arch_harvest(*d, 1);
+    } }
+    atomic_fetch_add(&g_cps_look_ns, bp_now() - t0);
     return ps;
+}
+// A compute pipeline built through the MTLDevice (from fn_dev_b's function), then captured for the archive (d: its Metal 4 descriptor, or nil); key names it in the log when it is slow
+static id<MTLComputePipelineState> cps_build(id<MTLFunction> f, int off, MTL4ComputePipelineDescriptor *d, NSString *key, NSError **e) {
+    SlowWatch *w = slow_begin([NSString stringWithFormat:@"compute pipeline %@", key]);
+    id<MTLComputePipelineState> ps = [g_dev newComputePipelineStateWithFunction:fn_dev_b(f, off) error:e];
+    uint64_t ns = slow_end(w);
+    if (!ps) return nil;
+    atomic_fetch_add(&g_cps_built, 1); atomic_fetch_add(&g_cps_build_ns, ns);
+    if (ns >= (uint64_t)g_slow_ms * 1000000ull) arch_harvest_solo(d, key); else arch_harvest(d, 0);
+    return ps;
+}
+static id<MTLComputePipelineState> cps_new_b(id<MTLFunction> f, int off, NSError **e) {   // off: without the border corrections (fn_off), the common dispatch's
+    MTL4ComputePipelineDescriptor *d = nil; id<MTLComputePipelineState> ps = cps_look(f, off, &d);
+    return ps ?: cps_build(f, off, d, d ? fd_label(d.computeFunctionDescriptor) : f.name ?: @"-", e);
 }
 static id<MTLComputePipelineState> cps_new(id<MTLFunction> f, NSError **e) { return cps_new_b(f, 0, e); }
 // Writes one flush period's captures as the next file of the archive, on g_arch_q once every compile in the period has returned
@@ -9374,7 +9450,10 @@ static id<MTLRenderPipelineState> pso_build_ex(MTLRenderPipelineDescriptor *d, i
     // ambient occlusion draws 4 triangles and writes the array layer of each one's primitive ID: every one wrote layer 0, so 3 pixels in 4 had no sun light. A platform limit: the ID has no other source
     if (rast && g_comp4 && [d.label isEqualToString:PSO_WHOLE]) {
         MTL4RenderPipelineDescriptor *whole = pso_desc4(d, 0, off);
-        if (whole) { if (!compile) return nil; return [g_comp4 newRenderPipelineStateWithDescriptor:whole compilerTaskOptions:nil error:e]; }
+        if (whole) { if (!compile) return nil;
+            SlowWatch *w = slow_begin([NSString stringWithFormat:@"render pipeline (vertex %@ fragment %@)", fd_label(whole.vertexFunctionDescriptor), fd_label(whole.fragmentFunctionDescriptor)]);
+            id<MTLRenderPipelineState> ps = [g_comp4 newRenderPipelineStateWithDescriptor:whole compilerTaskOptions:nil error:e];
+            slow_end(w); return ps; }
     }
     MTL4RenderPipelineDescriptor *b = g_comp4 ? pso_desc4(d, rast, off) : nil;   // with rasterization off there is no colour state to leave open: the base is the pipeline
     if (!b) { if (!compile) return nil; g_pb_legacy++; return pso_build_dev(d, off, e); }
@@ -9415,7 +9494,9 @@ static id<MTLRenderPipelineState> pso_build_ex(MTLRenderPipelineDescriptor *d, i
         if (!base) {
             if (!known && g_arch4.count + g_arch4p.count) { g_pt_miss_n++; g_pt_miss_ns += t1 - t0; }
             if (compile) {
+                SlowWatch *w = slow_begin([NSString stringWithFormat:@"render pipeline base (vertex %@ fragment %@)", fd_label(b.vertexFunctionDescriptor), fd_label(b.fragmentFunctionDescriptor)]);
                 NSError *be = nil; base = arch_capture(b, &be, vd, NULL); job->error = be; job->compiled = 1;
+                slow_end(w);
                 g_pt_comp_ns += bp_now() - t1;
                 if (base) { g_pb_built++; if (g_arch_cap) arch_note_new(); }
             }
@@ -9609,11 +9690,12 @@ void mtl_pso_line(char *o, size_t n) {
     o2 += snprintf(o + o2, n > o2 ? n - o2 : 0, "; draws that waited:");
     for (int i = 0; i < 5; i++) if (g_pw_n[i] > pn[i]) o2 += snprintf(o + o2, n > o2 ? n - o2 : 0, " %s %llu / %.1f ms,", g_pw_why[i], (unsigned long long)(g_pw_n[i] - pn[i]), (g_pw_ns[i] - pns[i]) / 1e6);
     memcpy(pn, g_pw_n, sizeof pn); memcpy(pns, g_pw_ns, sizeof pns);
-    static uint64_t pca, pcr, pcb, pcl, pcn; uint64_t ca = g_cps_arch, cr = g_cps_run, cb = g_cps_built, cl = g_cps_look_ns, cn = g_cps_build_ns;   // compute pipelines (cps_new)
-    if (ca > pca || cr > pcr || cb > pcb)
-        snprintf(o + o2, n > o2 ? n - o2 : 0, "; compute pipelines from the archive bundled with the app %llu, from this device's archive %llu, built %llu (%.1f ms looking up, %.1f ms building)",
-                 (unsigned long long)(ca - pca), (unsigned long long)(cr - pcr), (unsigned long long)(cb - pcb), (cl - pcl) / 1e6, (cn - pcn) / 1e6);
-    pca = ca; pcr = cr; pcb = cb; pcl = cl; pcn = cn;
+    static uint64_t pca, pcr, pcb, pcl, pcn, pck; uint64_t ca = g_cps_arch, cr = g_cps_run, cb = g_cps_built, cl = g_cps_look_ns, cn = g_cps_build_ns, ck = g_cps_skipped;   // compute pipelines (cps_new, cps_get)
+    if (ca > pca || cr > pcr || cb > pcb || ck > pck)
+        snprintf(o + o2, n > o2 ? n - o2 : 0, "; compute pipelines from the archive bundled with the app %llu, from this device's archive %llu, built %llu (%.1f ms looking up, %.1f ms building), "
+                 "dispatches skipped while their pipeline was built %llu",
+                 (unsigned long long)(ca - pca), (unsigned long long)(cr - pcr), (unsigned long long)(cb - pcb), (cl - pcl) / 1e6, (cn - pcn) / 1e6, (unsigned long long)(ck - pck));
+    pca = ca; pcr = cr; pcb = cb; pcl = cl; pcn = cn; pck = ck;
 }
 
 // ---- Prebuild: the base of every shader pair of the game, into the pipeline archive ----
@@ -14918,6 +15000,89 @@ static id<MTL4ComputeCommandEncoder> dispatch_enc_cs(NvShader *cs, uint64_t ind)
     args_dirty_all();
     return e;
 }
+// A dispatch's compute pipeline, on the submit thread. One already made (g_cps) or in the archive (the bundle, this device's files: cps_look) is taken at once, as before. Any
+// other is built off the submit thread (cps_build on a global queue). The first dispatch that needs it waits for the build up to g_cps_wait_ms (CPS_WAIT_MS), so a pipeline
+// that builds in that time runs in the same submission as before; past that the dispatch is skipped, and so is every later dispatch of the shader until the build returns,
+// without waiting and without asking for another build. The wait is one budget for a burst: after a whole wait ran out, a first dispatch in the next CPS_QUIET_X times the wait
+// time does not wait at all (and a skip there does not extend that time): Nintendo Switch Sports Resort met five such shaders within seconds, and 5 s for each was 25 s
+// of the submit thread. Before, the build ran on the submit thread and the replay waited for it however long it took: Switch Sports (frame ~3,100, about 80 s after its intro)
+// hung there for good, the "NVN queue replay" thread in -[_MTLDevice newComputePipelineStateWithFunction:error:] → MTLCompilerScheduler::buildRequest waiting on the
+// compiler service for more than 25 s and still in it minutes later (a `sample`), the game's main thread in nvnSyncWait for a fence the replay never reached and the
+// presentation thread on the queue's lock; with this its shaders took 9 to more than 40 s each. Skipping is what the replay can do with a pipeline it does not have: a render
+// draw waits for its pipeline (pso_get_), or draws with a stand-in, but a compute shader has none, and a replay that waits for a compile that never returns stops the game.
+// A workaround for Apple's compiler: it also skips the dispatches of a build that would have returned in 5-40 s, and what they would have written is missing until the
+// pipeline is there. The log says so once per shader ("[RED] compute pipeline <key> not built after N ms"), again when it is ("... built after N s: its dispatches run
+// again (M skipped meanwhile)"), and at quit for one never built (cps_at_exit); the build itself is named while it runs (slow_begin). DM_NVN_CPS_WAIT_MS sets the wait
+// (0: none, every such dispatch is skipped until its pipeline is there)
+enum { CPS_WAIT_MS = 5000, CPS_QUIET_X = 2 };
+static int g_cps_wait_ms = -1;   // the tests set it
+static uint64_t g_cps_quiet_until;   // a whole wait ran out: until then a first dispatch does not wait (submit thread; the tests clear it)
+@interface CpsJob : NSObject { @public dispatch_group_t done; id<MTLComputePipelineState> ps; NSError *err; NSString *key; uint64_t t0; _Atomic uint64_t skipped; int waited; } @end
+@implementation CpsJob @end
+static NSMutableSet<CpsJob *> *g_cps_jobs; static os_unfair_lock g_cps_jobs_lock = OS_UNFAIR_LOCK_INIT;   // jobs no dispatch has taken yet, for the report at quit
+static int cps_wait_ms(void) {
+    if (g_cps_wait_ms < 0) { const char *e = getenv("DM_NVN_CPS_WAIT_MS"); g_cps_wait_ms = e && *e ? atoi(e) : CPS_WAIT_MS; if (g_cps_wait_ms < 0) g_cps_wait_ms = CPS_WAIT_MS; }
+    return g_cps_wait_ms;
+}
+static void cps_at_exit(void) {   // a pipeline never built (its compile still under way): how long, and how many dispatches it cost
+    os_unfair_lock_lock(&g_cps_jobs_lock); NSArray<CpsJob *> *jobs = g_cps_jobs.allObjects; os_unfair_lock_unlock(&g_cps_jobs_lock);
+    for (CpsJob *job in jobs) if (dispatch_group_wait(job->done, DISPATCH_TIME_NOW))
+        MLOG("[RED] compute pipeline %s not built at exit: still compiling after %.1f s, %llu dispatches skipped", job->key.UTF8String, (bp_now() - job->t0) / 1e9, (unsigned long long)atomic_load(&job->skipped));
+}
+static CpsJob *cps_start(NvShader *cs, int off, MTL4ComputePipelineDescriptor *d) {
+    CpsJob *job = [CpsJob new]; job->done = dispatch_group_create(); job->t0 = bp_now();
+    id<MTLFunction> f = cs->fn; NSString *key = job->key = @(cs->key[0] ? cs->key : cs->builtin ? cs->builtin : "-");
+    atomic_fetch_add(&g_cps_async, 1);
+    os_unfair_lock_lock(&g_cps_jobs_lock);
+    if (!g_cps_jobs) { g_cps_jobs = [NSMutableSet set]; atexit(cps_at_exit); }
+    [g_cps_jobs addObject:job]; os_unfair_lock_unlock(&g_cps_jobs_lock);
+    dispatch_group_async(job->done, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ @autoreleasepool {
+        NSError *e = nil; id<MTLComputePipelineState> ps = cps_build(f, off, d, key, &e);
+        job->ps = ps; job->err = e;   // read by the submit thread only after the group's wait says the block is done
+    } });
+    return job;
+}
+static int cps_first_wait_ms(void) { return bp_now() < g_cps_quiet_until ? 0 : cps_wait_ms(); }   // what a first dispatch may wait
+static id<MTLComputePipelineState> cps_get(NvShader *cs, int off) {   // off: without the border corrections (border_need), keyed apart in g_cps
+    off = !!off; cps_key k = {(__bridge const void *)cs, (uintptr_t)off};
+    id<MTLComputePipelineState> ps = hm_get_id(&g_cps, &k);
+    if (ps || cs->cps_failed) return ps;   // failed: the same function fails the same way: asked again at every dispatch, Mario Kart World's refused shaders took 3,138 pipeline builds in 60 s
+    uint64_t bt = bp_now(); CpsJob *job = cs->cps_job[off]; NSError *e = nil;
+    if (!job) {
+        MTL4ComputePipelineDescriptor *d = nil; ps = cps_look(cs->fn, off, &d);
+        if (!ps) job = cs->cps_job[off] = cps_start(cs, off, d);
+    }
+    if (job) {
+        int first = !job->waited, ms = first ? cps_first_wait_ms() : 0; job->waited = 1;
+        if (dispatch_group_wait(job->done, ms > 0 ? dispatch_time(DISPATCH_TIME_NOW, (int64_t)ms * NSEC_PER_MSEC) : DISPATCH_TIME_NOW)) {
+            if (first) {
+                uint64_t now = bp_now(); g_bp_pso_n++; g_bp_pso_ns += now - bt;
+                if (ms > 0) { g_cps_quiet_until = now + (uint64_t)CPS_QUIET_X * (uint64_t)ms * 1000000ull; }   // a whole wait ran out: the quiet time begins
+                MLOG("[RED] compute pipeline %s not built after %d ms%s: its dispatches are skipped until it is, the replay goes on", cs->key, ms,
+                     ms || !cps_wait_ms() ? "" : " (no wait: another compute pipeline's wait ran out just before)");
+            }
+            atomic_fetch_add(&job->skipped, 1); atomic_fetch_add(&g_cps_skipped, 1);
+            return nil;
+        }
+        ps = job->ps; e = job->err; cs->cps_job[off] = nil;
+        os_unfair_lock_lock(&g_cps_jobs_lock); [g_cps_jobs removeObject:job]; os_unfair_lock_unlock(&g_cps_jobs_lock);
+        if (job->skipped && ps) MLOG("compute pipeline %s built after %.1f s: its dispatches run again (%llu skipped meanwhile)", cs->key, (bp_now() - job->t0) / 1e9, (unsigned long long)atomic_load(&job->skipped));
+    }
+    if (!job || !job->skipped) { g_bp_pso_n++; g_bp_pso_ns += bp_now() - bt; }
+    if (!ps) { cs->cps_failed = 1; MLOG("[RED] failed to create compute pipeline for %s: %s (its dispatches are skipped)", cs->key, e.localizedDescription.UTF8String); return nil; }
+    // A pipeline's thread limit falls with the kernel's registers on the M1 and M2 (dmsh_rewrite.py max_threads); a dispatch of the shader's local size past it runs no invocation
+    NSUInteger want = (NSUInteger)MAX(cs->rf.tg[0], 1) * MAX(cs->rf.tg[1], 1) * MAX(cs->rf.tg[2], 1);
+    if (!cs->builtin && cs->rf.tg[0] && want > ps.maxTotalThreadsPerThreadgroup) {
+        cs->cps_failed = 1;
+        MLOG("[RED] compute pipeline for %s allows %lu threads a threadgroup, its local size %ux%ux%u needs %lu (its dispatches are skipped)", cs->key,
+             (unsigned long)ps.maxTotalThreadsPerThreadgroup, cs->rf.tg[0], cs->rf.tg[1], cs->rf.tg[2], (unsigned long)want);
+        return nil;
+    }
+    pso_record("C\t%s\n", cs->key);
+    if (cs->key[0]) pso_user_record("C\t%s\n", cs->key);
+    hm_put_id(&g_cps, &k, ps);
+    return ps;
+}
 static void dispatch(const p_dispatch *dp) {
     zskip_clear();
     g_wr_epoch++; g_mdx_epoch++;
@@ -14931,26 +15096,8 @@ static void dispatch(const p_dispatch *dp) {
     if (dp->ind) ind_fly_put(cs->key, dp->ind, io, ib);
     if (passdump()) { uint32_t n[3] = {0, 0, 0}; if (dp->ind && nvn_host_readable(dp->ind, 12)) memcpy(n, (const void *)(uintptr_t)dp->ind, 12);
         PD("g %llu dispatch %s %ux%ux%u indirect=%#llx (now %u %u %u)", g_stat_pass, cs->key, dp->x, dp->y, dp->z, (unsigned long long)dp->ind, n[0], n[1], n[2]); }
-    int off = !border_need(cs, 5);
-    cps_key k = {(__bridge const void *)cs, (uintptr_t)off};
-    id<MTLComputePipelineState> ps = hm_get_id(&g_cps, &k);
-    if (!ps) {
-        if (cs->cps_failed) return;   // the same function fails the same way: asked again at every dispatch, Mario Kart World's refused shaders took 3,138 pipeline builds in 60 s
-        NSError *e = nil; uint64_t bt = bp_now(); ps = cps_new_b(cs->fn, off, &e);
-        g_bp_pso_n++; g_bp_pso_ns += bp_now() - bt;
-        if (!ps) { cs->cps_failed = 1; MLOG("[RED] failed to create compute pipeline for %s: %s (its dispatches are skipped)", cs->key, e.localizedDescription.UTF8String); return; }
-        // A pipeline's thread limit falls with the kernel's registers on the M1 and M2 (dmsh_rewrite.py max_threads); a dispatch of the shader's local size past it runs no invocation
-        NSUInteger want = (NSUInteger)MAX(cs->rf.tg[0], 1) * MAX(cs->rf.tg[1], 1) * MAX(cs->rf.tg[2], 1);
-        if (!cs->builtin && cs->rf.tg[0] && want > ps.maxTotalThreadsPerThreadgroup) {
-            cs->cps_failed = 1;
-            MLOG("[RED] compute pipeline for %s allows %lu threads a threadgroup, its local size %ux%ux%u needs %lu (its dispatches are skipped)", cs->key,
-                 (unsigned long)ps.maxTotalThreadsPerThreadgroup, cs->rf.tg[0], cs->rf.tg[1], cs->rf.tg[2], (unsigned long)want);
-            return;
-        }
-        pso_record("C\t%s\n", cs->key);
-        if (cs->key[0]) pso_user_record("C\t%s\n", cs->key);
-        hm_put_id(&g_cps, &k, ps);
-    }
+    id<MTLComputePipelineState> ps = cps_get(cs, !border_need(cs, 5));
+    if (!ps) return;   // refused, or still being built: skipped (cps_get)
     if (cs->builtin) {   // Built-in compute kernel: n = uniform buffer 0, src = storage buffer 0, dst = storage buffer 1
         const p_bind_buf *u = &S.ubo[5][0], *a0 = &S.ssbo[5][0], *a1 = &S.ssbo[5][1];
         void *ub, *sb, *db; uint64_t uo, so, dof;

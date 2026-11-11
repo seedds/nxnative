@@ -3002,6 +3002,33 @@ static int tex_atomic_alias(id<MTLTexture> base) {
         || pf == MTLPixelFormatRG16Unorm || pf == MTLPixelFormatRG16Snorm || pf == MTLPixelFormatRG16Uint || pf == MTLPixelFormatRG16Sint || pf == MTLPixelFormatRG16Float || pf == MTLPixelFormatR32Float;
     return bytes32 && (base.textureType == MTLTextureType2D || base.textureType == MTLTextureType2DArray) && base.sampleCount == 1 && base.storageMode == MTLStorageModePrivate && !base.buffer && !base.isSparse;
 }
+// ---------- Shadow map resolution (DM_SHADOW_SCALE) ----------
+// Breath of the Wild draws its sun shadows into a 896x896 depth array of three cascades (the profile's shadow_maps key names the size), whatever the scene's size: at 4K the
+// shadow edges are the coarsest thing on screen. DM_SHADOW_SCALE=<percent> (100 to 400; the launcher's Shadow resolution) makes the Metal texture of each depth array texture of
+// a listed size that much larger in both directions. The game is told nothing: it still sets a 896x896 viewport and scissor, which a pass whose only attachment is such a
+// texture multiplies (g_pass.ups: draw_'s viewport and scissor, clr_scissor), and the shaders that read the map sample it with normalized coordinates through a comparison
+// sampler, so they read the finer map as it is. As Cemu's Shadows graphic pack does on the Wii U version (its TextureRedefine of the 720x720 depth textures)
+static uint64_t g_shadow_made, g_shadow_passes;   // textures made larger, passes drawn into one
+void mtl_shadow_stats(uint64_t *made, uint64_t *passes) { *made = g_shadow_made; *passes = g_shadow_passes; }
+static int shadow_pct(void) {
+    static int v = -1; if (v >= 0) return v;
+    const char *e = getenv("DM_SHADOW_SCALE"); int n = e && *e ? atoi(e) : 100;
+    if (!DM_GAME_SHADOW_MAPS_N) n = 100;
+    else if (n < 100 || n > 400) { MLOG("[RED] DM_SHADOW_SCALE=%s: a percentage from 100 to 400; keeping the game's size", e); n = 100; }
+    if (n != 100) MLOG("shadow resolution (DM_SHADOW_SCALE): the game's shadow maps (" DM_GAME_SHADOW_MAPS " depth arrays) are made at %d%% of their size", n);
+    return v = n;
+}
+// Whether t is one of the profile's shadow maps: a depth array texture of a listed size
+static int shadow_tex(const tex_t *t) {
+    if (!t || t->d.target != 4) return 0;
+    for (const char *q = DM_GAME_SHADOW_MAPS; *q;) {
+        char *end; unsigned long w = strtoul(q, &end, 10), h = *end == 'x' ? strtoul(end + 1, &end, 10) : 0;
+        if (w == t->d.width && h == t->d.height) { uint32_t pf = 0; uint8_t swz[4]; return nvn_fmt_to_mtl(t->d.format, &pf, swz) && (pf == MTLPixelFormatDepth16Unorm || pf == MTLPixelFormatDepth32Float); }
+        if (*end != ',') break;
+        q = end + 1;
+    }
+    return 0;
+}
 static MTLTextureDescriptor *tex_desc(const tex_t *t, int packaged) {
     uint32_t pf = 0; uint8_t swz[4];
     if (!nvn_fmt_to_mtl(t->d.format, &pf, swz) || !pf) { RED_ONCE(0, "texture format %#x has no Metal equivalent (first case)", t->d.format); return nil; }
@@ -3011,6 +3038,10 @@ static MTLTextureDescriptor *tex_desc(const tex_t *t, int packaged) {
     d.pixelFormat = (MTLPixelFormat)pf;
     d.width = t->d.width ? t->d.width : 1; d.height = t->d.height ? t->d.height : 1; d.depth = 1; d.arrayLength = 1;
     d.mipmapLevelCount = t->d.levels ? t->d.levels : 1;
+    if (DM_GAME_SHADOW_MAPS_N && shadow_pct() != 100 && shadow_tex(t)) {   // a shadow map, made larger (see shadow_pct)
+        d.width = (d.width * (NSUInteger)shadow_pct() + 50) / 100; d.height = (d.height * (NSUInteger)shadow_pct() + 50) / 100;
+        if (!g_shadow_made++) MLOG("shadow resolution: first shadow map made %lux%lu instead of %ux%u (%u layers, format %#x, ser=%llu)", (unsigned long)d.width, (unsigned long)d.height, t->d.width, t->d.height, t->d.depth, t->d.format, (unsigned long long)t->serial);
+    }
     switch (t->d.target) {
         // 1D / 1D array are created as one-row 2D / 2D array textures: translated shaders never declare texture1d (0 in all five games' libraries) and always sample them as 2D; a Metal 1D texture bound to a texture2d argument is a type mismatch with undefined reads.
         // Super Mario 3D World + Bowser's Fury's material shaders sample 64x1 R32F 1D lookup tables heavily every frame (on Maxwell a 2D sample of a 1D texture reads that one row)
@@ -4892,7 +4923,8 @@ static void ts_boundary(void) {   // the end of a segment and the start of the n
 }
 static int enc_open(void) { return g_enc != nil; }
 // Target info of the current render pass: determined once from the attachments at rp_begin and shared by all draws in the pass (pipeline key, depth-stencil, viewport / scissor all depend only on it)
-static struct { uint32_t cfmt[8], dfmt, sfmt, samples; int hd, hs; NSUInteger tw, th; uint64_t serial, reg_gen, ser_gen, range_dirty; int range_external, range_depth_nonro, layered; __unsafe_unretained id<MTLTexture> range_color, range_depth; } g_pass;
+// ups: the percentage the game's viewport and scissor are multiplied by in this pass, 100 but in a pass into a shadow map made larger (shadow_pct)
+static struct { uint32_t cfmt[8], dfmt, sfmt, samples; int hd, hs; NSUInteger tw, th; uint64_t serial, reg_gen, ser_gen, range_dirty; int range_external, range_depth_nonro, layered, ups; __unsafe_unretained id<MTLTexture> range_color, range_depth; } g_pass;
 static int g_rp_layered;   // the pass about to open is for a vertex shader that writes the layer (draw → rp_begin_ex)
 // Slice-merged passes (DM_NVN_SLICE_MERGE, on by default; 0 off): consecutive passes that each draw into another layer of one level of the same array or cube texture,
 // with nothing between them but state, uniform updates and draws (no game barrier, clear, copy or dispatch: sm_scan), run as one layered pass. Each draw reaches its layer through a vertex
@@ -5763,6 +5795,12 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex_(int clear_only) {
            R.rt.has_dview && R.rt.dview.set_format ? R.rt.dview.format : 0, g_pass.dfmt, g_pass.sfmt, g_pass.hd, g_pass.hs, clear_only);
         if (dt || stt) g_pass.samples = (uint32_t)(dt ? dt : stt).sampleCount;
         pass_dims(pd, (NSUInteger)R.rt.n, &g_pass.tw, &g_pass.th);
+        g_pass.ups = 100;
+        if (DM_GAME_SHADOW_MAPS_N && shadow_pct() != 100 && R.rt.depth && shadow_tex(R.rt.depth)) {
+            int col = 0; for (int i = 0; i < R.rt.n && i < 8; i++) col |= R.rt.color[i] != NULL;
+            if (col) { static int once; if (!once++) MLOG("[RED] shadow resolution: a pass draws into a shadow map and a colour target of the game's size; its viewport is left as the game set it"); }
+            else { g_pass.ups = shadow_pct(); g_shadow_passes++; }
+        }
         if (rt_range_on()) { g_pass.reg_gen = reg0; g_pass.ser_gen = ser0; }
         if (rt_range_on()) { g_pass.range_dirty=dirty0; g_pass.range_color=pd.colorAttachments[0].texture; g_pass.range_depth=pd.depthAttachment.texture; }
         g_enc_pso = nil; g_enc_dss = nil; g_ed.ok = 0;
@@ -14197,6 +14235,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     // Viewport / scissor (clamped within the target size)
     NSUInteger tw = g_pass.tw, th = g_pass.th;
     { MTLViewport v = S.has_vp ? (MTLViewport){S.vp[0][0], S.vp[0][1], S.vp[0][2], S.vp[0][3], S.dr[0], S.dr[1]} : (MTLViewport){0, 0, tw, th, 0, 1};
+      if (g_pass.ups > 100 && S.has_vp) { double k = g_pass.ups / 100.0; v.originX *= k; v.originY *= k; v.width *= k; v.height *= k; }   // a shadow map made larger (shadow_pct)
       if (atomic_load_explicit(&g_origin_ll, memory_order_relaxed)) { v.originY += v.height; v.height = -v.height; }   // lower-left origin (see g_origin_ll)
       // Viewport swizzle: NEGATIVE_Y negates clip y, the same as the viewport flipped about its centre; facing is decided after it on the GPU as in Metal, so the winding stays.
       // Other swizzles (axis exchanges, negated x / z / w) are no viewport change and are drawn unswizzled
@@ -14207,6 +14246,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     MTLScissorRect sc = {0, 0, tw, th};
     if (R.has_sc && !S.rast_discard) {   // raster state cannot suppress vertex storage writes
         long x0 = R.sc.x < 0 ? 0 : R.sc.x, y0 = R.sc.y <= 0 ? 0 : R.sc.y, x1 = (long)R.sc.x + R.sc.w, y1 = (long)R.sc.y + R.sc.h;
+        if (g_pass.ups > 100) { x0 = x0 * g_pass.ups / 100; y0 = y0 * g_pass.ups / 100; x1 = (x1 * g_pass.ups + 99) / 100; y1 = (y1 * g_pass.ups + 99) / 100; }   // a shadow map made larger (shadow_pct)
         if (x1 > (long)tw) x1 = tw; if (y1 > (long)th) y1 = th;
         if (x1 <= x0 || y1 <= y0) { PD("Z %llu draw skipped: empty scissor (%d,%d %dx%d, target %lux%lu)", g_stat_pass, R.sc.x, R.sc.y, R.sc.w, R.sc.h, (unsigned long)tw, (unsigned long)th); return; }
         sc = (MTLScissorRect){(NSUInteger)x0, (NSUInteger)y0, (NSUInteger)(x1 - x0), (NSUInteger)(y1 - y0)};
@@ -15363,6 +15403,7 @@ static int clr_scissor(MTLScissorRect *sc) {   // the clear's scissor in the ope
     NSUInteger tw = g_pass.tw, th = g_pass.th; *sc = (MTLScissorRect){0, 0, tw, th};
     if (!R.has_sc) return tw && th;
     long x0 = R.sc.x < 0 ? 0 : R.sc.x, y0 = R.sc.y < 0 ? 0 : R.sc.y, x1 = (long)R.sc.x + R.sc.w, y1 = (long)R.sc.y + R.sc.h;
+    if (g_pass.ups > 100) { x0 = x0 * g_pass.ups / 100; y0 = y0 * g_pass.ups / 100; x1 = (x1 * g_pass.ups + 99) / 100; y1 = (y1 * g_pass.ups + 99) / 100; }   // a shadow map made larger (shadow_pct)
     if (x1 > (long)tw) x1 = (long)tw; if (y1 > (long)th) y1 = (long)th;
     if (x1 <= x0 || y1 <= y0) return 0;
     *sc = (MTLScissorRect){(NSUInteger)x0, (NSUInteger)y0, (NSUInteger)(x1 - x0), (NSUInteger)(y1 - y0)}; return 1;

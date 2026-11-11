@@ -19,6 +19,9 @@ include = ["scripts/**/*.py", "dm/tools/**/*.py", "dm/gfx/tools/**/*.py", "dm/ga
 select = ["F", "E7", "E9", "B", "PLE", "PLW", "PIE", "ISC001", "T10", "RUF006", "RUF008", "RUF009", "RUF013", "RUF016", "RUF017", "RUF018", "RUF024", "RUF026"]
 ignore = ["F403", "F405", "E701", "E702", "E731", "E741", "B007", "B905", "PLW0603", "PLW1510", "PLW2901"]
 
+[tool.ruff.lint.per-file-ignores]
+"dm/gfx/tools/dmsh_entry.py" = ["F401"]
+
 # coverage.py over the tool tests (docs/development.md, Continuous integration): the tools' folders, not their tests. Subprocesses are measured too (the tests run
 # many tools with sys.executable), each writing its own data file beside .coverage; `coverage combine` joins them. Run from the repository's root.
 [tool.coverage.run]

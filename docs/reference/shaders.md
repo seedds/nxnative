@@ -35,6 +35,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [FINAL FANTASY X/X-2 HD Remaster](../../dm/games/0100BC300CB48000/README.md); base and both supplied DLC packs yield 5,752 unique shaders.
 - **Check:** `test_vbf.py` covers raw and zlib blocks, shared/missing members, truncation, unaligned effects, loose shader keys and inconsistent lengths. All 5,752 programs translate on the Mac.
 
+### Diablo III's console packages
+
+- **Symptom:** the split finds no shaders (`[RED] the shader split found no shaders in main or the RomFS`), the RomFS holds only `.cpk` files, and `cpk.py` refuses them (`not a CPK`); the run prints `[RED] shader … is not in the shader map` for every program.
+- **Cause:** Diablo III: Eternal Collection's `.cpk` files are Blizzard's console packages, not CRI's: they start with the u32 `0xa1b2c3d4` and a version (7), then bit-packed tables and the data in 64 KiB sectors. Each file is stored or one zlib stream behind a 6-byte record `{u32 decoded length, u16 stored length}`; the game's SNO assets (`0xdeadbeef` headers) are such streams, and its shader assets hold each program as a control section directly followed by its code area. No reader looked inside the streams.
+- **Fix:** `dm/gfx/tools/d3cpk.py` finds each stream by its record and keeps it only when it inflates to exactly its decoded length and ends at its stored length, so a false start in stored data is left out; it does not read the archive's tables (no stream crosses a sector: in `ClientCommon.cpk` all 57,942 store at most 0xffff bytes). `shader_split.py` reads the packages in byte ranges (`d3cpk_jobs`) and takes every control section of 0x760 to 0x880 bytes followed by its code area in the same stream (`d3cpk_shaders`), each a program of one stage; one that is not is named in a red line, never dropped silently.
+- **Found on:** [Diablo III: Eternal Collection](../../dm/games/01001B300B9BE000/README.md) 2.7.7: 1,324 shaders (562 vertex, 762 pixel) from 16 GB in 26 s, against none before; every program the game asked for up to its menus is among them.
+- **Check:** `dm/tools/tests/test_split_d3cpk.py`: shaders in streams among stored data with a false zlib header, any cut of the byte ranges giving the same keys, a control section whose code area is cut short named, a record whose decoded length is wrong not taken.
+
 ### A file no reader reads
 
 - **Symptom:** the shader split stops on one archive with a Python traceback (an `IndexError` or `struct.error` naming no file), or a reader's `[RED]` line about a format it does not know, and nothing is written; the NSP script loses the build at the split.

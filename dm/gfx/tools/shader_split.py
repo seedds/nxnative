@@ -35,6 +35,7 @@
 #   · HNSHV002 (Needle, Persona 5 Royal): NVN section descriptors in the shader containers embedded in main and the GSC files of its CPK archives, see needle_shaders
 #   · GFPAK (Game Freak, Pokémon Sword, Pokémon Legends: Arceus): BNSH entries of the archives under bin/archive (Sword's LZ4; Arceus's Oodle Kraken, decoded by the game's own decoder in the Mac host), see gfpak_members
 #   · .tfxo (Silicon Studio's YEBIS post effects, Pokémon Sword): control sections each followed by its code area, in a zlib stream in main, see tfxo_streams and tfxo_shaders
+#   · Diablo III's packages (Diablo III: Eternal Collection's .cpk files, not CRI's): control sections each followed by its code area in the zlib streams of the game's SNO assets, see d3cpk.py and d3cpk_shaders
 #   · control sections loose in main, in no GLSLC output or BNSH file (Advance Wars 1+2: Re-Boot Camp's Bink 2 shaders): paired with their code areas by data records or adjacency, see raw_shaders
 #   · SNVN (Retro Studios, Donkey Kong Country: Tropical Freeze, Metroid Prime Remastered): zlib program records in the SNVN chunks of MaterialArchive.arc, of the MTRL resources in its
 #       .pak archives and of the startup material archive LZSS-compressed in main, see rfrm_shaders and retro_main_forms
@@ -893,6 +894,41 @@ def cpk_shaders(path, rel, ents, out):
         except (ValueError, IndexError) as x:   # a compression cpk.py does not decode: the entry is left out, and the split goes on
             print(f'[RED] /{rel}/{e[0]}: {x}; not scanned', flush=True); continue
         scan_blob(d, f'/{rel}/{e[0]}', out)
+
+D3CPK = b'D3CPK'   # job tag of a Diablo III package's byte range (d3cpk_jobs)
+def d3cpk_jobs(files, parts=64):
+    """Diablo III's console packages (d3cpk.py; .cpk like CRI's, another format) in byte ranges of about equal length: Diablo III: Eternal Collection 2.7.7 has 37, 16 GB.
+    → ([(path, rel, (D3CPK, start, end)), …], the package paths)"""
+    import d3cpk
+    ds = []
+    for p, r in files:
+        if not p.lower().endswith('.cpk'): continue
+        with open(p, 'rb') as f: h = f.read(8)
+        if d3cpk.is_d3cpk(h): ds.append((p, r, os.path.getsize(p)))
+    step = max(sum(n for *_, n in ds) // parts, 1 << 24)
+    return [(p, r, (D3CPK, a, min(a + step, n))) for p, r, n in ds for a in range(0, n, step)], {p for p, _, _ in ds}
+
+def d3cpk_shaders(path, rel, start, end, out):
+    """A byte range of a Diablo III package (d3cpk_jobs): every zlib stream whose record starts in it (d3cpk.streams), searched for control sections each directly followed by its code area
+    (control +0x704 bytes), as the game's shader SNO assets hold them (2.7.7: a control section of 0x850 bytes; the programs the game draws the title with are in ClientCommon.cpk). Each is a
+    program of one stage (separable_pairs). A control section of a plausible length (0x760 to 0x880 bytes, as tfxo_shaders) not followed by its code area in the same stream is counted and named:
+    in ClientCommon.cpk none is (3,528 control sections), so a stream that splits a file would show here"""
+    import d3cpk
+    with open(path, 'rb') as f:
+        f.seek(start); d = f.read(end - start + d3cpk.SPAN)
+    lost = []
+    for p, _, x in d3cpk.streams(d, 0, end - start, start):
+        label = f'/{rel}@{start + p:#x}'
+        for m in re.finditer(re.escape(CTL_MAGIC), x):
+            c = m.start()
+            if c + 0x708 > len(x): continue
+            n, k = struct.unpack_from('<I', x, c + 0x20)[0], struct.unpack_from('<I', x, c + 0x704)[0]
+            if not 0x760 <= n <= 0x880: continue   # the magic in other data
+            ctl, code = x[c:c + n], x[c + n:c + n + k]
+            st = glslc_stage(ctl, code) if len(code) == k else None
+            if st and not check(label, st, ctl, code): out.append((f'{label}#D3@{c:#x}', st, ctl, code))
+            else: lost.append(f'{label}+{c:#x}')
+    if lost: print(f'[RED] /{rel} {start:#x}..{end:#x}: {len(lost)} control section(s) not followed by their code area in the same stream, left out (first: {lost[0]})', flush=True)
 
 CRA = b'CRA.'
 def boot_nros():
@@ -2952,7 +2988,7 @@ def pixel_input_cover(shaders):
         k = min(ins, key=lambda k: (-len(ins[k] & left), k)); cover.append(k); left -= ins[k]
     return cover
 
-SINGLE_STAGE = ('#GLSLC@', '#VIPER', '#UE', '#MTSPK@', '#MGFX@', '#NLG', '#PGSO', '#RAW@', '#TFXO@', '#NEEDLE@', '#SNOWDROP@', '#PHYRE@', '#SUMO@', '#NVNSH@')   # sources whose every shader is a program of one stage: GLSLC outputs, Unreal's shader records, MT Framework's shader package (BNSH variations, Unity programs, MSHD and SDF pair theirs);
+SINGLE_STAGE = ('#GLSLC@', '#VIPER', '#UE', '#MTSPK@', '#MGFX@', '#NLG', '#PGSO', '#RAW@', '#TFXO@', '#NEEDLE@', '#SNOWDROP@', '#PHYRE@', '#SUMO@', '#NVNSH@', '#D3@')   # sources whose every shader is a program of one stage: GLSLC outputs, Unreal's shader records, MT Framework's shader package (BNSH variations, Unity programs, MSHD and SDF pair theirs);
 # Unreal Engine 3's shader caches (ue3_shaders, '#UE3@'); MonoGame's effects, whose passes may name no vertex shader and keep the one bound (Celeste: 10 of its 13 effects draw through SpriteBatch's vertex shader, which is in main); Next Level Games'
 # archives (Luigi's Mansion 3 makes 5,317 programs of one stage each at boot); PlatinumGames' shader objects (Bayonetta 3: one stage each, pg_shader); control sections loose in main
 # (Advance Wars 1+2: Re-Boot Camp's Bink shaders, raw_shaders), which no file pairs; YEBIS's effect file (tfxo_shaders); and Sumo's Ninty_NX descriptors and NVNsh records, one stage
@@ -3143,6 +3179,9 @@ def scan_file_in(args):
     if len(args) > 2 and head[:4] == CRA:   # files of Camelot's archive (cra_jobs)
         cra_shaders(path, rel, args[2], found)
         return rel, uniq_keys(found), var_pairs(found), trees
+    if len(args) > 2 and args[2][0] == D3CPK:   # a byte range of a Diablo III package (d3cpk_jobs)
+        d3cpk_shaders(path, rel, args[2][1], args[2][2], found)
+        return rel, uniq_keys(found), var_pairs(found), trees
     if len(args) > 2 and head[:4] == CPK:   # entries of a CRI CPK (cpk_jobs)
         cpk_shaders(path, rel, args[2], found)
         return rel, uniq_keys(found), var_pairs(found), trees
@@ -3323,14 +3362,15 @@ def main():
     arc_jobs, arcs = smash_arc_jobs(files)   # Super Smash Bros. Ultimate's data.arc: its current files, in ranges
     pz_jobs, pkzs = pkz_jobs(files)   # Bayonetta 3's PKZ archives, Oodle Kraken decoded by the game's own decoder in the Mac host
     ck_jobs, cpks = cpk_jobs(files)   # Bayonetta 2's CRI CPK archives (CRILAYLA entries)
+    d3_jobs, d3s = d3cpk_jobs(files)   # Diablo III's packages (zlib streams, d3cpk.py)
     cr_jobs, cras = cra_jobs(files)   # Mario Tennis Fever's CRA archive, its index in the NRO the game decodes at run time
     zp_jobs, zips = zip_jobs(files)   # Portal's game.zip (Deflate members)
     ah_jobs, arhs = arh_jobs(files)   # Monolith's ARH1/ARD archives and embedded XBC1/HCPS programs
     fb_jobs, fbs = frostbite_jobs(files)   # EA SPORTS FC 27's Frostbite bundles, Oodle Leviathan decoded by the game's own decoder in the Mac host
     pd_jobs, pdats = pdat_jobs(files)   # Kirby Air Riders' PDAT archives: the PMAP records in byte ranges
     rp_jobs, rpfs = rpf_jobs(files, main_v)   # Red Dead Redemption's RPF6 archives, their tables decrypted with the key in main (rpf6.py)
-    big += pak_jobs + tr_jobs + ue_jobs + bd_jobs + arc_jobs + pz_jobs + ck_jobs + cr_jobs + zp_jobs + ah_jobs + fb_jobs + pd_jobs + rp_jobs
-    files = [(p, r) for p, r in files if not linkdata_jobs(p, r) and p not in paks and p not in trp and p not in uep and p not in bdts and p not in arcs and p not in pkzs and p not in cpks and p not in cras and p not in zips and p not in arhs and p not in fbs and p not in pdats and p not in rpfs]
+    big += pak_jobs + tr_jobs + ue_jobs + bd_jobs + arc_jobs + pz_jobs + ck_jobs + d3_jobs + cr_jobs + zp_jobs + ah_jobs + fb_jobs + pd_jobs + rp_jobs
+    files = [(p, r) for p, r in files if not linkdata_jobs(p, r) and p not in paks and p not in trp and p not in uep and p not in bdts and p not in arcs and p not in pkzs and p not in cpks and p not in d3s and p not in cras and p not in zips and p not in arhs and p not in fbs and p not in pdats and p not in rpfs]
     with cf.ProcessPoolExecutor(J, initializer=_pool_init, initargs=(common, {}, zdicts)) as ex:
         n = len(big) + len(files)
         results += pooled(ex, big, n) + pooled(ex, files, n, len(big), chunk=16)

@@ -112,8 +112,9 @@ int main(void) { @autoreleasepool {
     same_as_whole(b7, "the patched table holds what a table built whole does (retired ID)");
 
     // A storage takeover: ID 4 names a finalized texture that resolves to a shared one (a pool the CPU cannot reach). When a texture of another description takes its storage,
-    // the change names no texture: no table is built, and no ID view is checked again. The evicted texture goes only behind the submission's fence (here the ghost table of finalized
-    // serials keeps it), and a retired ID's view of it goes at the submission's end, so the next submission takes ID 4 again
+    // the change names no texture: no table is built, and no ID view is checked again. The evicted texture goes behind the submission's fence, and the finalized serial that still
+    // resolved to it goes with it (ghost_purge), noted: ID 4 resolves anew in that submission, patched rather than built whole, as it did once the ghost ring let the serial go.
+    // A retired ID's view goes at the submission's end, so the next submission takes ID 4 again
     uint8_t *md = pages(); pool_t dpool = {0}; pool_builder_t pd = {.mem = md, .size = LEN, .flags = NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS | NVN_MEMORY_POOL_FLAGS_GPU_CACHED};
     CHECK(h_nvnMemoryPoolInitialize((NVNmemoryPool *)&dpool, (const NVNmemoryPoolBuilder *)&pd), "pool D initialized");
     NVNtexture t4 = {0}; h_nvnTextureBuilderSetStorage(&tb, (NVNmemoryPool *)&dpool, 0);
@@ -130,7 +131,8 @@ int main(void) { @autoreleasepool {
     builds = g_stat_pool_builds; uint64_t taken = g_alias_taken, ep = g_treg_ep;
     id<MTLBuffer> b10 = table();
     CHECK(g_alias_taken > taken, "texture 5 took the storage over");
-    CHECK(g_stat_pool_builds == builds && entry(b10, 5) != dummy_of(b10) && entry(b10, 4) == entry(b9, 4), "the takeover builds no table, and ID 4 keeps its entry in that submission");
+    CHECK(g_stat_pool_builds == builds && entry(b10, 5) != dummy_of(b10), "the takeover builds no table");
+    CHECK(entry(b10, 4) != entry(b9, 4) && entry(b10, 4) != dummy_of(b10), "ID 4, whose finalized serial went with the texture it let go, resolves anew in that submission");
     CHECK(g_treg_ep == ep, "nor sends every texture ID down the slow path");
     CHECK(!g_treg[4].view, "ID 4's view went at the submission's end");
     id<MTLBuffer> b11 = table();

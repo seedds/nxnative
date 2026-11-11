@@ -198,7 +198,7 @@ A game may tell NVN objects apart by their bytes, without an NVN call. A host re
 
 - **Symptom:** the serial table grows by about 10 entries a frame (276,000 after 25,000 frames).
 - **Cause:** a game that records transient render targets and finalizes them before it submits: replay put the dead serials back into `g_by_serial`.
-- **Fix:** dead serials go to a 512-entry table (`tex_put`, `g_ghost`; the memory line's `finalized textures still referenced`).
+- **Fix:** dead serials go to a ring whose oldest entry goes when a new one comes (`tex_put`, `g_ghost`; the memory line's `finalized textures still referenced`): 512 entries at first, 32,768 since [Render targets a game moved stayed in GPU memory](rendering.md#render-targets-a-game-moved-stayed-in-gpu-memory), where an entry that leaves the sharing table takes its serials with it.
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) (the HUD captures, the 640×360 buffers; found while fixing GitHub issue #9).
 
 ### A replay's own objects take serials above a capture's

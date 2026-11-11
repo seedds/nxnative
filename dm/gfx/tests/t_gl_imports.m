@@ -55,6 +55,37 @@ int main(int argc, char **argv) {
     GLsizei len = -1; GLchar log[2] = {'?', 0}; info(sh, sizeof log, &len, log); assert(!len && !log[0]);
     void (*delete)(GLuint) = import("glDeleteShader"); delete(sh); assert(!shader_of(sh));
 
+    // Deleting an attached shader only flags it: it keeps its name and goes with its last attachment; a program deleted while current stays in use until the next glUseProgram
+    GLuint (*createprog)(void) = import("glCreateProgram");
+    void (*attach)(GLuint, GLuint) = import("glAttachShader"), (*detach)(GLuint, GLuint) = import("glDetachShader");
+    void (*delprog)(GLuint) = import("glDeleteProgram"), (*use)(GLuint) = import("glUseProgram");
+    void (*progiv)(GLuint, GLenum, GLint *) = import("glGetProgramiv");
+    GLuint pr = createprog(), vs = create(GL_VERTEX_SHADER), fs = create(GL_FRAGMENT_SHADER);
+    attach(pr, vs); attach(pr, fs); delete(vs);
+    assert(shader_of(vs) && shader_of(vs)->type == GL_VERTEX_SHADER);
+    getiv(vs, GL_DELETE_STATUS, &value); assert(value == 1);
+    getiv(fs, GL_DELETE_STATUS, &value); assert(value == 0);
+    GLuint other = create(GL_FRAGMENT_SHADER); assert(other != vs);   // the flagged shader's name is not handed out again
+    assert(shader_of(prog_of(pr)->vs) == shader_of(vs));
+    progiv(pr, GL_ATTACHED_SHADERS, &value); assert(value == 2);
+    attach(pr, other); assert(prog_of(pr)->fs == other);   // a stage's new shader replaces the old one, which stays (it is not flagged)
+    assert(shader_of(fs) && !shader_of(fs)->refs && shader_of(other)->refs == 1);
+    detach(pr, vs); assert(!shader_of(vs) && !prog_of(pr)->vs);   // its last attachment: the flagged shader goes
+    progiv(pr, GL_ATTACHED_SHADERS, &value); assert(value == 1);
+    attach(pr, fs); delete(fs); delete(other); assert(shader_of(fs) && !shader_of(other));
+    // a second program shares the flagged shader: it goes only when both have let go of it
+    GLuint pr2 = createprog(); attach(pr2, fs); assert(shader_of(fs)->refs == 2);
+    prog_of(pr)->linked = 1;   // as a link with the library would leave it
+    use(pr); delprog(pr);
+    assert(prog_of(pr) && prog_of(pr)->linked);   // still current: its draws go on
+    progiv(pr, GL_DELETE_STATUS, &value); assert(value == 1);
+    GLint cur = 0; h_glGetIntegerv(GL_CURRENT_PROGRAM, &cur); assert(cur == (GLint)pr);
+    use(pr); assert(prog_of(pr));   // using it again does not release it
+    use(pr2); assert(!prog_of(pr) && shader_of(fs) && shader_of(fs)->refs == 1);   // switched away: the program goes, and its attachment with it
+    use(0); assert(prog_of(pr2));   // not flagged: it stays
+    delprog(pr2); assert(!prog_of(pr2) && !shader_of(fs));   // not current: it goes at once, and the shader with its last attachment
+    vs = create(GL_VERTEX_SHADER); assert(vs); delete(vs); assert(!shader_of(vs));   // the names are free again
+
     unsigned long sz;
     const hle_ent *sec = (const hle_ent *)getsectiondata(&_mh_execute_header, "__DATA", "swhle", &sz);
     unsigned count = 0;
@@ -72,6 +103,6 @@ int main(int argc, char **argv) {
     assert((h_eglGetProcAddress(missing) != NULL) == stubs);
     assert(resolve_import(NULL, missing) == (uint64_t)&unimpl_stubs[0]);
     assert(!strcmp(wrap_kind, "STUB"));
-    printf("GL imports: %u shared entries, shader handle/source, wrappers and missing names (DM_GL_STUBS=%d): OK\n", count, stubs);
+    printf("GL imports: %u shared entries, shader handle/source, shader and program lifetimes, wrappers and missing names (DM_GL_STUBS=%d): OK\n", count, stubs);
     return 0;
 }

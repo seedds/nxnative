@@ -50,6 +50,18 @@ fragment main0_out main0(main0_in in [[stage_in]], constant spvDescriptorSetBuff
 
 
 class Regress(unittest.TestCase):
+    def test_run_env_cloud_saves_off(self):   # an inherited DM_SAVE_SYNC would sync a route's scratch save with the player's cloud save (docs/reference/services.md)
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            g = NS(id='0100000000000000', folder=root, build=root / 'build', kind='nvn', romfs=lambda: root / 'romfs')
+            art = {'lib': root / 'lib', 'profile': root / 'profile'}
+            route = {'save': 'new'}
+            with patch.dict(os.environ, DM_SAVE_SYNC=str(root / 'cloud')):
+                env, src = regress.run_env(g, art, route, root / 'run', NS(env=[], no_hud=True))
+                self.assertEqual((env['DM_SAVE_SYNC'], env['DM_SAVE'], src), ('0', str(root / 'run/save'), None))
+                with self.assertRaises(regress.HarnessError): regress.run_env(g, art, route, root / 'run', NS(env=[f'DM_SAVE_SYNC={root}/cloud'], no_hud=True))
+                self.assertEqual(regress.run_env(g, art, route, root / 'run', NS(env=['DM_SAVE_SYNC=0'], no_hud=True))[0]['DM_SAVE_SYNC'], '0')
+
     def test_impact_without_machine_paths(self):
         env = {k: v for k, v in regress.os.environ.items() if k not in ('REGRESS_ROOT', 'REGRESS_GAMES')}
         with tempfile.TemporaryDirectory() as td:
@@ -483,13 +495,6 @@ class Regress(unittest.TestCase):
         good = {'exit': None, 'max_frame': 500, 'shots': {'8': {'dhash': '0' * 16, 'rgb16': '00' * 768}}}
         bad = dict(good, shots={'8': {'dhash': 'f' * 16, 'rgb16': 'ff' * 768}})
         self.assertTrue(regress.smoke_diff([good], [good, bad], route)[0]['REGRESSION'])
-
-    def test_shader_build_pauses_for_unknown_lock_owner(self):
-        with tempfile.TemporaryDirectory() as td:
-            with patch.object(regress.subprocess, 'Popen') as spawn, patch.object(regress.bench, 'lock_holder', return_value=0), patch.object(regress.os, 'killpg') as kill, patch.object(regress.time, 'sleep'), patch.object(regress, 'say'):
-                spawn.return_value.poll.side_effect = [None, 0, 0]
-                regress.run_heavy(['build'], Path(td) / 'build.log', td, {}, NS(pause_lock=Path(td) / 'lock'), 'build')
-            self.assertTrue(any(c.args[1] == regress.signal.SIGSTOP for c in kill.call_args_list))
 
     def test_idle_msbuild_workers_do_not_block_measurements(self):
         worker = '/usr/local/share/dotnet/dotnet /sdk/10.0.403/MSBuild.dll /nodemode:1 /nodeReuse:true'

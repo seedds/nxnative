@@ -18,7 +18,9 @@ import ios_metal  # noqa: E402
 
 def mac_metal():   # dmsh_build.py's MAC_METAL, read without running the script
     for n in ast.parse((TOOLS / 'dmsh_build.py').read_text()).body:
-        if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'MAC_METAL' for t in n.targets): return ast.literal_eval(n.value)
+        if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'MAC_METAL' for t in n.targets):
+            sys.path.insert(0, str(TOOLS)); import dmsh_chain   # the line names its deployment target, dmsh_chain.MAC_MIN_FLAG
+            return eval(compile(ast.Expression(n.value), 'dmsh_build.py', 'eval'), {'dmsh_chain': dmsh_chain})
     raise AssertionError('no MAC_METAL in dmsh_build.py')
 
 

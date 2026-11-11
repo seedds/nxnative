@@ -802,6 +802,13 @@ static void desc_write(desc_t *e, const lbind *lb, VkDescriptorType t, const VkD
         default: RED1("descriptor type %d not implemented", t); break;
     }
 }
+// A copy takes the source descriptor whole, but a destination binding with immutable samplers keeps its own sampler, as a write does: Vulkan's updates (copies too)
+// change only the image of a combined image sampler there, and a sampler-only copy into one is not allowed. A source's immutable sampler is part of what it copies
+static void desc_copy(desc_t *e, const lbind *lb, const desc_t *s) {
+    id<MTLSamplerState> keep = e->smp;
+    *e = *s;
+    if (lb->imm) e->smp = keep;
+}
 VK(vkUpdateDescriptorSets, void, VkDevice d, uint32_t nw, const VkWriteDescriptorSet *w, uint32_t nc, const VkCopyDescriptorSet *c) {
     (void)d;
     for (uint32_t i = 0; i < nw; i++)
@@ -813,7 +820,7 @@ VK(vkUpdateDescriptorSets, void, VkDevice d, uint32_t nw, const VkWriteDescripto
     for (uint32_t i = 0; i < nc; i++)
         for (uint32_t j = 0; j < c[i].descriptorCount; j++) {
             const lbind *la, *lb; desc_t *s = set_elem(c[i].srcSet, c[i].srcBinding, c[i].srcArrayElement + j, &la), *t = set_elem(c[i].dstSet, c[i].dstBinding, c[i].dstArrayElement + j, &lb);
-            if (s && t) *t = *s;
+            if (s && t) desc_copy(t, lb, s);
         }
 }
 VK(vkCreateDescriptorUpdateTemplate, VkResult, VkDevice d, const VkDescriptorUpdateTemplateCreateInfo *ci, const VkAllocationCallbacks *a, VkDescriptorUpdateTemplate *out) {

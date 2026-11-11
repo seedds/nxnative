@@ -131,6 +131,23 @@ class DriverReads(unittest.TestCase):
     def test_sample_rows_are_not_filled_for_other_stages(self):
         self.assertEqual(UNFILLABLE(self.SAMPLE_LOOKUP, 'vs'), ['c0 dynamic index', 'c0+0x630'])
 
+    # PRAGMATA's sample position lookup without the grid (a689530d00090ebf): a byte of the table at 0x620 + the sample index, row 98
+    SAMPLE_BYTE = ('float _115 = as_type<float>(gl_SampleID);\n'
+                   'int _141 = as_type<int>(_115) + 1568;\n'
+                   'uint _144 = uint(int(uint(_141) >> uint(2)));\n'
+                   'uint _146 = uint(int(uint(int(_144)) >> uint(2)));\n'
+                   'int _148 = int(_144) & 3;\n'
+                   'float _150 = (*spvDescriptorSet0.fp_c0)._m0[int(_146)][_148];')
+
+    def test_sample_byte_by_the_sample_index_is_filled_in_a_pixel_shader(self):
+        self.assertEqual(UNFILLABLE(self.SAMPLE_BYTE), [])
+
+    def test_sample_byte_is_not_filled_for_other_stages(self):
+        self.assertEqual(UNFILLABLE(self.SAMPLE_BYTE, 'vs'), ['c0+0x620'])
+
+    def test_index_reassigned_in_a_loop_stays_dynamic(self):
+        self.assertEqual(UNFILLABLE(self.SAMPLE_BYTE.replace('int _148', '_146 = 7u;\nint _148')), ['c0 dynamic index'])
+
 
 if __name__ == '__main__':
     unittest.main()

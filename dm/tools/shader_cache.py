@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # The shader build's compile cache as one file, cas.db, read and written in place. It was a folder of a few files per shader (Metroid Dread: 84,541 files), kept as a tar between builds and unpacked
 # for each build that ran. Nothing is unpacked now: an entry goes in and comes out by its name, and a file a tool needs is written only then.
-# SQLite, as it is in Python and takes several writers: dmsh_build.py's threads share one connection, and regress.py's chain builds and the NSP script can share a game's file at once (the wait is SQLite's).
+# SQLite, as it is in Python and takes several writers: dmsh_build.py's threads share one connection (its worker processes have one each: forked), and regress.py's chain builds and the NSP script can share a game's file at once (the wait is SQLite's).
 # Two tables: entry (name, the blob it names, when it was written) and blob (the bytes, once each). A library kept under its MSL's digest and under its shader's digest was one APFS clone of the other; inside
 # one file it would be two copies, so bytes are stored by their hash. A file removed from the cache gives its pages back at the next prune (incremental vacuum), with no copy of the file.
 # It only saves work: a damaged file costs the work it held and is made anew, and a full drive is one [RED] line. An entry is written and read whole, so its file is never seen half written.
@@ -34,6 +34,12 @@ class Store:
             for s in SCHEMA: self.db.execute(s)
         except sqlite3.DatabaseError as e:
             if not self._damage(e): raise
+
+    def forked(self):
+        """A connection of its own in a forked process (dmsh_build.py's workers): SQLite's must not be used across a fork, not even closed, so the inherited one is only kept"""
+        self._inherited = self.db
+        self.lock = threading.RLock()
+        self._open()
 
     def _damage(self, e):   # True when e says the file is damaged, which is now made anew
         if not any(w in str(e) for w in _DAMAGED): return False

@@ -7,31 +7,67 @@
 # It only saves work: a damaged file costs the work it held and is made anew, and a full drive is one [RED] line. An entry is written and read whole, so its file is never seen half written.
 # Names, as in the folder this replaces: metallib/<target>/<digest>[_x].metallib (dmsh_mtlcache.py), shader/<digest>/<mac|ios>/<output>, index/<key>.json, variant/<digest>/<file> (dmsh_build.py).
 # Not part of the translation chain: it decides no output (dmsh_chain.py), like dmsh_mtlcache.py.
-import contextlib, hashlib, json, os, re, shutil, sqlite3, tarfile, threading, time
+import contextlib, fcntl, hashlib, itertools, json, os, re, shutil, sqlite3, tarfile, threading, time
 
 SCHEMA = ('CREATE TABLE IF NOT EXISTS blob(id INTEGER PRIMARY KEY, hash BLOB UNIQUE NOT NULL, data BLOB NOT NULL)',
           'CREATE TABLE IF NOT EXISTS entry(name TEXT PRIMARY KEY, blob INTEGER NOT NULL, mtime REAL NOT NULL) WITHOUT ROWID')
 SHADER_ENTRY = re.compile(r'shader/([0-9a-f]{64})/')
 WAIT = 600   # seconds another process's write may hold this one up
 _DAMAGED = ('malformed', 'not a database', 'disk image')
+ZSTD_LIBRARY = os.path.join(os.path.dirname(__file__), 'sqlite_zstd_bin/libsqlite_zstd.dylib')
+
+
+def _load_zstd(db):
+    enabled = False
+    try:
+        db.enable_load_extension(True)
+        enabled = True
+        db.load_extension(os.fspath(ZSTD_LIBRARY))
+    except (AttributeError, NotImplementedError, OSError, sqlite3.Error) as e:
+        raise RuntimeError(f'sqlite-zstd cannot load {ZSTD_LIBRARY}: {e}; use Python with SQLite extension loading and rebuild with dm/tools/sqlite_zstd_bin/build.sh <scratch-folder>') from e
+    finally:
+        if enabled: db.enable_load_extension(False)
+
+
+@contextlib.contextmanager
+def _ownership(path, exclusive=False):
+    fd = os.open(f'{path}.lock', os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        try: fcntl.flock(fd, (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB)
+        except BlockingIOError as e: raise RuntimeError(f'shader compile cache {path} is busy; finish other builds before conversion') from e
+        except OSError:
+            if exclusive: raise
+            # A raw cache can still use SQLite on a drive without flock; conversion cannot.
+        yield
+    finally: os.close(fd)
 
 
 class Store:
     def __init__(self, path, say=print):
-        self.path, self.say = os.fspath(path), say
+        self.path, self.say = os.path.realpath(path), say
         self.lock = threading.RLock()   # one connection, for dmsh_build.py's threads: a read or a write of an entry takes microseconds next to a compile
         self.full = False
-        self._open()
+        os.makedirs(os.path.dirname(os.path.abspath(self.path)), exist_ok=True)
+        self.owner = _ownership(self.path)
+        self.owner.__enter__()
+        self.db: sqlite3.Connection
+        try: self._open()
+        except BaseException:
+            self.close()
+            raise
 
     def _open(self):
         os.makedirs(os.path.dirname(os.path.abspath(self.path)), exist_ok=True)
         self.db = sqlite3.connect(self.path, timeout=WAIT, check_same_thread=False, isolation_level=None)
         try:
+            self.compressed = self.db.execute("SELECT type FROM sqlite_master WHERE name='blob'").fetchone() == ('view',)
+            if self.compressed: _load_zstd(self.db)
             self.db.execute('PRAGMA page_size=16384'); self.db.execute('PRAGMA auto_vacuum=INCREMENTAL')   # both only before the first table
             # WAL: a reader in another process does not wait for a writer, and a commit needs no fsync. A drive that cannot share its memory file stays on the rollback journal, unsynced: a stop costs the cache at worst
             if self.db.execute('PRAGMA journal_mode=WAL').fetchone()[0].lower() == 'wal': self.db.execute('PRAGMA synchronous=NORMAL')
             else: self.db.execute('PRAGMA synchronous=OFF')
-            for s in SCHEMA: self.db.execute(s)
+            if not self.compressed:
+                for s in SCHEMA: self.db.execute(s)
         except sqlite3.DatabaseError as e:
             if not self._damage(e): raise
 
@@ -73,7 +109,10 @@ class Store:
             try:
                 with self.batch():
                     row = self.db.execute('SELECT id FROM blob WHERE hash=?', (digest,)).fetchone()
-                    blob = row[0] if row else self.db.execute('INSERT INTO blob(hash, data) VALUES(?, ?)', (digest, data)).lastrowid
+                    if not row:
+                        self.db.execute('INSERT INTO blob(hash, data) VALUES(?, ?)', (digest, data))
+                        row = self.db.execute('SELECT id FROM blob WHERE hash=?', (digest,)).fetchone()   # lastrowid does not follow a transparent view's trigger
+                    blob = row[0]
                     self.db.execute('INSERT OR REPLACE INTO entry(name, blob, mtime) VALUES(?, ?, ?)', (name, blob, time.time() if when is None else when))
             except sqlite3.OperationalError as e:
                 if any(w in str(e) for w in _DAMAGED): self._damage(e)
@@ -134,7 +173,86 @@ class Store:
         self._run('PRAGMA incremental_vacuum')
 
     def close(self):   # also folds the write-ahead log into the file, so that one file is left
-        with self.lock, contextlib.suppress(sqlite3.Error): self.db.close()
+        with self.lock:
+            if hasattr(self, 'db'):
+                with contextlib.suppress(sqlite3.Error): self.db.close()
+            if self.owner is not None:
+                self.owner.__exit__(None, None, None); self.owner = None
+
+
+def _reclaim(db):
+    # Batches bound the vacuum's WAL, including the first large conversion.
+    while db.execute('PRAGMA freelist_count').fetchone()[0]:
+        before = db.execute('PRAGMA freelist_count').fetchone()[0]
+        db.execute('PRAGMA incremental_vacuum(1024)').fetchall()
+        if db.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone()[0]:
+            raise RuntimeError('shader cache reclamation is busy; it will retry after the next successful build')
+        if db.execute('PRAGMA freelist_count').fetchone()[0] >= before:
+            raise RuntimeError('shader cache needs incremental auto_vacuum to reclaim free pages')
+
+
+def _remove_raw_part(path):
+    for suffix in ('', '-journal', '-wal', '-shm'):
+        with contextlib.suppress(FileNotFoundError): os.unlink(path + suffix)
+
+
+def _raw_copy(db, part):
+    out = sqlite3.connect(part)
+    try:
+        out.execute('PRAGMA page_size=16384'); out.execute('PRAGMA auto_vacuum=INCREMENTAL')
+        for sql in SCHEMA: out.execute(sql)
+        with out:
+            out.executemany('INSERT INTO blob VALUES(?,?,?)', db.execute('SELECT id,hash,data FROM blob'))
+            out.executemany('INSERT INTO entry VALUES(?,?,?)', db.execute('SELECT name,blob,mtime FROM entry'))
+        # Validate bytes and references before replacing the source, with only one pair of blobs in memory.
+        for sql in ('SELECT id,hash,data FROM blob ORDER BY id', 'SELECT name,blob,mtime FROM entry ORDER BY name'):
+            for src, dst in itertools.zip_longest(db.execute(sql), out.execute(sql)):
+                if src != dst: raise RuntimeError('raw shader cache validation failed: contents differ')
+                if sql.startswith('SELECT id') and hashlib.blake2b(dst[2], digest_size=16).digest() != dst[1]:
+                    raise RuntimeError('raw shader cache validation failed: blob hash differs')
+        if out.execute('PRAGMA quick_check').fetchone() != ('ok',) or out.execute('SELECT 1 FROM entry e LEFT JOIN blob b ON b.id=e.blob WHERE b.id IS NULL LIMIT 1').fetchone():
+            raise RuntimeError('raw shader cache validation failed: database or entry references')
+    finally: out.close()
+
+
+def maintain(path, *, compress=False, decompress=False, say=print):
+    """Maintain a compressed cache, optionally convert its format. Errors propagate: builds warn, the standalone command fails."""
+    if compress and decompress: raise ValueError('choose compression or decompression, not both')
+    path = os.path.realpath(path)
+    if not os.path.isfile(path): raise FileNotFoundError(f'no shader compile cache at {path}')
+    start, before = time.monotonic(), os.stat(path).st_blocks * 512
+    with _ownership(path, exclusive=compress or decompress):
+        db = sqlite3.connect(path, timeout=0, isolation_level=None)
+        part = path + '.raw.part'
+        try:
+            compressed = db.execute("SELECT type FROM sqlite_master WHERE name='blob'").fetchone() == ('view',)
+            if not compressed and not compress: return
+            _load_zstd(db)
+            if decompress:
+                say(f'restoring raw shader compile cache {path}')
+                _remove_raw_part(part)
+                _raw_copy(db, part)
+                if db.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone()[0]: raise RuntimeError('shader cache is busy; raw conversion was not installed')
+                db.close(); db = None
+                os.replace(part, path)
+                db = sqlite3.connect(path, timeout=0, isolation_level=None)
+                db.execute('PRAGMA journal_mode=WAL').fetchall()
+            else:
+                if not compressed:
+                    say(f'enabling sqlite-zstd compression for {path}')
+                    db.execute('SELECT zstd_enable_transparent(?)', (json.dumps({'table': 'blob', 'column': 'data', 'compression_level': 3, 'dict_chooser': "'[nodict]'"}),)).fetchall()
+                # Otherwise the extension's GROUP BY sorts whole uncompressed payloads into temporary files.
+                db.execute('CREATE INDEX IF NOT EXISTS blob_pending_size ON _blob_zstd(_data_dict,length(data)) WHERE _data_dict IS NULL')
+                # v0.3.5 divides by average pending size; use its own compact/nodict encoding for the one deduplicated empty blob first.
+                db.execute('UPDATE _blob_zstd SET data=zstd_compress_col(data,3,-1,1),_data_dict=-1 WHERE _data_dict IS NULL AND length(data)=0')
+                while db.execute('SELECT zstd_incremental_maintenance(2,1)').fetchone()[0]:
+                    say(f'compressing shader compile cache: {time.monotonic() - start:.0f} s')
+                _reclaim(db)
+        finally:
+            if db is not None: db.close()
+            if decompress: _remove_raw_part(part)
+    after = os.stat(path).st_blocks * 512
+    say(f'shader compile cache: {before / 2**20:.1f} -> {after / 2**20:.1f} MiB on disk, {time.monotonic() - start:.1f} s')
 
 
 def _adopted_name(name):

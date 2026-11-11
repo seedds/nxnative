@@ -841,9 +841,45 @@ class SeenShaders(unittest.TestCase):   # --seen-shaders: the keys, the partial 
 
     def seen(self, *logs): return nsp.seen_keys(self.g, self.sh, logs)
 
-    def build(self, seen=None, pkg='P'):
+    def build(self, seen=None, pkg='P', compress=False):
         self.ran.clear()
-        return nsp.build_shaders(sys.executable, REPO, self.sh, REPO / 'dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate', {'WORK': str(self.tmp)}, self.logs, self.g, pkg_key=pkg, mac=True, seen=seen)
+        return nsp.build_shaders(sys.executable, REPO, self.sh, REPO / 'dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate', {'WORK': str(self.tmp)}, self.logs, self.g, pkg_key=pkg, mac=True, seen=seen, compress_cache=compress)
+
+    def test_compression_option(self):
+        self.assertFalse(nsp.COMPRESS_SHADER_CACHE)
+        self.assertIsNone(nsp.parse_args([]).compress_shader_cache)
+        self.assertTrue(nsp.parse_args(['--compress-shader-cache']).compress_shader_cache)
+        self.assertFalse(nsp.parse_args(['--no-compress-shader-cache']).compress_shader_cache)
+
+    def test_cache_maintenance_on_partial_and_reuse(self):
+        cas = self.sh / 'cache/cas.db'; cas.parent.mkdir(); cas.touch()
+        a, = self.keys('a')
+        with mock.patch.object(nsp.shader_cache, 'maintain') as maintain:
+            self.build([a], compress=True)
+            maintain.assert_called_once_with(cas, compress=True, say=nsp.say)
+            maintain.reset_mock(); self.build([a])
+            maintain.assert_called_once_with(cas, compress=False, say=nsp.say)
+            self.assertFalse(self.ran, 'same fingerprint reuses outputs even when compression option changes')
+
+    def test_cache_failure_warns_and_shader_failure_skips_maintenance(self):
+        cas = self.sh / 'cache/cas.db'; cas.parent.mkdir(); cas.touch()
+        with mock.patch.object(nsp.shader_cache, 'maintain', side_effect=RuntimeError('busy')):
+            self.assertEqual(self.build(self.keys('a'), compress=True), self.sh / 'partial')
+        self.assertTrue(any('[RED]' in line and 'busy' in line for line in self.said))
+        with mock.patch.object(nsp.shader_cache, 'maintain') as maintain, mock.patch.object(nsp, 'run', side_effect=nsp.BuildError('shader failed')):
+            with self.assertRaises(nsp.BuildError): self.build(self.keys('b'), compress=True)
+            maintain.assert_not_called()
+
+    def test_full_build_maintains_after_pruning_before_stage_end(self):
+        cas = self.sh / 'cache/cas.db'; cas.parent.mkdir(); cas.touch()
+        calls = []
+        def maintain(*a, **kw):
+            self.assertEqual(calls, ['pruned']); nsp.PROG.end.assert_not_called()
+        with mock.patch.object(nsp, 'chain_tables', return_value=True), mock.patch.object(nsp, 'stale_shaders', return_value=None), mock.patch.object(nsp, 'prune_stale_chains'), \
+             mock.patch.object(nsp, 'prune_shader_cache', side_effect=lambda *a: calls.append('pruned')), mock.patch.object(nsp.shader_cache, 'maintain', side_effect=maintain) as operation:
+            self.build(compress=True)
+            operation.assert_called_once_with(cas, compress=True, say=nsp.say)
+        nsp.PROG.end.assert_called_once()
 
     def test_option(self):
         self.assertTrue(nsp.parse_args(['--seen-shaders']).seen_shaders); self.assertFalse(nsp.parse_args(['--no-seen-shaders']).seen_shaders)

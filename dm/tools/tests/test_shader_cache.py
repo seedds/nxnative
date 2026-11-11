@@ -240,6 +240,14 @@ class CompressedPrune(Prune):
 
 
 class Maintenance(Base):
+    def test_parallel_conversion_round_trip(self):
+        self.fill(); before = self.snapshot()
+        for workers in (2, 4):
+            shader_cache.maintain(self.path, compress=True, workers=workers, say=self.said.append)
+            self.assertEqual(self.snapshot(), before)
+            shader_cache.maintain(self.path, decompress=True, workers=workers, say=self.said.append)
+            self.assertEqual(self.snapshot(), before)
+
     def fill(self):
         for i in range(12): self.store.put(f'item/{i}', bytes([i]) + b'shader source' * 80000, when=123 + i)
         self.store.put('alias', bytes([3]) + b'shader source' * 80000, when=456)

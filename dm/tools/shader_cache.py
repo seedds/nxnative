@@ -7,7 +7,7 @@
 # It only saves work: a damaged file costs the work it held and is made anew, and a full drive is one [RED] line. An entry is written and read whole, so its file is never seen half written.
 # Names, as in the folder this replaces: metallib/<target>/<digest>[_x].metallib (dmsh_mtlcache.py), shader/<digest>/<mac|ios>/<output>, index/<key>.json, variant/<digest>/<file> (dmsh_build.py).
 # Not part of the translation chain: it decides no output (dmsh_chain.py), like dmsh_mtlcache.py.
-import contextlib, fcntl, hashlib, itertools, json, os, re, shutil, sqlite3, tarfile, threading, time
+import collections, concurrent.futures as cf, contextlib, fcntl, hashlib, itertools, json, os, re, shutil, sqlite3, tarfile, threading, time
 
 SCHEMA = ('CREATE TABLE IF NOT EXISTS blob(id INTEGER PRIMARY KEY, hash BLOB UNIQUE NOT NULL, data BLOB NOT NULL)',
           'CREATE TABLE IF NOT EXISTS entry(name TEXT PRIMARY KEY, blob INTEGER NOT NULL, mtime REAL NOT NULL) WITHOUT ROWID')
@@ -196,17 +196,65 @@ def _remove_raw_part(path):
         with contextlib.suppress(FileNotFoundError): os.unlink(path + suffix)
 
 
-def _raw_copy(db, part):
+def _parallel_blobs(db, workers, compress=False):
+    """Bounded batches, native codec on independent memory connections; only the caller touches the cache."""
+    # shortcut: the 8 MiB/256-row limit bounds encoded input, not decoded expansion; budget output bytes before supporting unusually large compressed blobs.
+    local, connections = threading.local(), []
+    def init():
+        local.db = sqlite3.connect(':memory:', check_same_thread=False)
+        connections.append(local.db); _load_zstd(local.db)
+    def work(rows):
+        result = []
+        for ident, digest, data, marker in rows:
+            if compress: data = local.db.execute('SELECT zstd_compress_col(?,3,-1,1)', (data,)).fetchone()[0]
+            elif marker is not None: data = local.db.execute('SELECT zstd_decompress_col(?,0,?,1)', (data, marker)).fetchone()[0]
+            result.append((ident, digest, data))
+        return result
+    def batches():
+        last = None
+        while True:
+            where = 'WHERE _data_dict IS NULL' if compress else 'WHERE 1'
+            if last is not None: where += ' AND id>?'
+            # Keyset scans avoid keeping a reader snapshot open while the writer commits or vacuum runs.
+            cur = db.execute(f'SELECT id,hash,data,{"NULL" if compress else "_data_dict"} FROM _blob_zstd NOT INDEXED {where} ORDER BY id LIMIT 256', () if last is None else (last,))
+            rows, size = [], 0
+            try:
+                for row in cur:
+                    rows.append(row); last = row[0]; size += len(row[2])
+                    if size >= 8 * 1024**2: break
+            finally: cur.close()
+            if not rows: return
+            yield rows
+    try:
+        with cf.ThreadPoolExecutor(workers, initializer=init) as pool:
+            pending = collections.deque()
+            for batch in batches():
+                pending.append(pool.submit(work, batch))
+                if len(pending) >= workers: yield pending.popleft().result()
+            while pending: yield pending.popleft().result()
+    finally:
+        for connection in connections: connection.close()
+
+
+def _compress_parallel(db, workers):
+    for batch in _parallel_blobs(db, workers, compress=True):
+        with db:
+            db.execute('BEGIN IMMEDIATE')
+            db.executemany('UPDATE _blob_zstd SET data=?,_data_dict=-1 WHERE id=? AND hash=? AND _data_dict IS NULL', ((data, ident, digest) for ident, digest, data in batch))
+
+
+def _raw_copy(db, part, workers=1):
     out = sqlite3.connect(part)
     try:
         out.execute('PRAGMA page_size=16384'); out.execute('PRAGMA auto_vacuum=INCREMENTAL')
         for sql in SCHEMA: out.execute(sql)
         with out:
-            out.executemany('INSERT INTO blob VALUES(?,?,?)', db.execute('SELECT id,hash,data FROM blob'))
+            out.executemany('INSERT INTO blob VALUES(?,?,?)', itertools.chain.from_iterable(_parallel_blobs(db, workers)) if workers > 1 else db.execute('SELECT id,hash,data FROM blob'))
             out.executemany('INSERT INTO entry VALUES(?,?,?)', db.execute('SELECT name,blob,mtime FROM entry'))
         # Validate bytes and references before replacing the source, with only one pair of blobs in memory.
         for sql in ('SELECT id,hash,data FROM blob ORDER BY id', 'SELECT name,blob,mtime FROM entry ORDER BY name'):
-            for src, dst in itertools.zip_longest(db.execute(sql), out.execute(sql)):
+            source = itertools.chain.from_iterable(_parallel_blobs(db, workers)) if workers > 1 and sql.startswith('SELECT id') else db.execute(sql)
+            for src, dst in itertools.zip_longest(source, out.execute(sql)):
                 if src != dst: raise RuntimeError('raw shader cache validation failed: contents differ')
                 if sql.startswith('SELECT id') and hashlib.blake2b(dst[2], digest_size=16).digest() != dst[1]:
                     raise RuntimeError('raw shader cache validation failed: blob hash differs')
@@ -215,9 +263,10 @@ def _raw_copy(db, part):
     finally: out.close()
 
 
-def maintain(path, *, compress=False, decompress=False, say=print):
+def maintain(path, *, compress=False, decompress=False, workers=1, say=print):
     """Maintain a compressed cache, optionally convert its format. Errors propagate: builds warn, the standalone command fails."""
     if compress and decompress: raise ValueError('choose compression or decompression, not both')
+    if workers < 1: raise ValueError('workers must be positive')
     path = os.path.realpath(path)
     if not os.path.isfile(path): raise FileNotFoundError(f'no shader compile cache at {path}')
     start, before = time.monotonic(), os.stat(path).st_blocks * 512
@@ -231,7 +280,8 @@ def maintain(path, *, compress=False, decompress=False, say=print):
             if decompress:
                 say(f'restoring raw shader compile cache {path}')
                 _remove_raw_part(part)
-                _raw_copy(db, part)
+                if workers == 1: _raw_copy(db, part)
+                else: _raw_copy(db, part, workers)
                 if db.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone()[0]: raise RuntimeError('shader cache is busy; raw conversion was not installed')
                 db.close(); db = None
                 os.replace(part, path)
@@ -245,8 +295,10 @@ def maintain(path, *, compress=False, decompress=False, say=print):
                 db.execute('CREATE INDEX IF NOT EXISTS blob_pending_size ON _blob_zstd(_data_dict,length(data)) WHERE _data_dict IS NULL')
                 # v0.3.5 divides by average pending size; use its own compact/nodict encoding for the one deduplicated empty blob first.
                 db.execute('UPDATE _blob_zstd SET data=zstd_compress_col(data,3,-1,1),_data_dict=-1 WHERE _data_dict IS NULL AND length(data)=0')
-                while db.execute('SELECT zstd_incremental_maintenance(2,1)').fetchone()[0]:
-                    say(f'compressing shader compile cache: {time.monotonic() - start:.0f} s')
+                if workers > 1: _compress_parallel(db, workers)
+                else:
+                    while db.execute('SELECT zstd_incremental_maintenance(2,1)').fetchone()[0]:
+                        say(f'compressing shader compile cache: {time.monotonic() - start:.0f} s')
                 _reclaim(db)
         finally:
             if db is not None: db.close()

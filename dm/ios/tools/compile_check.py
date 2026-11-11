@@ -28,7 +28,7 @@ ios_src = os.path.normpath(f'{ios}/Sources')
 srcs = [s for s in dict.fromkeys(srcs) if not os.path.splitext(s)[0].endswith('_mac') and os.path.dirname(s) != ios_src]
 srcs += sorted(os.path.join(ios_src, f) for f in os.listdir(ios_src) if f.endswith(('.c', '.m')))
 dirs = list(dict.fromkeys(os.path.dirname(s) for s in srcs))
-flags = ['-arch', 'arm64', '-miphoneos-version-min=26.0', '-mcpu=apple-a18', '-fobjc-arc', '-O1', '-w'] + defs + [f'-I{d}' for d in incs + dirs]
+flags = ['-arch', 'arm64', '-miphoneos-version-min=26.0', '-mcpu=apple-m1', '-fobjc-arc', '-O1', '-w'] + defs + [f'-I{d}' for d in incs + dirs]
 def one(s):
     c = ['xcrun', '-sdk', 'iphoneos', 'clang'] + flags + (['-Dmain=dm_main'] if s == os.path.join(host, 'main.c') else []) + ['-c', s, '-o', '/dev/null']
     if s.endswith('.c'): c[4:4] = ['-std=gnu11']

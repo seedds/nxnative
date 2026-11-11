@@ -8,6 +8,13 @@ void svc_thread_dump(void) {}
 uint64_t now_ns(void) { return bp_now(); }
 
 static int production_clears(id<MTLTexture> attachment, id<MTLTexture> texture, const float *depth, int n) {
+    typedef struct {
+        op_hdr rt_header; p_set_rt rt;
+        op_hdr ds_header; p_clear_ds ds;
+        op_hdr tex_header; p_clear_tex tex;
+    } clear_ops;
+    clear_ops *ops = calloc(1, (size_t)n * sizeof(*ops) + sizeof(op_hdr));
+    if (!ops) return 1;
     tex_t targets[2] = {0};
     id<MTLTexture> textures[2] = {attachment, texture};
     for (int k = 0; k < 2; k++) {
@@ -16,13 +23,6 @@ static int production_clears(id<MTLTexture> attachment, id<MTLTexture> texture, 
             .width=(int)attachment.width, .height=(int)attachment.height, .depth=n, .levels=1, .samples=1};
         res_add(textures[k]); mtl_tex_init(&targets[k]); serial_put(targets[k].serial, textures[k]);
     }
-    typedef struct {
-        op_hdr rt_header; p_set_rt rt;
-        op_hdr ds_header; p_clear_ds ds;
-        op_hdr tex_header; p_clear_tex tex;
-    } clear_ops;
-    clear_ops *ops = calloc(1, (size_t)n * sizeof(*ops) + sizeof(op_hdr));
-    if (!ops) return 1;
     for (int i = 0; i < n; i++) {
         ops[i].rt_header = (op_hdr){OP_SET_RT, sizeof(op_hdr) + sizeof(p_set_rt)};
         ops[i].rt = (p_set_rt){.depth=&targets[0], .has_dview=1, .dview={.set_layers=1, .min_layer=i}};

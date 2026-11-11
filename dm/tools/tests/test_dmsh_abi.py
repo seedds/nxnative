@@ -16,21 +16,25 @@ sys.path.insert(0, str(REPO / 'dm/gfx/tools'))
 import dmsh_abi as abi   # noqa: E402
 
 # Literals of the ABI still written in each file (outside comments), counted as the ratchet below does: the value, or the kind string (repr). These stay for other reasons:
-# a json key spelled like a kind ('c1', 'geometry', 'tex', 'img' in the facts and reflection json), an NVN stage name ("geometry"), a "?" placeholder in a log line, and 0x100
+# a json key spelled like a kind ('c1', 'geometry', 'tex', 'img' in the facts and reflection json), an NVN stage name ("geometry"), and 0x100
 # where it is not the push constant block's size (DMSH_PUSH_SIZE): a viewport swizzle value in nvn_mtl.m, the start of compute code in a package record in dmsh_build.py,
 # a single texture bind record's flag bit in nvn_obj.h (BIND_TEX1_NOBASE).
 # 0x1000 where it is not the pool table's entry count (DMSH_GMEM_MAP_ENTRIES): the 4 KB page step of nvn_mtl.m's sparse residency map.
 # A count may only go down; when it does, lower it here.
 BASELINE = {
-    'dm/gfx/nvn/nvn_mtl.m': {"'?'": 2, "'geometry'": 3, '0x100': 2, '0x1000': 2},
+    'dm/gfx/nvn/nvn_mtl.m': {"'geometry'": 3, '0x100': 2, '0x1000': 2},
     'dm/gfx/nvn/nvn_refl.m': {"'c1'": 1},
     'dm/gfx/nvn/nvn_refl.h': {},
     'dm/gfx/nvn/nvn_obj.h': {'0x100': 1},
     'dm/gfx/tools/dmsh_build.py': {"'c1'": 4, "'geometry'": 3, "'img'": 1, "'tex'": 1, '0x100': 2},
     'dm/gfx/tools/dmsh_fetch.py': {},
+    'dm/gfx/tools/dmsh_rewrite.py': {},
+    'dm/gfx/tools/dmsh_reflect.py': {},
+    'dm/gfx/tools/dmsh_entry.py': {},
     'dm/gfx/tools/cb_extent.py': {},
 }
 NUMBERS = {v for v in abi.VALUES.values() if isinstance(v, int) and v >= 0x100}   # the offsets and sizes distinctive enough to find as literals (not 8, 16, 0x20 or 128)
+KINDS = {k for k in abi.KINDS if len(k) > 1}   # the kind strings, likewise: not DMSH_KIND_UNKNOWN's "?", every log line's placeholder for a missing name (nvn_mtl.m has three)
 C_TOKEN = re.compile(r'"(?:\\.|[^"\\\n])*"|\'(?:\\.|[^\'\\\n])*\'|//[^\n]*|/\*.*?\*/|\b0[xX][0-9A-Fa-f]+\b', re.S)
 
 
@@ -53,7 +57,7 @@ def py_literals(text):   # the same for Python source
 def abi_literals(path):
     text = (REPO / path).read_text()
     lits = py_literals(text) if path.endswith('.py') else c_literals(text)
-    return collections.Counter(f'{v:#x}' if k == 'int' else repr(v) for k, v in lits if (k == 'int' and v in NUMBERS) or (k == 'str' and v in abi.KINDS))
+    return collections.Counter(f'{v:#x}' if k == 'int' else repr(v) for k, v in lits if (k == 'int' and v in NUMBERS) or (k == 'str' and v in KINDS))
 
 
 class Header(unittest.TestCase):
@@ -91,22 +95,19 @@ class Header(unittest.TestCase):
 
 class Build(unittest.TestCase):
     def test_values_come_from_the_header(self):
-        # dmsh_build.py is a command-line program whose top level loads a game profile: run only its layout assignments, with the reader
-        tree = ast.parse((REPO / 'dm/gfx/tools/dmsh_build.py').read_text())
-        names = {'TEX_BASE', 'SSBO', 'DRV_FILL'}
-        body: list[ast.stmt] = [n for n in tree.body if isinstance(n, ast.Assign) and any(getattr(e, 'id', None) in names for t in n.targets for e in (t.elts if isinstance(t, ast.Tuple) else [t]))]
-        ns: dict[str, Any] = {'abi': abi}
-        exec(compile(ast.Module(body=body, type_ignores=[]), 'dmsh_build.py', 'exec'), ns)
+        import dmsh_reflect   # the layout the reflection decodes slots with
+        ns: dict[str, Any] = dict(vars(dmsh_reflect))
         self.assertEqual((ns['TEX_BASE'], ns['IMG_BASE'], ns['IMG_SLOTS'], ns['SEPTEX_BASE'], ns['SEPTEX_SLOT0'], ns['SAMP_BASE']),
                          (abi.C2_TEX, abi.C2_IMG, abi.C2_IMG_SLOTS, abi.C2_SEPTEX, abi.SEPTEX_SLOT0, abi.C2_SAMP))
         self.assertEqual(ns['SSBO'], {'vs': abi.C0_SSBO_VS, 'cs': abi.C0_SSBO_CS, 'gs': abi.C0_SSBO_GS, 'ps': abi.C0_SSBO_PS, 'ts': abi.C0_SSBO_TS, 'ms': abi.C0_SSBO_MS})
         self.assertEqual(ns['DRV_FILL'][2][-1], (abi.C2_SAMP, abi.C2_SAMP + abi.C2_ROW * abi.C2_SEP_SLOTS))
 
     def test_every_kind_is_written_by_the_build(self):
-        src = (REPO / 'dm/gfx/tools/dmsh_build.py').read_text()
-        self.assertRegex(src, r'(?m)^import .*\bdmsh_abi as abi\b')
+        build = [REPO / 'dm/gfx/tools' / f for f in ('dmsh_build.py', 'dmsh_reflect.py', 'dmsh_rewrite.py', 'dmsh_entry.py')]   # the build and the modules that write its reflection
+        for p in build[:3]: self.assertRegex(p.read_text(), r'(?m)^import .*\bdmsh_abi as abi\b', p.name)   # dmsh_entry.py writes no binding
+        src = ''.join(p.read_text() for p in build)
         unused = [k for k in abi.VALUES if k.startswith('KIND_') and f'abi.{k}' not in src]
-        self.assertEqual(unused, [], 'binding kinds in dmsh_abi.h that dmsh_build.py never writes')
+        self.assertEqual(unused, [], 'binding kinds in dmsh_abi.h that the build never writes')
 
     def test_chain_covers_the_abi(self):   # the header and its reader decide the build output: they are part of the chain version
         sys.path.insert(0, str(REPO / 'dm/gfx/tools'))
@@ -135,6 +136,13 @@ class Host(unittest.TestCase):
         assert m, 'Program.cs C2HandleWords line not found'
         self.assertEqual(int(m.group(1)), abi.C2_SEP_SLOTS)
         self.assertEqual(abi.C2_ROW, 8)
+
+    def test_uniform_bounds_agree(self):   # the translator's size table (Ryujinx Constants.cs) is the bank and the slots the host fills (nvn_mtl.m NVN_RB_CBSIZE)
+        src = (REPO / 'dm/third_party/ryujinx/src/Ryujinx.Graphics.Shader/Constants.cs').read_text()
+        got = {n: int(v) for n, v in re.findall(r'public const int (Nx\w+) = (\d+);', src)}
+        self.assertEqual(got, {'NxFirstUniformSlot': 3, 'NxUniformSlots': abi.CBSIZE_SLOTS, 'NxUniformSizesBank': abi.CBSIZE_BANK})
+        self.assertEqual(abi.CBSIZE_SLOTS, 16 - 3 + 1, 'uniform slots c[3] to c[16], as dmsh_build.py reflects them')
+        self.assertIn('TranslationFlags.MetalUniformBounds', (REPO / 'dm/gfx/tools/dmsh_xlate/Program.cs').read_text())
 
 
 class Ratchet(unittest.TestCase):

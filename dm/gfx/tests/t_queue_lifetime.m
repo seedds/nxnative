@@ -79,7 +79,7 @@ static NVNcommandHandle record(NVNtexture *texture, NVNprogram *program, int wai
     return P(nvnCommandBufferEndRecording)(&command);
 }
 int main(void) { @autoreleasepool {
-    setbuf(stdout, NULL); mtl_init(); NSError *error = nil;
+    if (setvbuf(stdout, NULL, _IONBF, 0)) abort(); mtl_init(); NSError *error = nil;
     id<MTLLibrary> library = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
         "vertex float4 v(uint i [[vertex_id]]) { const float2 p[] = {float2(-1,-1),float2(3,-1),float2(-1,3)}; return float4(p[i],0.5,1); }\n"
         "fragment float4 red() { return float4(1,0,0,1); } fragment float4 green() { return float4(0,1,0,1); }\n"

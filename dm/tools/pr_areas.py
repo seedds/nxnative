@@ -13,7 +13,7 @@ AREAS = [   # label, color, description, paths (regular expression, matched from
     ('textures', '0e8a16', 'Texture layouts and formats (dm/gfx/tex)', r'dm/gfx/tex/'),
     ('rewriter', 'fbca04', 'The NSO rewriter and per-build patches', r'dm/tools/(patch_nso|sdk_patches|nso_)|dm/games/[^/]+/patches\.py$'),
     ('packing', 'c5def5', 'Building an IPA or a Mac app: the NSP script, extraction, the shader split, the packers',
-     r'scripts/build_ipa_from_nsp\.py$|dm/tools/nx_extract/|dm/ios/tools/build_ipa\.sh$|dm/mac/pack_app\.py$|dm/gfx/tools/shader_split\.py$'),
+     r'scripts/build_ipa_from_nsp\.py$|dm/tools/nx_extract(_bin)?/|dm/tools/native_tools\.sh$|dm/ios/tools/build_ipa\.sh$|dm/mac/pack_app\.py$|dm/gfx/tools/shader_split\.py$'),
     ('ios', 'c5def5', 'The iPhone and iPad app (dm/ios); on an issue, seen on one', r'dm/ios/'),
     ('mac', 'c5def5', 'The Mac front end and app (dm/mac, front_mac.m); on an issue, seen on a Mac', r'dm/mac/|dm/host/front_mac\.m$'),
     ('tools', 'bfdadc', 'Tools and scripts (dm/tools, scripts)', r'dm/tools/|scripts/'),

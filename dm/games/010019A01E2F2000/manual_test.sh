@@ -22,6 +22,9 @@ printf 'DM_INTERNAL_RESOLUTION=%s\nDM_PRESENT_UPSCALE=off\nDM_METAL_HUD=1\nDM_NV
 [ "${RUMBLE_PROBE:-}" = 1 ] && PROBE=main:936628,main:9366a0,main:a4e00,main:d350b8
 # SCAN_PROBE=1: main:331d18, the scene-size function's path when the render-target pool refuses its second target (0x33187c)
 [ "${SCAN_PROBE:-}" = 1 ] && PROBE=${PROBE:+$PROBE,}main:331d18
+# VIS_SCALE=<f>: the samples-passed totals the game reads scaled by f (DM_NVN_VIS_SCALE), with their values logged (DM_NVN_VIS_LOG): does the scan
+# compare a visible-sample count with an area at the game's own resolution (README: 2160p and 1800p scenes)
+[ -n "${VIS_SCALE:-}" ] && printf 'DM_NVN_VIS_SCALE=%s\nDM_NVN_VIS_LOG=1\n' "$VIS_SCALE" >> "$OUT/env.txt"
 [ -n "${PROBE:-}" ] && printf 'DM_PROBE=%s\nDM_PROBE_LIMIT=3\n' "$PROBE" >> "$OUT/env.txt"
 echo "== build (partial shaders; the first time a few thousand shaders compile) -> $OUT/build.log"
 "$PY" "$REPO/scripts/build_ipa_from_nsp.py" "$NSP" -k "$IMG/prod.keys" --package v131072 --platform mac \
@@ -74,6 +77,10 @@ print(f'vibration: handles for npad 0 {hand[:1] or "never asked"}; values {sum(n
 probes = {}
 for name, n in re.findall(r'^\[dm\] PROBE (\S+) #(\d+)', log, re.M): probes[name] = max(probes.get(name, 0), int(n))
 if probes or re.search(r'^\[dm\] probe \S+ \(original instruction', log, re.M): print('probe hits (highest hit number seen; 3 printed each):', probes or 'none')
+vis = {}
+for ad, tot, rep in re.findall(r'vis report addr=(\S+) total=(\d+) reported=(\d+)', log): vis[ad] = max(vis.get(ad, (0, 0)), (int(tot), int(rep)))
+for l in re.findall(r'^.*DM_NVN_VIS_SCALE:.*$', log, re.M)[:1]: print(l)
+if vis: print('samples-passed reports (largest counted / written total per query address, logged ones):', ', '.join(f'{a} {t}/{r}' for a, (t, r) in sorted(vis.items())[:12]))
 red = collections.Counter(re.sub(r'[0-9a-f]{8,}|\d+', 'N', l)[:160] for l in re.findall(r'^.*\[RED\].*$', log, re.M) if 'failed to load shader' not in l)
 print('other red lines:'); [print(f'  {n} x {l}') for l, n in red.most_common(8)]
 for l in re.findall(r'^.*(?:SIGSEGV|SIGBUS|fault at|crash handler).*$', log, re.M)[:3]: print('CRASH:', l[:200])

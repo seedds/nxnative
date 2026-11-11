@@ -19,6 +19,7 @@
 #include <os/proc.h>   // os_proc_available_memory: for the memory readout line
 #endif
 #include "nvn_aniso.h"
+#include "nvn_vis_scale.h"
 #include "nvn_mtl.h"
 #include "nvn_queue.h"
 #include <mach/mach.h>
@@ -2345,7 +2346,13 @@ static void post_run(post_rec *r, uint64_t c0, uint64_t c1) {
             if (ops[i].mode == VIS_ZERO) { g_vis_acc = 0; continue; }
             vis_list *l = ops[i].vis;
             for (int k = 0; k < l->n; k++) { g_vis_acc += ((const uint64_t *)((__bridge id<MTLBuffer>)l->s[k].buf).contents)[l->s[k].slot]; CFRelease(l->s[k].buf); }
-            free(l); if (ops[i].mode == VIS_REPORT) { uint64_t rec[2] = {g_vis_acc, gpu_ticks()}; memcpy((void *)ops[i].addr, rec, sizeof rec); }
+            free(l); if (ops[i].mode == VIS_REPORT) {
+                static double vs = -1; static int vlog = -1;   // DM_NVN_VIS_SCALE / DM_NVN_VIS_LOG (nvn_vis_scale.h): diagnostics for a scene rendered larger than the game asked
+                if (vs < 0) { vs = nvn_vis_scale_env(getenv("DM_NVN_VIS_SCALE")); const char *e = getenv("DM_NVN_VIS_LOG"); vlog = e && atoi(e) > 0; if (vs < 1) MLOG("DM_NVN_VIS_SCALE: samples-passed totals the game reads are scaled by %g", vs); }
+                uint64_t rec[2] = {nvn_vis_scaled(g_vis_acc, vs), gpu_ticks()}; memcpy((void *)ops[i].addr, rec, sizeof rec);
+                if (vlog) { static uint64_t sec, n; struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); if ((uint64_t)ts.tv_sec != sec) { sec = ts.tv_sec; n = 0; }
+                    if (n++ < 8) MLOG("vis report addr=%#llx total=%llu reported=%llu", (unsigned long long)ops[i].addr, (unsigned long long)g_vis_acc, (unsigned long long)rec[0]); }
+            }
         }
         else { uint64_t t = rep_ticks(&ops[i], sc, seg_last, c0, c1), rec[2] = {(ops[i].type == 0 || ops[i].type == 0x10) && !DM_GAME_RENDER_COND ? t : 0, t}; memcpy((void *)ops[i].addr, rec, sizeof rec); }   // render_cond: a timestamp report's counter field is 0, as on the GPU (see rc_value)
     }

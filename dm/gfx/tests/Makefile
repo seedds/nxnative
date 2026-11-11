@@ -298,6 +298,13 @@ t_direct_upload: t_direct_upload.m $(MTL_T_DEP)
 check_t_direct_upload: t_direct_upload
 	MTL_DEBUG_LAYER=1 ./t_direct_upload
 	DM_TEST_UP_LOST=13 MTL_DEBUG_LAYER=1 ./t_direct_upload
+# A texture upload's no-copy source buffer made once (up_big_src: the g_up_seq guard on pkg_upload_'s second call), with the switch on and off
+t_upload_src: t_upload_src.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_upload_src.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_upload_src
+check_t_upload_src: t_upload_src
+	MTL_DEBUG_LAYER=1 ./t_upload_src
+	DM_NVN_UPSRC_DEDUPE=0 MTL_DEBUG_LAYER=1 ./t_upload_src
 t_geometry_hazards: t_geometry_hazards.m t_geometry.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_geometry_hazards.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_geometry_hazards

@@ -69,7 +69,8 @@ class PoolArrays(unittest.TestCase):
 
 class Reflect(unittest.TestCase):
     def test_pools_and_attributes(self):
-        b = {e['msl_name']: e for e in NS['reflect']('k', 'ps', NS['pool_arrays'](MSL), {'sbufs': [], 'cbufs': []})}
+        b = {e['msl_name']: e for e in NS['reflect']('k', 'ps', NS['pool_arrays'](MSL), {'sbufs': [], 'cbufs': [{'slot': 5, 'fixed': 64}]})}
+        self.assertEqual((b['fp_c5']['kind'], b['fp_c5']['reg'], b['fp_c5']['fixed']), (abi.KIND_CBUF, 2, 64))   # the translator's count of the slot's bytes read at fixed offsets
         self.assertEqual((b['fp_t2d_cb0_40000000']['kind'], b['fp_t2d_cb0_40000000']['elem'], b['fp_t2d_cb0_40000000']['arg_id']), (abi.KIND_TEX_POOL, 'texture2d<float>', 2))
         self.assertEqual((b['fp_s_cb0_40000000']['kind'], b['fp_s_cb0_40000000']['arg_id']), (abi.KIND_SAMP_POOL, 3))
         self.assertEqual((b['fp_i_cb2_48_rg32ui']['kind'], b['fp_i_cb2_48_rg32ui']['reg'], b['fp_i_cb2_48_rg32ui']['arg_id']), (abi.KIND_IMG, 0, 36))

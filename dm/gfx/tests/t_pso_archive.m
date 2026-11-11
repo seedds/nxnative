@@ -507,6 +507,37 @@ static long pick_n(NSArray<NSArray<NSNumber *> *> *groups) {
     g_compact_enabled = 0; g_compact_files = nil; g_compact_state = NULL;
     return n;
 }
+// g_pbase_miss: an archive that never has the base, with the real compiler. A miss is searched for once, for its own base only; it keeps neither the compile nor the base
+// it builds from a draw, and the compile skips the search
+@interface MissingBaseArchive : NSObject { @public unsigned calls; } @end
+@implementation MissingBaseArchive
+- (id<MTLRenderPipelineState>)newRenderPipelineStateWithDescriptor:(MTL4RenderPipelineDescriptor *)d error:(NSError **)e {
+    (void)d; (void)e; calls++; return nil;
+}
+@end
+static void repeated_archive_miss(void) {
+    NSArray *saved = g_arch4, *savedp = g_arch4p;
+    MissingBaseArchive *archive = [MissingBaseArchive new];
+    g_arch4 = @[(id<MTL4Archive>)archive]; g_arch4p = @[];
+    MTLRenderPipelineDescriptor *d = desc(MTLPixelFormatRGBA8Unorm, 0, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll, 1);
+    d.vertexDescriptor.layouts[16].stride = 1536;
+    NSError *e = nil;
+    for (int i = 0; i < 100; i++) EXPECT("negative probe: no archived pipeline", 1, pso_build_ex(d, &e, 0) == nil);
+    EXPECT("negative probe: one lookup for 100 misses", 1, archive->calls);
+    EXPECT("negative probe: no unfinished owner", 0, g_pbase_pending.n);
+    d.vertexDescriptor.layouts[16].stride = 1552;
+    EXPECT("negative probe: another layout is independent", 1, pso_build_ex(d, &e, 0) == nil);
+    EXPECT("negative probe: another key looked up", 2, archive->calls);
+    d.vertexDescriptor.layouts[16].stride = 1536;
+    EXPECT("negative probe: demand can still compile", 1, pso_build_ex(d, &e, 1) != nil);
+    EXPECT("negative probe: the compile does not search again", 2, archive->calls);
+    unsigned after = archive->calls;
+    EXPECT("negative probe: compiled base overrides miss", 1, pso_build_ex(d, &e, 0) != nil);
+    EXPECT("negative probe: completed base needs no archive scan", after, archive->calls);
+    g_arch4 = saved; g_arch4p = savedp;
+    nvn_hm_clear(&g_pbase_miss, hm_rel);
+}
+
 int main(int argc, char **argv) { @autoreleasepool {
     if (!mkdtemp(archive_cache_root)) abort();
     atexit(archive_cache_cleanup);
@@ -960,6 +991,7 @@ int main(int argc, char **argv) { @autoreleasepool {
         EXPECT("constants: the vertex function given to it is specialized once", 1, fn_dev(cv) != cv && fn_dev(cv) == fn_dev(cv));
         EXPECT("constants: a function without constants is its own", 1, fn_dev(cd.fragmentFunction) == cd.fragmentFunction);
     }
+    repeated_archive_miss();
     spec_desc_ownership();
     capture_preserves_foreign_folder();
     [NSFileManager.defaultManager removeItemAtPath:@(dir) error:nil];

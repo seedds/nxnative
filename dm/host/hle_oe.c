@@ -56,6 +56,7 @@ void dm_set_opmode(int m) {   // called by the front end (overheat downgrade etc
     int old = dm_opmode(); if (old == m) return;
     g_opmode = m;
     LOG("oe operation mode %d → %d", old, m);
+    dm_hid_opmode_changed();   // player 1's npad moved: the style events first, so the game finds the new npads when the notification sends it to look
     if (g_ntf_opmode) mq_push(MSG_OPMODE);
     if (g_ntf_perfmode) mq_push(MSG_PERFMODE);
 }

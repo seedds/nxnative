@@ -109,6 +109,36 @@ int main(void) { @autoreleasepool {
         commit_as_running();
     }
 
+    // A counter report of a running submission: the host writes its 16 bytes when the submission completes, so they refuse a shadow over them and nothing else on their page
+    // (Ori and the Will of the Wisps: two timestamp reports a frame in the page of its uniform blocks, issue #1660)
+    mtl_sub_counter((uint64_t)mem + 0x14000, 0); commit_as_running(); g_npost = 0;
+    update(0x14104, 0xc5, 4);
+    { const uint32_t want[] = {0x22222222, 0xc5}; words(made_shadow(0x14100, 8), want, 2, "a running report does not refuse a shadow beside it on its page"); }
+    update(0x14014, 0xc6, 4);
+    CHECK(!made_shadow(0x13ff8, 32), "a shadow over a running report's bytes is refused");
+    CHECK(g_ubp_why[5] > 0, "and counted as a report still to land");
+    commit_as_running();
+    // A samples-passed result (OP_REPORT_COUNTER notes it as the report above) refuses the same way
+    hw_note((uint64_t)mem + 0x15000); commit_as_running();
+    update(0x15014, 0xc7, 4);
+    CHECK(!made_shadow(0x15008, 16), "a shadow over a running samples-passed result is refused");
+    update(0x15204, 0xc8, 4);
+    CHECK(made_shadow(0x15200, 8) != NULL, "and one beside it on its page is not");
+    commit_as_running();
+    // More reports than the ring's free slots: they count by page as before, so nothing on their pages is read from memory too early
+    for (int i = 0; i < HW_N + 1; i++) hw_note((uint64_t)mem + 0x16000 + 16 * (uint64_t)(i % 64));
+    commit_as_running();
+    update(0x16804, 0xc9, 4);
+    CHECK(!made_shadow(0x16800, 8), "reports past the ring refuse their whole page");
+    commit_as_running();
+    // Once they have landed nothing refuses
+    g_done = running; running += 1000; g_fence = running;
+    update(0x14014, 0xca, 4);
+    CHECK(made_shadow(0x13ff8, 32) != NULL, "a landed report no longer refuses");
+    update(0x16804, 0xcb, 4);
+    CHECK(made_shadow(0x16800, 8) != NULL, "nor do landed reports past the ring");
+    commit_as_running();
+
     pend_reset(); g_nubd = 0;
     printf("t_ubp_running: %d checks, %d failed\n", checks, failed); fflush(stdout);
     _exit(failed != 0);

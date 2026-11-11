@@ -86,7 +86,7 @@ def run_one(a, gid, build, var, route, out, lock):
     out.mkdir(parents=True, exist_ok=True); save, temp = out / 'save', out / 'temp'
     shutil.rmtree(save, ignore_errors=True); shutil.copytree(a.save, save); temp.mkdir(exist_ok=True)
     env.update(DM_ROOT=str(build), DM_ROMFS=str(romfs), DM_SAVE=str(save), DM_TEMP=str(temp), DM_MSL_DIR=str(var.get('msl') or build / 'shader/cache'),
-               DM_FONT_DIR=str(build / 'font'), DM_NVN_SHMAP=str(var.get('shmap') or prof / 'shader_map.tsv'), DM_WINDOW='1', DM_AUDIO='0', DM_KEYS=route['keys'],
+               DM_FOCUS_KEEP='1', DM_FONT_DIR=str(build / 'font'), DM_NVN_SHMAP=str(var.get('shmap') or prof / 'shader_map.tsv'), DM_WINDOW='1', DM_AUDIO='0', DM_KEYS=route['keys'],
                DM_NVN_TSV=str(out / 'frames.tsv'), DM_NVN_TSV_CALLS='0', DM_CTL=str(out / 'ctl'), DM_METAL_HUD='0' if a.no_hud else '1')
     if (build / 'pso/mac').is_dir(): env.setdefault('DM_PSO_BUNDLE', str(build / 'pso/mac'))   # the offline pipeline archive the Mac app bundles (launcher.c sets it there); without it an NVN game rebuilds every base before its first frame
     if (build / 'aoc').is_dir(): env['DM_AOC_DIR'] = str(build / 'aoc')

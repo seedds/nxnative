@@ -58,3 +58,11 @@ Use `scripts/bench.py` with a copied save and independent pipeline archive. Its 
 For a bounded run with no screenshot at all, pass `--shots 1000000000`; an empty shots list restores the default screenshot. Use pixel captures to inspect quality in a separate run, not as timing evidence.
 
 Record the branch/commit, shader-chain version, NSO build ID, scene/save, settings, thermal state and actual display callbacks. Keep failed hypotheses and limitations visible. Commit coherent tested units on a feature branch and open a PR against this fork when ready for review.
+
+### Unattended timing and focus
+
+The benchmark runner now defaults to `DM_FOCUS_KEEP=1`, matching the regression runner: another app taking keyboard focus must not pause the game during a timing run. Explicit benchmark environment overrides can still set it to zero. Normal player launches keep their existing focus behavior.
+
+A diagnostic on November 11 caught the main thread waiting in the blocking system-notification pop during three of four stalls, alongside repeated focus transitions. Keeping focus removed those transitions and multi-second pauses in the following 60–67 second window. That run still delivered 44.7 native FPS with interpolation, GPU median 18.35 ms, under thermal limits; this does not establish 60/120 FPS or long-session stability. A separate loading stall caught the main thread at texture registration, and a later host-inclusive capture found queue replay inside Metal residency commit during texture upload. These are separate observations, not proof that every stall has one cause.
+
+For causal stack captures, use `DM_HITCH_DUMP=300:49 DM_HITCH_HOST=1`. The host option adds replay, encoding and display workers to the existing guest-thread dump. Keep it off for final performance comparisons.

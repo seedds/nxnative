@@ -527,6 +527,33 @@ static void *hitch_main(void *arg) {
         int nt = 0;
         pthread_mutex_lock(&G); for (thr_t *t = g_all; t && nt < 256; t = t->all) if (t->started && !t->exited) hitch_grab(t, &hs[nt++]); pthread_mutex_unlock(&G);
         for (int k = 0; k < nt; k++) hitch_log(&hs[k]);
+        // Opt-in: registry / Metal locks may be owned by a host encoder rather
+        // than a guest. Capture those stacks too, without external symbol scans.
+        const char *host_dump = getenv("DM_HITCH_HOST");
+        if (host_dump && atoi(host_dump)) {
+            thread_act_array_t ports = NULL; mach_msg_type_number_t count = 0;
+            if (task_threads(mach_task_self(), &ports, &count) == KERN_SUCCESS) {
+                mach_port_t self = pthread_mach_thread_np(pthread_self());
+                for (mach_msg_type_number_t j = 0; j < count; j++) {
+                    int guest = 0; hitch_t h; char name[48] = "host";
+                    pthread_mutex_lock(&G);
+                    for (thr_t *t = g_all; t; t = t->all) if (t->mport == ports[j]) { guest = 1; break; }
+                    if (!guest && ports[j] != self) {
+                        thr_t native = {0}; native.mport = ports[j];
+                        hitch_grab(&native, &h);
+                    }
+                    pthread_mutex_unlock(&G);
+                    if (!guest && ports[j] != self) {
+                        pthread_t pt = pthread_from_mach_thread_np(ports[j]);
+                        if (pt) pthread_getname_np(pt, name, sizeof name);
+                        snprintf(h.name, sizeof h.name, "%s", name[0] ? name : "host");
+                        hitch_log(&h);
+                    }
+                    mach_port_deallocate(mach_task_self(), ports[j]);
+                }
+                vm_deallocate(mach_task_self(), (vm_address_t)ports, count * sizeof *ports);
+            }
+        }
     }
     return NULL;
 }

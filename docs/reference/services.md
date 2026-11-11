@@ -318,10 +318,24 @@ Most service calls can be found before they crash, before the first boot or the 
 
 - **Symptom:** a Switch 2 game aborts at boot inside the SDK's hid calls: Nintendo Switch Sports Resort with `Result 0x58cca` at `sdk+0x6cab6c` (`GetNpadJoyIconDecorationColor`) and, past that, `Result 0xe15` at `sdk+0x6d6948` (`InitializeSensorFusion`'s call to `EnableNpadImu`).
 - **Cause:** SDK 22's `GetNpadJoyIconDecorationColor` reads the npad's shared-memory state, and `EnableNpadImu` hands a work buffer to the hid service as transfer memory for it to fill with the controller's IMU samples; the host keeps neither and serves no hid, so the SDK's own functions failed.
-- **Fix:** `hle_hid.c` answers the icon colours (both overloads) with the controller colours `GetNpadControllerColor` gives, the body's again as the third, and records `EnableNpadImu` / `DisableNpadImu` for `IsNpadImuEnabled`. `GetNpadImuSamples` returns no samples, so the SDK's sensor fusion keeps its first orientation.
-- **Open:** the host's controller motion ([Live controller motion](#live-controller-motion)) as `NpadImuSample` entries; until then a Switch 2 game's motion controls and its Joy-Con calibration do not work (Nintendo Switch Sports Resort's calibration cannot finish and is skipped).
+- **Fix:** `hle_hid.c` answers the icon colours (both overloads) with the controller colours `GetNpadControllerColor` gives, the body's again as the third, and records `EnableNpadImu` / `DisableNpadImu` for `IsNpadImuEnabled`. The IMU samples: [Switch 2 controller IMU samples and sensor fusion](#switch-2-controller-imu-samples-and-sensor-fusion).
 - **Found on:** Nintendo Switch Sports Resort (`04008E001F098000`, v65536; no profile yet): boots to its title and menus, on the Mac.
 - **Check:** `make -C dm/host/tests GAME=<id> run` (`t_hid`).
+
+### Switch 2 controller IMU samples and sensor fusion
+
+- **Symptom:** a Switch 2 game's motion controls do nothing, and its Joy-Con calibration never finishes (Nintendo Switch Sports Resort: the calibration screen waits for still controllers and can only be skipped), although the host reads the controllers' motion (`[sw2] … gyro offset`, [Live controller motion](#live-controller-motion)).
+- **Cause:** SDK 22 games read motion through the SDK's sensor fusion (`InitializeSensorFusion`, `UpdateSensorFusion`, `GetSensorFusionOrientations`, `IsSensorFusionStill`, `IsSensorFusionCalibrated`), which runs in `sdk` on `nerd::sensors` and feeds on `GetNpadImuSamples`. The host gave no samples, so the fusion never started. Starting it also asks the hid service for the sensor's IC information, whether its device is newly assigned, and the calibration stored for it, which the host did not answer either.
+- **Fix:** `hle_hid.c`:
+  - **`GetNpadImuSamples`:** the samples of the live controller motion (the same source and handle decoding as `GetSixAxisSensorStates`, `six_states`) since the handle's last read, oldest first, at most the count asked for and the service ring's 16, numbered by the guest clock at 200 Hz. A handle's first read gives its newest sample only.
+  - **The sample** (0x28 bytes, as `UpdateSensorFusion` reads it, SDK 22.2.10 `sdk+0x6d6e60`): the sampling number, the time since the previous sample in ns (5 ms), the acceleration and the angular velocity. The fusion copies the angular velocity as it is and negates the acceleration. Its outputs are in m/s² and rad/s: after each update the SDK turns them into g and degrees per second (× −1/9.80665 and × 180/π, `sdk+0x6d74a0`) and starts the fusion over when one is past twice the sensor's range (`sdk+0x6d74f4` on). So the host's g (flat and still: 0, 0, −1) times 9.80665 and revolutions per second times 2π. Fed in cm/s² first (981 a g, from the 981 that `nn::imu::SixAxisSensorInformation`'s constructor scales the sensor's range by), gravity read as 100 g: the fusion was started over every half second and never calibrated.
+  - **The handle** is the SDK's (`GetNpadImuHandles` / `GetSensorFusionHandles` through `hid::utility::GetSixAxisSensorHandle`, `sdk+0x6d8490`), not the host's `GetSixAxisSensorHandles`': byte 0 the style's type (3 full key, 4 handheld, 5 Joy-Con pair, 6 left, 7 right, as the vibration handles), byte 1 the npad id, byte 2 the sensor (a pair's 0 left and 1 right, a right Joy-Con's 1, a full key or handheld controller's 2). `imu_six_handle` turns it into the host's (byte 0 the style's bit number); read as the host's own, a pair's handles named style bit 5 and got no samples.
+  - **`GetSixAxisSensorIcInformation`:** the Switch's 0xc8-byte six-axis sensor IC information with a Joy-Con's values (±2000 °/s, ±8 g, the zero-rate offset and sensitivity limits); on a failure the SDK leaves the fusion off (`sdk+0x6d7e2c`).
+  - **`IsSixAxisSensorDeviceNewlyAssigned`:** false; its reset does nothing.
+  - **`Load` / `StoreSixAxisSensorCalibrationParameter`:** the fusion's 0x744-byte calibration (its gyroscope bias), kept for the run per controller and sensor; a load before any store fails, and the fusion then starts with no bias guess.
+- **Open:** calibrations are not kept across runs, as a console keeps them.
+- **Found on:** Nintendo Switch Sports Resort (`04008E001F098000`, v65536; no profile on main).
+- **Check:** `make -C dm/host/tests GAME=<id> run` (`t_hid`: `t_npad_imu`).
 
 ### Switch 2 controllers over Bluetooth LE
 

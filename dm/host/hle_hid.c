@@ -1190,19 +1190,118 @@ HLE_FORCE("_ZN2nn3hid17GetDebugPadStatesEPNS0_13DebugPadStateEi", "debug pad sta
     for (int i = 0; i < n; i++) { memset(s + 32 * i, 0, 32); *(int64_t *)(s + 32 * i) = top - i; }
     return n > 0 ? n : 0;
 }
-// The IMU of a Switch 2 controller (SDK 22): EnableNpadImu hands a work buffer to the hid service as transfer memory, which the service fills with samples that GetNpadImuSamples
-// reads per controller; the SDK's sensor fusion (InitializeSensorFusion, GetSensorFusionOrientations) runs on top of them in sdk. The host serves no hid, so the SDK's own aborted
-// (Nintendo Switch Sports Resort: Result 0xe15 at sdk+0x6d6948, InitializeSensorFusion's call). The host records the setting and gives no samples yet: fusion keeps its first
-// orientation (open: the host's motion as NpadImuSample entries)
+// The IMU of a Switch 2 controller (SDK 22). EnableNpadImu hands a work buffer to the hid service as transfer memory, which the service fills with samples that GetNpadImuSamples reads
+// per controller; the SDK's sensor fusion (InitializeSensorFusion, UpdateSensorFusion, GetSensorFusionOrientations, IsSensorFusionStill, IsSensorFusionCalibrated) runs on top of them
+// in sdk, through nerd::sensors. With no samples the fusion never started, so nothing the game did with motion moved, and Nintendo Switch Sports Resort's Joy-Con calibration waited
+// for a still controller forever (it could only be skipped). The host gives the samples of the live controller motion, the same as GetSixAxisSensorStates (six_states).
+// An NpadImuSample, as UpdateSensorFusion reads it (SDK 22.2.10, sdk+0x6d6e60): the sampling number, the time since the previous sample in ns, the acceleration and the angular
+// velocity. The fusion copies the angular velocity as it is and negates the acceleration; its outputs are in m/s^2 and rad/s: after each update the SDK turns them into g and
+// degrees per second (times -1/9.80665 and 180/pi, sdk+0x6d74a0) and starts the fusion over when one is past twice the sensor's range (sdk+0x6d74f4 on). So the acceleration is
+// in m/s^2 with the Switch's sign (0, 0, -9.80665 flat and still) and the angular velocity in rad/s: the host's g times 9.80665 and revolutions per second times 2 pi. Fed in
+// cm/s^2 (981 a g), gravity read as 100 g: the fusion was started over at every check and never calibrated. The service hands each
+// sample once, from a ring of 16 per controller; the fusion fills a gap of fewer than 100 sampling numbers with 5 ms steps.
+// A handle is made by the SDK (GetNpadImuHandles and GetSensorFusionHandles: hid::utility::GetSixAxisSensorHandle, sdk+0x6d8490), not by the host's GetSixAxisSensorHandles: byte 0
+// the style's type (3 full key, 4 handheld, 5 Joy-Con pair, 6 left, 7 right, as the vibration handles), byte 1 the npad id, byte 2 the sensor (a pair's 0 left and 1 right; a right
+// Joy-Con's 1; a full key or handheld controller's 2). Read as the host's own handles (byte 0 the style's bit number), a pair's handles named style bit 5 and got no samples
+typedef struct { int64_t sampling, delta_ns; float acc[3], gyro[3]; } NpadImuSample;
+_Static_assert(sizeof(NpadImuSample) == 0x28, "NpadImuSample");
+enum { IMU_RING = 16, IMU_READERS = 32 };
 static _Atomic int g_npad_imu;
-HLE_FORCE("_ZN2nn3hid13EnableNpadImuEPvm", "controller IMU: on, the host fills no samples", Result, h_hid_ImuOn, void *buf, size_t sz) {
-    if (!atomic_exchange(&g_npad_imu, 1)) LOG("hid: EnableNpadImu (work buffer %zu bytes): on, with no samples from the host", sz);
+static pthread_mutex_t g_imu_mu = PTHREAD_MUTEX_INITIALIZER;
+static struct { uint32_t h; int used; int64_t last; } g_imu_read[IMU_READERS];   // the newest sampling number each handle was given
+HLE_FORCE("_ZN2nn3hid13EnableNpadImuEPvm", "controller IMU: on, the host fills the samples (GetNpadImuSamples)", Result, h_hid_ImuOn, void *buf, size_t sz) {
+    if (!atomic_exchange(&g_npad_imu, 1)) LOG("hid: EnableNpadImu (work buffer %zu bytes): on, samples from the controllers' motion", sz);
     (void)buf; return RES_OK;
 }
-HLE_FORCE("_ZN2nn3hid14DisableNpadImuEv", "controller IMU: off", Result, h_hid_ImuOff, void) { atomic_store(&g_npad_imu, 0); return RES_OK; }
+HLE_FORCE("_ZN2nn3hid14DisableNpadImuEv", "controller IMU: off", Result, h_hid_ImuOff, void) {
+    atomic_store(&g_npad_imu, 0); pthread_mutex_lock(&g_imu_mu); memset(g_imu_read, 0, sizeof g_imu_read); pthread_mutex_unlock(&g_imu_mu); return RES_OK;
+}
 HLE_FORCE("_ZN2nn3hid16IsNpadImuEnabledEv", "controller IMU: as the game set it", bool, h_hid_ImuIsOn, void) { return atomic_load(&g_npad_imu) != 0; }
-HLE_FORCE("_ZN2nn3hid17GetNpadImuSamplesEPNS0_13NpadImuSampleEiNS0_13NpadImuHandleE", "controller IMU samples: none", int, h_hid_ImuSamples, void *out, int n, uint32_t h) {
-    (void)out; (void)n; (void)h; return 0;
+// The samples this handle has not been given yet, oldest first: at most n, and at most the ring's 16; none while the IMU is off or the controller is not connected in that style
+static uint32_t imu_six_handle(uint32_t h) {   // the host's six-axis handle of an SDK-made one (style bit, npad id, Joy-Con of a pair); ~0: no style
+    unsigned type = h & 0xff, dev = h >> 16 & 0xff;
+    if (type < 3 || type > 7 || dev > 2) return ~0u;
+    return (type - 3) | (h & 0xff00) | (type == 5 && dev == 1 ? 1u << 16 : 0);
+}
+static int npad_imu_samples(NpadImuSample *out, int n, uint32_t h) {
+    if (!out || n <= 0 || !atomic_load(&g_npad_imu)) return 0;
+    uint32_t sh = imu_six_handle(h);
+    if (sh == ~0u) return 0;
+    SixAxisState st[IMU_RING];
+    int k = six_states(st, IMU_RING, sh);   // newest first, numbered by the guest clock
+    if (k <= 0) return 0;
+    pthread_mutex_lock(&g_imu_mu);
+    int slot = -1, free_slot = -1;
+    for (int i = 0; i < IMU_READERS; i++) { if (g_imu_read[i].used && g_imu_read[i].h == h) { slot = i; break; } if (!g_imu_read[i].used && free_slot < 0) free_slot = i; }
+    if (slot < 0) {   // a handle read for the first time is given its newest sample only
+        slot = free_slot >= 0 ? free_slot : (int)(h % IMU_READERS);
+        g_imu_read[slot].used = 1; g_imu_read[slot].h = h; g_imu_read[slot].last = st[0].sampling - 1;
+        LOG("hid: IMU samples for handle %#x (style type %u, npad %u, sensor %u): first one #%lld", h, h & 0xff, h >> 8 & 0xff, h >> 16 & 0xff, (long long)st[0].sampling);
+    }
+    int64_t last = g_imu_read[slot].last;
+    int m = 0;
+    for (int i = k - 1; i >= 0 && m < n; i--) {
+        if (st[i].sampling <= last) continue;
+        NpadImuSample *o = &out[m++];
+        o->sampling = st[i].sampling; o->delta_ns = st[i].delta_ns;
+        for (int c = 0; c < 3; c++) { o->acc[c] = st[i].acc[c] * 9.80665f; o->gyro[c] = st[i].gyro[c] * (float)(2 * M_PI); }
+        g_imu_read[slot].last = st[i].sampling;
+    }
+    pthread_mutex_unlock(&g_imu_mu);
+    return m;
+}
+// These take-overs run on the big host stack (HLE_FORCE_BIG): the SDK calls them from UpdateSensorFusion, which keeps 2.6 KB of its own frame on a game thread's stack, and the
+// store's first log line ran Nintendo Switch Sports Resort's thread off its stack (the game crashed as its calibration finished)
+HLE_FORCE_BIG("_ZN2nn3hid17GetNpadImuSamplesEPNS0_13NpadImuSampleEiNS0_13NpadImuHandleE", "controller IMU samples: the controller's motion since the last read, oldest first", int, h_hid_ImuSamples, void *out, int n, uint32_t h) {
+    return npad_imu_samples(out, n, h);
+}
+// The sensor's characteristics, which the fusion is set up from (sdk+0x6d7db0: a failure leaves the fusion off). The Switch's six-axis sensor IC information, 0xc8 bytes: the gyroscope's
+// range in degrees per second, its zero-rate offset limits, sensitivity limits (lower, upper: 3x3 each), then the same for the accelerometer in g. The fusion reads the ranges, the
+// upper offset limits and the upper sensitivity limits' first two entries. The values are a Joy-Con's (+-2000 dps, +-8 g)
+typedef struct { float gyro_range, gyro_offset[6], gyro_sens_lo[9], gyro_sens_hi[9], acc_range, acc_offset[6], acc_sens_lo[9], acc_sens_hi[9]; } SixAxisIcInfo;
+_Static_assert(sizeof(SixAxisIcInfo) == 0xc8, "SixAxisSensorIcInformation");
+HLE_FORCE_BIG("_ZN2nn3hid29GetSixAxisSensorIcInformationEPNS0_26SixAxisSensorIcInformationERKNS0_19SixAxisSensorHandleE", "six-axis sensor IC information: a Joy-Con's ranges and tolerances",
+          Result, h_hid_SixIc, SixAxisIcInfo *out, const uint32_t *h) {
+    (void)h;
+    static const SixAxisIcInfo ic = {
+        2000.0f, {-10.0f, -10.0f, -10.0f, 10.0f, 10.0f, 10.0f},
+        {0.95f, -0.003f, -0.003f, -0.003f, 0.95f, -0.003f, -0.003f, -0.003f, 0.95f}, {1.05f, 0.003f, 0.003f, 0.003f, 1.05f, 0.003f, 0.003f, 0.003f, 1.05f},
+        8.0f, {-0.0612f, -0.0612f, -0.0612f, 0.0612f, 0.0612f, 0.0612f},
+        {0.95f, -0.016f, -0.016f, -0.016f, 0.95f, -0.016f, -0.016f, -0.016f, 0.95f}, {1.05f, 0.016f, 0.016f, 0.016f, 1.05f, 0.016f, 0.016f, 0.016f, 1.05f},
+    };
+    if (!out) return RES_FAIL;
+    *out = ic; return RES_OK;
+}
+// A device the controller slot newly got: the fusion starts over for it. The host keeps no such state, so none is new
+HLE_FORCE("_ZN2nn3hid34IsSixAxisSensorDeviceNewlyAssignedERKNS0_19SixAxisSensorHandleE", "six-axis sensor device newly assigned: no", bool, h_hid_SixNew, const uint32_t *h) { (void)h; return false; }
+HLE_FORCE("_ZN2nn3hid39ResetIsSixAxisSensorDeviceNewlyAssignedERKNS0_19SixAxisSensorHandleE", "six-axis sensor newly-assigned flag: nothing to reset", void, h_hid_SixNewReset, const uint32_t *h) { (void)h; }
+// The fusion's calibration (gyroscope bias) for a controller, 0x744 bytes: stored once the fusion has it (UpdateSensorFusion), loaded when it starts for that controller (sdk+0x6d7f64:
+// 0, the bias it starts from; else it starts from none). The host keeps them for the run, per controller and sensor; the first load of a run finds none
+enum { SIX_CAL_SIZE = 0x744 };
+#define HID_RES_NO_CALIBRATION 0x8cau   // hid (module 202) description 4: no stored parameter; the SDK only tests for 0
+static struct { uint32_t key; int used; uint8_t p[SIX_CAL_SIZE]; } g_six_cal[16];
+static uint32_t six_cal_key(uint32_t h) { return (h >> 8 & 0xff) | (h & 0xff) << 8 | (h >> 16 & 0xff) << 16; }   // npad id, style type and sensor, as the SDK's handle names them
+HLE_FORCE_BIG("_ZN2nn3hid37LoadSixAxisSensorCalibrationParameterEPNS0_33SixAxisSensorCalibrationParameterERKNS0_19SixAxisSensorHandleE", "six-axis calibration: the one stored this run, else none",
+          Result, h_hid_SixCalLoad, void *out, const uint32_t *h) {
+    if (!out || !h) return HID_RES_NO_CALIBRATION;
+    Result r = HID_RES_NO_CALIBRATION; uint32_t key = six_cal_key(*h);
+    pthread_mutex_lock(&g_imu_mu);
+    for (int i = 0; i < 16; i++) if (g_six_cal[i].used && g_six_cal[i].key == key) { memcpy(out, g_six_cal[i].p, SIX_CAL_SIZE); r = RES_OK; break; }
+    pthread_mutex_unlock(&g_imu_mu);
+    return r;
+}
+HLE_FORCE_BIG("_ZN2nn3hid38StoreSixAxisSensorCalibrationParameterERKNS0_19SixAxisSensorHandleERKNS0_33SixAxisSensorCalibrationParameterE", "six-axis calibration: kept for the run",
+          Result, h_hid_SixCalStore, const uint32_t *h, const void *p) {
+    if (!h || !p) return RES_FAIL;
+    uint32_t key = six_cal_key(*h); int at = -1;
+    pthread_mutex_lock(&g_imu_mu);
+    for (int i = 0; i < 16 && at < 0; i++) if (g_six_cal[i].used && g_six_cal[i].key == key) at = i;
+    for (int i = 0; i < 16 && at < 0; i++) if (!g_six_cal[i].used) at = i;
+    if (at < 0) at = (int)(key % 16);
+    g_six_cal[at].used = 1; g_six_cal[at].key = key; memcpy(g_six_cal[at].p, p, SIX_CAL_SIZE);
+    pthread_mutex_unlock(&g_imu_mu);
+    static int said; if (!said++) LOG("hid: the sensor fusion stored a calibration (handle %#x: style type %u, npad %u, sensor %u)", *h, *h & 0xff, *h >> 8 & 0xff, *h >> 16 & 0xff);
+    return RES_OK;
 }
 HLE_FORCE("_ZN2nn3hid20FinalizeSensorFusionEv", "end of sensor fusion (SDK 22): the host keeps no IMU state to disable", void, h_hid_FusionFin, void) {}
 HLE_FORCE("_ZN2nn3hid25EnableSixAxisSensorFusionERKNS0_19SixAxisSensorHandleEb", "six-axis sensor fusion; ignored by the host", void, h_hid_SixFusionOn, const uint32_t *h, uint32_t on) { (void)h; (void)on; }

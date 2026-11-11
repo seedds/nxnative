@@ -26,8 +26,10 @@ static int hid_clock_gettime(clockid_t clock, struct timespec *ts) { (void)clock
 static int hid_usleep(useconds_t usec) { (void)usec; if (script_hold) script_hold(); return 0; }
 #define CHECK(c, msg) do { checks++; if (!(c)) { fails++; fprintf(stderr, "FAIL: %s (line %d)\n", msg, __LINE__); } } while (0)
 int dm_opmode(void) { return g_mode; }
-uint64_t guest_ns(void) { return 1000000000ull; }
+static uint64_t test_guest_ns = 1000000000ull;   // the guest clock; t_npad_imu moves it
+uint64_t guest_ns(void) { return test_guest_ns; }
 uint64_t now_ns(void) { return motion_now; }
+int dm_guest_as_contains(uintptr_t a) { (void)a; return 0; }   // hle_bigstack.c: the IMU take-overs run on the big stack (HLE_FORCE_BIG)
 static uint64_t test_frame;   // presented frames (t_rec moves it)
 uint64_t dm_guest_frame(void) { return test_frame; }
 // The touchscreen as the game would read it: the first finger, and whether one was put down since the last read (a touch's Start is reported once, hle_touch.c)
@@ -122,7 +124,7 @@ static void t_npads(void) {
         CHECK(!h_hid_ImuIsOn(), "the controller IMU starts off");
         uint8_t work[64]; uint8_t samples[256];
         CHECK(h_hid_ImuOn(work, sizeof work) == RES_OK && h_hid_ImuIsOn(), "EnableNpadImu turns it on");
-        CHECK(h_hid_ImuSamples(samples, 4, 0) == 0, "and the host gives no samples (open: its motion as NpadImuSample entries)");
+        CHECK(h_hid_ImuSamples(samples, 4, 0x3ff) == 0, "a handle of no connected controller gets no samples");
         CHECK(h_hid_ImuOff() == RES_OK && !h_hid_ImuIsOn(), "DisableNpadImu turns it off");
     }
     int32_t info[2]; int8_t arg[8] = {1, 4};
@@ -562,6 +564,63 @@ static void t_motion_threads(void) {
     for (int p = 0; p < DM_PLAYERS; p++) pthread_join(threads[p], NULL);
     g_phone_motion.last_ns = 0;   // the following test starts with no live source
 }
+// The Switch 2 controller IMU (GetNpadImuSamples) and what the SDK's sensor fusion asks beside it: samples of the controller's motion, each handed once, oldest first, in m/s^2
+// and rad/s; the sensor's IC information; calibrations kept for the run
+static void t_npad_imu(void) {
+    g_mode = 1; dm_pad_players(1);
+    g_phone_mode = 0; g_phone_motion.last_ns = 0; dm_motion_clear(0); dm_motion_clear_hid(0);   // no motion source left by the tests before
+    atomic_store(&g_shake_t0, 0); atomic_store(&g_shake_end, 0);
+    uint8_t work[64]; NpadImuSample s[IMU_RING + 4] = {0};
+    uint32_t h = 3 | 0u << 8 | 2u << 16;   // as the SDK makes it (hid::utility::GetSixAxisSensorHandle): full key type 3, npad 0, sensor 2
+    test_guest_ns = 1000000000ull;
+    CHECK(h_hid_ImuSamples(s, 16, h) == 0, "imu: off, no samples");
+    h_hid_ImuOn(work, sizeof work);
+    CHECK(h_hid_ImuSamples(s, 16, h) == 1, "imu: a handle's first read gives its newest sample only");
+    CHECK(s[0].sampling == 200 && s[0].delta_ns == SIX_PERIOD_NS, "imu: numbered by the guest clock, 5 ms apart");
+    CHECK(s[0].acc[0] == 0 && s[0].acc[1] == 0 && fabsf(s[0].acc[2] + 9.80665f) < 1e-5f && s[0].gyro[2] == 0, "imu: no live motion: flat and still, gravity -9.80665 m/s^2");
+    CHECK(h_hid_ImuSamples(s, 16, h) == 0, "imu: a sample is handed once");
+    test_guest_ns += 20000000ull;   // 20 ms: four samples
+    int n = h_hid_ImuSamples(s, 16, h);
+    CHECK(n == 4 && s[0].sampling == 201 && s[3].sampling == 204, "imu: the samples since the last read, oldest first");
+    test_guest_ns += 10000000ull;
+    CHECK(h_hid_ImuSamples(s, 1, h) == 1 && s[0].sampling == 205, "imu: at most the count asked for, the oldest of them");
+    CHECK(h_hid_ImuSamples(s, 16, h) == 1 && s[0].sampling == 206, "imu: the rest at the next read");
+    test_guest_ns += 200000000ull;   // 200 ms: 40 samples, more than the ring holds
+    n = h_hid_ImuSamples(s, IMU_RING + 4, h);
+    CHECK(n == IMU_RING && s[n - 1].sampling == 246 && s[0].sampling == 246 - IMU_RING + 1, "imu: at most the ring's 16, the newest");
+    float a[3] = {0.5f, 0, -0.8660254f}, w[3] = {0, 0, 3.14159265f};
+    dm_motion_set(0, a, w);
+    test_guest_ns += 5000000ull;
+    CHECK(h_hid_ImuSamples(s, 16, h) == 1 && fabsf(s[0].acc[0] - 4.903325f) < 1e-4f && fabsf(s[0].acc[2] + 8.492808f) < 1e-4f, "imu: live acceleration, g to m/s^2");
+    CHECK(fabsf(s[0].gyro[2] - 3.14159265f) < 1e-4f, "imu: live angular velocity in rad/s");
+    dm_motion_clear(0);
+    CHECK(h_hid_ImuSamples(s, 16, 5 | 1u << 16) == 0, "imu: a style the controller is not in (a Joy-Con pair) gets no samples");
+    CHECK(h_hid_ImuSamples(s, 16, 0 | 2u << 16) == 0 && h_hid_ImuSamples(s, 16, 9) == 0, "imu: a handle of no style type gets none");
+    CHECK(imu_six_handle(3 | 2u << 16) == 0 && imu_six_handle(4 | 2u << 16) == 1 && imu_six_handle(5 | 7u << 8) == (2 | 7u << 8)
+          && imu_six_handle(5 | 7u << 8 | 1u << 16) == (2 | 7u << 8 | 1u << 16) && imu_six_handle(6) == 3 && imu_six_handle(7 | 1u << 16) == 4,
+          "imu: the SDK's handle types map to the host's style bits, a pair's sensor to its Joy-Con");
+    h_hid_ImuOff();
+    test_guest_ns += 5000000ull;
+    CHECK(h_hid_ImuSamples(s, 16, h) == 0, "imu: off again, no samples");
+    h_hid_ImuOn(work, sizeof work);
+    CHECK(h_hid_ImuSamples(s, 16, h) == 1, "imu: on again, the handle starts over at its newest sample");
+    h_hid_ImuOff();
+
+    SixAxisIcInfo ic; memset(&ic, 0, sizeof ic);
+    CHECK(h_hid_SixIc(&ic, &h) == RES_OK && ic.gyro_range == 2000.0f && ic.acc_range == 8.0f, "ic information: +-2000 dps, +-8 g");
+    CHECK(ic.gyro_offset[3] == 10.0f && ic.gyro_sens_hi[0] == 1.05f && ic.acc_offset[3] == 0.0612f && ic.acc_sens_hi[1] == 0.016f, "ic information: the limits the fusion reads");
+    CHECK(!h_hid_SixNew(&h), "a sensor is never newly assigned");
+
+    static uint8_t cal[SIX_CAL_SIZE], got[SIX_CAL_SIZE];
+    uint32_t hr = 5 | 1u << 16;   // another sensor: a pair's right Joy-Con
+    CHECK(h_hid_SixCalLoad(got, &h) != RES_OK, "calibration: none before one is stored");
+    for (int i = 0; i < SIX_CAL_SIZE; i++) cal[i] = (uint8_t)(i * 7);
+    CHECK(h_hid_SixCalStore(&h, cal) == RES_OK, "calibration: stored");
+    memset(got, 0, sizeof got);
+    CHECK(h_hid_SixCalLoad(got, &h) == RES_OK && !memcmp(got, cal, SIX_CAL_SIZE), "calibration: loaded back as stored");
+    CHECK(h_hid_SixCalLoad(got, &hr) != RES_OK, "calibration: per sensor (a pair's right Joy-Con has none)");
+    test_guest_ns = 1000000000ull;
+}
 static void t_motion_live(void) {
     g_mode = 1; dm_pad_players(1);
     atomic_store(&g_shake_t0, 0); atomic_store(&g_shake_end, 0);   // no shake: the clocks here stand at 1 s, so the cycle t_script's shake finishes would never end
@@ -661,6 +720,7 @@ int main(void) {
     t_rumble_log();
     t_motion_threads();
     t_motion_live();
+    t_npad_imu();
     t_motion_hid();
     t_rec();
     {   // Nmouse with no device (SDK 21's forms): the pointer range is kept, the merged handle 0 takes settings, the standard mouse and the handle queries report nothing

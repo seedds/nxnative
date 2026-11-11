@@ -1200,3 +1200,26 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Cause:** an NRR with 1 in the byte at +5 (the Switch 2's) has a header 0x180 bytes longer. The same fields follow it: program ID +0x4b0, size +0x4b8, hash table +0x4c0, its count +0x4c4.
 - **Fix:** `hle_ro.c` and `nro_collect.py` read the table by that byte.
 - **Found on:** [Mario Tennis Fever](../../dm/games/0400D4201C6EA000/README.md).
+
+## Dynamic graphics lookup and startup configuration
+
+### Dynamic Vulkan entry point resolves to NULL
+
+- **Symptom:** `ro::LookupSymbol cannot find vkGetInstanceProcAddr`, then a branch to address zero.
+- **Cause:** LookupSymbol searched guest modules only; the Vulkan SDK module is replaced by the host, whose known HLE exports were reachable through static imports only.
+- **Fix:** `hle_known_symbol` exposes known host exports without creating missing-function stubs; `ro::LookupSymbol` tries them before guest definitions. Unknown names still fail. Native NRO lifecycle tests cover both a known host symbol and a missing symbol.
+- **Found on:** [Minecraft Switch 2 Edition](../../dm/games/04008A90274EC000/README.md#mac-bring-up).
+
+### Cache capacity query enters an absent fsp object
+
+- **Symptom:** a NULL dereference in SDK `GetCacheStorageMax`, before creating cache storage.
+- **Cause:** the host supplied cache create/mount operations but not the capacity query, which entered the SDK's uninitialized fsp object.
+- **Fix:** implement the query against the host backend: nonnegative int cache indices and available bytes on the temporary-storage volume. Resolve the nearest existing parent before storage directories exist. This reports capacity, not an enforced quota. Native filesystem tests pass; Minecraft proceeds to create its three cache storages.
+- **Found on:** [Minecraft Switch 2 Edition](../../dm/games/04008A90274EC000/README.md#mac-bring-up).
+
+### Server environment selection enters nsd IPC
+
+- **Symptom:** `the game connects to service nsd:a itself` / `nsd:u`, then an abort with Result 0xe8d during renderer startup.
+- **Cause:** nsd's local server-environment selection calls were not taken over and tried to open absent services.
+- **Fix:** retain Get/Set/Delete server-environment selection as process-local atomic state. Remote name resolution keeps the existing offline behavior. Minecraft then reaches its Vulkan loader.
+- **Found on:** [Minecraft Switch 2 Edition](../../dm/games/04008A90274EC000/README.md#mac-bring-up).

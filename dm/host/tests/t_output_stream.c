@@ -24,7 +24,7 @@ int main(void) {
     if (!name[0]) FAIL("no default virtual device name");
     if (h_os_State(stream) != OS_NONE) FAIL("state of a stream never opened");
     int32_t fmt[3] = {OS_FLOAT, 2, 48000};
-    if (h_os_Open(stream, ev, NULL, 0, name, fmt, CAP, CAP - FRAMES, 0)) FAIL("open");
+    if (h_os_OpenLegacy(stream, ev, NULL, 0, name, fmt, CAP, CAP - FRAMES)) FAIL("SDK 20.5 event overload open");
     if (h_os_State(stream) != OS_STOPPED || h_os_Free(stream) != CAP) FAIL("after open: state %d, free %d", h_os_State(stream), h_os_Free(stream));
     int32_t bad[3] = {OS_FLOAT, 2, 44100};
     char other[0x350] = {0};
@@ -59,6 +59,11 @@ int main(void) {
     if (h_os_Free(stream) != CAP) FAIL("purge left %d frames queued", CAP - h_os_Free(stream));
     h_os_Close(stream);
     if (h_os_State(stream) != OS_NONE) FAIL("state after close");
+    if (h_os_Open(stream, ev, NULL, 0, name, fmt, CAP, CAP - FRAMES, 0)) FAIL("flags overload open");
+    h_os_Close(stream);
+    memset(name, 0x7f, sizeof name); h_is_DefaultDev(name);
+    for (size_t i = 0; i < sizeof name; i++) if (name[i]) FAIL("absent microphone has a device name");
+    if (!h_is_Open(stream, NULL, 0, name, fmt, CAP)) FAIL("absent microphone opened");
     printf("OutputStream: 100 ms played in %llu ms, %d release events\n", (unsigned long long)ms, atomic_load(&g_sig));
     return 0;
 }

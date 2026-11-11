@@ -1,3 +1,4 @@
+#include <stdatomic.h>
 // Networking and peripheral system services (out of scope: online play, local wireless, friends, telemetry, SSL) as seen through newer SDKs: all made "unavailable", the game takes its offline branch.
 // Only entry points that go to a service are hooked; library functions that only read and write the game's own buffers (prepo Add / Array / Struct, err ErrorResultVariant, friends getters, socket byte-order conversion) keep running in the SDK.
 // Return convention as in hle_friends.c: Result returns RES_FAIL ("saved / submitted" kinds return RES_OK so the game does not retry); bool returns false; events get a bound SystemEvent that never fires.
@@ -224,3 +225,11 @@ HLE_FORCE("_ZN2nn5album21GetSharePostedLastUrlEPcmRKNS0_7ShareIdE", "URL of the 
 HLE_FORCE("_ZN2nn5album14ShowAlbumFilesEv", "album applet: not shown", Result, h_album_Show, void) { return RES_FAIL; }
 // Pokémon Legends: Z-A (SDK 19): a screenshot of the current frame, taken by the capture service
 HLE_FORCE("_ZN2nn5album21SaveCurrentScreenshotENS0_17AlbumReportOptionE", "screenshot of the current frame (capsrv): no album, fails", Result, h_album_SaveCur, int report) { (void)report; LOG("album::SaveCurrentScreenshot (no album)"); return RES_FAIL; }
+
+// Server environment selection is local process configuration; resolving remote
+// names still follows the host's offline policy. Minecraft sets this before its
+// first menu; entering the SDK's nsd:a/nsd:u IPC path aborted on an absent service.
+static _Atomic int g_nsd_server_environment;
+HLE_FORCE("_ZN2nn3nsd35SetApplicationServerEnvironmentTypeENS_2oe21ServerEnvironmentTypeE", "nsd local server environment selection", void, h_nsd_SetServerEnvironment, int value) { atomic_store(&g_nsd_server_environment, value); }
+HLE_FORCE("_ZN2nn3nsd35GetApplicationServerEnvironmentTypeEv", "nsd local server environment selection", int, h_nsd_GetServerEnvironment, void) { return atomic_load(&g_nsd_server_environment); }
+HLE_FORCE("_ZN2nn3nsd38DeleteApplicationServerEnvironmentTypeEv", "nsd reset server environment selection", void, h_nsd_ResetServerEnvironment, void) { atomic_store(&g_nsd_server_environment, 0); }

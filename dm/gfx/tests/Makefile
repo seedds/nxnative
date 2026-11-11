@@ -517,8 +517,11 @@ t_stencil_view: t_stencil_view.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_stencil_view.m $(MTL_T_SRC) $(FW)
 check_t_stencil_view: RUN_ENV = MTL_DEBUG_LAYER=1
 # The Vulkan layer (#included) over the whole NVN layer, whose device and present path it uses
-t_vk_desc: t_vk_desc.m ../vk/hle_vk.m $(MTL_T_DEP)
-	clang $(CFLAGS) -I../../third_party/vulkan-headers/include -fobjc-arc -o $@ t_vk_desc.m $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
+VK_INPUT_H = $(dir $(GAME_H))vk_input_test.h
+$(VK_INPUT_H): vk_input.metal ../tools/vk_inputs.py
+	python3 -c 'import sys,json,pathlib; sys.path.insert(0,"../tools"); from vk_inputs import integer_inputs; pathlib.Path(sys.argv[1]).write_text("static NSString *vk_input_test_source = @" + json.dumps(integer_inputs(pathlib.Path("vk_input.metal").read_text())) + ";\n")' "$@"
+t_vk_desc: t_vk_desc.m ../vk/hle_vk.m $(MTL_T_DEP) $(VK_INPUT_H)
+	clang $(CFLAGS) -DVK_INPUT_H='"$(abspath $(VK_INPUT_H))"' -I../../third_party/vulkan-headers/include -fobjc-arc -o $@ t_vk_desc.m $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
 t_gl_imports: t_gl_imports.m ../gl/hle_gl.m ../../host/hle.c ../../host/hle.h $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_gl_imports.m ../../host/hle.c $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
 .PHONY: check_t_gl_imports gl-imports

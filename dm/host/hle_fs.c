@@ -11,6 +11,8 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
+#include <limits.h>
 #include <unistd.h>
 #include <stdio.h>
 #include <stdatomic.h>
@@ -652,6 +654,24 @@ HLE_FORCE("_ZN2nn2fs21MountTemporaryStorageEPKc", "fsp-srv; temporary storage â†
 // Cache storage (Tears of the Kingdom; its first list call opened fsp-srv and aborted in sm::Initialize): storage <index> is the host folder <temporary storage>_cache<index>,
 // created when it is created or mounted. The list reports none (a fresh console), so the game creates its storage at every boot; creating an existing one succeeds
 static const char *cache_dir(int index, char *b, size_t n) { char t[1024]; snprintf(b, n, "%s_cache%d", envdir("DM_TEMP", "run/platform/temp", t, sizeof t), index); return b; }
+// GetCacheStorageMax asks the backend's index/aggregate capacity before creating
+// storage. The host uses nonnegative int indices and ordinary directories rather
+// than Horizon's NACP-sized partitions; report available space on their volume.
+// Minecraft Switch 2 otherwise entered the SDK's absent fsp object and dereferenced NULL.
+HLE_FORCE("_ZN2nn2fs18GetCacheStorageMaxEPiPl", "fsp-srv; cache indices and available backing-volume capacity", Result, h_fs_CacheMax, int *index, int64_t *size) {
+    char b[1024], fallback[1024];
+    strlcpy(b, envdir("DM_TEMP", "run/platform/temp", fallback, sizeof fallback), sizeof b);
+    struct statvfs st;
+    while (statvfs(b, &st)) {
+        if (errno != ENOENT) return err_res("statvfs", b);
+        char *slash = strrchr(b, '/');
+        if (!slash) { strcpy(b, "."); continue; }
+        if (slash == b) slash[1] = 0; else *slash = 0;
+    }
+    if (index) *index = INT_MAX;
+    if (size) *size = st.f_frsize && st.f_bavail > INT64_MAX / st.f_frsize ? INT64_MAX : (int64_t)(st.f_bavail * st.f_frsize);
+    return RES_OK;
+}
 HLE_FORCE("_ZN2nn2fs20OpenCacheStorageListEPNS0_22CacheStorageListHandleE", "fsp-srv; cache storage list: reports none", Result, h_fs_OpenCacheList, void *h) { (void)h; return RES_OK; }
 HLE_FORCE("_ZN2nn2fs20ReadCacheStorageListEPiPNS0_16CacheStorageInfoENS0_22CacheStorageListHandleEi", "fsp-srv; cache storage list: reports none", Result, h_fs_ReadCacheList,
           int *n, void *info, uint64_t h, int max) { (void)info; (void)h; (void)max; *n = 0; return RES_OK; }

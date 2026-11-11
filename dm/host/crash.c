@@ -143,6 +143,8 @@ void dm_guest_write_prepare(void *addr, size_t len) { for (int i = 0; i < g_nwri
 
 // The diagnostics module (the probes in diag.c) and the thread state dump (hle_thread.c) each register themselves here: a unit test that links only this file does not depend on them
 static int (*g_trap_hook)(ucontext_t *uc);
+static int (*g_branch_hook)(ucontext_t *uc);
+void crash_set_branch_hook(int (*fn)(ucontext_t *uc)) { g_branch_hook = fn; }
 void crash_set_trap_hook(int (*fn)(ucontext_t *uc)) { g_trap_hook = fn; }
 void crash_set_dump_hook(void (*fn)(void)) { g_dump_hook = fn; }
 void crash_set_wait_dump(void (*fn)(void)) { g_wait_dump = fn; }
@@ -159,6 +161,7 @@ static void crash_gate(int sig) {
 }
 static void on_crash(int sig, siginfo_t *si, void *uc_) {
     ucontext_t *uc = uc_;
+    if (sig == SIGTRAP && g_branch_hook && g_branch_hook(uc)) return;
     if (sig == SIGTRAP && g_trap_hook && g_trap_hook(uc)) return;
     if (sig == SIGSEGV || sig == SIGBUS) {
         int is_write = (int)((uc->uc_mcontext->__es.__esr >> 6) & 1);   // The WnR bit of ESR

@@ -121,6 +121,7 @@ One row per profile; the notes are each profile's `README.md`.
 | [Metroid Dread](010093801237C000/README.md) | `010093801237C000` | 2.1.0 | 11.4.3 | MercurySteam's engine | NVN |
 | [Metroid Prime Remastered](010012101468C000/README.md) | `010012101468C000` | 1.0.0 (base) | 12.3.1 | Retro Studios' engine | NVN |
 | [Minecraft Dungeons II](0100A7C01B792000/README.md) | `0100A7C01B792000` | 1.1.3.0 | 20.5.15 | Unreal Engine 5, Wwise, Havok | NVN |
+| [Minecraft Switch 2 Edition](04008A90274EC000/README.md) | `04008A90274EC000` | 1.26.50 (v262144, Switch 2) | 20.5.14 (Ounce) | RenderDragon | Vulkan |
 | [Monster Hunter Rise](0100B04011742000/README.md) | `0100B04011742000` | 16.0.2 | 11.4.3 | Capcom's RE Engine | NVN |
 | [Monster Train 2](010051701FB46000/README.md) | `010051701FB46000` | 1.1.1 | 18.3.5 | Unity 2022.3.54f1 IL2CPP | NVN |
 | [Need for Speed: Hot Pursuit Remastered](010029B0118E8000/README.md) | `010029B0118E8000` | 1.0.3 | 10.4.1 | Criterion's engine (Stellar Entertainment port) | NVN |

@@ -1,0 +1,37 @@
+# Minecraft Switch 2 Edition, standalone update v262144, SDK 20.5.14.
+# Mac gameplay confirmed by the user; README.md records the tested scope and remaining validation.
+
+# ---- Identity ----
+title_id	04008A90274EC000
+program_id	04008A90274EC000
+
+# ---- App ----
+name	Minecraft Switch 2 Edition
+ipa	MinecraftSwitch2Edition.ipa
+app_category	public.app-category.games
+pad_layout	full
+
+# ---- Versions ----
+build	v262144	1.26.50	main=71e679a4d77a93032dbecf11823656c0	subsdk0=8332d6dfc1bb9e38f343a4609ee1a5a6	sdk=dfb937c3d3e764f8393c5ce38dd276bf
+package	v262144
+shader_versions	v262144
+
+# ---- Files ----
+# not loaded, main takes nothing from them the host does not supply: subsdk0 (NintendoSDK_Vulkan)
+modules	main sdk
+romfs_marker	renderer/materials/Actor.material.bin
+zip_store	.bin:.dat:.fsb:.hdr:.nro:.ogg:.otf:.png:.metallib
+
+# ---- Memory ----
+# the NPDM declares 16 MB of system resource (virtual address memory) and main never sets a heap: a 5 GB block with a 4.375 GB alias region, where the game maps its memory itself
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+# the sdk is built for the Switch 2 (spec: Ounce): its 9 GB pool
+app_pool	0x240000000
+# the NPDM declares 16 MB of system resource
+sys_resource	0x1000000
+
+# ---- Shaders ----
+# RenderDragon materials contain Vulkan SPIR-V; the tools derive the API from them.
+shader_note	Minecraft Switch 2 Edition has Vulkan shaders in RenderDragon materials

@@ -1,6 +1,7 @@
 // Multi-module loading (playing the role of Horizon's rtld): mapping, claiming thread slots, gate registration, cross-module relocation, take-over by name, segment permissions.
 // The code area (original text and patch area) is set to read-only+execute as soon as it is copied in, and from then on the loader only writes data: on iOS these two blocks must be embedded as is as signed code segments.
 #include "dm.h"
+#include <sys/ucontext.h>
 #include <TargetConditionals.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -246,6 +247,16 @@ static void force_check(void) {
 }
 
 // Read the rewriter table header (segment boundaries, slot numbers); any row beyond the header means an old-format build output (code modified at load time), which is rejected
+// A marked BRK replaces only branches beyond B/BL's architectural range. All
+// registers and flags survive signal return; a BL alone updates the guest LR.
+// Tables and module mappings are established before guest threads execute.
+static int far_branch_trap(ucontext_t *uc) {
+    uint64_t pc = uc->uc_mcontext->__ss.__pc;
+    module_t *m = module_of((void *)pc);
+    if (!m || !m->n_far_branches) return 0;
+    return dm_far_branch_resume(uc, (uint64_t)m->base, m->far_branches, m->n_far_branches);
+}
+
 static void read_layout(module_t *m, const char *dir) {
     char path[1024]; snprintf(path, sizeof path, "%s/%s.fixups.tsv", dir, m->name);
     FILE *f = fopen(path, "r");
@@ -254,7 +265,17 @@ static void read_layout(module_t *m, const char *dir) {
     char line[256], key[48]; unsigned long v; unsigned seen = 0;
     while (fgets(line, sizeof line, f)) {
         if (sscanf(line, "# %47s %lx", key, &v) != 2) die("%s: the output comes from an old rewriter; rewrite the modules again with dm/tools/patch_nso.py", path);
-        if (!strcmp(key, "PATCH_OFF")) m->patch_off = strtoll(line + 2 + strlen(key), NULL, 16);   // may be negative (patch area before the base)
+        if (!strncmp(key, "FAR_BRANCH:", 11)) {
+            unsigned long long raw_source; unsigned link;
+            if (sscanf(key + 11, "%llx:%u", &raw_source, &link) != 2 || link > 1 ||
+                (m->n_far_branches && m->far_branches[m->n_far_branches - 1].source >= (int64_t)raw_source)) die("%s: invalid far branch", path);
+            size_t count = m->n_far_branches + 1;
+            void *entries = realloc(m->far_branches, count * sizeof *m->far_branches);
+            if (!entries) die("%s: allocating far branches", path);
+            m->far_branches = entries;
+            m->far_branches[m->n_far_branches++] = (struct dm_far_branch){(int64_t)raw_source, (int64_t)v, link};
+        }
+        else if (!strcmp(key, "PATCH_OFF")) m->patch_off = strtoll(line + 2 + strlen(key), NULL, 16);   // may be negative (patch area before the base)
         else if (!strcmp(key, "IMAGE_SIZE")) m->image_size = v;
         else if (!strcmp(key, "FILE_IMAGE_LEN")) m->file_image_len = v;
         else if (!strcmp(key, "BACK_OFF")) m->back_off = v;
@@ -833,6 +854,8 @@ static char g_module_dir[1024];   // the folder the modules were loaded from (dm
 const char *dm_module_dir(void) { return g_module_dir; }
 
 void load_modules(const char *dir, const char **names, int n) {
+    void crash_set_branch_hook(int (*fn)(ucontext_t *));
+    crash_set_branch_hook(far_branch_trap);
     strlcpy(g_module_dir, dir, sizeof g_module_dir);
     // Map everything and parse the symbol tables first, then relocate all at once (cross-module symbols must all be in place first)
     // DM_BOOTPROF: breakdown of ① host loading (milliseconds), to set the upper bound for ③ pre-relocation / mmap

@@ -1099,7 +1099,7 @@ def reused(keyfile, key):   # the note the stage's last successful run wrote bes
 
 
 def tool_files(repo):   # what the shader stages run: dm/gfx/tools' scripts and the lock of the translator's fingerprints, the profile reader, the iOS compile convention, the RomFS reader, the code module loader
-    return sorted((repo / 'dm/gfx/tools').glob('*.py')) + [repo / p for p in ('dm/gfx/tools/dmsh_chain.lock', 'dm/games/game.py', 'dm/ios/tools/ios_metal.py', 'dm/tools/romfs.py', 'dm/tools/nso.py')]
+    return sorted((repo / 'dm/gfx/tools').glob('*.py')) + [repo / p for p in ('dm/gfx/tools/dmsh_chain.lock', 'dm/games/game.py', 'dm/ios/tools/ios_metal.py', 'dm/tools/romfs.py', 'dm/tools/nso.py', 'dm/tools/renderdragon.py')]
 
 
 def python_tool_files(repo, entry, roots):   # transitive repository imports, including imports inside reader functions; unrelated tools are not inputs
@@ -1421,7 +1421,7 @@ def rewrite(py, repo, exe_dir, out, env, logs, g, provisional=False):
     # the repository profile's build rows decide which builds the rewriter treats as the game's own (SDK-wide function patches skip those), and its snowdrop_pools the sizes of those cuts, so they are inputs too
     try: own = [l for l in (repo / 'dm/games' / Path(env.get('DM_GAME') or '-').name / 'game.tsv').read_text(encoding='utf-8').splitlines() if l.startswith(('build\t', 'snowdrop_pools\t'))]
     except OSError: own = []
-    key = fingerprint(('files', [repo / 'dm/tools' / f for f in ('patch_nso.py', 'nso.py', 'nso_code.py', 'nso_asm.py', 'nso_match.py', 'ue_cvar.py', 'ue_malloc.py', 'ue_region.py', 'ue_ring.py', 'snowdrop_pools.py', 'loader_census.py', 'fps_target.py', 'ue_fixed_rate.py', 'unity_fps.py', 'unity_bucket.py')] + patch_files(repo, exe_dir, mods, env.get('DM_GAME')) + list(src.values()) + ([manifest] if manifest.is_file() else [])), names, capstone.__version__,
+    key = fingerprint(('files', [repo / 'dm/tools' / f for f in ('patch_nso.py', 'nso.py', 'nso_code.py', 'nso_asm.py', 'nso_branches.py', 'nso_match.py', 'ue_cvar.py', 'ue_malloc.py', 'ue_region.py', 'ue_ring.py', 'snowdrop_pools.py', 'loader_census.py', 'fps_target.py', 'ue_fixed_rate.py', 'unity_fps.py', 'unity_bucket.py')] + patch_files(repo, exe_dir, mods, env.get('DM_GAME')) + list(src.values()) + ([manifest] if manifest.is_file() else [])), names, capstone.__version__,
                       {k: env.get(k) for k in ('DM_PATCH_FRONT', 'DM_GAME')}, own)
     if all((out / f'{m}.patched.bin').is_file() for m in names) and reused(kf, key) is not None:
         PROG.end(f'{", ".join(mods)}{f" and {len(nros)} NROs" if nros else ""}, reused (inputs unchanged)')
@@ -1538,36 +1538,56 @@ def decoder_host_key(host):
     return None
 
 
+@contextlib.contextmanager
+def make_output_path(path):
+    """Keep make's generated outputs external, including when the path has spaces."""
+    if not any(c.isspace() for c in str(path)):
+        yield path
+        return
+    path.mkdir(parents=True, exist_ok=True)
+    alias = Path('/private/tmp') / ('nxnative-make-' + hashlib.sha256(os.fsencode(path.resolve())).hexdigest()[:24])
+    if alias.is_symlink():
+        if alias.resolve() != path.resolve(): raise BuildError(f'build alias points elsewhere: {alias}')
+    elif alias.exists(): raise BuildError(f'build alias is not a symlink: {alias}')
+    else: alias.symlink_to(path.resolve(), target_is_directory=True)
+    try:
+        yield alias
+    finally:
+        alias.unlink(missing_ok=True)
+
+
 def build_mac_host(repo, out, env, logs, g):
     """The Mac host for the profile, built into out: dm/host's own compile line (make -n) with the output moved, since make takes no target path with spaces and dm/host/dmhost may be another build's.
     Reused when the compile line and its inputs (the source files of HOST_DIRS, the chain header dm/gfx/nvn/dmsh_chain.h among them, the profile header make generates, libvpx, dav1d and the third-party headers, the compiler
     and the macOS SDK) are as at the last build into out. The host runs the game's own arm64 code natively, so an Intel Mac stops here (GitHub issue #54)"""
     if not apple_silicon(): raise BuildError('this step boots the game in the Mac host, which runs the game\'s own arm64 code natively: it needs a Mac with Apple silicon, and this Mac has an Intel processor')
     host = repo / 'dm/host'
-    run(['make', '-s', f'GAME={g.id}', f'gen/{g.id}/game_profile.h', 'gen/vpx/libvpx.a', 'gen/dav1d/libdav1d.a', 'host_msl'], logs / 'mac_host_make.log', env=env, cwd=host)
-    dry = subprocess.run(['make', '-n', '-B', f'GAME={g.id}', 'dmhost'], env=env, cwd=host, capture_output=True, text=True)
-    line = next((l for l in dry.stdout.splitlines() if ' -o dmhost ' in l), None)
-    if not line: raise BuildError(f'make -n gave no compile line for the Mac host: {dry.stderr.strip()[-500:]}')
-    cmd = shlex.split(line); cmd[cmd.index('-o') + 1] = out
-    kf, tp = out.with_name(out.name + '.key'), repo / 'dm/third_party'
-    srcs = [p for d in HOST_DIRS for p in sorted((repo / d).iterdir()) if p.is_file() and p.suffix in ('.c', '.m', '.h', '.S', '.inc')]
-    common = fingerprint(cmd, ('files', [host / f'gen/{g.id}/game_profile.h', host / 'gen/msl-macosx/host_msl_gen.h', host / 'gen/vpx/libvpx.a', host / 'gen/dav1d/libdav1d.a', tp / 'stb_vorbis/stb_vorbis.c']),
-                         ('tree', tp / 'vulkan-headers/include'), ('tree', tp / 'libvpx/vpx'), ('tree', tp / 'dav1d/include'), ('cmd', ['clang', '--version']), ('cmd', ['xcrun', '--show-sdk-build-version']), env=env)
-    key = fingerprint(common, ('files', srcs))
-    chain = repo / CHAIN_H
-    # The decoder serves game bytes before rendering. DMSH_CHAIN selects translated shader libraries and appears in the startup log; it cannot change decompression.
-    # Retain every other host build input, including any other header content. Bind the identity to the built binary so a replaced/custom host cannot inherit it.
-    chain_text = re.sub(r'(?m)^#define DMSH_CHAIN "[^"]*"$', '#define DMSH_CHAIN "<chain>"', chain.read_text()) if chain.is_file() else None
-    decoder = fingerprint('oodle-host-v1', common, ('files', [p for p in srcs if p != chain]), chain_text)
-    if out.is_file() and reused(kf, key) is not None and decoder_host_key(out) == decoder: return out
-    rmtree(kf); out.parent.mkdir(parents=True, exist_ok=True)
-    run(cmd, logs / 'mac_host_build.log', env=env, cwd=host)
-    record = out.with_name(out.name + '.decoder.json')
-    part = record.with_suffix('.json.partial')
-    part.write_text(json.dumps({'format': 1, 'binary': fingerprint(('files', [out])), 'inputs': decoder}) + '\n')
-    os.replace(part, record)
-    kf.write_text(f'{key}\n')
-    return out
+    with make_output_path(out.parent / 'host-gen') as gen:
+        make_gen = f'GEN={gen}'
+        run(['make', '-s', f'GAME={g.id}', make_gen, str(gen / g.id / 'game_profile.h'), str(gen / 'vpx/libvpx.a'), str(gen / 'dav1d/libdav1d.a'), 'host_msl'], logs / 'mac_host_make.log', env=env, cwd=host)
+        dry = subprocess.run(['make', '-n', '-B', f'GAME={g.id}', make_gen, 'dmhost'], env=env, cwd=host, capture_output=True, text=True)
+        line = next((l for l in dry.stdout.splitlines() if ' -o dmhost ' in l), None)
+        if not line: raise BuildError(f'make -n gave no compile line for the Mac host: {dry.stderr.strip()[-500:]}')
+        cmd = shlex.split(line); cmd[cmd.index('-o') + 1] = out
+        kf, tp = out.with_name(out.name + '.key'), repo / 'dm/third_party'
+        srcs = [p for d in HOST_DIRS for p in sorted((repo / d).iterdir()) if p.is_file() and p.suffix in ('.c', '.m', '.h', '.S', '.inc')]
+        common = fingerprint(cmd, ('files', [gen / g.id / 'game_profile.h', gen / 'msl-macosx/host_msl_gen.h', gen / 'vpx/libvpx.a', gen / 'dav1d/libdav1d.a', tp / 'stb_vorbis/stb_vorbis.c']),
+                             ('tree', tp / 'vulkan-headers/include'), ('tree', tp / 'libvpx/vpx'), ('tree', tp / 'dav1d/include'), ('cmd', ['clang', '--version']), ('cmd', ['xcrun', '--show-sdk-build-version']), env=env)
+        key = fingerprint(common, ('files', srcs))
+        chain = repo / CHAIN_H
+        # The decoder serves game bytes before rendering. DMSH_CHAIN selects translated shader libraries and appears in the startup log; it cannot change decompression.
+        # Retain every other host build input, including any other header content. Bind the identity to the built binary so a replaced/custom host cannot inherit it.
+        chain_text = re.sub(r'(?m)^#define DMSH_CHAIN "[^"]*"$', '#define DMSH_CHAIN "<chain>"', chain.read_text()) if chain.is_file() else None
+        decoder = fingerprint('oodle-host-v1', common, ('files', [p for p in srcs if p != chain]), chain_text)
+        if out.is_file() and reused(kf, key) is not None and decoder_host_key(out) == decoder: return out
+        rmtree(kf); out.parent.mkdir(parents=True, exist_ok=True)
+        run(cmd, logs / 'mac_host_build.log', env=env, cwd=host)
+        record = out.with_name(out.name + '.decoder.json')
+        part = record.with_suffix('.json.partial')
+        part.write_text(json.dumps({'format': 1, 'binary': fingerprint(('files', [out])), 'inputs': decoder}) + '\n')
+        os.replace(part, record)
+        kf.write_text(f'{key}\n')
+        return out
 
 
 def boot_mac(host, patched, henv, rd, log, secs, done=lambda: False):
@@ -3068,7 +3088,7 @@ def main(args=None):
     src = pg.build_sources(game / 'ExeFS', rfs.source(game), g.modules_in(game / 'ExeFS'))
     gfx = src['graphics'][0]   # nvn, vulkan (Hades: the host's Vulkan layer, SPIR-V shaders) or gl (Digimon Story Cyber Sleuth: the host's GL layer, GLSL sources)
     glslc = gfx == 'nvn' and src['glslc_capture'][0]   # shaders the game compiles at run time, captured in the Mac host (capture_glslc)
-    vkcap = gfx == 'vulkan' and src['vk_capture'][0]   # SPIR-V shaders the game generates at run time, captured in the Mac host (capture_shaders)
+    vkcap = gfx == 'vulkan' and (src['vk_capture'][0] or g.table('vk_capture.tsv').is_file())   # SPIR-V shaders the game generates at run time, captured in the Mac host (capture_shaders)
     glcap = gfx == 'gl' and src['gl_capture'][0]   # GLSL the game puts together at run time (LÖVE), captured in the Mac host (capture_shaders)
     uedec = gfx == 'nvn' and src['ue_decode'][0]   # Unreal Engine shaders, Oodle-compressed in the paks' shader code archives, decoded in the Mac host (decode_ue_shaders)
     if gfx == 'vulkan': say(f'Vulkan game ({src["graphics"][1]}): vk_shaders.py translates the shaders instead of the NVN shader chain')

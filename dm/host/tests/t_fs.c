@@ -68,6 +68,11 @@ int main(void) {
     char root[1024], save[1100], work[1200], p[1200];
     const char *sp = getenv("TMPDIR"); snprintf(root, sizeof root, "%s/t_fs.XXXXXX", sp ? sp : "/private/tmp");
     if (!mkdtemp(root)) { perror("mkdtemp"); return 1; }
+    { int index = -1; int64_t capacity = -1;
+      snprintf(p, sizeof p, "%s/not-created/cache", root); setenv("DM_TEMP", p, 1);
+      CHECK(h_fs_CacheMax(&index, &capacity) == RES_OK && index == INT_MAX && capacity > 0, "cache capacity resolves the backing volume before its directory exists");
+      CHECK(h_fs_CacheMax(NULL, NULL) == RES_OK, "cache capacity accepts absent outputs");
+      unsetenv("DM_TEMP"); }
     char rom[1100], overlay[1100], rdata[1200], odata[1200], fn[1300], got[64];
     snprintf(rom, sizeof rom, "%s/rom", root); snprintf(overlay, sizeof overlay, "%s/overlay", root); snprintf(rdata, sizeof rdata, "%s/data", rom); snprintf(odata, sizeof odata, "%s/data", overlay);
     mkdir(rom, 0755); mkdir(overlay, 0755); mkdir(rdata, 0755); mkdir(odata, 0755);

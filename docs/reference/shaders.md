@@ -2345,3 +2345,19 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** every Metal compile of translated shaders passes `-fwrapv`: `dmsh_build.py` (Mac), `ios_metal.py` (iOS), `vk_shaders.py` and `gl_shaders.py`. The flag also drops `inbounds` from pointer arithmetic, because Metal's clang has no separate `-fwrapv-pointer`. It also makes the compiler keep loop bounds that may wrap (an extra `smax` before a loop). In a sample of 1,000 of Ocarina's shaders, compiled to LLVM IR on an older chain, 12 came out identical, 746 differed only in their `nsw` / `nuw` / `inbounds` flags, and 242 had other changes. None of it shows on the GPU. On Ocarina's `kokiri-deck` route ([`bench.tsv`](../../dm/games/0400486024DEC000/bench.tsv)) on an M6 (12-core GPU, 2026-11-09), both sides built from the same main with their own libraries and warmed pipeline archives, the medians of three runs a side were 9.94 / 10.51 ms GPU p50 / p95 and 59.4 fps without the flag, and 9.91 / 10.43 ms and 59.6 fps with it. Runs of one side differ by about 0.1 ms.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game), found by nawangwe ([PR #1844](https://github.com/seedds/nxnative/pull/1844)) on an M4 Pro.
 - **Check:** `test_dmsh_wrapv.py` compiles the sign extension, an overflow test (`x + 0x7fffffff < x`) and a doubling and halving with `dmsh_build.py`'s command and checks the results on the Mac's GPU over 65,536 inputs. It also checks that the iPhone command keeps the shift and that all four tools pass the flag. Without `-fwrapv`, the GPU check and the iPhone check both fail.
+
+## Vulkan material containers
+
+### RenderDragon SPIR-V absent from the shader scan
+
+- **Symptom:** `the shader split found no shaders in main or the RomFS` despite `renderer/materials/*.material.bin` files.
+- **Cause:** RenderDragon wraps SPIR-V in CompiledMaterialDefinition records; the modules have a preceding byte length and do not start at file offset zero. The game resolves its Vulkan entry point dynamically, so direct imports do not identify its API.
+- **Fix:** `renderdragon.py` recognizes the container header and validates each module's bounds and SPIR-V instruction lengths. `vk_shaders.py` deduplicates these modules before translation. API discovery recognizes Vulkan-labelled material containers with SPIR-V. Minecraft's 154 containers yield 14,293 blocks and 1,817 unique modules, including 44 compute shaders. The builder records the compute workgroup size; the Vulkan host creates compute pipelines and dispatches with separate descriptor and push-constant state. With 11 additional captured built-ins, all 1,828 modules compile on the Mac.
+- **Found on:** [Minecraft Switch 2 Edition](../../dm/games/04008A90274EC000/README.md#files-and-shaders).
+
+### A dual-source variant made from a multi-target shader
+
+- **Symptom:** Metal rejects `invalid return type` for a generated `vk_<key>_d` fragment function.
+- **Cause:** treating output location 1 as a second blend source while retaining location 2 creates an illegal dual-source return type; Minecraft's prepass writes integer target 0 and float targets 1 and 2.
+- **Fix:** generate the optional dual-source variant only for exactly two vec4 outputs at locations 0 and 1. Multi-target shaders keep their original outputs. The full Minecraft vertex/fragment library compiles with this rule.
+- **Found on:** [Minecraft Switch 2 Edition](../../dm/games/04008A90274EC000/README.md#files-and-shaders).

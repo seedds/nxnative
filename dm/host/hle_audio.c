@@ -625,6 +625,13 @@ HLE_FORCE("_ZN2nn5audio16OpenOutputStreamEPNS0_16OutputStreamTypeEPvmRKNS0_15Aud
     (void)buf; (void)size; (void)dev; (void)flags;
     return os_open(g, NULL, fmt, frames, __builtin_return_address(0));
 }
+// SDK 20.5 exposes the event overload without flags (Minecraft imports this
+// exact ABI); it has the same format, frame capacity and release event.
+HLE_FORCE("_ZN2nn5audio16OpenOutputStreamEPNS0_16OutputStreamTypeEPNS_2os11SystemEventEPvmRKNS0_15AudioDeviceNameERKNS0_12StreamFormatEii",
+          "connect to auddmg:u; an AudioOut of the host's", Result, h_os_OpenLegacy, void *g, void *ev, void *buf, size_t size, const char *dev, const int32_t *fmt, int frames, int threshold) {
+    (void)buf; (void)size; (void)dev; (void)threshold;
+    return os_open(g, ev, fmt, frames, __builtin_return_address(0));
+}
 HLE_FORCE_BIG("_ZN2nn5audio17StartOutputStreamEPNS0_16OutputStreamTypeE", "start the stream's output", Result, h_os_Start, void *g) {
     ostream *o = os_of(g); o->state = OS_STARTED; return au_start_at(o->key, dm_bigstack_caller(__builtin_return_address(0)));
 }
@@ -699,6 +706,7 @@ HLE_FORCE("_ZN2nn5audio25GetOutputStreamStatisticsEPNS0_16OutputStreamTypeEb", "
 }
 // SDK 21's input streams (a microphone, GameChat; Star Fox imports them), as AudioIn above: no device is listed and an open fails, so the calls that need an open stream are never reached;
 // they still answer without touching the guest object, in case a game ignores the open's result
+HLE_FORCE("_ZN2nn5audio28GetDefaultVirtualInputDeviceEPNS0_15AudioDeviceNameE", "connect to auddmg:u; no default microphone on the host", void, h_is_DefaultDev, char *name) { memset(name, 0, 0x100); }
 HLE_FORCE("_ZN2nn5audio23ListVirtualInputDevicesEPNS0_15AudioDeviceNameEi", "connect to auddmg:u; the host has no microphone: no device", int, h_is_List, void *names, int n) { (void)names; (void)n; return 0; }
 HLE_FORCE("_ZN2nn5audio31GetVirtualInputDevicePropertiesEPNS0_23VirtualDevicePropertiesERKNS0_15AudioDeviceNameE", "connect to auddmg:u; no such device", Result, h_is_Props, void *props, const char *name) { (void)props; (void)name; return RES_FAIL; }
 HLE_FORCE("_ZN2nn5audio15OpenInputStreamEPNS0_15InputStreamTypeEPvmRKNS0_15AudioDeviceNameERKNS0_12StreamFormatEi", "connect to auddmg:u; no microphone on the host: fails", Result, h_is_Open,

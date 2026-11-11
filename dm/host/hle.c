@@ -48,6 +48,13 @@ static const hle_ent *hle_find(const char *name) {
     return NULL;
 }
 
+// Dynamic module lookups use the same known HLE exports as static imports, but
+// a missing name must fail instead of allocating an unimplemented-call stub.
+void *hle_known_symbol(const char *name) {
+    const hle_ent *e = hle_find(name);
+    return e ? e->fn : NULL;
+}
+
 uint64_t resolve_import(module_t *m, const char *name) {
     const hle_ent *e = hle_find(name);
     if (e) {

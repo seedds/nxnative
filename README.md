@@ -18,6 +18,7 @@ These Switch 2 games have passed Mac gameplay testing. Build them from a [`.nup`
 - [Kirby Air Riders](dm/games/040077201BE50000/README.md)
 - [Mario Kart World](dm/games/0400C3F00006E000/README.md)
 - [Mario Tennis Fever](dm/games/0400D4201C6EA000/README.md)
+- [Minecraft Switch 2 Edition](dm/games/04008A90274EC000/README.md)
 - [Pokémon Pokopia](dm/games/0400A3A01EE4C000/README.md)
 - [Splatoon Raiders](dm/games/0400380020056000/README.md)
 - [Star Fox](dm/games/0400E88025B1A000/README.md)

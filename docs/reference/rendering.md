@@ -1733,3 +1733,26 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 - **Fix:** the present reports the shape of the frame it draws ([the layer's](#a-crop-only-picks-texels-the-picture-has-the-layers-shape)) whenever its width / height changes (`nvn_mtl.m` `present_now` → `front.h` `front_picture_shape`; every graphics API presents there). The iOS front end lays the game's view out in that shape (`DmLayout.h` takes it as a parameter: the overlay, the split, Fill and the TV alike), so a 1.43:1 picture fills a 1.43:1 screen in Fit and touches are normalized on the picture as drawn; the Mac maps the mouse on the picture's own rectangle. A 16:9 game reports 16:9 and keeps its layout, and a size change of the same shape (1280x720 handheld, 1920x1080 docked) is not reported.
 - **Check:** the [Duo harness](../../dm/ios/tests/duo/README.md) tests the taller picture in Fit, in Fill and on a wider screen, and the production root view following a reported shape and returning to 16:9. Not yet run on a device.
 - **Found on:** [Breath of the Wild](../../dm/games/01007EF00011E000/README.md#screen-shape-dm_screen_aspect-current) and [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md#screen-shape-dm_screen_aspect-current) with `DM_SCREEN_ASPECT=1.43`.
+
+## Vulkan renderer initialization
+
+### Modern Vulkan commands resolved to NULL
+
+- **Symptom:** a branch to address zero during RenderDragon initialization, after dynamically loading Vulkan; later `dynamic state 4 not implemented`.
+- **Cause:** the host implemented older Vulkan entry points but not the promoted format/queue queries, surface queries, synchronization2, CopyCommands2, dynamic rendering, blend constants, standalone resolve/blit and compute operations this renderer uses.
+- **Fix:** promoted queries delegate their base properties; synchronization2 submissions preserve the command-buffer list and fence; copy wrappers retain region values. Dynamic rendering snapshots attachments into the existing Metal pass path, with format metadata for pipelines lacking a render-pass object. Blend constants remain dynamic state. Multisample resolves preserve source contents and use a temporary resolved texture for partial copies. Float/normalized/depth blits reuse the precompiled host copy shaders on the Vulkan queue, supporting scaling and reversed offsets; 3D/integer blits remain explicitly unsupported. Compute pipelines use reflected local sizes, direct/indirect dispatch, separate descriptor bindings and push constants. Native tests exercise these paths through GPU readback with Metal validation. Minecraft's current Mac gameplay validation is recorded in its game note.
+- **Found on:** [Minecraft Switch 2 Edition](../../dm/games/04008A90274EC000/README.md#technical-verification).
+
+### Integer vertex input rejected for format signedness
+
+- **Symptom:** `cannot build the pipeline (18cf018eba675096 9f92700c0a7ee2da): Vertex attribute a_indices(1) of type int cannot be read using MTLAttributeFormatUShort`.
+- **Cause:** the game's pipeline pairs unsigned 16-bit source data with a signed SPIR-V input. Metal requires matching signs. Merely changing UShort to Short would turn indices above 32767 negative. [Desktop Vulkan also requires matching numerical types](https://docs.vulkan.org/spec/latest/chapters/fxvertex.html#fxvertex-input-extraction); accepting this mismatch is a compatibility interpretation of the game's observed pipeline, not a claim about conformant desktop Vulkan or a verified Switch GPU result.
+- **Fix:** `vk_inputs.py` makes integer stage inputs unsigned, and inserts explicit per-location extension and conversion back to the shader's original type. `hle_vk.m` specializes shifts from each source format and maps signed fetch formats to their unsigned equivalents only for those translated inputs. Signed 8/16-bit sources extend their sign; unsigned sources preserve their high bits. Internal constants are identified by name and cannot be overwritten by Vulkan SpecIds. `t_vk_desc` translates its fixture through the same helper, builds pipelines with mixed signed/unsigned formats, and checks actual GPU values for 8/16/32-bit high-bit inputs. Detailed visual comparison remains unperformed.
+- **Found on:** [Minecraft Switch 2 Edition](../../dm/games/04008A90274EC000/README.md#technical-verification).
+
+### Query results copied before their CPU snapshot was available
+
+- **Symptom:** `vkCmdCopyQueryPoolResults` is resolved to NULL during frame setup.
+- **Cause:** query results were only available through the CPU GetQueryPoolResults API. The timestamp backend resolves at command-buffer completion, while a GPU copy must be visible to commands later in the same submission.
+- **Fix:** record the copy, drain the encoded prefix, obtain a query snapshot, then upload through an ordered blit before replaying later GPU commands. This is a slow path imposed by the current completion-based query model; timestamps retain that model's accuracy limit. The readback test copies the query result again on the GPU before its fence and verifies the value and availability. No deferred CPU write substitutes for GPU ordering.
+- **Found on:** [Minecraft Switch 2 Edition](../../dm/games/04008A90274EC000/README.md#technical-verification).

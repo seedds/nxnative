@@ -343,6 +343,13 @@ For a replaced DSP renderer the size query keeps the service's work-buffer contr
 - **Focus:** Star Fox closes its stream when its window loses focus and opens a new one when it regains it; 14 rounds went by with the sound intact.
 - **Found on:** Xenoblade Chronicles 2, Nintendo Switch 2 Edition (`0400E95004038001`) (SDK 21.4.4, one or two 2-channel streams at 48 kHz, 10 ms periods, 40 ms capacity; the second when the active device is `AudioExternalOutput`); [Star Fox](../../dm/games/0400E88025B1A000/README.md) (Wwise 2024.1, SDK 21.4.4).
 
+### OutputStream event overload without flags (SDK 20.5)
+
+- **Symptom:** `sf: the game connects to service auddmg:u itself, which the host does not serve`; no output stream is opened by the host.
+- **Cause:** main imports `OpenOutputStream(OutputStreamType*, SystemEvent*, void*, size_t, AudioDeviceName const&, StreamFormat const&, int, int)`. The host only supplied the later overload with an additional flags argument. SDK 20.5's export at `sdk+0x1f9cd0` forwards the same eight arguments to its implementation; the unmatched symbol therefore stayed on the SDK's IPC path. Main also imports `GetDefaultVirtualInputDevice`, which was uncovered.
+- **Fix:** `h_os_OpenLegacy` opens through the existing AudioOut-backed stream implementation with the supplied release event. The default input query returns an empty name, consistent with the host's existing empty input-device list and failed microphone open. No IPC service is faked. All main's `nn::audio` imports are now covered. `t_output_stream` verifies interleaved conversion, capacity, timed consumption, release events, purge and both event overloads: 100 ms of test frames consumed in 101 ms by the silent sink and 100 ms through the real Mac AudioUnit. The user subsequently confirmed sound in Minecraft; the real output reports no underruns in its first 8,000 callbacks. Sustained gameplay audio remains unvalidated.
+- **Found on:** [Minecraft Switch 2 Edition](../../dm/games/04008A90274EC000/README.md#technical-verification).
+
 ## Codecs
 
 ### Hardware Opus decoders built on the SDK's software decoders

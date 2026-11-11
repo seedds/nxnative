@@ -24,7 +24,7 @@ out, dst, names = a[0], a[1], a[2:]
 PG = 0x4000
 def r16(x): return (x + PG - 1) & ~(PG - 1)
 def pieces(n):   # the module's (x0, W, x1[, x2]) as (file start, end)
-    hdr = dict(l[2:].split() for l in open(f'{out}/{n}.fixups.tsv'))
+    hdr = dict(l[2:].split(maxsplit=1) for l in open(f'{out}/{n}.fixups.tsv'))  # diagnostic rows may have several values (BRANCH_RELAY); layout keys have one
     te, po = int(hdr['TEXT_END'], 16), int(hdr['PATCH_OFF'], 16)
     ko, ks = int(hdr['KEY_PAGE_OFF'], 16), int(hdr['KEY_PAGE_SIZE'], 16)
     bin_ = os.path.abspath(f'{out}/{n}.patched.bin'); sz = os.path.getsize(bin_)

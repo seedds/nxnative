@@ -18,14 +18,16 @@
 # Super Mario Galaxy generates its GX shaders at run time; they come from a capture folder (the Mac host's DM_VK_CAPTURE), read like a RomFS: every input folder is
 # searched for SPIR-V files by their magic
 # Output: <out>/vk/vk_shaders.metallib and <out>/vk/vk_shaders.tsv; --ios <dir> also writes <dir>/vk/ with an iPhone library (same table)
-# Table rows: key <TAB> stage (vert / frag) <TAB> resources, space-separated kind:set.binding=slot[*count] (count: an array of descriptors in consecutive slots; u uniform buffer, b storage buffer, t image, s sampler, c combined image sampler = texture and sampler slot n,
+# Table rows: key <TAB> stage (vert / frag / comp) <TAB> resources, space-separated kind:set.binding=slot[*count] (count: an array of descriptors in consecutive slots; u uniform buffer, b storage buffer, t image, s sampler, c combined image sampler = texture and sampler slot n,
 #   p push constants)
+# Compute rows append local=x,y,z after the source label; the host uses this reflected workgroup size at dispatch.
 # Usage: vk_shaders.py <SPIR-V dir>... <out dir> [--ios <dir>]   (SPIR-V dirs: the RomFS, capture folders)
 import concurrent.futures as cf, hashlib, json, os, re, struct, subprocess, sys, tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../tools'))
 from romfs import os, open
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from dmsh_chain import SPIRV_CROSS   # the in-repo spirv-cross build the NVN chain uses too (spirv_cross_bin)
+from vk_inputs import integer_inputs
 
 MAGIC = 0x07230203
 OP_DECORATE, OP_MEMBER_DECORATE, OP_TYPE_ARRAY, OP_TYPE_RTARRAY, OP_TYPE_STRUCT = 71, 72, 28, 29, 30
@@ -40,11 +42,18 @@ PRECISE = re.compile(r'\bfast::(min|max|clamp)\(')
 
 def red(msg): sys.exit('[RED] ' + msg)
 
-def spirv_files(root):
+def spirv_files(root, extracted=None):
     for d, _, fs in os.walk(root):
         for f in sorted(fs):
             p = os.path.join(d, f)
             with open(p, 'rb') as fh: head = fh.read(4)
+            if extracted and f.endswith('.material.bin'):
+                from renderdragon import spirv_blobs
+                for data in spirv_blobs(open(p, 'rb').read()):
+                    dst = os.path.join(extracted, hashlib.sha256(data).hexdigest() + '.spv')
+                    if not os.path.exists(dst):
+                        open(dst, 'wb').write(data)
+                        yield dst
             if len(head) == 4 and struct.unpack('<I', head)[0] == MAGIC: yield p
 
 def decorations(words):
@@ -89,7 +98,7 @@ def one(path, tmp, root):
     eps = refl.get('entryPoints', [])
     if len(eps) != 1: red(f'{path}: entry points {eps} are not exactly one')
     stage = eps[0]['mode']
-    if stage not in ('vert', 'frag'): return stage   # skipped (main counts them)
+    if stage not in ('vert', 'frag', 'comp'): return stage   # skipped (main counts them)
     dec = decorations(words)
     by_pair, count = {}, {}
     for k, kind in KINDS.items():
@@ -123,7 +132,9 @@ def one(path, tmp, root):
     if r.returncode: red(f'{path}: spirv-cross failed: {r.stderr.strip()[:300]}')
     # The reflection lists every declared resource; the Metal entry point only takes the ones the shader uses (Hades' ShadowMap.frag declares a buffer it never reads,
     # which the game's own pipeline layout leaves out): keep the rows whose slot is an argument of the entry point, so the host only binds, and only reports, real ones
-    src = open(msl).read(); m = re.search(r'\bvk_' + key + r'\((.*?)\)\s*\{', src, re.S)
+    src = open(msl).read()
+    if stage == 'vert': src = integer_inputs(src)
+    m = re.search(r'\bvk_' + key + r'\((.*?)\)\s*\{', src, re.S)
     if not m: red(f'{path}: entry point vk_{key} not found in the translated MSL')
     if pcs:   # the push-constant argument is `constant <block type>& name [[buffer(0)]]`: move it to its own slot
         tname = refl['types'][pcs[0]['type']]['name']
@@ -137,10 +148,18 @@ def one(path, tmp, root):
     res = [x for x in res if (SLOT_CLASS[x[0]], int(x.rsplit('=', 1)[1].split('*')[0])) in used]
     src = PRECISE.sub(r'precise::\1(', src); open(msl, 'w').write(src)
     msls = [msl]
-    if stage == 'frag' and '[[color(1)]]' in src:   # dual-source variant vk_<key>_d: the output at location 1 becomes the second blend source of attachment 0
+    dual_outputs = refl.get('outputs', [])
+    dual_compatible = {v.get('location') for v in dual_outputs} == {0, 1} and all(v.get('type') == 'vec4' for v in dual_outputs)
+    if stage == 'frag' and dual_compatible and '[[color(1)]]' in src:   # dual-source variant vk_<key>_d: the output at location 1 becomes the second blend source of attachment 0
         msl_d = os.path.join(tmp, key + '_d.metal'); msls.append(msl_d)
         open(msl_d, 'w').write(src.replace(f'vk_{key}', f'vk_{key}_d').replace('[[color(1)]]', '[[color(0), index(1)]]'))
-    return key, stage, res, msls, '/' + os.path.relpath(path, root)
+    source = '/' + os.path.relpath(path, root)
+    if stage == 'comp':
+        local = eps[0].get('workgroup_size', [])
+        if len(local) != 3 or any(not isinstance(v, int) or v <= 0 for v in local) or any(eps[0].get('workgroup_size_is_spec_constant_id', [])):
+            red(f'{path}: specialized/unknown compute workgroup size {local} is not implemented')
+        source += '\tlocal=' + ','.join(map(str, local))
+    return key, stage, res, msls, source
 
 def metallib(msls, out, sdk, extra):
     os.makedirs(out, exist_ok=True)
@@ -164,9 +183,15 @@ def main():
     if '--ios' in a: i = a.index('--ios'); ios = a[i + 1]; del a[i:i + 2]
     if len(a) < 2: sys.exit('usage: vk_shaders.py <SPIR-V dir>... <out dir> [--ios <dir>]')
     roots, out = a[:-1], a[-1]
-    files = [(p, r) for r in roots for p in spirv_files(r)]
-    if not files: red(f'no SPIR-V files in {" ".join(roots)}')
     with tempfile.TemporaryDirectory() as tmp:
+        files, seen_inputs = [], set()
+        for root in roots:
+            for path in spirv_files(root, tmp):
+                digest = hashlib.sha256(open(path, 'rb').read()).digest()
+                if digest in seen_inputs: continue
+                seen_inputs.add(digest)
+                files.append((path, tmp if os.path.dirname(path) == tmp else root))
+        if not files: red(f'no SPIR-V files in {" ".join(roots)}')
         with cf.ThreadPoolExecutor(os.cpu_count()) as ex: rows = list(ex.map(lambda pr: one(pr[0], tmp, pr[1]), files))
         seen, skipped = {}, {}
         for row in rows:
@@ -174,7 +199,7 @@ def main():
             key, stage, res, msl, src = row
             if key in seen: continue
             seen[key] = (stage, res, msl, src)
-        if skipped: print('[RED] skipped shader stages Metal does not have: ' + ', '.join(f'{k} {v}' for k, v in sorted(skipped.items())))
+        if skipped: print('[RED] skipped shader stages this Vulkan layer does not translate: ' + ', '.join(f'{k} {v}' for k, v in sorted(skipped.items())))
         msls = [m for v in seen.values() for m in v[2]]
         tsv = ['# Vulkan shaders (dm/gfx/tools/vk_shaders.py): key = sha256(SPIR-V)[:16], Metal function vk_<key>; resources kind:set.binding=slot (u uniform buffer, b storage buffer, t image, s sampler, c combined, p push constants)',
                '# spirv-cross ' + ' '.join((lambda r: r.stdout + r.stderr)(subprocess.run([SPIRV_CROSS, '--revision'], capture_output=True, text=True)).split())]

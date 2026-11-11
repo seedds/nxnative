@@ -24,6 +24,11 @@ from capstone import *
 from capstone.arm64 import ARM64_OP_IMM, ARM64_OP_MEM, ARM64_OP_REG
 import nso, nso_asm
 from nso_asm import *   # the instruction encoders (B, ADRP, LDRX, ...), shared with the per-build patch files
+import nso_branches
+branches = nso_branches.Branches()
+B = branches.encode
+def BL(frm, to): return branches.encode(frm, to, link=True)
+
 
 # The NSP script terminates a failed or cancelled rewrite with SIGTERM. Exit through the pool's context manager so it reaps the workers too.
 signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
@@ -55,10 +60,12 @@ TWO = BIG_TEXT and MOD.text_end > 0x8000000 - 0x10000
 BACK_MIN = 0   # TWO: BACK_OFF (set below) less the reach, plus the margin
 if TWO:
     BACK_MIN = ((((len(MOD.image) + bss + 0x3FFF) & ~0x3FFF) + 0x8000 + 0xFFFF) & ~0xFFFF) - 0x8000000 + 0x100000
-    assert BACK_MIN < 0x8000000 - 0x200000, f'no split reaches: the back patch area reaches no site below {BACK_MIN:#x}, too close to the front area\'s reach'
-    FRONT = int(os.environ.get('DM_PATCH_FRONT', '0'), 0) or min(0x1000000, (0x8000000 - 0x100000 - BACK_MIN) & ~0xFFFF)
+    # Minecraft Switch 2 has required sites in the gap between both areas.
+    # B/BL's architectural range is fixed: those edges use host-resumed BRKs.
+    unreachable = BACK_MIN >= 0x8000000 - 0x200000
+    FRONT = int(os.environ.get('DM_PATCH_FRONT', '0'), 0) or (0x1000000 if unreachable else min(0x1000000, (0x8000000 - 0x100000 - BACK_MIN) & ~0xFFFF))
 elif BIG_TEXT: FRONT = int(os.environ.get('DM_PATCH_FRONT', '0'), 0) or (0x8000000 - 0x10000 - MOD.text_end) & ~0xFFFF
-SPLIT = max(0x8000000 - FRONT - 0x100000, BACK_MIN) if TWO else None
+SPLIT = ((-FRONT + BACK_MIN + 0x8000000 - 0x100000) // 2 if unreachable else max(0x8000000 - FRONT - 0x100000, BACK_MIN)) if TWO else None
 IMG = MOD.image
 ORIG_TEXT = bytes(IMG[:MOD.text_end])   # the text as the file has it, before any cut or site: <name>.changed.tsv compares against it
 if not FAR: IMG.extend(bytes(bss))
@@ -1936,6 +1943,16 @@ if os.environ.get('DM_SPIN_LIST'):
 
 os.makedirs(outdir, exist_ok=True)
 P = lambda ext: os.path.join(outdir, f'{NAME}.{ext}')
+def relay_source(at, word):
+    if 0 <= at < TEXT_END: dest, off = IMG, at
+    elif PATCH_OFF <= at < PATCH_OFF + len(patch_front): dest, off = patch_front, at - PATCH_OFF
+    else:
+        assert TWO and BACK_OFF <= at < BACK_OFF + len(patch_back), f'far branch source outside patch areas: {at:#x}'
+        dest, off = patch_back, at - BACK_OFF
+    assert struct.unpack_from('<I', dest, off)[0] == nso_branches.MARKER, f'far branch marker overwritten: {at:#x}'
+    struct.pack_into('<I', dest, off, word)
+relays = branches.resolve(IMG, ORIG_TEXT, nso_code.fde_ranges(IMG), relay_source) if branches.far else []
+if relays: print(f'{NAME}: {len(relays)} far edges use direct branch relays; {len(branches.far)} need signal return', flush=True)
 patch = patch_front
 BACK_LEN = (len(patch_back) + 0x3FFF) & ~0x3FFF
 if FAR:   # patch area before the base: file = text + ro + data (padded to 16K) + patch area (TWO: the front area padded to 16K, then the back area, padded to 16K)
@@ -1953,11 +1970,13 @@ else:
     open(P('patched.bin'), 'wb').write(IMG + bytearray(PATCH_OFF - len(IMG)) + patch)
 import hashlib
 with open(os.path.join(outdir, 'build_src.sha256'), 'w') as f:   # the same for every module: the rewriter and every patch file, by path from dm/tools
-    for src_ in (os.path.abspath(__file__), nso.__file__, nso_code.__file__, nso_asm.__file__, ue_cvar.__file__, ue_malloc.__file__, fps_target.__file__, ue_fixed_rate.__file__, unity_fps.__file__, unity_bucket.__file__, ue_region.__file__, ue_ring.__file__, snowdrop_pools.__file__, os.path.join(os.path.dirname(ue_malloc.__file__), 'loader_census.py'), *PATCH_FILES): f.write(hashlib.sha256(open(src_, 'rb').read()).hexdigest() + f'  {os.path.relpath(os.path.abspath(src_), os.path.dirname(os.path.abspath(__file__)))}\n')
+    for src_ in (os.path.abspath(__file__), nso.__file__, nso_code.__file__, nso_asm.__file__, nso_branches.__file__, ue_cvar.__file__, ue_malloc.__file__, fps_target.__file__, ue_fixed_rate.__file__, unity_fps.__file__, unity_bucket.__file__, ue_region.__file__, ue_ring.__file__, snowdrop_pools.__file__, os.path.join(os.path.dirname(ue_malloc.__file__), 'loader_census.py'), *PATCH_FILES): f.write(hashlib.sha256(open(src_, 'rb').read()).hexdigest() + f'  {os.path.relpath(os.path.abspath(src_), os.path.dirname(os.path.abspath(__file__)))}\n')
 with open(P('fixups.tsv'), 'w') as f:
     f.write(f'# PATCH_OFF\t{PATCH_OFF:#x}\n# KEY_PAGE_OFF\t{KEY_PAGE_OFF:#x}\n# KEY_PAGE_SIZE\t0x4000\n# TEXT_END\t{TEXT_END:#x}\n# RO_OFF\t{RO_OFF:#x}\n# DATA_OFF\t{DATA_OFF:#x}\n')
     if FAR: f.write(f'# IMAGE_SIZE\t{IMAGE_SIZE:#x}\n# FILE_IMAGE_LEN\t{FILE_IMAGE_LEN:#x}\n')   # patch area before the base (negative PATCH_OFF): whole image size, length of the image part of the file
     if TWO: f.write(f'# BACK_OFF\t{BACK_OFF:#x}\n# BACK_LEN\t{BACK_LEN:#x}\n')   # the back patch area (TWO): its offset in the image, and its length, the last bytes of the file
+    for source, (target, link) in sorted(branches.far.items()): f.write(f'# FAR_BRANCH:{source:x}:{link}\t{target:#x}\n')
+    for source, relay, target, link in sorted(relays): f.write(f'# BRANCH_RELAY:{source:x}:{link}\t{relay:#x}\t{target:#x}\n')
     for k in KEY_INDEX: f.write(f'# KEY_{k}_IDX\t{KEY_INDEX[k]}\n')
     if FS_STATE_OFF: f.write(f'# FPS_STATE_OFF\t{FS_STATE_OFF:#x}\n')   # frame step state page (FRAME_STEP): the loader writes the target fps there
     if UE_CALLS: f.write(f'# UE_MALLOC_VT\t{UE_VT:#x}\n# UE_MALLOC_SLOT\t{UE_SLOT:#x}\n')   # Unreal's FMallocBinned3 (ue_malloc.py): its vtable and the slot of its name getter, which names the slot layout

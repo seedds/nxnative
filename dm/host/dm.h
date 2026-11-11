@@ -1,5 +1,6 @@
 // Common header of the native Switch host (multi-module).
 #pragma once
+#include "far_branch.h"
 #include <pthread.h>
 #include <errno.h>
 #include <stdint.h>
@@ -66,6 +67,8 @@ typedef struct {
     int64_t patch_off;         // patch area relative to the base; negative = before the base (image too large, see patch_nso.py FAR), and size does not include it
     uint64_t image_size, file_image_len, patch_len;   // only with the patch area before the base: whole image (with bss and key page), length of the image part of the file, patch area length
     uint64_t back_off, back_len;   // a second patch area after the image (patch_nso.py TWO: a text longer than a B reaches), inside size; 0 = none
+    struct dm_far_branch *far_branches;
+    size_t n_far_branches;   // sorted immutable BRK redirects, loaded before guest execution
     char build_id[33];         // First 16 bytes of the NSO build ID (hex); empty for older build outputs
     unsigned key_idx[4];       // key page index of each thread slot (K18, KTLS, KTLR, KGATE)
     const Elf64_Dyn *dyn;

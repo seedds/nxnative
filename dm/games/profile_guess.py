@@ -357,8 +357,20 @@ def build_sources(exefs, romfs, modules):
                 nb = (struct.unpack_from('<I', h, i + 12)[0] + max(struct.unpack_from('<I', h, i + 4)[0], 1) - 1) // max(struct.unpack_from('<I', h, i + 4)[0], 1)
                 oodle_ue3 += h[i + 16 + 8 * nb:i + 17 + 8 * nb] == b'\x8c'
     import frostbite   # Frostbite's superbundles (EA SPORTS FC 27): every item of the cas files is Oodle Leviathan, decoded with the game's own decoder
-    return shader_sources(imports, glsl_src, glslc_mods, spirv, len(uepak.unreal_paks(str(romfs), inline=False, mains=[exefs / 'main'])), trinity, len(uepak.unreal_paks(str(romfs), inline=True, mains=[exefs / 'main'])), gl_names, gl_src, gl_files, oodle_pkz, nro_imp,
+    result = shader_sources(imports, glsl_src, glslc_mods, spirv, len(uepak.unreal_paks(str(romfs), inline=False, mains=[exefs / 'main'])), trinity, len(uepak.unreal_paks(str(romfs), inline=True, mains=[exefs / 'main'])), gl_names, gl_src, gl_files, oodle_pkz, nro_imp,
                           oodle_gfpak=oodle_gfpak, oodle_ue3=oodle_ue3, frostbite=frostbite.is_frostbite(str(romfs)), romfs_glsl=romfs_glsl)
+    # RenderDragon materials identify Vulkan even without direct vk* imports.
+    if not any(re.match(r'vk[A-Z]', symbol) for symbol in imports) and 'nvnBootstrapLoader' not in imports:
+        from renderdragon import spirv_blobs
+        from romfs import Path as RomPath
+        for material in RomPath(romfs).rglob('*.material.bin'):
+            data = material.read_bytes()
+            if b'Vulkan' in data and next(spirv_blobs(data), None) is not None:
+                result['graphics'] = ('vulkan', 'RenderDragon materials contain length-prefixed SPIR-V and name the Vulkan platform')
+                result['vk_capture'] = (False, 'SPIR-V is stored inside RenderDragon materials')
+                break
+    return result
+
 
 
 def va_heap(sysres, imports):   # virtual address memory (an NPDM system resource) and a heap: the alias / heap split is a starting point the heap check corrects (Wonder, Tears of the Kingdom; Engage's pool is its own measurement)

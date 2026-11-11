@@ -11,6 +11,9 @@ uint64_t now_ns(void) { return 0; }
 void gate_register(uint64_t a, const char *k, int n, uint64_t o) { (void)a; (void)k; (void)n; (void)o; }
 void hlecount_seal(void) {}
 void *hlecount_wrap(const char *kind, const char *name, void *fn) { (void)kind; (void)name; return fn; }
+void crash_set_branch_hook(int (*fn)(ucontext_t *)) { (void)fn; }
+static uint64_t host_export;
+void *hle_known_symbol(const char *name) { return !strcmp(name, "vkGetInstanceProcAddr") ? &host_export : NULL; }
 static uint64_t missing;
 uint64_t resolve_import(module_t *m, const char *name) { (void)m; (void)name; return (uint64_t)&missing; }
 int hle_implements(const char *name) { (void)name; return 0; }
@@ -54,6 +57,9 @@ static void load(int i) { assert(h_ro_LoadModule(&handles[i - 1], raw[i - 1], NU
 static void unload(int i) { h_ro_UnloadModule(&handles[i - 1]); assert(!g_mod[i].loaded); }
 
 int main(void) {
+    uintptr_t symbol = 0;
+    assert(h_ro_LookupSymbol(&symbol, "vkGetInstanceProcAddr") == 0 && symbol == (uintptr_t)&host_export);
+    assert(h_ro_LookupSymbol(&symbol, "unknown_host_export") != 0);
     FILE *manifest = tmpfile(); assert(manifest);
     fputs("# NRO manifest\n\nrefused 00 128\n", manifest);
     for (int i = 0; i < 1432; i++) fprintf(manifest, "nro%d 00 128\n", i);

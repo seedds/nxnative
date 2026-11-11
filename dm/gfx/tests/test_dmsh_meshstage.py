@@ -21,6 +21,7 @@ struct spvUnsafeArray
     T elements[Num ? Num : 1];
     thread T& operator [] (size_t pos) thread { return elements[pos]; }
     threadgroup T& operator [] (size_t pos) threadgroup { return elements[pos]; }
+    device T& operator [] (size_t pos) device { return elements[pos]; }
 };
 struct B { uint _m0[4]; };
 struct spvDescriptorSetBuffer0 { constant B* cp_c3 [[id(0)]]; };
@@ -33,6 +34,9 @@ kernel void main0(constant spvDescriptorSetBuffer0& spvDescriptorSet0 [[buffer(0
     _23[%d] = (*spvDescriptorSet0.cp_c3)._m0[0];
 }
 """
+# The same with a byte store helper, as dmsh_build.py shared_store_msl leaves it, called on the stage memory
+STORE = KERNEL.replace('kernel void', 'void dmsh_shared_store8_0(thread const int& _9, thread const int& _10, threadgroup spvUnsafeArray<uint, %d>& _23)\n{\n    ((threadgroup uchar*)&_23[0])[uint(_9)] = uchar(uint(_10));\n}\n\nkernel void', 1) \
+    .replace('    if (gl_', '    int _11 = 3; int _12 = 7; dmsh_shared_store8_0(_11, _12, _23);\n    if (gl_', 1)
 
 
 def sph(pos=0xf0, generics=b''):
@@ -215,9 +219,46 @@ class Stage(unittest.TestCase):
     def test_position_is_invariant(self):   # two mesh shaders of one geometry must agree: a pre-pass and a colour pass testing depth for equality
         self.assertIn('float4 position [[position, invariant]];', self.mesh()[0])
 
+    def big(self, task=False, store=False, threads=32):   # 256 vertices and 512 primitives with a primitive block: 9,876 bytes of stage memory, 2469 words (one past a multiple of four)
+        i = ms.info(control(7, threads=threads, payload=128, task=int(task), max_v=256, max_p=512, prim_at=0x80), sph(0xf0, b'\x30') + sph(0, b'\x01'))
+        w, at = ms.memory(i)[1] // 4, ms.memory(i)[0][3] // 4
+        return ms.to_stage(STORE % (w, w, at) if store else KERNEL % (w, at), i), i
+
+    def test_scratch_slices_cover_resident_groups(self):   # 80-core Ultra x 96 resident 32-thread groups (3072 threads) per core; a power of two keeps the ticket's wrap unique
+        n = abi.MESH_SCRATCH_SLICES
+        self.assertGreater(n, 80 * 96)
+        self.assertEqual(n & (n - 1), 0)
+
+    def test_big_stage_memory_is_a_device_slice(self):   # 5-16 KB of threadgroup memory a 32-thread group cost occupancy (Ocarina of Time's foliage meshes)
+        src, i = self.big(); w = 2469
+        self.assertEqual(i['spill'], 1)
+        for entry in src.split('[[mesh]] void ')[1:]:
+            self.assertIn(f'device uchar* dm_scr [[buffer({abi.MESH_SCRATCH_SLOT})]])\n{{\n', entry)
+            self.assertIn('uint dm_t = 0u; if (gl_LocalInvocationID.x == 0u) dm_t = atomic_fetch_add_explicit((device atomic_uint*)dm_scr, 1u, memory_order_relaxed);\n    dm_t = simd_broadcast_first(dm_t);\n', entry)
+            self.assertIn(f'    device spvUnsafeArray<uint, {w}>& _23 = *(device spvUnsafeArray<uint, {w}>*)(dm_scr + {abi.MESH_SCRATCH_HEAD}ul + ulong(dm_t % {abi.MESH_SCRATCH_SLICES}u) * {abi.MESH_SCRATCH_STRIDE}ul);\n', entry)
+            self.assertIn(f'for (uint i = gl_LocalInvocationID.x; i < {w // 4}u; i += 32u) ((device uint4*)&_23[0])[i] = uint4(0u);\n', entry)   # zero at the body's start, vectors then the tail
+            self.assertIn(f'for (uint i = {w // 4 * 4}u + gl_LocalInvocationID.x; i < {w}u; i += 32u) _23[i] = 0u;\n', entry)
+            self.assertNotIn('threadgroup spvUnsafeArray', entry)
+            self.assertNotIn('barrier(mem_flags::mem_threadgroup)', entry)
+        self.assertIn(f'dm_stage_body(constant spvDescriptorSetBuffer0& spvDescriptorSet0, uint3 gl_LocalInvocationID, device spvUnsafeArray<uint, {w}>& _23)', src)
+        self.assertEqual(src.count('threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup)'), 6)   # the start and the two around the body, in each depth convention
+
+    def test_device_slice_takes_the_byte_store_helpers(self):
+        src = self.big(store=True)[0]
+        self.assertIn('((device uchar*)&_23[0])[uint(_9)] = uchar(uint(_10));', src)
+        self.assertIn('device spvUnsafeArray<uint, 2469>& _23)\n{', src)
+        self.assertNotIn('threadgroup uchar', src)
+        self.assertIn('threadgroup T& operator [] (size_t pos) threadgroup', src)   # the template keeps its overload
+
+    def test_device_slice_only_where_it_pays(self):   # a stage array under 6000 bytes, a task shader, or a group that is not one SIMD-group stay in threadgroup memory
+        for src, i in (self.mesh(primitive=True), self.task(), self.big(threads=64)):
+            self.assertNotIn('spill', i); self.assertNotIn('dm_scr', src); self.assertRegex(src, r'\n    threadgroup spvUnsafeArray<uint, \d+> _23;\n')
+            self.assertNotIn('mem_device', src)
+
     @unittest.skipUnless(shutil.which('xcrun') and subprocess.run(['xcrun', '-sdk', 'macosx', '-f', 'metal'], capture_output=True).returncode == 0, 'no Metal compiler')
     def test_compiles(self):
-        cases = [self.task()[0], self.mesh()[0], self.mesh(task=True)[0], self.mesh(primitive=True)[0], self.mesh(vertices=32, primitives=32, pos=0xf8, verts=1, reads={5: 0x7})[0], self.mesh(primitive=True, reads={0: 1, 1: 0xf, 5: 0xf})[0], self.local_word()]
+        cases = [self.task()[0], self.mesh()[0], self.mesh(task=True)[0], self.mesh(primitive=True)[0], self.mesh(vertices=32, primitives=32, pos=0xf8, verts=1, reads={5: 0x7})[0], self.mesh(primitive=True, reads={0: 1, 1: 0xf, 5: 0xf})[0], self.local_word(),
+                 self.big()[0], self.big(task=True)[0], self.big(store=True)[0]]
         with tempfile.TemporaryDirectory() as d:
             for n, src in enumerate(cases):
                 f = Path(d, f's{n}.metal'); f.write_text(src)

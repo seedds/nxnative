@@ -655,9 +655,18 @@ static id<MTLRenderPipelineState> mtk_pso(NvProg *raster) {
          elapsed / 1e6, archived ? " (from the pipeline archive)" : "", (unsigned long long)atomic_load(&g_cur_frame));
     return ps;
 }
+// The scratch buffer of the mesh shaders whose stage array is a device slice (reflection mesh_spill, dmsh_meshstage.py to_stage, DMSH_MESH_SCRATCH_* in dmsh_abi.h): one private buffer for
+// every draw, made on first use. Word 0 is the groups' ticket counter, which needs no start value, and a group zeroes its own slice, so nothing clears it between draws
+static uint64_t mesh_scratch(void) {
+    static uint64_t gpu; static __strong id<MTLBuffer> buf; static dispatch_once_t once;
+    dispatch_once(&once, ^{ buf = [g_dev newBufferWithLength:DMSH_MESH_SCRATCH_HEAD + (size_t)DMSH_MESH_SCRATCH_SLICES * DMSH_MESH_SCRATCH_STRIDE options:MTLResourceStorageModePrivate];
+        if (!buf) MDIE("failed to create the mesh scratch buffer"); res_add(buf); res_commit(); gpu = buf.gpuAddress; });
+    return gpu;
+}
 static void mtk_encode(id<MTLRenderCommandEncoder> en_) {
     id<MTL4RenderCommandEncoder> en = (id<MTL4RenderCommandEncoder>)en_; NvShader *ts = g_mtk.ts, *ms = g_mtk.ms;
     [en setArgumentTable:g_vt atStages:MTLRenderStageMesh];
+    if (ms->rf.mesh_spill) enc_r_vbuf(en, DMSH_MESH_SCRATCH_SLOT, mesh_scratch());   // the mesh function's stage array (the table persists; enc_r_vbuf skips an unchanged address)
     uint64_t draw_gpu = g_mtk.ind_rec;
     if (!g_mtk.ind) { id<MTLBuffer> b; size_t o = arena_alloc(16, &b); uint32_t rec[2] = {g_mtk.count, g_mtk.first}; memcpy((uint8_t *)b.contents + o, rec, 8); draw_gpu = b.gpuAddress + o; }
     [en setArgumentTable:g_ot atStages:MTLRenderStageObject];

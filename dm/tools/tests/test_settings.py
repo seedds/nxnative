@@ -34,7 +34,7 @@ class UpscalerSetting(unittest.TestCase):
     def test_only_for_games_naming_their_upscaler(self):
         with tempfile.TemporaryDirectory() as tmp,patch.object(settings.nacp,'languages',return_value=['en-US']):
             (Path(tmp)/'main.fixups.tsv').write_text('')
-            for gid,shown in [('040074A01BF12000',True),('010056B015FE8000',False)]:   # Donkey Kong Bananza (its NDSR network), NieR:Automata (none)
+            for gid,shown in [('040074A01BF12000',True),('0400E88025B1A000',True),('010056B015FE8000',False)]:   # Donkey Kong Bananza (its NDSR network), Star Fox (one nested in a VIPR container), NieR:Automata (none)
                 up=[s for s in settings.build(gid,tmp,'unused')['settings'] if s['env']=='DM_UPSCALER']
                 self.assertEqual(bool(up),shown,gid)
                 if up:self.assertEqual((up[0]['default'],up[0]['options']),('game',[['game',"Game's own"],['metalfx','MetalFX']]))

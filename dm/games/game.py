@@ -101,8 +101,10 @@ def by_build(main_id):   # the profile whose build rows register this main build
     return next((g for g in all_games() if any(b.get('main') == main_id for b in g.builds().values())), None)
 
 
-# agl's upscaler network (NDSR), by where the shader map found each key: the compute shaders of agl_ndsr.pck (Donkey Kong Bananza's 24 in its release library, Splatoon Raiders' 20 in its debug one)
-UPSCALER_SOURCE = re.compile(r'/agl_ndsr\.pck#')
+# the game's upscaler network (NDSR), by where the shader map found each key: the compute shaders of agl_ndsr.pck (Donkey Kong Bananza's 24 in its release library, Splatoon Raiders' 20 in its debug one),
+# and those of an NDSR pack nested in another (Star Fox's 20: ounce-nvn2-upper_left_ndsr.bin in a VIPR container, shader_split.py's #NDSR@<pack>#NDSR@<shader>). The packs of
+# agl_ndsr_vr*.pck and the NDVE movie networks are other networks, which MetalFX's spatial scaler does not stand in for
+UPSCALER_SOURCE = re.compile(r'/agl_ndsr\.pck#|#NDSR@0x[0-9a-f]+#NDSR@0x[0-9a-f]+$')
 
 
 def upscaler_keys(g):

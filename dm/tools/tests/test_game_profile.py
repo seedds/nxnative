@@ -1,5 +1,5 @@
 # dm/games/game.py's profile-key validation, on a synthetic profile: pso_gpu (the GPU architectures the app's offline pipeline archive is made for, beside pso_mtl4) takes, none and no others,
-# and a profile without the key generates its header unchanged; the game's upscaler shaders (the launcher's Game's upscaler) are the compute shaders its shader map found in agl_ndsr.pck
+# and a profile without the key generates its header unchanged; the game's upscaler shaders (the launcher's Game's upscaler) are the compute shaders its shader map found in agl_ndsr.pck or in an NDSR pack nested in another
 from pathlib import Path
 import os
 import subprocess
@@ -46,7 +46,11 @@ MAP = ('# kind: evidence  Test shaders\n# column 5 records where each key first 
        'cs_other.bin\t2\tcompute\t7629d857a0a93833\t/Lib/agl/agl_resource.Nin_Ounce_NVN2.debug.sarc.zs/agl_ndsr.pck#NDSR@0xeb4c0\n'
        'cs_other.bin\t3\tcompute\t7629d857a0a93833\t/Lib/agl/agl_resource.Nin_Ounce_NVN2.release.sarc.zs/agl_ndsr.pck#NDSR@0x124a00\n'   # a key twice: once
        'ps_other.bin\t4\tpixel\t0e423e497f1e3355\t/Lib/agl/agl_resource.Nin_Ounce_NVN2.release.sarc.zs/agl_ndsr.pck#NDSR@0x1247d8\n'   # the pack's draw shaders: not the upscaler
-       'cs_other.bin\t5\tcompute\t0123456789abcdef\t/Lib/agl/agl_resource.Nin_Ounce_NVN2.release.sarc.zs/agl_common.sharcb#BAHS@0x40\n')
+       'cs_other.bin\t5\tcompute\t0123456789abcdef\t/Lib/agl/agl_resource.Nin_Ounce_NVN2.release.sarc.zs/agl_common.sharcb#BAHS@0x40\n'
+       'cs_shader.bin\t6\tcompute\tabef20ad0d9a9b12\t/data.zip/66e36a907a6b7251#NDSR@0x12da#NDSR@0xeba00\n'   # an NDSR pack nested in a VIPR container (Star Fox)
+       'ps_shader.bin\t7\tpixel\t1111111111111111\t/data.zip/66e36a907a6b7251#NDSR@0x12da#NDSR@0xec000\n'   # its draw shaders: not the upscaler
+       'cs_other.bin\t8\tcompute\t2222222222222222\t/Lib/agl/agl_resource.Nin_Ounce_NVN2.release.sarc.zs/agl_ndsr_vr.pck#NDSR@0x900\n'   # agl's VR networks: others
+       'cs_other.bin\t9\tcompute\t3333333333333333\t/Movie/Ndve-Nvn2-vid_seq5.dat.zs#NDSR@0x900\n')   # a movie network's pack: another
 
 
 def macros(shader_map):
@@ -64,7 +68,7 @@ class UpscalerKeys(unittest.TestCase):
         none = ['#define DM_GAME_UPSCALER_KEYS ""', '#define DM_GAME_UPSCALER_N 0']   # the launcher hides the setting
         self.assertEqual(macros(None), none)
         self.assertEqual(macros(MAP.split('cs_other.bin')[0]), none)
-        self.assertEqual(macros(MAP), ['#define DM_GAME_UPSCALER_KEYS "7629d857a0a93833,c56db3d5a0f1b5af"', '#define DM_GAME_UPSCALER_N 2'])
+        self.assertEqual(macros(MAP), ['#define DM_GAME_UPSCALER_KEYS "7629d857a0a93833,abef20ad0d9a9b12,c56db3d5a0f1b5af"', '#define DM_GAME_UPSCALER_N 3'])
 
 
 if __name__ == '__main__':

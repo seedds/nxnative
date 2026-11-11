@@ -25,7 +25,10 @@ printf 'DM_INTERNAL_RESOLUTION=%s\nDM_PRESENT_UPSCALE=off\nDM_METAL_HUD=1\nDM_NV
 # VIS_SCALE=<f>: the samples-passed totals the game reads scaled by f (DM_NVN_VIS_SCALE), with their values logged (DM_NVN_VIS_LOG): does the scan
 # compare a visible-sample count with an area at the game's own resolution (README: 2160p and 1800p scenes)
 [ -n "${VIS_SCALE:-}" ] && printf 'DM_NVN_VIS_SCALE=%s\nDM_NVN_VIS_LOG=1\n' "$VIS_SCALE" >> "$OUT/env.txt"
-[ -n "${PROBE:-}" ] && printf 'DM_PROBE=%s\nDM_PROBE_LIMIT=3\n' "$PROBE" >> "$OUT/env.txt"
+# SCALE_PROBE=1: does the game request a scene-size change while scanning (README: scan with an overridden scene)? main:331654 runs only while a scale
+# request is active (x22+0xbd0 set), main:33167c only when it asks for a scale other than 1; every 30th hit is printed with its frame
+[ "${SCALE_PROBE:-}" = 1 ] && { PROBE=${PROBE:+$PROBE,}main:331654,main:33167c; printf 'DM_PROBE_EVERY=30\n' >> "$OUT/env.txt"; }
+[ -n "${PROBE:-}" ] && printf 'DM_PROBE=%s\nDM_PROBE_LIMIT=%s\n' "$PROBE" "$([ "${SCALE_PROBE:-}" = 1 ] && echo 400 || echo 3)" >> "$OUT/env.txt"
 echo "== build (partial shaders; the first time a few thousand shaders compile) -> $OUT/build.log"
 "$PY" "$REPO/scripts/build_ipa_from_nsp.py" "$NSP" -k "$IMG/prod.keys" --package v131072 --platform mac \
     --seen-shaders --work-dir "$WORK" --env-file "$OUT/env.txt" --progress lines 2>&1 | tee "$OUT/build.log"
@@ -81,6 +84,12 @@ vis = {}
 for ad, tot, rep in re.findall(r'vis report addr=(\S+) total=(\d+) reported=(\d+)', log): vis[ad] = max(vis.get(ad, (0, 0)), (int(tot), int(rep)))
 for l in re.findall(r'^.*DM_NVN_VIS_SCALE:.*$', log, re.M)[:1]: print(l)
 if vis: print('samples-passed reports (largest counted / written total per query address, logged ones):', ', '.join(f'{a} {t}/{r}' for a, (t, r) in sorted(vis.items())[:12]))
+hits = collections.defaultdict(list)
+for name, f in re.findall(r'^\[dm\] PROBE (\S+) #\d+ \[[\d.]+s\] F=(\d+)', log, re.M): hits[name].append(int(f))
+holds = [(a, b) for a, b, _ in spans if b - a >= 30]
+for name, fs in sorted(hits.items()):
+    inside = sum(any(a <= f < b for a, b in holds) for f in fs)
+    print(f'probe {name}: printed hits {len(fs)}, frames {fs[0]}..{fs[-1]}, {inside} of them inside a ZL hold')
 red = collections.Counter(re.sub(r'[0-9a-f]{8,}|\d+', 'N', l)[:160] for l in re.findall(r'^.*\[RED\].*$', log, re.M) if 'failed to load shader' not in l)
 print('other red lines:'); [print(f'  {n} x {l}') for l, n in red.most_common(8)]
 for l in re.findall(r'^.*(?:SIGSEGV|SIGBUS|fault at|crash handler).*$', log, re.M)[:3]: print('CRASH:', l[:200])

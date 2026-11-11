@@ -66,3 +66,9 @@ The benchmark runner now defaults to `DM_FOCUS_KEEP=1`, matching the regression 
 A diagnostic on November 11 caught the main thread waiting in the blocking system-notification pop during three of four stalls, alongside repeated focus transitions. Keeping focus removed those transitions and multi-second pauses in the following 60–67 second window. That run still delivered 44.7 native FPS with interpolation, GPU median 18.35 ms, under thermal limits; this does not establish 60/120 FPS or long-session stability. A separate loading stall caught the main thread at texture registration, and a later host-inclusive capture found queue replay inside Metal residency commit during texture upload. These are separate observations, not proof that every stall has one cause.
 
 For causal stack captures, use `DM_HITCH_DUMP=300:49 DM_HITCH_HOST=1`. The host option adds replay, encoding and display workers to the existing guest-thread dump. Keep it off for final performance comparisons.
+
+### CPU texture-upload batching checkpoint
+
+The CPU upload fallback now groups transfers inside an open rendering submission, retaining targets and applying the existing 128 MiB staging bound. Twenty 8 MiB CPU textures failed the batching regression before the change and pass afterward with exhaustive pixel readback. Upload-budget, upload-slot and direct-upload tests pass with encoding on and off; NVN passes 306 checks.
+
+One game run completed without RED lines at 59.1 native FPS and roughly 114.4 actual drawable presentations/s in the head-turn window. Its GPU ran at 1578 MHz without thermal capping, unlike the earlier capped run. No isolated FPS improvement is claimed. The loading pause and sustained thermal headroom remain open.

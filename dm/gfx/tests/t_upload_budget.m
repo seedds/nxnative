@@ -25,6 +25,38 @@ static void upload_one(id<MTLTexture> dst, NSHashTable *buffers, uint8_t value) 
     up_blit_add(b, off, 256, 256, MTLSizeMake(1, 1, 1), dst, 0, 0);
     [g_up_texs addObject:dst];
 }
+static void cpu_burst(void) {
+    enum { N = 20, W = 1024, H = 2048 };
+    tex_t t = {0};
+    t.d = (nvn_texdesc){.target=1,.format=NVN_FORMAT_RGBA8,.width=W,.height=H,.depth=1,.levels=1,.samples=1,.flags=NVN_TEXTURE_FLAGS_LINEAR};
+    nvn_tex_layout(&t.d, &t.L);
+    t.mem = malloc(t.L.size);
+    NSMutableArray *images = [NSMutableArray array];
+    uint64_t start = g_up_seq;
+    mtl_sub_begin();
+    for (int i=0; i<N; i++) {
+        memset((void *)t.mem, i+71, t.L.size);
+        id<MTLTexture> image = pkg_upload_(&t, NULL, nil, 0);
+        CHECK(image != nil, "CPU fallback texture is created");
+        if (image) [images addObject:image];
+        CHECK(g_up_staging_bytes <= UP_BATCH_BYTES, "CPU fallback staging respects batch budget");
+    }
+    CHECK(g_up_seq-start < N/2, "CPU burst groups uploads instead of committing each texture");
+    CHECK(mtl_wait(mtl_sub_commit(),5000000000ull), "CPU burst submission completes");
+    CHECK(!mtl_last_commit_error(), "CPU burst has no GPU error");
+    id<MTLBuffer> result=[g_dev newBufferWithLength:(size_t)W*H*4 options:MTLResourceStorageModeShared];
+    for (int i=0; i<(int)images.count; i++) {
+        id<MTLCommandBuffer> cb=q_cb();id<MTLBlitCommandEncoder> e=[cb blitCommandEncoder];
+        [e copyFromTexture:images[i] sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(W,H,1) toBuffer:result destinationOffset:0 destinationBytesPerRow:W*4 destinationBytesPerImage:(size_t)W*H*4];
+        [e endEncoding];[cb commit];[cb waitUntilCompleted];
+        CHECK(cb.status==MTLCommandBufferStatusCompleted,"CPU burst readback completes");
+        const uint8_t *bytes=result.contents;int valid=1;
+        for(size_t j=0;j<(size_t)W*H*4;j++)if(bytes[j]!=(uint8_t)(i+71)){valid=0;break;}
+        CHECK(valid,"all CPU-uploaded pixels survive later uploads and budget splitting");
+        res_remove(images[i]);
+    }
+    free((void *)t.mem);
+}
 int main(void) { @autoreleasepool {
     mtl_init();
     NSHashTable *buffers = [NSHashTable weakObjectsHashTable];
@@ -67,6 +99,7 @@ int main(void) { @autoreleasepool {
         [textures[i] getBytes:pixel bytesPerRow:4 fromRegion:MTLRegionMake2D(0, 0, 1, 1) mipmapLevel:0];
         for (int c = 0; c < 4; c++) CHECK(pixel[c] == i + 1, "upload pixels survive batch splitting and staging retirement");
     }
+    cpu_burst();
     printf("upload budget: peak %zu MiB, completed %zu MiB, %d checks, %d failed\n", peak >> 20, idle >> 20, checks, fails);
     return fails != 0;
 } }

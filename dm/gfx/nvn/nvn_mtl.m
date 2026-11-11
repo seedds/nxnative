@@ -3406,8 +3406,16 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
         nvn_sparse_copy(t->pool, part, (uint64_t)(uintptr_t)t->mem, t->L.size); src = part;
     }
     up_begin();
-    id<MTLBuffer> stg = [g_dev newBufferWithLength:total ? total : 16 options:MTLResourceStorageModeShared];
-    res_add(stg); [g_up_keep addObject:stg];
+    size_t cpu_bytes = total ? total : 16;
+    // CPU uploads share the GPU path's bounded batch. Flushing every texture
+    // committed residency while the descriptor lock was held, stalling guest
+    // registrations. Never defer an unbounded burst of shared staging instead.
+    if (g_up_staging_bytes && cpu_bytes > UP_BATCH_BYTES - MIN(g_up_staging_bytes, UP_BATCH_BYTES)) {
+        up_flush(); up_begin();
+    }
+    id<MTLBuffer> stg = [g_dev newBufferWithLength:cpu_bytes options:MTLResourceStorageModeShared];
+    if (!stg) MDIE("failed to create CPU upload staging %#zx", cpu_bytes);
+    res_add(stg); [g_up_keep addObject:stg]; g_up_staging_bytes += cpu_bytes;
     size_t off = 0;
     int zb = zblock_on() && t->d.format >= 0x79 && t->d.format <= 0x94; if (zb) { g_zb_ser = t->serial; g_zb_n = (int)MIN(d.mipmapLevelCount, 16u); memset(g_zb, 0, sizeof g_zb); memset(g_zb_tot, 0, sizeof g_zb_tot); }
     for (unsigned l = 0; l < d.mipmapLevelCount; l++) {
@@ -3428,7 +3436,8 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
         }
     }
     free(part);
-    up_flush();
+    [g_up_texs addObject:mt];   // up_blit.dst is unretained until this batch completes
+    if (!g_cb) up_flush();     // rendering submissions flush before they can read these uploads
     return mt;
 }
 // ---------- Placement sparse textures ----------

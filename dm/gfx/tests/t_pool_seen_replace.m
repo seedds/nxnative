@@ -1,4 +1,5 @@
-// A texture ID a shader has read keeps its read mark when the game puts another texture into it, and loses it only when emptied (mtl_reg_tex).
+// A texture ID a shader has read keeps its read mark when the game puts another texture into it, and loses it when emptied, or, once the marked textures pass the cap, when not
+// read within DM_NVN_SEEN_KEEP frames (mtl_reg_tex).
 // Zero ordinary walk room exercises first-table materialization and GPU pixels.
 // Finalize-before-replace, a read ID whose texture is not made yet, unread IDs and unwritten render targets stay distinct.
 #include "../nvn/nvn_mtl.m"
@@ -87,7 +88,28 @@ int main(void) { @autoreleasepool {
     mtl_reg_tex(10,&t[0],NULL); id<MTLBuffer> reset=table();
     CHECK(!pool_seen(10),"empty then re-register does not resurrect history");
     (void)reset;
-    mtl_reg_tex(10,NULL,NULL); mtl_reg_tex(20,NULL,NULL); mtl_reg_tex(30,NULL,NULL);
+    // Once the marked textures come to more than the cap (seen_cap_kb), a mark found last more than DM_NVN_SEEN_KEEP frames ago goes with the ID's next texture; the GPU's marks are
+    // taken back every SEEN_REARM frames and a read sets them again. Below the cap the marks stay as they are
+    mtl_reg_tex(40,&t[2],NULL); read_mark(40); (void)table();
+    CHECK(pool_seen(40) && (!seen_keep() || g_seen_at[40]==(uint32_t)atomic_load(&g_cur_frame)),"a read notes the frame it was found in");
+    CHECK(g_seen_kb[40]==(uint32_t)((pool_tex_size(&t[2])+1023)>>10) && g_seen_kb_all<=seen_cap_kb(),"a marked ID counts its texture's size");
+    if (seen_keep()) {   // DM_NVN_SEEN_KEEP=0: marks stay for good
+        atomic_fetch_add(&g_cur_frame,(uint64_t)seen_keep()+SEEN_REARM+1); (void)table();
+        CHECK((((uint32_t *)g_seen_buf.contents)[40/32] & 1u<<(40%32)) && pool_seen(40),"below the cap the GPU's mark is not taken back");
+        g_seen_at[40]=0; mtl_reg_tex(40,&t[6],NULL);
+        CHECK(pool_seen(40) && g_seen_kb[40]==(uint32_t)((pool_tex_size(&t[6])+1023)>>10),"below the cap an unread ID keeps its mark, counted at its new texture's size");
+        uint64_t pad=seen_cap_kb()+1; g_seen_kb_all+=pad;   // the marked textures above the cap
+        (void)table();
+        CHECK(!(((uint32_t *)g_seen_buf.contents)[40/32] & 1u<<(40%32)) && pool_seen(40),"above the cap the GPU's mark is taken back, the host's stays");
+        atomic_fetch_add(&g_cur_frame,(uint64_t)seen_keep()+1); (void)table();
+        mtl_reg_tex(40,&t[2],NULL);
+        CHECK(!pool_seen(40) && !g_seen_kb[40],"above the cap a texture streamed into an ID not read within the keep window drops its mark and its size");
+        read_mark(40); (void)table(); mtl_reg_tex(40,&t[4],NULL);
+        CHECK(pool_seen(40),"above the cap an ID read again since keeps its mark through the next texture");
+        g_seen_kb_all-=pad;
+    }
+    mtl_reg_tex(10,NULL,NULL); mtl_reg_tex(20,NULL,NULL); mtl_reg_tex(30,NULL,NULL); mtl_reg_tex(40,NULL,NULL);
+    CHECK(g_seen_kb_all==0,"the marked textures' size goes with their marks");
     for(int n=0;n<N;n++) if(n!=1) mtl_tex_release(&t[n]);
     mtl_pool_del(mem); mtl_drain(); munmap(mem,LEN);
     fprintf(stderr,"pool_seen_replace: %d checks, %d failed\n",checks,failed);

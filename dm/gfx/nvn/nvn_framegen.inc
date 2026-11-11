@@ -21,6 +21,7 @@ static double g_fg_tin[64];   // by ticket: when the game queued the present (pr
 #define FG_WIN 3
 static int g_fg_seen, g_fg_view, g_fg_flip, g_fg_pause = 1;
 static int g_fg_upto = 9;   // DM_FRAMEGEN_UPTO=<n>, to split the cost in play: 0 nothing drawn, 1 the three copies, 2 + motion pass, 3 + interpolation, 4 + second upscale, 5 + window picture (not shown), 9 all
+static float g_fg_soft;   // the real frame's upscale blends this share of a bilinear picture in (up_mfx_encode's soft); the generated frame's does the same (fg_comp)
 static _Atomic int g_fg_hooked;   // the hook was reached: an upscale of the game's was drawn by MetalFX (up_mfx_encode_from -> fg_frame)
 static struct {
     id<MTL4FXFrameInterpolator> fi; NSUInteger iw, ih, ow, oh; MTLPixelFormat cvf; int bad;
@@ -81,18 +82,21 @@ static NSString *const FG_MSL = @"#include <metal_stdlib>\nusing namespace metal
     "      for (int y = -1; y <= 1; y++) for (int x = -1; x <= 1; x++) { float z = vz(pd.read(uint2(qq + int2(x, y)))); zmin = min(zmin, z); zmax = max(zmax, z); nr = nr || fabs(z - ze) <= ze * 0.01; }\n"
     "      still = (zmax <= zmin * 1.05 ? (ze >= zmin * 0.99 && ze <= zmax * 1.01) : nr) ? 1 : 0; } }\n"
     "  if (still == 0) m = 0.0; if (any(isnan(m)) || any(isinf(m))) m = 0.0; return float4(m, 0.0, 0.0); }\n"
-    "struct CP { int2 org; int2 csize; int flip; int view; int encode; int pad; };\n"
+    "struct CP { int2 org; int2 csize; int flip; int view; int encode; float soft; };\n"
     "static float3 oetf(float3 c) { c = saturate(c); return mix(12.92 * c, 1.055 * pow(c, float3(1.0 / 2.4)) - 0.055, step(float3(0.0031308), c)); }\n"
     // The generated frame's window picture: win = the real frame's window texture (encoded bytes), gen = the generated scene upscaled (linear), cv = the canvas now (with the HUD),
     // cv0 = the canvas right after the real frame's upscale. A canvas pixel that changed is HUD: it keeps the real frame's picture. Any other takes the real picture plus the
     // difference between the generated and the real scene, both encoded, so a still scene comes out exactly as the real frame whatever the game's last pass does to the colour
-    "fragment float4 fg_comp(V in [[stage_in]], texture2d<float> win [[texture(0)]], texture2d<float> gen [[texture(1)]], texture2d<float> cv [[texture(2)]], texture2d<float> cv0 [[texture(3)]], constant CP *p [[buffer(0)]]) {\n"
+    "fragment float4 fg_comp(V in [[stage_in]], texture2d<float> win [[texture(0)]], texture2d<float> gen [[texture(1)]], texture2d<float> cv [[texture(2)]], texture2d<float> cv0 [[texture(3)]], texture2d<float> gs [[texture(4)]], constant CP *p [[buffer(0)]]) {\n"
     "  uint2 g = uint2(in.p.xy); float4 w = win.read(g); int2 q = int2(g) - p->org; if (p->flip != 0) q.y = p->csize.y - 1 - q.y;\n"
     "  if (any(q < int2(0)) || any(q >= p->csize)) return w;\n"
     "  float3 a = cv.read(uint2(q)).rgb; float3 b = cv0.read(uint2(q)).rgb; bool hud = any(a != b);\n"
     "  if (p->view == 2 && hud) return float4(1.0, 0.0, 1.0, 1.0);\n"
     "  if (hud && p->view != 1) return w;\n"
+    // soft: the share of a bilinear picture of the scaler's own input in the real frame's upscale (the profile's upscaler_sharpness, seedds/nxnative#2366): the generated
+    // scene (gs, before its upscale) is blended in the same way, or generated frames would be crisper than real ones
     "  float3 c = gen.read(uint2(q)).rgb;\n"
+    "  if (p->soft > 0.0) { constexpr sampler ls(coord::normalized, address::clamp_to_edge, filter::linear); c = mix(c, gs.sample(ls, (float2(q) + 0.5) / float2(p->csize)).rgb, p->soft); }\n"
     "  if (p->encode == 0) return float4(c, w.a);\n"
     "  if (p->view == 1) return float4(oetf(c), w.a);\n"
     "  return float4(saturate(w.rgb + oetf(c) - oetf(b)), w.a); }\n";
@@ -104,7 +108,7 @@ static int fg_pipes(void) {
     FG.vf = [lib newFunctionWithName:@"fg_vs"]; FG.f_mv = [lib newFunctionWithName:@"fg_mv"]; FG.f_comp = [lib newFunctionWithName:@"fg_comp"];
     MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new]; pd.vertexFunction = FG.vf; pd.fragmentFunction = FG.f_mv; pd.colorAttachments[0].pixelFormat = MTLPixelFormatRG16Float;
     FG.mv_pso = FG.vf && FG.f_mv ? [g_dev newRenderPipelineStateWithDescriptor:pd error:&e] : nil;
-    MTL4ArgumentTableDescriptor *ad = [MTL4ArgumentTableDescriptor new]; ad.maxTextureBindCount = 4; ad.maxBufferBindCount = 1;
+    MTL4ArgumentTableDescriptor *ad = [MTL4ArgumentTableDescriptor new]; ad.maxTextureBindCount = 5; ad.maxBufferBindCount = 1;
     FG.margs = rec_table([g_dev newArgumentTableWithDescriptor:ad error:&e]); FG.wargs = [g_dev newArgumentTableWithDescriptor:ad error:&e];
     if (!FG.mv_pso || !FG.f_comp || !FG.margs || !FG.wargs) { MLOG("[RED] frame generation: no pipeline or argument table: %s", e.localizedDescription.UTF8String); return 0; }
     MLOG("frame generation: shaders compiled in %.1f ms", (now_ns() - t0) / 1e6);
@@ -246,7 +250,7 @@ static uint64_t fg_compose(const tex_t *t, const int crop[4], int *slot) {
         res_add(FG.wpar[k]); }
     res_commit();
     int32_t *p = (int32_t *)FG.wpar[k].contents; p[0] = (int32_t)r[0]; p[1] = (int32_t)r[1]; p[2] = (int32_t)FG.ow; p[3] = (int32_t)FG.oh; p[4] = g_fg_flip; p[5] = g_fg_view;
-    p[6] = raw.pixelFormat == MTLPixelFormatRGBA8Unorm || raw.pixelFormat == MTLPixelFormatBGRA8Unorm; p[7] = 0;
+    p[6] = raw.pixelFormat == MTLPixelFormatRGBA8Unorm || raw.pixelFormat == MTLPixelFormatBGRA8Unorm; ((float *)p)[7] = g_fg_soft;
     [FG.walloc[k] reset];
     id<MTL4CommandBuffer> cb = FG.wcb[k];
     [cb beginCommandBufferWithAllocator:FG.walloc[k]];
@@ -256,7 +260,7 @@ static uint64_t fg_compose(const tex_t *t, const int crop[4], int *slot) {
     if (!en) { [cb endCommandBuffer]; MLOG("[RED] frame generation: no render encoder for the window picture"); return 0; }
     [en barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:resource_vis()];
     [en setArgumentTable:FG.wargs atStages:MTLRenderStageFragment];
-    [FG.wargs setTexture:raw.gpuResourceID atIndex:0]; [FG.wargs setTexture:FG.gen_up.gpuResourceID atIndex:1]; [FG.wargs setTexture:FG.cv.gpuResourceID atIndex:2]; [FG.wargs setTexture:FG.cv0.gpuResourceID atIndex:3];
+    [FG.wargs setTexture:raw.gpuResourceID atIndex:0]; [FG.wargs setTexture:FG.gen_up.gpuResourceID atIndex:1]; [FG.wargs setTexture:FG.cv.gpuResourceID atIndex:2]; [FG.wargs setTexture:FG.cv0.gpuResourceID atIndex:3]; [FG.wargs setTexture:FG.gen.gpuResourceID atIndex:4];
     [FG.wargs setAddress:FG.wpar[k].gpuAddress atIndex:0];
     [en setViewport:(MTLViewport){0, 0, dst.width, dst.height, 0, 1}]; [en setScissorRect:(MTLScissorRect){0, 0, dst.width, dst.height}];
     [en setRenderPipelineState:FG.comp_pso]; [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];

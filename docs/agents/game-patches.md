@@ -58,7 +58,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [Animal Crossing: New Horizons](#animal-crossing-new-horizons) | 0 | 0 | 14 | 0 | 0 | `build` → `game` |
 | [ASTRAL CHAIN](#astral-chain) | 0 | 0 | 112 | 0 | 0 | `build` → `game` |
 | [Batman: Arkham Knight](#batman-arkham-knight) | 8 | 0 | 0 | 0 | 1 | `build` → `game` ×2 |
-| [DARK SOULS: REMASTERED](#dark-souls-remastered) | 2 | 0 | 0 | 0 | 0 | `build` → `game` |
+| [DARK SOULS: REMASTERED](#dark-souls-remastered) | 2 | 0 | 1 | 0 | 0 | `build`, `build` → `game` |
 | [Diablo II: Resurrected](#diablo-ii-resurrected) | 2 | 0 | 0 | 1 | 0 | `game` |
 | [EA SPORTS FC 27](#ea-sports-fc-27) | 0 | 0 | 0 | 0 | 1 | `build` → `engine` |
 | [FINAL FANTASY TACTICS - The Ivalice Chronicles](#final-fantasy-tactics---the-ivalice-chronicles) | 2 | 0 | 0 | 0 | 0 | `build` → `game` |
@@ -260,11 +260,13 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 
 [DARK SOULS: REMASTERED](../../dm/games/01004AB00A260000/README.md), `01004AB00A260000`, [patches.py](../../dm/games/01004AB00A260000/patches.py).
 
+- **`build`**, memory, at goal, judgement: bound model effect instances to 384. The game's inline effect arrays and their exact count-load site
 - **`build` → `game`**, frame rate, gap, judgement: frame limiter 30 → 60 fps and the 1/60 update step. The game's own limiter constant and fixed step
 
-- **1.0.3 `main`** `df3766a2…` ([patches.py:10](../../dm/games/01004AB00A260000/patches.py#L10))
+- **1.0.3 `main`** `df3766a2…` ([patches.py:12](../../dm/games/01004AB00A260000/patches.py#L12))
   - cut `+0x706fa4`: frame limiter target: mov w1,#30 → mov w1,#60 (main+0x707090 sleeps out 1000 / fps ms since the last frame)
   - cut `+0x667904`: frame update step: ldr s8,[x8,#0x6ec] (1/30) → ldr s8,[x8,#0x834] (1/60), passed to main+0x6a337c
+  - stub `+0x622e58`: bound model effect instances to 384
 
 ### Diablo II: Resurrected
 

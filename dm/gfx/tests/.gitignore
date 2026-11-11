@@ -7,3 +7,15 @@ t_*
 nvn_replay
 .precommit.err
 .precommit_snap/
+
+t_present_classic_pair
+t_present_classic_pair.dSYM/
+
+t_pixel_probe
+t_pixel_probe.dSYM/
+
+t_pose_probe
+t_pose_probe.dSYM/
+
+t_native_upscale_capture
+t_native_upscale_capture.dSYM/

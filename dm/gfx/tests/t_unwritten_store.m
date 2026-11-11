@@ -12,6 +12,7 @@ static unsigned width=8, height=8, repeats=1;
 static tex_t color = {.magic=MAGIC('T','E','X',0), .serial=99501};
 static tex_t depth = {.magic=MAGIC('T','E','X',0), .serial=99502};
 static prog_t program = {.serial=99503};
+static prog_t extra_programs[6];
 static void seed(void) {
     MTL4RenderPassDescriptor *p=[MTL4RenderPassDescriptor new];
     p.colorAttachments[0].texture=tex_mtl(&color);
@@ -29,6 +30,8 @@ static result run(int enabled, int mode) {
     static uint64_t frame; uint64_t started=bp_now(); mtl_set_frame(++frame);
     g_udc_ab=enabled; g_udc_ab_on=0;
     state_reset(); memset(&R,0,sizeof R); mtl_sub_begin(); seed();
+    if(mode==8||mode==13) S.chmask.mask=0;
+    if(mode==11) S.chmask.mask=1;
     S.ds=(ds_st){.dt=1,.dw=mode==1||mode==7,.df=NVN_DEPTH_FUNC_LESS,.st=mode==2,
         .sf_f=NVN_STENCIL_FUNC_ALWAYS,.sf_b=NVN_STENCIL_FUNC_ALWAYS,
         .fail_f=NVN_STENCIL_OP_KEEP,.zfail_f=NVN_STENCIL_OP_KEEP,.zpass_f=NVN_STENCIL_OP_REPLACE,
@@ -39,17 +42,18 @@ static result run(int enabled, int mode) {
     code.rt_h=(op_hdr){OP_SET_RT,sizeof(op_hdr)+sizeof(p_set_rt)};
     code.rt=(p_set_rt){.n=1,.depth=&depth}; code.rt.color[0]=&color;
     code.pr_h=(op_hdr){OP_BIND_PROGRAM,sizeof(op_hdr)+sizeof(p_bind_program)};
-    code.pr=(p_bind_program){&program,3};
+    code.pr=(p_bind_program){mode>=8?&extra_programs[mode-8]:&program,3};
     code.draw_h=(op_hdr){OP_DRAW,sizeof(op_hdr)+sizeof(p_draw)};
     code.draw=(p_draw){NVN_DRAW_PRIMITIVE_TRIANGLES,0,3}; code.end=(op_hdr){OP_END,sizeof(op_hdr)};
     uint64_t before=g_udc_saved_bytes;
-    if (mode==3) { // A pending clear changes the backing planes even when the later draw does not.
+    if (mode==3||mode==13) { // A pending clear changes the backing planes even when the later draw does not.
         R.has_rt=1; R.rt=code.rt;
-        R.clear_d=R.clear_s=1; R.cd=.625; R.cs=0x63;
+        if(mode==3) {R.clear_d=R.clear_s=1; R.cd=.625; R.cs=0x63;}
+        else {R.clear_c[0]=1; R.cc[0]=MTLClearColorMake(0,1,0,1);}
     }
     for (unsigned i=0;i<repeats;i++) {
     mtl_exec((const uint8_t *)&code);
-    if (mode>=4) { // Unknown writable aliases must force stores, even with read-only depth state.
+    if (mode>=4 && mode<=7) { // Unknown writable aliases must force stores, even with read-only depth state.
         NvProg *alias=[NvProg new]; alias->sh[1]=[NvShader new];
         alias->sh[1]->rf.color_mask=1; alias->sh[1]->rf.nb=1;
         int kinds[]={NVN_RB_IMG,NVN_RB_SBUFP,NVN_RB_SBUFU};
@@ -74,25 +78,35 @@ int main(int argc,char **argv) { @autoreleasepool {
     color.d=(nvn_texdesc){.target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_RGBA8,.width=width,.height=height,.depth=1,.levels=1,.samples=1};
     depth.d=color.d; depth.d.format=NVN_FORMAT_DEPTH32F_STENCIL8;
     NSError *error=nil;
-    id<MTLLibrary> lib=[g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;vertex float4 v(uint n[[vertex_id]]){float2 p[3]={float2(-1,-1),float2(3,-1),float2(-1,3)};return float4(p[n],.5,1);}\nfragment float4 f(){return float4(1,0,0,1);}" options:nil error:&error];
+    id<MTLLibrary> lib=[g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;vertex float4 v(uint n[[vertex_id]]){float2 p[3]={float2(-1,-1),float2(3,-1),float2(-1,3)};return float4(p[n],.5,1);}\nfragment float4 f(){return float4(1,0,0,1);} fragment void empty(){}" options:nil error:&error];
     CHECK(lib!=nil,"literal test shaders compile"); if (!lib) return 1;
     NvProg *pr=[NvProg new]; pr->sh[0]=[NvShader new]; pr->sh[1]=[NvShader new];
     pr->sh[0]->fn=[lib newFunctionWithName:@"v"]; pr->sh[1]->fn=[lib newFunctionWithName:@"f"];
     pr->sh[1]->stage=1; pr->sh[1]->rf.color_mask=1; serial_put(program.serial,pr);
-    for (int case_id=0;case_id<(bench?12:8);case_id++) {
+    for(int i=0;i<6;i++) {
+        extra_programs[i].serial=99510+i;
+        NvProg *p=[NvProg new]; p->sh[0]=pr->sh[0];
+        if(i!=2) {
+            p->sh[1]=[NvShader new]; p->sh[1]->stage=1;
+            p->sh[1]->fn=[lib newFunctionWithName:i==1?@"empty":@"f"];
+            p->sh[1]->rf.color_known=i!=4; p->sh[1]->rf.color_mask=i==1?0:1;
+        }
+        serial_put(extra_programs[i].serial,p);
+    }
+    for (int case_id=0;case_id<(bench?12:14);case_id++) {
         int mode=bench?0:case_id;
         result off,on;
         if(case_id&1) { on=run(1,mode); off=run(0,mode); }
         else { off=run(0,mode); on=run(1,mode); }
         CHECK(!memcmp(off.color,on.color,256)&&!memcmp(off.depth,on.depth,256)&&!memcmp(off.stencil,on.stencil,64),"store-all and elided planes match byte for byte");
         int good=1; for(int i=0;i<64;i++) {
-            uint8_t red[4]={255,0,0,255}; good &= !memcmp(on.color+4*i,red,4);
+            uint8_t red[4]={(mode>=8&&mode<=10)?0:255,0,0,255}; if(mode==13) {red[0]=0;red[1]=255;} good &= !memcmp(on.color+4*i,red,4);
             good &= on.depth[i]==(mode==1||mode==7?.5f:mode==3?.625f:.75f);
             good &= on.stencil[i]==(mode==2?0x36:mode==3?0x63:0x2d);
         }
         CHECK(good,"all 64 pixels match hand-computed color/depth/stencil");
         CHECK(off.saved==0,"disabled control always stores");
-        uint64_t want=(uint64_t)width*height*repeats*(mode==0?5:mode==1?1:mode==2?4:0);
+        uint64_t want=(uint64_t)width*height*repeats*(mode==0?5:mode==1?1:mode==2?4:mode>=8&&mode<=10?9:mode>=11?5:0);
         CHECK(on.saved==want,"only provably unchanged planes skip their store");
         printf("mode %d: saved %llu bytes, expected %llu\n",mode,(unsigned long long)on.saved,(unsigned long long)want);
         if(bench) printf("BENCH trial %d off_gpu_ms %.6f on_gpu_ms %.6f off_wall_ms %.6f on_wall_ms %.6f saved_mb %.3f\n",case_id,off.gpu_ms,on.gpu_ms,off.wall_ms,on.wall_ms,on.saved/1e6);

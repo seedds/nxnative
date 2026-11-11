@@ -145,6 +145,15 @@ void dm_guest_write_prepare(void *addr, size_t len) { for (int i = 0; i < g_nwri
 static int (*g_trap_hook)(ucontext_t *uc);
 void crash_set_trap_hook(int (*fn)(ucontext_t *uc)) { g_trap_hook = fn; }
 void crash_set_dump_hook(void (*fn)(void)) { g_dump_hook = fn; }
+// Fatal-only context callbacks: diagnostics do not handle or resume a fault.
+#define MAX_CONTEXT_DUMP 4
+static void (*g_context_dump[MAX_CONTEXT_DUMP])(const void *);
+static unsigned g_ncontext_dump;
+void crash_context_dump_register(void (*fn)(const void *)) {
+    if(g_ncontext_dump>=MAX_CONTEXT_DUMP)die("too many crash context dump hooks");
+    g_context_dump[g_ncontext_dump++]=fn;
+}
+
 void crash_set_wait_dump(void (*fn)(void)) { g_wait_dump = fn; }
 // Dump the current state on demand (without exiting): the iOS app has no no-progress watchdog, so when the smoke test fails it sends dump through DM_LOG_PORT to trigger this -- what each guest thread is waiting on + the graphics-side wait points, the same thing the watchdog prints
 void crash_dump_now(const char *why) { fprintf(stderr, "[dm] state dump (%s): tick %u / stage %s\n", why, atomic_load(&g_watch_tick), g_watch_stage[atomic_load(&g_watch_stage_idx)]); if (g_dump_hook) g_dump_hook(); if (g_wait_dump) g_wait_dump(); }
@@ -183,6 +192,7 @@ static void on_crash(int sig, siginfo_t *si, void *uc_) {
     fprintf(stderr, " sp=%#llx\n", uc->uc_mcontext->__ss.__sp);
     for (int i = 0; i < 29; i++) fprintf(stderr, "x%d=%#llx%s", i, uc->uc_mcontext->__ss.__x[i], i % 6 == 5 ? "\n" : " ");
     fprintf(stderr, "\n");
+    for(unsigned i=0;i<g_ncontext_dump;i++)g_context_dump[i](uc);
     // What the registers point at: the first six words of each readable target (read with vm_read_overwrite, which fails instead of faulting); a word inside a module prints as a module offset, so an object's vtable names its class
     for (int i = 0; i < 29; i++) {
         uint64_t a = uc->uc_mcontext->__ss.__x[i], w[6]; vm_size_t got = 0;

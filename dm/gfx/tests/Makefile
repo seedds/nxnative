@@ -600,3 +600,93 @@ check_t_pool_standin: t_pool_standin
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./t_pool_standin
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./t_pool_standin
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 DM_NVN_POOL_STANDIN=0 ./t_pool_standin
+
+# Camera-only pixel motion for temporal effects; uses synthetic depth and known transforms.
+t_camera_motion: t_camera_motion.m ../msl/camera_motion.metal
+	clang $(CFLAGS) -fobjc-arc -o $@ t_camera_motion.m $(FW)
+check_t_camera_motion: RUN_ENV = MTL_DEBUG_LAYER=1
+
+# Observed agl camera uniforms: geometry checks and rejection of invalid input.
+t_agl_camera: t_agl_camera.c ../nvn/nvn_agl_camera.h
+	clang $(CFLAGS) -o $@ t_agl_camera.c
+
+# Actual Metal4 camera-motion and interpolation path, including deferred encoding.
+t_temporal_preview: t_temporal_preview.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_temporal_preview.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_temporal_preview
+check_t_temporal_preview: t_temporal_preview
+	DM_NVN_ENC_THREAD=0 ./t_temporal_preview
+	DM_NVN_ENC_THREAD=1 ./t_temporal_preview
+
+t_temporal_snapshot: t_temporal_snapshot.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_temporal_snapshot.m $(MTL_T_SRC) $(FW)
+check_t_temporal_snapshot: t_temporal_snapshot
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./t_temporal_snapshot
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./t_temporal_snapshot
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 DM_TEST_PACKED_COLOR=1 ./t_temporal_snapshot
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 DM_TEST_PACKED_COLOR=1 ./t_temporal_snapshot
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 DM_TEST_ASYNC=1 ./t_temporal_snapshot
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 DM_TEST_ASYNC=1 ./t_temporal_snapshot
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 DM_TEST_PACKED_COLOR=1 DM_TEST_ASYNC=1 ./t_temporal_snapshot
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 DM_TEST_PACKED_COLOR=1 DM_TEST_ASYNC=1 ./t_temporal_snapshot
+
+
+t_dispatch_replacement: t_dispatch_replacement.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_dispatch_replacement.m $(MTL_T_SRC) $(FW)
+check_t_dispatch_replacement: t_dispatch_replacement
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./t_dispatch_replacement
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./t_dispatch_replacement
+
+check_t_temporal_snapshot_camera: t_temporal_snapshot
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 DM_TEST_PACKED_COLOR=1 DM_TEST_RENDER_MATRICES=1 ./t_temporal_snapshot
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 DM_TEST_PACKED_COLOR=1 DM_TEST_RENDER_MATRICES=1 ./t_temporal_snapshot
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 DM_TEST_PACKED_COLOR=1 DM_TEST_RENDER_MATRICES=1 DM_TEST_ASYNC=1 ./t_temporal_snapshot
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 DM_TEST_PACKED_COLOR=1 DM_TEST_RENDER_MATRICES=1 DM_TEST_ASYNC=1 ./t_temporal_snapshot
+
+t_uniform_padding: t_uniform_padding.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_uniform_padding.m $(MTL_T_SRC) $(FW)
+check_t_uniform_padding: t_uniform_padding
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./t_uniform_padding
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./t_uniform_padding
+
+# Buffered diagnostic intervals: disabled mode and concurrent publication.
+t_flow_trace: t_flow_trace.c ../nvn/nvn_flow_trace.h
+	clang $(CFLAGS) -pthread -o $@ $<
+check_t_flow_trace: t_flow_trace
+	env -u DM_NVN_FLOW ./t_flow_trace
+	@trace=$$(mktemp); trap 'rm -f "$$trace"' EXIT; env -u DM_NVN_FLOW_FROM -u DM_NVN_FLOW_TO -u DM_TEST_FLOW_WINDOW DM_NVN_FLOW="$$trace" ./t_flow_trace
+	@trace=$$(mktemp); trap 'rm -f "$$trace"' EXIT; DM_NVN_FLOW="$$trace" DM_NVN_FLOW_FROM=84 DM_NVN_FLOW_TO=106 DM_TEST_FLOW_WINDOW=1 ./t_flow_trace
+
+t_flow_exit: t_flow_exit.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_flow_exit.m $(MTL_T_SRC) $(FW)
+check_t_flow_exit: t_flow_exit
+	@trace=$$(mktemp); trap 'rm -f "$$trace"' EXIT; env -u DM_NVN_FLOW_FROM -u DM_NVN_FLOW_TO DM_NVN_FLOW="$$trace" ./t_flow_exit; grep -q '^lifecycle probe' "$$trace"
+
+t_allocator_wake: t_allocator_wake.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_allocator_wake.m $(MTL_T_SRC) $(FW)
+check_t_allocator_wake: t_allocator_wake
+	MTL_DEBUG_LAYER=1 ./t_allocator_wake
+
+t_present_classic_pair: t_present_classic_pair.m t_present_classic_pair_front.c t_present_alloc.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_present_classic_pair.m t_present_classic_pair_front.c $(MTL_T_SRC) $(FW)
+.PHONY: check_t_present_classic_pair
+check_t_present_classic_pair: t_present_classic_pair
+	MTL_DEBUG_LAYER=1 ./t_present_classic_pair
+
+t_pixel_probe: t_pixel_probe.m t_unwritten_store.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_pixel_probe.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_pixel_probe
+check_t_pixel_probe: t_pixel_probe
+	MTL_DEBUG_LAYER=1 ./t_pixel_probe
+
+t_pose_probe: t_pose_probe.m t_pixel_probe.m t_unwritten_store.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_pose_probe.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_pose_probe
+check_t_pose_probe: t_pose_probe
+	MTL_DEBUG_LAYER=1 ./t_pose_probe
+
+t_native_upscale_capture: t_native_upscale_capture.m t_unwritten_store.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_native_upscale_capture.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_native_upscale_capture
+check_t_native_upscale_capture: t_native_upscale_capture
+	MTL_DEBUG_LAYER=1 ./t_native_upscale_capture

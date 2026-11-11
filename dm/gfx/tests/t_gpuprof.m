@@ -84,6 +84,16 @@ int main(void) { @autoreleasepool {
     atomic_store(&g_cur_frame, 10); gp_begin(pass, 'R', nil); int k = g_gp_cur;
     @try { gp_end(upload); } @catch (NSException *x) { CHECK(0, "another queue's encoder got the open pass's timestamp"); }
     CHECK(upload.stamps == 0 && g_gp_cur == k, "another queue's encoder does not close the open pass");
+    gp_note_fragment((__bridge const void*)pass,"0123456789abcdef_b");
+    gp_note_fragment((__bridge const void*)pass,NULL);
+    gp_note_fragment((__bridge const void*)pass,"fedcba9876543210_b");
+    CHECK(g_gp_lab[k].fragment_count==2 && g_gp_lab[k].fragment_draws[0]==2 && g_gp_lab[k].fragment_draws[1]==1,"sample records unique shaders and inherited multi-draw identities");
+    gp_note_fragment((__bridge const void*)upload,"1111111111111111_b");
+    CHECK(g_gp_lab[k].fragment_count==2,"a different encoder cannot change sampled shader identities");
+    for(unsigned j=0;j<8;j++){char key[24];snprintf(key,sizeof key,"%016llx_b",(unsigned long long)j+32);gp_note_fragment((__bridge const void*)pass,key);}
+    CHECK(g_gp_lab[k].fragment_count==8 && g_gp_lab[k].fragment_other==2,"shader identity overflow is explicit and bounded");
+    gp_note_fragment((__bridge const void*)pass,NULL);
+    CHECK(g_gp_lab[k].fragment_other==3,"multi-draws of an overflow identity remain counted as overflow");
     gp_end(pass); CHECK(pass.stamps == 2 && pass.last == 2 * (NSUInteger)k + 1 && g_gp_cur < 0, "the pass's own end writes its end stamp");
     printf("t_gpuprof: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

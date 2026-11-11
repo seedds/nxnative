@@ -1,5 +1,7 @@
 # nxnative
 
+> Development fork: OOT/M4 Pro work is on perf/oot-mbpn. See the [contributor checkpoint](docs/oot-m4-pro-fork.md) for tested changes, experiments and open problems.
+
 Play your own Nintendo Switch and Switch 2 games natively on Apple silicon Macs, iPhone and iPad. One script packs your game into a Mac app or an unsigned IPA that you sideload.
 
 It is not an emulator: the game's own code runs directly on the Apple chip, with Switch graphics rebuilt on Metal. Nothing from any game is in this repository, and the project is not affiliated with Nintendo or any game publisher.

@@ -316,6 +316,15 @@ Games read this count as a position in their own command memory and size their h
 - **Found on:** [Luigi's Mansion 3](../../dm/games/0100DCA0064A6000/README.md). Found with a check that reports a bind record holding more than 32 handles (`[RED] bind record … overwritten after recording`), then `DM_PROBE_WATCH` on that word.
 - **Note:** any other command a game patches this way needs the same: find the readers of the `GetCommandMemoryUsed` slot first.
 
+
+### Uniform bindings re-recorded in place keep their byte span
+
+- **Symptom:** a cached command list aborts on a payload interpreted as a record header, 144 bytes into a 224- or 248-byte piece. Seen while enabling Ocarina's native motion buffer, after experimentally refreshing its stale material shader references.
+- **Cause:** a single uniform binding used a 16-byte compact record for a 256-aligned address and a range below 2^18, otherwise the existing 24-byte form. Re-recording only a block's uniform bindings could therefore shorten that block without moving the untouched command tail. Reservation receipts showed newer uniform records at offsets 96/112/128 over an older block with records at 120/136 and its following storage binding still at 152. Per-record allocation and callback invariants stayed valid: each individual new reservation was correct, but the earlier cached list retained the old boundaries.
+- **Fix:** valid single BindUniformBuffer calls always use the existing 24-byte OP_BIND_UBO_SMALL form, independent of address alignment and range size. Multi-binding compact records are unchanged.
+- **Check:** t_nvn records three uniform bindings and a barrier, re-records the bindings at the same address with different alignment, and checks the old list and untouched tail. Before this fix the block shrinks from 56 to 48 bytes and the old chain is invalid; after it both blocks occupy 72 bytes and the chain remains valid. Crossing the compact range-size threshold is checked separately. The targeted NVN suite passes 306 checks and queue-origin passes 398.
+- **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md). A bounded copied-save run then exits cleanly after 70 seconds. Two texture-type warnings and visibly white/flickering eyes remain; this is not validation of the native motion field or the late material-refresh experiment. Broad gameplay regression is still pending.
+
 ## Queues and syncs
 
 ### GPU event waits order work across queues

@@ -85,6 +85,17 @@ static void mapping_checks(NvProg *pr) {
     S.chmask.mask = 0xf00;
     const uint8_t logical[8] = {2,255,255,255,255,255,255,255}; g_pso_lmap = logical;
     CHECK(draw_color_writes(pr) == 1, "logical output 2 writes remapped physical attachment 0");
+    // A raster-only program must retain a store for its physical output, even when the logical slot differs.
+    NvProg *plain=[NvProg new]; plain->sh[1]=[NvShader new]; plain->sh[1]->rf.color_known=1; plain->sh[1]->rf.color_mask=4;
+    sd_att saved[SD_ATT_MAX]; memcpy(saved,g_sd,sizeof saved); int saved_n=g_nsd;
+    g_nsd=1; g_sd[0]=(sd_att){.idx=0,.load=1};
+    udc_note_draw(plain,draw_color_writes(plain));
+    CHECK(g_sd[0].wrote,"remapped raster output keeps the physical attachment store");
+    S.chmask.mask=0; g_sd[0]=(sd_att){.idx=0,.load=1};
+    udc_note_draw(plain,draw_color_writes(plain));
+    CHECK(!g_sd[0].wrote,"remapped masked output leaves the loaded attachment unchanged");
+    memcpy(g_sd,saved,sizeof saved); g_nsd=saved_n;
+
     S.chmask.mask = 0;
     CHECK(draw_color_writes(pr) == 0, "a remapped zero channel mask still writes no color");
     g_pso_lmap = NULL; S.chmask.mask = 15; pr->sh[1]->rf.color_mask = 0; g_pso_fsfn = pr->sh[1]->fn;

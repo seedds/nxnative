@@ -35,6 +35,24 @@ int main(void) { @autoreleasepool {
     running = g_done + 1000; g_fence = running;   // committed, as a running submission's fence is: g_done never passes g_fence, and objects deferred to g_fence + 1 (the open submission's update buffers) would be freed at once (defer_obj_at)
     memset(mem, 0x11, LEN);
 
+    // Fixed-offset loads no longer test size in the shader. Preserve the
+    // binding's current bytes and supply zeros only beyond its actual extent.
+    NvShader *pad_shader=[NvShader new];snprintf(pad_shader->key,sizeof pad_shader->key,"test_padding");
+    p_bind_buf short_binding={.addr=(uint64_t)mem+0x14000,.size=12};
+    id<MTLBuffer> padded;uint64_t padded_gpu=ub_padded(pad_shader,5,0,&short_binding,32,mem+0x14000,&padded);
+    const uint32_t *padding_words=(const uint32_t*)((const uint8_t*)padded.contents+padded_gpu-padded.gpuAddress);
+    {const uint32_t want[]={0x11111111,0x11111111,0x11111111,0,0,0,0,0};words(padding_words,want,8,"a short fixed binding preserves its prefix and zeros every out-of-bounds word");}
+    update(0x14000,0x77,12);
+    padded_gpu=ub_padded(pad_shader,5,0,&short_binding,32,mem+0x14000,&padded);
+    padding_words=(const uint32_t*)((const uint8_t*)padded.contents+padded_gpu-padded.gpuAddress);
+    {const uint32_t want[]={0x77,0x77,0x77,0,0,0,0,0};words(padding_words,want,8,"padding takes complete deferred updates instead of stale source bytes");}
+    commit_as_running();
+    update(0x14004,0x88,4);
+    padded_gpu=ub_padded(pad_shader,5,0,&short_binding,32,mem+0x14000,&padded);
+    padding_words=(const uint32_t*)((const uint8_t*)padded.contents+padded_gpu-padded.gpuAddress);
+    {const uint32_t want[]={0x77,0x88,0x77,0,0,0,0,0};words(padding_words,want,8,"padding overlays a partial update and prior running updates before adding zeros");}
+    commit_as_running();
+
     // The first case: every frame the same fields, with a hole (word 1) nothing updates
     update(0, 0xa0, 4); update(8, 0xa2, 4); commit_as_running();
     update(0, 0xb0, 4); update(8, 0xb2, 4);

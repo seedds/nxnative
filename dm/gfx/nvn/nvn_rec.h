@@ -128,6 +128,16 @@ static void rec_note_wait(_Atomic uint64_t *p, uint64_t v) {
     pthread_mutex_lock(&g_note_mu); while (atomic_load(p) < v) pthread_cond_wait(&g_note_cv, &g_note_mu); pthread_mutex_unlock(&g_note_mu);
 }
 
+// Cover every replay-queue submission, including upload buffers without frame tags.
+static MTL4CommitOptions *rec_flow_options(MTL4CommitOptions *o) {
+    if (!nvn_flow_on()) return o;
+    MTL4CommitOptions *options = o ? o : [MTL4CommitOptions new];
+    [options addFeedbackHandler:^(id<MTL4CommitFeedback> f) {
+        nvn_flow_event("queue", UINT64_MAX, 1, f.GPUStartTime, f.GPUEndTime);
+    }];
+    return options;
+}
+
 // ---------- The encode thread ----------
 static id g_rx_cb, g_rx_enc;   // the encode thread's real command buffer and open encoder
 static void rec_exec(const rec_t *r) {
@@ -141,7 +151,9 @@ static void rec_exec(const rec_t *r) {
         if (r->op == RO_COMMIT) ubc_wait(a[2]);   // the uniform shadows this command buffer reads
         id<MTL4CommandBuffer> buffers[] = {r->op == RO_COMMIT ? g_rx_cb : rec_id(a[1])}; MTL4CommitOptions *o = rec_id(a[0]);
         pthread_mutex_lock(&g_res_mu);
-        if (o) [g_q4 commit:buffers count:1 options:o]; else [g_q4 commit:buffers count:1];
+        MTL4CommitOptions *flow_options = rec_flow_options(o); double flow_submit = nvn_flow_begin();
+        if (flow_options) [g_q4 commit:buffers count:1 options:flow_options]; else [g_q4 commit:buffers count:1];
+        if (flow_submit) nvn_flow_event("queue submit", UINT64_MAX, 0, flow_submit, nvn_flow_clock());
         pthread_mutex_unlock(&g_res_mu);
         if (r->op == RO_COMMIT) g_rx_cb = nil;
         break; }
@@ -369,13 +381,17 @@ static void rec_commit(id cb, MTL4CommitOptions *o) {
     if ([cb isKindOfClass:[DmRecCB class]]) { rec_t *r = rec_put(RO_COMMIT, 1); r->a[0] = rec_obj(o); r->a[2] = ubc_head(); return; }
     ubc_wait(ubc_head());
     id<MTL4CommandBuffer> buffers[] = {cb};
-    if (o) [g_q4 commit:buffers count:1 options:o]; else [g_q4 commit:buffers count:1];
+    MTL4CommitOptions *flow_options = rec_flow_options(o); double flow_submit = nvn_flow_begin();
+    if (flow_options) [g_q4 commit:buffers count:1 options:flow_options]; else [g_q4 commit:buffers count:1];
+    if (flow_submit) nvn_flow_event("queue submit", UINT64_MAX, 0, flow_submit, nvn_flow_clock());
 }
 // An upload batch: its place in the queue is after what is recorded so far (it reads no uniform shadow)
 static void rec_commit_upload(id cb, MTL4CommitOptions *o) {
     if (rec_on() && g_rb_started) { rec_t *r = rec_put(RO_COMMIT_REAL, 2); r->a[0] = rec_obj(o); r->a[1] = rec_obj(cb); return; }
     id<MTL4CommandBuffer> buffers[] = {cb};
-    if (o) [g_q4 commit:buffers count:1 options:o]; else [g_q4 commit:buffers count:1];
+    MTL4CommitOptions *flow_options = rec_flow_options(o); double flow_submit = nvn_flow_begin();
+    if (flow_options) [g_q4 commit:buffers count:1 options:flow_options]; else [g_q4 commit:buffers count:1];
+    if (flow_submit) nvn_flow_event("queue submit", UINT64_MAX, 0, flow_submit, nvn_flow_clock());
 }
 // A queue operation (a sparse texture's mapping update, nvn_mtl.m sparse_*): on the encoding thread in its place among the recorded commits, so it reaches the queue before the upload batch
 // committed after it and after the command buffers committed before it

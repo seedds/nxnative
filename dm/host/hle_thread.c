@@ -17,6 +17,7 @@
 #include <sys/mman.h>
 #include <time.h>
 #include <mach/mach.h>
+#include <mach/thread_switch.h>
 #include <pthread/qos.h>
 #include <dlfcn.h>
 #include <stdatomic.h>
@@ -798,11 +799,17 @@ static uint64_t yield_backoff_ns(uint64_t run_ns, int clock) {
     return s < (uint64_t)cap ? s : (uint64_t)cap;
 }
 static void sleep_precise(uint64_t dl);
-// sched_yield, or a short sleep once the wait has lasted run_ns past the back-off's start
+// Darwin sched_yield uses a priority-depressing yield: on an M4 Pro under load
+// its short poll cost 10 ms. Horizon's yield does not lower a worker's priority
+// for a whole host quantum. Relinquish the CPU without depression; existing
+// progress detection and bounded back-off still keep idle polling from spinning.
+static void host_yield(void) { (void)thread_switch(MACH_PORT_NULL, SWITCH_OPTION_NONE, 0); }
+
+// A non-depressing host yield, or a short sleep after the back-off starts
 static void yield_for(thr_t *me, uint64_t run_ns, int clock) {
     uint64_t bo = yield_backoff_ns(run_ns, clock);
     if (bo) { me->nbackoff++; me->sleeping = 1; struct timespec ts = {0, (long)bo}; nanosleep(&ts, 0); me->sleeping = 0; }
-    else sched_yield();
+    else host_yield();
 }
 // One yield SVC of the calling thread (me may be NULL); regs = the guest registers at the SVC.
 // A run of yields is a wait only while the loop makes no progress: it also starts again when the caller's callee-saved registers x19–x28 differ from the last yield's. The SDK's
@@ -819,7 +826,7 @@ static void yield_for(thr_t *me, uint64_t run_ns, int clock) {
 // A wait whose pass reads the system clock (dm_clock_reads moved since the last yield of the run) waits for a time, not for another thread's handoff: a clock wait (clock_wait).
 static void clock_wait(thr_t *me, uint64_t sig, uint64_t now, int predict);
 static void thr_yield(thr_t *me, const uint64_t *regs) {
-    if (!me) { sched_yield(); return; }
+    if (!me) { host_yield(); return; }
     static int clock_on = -1;   // DM_YIELD_CLOCK: 0 = clock waits are yields as any other, 1 = they back off from their start but sleep to no predicted end, 2 (the default) = both
     if (clock_on < 0) { const char *e = getenv("DM_YIELD_CLOCK"); clock_on = e && *e ? atoi(e) : 2; if (clock_on != 2) LOG("DM_YIELD_CLOCK=%d: yield loops that read the clock %s", clock_on, clock_on ? "back off from their start, with no sleep to a predicted end" : "back off after the start, as other yields"); }
     uint64_t y0 = now_ns(), sig = 0xcbf29ce484222325ull;
@@ -879,7 +886,7 @@ static void clock_wait(thr_t *me, uint64_t sig, uint64_t now, int predict) {
     } else if (me->cw_pred) {   // polling after the predicted sleep
         me->cw_after++;
         uint64_t past = now > me->cw_wake ? now - me->cw_wake : 0;
-        if (past < 2 * CW_MARGIN) sched_yield(); else yield_for(me, past - 2 * CW_MARGIN, 1);
+        if (past < 2 * CW_MARGIN) host_yield(); else yield_for(me, past - 2 * CW_MARGIN, 1);
         return;
     }
     yield_for(me, now - me->yrun_t0, 1);

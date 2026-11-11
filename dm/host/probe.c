@@ -20,6 +20,7 @@ void crash_set_trap_hook(int (*fn)(ucontext_t *uc));
 #if !TARGET_OS_IPHONE
 // Syntax module:offset[@x0 offset]. Put a brk at the guest address; on hit print x0..x3 (and the readable strings they point to) and a backtrace, then execute the original instruction from a trampoline slot and jump back.
 // The trampoline borrows x16: place probes only at function entries or at points where x16 is dead; the original instruction must not be PC-relative (adr/adrp/b/bl/ldr literal/cbz...).
+#include "probe_context.inc"
 #define MAX_PROBE 16
 typedef void (*probe_fn)(ucontext_t *uc);
 static struct { uint64_t at; uint32_t *slot; unsigned hits, seen; char name[40]; long dump, dpost; probe_fn fn; int freg; long foff; uint64_t fval; int hreg; } g_probe[MAX_PROBE];   // dpost: @*xN+off+dpost
@@ -375,6 +376,7 @@ static void watch_install(void) {
 void probe_install(void) {
 #if !TARGET_OS_IPHONE
     crash_set_trap_hook(probe_hit);
+    probe_context_install();
     const char *frames = getenv("DM_PROBE_FRAMES");
     if (frames) {
         char *end; g_probe_frame_first = strtoull(frames, &end, 10);

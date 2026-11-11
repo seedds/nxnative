@@ -534,7 +534,21 @@ namespace Ryujinx.Graphics.Shader.Translation
 
             foreach ((Register reg, Operand local) in locals)
             {
-                context.InsertOperation(at++, new Operation(Instruction.Copy, local, Register(reg)));
+                // A register written again before its earlier deferred write landed: the new shadow starts from the earlier write's value, not the register's, which that
+                // write has not reached yet. Otherwise an instruction that reads the register and writes it again (or a later predicated write that does not run) sees
+                // the value from before the earlier write. PRAGMATA's LDC.64.IS into R12:R13, then a SUATOM that reads R12 and writes R12 again: the c1 read
+                // was dropped as dead code (LdcIndexedBank). Main's guard rules (an earlier guarded entry stays pending) are unchanged
+                Operand earlier = null;
+
+                foreach (List<(Register Reg, Operand Value, Operand Guard)> list in pendingAll)
+                {
+                    if (list != null && list.FindLast(p => p.Reg.Equals(reg)) is { Value: not null } prev)
+                    {
+                        earlier = prev.Value;
+                    }
+                }
+
+                context.InsertOperation(at++, new Operation(Instruction.Copy, local, earlier ?? Register(reg)));
 
                 Operand guard = null;
 

@@ -362,6 +362,17 @@ class LdcIndexedBank(Translated):
         self.assertRegex(msl, r'== 1;')                          # selected among the banks by its value
         self.assertNotIn('cp_c0)._m0[', msl)   # never the driver segment at a run-time index, which the host cannot fill (here the instruction's own bank)
 
+    # PRAGMATA's compute form (78 of its compute shaders, and 3 vertex shaders): LDC.64.IS R12, c[0x0][R16+0x8] after LEA R16, i, 0x10000, 0x4, a vec4 array in c1
+    # indexed at run time with the bank folded into the address, the immediate 8 picking the second pair of each entry. Its bank field is 0 but the bank read is c1.
+    # The SUATOM then reads R12 and writes it again while the LDC's deferred write is pending: its shadow must start from the LDC's value, or the c1 read is dropped
+    LDC_IS_PRAGMATA = (0x001e220000008a00, 0x0000000200100c7b82)
+
+    def test_pragmata_reads_c1_at_the_immediate_offset(self):
+        msl = self.translate(inst(*self.LDC_IS_PRAGMATA) + inst(*SUATOM) + inst(*EXIT))
+        self.assertIn('cp_c1)._m0[', msl)
+        self.assertRegex(msl, r'& 65535\b')
+        self.assertNotIn('cp_c0)._m0[', msl)
+
 
 def mov(rd, value):   # MOV Rd, imm32: values the tests can see in the output
     return inst(0x000fc60000000f00, value << 32 | rd << 16 | 0x7802)

@@ -137,6 +137,7 @@ static int g_res_dirty;
 static id<MTLSharedEvent> g_ev;
 static _Atomic uint64_t g_fence;                // Highest committed fence value (incremented exclusively by the submit thread)
 static _Atomic int g_sub_on;                    // a submission is open: from mtl_sub_begin until its commit has taken its fence and encoded everything (mtl_pool_del reads it)
+static void (*g_pool_del_between)(void);        // test hook (t_pool_retire): runs between mtl_pool_del's read of g_sub_on and its read of g_fence; the host never sets it
 static int g_cut_copy;                          // a buffer → texture copy was encoded since the last commit: the next pass boundary commits the segment (sub_cut)
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_cv = PTHREAD_COND_INITIALIZER;
@@ -897,7 +898,10 @@ void mtl_pool_del(const void *mem) {
     // autoreleased there, so every finalized pool buffer stayed alive for good (Ghost Trick: Phantom Detective, 125 buffers and 6.6 GB of GPU allocations 300 frames into the boot, 0 with the pool)
     // Once out of the table and with g_pool_gen bumped, a buffer is reached only by what a submission already encoded: so with none open it waits for the last committed fence, not the
     // next one, which a game that stops submitting never reaches (defer_kick). The open flag is read after the bump, and mtl_sub_begin sets it before its lookups, each side with a full
-    // fence: a submission either is seen open or sees the bump, and then neither the per-thread cache (pc_get, no lock) nor the table gives it this buffer
+    // fence: a submission either is seen open or sees the bump, and then neither the per-thread cache (pc_get, no lock) nor the table gives it this buffer.
+    // The open flag is read before g_fence, in its own statement: the commit clears the flag only after its ++g_fence, so a 0 read means the g_fence read after it already counts that
+    // submission, and a 1 read gives g_fence + 1, at most one later than needed. In one expression (g_fence + (open ? 1 : 0)) C leaves the order of the two reads unspecified: g_fence
+    // read before a commit's ++g_fence and the flag after its clear gave the fence before that submission's, which may already be done, so defer_kick could free the buffer while it ran
     @autoreleasepool {
     NSMutableArray<id<MTLBuffer>> *gone = [NSMutableArray array];
     int bg = -1; for (int k = 0; k < g_nbig; k++) if (g_big[k].mem == mem) bg = k;
@@ -913,7 +917,9 @@ void mtl_pool_del(const void *mem) {
         free(g_big[bg].chunk); g_big[bg] = g_big[--g_nbig]; g_pidx_ok = 0; g_plast = -1; atomic_fetch_add(&g_pool_gen, 1); atomic_fetch_sub(&g_big_n, 1);
     }
     atomic_thread_fence(memory_order_seq_cst);
-    uint64_t fence = g_fence + (atomic_load(&g_sub_on) ? 1 : 0);
+    int open = atomic_load(&g_sub_on);
+    if (g_pool_del_between) g_pool_del_between();
+    uint64_t fence = atomic_load(&g_fence) + (open ? 1 : 0);
     for (id<MTLBuffer> b in gone) defer_obj_at(b, 0, fence);
     }
     pthread_mutex_unlock(&g_mu);

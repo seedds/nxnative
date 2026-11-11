@@ -2,6 +2,7 @@
 """NVN2 task and mesh shaders as Metal stage functions (dmsh_meshstage.py), on the shape of Mario Kart World's: the control section's facts, the SPH's outputs, the stage memory's layout
 and the wrapper's entry points. When the Metal compiler is installed, the stages compile for macOS and iOS."""
 from pathlib import Path
+import os
 import shutil
 import struct
 import subprocess
@@ -21,6 +22,7 @@ struct spvUnsafeArray
     T elements[Num ? Num : 1];
     thread T& operator [] (size_t pos) thread { return elements[pos]; }
     threadgroup T& operator [] (size_t pos) threadgroup { return elements[pos]; }
+    device T& operator [] (size_t pos) device { return elements[pos]; }
 };
 struct B { uint _m0[4]; };
 struct spvDescriptorSetBuffer0 { constant B* cp_c3 [[id(0)]]; };
@@ -33,6 +35,85 @@ kernel void main0(constant spvDescriptorSetBuffer0& spvDescriptorSet0 [[buffer(0
     _23[%d] = (*spvDescriptorSet0.cp_c3)._m0[0];
 }
 """
+# The same with a byte store helper, as dmsh_build.py shared_store_msl leaves it, called on the stage memory
+STORE = KERNEL.replace('kernel void', 'void dmsh_shared_store8_0(thread const int& _9, thread const int& _10, threadgroup spvUnsafeArray<uint, %d>& _23)\n{\n    ((threadgroup uchar*)&_23[0])[uint(_9)] = uchar(uint(_10));\n}\n\nkernel void', 1) \
+    .replace('    if (gl_', '    int _11 = 3; int _12 = 7; dmsh_shared_store8_0(_11, _12, _23);\n    if (gl_', 1)
+
+# One long group among many short ones (GitHub pull request #2308): every lane stamps a word of its group's stage memory and reads it back. Workgroup 0 keeps reading until
+# MESH_SCRATCH_SLICES + 1024 more tickets were taken, so a slice handed out again while its group runs shows as a stamp another group zeroed or wrote. An M3 Pro let about
+# 14,500 tickets pass before later groups waited on workgroup 0 and reports a longer spin as a GPU hang, hence the margin and the bound of 100,000 reads
+STRESS = HEAD + """
+kernel void main0(device atomic_uint* dm_rep [[buffer(1)]], device atomic_uint* dm_ctr [[buffer(2)]], uint3 gl_LocalInvocationID [[thread_position_in_threadgroup]])
+{
+    threadgroup spvUnsafeArray<uint, %d> _23;
+    uint g = _23[0], lane = gl_LocalInvocationID.x, want = ((g + 1u) * 0x9E3779B1u) ^ lane;
+    _23[4u + lane] = want;
+    uint t0 = atomic_load_explicit(dm_ctr, memory_order_relaxed), seen = 0u, bad = 0u;
+    if (g == 0u)
+        for (uint k = 0u; k < 100000u && seen < %du; k++)
+        {
+            seen = atomic_load_explicit(dm_ctr, memory_order_relaxed) - t0;
+            bad |= uint(atomic_load_explicit((threadgroup atomic_uint*)&_23[4u + lane], memory_order_relaxed) != want);
+        }
+    bad |= uint(_23[4u + lane] != want);
+    if (bad != 0u) atomic_fetch_add_explicit(dm_rep, 1u, memory_order_relaxed);
+    if (lane == 0u) { atomic_fetch_add_explicit(dm_rep + 1, 1u, memory_order_relaxed); if (g == 0u) atomic_store_explicit(dm_rep + 2, seen, memory_order_relaxed); }
+}
+"""
+# Builds the stage above into a mesh pipeline (an object function launching blocks of MESH_GRID) and draws BLOCKS x GRID groups 8 times; exit 2 no Metal device or pipeline, 3 no overtaking
+RUNNER = r'''#import <Metal/Metal.h>
+#include <stdio.h>
+#include <stdlib.h>
+// argv: metallib, head bytes, flags offset, slices, stride, the draw record's object buffer slot, the scratch buffer's mesh slot
+enum { BLOCKS = 24, GRID = 1024 };
+int main(int argc, char **argv) {
+    @autoreleasepool {
+        if (argc != 8) return 64;
+        size_t head = strtoul(argv[2], 0, 0), flags = strtoul(argv[3], 0, 0), slices = strtoul(argv[4], 0, 0), stride = strtoul(argv[5], 0, 0);
+        NSUInteger draw_slot = strtoul(argv[6], 0, 0), scr_slot = strtoul(argv[7], 0, 0);
+        id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
+        if (!dev) { printf("no Metal device\n"); return 2; }
+        NSError *err = nil;
+        id<MTLLibrary> lib = [dev newLibraryWithURL:[NSURL fileURLWithPath:@(argv[1])] error:&err];
+        if (!lib) { printf("%s\n", err.localizedDescription.UTF8String); return 1; }
+        MTLMeshRenderPipelineDescriptor *pd = [MTLMeshRenderPipelineDescriptor new];
+        pd.objectFunction = [lib newFunctionWithName:@"main0_o"]; pd.meshFunction = [lib newFunctionWithName:@"main0"]; pd.fragmentFunction = [lib newFunctionWithName:@"dm_fs"];
+        pd.payloadMemoryLength = 16; pd.maxTotalThreadsPerObjectThreadgroup = 1; pd.maxTotalThreadsPerMeshThreadgroup = 32;
+        pd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+        id<MTLRenderPipelineState> ps = [dev newRenderPipelineStateWithMeshDescriptor:pd options:0 reflection:nil error:&err];
+        if (!ps) { printf("%s\n", err.localizedDescription.UTF8String); return 2; }
+        MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:16 height:16 mipmapped:NO];
+        td.usage = MTLTextureUsageRenderTarget;
+        id<MTLTexture> target = [dev newTextureWithDescriptor:td];
+        id<MTLBuffer> scr = [dev newBufferWithLength:head + slices * stride options:MTLResourceStorageModeShared];
+        id<MTLBuffer> rep = [dev newBufferWithLength:16 options:MTLResourceStorageModeShared];
+        uint32_t rec[2] = {BLOCKS * GRID, 0};
+        id<MTLBuffer> draw = [dev newBufferWithBytes:rec length:sizeof rec options:MTLResourceStorageModeShared];
+        id<MTLCommandQueue> q = [dev newCommandQueue];
+        int overtaken = 0;
+        for (int run = 0; run < 8; run++) {
+            uint32_t *r = rep.contents; r[0] = r[1] = r[2] = 0;
+            MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+            pass.colorAttachments[0].texture = target; pass.colorAttachments[0].loadAction = MTLLoadActionClear; pass.colorAttachments[0].storeAction = MTLStoreActionDontCare;
+            id<MTLCommandBuffer> cb = [q commandBuffer];
+            id<MTLRenderCommandEncoder> en = [cb renderCommandEncoderWithDescriptor:pass];
+            [en setRenderPipelineState:ps];
+            [en setObjectBuffer:draw offset:0 atIndex:draw_slot];
+            [en setMeshBuffer:rep offset:0 atIndex:1]; [en setMeshBuffer:scr offset:0 atIndex:2]; [en setMeshBuffer:scr offset:0 atIndex:scr_slot];
+            [en drawMeshThreadgroups:MTLSizeMake(BLOCKS, 1, 1) threadsPerObjectThreadgroup:MTLSizeMake(1, 1, 1) threadsPerMeshThreadgroup:MTLSizeMake(32, 1, 1)];
+            [en endEncoding]; [cb commit]; [cb waitUntilCompleted];
+            if (cb.error) { printf("%s\n", cb.error.localizedDescription.UTF8String); return 1; }
+            printf("run %d: %u groups ran, %u lanes read another group's data, the long group saw %u tickets pass\n", run, r[1], r[0], r[2]);
+            if (r[1] != BLOCKS * GRID || r[0]) return 1;
+            overtaken |= r[2] >= slices;
+        }
+        const uint32_t *f = (const uint32_t *)((const uint8_t *)scr.contents + flags);
+        for (size_t i = 0; i < slices; i++) if (f[i]) { printf("slice %zu is still claimed after the draws\n", i); return 1; }
+        if (!overtaken) { printf("the long group never saw %zu tickets pass: no overtaking on this GPU\n", slices); return 3; }
+        return 0;
+    }
+}
+'''
 
 
 def sph(pos=0xf0, generics=b''):
@@ -215,9 +296,55 @@ class Stage(unittest.TestCase):
     def test_position_is_invariant(self):   # two mesh shaders of one geometry must agree: a pre-pass and a colour pass testing depth for equality
         self.assertIn('float4 position [[position, invariant]];', self.mesh()[0])
 
+    def big(self, task=False, store=False, threads=32):   # 256 vertices and 512 primitives with a primitive block: 9,876 bytes of stage memory, 2469 words (one past a multiple of four)
+        i = ms.info(control(7, threads=threads, payload=128, task=int(task), max_v=256, max_p=512, prim_at=0x80), sph(0xf0, b'\x30') + sph(0, b'\x01'))
+        w, at = ms.memory(i)[1] // 4, ms.memory(i)[0][3] // 4
+        return ms.to_stage(STORE % (w, w, at) if store else KERNEL % (w, at), i), i
+
+    def test_scratch_slices_cover_resident_groups(self):   # 80-core Ultra x 96 resident 32-thread groups (3072 threads) per core; the head holds the counter and a flag word a slice, 16-byte aligned for the uint4 zeroing
+        n = abi.MESH_SCRATCH_SLICES
+        self.assertGreater(n, 80 * 96)
+        self.assertGreaterEqual(abi.MESH_SCRATCH_FLAGS, 4)
+        self.assertEqual(abi.MESH_SCRATCH_HEAD, abi.MESH_SCRATCH_FLAGS + 4 * n)
+        self.assertEqual(abi.MESH_SCRATCH_HEAD % 16, 0)
+
+    def test_big_stage_memory_is_a_device_slice(self):   # 5-16 KB of threadgroup memory a 32-thread group cost occupancy (Ocarina of Time's foliage meshes)
+        src, i = self.big(); w = 2469
+        self.assertEqual(i['spill'], 1)
+        for entry in src.split('[[mesh]] void ')[1:]:
+            self.assertIn(f'device uchar* dm_scr [[buffer({abi.MESH_SCRATCH_SLOT})]])\n{{\n', entry)
+            flag = f'(device atomic_uint*)(dm_scr + {abi.MESH_SCRATCH_FLAGS}ul) + dm_t'
+            self.assertIn('    uint dm_t = 0u; bool dm_own = false;\n'
+                          f'    if (gl_LocalInvocationID.x == 0u) for (uint dm_k = 0u; dm_k < {abi.MESH_SCRATCH_SLICES}u && !dm_own; dm_k++)\n    {{\n'
+                          f'        dm_t = atomic_fetch_add_explicit((device atomic_uint*)dm_scr, 1u, memory_order_relaxed) % {abi.MESH_SCRATCH_SLICES}u;\n'
+                          f'        dm_own = atomic_exchange_explicit({flag}, 1u, memory_order_relaxed) == 0u;\n    }}\n'
+                          '    dm_t = simd_broadcast_first(dm_t);\n', entry)   # a slice still owned costs a new ticket
+            self.assertIn(f'    device spvUnsafeArray<uint, {w}>& _23 = *(device spvUnsafeArray<uint, {w}>*)(dm_scr + {abi.MESH_SCRATCH_HEAD}ul + ulong(dm_t) * {abi.MESH_SCRATCH_STRIDE}ul);\n', entry)
+            self.assertIn('    }\n    threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);\n'
+                          f'    if (gl_LocalInvocationID.x == 0u && dm_own) atomic_store_explicit({flag}, 0u, memory_order_relaxed);\n}}\n', entry)   # released after the last read, at the end
+            self.assertIn(f'for (uint i = gl_LocalInvocationID.x; i < {w // 4}u; i += 32u) ((device uint4*)&_23[0])[i] = uint4(0u);\n', entry)   # zero at the body's start, vectors then the tail
+            self.assertIn(f'for (uint i = {w // 4 * 4}u + gl_LocalInvocationID.x; i < {w}u; i += 32u) _23[i] = 0u;\n', entry)
+            self.assertNotIn('threadgroup spvUnsafeArray', entry)
+            self.assertNotIn('barrier(mem_flags::mem_threadgroup)', entry)
+        self.assertIn(f'dm_stage_body(constant spvDescriptorSetBuffer0& spvDescriptorSet0, uint3 gl_LocalInvocationID, device spvUnsafeArray<uint, {w}>& _23)', src)
+        self.assertEqual(src.count('threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup)'), 8)   # the start, the two around the body and the release's, in each depth convention
+
+    def test_device_slice_takes_the_byte_store_helpers(self):
+        src = self.big(store=True)[0]
+        self.assertIn('((device uchar*)&_23[0])[uint(_9)] = uchar(uint(_10));', src)
+        self.assertIn('device spvUnsafeArray<uint, 2469>& _23)\n{', src)
+        self.assertNotIn('threadgroup uchar', src)
+        self.assertIn('threadgroup T& operator [] (size_t pos) threadgroup', src)   # the template keeps its overload
+
+    def test_device_slice_only_where_it_pays(self):   # a stage array under 6000 bytes, a task shader, or a group that is not one SIMD-group stay in threadgroup memory
+        for src, i in (self.mesh(primitive=True), self.task(), self.big(threads=64)):
+            self.assertNotIn('spill', i); self.assertNotIn('dm_scr', src); self.assertRegex(src, r'\n    threadgroup spvUnsafeArray<uint, \d+> _23;\n')
+            self.assertNotIn('mem_device', src); self.assertNotIn('dm_own', src)
+
     @unittest.skipUnless(shutil.which('xcrun') and subprocess.run(['xcrun', '-sdk', 'macosx', '-f', 'metal'], capture_output=True).returncode == 0, 'no Metal compiler')
     def test_compiles(self):
-        cases = [self.task()[0], self.mesh()[0], self.mesh(task=True)[0], self.mesh(primitive=True)[0], self.mesh(vertices=32, primitives=32, pos=0xf8, verts=1, reads={5: 0x7})[0], self.mesh(primitive=True, reads={0: 1, 1: 0xf, 5: 0xf})[0], self.local_word()]
+        cases = [self.task()[0], self.mesh()[0], self.mesh(task=True)[0], self.mesh(primitive=True)[0], self.mesh(vertices=32, primitives=32, pos=0xf8, verts=1, reads={5: 0x7})[0], self.mesh(primitive=True, reads={0: 1, 1: 0xf, 5: 0xf})[0], self.local_word(),
+                 self.big()[0], self.big(task=True)[0], self.big(store=True)[0]]
         with tempfile.TemporaryDirectory() as d:
             for n, src in enumerate(cases):
                 f = Path(d, f's{n}.metal'); f.write_text(src)
@@ -322,6 +449,26 @@ fragment main0_out main0(main0_in in [[stage_in]])
 
     def test_computed_from_a_flat_input_gets_none(self):
         self.assertIsNone(self.fs_uint(self.SRC % (', flat', '_26 * 2.0'))[0])
+
+
+@unittest.skipUnless(os.environ.get('DMSH_TEST_GPU') == '1' and shutil.which('xcrun') and shutil.which('clang'), 'set DMSH_TEST_GPU=1 on a Mac with Xcode')
+class OnGpu(unittest.TestCase):
+    def test_a_slice_is_not_reused_while_its_group_runs(self):
+        i = ms.info(control(7, payload=128, max_v=256, max_p=512, prim_at=0x80), sph(0xf0, b'\x30') + sph(0, b'\x01'))
+        src = ms.to_stage(STRESS % (ms.memory(i)[1] // 4, abi.MESH_SCRATCH_SLICES + 1024), i) + '\nfragment float4 dm_fs() { return float4(0.0); }\n'
+        self.assertEqual(i['spill'], 1)
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            (d / 's.metal').write_text(src)
+            subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-c', str(d / 's.metal'), '-o', str(d / 's.air')], check=True)
+            subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', str(d / 's.air'), '-o', str(d / 's.metallib')], check=True)
+            (d / 'run.m').write_text(RUNNER)
+            subprocess.run(['clang', '-fobjc-arc', '-O1', str(d / 'run.m'), '-framework', 'Metal', '-framework', 'Foundation', '-o', str(d / 'run')], check=True)
+            r = subprocess.run([str(d / 'run'), str(d / 's.metallib')] + [str(v) for v in (abi.MESH_SCRATCH_HEAD, abi.MESH_SCRATCH_FLAGS, abi.MESH_SCRATCH_SLICES, abi.MESH_SCRATCH_STRIDE, abi.MESH_DRAW_SLOT, abi.MESH_SCRATCH_SLOT)],
+                               capture_output=True, text=True)
+            print(r.stdout, end='')
+            if r.returncode in (2, 3): self.skipTest(r.stdout.strip().splitlines()[-1])
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
 
 if __name__ == '__main__':

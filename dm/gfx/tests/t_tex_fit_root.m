@@ -50,8 +50,8 @@ static void cube_views(id<MTLLibrary> library) {
     uint64_t rid = 0; const int plain[4] = {0, 1, 2, 3}; float v[4];
     static const float dirs[6][4] = {{1, 0, 0, 0}, {-1, 0, 0, 0}, {0, 1, 0, 0}, {0, -1, 0, 0}, {0, 0, 1, 0}, {0, 0, -1, 0}};
     os_unfair_lock_lock(&g_rmu);
-    id<MTLTexture> c_ca = tex_fit(CUBE_CA, cube, MTLTextureTypeCubeArray, &rid), c_2a = tex_fit(CUBE_2A, cube, MTLTextureType2DArray, &rid);
-    id<MTLTexture> ca_2d = tex_fit(CA_2D, array, MTLTextureType2D, &rid), ca_2a = tex_fit(CA_2A, array, MTLTextureType2DArray, &rid), ca_c = tex_fit(CA_CUBE, array, MTLTextureTypeCube, &rid);
+    id<MTLTexture> c_ca = tex_fit(CUBE_CA, cube, MTLTextureTypeCubeArray, NVN_DPF_FLOAT, &rid), c_2a = tex_fit(CUBE_2A, cube, MTLTextureType2DArray, NVN_DPF_FLOAT, &rid);
+    id<MTLTexture> ca_2d = tex_fit(CA_2D, array, MTLTextureType2D, NVN_DPF_FLOAT, &rid), ca_2a = tex_fit(CA_2A, array, MTLTextureType2DArray, NVN_DPF_FLOAT, &rid), ca_c = tex_fit(CA_CUBE, array, MTLTextureTypeCube, NVN_DPF_FLOAT, &rid);
     os_unfair_lock_unlock(&g_rmu);
     CHECK(c_ca && c_ca.textureType == MTLTextureTypeCubeArray && c_ca.arrayLength == 1, "a cube in a cube array slot: an array of that one cube");
     CHECK(c_ca.parentTexture == root && c_ca.parentRelativeSlice == 6 && c_ca.parentRelativeLevel == 1 && c_ca.mipmapLevelCount == 2, "from the root, with the cube's layers and levels");
@@ -82,8 +82,8 @@ int main(void) { @autoreleasepool {
     os_unfair_lock_lock(&g_rmu);
     g_treg = calloc(NTID, sizeof *g_treg); g_ntreg = NTID;
     uint64_t rid = 0, rid2 = 0;
-    id<MTLTexture> fit = tex_fit(TID, view, MTLTextureType2D, &rid);   // a shader that declares 2D reads the 2D array's first layer
-    id<MTLTexture> again = tex_fit(TID, view, MTLTextureType2D, &rid2);
+    id<MTLTexture> fit = tex_fit(TID, view, MTLTextureType2D, NVN_DPF_FLOAT, &rid);   // a shader that declares 2D reads the 2D array's first layer
+    id<MTLTexture> again = tex_fit(TID, view, MTLTextureType2D, NVN_DPF_FLOAT, &rid2);
     os_unfair_lock_unlock(&g_rmu);
     CHECK(fit && fit.textureType == MTLTextureType2D, "a 2D view of the 2D-array view");
     CHECK(fit.parentTexture == root, "made from the texture under the view, not from the view");

@@ -233,6 +233,18 @@ class PackReuse(unittest.TestCase):
         (source / 'marker').write_text('new bytes'); romfs_image.pack(source, image)
         self.assert_repacked()
 
+    def test_image_identity_goes_with_the_image(self):   # an iPhone build of the game reuses the app's image when the identity beside it matches (LNPANDY/NX2Apple#708)
+        import romfs_image
+        image = self.tmp / 'RomFS.img'
+        romfs_image.pack(self.tmp / 'romfs', image); self.args.romfs = str(image)
+        self.pack()
+        resources = Path(self.args.out) / 'Contents/Resources'
+        self.assertFalse((resources / 'romfs.img.id').exists())
+        Path(f'{image}.id').write_text('{"version": "v0"}\n')
+        self.assert_repacked()
+        self.assertEqual((resources / 'romfs.img.id').read_text(), '{"version": "v0"}\n')
+        self.assert_reused()
+
     def test_all_metadata_sign_identity_and_selected_paths_invalidate(self):
         self.pack()
         for name, value in [('name', 'New Game'), ('version', '2.0'), ('bundle_id', 'org.test.new'), ('category', 'public.app-category.action-games'),

@@ -82,6 +82,7 @@ SURVEY_ONLY = False                     # a game with no profile in dm/games: on
 PROFILE_OUT = ''                        # where a provisional profile goes (empty = <build folder>/profile, i.e. <NSP folder>/<title ID>_build/profile unless WORK_DIR is set; the profile is <this>/<title ID>/)
 PROGRAM_INDEX = 0                       # a multi-program application (Super Mario 3D All-Stars: a launcher and one program per game): which program to pack, 0 = the application's own; its title ID is the application's + the index.
                                         #   A game of several programs (its profile's key programs) is packed as one from program 0: this setting packs one of them alone, for bring-up
+ROMFS_FROM = []                         # RomFS images of this game an earlier build left outside this build folder (--romfs-from): the other platform's app or games/<title ID>/romfs.img, reused when they are this version's
 ALLOW_DAMAGED = False                   # a damaged NSP (files failing the NCA's hash check: an incomplete copy or a broken download), or files whose bytes do not start as their names promise (a .zs that is no zstd stream: a NUP or a dump has no hashes), stop the build; True writes those files as read and goes on
 ALLOW_SHADER_REGRESSIONS = False        # shaders that translated in this game's previous build and fail with the current translation chain stop the build (logs/shader_regressions.log lists them);
                                         #   True packs the app without them
@@ -1199,6 +1200,77 @@ def extracted(log):   # (files, bytes) from the summary lines nx_extract wrote t
     return (sum(int(n) for n, _ in rows), int(sum(float(mb) for _, mb in rows) * 2**20)) if rows else None
 
 
+def package_contents(p):   # the content IDs of a package's NCAs (each one's name: the first 16 bytes of its SHA-256), sorted; None when the package cannot be listed
+    try: return sorted(n.split('.', 1)[0].lower() for n in package_names(p) if n.lower().endswith(('.nca', '.ncz')))
+    except (OSError, ValueError, struct.error, BuildError): return None
+
+
+def image_identity(app, name, base, upd):
+    """What an extraction's RomFS.img was read from: the program, the version, whether damaged files were let through, and the content IDs of the base game's and the update's
+    packages, which name every NCA by its hash: another package under the same version (a different dump, a replaced file) has other content IDs"""
+    return {'title': f'{app:016x}', 'program': PROGRAM_INDEX, 'version': name, 'allow_damaged': ALLOW_DAMAGED,
+            'contents': [package_contents(base), package_contents(upd) if upd and upd != base else []]}
+
+
+def image_sha256(img):
+    with open(img, 'rb') as f: return hashlib.file_digest(f, 'sha256').hexdigest()
+
+
+def write_image_id(dst, app, name, base, upd):
+    """<dst>/RomFS.img.id: the image's identity, size and SHA-256. It goes wherever the image goes (the launcher's games/<title ID>/romfs.img.id, a Mac app's Resources/romfs.img.id), so
+    that a build of this game for the other platform can reuse the image instead of extracting it again (--romfs-from, LNPANDY/NX2Apple#708)"""
+    img, out = dst / 'RomFS.img', dst / 'RomFS.img.id'
+    if not img.is_file(): return
+    tmp = out.with_name(out.name + '.partial')
+    tmp.write_text(json.dumps(image_identity(app, name, base, upd) | {'bytes': img.stat().st_size, 'sha256': image_sha256(img)}, sort_keys=True) + '\n')
+    tmp.replace(out)
+
+
+def image_ids(app, name, base, upd):   # the --romfs-from images whose identity file (<image>.id) names this program, version and these packages, with the size it records: (image, identity)
+    want = image_identity(app, name, base, upd)
+    if None in want['contents']: return   # packages that cannot be listed are never matched
+    for img in ROMFS_FROM:
+        try:
+            have = json.loads(Path(f'{img}.id').read_text())
+            if isinstance(have, dict) and all(have.get(k) == v for k, v in want.items()) and have.get('bytes') == img.stat().st_size: yield img, have
+        except (OSError, ValueError): continue
+
+
+def reuse_image(nx, keys, base, upd, tmp, log, name, app, marker):
+    """The RomFS.img of this version that an earlier build for the other platform left (--romfs-from) into tmp, in place of extracting it again (LNPANDY/NX2Apple#708): the Mac app and the
+    iPhone build read the same image. Taken only when its identity file names this program, version and the packages' content IDs, its bytes hash to the SHA-256 written there, and its
+    files are the ones these packages hold: nx_extract --manifest writes the code modules and the control data as the extraction does, and every RomFS file's path, size and first 32 bytes, without the RomFS.
+    Returns the image taken, with tmp in the layout extract writes; None leaves no tmp, for the extraction"""
+    found = None
+    for img, have in image_ids(app, name, base, upd):
+        try: rfs.Image(img); ok = image_sha256(img) == have.get('sha256')   # the index is whole, and the bytes are the ones the identity was written for
+        except (OSError, ValueError, struct.error): ok = False
+        if ok: found = img, have; break
+        say(f'not reusing {img}: its bytes are not the ones its identity file records')
+    if not found: return None
+    img, have = found
+    rmtree(tmp)
+    if run([nx, keys, base, upd or '-', tmp, '--manifest'] + extract_flags(app), log, fatal=False) == 0:
+        try:
+            files = sorted(pg.romfs_files(tmp / 'romfs_manifest.tsv'))
+            same = (tmp / 'ExeFS' / 'main').is_file() and files == sorted(pg.romfs_files(img))
+        except (OSError, ValueError, struct.error): same = False
+        if same:
+            rmtree(tmp / 'romfs_manifest.tsv'); rmtree(tmp / 'romfs_nro')
+            try:   # an APFS clone on the same volume (no space, no write), else a copy, which a full disk can stop
+                pack_dump.clone(img, tmp / 'RomFS.img')
+                (tmp / 'RomFS.img.id').write_text(json.dumps(have, sort_keys=True) + '\n')
+                whole = (tmp / 'RomFS.img').stat().st_size == have['bytes'] and (not marker or (rfs.source(tmp) / marker).exists())
+            except (OSError, ValueError, struct.error): whole = False
+            if whole:
+                with open(log, 'a') as f: f.write(f'{tmp / "RomFS.img"}: {len(files)} files {sum(n for _, n, _ in files) / 2**20:.1f} MB, reused from {img}\n')   # the summary line extracted() reads
+                say(f'reusing the RomFS image of {name} from {img}')
+                return img
+        say(f'not reusing {img}: its files are not the ones the packages hold (see {log})')
+    rmtree(tmp)
+    return None
+
+
 def extract(nx, keys, ex, name, base, upd, cmp_dir, logs, g, app):   # the build IDs are checked by the caller (build_mismatch); app: the application read from the packages (--app)
     dst, marker, log = ex / name, g.get('romfs_marker'), logs / f'extract_{name}.log'
     try: reusable = (dst / 'ExeFS' / 'main').exists() and (dst / 'RomFS.img').is_file() and not (dst / 'RomFS').exists() and (rfs.source(dst) / marker).exists()
@@ -1213,10 +1285,13 @@ def extract(nx, keys, ex, name, base, upd, cmp_dir, logs, g, app):   # the build
     def poll():
         n, b = tree_size(tmp); return {'done': b, 'note': f'{n:,} files'}
     PROG.stage(f'extract {name}', poll=poll, unit='B', total=last[1] if last else base.stat().st_size + (upd.stat().st_size if upd and upd != base else 0), est=not last)
-    run([nx, keys, base, upd or '-', tmp, '--romfs-image'] + extract_flags(app), log)
+    donor = reuse_image(nx, keys, base, upd, tmp, log, name, app, marker)   # the image a build for the other platform left (--romfs-from), when it is this version's
+    if not donor:
+        run([nx, keys, base, upd or '-', tmp, '--romfs-image'] + extract_flags(app), log)
     swap_in(tmp, dst)
+    if not donor: write_image_id(dst, app, name, base, upd)   # only a fresh extraction: an older one reused above was not checked against the packages, so nothing vouches for it
     n, b = extracted(log) or (0, 0)
-    PROG.end(f'{n:,} files, {amount(b, "B")}')
+    PROG.end(f'{n:,} files, {amount(b, "B")}' + (f', the image reused from {donor}' if donor else ''))
     return dst
 
 
@@ -2803,6 +2878,8 @@ def parse_args(argv):
     ap.add_argument('--xcode-workspace', help='workspace collecting prepared games (default: NxNative.xcworkspace beside the NSP folder; use with --prepare-xcode)')
     ap.add_argument('-l', '--language', help='game language, a code or a name: ja, fr, de, es, it, nl, pt, ru, ko, zh-Hans, zh-Hant, en-GB, fr-CA, es-419, pt-BR, Japanese, ... (default: the LANGUAGE setting, else English); '
                     'it must be one the game supports, which the console lists')
+    ap.add_argument('--romfs-from', action='append', metavar='IMAGE', help='a RomFS image of this game an earlier build left (a Mac app\'s Contents/Resources/romfs.img, the launcher\'s games/<title ID>/romfs.img), '
+                    'taken instead of extracting the image again when the identity file beside it (<image>.id) names this title and version, its SHA-256 matches, and its files are the ones the packages hold; may be given more than once')
     ap.add_argument('--keep-extracted', action=argparse.BooleanOptionalAction, help='keep the extracted game files after the IPA is built, for the next build (default: the KEEP_EXTRACTED setting, on)')
     ap.add_argument('--work-dir', help='the game\'s build folder, used as it is (default: the WORK_DIR setting, else <title ID>_build in the NSP folder); the extracted files, shader cache and temporary files live there, and the IPA or Mac app defaults to the folder holding it')
     ap.add_argument('--env-file', help='environment switches for a diagnostic build (one KEY=VALUE per line)')
@@ -2922,6 +2999,7 @@ def main(args=None):
     PROG.mode = progress_mode(args.progress or PROGRESS)
     global ALLOW_DAMAGED; ALLOW_DAMAGED = args.allow_damaged or ALLOW_DAMAGED
     global PROGRAM_INDEX; PROGRAM_INDEX = args.program if args.program is not None else PROGRAM_INDEX
+    global ROMFS_FROM; ROMFS_FROM = [Path(p).expanduser() for p in args.romfs_from] if getattr(args, 'romfs_from', None) else ROMFS_FROM
     global ALLOW_SHADER_REGRESSIONS; ALLOW_SHADER_REGRESSIONS = args.allow_shader_regressions or ALLOW_SHADER_REGRESSIONS
     global ALLOW_OTHER_METAL; ALLOW_OTHER_METAL = args.allow_other_metal or ALLOW_OTHER_METAL
     here = Path(globals().get('__file__') or sys.argv[0]).resolve()

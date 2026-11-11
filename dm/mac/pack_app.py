@@ -289,7 +289,7 @@ def pack(a):
         minos = min_os(a.host)
         sources = [Path(__file__).resolve(), HERE / 'launcher.c', HERE.parent / 'host/romfs_image.h', HERE.parent / 'host/save_sync.c', HERE.parent / 'host/save_sync.h', HERE.parent / 'tools/romfs.py'] + swift_sources()
         inputs = {'options': vars(a), 'files': [(str(p), p.stat().st_mode, digest(p), os.readlink(p) if p.is_symlink() else None) for p in files + sources],
-                  'trees': [(p, inventory(Path(p))) for p in (a.romfs, a.aoc, a.html, *(str(x[1]) for x in programs), *(str(x[3]) for x in programs)) if p and Path(p).exists()],
+                  'trees': [(p, inventory(Path(p))) for p in (a.romfs, a.romfs and f'{a.romfs}.id', a.aoc, a.html, *(str(x[1]) for x in programs), *(str(x[3]) for x in programs)) if p and Path(p).exists()],
                   'tools': [[str(c), c.stat().st_mode, c.stat().st_size, c.stat().st_mtime_ns, c.stat().st_ctime_ns, run([c, '--version']).strip()] for c in (clang, swiftc)] + [
                             str(sdk), run(['xcrun', '--sdk', 'macosx', '--show-sdk-version']).strip(),
                             str(codesign), codesign.stat().st_mode, digest(codesign), minos]}
@@ -327,6 +327,8 @@ def pack(a):
     if aoc: step('add-on content'); copy([aoc], res / 'aoc', clone['aoc'])
     if pso: step('pipeline archive'); (res / 'pso').mkdir(); copy(pso, res / 'pso', clone['pso'])
     step('game files'); copy([romfs], res / ('romfs.img' if romfs.is_file() else 'romfs'), clone['romfs'])
+    image_id = Path(f'{romfs}.id')   # the image's identity (build_ipa_from_nsp.py write_image_id): an iPhone build of this game reuses the image from the app instead of extracting it again (LNPANDY/NX2Apple#708)
+    if romfs.is_file() and image_id.is_file(): shutil.copyfile(image_id, res / 'romfs.img.id')
     if a.html and Path(a.html).is_dir(): copy([Path(a.html)], res / 'html', False)   # the offline pages, beside the RomFS where the host looks for them (hle_web.c)
     # The other programs: p<N>/ (RomFS, offline pages), msl/p<N>/<library>, dm/p<N>/ (modules, tables), and the table of them all, which the launcher makes DM_PROGRAMS (launcher.c, hle_oe.c): @R@ Resources, @C@ Contents, @S@ the app's Application Support folder
     if programs:

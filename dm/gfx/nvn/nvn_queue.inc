@@ -161,9 +161,11 @@ static void *nq_worker(void *unused) {
             mtl_queue_activate(q->serial); mtl_set_queue_origin_lower_left(q->origin);
             if(n->kind==NQ_COMMANDS) {
                 uint64_t handle=(uintptr_t)n->bytes;
+                DM_SP_START("Encode", sp, j->frame);
                 nvn_cap_submit(1,&handle);
                 mtl_sub_begin(); nvn_ft_poll(); mtl_sub_index(&handle,1);
                 mtl_exec_rest(NULL,0); mtl_exec(n->bytes); fence=mtl_sub_commit();
+                DM_SP_END("Encode", sp);
             } else {
                 nvn_cap_present(&n->texture,n->crop);
                 present=mtl_present(&n->texture,n->period,n->crop,&copy); mtl_tex_unpin(n->texture.serial);

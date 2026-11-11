@@ -129,6 +129,14 @@ int main(void) { @autoreleasepool {
         CHECK(up_mfx_encode(named), "linear input after sRGB at the same sizes");
         CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "the second linear submission completes");
         CHECK(matches(written, colour, MTLRegionMake2D(0, 0, 1920, 1080), black), "the same sizes in linear colour are not decoded: each colour has its own scaler");
+        // Square-root input and linear output (Ocarina of Time's agl_ndsr_vr_light step, named by its profile's upscaler_sqrt): the image holds the colour squared
+        named->up_color = UP_COLOR_SQRT;
+        const float squared[4] = {0.25f, 0.0625f, 0.5625f, 1.0f};
+        fill(written, MTLClearColorMake(0, 0, 0, 1)); mtl_sub_begin();
+        CHECK(up_mfx_encode(named), "MetalFX takes square-root-encoded input");
+        CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "the square-root submission completes");
+        CHECK(matches(written, squared, MTLRegionMake2D(0, 0, 1920, 1080), black), "the square-root input comes out squared");
+        named->up_color = UP_COLOR_LINEAR;
         NvShader *encoded_out = upscaler(key); encoded_out->up_color = UP_COLOR_KEEP;
         CHECK(!up_mfx_wanted(encoded_out), "a named shader whose output stays encoded is left to its shader");
         S.tex[5][0] = 701;

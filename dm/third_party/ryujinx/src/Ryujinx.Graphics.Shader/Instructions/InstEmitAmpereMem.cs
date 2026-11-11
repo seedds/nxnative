@@ -60,7 +60,9 @@ namespace Ryujinx.Graphics.Shader.Instructions
             x(0xb99, InstName.Suld, ASurface, N);
             x(0xb9b, InstName.Sust, ASurface, N, writesRd: false);
             x(0xb9d, InstName.Sust, ASurface, N, writesRd: false);
+            x(0x99c, InstName.Sust, ASurface, N, writesRd: false);
             x(0x593, InstName.Suatom, ASuatom, N);
+            x(0x394, InstName.Suatom, ASuatom, N);
             x(0x59f, InstName.Sured, ASured, N, writesRd: false);
             x(0xb1d, InstName.Bar, ABar, N, writesRd: false);
         }
@@ -554,8 +556,10 @@ namespace Ryujinx.Graphics.Shader.Instructions
         public static void ASurface(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
-            (int handle, int cbufSlot) = ATexHandle(context, x);
-            bool formatted = x.Opcode is 0xb97 or 0xb9b;
+            // Formatted SUST with its handle in a GPR (Mesa NAK encode_sust).
+            bool bindless = x.Opcode == 0x99c;
+            (int handle, int cbufSlot) = bindless ? (0, TextureOperation.DefaultCbufSlot) : ATexHandle(context, x);
+            bool formatted = x.Opcode is 0xb97 or 0xb9b or 0x99c;
             SuDim dim = (SuDim)x.Bits(61, 64);
             SuSize size = formatted ? 0 : (SuSize)x.Bits(73, 76);
             SuRgba mask = formatted ? (SuRgba)x.Bits(72, 76) : 0;
@@ -566,7 +570,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
             else
             {
-                EmitSust(context, CacheOpSt.Wb, dim, size, handle, mask, x.Ra, x.Rb, 0, formatted, false, false, cbufSlot);
+                EmitSust(context, CacheOpSt.Wb, dim, size, handle, mask, x.Ra, x.Rb, bindless ? x.Bits(64, 72) : 0, formatted, false, bindless, cbufSlot);
             }
         }
 
@@ -578,14 +582,21 @@ namespace Ryujinx.Graphics.Shader.Instructions
         {
             AmpereOp x = new(context.CurrOp);
 
-            if ((x.Bits(64, 96) & ~(0xf << 23)) != 0x0010e000 || x.Bits(59, 61) != 0)
+            int form = x.Bits(64, 96) & ~(0xf << 23);
+            SuDim dim = (SuDim)x.Bits(61, 64);
+            RedOp op = (RedOp)x.Bits(87, 91);
+            bool max64 = form == 0x0010e400 && op == RedOp.Max && dim == SuDim._2d &&
+                context.TranslatorContext.Options.Flags.HasFlag(TranslationFlags.MetalImageAtomics);
+
+            if ((form != 0x0010e000 && !max64) || x.Bits(59, 61) != 0)
             {
                 throw AFail(context, $"SURED form {x.Bits(64, 96):x8}");
             }
 
             (int handle, int cbufSlot) = ATexHandle(context, x);
 
-            EmitSured(context, (SuDim)x.Bits(61, 64), 0, (RedOp)x.Bits(87, 91), SuatomSize.U32, handle, x.Ra, x.Rb, 0, false, isBindless: false, cbufSlot: cbufSlot);
+            EmitSured(context, dim, Clamp.Ign, op, max64 ? SuatomSize.U64 : SuatomSize.U32,
+                handle, x.Ra, x.Rb, 0, false, isBindless: false, cbufSlot: cbufSlot);
         }
 
         // SUATOM Rd, [Ra], Rb (0x593): an atomic on an image through a handle, laid out as SUST's (handle 40..59, dimension 61..64) and as ATOMG's (operation
@@ -594,14 +605,16 @@ namespace Ryujinx.Graphics.Shader.Instructions
         public static void ASuatom(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
-            (int handle, int cbufSlot) = ATexHandle(context, x);
+            // Mesa NAK encode_suatom: 0x394 carries its handle in the GPR at bits 64..72.
+            bool bindless = x.Opcode == 0x394;
+            (int handle, int cbufSlot) = bindless ? (0, TextureOperation.DefaultCbufSlot) : ATexHandle(context, x);
 
             if (x.Bits(81, 84) != 7)
             {
                 throw AFail(context, "SUATOM with a predicate result");
             }
 
-            EmitSuatom(context, (SuDim)x.Bits(61, 64), 0, (SuatomOp)x.Bits(87, 91), (SuatomSize)x.Bits(73, 76), handle, x.Ra, x.Rb, 0, x.Rd, false, isBindless: false, compareAndSwap: false, cbufSlot: cbufSlot);
+            EmitSuatom(context, (SuDim)x.Bits(61, 64), 0, (SuatomOp)x.Bits(87, 91), (SuatomSize)x.Bits(73, 76), handle, x.Ra, x.Rb, bindless ? x.Bits(64, 72) : 0, x.Rd, false, isBindless: bindless, compareAndSwap: false, cbufSlot: cbufSlot);
         }
 
         // BAR.SYNC: the workgroup barrier

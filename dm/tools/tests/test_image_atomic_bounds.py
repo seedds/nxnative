@@ -372,6 +372,31 @@ class Compiler(unittest.TestCase):
                     if shape == '3d': self.assertIn('.get_depth()', source)
                     self.compile_metal(msl, work, key)
 
+    def test_ampere_unsigned_64_bit_maximum(self):
+        with tempfile.TemporaryDirectory(prefix='dm-image-atomic-max64-') as temp:
+            work = Path(temp)
+            code = work / 'max64.bin'
+            # SURED.MAX.U64.2D with the bound handle encoding used by Yoshi.
+            # With no earlier definitions its coordinates and data are zero.
+            code.write_bytes(struct.pack('<QQQQ', 0x60c000602000759f, 0x0001e6000110e400, 0x794d, 7 << 23))
+            jobs = work / 'jobs.json'
+            jobs.write_text(json.dumps([dict(key='max64', stage='cs', arch='sm86',
+                code=str(code), local=[1, 1, 1], debug=True)]))
+            result = subprocess.run([os.environ['DMSH_TEST_XLATE'], str(jobs), str(work)],
+                capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            spv = work / 'max64.spv'
+            subprocess.run(['spirv-val', '--target-env', 'vulkan1.1', str(spv)], check=True)
+            msl = work / 'max64.metal'
+            subprocess.run([str(SPIRV_CROSS), *atomic.cross_args(XC, str(spv)),
+                str(spv), '--output', str(msl)], check=True)
+            source = atomic.check_msl(msl.read_text())
+            self.assertIn('texture2d<ulong, access::read_write>', source)
+            self.assertIn('.atomic_max(', source)
+            self.assertIn('.get_width()', source)
+            self.assertIn('.get_height()', source)
+            self.compile_metal(msl, work, 'max64')
+
     def test_source_size_gate(self):
         with tempfile.TemporaryDirectory(prefix='dm-image-atomic-width-') as temp:
             work = Path(temp)

@@ -1757,3 +1757,12 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 - **Fix:** the present reports the shape of the frame it draws ([the layer's](#a-crop-only-picks-texels-the-picture-has-the-layers-shape)) whenever its width / height changes (`nvn_mtl.m` `present_now` → `front.h` `front_picture_shape`; every graphics API presents there). The iOS front end lays the game's view out in that shape (`DmLayout.h` takes it as a parameter: the overlay, the split, Fill and the TV alike), so a 1.43:1 picture fills a 1.43:1 screen in Fit and touches are normalized on the picture as drawn; the Mac maps the mouse on the picture's own rectangle. A 16:9 game reports 16:9 and keeps its layout, and a size change of the same shape (1280x720 handheld, 1920x1080 docked) is not reported.
 - **Check:** the [Duo harness](../../dm/ios/tests/duo/README.md) tests the taller picture in Fit, in Fill and on a wider screen, and the production root view following a reported shape and returning to 16:9. Not yet run on a device.
 - **Found on:** [Breath of the Wild](../../dm/games/01007EF00011E000/README.md#screen-shape-dm_screen_aspect-current) and [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md#screen-shape-dm_screen_aspect-current) with `DM_SCREEN_ASPECT=1.43`.
+
+
+### A 3D texture in a 2D array slot binds the zero array
+
+- **Symptom:** `[RED] texture type mismatch: shader … declares slot … as Metal type 3, texture ID … is type 7 … bound as is`.
+- **Cause:** a conditional shader input can retain a 3D descriptor although its declaration is a 2D array. Metal cannot view a volume as an array. The UI merge shader's active branch can leave that input unused.
+- **Fix:** `tex_fit` supplies a zero 2D array matching the declared pixel class. Handle-table elements leave the typed zero binding to their caller. This is a defined fallback for the incompatible descriptor. What the Switch reads if that input is actually sampled remains unmeasured.
+- **Check:** `make -C dm/gfx/tests GAME=0400486024DEC000 check_t_cube_placeholder check_t_tex_fit_root check_t_cpu_tex`. The placeholder test verifies both branch choices on the GPU, the fallback resource ID, an integer array's pixel class and the handle-table caller path. Original scene transitions and the five-game regression suite were not rerun on this revision.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#open), three UI merge shaders at slot 7.

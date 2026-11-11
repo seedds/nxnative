@@ -18,6 +18,7 @@ rm -rf "$WORK/src" "$WORK/build"
 git clone --quiet --depth 1 --branch "$TAG" https://github.com/KhronosGroup/SPIRV-Cross.git "$WORK/src"
 got=$(git -C "$WORK/src" rev-parse HEAD)
 [ "$got" = "$COMMIT" ] || { echo "[RED] $TAG is commit $got, not the pinned $COMMIT" >&2; exit 1; }
+git -C "$WORK/src" apply "$HERE/texture-atomic-max64.patch"
 export SOURCE_DATE_EPOCH="$(git -C "$WORK/src" log -1 --format=%ct)" TZ=UTC
 cmake -S "$WORK/src" -B "$WORK/build" -DCMAKE_BUILD_TYPE=Release -DSPIRV_CROSS_ENABLE_TESTS=OFF -DSPIRV_CROSS_SKIP_INSTALL=ON \
     -DCMAKE_OSX_ARCHITECTURES='arm64;x86_64' -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 -DCMAKE_EXE_LINKER_FLAGS='-Wl,-S,-x' > "$WORK/configure.log"

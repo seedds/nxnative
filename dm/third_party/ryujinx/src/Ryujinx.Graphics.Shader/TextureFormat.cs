@@ -44,6 +44,7 @@ namespace Ryujinx.Graphics.Shader
         R10G10B10A2Unorm,
         R10G10B10A2Uint,
         R11G11B10Float,
+        R64Uint,
     }
 
     static class TextureFormatExtensions
@@ -103,6 +104,7 @@ namespace Ryujinx.Graphics.Shader
             {
                 case TextureFormat.R8Uint:
                 case TextureFormat.R16Uint:
+                case TextureFormat.R64Uint:
                 case TextureFormat.R32Uint:
                 case TextureFormat.R8G8Uint:
                 case TextureFormat.R16G16Uint:

@@ -2,7 +2,8 @@
 // a 2D descriptor from an earlier pass: production tex_fit must bind a valid
 // zero cube without diagnosing the binding itself as a rendering error.
 // The same for a 3D input holding a 2D texture or 2D array (Batman: Arkham Knight's
-// volume slots): the zero 3D texture.
+// volume slots): the zero 3D texture. Ocarina of Time also leaves a volume
+// bound to an unused 2D array input, which gets the zero array.
 #include "../nvn/nvn_mtl.m"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
@@ -23,7 +24,7 @@ static id<MTLTexture> texture(MTLTextureType type, NSUInteger layers) {
 static void run_case(id<MTLTexture> descriptor, MTLTextureType want, id<MTLTexture> primary, id<MTLComputePipelineState> pipeline) {
     unsigned before = errors(); uint64_t rid = 0;
     os_unfair_lock_lock(&g_rmu);
-    id<MTLTexture> fitted = tex_fit(272, descriptor, want, &rid);
+    id<MTLTexture> fitted = tex_fit(272, descriptor, want, NVN_DPF_FLOAT, &rid);
     os_unfair_lock_unlock(&g_rmu);
     CHECK(fitted && fitted.textureType == want, "fallback matches the shader's declared type");
     CHECK(rid == fitted.gpuResourceID._impl && rid != 0, "binding uses the fallback's actual resource ID");
@@ -50,6 +51,7 @@ int main(void) { @autoreleasepool {
         "kernel void cube(texturecube<float> a [[texture(0)]], texturecube<float> b [[texture(1)]], constant uint& select [[buffer(0)]], device float4* out [[buffer(1)]]) { constexpr sampler s(coord::normalized, filter::nearest); if (select) out[0] = b.sample(s,float3(0,0,1),level(0)); else out[0] = a.sample(s,float3(0,0,1),level(0)); }\n"
         "kernel void cubes(texturecube<float> a [[texture(0)]], texturecube_array<float> b [[texture(1)]], constant uint& select [[buffer(0)]], device float4* out [[buffer(1)]]) { constexpr sampler s(coord::normalized, filter::nearest); if (select) out[0] = b.sample(s,float3(0,0,1),0,level(0)); else out[0] = a.sample(s,float3(0,0,1),level(0)); }\n"
         "kernel void volume(texture3d<float> a [[texture(0)]], texture3d<float> b [[texture(1)]], constant uint& select [[buffer(0)]], device float4* out [[buffer(1)]]) { constexpr sampler s(coord::normalized, filter::nearest); if (select) out[0] = b.sample(s,float3(0.5),level(0)); else out[0] = a.sample(s,float3(0.5),level(0)); }\n";
+    source = [source stringByAppendingString:@"kernel void layers(texture3d<float> a [[texture(0)]], texture2d_array<float> b [[texture(1)]], constant uint& select [[buffer(0)]], device float4* out [[buffer(1)]]) { constexpr sampler s(coord::normalized, filter::nearest); if (select) out[0] = b.sample(s,float2(0.5),0,level(0)); else out[0] = a.sample(s,float3(0.5),level(0)); }\n"];
     id<MTLLibrary> library = [g_dev newLibraryWithSource:source options:nil error:&error];
     if (!library) { fprintf(stderr, "%s\n", error.localizedDescription.UTF8String); return 2; }
     id<MTLTexture> primary = texture(MTLTextureTypeCube, 1);
@@ -70,5 +72,14 @@ int main(void) { @autoreleasepool {
     if (!pipeline) { fprintf(stderr, "%s\n", error.localizedDescription.UTF8String); return 2; }
     const NSUInteger layer_counts[] = {0, 1, 5};
     for (int i = 0; i < 3; i++) run_case(texture(layer_counts[i] ? MTLTextureType2DArray : MTLTextureType2D, layer_counts[i] ?: 1), MTLTextureType3D, volume, pipeline);
-    printf("cube and 3D placeholders: %d checks, %d failed\n", checks, failed); return failed != 0;
+    pipeline = [g_dev newComputePipelineStateWithFunction:[library newFunctionWithName:@"layers"] error:&error];
+    if (!pipeline) { fprintf(stderr, "%s\n", error.localizedDescription.UTF8String); return 2; }
+    run_case(volume, MTLTextureType2DArray, volume, pipeline);
+    uint64_t rid = 0;
+    id<MTLTexture> uint_array = tex_fit(272, volume, MTLTextureType2DArray, NVN_DPF_UINT, &rid);
+    CHECK(uint_array.pixelFormat == MTLPixelFormatRGBA32Uint && rid == uint_array.gpuResourceID._impl,
+          "an integer slot gets an integer array and its resource ID");
+    CHECK(!tex_fit_elem(272, volume, MTLTextureType2DArray, NVN_DPF_UINT, &rid),
+          "a handle-table element asks its caller for the typed zero resource");
+    printf("cube, 3D and 2D array placeholders: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

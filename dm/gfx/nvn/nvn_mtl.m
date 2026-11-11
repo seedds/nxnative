@@ -5755,10 +5755,12 @@ static void shmap_read(void) {
     NSString *ventry; id<MTLFunction> vfn; int vfn_state;
     id<MTLFunction> pfn; int pfn_state, has_pull;
     id<MTLFunction> afn[4]; int afn_state, has_alpha, has_bz;   // has_bz: its entry points read the blend weight word (bz_bind)
-    id<MTLLibrary> llib; NSMutableDictionary<NSNumber *, id<MTLFunction>> *lfn; int lfn_state, has_logic; } @end   // llib: the side library <key>_bx for logic operations, lfn: its fn_u / fn_m specialized per set of targets (lo_fn; lfn_state as afn_state; has_logic: the reflection names its entry points, dmsh_logic.py)   // afn: the alpha test entry points of fn, fn_u, fn_m, fn_d in the side library <key>_bx (at_fn; afn_state 0 untried, 1 loaded, 2 failed; has_alpha: the reflection names them, dmsh_alpha.py)   // pfn: the same entry of the pulling library <key>_bp (pull_fn; has_pull: the reflection names one, dmsh_pull.py)   // vertex: the entry point loaded (by the depth mode); vfn: the same entry of the shadow-input library <key>_bv (vin_fn; state 0 untried, 1 loaded, 2 failed)
+    id<MTLLibrary> llib; NSMutableDictionary<NSNumber *, id<MTLFunction>> *lfn; int lfn_state, has_logic;   // llib: the side library <key>_bx for logic operations, lfn: its fn_u / fn_m specialized per set of targets (lo_fn; lfn_state as afn_state; has_logic: the reflection names its entry points, dmsh_logic.py)   // afn: the alpha test entry points of fn, fn_u, fn_m, fn_d in the side library <key>_bx (at_fn; afn_state 0 untried, 1 loaded, 2 failed; has_alpha: the reflection names them, dmsh_alpha.py)   // pfn: the same entry of the pulling library <key>_bp (pull_fn; has_pull: the reflection names one, dmsh_pull.py)   // vertex: the entry point loaded (by the depth mode); vfn: the same entry of the shadow-input library <key>_bv (vin_fn; state 0 untried, 1 loaded, 2 failed)
+    NSString *altdir; NvShader *alt; uint8_t alt_tried; } @end   // DM_NVN_SHADER_ALT: altdir, the folder a variant's libraries come from (nil: the game's library); alt, the image shader's variant (alt_get); alt_tried, looked for once
 @implementation NvShader
 - (void)dealloc { free(rf.c1); free(geo_slot); }
 @end
+static inline NSString *sh_dir(NvShader *s) { return s && s->altdir ? s->altdir : g_msl_dir; }   // the folder of a shader's side libraries (_bx, _bf, _bp, _bv): a variant's own
 // One specialization of a shader's readable-tile version: what each sample reads from the tile (fx, -1 none; only the shader's nfc entries), the attachments read (fbmask) and the
 // attachment each colour output goes to (lmap); fn nil when Metal refused it (not asked again)
 typedef struct { int8_t fx[32]; uint8_t fbmask, lmap[8]; } bf_key;
@@ -5767,7 +5769,7 @@ typedef struct { int8_t fx[32]; uint8_t fbmask, lmap[8]; } bf_key;
 #include "nvn_pso_skey.h"
 #include "nvn_geometry.h"
 #include "nvn_feedback.h"
-@interface NvProg : NSObject { @public NvShader *sh[6]; char gs_miss[17]; NvProg *geo_raster, *geo_lean_raster; int8_t c_sw, c_iw, c_img; } @end   // c_sw / c_iw / c_img: prog_swrites, udc_note_draw's image write, image_prepare's written image slots; + 1 once known (the shaders are fixed once made)   // geo_raster: GS output reader paired with this program's fragment stage; geo_lean_raster: its own vertex and fragment stages (a lean passthrough kernel)
+@interface NvProg : NSObject { @public NvShader *sh[6]; char gs_miss[17]; NvProg *geo_raster, *geo_lean_raster; int8_t c_sw, c_iw, c_img; NvProg *alt; int8_t alt_state; } @end   // alt: this program with its DM_NVN_SHADER_ALT variants (prog_alt; alt_state 0 not looked at, 1 has one, 2 none)   // c_sw / c_iw / c_img: prog_swrites, udc_note_draw's image write, image_prepare's written image slots; + 1 once known (the shaders are fixed once made)   // geo_raster: GS output reader paired with this program's fragment stage; geo_lean_raster: its own vertex and fragment stages (a lean passthrough kernel)
 @implementation NvProg @end
 // Warm-up entry: built in the background, waiting to be taken by the submit thread. vs / fs are strong references (in pso they are only raw pointers, and the background dictionary is released when the task ends)
 @interface WarmItem : NSObject { @public int kind, record; NSString *key, *vs_key, *fs_key, *ts_key; NvShader *shader, *vs, *fs, *ts; pso_key pso; id<MTLFunction> fsfn; id object; } @end   // record: a prefetched library, written to the prewarm lists when claimed (shader_get's lines)
@@ -5874,7 +5876,9 @@ static void pso_user_record(const char *fmt, ...) {
 // update or another container moves the folder). A pipeline from a library with no name has no key: it is looked up in the files without an index, as every pipeline was before
 static char g_lib_tag;
 static id<MTLLibrary> lib_tag(id<MTLLibrary> lib, NSString *name) { if (lib && name) objc_setAssociatedObject(lib, &g_lib_tag, name, OBJC_ASSOCIATION_COPY_NONATOMIC); return lib; }
+static NSString *g_alt_dir;   // DM_NVN_SHADER_ALT (alt_dir)
 static NSString *lib_name(NSString *path) {
+    if (g_alt_dir && [path hasPrefix:[g_alt_dir stringByAppendingString:@"/"]]) return [@"alt/" stringByAppendingString:path.lastPathComponent];   // a variant: never the archive key of the game's own library
     NSString *dir = g_msl_dir ? [g_msl_dir stringByAppendingString:@"/"] : nil;
     return dir && [path hasPrefix:dir] ? [path substringFromIndex:dir.length] : path.lastPathComponent;
 }
@@ -6021,8 +6025,11 @@ static id<MTLFunction> fn_dev_b(id<MTLFunction> f, int off) {
 }
 static id<MTLComputePipelineState> cps_new(id<MTLFunction> f, NSError **e);   // a compute shader's pipeline: from the archive bundled with the app, else built
 // layer: a vertex shader's layer entry points (entry_layer / entry_layer_z, which also write the layer) instead of main0 / main0_z, for a program whose geometry shader is a slice writer (prog_fold_gs)
-static NvShader *shader_load(NSString *pc, int stage, int layer) {
-    NSError *e = nil;
+static NvShader *shader_load_in(NSString *pc, int stage, int layer, NSString *dir);
+static NvShader *shader_load(NSString *pc, int stage, int layer) { return shader_load_in(pc, stage, layer, g_msl_dir); }
+// dir: the folder of the library (the game's, or a DM_NVN_SHADER_ALT variant's: its reflection is the game's own, whose bindings the variant must keep)
+static NvShader *shader_load_in(NSString *pc, int stage, int layer, NSString *dir) {
+    NSError *e = nil; int alt = dir != g_msl_dir;
     NSData *jd = msl_data([NSString stringWithFormat:@"%@/%@.json", g_msl_dir, pc]);
     NSDictionary *j = jd ? [NSJSONSerialization JSONObjectWithData:jd options:0 error:nil] : nil;
     if (j && stage == 2 && [j[@"gs_slice"] isKindOfClass:[NSDictionary class]] && [j[@"chain"] isEqual:@DMSH_CHAIN]) {   // a slice-writing geometry shader has no library: a stub prog_fold_gs replaces
@@ -6031,12 +6038,12 @@ static NvShader *shader_load(NSString *pc, int stage, int layer) {
         return o;
     }
     if (stage == 2 && !j) return nil;   // missing geometry translation: the caller's red line says so
-    NSString *lp = [NSString stringWithFormat:@"%@/%@.metallib", g_msl_dir, pc];
+    NSString *lp = [NSString stringWithFormat:@"%@/%@.metallib", dir, pc];
     id<MTLLibrary> lib = lib_from_file(lp, &e);
     if (!lib || !j) { MLOG("[RED] failed to load shader %s: %s", pc.UTF8String, e ? e.localizedDescription.UTF8String : "no reflection json"); return nil; }
     if (![j[@"chain"] isEqual:@DMSH_CHAIN]) { MLOG("[RED] shader %s has translation chain version %s, but this host expects %s", pc.UTF8String, [[j[@"chain"] description] UTF8String], DMSH_CHAIN); return nil; }
     if (layer && !j[@"entry_layer"]) { MLOG("[RED] vertex shader %s has no layer entry points", pc.UTF8String); return nil; }
-    NvShader *o = [NvShader new]; o->gs_loc = o->lay_loc = -1;
+    NvShader *o = [NvShader new]; o->gs_loc = o->lay_loc = -1; if (alt) o->altdir = dir;
     if (stage == 0 && [j[@"layer_from"] isKindOfClass:[NSDictionary class]]) { o->lay_loc = [j[@"layer_from"][@"loc"] intValue]; o->lay_comp = [[j[@"layer_from"][@"comp"] description] UTF8String][0]; }
     char err[160];
     if (nvn_refl_from_json(j, &o->rf, err, sizeof err)) { MLOG("[RED] shader %s reflection conversion failed: %s", pc.UTF8String, err); return nil; }
@@ -6111,6 +6118,7 @@ static NvShader *shader_load(NSString *pc, int stage, int layer) {
         int max_aid = -1;
         for (int i = 0; i < o->rf.nb; i++) max_aid = MAX(max_aid, o->rf.b[i].aid + (o->rf.b[i].n ? o->rf.b[i].n - 1 : 0));   // an array takes n entries
         o->arg_len = o->ae.encodedLength;
+        if (alt && (o->arg_len != (NSUInteger)(8 * (max_aid + 1)) || (o->arg_len & 7) || max_aid >= NVN_REFL_MAXARG)) { MLOG("[RED] shader variant %s/%s: its argument buffer (%lu bytes) does not fit the game's reflection: not used", dir.UTF8String, pc.UTF8String, (unsigned long)o->arg_len); return nil; }
         if (o->arg_len != (NSUInteger)(8 * (max_aid + 1)) || (o->arg_len & 7) || max_aid >= NVN_REFL_MAXARG)
             MDIE("shader %s has an unexpected argument buffer layout: encodedLength=%lu maxAid=%d", o->key, (unsigned long)o->arg_len, max_aid);
     }
@@ -6176,7 +6184,7 @@ static NvShader *shader_get(NSString *pc, int stage) {
 static NvShader *shader_get_layer(NvShader *vs) {
     NSString *pc = @(vs->key), *ck = [pc stringByAppendingString:@"#l"];
     NvShader *o = g_shcache[ck];
-    if (!o && (o = shader_load(pc, 0, 1))) g_shcache[ck] = o;
+    if (!o && (o = shader_load(pc, 0, 1))) { o->alt_tried = 1; g_shcache[ck] = o; }   // layer entry points: no DM_NVN_SHADER_ALT variant (alt_get loads main0 only)
     return o;
 }
 // A program whose geometry shader is a slice writer (a stub with no function, shader_load) draws with its vertex shader's layer entry points instead, which write the layer the geometry
@@ -6219,7 +6227,61 @@ static NvShader *builtin_get(const char *ctl) {
     return nil;
 }
 static void up_mfx_read_color(NvShader *cs, const NVNshaderData *sd);
-static __unsafe_unretained NvProg *prog_get(const prog_t *cp) {   // Called only on the submit thread
+static __unsafe_unretained NvProg *prog_get_base(const prog_t *cp);
+static __unsafe_unretained NvProg *prog_alt(NvProg *p);
+// The program a draw uses: the game's, or in a DM_NVN_SHADER_ALT phase its twin with the variants (prog_alt). Called only on the submit thread
+static __unsafe_unretained NvProg *prog_get(const prog_t *cp) { return prog_alt(prog_get_base(cp)); }
+// ---------- DM_NVN_SHADER_ALT (diagnostic, off by default): any shader variant, measured in the run ----------
+// DM_NVN_SHADER_ALT=<dir>: a shader key with a library <key>.metallib in <dir> (and its side libraries: dm/gfx/tools/fsbench, mk_probe_libs.py) draws with that variant instead of the
+// game's. DM_NVN_SHADER_ALT_AB=ab (or ab:<k>/<n>, as every DM_AB switch) alternates them with the DM_AB phases: phase 0 the game's, so both run in one process, scene and thermal state;
+// =0 loads the variants and never draws with them. A variant keeps the game's reflection (<key>.json, from the game's library), so its bindings must be the same: one whose argument
+// buffer differs, or whose side libraries are not the game's set (_bx, _bf, _bp, _bv: one has a file the other lacks), is refused with a red line and the key stays the game's. A variant
+// is a shader object of its own (NvShader alt): its pipelines are other pso_key entries (the key holds the shader objects) and other archive entries (lib_name: alt/<file>), so the
+// two never share a pipeline. Warm the archive with one unanalysed run of the same switch before measuring, as for any switch that compiles pipelines of its own
+static int g_alt_mode;
+static NSString *alt_dir(void) {
+    static dispatch_once_t once; dispatch_once(&once, ^{
+        const char *e = getenv("DM_NVN_SHADER_ALT"); if (!e || !*e) return;
+        BOOL isdir = NO;
+        if (![NSFileManager.defaultManager fileExistsAtPath:@(e) isDirectory:&isdir] || !isdir) { MLOG("[RED] DM_NVN_SHADER_ALT=%s is not a folder: no shader variants", e); return; }
+        g_alt_dir = [@(e) stringByStandardizingPath]; g_alt_mode = sw_mode("DM_NVN_SHADER_ALT_AB", 1);
+        MLOG("DM_NVN_SHADER_ALT: shader variants from %s (%s)", g_alt_dir.UTF8String, g_alt_mode == 1 ? "always" : g_alt_mode ? "alternated with the DM_AB phases" : "off: DM_NVN_SHADER_ALT_AB=0");
+    });
+    return g_alt_dir;
+}
+static int lib_file_in_game(NSString *path) { romfs_img *m; return [NSFileManager.defaultManager fileExistsAtPath:path] || msl_image_file(path, &m) != NULL; }
+// The variant of shader s (nil: none, or refused), looked for once per shader
+static NvShader *alt_get(NvShader *s) {
+    if (!s || s->altdir || s->alt_tried || !s->key[0]) return s ? s->alt : nil;
+    s->alt_tried = 1; NSString *dir = alt_dir(); if (!dir) return nil;
+    NSString *pc = @(s->key);
+    if (![NSFileManager.defaultManager fileExistsAtPath:[NSString stringWithFormat:@"%@/%@.metallib", dir, pc]]) return nil;
+    NSString *base = [pc hasSuffix:@"_b"] ? [pc substringToIndex:pc.length - 2] : pc;
+    for (NSString *suf in @[@"_bx", @"_bf", @"_bp", @"_bv"]) {
+        int g = lib_file_in_game([NSString stringWithFormat:@"%@/%@%@.metallib", g_msl_dir, base, suf]);
+        int v = [NSFileManager.defaultManager fileExistsAtPath:[NSString stringWithFormat:@"%@/%@%@.metallib", dir, base, suf]];
+        if (g != v) { MLOG("[RED] shader variant %s/%s: %s side library %s%s, the game's %s: not used", dir.UTF8String, pc.UTF8String, v ? "has the" : "lacks the", base.UTF8String, suf.UTF8String, g ? "has it" : "does not"); return nil; }
+    }
+    NvShader *a = shader_load_in(pc, s->stage, 0, dir);
+    if (!a) { MLOG("[RED] shader variant %s/%s did not load: the key stays the game's", dir.UTF8String, pc.UTF8String); return nil; }
+    if (a->arg_len != s->arg_len || a->rf.nb != s->rf.nb || !a->fn != !s->fn || !a->fn_u != !s->fn_u || !a->fn_m != !s->fn_m || !a->fn_d != !s->fn_d || !a->discard_fn != !s->discard_fn) {
+        MLOG("[RED] shader variant %s/%s: its entry points or argument buffer (%lu bytes, %d bindings) differ from the game's (%lu, %d): not used", dir.UTF8String, pc.UTF8String,
+             (unsigned long)a->arg_len, a->rf.nb, (unsigned long)s->arg_len, s->rf.nb); return nil; }
+    MLOG("DM_NVN_SHADER_ALT: shader %s (stage %d) draws with the variant from %s%s", pc.UTF8String, s->stage, dir.UTF8String, g_alt_mode >= 2 ? " in its DM_AB phases" : "");
+    return s->alt = a;
+}
+// Program p with its shaders' variants, in the phases the switch is on (p itself otherwise, and when it has no variant)
+static __unsafe_unretained NvProg *prog_alt(NvProg *p) {
+    if (!p || !g_alt_dir && !alt_dir()) return p;
+    if (!sw_on(g_alt_mode)) return p;
+    if (p->alt_state == 0) {
+        p->alt_state = 2; NvProg *t = nil;
+        for (int st = 0; st < 6; st++) { NvShader *a = alt_get(p->sh[st]); if (!a) continue; if (!t) { t = [NvProg new]; memcpy(t->sh, p->sh, sizeof t->sh); memcpy(t->gs_miss, p->gs_miss, sizeof t->gs_miss); t->alt_state = 2; } t->sh[st] = a; }
+        if (t) { p->alt = t; p->alt_state = 1; }
+    }
+    return p->alt_state == 1 ? p->alt : p;
+}
+static __unsafe_unretained NvProg *prog_get_base(const prog_t *cp) {   // Called only on the submit thread
     prog_t *p = (prog_t *)cp;
     if (!p) return nil;   // no program bound: nil, as the callers that test S.prog first get (draw_'s passdump line tests it, the lines after it did not)
     static const prog_t *lp; static uint64_t lser, lgen; static NvProg *lpr;   // Last result: same object, same serial and unchanged serial table means it is used directly
@@ -6271,7 +6333,7 @@ void mtl_prog_unpin(prog_t *p) {
     if(pin && !--pin->refs) { nvn_hm_del(&g_prog_pins,&p->serial); if(pin->retired) serial_del(p->serial); free(pin); }
 }
 void mtl_prog_snapshot(prog_t *copy,const prog_t *source) {
-    prog_get(source); *copy=*source;
+    prog_get_base(source); *copy=*source;
     if(!source->serial) MDIE("cannot retain a program without an initialization serial");
     prog_pin *pin=nvn_hm_get(&g_prog_pins,&source->serial);
     if(!pin) { pin=calloc(1,sizeof *pin); if(!pin) MDIE("program retention allocation failed"); nvn_hm_put(&g_prog_pins,&source->serial,pin); }
@@ -7275,7 +7337,7 @@ static const prog_t *bind_stages(const prog_t *p, int stages) {
     int i = ncp < NCMP ? ncp++ : next++ % NCMP;
     if (cp[i].serial) serial_del(cp[i].serial);
     NvProg *o = [NvProg new];
-    for (int st = 0; st < 5; st++) { ck[i][st] = S.bst[st]; cs[i][st] = S.bst[st] ? S.bst[st]->serial : 0; if (S.bst[st]) { __unsafe_unretained NvProg *src = prog_get(S.bst[st]); o->sh[st] = src ? src->sh[st] : nil; } }
+    for (int st = 0; st < 5; st++) { ck[i][st] = S.bst[st]; cs[i][st] = S.bst[st] ? S.bst[st]->serial : 0; if (S.bst[st]) { __unsafe_unretained NvProg *src = prog_get_base(S.bst[st]); o->sh[st] = src ? src->sh[st] : nil; } }
     prog_fold_gs(o);   // the geometry stage came from another program (see prog_fold_gs)
     memset(&cp[i], 0, sizeof cp[i]); cp[i].magic = MAGIC('P', 'R', 'O', 'G'); cp[i].serial = nvn_new_serial(); serial_put(cp[i].serial, o);
     { static int once; if (!once++) MLOG("per-stage program binding: first combined program (vertex %s fragment %s)", o->sh[0] ? o->sh[0]->key : "-", o->sh[1] ? o->sh[1]->key : "-"); }
@@ -7521,7 +7583,7 @@ static id<MTLFunction> vin_fn(NvShader *vs) {   // the shadow-input entry point,
     os_unfair_lock_lock(&g_vin_lock);
     if (!vs->vfn_state) {
         vs->vfn_state = 2;
-        size_t kl = strlen(vs->key); NSString *path = [NSString stringWithFormat:@"%@/%.*s_bv.metallib", g_msl_dir, (int)(kl > 2 ? kl - 2 : kl), vs->key];
+        size_t kl = strlen(vs->key); NSString *path = [NSString stringWithFormat:@"%@/%.*s_bv.metallib", sh_dir(vs), (int)(kl > 2 ? kl - 2 : kl), vs->key];
         NSError *e = nil; id<MTLLibrary> lib = lib_from_file(path, &e); id<MTLFunction> f = lib && vs->ventry ? fn4_note([lib newFunctionWithName:vs->ventry], lib, vs->ventry, nil) : nil;
         if (f && f.functionConstantsDictionary.count) f = fn_spec(lib, vs->ventry, [MTLFunctionConstantValues new], &e);   // as shader_load
         const char *why = !lib ? "no library" : !f ? "no entry point" : NULL;
@@ -7540,7 +7602,7 @@ static os_unfair_lock g_pull_lock = OS_UNFAIR_LOCK_INIT;
 static void pull_load(NvShader *vs) {
     {
         vs->pfn_state = 2;
-        size_t kl = strlen(vs->key); NSString *path = [NSString stringWithFormat:@"%@/%.*s_bp.metallib", g_msl_dir, (int)(kl > 2 ? kl - 2 : kl), vs->key];
+        size_t kl = strlen(vs->key); NSString *path = [NSString stringWithFormat:@"%@/%.*s_bp.metallib", sh_dir(vs), (int)(kl > 2 ? kl - 2 : kl), vs->key];
         NSError *e = nil; id<MTLLibrary> lib = lib_from_file(path, &e); id<MTLFunction> f = lib && vs->ventry ? fn4_note([lib newFunctionWithName:vs->ventry], lib, vs->ventry, nil) : nil;
         if (f && f.functionConstantsDictionary.count) f = fn_spec(lib, vs->ventry, [MTLFunctionConstantValues new], &e);
         const char *why = !lib ? "no library" : !f ? "no entry point" : NULL;
@@ -7953,7 +8015,7 @@ static id<MTLFunction> at_fn(NvShader *fs, id<MTLFunction> base) {   // the side
     os_unfair_lock_lock(&g_at_lock);
     if (!fs->afn_state) {
         fs->afn_state = 2;
-        size_t kl = strlen(fs->key); NSString *path = [NSString stringWithFormat:@"%@/%.*s_bx.metallib", g_msl_dir, (int)(kl > 2 ? kl - 2 : kl), fs->key];
+        size_t kl = strlen(fs->key); NSString *path = [NSString stringWithFormat:@"%@/%.*s_bx.metallib", sh_dir(fs), (int)(kl > 2 ? kl - 2 : kl), fs->key];
         NSError *e = nil; id<MTLLibrary> lib = lib_from_file(path, &e); const char *why = lib ? NULL : "no library";
         id<MTLFunction> own[4] = {fs->fn, fs->fn_u, fs->fn_m, fs->fn_d};
         for (int i = 0; i < 4 && !why; i++) {
@@ -8073,7 +8135,7 @@ static id<MTLFunction> lo_fn(NvShader *fs, id<MTLFunction> base, uint32_t target
     NSError *e = nil; const char *why = NULL;
     if (!fs->lfn_state) {
         fs->lfn_state = 2;
-        size_t kl = strlen(fs->key); NSString *path = [NSString stringWithFormat:@"%@/%.*s_bx.metallib", g_msl_dir, (int)(kl > 2 ? kl - 2 : kl), fs->key];
+        size_t kl = strlen(fs->key); NSString *path = [NSString stringWithFormat:@"%@/%.*s_bx.metallib", sh_dir(fs), (int)(kl > 2 ? kl - 2 : kl), fs->key];
         if ((fs->llib = lib_from_file(path, &e))) { fs->lfn_state = 1; fs->lfn = [NSMutableDictionary dictionary]; static int n; if (++n <= 3 || !(n & (n - 1))) MLOG("logic operation: side library of %s loaded (%d shaders so far)", fs->key, n); }
         else why = "no library";
     }
@@ -12518,7 +12580,7 @@ static id<MTLFunction> bf_fn(NvShader *fs, const int *fx, uint8_t fbmask, const 
     for (NvBfFn *s in fs->bffn) if (!memcmp(&s->k, &k, sizeof k)) { id<MTLFunction> f = s->fn; os_unfair_lock_unlock(&g_fz_fn_lock); return f; }
     if (!fs->bflib_state) {   // loaded once (a failure too: not again for every draw)
         size_t kl = strlen(fs->key); NSError *e = nil;
-        NSString *path = [NSString stringWithFormat:@"%@/%.*s_bf.metallib", g_msl_dir, (int)(kl > 2 ? kl - 2 : kl), fs->key];
+        NSString *path = [NSString stringWithFormat:@"%@/%.*s_bf.metallib", sh_dir(fs), (int)(kl > 2 ? kl - 2 : kl), fs->key];
         fs->bflib = lib_from_file(path, &e); fs->bflib_state = fs->bflib ? 1 : 2;
         if (!fs->bflib) MLOG("[RED] failed to load the readable-tile version %s: %s", path.UTF8String, e.localizedDescription.UTF8String);
     }

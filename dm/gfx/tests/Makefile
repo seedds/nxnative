@@ -549,6 +549,12 @@ t_blend_zero: t_blend_zero.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_blend_zero.m $(MTL_T_SRC) $(FW)
 check_t_blend_zero: t_blend_zero
 	@set -e; work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; python3 test_dmsh_blend_zero.py --fixture "$$work"; MTL_DEBUG_LAYER=1 ./t_blend_zero "$$work"; DM_NVN_BLEND_ZERO=0 MTL_DEBUG_LAYER=1 ./t_blend_zero "$$work"
+# DM_NVN_SHADER_ALT: a shader variant in the DM_AB phases, and the variants refused (t_shader_alt.m; fixtures made with xcrun metal)
+t_shader_alt: t_shader_alt.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_shader_alt.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_shader_alt
+check_t_shader_alt: t_shader_alt
+	MTL_DEBUG_LAYER=1 ./t_shader_alt
 # Logic operations through the replay (t_logic.m), with its shaders from test_dmsh_logic.py
 t_logic: t_logic.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_logic.m $(MTL_T_SRC) $(FW)

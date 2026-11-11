@@ -61,6 +61,8 @@ Joy-Con 2 and the Pro Controller 2 do not appear in macOS's Bluetooth settings: 
 
 The mouse pointer hides when you press a key or a controller button, or move a stick, while it is over the game picture. Moving the mouse shows it again, as does switching to another window or app.
 
+The mouse is the touchscreen. With [Mouse](settings.md#mouse) set to **Left stick** or **Right stick**, a click on the picture captures it as that stick instead, with its buttons as Switch buttons; Escape gives the pointer back.
+
 ## Shaders on first sight
 
 Short stutters the first time a new scene appears are normal: the app compiles graphics for it once and remembers them for the next launch. What it remembered, and what the game's list names, is built before the game starts, behind "Preparing shaders" and a progress bar when that takes more than half a second.

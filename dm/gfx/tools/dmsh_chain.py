@@ -14,7 +14,7 @@
 import os, sys, ast, hashlib
 DM_ROOT = os.environ.get('DM_ROOT') or os.path.expanduser('~/dm-work')   # Workspace root (game files, build outputs and run artifacts are all under it)
 HERE = os.path.dirname(os.path.abspath(__file__)); GFX = os.path.dirname(HERE); HOME = os.path.expanduser('~')
-FILES = ['tools/dmsh_chain.py', 'tools/dmsh_build.py', 'tools/dmsh_atomic.py', 'tools/dmsh_wide.py', 'tools/dmsh_fetch.py', 'tools/dmsh_vin.py', 'tools/dmsh_pull.py', 'tools/dmsh_pull.metal', 'tools/dmsh_alpha.py', 'tools/dmsh_logic.py', 'tools/dmsh_side.py', 'tools/dmsh_rewrite.py', 'tools/dmsh_reflect.py', 'tools/dmsh_entry.py', 'tools/dmsh_geometry.py', 'tools/dmsh_mesh.py', 'tools/dmsh_meshstage.py', 'tools/dmsh_facts.py', 'tools/dmsh_ampere.py', 'nvn/dmsh_abi.h', 'tools/dmsh_abi.py', 'tools/dmsh_xlate/Program.cs', 'tools/dmsh_xlate/dmsh_xlate.csproj', '../ios/tools/ios_metal.py', 'tools/dmsh_chain.lock']
+FILES = ['tools/dmsh_chain.py', 'tools/dmsh_build.py', 'tools/dmsh_atomic.py', 'tools/dmsh_wide.py', 'tools/dmsh_fetch.py', 'tools/dmsh_vin.py', 'tools/dmsh_pull.py', 'tools/dmsh_pull.metal', 'tools/dmsh_alpha.py', 'tools/dmsh_logic.py', 'tools/dmsh_side.py', 'tools/dmsh_rewrite.py', 'tools/dmsh_reflect.py', 'tools/dmsh_entry.py', 'tools/dmsh_geometry.py', 'tools/dmsh_mesh.py', 'tools/dmsh_meshstage.py', 'tools/dmsh_facts.py', 'tools/dmsh_ampere.py', 'tools/dmsh_metalwa.py', 'nvn/dmsh_abi.h', 'tools/dmsh_abi.py', 'tools/dmsh_xlate/Program.cs', 'tools/dmsh_xlate/dmsh_xlate.csproj', '../ios/tools/ios_metal.py', 'tools/dmsh_chain.lock']
 # This target-specific lowering lives in the vendored translator. Include its
 # sources as well as the rebuilt translator's fingerprint; no old shader cache can bypass it.
 FILES += ['../third_party/ryujinx/src/Ryujinx.Graphics.Shader/' + f for f in (
@@ -63,6 +63,17 @@ def code_form(source, blank=()):
 def load_game():   # the current game profile (DM_GAME), only for what needs one: the version itself does not
     sys.path.insert(0, os.path.join(GFX, '../games')); import game
     return game.load()
+
+def metalwa(g):
+    """The profile's shader_metalwa rows (dmsh_metalwa.py): (the workarounds they name, as KosmicKrisp's numbers; the shader key prefixes they list, empty for every shader).
+    `shader_metalwa kk3 kk9 0123456789abcdef`: KK3 and KK9 on that shader only. No row: (frozenset(), frozenset()), the pass does not run. A shader input like every shader_* key"""
+    import dmsh_metalwa
+    words = [w for k, v in (g.rows if g else []) if k == 'shader_metalwa' for x in v for w in x.split()]   # every row
+    kk = frozenset(dmsh_metalwa.NAMES[w.lower()] for w in words if w.lower() in dmsh_metalwa.NAMES)
+    keys = frozenset(w.lower() for w in words if w.lower() not in dmsh_metalwa.NAMES)
+    bad = [k for k in keys if not all(c in '0123456789abcdef' for c in k) or not 4 <= len(k) <= 16]
+    if bad or (words and not kk): sys.exit(f'[RED] shader_metalwa takes {", ".join(dmsh_metalwa.NAMES)} and shader key prefixes (4 to 16 hex digits, lower or upper case), not {" ".join(words)!r}')
+    return kk, keys
 
 def profile_rows(g):   # the profile keys that change how a shader is built (nvn_*, shader_*)
     return ''.join(f'{k}\t{chr(9).join(v)}\n' for k, v in g.rows if k.startswith(('nvn_', 'shader_'))).encode()

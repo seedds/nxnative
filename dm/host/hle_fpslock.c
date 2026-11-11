@@ -363,6 +363,20 @@ void dm_ctl_peek(uint64_t a, int n) {
         LOG("DM_CTL: peek %#llx: %g %g %g %g (%08x %08x %08x %08x)", (unsigned long long)(a + 4 * (uint64_t)i), f[0], f[1], f[2], f[3], w[0], w[1], w[2], w[3]);
     }
 }
+// "poke <guest address> <word> [<word> ...]" (hex): writes those 32-bit words to consecutive guest addresses, for trying a change to guest data while
+// the game runs (a diagnostic, the counterpart of peek). The address must be 4-byte aligned and the whole range readable, else nothing is written.
+// The pages are unprotected and marked dirty first (dm_guest_write_prepare), so a texture or buffer view of the bytes (a texture-pool page the graphics
+// layer tracks) picks the change up as it would a guest store. Up to 64 words; the log line gives the first old and new word.
+void dm_ctl_poke(uint64_t a, const char *words) {
+    uint32_t w[64], old[64]; int n = 0; const char *s = words; char *e;
+    while (n < 64) { while (*s == ' ') s++; unsigned long v = strtoul(s, &e, 16); if (e == s) break; w[n++] = (uint32_t)v; s = e; }
+    if (!n || (a & 3)) { LOG("[RED] DM_CTL poke %#llx: needs an aligned address and at least one hex word", (unsigned long long)a); return; }
+    if (!rd(a, old, 4 * (size_t)n)) { LOG("[RED] DM_CTL poke %#llx: not readable, nothing written", (unsigned long long)a); return; }
+    uint32_t *p = (uint32_t *)(uintptr_t)a;
+    dm_guest_write_prepare(p, 4 * (size_t)n);
+    for (int i = 0; i < n; i++) __atomic_store_n(p + i, w[i], __ATOMIC_RELAXED);   // word by word: the GPU may read the range meanwhile
+    LOG("DM_CTL: poke %#llx: %d words (first %08x, was %08x)", (unsigned long long)a, n, w[0], old[0]);
+}
 // "memdump <guest address> <bytes> <path>": guest memory to a file, read safely (stops at the first unreadable page)
 void dm_ctl_memdump(uint64_t a, uint64_t n, const char *path) {
     FILE *f = fopen(path, "wb"); if (!f) { LOG("[RED] DM_CTL: memdump: cannot open %s", path); return; }

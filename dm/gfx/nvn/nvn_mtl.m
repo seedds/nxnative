@@ -14213,6 +14213,35 @@ static id<MTL4ComputeCommandEncoder> dispatch_enc(void) {
     args_dirty_all();
     return e;
 }
+// DM_NVN_RBFORCE=<compute shader key>[:<float>] (diagnostic): watches a GPU-to-CPU read-back. For each dispatch of that compute shader, logs
+// the first two words of its storage buffer 0 as the CPU sees them when the dispatch is encoded: the result of the previous dispatch, since guest
+// memory is the pools' shared storage. With a value, it also fills word 0 with that float after the dispatch, in submission order, so the CPU and
+// any later GPU work read the forced word instead of the computed one. It exists to test whether a read-back feeds what a game uploads next
+// (Hyrule Warriors: Age of Imprisonment copies its auto-exposure into an 8-byte buffer with 2c74cdd946f8da54, which writes word 0 only).
+// Logs the first 120 dispatches, then every 60th, so a long run stays readable. cs: the dispatched compute shader; reads S.ssbo[5][0].
+static void rbforce_after(NvShader *cs) {
+    static int init, force; static char key[17]; static float val; static uint64_t n;
+    if (!init) {
+        init = 1; const char *e = getenv("DM_NVN_RBFORCE");
+        if (e && *e) {
+            snprintf(key, sizeof key, "%.16s", e);   // the 16 hex digits of the key; a "_b" suffix or the ":value" part is not compared
+            const char *c = strchr(e, ':'); if (c) { force = 1; val = strtof(c + 1, NULL); }
+            if (force) MLOG("DM_NVN_RBFORCE: storage buffer 0 word 0 of compute shader %s forced to %g after each dispatch", key, val);
+            else MLOG("DM_NVN_RBFORCE: logging storage buffer 0 of compute shader %s", key);
+        }
+    }
+    if (!key[0] || strncmp(cs->key, key, 16)) return;
+    const p_bind_buf *u = &S.ssbo[5][0];
+    if (!u->addr) return;
+    n++;
+    if (n <= 120 || n % 60 == 0) {
+        uint32_t w[2]; memcpy(w, (const void *)u->addr, sizeof w);   // guest addresses are host pointers (the pools wrap guest memory, newBufferWithBytesNoCopy)
+        float f0; memcpy(&f0, &w[0], 4);
+        MLOG("[rbforce] dispatch %llu frame %llu: storage %#llx word0 %g (%#x) word1 %#x (as read before this dispatch)", (unsigned long long)n,
+             (unsigned long long)atomic_load(&g_cur_frame), (unsigned long long)u->addr, f0, w[0], w[1]);
+    }
+    if (force) { uint32_t bits; memcpy(&bits, &val, 4); mtl_sub_fill(u->addr, 4, bits); }   // after the dispatch: blit_buf orders it behind the dispatch's writes
+}
 static void dispatch(const p_dispatch *dp) {
     zskip_clear();
     g_wr_epoch++; g_mdx_epoch++;
@@ -14296,6 +14325,7 @@ static void dispatch(const p_dispatch *dp) {
         enc_c_dispatch_indirect(ce, ig, MTLSizeMake(tg[0], tg[1], tg[2]));
     } else enc_c_dispatch(ce, MTLSizeMake(dp->x, dp->y, dp->z), MTLSizeMake(tg[0], tg[1], tg[2]));
     if (own) enc_c_end(ce);
+    rbforce_after(cs);   // DM_NVN_RBFORCE: log, and optionally overwrite, a read-back this dispatch fills
 }
 // GPU: texture -> buffer (row stride taken from SetCopyRowStride, layer stride from SetCopyImageStride, 0 = tightly packed)
 // A copy at a level the host texture lacks (more levels declared than its size holds, tex_desc) is skipped: Metal does not check the level of a blit

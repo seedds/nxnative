@@ -2748,12 +2748,17 @@ def mac_app(py, repo, out, app, work, game, patched, host, font, msl, aoc, gfx, 
     # The launcher settings the IPA carries (dm/games/settings.py), without the iPhone's own switches: the app's settings window and Mac front ends show them (docs/frontends.md)
     settings = work / 'app/launcher.json'; settings.parent.mkdir(parents=True, exist_ok=True)
     run([py, repo / 'dm/games/settings.py', g.id, patched, control or game / 'control.nacp', settings], logs / 'mac_settings.log', env=dict(env, GFXAPI=gfx, SETTINGS_PLATFORM='mac', DM_LANG=lang))
+    # RomFS tweaks (dm/tools/romfs_tweaks.py): the profile's settings that pick a rewritten copy of some game files, made here from the packed version's own RomFS
+    tweaks = None
+    if g.table('romfs_tweaks.tsv').is_file():
+        PROG.set(step='RomFS tweaks'); tweaks = work / 'app/tweaks'; shutil.rmtree(tweaks, ignore_errors=True)
+        run([py, repo / 'dm/tools/romfs_tweaks.py', g.table('romfs_tweaks.tsv'), rfs.source(game), tweaks], logs / 'romfs_tweaks.log', env=env)
     cmd = [py, repo / 'dm/mac/pack_app.py', out, '--host', host, '--patched', patched, '--romfs', rfs.source(game), '--msl', lib, '--tables', g.table('shader_map.tsv').parent,
            '--font', font, '--title-id', f'{app:016X}', '--name', name, '--bundle-id', bundle_id, '--lang', lang, '--sign', sign or '-']
     split_pairs = work / 'shader/pso_pairs.tsv'   # the split's copy of pso_pairs.tsv, for a profile without the table (as mac_run's DM_PSO_PAIRS)
     for opt, v in (('--version', version), ('--category', g.get('app_category')), ('--marker', g.get('romfs_marker')), ('--aoc', aoc), ('--icon', icon),
                    ('--pso', pso), ('--pso-pairs', split_pairs if gfx == 'nvn' and not g.table('pso_pairs.tsv').is_file() and split_pairs.is_file() else None),
-                   ('--env-file', Path(os.path.expanduser(env_file)).resolve() if env_file else None), ('--settings', settings)):
+                   ('--env-file', Path(os.path.expanduser(env_file)).resolve() if env_file else None), ('--settings', settings), ('--tweaks', tweaks)):
         if v: cmd += [opt, v]
     for n, r in (programs or {}).items(): cmd += ['--program', f'{n}\t{r["patched"]}\t{r["romfs"]}\t{r["msl"]}\t{r["tables"]}\t{r["html"]}']
     if (game / 'html').is_dir(): cmd += ['--html', game / 'html']

@@ -41,6 +41,14 @@ Hades II goes up to 300 %: it renders its whole picture, the HUD and text includ
 
 **Docked** renders at the Switch's TV resolution, **Handheld** at its lower handheld resolution, which is lighter on the phone and can give a higher frame rate.
 
+### Decoration distance
+
+How far away grass, weeds, flowers and small rocks are drawn: **Full** (the game's own), **Shorter** (75 %) or **Shortest** (50 %). Only the Mac app of a game whose profile has a `romfs_tweaks.tsv` offers it, today Donkey Kong Bananza.
+
+- **How it works:** the packer copies the files that set those distances out of the player's own RomFS and rewrites the numbers (`dm/tools/romfs_tweaks.py`), one copy per value, into the app (`Contents/Resources/dm/tweaks`); the launcher points `DM_ROMFS_OVERLAY` at the chosen copy. Donkey Kong Bananza: each procedural decoration model's `FarClipDistance` in `ClusteredRendering/ModelSettings` scaled by the value, and the margin past the view's edges where it keeps placing them (`SystemSettings`' frustum expansion, 50 %) set to 30 % or 15 %.
+- **When to change it:** when a grassy area falls to a lower frame rate because of CPU time. Each decoration instance is a draw the host translates on its submit thread; on an M2 Pro by the Planet Core in handheld mode, Shortest cut that thread from 23.5 to 15.4 ms a frame and the game held 30 fps instead of 20 (two 6-minute runs; GPU 25.5 → 23.4 ms).
+- **Cost:** decoration pops in nearer the camera. A player's own `DM_ROMFS_OVERLAY` (in `env.txt`) comes first, so a file it replaces wins over the tweak.
+
 ### Upscaling
 
 A game that renders below the screen's resolution is scaled up to the screen. **Standard**, the default, scales smoothly; **MetalFX** uses Apple's MetalFX upscaler, which sharpens edges and text as it scales.
@@ -268,6 +276,7 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 | Frame rate | `DM_FPS_TARGET` | `30`, `60`, `120` (Mac, games with `fps_max 120`) |
 | Render scale | `DM_RENDER_SCALE` | `0.5` to `1.0` (Hades II: to `3.0`) |
 | Console mode | `DM_OPMODE` | `1` docked, `0` handheld |
+| Decoration distance | `DM_DECO_DISTANCE` | `1.0`, `0.75`, `0.5` (Mac, games with RomFS tweaks) |
 | Game language | `DM_LANG` | a language code, such as `ja` |
 | Display mode (Mac) | `DM_FULLSCREEN` | `1` fullscreen, `0` a window |
 | Cloud saves folder (Mac) | `DM_SAVE_SYNC` | a folder; `icloud`: iCloud Drive › nxnative Saves; `0`: off |

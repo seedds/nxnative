@@ -1,0 +1,10 @@
+# RomFS tweaks (dm/tools/romfs_tweaks.py; docs/settings.md, Decoration distance): per setting value, the numbers to change in the game's own files, rewritten at build time from the player's RomFS.
+# Columns: variable, value (the setting's value, a folder name), RomFS file, BYML key (every scalar under it, in every SARC member), op (scale or set), number.
+# ClusteredRendering places the procedural decoration (grass, weeds, flowers, small rocks) on the voxel surfaces: each model's FarClipDistance (80-700) is where it stops drawing, and the frustum
+# expansion (50 %) is how far past the view's edges it keeps placing. On an M2 Pro by the Planet Core, handheld: 0.5 cut the submit thread from 23.5 to 15.4 ms a frame, 20 -> 30 fps.
+DM_DECO_DISTANCE	0.75	ClusteredRendering/ModelSettings.alsarc.zs	FarClipDistance	scale	0.75
+DM_DECO_DISTANCE	0.75	ClusteredRendering/SystemSettings.alsarc.zs	HorizontalFrustumExpansionPctg	set	30
+DM_DECO_DISTANCE	0.75	ClusteredRendering/SystemSettings.alsarc.zs	VerticalFrustumExpansionPctg	set	30
+DM_DECO_DISTANCE	0.5	ClusteredRendering/ModelSettings.alsarc.zs	FarClipDistance	scale	0.5
+DM_DECO_DISTANCE	0.5	ClusteredRendering/SystemSettings.alsarc.zs	HorizontalFrustumExpansionPctg	set	15
+DM_DECO_DISTANCE	0.5	ClusteredRendering/SystemSettings.alsarc.zs	VerticalFrustumExpansionPctg	set	15

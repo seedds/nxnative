@@ -297,6 +297,7 @@ void mtl_gp_note_park(uint64_t t0, unsigned why, uint64_t queue) { gt_put(GT_QPA
 #include "nvn_rec.h"   // deferred encoding (DM_NVN_ENC_THREAD)
 static NSHashTable *g_res_objects;
 static char g_tex_range_key;   // res_top: a GPU-made texture's storage (guest address, NVN size, pool flags)
+static char g_tex_up_key;   // mem_census: an uploaded texture's storage, as g_tex_range_key
 static NSMapTable *g_res_line;   // res_top: the source line that put each object in the set
 static _Atomic unsigned g_image_heap_n, g_big_n;   // g_big_n: large pools in chunks, whose buffers overlap (BIG_MIN)
 static inline MTL4VisibilityOptions resource_vis(void) { return MTL4VisibilityOptionDevice | (g_image_heap_n || g_big_n ? MTL4VisibilityOptionResourceAlias : 0); }
@@ -305,6 +306,10 @@ enum { RS_SITES = 16 }; static struct { int line; uint64_t n, bytes; } g_rs_site
 // What is in the set now by the line that added it (adds less removals), and what it was at the last residency line: a load's leftovers show as a line whose bytes stay up after it.
 // The phone's set grew 3.2 → 3.9 → 4.5 GB over two loads of Ocarina of Time and nothing said by which line
 enum { RS_LIVE = 48 }; static struct { int line; int64_t n, bytes, last; } g_rs_live[RS_LIVE];
+// The bytes an object adds to the set: a texture made over a buffer (a linear texture over its pool's buffer, tex_linear) is that buffer's memory, which the set counts once (measured:
+// an 8 MB buffer and 31 textures over it read 8 MB in allocatedSize), though each texture's allocatedSize gives the whole buffer. Counted per texture, Ocarina of Time's 31-64 linear
+// targets over one 8 MB pool read 248-512 MB that the set does not hold (the iPhone 17's "line 4926: 64, 512 MB" back on the field)
+static uint64_t res_bytes(id<MTLAllocation> o) { return [(id)o conformsToProtocol:@protocol(MTLTexture)] && ((id<MTLTexture>)o).buffer ? 0 : o.allocatedSize; }
 static void rs_live_add(int line, int64_t n, int64_t bytes) {   // under g_res_mu
     int k = 0; while (k < RS_LIVE - 1 && g_rs_live[k].line && g_rs_live[k].line != line) k++;
     g_rs_live[k].line = line; g_rs_live[k].n += n; g_rs_live[k].bytes += bytes;
@@ -364,13 +369,13 @@ static void res_add_at(id<MTLAllocation> allocation, int line) { @autoreleasepoo
     pthread_mutex_lock(&g_res_mu);
     if (!g_res_objects) g_res_objects = [NSHashTable weakObjectsHashTable];
     if ([g_res_objects containsObject:r]) { pthread_mutex_unlock(&g_res_mu); return; }   // already resident (a shared texture resolved again): marking the set dirty would cost a commit that changes nothing
-    { int k = 0; while (k < RS_SITES - 1 && g_rs_site[k].line && g_rs_site[k].line != line) k++; g_rs_site[k].line = line; g_rs_site[k].n++; g_rs_site[k].bytes += r.allocatedSize; }
+    { int k = 0; while (k < RS_SITES - 1 && g_rs_site[k].line && g_rs_site[k].line != line) k++; g_rs_site[k].line = line; g_rs_site[k].n++; g_rs_site[k].bytes += res_bytes(r); }
     file_wire(r);   // before its change is queued: the commit that applies the change takes this range with it and gives it back after (res_commit)
     res_q_put(r, 1);
     [g_res_objects addObject:r];
     if (!g_res_line) g_res_line = [NSMapTable weakToStrongObjectsMapTable];
     [g_res_line setObject:@(line) forKey:r];
-    rs_live_add(line, 1, (int64_t)r.allocatedSize);
+    rs_live_add(line, 1, (int64_t)res_bytes(r));
     pthread_mutex_unlock(&g_res_mu);
 } }
 static void res_remove(id<MTLAllocation> r) { @autoreleasepool {
@@ -380,7 +385,7 @@ static void res_remove(id<MTLAllocation> r) { @autoreleasepool {
     if (![g_res_objects containsObject:r]) { pthread_mutex_unlock(&g_res_mu); return; }
     res_q_put(r, 0);
     [g_res_objects removeObject:r];
-    rs_live_add([[g_res_line objectForKey:r] intValue], -1, -(int64_t)r.allocatedSize);
+    rs_live_add([[g_res_line objectForKey:r] intValue], -1, -(int64_t)res_bytes(r));
     g_rs_rm++;
     pthread_mutex_unlock(&g_res_mu);
 } }
@@ -616,7 +621,7 @@ static void res_top_pools(const char *why);
 static void res_top(const char *why) { @autoreleasepool {
     enum { N = 24 }; id<MTLAllocation> top[N] = {nil}; uint64_t total = 0, n = 0, kind[4] = {0}, count[4] = {0};
     pthread_mutex_lock(&g_res_mu);
-    for (id<MTLAllocation> o in g_res_objects.allObjects) { uint64_t z = o.allocatedSize; total += z; n++;
+    for (id<MTLAllocation> o in g_res_objects.allObjects) { uint64_t z = res_bytes(o); total += z; n++;
         int k = [(id)o conformsToProtocol:@protocol(MTLTexture)] ? 0 : [(id)o conformsToProtocol:@protocol(MTLHeap)] ? 1 : ((id<MTLBuffer>)o).storageMode == MTLStorageModeShared ? 2 : 3;
         kind[k] += z; count[k]++;
         for (int q = 0; q < N; q++) if (!top[q] || z > top[q].allocatedSize) { for (int j = N - 1; j > q; j--) top[j] = top[j - 1]; top[q] = o; break; } }
@@ -629,7 +634,7 @@ static void res_top(const char *why) { @autoreleasepool {
         pthread_mutex_lock(&g_res_mu);
         for (id<MTLAllocation> o in g_res_objects.allObjects) { int line = [[g_res_line objectForKey:o] intValue], tx = [(id)o conformsToProtocol:@protocol(MTLTexture)];
             int i = 0; while (i < nl && (bl[i].line != line || bl[i].tex != tx)) i++; if (i == nl && nl < NL) { bl[nl].line = line; bl[nl].tex = tx; bl[nl].n = bl[nl].b = 0; nl++; }
-            if (i < NL) { bl[i].n++; bl[i].b += o.allocatedSize; } }
+            if (i < NL) { bl[i].n++; bl[i].b += res_bytes(o); } }
         pthread_mutex_unlock(&g_res_mu);
         char line[1400] = ""; size_t lo = 0;
         for (int i = 0; i < nl && lo < sizeof line; i++) lo += snprintf(line + lo, sizeof line - lo, "%sline %d %s %llu, %llu MB", i ? "; " : "", bl[i].line, bl[i].tex ? "textures" : "other", (unsigned long long)bl[i].n, (unsigned long long)(bl[i].b >> 20));
@@ -3709,6 +3714,7 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
         MLOG("large texture ser=%llu %ux%ux%u format %#x target %d levels %u: %llu MB%s", (unsigned long long)t->serial, t->d.width, t->d.height, t->d.depth, t->d.format, t->d.target, t->d.levels,
              (unsigned long long)(mt.allocatedSize >> 20), t->pool && nvn_sparse_pool(t->pool) ? ", in a sparse virtual pool" : t->pool && (t->pool->flags & NVN_MEMORY_POOL_FLAGS_VIRTUAL) ? ", in a virtual pool" : ""); }
     if (g_allocprof > 0) { static int n; if (n++ < 30 || n % 500 == 0) MLOG("new texture (%s) #%d ser=%llu %ux%ux%u format %#x target %d levels %u storage %p", __func__, n, (unsigned long long)t->serial, t->d.width, t->d.height, t->d.depth, t->d.format, t->d.target, t->d.levels, (void *)t->mem); }
+    if (t->pool && t->mem && mt != reuse) objc_setAssociatedObject(mt, &g_tex_up_key, @[@((uint64_t)(uintptr_t)t->mem), @(t->L.size), @(t->pool->flags)], OBJC_ASSOCIATION_RETAIN_NONATOMIC);   // the census: its storage
     res_add(mt);   // Both first upload and re-upload register residency here (Metal 4 does not make resources resident automatically; a missed registration = GPU address page fault)
     if (drop) { objc_setAssociatedObject(mt, &g_drop_key, @1, OBJC_ASSOCIATION_RETAIN_NONATOMIC); if (!reuse) g_drop_n++; }
     int sparse = t->pool && nvn_sparse_pool(t->pool);
@@ -17834,7 +17840,7 @@ void mem_census(const char *why) { @autoreleasepool {
     uint64_t n_ret = 0, b_ret = 0, n_named = 0, b_named = 0, n_wait = 0, b_wait = 0, n_none = 0, b_none = 0, n_buf = 0, b_buf = 0;
     enum { NF = 24 }; struct { unsigned long pf; uint64_t n, b; } fm[NF] = {{0}}; int nfm = 0;
     pthread_mutex_lock(&g_res_mu);
-    for (id<MTLAllocation> o in g_res_objects.allObjects) { uint64_t z = o.allocatedSize;
+    for (id<MTLAllocation> o in g_res_objects.allObjects) { uint64_t z = res_bytes(o);
         if (z <= 65536) { int tx = [(id)o conformsToProtocol:@protocol(MTLTexture)], sh = ((id<MTLResource>)o).storageMode == MTLStorageModeShared; small_n[tx][sh]++; small_b[tx][sh] += z; }
         if (![(id)o conformsToProtocol:@protocol(MTLTexture)]) { n_buf++; b_buf += z; continue; }
         id<MTLTexture> t = (id)o; if (t.parentTexture) continue;
@@ -17889,6 +17895,32 @@ void mem_census(const char *why) { @autoreleasepool {
         for (int i = 0; i < nhm; i++) for (int j = i + 1; j < nhm; j++) if (hm[j].b > hm[i].b) { __typeof__(hm[0]) x = hm[i]; hm[i] = hm[j]; hm[j] = x; }
         char hl[900]; size_t ho = 0; for (int i = 0; i < nhm && ho < sizeof hl; i++) ho += snprintf(hl + ho, sizeof hl - ho, "%s%s %llu, %llu MB", i ? "; " : "", hm[i].k, (unsigned long long)hm[i].n, (unsigned long long)(hm[i].b >> 20));
         MLOG("%s census: textures at storage addresses with several, by holder (s live serial, g finalized serial, p pin, a sharing table, v live descriptor, r retired descriptor; R resident; memory h own recycled heap, f family heap, w span heap, - own): %s", why, nhm ? hl : "none");
+    }
+    {   // Every texture in the set by the line that added it and who holds it (the letters of the line above), and whether the memory pool its storage lies in still exists (P) or was
+        // finalized (x), or no storage is recorded (-). A texture left over from an area the game has left would be held by something here while its pool is gone
+        enum { NK = 40 }; struct { int line; char k[16]; uint64_t n, b; } hk[NK]; int nhk = 0; uint64_t nview = 0;
+        NSArray *objs; pthread_mutex_lock(&g_res_mu); objs = g_res_objects.allObjects; pthread_mutex_unlock(&g_res_mu);
+        NSMutableArray *tx = [NSMutableArray array]; for (id o in objs) if ([o conformsToProtocol:@protocol(MTLTexture)]) { id<MTLTexture> t = o; if (t.buffer || t.parentTexture) nview++; else [tx addObject:t]; }
+        NSUInteger nt = tx.count; char (*ks)[16] = calloc(nt ? nt : 1, 16); int *ln = calloc(nt ? nt : 1, sizeof *ln);
+        pthread_mutex_lock(&g_smu);
+        for (NSUInteger i = 0; i < nt; i++) { id t = tx[i]; const void *p = (__bridge const void *)t; char *k = ks[i]; int o = 0;
+            if (serial_table_holds(p)) k[o++] = 's';
+            if (own_ghost_holds_locked(p)) k[o++] = 'g';
+            if (tex_object_pinned(t)) k[o++] = 'p';
+            if (own_shared_locked(t)) k[o++] = 'a';
+            if ([v_live countForObject:t]) k[o++] = 'v'; else if ([v_ret countForObject:t]) k[o++] = 'r';
+            k[o] = 0; }
+        pthread_mutex_unlock(&g_smu);
+        pthread_mutex_lock(&g_res_mu); for (NSUInteger i = 0; i < nt; i++) ln[i] = [[g_res_line objectForKey:tx[i]] intValue]; pthread_mutex_unlock(&g_res_mu);
+        for (NSUInteger i = 0; i < nt; i++) { id<MTLTexture> t = tx[i]; NSArray *rg = objc_getAssociatedObject(t, &g_tex_range_key); if (!rg) rg = objc_getAssociatedObject(t, &g_tex_up_key);
+            size_t o = strlen(ks[i]); ks[i][o++] = ' '; ks[i][o++] = !rg ? '-' : mtl_addr_known([rg[0] unsignedLongLongValue], MAX([rg[1] unsignedLongLongValue], 1ull)) ? 'P' : 'x'; ks[i][o] = 0;
+            int j = 0; while (j < nhk && (hk[j].line != ln[i] || strcmp(hk[j].k, ks[i]))) j++;
+            if (j == nhk) { if (nhk == NK) continue; hk[nhk].line = ln[i]; memcpy(hk[nhk].k, ks[i], 16); hk[nhk].n = hk[nhk].b = 0; nhk++; }
+            hk[j].n++; hk[j].b += t.heap ? 0 : t.allocatedSize; }
+        free(ks); free(ln);
+        for (int i = 0; i < nhk; i++) for (int j = i + 1; j < nhk; j++) if (hk[j].b > hk[i].b) { __typeof__(hk[0]) x = hk[i]; hk[i] = hk[j]; hk[j] = x; }
+        char hl[1400]; size_t ho = 0; for (int i = 0; i < nhk && i < 24 && ho < sizeof hl; i++) ho += snprintf(hl + ho, sizeof hl - ho, "%sline %d [%s] %llu, %llu MB", i ? "; " : "", hk[i].line, hk[i].k, (unsigned long long)hk[i].n, (unsigned long long)(hk[i].b >> 20));
+        MLOG("%s census: textures in the set by the line that added them, holder (s live serial, g finalized serial, p pin, a sharing table, v live descriptor, r retired descriptor) and their storage's pool (P live, x finalized, - none recorded; placed textures count 0, their heaps apart): %s; views and textures over buffers %llu", why, hl, (unsigned long long)nview);
     }
     {   // the largest groups: each Metal texture over one storage address, so a reader can tell views made as copies from different images that reuse the memory
         NSMutableArray *groups = [NSMutableArray array];

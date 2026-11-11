@@ -295,6 +295,19 @@ class Maintenance(Base):
         self.assertFalse(any(sql.startswith('SELECT id,hash FROM blob') for sql in statements))
         self.assertEqual(self.snapshot(), before)
 
+    def test_private_compression_uses_rollback_journal_then_installs_wal(self):
+        self.fill(); before = self.snapshot(); seen = []; load = shader_cache._load_zstd
+        def observe(db):
+            load(db)
+            if db.execute('PRAGMA database_list').fetchone()[2].endswith('.compressed.part'):
+                seen.append((db.execute('PRAGMA journal_mode').fetchone()[0], db.execute('PRAGMA synchronous').fetchone()[0]))
+        with mock.patch.object(shader_cache, '_load_zstd', side_effect=observe):
+            shader_cache.maintain(self.path, compress=True, workers=2, say=self.said.append)
+        self.assertEqual(seen, [('delete', 1)])
+        with contextlib.closing(sqlite3.connect(self.path)) as db:
+            self.assertEqual(db.execute('PRAGMA journal_mode').fetchone(), ('wal',))
+        self.assertEqual(self.snapshot(), before)
+
     def test_wal_maintenance_uses_store_sync_policy(self):
         self.fill(); seen = []; compress = shader_cache._compressed_copy
         def observe(db, *args):

@@ -288,7 +288,8 @@ def _compressed_copy(db, path, part, workers):
     try:
         out.execute('PRAGMA page_size=16384'); out.execute('PRAGMA auto_vacuum=INCREMENTAL')
         for sql in SCHEMA: out.execute(sql)
-        out.execute('PRAGMA journal_mode=WAL'); out.execute('PRAGMA synchronous=NORMAL')
+        # Write the private output directly; enable WAL only after installation.
+        out.execute('PRAGMA synchronous=NORMAL')
         _load_zstd(out)
         out.execute('SELECT zstd_enable_transparent(?)', (json.dumps({'table': 'blob', 'column': 'data', 'compression_level': 3, 'dict_chooser': "'[nodict]'"}),)).fetchall()
         with cf.ThreadPoolExecutor(workers, initializer=init) as pool, out:
@@ -300,7 +301,6 @@ def _compressed_copy(db, path, part, workers):
             while pending:
                 out.executemany('INSERT INTO _blob_zstd(id,hash,data,_data_dict) VALUES(?,?,?,-1)', pending.popleft().result())
             out.executemany('INSERT INTO entry VALUES(?,?,?)', db.execute('SELECT name,blob,mtime FROM entry'))
-        if out.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone()[0]: raise RuntimeError('shader cache is busy; compressed conversion was not installed')
     finally:
         out.close()
         for connection in connections: connection.close()
@@ -328,6 +328,8 @@ def maintain(path, *, compress=False, decompress=False, workers=1, say=print):
                 if db.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone()[0]: raise RuntimeError('shader cache is busy; compressed conversion was not installed')
                 db.close(); db = None
                 os.replace(part, path)
+                db = sqlite3.connect(path, timeout=0, isolation_level=None)
+                db.execute('PRAGMA journal_mode=WAL').fetchall()
             elif decompress:
                 say(f'restoring raw shader compile cache {path}')
                 _remove_raw_part(part)

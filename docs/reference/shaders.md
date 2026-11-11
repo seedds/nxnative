@@ -773,6 +773,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Open:** a NaN or Inf already in the target under a zero destination weight, and a non-finite weight on a colour of 0, which a shader cannot see; the alpha channel's own weights; the Vulkan and OpenGL shader paths (whether those drivers set the option is not known).
 - **Note:** found with `DM_NVN_SNAPRAW` and `DM_NVN_TEXSNAP` (raw floats of every colour target after chosen passes of one frame) and `DM_NVN_MAGSCAN`, then the one shader instrumented beside the library (`DM_MSL_DIR`): the first NaN at `1/w × v` with `w = 0`, every NaN texel stored with alpha 1 (source alpha 0). Ruled out on the way: the fog volumes (finite), FMZ handling (none in the code), stale uniforms (`DM_NVN_UB_DEFER=0`, `DM_NVN_UBP_CHECK`), the depth test, `-fmetal-math-mode=relaxed`. The driver's command word was found by scanning the modules for writes to method 0x670; the code that sends the list was not disassembled, and no console was measured.
 
+### The blend helper's output reference on iOS
+
+- **Symptom:** iOS pixel shader compilation fails with `reference type must have explicit address space qualifier` at `dm_blend0(main0_out& dm_o, ...)`. The Mac libraries compile.
+- **Cause:** `blend_zero` generated a reference without an address space. The iOS build targets Metal's iOS 18 language mode, which requires one; the Mac compiler's newer default accepts a generic reference. The output is a local variable of the fragment function.
+- **Fix:** `dmsh_rewrite.py` declares the helper's output parameter `thread main0_out&`. The helper's behavior is unchanged. `test_dmsh_blend_zero.py` compiles the plain, integer-output, side and readable-tile variants for both macOS and the packing script's iOS 18 target.
+- **Found on:** [The Binding of Isaac: Rebirth](../../dm/games/01009BC00C38A000/README.md): all 10 pixel shaders failed on iOS, while its 9 vertex shaders and all 19 Mac shaders compiled.
+
 ### gl_FragCoord.z against the depth stored for its own surface
 
 - **Symptom:** dark specks flickering in a ground mist, a few pixels each, at different places every frame (Ocarina of Time in Kokiri Forest; the console shows none). Dropping the mist removes them, as does dropping its depth-only pass.

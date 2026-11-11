@@ -6,7 +6,7 @@ Work in progress. With the pull requests below, it boots on the Mac and plays to
 
 - [PR #1561](https://github.com/seedds/nxnative/pull/1561): SDK 21's `GetVirtualOutputDeviceProperties`. The game asks for it after the safety screen; without it the SDK connects to `auddmg:u` itself, which the host does not serve, and aborts (`Result 0xa99`).
 - [PR #2105](https://github.com/seedds/nxnative/pull/2105): file calls on a mount only the SDK holds. The game copies its VoiceText dictionaries into a RAM disk it mounts as `vtapi` and reads them back; without it, `Result 0x202` at `main+0x414dbc` at boot.
-- [PR #2106](https://github.com/seedds/nxnative/pull/2106): the controller icon colours and the IMU's enable state, which the SDK's own functions ask the hid service the host does not serve (`Result 0xe15` at boot).
+- [PR #2106](https://github.com/seedds/nxnative/pull/2106): the controller icon colours and the controller IMU, which the SDK's own functions ask the hid service the host does not serve (`Result 0xe15` at boot), and the IMU's samples, from which the SDK's sensor fusion calibrates the Joy-Cons and gives the game their motion.
 - [PR #2103](https://github.com/seedds/nxnative/pull/2103): the fragment's shading-rate size (system register 0x84) reads 1 x 1. 612 of its pixel shaders read it; without it the sea is black on the title screen and in the menus (chain change).
 - [PR #2264](https://github.com/seedds/nxnative/pull/2264): six task and mesh shaders whose payload is past Metal's 16 KB ([Shaders](#shaders)).
 - [PR #2271](https://github.com/seedds/nxnative/pull/2271): integer reads of game uniforms as volatile loads. On main some of its material pipelines take Metal's compiler minutes and gigabytes each, the prebuild runs `MTLCompilerService` out of memory, and the pipeline archive loses whole files, so the game compiles pipelines for minutes at every start.
@@ -40,7 +40,7 @@ With both in place the Miis are listed first on Select User and their heads draw
 - [The fragment's shading-rate size reads 1 x 1](https://github.com/seedds/nxnative/pull/2103) (PR #2103).
 - [A read-only mount of the game's own save data](https://github.com/seedds/nxnative/pull/2104) (PR #2104).
 - [File calls on a mount only the SDK holds](https://github.com/seedds/nxnative/pull/2105) (PR #2105).
-- [Switch 2 controller icon colours and IMU calls](https://github.com/seedds/nxnative/pull/2106) (PR #2106).
+- [Switch 2 controller icon colours, IMU samples and sensor fusion](https://github.com/seedds/nxnative/pull/2106) (PR #2106).
 - [A task shader's payload past Metal's 16 KB](https://github.com/seedds/nxnative/pull/2264) (PR #2264).
 - [Integer reads of game uniforms and Metal's compile time](https://github.com/seedds/nxnative/pull/2271) (PR #2271).
 - [A colour clear under a partial channel mask leaves the other channels](https://github.com/seedds/nxnative/pull/2273) (PR #2273).
@@ -53,6 +53,6 @@ With both in place the Miis are listed first on Select User and their heads draw
 - Tennis: on the VS screen, the left player's partner is drawn with horizontal stripes.
 - The title and menus show a faint vertical seam down the middle of the sky.
 - Gameplay is letterboxed (black bars above and below); not checked whether that is the game's own framing.
-- Motion: the host gives the controller IMU no samples ([PR #2106](https://github.com/seedds/nxnative/pull/2106)), so the Joy-Con calibration cannot finish (it can be skipped) and motion controls do not work.
+- Motion: with [PR #2106](https://github.com/seedds/nxnative/pull/2106) the Joy-Cons' motion reaches the game and its sensor fusion calibrates them on its own while they lie still (the game no longer asks), with two Joy-Con 2 as a pair. Not checked: whether swings in play feel right (axes, signs), a single Joy-Con, handheld. The calibration is not kept across starts, as a console keeps it.
 - Miis: with [PR #2274](https://github.com/seedds/nxnative/pull/2274) and the player's files ([Miis](#miis)) the console's Miis are listed and drawn. The game's "Add User" opens the system Mii editor (`AppendMii`), which the host still answers as cancelled, so no new Mii can be made in the game. Not checked: the boxing arms an earlier run lacked, with the head models now in place.
 - Online play, iOS: not tested.

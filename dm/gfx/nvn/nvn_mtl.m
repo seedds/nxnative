@@ -9845,6 +9845,18 @@ static NSArray<WarmTask *> *warm_parse(NSArray<NSString *> *paths, long *lines) 
             n++;
         }
     }
+    // Every compute shader of the shader map, after the lists' lines: a compute pipeline is its shader alone, so all of them can be built ahead, and one no list names was built at
+    // its first dispatch on the submit thread (Kirby Air Riders: 5,586 of 8,092 in no list, about 180 ms each, 8-22 of them in a race's first minute). DM_PSO_ALL_COMPUTE=0 turns it off
+    { const char *ev = getenv("DM_PSO_ALL_COMPUTE"); long added = 0;
+      if (!(ev && !strcmp(ev, "0")))
+          for (NSString *mk in [g_shmap.allKeys sortedArrayUsingSelector:@selector(compare:)]) {
+              if (![g_shmap[mk] isEqualToString:@"compute"]) continue;
+              NSString *key = [mk stringByAppendingString:@"_b"], *line = [@"C\t" stringByAppendingString:key];
+              if ([seen containsObject:line]) continue;
+              [seen addObject:line];
+              WarmTask *t = [WarmTask new]; t->kind = 2; t->key = key; t->stage = 5; [tasks addObject:t]; n++; added++;
+          }
+      if (added) MLOG("pipeline prewarm: %ld compute shaders of the shader map no list names, added (DM_PSO_ALL_COMPUTE=0 turns this off)", added); }
     *lines = n; return tasks;
 }
 static void warm_task(WarmTask *t) {

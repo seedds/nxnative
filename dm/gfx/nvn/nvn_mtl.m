@@ -486,6 +486,8 @@ static void file_wire_record(fwire_t fw, uint64_t dt) {   // Caller holds g_res_
     }
     g_fwire[g_nfwire++] = fw;
 }
+static uint64_t g_fwire_peak, g_res_peak;   // since the last residency line: the most file-backed bytes wired before one commit, the largest set after a commit
+static _Atomic uint64_t g_ubs_live, g_ubs_peak;   // bytes of the upload batches' buffers over guest memory (up_big_src) in the set now, and the most at once since the last residency line
 static void file_unwire(fwire_t *fw, size_t n) { for (size_t i = 0; i < n; i++) munlock(fw[i].p, fw[i].n); free(fw); }   // a range the game has mapped anew meanwhile fails, harmlessly
 // Both run on guest threads too (pool_res from mtl_addr, uploads), whose implicit autorelease pools never drain; containsObject: / removeObject: on a weak NSHashTable leave the object
 // autoreleased in the calling thread's pool (measured in a standalone test: the object outlived its last strong reference until the thread ended), so each has a pool of its own
@@ -834,14 +836,15 @@ static void res_commit_retiring(NSArray<id<MTLAllocation>> *staging) { @autorele
     pthread_mutex_lock(&g_res_mu);
     res_op *q = g_res_q; size_t n = g_res_qn; g_res_q = NULL; g_res_qn = g_res_qcap = 0;
     fwire_t *fw = g_fwire; size_t nfw = g_nfwire; g_fwire = NULL; g_nfwire = g_cfwire = 0;   // the file pages wired for exactly these changes
+    { uint64_t b = 0; for (size_t i = 0; i < nfw; i++) b += fw[i].n; if (b > g_fwire_peak) g_fwire_peak = b; }
     pthread_mutex_unlock(&g_res_mu);
     uint64_t dt = 0;
     if (n) {
         uint64_t t0 = commit_now();
         for (size_t i = 0; i < n; i++) { if (q[i].add) [g_res addAllocation:(__bridge id<MTLAllocation>)q[i].o]; else [g_res removeAllocation:(__bridge id<MTLAllocation>)q[i].o]; }
         [g_res commit];
-        dt = commit_now() - t0;
-        pthread_mutex_lock(&g_res_mu); g_rs_commits++; g_rs_commit_ns += dt; pthread_mutex_unlock(&g_res_mu);
+        dt = commit_now() - t0; uint64_t z = g_res.allocatedSize;   // the set after the commit, read under g_res_commit_mu
+        pthread_mutex_lock(&g_res_mu); g_rs_commits++; g_rs_commit_ns += dt; if (z > g_res_peak) g_res_peak = z; pthread_mutex_unlock(&g_res_mu);
     }
     file_unwire(fw, nfw);   // after the commit that made those buffers resident; under g_res_commit_mu, so a later commit cannot run before them
     uint64_t slow = n && dt >= g_slow_commit_ns ? slow_commit_log_number(&g_slow_res_commits) : 0;
@@ -909,8 +912,10 @@ void mtl_res_stats(char *out, size_t n) {
     if (o < n) o += snprintf(out + o, n - o, "), removed %llu, %lu allocations in the set (%.0f MB)", (unsigned long long)g_rs_rm, set_n, set_mb);
     if (o < n) snprintf(out + o, n - o, ", named on %llu command buffers in %.2f ms, longest %.2f ms", (unsigned long long)atomic_exchange(&g_res_names, 0), atomic_exchange(&g_res_name_ns, 0) / 1e6, atomic_exchange(&g_res_name_max, 0) / 1e6);
     { uint64_t ffail = atomic_load(&g_fwire_fail);
-      if (g_fwire_n + ffail) { o = strlen(out); if (o < n) snprintf(out + o, n - o, ", file-backed buffers wired before their commit %llu, %.0f MB, %.1f ms (refused %llu)", (unsigned long long)g_fwire_n, g_fwire_bytes / 1048576.0, g_fwire_ns / 1e6, (unsigned long long)ffail); }
-      g_fwire_n = g_fwire_bytes = g_fwire_ns = 0; }
+      { o = strlen(out); if (o < n) snprintf(out + o, n - o, ", at most %.0f MB after a commit", g_res_peak / 1048576.0); }
+      if (g_fwire_n + ffail) { o = strlen(out); if (o < n) snprintf(out + o, n - o, ", file-backed buffers wired before their commit %llu, %.0f MB, %.1f ms, at most %.0f MB before one commit (refused %llu)", (unsigned long long)g_fwire_n, g_fwire_bytes / 1048576.0, g_fwire_ns / 1e6, g_fwire_peak / 1048576.0, (unsigned long long)ffail); }
+      { uint64_t pk = atomic_exchange(&g_ubs_peak, atomic_load(&g_ubs_live)); if (pk) { o = strlen(out); if (o < n) snprintf(out + o, n - o, ", upload reads over guest memory at most %.0f MB at once", pk / 1048576.0); } }
+      g_fwire_n = g_fwire_bytes = g_fwire_ns = g_fwire_peak = 0; g_res_peak = (uint64_t)(set_mb * 1048576.0); }   // set_mb: the set's size read under g_res_commit_mu
     memset(g_rs_site, 0, sizeof g_rs_site); g_rs_rm = g_rs_commits = g_rs_commit_ns = 0;
     pthread_mutex_unlock(&g_res_mu);
 }
@@ -3947,6 +3952,7 @@ static unsigned g_up_seq;
 static __strong id<MTLBuffer> g_up_slot_blk[3], g_up_slot_over[3]; static unsigned g_up_cur_slot;
 static size_t g_up_slot_want[3], g_up_batch_bytes; static int g_up_over_used;
 static size_t g_up_src_bytes;   // page-rounded bytes of the open batch's zero-copy sources
+static uint64_t g_up_big_batch;   // bytes of up_big_src buffers in the open batch, budget or not (the residency line's peak, g_ubs_live)
 static size_t up_src_budget(void) {
     static size_t bytes = SIZE_MAX;
     if (bytes == SIZE_MAX) {
@@ -4091,6 +4097,7 @@ static void up_flush(void) {
     NSMutableArray *staging = g_up_keep;
     if (g_up_block && !up_retained(g_up_block, slot)) [staging addObject:g_up_block];
     NSMutableArray *views = g_up_views; g_up_views = nil;
+    uint64_t big = g_up_big_batch; g_up_big_batch = 0;   // this batch's buffers over guest memory, out of the set with its staging
     g_up_keep = nil; g_up_block = nil;
     g_up_block_off = g_up_block_size = g_up_staging_bytes = 0;
     NSMutableSet *targets = [NSMutableSet setWithArray:g_up_texs]; for (int i = 0; i < g_nup_blits; i++) if (g_up_blits[i].dst) [targets addObject:g_up_blits[i].dst];
@@ -4117,6 +4124,7 @@ static void up_flush(void) {
                     res_commit_retiring(staging);
                     [staging removeAllObjects];
                 }
+                atomic_fetch_sub(&g_ubs_live, big);
                 up_complete(slot);
             });
         } else {
@@ -4491,6 +4499,7 @@ static id<MTLBuffer> up_big_src(uint64_t addr, uint64_t len, uint64_t *off, int 
     if (!buf) return nil;
     g_up_src_made++;
     if (budget) g_up_src_bytes += b - a;
+    g_up_big_batch += b - a; { uint64_t lv = atomic_fetch_add(&g_ubs_live, b - a) + (b - a), pk = atomic_load(&g_ubs_peak); while (lv > pk && !atomic_compare_exchange_weak(&g_ubs_peak, &pk, lv)) {} }
     res_add(buf); [g_up_keep addObject:buf]; *off = (uint64_t)addr - a;
     return buf;
 }

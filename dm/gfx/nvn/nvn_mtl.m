@@ -6229,10 +6229,10 @@ static NvShader *builtin_get(const char *ctl) {
     return nil;
 }
 static void up_mfx_read_color(NvShader *cs, const NVNshaderData *sd);
-static __unsafe_unretained NvProg *prog_get_base(const prog_t *cp);
-static __unsafe_unretained NvProg *prog_alt(NvProg *p);
+static NvProg *prog_alt(NvProg *p);
 // The program a draw uses: the game's, or in a DM_NVN_SHADER_ALT phase its twin with the variants (prog_alt). Called only on the submit thread
-static __unsafe_unretained NvProg *prog_get(const prog_t *cp) { return prog_alt(prog_get_base(cp)); }
+static NvProg *prog_get_base(const prog_t *cp);
+static NvProg *prog_get(const prog_t *cp) { return prog_alt(prog_get_base(cp)); }
 // ---------- DM_NVN_SHADER_ALT (diagnostic, off by default): any shader variant, measured in the run ----------
 // DM_NVN_SHADER_ALT=<dir>: a shader key with a library <key>.metallib in <dir> (and its side libraries: dm/gfx/tools/fsbench, mk_probe_libs.py) draws with that variant instead of the
 // game's. DM_NVN_SHADER_ALT_AB=ab (or ab:<k>/<n>, as every DM_AB switch) alternates them with the DM_AB phases: phase 0 the game's, so both run in one process, scene and thermal state;
@@ -6273,17 +6273,17 @@ static NvShader *alt_get(NvShader *s) {
     return s->alt = a;
 }
 // Program p with its shaders' variants, in the phases the switch is on (p itself otherwise, and when it has no variant)
-static __unsafe_unretained NvProg *prog_alt(NvProg *p) {
-    if (!p || !g_alt_dir && !alt_dir()) return p;
+static NvProg *prog_alt(NvProg *p) {
+    if (!p || (!g_alt_dir && !alt_dir())) return p;
     if (!sw_on(g_alt_mode)) return p;
     if (p->alt_state == 0) {
         p->alt_state = 2; NvProg *t = nil;
-        for (int st = 0; st < 6; st++) { NvShader *a = alt_get(p->sh[st]); if (!a) continue; if (!t) { t = [NvProg new]; memcpy(t->sh, p->sh, sizeof t->sh); memcpy(t->gs_miss, p->gs_miss, sizeof t->gs_miss); t->alt_state = 2; } t->sh[st] = a; }
+        for (int st = 0; st < 6; st++) { NvShader *a = alt_get(p->sh[st]); if (!a) continue; if (!t) { t = [NvProg new]; for (int i = 0; i < 6; i++) t->sh[i] = p->sh[i];   /* assigned, not copied: the slots are strong references */ memcpy(t->gs_miss, p->gs_miss, sizeof t->gs_miss); t->alt_state = 2; } t->sh[st] = a; }
         if (t) { p->alt = t; p->alt_state = 1; }
     }
     return p->alt_state == 1 ? p->alt : p;
 }
-static __unsafe_unretained NvProg *prog_get_base(const prog_t *cp) {   // Called only on the submit thread
+static NvProg *prog_get_base(const prog_t *cp) {   // Called only on the submit thread
     prog_t *p = (prog_t *)cp;
     if (!p) return nil;   // no program bound: nil, as the callers that test S.prog first get (draw_'s passdump line tests it, the lines after it did not)
     static const prog_t *lp; static uint64_t lser, lgen; static NvProg *lpr;   // Last result: same object, same serial and unchanged serial table means it is used directly

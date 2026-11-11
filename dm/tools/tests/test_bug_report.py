@@ -151,6 +151,45 @@ class BugReport(unittest.TestCase):
         t = br.read_text(p)
         self.assertLess(len(t), br.FILE_CAP + 200); self.assertIn('HEAD', t); self.assertIn('TAIL', t)
 
+    def test_large_log_cut_does_not_bypass_key_redaction(self):
+        half = br.FILE_CAP // 2
+        key_line = f'title_key = {KEY}\n'
+        # At the head cut only half the value survives; at the tail cut the
+        # entire value survives without the key name. Neither matches redaction.
+        for side in ('head', 'tail'):
+            with self.subTest(side=side):
+                if side == 'head':
+                    prefix = 'HEAD\n' + 'x' * (half - len('HEAD\n') - len('title_key = ') - 16 - 1) + '\n'
+                    text = prefix + key_line + 'x' * br.FILE_CAP + '\nTAIL\n'
+                else:
+                    # Whitespace after '=' is valid key syntax. Leave enough
+                    # that the bundle's final byte cap still keeps the value.
+                    value = ' ' * 128 + KEY
+                    suffix = '\n' + 'x' * (half - len(value) - len('\nTAIL\n') - 1) + '\nTAIL\n'
+                    text = 'HEAD\n' + 'x' * br.FILE_CAP + '\ntitle_key =' + value + suffix
+                path = self.home / f'Library/Logs/nxnative/{TID}.log'
+                path.write_text(text)
+                code, out = self.run_main(TID)
+                self.assertEqual(code, 0)
+                with zipfile.ZipFile(out) as z:
+                    log = z.read(f'logs/mac-app/{TID}.log').decode()
+                self.assertIn('HEAD\n', log); self.assertIn('TAIL\n', log)
+                self.assertIn('bytes cut here', log)
+                self.assertFalse(KEY[:16] in log, 'key material survived in the report zip')
+                redacted, _ = br.redact(br.read_text(path), str(self.home))
+                self.assertFalse(KEY[:16] in redacted, 'a cut line bypassed redaction')
+
+    def test_large_log_keeps_complete_boundary_lines(self):
+        head = b'HEAD\n' + b'h' * 122 + b'\n'
+        tail = b'TAIL\n' + b't' * 123   # the final line has no newline
+        middle = b'm' * 256 + b'\n'
+        p = self.root / 'big.log'; p.write_bytes(head + middle + tail)
+        with mock.patch.object(br, 'FILE_CAP', 256):
+            text = br.read_text(p)
+        self.assertTrue(text.startswith(head.decode()))
+        self.assertTrue(text.endswith(tail.decode()))
+        self.assertIn(f'{len(middle)} bytes cut here', text)
+
     def test_report_and_utf8_text_share_hard_caps(self):
         self.mocks[0].return_value = {'launcher.DM_TEST': '\u00e9' * 20000}
         for name in (f'{TID}.log', f'{TID}.prev.log'):

@@ -92,7 +92,7 @@ DM_KBD_PLAYER	switch	`own` makes the Mac keyboard player 1 on its own, with cont
 DM_KEYS	switch	Scripted input: `<seconds or f<frame>>:<key>[+key][~hold or ~f<frames>][*count/interval],…` presses buttons, sticks, touches and `Shake` at those times; `=@<file>` reads the steps from the file
 DM_LANG	player	Game language as a language code (default `en-US`; the iOS app sets the one the IPA was packed with)
 DM_LAUNCHER	switch	`0` skips the iOS settings screen or the Mac settings window and starts the game at once, with the saved choices (on the Mac also `--no-launcher`)
-DM_LAUNCH_PARAM	path	File whose bytes `oe::TryPopLaunchParameter` returns once; `oe::ExecuteProgram` sets it for the program it starts
+DM_LAUNCH_PARAM	path	File whose bytes `oe::TryPopLaunchParameter` returns once; `oe::ExecuteProgram` sets it for the program it starts; a relaunch removes it
 DM_LINK_VTICK	switch	`0` keeps the system's display-link rate on 144 or 165 Hz Mac screens; by default the link counts only the refreshes nearest a steady 1/60 s clock
 DM_LOADHASH	diagnostic	`=1` logs an address-independent SHA-256 per module after loading
 DM_LONGFRAME	diagnostic	`0` turns off the long-frame log (on by default), a line for a frame over 20 ms or with GPU time over 16.7 ms that is clearly above recent frames
@@ -263,7 +263,7 @@ DM_PRESENT_LATENCY	switch	`=1` or `2`: overrides the display link's preferred fr
 DM_PRESENT_LINK	switch	Present pacing: `0` acquires the drawable itself, `1` (the default) presents on a 60 Hz display link, `2` uses a 120 Hz display link with a frame every other tick. Unset, a 60 fps game in fullscreen on a variable-refresh screen that keeps its variable mode (no fixed-rate mode, or `DM_SCREEN_MATCH=0`) at a multiple of 120 Hz takes the 120 Hz link of `2`; a value set here holds in every window and screen mode
 DM_PRESENT_SNAP	player	`=<n>`: present snapshots, a ring of n host textures (2 to 4; `1` = 2) the presents are copied to so the game's swapchain texture is free at once; `0` off (default: the profile's `present_snap`)
 DM_PRESENT_UPSCALE	player	`metalfx` scales a picture smaller than its rectangle on the screen through MetalFX's spatial scaler; `off` (the default) scales it bilinearly
-DM_PREV_PROGRAM	switch	What `oe::GetPreviousProgramIndex` answers (default -1, started from HOME); `oe::ExecuteProgram` sets it for the program it starts
+DM_PREV_PROGRAM	switch	What `oe::GetPreviousProgramIndex` answers (default -1, started from HOME); `oe::ExecuteProgram` sets it for the program it starts; a relaunch removes it
 DM_PROBE	diagnostic	`=module:offset,…` (Mac only): puts a `brk` at each guest address and on every hit prints the thread, registers, strings they point to and a backtrace, then runs the original instruction
 DM_PROBE_ALL	diagnostic	Set: probe hits (`DM_PROBE`) also print x8–x18
 DM_PROBE_DUMP	diagnostic	`=module:offset:length[:file]`: on the first hit of any probe, writes that range of guest memory to a file (default `run/<platform>/probe_dump.bin`)
@@ -302,6 +302,7 @@ DM_QOS_EDGES	switch	`=e1,e2`: the Switch priority edges of `DM_QOS_MAP` (default
 DM_QOS_MAP	switch	`=1` maps guest thread priority to QoS class: ≤ 44 user-interactive, 45–59 user-initiated, the rest utility (off by default: every guest thread runs user-interactive)
 DM_REC	diagnostic	`=<file>`: writes player 1's physical input (keyboard, mouse touches, controllers; never `DM_KEYS` / `DM_CTL`) to the file as `DM_KEYS` steps in presented frames, for replaying a run (`DM_KEYS=@<file>`)
 DM_REGIONS	diagnostic	`=<file>` writes the table of the SDK's address regions every 2 s (alias offset, size, where the request returns to in the game, bytes mapped, the part opened, the SDK offset the request came through; `hle_svc.c` "Address regions"); the NSP script's address region check sets it
+DM_RELAUNCH	switch	Set by `oe::RequestToRelaunchApplication` for the host it starts again: `DM_CTL` resumes at the end of its file instead of replaying it
 DM_RENDER_SCALE	player	`0.5` to `1.0`: fixes the game's 3D views at that fraction of their size and turns its dynamic resolution off, for builds with a render scale stub; `1.0` (the default) keeps it. Up to the stub's largest scale (`RENDER_SCALE` in its fixups table): Hades II's render size stub takes up to `3.0` (3840x2160)
 DM_RESOURCE_AOC	path	The add-on content folder the iOS build copies into the app's `aoc/` (empty for none); written by `gen_resources.py`, read by `stage_resources.sh`
 DM_RESOURCE_BUILD	switch	Package version (for example `v327680`), written to `Gen/resources.env` by `gen_resources.py`; with `DM_COPY_ROMFS=NO` the copy phase puts it in the `build=` field of the app's `romfs.id`

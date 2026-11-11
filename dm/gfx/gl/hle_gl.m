@@ -16,7 +16,7 @@
 //   · shaders come from the offline library built by dm/gfx/tools/gl_shaders.py (<DM_MSL_DIR>/gl/): a shader is found by the hash of its source and its stage; its table row lists the
 //     vertex inputs, the members of its default uniform block (glUniform* writes them into CPU copies that are set as bytes at each draw that needs them) and its samplers.
 //     glGetAttribLocation returns the Metal attribute index of the input, so the game's attribute index is the Metal one; vertex buffers are at slot 30 − index.
-// Environment: DM_GL_LOG=1 logs object creation; DM_GL_CAPTURE=<dir> writes every shader source the game compiles (<key>.vert / <key>.frag, read by gl_shaders.py).
+// Environment: DM_GL_LOG=1 logs object creation and the deletion of shaders and programs; DM_GL_CAPTURE=<dir> writes every shader source the game compiles (<key>.vert / <key>.frag, read by gl_shaders.py).
 #include "../../host/hle.h"
 #include "../nvn/nvn_mtl.h"
 #include "../nvn/host_msl.h"
@@ -318,15 +318,18 @@ typedef struct { vattr_t a[16]; GLuint ebo; } vao_t;
 NAMES(vao_t, g_vaos, g_nvaos, g_capvaos)
 static vao_t g_vao0;   // the default vertex array (GL core has none, the compatibility profile does)
 
-typedef struct { GLenum type; char *src; size_t len; char key[17]; const shinfo *si; __strong id<MTLFunction> fn; int compiled; } shader_t;
+// refs: the programs it is attached to; deleted: glDeleteShader flagged it while attached (it keeps its name and goes with its last attachment, as in GL)
+typedef struct { GLenum type; char *src; size_t len; char key[17]; const shinfo *si; __strong id<MTLFunction> fn; int compiled, refs, deleted; } shader_t;
 typedef struct { char name[48]; uint8_t type; uint16_t count; int32_t off[2]; uint16_t stride[2]; int slot[2]; int unit; } puni_t;   // [0] vertex, [1] fragment
 typedef struct { uint32_t vf[16]; uint16_t stride[16]; uint8_t div[16]; uint32_t cpf, dpf, spf; uint8_t blend, mask, bsrc, bdst, bsa, bda, eqc, eqa; } pkey_t;
 typedef struct { pkey_t k; void *pso; } pent_t;   // pso: a retained id<MTLRenderPipelineState>, NULL = failed
 // amap: the game's attribute index of each Metal vertex input (glBindAttribLocation before the link, else the input's own number, which glGetAttribLocation returns);
 // LÖVE binds VertexPosition, VertexTexCoord, VertexColor and ConstantColor to 0–3 in every program
 typedef struct { char name[48]; int index; } abind_t;
+// vs, fs: the attached shaders, each counted in its refs; deleted: glDeleteProgram flagged it while current (it goes at the next glUseProgram of another);
+// what the link took from them (si, fn, the uniform table) is the program's own, so attaching, detaching or deleting a shader later leaves the linked program as it is
 typedef struct {
-    GLuint vs, fs; int linked; const shinfo *si[2]; __strong id<MTLFunction> fn[2];
+    GLuint vs, fs; int linked, deleted; const shinfo *si[2]; __strong id<MTLFunction> fn[2];
     int nu; puni_t *u; uint8_t *ub[2]; uint64_t ub_gen[2]; uint32_t serial;
     pent_t *pc; int npc, cappc;
     abind_t bind[16]; int nbind; int8_t amap[16];
@@ -1716,15 +1719,32 @@ GL(glGetShaderiv, void, GLuint sh, GLenum p, GLint *v) {
         case GL_INFO_LOG_LENGTH: *v = 0; return;
         case GL_SHADER_TYPE: *v = s->type; return;
         case GL_SHADER_SOURCE_LENGTH: *v = (GLint)s->len + 1; return;
-        case GL_DELETE_STATUS: *v = 0; return;
+        case GL_DELETE_STATUS: *v = s->deleted; return;
     }
     RED1("glGetShaderiv(%#x) not implemented", p); *v = 0;
 }
 GL(glGetShaderInfoLog, void, GLuint sh, GLsizei size, GLsizei *len, GLchar *log) { (void)sh; if (len) *len = 0; if (log && size > 0) log[0] = 0; }
-GL(glDeleteShader, void, GLuint sh) { shader_t *s = shader_of(sh); if (!s) return; free(s->src); s->fn = nil; free(g_sps[sh]); g_sps[sh] = NULL; }
+static void shader_free(GLuint sh) { shader_t *s = &g_sps[sh]->s; free(s->src); s->fn = nil; free(g_sps[sh]); g_sps[sh] = NULL; }
+static void shader_release(GLuint *slot) {   // a program lets go of the shader in one of its stages
+    GLuint sh = *slot; shader_t *s = shader_of(sh); *slot = 0;
+    if (s && --s->refs <= 0 && s->deleted) shader_free(sh);
+}
+GL(glDeleteShader, void, GLuint sh) {
+    shader_t *s = shader_of(sh); if (!s) return;
+    OLOG("DeleteShader %u%s", sh, s->refs ? " (attached: flagged)" : "");
+    if (s->refs) s->deleted = 1; else shader_free(sh);
+}
+// One shader per stage: attaching another replaces it (GLES refuses a second one; the shader tables have one stage each)
 GL(glAttachShader, void, GLuint pr, GLuint sh) {
     prog_t *p = prog_of(pr); shader_t *s = shader_of(sh); if (!p || !s) return;
-    if (s->type == GL_VERTEX_SHADER) p->vs = sh; else p->fs = sh;
+    GLuint *slot = s->type == GL_VERTEX_SHADER ? &p->vs : &p->fs;
+    if (*slot == sh) return;
+    shader_release(slot); *slot = sh; s->refs++;
+}
+GL(glDetachShader, void, GLuint pr, GLuint sh) {
+    prog_t *p = prog_of(pr); if (!p || !sh) return;
+    OLOG("DetachShader %u from %u", sh, pr);
+    if (p->vs == sh) shader_release(&p->vs); else if (p->fs == sh) shader_release(&p->fs);
 }
 static void prog_clear(prog_t *p) {
     for (int i = 0; i < p->npc; i++) if (p->pc[i].pso) CFRelease(p->pc[i].pso);
@@ -1782,12 +1802,23 @@ GL(glGetProgramiv, void, GLuint pr, GLenum p, GLint *v) {
         case GL_ACTIVE_UNIFORM_MAX_LENGTH: { int m = 0; for (int i = 0; i < x->nu; i++) m = (int)umax(m, (uint32_t)strlen(x->u[i].name) + 4); *v = m; return; }
         case GL_ATTACHED_SHADERS: *v = (x->vs != 0) + (x->fs != 0); return;
         case GL_ACTIVE_ATTRIBUTES: *v = x->si[0] ? x->si[0]->na : 0; return;
-        case GL_DELETE_STATUS: *v = 0; return;
+        case GL_DELETE_STATUS: *v = x->deleted; return;
     }
     RED1("glGetProgramiv(%#x) not implemented", p); *v = 0;
 }
-GL(glDeleteProgram, void, GLuint pr) { prog_t *p = prog_of(pr); if (!p) return; prog_clear(p); free(g_sps[pr]); g_sps[pr] = NULL; if (S.prog == pr) S.prog = 0; }
-GL(glUseProgram, void, GLuint pr) { S.prog = pr; }
+static void prog_free(GLuint pr) {   // the program goes, and its attachments with it
+    prog_t *p = &g_sps[pr]->p; prog_clear(p); shader_release(&p->vs); shader_release(&p->fs); free(g_sps[pr]); g_sps[pr] = NULL;
+}
+// As in GL, the current program deleted stays in use, its draws going on, until another is made current
+GL(glDeleteProgram, void, GLuint pr) {
+    prog_t *p = prog_of(pr); if (!p) return;
+    OLOG("DeleteProgram %u%s", pr, S.prog == pr ? " (current: flagged)" : "");
+    if (S.prog == pr) p->deleted = 1; else prog_free(pr);
+}
+GL(glUseProgram, void, GLuint pr) {
+    GLuint old = S.prog; S.prog = pr;
+    prog_t *o = prog_of(old); if (old != pr && o && o->deleted) prog_free(old);
+}
 GL(glGetAttribLocation, GLint, GLuint pr, const GLchar *name) {
     prog_t *p = prog_of(pr); if (!p || !p->linked) return -1;
     for (int i = 0; i < p->si[0]->na; i++) if (!strcmp(p->si[0]->a[i].name, name)) return p->amap[p->si[0]->a[i].slot];

@@ -29,11 +29,21 @@ printf 'DM_INTERNAL_RESOLUTION=%s\nDM_PRESENT_UPSCALE=off\nDM_METAL_HUD=1\nDM_NV
 # request is active (x22+0xbd0 set), main:33167c only when it asks for a scale other than 1; every 30th hit is printed with its frame
 [ "${SCALE_PROBE:-}" = 1 ] && { PROBE=${PROBE:+$PROBE,}main:331654,main:33167c; printf 'DM_PROBE_EVERY=30\n' >> "$OUT/env.txt"; }
 [ -n "${PROBE:-}" ] && printf 'DM_PROBE=%s\nDM_PROBE_LIMIT=%s\n' "$PROBE" "$([ "${SCALE_PROBE:-}" = 1 ] && echo 400 || echo 3)" >> "$OUT/env.txt"
+# Native Scan Visor state, read-only; no renderer-size, visibility or rumble probes in this diagnostic.
+# Reject incompatible originals before building; verify the just-built probe sites again before launch.
+if [ "${SCAN_STATE_PROBE:-}" = 1 ]; then
+    [ -z "${PROBE:-}${VIS_SCALE:-}" ] || { echo "SCAN_STATE_PROBE must run without other probes or VIS_SCALE" >&2; exit 2; }
+    ORIGINAL="$WORK/extract/v131072/ExeFS/main"
+    "$PY" "$REPO/dm/games/010019A01E2F2000/scan_diag.py" env "$ORIGINAL" >> "$OUT/env.txt"
+fi
 echo "== build (partial shaders; the first time a few thousand shaders compile) -> $OUT/build.log"
 "$PY" "$REPO/scripts/build_ipa_from_nsp.py" "$NSP" -k "$IMG/prod.keys" --package v131072 --platform mac \
     --seen-shaders --work-dir "$WORK" --env-file "$OUT/env.txt" --progress lines 2>&1 | tee "$OUT/build.log"
 CMD=$(grep -E "^cd .*dmhost.* \| tee " "$OUT/build.log" | tail -1)
 [ -n "$CMD" ] || { echo "[RED] the build printed no run command: see $OUT/build.log" >&2; exit 1; }
+if [ "${SCAN_STATE_PROBE:-}" = 1 ]; then
+    "$PY" "$REPO/dm/games/010019A01E2F2000/scan_diag.py" check "$ORIGINAL" "$WORK/patched_v131072/main.patched.bin"
+fi
 echo "== running ($MODE). Play, then quit the game window."
 bash -c "$CMD" || true
 cp "$WORK/run/host.log" "$OUT/host.log"
@@ -79,7 +89,7 @@ hand = re.findall(r'rumble: game asked for vibration handles of npad 0 style (\S
 print(f'vibration: handles for npad 0 {hand[:1] or "never asked"}; values {sum(n for n, _, _ in rum)}, {sum(u for _, u, _ in rum)} with no output; seconds with a nonzero amplitude {sum(a > 0 for _, _, a in rum)} of {len(rum)}, peak {max((a for _, _, a in rum), default=0):.2f}')
 probes = {}
 for name, n in re.findall(r'^\[dm\] PROBE (\S+) #(\d+)', log, re.M): probes[name] = max(probes.get(name, 0), int(n))
-if probes or re.search(r'^\[dm\] probe \S+ \(original instruction', log, re.M): print('probe hits (highest hit number seen; 3 printed each):', probes or 'none')
+if probes or re.search(r'^\[dm\] probe \S+ \(original instruction', log, re.M): print('probe hits (highest hit number seen; env.txt sets print limits):', probes or 'none')
 vis = {}
 for ad, tot, rep in re.findall(r'vis report addr=(\S+) total=(\d+) reported=(\d+)', log): vis[ad] = max(vis.get(ad, (0, 0)), (int(tot), int(rep)))
 for l in re.findall(r'^.*DM_NVN_VIS_SCALE:.*$', log, re.M)[:1]: print(l)
@@ -94,4 +104,7 @@ red = collections.Counter(re.sub(r'[0-9a-f]{8,}|\d+', 'N', l)[:160] for l in re.
 print('other red lines:'); [print(f'  {n} x {l}') for l, n in red.most_common(8)]
 for l in re.findall(r'^.*(?:SIGSEGV|SIGBUS|fault at|crash handler).*$', log, re.M)[:3]: print('CRASH:', l[:200])
 PYEOF
+if [ "${SCAN_STATE_PROBE:-}" = 1 ]; then
+    "$PY" "$REPO/dm/games/010019A01E2F2000/scan_diag.py" summary "$OUT/host.log" | tee -a "$OUT/summary.txt"
+fi
 echo "== summary: $OUT/summary.txt"

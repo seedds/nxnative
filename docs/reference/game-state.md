@@ -48,3 +48,12 @@ The games' own state: saves, scripted state, and behaviour that looks like a hos
 - **Fix:** in `DM_KEYS` that is `L+R~0.5` while the screen is up (presses on the title before it are lost).
 - **Found on:** [Super Mario 3D World + Bowser's Fury](../../dm/games/010028600EBDA000/README.md).
 - **Note:** on the game select, holding the stick right for a second (`7:LRight~1`) switches to Bowser's Fury, which also uses `nvnTextureGetSwizzle` and `nvnTextureGetStorageClass`. Map and level movement read the left stick only: `DM_KEYS` takes `LLeft` / `LUp` / `LRight` / `LDown`. A working route into World 1-1 on a fresh save: `DM_KEYS=6:A,10:A,14:L+R~0.5,17:A*3/2,24:Plus*6/3,45:A*6/3,66:LUp~1,70:A,74:LRight~1,78:A,82:LLeft~1,86:A` (World 1-1 by frame ~6000).
+
+## Guest state diagnostics
+
+### Change-only guest state observations
+
+- **Symptom:** periodic size probes cannot tell whether a native gameplay transition ran, while logging every poll hides a rare scan-start call in repeated state.
+- **Cause:** a global every-N sampling interval can discard a function called once; a small printed-hit limit is exhausted by unchanged polling.
+- **Fix:** a probe suffix `^sN` (N = 0–31, after `@...` if used together) prints the low float32 lane and its raw bits. For example, `main:699d4@x0+2b0^s0`. Optional `DM_PROBE_CHANGES=1..16` compares the selected prefix of the probe's `@...` memory, its address/readability and an optional `^sN` float32 lane. Print the first observation and each change, up to `DM_PROBE_LIMIT` per site. It observes state only; the trap still executes the original instruction. Without the option, existing probe frequency is retained. See [probe syntax](../agents/05-debugging.md#probes-without-a-debugger-dm_probe).
+- **Found on:** [Metroid Prime 4: Beyond](../../dm/games/010019A01E2F2000/README.md#native-scan-state-diagnostic-current-awaiting-manual-test), native Scan Visor bindings, v1.1.0. Instrumentation compiled and snapshot filter tested; gameplay validation pending.

@@ -417,3 +417,9 @@ runtime-patch: $(B)/t_runtime_patch
 	$(B)/t_runtime_patch
 $(B)/t_runtime_patch: t_runtime_patch.c ../runtime_patch.h | $(B)
 	$(CLANG) -O1 -g -Wall -Wextra -Werror -o $@ $<
+
+.PHONY: probe-snapshot
+probe-snapshot: $(B)/t_probe_snapshot
+	$(B)/t_probe_snapshot
+$(B)/t_probe_snapshot: t_probe_snapshot.c ../probe_snapshot.h | $(B)
+	$(CLANG) -Wall -Wextra -Werror -O2 $< -o $@

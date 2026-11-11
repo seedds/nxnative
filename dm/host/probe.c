@@ -1,5 +1,6 @@
 // Probes DM_PROBE: when the debugger needs a system authorization prompt on the Mac, use this to print registers and a backtrace at a guest address.
 #include "dm.h"
+#include "probe_snapshot.h"
 #include <TargetConditionals.h>
 #include <signal.h>
 #include <dlfcn.h>
@@ -22,7 +23,7 @@ void crash_set_trap_hook(int (*fn)(ucontext_t *uc));
 // The trampoline borrows x16: place probes only at function entries or at points where x16 is dead; the original instruction must not be PC-relative (adr/adrp/b/bl/ldr literal/cbz...).
 #define MAX_PROBE 16
 typedef void (*probe_fn)(ucontext_t *uc);
-static struct { uint64_t at; uint32_t *slot; unsigned hits, seen; char name[40]; long dump, dpost; probe_fn fn; int freg; long foff; uint64_t fval; int hreg; } g_probe[MAX_PROBE];   // dpost: @*xN+off+dpost
+static struct { uint64_t at; uint32_t *slot; unsigned hits, seen; char name[40]; long dump, dpost; probe_fn fn; int freg; long foff; uint64_t fval; int hreg, sreg; probe_snapshot_t last; } g_probe[MAX_PROBE];   // dpost: @*xN+off+dpost
 
 // !xN: treat xN as a sead::ExpHeap and print its free and used blocks (block size at block +0x18, alignment pad at +0x12). Settings (docs/agents/05-debugging.md):
 // DM_PROBE_HEAP=<name>,<start>,<size>,<free list>,<used list> layout by sead version (hex; node offset at list +0x14), default SMBW 0,28,30,b0,c8 (no name), BotW 28,38,40,e0,f8;
@@ -78,6 +79,7 @@ static void probe_heapwalk(uint64_t h) {
 }   // dump: on hit print 16 bytes at [x0+dump] (-1 = do not print); fn: dedicated handler (replaces the default print)
 static int g_nprobe;
 static uint64_t g_probe_frame_first, g_probe_frame_last = UINT64_MAX;
+static unsigned g_probe_changes;   // DM_PROBE_CHANGES=1..16: only print when the @ memory prefix/address/readability changes
 static unsigned g_probe_limit, g_probe_every;   // DM_PROBE_LIMIT printed hits per probe; DM_PROBE_EVERY=N every hit counts, every N-th prints (#N is then the true hit count: rates)
 uint64_t dm_guest_frame(void);
 static void probe_str(uint64_t p) {
@@ -125,24 +127,36 @@ static int probe_hit(ucontext_t *uc) {   // Registered by probe_install with the
             char nm[128]; probe_heapname(uc->uc_mcontext->__ss.__x[g_probe[i].hreg], nm, sizeof nm);
             if (!strstr(nm, g_hw.want)) { uc->uc_mcontext->__ss.__pc = (uint64_t)g_probe[i].slot; return 1; }
         }
-        probe_dump_once();
+        probe_snapshot_t snapshot = {0};
+        if (g_probe[i].dump >= 0) {
+            int dr = (g_probe[i].dump >> 25) & 31;
+            uint64_t at = uc->uc_mcontext->__ss.__x[dr] + (g_probe[i].dump & 0xffffff);
+            if (g_probe[i].dump & 0x1000000) { uint64_t p = 0; vm_size_t got = 0; if (!vm_read_overwrite(mach_task_self(), at, 8, (vm_address_t)&p, &got) && got == 8 && p) at = p + g_probe[i].dpost; else at = 0; }
+            snapshot.address = at;
+            vm_size_t got = 0;
+            snapshot.readable = at && !vm_read_overwrite(mach_task_self(), at, 16, (vm_address_t)snapshot.bytes, &got) && got == 16;
+        }
+        if (g_probe[i].sreg >= 0) memcpy(&snapshot.scalar, &uc->uc_mcontext->__ns.__v[g_probe[i].sreg], sizeof snapshot.scalar);
         flockfile(stderr);   // One block per hit when threads hit at once
+        if (g_probe_changes && (g_probe[i].dump >= 0 || g_probe[i].sreg >= 0) && !probe_snapshot_changed(&g_probe[i].last, &snapshot, g_probe_changes)) {
+            funlockfile(stderr); uc->uc_mcontext->__ss.__pc = (uint64_t)g_probe[i].slot; return 1;
+        }
+        probe_dump_once();
         { extern uint64_t g_t0_ns; uint64_t now_ns(void); uint32_t thr_cur_handle(void); ++g_probe[i].hits; fprintf(stderr, "[dm] PROBE %s #%u [%.4fs] F=%llu T=%x", g_probe[i].name, g_probe_every ? g_probe[i].seen : g_probe[i].hits, (now_ns() - g_t0_ns) / 1e9, (unsigned long long)frame, thr_cur_handle()); }
         for (int r = 0; r < 8; r++) { uint64_t v = uc->uc_mcontext->__ss.__x[r]; fprintf(stderr, " x%d=%#llx", r, v); probe_str(v); }
         for (int r = 19; r < 24; r++) fprintf(stderr, " x%d=%#llx", r, uc->uc_mcontext->__ss.__x[r]);
         if (getenv("DM_PROBE_ALL")) for (int r = 8; r < 19; r++) fprintf(stderr, " x%d=%#llx", r, uc->uc_mcontext->__ss.__x[r]);   // also print x8–x18
+        if (g_probe[i].sreg >= 0) { float value; memcpy(&value, &snapshot.scalar, sizeof value); fprintf(stderr, " s%d=%.9g(%08x)", g_probe[i].sreg, (double)value, snapshot.scalar); }
         fprintf(stderr, " lr=%#llx", uc->uc_mcontext->__ss.__lr);
         { uint64_t x8 = uc->uc_mcontext->__ss.__x[8]; Dl_info di; fprintf(stderr, " x8=%#llx", x8);   // x8: indirect call targets are often here (probe placed before blr x8)
           if (dladdr((void *)x8, &di) && di.dli_sname) fprintf(stderr, " (%s+%#lx)", di.dli_sname, (unsigned long)(x8 - (uint64_t)di.dli_saddr)); }
         if (g_probe[i].dump >= 0) {
-            uint8_t b[16]; vm_size_t got = 0;
-            int dr = (g_probe[i].dump >> 25) & 31;                                    // @xN+offset: based on xN
-            uint64_t at = uc->uc_mcontext->__ss.__x[dr] + (g_probe[i].dump & 0xffffff);
-            if (g_probe[i].dump & 0x1000000) { uint64_t p = 0; vm_size_t g = 0; if (!vm_read_overwrite(mach_task_self(), at, 8, (vm_address_t)&p, &g) && p) at = p + g_probe[i].dpost; else at = 0; }   // @*offset[+post]: dereference first, then dump (post bytes further on)
-            if (at && !vm_read_overwrite(mach_task_self(), at, 16, (vm_address_t)b, &got) && got == 16) {
-                fprintf(stderr, " [%sx%d+%#lx]", (g_probe[i].dump & 0x1000000) ? "*" : "", dr, g_probe[i].dump & 0xffffff);
-                if (g_probe[i].dpost) fprintf(stderr, "+%#lx", g_probe[i].dpost);
-                fputc('=', stderr); for (int k = 0; k < 16; k++) fprintf(stderr, "%02x", b[k]); }
+            int dr = (g_probe[i].dump >> 25) & 31;
+            fprintf(stderr, " [%sx%d+%#lx]", (g_probe[i].dump & 0x1000000) ? "*" : "", dr, g_probe[i].dump & 0xffffff);
+            if (g_probe[i].dpost) fprintf(stderr, "+%#lx", g_probe[i].dpost);
+            fputc('=', stderr);
+            if (snapshot.readable) for (int k = 0; k < 16; k++) fprintf(stderr, "%02x", snapshot.bytes[k]);
+            else fputs("unreadable", stderr);
         }
         fputc('\n', stderr);
         { static long xd = -2; if (xd == -2) { const char *e = getenv("DM_PROBE_X2"); xd = e ? strtol(e, 0, 16) : -1; }   // DM_PROBE_X2=bytes: also print the memory x2 points to (to read object fields)
@@ -171,7 +185,7 @@ static void probe_add(module_t *m, uint64_t off, long dump, probe_fn fn) {
     *w = 0xD43E0000;                             // brk #0xf000
     mprotect((void *)pg, 0x4000, PROT_READ | PROT_EXEC);
     sys_icache_invalidate(w, 4);
-    g_probe[g_nprobe].at = at; g_probe[g_nprobe].slot = sl; g_probe[g_nprobe].dump = dump; g_probe[g_nprobe].fn = fn; g_probe[g_nprobe].freg = -1; g_probe[g_nprobe].hreg = -1;
+    g_probe[g_nprobe].at = at; g_probe[g_nprobe].slot = sl; g_probe[g_nprobe].dump = dump; g_probe[g_nprobe].fn = fn; g_probe[g_nprobe].freg = -1; g_probe[g_nprobe].hreg = -1; g_probe[g_nprobe].sreg = -1;
     snprintf(g_probe[g_nprobe].name, sizeof g_probe[0].name, "%s+%#llx", m->name, off);
     LOG("probe %s (original instruction %08x)", g_probe[g_nprobe].name, sl[0]);
     g_nprobe++;
@@ -383,6 +397,11 @@ void probe_install(void) {
     const char *limit = getenv("DM_PROBE_LIMIT");
     if (limit) g_probe_limit = (unsigned)strtoul(limit, NULL, 10);
     if ((limit = getenv("DM_PROBE_EVERY"))) g_probe_every = (unsigned)strtoul(limit, NULL, 10);
+    if ((limit = getenv("DM_PROBE_CHANGES"))) {
+        char *end; unsigned long bytes = strtoul(limit, &end, 10);
+        if (!*limit || *end || bytes < 1 || bytes > 16) die("DM_PROBE_CHANGES requires a byte count from 1 to 16");
+        g_probe_changes = (unsigned)bytes;
+    }
     const char *e = getenv("DM_PROBE");
     if (e) {
         char spec[512]; strlcpy(spec, e, sizeof spec);
@@ -403,6 +422,13 @@ void probe_install(void) {
             char *qm = strchr(c + 1, '?'), *bang = strchr(c + 1, '!');
             probe_add(m, strtoull(c + 1, 0, 16), dump, NULL);
             g_probe[g_nprobe - 1].dpost = post;
+            char *simd = strchr(c + 1, '^');
+            if (simd) {
+                if (simd[1] != 's') die("DM_PROBE scalar format: ^s0 through ^s31");
+                char *end; long reg = strtol(simd + 2, &end, 10);
+                if (end == simd + 2 || (*end && *end != '?' && *end != '!') || reg < 0 || reg > 31) die("DM_PROBE scalar format: ^s0 through ^s31");
+                g_probe[g_nprobe - 1].sreg = (int)reg;
+            }
             if (bang && bang[1] == 'x') { g_probe[g_nprobe - 1].hreg = (int)strtol(bang + 2, 0, 10) & 31; probe_heapcfg(); }
             if (qm) {   // Filter: ?x0=706c400000 or ?[x0+38]=781548 (hex)
                 const char *q = qm + 1; int br = *q == '[';

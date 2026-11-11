@@ -26,3 +26,23 @@ BINDING = [
     {'what': 'experimental 1440p, 2160p and 1800p scene descriptor stubs (inactive by default)', 'now': 'build', 'goal': 'unreviewed', 'purpose': 'rendering',
      'why': 'the final scene allocation descriptor and fallback are immediate code in main 1.1.0; gameplay validation and other builds remain open'},
 ]
+
+# Read-only scan diagnostics, independently located through the native script bindings in the original NSO.
+# Full NSO identity and the instruction at each point are checked by scan_diag.py, including in the rewritten main.
+# No PC-relative instruction; x16 is dead at these entries / after calls, and on the short paths to the next call.
+# label, instruction offset, original bytes, @ register (None = every call), field offset, optional scalar register.
+SCAN_DIAGNOSTICS = {
+    '8275fbe1ec5191c279f3a943ad8524f4bab087a3000000000000000000000000': (
+        ('target-handle', 0xcb2ca4, '886641b9', 20, 0x164, None),
+        ('target-resolved', 0xcb2cb8, 'f44f42a9', 0, 0x2b0, None),
+        ('target-range', 0xcb2de0, '08b04579', 0, 0x2d8, None),
+        ('scanning-target-state', 0x1213350, '08b042b9', 0, 0x2b0, None),
+        ('scanning-script-gate', 0x1213358, '68d243b9', 19, 0x3d0, None),
+        ('begin-request', 0x5d9450, 'ff4302d1', None, 0, None),
+        ('begin-target', 0x5d9560, 'e10313aa', 0, 0x2d8, None),
+        ('begin-range-gate', 0x5d97f0, '68b20579', 19, 0x2d8, None),
+        ('progress-call', 0x699d4, 'ff0302d1', 0, 0x2b0, 0),
+        ('progress-manager', 0x69a10, '0041201e', 20, 0x2b0, 8),
+        ('progress-return', 0x69a64, '88724039', 20, 0x2b0, 8),
+    ),
+}

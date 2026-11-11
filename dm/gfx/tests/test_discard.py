@@ -4,13 +4,13 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
-path = Path(__file__).resolve().parents[1] / 'tools/dmsh_build.py'
-nodes = [n for n in ast.parse(path.read_text()).body if isinstance(n, ast.FunctionDef) and n.name in ('vs_discard', 'vs_writes')]
-scope = {'re': re}
-exec(compile(ast.Module(body=nodes, type_ignores=[]), str(path), 'exec'), scope)
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
+import dmsh_entry   # noqa: E402
+scope = vars(dmsh_entry)
 
 SOURCE = '''#include <metal_stdlib>
 using namespace metal;

@@ -8,6 +8,7 @@ void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t *g_mod; int g_nmod;
 struct dm_flags g_flag;
+pthread_key_t g_key18;   // written by hle.c's counter gate for mrs x18, cntpct_el0; in the host it is defined in loader.c (never created here: no gate runs)
 void svc_thread_dump(void) {}
 void dm_vi_layer_size(int *w, int *h) { *w = *h = 0; }
 void dm_vi_layer_crop(int c[4]) { memset(c, 0, 4 * sizeof *c); }

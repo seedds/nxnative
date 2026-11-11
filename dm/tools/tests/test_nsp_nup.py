@@ -224,9 +224,9 @@ class Survey(Base):
         seen = {}
         def survey(nsp_dir, app, fam, keys, repo, py, env):
             seen.update(app=app, nup=fam['nup'], base=fam['base']); raise Stop()
-        with mock.patch.object(nsp, 'find_repo', return_value=REPO), mock.patch.object(nsp, 'configure_dotnet'), mock.patch.object(nsp, 'WORK_DIR', ''), mock.patch.object(nsp, 'PROD_KEYS', ''), \
-             mock.patch.object(nsp, 'survey', side_effect=survey), mock.patch.object(nsp, 'check_capstone'), mock.patch.object(nsp.shutil, 'which', return_value='/usr/bin/dotnet'), \
-             mock.patch.object(nsp, 'say'), mock.patch.object(nsp, 'build_nx_extract', side_effect=AssertionError('built nx_extract')), \
+        with mock.patch.object(nsp, 'find_repo', return_value=REPO), mock.patch.object(nsp, 'WORK_DIR', ''), mock.patch.object(nsp, 'PROD_KEYS', ''), \
+             mock.patch.object(nsp, 'survey', side_effect=survey), mock.patch.object(nsp, 'check_capstone'), \
+             mock.patch.object(nsp, 'say'), mock.patch.object(nsp, 'find_nx_extract', side_effect=AssertionError('built nx_extract')), \
              mock.patch.object(nsp, 'ask', side_effect=AssertionError('asked for something')), mock.patch.object(nsp, 'package_reader', side_effect=AssertionError('read a package')):
             with self.assertRaises(Stop): nsp.main(nsp.parse_args([str(self.path), '--survey-only']))
         self.assertEqual(seen['app'], NEW)
@@ -239,7 +239,7 @@ class Survey(Base):
         seen, prof = [], mock.Mock(id='P', builds=lambda: {'v0': {'main': 'ab' * 16}})
         games = mock.Mock(by_build=lambda bid: seen.append(bid) or (prof if bid == 'ab' * 16 else None))
         with mock.patch.dict(sys.modules, {'game': games}), mock.patch.object(nsp, 'PROG', mock.Mock()), \
-             mock.patch.object(nsp, 'build_nx_extract', side_effect=AssertionError('built nx_extract')):
+             mock.patch.object(nsp, 'find_nx_extract', side_effect=AssertionError('built nx_extract')):
             self.assertEqual(nsp.same_build(self.dir, app, fam, None, REPO, {}), (prof, 'v0', 'ab' * 16))
         self.assertEqual(seen, ['cd' * 16, 'ab' * 16])
 
@@ -549,7 +549,7 @@ class Main(Base):
         def stop(env, *a):
             seen.update(env)
             if not extract: raise Stop()
-        with mock.patch.object(nsp, 'find_repo', return_value=REPO), mock.patch.object(nsp, 'configure_dotnet'), mock.patch.object(nsp, 'WORK_DIR', ''), mock.patch.object(nsp, 'PROD_KEYS', ''), \
+        with mock.patch.object(nsp, 'find_repo', return_value=REPO), mock.patch.object(nsp, 'WORK_DIR', ''), mock.patch.object(nsp, 'PROD_KEYS', ''), \
              mock.patch.object(nsp, 'check_prereqs', side_effect=stop), mock.patch.object(nsp, 'say', side_effect=said.append), \
              mock.patch.object(nsp, 'check_versions_aarch64', side_effect=Stop), \
              mock.patch.object(nsp, 'ask', side_effect=AssertionError('asked for something')), mock.patch.object(nsp, 'package_reader', side_effect=AssertionError('read a package')):
@@ -594,7 +594,7 @@ class Main(Base):
             with self.subTest(flags=flags, package=package):
                 write_nup(self.path, packages, update_flags=flags)
                 argv = [str(self.path)] + (['--package', package] if package else [])
-                with mock.patch.object(nsp, 'find_repo', return_value=REPO), mock.patch.object(nsp, 'configure_dotnet'), mock.patch.object(nsp, 'WORK_DIR', ''), mock.patch.object(nsp, 'PROD_KEYS', ''), \
+                with mock.patch.object(nsp, 'find_repo', return_value=REPO), mock.patch.object(nsp, 'WORK_DIR', ''), mock.patch.object(nsp, 'PROD_KEYS', ''), \
                      mock.patch.object(nsp, 'check_prereqs'), mock.patch.object(nsp, 'say'), mock.patch.object(nsp.PROG, 'say') as red:
                     self.assertEqual(nsp.cli(argv), 1)
                 self.assertRegex(red.call_args.args[0], r'^\[RED\] .*no romfs/')

@@ -138,6 +138,39 @@ static void separate_storage(pool_t *pool, id<MTLHeap> original) {
     for (int i=0;i<8;i++) mtl_tex_release(&t[i]);
     mtl_alias_drop_pool(&other_pool); mtl_alias_drop_pool(&cpu_pool);
 }
+// Two families whose offsets lie in one 64 KB cell of the sharing table's index (alias_index): the owner lookup reads that cell and takes only the entries at its own offset
+static void same_cell(pool_t *pool) {
+    tex_t t[4];
+    for (int i=0;i<4;i++) { t[i]=image(pool,996000+i,(i%2+1)*64,64); t[i].off=(11<<20)+(i/2)*0x4000; t[i].mem=pool->mem+t[i].off; mtl_tex_init(&t[i]); }
+    id<MTLTexture> m[4]; for (int i=0;i<4;i++) m[i]=tex_mtl(&t[i]);
+    CHECK(m[0].heap && m[0].heap==m[1].heap && m[2].heap && m[2].heap==m[3].heap,"each family in the cell shares its own heap");
+    CHECK(m[0].heap!=m[2].heap,"an offset 16 KB further in the same cell is another family");
+    for (int i=0;i<4;i++) mtl_tex_release(&t[i]);
+}
+// A resolution family member read after another size wrote the shared storage sees that size's texels, misplaced but of the same format, as on the console (ASTRAL CHAIN, issue #1935)
+static void cross_size_read(void) {
+    void *mem=NULL; posix_memalign(&mem,16384,16<<20); memset(mem,0,16<<20);
+    pool_t pool={.magic=MAGIC('P','O','O','L'), .flags=NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS|NVN_MEMORY_POOL_FLAGS_GPU_CACHED|NVN_MEMORY_POOL_FLAGS_COMPRESSIBLE, .mem=mem, .size=16<<20};
+    tex_t a[2]; unsigned w[2]={1600,1440}, h[2]={900,810};
+    for (int i=0;i<2;i++) { a[i]=image(&pool,993000+i,w[i],h[i]); a[i].d.format=NVN_FORMAT_RGBA16F; a[i].d.flags=NVN_TEXTURE_FLAGS_COMPRESSIBLE; nvn_tex_layout(&a[i].d,&a[i].L); mtl_tex_init(&a[i]); }
+    id<MTLTexture> big=tex_mtl(&a[0]), small=tex_mtl(&a[1]);
+    CHECK(big.heap && big.heap==small.heap,"a render-target family shares one heap");
+    state_reset(); memset(&R,0,sizeof R); R.has_rt=1; R.rt.n=1; R.rt.color[0]=&a[1];
+    struct { op_hdr h; p_clear_color clear; op_hdr end; } ops={0};
+    ops.h=(op_hdr){OP_CLEAR_COLOR,sizeof(op_hdr)+sizeof(p_clear_color)};
+    ops.clear=(p_clear_color){.index=0,.mask=15,.rgba={1,.5f,.25f,1}}; ops.end=(op_hdr){OP_END,sizeof(op_hdr)};
+    mtl_exec((const uint8_t *)&ops); mtl_sub_commit(); mtl_drain(); mtl_sub_begin(); memset(&R,0,sizeof R);
+    NSUInteger row=big.width*8, bytes=row*big.height;
+    id<MTLBuffer> b=[g_dev newBufferWithLength:bytes options:MTLResourceStorageModeShared]; res_add(b);
+    enc_b_copy_texture_buffer(blit(), big, 0, 0, MTLOriginMake(0,0,0), MTLSizeMake(big.width,big.height,1), b, 0, row, bytes);
+    mtl_sub_commit(); mtl_drain(); res_remove(b); mtl_sub_begin();
+    const uint64_t *p=b.contents, clear=0x3c00340038003c00ull; NSUInteger nclear=0, nzero=0, other=0;
+    for (NSUInteger i=0;i<bytes/8;i++) { if (p[i]==clear) nclear++; else if (!p[i]) nzero++; else other++; }
+    printf("cross-size read: %lu clear, %lu zero, %lu other texels of %lu (compression %d)\n",(unsigned long)nclear,(unsigned long)nzero,(unsigned long)other,(unsigned long)(bytes/8),(int)big.allowGPUOptimizedContents);
+    CHECK(!other && nclear,"another size's writes read back as its texels, misplaced");
+    for (int i=0;i<2;i++) mtl_tex_release(&a[i]);
+    mtl_alias_drop_pool(&pool); free(mem);
+}
 int main(void) { @autoreleasepool {
     mtl_init(); __weak id<MTLHeap> weak_heap; void *mem=NULL;
     posix_memalign(&mem,16384,16<<20); memset(mem,0,16<<20);
@@ -150,9 +183,11 @@ int main(void) { @autoreleasepool {
     id<MTLTexture> small=tex_mtl(&a[0]);
     CHECK(small.width==512 && small.height==512,"the first descriptor retains its NVN dimensions");
     CHECK(small.heap!=nil,"live resolution family has physical backing");
-    CHECK(!(small.usage&MTLTextureUsagePixelFormatView),"colour compression is not disabled by forced format-view usage");
-    MTLSizeAndAlign max_size=[g_dev heapTextureSizeAndAlignWithDescriptor:tex_desc(&a[N-1],0)];
-    CHECK(small.heap.size==max_size.size,"heap capacity is the exact largest declared size");
+    CHECK(!(small.usage&MTLTextureUsagePixelFormatView),"a family texture gets no forced format-view usage");
+    CHECK(!small.allowGPUOptimizedContents,"family textures are uncompressed: a size reading another's compressed blocks decodes garbage");
+    MTLTextureDescriptor *largest=tex_desc(&a[N-1],0); largest.allowGPUOptimizedContents=NO;   // family members are sized uncompressed, as they are made (image_texture)
+    MTLSizeAndAlign max_size=[g_dev heapTextureSizeAndAlignWithDescriptor:largest];
+    CHECK(small.heap.size>=max_size.size && small.heap.size<=(sw_on(rh_mode()) ? max_size.size+max_size.size/4 : max_size.size),"heap capacity holds the largest declared size (with the recycled heaps' eighth of headroom)");
     is_zero(small);
     id<MTLTexture> big=tex_mtl(&a[N-1]); is_zero(big);
     pixels(small,0x10203040);
@@ -170,9 +205,11 @@ int main(void) { @autoreleasepool {
     CHECK(delta<max_size.size+(12<<20),"allocation is bounded by one image plus upload/readback scratch");
     pixels(big,0x55667788); pixels(tex_mtl(&a[63]),0xa1b2c3d4); pixels(small,0x76543210);
     separate_storage(&pool,small.heap);
+    same_cell(&pool);
     indirect_pixels(small,0x76543210);   // writes to other pools, offsets and formats left it intact
     atomic_colour(&pool);
     depth_planes(&pool);
+    cross_size_read();
     CHECK([g_res_objects containsObject:small.heap],"the parent heap is resident for indirect access");
     CHECK(![g_res_objects containsObject:small],"aliases do not each register a separate allocation");
     // Different offsets, formats, CPU-visible and sparse flags cannot join this family.
@@ -200,7 +237,10 @@ int main(void) { @autoreleasepool {
     dispatch_sync(g_feedback_q, ^{}); defer_drain();
     CHECK(g_image_desc.n==0,"finalization releases every recorded description");
     }
-    CHECK(!weak_heap || ![g_res_objects containsObject:weak_heap],"the last texture retires its heap from residency");
+    if (sw_on(rh_mode())) {   // the heap waits, resident, for the next texture it fits (rh_wait)
+        int waits=0; os_unfair_lock_lock(&g_rh_lk); for (unsigned i=0;i<g_rh_n;i++) waits |= (__bridge id)g_rh[i].heap==weak_heap; os_unfair_lock_unlock(&g_rh_lk);
+        CHECK(weak_heap && waits && [g_res_objects containsObject:weak_heap],"the last texture hands its heap to the recycled heaps, resident while it waits");
+    } else CHECK(!weak_heap || ![g_res_objects containsObject:weak_heap],"the last texture retires its heap from residency");
     CHECK(g_image_heap_n==0,"every family heap is released after its textures and views go");
     uint64_t settled=g_dev.currentAllocatedSize;
     for (int i=0;i<8;i++) { @autoreleasepool {

@@ -19,6 +19,9 @@
 #        shader_lib.py has <lib>                       exit status 0 when it holds a shader's library (<key>_b.metallib)
 #        shader_lib.py cat <lib> <name>                one file's bytes on standard output
 #        shader_lib.py subset <lib> <out.img> [--skip-suffix S]...  a new image without .metal sources and build reports, as an app carries it
+#        shader_lib.py compress <lib> [<out.img>] [--jobs N]  the image with each file compressed (imgz.py: metallibs LZBITMAP, .metal/.json LZFSE); in place without out.img.
+#                                                      The host decodes them (msl_imgz.h; DM_MSL_IMGZ=0 refuses them); romfs.py decodes for the tools. About 0.36x of a large image
+#        shader_lib.py decompress <lib> [<out.img>]    the image back with every file as it was (for a host from before the decode, or a tool that maps files)
 # <lib> is the path b-<chain>, with or without .img.
 import argparse, builtins, os, shutil, sys
 
@@ -71,7 +74,7 @@ def _names(folder):
     return out
 
 
-def write(files, dst):
+def write(files, dst, decode=False):
     """files: {name: path to read (a romfs path may name a file inside an image), the bytes, or a function returning them (read only when its file is written: dmsh_build.py's outputs staged in the
     shader cache, so that no library is held in memory whole)} → the image dst, by way of dst.part. A stopped write leaves only the .part, and an image is whole or absent"""
     part = dst + '.part'
@@ -88,7 +91,7 @@ def write(files, dst):
             if isinstance(source, bytes): out.write(source); n = len(source)
             elif not isinstance(source, (str, os.PathLike)): raise TypeError(f'{name.decode()}: {type(source).__name__} is not a path, bytes or a function')
             else:
-                with romfs.open(source, 'rb') as f:
+                with (romfs.open(source, 'rb') if decode else romfs.open_stored(source)) as f:   # a compressed file stays compressed (imgz.py) unless decode
                     while b := f.read(8 << 20): out.write(b); n += len(b)
             ents.append((name, off, n)); off += n
         out.seek(off)
@@ -159,8 +162,66 @@ def app_files(lib, skip_suffix=()):
 def subset(lib, dst, skip_suffix=()):   # → the number of files in the image dst
     files = app_files(lib, skip_suffix)
     if not any(n.endswith('.metallib') for n in files): raise ValueError(f'no shader libraries at {lib}')
-    write(files, os.fspath(dst))
+    write(files, os.fspath(dst), decode=True)   # an app's image is plain: the iPhone keeps a mapped library out of its memory footprint
     return len(files)
+
+
+def _recode(lib, dst, fn, jobs):
+    """Every file of lib's image through fn(name, bytes) → bytes into the image dst (lib's own image by default, replaced only when whole). Files are read and coded jobs at a time,
+    ahead of the writer, so that at most about 4*jobs files are in memory. → (bytes before, bytes after)"""
+    import concurrent.futures as cf
+    image = image_of(lib)
+    if not os.path.isfile(image): raise ValueError(f'{image}: no image (pack the folder first)')
+    if os.path.isdir(folder_of(lib)) and _names(folder_of(lib)): raise ValueError(f'{folder_of(lib)} holds files over the image: pack first')
+    img = romfs.Image(image)
+    if not img.shader_library: raise ValueError(f'{image}: not a shader library image (flat, with a Metal library in it)')   # a game RomFS would lose its folders, and its files would not decode
+    fd = os.open(image, os.O_RDONLY)
+    ents = {}
+    for name, k in img.children(0):
+        a, b, _, _, t, _ = img.entry(k)
+        if t: ents[name] = (a, b)
+    names = sorted(ents, key=str.encode)   # write()'s order
+    total, lock = [0, 0], __import__('threading').Lock()
+    def job(name):
+        a, b = ents[name]; data = os.pread(fd, b, a); out = fn(name, data)
+        with lock: total[0] += len(data); total[1] += len(out)
+        return out
+    ex = cf.ThreadPoolExecutor(max(1, jobs)); fut = {}; ahead = 4 * max(1, jobs); nxt = [0]
+    def get(i):
+        while nxt[0] < len(names) and nxt[0] < i + ahead: fut[nxt[0]] = ex.submit(job, names[nxt[0]]); nxt[0] += 1
+        return fut.pop(i).result()
+    try: write({n: (lambda i=i: get(i)) for i, n in enumerate(names)}, os.fspath(dst or image))
+    except BaseException:
+        try: os.unlink(os.fspath(dst or image) + '.part')   # a failed code (a damaged stream) leaves no partial image of several GB
+        except OSError: pass
+        raise
+    finally: ex.shutdown(cancel_futures=True); os.close(fd)
+    return tuple(total)
+
+
+def is_compressed(lib):
+    """Whether lib's image holds a compressed file (imgz.py): a host must decode it, and an app gets a plain copy (pack_ipa.py)"""
+    import imgz
+    image = image_of(lib)
+    if not os.path.isfile(image): return False
+    resolved = romfs._resolve(image)   # the cached index (view() loaded it)
+    if not resolved or not resolved[0].shader_library: return False
+    img = resolved[0]
+    with builtins.open(image, 'rb') as f:   # the first file's header answers for an image compress wrote; a plain one is read to its end (one 16-byte read a file)
+        for _, k in img.children(0):
+            a, b, _, _, t, _ = img.entry(k)
+            if t and imgz.is_dmz(os.pread(f.fileno(), imgz.HEAD.size, a) if b >= imgz.HEAD.size else b''): return True
+    return False
+
+
+def compress(lib, dst=None, jobs=8):
+    import imgz
+    return _recode(lib, dst, lambda name, data: imgz.encode(data, c) if (c := imgz.codec_for(name)) else data, jobs)
+
+
+def decompress(lib, dst=None, jobs=8):
+    import imgz
+    return _recode(lib, dst, lambda name, data: imgz.decode(data), jobs)
 
 
 def has_library(lib): return next(view(lib).glob('*_b.metallib'), None) is not None
@@ -169,10 +230,14 @@ def left_out_pulling(lib): return (view(lib) / PULLING_LEFT_OUT).is_file()   # w
 
 def main():
     ap = argparse.ArgumentParser(description='A game\'s shader libraries as one file, read in place')
-    ap.add_argument('cmd', choices=('pack', 'expand', 'path', 'has', 'cat', 'subset'))
+    ap.add_argument('cmd', choices=('pack', 'expand', 'path', 'has', 'cat', 'subset', 'compress', 'decompress'))
     ap.add_argument('lib'); ap.add_argument('arg', nargs='?')
-    ap.add_argument('--skip-suffix', action='append', default=[])
+    ap.add_argument('--skip-suffix', action='append', default=[]); ap.add_argument('--jobs', type=int, default=8)
     a = ap.parse_args()
+    if a.cmd in ('compress', 'decompress'):
+        try: before, after = (compress if a.cmd == 'compress' else decompress)(a.lib, a.arg, a.jobs)
+        except (OSError, ValueError) as e: sys.exit(f'[RED] {e}')
+        print(f'{a.cmd}: {a.arg or image_of(a.lib)}: files {before / 1e9:.2f} GB -> {after / 1e9:.2f} GB ({after / max(1, before):.3f}x)'); return 0
     if a.cmd == 'pack': return 0 if pack(a.lib) else 1
     if a.cmd == 'expand': expand(a.lib); return 0
     if a.cmd == 'path': print(view(a.lib)); return 0

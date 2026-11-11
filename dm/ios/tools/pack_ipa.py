@@ -240,7 +240,7 @@ def library_map(arc, src, skip_suffix, out, shader_files=False):
         sys.exit(f'[RED] pack_ipa: {shader_lib.image_of(src)} has no pulling vertex libraries, and this app needs them: run the NSP script again, which builds them')
     image = shader_lib.image_of(src)
     subset = bool(skip_suffix) and any(p.name.endswith(skip_suffix) for p in shader_lib.view(src).iterdir())
-    if not subset and not shader_files: return arc + '.img', image
+    if not subset and not shader_files and not shader_lib.is_compressed(src): return arc + '.img', image   # a compressed image (shader_lib.py compress) goes in plain, by subset below
     work = tempfile.mkdtemp(prefix=os.path.basename(out) + '.msl-', dir=os.path.dirname(os.path.abspath(out)))
     atexit.register(shutil.rmtree, work, True)
     if not shader_files:

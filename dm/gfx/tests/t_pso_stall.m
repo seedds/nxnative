@@ -227,6 +227,23 @@ int main(void) { @autoreleasepool {
     EXPECT("image + folder: the others from the archive", 2, g_pre_archived);
     EXPECT("image + folder: none counted", 0, g_pre_nolib);
     EXPECT("image + folder: the stamp says all", 1, [slurp(stamp4) hasSuffix:@"libs\tall\n"]);
+    // the same image with its files compressed (shader_lib.py compress): a library loaded from it carries the same digest tag as from the plain image, which arch_key names it by.
+    // Without the tag its pipelines have no key (akb_fn), so the archive's index cannot serve them
+    {
+        NSString *vp = [msl stringByAppendingPathComponent:@"v1_bp.metallib"]; NSError *le = nil;
+        NSString *plain = objc_getAssociatedObject(lib_from_file(vp, &le), &g_lib_tag);
+        EXPECT("compressed image: the plain library has a tag", 1, plain.length == 32);
+        [NSFileManager.defaultManager removeItemAtPath:msl error:nil];   // a folder over the image is refused
+        EXPECT("compressed image: compressed", 0, sh([NSString stringWithFormat:@"python3 %@ compress %@ > /dev/null", packer, msl]));
+        arch_flush_wait();   // every pso_prebuild above waited for its workers (wait = 1), which are the only readers of the image; the archive writers do not read it
+        romfs_img *old = atomic_exchange(&g_msl_img, NULL); if (old) romfs_image_close(old);   // the host opens the image once; this is a new app start
+        romfs_img *zi; const img_ent *zx = msl_image_file(vp, &zi); msl_map zm = {0};
+        EXPECT("compressed image: the file is stored compressed", 1, zx && msl_image_map(zi, zx, &zm) && msl_imgz_is(zm.data, zm.size));
+        if (zm.base) munmap(zm.base, zm.base_len);
+        id<MTLLibrary> zl = lib_from_file(vp, &le);
+        EXPECT("compressed image: the library loads", 1, zl != nil);
+        EXPECT("compressed image: the same tag as the plain image's", 1, [objc_getAssociatedObject(zl, &g_lib_tag) isEqualToString:plain]);
+    }
     [NSFileManager.defaultManager removeItemAtPath:root error:nil];
     printf("t_pso_stall: %d checks, %d failed\n", checks, failed);
     return failed != 0;

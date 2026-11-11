@@ -36,6 +36,7 @@ Measured on the M4 Pro, in a 1920x1080 window: 60 fps at the title, 44 to 52 fps
 - [More than 1,024 mapped runs in a sparse pool](../../../docs/reference/nvn-objects.md#more-than-1024-mapped-runs-in-a-sparse-pool): the GPU hang 3 to 4 minutes into the intro.
 - [Pages changed under a buffer the GPU still uses](../../../docs/reference/nvn-objects.md#pages-changed-under-a-buffer-the-gpu-still-uses): absurd indirect dispatches and a hang while it maps and unmaps sparse pages.
 - [A sparse pool's runs replaced in two steps](../../../docs/reference/nvn-objects.md#a-sparse-pools-runs-replaced-in-two-steps): mesh shaders `765e6d9d2588ce70` and `5aab38bb5ba67ef7` bound to a dummy buffer for a frame.
+- [A shader library image is mostly bytes that compress](../../../docs/reference/packing.md#a-shader-library-image-is-mostly-bytes-that-compress): its 36,779-shader library, 20.68 GB stored plain, 7.49 GB compressed.
 - [Queue builder size getters](../../../docs/reference/nvn-objects.md#queue-builder-size-getters): read after `SetDefaults` as it makes its queue.
 - [Float blend clamp](../../../docs/reference/nvn-objects.md#float-blend-clamp-nvncommandbuffersetfloatblendclamp): it sets 1.
 - [A sync never fenced since its Initialize is signalled](../../../docs/reference/nvn-objects.md#a-sync-never-fenced-since-its-initialize-is-signalled).

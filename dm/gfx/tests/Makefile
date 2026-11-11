@@ -445,6 +445,9 @@ check_t_clear_ds: RUN_ENV = MTL_DEBUG_LAYER=1
 t_clear_layers: t_clear_layers.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_clear_layers.m $(MTL_T_SRC) $(FW)
 check_t_clear_layers: RUN_ENV = MTL_DEBUG_LAYER=1
+t_clear_chmask: t_clear_chmask.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_clear_chmask.m $(MTL_T_SRC) $(FW)
+check_t_clear_chmask: RUN_ENV = MTL_DEBUG_LAYER=1
 t_clear_tex: t_clear_tex.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_clear_tex.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_clear_tex

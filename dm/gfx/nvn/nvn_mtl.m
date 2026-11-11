@@ -11650,6 +11650,18 @@ static uint32_t *g_rtx_seq, *g_drx_seq; static uint32_t g_rtx_n, g_rtx_cap, g_dr
 static void seq_push(uint32_t **v, uint32_t *n, uint32_t *cap, uint32_t x) { if (*n == *cap) { *cap = *cap ? *cap * 2 : 1024; *v = realloc_or_die(*v, *cap * sizeof **v, "the store lookahead index"); } (*v)[(*n)++] = x; }
 static void sdx_ev_add(sdx_ev e) { if (sdx_bucket(e.ser, 0) < 0) return; if (g_sdx_n == g_sdx_cap) { g_sdx_cap = g_sdx_cap ? g_sdx_cap * 2 : 4096; g_sdx = realloc_or_die(g_sdx, g_sdx_cap * sizeof *g_sdx, "the store lookahead index"); g_sdx_tmp = realloc_or_die(g_sdx_tmp, g_sdx_cap * sizeof *g_sdx, "the store lookahead index"); } g_sdx[g_sdx_n++] = e; }
 static void sdx_lvsl(const view_t *v, int hv, uint16_t *lv, uint16_t *sl) { *lv = (uint16_t)(hv && v->set_levels ? v->base_level : 0); *sl = (uint16_t)(hv && v->set_layers ? v->min_layer : 0); }
+// The channels a colour clear writes. Under a channel mask state that lets only some of its target's channels through, the clear leaves the others, as a draw does: Nintendo Switch
+// Sports Resort blurs G and B of its screen-space shadow target back and forth under a mask of G and B, clearing the target (own mask 0xf) before each pass, and its material shaders
+// read R and A of it afterwards. Cleared whole, those were 0, and outfits in the menus were lit by nothing (black). With every channel of the target off the clear is whole, as it
+// was: the same game clears its main colour target right after a shadow pass drawn with the mask at 0, and held back there the target was never cleared (its Select User background
+// came out black with outlines). What a console does under a mask of 0 is not known; this is the narrowest rule both cases bear out. The scans ahead of the replay follow the state
+// (scan_chmask) from where they start, so a clear that leaves channels is not taken for one that replaces the target's content
+static inline int clear_mask(const p_clear_color *c, uint32_t chmask) {
+    int m = c->mask & 0xf, st = c->index >= 0 && c->index < 8 ? (int)(chmask >> (4 * c->index) & 0xf) : 0xf;
+    return st ? m & st : m;
+}
+static inline void scan_chmask(const void *a, uint32_t *cm) { const p_bind_state *b = a; if (b->kind == 2) memcpy(cm, b->bytes, sizeof *cm); }
+static uint32_t g_pp_cm;   // the channel mask state as sdx_walk meets the records
 static void sdx_walk(const uint8_t *p, int depth) {
     if (depth > 64) { g_sdx_ok = 0; return; }
     for (uint32_t guard = 0; guard < 4000000 && p && g_sdx_ok; guard++) {
@@ -11664,8 +11676,9 @@ static void sdx_walk(const uint8_t *p, int depth) {
                 for (int k = 0; k < r->n && k < 8; k++) if (r->color[k]) sdx_bucket(r->color[k]->serial, 1);
                 if (r->depth) sdx_bucket(r->depth->serial, 1);
                 break; }
+            case OP_BIND_STATE: scan_chmask(a, &g_pp_cm); break;
             case OP_CLEAR_COLOR: { const p_clear_color *c = a; const p_set_rt *r = g_pp_rt;
-                if (!r || (c->mask & 0xf) != 0xf || c->index < 0 || c->index >= r->n || c->index >= 8 || !r->color[c->index]) break;
+                if (!r || clear_mask(c, g_pp_cm) != 0xf || c->index < 0 || c->index >= r->n || c->index >= 8 || !r->color[c->index]) break;
                 uint16_t lv, sl; sdx_lvsl(&r->cview[c->index], r->has_cview[c->index], &lv, &sl); int last = -1;   // When the same subresource is attached at several indices, the last one counts
                 for (int k = 0; k < r->n && k < 8; k++) { uint16_t l2, s2; if (!r->color[k] || r->color[k]->serial != r->color[c->index]->serial) continue; sdx_lvsl(&r->cview[k], r->has_cview[k], &l2, &s2); if (l2 == lv && s2 == sl) last = k; }
                 if (last == c->index) sdx_ev_add((sdx_ev){seq, g_pp_rtseq, r->color[c->index]->serial, p, lv, sl, SDX_CLEAR, 0, 0, 0});
@@ -11714,7 +11727,7 @@ static void mtl_sub_index_(const uint64_t *h, int n) {   // Start of submit (hle
     memset(g_sdx_hk, 0, sizeof g_sdx_hk); g_sdx_nb = 0;
     for (int i = 0; i < g_xv_n; i++) sdx_bucket(g_xv[i].ser, 1);   // Textures in the ledger enter the candidate set: otherwise, when one is only sampled and not used as an attachment in this submit, its read events are not indexed and the fallback cannot see them
     if (R.has_rt) { for (int k = 0; k < R.rt.n && k < 8; k++) if (R.rt.color[k]) sdx_bucket(R.rt.color[k]->serial, 1); if (R.rt.depth) sdx_bucket(R.rt.depth->serial, 1); }   // The targets at the start of the submit (the first draw may reopen the render pass without going through SetRenderTargets)
-    g_pp_prog = S.prog; g_pp_cprog = S.cprog; g_pp_rt = NULL; g_pp_rtseq = SDX_NONE;
+    g_pp_prog = S.prog; g_pp_cprog = S.cprog; g_pp_rt = NULL; g_pp_rtseq = SDX_NONE; g_pp_cm = S.chmask.mask;
     for (int st = 0; st < 6; st++) { for (int k = 0; k < NTEX; k++) g_pp_slot[st][k] = S.tex[st][k] ? h_ser(S.tex[st][k]) : 0;
                                      for (int k = 0; k < 32; k++) g_pp_slot[st][NTEX + k] = S.img[st][k] ? h_ser(S.img[st][k]) : 0; }
     for (int i = 0; i < n && g_sdx_ok; i++) sdx_walk((const uint8_t *)h[i], 0);
@@ -11773,7 +11786,7 @@ static void hoist_try(void) {
     if (g_hoist_n || !g_exec_next) return;
     typedef struct { const uint8_t *rt_op; const p_set_rt *rt; uint8_t clear_c[8]; MTLClearColor cc[8]; uint8_t clear_d, clear_s; double cd; uint32_t cs;
                      p_scissor sc; int has_sc; const uint8_t *ops[8]; int nops; } grp;
-    grp G[4]; int ng = 0, in_grp = 0; p_scissor sc = R.sc; int has_sc = R.has_sc;
+    grp G[4]; int ng = 0, in_grp = 0; p_scissor sc = R.sc; int has_sc = R.has_sc; uint32_t cm = S.chmask.mask;
     // The binding set needed for "the cleared texture is not on any slot": the table is looked up only when a hoistable clear group is really found and we are back to this render pass's targets (the vast majority of render passes never get that far).
     // Handles bound within the scan range are noted first and converted to texture serials together with the current slots at lookup time; the scan only reads commands and the current slots S do not change meanwhile, so the result is the same as checking at the start
     uint64_t bh[512]; int nbh = 0;
@@ -11786,12 +11799,13 @@ static void hoist_try(void) {
             case OP_MULTI_DRAW: return;
             case OP_DRAW: case OP_DRAW_IDX: if (in_grp) return; break;
             case OP_SCISSOR: sc = *(const p_scissor *)a; has_sc = 1; break;
+            case OP_BIND_STATE: scan_chmask(a, &cm); break;
             case OP_BIND_TEX: case OP_BIND_TEX1: case OP_BIND_IMG: { p_bind_handles t1; const p_bind_handles *b = bind_rec(h.op, a, &t1); bh_fresh(b); for (int k = 0; k < b->n && k < 32 && nbh < 512; k++) if (b->h[k]) bh[nbh++] = b->h[k]; break; }
             case OP_CLEAR_COLOR: case OP_CLEAR_DS: {
                 if (!in_grp || G[ng - 1].nops >= 8) return;
                 grp *g = &G[ng - 1];
                 if (h.op == OP_CLEAR_COLOR) { const p_clear_color *c = a;
-                    if (c->index < 0 || c->index >= g->rt->n || !g->rt->color[c->index] || c->mask != 0xf) return;
+                    if (c->index < 0 || c->index >= g->rt->n || !g->rt->color[c->index] || clear_mask(c, cm) != 0xf) return;
                     const tex_t *t = g->rt->color[c->index];
                     if (has_sc && !(sc.x <= 0 && sc.y <= 0 && sc.x + sc.w >= (int)t->d.width && sc.y + sc.h >= (int)t->d.height)) return;
                     g->clear_c[c->index] = 1; g->cc[c->index] = MTLClearColorMake(c->rgba[0], c->rgba[1], c->rgba[2], c->rgba[3]); }
@@ -12168,7 +12182,7 @@ static void fuse_try(void) {
     if (g_fz.active || !g_exec_next || g_hoist_n + 12 > HOIST_MAX || !R.rt.n) return;
     if (!fz_prefilter()) return;
     // One: from the earlier pass to the next SetRenderTargets, only draws and state are allowed
-    const uint8_t *p = NULL, *r2op = NULL, *reuse[8]; int nreuse = 0; const p_set_rt *r2 = NULL; p_scissor sc = R.sc; int has_sc = R.has_sc;
+    const uint8_t *p = NULL, *r2op = NULL, *reuse[8]; int nreuse = 0; const p_set_rt *r2 = NULL; p_scissor sc = R.sc; int has_sc = R.has_sc; uint32_t cm = S.chmask.mask;
     fz_cursor cur = {.p = g_exec_next}; op_hdr h; const void *a;
     for (int guard = 0; guard < 200000 && !r2; guard++) {
         if (!fz_next(&cur, &p, &h, &a)) return;
@@ -12176,6 +12190,7 @@ static void fuse_try(void) {
             case OP_COPY_T2T: case OP_DRAW_TEX: case OP_COPY_B2T: case OP_COPY_T2B: case OP_CLEAR_TEX: case OP_DLSS: case OP_DISPATCH: case OP_RENDER_COND:
             case OP_CLEAR_COLOR: case OP_CLEAR_DS: case OP_UPDATE_UB: case OP_COPY_B2B: case OP_CLEAR_BUF: return;
             case OP_SCISSOR: sc = *(const p_scissor *)a; has_sc = 1; break;
+            case OP_BIND_STATE: scan_chmask(a, &cm); break;
             case OP_SET_RT: {
                 int pend = R.clear_d || R.clear_s; for (int i = 0; i < 8; i++) pend |= R.clear_c[i];
                 if (rt_same(&R.rt, a)) {
@@ -12196,7 +12211,8 @@ static void fuse_try(void) {
         switch (h.op) {
             case OP_COPY_T2T: case OP_DRAW_TEX: case OP_COPY_B2T: case OP_COPY_T2B: case OP_CLEAR_TEX: case OP_DLSS: case OP_DISPATCH: case OP_SET_RT: case OP_UPDATE_UB: case OP_COPY_B2B: case OP_CLEAR_BUF: case OP_RENDER_COND: return;
             case OP_SCISSOR: sc = *(const p_scissor *)a; has_sc = 1; break;
-            case OP_CLEAR_COLOR: { const p_clear_color *c = a; if (ncl >= 8 || c->index < 0 || c->index >= r2->n || !r2->color[c->index] || c->mask != 0xf) return;
+            case OP_BIND_STATE: scan_chmask(a, &cm); break;
+            case OP_CLEAR_COLOR: { const p_clear_color *c = a; if (ncl >= 8 || c->index < 0 || c->index >= r2->n || !r2->color[c->index] || clear_mask(c, cm) != 0xf) return;
                 const tex_t *t = r2->color[c->index];
                 if (has_sc && !(sc.x <= 0 && sc.y <= 0 && sc.x + sc.w >= (int)t->d.width && sc.y + sc.h >= (int)t->d.height)) return;
                 clr[c->index] = 1; cc[c->index] = MTLClearColorMake(c->rgba[0], c->rgba[1], c->rgba[2], c->rgba[3]); cl[ncl++] = p; break; }
@@ -15014,8 +15030,12 @@ void mtl_exec(const uint8_t *p) {
                 sub_cut(); R.rt = *r; R.has_rt = 1; break;
             }
             case OP_CLEAR_COLOR: {
-                const p_clear_color *c = a;
+                const p_clear_color *c = a; p_clear_color masked;
                 if (g_rc_skip) { PD("c %llu color clear skipped by conditional rendering slot%d", g_stat_pass, c->index); break; }
+                if (clear_mask(c, S.chmask.mask) != (c->mask & 0xf)) {   // the channel mask state holds some of its channels back (clear_mask)
+                    masked = *c; masked.mask = clear_mask(c, S.chmask.mask); c = &masked;
+                    if (!c->mask) { PD("c %llu color clear writes no channel (its own mask and the channel mask share none) slot%d", g_stat_pass, c->index); break; }
+                }
                 // A scissored clear to 0 outside a pass with all channels (SMBW clears pyramid levels as sub-rectangles of 480×272 and other targets): copy from the zero buffer into the scissor rectangle in the replay stream
                 if (!g_enc && c->mask == 0xf && !c->rgba[0] && !c->rgba[1] && !c->rgba[2] && !c->rgba[3] && R.has_sc && c->index >= 0 && c->index < R.rt.n && R.rt.color[c->index]
                     && !scissor_full(R.rt.color[c->index], &R.rt.cview[c->index], R.rt.has_cview[c->index]) && clear_rect_zero(c->index)) break;

@@ -690,3 +690,12 @@ t_native_upscale_capture: t_native_upscale_capture.m t_unwritten_store.m $(MTL_T
 .PHONY: check_t_native_upscale_capture
 check_t_native_upscale_capture: t_native_upscale_capture
 	MTL_DEBUG_LAYER=1 ./t_native_upscale_capture
+
+# Experimental profile spatial stage: procedural packed pixels, no game assets.
+t_upscale_recipe: t_upscale_recipe.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_upscale_recipe.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
+.PHONY: check_t_upscale_recipe
+check_t_upscale_recipe: t_upscale_recipe
+	DM_UPSCALER=metalfx DM_UPSCALER_EXPERIMENTAL=0 ./t_upscale_recipe
+	DM_UPSCALER=metalfx DM_UPSCALER_EXPERIMENTAL=1 DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_upscale_recipe
+	DM_UPSCALER=metalfx DM_UPSCALER_EXPERIMENTAL=1 DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_upscale_recipe

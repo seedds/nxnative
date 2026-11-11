@@ -116,6 +116,20 @@ def upscaler_keys(g):
     return sorted(keys)
 
 
+def upscaler_recipe(g):
+    """One vetted final spatial stage; dimensions and argument indices are part of the contract."""
+    rows = g.values('upscaler_recipe')
+    if not rows: return ''
+    if len(rows) != 1: sys.exit(f'{g.id}: only one upscaler_recipe is supported')
+    v = rows[0]
+    if len(v) != 11 or not re.fullmatch(r'[0-9a-f]{16}_b', v[0]) or v[1] != 'sqrt_linear' or any(not x.isdigit() for x in v[2:]):
+        sys.exit(f'{g.id}: upscaler_recipe needs key_b sqrt_linear input_w input_h output_w output_h texture_argument image_argument grid_x grid_y grid_z')
+    iw, ih, ow, oh, ti, oi, gx, gy, gz = map(int, v[2:])
+    if not (0 < iw < ow <= 16384 and 0 < ih < oh <= 16384 and 0 <= ti < 768 and 0 <= oi < 768 and ti != oi and 0 < gx <= 65535 and 0 < gy <= 65535 and 0 < gz <= 65535):
+        sys.exit(f'{g.id}: invalid upscaler_recipe dimensions or arguments')
+    return ','.join(v)
+
+
 def header(g):
     """game_profile.h of a profile: one profile's constants, or with the key programs (a multi-program application packed as one game: Super Mario 3D All-Stars) a table of its programs' profiles"""
     return header_multi([(0, g)] + [(int(n), load(i)) for n, i in g.pairs('programs')]) if g.get('programs', '') else header_one(g)
@@ -203,6 +217,7 @@ def header_one(g):
     if vcr not in ('on', 'off'): sys.exit(f'{g.id}: vconv_range must be on or off: {vcr}')
     mml = g.get('mem_map_limit', 'off')   # MapPhysicalMemory refused beyond the application pool, as on Horizon (hle_svc.c): on / off
     if mml not in ('on', 'off'): sys.exit(f'{g.id}: mem_map_limit must be on or off: {mml}')
+    recipe = upscaler_recipe(g)
     ups = upscaler_keys(g)   # the game's own upscaler shaders, which DM_UPSCALER=metalfx (the launcher's Game's upscaler) replaces with MetalFX's spatial scaler (nvn_mtl.m up_mfx_encode)
     dbr = g.get('draw_barriers', 'full')   # how draw passes are ordered (nvn_mtl.m barrier_game): full = each waits for all earlier GPU work, game = by the game's own barriers, so vertex work overlaps the previous pass's fragments
     if dbr not in ('full', 'game'): sys.exit(f'{g.id}: draw_barriers must be full or game: {dbr}')
@@ -263,6 +278,7 @@ def header_one(g):
          f'#define DM_GAME_TEX_DYN_SLOTS {int(tds == "on")}',
          f'#define DM_GAME_GPU_TS_SEGMENT {int(gts == "segment")}',
          f'#define DM_GAME_DRAW_BARRIERS_GAME {int(dbr == "game")}',
+         f'#define DM_GAME_UPSCALER_RECIPE {q(recipe)}',
          f'#define DM_GAME_UPSCALER_KEYS {q(",".join(ups))}', f'#define DM_GAME_UPSCALER_N {len(ups)}',
          f'#define DM_GAME_VCONV_RANGE {int(vcr == "on")}',
          *([f'#define DM_GAME_NVN_API_MAJOR {api.split(".")[0]}', f'#define DM_GAME_NVN_API_MINOR {api.split(".")[1]}'] if g.get('device_api', '') else []),   # without the key: by the SDK version (hle_nvn.c nvn_api)

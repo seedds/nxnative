@@ -72,3 +72,11 @@ For causal stack captures, use `DM_HITCH_DUMP=300:49 DM_HITCH_HOST=1`. The host 
 The CPU upload fallback now groups transfers inside an open rendering submission, retaining targets and applying the existing 128 MiB staging bound. Twenty 8 MiB CPU textures failed the batching regression before the change and pass afterward with exhaustive pixel readback. Upload-budget, upload-slot and direct-upload tests pass with encoding on and off; NVN passes 306 checks.
 
 One game run completed without RED lines at 59.1 native FPS and roughly 114.4 actual drawable presentations/s in the head-turn window. Its GPU ran at 1578 MHz without thermal capping, unlike the earlier capped run. No isolated FPS improvement is claimed. The loading pause and sustained thermal headroom remain open.
+
+### Experimental spatial upscaling and interpolation together
+
+Use `DM_UPSCALER=metalfx DM_UPSCALER_EXPERIMENTAL=1` to opt into the vetted final-stage recipe. It preserves native AA and uses the real square-root-color input contract. This remains an experiment, not a recommended stable preset.
+
+The first integration trial revealed that replacing a dispatch skipped its normal scene-discovery notification and silently stopped frame generation. The replacement now sends the same post-dispatch notification as the native shader. A composed procedural regression catches that failure in both encoding modes. The corrected game trial records 600 replacements without fallback, passes native-copy fidelity at 0 LSB and displays 353 generated images during the seven-second timing window.
+
+That trial delivered 51 native FPS and roughly 101 actual presentations/s, with the GPU thermally capped at about 1216 MHz. The target of sustained 60/120 remains open. Earlier experimental runs with zero generated images do not establish combined performance. Bright-scene, foliage, text, latency and long-session quality still need validation.

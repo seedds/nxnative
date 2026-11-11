@@ -288,3 +288,9 @@ These are not profile keys: the tools read them from the game files each time, b
 4. **Shaders.** `DM_GAME=<id> [IOSOUT=…] dmsh_build.py <pkg> <cache>`, with a cache directory of the game's own. A full build also writes `c1_full.tsv` and `cb_extent.tsv` (local files, not committed). The chain version needs nothing: it is the same for every game.
 5. **Host bring-up.** Run `make -C dm/host GAME=<id>`, then work through the bring-up loop in docs/agents. Code that only fits one game is gated by its build ID (`dm_main_build()`), never left to run on every game.
 6. **IPA.** Use `GAME=<id> dm/ios/tools/build_ipa.sh`, or the NSP script, which now finds the profile.
+
+### Experimental full-rectangle upscaler recipe
+
+`upscaler_recipe` declares one vetted final spatial shader whose input stores sqrt(linear) color. Columns after the key are: shader key with `_b`, `sqrt_linear`, input width/height, output width/height, texture argument, image argument, dispatch grid x/y/z. The runtime checks that whole-rectangle contract, bindings, native formats and independent storage before replacing the dispatch. It preserves the preceding native antialiasing passes.
+
+This prototype requires both `DM_UPSCALER=metalfx` and `DM_UPSCALER_EXPERIMENTAL=1` at process launch. Without both, or when a guard fails, the game shader remains active. The recipe is shader-content-specific; carry it to another build only after checking its actual resource/color contract.

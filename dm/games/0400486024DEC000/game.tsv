@@ -49,3 +49,6 @@ draw_barriers	game
 # As Tears of the Kingdom: the terrain's height, blend and hole maps are written by the CPU into textures after they are created. Without these keys they stay zero: holes in the ground and the wrong materials
 tex_flush_upload	on
 tex_dirty_upload	on
+
+# Experimental final NDSR stage only; preceding native AA remains. Requires explicit player opt-in.
+upscaler_recipe	fa3033d05c0a41d6_b	sqrt_linear	1536	864	2048	1152	2	4	32	36	1

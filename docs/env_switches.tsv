@@ -397,3 +397,4 @@ DM_XCODE_PROJECT_DIR	path	Folder of the per-game Xcode project that `build_ipa.s
 DM_XV_FILE	path	File where the attachment validity ledger keeps the keys it disabled after a violation, read at the next launch
 DM_YIELD_BACKOFF	switch	`0` turns off the yield back-off; `=<cap µs>[:<start µs>]` sets its sleep cap and the run of yields after which it starts (default 250:2000)
 DM_YIELD_CLOCK	diagnostic	Clock-reading yield loops: 0 uses ordinary yield backoff, 1 backs off from the start, 2 also sleeps to the predicted end (default)
+DM_UPSCALER_EXPERIMENTAL	diagnostic	`=1`: with DM_UPSCALER=metalfx, enable a vetted profile upscaler recipe; default off, unsupported contracts keep the native shader

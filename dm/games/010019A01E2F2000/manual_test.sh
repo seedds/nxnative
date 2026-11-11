@@ -8,7 +8,7 @@
 # Never prints key material: prod.keys is passed by path only.
 set -euo pipefail
 MODE=${1:-1440p}
-case $MODE in default|1440p|1800p|2160p) ;; *) echo "mode: 1440p, 1800p, 2160p or default" >&2; exit 2;; esac
+case $MODE in default|1440p|1800p|2160p|diag1792) ;; *) echo "mode: 1440p, 1800p, 2160p, diag1792 or default" >&2; exit 2;; esac
 REPO=$(cd "$(dirname "$0")/../../.." && pwd)
 IMG=${MP4_IMAGES:-"$HOME/Downloads/Nintendo Switch 1:2 — images"}
 NSP="$IMG/Metroid Prime 4 Beyond [NSZ]"; WORK="$NSP/010019A01E2F2000_build"

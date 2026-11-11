@@ -86,8 +86,8 @@ class SceneStub(unittest.TestCase):
             assert register is not None
             sizes.append((register & 0xffffffff, register >> 32))
             self.assertEqual(words[k + 2], B(base + 4 * k + 8, profile.scene_site + 4))
-        self.assertEqual(sizes, [(2560, 1440), (3840, 2160), (3200, 1800)])
-        self.assertEqual(exports, {'SCENE_1440': base, 'SCENE_2160': base + 12, 'SCENE_1800': base + 24})
+        self.assertEqual(sizes, [(2560, 1440), (3840, 2160), (3200, 1800), (3200, 1792)])
+        self.assertEqual(exports, {'SCENE_1440': base, 'SCENE_2160': base + 12, 'SCENE_1800': base + 24, 'SCENE_D1792': base + 36})
         self.assertEqual(checked, [(profile.scene_site, '358108aa')])
 
     def test_unknown_game_build_cannot_generate_manifest(self):
@@ -101,7 +101,7 @@ class SceneStub(unittest.TestCase):
         writes = profile.scene_writes(stub)
         self.assertEqual([(c, off, orig.hex()) for c, off, orig, _ in writes], [('1440p', 0x33170c, '358108aa')])
         self.assertEqual([c for c, *_ in profile.scene_writes(stub + 12, '2160p')], ['2160p'])
-        self.assertEqual([c[0] for c in profile.CHOICES], ['1440p', '2160p', '1800p'])
+        self.assertEqual([c[0] for c in profile.CHOICES], ['1440p', '2160p', '1800p', 'diag1792'])
         self.assertTrue(all((w, h) == (1600 * k, 900 * k) for c, _, w, h in profile.CHOICES if c == '1800p' for k in [2]))   # an exact 2:1 of the output
         self.assertEqual(writes[0][3], struct.pack('<I', B(0x33170c, stub)))
         self.assertFalse(any(0x3317ec <= off < 0x3317fc for _, off, _, _ in writes))

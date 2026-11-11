@@ -41,7 +41,9 @@ def generate(module, patched, fixups):
 # 1800p is twice the 1600x900 output in each direction: the game's composite reads the scene with one bilinear tap per output pixel (pass dumps:
 # sampler 288, a single-level scene), which at exactly 2:1 lands between four texels and averages them, a 2x2 box filter. At 2160p (2.4:1) the same tap
 # covers 4 of about 5.8 texels at a drifting phase, so the edges keep stair steps.
-CHOICES = (('1440p', 'SCENE_1440', 2560, 1440), ('2160p', 'SCENE_2160', 3840, 2160), ('1800p', 'SCENE_1800', 3200, 1800))   # patches.py SCENE_SIZES
+CHOICES = (('1440p', 'SCENE_1440', 2560, 1440), ('2160p', 'SCENE_2160', 3840, 2160), ('1800p', 'SCENE_1800', 3200, 1800),
+           ('diag1792', 'SCENE_D1792', 3200, 1792))   # patches.py SCENE_SIZES. diag1792: a diagnostic, not a mode: its half-resolution target is 1600x896,
+# inside the fixed 1600x900 one, where 1800p's is 1600x904 (900 rounded up to 8); whether scanning works there tells which size the Scan Visor needs
 
 
 def scene_writes(stub, choice='1440p'):

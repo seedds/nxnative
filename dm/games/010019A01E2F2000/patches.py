@@ -7,7 +7,7 @@ from nso_asm import B
 
 build_id = '8275fbe1ec5191c279f3a943ad8524f4'
 scene_site = 0x33170c
-SCENE_SIZES = (('SCENE_1440', 2560, 1440), ('SCENE_2160', 3840, 2160), ('SCENE_1800', 3200, 1800))   # runtime_patches.py's choices 1440p, 2160p and 1800p
+SCENE_SIZES = (('SCENE_1440', 2560, 1440), ('SCENE_2160', 3840, 2160), ('SCENE_1800', 3200, 1800), ('SCENE_D1792', 3200, 1792))   # runtime_patches.py's choices 1440p, 2160p, 1800p and diag1792
 
 
 def resolution_stub(c):

@@ -31,8 +31,9 @@ BINDING = [
 # Full NSO identity and the instruction at each point are checked by scan_diag.py, including in the rewritten main.
 # No PC-relative instruction; x16 is dead at these entries / after calls, and on the short paths to the next call.
 # label, instruction offset, original bytes, @ register (None = every call), field offset, optional scalar register.
+SCAN_BUILD_ID = '8275fbe1ec5191c279f3a943ad8524f4bab087a3000000000000000000000000'
 SCAN_DIAGNOSTICS = {
-    '8275fbe1ec5191c279f3a943ad8524f4bab087a3000000000000000000000000': (
+    SCAN_BUILD_ID: (
         ('target-handle', 0xcb2ca4, '886641b9', 20, 0x164, None),
         ('target-resolved', 0xcb2cb8, 'f44f42a9', 0, 0x2b0, None),
         ('target-range', 0xcb2de0, '08b04579', 0, 0x2d8, None),
@@ -44,5 +45,25 @@ SCAN_DIAGNOSTICS = {
         ('progress-call', 0x699d4, 'ff0302d1', 0, 0x2b0, 0),
         ('progress-manager', 0x69a10, '0041201e', 20, 0x2b0, 8),
         ('progress-return', 0x69a64, '88724039', 20, 0x2b0, 8),
+    ),
+}
+
+# Acquisition upstream of BeginScan. Same read-only probe ABI as SCAN_DIAGNOSTICS.
+# @/^ polls are limited to one printed observation per 30 presented frames; every BeginScan entry is kept.
+SCAN_ACQUISITION_DIAGNOSTICS = {
+    SCAN_BUILD_ID: (
+        *[p for p in SCAN_DIAGNOSTICS[SCAN_BUILD_ID] if p[0] in
+          ('target-handle', 'target-resolved', 'begin-request', 'begin-target', 'progress-call')],
+        ('acquire-input', 0x402924, '0a8040b9', 0, 0x80, None),
+        ('acquire-context-state', 0x402934, '09d14439', 8, 0x130, None),
+        ('acquire-context-pointer', 0x402938, '08c940f9', 8, 0x190, None),
+        ('acquire-eligible', 0x40294c, '08b840b9', 0, 0x80, None),
+        ('spatial-candidates', 0x402b50, 'e0031baa', 22, 0x80, None),
+        ('project-depth', 0x40342c, '4020281e', 28, 0x18, None),
+        ('project-bounds', 0x4034a0, '40212c1e', 28, 0x18, None),
+        ('project-accepted', 0x4034c4, 'e93f40f9', 28, 0x18, None),
+        ('raw-candidates', 0x221ed8, '97de43f9', 20, 0x218, None),
+        ('filtered-candidates', 0x21ea8c, 'e93340f9', 19, 0x218, None),
+        ('selected-candidate', 0x222b2c, 'ff0304d1', 0, 0x120, None),
     ),
 }

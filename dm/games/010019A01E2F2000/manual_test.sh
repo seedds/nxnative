@@ -31,20 +31,25 @@ printf 'DM_INTERNAL_RESOLUTION=%s\nDM_PRESENT_UPSCALE=off\nDM_METAL_HUD=1\nDM_NV
 [ -n "${PROBE:-}" ] && printf 'DM_PROBE=%s\nDM_PROBE_LIMIT=%s\n' "$PROBE" "$([ "${SCALE_PROBE:-}" = 1 ] && echo 400 || echo 3)" >> "$OUT/env.txt"
 # Native Scan Visor state, read-only; no renderer-size, visibility or rumble probes in this diagnostic.
 # Reject incompatible originals before building; verify the just-built probe sites again before launch.
-if [ "${SCAN_STATE_PROBE:-}" = 1 ]; then
-    [ -z "${PROBE:-}${VIS_SCALE:-}" ] || { echo "SCAN_STATE_PROBE must run without other probes or VIS_SCALE" >&2; exit 2; }
+DIAG_MODE=--state
+if [ "${SCAN_ACQUIRE_PROBE:-}" = 1 ]; then
+    [ "${SCAN_STATE_PROBE:-}" != 1 ] || { echo "choose only one scan diagnostic" >&2; exit 2; }
+    DIAG_MODE=--acquisition
+fi
+if [ "${SCAN_STATE_PROBE:-}" = 1 ] || [ "${SCAN_ACQUIRE_PROBE:-}" = 1 ]; then
+    [ -z "${PROBE:-}${VIS_SCALE:-}" ] || { echo "scan diagnostics must run without other probes or VIS_SCALE" >&2; exit 2; }
     ORIGINAL="$WORK/extract/v131072/ExeFS/main"
-    "$PY" "$REPO/dm/games/010019A01E2F2000/scan_diag.py" env "$ORIGINAL" >> "$OUT/env.txt"
+    "$PY" "$REPO/dm/games/010019A01E2F2000/scan_diag.py" "$DIAG_MODE" env "$ORIGINAL" >> "$OUT/env.txt"
 fi
 echo "== build (partial shaders; the first time a few thousand shaders compile) -> $OUT/build.log"
 "$PY" "$REPO/scripts/build_ipa_from_nsp.py" "$NSP" -k "$IMG/prod.keys" --package v131072 --platform mac \
     --seen-shaders --work-dir "$WORK" --env-file "$OUT/env.txt" --progress lines 2>&1 | tee "$OUT/build.log"
 CMD=$(grep -E "^cd .*dmhost.* \| tee " "$OUT/build.log" | tail -1)
 [ -n "$CMD" ] || { echo "[RED] the build printed no run command: see $OUT/build.log" >&2; exit 1; }
-if [ "${SCAN_STATE_PROBE:-}" = 1 ]; then
-    "$PY" "$REPO/dm/games/010019A01E2F2000/scan_diag.py" check "$ORIGINAL" "$WORK/patched_v131072/main.patched.bin"
+if [ "${SCAN_STATE_PROBE:-}" = 1 ] || [ "${SCAN_ACQUIRE_PROBE:-}" = 1 ]; then
+    "$PY" "$REPO/dm/games/010019A01E2F2000/scan_diag.py" "$DIAG_MODE" check "$ORIGINAL" "$WORK/patched_v131072/main.patched.bin"
 fi
-echo "== running ($MODE). Play, then quit the game window."
+echo "== ONE game launch: $MODE. Play this mode, then quit the game window."
 bash -c "$CMD" || true
 cp "$WORK/run/host.log" "$OUT/host.log"
 "$PY" -I - "$OUT/host.log" "$MODE" "$OUT/input.rec" <<'PYEOF' | tee "$OUT/summary.txt"
@@ -104,7 +109,7 @@ red = collections.Counter(re.sub(r'[0-9a-f]{8,}|\d+', 'N', l)[:160] for l in re.
 print('other red lines:'); [print(f'  {n} x {l}') for l, n in red.most_common(8)]
 for l in re.findall(r'^.*(?:SIGSEGV|SIGBUS|fault at|crash handler).*$', log, re.M)[:3]: print('CRASH:', l[:200])
 PYEOF
-if [ "${SCAN_STATE_PROBE:-}" = 1 ]; then
-    "$PY" "$REPO/dm/games/010019A01E2F2000/scan_diag.py" summary "$OUT/host.log" | tee -a "$OUT/summary.txt"
+if [ "${SCAN_STATE_PROBE:-}" = 1 ] || [ "${SCAN_ACQUIRE_PROBE:-}" = 1 ]; then
+    "$PY" "$REPO/dm/games/010019A01E2F2000/scan_diag.py" "$DIAG_MODE" summary "$OUT/host.log" | tee -a "$OUT/summary.txt"
 fi
 echo "== summary: $OUT/summary.txt"

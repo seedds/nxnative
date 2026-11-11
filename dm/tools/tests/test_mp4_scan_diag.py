@@ -19,9 +19,10 @@ spec.loader.exec_module(scan)
 class ScanDiagnostics(unittest.TestCase):
     def setUp(self):
         self.build, self.probes = next(iter(scan.BUILDS.items()))
-        end = max(p[1] for p in self.probes) + 4
+        all_probes = (*self.probes, *scan.ACQUISITION_BUILDS[self.build])
+        end = max(p[1] for p in all_probes) + 4
         image = bytearray(end)
-        for _, off, original, *_ in self.probes:
+        for _, off, original, *_ in all_probes:
             image[off:off + 4] = bytes.fromhex(original)
         self.module = types.SimpleNamespace(build_id=bytes.fromhex(self.build), text_end=end, image=image)
         self.fixups = {'BUILD_ID': self.build[:32], 'TEXT_END': hex(end)}
@@ -70,9 +71,36 @@ class ScanDiagnostics(unittest.TestCase):
         self.assertEqual(env['DM_PROBE_EVERY'], '0')  # rare BeginScan calls must not be sampled away
         self.assertFalse(any('RESOLUTION' in key or 'VIS_SCALE' in key for key in env))
 
+    def test_acquisition_sites_and_cadence_are_checked(self):
+        env = dict(line.split('=', 1) for line in scan.environment(self.module, acquisition=True).splitlines())
+        self.assertEqual(len(scan.validate(self.module, self.module.image, self.fixups, acquisition=True)), 16)
+        self.assertEqual(len(env['DM_PROBE'].split(',')), 16)
+        self.assertLess(len(env['DM_PROBE']), 512)
+        self.assertEqual(env['DM_PROBE_INTERVAL_FRAMES'], '30')
+        self.assertEqual(env['DM_PROBE_EVERY'], '0')
+        self.assertEqual(env['DM_PROBE_CHANGES'], '0')
+        self.assertEqual(env['DM_PROBE_FLOATS'], '1')
+        self.assertIn('main:5d9450', env['DM_PROBE'].split(','))
+        bad = bytearray(self.module.image); bad[0x4034a0] ^= 1
+        with self.assertRaisesRegex(ValueError, 'rewritten instruction'):
+            scan.validate(self.module, bad, self.fixups, acquisition=True)
+        self.module.build_id = bytes(32)
+        with self.assertRaisesRegex(ValueError, 'verified main'):
+            scan.environment(self.module, acquisition=True)
+
+    def test_acquisition_summary_decodes_flag_and_full_pointer(self):
+        log = ('[dm] PROBE main+0x402934 #20 [1.0s] F=60 T=1 [x8+0x130]=00000000010000000000000000000000\n'
+               '[dm] PROBE main+0x402938 #20 [1.0s] F=60 T=1 [x8+0x190]=88776655443322110000000000000000\n')
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            scan.summarize(log, acquisition=True)
+        self.assertIn('flag134=01', out.getvalue())
+        self.assertIn('ptr190=1122334455667788', out.getvalue())
+        self.assertIn('project-bounds: no printed hit', out.getvalue())
+
     def test_summary_preserves_unknowns_and_reports_scalar(self):
         log = ('[dm] PROBE main+0xcb2cb8 #1 [1.0s] F=60 T=1 x0=0 [x0+0x2b0]=unreadable\n'
-               '[dm] PROBE main+0x699d4 #1 [2.0s] F=120 T=1 x0=0x1234 s0=0.5(3f000000) [x0+0x2b0]=01000000000000000000000000000000\n')
+               '[dm] PROBE main+0x699d4 #1 [2.0s] F=120 T=1 x0=0x1234 s0=0.5(3f000000) s1=999(4479c000) [x0+0x2b0]=01000000000000000000000000000000\n')
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             scan.summarize(log)

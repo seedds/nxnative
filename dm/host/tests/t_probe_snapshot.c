@@ -15,5 +15,15 @@ int main(void) {
     assert(!probe_snapshot_changed(&last, &now, 16));
     now.scalar = 0x3f800000; assert(probe_snapshot_changed(&last, &now, 16));
     assert(!probe_snapshot_changed(&last, &now, 16));
-    puts("probe snapshots: 12 checks passed");
+    probe_interval_t poll = {0};
+    assert(probe_interval_due(&poll, 0, 30));  // first observation, including frame zero
+    assert(!probe_interval_due(&poll, 0, 30));
+    assert(!probe_interval_due(&poll, 29, 30));
+    assert(probe_interval_due(&poll, 30, 30));
+    assert(!probe_interval_due(&poll, 31, 30));
+    assert(probe_interval_due(&poll, 1, 30));  // frame counter restarted
+    assert(probe_interval_due(&poll, 1, 0));   // disabled interval
+    assert(probe_interval_due(&poll, UINT64_MAX, 30));
+    assert(!probe_interval_due(&poll, UINT64_MAX, 30));
+    puts("probe snapshots/intervals: 21 checks passed");
 }

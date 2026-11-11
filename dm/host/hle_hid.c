@@ -17,6 +17,7 @@
 #include <time.h>
 #include <math.h>
 #include "motion_fusion.h"
+#include "motion_swing.h"
 
 enum { NPAD_NO1 = 0, NPAD_HANDHELD = 0x20 };
 enum { STYLE_FULLKEY = 1u << 0, STYLE_HANDHELD = 1u << 1, STYLE_JOYDUAL = 1u << 2, STYLE_JOYLEFT = 1u << 3, STYLE_JOYRIGHT = 1u << 4 };
@@ -56,6 +57,26 @@ static void shake_note(void) {
     if (on) { if (t >= atomic_load(&g_shake_end)) atomic_store(&g_shake_t0, t); atomic_store(&g_shake_end, UINT64_MAX); }
     else { uint64_t t0 = atomic_load(&g_shake_t0); atomic_store(&g_shake_end, t0 + ((t - t0) / SHAKE_CYCLE_NS + 1) * SHAKE_CYCLE_NS); }
 }
+// Swing (DM_KEYS / DM_CTL "Swing[<axis>][@<deg/s>]", motion_swing.h): one scripted swing of player 1's controller, started by the step's press on the guest clock and played to its
+// end whatever the hold; a new swing replaces one still playing. Like the shake it moves only the sensor of player 1's own controller (the keyboard, a pad shown as one controller,
+// handheld), and only while no live motion drives it: it does nothing on a real Joy-Con pair or single Joy-Con (their own sensors, six_source's KIND_DUAL and up) or on any
+// controller whose gyro reports (live motion wins, six_at)
+static pthread_mutex_t g_swing_mu = PTHREAD_MUTEX_INITIALIZER;
+static swing_spec g_swing; static uint64_t g_swing_t0; static int g_swing_set;
+static void swing_start(const swing_spec *sp) {
+    pthread_mutex_lock(&g_swing_mu); g_swing = *sp; g_swing_t0 = guest_ns(); g_swing_set = 1; pthread_mutex_unlock(&g_swing_mu);
+    if (sp->lift) LOG("swing: a lift along %c%c at %.1f G, over %.2f s", sp->sign < 0 ? '-' : '+', "xyz"[sp->axis], sp->peak_dps, LIFT_S);
+    else LOG("swing: about %c%c at %.0f deg/s, impact %.2f s after the press, over %.2f s", sp->sign < 0 ? '-' : '+', "xyz"[sp->axis], sp->peak_dps, swing_impact(sp->peak_dps), swing_duration(sp->peak_dps));
+}
+void dm_input_swing(int axis, int sign) {   // a front end's key (dm_input.h)
+    if (axis < 0 || axis > 2) return;
+    swing_spec sp = {axis, sign < 0 ? -1 : 1, SWING_DPS_DEFAULT, 0}; swing_start(&sp);
+}
+// The swing's pose at guest time t (ns): 1 while it plays (acc, gyro, angle, dir filled), else 0
+static int swing_at(uint64_t t, float acc[3], float gyro[3], float angle[3], float dir[9]) {
+    pthread_mutex_lock(&g_swing_mu); swing_spec sp = g_swing; uint64_t t0 = g_swing_t0; int set = g_swing_set; pthread_mutex_unlock(&g_swing_mu);
+    return set && t >= t0 && swing_pose(&sp, (double)(t - t0) / 1e9, acc, gyro, angle, dir);
+}
 void dm_input_set(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry) {
     uint64_t old = atomic_exchange(&g_btn, buttons); atomic_fetch_or(&g_latch, buttons & ~old); atomic_fetch_or(&g_peek_latch, buttons & ~old); atomic_store(&g_axes, pack(lx, ly, rx, ry));
     shake_note();
@@ -84,13 +105,14 @@ static void script_set(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int
 }
 uint64_t dm_input_samples(void) { return (uint64_t)atomic_load(&g_sampling); }
 // DM_KEYS scripted input (for tests): "seconds:key[+key][~hold seconds][*count/interval seconds],...", e.g. "8:A,12:A,15:Down~0.5,16:A+B,40:A*80/2" (A every 2 s from 40 s on, 80 times). Key names A B X Y LS RS L R ZL ZR (plus the sticks LLeft LUp LRight LDown and RLeft RUp RRight RDown) Plus Minus Left Up Right Down, left stick LLeft LUp LRight LDown,
-//   L<x>/<y> and R<x>/<y> = a stick tilted part way (each -1 to 1, y up: a cursor that a full tilt sweeps past its target), T<x>x<y> = a touch at normalized picture coordinates (origin top left) for the hold time, and Shake = the controller shaken for the hold time (at least one whole shake);
+//   L<x>/<y> and R<x>/<y> = a stick tilted part way (each -1 to 1, y up: a cursor that a full tilt sweeps past its target), T<x>x<y> = a touch at normalized picture coordinates (origin top left) for the hold time, Shake = the controller shaken for the hold time (at least one whole shake),
+//   and Swing[-][x|y|z][@<deg/s>] = one swing of the controller about that axis of its own (default +z, 1500 deg/s; motion_swing.h), played to its end whatever the hold, its impact 0.72 s after the press at the default speed;
 //   held 0.15 s by default, at most KEY_STEPS steps (counted after repeats are expanded). Goes through player 1's scripted path (script_set), ORed with keyboard / touch and player 1's controller, none overrides another. Times are counted from host start.
 //   An f before the time means a presented frame number ("f7600:A", and the repeat interval counts frames too): when the machine is busy seconds drift from the game's progress, frame numbers do not (used for the Zelda BotW opening route)
 //   An f before the hold counts presented frames too ("f7600:A~f12"): held until 12 frames after the step's frame, and a step that begins by then follows without a release in between (the buttons
 //   go straight to its state, a held touch moves instead of lifting): DM_REC writes a run as such steps, one state after the other, and a list of only such steps is applied at the
 //   game's reads (keys_sync) instead of by keys_main. Whitespace and newlines separate steps as commas do
-typedef struct { double at, hold; uint64_t btn; int32_t lx, ly, rx, ry; int frame, fhold, tap; float tx, ty; } key_step;   // tap: a touch at (tx, ty), normalized; fhold: hold in frames
+typedef struct { double at, hold; uint64_t btn; int32_t lx, ly, rx, ry; int frame, fhold, tap, swing; float tx, ty; swing_spec sw; } key_step;   // tap: a touch at (tx, ty), normalized; fhold: hold in frames; swing: sw starts with the press
 #define KEY_STEPS (1 << 20)
 static key_step *g_steps; static int g_nsteps, g_cap_steps;
 static int step_add(const key_step *st) {
@@ -108,7 +130,7 @@ static void *keys_main(void *arg) {
                    if (s->frame ? (double)dm_guest_frame() >= s->at && (int64_t)dm_guest_frame() > released : el >= s->at) break; usleep(5000); }
         LOG("DM_KEYS: %s%.2f press %#llx (hold %.2f %s)", s->frame ? "frame " : "", s->at, (unsigned long long)s->btn, s->hold, s->fhold ? "frames" : "s");
         if (s->tap) { dm_touch t = {0, s->tx, s->ty}; dm_touch_script(&t, 1); } else if (touching) dm_touch_script(NULL, 0);
-        script_set(s->btn, s->lx, s->ly, s->rx, s->ry);
+        script_set(s->btn, s->lx, s->ly, s->rx, s->ry); if (s->swing) swing_start(&s->sw);
         uint64_t end = 0;
         if (s->fhold) { end = (s->frame ? (uint64_t)s->at : dm_guest_frame()) + (uint64_t)s->hold; while (dm_guest_frame() < end) usleep(5000); }
         else usleep((useconds_t)(s->hold * 1e6));
@@ -136,7 +158,7 @@ static void keys_sync(void) {
             if (g_sync_next < g_nsteps && g_steps[g_sync_next].at <= (double)end) {   // the next step begins where this hold ends: no release (buttons go to its state, a finger moves)
                 const key_step *n = &g_steps[g_sync_next++];
                 if (n->tap) { dm_touch t = {0, n->tx, n->ty}; dm_touch_script(&t, 1); } else if (s->tap) dm_touch_script(NULL, 0);
-                script_set(n->btn, n->lx, n->ly, n->rx, n->ry); continue;
+                script_set(n->btn, n->lx, n->ly, n->rx, n->ry); if (n->swing) swing_start(&n->sw); continue;
             }
             script_set(0, 0, 0, 0, 0); if (s->tap) dm_touch_script(NULL, 0);   // let go (a hold of 0 frames is pressed and let go before one read: the press latch hands it to that read)
             g_sync_held = 0; continue;
@@ -145,7 +167,7 @@ static void keys_sync(void) {
         const key_step *s = &g_steps[g_sync_next];
         if (s->at > (double)f) break;
         if (s->tap) { dm_touch t = {0, s->tx, s->ty}; dm_touch_script(&t, 1); }
-        script_set(s->btn, s->lx, s->ly, s->rx, s->ry); g_sync_next++; g_sync_held = 1;
+        script_set(s->btn, s->lx, s->ly, s->rx, s->ry); if (s->swing) swing_start(&s->sw); g_sync_next++; g_sync_held = 1;
     }
     pthread_mutex_unlock(&g_sync_mu);
 }
@@ -170,6 +192,7 @@ static void parse_keys(char *spec, key_step *st) {
         // a touch: T<x>x<y> with x, y normalized on the picture, origin top left ("f3000:T0.31x0.62", Super Mario Galaxy's file select in handheld mode)
         float tx, ty; if ((k[0] == 'T' || k[0] == 't') && sscanf(k + 1, "%fx%f", &tx, &ty) == 2) { st->tap = 1; st->tx = tx; st->ty = ty; found = 1; }
         if (!strcasecmp(k, "Shake")) { st->btn |= DM_BTN_SHAKE; found = 1; }   // the six-axis sensor shaken (Super Mario Odyssey's cap throw)
+        if (swing_parse(k, &st->sw)) { st->swing = 1; found = 1; }   // a swing (motion_swing.h): Nintendo Switch Sports Resort's racket
         if (!found) LOG("[RED] DM_KEYS unknown key name: %s", k);
         k = plus ? plus + 1 : NULL; }
 }
@@ -274,7 +297,7 @@ static void *ctl_main(void *arg) {
                 parse_keys(line, &st);
                 LOG("DM_CTL: press %#llx (hold %.2f s)", (unsigned long long)st.btn, st.hold);
                 if (st.tap) { dm_touch t = {0, st.tx, st.ty}; dm_touch_script(&t, 1); }
-                script_set(st.btn, st.lx, st.ly, st.rx, st.ry); usleep((useconds_t)(st.hold * 1e6)); script_set(0, 0, 0, 0, 0);
+                script_set(st.btn, st.lx, st.ly, st.rx, st.ry); if (st.swing) swing_start(&st.sw); usleep((useconds_t)(st.hold * 1e6)); script_set(0, 0, 0, 0, 0);
                 if (st.tap) dm_touch_script(NULL, 0);
             }
         }
@@ -1017,6 +1040,7 @@ static void six_sample(SixAxisState *s, int64_t samp, int shakes) {
     memset(s, 0, sizeof *s);
     uint64_t t = (uint64_t)samp * SIX_PERIOD_NS;
     s->delta_ns = SIX_PERIOD_NS; s->sampling = samp; s->attributes = 1;   // IsConnected
+    if (shakes && swing_at(t, s->acc, s->gyro, s->angle, s->dir)) return;   // a scripted swing (DM_KEYS Swing) takes the sensor over while it plays
     s->acc[2] = -1;
     double yaw = 0;
     if (shakes && shaking(t)) {
@@ -1111,7 +1135,7 @@ static int six_offset_known(uint32_t h) {
     pthread_mutex_lock(&m->mu); int have = m->rest.have; pthread_mutex_unlock(&m->mu);
     return have;
 }
-// The state at a tick: from the live history (live_at) while there is one, else the host's own (flat or shaken)
+// The state at a tick: from the live history (live_at) while there is one, else the host's own (flat, shaken or swung)
 static int six_at(SixAxisState *s, int64_t samp, const live_hist *src, int shakes) {   // returns live_at's "no change of its own" (0 for the host's own samples)
     if (src->n) { motion_sample ms; int held = live_at(src->r, src->n, (uint64_t)samp * SIX_PERIOD_NS, &ms); six_sample_live(s, samp, &ms, shakes); return held; }
     six_sample(s, samp, shakes); return 0;
@@ -1683,10 +1707,11 @@ HLE_FORCE("_ZN2nn3hid16GetGestureStatesEPNS0_12GestureStateEi", "gesture states,
 // Six-axis details: the current state, at rest unless shaking, fusion off
 HLE_FORCE("_ZN2nn3hid17StopSixAxisSensorERKNS0_19SixAxisSensorHandleE", "six-axis sensor; always sampling on the host", void, h_hid_SixStop, const uint32_t *h) { (void)h; }
 HLE_FORCE("_ZN2nn3hid21GetSixAxisSensorStateEPNS0_18SixAxisSensorStateERKNS0_19SixAxisSensorHandleE", "six-axis sensor current state", void, h_hid_SixState, SixAxisState *s, const uint32_t *h) { six_states(s, 1, *h); }
-HLE_FORCE("_ZN2nn3hid21IsSixAxisSensorAtRestERKNS0_19SixAxisSensorHandleE", "six-axis sensor at rest: yes unless player 1's is shaking or a live controller is turning", unsigned, h_hid_SixRest, const uint32_t *h) {
+HLE_FORCE("_ZN2nn3hid21IsSixAxisSensorAtRestERKNS0_19SixAxisSensorHandleE", "six-axis sensor at rest: yes unless player 1's is shaking or swinging or a live controller is turning", unsigned, h_hid_SixRest, const uint32_t *h) {
     int pl = player_of(*h >> 8 & 0xff); motion_state ms;
     if (motion_live(pl, &ms)) return fabsf(ms.gyro[0]) + fabsf(ms.gyro[1]) + fabsf(ms.gyro[2]) < 0.01f && !(pl == 0 && shaking(guest_ns()));
-    return pl != 0 || !shaking(guest_ns());
+    float a[3], g[3], an[3], d[9];
+    return pl != 0 || (!shaking(guest_ns()) && !swing_at(guest_ns(), a, g, an, d));
 }
 // The console's own six-axis sensor (SevenSixAxisSensor, the body's orientation in handheld mode; The Legend of Zelda: Breath of the Wild): takes a work buffer and is switched through the hid service. The host provides none: switching succeeds, 0 states
 HLE_FORCE("_ZN2nn3hid28InitializeSevenSixAxisSensorEPvm", "console six-axis sensor initialization; not provided by the host", Result, h_hid_SevenInit, void *buf, size_t n) { (void)buf; (void)n; return RES_OK; }

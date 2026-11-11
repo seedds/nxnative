@@ -908,6 +908,50 @@ static void t_imu_noise(void) {
     h_hid_ImuDisable(); hwm_clear(), guest_now = 1000000000ull; g_phone_mode = -1;
 }
 
+// DM_KEYS / DM_CTL "Swing" (motion_swing.h): the step carries the swing, its press starts it on the guest clock, player 1's six-axis states and npad IMU samples play it (in the IMU's
+// units and signs), the sensor is not at rest meanwhile, and a pad that is not player 1's own does not swing
+static void t_swing(void) {
+    g_mode = 1; dm_pad_players(1); g_phone_mode = 0;
+    setenv("DM_IMU_NOISE", "0", 1); imu_env_read();
+    atomic_store(&g_shake_t0, 0); atomic_store(&g_shake_end, 0);
+    keys_parse("f100:Swing-x@1800,f200:A+Swing~f2,f300:Swingq");
+    CHECK(g_nsteps == 3 && g_steps[0].swing && g_steps[0].sw.axis == 0 && g_steps[0].sw.sign == -1 && g_steps[0].sw.peak_dps == 1800 && !g_steps[0].btn, "Swing-x@1800 parses into the step, with no button");
+    CHECK(g_steps[1].swing && g_steps[1].btn == DM_BTN_A && g_steps[1].sw.axis == 2 && g_steps[1].sw.sign == 1, "A+Swing: the button and the default swing");
+    CHECK(!g_steps[2].swing, "an unknown axis is no swing");
+    free(g_steps); g_steps = NULL; g_nsteps = g_cap_steps = 0;
+    uint32_t id = 0, h; h_hid_SixHandles(&h, 1, &id, STYLE_FULLKEY);
+    SixAxisState st[2];
+    hwm_clear(), guest_now = 5000000000ull;
+    CHECK(six_states(st, 1, h) == 1 && st[0].acc[2] == -1 && st[0].gyro[2] == 0 && h_hid_SixRest(&h), "before the swing: flat and at rest");
+    static key_step one[1]; g_steps = one; g_cap_steps = 0; g_nsteps = 1;
+    g_steps[0] = (key_step){.hold = 0.15, .swing = 1, .sw = {2, 1, 1500}};
+    keys_main(NULL);   // presses at guest 5 s (the test's usleep does not move the guest clock)
+    hwm_clear(), guest_now = 5000000000ull + (uint64_t)(swing_impact(1500) * 1e9);
+    CHECK(six_states(st, 2, h) == 2 && fabsf(st[0].gyro[2] - 1500.f / 360) < 1e-3f && st[0].acc[1] > 7.9f, "at the impact: the swing's peak about z and its centripetal pull");
+    CHECK(st[1].sampling == st[0].sampling - 1 && st[1].gyro[2] < st[0].gyro[2] + 1e-6f, "the history holds the swing's earlier ticks");
+    CHECK(!h_hid_SixRest(&h), "a swinging sensor is not at rest");
+    uint8_t ring[64]; h_hid_ImuEnable(ring, sizeof ring);
+    TestImuSample m[1];
+    CHECK(h_hid_ImuSamples(m, 1, 0x20003) == 1 && fabsf(m[0].gyro[2] + 1500.f / 360 * 2 * (float)M_PI) < 1e-3f && fabsf(m[0].acc[1] + st[0].acc[1] * 9.80665f) < 1e-3f,
+          "the npad IMU sample of that tick: -rev/s x 2 pi rad/s, -G x 9.80665 m/s^2");
+    h_hid_ImuDisable();
+    dm_pad_players(3); uint32_t id2 = 1, h2; h_hid_SixHandles(&h2, 1, &id2, STYLE_FULLKEY);
+    CHECK(six_states(st, 1, h2) == 1 && st[0].gyro[2] == 0 && st[0].acc[2] == -1, "player 2's sensor does not swing");
+    dm_pad_players(1);
+    hwm_clear(), guest_now = 5000000000ull + (uint64_t)(swing_duration(1500) * 1e9) + SIX_PERIOD_NS;
+    CHECK(six_states(st, 1, h) == 1 && st[0].acc[2] == -1 && st[0].gyro[2] == 0 && st[0].dir[0] == 1 && h_hid_SixRest(&h), "after the swing: flat and at rest again");
+    // A front end's key (dm_input_swing, the Mac's V / B): the same swing from the guest clock's now; an axis that does not exist is ignored
+    pthread_mutex_lock(&g_swing_mu); g_swing_set = 0; pthread_mutex_unlock(&g_swing_mu);
+    dm_input_swing(3, 1);
+    guest_now += (uint64_t)(swing_impact(SWING_DPS_DEFAULT) * 1e9);
+    CHECK(six_states(st, 1, h) == 1 && st[0].gyro[2] == 0 && st[0].gyro[0] == 0, "dm_input_swing: no axis 3, no swing");
+    hwm_clear(), guest_now = 9000000000ull; dm_input_swing(2, -1); guest_now += (uint64_t)(swing_impact(SWING_DPS_DEFAULT) * 1e9);
+    CHECK(six_states(st, 1, h) == 1 && fabsf(st[0].gyro[2] + (float)(SWING_DPS_DEFAULT / 360)) < 1e-3f, "dm_input_swing(2, -1): a backhand about -z at the default speed");
+    g_nsteps = 0; g_steps = NULL; hwm_clear(), guest_now = 1000000000ull; g_phone_mode = -1;
+    pthread_mutex_lock(&g_swing_mu); g_swing_set = 0; pthread_mutex_unlock(&g_swing_mu);
+    unsetenv("DM_IMU_NOISE"); imu_env_read();
+}
+
 // Live motion through the history ring (live_ring): a source at 100 / 125 / 200 / 833 Hz with jittered sample times drives player 1; the IMU answers a game reads once a frame
 // (60 Hz) number their ticks consecutively at 5 ms, end at the clock's tick (the newest sample held past its time), and carry the source's signal at each tick's own time,
 // interpolated (a ramp in the gyro comes out as that ramp, without steps); GetSixAxisSensorStates' history follows the same ticks, newest first
@@ -1582,6 +1626,7 @@ int main(void) {
     t_motion_live();
     t_motion_hid();
     t_npad_imu_samples();
+    t_swing();
     t_imu_noise();
     t_imu_sdk_handles();
     t_live_ring();

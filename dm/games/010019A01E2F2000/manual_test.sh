@@ -17,6 +17,10 @@ OUT="$NSP/010019A01E2F2000-work/manual-test/$MODE-$(date +%m%d-%H%M%S)"; mkdir -
 # DUMP=every:<n> sets the pass-dump interval (every:150 catches a scan held for a few seconds); input.rec is player 1's input as the game's reads saw it (DM_REC), replayable with DM_KEYS=@<file>
 printf 'DM_INTERNAL_RESOLUTION=%s\nDM_PRESENT_UPSCALE=off\nDM_METAL_HUD=1\nDM_NVN_PASSDUMP=%s\nDM_REC=%s\nDM_RUMBLE_LOG=1\n' "$MODE" "${DUMP:-every:1800}" "$OUT/input.rec" > "$OUT/env.txt"
 [ -n "${ANISO:-}" ] && echo "DM_NVN_ANISO=$ANISO" >> "$OUT/env.txt"   # ANISO=<2..16>: the anisotropy floor of the surface samplers (DM_NVN_ANISO), for an A/B against a run without it
+# PROBE=<module:offset,...>: guest probes (DM_PROBE, Mac), the first 3 hits of each printed; RUMBLE_PROBE=1 is the vibration set (README: Vibration with a DualSense):
+# main:936628 the rumble setup runs, main:9366a0 its RumbleCategories lookup found the resource, main:a4e00 / main:d350b8 an amplitude or effect request
+[ "${RUMBLE_PROBE:-}" = 1 ] && PROBE=main:936628,main:9366a0,main:a4e00,main:d350b8
+[ -n "${PROBE:-}" ] && printf 'DM_PROBE=%s\nDM_PROBE_LIMIT=3\n' "$PROBE" >> "$OUT/env.txt"
 echo "== build (partial shaders; the first time a few thousand shaders compile) -> $OUT/build.log"
 "$PY" "$REPO/scripts/build_ipa_from_nsp.py" "$NSP" -k "$IMG/prod.keys" --package v131072 --platform mac \
     --seen-shaders --work-dir "$WORK" --env-file "$OUT/env.txt" --progress lines 2>&1 | tee "$OUT/build.log"
@@ -65,6 +69,9 @@ if iv: print(f'on-screen windows of 300 frames: {len(iv)}, dropped in all {sum(d
 rum = [(int(n), int(u), float(a)) for n, u, a in re.findall(r'rumble: (\d+) values sent, (\d+) with no output, peak amplitude ([\d.]+)', log)]
 hand = re.findall(r'rumble: game asked for vibration handles of npad 0 style (\S+): ([^\n]*)', log)
 print(f'vibration: handles for npad 0 {hand[:1] or "never asked"}; values {sum(n for n, _, _ in rum)}, {sum(u for _, u, _ in rum)} with no output; seconds with a nonzero amplitude {sum(a > 0 for _, _, a in rum)} of {len(rum)}, peak {max((a for _, _, a in rum), default=0):.2f}')
+probes = {}
+for name, n in re.findall(r'^\[dm\] PROBE (\S+) #(\d+)', log, re.M): probes[name] = max(probes.get(name, 0), int(n))
+if probes or re.search(r'^\[dm\] probe \S+ \(original instruction', log, re.M): print('probe hits (highest hit number seen; 3 printed each):', probes or 'none')
 red = collections.Counter(re.sub(r'[0-9a-f]{8,}|\d+', 'N', l)[:160] for l in re.findall(r'^.*\[RED\].*$', log, re.M) if 'failed to load shader' not in l)
 print('other red lines:'); [print(f'  {n} x {l}') for l, n in red.most_common(8)]
 for l in re.findall(r'^.*(?:SIGSEGV|SIGBUS|fault at|crash handler).*$', log, re.M)[:3]: print('CRASH:', l[:200])

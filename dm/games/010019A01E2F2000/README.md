@@ -164,6 +164,8 @@ Second 1440p manual test (2026-11-11, `manual-test/1440p-1111-154657`): the whit
 - **Measured:** `manual-test/1440p-1111-163318` (108 s of play with scans): handles `0x5` / `0x10005` on npad 0, 84,966 values, 0 seconds with a nonzero amplitude. Nothing was lost in the host; the game requested no vibration.
 - **Host output check without the game (passed 2026-11-11):** [`scripts/rumble_check.sh`](../../../scripts/rumble_check.sh) builds `dm/host/rumble_check.m` with the host's haptics code and plays a fixed sequence on the first controller; on the user's DualSense every step was felt, the side and strength steps included. The host's output works; the game sends no vibration.
 - **Open, the remaining lead:** the rumble system's setup (`main+0x936640`) looks up a resource named `RumbleCategories` by name (`0x936670`, the resource manager's vtable `+0x28`) and skips its whole setup when the lookup returns nothing (`cbz x0, 0x936748` at `0x936698`). A missing rumble category table would leave every request at 0, as measured. Whether the lookup fails here needs a probe on `0x936698` in a game run (`x0` there); the game's own vibration option is the other candidate. Not pursued further for now.
+- **What the game is told (log of `manual-test/1440p-1111-165259`):** it declares FullKey, Handheld and JoyDual as supported (`hid supported controller styles 0x7`). The host answers FullKey (a Pro Controller, style `0x1`) for a connected pad when the game supports it (`kind_style`, `hle_hid.c`), and the earlier handle log showed npad 0 at `0x1`. The DualSense was reported 46 s after the game set up vibration; npad 0 already had the keyboard's player then, so the handle request was answered. The game's options have no vibration setting (user, 2026-11-11). That the game draws Joy-Con button prompts is not proof of a Joy-Con style: which prompts it picks, and from what, is not traced.
+- **Next, a bounded probe:** `RUMBLE_PROBE=1` in [`manual_test.sh`](manual_test.sh) puts four probes in (3 hits printed each): `main:936628` (the rumble setup runs), `main:9366a0` (its `RumbleCategories` lookup found the resource), `main:a4e00` and `main:d350b8` (an amplitude or effect request reaches the input object). Its summary gives each probe's highest hit number.
 
 ### Texture sharpness (current: an A/B candidate)
 
@@ -172,6 +174,14 @@ From the pass dumps of the 1440p and stock runs and the host's sampler code, wit
 - **As on the console:** every one of the game's samplers in the dumps has anisotropy 1 and LOD bias 0, which `samp_by_id` (`nvn_mtl.m`) passes to Metal unchanged. 14 of about 2,500 sampler bindings clamp the minimum LOD to 0.5 or 0.75; that is the game's choice. Bound textures carry their whole mip chains (for example 1024x1024 with 11 levels, 64x512 with 10), and a re-upload after the CPU rewrites a texture's pool pages sends every level again, so no top mip is lost.
 - **Already sharper at 1440p:** the scene is 2560x1440 instead of the stock 1244x700 to 1436x808, so the hardware picks mips about 0.8 to 1 level finer with no bias. A negative bias would add shimmer, not detail.
 - **The candidate:** anisotropic filtering, which the game never asks for, sharpens floors and walls seen at a grazing angle. `DM_NVN_ANISO=<2..16>` (`nvn_aniso.h`, `t_aniso`) sets a floor for the samplers that filter linearly across mips, leaving out nearest, comparison (shadow), min / max reduction and single-LOD samplers. Off by default. Its GPU cost is expected to be small next to the 6 to 9 ms the 1440p scene takes; there is no memory cost. Not seen on screen yet.
+
+### Red lines of a partial-library run (current)
+
+`manual-test/1440p-1111-165259`, read once:
+- `shader library … has no stamp (inputs.tsv)` and `c1_full.tsv is stale or missing`: expected with `--seen-shaders`. A partial library is left unstamped on purpose, since shaders it does not hold are not proven safe, so the host does not take the tables a full build writes, and every c1 gets its own 64 KiB (memory, not a picture). A packaged app needs the full, stamped library and its `c1_full.tsv` / `cb_extent.tsv`, which only an approved full build makes.
+- `NVN address lookup of an unknown name: nvnInstallGlobalDebugCallback`: benign. The game asks for a debug-layer hook the host does not provide and gets null, as without the debug layer.
+- `vertex attribute format 0x27 (8 / 16-bit integer) feeds a float input`: benign compatibility. The host converts those attributes on the CPU at replay, as the line says; no draw was seen wrong.
+None needs a fix.
 
 ### Stutter at area transitions (open)
 

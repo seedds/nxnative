@@ -3,7 +3,7 @@
 The screen before the game starts shows the settings the game supports. A setting that only matters while another is on appears under it and disappears when that one is turned off. Tap **Play** to start; the app remembers your choices for the next start. All settings are on one scrollable screen, under **Game**, **Controls** and **Performance**. Tap a menu or move a slider there; no settings page needs opening. **Upscaling** is in **Game**, beside **Console mode**. A Mac app shows the same settings in a [window of its own](#the-mac-settings-window).
 
 - [Tested defaults](#tested-defaults)
-- [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Game's upscaler](#games-upscaler), [Game language](#game-language), [Picture](#picture), [Frame-rate counter](#frame-rate-counter)
+- [Game](#game): [Frame rate](#frame-rate), [Frame generation](#frame-generation), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Game's upscaler](#games-upscaler), [Game language](#game-language), [Picture](#picture), [Frame-rate counter](#frame-rate-counter)
 - [Controls](#controls): [Touch feedback](#touch-feedback), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff), [Press a button to join](#press-a-button-to-join)
 - [Performance](#performance): [Frame buffering](#frame-buffering), [Metal 4 pipelines](#metal-4-pipelines), [Pipeline prebuild](#pipeline-prebuild), [Encode thread](#encode-thread), [Hold frames when late](#hold-frames-when-late), [Performance HUD](#performance-hud), [Reset to tested defaults](#reset-to-tested-defaults)
 - [The Mac settings window](#the-mac-settings-window): [Display mode](#display-mode)
@@ -30,6 +30,15 @@ On a Mac, a game checked at that speed (Fire Emblem Fortune's Weave, Mario & Lui
 ### Dynamic resolution
 
 Off, the default, keeps the 3D picture at full size. On lets the game lower its resolution when frames run heavy and raise it again when they fit, as on the Switch: steadier frame rate, at times a softer picture. Only games whose resolution control the app can hold offer it (NieR:Automata, Ocarina of Time).
+
+### Frame generation
+
+Offered with **30 fps**, for games drawn with NVN. The game draws 30 frames a second and the screen shows 60: between each two of the game's frames, MetalFX (Apple's frame interpolation) makes the one halfway and shows it first. Motion looks like 60 fps for about the work and heat of 30.
+
+- **Cost:** some GPU time for each made frame (a few milliseconds), and more input delay than real 60 fps: each frame waits half a frame (about 17 ms) for the one made before it. Fast motion can smear or wobble at the edges of moving things.
+- **When frames drop**, it pauses and shows the game's own frames until they come in time again.
+- **Frame generation size:** Lighter makes the in-between frames smaller and scales the picture back up, for about half of frame generation's GPU time and a slightly softer picture.
+- It needs iOS 26 or macOS 26 and a device with MetalFX frame interpolation; without it the game shows its own 30 frames.
 
 ### Render scale
 

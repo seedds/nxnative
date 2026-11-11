@@ -41,8 +41,10 @@ int main(void) { @autoreleasepool {
     atomic_store(&g_ab_phase, 0);
     CHECK(prog_get(&p1) == b1);   // phase 0: the game's
     b1->sh[0] = s2; long rc0 = CFGetRetainCount((__bridge CFTypeRef)s2);   // a stage without a variant: the twin shares the game's shader object
+    NvProg *t1 = nil;
+    @autoreleasepool {   // the getters' results are autoreleased: the pool ends before the twin is let go
     atomic_store(&g_ab_phase, 1);
-    NvProg *t1 = prog_get(&p1);
+    t1 = prog_get(&p1);
     CHECK(t1->sh[0] == s2 && CFGetRetainCount((__bridge CFTypeRef)s2) == rc0 + 1);   // and holds its own reference to it (an unretained copy would be released twice)
     CHECK(t1 != b1 && t1->sh[1] != s1 && t1->sh[1] == s1->alt && t1->sh[1]->altdir != nil);   // phase 1: the twin with the variant
     CHECK(t1->sh[1]->fn != nil && t1->sh[1]->fn != s1->fn);
@@ -58,6 +60,7 @@ int main(void) { @autoreleasepool {
     CHECK(prog_get(&pu) == bu && !su->alt);   // entry points differ: refused
     atomic_store(&g_ab_phase, 2);
     CHECK(prog_get(&p1) == b1);   // back to the game's
+    }
     b1->alt = nil; t1 = nil;
     CHECK(CFGetRetainCount((__bridge CFTypeRef)s2) == rc0);   // the twin gone, the shader's references are as before
     [NSFileManager.defaultManager removeItemAtPath:root error:nil];

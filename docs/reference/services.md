@@ -392,6 +392,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** `pad_hid_mac.h` knows a device by its registry entry ID (`hidpad_entry`): a second reference to a known entry is ignored in every list.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md), one Pro Controller over Bluetooth on the Mac: no music in Kokiri Forest gameplay or its cutscenes, back once the pad was read once.
 
+### A keyboard receiver that declares a gamepad takes player 1
+
+- **Symptom:** on the Mac, with a keyboard and mouse receiver plugged in, the log shows `controller '<receiver>' (HID) connected: player 1` and the real controller as player 2; a one-player game takes no input from it and opens the controller applet again and again (`hid controller applet: 1 to 1 players wanted, 2 connected`).
+- **Cause:** the receiver declares a Generic Desktop GamePad or Joystick collection, so it matches the raw HID pad filter (`hidpad_start`), and a raw HID pad took the lowest free player at its connection. A HID descriptor only claims a controller: nothing in it tells a receiver that never sends a report through that collection from a pad at rest. `+[GCController supportsHIDDevice:]` answers YES for this receiver and GameController never lists it, so since the two-second wait for such devices (463d21f7) it was read as HID; before that it was skipped.
+- **Fix:** a raw HID pad is a player from its first button press, not from its connection (`hidpad_first_press`, `front_mac.m`), through the path of [Press a button to join](../settings.md#press-a-button-to-join) but with the slot a connecting controller takes (`pad_slot_take`): the log says `press a button to play`, then `a button pressed: player N`. A device that never presses takes no player. Identical pads read here (twins) are models GameController lists and stay players at their connection.
+- **Open:** not run with such a receiver (none here): the issue stays open for the reporter's retest. The applet opening in a loop when a one-player game sees two players is a cause of its own ([issue #2237](https://github.com/seedds/nxnative/issues/2237)).
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md), a Keychron Link receiver (3434:d030) over USB and a Pro Controller over Bluetooth, macOS 27.0.1 ([issue #1657](https://github.com/seedds/nxnative/issues/1657)).
+
 ### SDK 20 six-axis sensor and amiibo (`nfp`) calls
 
 - **Symptom:** SDK 20 calls that reach a service; `nfp`'s `AttachActivateEvent` / `AttachDeactivateEvent` crashed in the SDK at `sdk+0x3f2a78`.

@@ -1,6 +1,6 @@
 # Kirby Air Riders (`040077201BE50000`)
 
-A Switch 2 game: update v458752 (display version 1.3.3), SDK 20.5.26 built for the Switch 2 (`Ounce`), NVN2. The engine's namespace is `phx`, its platform layer `Aurora` (`WindApplication`); PhysX 5.2 and NPLN for online play. Modules `main`, `subsdk0` (CUDA), `sdk`; `subsdk1` (NGX) is shipped but `main` imports nothing from it. **Plays on the Mac** (M4 Pro, 48 GB): title, attract mode, menus, a lesson and Air Ride races from start to the results screen, on Floria Fields and other courses (the course is random), with scripted input and sound on. It holds 57 to 60 fps in races after the first run, at about 10 GB resident. No IPA has been built, and a player has not yet played it through a window on this build.
+A Switch 2 game: update v458752 (display version 1.3.3), SDK 20.5.26 built for the Switch 2 (`Ounce`), NVN2. The engine's namespace is `phx`, its platform layer `Aurora` (`WindApplication`); PhysX 5.2 and NPLN for online play. Modules `main`, `subsdk0` (CUDA), `sdk`; `subsdk1` (NGX) is shipped but `main` imports nothing from it. **Plays on the Mac** (M4 Max, 36 GB): title, attract mode, menus, a lesson and Air Ride races from start to the results screen, on Floria Fields and other courses (the course is random), with scripted input and sound on, and played by hand in the Mac app (on the Mac's display and on a TV). It holds 57 to 60 fps in races after the first run, at about 10 GB resident. No IPA has been built.
 
 ## What it needs
 
@@ -11,6 +11,7 @@ A Switch 2 game: update v458752 (display version 1.3.3), SDK 20.5.26 built for t
 | `modules main subsdk0 sdk` | `game.tsv` | `main` imports 49 `cu*` functions from `subsdk0` (CUDA), nothing from `subsdk1` (NGX) |
 | `romfs_marker Asset/assets.cat` | `game.tsv` | the archives' catalog |
 | `shader_groups /Asset/=shader /Bin/=shader` | `game.tsv` | where the shaders are |
+| `depth_mode zero` | `game.tsv` | the game sets near = 0 (`depth mode: near=0, vertex shaders use the main0_z entry` in the log). Without the key, the Mac app's pipeline archive (18,112 bases, 2.1 GB) was built for `main0`, and in a 6-minute session with races none of its 2,754 lookups found anything: every base was compiled at the draw, with frames of 1 to 5 s on the first course |
 | `tex_flush_upload`, `tex_dirty_upload` | `game.tsv` | textures the CPU fills while the game plays, without an NVN call over the texels: without them some props and panels are magenta (all-zero ASTC blocks). Binding `game`: no general rule tells a texture written this way from one a shader writes, whose content an upload would replace ([`tex_flush_upload`](../README.md)) |
 
 There is no game-specific patch, and only v458752's build row: the base game, v0, has not been run. The binding of this bring-up is `build` only for that row.
@@ -56,6 +57,6 @@ Moving objects get their ambient light from eight values per object in a storage
 - The 12x12 cube the vertex shader mixes with the probe values holds 4 to 27 with `tex_flush_upload`, and read zeros without it.
 - [The guard band cull's](../../../docs/reference/shaders.md#a-guard-band-cull-in-every-vertex-shader-0x80d) real meaning, and the vertex output at `a[0x5c]` that 4,771 vertex shaders write and the translator drops (probably a shading rate, not checked).
 - `nn::codec VP9: busy (result 3603), a packet refused with 12 pictures waiting for a released buffer` (4 lines at the first movie, a red line until [a refusal was known to be no fault](../../../docs/reference/movies.md#the-submission-ready-event-counted-as-packets)); the movies seen play.
-- A `pso_manifest.tsv` has not been recorded, so the first race compiles pipelines as it goes.
+- A `pso_manifest.tsv` has not been recorded. With the archive built for `main0_z`, a 13-minute session by hand in the Mac app had 7 frames over 100 ms (160-280 ms, each at a scene's first draws with 1 to 7 new pipelines) and none in a row; frame time p95 16.8 ms in races. The session before it, with a Linux VM and dev servers using about 13 GB beside the game on a 36 GB Mac, had stretches at 20 fps (GPU 35-50 ms a frame) that this one did not: memory pressure, not the game. Headless runs in that state stalled for tens of seconds a frame.
 - What `nvnTextureViewCompare`'s return value means is taken from its name.
 - City Trial played by hand, Road Trip, online, the base game, iOS: not tested.

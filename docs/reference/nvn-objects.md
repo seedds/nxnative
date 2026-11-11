@@ -209,6 +209,13 @@ A game may tell NVN objects apart by their bytes, without an NVN call. A host re
 - **Fix:** dead serials go to a 512-entry table (`tex_put`, `g_ghost`; the memory line's `finalized textures still referenced`).
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) (the HUD captures, the 640×360 buffers; found while fixing GitHub issue #9).
 
+### A stage still bound to a program the game has finalized
+
+- **Symptom:** `CRASH sig=11 addr=0x100000703 pc=keys_hash+0x3c lr=prog_key+0x5c`, from `prog_get` ← `bind_stages` ← `mtl_exec`, about a minute into Assassin's Creed II's opening in the Animus (The Ezio Collection), with one `shader … is not in the shader map` line right before it; the player saw Desmond flicker before the crash.
+- **Cause:** the game binds programs for some stages only and finalizes the program another stage still holds, then reuses its memory. On NVN a bind takes the shaders' GPU state, so the stage goes on with them; the host kept only the program's pointer per stage (`S.bst`) and, at the next bind, read that object again for its shader keys: a control section pointer of `0xffffffff` from the reused memory.
+- **Fix:** each stage keeps the serial its program had at its bind (`S.bser`), and what the program resolved to is kept by that serial (`bring_put`, 64 entries); a stage whose object no longer has that serial takes its shaders from there (`stage_prog`, the log's `stage N keeps the shaders of a program the game has finalized`). `prog_get` reads no control section of an object that is no longer a program (finalized: its serial's program, else none, `[RED] a draw or dispatch uses a program the game has finalized`).
+- **Found on:** Assassin's Creed: The Ezio Collection (0100670014482000, a provisional profile), AC2.
+
 ### A replay's own objects take serials above a capture's
 
 - **Symptom:** `nvn_replay` aborts on a game's capture with `-[NvProg width]: unrecognized selector` (from `rt_dims`) or `-[NvProg mipmapLevelCount]`: a render target resolves to a program.

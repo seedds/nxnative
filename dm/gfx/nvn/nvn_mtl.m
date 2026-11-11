@@ -6359,6 +6359,12 @@ static __unsafe_unretained NvProg *prog_get(const prog_t *cp) {   // Called only
     static const prog_t *lp; static uint64_t lser, lgen; static NvProg *lpr;   // Last result: same object, same serial and unchanged serial table means it is used directly
     uint64_t gen = g_ser_gen;
     if (p == lp && p->serial == lser && gen == lgen && lpr) return lpr;
+    if (p->magic != MAGIC('P', 'R', 'O', 'G')) {   // finalized (or its memory reused) while still bound: never read its control sections; what its serial resolved to, else no shaders
+        __unsafe_unretained NvProg *had = serial_get(p->serial); if (had) return had;
+        static NvProg *none; if (!none) none = [NvProg new];
+        static unsigned n; if (!n++ || !(n & (n - 1))) MLOG("[RED] a draw or dispatch uses a program the game has finalized; it draws nothing (%u times so far)", n);
+        return none;
+    }
     __unsafe_unretained NvProg *have = p->serial ? serial_get(p->serial) : nil;
     if (have) { lp = p; lser = p->serial; lgen = gen; lpr = have; return have; }
     shmap_load();
@@ -7129,6 +7135,7 @@ static struct {
     const prog_t *cprog;       // compute program: NVN binds it apart from the graphics stages (see OP_BIND_PROGRAM in state_op)
     p_prim_restart restart;
     const prog_t *bst[5];      // program bound per stage (NVN stage bits 1 vertex 2 fragment 4 geometry 8 / 16 tessellation, indices as in NvProg.sh), see bind_stages
+    uint64_t bser[5];          // the serial each of those programs had when it was bound: a program the game finalizes (or sets again) while a stage still holds it is not read again (see stage_prog)
     blend_st blend[8]; color_st color; chmask_st chmask; ms_st ms; poly_st poly; ds_st ds;
     va_st attr[32]; int nattr; vs_st stream[16]; int nstream;
     NVNbufferRange vbuf[16];
@@ -7394,8 +7401,33 @@ static void udc_note_draw(NvProg *pr, uint32_t raster_mask) {
 // When every stage comes from the same program, that program is the effective one (all of Mario's and Engage's binds are like this, so nothing changes for them); otherwise a composite is made: a host-made prog_t carrying only a serial, whose NvProg in the serial table takes each stage from its source program (a null fragment = a vertex-only pipeline)
 // NVN2's task and mesh bits (0x40, 0x80) of a program bind: stages 3 and 4, where those shaders are kept (hle_nvn.c st_host)
 static inline int gfx_stage_bits(int stages) { return (stages & 0x1f) | (stages & 0x40 ? 8 : 0) | (stages & 0x80 ? 16 : 0); }
+// The stages a program was bound for keep its shaders after the game is done with the program object. On NVN a bind takes the shaders' GPU state, so a stage the next bind leaves alone goes on with
+// them even when the game finalizes the program and reuses its memory. Assassin's Creed II (The Ezio Collection) binds programs for some stages only and finalizes the others' while they are still bound:
+// re-reading that object at the next bind took a control section pointer of 0xffffffff from the reused memory (SIGSEGV in keys_hash, from prog_key / prog_get, the first minute in the Animus).
+// Each bound stage's program is resolved at its bind and kept here by its serial; a later bind takes a stage whose object no longer has that serial (finalized, set again, reused) from here
+enum { NBRING = 64 };
+static uint64_t g_bring_ser[NBRING]; static NvProg *g_bring[NBRING]; static unsigned g_bring_next;
+static int bring_held(uint64_t ser);   // a stage of the active queue or of a saved one still holds the program of that serial (below, after queue_state)
+// A slot a stage still holds is never taken: at most 5 stages per queue hold one, so a ring of 64 keeps every held program however long the stage keeps it
+static void bring_put(uint64_t ser, NvProg *o) {
+    if (!ser || !o) return;
+    for (int i = 0; i < NBRING; i++) if (g_bring_ser[i] == ser) { g_bring[i] = o; return; }
+    unsigned i = g_bring_next % NBRING;
+    for (int n = 0; n < NBRING && g_bring_ser[i] && bring_held(g_bring_ser[i]); n++) i = ++g_bring_next % NBRING;
+    g_bring_next++; g_bring_ser[i] = ser; g_bring[i] = o;
+}
+static NvProg *bring_get(uint64_t ser) { for (int i = 0; ser && i < NBRING; i++) if (g_bring_ser[i] == ser) return g_bring[i]; return nil; }
+static __unsafe_unretained NvProg *stage_prog(int st) {
+    const prog_t *p = S.bst[st]; if (!p) return nil;
+    if (p->magic == MAGIC('P', 'R', 'O', 'G') && p->serial == S.bser[st]) return prog_get(p);
+    static unsigned n; if (!n++ || !(n & (n - 1))) MLOG("stage %d keeps the shaders of a program the game has finalized or set again since its bind (%u times so far)", st, n);
+    return bring_get(S.bser[st]);
+}
 static const prog_t *bind_stages(const prog_t *p, int stages) {
-    for (int st = 0; st < 5; st++) if (stages >> st & 1) S.bst[st] = p;
+    for (int st = 0; st < 5; st++) if (stages >> st & 1) {
+        S.bst[st] = p; S.bser[st] = p ? p->serial : 0;
+        if (p) bring_put(p->serial, prog_get(p));
+    }
     const prog_t *v = S.bst[0] ? S.bst[0] : S.bst[4];   // a mesh program has no vertex stage
     if (!v) return NULL;
     int same = 1; for (int st = 1; st < 5; st++) if (S.bst[st] && S.bst[st] != v) same = 0;
@@ -7403,13 +7435,13 @@ static const prog_t *bind_stages(const prog_t *p, int stages) {
     enum { NCMP = 64 };
     static prog_t cp[NCMP]; static const prog_t *ck[NCMP][5]; static uint64_t cs[NCMP][5]; static int ncp, next;
     for (int i = 0; i < ncp; i++) {
-        int hit = 1; for (int st = 0; st < 5 && hit; st++) hit = ck[i][st] == S.bst[st] && (!S.bst[st] || cs[i][st] == S.bst[st]->serial);
+        int hit = 1; for (int st = 0; st < 5 && hit; st++) hit = ck[i][st] == S.bst[st] && (!S.bst[st] || cs[i][st] == S.bser[st]);
         if (hit) return &cp[i];
     }
     int i = ncp < NCMP ? ncp++ : next++ % NCMP;
     if (cp[i].serial) serial_del(cp[i].serial);
     NvProg *o = [NvProg new];
-    for (int st = 0; st < 5; st++) { ck[i][st] = S.bst[st]; cs[i][st] = S.bst[st] ? S.bst[st]->serial : 0; if (S.bst[st]) { __unsafe_unretained NvProg *src = prog_get(S.bst[st]); o->sh[st] = src ? src->sh[st] : nil; } }
+    for (int st = 0; st < 5; st++) { ck[i][st] = S.bst[st]; cs[i][st] = S.bst[st] ? S.bser[st] : 0; if (S.bst[st]) { __unsafe_unretained NvProg *src = stage_prog(st); o->sh[st] = src ? src->sh[st] : nil; } }
     prog_fold_gs(o);   // the geometry stage came from another program (see prog_fold_gs)
     memset(&cp[i], 0, sizeof cp[i]); cp[i].magic = MAGIC('P', 'R', 'O', 'G'); cp[i].serial = nvn_new_serial(); serial_put(cp[i].serial, o);
     { static int once; if (!once++) MLOG("per-stage program binding: first combined program (vertex %s fragment %s)", o->sh[0] ? o->sh[0]->key : "-", o->sh[1] ? o->sh[1]->key : "-"); }
@@ -7441,6 +7473,11 @@ static void state_reset(void) {
 // and X-2's first fragment-only bind dereferenced that stale vertex program in keys_hash. Separate queues also retain their own bindings when submissions alternate (Three Houses).
 typedef struct queue_state { uint64_t serial; typeof(S) s; typeof(R) r; tex_t rt_tex[9]; uint64_t rt_pins[9]; prog_t programs[6]; int rc_skip; struct queue_state *next; } queue_state;
 static queue_state *g_queue_states, *g_active_queue;
+static int bring_held(uint64_t ser) {
+    for (int st = 0; st < 5; st++) if (S.bser[st] == ser) return 1;
+    for (queue_state *q = g_queue_states; q; q = q->next) if (q != g_active_queue) for (int st = 0; st < 5; st++) if (q->s.bser[st] == ser) return 1;
+    return 0;
+}
 // Recording snapshots belong to command memory, not to the queue. Keep only the
 // bound target descriptions after CPU replay, before this submission can finish
 // and let the game overwrite those bytes. Metal objects keep their existing

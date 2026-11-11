@@ -132,6 +132,9 @@
 #define DMSH_LOGIC_BUFFER 29
 // Its function constants: bool, colour target n is attached (the variant reads it only then), at this index + n (nvn_mtl.m lo_fn specializes the entry point per pass's targets)
 #define DMSH_LOGIC_FC 200
+// Metal compiler workarounds (dm/gfx/tools/dmsh_metalwa.py, profile shader_metalwa): bool, KosmicKrisp's KK_WORKAROUND_3 ballot rewrite is used; default true. The host sets it false on
+// macOS 27 and later, whose GPU compiler is fixed (nvn_mtl.m mwa_on, DM_NVN_METALWA), in every set of values it specializes a game's shader with (fc_values)
+#define DMSH_MWA_FC 220
 // Compute shared memory past Metal's limit (dm/gfx/tools/dmsh_rewrite.py tg_spill): a kernel whose threadgroup arrays exceed DMSH_TG_MAX bytes takes them from a device buffer at this compute
 // buffer index, one slice of the reflection's tg_spill bytes per workgroup, at the workgroup's index in the whole grid (nvn_mtl.m dispatch binds a slice for every workgroup of the dispatch)
 #define DMSH_TG_SLOT 30

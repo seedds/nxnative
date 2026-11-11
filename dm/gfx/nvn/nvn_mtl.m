@@ -6132,6 +6132,29 @@ static os_unfair_lock g_fn_dev_lock = OS_UNFAIR_LOCK_INIT;
 @interface FnDev : NSObject { @public id<MTLFunction> fn; } @end
 @implementation FnDev @end
 static NSMapTable *g_fn_dev;   // a function fn_spec left unspecialized → its stable specialization record (fn filled by fn_dev)
+// Metal compiler workarounds (dm/gfx/tools/dmsh_metalwa.py, profile shader_metalwa): the KK_WORKAROUND_3 ballot rewrite is behind the function constant DMSH_MWA_FC, on by default.
+// The GPU compiler of macOS 15.4 to 26 speculates a ballot out of its branch (KosmicKrisp's FB20113490); macOS 27's does not, so there the rewrite is turned off and the shaders
+// take simd_ballot as built. iOS keeps the default (its compiler is not checked). DM_NVN_METALWA=0 / 1 overrides. Only shaders the profile rewrote declare the constant
+static int mwa_on(void) {
+    static int v; static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        const char *e = getenv("DM_NVN_METALWA"); int on = 1;
+#if !TARGET_OS_IPHONE
+        on = ![[NSProcessInfo processInfo] isOperatingSystemAtLeastVersion:(NSOperatingSystemVersion){27, 0, 0}];
+#endif
+        if (e && *e) on = strcmp(e, "0") != 0;
+        if (!on || (e && *e)) MLOG("Metal compiler workaround KK3 (profile shader_metalwa): %s (%s)", on ? "on" : "off", e && *e ? "DM_NVN_METALWA" : "macOS 27 or later");
+        v = on;
+    });
+    return v;
+}
+// A new set of function constant values for a game's shader: empty but for DMSH_MWA_FC where mwa_on turns it off. Every place that specializes a game's shader takes its set from
+// here, shader_load and the prewarm's descriptors (pre_fn) alike, so a pipeline is looked up as it was captured
+static MTLFunctionConstantValues *fc_values(void) {
+    MTLFunctionConstantValues *cv = [MTLFunctionConstantValues new];
+    if (!mwa_on()) { bool off = false; [cv setConstantValue:&off type:MTLDataTypeBool atIndex:DMSH_MWA_FC]; }
+    return cv;
+}
 static id<MTLFunction> fn_lib_spec(id<MTLLibrary> lib, NSString *name, MTLFunctionConstantValues *cv, NSError **e) {
     if (!lib || !name || !cv) return nil;
     return fn4_note([lib newFunctionWithName:name constantValues:cv error:e], lib, name, cv);
@@ -6191,7 +6214,7 @@ static FnOff *fn_off(id<MTLFunction> f) {
         }
         MTL4LibraryFunctionDescriptor *ld = [fd isKindOfClass:MTL4LibraryFunctionDescriptor.class] ? (MTL4LibraryFunctionDescriptor *)fd : nil;
         if (!ld || ![ld.library newFunctionWithName:ld.name].functionConstantsDictionary[@"dm_border_off"]) { o->none = 1; return nil; }   // the entry's, not f's: a specialized f lists no constants
-        if (!cv) cv = [MTLFunctionConstantValues new];
+        if (!cv) cv = fc_values();
         BOOL yes = YES; [cv setConstantValue:&yes type:MTLDataTypeBool atIndex:DMSH_BORDER_FC];
         MTL4SpecializedFunctionDescriptor *sd = [MTL4SpecializedFunctionDescriptor new]; sd.functionDescriptor = ld; sd.constantValues = cv;
         o->cv = cv; o->d4 = sd;
@@ -6250,7 +6273,7 @@ static NvShader *shader_load(NSString *pc, int stage, int layer) {
                o->mesh_notask = o->mesh_kind == 2 && ![mst[@"task"] boolValue];
                if (o->mesh_kind == 2 && atomic_load(&g_depth_zero) && j[@"entry_z"]) entry = j[@"entry_z"]; }   // the depth convention, as a vertex shader takes it above
     if (j[@"entry_geometry_capture"]) {
-        NSError *ge = nil; MTLFunctionConstantValues *gcv = [MTLFunctionConstantValues new];
+        NSError *ge = nil; MTLFunctionConstantValues *gcv = fc_values();
         o->geo_fn = fn_spec(lib, j[@"entry_geometry_capture"], gcv, &ge);
         if (!o->geo_fn) MLOG("[RED] vertex shader %s: geometry capture entry failed: %s", pc.UTF8String, ge.localizedDescription.UTF8String);
     }
@@ -6279,7 +6302,7 @@ static NvShader *shader_load(NSString *pc, int stage, int layer) {
     if (j[@"entry_discard"]) {
         o->discard_fn = fn4_note([lib newFunctionWithName:j[@"entry_discard"]], lib, j[@"entry_discard"], nil);
         if (o->discard_fn.functionConstantsDictionary.count) {
-            MTLFunctionConstantValues *cv = [MTLFunctionConstantValues new]; NSError *error = nil;
+            MTLFunctionConstantValues *cv = fc_values(); NSError *error = nil;
             o->discard_fn = fn_spec(lib, j[@"entry_discard"], cv, &error);
         }
         if (!o->discard_fn) MLOG("[RED] shader %s: no rasterizer-discard entry point %s in its library", pc.UTF8String, [j[@"entry_discard"] UTF8String]);
@@ -6294,7 +6317,7 @@ static NvShader *shader_load(NSString *pc, int stage, int layer) {
         if (!o->fn_m) MLOG("[RED] shader %s: no mixed integer-output entry point %s in its library", pc.UTF8String, [j[@"entry_m"] UTF8String]); }
     if (stage == 1 && j[@"entry_d"]) { o->fn_d = fn4_note([lib newFunctionWithName:j[@"entry_d"]], lib, j[@"entry_d"], nil); if (!o->fn_d) MLOG("[RED] shader %s: no dual-source entry point %s in its library", pc.UTF8String, [j[@"entry_d"] UTF8String]); }
     if (o->fn.functionConstantsDictionary.count) {   // a compute shader's pipeline is looked up by this specialized descriptor too (cps_new); the MTLDevice builds it from fn_dev's
-        NSError *fe = nil; MTLFunctionConstantValues *cv = [MTLFunctionConstantValues new];
+        NSError *fe = nil; MTLFunctionConstantValues *cv = fc_values();
         id<MTLFunction> f = fn_spec(lib, entry, cv, &fe);
         if (f) o->fn = f; else MLOG("[RED] shader %s: specializing its function constants failed: %s", pc.UTF8String, fe.localizedDescription.UTF8String);
         if (o->fn_u) o->fn_u = fn_spec(lib, j[@"entry_u"], cv, &fe);
@@ -7718,7 +7741,7 @@ static id<MTLFunction> vin_fn(NvShader *vs) {   // the shadow-input entry point,
         vs->vfn_state = 2;
         size_t kl = strlen(vs->key); NSString *path = [NSString stringWithFormat:@"%@/%.*s_bv.metallib", g_msl_dir, (int)(kl > 2 ? kl - 2 : kl), vs->key];
         NSError *e = nil; id<MTLLibrary> lib = lib_from_file(path, &e); id<MTLFunction> f = lib && vs->ventry ? fn4_note([lib newFunctionWithName:vs->ventry], lib, vs->ventry, nil) : nil;
-        if (f && f.functionConstantsDictionary.count) f = fn_spec(lib, vs->ventry, [MTLFunctionConstantValues new], &e);   // as shader_load
+        if (f && f.functionConstantsDictionary.count) f = fn_spec(lib, vs->ventry, fc_values(), &e);   // as shader_load
         const char *why = !lib ? "no library" : !f ? "no entry point" : NULL;
         if (f && vs->rf.nb && [f newArgumentEncoderWithBufferIndex:vs->rf.abi].encodedLength != vs->arg_len) { why = "its argument buffer differs from the base library's"; f = nil; }
         if (f) { vs->vfn = f; vs->vfn_state = 1; g_vin_loaded++; }
@@ -7737,7 +7760,7 @@ static void pull_load(NvShader *vs) {
         vs->pfn_state = 2;
         size_t kl = strlen(vs->key); NSString *path = [NSString stringWithFormat:@"%@/%.*s_bp.metallib", g_msl_dir, (int)(kl > 2 ? kl - 2 : kl), vs->key];
         NSError *e = nil; id<MTLLibrary> lib = lib_from_file(path, &e); id<MTLFunction> f = lib && vs->ventry ? fn4_note([lib newFunctionWithName:vs->ventry], lib, vs->ventry, nil) : nil;
-        if (f && f.functionConstantsDictionary.count) f = fn_spec(lib, vs->ventry, [MTLFunctionConstantValues new], &e);
+        if (f && f.functionConstantsDictionary.count) f = fn_spec(lib, vs->ventry, fc_values(), &e);
         const char *why = !lib ? "no library" : !f ? "no entry point" : NULL;
         if (f && vs->rf.nb && [f newArgumentEncoderWithBufferIndex:vs->rf.abi].encodedLength != vs->arg_len) { why = "its argument buffer differs from the base library's"; f = nil; }
         if (f) { vs->pfn = f; vs->pfn_state = 1; }
@@ -8154,7 +8177,7 @@ static id<MTLFunction> at_fn(NvShader *fs, id<MTLFunction> base) {   // the side
         for (int i = 0; i < 4 && !why; i++) {
             if (!own[i]) continue;
             NSString *name = [own[i].name stringByAppendingString:@"_a"]; id<MTLFunction> f = fn4_note([lib newFunctionWithName:name], lib, name, nil);
-            if (f && f.functionConstantsDictionary.count) f = fn_spec(lib, name, [MTLFunctionConstantValues new], &e);   // as shader_load
+            if (f && f.functionConstantsDictionary.count) f = fn_spec(lib, name, fc_values(), &e);   // as shader_load
             if (!f) why = "no entry point";
             else if (fs->rf.nb && [f newArgumentEncoderWithBufferIndex:fs->rf.abi].encodedLength != fs->arg_len) why = "its argument buffer differs from the base library's";
             else fs->afn[i] = f;
@@ -8274,7 +8297,7 @@ static id<MTLFunction> lo_fn(NvShader *fs, id<MTLFunction> base, uint32_t target
     }
     id<MTLFunction> f = nil; NSNumber *k = @(w << 8 | (targets & 0xff));
     if (fs->lfn_state == 1 && !(f = fs->lfn[k])) {
-        MTLFunctionConstantValues *cv = [MTLFunctionConstantValues new];
+        MTLFunctionConstantValues *cv = fc_values();
         for (int n = 0; n < 8; n++) { bool on = targets >> n & 1; [cv setConstantValue:&on type:MTLDataTypeBool atIndex:DMSH_LOGIC_FC + n]; }
         NSString *name = [base.name stringByAppendingString:@"_l"];
         f = fn4_note([fs->llib newFunctionWithName:name constantValues:cv error:&e], fs->llib, name, cv);
@@ -9441,11 +9464,11 @@ static NSDictionary<NSString *, NSString *> *pre_fail_load(NSString *path, NSStr
     if ([head isEqualToString:pre_fail_head(want)]) return pairs;
     *other = 1; return @{};
 }
-static MTL4FunctionDescriptor *pre_fn(id<MTLLibrary> lib, NSString *name) {   // the common draw's specialization: defaults, with unused border corrections off (as fn_off's)
+static MTL4FunctionDescriptor *pre_fn(id<MTLLibrary> lib, NSString *name) {   // the common draw's specialization: fc_values (as shader_load), with unused border corrections off (as fn_off's)
     id<MTLFunction> f = [lib newFunctionWithName:name]; if (!f) return nil;
     MTL4LibraryFunctionDescriptor *ld = [MTL4LibraryFunctionDescriptor new]; ld.library = lib; ld.name = name;
     if (!f.functionConstantsDictionary.count) return ld;
-    MTLFunctionConstantValues *cv = [MTLFunctionConstantValues new];
+    MTLFunctionConstantValues *cv = fc_values();
     if (f.functionConstantsDictionary[@"dm_border_off"]) { BOOL yes = YES; [cv setConstantValue:&yes type:MTLDataTypeBool atIndex:DMSH_BORDER_FC]; }
     MTL4SpecializedFunctionDescriptor *sd = [MTL4SpecializedFunctionDescriptor new]; sd.functionDescriptor = ld; sd.constantValues = cv; return sd;
 }
@@ -12767,7 +12790,7 @@ static id<MTLFunction> bf_fn(NvShader *fs, const int *fx, uint8_t fbmask, const 
     }
     id<MTLLibrary> lib = fs->bflib;
     if (!lib) { os_unfair_lock_unlock(&g_fz_fn_lock); return nil; }
-    MTLFunctionConstantValues *cv = [MTLFunctionConstantValues new];
+    MTLFunctionConstantValues *cv = fc_values();
     for (int i = 0; i < nfc; i++) { int v = fx[i]; [cv setConstantValue:&v type:MTLDataTypeInt atIndex:(NSUInteger)i]; }
     for (int q = 0; q < 8; q++) { bool b = fbmask >> q & 1; [cv setConstantValue:&b type:MTLDataTypeBool atIndex:(NSUInteger)(32 + q)]; }
     for (int j = 0; j < fs->rf.nfo; j++) for (int q = 0; q < 8; q++) { bool b = lmap[q] == fs->rf.fo_color[j]; [cv setConstantValue:&b type:MTLDataTypeBool atIndex:(NSUInteger)(64 + 8 * j + q)]; }

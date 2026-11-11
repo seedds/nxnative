@@ -374,7 +374,7 @@ def run(cmd, log, env=None, cwd=None, on_line=None, ok=(), fatal=True):
     tail = collections.deque(maxlen=40)
     p = subprocess.Popen(cmd, env=env, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors='replace', bufsize=1)
     try:
-        with open(log, 'w') as f:
+        with open(log, 'w', buffering=1) as f:
             for line in p.stdout:
                 f.write(line); tail.append(line)
                 if on_line:
@@ -2531,6 +2531,18 @@ def build_gl_shaders(py, repo, roots, sh, env, logs, g, reuse=True, mac=False, p
     return layer_shaders(py, repo, 'gl', 'GL', roots, sh, key, logs, env, mac)
 
 
+def pso_line(s):   # a line of pso_offline.py's output: batch progress for the stage line and --progress json
+    if m := re.match(r'pso_offline: \S+: batch (\d+)/(\d+): (ready\b|.*compiling)', s):
+        i, n = int(m.group(1)), int(m.group(2))
+        PROG.set(done=i if m.group(3).startswith('ready') else i - 1, total=n, unit='batches', note='')
+        return True
+    if m := re.match(r'pso_offline: \S+: merging (\d+) batches', s):
+        n = int(m.group(1))
+        PROG.set(done=n, total=n, unit='batches', note='merging')
+        return True
+    return False
+
+
 class IpaWatch:
     """Progress of build_ipa.sh, from its step lines ("[time] generate Gen/ …", "xcodebuild …", "pack IPA …", then pack_ipa.py's "pack: N entries, X bytes") and the files it writes:
     the CompileC lines in xcodebuild's build.log (one per source file: Gen/src, Gen/main/main.c, Gen/embed.S and the app's Sources), then the bytes of the archive pack_ipa.py is
@@ -2549,6 +2561,7 @@ class IpaWatch:
             if s.startswith('generate Gen/'): self.state = 'gen'; PROG.set(step='generating sources')
             elif s.startswith('[RED] pipeline archive:'): say(s)   # the build goes on without one, and only this says so
             elif s.startswith('pipeline archive for'): PROG.set(step='pipeline archive (metal-tt)')
+            elif pso_line(s): pass
             elif s.startswith('xcodebuild'):
                 units = len(os.listdir(self.ios / 'Gen/src')) + 2 + sum(1 for p in (self.ios / 'Sources').iterdir() if p.suffix in ('.c', '.m'))   # + Gen/main/main.c and Gen/embed.S
                 self.state, self.t = 'xcode', time.time(); PROG.set(step='xcodebuild', done=0, total=units, unit='files', est=True)   # an incremental build compiles fewer
@@ -2722,7 +2735,7 @@ def mac_pso(py, repo, work, lib, g, gpus, env, logs):
     cmd = [py, repo / 'dm/gfx/tools/pso_offline.py', '--game', g.id, '--msl', lib, '--out', out, '--work', work / 'pso/mac-work', '--gpu', arch, '--platform', 'macos']
     if not g.table('pso_pairs.tsv').is_file() and (work / 'shader/pso_pairs.tsv').is_file():   # the split's copy, as the app gets it (--pso-pairs)
         cmd += ['--pairs', g.table('shader_pairs.tsv'), '--pairs', work / 'shader/pso_pairs.tsv']
-    if run(cmd, logs / 'pso_offline_mac.log', env=env, fatal=False):   # an optimization: the app builds the bases on its first start without it
+    if run(cmd, logs / 'pso_offline_mac.log', env=env, on_line=pso_line, fatal=False):   # an optimization: the app builds the bases on its first start without it
         shutil.rmtree(out, ignore_errors=True)
         PROG.end('failed, the app is packed without one', warn=True)
         say(f'[RED] pipeline archive: pso_offline.py failed (see {logs / "pso_offline_mac.log"}); the app is packed without one and builds its pipeline bases on its first start (--gpu none skips this step)')

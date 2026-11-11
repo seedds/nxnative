@@ -732,11 +732,16 @@ class Script(unittest.TestCase):
             ran.append([str(c) for c in cmd])
             if str(cmd[1]).endswith('dm/games/settings.py'):   # the launcher settings, before the packer
                 self.settings_env = env; Path(cmd[-1]).write_text('{}'); return
-            if not on_line:   # pso_offline.py: its archive, or none when every eligible pair has function constants
+            if str(cmd[1]).endswith('pso_offline.py'):   # pso_offline.py: its archive, or none when every eligible pair has function constants
                 o = Path(cmd[cmd.index('--out') + 1]); o.mkdir(parents=True, exist_ok=True)
                 if kw.get('pso_fail'):   # metal-tt failed
                     self.assertFalse(fatal); (o / 'applegpu_g14s.mtl4a.partial').write_bytes(b'half'); return 1
-                if not kw.get('no_bases'): (o / f'{cmd[cmd.index("--gpu") + 1]}.mtl4a').write_bytes(b'arch')
+                if not kw.get('no_bases'):
+                    if on_line:
+                        on_line('pso_offline: applegpu_g14s: batch 1/2: 1000 bases, compiling or checking cache')
+                        on_line('pso_offline: applegpu_g14s: batch 1/2: ready (compiled)')
+                        on_line('pso_offline: applegpu_g14s: merging 2 batches')
+                    (o / f'{cmd[cmd.index("--gpu") + 1]}.mtl4a').write_bytes(b'arch')
                 return
             (out / 'Contents/MacOS').mkdir(parents=True); (out / 'Contents/MacOS/dmhost').write_bytes(b'x')
             on_line('step: launcher and host (clones of the game files)')
@@ -774,6 +779,9 @@ class Script(unittest.TestCase):
         (tmp / 'profile').mkdir(); (tmp / 'profile/shader_pairs.tsv').write_text('v\tf\n')
         o, _ = self.pack_cmd('nvn', work=tmp)
         self.assertEqual(o['--pso'], str(tmp / 'pso/mac'))
+        self.assertIn(mock.call(done=0, total=2, unit='batches', note=''), self.prog.set.call_args_list)
+        self.assertIn(mock.call(done=1, total=2, unit='batches', note=''), self.prog.set.call_args_list)
+        self.assertIn(mock.call(done=2, total=2, unit='batches', note='merging'), self.prog.set.call_args_list)
         p = self.pso_cmd; self.assertTrue(p[1].endswith('dm/gfx/tools/pso_offline.py'))
         self.assertEqual({p[i]: p[i + 1] for i in range(2, len(p) - 1) if p[i].startswith('--')},
                          {'--game': '01008CF01BAAC000', '--msl': str(tmp / 'shader/cache/b-0123456789ab'), '--out': str(tmp / 'pso/mac'), '--work': str(tmp / 'pso/mac-work'),
@@ -781,6 +789,9 @@ class Script(unittest.TestCase):
         self.assertFalse(any('does not name this Mac' in m for m in self.said))
         o, _ = self.pack_cmd('nvn', work=tmp, gpus='g18p')   # PSO_GPUS set for the IPA: built as asked, with a note that this Mac's app builds its own bases
         self.assertEqual(o['--pso'], str(tmp / 'pso/mac'))
+        self.assertIn(mock.call(done=0, total=2, unit='batches', note=''), self.prog.set.call_args_list)
+        self.assertIn(mock.call(done=1, total=2, unit='batches', note=''), self.prog.set.call_args_list)
+        self.assertIn(mock.call(done=2, total=2, unit='batches', note='merging'), self.prog.set.call_args_list)
         self.assertTrue(any('does not name this Mac\'s GPU (applegpu_g14s)' in m for m in self.said))
         o, _ = self.pack_cmd('nvn', work=tmp, gpus='applegpu_g14s,g18p'); self.assertFalse(any('does not name this Mac' in m for m in self.said))
         o, _ = self.pack_cmd('nvn', work=tmp, gpus='none')
@@ -800,10 +811,19 @@ class Script(unittest.TestCase):
         self.assertFalse((tmp / 'pso/mac').exists())   # no half archive left to be picked up
 
     def test_ipa_build_says_its_archive_failed(self):   # build_ipa.sh's output goes to a log: the console shows this line, which the build going on would otherwise hide
-        tmp = Path(tempfile.mkdtemp(dir=TEST_ROOT)); self.addCleanup(shutil.rmtree, tmp); said = []
-        with mock.patch.object(nsp, 'say', said.append), mock.patch.object(nsp, 'PROG', mock.Mock()):
-            w = nsp.IpaWatch(REPO, tmp, tmp / 'G.ipa'); w.line('[12:00:00] pso_offline: g18p: metal-tt'); w.line('[12:00:01] [RED] pipeline archive: pso_offline.py failed')
+        tmp = Path(tempfile.mkdtemp(dir=TEST_ROOT)); self.addCleanup(shutil.rmtree, tmp); said = []; prog = mock.Mock()
+        with mock.patch.object(nsp, 'say', said.append), mock.patch.object(nsp, 'PROG', prog):
+            w = nsp.IpaWatch(REPO, tmp, tmp / 'G.ipa')
+            w.line('[12:00:00] pipeline archive for g18p (metal-tt, minutes when its inputs changed) ...')
+            w.line('[12:00:01] pso_offline: applegpu_g18p: batch 1/3: 1000 bases, compiling or checking cache')
+            w.line('[12:00:02] pso_offline: applegpu_g18p: batch 1/3: ready (reused)')
+            w.line('[12:00:03] [RED] pipeline archive: pso_offline.py failed')
         self.assertEqual(said, ['[RED] pipeline archive: pso_offline.py failed'])
+        self.assertEqual(prog.set.call_args_list, [
+            mock.call(step='pipeline archive (metal-tt)'),
+            mock.call(done=0, total=3, unit='batches', note=''),
+            mock.call(done=1, total=3, unit='batches', note=''),
+        ])
 
     def test_run_not_fatal_returns_the_exit_code(self):
         log = Path(tempfile.mkdtemp(dir=TEST_ROOT)); self.addCleanup(shutil.rmtree, log)

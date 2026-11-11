@@ -327,6 +327,9 @@ HLE_FORCE("_ZN2nn2oe24IsInStoreDemoModeEnabledEv", "retail store demo mode (thro
 HLE_FORCE("_ZN2nn2oe27SetPerformanceConfigurationENS0_15PerformanceModeEi", "set the CPU/GPU clock config; the host does not scale clocks", void, h_oe_SetPerfCfg, int mode, int cfg) {
     LOG("oe::SetPerformanceConfiguration mode=%d cfg=%#x (ignored)", mode, cfg);
 }
+HLE_FORCE("_ZN2nn2oe27SetPerformanceConfigurationEi", "set the CPU/GPU clock config for the current mode; the host does not scale clocks", void, h_oe_SetPerfCfgCur, int cfg) {
+    LOG("oe::SetPerformanceConfiguration cfg=%#x (ignored)", cfg);
+}
 
 // Scripted state changes (verify lifecycle / overheat downgrade without a window): DM_OE_SCRIPT="focus=3@10,focus=1@20,opmode=0@30" (second N); bg=1 / bg=0 run the whole background round trip (see script_bg)
 // Time counts from the game's first notification fetch. Coexists with front end calls.

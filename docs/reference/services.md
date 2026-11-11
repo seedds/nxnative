@@ -710,6 +710,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** `oe::IsCpuOverclockEnabled` is hooked; for `SetCpuOverclockEnabled` the host keeps the flag and the query reports it (`hle_oe.c`); it does not scale clocks.
 - **Found on:** [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md) (SDK 11: `IsCpuOverclockEnabled`); [Taiko Risshiden V DX](../../dm/games/0100346017304000/README.md) (SDK 12.3.3: `SetCpuOverclockEnabled`).
 
+### SetPerformanceConfiguration without an apm session
+
+- **Symptom:** SIGSEGV (`addr=0 pc=sdk+0x40720c lr=sdk+0x4071d4`) in `_ZN2nn2oe6detail30ApmSetPerformanceConfigurationENS_3apm15PerformanceModeENS2_24PerformanceConfigurationE` under `nn::oe::SetPerformanceConfiguration(int)` right as a movie or game scene begins.
+- **Cause:** `nn::oe::SetPerformanceConfiguration(int)` calls `ApmSetPerformanceConfiguration`, which dereferences the unopened `apm` service session. The host hooked the two-argument overload `SetPerformanceConfiguration(PerformanceMode, int)` but not the single-argument overload `SetPerformanceConfiguration(int)`.
+- **Fix:** hooked `_ZN2nn2oe27SetPerformanceConfigurationEi` in `hle_oe.c`.
+- **Found on:** [Warhammer Survivors](../../dm/games/0100CAA026246000/README.md) (SDK 21.4.7).
+
 ### Focus handling mode decides whether focus changes are notified
 
 - **Symptom:** the game freezes after switching apps and back, picture still, sound on; the main loop waits in its pause handshake (`main+0x5d10d4` / `main+0x5cea68`). Mac repro `DM_OE_SCRIPT=bg=1@20,bg=0@25`.

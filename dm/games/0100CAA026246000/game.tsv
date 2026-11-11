@@ -1,0 +1,40 @@
+# Game profile of Warhammer Survivors (0100CAA026246000), base game v0 (1.0.0), SDK 21.4.7 (Unity IL2CPP, NVN).
+# Format: key <TAB> value; several values of one key are separated by spaces; one build row per version; comments must be on their own line.
+
+# ---- Identity ----
+title_id	0100CAA026246000
+program_id	0100CAA026246000
+
+# ---- App ----
+name	Warhammer Survivors
+ipa	WarhammerSurvivors.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v0	1.0.0	main=8684ba349faec7f25c7f7b061dd46f30	subsdk0=92a5f1a1e8d50e4d05b2212f564bf226	sdk=ab3835b2a37b1916e296f27e82dd4e36
+package	v0
+shader_versions	v0
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 sdk
+romfs_marker	Data/data.unity3d
+zip_store	.bundle:.dat:.resource:.unity3d:.metallib
+
+# ---- Memory ----
+# the NPDM declares 16 MB of system resource (virtual address memory) and main never sets a heap: a 5 GB block with a 4.375 GB alias region, where the game maps its memory itself
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x1000000
+
+# ---- Shader split ----
+shader_groups	/Data/=data
+shader_note	Warhammer Survivors shaders
+
+# ---- Address region check ----
+# the game calls nvnDeviceSetDepthMode with near = 0 in the check boot: the pipeline bases made before it runs are made for that mode
+depth_mode	zero
+
+# address regions: 2026-11-11, in its first 15 s in nnMain the game's regions reach alias +3.96 GB, within the profile's 4.38 GB alias region (what it takes later in play is not measured here) (rewrite 789cfffd7ef4)

@@ -240,6 +240,14 @@ class CompressedPrune(Prune):
 
 
 class Maintenance(Base):
+    def test_reversal_decodes_source_once(self):
+        self.fill(); before = self.snapshot()
+        shader_cache.maintain(self.path, compress=True, workers=4, say=self.said.append)
+        with mock.patch.object(shader_cache, '_parallel_blobs', wraps=shader_cache._parallel_blobs) as decode:
+            shader_cache.maintain(self.path, decompress=True, workers=4, say=self.said.append)
+            self.assertEqual(decode.call_count, 1)
+        self.assertEqual(self.snapshot(), before)
+
     def test_parallel_conversion_round_trip(self):
         self.fill(); before = self.snapshot()
         for workers in (2, 4):

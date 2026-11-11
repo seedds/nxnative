@@ -251,13 +251,13 @@ def _raw_copy(db, part, workers=1):
         with out:
             out.executemany('INSERT INTO blob VALUES(?,?,?)', itertools.chain.from_iterable(_parallel_blobs(db, workers)) if workers > 1 else db.execute('SELECT id,hash,data FROM blob'))
             out.executemany('INSERT INTO entry VALUES(?,?,?)', db.execute('SELECT name,blob,mtime FROM entry'))
-        # Validate bytes and references before replacing the source, with only one pair of blobs in memory.
-        for sql in ('SELECT id,hash,data FROM blob ORDER BY id', 'SELECT name,blob,mtime FROM entry ORDER BY name'):
-            source = itertools.chain.from_iterable(_parallel_blobs(db, workers)) if workers > 1 and sql.startswith('SELECT id') else db.execute(sql)
-            for src, dst in itertools.zip_longest(source, out.execute(sql)):
-                if src != dst: raise RuntimeError('raw shader cache validation failed: contents differ')
-                if sql.startswith('SELECT id') and hashlib.blake2b(dst[2], digest_size=16).digest() != dst[1]:
-                    raise RuntimeError('raw shader cache validation failed: blob hash differs')
+        # Check written bytes against the cache's content hashes without decoding the source again.
+        for src, dst in itertools.zip_longest(db.execute('SELECT id,hash FROM blob ORDER BY id'), out.execute('SELECT id,hash,data FROM blob ORDER BY id')):
+            if src is None or dst is None or src != dst[:2]: raise RuntimeError('raw shader cache validation failed: contents differ')
+            if hashlib.blake2b(dst[2], digest_size=16).digest() != dst[1]: raise RuntimeError('raw shader cache validation failed: blob hash differs')
+        sql = 'SELECT name,blob,mtime FROM entry ORDER BY name'
+        for src, dst in itertools.zip_longest(db.execute(sql), out.execute(sql)):
+            if src != dst: raise RuntimeError('raw shader cache validation failed: contents differ')
         if out.execute('PRAGMA quick_check').fetchone() != ('ok',) or out.execute('SELECT 1 FROM entry e LEFT JOIN blob b ON b.id=e.blob WHERE b.id IS NULL LIMIT 1').fetchone():
             raise RuntimeError('raw shader cache validation failed: database or entry references')
     finally: out.close()

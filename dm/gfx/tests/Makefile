@@ -623,3 +623,11 @@ check_t_pool_standin: t_pool_standin
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./t_pool_standin
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./t_pool_standin
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 DM_NVN_POOL_STANDIN=0 ./t_pool_standin
+
+# Snapshot diagnostics must not materialize guest pool buffers.
+t_rt_breakdown: t_rt_breakdown.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_rt_breakdown.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_rt_breakdown
+check_t_rt_breakdown: t_rt_breakdown
+	./t_rt_breakdown
+	./t_rt_breakdown off

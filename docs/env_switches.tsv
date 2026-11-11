@@ -208,6 +208,7 @@ DM_NVN_STORAGE_FIRST_USE	switch	`0` keeps a sampled block-compressed texture in 
 DM_NVN_T2T_FROM	diagnostic	`=<frame>`: `DM_NVN_T2T_TRACE` records copies only from that frame on (default 0)
 DM_NVN_T2T_TRACE	diagnostic	`=<W>x<H>:<file>`: after each copy into an RGBA16F texture of that size, copies the result into a trace buffer on the GPU timeline; 240 entries are written to the file
 DM_NVN_TBDR	switch	`=1` turns on the replay's TBDR pass optimizations (store / load elision, pass merging, same-target continuation); off by default since bindless textures defeat their read inference
+DM_NVN_TEX_BREAKDOWN	diagnostic	`1` adds GPU-only shared render-target snapshots to `DM_CTL restop`: guest intervals, Metal formats, unique allocations, family heaps and recorded write frames; `dm/tools/nvn_rt_breakdown.py` reports union bytes and estimated overwritten entries (off by default)
 DM_NVN_TEXCPU	diagnostic	`=1` logs non-packaged (non-swizzled) textures in CPU-visible pools
 DM_NVN_TEXDUMP	diagnostic	`=<frame>:<path>`, `size=<W>x<H>:<path>` or `layers=<n>:<path>`: saves every colour render target of that frame as PNG (`%d` = serial × 100 + layer × 10 + level)
 DM_NVN_TEXINFO	diagnostic	`=<W>x<H>` logs storage and description of every texture of that size on first use, registration and initialization (pool, flags, packaged, non-zero bytes, swizzles)

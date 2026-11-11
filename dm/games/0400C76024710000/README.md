@@ -38,6 +38,7 @@ Measured on the M4 Pro, in a 1920x1080 window: 60 fps at the title, 44 to 52 fps
 - [Queue builder size getters](../../../docs/reference/nvn-objects.md#queue-builder-size-getters): read after `SetDefaults` as it makes its queue.
 - [A sync never fenced since its Initialize is signalled](../../../docs/reference/nvn-objects.md#a-sync-never-fenced-since-its-initialize-is-signalled).
 - [The provoking vertex is the first](../../../docs/reference/rendering.md#the-provoking-vertex-is-the-first): it sets mode 0.
+- [An unbound uniform slot reads the zero bank](../../../docs/reference/rendering.md#an-unbound-uniform-slot-reads-the-zero-bank): compute shader `9d5de89b049f5915_b` declares cb1, which the game leaves unbound, and reads it only for a workgroup count of 2,048 or more. It was a `[RED]` line; now a plain one.
 - [Touch gestures recognized from the touch points](../../../docs/reference/services.md#touch-gestures-recognized-from-the-touch-points).
 - [SDF definitions in RE Engine PAKs](../../../docs/reference/shaders.md#sdf-definitions-in-re-engine-paks).
 - [Integer outputs told from float bits](../../../docs/reference/shaders.md#integer-outputs-told-from-float-bits).
@@ -68,7 +69,6 @@ Measured on the M4 Pro, in a 1920x1080 window: 60 fps at the title, 44 to 52 fps
 ## Open
 
 - `[RED] NVN unimplemented function called: nvnCommandBufferSetFloatBlendClamp`: the driver writes method 0x10b0, which NVIDIA's published class header (`clb197.h`) lists only as a reserved software method (read through a summary of the file, not verbatim), so what it selects is not known; the game passes 1.
-- `[RED] stage 5 cb1 has no uniform buffer bound: shader 9d5de89b049f5915_b`: the shader reads slot 1 only for a workgroup count of 2,048 or more, so the unbound slot is not read; the line is still printed.
 - `[RED] queue 4: an event wait has held it 8.1 s`, once in one run, as the game left the title: the wait sat inside a frame of 11.9 s, 11.6 s of it 29 pipelines compiled at first use (the run skipped the prepare step), so the producer's submission was late, not missing. Not seen in the two runs after it.
 - The two shaders under [Shaders](#shaders).
 - How long the prepare step's 48,957 pipelines take on a first start has not been measured. A `pso_manifest.tsv` has not been recorded. Combat, later areas, a long session and iOS are not tested; the alias region above has no iPhone answer.

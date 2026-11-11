@@ -1360,11 +1360,11 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 
 ### An unbound uniform slot reads the zero bank
 
-- **Symptom:** `stage 0 cb5 has no uniform buffer bound` (or another stage and slot, such as `stage 0 cb0`), once per run.
+- **Symptom:** `stage 0 cb5 of shader <key> is not bound (address 0): it reads the zero bank, the game's own state` (or another stage and slot, such as `stage 0 cb0`), a plain line for each of the first 8 shaders. Before, the same case printed `[RED] stage 0 cb5 has no uniform buffer bound`, once per run.
 - **Cause:** the argument buffer kept a null pointer for the unbound slot. The game draws with nothing bound there; the host misses no bind. What the Switch reads from an unbound slot is not known.
-- **Fix:** the slot now reads the all-zero bank, as an unbound texture slot reads the zero texture.
-- **Found on:** [Paper Mario: The Thousand-Year Door](../../dm/games/0100ECD018EBE000/README.md) (at the title); [Batman: Arkham Knight](../../dm/games/0100ACD0163D0000/README.md#files-and-shaders) (`stage 0 cb0`, at boot: the first command buffer draws before the game has bound any uniform buffer).
-- **Check:** a pass dump of the frame (`DM_NVN_PASSDUMP=<frame>`, frame 0 for the boot) shows the draw (`j` line) and its stage's `K` line with no `B … cb` line, and the frame's `[nvn]` call counts show whether the game called `CommandBufferBindUniformBuffer` at all.
+- **Fix:** the slot now reads the all-zero bank, as an unbound texture slot reads the zero texture. A slot at address 0 is the game's own state, so it gets a plain line naming the shader; `[RED] … has no uniform buffer bound` is kept for a binding the host lost: an address in no memory pool, or a slot past the 16 the replay keeps (`nvn_cbmiss.h`, `cbuf_slot`). The binding is the same in every case.
+- **Found on:** [Paper Mario: The Thousand-Year Door](../../dm/games/0100ECD018EBE000/README.md) (at the title); [Batman: Arkham Knight](../../dm/games/0100ACD0163D0000/README.md#files-and-shaders) (`stage 0 cb0`, at boot: the first command buffer draws before the game has bound any uniform buffer); [PRAGMATA](../../dm/games/0400C76024710000/README.md) (`stage 5 cb1`, compute shader `9d5de89b049f5915_b`, which reads the slot only for a workgroup count of 2,048 or more).
+- **Check:** `make -C dm/gfx/tests GAME=<id> t_cbmiss && dm/gfx/tests/t_cbmiss`. A pass dump of the frame (`DM_NVN_PASSDUMP=<frame>`, frame 0 for the boot) shows the draw (`j` line) and its stage's `K` line with no `B … cb` line, and the frame's `[nvn]` call counts show whether the game called `CommandBufferBindUniformBuffer` at all.
 
 ### Compute dispatches share the copy encoder
 

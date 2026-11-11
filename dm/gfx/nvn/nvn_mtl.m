@@ -34,6 +34,7 @@
 #include "nvn_border.h"
 #include "nvn_primitive.h"
 #include "nvn_timestamp.h"
+#include "nvn_cbmiss.h"
 #include "msl_image.h"
 #include "dmsh_chain.h"   // DMSH_CHAIN: the translation chain version of the B shader library expected by this source tree, one for every game (beside this file, tools/dmsh_chain.py --header)
 #include "game_profile.h"   // game profile constants (profile id, the profile's switches)
@@ -11075,7 +11076,9 @@ static uint64_t cbuf_slot(NvShader *sh, int nvn_stage, const nvn_rbind *b, __str
     int reg = b->reg; const p_bind_buf *u = reg < 16 ? &S.ubo[nvn_stage][reg] : NULL;
     void *mb; uint64_t mo, gpu;
     if (!u || !u->addr || !mtl_gpu_addr(u->addr, u->size ? u->size : 1, &mb, &mo, &gpu)) {   // reads 0 (the all-zero bank), as an unbound texture slot does, instead of through a null pointer
-        if (!g_red_once[16]) { char note[400] = ""; if (u && u->addr) dm_gfx_addr_note(u->addr, note, sizeof note);   // which shader, and what the address is (unbound, or in no pool)
+        if (!nvn_cb_red(nvn_cb_state(u ? reg : -1, u ? u->addr : 0, 0))) {   // left unbound by the game (address 0): its own state, the host missed no bind (nvn_cbmiss.h)
+            if (!(sh->logged & 32)) { sh->logged |= 32; static int nlog; if (nlog++ < 8) MLOG("stage %d cb%d of shader %s is not bound (address 0): it reads the zero bank, the game's own state (first 8 shaders)", nvn_stage, reg, sh->key); } }
+        else if (!g_red_once[16]) { char note[400] = ""; if (u && u->addr) dm_gfx_addr_note(u->addr, note, sizeof note);   // a binding the host lost: which shader, and where the address is
             RED_ONCE(16, "stage %d cb%d has no uniform buffer bound: shader %s, address %#llx size %#llx (frame %llu)%s", nvn_stage, reg, sh->key, u ? (unsigned long long)u->addr : 0ull, u ? (unsigned long long)u->size : 0ull,
                      (unsigned long long)atomic_load(&g_cur_frame), note); }
         *use = zero_bank(); return zero_bank_gpu(); }

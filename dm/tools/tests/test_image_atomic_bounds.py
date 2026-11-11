@@ -36,7 +36,7 @@ def cross(spv, msl):
     """spirv-cross as dmsh_build runs it: MSL 3.1 for a module with image atomics, which must come out as native texture atomics"""
     subprocess.run([str(SPIRV_CROSS), *atomic.cross_args(XC, str(spv)), str(spv), '--output', str(msl)], check=True)
     source = atomic.check_msl(msl.read_text())
-    assert '.atomic_fetch_' in source and 'access::read_write' in source, msl
+    assert ('.atomic_fetch_' in source or re.search(r'<ulong, access::read_write>.*\.atomic_(max|min)\(', source, re.S)) and 'access::read_write' in source, msl
     return source
 
 
@@ -391,7 +391,18 @@ class Compiler(unittest.TestCase):
                         msl = work / (key + '.metal')
                         cross(spv, msl)
                         self.compile_metal(msl, work, key)
-                    else:  # U64, S64, descriptor-sized64, float and half2.
+                    elif size == 2:  # U64: a max with no result is Metal's 64-bit texture atomic (dmsh_atomic.wide_atomics); every other form is refused (PR #1801)
+                        if result.returncode == 0:
+                            # Universal SPIR-V, not Vulkan: the 32-bit atomic pair on the rg32ui texel is a marker for the Metal rewrite, which Vulkan's
+                            # texel-pointer format rule (R32 / R64 only) refuses; it never reaches a Vulkan driver.
+                            subprocess.run(['spirv-val', '--target-env', 'spv1.3', str(spv)], check=True)
+                            msl = work / (key + '.metal')
+                            self.assertIn('texture2d_array<ulong, access::read_write>', cross(spv, msl))
+                            self.compile_metal(msl, work, key)
+                        else:  # Maxwell's SURED (InstEmitSurface.EmitSured) keeps the 32-bit gate; SUATOM forms other than a max / min with no result name the 64-bit rule
+                            self.assertRegex(result.stderr, 'Metal 64-bit image atomics|require a 32-bit integer source size')
+                            self.assertFalse(spv.exists())
+                    else:  # S64, descriptor-sized64, float and half2.
                         self.assertNotEqual(result.returncode, 0, key)
                         self.assertIn('require a 32-bit integer source size', result.stderr)
                         self.assertFalse(spv.exists())

@@ -19,6 +19,7 @@ These Switch 2 games have passed Mac gameplay testing. Build them from a [`.nup`
 - [Mario Kart World](dm/games/0400C3F00006E000/README.md)
 - [Mario Tennis Fever](dm/games/0400D4201C6EA000/README.md)
 - [Pokémon Pokopia](dm/games/0400A3A01EE4C000/README.md)
+- [PRAGMATA](dm/games/0400C76024710000/README.md)
 - [Splatoon Raiders](dm/games/0400380020056000/README.md)
 - [Star Fox](dm/games/0400E88025B1A000/README.md)
 - [The Legend of Zelda: Ocarina of Time](dm/games/0400486024DEC000/README.md)

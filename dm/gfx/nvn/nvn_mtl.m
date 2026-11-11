@@ -8764,6 +8764,15 @@ static void pso_bundle_open(NSMutableArray<id<MTL4Archive>> *archp) {
 // layout. A file that is not an archive, or that this system cannot open, is left out with a line in the log: its bases are built on the device as before. Call between
 // arch_open_begin and arch_open_end, before the device's files (the first file to name a key keeps it)
 static NSString *pw_prefix(NSString *gpu) { return [gpu stringByAppendingString:@"-prewarm-"]; }
+// A flush period's captures as a Metal 4 pipelines script (the .mtl4-json metal-tt reads) beside its archive file, <name>.mtl4-json: the serializer that captures the binaries hands out
+// the descriptors as well, vertex layouts included, so metal-tt builds the same bases for a GPU this Mac does not have (the NSP script's --gpu). Asking the serializer to capture the
+// descriptors too is not needed, and with it the archive is not written (macOS 27.3). A script that cannot be made only leaves those GPUs to build the bases on their first start
+static void pw_script(id<MTL4PipelineDataSetSerializer> ser, NSString *path) {
+    NSError *e = nil; NSData *js = [ser serializeAsPipelinesScriptWithError:&e];
+    NSString *sp = [path.stringByDeletingPathExtension stringByAppendingPathExtension:@"mtl4-json"];
+    if (!js || ![js writeToFile:sp atomically:YES]) MLOG("[RED] prewarm tool: no pipelines script for %s (%s): other GPUs build these bases on their first start", path.lastPathComponent.UTF8String,
+                                                          e ? e.localizedDescription.UTF8String : "not written");
+}
 static void pso_bundle_open_prewarm(NSMutableArray<id<MTL4Archive>> *arch) {
     const char *e = getenv("DM_PSO_BUNDLE");
     if (g_pw_tool || !e || !*e || !strcmp(e, "off")) return;
@@ -9065,6 +9074,7 @@ static void arch_write_file(ArchEpoch *ep) {
     [NSFileManager.defaultManager createDirectoryAtPath:g_arch_dir withIntermediateDirectories:YES attributes:nil error:nil];
     uint64_t t0 = bp_now(); NSError *e = nil;
     NSString *path = [g_arch_dir stringByAppendingPathComponent:vd || cs ? [NSString stringWithFormat:@"%05d-%d.mtl4a", g_arch_seq++, n] : [NSString stringWithFormat:@"p%05d.mtl4a", g_arch_seq++]], *tmp = [path stringByAppendingString:@".tmp"];
+    if (g_pw_tool) pw_script(ep->ser, path);   // the prewarm tool: the period as a pipelines script too, for the other GPUs
     if (ep->compacting) arch_mark(1);
     BOOL ok = [ep->ser serializeAsArchiveAndFlushToURL:[NSURL fileURLWithPath:tmp] error:&e];
     if (ep->compacting) arch_mark(0);
@@ -10051,8 +10061,8 @@ static void prepare_prebuild(void) {
 // the first submit (nvnDeviceSetDepthMode), comes as DM_PSO_PREWARM_DEPTH=zero from the profile's depth_mode key (as DM_PSO_PREBUILD_DEPTH): a base for the other mode is simply
 // not found at a run, whose lookup is by content.
 // Environment as for a run (DM_NVN_SHMAP, DM_MSL_DIR), and: DM_PSO_ARCHIVE=<work folder> where the captures are written (the flush periods of ARCH_PERIOD_MAX, as a run writes them;
-// a folder with files from an earlier run is opened like a device's, so an interrupted run goes on from where it was), DM_PSO_PREWARM_OUT=<folder> where <GPU>-prewarm-<NN>.mtl4a and
-// prewarm.tsv are put, DM_PSO_BUNDLE=<folder> the pairs' bundle (bases it holds are not captured again), DM_PSO_PREWARM_LIST=<file> (default: pso_manifest.tsv beside the shader map),
+// a folder with files from an earlier run is opened like a device's, so an interrupted run goes on from where it was), DM_PSO_PREWARM_OUT=<folder> where <GPU>-prewarm-<NN>.mtl4a, prewarm-<NN>.mtl4-json
+// (each period as a pipelines script, pw_script) and prewarm.tsv are put, DM_PSO_BUNDLE=<folder> the pairs' bundle (bases it holds are not captured again), DM_PSO_PREWARM_LIST=<file> (default: pso_manifest.tsv beside the shader map),
 // DM_PSO_PREWARM_THREADS=<n> workers (default: compile_tasks). Returns 0 when not asked for, 1 done, 2 failed
 int mtl_pso_prewarm_tool(void) {
     const char *e = getenv("DM_PSO_PREWARM"); if (!e || strcmp(e, "tool")) return 0;
@@ -10083,7 +10093,7 @@ int mtl_pso_prewarm_tool(void) {
     NSFileManager *fm = NSFileManager.defaultManager; NSString *gpu = g_dev.architecture.name, *pre = pw_prefix(gpu);
     NSArray<NSString *> *staged = [[[fm contentsOfDirectoryAtPath:g_arch_dir error:nil] filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"self ENDSWITH '.mtl4a'"]] sortedArrayUsingSelector:@selector(compare:)];
     [fm createDirectoryAtPath:out withIntermediateDirectories:YES attributes:nil error:nil];
-    for (NSString *old in [fm contentsOfDirectoryAtPath:out error:nil]) if ([old hasPrefix:pre] || [old isEqualToString:@"prewarm.tsv"]) [fm removeItemAtPath:[out stringByAppendingPathComponent:old] error:nil];
+    for (NSString *old in [fm contentsOfDirectoryAtPath:out error:nil]) if ([old hasPrefix:pre] || [old hasPrefix:@"prewarm-"] || [old isEqualToString:@"prewarm.tsv"]) [fm removeItemAtPath:[out stringByAppendingPathComponent:old] error:nil];
     int k = 0, bad = 0; unsigned long long bytes = 0;
     for (NSString *name in staged) {   // the folder's files are the bases of this run and of any earlier one into it: a hard link, else a copy
         NSString *src = [g_arch_dir stringByAppendingPathComponent:name];
@@ -10092,6 +10102,8 @@ int mtl_pso_prewarm_tool(void) {
         if (![fm linkItemAtPath:src toPath:dst error:nil] && ![fm copyItemAtPath:src toPath:dst error:nil]) { bad++; MLOG("[RED] prewarm tool: cannot put %s in %s", name.UTF8String, out.UTF8String); continue; }
         NSString *ksrc = arch_keys_path(src), *kdst = arch_keys_path(dst);   // its index goes with it (the host reads it at the open)
         if ([fm fileExistsAtPath:ksrc] && ![fm linkItemAtPath:ksrc toPath:kdst error:nil] && ![fm copyItemAtPath:ksrc toPath:kdst error:nil]) MLOG("[RED] prewarm tool: cannot put the index of %s in %s", name.UTF8String, out.UTF8String);
+        NSString *js = [src.stringByDeletingPathExtension stringByAppendingPathExtension:@"mtl4-json"], *jd = [out stringByAppendingPathComponent:[NSString stringWithFormat:@"prewarm-%02d.mtl4-json", k]];
+        if ([fm fileExistsAtPath:js] && ![fm linkItemAtPath:js toPath:jd error:nil]) [fm copyItemAtPath:js toPath:jd error:nil];   // the same bases for the other GPUs (build_ipa_from_nsp.py, metal-tt)
         bytes += [[fm attributesOfItemAtPath:dst error:nil] fileSize]; k++;
     }
     NSString *stamp = [NSString stringWithFormat:@"chain\t%s\ndepth\t%s\nrows\t%ld\nfiles\t%d\nbases\t%llu\n%@", DMSH_CHAIN, atomic_load(&g_depth_zero) ? "near=0" : "near=-w", rows, k,

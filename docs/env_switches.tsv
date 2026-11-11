@@ -301,7 +301,7 @@ DM_PSO_PREPARE_THREADS	switch	`=<n>`: the workers of the prepare step that build
 DM_PSO_PREWARM	switch	`tool`: run the prewarm tool on the Mac and exit: the bases of the prewarm list's R rows (pipelines with a vertex layout) are built and written as `<GPU>-prewarm-<NN>.mtl4a` for the app to bundle (`--prebake` of the NSP script); needs `DM_PSO_ARCHIVE` and `DM_PSO_PREWARM_OUT`
 DM_PSO_PREWARM_DEPTH	switch	`zero`: the prewarm tool (`DM_PSO_PREWARM=tool`) builds bases for the near = 0 depth mode; the NSP script sets it from the profile's `depth_mode`
 DM_PSO_PREWARM_LIST	switch	`=<file>`: the prewarm list the prewarm tool reads (default: `pso_manifest.tsv` beside the shader map)
-DM_PSO_PREWARM_OUT	switch	`=<folder>`: where the prewarm tool puts `<GPU>-prewarm-<NN>.mtl4a` and `prewarm.tsv`; the captures go to the `DM_PSO_ARCHIVE` folder first
+DM_PSO_PREWARM_OUT	switch	`=<folder>`: where the prewarm tool puts `<GPU>-prewarm-<NN>.mtl4a`, `prewarm-<NN>.mtl4-json` (each period as a pipelines script, which the NSP script compiles with `metal-tt` for the other GPUs `--gpu` names) and `prewarm.tsv`; the captures go to the `DM_PSO_ARCHIVE` folder first
 DM_PSO_PREWARM_THREADS	switch	`=<n>`: the workers of the prewarm tool (default: Metal's concurrent compiles, `maximumConcurrentCompilationTaskCount`)
 DM_PSO_PULL_ALL	diagnostic	`=1`: every draw that has a pulling pipeline draws with it, never with the pipeline for its vertex layout
 DM_PSO_RECORD	path	`=<file>`: appends the shaders and pipelines used in the run to that file, for re-recording the prewarm manifest

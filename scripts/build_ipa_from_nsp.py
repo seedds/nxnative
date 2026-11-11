@@ -2755,8 +2755,9 @@ def mac_prebake(py, repo, work, msl, g, host, pso, env, logs):
     first start finds them (nvn_mtl.m pso_bundle_open_prewarm) instead of building them before the first frame. They need the descriptor the host builds from a row's pipeline key and the shader's
     reflection, which only the host knows, so the host makes them itself: DM_PSO_PREWARM=tool (mtl_pso_prewarm_tool; depth mode from the profile's depth_mode, as pso_offline.py gets it). The tool captures
     into a work folder, one file per flush period (Metal's serializer store fills past about 2,000 captures), keeps it between runs (an interrupted run goes on from there) and puts
-    <GPU>-prewarm-<NN>.mtl4a, each with its index <GPU>-prewarm-<NN>.keys, and prewarm.tsv in the output folder; those are linked into pso, where pack_app.py takes them. Made again only when its key changes (the rows, the libraries, the pair
-    archive, the host, the depth mode, the system build). Returns pso; an optimization, so a failure leaves the app without them (it builds them on its first start)"""
+    <GPU>-prewarm-<NN>.mtl4a, each with its index <GPU>-prewarm-<NN>.keys, and prewarm.tsv in the output folder; those are linked into pso, where pack_app.py takes them. The files are for this Mac's GPU,
+    so for every other GPU --gpu names (pso holds a pair archive for it) the tool also writes each period as a pipelines script (prewarm-<NN>.mtl4-json), which other_gpu_prewarm compiles with metal-tt
+    into <GPU>-prewarm-<NN>.mtl4a. Made again only when its key changes (the rows, the libraries, the pair archive, the GPUs, the host, the depth mode, the system build). Returns pso; an optimization, so a failure leaves the app without them (it builds them on its first start)"""
     if pso is None: return pso   # no pair archive (none for this Mac's GPU, or --gpu none): the app has no bundle to put them in
     manifest = g.table('pso_manifest.tsv')
     rows = [ln for ln in manifest.read_text().splitlines() if ln.startswith('R\t')] if manifest.is_file() else []
@@ -2767,11 +2768,12 @@ def mac_prebake(py, repo, work, msl, g, host, pso, env, logs):
     PROG.add(1); PROG.stage('Prewarm bases', step=f'{arch}, {len(rows):,} rows (host, minutes to hours when its inputs changed)')
     out, stage = work / 'pso/mac-prewarm', work / 'pso/mac-prewarm-work'
     zero = g.get('depth_mode', 'gl') == 'zero'
+    others = sorted(f.stem for f in pso.glob('applegpu_*.mtl4a') if '-prewarm-' not in f.name and f.stem != arch)   # the other GPUs --gpu named: their bases come from the scripts (metal-tt)
     digest = hashlib.sha256()
     for part in (arch, chain_of(repo), 'zero' if zero else 'gl', '\n'.join(rows), Path(host).read_bytes() if Path(host).is_file() else str(host),
                  (msl / f'b-{chain_of(repo)}/inputs.tsv').read_text() if (msl / f'b-{chain_of(repo)}/inputs.tsv').is_file() else '',
                  (work / f'pso/mac-work/key.{arch}').read_text() if (work / f'pso/mac-work/key.{arch}').is_file() else '',
-                 subprocess.run(['sysctl', '-n', 'kern.osversion'], capture_output=True, text=True).stdout):
+                 subprocess.run(['sysctl', '-n', 'kern.osversion'], capture_output=True, text=True).stdout, ','.join(others)):
         digest.update(part if isinstance(part, bytes) else str(part).encode()); digest.update(b'\0')
     key, keyf = digest.hexdigest(), work / 'pso/mac-prewarm.key'
     if keyf.is_file() and keyf.read_text().strip() == key and list(out.glob('*-prewarm-*.mtl4a')):
@@ -2787,14 +2789,90 @@ def mac_prebake(py, repo, work, msl, g, host, pso, env, logs):
             PROG.end('failed, the app is packed without them', warn=True)
             say(f'[RED] prewarm bases: the host\'s prewarm tool failed (see {logs / "pso_prewarm_mac.log"}); the app is packed without them and builds them on its first start (leave --prebake off to skip this step)')
             return pso
-        keyf.write_text(key + '\n'); shutil.rmtree(stage, ignore_errors=True)   # the work folder is kept only while a run is unfinished
+        lib = msl / f'b-{chain_of(repo)}'
+        whole = other_gpu_prewarm(repo, out, others, logs, lib if lib.is_dir() else lib.with_name(lib.name + '.img'), env)   # a folder, or the one image file
+        if whole: keyf.write_text(key + '\n')   # a GPU left out: no key, so the next build runs the stage again
+        else: keyf.unlink(missing_ok=True)
+        shutil.rmtree(stage, ignore_errors=True)   # the work folder is kept only while a run is unfinished
     for old in pso.glob('*-prewarm-*'): old.unlink()   # the files and their indexes (.keys)
     (pso / 'prewarm.tsv').unlink(missing_ok=True)
     for f in out.iterdir():
+        if f.suffix not in ('.mtl4a', '.keys', '.tsv'): continue   # the pipelines scripts and their libraries stay in the work folder
         try: os.link(f, pso / f.name)
         except OSError: shutil.copyfile(f, pso / f.name)
     PROG.end(f'{len(list(out.glob("*.mtl4a")))} files, {amount(sum(f.stat().st_size for f in out.glob("*.mtl4a")), "B")}')
     return pso
+
+
+def prewarm_script_libraries(out, scripts, lib_dir, po):
+    """The libraries a prewarm pipelines script names, as files for metal-tt. The host loads its libraries from memory, so a script names each by the SHA-256 of its bytes (label) with a path Metal
+    marks _Path_not_available_for_lib_from_data_with_UUID_...; the libraries of the shader folder (a folder, or one image file) are hashed until every one the scripts name is found, written to
+    out/libraries, and the scripts' paths pointed at them. po: the pso_offline module. Returns that folder, or raises BuildError naming a library not found"""
+    want, data = set(), {}
+    for js in scripts:
+        data[js] = json.loads(js.read_text())
+        want |= {lib['label'].upper() for lib in data[js].get('libraries', []) if not Path(lib.get('path', '')).is_file()}
+    real = out / 'libraries'; shutil.rmtree(real, ignore_errors=True); real.mkdir()
+    found = {}
+    for root, _, files in rfs.walk(str(lib_dir)):
+        for f in files:
+            if not f.endswith('.metallib') or len(found) == len(want): continue
+            with rfs.open(os.path.join(root, f), 'rb') as fh: b = fh.read()
+            h = hashlib.sha256(b).hexdigest().upper()
+            if h in want and h not in found: (real / f'{h}.metallib').write_bytes(b); found[h] = real / f'{h}.metallib'
+    missing = want - set(found)
+    if missing: raise BuildError(f'{len(missing)} of the libraries the prewarm scripts name are not in {lib_dir} (one is {sorted(missing)[0]})')
+    cuts = {}
+    for js, d in data.items():
+        for lib in d.get('libraries', []):
+            if lib['label'].upper() in found: lib['path'] = str(found[lib['label'].upper()])
+        fds = d.get('function_descriptors', {})
+        spec = {s['function_descriptor'].removeprefix('fnd:') for s in fds.get('specialized_function_descriptors', [])}
+        for fn in fds.get('library_function_descriptors', []):
+            h = fn.get('library', '').upper()
+            # metal-tt specializes only a library's first function ("cannot find private metadata at offset '8'" for a later one, as main0_z behind main0 of a depth_mode zero game's
+            # <key>_bp): such a function is specialized from a library of its own, cut from its library as pso_offline.py does (needs_cut; reference: Specialized second functions in
+            # the offline pipeline archive)
+            if fn['label'] not in spec or h not in found: continue
+            if h not in cuts:
+                try: cuts[h] = po.constants(found[h])
+                except (OSError, ValueError): cuts[h] = {}
+            if not po.needs_cut(cuts[h], fn['name']): continue
+            cut = po.cut_name(h, fn['name']); path = real / f'{cut}.metallib'
+            if not path.exists(): path.write_bytes(po.dmsh_side.cut(found[h].read_bytes(), {fn['name']})[1])
+            if not any(lib['label'] == cut for lib in d['libraries']): d['libraries'].append({'label': cut, 'path': str(path)})
+            fn['library'] = cut
+        js.write_text(json.dumps(d, indent=1))
+    return real
+
+
+def other_gpu_prewarm(repo, out, others, logs, lib_dir, env):
+    """The prewarm bases for the GPUs --gpu named besides this Mac's: the host's tool wrote each flush period also as a pipelines script (prewarm-<NN>.mtl4-json, pw_script), which metal-tt builds
+    for each of them as <GPU>-prewarm-<NN>.mtl4a, as pso_offline.py builds the pairs' bases. A GPU whose build fails is left out (its first start builds them).
+    Returns False when a GPU was left out, so the stage keeps no key and the next build tries again"""
+    scripts = sorted(out.glob('prewarm-*.mtl4-json'))
+    if not others: return True
+    if not scripts: return False
+    spec = importlib.util.spec_from_file_location('pso_offline', repo / 'dm/gfx/tools/pso_offline.py'); po = importlib.util.module_from_spec(spec); spec.loader.exec_module(po)
+    osmin = po.os_min_default('macos')
+    try: prewarm_script_libraries(out, scripts, lib_dir, po)
+    except (BuildError, OSError) as e: say(f'[RED] prewarm bases for {", ".join(others)}: {e}; those GPUs build them on their first start'); return False
+    ok = True
+    for gpu in others:
+        made = []
+        for js in scripts:
+            dst = out / f'{gpu}-{js.stem}.mtl4a'
+            if run(['xcrun', '-sdk', 'macosx', 'metal-tt', '-arch', gpu, '-macos-version-min', osmin, js, '-o', dst], logs / f'pso_prewarm_{gpu}.log', env=env, fatal=False):
+                for f in made: f.unlink(missing_ok=True)
+                dst.unlink(missing_ok=True); made = []
+                say(f'[RED] prewarm bases for {gpu}: metal-tt failed on {js.name} (see {logs / f"pso_prewarm_{gpu}.log"}); that GPU builds them on its first start'); ok = False; break
+            made.append(dst)
+            keys = next((k for k in out.glob(f'*-{js.stem}.keys') if not k.name.startswith(f'{gpu}-')), None)   # this Mac's file of the same period: the same pipelines, so the same keys
+            if keys:   # with its index, the file leads the lookup for them over a device file an earlier build left (pso_bundle_open_prewarm)
+                k = dst.with_suffix('.keys'); k.unlink(missing_ok=True); os.link(keys, k); made.append(k)
+        if made: say(f'prewarm bases for {gpu}: {sum(f.suffix == ".mtl4a" for f in made)} files, {amount(sum(f.stat().st_size for f in made if f.suffix == ".mtl4a"), "B")} (metal-tt)')
+    shutil.rmtree(out / 'libraries', ignore_errors=True)
+    return ok
 
 
 def mac_app_name(name):   # the app's file name: the game name with the characters Finder shows otherwise (':' and '/') as ' - '
@@ -2877,7 +2955,7 @@ def parse_args(argv):
                     'With --platform mac-app: the Mac app\'s archive, by default for this Mac\'s GPU (none: the app builds the bases on its first start)')
     ap.add_argument('--prebake', action=argparse.BooleanOptionalAction, help='--platform mac-app, NVN games: also make the pipeline bases the prewarm list\'s R rows (pso_manifest.tsv) need, here on this Mac with the host\'s DM_PSO_PREWARM=tool, '
                     'and bundle them with the app after the pipeline archive, so its first start builds none (Ocarina of Time: about 6,400 bases, 450-475 s on an M5 Max at the first start); minutes to hours on a first build and '
-                    'about 1.3 GB more app for such a list, made again only when its inputs change; needs the pipeline archive for this Mac\'s GPU (default: the PREBAKE setting, off)')
+                    'about 1.3 GB more app for such a list, made again only when its inputs change; needs the pipeline archive for this Mac\'s GPU; the other GPUs --gpu names get theirs from the host\'s pipelines scripts through metal-tt (default: the PREBAKE setting, off)')
     ap.add_argument('--seen-shaders', action=argparse.BooleanOptionalAction, help='--platform mac or mac-app: build only the shaders the profile\'s playtests used (its shader_seen.tsv) and those the last runs\' logs reported missing, not the whole map: '
                     'minutes instead of hours, but areas the list does not cover draw without the rest until this runs again (default: the SEEN_SHADERS setting, off)')
     ap.add_argument('--show-fps', action=argparse.BooleanOptionalAction, help='show the game\'s frame rate on the iPhone, frames on screen per second at the top left (default: the SHOW_FPS setting, on)')

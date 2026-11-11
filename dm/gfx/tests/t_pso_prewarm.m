@@ -1,4 +1,4 @@
-// The prewarm tool (DM_PSO_PREWARM=tool, mtl_pso_prewarm_tool) and the files it makes for the app to bundle (<GPU>-prewarm-<NN>.mtl4a, pso_bundle_open_prewarm), on synthetic shaders with a
+// The prewarm tool (DM_PSO_PREWARM=tool, mtl_pso_prewarm_tool) and the files it makes for the app to bundle (<GPU>-prewarm-<NN>.mtl4a, pso_bundle_open_prewarm, and prewarm-<NN>.mtl4-json, each period as a pipelines script), on synthetic shaders with a
 // vertex layout. Checks: a pso_key written as a prewarm row (pso_skey) decodes to the same Metal descriptor the draw's own key gives (vertex attribute format, offset, stream and stride),
 // so the base the tool captures is the base a run asks for; the tool writes one file per flush period (g_arch_period_max lowered to 2: 5 bases, 3 files) and a stamp with the depth
 // mode; and the host opens those files with the bundle and searches them first among the files of bases with a vertex layout, before the device's own archive, skips a file that is
@@ -151,6 +151,11 @@ int main(int argc, char **argv) { @autoreleasepool {
     EXPECT("tool: log names the bases", 1, [log1 containsString:@"5 bases compiled"]);
     NSString *stamp = slurp([bundle stringByAppendingPathComponent:@"prewarm.tsv"]);
     EXPECT("tool: stamp, depth near=-w", 1, [stamp containsString:@"depth\tnear=-w\n"] && [stamp containsString:@"files\t3\n"] && [stamp containsString:@"rows\t5\n"]);
+    for (NSUInteger i = 0; i < files.count; i++) {   // each period is also a pipelines script, for metal-tt and the other GPUs
+        NSData *js = [NSData dataWithContentsOfFile:[bundle stringByAppendingFormat:@"/prewarm-%02lu.mtl4-json", (unsigned long)i]];
+        id j = js ? [NSJSONSerialization JSONObjectWithData:js options:0 error:nil] : nil;
+        EXPECT("tool: each file has its pipelines script, with its libraries", 1, [j isKindOfClass:NSDictionary.class] && [j[@"libraries"] count] > 0);
+    }
     // the tool again on the same work folder: the bases are in its files, nothing is compiled, the output is the same
     EXPECT("tool again: exit 0", 0, run_self(@[@"--tool", root], tool, [root stringByAppendingPathComponent:@"tool1b.log"]));
     NSString *log1b = slurp([root stringByAppendingPathComponent:@"tool1b.log"]);

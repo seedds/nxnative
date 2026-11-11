@@ -4,6 +4,7 @@ code returned and SIGTERM forwarded to it, an alert when the game data is missin
 No game files, keys or Xcode needed: a stand-in host compiled here records what it was given (temporary files only in a temporary folder)."""
 import contextlib
 import errno
+import hashlib
 import importlib.util
 import io
 import json
@@ -726,7 +727,7 @@ class Script(unittest.TestCase):
         self.assertEqual(nsp.mac_app_name('AC/DC'), 'AC - DC'); self.assertEqual(nsp.mac_app_name(':'), 'nxnative')
 
     def pack_cmd(self, gfx, **kw):
-        ran, tmp = [], Path(tempfile.mkdtemp(dir=TEST_ROOT)); self.addCleanup(shutil.rmtree, tmp); self.said = []; self.settings_env = {}
+        ran, tmp = [], Path(tempfile.mkdtemp(dir=TEST_ROOT)); self.addCleanup(shutil.rmtree, tmp); self.said = []; self.settings_env = {}; self.metal_tt = []
         if kw.get('work'): tmp = kw['work']
         out = tmp / 'G.app'; shutil.rmtree(out, ignore_errors=True)
         def fake_run(cmd, log, env=None, cwd=None, on_line=None, fatal=True):
@@ -737,14 +738,23 @@ class Script(unittest.TestCase):
                 o = Path(env['DM_PSO_PREWARM_OUT']); o.mkdir(parents=True, exist_ok=True)
                 for i in range(3):
                     (o / f'applegpu_g14s-prewarm-{i:02d}.mtl4a').write_bytes(b'bases%d' % i); (o / f'applegpu_g14s-prewarm-{i:02d}.keys').write_bytes(b'DMPSOIX1')   # a file and its index
-                (o / 'prewarm.tsv').write_text('chain\tx\n'); return
+                (o / 'prewarm.tsv').write_text('chain\tx\n')
+                for i in range(3 if kw.get('scripts', True) else 0):   # each period as a pipelines script, whose libraries are named by their SHA-256 (the host loads them from memory)
+                    libs = [{'label': h, 'path': '_Path_not_available_for_lib_from_data_with_UUID_' + h} for j, h in enumerate(kw.get('lib_hashes', [])) if j <= i]
+                    (o / f'prewarm-{i:02d}.mtl4-json').write_text(json.dumps({'libraries': libs, 'function_descriptors': {}}))
+                return
+            if cmd[:3] == ['xcrun', '-sdk', 'macosx'] and cmd[3] == 'metal-tt':   # other_gpu_prewarm: a script into an archive for another GPU
+                self.metal_tt.append(cmd); self.assertFalse(fatal)
+                if kw.get('metal_tt_fail') and cmd[5] == kw['metal_tt_fail']: return 1
+                Path(cmd[-1]).write_bytes(b'bases for ' + cmd[5].encode()); return
             if str(cmd[1]).endswith('dm/games/settings.py'):   # the launcher settings, before the packer
                 self.settings_env = env; Path(cmd[-1]).write_text('{}'); return
             if not on_line:   # pso_offline.py: its archive, or none when every eligible pair has function constants
                 o = Path(cmd[cmd.index('--out') + 1]); o.mkdir(parents=True, exist_ok=True)
                 if kw.get('pso_fail'):   # metal-tt failed
                     self.assertFalse(fatal); (o / 'applegpu_g14s.mtl4a.partial').write_bytes(b'half'); return 1
-                if not kw.get('no_bases'): (o / f'{cmd[cmd.index("--gpu") + 1]}.mtl4a').write_bytes(b'arch')
+                if not kw.get('no_bases'):
+                    for gpu in cmd[cmd.index('--gpu') + 1].split(','): (o / f'{gpu if gpu.startswith("applegpu_") else "applegpu_" + gpu}.mtl4a').write_bytes(b'arch')
                 return
             (out / 'Contents/MacOS').mkdir(parents=True); (out / 'Contents/MacOS/dmhost').write_bytes(b'x')
             on_line('step: launcher and host (clones of the game files)')
@@ -752,7 +762,9 @@ class Script(unittest.TestCase):
         g = types.SimpleNamespace(table=lambda n: tmp / 'profile' / n, get={'app_category': 'public.app-category.games', 'romfs_marker': 'a/b', **kw.get('profile', {})}.get)
         g.id = '01008CF01BAAC000'
         self.prog = mock.Mock()
-        with mock.patch.object(nsp, 'run', fake_run), mock.patch.object(nsp, 'PROG', self.prog), mock.patch.object(nsp, 'chain_of', lambda repo: '0123456789ab'), \
+        real_run = subprocess.run
+        def sw_vers(cmd, *a, **k): return subprocess.CompletedProcess(cmd, 0, '26.1\n', '') if cmd[0] == 'sw_vers' else real_run(cmd, *a, **k)   # pso_offline.os_min_default
+        with mock.patch.object(nsp, 'run', fake_run), mock.patch.object(nsp, 'PROG', self.prog), mock.patch.object(subprocess, 'run', sw_vers), mock.patch.object(nsp, 'chain_of', lambda repo: '0123456789ab'), \
              mock.patch.object(nsp, 'mac_gpu_arch', lambda *a: 'applegpu_g14s'), mock.patch.object(nsp, 'say', self.said.append):
             nsp.mac_app(sys.executable, REPO, out, 0x01008CF01BAAC000, tmp, tmp / 'ex', tmp / 'patched', tmp / 'dmhost', tmp / 'font', tmp / 'shader/cache' if gfx == 'nvn' else tmp / 'shader',
                         kw.get('aoc'), gfx, 'en-US', g, 'Game', '1.0.0', 'org.nxnative.01008cf01baac000', None, kw.get('sign', ''), {}, tmp, gpus=kw.get('gpus', ''), prebake=kw.get('prebake', False))
@@ -799,6 +811,9 @@ class Script(unittest.TestCase):
 
     def prebake_work(self):
         tmp = Path(tempfile.mkdtemp(dir=TEST_ROOT)); self.addCleanup(shutil.rmtree, tmp); self.tool_env = None
+        lib = tmp / 'shader/cache/b-0123456789ab'; lib.mkdir(parents=True)   # the shader libraries the prewarm scripts name by the SHA-256 of their bytes
+        for n in ('ab12cd34', 'ef56ab78', 'unused'): (lib / f'{n}.metallib').write_bytes(b'metallib ' + n.encode())
+        self.lib_hashes = [hashlib.sha256(b'metallib ' + n.encode()).hexdigest().upper() for n in ('ab12cd34', 'ef56ab78')]
         (tmp / 'profile').mkdir(); (tmp / 'profile/shader_pairs.tsv').write_text('v\tf\n')
         (tmp / 'profile/pso_manifest.tsv').write_text('S\tk\t0\nC\tc\nR\t00aa\nR\t00bb\n')
         return tmp
@@ -807,7 +822,7 @@ class Script(unittest.TestCase):
         tmp = self.prebake_work()
         o, _ = self.pack_cmd('nvn', work=tmp)
         self.assertIsNone(self.tool_env); self.assertEqual(sorted(p.name for p in (tmp / 'pso/mac').iterdir()), ['applegpu_g14s.mtl4a'])   # off by default
-        o, _ = self.pack_cmd('nvn', work=tmp, prebake=True, profile={'depth_mode': 'zero'})
+        o, _ = self.pack_cmd('nvn', work=tmp, prebake=True, profile={'depth_mode': 'zero'}, lib_hashes=self.lib_hashes)
         e = self.tool_env
         self.assertEqual((e['DM_PSO_PREWARM'], e['DM_PSO_ARCHIVE'], e['DM_PSO_PREWARM_OUT'], e['DM_PSO_BUNDLE'], e['DM_MSL_DIR'], e['DM_NVN_SHMAP'], e['DM_PSO_PREWARM_DEPTH']),
                          ('tool', str(tmp / 'pso/mac-prewarm-work'), str(tmp / 'pso/mac-prewarm'), str(tmp / 'pso/mac'), str(tmp / 'shader/cache'), str(tmp / 'profile/shader_map.tsv'), 'zero'))
@@ -825,6 +840,71 @@ class Script(unittest.TestCase):
         self.assertNotIn('DM_PSO_PREWARM_DEPTH', self.tool_env)
         (tmp / 'profile/pso_manifest.tsv').write_text('R\t00cc\n')   # other rows: again
         self.tool_env = None; self.pack_cmd('nvn', work=tmp, prebake=True); self.assertIsNotNone(self.tool_env)
+
+    def test_prebake_other_gpus(self):   # --gpu naming more GPUs: the tool's pipelines scripts become each of their prewarm archives, through metal-tt
+        tmp = self.prebake_work()
+        o, _ = self.pack_cmd('nvn', work=tmp, prebake=True, gpus='g14s,g17p', lib_hashes=self.lib_hashes)
+        names = sorted(p.name for p in (tmp / 'pso/mac').iterdir())
+        self.assertEqual([n for n in names if n.startswith('applegpu_g17p')], ['applegpu_g17p-prewarm-00.keys', 'applegpu_g17p-prewarm-00.mtl4a', 'applegpu_g17p-prewarm-01.keys', 'applegpu_g17p-prewarm-01.mtl4a',
+                                                                        'applegpu_g17p-prewarm-02.keys', 'applegpu_g17p-prewarm-02.mtl4a', 'applegpu_g17p.mtl4a'])
+        for i in range(3):   # each with the index of this Mac's file of the same period: with it the file leads the lookup over an earlier build's device files
+            self.assertEqual((tmp / f'pso/mac/applegpu_g17p-prewarm-{i:02d}.keys').read_bytes(), (tmp / f'pso/mac/applegpu_g14s-prewarm-{i:02d}.keys').read_bytes())
+        self.assertEqual([n for n in names if not n.startswith('applegpu_')], ['prewarm.tsv'])   # the scripts and the libraries stay in the work folder
+        self.assertEqual(len(self.metal_tt), 3)
+        c = self.metal_tt[0]
+        self.assertEqual((c[4], c[5], c[6], c[7]), ('-arch', 'applegpu_g17p', '-macos-version-min', '26.0'))   # this Mac's GPU is not built again
+        self.assertEqual((Path(c[8]).name, Path(c[10]).name), ('prewarm-00.mtl4-json', 'applegpu_g17p-prewarm-00.mtl4a'))
+        script = json.loads((tmp / 'pso/mac-prewarm/prewarm-02.mtl4-json').read_text())   # the paths point at the libraries found by their SHA-256, written beside the scripts
+        self.assertEqual([Path(lib['path']).name for lib in script['libraries']], [h + '.metallib' for h in self.lib_hashes])
+        self.assertEqual(Path(script['libraries'][1]['path']).parent, tmp / 'pso/mac-prewarm/libraries')
+        self.assertFalse((tmp / 'pso/mac-prewarm/libraries').exists())   # removed once metal-tt has read them
+        self.assertTrue(any('prewarm bases for applegpu_g17p: 3 files' in m for m in self.said))
+        self.metal_tt.clear(); self.tool_env = None   # the same inputs: reused, metal-tt does not run again
+        for f in (tmp / 'pso/mac').glob('*-prewarm-*'): f.unlink()
+        self.pack_cmd('nvn', work=tmp, prebake=True, gpus='g14s,g17p', lib_hashes=self.lib_hashes)
+        self.assertEqual((self.tool_env, self.metal_tt, len(list((tmp / 'pso/mac').glob('applegpu_g17p-prewarm-*.mtl4a')))), (None, [], 3))
+        (tmp / 'pso/mac/applegpu_g17p.mtl4a').unlink()   # the pair archive of a GPU no longer named
+        self.pack_cmd('nvn', work=tmp, prebake=True, gpus='g14s', lib_hashes=self.lib_hashes)   # the GPUs are an input
+        self.assertIsNotNone(self.tool_env); self.assertEqual(self.metal_tt, [])
+
+    @unittest.skipUnless(shutil.which('xcrun'), 'needs Xcode and Metal')
+    def test_prebake_other_gpus_cut_library(self):   # a specialized function that is not its library's first (main0_z of a depth_mode zero game): metal-tt needs a library of its own for it
+        tmp = Path(tempfile.mkdtemp(dir=TEST_ROOT)); self.addCleanup(shutil.rmtree, tmp)
+        src = '#include <metal_stdlib>\nusing namespace metal;\nconstant bool dm_border_off [[function_constant(216)]];\nstruct V { float4 p [[position]]; };\n' + ''.join(
+            'vertex V %s(uint id [[vertex_id]]) { V o; o.p = float4(float(id), 0, is_function_constant_defined(dm_border_off) && dm_border_off ? %d.5 : 1, 1); return o; }\n' % (e, n)
+            for n, e in enumerate(('main0', 'main0_z')))
+        (tmp / 'v.metal').write_text(src)
+        r = subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-c', str(tmp / 'v.metal'), '-o', str(tmp / 'v.air')], capture_output=True, text=True)
+        if r.returncode: self.skipTest('no Metal compiler: ' + r.stderr[-200:])
+        lib = tmp / 'lib'; lib.mkdir()
+        subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', str(tmp / 'v.air'), '-o', str(lib / 'v_bp.metallib')], check=True, capture_output=True)
+        h = hashlib.sha256((lib / 'v_bp.metallib').read_bytes()).hexdigest().upper()
+        fds = [{'label': 'A' * 64, 'name': 'main0', 'library': h}, {'label': 'B' * 64, 'name': 'main0_z', 'library': h}]
+        out = tmp / 'out'; out.mkdir()
+        (out / 'prewarm-00.mtl4-json').write_text(json.dumps({'libraries': [{'label': h, 'path': '_Path_not_available_for_lib_from_data_with_UUID_' + h}], 'function_descriptors': {
+            'library_function_descriptors': fds, 'specialized_function_descriptors': [{'label': 'S' + str(i), 'function_descriptor': 'fnd:' + f['label']} for i, f in enumerate(fds)]}}))
+        spec = importlib.util.spec_from_file_location('pso_offline', REPO / 'dm/gfx/tools/pso_offline.py'); po = importlib.util.module_from_spec(spec); spec.loader.exec_module(po)
+        real = nsp.prewarm_script_libraries(out, [out / 'prewarm-00.mtl4-json'], lib, po)
+        d = json.loads((out / 'prewarm-00.mtl4-json').read_text())
+        self.assertEqual({f['name']: f['library'] for f in d['function_descriptors']['library_function_descriptors']}, {'main0': h, 'main0_z': h + '@main0_z'})   # main0_z only
+        self.assertEqual({x['label']: Path(x['path']).name for x in d['libraries']}, {h: h + '.metallib', h + '@main0_z': h + '@main0_z.metallib'})
+        self.assertEqual(po.constants(real / (h + '@main0_z.metallib')), {'main0_z': ('dm_border_off',)})   # the function alone
+
+    def test_prebake_other_gpus_failures(self):   # an optimization: a GPU whose build fails, or a library not found, leaves that GPU to build the bases on its first start
+        tmp = self.prebake_work()
+        self.pack_cmd('nvn', work=tmp, prebake=True, gpus='g14s,g17p,g17s', lib_hashes=self.lib_hashes, metal_tt_fail='applegpu_g17p')
+        names = sorted(p.name for p in (tmp / 'pso/mac').iterdir())
+        self.assertEqual([n for n in names if n.startswith('applegpu_g17p-')], [])   # no half set
+        self.assertEqual(len([n for n in names if n.startswith('applegpu_g17s-prewarm-') and n.endswith('.mtl4a')]), 3)
+        self.assertTrue(any('prewarm bases for applegpu_g17p: metal-tt failed on prewarm-00.mtl4-json' in m for m in self.said))
+        self.assertFalse((tmp / 'pso/mac-prewarm.key').exists())   # a GPU left out: the next build runs the stage again
+        shutil.rmtree(tmp / 'pso'); self.metal_tt.clear()
+        self.pack_cmd('nvn', work=tmp, prebake=True, gpus='g14s,g17p', lib_hashes=['0' * 64])   # a library the folder does not hold
+        self.assertEqual(self.metal_tt, []); self.assertEqual(len(list((tmp / 'pso/mac').glob('applegpu_g14s-prewarm-*.mtl4a'))), 3)
+        self.assertTrue(any('are not in' in m and 'those GPUs build them on their first start' in m for m in self.said))
+        shutil.rmtree(tmp / 'pso'); self.metal_tt.clear()
+        self.pack_cmd('nvn', work=tmp, prebake=True, gpus='g14s,g17p', scripts=False)   # a tool that wrote no scripts
+        self.assertEqual(self.metal_tt, []); self.assertEqual(len(list((tmp / 'pso/mac').glob('applegpu_g14s-prewarm-*.mtl4a'))), 3)
 
     def test_prebake_skipped_or_failed(self):   # an optimization: no list rows, no pipeline archive or a failed tool leave the app as it was
         tmp = self.prebake_work()

@@ -366,6 +366,10 @@ python3 scripts/build_ipa_from_nsp.py ~/Games/MarioWonder -k ~/keys/prod.keys --
 # keep this game's build folder elsewhere (used as given, not extended with the title ID; WORK_DIR in Spyder); the IPA then defaults to the folder holding it
 python3 scripts/build_ipa_from_nsp.py ~/Games/MarioWonder -k ~/keys/prod.keys --work-dir /Volumes/Builds/MarioWonder
 
+# build again from a build folder's extracted game files, with no NSPs or NUP at hand (a chain or rewriter change on a Mac that has the build folder but not the game's package): its
+# extract/v<version>/ must hold ExeFS/main and RomFS.img; the scan, the unpack and the file checks are skipped, and the title ID and the version are given, as nothing else says them
+python3 scripts/build_ipa_from_nsp.py --reuse-extracted --title-id 010015100B514000 --package v327680 --work-dir /Volumes/Builds/MarioWonder --platform mac
+
 # a folder of the game's files instead of NSPs (a dump: base/, updates/<version>/, dlc/; scripts/pack_dump.py lists the layout): no prod.keys; an update without base/ is the whole game, and exefs/ and romfs/ directly in the folder count as base/; a game with no profile is surveyed from the files and gets a provisional profile named after the folder; no icon, as a dump has no control data, unless --icon <image> (ICON) gives one
 python3 scripts/build_ipa_from_nsp.py ~/Games/DonkeyKongBananza --platform mac-app
 

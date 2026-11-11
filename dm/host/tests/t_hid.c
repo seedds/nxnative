@@ -146,6 +146,34 @@ static void t_npads(void) {
     CHECK(applet_opens == 12 && applet_depth == 0, "every answer opened and closed its applet");
     arg[0] = 1;
     CHECK(six_connected(0x0100 | 0) && !six_connected(0x0200 | 0), "player 2 has a six-axis sensor, No3 none");
+    {   // GitHub issue #2237: more players than the game's maximum. The applet leaves the players past it out, so the game does not see them and open it again
+        arg[0] = 1; arg[1] = 1; g_signals = 0;
+        CHECK(h_hid_ShowCtrl(info, arg) == RES_OK && info[0] == 1 && dm_players_reported() == 1, "two players, one wanted: the applet answers one and one is reported");
+        CHECK(h_hid_GetStyle(&(uint32_t){1}) == 0 && buttons_of(1, STYLE_FULLKEY) == 0, "No2 reads as not connected");
+        CHECK(g_signals == 1 && g_signalled == ev1, "No2's style event tells the game");
+        CHECK(buttons_of(0, STYLE_FULLKEY) == (DM_BTN_Y | DM_BTN_B) && lx_of(0) == 300, "a maximum of one: the controller left out feeds player 1");
+        g_signals = 0;
+        CHECK(h_hid_ShowCtrl(info, arg) == RES_OK && info[0] == 1 && g_signals == 0, "asked again: the same answer, nothing changes");
+        h_hid_ShowCtrl(info, NULL); CHECK(info[0] == 1, "the applet without arguments reports the players the game sees");
+        dm_pad_players(0x1); dm_pad_players(0x3); dm_pad_set_player(1, DM_BTN_B, 300, 0, 0, 0);
+        CHECK(h_hid_GetStyle(&(uint32_t){1}) == STYLE_FULLKEY, "a controller that went away and came back is a player again, until the applet says otherwise");
+        CHECK(h_hid_ShowCtrl(info, arg) == RES_OK && h_hid_GetStyle(&(uint32_t){1}) == 0, "and the applet leaves it out again");
+        dm_pad_players(0x7); dm_pad_set_player(2, DM_BTN_X, 0, 0, 0, 0);
+        CHECK(h_hid_GetStyle(&(uint32_t){2}) == STYLE_FULLKEY, "a third controller connects: a player of its own, on No3");
+        arg[1] = 2;
+        CHECK(h_hid_ShowCtrl(info, arg) == RES_OK && info[0] == 2, "one to two players wanted, three connected: two");
+        CHECK(h_hid_GetStyle(&(uint32_t){1}) == STYLE_FULLKEY && h_hid_GetStyle(&(uint32_t){2}) == 0, "the lowest players stay: player 2 is back, player 3 is left out");
+        CHECK(buttons_of(0, STYLE_FULLKEY) == DM_BTN_Y && buttons_of(1, STYLE_FULLKEY) == DM_BTN_B, "a maximum above one: the controller left out feeds nobody");
+        arg[1] = 4;
+        CHECK(h_hid_ShowCtrl(info, arg) == RES_OK && info[0] == 3 && buttons_of(2, STYLE_FULLKEY) == DM_BTN_X, "the applet opened for up to four: all three play");
+        arg[1] = 1; h_hid_ShowCtrl(info, arg);
+        CHECK(h_hid_GetStyle(&(uint32_t){1}) == 0 && h_hid_GetStyle(&(uint32_t){2}) == 0, "one wanted: players 2 and 3 left out");
+        CHECK(buttons_of(0, STYLE_FULLKEY) == (DM_BTN_Y | DM_BTN_B | DM_BTN_X), "and both feed player 1");
+        ids((const uint32_t[]){0, 1, 2, NPAD_HANDHELD}, 4);
+        CHECK(h_hid_GetStyle(&(uint32_t){1}) == STYLE_FULLKEY && h_hid_GetStyle(&(uint32_t){2}) == STYLE_FULLKEY, "the game sets its supported npads again: everyone counts again");
+        ids((const uint32_t[]){0, 1, 2, 3, 4, 5, 6, 7, NPAD_HANDHELD}, 9);
+        dm_pad_players(0x3); arg[1] = 4;
+    }
 
     // A one-player game ({No1, Handheld}): player 2's controller plays as player 1, No2 reads as not connected
     g_signals = 0; ids((const uint32_t[]){0, NPAD_HANDHELD}, 2);

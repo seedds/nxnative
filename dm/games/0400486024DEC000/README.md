@@ -12,7 +12,7 @@ A Switch 2 game: update v131072, SDK 22.2.8 (`Ounce`). Nintendo EPD's engine (se
 | `render_cond on` | `game.tsv` | agl clears a copy of the prepass depth again under a render condition the console skips. Run unconditionally, the opaque pass's `EQUAL` test fails everywhere ([PR 1299](https://github.com/seedds/nxnative/pull/1299)'s finding) |
 | `gpu_timestamps segment` | `game.tsv` | the game's dynamic resolution decides from GPU timestamps, and with one time per submission it never lowers its resolution ([why](../../../docs/reference/frame-rate.md#dynamic-resolution-that-never-moves-and-draw-passes-that-wait-for-each-other)) |
 | Dynamic-resolution stub | [`patches.py`](patches.py) (frame step rule, `others`) | full resolution unless the launcher's Dynamic resolution is on ([Dynamic resolution](#dynamic-resolution)) |
-| `draw_barriers game` | `game.tsv` | about 180 full barriers a frame NVN does not ask for: GPU 25 → 18 ms at full resolution |
+| `draw_barriers game` | `game.tsv` | about 180 full barriers a frame NVN does not ask for: GPU 25 → 18 ms at full resolution. From 7f50222 until the fix in [Draw passes that wait for each other again while images share memory](../../../docs/reference/frame-rate.md#draw-passes-that-wait-for-each-other-again-while-images-share-memory) it had no effect, since the dynamic resolution's family heaps turned it off; with the fix, M1 Max gameplay GPU 22.2 → 20.3 ms |
 | `tex_flush_upload on`, `tex_dirty_upload on` | `game.tsv` | as Tears of the Kingdom: the CPU writes the terrain tiles' height (R32F), blend and hole (RGBA8) maps into textures after creating them. Without the keys those textures stay zero: flat blue holes in the ground around the path with grass floating in them, and grey stone where the console shows dirt |
 | `shader_groups`, `shader_note` | `game.tsv` | shaders grouped as `/Shader/`, `/Effect/`, `/Lib/`, `/UI/` |
 | `pad_layout full` | `game.tsv` | a 3D field and both sticks |
@@ -108,6 +108,7 @@ From an empty save: at about 45 s `A` (title), `A` (New Game), then the movie. F
 
 ## Found on this game
 
+- [Draw passes that wait for each other again while images share memory](../../../docs/reference/frame-rate.md#draw-passes-that-wait-for-each-other-again-while-images-share-memory): resolved, `draw_barriers game` was off whenever family heaps existed, and fragment-only barriers forced full ones; M1 Max gameplay frame 23.4 → 21.7 ms.
 - [One Pro Controller read as two players](../../../docs/reference/services.md#one-pro-controller-read-as-two-players): resolved, no music in Kokiri Forest gameplay and its cutscenes; the controller applet opened over and over and the game kept its music suspended while it had focus.
 - [Compute bindings prepare texture copies before the dispatch encoder](../../../docs/reference/rendering.md#compute-bindings-prepare-texture-copies-before-the-dispatch-encoder): resolved, `DM_NVN_DISPATCH_OWN=1` crashed in the Metal driver (`AGX::ComputeContext::prepareForEnqueue`) during the Kokiri Forest load ([issue #1743](https://github.com/seedds/nxnative/issues/1743)); on an M2 Pro 5 of 5 runs crashed before the fix and 3 of 3 loaded the forest after it.
 - [A fixed frame step plays in slow motion on a slow Mac](../../../docs/reference/frame-rate.md#a-fixed-frame-step-plays-in-slow-motion-on-a-slow-mac): the frame-ratio division.

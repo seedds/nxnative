@@ -1384,7 +1384,7 @@ static int g_pass_order;    // ordering barriers came in the open draw pass afte
 static int g_pass_late_res; // a draw of the open pass reads memory in a stage after the vertex stage (order_note)
 static uint64_t g_order_vbar;   // ordering barriers kept inside the pass as a vertex-to-vertex barrier (prog_swrites)
 static void img_fit_upgrade(void); static int g_imfit_npend;   // textures an image slot needs a format view of (img_fit), upgraded before the next draw pass opens
-static int g_last_end_relaxed, g_game_barrier;   // the last encoder ended was a draw pass with the relaxed end barrier (nothing else since); the game issued nvnCommandBufferBarrier since the last draw pass began
+static int g_last_end_relaxed, g_game_barrier, g_game_barrier_all;   // the last encoder ended was a draw pass with the relaxed end barrier (nothing else since); the game issued nvnCommandBufferBarrier since the last draw pass began (_all: one that orders primitives or indirect data, barrier_game)
 static uint64_t g_bar_skip, g_bar_full;            // draw passes begun without / with the consumer barrier (DM_NVN_BARRIER=game)
 static void gp_end(id e);
 // An encoder's end barrier flushes to the device coherence point only. MTL4VisibilityOptionResourceAlias (aliased virtual addresses: overlapping large-pool chunks, image family heaps,
@@ -1490,14 +1490,15 @@ static void gp_report(int n, gp_lab *lab, uint64_t frame) {   // the frame's las
 }
 static inline id<MTL4RenderCommandEncoder> enc_r_begin_pass(MTL4RenderPassDescriptor *d) { g_cm_enc++; cm_enc_mark(2);   // the draw passes (rp_begin_ex); see barrier_game
     id<MTL4RenderCommandEncoder> e = [g_cb renderCommandEncoderWithDescriptor:d]; cm_enc_mark(0);
-    if (g_last_end_relaxed && !g_game_barrier && barrier_game() && !g_image_heap_n) g_bar_skip++;
+    if (g_last_end_relaxed && !g_game_barrier_all && barrier_game()) { g_bar_skip++;   // ordered by the relaxed end barrier; the alias flush, when aliases exist, is a consumer barrier before this pass's fragments (see m4_end)
+        MTL4VisibilityOptions vis = resource_vis(); if (vis & MTL4VisibilityOptionResourceAlias) [e barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageFragment visibilityOptions:vis]; }
     else { [e barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:resource_vis()]; g_bar_full++; }
-    g_game_barrier = 0;
+    g_game_barrier = g_game_barrier_all = 0;
     [e setArgumentTable:g_vt atStages:MTLRenderStageVertex]; [e setArgumentTable:g_ft atStages:MTLRenderStageFragment]; gp_begin(e, 'R', d); return e;
 }
 static inline void enc_r_end_pass(id e) {
-    if (!barrier_game() || g_image_heap_n) { m4_end(e); return; }
-    gp_end(e); [(id<MTL4CommandEncoder>)e barrierAfterStages:MTLStageVertex | MTLStageMesh | MTLStageFragment beforeQueueStages:MTLStageFragment | MTLStageDispatch | MTLStageBlit visibilityOptions:resource_vis()];
+    if (!barrier_game()) { m4_end(e); return; }
+    gp_end(e); [(id<MTL4CommandEncoder>)e barrierAfterStages:MTLStageVertex | MTLStageMesh | MTLStageFragment beforeQueueStages:MTLStageFragment | MTLStageDispatch | MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];
     [e endEncoding]; g_last_end_relaxed = 1;
 }
 static inline id<MTL4RenderCommandEncoder> enc_r_begin(MTL4RenderPassDescriptor *d) { g_cm_enc++; cm_enc_mark(2); id<MTL4RenderCommandEncoder> e = [g_cb renderCommandEncoderWithDescriptor:d]; cm_enc_mark(0); [e barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:resource_vis()]; [e setArgumentTable:g_vt atStages:MTLRenderStageVertex]; [e setArgumentTable:g_ft atStages:MTLRenderStageFragment]; gp_begin(e, 'R', d); return e; }
@@ -14126,7 +14127,7 @@ void mtl_exec(const uint8_t *p) {
                 PD("I %llu barrier bits %#x%s", g_stat_pass, bits, split ? ": ends the pass (shader writes)" : order ? " (render pass open; a later shader write is ordered after its draws)" : g_enc ? " (render pass open)" : "");
                 if (split) { rp_end(); static int once; if (!once++) MLOG("a game barrier (bits %#x) after shader writes in a draw pass: the pass ends there (first case pass %llu)", bits, (unsigned long long)g_stat_pass); }
                 else if (order) g_pass_order |= (bits & NVN_BARRIER_ORDER_PRIMITIVES_BIT ? 1 : 0) | (bits & (NVN_BARRIER_ORDER_FRAGMENTS_BIT | NVN_BARRIER_ORDER_FRAGMENTS_TILED_BIT) ? 2 : 0);
-                if (bits) { g_game_barrier = 1; g_fb_bar++; } break; }   // g_fb_bar: snapshots taken before it are stale (see fb_prepare)
+                if (bits) { g_game_barrier = 1; g_fb_bar++; } if (bits & (NVN_BARRIER_ORDER_PRIMITIVES_BIT | NVN_BARRIER_ORDER_INDIRECT_DATA_BIT)) g_game_barrier_all = 1; break; }   // g_fb_bar: snapshots taken before it are stale (see fb_prepare)
             case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL: state_op(h.op, a); break;
             default: break;
         }

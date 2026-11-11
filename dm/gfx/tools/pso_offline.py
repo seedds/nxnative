@@ -63,7 +63,10 @@ HOST_CONSTANTS = {'dm_border_off': (abi.BORDER_FC, True)}
 BATCH = 1000   # bases per metal-tt run: Odyssey's largest compiler lifetime footprint at this size was 2.065 GiB on an 8 GB M2
 COMPUTE_BATCH = 16   # compute pipelines per metal-tt run, JOBS runs at a time: one metal-tt keeps about 2-3 cores busy: Star Fox's 233 took 268 s in 16 groups against 453 s in one run (M5 Pro, background priority, a loaded Mac)
 JOBS = max(1, (os.cpu_count() or 2) // 2)
-SPLIT = 16   # a group metal-tt makes no archive of is compiled again in parts of this many pipelines (smaller ones in halves), down to the pipelines that fail alone (compile_split)
+SPLIT = 16   # a group metal-tt makes no archive of is compiled again in parts of this many pipelines (smaller ones in halves), down to the pipelines that fail alone (compile_split).
+             # A part of at most this many that ran past its time limit is compiled one pipeline at a time instead: halving it again would run the slow pipeline to the limit at
+             # each level (16, 8, 4, 2, 1: about 2.6 h a pipeline at the default limit), where ordinary pipelines alone take seconds. Nintendo Switch Sports Resort's four pipelines
+             # that Apple's compiler could not finish (dmsh_rewrite.py uniform_tests) took 11 h of halving after their group of 1,000 had run its 3 h 17 min
 RUN_BASE_S = 1800   # a metal-tt run's time limit: this, then --time-limit seconds per pipeline (time_limit)
 PER_PIPELINE_S = 10   # the default of --time-limit: a group of 1,000 bases may take 3 h 17 min, of 16 compute pipelines 33 min, one pipeline 30 min. Most pipelines take well under a
                       # second (Nintendo Switch Sports Resort's whole archive, 11,074 pipelines, 631 s), a slow one minutes (a compute shader 46 s at run time; a pixel shader of chain
@@ -518,9 +521,9 @@ class Tally:
 
 def compile_split(lib_dir, bases, work, arch, platform, osmin, toolchain, computes=(), per_pipeline=0, say=print, tally=None, failed=None):
     """compile_batch, and when metal-tt makes no archive of the group (CompileFailed; failed: that failure, already known), its parts instead, down to single pipelines: a
-    group of more than SPLIT pipelines in parts of SPLIT, a smaller one in halves, one after the other, since the group may have taken the Mac's memory (work/split/<n>/, cached
-    as any group). Every part of a level is tried before the parts that failed are split further, so a pipeline that compiles is found before the failures of a cluster of bad
-    ones add up to GIVE_UP. A pipeline that fails alone is left out of the archive, so one pipeline the compiler rejects or cannot finish costs the archive that pipeline,
+    group of more than SPLIT pipelines in parts of SPLIT, a smaller one in halves (one that ran past its time limit, each pipeline alone), one after the other, since the group may
+    have taken the Mac's memory (work/split/<n>/, cached as any group). Every part of a level is tried before the parts that failed are split further, so a pipeline that
+    compiles is found before the failures of a cluster of bad ones add up to GIVE_UP. A pipeline that fails alone is left out of the archive, so one pipeline the compiler rejects or cannot finish costs the archive that pipeline,
     not all of it. Returns ([archive pieces], [(base or compute pipeline left out, reason)])"""
     check_stopping()
     tally = tally or Tally()
@@ -532,7 +535,7 @@ def compile_split(lib_dir, bases, work, arch, platform, osmin, toolchain, comput
         if len(items) == 1:
             tally.fail(arch, str(e))
             say(left_out_line(arch, items[0], e)); return [], [(items[0][1], str(e))]
-        size = SPLIT if len(items) > 2 * SPLIT else (len(items) + 1) // 2
+        size = 1 if e.timed_out and len(items) <= SPLIT else SPLIT if len(items) > 2 * SPLIT else (len(items) + 1) // 2   # a part that ran out of time: each pipeline alone (see SPLIT)
         parts = [items[i:i + size] for i in range(0, len(items), size)]
         say(f'[RED] pso_offline: {arch}: {e}: compiling its {len(items)} pipelines again in {len(parts)} parts, to leave out only those that fail alone')
         for old in (work / 'split').glob('*'):   # the parts of a longer group; the others are cached by their inputs

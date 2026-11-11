@@ -27,6 +27,7 @@ spec = importlib.util.spec_from_file_location('pso_offline', REPO / 'dm/gfx/tool
 po = importlib.util.module_from_spec(spec); spec.loader.exec_module(po)
 CHAIN = '0123456789ab'
 REAL_RUN_LOGGED = po.run_logged   # the Build tests replace it; the tests of stopping need real processes
+SLOW_GROUP = po.SPLIT   # a part of the size compile_split cuts a large group into
 
 
 def tag(name, data): return name + struct.pack('<H', len(data)) + data
@@ -754,6 +755,24 @@ class Build(unittest.TestCase):
         self.assertEqual(po.time_limit(1000, po.PER_PIPELINE_S), po.RUN_BASE_S + 1000 * po.PER_PIPELINE_S); self.assertIsNone(po.time_limit(1000, 0))
         self.assertTrue((self.out / 'applegpu_g18p.mtl4a').is_file())
         self.assertNotIn('failed', (self.out / 'archive.tsv').read_text())
+
+    def test_a_small_part_past_its_time_limit_is_compiled_one_pipeline_at_a_time(self):   # Nintendo Switch Sports Resort: each slow pipeline ran to the limit at 16, 8, 4, 2 and 1
+        bases = [('v_bp', f'vertex{i}', 'f_b', 'main0') for i in range(SLOW_GROUP)]
+        runner, observed = self.batched_runner()
+        def slow(cmd, log_path, env, timeout=None, watch=None):   # a run with vertex5 does not finish in time
+            names = [f['name'] for f in json.loads(Path(next(c for c in cmd if str(c).endswith('.mtl4-json'))).read_text())['function_descriptors']['library_function_descriptors']
+                     if f['library'] == 'lib:v_bp']
+            observed.append(('run', len(names)))
+            if 'vertex5' in names: log_path.write_text(''); return None
+            return run_logged_through_run(cmd, log_path, env, timeout)
+        with mock.patch.object(po.subprocess, 'run', runner), mock.patch.object(po, 'plan', return_value=(bases, [], {})), mock.patch.object(po, 'run_logged', slow), \
+                mock.patch.dict(os.environ, DM_GAMES_DIR=str(self.prof.parent)), contextlib.redirect_stdout(io.StringIO()):
+            code = po.main(['--game', '0100000000001000', '--msl', str(self.lib), '--out', str(self.out), '--work', str(self.work), '--os-min', '27.0', '--jobs', '1'])
+        self.assertEqual(code, po.LEFT_OUT_EXIT)
+        runs = [n for kind, n in observed if kind == 'run']
+        self.assertEqual(runs, [SLOW_GROUP] + [1] * SLOW_GROUP)   # the group once, then each pipeline alone: one more run past the limit, not one at every halving
+        self.assertEqual([x[1][1] for x in po.read_left_out(self.work / 'left_out.applegpu_g18p.tsv', (self.work / 'key.applegpu_g18p').read_text().strip())], ['vertex5'])
+        self.assertTrue((self.out / 'applegpu_g18p.mtl4a').is_file())
 
     def test_merge_failure_never_publishes_partial_archive(self):
         bases = [('v_bp', f'vertex{i}', 'f_b', 'main0') for i in range(3)]

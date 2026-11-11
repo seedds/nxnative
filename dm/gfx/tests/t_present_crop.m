@@ -128,6 +128,31 @@ int main(void) { @autoreleasepool {
         }
         EXPECT("empty content is not upscaled",0,fx_wanted((MTLViewport){0,0,2868,1320,0,1},0,720));
     }
+    {   // DM_PRESENT_AA: FXAA blends a stair-stepped edge and leaves flat areas as they are, at the source's size, also from a crop with an offset (aa_encode draws it at its origin)
+        const int N=64;uint64_t layer=atomic_load(&g_layer_shape);mtl_present_layer(N,N);int fxm=g_fx_mode;g_fx_mode=0;
+        MTLTextureDescriptor *ed=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:N+16 height:N+16 mipmapped:NO];ed.storageMode=MTLStorageModeShared;ed.usage=MTLTextureUsageShaderRead;
+        id<MTLTexture> edge=[g_dev newTextureWithDescriptor:ed];uint8_t *ep=malloc((N+16)*(N+16)*4);
+        for(int y=0;y<N+16;y++)for(int x=0;x<N+16;x++){uint8_t v=x-8>(y-8)/2+16?255:0,p[4]={v,v,v,255};if(x<8||y<8){p[0]=255;p[1]=0;p[2]=0;}memcpy(ep+4*(y*(N+16)+x),p,4);}   // red outside the crop: must not leak in
+        [edge replaceRegion:MTLRegionMake2D(0,0,N+16,N+16) mipmapLevel:0 withBytes:ep bytesPerRow:(N+16)*4];free(ep);res_add(edge);res_commit();
+        MTLTextureDescriptor *od=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:N height:N mipmapped:NO];
+        od.storageMode=MTLStorageModePrivate;od.usage=MTLTextureUsageRenderTarget|MTLTextureUsageShaderRead;id<MTLTexture> out=[g_dev newTextureWithDescriptor:od];
+        const int crop[4]={8,8,N,N};
+        for(int aa=0;aa<2;aa++){
+            g_aa_mode=aa;
+            EXPECT(aa?"FXAA present encodes":"present without FXAA encodes",PRESENT_STANDARD,present_offscreen_wait(edge,crop,out));
+            id<MTLBuffer> rb=[g_dev newBufferWithLength:N*N*4 options:MTLResourceStorageModeShared];id<MTLCommandBuffer> cb=[g_q commandBuffer];id<MTLBlitCommandEncoder> bl=[cb blitCommandEncoder];
+            [bl copyFromTexture:out sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(N,N,1) toBuffer:rb destinationOffset:0 destinationBytesPerRow:N*4 destinationBytesPerImage:N*N*4];
+            [bl endEncoding];[cb commit];[cb waitUntilCompleted];
+            const uint8_t *o=rb.contents;int mid=0,flat=0,red=0;
+            for(int y=0;y<N;y++)for(int x=0;x<N;x++){const uint8_t *p=o+4*(y*N+x);int v=p[1],far=abs(x-(y/2+16))>3;
+                red+=p[2]>p[1]+8;mid+=v>8&&v<247;if(far)flat+=v!=(x>y/2+16?255:0);}
+            EXPECT(aa?"  FXAA blends the edge (pixels between black and white > 40)":"  without FXAA the edge stays hard (pixels between black and white)",aa,mid>40);
+            if(!aa)EXPECT("  without FXAA no pixel is between black and white",0,mid);
+            EXPECT("  pixels away from the edge keep their value",0,flat);
+            EXPECT("  nothing from outside the crop is read",0,red);
+        }
+        g_aa_mode=0;g_fx_mode=fxm;atomic_store(&g_layer_shape,layer);res_remove(edge);
+    }
     if([MTLFXSpatialScalerDescriptor supportsMetal4FX:g_dev]) {   // the present pass through MetalFX into an offscreen canvas (present_offscreen_m4, as DM_NVN_SHOT_OUT uses it)
         g_fx_mode=1;
         const int N=64;MTLTextureDescriptor *bd=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm_sRGB width:N height:N mipmapped:NO];bd.storageMode=MTLStorageModeShared;bd.usage=MTLTextureUsageShaderRead;

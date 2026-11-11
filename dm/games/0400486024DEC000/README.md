@@ -108,6 +108,7 @@ From an empty save: at about 45 s `A` (title), `A` (New Game), then the movie. F
 
 ## Found on this game
 
+- [The present anti-aliases with FXAA](../../../docs/reference/rendering.md#the-present-anti-aliases-with-fxaa): current, opt-in (`DM_PRESENT_AA=fxaa`, the launcher's Anti-aliasing). The 3D picture's edges looked jagged in Kokiri Forest; FXAA over the 2048x1152 crop smooths them for about 0.1-0.2 ms of present GPU time on an M1 Max, the HUD barely changed.
 - [One Pro Controller read as two players](../../../docs/reference/services.md#one-pro-controller-read-as-two-players): resolved, no music in Kokiri Forest gameplay and its cutscenes; the controller applet opened over and over and the game kept its music suspended while it had focus.
 - [Compute bindings prepare texture copies before the dispatch encoder](../../../docs/reference/rendering.md#compute-bindings-prepare-texture-copies-before-the-dispatch-encoder): resolved, `DM_NVN_DISPATCH_OWN=1` crashed in the Metal driver (`AGX::ComputeContext::prepareForEnqueue`) during the Kokiri Forest load ([issue #1743](https://github.com/seedds/nxnative/issues/1743)); on an M2 Pro 5 of 5 runs crashed before the fix and 3 of 3 loaded the forest after it.
 - [A fixed frame step plays in slow motion on a slow Mac](../../../docs/reference/frame-rate.md#a-fixed-frame-step-plays-in-slow-motion-on-a-slow-mac): the frame-ratio division.

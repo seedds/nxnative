@@ -46,6 +46,13 @@ class LauncherSettingsTests(unittest.TestCase):
                 self.assertEqual((s['kind'], s['section'], s['default']), ('choice', 'Game', 'off'))
                 self.assertEqual(s['options'], [['off', 'Standard'], ['metalfx', 'MetalFX']])
 
+    def test_anti_aliasing_is_opt_in_for_every_graphics_api(self):
+        for api, gid in [('nvn', BOTW), ('vulkan', '0100535012974000'), ('gl', '010014E00DB56000')]:
+            with self.subTest(api=api):
+                s = build(gid, api)['DM_PRESENT_AA']
+                self.assertEqual((s['kind'], s['section'], s['default']), ('choice', 'Game', 'off'))
+                self.assertEqual(s['options'], [['off', 'Off'], ['fxaa', 'FXAA']])
+
     def test_frame_buffering_by_graphics_api(self):
         for api, gid in [('nvn', BOTW), ('vulkan', '0100535012974000'), ('gl', '010014E00DB56000'), ('', BOTW)]:
             with self.subTest(api=api):

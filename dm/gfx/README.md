@@ -191,6 +191,7 @@ Comparison and testing:
 | `DM_NVN_BARRIER=game`, `DM_NVN_CUT` | Pass ordering and segment commits: see [docs/agents/04-graphics.md](../../docs/agents/04-graphics.md) section 7 |
 | `DM_PRESENT_HZ=N` | The frequency of presentation pacing (default 60); 0 means no frame limit and is for performance profiling only |
 | `DM_PRESENT_UPSCALE=metalfx` or `off` | How the present scales a picture smaller than its rectangle on the screen: `metalfx` through MetalFX's spatial scaler, `off` (the default) bilinearly. An option on both platforms (the iOS launcher's Upscaling; `env.txt` on the Mac); rendering at the screen's resolution stays the reference for sharpness ([reference](../../docs/reference/rendering.md#the-present-upscales-through-metalfx)) |
+| `DM_PRESENT_AA=fxaa` or `off` | FXAA over the presented picture at the game's resolution, before the present scales it, for every graphics API; `off` (the default) leaves the picture as it is. The launcher's Anti-aliasing ([reference](../../docs/reference/rendering.md#the-present-anti-aliases-with-fxaa)) |
 
 ## Known limitations
 

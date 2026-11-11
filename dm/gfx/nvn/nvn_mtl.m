@@ -8306,6 +8306,16 @@ static void lo_bind(id<MTLCommandEncoder> en) {
     enc_r_args((id<MTL4RenderCommandEncoder>)en, MTLRenderStageFragment, gpu, DMSH_LOGIC_BUFFER);
 }
 #define PSO_WHOLE @"built whole"   // pso_desc's label for pso_build_ex: no base, see there
+// Integer bits in a float colour output: a fragment shader whose float entry point returns, in some outputs, integer register bits as floats (as_type<float>: the outputs the
+// mixed entry point returns as integers, mask_m) into colour targets of a non-integer format gets a pipeline built whole, as one reading [[primitive_id]] does. Specialized
+// from a base with open colour state, such a pipeline wrote zeros where its whole build (and the MTLDevice build) writes the values: Orbitals' player ship (M_Cel_Base_PlayerShip,
+// e97d65cf4844ecdb) writes the GBufferB blue channel from an integer register (as_type<float>(int)), and on the Metal 4 path GBufferB, GBufferC and GBufferD came out zero over
+// the ship (snapshots, stage 2): no base colour, so the sun light left it black while engaging, and the ship "loaded dark". Writing 0.0 there instead (the unorm value of
+// those bits) or building whole cured it; the cause inside Metal's specialization is not known (a probe with a few outputs does not show it, macOS 26.1, M4 Pro)
+static int pso_intbits_whole(const pso_key *k, uint8_t mask, int merged) {   // merged: output lmap[i] goes to attachment i
+    for (int i = 0; i < 8; i++) { int l = merged ? k->lmap[i] : i; if (l >= 0 && l < 8 && (mask >> l & 1) && k->cfmt[i] && !pf_int_kind((MTLPixelFormat)k->cfmt[i])) return 1; }
+    return 0;
+}
 static MTLRenderPipelineDescriptor *pso_desc(const pso_key *k, NvShader *vs, NvShader *fs, id<MTLFunction> fsfn, int merged) {
     MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
     d.vertexFunction = vs && vs->mesh_kind != 2 ? vs->fn : nil; d.fragmentFunction = fsfn ? fsfn : fs ? fs->fn : nil;   // mtk_pso copies the raster state only: a mesh function is not a vertex function
@@ -8354,6 +8364,7 @@ static MTLRenderPipelineDescriptor *pso_desc(const pso_key *k, NvShader *vs, NvS
     d.rasterSampleCount = k->samples ? k->samples : 1;
     d.alphaToCoverageEnabled = k->a2c;
     if (fs && fs->rf.reads_prim_id) d.label = PSO_WHOLE;
+    if (fs && fs->mask_m && pso_intbits_whole(k, fs->mask_m, merged)) d.label = PSO_WHOLE;
     for (int i = 0; i < 8; i++) {
         if (!k->cfmt[i]) continue;
         MTLRenderPipelineColorAttachmentDescriptor *c = d.colorAttachments[i];

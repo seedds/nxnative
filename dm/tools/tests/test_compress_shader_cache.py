@@ -13,7 +13,7 @@ class Command(unittest.TestCase):
         assert spec and spec.loader
         command = importlib.util.module_from_spec(spec); spec.loader.exec_module(command)
         with tempfile.TemporaryDirectory() as root:
-            for args, compressed, decompressed, workers in (([], True, False, 7), (['--decompress'], False, True, 1), (['--workers', '4'], True, False, 4), (['--decompress', '--workers', 'max'], False, True, 7)):
+            for args, compressed, decompressed, workers in (([], True, False, 7), (['--decompress'], False, True, 7), (['--decompress', '--workers', '1'], False, True, 1), (['--workers', '4'], True, False, 4), (['--decompress', '--workers', 'max'], False, True, 7)):
                 with mock.patch.object(command.shader_cache, 'maintain') as maintain, mock.patch.object(command.os, 'cpu_count', return_value=7):
                     self.assertEqual(command.main([root, *args]), 0)
                     maintain.assert_called_once_with(Path(root) / 'shader/cache/cas.db', compress=compressed, decompress=decompressed, workers=workers)

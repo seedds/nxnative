@@ -1001,13 +1001,20 @@ static uint32_t vib_targets(uint32_t h, int *motor) {
     *motor = (int)(dev & 1);
     if (h >> 24 || dev > 1 || type < 3 || type > 7) return 0;
     npad_ref r = npad_resolve(id);
+    // Joy-Con handles on an npad that holds a full controller reach its motor of that side, as the hid service routes a handle by npad and position (left 0, right 1), not by the style it
+    // names: Metroid Prime 4 asks only for JoyDual handles (GetVibrationDeviceHandles with style 0x4) and plays on a Pro Controller or a DualSense through them
+    int p = player_of(id);
+    if (p >= 0 && r.kind == KIND_PAD && type >= 5 && id != NPAD_HANDHELD) {
+        if (type != 5 && dev) return 0;
+        if (type != 5) *motor = type == 7;
+        return dm_haptics_available() & (p == 0 ? 1u | merged_players() : 1u << p);
+    }
     if (type >= 5) {
         if (r.kind != (type == 5 ? KIND_DUAL : type == 6 ? KIND_LEFT : KIND_RIGHT) || (type != 5 && dev)) return 0;
         if (type != 5) *motor = type == 7;
         return dm_haptics_available() & (1u << r.pad);
     }
     if (type > 4) return 0;
-    int p = player_of(id);
     // A full-key handle on an npad that now holds Joy-Cons still reaches them: a game keeps the handles it got before the Joy-Cons connected (Super Mario Odyssey asks for the
     // JoyDual handles when the pair connects, but keeps sending to its full-key ones). Its motor is the Joy-Con of that side; a single Joy-Con takes the handle of its side
     if (p >= 0 && r.kind >= KIND_DUAL && type == 3 && id != NPAD_HANDHELD) {
@@ -1044,25 +1051,41 @@ static void vib_send(const uint32_t *handles, const dm_vibration *values, int n)
     }
     dm_haptics_send(updates, count);
 }
-HLE_FORCE("_ZN2nn3hid20IsVibrationPermittedEv", "vibration permission: enabled and an output available", unsigned, h_hid_VibPermit, void) { return dm_haptics_available() != 0; }
+// DM_RUMBLE_LOG: the first calls of each vibration query and its answer, to see which ones a game asks and when (a game can settle on silence from an early answer)
+static unsigned vib_query_log(const char *what, const uint32_t *h, unsigned answer) {
+    static _Atomic int seen[8]; static const char *names[8]; int k = 0;
+    if (!getenv("DM_RUMBLE_LOG")) return answer;
+    for (; k < 8 && names[k] && strcmp(names[k], what); k++) {}
+    if (k < 8 && !names[k]) names[k] = what;
+    if (k < 8 && atomic_fetch_add(&seen[k], 1) < 4) LOG("rumble: %s(%#x) = %u", what, h ? *h : 0, answer);
+    return answer;
+}
+HLE_FORCE("_ZN2nn3hid20IsVibrationPermittedEv", "vibration permission: enabled and an output available", unsigned, h_hid_VibPermit, void) { return vib_query_log("IsVibrationPermitted", NULL, dm_haptics_available() != 0); }
 // Games can cache handles once at startup, before GameController routes the pad's haptics (Unicorn Overlord kept an empty answer and sent every value to handle 0).
 // On Horizon handles are computed from npad id and style (libnx _hidGetVibrationDeviceHandles); vib_send checks for an output at each send. With rumble off they are handed out too,
 // as on a Switch whose vibration setting is off (IsVibrationPermitted answers false and nothing is felt), so turning it on while the game runs works in a game that asked only once.
 HLE_FORCE("_ZN2nn3hid25GetVibrationDeviceHandlesEPNS0_21VibrationDeviceHandleEiRKjNS_4util10BitFlagSetILi32ENS0_12NpadStyleTagEEE", "vibration devices of the connected controller",
           int, h_hid_VibHandles, uint32_t *h, int n, const uint32_t *id, uint32_t style) {
-    if (!h || !id || n <= 0 || !(style & style_of(*id)) || !dm_haptics_has_output()) {
+    // A style the connected controller does not have still gets its handles, computed from the npad and that style as on Horizon (vib_targets routes them by position); an npad with
+    // no player, or a style with no vibration handle form, gets none
+    static const uint32_t forms[] = {STYLE_FULLKEY, STYLE_HANDHELD, STYLE_JOYDUAL, STYLE_JOYLEFT, STYLE_JOYRIGHT};   // handle types 3 to 7
+    uint32_t asked = 0;
+    if (h && id && !(style & style_of(*id)) && player_of(*id) >= 0) for (unsigned i = 0; i < sizeof forms / sizeof *forms; i++) if (style & forms[i]) { asked = 3 + i; break; }
+    if (!h || !id || n <= 0 || (!(style & style_of(*id)) && !asked) || !dm_haptics_has_output()) {
         if (getenv("DM_RUMBLE_LOG") && id) LOG("rumble: game asked for vibration handles of npad %u style %#x: none (connected style %#x, %s)", *id, style, style_of(*id), dm_haptics_has_output() ? "output ready" : "no output yet");
         return 0;
     }
     npad_ref r = npad_resolve(*id);
-    uint32_t type = r.kind == KIND_DUAL ? 5u : r.kind == KIND_LEFT ? 6u : r.kind == KIND_RIGHT ? 7u : *id == NPAD_HANDHELD ? 4u : 3u;
+    uint32_t type = asked ? asked : r.kind == KIND_DUAL ? 5u : r.kind == KIND_LEFT ? 6u : r.kind == KIND_RIGHT ? 7u : *id == NPAD_HANDHELD ? 4u : 3u;
     uint32_t base = (*id << 8) | type;
-    int count = n < (r.kind == KIND_LEFT || r.kind == KIND_RIGHT ? 1 : 2) ? n : (r.kind == KIND_LEFT || r.kind == KIND_RIGHT ? 1 : 2);
+    int single = type == 6 || type == 7;
+    int count = n < (single ? 1 : 2) ? n : (single ? 1 : 2);
     for (int i = 0; i < count; i++) h[i] = base | (uint32_t)i << 16;
     if (getenv("DM_RUMBLE_LOG")) LOG("rumble: game asked for vibration handles of npad %u style %#x: %d, first %#x", *id, style, count, h[0]);
     return count;
 }
 HLE_FORCE("_ZN2nn3hid25InitializeVibrationDeviceERKNS0_21VibrationDeviceHandleE", "vibration: initialize one channel", void, h_hid_InitVib, const uint32_t *h) {
+    int m_; vib_query_log("InitializeVibrationDevice", h, h && vib_targets(*h, &m_));
     const dm_vibration idle = {0, 160, 0, 320}; vib_send(h, &idle, 1);
 }
 HLE_FORCE("_ZN2nn3hid18SendVibrationValueERKNS0_21VibrationDeviceHandleERKNS0_14VibrationValueE", "vibration: update one channel", void, h_hid_SendVib, const uint32_t *h, const dm_vibration *v) { vib_send(h, v, 1); }
@@ -1196,16 +1219,16 @@ HLE_FORCE("_ZN2nn3hid34ResetSixAxisSensorFusionParametersERKNS0_19SixAxisSensorH
 HLE_FORCE("_ZN2nn3hid41IsFirmwareUpdateAvailableForSixAxisSensorERKNS0_19SixAxisSensorHandleE", "six-axis sensor firmware update: none", unsigned, h_hid_SixFw, const uint32_t *h) { (void)h; return 0; }
 // GetActual returns the sanitized guest value accepted by the host, before output-device adaptation.
 HLE_FORCE("_ZN2nn3hid22GetVibrationDeviceInfoEPNS0_19VibrationDeviceInfoERKNS0_21VibrationDeviceHandleE", "vibration: linear resonant actuator, left or right", void, h_hid_VibInfo, uint32_t *info, const uint32_t *h) {
-    int m = 0, on = h && vib_targets(*h, &m) != 0; info[0] = on ? 1 : 0; info[1] = on ? 1 + m : 0;
+    int m = 0, on = h && vib_targets(*h, &m) != 0; info[0] = on ? 1 : 0; info[1] = on ? 1 + m : 0; vib_query_log("GetVibrationDeviceInfo", h, (unsigned)on);
 }
 // The SDK's own call reaches the hid service (a null read in hid::detail::IsVibrationDeviceMounted; Super Mario Odyssey asks for each handle of a controller).
 // On Horizon a device is mounted when the npad's connected controller has that style and an actuator on that side: here, when the channel has an output, as GetVibrationDeviceInfo reports it
 HLE_FORCE("_ZN2nn3hid24IsVibrationDeviceMountedERKNS0_21VibrationDeviceHandleE", "vibration: device mounted when the channel has an output", unsigned, h_hid_VibMounted, const uint32_t *h) {
-    int m; return h && vib_targets(*h, &m);
+    int m; return vib_query_log("IsVibrationDeviceMounted", h, h && vib_targets(*h, &m));
 }
 // The Switch 2's form of the same question (Kirby Air Riders asks soon after boot in a run with a window, main+0x10709b0; its SDK's call reads the same null service object)
 HLE_FORCE("_ZN2nn3hid29IsOunceVibrationDeviceMountedERKNS0_21VibrationDeviceHandleE", "vibration (Switch 2): device mounted when the channel has an output", unsigned, h_hid_VibMountedOunce, const uint32_t *h) {
-    int m; return h && vib_targets(*h, &m);
+    int m; return vib_query_log("IsOunceVibrationDeviceMounted", h, h && vib_targets(*h, &m));
 }
 HLE_FORCE("_ZN2nn3hid23GetActualVibrationValueEPNS0_14VibrationValueERKNS0_21VibrationDeviceHandleE", "vibration: last accepted channel value", void, h_hid_VibActual, dm_vibration *v, const uint32_t *h) {
     int m = 0; uint32_t targets = h ? vib_targets(*h, &m) : 0;

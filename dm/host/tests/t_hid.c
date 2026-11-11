@@ -312,7 +312,12 @@ static void t_vibration(void) {
     CHECK(!memcmp(&vibration[0].motor[0], &v, sizeof v), "cached startup handles reach an output routed later");
     CHECK(h_hid_VibPermit() && h_hid_VibHandles(h, 2, &id, STYLE_FULLKEY) == 2, "two vibration motors available");
     CHECK(h[0] == 3 && h[1] == 0x10003, "SDK vibration handle bytes: style 3, npad 0, motors 0 and 1");
-    CHECK(!h_hid_VibHandles(h, 2, &id, STYLE_HANDHELD), "wrong controller style gets no motors");
+    CHECK(h_hid_VibHandles(h, 2, &id, STYLE_HANDHELD) == 2 && h[0] == 0x0004, "another style's handles are computed from the npad and that style, as on Horizon");
+    { int m; CHECK(!vib_targets(h[0], &m), "but a handheld handle does not reach a docked full controller"); }
+    CHECK(h_hid_VibHandles(h, 2, &id, STYLE_JOYDUAL) == 2 && h[0] == 0x0005 && h[1] == 0x10005, "JoyDual handles on a full controller's npad (Metroid Prime 4 asks only for these)");
+    { int m; CHECK(vib_targets(h[0], &m) == 1 && m == 0 && vib_targets(h[1], &m) == 1 && m == 1, "they reach the full controller's left and right motors"); }
+    CHECK(h_hid_VibHandles(h, 2, &id, STYLE_JOYRIGHT) == 1 && h[0] == 0x0007, "JoyRight on a full controller's npad: one handle");
+    { int m; CHECK(vib_targets(h[0], &m) == 1 && m == 1 && !vib_targets(0x10007, &m), "it reaches the right motor; a second motor of a single Joy-Con handle is invalid"); }
     CHECK(!h_hid_VibHandles(h, 2, &(uint32_t){2}, STYLE_FULLKEY), "disconnected player gets no motors");
     CHECK(h_hid_VibHandles(h, 1, &id, STYLE_FULLKEY) == 1, "handle count respects caller capacity");
     h_hid_SendVib(&h[0], &v); h_hid_VibActual(&got, &h[0]);

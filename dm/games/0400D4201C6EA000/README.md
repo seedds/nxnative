@@ -25,7 +25,7 @@ The NRO and the archive need no key: the NSP script captures one and `shader_spl
 
 35,045 in [`shader_map.tsv`](shader_map.tsv): 26,096 from models (one FSHA each), 5,331 from `ssg_system`, 3,316 from effects, 138 from `shader/`, 124 from layouts, 40 in the NRO's data. All translate. A full build takes about an hour on an M4 Pro with another job running (not timed from an empty cache in one go). [`pso_manifest.tsv`](pso_manifest.tsv) (1,351 lines) is one Mac session: boot, the movie, the menus, a match.
 
-One does not load (current): `3032440e5027bbe5`, `shader/audience/audience_compute`, reads `array<texture2d<float>, 32> cp_t2d_cb0_0`, the compute texture handles of NVN2's per-shader `c[0]` indexed by its workgroup ID. `dmsh_reflect.py` `c2_array` only knows c2; fixing it is a chain change. The dispatch is skipped, a red line says so, and the crowd still draws; what the shader adds has not been seen.
+Resolved for offline builds: [indexed NVN2 compute combined handles](../../../docs/reference/shaders.md#indexed-nvn2-compute-combined-handles). The audience shader `3032440e5027bbe5` retained an indexed c0 handle table and its reflection had no resolved slot. The control block places its 32 combined handles at c0 byte 0x20, the same offsets as the host's c2 table. The build now remaps the array and its indices using that layout. The original shader, compiled through this rewrite, passes Metal validation and returns the expected bounding box for an opaque texture. A local repair of the installed library reached the 3D scene without the earlier load failure. That run did not capture this specific dispatch, so its effect on the crowd remains unverified.
 
 ## Rendering
 
@@ -40,7 +40,7 @@ The work folder `0400D4201C6EA000-work` beside the dump has `run/boot.sh <log> <
 ## Open
 
 - **Tessellated grass is not drawn.** `shader/grass` and `shader/sea_of_clouds` use hull and domain shaders (two each), which the host has no path for: `primitive type 14 not implemented` and `geometry draw cannot capture this pipeline` (tessellation with a geometry shader), and those draws are skipped. The court's own texture and stripes draw, so grass courts look flat; compared with nothing yet.
-- `3032440e5027bbe5` above.
+- The audience compute shader is covered by the offline fix above. The crowd still needs a visual comparison.
 - Nothing past the first Adventure scenes and one Free Play match has been played: no other court, doubles, the online modes (no network on the host).
 - Not checked: game speed against the console; the host's `IsRunningOnOunce` answers false.
 - `linear texture storage is not in a memory pool (1024x1024 format 0x26)`, once in some runs, no effect seen.

@@ -569,6 +569,13 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Fix:** the declaration also covers 1.1 × the window's peak (`rt_comp_tick` in `hle_nvn.c`): 5.6 ms here, 60.0 fps, 99th percentile 21 ms.
 - **Found on:** [DARK SOULS: REMASTERED](../../dm/games/01004AB00A260000/README.md), in the Asylum cell.
 
+### The presenting thread is not the thread that acquires
+
+- **Symptom:** the frame's CPU work runs slow on iOS (the thread that records and translates draws sits on efficiency cores at 1.3–1.7 GHz) although the log says the present thread's time-constraint policy is set.
+- **Cause:** the policy is declared on the thread that acquires the window texture (`set_time_constraint_comp`). Ocarina of Time acquires on one guest thread and presents, records and translates on another, which therefore never had a frame deadline. iOS kept it on efficiency cores: 16–21 ms of CPU a frame in Hyrule Field on an iPhone 17 Pro, 4–45 % of it on performance cores.
+- **Fix:** `rt_present_tick` (`hle_nvn.c`), called at each `nvnQueuePresentTexture`: when the presenting thread is not the acquire thread, it declares the same period with a computation measured on itself the way `rt_comp_tick` measures the acquire thread. A game that acquires and presents on one thread is unchanged. `DM_RT_PRESENT=0` turns it off.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md), from HookLink's measurements ([dsi-hub/HookLink issue 3](https://github.com/dsi-hub/HookLink/issues/3)). **Open:** the frame-time change is not measured on main.
+
 ### A shader that writes a whole frame through raw global memory
 
 - **Symptom:** a movie or full-screen compute pass far slower than the same work should be, nearly all of it GPU time: `GPU p50` near the frame time with `submit+present` under 1 ms. `[RED] raw global memory: a write log ran out of slots` on older chains. With `DM_NVN_GPUPROF` a relaxed timestamp can put the time before the compute encoder's reported start, so the encoder itself looks short and the gap before it is what is long.

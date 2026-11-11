@@ -209,6 +209,10 @@ def header_one(g):
     om = g.get('op_mode', 'console')   # the operation mode reported at start (hle_oe.c dm_opmode; DM_OPMODE overrides): console = docked, handheld = touch screen in use (Super Mario Galaxy's pointer)
     if om not in ('console', 'handheld'): sys.exit(f'{g.id}: op_mode must be console or handheld: {om}')
     if pl == 'touch' and om != 'handheld': sys.exit(f'{g.id}: pad_layout touch needs op_mode handheld (the touch screen reaches the game only in handheld mode)')
+    dyr = g.get('dynamic_resolution', 'off')   # the launcher's Dynamic resolution as the game is first started (loader.c; DM_DYNAMIC_RESOLUTION overrides): on lets the game lower its resolution under load
+    if dyr not in ('on', 'off'): sys.exit(f'{g.id}: dynamic_resolution must be on or off: {dyr}')
+    upd = g.get('upscaler', 'game')   # the launcher's Game's upscaler as the game is first started (nvn_mtl.m up_mfx_on; DM_UPSCALER overrides): game = its own network, metalfx
+    if upd not in ('game', 'metalfx'): sys.exit(f'{g.id}: upscaler must be game or metalfx: {upd}')
     pm = g.get('perf_mode', 'follow')   # the performance mode reported (hle_oe.c): follow = the operation mode's (Boost docked, Normal handheld), boost = Boost always
     if pm not in ('follow', 'boost'): sys.exit(f'{g.id}: perf_mode must be follow or boost: {pm}')
     dmo = g.get('depth_mode', 'gl')   # the NVN depth mode the game sets, for the pipeline archive made offline (dm/gfx/tools/pso_offline.py; the host follows the game at run time): gl / zero
@@ -253,6 +257,7 @@ def header_one(g):
          *([f'#define DM_GAME_SHARED_FONT_TTF {int(sf == "ttf")}'] if g.get('shared_font', '') else []),   # without the key the host decides by the SDK version (hle_sdk16.c)
          f'#define DM_GAME_PAD_LAYOUT {("simple", "full", "touch").index(pl)}',
          f'#define DM_GAME_OPMODE {int(om == "console")}',
+         f'#define DM_GAME_START_DYNAMIC_RESOLUTION {int(dyr == "on")}', f'#define DM_GAME_START_UPSCALE {q(upd)}',
          f'#define DM_GAME_PERF_BOOST {int(pm == "boost")}',
          f'#define DM_GAME_TEX_FLUSH_UPLOAD {int(tfu == "on")}',
          f'#define DM_GAME_SHADER_KEY_SKIP_OFF {sko:#x}', f'#define DM_GAME_SHADER_KEY_SKIP_LEN {skl:#x}',

@@ -29,6 +29,9 @@ enum { NVN_CT_FLOAT = 0, NVN_CT_UINT, NVN_CT_INT };                             
 #define NVN_REFL_MAXB 128
 #define NVN_REFL_MAXARG 768   // argument buffer entries of one shader (an array binding takes n of them; a c2 handle array 301, with its samplers 602)
 #define NVN_REFL_MAXV 32
+#define NVN_RS_NONE 0xff      // nvn_rbind.sidx of a binding without a render_scale entry
+#define NVN_RS_MAXIDX 71      // render_scale has 73 entries: [0] the render target, [1 + sidx] the textures and images
+enum { NVN_RSF_UNSUPPORTED = 1, NVN_RSF_NEEDS_SCALE = 2, NVN_RSF_IMAGE_STORE = 4, NVN_RSF_COHERENT = 8 };   // Ryujinx.Graphics.Shader TextureUsageFlags
 
 typedef struct {
     uint8_t kind, rw;        // rw: storage buffer access is read_write / write / device
@@ -42,6 +45,7 @@ typedef struct {
     uint8_t atom;            // IMG: the shader runs image atomics on it (dmsh_build.py "atomic"): the texture must allow Metal's texture atomics (nvn_mtl.m dummy_img_atomic)
     uint16_t fixw;           // CBUF: the slot's words the shader reads at fixed offsets, from its start to the end of the highest (dmsh_reflect.py "fixed"): a binding shorter than that is encoded with zeros up to there (nvn_mtl.m ub_padded)
     uint8_t bw;              // SAMP / SAMPT / SAMPU / SAMPI: a twin sampler for border colours (dmsh_rewrite.py border_emu), its bit in the BORDER block + 1; 0 = an ordinary sampler binding
+    uint8_t sidx, sfl;       // internal resolution (dmsh_rscale.py): the binding's render_scale index in the support buffer (render_scale[1 + sidx], NVN_RS_NONE = none) and Ryujinx's TextureUsageFlags
 } nvn_rbind;
 typedef struct {
     int nb, abi, nv;         // Binding count, argument buffer slot, vertex input count
@@ -55,6 +59,7 @@ typedef struct {
     uint8_t route_b, has_c1; // Route B; has a c1 constant segment
     uint8_t bindless;        // Has TEXU / SAMPU bindings (which texture is read is known only at replay time)
     uint8_t border;          // index in b of the BORDER binding + 1, 0 = none
+    uint8_t frag_coord;      // reads FragCoord (Ryujinx UsesFragCoord): the translator divides its x and y by render_scale[0]
     uint8_t dyn;             // Has TEXD / SAMPD bindings: c2's texture and sampler tables hold slot indices for this shader
     uint8_t pool;            // Has TEXP / SAMPP bindings (it also sets bindless): its argument block holds pool addresses, which change when a pool is rebuilt
     uint8_t htab;            // Has TEXH / SAMPH bindings (tables of a uniform buffer's handles, nvn_mtl.m htab_gpu; it also sets bindless): likewise

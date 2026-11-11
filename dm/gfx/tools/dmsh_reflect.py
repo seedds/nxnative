@@ -4,7 +4,7 @@
 # (raster_facts). Functions of the MSL text and the library ABI (dmsh_abi.py) only, with no build state, so tests import them. Part of the translation chain (dmsh_chain.FILES)
 # and of every shader's cache key (dmsh_build.py CODE_FP): what they find goes into the shader's library and its reflection json.
 import re
-import dmsh_abi as abi, dmsh_fetch, dmsh_geometry
+import dmsh_abi as abi, dmsh_fetch, dmsh_geometry, dmsh_rscale
 
 # The NVN driver's constant segments have one layout in every game, which dm/gfx/nvn/dmsh_abi.h holds for the host and this build (through dmsh_abi.py); nvn_mtl.m fills them the same way at run time.
 #   c2 C2_TEX + 8 r: handles bound with nvnCommandBufferBindTexture (combined texture and sampler), slot r. The driver has 32 such slots, but a game may bind higher ones, whose words lie in the
@@ -284,7 +284,7 @@ def reflect(key, stage, msl, res):
                 e.update(kind=abi.KIND_SBUF_UBO, reg=b['cb_slot'] - 3, off=b['cb_offset'] * 4)
             else: e['reg'] = (off - base) // abi.C0_ROW if off is not None and base is not None and 0 <= off - base < abi.C0_ROW * abi.C0_SSBO_SLOTS and (off - base) % abi.C0_ROW == 0 else None
             e['rw'] = bool(b and b['flags'] & 1)   # BufferUsageFlags.Write; Program.cs serializes the translator enum unchanged (atomics count as writes too)
-    return binds
+    return dmsh_rscale.facts(binds, res)   # each texture's and image's render_scale index and usage flags (internal resolution)
 
 DRV_FILL = {0: [(b, b + abi.C0_ROW * abi.C0_SSBO_SLOTS) for k, b in sorted(SSBO.items(), key=lambda kv: kv[1]) if k not in ('ts', 'ms')],   # c0: storage buffer address tables (vertex / compute / geometry / pixel; a task or mesh stage's: unfillable())
             2: [(TEX_BASE, SEPTEX_BASE), (IMG_BASE, IMG_BASE + abi.C2_ROW * IMG_SLOTS), (SEPTEX_BASE, SAMP_BASE), (SAMP_BASE, SAMP_BASE + abi.C2_ROW * abi.C2_SEP_SLOTS)]}   # c2: the handle tables above, all filled by the replay layer

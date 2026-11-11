@@ -48,6 +48,8 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
             NSString *k = b[@"kind"]; nvn_rbind *r = &o->b[o->nb];
             id rg = b[@"reg"]; int reg = [rg isKindOfClass:[NSNumber class]] ? [rg intValue] : -1, aid = [b[@"arg_id"] intValue];
             r->aid = (uint16_t)aid; r->reg = reg < 0 ? 0 : (uint16_t)reg;
+            id si = b[@"sidx"]; r->sidx = NVN_RS_NONE; r->sfl = (uint8_t)[b[@"sfl"] intValue];   // internal resolution facts (dmsh_rscale.py); absent = no render_scale entry
+            if (si) { int v = [si intValue]; if (v < 0 || v > NVN_RS_MAXIDX) FAIL("B binding %s: render_scale index %d out of range", [b[@"msl_name"] UTF8String], v); r->sidx = (uint8_t)v; }
             NSString *nm = b[@"msl_name"], *ty = b[@"msl_type"];
             // Ryujinx's fallback for a handle it cannot trace to one slot (handle type 4: <stage>_<t|tb|s>_cb0_40000000, declared array<element, n>); the build leaves it without a slot
             // ('tbuf' / 'tex' with no reg, '?' for the samplers). Octopath Traveler 0's vertex shaders pick one of several c2 table slots at run time (61 shaders, slots 0-10)
@@ -114,6 +116,7 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
                 FAIL("B binding %s has no resolved slot number", [b[@"msl_name"] UTF8String]);
             o->nb++;
         }
+        o->frag_coord = [j[@"frag_coord"] intValue] != 0;
         NSDictionary *dr = j[@"drv_reads"];
         if ([dr isKindOfClass:[NSDictionary class]]) { o->drv_read[0] = dr[@"0"] != nil; o->drv_read[2] = dr[@"2"] != nil; }
         // A declared driver-segment binding means the shader reads it: the build's drv_reads scan (dmsh_build.py) matches only fragment-shader names (fp_c0 / fp_c2), so vertex and compute

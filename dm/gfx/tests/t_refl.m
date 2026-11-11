@@ -119,6 +119,24 @@ int main(void) { @autoreleasepool {
         check("B texture without a resolved slot fails", 1, nvn_refl_from_json(b2, &r, err, sizeof err) != 0);
         printf("%-60s %s\n", "B negative control: unknown kind / missing slot", fail == f1 ? "✓" : "✗");
     }
+    {   int f1 = fail;   // internal-resolution facts (dmsh_rscale.py): per texture or image binding its render_scale index and Ryujinx usage flags, per shader whether it reads FragCoord
+        NSDictionary *j = @{@"route": @"B", @"frag_coord": @1, @"bindings": @[
+            @{@"kind": @"support", @"arg_id": @0, @"msl_name": @"support_buffer", @"msl_type": @"constant _10*"},
+            @{@"kind": @"tex", @"reg": @1, @"arg_id": @1, @"msl_name": @"fp_t_tcb_8", @"msl_type": @"texture2d<float>", @"sidx": @0, @"sfl": @2},
+            @{@"kind": @"samp_tex", @"reg": @1, @"arg_id": @2, @"msl_name": @"fp_t_tcb_8Smplr", @"msl_type": @"sampler"},
+            @{@"kind": @"img", @"reg": @0, @"arg_id": @3, @"msl_name": @"fp_i_tcb_48_rgba8", @"msl_type": @"texture2d<float, access::write>", @"sidx": @1, @"sfl": @5}]};
+        check("rscale: conversion succeeds", 0, nvn_refl_from_json(j, &r, err, sizeof err));
+        check("rscale: frag_coord", 1, r.frag_coord);
+        check("rscale: texture scale index", 0, r.b[1].sidx); check("rscale: texture flags (NeedsScaleValue)", 2, r.b[1].sfl);
+        check("rscale: image scale index", 1, r.b[3].sidx); check("rscale: image flags (ResScaleUnsupported | ImageStore)", 5, r.b[3].sfl);
+        check("rscale: support binding has no index", NVN_RS_NONE, r.b[0].sidx); check("rscale: sampler has no index", NVN_RS_NONE, r.b[2].sidx); check("rscale: sampler has no flags", 0, r.b[2].sfl);
+        NSDictionary *old = @{@"route": @"B", @"bindings": @[@{@"kind": @"tex", @"reg": @1, @"arg_id": @0, @"msl_name": @"fp_t_tcb_8", @"msl_type": @"texture2d<float>"}]};
+        check("rscale: a reflection without the facts converts", 0, nvn_refl_from_json(old, &r, err, sizeof err));
+        check("rscale: no facts, no index", NVN_RS_NONE, r.b[0].sidx); check("rscale: no facts, no flags", 0, r.b[0].sfl); check("rscale: no facts, no FragCoord", 0, r.frag_coord);
+        NSDictionary *bad = @{@"route": @"B", @"bindings": @[@{@"kind": @"tex", @"reg": @1, @"arg_id": @0, @"msl_name": @"fp_t_tcb_8", @"msl_type": @"texture2d<float>", @"sidx": @72}]};
+        check("rscale: an index past render_scale[72] fails", 1, nvn_refl_from_json(bad, &r, err, sizeof err) != 0);
+        printf("%-60s %s\n", "internal-resolution facts: scale index, usage flags, FragCoord", fail == f1 ? "✓" : "✗");
+    }
     printf("== %d checks, %d failed, %d sample files missing (those checks skipped) ==\n", n, fail, skipped);
     return fail != 0;
 } }

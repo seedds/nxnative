@@ -7991,11 +7991,15 @@ static void at_bind(id<MTLCommandEncoder> en) {
 // source colour keeps 0: zeroing the source would also change that term, where NVIDIA keeps the NaN. With blending off, MIN / MAX (no weights) and every other factor the bits are 0
 // and the shader returns its colour as it is. DM_NVN_BLEND_ZERO=0 gives 0 for every draw (Apple's blender as it is), for A/B runs
 static int bz_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_BLEND_ZERO"); v = !(e && !strcmp(e, "0")); if (!v) MLOG("DM_NVN_BLEND_ZERO=0: a non-finite colour with a zero blend weight is blended as Apple's blender does (NaN kept)"); } return v; }
-static uint32_t bz_word(void) {
+// lm: a merged pass's physical -> logical mapping (physical target i holds logical output lm[i]), NULL for target i = output i. A draw's mapping reaches bz_bind through g_bz_lmap:
+// draw_ resets g_pso_lmap before it encodes the fragment arguments (it takes raster_mask before that reset for the same reason), so g_pso_lmap is always NULL in bz_bind
+static const uint8_t *g_bz_lmap;   // the mapping of the draw whose fragment arguments draw_ is encoding (its copy of g_pso_lmap, made before the reset), NULL outside that call
+static uint32_t g_bz_last;         // the word bz_bind bound last (t_blend_zero)
+static uint32_t bz_word(const uint8_t *lm) {
     if (!S.color.blend_en || !bz_on()) return 0;
     uint32_t w = 0;
     for (int i = 0; i < 8; i++) {
-        unsigned l = g_pso_lmap ? g_pso_lmap[i] : (unsigned)i;
+        unsigned l = lm ? lm[i] : (unsigned)i;
         if (l >= 8 || !g_pass.cfmt[i] || !(S.color.blend_en >> l & 1) || !pf_is_float((MTLPixelFormat)g_pass.cfmt[i])) continue;
         blend_st b = adv_blend(S.blend[l]);
         if (b.eq_rgb == NVN_BLEND_EQUATION_MIN || b.eq_rgb == NVN_BLEND_EQUATION_MAX) continue;
@@ -8007,11 +8011,11 @@ static uint32_t bz_word(void) {
 }
 // The word at fragment buffer DMSH_BLEND_BUFFER, for every draw of a shader that reads it: a copy in the frame arena per value and pass, as at_bind
 static void bz_bind(id<MTLCommandEncoder> en) {
-    static uint64_t gpu, pass; static uint32_t last;
-    uint32_t v = bz_word();
-    if (!gpu || pass != g_pass.serial || v != last) {
+    static uint64_t gpu, pass;
+    uint32_t v = bz_word(g_bz_lmap);
+    if (!gpu || pass != g_pass.serial || v != g_bz_last) {
         __strong id<MTLBuffer> b; size_t off = arena_alloc(16, &b); memset((uint8_t *)b.contents + off, 0, 16); memcpy((uint8_t *)b.contents + off, &v, sizeof v);
-        gpu = b.gpuAddress + off; pass = g_pass.serial; last = v;
+        gpu = b.gpuAddress + off; pass = g_pass.serial; g_bz_last = v;
         if (v) { static uint64_t n; if (++n <= 3 || !(n & (n - 1))) MLOG("blend: a zero source weight on a floating-point target (outputs %#x): a non-finite colour is blended as 0 there, as NVIDIA's blender does (%llu passes or states so far)", v, (unsigned long long)n); }
     }
     enc_r_args((id<MTL4RenderCommandEncoder>)en, MTLRenderStageFragment, gpu, DMSH_BLEND_BUFFER);
@@ -13907,6 +13911,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
         rp_end(); en = rp_begin_ex(mode); if (!en) return;
         cur_ps = pso_get(pr, nil); cur_pull = g_pso_pull; cur_pr = pr; cur_ps_pass = g_pass.serial; cur_border = border; g_pso_dirty = !cur_ps || cur_pull; }
     uint32_t raster_mask = draw_color_writes(pr);   // Capture the physical mapping before resetting the merged pipeline state.
+    uint8_t bz_lm[8]; const uint8_t *bz_map = g_pso_lmap ? memcpy(bz_lm, g_pso_lmap, sizeof bz_lm) : NULL;   // the blend weight word's mapping (bz_bind, in encode_args below)
     if (g_pso_lmap) { g_pso_lmap = NULL; g_pso_fsfn = nil; memset(&g_pso_fz, 0, sizeof g_pso_fz); g_pso_dirty = 1; }   // The next draw fetches again according to its own situation
     __unsafe_unretained id<MTLRenderPipelineState> ps = cur_ps;
     if (!ps) { PD("Z %llu draw skipped: no render pipeline (vertex %s fragment %s)", g_stat_pass, pr->sh[0] ? pr->sh[0]->key : "-", pr->sh[1] ? pr->sh[1]->key : "-"); return; }
@@ -13961,7 +13966,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     }
     g_kd_force = kd_draw(pr, dw, di);
     if (pr->sh[0]) encode_args(en, pr->sh[0], 0, 1);
-    if (pr->sh[1] && !S.rast_discard) encode_args(en, pr->sh[1], 1, 0);
+    if (pr->sh[1] && !S.rast_discard) { g_bz_lmap = bz_map; encode_args(en, pr->sh[1], 1, 0); g_bz_lmap = NULL; }
     // Binding a texture view can upgrade its texture first (tex_upgrade: a format view of a texture made without PixelFormatView), and the upgrade's copy goes through blit(),
     // which ends the render pass: en is then an ended encoder, and drawing on it crashed in the driver (AGX reads its released context: Need for Speed: Hot Pursuit Remastered,
     // a 4096x1024 texture sampled through another format's view at its first loading screen). The texture is upgraded now, so the draw is encoded again in a new pass

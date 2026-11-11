@@ -1,7 +1,8 @@
 // NVIDIA's "zero times anything is zero" float blending through the replay: a pixel shader that writes NaN, +Inf, -Inf and 2 at alpha 0 and at alpha 1 (dmsh_rewrite.py blend_zero's
 // guard in it, from test_dmsh_blend_zero.py --fixture), drawn into an RGBA16F target under blend states with and without a zero source weight, and the target read back. Where the
 // weight is zero by the alpha the target keeps its colour; everywhere else the non-finite colour is stored, as NVIDIA stores it. With DM_NVN_BLEND_ZERO=0 the same draws show Apple's blender as
-// it is: the NaN is stored under the zero weight too (what the guard is for). bz_word's cases are checked on the state alone.
+// it is: the NaN is stored under the zero weight too (what the guard is for). bz_word's cases are checked on the state alone, and the word a draw through a merged pass's mapping
+// binds (drawn_word).
 // make GAME=<id> check_t_blend_zero (./t_blend_zero <dir>)
 #include "../nvn/nvn_mtl.m"
 void *front_metal_layer(void) { return NULL; }
@@ -29,6 +30,38 @@ static const struct { int on, src, dst, eq; char a0, a1; uint32_t word; } rows[]
 };
 enum { NROWS = sizeof rows / sizeof *rows };
 static blend_st state(int r) { blend_st b = {.target = 0, .src_rgb = (uint64_t)rows[r].src, .dst_rgb = (uint64_t)rows[r].dst, .src_a = O, .dst_a = Z, .eq_rgb = (uint64_t)rows[r].eq, .eq_a = ADD}; return b; }
+// The word a draw binds through a merged pass's mapping, drawn through draw() with g_pso_lmap set before the call, as defer_replay passes a mapping in; the mapping is one fz_p2_draw
+// makes when the readable-tile merge moves output 0 to attachment 1. draw_ resets g_pso_lmap before it encodes the fragment arguments, so the word must come from the copy it takes
+// first: physical target 0 (RGBA8) holds no output, physical 1 (RGBA16F) holds output 0, blended SRC_ALPHA / ONE_MINUS_SRC_ALPHA, so output 0's bits are set from physical 1's format.
+// Unmapped, the same draw binds 0 (output 0 is then the RGBA8 target). The word is read, not the pixels: the pipeline of a mapped draw without a specialized function writes output 0
+// to attachment 0
+static void drawn_word(id<MTLLibrary> lib, int on) {
+    NvProg *pr = [NvProg new];
+    pr->sh[0] = [NvShader new]; pr->sh[0]->fn = [lib newFunctionWithName:@"vertex_main"]; pr->sh[0]->stage = 0; snprintf(pr->sh[0]->key, sizeof pr->sh[0]->key, "vblendm_b");
+    NvShader *ps = [NvShader new]; pr->sh[1] = ps;
+    ps->fn = fn4_note([lib newFunctionWithName:@"main0"], lib, @"main0", nil); ps->stage = 1; ps->has_bz = 1; snprintf(ps->key, sizeof ps->key, "pblendm_b");
+    static prog_t program = {.serial = 98300}; serial_put(program.serial, pr);
+    static NSMutableArray *keep; if (!keep) keep = [NSMutableArray array]; [keep addObject:pr];
+    static tex_t t[2]; const int fmt[2] = {NVN_FORMAT_RGBA8, NVN_FORMAT_RGBA16F};
+    for (int i = 0; i < 2; i++) {
+        t[i] = (tex_t){.magic = MAGIC('T', 'E', 'X', 0), .serial = 98301 + (uint64_t)i};
+        t[i].d = (nvn_texdesc){.width = 4, .height = 4, .depth = 1, .samples = 1, .levels = 1, .target = NVN_TEXTURE_TARGET_2D, .format = fmt[i]};
+        MTLTextureDescriptor *td = tex_desc(&t[i], 0); td.storageMode = MTLStorageModePrivate; id<MTLTexture> tx = [g_dev newTextureWithDescriptor:td]; [keep addObject:tx];
+        res_add(tx); mtl_tex_init(&t[i]); serial_put(t[i].serial, tx);
+    }
+    state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
+    R.has_rt = 1; R.rt.n = 2; R.rt.color[0] = &t[0]; R.rt.color[1] = &t[1]; R.clear_c[0] = R.clear_c[1] = 1;
+    S.prog = &program; S.ds.dt = S.ds.dw = S.ds.st = 0; S.poly.cull = 0; S.chmask.mask = 0xff; S.color.blend_en = 1; S.blend[0] = state(1);
+    static const uint8_t lmap[8] = {0xff, 0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+    p_draw dw = {.prim = 4, .count = 3, .instances = 1};
+    g_bz_last = 0xdead; g_pso_lmap = lmap; g_pso_dirty = 1; draw(&dw, NULL);
+    CHECK(g_bz_last == (on ? 1u : 0u));   // output 0's bits (SRC_ALPHA: 1), from physical target 1's floating-point format
+    CHECK(!g_bz_lmap && !g_pso_lmap);     // the next draw starts unmapped
+    g_bz_last = 0xdead; g_pso_dirty = 1; draw(&dw, NULL);
+    CHECK(g_bz_last == 0);                // unmapped: output 0 is the RGBA8 target
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull)); CHECK(!mtl_last_commit_error());
+    for (int i = 0; i < 2; i++) mtl_tex_release(&t[i]);
+}
 int main(int argc, char **argv) { @autoreleasepool {
     if (argc != 2) return 2;
     setenv("DM_MSL_DIR", argv[1], 1);
@@ -71,14 +104,14 @@ int main(int argc, char **argv) { @autoreleasepool {
     const float src[4] = {NAN, INFINITY, -INFINITY, 2};
     for (int r = 0; r < NROWS; r++) {
         memset(&S.color, 0, sizeof S.color); S.color.blend_en = (uint32_t)rows[r].on; S.blend[0] = state(r);
-        memset(g_pass.cfmt, 0, sizeof g_pass.cfmt); g_pass.cfmt[0] = MTLPixelFormatRGBA16Float; g_pso_lmap = NULL;
-        CHECK(bz_word() == (on ? rows[r].word : 0));
-        g_pass.cfmt[0] = MTLPixelFormatRGBA8Unorm; CHECK(bz_word() == 0);   // not a float target: the option is the float blender's
+        memset(g_pass.cfmt, 0, sizeof g_pass.cfmt); g_pass.cfmt[0] = MTLPixelFormatRGBA16Float;
+        CHECK(bz_word(NULL) == (on ? rows[r].word : 0));
+        g_pass.cfmt[0] = MTLPixelFormatRGBA8Unorm; CHECK(bz_word(NULL) == 0);   // not a float target: the option is the float blender's
         g_pass.cfmt[0] = MTLPixelFormatRG11B10Float; g_pass.cfmt[1] = MTLPixelFormatRGBA16Float;
-        static const uint8_t lmap[8] = {0xff, 0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}; g_pso_lmap = lmap;   // output 0 is physical target 1
-        CHECK(bz_word() == (on ? rows[r].word : 0));
-        g_pso_lmap = NULL; S.color.blend_en = rows[r].on ? 2 : 0; S.blend[1] = state(r); memset(&S.blend[0], 0, sizeof S.blend[0]);
-        CHECK(bz_word() == (on ? rows[r].word << DMSH_BLEND_ZERO_BITS : 0));   // output 1's bits
+        static const uint8_t lmap[8] = {0xff, 0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff};   // output 0 is physical target 1
+        CHECK(bz_word(lmap) == (on ? rows[r].word : 0));
+        S.color.blend_en = rows[r].on ? 2 : 0; S.blend[1] = state(r); memset(&S.blend[0], 0, sizeof S.blend[0]);
+        CHECK(bz_word(NULL) == (on ? rows[r].word << DMSH_BLEND_ZERO_BITS : 0));   // output 1's bits
     }
     const uint16_t *px = pixels.contents;
     if (getenv("DM_T_DUMP")) for (int r = 0; r < NROWS; r++) { printf("row %d:", r); for (int x = 0; x < 8; x++) printf(" %g", half(px[r * 128 + x * 4])); printf("\n"); }   // the red channel as stored
@@ -94,6 +127,7 @@ int main(int argc, char **argv) { @autoreleasepool {
         }
     }
     mtl_pool_del(commands); mtl_drain(); free(commands);
+    drawn_word(lib, on);
     printf("blend zero replay (%s): %d checks, %d failed\n", on ? "NVIDIA's rule" : "DM_NVN_BLEND_ZERO=0, Apple's blender", checks, failed);
     return failed != 0;
 } }

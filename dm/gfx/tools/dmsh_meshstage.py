@@ -174,19 +174,28 @@ def to_stage(msl, i, reads=None):
     wg, inp, out, prim = lay[0] >> 2, lay[1] >> 2, lay[2] >> 2, lay[3]
     bar = 'mem_flags::mem_device | mem_flags::mem_threadgroup' if spill else 'mem_flags::mem_threadgroup'   # the device slice is ordered by the same barriers
     if spill:
-        # The slice: the group's ticket from a counter at the buffer's start (a 32-thread group is one SIMD-group on Apple GPUs: one atomic, broadcast); abi.MESH_SCRATCH_SLICES divides 2^32, so the
-        # ticket's wrap stays unique among the groups in flight. It starts zero as the threadgroup array did: uint4 stores, then the words the vectors do not cover
+        # The slice: lane 0 takes a ticket from the counter at the buffer's start and claims the slice at ticket % abi.MESH_SCRATCH_SLICES by changing its flag word from 0 to 1 (a 32-thread group is one
+        # SIMD-group on Apple GPUs: lane 0's atomics, broadcast); a slice another group still owns costs a new ticket. The entry clears the flag after its last read (release), so a slice is handed out
+        # again only once its group finished (GitHub pull request #2308). It starts zero as the threadgroup array did: uint4 stores, then the words the vectors do not cover
+        # shortcut: after abi.MESH_SCRATCH_SLICES tickets with no free slice (flags a dropped command buffer left set) the group uses the last slice unowned, clear the flags from the host on a failed submission if a log ever shows it
         w4 = words // 4
-        start = (f'    uint dm_t = 0u; if ({lid} == 0u) dm_t = atomic_fetch_add_explicit((device atomic_uint*)dm_scr, 1u, memory_order_relaxed);\n'
+        flag = f'(device atomic_uint*)(dm_scr + {abi.MESH_SCRATCH_FLAGS}ul) + dm_t'
+        start = ('    uint dm_t = 0u; bool dm_own = false;\n'
+                 f'    if ({lid} == 0u) for (uint dm_k = 0u; dm_k < {abi.MESH_SCRATCH_SLICES}u && !dm_own; dm_k++)\n    {{\n'
+                 f'        dm_t = atomic_fetch_add_explicit((device atomic_uint*)dm_scr, 1u, memory_order_relaxed) % {abi.MESH_SCRATCH_SLICES}u;\n'
+                 f'        dm_own = atomic_exchange_explicit({flag}, 1u, memory_order_relaxed) == 0u;\n    }}\n'
                  '    dm_t = simd_broadcast_first(dm_t);\n'
-                 f'    device spvUnsafeArray<uint, {words}>& {mem} = *(device spvUnsafeArray<uint, {words}>*)(dm_scr + {abi.MESH_SCRATCH_HEAD}ul + ulong(dm_t % {abi.MESH_SCRATCH_SLICES}u) * {abi.MESH_SCRATCH_STRIDE}ul);\n'
+                 f'    device spvUnsafeArray<uint, {words}>& {mem} = *(device spvUnsafeArray<uint, {words}>*)(dm_scr + {abi.MESH_SCRATCH_HEAD}ul + ulong(dm_t) * {abi.MESH_SCRATCH_STRIDE}ul);\n'
                  f'    for (uint i = {lid}; i < {w4}u; i += {thr}u) ((device uint4*)&{mem}[0])[i] = uint4(0u);\n' +
                  (f'    for (uint i = {w4 * 4}u + {lid}; i < {words}u; i += {thr}u) {mem}[i] = 0u;\n' if words % 4 else '') +
                  f'    threadgroup_barrier({bar});\n')
+        release = (f'    threadgroup_barrier({bar});\n'   # every lane has read its outputs
+                   f'    if ({lid} == 0u && dm_own) atomic_store_explicit({flag}, 0u, memory_order_relaxed);\n')
     else:
         start = (f'    threadgroup spvUnsafeArray<uint, {words}> {mem};\n'
                  f'    for (uint i = {lid}; i < {words}u; i += {thr}u) {mem}[i] = 0u;\n'
                  f'    threadgroup_barrier({bar});\n')
+        release = ''
     head = f'struct dm_payload_t {{ uint w[{max(pay, 1)}]; }};\n'
     sig = ', '.join(params + extra)
     draw = f'constant uint* dm_draw [[buffer({abi.MESH_DRAW_SLOT})]]'   # the draw's {count, first}, which the host binds (nvn_geometry.inc mtk_encode)
@@ -246,7 +255,7 @@ def to_stage(msl, i, reads=None):
                 ('        v.position.z = fma(v.position.z, 0.5, v.position.w * 0.5);\n' if gl else '') +
                 '        dm_out.set_vertex(n, v);\n    }\n' +
                 (f'    for (uint n = {lid}; n < np; n += {thr}u)\n    {{\n        uint b = {p_block("n")};\n        dm_prim_t p;\n{psets}        dm_out.set_primitive(n, p);\n    }}\n' if pm else '') +
-                f'    for (uint n = {lid}; n < np * {verts}u; n += {thr}u)\n    {{\n        uint at = {prim + 4}u + n;\n        dm_out.set_index(n, ({mem}[at >> 2] >> ((at & 3u) * 8u)) & 0xffu);\n    }}\n}}\n')
+                f'    for (uint n = {lid}; n < np * {verts}u; n += {thr}u)\n    {{\n        uint at = {prim + 4}u + n;\n        dm_out.set_index(n, ({mem}[at >> 2] >> ((at & 3u) * 8u)) & 0xffu);\n    }}\n' + release + '}\n')
     if i['task']: return src + '\n' + head + entry('main0', True) + '\n' + entry('main0_z', False)
     # The object function of a mesh shader with no task: one thread a block of METAL_MAX_GRID workgroups
     head += 'struct dm_block_t { uint first; };\n'

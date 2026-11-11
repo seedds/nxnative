@@ -656,7 +656,7 @@ static id<MTLRenderPipelineState> mtk_pso(NvProg *raster) {
     return ps;
 }
 // The scratch buffer of the mesh shaders whose stage array is a device slice (reflection mesh_spill, dmsh_meshstage.py to_stage, DMSH_MESH_SCRATCH_* in dmsh_abi.h): one private buffer for
-// every draw, made on first use. Word 0 is the groups' ticket counter, which needs no start value, and a group zeroes its own slice, so nothing clears it between draws
+// every draw, made on first use. Word 0 is the groups' ticket counter, which needs no start value; the slice flags after it must start 0, as a new buffer's bytes do (newBufferWithLength: zero-fills); a group zeroes its own slice, so nothing clears the buffer between draws
 static uint64_t mesh_scratch(void) {
     static uint64_t gpu; static __strong id<MTLBuffer> buf; static dispatch_once_t once;
     dispatch_once(&once, ^{ buf = [g_dev newBufferWithLength:DMSH_MESH_SCRATCH_HEAD + (size_t)DMSH_MESH_SCRATCH_SLICES * DMSH_MESH_SCRATCH_STRIDE options:MTLResourceStorageModePrivate];

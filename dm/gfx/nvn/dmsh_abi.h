@@ -33,12 +33,15 @@
 #define DMSH_MESH_GRID 1024              // Metal's limit of threadgroups in a mesh grid: a mesh shader with no task shader is drawn by an object function launching blocks of this many (dmsh_meshstage.py)
 // A mesh function whose stage array is 6000 to 16384 bytes (a 32-thread group; dmsh_meshstage.py to_stage, reflection key mesh_spill) keeps it in a device slice, not in threadgroup memory:
 // buffer DMSH_MESH_SCRATCH_SLOT of the mesh stage, which shares the vertex argument table. A mesh draw binds slot 0 (the arguments) and this one; vertex draws use the others (1-12
-// converted streams, 8-11 transform feedback, 12-13 geometry, 14-29 streams, 30 the zero buffer) and rebind what they read, as nvn_mtl.m enc_r_vbuf tracks every write. The buffer is DMSH_MESH_SCRATCH_HEAD bytes (word 0: the ticket counter, any start value) and then
-// DMSH_MESH_SCRATCH_SLICES slices of DMSH_MESH_SCRATCH_STRIDE bytes, a group's at its ticket modulo the count (2^32 is a multiple of it, so a wrap keeps tickets unique: it must be a power of two and exceed the groups in flight).
-// With the array out of threadgroup memory nothing limits occupancy but threads: an Apple GPU core holds 3072 threads = 96 groups of 32, so the slices must exceed cores x 96 (M4 Air 10 cores: 960; M3 Pro 14/18: 1344/1728;
-// M4/M5 Max 40: 3840; Ultra 80: 7680); 8192 x 16 KiB is 128 MiB of private virtual memory
+// converted streams, 8-11 transform feedback, 12-13 geometry, 14-29 streams, 30 the zero buffer) and rebind what they read, as nvn_mtl.m enc_r_vbuf tracks every write.
+// The buffer is DMSH_MESH_SCRATCH_HEAD bytes (word 0: the ticket counter, any start value; from DMSH_MESH_SCRATCH_FLAGS a word a slice, 1 while a group owns the slice, 0 in a new buffer) and then
+// DMSH_MESH_SCRATCH_SLICES slices of DMSH_MESH_SCRATCH_STRIDE bytes. A group owns the slice whose flag its lane 0 changed from 0 to 1 (an atomic exchange at its ticket modulo the count; a slice still owned costs a new ticket)
+// and clears the flag after its last read, so a slice is handed out again only after its group finished, however long the group ran and however many groups started meanwhile. A free slice exists while fewer groups
+// run than there are slices: with the array out of threadgroup memory an Apple GPU core holds 3072 threads = 96 groups of 32, so the slices must exceed cores x 96 (M4 Air 10 cores: 960; M3 Pro 14/18: 1344/1728;
+// M4/M5 Max 40: 3840; Ultra 80: 7680); 8192 x 16 KiB is 128 MiB of private virtual memory. A group that finds no free slice in DMSH_MESH_SCRATCH_SLICES tickets (flags a dropped command buffer left set) uses its last ticket's slice without owning it
 #define DMSH_MESH_SCRATCH_SLOT 7
-#define DMSH_MESH_SCRATCH_HEAD 64
+#define DMSH_MESH_SCRATCH_FLAGS 64
+#define DMSH_MESH_SCRATCH_HEAD 32832
 #define DMSH_MESH_SCRATCH_SLICES 8192
 #define DMSH_MESH_SCRATCH_STRIDE 16384
 #define DMSH_C0_DISPATCH 0x200           // compute: the dispatch's workgroup counts x, y, z (32 bits each; Link's Awakening's light culling)

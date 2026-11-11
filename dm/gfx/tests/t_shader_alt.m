@@ -46,6 +46,7 @@ int main(void) { @autoreleasepool {
     CHECK([lib_name([alt stringByAppendingPathComponent:@"f1_b.metallib"]) isEqualToString:@"alt/f1_b.metallib"]);   // the variant's archive key is its own
     CHECK([lib_name([game stringByAppendingPathComponent:@"f1_b.metallib"]) isEqualToString:@"f1_b.metallib"]);
     CHECK(prog_get(&p1) == t1);   // the twin is made once
+    CHECK(sh_alt(t1->sh[1]) && !sh_alt(s1));   // its pipelines are not recorded for the prewarm
     pso_key ka, kb; uint32_t cfmt[8] = {MTLPixelFormatRGBA8Unorm};
     pso_key_fill(&ka, s2, s1, cfmt, 0, 0, 1, 0); pso_key_fill(&kb, s2, t1->sh[1], cfmt, 0, 0, 1, 0);
     CHECK(memcmp(&ka, &kb, sizeof ka) != 0);   // its pipelines are other entries

@@ -1,5 +1,6 @@
 // The raw pool table words of the argument blocks encoded so far follow the pools at commit (nvn_mtl.m gmem_slot_note, gmem_commit_patch): a pool made after a block was encoded is in the
-// table its word points at when the GPU reads it, a word behind the pools or holding an older table is rewritten and counted, and a word that is current is left alone.
+// table its word points at when the GPU reads it, a word behind the pools or holding an older table is rewritten and counted, a word that is current is left alone, and the commit before an
+// indirect-count multi-draw's count wait (mdi_wait) patches them too and clears the list of noted words.
 #include "../nvn/nvn_mtl.m"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
@@ -63,6 +64,13 @@ int main(void) { @autoreleasepool {
     gmem_commit_patch();
     CHECK("its word follows the newer table", w4 == g_gmem_buf.gpuAddress && w4 != t3);
     CHECK("and its log is read against that table, not the older one", lg->map == g_gmem_buf && lg->map != t3buf);
+    // an indirect-count multi-draw's wait commits the command buffer mid-submission (mdi_wait): the words of the blocks encoded before it follow the pools there, before the GPU reads them
+    uint64_t w8 = g_gmem_buf.gpuAddress;             // a block encoded with the table as it is now
+    mtl_pool_add(mem + 48 * MB, 4 * MB); mtl_pool_addressed(mem + 48 * MB, 4 * MB);             // then a pool that table lacks
+    gmem_slot_note(&w8, NULL);
+    mdi_wait();
+    CHECK("a count wait's commit points the words encoded before it at the pools", w8 == g_gmem_buf.gpuAddress && table_has(w8, a + 48 * MB));
+    CHECK("and leaves none of them noted, so the next commit does not rewrite them after the GPU ran them", g_gmem_nslots == 0);
     CHECK("submission completes", mtl_wait(mtl_sub_commit(), 5000000000ull));
     CHECK("GPU has no submission error", !mtl_last_commit_error());
     printf("t_gmem_words: %d checks, %d failed\n", checks, failed); return failed != 0;

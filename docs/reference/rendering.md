@@ -1055,6 +1055,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Found on:** [Hyrule Warriors: Age of Calamity](../../dm/games/01002B00111A2000/README.md) (its GPU-driven effects are indirect quads).
 - **Check:** `DM_NVN_IXCLOG=<n>` logs the first n conversions (record → arguments) once the GPU has run them.
 
+### A GPU-written dispatch count of billions of threadgroups
+
+- **Symptom:** the GPU stays busy at 100% after a game stops responding, and the Mac's WindowServer freezes minutes later; no error is logged, and no game process is left.
+- **Cause:** `nvnCommandBufferDispatchComputeIndirect` reads its `{x, y, z}` group counts from memory the GPU wrote earlier in the frame. When those counts are garbage (a producer that read bad data), the dispatch launches billions of threadgroups and runs for practically ever, and Metal does not reclaim a command buffer that never completes when the process exits.
+- **Fix:** before an indirect dispatch reads its record, a one-thread kernel (`ixc.metal` `dpc_clamp`, encoded by `dpc_clamp_enc` in `nvn_mtl.m`) copies it into the frame arena: a record of more than 2^22 threadgroups in all becomes 0 x 0 x 0, so nothing is dispatched; any other record passes unchanged, a 1D dispatch of more than 65535 groups too. The product is taken in steps that cannot wrap.
+- **Found on:** PRAGMATA's first frames on an early branch, twice followed by WindowServer stopping; its largest real dispatch is 96 x 54.
+- **Check:** `make -C dm/gfx/tests GAME=<id> check_t_dispatch_clamp` (ten records on the GPU: five pass unchanged, five dispatch nothing; it does not build on `main`).
+
 ### Indirect-count multi-draws
 
 - **Symptom:** an empty G-buffer pass (the title screen showed only the UI); later, the submitting thread waiting for the GPU before each such draw (36–54 fps in Kamura Village on an iPhone). MIO also reported missing level geometry with maxima of 4,594 and 8,192 draws.

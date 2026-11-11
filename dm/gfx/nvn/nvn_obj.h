@@ -321,6 +321,7 @@ void mtl_tex_release(tex_t *t);
 void mtl_tex_pin(uint64_t serial);
 void mtl_tex_unpin(uint64_t serial);
 void mtl_pkg_stats(uint64_t *uploads, uint64_t *reuploads);
+void mtl_spare_stats(uint64_t *held, uint64_t *trimmed, uint64_t *trimmed_mb);   // packaged textures holding a spare now; spares retired so far (spare_trim) and their MB
 unsigned mtl_cpu_tex_count(void);   // live textures the CPU writes (retired snapshots are excluded)
 uint64_t mtl_pkg_edge_skips(void);   // packaged texture checks that found only writes beside the texture (pkg_edges_clean)
 uint64_t mtl_pkg_miss(void);

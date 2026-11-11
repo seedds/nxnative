@@ -1,6 +1,7 @@
 // The tables of handles traced to no slot (pool_gpu) over noted changes: a pool added or removed records REG_POOL and no ID, so a table built before keeps its buffer when nothing
 // it holds changed, takes again an ID whose storage came with a new pool, and the IDs of a finalized pool go to the dummy through notes of their own (treg_gone). A new submission
-// takes again only the IDs whose entries were views of retired registrations, which went at the end of the last one, and a storage takeover builds nothing. A patch follows the
+// takes again only the IDs whose entries were views of retired registrations, which went at the end of the last one, and a storage takeover builds nothing: it notes the serials
+// of a live sRGB / linear twin of what it evicts, and only a twin list full of live serials makes its bump a bare one (GitHub issue #2125). A patch follows the
 // walk's rules: past the budget an unread texture is not made (its entry is its stand-in, pool_stand), and a view the shader-read scan writes in place is taken again at the next submission. Each patched table holds
 // what a table built whole holds.
 // Ocarina of Time maps and unmaps virtual pool runs dozens of times a second and registers something between most of its draws; each of those walked its 33,025-entry texture table
@@ -34,6 +35,14 @@ static pool_snap *snap(void) { for (int k = 0; k < POOL_SNAPS; k++) if (g_psnap[
 static uint64_t entry(id<MTLBuffer> b, int i) { return ((const uint64_t *)((const uint8_t *)b.contents + DMSH_POOL_HEAD))[i]; }
 static uint64_t dummy_of(id<MTLBuffer> b) { return entry(b, (int)*(const uint32_t *)b.contents); }
 static int lists(const pool_ids *l, int id_) { for (int i = 0; i < l->n; i++) if (l->v[i] == id_) return 1; return 0; }
+static id<MTLTexture> made(const NVNtexture *t) { mtl_sub_begin(); id<MTLTexture> x = tex_mtl((const tex_t *)t); CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "the submission completed"); return x; }
+// The storage changes since generation g0 (g_ser_log): how many were bumps with no note, and whether a note named serial
+static void ser_log_since(uint64_t g0, uint64_t serial, int *bare, int *named) {
+    *bare = *named = 0; uint64_t g1 = atomic_load(&g_ser_gen);
+    os_unfair_lock_lock(&g_snote_lk);
+    for (uint64_t g = g0 + 1; g <= g1; g++) { const ser_lnote *sn = &g_ser_log[g % SER_LOG]; if (sn->gen != g) ++*bare; else *named |= sn->serial == serial; }
+    os_unfair_lock_unlock(&g_snote_lk);
+}
 // A patched table against the same table built whole (a bump the ring holds no note for) in the next submission, over the IDs the test registers. A retired registration's view is
 // made again in each submission, so for its ID only whether it holds a texture can agree
 static void same_as_whole(id<MTLBuffer> patched, const char *label) {
@@ -167,8 +176,9 @@ int main(void) { @autoreleasepool {
     hog = nil;
 
     // A live sRGB / linear twin: ID 8's serial resolves to a view of the shared texture that ID 7, finalized since, made (srgb_twins in tex_mtl_), so no live serial holds that texture
-    // and a takeover may evict it while ID 8 is live. tex_mtl_ finds the view stale once its parent left the sharing table and drops it (serial_del, a note naming ID 8's serial):
-    // the patch takes ID 8 again, without a table built whole or the slow path for every ID, and gives it what a table built whole does
+    // and a takeover may evict it while ID 8 is live. ID 8 keeps the view on the fast path, so the takeover notes ID 8's serial (g_twin_par): the next walk sends ID 8 down the slow
+    // path, where tex_mtl_ finds the view stale and drops it (serial_del), and the patch takes ID 8 again, without a table built whole or the slow path for every ID, and gives it
+    // what a table built whole does. With only the takeover's note naming no texture, ID 8 kept the view of the evicted texture
     uint8_t *me = pages(); pool_t epool = {0}; pool_builder_t pe = {.mem = me, .size = LEN, .flags = NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS | NVN_MEMORY_POOL_FLAGS_GPU_CACHED};
     CHECK(h_nvnMemoryPoolInitialize((NVNmemoryPool *)&epool, (const NVNmemoryPoolBuilder *)&pe), "pool E initialized");
     NVNtexture t7 = {0}, t8 = {0}, t9 = {0};
@@ -182,25 +192,65 @@ int main(void) { @autoreleasepool {
     uint64_t s8 = ((const tex_t *)&t8)->serial;
     pthread_mutex_lock(&g_smu); id<MTLTexture> v8 = hm_get_id(&g_by_serial, &s8); pthread_mutex_unlock(&g_smu);
     id<MTLTexture> base8 = v8.parentTexture;
-    CHECK(v8 && base8 && entry(b15, 8) != dummy_of(b15), "ID 8's serial resolves to a view of the shared texture");
+    uint64_t rid8 = entry(b15, 8);   // the table's buffer is used again once its submission completes: its entry is kept here
+    CHECK(v8 && base8 && rid8 != dummy_of(b15), "ID 8's serial resolves to a view of the shared texture");
+    table();   // ID 8's first resolution noted its serial (tex_put): its ID is taken again here, so that note does not take it again in the walks below
     mtl_reg_tex(7, NULL, NULL); h_nvnTextureFinalize(&t7);
     for (int i = 0; i <= ALIAS_IDLE; i++) { mtl_sub_begin(); mtl_wait(mtl_sub_commit(), 5000000000ull); }   // until the sharing table no longer spares the entry
     h_nvnTextureBuilderSetFormat(&tb, NVN_FORMAT_R32F);
     CHECK(h_nvnTextureInitialize(&t9, &tb), "texture 9 over the same storage initialized");
     mtl_reg_tex(9, (const tex_t *)&t9, NULL);
     builds = g_stat_pool_builds; taken = g_alias_taken; ep = g_treg_ep;
-    id<MTLBuffer> b16 = table();
-    pthread_mutex_lock(&g_smu); id<MTLTexture> now8 = hm_get_id(&g_by_serial, &s8); int base_shared = CFSetContainsValue(g_alias_set, (__bridge const void *)base8); pthread_mutex_unlock(&g_smu);
+    table();   // texture 9 is made in this walk: the takeover's note on ID 8's serial reaches the next one
+    pthread_mutex_lock(&g_smu); int base_shared = CFSetContainsValue(g_alias_set, (__bridge const void *)base8); pthread_mutex_unlock(&g_smu);
     CHECK(g_alias_taken > taken && !base_shared, "texture 9 took the storage over and evicted the twin's base");
+    id<MTLBuffer> b16 = table();
+    pthread_mutex_lock(&g_smu); id<MTLTexture> now8 = hm_get_id(&g_by_serial, &s8); pthread_mutex_unlock(&g_smu);
     CHECK(now8 && now8 != v8 && g_treg_ep == ep, "ID 8's stale view was dropped and its texture made again, and no ID went down the slow path");
-    CHECK(g_stat_pool_builds == builds && entry(b16, 8) != entry(b15, 8) && entry(b16, 8) != dummy_of(b16) && entry(b16, 9) != dummy_of(b16),
+    CHECK(g_stat_pool_builds == builds && entry(b16, 8) != rid8 && entry(b16, 8) != dummy_of(b16) && entry(b16, 9) != dummy_of(b16),
           "no table is built: the patch gives ID 8 its new texture and ID 9 its own");
     same_as_whole(b16, "the patched table holds what a table built whole does (a live twin's base taken over)");
+
+    // Twin lists: a list that fills drops the serials that were finalized (pass 0: only the live twin is noted when the parent is evicted), and one still full of live serials
+    // makes the takeover's bump a bare one (pass 1), as a twin it could not list would keep its view of the evicted texture
+    uint8_t *mq[2];
+    for (int pass = 0; pass < 2; pass++) {
+        mq[pass] = pages(); pool_t qpool = {0}; pool_builder_t pq = {.mem = mq[pass], .size = LEN, .flags = NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS | NVN_MEMORY_POOL_FLAGS_GPU_CACHED};
+        CHECK(h_nvnMemoryPoolInitialize((NVNmemoryPool *)&qpool, (const NVNmemoryPoolBuilder *)&pq), "pool Q initialized");
+        NVNtexture par = {0}, tw[TWIN_SERS + 1] = {0}, tk = {0};
+        h_nvnTextureBuilderSetFormat(&tb, NVN_FORMAT_RGBA8); h_nvnTextureBuilderSetStorage(&tb, (NVNmemoryPool *)&qpool, 0);
+        int views = h_nvnTextureInitialize(&par, &tb); id<MTLTexture> xp = made(&par); views &= xp != nil;
+        h_nvnTextureBuilderSetFormat(&tb, NVN_FORMAT_RGBA8_SRGB);
+        for (int i = 0; i <= TWIN_SERS; i++) {
+            views &= h_nvnTextureInitialize(&tw[i], &tb); id<MTLTexture> x = made(&tw[i]); views &= x && x.parentTexture == xp;
+            if (!pass && i < TWIN_SERS) h_nvnTextureFinalize(&tw[i]);
+        }
+        CHECK(views, "each sRGB texture over the storage is a view of the shared texture");
+        pthread_mutex_lock(&g_smu); uintptr_t pk = (uintptr_t)(__bridge void *)xp; const twin_sers *l = nvn_hm_get(&g_twin_par, &pk);
+        int ln = l ? (int)l->n : -1, lo = l ? (int)l->over : -1; pthread_mutex_unlock(&g_smu);
+        if (!pass) CHECK(ln == 1 && !lo, "the list that filled dropped the finalized twins' serials");
+        else CHECK(ln == TWIN_SERS && lo == 1, "a list full of live twins' serials is marked full");
+        h_nvnTextureFinalize(&par); xp = nil;
+        for (int i = 0; i <= ALIAS_IDLE; i++) { mtl_sub_begin(); mtl_wait(mtl_sub_commit(), 5000000000ull); }   // until the sharing table no longer spares the entry
+        h_nvnTextureBuilderSetFormat(&tb, NVN_FORMAT_R32F);
+        CHECK(h_nvnTextureInitialize(&tk, &tb), "a texture of another format over the storage initialized");
+        uint64_t g0 = atomic_load(&g_ser_gen); taken = g_alias_taken; int bare, named;
+        id<MTLTexture> xk = made(&tk);
+        ser_log_since(g0, ((const tex_t *)&tw[TWIN_SERS])->serial, &bare, &named);
+        CHECK(xk && g_alias_taken > taken, "it took the parent's storage over");
+        if (!pass) CHECK(!bare && named, "the live twin's serial is noted, with no bare bump");
+        else CHECK(bare == 1, "a list full of live twins makes the bump a bare one");
+        pthread_mutex_lock(&g_smu); int left = nvn_hm_get(&g_twin_par, &pk) != NULL; pthread_mutex_unlock(&g_smu);
+        CHECK(!left, "the evicted texture's list goes");
+        xk = nil;
+        for (int i = pass ? 0 : TWIN_SERS; i <= TWIN_SERS; i++) h_nvnTextureFinalize(&tw[i]);
+        h_nvnTextureFinalize(&tk); h_nvnMemoryPoolFinalize((NVNmemoryPool *)&qpool);
+    }
 
     mtl_reg_tex(1, NULL, NULL); mtl_reg_tex(2, NULL, NULL); mtl_reg_tex(5, NULL, NULL); mtl_reg_tex(6, NULL, NULL); mtl_reg_tex(8, NULL, NULL); mtl_reg_tex(9, NULL, NULL);
     mtl_tex_release(&t2); h_nvnTextureFinalize(&t1); h_nvnTextureFinalize(&t5); h_nvnTextureFinalize(&t8); h_nvnTextureFinalize(&t9);
     h_nvnMemoryPoolFinalize((NVNmemoryPool *)&dpool); h_nvnMemoryPoolFinalize((NVNmemoryPool *)&epool);
     mtl_pool_del(mb); mtl_pool_del(mc);
-    defer_drain(); munmap(ma, LEN); munmap(mb, LEN); munmap(mc, LEN); munmap(md, LEN); munmap(me, LEN);
+    defer_drain(); munmap(ma, LEN); munmap(mb, LEN); munmap(mc, LEN); munmap(md, LEN); munmap(me, LEN); munmap(mq[0], LEN); munmap(mq[1], LEN);
     printf("t_pool_notes: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

@@ -2636,8 +2636,36 @@ static int tex_object_pinned(id o) { uintptr_t key=(uintptr_t)(__bridge void *)o
 static CFMutableSetRef g_alias_set;   // Textures in the sharing table (non-owning; used to ask "is this shared")
 static uint64_t g_alias_evicted;   // shared textures evicted on pool Finalize so far (for the memory report)
 static int alias_has(id o) { return tex_object_pinned(o) || (g_alias_set && o && CFSetContainsValue(g_alias_set, (__bridge const void *)o)); }
+// Shared textures an sRGB / linear twin's view was made of (tex_mtl_'s srgb_twins path, the upgrade's view made again): the texture's address → the serials that took such a view of
+// it (twin_sers, malloc'ed), non-owning, under g_smu. A live twin's serial holds the view, not the texture (serial_table_holds counts the view), so a storage takeover may evict the
+// texture while the twin is live, and the twin's texture IDs keep the cached view on the fast path (tex_fast_rid) until a slow lookup finds it stale (tex_mtl_). The takeover's note
+// names no texture (ser_note(0)) and sends none of them there, so the pool tables kept the view's resource ID while its parent left the sharing table and the residency set (GitHub
+// issue #2125). A takeover that evicts one notes each of its serials (twin_par_take): their IDs alone take the slow path, and the pool tables take them alone again. A list that
+// fills drops its finalized serials (a retired ID's view goes at the submission's end, treg_finish_submission), and one still full of TWIN_SERS live serials makes the takeover's
+// bump a bare one (every texture ID takes the slow path once and every pool table is built whole). An entry goes when its texture leaves the sharing table (alias_del, the upgrade)
+static nvn_hmap g_tex_live;   // defined below (serials of live texture objects)
+enum { TWIN_SERS = 8 };
+typedef struct { uint32_t n, over; uint64_t ser[TWIN_SERS]; } twin_sers;
+static nvn_hmap g_twin_par = {.klen = sizeof(uintptr_t)};
+static void twin_par_add(const void *o, uint64_t serial) {   // caller holds g_smu
+    uintptr_t k = (uintptr_t)o; twin_sers *l = nvn_hm_get(&g_twin_par, &k);
+    if (!l) { l = realloc_or_die(NULL, sizeof *l, "the sRGB / linear twin lists"); memset(l, 0, sizeof *l); nvn_hm_put(&g_twin_par, &k, l); }
+    for (uint32_t i = 0; i < l->n; i++) if (l->ser[i] == serial) return;
+    if (l->n == TWIN_SERS) { uint32_t m = 0;   // serials from 2^62 up are external textures (tex_put), never finalized
+        for (uint32_t i = 0; i < l->n; i++) if (l->ser[i] >= (1ull << 62) || nvn_hm_get(&g_tex_live, &l->ser[i])) l->ser[m++] = l->ser[i];
+        l->n = m; }
+    if (l->n < TWIN_SERS) l->ser[l->n++] = serial; else l->over = 1;
+}
+// o left the sharing table: with note (a storage takeover's eviction), each serial that took a twin view of it is noted. → 1 when the list was full of live serials (the caller's
+// bump must then have no note). Caller holds g_smu
+static int twin_par_take(const void *o, int note) {
+    uintptr_t k = (uintptr_t)o; twin_sers *l = g_twin_par.n ? nvn_hm_del(&g_twin_par, &k) : NULL;
+    if (!l) return 0;
+    if (note) for (uint32_t i = 0; i < l->n; i++) ser_note(l->ser[i]);
+    int over = (int)l->over; free(l); return over;
+}
 // The sharing table's two writers: an entry goes in and out with its cells (alias_index), its place in g_alias_set and its last lookup (g_alias_seen), so none of them can be
-// left out. A removed texture is retired (deferred release). Caller holds g_smu
+// left out. A removed texture is retired (deferred release) and its twin list dropped (g_twin_par; a takeover notes the list first). Caller holds g_smu
 static void alias_put(const alias_key *k, id o) {
     if (!g_alias_set) g_alias_set = CFSetCreateMutable(NULL, 0, NULL);
     hm_put_id(&g_alias, k, o); alias_index(k, 1); CFSetAddValue(g_alias_set, (__bridge const void *)o); nvn_hm_put(&g_alias_seen, k, (void *)(uintptr_t)(g_fence + 1));
@@ -2648,6 +2676,7 @@ static int alias_del(const alias_key *k) {
     alias_index(k, 0); nvn_hm_del(&g_alias_seen, k);
     id o = CFBridgingRelease(old);
     if (g_alias_set) CFSetRemoveValue(g_alias_set, (__bridge const void *)o);
+    twin_par_take((__bridge const void *)o, 0);
     defer_obj_release(o);
     return 1;
 }
@@ -2701,8 +2730,9 @@ void mtl_alias_drop_pool(const void *pool) {
 // finalizes the texture before the next one: each image added an entry, 468 of them and 1.58 GB of GPU memory 24,000 frames into a new game. The texture is retired (deferred until
 // the submissions that used it complete); one a finalized object still resolves through g_ghost stays resident until the ring lets it go (defer_drain, g_retire_held).
 // The change records a note that names no texture (ser_note(0)), as it changes no serial's texture: an entry a live serial holds is not evicted (serial_table_holds), and one a finalized
-// serial holds through g_ghost keeps its texture. A live sRGB / linear twin's serial holds a view of the shared texture, not the texture, so that texture can go while the twin is live;
-// tex_mtl_ then finds the view stale and drops it (serial_del), a note naming that serial. A retired ID's view goes at the submission's end (treg_finish_submission), and the
+// serial holds through g_ghost keeps its texture. A live sRGB / linear twin's serial holds a view of the shared texture, not the texture, so that texture can go while the twin is live:
+// the serials that took a twin view of it are noted too (g_twin_par), so their IDs take the slow path, where tex_mtl_ finds the view stale and drops it (serial_del); a twin list
+// full of live serials makes the bump a bare one instead. A retired ID's view goes at the submission's end (treg_finish_submission), and the
 // pool tables take those IDs again at the next one (pool_snap.trans). With no note, every takeover (about 8,400 in six minutes walking through Ocarina of Time's Kokiri Forest) sent
 // every texture ID down the slow path and made the next walk build the 33,025-entry table whole. Caller holds g_smu
 enum { ALIAS_IDLE = 16 };
@@ -2711,6 +2741,7 @@ static void alias_take_over(const alias_key *nk) {
     nvn_texlayout L; nvn_tex_layout(&nk->d, &L);
     if (!L.size) return;
     int64_t lo = nk->off, hi = nk->off + (int64_t)L.size;
+    int twin_over = 0;   // a twin list of an evicted texture was full of live serials (twin_par_take)
     uint32_t n = 0; alias_key ks[16];
     for (int64_t c = lo >> ALIAS_CELL; c <= (hi - 1) >> ALIAS_CELL && n < 16; c++) {   // the entries whose storage reaches into this one's cells (alias_index)
         uint64_t ck[2] = {nk->pool, (uint64_t)c}; const alias_cell *v = nvn_hm_get(&g_alias_cells, ck);
@@ -2725,8 +2756,8 @@ static void alias_take_over(const alias_key *nk) {
             ks[n++] = *k;
         }
     }
-    for (uint32_t j = 0; j < n; j++) alias_del(&ks[j]);
-    if (n) { ser_note(0); g_alias_taken += n; }
+    for (uint32_t j = 0; j < n; j++) { twin_over |= twin_par_take(nvn_hm_get(&g_alias, &ks[j]), 1); alias_del(&ks[j]); }   // the serials that took a twin view of it are noted (g_twin_par)
+    if (n) { if (twin_over) g_ser_gen++; else ser_note(0); g_alias_taken += n; }
 }
 static __unsafe_unretained id serial_get(uint64_t k) { pthread_mutex_lock(&g_smu); __unsafe_unretained id o = hm_get_id(&g_by_serial, &k); pthread_mutex_unlock(&g_smu); return o; }
 static void serial_put(uint64_t k, id o) { pthread_mutex_lock(&g_smu); id old = hm_get_id(&g_by_serial, &k); if (old) { held_add((__bridge void *)old, -1); if (alias_has(old)) defer_obj_unref(old); else defer_obj_release(old); } hm_put_id(&g_by_serial, &k, o); held_add((__bridge void *)o, 1); ser_note(k); pthread_mutex_unlock(&g_smu); }
@@ -3022,7 +3053,8 @@ static id<MTLTexture> tex_upgrade(const tex_t *t, id<MTLTexture> asked, MTLTextu
             if (g_alias.vals[i] != (__bridge void *)base) continue;
             void *old = g_alias.vals[i]; g_alias.vals[i] = (void *)CFBridgingRetain(upgraded); CFRelease(old); shared = 1;
         }
-        if (shared) { CFSetRemoveValue(g_alias_set, (__bridge const void *)base); CFSetAddValue(g_alias_set, (__bridge const void *)upgraded); }
+        if (shared) { CFSetRemoveValue(g_alias_set, (__bridge const void *)base); CFSetAddValue(g_alias_set, (__bridge const void *)upgraded); twin_par_take((__bridge const void *)base, 0);
+            if (view) twin_par_add((__bridge const void *)upgraded, t->serial); }   // the bump below has no note; the asking serial's view is made again on upgraded below (g_twin_par)
         g_ser_gen++;
         pthread_mutex_unlock(&g_smu);
         if (view) {
@@ -4523,7 +4555,7 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
     {   // NVN textures over the same storage share its bytes. One that differs from a shared texture only by the other format of an sRGB / linear pair is a view of it: as its own Metal
         // texture, Mario Kart World's Grand Prix movie (an RGBA8 render target the YUV pass writes, sampled by the composite through an RGBA8_SRGB texture) showed a frozen frame
         // The other formats of the pair are looked up directly (srgb_twins), with the rest of the key unchanged; the descriptor is built only when one is shared
-        const uint8_t *tw = srgb_twins(ak.d.format); id<MTLTexture> v = nil;
+        const uint8_t *tw = srgb_twins(ak.d.format); id<MTLTexture> v = nil; int retry = 0;
         for (int j = 0; j < 4 && tw[j] && !v; j++) {
             alias_key k; memcpy(&k, &ak, sizeof k); k.d.format = tw[j];   // memcpy keeps the zeroed padding the table hashes
             pthread_mutex_lock(&g_smu); id<MTLTexture> b = hm_get_id(&g_alias, &k); pthread_mutex_unlock(&g_smu);
@@ -4532,7 +4564,12 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
             if (!d || d.sampleCount > 1 || (d.textureType != MTLTextureType2D && d.textureType != MTLTextureType2DArray)) break;
             if (b.pixelFormat == d.pixelFormat || tex_need_pfv(b.pixelFormat, d.pixelFormat) || b.textureType != d.textureType) continue;
             v = [b newTextureViewWithPixelFormat:d.pixelFormat textureType:b.textureType levels:NSMakeRange(0, b.mipmapLevelCount) slices:NSMakeRange(0, b.arrayLength) swizzle:b.swizzle];
-            if (v) { pthread_mutex_lock(&g_smu); nvn_hm_put(&g_alias_seen, &k, (void *)(uintptr_t)(g_fence + 1)); pthread_mutex_unlock(&g_smu); }
+            // b is looked up again under the lock that lists it: a takeover on another thread (tex_mtl_ also runs on the present thread and in mtl_read_texels) may have evicted
+            // it since and found no list to note. Then the view is not of what holds the storage now: dropped, and the same key looked up again (twice at most)
+            if (v) { pthread_mutex_lock(&g_smu);
+                if (hm_get_id(&g_alias, &k) == b) { nvn_hm_put(&g_alias_seen, &k, (void *)(uintptr_t)(g_fence + 1)); twin_par_add((__bridge const void *)b, t->serial); }   // a takeover of b notes this serial
+                else { v = nil; if (retry++ < 2) j--; }
+                pthread_mutex_unlock(&g_smu); }
         }
         if (v) { tex_put(t->serial, v); return v; }
     }

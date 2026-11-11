@@ -227,6 +227,10 @@ Click **Play** (or press Return) to start the game. **Quit**, ⌘Q or closing th
 
 Turn off **Show this window at launch** to start the game at once with your choices. Hold Option while the app opens to see the window again. `DM_LAUNCHER=0` in the app's `env.txt` (`~/Library/Application Support/nxnative/<title ID>/env.txt`) or in its environment, or opening it with `open <app> --args --no-launcher`, also skips the window; your choices still apply. `DM_SAVED_CHOICES=0` starts with the tested defaults instead.
 
+**Language** under **General** at the top of the Mac window offers **English** and **Simplified Chinese**, with a note that the choice applies only to this settings window. Each launch starts in the system's best supported language, or English when none is supported. A manual change takes effect immediately for this launch, independently of the game settings. **Game language** changes the game's language only. System-owned controls, such as the file picker and Bluetooth permission dialog, follow macOS's language. The iPhone and iPad settings screens keep their existing text.
+
+The Mac string tables are `dm/mac/Resources/<language>.lproj/Launcher.strings`; `InfoPlist.strings` holds the Bluetooth permission text. English source text is the lookup key. When adding a translation, keep those keys and format arguments (`%@`, `%d`) unchanged. Translate only display text: setting identifiers, option values and section identities in `launcher.json` remain unchanged. The interface choice stays in memory; it never changes `DM_LANG` or macOS's language preferences. `pack_app.py` includes these resources in each Mac app and in its reuse check.
+
 ### Display mode
 
 **Window** or **Fullscreen**: how the game's window opens. ⌃⌘F or the green button changes it while you play. In an `env.txt`: `DM_FULLSCREEN=1` or `0`.

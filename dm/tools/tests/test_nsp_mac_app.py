@@ -110,7 +110,7 @@ class PackReuse(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp(prefix='pack-reuse-', dir=TEST_ROOT)).resolve()
         self.addCleanup(shutil.rmtree, self.tmp)
         t = self.tmp
-        for d in ('patched', 'romfs/empty', 'msl', 'profile', 'font', 'aoc/1', 'pso', 'bin', 'sdk', 'source', 'host', 'tools', 'ios/Sources'):
+        for d in ('patched', 'romfs/empty', 'msl', 'profile', 'font', 'aoc/1', 'pso', 'bin', 'sdk', 'source/Resources/en.lproj', 'source/Resources/zh-Hans.lproj', 'host', 'tools', 'ios/Sources'):
             (t / d).mkdir(parents=True)
         files = {
             'dmhost': b'host', 'patched/main.patched.bin': b'code', 'patched/main.fixups.tsv': b'fixups',
@@ -121,7 +121,11 @@ class PackReuse(unittest.TestCase):
             'pso/gpu-prewarm-00.mtl4a': b'bases', 'pso/gpu-prewarm-00.keys': b'DMPSOIX1', 'pso/prewarm.tsv': b'stamp',   # --prebake's files and their index
             'env.txt': b'DM_TEST=1', 'split.tsv': b'split', 'icon.jpg': b'jpeg', 'source/launcher.c': b'launcher',
             'host/romfs_image.h': b'validator', 'host/save_sync.c': b'sync', 'host/save_sync.h': b'sync api', 'tools/romfs.py': b'reader',
-            'source/Launcher.swift': b'window', 'ios/Sources/LauncherSettings.swift': b'model', 'ios/Sources/LauncherRow.swift': b'rows', 'ios/Sources/SaveSyncReport.swift': b'report',
+            'source/Launcher.swift': b'window', 'source/I18n.swift': b'localization',
+            'source/Resources/en.lproj/Launcher.strings': b'"Play" = "Play";', 'source/Resources/zh-Hans.lproj/Launcher.strings': '"Play" = "\u5f00\u59cb\u6e38\u620f";'.encode(),
+            'source/Resources/en.lproj/InfoPlist.strings': b'"NSBluetoothAlwaysUsageDescription" = "Controllers";',
+            'source/Resources/zh-Hans.lproj/InfoPlist.strings': b'"NSBluetoothAlwaysUsageDescription" = "Localized controllers";',
+            'ios/Sources/LauncherSettings.swift': b'model', 'ios/Sources/LauncherRow.swift': b'rows', 'ios/Sources/SaveSyncReport.swift': b'report',
         }
         for n in pack_app.TABLES: files['profile/' + n] = n.encode()
         for n, content in files.items(): (t / n).write_bytes(content)
@@ -206,7 +210,9 @@ class PackReuse(unittest.TestCase):
         names = ['dmhost', 'patched/main.patched.bin', 'patched/main.fixups.tsv', 'patched/main.gates.tsv', 'patched/main.cuts.tsv',
                  'patched/main.obs.tsv', 'patched/nro.tsv', 'msl/k.metallib', 'msl/k.json', 'msl/inputs.tsv', 'font/nintendo_ext.ttf',
                  'pso/gpu.mtl4a', 'pso/prebuilt.tsv', 'pso/rest_pairs.tsv', 'pso/archive.tsv', 'pso/gpu-prewarm-00.mtl4a', 'pso/gpu-prewarm-00.keys', 'pso/prewarm.tsv', 'env.txt', 'icon.jpg', 'source/launcher.c',
-                 'source/Launcher.swift', 'ios/Sources/LauncherSettings.swift', 'ios/Sources/LauncherRow.swift', 'ios/Sources/SaveSyncReport.swift',   # the settings window's sources
+                 'source/Launcher.swift', 'source/I18n.swift', 'ios/Sources/LauncherSettings.swift', 'ios/Sources/LauncherRow.swift', 'ios/Sources/SaveSyncReport.swift',   # the settings window's sources
+                 'source/Resources/en.lproj/Launcher.strings', 'source/Resources/zh-Hans.lproj/Launcher.strings',
+                 'source/Resources/en.lproj/InfoPlist.strings', 'source/Resources/zh-Hans.lproj/InfoPlist.strings',
                  'host/save_sync.c', 'host/save_sync.h']   # the cloud-save code the launcher links (its send after the host exits)
         names += ['profile/' + n for n in pack_app.TABLES]
         for name in names:
@@ -267,7 +273,26 @@ class PackReuse(unittest.TestCase):
         self.assertIn(c[c.index('-o') + 1], s)   # launcher.c's object, with its main
         sync = next(c for c in self.commands if Path(c[0]).name == 'clang' and '-o' in c and c[-1].endswith('save_sync.c'))
         self.assertIn(sync[sync.index('-o') + 1], s)   # save_sync.c's object: the launcher sends the save once the host has exited
-        self.assertEqual([Path(x).name for x in s if x.endswith('.swift')], ['Launcher.swift', 'LauncherSettings.swift', 'LauncherRow.swift', 'SaveSyncReport.swift'])
+        self.assertEqual([Path(x).name for x in s if x.endswith('.swift')], ['Launcher.swift', 'I18n.swift', 'LauncherSettings.swift', 'LauncherRow.swift', 'SaveSyncReport.swift'])
+
+    def test_localization_resources_are_copied_and_changes_invalidate_reuse(self):
+        self.pack(); self.assert_reused()
+        source = self.tmp / 'source/Resources'
+        resources = Path(self.args.out) / 'Contents/Resources'
+        for name in ('en.lproj/Launcher.strings', 'zh-Hans.lproj/Launcher.strings', 'en.lproj/InfoPlist.strings', 'zh-Hans.lproj/InfoPlist.strings'):
+            self.assertEqual((resources / name).read_bytes(), (source / name).read_bytes())
+        for name in ('fr.lproj/Launcher.strings', 'fr.lproj/InfoPlist.strings'):
+            with self.subTest(table=name):
+                added = source / name
+                added.parent.mkdir(exist_ok=True); added.write_text('"Play" = "Jouer";')
+                self.assert_repacked()
+                self.assertEqual((resources / name).read_bytes(), added.read_bytes())
+                self.assert_reused()
+                added.write_text('"Play" = "Commencer";'); self.assert_repacked()
+                self.assertEqual((resources / name).read_bytes(), added.read_bytes())
+                added.unlink(); self.assert_repacked()
+                self.assertFalse((resources / name).exists())
+                self.assert_reused()
 
     def test_selected_file_modes_and_file_additions_and_removals_invalidate(self):
         self.pack()
@@ -340,7 +365,7 @@ class PackReuse(unittest.TestCase):
     def test_missing_selected_inputs_fail_before_reuse_or_partial_creation(self):
         self.pack()
         for name in ('dmhost', 'patched/main.fixups.tsv', 'msl/k.metallib', 'romfs/marker', 'pso/prebuilt.tsv', 'env.txt', 'icon.jpg',
-                     'font', 'aoc', 'profile', 'bin/clang', 'bin/swiftc', 'sdk', 'bin/codesign', 'source/launcher.c', 'source/Launcher.swift', 'ios/Sources/LauncherRow.swift', 'ios/Sources/SaveSyncReport.swift'):
+                     'font', 'aoc', 'profile', 'bin/clang', 'bin/swiftc', 'sdk', 'bin/codesign', 'source/launcher.c', 'source/Launcher.swift', 'source/I18n.swift', 'ios/Sources/LauncherRow.swift', 'ios/Sources/SaveSyncReport.swift'):
             with self.subTest(name=name):
                 p = self.tmp / name; hidden = p.with_name(p.name + '.hidden'); p.rename(hidden)
                 try:
@@ -488,6 +513,8 @@ class App(unittest.TestCase):
         self.assertTrue((c / 'Resources/aoc/1/x').is_file()); self.assertTrue((c / 'Resources/dm/font/nintendo_ext.ttf').is_file())
         self.assertEqual(sorted(p.name for p in (c / 'Resources/pso').iterdir()), ['applegpu_g14s.mtl4a', 'prebuilt.tsv'])   # the pipeline archive and its stamp only
         self.assertEqual((c / 'Resources/AppIcon.icns').read_bytes()[:4], b'icns')
+        for strings in pack_app.localization_files():
+            self.assertEqual((c / 'Resources' / strings.parent.name / strings.name).read_bytes(), strings.read_bytes())
 
     def test_pipeline_pair_tables(self):   # the pipeline prebuild reads them beside DM_NVN_SHMAP: without them it builds nothing, though every shader library is there
         dm = self.app / 'Contents/Resources/dm'
@@ -507,6 +534,7 @@ class App(unittest.TestCase):
         p = plistlib.loads((self.app / 'Contents/Info.plist').read_bytes())
         self.assertEqual((p['CFBundleExecutable'], p['CFBundleName'], p['CFBundleIdentifier'], p['CFBundleShortVersionString']), ('nxnative', 'Game: Test', 'org.nxnative.01008cf01baac000', '1.0.1'))
         self.assertEqual((p['DMTitleID'], p['DMLanguage'], p['DMRomfsMarker'], p['CFBundleIconFile']), (TID, 'fr', 'region_common/audio/edward.bfsar', 'AppIcon'))
+        self.assertEqual(p['CFBundleDevelopmentRegion'], 'en')
         self.assertIs(p['LSSupportsGameMode'], False)   # macOS's Game Mode holds the GPU at its lowest clock (frame-rate.md)
         self.assertEqual(p['DMSettings'], [])   # launcher.json's settings, as the saved choices they accept: none here
         self.assertRegex(p['DMCommit'], r'^[0-9a-f]{12}(\+dirty)?$')   # the packing checkout (scripts/bug_report.py, the host's start line)
@@ -619,10 +647,14 @@ class App(unittest.TestCase):
         broken = self.tmp / 'Broken.app'; shutil.rmtree(broken, ignore_errors=True)
         subprocess.run(['/bin/cp', '-R', self.app, broken], check=True)
         shutil.rmtree(broken / 'Contents/Resources/romfs')
-        (self.tmp / 'home/alert.txt').unlink(missing_ok=True)
-        p = subprocess.run([broken / 'Contents/MacOS/nxnative'], env=dict(HOME=str(self.tmp / 'home'), PATH=f'{self.tmp / "bin"}:/usr/bin:/bin'), capture_output=True, text=True, timeout=30)
-        self.assertEqual(p.returncode, 1)
-        self.assertIn('game data inside this app is missing', (self.tmp / 'home/alert.txt').read_text())
+        for language, expected in [('en', 'game data inside this app is missing'), ('zh-Hans', '游戏数据缺失或不完整')]:
+            with self.subTest(language=language):
+                (self.tmp / 'home/alert.txt').unlink(missing_ok=True)
+                p = subprocess.run([broken / 'Contents/MacOS/nxnative', '-AppleLanguages', f'({language})'],
+                                   env=dict(HOME=str(self.tmp / 'home'), PATH=f'{self.tmp / "bin"}:/usr/bin:/bin'), capture_output=True, text=True, timeout=30)
+                self.assertEqual(p.returncode, 1)
+                self.assertIn(expected, (self.tmp / 'home/alert.txt').read_text())
+                self.assertIn('game data inside this app is missing', p.stderr)   # diagnostic logs keep their source text
 
     def test_missing_modules(self):
         for missing in (('main.patched.bin',), ('main.fixups.tsv',), ('main.patched.bin', 'main.fixups.tsv')):
@@ -632,7 +664,7 @@ class App(unittest.TestCase):
                 for name in missing: (broken / 'Contents/Resources/dm' / name).unlink()
                 home = self.tmp / 'home'
                 for name in ('alert.txt', 'host_run.txt'): (home / name).unlink(missing_ok=True)
-                p = subprocess.run([broken / 'Contents/MacOS/nxnative'], env=dict(HOME=str(home), PATH=f'{self.tmp / "bin"}:/usr/bin:/bin'),
+                p = subprocess.run([broken / 'Contents/MacOS/nxnative', '-AppleLanguages', '(en)'], env=dict(HOME=str(home), PATH=f'{self.tmp / "bin"}:/usr/bin:/bin'),
                                    capture_output=True, text=True, timeout=30)
                 self.assertEqual(p.returncode, 1)
                 self.assertFalse((home / 'host_run.txt').exists())
@@ -646,7 +678,7 @@ class App(unittest.TestCase):
         shutil.rmtree(broken / 'Contents/Resources/romfs')
         home = self.tmp / 'home'
         (home / 'alert.scpt').unlink(missing_ok=True)
-        p = subprocess.run([broken / 'Contents/MacOS/nxnative'], env=dict(HOME=str(home), PATH=f'{self.tmp / "bin"}:/usr/bin:/bin'),
+        p = subprocess.run([broken / 'Contents/MacOS/nxnative', '-AppleLanguages', '(en)'], env=dict(HOME=str(home), PATH=f'{self.tmp / "bin"}:/usr/bin:/bin'),
                            capture_output=True, text=True, timeout=30)
         self.assertEqual(p.returncode, 1)
         self.assertTrue((home / 'alert.scpt').exists(), (home / 'alert.error').read_text())

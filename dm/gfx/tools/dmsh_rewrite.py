@@ -526,7 +526,7 @@ static inline __attribute__((always_inline)) float4 dm_bz(float4 c, uint m)
     if (!((m == 1u && c.w == 0.0f) || (m == 2u && c.w == 1.0f))) return c;
     return float4(select(c.xyz, float3(0.0f), (as_type<uint3>(c.xyz) & uint3(0x7f800000u)) == uint3(0x7f800000u)), c.w);   // NaN or Inf by its bits: fast math may assume there is none
 }
-static inline __attribute__((always_inline)) void dm_blend0(main0_out& dm_o, constant dm_blend_state& dm_s)
+static inline __attribute__((always_inline)) void dm_blend0(thread main0_out& dm_o, constant dm_blend_state& dm_s)
 {
     uint m = dm_s.zero;
     if (m == 0u) return;

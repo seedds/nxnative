@@ -3,7 +3,7 @@
 // players 2..8 are full-key controllers on No2..No8 (ids 1..7) while the front end reports a controller for them (dm_pad_players; the Mac gives each physical controller a player
 // of its own, front_mac.m). A player whose npad the game does not support (SetSupportedNpadIdType) is not reported: in a one-player game it feeds player 1, otherwise it is not used.
 // Six-axis sensor: one per connected controller (two for handheld), at rest lying flat, player 1's shaken side to side while the front end holds DM_BTN_SHAKE (see the six-axis section below).
-// Vibration follows the player assignments through hle_haptics.c. Mouse and keyboard: not connected; the controller applet reports the connected players with player 1 selected.
+// Vibration follows the player assignments through hle_haptics.c. Mouse and keyboard: not connected; the controller applet reports the connected players with player 1 selected, and leaves out those past the game's maximum.
 #include "hle.h"
 #include "hle_haptics.h"
 #include "dm_input.h"
@@ -229,7 +229,7 @@ void hid_keys_init(void) {
 //   Look at a screen, decide, press, look again: menus whose timing moves from run to run (loading) need no blind timed script
 static void *ctl_main(void *arg) {
     const char *path = arg; long off = 0; char line[1100];
-    if (getenv("DM_PREV_PROGRAM")) {   // oe::ExecuteProgram started this program in the last one's place: that program acted on what the file holds
+    if (getenv("DM_PREV_PROGRAM") || getenv("DM_RELAUNCH")) {   // oe::ExecuteProgram or oe::RequestToRelaunchApplication started this program in the last one's place: that program acted on what the file holds
         FILE *f0 = fopen(path, "r"); if (f0) { if (!fseek(f0, 0, SEEK_END)) off = ftell(f0); fclose(f0); }
     }
     for (;;) {
@@ -286,16 +286,20 @@ uint32_t dm_player_npad(int p) { return p <= 0 ? connected_id() : (uint32_t)p; }
 // The players with a controller (bit p = player p + 1, from the front end's dm_pad_players; player 1 always) and the npads the game supports (bit id for No1..No8, bit 8
 // Handheld, bit 9 Other: all of them until SetSupportedNpadIdType, as the hid service starts)
 static _Atomic uint32_t g_players = 1, g_ids_supported = 0x3ff;
+// The players the controller applet left out (ctrl_support): those past the game's playerCountMax when it last opened, and whether that maximum was one. On a Switch the
+// applet leaves no more controllers connected than the game takes; here such a player is not reported, as one on an npad the game does not support
+static _Atomic uint32_t g_benched, g_bench_one;
 static uint32_t id_bit(uint32_t id) { return id < DM_PLAYERS ? 1u << id : id == NPAD_HANDHELD ? 1u << 8 : id == 0x10 ? 1u << 9 : 0; }
-static int reported(int p) { return p == 0 || (atomic_load(&g_players) >> p & 1 && atomic_load(&g_ids_supported) & id_bit((uint32_t)p)); }
-// Players with a controller whose npad the game does not support. A one-player game (no npad past No1 supported) gets them as player 1, so any controller plays it; in a game for
-// fewer players than are connected (a fifth controller in a four-player game) they are not used, as on the Switch, where the system does not connect them
+static int reported(int p) { return p == 0 || (atomic_load(&g_players) >> p & 1 && atomic_load(&g_ids_supported) & id_bit((uint32_t)p) && !(atomic_load(&g_benched) >> p & 1)); }
+// Players with a controller that the game does not see: their npad is not supported, or the controller applet left them out. A one-player game (no npad past No1 supported, or
+// an applet opened for one player) gets them as player 1, so any controller plays it; in a game for fewer players than are connected (a fifth controller in a four-player game)
+// they are not used, as on the Switch, where the system does not connect them
 static uint32_t unsupported_players(void) {
     uint32_t m = 0; for (int p = 1; p < DM_PLAYERS; p++) if (atomic_load(&g_players) >> p & 1 && !reported(p)) m |= 1u << p;
     return m;
 }
 static int one_player(void) { return !(atomic_load(&g_ids_supported) & ((1u << DM_PLAYERS) - 2)); }
-static uint32_t merged_players(void) { return one_player() ? unsupported_players() : 0; }
+static uint32_t merged_players(void) { return one_player() ? unsupported_players() : atomic_load(&g_bench_one) ? atomic_load(&g_benched) & atomic_load(&g_players) : 0; }
 static int player_of(uint32_t id) {   // the reported player on npad id; -1 when none
     if (id == connected_id()) return 0;
     return id > 0 && id < DM_PLAYERS && reported((int)id) ? (int)id : -1;
@@ -394,17 +398,19 @@ void dm_joy_set(int p, int side, uint64_t buttons, int32_t sx, int32_t sy) {
     uint64_t old = atomic_exchange(&g_joy_btn[p][side], buttons); atomic_fetch_or(&g_joy_latch[p][side], buttons & ~old);
     atomic_store(&g_joy_axes[p][side], pack(sx, sy, 0, 0));
 }
-static void note_merged(void) {   // logs the players whose npad the game does not support, when that changes
-    static _Atomic uint32_t last; uint32_t m = unsupported_players(), one = (uint32_t)one_player();
-    if (atomic_exchange(&last, m | one << 31) == (m | one << 31)) return;
+static void note_merged(void) {   // logs the players the game does not see, when they change
+    static _Atomic uint32_t last; uint32_t m = unsupported_players(), one = (uint32_t)one_player(), b = atomic_load(&g_benched) & m, bone = atomic_load(&g_bench_one), key = m | b << 8 | bone << 30 | one << 31;
+    if (atomic_exchange(&last, key) == key) return;
     for (int p = 1; p < DM_PLAYERS; p++) if (m >> p & 1) {
-        if (one) LOG("hid: player %d's controller feeds player 1: the game supports one player (no npad %d)", p + 1, p);
+        if (b >> p & 1 && atomic_load(&g_ids_supported) & id_bit((uint32_t)p)) LOG("hid: player %d's controller %s: the controller applet left it out (more players than the game asked for)", p + 1, one || bone ? "feeds player 1" : "is not used");
+        else if (one) LOG("hid: player %d's controller feeds player 1: the game supports one player (no npad %d)", p + 1, p);
         else LOG("hid: player %d's controller is not used: the game supports no npad %d", p + 1, p);
     }
 }
 void dm_pad_players(uint32_t mask) {
     mask = (mask | 1u) & ((1u << DM_PLAYERS) - 1);
     uint32_t old = atomic_exchange(&g_players, mask);
+    atomic_fetch_and(&g_benched, mask);   // a controller that went away is no longer left out: the next one on its slot is a player until the applet says otherwise
     for (int p = 1; p < DM_PLAYERS; p++) if ((old ^ mask) >> p & 1 && !(mask >> p & 1)) dm_pad_set_player(p, 0, 0, 0, 0, 0);   // a controller that went away leaves nothing pressed
     styles_sync();
     note_merged();
@@ -618,6 +624,7 @@ HLE_FORCE("_ZN2nn3hid14InitializeNpadEv", "connect to the hid service; the host 
 HLE_FORCE("_ZN2nn3hid22SetSupportedNpadIdTypeEPKjm", "supported controller ids; the host records them and reports further players only on supported ids", void, h_hid_SetIds, const uint32_t *ids, uint64_t n) {
     uint32_t m = 0; for (uint64_t i = 0; ids && i < n; i++) m |= id_bit(ids[i]);
     if (atomic_exchange(&g_ids_supported, m) == m) return;
+    atomic_store(&g_benched, 0);   // the game names its npads anew: whoever the controller applet left out counts again
     for (int p = 0; p < DM_PLAYERS; p++) dm_haptics_clear(p);
     LOG("hid supported controller ids %#x (bit n: No n+1, bit 8 Handheld, bit 9 Other)", m);
     styles_sync();
@@ -660,6 +667,11 @@ HLE_FORCE("_ZN2nn3hid20StopLrAssignmentModeEv", "L/R assignment mode; ignored by
 // (GitHub issue #1640: Mario Kart World's player screen closed when the second controller had not pressed yet). Without a window, or with scripted input (DM_KEYS, DM_CTL), nobody
 // is at the controllers: the host answers at once, as the player closing it. An OK with fewer players is an answer a Switch never gives: Mario Kart 8 Deluxe asks for two in 2P
 // and opened the applet again every few frames on it (GitHub issue #550)
+// More players than the maximum: on a Switch the applet leaves no more controllers connected than the game takes. The host answered with the count capped and left every npad
+// connected, so a game that takes one player saw two and opened the applet again, 1,671 times in one run of Ocarina of Time, with no input (GitHub issue #2237). The players
+// past the maximum, the highest first, are now left out (g_benched) until the applet opens for more players, the game sets its supported npads again or their controller goes
+// away; with a maximum of one their controllers feed player 1, as in a game that supports one npad, so whichever controller the player holds plays. No prompt asks which
+// controller stays: a Switch's does, and with a maximum above one the lowest players stay here
 // Both overloads run on the big host stack (HLE_FORCE_BIG): with too few players the front end's prompt runs on the game's thread, and Drag x Drive opens the applet from a
 // thread with less than a log line's worth of stack left (PR #1943; memory.md, Host calls on small guest stacks)
 #define RES_CTRL_CANCELED (202u | 3101u << 9)
@@ -669,6 +681,10 @@ int dm_players_reported(void) {   // a pair of Joy-Cons split into two npads is 
 }
 static Result ctrl_support(int32_t *info, const int8_t *arg) {
     int count = dm_players_reported(), canceled = 0;
+    uint32_t bench_was = atomic_load(&g_benched);
+    // The game takes more players than it sees: those left out before count again, the lowest first
+    for (int p = 1; arg && p < DM_PLAYERS && (arg[1] <= 0 || count < arg[1]); p++)
+        if (atomic_load(&g_benched) >> p & 1) { atomic_fetch_and(&g_benched, ~(1u << p)); count = dm_players_reported(); }
     // Too few players, but a pair of Joy-Cons is two when each is held sideways (single assignment): the applet splits the pair, as the player does on a Switch, to reach the minimum
     for (int p = 0; arg && count < arg[0] && p < DM_PLAYERS; p++)
         if (reported(p) && joy_active(p) && atomic_load(&g_joy_sides[p]) == 3 && !(atomic_load(&g_single_mask) >> p & 1)) {
@@ -685,11 +701,20 @@ static Result ctrl_support(int32_t *info, const int8_t *arg) {
         }
         canceled = r <= 0 || arg[0] > count;
     } else if (arg) LOG("hid controller applet: %d to %d players wanted, %d connected", arg[0], arg[1], count);
-    if (arg && arg[1] > 0 && count > arg[1]) count = arg[1];
+    for (int p = DM_PLAYERS - 1; arg && arg[1] > 0 && p > 0 && count > arg[1]; p--)
+        if (reported(p)) { atomic_fetch_or(&g_benched, 1u << p); count = dm_players_reported(); }
+    // The lowest players stay: one left out before takes the place of a higher player that connected since
+    for (int q = 1; arg && q < DM_PLAYERS; q++) if (atomic_load(&g_benched) >> q & 1)
+        for (int p = DM_PLAYERS - 1; p > q; p--) if (reported(p)) { atomic_store(&g_benched, (atomic_load(&g_benched) | 1u << p) & ~(1u << q)); break; }
+    if (arg) {
+        atomic_store(&g_bench_one, arg[1] == 1);
+        if (atomic_load(&g_benched) != bench_was) { styles_sync(); note_merged(); }   // their npads connect or disconnect: the style events tell the game
+    }
+    if (arg && arg[1] > 0 && count > arg[1]) count = arg[1];   // a split pair of Joy-Cons on player 1 can still be one too many
     if (info) { info[0] = count; info[1] = (int32_t)connected_id(); }
     return canceled ? RES_CTRL_CANCELED : RES_OK;
 }
-HLE_FORCE_BIG("_ZN2nn3hid21ShowControllerSupportEPNS0_27ControllerSupportResultInfoERKNS0_20ControllerSupportArgE", "controller applet; the host reports the connected players (fewer than the minimum: the front end's prompt waits for more, canceled without a window)",
+HLE_FORCE_BIG("_ZN2nn3hid21ShowControllerSupportEPNS0_27ControllerSupportResultInfoERKNS0_20ControllerSupportArgE", "controller applet; the host reports the connected players (fewer than the minimum: the front end's prompt waits for more, canceled without a window; more than the maximum: the highest are left out)",
           Result, h_hid_ShowCtrl, int32_t *info, const int8_t *arg) {
     DM_APPLET("controller support");
     return ctrl_support(info, arg);

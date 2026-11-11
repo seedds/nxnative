@@ -1657,7 +1657,7 @@ The Vulkan layer (`dm/gfx/vk/hle_vk.m`) was written for Hades; Super Mario Galax
 - Dynamic stencil state:
   - the reference is the encoder's;
   - the compare and write masks belong to a Metal depth-stencil state, so the pipeline keeps its depth-stencil description and builds one state per set of masks, cached (`C_STENCIL`).
-- A dynamic line width is ignored: Metal draws 1-pixel lines.
+- A dynamic line width above 1 is drawn as shifted strokes of 1-pixel lines (`nvn_mtl.m` `wide_lines`: the viewport moved by whole pixels across the width's columns and rows; `DM_NVN_LINE_WIDTH=0` draws hairlines): Metal draws 1-pixel lines. Mario Golf: Super Rush's putting and aiming grids are 4 pixels wide, and as hairlines the moving dashes that show a green's slope could hardly be seen.
 - **Found on:** [Super Mario 64 (Super Mario 3D All-Stars)](../../dm/games/010049900F546001/README.md), [Super Mario Sunshine (Super Mario 3D All-Stars)](../../dm/games/010049900F546002/README.md).
 
 ### What a game tears down that it should not

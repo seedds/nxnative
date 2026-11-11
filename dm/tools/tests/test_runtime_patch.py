@@ -71,20 +71,23 @@ class SceneStub(unittest.TestCase):
         ctx = types.SimpleNamespace(here=lambda: base + 4 * len(words), emit=words.append,
                                     site=lambda off, original: checked.append((off, original)), runtime_exports=exports)
         profile.resolution_stub(ctx)
-        # Decode the generated MOVZ/MOVK and branch using the ISA, independently of the encoder.
-        register = None
-        for word in words[:2]:
-            self.assertEqual(word & 31, 21)  # x21 is the packed scene descriptor; no flags/register spills
-            if word & 0xff800000 == 0xd2800000:
-                register = (word >> 5) & 0xffff
-            else:
-                self.assertEqual(word & 0xff800000, 0xf2800000)
-                shift = ((word >> 21) & 3) * 16
-                register = (register & ~(0xffff << shift)) | (((word >> 5) & 0xffff) << shift)
-        assert register is not None
-        self.assertEqual((register & 0xffffffff, register >> 32), (2560, 1440))
-        self.assertEqual(words[2], B(base + 8, profile.scene_site + 4))
-        self.assertEqual(exports, {'SCENE_1440': base})
+        # Decode each generated MOVZ/MOVK and branch using the ISA, independently of the encoder.
+        sizes = []
+        for k in range(0, len(words), 3):
+            register = None
+            for word in words[k:k + 2]:
+                self.assertEqual(word & 31, 21)  # x21 is the packed scene descriptor; no flags/register spills
+                if word & 0xff800000 == 0xd2800000:
+                    register = (word >> 5) & 0xffff
+                else:
+                    self.assertEqual(word & 0xff800000, 0xf2800000)
+                    shift = ((word >> 21) & 3) * 16
+                    register = (register & ~(0xffff << shift)) | (((word >> 5) & 0xffff) << shift)
+            assert register is not None
+            sizes.append((register & 0xffffffff, register >> 32))
+            self.assertEqual(words[k + 2], B(base + 4 * k + 8, profile.scene_site + 4))
+        self.assertEqual(sizes, [(2560, 1440), (3840, 2160)])
+        self.assertEqual(exports, {'SCENE_1440': base, 'SCENE_2160': base + 12})
         self.assertEqual(checked, [(profile.scene_site, '358108aa')])
 
     def test_unknown_game_build_cannot_generate_manifest(self):
@@ -97,6 +100,8 @@ class SceneStub(unittest.TestCase):
         stub = 0x1b37a80
         writes = profile.scene_writes(stub)
         self.assertEqual([(c, off, orig.hex()) for c, off, orig, _ in writes], [('1440p', 0x33170c, '358108aa')])
+        self.assertEqual([c for c, *_ in profile.scene_writes(stub + 12, '2160p')], ['2160p'])
+        self.assertEqual([c[0] for c in profile.CHOICES], ['1440p', '2160p'])
         self.assertEqual(writes[0][3], struct.pack('<I', B(0x33170c, stub)))
         self.assertFalse(any(0x3317ec <= off < 0x3317fc for _, off, _, _ in writes))
 

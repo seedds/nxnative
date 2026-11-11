@@ -82,7 +82,7 @@ DM_HOME_QUIT_TEXT	switch	The texts of the Home button's quit prompt in the playe
 DM_HTML	path	Folder of the offline HTML pages (default: `html` beside the RomFS)
 DM_ICON	path	`=<image>` gives `build_ipa.sh` another app icon (default the `icon.jpg` beside the RomFS)
 DM_IMPORTS	diagnostic	When set, logs each import the loader binds to a host function and each forced takeover
-DM_INTERNAL_RESOLUTION	diagnostic	`default` (or unset) leaves the rewritten text unchanged; `1440p` is an experimental Mac-only internal-scene choice in a matching version-checked `main.runtime.tsv` (Metroid Prime 4 1.1.0 only). Invalid values, builds, layouts or expected instruction bytes stop loading. Not a validated launcher option.
+DM_INTERNAL_RESOLUTION	diagnostic	`default` (or unset) leaves the rewritten text unchanged; `1440p` (validated in play) and `2160p` are experimental Mac-only internal-scene choices in a matching version-checked `main.runtime.tsv` (Metroid Prime 4 1.1.0 only). Invalid values, builds, layouts or expected instruction bytes stop loading. Not a validated launcher option.
 DM_JCMS_LOG	diagnostic	`=1` logs the game's Joy-Con mouse sensor and pointer calls (JcmsState reads, Nmouse handles, states and positions), at most once a second each
 DM_JIT_CAPTURE	path	Folder the Mac host writes what a game's `nn::jit` plugin makes to, one `<key>.jit` per request, for `dm/tools/jit_capture.py`; the NSP script sets it
 DM_JIT_LOG	diagnostic	`1` logs every `nn::jit` `GenerateCode` request

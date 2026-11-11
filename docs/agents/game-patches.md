@@ -50,7 +50,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | `build` → `game` | 60 fps frame step (112 sites) | frame rate | kept: 1.0.1 (2019) is the last update; a function match would serve no other build of this game | checked: nso_fnmap of its 112 sites into those four mains (2026-11-09) | 1 | [ASTRAL CHAIN](../../dm/games/01007300020FA000/README.md) | the game's own clock and timers (a community 60 fps mod on the host's frame step). PlatinumGames' other games do not share them: none of its 15 functions has an exact match in Bayonetta, Bayonetta 2, Bayonetta 3 or NieR:Automata |
 | `build` → `game` | 60 fps frame step and render scale (ksys::VFR) | frame rate | kept: 44 sites in 34 functions to fingerprint for an update that may not come (1.9.0, the Switch 2 Edition release); convert when a new build appears | checked: nso_fnmap of its 44 sites into those 13 mains (2026-11-09) | 1 | [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) | the game's own frame code; the frame-step state page is general. No engine sibling shares it: none of its 34 functions has an exact match in Tears of the Kingdom, SMO, MK8D, ACNH, Splatoon 2 / 3, Kirby, Mario Party, Ocarina, Smash, Metroid Dread or Origami King (only the widescreen stubs' sead::PerspectiveProjection functions recur) |
 | `build` → `game` | Hagi coroutine stack region 1 GB → 64 MB | memory | kept: 1.1.4 is the last update; a match over Hagi would serve no other build of this game | checked: the final build 1.1.4 (the only one the profile packs), 2026-11-04 | 1 | [Super Mario 3D All-Stars: Super Mario Sunshine](../../dm/games/010049900F546002/README.md) | a size inside Hagi's own code: nothing the host sees tells a 1 GB reservation it can shrink from one it cannot |
-| `build` → unreviewed | experimental 1440p scene descriptor stub (inactive by default) | rendering | unreviewed | judgement | 1 | [Metroid Prime 4: Beyond](../../dm/games/010019A01E2F2000/README.md) | the final scene allocation descriptor and fallback are immediate code in main 1.1.0; gameplay validation and other builds remain open |
+| `build` → unreviewed | experimental 1440p and 2160p scene descriptor stubs (inactive by default) | rendering | unreviewed | judgement | 1 | [Metroid Prime 4: Beyond](../../dm/games/010019A01E2F2000/README.md) | the final scene allocation descriptor and fallback are immediate code in main 1.1.0; gameplay validation and other builds remain open |
 
 ## Summary
 
@@ -354,7 +354,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 
 [Metroid Prime 4: Beyond](../../dm/games/010019A01E2F2000/README.md), `010019A01E2F2000`, [patches.py](../../dm/games/010019A01E2F2000/patches.py).
 
-- **`build` → unreviewed**, rendering, unreviewed, judgement: experimental 1440p scene descriptor stub (inactive by default). The final scene allocation descriptor and fallback are immediate code in main 1.1.0; gameplay validation and other builds remain open
+- **`build` → unreviewed**, rendering, unreviewed, judgement: experimental 1440p and 2160p scene descriptor stubs (inactive by default). The final scene allocation descriptor and fallback are immediate code in main 1.1.0; gameplay validation and other builds remain open
 
 - **1.1.0 `main`** `8275fbe1…` ([patches.py:8](../../dm/games/010019A01E2F2000/patches.py#L8))
 

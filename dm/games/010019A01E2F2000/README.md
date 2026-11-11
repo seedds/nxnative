@@ -168,6 +168,10 @@ Second 1440p manual test (2026-11-11, `manual-test/1440p-1111-154657`): the whit
 - **Probe results (`manual-test/1440p-1111-170322`, `RUMBLE_PROBE=1`):** the rumble setup runs (`main+0x936628`, at boot and again at 17.5 s) and finds `RumbleCategories` (`0x9366a0` each time). From frame 508 the rumble mixer calls the amplitude request (`0xa4e00`, through vtable `+0x58` from `0x2829e0`) for npad 0 every frame. It passes its sums at `[x21]` / `[x20]` times a category gain (`[entry+0xf8]` normalised); a gain of 0 skips the call (`0x282950`), so the gain is positive and the sums are 0. No effect file plays (`0xd350b8` never hit). The host side is complete: handles, routing and output all work, and the zeros come from the game's rumble sources, which no gameplay event fed in 63 s of play.
 - **Blocker (deferred, 2026-11-11):** why the game's rumble sources stay at 0 is in its gameplay rumble system (what fills the sums the mixer reads), not traced. Not a host fault found so far; possibly a condition of the controller or session the game checks that the host answers differently from a console.
 
+### 2160p scene (current: candidate, not run)
+
+Choice `2160p` (`DM_INTERNAL_RESOLUTION=2160p`) is the same single write at `0x33170c` as 1440p, branching to a second stub that packs 3840x2160 (`patches.py` `SCENE_SIZES`, `RUNTIME_SCENE_2160`); 1440p and default are unchanged. Expected cost, an estimate: 2.25 times the 1440p scene's pixels, whose GPU time was 6 to 9 ms a frame in the landing pad, so roughly 13 to 20 ms, at or past the 16.7 ms budget in busy scenes on an M4 Max; the scene's targets grow by about 130 MB. The HUD and output stay 1600x900, so this is supersampling into the original output, as 1440p is.
+
 ### Texture sharpness (current: an A/B candidate)
 
 From the pass dumps of the 1440p and stock runs and the host's sampler code, without a run of its own:

@@ -7,20 +7,22 @@ from nso_asm import B
 
 build_id = '8275fbe1ec5191c279f3a943ad8524f4'
 scene_site = 0x33170c
+SCENE_SIZES = (('SCENE_1440', 2560, 1440), ('SCENE_2160', 3840, 2160))   # runtime_patches.py's choices 1440p and 2160p
 
 
 def resolution_stub(c):
     c.site(scene_site, '358108aa')   # orr x21,x9,x8,lsl #32, common to adaptive and fixed-size paths
-    start = c.here()
-    c.emit(0xd2800000 | (2560 << 5) | 21)   # movz x21,#2560
-    c.emit(0xf2c00000 | (1440 << 5) | 21)   # movk x21,#1440,lsl #32
-    c.emit(B(c.here(), scene_site + 4))
-    c.runtime_exports['SCENE_1440'] = start
+    for name, w, h in SCENE_SIZES:   # one stub per runtime choice, each a branch target of its own manifest write
+        start = c.here()
+        c.emit(0xd2800000 | (w << 5) | 21)   # movz x21,#w
+        c.emit(0xf2c00000 | (h << 5) | 21)   # movk x21,#h,lsl #32
+        c.emit(B(c.here(), scene_site + 4))
+        c.runtime_exports[name] = start
 
 
 STUBS = {build_id: resolution_stub}
 
 BINDING = [
-    {'what': 'experimental 1440p scene descriptor stub (inactive by default)', 'now': 'build', 'goal': 'unreviewed', 'purpose': 'rendering',
+    {'what': 'experimental 1440p and 2160p scene descriptor stubs (inactive by default)', 'now': 'build', 'goal': 'unreviewed', 'purpose': 'rendering',
      'why': 'the final scene allocation descriptor and fallback are immediate code in main 1.1.0; gameplay validation and other builds remain open'},
 ]

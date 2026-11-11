@@ -213,6 +213,9 @@ static int gpu_err_has(NSError *e, NSInteger code, int depth) {
     for (NSError *u in e.underlyingErrors) if (gpu_err_has(u, code, depth + 1)) return 1;
     return 0;
 }
+// Whether a command buffer's error is its own: a victim of another's fault and a submission refused after one ran nothing of their own (Splatoon Raiders, issue #1289), so
+// the failed command buffer reports (cbs_feedback, subrec_failed) leave them out
+static int cb_err_own(NSError *e) { NSString *d = e.description; return e && ![d containsString:@"InnocentVictim"] && ![d containsString:@"SubmissionsIgnored"]; }
 static void gpu_lost_check(NSError *e, const char *where) {
     if (!e || atomic_load(&g_gpu_lost) || !gpu_err_has(e, MTL4CommandQueueErrorAccessRevoked, 0) || atomic_exchange(&g_gpu_lost, 1)) return;
     MLOG("[RED] GPU access revoked: the %s command buffer was ignored (fences back %llu of %llu); macOS runs none of this process's GPU work any more, so the game stops", where,
@@ -1402,8 +1405,119 @@ void mtl_prepare(void) {
 }
 static void sub_cut_begin(void); static void ts_sub_begin(void), ts_boundary(void); static int ts_on(void);
 static void gmem_commit_patch(void);   // the raw pool table words of the arguments encoded so far follow the pools (gmem_slot_note)
+// GPU hang watchdog. A shader that never ends (Hyrule Warriors: Age of Imprisonment's light-list loops in a battle: the game README, "Found on this game") keeps the GPU busy
+// without a fault, so no command buffer completes, no feedback handler runs, g_done stops, and every wait on the CPU for the GPU blocks for good: the allocator wait of the next
+// submission (WS_ALLOC, no timeout) froze the host silently. Metal cannot abort GPU work, so the watchdog only tells: a wait that sees no fence complete for DM_NVN_GPU_WATCHDOG
+// seconds (5 by default, 0 off) while submissions are in flight logs one [RED] line per stuck fence naming the pipelines of the oldest submission in flight (the GPU runs them in
+// order, so that is the one it is stuck on) and of the two after it, from a record each submission keeps of the distinct (vertex, fragment) pairs its draws bound and the compute
+// shaders it dispatched (subrec_add from draw_ and dispatch), per command buffer of the submission and in the order they first ran there, each with the render pass it first ran in.
+// The record is filled by the submit thread and read by other threads only for fences already committed, which the ring rewrites 64 submissions later. The line names what to pass
+// to DM_NVN_SKIP_FS to play on without the looping draws (docs/env_switches.tsv).
+// The same record is printed when a command buffer of the submission fails (subrec_failed): macOS ends a shader that runs too long by aborting its command buffer (issue #1326,
+// Ocarina of Time), so the fence completes with an error, g_done moves on and the watchdog never fires
+#define SUBREC_RING 64
+#define SUBREC_PAIRS 48   // per submission, over all its command buffers; the rest is only counted (n_more)
+#define SUBREC_LINE 8192   // the longest line a report builds: 48 pairs of two 16-character keys with their pass marks fit with room to spare
+// vs / fs: shader keys (16 hex digits, or a builtin's name cut to 16); cb: the command buffer of the submission it ran in (0 = the first, 255 = that one or later);
+// pass: render passes begun since the submission began when it first ran in that command buffer (65535 = that many or more)
+typedef struct { char vs[17], fs[17]; uint8_t cb; uint16_t pass; } subrec_pair;
+// last: the program or compute shader of the previous add (most draws repeat it); cb: the command buffer being encoded (its index in the submission), cb_first: its first entry in p
+// (pairs are kept once per command buffer, so a failed one lists all it ran); pass0: g_stat_pass when the submission began; fb: subrec_failed's state, SUBREC_FB_* bits
+typedef struct { uint64_t fence, frame, pass0; uint32_t draws, dispatches, n, n_more, cb, cb_first; subrec_pair p[SUBREC_PAIRS]; const void *last; _Atomic uint32_t fb; } subrec_t;
+static subrec_t g_subrec[SUBREC_RING]; static subrec_t *g_subrec_cur;   // g_subrec_cur: the record draws go to, NULL between mtl_sub_commit and the next mtl_sub_begin
+static _Atomic uint64_t g_cur_frame;   // tentative, as below: the presented frame counter (mtl_set_frame)
+static uint64_t g_stat_pass;   // tentative, as below: render passes begun since launch (the number DM_NVN_PASSDUMP's lines carry)
+static void subrec_begin(uint64_t fence) { subrec_t *r = &g_subrec[fence % SUBREC_RING]; memset(r, 0, sizeof *r); r->fence = fence; r->frame = atomic_load(&g_cur_frame); r->pass0 = g_stat_pass; g_subrec_cur = r; }
+static void subrec_key(char *dst, const char *key, const char *builtin) { const char *s = key && key[0] ? key : builtin ? builtin : "(unnamed)"; size_t n = strlen(s); if (n > 16) n = 16; memcpy(dst, s, n); dst[n] = 0; }   // not "?" for the fallback: that string is DMSH_KIND_UNKNOWN, which test_dmsh_abi counts as an ABI literal
+// who: the NvProg of a draw or the NvShader of a dispatch, to skip the scan when a run of draws uses one program; vs / fs: the keys as subrec_key makes them
+static void subrec_add(const char *vs, const char *fs, const void *who, int dispatch) {
+    subrec_t *r = g_subrec_cur; if (!r) return;
+    if (dispatch) r->dispatches++; else r->draws++;
+    if (who == r->last) return;
+    r->last = who;
+    for (uint32_t i = r->cb_first; i < r->n; i++) if (!strcmp(r->p[i].vs, vs) && !strcmp(r->p[i].fs, fs)) return;   // only this command buffer's: a failed one lists every pipeline it ran
+    if (r->n == SUBREC_PAIRS) { r->n_more++; return; }
+    subrec_pair *e = &r->p[r->n];
+    memcpy(e->vs, vs, 17); memcpy(e->fs, fs, 17);
+    e->cb = (uint8_t)(r->cb < 255 ? r->cb : 255); uint64_t dp = g_stat_pass - r->pass0; e->pass = (uint16_t)(dp < 65535 ? dp : 65535);
+    r->n++;
+}
+// A segment of the submission is committed (sub_cut): the draws after it go to the next command buffer. Returns the index of the committed one, which its feedback handler gives
+// back to subrec_failed. Without a record (no submission begun) 0, which subrec_failed cannot match to a fence anyway
+static uint32_t subrec_cut(void) { subrec_t *r = g_subrec_cur; if (!r) return 0; uint32_t k = r->cb++; r->cb_first = r->n; r->last = NULL; return k; }
+// Appends to line, which holds o characters of size, without running past its end (snprintf returns the length it wanted, not what it wrote). Returns the new length, at most size - 1
+static int sr_put(char *line, size_t size, int o, const char *fmt, ...) __attribute__((format(printf, 4, 5)));
+static int sr_put(char *line, size_t size, int o, const char *fmt, ...) {
+    if (o < 0 || (size_t)o + 1 >= size) return o;
+    va_list ap; va_start(ap, fmt); int n = vsnprintf(line + o, size - (size_t)o, fmt, ap); va_end(ap);
+    if (n < 0) return o;
+    return (size_t)o + (size_t)n >= size ? (int)size - 1 : o + n;
+}
+// One record as text: " fence F (frame N, D draws, X dispatches, C command buffers, from pass P): cb 0: pass +0 vs/fs vs/fs pass +2 -/cs | cb 1 FAILED: …;". failed: bit k marks
+// command buffer k as failed (bit 29: that one or a later one), 0 for none. A command buffer with no entry (no draw or dispatch of its own, or past a full record) shows only if it
+// failed, after the others ("cb K FAILED: none listed"). Its index counts the submission's commits, so it matches the shader list's "segment K" (cbs_report) except where game
+// timestamps (ts_boundary) numbered a segment without committing one
+static int subrec_fmt(char *line, size_t size, int o, const subrec_t *r, uint32_t failed) {
+    uint32_t listed = 0;   // the command buffers with an entry, as failed's bits
+    o = sr_put(line, size, o, " fence %llu (frame %llu, %u draws, %u dispatches, %u command buffers, from pass %llu):", (unsigned long long)r->fence, (unsigned long long)r->frame,
+               r->draws, r->dispatches, r->cb + 1, (unsigned long long)r->pass0);
+    for (uint32_t i = 0; i < r->n; i++) {
+        const subrec_pair *e = &r->p[i];
+        int new_cb = !i || e->cb != r->p[i - 1].cb;
+        uint32_t bit = 1u << (e->cb < 29 ? e->cb : 29); listed |= bit;
+        if (new_cb) o = sr_put(line, size, o, "%s cb %u%s:", i ? " |" : "", e->cb, failed & bit ? " FAILED" : "");
+        if (new_cb || e->pass != r->p[i - 1].pass) o = sr_put(line, size, o, " pass +%u", e->pass);
+        o = sr_put(line, size, o, " %s/%s", e->vs, e->fs);
+    }
+    for (uint32_t k = 0; k < 30; k++) if (failed >> k & 1 && !(listed >> k & 1)) o = sr_put(line, size, o, "%s cb %u%s FAILED: none listed", r->n || k ? " |" : "", k, k == 29 ? " or later" : "");
+    if (!r->n && !failed) o = sr_put(line, size, o, " no draw or dispatch");
+    if (r->n_more) o = sr_put(line, size, o, " (+%u more)", r->n_more);
+    return sr_put(line, size, o, ";");
+}
+// A failed command buffer of a submission, from its feedback handler: once all of the submission's command buffers are committed (its last one's handler has run, last = 1) and one
+// of its own failed, the record is printed, once per fence and for the first SUBREC_REPORTS fences. Every handler of the last command buffer calls it, failed or not, to close the
+// record; a segment's handler only on an error. The record is complete only after the last commit, so a segment that fails first leaves a bit for the last handler to print, and a
+// segment whose handler runs after the last one prints itself. Victims of another's fault and refused submissions ran nothing of their own (cb_err_own) and set no bit.
+// cb: the command buffer's index in the submission (subrec_cut, or the record's cb for the last). Returns 1 if it printed (for the tests)
+enum { SUBREC_FB_CLOSED = 1u << 31, SUBREC_FB_PRINTED = 1u << 30, SUBREC_FB_CBS = 30, SUBREC_REPORTS = 16 };
+static _Atomic uint32_t g_subrec_reports;
+static int cb_err_own(NSError *e);
+static int subrec_failed(uint64_t fence, uint32_t cb, NSError *err, int last) {
+    subrec_t *r = &g_subrec[fence % SUBREC_RING];
+    if (r->fence != fence) return 0;   // rewritten by a submission 64 later, or never begun
+    uint32_t bit = err && cb_err_own(err) ? 1u << (cb < SUBREC_FB_CBS - 1 ? cb : SUBREC_FB_CBS - 1) : 0, set = bit | (last ? SUBREC_FB_CLOSED : 0);
+    uint32_t now = atomic_fetch_or(&r->fb, set) | set;   // one of the two handlers sees both the failure and the close, whichever order they run in
+    if (!(now & SUBREC_FB_CLOSED) || !(now & ((1u << SUBREC_FB_CBS) - 1))) return 0;
+    if (atomic_fetch_or(&r->fb, SUBREC_FB_PRINTED) & SUBREC_FB_PRINTED) return 0;
+    if (atomic_fetch_add(&g_subrec_reports, 1) >= SUBREC_REPORTS) return 0;
+    char *line = malloc(SUBREC_LINE); if (!line) return 0;
+    int o = sr_put(line, SUBREC_LINE, 0, "[RED] pipelines of the failed submission (vertex/fragment pairs and -/compute, per command buffer in the order they first ran):");
+    subrec_fmt(line, SUBREC_LINE, o, r, now & ((1u << SUBREC_FB_CBS) - 1));
+    MLOG("%s", line); free(line);
+    return 1;
+}
+#define WD_SLICE_MS 2000ull   // a blocking wait is cut into slices of this length so the watchdog can look between them
+static long wd_secs(void) { static long v = -1; if (v < 0) { const char *e = getenv("DM_NVN_GPU_WATCHDOG"); v = e && *e ? strtol(e, NULL, 0) : 5; if (v < 0) v = 0; } return v; }
+static _Atomic uint64_t g_wd_reported;   // the oldest in-flight fence the last report named: one report per stuck fence, whichever threads wait
+// Called between slices of a blocking wait: done0 is g_done when the slice loop began or last saw progress, t0 that moment (CLOCK_UPTIME_RAW ns). Returns the current g_done
+static uint64_t wd_check(uint64_t waited_for, int site, uint64_t *t0, uint64_t done0) {
+    uint64_t done = atomic_load(&g_done), now = ws_t0();
+    if (done != done0) { *t0 = now; return done; }   // the GPU completed something: not stuck
+    long secs = wd_secs(); uint64_t newest = atomic_load(&g_fence);
+    if (!secs || now - *t0 < (uint64_t)secs * 1000000000ull || newest <= done) return done;   // nothing in flight: the wait is for work not committed yet, not the GPU's fault
+    uint64_t oldest = done + 1;
+    if (atomic_exchange(&g_wd_reported, oldest) == oldest) return done;
+    char *line = malloc(SUBREC_LINE); if (!line) return done;
+    int o = sr_put(line, SUBREC_LINE, 0, "[RED] GPU watchdog: no submission completed in %llu s (waiting for fence %llu at '%s', done %llu, committed %llu): the GPU is stuck on fence %llu or keeps it from running;",
+                   (unsigned long long)((now - *t0) / 1000000000ull), (unsigned long long)waited_for, ws_name[site], (unsigned long long)done, (unsigned long long)newest, (unsigned long long)oldest);
+    for (uint64_t f = oldest; f <= newest && f < oldest + 3; f++) { const subrec_t *r = &g_subrec[f % SUBREC_RING]; if (r->fence == f) o = subrec_fmt(line, SUBREC_LINE, o, r, 0); }
+    MLOG("%s", line); free(line);
+    MLOG("[RED] GPU watchdog: the host cannot abort GPU work; if a fragment shader above loops, relaunch with DM_NVN_SKIP_FS=<its key> (the title's env.txt on the Mac) to play on without its draws");
+    return done;
+}
 void mtl_sub_begin(void) {
     mtl_init(); g_sub_serial++; g_seg = 0; seg_clk_put(g_sclk); g_sclk = NULL;
+    subrec_begin(atomic_load(&g_fence) + 1);   // GPU hang watchdog: this submission's pipelines, under the fence mtl_sub_commit will give it
     sub_cut_begin();
     defer_drain();
     rh_trim();
@@ -2393,6 +2507,7 @@ uint64_t mtl_sub_commit(void) {
     rt_preserve_bound();   // The game may reuse completed command memory; queue bindings must not point into its texture snapshots.
     queue_program_preserve(); // Submitted metadata may retire while these programs remain bound.
     uint64_t fence = ++g_fence;
+    uint32_t sr_cb = g_subrec_cur ? g_subrec_cur->cb : 0; g_subrec_cur = NULL;   // GPU hang watchdog: the record is complete; the feedback handler reads it (subrec_failed)
     if (g_nvs) { post((post_op){3, NULL, VIS_FOLD, 0, 0, 0, vis_snapshot()}); vis_clear(); }   // this submission's slots after its last report: read at its completion (Occlusion queries)
     gw_commit(fence); rc_commit(fence);
     if (g_vis_ring_i >= 0) g_vis_ring[g_vis_ring_i].fence = fence;
@@ -2419,6 +2534,7 @@ uint64_t mtl_sub_commit(void) {
         uint64_t c0 = 0, c1 = 0; if (seg_ts()) { c0 = gpu_s_guest_ns(cb.GPUStartTime); c1 = gpu_s_guest_ns(cb.GPUEndTime); }
         if (cb.error) { atomic_store(&g_last_commit_error, 1); res_top_once(cb.error); static int n, nv; int victim = [cb.error.description containsString:@"InnocentVictim"]; if (victim ? nv++ < 1 : n++ < 8) MLOG("[RED] command buffer error details fence=%llu: %s | GPU %.3f→%.3f", (unsigned long long)fence, cb.error.description.UTF8String, cb.GPUStartTime, cb.GPUEndTime); if (!victim) MLOG("[RED] state of the failed submission fence=%llu: %s", (unsigned long long)fence, cctx.UTF8String); MLOG("[RED] command buffer execution error: %s", cb.error.localizedDescription.UTF8String); }
         char where[64]; snprintf(where, sizeof where, "fence %llu, its last command buffer", (unsigned long long)fence); cbs_feedback(cbs, cb.error, where);
+        subrec_failed(fence, sr_cb, cb.error, 1);   // the pipelines of this submission if one of its command buffers failed (closes its record either way)
         gpu_lost_check(lost_test ? gpu_lost_test_error() : cb.error, "submission");
         post_complete(fence, c0, c1);
         if (atomic_load(&g_gpu_lost)) gpu_lost_release();   // the GPU signals none of these fences
@@ -2454,9 +2570,15 @@ static void post_early(uint64_t fence) {
 static int mtl_wait_at(uint64_t fence, uint64_t timeout_ns, int site) {
     if (g_done >= fence) { if (ws_on()) ws_put(site, 0, 0); return 1; }
     uint64_t w0 = ws_t0();
+    uint64_t wd_t0 = w0, wd_done = atomic_load(&g_done);   // GPU hang watchdog (wd_check): progress seen so far
     if ((site == WS_SYNC || site == WS_SYNC_NEWEST || site == WS_ACQ) && fast_wake() && g_ev && fence <= g_fence) {   // the game's own wait: wake on the GPU's signal (rec_signal(g_ev, fence) after each submission)
         uint64_t ms = timeout_ns / 1000000ull; if (ms > 3600000ull) ms = 3600000ull;
-        if ([g_ev waitUntilSignaledValue:fence timeoutMS:ms]) post_early(fence);
+        for (;;) {   // in slices, so a GPU that never signals is reported (wd_check) instead of waited for in silence
+            uint64_t slice = ms > WD_SLICE_MS ? WD_SLICE_MS : ms;
+            if ([g_ev waitUntilSignaledValue:fence timeoutMS:slice]) { post_early(fence); break; }
+            ms -= slice; if (!ms) break;
+            wd_done = wd_check(fence, site, &wd_t0, wd_done);
+        }
         int ok = g_done >= fence;
         if (ws_on()) { ws_put(site, w0, 1); ws_wake(fence); }
         if (ok || timeout_ns < 1000000ull) return ok;
@@ -2472,7 +2594,14 @@ static int mtl_wait_at(uint64_t fence, uint64_t timeout_ns, int site) {
     dl.tv_sec += ns / 1000000000ull; dl.tv_nsec = ns % 1000000000ull;
     pthread_mutex_lock(&g_mu);
     int r = 0;
-    while (g_done < fence) if ((r = pthread_cond_timedwait(&g_cv, &g_mu, &dl))) break;
+    while (g_done < fence) {   // in slices of WD_SLICE_MS up to the deadline, with the watchdog looking between them (the lock is dropped for its report)
+        struct timespec sl; clock_gettime(CLOCK_REALTIME, &sl);
+        uint64_t sns = (uint64_t)sl.tv_nsec + WD_SLICE_MS * 1000000ull; sl.tv_sec += sns / 1000000000ull; sl.tv_nsec = sns % 1000000000ull;
+        int last = sl.tv_sec > dl.tv_sec || (sl.tv_sec == dl.tv_sec && sl.tv_nsec >= dl.tv_nsec);   // the slice reaches the deadline: wait to the deadline itself
+        if ((r = pthread_cond_timedwait(&g_cv, &g_mu, last ? &dl : &sl))) { if (r != ETIMEDOUT || last) break; r = 0; }
+        if (g_done >= fence) break;
+        pthread_mutex_unlock(&g_mu); wd_done = wd_check(fence, site, &wd_t0, wd_done); pthread_mutex_lock(&g_mu);
+    }
     int ok = g_done >= fence;
     pthread_mutex_unlock(&g_mu);
     if (ws_on()) { ws_put(site, w0, 1); if (site == WS_SYNC_NEWEST || site == WS_SYNC || site == WS_ACQ) ws_wake(fence); }
@@ -10838,8 +10967,8 @@ static void cbs_report(const cbs_list *l, const char *where, uint64_t nth) {   /
     free(b);
 }
 static void cbs_feedback(cbs_list *l, NSError *err, const char *where) {   // from a command buffer's feedback handler; owns l
-    if (err && l) { NSString *d = err.description;
-        if (![d containsString:@"InnocentVictim"] && ![d containsString:@"SubmissionsIgnored"]) {
+    if (err && l) {
+        if (cb_err_own(err)) {
             pthread_mutex_lock(&g_cbs_mu);
             uint64_t nth = ++g_cbs_failures;
             cbs_tally_add(l);
@@ -13911,6 +14040,10 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     __unsafe_unretained id<MTLRenderPipelineState> ps = cur_ps;
     if (!ps) { PD("Z %llu draw skipped: no render pipeline (vertex %s fragment %s)", g_stat_pass, pr->sh[0] ? pr->sh[0]->key : "-", pr->sh[1] ? pr->sh[1]->key : "-"); return; }
     if (ps != g_enc_pso) { enc_r_pso(en, ps); g_enc_pso = ps; }
+    if (g_subrec_cur && g_subrec_cur->last != (__bridge const void *)pr) {   // GPU hang watchdog: the pipelines of this submission (a repeated program costs one compare)
+        char vk[17], fk[17]; subrec_key(vk, pr->sh[0] ? pr->sh[0]->key : NULL, pr->sh[0] ? pr->sh[0]->builtin : NULL); subrec_key(fk, pr->sh[1] ? pr->sh[1]->key : NULL, pr->sh[1] ? pr->sh[1]->builtin : "-");
+        subrec_add(vk, fk, (__bridge const void *)pr, 0); }
+    else if (g_subrec_cur) g_subrec_cur->draws++;
     if (g_sm_pass && g_sm_applied != g_sm_cur) {   // the layer this draw goes to (see g_sm_plan)
         MTLVertexAmplificationViewMapping vm = {0, (uint32_t)(g_sm_cur - g_sm_lo)}; [(id<MTL4RenderCommandEncoder>)en setVertexAmplificationCount:1 viewMappings:&vm]; g_sm_applied = g_sm_cur; }
     static id<MTLDepthStencilState> cur_ds; static uint64_t cur_ds_pass;
@@ -14284,6 +14417,7 @@ static void dispatch(const p_dispatch *dp) {
     if (own && g_blit) { enc_b_end(g_blit); g_blit = nil; }
     id<MTLComputeCommandEncoder> ce = own ? pg_compute() : (id<MTLComputeCommandEncoder>)dispatch_enc();
     enc_c_pso(ce, ps);
+    { char ck[17]; subrec_key(ck, cs->key, cs->builtin); subrec_add("-", ck, (__bridge const void *)cs, 1); }   // GPU hang watchdog: the compute shaders of this submission
     if (tg_groups) {
         __strong id<MTLBuffer> tb = nil; size_t to = arena_alloc((size_t)(tg_groups * cs->rf.tg_spill), &tb);
         enc_c_args(ce, tb.gpuAddress + to, DMSH_TG_SLOT);
@@ -14990,7 +15124,7 @@ static void sub_cut(void) {
     uint64_t f = atomic_load(&g_cur_frame); gpu_tag_begin(f);
     uint32_t k = g_seg++; seg_clk *sc = NULL;   // reports encoded so far keep this segment's GPU times (seg_ts)
     if (seg_ts()) { if (!g_sclk) { g_sclk = calloc(1, sizeof *g_sclk); if (!g_sclk) MDIE("segment clock allocation failed"); atomic_store(&g_sclk->refs, 1); } sc = g_sclk; atomic_fetch_add(&sc->refs, 1); if (k < SEG_CLK_N) sc->cm[sc->ncm++] = (uint16_t)k; }   // this command buffer ends with segment k (seg_idle_before)
-    cbs_list *cbs = cbs_take(); uint64_t cbs_fence = g_fence + 1;
+    cbs_list *cbs = cbs_take(); uint64_t cbs_fence = g_fence + 1; uint32_t sr_cb = subrec_cut();
     MTL4CommitOptions *o = [MTL4CommitOptions new];
     atomic_fetch_add(&g_seg_inflight, 1);
     [o addFeedbackHandler:^(id<MTL4CommitFeedback> cb) {
@@ -14999,6 +15133,7 @@ static void sub_cut(void) {
         if (sc) { if (k < SEG_CLK_N) { atomic_store(&sc->t[k][0], gpu_s_guest_ns(cb.GPUStartTime)); atomic_store(&sc->t[k][1], gpu_s_guest_ns(cb.GPUEndTime)); } seg_clk_put(sc); }
         if (cb.error) { atomic_store(&g_last_commit_error, 1); static int k; if (k++ < 8) MLOG("[RED] segment command buffer execution error: %s", cb.error.description.UTF8String); res_top_once(cb.error); }
         char where[64]; snprintf(where, sizeof where, "fence %llu, segment %u", (unsigned long long)cbs_fence, k); cbs_feedback(cbs, cb.error, where);
+        if (cb.error) subrec_failed(cbs_fence, sr_cb, cb.error, 0);   // printed with the whole submission once its last command buffer is committed
         gpu_lost_check(cb.error, "segment");
     }];
     gmem_commit_patch();

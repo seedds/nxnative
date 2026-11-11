@@ -991,6 +991,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Found on:** [Super Mario 3D All-Stars: Super Mario 64](../../dm/games/010049900F546001/README.md) : command 3 at boot turns 4,235 precompiled MIPS blocks into 14.2 MB of code in 27 ms; command 4 compiles a handful of blocks in play. Its code needs nothing from the rewriter (no x18, SVC, system register or PC-relative literal in 3.55 million instructions).
 
 
+### A JIT plugin loaded a second time crashed
+
+- **Symptom:** a second `nn::jit::CreateJitEnvironment` for the same plugin, after `DestroyJitEnvironment`, crashes with SIGSEGV in `nro_load_alone` (a `memcpy` from address 0) right after `NRO <name> loaded alone (load 2, …)`.
+- **Cause:** NRO data snapshots are lazy: `preload_nros` records only the length of an NRO's initialized data, and the first load copies it. `nro_load` did that copy, but `nro_load_alone` (the JIT plugin's load) did not, so its reload restored the data from a null pointer. Its reload also left the bss as the previous environment had left it, while the jit service loads the plugin fresh for each environment.
+- **Fix:** both loads start with `nro_reset_data` (`loader.c`): the first load snapshots the initialized data, and a reload restores it and zeroes the bss. Each load keeps its own symbol binding (linked into the game's lookups, or alone).
+- **Found on:** no game: a synthetic test found it, and no game has been seen to create a second environment. [Super Mario 3D All-Stars: Super Mario 64](../../dm/games/010049900F546001/README.md) is the one game that takes this path.
+- **Check:** `t_nro` loads a module alone, dirties its data, bss and relocation slots, and loads it alone again: the data and bss are as rewritten and the slots relocated against the module itself. Without the fix it fails at the first load (no snapshot).
+
 ### `nn::jit` served from an image on iOS
 
 - **Symptom:** `[RED] jit::GenerateCode command <n>: request <key> … is not in the image …: capture it on the Mac (DM_JIT_CAPTURE) and rebuild the image`, then the game crashes there (the iPhone, or the Mac with `DM_JIT_SERVE`).

@@ -11,3 +11,5 @@ dm/games/*/cb_extent.tsv
 .coverage
 .coverage.*
 /coverage.json
+# fsbench.py tool builds its binary beside its source
+dm/gfx/tools/fsbench/fsbench

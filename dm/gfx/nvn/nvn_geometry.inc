@@ -648,6 +648,7 @@ static id<MTLRenderPipelineState> mtk_pso(NvProg *raster) {
     }
     hm_put_id(&g_pso_mtk, &k, ps);
     k.fsfn = NULL;   // The third function has its own key column; this is not a specialized fragment.
+    mtk_state_note(&k);   // a pass state the prediction did not have for this program (mtk_predict)
     pso_skey sk; char hex[sizeof sk * 2 + 1];
     pso_skey_from(&k, ms, fs, 0, NULL, &sk); pso_skey_hex(&sk, hex);
     pso_record("M\t%s\t%s\n", task, hex); pso_user_record("M\t%s\t%s\n", task, hex);

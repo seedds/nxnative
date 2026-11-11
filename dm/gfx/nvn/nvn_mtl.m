@@ -5821,6 +5821,27 @@ static _Atomic int g_warm_running;   // Background warm-up has not finished yet 
 static _Atomic uint64_t g_warm_shaders, g_warm_rps, g_warm_mps, g_warm_cps, g_warm_skip_fz, g_warm_skip_stale;   // the prewarm's workers count into them
 static id<MTLRenderPipelineState> mtk_build(const pso_key *, NvShader *, NvShader *, NvShader *, NSError **, int *);
 static _Atomic uint64_t g_mtk_arch, g_mtk_built, g_mtk_dev;   // native mesh pipelines (mtk_build, all threads): taken from the pipeline archive, built and captured for it (arch_harvest), built with no Metal 4 descriptor (not kept)
+// The pass states native mesh pipelines are drawn in (a pso_key with no shaders), with how many pipelines of the prewarm lists and of this run had each: what mtk_predict builds
+// a new program's pipelines for. Any thread
+enum { MTK_STATES = 16 };
+static struct { pso_key k; uint32_t n; } g_mtk_state[MTK_STATES]; static int g_mtk_nstate; static os_unfair_lock g_mtk_state_lock = OS_UNFAIR_LOCK_INIT;
+static void mtk_state_note(const pso_key *k0) {
+    pso_key k = *k0; k.vs = k.fs = k.fsfn = NULL;
+    os_unfair_lock_lock(&g_mtk_state_lock);
+    int i = 0; while (i < g_mtk_nstate && memcmp(&g_mtk_state[i].k, &k, sizeof k)) i++;
+    if (i < g_mtk_nstate) g_mtk_state[i].n++; else if (g_mtk_nstate < MTK_STATES) { g_mtk_state[g_mtk_nstate].k = k; g_mtk_state[g_mtk_nstate++].n = 1; }
+    os_unfair_lock_unlock(&g_mtk_state_lock);
+}
+// The task / mesh / pixel triples the prewarm lists hold a pipeline for. The prewarm builds those in the states they were drawn in, so mtk_predict leaves them alone: built for
+// every program in every state, a start of Ocarina of Time made 1,933 pipelines for 264 programs in 257 s of background time, where its route needed one
+static NSMutableSet<NSString *> *g_mtk_known; static _Atomic int g_mtk_parsed;   // g_mtk_parsed: the lists have been read (warm_parse)
+static NSString *mtk_triple(NSString *t, NSString *m, NSString *f) { return [NSString stringWithFormat:@"%@|%@|%@", t.length ? t : @"-", m, f.length ? f : @"-"]; }
+static void mtk_known_note(NSString *t, NSString *m, NSString *f) {
+    os_unfair_lock_lock(&g_mtk_state_lock); if (!g_mtk_known) g_mtk_known = [NSMutableSet set]; [g_mtk_known addObject:mtk_triple(t, m, f)]; os_unfair_lock_unlock(&g_mtk_state_lock);
+}
+static int mtk_known(NSString *t, NSString *m, NSString *f) {
+    os_unfair_lock_lock(&g_mtk_state_lock); int k = [g_mtk_known containsObject:mtk_triple(t, m, f)]; os_unfair_lock_unlock(&g_mtk_state_lock); return k;
+}
 static uint64_t g_warm_claim_shaders, g_warm_claim_rps, g_warm_claim_cps;
 static id<MTLFunction> bf_fn(NvShader *fs, const int *fx, uint8_t fbmask, const uint8_t *lmap);
 static int rt_range_bindings_ro(NSDictionary *j);
@@ -9635,6 +9656,7 @@ static NSArray<WarmTask *> *warm_parse(NSArray<NSString *> *paths, long *lines) 
                 [t->rs addObject:kd];
             } else if ([c[0] isEqualToString:@"M"] && c.count == 3) {
                 pso_skey sk; if (pso_mesh_skey_parse(c[2].UTF8String, &sk)) continue;
+                mtk_state_note(&sk.k);
                 NSString *vkey = warm_key(sk.vs, sizeof sk.vs), *fkey = warm_key(sk.fs, sizeof sk.fs);
                 NSString *tkey = [c[1] isEqualToString:@"-"] ? nil : c[1];
                 if (!vkey.length || warm_stale(vkey, stale) || (fkey.length && warm_stale(fkey, stale)) ||
@@ -9643,6 +9665,7 @@ static NSArray<WarmTask *> *warm_parse(NSArray<NSString *> *paths, long *lines) 
                 if (![warm_map_stage(vkey) isEqualToString:@"mesh"] ||
                     (fkey.length && ![warm_map_stage(fkey) isEqualToString:@"pixel"]) ||
                     (tkey && ![warm_map_stage(tkey) isEqualToString:@"task"])) continue;
+                mtk_known_note(tkey, vkey, fkey);
                 t = [WarmTask new]; t->kind = 3; t->vkey = vkey; t->fkey = fkey; t->tkey = tkey;
                 t->rs = [NSMutableArray arrayWithObject:[NSData dataWithBytes:&sk length:sizeof sk]];
                 [tasks addObject:t];
@@ -9650,6 +9673,7 @@ static NSArray<WarmTask *> *warm_parse(NSArray<NSString *> *paths, long *lines) 
             n++;
         }
     }
+    atomic_store(&g_mtk_parsed, 1);
     *lines = n; return tasks;
 }
 static void warm_task(WarmTask *t) {
@@ -14171,6 +14195,58 @@ static void warm_claim(void) {
         }
     }
 }
+// Native mesh pipelines built when the game makes the program, not at their first draw. A mesh pipeline is the program's task, mesh and pixel shaders plus the state of the pass it
+// is drawn in, and it has no stand-in: a draw waits for it (mtk_pso), 90-470 ms each on an M3 Pro with the system's shader cache warm and seconds with it cold. The shaders are
+// known when the program is made (nvnProgramSetShaders, mostly while a scene loads). The pass state is not, but a game draws its mesh programs in few states: Ocarina of Time's
+// 140 listed pipelines use 8, and the 17 pipelines a new route met all had one of them. So each new task / mesh / pixel triple is built in the background for the states seen so
+// far, the most used first, and the submit thread claims the results as it claims the prewarm's rows (warm_claim, kind 3). A state the prediction missed is built at its draw as
+// before and noted for the programs made after it. The picture does not depend on any of this: the pipelines are the ones the draw would have built.
+// Measured on a route of Ocarina of Time with every mesh pipeline a first visit (M3 Pro): 57 built at a draw without it, 10 with the 4 most used states (every one in a state
+// left out, none drawn before its build was done: 19 frames from the program to its pipelines, 191 at most), so all states by default. The game makes about 360 mesh programs
+// and its lists hold about 110, so a first session builds about 2,000 pipelines in the background, once (the archive keeps them), for about 500 MiB.
+// DM_NVN_MESH_PREDICT=<n>: how many states are built for each program (0 = none). Default all known (at most MTK_STATES) on a Mac with more than 16 GiB of memory and none on a
+// smaller one, where neither the memory nor the first session's background compiles have been measured
+// shortcut: a draw that comes while its predicted pipeline is still being built builds it again itself (mtk_pso), and a predicted pipeline that is drawn is not written to the
+// prewarm lists (the next start predicts it again and takes it from the pipeline archive); upgrade when the log shows such draws or a list recorded from play has to hold them
+static _Atomic uint64_t g_mtk_pred_progs, g_mtk_pred_ps, g_mtk_pred_arch, g_mtk_pred_ns;
+static void mtk_predict(NSString *tkey, NSString *mkey, NSString *fkey) {
+    static int want = -1;
+    if (want < 0) {
+        const char *e = getenv("DM_NVN_MESH_PREDICT"); uint64_t mem = 0; size_t sz = sizeof mem; sysctlbyname("hw.memsize", &mem, &sz, NULL, 0);
+        want = e ? atoi(e) : mem > (16ull << 30) ? MTK_STATES : 0; if (want < 0) want = 0; if (want > MTK_STATES) want = MTK_STATES;
+        MLOG("native mesh pipelines: %s (%s)", want ? "built in the background when the game makes the program" : "built at their first draw only", e ? "DM_NVN_MESH_PREDICT" : "by memory size");
+    }
+    if (!want || !progpf_first([NSString stringWithFormat:@"M|%@|%@|%@", tkey ?: @"-", mkey, fkey ?: @"-"])) return;
+    uint64_t frame = atomic_load(&g_cur_frame);
+    dispatch_async(pp_bg_queue(), ^{ @autoreleasepool {
+        // The lists first (a program made while the game boots comes before the prewarm has read them; with no list, 20 s and then the states met at draws)
+        for (int i = 0; i < 400 && !atomic_load(&g_mtk_parsed); i++) usleep(50000);
+        if (mtk_known(tkey, mkey, fkey)) return;
+        pso_key st[MTK_STATES]; uint32_t cnt[MTK_STATES]; int n;
+        os_unfair_lock_lock(&g_mtk_state_lock);
+        n = g_mtk_nstate; for (int i = 0; i < n; i++) { st[i] = g_mtk_state[i].k; cnt[i] = g_mtk_state[i].n; }
+        os_unfair_lock_unlock(&g_mtk_state_lock);
+        if (!n) return;
+        for (int i = 0; i < n; i++) for (int j = i + 1; j < n; j++) if (cnt[j] > cnt[i]) { pso_key k = st[i]; st[i] = st[j]; st[j] = k; uint32_t c = cnt[i]; cnt[i] = cnt[j]; cnt[j] = c; }
+        NvShader *ms = shader_load(mkey, 4, 0), *fs = fkey ? shader_load(fkey, 1, 0) : nil, *ts = tkey ? shader_load(tkey, 3, 0) : nil;
+        if (!ms || ms->mesh_kind != 2 || !ms->fn || (fkey && (!fs || !fs->fn)) || (tkey ? (!ts || ts->mesh_kind != 1 || !ts->fn || ms->mesh_notask) : !ms->mesh_notask)) return;   // as the prewarm's rows (warm_task)
+        uint64_t t0 = bp_now(); int made = 0, arch = 0;
+        for (int i = 0; i < n && i < want; i++) {
+            pso_key k = st[i]; NSError *error = nil; int archived = 0;
+            id<MTLRenderPipelineState> ps = mtk_build(&k, ts, ms, fs, &error, &archived);
+            if (!ps) continue;   // a state these functions do not fit (Metal refuses the pair): no draw makes that key
+            WarmItem *item = [WarmItem new]; item->kind = 3; item->pso = k; item->object = ps;
+            item->vs = ms; item->vs_key = mkey; item->fs = fs; item->fs_key = fkey; item->ts = ts; item->ts_key = tkey;
+            warm_enqueue(item); made++; arch += archived;
+        }
+        uint64_t ns = bp_now() - t0, progs = ++g_mtk_pred_progs; g_mtk_pred_ps += (uint64_t)made; g_mtk_pred_arch += (uint64_t)arch; g_mtk_pred_ns += ns;
+        if (progs <= 400 || progs % 100 == 0)
+            MLOG("task / mesh prediction: task %s mesh %s fragment %s, program made at frame %llu: %d pipelines for %d states (%d from the pipeline archive) in %.1f ms, ready at frame %llu; "
+                 "so far %llu programs, %llu pipelines (%llu from the archive), %.0f ms", tkey ? tkey.UTF8String : "-", mkey.UTF8String, fkey ? fkey.UTF8String : "-", (unsigned long long)frame,
+                 made, n < want ? n : want, arch, ns / 1e6, (unsigned long long)atomic_load(&g_cur_frame), (unsigned long long)progs, (unsigned long long)g_mtk_pred_ps,
+                 (unsigned long long)g_mtk_pred_arch, g_mtk_pred_ns / 1e6);
+    } });
+}
 // A program's libraries are loaded in the background when the game makes the program (nvnProgramSetShaders, most of them while it loads a scene), and the next submission
 // takes them (warm_claim) instead of its first draw loading each on the submit thread: in Donkey Kong Bananza a level's first frames loaded 3 to 7 libraries there, 20-90 ms
 // with the drive idle and up to 4 s with it busy. A draw that comes before its library has loaded loads it itself, as before. DM_NVN_PREFETCH=0 turns it off
@@ -14180,12 +14256,14 @@ void mtl_prog_prefetch(const prog_t *cp) {
     prog_t *p = (prog_t *)cp;
     if (!g_dev || !prefetch_on()) return;
     shmap_read_once();   // the map only: the prewarm starts on the submit thread (shmap_load)
+    NSString *tkey = nil, *mkey = nil, *fkey = nil;   // a task / mesh program's stages (mtk_predict)
     for (unsigned i = 0; i < p->nstage; i++) {
         uint8_t md[8]; if (!prog_key(p, i, md)) MDIE("program stage %u has no shader key", i);
         NSString *k = [NSString stringWithFormat:@"%02x%02x%02x%02x%02x%02x%02x%02x", md[0], md[1], md[2], md[3], md[4], md[5], md[6], md[7]];
         NSString *stage = g_shmap[k]; int st = stage ? stage_of(stage) : -1;
         if (st < 0) continue;   // not in the package: a built-in kernel (prog_get)
         NSString *pc = [k stringByAppendingString:@"_b"];
+        if ([stage isEqualToString:@"mesh"]) mkey = pc; else if ([stage isEqualToString:@"task"]) tkey = pc; else if ([stage isEqualToString:@"pixel"]) fkey = pc;
         if (!progpf_first(pc)) continue;
         dispatch_async(pp_bg_queue(), ^{ @autoreleasepool {
             NvShader *sh = shader_load(pc, st, 0);
@@ -14195,6 +14273,7 @@ void mtl_prog_prefetch(const prog_t *cp) {
             if (!g_progpf_loaded++) MLOG("shader prefetch at program creation: first library %s loaded in the background (DM_NVN_PREFETCH=0 turns it off)", pc.UTF8String);
         } });
     }
+    if (mkey) mtk_predict(tkey, mkey, fkey);
 }
 // Dispatches share the open copy encoder (a Metal 4 compute encoder) with the copies and dispatches around them, each ordered after everything the encoder already holds by a barrier inside it,
 // as a texture copy is (blit). An encoder of their own, with full queue barriers on both sides, cost the GPU a drain per dispatch: Hyrule Warriors: Age of Calamity's battles after the first cutscene

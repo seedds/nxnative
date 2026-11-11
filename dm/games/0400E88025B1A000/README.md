@@ -12,6 +12,7 @@ A Switch 2 game: update v131072, SDK 21.4.4 built for the Switch 2 (`Ounce`), NV
 | `romfs_marker data.zip` | `game.tsv` | the RomFS has two files, and this is the game |
 | `zip_store .zip:.metallib` | `game.tsv` | the archive's members are LZ4-compressed already |
 | `shader_groups /data.zip=shader` | `game.tsv` | every shader is a member of the archive |
+| `depth_mode zero` | `game.tsv` | the game selects near-zero depth; without the key the Mac app's pipeline archive is made for the other mode and refused ([Offline pipeline archive and profile depth disagree](../../../docs/reference/shaders.md#offline-pipeline-archive-and-profile-depth-disagree)) |
 
 There is no game-specific patch, and only v131072's build row: the base game, v0, has not been run.
 

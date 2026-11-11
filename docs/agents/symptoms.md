@@ -840,6 +840,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - an experimental native/generated pair retains a padded window canvas, then copies its visible rectangle again before final MetalFX scaling. Generated display allocation and conversion also carry padding that is never shown. → [Compact host-owned interpolation surfaces](../reference/rendering.md#compact-host-owned-interpolation-surfaces)
 - private world, UI, depth and display snapshots all request compute writes and arbitrary format views, even when they are only copied and read. These flags can prevent lossless GPU texture optimization. → [Host interpolation textures declare their actual usage](../reference/rendering.md#host-interpolation-textures-declare-their-actual-usage)
 - camera-only motion reconstructs world coordinates and applies a second transform for every depth pixel, with cancellation in single-precision intermediate world positions. → [Camera reprojection composes transforms once per image](../reference/rendering.md#camera-reprojection-composes-transforms-once-per-image)
+- preserving a reconstructed scene before UI draws adds a fullscreen fragment pass, a sampled texture view and copy arguments even when the retained image has identical dimensions and format. → [Pre-UI interpolation capture does not need a fragment pass](../reference/rendering.md#pre-ui-interpolation-capture-does-not-need-a-fragment-pass)
 
 ## Shaders
 

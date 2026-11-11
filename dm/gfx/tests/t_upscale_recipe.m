@@ -43,7 +43,10 @@ static void composed_dispatch(const up_recipe *profile) {
     CHECK(src.L.size<bytes && dst.L.size<bytes,"composed pool extents contain complete textures");
     id<MTLTexture> input=texture(MTLPixelFormatRGB9E5Float,profile->iw,profile->ih,MTLTextureUsageShaderRead);
     id<MTLTexture> output=texture(MTLPixelFormatRG11B10Float,profile->ow,profile->oh,MTLTextureUsageShaderRead|MTLTextureUsageShaderWrite);
-    setall(input,(15u<<27)|256u|(128u<<9)|(384u<<18));setall(output,0);
+    // Nonuniform tiles expose missing rows, sampling shifts and format changes.
+    uint32_t *pixels=malloc(profile->iw*profile->ih*4);CHECK(pixels!=NULL,"procedural tiled input allocation");if(!pixels)abort();
+    for(unsigned y=0;y<profile->ih;y++)for(unsigned x=0;x<profile->iw;x++)pixels[y*profile->iw+x]=(15u<<27)|(256u+x/32)|((128u+y/24)<<9)|((384u+(x+y)/48%128)<<18);
+    [input replaceRegion:MTLRegionMake2D(0,0,profile->iw,profile->ih) mipmapLevel:0 withBytes:pixels bytesPerRow:profile->iw*4];free(pixels);setall(output,0);
     mtl_tex_init(&src);mtl_tex_init(&dst);serial_put(src.serial,input);serial_put(dst.serial,output);
     mtl_reg_tex(811,&src,NULL);mtl_reg_image(812,&dst,NULL);
     NvShader *shader=[NvShader new];strcpy(shader->key,profile->key);
@@ -73,6 +76,9 @@ static void composed_dispatch(const up_recipe *profile) {
         mtl_sub_begin();enc_b_copy_texture_buffer(blit(),g_temporal_full_scene,0,0,MTLOriginMake(0,0,0),MTLSizeMake(profile->ow,profile->oh,1),rb,0,profile->ow*4,profile->ow*profile->oh*4);finish();
         uint32_t first=((uint32_t*)rb.contents)[0];
         CHECK(abs((int)(first&2047u)-(13<<6))<=1,"observer snapshot contains actual scaled procedural pixels");
+        void *expected=malloc(profile->ow*profile->oh*4);CHECK(expected!=NULL,"complete snapshot comparison allocation");if(!expected)abort();
+        [output getBytes:expected bytesPerRow:profile->ow*4 fromRegion:MTLRegionMake2D(0,0,profile->ow,profile->oh) mipmapLevel:0];
+        CHECK(!memcmp(expected,rb.contents,profile->ow*profile->oh*4),"every pre-UI packed pixel is preserved without sampling");free(expected);
     }
     S.cprog=NULL;mtl_reg_tex(811,NULL,NULL);mtl_reg_tex(812,NULL,NULL);mtl_tex_release(&src);mtl_tex_release(&dst);serial_del(native_program.serial);
     // The process owns these mapped pools until exit, as do the Metal no-copy

@@ -316,8 +316,16 @@ static void temporal_after_dispatch(NvShader *cs) {
         if(!g_temporal_full_scene || (temporal_preview_on()!=3 && !g_temporal_full_ui)){g_temporal_disabled=1;return;}
         res_commit();
     }
-    NVNcopyRegion r={0,0,0,(int)out.width,(int)out.height,1};
-    if(!copy_t2t_draw(out,g_temporal_full_scene,0,0,0,0,&r,&r,0,0))return;
+    // An equal-format image needs no sampling or fragment pass. Keep conversion
+    // and nonidentity channel views on the existing draw path.
+    MTLTextureSwizzleChannels sw=out.swizzle;
+    int exact=out.pixelFormat==retained_format && out.textureType==MTLTextureType2D && out.sampleCount==1 &&
+        sw.red==MTLTextureSwizzleRed && sw.green==MTLTextureSwizzleGreen && sw.blue==MTLTextureSwizzleBlue && sw.alpha==MTLTextureSwizzleAlpha;
+    if(exact)enc_b_copy_texture(blit(),out,0,0,MTLOriginMake(0,0,0),MTLSizeMake(out.width,out.height,1),g_temporal_full_scene,0,0,MTLOriginMake(0,0,0));
+    else {
+        NVNcopyRegion r={0,0,0,(int)out.width,(int)out.height,1};
+        if(!copy_t2t_draw(out,g_temporal_full_scene,0,0,0,0,&r,&r,0,0))return;
+    }
     g_temporal_coverage.captured++;
     g_temporal_game_ui=out;g_temporal_ui_serial=serial;g_temporal_full_frame=frame;g_temporal_ui_seen=0;
     static int once;if(!once++)MLOG("interpolation full-scene capture: %lux%lu color, %lux%lu depth, before UI",(unsigned long)out.width,(unsigned long)out.height,(unsigned long)g_temporal_game_depth.width,(unsigned long)g_temporal_game_depth.height);

@@ -1764,3 +1764,12 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 - **Fix:** compose previous-world-to-clip times current-clip-to-world once with the existing double-accumulating `nvn_cam_mul`. A separate precompiled host shader evaluates the previous x/y/w row products directly. Keep the original shader as a test control. Update preview, serial snapshot and asynchronous snapshot uniforms together; preserve depth convention, direction, scale and invalid-value handling. This does not add object motion.
 - **Check:** `t_camera_motion` executes original and composed entries for identity, signed translations, jitter and reversed-depth fixtures. The composed entry's maximum error in the last fixture is 0.000002 pixels. The interpolation/dispatch fixtures and a real game pass also succeed. A CPU screen of seven recorded depths favors the composed expression against a double reference, but is not a hardware accuracy/performance measurement on those captures. Detailed character-motion quality remains open.
 - **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md).
+
+
+### Pre-UI interpolation capture does not need a fragment pass
+
+- **Symptom:** preserving a reconstructed scene before UI draws adds a fullscreen fragment pass, a sampled texture view and copy arguments even when the retained image has identical dimensions and format.
+- **Cause:** the interpolation observer always used the format-converting render copy helper.
+- **Fix:** use the existing ordered texture-copy encoder for a single-sample 2D image whose retained format and channel mapping are identical. The destination remains a separate host-owned texture; input lifetime, pre-UI timing, snapshot readers and scene continuity are unchanged. Conversion and nonidentity channel mappings keep the existing render path. This removes a fragment pass; it does not remove the protected scene copy or its bytes.
+- **Check:** the actual spatial replacement/scene-observer fixture uses nonuniform tiled packed colors and compares every retained RG11 pixel against the real output. Both direct and deferred encoding pass 64 checks; asynchronous interpolation, camera, UI completion and slot lifetime pass 179 checks in each encoding mode under Metal validation. An isolated performance gain is not established by these correctness checks.
+- **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md).

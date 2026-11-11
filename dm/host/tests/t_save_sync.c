@@ -314,6 +314,52 @@ int main(void) {
     backup_of(X, "cloud", back, sizeof back); snprintf(q, sizeof q, "%s/save/game.dat", back);
     CHECK(*back && same(q, "y3"), "and the iPhone's save it replaced is kept on the Mac (%s)", back);
 
+    printf("(15) the report a front end reads before it plays\n");
+    char R1[1200], R2[1200], cloud4[1200], cf4[1400], own4[1400], line[2048];
+    snprintf(R1, sizeof R1, "%s/mac6/save", root); snprintf(R2, sizeof R2, "%s/iphone4/save", root);
+    snprintf(cloud4, sizeof cloud4, "%s/iCloud Drive/Fourth Saves", root); snprintf(own4, sizeof own4, "%s/%s", cloud4, id);
+    mkd(R1); mkd(R2); mkd(cloud4); snprintf(cf4, sizeof cf4, "%s/%s/save.dmsync", cloud4, id);
+#define REPORT(save, folder) (!save_sync_report(save, DM_GAME_ID, folder, 0, line, sizeof line) && !strchr(line, '\n'))
+    CHECK(!strcmp(dm_save_title(), DM_GAME_ID), "the title the iPhone launcher names the cloud file with is the profile's");
+    CHECK(REPORT(R1, cloud4) && strstr(line, "sync=1 cloud=0 ") && strstr(line, "local=- ") && strstr(line, "conflict=0"),
+          "no save here, none in the cloud: no conflict, nothing to replace (%s)", line);
+    snprintf(p, sizeof p, "%s/game.dat", R1); put(p, "r1-with-progress");
+    CHECK(REPORT(R1, cloud4) && strstr(line, "files=1 size=16 ") && strstr(line, "chash=- ") && strstr(line, "conflict=0"),
+          "a save here, the cloud's empty: no conflict, the mount sends it (%s)", line);
+    CHECK(session(R1, cloud4, NULL, NULL) == 0 && cloud_has(cf4, root, "game.dat", "r1-with-progress"), "the session sends it");
+    CHECK(REPORT(R1, cloud4) && strstr(line, "cloud=1 ") && strstr(line, "csize=16 ") && strstr(line, "sametitle=1 ") && strstr(line, "conflict=0") && !strstr(line, "cdevice=- "),
+          "the same save here and in the cloud: no conflict, the cloud's device named (%s)", line);
+    CHECK(REPORT(R1, own4) && strstr(line, "cloud=1 ") && strstr(line, "csize=16 "),
+          "the game's own folder chosen as the folder: the same file as the mount's (%s)", line);
+    snprintf(p, sizeof p, "%s/game.dat", R2);
+    CHECK(REPORT(R2, cloud4) && strstr(line, "local=- ") && strstr(line, "cfiles=1 ") && strstr(line, "conflict=0"),
+          "the cloud has one and this device none: it comes in, no conflict (%s)", line);
+    CHECK(session(R2, cloud4, NULL, NULL) == 0 && same(p, "r1-with-progress"), "and the session brings it in");
+    CHECK(session(R2, NULL, "game.dat", "r2") == 0 && same(p, "r2"), "the iPhone plays with sync off and saves r2");
+    set_mtime(p, time(NULL) - 100);
+    CHECK(session(R1, cloud4, "game.dat", "r3-more-progress") == 0 && cloud_has(cf4, root, "game.dat", "r3-more-progress"), "then the Mac saves more and sends it");
+    snprintf(p, sizeof p, "%s/game.dat", R2); put(p, "new"); set_mtime(p, time(NULL) + 45);
+    CHECK(REPORT(R2, cloud4) && strstr(line, "conflict=1") && strstr(line, "cfiles=1 ") && strstr(line, "cdevice=Mac"),
+          "both changed: the report says conflict, with the cloud's device (%s)", line);
+    {   // the incident of the PR: the new game's save is the newer by date, so the player needs the sizes to tell them apart
+        char *cs = strstr(line, "csaved="), *sv = strstr(line, " saved=");
+        CHECK(cs && sv && atoll(sv + 7) > atoll(cs + 7) && strstr(line, " size=3 ") && strstr(line, "csize=16 "),
+              "this device's date is the newer, its save the smaller (%s)", line);
+    }
+    chmod(cf4, 0);
+    CHECK(REPORT(R2, cloud4) && strstr(line, "cloud=-1 ") && strstr(line, "chash=- ") && strstr(line, "conflict=0"),
+          "the cloud cannot be read: said so, and no conflict to offer (%s)", line);
+    chmod(cf4, 0644);
+    CHECK(REPORT(R2, "0") && strstr(line, "sync=0 cloud=0 ") && !strstr(line, "local=- ") && strstr(line, "conflict=0"),
+          "sync off: the local save alone is reported (%s)", line);
+    setenv("DM_SAVE_SYNC", cloud4, 1);
+    CHECK(REPORT(R2, NULL) && strstr(line, "conflict=1"), "no folder given: DM_SAVE_SYNC's, as the mount reads it (%s)", line);
+    unsetenv("DM_SAVE_SYNC");
+    CHECK(REPORT(R2, NULL) && strstr(line, "sync=0 "), "and with no DM_SAVE_SYNC, sync is off (%s)", line);
+    snprintf(q, sizeof q, "%s.sync-tmp", R2);
+    CHECK(access(q, F_OK), "the reports leave no files behind");
+#undef REPORT
+
     printf("== save sync: %d checks, %d failed ==\n", checks, fails);
     if (!fails) { char c[1200]; snprintf(c, sizeof c, "rm -rf '%s'", root); system(c); }
     return fails != 0;

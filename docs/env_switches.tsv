@@ -175,6 +175,7 @@ DM_NVN_LAZY_CLEAR	switch	`0` makes clears with no draw after them open a pass of
 DM_NVN_LOADPROBE	diagnostic	`=1`, `2` or `3`: attachments whose load is skipped are cleared to a sentinel colour (`3` NaN; `1` NaN for float formats) and the sentinel pixels left at pass end are counted (should be 0)
 DM_NVN_LOG	diagnostic	`=1` logs the creation of NVN objects
 DM_NVN_MAGSCAN	diagnostic	`=<fs key>[:every[:phase]]`: device self-check that reads each pass's colour attachments every `every` frames (default 30) and logs `[mag]` lines for solid magenta 16×16 blocks or non-finite pixels
+DM_NVN_PARTIAL_UPLOAD	switch	`0` reads a texture whole from its storage at every re-upload; by default a re-upload reads only the images (a layer's level) with a page written since the last upload and copies the others from the texture it replaces
 DM_NVN_PASSDUMP	diagnostic	`=<f>`, `<f1>-<f2>` or `every:<n>`: logs every render pass of those frames (attachments, clears, shader keys, bindings, draw state, presents, and the host function and line that ended each pass) for the `tbdr_*.py` tools
 DM_NVN_PASSDUMP_ALL	diagnostic	`=1` makes `DM_NVN_PASSDUMP` record every draw and binding change, not only the first per pass and stage, including copies and inline uniform updates
 DM_NVN_PASSGPU	diagnostic	`=<file>` writes the GPU time of each render and compute pass from stage-boundary timestamp counters (off under Metal 4); also gives each dispatch its own encoder
@@ -188,7 +189,7 @@ DM_NVN_PROF	diagnostic	`=1` wraps the implemented NVN functions in a timing wrap
 DM_NVN_PROGTRACE	diagnostic	`=<vertex keys,...>` logs matching ProgramSetShaders calls and their guest backtraces
 DM_NVN_REGLUM	diagnostic	`=x0,y0,x1,y1:<file>` (normalized coordinates): on every present records the present number, time, mean luminance and a grayscale thumbnail of that region, to check animation speed against frame rate
 DM_NVN_REPORT_EXACT	switch	`0` refuses a partly covered uniform shadow over the whole 4 KB page of a counter report of a running submission, as before; by default only over the report's own 16 bytes, which the host writes when that submission completes
-DM_NVN_REUPLOADS	diagnostic	`=1` logs the first 400 re-uploads of textures taken from their storage: shape, size, the pages written since the upload and where the first lies, and the GPU copies into it since then
+DM_NVN_REUPLOADS	diagnostic	`=1` logs the first 400 re-uploads of textures taken from their storage: shape, size, how much was read from guest memory and how many images were copied from the texture it replaces, the frame and the submission, the pages written since the upload and where the first lies, and the GPU copies into it since then
 DM_NVN_RP_AREA	switch	`0` makes passes on targets of 16 M pixels or more cover the whole target, as before; by default a draw pass that loads what it keeps stops at the far corner of its scissor when that is at most half the target
 DM_NVN_RT_CONTINUE	switch	`0` ends the pass whenever the game sets render targets, as before; by default SetRenderTargets naming the open pass's targets continues the pass
 DM_NVN_RT_RANGE	switch	`=1` (experimental, off by default; with `DM_NVN_TBDR=1`) keeps the pass open when the game sets the same colour and depth target again with a view that differs only in its level count

@@ -151,7 +151,7 @@ static int pack_entry(void *c, const char *abs, const char *rel, const struct st
     }
     close(fd);
     if (left) return -1;   // a failed read, or a file shorter than its size (the save is a clone no Commit touches, so not one being written)
-    k->m->files++;
+    k->m->files++; k->m->bytes += (int64_t)size;
     if (mt > k->m->saved) k->m->saved = mt;
     return 0;
 }
@@ -242,7 +242,7 @@ int ss_read(const char *bundle, const char *into, ss_meta *m) {
             struct timespec t[2] = {{(time_t)mt, 0}, {(time_t)mt, 0}}; futimens(fd, t);
             int bad = close(fd); fd = -1; if (bad) goto done;
         }
-        if (h[0] == 2) m->files++;
+        if (h[0] == 2) m->files++, m->bytes += (int64_t)size;
     }
     if (fread(end, 1, sizeof end, f) != sizeof end || memcmp(end, END, sizeof end) || fgetc(f) != EOF) goto done;
     CC_SHA256_Final(d, &sha); hex(d, m->hash);
@@ -252,7 +252,7 @@ int ss_read(const char *bundle, const char *into, ss_meta *m) {
 done:
     if (fd >= 0) close(fd);
     free(buf); fclose(f);
-    if (r) m->files = 0, m->hash[0] = 0;
+    if (r) m->files = 0, m->bytes = 0, m->hash[0] = 0;
     return r;
 }
 
@@ -347,9 +347,9 @@ static int backup_dir(const char *save, const char *side, char *out, size_t n) {
     return 0;
 }
 
-// DM_SAVE_SYNC → <folder>/<title ID>/save.dmsync; 0 when sync is off
-static int cloud_file(const char *title, char *out, size_t n) {
-    const char *v = getenv("DM_SAVE_SYNC"); char dir[PATH_MAX], id[24];
+// A DM_SAVE_SYNC value → <folder>/<title ID>/save.dmsync; 0 when sync is off
+static int cloud_path(const char *v, const char *title, char *out, size_t n) {
+    char dir[PATH_MAX], id[24];
     if (!v || !*v || !strcmp(v, "0")) return 0;
     if (!strcmp(v, "icloud")) {
 #if TARGET_OS_OSX
@@ -374,6 +374,7 @@ static int cloud_file(const char *title, char *out, size_t n) {
     if (!strcasecmp(last ? last + 1 : dir, id)) return snprintf(out, n, "%s/save.dmsync", dir) < (int)n;
     return snprintf(out, n, "%s/%s/save.dmsync", dir, id) < (int)n;
 }
+static int cloud_file(const char *title, char *out, size_t n) { return cloud_path(getenv("DM_SAVE_SYNC"), title, out, n); }
 
 // The platform's fetch, given at most `ms`: a download iCloud never finishes must not hold the game at its first save mount. One that comes too late is dropped
 typedef struct { pthread_mutex_t mu; pthread_cond_t cv; int done, abandoned, result; char cloud[PATH_MAX], local[PATH_MAX]; } fetch_job;
@@ -558,6 +559,37 @@ static void mount_once(const char *save, const char *title) {
     if (pthread_create(&th, NULL, sender, NULL)) { SRED("cannot start the sender: saves are not sent this session"); return; }
     pthread_detach(th);
     atomic_store(&g_on, 1);
+}
+
+// ---------- what a front end asks the player with ----------
+// The two saves and the one last synced, as the mount will see them (dm/host/save_sync.h). The cloud's file is found as the mount finds it (cloud_path) and fetched
+// through the same front-end call, so on the iPhone the report is what downloads a file iCloud has only listed. It goes to a file of its own under <save>.sync-tmp:
+// a report the front end stopped waiting for may still be fetching when the next one starts, or when the game's mount clears the folder.
+int save_sync_report(const char *save, const char *title, const char *folder, int wait_ms, char *out, size_t n) {
+    char dd[PATH_MAX], cloud[PATH_MAX], tmp[PATH_MAX], theirs[PATH_MAX], base[SS_HASH + 1], dev[64];
+    static _Atomic int seq;
+    ss_meta mine, other; int got = -1, both = 0, same = 1, on;
+    memset(&other, 0, sizeof other); base[0] = 0;
+    if (!save || !*save || !title || !*title || !out || !n) return -1;
+    snprintf(dd, sizeof dd, "%s", save); size_t L = strlen(dd); while (L > 1 && dd[L - 1] == '/') dd[--L] = 0;
+    if (ss_scan(dd, &mine)) return -1;
+    read_base(dd, base);
+    if ((on = cloud_path(folder ? folder : getenv("DM_SAVE_SYNC"), title, cloud, sizeof cloud))) {
+        snprintf(tmp, sizeof tmp, "%s.sync-tmp", dd);
+        snprintf(theirs, sizeof theirs, "%s/report-%d-%d.dmsync", tmp, (int)getpid(), atomic_fetch_add(&seq, 1));
+        if (!mkdirs(tmp)) {
+            got = fetch_timed(cloud, theirs, wait_ms > 0 ? wait_ms : FETCH_MS);
+            if (got > 0 && ss_read(theirs, NULL, &other)) { SRED("the cloud's save %s is damaged", cloud); got = 0; memset(&other, 0, sizeof other); }   // the mount replaces it
+            unlink(theirs); rmdir(tmp);
+        }
+        if (got > 0 && strcasecmp(other.title, title)) same = 0;
+    }
+    if (got >= 0 && same) ss_decide(mine.hash, base, got > 0 ? other.hash : "", mine.saved, other.saved, 1, &both);
+    snprintf(dev, sizeof dev, "%s", other.device); for (char *s = dev; *s; s++) if (*s == ' ' || *s == '=') *s = '_';
+    int w = snprintf(out, n, "sync=%d cloud=%d local=%s saved=%lld files=%d size=%lld chash=%s csaved=%lld cfiles=%d csize=%lld cdevice=%s sametitle=%d conflict=%d",
+                     on, on ? got : 0, *mine.hash ? mine.hash : "-", (long long)mine.saved, mine.files, (long long)mine.bytes,
+                     got > 0 && *other.hash ? other.hash : "-", (long long)other.saved, other.files, (long long)other.bytes, *dev ? dev : "-", same, both);
+    return w < 0 || w >= (int)n ? -1 : 0;
 }
 
 void save_sync_mount(const char *save, const char *title) {   // the first mount does it; a second one (the device save) waits for it

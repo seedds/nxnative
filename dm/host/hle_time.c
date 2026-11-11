@@ -30,6 +30,14 @@ HLE_FORCE("_ZN2nn4time23StandardUserSystemClock14GetCurrentTimeEPNS0_9PosixTimeE
 // GetCurrentTime reads the time service's shared memory, which the host never maps (an abort in MonotonicSystemClock::GetCurrentTime, sdk+0x4421cc on that build). On the host the user clock
 // is the host's own clock, so it is this one too; Adjust runs natively (it reads the user clock context, a host take-over) and only sets the SDK's copy
 HLE_FORCE("_ZN2nn4time25AdjustableUserSystemClock14GetCurrentTimeEPNS0_9PosixTimeE", "adjustable user clock → host time(), as the user clock", Result, h_time_AdjGetCurrentTime, int64_t *out) { return h_time_GetCurrentTime(out); }
+// The network clock: a Switch keeps it from its last time sync, so one that has ever been online reads it offline too (IsAccuracySufficient, below, says how fresh). Games date their saves
+// by it: Divinity: Original Sin 2 failed its read here, kept its PosixTime 2, and showed every save as 18:00:02 31/12/1969, so Continue, which takes the newest, loaded an older save. The
+// host's clock is set from the network, so the network clock is the user clock; accuracy stays "not sufficient", as for a Switch that is offline now
+HLE_FORCE("_ZN2nn4time26StandardNetworkSystemClock14GetCurrentTimeEPNS0_9PosixTimeE", "network clock → host time(), as the user clock (the host's clock is network-set)", Result, h_time_NetNow, int64_t *out) {
+    Result r = h_time_GetCurrentTime(out);
+    static _Atomic int once; if (!atomic_exchange(&once, 1)) LOG("[time] the network clock read: %lld, the host's clock", (long long)*out);
+    return r;
+}
 // The C library's real-time clock (SDK 17): clock_gettime(CLOCK_REALTIME) calls the source that nntimeStartup selects once time::Initialize succeeds (sdk+0x8e414: 1 = the standard user clock,
 // 2 = the adjustable one; 0, the system tick, before that), and std::chrono::system_clock::now() throws on its failure. The SDK's getters ask the time service: Ace Attorney Investigations
 // Collection called std::terminate at its first real-time read, right after the first-boot language dialog (main+0x3f3f68; found by armyja, GitHub issue #18). The host user clock, to the nanosecond

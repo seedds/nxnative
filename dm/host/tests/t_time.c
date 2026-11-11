@@ -51,6 +51,9 @@ int main(void) {
     CHECK(guards_ok, "adjustable snapshot writes only its 0xd0 bytes");
     CHECK(adjustable[0xcd] == 2, "adjustable snapshot type is 2");
     CHECK(get64(adjustable, 0x40) == 1700000000, "adjustable user time follows the host clock");
+    Result (*net)(int64_t *) = hook("_ZN2nn4time26StandardNetworkSystemClock14GetCurrentTimeEPNS0_9PosixTimeE");
+    int64_t nt = -1;
+    CHECK(net && net(&nt) == RES_OK && nt == 1700000000, "the network clock reads the host clock, as the user clock (saves are dated by it)");
     const CalendarTime *cal = (const CalendarTime *)(adjustable + 0x50);
     CHECK(cal->year == 2023 && cal->month == 11 && cal->day == 14 && cal->hour == 22 && cal->minute == 13 && cal->second == 20,
           "adjustable snapshot has the UTC calendar for the fixed time");

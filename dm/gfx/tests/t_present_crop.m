@@ -64,6 +64,19 @@ static void check(id<MTLTexture> src, const char *name, const int crop[4], int w
     EXPECT(name,0,bad);free(out);
 }
 
+// This fixture is the only present producer. A window now holds a logical queue receipt;
+// wait for replay, then for the display ticket (snapshots do not return that ticket).
+static uint64_t display_ticket(uint64_t receipt, uint64_t before) {
+    EXPECT("present returned a logical receipt",1,receipt!=0);
+    if (!receipt) return 0;
+    nvn_queue_present_wait(receipt);
+    uint64_t queued, done; mtl_present_progress(&queued,&done);
+    EXPECT("one frame reached the display queue",1,queued==before+1);
+    if (queued!=before+1) return 0;
+    mtl_present_wait(queued);
+    return queued;
+}
+
 int main(void) { @autoreleasepool {
     mtl_init();
 #ifndef CROP_LEGACY_HEADER
@@ -192,17 +205,30 @@ int main(void) { @autoreleasepool {
     PFNNVNDEVICEGETPROCADDRESSPROC get=(PFNNVNDEVICEGETPROCADDRESSPROC)h_nvnBootstrapLoader("nvnDeviceGetProcAddress");
     NVNT_nvnWindowSetCrop set=(NVNT_nvnWindowSetCrop)get(NULL,"nvnWindowSetCrop");
     NVNT_nvnQueuePresentTexture present=(NVNT_nvnQueuePresentTexture)get(NULL,"nvnQueuePresentTexture");
+    NVNqueueBuilder builder={0}; NVNqueue queue={0};
+    h_nvnQueueBuilderSetDefaults(&builder);
+    EXPECT("fixture queue initialized",1,h_nvnQueueInitialize(&queue,&builder));
+    uint64_t before, done;
     tex_t tex={.magic=MAGIC('T', 'E', 'X', 0), .serial =10001};tex.d.width=tex.d.height=8;tex.d.depth=tex.d.levels=1;tex.d.format=NVN_FORMAT_RGBA8;tex.d.target=NVN_TEXTURE_TARGET_2D;serial_put(tex.serial,src);
     win_t win={.ntex=1};win.tex[0]=(NVNtexture *)&tex;set((NVNwindow *)&win,4,4,4,4);
-    mtl_present_test_stall(100000000);present(NULL,(NVNwindow *)&win,0);uint64_t tk=win.ticket[0];set((NVNwindow *)&win,0,0,8,8);
+    mtl_present_progress(&before,&done);
+    // Replay is held until the window changes: QueuePresent must take this frame's crop when it queues the frame, not when replay presents it
+    nvn_queue_test_hold(1);
+    present(&queue,(NVNwindow *)&win,0);set((NVNwindow *)&win,0,0,8,8);
+    {   // without a working hold the crop check below would pass whenever replay ran first
+        uint64_t held; usleep(20000); mtl_present_progress(&held,&done);
+        EXPECT("the held replay queues no frame for the display",1,held==before);
+    }
+    nvn_queue_test_hold(0);
+    uint64_t tk=display_ticket(win.ticket[0],before);
 #ifdef CROP_LEGACY_HEADER
     EXPECT("old queue struct has no room for a four-value copy (struct check)",1,sizeof(pq_item)>=sizeof(tex_t)+sizeof(double)+sizeof(uint64_t)+sizeof br);
 #else
-    pthread_mutex_lock(&g_pq_mu);if(!tk)tk=g_pq_in;   // a present snapshot (DM_PRESENT_SNAP; with the encode thread too) hands back no ticket: the frame is the last one queued
-    int saved=memcmp(g_pq[(tk-1)%PQ].crop,br,sizeof br)==0;pthread_mutex_unlock(&g_pq_mu);
+    pthread_mutex_lock(&g_pq_mu);
+    int saved=tk && memcmp(g_pq[(tk-1)%PQ].crop,br,sizeof br)==0;pthread_mutex_unlock(&g_pq_mu);
     EXPECT("real QueuePresent: the frame's crop copy does not change with the window",1,saved);
 #endif
-    mtl_present_wait(tk);mtl_present_test_stall(0);
+    h_nvnWindowFinalize((NVNwindow *)&win);
 #ifndef CROP_LEGACY_HEADER
     {   // A window without a crop of its own presents by the vi layer crop (Link's Awakening in handheld mode: 1280x720 of its 1920x1080 window textures, cropped through vi::SetLayerCrop)
         int none[4]={0},lay[4]={0,4,4,4},over[4]={0,0,16,16},lc[4];
@@ -211,10 +237,14 @@ int main(void) { @autoreleasepool {
         EXPECT("the window's own crop wins over the layer crop",1,present_crop(br,8,8,lc)==br);
         memcpy(g_layer_crop,over,sizeof over);EXPECT("a layer crop larger than the texture: the whole texture",1,present_crop(none,8,8,lc)==none);
         memcpy(g_layer_crop,lay,sizeof lay);win_t w2={.ntex=1};w2.tex[0]=(NVNtexture *)&tex;
-        mtl_present_test_stall(100000000);present(NULL,(NVNwindow *)&w2,0);uint64_t t2=w2.ticket[0];memset(g_layer_crop,0,sizeof g_layer_crop);
-        pthread_mutex_lock(&g_pq_mu);if(!t2)t2=g_pq_in;int got=memcmp(g_pq[(t2-1)%PQ].crop,lay,sizeof lay)==0;pthread_mutex_unlock(&g_pq_mu);
+        mtl_present_progress(&before,&done);
+        nvn_queue_test_hold(1);
+        present(&queue,(NVNwindow *)&w2,0);memset(g_layer_crop,0,sizeof g_layer_crop);
+        nvn_queue_test_hold(0);
+        uint64_t t2=display_ticket(w2.ticket[0],before);
+        pthread_mutex_lock(&g_pq_mu);int got=t2 && memcmp(g_pq[(t2-1)%PQ].crop,lay,sizeof lay)==0;pthread_mutex_unlock(&g_pq_mu);
         EXPECT("real QueuePresent: a window without a crop queues the layer crop",1,got);
-        mtl_present_wait(t2);mtl_present_test_stall(0);
+        h_nvnWindowFinalize((NVNwindow *)&w2);
     }
     {   // The crop only picks texels; the picture has the layer's shape (Super Mario Galaxy 2's storybook cutscenes: 1200x960 of a 1920x1080 swapchain, shown at 16:9, issue #949)
         const int W=64,H=36,TW=64,TH=36;MTLTextureDescriptor *td=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:TW height:TH mipmapped:NO];td.storageMode=MTLStorageModeShared;td.usage=MTLTextureUsageShaderRead;
@@ -246,11 +276,13 @@ int main(void) { @autoreleasepool {
         // The front end's layout and the mouse follow the same shape, not the crop's (front_picture_shape): a real present of the 5:4 crop
         tex_t st={.magic=MAGIC('T', 'E', 'X', 0), .serial =10002};st.d.width=TW;st.d.height=TH;st.d.depth=st.d.levels=1;st.d.format=NVN_FORMAT_RGBA8;st.d.target=NVN_TEXTURE_TARGET_2D;serial_put(st.serial,sw);
         win_t w3={.ntex=1};w3.tex[0]=(NVNtexture *)&st;set((NVNwindow *)&w3,crop54[0],crop54[1],crop54[2],crop54[3]);
-        present(NULL,(NVNwindow *)&w3,0);mtl_present_wait(w3.ticket[0]);
-        for(int i=0;i<200&&g_shape_h!=1080;i++)usleep(10000);   // a present snapshot hands back no ticket to wait on
+        mtl_present_progress(&before,&done);
+        present(&queue,(NVNwindow *)&w3,0);display_ticket(w3.ticket[0],before);
+        h_nvnWindowFinalize((NVNwindow *)&w3);
         EXPECT("the shape reported to the front end is the layer's, width",1920,g_shape_w);EXPECT("the shape reported to the front end is the layer's, height",1080,g_shape_h);
         res_remove(sw);
     }
 #endif
+    h_nvnQueueFinalize(&queue);
     printf("== %d checks, %d failed ==\n",cases,failed);return failed!=0;
 } }

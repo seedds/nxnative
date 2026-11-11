@@ -107,7 +107,8 @@ class Stage(unittest.TestCase):
         self.assertIn('[[object]] void main0(', src)
         self.assertIn(f'set_threadgroups_per_grid(uint3(min(_23[{out + 1}], {ms.METAL_MAX_GRID}u), 1u, 1u))', src)
         self.assertIn(f'dm_payload.w[i] = _23[{out}u + i]', src)
-        self.assertIn(f'[[buffer({abi.MESH_FIRST_SLOT})]]', src)
+        self.assertIn(f'[[buffer({abi.MESH_DRAW_SLOT})]]', src)
+        self.assertIn('_23[0] = dm_draw[1] + dm_tg;', src)   # the draw's {count, first}: its first task + this threadgroup
 
     def test_body_returns_to_the_wrapper(self):   # an early return must not skip handing the outputs over
         src, _ = self.task()
@@ -135,12 +136,20 @@ class Stage(unittest.TestCase):
         self.assertIn(f'uint at = {prim + 4}u + n;', src)
 
     def test_mesh_with_a_task_reads_its_number_from_the_payload(self):
-        self.assertIn('_23[4] = dm_tg;', self.mesh(task=True)[0])
+        src = self.mesh(task=True)[0]
+        self.assertIn('_23[4] = dm_tg;', src)
+        self.assertNotIn('main0_o', src)
 
-    def test_mesh_without_a_task_counts_from_the_draws_first(self):
+    def test_mesh_without_a_task_counts_from_its_blocks_first(self):   # Metal's mesh grid holds at most METAL_MAX_GRID threadgroups: an object function launches the draw in blocks
         src = self.mesh()[0]
-        self.assertIn('_23[0] = dm_first[0] + dm_tg;', src)
-        self.assertNotIn('[[payload]]', src)
+        self.assertEqual(ms.METAL_MAX_GRID, abi.MESH_GRID)
+        self.assertIn('_23[0] = dm_block.first + dm_tg;', src)
+        self.assertIn('const object_data dm_block_t& dm_block [[payload]]', src)
+        self.assertIn('[[object]] void main0_o(object_data dm_block_t& dm_block [[payload]]', src)
+        self.assertIn(f'[[buffer({abi.MESH_DRAW_SLOT})]]', src)
+        self.assertIn(f'uint b = dm_otg * {ms.METAL_MAX_GRID}u;', src)
+        self.assertIn('dm_block.first = dm_draw[1] + b;', src)
+        self.assertIn(f'dm_grid.set_threadgroups_per_grid(uint3(min(dm_draw[0] - b, {ms.METAL_MAX_GRID}u), 1u, 1u));', src)
 
     def test_per_primitive_outputs(self):   # four blocks of 6 vertex components (36 + 4 * 192 = 804 words), then the per-primitive blocks of 1 component (stride 32)
         src = self.mesh(primitive=True)[0]
@@ -203,6 +212,9 @@ class Stage(unittest.TestCase):
         src = (KERNEL % (ms.memory(i)[1] // 4, ms.memory(i)[0][2] // 4 + 1)).replace('main0(', 'main0(uint (&a)[4], ')
         with self.assertRaises(ValueError): ms.to_stage(src, i)
 
+    def test_position_is_invariant(self):   # two mesh shaders of one geometry must agree: a pre-pass and a colour pass testing depth for equality
+        self.assertIn('float4 position [[position, invariant]];', self.mesh()[0])
+
     @unittest.skipUnless(shutil.which('xcrun') and subprocess.run(['xcrun', '-sdk', 'macosx', '-f', 'metal'], capture_output=True).returncode == 0, 'no Metal compiler')
     def test_compiles(self):
         cases = [self.task()[0], self.mesh()[0], self.mesh(task=True)[0], self.mesh(primitive=True)[0], self.mesh(vertices=32, primitives=32, pos=0xf8, verts=1, reads={5: 0x7})[0], self.mesh(primitive=True, reads={0: 1, 1: 0xf, 5: 0xf})[0], self.local_word()]
@@ -215,7 +227,7 @@ class Stage(unittest.TestCase):
 
 
 class IntegerPassThrough(unittest.TestCase):
-    """dmsh_build.py fs_uint: a pixel shader that passes a flat input through to an integer target needs the integer entry point: Mario Kart World's dcb0504c844f1ecc, whose R8Uint output
+    """dmsh_entry.py fs_uint: a pixel shader that passes a flat input through to an integer target needs the integer entry point: Mario Kart World's dcb0504c844f1ecc, whose R8Uint output
     comes from its mesh stage's per-primitive attribute. A smooth input is not integer data"""
     SRC = """struct main0_out
 {
@@ -238,13 +250,8 @@ fragment main0_out main0(main0_in in [[stage_in]])
 
     @classmethod
     def setUpClass(cls):
-        import ast, re
-        tools = Path(__file__).resolve().parents[1] / 'tools'
-        tree = ast.parse((tools / 'dmsh_build.py').read_text())
-        sys.path.insert(0, str(tools)); import dmsh_side   # fs_uint's entry points call main0's shared body
-        scope = {'re': re, 'collections': __import__('collections'), 'dmsh_side': dmsh_side}
-        exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ('fs_uint', 'int_outputs', 'in_word')], type_ignores=[]), 'dmsh_build.py', 'exec'), scope)
-        cls.fs_uint = staticmethod(scope['fs_uint'])
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools')); import dmsh_entry
+        cls.fs_uint = staticmethod(dmsh_entry.fs_uint)
 
     def test_flat_input_through_a_local(self):
         src, mask = self.fs_uint(self.SRC % (', flat', '_26'))

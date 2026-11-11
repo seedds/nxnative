@@ -1,29 +1,15 @@
 """Production reflection conversion with synthetic translator descriptors."""
-import ast
 from pathlib import Path
-import re
 import sys
 import unittest
 
 TOOLS = Path(__file__).resolve().parents[1] / 'tools'
 sys.path.insert(0, str(TOOLS))
 import dmsh_abi
-import dmsh_geometry
+import dmsh_reflect
 
 
-def builder_reflection():
-    # Isolate pure reflection code from the builder's CLI/profile initialization.
-    tree = ast.parse((TOOLS / 'dmsh_build.py').read_text())
-    names = {'reflect', 'decode_tex', 'decode_ubo_tex', 'decode_ubo_img', 'const_sampler', 'c2_array'}
-    selected = [n for n in tree.body if (isinstance(n, ast.FunctionDef) and n.name in names)
-                or (isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'SSBO' for t in n.targets))
-                or (isinstance(n, ast.Assign) and any(isinstance(t, ast.Tuple) and any(isinstance(e, ast.Name) and e.id == 'TEX_BASE' for e in t.elts) for t in n.targets))]
-    ns = {'re': re, 'dmsh_geometry': dmsh_geometry, 'abi': dmsh_abi}
-    exec(compile(ast.Module(body=selected, type_ignores=[]), str(TOOLS / 'dmsh_build.py'), 'exec'), ns)
-    return ns['reflect']
-
-
-REFLECT = builder_reflection()
+REFLECT = dmsh_reflect.reflect
 
 
 def bindings(stage, offsets, flags, cb_slot=0):
@@ -119,12 +105,7 @@ class UniformArraysWithDriverSampler(unittest.TestCase):
 
 
 def builder_unfillable():
-    tree = ast.parse((TOOLS / 'dmsh_build.py').read_text())
-    keep = lambda n: (isinstance(n, ast.FunctionDef) and n.name in ('drv_reads', 'unfillable')) or (isinstance(n, ast.Assign) and any(
-        (isinstance(t, ast.Name) and t.id in ('SSBO', 'DRV_FILL', 'SAMPLE_ROWS')) or (isinstance(t, ast.Tuple) and any(isinstance(e, ast.Name) and e.id == 'TEX_BASE' for e in t.elts)) for t in n.targets))
-    ns = {'re': re, 'abi': dmsh_abi}
-    exec(compile(ast.Module(body=[n for n in tree.body if keep(n)], type_ignores=[]), str(TOOLS / 'dmsh_build.py'), 'exec'), ns)
-    return lambda src, stage='ps': ns['unfillable'](ns['drv_reads'](src), stage)
+    return lambda src, stage='ps': dmsh_reflect.unfillable(dmsh_reflect.drv_reads(src), stage)
 
 
 UNFILLABLE = builder_unfillable()

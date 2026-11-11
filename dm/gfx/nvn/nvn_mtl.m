@@ -16099,12 +16099,16 @@ static int present_now_kind(const tex_t *t, double period, uint64_t frame, uint6
 // Swapchain texture return: before AcquireTexture gets a texture it waits for the ticket of that texture's previous present to be processed (mtl_present_wait), after which the commands the game draws into it
 // are necessarily ordered after that blit on the GPU queue.
 #define PQ 8
-typedef struct { tex_t t; double period; uint64_t frame; int crop[4]; double t_in; uint64_t ev_val, snap_v; tex_t generated; int phase; } pq_item;   // snap_v: the snapshot copy this present shows (snap_commit_wait)   // t_in: the time the game handed this frame into the present queue (CACurrentMediaTime); ev_val: see g_ext_ev
+typedef struct { tex_t t; double period; uint64_t frame; int crop[4]; double t_in; uint64_t ev_val, snap_v; tex_t generated; int phase; int generated_crop[4]; } pq_item;   // snap_v: the snapshot copy this present shows (snap_commit_wait)   // t_in: the time the game handed this frame into the present queue (CACurrentMediaTime); ev_val: see g_ext_ev
 // External producer (the Vulkan layer, dm/gfx/vk) renders on its own queue and signals this event when a frame's rendering is done: the present of that frame waits for the value on g_q4
 static id<MTLSharedEvent> g_ext_ev;
 static void ext_wait(uint64_t v) { if (v && g_ext_ev) [g_q4 waitForEvent:g_ext_ev value:v]; }
 static void snap_commit_wait(uint64_t v);
 static pq_item g_pq[PQ];
+// A generated surface may own a compact backing while the native keeps its canvas.
+static const int *pq_picture_crop(const pq_item *it, int generated) {
+    return generated && it->generated_crop[2] > 0 && it->generated_crop[3] > 0 ? it->generated_crop : it->crop;
+}
 static int pq_take_phase(pq_item *entry,uint64_t ticket) {
     int generated=entry->generated.serial && !entry->phase;
     if(generated){entry->phase=1;g_pq_read=ticket-1;}else g_pq_read=ticket;
@@ -16188,7 +16192,7 @@ __attribute__((weak)) uint64_t dm_focus_in_since(void) { return 0; }
     ext_wait(it.ev_val); snap_commit_wait(it.snap_v);
     @autoreleasepool {
         const tex_t *picture=generated?&it.generated:&it.t;
-        submitted=present_now_kind(picture,it.generated.serial?it.period*.5:it.period,it.frame,ticket,it.crop,update.drawable,update.targetPresentationTimestamp,generated);
+        submitted=present_now_kind(picture,it.generated.serial?it.period*.5:it.period,it.frame,ticket,pq_picture_crop(&it,generated),update.drawable,update.targetPresentationTimestamp,generated);
         mtl_tex_unpin(picture->serial);
     }
     g_link_hold_until = submitted && (it.generated.serial || it.period>0.025) ? update.targetPresentationTimestamp + (it.generated.serial?it.period*.5:it.period) : 0;
@@ -16343,7 +16347,7 @@ static void *present_main(void *arg) {
         ext_wait(it.ev_val); snap_commit_wait(it.snap_v);
         @autoreleasepool {
             const tex_t *picture = generated ? &it.generated : &it.t;
-            submitted = present_now_kind(picture, it.generated.serial ? it.period * .5 : it.period, it.frame, ticket, it.crop, nil, 0, generated);
+            submitted = present_now_kind(picture, it.generated.serial ? it.period * .5 : it.period, it.frame, ticket, pq_picture_crop(&it, generated), nil, 0, generated);
             mtl_tex_unpin(picture->serial);
         }
         pthread_mutex_lock(&g_pq_mu); g_classic_busy = 0; pthread_cond_broadcast(&g_pq_cv); pthread_mutex_unlock(&g_pq_mu);
@@ -16392,7 +16396,7 @@ extern _Atomic uint64_t dm_present_ns;   // hle_thread.c (DM_HITCH_DUMP); the NV
 // The ring's length is the number of frames the game may run ahead of the screen: DM_PRESENT_SNAP=<n> (2 to SNAP_MAX; 1 = 2). Off by default; the iOS launcher's Frame buffering toggle enables it.
 #define SNAP_MAX 4
 // old: the slot's texture before the presented size or format last changed, resident until the slot's next use (snap_take)
-static struct { id<MTLTexture> tex, old; uint64_t serial; _Atomic uint64_t ticket, ev; } g_snap[SNAP_MAX];
+static struct { id<MTLTexture> tex, old; uint64_t serial; _Atomic uint64_t ticket, ev; int compact; } g_snap[SNAP_MAX];
 static id<MTL4CommandAllocator> g_snap_alloc[SNAP_MAX]; static id<MTL4CommandBuffer> g_snap_cb[SNAP_MAX];
 static id<MTLResidencySet> g_snap_res; static id<MTLSharedEvent> g_snap_ev; static uint64_t g_snap_v;
 static _Atomic uint64_t g_snap_next, g_snap_cmt;   // g_snap_cmt: the last copy the encode thread has committed (its g_snap_v)
@@ -16432,7 +16436,7 @@ uint64_t mtl_snap_acquire_wait(void) {
     return ws_t0() - w0;
 }
 // Copy the presented texture into the next ring slot; returns the slot's serial (0 = no snapshot: the game's texture is presented as before)
-static uint64_t snap_take(const tex_t *t,uint64_t *generated) {
+static uint64_t snap_take(const tex_t *t,const int present_crop[4],uint64_t *generated) {
     *generated=0;
     int k = (int)(atomic_load(&g_snap_next) % (uint64_t)g_snap_n);
     pthread_mutex_lock(&g_pq_mu); int busy = atomic_load(&g_snap[k].ticket) > g_pq_done; pthread_mutex_unlock(&g_pq_mu);
@@ -16472,9 +16476,13 @@ static uint64_t snap_take(const tex_t *t,uint64_t *generated) {
             if (!g_snap_alloc[i] || !g_snap_cb[i]) MDIE("present snapshots: no command allocator / buffer");
         }
     }
+    NSUInteger content[4]={0,0,src.width,src.height};
+    int compact=temporal_preview_on()==3 && present_crop && present_crop[2]>0 && present_crop[3]>0 &&
+        present_crop_rect(src,present_crop,content) && content[2]*src.height==content[3]*src.width;
+    NSUInteger copy_w=compact?content[2]:src.width,copy_h=compact?content[3]:src.height;
     id<MTLTexture> dst = g_snap[k].tex;
-    if (!dst || dst.width != src.width || dst.height != src.height || dst.pixelFormat != src.pixelFormat) {
-        MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:src.pixelFormat width:src.width height:src.height mipmapped:NO];
+    if (!dst || dst.width != copy_w || dst.height != copy_h || dst.pixelFormat != src.pixelFormat) {
+        MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:src.pixelFormat width:copy_w height:copy_h mipmapped:NO];
         d.storageMode = MTLStorageModePrivate; d.usage = MTLTextureUsageShaderRead;
         // The old texture stays resident (and referenced) until the slot's next use: the busy check above means its last present was committed, not that the GPU has run it,
         // and a texture removed here was sampled outside the residency set by a display command buffer still queued
@@ -16490,7 +16498,7 @@ static uint64_t snap_take(const tex_t *t,uint64_t *generated) {
     [cb beginCommandBufferWithAllocator:g_snap_alloc[k]];
     id<MTL4ComputeCommandEncoder> ce = [cb computeCommandEncoder];
     [ce barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageBlit visibilityOptions:resource_vis()];   // after the frame's work and the slot's last blit to the screen
-    [ce copyFromTexture:src sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(src.width, src.height, 1) toTexture:dst destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
+    [ce copyFromTexture:src sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(compact?content[0]:0, compact?content[1]:0, 0) sourceSize:MTLSizeMake(copy_w, copy_h, 1) toTexture:dst destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
     [ce barrierAfterStages:MTLStageBlit beforeQueueStages:MTLStageAll visibilityOptions:resource_vis()];   // the game's next writes to its texture come after the copy
     [ce endEncoding];
     uint64_t frame=atomic_load(&g_cur_frame);
@@ -16503,7 +16511,7 @@ static uint64_t snap_take(const tex_t *t,uint64_t *generated) {
                  front_screen_max_fps(),g_temporal_pair_viewport[0],g_temporal_pair_viewport[1],g_temporal_pair_viewport[2],g_temporal_pair_viewport[3]);
     }
     if(temporal_preview_on()==3 && front_screen_max_fps()>=120 && g_temporal_pair_final_frame==frame && g_temporal_pair_final_serial==t->serial)
-        *generated=temporal_snap_encode_producer(cb,k,src,g_temporal_pair_viewport,frame,now_ns(),g_temporal_full_scene,g_temporal_pair_ui,g_temporal_game_depth,g_temporal_full_camera,g_snap_ev,g_snap_v+1);
+        *generated=temporal_snap_encode_producer(cb,k,src,g_temporal_pair_viewport,frame,now_ns(),g_temporal_full_scene,g_temporal_pair_ui,g_temporal_game_depth,g_temporal_full_camera,g_snap_ev,g_snap_v+1,present_crop);
     else if(temporal_preview_on()==3) {
         double at=nvn_flow_begin();
         if(at)nvn_flow_event(g_temporal_pair_final_frame!=frame?"snapshot final frame missing":g_temporal_pair_final_serial!=t->serial?"snapshot final serial mismatch":"snapshot screen below 120",frame,0,at,nvn_flow_clock());
@@ -16531,7 +16539,7 @@ static uint64_t snap_take(const tex_t *t,uint64_t *generated) {
         pthread_mutex_lock(&g_res_mu); temporal_async_copy_wait(old_reader); double flow_submit = nvn_flow_begin(); [g_q4 commit:&cb count:1 options:options]; if (flow_submit) nvn_flow_event("snapshot submit", frame, 0, flow_submit, nvn_flow_clock()); [g_q4 signalEvent:g_snap_ev value:v]; pthread_mutex_unlock(&g_res_mu);
         atomic_store(&g_snap_cmt, v);
     }
-    g_snap[k].ev = v;
+    g_snap[k].ev = v;g_snap[k].compact=compact;
     return g_snap[k].serial;
 }
 static uint64_t present_enqueue(const tex_t *t, double period, const int crop[4], uint64_t ev_val) {
@@ -16557,15 +16565,24 @@ static uint64_t present_enqueue(const tex_t *t, double period, const int crop[4]
     tex_t snap; uint64_t ss = 0, generated = 0; int slot = 0;
     if (!ev_val && mtl_snap_on()) {
         slot = (int)(atomic_load(&g_snap_next) % (uint64_t)g_snap_n);
-        if ((ss = snap_take(t,&generated))) { memset(&snap, 0, sizeof snap); snap.magic = MAGIC('T', 'E', 'X', 0); snap.serial = ss; t = &snap; }
+        if ((ss = snap_take(t,crop,&generated))) { memset(&snap, 0, sizeof snap); snap.magic = MAGIC('T', 'E', 'X', 0); snap.serial = ss; t = &snap; }
     }
     mtl_tex_pin(t->serial);
     if(generated)mtl_tex_pin(generated);
     pthread_mutex_lock(&g_pq_mu);
     while (g_pq_in - g_pq_done >= PQ) pthread_cond_wait(&g_pq_cv, &g_pq_mu);   // Wait only when the queue is full; normally AcquireTexture blocks first
     pq_item *it = &g_pq[g_pq_in % PQ]; *it = (pq_item){*t, period, atomic_load(&g_cur_frame), {0}, CACurrentMediaTime(), ev_val, ss ? g_snap[slot].ev : 0};
-    if(generated){it->generated.magic=MAGIC('T','E','X',0);it->generated.serial=generated;}
-    if (crop) memcpy(it->crop, crop, sizeof it->crop);   // The current frame's state is enqueued with the ticket number, rather than reading the mutable window late on the present thread
+    if(generated){
+        it->generated.magic=MAGIC('T','E','X',0);it->generated.serial=generated;
+        if(crop)memcpy(it->generated_crop,crop,sizeof it->generated_crop);
+        if(g_temporal_snap[slot].compact_display){
+            it->generated_crop[0]=it->generated_crop[1]=0;
+            it->generated_crop[2]=(int)g_temporal_snap[slot].display.width;
+            it->generated_crop[3]=(int)g_temporal_snap[slot].display.height;
+        }
+    }
+    if (crop) memcpy(it->crop, crop, sizeof it->crop);   // immutable per-ticket window state
+    if(ss && g_snap[slot].compact){it->crop[0]=it->crop[1]=0;it->crop[2]=(int)g_snap[slot].tex.width;it->crop[3]=(int)g_snap[slot].tex.height;}
     uint64_t tk = ++g_pq_in;
     if (ss) { g_snap[slot].ticket = tk; atomic_fetch_add(&g_snap_next, 1); }
     pthread_cond_broadcast(&g_pq_cv);

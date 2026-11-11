@@ -123,7 +123,7 @@ static int temporal_async_submit(temporal_snap_slot *s,unsigned slot,id<MTLTextu
     pthread_mutex_lock(&g_temporal_async_mu);
     id<MTLCommandBuffer> cb=[g_temporal_async_queue commandBuffer];if(!cb){pthread_mutex_unlock(&g_temporal_async_mu);return 0;}
     [cb encodeWaitForEvent:producer value:producer_value];
-    float matrices[32];memcpy(matrices,camera.clip_to_world,64);memcpy(matrices+16,camera.previous_world_to_clip,64);
+    float matrices[16];nvn_cam_mul(camera.previous_world_to_clip,camera.clip_to_world,matrices);
     id<MTLComputeCommandEncoder> e=[cb computeCommandEncoder];[e setComputePipelineState:g_temporal_motion_ps];
     [e setBytes:matrices length:sizeof matrices atIndex:0];[e setTexture:s->depth_copy atIndex:0];[e setTexture:s->motion atIndex:1];
     [e dispatchThreadgroups:MTLSizeMake((s->depth_copy.width+7)/8,(s->depth_copy.height+7)/8,1) threadsPerThreadgroup:MTLSizeMake(8,8,1)];[e endEncoding];
@@ -164,9 +164,16 @@ static id<MTLTexture> temporal_async_upscale(id<MTLCommandBuffer> cb,id<MTLTextu
         id<MTLTexture> out=[g_dev newTextureWithDescriptor:td];if(!in || !out)return nil;
         s->scaler=f;s->input=in;s->output=out;s->made_at=g_present_n;
     }
-    id<MTLBlitCommandEncoder> e=[cb blitCommandEncoder];[e copyFromTexture:raw sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(r[0],r[1],0) sourceSize:MTLSizeMake(r[2],r[3],1) toTexture:s->input destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0,0,0)];[e endEncoding];
-    s->scaler.colorTexture=s->input;s->scaler.outputTexture=s->output;s->scaler.inputContentWidth=r[2];s->scaler.inputContentHeight=r[3];[s->scaler encodeToCommandBuffer:cb];
-    *keep=@[s->scaler,s->input,s->output];return s->output;
+    // Exact physical bounds are required: inputContent alone does not clamp padded texels.
+    int exact=!r[0] && !r[1] && r[2]==raw.width && r[3]==raw.height &&
+        raw.textureType==MTLTextureType2D && raw.sampleCount==1 &&
+        (raw.usage & s->scaler.colorTextureUsage)==s->scaler.colorTextureUsage;
+    id<MTLTexture> input=exact?raw:s->input;
+    if(!exact){
+        id<MTLBlitCommandEncoder> e=[cb blitCommandEncoder];[e copyFromTexture:raw sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(r[0],r[1],0) sourceSize:MTLSizeMake(r[2],r[3],1) toTexture:input destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0,0,0)];[e endEncoding];
+    }
+    s->scaler.colorTexture=input;s->scaler.outputTexture=s->output;s->scaler.inputContentWidth=r[2];s->scaler.inputContentHeight=r[3];[s->scaler encodeToCommandBuffer:cb];
+    *keep=@[s->scaler,input,s->output];return s->output;
 }
 static int temporal_async_present(uint64_t serial,id<MTLTexture> src,double period,uint64_t frame,uint64_t ticket,const int crop[4],id<CAMetalDrawable> drawable,double target,int generated) {
     int slot=temporal_async_slot(serial);if(slot<0 || !temporal_async_init())return -1;
@@ -178,6 +185,7 @@ static int temporal_async_present(uint64_t serial,id<MTLTexture> src,double peri
     uint64_t ready=generated?atomic_load(&g_temporal_snap[slot].async_ready):0;
     if(ready)[cb encodeWaitForEvent:g_temporal_async_done value:ready];
     NSArray *keep=nil;id<MTLTexture> up=temporal_async_upscale(cb,src,crop,drawable.texture,&keep);int rect[4]={0,0,(int)up.width,(int)up.height};
+    static int noted[2];if(up && !noted[!!generated]++){MLOG("asynchronous final MetalFX: %s, source %lux%lu -> drawable %lux%lu",generated?"generated":"native",(unsigned long)src.width,(unsigned long)src.height,(unsigned long)drawable.texture.width,(unsigned long)drawable.texture.height);}
     if(!present_encode(cb,up?:src,drawable.texture,up?rect:crop)){pthread_mutex_unlock(&g_temporal_async_mu);return 0;}
     uint64_t value=++g_temporal_display_sequence;atomic_store(&g_temporal_snap[slot].display_reader,value);
     [cb encodeSignalEvent:g_temporal_display_done value:value];

@@ -15,6 +15,7 @@ typedef struct {
     id<MTL4CounterHeap> profile;uint64_t profile_frame;int profile_pending;
     uint64_t serial,check_generation;
     NSUInteger check_pitch,check_width,check_height;
+    int compact_display;
 } temporal_snap_slot;
 static temporal_snap_slot g_temporal_snap[SNAP_MAX];
 static id<MTL4FXFrameInterpolator> g_temporal_snap_interp;
@@ -28,10 +29,14 @@ static int g_temporal_snap_rect[4];
 static MTLPixelFormat g_temporal_snap_format,g_temporal_snap_color_format,g_temporal_snap_ui_format;
 static id<MTLSamplerState> g_temporal_snap_sampler;
 static NSMutableDictionary<NSNumber *,id<MTLRenderPipelineState>> *g_temporal_snap_copy_ps;
-static id<MTLTexture> temporal_snap_texture(MTLPixelFormat format,NSUInteger w,NSUInteger h) {
+static id<MTLTexture> temporal_snap_texture_with_usage(MTLPixelFormat format,NSUInteger w,NSUInteger h,MTLTextureUsage usage) {
     MTLTextureDescriptor *d=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format width:w height:h mipmapped:NO];
-    d.storageMode=MTLStorageModePrivate;d.usage=MTLTextureUsageShaderRead|MTLTextureUsageShaderWrite|MTLTextureUsageRenderTarget|MTLTextureUsagePixelFormatView;
+    d.storageMode=MTLStorageModePrivate;d.usage=usage;
     return [g_dev newTextureWithDescriptor:d];
+}
+// Legacy broad-purpose fixture allocator. Production snapshots declare actual use below.
+static id<MTLTexture> temporal_snap_texture(MTLPixelFormat format,NSUInteger w,NSUInteger h) {
+    return temporal_snap_texture_with_usage(format,w,h,MTLTextureUsageShaderRead|MTLTextureUsageShaderWrite|MTLTextureUsageRenderTarget|MTLTextureUsagePixelFormatView);
 }
 static id<MTL4ArgumentTable> temporal_snap_table(int motion) {
     MTL4ArgumentTableDescriptor *d=[MTL4ArgumentTableDescriptor new];
@@ -139,7 +144,7 @@ static void temporal_snap_feedback(uint64_t frame,id<MTL4CommitFeedback> feedbac
     if(file){fprintf(file,"%llu\t%.9f\t%.9f\t%.6f\n",(unsigned long long)frame,feedback.GPUStartTime,feedback.GPUEndTime,(feedback.GPUEndTime-feedback.GPUStartTime)*1000);fflush(file);}
     pthread_mutex_unlock(&mu);
 }
-static uint64_t temporal_snap_encode_producer(id<MTL4CommandBuffer> cb,unsigned slot,id<MTLTexture> native,const int rect[4],uint64_t frame,uint64_t now,id<MTLTexture> world,id<MTLTexture> ui,id<MTLTexture> depth,nvn_camera_input camera,id<MTLSharedEvent> producer,uint64_t producer_value) {
+static uint64_t temporal_snap_encode_producer(id<MTL4CommandBuffer> cb,unsigned slot,id<MTLTexture> native,const int rect[4],uint64_t frame,uint64_t now,id<MTLTexture> world,id<MTLTexture> ui,id<MTLTexture> depth,nvn_camera_input camera,id<MTLSharedEvent> producer,uint64_t producer_value,const int present_crop[4]) {
     int asynchronous=temporal_async_on();
     if(asynchronous && (!producer || !producer_value))return 0;
     if(slot>=SNAP_MAX || g_temporal_snap_disabled || !world || !ui || !depth || !native)return 0;
@@ -151,6 +156,14 @@ static uint64_t temporal_snap_encode_producer(id<MTL4CommandBuffer> cb,unsigned 
     if(!srgb || (world.pixelFormat!=MTLPixelFormatRGBA16Float && world.pixelFormat!=MTLPixelFormatRG11B10Float) || (ui.pixelFormat!=MTLPixelFormatRGBA16Float && ui.pixelFormat!=MTLPixelFormatRG11B10Float) || depth.pixelFormat!=MTLPixelFormatDepth32Float || depth.sampleCount!=1 || world.sampleCount!=1 || ui.sampleCount!=1 ||
        depth.width!=camera.width || depth.height!=camera.height || ui.width!=world.width || ui.height!=world.height ||
        rect[0]<0 || rect[1]<0 || rect[2]<=0 || rect[3]<=0 || (NSUInteger)(rect[0]+rect[2])>native.width || (NSUInteger)(rect[1]+rect[3])>native.height)return 0;
+    // Compact only when the presented crop exactly matches the proven final viewport.
+    // Other crops may include meaningful black canvas pixels; preserve the legacy backing.
+    int compact=present_crop && !memcmp(present_crop,rect,4*sizeof(int)) &&
+        (NSUInteger)rect[2]*native.height==(NSUInteger)rect[3]*native.width;
+    NSUInteger display_w=compact?(NSUInteger)rect[2]:native.width,display_h=compact?(NSUInteger)rect[3]:native.height;
+    int output_rect[4];memcpy(output_rect,rect,sizeof output_rect);
+    if(compact)output_rect[0]=output_rect[1]=0;
+    s->compact_display=compact;
     NSUInteger dimensions[6]={world.width,world.height,depth.width,depth.height,native.width,native.height};
     int changed=world.pixelFormat!=g_temporal_snap_color_format || ui.pixelFormat!=g_temporal_snap_ui_format || memcmp(dimensions,g_temporal_snap_dimensions,sizeof dimensions)||base!=g_temporal_snap_format||memcmp(rect,g_temporal_snap_rect,sizeof g_temporal_snap_rect);
     if(changed || (asynchronous?!g_temporal_async_interp:!g_temporal_snap_interp)) {
@@ -173,19 +186,24 @@ static uint64_t temporal_snap_encode_producer(id<MTL4CommandBuffer> cb,unsigned 
         for(int i=0;i<3;i++)if(!s->copy_uniform[i] || !s->copy_args[i]){g_temporal_snap_disabled=1;return 0;}
         if(!s->serial)s->serial=(1ull<<60)+slot+1;
     }
+    id<MTLFXFrameInterpolatorBase> requirements=asynchronous?(id<MTLFXFrameInterpolatorBase>)g_temporal_async_interp:(id<MTLFXFrameInterpolatorBase>)g_temporal_snap_interp;
     int resized=(asynchronous && !s->depth_copy) || !s->world || s->world.pixelFormat!=world.pixelFormat || s->ui.pixelFormat!=ui.pixelFormat || s->world.width!=world.width || s->world.height!=world.height || s->motion.width!=depth.width || s->motion.height!=depth.height ||
-                s->display.width!=native.width || s->display.height!=native.height || s->display.pixelFormat!=base;
+                s->display.width!=display_w || s->display.height!=display_h || s->display.pixelFormat!=base;
     // Old display allocations may still be read by an already submitted present.
     // Keep their residency through this copy's queue position; the next safe reuse
     // proves that those earlier reads have completed, including a resize/grab.
     s->retired_keep=resized?s->keep:nil;
+    // Blits need no ShaderWrite flag. Ask for each MetalFX texture's actual usage;
+    // unnecessary write/view flags can prevent lossless texture optimization.
     if(resized) {
-        s->world=temporal_snap_texture(world.pixelFormat,world.width,world.height);s->ui=temporal_snap_texture(ui.pixelFormat,world.width,world.height);
-        s->depth_copy=asynchronous?temporal_snap_texture(MTLPixelFormatDepth32Float,depth.width,depth.height):nil;
-        s->output=temporal_snap_texture(MTLPixelFormatRGBA16Float,world.width,world.height);s->motion=temporal_snap_texture(MTLPixelFormatRG16Float,depth.width,depth.height);
-        s->display=temporal_snap_texture(base,native.width,native.height);s->srgb=[s->display newTextureViewWithPixelFormat:srgb];
+        s->world=temporal_snap_texture_with_usage(world.pixelFormat,world.width,world.height,requirements.colorTextureUsage|MTLTextureUsageShaderRead);s->ui=temporal_snap_texture_with_usage(ui.pixelFormat,world.width,world.height,requirements.uiTextureUsage|MTLTextureUsageShaderRead);
+        s->depth_copy=asynchronous?temporal_snap_texture_with_usage(MTLPixelFormatDepth32Float,depth.width,depth.height,requirements.depthTextureUsage|MTLTextureUsageShaderRead):nil;
+        s->output=temporal_snap_texture_with_usage(MTLPixelFormatRGBA16Float,world.width,world.height,requirements.outputTextureUsage|MTLTextureUsageShaderRead);s->motion=temporal_snap_texture_with_usage(MTLPixelFormatRG16Float,depth.width,depth.height,requirements.motionTextureUsage|MTLTextureUsageShaderRead|MTLTextureUsageShaderWrite);
+        // Keep only the pixels that will be shown. The game's native canvas is unchanged.
+        s->display=temporal_snap_texture_with_usage(base,display_w,display_h,MTLTextureUsageShaderRead|MTLTextureUsageRenderTarget);s->srgb=[s->display newTextureViewWithPixelFormat:srgb];
         if((asynchronous && !s->depth_copy) || !s->world || !s->ui || !s->output || !s->motion || !s->display || !s->srgb){g_temporal_snap_disabled=1;return 0;}
         serial_put(s->serial,s->display);
+        MLOG("snapshot surfaces: native %lux%lu -> display %lux%lu, compact=%d; usage world=%lx ui=%lx depth=%lx output=%lx motion=%lx display=%lx",(unsigned long)native.width,(unsigned long)native.height,(unsigned long)s->display.width,(unsigned long)s->display.height,compact,(unsigned long)s->world.usage,(unsigned long)s->ui.usage,(unsigned long)s->depth_copy.usage,(unsigned long)s->output.usage,(unsigned long)s->motion.usage,(unsigned long)s->display.usage);
     }
     int matrices=camera.has_current_transform&&g_temporal_snap_camera.has_current_transform;
     int continuous=matrices?nvn_camera_previous_matches(&camera,&g_temporal_snap_camera):frame==g_temporal_snap_frame+1;
@@ -196,7 +214,8 @@ static uint64_t temporal_snap_encode_producer(id<MTL4CommandBuffer> cb,unsigned 
     s->used_interpolator=g_temporal_snap_interp;s->async_interpolator=g_temporal_async_interp;
     int check=g_temporal_snap_fidelity==0;
     if(check) {
-        s->control=temporal_snap_texture(base,native.width,native.height);
+        // A matching linear/sRGB view needs no PixelFormatView usage. No compute writes.
+        s->control=temporal_snap_texture_with_usage(base,native.width,native.height,MTLTextureUsageShaderRead|MTLTextureUsageRenderTarget);
         s->control_srgb=[s->control newTextureViewWithPixelFormat:srgb];
         if(!s->control || !s->control_srgb){g_temporal_snap_disabled=1;return 0;}
         s->check_width=rect[2];s->check_height=rect[3];s->check_pitch=(s->check_width*4+255)&~255ul;
@@ -233,10 +252,10 @@ static uint64_t temporal_snap_encode_producer(id<MTL4CommandBuffer> cb,unsigned 
     if(profile)[cb writeTimestampIntoHeap:profile atIndex:2];
     float delta_time=reset?1.f/60:(now-g_temporal_snap_ns)*1e-9f;
     if(!asynchronous) {
-        memcpy(s->motion_uniform.contents,camera.clip_to_world,64);memcpy((uint8_t*)s->motion_uniform.contents+64,camera.previous_world_to_clip,64);
+        nvn_cam_mul(camera.previous_world_to_clip,camera.clip_to_world,(float *)s->motion_uniform.contents);
         [s->motion_args setAddress:s->motion_uniform.gpuAddress atIndex:0];[s->motion_args setTexture:depth.gpuResourceID atIndex:0];[s->motion_args setTexture:s->motion.gpuResourceID atIndex:1];
         temporal_encode_fx(cb,s->used_interpolator,s->motion_args,g_temporal_motion_ps,depth.width,depth.height,camera,delta_time,reset,s->world,previous,depth,s->motion,s->output,s->ui,profile);
-        if(!temporal_snap_copy(cb,s,1,s->output,s->srgb,rect))return 0;
+        if(!temporal_snap_copy(cb,s,1,s->output,s->srgb,output_rect))return 0;
         if(profile)[cb writeTimestampIntoHeap:profile atIndex:5];
     }
     if(check) {
@@ -247,7 +266,7 @@ static uint64_t temporal_snap_encode_producer(id<MTL4CommandBuffer> cb,unsigned 
         [e barrierAfterStages:MTLStageBlit beforeQueueStages:MTLStageAll visibilityOptions:resource_vis()];[e endEncoding];
     }
     g_temporal_snap_age=reset?1:g_temporal_snap_age+1;g_temporal_snap_previous=s->world;g_temporal_snap_camera=camera;g_temporal_snap_frame=frame;g_temporal_snap_ns=now;
-    if(asynchronous && !temporal_async_submit(s,slot,previous,g_snap[slot].tex?:native,producer,producer_value,camera,frame,delta_time,reset,rect)){g_temporal_snap_disabled=1;return 0;}
+    if(asynchronous && !temporal_async_submit(s,slot,previous,g_snap[slot].tex?:native,producer,producer_value,camera,frame,delta_time,reset,output_rect)){g_temporal_snap_disabled=1;return 0;}
 
     // Optional readback belongs to this slot, not the game's earlier completion fence.
     // Read it only at safe slot reuse, after the snapshot command buffer has finished.
@@ -300,6 +319,6 @@ static uint64_t temporal_snap_encode_producer(id<MTL4CommandBuffer> cb,unsigned 
     return ready?s->serial:0;
 }
 static uint64_t temporal_snap_encode(id<MTL4CommandBuffer> cb,unsigned slot,id<MTLTexture> native,const int rect[4],uint64_t frame,uint64_t now,id<MTLTexture> world,id<MTLTexture> ui,id<MTLTexture> depth,nvn_camera_input camera) {
-    return temporal_snap_encode_producer(cb,slot,native,rect,frame,now,world,ui,depth,camera,nil,0);
+    return temporal_snap_encode_producer(cb,slot,native,rect,frame,now,world,ui,depth,camera,nil,0,NULL);
 }
 #endif

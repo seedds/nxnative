@@ -68,7 +68,7 @@ int main(void){@autoreleasepool{
     if(layer.requests==7)CHECK("generated pixels survive failed native acquisition",!bad_pixels(d4.texture,50,150));
     CHECK("the queue is completely consumed",g_pq_read==g_pq_in&&g_pq_done==g_pq_in);
     {   // Snapshot capacity must also be respected when QueuePresent reaches replay late.
-        uint64_t extra=0,first=snap_take(&native,&extra);
+        uint64_t extra=0,first=snap_take(&native,NULL,&extra);
         CHECK("snapshot fixture initializes a real copy",first!=0);
         snap_commit_wait(g_snap_v);
         CHECK("initial snapshot GPU copy completes",[g_snap_ev waitUntilSignaledValue:g_snap_v timeoutMS:2000]);
@@ -80,7 +80,7 @@ int main(void){@autoreleasepool{
             pthread_mutex_lock(&g_pq_mu);g_pq_done=blocked_ticket;pthread_cond_broadcast(&g_pq_cv);pthread_mutex_unlock(&g_pq_mu);
             dispatch_semaphore_signal(retired);
         });
-        double begin=CACurrentMediaTime();uint64_t copied=snap_take(&native,&extra);
+        double begin=CACurrentMediaTime();uint64_t copied=snap_take(&native,NULL,&extra);
         CHECK("an occupied slot is awaited instead of losing the snapshot",copied!=0&&CACurrentMediaTime()-begin>=.05);
         dispatch_semaphore_wait(retired,dispatch_time(DISPATCH_TIME_NOW,2*NSEC_PER_SEC));
         if(copied){snap_commit_wait(g_snap_v);CHECK("retired slot copy completes",[g_snap_ev waitUntilSignaledValue:g_snap_v timeoutMS:2000]);CHECK("retired slot keeps native pixels",!bad_pixels(g_snap[k].tex,100,100));}
@@ -88,10 +88,30 @@ int main(void){@autoreleasepool{
         [g_q4 waitForEvent:block value:1];uint64_t pending=++g_snap_v;[g_q4 signalEvent:g_snap_ev value:pending];g_snap[k].ev=pending;
         dispatch_semaphore_t released=dispatch_semaphore_create(0);
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW,100*NSEC_PER_MSEC),dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0),^{block.signaledValue=1;dispatch_semaphore_signal(released);});
-        begin=CACurrentMediaTime();copied=snap_take(&native,&extra);
+        begin=CACurrentMediaTime();copied=snap_take(&native,NULL,&extra);
         CHECK("a GPU-owned slot waits before its allocator is reused",copied!=0&&CACurrentMediaTime()-begin>=.05);
         dispatch_semaphore_wait(released,dispatch_time(DISPATCH_TIME_NOW,2*NSEC_PER_SEC));
         if(copied){snap_commit_wait(g_snap_v);CHECK("GPU-owned slot copy completes",[g_snap_ev waitUntilSignaledValue:g_snap_v timeoutMS:2000]);CHECK("GPU-owned slot keeps native pixels",!bad_pixels(g_snap[k].tex,100,100));}
+    }
+    {
+        uint64_t extra=0;int k=(int)(atomic_load(&g_snap_next)%(uint64_t)g_snap_n);
+        int crop[4]={2,2,4,4};uint64_t copied=snap_take(&generated,crop,&extra);
+        CHECK("offset compact snapshot is created",copied!=0);snap_commit_wait(g_snap_v);
+        CHECK("offset compact snapshot completes",[g_snap_ev waitUntilSignaledValue:g_snap_v timeoutMS:2000]);
+        id<MTLTexture> image=g_snap[k].tex;
+        CHECK("same-aspect crop changes physical backing to content dimensions",g_snap[k].compact && image.width==4 && image.height==4);
+        if(image.width==4 && image.height==4){
+            id<MTLBuffer> bytes=[g_dev newBufferWithLength:64 options:MTLResourceStorageModeShared];
+            id<MTLCommandBuffer> cb=[g_q commandBuffer];id<MTLBlitCommandEncoder> e=[cb blitCommandEncoder];
+            [e copyFromTexture:image sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(4,4,1) toBuffer:bytes destinationOffset:0 destinationBytesPerRow:16 destinationBytesPerImage:64];
+            [e endEncoding];[cb commit];[cb waitUntilCompleted];CHECK("compact crop readback completes",!cb.error);
+            int wrong=0;const uint8_t *p=bytes.contents;
+            for(int y=0;y<4;y++)for(int x=0;x<4;x++){const uint8_t *q=p+16*y+4*x;int v=x<2?50:150;wrong+=q[0]!=v || q[1]!=v || q[2]!=v || q[3]!=255;}
+            CHECK("compact copy retains the exact offset pixels",!wrong);
+        }
+        int anamorphic[4]={2,2,4,2};copied=snap_take(&generated,anamorphic,&extra);snap_commit_wait(g_snap_v);
+        CHECK("shape-changing crop keeps legacy canvas",copied && !g_snap[k].compact && g_snap[k].tex.width==8 && g_snap[k].tex.height==8);
+        CHECK("legacy shape fallback completes",[g_snap_ev waitUntilSignaledValue:g_snap_v timeoutMS:2000]);
     }
     printf("CLASSIC_PRESENT_PAIR %d checks, %d failed\n",checks,failed);return failed!=0;
 }}

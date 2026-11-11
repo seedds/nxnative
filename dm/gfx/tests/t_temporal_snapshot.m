@@ -58,15 +58,15 @@ static int generated_matches(id<MTLTexture>t,int left) {
     double center=weight?sum/weight:NAN;printf("snapshot generated centroid %.3f expected %d\n",center,left+8);
     return isfinite(center)&&fabs(center-(left+8))<1;
 }
-static int scaled_native_matches(id<MTLTexture> t,int scale) {
+static int scaled_native_matches(id<MTLTexture> t,int scale,int expected_center) {
     NSData *data=read_bytes(t);const uint8_t *p=data.bytes;NSUInteger pitch=(t.width*4+255)&~255ul;
     int red=t.pixelFormat==MTLPixelFormatBGRA8Unorm?2:0;double sum=0,weight=0;
     const uint8_t *hud=p+8*scale*pitch+20*scale*4;if(test_ui_visible) {if(hud[1]<240 || hud[red]>40)return 0;} else {for(int i=0;i<3;i++)if(abs(hud[i]-srgb_byte(.01f))>1)return 0;}
     for(NSUInteger y=20*scale;y<t.height;y++)for(NSUInteger x=0;x<t.width;x++){
         double value=fmax(0,p[y*pitch+4*x+red]-50);sum+=(x+.5)*value;weight+=value;
     }
-    double center=weight?sum/weight:NAN;printf("scaled auxiliary centroid %.3f expected %d\n",center,32*scale);
-    return isfinite(center)&&fabs(center-32*scale)<2;
+    double center=weight?sum/weight:NAN;printf("scaled auxiliary centroid %.3f expected %d\n",center,expected_center*scale);
+    return isfinite(center)&&fabs(center-expected_center*scale)<2;
 }
 
 static void ui_completion_setup(prog_t *pg,tex_t *window,id<MTLTexture> ui,uint64_t frame) {
@@ -131,6 +131,11 @@ int main(void){@autoreleasepool{
     CHECK(g_pq_done==10 && g_pq_inflight==0,"original GPU feedback completes the native ticket");
     memset(&item,0,sizeof item);item.t.serial=103;
     CHECK(!pq_take_phase(&item,11) && g_pq_read==11,"native-only fallback uses one tick and native ticket");
+    pq_item cropped={.crop={16,8,128,72},.generated_crop={0,0,128,72}};
+    CHECK(pq_picture_crop(&cropped,0)==cropped.crop,"native phase retains canvas coordinates");
+    CHECK(pq_picture_crop(&cropped,1)==cropped.generated_crop,"compact generated phase uses its own coordinates");
+    memset(cropped.generated_crop,0,sizeof cropped.generated_crop);
+    CHECK(pq_picture_crop(&cropped,1)==cropped.crop,"legacy generated surfaces retain the shared crop");
     MTLPixelFormat color=getenv("DM_TEST_PACKED_COLOR")?MTLPixelFormatRG11B10Float:MTLPixelFormatRGBA16Float;
     id<MTLTexture>world=temporal_snap_texture(color,128,72);
     id<MTLTexture>ui=temporal_snap_texture(color,128,72);
@@ -160,7 +165,7 @@ int main(void){@autoreleasepool{
         if(asynchronous && frame==5){id<MTLCommandBuffer>hold=[g_temporal_async_queue commandBuffer];[hold encodeWaitForEvent:aux_gate value:1];[hold commit];}
         temporal_async_readers reader=temporal_async_reader((unsigned)slot);
         [alloc[slot]reset];id<MTL4CommandBuffer>cb=[g_dev newCommandBuffer];[cb beginCommandBufferWithAllocator:alloc[slot]];
-        uint64_t generated=temporal_snap_encode_producer(cb,slot,native,rect,frame,1000000000ull+frame*16666667ull,world,ui,depth,camera,asynchronous?event:nil,asynchronous?frame:0);
+        uint64_t generated=temporal_snap_encode_producer(cb,slot,native,rect,frame,1000000000ull+frame*16666667ull,world,ui,depth,camera,asynchronous?event:nil,asynchronous?frame:0,rect);
         [cb endCommandBuffer];temporal_async_copy_wait(reader);[g_q4 commit:&cb count:1];[g_q4 signalEvent:event value:frame];
         CHECK([event waitUntilSignaledValue:frame timeoutMS:10000],"snapshot GPU work completes");
         if(asynchronous && frame==5) {
@@ -175,6 +180,7 @@ int main(void){@autoreleasepool{
             CHECK(fabsf(value-.95095095095f)<.000001f,"auxiliary work uses immutable copied depth after live depth is overwritten");
             b=q_cb();rp.depthAttachment.clearDepth=.95095095095;[[b renderCommandEncoderWithDescriptor:rp]endEncoding];[b commit];[b waitUntilCompleted];
         }
+        CHECK(g_temporal_snap[slot].compact_display && g_temporal_snap[slot].display.width==128 && g_temporal_snap[slot].display.height==72,"matching present crop produces a physically compact generated surface");
         CHECK(native_matches(native,left),"host generation leaves the native game's output unchanged");
         if(frame<4)CHECK(!generated,"no extra picture before history and conversion proof are ready");
         else {CHECK(generated!=0 && g_temporal_snap_fidelity==2,"a real generated snapshot becomes available");
@@ -205,7 +211,7 @@ int main(void){@autoreleasepool{
             int slot=(frame-1)%2,left=96-(int)(frame-1)*8;upload(world,left,0,0);upload(ui,left,test_ui_visible,0);upload(native,left,test_ui_visible,1);
             temporal_async_readers reader=temporal_async_reader((unsigned)slot);
             [alloc[slot]reset];id<MTL4CommandBuffer>cb=[g_dev newCommandBuffer];[cb beginCommandBufferWithAllocator:alloc[slot]];
-            CHECK(temporal_snap_encode_producer(cb,slot,native,rect,frame,1000000000ull+frame*16666667ull,world,ui,depth,camera,event,frame)!=0,"gated history pair remains available");
+            CHECK(temporal_snap_encode_producer(cb,slot,native,rect,frame,1000000000ull+frame*16666667ull,world,ui,depth,camera,event,frame,rect)!=0,"gated history pair remains available");
             [cb endCommandBuffer];temporal_async_copy_wait(reader);[g_q4 commit:&cb count:1];[g_q4 signalEvent:event value:frame];
             if(frame==9)CHECK([event waitUntilSignaledValue:9 timeoutMS:10000],"first gated pair input is published");
         }
@@ -262,14 +268,21 @@ int main(void){@autoreleasepool{
         pthread_mutex_lock(&g_pq_mu);struct timespec resize_deadline;clock_gettime(CLOCK_REALTIME,&resize_deadline);resize_deadline.tv_sec+=5;
         while(g_pq_inflight && pthread_cond_timedwait(&g_pq_cv,&g_pq_mu,&resize_deadline)!=ETIMEDOUT){}
         int remaining=g_pq_inflight;pthread_mutex_unlock(&g_pq_mu);CHECK(!remaining,"both resized auxiliary presentations finish");
-        CHECK(scaled_native_matches(scaled[0].texture,2),"old spatial-scaled drawable preserves image and HUD after its context is replaced");
-        CHECK(scaled_native_matches(scaled[1].texture,3),"new spatial-scaled drawable preserves image and HUD");
+        CHECK(scaled_native_matches(scaled[0].texture,2,32),"old spatial-scaled drawable preserves image and HUD after its context is replaced");
+        CHECK(scaled_native_matches(scaled[1].texture,3,32),"new spatial-scaled drawable preserves image and HUD");
+        CAMetalLayer *generated_layer=[CAMetalLayer layer];generated_layer.device=g_dev;generated_layer.pixelFormat=MTLPixelFormatBGRA8Unorm;generated_layer.framebufferOnly=NO;generated_layer.drawableSize=CGSizeMake(384,216);[layers addObject:generated_layer];
+        id<CAMetalDrawable> generated_drawable=[generated_layer nextDrawable];
+        CHECK(generated_drawable!=nil,"compact generated spatial result receives a drawable");
+        CHECK(temporal_async_present(g_temporal_snap[0].serial,g_temporal_snap[0].display,0,9,23,rect,generated_drawable,0,1)==1,"compact generated picture passes through the real final spatial path");
+        CHECK(g_temporal_async_spatial.scaler.colorTexture==g_temporal_snap[0].display,"physically exact generated input bypasses extraction without reading padding");
+        temporal_async_drain();
+        CHECK(scaled_native_matches(generated_drawable.texture,3,44),"direct compact spatial input preserves generated midpoint and HUD");
         g_fx_mode=0;
     }
     // Unsupported output must fall back before encoding, without corrupting source/history.
     [alloc[0]reset];id<MTL4CommandBuffer>cb=[g_dev newCommandBuffer];[cb beginCommandBufferWithAllocator:alloc[0]];
     uint64_t fallback=asynchronous?11:9;
-    CHECK(!temporal_snap_encode_producer(cb,0,world,rect,fallback,1200000000ull,world,ui,depth,camera,asynchronous?event:nil,asynchronous?fallback:0),"unsupported native output format falls back");
+    CHECK(!temporal_snap_encode_producer(cb,0,world,rect,fallback,1200000000ull,world,ui,depth,camera,asynchronous?event:nil,asynchronous?fallback:0,rect),"unsupported native output format falls back");
     [cb endCommandBuffer];[g_q4 commit:&cb count:1];[g_q4 signalEvent:event value:fallback];CHECK([event waitUntilSignaledValue:fallback timeoutMS:10000],"fallback command buffer completes");
     if(!asynchronous) {
         // Replacing a slot must not evict a generated image still read by an older Metal4 present.

@@ -28,3 +28,24 @@ kernel void camera_motion(texture2d<float, access::read> depth [[texture(0)]],
     }
     motion.write(float4(delta, 0, 0), pixel);
 }
+
+// The host composes previous_world_to_clip * clip_to_world once in double precision.
+// Only the old x/y/w coordinates are needed; keep the original entry above as a control.
+kernel void camera_motion_composed(texture2d<float, access::read> depth [[texture(0)]],
+                                  texture2d<float, access::write> motion [[texture(1)]],
+                                  constant float4 *current_to_previous [[buffer(0)]],
+                                  uint2 pixel [[thread_position_in_grid]]) {
+    uint2 extent(depth.get_width(), depth.get_height());
+    if (any(pixel >= extent)) return;
+    float2 uv = (float2(pixel) + 0.5f) / float2(extent);
+    float4 clip(uv * float2(2, -2) + float2(-1, 1), depth.read(pixel).x, 1);
+    float3 old(dot(current_to_previous[0], clip), dot(current_to_previous[1], clip),
+               dot(current_to_previous[3], clip));
+    float2 delta(0);
+    if (old.z > 1e-6f) {
+        float2 old_uv = old.xy / old.z * float2(0.5f, -0.5f) + 0.5f;
+        delta = (old_uv - uv) * float2(extent);
+        if (!all(isfinite(delta))) delta = 0;
+    }
+    motion.write(float4(delta, 0, 0), pixel);
+}

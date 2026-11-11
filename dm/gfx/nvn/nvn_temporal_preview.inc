@@ -35,7 +35,7 @@ static id<MTLTexture> temporal_texture(MTLPixelFormat format, NSUInteger w, NSUI
 }
 static int temporal_motion_pipeline(void) {
     if(g_temporal_motion_ps)return 1;
-    NSError *error=nil;id<MTLLibrary> library=host_lib("camera_motion",&error);id<MTLFunction> fn=[library newFunctionWithName:@"camera_motion"];
+    NSError *error=nil;id<MTLLibrary> library=host_lib("camera_motion",&error);id<MTLFunction> fn=[library newFunctionWithName:@"camera_motion_composed"];
     if(fn)g_temporal_motion_ps=[g_dev newComputePipelineStateWithFunction:fn error:&error];
     return g_temporal_motion_ps!=nil;
 }
@@ -168,8 +168,7 @@ static int temporal_encode_scene(id<MTLTexture> scene, id<MTLTexture> depth, id<
     rp_end();
     id<MTLBuffer> uniforms; size_t offset = arena_alloc(sizeof(float)*32,&uniforms);
     if (!uniforms) return 0;
-    memcpy((uint8_t *)uniforms.contents+offset, camera.clip_to_world, sizeof(float)*16);
-    memcpy((uint8_t *)uniforms.contents+offset+sizeof(float)*16, camera.previous_world_to_clip, sizeof(float)*16);
+    nvn_cam_mul(camera.previous_world_to_clip,camera.clip_to_world,(float *)((uint8_t *)uniforms.contents+offset));
     MTL4ArgumentTableDescriptor *ad = [MTL4ArgumentTableDescriptor new]; ad.maxBufferBindCount=1; ad.maxTextureBindCount=2;
     id<MTL4ArgumentTable> table = [g_dev newArgumentTableWithDescriptor:ad error:nil];
     if (!table) return 0;

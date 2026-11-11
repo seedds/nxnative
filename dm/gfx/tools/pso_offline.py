@@ -8,12 +8,16 @@
 #   · left out as the host leaves them out (to the draws): a reflection of another chain version or none, a vertex shader with stage inputs and no pulling library, a vertex library that
 #     writes the layer (its reflection's layer_out, dmsh_entry.py layer_out: its pipelines take an input primitive class), a pixel shader that reads the primitive ID (its reflection's
 #     raster.primitive_id: the host builds its pipelines whole, since through a base every primitive reads 0), a missing library or entry point
-#   · a pair whose functions declare function constants is left to the device (rest_pairs.tsv): the host specializes such functions with an empty set of values, and metal-tt makes
-#     no specialized function from a library (applegpu-nt: "cannot find private metadata"), nor the function unspecialized ("cannot lower module with unresolved function constants")
+#   · a function that declares function constants is specialized as the host's prebuild specializes it (pre_fn in nvn_mtl.m): the border colour corrections' dm_border_off set (true:
+#     off), the specialization the draws that bind no sampler with a twin share (fn_off). metal-tt specializes a <key>_b or <key>_bp function, cut by dmsh_side.cut or not, and the host
+#     finds that base by its specialized descriptor (checked on Ocarina of Time's libraries, macOS 27.2, metal-tt 32023). It cannot lower a function unspecialized ("cannot lower module
+#     with unresolved function constants"), and failed with "cannot find private metadata" on a side library (<key>_bx), which no base uses. A pair whose functions declare any other
+#     constant is left to the device (rest_pairs.tsv), as before (HOST_CONSTANTS)
 # And a compute pipeline per compute shader, which depends on its function alone (the host makes it from the function, cps_new in nvn_mtl.m; the threadgroup size is the dispatch's):
 # the C rows of the profile's prewarm list (pso_manifest.tsv, recorded, in order), then every compute shader of its shader map (shader_map.tsv, stage compute), so a game whose list
 # names none (a provisional profile) still has them; per shader <key>_b, entry `entry`. Left out as the host would not find them: a reflection of another chain version or none, a
-# missing library or entry point, a function with function constants (the host specializes it through its library, fn_lib_spec, and builds that pipeline through the MTLDevice)
+# missing library or entry point, a function with a function constant other than HOST_CONSTANTS (the host builds that pipeline through the MTLDevice). One with the border corrections'
+# constant is specialized as for the bases, as the host's common dispatch and its prewarm take it (cps_new_b)
 # Output folder (what the app bundles as pso/, the host's DM_PSO_BUNDLE):
 #   <arch>.mtl4a     one archive per GPU architecture (applegpu_g18p = A19 / A19 Pro); the host opens the one named after its device's architecture
 #   prebuilt.tsv     what the archives cover, in the host's stamp format (pso_prebuild): chain version, depth mode, the pair lists' size and SHA-256. The host skips its prebuild when
@@ -39,7 +43,13 @@ import argparse, concurrent.futures, filecmp, hashlib, json, os, shutil, struct,
 from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'tools'))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import romfs, shader_lib   # the libraries may be one file (shader_lib.py), read in place; metal-tt alone needs files of its own (real_libraries)
+import dmsh_abi as abi
+
+# The function constants the host's prebuild sets in a base's functions (nvn_mtl.m pre_fn), by name: (index, bool value). A pair whose functions declare another constant is left to the
+# device: the host leaves it at its default, which metal-tt can do too, but no other constant was tried there, and one function metal-tt fails fails its whole group
+HOST_CONSTANTS = {'dm_border_off': (abi.BORDER_FC, True)}
 
 BATCH = 1000   # bases per metal-tt run: Odyssey's largest compiler lifetime footprint at this size was 2.065 GiB on an 8 GB M2
 COMPUTE_BATCH = 16   # compute pipelines per metal-tt run, JOBS runs at a time: one metal-tt keeps about 2-3 cores busy: Star Fox's 233 took 268 s in 16 groups against 453 s in one run (M5 Pro, background priority, a loaded Mac)
@@ -87,8 +97,22 @@ def stamp(chain, zero, text):
 
 
 def functions(path):
-    """{entry name: declares function constants} of a .metallib, from its header: the function list (NAME tags) and each function's public metadata (a CNST tag lists its constants).
-    Raises ValueError on a file it cannot read"""
+    """{entry name: declares function constants} of a .metallib (constants). Raises ValueError on a file it cannot read"""
+    return {k: bool(v) for k, v in constants(path).items()}
+
+
+def _constant_names(cnst):
+    """The names in a CNST tag: a 16-bit count, then per constant its name (NUL-terminated), a type byte, a 16-bit index and a byte"""
+    n, p, out = struct.unpack_from('<H', cnst, 0)[0], 2, []
+    for _ in range(n):
+        end = cnst.index(b'\0', p); out.append(cnst[p:end].decode()); p = end + 1 + 4
+    if p > len(cnst): raise ValueError('a truncated CNST tag')
+    return tuple(out)
+
+
+def constants(path):
+    """{entry name: the names of the function constants it declares, a tuple, empty for none} of a .metallib, from its header: the function list (NAME tags) and each function's public
+    metadata (a CNST tag lists its constants). Raises ValueError on a file it cannot read"""
     with romfs.open(path, 'rb') as f: b = f.read(1 << 20)
     if b[:4] != b'MTLB' or len(b) < 0x58: raise ValueError(f'{path}: not a Metal library')
     fo, _, po, ps = struct.unpack_from('<QQQQ', b, 0x18)
@@ -105,9 +129,9 @@ def functions(path):
             size = struct.unpack_from('<I', b, p)[0]; names.append(tags(p + 4, p + size)[b'NAME'].rstrip(b'\0').decode()); p += size
         consts, p = [], po
         for _ in range(count):   # each entry: its size (not counting the size field), then tags
-            size = struct.unpack_from('<I', b, p)[0]; consts.append(b'CNST' in tags(p + 4, p + 4 + size)); p += 4 + size
+            size = struct.unpack_from('<I', b, p)[0]; t = tags(p + 4, p + 4 + size); consts.append(_constant_names(t[b'CNST']) if b'CNST' in t else ()); p += 4 + size
         if p != po + ps: raise ValueError(f'{path}: public metadata does not match the function list')
-    except (struct.error, KeyError) as e: raise ValueError(f'{path}: unreadable function list ({e})') from e
+    except (struct.error, KeyError, UnicodeDecodeError) as e: raise ValueError(f'{path}: unreadable function list ({e})') from e
     return dict(zip(names, consts))
 
 
@@ -121,7 +145,7 @@ def plan(lib_dir, chain, pairs, zero):
         return js[key]
     def fn(lib):
         if lib not in fns:
-            try: fns[lib] = functions(lib_dir / f'{lib}.metallib')
+            try: fns[lib] = constants(lib_dir / f'{lib}.metallib')
             except (OSError, ValueError): fns[lib] = None
         return fns[lib]
     bases, rest, seen, left = [], [], set(), dict.fromkeys(('reflection', 'mesh', 'stage inputs', 'library', 'layer', 'primitive ID', 'entry'), 0)
@@ -138,7 +162,7 @@ def plan(lib_dir, chain, pairs, zero):
         vf, ff = fn(vl), fn(fl)
         if vf is None or ff is None: left['library'] += 1; continue
         if ventry not in vf or fentry not in ff: left['entry'] += 1; continue
-        if vf[ventry] or ff[fentry]: rest.append((vk, fk)); continue
+        if any(c not in HOST_CONSTANTS for c in vf[ventry] + ff[fentry]): rest.append((vk, fk)); continue   # script specializes HOST_CONSTANTS as the host does
         b = (vl, ventry, fl, fentry)
         if b not in seen: seen.add(b); bases.append(b)
     return bases, rest, left
@@ -153,30 +177,41 @@ def plan_compute(lib_dir, chain, shaders):
         except (OSError, ValueError): j = None
         if not isinstance(j, dict) or j.get('chain') != chain or j.get('stage', 'cs') != 'cs': left['reflection'] += 1; continue
         entry = j.get('entry') or 'main0'
-        try: fs = functions(lib_dir / f'{pc}.metallib')
+        try: fs = constants(lib_dir / f'{pc}.metallib')
         except (OSError, ValueError): left['library'] += 1; continue
         if entry not in fs: left['entry'] += 1; continue
-        if fs[entry]: left['constants'] += 1; continue
+        if any(c not in HOST_CONSTANTS for c in fs[entry]): left['constants'] += 1; continue   # script specializes HOST_CONSTANTS, as cps_new looks the pipeline up
         if (pc, entry) not in seen: seen.add((pc, entry)); pipes.append((pc, entry))
     return pipes, left
 
 
 def script(lib_dir, bases, computes=()):
     """A Metal 4 pipelines script (metal4-pipelines-script(5), the .mtl4-json format metal-tt reads) with one render pipeline descriptor per base, and one compute pipeline descriptor per
-    compute pipeline (library, entry) that names the function alone, as the host's lookup does (cps_bundle in nvn_mtl.m: no threadgroup size, no indirect command buffers)"""
-    libs, fns, pipes = {}, {}, []
+    compute pipeline (library, entry) that names the function alone, as the host's lookup does (cps_bundle in nvn_mtl.m: no threadgroup size, no indirect command buffers).
+    A function that declares constants is named through its specialization by HOST_CONSTANTS (a pair with other constants is not among the bases: plan)"""
+    libs, fns, specs, declared, pipes = {}, {}, {}, {}, []
     def fd(lib, entry):
-        if lib not in libs: libs[lib] = {'label': lib, 'path': str(Path(lib_dir).resolve() / f'{lib}.metallib')}
+        if lib not in libs:
+            libs[lib] = {'label': lib, 'path': str(Path(lib_dir).resolve() / f'{lib}.metallib')}
+            try: declared[lib] = constants(romfs.Path(lib_dir) / f'{lib}.metallib')
+            except (OSError, ValueError): declared[lib] = {}   # plan read every base's libraries; one it could not read is not among them
         label = f'{lib}.{entry}'
         if label not in fns: fns[label] = {'label': label, 'library': f'lib:{lib}', 'name': entry}
-        return f'fnd:{label}'
+        cs = declared[lib].get(entry, ())
+        if not cs: return f'fnd:{label}'
+        if label not in specs:
+            specs[label] = {'label': f'{label}.host', 'function_descriptor': f'fnd:{label}',
+                            'constant_values': [{'id_type': 'FunctionConstantIndex', 'id': {'data': i}, 'value_type': 'ConstantBool', 'value': {'data': v}}
+                                                for i, v in sorted(HOST_CONSTANTS[c] for c in cs if c in HOST_CONSTANTS)]}
+        return f'fnd:{label}.host'
     for vl, ve, fl, fe in bases:
         pipes.append({'vertex_function_descriptor': fd(vl, ve), 'fragment_function_descriptor': fd(fl, fe),
                       'color_attachments': [dict.fromkeys(COLOUR, 'Unspecialized') for _ in range(8)]})
     descriptors = {'render_pipeline_descriptors': pipes}
     if computes: descriptors['compute_pipeline_descriptors'] = [{'compute_function_descriptor': fd(lib, entry)} for lib, entry in computes]   # none: the script of bases alone, as before
-    return {'libraries': list(libs.values()), 'function_descriptors': {'library_function_descriptors': list(fns.values())},
-            'pipeline_descriptors': descriptors}
+    functions_ = {'library_function_descriptors': list(fns.values())}
+    if specs: functions_['specialized_function_descriptors'] = list(specs.values())   # none: the script as before, so other games' archive keys hold
+    return {'libraries': list(libs.values()), 'function_descriptors': functions_, 'pipeline_descriptors': descriptors}
 
 
 def write_script(path, configuration):

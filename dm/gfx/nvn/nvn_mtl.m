@@ -1456,6 +1456,7 @@ static void rp_end_at(const char *fn, int line);
 // third boss stage, about 1,500 one-draw passes a frame on its ink map, dm/games/0400380020056000/README.md). The line is in the file that holds the function (this one or an .inc it includes), at the build the log came from
 #define rp_end() rp_end_at(__func__, __LINE__)
 static void geo_mesh_flush_pass(void);   // a waiting run of mesh draws is drawn before its pass ends (nvn_geometry.inc)
+static int g_nibs; static void ibs_flush(void);   // image buffer textures written through aligned shadows (see ibs_begin)
 // DM_NVN_PASSGPU_SERIAL=1 (for measurement): before creating each encoder on the main command buffer, encode 'signal n+1 → wait for signal n+1' - the signal is only raised once all prior work has completed,
 // so the following encoder starts only after the previous one has fully finished; on TBDR passes no longer overlap in the pipeline, and the per-pass start-to-end span of DM_NVN_PASSGPU is that pass's exclusive time (the whole-frame total is inflated; look only at relative cost)
 static void ser_gate(void) {
@@ -4600,10 +4601,10 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
         // Metal requires 16-byte alignment for texture buffer views (minimumTextureBufferAlignmentForPixelFormat), and an Apple GPU addresses such a view from the 16-byte boundary below its
         // offset (measured on an M4 Pro: R32Float views at offsets 4, 8 and 12 read elements 0, 0 and 0 instead of 1, 2 and 3, shared and private buffers, bound directly or in an argument
         // buffer). Unreal puts buffer textures at 4-, 8- and 12-byte offsets in its pools (Octopath Traveler 0: offset 0x168; FINAL FANTASY RESONANCE's particle data), so the view is created
-        // there and shaders read it through an aligned copy (tbuf_shadow). Writes through such a view cannot be redirected. Below the element size the view stays a dummy
+        // there and shaders read it through an aligned copy (tbuf_shadow) and write it through an aligned shadow (ibs_begin). Below the element size the view stays a dummy
         if (mo % al) {
             if (mo % (uint64_t)bpb) { RED_ONCE(38, "buffer texture offset %#llx not aligned to its %d-byte elements", (unsigned long long)mo, bpb); return nil; }
-            if (t->d.flags & NVN_TEXTURE_FLAGS_IMAGE) RED_ONCE(119, "image buffer texture at pool offset %#llx, below Metal's %lu-byte alignment: shader writes to it land at the 16-byte boundary below", (unsigned long long)mo, (unsigned long)al);
+            if (t->d.flags & NVN_TEXTURE_FLAGS_IMAGE) { static int n; if (n++ < 4) MLOG("image buffer texture at pool offset %#llx, below Metal's %lu-byte alignment: shader writes go through an aligned shadow (ibs_begin)", (unsigned long long)mo, (unsigned long)al); }
             static int once; if (!once++) MLOG("buffer texture at pool offset %#llx, below Metal's %lu-byte alignment: created there, read through an aligned copy (tbuf_shadow)", (unsigned long long)mo, (unsigned long)al);
         }
         MTLTextureDescriptor *d = [MTLTextureDescriptor textureBufferDescriptorWithPixelFormat:(MTLPixelFormat)pf width:t->d.width resourceOptions:b.resourceOptions
@@ -5361,6 +5362,7 @@ static void rp_end_at(const char *fn, int line) { if (g_enc) { AP_B; geo_mesh_fl
     if (g_nubd && g_nubd >= ubd_lazy()) ubd_flush();   // the inline updates deferred in this pass, in order (see mtl_sub_update); across passes they wait for the next copy or dispatch (blit_raw)
     if (g_nbcrt) bcrt_flush();   // blocks drawn into shadows go back into their compressed textures
     if (g_nrtm) rt_mirror_flush();
+    if (g_nibs) ibs_flush();   // image buffer shadows (see ibs_begin) go back into their pools
 #ifdef NVN_RT_RANGE_TEST
     rr_finish(ranged);
 #endif
@@ -10533,6 +10535,59 @@ static id<MTLTexture> img_binding(int tid, const nvn_rbind *b, uint64_t *rid, in
     if (!t) { t = dummy_img(b->dtt, b->dpf); *rid = g_dummy_img_rid[b->dtt & 7][b->dpf & 3]; }
     return t;
 }
+// An image buffer texture below Metal's 16-byte view alignment is written through an aligned shadow: an Apple GPU addresses such a view from the 16-byte boundary below its offset
+// (see tex_mtl, target BUFFER), so every shader write landed that many bytes early. Assassin's Creed II's occlusion culling draws each object's bounding box and its fragment shader marks
+// "object k visible" in a 4096-entry R32 buffer, one of three rotating ones, two of them at pool offsets ≡ 8 (mod 16): in those frames each mark went to object k - 2, and walls, floors
+// and props vanished and came back from frame to frame (the elevator corridor of the Animus, the background of Ezio's birth). ibs_begin (image_prepare, before the encoder opens) copies the
+// bytes into the shadow on the GPU; the binding (encode_args) uses the shadow's view; ibs_flush copies them back after the pass (rp_end) or the dispatch. The shadow is good for one submission
+enum { IBS_N = 16, IBS_ACT = 8 };
+static struct { __unsafe_unretained id<MTLTexture> src; __strong id<MTLBuffer> buf, pool; __strong id<MTLTexture> view; uint64_t sub, guest; NSUInteger off, n; } g_ibs[IBS_N];
+static int g_ibs_act[IBS_ACT]; static unsigned g_ibs_next;
+static int ibs_find(id<MTLTexture> root) { for (int i = 0; i < g_nibs; i++) { int k = g_ibs_act[i]; if (g_ibs[k].src == root && g_ibs[k].sub == g_fence) return k; } return -1; }
+static void ibs_begin(id<MTLTexture> root, uint64_t guest) {
+    if (ibs_find(root) >= 0) return;
+    id<MTLBuffer> src = root.buffer; NSUInteger off = root.bufferOffset, row = root.bufferBytesPerRow;
+    if (!src || !(off & 15) || off >= src.length) return;
+    if (off & 3) { RED_ONCE(132, "image buffer texture at pool offset %#lx, not 4-byte aligned: shader writes land at the 16-byte boundary below", (unsigned long)off); return; }
+    if (g_nibs == IBS_ACT) { RED_ONCE(133, "more than %d image buffer textures below the 16-byte alignment in one pass: the rest are written at the 16-byte boundary below", IBS_ACT); return; }
+    NSUInteger n = (row < src.length - off ? row : src.length - off) & ~(NSUInteger)3;
+    int k = -1; for (int i = 0; i < IBS_N && k < 0; i++) if (g_ibs[i].src == root && g_ibs[i].n == n) k = i;
+    if (k < 0) {
+        k = (int)(g_ibs_next++ % IBS_N);
+        if (g_ibs[k].buf) { defer_obj_release(g_ibs[k].buf); if (g_ibs[k].view) defer_obj_release(g_ibs[k].view); }
+        id<MTLBuffer> b = [g_dev newBufferWithLength:n options:MTLResourceStorageModePrivate];
+        if (!b) { g_ibs[k] = (typeof(g_ibs[0])){0}; RED_ONCE(134, "cannot create the aligned shadow of an image buffer texture (%lu bytes)", (unsigned long)n); return; }
+        res_add(b); g_ibs[k] = (typeof(g_ibs[0])){root, b, nil, nil, 0, 0, 0, n};
+    }
+    for (int i = 0; i < g_nibs; i++) if (g_ibs_act[i] == k) { g_ibs_act[i] = g_ibs_act[--g_nibs]; break; }   // left over from an earlier submission
+    enc_b_copy_buffer(blit(), src, off, g_ibs[k].buf, 0, n);
+    g_ibs[k].sub = g_fence; g_ibs[k].guest = guest; g_ibs[k].off = off; g_ibs[k].pool = src; g_ibs_act[g_nibs++] = k;
+    args_dirty_all();
+    static int once; if (!once++) MLOG("image buffer texture at pool offset %#lx (not 16-byte aligned) written through an aligned shadow: %lu bytes, copied back after the pass (first case)", (unsigned long)off, (unsigned long)n);
+}
+// The view a shader writes in place of t (t itself when it has no shadow in this submission); a format view (img_fit) gets a view of the shadow in its format
+static id<MTLTexture> ibs_view(id<MTLTexture> t, uint64_t *rid) {
+    if (!g_nibs || t.textureType != MTLTextureTypeTextureBuffer) return t;
+    id<MTLTexture> root = t; while (root.parentTexture) root = root.parentTexture;
+    int k = ibs_find(root); if (k < 0) return t;
+    if (!g_ibs[k].view || g_ibs[k].view.pixelFormat != t.pixelFormat || g_ibs[k].view.width != t.width) {
+        MTLTextureDescriptor *d = [MTLTextureDescriptor textureBufferDescriptorWithPixelFormat:t.pixelFormat width:t.width resourceOptions:g_ibs[k].buf.resourceOptions usage:t.usage];
+        id<MTLTexture> v = [g_ibs[k].buf newTextureWithDescriptor:d offset:0 bytesPerRow:root.bufferBytesPerRow];
+        if (!v) { RED_ONCE(135, "cannot create a view of an image buffer texture's aligned shadow (%lu elements, format %lu)", (unsigned long)t.width, (unsigned long)t.pixelFormat); return t; }
+        if (g_ibs[k].view) defer_obj_release(g_ibs[k].view);
+        g_ibs[k].view = v;
+    }
+    *rid = g_ibs[k].view.gpuResourceID._impl;
+    return g_ibs[k].view;
+}
+// After the pass or dispatch that wrote the shadows: their bytes go back to the pool. Leaves no encoder open, as rt_mirror_flush
+static void ibs_flush(void) {
+    int n = g_nibs; g_nibs = 0;
+    for (int i = 0; i < n; i++) { int k = g_ibs_act[i]; id<MTLBuffer> dst = g_ibs[k].pool; if (g_ibs[k].sub != g_fence || !dst) continue;
+        g_wr_epoch++; pend_add(g_ibs[k].guest, g_ibs[k].n, 2);
+        enc_b_copy_buffer(blit(), g_ibs[k].buf, 0, dst, g_ibs[k].off, g_ibs[k].n); }
+    if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
+}
 // Resolve shader image writes before an encoder is opened. Snowdrop's cf5ba107e29b51f4 writes a COMPRESSIBLE-only R16F texture registered with RegisterTexture, not RegisterImage.
 // An image bind may follow rendering into a texture created without IMAGE; upgrading it inside encode_args would
 // copy out of an attachment while its render pass was still open. Close that pass first, then replace the shared backing (all registered sampled views follow g_ser_gen).
@@ -10558,7 +10613,7 @@ static void image_prepare(NvProg *pr, unsigned stages) {
             int reinterpret = b->atom && b->dpf != NVN_DPF_FLOAT && tex_atomic_alias(base);
             int upgrade = base && (!(base.usage & MTLTextureUsageShaderWrite) || reinterpret);
             os_unfair_lock_unlock(&g_rmu);
-            if (!upgrade) continue;
+            if (!upgrade) { if (base.textureType == MTLTextureTypeTextureBuffer && (base.bufferOffset & 15)) ibs_begin(base, (uint64_t)(uintptr_t)image.mem); continue; }   // see ibs_begin
             rp_end();
             os_unfair_lock_lock(&g_rmu);
             // A guest registration can change while the pass ends; resolve its current snapshot again under the descriptor lock.
@@ -11163,6 +11218,7 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
             id<MTLTexture> t = img_binding(tid, b, &trid, &real);
             int snap = real && g_fb_n && !b->rw && !b->atom && fb_image_view(tid, b, t) ? fb_snapshot_slot(nvn_stage, t) : -1;
             if (snap >= 0) { t = g_fb_use[snap]; trid = g_fb_rid[snap]; }
+            else if (real) t = ibs_view(t, &trid);   // see ibs_begin (a framebuffer snapshot is never an image buffer texture)
             if (b->atom && !img_atomic_ok(t, b)) {   // see dummy_img_atomic; an unbound slot's write sink is not atomic-capable either
                 if (real) { id<MTLTexture> base = t; while (base.parentTexture) base = base.parentTexture;
                     RED_ONCE(93, "image atomics on a texture Metal cannot run them on (shader %s stage %d slot %d texture ID %d: Metal format %lu of base format %lu, type %lu for %u, %s): they go to a write sink",
@@ -14430,6 +14486,7 @@ static void dispatch(const p_dispatch *dp) {
         enc_c_dispatch_indirect(ce, ig, MTLSizeMake(tg[0], tg[1], tg[2]));
     } else enc_c_dispatch(ce, MTLSizeMake(dp->x, dp->y, dp->z), MTLSizeMake(tg[0], tg[1], tg[2]));
     if (own) enc_c_end(ce);
+    if (g_nibs) ibs_flush();   // see ibs_begin (dispatch_enc recorded the dispatch as writing everything: the copy-back waits for it)
 }
 // GPU: texture -> buffer (row stride taken from SetCopyRowStride, layer stride from SetCopyImageStride, 0 = tightly packed)
 // A copy at a level the host texture lacks (more levels declared than its size holds, tex_desc) is skipped: Metal does not check the level of a blit

@@ -870,6 +870,14 @@ Games read this count as a position in their own command memory and size their h
 - **Fix:** before a draw or dispatch uses a writable image, `image_prepare` resolves it with image intent and ensures its backing allows shader writes. `RegisterImage` also keeps this intent in its host snapshot; neither path changes the guest texture. A texture already rendered into is upgraded through `tex_upgrade`: end its render pass first, copy every mip / slice, replace all shared serials and invalidate cached sampled views. Load-only image slots accept read-only storage without upgrading, and ordinary render targets retain their original usage. `t_image_usage.m` exercises both registration entry points, a late registration while a render pass is open, the clear and other mip surviving the upgrade, and a GPU image write read through a sampled alias.
 - **Found on:** [Mario + Rabbids Sparks of Hope](../../dm/games/0100317013770000/README.md) (SDK 13.3.5, Snowdrop).
 
+### Image buffer textures below Metal's 16-byte alignment
+
+- **Symptom:** walls, floors and props vanish and come back from frame to frame in Assassin's Creed II (the Abstergo elevator corridor, the background of Ezio's birth scene); the log has `image buffer texture at pool offset …, below Metal's 16-byte alignment`. Forcing occlusion queries visible (`DM_NVN_VIS_ALL=1`) does not help.
+- **Cause:** the game's occlusion culling draws each object's bounding box (36 indices, about 137 instances) and fragment shader `f17624f1613d0321` marks "object k visible" in a 4096-entry R32 buffer texture, one of three it rotates through. Two of them sit at pool offsets ≡ 8 (mod 16). An Apple GPU addresses a buffer texture view from the 16-byte boundary below its offset, so in those frames every mark landed two objects early and the game culled visible geometry. Reads of such views already went through an aligned copy (`tbuf_shadow`); writes did not.
+- **Fix:** `ibs_begin` (from `image_prepare`, before the encoder opens) copies the buffer's bytes on the GPU into an aligned private shadow, the image binding uses a view of the shadow (`ibs_view`), and `ibs_flush` copies it back after the render pass (`rp_end`) or the dispatch. A shadow is valid for one submission.
+- **Check:** 60 consecutive frames at the corridor before the fix showed the geometry missing in most frames; after it the player saw no flicker in the corridor or the birth scene.
+- **Found on:** Assassin's Creed: The Ezio Collection (0100670014482000).
+
 ### Plural texture binds, builder-registered samplers, strided texel writes, device item 0x67
 
 - `nvnCommandBufferBindTextures` (the plural of `BindTexture`), `nvnSamplerPoolRegisterSamplerBuilder` (a sampler registered from its builder), `nvnTextureWriteTexelsStrided` (`WriteTexels` with row and image strides) and device item 0x67, which the game reads before every program it loads and uses as the alignment of its copies of the shader (answered 256, not measured).

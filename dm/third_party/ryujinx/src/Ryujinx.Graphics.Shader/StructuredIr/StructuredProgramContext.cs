@@ -312,6 +312,7 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
                 int elemIndex = cbufOffset & 3;
 
                 ResourceManager.SetUsedConstantBufferBinding(binding);
+                ResourceManager.NoteUniformRead(binding, true, cbufOffset);   // nxnative: uniform bounds
 
                 IAstNode[] sources =
                 [

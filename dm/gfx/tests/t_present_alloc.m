@@ -88,9 +88,9 @@ int main(void) { @autoreleasepool {
 
     // A dropped frame: ticket 1 on allocator 1, then 3 (2 dropped) on allocator 0, then 4 on allocator 1 again with two presents in flight
     [g_q4 waitForEvent:gate value:1];   // nothing committed to the Metal 4 queue from here runs until the gate opens
-    present_enqueue(&a, 1. / 60, NULL, 0);
+    present_enqueue(&a, 1. / 60, NULL, 0, NULL);
     id<CAMetalDrawable> first = tick();
-    present_enqueue(&b, 1. / 60, NULL, 0); present_enqueue(&b, 1. / 60, NULL, 0); present_enqueue(&c, 1. / 60, left_half, 0);
+    present_enqueue(&b, 1. / 60, NULL, 0, NULL); present_enqueue(&b, 1. / 60, NULL, 0, NULL); present_enqueue(&c, 1. / 60, left_half, 0, NULL);
     tick();
     printf("after the drop: read %llu, done %llu, in flight %d\n", (unsigned long long)g_pq_read, (unsigned long long)g_pq_done, g_pq_inflight);
     CHECK("ticket 1 has not completed", g_pq_inflight == 2);
@@ -100,10 +100,10 @@ int main(void) { @autoreleasepool {
 
     // One frame per tick, nothing dropped: tickets 5, 6 and 7 on allocators 2, 0 and 1, then 8 on allocator 2 again with three presents in flight
     [g_q4 waitForEvent:gate value:2];
-    present_enqueue(&a, 1. / 60, NULL, 0); id<CAMetalDrawable> fifth = tick();
-    present_enqueue(&b, 1. / 60, NULL, 0); tick();
-    present_enqueue(&b, 1. / 60, NULL, 0); tick();
-    present_enqueue(&c, 1. / 60, left_half, 0);
+    present_enqueue(&a, 1. / 60, NULL, 0, NULL); id<CAMetalDrawable> fifth = tick();
+    present_enqueue(&b, 1. / 60, NULL, 0, NULL); tick();
+    present_enqueue(&b, 1. / 60, NULL, 0, NULL); tick();
+    present_enqueue(&c, 1. / 60, left_half, 0, NULL);
     printf("one per tick: read %llu, done %llu, in flight %d, dropped %llu\n", (unsigned long long)g_pq_read, (unsigned long long)g_pq_done, g_pq_inflight, (unsigned long long)g_link_dropped);
     CHECK("tickets 5-7 have not completed", g_pq_inflight == 3 && g_link_dropped == 1);
     reuse_case(drawable(), gate, 2, 8, 3, 5);

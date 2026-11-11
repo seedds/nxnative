@@ -1250,7 +1250,12 @@ static void resume_rp(rs_t *s) {
     s->applied = NULL; s->vp_dirty = s->sc_dirty = 1;
     occ_start(s);
 }
-static MTLLoadAction load_a(VkAttachmentLoadOp o) { return o == VK_ATTACHMENT_LOAD_OP_CLEAR ? MTLLoadActionClear : o == VK_ATTACHMENT_LOAD_OP_LOAD ? MTLLoadActionLoad : MTLLoadActionDontCare; }
+// An attachment opened with LOAD_OP_DONT_CARE is loaded, colour, depth and stencil alike: Vulkan leaves its contents undefined, the Switch's driver does no colour discard
+// at render-pass begin or end (the macro it runs there is a no-op) and for depth and stencil only drops the ZCULL hints, so they survive there, and games read them.
+// Re:ZERO's pfx pass blends its effects layer over the copy the pass before wrote into the same image, both opened with DONT_CARE; a DontCare load starts Apple's tiles
+// empty, and the 3D world came out black. Its particle pass reopens the half-res depth with DONT_CARE and STORE, draws nothing, and the pfx pass samples that depth: a
+// DontCare load stores whatever the tiles held (t_vk_dontcare; docs/reference/rendering.md, "Attachments opened with LOAD_OP_DONT_CARE")
+static MTLLoadAction load_a(VkAttachmentLoadOp o) { return o == VK_ATTACHMENT_LOAD_OP_CLEAR ? MTLLoadActionClear : MTLLoadActionLoad; }
 static MTLStoreAction store_a(VkAttachmentStoreOp o) { return o == VK_ATTACHMENT_STORE_OP_DONT_CARE ? MTLStoreActionDontCare : MTLStoreActionStore; }
 static void begin_rp(rs_t *s, const c_brp *c) {
     end_blit(s);

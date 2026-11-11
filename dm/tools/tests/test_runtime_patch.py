@@ -1,6 +1,7 @@
 """Build identity, rewrite-site conflicts, cache lifecycle and the original scene allocation ABI."""
 import importlib.util
 from pathlib import Path
+import struct
 import sys
 import tempfile
 import types
@@ -90,6 +91,14 @@ class SceneStub(unittest.TestCase):
         profile = load('mp4_runtime', ROOT / 'dm/games/010019A01E2F2000/runtime_patches.py')
         with self.assertRaisesRegex(ValueError, 'requires main v1.1.0'):
             profile.generate(types.SimpleNamespace(build_id=bytes(32)), b'', {})
+
+    def test_1440p_changes_only_the_scene_descriptor(self):   # the fixed 1600x900 descriptor (0x3317ec / 0x3317f8) stays: stock scanning depends on the display-sized record
+        profile = load('mp4_runtime', ROOT / 'dm/games/010019A01E2F2000/runtime_patches.py')
+        stub = 0x1b37a80
+        writes = profile.scene_writes(stub)
+        self.assertEqual([(c, off, orig.hex()) for c, off, orig, _ in writes], [('1440p', 0x33170c, '358108aa')])
+        self.assertEqual(writes[0][3], struct.pack('<I', B(0x33170c, stub)))
+        self.assertFalse(any(0x3317ec <= off < 0x3317fc for _, off, _, _ in writes))
 
     def test_unvalidated_resolution_is_not_in_launcher(self):
         sys.path.insert(0, str(ROOT / 'dm/games'))

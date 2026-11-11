@@ -3,7 +3,7 @@
 
 Usage: runtime_patches.py <original main NSO> <rewritten main> <output manifest>
 The game's display and UI remain at their original size; no frame-rate or scan workaround.
-This experiment forces the two scene allocation descriptors, after dynamic resolution has run.
+This experiment forces the scene allocation descriptor, after dynamic resolution has run.
 """
 from pathlib import Path
 import struct
@@ -33,12 +33,17 @@ def generate(module, patched, fixups):
                                 0xf2c00000 | (1440 << 5) | 21, B(stub + 8, 0x331710))
     if patched[stub:stub + 12] != expected_stub:
         raise ValueError('mismatched rewritten scene stub')
-    # Only the internal scene descriptors change. The second descriptor (1600x900 by default)
-    # feeds the scene resource lookup at 134470. Do not change output framebuffer dimensions.
-    writes = [('1440p', 0x33170c, bytes.fromhex('358108aa'), struct.pack('<I', B(0x33170c, stub))),
-              ('1440p', 0x3317ec, bytes.fromhex('08c880d2'), struct.pack('<I', 0xd2800000 | (2560 << 5) | 8)),
-              ('1440p', 0x3317f8, bytes.fromhex('8870c0f2'), struct.pack('<I', 0xf2c00000 | (1440 << 5) | 8))]
-    return manifest(module, patched, fixups, BUILD, 'DM_INTERNAL_RESOLUTION', writes)
+    return manifest(module, patched, fixups, BUILD, 'DM_INTERNAL_RESOLUTION', scene_writes(stub))
+
+
+def scene_writes(stub):
+    """The writes of choice 1440p: only the scene descriptor (0x33170c), the size the game computes from dynamic
+    resolution and its scale requests, which every consumer reads from the target it gets (stock runs draw scenes of
+    1244x700 to 1436x808 and scan at each). The next descriptor (0x3317ec / 0x3317f8, a fixed 1600x900) stays as it is:
+    its target's size is kept at +0x618 of the renderer and compared with the 1600x900 display rectangle (0x3318b8, a
+    flag at +0x620 when they differ). With it raised too, the Scan Visor could not complete a scan, which stock runs do;
+    that this write is the cause is the hypothesis under test (README: Scanning does not complete in the 1440p test)."""
+    return [('1440p', 0x33170c, bytes.fromhex('358108aa'), struct.pack('<I', B(0x33170c, stub)))]
 
 
 def main(argv):

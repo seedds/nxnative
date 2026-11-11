@@ -869,6 +869,12 @@ class SeenShaders(unittest.TestCase):   # --seen-shaders: the keys, the partial 
         self.assertEqual((self.sh / 'partial-keys.txt').read_text().split(), [a, b, c])
         self.assertTrue(any('3 of 4 shaders' in m and 'the rest will not draw' in m and '2 that earlier runs reported' in m for m in self.said))
 
+    def test_missing_geometry_shader(self):   # the host draws a program whose geometry shader has no library without that stage (Metroid Prime 4's cube-map faces): the next partial build must add it
+        a, b = self.keys('a', 'b')
+        log = self.tmp / 'host.log'; log.write_text(f'[dm] [nvn-mtl] [RED] shader {b} (geometry) failed to load: build the shaders with dm/gfx/tools/dmsh_build.py first\n'
+                                                     f'[dm] [nvn-mtl] [RED] draw with geometry shader {b}, which has no library (vertex {a}_b fragment {a}_b)\n')
+        self.assertEqual(self.seen(log), [a, b])
+
     def test_earlier_additions_stay(self):   # a shader that loads no longer shows in the next log
         a, b, c = self.keys('a', 'b', 'c')
         log = self.tmp / 'host.log'; log.write_text(f'[RED] shader {b} (pixel) failed to load: x\n'); self.assertEqual(self.seen(log), [a, b])

@@ -511,4 +511,18 @@ class OodleTables(unittest.TestCase):
         self.assertEqual((rel, len(keys), extra), ('Game.pak', 1, ('unreadable', '/Game.pak#A: why', 3)))
 
 
+    @staticmethod
+    def archive(rec, freq):   # a decoded version 2 shader code archive holding one stored shader
+        return struct.pack('<5I', 2, 0, 0, 0, 1) + struct.pack('<QIIB', 0, len(rec), len(rec), freq) + bytes(8) + rec
+
+    def test_nvn2_records_in_a_shader_code_archive(self):
+        """Unreal Engine 5 for the Switch 2 with shared shader code (Orbitals Deluxe Edition's SF_GLSL_SWITCH2 archives): each shader an NVN2 record, its stage
+        checked against Unreal Engine 5's frequency numbering (0 vertex)"""
+        out = ss.ue_shaders(self.archive(self.record(), 0), '/A.ushaderbytecode')
+        self.assertEqual([st for _, st, _, _ in out], ['vs'])
+        with self.assertRaisesRegex(SystemExit, r'shader 0 is an NVN2 vs shader but has frequency 3'):
+            ss.ue_shaders(self.archive(self.record(), 3), '/A.ushaderbytecode')
+        with self.assertRaisesRegex(SystemExit, r'shader 0 is neither an LSLG nor an NVN2 record'):
+            ss.ue_shaders(self.archive(b'no record here' * 8, 0), '/A.ushaderbytecode')
+
 if __name__ == '__main__': unittest.main()

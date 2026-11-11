@@ -507,6 +507,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Reader:** `uepak.shader_map_entries` finds a table by its first entry's stream (`8C 0A` is Mermaid) and takes it only when the count before the first entry, the same count before the 20-byte hashes, and a walk over all its entries agree: those two bytes also turn up inside other data, and decoding such a false start aborts the decoder (85 of 5,341 candidates in the global cache). `uepak.sage_record` splits each decoded stream by its lengths and the control section's own. `Toc.export_bundles` now takes UE5's chunk type as well; a container is read only beside a pak `inline_shaders` accepts, so FINAL FANTASY RESONANCE and Octopath Traveler 0 are unaffected.
 - **Found on:** [Yoshi and the Mysterious Book](../../dm/games/0400245021D2C000/README.md): 133,154 unique shaders (45,614 vertex, 60,840 pixel, 21,654 compute, 5,041 mesh, 5 geometry) from 19 GB of container in 76 s.
 
+### Unreal Engine 5 shader code archives for the Switch 2
+
+- **Symptom:** `[RED] /ue_shaders/ShaderArchive-Global-SF_GLSL_SWITCH2-SP_GLSL_SWITCH2.ushaderbytecode: shader 0 is not an LSLG record` from the shader split, after the UE shader decode step.
+- **Cause:** with shared shader code on, the Switch 2's archives hold each shader as the NVN2 record of [the inline 5.4 shaders](#unreal-engine-54-shaders-for-the-switch-2) (no `LSLG`), which `shader_split.py` `ue_shaders` did not read. Their frequency byte is Unreal Engine 5's `EShaderFrequency` (0 vertex, 1 mesh, 2 amplification, 3 pixel, 4 geometry, 5 compute), not Unreal Engine 4's.
+- **Fix:** `ue_shaders` reads an entry that is no LSLG record with `uepak.sage_record`, takes its stage from the shader (`nvn2_stage`) and checks it against `uepak.FREQ5`. `test_uepak_iostore.py` builds such an archive.
+- **Found on:** Orbitals Deluxe Edition (`040032B023CA4000`, provisional profile, no note yet): 40,995 shaders (4,515 global, 36,480 game), every stage agreeing with its frequency.
+
 ### Unreal Engine 4.22 to 4.25 paks (version 8)
 
 - **Symptom:** `[RED] the shader split found no shaders in main or the RomFS`; the survey counts the game's Unreal paks, but no `UE shader decode` step runs and the split reads none of them.

@@ -48,6 +48,7 @@ from romfs import os, open
 PAK_MAGIC, ARCHIVE_VERSION = 0x5A6F12E1, 2
 JOB_MAGIC, OUT_MAGIC = 0x4a4f4d44, 0x524f4d44   # "DMOJ", "DMOR" (hle_oodle.c)
 FREQ = {0: 'vs', 1: 'hs', 2: 'ds', 3: 'ps', 4: 'gs', 5: 'cs'}   # EShaderFrequency (the archive's frequency census: 0 vertex, 3 pixel, 5 compute)
+FREQ5 = {0: 'vs', 1: 'ms', 2: 'ts', 3: 'ps', 4: 'gs', 5: 'cs'}   # Unreal Engine 5's EShaderFrequency, where mesh and amplification took the tessellation stages' numbers
 
 _cc = None
 def aes_decrypt(key, data):

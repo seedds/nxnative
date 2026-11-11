@@ -302,6 +302,13 @@ static _Atomic unsigned g_image_heap_n, g_big_n;   // g_big_n: large pools in ch
 static inline MTL4VisibilityOptions resource_vis(void) { return MTL4VisibilityOptionDevice | (g_image_heap_n || g_big_n ? MTL4VisibilityOptionResourceAlias : 0); }
 // Residency churn by call site (the power line every 300 frames, mtl_res_stats): each commit with changes is a kernel call whose cost grows with what was added or removed
 enum { RS_SITES = 16 }; static struct { int line; uint64_t n, bytes; } g_rs_site[RS_SITES]; static uint64_t g_rs_rm, g_rs_commits, g_rs_commit_ns;
+// What is in the set now by the line that added it (adds less removals), and what it was at the last residency line: a load's leftovers show as a line whose bytes stay up after it.
+// The phone's set grew 3.2 → 3.9 → 4.5 GB over two loads of Ocarina of Time and nothing said by which line
+enum { RS_LIVE = 48 }; static struct { int line; int64_t n, bytes, last; } g_rs_live[RS_LIVE];
+static void rs_live_add(int line, int64_t n, int64_t bytes) {   // under g_res_mu
+    int k = 0; while (k < RS_LIVE - 1 && g_rs_live[k].line && g_rs_live[k].line != line) k++;
+    g_rs_live[k].line = line; g_rs_live[k].n += n; g_rs_live[k].bytes += bytes;
+}
 #define res_add(r) res_add_at((r), __LINE__)
 // File pages under a shared buffer that joins the set are wired through the CPU's fault path (mlock) before the commit, and given back after it, when the commit holds them for the GPU.
 // The commit wires an added buffer's pages itself, and pages a file in from the GPU driver's wiring path (IOGPUResourceGroupUpdateResources → the VM → APFS pagein). With the guest's
@@ -363,6 +370,7 @@ static void res_add_at(id<MTLAllocation> allocation, int line) { @autoreleasepoo
     [g_res_objects addObject:r];
     if (!g_res_line) g_res_line = [NSMapTable weakToStrongObjectsMapTable];
     [g_res_line setObject:@(line) forKey:r];
+    rs_live_add(line, 1, (int64_t)r.allocatedSize);
     pthread_mutex_unlock(&g_res_mu);
 } }
 static void res_remove(id<MTLAllocation> r) { @autoreleasepool {
@@ -372,6 +380,7 @@ static void res_remove(id<MTLAllocation> r) { @autoreleasepool {
     if (![g_res_objects containsObject:r]) { pthread_mutex_unlock(&g_res_mu); return; }
     res_q_put(r, 0);
     [g_res_objects removeObject:r];
+    rs_live_add([[g_res_line objectForKey:r] intValue], -1, -(int64_t)r.allocatedSize);
     g_rs_rm++;
     pthread_mutex_unlock(&g_res_mu);
 } }
@@ -518,6 +527,7 @@ static void mem_pressure_said(char *b, size_t n) {
     snprintf(b, n, "memory pressure events warn %llu, critical %llu, back to normal %llu; trims %llu, %llu MB given back", (unsigned long long)atomic_load(&g_mp_n[1]), (unsigned long long)atomic_load(&g_mp_n[2]),
              (unsigned long long)atomic_load(&g_mp_n[0]), (unsigned long long)atomic_load(&g_mp_trims), (unsigned long long)(atomic_load(&g_mp_freed) >> 20));
 }
+static void res_report(const char *why, int kind);
 static void mem_pressure_event(int lv) {   // lv: 0 normal, 1 warn, 2 critical (the source's handler; a test calls it directly)
     atomic_fetch_add(&g_mp_n[lv], 1);
     sys_mem_t m = sys_mem(); char room[32] = "none";
@@ -529,6 +539,7 @@ static void mem_pressure_event(int lv) {   // lv: 0 normal, 1 warn, 2 critical (
          (unsigned long long)m.free, (unsigned long long)m.wired, (unsigned long long)m.compressed, (unsigned long long)m.file, (unsigned long long)(g_res ? g_res.allocatedSize >> 20 : 0), room,
          act ? "trimming at the next submission" : lv ? "no trim at this level here" : "");
     if (act) { int cur = atomic_load(&g_mp_want); while (lv > cur && !atomic_compare_exchange_weak(&g_mp_want, &cur, lv)) {} }
+    if (lv) res_report(lv == 2 ? "[mem] memory pressure critical" : "[mem] memory pressure warn", lv);
 }
 static void mem_pressure_start(void) {
     static dispatch_source_t src;
@@ -571,9 +582,11 @@ static void res_check(id r, const char *what, int reg) {
         MLOG("[RED] missing residency #%d: %s slot %d %s %p (parent chain %d deep) allocated %lu B storage mode %lu%s", nbad, what, reg, is_tex ? "texture" : "buffer", (__bridge void *)a, hops, (unsigned long)a.allocatedSize, (unsigned long)a.storageMode,
              t ? [NSString stringWithFormat:@" format %lu %lux%lu type %lu usage %#lx", (unsigned long)t.pixelFormat, (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.textureType, (unsigned long)t.usage].UTF8String : ""); }
 }
+static void res_report(const char *why, int kind);
 // Applies and commits every change made before the call. A change another thread's commit took is in the set when this returns too: that commit holds g_res_commit_mu until it is
 // done. Each change holds its allocation until it is committed, so a removed one stays alive until it has left the set
 static void res_commit(void) { @autoreleasepool {
+    uint64_t z = 0;
     pthread_mutex_lock(&g_res_commit_mu);
     pthread_mutex_lock(&g_res_mu);
     res_op *q = g_res_q; size_t n = g_res_qn; g_res_q = NULL; g_res_qn = g_res_qcap = 0;
@@ -584,13 +597,17 @@ static void res_commit(void) { @autoreleasepool {
         uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
         for (size_t i = 0; i < n; i++) { if (q[i].add) [g_res addAllocation:(__bridge id<MTLAllocation>)q[i].o]; else [g_res removeAllocation:(__bridge id<MTLAllocation>)q[i].o]; }
         [g_res commit];
-        uint64_t dt = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0, z = g_res.allocatedSize;   // the set after the commit, read under g_res_commit_mu
+        uint64_t dt = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0; z = g_res.allocatedSize;   // the set after the commit, read under g_res_commit_mu
         pthread_mutex_lock(&g_res_mu); g_rs_commits++; g_rs_commit_ns += dt; if (z > g_res_peak) g_res_peak = z; pthread_mutex_unlock(&g_res_mu);
     }
     file_unwire(fw, nfw);   // after the commit that made those buffers resident; under g_res_commit_mu, so a later commit cannot run before them
     pthread_mutex_unlock(&g_res_commit_mu);
     for (size_t i = 0; i < n; i++) CFRelease(q[i].o);
     free(q);
+    // What the set is made of, once, when it first passes three quarters of Metal's working set: a device that later fails with GPU out-of-memory has said it before (the M1 iPad's
+    // 5,461 MB is passed going outside in Ocarina of Time), and one that does not still tells what to cut. Checked after each commit: read only at the 300-frame line, the iPhone 17's
+    // set passed 4.4 GB of its 4,096 MB line between two lines and was back under it at each
+    static _Atomic int told; if (z && g_dev && z > g_dev.recommendedMaxWorkingSetSize / 4 * 3 && !atomic_exchange(&told, 1)) res_report("[mem] the residency set passed three quarters of Metal's working set", 0);
 } }
 static int res_pending(void) { pthread_mutex_lock(&g_res_mu); int n = g_res_qn != 0; pthread_mutex_unlock(&g_res_mu); return n; }
 // What the residency set holds: totals by kind and the largest objects. At the first GPU out-of-memory error (the error names none of them), and for DM_CTL "restop" (hle_hid.c). The set holds
@@ -652,11 +669,25 @@ void mtl_res_stats(char *out, size_t n) {
     { uint64_t pk = atomic_exchange(&g_ubs_peak, atomic_load(&g_ubs_live)); if (pk) { o = strlen(out); if (o < n) snprintf(out + o, n - o, ", upload reads over guest memory at most %.0f MB at once", pk / 1048576.0); } }
     g_fwire_n = g_fwire_bytes = g_fwire_ns = g_fwire_peak = 0; g_res_peak = (uint64_t)(set_mb * 1048576.0);   // set_mb: the set's size main reads under g_res_commit_mu
     memset(g_rs_site, 0, sizeof g_rs_site); g_rs_rm = g_rs_commits = g_rs_commit_ns = 0;
-    uint64_t held = g_res ? g_res.allocatedSize : 0;
+    {   // in the set now by the line that added it, the largest first, with the change since the last residency line
+        int ord[RS_LIVE], no = 0; for (int k = 0; k < RS_LIVE; k++) if (g_rs_live[k].line && (g_rs_live[k].bytes || g_rs_live[k].last)) ord[no++] = k;
+        for (int i = 0; i < no; i++) for (int j = i + 1; j < no; j++) if (g_rs_live[ord[j]].bytes > g_rs_live[ord[i]].bytes) { int x = ord[i]; ord[i] = ord[j]; ord[j] = x; }
+        o = strlen(out); if (o < n) o += snprintf(out + o, n - o, ", in the set by line (change since the last line):");
+        for (int i = 0; i < no && i < 8 && o < n; i++) { int k = ord[i];
+            o += snprintf(out + o, n - o, "%s line %d %lld, %.0f MB (%+.0f)", i ? "," : "", g_rs_live[k].line, (long long)g_rs_live[k].n, g_rs_live[k].bytes / 1048576.0, (g_rs_live[k].bytes - g_rs_live[k].last) / 1048576.0); }
+        for (int k = 0; k < RS_LIVE; k++) g_rs_live[k].last = g_rs_live[k].bytes;
+    }
     pthread_mutex_unlock(&g_res_mu);
-    // What the set is made of, once, when it first passes three quarters of Metal's working set: a device that later fails with GPU out-of-memory has said it before (the M1 iPad's
-    // 5,461 MB is passed going outside in Ocarina of Time), and one that does not still tells what to cut
-    static int told; if (!told && g_dev && held > g_dev.recommendedMaxWorkingSetSize / 4 * 3) { told = 1; res_top("[mem] the residency set passed three quarters of Metal's working set"); }
+}
+// res_top and mem_census off the caller's thread: res_commit runs with g_mu held on some paths, and the census takes it. kind 0 once (the three-quarters line), 1 / 2 a memory pressure warn /
+// critical, each at most once a minute. A device that is ended for its wired memory (proc-thrashing, the iPhone 17) never fails a command buffer, so these are what its log says of the set
+static void res_report(const char *why, int kind) {
+    static _Atomic uint64_t last[3];
+    uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC), was = atomic_load(&last[kind]);
+    if (kind && was && now - was < 60000000000ull) return;
+    if (!atomic_compare_exchange_strong(&last[kind], &was, now)) return;
+    char *w = strdup(why);
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ @autoreleasepool { res_top(w); mem_census(w); free(w); } });
 }
 
 @interface NvDeferredRelease : NSObject { @public id object; uint64_t fence; int keep_resident; } @end

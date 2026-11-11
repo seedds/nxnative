@@ -397,7 +397,10 @@ void dm_joy_attach(int p, uint32_t sides) {
     if (p < 0 || p >= DM_PLAYERS) return;
     atomic_store(&g_joy_two[p], (sides & DM_JOY_2) && (sides & 3) ? 1u : 0u);
     sides &= 3;
-    if (atomic_exchange(&g_joy_sides[p], sides) != sides && !sides) for (int s = 0; s < 2; s++) { atomic_store(&g_joy_btn[p][s], 0); atomic_store(&g_joy_axes[p][s], 0); }
+    uint32_t old = atomic_exchange(&g_joy_sides[p], sides);
+    if (old == sides) return;
+    if (sides == 3 && old != 0) atomic_fetch_and(&g_single_mask, ~(1u << p));
+    if (!sides) for (int s = 0; s < 2; s++) { atomic_store(&g_joy_btn[p][s], 0); atomic_store(&g_joy_axes[p][s], 0); }
     styles_sync();
 }
 void dm_joy_set(int p, int side, uint64_t buttons, int32_t sx, int32_t sy) {
@@ -859,10 +862,18 @@ static int six_states(SixAxisState *out, int n, uint32_t h) {
     int64_t samp = (int64_t)(guest_ns() / SIX_PERIOD_NS);
     npad_ref ref = npad_resolve(h >> 8 & 0xff);
     int pl = ref.kind >= KIND_DUAL ? ref.pad : player_of(h >> 8 & 0xff), shakes = pl == 0 && ref.kind < KIND_DUAL;
+    int split = ((1u << (h & 0xff)) & (STYLE_JOYDUAL | STYLE_JOYLEFT | STYLE_JOYRIGHT)) != 0;
     motion_state ms;
     int live = ref.kind >= KIND_DUAL ? motion_joy(ref.pad, ref.kind == KIND_LEFT ? 0 : ref.kind == KIND_RIGHT ? 1 : (int)(h >> 16 & 1), &ms) : motion_live(pl, &ms);
-    if (live) { for (int i = 0; i < n; i++) six_sample_live(&out[i], samp - i, &ms, shakes); return n; }
-    for (int i = 0; i < n; i++) six_sample(&out[i], samp - i, shakes);
+    for (int i = 0; i < n; i++) {
+        if (live) six_sample_live(&out[i], samp - i, &ms, shakes);
+        else six_sample(&out[i], samp - i, shakes);
+        // Super Mario Party (main+0x57a72c, main+0x57ce38) discards any Joy-Con SixAxisSensorState whose
+        // acceleration has an exact 0.0f component (fcmp s0/s1/s2, #0.0; b.eq) and falls back to (0, 0, 0).
+        if (split) {
+            for (int k = 0; k < 3; k++) if (out[i].acc[k] == 0.0f) out[i].acc[k] = 1e-6f;
+        }
+    }
     return n;
 }
 HLE_FORCE("_ZN2nn3hid23GetSixAxisSensorHandlesEPNS0_19SixAxisSensorHandleEiRKjNS_4util10BitFlagSetILi32ENS0_12NpadStyleTagEEE", "six-axis sensor handles: two for handheld / dual Joy-Cons, one otherwise",
@@ -1067,11 +1078,24 @@ static void vib_send(const uint32_t *handles, const dm_vibration *values, int n)
     if (getenv("DM_RUMBLE_LOG")) {   // Count input values before deduplicating motors, including partially routed batches.
         static pthread_mutex_t log_lock = PTHREAD_MUTEX_INITIALIZER;
         static uint64_t sends, dropped, t0; static float peak; struct timespec ts;
+        // The frequencies of the values that carry one, so a run shows the range a game actually drives its two bands at
+        static float flo = 1e9f, fhi = 0, hlo = 1e9f, hhi = 0;
         pthread_mutex_lock(&log_lock);   // SDK sends can arrive from several game threads.
         clock_gettime(CLOCK_MONOTONIC, &ts);
         uint64_t now = ts.tv_sec; sends += n; dropped += unrouted;
-        for (int i = 0; i < n; i++) peak = fmaxf(peak, fmaxf(values[i].amplitude_low, values[i].amplitude_high));
-        if (now != t0) { LOG("rumble: %llu values sent, %llu with no output, peak amplitude %.2f, handle %#x", sends, dropped, peak, handles[0]); sends = dropped = 0; peak = 0; t0 = now; }
+        for (int i = 0; i < n; i++) {
+            peak = fmaxf(peak, fmaxf(values[i].amplitude_low, values[i].amplitude_high));
+            float lf = values[i].frequency_low, hf = values[i].frequency_high;
+            if (values[i].amplitude_low > 0 && lf > 0 && isfinite(lf)) { flo = fminf(flo, lf); fhi = fmaxf(fhi, lf); }
+            if (values[i].amplitude_high > 0 && hf > 0 && isfinite(hf)) { hlo = fminf(hlo, hf); hhi = fmaxf(hhi, hf); }
+        }
+        if (now != t0) {
+            LOG("rumble: %llu values sent, %llu with no output, peak amplitude %.2f, handle %#x", sends, dropped, peak, handles[0]);
+            if (flo <= fhi || hlo <= hhi) LOG("rumble: low band %s%.0f to %.0f Hz, high band %s%.0f to %.0f Hz",
+                                             flo <= fhi ? "" : "unused ", flo <= fhi ? flo : 0.0f, fhi,
+                                             hlo <= hhi ? "" : "unused ", hlo <= hhi ? hlo : 0.0f, hhi);
+            sends = dropped = 0; peak = 0; t0 = now; flo = hlo = 1e9f; fhi = hhi = 0;
+        }
         pthread_mutex_unlock(&log_lock);
     }
     dm_haptics_send(updates, count);

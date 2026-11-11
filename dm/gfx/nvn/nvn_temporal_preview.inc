@@ -206,6 +206,27 @@ static int temporal_final_copy(NvProg *program,int rect[4]) {
     if(rect)memcpy(rect,r,sizeof r);
     return 1;
 }
+// Ocarina can bypass its grading/composition shaders with a plain full-scene
+// copy. The same shader also copies the UI to the window, so its key alone is
+// insufficient: retain only a complete floating-point scene with matching depth.
+static int temporal_scene_copy(NvProg *program) {
+    if(!program || !program->sh[1] || strncmp(program->sh[1]->key,"29e3c9dd92b8a571",16) ||
+       R.rt.n!=1 || !R.rt.color[0] || !R.rt.depth || !S.has_vp)return 0;
+    id<MTLTexture> color=tex_mtl(R.rt.color[0]),depth=tex_mtl(R.rt.depth);
+    if(color.pixelFormat!=MTLPixelFormatRG11B10Float || color.textureType!=MTLTextureType2D ||
+       color.sampleCount!=1 || depth.sampleCount!=1 || color.width!=depth.width || color.height!=depth.height ||
+       S.vp[0][0]!=0 || S.vp[0][1]!=0 || S.vp[0][2]!=color.width || S.vp[0][3]!=color.height)return 0;
+    int tid=(int)(tex_slot_h(S.tex[1],S.img[1],0)&0xfffff),valid=0;
+    os_unfair_lock_lock(&g_rmu);
+    if(tid>0 && tid<g_ntreg && g_treg[tid].ok && !g_treg[tid].gone) {
+        treg_t *r=&g_treg[tid];
+        int base=!r->has_v || ((!r->v.set_levels || !r->v.base_level) && (!r->v.set_layers || !r->v.min_layer));
+        id<MTLTexture> source=base?tex_mtl(&r->t):nil;
+        valid=source && !tex_storage_overlap(&r->t,R.rt.color[0]) && source.textureType==MTLTextureType2D &&
+              source.sampleCount==1 && source.pixelFormat==color.pixelFormat && source.width==color.width && source.height==color.height;
+    }
+    os_unfair_lock_unlock(&g_rmu);return valid;
+}
 static void temporal_after_draw(void) {
     if (!temporal_preview_on()) return;
     // Immutable shader identity of the observed Ocarina pre-UI scene composition.
@@ -215,7 +236,9 @@ static void temporal_after_draw(void) {
        temporal_final_copy(program,g_temporal_pair_viewport)) {
         g_temporal_pair_final_frame=g_temporal_pair_frame;g_temporal_pair_final_serial=R.rt.color[0]->serial;
     }
-    if (!program || !program->sh[1] || (strncmp(program->sh[1]->key, "9e09b406de439a34", 16) && strncmp(program->sh[1]->key, "99d1ecbf2947464b", 16))) return;
+    int graded=program && program->sh[1] && (!strncmp(program->sh[1]->key,"9e09b406de439a34",16) || !strncmp(program->sh[1]->key,"99d1ecbf2947464b",16));
+    int copied=!graded && g_temporal_depth_frame!=atomic_load(&g_cur_frame) && temporal_scene_copy(program);
+    if(!graded && !copied)return;
     uint64_t frame = atomic_load(&g_cur_frame), now = now_ns();
     if(temporal_preview_on()>=2 && ++g_temporal_coverage.scenes%120==0)
         MLOG("temporal coverage: scenes %llu, missing matching camera %llu, full captures %llu, UI completions %llu, encoded %llu, resets %llu (camera mismatches %llu), failed %llu",
@@ -233,6 +256,7 @@ static void temporal_after_draw(void) {
     if (temporal_preview_on()>=2) {
         g_temporal_game_depth=depth;g_temporal_full_camera=camera;g_temporal_depth_frame=frame;
         g_temporal_flow[0]=R.rt.color[0]->serial;g_temporal_flow_n=1;
+        if(copied){static unsigned notes;if(notes++<4)MLOG("interpolation scene-copy variant: frame %llu color %llu depth %llu %lux%lu",(unsigned long long)frame,(unsigned long long)R.rt.color[0]->serial,(unsigned long long)R.rt.depth->serial,(unsigned long)scene.width,(unsigned long)scene.height);}
         return;
     }
     temporal_encode_scene(scene, depth, nil, camera, frame, now, 1);

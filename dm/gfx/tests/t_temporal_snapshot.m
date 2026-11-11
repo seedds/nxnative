@@ -115,12 +115,58 @@ static void ui_completion_test(void) {
     g_temporal_full_frame=g_temporal_pair_frame=g_temporal_pair_final_frame=UINT64_MAX;g_temporal_ui_seen=0;
 }
 
+
+static int scene_copy_observed(uint64_t frame) {
+    mtl_set_frame(frame);g_temporal_depth_frame=UINT64_MAX;g_temporal_flow_n=0;
+    temporal_after_draw();return g_temporal_depth_frame==frame;
+}
+// The game's no-grading path copies its scene with the same shader as the final
+// window copy. Only a full floating-point scene with its current depth/camera
+// and a separate full-size source may begin the pre-UI dependency chain.
+static void scene_copy_test(void) {
+    const uint64_t frame=200;
+    prog_t pg={.serial=95003};tex_t source={.magic=MAGIC('T','E','X',0),.serial=95001};
+    source.d=(nvn_texdesc){.target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_R11G11B10F,.width=128,.height=72,.depth=1,.levels=1,.samples=1};
+    tex_t target=source,depth=source;target.serial=95002;depth.serial=95004;depth.d.format=NVN_FORMAT_DEPTH32F;
+    id<MTLTexture> input=temporal_texture(MTLPixelFormatRG11B10Float,128,72,MTLTextureUsageShaderRead|MTLTextureUsageRenderTarget);
+    id<MTLTexture> output=temporal_texture(MTLPixelFormatRG11B10Float,128,72,MTLTextureUsageShaderRead|MTLTextureUsageRenderTarget);
+    id<MTLTexture> z=temporal_texture(MTLPixelFormatDepth32Float,128,72,MTLTextureUsageShaderRead|MTLTextureUsageRenderTarget);
+    serial_put(source.serial,input);serial_put(target.serial,output);serial_put(depth.serial,z);mtl_reg_tex(711,&source,NULL);
+    NvProg *program=[NvProg new];program->sh[1]=[NvShader new];serial_put(pg.serial,program);
+    state_reset();memset(&R,0,sizeof R);S.prog=&pg;S.tex[1][0]=711;S.has_vp=1;S.vp[0][2]=128;S.vp[0][3]=72;
+    R.rt.n=1;R.rt.color[0]=&target;R.rt.depth=&depth;
+    nvn_camera_input camera={.width=128,.height=72,.near_plane=.1f,.far_plane=100,.fov=1};
+    temporal_camera_record(frame,depth.serial,camera);
+    strcpy(program->sh[1]->key,"unrelated");CHECK(!scene_copy_observed(frame),"an unrelated full-size draw is not a scene composition");
+    strcpy(program->sh[1]->key,"29e3c9dd92b8a571_b");
+    CHECK(!scene_copy_observed(frame+1),"a copy cannot borrow the preceding frame's depth camera");
+    R.rt.depth=NULL;CHECK(!scene_copy_observed(frame),"a window copy without depth is not a new scene");R.rt.depth=&depth;
+    S.has_vp=0;CHECK(!scene_copy_observed(frame),"a scene copy needs an explicit viewport");S.has_vp=1;
+    S.vp[0][2]=64;CHECK(!scene_copy_observed(frame),"a partial viewport is not a full scene copy");S.vp[0][2]=128;
+    S.vp[0][0]=1;CHECK(!scene_copy_observed(frame),"an offset viewport is not the full scene");S.vp[0][0]=0;
+    S.tex[1][0]=0;CHECK(!scene_copy_observed(frame),"an absent source cannot begin the scene chain");S.tex[1][0]=711;
+    mtl_reg_tex(711,&target,NULL);CHECK(!scene_copy_observed(frame),"sampling the output itself is not a proven scene copy");mtl_reg_tex(711,&source,NULL);
+    view_t view={.set_levels=1,.base_level=1,.nlevels=1};mtl_reg_tex(711,&source,&view);
+    CHECK(!scene_copy_observed(frame),"a source mip view is not the full scene");mtl_reg_tex(711,&source,NULL);
+    R.rt.has_cview[0]=1;R.rt.cview[0]=view;CHECK(!scene_copy_observed(frame),"a target mip view is not the full scene");R.rt.has_cview[0]=0;
+    id<MTLTexture> rgba=temporal_texture(MTLPixelFormatRGBA8Unorm,128,72,MTLTextureUsageShaderRead|MTLTextureUsageRenderTarget);
+    serial_put(target.serial,rgba);CHECK(!scene_copy_observed(frame),"a same-size UI/window target is not a floating-point scene");serial_put(target.serial,output);
+    CHECK(scene_copy_observed(frame),"the observed full floating-point scene copy captures current depth and camera");
+    CHECK(g_temporal_flow_n==1 && g_temporal_flow[0]==target.serial && g_temporal_game_depth==z,"the scene-copy output begins the real compute dependency chain");
+    id<MTLTexture> remembered=g_temporal_game_depth;R.rt.depth=NULL;temporal_after_draw();
+    CHECK(g_temporal_game_depth==remembered && g_temporal_flow[0]==target.serial,"a later window copy cannot replace the captured scene");
+    R.rt.depth=&depth;strcpy(program->sh[1]->key,"99d1ecbf2947464b_b");S.tex[1][0]=0;
+    CHECK(scene_copy_observed(frame),"the original graded scene recognition remains available");
+    mtl_reg_tex(711,NULL,NULL);serial_del(pg.serial);serial_del(source.serial);serial_del(target.serial);serial_del(depth.serial);
+    state_reset();memset(&R,0,sizeof R);g_temporal_depth_frame=UINT64_MAX;g_temporal_flow_n=0;g_temporal_game_depth=nil;
+}
+
 int main(void){@autoreleasepool{
     alarm(45);int asynchronous=getenv("DM_TEST_ASYNC")!=NULL;
     test_ui_visible=!getenv("DM_TEST_NO_UI");
     if(getenv("DM_TEST_UI_COMPLETION"))setenv("DM_OOT_INTERPOLATION_PREVIEW","3",1);
     if(asynchronous){setenv("DM_OOT_INTERPOLATION_PREVIEW","3",1);setenv("DM_OOT_FRAMEGEN_ASYNC","1",1);}
-    mtl_init();if(getenv("DM_TEST_UI_COMPLETION"))ui_completion_test();
+    mtl_init();if(getenv("DM_TEST_UI_COMPLETION")){ui_completion_test();scene_copy_test();}
     pq_item item={0};item.t.serial=101;item.generated.serial=102;g_pq_read=g_pq_done=9;g_pq_inflight=2;
     CHECK(pq_take_phase(&item,10),"first tick chooses generated picture");
     CHECK(g_pq_read==9 && g_pq_done==9,"generated phase leaves native read/completion ticket pending");

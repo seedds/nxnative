@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Experimental 2560x1440 and 3840x2160 internal scene allocation, not a validated launcher option.
+"""Experimental 2560x1440, 3840x2160 and 3200x1800 internal scene allocation, not a validated launcher option.
 
 Usage: runtime_patches.py <original main NSO> <rewritten main> <output manifest>
 The game's display and UI remain at their original size; no frame-rate or scan workaround.
@@ -38,11 +38,14 @@ def generate(module, patched, fixups):
     return manifest(module, patched, fixups, BUILD, 'DM_INTERNAL_RESOLUTION', writes)
 
 
-CHOICES = (('1440p', 'SCENE_1440', 2560, 1440), ('2160p', 'SCENE_2160', 3840, 2160))   # patches.py SCENE_SIZES
+# 1800p is twice the 1600x900 output in each direction: the game's composite reads the scene with one bilinear tap per output pixel (pass dumps:
+# sampler 288, a single-level scene), which at exactly 2:1 lands between four texels and averages them, a 2x2 box filter. At 2160p (2.4:1) the same tap
+# covers 4 of about 5.8 texels at a drifting phase, so the edges keep stair steps.
+CHOICES = (('1440p', 'SCENE_1440', 2560, 1440), ('2160p', 'SCENE_2160', 3840, 2160), ('1800p', 'SCENE_1800', 3200, 1800))   # patches.py SCENE_SIZES
 
 
 def scene_writes(stub, choice='1440p'):
-    """The writes of a choice (1440p, 2160p): only the scene descriptor (0x33170c), the size the game computes from dynamic
+    """The writes of a choice (1440p, 2160p, 1800p): only the scene descriptor (0x33170c), the size the game computes from dynamic
     resolution and its scale requests, which every consumer reads from the target it gets (stock runs draw scenes of
     1244x700 to 1436x808 and scan at each). The next descriptor (0x3317ec / 0x3317f8, a fixed 1600x900) stays as it is:
     its target's size is kept at +0x618 of the renderer and compared with the 1600x900 display rectangle (0x3318b8, a
@@ -55,7 +58,7 @@ def main(argv):
     original, rewritten, out = map(Path, argv)
     result = generate(nso.load(original.read_bytes(), original.name), rewritten.read_bytes(), layout(rewritten.with_name('main.fixups.tsv')))
     out.write_text(result)
-    print('Runtime internal resolution: default (no writes), 1440p (validated in play), experimental 2160p')
+    print('Runtime internal resolution: default (no writes), 1440p (validated in play), experimental 2160p and 1800p')
 
 
 if __name__ == '__main__':

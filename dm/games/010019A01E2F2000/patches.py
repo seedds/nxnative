@@ -7,7 +7,7 @@ from nso_asm import B
 
 build_id = '8275fbe1ec5191c279f3a943ad8524f4'
 scene_site = 0x33170c
-SCENE_SIZES = (('SCENE_1440', 2560, 1440), ('SCENE_2160', 3840, 2160))   # runtime_patches.py's choices 1440p and 2160p
+SCENE_SIZES = (('SCENE_1440', 2560, 1440), ('SCENE_2160', 3840, 2160), ('SCENE_1800', 3200, 1800))   # runtime_patches.py's choices 1440p, 2160p and 1800p
 
 
 def resolution_stub(c):
@@ -23,6 +23,6 @@ def resolution_stub(c):
 STUBS = {build_id: resolution_stub}
 
 BINDING = [
-    {'what': 'experimental 1440p and 2160p scene descriptor stubs (inactive by default)', 'now': 'build', 'goal': 'unreviewed', 'purpose': 'rendering',
+    {'what': 'experimental 1440p, 2160p and 1800p scene descriptor stubs (inactive by default)', 'now': 'build', 'goal': 'unreviewed', 'purpose': 'rendering',
      'why': 'the final scene allocation descriptor and fallback are immediate code in main 1.1.0; gameplay validation and other builds remain open'},
 ]

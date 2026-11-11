@@ -1436,6 +1436,7 @@ void *objc_autoreleasePoolPush(void); void objc_autoreleasePoolPop(void *);
 static void *g_sub_pool;
 static int tbdr_on(void);
 static void treg_finish_submission(void);
+static void ghost_trim_idle(void);
 
 static uint64_t g_sub_serial;   // Submission index (used by the parallel precompile's 'predict only once per submission')
 static int g_pkg_kept;   // a texture written during this submission kept its texture (tex_mtl_): the next submission starts a write generation, as a write would
@@ -2435,6 +2436,7 @@ uint64_t mtl_sub_commit(void) {
     up_flush();
     gmem_commit_patch();
     g_cut_copy = 0;
+    ghost_trim_idle();
     treg_finish_submission();   // Late descriptor views retire behind this submission's fence.
     rt_preserve_bound();   // The game may reuse completed command memory; queue bindings must not point into its texture snapshots.
     queue_program_preserve(); // Submitted metadata may retire while these programs remain bound.
@@ -2804,10 +2806,12 @@ static void serial_del(uint64_t k) { pthread_mutex_lock(&g_smu); id old = hm_get
 // texture object (tex_snap in hle_nvn.c, mtl_reg_tex), so replay can resolve a texture the game has already finalized: Breath of the Wild records each frame's transient render targets
 // (the HUD captures, the 640x360 half-resolution buffers) and finalizes their objects before it submits. Those serials went back into g_by_serial and stayed there for good, as no second
 // Finalize comes: about 10 a frame, 200,000 after an hour in the first shrine. A dead serial resolves through g_ghost instead, a small table whose oldest entry goes when a new one comes,
-// so a record replayed again soon still finds its texture
-enum { NGHOST = 512 };
+// so a record replayed again soon still finds its texture. An entry resolved in the last GHOST_IDLE frames stays, past NGHOST if need be (frames, not submissions: that game makes 25 submissions a frame): while Ocarina of Time streams an area in,
+// its registered IDs name thousands of finalized textures at once, and with 512 slots each pool walk evicted what the next one resolved (3.7 million puts in 300 frames, each with
+// two notes and a release, frames of 100-490 ms on the submit thread)
+enum { NGHOST = 512, GHOST_IDLE = 16 };
 static nvn_hmap g_tex_live = {.klen = 8};   // serial → the texture object it was initialized in (mtl_tex_release), under g_smu
-static nvn_hmap g_ghost = {.klen = 8}; static uint64_t g_ghost_ring[NGHOST]; static unsigned g_ghost_next; static uint64_t g_ghost_puts;
+static nvn_hmap g_ghost = {.klen = 8}, g_ghost_seen = {.klen = 8}; static uint64_t *g_ghost_q; static unsigned g_ghost_qcap, g_ghost_qhead, g_ghost_qn; static uint64_t g_ghost_puts;
 void mtl_tex_init(const tex_t *t) {
     if (!t->serial) return;
     tex_t *desc = image_shape(t) ? malloc(sizeof *desc) : NULL; if (desc) *desc = *t;
@@ -2817,6 +2821,24 @@ void mtl_tex_init(const tex_t *t) {
     pthread_mutex_unlock(&g_smu);
 }
 static void obj_drop(id o) { if (alias_has(o)) defer_obj_unref(o); else defer_obj_release(o); }   // caller holds g_smu
+static void ghost_push(uint64_t k) {
+    if (g_ghost_qn == g_ghost_qcap) {
+        unsigned cap = g_ghost_qcap ? g_ghost_qcap * 2 : NGHOST * 2; uint64_t *q = realloc_or_die(NULL, cap * sizeof *q, "the finalized textures' queue");
+        for (unsigned i = 0; i < g_ghost_qn; i++) q[i] = g_ghost_q[(g_ghost_qhead + i) % g_ghost_qcap];
+        free(g_ghost_q); g_ghost_q = q; g_ghost_qcap = cap; g_ghost_qhead = 0;
+    }
+    g_ghost_q[(g_ghost_qhead + g_ghost_qn++) % g_ghost_qcap] = k;
+}
+static void ghost_trim(unsigned scan) {   // caller holds g_smu
+    while (g_ghost_qn > NGHOST && scan--) {
+        uint64_t s = g_ghost_q[g_ghost_qhead]; g_ghost_qhead = (g_ghost_qhead + 1) % g_ghost_qcap; g_ghost_qn--;
+        uint64_t seen = (uint64_t)(uintptr_t)nvn_hm_get(&g_ghost_seen, &s);
+        if (seen && atomic_load(&g_cur_frame) + 1 - seen < GHOST_IDLE) { ghost_push(s); continue; }
+        id ev = hm_get_id(&g_ghost, &s); if (ev) { ghost_held_add((__bridge void *)ev, -1); obj_drop(ev); }
+        hm_del_id(&g_ghost, &s); nvn_hm_del(&g_ghost_seen, &s); ser_note(s);   // the evicted serial resolves anew too
+    }
+}
+static void ghost_trim_idle(void) { pthread_mutex_lock(&g_smu); ghost_trim(64); pthread_mutex_unlock(&g_smu); }
 static void tex_pin_set(tex_pin *pin,id object) { // g_smu held
     id old=(__bridge id)pin->object; if(old==object) return;
     if(old) {
@@ -2844,7 +2866,7 @@ void mtl_tex_unpin(uint64_t serial) {
     pthread_mutex_unlock(&g_smu);
 }
 static __unsafe_unretained id tex_get(uint64_t k) {
-    pthread_mutex_lock(&g_smu); __unsafe_unretained id o = hm_get_id(&g_by_serial, &k); if (!o && g_ghost.n) o = hm_get_id(&g_ghost, &k); if(!o) { tex_pin *pin=nvn_hm_get(&g_tex_pins,&k); if(pin) o=(__bridge id)pin->object; } pthread_mutex_unlock(&g_smu); return o;
+    pthread_mutex_lock(&g_smu); __unsafe_unretained id o = hm_get_id(&g_by_serial, &k); if (!o && g_ghost.n && (o = hm_get_id(&g_ghost, &k))) nvn_hm_put(&g_ghost_seen, &k, (void *)(uintptr_t)(atomic_load(&g_cur_frame) + 1)); if(!o) { tex_pin *pin=nvn_hm_get(&g_tex_pins,&k); if(pin) o=(__bridge id)pin->object; } pthread_mutex_unlock(&g_smu); return o;
 }
 static void tex_put(uint64_t k, id o) {   // serials from 2^62 up are external textures (mtl_ext_tex), never initialized by the game
     pthread_mutex_lock(&g_smu);
@@ -2852,13 +2874,10 @@ static void tex_put(uint64_t k, id o) {   // serials from 2^62 up are external t
     id old = hm_get_id(m, &k);
     if (old) count_add(m == &g_by_serial ? &g_by_serial_held : &g_ghost_held, (__bridge void *)old, -1);
     if (old) obj_drop(old);
-    else if (m == &g_ghost) {
-        uint64_t *slot = &g_ghost_ring[g_ghost_next++ % NGHOST];
-        if (*slot) { id ev = hm_get_id(&g_ghost, slot); if (ev) { ghost_held_add((__bridge void *)ev, -1); obj_drop(ev); } hm_del_id(&g_ghost, slot); ser_note(*slot); }   // the evicted serial resolves anew too
-        *slot = k; g_ghost_puts++;
-    }
+    else if (m == &g_ghost) { ghost_push(k); g_ghost_puts++; }
     hm_put_id(m, &k, o); tex_pin *pin=nvn_hm_get(&g_tex_pins,&k); if(pin) tex_pin_set(pin,o); ser_note(k);
     count_add(m == &g_by_serial ? &g_by_serial_held : &g_ghost_held, (__bridge void *)o, 1);
+    if (m == &g_ghost) { nvn_hm_put(&g_ghost_seen, &k, (void *)(uintptr_t)(atomic_load(&g_cur_frame) + 1)); ghost_trim(8); }
     pthread_mutex_unlock(&g_smu);
 }
 // Host record of a packaged texture: the current MTLTexture, the upload stamp, and the global write generation at the last check
@@ -10138,8 +10157,9 @@ static uint64_t dummy_samp_rid(void) { static uint64_t rid; if (!rid) rid = dumm
 // Each table keeps two lists of IDs, so that a change takes again only the IDs it can reach (n -1: more than POOL_IDS_MAX of them, and that change builds the table whole):
 // dead: the IDs a texture table holds the dummy for because their storage did not exist (pool_entry), which a memory pool added later can bring (REG_POOL);
 // trans: the IDs whose entry is a view of a retired registration made in submission sub, which goes at that submission's end (treg_finish_submission), so the next submission
-// takes them again. Walking through Ocarina of Time's Kokiri Forest, about 100 of its 33,025 IDs hold such a view
-enum { POOL_IDS_MAX = 1024 };
+// takes them again. Walking through Ocarina of Time's Kokiri Forest, about 100 of its 33,025 IDs hold such a view; more than 1,024 while it streams an area in behind its pause
+// menu, and with that as the limit each submission built the table whole (1.4-1.6 builds a frame of 9 ms, 50 fps). The limit is the patch's own (nid)
+enum { POOL_IDS_MAX = 8192 };
 typedef struct { int *v, n, cap; } pool_ids;
 typedef struct { __strong id<MTLBuffer> buf; uint64_t gpu, reg, ser, frame, sub; int samp, dtt, dpf, base, left, left_req; pool_ids dead, trans; int over; } pool_snap;   // over: its last walk found the budget full, so what it left out has its stand-in (pool_stand)
 static pool_snap g_psnap[POOL_SNAPS]; static unsigned g_psnap_next;

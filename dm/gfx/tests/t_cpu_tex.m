@@ -256,13 +256,26 @@ static void handover_holders(void) {
     tex_put(sa, ta);   // a record of the finalized object replayed: its serial resolves through the ghost ring
     h_nvnTextureFinalize(&b); settle();
     CHECK(resident(ta), "hand-over: a finalized serial in the ghost ring keeps it resident");
-    for (uint64_t i = 0; i < NGHOST; i++) tex_put((1ull << 61) + i, [NSObject new]);   // the ring evicts that entry
+    g_cur_frame += GHOST_IDLE;   // not resolved for that long: the next entries past NGHOST evict it
+    for (uint64_t i = 0; i < NGHOST; i++) tex_put((1ull << 61) + i, [NSObject new]);
     settle();
     pthread_mutex_lock(&g_smu); int left = g_retire_held.n; pthread_mutex_unlock(&g_smu);
     CHECK(!resident(ta) && !left, "hand-over: the last holder's release takes it out of the residency set");
     h_nvnTextureFinalize(&c); h_nvnMemoryPoolFinalize((NVNmemoryPool *)&pool); settle();
     CHECK(!resident(tc), "hand-over: the pool's own texture goes with the pool");
     munmap(mem, len);
+}
+// More finalized serials than NGHOST resolved every frame (Ocarina of Time streaming an area in): none is evicted while it is in use, and the table shrinks back once they idle
+static void ghost_keeps_used(void) {
+    enum { N = 4 * NGHOST }; const uint64_t base = 1ull << 60;
+    for (uint64_t i = 0; i < N; i++) tex_put(base + i, [NSObject new]);
+    uint64_t puts = g_ghost_puts; int found = 0;
+    for (int f = 0; f < 2 * GHOST_IDLE; f++) { g_cur_frame++; ghost_trim_idle(); for (uint64_t i = 0; i < N; i++) found += tex_get(base + i) != nil; }
+    CHECK(found == N * 2 * GHOST_IDLE && g_ghost_puts == puts, "finalized serials resolved every frame stay past the table's size");
+    g_cur_frame += GHOST_IDLE;
+    for (int i = 0; i < N; i++) ghost_trim_idle();
+    pthread_mutex_lock(&g_smu); unsigned left = g_ghost.n; pthread_mutex_unlock(&g_smu);
+    CHECK(left <= NGHOST, "idle finalized serials go until the table is back at its size");
 }
 int main(int argc, const char **argv) { @autoreleasepool {
     enum { N = 6442, BASE = 1000 };
@@ -298,6 +311,6 @@ int main(int argc, const char **argv) { @autoreleasepool {
     own.serial = 900002; mtl_tex_init(&own); moved = own; own.magic = 0; mtl_tex_release(&moved);
     CHECK(!nvn_hm_get(&g_tex_live, &moved.serial), "a copy outliving the object it was initialized in ends the texture");
     retired_classification(); descriptor_replacement();
-    if (argc > 1 && !strcmp(argv[1], "--metal")) { mtl_init(); finalized_upload(0); finalized_upload(1); finalize_during_walk(); poll_asks_again(); poll_beside(); handover_holders(); }
+    if (argc > 1 && !strcmp(argv[1], "--metal")) { mtl_init(); finalized_upload(0); finalized_upload(1); finalize_during_walk(); poll_asks_again(); poll_beside(); handover_holders(); ghost_keeps_used(); }
     printf("t_cpu_tex: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

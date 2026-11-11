@@ -78,7 +78,7 @@ static void finalized_upload(int write_after_record) {
     mtl_sub_begin();
     id<MTLTexture> before = tex_by_id(1), second = tex_by_id(2); uint64_t compatible_id = 0;
     CHECK(before && second && g_treg[1].view && g_treg[2].view, "live descriptors cache their texture");
-    CHECK(tex_fit(2, second, MTLTextureType2DArray, &compatible_id) && g_treg[2].alt, "live descriptor caches a compatible view");
+    CHECK(tex_fit(2, second, MTLTextureType2DArray, NVN_DPF_FLOAT, &compatible_id) && g_treg[2].alt, "live descriptor caches a compatible view");
     CHECK(mtl_wait(mtl_sub_commit(),5000000000ull), "initial descriptor uploads completed");
     h_nvnTextureFinalize(&tex);
     CHECK(mtl_cpu_tex_count() == 0, "finalized texture leaves the live CPU set");
@@ -91,7 +91,7 @@ static void finalized_upload(int write_after_record) {
     CHECK(!memcmp(mem+131072, pixels, sizeof pixels), "finalized command snapshot uploads CPU-written pixels");
     mtl_sub_begin(); id<MTLTexture> registered = tex_by_id(1);
     CHECK(registered && registered.width == 4, "finalized registered descriptor resolves a Metal texture");
-    CHECK(tex_fit(2, tex_by_id(2), MTLTextureType2DArray, &compatible_id), "late compatible view resolves");
+    CHECK(tex_fit(2, tex_by_id(2), MTLTextureType2DArray, NVN_DPF_FLOAT, &compatible_id), "late compatible view resolves");
     CHECK(mtl_wait(mtl_sub_commit(),5000000000ull), "registered descriptor upload completed");
     CHECK(!g_treg[1].view && !g_treg[2].view && !g_treg[2].alt, "late descriptor views retire at submission end");
     // Resolve again: a retired serial may already hold an NvPkg in the ghost cache.

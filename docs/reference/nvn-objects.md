@@ -83,6 +83,27 @@ A game may tell NVN objects apart by their bytes, without an NVN call. A host re
 - **Fix:** such a pool gets an address range of its own at `MemoryPoolInitialize` (reserved, inaccessible: 64 GB on the Mac, at most 1 GB on iOS), and each mapping request `vm_remap`s the physical pages over its part of the range, so virtual addresses read and write the same memory, as the GPU's page table does. Each run of mapped pages is registered with the replay like a pool of its own and rebuilt when a request joins or splits runs (`vpool_*` in `hle_nvn.c`). Mario's 128 MB pool, mapped whole onto one physical pool, keeps the alias. The log reports the mapped high-water mark per 128 MB.
 - **Found on:** [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md).
 
+### More than 1,024 mapped runs in a sparse pool
+
+- **Symptom:** `[RED] virtual pool …: more than 1024 separate mapped runs`, then a GPU hang minutes later: `[RED] the host has waited 10 s for GPU work`, an indirect dispatch of absurd size (`283343572 x 965150577 x 1006648320 groups`), and the game aborts once its 15 s `nvnSyncWait` expires.
+- **Cause:** the run list of [a sparse pool](#sparse-virtual-pools-built-from-separate-physical-pools) was a fixed array of 1,024. Past it, a new run was neither listed nor registered with the replay, so the GPU did not reach it, and runs that no longer fit fell off the list while their zero-copy buffers stayed: after a later remap such a buffer still wired the old pages, and the GPU read what had been there (the dispatch's group counts were float data).
+- **Fix:** the list grows (`vrun_set` in `hle_nvn.c`); a change touches only the runs it overlaps, so a new list has at most two more runs than the old. The log reports the count at each power of two from 1,024.
+- **Found on:** [PRAGMATA](../../dm/games/0400C76024710000/README.md): its GPU heap passes 1,024 runs while the title screen loads; the hang came 3 to 4 minutes into the intro.
+
+### Pages changed under a buffer the GPU still uses
+
+- **Symptom:** in a game that maps and unmaps sparse pages while it runs: an indirect dispatch of absurd size, a GPU hang, then a crash in the game's own code reading a command list that holds another object's data.
+- **Cause:** a run of [a sparse pool](#sparse-virtual-pools-built-from-separate-physical-pools) is a zero-copy `MTLBuffer` over the pages `vm_remap` put in its range, and such a buffer keeps the pages it was made over, not the address. An unmap or a new mapping changed the pages at once, while the run's old buffer was still in submitted command buffers and the residency set. The GPU then read or wrote the old physical pages, which the game may already have mapped elsewhere.
+- **Fix:** no page under a live buffer changes (`hle_nvn.c`). An unmap clears the page table at once (textures read 0) but keeps the host pages until the fence after the last commit has completed (`vunmap_defer`, `vunmap_run`); then it makes the whole host pages no newer request has mapped inaccessible. A mapping over pages mapped before waits for the GPU first (`vpool_overwrites`, `mtl_finish`), and finalizing a pool with runs waits too. The log counts the waits once at each power of two (`[nvn] sparse pools: … waited for the GPU first`). Ported from uncraftablexd's sparse safe mode ([PR #1407](https://github.com/seedds/nxnative/pull/1407)), without its loop caps and skip lists.
+- **Found on:** [PRAGMATA](../../dm/games/0400C76024710000/README.md).
+
+### A sparse pool's runs replaced in two steps
+
+- **Symptom:** `[RED] shader <key>: the buffer address the game pushed at c[24] + … is …, in no memory pool: bound to a dummy buffer`, once or twice in minutes, for an address inside a mapped run of a sparse pool; the draw or dispatch of that frame reads zeros.
+- **Cause:** each run of [a sparse pool](#sparse-virtual-pools-built-from-separate-physical-pools) is a pool of its own for the replay. A mapping that joins a run to its neighbours, or an unmap that splits one, removed the old runs (`mtl_pool_del`) and then added the new ones (`mtl_pool_add`) on the game's thread, while the replay looks addresses up on its own thread: between the two, an address mapped all along was in no pool.
+- **Fix:** `vrun_set` (`hle_nvn.c`) hands the runs it removes and the runs it adds to `mtl_pool_replace` (`nvn_mtl.m`), which makes the new runs' buffers first and then takes the old ones out and puts the new ones in under one hold of `g_mu`, so every lookup sees the old runs or the new.
+- **Found on:** [PRAGMATA](../../dm/games/0400C76024710000/README.md): its mesh shaders `765e6d9d2588ce70` and `5aab38bb5ba67ef7` read a buffer 0x3000000 into a sparse pool whose one run keeps growing; the miss came at frames 2971 and 4484, the frames the run was replaced in; none in a run with the fix.
+
 ### Virtual pools of one texture each, mapped before and after the texture
 
 - **Symptom:** `[RED] MapVirtual: non-contiguous mapping (true sparse) not implemented`, on small virtual pools; streamed textures black or missing (OCTOPATH TRAVELER's village ground and plants).
@@ -261,6 +282,13 @@ A game may tell NVN objects apart by their bytes, without an NVN call. A host re
 - **Fix:** `cmd_t` records the last `AddControlMemory` block; `GetControlMemorySize` returns its size, `GetControlMemoryUsed` the bytes of control entries the host wrote into it ([A recording's end and links are in control memory](#a-recordings-end-and-links-are-in-control-memory); 0 until then, when the host used none), and `GetControlMemoryFree` the rest. `t_nvn` checks the values before any block, after one, after a recording and after a smaller block replaces it.
 - **Found on:** South Park: The Fractured But Whole 1.05, whose port is [PR #662](https://github.com/seedds/nxnative/pull/662) (not yet in the games table). With the getters implemented it reached the title, menu, a save and character customization on the Mac; with them returning 0 it also progressed, but submitted commands at a different rate.
 
+### Queue builder size getters
+
+- **Symptom:** `[RED] NVN unimplemented function called: nvnQueueBuilderGetCommandMemorySize` (or `…GetComputeMemorySize`, `…GetControlMemorySize`, `…GetRayTracingMemorySize`, `nvnQueueBuilderSetRayTracingMemorySize`), once each, as the game makes its queue.
+- **Cause:** the calls were not implemented. The driver's getters write the size to `*size` and return whether it was set (`ldr w8, [x0, #0x2c]; str w8, [x1]; ldrb w0, [x0, #0x24]`); the stub returns 0 and writes nothing, so a game that copies the sizes into its own queue description keeps what its fields held.
+- **Fix:** the queue builder keeps each size with a set flag (`qb_set`, `qb_get` in `hle_nvn.c`); the getters answer from them, and `GetQueueMemorySize` takes the device defaults for the sizes not set, as before. The ray tracing size is kept and reported only: the host traces no rays.
+- **Found on:** [PRAGMATA](../../dm/games/0400C76024710000/README.md), which reads all four after `SetDefaults` and its setters.
+
 ### Host-lent command memory segments
 
 - **Symptom:** `FATAL NVN command memory: the game's pool is empty…`.
@@ -381,6 +409,13 @@ Games read this count as a position in their own command memory and size their h
 - **Cause:** a GPU command buffer never completes.
 - **Check:** GPU load from outside: `ioreg -r -d 1 -c IOAccelerator | grep 'Device Utilization'` at 100 % means a shader is looping forever. Find the shaders first used in the last frames (`DM_NVN_PASSDUMP`, compare the `K` keys) and look at their `.metal` for an empty `do {} while (true);` with no `return` (one such case: [Exact program start for the decoder](shaders.md#exact-program-start-for-the-decoder)).
 - **Found on:** no game named in the source (general).
+
+### A sync never fenced since its Initialize is signalled
+
+- **Symptom:** `game called nn::diag abort` right after a screen change (PRAGMATA: the Initial Settings menu's Next), with nothing slow before it.
+- **Cause:** the game initializes its two frame syncs again and then waits 15 s on the one it has not fenced yet, aborting on `TIMEOUT_EXPIRED` or `FAILED` (`main+0x4a8cf0`) once two frames are in flight. It is a shipped path, so on the console that wait does not expire. The host answered a never-fenced sync with a timeout, a rule from its first version with no game behind it.
+- **Fix:** `nvnSyncWait` answers `ALREADY_SIGNALED` for a sync never fenced since its `Initialize`: no GPU work stands behind it. A wait that does expire after a second or more is a red line naming the sync's state (`sync_expired`), since that is what a game's GPU watchdog acts on.
+- **Found on:** [PRAGMATA](../../dm/games/0400C76024710000/README.md).
 
 ### The game's SyncWait wakes on the GPU's own signal of its fence
 

@@ -300,6 +300,13 @@ A decoder hands out as many outputs as it has slots, and while every slot is tak
 - **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md): 101 guide movies (`Movie/*.webm`, VP9 960×540, no sound); its player reads the pictures as NV12 (`ReadDecoderOutputImageNv12`, output format 3).
 - **Open:** AV1 (no decoder on the host: Initialize fails with a red line, so a client takes its error path instead of reaching the service), encrypted input, native image handles (the GPU route of decoded pictures), alias pools and the readback of part of a picture are not served (each prints a red line once). No game here plays VP8 or H.264 through this API yet: those paths are checked by the test only. Donkey Kong Bananza's player imports all four decoders; its movies are VP9.
 
+### H.264 parameter sets past the eighth argument
+
+- **Symptom:** every movie stays black; `[RED] nn::codec H.264: VideoToolbox could not decode a packet`, the packets starting with an SEI NAL unit, not a parameter set.
+- **Cause:** H.264's two `Initialize…Decoder` overloads end with the stream's parameter sets (SPS / PPS: a pointer and a size), the only place the game gives them. The host's shared entry points (`CV_FAMILY`) took the overloads without them, so VideoToolbox had no format. They are the ninth and tenth arguments of the longer overload: past the eight registers the guest's AAPCS64 gives each stack argument an 8-byte slot, where Apple's arm64 packs a 32-bit one into 4, so the argument before them had to be declared 64 bits wide.
+- **Fix:** both overloads take the parameter sets for every decoder type and pass them on for H.264 only; the red line prints a refused packet's first bytes, which show how its NAL units are framed.
+- **Found on:** [PRAGMATA](../../dm/games/0400C76024710000/README.md) (SDK 20.5.15): its opening movies.
+
 ### The submission-ready event counted as packets
 
 - **Symptom:** a movie stays black with the game waiting behind it, the decoder made and no `first picture` line (`Submit…InputBuffer` never called). Or `[RED] nn::codec VP9: Corrupt frame detected`, then `Keyframe / intra-only frame required`, each time about 6 s into a movie or after skipping in one.

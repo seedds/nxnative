@@ -861,6 +861,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** the builder's mode now goes to the texture (`tex_t.stencil`), whose sampling view is the `X32_Stencil8` one a stencil-mode texture view already got.
 - **Found on:** [DRAGON QUEST VII Reimagined](../../dm/games/0100A9D01C446000/README.md) (the character occlusion mask, `edbfc7a088be545e`).
 
+### The provoking vertex is the first
+
+- **Symptom:** `[RED] NVN unimplemented function called: nvnCommandBufferSetProvokingVertexMode`, once.
+- **Cause:** the call was not implemented. NVN2's driver writes its mode into the 3D class's `SET_PROVOKING_VERTEX` (method 0x1684), 0 for the first vertex of a primitive and 1 for the last.
+- **Fix:** mode 0 needs nothing: Metal's flat values come from the first vertex. Mode 1 has no Metal setting and is reported once (`[RED] nvnCommandBufferSetProvokingVertexMode 1 (the last vertex)`); open until a game sets it.
+- **Found on:** [PRAGMATA](../../dm/games/0400C76024710000/README.md), which sets mode 0.
+
 ### Conservative rasterization remains unimplemented
 
 - **Symptom:** `[nvn] SetConservativeRasterEnable on: ignored by host for now`, followed by `[RED] NVN unimplemented function called: nvnCommandBufferSetConservativeRasterDilate`.

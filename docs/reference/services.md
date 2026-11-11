@@ -536,6 +536,7 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** the host now recognizes gestures from the same touch points, by yuzu's rules plus an 8 px slop before a touch counts as moving (`hle_touch.c` `gesture_sample`, unit test `t_gesture`; only in handheld mode, as touches): Touch, Press after 0.5 s, Pan, Pinch / Rotate with two fingers, Cancel on a change in the finger count, then Tap (IsDoubleTap within 0.35 s), Swipe above 400 px/s or Complete, and Idle. For every game.
 - **Check:** every menu, the cards, the map's drag and flick worked by touch with it. `DM_TOUCH_LOG=1` logs each gesture entry, and a `DM_CTL` line `drag <x0> <y0> <x1> <y1> [seconds]` moves a finger for testing pans and swipes on the Mac.
 - **Found on:** [Taiko Risshiden V DX](../../dm/games/0100346017304000/README.md) (SDK 12.3.3, Koei Tecmo's KTGL).
+- **Two-argument `InitializeGesture`:** SDK 20.5.15 has an overload `nn::hid::InitializeGesture(int, int)`, whose SDK body opens the hid service and aborts in `sm::Initialize` (Result 0xe15) on the host; it is taken over as the other one is ([PRAGMATA](../../dm/games/0400C76024710000/README.md)).
 
 ### Touch sampling numbers across docked and handheld
 

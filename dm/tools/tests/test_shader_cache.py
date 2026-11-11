@@ -240,6 +240,15 @@ class CompressedPrune(Prune):
 
 
 class Maintenance(Base):
+    def test_wal_maintenance_uses_store_sync_policy(self):
+        self.fill(); seen = []; compress = shader_cache._compress_parallel
+        def observe(db, workers):
+            seen.append((db.execute('PRAGMA journal_mode').fetchone()[0], db.execute('PRAGMA synchronous').fetchone()[0]))
+            return compress(db, workers)
+        with mock.patch.object(shader_cache, '_compress_parallel', side_effect=observe):
+            shader_cache.maintain(self.path, compress=True, workers=4, say=self.said.append)
+        self.assertEqual(seen, [('wal', 1)])
+
     def test_reversal_decodes_source_once(self):
         self.fill(); before = self.snapshot()
         shader_cache.maintain(self.path, compress=True, workers=4, say=self.said.append)

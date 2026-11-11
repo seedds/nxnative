@@ -276,6 +276,7 @@ def maintain(path, *, compress=False, decompress=False, workers=1, say=print):
         try:
             compressed = db.execute("SELECT type FROM sqlite_master WHERE name='blob'").fetchone() == ('view',)
             if not compressed and not compress: return
+            if db.execute('PRAGMA journal_mode').fetchone()[0].lower() == 'wal': db.execute('PRAGMA synchronous=NORMAL')
             _load_zstd(db)
             if decompress:
                 say(f'restoring raw shader compile cache {path}')

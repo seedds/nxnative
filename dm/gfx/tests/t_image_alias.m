@@ -178,7 +178,7 @@ int main(void) { @autoreleasepool {
     CHECK(!small.allowGPUOptimizedContents,"family textures are uncompressed: a size reading another's compressed blocks decodes garbage");
     MTLTextureDescriptor *largest=tex_desc(&a[N-1],0); largest.allowGPUOptimizedContents=NO;   // family members are sized uncompressed, as they are made (image_texture)
     MTLSizeAndAlign max_size=[g_dev heapTextureSizeAndAlignWithDescriptor:largest];
-    CHECK(small.heap.size==max_size.size,"heap capacity is the exact largest declared size");
+    CHECK(small.heap.size>=max_size.size && small.heap.size<=(sw_on(rh_mode()) ? max_size.size+max_size.size/4 : max_size.size),"heap capacity holds the largest declared size (with the recycled heaps' eighth of headroom)");
     is_zero(small);
     id<MTLTexture> big=tex_mtl(&a[N-1]); is_zero(big);
     pixels(small,0x10203040);
@@ -227,7 +227,10 @@ int main(void) { @autoreleasepool {
     dispatch_sync(g_feedback_q, ^{}); defer_drain();
     CHECK(g_image_desc.n==0,"finalization releases every recorded description");
     }
-    CHECK(!weak_heap || ![g_res_objects containsObject:weak_heap],"the last texture retires its heap from residency");
+    if (sw_on(rh_mode())) {   // the heap waits, resident, for the next texture it fits (rh_wait)
+        int waits=0; os_unfair_lock_lock(&g_rh_lk); for (unsigned i=0;i<g_rh_n;i++) waits |= (__bridge id)g_rh[i].heap==weak_heap; os_unfair_lock_unlock(&g_rh_lk);
+        CHECK(weak_heap && waits && [g_res_objects containsObject:weak_heap],"the last texture hands its heap to the recycled heaps, resident while it waits");
+    } else CHECK(!weak_heap || ![g_res_objects containsObject:weak_heap],"the last texture retires its heap from residency");
     CHECK(g_image_heap_n==0,"every family heap is released after its textures and views go");
     uint64_t settled=g_dev.currentAllocatedSize;
     for (int i=0;i<8;i++) { @autoreleasepool {

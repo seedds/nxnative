@@ -303,74 +303,96 @@ static void res_remove(id<MTLAllocation> r) { @autoreleasepool {
     g_res_dirty = 1; g_rs_rm++;
     pthread_mutex_unlock(&g_res_mu);
 } }
-@interface NvImageHeap : NSObject { @public id<MTLHeap> heap; } @end
-@implementation NvImageHeap
-- (void)dealloc { res_remove(heap); atomic_fetch_sub(&g_image_heap_n, 1); }
-@end
-static char g_image_heap_owner_key;
-// Recycled render-target memory (GitHub issue #1831). An engine that keeps its render targets in a GPU-only pool and moves or resizes them with its dynamic resolution names new
+// Recycled texture memory (GitHub issues #1831, #1823). An engine that keeps its render targets in a GPU-only pool and moves or resizes them with its dynamic resolution names new
 // storage or a new size every few frames, and each (pool, offset, description) gets a Metal texture of its own: Ocarina of Time's 305 MB target pool made 3,468 textures in about
 // 1,000 frames of its village, 450-575 MB added to the residency set every 300 frames, while the storage takeover (alias_take_over) let as many go. Metal does not lay a texture out
 // as NVN does, so these targets cannot share the pool's memory as on the console: a heap that mirrors the pool corrupts the picture, as the game keeps live targets in the part of
-// the full-size scene target its current resolution leaves unused (PR #1453). What can be kept is the memory of a texture the host has already let go. Each such target is made in
-// a placement heap of its own; when its texture is freed (after the submissions that used it completed, defer_drain), the heap waits here, still resident, for the next target it fits
-// (Metal's allocation sizes come in steps: 855 resolutions at 2048x1152 fall into 21 sizes, PR #1583). The new texture is filled as a new allocation is (tex_init_fill or zeros), so
-// nothing it reads depends on the reuse; the memory was the old texture's only up to that texture's last use, which completed, as with memory Metal frees and hands out again, so no
-// alias flush is added (resource_vis). Heaps idle for RH_IDLE_NS, and the oldest past RH_CAP bytes waiting, leave the residency set when a submission begins (rh_trim).
-// DM_NVN_RT_RECYCLE=0 makes each target its own allocation as before; ab alternates it with the DM_AB phases
+// the full-size scene target its current resolution leaves unused (PR #1453). What can be kept is the memory of a texture the host has already let go. Each such texture is made in
+// a placement heap of its own; when its texture is freed (after the submissions that used it completed, defer_drain), the heap waits here, still resident, for the next texture it fits.
+// Every texture whose memory the host makes for the GPU alone draws from the same list: single-description targets in a GPU-only pool (rh_texture), the heaps of resolution families
+// (image_texture), and same-pass feedback snapshots (fb_snap). A heap is made an eighth larger than its first texture, and a waiting heap serves a texture up to a third smaller
+// than itself (the smallest that fits is taken), so a target that grows by a step of Metal's sizes (about 10% near 2 MB) fits the heap it freed the frame before: Mario Kart World's
+// dynamic resolution moves its targets every frame (1480x832, 1544x868, 1548x868, 1488x836 and their halves and quarters), and with exact heaps taken only up to an eighth larger,
+// family heaps freed for good and only COMPRESSIBLE targets recycled, its race made about 3,500 textures and heaps and added 5-6 GB to the residency set every 300 frames on an
+// M6, with a residency commit for nearly every one; alternating that policy with this one in a run, 970 -> 272 commits and 1.8 -> 0.34 GB per 300 frames, replay CPU 6.94 -> 6.36 ms
+// a frame (issue #1823). Only textures the GPU can render or write to are taken (block-compressed assets keep exact allocations of their own, without the headroom). The new
+// texture is filled as a new allocation is (tex_init_fill or zeros; a family heap is zeroed through its largest description, a snapshot is copied into), so nothing it reads
+// depends on the reuse; the memory was the old texture's only up to that texture's last use, which completed, as with memory Metal frees and hands out again, so no alias flush is
+// added (resource_vis). Heaps idle for RH_IDLE_NS, and the oldest past
+// RH_CAP bytes waiting, leave the residency set when a submission begins (rh_trim). DM_NVN_RT_RECYCLE=0 makes each texture its own allocation and each family heap exact and freed
+// with its last texture, as before; ab alternates it with the DM_AB phases
 enum { RH_CAP = 256u << 20 }; static const uint64_t RH_IDLE_NS = 3000000000ull;
 typedef struct { void *heap; uint64_t size, t; } rh_ent;   // heap: retained (CFBridgingRetain); t: when it began to wait
 static os_unfair_lock g_rh_lk = OS_UNFAIR_LOCK_INIT; static rh_ent *g_rh; static unsigned g_rh_n, g_rh_cap; static uint64_t g_rh_bytes;
 static _Atomic uint64_t g_rh_made, g_rh_reused, g_rh_trimmed;   // for the memory readout
-@interface NvRecycledHeap : NSObject { @public id<MTLHeap> heap; } @end
-@implementation NvRecycledHeap
-- (void)dealloc {   // its texture was freed: the heap waits for the next target it fits. Runs where the texture's last reference goes (defer_drain: the submit thread or a completion handler)
+static int sw_mode(const char *name, int dflt); static inline int sw_on(int m);
+static int rh_mode(void) { static int m = -1; if (m < 0) m = sw_mode("DM_NVN_RT_RECYCLE", 1); return m; }
+// A heap whose texture was freed waits for the next texture it fits (with the switch off it is freed). Runs where the texture's last reference goes (defer_drain: the submit thread or a
+// completion handler)
+static void rh_wait(id<MTLHeap> heap) {
     if (!heap) return;
+    if (!sw_on(rh_mode())) { res_remove(heap); return; }
     rh_ent e = {(void *)CFBridgingRetain(heap), heap.size, clock_gettime_nsec_np(CLOCK_MONOTONIC)};
     os_unfair_lock_lock(&g_rh_lk);
-    if (g_rh_n == g_rh_cap) { g_rh_cap = g_rh_cap ? 2 * g_rh_cap : 64; g_rh = realloc_or_die(g_rh, g_rh_cap * sizeof *g_rh, "the recycled render-target heaps"); }
+    if (g_rh_n == g_rh_cap) { g_rh_cap = g_rh_cap ? 2 * g_rh_cap : 64; g_rh = realloc_or_die(g_rh, g_rh_cap * sizeof *g_rh, "the recycled texture heaps"); }
     g_rh[g_rh_n++] = e; g_rh_bytes += e.size;
     os_unfair_lock_unlock(&g_rh_lk);
 }
+@interface NvRecycledHeap : NSObject { @public id<MTLHeap> heap; } @end
+@implementation NvRecycledHeap
+- (void)dealloc { rh_wait(heap); }
 @end
-static char g_rh_owner_key;
-static int sw_mode(const char *name, int dflt); static inline int sw_on(int m);
-static int rh_mode(void) { static int m = -1; if (m < 0) m = sw_mode("DM_NVN_RT_RECYCLE", 1); return m; }
-// A heap for a texture of this descriptor: the smallest waiting one it fits, up to an eighth larger, or a new one of its exact size. nil when the descriptor cannot be placed
-static id<MTLHeap> rh_take(MTLTextureDescriptor *d, int *reused) {
-    MTLSizeAndAlign need = [g_dev heapTextureSizeAndAlignWithDescriptor:d];
-    if (!need.size) return nil;
+@interface NvImageHeap : NSObject { @public id<MTLHeap> heap; } @end   // a resolution family's heap (image_texture)
+@implementation NvImageHeap
+- (void)dealloc { rh_wait(heap); atomic_fetch_sub(&g_image_heap_n, 1); }
+@end
+static char g_image_heap_owner_key, g_rh_owner_key;
+// A placement heap of at least `size` bytes: the smallest waiting one up to half as large again, or a new one an eighth larger (its exact size with the switch off). nil if Metal
+// makes none
+static id<MTLHeap> rh_heap(uint64_t size, MTLStorageMode sm, MTLCPUCacheMode cm, MTLHazardTrackingMode hm, int *reused) {
+    *reused = 0;
+    if (!size) return nil;
+    int on = sw_on(rh_mode());
+    uint64_t top = size + size / 2;
     void *got = NULL;
-    os_unfair_lock_lock(&g_rh_lk);
-    unsigned best = g_rh_n;
-    for (unsigned i = 0; i < g_rh_n; i++) {
-        id<MTLHeap> h = (__bridge id<MTLHeap>)g_rh[i].heap;
-        if (g_rh[i].size < need.size || g_rh[i].size > need.size + need.size / 8 || (best < g_rh_n && g_rh[i].size >= g_rh[best].size)) continue;
-        if (h.storageMode != d.storageMode || h.cpuCacheMode != d.cpuCacheMode) continue;   // (a placed texture takes its heap's hazard tracking: a placement heap reports untracked, a descriptor default)
-        best = i;
+    if (on) {
+        os_unfair_lock_lock(&g_rh_lk);
+        unsigned best = g_rh_n;
+        for (unsigned i = 0; i < g_rh_n; i++) {
+            if (g_rh[i].size < size || g_rh[i].size > top || (best < g_rh_n && g_rh[i].size >= g_rh[best].size)) continue;
+            id<MTLHeap> h = (__bridge id<MTLHeap>)g_rh[i].heap;
+            if (h.storageMode != sm || h.cpuCacheMode != cm) continue;   // (a placed texture takes its heap's hazard tracking: a placement heap reports untracked, a descriptor default)
+            best = i;
+        }
+        if (best < g_rh_n) { got = g_rh[best].heap; g_rh_bytes -= g_rh[best].size; g_rh[best] = g_rh[--g_rh_n]; }
+        os_unfair_lock_unlock(&g_rh_lk);
     }
-    if (best < g_rh_n) { got = g_rh[best].heap; g_rh_bytes -= g_rh[best].size; g_rh[best] = g_rh[--g_rh_n]; }
-    os_unfair_lock_unlock(&g_rh_lk);
-    if (got) { *reused = 1; return CFBridgingRelease(got); }
-    MTLHeapDescriptor *hd = [MTLHeapDescriptor new]; hd.type = MTLHeapTypePlacement; hd.size = need.size;
-    hd.storageMode = d.storageMode; hd.cpuCacheMode = d.cpuCacheMode; hd.hazardTrackingMode = d.hazardTrackingMode;
-    *reused = 0; return [g_dev newHeapWithDescriptor:hd];
+    if (got) { *reused = 1; atomic_fetch_add(&g_rh_reused, 1); return CFBridgingRelease(got); }
+    MTLHeapDescriptor *hd = [MTLHeapDescriptor new]; hd.type = MTLHeapTypePlacement; hd.size = on ? size + size / 8 : size;
+    hd.storageMode = sm; hd.cpuCacheMode = cm; hd.hazardTrackingMode = hm;
+    id<MTLHeap> h = [g_dev newHeapWithDescriptor:hd];
+    if (h && on) atomic_fetch_add(&g_rh_made, 1);
+    return h;
 }
-// A shared render target in a GPU-only pool (tex_mtl_), in recycled memory: written by the GPU alone, so its bytes never come from the CPU's view of the pool
-static id<MTLTexture> rh_texture(const tex_t *t, MTLTextureDescriptor *d) {
-    if (!sw_on(rh_mode()) || !t->pool || !(t->pool->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) || !(t->d.flags & NVN_TEXTURE_FLAGS_COMPRESSIBLE)
-        || (t->d.flags & (NVN_TEXTURE_FLAGS_DISPLAY | NVN_TEXTURE_FLAGS_VIDEO_DECODE | NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_SPARSE | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET))
-        || d.storageMode != MTLStorageModePrivate || d.textureType == MTLTextureTypeTextureBuffer) return nil;
-    int reused = 0; id<MTLHeap> heap = rh_take(d, &reused);
+// A texture of this descriptor in recycled memory, at the start of its heap. nil when the switch is off or the descriptor cannot be placed. A heap taken from the list that the texture
+// does not go into waits again; a new one goes
+static id<MTLTexture> rh_place(MTLTextureDescriptor *d) {
+    if (!sw_on(rh_mode()) || d.storageMode != MTLStorageModePrivate || d.textureType == MTLTextureTypeTextureBuffer) return nil;
+    MTLSizeAndAlign need = [g_dev heapTextureSizeAndAlignWithDescriptor:d];
+    int reused = 0; id<MTLHeap> heap = rh_heap(need.size, d.storageMode, d.cpuCacheMode, d.hazardTrackingMode, &reused);
     id<MTLTexture> mt = heap ? [heap newTextureWithDescriptor:d offset:0] : nil;
-    if (!mt) {   // not placeable after all: a heap taken from the list waits again; a new one goes
-        if (heap && reused) { NvRecycledHeap *o = [NvRecycledHeap new]; o->heap = heap; }
-        return nil;
-    }
+    if (!mt) { if (heap && reused) rh_wait(heap); return nil; }
     NvRecycledHeap *owner = [NvRecycledHeap new]; owner->heap = heap;
     objc_setAssociatedObject(mt, &g_rh_owner_key, owner, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    atomic_fetch_add(reused ? &g_rh_reused : &g_rh_made, 1);
     return mt;
+}
+// A shared texture in a GPU-only pool (tex_mtl_) that the GPU can render or write to, in recycled memory: the CPU never writes its storage, and the new texture is filled from what
+// the host holds of it (tex_init_fill) or zeroed, as a new allocation is. NVN asks no flag of a render target (Mario Kart World's resized targets include some without COMPRESSIBLE),
+// so the test is the Metal usage the host gives it: a texture of a block-compressed format, which is an asset the game copied in, keeps an allocation of its own and so its exact size
+static id<MTLTexture> rh_texture(const tex_t *t, MTLTextureDescriptor *d) {
+    if (!t->pool || !(t->pool->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) || !(d.usage & (MTLTextureUsageRenderTarget | MTLTextureUsageShaderWrite))
+        || (t->d.flags & (NVN_TEXTURE_FLAGS_DISPLAY | NVN_TEXTURE_FLAGS_VIDEO_DECODE | NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_SPARSE | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET))) return nil;
+    return rh_place(d);
 }
 // When a submission begins: heaps that waited RH_IDLE_NS, and the oldest past RH_CAP bytes, leave the residency set and are freed
 static void rh_trim(void) {
@@ -4303,9 +4325,7 @@ static id<MTLTexture> image_texture(const tex_t *t, MTLTextureDescriptor *d0) {
     int fresh = !owner;
     if (fresh) {
         if (!family) return nil;
-        MTLHeapDescriptor *hd = [MTLHeapDescriptor new]; hd.type = MTLHeapTypePlacement; hd.size = capacity;
-        hd.storageMode = d.storageMode; hd.cpuCacheMode = d.cpuCacheMode; hd.hazardTrackingMode = d.hazardTrackingMode;
-        id<MTLHeap> heap = [g_dev newHeapWithDescriptor:hd]; if (!heap) return nil;
+        int reused; id<MTLHeap> heap = rh_heap(capacity, d.storageMode, d.cpuCacheMode, d.hazardTrackingMode, &reused); if (!heap) return nil;   // from the recycled heaps
         owner = [NvImageHeap new]; owner->heap = heap; atomic_fetch_add(&g_image_heap_n, 1);
     }
     id<MTLTexture> mt = [owner->heap newTextureWithDescriptor:d offset:0]; if (!mt) return nil;
@@ -4535,7 +4555,7 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long rss_mb) {
 #if TARGET_OS_IPHONE
     snprintf(avail, sizeof avail, "%llu MB", (unsigned long long)(os_proc_available_memory() >> 20));
 #endif
-    MLOG("memory up to frame %llu: resident %llu MB, GPU allocated %llu MB, deferred-release queue %lu, residency set %lu, serial objects %u, memory pools %d (resident %d; peak %d / tracking table capacity %d; freed but alive %lu, %llu MB), shared textures %u (%u of them unreferenced; evicted with pools %llu, on storage takeover %llu in total), texture re-uploads %llu in total, per-frame arena blocks created %llu in total, finalized textures still referenced %u (small table, %llu put in total), retired but held by a serial %u, recycled render-target heaps made %llu, reused %llu, freed %llu, waiting %u (%llu MB); headroom to the system memory limit %s", frame, rss_mb, gpu, nd, nr, ns, live, pres, peak, cap, dead_n, dead_mb, ashared, aorph, (unsigned long long)g_alias_evicted, (unsigned long long)g_alias_taken, (unsigned long long)g_pkg_reuploads, (unsigned long long)g_arena_made, nghost, (unsigned long long)ghost_puts, nwait,
+    MLOG("memory up to frame %llu: resident %llu MB, GPU allocated %llu MB, deferred-release queue %lu, residency set %lu, serial objects %u, memory pools %d (resident %d; peak %d / tracking table capacity %d; freed but alive %lu, %llu MB), shared textures %u (%u of them unreferenced; evicted with pools %llu, on storage takeover %llu in total), texture re-uploads %llu in total, per-frame arena blocks created %llu in total, finalized textures still referenced %u (small table, %llu put in total), retired but held by a serial %u, recycled texture heaps made %llu, reused %llu, freed %llu, waiting %u (%llu MB); headroom to the system memory limit %s", frame, rss_mb, gpu, nd, nr, ns, live, pres, peak, cap, dead_n, dead_mb, ashared, aorph, (unsigned long long)g_alias_evicted, (unsigned long long)g_alias_taken, (unsigned long long)g_pkg_reuploads, (unsigned long long)g_arena_made, nghost, (unsigned long long)ghost_puts, nwait,
          (unsigned long long)g_rh_made, (unsigned long long)g_rh_reused, (unsigned long long)g_rh_trimmed, rh_n, (unsigned long long)(rh_bytes >> 20), avail);
     { void mtl_vc_stats(unsigned *, uint64_t *, uint64_t *), mtl_tb2_stats(uint64_t *, uint64_t *, uint64_t *, uint64_t *, uint64_t *); uint64_t mtl_tex_mis_count(void); unsigned vn; uint64_t vh, vm, tb, tm, tf, tc, tcb;
       mtl_vc_stats(&vn, &vh, &vm); mtl_tb2_stats(&tb, &tm, &tf, &tc, &tcb);
@@ -12787,7 +12807,8 @@ static fb_cache_t *fb_snap(uint64_t ser, int lv, int sl, MTLPixelFormat pf, NSUI
     }
     if (!e->snap) { MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:pf width:w height:h mipmapped:NO];
         d.usage = MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView; d.storageMode = MTLStorageModePrivate;
-        e->snap = [g_dev newTextureWithDescriptor:d]; if (!e->snap) { e->ser = 0; return NULL; } res_add(e->snap); }   // full queue barriers separate a copy from the draws that read the earlier content
+        e->snap = rh_place(d); if (!e->snap) e->snap = [g_dev newTextureWithDescriptor:d];   // recycled memory: a resized attachment's snapshot takes the heap of an earlier size's
+        if (!e->snap) { e->ser = 0; return NULL; } res_add(e->snap); }   // full queue barriers separate a copy from the draws that read the earlier content
     e->ser = ser; e->lv = lv; e->sl = sl; e->bar = g_fb_bar; e->sub = g_sub_serial; e->use = ++g_fbc_use; *fresh = 1; return e;
 }
 // ---- Same-pass feedback read from the tile ----

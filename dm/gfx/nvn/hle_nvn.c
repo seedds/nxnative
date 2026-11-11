@@ -266,12 +266,38 @@ NVN(nvnMemoryPoolBuilderSetDefaults, void, NVNmemoryPoolBuilder *b) { memset(b, 
 NVN(nvnMemoryPoolBuilderSetDevice, void, NVNmemoryPoolBuilder *b, NVNdevice *d) { ((pool_builder_t *)b)->dev = d; }
 NVN(nvnMemoryPoolBuilderSetStorage, void, NVNmemoryPoolBuilder *b, void *m, size_t n) { ((pool_builder_t *)b)->mem = m; ((pool_builder_t *)b)->size = n; }
 NVN(nvnMemoryPoolBuilderSetFlags, void, NVNmemoryPoolBuilder *b, int f) { ((pool_builder_t *)b)->flags = f; }
+// Pool census (Salt 2026-11-11, notes/2026-11-11-salt-hotset-plan.md): live memory pools and bytes by their flags (virtual pools left out: their storage is another pool's).
+// The CPU-written, GPU-read pools (CPU_UNCACHED or CPU_CACHED, with GPU_UNCACHED or GPU_CACHED) are the ones the CPU keeps rewriting for the GPU (command memory,
+// uniforms, staging): with guest files (DM_GUEST_FILE) they are what the periodic flush writes, and what keeping them anonymous would cost. Counters only, logged with the
+// pool tables line when they change: "[nvn] pool census up to frame N"
+static _Atomic uint64_t g_cens_n[0x200], g_cens_b[0x200], g_cens_cw_peak;
+static int cens_cw(int f) { return (f & (NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED | NVN_MEMORY_POOL_FLAGS_CPU_CACHED)) && (f & (NVN_MEMORY_POOL_FLAGS_GPU_UNCACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED)); }
+static void cens_add(int flags, uint64_t size, int sign) {
+    if (flags & NVN_MEMORY_POOL_FLAGS_VIRTUAL) return;
+    int k = flags & 0x1ff; atomic_fetch_add(&g_cens_n[k], (uint64_t)(int64_t)sign); atomic_fetch_add(&g_cens_b[k], (uint64_t)((int64_t)sign * (int64_t)size));
+    if (sign > 0 && cens_cw(flags)) { uint64_t cw = 0; for (int i = 0; i < 0x200; i++) if (cens_cw(i)) cw += atomic_load(&g_cens_b[i]);
+        uint64_t pk = atomic_load(&g_cens_cw_peak); while (cw > pk && !atomic_compare_exchange_weak(&g_cens_cw_peak, &pk, cw)) {} }
+}
+void nvn_pool_census(uint64_t *n, uint64_t *b, uint64_t *cw, uint64_t *cw_peak) {   // whole totals and the CPU-written GPU-read share (tests, the log line)
+    *n = *b = *cw = 0; for (int i = 0; i < 0x200; i++) { uint64_t bi = atomic_load(&g_cens_b[i]); *n += atomic_load(&g_cens_n[i]); *b += bi; if (cens_cw(i)) *cw += bi; }
+    *cw_peak = atomic_load(&g_cens_cw_peak);
+}
+static void cens_log(unsigned long long frame) {
+    static uint64_t pb, pn; uint64_t n, b, cw, pk; nvn_pool_census(&n, &b, &cw, &pk); if (b == pb && n == pn) return; pb = b; pn = n;
+    char t[1200]; size_t o = 0; int used[10], nu = 0; const double MB = 1048576.0;
+    for (int r = 0; r < 10; r++) { int best = -1; for (int i = 0; i < 0x200; i++) { int u = 0; for (int j = 0; j < nu; j++) u |= used[j] == i; uint64_t bi = atomic_load(&g_cens_b[i]);
+            if (!u && bi && (best < 0 || bi > atomic_load(&g_cens_b[best]))) best = i; } if (best < 0) break; used[nu++] = best; }
+    for (int j = 0; j < nu && o < sizeof t - 80; j++) o += snprintf(t + o, sizeof t - o, " flags %#x%s: %llu pools %.1f MB;", used[j], cens_cw(used[j]) ? " (CPU-written)" : "",
+        (unsigned long long)atomic_load(&g_cens_n[used[j]]), atomic_load(&g_cens_b[used[j]]) / MB);
+    LOG("[nvn] pool census up to frame %llu: %llu pools, %.1f MB; CPU-written GPU-read %.1f MB (peak %.1f); largest:%s", frame, (unsigned long long)n, b / MB, cw / MB, pk / MB, t);
+}
 static uint8_t *vpool_reserve(pool_t *o); static void vpool_release(pool_t *o); static void vpool_taken(const pool_t *o);   // sparse virtual pools, see MapVirtual
 NVN(nvnMemoryPoolInitialize, NVNboolean, NVNmemoryPool *p, const NVNmemoryPoolBuilder *b) {
     const pool_builder_t *s = (const pool_builder_t *)b; pool_t *o = (pool_t *)p;
     o->magic = MAGIC('P', 'O', 'O', 'L'); o->flags = s->flags; o->mem = s->mem; o->size = s->size; o->vp = NULL; o->vmode = 0;
     if (!o->mem && (o->flags & 0x200)) { uint8_t *vr = vpool_reserve(o); if (vr) o->mem = vr; }   // a virtual pool's own address range until its first mapping decides (see MapVirtual)
     else if (o->mem) { mtl_pool_add(o->mem, o->size); nvn_dirty_add_range(o->mem, o->size); }
+    if (o->mem) cens_add(o->flags, o->size, 1);
     if (o->mem && !(o->flags & 0x200)) dm_device_share(o->mem, o->size, 1);   // the GPU maps the storage: the host refuses to unmap it until Finalize, as Horizon does (hle_svc.c)
     if (!o->mem && !(o->flags & 0x200)) LOG("[RED] MemoryPoolInitialize: non-virtual pool has no storage flags=%#x size=%#llx", o->flags, o->size);
     if (getenv("DM_NVN_VLOG")) { LOG("[nvn] MemoryPool %p mem=%p size=%#llx flags=%#x", (void *)p, (void *)o->mem, (unsigned long long)o->size, o->flags); void dm_backtrace(uint64_t fp); dm_backtrace((uint64_t)__builtin_frame_address(0)); }
@@ -282,6 +308,7 @@ static void fl_add(const uint8_t *a, uint64_t n); static void fl_drop(const uint
 NVN(nvnMemoryPoolFinalize, void, NVNmemoryPool *p) {
     // Dead to the replay first (its IDs marked gone under g_rmu, the magic cleared), then torn down: a texture resolving on the submit thread must not find the page table or the storage already gone
     mtl_alias_drop_pool(p); ((pool_t *)p)->magic = 0;
+    if (((pool_t *)p)->mem) cens_add(((pool_t *)p)->flags, ((pool_t *)p)->size, -1);
     if (((pool_t *)p)->flags & 0x200 && ((pool_t *)p)->vp) vpool_release((pool_t *)p);
     if (((pool_t *)p)->mem && !(((pool_t *)p)->flags & 0x200)) {   // A virtual pool's storage is borrowed from a physical pool; do not unregister it
  nvn_dirty_remove_range(((pool_t *)p)->mem); mtl_pool_del(((pool_t *)p)->mem); mtl_sp_phys_gone(((pool_t *)p)->mem, ((pool_t *)p)->size); fl_drop(((pool_t *)p)->mem, ((pool_t *)p)->size);
@@ -2082,6 +2109,7 @@ static void power_line(uint64_t frame) {
         if (fs_ != pfs || fr != pfr || ft != pft) LOG("[nvn] same-pass feedback up to frame %llu, per frame: %.1f snapshots taken, %.1f draws reused one, %.1f read the tile (%.1f waited for their pipeline)",
             frame, (fs_ - pfs) / nf, (fr - pfr) / nf, (ft - pft) / nf, (fw - pfw) / nf);
         pfs = fs_; pfr = fr; pft = ft; pfw = fw;
+        cens_log(frame);
         void mtl_pool_stats(uint64_t s[6]); static uint64_t pps[6]; uint64_t ps[6]; mtl_pool_stats(ps);   // the tables of handles traced to no slot (nvn_mtl.m pool_gpu)
         if (ps[0] != pps[0] || ps[2] != pps[2] || ps[3] != pps[3]) LOG("[nvn] pool tables up to frame %llu, per frame: %.2f built whole (%.2f ms), %.2f patched, %.2f kept; of these two %.2f over memory pool changes, %.2f over a new submission",
             frame, (ps[0] - pps[0]) / nf, (ps[1] - pps[1]) / 1e3 / nf, (ps[2] - pps[2]) / nf, (ps[3] - pps[3]) / nf, (ps[4] - pps[4]) / nf, (ps[5] - pps[5]) / nf);

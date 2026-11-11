@@ -54,6 +54,8 @@ int main(void) { @autoreleasepool {
     // Pool A holds texture ID 1; pool B is a pool object whose storage the host does not map yet (a virtual pool before its first mapping): ID 2 there has no storage
     pool_t a = {0}, b = {0}; pool_builder_t pb = {.mem = ma, .size = LEN, .flags = NVN_MEMORY_POOL_FLAGS_CPU_CACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED};
     CHECK(h_nvnMemoryPoolInitialize((NVNmemoryPool *)&a, (const NVNmemoryPoolBuilder *)&pb), "pool A initialized");
+    void nvn_pool_census(uint64_t *, uint64_t *, uint64_t *, uint64_t *); uint64_t cn, cb, ccw, cpk;   // the pool census (hle_nvn.c): pool A is CPU-written and GPU-read
+    nvn_pool_census(&cn, &cb, &ccw, &cpk); CHECK(cn == 1 && cb == LEN && ccw == LEN && cpk == LEN, "the census counts pool A as CPU-written GPU-read");
     NVNtextureBuilder tb = {0}; NVNtexture t1 = {0}; h_nvnTextureBuilderSetDefaults(&tb);
     h_nvnTextureBuilderSetWidth(&tb, 4); h_nvnTextureBuilderSetHeight(&tb, 4); h_nvnTextureBuilderSetFormat(&tb, NVN_FORMAT_RGBA8);
     h_nvnTextureBuilderSetStorage(&tb, (NVNmemoryPool *)&a, 0);
@@ -84,6 +86,7 @@ int main(void) { @autoreleasepool {
 
     // Pool A finalized: ID 1 is marked gone with a note of its own, whatever else the Finalize changes
     h_nvnMemoryPoolFinalize((NVNmemoryPool *)&a);
+    nvn_pool_census(&cn, &cb, &ccw, &cpk); CHECK(cn == 0 && cb == 0 && ccw == 0 && cpk == LEN, "the census drops pool A at Finalize and keeps its peak");
     id<MTLBuffer> b3 = table();
     CHECK(g_treg[1].gone && entry(b3, 1) == dummy_of(b3), "the finalized pool's ID holds the dummy");
     CHECK(entry(b3, 2) == entry(b2, 2), "the other pool's ID is unchanged");

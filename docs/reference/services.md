@@ -240,6 +240,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** cache storage: `OpenCacheStorageList` / `ReadCacheStorageList` report none, `CreateCacheStorage` / `MountCacheStorage` use a host folder beside the temporary storage. `fs::IsSaveDataExisting(ApplicationId, Uid)` for another title (it asks for Breath of the Wild's save: none) and `MountSaveDataReadOnly`.
 - **Found on:** [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md) (1.4.3, the same `sdk` build as Breath of the Wild 1.9.0).
 
+### A read-only mount of the game's own save data
+
+- **Symptom:** `game called nn::diag abort: Result 0, call site main+0x3917270` about 48 s into every start after the game first saved, right after `fs mount save0`; the first start, with no account save yet, went on. Earlier the log has `[RED] fs read-only mount of another program's save data SaveReadOnly: program <the game's own ID>, the host has none`.
+- **Cause:** the game mounts its own account save read-only as `SaveReadOnly` at boot (`fs::MountSaveDataReadOnly` with its own application ID; `fs::IsSaveDataExisting` had told it the save exists). The host answered every such mount TargetNotFound. Once an account save existed, the game read through that mount and aborted where it checks the mount's name against `SaveReadOnly` (main+0x349d880 → main+0x3917260).
+- **Fix:** `hle_fs.c` mounts the game's own save data read-only on its committed save directory (`DM_SAVE`, not the transaction's work directory), creating it empty on a first start, as the console creates the save data; another program's save data is still TargetNotFound, and so is the game's own when `DM_SAVE` is unset or its folder cannot be made (a red line, no exit).
+- **Check:** `make -C dm/host/tests GAME=<id> run` (`t_fs_case`): the own save mounts read-only, reads the committed files and not the uncommitted ones, refuses writes; another program's gets TargetNotFound; a first start mounts an empty save; no `DM_SAVE`, or a file in its place, gets TargetNotFound. In the game, a start with the save the abort happened on runs past it.
+- **Found on:** Nintendo Switch Sports Resort (Switch 2, `04008E001F098000`, v65536).
+
 ### Device save data on the account save's directory
 
 - **Symptom:** the island lives in device save data, which the host did not mount.

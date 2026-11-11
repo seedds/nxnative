@@ -694,9 +694,9 @@ def geometry_finish(key, w, j, c1):
         if r.returncode: return 'geometry MSL failed', r.stderr.strip()[:160], None
         try: selected = dmsh_fetch.select_guards(dmsh_rewrite.precise(dmsh_atomic.check_msl(r.stdout)))   # bounded uniform reads as selects (see dmsh_fetch.select_guards)
         except ValueError as e: return 'geometry MSL failed', str(e)[:160], None
-        plain = dmsh_geometry.topology_pointer(dmsh_reflect.pool_arrays(selected))
-        src = dmsh_geometry.capture_input(plain)
         res = json.load(open(os.path.join(w, k + '.res.json')))
+        plain = dmsh_geometry.topology_pointer(dmsh_reflect.pool_arrays(dmsh_rewrite.fetch_clamp(selected, dmsh_reflect.fetch1d_names(selected, res))))   # as finish: see dmsh_rewrite.fetch_clamp
+        src = dmsh_geometry.capture_input(plain)
         refl = {'key': key + '_bg' + str(t), 'route': 'B', 'chain': CHAIN, 'dm_ctl': key,
                 'source': f'{loc[key][0]}#{loc[key][1]}', 'pc_paired': pc_of[key], 'stage': 'gs',
                 'entry': 'main0', 'msl_entry_kind': 'kernel', 'threadgroup_size': [32, 1, 1],
@@ -771,6 +771,9 @@ def finish(key, w, j, c1):
     try: src = dmsh_fetch.select_guards(src)   # bounded uniform reads as a load and a select, as the translator means them, not a branch for each (see dmsh_fetch.select_guards)
     except ValueError as e: return 'uniform bounds rewrite failed', str(e)[:160], None
     src = dmsh_rewrite.mul_extended(src)   # scalar extended products without the optnone wrapper (see mul_extended)
+    res = json.load(open(os.path.join(w, key + '.res.json')))
+    try: src = dmsh_rewrite.fetch_clamp(src, dmsh_reflect.fetch1d_names(src, res))   # texel fetches past the edge of a sampled 2D texture (see fetch_clamp)
+    except ValueError as e: return 'texel fetch clamp failed', str(e)[:160], None
     try: src = dmsh_rewrite.gather_offsets(src)   # four gathers instead of a wrapper's loop over their offsets (see gather_offsets)
     except ValueError as e: return 'gather offsets rewrite failed', str(e)[:160], None
     try: src = dmsh_rewrite.hmma_msl(src)   # Ampere HMMA through simdgroup_matrix (see hmma_msl)
@@ -805,7 +808,6 @@ def finish(key, w, j, c1):
         src, pad = vs_pad(key, src)
         if pad: open(msl, 'w').write(src)
     lay = None; discard = False
-    res = json.load(open(os.path.join(w, key + '.res.json')))
     if j['stage'] == 'vs':   # the two depth-convention entry points (see vs_depth); the analysis below uses the source with only main0
         capture = dmsh_geometry.capture(src)
         src, full = dmsh_entry.vs_depth(src)

@@ -3348,6 +3348,22 @@ static void write_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r
     if (!bpb) { ONCE_LOG("[RED] WriteTexels: unknown format %#x", t->d.format); return; }
     unsigned level = v && v->set_levels ? (unsigned)v->base_level : 0, layer0 = v && v->set_layers ? (unsigned)v->min_layer : 0;
     int is3d = t->d.target == NVN_TEXTURE_TARGET_3D, nz = r->depth ? r->depth : 1;
+    // A linear texture (LINEAR or LINEAR_RENDER_TARGET) is one 2D level of rows of its stride, written by rows as ReadTexels reads it (mtl_read_texels) and the upload reads it (gsb_geom).
+    // The block-linear writes below refuse its layout (nvn_deswizzle_geom), and the whole-level path dropped the write: a movie decoded into a LINEAR | VIDEO_DECODE texture (the host's
+    // native-texture output, nvn_host_write_texture) drew black (Tsukihime's title backdrop, 1920x1080 RGBA8, nxnative PR #1983)
+    if (t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)) {
+        size_t srow = tex_linear_row(t), wb = (size_t)r->width * (size_t)bpb, hb = (size_t)r->height, x0 = (size_t)r->xoffset * (size_t)bpb, y0 = (size_t)r->yoffset, row0 = row ? row : wb;
+        if (t->d.target != NVN_TEXTURE_TARGET_2D || level || layer0 || r->zoffset || nz != 1 || bw != 1 || bh != 1 || r->xoffset < 0 || r->yoffset < 0 || r->width < 0 || r->height < 0
+            || x0 + wb > srow || (y0 + hb) * srow > t->L.size) {
+            static int once; if (!once++) LOG("[RED] WriteTexels into a linear texture outside its one level of rows (%ux%u format %#x target %d, stride %zu, region %d,%d,%d %dx%dx%d): not written",
+                                              t->d.width, t->d.height, t->d.format, t->d.target, srow, r->xoffset, r->yoffset, r->zoffset, r->width, r->height, nz);
+            return;
+        }
+        dm_guest_write_prepare(t->mem, t->L.size);
+        for (size_t y = 0; y < hb; y++) memcpy(t->mem + (y0 + y) * srow + x0, src + y * row0, wb);
+        mtl_tex_linear_cpu_written(t);
+        return;
+    }
     {
         size_t wb0 = (size_t)((r->width + bw - 1) / bw) * bpb, row0 = row ? row : wb0, img0 = img ? img : row0 * (size_t)((r->height + bh - 1) / bh);
         dm_guest_write_prepare(t->mem, t->L.size);
@@ -3369,7 +3385,10 @@ static void write_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r
         if (((is3d && z == 0) || !is3d) && !whole) if (nvn_deswizzle(&t->d, level, layer, t->mem, lin, lp)) { ONCE_LOG("[RED] WriteTexels deswizzle failed (format %#x target %d)", t->d.format, t->d.target); free(lin); return; }
         uint8_t *dst = lin + (is3d ? (size_t)(r->zoffset + z) * lp * lr : 0) + (size_t)(r->yoffset / bh) * lp + (size_t)(r->xoffset / bw) * bpb;
         for (size_t y = 0; y < hb; y++) memcpy(dst + y * lp, src + (size_t)z * img + y * row, wb);
-        if (!is3d || z == nz - 1) nvn_swizzle(&t->d, level, layer, lin, lp, t->mem);
+        if ((!is3d || z == nz - 1) && nvn_swizzle(&t->d, level, layer, lin, lp, t->mem)) {
+            static int once; if (!once++) LOG("[RED] WriteTexels swizzle failed (format %#x target %d flags %#x): not written", t->d.format, t->d.target, t->d.flags);
+            free(lin); return;
+        }
     }
     free(lin);
     mtl_tex_cpu_written(t);

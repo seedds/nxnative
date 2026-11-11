@@ -3504,7 +3504,7 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
         for (unsigned y = 0; y < layers; y++) {
             if (need && !need[l * layers + y]) { up_copy_add(prev, MTLSizeMake(w, h, z), mt, y, l); continue; }
             if (linear) {   // one 2D level (linear_fit): rows of the storage's stride, the same pitch GetStorageSize counts
-                size_t srow = t->L.layer_size / (t->d.height ? t->d.height : 1);
+                size_t srow = tex_linear_row(t);
                 if (l || y || z != 1 || srow < pitch || srow * rows > t->L.size) { RED_ONCE(153, "linear texture upload: %ux%u format %#x target %d levels %u is not one 2D level of rows (stride %zu)", t->d.width, t->d.height, t->d.format, t->d.target, t->d.levels, srow); break; }
                 for (size_t r = 0; r < rows; r++) memcpy((uint8_t *)stg.contents + off + r * pitch, src + r * srow, pitch);
             } else if (nvn_deswizzle(&t->d, l, y, src, (uint8_t *)stg.contents + off, pitch)) { RED_ONCE(9, "deswizzle failed format %#x target %d", t->d.format, t->d.target); break; }
@@ -3966,7 +3966,7 @@ static int linear_fit(const tex_t *t, uint32_t *pf, void **mb, uint64_t *mo, siz
     if (t->d.target != NVN_TEXTURE_TARGET_2D || t->d.levels > 1 || t->d.samples > 1) return 0;
     uint8_t swz[4]; int bw, bh, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh);
     if (!nvn_fmt_to_mtl(t->d.format, pf, swz) || !*pf || !bpb || bw != 1 || bh != 1) return 0;
-    *row = t->L.layer_size / (t->d.height ? t->d.height : 1);   // same explicit or aligned stride as GetStorageSize
+    *row = tex_linear_row(t);
     if (!mtl_addr((uint64_t)t->mem, (uint64_t)*row * (t->d.height ? t->d.height : 1), mb, mo)) { RED_ONCE(64, "linear texture storage is not in a memory pool (%ux%u format %#x)", t->d.width, t->d.height, t->d.format); return 0; }
     NSUInteger al = tbuf_align([g_dev minimumLinearTextureAlignmentForPixelFormat:(MTLPixelFormat)*pf]);
     if (*mo % al || *row % al) {
@@ -4323,6 +4323,15 @@ int mtl_tex_cpu_rewritten(const tex_t *t) {
     if (mtl_tex_gpu_owned(t->serial)) return MTL_REWRITE_GPU;
     mtl_tex_cpu_written(t);
     return MTL_REWRITE_UPLOADED;
+}
+// WriteTexels wrote a linear texture's storage (hle_nvn.c write_texels). One a view on its pool's buffer can take (linear_fit) is that view, which reads the storage itself: made
+// CPU-written, it would become an upload of the whole texture at each write. Any other is taken from its storage, as tex_mtl_ takes one at its first use (linear_storage_ok), and one the
+// GPU may render or store into becomes a GPU texture again at the GPU's next write there (cpu_unc_drop)
+void mtl_tex_linear_cpu_written(const tex_t *t) {
+    uint32_t pf; void *mb; uint64_t mo; size_t row;
+    if (linear_fit(t, &pf, &mb, &mo, &row) == 1) return;
+    if (linear_gpu_may_write(t)) cpu_unc_take(t);
+    mtl_tex_cpu_written(t);
 }
 // The GPU writes storage an uncompressed texture was taken from: what the storage holds is no longer the whole truth, so the texture becomes a GPU texture with the content it has, and
 // CPU writes to it are no longer uploaded. Submit thread, as tex_cpu_content is, so a texture it has just taken is seen here if its storage was written meanwhile
@@ -5248,7 +5257,7 @@ static int gsb_geom(const tex_t *t, unsigned level, unsigned slice, unsigned n, 
     nvn_texlayout L; nvn_tex_layout(&t->d, &L);
     if (t->d.flags & NVN_TEXTURE_FLAGS_LINEAR) {   // rows of its stride, one 2D level (as pkg_upload_ reads them)
         if (t->d.target != NVN_TEXTURE_TARGET_2D || level || slice || n != 1 || bw != 1 || bh != 1 || !t->d.height) return -1;
-        size_t srow = L.layer_size / t->d.height;
+        size_t srow = tex_linear_row(t);
         if (g->xb1 > srow || (size_t)by1 * srow > t->L.size || srow > UINT32_MAX) return -1;
         g->lin = (uint32_t)srow; return 0;
     }
@@ -14501,7 +14510,7 @@ void mtl_read_texels(const tex_t *t, unsigned level, unsigned layer0, const NVNc
     int lin_cpu = (linear_gpu_may_write(t) ? tex_cpu_written(t->serial) || (!tex_get(t->serial) && linear_storage_ok(t)) : linear_storage_ok(t))
                   && t->pool && !nvn_sparse_pool(t->pool) && t->d.target == NVN_TEXTURE_TARGET_2D && t->d.levels <= 1 && t->d.samples <= 1 && bw == 1 && bh == 1;
     if (lin_cpu) {
-        size_t srow = t->L.layer_size / (t->d.height ? t->d.height : 1);
+        size_t srow = tex_linear_row(t);
         if (level || layer0 + r->zoffset || nz != 1 || x0 + wb > srow || (y0 + hb) * srow > t->L.size) {
             RED_ONCE(155, "ReadTexels of a linear texture outside its one level of rows (%ux%u format %#x, stride %zu)", t->d.width, t->d.height, t->d.format, srow);
             memset(dst, 0, img * nz); return;

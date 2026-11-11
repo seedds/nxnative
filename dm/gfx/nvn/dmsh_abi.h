@@ -31,6 +31,16 @@
 #define DMSH_C0_SSBO_MS 0x770            // NVN2 mesh stage storage buffer table: its mesh shaders read c0 0x770, 0x780, 0x790 and 0x7b0, and it binds slots from 0
 #define DMSH_MESH_DRAW_SLOT 29           // a task or object function's buffer: the draw's {count, first} workgroups, NVN's DrawMeshTasksIndirect record (dmsh_meshstage.py, nvn_geometry.inc mtk_encode)
 #define DMSH_MESH_GRID 1024              // Metal's limit of threadgroups in a mesh grid: a mesh shader with no task shader is drawn by an object function launching blocks of this many (dmsh_meshstage.py)
+// A mesh function whose stage array is 6000 to 16384 bytes (a 32-thread group; dmsh_meshstage.py to_stage, reflection key mesh_spill) keeps it in a device slice, not in threadgroup memory:
+// buffer DMSH_MESH_SCRATCH_SLOT of the mesh stage, which shares the vertex argument table. A mesh draw binds slot 0 (the arguments) and this one; vertex draws use the others (1-12
+// converted streams, 8-11 transform feedback, 12-13 geometry, 14-29 streams, 30 the zero buffer) and rebind what they read, as nvn_mtl.m enc_r_vbuf tracks every write. The buffer is DMSH_MESH_SCRATCH_HEAD bytes (word 0: the ticket counter, any start value) and then
+// DMSH_MESH_SCRATCH_SLICES slices of DMSH_MESH_SCRATCH_STRIDE bytes, a group's at its ticket modulo the count (2^32 is a multiple of it, so a wrap keeps tickets unique: it must be a power of two and exceed the groups in flight).
+// With the array out of threadgroup memory nothing limits occupancy but threads: an Apple GPU core holds 3072 threads = 96 groups of 32, so the slices must exceed cores x 96 (M4 Air 10 cores: 960; M3 Pro 14/18: 1344/1728;
+// M4/M5 Max 40: 3840; Ultra 80: 7680); 8192 x 16 KiB is 128 MiB of private virtual memory
+#define DMSH_MESH_SCRATCH_SLOT 7
+#define DMSH_MESH_SCRATCH_HEAD 64
+#define DMSH_MESH_SCRATCH_SLICES 8192
+#define DMSH_MESH_SCRATCH_STRIDE 16384
 #define DMSH_C0_DISPATCH 0x200           // compute: the dispatch's workgroup counts x, y, z (32 bits each; Link's Awakening's light culling)
 #define DMSH_C0_DISPATCH_NVN2 4          // NVN2 compute keeps them here, below its per-shader layout at 0x10 (x and y read by Fire Emblem Fortune's Weave's light culling; z by their order)
 #define DMSH_C0_CS_UBO 0x210             // compute: uniform slot r's address and size at 0x210 + 0x10 r, read through global memory (the build's ubo_ptr bindings); it ends where the storage buffer table starts

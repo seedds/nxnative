@@ -22,6 +22,8 @@ A Switch 2 game: update v131072 (Ver. 1.0.2 on its title screen), SDK 20.5.15 bu
 
 ## Shaders
 
+- Resolved in the isolated patched build: the twelve failures left after SURED.MAX.U64 support (seven PIXLD.MYINDEX, five register-addressed SUATOM / SUST) all translate and compile. See [Ampere sample ID and register-addressed image operations](../../../docs/reference/shaders.md#ampere-sample-id-and-register-addressed-image-operations). Installed with the completed SURED build and matching host; a Mac start test reached 900 frames without shader errors, and the player confirmed it works. The test did not establish that all twelve shaders drew. Four dynamic-driver-read warnings were traced to sample ID plus 0x620, the sample position table already filled by the host.
+
 - 133,154 in [`shader_map.tsv`](shader_map.tsv) (45,614 vertex, 60,840 pixel, 21,654 compute, 5,041 mesh, 5 geometry), split in 76 s: [Unreal Engine 5.4 shaders for the Switch 2](../../../docs/reference/shaders.md#unreal-engine-54-shaders-for-the-switch-2).
 - The runs here used a partial Mac library of the keys the playtests asked for, listed in [`shader_seen.tsv`](shader_seen.tsv) (1,519, of which 395 come from [PR 1261](https://github.com/seedds/nxnative/pull/1261)'s runs through part of the second level) ([Building selected Mac shaders](../../../docs/development.md#building-selected-mac-shaders)), which takes about a minute to build. A full build is not estimated yet; Pokopia's similar map came to about 6 hours on an M4 Pro. All of the listed shaders translate. With no stamp the host logs a red line at each start and every c1 takes its own 64 KiB.
 - Resolved: 3 pixel shaders of the playtests lost 5 texture reads, [handles built under a guard](../../../docs/reference/shaders.md#handles-built-under-a-guard-the-reads-guard-cannot-be-tied-to), 130 reads in 78 shaders of the whole map. `6f91c450371a880c` (`MM_Masked_SingleLayerWater`) and `c132ee1a17f37080` (`M_HoneyPoolB`) each lost a gather through a register (0x364) of the depth behind the water, c3 +0x18 | +0x68. Both draw on Chapter 1's page, and with the gather's result 0 the pool's water surface there is darker and has no foam. `cbd80cb96ad38a61`, a global lighting pass that draws at the title, lost 3 reads, with no difference in the title's picture. `03be149072c3a673` (`MI_SingleLayerWater_PansySanA`), which draws in the first habitat, read c3 +0x18 with no sampler word; that change was not compared in a picture. Across the map, 189 reads in 152 shaders had that form.
@@ -59,6 +61,8 @@ From `save_ref`: at 72 s `A`, 8 s later `A`, 14 s later the book is open at Chap
 - An IPA: the 5 GB block suits iOS, but no iOS shader build or iPhone run has been done.
 
 ## Found on this game
+
+- [Ampere sample ID and register-addressed image operations](../../../docs/reference/shaders.md#ampere-sample-id-and-register-addressed-image-operations): the twelve remaining translation failures.
 
 - [Unreal Engine 5.4 shaders for the Switch 2](../../../docs/reference/shaders.md#unreal-engine-54-shaders-for-the-switch-2): `shaders: 0` from the split.
 - [The SDK's address-region node area](../../../docs/reference/memory.md#the-sdks-address-region-node-area): `nninitStartup` exits. The rule for this `sdk` also matches those of Mario Kart World and Donkey Kong Bananza.

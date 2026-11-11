@@ -1479,9 +1479,17 @@ namespace Ryujinx.Graphics.Shader.Instructions
         {
             AmpereOp x = new(context.CurrOp);
 
-            if (x.Bits(78, 81) != 1 || x.Bits(81, 84) != 7 || x.Bits(24, 32) != 0 || x.Bits(32, 48) != 0 || context.TranslatorContext.Definitions.Stage != ShaderStage.Fragment)
+            int mode = x.Bits(78, 81);
+            if ((mode != 1 && mode != 3) || x.Bits(81, 84) != 7 || x.Bits(24, 32) != 0 || x.Bits(32, 48) != 0 || context.TranslatorContext.Definitions.Stage != ShaderStage.Fragment)
             {
                 throw AFail(context, $"0x925 form {x.Bits(78, 81)} outside a covered pixel's read in a pixel shader");
+            }
+
+            // PIXLD.MYINDEX (Mesa NAK PixVal::MyIndex) is gl_SampleID, also implemented for Maxwell's PIXLD.
+            if (mode == 3)
+            {
+                ASet(context, x, context.Load(StorageKind.Input, IoVariable.SampleId), false);
+                return;
             }
 
             Operand helper = context.Load(StorageKind.Input, IoVariable.HelperInvocation);

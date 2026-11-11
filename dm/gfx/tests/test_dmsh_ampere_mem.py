@@ -205,6 +205,26 @@ class PixelCovered(unittest.TestCase):
         self.assertIsNone(msl)
         self.assertIn('0x925 form 2', log)
 
+    def test_myindex_reads_sample_id(self):
+        msl, log = self.run_job((0x040e0200000ec000, 0x0000000000007925))
+        self.assertIsNotNone(msl, log)
+        self.assertIn('[[sample_id]]', msl)
+
+
+class RegisterImageAtomic(Translated):
+    def test_handle_in_register_is_traced(self):
+        # Handle R4 from c3[0], SUATOM.ADD.U32 R3, [R8], R0, R4.
+        handle = (0x000fe20000000f00, 0x00c0000000047a02)
+        atomic = (0x00321e00001ee004, 0x2000000008037394)
+        msl = self.translate(inst(*handle) + inst(*atomic) + inst(*EXIT))
+        self.assertIn('atomic_fetch_add_explicit', msl)
+
+    def test_formatted_store_uses_its_register_handle(self):
+        handle = (0x000fe20000000f00, 0x00c0000000047a02)
+        store = (0x0033de0000100f04, 0x600000000800799c)
+        msl = self.translate(inst(*handle) + inst(*store) + inst(*EXIT))
+        self.assertIn('.write(', msl)
+
 
 @unittest.skipUnless(os.environ.get('DMSH_TEST_XLATE'), 'set DMSH_TEST_XLATE to the offline translator')
 class DepthRegister(unittest.TestCase):

@@ -467,8 +467,10 @@ static void reuse_tables_case(void) {
     pool_table_give(b); pool_table_give(c); pool_table_give(d);
     g_done = done0; g_fence = fence0;
 }
-// A cut with earlier work still running stays a boundary for the game's timestamps, and commits only when the GPU has run out; a report after it takes that boundary's time
+// A cut with earlier work still running stays a boundary for the game's timestamps, and commits only when the GPU has run out; a report after it takes that boundary's time.
+// With the rule off (DM_NVN_CUT_BUSY=0, or the profile's cut_busy off on the Mac) the cut commits with work running; the reports read two times either way
 static void cut_boundary_case(void) {
+    const char *be = getenv("DM_NVN_CUT_BUSY"); int busy = be ? atoi(be) != 0 : CUT_BUSY_DEFAULT;
     tex_t colour; target(&colour, 99810);
     id<MTLBuffer> rep = [g_dev newBufferWithLength:64 options:MTLResourceStorageModeShared]; res_add(rep);
     CHECK(ts_on(), "segment mode has a timestamp heap");
@@ -479,8 +481,10 @@ static void cut_boundary_case(void) {
     mtl_sub_counter((uint64_t)rep.contents, 0x10);
     atomic_fetch_add(&g_seg_inflight, 1);
     g_stat_draw += (uint64_t)cut_draws(); sub_cut();
-    CHECK(g_cb == cb0 && g_seg == 1, "with work running: a boundary, no commit");
-    CHECK(g_sclk && g_sclk->nb == 2, "and its timestamp slot");
+    if (busy) {
+        CHECK(g_cb == cb0 && g_seg == 1, "with work running: a boundary, no commit");
+        CHECK(g_sclk && g_sclk->nb == 2, "and its timestamp slot");
+    } else CHECK(g_cb != cb0 && g_seg == 1, "with work running and the rule off: a commit");
     clear(MTLClearColorMake(0, 1, 0, 1)); rp_end();
     mtl_sub_counter((uint64_t)rep.contents + 16, 0x10);
     atomic_fetch_sub(&g_seg_inflight, 1);

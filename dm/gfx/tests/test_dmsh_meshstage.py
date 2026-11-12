@@ -359,8 +359,9 @@ int main(int argc, char **argv) { @autoreleasepool {
 class PrimitiveIdOnTheGpu(unittest.TestCase):
     def test_fragment_reads_the_mesh_shaders_id(self):
         i = ms.info(control(7, payload=128, max_v=32, max_p=2, prim_at=0x80), sph(0xf0) + sph(0x01))
-        lay, size = ms.memory(i); out = lay[2] // 4; pfirst = ms.attributes(i)[1]
-        src = ms.to_stage(GPU_KERNEL % {'words': size // 4, 'out': out, 'pid': out + pfirst, 'count': lay[3] // 4}, i)
+        # The guest's addresses: one block of 32 vertices of the 4 position components, then the primitive block, whose component 0 is the id (a word per primitive)
+        lay, size = ms.memory(i); out = lay[2] // 4; pid = out + 4 * ms.BLOCK
+        src = ms.to_stage(GPU_KERNEL % {'words': size // 4, 'out': out, 'pid': pid, 'count': lay[3] // 4}, i)
         with tempfile.TemporaryDirectory() as d:
             f = Path(d, 'm.metal'); f.write_text(src); lib = Path(d, 'm.metallib'); host = Path(d, 'h.m'); host.write_text(GPU_HOST); exe = Path(d, 'h')
             r = subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', str(f), '-o', str(lib)], capture_output=True, text=True); self.assertEqual(r.returncode, 0, r.stderr[-1500:])

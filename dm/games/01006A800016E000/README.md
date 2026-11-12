@@ -62,6 +62,7 @@ No `pad_layout` key (the iPhone pad starts in the 3D layout).
 General host changes first needed here; each applies to every game:
 
 - **Joy-Cons as dual or single npads:** [Joy-Cons as dual or single npads](../../../docs/reference/services.md#joy-cons-as-dual-or-single-npads): a Joy-Con 2 pair split by holding SL + SR played a 1v1 with a Joy-Con each, rail buttons as shoulders, rumble on each.
+- **Resolved: the How to Play page white, with no way past it, in an app whose pages came from an older build**: [Extractions kept from an older nx_extract or another copy of the game](../../../docs/reference/packing.md#extractions-kept-from-an-older-nx_extract-or-another-copy-of-the-game). 13.0.5 on the Mac, one session to the stage selection after the pages were read again.
 - **Elapsed time between two snapshots read as unknown** (the Spirit Board, reported by MacNativeGames): [Hooks whose return type did not match the SDK](../../../docs/reference/services.md#hooks-whose-return-type-did-not-match-the-sdk).
 - **The complete owned DLC list:** [Owned add-on content lists beyond 64 entries](../../../docs/reference/services.md#owned-add-on-content-lists-beyond-64-entries).
 - **Movie crackle:** [Vorbis output lengths at a window change](../../../docs/reference/movies.md#vorbis-output-lengths-at-a-window-change). Of about 7,300 packets in the first movie, some 420 were affected; `DM_AUDIO_DUMP` had 124 and 287 silent 512-sample blocks in the two opening movies before the fix and none after.
@@ -76,6 +77,7 @@ General host changes first needed here; each applies to every game:
 - **Function-matched patches of several functions, and the pack-time report of what an unregistered build kept** (`nso_match.py` `match_patch`, `<module>.match.tsv`, `report_fix_coverage`): [Function-matched cuts for unregistered builds](../../../docs/reference/rewriter.md#function-matched-cuts-for-unregistered-builds).
 - **The address region table and the NSP script's region check** (`patch_nso.py` "Address regions", `hle_svc.c`, `DM_REGIONS`): its engine region, 4 GB through `nn::os::AllocateAddressRegion`, returning to `main+0x37c9a64` (its constructor's call), opened up to 14 MB below its end: [Measuring address regions and commits](../../../docs/reference/memory.md#measuring-address-regions-and-commits).
 - **Update 13.0.5's offline HTML pages, a patch of the base game's** (`nx_extract --html` reads a patch section over the base): [An update's offline HTML pages reported as a damaged NSP](../../../docs/reference/packing.md#an-updates-offline-html-pages-reported-as-a-damaged-nsp).
+- **Restarting after a language change** (`h_oe_Relaunch`, `oe_start`): [`oe::RequestToRelaunchApplication`: the application starts again](../../../docs/reference/services.md#oerequesttorelaunchapplication-the-application-starts-again).
 
 ## Open
 

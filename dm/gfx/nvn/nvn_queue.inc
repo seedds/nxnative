@@ -12,7 +12,7 @@ typedef struct nq_node {
     struct nq_node *next;
     uint8_t *bytes; size_t length, capacity;
     unsigned kind, mode, closed, waiting; volatile uint32_t *event; uint32_t value;
-    uint64_t wait_fence, event_predecessor; unsigned wait_kind; const sync_t *sync_source; nq_receipt *receipt;
+    uint64_t wait_fence, event_predecessor, wait_since; unsigned wait_kind, wait_said; const sync_t *sync_source; nq_receipt *receipt;
     nq_signal *signals; unsigned signal_count;   // NQ_COMMANDS: every event signal it records, in order (nq_event_issued at its commit)
     tex_t texture; double period; int crop[4];
 } nq_node;
@@ -130,10 +130,20 @@ static void *nq_worker(void *unused) {
                     // for the writer's completion left the GPU idle while the host encoded the next submission, 2 ms of its 14.5 ms frame, which its dynamic resolution read as work
                     nq_event_write *queued=predecessor>mtl_completed_fence() ? nq_event_write_of(n->event) : NULL;
                     if(queued && queued->exact && nq_predicate(queued->value,n->mode,n->value)) break;
-                    if(predecessor>mtl_completed_fence() || !nq_predicate(atomic_load_explicit((_Atomic uint32_t *)n->event,memory_order_acquire),n->mode,n->value)) { n->waiting=1; mapped_event_wait=1; continue; }
+                    if(predecessor>mtl_completed_fence() || !nq_predicate(atomic_load_explicit((_Atomic uint32_t *)n->event,memory_order_acquire),n->mode,n->value)) {
+                        // A queue held more than 5 s by one event wait: what it waits for, since the game's own GPU watchdog acts on the fences behind it (PRAGMATA aborts after 15 s)
+                        uint64_t t=now_ns(); if(!n->wait_since) n->wait_since=t;
+                        else if(t-n->wait_since>5000000000ull && !n->wait_said) { static _Atomic int said; n->wait_said=1; if(atomic_fetch_add(&said,1)<8)
+                            LOG("[RED] queue %llu: an event wait has held it %.1f s: word %p is %#x, waiting for %s %#x; a GPU write of it is %s",(unsigned long long)q->serial,(t-n->wait_since)/1e9,(void *)n->event,
+                                atomic_load_explicit((_Atomic uint32_t *)n->event,memory_order_acquire),n->mode==0?"equal to":"at least",n->value,predecessor>mtl_completed_fence()?"queued, not completed":"not queued"); }
+                        n->waiting=1; mapped_event_wait=1; continue; }
                 }
                 if(n->kind==NQ_SYNC) {
-                    if(n->receipt && !n->receipt->published) continue;
+                    if(n->receipt && !n->receipt->published) {
+                        uint64_t t=now_ns(); if(!n->wait_since) n->wait_since=t;
+                        else if(t-n->wait_since>5000000000ull && !n->wait_said) { static _Atomic int said; n->wait_said=1; if(atomic_fetch_add(&said,1)<8)
+                            LOG("[RED] queue %llu: a sync wait has held it %.1f s: the fence it waits for (receipt %p) is not published yet",(unsigned long long)q->serial,(t-n->wait_since)/1e9,(void *)n->receipt); }
+                        continue; }
                     // Targets are immutable snapshots. One Metal queue orders an encoded producer before this continuation. A sync not yet fenced when the wait was submitted
                     // (wait_kind 0) is a snapshot of nothing to wait for, and the wait passes. Sparking! ZERO, on one NVN queue, waits on a sync before that queue's own first
                     // fence of it at its first load, which runs on the console; parked here, the fence behind the wait never published and its SyncWait stalled the game (#1808)

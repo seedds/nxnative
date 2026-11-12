@@ -240,6 +240,36 @@ class DirectedRounding(Alu):
         self.assertNotIn('& 65535', self.kept(self.F2F_RN, srcs=(19,)))
 
 
+class Frnd(Alu):
+    """FRND rounds a float to an integer value; FRND.F16 does so on a half (PRAGMATA: 65 shaders did not translate). The half is rounded in 32 bits and packed, which is
+    exact. PRAGMATA's encodings (000ff000001008000000000400057307 and, with .FLOOR, 000e2600001048000000000c00257307) with the registers of this file"""
+    F16 = (0x000fe20000100800, 0x0000001300067307)        # FRND.F16 R6, R19
+    F16_FLOOR = (0x000fe20000104800, 0x0000001300067307)  # FRND.F16.FLOOR R6, R19
+    F32 = (0x000fe20000201000, 0x0000001300067307)        # FRND R6, R19
+
+    def test_a_half_is_unpacked_rounded_and_packed(self):
+        msl = self.kept(self.F16, srcs=(19,))
+        self.assertRegex(msl, r'float2\(as_type<half2>\(as_type<uint>\(_\d+\)\)\)\.x')
+        self.assertRegex(msl, r'half2\(float2\(_\d+, 0\.0\)\)')
+        self.assertIn('rint(', msl)
+
+    def test_a_half_floor(self):
+        self.assertIn('floor(', self.kept(self.F16_FLOOR, srcs=(19,)))
+
+    def test_a_float_stays_a_float(self):
+        msl = self.kept(self.F32, srcs=(19,))
+        self.assertIn('rint(', msl); self.assertNotIn('half2', msl)
+
+
+class I2fImmediate(Alu):
+    """I2F of an immediate (form 4): bits 32..63 are the value, so 60..62 select no byte. PRAGMATA's I2F.F16.S32 of -2 (000e620000200c00fffffffe000f7906, 3 compute
+    shaders) was refused as a byte select of a 32-bit source"""
+    I2F_F16_M2 = (0x000fe20000200c00, 0xfffffffe00067906)   # I2F.F16.S32 R6, -2
+
+    def test_translates(self):
+        self.kept(self.I2F_F16_M2)
+
+
 class CompareFtz(Alu):
     """FSETP / FSET .FTZ (bit 80): a denormal operand compares as zero, as on NVIDIA; Apple's GPUs keep denormals. Mario Kart World's deferred lighting 635061c90d75a8d1
     normalises its four depth-weighted samples by 1 / sum only where FSETP.NEU.FTZ says sum != 0: a denormal sum passed, its reciprocal overflowed, and the NaN came out
@@ -284,6 +314,37 @@ class Vote(Alu):
 
     def test_vote_writes_the_lane_predicate(self):
         self.assertIn('simd_any', self.kept(self.FSETP, self.VOTE, self.MOV_P0, srcs=(6, 19, 20)))
+
+
+class SingleInstructionSemantics(Alu):
+    """Constant inputs the translator folds, the result stored (R6). From uncraftablexd's offline per-instruction tester (PR #1800: single instructions with nvdisasm-checked
+    encodings run on the GPU against an interpreter on Mesa NAK's folds).
+    - SETP's two results: Pd1 reads the accumulator P as it was, also when Pd0 is P (Pd1 was computed after Pd0 had been written).
+    - IMAD has no negation of B: bit 63 (B a register, constant or uniform register) and bit 75 (B the 64-slot register of forms 2, 3, 7) are not printed
+      by nvdisasm and are not modifiers; B was negated."""
+    SEL_P0 = (0x000fc200040000ff, 0x00000001ff067807)   # SEL R6, RZ, 0x1, !P0: R6 = P0 ? 1 : 0
+    P2_TRUE = (0x000fc20003f42070, 0x000000ffff00720c)  # ISETP.EQ.U32.AND P2, PT, RZ, RZ, PT: P2 = true
+    MOV_R5_3 = (0x000fc20000000fff, 0x00000003ff057802)  # MOV R5, 0x3
+
+    def stored(self, *code):
+        m = re.findall(r'\] = (\w+);', self.kept(*code))
+        return m[-1] if m else None
+
+    def test_isetp_second_result_reads_the_old_accumulator(self):
+        isetp = (0x000fc2000104507f, 0x000000ffffff720c)   # ISETP.NE.U32.AND P2, P0, RZ, RZ, P2: P2 = false AND P2, P0 = true AND the old P2 (true)
+        self.assertEqual(self.stored(self.P2_TRUE, isetp, self.SEL_P0), '1u')
+
+    def test_fsetp_second_result_reads_the_old_accumulator(self):
+        fsetp = (0x000fc200010450ff, 0x000000ffffff720b)   # FSETP.NE.AND P2, P0, RZ, RZ, P2
+        self.assertEqual(self.stored(self.P2_TRUE, fsetp, self.SEL_P0), '1u')
+
+    def test_imad_bit_63_is_no_negation(self):
+        imad = (0x000fc200078e02ff, 0x8000000505067224)    # IMAD R6, R5, R5, RZ with bit 63 set: 9, not -9
+        self.assertEqual(self.stored(self.MOV_R5_3, imad), '9u')
+
+    def test_imad_bit_75_of_the_c_slot_forms_is_no_negation(self):
+        imad = (0x000fc200078e0a05, 0x0000000105067424)    # IMAD R6, R5, R5, 0x1 (form 2) with bit 75 set: 10, not -8
+        self.assertEqual(self.stored(self.MOV_R5_3, imad), '10u')
 
 
 if __name__ == '__main__':

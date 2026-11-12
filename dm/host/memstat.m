@@ -153,3 +153,52 @@ __attribute__((constructor)) static void thrcpu_start(void) {
 #endif
     pthread_t th; pthread_create(&th, NULL, thrcpu_thread, spec); pthread_detach(th);
 }
+
+#if TARGET_OS_OSX
+#include <IOKit/IOKitLib.h>
+// GPU time by process over the window since the last line (hle_nvn.c's power summary calls it): the accelerator's user clients each list their creator and, per command queue,
+// the GPU time it has run (AppUsage accumulatedGPUTime, ns). A game whose frame leaves the GPU little time to spare misses its frame rate when other apps draw, and nothing in
+// the game's own timing says so: its command buffers' GPU spans include the time the GPU ran someone else's work (docs/reference/frame-rate.md "Other apps' GPU work")
+enum { GU_N = 96 };
+typedef struct { int pid; char name[24]; uint64_t ns; } gpu_user;
+static int gpu_users(gpu_user *u) {
+    io_iterator_t accs = 0; int n = 0;
+    if (IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("IOAccelerator"), &accs) != KERN_SUCCESS) return 0;
+    for (io_service_t acc; (acc = IOIteratorNext(accs)); IOObjectRelease(acc)) {
+        io_iterator_t kids = 0; if (IORegistryEntryGetChildIterator(acc, kIOServicePlane, &kids) != KERN_SUCCESS) continue;
+        for (io_registry_entry_t c; (c = IOIteratorNext(kids)); IOObjectRelease(c)) {
+            NSString *who = CFBridgingRelease(IORegistryEntryCreateCFProperty(c, CFSTR("IOUserClientCreator"), NULL, 0));
+            NSArray *use = CFBridgingRelease(IORegistryEntryCreateCFProperty(c, CFSTR("AppUsage"), NULL, 0));
+            int pid = 0; char name[24] = "";
+            if (![who isKindOfClass:NSString.class] || ![use isKindOfClass:NSArray.class] || sscanf(who.UTF8String, "pid %d, %23[^\n]", &pid, name) < 1) continue;
+            uint64_t ns = 0; for (NSDictionary *q in use) if ([q isKindOfClass:NSDictionary.class]) ns += [q[@"accumulatedGPUTime"] unsignedLongLongValue];
+            int k = 0; while (k < n && u[k].pid != pid) k++;
+            if (k < n) u[k].ns += ns;
+            else if (n < GU_N && ns) { u[n].pid = pid; snprintf(u[n].name, sizeof u[n].name, "%s", name); u[n].ns = ns; n++; }
+        }
+        IOObjectRelease(kids);
+    }
+    IOObjectRelease(accs); return n;
+}
+void dm_gpu_share_line(uint64_t frame, double frames) {
+    static dispatch_queue_t q; if (!q) q = dispatch_queue_create("dm.gpu-share", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0));
+    dispatch_async(q, ^{ @autoreleasepool {   // off the frame's thread: the registry walk takes a few milliseconds
+        static gpu_user prev[GU_N]; static int pn; static uint64_t pt;
+        gpu_user u[GU_N]; int n = gpu_users(u), me = getpid(); uint64_t t = now_ns();
+        if (pt && t > pt && n) {
+            double s = (t - pt) / 1e9, own = 0, others = 0; struct { double ms; const char *name; } top[4] = {{0}};
+            for (int i = 0; i < n; i++) {
+                int k = 0; while (k < pn && prev[k].pid != u[i].pid) k++;
+                uint64_t was = k < pn ? prev[k].ns : 0; double ms = u[i].ns > was ? (u[i].ns - was) / 1e6 / s : 0;   // a closed command queue takes its time out of the sum
+                if (u[i].pid == me) { own = ms; continue; }
+                others += ms;
+                for (int j = 0; j < 4; j++) if (ms > top[j].ms) { memmove(&top[j + 1], &top[j], sizeof top[0] * (size_t)(3 - j)); top[j].ms = ms; top[j].name = u[i].name; break; }
+            }
+            char list[160] = ""; size_t o = 0;
+            for (int j = 0; j < 4 && top[j].ms >= 1 && o < sizeof list; j++) o += (size_t)snprintf(list + o, sizeof list - o, "%s%s %.0f", j ? ", " : ": ", top[j].name, top[j].ms);
+            LOG("[nvn] GPU by process up to frame %llu: the game %.0f ms/s (%.2f ms per frame), other processes %.0f ms/s%s", (unsigned long long)frame, own, frames > 0 ? own * s / frames : 0, others, list);
+        }
+        memcpy(prev, u, sizeof u); pn = n; pt = t;
+    } });
+}
+#endif

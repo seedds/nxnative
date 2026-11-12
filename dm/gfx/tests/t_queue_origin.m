@@ -117,6 +117,26 @@ int main(void) { @autoreleasepool {
         if (!good) fprintf(stderr,"queue origin=%d device origin=%d front=%d cull=%d triangle CCW=%d\n",queue,current,winding,cull,ccw);
         CHECK(good,"queue-latched culling and front_facing match native GPU state");
     }
+    // A draw pass right after another NVN queue's draw pass begins with the full barrier, whatever DM_NVN_BARRIER is; the same queue's next pass may take the relaxed one
+    // (check_t_queue_origin also runs with DM_NVN_BARRIER=game, where the second count is checked)
+    { uint64_t skip[4], full[4]; const int order[3] = {0,1,1}; float positions[3][4] = {{-1,-1,.5,1},{3,-1,.5,1},{-1,3,.5,1}}; memcpy(vertices,positions,sizeof positions);
+      mtl_barrier_stats(&skip[0],&full[0]);
+      for (int k=0;k<3;k++) {
+        state_reset(); memset(&R,0,sizeof R); used=0;
+        p_set_rt rt = {.n=1}; rt.color[0]=&target; emit(OP_SET_RT,&rt,sizeof rt);
+        p_clear_color clear = {.rgba={0,0,1,1},.mask=15}; emit(OP_CLEAR_COLOR,&clear,sizeof clear);
+        p_bind_program bp = {.prog=&pg,.stages=3}; emit(OP_BIND_PROGRAM,&bp,sizeof bp);
+        struct { int32_t first,n; va_st attr; } attr = {0,1,{.fmt=NVN_FORMAT_RGBA32F}}; emit(OP_BIND_VATTR,&attr,sizeof attr);
+        struct { int32_t first,n; vs_st stream; } stream = {0,1,{.stride=16}}; emit(OP_BIND_VSTREAM,&stream,sizeof stream);
+        p_bind_vbuf1 vb = {.index=0,.size=sizeof positions,.addr=(uint64_t)vertices}; emit(OP_BIND_VBUF1,&vb,sizeof vb);
+        p_draw draw = {.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.count=3,.instances=1}; emit(OP_DRAW,&draw,sizeof draw);
+        static uint64_t list; list = ctl_e(CTL_CHUNK,commands,used) | CTL_LAST;
+        NVNcommandHandle handle = (NVNcommandHandle)&list; P(nvnQueueSubmitCommands)(&queues[order[k]],1,&handle); P(nvnQueueFinish)(&queues[order[k]]);
+        mtl_barrier_stats(&skip[k+1],&full[k+1]);
+      }
+      CHECK(full[2] == full[1] + 1 && skip[2] == skip[1],"a draw pass after another queue's draw pass takes the full barrier");
+      const char *bar = getenv("DM_NVN_BARRIER");
+      if (bar && !strcmp(bar,"game")) CHECK(skip[3] == skip[2] + 1,"the same queue's next draw pass takes the relaxed barrier (DM_NVN_BARRIER=game: the case above is sensitive)"); }
     mtl_pool_del(vertices); free(vertices);
     printf("queue origin: %d checks, %d failed\n",checks,fails); return fails != 0;
 } }

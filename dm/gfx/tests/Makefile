@@ -270,6 +270,7 @@ t_queue_origin: t_queue_origin.m $(MTL_T_DEP)
 check_t_queue_origin: t_queue_origin
 	MTL_DEBUG_LAYER=1 ./t_queue_origin
 	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_queue_origin
+	DM_NVN_BARRIER=game MTL_DEBUG_LAYER=1 ./t_queue_origin
 t_rt_lifetime: t_rt_lifetime.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_rt_lifetime.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
 .PHONY: check_t_rt_lifetime

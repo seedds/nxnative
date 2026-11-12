@@ -7396,6 +7396,10 @@ static void queue_program_preserve(void) {
 }
 void mtl_queue_activate(uint64_t serial) {   // caller holds the submission lock
     if (g_active_queue && g_active_queue->serial == serial) return;
+    // Another NVN queue's work begins here: the relaxed end barrier of the last draw pass (DM_NVN_BARRIER=game) orders this queue's own next pass only as far as that queue's
+    // nvnCommandBufferBarrier bits ask, and this queue's work after an event or sync wait must see all of the other queue's writes, vertex and indirect fetch included. Its first pass
+    // takes the full barrier (DM_NVN_QDEFER makes such render → render hand-overs between queues more common)
+    g_last_end_relaxed = 0;
     if (g_active_queue) { g_active_queue->s = S; g_active_queue->r = R; g_active_queue->rc_skip=g_rc_skip; }
     queue_state *q = g_queue_states;
     while (q && q->serial != serial) q = q->next;

@@ -9,7 +9,7 @@ Base game v0 (1.0.0, SDK 16.2.0), update 1.0.1 (v65536, SDK 16.2.0; short Mac cr
 | 5 GB guest layout: `mem_reserve 0x140000000`, `mem_alias 0xB8000000`, `mem_stack 0x10000000`, `app_pool 0xCD500000` | [`game.tsv`](game.tsv) | 256 MB in front + 2.875 GB alias region + 256 MB stack region + 1.625 GB heap region: the game maps 1.75 GB of virtual address memory on demand into the alias region and asks for a 1.47 GB heap |
 | `shader_versions v0 v327680` | `game.tsv` | the shader tables are the union of both versions, so packing either needs both NSPs |
 
-No game-specific executable cuts. `dm/tools/sdk_patches.py`'s SDK-wide rules cut its `sdk` builds (`3053b229…` v0, Sea of Stars' build; `e4bd58ca…` 1.2.1): the node area and 2 MB alignment of large regions. No `render_cond`: a minute's boot counted 65,536 or more clears under render conditions, and the game needs none. No `pad_layout`: the virtual gamepad starts in the 2D layout.
+No game-specific executable cuts. `dm/tools/sdk_patches.py`'s SDK-wide rules cut its `sdk` builds (`3053b229…` v0, Sea of Stars' build; `e4bd58ca…` 1.2.1): the node area and 2 MB alignment of large regions. Render conditions: a minute's boot counted 65,536 or more clears under them; drawn unconditionally, nothing looked wrong. The host now evaluates them for every game; not checked on this game since. No `pad_layout`: the virtual gamepad starts in the 2D layout.
 
 ## Versions
 
@@ -100,6 +100,7 @@ Game-specific findings; the general host changes they led to are listed under [F
 
 ## Found on this game
 
+- **Joy-Cons as dual or single npads:** [Joy-Cons as dual or single npads](../../../docs/reference/services.md#joy-cons-as-dual-or-single-npads): choosing two players splits a Joy-Con 2 pair through the controller applet, one sideways Joy-Con each.
 - [Offline pipeline archive missing for the device GPU](../../../docs/reference/shaders.md#offline-pipeline-archive-missing-for-the-device-gpu): archive targets can follow profile metadata while iOS Metal 4 remains opt-in; [the probe above](#offline-pipeline-archive-probe) records the build evidence and open device checks.
 General host changes first needed here; each applies to every game:
 

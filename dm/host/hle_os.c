@@ -54,6 +54,7 @@ static int detclock_cfg(void) {
 }
 static uint64_t wall_guest_ns(void) { return atomic_load(&g_gfz) ? atomic_load(&g_gfrozen) : now_ns() - atomic_load(&g_glag); }
 uint64_t guest_ns(void) { return atomic_load(&g_gdet_on) ? atomic_load(&g_gdet) : wall_guest_ns(); }
+int guest_clock_pinned(void) { return atomic_load(&g_gdet_on) || atomic_load(&g_gfz); }
 uint64_t guest_ns_at_host_time(uint64_t host_ns) {
     if (atomic_load(&g_gdet_on)) return atomic_load(&g_gdet);
     if (atomic_load(&g_gfz)) return atomic_load(&g_gfrozen);
@@ -87,7 +88,10 @@ static pthread_mutex_t g_gfz_mu = PTHREAD_MUTEX_INITIALIZER; static unsigned g_g
 // frames as its period, got 0, and the next frame's loop that steps by it (main+0x9abd0) never ended. Guest reads of the system counter (the cntpct gate, svc GetSystemTick) wait while
 // the app is in the background (reason 1); host work (dm_host_work: inside a submit or present, which the graphics suspend waits for) reads the frozen clock, as do the other reasons
 static pthread_cond_t g_gfz_cv = PTHREAD_COND_INITIALIZER; static _Atomic int g_gfz_bg;
+// Each read also counts on the reading thread: a run of yields whose passes read the clock is a wait for a time, which the yield back-off sleeps from its start (hle_thread.c thr_yield)
+__thread uint64_t dm_clock_reads;
 void guest_clock_read_wait(void) {
+    dm_clock_reads++;
     if (!atomic_load(&g_gfz_bg) || atomic_load(&dm_host_work)) return;
     pthread_mutex_lock(&g_gfz_mu);
     while (g_gfz_reasons & 2u) pthread_cond_wait(&g_gfz_cv, &g_gfz_mu);

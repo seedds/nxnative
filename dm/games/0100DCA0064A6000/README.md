@@ -19,7 +19,8 @@ No `patches.py`.
 
 - **Current:** 60 fps (30 on the Switch). At the end of each frame the main thread calls its frame callbacks (`main+0xb7c308`) with the milliseconds since the frame began; the frame limiter among them (`main+0x7a3e70`) runs jobs or sleeps until 33.333 ms have passed, a float in read-only data (`main+0x13c94dc`, read only there), and the game steps by the time that really passed. The host writes the profile's `fps_target` there as a frame time (`hle_fpslock.c`): 16.167 ms at 60, half a millisecond under the vsync so the presents set the pace. At exactly 16.667 the work after the limiter made it 59.6 fps with a frame shown twice every 2.5 s.
 - On the Mac the lobby holds 60.0 fps (display interval p99 16.67 ms); the same 2 s walk and 1.5 s turn from the same save end at the same spot at 30 and 60 fps, and the title's animation matches at time scale 1.00 (`DM_NVN_REGLUM`). `DM_FPS_TARGET=30` keeps the game's 33.333 ms.
-- The limiter also has a phase lock, a nudge of at most 0.05 ms a frame from the layer's frame history, which stays off: the host's `nn::vi::ListFrameHistory` returns no entries.
+- The limiter also has a phase lock, a nudge of at most 0.05 ms a frame from the layer's frame history (`main+0xb7c050` reads 8 entries and finds the frame it recorded after its present). It had no input while the host's `nn::vi::ListFrameHistory` returned no entries; it has entries since 51cc8bce, and its effect is not measured.
+- **Resolved: about 25 fps since 51cc8bce** (issue #1705; an M2 Pro in a window, 54–58 fps on an M6). Before each `nvnQueuePresentTexture` the render thread (`main+0xb7a4b8`, after an `nvnQueueFinish`) reads the newest history entry and `nvnWindowGetPresentInterval`. While that frame is not shown it sleeps 16.67 ms per vsync of the interval; once shown, it waits until (interval − 1) vsyncs after its present time. That is the game's own pacing for 30 fps at interval 2, which `present_interval display` did not reach: the host still answered 2. It now answers the interval the window presents at, 1 ([A game's own present pacing reads the interval the window presents at](../../../docs/reference/frame-rate.md#a-games-own-present-pacing-reads-the-interval-the-window-presents-at)). Title screen in a window on an M6, 75 s each: 54.3–58.2 → 60.0 fps, frame time p95 24–25 → 18 ms, max 107 → 22.7 ms, no frame of 33 ms (no sleep for a frame not yet shown) and no empty display-link ticks after warm-up.
 
 ## Modules and memory
 
@@ -73,9 +74,10 @@ General host changes first needed here; each applies to every game:
 - **Live dynamic-resolution images backed by shared physical storage** (`image_texture`): [Live resolution variants share physical image storage](../../../docs/reference/rendering.md#live-resolution-variants-share-physical-image-storage).
 - **The engine's `.dict` / `.data` / `.patch` archives** (`nlg_shaders`, `nlg_patch_section`): [01, Compressed RomFS content](../../../docs/agents/01-extract.md#compressed-romfs-content).
 - **The frame limiter's milliseconds written in game memory** (`hle_fpslock.c`, `fps_target` with `present_interval display`): [the profile keys](../README.md#keys).
+- **The window's present interval read back in display mode** (`window_interval`, issue #1705): [A game's own present pacing reads the interval the window presents at](../../../docs/reference/frame-rate.md#a-games-own-present-pacing-reads-the-interval-the-window-presents-at).
 
 ## Open
 
 - Tessellation (15 hull, 18 domain shaders) and the 10 geometry shaders are not built ([Rendering](#rendering)).
 - [docs/geometry-metal-research.md](../../../docs/geometry-metal-research.md) describes geometry shaders now built as compute kernels, checked on AI: THE SOMNIUM FILES only ("Other games and iOS device execution are unvalidated"); whether this game's 10 build with it is not recorded.
-- The limiter's phase lock stays off while `nn::vi::ListFrameHistory` returns no entries.
+- The limiter's phase lock has frame-history entries since 51cc8bce; its effect is not measured ([Frame rate](#frame-rate)).

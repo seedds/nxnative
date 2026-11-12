@@ -25,7 +25,8 @@ import concurrent.futures as cf, hashlib, json, os, re, struct, subprocess, sys,
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../tools'))
 from romfs import os, open
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from dmsh_chain import SPIRV_CROSS   # the in-repo spirv-cross build the NVN chain uses too (spirv_cross_bin)
+from dmsh_chain import SPIRV_CROSS, MAC_MIN_FLAG   # the in-repo spirv-cross build the NVN chain uses too (spirv_cross_bin)
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../ios/tools')); from ios_metal import IOS_FLAGS   # the iPhone's deployment target and math mode
 
 MAGIC = 0x07230203
 OP_DECORATE, OP_MEMBER_DECORATE, OP_TYPE_ARRAY, OP_TYPE_RTARRAY, OP_TYPE_STRUCT = 71, 72, 28, 29, 30
@@ -117,7 +118,9 @@ def one(path, tmp, root):
     if nxt['buffer'] > 16 or nxt['texture'] > 31 or nxt['sampler'] > 16: red(f'{path}: resource slots exceeded {nxt}')
     spv = os.path.join(tmp, key + '.spv'); msl = os.path.join(tmp, key + '.metal')
     open(spv, 'wb').write(struct.pack(f'<{len(words)}I', *words))
-    cmd = [SPIRV_CROSS, spv, '--msl', '--msl-version', '20300', '--msl-decoration-binding', '--rename-entry-point', 'main', f'vk_{key}', stage, '--output', msl]
+    # --msl-texture-1d-as-2d: a 1D image is a one-row 2D texture in the host (hle_vk.m vkCreateImage), since Metal's 1D texture cannot be drawn into, mipmapped or depth; spirv-cross samples it at
+    # the row's centre (float2(x, 0.5)) and reads it at (x, 0)
+    cmd = [SPIRV_CROSS, spv, '--msl', '--msl-version', '20300', '--msl-decoration-binding', '--msl-texture-1d-as-2d', '--rename-entry-point', 'main', f'vk_{key}', stage, '--output', msl]
     if stage == 'vert': cmd.append('--flip-vert-y')
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode: red(f'{path}: spirv-cross failed: {r.stderr.strip()[:300]}')
@@ -147,7 +150,8 @@ def metallib(msls, out, sdk, extra):
     airs = []
     def comp(m):
         a = m[:-6] + f'.{sdk}.air'
-        r = subprocess.run(['xcrun', '-sdk', sdk, 'metal', '-c', '-fpreserve-invariance', *extra, m, '-o', a], capture_output=True, text=True)
+        # -fwrapv: signed integer overflow wraps, as SPIR-V's integer arithmetic does; in MSL it is undefined and the compiler folds around it (dmsh_chain.py MAC_METAL)
+        r = subprocess.run(['xcrun', '-sdk', sdk, 'metal', '-c', '-fpreserve-invariance', '-fwrapv', *extra, m, '-o', a], capture_output=True, text=True)
         if r.returncode: red(f'{m}: metal compile failed: {r.stderr.strip()[:400]}')
         return a
     with cf.ThreadPoolExecutor(os.cpu_count()) as ex: airs = list(ex.map(comp, msls))
@@ -178,10 +182,10 @@ def main():
         tsv = ['# Vulkan shaders (dm/gfx/tools/vk_shaders.py): key = sha256(SPIR-V)[:16], Metal function vk_<key>; resources kind:set.binding=slot (u uniform buffer, b storage buffer, t image, s sampler, c combined, p push constants)',
                '# spirv-cross ' + ' '.join((lambda r: r.stdout + r.stderr)(subprocess.run([SPIRV_CROSS, '--revision'], capture_output=True, text=True)).split())]
         tsv += [f'{k}\t{v[0]}\t{" ".join(v[1])}\t{v[3]}' for k, v in sorted(seen.items())]
-        dirs = [(os.path.join(out, 'vk'), 'macosx', [])]
+        dirs = [(os.path.join(out, 'vk'), 'macosx', [MAC_MIN_FLAG])]   # the Mac host's minimum macOS, as the NVN chain's libraries (dmsh_chain.py MAC_MIN)
         # The iPhone library is compiled with -fmetal-math-mode=relaxed, as the NVN chain's (dm/ios/tools/ios_metal.py): the default fast mode lets the GPU compiler assume there is
         # no NaN / Inf, which would let it drop the NaN handling of the precise:: functions above
-        if ios: dirs.append((os.path.join(ios, 'vk'), 'iphoneos', ['-mios-version-min=18.0', '-fmetal-math-mode=relaxed']))
+        if ios: dirs.append((os.path.join(ios, 'vk'), 'iphoneos', list(IOS_FLAGS)))
         for d, sdk, extra in dirs:
             lib = metallib(msls, d, sdk, extra)
             open(os.path.join(d, 'vk_shaders.tsv'), 'w').write('\n'.join(tsv) + '\n')

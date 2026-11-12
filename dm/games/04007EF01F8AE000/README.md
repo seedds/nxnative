@@ -14,7 +14,6 @@ A Switch 2 game: v131072, SDK 22.2.0 built for the Switch 2 (`Ounce`), NVN2 API 
 | `fps_max 120` | `game.tsv` | **Frame rate** offers 120 on the Mac: speed measured below; see [Frame rate](#frame-rate) |
 | `depth_mode zero` | `game.tsv` | the game selects near-zero NVN depth; offline pipeline bases must use the matching vertex entry. Without it the app's bundled archive (661.6 MB on an M1 Pro) was refused at every start and the Mac built 872 MB of bases of its own in the background |
 
-No `render_cond`: not tried, and nothing has called for it so far.
 
 ## Files
 
@@ -33,6 +32,7 @@ All 16,888 translate (current). One shader has 10 texture handles the translator
 - Ambient occlusion is interleaved: depth into a 4-layer 512x288 array, four triangles picking the layer by primitive ID, then back together at 1024x576 ([`[[primitive_id]]` in a specialized Metal 4 pipeline](../../../docs/reference/rendering.md#primitive_id-in-a-specialized-metal-4-pipeline)).
 - The enemy's checkered look and the pale squares over the ground are in the published footage too: both are the game's.
 - Frame time: 33 ms with the window on screen at the game's own 30 fps (16.7 ms at `fps_target 60`, [Frame rate](#frame-rate)), and GPU about 12 ms. A covered window reads 80-180 ms, the host's display-link fallback (`front end: window covered`), which measures nothing.
+- Resolved: at Alcineus Bridge on an M1 Pro (macOS 27.2, 1080p output) the scene ran at 4.24 fps, the lighting pass 196.7 ms of a 236 ms frame, while its reads of a uniform buffer's handle table were marked through a null address ([Reads of a handle table marked through a null address](../../../docs/reference/shaders.md#reads-of-a-handle-table-marked-through-a-null-address)). PR #1738's host bitmap measured 56.1 fps and 2.35 ms there (on `bd979ce`, chain `3ee52af3ca18`); the chain change that replaced it was not run on an M1 Pro.
 
 ## Frame rate
 
@@ -65,6 +65,7 @@ Keyboard in a window: J K U I are A B X Y, WASD the left stick, Shift + arrows t
 - [NVN2 compute reads its workgroup counts at c0 + 4](../../../docs/reference/shaders.md#nvn2-compute-reads-its-workgroup-counts-at-c0--4).
 - [Texture handles of SDK 22's Ampere code](../../../docs/reference/shaders.md#texture-handles-of-sdk-22s-ampere-code): white units.
 - [A table of handles past the array's length](../../../docs/reference/shaders.md#a-table-of-handles-past-the-arrays-length): black characters.
+- [Reads of a handle table marked through a null address](../../../docs/reference/shaders.md#reads-of-a-handle-table-marked-through-a-null-address): 4 fps at Alcineus Bridge on an M1 Pro.
 - [`[[primitive_id]]` in a specialized Metal 4 pipeline](../../../docs/reference/rendering.md#primitive_id-in-a-specialized-metal-4-pipeline): the dot lattice over the ground.
 - [NVN2's DLSS on MetalFX](../../../docs/reference/rendering.md#nvn2s-dlss-on-metalfx).
 - [Bindless shaders taken as depth readers](../../../docs/reference/rendering.md#bindless-shaders-taken-as-depth-readers): the battle maps' decals split the G-buffer pass about 31 times a frame.

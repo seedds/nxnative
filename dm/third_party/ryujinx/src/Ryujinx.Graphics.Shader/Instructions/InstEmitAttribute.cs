@@ -161,7 +161,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
         }
 
         // idxAddress: the whole attribute address of IPA.IDX (null otherwise)
-        internal static void EmitIpa(EmitterContext context, Operand idxAddress, int imm10, IpaOp ipaOp, int srcB, bool sat, int dest)
+        // nxnative: at (null: none) is the word of an Ampere IPA at an offset from the pixel centre (AIpa)
+        internal static void EmitIpa(EmitterContext context, Operand idxAddress, int imm10, IpaOp ipaOp, int srcB, bool sat, int dest, Operand at = null)
         {
             Operand res;
 
@@ -188,6 +189,11 @@ namespace Ryujinx.Graphics.Shader.Instructions
                     {
                         res = context.FPMultiply(res, context.Load(StorageKind.Input, IoVariable.FragmentCoord, null, Const(3)));
                     }
+                }
+                else if (imm10 is AttributeConsts.BaryCoordX or AttributeConsts.BaryCoordX + 4)
+                {
+                    // nxnative: the perspective barycentric coordinates are read divided by w, like a perspective attribute
+                    res = context.FPMultiply(res, context.Load(StorageKind.Input, IoVariable.FragmentCoord, null, Const(3)));
                 }
                 else if (imm10 is AttributeConsts.PositionX or AttributeConsts.PositionY)
                 {
@@ -219,6 +225,20 @@ namespace Ryujinx.Graphics.Shader.Instructions
                     // This weird trick makes it behave.
                     res = context.ICompareLess(context.INegate(context.FP32ConvertToS32(context.ConditionalSelect(res, ConstF(1f), ConstF(0f)))), Const(0));
                 }
+            }
+
+            if (at != null && ipaOp != IpaOp.Constant && (idxAddress != null || IsInterpolatedFloat(imm10)))
+            {
+                // nxnative: what IPA.PASS reads (an attribute over w, 1 / w, a screen-linear attribute, the position) is linear over the screen within the
+                // primitive, so its value at an offset is the centre's plus the offset times its screen derivatives, which are exact for a linear function.
+                // The offset word holds x in bits 8..11 and y in bits 24..27, signed, in 1/16 pixel from the centre (Mesa NAK's load_barycentric_offset: s12 in
+                // 1/4096, of which GLSLC writes the top four bits)
+                Operand ox = context.FPMultiply(context.IConvertS32ToFP32(context.ShiftRightS32(context.ShiftLeft(at, Const(20)), Const(28))), ConstF(1f / 16));
+                Operand oy = context.FPMultiply(context.IConvertS32ToFP32(context.ShiftRightS32(context.ShiftLeft(at, Const(4)), Const(28))), ConstF(1f / 16));
+                Operand ddx = context.Add(Instruction.Ddx, Local(), res);
+                Operand ddy = context.Add(Instruction.Ddy, Local(), res);
+
+                res = context.FPAdd(res, context.FPAdd(context.FPMultiply(ddx, ox), context.FPMultiply(ddy, oy)));
             }
 
             if (ipaOp == IpaOp.Multiply && !isFixedFunc)
@@ -320,6 +340,12 @@ namespace Ryujinx.Graphics.Shader.Instructions
         private static bool CanLoadOutput(int attr)
         {
             return attr is not AttributeConsts.TessCoordX and not AttributeConsts.TessCoordY;
+        }
+
+        // nxnative: a float attribute the rasterizer interpolates (not the primitive, layer and viewport indices, the viewport mask or the facing)
+        private static bool IsInterpolatedFloat(int attr)
+        {
+            return attr is >= AttributeConsts.PositionX and < AttributeConsts.ViewportMask or >= 0x3a8 and < AttributeConsts.BaryCoordX + 8;
         }
 
         private static bool TryFixedFuncToUserAttributeIpa(EmitterContext context, int attr, out Operand selectedAttr)

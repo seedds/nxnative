@@ -11,6 +11,8 @@ typedef struct {
     uint32_t atest, logic;   // atest: 1 = drawn with the alpha test, the fragment from the shader's side library <key>_bx (nvn_mtl.m atest_key); last, so a prewarm row written before it reads as 0
                              // logic: 1 = drawn with a logic operation, the fragment from the side library <key>_bx (lop_key); in what was padding (0 in older rows)
     va_st attr_hi[16];       // NVN2's attributes 16 to 31 (pso_key_attr); last, so a prewarm row written before them reads as 0
+    uint32_t border, border_spare;   // border: 1 = a sampler the draw binds has a twin, so the shaders keep their border colour corrections (nvn_mtl.m border_need); 0 = specialized without
+                                     // them (fn_off); last, so a prewarm row written before it reads as 0. border_spare keeps the key a whole number of 8-byte words
 } pso_key;
 static inline va_st pso_key_attr(const pso_key *k, int a) { return a < 16 ? k->attr[a] : k->attr_hi[a - 16]; }
 
@@ -51,8 +53,8 @@ static inline void pso_skey_hex(const pso_skey *key, char *out) {
 }
 
 static inline int pso_skey_parse(const char *hex, pso_skey *out) {
-    size_t n = sizeof *out * 2, old1 = n - 2 * sizeof out->k.attr_hi, old = old1 - 2 * (sizeof out->k.atest + sizeof out->k.logic);   // a row from before the high attributes, or also before the alpha test field: the key without them
-    if (!hex || (strlen(hex) != n && strlen(hex) != old1 && strlen(hex) != old)) return -1;
+    size_t n = sizeof *out * 2, old2 = n - 2 * (sizeof out->k.border + sizeof out->k.border_spare), old1 = old2 - 2 * sizeof out->k.attr_hi, old = old1 - 2 * (sizeof out->k.atest + sizeof out->k.logic);   // a row from before the border field, before the high attributes, or also before the alpha test field: the key without them
+    if (!hex || (strlen(hex) != n && strlen(hex) != old2 && strlen(hex) != old1 && strlen(hex) != old)) return -1;
     if (strlen(hex) != n) { n = strlen(hex); memset(out, 0, sizeof *out); }
     uint8_t *p = (uint8_t *)out;
     for (size_t i = 0; i < n; i += 2) {
@@ -62,5 +64,16 @@ static inline int pso_skey_parse(const char *hex, pso_skey *out) {
         p[i / 2] = (uint8_t)(a << 4 | b);
     }
     pso_key_norm(&out->k, out->merged);
+    return 0;
+}
+
+// M rows carry their optional object shader separately. They never use a tile-specialized fragment or a vertex layout.
+static inline int pso_mesh_skey_parse(const char *hex, pso_skey *out) {
+    if (pso_skey_parse(hex, out) || !out->vs[0] || out->vs_stage != 4 ||
+        (out->fs[0] && out->fs_stage != 1) || out->merged || out->fz ||
+        out->k.vs || out->k.fs || out->k.fsfn || !pso_ds_valid(out->k.dfmt, out->k.sfmt)) return -1;
+    memset(out->k.attr, 0, sizeof out->k.attr);
+    memset(out->k.attr_hi, 0, sizeof out->k.attr_hi);
+    memset(out->k.stream, 0, sizeof out->k.stream);
     return 0;
 }

@@ -1,7 +1,5 @@
 """The builder's text rewrites found by text where a pattern tried every character of the source (dm/gfx/tools/dmsh_build.py, dmsh_fetch.py, dmsh_side.py, dmsh_atomic.py, GitHub
 issue #1036): each gives the answer the pattern gave, at the edges of a word and of the source. No game files, no Metal compiler."""
-import ast
-import collections
 from pathlib import Path
 import random
 import re
@@ -15,11 +13,12 @@ REPO = Path(__file__).resolve().parents[3]
 TOOLS = REPO / 'dm/gfx/tools'
 sys.path.insert(0, str(TOOLS))
 import dmsh_atomic  # noqa: E402
+import dmsh_entry  # noqa: E402
 import dmsh_fetch  # noqa: E402
+import dmsh_reflect  # noqa: E402
 import dmsh_side  # noqa: E402
 
-ns: dict[str, Any] = {'re': re, 'collections': collections, 'dmsh_side': dmsh_side}   # dmsh_build.py is a script that runs a build when imported
-exec(compile(ast.Module(body=[n for n in ast.parse((TOOLS / 'dmsh_build.py').read_text()).body if isinstance(n, ast.FunctionDef) and n.name in {'attributes', 'in_word', 'has_word', 'int_outputs', 'fs_uint'}], type_ignores=[]), 'dmsh_build', 'exec'), ns)
+ns: dict[str, Any] = {**vars(dmsh_reflect), **vars(dmsh_entry)}
 attributes, has_word, fs_uint = ns['attributes'], ns['has_word'], ns['fs_uint']
 
 
@@ -125,6 +124,29 @@ class IntegerOutputs(unittest.TestCase):
         src = self.source('    out.m_0 = in.m_1;', 'struct main0_in\n{\n    float4 m_1 [[user(locn1), flat]];\n};\n\n')
         self.assertIsNotNone(fs_uint(src)[0])
         self.assertIsNone(fs_uint(src.replace(', flat]]', ']]'))[0])
+
+    def test_a_float_local_holding_integer_bits(self):   # PRAGMATA's visibility shaders: the primitive id's bits and the depth into an RG32Uint target
+        body = '    float _439 = as_type<float>(int(gl_PrimitiveID));\n    float _437 = gl_FragCoord.z;\n    out.m_0.x = _439;\n    out.m_0.y = _437;'
+        self.assertIsNotNone(fs_uint(self.source(body))[0])
+        self.assertIsNone(fs_uint(self.source(body.replace('as_type<float>(int(gl_PrimitiveID))', 'gl_FragCoord.w')))[0])
+
+    def test_writes_after_an_early_return(self):   # a9c1f9ea0c76a54c: a discard's branch returns zeros first; the integer bits are written after it
+        early = '    if (!_435)\n    {\n        discard_fragment();\n    }\n    if (!_435)\n    {\n        out.m_0.x = 0.0;\n        out.m_0.y = 0.0;\n        return out;\n    }\n'
+        body = early + '    float _439 = as_type<float>(int(gl_PrimitiveID));\n    float _437 = gl_FragCoord.z;\n    out.m_0.x = _439;\n    out.m_0.y = _437;'
+        self.assertIsNotNone(fs_uint(self.source(body))[0])
+        self.assertIsNone(fs_uint(self.source(body.replace('as_type<float>(int(gl_PrimitiveID))', 'gl_FragCoord.w')))[0])
+
+    def test_a_float_local_holding_an_array_element_of_float_bits(self):   # OCTOPATH TRAVELER II's 05af5b1924d3b8b7: a register kept in a local array
+        body = '    uint _30[2];\n    _30[0] = 1065353216u;\n    _30[0] = as_type<uint>(_680);\n    float _884 = as_type<float>(_30[0]);\n    out.m_0.x = _884;\n    out.m_0.y = _680;'
+        self.assertIsNone(fs_uint(self.source(body))[0])
+        self.assertIsNotNone(fs_uint(self.source(body.replace('as_type<uint>(_680)', '_681 << 3u')))[0])   # a computed integer in the element is one
+
+    def test_a_flat_input_passed_through_beside_constants(self):   # Unreal's virtual texture page table update (Sparking! ZERO's 17eda07e4bac39f8)
+        flat = 'struct main0_in\n{\n    float4 m_1 [[user(locn0), flat]];\n};\n\n'
+        src = self.source('    float _26 = in.m_1.x;\n    out.m_0.x = _26;\n    out.m_0.y = 0.0;\n    out.m_0.z = 0.0;\n    out.m_0.w = 0.0;', flat)
+        self.assertIsNotNone(fs_uint(src)[0])
+        self.assertIsNone(fs_uint(src.replace(', flat]]', ']]'))[0])
+        self.assertIsNone(fs_uint(self.source('    out.m_0.x = in.m_1.x * 2.0;\n    out.m_0.y = 0.0;', flat))[0])
 
 
 class ImageAtomics(unittest.TestCase):

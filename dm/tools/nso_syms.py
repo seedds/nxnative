@@ -58,13 +58,13 @@ def area(s):
 def host_hooks(host, forced=True):
     """The names the host resolves imports to: HLE / HLE_FORCE hooks in dm/host/*.c and dm/gfx's (nn::vi, nv::, NVN), the libc passthrough table (hle_table.c L), the Vulkan layer (VK / VKB in dm/gfx/vk/*.m).
     forced=False leaves out the HLE_FORCE hooks: some wrap the module's own function (glslcCompile), so the module that defines it is still needed"""
-    hooks = set()
-    for f in glob.glob(os.path.join(host, '*.c')) + glob.glob(os.path.join(host, '../gfx/*.c')) + glob.glob(os.path.join(host, '../gfx/nvn/*.c')):
+    hooks, d = set(), glob.escape(host)   # escaped: brackets in a parent folder are a glob pattern
+    for f in glob.glob(os.path.join(d, '*.c')) + glob.glob(os.path.join(d, '../gfx/*.c')) + glob.glob(os.path.join(d, '../gfx/nvn/*.c')):
         t = open(f, encoding='utf-8', errors='replace').read()
         hooks |= set(re.findall(r'\bHLE\(\s*"([^"]+)"', t))
         if forced: hooks |= set(re.findall(r'\bHLE_FORCE(?:_BIG)?\(\s*"([^"]+)"', t))
         if os.path.basename(f) == 'hle_table.c': hooks |= set(re.findall(r'\bL\((\w+)\)', t))
-    for f in glob.glob(os.path.join(host, '../gfx/vk/*.m')):
+    for f in glob.glob(os.path.join(d, '../gfx/vk/*.m')):
         hooks |= set(re.findall(r'^VKB?\((vk\w+),', open(f, encoding='utf-8', errors='replace').read(), re.M))
     return hooks
 

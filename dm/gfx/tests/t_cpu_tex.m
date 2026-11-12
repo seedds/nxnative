@@ -85,7 +85,7 @@ static void finalized_upload(int write_after_record) {
     CHECK(!g_treg[1].view && !g_treg[2].view && !g_treg[2].alt, "finalization retires every descriptor's cached views");
     // Reuse the API object: commands and registered descriptors must use their snapshots.
     memset(&tex, 0xa5, sizeof tex);
-    state_reset(); memset(&R,0,sizeof R); mtl_sub_begin(); mtl_exec((const uint8_t *)handle);
+    state_reset(); memset(&R,0,sizeof R); mtl_sub_begin(); mtl_exec(nvn_rec_linear(handle, NULL));
     CHECK(mtl_wait(mtl_sub_commit(),5000000000ull), "recorded texture readback completed");
     CHECK(!mtl_last_commit_error(), "recorded texture readback has no GPU error");
     CHECK(!memcmp(mem+131072, pixels, sizeof pixels), "finalized command snapshot uploads CPU-written pixels");
@@ -95,7 +95,7 @@ static void finalized_upload(int write_after_record) {
     CHECK(mtl_wait(mtl_sub_commit(),5000000000ull), "registered descriptor upload completed");
     CHECK(!g_treg[1].view && !g_treg[2].view && !g_treg[2].alt, "late descriptor views retire at submission end");
     // Resolve again: a retired serial may already hold an NvPkg in the ghost cache.
-    mtl_sub_begin(); mtl_exec((const uint8_t *)handle);
+    mtl_sub_begin(); mtl_exec(nvn_rec_linear(handle, NULL));
     CHECK(mtl_wait(mtl_sub_commit(),5000000000ull), "recorded snapshot can be replayed again");
     CHECK(!memcmp(mem+131072, pixels, sizeof pixels), "replayed retired snapshot keeps its CPU content");
     mtl_reg_tex(1,NULL,NULL); mtl_reg_tex(2,NULL,NULL); h_nvnCommandBufferFinalize(&cmd);
@@ -225,8 +225,8 @@ static void poll_beside(void) { printf("poll_beside: skipped, the profile has no
 static int resident(id o) { pthread_mutex_lock(&g_res_mu); int r = [g_res_objects containsObject:o]; pthread_mutex_unlock(&g_res_mu); return r; }
 static void settle(void) { for (int i = 0; i < 2; i++) { g_fence++; pthread_mutex_lock(&g_mu); g_done = g_fence; pthread_mutex_unlock(&g_mu); defer_drain(); } }   // the GPU passed every fence
 // The GPU's first write over a texture taken from its storage (cpu_unc_drop): every serial that held the package now holds its texture, the package goes, and the serials go one by
-// one, the last through the ghost ring. The texture stays resident while any serial entry, live or finalized, holds it, and leaves the residency set with the last. Ocarina of Time's
-// 260x260 terrain tiles handed over this way left the set with the package, or with the first holder a ghost-ring eviction dropped, while still drawn: GPU address faults (#1326)
+// one, the last through the ghost table. The texture stays resident while any serial entry, live or finalized, holds it, and leaves the residency set with the last. Ocarina of Time's
+// 260x260 terrain tiles handed over this way left the set with the package, or with the first holder a ghost eviction dropped, while still drawn: GPU address faults (#1326)
 static void handover_holders(void) {
     const size_t len = 262144;
     uint8_t *mem = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
@@ -253,16 +253,78 @@ static void handover_holders(void) {
     CHECK(resident(ta), "hand-over: the package's release leaves the texture resident for its serials");
     h_nvnTextureFinalize(&a); settle();
     CHECK(resident(ta), "hand-over: one serial's release leaves it resident for the other");
-    tex_put(sa, ta);   // a record of the finalized object replayed: its serial resolves through the ghost ring
+    tex_put(sa, ta);   // a record of the finalized object replayed: its serial resolves through the ghost table
     h_nvnTextureFinalize(&b); settle();
-    CHECK(resident(ta), "hand-over: a finalized serial in the ghost ring keeps it resident");
-    for (uint64_t i = 0; i < NGHOST; i++) tex_put((1ull << 61) + i, [NSObject new]);   // the ring evicts that entry
+    CHECK(resident(ta), "hand-over: a finalized serial in the ghost table keeps it resident");
+    atomic_fetch_add(&g_cur_frame, GHOST_IDLE);   // not resolved for that long: the entries that come past NGHOST evict it
+    for (uint64_t i = 0; i < NGHOST; i++) tex_put((1ull << 61) + i, [NSObject new]);
     settle();
-    pthread_mutex_lock(&g_smu); int left = g_retire_held.n; pthread_mutex_unlock(&g_smu);
+    pthread_mutex_lock(&g_smu); int left = own_stats_locked().retire_wait; pthread_mutex_unlock(&g_smu);
     CHECK(!resident(ta) && !left, "hand-over: the last holder's release takes it out of the residency set");
     h_nvnTextureFinalize(&c); h_nvnMemoryPoolFinalize((NVNmemoryPool *)&pool); settle();
     CHECK(!resident(tc), "hand-over: the pool's own texture goes with the pool");
     munmap(mem, len);
+}
+// Retirement's two conditions, one after the other: the queue waits for the fence of the submission in flight at the retirement (completion), then asks the owner (eligibility,
+// own_retire_locked). An object an entry holds waits in the owner; its last count going hands it back behind the submission then in flight, so the entry's last encodings complete
+// before it leaves the residency set. The entry here holds a view of the texture (an sRGB / linear twin's): the entry's own drop retires the view, and only the owner's hand-back
+// retires the texture. One step of the GPU: fence() passes one fence
+static void fence(void) { g_fence++; pthread_mutex_lock(&g_mu); g_done = g_fence; pthread_mutex_unlock(&g_mu); defer_drain(); }
+static void retire_after_completion(void) {
+    id<MTLTexture> x = [g_dev newTextureWithDescriptor:[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:4 height:4 mipmapped:NO]];
+    res_add(x); res_commit();
+    uint64_t k = (1ull << 62) + 990001; tex_put(k, [x newTextureViewWithPixelFormat:MTLPixelFormatRGBA8Unorm]);   // a serial's entry holds a view of it
+    pthread_mutex_lock(&g_smu); uint32_t w0 = own_stats_locked().retire_wait; pthread_mutex_unlock(&g_smu);
+    defer_obj_release(x);   // retired: behind the submission now in flight
+    defer_drain();
+    CHECK(resident(x), "retire: before its fence passes, a retired texture stays resident (the queue does not ask the owner yet)");
+    fence();
+    pthread_mutex_lock(&g_smu); uint32_t w1 = own_stats_locked().retire_wait; pthread_mutex_unlock(&g_smu);
+    CHECK(resident(x) && w1 == w0 + 1, "retire: its fence passed, an entry still holds it: it stays resident and waits in the owner");
+    serial_del(k);   // the last entry goes: handed back behind the submission in flight
+    pthread_mutex_lock(&g_smu); uint32_t w2 = own_stats_locked().retire_wait; pthread_mutex_unlock(&g_smu);
+    defer_drain();
+    CHECK(resident(x) && w2 == w0, "retire: handed back, it stays resident until the submission in flight when its last entry went completes");
+    fence(); res_commit();
+    CHECK(!resident(x), "retire: then it leaves the residency set");
+}
+// The same two conditions across threads, as the host runs them: a completion handler's drain (defer_drain, its try of g_smu) while the submit thread's entries come
+// and go. One live entry holds a view of the texture throughout, so whatever the interleaving it must never leave the residency set; the other thread retires it again
+// and again and passes fences. When that entry goes too, the owner hands the texture back and it leaves after the next fence. TSan: the shared state is the owner's
+// (under g_smu), the queue's (g_deferred_mu) and the residency set's (g_res_mu)
+enum { CHURN = 4000 };
+static _Atomic int g_churn_done, g_lost_residency;
+static id<MTLTexture> g_churn_x;
+static void *retirer(void *arg) {
+    (void)arg;
+    for (int i = 0; !atomic_load(&g_churn_done); i++) { if (!(i % 8)) defer_obj_release(g_churn_x); fence(); }
+    return NULL;
+}
+static void retire_across_threads(void) {
+    @autoreleasepool {
+    id<MTLTexture> x = g_churn_x = [g_dev newTextureWithDescriptor:[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:4 height:4 mipmapped:NO]];
+    res_add(x); res_commit();
+    uint64_t hold = (1ull << 62) + 990101, churn = (1ull << 62) + 990102, ghost = 990103;
+    tex_put(hold, [x newTextureViewWithPixelFormat:MTLPixelFormatRGBA8Unorm]);
+    pthread_t t; atomic_store(&g_churn_done, 0); atomic_store(&g_lost_residency, 0);
+    pthread_create(&t, NULL, retirer, NULL);
+    for (int i = 0; i < CHURN; i++) {   // the texture, a view of it, a finalized serial's ghost entry: put and taken away
+        id o = i % 3 == 0 ? (id)x : (id)[x newTextureViewWithPixelFormat:MTLPixelFormatRGBA8Unorm];
+        tex_put(i % 3 == 2 ? ghost : churn, o);
+        serial_del(churn);
+        if (!resident(x)) atomic_store(&g_lost_residency, 1);
+    }
+    atomic_store(&g_churn_done, 1); pthread_join(t, NULL);
+    CHECK(!atomic_load(&g_lost_residency) && resident(x), "across threads: held by a live entry's view, the texture never left the residency set");
+    atomic_fetch_add(&g_cur_frame, GHOST_IDLE);   // idle, the ghost entry goes as newer ones come
+    for (uint64_t i = 0; i < NGHOST; i++) tex_put((1ull << 61) + 1000 + i, [NSObject new]);
+    serial_del(hold); defer_drain(); fence(); fence(); res_commit();
+    pthread_mutex_lock(&g_smu); uint32_t waiting = own_stats_locked().retire_wait; char why[256] = ""; int ok = own_check_locked(why, sizeof why); pthread_mutex_unlock(&g_smu);
+    CHECK(!resident(x) && !waiting, "across threads: its last entry gone, it is handed back and leaves the residency set");
+    if (!ok) fprintf(stderr, "owner: %s\n", why);
+    CHECK(ok, "across threads: the owner's counts and waiting objects agree with its tables");
+    g_churn_x = nil;
+    }
 }
 int main(int argc, const char **argv) { @autoreleasepool {
     enum { N = 6442, BASE = 1000 };
@@ -294,10 +356,10 @@ int main(int argc, const char **argv) { @autoreleasepool {
     cpy = own; mtl_tex_release(&cpy);
     CHECK(tex_cpu_written(own.serial) == 1, "finalizing a copy leaves the texture live");
     mtl_tex_release(&own);
-    CHECK(!nvn_hm_get(&g_tex_live, &own.serial), "finalizing the object itself ends it");
+    CHECK(!own_tex_live(own.serial), "finalizing the object itself ends it");
     own.serial = 900002; mtl_tex_init(&own); moved = own; own.magic = 0; mtl_tex_release(&moved);
-    CHECK(!nvn_hm_get(&g_tex_live, &moved.serial), "a copy outliving the object it was initialized in ends the texture");
+    CHECK(!own_tex_live(moved.serial), "a copy outliving the object it was initialized in ends the texture");
     retired_classification(); descriptor_replacement();
-    if (argc > 1 && !strcmp(argv[1], "--metal")) { mtl_init(); finalized_upload(0); finalized_upload(1); finalize_during_walk(); poll_asks_again(); poll_beside(); handover_holders(); }
+    if (argc > 1 && !strcmp(argv[1], "--metal")) { mtl_init(); finalized_upload(0); finalized_upload(1); finalize_during_walk(); poll_asks_again(); poll_beside(); handover_holders(); retire_after_completion(); retire_across_threads(); }
     printf("t_cpu_tex: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

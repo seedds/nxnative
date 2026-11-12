@@ -171,7 +171,7 @@ class Reader(unittest.TestCase):
         if self.code and self.code not in ok: raise nsp.BuildError(f'nx_extract exit code {self.code} (full output: {log})')
 
     def reader(self):
-        cms = [mock.patch.object(nsp, 'build_nx_extract', lambda *a: 'nx'), mock.patch.object(nsp, 'run', self.fake_run)]
+        cms = [mock.patch.object(nsp, 'find_nx_extract', lambda *a: 'nx'), mock.patch.object(nsp, 'run', self.fake_run)]
         for cm in cms: cm.__enter__(); self.addCleanup(cm.__exit__, None, None, None)
         cm = nsp.package_reader(REPO, self.keys, {}); r = cm.__enter__(); self.addCleanup(cm.__exit__, None, None, None)
         return r
@@ -202,10 +202,9 @@ class Reader(unittest.TestCase):
         self.out = 'package 0 a.nsp\n'
         with self.assertRaisesRegex(nsp.BuildError, 'listed 1 of 2 packages'): self.reader().contents([self.tmp / 'a.nsp', self.tmp / 'b.nsp'])
 
-    def test_without_dotnet_says_what_to_do(self):
-        with mock.patch.object(nsp.shutil, 'which', lambda *a, **k: None), nsp.package_reader(REPO, self.keys, {}) as r:
-            with self.assertRaisesRegex(nsp.BuildError, r'needs dotnet'): r.contents([self.tmp / 'Game.nsp'])
-            r.check_keys({'base': self.tmp / 'Game.nsp', 'updates': [], 'dlc': []})   # the steps that need it say so
+    def test_nx_extract_that_does_not_start_says_so(self):
+        with mock.patch.object(nsp, 'NX_EXTRACT', 'dm/tools/nx_extract_bin/missing'), nsp.package_reader(REPO, self.keys, {}) as r:
+            with self.assertRaisesRegex(nsp.BuildError, r'nx_extract does not start'): r.contents([self.tmp / 'Game.nsp'])
 
     def test_keys_too_old_stop_before_the_packages_are_read(self):   # nx_extract --keys: every package once, a merged one too; its red line becomes the stop, other failures are left to later steps
         m, upd = self.tmp / 'm.nsz', self.tmp / 'u.nsp'
@@ -264,9 +263,8 @@ class Merged(unittest.TestCase):
     def test_extraction_names_the_application(self):   # nx_extract reads the scanned game's own content metas (--app), whichever package holds them
         m = self.merged_nsp(); calls = []
         def fake_run(cmd, log, **k): calls.append(cmd); (Path(cmd[4]) / 'ExeFS').mkdir(parents=True)
-        with mock.patch.object(nsp, 'run', fake_run), mock.patch.object(nsp, 'swap_in'), mock.patch.object(nsp, 'extracted', return_value=None), \
-             mock.patch.object(nsp, 'PROG', mock.MagicMock()):
-            nsp.extract('nx', 'k', self.tmp / 'ex', 'v1507328', m, m, None, self.tmp / 'logs', mock.MagicMock(), APP)
+        with mock.patch.object(nsp, 'run', fake_run), mock.patch.object(nsp, 'extracted', return_value=None), mock.patch.object(nsp, 'PROG', mock.MagicMock()):
+            nsp.extract('nx', 'k', self.tmp / 'ex', 'v1507328', m, m, self.tmp / 'logs', mock.MagicMock(), APP, REPO)
         self.assertEqual(calls[0][calls[0].index('--app') + 1], f'{APP:016x}')
 
     def test_dlc_extraction_names_the_dlc(self):   # --aoc takes one DLC's data NCA by its content meta's title ID, from a merged package or a DLC NSP alike
@@ -275,6 +273,13 @@ class Merged(unittest.TestCase):
         with mock.patch.object(nsp, 'run', fake_run), mock.patch.object(nsp, 'PROG', mock.MagicMock()):
             nsp.extract_aoc('nx', 'k', REPO, self.tmp / 'work', APP, {'dlc': [(APP + 0x1001, 65536, m)]}, self.tmp / 'logs')
         self.assertEqual(calls[0][-1], f'{APP + 0x1001:016x}')
+
+    def test_a_programs_dlc_are_the_applications(self):   # program 1 (app + 1) asks for the application's DLC by their index from the application: DLC …1001 is 1.img, not 0.img
+        m = self.merged_nsp(); made = []
+        def fake_run(cmd, log, **k): made.append(Path(cmd[4]).name); Path(cmd[4]).parent.mkdir(parents=True, exist_ok=True); Path(cmd[4]).write_bytes(b'img')
+        with mock.patch.object(nsp, 'run', fake_run), mock.patch.object(nsp, 'PROG', mock.MagicMock()):
+            nsp.extract_aoc('nx', 'k', REPO, self.tmp / 'work', APP + 1, {'dlc': [(APP + 0x1001, 0, m), (APP + 0x1002, 0, m)]}, self.tmp / 'logs')
+        self.assertEqual(made, ['1.img', '2.img'])
 
 
 if __name__ == '__main__':

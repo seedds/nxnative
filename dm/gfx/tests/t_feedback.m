@@ -137,7 +137,7 @@ static void image_view_case(NvProg *pr) {
     CHECK(g_fb_n == 0 && g_enc, "a SINT-class read of the R32Uint attachment keeps its reinterpreted image binding");
     rp_end(); b->dpf = NVN_DPF_UINT;
     CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "image view submission completed without error");
-    CHECK(serial_get(source.serial) == original, "the serial table still holds the image target");   // NOLINT(clang-analyzer-osx.cocoa.RetainCount): g_by_serial owns original (serial_put's CFBridgingRetain) until mtl_tex_release below, not a leak
+    CHECK(serial_get(source.serial) == original, "the serial table still holds the image target");
     mtl_tex_release(&source);
     CHECK(serial_get(source.serial) == nil, "releasing the image target removes its serial entry");
 }
@@ -176,7 +176,7 @@ static void mip_chain_case(NvProg *pr) {
 static void reuse_case(NvProg *pr) {
     int before = failed, tid = 650; NvShader *fs = pr->sh[1]; fs->rf.b[0].reg = 0;
     tex_t source; target(&source, 99790);
-    mtl_reg_tex(tid, &source, NULL);   // NOLINT(clang-analyzer-osx.cocoa.RetainCount): g_by_serial owns the texture (serial_put's CFBridgingRetain) until mtl_tex_release below, not a leak
+    mtl_reg_tex(tid, &source, NULL);
     state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
     R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &source; S.tex[1][0] = tid;
     S.chmask.mask = 0; clear(MTLClearColorMake(1, 0, 0, 1));
@@ -202,7 +202,7 @@ static void reuse_case(NvProg *pr) {
     CHECK(g_fb_n == 1 && !g_enc && g_fb_count == copies + 2, "a game barrier makes the next writing draw take a fresh snapshot");
     rp_end();
     // The depth attachment read, then written in the same pass (only serials matter to the rule: the attachment is named after the pass opens)
-    { tex_t output, depth; target(&output, 99791); target(&depth, 99792); mtl_reg_tex(651, &depth, NULL);   // NOLINT(clang-analyzer-osx.cocoa.RetainCount): g_by_serial owns both textures (serial_put's CFBridgingRetain) until mtl_tex_release below, not a leak
+    { tex_t output, depth; target(&output, 99791); target(&depth, 99792); mtl_reg_tex(651, &depth, NULL);
       R.rt.color[0] = &output; R.rt.depth = NULL; S.tex[1][0] = 651; S.chmask.mask = 0xffffffffu; S.ds.dt = 1; S.ds.dw = 0;
       clear(MTLClearColorMake(0, 0, 0, 1)); R.rt.depth = &depth;
       fb_prepare(pr);
@@ -559,7 +559,7 @@ static void om_case(const char *dir) {
 // filled from the CPU
 static void depth_snap_case(NvProg *pr) {
     int before = failed; NvShader *fs = pr->sh[1]; fs->rf.b[0].reg = 0;
-    tex_t output, depth; target(&output, 99920); id<MTLTexture> dtex = target(&depth, 99921); mtl_reg_tex(652, &depth, NULL);   // NOLINT(clang-analyzer-osx.cocoa.RetainCount): g_by_serial owns both textures until mtl_tex_release below, not a leak
+    tex_t output, depth; target(&output, 99920); id<MTLTexture> dtex = target(&depth, 99921); mtl_reg_tex(652, &depth, NULL);
     uint8_t px[64]; for (int i = 0; i < 16; i++) { px[4 * i] = 10; px[4 * i + 1] = 20; px[4 * i + 2] = 30; px[4 * i + 3] = 40; }
     [dtex replaceRegion:MTLRegionMake2D(0, 0, 4, 4) mipmapLevel:0 withBytes:px bytesPerRow:16];
     id<MTLBuffer> result = [g_dev newBufferWithLength:1024 options:MTLResourceStorageModeShared]; res_add(result);
@@ -595,7 +595,7 @@ static void depth_snap_case(NvProg *pr) {
 // it first in its pass leaves the pass open, and a later draw that writes depth then ends it (g_fb_dread)
 static void depth_after_write_case(NvProg *pr) {
     int before = failed; NvShader *fs = pr->sh[1]; fs->rf.b[0].reg = 0;
-    tex_t output, depth; target(&output, 99940); target(&depth, 99941); mtl_reg_tex(654, &depth, NULL);   // NOLINT(clang-analyzer-osx.cocoa.RetainCount): g_by_serial owns both textures until mtl_tex_release below, not a leak
+    tex_t output, depth; target(&output, 99940); target(&depth, 99941); mtl_reg_tex(654, &depth, NULL);
     state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
     R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &output; S.chmask.mask = 0xffffffffu;
     clear(MTLClearColorMake(0, 0, 0, 1)); R.rt.depth = &depth;
@@ -633,9 +633,12 @@ static void real_depth_snap_case(NvProg *pr, int colour_pass, int stencil, int p
     id<MTLTexture> dt = [g_dev newTextureWithDescriptor:tex_desc(&depth, 0)];
     CHECK(dt != nil, "real depth attachment allocates");
     if (!dt) { if (colour_pass) mtl_tex_release(&colour); return; }
-    res_add(dt); mtl_tex_init(&depth); serial_put(depth.serial, dt);   // NOLINT(clang-analyzer-osx.cocoa.RetainCount): g_by_serial owns the texture until mtl_tex_release below, not a leak
+    res_add(dt); mtl_tex_init(&depth); serial_put(depth.serial, dt);
     mtl_reg_tex(655, &depth, NULL);
-    id<MTLBuffer> result = [g_dev newBufferWithLength:1024 options:MTLResourceStorageModeShared]; res_add(result);
+    id<MTLBuffer> result = [g_dev newBufferWithLength:1024 options:MTLResourceStorageModeShared];
+    CHECK(result != nil, "the readback buffer allocates");
+    if (!result) { mtl_tex_release(&depth); if (colour_pass) mtl_tex_release(&colour); return; }
+    res_add(result);
     state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
     R.has_rt = 1; R.rt.n = colour_pass; if (colour_pass) R.rt.color[0] = &colour; R.rt.depth = &depth;
     S.ds.dt = S.ds.dw = 1; S.tex[1][0] = 655;
@@ -662,7 +665,7 @@ static void real_depth_snap_case(NvProg *pr, int colour_pass, int stencil, int p
 // the clear is red, and the draw writes the attachment it samples
 static void pending_clear_case(NvProg *pr) {
     int before = failed; NvShader *fs = pr->sh[1]; fs->rf.b[0].reg = 0;
-    tex_t source; id<MTLTexture> st = target(&source, 99950); mtl_reg_tex(656, &source, NULL);   // NOLINT(clang-analyzer-osx.cocoa.RetainCount): g_by_serial owns the texture until mtl_tex_release below, not a leak
+    tex_t source; id<MTLTexture> st = target(&source, 99950); mtl_reg_tex(656, &source, NULL);
     uint8_t px[64]; for (int i = 0; i < 16; i++) { px[4 * i] = 10; px[4 * i + 1] = 20; px[4 * i + 2] = 30; px[4 * i + 3] = 40; }
     [st replaceRegion:MTLRegionMake2D(0, 0, 4, 4) mipmapLevel:0 withBytes:px bytesPerRow:16];
     id<MTLBuffer> result = [g_dev newBufferWithLength:1024 options:MTLResourceStorageModeShared]; res_add(result);

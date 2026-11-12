@@ -320,6 +320,8 @@ namespace Ryujinx.Graphics.Shader.Translation
                 funcs[i] = new Function(cfg.Blocks, $"fun{i}", false, inArgumentsCount, outArgumentsCount);
             }
 
+            resourceManager.UnifyArrayTypes(funcs);   // nxnative
+
             return Generate(
                 funcs,
                 AttributeUsage,

@@ -9005,6 +9005,11 @@ static void arch_flush(void) { arch_flush_from(nil); }
 enum { ARCH_QUIT_WAIT_MS = 10000 };
 void mtl_arch_save(int wait_ms, int ending) {
     if (!g_arch_cap) return;
+    // The prebuild tool's bundle form has made its files (pre_bundle_out) by the time it quits, and a period captured after that is bundled by nobody. Writing it at exit also writes its
+    // pipelines script (prewarm_script), and Metal's serializer parses that script with libllvm-flatbuffers' locale, a function-local static first made after this handler was
+    // registered, so exit() has destroyed it when this runs: the write trapped in localeconv_l on the archive queue (EXC_BREAKPOINT, macOS 27.3; the tool ended by a signal and the
+    // NSP script packed the app without its prewarm files, though they were complete). Whether the freed locale is still readable depends on the heap, so a start does not repeat it
+    if (ending && g_pre_out) return;
     int n = atomic_load(&g_arch_new); uint64_t t0 = bp_now();
     arch_hand_over(nil, 1);
     if (!wait_ms && !ending) return;
@@ -10021,6 +10026,7 @@ int mtl_pso_prebuild_tool(void) {
     else if (lists) MLOG("pipeline prebuild: no Metal 4 compiler or no archive to capture into: the prewarm lists are left to the first start");
     if (!g_pre_out) return 1;
     if (!g_comp4 || !g_arch_cap) { MLOG("[RED] pipeline prebuild: no Metal 4 compiler or pipeline serializer: nothing for the app"); return 2; }
+    arch_flush_wait();   // what was captured since the lists' last flush (the pairs', a task / mesh pipeline's) belongs in the bundle: the exit writes nothing for this form (mtl_arch_save)
     return pre_bundle_out(g_pre_out, lines);
 }
 static void warm_start(void) {

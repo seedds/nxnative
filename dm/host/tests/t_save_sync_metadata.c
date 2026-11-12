@@ -4,7 +4,7 @@
 // The journal (<save>.pull): the app killed after each rename or swap of a pull (a longjmp out of it, nothing undone), with this device's folders holding a save, empty or
 // absent, then the next start's mount (sync off): this device's save is back as it was, the cloud's gone, the journal removed; killed again in the middle of that recovery,
 // the next one finishes it. A recovery that fails refuses the mount and keeps the journal, and the start after it recovers; an unreadable journal refuses the mount; a
-// second mount gets the first's answer. Older backups are pruned only when a pull completes, and nothing is sent after the host while a journal is pending
+// second mount gets the first's answer, and the first one's start copy is of this device's save put back. Older backups are pruned only when a pull completes, and nothing is sent after the host while a journal is pending
 #include <errno.h>
 #include <setjmp.h>
 #include <fcntl.h>
@@ -268,7 +268,14 @@ static void journal_cases(const char *root, const char *both, const char *one) {
     unsetenv("DM_SAVE_SYNC");
     // The first mount's answer is the second's (the device save mounted after the account save)
     name = "a second mount";
-    CHECK(save_sync_mount(save, "0100000000010000") == 0 && as_before(root, HAD_SAVE), "the first mount recovers and goes on");
+    CHECK(save_sync_mount(save, "0100000000010000") == 0, "the first mount recovers and goes on");
+    {   // the mount then keeps a start copy (keep_start_copy): of this device's save put back, nothing of the cloud's; without it, everything is as before
+        char sd[PATH_MAX], cp[PATH_MAX] = "", **v; size_t n, k = 0; snprintf(sd, sizeof sd, "%s-backups", save);
+        if (!names_of(sd, &v, &n)) { for (size_t i = 0; i < n; i++) if (is_backup(v[i], START_SIDE)) { k++; snprintf(cp, sizeof cp, "%s/%s", sd, v[i]); } free_names(v, n); }
+        CHECK(k == 1 && holds(cp, "original") == 2 && !holds(cp, "cloud"), "its start copy is this device's save put back, nothing of the cloud's");
+        if (*cp) rm_tree(cp);
+        CHECK(as_before(root, HAD_SAVE), "the rest is this device's save as it was");
+    }
     device_save(root, HAD_SAVE); snprintf(p, sizeof p, "%s.pull", save); put(p, "not a journal\n");
     CHECK(save_sync_mount(save, "0100000000010000") == 0, "a second mount gets the first's answer, not a new one");
     unlink(p);

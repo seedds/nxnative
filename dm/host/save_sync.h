@@ -10,6 +10,7 @@
 // with one, the chosen save wins. Without DM_SAVE_SYNC_CHOICE the newer one wins. Only the start decides: a send replaces a cloud save only when it is no save, the
 // one last synced, damaged, or the one the start chose against. A cloud that changed since (or that the start could not read) waits for the next start.
 // Every save this replaces, here or in the cloud, is kept first in <DM_SAVE>-backups/<date> <side>; the newest 10 of each side stay.
+// With sync on or off, the first save mount also keeps the save the game starts from in <DM_SAVE>-backups/<date> start (a clone), when it changed since the newest of those.
 #pragma once
 #include <stddef.h>
 #include <stdint.h>
@@ -52,8 +53,9 @@ int save_sync_report(const char *save, const char *title, const char *folder, in
 // ---- the host ----
 const char *dm_save_title(void);          // the title ID the cloud file is named after (hle_fs.c, from the game's profile): for a front end in the host's process (the iPhone launcher)
 // The game's first save mount (hle_fs.c): puts back this device's save from a pull of the cloud's that did not finish (<save>.pull, whatever DM_SAVE_SYNC says), then
-// brings the cloud's save in when it is the one to keep, and starts the sender. 0: the save may be mounted (whether or not the cloud's came in); -1: it may not, as this
-// device's save could not be put back whole (the log says where it is; the next start tries again). A second mount gets the first's answer
+// brings the cloud's save in when it is the one to keep, starts the sender, and keeps the start copy. 0: the save may be mounted (whether or not the cloud's came in);
+// -1: it may not, as this device's save could not be put back whole (the log says where it is; the next start tries again; no start copy). A second mount gets the
+// first's answer
 int save_sync_mount(const char *save, const char *title);
 void save_sync_committed(void);           // a Commit went through (hle_fs.c, under its locks: it only wakes the sender)
 int save_sync_flush(int timeout_ms);      // sends now what was committed and not sent (the iPhone app going to the background): 1 = in step with the cloud, 0 = not (yet)

@@ -75,8 +75,8 @@ int main(void) { @autoreleasepool {
     CHECK(!S.bst[0] && !S.bst[1] && !S.prog,"finalizing a program unbinds it from a saved queue state");
     // Stages bound from two programs make a composite: finalizing the fragment program takes the effective program again, the vertex stage alone
     static prog_t pf = {.serial=920003}; NvProg *fprogram = [NvProg new]; fprogram->sh[1] = fs; serial_put(pf.serial,fprogram);
-    S.prog = bind_stages(&pg,1); S.prog = bind_stages(&pf,2);   // NOLINT(clang-analyzer-osx.cocoa.RetainCount): g_by_serial owns fprogram (serial_put's CFBridgingRetain), not a leak
-    CHECK(S.prog && S.prog != &pg && prog_get(S.prog)->sh[0] == vs && prog_get(S.prog)->sh[1] == fs,"a vertex and a fragment program bound apart make a composite");   // NOLINT(clang-analyzer-osx.cocoa.RetainCount): g_by_serial owns the composite bind_stages made (serial_put's CFBridgingRetain), not a leak
+    S.prog = bind_stages(&pg,1); S.prog = bind_stages(&pf,2);
+    CHECK(S.prog && S.prog != &pg && prog_get(S.prog)->sh[0] == vs && prog_get(S.prog)->sh[1] == fs,"a vertex and a fragment program bound apart make a composite");
     P(nvnProgramFinalize)((NVNprogram *)&pf);
     CHECK(!S.bst[1] && S.prog && prog_get(S.prog)->sh[0] == vs && !prog_get(S.prog)->sh[1],"finalizing a composite's fragment program drops its stage from the effective program");
     memset(S.bst,0,sizeof S.bst); S.prog = NULL;

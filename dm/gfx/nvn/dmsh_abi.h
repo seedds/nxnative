@@ -35,6 +35,11 @@
 #define DMSH_C0_DISPATCH_NVN2 4          // NVN2 compute keeps them here, below its per-shader layout at 0x10 (x and y read by Fire Emblem Fortune's Weave's light culling; z by their order)
 #define DMSH_C0_CS_UBO 0x210             // compute: uniform slot r's address and size at 0x210 + 0x10 r, read through global memory (the build's ubo_ptr bindings); it ends where the storage buffer table starts
 #define DMSH_C0_CS_UBO_SLOTS 16          // uniform slots of that table
+// NVN2 graphics stages read the buffer entries the game pushes for them from a bank of their own: stage i's (vertex 0, hull or mesh 1, domain 2, geometry 3, pixel 4) is
+// c[25 + i], which holds graphics push block 1 + i (DMSH_PUSH_BLOCKS): {address, size} entries of 16 bytes, or 8-byte handles. PRAGMATA's shaders read c[25] in 9,944
+// vertex shaders, c[26] in 538 mesh and 3 hull shaders, c[27] in 37 domain shaders, c[28] in 1 geometry shader and c[29] in 12,195 pixel shaders, and the game binds no
+// storage buffer at all. The translator maps the bank onto that block of c[24] (the build's job key stage_bank, InstEmitAmpere.cs AStageBlock)
+#define DMSH_NVN2_STAGE_BANK 25
 
 // NVN2 push constants (nvnCommandBufferPushGraphicsConstants / PushComputeConstants): the bytes the game pushes, read by its shaders as c[24] (the translator maps NVN2
 // compute's c0 push region there); one block for the graphics stages, one for compute
@@ -47,6 +52,16 @@
 // the current bindings; only a shader with such a read has the table
 #define DMSH_CBSIZE_BANK 25
 #define DMSH_CBSIZE_SLOTS 14             // a u32 for each of uniform slots 0 to 13, as four uint4: 64 bytes
+// Buffer image offsets: Metal makes a buffer texture only at an aligned offset of its buffer, and an Apple GPU addresses a view below that alignment from the boundary below
+// its offset, so every access landed that many bytes early. The host binds such an image as a view from that boundary, wider by the elements in between, and gives their count
+// in a table in a bank of its own (Ryujinx Constants.NxBufferImageBiasBank), which the shader adds to each coordinate of the image; only a shader with a buffer image has it
+#define DMSH_TBIAS_BANK 26
+#define DMSH_TBIAS_SLOTS 16              // a u32 for each of a shader's first 16 buffer images, as four uint4: 64 bytes (the image's index: its binding's "tbx")
+// The push call's word before the offset names a block of the stage group; c[24] holds block b at b * DMSH_PUSH_SIZE. Block 0 holds the group's constants. Block 1 + i holds
+// stage i's buffer entries: compute has one stage and reads block 1 where its c0 layout counts it (control +0xaa, in words, right after block 0's +0xa9; the translator maps it
+// to c[24] + DMSH_PUSH_SIZE); graphics stage i reads its block through its own bank (DMSH_NVN2_STAGE_BANK + i), up to the pixel stage's block 5. PRAGMATA pushes 16-byte buffer
+// entries (a 64-bit GPU address, then a size) or 8-byte handles there before its dispatches and draws, and its shaders load and store through those addresses
+#define DMSH_PUSH_BLOCKS 6
 #define DMSH_C0_POINT_SIZE 0x610         // graphics stages: the largest point size, to which GLSLC clamps a shader-written gl_PointSize (Super Mario Odyssey's point sprites)
 #define DMSH_C0_SAMPLE_TABLE 0x620       // pixel stage: GLSLC's sample position table, one byte per (pixel of the location grid, sample): x and y in 1/16 pixel, low and high nibble
 #define DMSH_C0_SAMPLE_BYTES 16          // bytes of that table
@@ -58,10 +73,12 @@
 #define DMSH_KIND_C1 "c1"                // the shader's own constant segment c[1] (its bytes are the json's c1)
 #define DMSH_KIND_DRVCB "drvcb"          // a driver segment, c[bank] (bank 0 or 2): NVN_RB_DRV0 / NVN_RB_DRV2
 #define DMSH_KIND_CBSIZE "cbsize"        // the uniform slots' bound sizes, c[DMSH_CBSIZE_BANK]: NVN_RB_CBSIZE
+#define DMSH_KIND_TBIAS "tbias"          // the buffer images' element offsets, c[DMSH_TBIAS_BANK]: NVN_RB_TBIAS
 #define DMSH_KIND_SUPPORT "support"      // the translator's support buffer
 #define DMSH_KIND_GEOMETRY "geometry"    // one of the geometry lowering's helper buffers, reg = its index (dmsh_geometry.py HELPERS)
 #define DMSH_KIND_SBUF "sbuf"            // storage buffer slot reg, its address in the stage's c0 table; rw = the shader writes it
 #define DMSH_KIND_SBUF_UBO "sbuf_ubo"    // a storage buffer whose address the game keeps in its own uniform slot reg at byte off
+#define DMSH_KIND_SBUF_PUSH "sbuf_push"  // a storage buffer whose address the game pushed: c[24] (both push blocks, DMSH_PUSH_BLOCKS) at byte off
 #define DMSH_KIND_UBO_PTR "ubo_ptr"      // compute: uniform slot reg read through its address in c0 (DMSH_C0_CS_UBO)
 #define DMSH_KIND_TEX "tex"              // texture slot reg (combined, or DMSH_SEPTEX_SLOT0 + r for a separate texture)
 #define DMSH_KIND_TBUF "tbuf"            // a buffer texture in texture slot reg
@@ -102,12 +119,21 @@
 // The alpha test's state (dm/gfx/tools/dmsh_alpha.py, the _a entry points of the <key>_bx libraries): uint function (NVN_ALPHA_FUNC_*), float reference, at this fragment buffer index (nvn_mtl.m at_bind)
 #define DMSH_ALPHA_BUFFER 30             // the fragment argument table's last binding; translated shaders use only buffer 0 there
 
+// NVIDIA's "zero times anything is zero" float blend option, which NVN's driver switches on (SET_BLEND_FLOAT_OPTION; dm/gfx/tools/dmsh_rewrite.py blend_zero): a uint at this fragment buffer
+// index, DMSH_BLEND_ZERO_BITS bits per colour output from bit 0: 0 = the output's source colour weight is not known to be zero, 1 = it is zero where the output's alpha is 0 (SRC_ALPHA),
+// 2 = where its alpha is 1 (ONE_MINUS_SRC_ALPHA) (nvn_mtl.m bz_bind). A factor of ZERO needs none: Apple's blender leaves that term out (dm/gfx/tests/t_blend_zero.m)
+#define DMSH_BLEND_BUFFER 28
+#define DMSH_BLEND_ZERO_BITS 2
+
 // Border colours Metal has no sampler state for (it has transparent black, opaque black and opaque white): the build gives each sampler member a shader samples through a twin,
 // <member>_w, and the shader a block it reads per sample, r + (twin sample - r) * k when the sampler's bit is set (dmsh_rewrite.py border_emu, nvn_border.h)
 #define DMSH_BORDER_SAMPLERS 32          // sampler members one shader corrects (the bits of the block's mask word at byte 0; members past these keep Metal's nearest colour)
 #define DMSH_BORDER_K 0x10               // byte offset of sampler bit i's factors k (a float4) in the block: DMSH_BORDER_K + 16 i
 #define DMSH_BORDER_TWIN "_w"            // the suffix of a twin sampler member's name
 #define DMSH_BORDER_MEMBER "dm_border"   // the name of the block's member in the argument buffer
+// The corrections' function constant (bool, every stage): true turns them off, for a pipeline whose draw or dispatch binds no sampler with a
+// twin (nvn_mtl.m border_need, fn_off). The twin samples go, and the registers they kept: Ocarina of Time's 1080p material passes spilled 300-400 bytes a thread with them. Undefined, every sample corrects as its bit says
+#define DMSH_BORDER_FC 216
 // The logic operation's state (dm/gfx/tools/dmsh_logic.py, the _l entry points of the <key>_bx libraries): uint operation (NVN_LOGIC_OP_*), 12 bytes of padding, a uint4 channel mask per colour target, at this fragment buffer index (nvn_mtl.m lo_bind)
 #define DMSH_LOGIC_BUFFER 29
 // Its function constants: bool, colour target n is attached (the variant reads it only then), at this index + n (nvn_mtl.m lo_fn specializes the entry point per pass's targets)

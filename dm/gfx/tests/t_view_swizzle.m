@@ -80,7 +80,7 @@ static void in_place_case(int tid, int format, const uint16_t pixels[2], const u
     id<MTLTexture> base = [b newTextureWithDescriptor:d offset:0 bytesPerRow:256];
     CHECK(base != nil, "texture on a buffer created");
     serial_put(t.serial, base);
-    mtl_reg_tex(tid, &t, NULL);   // NOLINT(clang-analyzer-osx.cocoa.RetainCount): base is held by the serial table (serial_put), which the analyzer does not follow
+    mtl_reg_tex(tid, &t, NULL);
     os_unfair_lock_lock(&g_rmu); id<MTLTexture> view = tex_by_id(tid); os_unfair_lock_unlock(&g_rmu);
     read_check(tid, view, expected, 0.001f);
     CHECK(!memcmp(b.contents, pixels, 4), "the guest's bits are left as they are");

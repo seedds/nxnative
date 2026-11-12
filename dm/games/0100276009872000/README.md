@@ -32,7 +32,9 @@ On the Mac (2026-11-06, M4 Pro): the logos, the Joy-Con notice, the intro movie,
 
 ## Found on this game
 
-Nothing new: it runs on mechanisms found on other games, SDK 4.5.0's NVN, movie library and services included ([DARK SOULS: REMASTERED](../01004AB00A260000/README.md) and [SteamWorld Heist: Ultimate Edition](../010016100A186000/README.md) share the SDK).
+It runs on mechanisms found on other games, SDK 4.5.0's NVN, movie library and services included ([DARK SOULS: REMASTERED](../01004AB00A260000/README.md) and [SteamWorld Heist: Ultimate Edition](../010016100A186000/README.md) share the SDK).
+
+- **Pipeline archive keys name a library by its bytes** (resolved): which vertex library its prewarm took varied between starts, so 2 to 8 bases were compiled again at some starts; `a7537d4f1786cfda` and `b555f7058434e1fa` are one library: [rendering.md](../../../docs/reference/rendering.md#bases-of-byte-identical-libraries-compiled-again-at-every-start).
 
 ## Open
 

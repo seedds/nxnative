@@ -8,13 +8,51 @@ sys.path.insert(0, str(REPO / 'dm/tools'))
 import shader_cache
 
 D1, D2, D3 = 'a' * 64, 'b' * 64, 'c' * 64
-FORKED = None   # the store test_forked_workers_share_it's workers inherit
+APPLE_PYTHON = '/usr/bin/python3'   # Xcode's, whose sqlite3 is Apple's /usr/lib/libsqlite3.dylib: a fork that opens a database there dies (GitHub issue #2354)
+SERVED = STORE = None   # what the forked workers inherit, and each worker's own store
+
+
+def worker_start():
+    global STORE
+    assert SERVED is not None; STORE = SERVED.worker()
 
 
 def forked_work(i):
-    s = FORKED; assert s is not None
+    s = STORE; assert s is not None
     for j in range(300): s.put(f'f{i}/{j}', f'{i}'.encode() * 1000); assert s.get(f'f{i}/{j}') == f'{i}'.encode() * 1000
-    return s.get('before')
+    with s.batch():
+        with s.batch(): s.put(f'f{i}/batch', b'b')
+        assert s.has(f'f{i}/batch')
+    try:
+        with s.batch(): s.put(f'f{i}/undone', b'u'); raise KeyError(i)
+    except KeyError: pass
+    try: s._call('close')
+    except ValueError: pass
+    else: raise AssertionError('a worker closed the store')
+    tmp = f'{WORK}/{i}'
+    assert s.to_file(f'f{i}/0', tmp) and not s.to_file('none', tmp); s.put_file(f'f{i}/file', tmp)
+    return s.get('before'), sorted(s.names(f'f{i}/'))[-2:], s.get(f'f{i}/file'), s.full
+
+
+def dies_in_batch(i):
+    s = STORE; assert s is not None
+    with s.batch(): s.put('dead', b'd'); os._exit(9)
+
+
+def forked_stores(path, work):
+    """Four forked workers of a process that has opened the store, as dmsh_build.py makes them → their results, and what the store holds then"""
+    import multiprocessing
+    global SERVED, WORK
+    WORK = work; store = shader_cache.Store(path); store.put('before', b'0'); SERVED = shader_cache.Served(store, 4)
+    with multiprocessing.get_context('fork').Pool(4, initializer=worker_start) as pool:   # every worker forked here, on any Python (an executor of Python 3.9 forks them as work comes)
+        SERVED.start()
+        got = pool.map(forked_work, range(4), 1)
+    store.put('after', b'1')   # this process's connection still works
+    return got, len(store.names('f')), store.has('f0/undone'), store.get('after')
+
+
+WORK = ''
+EXPECT = ([(b'0', [f'f{i}/batch', f'f{i}/file'], f'{i}'.encode() * 1000, False) for i in range(4)], 1208, False, b'1')
 
 
 class Base(unittest.TestCase):
@@ -94,14 +132,29 @@ class Writers(Base):
         self.assertEqual([p.wait() for p in ps], [0, 0, 0, 0])
         self.assertEqual(len(self.store.names('p')), 1200)
 
-    def test_forked_workers_share_it(self):   # dmsh_build.py's worker processes: forks of a process that has the file open, each with a connection of its own
+    def test_forked_workers_share_it(self):   # dmsh_build.py's worker processes: forks of a process that has the file open, their calls made by that process
+        self.store.close()
+        self.assertEqual(forked_stores(self.path, str(self.root)), EXPECT)
+
+    def test_forked_workers_with_apples_sqlite(self):   # the same with a Python whose SQLite is Apple's, where a fork that opens the file is killed
+        probe = "import _sqlite3, subprocess; print(subprocess.run(['otool', '-L', _sqlite3.__file__], capture_output=True, text=True).stdout)"
+        try: libs = subprocess.run([APPLE_PYTHON, '-c', probe], capture_output=True, text=True, timeout=60).stdout
+        except (OSError, subprocess.TimeoutExpired): libs = ''
+        if '/usr/lib/libsqlite3.dylib' not in libs: self.skipTest(f"no {APPLE_PYTHON} with Apple's SQLite")
+        self.store.close()
+        code = "import sys; sys.path.insert(0, sys.argv[1]); import test_shader_cache as t; assert t.forked_stores(sys.argv[2], sys.argv[3]) == t.EXPECT, 'results differ'"
+        r = subprocess.run([APPLE_PYTHON, '-c', code, str(Path(__file__).parent), str(self.path), str(self.root)], capture_output=True, text=True, timeout=300)
+        self.assertEqual((r.returncode, r.stderr), (0, ''))
+
+    def test_worker_dying_in_a_batch(self):   # its batch is rolled back and the store goes on
         import concurrent.futures as cf, multiprocessing
-        global FORKED; FORKED = self.store
-        self.store.put('before', b'0')
-        with cf.ProcessPoolExecutor(4, mp_context=multiprocessing.get_context('fork'), initializer=self.store.forked) as ex:
-            self.assertEqual(list(ex.map(forked_work, range(4))), [b'0'] * 4)
-        self.assertEqual(len(self.store.names('f')), 1200)
-        self.store.put('after', b'1'); self.assertEqual(self.store.get('after'), b'1')   # the inherited connection still works here
+        global SERVED; SERVED = shader_cache.Served(self.store, 2)
+        with cf.ProcessPoolExecutor(2, mp_context=multiprocessing.get_context('fork'), initializer=worker_start) as ex:
+            ex.submit(int).result(); SERVED.start()
+            with self.assertRaises(cf.process.BrokenProcessPool): ex.submit(dies_in_batch, 0).result()
+        t = threading.Thread(target=lambda: self.store.put('alive', b'a')); t.start(); t.join(20)
+        self.assertFalse(t.is_alive()); self.assertFalse(self.store.has('dead')); self.assertTrue(self.store.has('alive'))
+
 
     def test_a_killed_writer_loses_only_what_it_had_not_committed(self):
         code = ("import os, sys; sys.path.insert(0, sys.argv[1]); import shader_cache\ns = shader_cache.Store(sys.argv[2]); s.put('done', b'1')\n"

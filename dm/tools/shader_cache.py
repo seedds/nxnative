@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # The shader build's compile cache as one file, cas.db, read and written in place. It was a folder of a few files per shader (Metroid Dread: 84,541 files), kept as a tar between builds and unpacked
 # for each build that ran. Nothing is unpacked now: an entry goes in and comes out by its name, and a file a tool needs is written only then.
-# SQLite, as it is in Python and takes several writers: dmsh_build.py's threads share one connection (its worker processes have one each: forked), and regress.py's chain builds and the NSP script can share a game's file at once (the wait is SQLite's).
+# SQLite, as it is in Python and takes several writers: dmsh_build.py's threads share one connection (its worker processes use that one too, through this process: Served), and regress.py's chain builds and the NSP script can share a game's file at once (the wait is SQLite's).
 # Two tables: entry (name, the blob it names, when it was written) and blob (the bytes, once each). A library kept under its MSL's digest and under its shader's digest was one APFS clone of the other; inside
 # one file it would be two copies, so bytes are stored by their hash. A file removed from the cache gives its pages back at the next prune (incremental vacuum), with no copy of the file.
 # It only saves work: a damaged file costs the work it held and is made anew, and a full drive is one [RED] line. An entry is written and read whole, so its file is never seen half written.
 # Names, as in the folder this replaces: metallib/<target>/<digest>[_x].metallib (dmsh_mtlcache.py), shader/<digest>/<mac|ios>/<output>, index/<key>.json, variant/<digest>/<file> (dmsh_build.py).
 # Not part of the translation chain: it decides no output (dmsh_chain.py), like dmsh_mtlcache.py.
-import contextlib, hashlib, json, os, re, shutil, sqlite3, tarfile, threading, time
+import contextlib, hashlib, json, multiprocessing, os, re, shutil, sqlite3, tarfile, threading, time
 
 SCHEMA = ('CREATE TABLE IF NOT EXISTS blob(id INTEGER PRIMARY KEY, hash BLOB UNIQUE NOT NULL, data BLOB NOT NULL)',
           'CREATE TABLE IF NOT EXISTS entry(name TEXT PRIMARY KEY, blob INTEGER NOT NULL, mtime REAL NOT NULL) WITHOUT ROWID')
@@ -16,7 +16,23 @@ WAIT = 600   # seconds another process's write may hold this one up
 _DAMAGED = ('malformed', 'not a database', 'disk image')
 
 
-class Store:
+class _Files:   # an entry from or to a file, by get and put
+    def get(self, name) -> 'bytes | None': raise NotImplementedError
+    def put(self, name, data, when=None): raise NotImplementedError
+
+    def put_file(self, name, path):
+        with open(path, 'rb') as f: self.put(name, f.read())
+
+    def to_file(self, name, path):   # an entry written to path, whole or not at all; False when there is none
+        data = self.get(name)
+        if data is None: return False
+        tmp = f'{path}.tmp-{os.getpid()}-{threading.get_ident()}'
+        with open(tmp, 'wb') as f: f.write(data)
+        os.replace(tmp, path)
+        return True
+
+
+class Store(_Files):
     def __init__(self, path, say=print):
         self.path, self.say = os.fspath(path), say
         self.lock = threading.RLock()   # one connection, for dmsh_build.py's threads: a read or a write of an entry takes microseconds next to a compile
@@ -34,12 +50,6 @@ class Store:
             for s in SCHEMA: self.db.execute(s)
         except sqlite3.DatabaseError as e:
             if not self._damage(e): raise
-
-    def forked(self):
-        """A connection of its own in a forked process (dmsh_build.py's workers): SQLite's must not be used across a fork, not even closed, so the inherited one is only kept"""
-        self._inherited = self.db
-        self.lock = threading.RLock()
-        self._open()
 
     def _damage(self, e):   # True when e says the file is damaged, which is now made anew
         if not any(w in str(e) for w in _DAMAGED): return False
@@ -80,17 +90,6 @@ class Store:
                 elif not self.full: self.full = True; self.say(f'[RED] the shader compile cache {self.path} cannot be written, the build goes on without it: {e}')
             except sqlite3.DatabaseError as e:
                 if not self._damage(e): raise
-
-    def put_file(self, name, path):
-        with open(path, 'rb') as f: self.put(name, f.read())
-
-    def to_file(self, name, path):   # an entry written to path, whole or not at all; False when there is none
-        data = self.get(name)
-        if data is None: return False
-        tmp = f'{path}.tmp-{os.getpid()}-{threading.get_ident()}'
-        with open(tmp, 'wb') as f: f.write(data)
-        os.replace(tmp, path)
-        return True
 
     @contextlib.contextmanager
     def batch(self):
@@ -135,6 +134,86 @@ class Store:
 
     def close(self):   # also folds the write-ahead log into the file, so that one file is left
         with self.lock, contextlib.suppress(sqlite3.Error): self.db.close()
+
+
+class _Gone(Exception): pass    # a worker's end closed inside its batch
+class _Abort(Exception): pass   # a worker's batch raised
+
+
+class Served:
+    """A store for forked worker processes (dmsh_build.py's), which must not open the file themselves: Apple's SQLite (/usr/lib/libsqlite3.dylib, which Xcode's Python and Pythons built
+    from source use) calls os_signpost when it opens a database, and in a fork of a process that has opened one, that call reads the parent's logging state at an address the child does
+    not have (SIGSEGV in _os_log_preferences_refresh, GitHub issue #2354). So the process that opened the store makes every call: each worker has a pipe to a thread here, which stands
+    where that worker's thread stood when the build finished its shaders in threads, on the one connection and under its lock. A worker's batch is that thread's batch, so it is whole
+    or absent as before, and is rolled back when the worker dies inside it.
+    Made before the fork; start() here once every worker is forked (it starts threads); worker() in each worker gives its store (get, has, names, put, put_file, to_file, delete_prefix, batch, full)"""
+    OPS = ('get', 'has', 'names', 'put', 'delete_prefix')
+
+    def __init__(self, store, n):
+        ctx = multiprocessing.get_context('fork')
+        self.store, self.pipes, self.taken = store, [ctx.Pipe() for _ in range(n)], ctx.Value('i', 0)
+
+    def start(self):
+        for here, there in self.pipes:
+            there.close()   # so that a dead worker ends its thread's read
+            threading.Thread(target=self._serve, args=(here,), daemon=True).start()
+
+    def worker(self):
+        with self.taken.get_lock(): i = self.taken.value; self.taken.value += 1
+        for j, (here, there) in enumerate(self.pipes):
+            here.close()
+            if j != i: there.close()
+        return Remote(self.pipes[i][1])
+
+    def _serve(self, conn):
+        with contextlib.suppress(_Gone, EOFError, OSError): self._calls(conn, False)
+
+    def _calls(self, conn, inside):   # answers a worker's calls: until its end closes, or inside its batch until the batch ends
+        s = self.store
+        while True:
+            try: op, args = conn.recv()
+            except (EOFError, OSError):
+                if inside: raise _Gone from None
+                return
+            if op == 'end' and inside: return
+            if op == 'abort' and inside: raise _Abort
+            try:
+                if op == 'begin' and not inside:
+                    try:
+                        with s.batch(): conn.send((True, None, s.full)); self._calls(conn, True)
+                    except _Abort: pass
+                    value = None   # the answer to the batch's end, once it is committed or rolled back
+                elif op in self.OPS: value = getattr(s, op)(*args)
+                else: raise ValueError(f'shader cache: no call {op!r}')
+            except _Gone: raise
+            except Exception as e: conn.send((False, e, s.full))
+            else: conn.send((True, value, s.full))
+
+
+class Remote(_Files):
+    """A worker's store (Served.worker): each call is made by the process that opened the file"""
+    def __init__(self, conn): self.conn, self.lock, self.inside, self.full = conn, threading.RLock(), False, False
+
+    def _call(self, op, *args):
+        with self.lock:
+            self.conn.send((op, args)); ok, value, self.full = self.conn.recv()
+        if not ok: raise value
+        return value
+
+    def get(self, name): return self._call('get', name)
+    def has(self, name): return self._call('has', name)
+    def names(self, prefix): return self._call('names', prefix)
+    def put(self, name, data, when=None): self._call('put', name, data, when)
+    def delete_prefix(self, prefix): self._call('delete_prefix', prefix)
+
+    @contextlib.contextmanager
+    def batch(self):   # as Store.batch: nests, and the lock is held for all of it
+        with self.lock:
+            if self.inside: yield; return
+            self._call('begin'); self.inside = True
+            try: yield
+            except BaseException: self.inside = False; self._call('abort'); raise
+            else: self.inside = False; self._call('end')
 
 
 def _adopted_name(name):

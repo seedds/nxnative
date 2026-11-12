@@ -33,6 +33,7 @@ Community projects build on nxnative with tools to turn your games into apps for
 - [NX2Apple](https://github.com/LNPANDY/NX2Apple) — Mac builder with a shared iPhone/iPad game library.
 - [NX Play](https://github.com/varyform/nx-native-wrapper) — Mac library with device installs and save sync.
 - [NxNative Launcher](https://github.com/rennan101/nxnative_Launcher) — Mac launcher with guided builds and controller mapping.
+- [nxnative Easy](https://github.com/nalancer08/nxnative-easy) — Mac game library with guided builds, iPhone/iPad installation and signature renewal, and iCloud save sync.
 - [LumaNX](https://github.com/Xc1Ym/LumaNX) — Mac game builder with IPA export.
 - [GameCase](https://github.com/Tiaoge-tou/GameCase) — iOS game library based on LiveContainer.
 

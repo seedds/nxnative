@@ -2762,6 +2762,22 @@ def mac_app_name(name):   # the app's file name: the game name with the characte
     return re.sub(r'\s*[:/]\s*', ' - ', name).strip(' .-') or 'nxnative'
 
 
+def mac_app_title_id(app, g, dump):
+    """An extracted dump's selected program owns its Mac save and pipeline cache.
+
+    The application ID still identifies the update and DLC while packing. An
+    extracted Program 1 may have its own profile and needs a separate launcher
+    identity from Program 0. NSPs and NUPs keep the application's existing ID.
+    """
+    return g.title_id if dump == 'folder' else app
+
+
+def build_bundle_id(title_id, requested, saved_signing, selected_extracted_mac_program=False):
+    """Keep saved signing unless an extracted Mac app selects another program."""
+    stored = None if selected_extracted_mac_program else saved_signing.get('PRODUCT_BUNDLE_IDENTIFIER')
+    return requested or stored or f'org.nxnative.{title_id:016x}'
+
+
 def mac_app(py, repo, out, app, work, game, patched, host, font, msl, aoc, gfx, lang, g, name, version, bundle_id, icon, sign, env, logs, env_file='', gpus='', programs=None, control=None):
     """The last stage of PLATFORM 'mac-app': pack the Mac app (dm/mac/pack_app.py) from what a Mac-only build made: the Mac host and font (mac_host), the packed version's RomFS and rewritten
     modules, the Mac shader libraries (msl: <shader>/cache, whose b-<chain> goes in, or a Vulkan or GL game's <shader>, whose vk / gl goes in), the DLC, the profile's tables (with the shader pairs
@@ -2811,7 +2827,7 @@ def parse_args(argv):
     ap.add_argument('-p', '--package', help='version packed into the IPA, e.g. v327680 / v0 (default: the newest in the folder)')
     ap.add_argument('-o', '--out', help='output IPA, or app with --platform mac-app (default: <the profile\'s ipa>, or <game name>.app, in the NSP folder)')
     ap.add_argument('--app-name', help='app name on the home screen (default: the game name in the base NSP)')
-    ap.add_argument('--bundle-id', help='the app\'s bundle ID (default: saved Xcode ID when preparing again, else org.nxnative.<base game title ID in lowercase>)')
+    ap.add_argument('--bundle-id', help='the app\'s bundle ID (default: saved Xcode ID when preparing again, else org.nxnative.<title ID in lowercase>; extracted-folder Mac apps use their selected program\'s title ID)')
     ap.add_argument('--romfs', choices=('bundle', 'separate'), help='bundle = the game files go into the IPA (default: the ROMFS setting, bundle); separate = they stay out of the IPA and the Xcode app: the build is small and fast, and the RomFS image '
                     'is copied to the phone once per game version with the scripts/push_romfs.sh command printed at the end (the app refuses an image of another version)')
     ap.add_argument('--shader-files', action=argparse.BooleanOptionalAction, help='an NVN game\'s shader library goes into the IPA as its separate files, not as one file, for install tools that cannot copy '
@@ -3123,10 +3139,11 @@ def main(args=None):
     aoc = extract_aoc(nx, keys, repo, work, app, fam, logs)
     dlc_roms = sorted(p for p in aoc.iterdir() if p.is_dir() or p.suffix == '.img') if aoc else []
     base = next((dirs[v] for v in versions if picks[v][1] is None), dirs[versions[0]])   # the folder the base game was extracted to alone
-    # the app name and bundle ID both come from the base NSP: the game name in its control data, and a bundle ID from its title ID; a setting / the command line overrides them
+    # The app name comes from the control data, and the default bundle ID names the launched program. Explicit settings and command-line values override it.
     app_name = args.app_name or APP_NAME or nacp.name(base / 'control.nacp') or (g.get('name') if dump else '')   # a dump has no control data, a NUP may have no NACP
     if not app_name and not (mac and not mac_pack): raise BuildError(f'no game name in the base extraction ({base / "control.nacp"}; an older extraction did not save it: delete extract/ and run again, or give --app-name)')
-    bundle_id = args.bundle_id or BUNDLE_ID or saved_signing.get('PRODUCT_BUNDLE_IDENTIFIER') or f'org.nxnative.{app:016x}'
+    launch_id = mac_app_title_id(app, g, dump) if mac_pack else app
+    bundle_id = build_bundle_id(launch_id, args.bundle_id or BUNDLE_ID, saved_signing, mac_pack and dump == 'folder' and launch_id != app)
     team_id = args.team_id or TEAM_ID or env.get('DM_TEAM_ID') or saved_signing.get('DEVELOPMENT_TEAM') or '0000000000'
     if prepare_xcode:
         try: xcode_projects.check_bundle_id(workspace, project, bundle_id)
@@ -3198,11 +3215,11 @@ def main(args=None):
         host, font = mac_host(py, repo, work, env, logs, g)
         programs = other_programs(args, g)
         if not icon: say(('no game icon: the NUP carries none' if nup else 'no game icon: a dump folder has no control data') + '; the app\'s icon will be blank; --icon / ICON or --fallback-icon / FALLBACK_ICON gives it one' if dump else '[RED] no game icon in the extraction (an older extraction did not save it: delete extract/ and run again); the app\'s icon will be blank')
-        mac_app(py, repo, out_ipa, app, work, game, patched, host, font, ios, aoc, gfx, lang, g, app_name, app_version, bundle_id, icon, args.mac_sign or MAC_SIGN, env, logs, env_file,
+        mac_app(py, repo, out_ipa, launch_id, work, game, patched, host, font, ios, aoc, gfx, lang, g, app_name, app_version, bundle_id, icon, args.mac_sign or MAC_SIGN, env, logs, env_file,
                 (args.gpu or PSO_GPUS).strip(), programs, control)
         rmtree(work / 'tmp')
         say(f'done: {out_ipa} ({tree_size(out_ipa)[1] / 2**30:.1f} GB); '
-            f'open it from Finder. Its save is in ~/Library/Application Support/nxnative/{app:016X}/, its log in ~/Library/Logs/nxnative/{app:016X}.log')
+            f'open it from Finder. Its save is in ~/Library/Application Support/nxnative/{launch_id:016X}/, its log in ~/Library/Logs/nxnative/{launch_id:016X}.log')
         if seen_shaders: say('a partial shader library: where a shader is missing, the log says so in red and the draw goes without it. Run this script again with --seen-shaders to add what the log names, or without it for the whole map')
         report_profile_status(g, reg, pkg_ver, derived, provisional, 'Mac app', patched)
         return

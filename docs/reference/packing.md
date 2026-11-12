@@ -292,6 +292,13 @@
 - **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md) (1.2.1, v327680, an update-only NUP; `main` ff773e90…, the registered build): `Ver. ?` before, `Ver. 1.2.1` after, one Mac boot each to the title screen.
 - **Check:** `dm/tools/tests/test_nsp_alias.py` `test_derived_profile_keeps_the_display_version_the_profile_registers_for_the_build`.
 
+### An extracted Program 1 Mac app uses Program 0's save folder
+
+- **Symptom:** a Mac app built from an extracted Switch 2 Edition's Program 1 uses the original game's save and pipeline-cache directory, even when its selected game profile names Program 1.
+- **Cause:** the extracted dump's application ID selects its update and DLC, but `build_ipa_from_nsp.py` also passed that ID to `pack_app.py` as the Mac launcher's `DMTitleID` and used it for the default bundle ID. Those values name the host's save and Metal pipeline-cache namespace.
+- **Fix:** for a Mac app built from an extracted folder, use the selected profile's `title_id` for the launcher, default bundle ID and reported save/log path. Keep the application's ID for update and DLC selection; NSP, NUP and iOS builds retain their existing identity. Synthetic tests cover both programs and the unchanged package types. Selecting Program 1 from an extracted folder requires the separate [dump-layout support in #1253](https://github.com/seedds/nxnative/pull/1253) or equivalent.
+- **Found on:** [Super Mario Bros. Wonder Switch 2 Edition Program 1](https://github.com/seedds/nxnative/pull/1563) (`040015100B514001`), which must remain separate from the original (`010015100B514000`).
+
 ### No Game language row in an app packed from a NUP or a dump
 
 - **Symptom:** the settings of a Mac app or IPA packed from a NUP or a dump folder have no Game language row, while `DM_LANG` in the environment changes the language. Reported on [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md) ([NX2Apple#619](https://github.com/LNPANDY/NX2Apple/issues/619), [#659](https://github.com/LNPANDY/NX2Apple/issues/659); the reporters' packed files were not available).

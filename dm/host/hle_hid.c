@@ -241,6 +241,12 @@ static void *ctl_main(void *arg) {
                 size_t n = strlen(line); if (!n || line[n - 1] != '\n') break;   // a line still being written: read it next time
                 off += (long)n; line[--n] = 0; if (n && line[n - 1] == '\r') line[--n] = 0;
                 if (!n || line[0] == '#') continue;
+                if (!strncmp(line, "mod-on ", 7) || !strncmp(line, "mod-off ", 8)) {
+                    int on = line[5] == 'n'; const char *name = line + (on ? 7 : 8), *why = "no such mod";
+                    for (int i = 0; i < dm_mods_count(); i++) if (!strcmp(dm_mods_name(i), name)) { dm_mods_set(i, on); why = NULL; }
+                    if (why) LOG("[RED] DM_CTL: %s: %s", line, why);
+                    continue;
+                }
                 if (!strcmp(line, "dump")) { crash_dump_now("DM_CTL dump"); continue; }
                 if (!strncmp(line, "atrace ", 7)) { void probe_atrace(uint64_t lo, uint64_t n); char *e2; uint64_t a = strtoull(line + 7, &e2, 16); probe_atrace(a, strtoull(e2, NULL, 0)); continue; }   // probe.c
                 if (!strncmp(line, "program ", 8)) { void dm_oe_execute(int index, const void *param, size_t n); LOG("DM_CTL: oe::ExecuteProgram(%d)", atoi(line + 8)); dm_oe_execute(atoi(line + 8), NULL, 0); continue; }

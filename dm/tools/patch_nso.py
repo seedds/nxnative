@@ -169,6 +169,33 @@ if NAME == 'main' and BUILD_ID not in PATCHES['FRAME_STEP']:
 # every other module keeps its layout
 if (BUILD_ID in PATCHES['FRAME_STEP'] or FS_MATCH) and NAME == 'main' and not FAR and PATCH_OFF < KEY_PAGE_OFF + 0x4000 + 0x1000:
     PATCH_OFF += 0x10000
+# ---- Mod patches (DM_MOD_PATCHES=<file>, written by dm/tools/mods_rewrite.py): the .pchtxt / .ips patches of the player's mods that the host cannot make in the mapped image
+# (hle_mods.c: an instruction this rewriter must replace, or a word it changed). Lines of image offset, bytes and the patch file's label, lowest priority first. They become
+# part of the module's code here: after the cuts and the frame step were found on the game's own code (a function fingerprint would not find a patched function), before anything
+# is rewritten. A patch that overlaps a cut, a frame step site or an observation gate cannot hold together with it: its whole file is refused by name (MOD_REFUSED lines, exit
+# status 4), and mods_rewrite.py runs the rewrite again without that file
+MOD_RECS = []
+def mod_overlap(off, n): return sorted({label for o, data, label in MOD_RECS if o < off + n and off < o + len(data)})
+def mod_refuse(found):
+    for label, why in found: print(f'MOD_REFUSED\t{label}\t{why}')
+    sys.stdout.flush(); sys.exit(4)
+def mod_conflict(off, n, what):
+    hit = mod_overlap(off, n)
+    if hit: mod_refuse([(label, f'it patches {NAME}+{off:#x}, where the rewriter has {what}') for label in hit])
+if os.environ.get('DM_MOD_PATCHES'):
+    with open(os.environ['DM_MOD_PATCHES'], encoding='utf-8') as f:
+        for line in f:
+            c = line.rstrip('\n').split('\t')
+            if len(c) == 3: MOD_RECS.append((int(c[0], 16), bytes.fromhex(c[1]), c[2]))
+    mod_end, refused = len(MOD.image) + (0 if FAR else bss), {}
+    for o, data, label in MOD_RECS:
+        if o + len(data) > mod_end: refused.setdefault(label, f'it patches {NAME}+{o:#x}, outside the module\'s image')
+    for off, ob, nb, why in cuts:
+        for label in mod_overlap(off, len(ob) // 2): refused.setdefault(label, f'it patches {NAME}+{off:#x}, where the rewriter has a cut ({why})')
+    if refused: mod_refuse(sorted(refused.items()))
+    for o, data, label in MOD_RECS: IMG[o:o + len(data)] = data
+    ORIG_TEXT = bytes(IMG[:TEXT_END])
+    print(f'{NAME}: {len(MOD_RECS)} mod patch(es) of {len({label for _, _, label in MOD_RECS})} file(s) applied before the rewrite')
 for off, ob, nb, why in cuts:
     ob, nb = bytes.fromhex(ob), bytes.fromhex(nb)
     assert len(ob) == len(nb) and IMG[off:off + len(ob)] == ob, f'cut original bytes mismatch {off:#x}: {bytes(IMG[off:off + len(ob)]).hex()}'
@@ -1555,6 +1582,7 @@ for a in sorted(kinds):
 
 obs = list(PATCHES['OBS'].get(BUILD_ID, []))
 for off, oid, ow, why in obs:
+    mod_conflict(off, 4, f'an observation gate ({why})')
     w = struct.unpack_from('<I', IMG, off)[0]
     assert f'{w:08x}' == ow, f'observation gate original instruction mismatch {off:#x}: {w:08x}'
     # Any instruction site_obs can relocate: the gate frame saves x0–x28 and the flags and restores them (dm/host/entry.S), so the code around it sees its registers as they were
@@ -1649,10 +1677,12 @@ if (BUILD_ID in FRAME_STEP or FS_MATCH) and NAME == 'main':
 # data addresses read from the original text
 def stub_site(off, orig, what):
     ob = bytes.fromhex(orig)
+    mod_conflict(off, len(ob), f'a {what} site')
     assert IMG[off:off + len(ob)] == ob, f'{what} original bytes mismatch {off:#x}: {bytes(IMG[off:off + len(ob)]).hex()}'
     for o in range(off, off + len(ob), 4):
         assert o not in kinds and not any(seg[0].address <= o < seg[-1].address + 4 for seg in windows), f'{what} site is a rewrite site {o:#x}'
 def stub_put(off, words, why, kind):
+    mod_conflict(off, 4 * len(words), f"a {kind.replace('_', ' ')} site ({why})")
     old = bytes(IMG[off:off + 4 * len(words)])
     for i, w in enumerate(words): struct.pack_into('<I', IMG, off + 4 * i, w)
     cuts.append((off, old.hex(), bytes(IMG[off:off + 4 * len(words)]).hex(), why)); stat(kind)

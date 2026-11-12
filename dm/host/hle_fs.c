@@ -53,6 +53,7 @@ typedef struct {
     char name[32]; char dir[1024]; char overlay[4096]; char commit[1024];
     romfs_img *img;                  // non-NULL: dir is a RomFS image file
     int ro;
+    int romfs;                       // the game's RomFS: reads look in the overlay folders first (DM_ROMFS_OVERLAY, dm_fs_overlay_set)
     int aoc;                         // add-on content: Unmount releases the name (mount_aoc)
     int released;                    // an add-on content entry after its Unmount: kept for open handles and a later mount of its image, matched by no name (mnt_is)
     int txn_root;                    // canonical mount entry for this backing transaction, or -1
@@ -175,7 +176,15 @@ static const char *fwd_slashes(const char *p, char *buf, size_t n) {
     buf[i] = 0; return buf;
 }
 static int norm_rest(const char *rest, char *out, size_t n);
-static int rom_overlay_path(const mount_t *m, const char *rest, char *out, size_t n);
+static int rom_overlay_path(const mount_t *m, const char *rest, char *out, size_t n, int *deleted);
+// The overlay folders while the game runs (the Mods menu turns mods on and off): open files stay as they are, later opens and listings follow the new list
+static char g_overlay_live[4096]; static int g_overlay_is_live;
+static const char *overlay_now(void) { return g_overlay_is_live ? g_overlay_live : getenv("DM_ROMFS_OVERLAY"); }
+void dm_fs_overlay_set(const char *list) {
+    PATH_LOCK();
+    strlcpy(g_overlay_live, list, sizeof g_overlay_live); g_overlay_is_live = 1;
+    for (int i = 0; i < g_nmnt; i++) if (g_mnt[i].romfs) strlcpy(g_mnt[i].overlay, list, sizeof g_mnt[i].overlay);
+}
 // A path on an image mount: returns 1 with the mount in *mi and the entry in *k (-1 with errno set when there is none); 0 for a path on any other mount, or one an overlay folder (DM_ROMFS_OVERLAY) has, which then opens as a host file
 static int img_path(const char *p, int *mi, int64_t *k) {
     PATH_LOCK(); char fwd[1024]; p = fwd_slashes(p, fwd, sizeof fwd); const char *c = p ? strchr(p, ':') : NULL; if (!c) return 0;
@@ -185,7 +194,9 @@ static int img_path(const char *p, int *mi, int64_t *k) {
         if (!g_mnt[i].img) return 0;
         char normed[1024]; const char *rest = c + 1; *mi = i;
         if (strstr(rest, "/.")) { if (!norm_rest(rest, normed, sizeof normed)) { *k = -1; return 1; } rest = normed; }
-        char ov[1024]; if (g_mnt[i].overlay[0] && rom_overlay_path(&g_mnt[i], rest, ov, sizeof ov)) return 0;
+        char ov[1024]; int deleted = 0;
+        if (g_mnt[i].overlay[0] && rom_overlay_path(&g_mnt[i], rest, ov, sizeof ov, &deleted)) return 0;
+        if (deleted) { errno = ENOENT; *k = -1; return 1; }
         *k = img_find(g_mnt[i].img, rest); return 1;
     }
     return 0;
@@ -202,7 +213,8 @@ static Result mount_ex(const char *name, const char *dir, int ro, int txn) {
     g_mnt[g_nmnt].txn_root = -1;
     atomic_store(&g_mnt[g_nmnt].poison, 0);
     atomic_store(&g_mnt[g_nmnt].first_write_ns, 0);
-    const char *overlay = !strcmp(name, "rom") ? getenv("DM_ROMFS_OVERLAY") : NULL;
+    g_mnt[g_nmnt].romfs = !strcmp(name, "rom");
+    const char *overlay = g_mnt[g_nmnt].romfs ? overlay_now() : NULL;
     if (overlay) strlcpy(g_mnt[g_nmnt].overlay, overlay, sizeof g_mnt[0].overlay);
     // The transaction directory cannot be set up (leftovers cannot be cleared / clone failed, which really happens on a full disk): do not exit; mount the committed directory read-only -- saves still read, every write fails, commits are no-ops, the committed version is untouched, and the front end is told
     // (each of these three failures used to call die: with the phone's storage full the game exited as soon as it mounted its saves)
@@ -390,15 +402,60 @@ static int root_path(const char *root, const char *rest, char *out, size_t n) {
     }
     return 1;
 }
-static int rom_overlay_path(const mount_t *m, const char *rest, char *out, size_t n) {
+// A mod's folder may spell a name in another case than the game does (made on Windows or macOS, where both spellings name one file): a Switch would
+// not match it and the mod would silently do nothing, so an overlay folder's entry is taken when no exactly spelled one is there, and the log says so
+#define OVERLAY_DELETE ".dm-delete"
+static int fold_component(char *parent, size_t n, const char *name) {
+    const dir_index *x = dir_index_get(parent);
+    for (size_t i = 0; x && i < x->n; i++) if (!strcasecmp(x->e[i].guest, name)) {
+        size_t len = strlen(parent), k = strlen(x->e[i].phys);
+        if (len + k + 2 > n) return 0;
+        parent[len] = '/'; memcpy(parent + len + 1, x->e[i].phys, k + 1); return 1;
+    }
+    return 0;
+}
+static void fold_note(const char *found, const char *asked) {
+    static uint64_t seen[64]; static int n;
+    uint64_t h = fnv1a(found);
+    for (int i = 0; i < n; i++) if (seen[i] == h) return;
+    if (n == 64) return;
+    seen[n++] = h;
+    LOG("mods: warning: %s is used for the game's \"%s\": the names differ only in case, which a Switch would not match%s", found, asked, n == 64 ? " (further ones are not listed)" : "");
+}
+// One overlay folder's answer for a path: 1 it has it (out), -1 it deletes it, 0 neither. "<name>.dm-delete" beside where <name> would be hides
+// the game's file or directory of that name, and those of the folders after this one; the folder's own <name>, if it has one, takes its place
+static int overlay_lookup(const char *root, const char *rest, char *out, size_t n) {
+    const char *asked = rest; int deleted = 0, folded = 0;
+    strlcpy(out, root, n);
+    while (*rest) {
+        while (*rest == '/') rest++;
+        if (!*rest) break;
+        const char *end = strchr(rest, '/'); if (!end) end = rest + strlen(rest);
+        size_t k = end - rest; char part[0x301], mark[0x301 + sizeof OVERLAY_DELETE], probe[1024];
+        if (k >= sizeof part) { errno = ENAMETOOLONG; return 0; }
+        memcpy(part, rest, k); part[k] = 0;
+        if (!strcmp(part, "..")) return -deleted;
+        rest = end;
+        if (!strcmp(part, ".")) continue;
+        snprintf(mark, sizeof mark, "%s" OVERLAY_DELETE, part); strlcpy(probe, out, sizeof probe);
+        if (!deleted && path_component(probe, sizeof probe, mark, 0, 1)) deleted = 1;
+        if (path_component(out, n, part, 0, 1)) continue;
+        if (!fold_component(out, n, part)) return -deleted;
+        folded = 1;
+    }
+    if (access(out, F_OK)) return -deleted;
+    if (folded) fold_note(out, asked);
+    return 1;
+}
+static int rom_overlay_path(const mount_t *m, const char *rest, char *out, size_t n, int *deleted) {
     char *roots = strdup(m->overlay);
     if (!roots) die("rom overlay path allocation failed");
     char *save = NULL;
     for (char *root = strtok_r(roots, ":", &save); root; root = strtok_r(NULL, ":", &save)) {
         char candidate[1024];
-        if (root_path(root, rest, candidate, sizeof candidate) && !access(candidate, F_OK)) {
-            strlcpy(out, candidate, n); free(roots); return 1;
-        }
+        int r = overlay_lookup(root, rest, candidate, sizeof candidate);
+        if (r > 0) { strlcpy(out, candidate, n); free(roots); return 1; }
+        if (r < 0) { if (deleted) *deleted = 1; free(roots); errno = ENOENT; return 0; }
     }
     int found = !m->img && root_path(m->dir, rest, out, n) && !access(out, F_OK);   // an image base is looked up by img_path
     free(roots);
@@ -437,7 +494,7 @@ static int host_path_ex(const char *p, char *out, size_t n, int *ro, int create)
         if (ro) *ro = g_mnt[i].ro;
         char normed[1024]; const char *rest = c + 1;
         if (strstr(rest, "/.")) { if (!norm_rest(rest, normed, sizeof normed)) return 0; rest = normed; }   // only paths with "." components are normalized; the rest walk component by component as before
-        if (g_mnt[i].overlay[0] && !create) return rom_overlay_path(&g_mnt[i], rest, out, n);
+        if (g_mnt[i].overlay[0] && !create) return rom_overlay_path(&g_mnt[i], rest, out, n, NULL);
         strlcpy(out, g_mnt[i].dir, n);
         while (*rest) {
             while (*rest == '/') rest++;
@@ -529,11 +586,11 @@ HLE_FORCE("_ZN2nn2fs22QueryMountRomCacheSizeEPm", "fsp-srv; rom reads the host d
 HLE_FORCE("_ZN2nn2fs8MountRomEPKcPvm", "fsp-srv; rom → host RomFS directory", Result, h_fs_MountRom, const char *name, void *cache, size_t sz) { dm_thread_service_request();
     (void)cache; (void)sz; char b[1024];
     Result r = mount(name, envdir("DM_ROMFS", "romfs", b, sizeof b), 1);
-    const char *overlay = getenv("DM_ROMFS_OVERLAY");
-    if (r == RES_OK && overlay) {
+    if (r == RES_OK) {
         PATH_LOCK();
+        const char *overlay = overlay_now();
         for (int i = 0; i < g_nmnt; i++) if (mnt_named(&g_mnt[i], name)) {
-            strlcpy(g_mnt[i].overlay, overlay, sizeof g_mnt[i].overlay); break;
+            g_mnt[i].romfs = 1; strlcpy(g_mnt[i].overlay, overlay ? overlay : "", sizeof g_mnt[i].overlay); break;
         }
     }
     return r;
@@ -1182,40 +1239,48 @@ static void dir_snapshot(dirh_t *h, const mount_t *m, const char *rest) {
     all[nr++] = m->dir;
     char *save = NULL;
     for (char *root = strtok_r(roots, ":", &save); root && nr < 65; root = strtok_r(NULL, ":", &save)) all[nr++] = root;
-    for (int ri = nr - 1; ri >= 0; ri--) {
-        if (!root_path(all[ri], rest, parent, 1024)) continue;
+    int last = nr - 1, base = 1;   // an overlay folder that deletes this directory hides the folders after it and the game's own
+    for (int ri = 1; ri < nr; ri++) if (overlay_lookup(all[ri], rest, parent, 1024) < 0) { last = ri; base = 0; break; }
+    for (int ri = last; ri >= !base; ri--) {
+        if (ri ? overlay_lookup(all[ri], rest, parent, 1024) <= 0 : !root_path(all[ri], rest, parent, 1024)) continue;
         DIR *x = opendir(parent); if (!x) continue;   // an image base is no folder: its names are added below
         struct dirent *e;
         while ((e = readdir(x))) {
             if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
             if (!guest_name(parent, e->d_name, guest, 0x301)) continue;
-            int dup = 0; for (size_t j = 0; j < nn; j++) if (!strcmp(names[j], guest)) { dup = 1; break; }
+            size_t gl = strlen(guest);
+            if (ri && gl > sizeof OVERLAY_DELETE - 1 && !strcmp(guest + gl - (sizeof OVERLAY_DELETE - 1), OVERLAY_DELETE)) continue;
+            int dup = 0; for (size_t j = 0; j < nn; j++) if (!strcasecmp(names[j], guest)) { dup = 1; if (!ri) strlcpy(names[j], guest, sizeof names[0]); break; }   // the game's spelling of a name is the one listed
             if (dup) continue;
             if (nn == cap && !(names = realloc(names, (cap *= 2) * sizeof *names))) die("rom overlay directory snapshot allocation failed");
             strlcpy(names[nn++], guest, sizeof names[0]);
         }
         closedir(x);
     }
-    size_t nov = nn; int64_t dk = m->img ? img_find(m->img, rest) : -1;
+    size_t nov = nn; int64_t dk = m->img && base ? img_find(m->img, rest) : -1;
+    char *claimed = calloc(nov + 1, 1); if (!claimed) die("rom overlay directory snapshot allocation failed");
     if (dk >= 0 && !m->img->e[dk].type)   // the image's own entries of this directory, after the overlay folders' (only those can repeat a name)
         for (uint64_t j = 0; j < m->img->e[dk].b; j++) {
             const img_ent *c = &m->img->e[m->img->e[dk].a + j]; size_t l = c->nlen < 0x300 ? c->nlen : 0x300;
             memcpy(guest, m->img->names + c->name, l); guest[l] = 0;
-            int dup = 0; for (size_t i = 0; i < nov; i++) if (!strcmp(names[i], guest)) { dup = 1; break; }
+            int dup = 0; for (size_t i = 0; i < nov && !dup; i++) if (!strcmp(names[i], guest)) dup = claimed[i] = 1;
+            for (size_t i = 0; i < nov && !dup; i++) if (!claimed[i] && !strcasecmp(names[i], guest)) { dup = claimed[i] = 1; strlcpy(names[i], guest, sizeof names[0]); }   // the game's spelling of a name is the one listed
             if (dup) continue;
             if (nn == cap && !(names = realloc(names, (cap *= 2) * sizeof *names))) die("rom overlay directory snapshot allocation failed");
             strlcpy(names[nn++], guest, sizeof names[0]);
         }
-    h->snap = calloc(nn ? nn : 1, sizeof *h->snap); h->nsnap = (int64_t)nn;
+    h->snap = calloc(nn ? nn : 1, sizeof *h->snap); h->nsnap = 0;
     if (!h->snap) die("rom overlay directory snapshot allocation failed");
     for (size_t j = 0; j < nn; j++) {
-        strlcpy(h->snap[j].name, names[j], sizeof h->snap[j].name);
+        DirectoryEntry *o = &h->snap[h->nsnap];
         snprintf(rel, 2048, "%s/%s", rest, names[j]);
-        struct stat st; int64_t k;
-        if (rom_overlay_path(m, rel, resolved, 1024)) { if (!stat(resolved, &st)) { h->snap[j].type = S_ISDIR(st.st_mode) ? ENT_DIR : ENT_FILE; h->snap[j].size = S_ISDIR(st.st_mode) ? 0 : st.st_size; } }
-        else if (m->img && (k = img_find(m->img, rel)) >= 0) { h->snap[j].type = m->img->e[k].type ? ENT_FILE : ENT_DIR; h->snap[j].size = m->img->e[k].type ? (int64_t)m->img->e[k].b : 0; }
+        struct stat st; int64_t k; int deleted = 0;
+        if (rom_overlay_path(m, rel, resolved, 1024, &deleted)) { if (!stat(resolved, &st)) { o->type = S_ISDIR(st.st_mode) ? ENT_DIR : ENT_FILE; o->size = S_ISDIR(st.st_mode) ? 0 : st.st_size; } }
+        else if (deleted) continue;
+        else if (m->img && (k = img_find(m->img, rel)) >= 0) { o->type = m->img->e[k].type ? ENT_FILE : ENT_DIR; o->size = m->img->e[k].type ? (int64_t)m->img->e[k].b : 0; }
+        strlcpy(o->name, names[j], sizeof o->name); h->nsnap++;
     }
-    free(resolved); free(rel); free(guest); free(parent); free(all); free(names); free(roots);
+    free(claimed); free(resolved); free(rel); free(guest); free(parent); free(all); free(names); free(roots);
 }
 HLE_FORCE("_ZN2nn2fs13OpenDirectoryEPNS0_15DirectoryHandleEPKci", "fsp-srv → opendir(3)", Result, h_fs_OpenDirectory, uint64_t *out, const char *path, int mode) { dm_thread_service_request();
     Result (*sdk_open)(uint64_t *, const char *, int) = sdk_path_call(path, "_ZN2nn2fs13OpenDirectoryEPNS0_15DirectoryHandleEPKci");

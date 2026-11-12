@@ -188,6 +188,34 @@ int main(void) {
         CHECK(seen == 4, "with the right types and sizes"); h_fs_CloseDirectory(h);
         CHECK(read_fs("rom:\\data\\a", got, sizeof got) && !strcmp(got, "mod") && read_fs("rom:\\data\\c", got, sizeof got) && !strcmp(got, "xy"), "backslash paths reach the overlay folder and the image");
         h = 0; cnt = -1; CHECK(h_fs_OpenDirectory(&h, "rom:\\data", DIRMODE_DIR | DIRMODE_FILE) == RES_OK && h_fs_DirCount(&cnt, h) == RES_OK && cnt == 4, "and list the merged directory (%lld)", (long long)cnt); h_fs_CloseDirectory(h);
+        g_nmnt = 0;
+        {   // three folders, the first the highest: one that deletes, the one above, and one whose names differ from the game's in case
+            char o2[1100], o3[1100], list[3400], cmd[2600];
+            snprintf(o2, sizeof o2, "%s/ovdel", root); snprintf(o3, sizeof o3, "%s/ovcase", root);
+            snprintf(cmd, sizeof cmd, "mkdir -p '%s/data' '%s/DATA/B'", o2, o3); CHECK(!system(cmd), "stage the overlay folders");
+            snprintf(fn, sizeof fn, "%s/data/c.dm-delete", o2); put(fn, ""); snprintf(fn, sizeof fn, "%s/data/new.dm-delete", o2); put(fn, "");
+            snprintf(fn, sizeof fn, "%s/DATA/C", o3); put(fn, "lower"); snprintf(fn, sizeof fn, "%s/DATA/Extra", o3); put(fn, "x"); snprintf(fn, sizeof fn, "%s/DATA/B/inner", o3); put(fn, "in");
+            snprintf(list, sizeof list, "%s:%s:%s", o2, ov, o3); setenv("DM_ROMFS_OVERLAY", list, 1);
+            CHECK(h_fs_MountRom("rom", NULL, 0) == RES_OK, "mount the image with three overlay folders");
+            CHECK(read_fs("rom:/data/a", got, sizeof got) && !strcmp(got, "mod"), "a file of the middle folder still reads");
+            CHECK(h_fs_OpenFile(&h, "rom:/data/c", MODE_READ) == RES_PATH_NOT_FOUND && h_fs_GetEntryType(&t, "rom:/data/c") != RES_OK, "a delete marker hides the game's file, and a lower folder's of that name");
+            CHECK(h_fs_OpenFile(&h, "rom:/data/new", MODE_READ) == RES_PATH_NOT_FOUND, "a delete marker hides a lower folder's file");
+            CHECK(read_fs("rom:/data/Extra", got, sizeof got) && !strcmp(got, "x") && read_fs("rom:/data/extra", got, sizeof got) && !strcmp(got, "x"), "a folder's names that differ in case from the asked path are taken");
+            CHECK(read_fs("rom:/data/b/inner", got, sizeof got) && !strcmp(got, "in"), "also below a directory the game has");
+            DirectoryEntry d8[8]; cnt = 0; seen = 0;
+            CHECK(h_fs_OpenDirectory(&h, "rom:/data", DIRMODE_DIR | DIRMODE_FILE) == RES_OK && h_fs_ReadDirectory(&cnt, d8, h, 8) == RES_OK && cnt == 3, "the listing leaves out deleted files and markers (%lld)", (long long)cnt);
+            for (int i = 0; i < cnt; i++) seen += (!strcmp(d8[i].name, "a") && d8[i].size == 3) || (!strcmp(d8[i].name, "b") && d8[i].type == ENT_DIR) || (!strcmp(d8[i].name, "Extra") && d8[i].size == 1);
+            CHECK(seen == 3, "and names what the game has by the game's spelling"); h_fs_CloseDirectory(h);
+            g_nmnt = 0;
+            snprintf(o2, sizeof o2, "%s/ovdir", root); snprintf(cmd, sizeof cmd, "mkdir -p '%s/data'", o2); CHECK(!system(cmd), "stage a folder that replaces a directory");
+            snprintf(fn, sizeof fn, "%s/data.dm-delete", o2); put(fn, ""); snprintf(fn, sizeof fn, "%s/data/only", o2); put(fn, "o");
+            snprintf(list, sizeof list, "%s:%s", o2, ov); setenv("DM_ROMFS_OVERLAY", list, 1);
+            CHECK(h_fs_MountRom("rom", NULL, 0) == RES_OK, "mount the image with a folder that replaces a directory");
+            CHECK(read_fs("rom:/data/only", got, sizeof got) && !strcmp(got, "o") && h_fs_OpenFile(&h, "rom:/data/a", MODE_READ) == RES_PATH_NOT_FOUND && h_fs_OpenFile(&h, "rom:/data/c", MODE_READ) == RES_PATH_NOT_FOUND,
+                  "a deleted directory with the folder's own in its place: only the folder's files");
+            cnt = 0; CHECK(h_fs_OpenDirectory(&h, "rom:/data", DIRMODE_DIR | DIRMODE_FILE) == RES_OK && h_fs_ReadDirectory(&cnt, d8, h, 8) == RES_OK && cnt == 1 && !strcmp(d8[0].name, "only"), "and its listing (%lld)", (long long)cnt); h_fs_CloseDirectory(h);
+            cnt = 0; CHECK(h_fs_OpenDirectory(&h, "rom:/", DIRMODE_DIR | DIRMODE_FILE) == RES_OK && h_fs_ReadDirectory(&cnt, d8, h, 8) == RES_OK && cnt == 1 && !strcmp(d8[0].name, "data"), "the root lists the directory, not the marker (%lld)", (long long)cnt); h_fs_CloseDirectory(h);
+        }
         unsetenv("DM_ROMFS_OVERLAY"); g_nmnt = 0;
         snprintf(fn, sizeof fn, "%s/2.img", root); CHECK(!link(ip, fn), "stage a DLC image"); setenv("DM_AOC_DIR", root, 1);
         size_t cache = 0;

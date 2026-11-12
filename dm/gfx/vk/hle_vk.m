@@ -119,6 +119,21 @@ static const fmt_t *fmt_of(VkFormat f) {
 }
 static int fmt_has_depth(const fmt_t *f) { return f && (f->kind == K_DEPTH || f->kind == K_DS); }
 static int fmt_has_stencil(const fmt_t *f) { return f && (f->kind == K_STENCIL || f->kind == K_DS); }
+static int fmt_is_signed_int(const fmt_t *f) {
+    if (!f || f->kind != K_INT) return 0;
+    switch (f->vk) {
+    case VK_FORMAT_R8_SINT: case VK_FORMAT_R8G8_SINT: case VK_FORMAT_R8G8B8A8_SINT: case VK_FORMAT_R16_SINT: case VK_FORMAT_R16G16_SINT: case VK_FORMAT_R16G16B16A16_SINT:
+    case VK_FORMAT_R32_SINT: case VK_FORMAT_R32G32_SINT: case VK_FORMAT_R32G32B32_SINT: case VK_FORMAT_R32G32B32A32_SINT: return 1;
+    default: return 0;
+    }
+}
+// VkClearColorValue is a union whose member the cleared format names: int32 for a signed integer format, uint32 for an unsigned one, float32 for every other. Metal takes
+// doubles and converts them to the attachment's type, so the member must be read as its own type (a uint32 above INT32_MAX saturates a signed attachment)
+static MTLClearColor fmt_clear_color(const fmt_t *f, const VkClearColorValue *v) {
+    if (fmt_is_signed_int(f)) return MTLClearColorMake(v->int32[0], v->int32[1], v->int32[2], v->int32[3]);
+    if (f && f->kind == K_INT) return MTLClearColorMake(v->uint32[0], v->uint32[1], v->uint32[2], v->uint32[3]);
+    return MTLClearColorMake(v->float32[0], v->float32[1], v->float32[2], v->float32[3]);
+}
 
 // ---------- Device-wide state ----------
 static id<MTLDevice> g_dev;
@@ -1275,7 +1290,7 @@ static void begin_rp(rs_t *s, const c_brp *c) {
         const ratt *at = &rp->att[a]; MTLRenderPassColorAttachmentDescriptor *ca = d.colorAttachments[i];
         ca.texture = fb->v[a]->tex; w = umin(w, (uint32_t)ca.texture.width); h = umin(h, (uint32_t)ca.texture.height);
         ca.loadAction = load_a(at->load); s->st_col[i] = store_a(at->store); ca.storeAction = MTLStoreActionUnknown;
-        if (at->load == VK_ATTACHMENT_LOAD_OP_CLEAR && (uint32_t)a < c->nclear) { const float *f = c->clear[a].color.float32; ca.clearColor = MTLClearColorMake(f[0], f[1], f[2], f[3]); }
+        if (at->load == VK_ATTACHMENT_LOAD_OP_CLEAR && (uint32_t)a < c->nclear) ca.clearColor = fmt_clear_color(fmt_of(at->fmt), &c->clear[a].color);
         int r = rp->res[i];
         if (r >= 0 && (uint32_t)r < fb->n) { ca.resolveTexture = fb->v[r]->tex; s->st_col[i] = at->store == VK_ATTACHMENT_STORE_OP_DONT_CARE ? MTLStoreActionMultisampleResolve : MTLStoreActionStoreAndMultisampleResolve; }
     }
@@ -1538,9 +1553,7 @@ static void replay(rs_t *s, VkCommandBuffer cb) {
                             if (!x->ds) {
                                 MTLRenderPassColorAttachmentDescriptor *a = d.colorAttachments[0]; a.texture = im->tex; a.level = r->baseMipLevel + m; a.slice = r->baseArrayLayer + l;
                                 a.loadAction = MTLLoadActionClear; a.storeAction = MTLStoreActionStore;
-                                const VkClearColorValue *cv = &x->v.color;
-                                a.clearColor = im->f->kind == K_INT ? MTLClearColorMake(cv->uint32[0], cv->uint32[1], cv->uint32[2], cv->uint32[3])
-                                                                     : MTLClearColorMake(cv->float32[0], cv->float32[1], cv->float32[2], cv->float32[3]);
+                                a.clearColor = fmt_clear_color(im->f, &x->v.color);
                             } else {
                                 if (fmt_has_depth(im->f) && (r->aspectMask & VK_IMAGE_ASPECT_DEPTH_BIT)) {
                                     MTLRenderPassDepthAttachmentDescriptor *a = d.depthAttachment; a.texture = im->tex; a.level = r->baseMipLevel + m; a.slice = r->baseArrayLayer + l;

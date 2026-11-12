@@ -14642,6 +14642,18 @@ static void dispatch(const p_dispatch *dp) {
         if (cs->key[0]) pso_user_record("C\t%s\n", cs->key);
         hm_put_id(&g_cps, &k, ps);
     }
+    // A pipeline built from the function alone may allow fewer threads a threadgroup than the shader's own size: Metal lowers maxTotalThreadsPerThreadgroup for a kernel that
+    // needs many registers, and a dispatch over that limit is invalid, which without the validation layer can do nothing. Ocarina of Time's fog (compute shader
+    // 9ed48d1011f1b48b: 512 threads, a pipeline limit of 384) was never drawn. Such a shader gets a second pipeline built with maxTotalThreadsPerThreadgroup at its size, which
+    // makes the compiler fit it (cache key off | 2)
+    { NSUInteger nt = (NSUInteger)cs->rf.tg[0] * cs->rf.tg[1] * cs->rf.tg[2];
+      if (nt > ps.maxTotalThreadsPerThreadgroup && nt <= 1024) {
+        cps_key kt = {(__bridge const void *)cs, (uintptr_t)off | 2}; id pt = hm_get_id(&g_cps, &kt);
+        if (!pt) { NSError *et = nil; MTLComputePipelineDescriptor *d = [MTLComputePipelineDescriptor new]; d.computeFunction = fn_dev_b(cs->fn, off); d.maxTotalThreadsPerThreadgroup = nt;
+            pt = [g_dev newComputePipelineStateWithDescriptor:d options:MTLPipelineOptionNone reflection:nil error:&et]; hm_put_id(&g_cps, &kt, pt ?: NSNull.null);
+            MLOG("%scompute shader %s: threadgroup of %lu threads over its pipeline's limit of %lu: %s%s", pt ? "" : "[RED] ", cs->key, (unsigned long)nt, (unsigned long)ps.maxTotalThreadsPerThreadgroup,
+                 pt ? "built again for its size" : "could not be built for it: ", pt ? "" : et.localizedDescription.UTF8String); }
+        if (pt && pt != NSNull.null) ps = pt; } }
     if (cs->builtin) {   // Built-in compute kernel: n = uniform buffer 0, src = storage buffer 0, dst = storage buffer 1
         const p_bind_buf *u = &S.ubo[5][0], *a0 = &S.ssbo[5][0], *a1 = &S.ssbo[5][1];
         void *ub, *sb, *db; uint64_t uo, so, dof;

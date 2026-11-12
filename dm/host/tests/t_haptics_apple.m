@@ -262,6 +262,96 @@ static void send_pair(float left, float right) {
     dm_haptics_send(u, 2); drain();
 }
 static int made;   // engines the test factories made
+// Short pulses on a controller (held_level). The hit is issue #2148's: Ocarina of Time sends a value every 10 ms for about 60 ms, both motors alike,
+// the low band at 55 Hz up to 0.06 and the high band at 231 Hz about 0.4 of it (the reporter's VibrationValue captures). Each check is counted, so a
+// run against the code without the hold reports how many fail
+static int pulse_checks, pulse_failures;
+static void check(int ok, const char *what) { pulse_checks++; if (!ok) { pulse_failures++; printf("short pulses: FAILED %s\n", what); } }
+static void send_both(float lo) {
+    dm_vibration_update u[] = {{0, 0, {lo, 55.4f, 0.4f * lo, 231.2f}}, {0, 1, {lo, 55.4f, 0.4f * lo, 231.2f}}};
+    dm_haptics_send(u, 2); drain();
+}
+static const float hit[] = {0.02f, 0.045f, 0.06f, 0.05f, 0.03f, 0.01f};
+static void send_hit(void) { for (int i = 0; i < 6; i++) { send_both(hit[i]); advance(0.01); } send_both(0); }   // ends 60 ms after it began
+static float hit_peak(void) { dm_vibration v = {0.06f, 55.4f, 0.024f, 231.2f}, both[2] = {v, v}; return dm_haptics_level(both, 2, 1).intensity; }
+static TestPlayer *player_of(TestController *c) { return c.haptics.engines.lastObject.testPlayer; }
+static float last_level(TestController *c) { return player_of(c).levels.lastObject.floatValue; }
+static TestController *pad(NSString *category, BOOL noAdvanced) {
+    TestController *c = [TestController new]; c.haptics = [TestHaptics new]; c.haptics.noAdvanced = noAdvanced; c.productCategory = category;
+    dm_haptics_apple_controller(0, (id)c); drain();
+    return c;
+}
+static void short_pulses(void) {
+    float peak = hit_peak();
+    // The hit on a controller: its peak plays until 250 ms after it began, then silence
+    TestController *c = pad(nil, NO);
+    send_hit();
+    check(fabsf(last_level(c) - peak) < 1e-6f, "the hit's peak plays on when the game falls silent");
+    advance(0.189);
+    check(fabsf(last_level(c) - peak) < 1e-6f, "the peak still plays 249 ms after the hit began");
+    advance(0.001);
+    check(last_level(c) == 0, "silence 250 ms after the hit began");
+    NSUInteger sent = player_of(c).levels.count; advance(1.1);
+    check(player_of(c).levels.count == sent && last_level(c) == 0, "nothing more after the hold");
+    // The same on a server without advanced players, one engine for both handles, as the 8BitDo pad of the issue plays it
+    TestController *plain = pad(nil, YES);
+    send_hit(); advance(1.1);   // the first makes the plain route; the second plays on it
+    send_hit();
+    advance(0.14);
+    check(fabsf(last_level(plain) - peak) < 1e-6f, "plain players: the peak plays 200 ms after the hit began");
+    advance(0.05);
+    check(last_level(plain) == 0, "plain players: silence 250 ms after the hit began");
+    advance(1.1);
+    // Silence is never rumble: zeros make no engine
+    TestController *quiet = pad(nil, NO);
+    for (int i = 0; i < 5; i++) { send_both(0); advance(0.05); }
+    advance(1);
+    check(quiet.haptics.attempts == 0, "silence makes no engine");
+    // A long strong effect ends when the game ends it
+    TestController *strong = pad(nil, NO);
+    send_both(0.8f); advance(0.5); send_both(0);
+    check(last_level(strong) == 0, "a 500 ms effect stops at once");
+    advance(1.1);
+    // A texture that never falls to zero (Mario Kart 8 Deluxe's low band) plays as sent, and stops at once
+    TestController *texture = pad(nil, NO);
+    BOOL asSent = YES;
+    for (int i = 0; i < 30; i++) {
+        float lo = i & 1 ? 0.1f : 0.3f; send_both(lo);
+        dm_vibration v = {lo, 55.4f, 0.4f * lo, 231.2f}, both[2] = {v, v};
+        asSent &= fabsf(last_level(texture) - dm_haptics_level(both, 2, 1).intensity) < 1e-6f;
+        advance(0.033);
+    }
+    send_both(0);
+    check(asSent, "a texture plays as sent");
+    check(last_level(texture) == 0, "a texture stops at once");
+    advance(1.1);
+    // A DualSense's actuators play the click as sent
+    TestController *sense = pad(GCProductCategoryDualSense, NO);
+    send_hit();
+    check(last_level(sense) == 0, "a DualSense's hit ends when the game ends it");
+    advance(1.1);
+    // Hits every 100 ms merge only within 250 ms of the first of a run: silence at 260, 560 and 860 ms, and after the last one's hold
+    TestController *train = pad(nil, NO);
+    NSTimeInterval begin = now();
+    for (int k = 0; k < 10; k++) { send_hit(); advance(0.04); }
+    int silences = 0; for (NSNumber *v in player_of(train).levels) silences += v.floatValue == 0;
+    check(silences == 3, "ten hits 100 ms apart fall silent three times");
+    advance(begin + 1.15 - now());
+    check(last_level(train) == 0, "silence 250 ms after the last run began");
+    advance(1.1);
+    // A stop (focus loss) during a hold is silence at once, and the hold's end does not play afterwards
+    TestController *stopped = pad(nil, NO);
+    send_hit();
+    suspend(DM_HAPTICS_INACTIVE, YES); drain();
+    check(player_of(stopped).stops == 1, "a stop during the hold silences at once");
+    sent = player_of(stopped).levels.count;
+    advance(0.3);
+    check(player_of(stopped).levels.count == sent, "the hold's end after a stop sends nothing");
+    suspend(DM_HAPTICS_INACTIVE, NO); drain();
+    dm_haptics_apple_controller(0, nil); drain();
+    printf("short pulses: %d of %d checks failed\n", pulse_failures, pulse_checks);
+    assert(!pulse_failures);
+}
 int main(void) { @autoreleasepool {
     queue = dispatch_queue_create("test.rumble", DISPATCH_QUEUE_SERIAL);
     dispatch_queue_set_specific(queue, &queue, &queue, NULL);
@@ -333,7 +423,7 @@ int main(void) { @autoreleasepool {
         assert(dm_haptics_actual(0, 0).amplitude_low == 0.6f);
         if (lateReset) { lateReset(); drain(); }
         assert(recovered.testPlayer.levels.lastObject.floatValue == 0.6f);   // old callbacks cannot silence the replacement
-        send_pair(0, 0); drain();
+        send_pair(0, 0); advance(SHORT_PULSE_HOLD);   // a controller pulse this short is held (short_pulses)
         assert(recovered.testPlayer.levels.lastObject.floatValue == 0);
     }
     // A server without advanced players (game controllers on macOS 27): the first effect plays at once in plain pulses from a new engine, the pulses
@@ -437,6 +527,7 @@ int main(void) { @autoreleasepool {
     assert(fabsf(cut.haptics.engines.lastObject.testPlayer.levels.lastObject.floatValue - 0.5f) < 1e-6f);
     send_pair(0, 0); drain();
     rumble_min = 0;
+    short_pulses();
     // A DualShock 4 goes through its effects report only while a HID device is free; without one it keeps Core Haptics
     registry = [NSMutableArray new];
     TestController *ds = [TestController new]; ds.haptics = [TestHaptics new]; ds.productCategory = GCProductCategoryDualShock4;

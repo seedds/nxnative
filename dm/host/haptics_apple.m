@@ -32,6 +32,9 @@
 @property(nonatomic) id<CHHapticPatternPlayer> previous;   // the pulse before the scheduled one, still playing
 @property(nonatomic) NSTimeInterval pulseEnd;   // engine time at which the last scheduled pulse ends
 @property(nonatomic) dm_haptic_level level;   // the level the next pulse starts at
+@property(nonatomic) NSTimeInterval pulseStart;   // when the controller's output last left silence (0: silent), for the short-pulse hold
+@property(nonatomic) dm_haptic_level pulsePeak;   // the strongest level since then
+@property(nonatomic) uint64_t holdGeneration;   // a newer level or a stop makes a queued hold end stale
 - (void)apply:(dm_haptic_level)level;
 - (void)stop;
 @end
@@ -39,6 +42,7 @@
 static dispatch_queue_t queue;
 static NSMutableArray<DmRumbleChannel *> *channels[DM_PLAYERS];
 static GCController *controllers[DM_PLAYERS];
+static BOOL voice_coils[DM_PLAYERS];   // the player's controller is a DualSense: no short-pulse hold (held_level)
 #if TARGET_OS_IPHONE
 static BOOL phoneSupported;
 #endif
@@ -74,6 +78,26 @@ static float controller_level(float x) {
     x = isfinite(x) ? fmaxf(0, fminf(1, x)) : 0;
     return x <= rumble_min ? 0 : (x - rumble_min) / (1 - rumble_min);
 }
+// A controller pulse that rises from silence and falls back to it sooner than this keeps its strongest level until this long after it began. Games
+// written for HD rumble play hits as clicks: Ocarina of Time's last about 60 ms (a value every 10 ms), and a rotating motor does not spin up in that
+// time, so nothing is felt: on an 8BitDo pad, not even at 16 times the level, with the peaks at full intensity; held for 250 ms they were felt
+// (issue #2148, the reporter's measurements; no such motor was tried here). Silence stays silence, an effect longer than this or one that never falls
+// to zero (a texture, Mario Kart 8 Deluxe's low band) is unchanged, and pulses closer together than this merge only within this time of the first.
+// GameController names no actuator type, and an 8BitDo pad in Switch mode is a "Pro Controller" like a real one, whose resonant actuators play a
+// click as sent: there such a hit is now a 250 ms buzz at its peak. A DualSense, whose actuators are voice coils, keeps its levels as sent
+#define SHORT_PULSE_HOLD 0.25
+static dm_haptic_level held_level(DmRumbleChannel *c, dm_haptic_level level, NSTimeInterval t, NSTimeInterval *holdEnd) {
+    *holdEnd = 0;
+    if (level.intensity > 0) {
+        if (!c.pulseStart) { c.pulseStart = t; c.pulsePeak = level; }
+        else if (level.intensity > c.pulsePeak.intensity) c.pulsePeak = level;
+        return level;
+    }
+    if (!c.pulseStart) return level;
+    if (t >= c.pulseStart + SHORT_PULSE_HOLD) { c.pulseStart = 0; c.pulsePeak = (dm_haptic_level){0, 0}; return level; }
+    *holdEnd = c.pulseStart + SHORT_PULSE_HOLD;
+    return c.pulsePeak;
+}
 static void report(NSError *e, NSString *target, const char *stage) {
     if (++errors <= 8 || errors % 64 == 0) {
         fprintf(stderr, "[RED] haptics: %s %s: %s (%s %ld)\n", target.UTF8String, stage,
@@ -105,16 +129,21 @@ static void report(NSError *e, NSString *target, const char *stage) {
         fprintf(stderr, "[RED] haptics: %s %s on a stopped engine (%s: %s)\n", self.target.UTF8String, stage,
                 x.name.UTF8String ?: "exception", x.reason.UTF8String ?: "no reason");
     self.generation++; self.silenceGeneration++;   // its renewals, idle release and callbacks are stale
+    [self dropHold];
     self.engine.stoppedHandler = ^(CHHapticEngineStoppedReason reason) { (void)reason; }; self.engine.resetHandler = ^{};
     self.engine = nil; self.pattern = nil; self.previous = nil; self.level = (dm_haptic_level){0, 0};
     self.failures = MIN(self.failures + 1, 4u);
     self.retryAfter = now() + (1u << (self.failures - 1));
     dm_haptics_clear(self.player);
 }
+- (void)dropHold {   // a stop is silence at once: a held pulse ends with it, and its queued end is stale
+    self.holdGeneration++; self.pulseStart = 0; self.pulsePeak = (dm_haptic_level){0, 0};
+}
 - (void)stop { [self guarded:"stop" work:^{ [self halt]; }]; }
 // stop's work, for callers already inside guarded:work:
 - (void)halt {
     self.generation++; self.silenceGeneration++;
+    [self dropHold];
     self.engine.stoppedHandler = ^(CHHapticEngineStoppedReason reason) { (void)reason; }; self.engine.resetHandler = ^{};
     if (self.simple) {
         // Never cut a pulse: silence the playing ones and stop the engine once the last has ended
@@ -188,8 +217,24 @@ static void report(NSError *e, NSString *target, const char *stage) {
     return YES;
 }
 - (void)apply:(dm_haptic_level)level { [self guarded:"apply" work:^{ [self applyLevel:level]; }]; }
+// The level a controller plays, with a short pulse held (held_level); the hold's end is queued as the game's silence
+- (dm_haptic_level)held:(dm_haptic_level)level {
+    uint64_t generation = ++self.holdGeneration;
+    NSTimeInterval t = now(), end;
+    level = held_level(self, level, t, &end);
+    if (end) {
+        __weak DmRumbleChannel *weak = self;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((end - t) * NSEC_PER_SEC)), queue, ^{
+            DmRumbleChannel *c = weak; if (c && c.holdGeneration == generation) [c apply:(dm_haptic_level){0, 0}];
+        });
+    }
+    return level;
+}
 - (void)applyLevel:(dm_haptic_level)level {
-    if ([self.target hasPrefix:@"controller"]) level.intensity = controller_level(level.intensity);
+    if ([self.target hasPrefix:@"controller"]) {
+        level.intensity = controller_level(level.intensity);
+        if (!voice_coils[self.player]) level = [self held:level];
+    }
     uint64_t silence = ++self.silenceGeneration;
     NSError *error = nil;
     self.level = level;
@@ -370,6 +415,7 @@ static void default_controller(int p, GCDeviceHaptics *h, NSTimeInterval retryAf
 static void configure(int p, GCController *controller) {
     for (DmRumbleChannel *c in channels[p]) [c stop];
     channels[p] = [NSMutableArray new];
+    voice_coils[p] = [controller.productCategory isEqualToString:GCProductCategoryDualSense];
     if (sinks[p]) { sink_silence(p); dm_haptics_route(p, 1); return; }
 #if !TARGET_OS_IPHONE
     ds4_release(p);

@@ -157,6 +157,7 @@ static void crash_gate(int sig) {
     if (none == me) _exit(128 + sig);
     for (;;) pause();
 }
+__attribute__((weak)) void dm_gfx_addr_note(uint64_t a, char *note, size_t n) { (void)a; if (n) note[0] = 0; }   // nvn_mtl.m provides the strong definition
 static void on_crash(int sig, siginfo_t *si, void *uc_) {
     ucontext_t *uc = uc_;
     if (sig == SIGTRAP && g_trap_hook && g_trap_hook(uc)) return;
@@ -190,6 +191,33 @@ static void on_crash(int sig, siginfo_t *si, void *uc_) {
         fprintf(stderr, "[dm] *x%d:", i);
         for (int k = 0; k < 6; k++) off("", w[k]);
         fputc('\n', stderr);
+    }
+    // What the graphics layer knows of the addresses in the registers (dm_gfx_addr_note: the memory pool, a texture's storage, a GPU write the host recorded on the page). A game's own
+    // data overwritten with float words (PRAGMATA's render command lists) asks whether the GPU or a host copy wrote there
+    for (int i = 0; i < 29; i++) {
+        uint64_t a = uc->uc_mcontext->__ss.__x[i]; char note[512]; note[0] = 0;
+        if (a < 0x100000000ull) continue;
+        dm_gfx_addr_note(a, note, sizeof note);
+        if (note[0]) fprintf(stderr, "[dm] x%d %#llx:%s\n", i, (unsigned long long)a, note);
+    }
+    // DM_CRASH_PEEK="sp+0x248*,x22-0x20": 0x100 bytes at each address, given as sp or a register plus or minus an offset, a trailing * reading the pointer stored there first
+    // (PRAGMATA's render function keeps its current draw item at sp + 0x248: the item and what it points at tell where a bad pointer came from); with what the graphics layer knows of it
+    if (getenv("DM_CRASH_PEEK")) {
+        char spec[512]; snprintf(spec, sizeof spec, "%s", getenv("DM_CRASH_PEEK"));
+        for (char *tok = strtok(spec, ","); tok; tok = strtok(NULL, ",")) {
+            uint64_t a = 0; char *p = tok;
+            if (!strncmp(p, "sp", 2)) { a = uc->uc_mcontext->__ss.__sp; p += 2; }
+            else if (*p == 'x') { long r = strtol(p + 1, &p, 10); if (r < 0 || r > 28) continue; a = uc->uc_mcontext->__ss.__x[r]; }
+            else continue;
+            if (*p == '+' || *p == '-') { long long d = strtoll(p, &p, 0); a += (uint64_t)d; }
+            if (*p == '*') { uint64_t v = 0; vm_size_t got = 0; if (vm_read_overwrite(mach_task_self(), (vm_address_t)a, 8, (vm_address_t)&v, &got) != KERN_SUCCESS || got != 8) { fprintf(stderr, "[dm] peek %s: %#llx unreadable\n", tok, (unsigned long long)a); continue; } a = v; }
+            uint64_t w[32]; vm_size_t got = 0; char note[512]; note[0] = 0;
+            if (vm_read_overwrite(mach_task_self(), (vm_address_t)a, sizeof w, (vm_address_t)w, &got) != KERN_SUCCESS || got != sizeof w) { fprintf(stderr, "[dm] peek %s: %#llx unreadable\n", tok, (unsigned long long)a); continue; }
+            dm_gfx_addr_note(a, note, sizeof note);
+            fprintf(stderr, "[dm] peek %s = %#llx:%s", tok, (unsigned long long)a, note);
+            for (int k = 0; k < 32; k++) { if (!(k % 4)) fprintf(stderr, "\n[dm]   +%#04x", k * 8); off("", w[k]); }
+            fputc('\n', stderr);
+        }
     }
     dm_backtrace(uc->uc_mcontext->__ss.__fp);
     // Stack scan: when the frame chain is broken (a return address was overwritten, pc = lr lands on garbage) the backtrace prints nothing; scan 512 words up from sp and list everything that resolves to a module / host symbol (nearest callers first)

@@ -14,6 +14,8 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
         {
             return ioVariable switch
             {
+                IoVariable.BaryCoord => (BuiltIn.BaryCoordKHR, AggregateType.Vector3 | AggregateType.FP32),
+                IoVariable.BaryCoordNoPersp => (BuiltIn.BaryCoordNoPerspKHR, AggregateType.Vector3 | AggregateType.FP32),
                 IoVariable.BaseInstance => (BuiltIn.BaseInstance, AggregateType.S32),
                 IoVariable.BaseVertex => (BuiltIn.BaseVertex, AggregateType.S32),
                 IoVariable.ClipDistance => (BuiltIn.ClipDistance, AggregateType.Array | AggregateType.FP32),

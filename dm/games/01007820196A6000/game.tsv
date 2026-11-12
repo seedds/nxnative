@@ -1,0 +1,48 @@
+# Red Dead Redemption: the NSP script's provisional profile (dm/games/profile_guess.py), checked on the Mac through the opening into Armadillo
+# SDK 15.3.2, RAGE (Double Eleven port), NVN
+
+# ---- Identity ----
+title_id	01007820196A6000
+program_id	01007820196A6000
+
+# ---- App ----
+name	Red Dead Redemption
+ipa	RedDeadRedemption.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v0	1.0.0	main=9515ef1f79ef3cb800bd85e5d3de0d98	sdk=8618895246b420329b77746b960a66ab
+build	v262144	1.0.4	main=37531419da7654ec3f5b586693f7f331	sdk=8618895246b420329b77746b960a66ab
+# 1.0.7 changes the RomFS only: its main and sdk are 1.0.4's
+build	v458752	1.0.7	main=37531419da7654ec3f5b586693f7f331	sdk=8618895246b420329b77746b960a66ab
+package	v458752
+shader_versions	v0 v458752
+
+# ---- Files ----
+# every module main imports from
+modules	main sdk
+romfs_marker	audio_switch.rpf
+zip_store	.bk2:.pkdswitch:.rpf:.metallib
+
+# ---- Memory ----
+# main sets a heap of at most the pool − 64 MB − 1207 MB of bss (counted as used memory): a 2048 MB heap region
+mem_reserve	0xb0000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 0 MB of system resource: IsVirtualAddressMemoryEnabled is false, as on Horizon (Big Brain Academy: Brain vs. Brain sets a heap only then)
+sys_resource	0x0
+
+# ---- Shader split ----
+shader_groups	/redemption/=redemption /cero/=cero /d11extra/=d11extra
+shader_note	Red Dead Redemption shaders (RAGE effects in shaders.rpf and main, Double Eleven pack)
+
+# ---- After the rewrite ----
+# used memory for the rewritten modules, at least the default 64 MB: 1.0.0's (1.0.4's fit in the default)
+mem_used	0x4ca4000
+
+# ---- Frame rate ----
+# 60 fps (30 on the Switch): the game asks for present interval 2 once (main+0x38ea0) and has no other limit; it steps by the time that passed (the opening cutscene's
+# shots at the same seconds at 30 and 60, README.md Frame rate). Display mode presents at the cap by the present interval alone; the player's Frame rate picks 30 or 60
+fps_target	60
+present_interval	display

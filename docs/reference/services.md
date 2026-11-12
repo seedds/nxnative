@@ -1242,6 +1242,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** once the rewrite stage has collected the NROs, the NSP script adds to a provisional profile every subsdk whose exports an NRO imports and that no loaded module, other NRO or host hook supplies (`profile_guess.py` `nro_modules`, written under a section `After the NRO collection`). NVIDIA's GPU drivers stay out, as above.
 - **Found on:** [Portal](../../dm/games/01007BB017812000/README.md) (`modules main subsdk0 subsdk2 sdk`; `subsdk1`, NVIDIA's OpenGL driver, stays out).
 
+### A module the NROs import from, missing from the build row
+
+- **Symptom:** a game with a provisional profile stays black where its opening movie plays; the log has `modules of main's build …: main sdk (the profile lists 3)`, and `movie::Extractor`'s constructor is unimplemented.
+- **Cause:** since the host loads the modules of the `build` row for main's build ([A derived profile leaves out a module that moved to another slot](packing.md#a-derived-profile-leaves-out-a-module-that-moved-to-another-slot)), a module in `modules` alone is not loaded. The NRO step above added its subsdks to `modules` only, and the provisional profile's row, written by the survey, named the modules `main` imports from.
+- **Fix:** after the NRO collection, `provisional_modules` (`scripts/build_ipa_from_nsp.py`) writes `modules` and completes the row of this ExeFS's main build in one write: every module of `modules` the ExeFS has, with its build ID. It runs on every build of a provisional profile, so a profile written before is repaired; the rows of other versions packed from the same folder are left as they are. A changed row rebuilds the Mac host, which has the rows compiled in.
+- **Found on:** Mario Golf: Super Rush (`0100C9C00E25C000`, 4.0.0, issue #814; no profile in the repository), from the PR author's run ([PR #2215](https://github.com/seedds/nxnative/pull/2215)): `subsdk0` (NintendoSDK_movie) in `modules` and not in the row; with it in the row the opening movie plays (4,921 frames decoded) and the title follows. Not run here: no Mario Golf files on this Mac.
+
 ### `ro::LookupModuleSymbol` for a name the module does not define
 
 - **Symptom:** `[RED] ro::LookupModuleSymbol BuiltDebug: not defined in that module` once at boot; nothing goes wrong after it.

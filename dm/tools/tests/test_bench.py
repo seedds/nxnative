@@ -132,7 +132,7 @@ open({str(self.marker)!r} + '.tmp', 'w').write(str(os.getpid())); os.rename({str
 while True: signal.pause()
 ''')
         self.host.chmod(0o755)
-        self.host_pid = None
+        self.host_pid = 0
         self.addCleanup(self.kill_host)
 
     def kill_host(self):
@@ -154,10 +154,11 @@ while True: signal.pause()
             p.wait(self.BOUND)
         finally:
             if p.poll() is None: p.kill(); p.wait()
-            p.stderr.close()
+            if p.stderr: p.stderr.close()
         return p.returncode
 
     def host_running(self):   # a zombie counts as gone: launchd reaps the orphan
+        if not self.host_pid: return False
         try: os.kill(self.host_pid, 0)
         except ProcessLookupError: return False
         return subprocess.run(['ps', '-o', 'stat=', '-p', str(self.host_pid)], capture_output=True, text=True).stdout.strip()[:1] not in ('', 'Z')

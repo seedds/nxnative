@@ -36,6 +36,7 @@ static int test_sleep(const struct timespec *ts, struct timespec *left) {
 #define pthread_detach test_detach
 #define nanosleep test_sleep
 #include "../hle_sdk16.c"
+void dm_mii_default_charinfo(void *out) { memset(out, 0, 0x58); }
 #undef pthread_create
 #undef pthread_detach
 #undef nanosleep

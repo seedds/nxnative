@@ -221,61 +221,249 @@ HLE_FORCE("_ZN2nn3nfc12IsNfcEnabledEv", "NFC switched on or off (returns bool): 
 
 // ---------- nfp: amiibo ----------
 // From Mario 1.2.1 the game initializes nfp at boot (v0 did not use it). The real SDK would connect to the sm: service, which the host lacks → abort, so the whole family is taken over.
-// The host has no NFC reader: it reports one NFC device on the currently connected controller (same as hle_hid.c) whose detection never finds a tag -- the same as real hardware with no amiibo at hand:
-// the game's "touch an amiibo" screen appears as usual and cancelling leaves it. Operations that need a tag (mount, application area read / write, amiibo settings applets) all return "tag not found".
-// The game attaches no activate / deactivate events; it polls GetDeviceState to see whether a tag is there.
+// The host has no NFC reader: it reports one NFC device on the currently connected controller (same as hle_hid.c). With no amiibo file scanned its detection finds no tag, as real hardware with no
+// amiibo at hand: the game's "touch an amiibo" screen appears as usual and cancelling leaves it, and operations that need a tag return "tag not found".
 // GetState is the library's own state, as on Horizon: 0 until Initialize, 1 until Finalize. Breath of the Wild (main+0x128ec7c) and Tears of the Kingdom (main+0xca5200) call Initialize and attach their
 // availability change event only when GetState is not 1; answering 1 before Initialize skipped the attach, and TotK's poll of that event (main+0x1fb991c) aborted in TryWaitSystemEvent (#613).
-#define NFP_RES_TAG_NOT_FOUND (115u | 97u << 9)   // module 115 (nfp), description 97
-enum { NFP_STATE_INIT = 0, NFP_STATE_SEARCH = 1 };   // 0 initialized, 1 searching for a tag (2 = tag found, never on the host)
+// A virtual amiibo (dm_amiibo_scan: the Mac window's Amiibo menu, DM_AMIIBO, DM_CTL "amiibo <file>") is a raw NTAG215 dump. Its UID and model block are plain and are answered as they are.
+// The owner, nickname and application area are encrypted with keys the host does not have: the host answers a registered amiibo with the default Mii, and keeps each amiibo's application
+// area in a file of its own, <DM_ROOT>/amiibo/<UID>.area, empty until a game creates it. Open: reading a dump's own application area (docs/reference/services.md)
+#define NFP_RES(d) (115u | (uint32_t)(d) << 9)
+#define NFP_RES_TAG_NOT_FOUND NFP_RES(97)
+#define NFP_RES_WRONG_AREA_SIZE NFP_RES(68)
+#define NFP_RES_WRONG_STATE NFP_RES(73)
+#define NFP_RES_AREA_NOT_CREATED NFP_RES(128)
+#define NFP_RES_WRONG_AREA_ID NFP_RES(152)
+#define NFP_RES_AREA_EXISTS NFP_RES(168)
+enum { NFP_STATE_INIT = 0, NFP_STATE_SEARCH = 1, NFP_STATE_FOUND = 2, NFP_STATE_REMOVED = 3, NFP_STATE_MOUNTED = 4 };
+#define NFP_AREA_SIZE 0xD8
 typedef struct { uint32_t id; uint8_t reserved[4]; } NfpDeviceHandle;
 #define NFP_DEVICE_ID 0x4e465030u   // 'NFP0'
-static _Atomic int g_nfp_state;
+static pthread_mutex_t g_nfp_mu = PTHREAD_MUTEX_INITIALIZER;
+static int g_nfp_state;
 static _Atomic int g_nfp_lib;   // the library state GetState answers: 0 uninitialized, 1 initialized
+static struct {
+    int present; char name[128]; uint8_t dump[0x60];
+    int area_made, area_open, area_dirty; uint32_t area_id; uint8_t area[NFP_AREA_SIZE];
+} g_tag;
+static uint64_t g_nfp_ev_on, g_nfp_ev_off;
 uint32_t hle_hid_connected_npad(void);
+void dm_mii_default_charinfo(void *out);   // hle_mii.c
+
+static void nfp_uid(uint8_t uid[7]) { memcpy(uid, g_tag.dump, 3); memcpy(uid + 3, g_tag.dump + 4, 4); }
+static int nfp_area_path(char *out, size_t n) {
+    const char *root = getenv("DM_ROOT");
+    if (!root || !*root) return 0;
+    uint8_t u[7]; nfp_uid(u);
+    snprintf(out, n, "%s/amiibo", root); mkdir(out, 0755);
+    snprintf(out, n, "%s/amiibo/%02X%02X%02X%02X%02X%02X%02X.area", root, u[0], u[1], u[2], u[3], u[4], u[5], u[6]);
+    return 1;
+}
+static void nfp_area_load(void) {
+    g_tag.area_made = g_tag.area_open = g_tag.area_dirty = 0; memset(g_tag.area, 0, sizeof g_tag.area);
+    char p[1100]; uint8_t raw[4 + NFP_AREA_SIZE];
+    if (!nfp_area_path(p, sizeof p)) return;
+    FILE *f = fopen(p, "rb");
+    if (!f) return;
+    if (fread(raw, 1, sizeof raw, f) == sizeof raw) { memcpy(&g_tag.area_id, raw, 4); memcpy(g_tag.area, raw + 4, NFP_AREA_SIZE); g_tag.area_made = 1; }
+    fclose(f);
+}
+static void nfp_area_save(void) {
+    char p[1100], tmp[1110]; uint8_t raw[4 + NFP_AREA_SIZE];
+    if (!g_tag.area_dirty) return;
+    g_tag.area_dirty = 0;
+    if (!nfp_area_path(p, sizeof p)) { LOG("[RED] nfp: DM_ROOT is not set: the amiibo's application area is kept for this run only"); return; }
+    memcpy(raw, &g_tag.area_id, 4); memcpy(raw + 4, g_tag.area, NFP_AREA_SIZE);
+    snprintf(tmp, sizeof tmp, "%s.tmp", p);
+    FILE *f = fopen(tmp, "wb");
+    if (!f || fwrite(raw, 1, sizeof raw, f) != sizeof raw || fclose(f) || rename(tmp, p)) LOG("[RED] nfp: cannot write %s: %s", p, strerror(errno));
+}
+static void nfp_found(void) {
+    g_nfp_state = NFP_STATE_FOUND;
+    if (g_nfp_ev_on) hle_signal_system_event_binding(g_nfp_ev_on);
+    LOG("nfp: amiibo %s found by the game", g_tag.name);
+}
+
+int dm_amiibo_scan(const char *path) {
+    uint8_t raw[0x60]; FILE *f = fopen(path, "rb");
+    size_t n = f ? fread(raw, 1, sizeof raw, f) : 0; long size = 0;
+    if (f) { fseek(f, 0, SEEK_END); size = ftell(f); fclose(f); }
+    if (n != sizeof raw || size < 520 || size > 4096 || raw[0x0C] != 0xF1 || raw[0x0D] != 0x10 || raw[0x0E] != 0xFF || raw[0x0F] != 0xEE || raw[0x5B] != 0x02) {
+        LOG("[RED] nfp: %s is not an amiibo dump (a raw NTAG215 image of 520 to 572 bytes)", path); return 0;
+    }
+    pthread_mutex_lock(&g_nfp_mu);
+    memcpy(g_tag.dump, raw, sizeof raw); g_tag.present = 1;
+    const char *base = strrchr(path, '/'); snprintf(g_tag.name, sizeof g_tag.name, "%s", base ? base + 1 : path);
+    char *dot = strrchr(g_tag.name, '.'); if (dot) *dot = 0;
+    nfp_area_load();
+    LOG("nfp: amiibo %s on the reader (model %02x%02x%02x%02x %02x%02x%02x%02x%s)", g_tag.name, raw[0x54], raw[0x55], raw[0x56], raw[0x57], raw[0x58], raw[0x59], raw[0x5A], raw[0x5B],
+        g_tag.area_made ? ", with a saved application area" : "");
+    if (g_nfp_state != NFP_STATE_INIT) nfp_found();
+    pthread_mutex_unlock(&g_nfp_mu);
+    return 1;
+}
+void dm_amiibo_remove(void) {
+    pthread_mutex_lock(&g_nfp_mu);
+    if (g_tag.present) {
+        nfp_area_save(); g_tag.present = 0;
+        LOG("nfp: amiibo %s taken off the reader", g_tag.name);
+        if (g_nfp_state == NFP_STATE_FOUND || g_nfp_state == NFP_STATE_MOUNTED) { g_nfp_state = NFP_STATE_REMOVED; if (g_nfp_ev_off) hle_signal_system_event_binding(g_nfp_ev_off); }
+    }
+    pthread_mutex_unlock(&g_nfp_mu);
+}
+const char *dm_amiibo_name(void) { return g_tag.present ? g_tag.name : NULL; }
+
 static Result nfp_no_tag(const char *what) {
-    static _Atomic int logged; if (!atomic_exchange(&logged, 1)) LOG("nfp: %s and other operations that need an amiibo tag → no tag found (the host has no NFC)", what);
+    static _Atomic int logged; if (!atomic_exchange(&logged, 1)) LOG("nfp: %s and other operations that need an amiibo tag → no tag found (none is on the reader)", what);
     return NFP_RES_TAG_NOT_FOUND;
 }
-HLE_FORCE("_ZN2nn3nfp10InitializeEv", "amiibo library init; the host has one NFC device that never finds a tag", void, h_nfp_Init, void) { atomic_store(&g_nfp_lib, 1); LOG("nfp::Initialize: the host has one NFC device and finds no amiibo tag"); }
-// Kirby Air Riders initializes it with this one instead; on the host the extended application area is no different, as no tag ever has one
-HLE_FORCE("_ZN2nn3nfp37InitializeWithExtendedApplicationAreaEv", "amiibo library init with the extended application area; the same device that never finds a tag", void, h_nfp_InitExt, void) { atomic_store(&g_nfp_lib, 1); LOG("nfp::InitializeWithExtendedApplicationArea: the host has one NFC device that never finds a tag"); }
+// 0 with the lock held when the tag is there (and mounted, if asked); else the result to return, the lock released
+static Result nfp_need(const char *what, int mounted) {
+    pthread_mutex_lock(&g_nfp_mu);
+    int have = g_nfp_state == NFP_STATE_FOUND || g_nfp_state == NFP_STATE_MOUNTED;
+    if (have && (!mounted || g_nfp_state == NFP_STATE_MOUNTED)) return RES_OK;
+    pthread_mutex_unlock(&g_nfp_mu);
+    return have ? NFP_RES_WRONG_STATE : nfp_no_tag(what);
+}
+static void nfp_today(uint8_t *out) {
+    time_t t = time(NULL); struct tm tm; localtime_r(&t, &tm);
+    uint16_t y = (uint16_t)(tm.tm_year + 1900); memcpy(out, &y, 2); out[2] = (uint8_t)(tm.tm_mon + 1); out[3] = (uint8_t)tm.tm_mday;
+}
+static void nfp_register_info(uint8_t *out) {
+    memset(out, 0, 0x100); dm_mii_default_charinfo(out); nfp_today(out + 0x58); strcpy((char *)out + 0x5C, "nxnative");
+}
+
+HLE_FORCE("_ZN2nn3nfp10InitializeEv", "amiibo library init; the host has one NFC device, which finds the amiibo file the player scans", void, h_nfp_Init, void) {
+    atomic_store(&g_nfp_lib, 1); LOG("nfp::Initialize: one NFC device, which finds a scanned amiibo file");
+    static _Atomic int env; const char *e = getenv("DM_AMIIBO"); if (e && *e && !atomic_exchange(&env, 1)) dm_amiibo_scan(e);
+}
+// Kirby Air Riders initializes it with this one instead; the host has no extended application area
+HLE_FORCE("_ZN2nn3nfp37InitializeWithExtendedApplicationAreaEv", "amiibo library init with the extended application area; the same device", void, h_nfp_InitExt, void) { h_nfp_Init(); }
 HLE_FORCE("_ZN2nn3nfp29AttachAvailabilityChangeEventEPNS_2os15SystemEventTypeE", "NFC availability change event; bound to a kernel event, never signalled", void, h_nfp_AttachAvail, void *ev) { hle_bind_system_event(ev, 0); }
 HLE_FORCE("_ZN2nn3nfp11ListDevicesEPNS0_12DeviceHandleEPii", "NFC device list: one device", Result, h_nfp_List, NfpDeviceHandle *out, int *n, int max) {
     *n = 0; if (max >= 1) { memset(&out[0], 0, sizeof out[0]); out[0].id = NFP_DEVICE_ID; *n = 1; }
     return RES_OK;
 }
 HLE_FORCE("_ZN2nn3nfp9GetNpadIdEPjRKNS0_12DeviceHandleE", "controller the NFC device is on: the one connected now", Result, h_nfp_NpadId, uint32_t *out, const NfpDeviceHandle *h) { (void)h; *out = hle_hid_connected_npad(); return RES_OK; }
-HLE_FORCE("_ZN2nn3nfp14StartDetectionERKNS0_12DeviceHandleE", "start tag detection (never finds one)", Result, h_nfp_Start, const NfpDeviceHandle *h) { (void)h; atomic_store(&g_nfp_state, NFP_STATE_SEARCH); return RES_OK; }
-HLE_FORCE("_ZN2nn3nfp13StopDetectionERKNS0_12DeviceHandleE", "stop tag detection", Result, h_nfp_Stop, const NfpDeviceHandle *h) { (void)h; atomic_store(&g_nfp_state, NFP_STATE_INIT); return RES_OK; }
-HLE_FORCE("_ZN2nn3nfp14GetDeviceStateERKNS0_12DeviceHandleE", "device state: initialized / searching for a tag", int, h_nfp_State, const NfpDeviceHandle *h) { (void)h; return atomic_load(&g_nfp_state); }
-HLE_FORCE("_ZN2nn3nfp10GetTagInfoEPNS0_7TagInfoERKNS0_12DeviceHandleE", "tag info: no tag", Result, h_nfp_TagInfo, void *out, const NfpDeviceHandle *h) { (void)out; (void)h; return nfp_no_tag("GetTagInfo"); }
-HLE_FORCE("_ZN2nn3nfp12GetModelInfoEPNS0_9ModelInfoERKNS0_12DeviceHandleE", "model info: no tag", Result, h_nfp_ModelInfo, void *out, const NfpDeviceHandle *h) { (void)out; (void)h; return nfp_no_tag("GetModelInfo"); }
-HLE_FORCE("_ZN2nn3nfp5MountERKNS0_12DeviceHandleENS0_9ModelTypeENS0_11MountTargetE", "mount tag: no tag", Result, h_nfp_Mount, const NfpDeviceHandle *h, int model, int target) { (void)h; (void)model; (void)target; return nfp_no_tag("Mount"); }
-// Another group The Legend of Zelda: Breath of the Wild (SDK 20) uses: tag activate / deactivate events (bound to a kernel event that never fires; without the take-over the SDK's code reads a null pointer at sdk+0x3f2a78), the two-argument Mount,
-//   Unmount, reading common / register info (all answered as no tag), the library state (1 = initialized) and Finalize
-HLE_FORCE("_ZN2nn3nfp19AttachActivateEventEPNS_2os15SystemEventTypeERKNS0_12DeviceHandleE", "tag placed event; bound to a kernel event, never signalled", Result, h_nfp_AttachAct, void *ev, const NfpDeviceHandle *h) { (void)h; hle_bind_system_event(ev, 0); return RES_OK; }
-HLE_FORCE("_ZN2nn3nfp21AttachDeactivateEventEPNS_2os15SystemEventTypeERKNS0_12DeviceHandleE", "tag removed event; bound to a kernel event, never signalled", Result, h_nfp_AttachDeact, void *ev, const NfpDeviceHandle *h) { (void)h; hle_bind_system_event(ev, 0); return RES_OK; }
-HLE_FORCE("_ZN2nn3nfp5MountERKNS0_12DeviceHandleENS0_9ModelTypeE", "mount tag (two arguments): no tag", Result, h_nfp_Mount2, const NfpDeviceHandle *h, int model) { (void)h; (void)model; return nfp_no_tag("Mount"); }
-HLE_FORCE("_ZN2nn3nfp7UnmountERKNS0_12DeviceHandleE", "unmount tag: no tag", Result, h_nfp_Unmount, const NfpDeviceHandle *h) { (void)h; return nfp_no_tag("Unmount"); }
-HLE_FORCE("_ZN2nn3nfp13GetCommonInfoEPNS0_10CommonInfoERKNS0_12DeviceHandleE", "common info: no tag", Result, h_nfp_CommonInfo, void *out, const NfpDeviceHandle *h) { (void)out; (void)h; return nfp_no_tag("GetCommonInfo"); }
-HLE_FORCE("_ZN2nn3nfp15GetRegisterInfoEPNS0_12RegisterInfoERKNS0_12DeviceHandleE", "register info: no tag", Result, h_nfp_RegInfo, void *out, const NfpDeviceHandle *h) { (void)out; (void)h; return nfp_no_tag("GetRegisterInfo"); }
+HLE_FORCE("_ZN2nn3nfp14StartDetectionERKNS0_12DeviceHandleE", "start tag detection: finds the scanned amiibo, if one is on the reader", Result, h_nfp_Start, const NfpDeviceHandle *h) { (void)h;
+    pthread_mutex_lock(&g_nfp_mu);
+    g_nfp_state = NFP_STATE_SEARCH; if (g_tag.present) nfp_found();
+    pthread_mutex_unlock(&g_nfp_mu); return RES_OK;
+}
+// A detection that found the amiibo ends with it: the next one needs a new scan, as a player lifts the figure off between uses
+HLE_FORCE("_ZN2nn3nfp13StopDetectionERKNS0_12DeviceHandleE", "stop tag detection", Result, h_nfp_Stop, const NfpDeviceHandle *h) { (void)h;
+    pthread_mutex_lock(&g_nfp_mu);
+    if (g_nfp_state >= NFP_STATE_FOUND && g_tag.present) { nfp_area_save(); g_tag.present = 0; }
+    g_nfp_state = NFP_STATE_INIT;
+    pthread_mutex_unlock(&g_nfp_mu); return RES_OK;
+}
+HLE_FORCE("_ZN2nn3nfp14GetDeviceStateERKNS0_12DeviceHandleE", "device state: initialized / searching / tag found / removed / mounted", int, h_nfp_State, const NfpDeviceHandle *h) { (void)h;
+    pthread_mutex_lock(&g_nfp_mu); int s = g_nfp_state; pthread_mutex_unlock(&g_nfp_mu); return s;
+}
+HLE_FORCE("_ZN2nn3nfp10GetTagInfoEPNS0_7TagInfoERKNS0_12DeviceHandleE", "tag info: the dump's UID, an NFC-A type 2 tag", Result, h_nfp_TagInfo, uint8_t *out, const NfpDeviceHandle *h) { (void)h;
+    Result r = nfp_need("GetTagInfo", 0); if (r) return r;
+    memset(out, 0, 0x58); nfp_uid(out); out[0x0A] = 7; uint32_t protocol = 1, type = 2; memcpy(out + 0x20, &protocol, 4); memcpy(out + 0x24, &type, 4);
+    pthread_mutex_unlock(&g_nfp_mu); return RES_OK;
+}
+// ModelInfo: character ID (2 bytes as on the tag), variant, figure type, model number (big-endian on the tag), series
+HLE_FORCE("_ZN2nn3nfp12GetModelInfoEPNS0_9ModelInfoERKNS0_12DeviceHandleE", "model info: the dump's model block", Result, h_nfp_ModelInfo, uint8_t *out, const NfpDeviceHandle *h) { (void)h;
+    Result r = nfp_need("GetModelInfo", 1); if (r) return r;
+    const uint8_t *m = g_tag.dump + 0x54;
+    memset(out, 0, 0x40); memcpy(out, m, 4); out[4] = m[5]; out[5] = m[4]; out[6] = m[6];
+    pthread_mutex_unlock(&g_nfp_mu); return RES_OK;
+}
+static Result nfp_mount(void) {
+    Result r = nfp_need("Mount", 0); if (r) return r;
+    g_nfp_state = NFP_STATE_MOUNTED; g_tag.area_open = 0;
+    pthread_mutex_unlock(&g_nfp_mu); return RES_OK;
+}
+HLE_FORCE("_ZN2nn3nfp5MountERKNS0_12DeviceHandleENS0_9ModelTypeENS0_11MountTargetE", "mount the scanned amiibo", Result, h_nfp_Mount, const NfpDeviceHandle *h, int model, int target) { (void)h; (void)model; (void)target; return nfp_mount(); }
+// Breath of the Wild (SDK 20) attaches the tag events and polls them: bound here, signalled when a scanned amiibo is found or taken away (unbound, the SDK's code reads a null pointer at sdk+0x3f2a78)
+HLE_FORCE("_ZN2nn3nfp19AttachActivateEventEPNS_2os15SystemEventTypeERKNS0_12DeviceHandleE", "tag placed event: signalled when a scanned amiibo is found", Result, h_nfp_AttachAct, void *ev, const NfpDeviceHandle *h) { (void)h;
+    hle_bind_system_event(ev, 0); uint64_t b = hle_system_event_binding(ev);
+    pthread_mutex_lock(&g_nfp_mu); g_nfp_ev_on = b; pthread_mutex_unlock(&g_nfp_mu); return RES_OK;
+}
+HLE_FORCE("_ZN2nn3nfp21AttachDeactivateEventEPNS_2os15SystemEventTypeERKNS0_12DeviceHandleE", "tag removed event: signalled when the amiibo is taken away", Result, h_nfp_AttachDeact, void *ev, const NfpDeviceHandle *h) { (void)h;
+    hle_bind_system_event(ev, 0); uint64_t b = hle_system_event_binding(ev);
+    pthread_mutex_lock(&g_nfp_mu); g_nfp_ev_off = b; pthread_mutex_unlock(&g_nfp_mu); return RES_OK;
+}
+HLE_FORCE("_ZN2nn3nfp5MountERKNS0_12DeviceHandleENS0_9ModelTypeE", "mount the scanned amiibo (two arguments)", Result, h_nfp_Mount2, const NfpDeviceHandle *h, int model) { (void)h; (void)model; return nfp_mount(); }
+HLE_FORCE("_ZN2nn3nfp7UnmountERKNS0_12DeviceHandleE", "unmount the amiibo: it stays on the reader", Result, h_nfp_Unmount, const NfpDeviceHandle *h) { (void)h;
+    Result r = nfp_need("Unmount", 1); if (r) return r;
+    nfp_area_save(); g_nfp_state = NFP_STATE_FOUND; g_tag.area_open = 0;
+    pthread_mutex_unlock(&g_nfp_mu); return RES_OK;
+}
+// CommonInfo: last write date (encrypted on the tag: today), write counter (plain, big-endian at 0x11), version, application area size
+HLE_FORCE("_ZN2nn3nfp13GetCommonInfoEPNS0_10CommonInfoERKNS0_12DeviceHandleE", "common info: the dump's write counter, today's date", Result, h_nfp_CommonInfo, uint8_t *out, const NfpDeviceHandle *h) { (void)h;
+    Result r = nfp_need("GetCommonInfo", 1); if (r) return r;
+    memset(out, 0, 0x40); nfp_today(out); out[4] = g_tag.dump[0x12]; out[5] = g_tag.dump[0x11]; uint32_t size = NFP_AREA_SIZE; memcpy(out + 8, &size, 4);
+    pthread_mutex_unlock(&g_nfp_mu); return RES_OK;
+}
+HLE_FORCE("_ZN2nn3nfp15GetRegisterInfoEPNS0_12RegisterInfoERKNS0_12DeviceHandleE", "register info: the default Mii as the owner (the dump's own is encrypted)", Result, h_nfp_RegInfo, uint8_t *out, const NfpDeviceHandle *h) { (void)h;
+    Result r = nfp_need("GetRegisterInfo", 1); if (r) return r;
+    nfp_register_info(out);
+    pthread_mutex_unlock(&g_nfp_mu); return RES_OK;
+}
 HLE_FORCE("_ZN2nn3nfp8GetStateEv", "amiibo library state: uninitialized (0) / initialized (1)", int, h_nfp_LibState, void) { return atomic_load(&g_nfp_lib); }
 HLE_FORCE("_ZN2nn3nfp8FinalizeEv", "amiibo library finalize; the host has no session", void, h_nfp_Fini, void) { atomic_store(&g_nfp_lib, 0); }
-HLE_FORCE("_ZN2nn3nfp5FlushERKNS0_12DeviceHandleE", "flush tag: no tag", Result, h_nfp_Flush, const NfpDeviceHandle *h) { (void)h; return nfp_no_tag("Flush"); }
-HLE_FORCE("_ZN2nn3nfp19OpenApplicationAreaERKNS0_12DeviceHandleEj", "open application area: no tag", Result, h_nfp_OpenArea, const NfpDeviceHandle *h, uint32_t id) { (void)h; (void)id; return nfp_no_tag("OpenApplicationArea"); }
-HLE_FORCE("_ZN2nn3nfp18GetApplicationAreaEPvPmRKNS0_12DeviceHandleEm", "read application area: no tag", Result, h_nfp_GetArea, void *buf, uint64_t *n, const NfpDeviceHandle *h, uint64_t sz) { (void)buf; (void)h; (void)sz; if (n) *n = 0; return nfp_no_tag("GetApplicationArea"); }
-HLE_FORCE("_ZN2nn3nfp18SetApplicationAreaERKNS0_12DeviceHandleEPKvm", "write application area: no tag", Result, h_nfp_SetArea, const NfpDeviceHandle *h, const void *buf, uint64_t sz) { (void)h; (void)buf; (void)sz; return nfp_no_tag("SetApplicationArea"); }
-HLE_FORCE("_ZN2nn3nfp21CreateApplicationAreaERKNS0_12DeviceHandleERKNS0_25ApplicationAreaCreateInfoE", "create application area: no tag", Result, h_nfp_CreateArea, const NfpDeviceHandle *h, const void *info) { (void)h; (void)info; return nfp_no_tag("CreateApplicationArea"); }
-HLE_FORCE("_ZN2nn3nfp23RecreateApplicationAreaERKNS0_12DeviceHandleERKNS0_25ApplicationAreaCreateInfoE", "recreate application area: no tag", Result, h_nfp_RecreateArea, const NfpDeviceHandle *h, const void *info) { (void)h; (void)info; return nfp_no_tag("RecreateApplicationArea"); }
-HLE_FORCE("_ZN2nn3nfp26GetExtendedApplicationAreaEPvPmRKNS0_12DeviceHandleEm", "read extended application area: no tag", Result, h_nfp_GetAreaExt, void *buf, uint64_t *n, const NfpDeviceHandle *h, uint64_t sz) { (void)buf; (void)n; (void)h; (void)sz; return nfp_no_tag("GetExtendedApplicationArea"); }
-HLE_FORCE("_ZN2nn3nfp26SetExtendedApplicationAreaERKNS0_12DeviceHandleEPKvm", "write extended application area: no tag", Result, h_nfp_SetAreaExt, const NfpDeviceHandle *h, const void *buf, uint64_t sz) { (void)h; (void)buf; (void)sz; return nfp_no_tag("SetExtendedApplicationArea"); }
-HLE_FORCE("_ZN2nn3nfp30GetExtendedApplicationAreaInfoEPNS0_27ExtendedApplicationAreaInfoERKNS0_12DeviceHandleE", "extended application area info: no tag", Result, h_nfp_AreaExtInfo, void *out, const NfpDeviceHandle *h) { (void)out; (void)h; return nfp_no_tag("GetExtendedApplicationAreaInfo"); }
-HLE_FORCE("_ZN2nn3nfp7RestoreERKNS0_12DeviceHandleE", "restore tag: no tag", Result, h_nfp_Restore, const NfpDeviceHandle *h) { (void)h; return nfp_no_tag("Restore"); }
-HLE_FORCE("_ZN2nn3nfp13StartRestorerEPNS0_12DeviceHandleERKNS0_24AmiiboSettingsStartParamERKNS0_7TagInfoE", "amiibo restorer applet: no tag", Result, h_nfp_Restorer, NfpDeviceHandle *h, const void *p, const void *tag) { (void)h; (void)p; (void)tag; return nfp_no_tag("StartRestorer"); }
-HLE_FORCE("_ZN2nn3nfp19StartGameDataEraserEPNS0_12DeviceHandleERKNS0_24AmiiboSettingsStartParamERKNS0_7TagInfoE", "amiibo game data eraser applet: no tag", Result, h_nfp_Eraser, NfpDeviceHandle *h, const void *p, const void *tag) { (void)h; (void)p; (void)tag; return nfp_no_tag("StartGameDataEraser"); }
-HLE_FORCE("_ZN2nn3nfp29StartNicknameAndOwnerSettingsEPNS0_12DeviceHandleEPbPNS0_12RegisterInfoERKNS0_24AmiiboSettingsStartParamERKNS0_7TagInfoE", "amiibo nickname and owner settings applet: no tag", Result, h_nfp_Nick, NfpDeviceHandle *h, uint8_t *changed, void *reg, const void *p, const void *tag) { (void)h; (void)reg; (void)p; (void)tag; if (changed) *changed = 0; return nfp_no_tag("StartNicknameAndOwnerSettings"); }
-HLE_FORCE("_ZN2nn3nfp29StartNicknameAndOwnerSettingsEPNS0_12DeviceHandleEPbPNS0_12RegisterInfoERKNS0_24AmiiboSettingsStartParamERKNS0_7TagInfoERKS4_", "amiibo nickname and owner settings applet (with the old register info): no tag", Result, h_nfp_Nick2, NfpDeviceHandle *h, uint8_t *changed, void *reg, const void *p, const void *tag, const void *old) { (void)h; (void)reg; (void)p; (void)tag; (void)old; if (changed) *changed = 0; return nfp_no_tag("StartNicknameAndOwnerSettings"); }
+HLE_FORCE("_ZN2nn3nfp5FlushERKNS0_12DeviceHandleE", "flush: the application area goes to its file", Result, h_nfp_Flush, const NfpDeviceHandle *h) { (void)h;
+    Result r = nfp_need("Flush", 1); if (r) return r;
+    nfp_area_save();
+    pthread_mutex_unlock(&g_nfp_mu); return RES_OK;
+}
+HLE_FORCE("_ZN2nn3nfp19OpenApplicationAreaERKNS0_12DeviceHandleEj", "open the amiibo's application area, if a game made one with this access ID", Result, h_nfp_OpenArea, const NfpDeviceHandle *h, uint32_t id) { (void)h;
+    Result r = nfp_need("OpenApplicationArea", 1); if (r) return r;
+    r = !g_tag.area_made ? NFP_RES_AREA_NOT_CREATED : g_tag.area_id != id ? NFP_RES_WRONG_AREA_ID : RES_OK;
+    g_tag.area_open = r == RES_OK;
+    LOG("nfp: OpenApplicationArea(%#x) on %s → %s", id, g_tag.name, r == RES_OK ? "opened" : g_tag.area_made ? "another game's" : "none yet (a dump's own is encrypted, the host starts each amiibo empty)");
+    pthread_mutex_unlock(&g_nfp_mu); return r;
+}
+HLE_FORCE("_ZN2nn3nfp18GetApplicationAreaEPvPmRKNS0_12DeviceHandleEm", "read the application area", Result, h_nfp_GetArea, void *buf, uint64_t *n, const NfpDeviceHandle *h, uint64_t sz) { (void)h;
+    if (n) *n = 0;
+    Result r = nfp_need("GetApplicationArea", 1); if (r) return r;
+    if (!g_tag.area_open) { pthread_mutex_unlock(&g_nfp_mu); return NFP_RES_AREA_NOT_CREATED; }
+    if (sz > NFP_AREA_SIZE) sz = NFP_AREA_SIZE;
+    memcpy(buf, g_tag.area, sz); if (n) *n = sz;
+    pthread_mutex_unlock(&g_nfp_mu); return RES_OK;
+}
+HLE_FORCE("_ZN2nn3nfp18SetApplicationAreaERKNS0_12DeviceHandleEPKvm", "write the application area", Result, h_nfp_SetArea, const NfpDeviceHandle *h, const void *buf, uint64_t sz) { (void)h;
+    Result r = nfp_need("SetApplicationArea", 1); if (r) return r;
+    if (!g_tag.area_open) r = NFP_RES_AREA_NOT_CREATED;
+    else if (sz > NFP_AREA_SIZE) r = NFP_RES_WRONG_AREA_SIZE;
+    else { memcpy(g_tag.area, buf, sz); g_tag.area_dirty = 1; }
+    pthread_mutex_unlock(&g_nfp_mu); return r;
+}
+// ApplicationAreaCreateInfo: access ID, the initial data at +8 and its size at +0x10
+static Result nfp_create_area(const uint8_t *info, int again, const char *what) {
+    Result r = nfp_need(what, 1); if (r) return r;
+    uint32_t id, size; const void *data; memcpy(&id, info, 4); memcpy(&data, info + 8, 8); memcpy(&size, info + 0x10, 4);
+    if (g_tag.area_made && !again) r = NFP_RES_AREA_EXISTS;
+    else if (size > NFP_AREA_SIZE) r = NFP_RES_WRONG_AREA_SIZE;
+    else {
+        memset(g_tag.area, 0, sizeof g_tag.area); if (data && size) memcpy(g_tag.area, data, size);
+        g_tag.area_id = id; g_tag.area_made = g_tag.area_open = g_tag.area_dirty = 1; nfp_area_save();
+        LOG("nfp: %s(%#x) on %s: %u bytes", what, id, g_tag.name, size);
+    }
+    pthread_mutex_unlock(&g_nfp_mu); return r;
+}
+HLE_FORCE("_ZN2nn3nfp21CreateApplicationAreaERKNS0_12DeviceHandleERKNS0_25ApplicationAreaCreateInfoE", "create the application area in the amiibo's file", Result, h_nfp_CreateArea, const NfpDeviceHandle *h, const uint8_t *info) { (void)h; return nfp_create_area(info, 0, "CreateApplicationArea"); }
+HLE_FORCE("_ZN2nn3nfp23RecreateApplicationAreaERKNS0_12DeviceHandleERKNS0_25ApplicationAreaCreateInfoE", "replace the application area in the amiibo's file", Result, h_nfp_RecreateArea, const NfpDeviceHandle *h, const uint8_t *info) { (void)h; return nfp_create_area(info, 1, "RecreateApplicationArea"); }
+static Result nfp_no_ext(const char *what) { Result r = nfp_need(what, 1); if (r) return r; pthread_mutex_unlock(&g_nfp_mu); return NFP_RES_AREA_NOT_CREATED; }
+HLE_FORCE("_ZN2nn3nfp26GetExtendedApplicationAreaEPvPmRKNS0_12DeviceHandleEm", "read extended application area: the host keeps none", Result, h_nfp_GetAreaExt, void *buf, uint64_t *n, const NfpDeviceHandle *h, uint64_t sz) { (void)buf; (void)n; (void)h; (void)sz; return nfp_no_ext("GetExtendedApplicationArea"); }
+HLE_FORCE("_ZN2nn3nfp26SetExtendedApplicationAreaERKNS0_12DeviceHandleEPKvm", "write extended application area: the host keeps none", Result, h_nfp_SetAreaExt, const NfpDeviceHandle *h, const void *buf, uint64_t sz) { (void)h; (void)buf; (void)sz; return nfp_no_ext("SetExtendedApplicationArea"); }
+HLE_FORCE("_ZN2nn3nfp30GetExtendedApplicationAreaInfoEPNS0_27ExtendedApplicationAreaInfoERKNS0_12DeviceHandleE", "extended application area info: the host keeps none", Result, h_nfp_AreaExtInfo, void *out, const NfpDeviceHandle *h) { (void)out; (void)h; return nfp_no_ext("GetExtendedApplicationAreaInfo"); }
+static Result nfp_nothing_to_do(const char *what) { Result r = nfp_need(what, 0); if (r) return r; pthread_mutex_unlock(&g_nfp_mu); return RES_OK; }
+HLE_FORCE("_ZN2nn3nfp7RestoreERKNS0_12DeviceHandleE", "restore tag: a file is never damaged", Result, h_nfp_Restore, const NfpDeviceHandle *h) { (void)h; return nfp_nothing_to_do("Restore"); }
+HLE_FORCE("_ZN2nn3nfp13StartRestorerEPNS0_12DeviceHandleERKNS0_24AmiiboSettingsStartParamERKNS0_7TagInfoE", "amiibo restorer applet: nothing to restore", Result, h_nfp_Restorer, NfpDeviceHandle *h, const void *p, const void *tag) { (void)h; (void)p; (void)tag; return nfp_nothing_to_do("StartRestorer"); }
+HLE_FORCE("_ZN2nn3nfp19StartGameDataEraserEPNS0_12DeviceHandleERKNS0_24AmiiboSettingsStartParamERKNS0_7TagInfoE", "amiibo game data eraser applet: the host has none, the data stays", Result, h_nfp_Eraser, NfpDeviceHandle *h, const void *p, const void *tag) { (void)h; (void)p; (void)tag; return nfp_nothing_to_do("StartGameDataEraser"); }
+static Result nfp_owner_applet(uint8_t *changed, uint8_t *reg) {
+    if (changed) *changed = 0;
+    Result r = nfp_need("StartNicknameAndOwnerSettings", 0); if (r) return r;
+    if (reg) nfp_register_info(reg);
+    pthread_mutex_unlock(&g_nfp_mu); return RES_OK;
+}
+HLE_FORCE("_ZN2nn3nfp29StartNicknameAndOwnerSettingsEPNS0_12DeviceHandleEPbPNS0_12RegisterInfoERKNS0_24AmiiboSettingsStartParamERKNS0_7TagInfoE", "amiibo nickname and owner settings applet: the host's owner stays", Result, h_nfp_Nick, NfpDeviceHandle *h, uint8_t *changed, uint8_t *reg, const void *p, const void *tag) { (void)h; (void)p; (void)tag; return nfp_owner_applet(changed, reg); }
+HLE_FORCE("_ZN2nn3nfp29StartNicknameAndOwnerSettingsEPNS0_12DeviceHandleEPbPNS0_12RegisterInfoERKNS0_24AmiiboSettingsStartParamERKNS0_7TagInfoERKS4_", "amiibo nickname and owner settings applet (with the old register info): the host's owner stays", Result, h_nfp_Nick2, NfpDeviceHandle *h, uint8_t *changed, uint8_t *reg, const void *p, const void *tag, const void *old) { (void)h; (void)p; (void)tag; (void)old; return nfp_owner_applet(changed, reg); }
 
 // ---------- vi: vsync event ----------
 // The game passes a SystemEventType; after binding, a host thread fires it at 60 Hz, at 120 while 120 fps holds one tick of 1/120 s (nvn_vsync_hz; DM_VSYNC_HZ fixes another rate). While the display link presents, the event follows its ticks, as a

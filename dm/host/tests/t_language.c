@@ -1,6 +1,7 @@
 // Settings language comparisons through the host hooks. All codes are synthetic;
 // no game module, control data, graphics device or font file is needed.
 #include "../hle_sdk16.c"
+void dm_mii_default_charinfo(void *out) { memset(out, 0, 0x58); }
 #include <limits.h>
 
 module_t *g_mod;

@@ -3245,6 +3245,8 @@ static void rb_swap_rows(uint8_t *p, size_t wb, size_t rows, size_t nz, size_t r
 // nil elsewhere (or if it is refused: the caller looks the address up as usual). The GPU only reads it, so it is made over the pages the upload has just protected, not through pool_buf,
 // which would make them writable again and the texture count as written at once
 static uint64_t g_up_src_made;   // source buffers made (t_upload_src)
+static uint64_t g_up_src_stale;  // uploads whose source buffer went with a flushed batch and could not be made again (pkg_upload_)
+static int t_up_src_refuse;      // tests: refuse the source buffer of the batch that follows a flush (t_upload_src)
 static id<MTLBuffer> up_big_src(uint64_t addr, uint64_t len, uint64_t *off) {
     // Not once the raw memory table holds the whole pool (big_full): the lookup finds that buffer. Ocarina of Time's first scene made 4,664 of these in one batch, 2.1 GB counted against the working set for pages already wired
     pthread_mutex_lock(&g_mu); int k = big_of(addr), in = k >= 0 && !g_big[k].full;
@@ -3346,8 +3348,16 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
         id<MTLBuffer> stg = up_alloc(total ? total : 16, &stg_off);
         // up_alloc may have flushed the batch that held the first source buffer: only then the new batch needs one of its own. Made for every texture, each staged upload from a large pool
         // put its storage twice into the residency set (Switch Sports Resort's first court frame: 855 textures, 1.8 GB of source buffers for 908 MB of storage; t_upload_src)
-        if (upsrc && g_up_seq != src_batch) { uint64_t mo2; id<MTLBuffer> u2 = up_big_src((uint64_t)t->mem, t->L.size, &mo2); if (u2) { upsrc = u2; mb = (__bridge void *)u2; mo = mo2; } }
-        size_t off = 0; int enc_ok = g_up_ce != nil, nb0 = g_nup_blits;
+        // The first buffer is then the flushed batch's, whose completion takes it out of the residency set and releases it (up_flush's handler), so this batch's deswizzle must not
+        // read it. When the new batch's buffer is refused (the pool became resident or had an address given out meanwhile, or Metal made none) the storage is looked up as for any
+        // other pool; with no buffer there either, the texture is read on the CPU below. Returning nil instead would leave it unmade with its pages already counted as seen
+        int src_ok = 1;
+        if (upsrc && g_up_seq != src_batch) {
+            uint64_t mo2; id<MTLBuffer> u2 = t_up_src_refuse ? nil : up_big_src((uint64_t)t->mem, t->L.size, &mo2);
+            if (u2) { upsrc = u2; mb = (__bridge void *)u2; mo = mo2; }
+            else { upsrc = nil; g_up_src_stale++; t_tex_upload_lookup = 1; src_ok = mtl_addr((uint64_t)t->mem, t->L.size, &mb, &mo); t_tex_upload_lookup = 0; }
+        }
+        size_t off = 0; int enc_ok = src_ok && g_up_ce != nil, nb0 = g_nup_blits;
         for (unsigned l = 0; enc_ok && l < d.mipmapLevelCount; l++) {
             uint32_t w = MAX(t->d.width >> l, 1u), h = MAX(t->d.height >> l, 1u), z = t->d.target == 2 ? MAX(t->d.depth >> l, 1u) : 1;
             size_t pitch = (size_t)((w + bw - 1) / bw) * bpb, rows = (h + bh - 1) / bh;
@@ -3367,7 +3377,8 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
         }
         g_nup_blits = nb0;   // Roll back the copies already recorded for this texture: the already-encoded deswizzle only writes the staging area and is harmless; this texture takes the CPU path below instead
         if (!g_cb) up_flush();
-        RED_ONCE(41, "GPU deswizzle does not support format %#x target %d; falling back to the CPU", t->d.format, t->d.target);
+        if (src_ok) RED_ONCE(41, "GPU deswizzle does not support format %#x target %d; falling back to the CPU", t->d.format, t->d.target);
+        else { static int said; if (!said++) MLOG("an upload's source buffer went with a flushed batch and its storage has no buffer now: ser=%llu is read on the CPU", (unsigned long long)t->serial); }
     }
 
     // A sparse pool's texture is read through a copy gathered from its page table, unmapped pages as 0 (a mip tail at a 4 KB offset has no host alias; reading the alias stopped the host with SIGBUS)

@@ -404,7 +404,7 @@ static id<MTLFunction> geo_mesh_fn(NvProg *pr, const p_draw *dw, const p_draw_id
     NSString *k = @(lean->key); id f = vs->geo_mesh[k];
     if (!f) {
         NSString *path = [NSString stringWithFormat:@"%@/%.16s_%.16s_m3.metallib", g_msl_dir, vs->key, lean->key];
-        id<MTLLibrary> lib = lib_from_file(path, NULL);
+        id<MTLLibrary> lib = lib_from_file_stage(path, "mesh", NULL);   // the stage that runs it; the label's variant carries the geometry shader's key (<vertex key> mesh _<geometry key>_m3)
         NSString *want = [vs->fn.name isEqualToString:@"main0_z"] ? @"dm_mesh_z" : @"dm_mesh";
         f = lib ? geo_mesh_entry(lib, want) : nil;
         if (lib && !f) for (NSString *nm in lib.functionNames) if ([nm hasPrefix:[want stringByAppendingString:@"_p"]]) { f = geo_mesh_entry(lib, nm); break; }   // fewer triangles a group (dm_mesh_p16)

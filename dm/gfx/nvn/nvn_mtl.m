@@ -5899,8 +5899,21 @@ static NSString *lib_name(NSString *path) {
     NSString *dir = g_msl_dir ? [g_msl_dir stringByAppendingString:@"/"] : nil;
     return dir && [path hasPrefix:dir] ? [path substringFromIndex:dir.length] : path.lastPathComponent;
 }
+// A guest shader's NVN library carries "<16-hex key> <stage> <variant>" as its Metal label (the key is the one in the shader's file names, <key>_b.metallib, and in the build's shader tables; the variant is the rest of the file name: _b, _bp, _bx ...), so a frame
+// capture's library list (seen in gpudebug; Xcode's Metal debugger reads the same MTLLibrary.label) shows which guest shader a pipeline runs; the tools' own name is generated otherwise. Only the library is labelled: pipeline descriptor labels are left alone (PSO_WHOLE is a
+// marker, and they may feed pipeline caches). The GL and Vulkan layers load one combined library each, which has no single shader to name
+static id<MTLLibrary> lib_label(id<MTLLibrary> lib, NSString *path, const char *stage) {
+    NSString *f = path.lastPathComponent; NSUInteger n = f.length;
+    if (!lib || n < 16) return lib;
+    for (NSUInteger i = 0; i < 16; i++) { unichar c = [f characterAtIndex:i]; if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return lib; }
+    // a name of 16 to 24 characters cannot end in ".metallib" past the key test above (the '.' falls inside the first 16), so n - 16 - 9 does not underflow
+    NSString *rest = [f hasSuffix:@".metallib"] ? [f substringWithRange:NSMakeRange(16, n - 16 - 9)] : [f substringFromIndex:16];
+    lib.label = [NSString stringWithFormat:@"%@ %s%@", [f substringToIndex:16], stage ?: "lib", rest.length ? [@" " stringByAppendingString:rest] : @""];
+    return lib;
+}
 static id<MTLLibrary> lib_from_file_(NSString *path, NSError **err);
-static id<MTLLibrary> lib_from_file(NSString *path, NSError **err) { return lib_tag(lib_from_file_(path, err), lib_name(path)); }
+static id<MTLLibrary> lib_from_file_stage(NSString *path, const char *stage, NSError **err) { return lib_label(lib_tag(lib_from_file_(path, err), lib_name(path)), path, stage); }
+static id<MTLLibrary> lib_from_file(NSString *path, NSError **err) { return lib_from_file_stage(path, NULL, err); }   // the tests' form: labelled "<key> lib <variant>" for a key-named file, no stage known
 static id<MTLLibrary> lib_from_file_(NSString *path, NSError **err) {
     int fd = open(path.fileSystemRepresentation, O_RDONLY); struct stat st;
     if (fd < 0) {   // not in the folder: the library's image, whose one descriptor is shared, and only this file's pages are mapped
@@ -6055,7 +6068,11 @@ static NvShader *shader_load(NSString *pc, int stage, int layer) {
     }
     if (stage == 2 && !j) return nil;   // missing geometry translation: the caller's red line says so
     NSString *lp = [NSString stringWithFormat:@"%@/%@.metallib", g_msl_dir, pc];
-    id<MTLLibrary> lib = lib_from_file(lp, &e);
+    // the stage names the build's shader tables use (stage_of's inverse); 3 / 4 are tessellation stages or, with a mesh_stage entry, NVN2's task / mesh
+    static const char *const k_stage[] = {"vertex", "pixel", "geometry", "hull", "domain", "compute"};
+    NSDictionary *lms = [j[@"mesh_stage"] isKindOfClass:[NSDictionary class]] ? j[@"mesh_stage"] : nil;
+    const char *lst = lms ? ([lms[@"kind"] isEqual:@"ts"] ? "task" : "mesh") : stage >= 0 && stage < 6 ? k_stage[stage] : "unknown";
+    id<MTLLibrary> lib = lib_from_file_stage(lp, lst, &e);
     if (!lib || !j) { MLOG("[RED] failed to load shader %s: %s", pc.UTF8String, e ? e.localizedDescription.UTF8String : "no reflection json"); return nil; }
     if (![j[@"chain"] isEqual:@DMSH_CHAIN]) { MLOG("[RED] shader %s has translation chain version %s, but this host expects %s", pc.UTF8String, [[j[@"chain"] description] UTF8String], DMSH_CHAIN); return nil; }
     if (layer && !j[@"entry_layer"]) { MLOG("[RED] vertex shader %s has no layer entry points", pc.UTF8String); return nil; }
@@ -7530,7 +7547,7 @@ static id<MTLFunction> vin_fn(NvShader *vs) {   // the shadow-input entry point,
     if (!vs->vfn_state) {
         vs->vfn_state = 2;
         size_t kl = strlen(vs->key); NSString *path = [NSString stringWithFormat:@"%@/%.*s_bv.metallib", g_msl_dir, (int)(kl > 2 ? kl - 2 : kl), vs->key];
-        NSError *e = nil; id<MTLLibrary> lib = lib_from_file(path, &e); id<MTLFunction> f = lib && vs->ventry ? fn4_note([lib newFunctionWithName:vs->ventry], lib, vs->ventry, nil) : nil;
+        NSError *e = nil; id<MTLLibrary> lib = lib_from_file_stage(path, "vertex", &e); id<MTLFunction> f = lib && vs->ventry ? fn4_note([lib newFunctionWithName:vs->ventry], lib, vs->ventry, nil) : nil;
         if (f && f.functionConstantsDictionary.count) f = fn_spec(lib, vs->ventry, [MTLFunctionConstantValues new], &e);   // as shader_load
         const char *why = !lib ? "no library" : !f ? "no entry point" : NULL;
         if (f && vs->rf.nb && [f newArgumentEncoderWithBufferIndex:vs->rf.abi].encodedLength != vs->arg_len) { why = "its argument buffer differs from the base library's"; f = nil; }
@@ -7549,7 +7566,7 @@ static void pull_load(NvShader *vs) {
     {
         vs->pfn_state = 2;
         size_t kl = strlen(vs->key); NSString *path = [NSString stringWithFormat:@"%@/%.*s_bp.metallib", g_msl_dir, (int)(kl > 2 ? kl - 2 : kl), vs->key];
-        NSError *e = nil; id<MTLLibrary> lib = lib_from_file(path, &e); id<MTLFunction> f = lib && vs->ventry ? fn4_note([lib newFunctionWithName:vs->ventry], lib, vs->ventry, nil) : nil;
+        NSError *e = nil; id<MTLLibrary> lib = lib_from_file_stage(path, "vertex", &e); id<MTLFunction> f = lib && vs->ventry ? fn4_note([lib newFunctionWithName:vs->ventry], lib, vs->ventry, nil) : nil;
         if (f && f.functionConstantsDictionary.count) f = fn_spec(lib, vs->ventry, [MTLFunctionConstantValues new], &e);
         const char *why = !lib ? "no library" : !f ? "no entry point" : NULL;
         if (f && vs->rf.nb && [f newArgumentEncoderWithBufferIndex:vs->rf.abi].encodedLength != vs->arg_len) { why = "its argument buffer differs from the base library's"; f = nil; }
@@ -7962,7 +7979,7 @@ static id<MTLFunction> at_fn(NvShader *fs, id<MTLFunction> base) {   // the side
     if (!fs->afn_state) {
         fs->afn_state = 2;
         size_t kl = strlen(fs->key); NSString *path = [NSString stringWithFormat:@"%@/%.*s_bx.metallib", g_msl_dir, (int)(kl > 2 ? kl - 2 : kl), fs->key];
-        NSError *e = nil; id<MTLLibrary> lib = lib_from_file(path, &e); const char *why = lib ? NULL : "no library";
+        NSError *e = nil; id<MTLLibrary> lib = lib_from_file_stage(path, "pixel", &e); const char *why = lib ? NULL : "no library";
         id<MTLFunction> own[4] = {fs->fn, fs->fn_u, fs->fn_m, fs->fn_d};
         for (int i = 0; i < 4 && !why; i++) {
             if (!own[i]) continue;
@@ -8082,7 +8099,7 @@ static id<MTLFunction> lo_fn(NvShader *fs, id<MTLFunction> base, uint32_t target
     if (!fs->lfn_state) {
         fs->lfn_state = 2;
         size_t kl = strlen(fs->key); NSString *path = [NSString stringWithFormat:@"%@/%.*s_bx.metallib", g_msl_dir, (int)(kl > 2 ? kl - 2 : kl), fs->key];
-        if ((fs->llib = lib_from_file(path, &e))) { fs->lfn_state = 1; fs->lfn = [NSMutableDictionary dictionary]; static int n; if (++n <= 3 || !(n & (n - 1))) MLOG("logic operation: side library of %s loaded (%d shaders so far)", fs->key, n); }
+        if ((fs->llib = lib_from_file_stage(path, "pixel", &e))) { fs->lfn_state = 1; fs->lfn = [NSMutableDictionary dictionary]; static int n; if (++n <= 3 || !(n & (n - 1))) MLOG("logic operation: side library of %s loaded (%d shaders so far)", fs->key, n); }
         else why = "no library";
     }
     id<MTLFunction> f = nil; NSNumber *k = @(w << 8 | (targets & 0xff));
@@ -9277,9 +9294,9 @@ static MTL4RenderPipelineDescriptor *pre_desc(NSString *vk, NSString *fk, int ze
     NSDictionary *fr = fj[@"raster"]; if ([fr isKindOfClass:[NSDictionary class]] && [fr[@"primitive_id"] intValue]) return nil;   // reads the primitive ID: its pipelines are built whole (pso_build_ex), no base
     NSError *e = nil;
     if (pre_lib_absent(vk, pull ? @"_bp.metallib" : @"_b.metallib") || pre_lib_absent(fk, @"_b.metallib")) return nil;
-    id<MTLLibrary> vl = lib_from_file([NSString stringWithFormat:@"%@/%@%@.metallib", g_msl_dir, vk, pull ? @"_bp" : @"_b"], &e);
+    id<MTLLibrary> vl = lib_from_file_stage([NSString stringWithFormat:@"%@/%@%@.metallib", g_msl_dir, vk, pull ? @"_bp" : @"_b"], "vertex", &e);
     if (!vl) return nil;
-    id<MTLLibrary> fl = lib_from_file([NSString stringWithFormat:@"%@/%@_b.metallib", g_msl_dir, fk], &e);
+    id<MTLLibrary> fl = lib_from_file_stage([NSString stringWithFormat:@"%@/%@_b.metallib", g_msl_dir, fk], "pixel", &e);
     MTL4FunctionDescriptor *vf = pre_fn(vl, ventry), *ff = fl ? pre_fn(fl, fentry) : nil;
     if (!vf || !ff) return nil;
     MTL4RenderPipelineDescriptor *m = [MTL4RenderPipelineDescriptor new];
@@ -12582,7 +12599,7 @@ static id<MTLFunction> bf_fn(NvShader *fs, const int *fx, uint8_t fbmask, const 
     if (!fs->bflib_state) {   // loaded once (a failure too: not again for every draw)
         size_t kl = strlen(fs->key); NSError *e = nil;
         NSString *path = [NSString stringWithFormat:@"%@/%.*s_bf.metallib", g_msl_dir, (int)(kl > 2 ? kl - 2 : kl), fs->key];
-        fs->bflib = lib_from_file(path, &e); fs->bflib_state = fs->bflib ? 1 : 2;
+        fs->bflib = lib_from_file_stage(path, "pixel", &e); fs->bflib_state = fs->bflib ? 1 : 2;
         if (!fs->bflib) MLOG("[RED] failed to load the readable-tile version %s: %s", path.UTF8String, e.localizedDescription.UTF8String);
     }
     id<MTLLibrary> lib = fs->bflib;

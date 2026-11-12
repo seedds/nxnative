@@ -553,6 +553,8 @@ Limits: the replay matches the recording read for read only while the game's rea
 
 The benchmark gives each frame's GPU time; these switches split it by pass, on the Mac or on an iPhone (`Documents/env.txt`), and are off by default: `DM_NVN_GPUPROF=every:<n>` (each encoder's GPU time and attachment traffic in one frame of every n), `DM_NVN_PASSDUMP=every:<n>`, `DM_AB=<frames>` (switches set to `ab` alternate in phases of one run) and `DM_GPU_CAPTURE` (Metal GPU traces for Xcode, written to `DM_GPU_CAPTURE_DIR`, by default `gpu_captures/` in the working directory, which keeps the newest `DM_GPU_CAPTURE_KEEP`; an IPA built with `DM_METAL_CAPTURE=1`, or `MTL_CAPTURE_ENABLED=1` on the Mac). `dm/tools/gpuprof.py` reads their log lines. How to use them: [05, GPU time on the device](agents/05-debugging.md#gpu-time-on-the-device).
 
+In a captured frame, each guest shader's Metal library (NVN games; the GL and Vulkan layers load one combined library each) is labelled `<16-hex shader key> <stage> [variant]` (the key in the shader's file names, `<key>_b.metallib`, and in the build's shader tables), so the capture's library list shows which guest shader a pipeline runs: `gpudebug` shows it, and Xcode's Metal debugger reads the same `MTLLibrary.label`.
+
 ### Frame capture and replay
 
 `DM_NVN_CAPTURE=<frame>:1:<path>` (an NVN game, Mac host) writes one frame to one file, at the boundary between recording and replay: from the frame's first `nvnQueueSubmitCommands` to its present (frames counted as `DM_NVN_SHOT` counts them). `dm/gfx/tests/nvn_replay` replays it against the replay layer of the tree it is built from (`nvn_mtl.m` and everything under it) and compares the presented frame with the live one:

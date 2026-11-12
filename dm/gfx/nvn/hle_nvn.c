@@ -2391,6 +2391,16 @@ static void fstep_tick(const win_t *o, int c) {
     g_fs.smax = dm_fps_step_max;   // the stub's largest step (Mario Kart World: 2): frames held longer than the game steps would play in slow motion
     g_fs.no_payback = fps_high();   // at 120 fps the game steps by its target, not by the step: a late frame is slow motion, so three raise the hold whatever the average
     int n = nvn_fstep_next(&g_fs, shown, cost, kmin, kmax, fixed, cslow || gslow);
+    static double measured_sum;   // vsyncs the game stepped beyond the host's steps
+    if (dm_fps_state && !fixed && __atomic_load_n((uint32_t *)(dm_fps_state + 0x3c), __ATOMIC_RELAXED) && !dm_detclock_enabled()) {   // a main whose stub steps by the frame time when it is longer (state +0x38; Ocarina of Time's patches.py)
+        static int on = -1; static nvn_fdelta fd;
+        if (on < 0) { const char *e = getenv("DM_FRAME_DELTA"); on = !e || strcmp(e, "0"); LOG("[nvn] game step from the measured frame time: %s", on ? "on" : "off (DM_FRAME_DELTA=0)"); }
+        if (on) {
+            double vs = nvn_fstep_measured(&g_fs, nvn_fdelta_next(&fd, now_ns()) * 60.0); float s = (float)(vs / 60); uint32_t b; memcpy(&b, &s, sizeof b);
+            n = g_fs.step; if (vs > n) measured_sum += vs - n;
+            __atomic_store_n((uint32_t *)(dm_fps_state + 0x38), b, __ATOMIC_RELAXED);
+        }
+    }
     if (dm_fps_state) __atomic_store_n((uint32_t *)(dm_fps_state + 0x20), (uint32_t)n, __ATOMIC_RELAXED);
     atomic_store(&g_fs_k, g_fs.k);
     held[g_fs.k]++; if (fixed) fixed_sum += (uint64_t)n;   // the stubs count only the host's steps
@@ -2413,7 +2423,7 @@ static void fstep_tick(const win_t *o, int c) {
     if (!dm_fps_state) {   // 120 fps: no game clock to read; the frames at each hold say how much of the time it held 120
         if (o->presents % 1800 == 0) { LOG("[nvn] 120 fps: held 1 / 2 ticks %llu / %llu frames, %llu late, %llu up / %llu down (%llu probes, %llu failed trials)", (unsigned long long)held[1], (unsigned long long)held[2], (unsigned long long)g_fs.late, (unsigned long long)g_fs.ups, (unsigned long long)g_fs.downs, (unsigned long long)g_fs.probes, (unsigned long long)g_fs.failed); memset(held, 0, sizeof held); }
     } else if (o->presents % 1800 == 0) {   // game time against real time (1.000 = normal speed; lower when a device cannot hold 20 fps or after long stalls)
-        uint64_t vs = __atomic_load_n((uint64_t *)(dm_fps_state + 0x30), __ATOMIC_RELAXED) + fixed_sum, t = now_ns();
+        uint64_t vs = __atomic_load_n((uint64_t *)(dm_fps_state + 0x30), __ATOMIC_RELAXED) + fixed_sum + (uint64_t)measured_sum, t = now_ns();
         if (t0) LOG("[nvn] frame step: game time %.2f s in %.2f s (%.3f of real time); held 1 / 2 / 3 vsyncs %llu / %llu / %llu frames, %llu late, %llu vsyncs paid back, %.0f dropped, %llu up / %llu down (%llu probes, %llu failed trials)",
                     (vs - v0) / 60.0, (t - t0) / 1e9, (vs - v0) / 60.0 / ((t - t0) / 1e9), (unsigned long long)held[1], (unsigned long long)held[2], (unsigned long long)held[3],
                     (unsigned long long)g_fs.late, (unsigned long long)g_fs.paid, g_fs.dropped, (unsigned long long)g_fs.ups, (unsigned long long)g_fs.downs, (unsigned long long)g_fs.probes, (unsigned long long)g_fs.failed);

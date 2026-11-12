@@ -1,6 +1,7 @@
 """The repository's two C# tools are committed as native universal executables (dm/tools/native_tools.sh, NativeAOT), so building an IPA needs no .NET (GitHub issue #1853):
 the shader translator dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate and the extractor dm/tools/nx_extract_bin/nx_extract. Each must hold both Mac architectures (an Intel Mac builds IPAs
-too: GitHub issues #54 and #803), and each must be built from the sources beside it, which it embeds and names with --source-sha: the translator also matches dmsh_chain.lock."""
+too: GitHub issues #54 and #803), and each must be built from the sources beside it, which it embeds and names with --source-sha: the translator also matches dmsh_chain.lock.
+Neither may import a function weakly: that is one newer than the executable's minimum macOS, which binds to 0 on a Mac without it (GitHub issue #2190)."""
 from pathlib import Path
 import hashlib
 import importlib.util
@@ -22,6 +23,26 @@ def macho_archs(data):
     return sorted({0x01000007: 'x86_64', 0x0100000C: 'arm64'}.get(struct.unpack_from('>I', data, 8 + 20 * i)[0], '?') for i in range(n))
 
 
+def weak_imports(data):
+    """{architecture: the undefined symbols marked N_WEAK_REF} of a universal binary's 64-bit little-endian slices, as nm -m -u names them 'weak external'"""
+    out = {}
+    for i in range(struct.unpack_from('>I', data, 4)[0]):
+        cpu, _, off, _, _ = struct.unpack_from('>5I', data, 8 + 20 * i)
+        assert struct.unpack_from('<I', data, off)[0] == 0xFEEDFACF, 'not a 64-bit Mach-O slice'
+        ncmds, weak, at = struct.unpack_from('<I', data, off + 16)[0], [], off + 32
+        for _ in range(ncmds):
+            cmd, size = struct.unpack_from('<II', data, at)
+            if cmd == 2:   # LC_SYMTAB
+                symoff, nsyms, stroff, _ = struct.unpack_from('<4I', data, at + 8)
+                for k in range(nsyms):
+                    strx, n_type, _, n_desc, _ = struct.unpack_from('<IBBHQ', data, off + symoff + 16 * k)
+                    if n_type & 0xE0 == 0 and n_type & 0x0E == 0 and n_desc & 0x40:   # not a debug entry, N_UNDF, N_WEAK_REF
+                        weak.append(data[off + stroff + strx:data.index(b'\0', off + stroff + strx)].decode())
+            at += size
+        out[{0x01000007: 'x86_64', 0x0100000C: 'arm64'}.get(cpu, '?')] = sorted(weak)
+    return out
+
+
 def nsp_script():
     spec = importlib.util.spec_from_file_location('build_ipa_from_nsp_native', REPO / 'scripts/build_ipa_from_nsp.py')
     assert spec and spec.loader
@@ -35,6 +56,12 @@ class NativeTools(unittest.TestCase):
             with self.subTest(exe=exe.name):
                 self.assertEqual(macho_archs(exe.read_bytes()), ['arm64', 'x86_64'])
                 self.assertTrue(exe.stat().st_mode & 0o111, f'{exe} is not executable')
+
+    def test_no_weak_imports(self):   # the arm64 translator of 641636e2 called pipe2 (macOS 27) unchecked and faulted at address 0 on macOS 26
+        for exe in (XLATE, NX):
+            with self.subTest(exe=exe.name):
+                self.assertEqual(weak_imports(exe.read_bytes()), {'arm64': [], 'x86_64': []},
+                                 f"{exe.name} imports functions its minimum macOS does not have: rebuild it with Microsoft's .NET SDK (dm/tools/native_tools.sh {exe.name})")
 
     def test_only_the_executable_is_committed(self):   # no dlls, runtimeconfig or satellite folders of a framework-dependent build left beside it
         for exe in (XLATE, NX):

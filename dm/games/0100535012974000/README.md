@@ -48,6 +48,7 @@ General host changes first needed here; each applies to every game:
 - **A host notification event** for `oe::GetNotificationMessageEvent` (`hle_oe.c`), described above.
 - **A network request on hold for its first query only** (`hle_net.c`, `nn::nifm`): [Network requests stay on hold before they settle](../../../docs/reference/services.md#network-requests-stay-on-hold-before-they-settle).
 - **A wait at two yields gets the back-off** (`thr_yield`, `hle_thread.c`): [A wait at two yields is not progress](../../../docs/reference/threads.md#a-wait-at-two-yields-is-not-progress).
+- **1D images are one-row 2D textures** (`hle_vk.m`, `vk_shaders.py`): the game draws into a 512x1 colour target, which Metal's API validation stopped while it was a 1D texture, and `LightAndShadow.frag` samples a 1D shadow map (resolved); [1D images drawn into](../../../docs/reference/rendering.md#1d-images-drawn-into).
 
 ## Open
 

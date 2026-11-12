@@ -2849,13 +2849,14 @@ static uint8_t *vpool_reserve(pool_t *o) {   // → the reserved range, or NULL
 static void vpool_drop(pool_t *o) {   // caller holds g_vp_mu
     struct vpool *v = o->vp; if (!v) return;
     for (int k = 0; k < v->nrun; k++) mtl_pool_del(v->base + v->run[k].lo);
+    mtl_span_retire((uintptr_t)v->base, (uintptr_t)v->base + v->len);   // its span buffers leave the cache and the residency set as its runs' do, before the pages go
     munmap(v->base, v->len);
     for (uint64_t l = 0; l < (v->size + (2u << 20) - 1) >> 21; l++) free(v->pt[l]);
     for (int i = 0; i < g_nvp; i++) if (g_vp[i] == v) { g_vp[i] = g_vp[--g_nvp]; break; }
     free(v->pt); free(v->log); free(v->run); free(v); o->vp = NULL;
 }
 static void vunmap_run(int all); static int g_nvun;   // the deferred unmaps (below)
-// Pool finalize: the reservation goes (munmap) with its runs' buffers. The GPU finishes the work submitted so far first: the buffers' deferred release keeps them alive for that
+// Pool finalize: the reservation goes (munmap) with its runs' buffers and its span buffers (vpool_drop). The GPU finishes the work submitted so far first: the buffers' deferred release keeps them alive for that
 // work, but not the pages under them, and inaccessible pages under a buffer still in submitted work or in the residency set are a GPU page fault (see vunmap_defer)
 static void vpool_release(pool_t *o) { if (o->vp && o->vp->nrun) mtl_finish(); pthread_mutex_lock(&g_vp_mu); if (g_nvun) vunmap_run(0); vpool_drop(o); pthread_mutex_unlock(&g_vp_mu); }
 // Mapped runs of a sparse pool: [lo, hi) sorted, disjoint, adjacent runs merged, each one a buffer the GPU addresses (mtl_pool_add). Caller holds g_vp_mu. The list grows with the
@@ -2912,6 +2913,7 @@ static void vpt_set(struct vpool *v, uint64_t voff, uint64_t size, const uint8_t
     uint64_t gen = atomic_fetch_add(&g_vp_gen, 1) + 1;
     g_vnote[gen % VNOTE_N].gen = gen; g_vnote[gen % VNOTE_N].lo = (uint64_t)(uintptr_t)v->base + voff; g_vnote[gen % VNOTE_N].hi = (uint64_t)(uintptr_t)v->base + voff + size;
     if (v->log) { v->log[atomic_load_explicit(&v->nlog, memory_order_relaxed) % VLOG_N] = (struct vlog_ent){voff, size}; atomic_fetch_add_explicit(&v->nlog, 1, memory_order_release); }
+    mtl_span_retire((uintptr_t)v->base + voff, (uintptr_t)v->base + voff + size);   // a span buffer over these pages goes, as the runs' buffers do (vrun_set): see nvn_sparse_span_bind
     for (uint64_t o = 0; o < size; o += 0x1000) {
         vpte **l = &v->pt[(voff + o) >> 21];
         if (!*l && !phys) continue;   // never mapped: stays unmapped
@@ -2929,6 +2931,7 @@ static void vpt_set(struct vpool *v, uint64_t voff, uint64_t size, const uint8_t
 enum { VUNMAP_N = 4096 };
 static struct { struct vpool *v; uint64_t off, len, gen, fence; } g_vun[VUNMAP_N];
 static _Atomic uint64_t g_vp_kept, g_vp_waits, g_vp_released, g_vp_unmap_lost;
+static _Atomic uint64_t g_span_pending;   // span buffers not made: a hole page's unmap still queued (nvn_sparse_span_bind)
 static void vunmap_defer(struct vpool *v, uint64_t off, uint64_t len) {
     if (g_nvun == VUNMAP_N) { atomic_fetch_add(&g_vp_unmap_lost, 1); return; }   // full: these pages stay kept (safe; a later mapping over them waits)
     g_vun[g_nvun++] = (typeof(g_vun[0])){v, off, len, atomic_load(&g_vp_gen), mtl_last_fence() + 1};
@@ -3483,6 +3486,45 @@ int nvn_sparse_alias(uint64_t lo, uint64_t hi) {
         r = lo < base + v->len && base < hi;
     }
     pthread_mutex_unlock(&g_vp_mu); return r;
+}
+// A storage buffer bound by its address alone (NVN_RB_SBUFU / NVN_RB_SBUFQ, size unknown) in a sparse pool: the address resolves to the mapped run holding its first byte, whose
+// buffer ends at the next unmapped page, while the GPU's page table reads 0 in a hole and the mapped pages after it. Such a binding gets one buffer over its span: from a to the end
+// of the last run that follows with less than 1 MB unmapped before it, at most cap. → that buffer (unretained: it stays alive for the submission being encoded, see mtl_span_retire),
+// or NULL when a is in no run of a sparse pool, no run follows close enough (the run's own buffer holds all of it then), or a hole cannot be backed yet.
+// A zero-copy buffer cannot wrap inaccessible pages, so a host page of a hole that is not readable (never mapped, released by its unmap, or kept in the page table only) gets a
+// fresh zero page first. A hole page whose unmap is still queued (vunmap_defer: a page entry live and not mapped) still holds the old physical page, which the game may have mapped
+// elsewhere: no span is made over it until the unmap has released it, and the binding takes the first run alone as before. The span's buffers are cached by address and span
+// (nvn_mtl.m), and every mapping request retires the ones over its pages (vpt_set), as vrun_set retires the runs' buffers: so no span buffer outlives a page it was made over, and a
+// hit costs the binary search for the run and a step over the runs that follow, no page-table walk. Caller: the replay; takes g_vp_mu
+void *nvn_sparse_span_bind(uint64_t a, uint64_t cap) {
+    if (!cap || !__atomic_load_n(&g_nvp, __ATOMIC_ACQUIRE)) return NULL;
+    uint64_t pg = (uint64_t)getpagesize(); void *buf = NULL;
+    pthread_mutex_lock(&g_vp_mu);
+    for (int k = 0; k < g_nvp; k++) { const struct vpool *v = g_vp[k]; uint64_t base = (uint64_t)(uintptr_t)v->base;
+        if (a < base || a >= base + v->len) continue;
+        uint64_t o = a - base; int r = 0, hi = v->nrun;
+        while (r < hi) { int m = (r + hi) / 2; if (v->run[m].hi <= o) r = m + 1; else hi = m; }   // the first run ending after o (the runs are sorted and disjoint)
+        if (r == v->nrun || v->run[r].lo > o) break;
+        int r0 = r; uint64_t end = v->run[r].hi, gap = 0;
+        for (r++; r < v->nrun && v->run[r].lo < o + cap && v->run[r].lo - end < (1u << 20); r++) { gap += v->run[r].lo - end; end = v->run[r].hi; }
+        if (!gap) break;
+        if (end > o + cap) end = o + cap;
+        uint64_t lo = o & ~(pg - 1), hi_ = (end + pg - 1) & ~(pg - 1);
+        if ((buf = mtl_span_find(a, end - o))) break;
+        if (g_nvun) vunmap_run(0);   // unmaps whose work has completed release their pages first
+        int ok = 1;
+        for (int q = r0; q + 1 < r && ok; q++)   // the holes between the runs: host-page aligned, as every run is (vpool_map)
+            for (uint64_t hp = v->run[q].hi; hp < v->run[q + 1].lo && hp < hi_ && ok; hp += pg) {
+                int pending = 0; for (uint64_t e = 0; e < pg; e += 0x1000) { const vpte *t = vpt_get(v, hp + e); if (t && t->live && !t->phys) pending = 1; }
+                if (pending) { ok = 0; atomic_fetch_add(&g_span_pending, 1); break; }
+                vm_address_t ra = (vm_address_t)(v->base + hp); vm_size_t rs = 0; vm_region_basic_info_data_64_t vi; mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64; mach_port_t obj = MACH_PORT_NULL;
+                int none = vm_region_64(mach_task_self(), &ra, &rs, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&vi, &cnt, &obj) != KERN_SUCCESS || ra > (vm_address_t)(v->base + hp) || !(vi.protection & VM_PROT_READ);
+                if (none && mmap(v->base + hp, pg, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE | MAP_FIXED, -1, 0) == MAP_FAILED) ok = 0;
+            }
+        if (ok) buf = mtl_span_put(a, end - o, (uintptr_t)(base + lo), (uintptr_t)(base + hi_));
+        break; }
+    pthread_mutex_unlock(&g_vp_mu);
+    return buf;
 }
 // Textures of a sparse pool, read through its page table (see the sparse pools above): whether a pool is one, a copy of a texture's bytes (unmapped pages read as 0; → bytes not mapped),
 // whether its content may have changed since an upload (a mapping in its range newer than gen, or a physical page behind it written after the dirty-page stamp), and the write

@@ -111,6 +111,23 @@ A game may tell NVN objects apart by their bytes, without an NVN call. A host re
 - **Fix:** the case is noted once without `[RED]` (`unmapped page of a sparse pool: bound to the zero buffer`, `hle_nvn.c` `nvn_vpool_unmapped`); an address in no pool and no reservation is still red. The zero buffer is shared and 64 KB: a store through it is kept, not dropped (no game is known to store there).
 - **Found on:** [Resident Evil 4](../../dm/games/0400569027BF4000/README.md).
 
+### A storage buffer bound by address in a sparse pool ended at the first hole
+
+- **Symptom:** a compute or fragment shader that takes a storage buffer's address from a uniform buffer or the push constants (`NVN_RB_SBUFU`, `NVN_RB_SBUFQ`) reads wrong values past some point of the buffer, now and then; no red line. PRAGMATA: a green or yellow-green bloom flare in its first area, from the SDF GI surfel colours.
+- **Cause:** such a binding does not say its size, so the address was looked up with length 1 (`mtl_gpu_addr(addr, 1)`), which finds the mapped run of [the sparse pool](#sparse-virtual-pools-built-from-separate-physical-pools) holding the first byte. A run ends at the next unmapped page, so when the buffer's range crosses a hole the bound buffer was cut short there, and the shader ran past its end. On the Switch the GPU's page table reads 0 in the hole and the mapped pages after it. In PRAGMATA 536,768 of 3.41 million such bindings were cut short, e.g. fragment shaders `2ae3de25` and `a3ba2e76` got 64 KB of a 768 KB buffer.
+- **Fix:** the binding gets one buffer over its whole span (`sbuf_addr` / `sbuf_span` in `nvn_mtl.m`, `nvn_sparse_span_bind` in `hle_nvn.c`): from the address to the end of the last run that follows with less than 1 MB unmapped before it, at most 64 MB. A hole's host pages that are not readable (never mapped, released by an unmap, or kept in the page table only) get zero pages first, since a zero-copy buffer cannot wrap inaccessible pages. A hole page whose unmap is still queued still holds the old physical page ([pages under a live buffer](#pages-changed-under-a-buffer-the-gpu-still-uses)), so no span is made over it until the unmap has released it; until then the binding takes the first run alone, as before. The buffers are cached by address and span (32 entries). Every mapping request retires the span buffers over its pages, as `vrun_set` retires the runs' buffers (`mtl_span_retire`, the fence rule of `pool_gone_release`): out of the cache at once, and out of the residency set once the submission open then completes, or at once when none is open. So no span buffer is in a residency set when an unmap's pages are released, and a pool's `Finalize` takes them out before its pages go. A cache hit costs the binary search for the run and a step over the runs that follow, under `g_vp_mu`; a miss also checks the holes' host pages. An address whose run has no other run close after it resolves as before. `DM_NVN_SPARSE_SPAN=0` binds the first run's buffer, as before. Open: a hole page that a shader wrote through an earlier span buffer (the game writing to unmapped memory, which the Switch drops) keeps those bytes for later spans until the game maps the page.
+- **Check:** `make -C dm/gfx/tests GAME=<id> check_t_sparse_span` (Metal validation, 52 checks). It covers:
+  - a 256 KB binding over a 64 KB hole is bound whole, and the GPU reads the piece before the hole, zeros in it and the pieces after it;
+  - remapping the hole gives a buffer that reads the new pages;
+  - an unmap after the span is cached retires its buffer at once and takes it out of the residency set;
+  - a hole whose unmap is still queued gets no span until the unmap's fence has passed, then reads zeros, not the old page;
+  - a never-mapped (inaccessible) hole is read as zeros;
+  - a lone run resolves as the plain lookup does;
+  - `Finalize` leaves no span buffer, in the cache or in the residency set.
+
+  With `DM_NVN_SPARSE_SPAN=0`, the binding is the first 64 KB run's buffer and 13 of the 45 checks that run fail. With the unmap retirement, the `Finalize` fence or the queued-unmap check taken out, 4, 2 and 2 checks fail.
+- **Found on:** [PRAGMATA](../../dm/games/0400C76024710000/README.md): on its first-area route, 0 bindings cut short of 3.67 million and no flare in two runs with the fix; without it, the flare in 2 of 4 runs (up to 4.2% of the picture green).
+
 ### Virtual pools of one texture each, mapped before and after the texture
 
 - **Symptom:** `[RED] MapVirtual: non-contiguous mapping (true sparse) not implemented`, on small virtual pools; streamed textures black or missing (OCTOPATH TRAVELER's village ground and plants).

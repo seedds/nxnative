@@ -35,7 +35,7 @@ int main(void) {
         pso_skey_from(&k, vs, nil, 0, NULL, &a); pso_skey_hex(&a, hex);
         size_t old = strlen(hex) - 2 * (sizeof k.attr_hi + sizeof k.atest + sizeof k.logic + sizeof k.border + sizeof k.border_spare); hex[old] = 0;
         assert(pso_skey_parse(hex, &b) == 0); assert(b.k.atest == 0 && b.k.logic == 0);
-        a.k.atest = a.k.logic = a.k.border = a.k.border_spare = 0; memset(a.k.attr_hi, 0, sizeof a.k.attr_hi); assert(memcmp(&a, &b, sizeof a) == 0);
+        a.k.atest = a.k.logic = a.k.border = a.k.border_spare = 0; memset(a.k.attr_hi, 0, sizeof a.k.attr_hi); assert(memcmp(&a, &b, sizeof a) == 0);  // NOLINT(bugprone-suspicious-memory-comparison): a pso_skey is its bytes (pso_skey_from zeroes it, pso_skey_hex writes them, the maps key on them)
     }
     // A row written before pso_key.attr_hi (NVN2's vertex attributes 16 to 31): they read as 0, the fields before them stay
     {
@@ -55,8 +55,8 @@ int main(void) {
         pso_skey_from(&k, vs, nil, 0, NULL, &a); pso_skey_hex(&a, hex);
         hex[strlen(hex) - 2 * (sizeof k.border + sizeof k.border_spare)] = 0;
         assert(pso_skey_parse(hex, &b) == 0 && b.k.border == 0 && b.k.border_spare == 0);
-        a.k.border = a.k.border_spare = 0; assert(memcmp(&a, &b, sizeof a) == 0);
-        a.k.border = 1; assert(memcmp(&a, &b, sizeof a) != 0);
+        a.k.border = a.k.border_spare = 0; assert(memcmp(&a, &b, sizeof a) == 0);  // NOLINT(bugprone-suspicious-memory-comparison): a pso_skey is its bytes (pso_skey_from zeroes it, pso_skey_hex writes them, the maps key on them)
+        a.k.border = 1; assert(memcmp(&a, &b, sizeof a) != 0);  // NOLINT(bugprone-suspicious-memory-comparison): a pso_skey is its bytes (pso_skey_from zeroes it, pso_skey_hex writes them, the maps key on them)
     }
     // pso_key_attr: attribute 16 is the first of the high table
     {

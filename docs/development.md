@@ -304,6 +304,15 @@ python3 dm/tools/lint_c.py tidy -j 8           # the check CI runs; FILE... chec
 python3 dm/tools/lint_c.py tidy --update       # after fixing findings: lowers the counts, never adds one
 ```
 
+A file's count comes from every source that includes it: most graphics tests
+include `nvn_mtl.m`, so a finding listed under it may come from a test's
+analysis (run clang-tidy on the test to see the path), and a change anywhere in
+it can move the analyzer onto other paths. An object the host keeps in one of
+its C hash maps (`hm_put_id`: the serial table, the pending pipeline bases) is
+handed to the map for the analyzer's eyes (a `CF_CONSUMED` declaration under
+`__clang_analyzer__` in `nvn_mtl.m`), so code that leaves an object there needs
+no `NOLINT` for a leak.
+
 Raising `LLVM_VERSION` takes a new baseline in the same change
 (`tidy --rebaseline`; `dm/tools/tests/test_lint_c.py` checks that the two name
 the same release).

@@ -1,0 +1,41 @@
+# Game profile of Nintendo Switch Sports Resort (Switch 2, update v65536, which holds the whole game). Plays on the Mac: see README.md
+# Format: see dm/games/README.md
+# Nintendo EPD's sead / agl / gsys with Havok, SDK 22.2.10 built for the Switch 2 (Ounce), NVN2. From the NSP script's provisional profile (its heap and address-region checks)
+
+# ---- Identity ----
+title_id	04008E001F098000
+program_id	04008E001F098000
+
+# ---- App ----
+# Game name: only a label for profile listings and the Mac window title; the app's name comes from the package's control data (the NUP has none: the NSP script takes --app-name)
+name	Nintendo Switch Sports Resort
+ipa	NintendoSwitchSportsResort.ipa
+app_category	public.app-category.sports-games
+
+# ---- Versions ----
+build	v65536	?	main=3941550a42845731651bcd05edbb4703	subsdk0=d5bc474e0cefa2140efbe3a300aff60d	sdk=0c5ec6021e995368f68fba79c3ed0c5b
+package	v65536
+shader_versions	v65536
+
+# ---- Files ----
+# not loaded, main takes nothing from them the host does not supply: subsdk1 (nn::camera), subsdk2 (C / libc), subsdk3 (C / libc), subsdk4 (other C++)
+modules	main subsdk0 sdk
+romfs_marker	Tex/RBake_Scene_AnnaBoxingDesign00Scene_d1_t0.bntx.zs
+zip_store	.bwav:.rs:.webm:.zs:.metallib
+
+# ---- Memory ----
+# the Switch 2's 9 GB application pool; the NPDM declares 32 MB of system resource (virtual address memory). The game asks for a 7.47 GB heap (the NSP script's heap check,
+# 2026-11-12), so the block is 12.4 GB with a 4.38 GB alias region; in its first 15 s the game's regions reach alias +2.82 GB (address-region check, 2026-11-12)
+mem_reserve	0x318000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0x240000000
+sys_resource	0x2000000
+
+# ---- Shader split ----
+shader_groups	/BowlingReplay/=bowlingreplay /Tex/=tex /Bake/=bake /Parameter/=parameter /Voice/=voice /Model/=model /Pack/=pack /Banc/=banc /Phive/=phive /UI/=ui /Layout/=layout /Sound/=sound /VoiceText/=voicetext /gsys/=gsys /Event/=event /Mii/=mii /Scene/=scene /System/=system /GameParameter/=gameparameter /agl/=agl /GolfSwing/=golfswing /AnimationEvent/=animationevent /CameraAnimation/=cameraanimation /Mals/=mals
+shader_note	Nintendo Switch Sports Resort shaders
+
+# ---- Graphics ----
+# the game calls nvnDeviceSetDepthMode with near = 0: the pipeline bases made before it runs are made for that mode
+depth_mode	zero

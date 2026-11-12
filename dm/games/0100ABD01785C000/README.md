@@ -13,12 +13,9 @@ Update 1.0.3 (`v196608`) over the base game, SDK 13.3.0. Valve's Source engine a
 | `pad_layout full` | `game.tsv` | first-person: move with the left stick, look with the right |
 | `shader_groups /game.zip/=game` | `game.tsv` | the shipped programs come from `game.zip`; the run-time captures go to `other` |
 
-No `render_cond`: see [Rendering](#rendering).
-
 ## Rendering
 
-- **Current, harmless:** `[RED] SetRenderEnableConditional: the host draws anyway for now` once a map loads. It is NVIDIA's occlusion culling in the D3D9 layer: `IDirect3DDevice9::SetOcclusionShape` (`materialsystem.nro+0xc1130`) puts each mesh whose bounding shape has a query under `SetRenderEnableConditional(RENDER_IF_NOT_EQUAL, pair)`, else `SetRenderEnable(true)` (cvars `nvn_occlusion_mindist`, `nvn_occlusion_prezdist`). Culling only skips hidden meshes, so drawing them all is the right picture at some GPU cost.
-- **Open:** a host built with `render_cond on` evaluated those conditions as 0 / 0 (no report in the submission wrote the pairs; a memory dump later held `0xffff` / 0) and dropped the vault's desk, microwave, fridge, lamp, TV, plant and blinds ([Conditional rendering evaluated at replay](../../../docs/reference/rendering.md#conditional-rendering-evaluated-at-replay)). Who writes the pairs, and when, is not traced.
+- **Resolved: occlusion culling dropped the vault's furniture once render conditions were evaluated.** NVIDIA's D3D9 layer (`IDirect3DDevice9::SetOcclusionShape`, `materialsystem.nro+0xc1130`; cvars `nvn_occlusion_mindist`, `nvn_occlusion_prezdist`) draws each mesh's bounding shape with a shader that writes a visibility word (`0xffff` when visible) into a 32 KB storage buffer bound read-write, then draws the mesh under `SetRenderEnableConditional(RENDER_IF_NOT_EQUAL, pair)`, else `SetRenderEnable(true)`. Seven such conditions in a vault frame; read from memory before that shader ran, they were 0 / 0 and the desk, microwave, fridge, lamp, TV, plant and blinds were dropped (a host with the profile key `render_cond`, 2026-10 and again on 2026-11-12). Now an operand a queued GPU write covers is unknown and the mesh draws ([A condition on a word the GPU writes](../../../docs/reference/rendering.md#a-condition-on-a-word-the-gpu-writes)); the vault is whole with the conditions evaluated (M6, 2026-11-12). Culling therefore saves no GPU work here: the host cannot read the word before the GPU writes it.
 - About 1,100 NVN calls a frame in the vault.
 
 ## Shaders
@@ -43,10 +40,9 @@ No `render_cond`: see [Rendering](#rendering).
 
 - [No audio input devices](../../../docs/reference/audio.md#no-audio-input-devices): `audio::AcquireAudioDeviceNotificationForInput` on the audio thread at start reached the `audren:u` service and aborted.
 - [NVN in NROs under an SDL main that names GL](../../../docs/reference/rendering.md#nvn-in-nros-under-an-sdl-main-that-names-gl): the survey now reads the NROs as the build does.
-- [Conditional rendering evaluated at replay](../../../docs/reference/rendering.md#conditional-rendering-evaluated-at-replay): NVIDIA's occlusion culling, and why the profile has no `render_cond`.
+- [A condition on a word the GPU writes](../../../docs/reference/rendering.md#a-condition-on-a-word-the-gpu-writes): NVIDIA's occlusion culling, a shader writes the operands.
 
 ## Open
 
 - The test chambers (portals, the portal gun from `sp_a1_intro3`, lasers in Chapter 2) are untested: reach them through the departure elevator.
-- The `render_cond` evaluation above.
 - An iPhone build and test.

@@ -86,7 +86,7 @@ static void scaled_copy_case(void) {
     h_nvnCommandBufferAddCommandMemory(&cmd, (const NVNmemoryPool *)&pool, 0, 65536); h_nvnCommandBufferBeginRecording(&cmd);
     NVNcopyRegion sr={0,0,0,320,180,1}, dr={0,0,0,160,90,1};
     h_nvnCommandBufferCopyTextureToTexture(&cmd, (const NVNtexture *)&src, NULL, &sr, &dst, NULL, &dr, NVN_COPY_FLAGS_LINEAR_FILTER_BIT);
-    NVNcommandHandle h=h_nvnCommandBufferEndRecording(&cmd); state_reset(); memset(&R,0,sizeof R); mtl_sub_begin(); mtl_exec((const uint8_t *)h);
+    NVNcommandHandle h=h_nvnCommandBufferEndRecording(&cmd); state_reset(); memset(&R,0,sizeof R); mtl_sub_begin(); mtl_exec(nvn_rec_linear(h, NULL));
     EXPECT("scaled copy committed", 1, mtl_wait(mtl_sub_commit(),5000000000ull)); EXPECT("scaled copy GPU error",0,mtl_last_commit_error());
     h_nvnMemoryPoolInvalidateMappedRange((const NVNmemoryPool *)&pool,65536,640*90); uint8_t *map=(uint8_t *)h_nvnMemoryPoolMap((const NVNmemoryPool *)&pool)+65536;
     static const uint8_t want[]={255,0,0,255}; int bad=0; for(int i=0;i<160*90;i++)bad+=memcmp(map+i*4,want,4)!=0;
@@ -165,7 +165,7 @@ static void unaligned_upload_case(void) {   // a pool made through NVN, so that 
     NVNcommandBuffer cmd; EXPECT("unaligned case: command buffer init", 1, h_nvnCommandBufferInitialize(&cmd, NULL));
     h_nvnCommandBufferAddCommandMemory(&cmd, (const NVNmemoryPool *)&pool, 0, 65536); h_nvnCommandBufferBeginRecording(&cmd);
     NVNcopyRegion cr = {0, 0, 0, 6, 6, 1}; h_nvnCommandBufferCopyTextureToTexture(&cmd, &tex[1], NULL, &cr, &tex[0], NULL, &cr, 0);
-    NVNcommandHandle h = h_nvnCommandBufferEndRecording(&cmd); state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin(); mtl_exec((const uint8_t *)h);
+    NVNcommandHandle h = h_nvnCommandBufferEndRecording(&cmd); state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin(); mtl_exec(nvn_rec_linear(h, NULL));
     EXPECT("0: the copy from 1 committed", 1, mtl_wait(mtl_sub_commit(), 5000000000ull));
     uint8_t want[24 * 6]; for (int y = 0; y < 6; y++) memcpy(want + y * 24, stored[1] + y * 64, 24);
     read_job after_copy = {&tex[0], want, -1}; read_job_tight(&after_copy);

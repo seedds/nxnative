@@ -1,0 +1,10 @@
+# Fresh save past the autosave notice, the Blizzard logo movie and the gamma screen (A) to hero creation, where the "New on Nintendo Switch" notice stays open over the lit 3D hero
+# until B: screenshots only while it is up. Naming a hero needs DM_KBD, which a smoke route cannot set.
+save	new
+keys	25:A*4/3
+secs	80
+quick	70
+reach	3000@65
+window	55	20
+shots	60,70
+hang	20

@@ -110,7 +110,8 @@ int main(void) { @autoreleasepool {
         uint64_t r[2]; memcpy(r, map + (size_t)entry * DMSH_GMEM_MAP_ENTRY, sizeof r);
         CHECK("the entry holds the whole chunk", r[0] <= chunk << DMSH_GMEM_HINT_SHIFT && r[1] >= (chunk + 1) << DMSH_GMEM_HINT_SHIFT);
     }
-    // A texture a shader read is made, and goes into the table in place: no new table, and the budget does not apply. One nobody read stays the dummy, as does a render target no pass has written
+    // A texture a shader read is made, and goes into the table in place: no new table, and the budget does not apply. One nobody read is not made: its entry is its stand-in (pool_stand; the
+    // dummy with DM_NVN_POOL_STANDIN=0). A render target no pass has written stays the dummy
     {
         tex_t rd = {.magic = MAGIC('T', 'E', 'X', 0), .has_layout = 1, .serial = 99801}, un = rd, rt = rd;
         rd.d = (nvn_texdesc){.target = 1, .format = NVN_FORMAT_RGBA8, .width = 2048, .height = 2048, .depth = 1, .levels = 1, .samples = 1}; nvn_tex_layout(&rd.d, &rd.L);
@@ -123,17 +124,19 @@ int main(void) { @autoreleasepool {
         __unsafe_unretained id<MTLBuffer> tb = nil, tb2 = nil;
         mtl_sub_begin(); os_unfair_lock_lock(&g_rmu);
         pool_gpu(0, MTLTextureType2D, 0, 0, &tb);
-        const uint64_t *e = (const uint64_t *)((const uint8_t *)tb.contents + DMSH_POOL_HEAD); uint64_t dummy = e[302];
+        const uint64_t *e = (const uint64_t *)((const uint8_t *)tb.contents + DMSH_POOL_HEAD); uint64_t dummy = e[*(const uint32_t *)tb.contents];   // the entry past the table's IDs
+        #define UNREAD(x, i) (!g_treg[i].view && (stand_on() ? g_treg[i].stand && (x)[i] == g_treg[i].stand_rid : (x)[i] == dummy))
         CHECK("the table's head holds the bitmap's address", *(const uint64_t *)((const uint8_t *)tb.contents + 8) == g_seen_buf.gpuAddress);
-        CHECK("unread textures read the dummy", e[301] == dummy && e[303] == dummy);
+        CHECK("unread textures are not made: a stand-in, and the dummy for a render target no pass has written", UNREAD(e, 301) && UNREAD(e, 302) && e[303] == dummy && !g_treg[303].stand);
+        uint64_t was = e[301];   // its stand-in, or the dummy
         os_unfair_lock_unlock(&g_rmu); finish();
         ((uint32_t *)g_seen_buf.contents)[301 / 32] |= 1u << (301 % 32) | 1u << (303 % 32);
         mtl_sub_begin(); os_unfair_lock_lock(&g_rmu);
         pool_gpu(0, MTLTextureType2D, 0, 0, &tb2);
         const uint64_t *e2 = (const uint64_t *)((const uint8_t *)tb2.contents + DMSH_POOL_HEAD);
-        CHECK("a read texture goes in, past the budget", e2[301] != dummy);
-        CHECK("and into the table a draw already encoded reads", e[301] != dummy);
-        CHECK("an unread one stays the dummy", e2[302] == dummy);
+        CHECK("a read texture goes in, past the budget", g_treg[301].view && e2[301] == g_treg[301].view_rid && e2[301] != dummy);
+        CHECK("and into the table a draw already encoded reads", e[301] != dummy && e[301] != was && !g_treg[301].stand);
+        CHECK("an unread one is still not made", UNREAD(e2, 302));
         CHECK("a read render target no pass wrote stays the dummy", e2[303] == dummy);
         os_unfair_lock_unlock(&g_rmu); finish();
         // Another texture in a read ID keeps the ID's mark, so the next walk makes the replacement; an emptied ID is cleared, and an ID given its first texture has not been read

@@ -138,7 +138,7 @@ static void dependency(int mode) {
     strcpy(gs->key,"fedcba9876543210_b");gs->geo_vertices=3;gs->geo_invocations=1;gs->geo_output=7;gs->geo_stride=4;gs->geo_index_stride=4;
     g_shcache=[NSMutableDictionary dictionary];g_shcache[@"fedcba9876543210_bg0"]=gs;g_shcache[@"fedcba9876543210_bgv"]=shader(l,@"reader",0,rh,1);
     prog_t cp={.serial=9700+mode};serial_put(cp.serial,pr);
-    uint8_t *cmd;posix_memalign((void**)&cmd,getpagesize(),65536);memset(cmd,0,65536);mtl_pool_add(cmd,65536);size_t used=0;   // NOLINT(clang-analyzer-osx.cocoa.RetainCount): g_by_serial owns pr (serial_put's CFBridgingRetain) for the life of the test, not a leak
+    uint8_t *cmd;posix_memalign((void**)&cmd,getpagesize(),65536);memset(cmd,0,65536);mtl_pool_add(cmd,65536);size_t used=0;
     #define EMIT(OP,X) do{size_t z=(8+sizeof(X)+7)&~7ull;op_hdr h={OP,(uint32_t)z};memcpy(cmd+used,&h,8);memcpy(cmd+used+8,&(X),sizeof(X));used+=z;}while(0)
     tex_t target={.magic=MAGIC('T','E','X',0),.serial=9800+mode,.d={.target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_RGBA8,.width=32,.height=32,.depth=1,.levels=1,.samples=1}};
     p_set_rt rt={.n=1};rt.color[0]=&target;EMIT(OP_SET_RT,rt);p_viewports vp={.n=1};vp.v[0][2]=vp.v[0][3]=32;EMIT(OP_VIEWPORTS,vp);

@@ -124,7 +124,7 @@ class UnrealMemory(unittest.TestCase):
             'mods': {'main': {'imports': {'nvnBootstrapLoader', pg.HEAP_API}, 'bss': 0, 'far': False}},
             'romfs': {'root': set(), 'exts': {'.pak': 1}},
             'sysres': 40 * pg.MiB,
-            'main_markers': {'Unreal 4'},
+            'main_markers': {'Unreal'},
         }
         keys = pg.guess(facts, hooks=set())
         reserve, alias, stack = (int(keys[k][0], 0) for k in ('mem_reserve', 'mem_alias', 'mem_stack'))

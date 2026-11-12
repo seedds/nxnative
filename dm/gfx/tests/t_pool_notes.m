@@ -1,7 +1,7 @@
 // The tables of handles traced to no slot (pool_gpu) over noted changes: a pool added or removed records REG_POOL and no ID, so a table built before keeps its buffer when nothing
 // it holds changed, takes again an ID whose storage came with a new pool, and the IDs of a finalized pool go to the dummy through notes of their own (treg_gone). A new submission
 // takes again only the IDs whose entries were views of retired registrations, which went at the end of the last one, and a storage takeover builds nothing. A patch follows the
-// walk's rules: past the budget an unread texture stays the dummy, and a view the shader-read scan writes in place is taken again at the next submission. Each patched table holds
+// walk's rules: past the budget an unread texture is not made (its entry is its stand-in, pool_stand), and a view the shader-read scan writes in place is taken again at the next submission. Each patched table holds
 // what a table built whole holds.
 // Ocarina of Time maps and unmaps virtual pool runs dozens of times a second and registers something between most of its draws; each of those walked its 33,025-entry texture table
 #define nvn_game_fps nvn_game_fps_mtl_default
@@ -20,6 +20,7 @@ static int checks, failed;
 #define CHECK(c, label) do { checks++; if (!(c)) { failed++; fprintf(stderr, "FAIL: %s (line %d)\n", label, __LINE__); } } while (0)
 
 enum { LEN = 1 << 20, IDS = 10 };
+static uint64_t alias_taken(void) { pthread_mutex_lock(&g_smu); uint64_t n = own_alias_stats_locked().taken; pthread_mutex_unlock(&g_smu); return n; }   // shared textures a takeover evicted, in total
 static uint8_t *pages(void) { uint8_t *m = mmap(NULL, LEN, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0); if (m == MAP_FAILED) abort(); return m; }
 // The 2D float texture table at base 0, in a submission of its own, as a draw that reads it would ask
 static id<MTLBuffer> table(void) {
@@ -47,6 +48,7 @@ static void same_as_whole(id<MTLBuffer> patched, const char *label) {
 }
 
 int main(void) { @autoreleasepool {
+    setenv("DM_NVN_RT_RECYCLE", "0", 1);   // textures with allocations of their own: one placed in a recycled heap is resident through its heap, whatever retires it
     mtl_init();
     uint8_t *ma = pages(), *mb = pages(), *mc = pages();
     // Pool A holds texture ID 1; pool B is a pool object whose storage the host does not map yet (a virtual pool before its first mapping): ID 2 there has no storage
@@ -127,9 +129,9 @@ int main(void) { @autoreleasepool {
     NVNtexture t5 = {0}; h_nvnTextureBuilderSetFormat(&tb, NVN_FORMAT_R32F); h_nvnTextureBuilderSetStorage(&tb, (NVNmemoryPool *)&dpool, 0);
     CHECK(h_nvnTextureInitialize(&t5, &tb), "texture 5 over the same storage initialized");
     mtl_reg_tex(5, (const tex_t *)&t5, NULL);
-    builds = g_stat_pool_builds; uint64_t taken = g_alias_taken, ep = g_treg_ep;
+    builds = g_stat_pool_builds; uint64_t taken = alias_taken(), ep = g_treg_ep;
     id<MTLBuffer> b10 = table();
-    CHECK(g_alias_taken > taken, "texture 5 took the storage over");
+    CHECK(alias_taken() > taken, "texture 5 took the storage over");
     CHECK(g_stat_pool_builds == builds && entry(b10, 5) != dummy_of(b10) && entry(b10, 4) == entry(b9, 4), "the takeover builds no table, and ID 4 keeps its entry in that submission");
     CHECK(g_treg_ep == ep, "nor sends every texture ID down the slow path");
     CHECK(!g_treg[4].view, "ID 4's view went at the submission's end");
@@ -137,7 +139,7 @@ int main(void) { @autoreleasepool {
     CHECK(g_stat_pool_builds == builds && entry(b11, 4) != dummy_of(b11), "the next submission takes ID 4 again without building the table");
     same_as_whole(b11, "the patched table holds what a table built whole does (takeover)");
 
-    // Past the budget: a texture registered since the walk that no shader has read stays the dummy, as in a walk, and the table is patched rather than built whole. ID 6 names a
+    // Past the budget: a texture registered since the walk that no shader has read is not made, as in a walk (its entry is its stand-in, or the dummy with DM_NVN_POOL_STANDIN=0), and the table is patched rather than built whole. ID 6 names a
     // texture the game finalized before anything made it. Once a shader reads ID 6, the scan of the read bitmap makes it whatever the budget and writes it into the table in place:
     // a view of a retired registration, which the table lists, so the next submission takes it again
     mtl_reg_tex(3, NULL, NULL); mtl_reg_tex(4, NULL, NULL); table(); table();   // no retired IDs left: the table lists none
@@ -150,9 +152,10 @@ int main(void) { @autoreleasepool {
     builds = g_stat_pool_builds; patched = g_stat_pool_patched; kept = g_stat_pool_kept;
     id<MTLBuffer> b12 = table();
     CHECK(g_stat_pool_builds == builds && g_stat_pool_patched + g_stat_pool_kept > patched + kept, "a registration past the budget patches the table");
-    CHECK(entry(b12, 6) == dummy_of(b12) && snap()->left > 0 && !snap()->left_req, "the unread texture is left out");
+    #define LEFT_OUT(buf, i) (!g_treg[i].view && (stand_on() ? g_treg[i].stand && entry(buf, i) == g_treg[i].stand_rid : entry(buf, i) == dummy_of(buf)))   // not the texture: its stand-in
+    CHECK(LEFT_OUT(b12, 6) && snap()->left > 0 && !snap()->left_req, "the unread texture is left out");
     h_nvnTextureFinalize(&t6); table();
-    CHECK(g_treg[6].retired && !tex_get(((const tex_t *)&t6)->serial) && entry(snap()->buf, 6) == dummy_of(snap()->buf), "finalized, it is still left out: nothing made it");
+    CHECK(g_treg[6].retired && !tex_get(((const tex_t *)&t6)->serial) && LEFT_OUT(snap()->buf, 6), "finalized, it is still left out: nothing made it");
     ((uint32_t *)g_seen_buf.contents)[6 / 32] |= 1u << (6 % 32);
     mtl_sub_begin(); os_unfair_lock_lock(&g_rmu); pool_seen_scan();
     pool_snap *s = snap(); id<MTLBuffer> b13 = s->buf;
@@ -165,12 +168,13 @@ int main(void) { @autoreleasepool {
     CHECK(g_stat_pool_builds == builds && g_stat_pool_schg > schg && entry(b14, 6) != dummy_of(b14), "the next submission takes ID 6 again without building the table");
     hog = nil;
 
-    // A live sRGB / linear twin: ID 8's serial resolves to a view of the shared texture that ID 7, finalized since, made (srgb_twins in tex_mtl_), so no live serial holds that texture
-    // and a takeover may evict it while ID 8 is live. tex_mtl_ finds the view stale once its parent left the sharing table and drops it (serial_del, a note naming ID 8's serial):
-    // the patch takes ID 8 again, without a table built whole or the slow path for every ID, and gives it what a table built whole does
+    // A live sRGB / linear twin: ID 8's serial resolves to a view of the shared texture that ID 7, finalized since, made (srgb_twins in tex_mtl_). The view's entry counts as
+    // holding that texture (count_add), so a texture of another description over the storage does not take it while ID 8 is live: with the view alone counted it went, the
+    // takeover's note named no ID of the twin, and the tables kept naming a view whose parent had left the sharing table and then the residency set (GitHub issue #2125).
+    // The walk after the twin's first resolution takes that resolution's note, so nothing but the takeover could send ID 8 anywhere
     uint8_t *me = pages(); pool_t epool = {0}; pool_builder_t pe = {.mem = me, .size = LEN, .flags = NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS | NVN_MEMORY_POOL_FLAGS_GPU_CACHED};
     CHECK(h_nvnMemoryPoolInitialize((NVNmemoryPool *)&epool, (const NVNmemoryPoolBuilder *)&pe), "pool E initialized");
-    NVNtexture t7 = {0}, t8 = {0}, t9 = {0};
+    NVNtexture t7 = {0}, t8 = {0}, t9 = {0}, t10 = {0};
     h_nvnTextureBuilderSetFormat(&tb, NVN_FORMAT_RGBA8); h_nvnTextureBuilderSetStorage(&tb, (NVNmemoryPool *)&epool, 0);
     CHECK(h_nvnTextureInitialize(&t7, &tb), "texture 7 initialized");
     mtl_reg_tex(7, (const tex_t *)&t7, NULL); table();
@@ -179,25 +183,43 @@ int main(void) { @autoreleasepool {
     mtl_reg_tex(8, (const tex_t *)&t8, NULL);
     id<MTLBuffer> b15 = table();
     uint64_t s8 = ((const tex_t *)&t8)->serial;
-    pthread_mutex_lock(&g_smu); id<MTLTexture> v8 = hm_get_id(&g_by_serial, &s8); pthread_mutex_unlock(&g_smu);
+    id<MTLTexture> v8 = serial_get(s8);
     id<MTLTexture> base8 = v8.parentTexture;
     CHECK(v8 && base8 && entry(b15, 8) != dummy_of(b15), "ID 8's serial resolves to a view of the shared texture");
+    table();
     mtl_reg_tex(7, NULL, NULL); h_nvnTextureFinalize(&t7);
     for (int i = 0; i <= ALIAS_IDLE; i++) { mtl_sub_begin(); mtl_wait(mtl_sub_commit(), 5000000000ull); }   // until the sharing table no longer spares the entry
     h_nvnTextureBuilderSetFormat(&tb, NVN_FORMAT_R32F);
     CHECK(h_nvnTextureInitialize(&t9, &tb), "texture 9 over the same storage initialized");
     mtl_reg_tex(9, (const tex_t *)&t9, NULL);
-    builds = g_stat_pool_builds; taken = g_alias_taken; ep = g_treg_ep;
+    builds = g_stat_pool_builds; taken = alias_taken(); ep = g_treg_ep;
     id<MTLBuffer> b16 = table();
-    pthread_mutex_lock(&g_smu); id<MTLTexture> now8 = hm_get_id(&g_by_serial, &s8); int base_shared = CFSetContainsValue(g_alias_set, (__bridge const void *)base8); pthread_mutex_unlock(&g_smu);
-    CHECK(g_alias_taken > taken && !base_shared, "texture 9 took the storage over and evicted the twin's base");
-    CHECK(now8 && now8 != v8 && g_treg_ep == ep, "ID 8's stale view was dropped and its texture made again, and no ID went down the slow path");
-    CHECK(g_stat_pool_builds == builds && entry(b16, 8) != entry(b15, 8) && entry(b16, 8) != dummy_of(b16) && entry(b16, 9) != dummy_of(b16),
-          "no table is built: the patch gives ID 8 its new texture and ID 9 its own");
-    same_as_whole(b16, "the patched table holds what a table built whole does (a live twin's base taken over)");
+    pthread_mutex_lock(&g_smu); id<MTLTexture> now8 = (__bridge id)own_live_ref_locked(s8); int base_shared = own_shared_locked(base8), base_held = serial_table_holds((__bridge void *)base8); pthread_mutex_unlock(&g_smu);
+    CHECK(base_held && alias_taken() == taken && base_shared, "the twin's entry holds its view's parent, and texture 9 over the same storage leaves it shared");
+    CHECK(now8 == v8 && g_treg_ep == ep, "ID 8's serial keeps its view, and no ID went down the slow path");
+    CHECK(g_stat_pool_builds == builds && entry(b16, 8) == entry(b15, 8) && entry(b16, 9) != dummy_of(b16), "no table is built: the patch keeps ID 8's view and gives ID 9 its texture");
+    same_as_whole(b16, "the patched table holds what a table built whole does (a texture over a live twin's base)");
+    for (int i = 0; i <= ALIAS_IDLE; i++) { mtl_sub_begin(); mtl_wait(mtl_sub_commit(), 5000000000ull); }
+    defer_drain();
+    pthread_mutex_lock(&g_res_mu); int base_res = [g_res_objects containsObject:base8]; pthread_mutex_unlock(&g_res_mu);
+    id<MTLBuffer> b17 = table();
+    CHECK(!base8.heap && base_res && entry(b17, 8) == entry(b15, 8), "submissions later the table still names the view, and its parent, an allocation of its own, is resident");
+    // The twin finalized and unregistered: nothing holds the base, and the next texture of another description over the storage takes it
+    mtl_reg_tex(8, NULL, NULL); h_nvnTextureFinalize(&t8);
+    for (int i = 0; i <= ALIAS_IDLE; i++) { mtl_sub_begin(); mtl_wait(mtl_sub_commit(), 5000000000ull); }
+    h_nvnTextureBuilderSetFormat(&tb, NVN_FORMAT_RG16F);
+    CHECK(h_nvnTextureInitialize(&t10, &tb), "texture 10 over the same storage initialized");
+    mtl_reg_tex(7, (const tex_t *)&t10, NULL);
+    builds = g_stat_pool_builds; taken = alias_taken(); ep = g_treg_ep;
+    id<MTLBuffer> b18 = table();
+    pthread_mutex_lock(&g_smu); base_shared = own_shared_locked(base8); base_held = serial_table_holds((__bridge void *)base8); pthread_mutex_unlock(&g_smu);
+    CHECK(!base_held && alias_taken() > taken && !base_shared, "with the twin finalized, texture 10 took the storage over and evicted the base");
+    CHECK(g_stat_pool_builds == builds && g_treg_ep == ep && entry(b18, 8) == dummy_of(b18) && entry(b18, 7) != dummy_of(b18) && entry(b18, 9) != dummy_of(b18),
+          "no table is built and no ID went down the slow path: the takeover's note names no ID");
+    same_as_whole(b18, "the patched table holds what a table built whole does (a finalized twin's base taken over)");
 
-    mtl_reg_tex(1, NULL, NULL); mtl_reg_tex(2, NULL, NULL); mtl_reg_tex(5, NULL, NULL); mtl_reg_tex(6, NULL, NULL); mtl_reg_tex(8, NULL, NULL); mtl_reg_tex(9, NULL, NULL);
-    mtl_tex_release(&t2); h_nvnTextureFinalize(&t1); h_nvnTextureFinalize(&t5); h_nvnTextureFinalize(&t8); h_nvnTextureFinalize(&t9);
+    mtl_reg_tex(1, NULL, NULL); mtl_reg_tex(2, NULL, NULL); mtl_reg_tex(5, NULL, NULL); mtl_reg_tex(6, NULL, NULL); mtl_reg_tex(7, NULL, NULL); mtl_reg_tex(9, NULL, NULL);
+    mtl_tex_release(&t2); h_nvnTextureFinalize(&t1); h_nvnTextureFinalize(&t5); h_nvnTextureFinalize(&t9); h_nvnTextureFinalize(&t10);
     h_nvnMemoryPoolFinalize((NVNmemoryPool *)&dpool); h_nvnMemoryPoolFinalize((NVNmemoryPool *)&epool);
     mtl_pool_del(mb); mtl_pool_del(mc);
     defer_drain(); munmap(ma, LEN); munmap(mb, LEN); munmap(mc, LEN); munmap(md, LEN); munmap(me, LEN);

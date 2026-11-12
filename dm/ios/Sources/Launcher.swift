@@ -127,6 +127,35 @@ private struct PlayerNameSection: View {
     }
 }
 
+/// VPN play (DM_NET_VPN and DM_NET_DISCOVERY_PEER; docs/reference/services.md, Local play over a VPN): LAN and Local wireless with friends on other networks, through
+/// a VPN app every player is on. Not rows of the settings list, since an address is none of its kinds (docs/frontends.md): the choices are kept under keys of their own
+/// (vpnPlay.on, vpnPlay.host) and LauncherView puts them in the environment at Play. Shown while Network is LAN or Local wireless.
+private func vpnAddressValid(_ s: String) -> Bool { var a = in_addr(); return inet_pton(AF_INET, s, &a) == 1 }
+private struct VpnSection: View {
+    @Binding var on: Bool
+    @Binding var host: String
+    let fixed: Bool   // an env file or the launch set one of the two: shown, not changed
+
+    private var footer: String {
+        if fixed { return "Set by an env file or at launch." }
+        let h = host.trimmingCharacters(in: .whitespaces)
+        if on && !h.isEmpty && !vpnAddressValid(h) { return "That isn't an IPv4 address. It looks like 100.101.2.3." }
+        return on ? "Joining on Tailscale or NetBird: type the host's address from the VPN app (100.x.x.x). Leave it empty to host, or to join on ZeroTier."
+                  : "For friends on other networks. Every player joins the same Tailscale, ZeroTier or NetBird network and turns this on."
+    }
+
+    var body: some View {
+        Section {
+            Toggle("Play over a VPN", isOn: $on)
+            if on {
+                TextField("Host's VPN address", text: $host)
+                    .keyboardType(.numbersAndPunctuation).textInputAutocapitalization(.never).autocorrectionDisabled()
+            }
+        } header: { Text("VPN play") } footer: { Text(footer) }
+        .disabled(fixed)
+    }
+}
+
 /// UIDocumentPickerViewController for a folder, in the two callbacks a SwiftUI sheet wants.
 private struct DocumentPicker: UIViewControllerRepresentable {
     var types: [UTType] = [.folder]
@@ -166,6 +195,14 @@ private struct LauncherView: View {
     @State private var check = 0   // which Play the running check is for: one the player went on from without it is dropped
     @State private var report: SaveSyncReport?
     @State private var asking: SaveSyncReport.Step?
+    @AppStorage("vpnPlay.on") private var vpnOn = false
+    @AppStorage("vpnPlay.host") private var vpnHost = ""
+
+    private var vpnFixed: Bool { m.fixed.contains("DM_NET_VPN") || m.fixed.contains("DM_NET_DISCOVERY_PEER") }
+    private var vpnShown: Bool { ["lan", "ldn"].contains(m.values["DM_NETWORK"] ?? "") }
+    private var vpnTyped: String { vpnHost.trimmingCharacters(in: .whitespaces) }
+    // A typo in the host's address would leave joiners searching nobody: Play waits for an address or an empty field
+    private var vpnBlocks: Bool { vpnShown && vpnOn && !vpnFixed && !vpnTyped.isEmpty && !vpnAddressValid(vpnTyped) }
 
     @AppStorage(playerNameKey) private var playerName = ""
     private var nameFixed: Bool { m.fixed.contains("DM_NICK") }
@@ -196,6 +233,10 @@ private struct LauncherView: View {
                                 ForEach(rows) { SettingRow(s: $0, m: m) }
                             }
                         }
+                    }
+                    if vpnShown {
+                        VpnSection(on: vpnFixed ? .constant(getenv("DM_NET_VPN").map { String(cString: $0) == "1" } ?? false) : $vpnOn,
+                                   host: vpnFixed ? .constant(getenv("DM_NET_DISCOVERY_PEER").map { String(cString: $0) } ?? "") : $vpnHost, fixed: vpnFixed)
                     }
                     if nameShown {
                         PlayerNameSection(name: nameFixed ? .constant(getenv("DM_NICK").map { String(cString: $0) } ?? "") : $playerName, fixed: nameFixed)
@@ -241,7 +282,7 @@ private struct LauncherView: View {
     }
 
     @ViewBuilder var playButton: some View {
-        let button = Button(action: start) { Text("Play").font(.title3.weight(.semibold)).frame(maxWidth: 220) }.controlSize(.large).disabled(checking)
+        let button = Button(action: start) { Text("Play").font(.title3.weight(.semibold)).frame(maxWidth: 220) }.controlSize(.large).disabled(checking || vpnBlocks)
         if #available(iOS 26.0, *) { button.buttonStyle(.glassProminent) } else { button.buttonStyle(.borderedProminent) }
         if checking {
             VStack(spacing: 6) {
@@ -291,6 +332,7 @@ private struct LauncherView: View {
     private func go(_ choice: String?) {
         asking = nil
         if let choice { setenv("DM_SAVE_SYNC_CHOICE", choice, 1); fputs("launcher: DM_SAVE_SYNC_CHOICE=\(choice)\n", stderr) }
+        applyVpn()
         applyNextendoProfile()
         applyPlayerName()
         play()
@@ -313,6 +355,15 @@ private struct LauncherView: View {
         if getenv("DM_NEXTENDO_COUNTRY") == nil, let region = Locale.current.region?.identifier, region.count == 2, region.allSatisfy({ $0.isASCII && $0.isUppercase }) {
             setenv("DM_NEXTENDO_COUNTRY", region, 1); fputs("launcher: DM_NEXTENDO_COUNTRY=\(region)\n", stderr)
         }
+    }
+
+    /// VPN play's two variables, while Network is LAN or Local wireless (VpnSection); what an env file or the launch set stays
+    private func applyVpn() {
+        if vpnFixed { fputs("launcher: VPN play kept as the env file or launch set it\n", stderr); return }
+        guard vpnShown && vpnOn else { return }
+        setenv("DM_NET_VPN", "1", 1)
+        if vpnTyped.isEmpty { fputs("launcher: DM_NET_VPN=1\n", stderr); return }
+        setenv("DM_NET_DISCOVERY_PEER", vpnTyped, 1); fputs("launcher: DM_NET_VPN=1 DM_NET_DISCOVERY_PEER=\(vpnTyped)\n", stderr)
     }
 
     private func appIcon() -> UIImage? {

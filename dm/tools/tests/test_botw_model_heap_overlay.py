@@ -6,7 +6,7 @@ import tempfile
 import unittest
 import zlib
 
-spec = importlib.util.spec_from_file_location('overlay', Path(__file__).parents[1] / 'botw_model_heap_overlay.py')
+spec = importlib.util.spec_from_file_location('overlay', Path(__file__).parents[3] / 'scripts' / 'botw_model_heap_overlay.py')
 overlay = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(overlay)
 
@@ -61,6 +61,32 @@ class ModelHeapOverlayTests(unittest.TestCase):
             data = b'RSTB' + struct.pack('<IIII', 1, 0, zlib.crc32(b'Model/Test.bfres'), 100)
         table.write_bytes(overlay.yaz0_store(data))
         return source
+
+    def test_literal_size_boundary(self):
+        from unittest.mock import patch
+        with patch.object(overlay, 'MAX_TABLE', 1024), patch.object(overlay, 'MAX_ENCODED_TABLE', 1168):
+            data = bytes(1024)
+            self.assertEqual(overlay.yaz0_decode(overlay.yaz0_store(data)), data)
+            with self.assertRaises(ValueError):
+                overlay.yaz0_decode(overlay.yaz0_store(bytes(1025)))
+            with self.assertRaises(ValueError):
+                overlay.yaz0_decode(overlay.yaz0_store(data) + b'x')
+
+    def test_output_parent_symlink(self):
+        for component in ('System', 'System/Resource'):
+            with self.subTest(component=component), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                source = self.fixture(root)
+                out = root / 'out'
+                link = out / component
+                link.parent.mkdir(parents=True)
+                target = source / 'new-data'
+                link.symlink_to(target, target_is_directory=True)
+                before = (source / overlay.RSTB).read_bytes()
+                with self.assertRaisesRegex(ValueError, 'symlinked'):
+                    overlay.main([str(source), str(out)])
+                self.assertFalse(target.exists())
+                self.assertEqual((source / overlay.RSTB).read_bytes(), before)
 
     def test_image_matches_directory(self):
         import romfs_image

@@ -19,7 +19,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'dm' / 'tools'))
 from romfs import Path as RomPath
 
-MAX_TABLE = 16 * 1024 * 1024  # Bound both compressed input and decompressed resource tables.
+MAX_TABLE = 16 * 1024 * 1024  # Maximum decoded resource table size.
+MAX_ENCODED_TABLE = 16 + MAX_TABLE + (MAX_TABLE + 7) // 8
 
 # Spyder/F5: set both paths here, or pass them on the command line.
 ROMFS = None
@@ -31,7 +32,7 @@ RSTB = 'System/Resource/ResourceSizeTable.product.srsizetable'
 
 
 def yaz0_decode(d):
-    if len(d) < 16 or len(d) > MAX_TABLE or d[:4] != b'Yaz0':
+    if len(d) < 16 or len(d) > MAX_ENCODED_TABLE or d[:4] != b'Yaz0':
         raise ValueError('invalid Yaz0 header or oversized input')
     size = struct.unpack('>I', d[4:8])[0]
     if size > MAX_TABLE:
@@ -88,7 +89,7 @@ def main(argv=None):
         parser.error('OVERLAY_DIR must differ from ROMFS; the original table is never overwritten')
     source = RomPath(romfs)
     with (source / RSTB).open('rb') as f:
-        compressed = f.read(MAX_TABLE + 1)
+        compressed = f.read(MAX_ENCODED_TABLE + 1)
     data = bytearray(yaz0_decode(compressed))
     if len(data) < 12 or data[:4] != b'RSTB':
         raise ValueError('invalid RSTB header')
@@ -138,7 +139,11 @@ def main(argv=None):
             padded += 1; extra += add
     if not padded:
         raise ValueError('no eligible model budgets found; no overlay written')
-    out = overlay / RSTB
+    out = overlay.resolve() / RSTB
+    # Resolve the chosen root once, then reject redirects below it before mkdir.
+    for parent in (out.parent, out.parent.parent):
+        if parent.is_symlink():
+            raise ValueError('symlinked output directory')
     out.parent.mkdir(parents=True, exist_ok=True)
     if out.resolve() == (romfs / RSTB).resolve():
         parser.error('output aliases the source table')

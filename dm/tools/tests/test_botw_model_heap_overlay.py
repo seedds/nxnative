@@ -7,6 +7,7 @@ import unittest
 import zlib
 
 spec = importlib.util.spec_from_file_location('overlay', Path(__file__).parents[3] / 'scripts' / 'botw_model_heap_overlay.py')
+assert spec is not None and spec.loader is not None
 overlay = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(overlay)
 
@@ -87,6 +88,21 @@ class ModelHeapOverlayTests(unittest.TestCase):
                     overlay.main([str(source), str(out)])
                 self.assertFalse(target.exists())
                 self.assertEqual((source / overlay.RSTB).read_bytes(), before)
+
+    def test_failed_output_leaves_no_final_file(self):
+        from unittest.mock import patch
+        for operation in ('fsync', 'link'):
+            with self.subTest(operation=operation), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                source = self.fixture(root)
+                out = root / 'out'
+                with patch.object(overlay.os, operation, side_effect=OSError('disk failure')):
+                    with self.assertRaises(OSError):
+                        overlay.main([str(source), str(out)])
+                self.assertFalse((out / overlay.RSTB).exists())
+                self.assertEqual(list((out / overlay.RSTB).parent.iterdir()), [])
+                overlay.main([str(source), str(out)])
+                self.assertTrue((out / overlay.RSTB).is_file())
 
     def test_image_matches_directory(self):
         import romfs_image

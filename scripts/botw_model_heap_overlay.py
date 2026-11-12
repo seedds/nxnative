@@ -14,6 +14,8 @@ usage: botw_model_heap_overlay.py ROMFS OVERLAY_DIR
 """
 import argparse, struct, zlib
 import sys
+import os
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'dm' / 'tools'))
@@ -150,8 +152,17 @@ def main(argv=None):
     encoded = yaz0_store(bytes(data))
     if yaz0_decode(encoded) != bytes(data):
         raise ValueError('overlay round-trip validation failed')
-    with out.open('xb') as f:
-        f.write(encoded)
+    # Publish only a complete file; link fails if any destination already exists.
+    with tempfile.NamedTemporaryFile(dir=out.parent, prefix='.rstb-', delete=False) as f:
+        temporary = Path(f.name)
+        try:
+            f.write(encoded)
+            f.flush()
+            os.fsync(f.fileno())
+            f.close()
+            os.link(temporary, out)
+        finally:
+            temporary.unlink()
     print(f'{padded} model entries padded, {extra / 2**20:.1f} MB if all were loaded at once -> {out}')
 
 

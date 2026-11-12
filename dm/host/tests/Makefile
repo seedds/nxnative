@@ -409,3 +409,11 @@ coverage:
 	rm -rf $(B)/cov/prof
 	LLVM_PROFILE_FILE="$(call cov_profile,$(B)/cov)" $(MAKE) -i B=$(B)/cov SAN="$(COV_FLAGS)" run
 	@$(call cov_export,$(B)/cov)
+
+# Native-pixel fullscreen mode selection: CPU-only, no display reconfiguration.
+$(B)/t_screen_mode: t_screen_mode.c ../front_screen_mode.h | $(B)
+	$(CLANG) -std=c11 -O1 -g -Wall -Wextra -Werror -I.. -o $@ t_screen_mode.c
+.PHONY: screen-mode
+screen-mode: $(B)/t_screen_mode
+	$(B)/t_screen_mode
+run: screen-mode

@@ -534,6 +534,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - one otherwise valid game image has no captured scene, followed by several missing generated pictures while interpolation rebuilds history. The camera is current and no snapshot slot or GPU operation failed. → [Interpolation loses a scene when composition becomes a copy](../reference/frame-rate.md#interpolation-loses-a-scene-when-composition-becomes-a-copy)
 - tracing actual presents and frame-generation GPU intervals performs filesystem work on every completion/presented callback, potentially disturbing the cadence being measured. → [Diagnostic frame records must not flush once per image](../reference/frame-rate.md#diagnostic-frame-records-must-not-flush-once-per-image)
 - a rare long frame occurs inside the timing probes after rendering has been enqueued, without new pipelines, libraries or screenshots. A detailed capture can disturb the game it measures. → [Bounded NVN timing captures without filesystem work per frame](../reference/frame-rate.md#bounded-nvn-timing-captures-without-filesystem-work-per-frame)
+- a forced 16:9 drawable fills a differently shaped fullscreen layer, while a scaled Retina desktop resamples the output again. Using a whole-view drawable instead keeps aspect bars inside the render target and prevents an identity final MetalFX write. → [Fullscreen output can match the panel’s native pixels](../reference/frame-rate.md#fullscreen-output-can-match-the-panels-native-pixels)
 
 ## NVN objects
 

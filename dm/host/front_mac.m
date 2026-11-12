@@ -11,6 +11,10 @@
 // DM_PAD_MERGE=1 merges every controller into player 1 instead, DM_KBD_PLAYER=own makes the keyboard player 1 on its own, with the controllers from player 2 on.
 #import <Cocoa/Cocoa.h>
 #import <QuartzCore/CAMetalLayer.h>
+#import <QuartzCore/CATransaction.h>
+#include <stdatomic.h>
+#import <IOKit/graphics/IOGraphicsTypes.h>
+#include "front_screen_mode.h"
 #import <Metal/Metal.h>
 #import <GameController/GameController.h>
 #include "dm.h"
@@ -36,6 +40,10 @@ static void merge_rumble_to_s2(int on);
 #include <sys/stat.h>
 
 static CAMetalLayer *g_layer;
+// Fit the Metal layer itself to the logical game picture. A forced drawable then
+// keeps its aspect ratio, and a view-sized drawable has no rendered black bars.
+// The ordinary whole-view layer remains available for comparison.
+static int g_picture_layer;
 // Opt-in output-resolution diagnostic. Leave the view and the game's targets unchanged;
 // this measures the actual drawable/upscaler workload even on a smaller panel.
 static NSSize g_drawable_override;
@@ -93,6 +101,7 @@ int front_fullscreen(void) { return g_fullscreen; }   // nvn_mtl.m link_latency:
 // 1 → 2 → 3 vsync steps at latency 1, issue #347), and the fixed 60 Hz mode held 60.0 fps at latency 1 (docs/reference/frame-rate.md). A screen with no such mode keeps its rate, and
 // the 120 Hz link paces it (nvn_mtl.m link_vrr_120)
 static NSWindow *g_win; static _Atomic int g_match_want;   // the game's window; the frame rate to match (0 = not known yet), written by the present thread only
+static uint32_t g_match_native_mode; static int g_match_native_vrr;
 static CGDirectDisplayID g_match_id; static CGDisplayModeRef g_match_orig; static int g_match_orig_vrr;   // main thread: the screen this host switched, its own mode (NULL = none switched) and whether that mode is variable-refresh
 static double mode_hz(CGDisplayModeRef m) { double hz = CGDisplayModeGetRefreshRate(m); return hz > 0 ? hz : 0; }   // 0 = not known (older built-in screens report none)
 static int hz_multiple(double hz, int fps) { double k = round(hz / fps); return k >= 1 && fabs(hz / fps - k) < 0.01; }   // 59.94 Hz counts as 60
@@ -107,7 +116,43 @@ static void screen_match_restore(int on_it) {   // main thread: the screen this 
     double hz = mode_hz(g_match_orig); CGError r = screen_set_mode(g_match_id, g_match_orig);
     LOG("front end: screen %s %.0f Hz", r == kCGErrorSuccess ? "back at" : "could not be switched back to", hz);
     if (r == kCGErrorSuccess && on_it) { if (hz > 0) g_screen_fps = (int)round(hz); g_screen_variable_refresh = g_match_orig_vrr; }   // the screen observer may not show the mode yet
-    CGDisplayModeRelease(g_match_orig); g_match_orig = NULL;
+    CGDisplayModeRelease(g_match_orig); g_match_orig = NULL; g_match_native_mode = 0;
+}
+// Native-pixel output is opt-in. Keep the user's Retina density, let the existing
+// refresh policy prefer fixed modes, and retain the 120 Hz variable mode when no
+// fixed 120 Hz native mode exists. The original mode belongs to the same lifecycle
+// as refresh matching: leaving fullscreen or this display restores it.
+static front_screen_mode screen_mode_info(CGDisplayModeRef m) {
+    return (front_screen_mode){CGDisplayModeGetIODisplayModeID(m), CGDisplayModeGetWidth(m), CGDisplayModeGetHeight(m),
+        CGDisplayModeGetPixelWidth(m), CGDisplayModeGetPixelHeight(m), mode_hz(m),
+        !!(CGDisplayModeGetIOFlags(m) & kDisplayModeNativeFlag), CGDisplayModeIsUsableForDesktopGUI(m)};
+}
+static void screen_native_apply(CGDirectDisplayID id, CGDisplayModeRef cur, int want) {
+    front_screen_mode current = screen_mode_info(cur), original = screen_mode_info(g_match_orig ?: cur);
+    int vrr = g_match_orig ? current.id == g_match_native_mode ? g_match_native_vrr :
+        current.id == original.id ? g_match_orig_vrr : g_screen_variable_refresh : g_screen_variable_refresh;
+    int original_vrr = g_match_orig ? g_match_orig_vrr : vrr;
+    CFArrayRef modes = CGDisplayCopyAllDisplayModes(id, (__bridge CFDictionaryRef)@{(__bridge NSString *)kCGDisplayShowDuplicateLowResolutionModes: @YES});
+    CFIndex count = modes ? CFArrayGetCount(modes) : 0;
+    front_screen_mode *list = count > 0 ? calloc((size_t)count, sizeof *list) : NULL;
+    if (!list) { if (modes) CFRelease(modes); return; }
+    for (CFIndex i = 0; i < count; i++) list[i] = screen_mode_info((CGDisplayModeRef)CFArrayGetValueAtIndex(modes, i));
+    int index = front_screen_native_pick(list, (size_t)count, current, original, vrr, original_vrr, want);
+    if (index >= 0 && list[index].id != current.id) {
+        front_screen_mode selected = list[index];
+        CGDisplayModeRef pick = (CGDisplayModeRef)CFArrayGetValueAtIndex(modes, index);
+        CGError error = screen_set_mode(id, pick);
+        LOG("front end: native-pixel mode %zux%zu points / %zux%zu pixels at %.0f Hz %s for %d fps (DM_SCREEN_NATIVE=1)",
+            selected.width, selected.height, selected.pixel_width, selected.pixel_height, selected.hz,
+            error == kCGErrorSuccess ? "selected" : "unavailable", want);
+        if (error == kCGErrorSuccess) {
+            if (!g_match_orig) { g_match_orig = CGDisplayModeRetain(cur); g_match_id = id; g_match_orig_vrr = vrr; }
+            g_match_native_mode = selected.id;
+            g_match_native_vrr = (original_vrr && fabs(selected.hz - original.hz) < 0.5) || (vrr && fabs(selected.hz - current.hz) < 0.5);
+            g_screen_fps = (int)round(selected.hz); g_screen_variable_refresh = g_match_native_vrr;
+        }
+    } else if (index < 0) LOG("front end: no native-pixel mode at this Retina density matches %d fps; keeping the screen mode", want);
+    free(list); if (modes) CFRelease(modes);
 }
 static void screen_match_apply(void) {   // main thread: on a new frame rate, on entering and leaving fullscreen and on a move to another screen
     static int off = -1; if (off < 0) { const char *e = getenv("DM_SCREEN_MATCH"); off = e && !strcmp(e, "0"); if (off) LOG("front end: the screen keeps its refresh rate in fullscreen too (DM_SCREEN_MATCH=0)"); }
@@ -117,6 +162,8 @@ static void screen_match_apply(void) {   // main thread: on a new frame rate, on
     if (off || !full || want <= 0 || !scr) return;
     CGDisplayModeRef cur = CGDisplayCopyDisplayMode(id);
     if (!cur) return;
+    static int native = -1; if (native < 0) { const char *e = getenv("DM_SCREEN_NATIVE"); native = e && !strcmp(e, "1"); }
+    if (native) { screen_native_apply(id, cur, want); CGDisplayModeRelease(cur); return; }
     double hz = mode_hz(cur);
     // the current mode is variable-refresh: the screen's own mode as screen_refresh saw it; one this host switched to as it chose it (the screen observer may lag), so a
     // fixed mode is never left for the variable one at a rate it already matches
@@ -631,7 +678,11 @@ static void pads_start(void) {
 // not a window-wide event monitor, so clicks on the title bar, the window buttons and the resize edges still reach AppKit.
 // The picture's width / height (front.h front_picture_shape; 16:9 until the first present), which the present fits into the view
 static _Atomic double g_picture_aspect = 16.0 / 9.0;
-void front_picture_shape(int w, int h) { if (w > 0 && h > 0) g_picture_aspect = (double)w / h; }
+void front_picture_shape(int w, int h) {
+    if (w <= 0 || h <= 0) return;
+    double next = (double)w / h, previous = atomic_exchange(&g_picture_aspect, next);
+    if (g_picture_layer && next != previous) dispatch_async(dispatch_get_main_queue(), ^{ g_win.contentView.needsLayout = YES; });
+}
 @interface DmGameView : NSView @end
 @implementation DmGameView
 - (void)mouseDown:(NSEvent *)e { [self mouseDragged:e]; }
@@ -649,11 +700,29 @@ void front_picture_shape(int w, int h) { if (w > 0 && h > 0) g_picture_aspect = 
 // The drawable follows the view in pixels: a layer assigned to a layer-backed view kept the drawable at the first window's 1280x720 in fullscreen too, so the game picture was
 // scaled down to it and up again by the compositor
 - (void)fitDrawable {
-    CAMetalLayer *l = (CAMetalLayer *)self.layer; if (![l isKindOfClass:CAMetalLayer.class] || !self.window) return;
+    CAMetalLayer *l = g_picture_layer ? g_layer : (CAMetalLayer *)self.layer;
+    if (![l isKindOfClass:CAMetalLayer.class] || !self.window) return;
     l.contentsScale = self.window.backingScaleFactor;
-    NSSize px = g_drawable_override.width > 0 ? g_drawable_override : [self convertSizeToBacking:self.bounds.size]; if (px.width < 1 || px.height < 1 || CGSizeEqualToSize(l.drawableSize, px)) return;
-    l.drawableSize = px; LOG("front end: drawable %.0fx%.0f", px.width, px.height);
+    NSSize px = [self convertSizeToBacking:self.bounds.size];
+    if (px.width < 1 || px.height < 1) return;
+    if (g_picture_layer) {
+        double aspect = atomic_load(&g_picture_aspect);
+        double width = floor(px.width), height = floor(px.height);
+        if (width / height > aspect) width = floor(height * aspect); else height = floor(width / aspect);
+        if (width < 1 || height < 1) return;
+        NSRect pixels = NSMakeRect(floor((px.width - width) / 2), floor((px.height - height) / 2), width, height);
+        NSRect frame = [self convertRectFromBacking:pixels];
+        [CATransaction begin]; [CATransaction setDisableActions:YES];
+        l.frame = frame;
+        [CATransaction commit];
+        px = pixels.size;
+    }
+    if (g_drawable_override.width > 0) px = g_drawable_override;
+    if (CGSizeEqualToSize(l.drawableSize, px)) return;
+    l.drawableSize = px;
+    LOG("front end: drawable %.0fx%.0f, layer %.1fx%.1f points at %.0fx, picture aspect %.6f", px.width, px.height, l.bounds.size.width, l.bounds.size.height, l.contentsScale, atomic_load(&g_picture_aspect));
 }
+- (void)layout { [super layout]; [self fitDrawable]; }
 - (void)setFrameSize:(NSSize)s { [super setFrameSize:s]; [self fitDrawable]; }
 - (void)viewDidChangeBackingProperties { [super viewDidChangeBackingProperties]; [self fitDrawable]; }
 @end
@@ -1548,8 +1617,31 @@ void front_run(void (*guest)(void)) {
         // Apple's HUD over the game (frame rate, frame and GPU time, memory): front_hud_env turns it on before the first device. The layer's developerHUDProperties
         // stay unset: mode=default forces this layer's HUD on, so the Metal HUD menu's Hide HUD left it on screen
         if (getenv("DM_METAL_HUD") && atoi(getenv("DM_METAL_HUD"))) LOG("front end: Metal performance HUD on (DM_METAL_HUD)");
-        v.layer = g_layer; [(DmGameView *)v fitDrawable];
-        [win center];
+        const char *picture = getenv("DM_PRESENT_PICTURE_LAYER");
+        g_picture_layer = picture && !strcmp(picture, "1");
+        if (g_picture_layer) {
+            v.layer.backgroundColor = NSColor.blackColor.CGColor;
+            [v.layer addSublayer:g_layer];
+            LOG("front end: Metal picture layer follows the game's aspect ratio");
+        } else v.layer = g_layer;
+        [(DmGameView *)v fitDrawable];
+        // Explicit target for reproducible multi-display launches. Unset keeps
+        // AppKit's ordinary placement; never silently test a different display.
+        const char *screen_choice = getenv("DM_WINDOW_SCREEN");
+        if (screen_choice && *screen_choice) {
+            NSScreen *chosen = nil;
+            int builtin = !strcmp(screen_choice, "builtin");
+            char *end = NULL; unsigned long number = strtoul(screen_choice, &end, 0);
+            if (!builtin && (!end || *end || number > UINT32_MAX)) { LOG("[RED] invalid DM_WINDOW_SCREEN: builtin or a display ID expected"); exit(2); }
+            for (NSScreen *screen in NSScreen.screens) {
+                CGDirectDisplayID display = [screen.deviceDescription[@"NSScreenNumber"] unsignedIntValue];
+                if (builtin ? CGDisplayIsBuiltin(display) : display == (CGDirectDisplayID)number) { chosen = screen; break; }
+            }
+            if (!chosen) { LOG("[RED] requested DM_WINDOW_SCREEN is unavailable"); exit(2); }
+            NSRect area = chosen.visibleFrame;
+            [win setFrameOrigin:NSMakePoint(NSMidX(area) - win.frame.size.width / 2, NSMidY(area) - win.frame.size.height / 2)];
+            LOG("front end: explicit display %u, maximum %ld Hz", [chosen.deviceDescription[@"NSScreenNumber"] unsignedIntValue], (long)chosen.maximumFramesPerSecond);
+        } else [win center];
         [win makeKeyAndOrderFront:nil];
         screen_refresh(win.screen ?: NSScreen.mainScreen);
         g_win = win;

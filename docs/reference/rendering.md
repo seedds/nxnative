@@ -1787,6 +1787,6 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 
 - **Symptom:** a smaller Mac panel prevents measuring the workload of a higher-resolution output by resizing its game window.
 - **Cause:** the default drawable correctly follows the window's backing-pixel dimensions.
-- **Fix:** `DM_DRAWABLE_SIZE=WIDTHxHEIGHT` explicitly overrides the drawable for diagnostics, including after AppKit resize/backing notifications. Each dimension must be 1..16384; malformed values keep the default. Without the setting, the window continues to determine the drawable. A forced 16:9 output should use a 16:9 window; this diagnostic does not change mouse mapping or the panel's mode.
+- **Fix:** `DM_DRAWABLE_SIZE=WIDTHxHEIGHT` explicitly overrides the drawable for diagnostics, including after AppKit resize/backing notifications. Each dimension must be 1..16384; malformed values keep the default. Without the setting, the window continues to determine the drawable. A forced 16:9 output needs a matching onscreen layer: use a 16:9 window or the [picture-layer option](frame-rate.md#fullscreen-output-can-match-the-panels-native-pixels). This diagnostic alone does not change mouse mapping or the panel's mode.
 - **Check:** OOT's native and generated final scalers report 2048×1152→3840×2160 while the built-in panel remains 3024×1964. This establishes 4K render work, not 4K physical scanout.
 - **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md).

@@ -1,0 +1,10 @@
+# Fresh save to the title (the Blizzard logo movie and the title's flames), then A through the calibration screens into the Act I opening cinematic (the movie player). Making a hero needs
+# DM_KBD, which a smoke route cannot set.
+save	new
+keys	50:A*4/5
+secs	90
+quick	80
+reach	2400@85
+window	60	20
+shots	45,85
+hang	20

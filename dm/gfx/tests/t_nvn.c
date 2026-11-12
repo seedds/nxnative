@@ -425,7 +425,7 @@ int main(void) {
     EXPECT("buffer copy 64 B identical", 0, memcmp(src, dst, 64));
     uint64_t ts[2]; memcpy(ts, cnt, 16);
     EXPECT("counter timestamp written (non-zero)", 1, ts[1] != 0);
-    EXPECT("its counter field: the time, 0 with the profile's render_cond (as on the GPU)", DM_GAME_RENDER_COND ? 0 : ts[1], ts[0]);
+    EXPECT("its counter field: 0, as on the GPU", 0, ts[0]);
     NVNcounterData fixed_counter = {0, 614400};
     EXPECT("614400 raw counter ticks = 1 ms", 1000000, P(nvnDeviceGetTimestampInNanoseconds)(&dev, &fixed_counter));
     NVNcounterData reported_counter; memcpy(&reported_counter, cnt, sizeof reported_counter);
@@ -795,7 +795,7 @@ int main(void) {
         EQ(P(nvnCommandBufferBindSeparateTexture)(CB_, NVN_SHADER_STAGE_FRAGMENT, 4, (NVNseparateTextureHandle){77}));
         EQ(h_nvnCommandBufferBindTexturesDeferred(CB_, NVN_SHADER_STAGE_FRAGMENT, 0, 2, th));
         EQ(P(nvnCommandBufferBindUniformBuffers)(CB_, NVN_SHADER_STAGE_VERTEX, 4, 3, r3));
-        EQ(P(nvnCommandBufferBindUniformBuffers)(CB_, NVN_SHADER_STAGE_VERTEX, 14, 3, r3));   // past slot 16: one by one both ways
+        EQ(P(nvnCommandBufferBindUniformBuffers)(CB_, NVN_SHADER_STAGE_VERTEX, 14, 3, r3));   // past slot 16: the two slots inside it
         EQ(P(nvnCommandBufferBindUniformBuffers)(CB_, NVN_SHADER_STAGE_FRAGMENT, 0, 2, rbig));
         EQ(P(nvnCommandBufferBindStorageBuffer)(CB_, NVN_SHADER_STAGE_COMPUTE, 5, 0x40000, 0x1000));
         EQ(P(nvnCommandBufferBindStorageBuffers)(CB_, NVN_SHADER_STAGE_COMPUTE, 1, 3, r3));
@@ -822,6 +822,20 @@ int main(void) {
         EQ(P(nvnCommandBufferBarrier)(CB_, 0x1f)); EQ(P(nvnCommandBufferBarrier)(CB_, 1 << 30));
         EQ(P(nvnCommandBufferSetPrimitiveRestart)(CB_, 1, -1)); EQ(P(nvnCommandBufferSetPrimitiveRestart)(CB_, 1, 0xffff)); EQ(P(nvnCommandBufferSetPrimitiveRestart)(CB_, 0, 0x7fffffff));
         EQ(P(nvnCommandBufferSetScissor)(CB_, 0, 0, 1920, 1080)); EQ(P(nvnCommandBufferSetScissor)(CB_, -4, 0, 70000, 8));
+        // A range a stage's table does not hold records nothing, either way (SetViewports with first -1 wrote S.vp[-1] at replay; a first near INT_MAX overflowed first + n)
+        size_t ln0; { P(nvnCommandBufferAddCommandMemory)(&ce, &mp, 0, sizeof m); P(nvnCommandBufferBeginRecording)(&ce); free(nvn_rec_linear(P(nvnCommandBufferEndRecording)(&ce), &ln0)); }
+        #define NONE(...) do { for (int k = 0; k < 2; k++) { size_t ln; g_rec_compact = !k; P(nvnCommandBufferAddCommandMemory)(&ce, &mp, 0, sizeof m); P(nvnCommandBufferBeginRecording)(&ce); __VA_ARGS__; \
+                free(nvn_rec_linear(P(nvnCommandBufferEndRecording)(&ce), &ln)); if (ln != ln0) { bad++; printf("out-of-range bind recorded at line %d (%s): %zu bytes\n", __LINE__, k ? "canonical" : "compact", ln); } } \
+            g_rec_compact = 1; } while (0)
+        NVNviewportSwizzle sw4[4] = {0};
+        NONE(P(nvnCommandBufferSetViewports)(CB_, -1, 1, vp)); NONE(P(nvnCommandBufferSetViewports)(CB_, 0x7fffffff, 1, vp)); NONE(P(nvnCommandBufferSetViewportSwizzles)(CB_, -1, 1, sw4));
+        NONE(P(nvnCommandBufferBindVertexBuffers)(CB_, -1, 1, r3)); NONE(P(nvnCommandBufferBindVertexBuffers)(CB_, 0x7fffffff, 2, r3));
+        NONE(P(nvnCommandBufferBindTextures)(CB_, NVN_SHADER_STAGE_FRAGMENT, -1, 1, th)); NONE(P(nvnCommandBufferBindTextures)(CB_, NVN_SHADER_STAGE_FRAGMENT, 0x7fffffff, 3, th));
+        NONE(P(nvnCommandBufferBindSeparateSamplers)(CB_, NVN_SHADER_STAGE_FRAGMENT, -2, 2, sh)); NONE(P(nvnCommandBufferBindImages)(CB_, NVN_SHADER_STAGE_FRAGMENT, 32, 1, ih));
+        NONE(h_nvnCommandBufferBindTexturesDeferred(CB_, NVN_SHADER_STAGE_FRAGMENT, -1, 1, th)); NONE(P(nvnCommandBufferBindTextures)(CB_, (NVNshaderStage)-1, 0, 1, th));
+        NONE(P(nvnCommandBufferBindUniformBuffer)(CB_, NVN_SHADER_STAGE_VERTEX, -1, 0x20000, 0x100)); NONE(P(nvnCommandBufferBindUniformBuffers)(CB_, (NVNshaderStage)-1, 0, 2, r3));
+        NONE(P(nvnCommandBufferBindStorageBuffer)(CB_, NVN_SHADER_STAGE_COMPUTE, 16, 0x40000, 0x1000)); NONE(P(nvnCommandBufferBindStorageBuffers)(CB_, NVN_SHADER_STAGE_COMPUTE, -1, 2, r3));
+        #undef NONE
         #undef EQ
         #undef CB_
         printf("(compact records: %d cases, %d smaller, %zu bytes saved)\n", cases, smaller, saved);
@@ -899,7 +913,7 @@ int main(void) {
 
     // 6. Sync / window / present
     NVNsync s1, s2; P(nvnSyncInitialize)(&s1, &dev); P(nvnSyncInitialize)(&s2, &dev);
-    EXPECT("wait on an unfenced sync = timeout (2)", 2, P(nvnSyncWait)(&s1, 0));
+    EXPECT("wait on a sync never fenced since Initialize = already signaled (0)", 0, P(nvnSyncWait)(&s1, 0));   // the console's driver initializes it signalled (docs/reference/nvn-objects.md)
     P(nvnQueueFenceSync)(&q, &s1, NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE, 0);
     EXPECT("wait after fence = already signaled (0)", 0, P(nvnSyncWait)(&s1, 0));
     NVNtexture sc[2]; NVNtextureBuilder tb; P(nvnTextureBuilderSetDevice)(&tb, &dev); P(nvnTextureBuilderSetDefaults)(&tb);
@@ -989,6 +1003,24 @@ int main(void) {
             EXPECT("MINIMAL_LAYOUT texels read back as written", 0, memcmp(px, back, bytes));
         }
         P(nvnTextureFinalize)(&mt[0]); P(nvnTextureFinalize)(&mt[1]); P(nvnMemoryPoolFinalize)(&mp);
+    }
+
+    // Packaged H/D/W nibbles describe physical pitch independently of API SPARSE.
+    {
+        NVNtextureBuilder b = {0}; NVNpackagedTextureLayout layout={{3,4,0,0,0,0,0,0}};
+        P(nvnTextureBuilderSetDevice)(&b,&dev);
+        P(nvnTextureBuilderSetDefaults)(&b); P(nvnTextureBuilderSetSize2D)(&b,2052,1026);
+        P(nvnTextureBuilderSetFormat)(&b,NVN_FORMAT_RGBA_ASTC_6x6); P(nvnTextureBuilderSetFlags)(&b,NVN_TEXTURE_FLAGS_IMAGE);
+        P(nvnTextureBuilderSetPackagedTextureLayout)(&b,&layout);
+        EXPECT("packaged width nibble reaches description",0x404,((tex_builder_t*)&b)->d.pkg_layout);
+        EXPECT("packaged full tiles use padded pitch",0x120000,P(nvnTextureBuilderGetStorageSize)(&b));
+        EXPECT("packaged pitch leaves public flags unchanged",NVN_TEXTURE_FLAGS_IMAGE,P(nvnTextureBuilderGetFlags)(&b));
+        NVNtextureSparseTileLayout sparse; P(nvnTextureBuilderGetSparseTileLayout)(&b,&sparse);
+        EXPECT("packaged pitch does not advertise sparse tiles",0,sparse.numTiledLevels);
+        layout.layout[1]=0; P(nvnTextureBuilderSetPackagedTextureLayout)(&b,&layout);
+        EXPECT("ordinary packaged pitch remains unpadded",0x102000,P(nvnTextureBuilderGetStorageSize)(&b));
+        P(nvnTextureBuilderSetPackagedTextureLayout)(&b,NULL);
+        EXPECT("clearing packaged layout clears width too",0,((tex_builder_t*)&b)->d.pkg_layout);
     }
 
     // 6c. Write-protected dirty pages: after a packaged texture is uploaded its pool pages are read-only; game write → page fault → mark dirty → re-upload on next use; a direct host read() write needs prepare first
@@ -1100,6 +1132,54 @@ int main(void) {
         }
         EXPECT("WriteTexels region write byte-identical to a whole-level round trip (15 cases)", 0, bad); EXPECT("WriteTexels region case count", 15, n);
         P(nvnMemoryPoolFinalize)(&wtp);
+    }
+
+    // 6c2b. WriteTexels into linear textures (LINEAR, LINEAR_RENDER_TARGET): rows of the texture's stride, the row padding and the bytes after the texture untouched, and ReadTexels gives
+    //       back what was written. The block-linear writes refuse a linear layout and the whole-level path dropped the write (a native-texture movie into LINEAR | VIDEO_DECODE drew black,
+    //       nxnative PR #1983). A region outside the rows is refused and writes nothing. A texture a view on its pool's buffer takes stays that view: no CPU-written texture is added
+    {
+        static uint8_t lmem[1 << 16] __attribute__((aligned(16384)));
+        static uint8_t want[1 << 16], src[1 << 14], back[1 << 14];
+        NVNmemoryPoolBuilder lb; NVNmemoryPool lpool; P(nvnMemoryPoolBuilderSetDevice)(&lb, &dev); P(nvnMemoryPoolBuilderSetDefaults)(&lb);
+        P(nvnMemoryPoolBuilderSetStorage)(&lb, lmem, sizeof lmem); P(nvnMemoryPoolBuilderSetFlags)(&lb, 0x24); P(nvnMemoryPoolInitialize)(&lpool, &lb);
+        struct { int flags, w, h, stride; int rg[4][4]; int strided; } cs[] = {
+            {NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_VIDEO_DECODE, 37, 5, 256, {{0, 0, 37, 5}, {3, 1, 10, 2}, {36, 4, 1, 1}, {0, 2, 37, 1}}, 0},
+            {NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET, 16, 16, 128, {{0, 0, 16, 16}, {5, 7, 9, 6}, {0, 15, 16, 1}, {15, 0, 1, 16}}, 1},
+        };
+        int bad = 0, n = 0, unwritten = 0, read_bad = 0, made_cpu = 0; uint32_t seed = 777;
+        for (unsigned c = 0; c < sizeof cs / sizeof cs[0]; c++) {
+            NVNtextureBuilder b; NVNtexture t; P(nvnTextureBuilderSetDevice)(&b, &dev); P(nvnTextureBuilderSetDefaults)(&b);
+            P(nvnTextureBuilderSetTarget)(&b, NVN_TEXTURE_TARGET_2D); P(nvnTextureBuilderSetFormat)(&b, NVN_FORMAT_RGBA8); P(nvnTextureBuilderSetFlags)(&b, cs[c].flags);
+            P(nvnTextureBuilderSetSize2D)(&b, cs[c].w, cs[c].h); P(nvnTextureBuilderSetStride)(&b, cs[c].stride);
+            P(nvnTextureBuilderSetStorage)(&b, &lpool, 0); P(nvnTextureInitialize)(&t, &b);
+            const tex_t *tt = (const tex_t *)&t; size_t span = tt->L.size + 512;   // the texture and the bytes after it
+            unsigned cpu0 = mtl_cpu_tex_count();
+            EXPECT("linear texture stride from the builder", cs[c].stride, (long long)tex_linear_row(tt));
+            for (size_t i = 0; i < span; i++) lmem[i] = (uint8_t)((seed = seed * 1103515245u + 12345u) >> 3);   // random old content
+            memcpy(want, lmem, span);
+            for (int k = 0; k < 4; k++) {
+                int x = cs[c].rg[k][0], y = cs[c].rg[k][1], w = cs[c].rg[k][2], h = cs[c].rg[k][3];
+                size_t sr = cs[c].strided ? (size_t)w * 4 + 12 : (size_t)w * 4;   // the strided case's source rows carry 12 bytes of padding
+                for (size_t i = 0; i < sr * (size_t)h; i++) src[i] = (uint8_t)((seed = seed * 1103515245u + 12345u) >> 5);
+                for (int r = 0; r < h; r++) memcpy(want + (size_t)(y + r) * (size_t)cs[c].stride + (size_t)x * 4, src + (size_t)r * sr, (size_t)w * 4);
+                NVNcopyRegion rg = {x, y, 0, w, h, 1};
+                if (cs[c].strided) P(nvnTextureWriteTexelsStrided)(&t, NULL, &rg, src, (ptrdiff_t)sr, 0); else P(nvnTextureWriteTexels)(&t, NULL, &rg, src);
+                n++; bad += memcmp(want, lmem, span) != 0;
+            }
+            NVNcopyRegion out = {0, cs[c].h - 1, 0, cs[c].w, 2, 1};   // a row past the last: refused, nothing written
+            memset(src, 0x5A, (size_t)cs[c].w * 8); P(nvnTextureWriteTexels)(&t, NULL, &out, src);
+            unwritten += memcmp(want, lmem, span) != 0;
+            NVNcopyRegion all = {0, 0, 0, cs[c].w, cs[c].h, 1};
+            P(nvnTextureReadTexels)(&t, NULL, &all, back);
+            for (int r = 0; r < cs[c].h; r++) read_bad += memcmp(back + (size_t)r * (size_t)cs[c].w * 4, want + (size_t)r * (size_t)cs[c].stride, (size_t)cs[c].w * 4) != 0;
+            made_cpu += (int)(mtl_cpu_tex_count() - cpu0);
+            P(nvnTextureFinalize)(&t);
+        }
+        EXPECT("WriteTexels into linear textures: rows of the stride, padding and the bytes after untouched (8 cases)", 0, bad); EXPECT("linear WriteTexels case count", 8, n);
+        EXPECT("WriteTexels into a linear texture past its rows writes nothing", 0, unwritten);
+        EXPECT("ReadTexels of a linear texture gives back what WriteTexels wrote (rows)", 0, read_bad);
+        EXPECT("linear textures viewed on their pool's buffer are not made CPU-written by WriteTexels", 0, made_cpu);
+        P(nvnMemoryPoolFinalize)(&lpool);
     }
 
     // 6c3. GPU copies stored into the destination's storage on the GPU (nvn_mtl.m gsb_store / gsb_store_buf, the streamer's level copies), run through the queue: a region of a level

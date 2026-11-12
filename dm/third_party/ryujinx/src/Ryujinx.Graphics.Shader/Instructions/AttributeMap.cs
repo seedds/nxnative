@@ -78,6 +78,10 @@ namespace Ryujinx.Graphics.Shader.Instructions
             Add(map, 0x2fc, AggregateType.S32, IoVariable.VertexId, StagesMask.Vertex, StagesMask.None);
             Add(map, 0x300, AggregateType.Vector4 | AggregateType.FP32, IoVariable.TextureCoord, StagesMask.TessellationGeometryFragment, StagesMask.VertexTessellationGeometry);
             Add(map, 0x3a0, AggregateType.Array | AggregateType.S32, IoVariable.ViewportMask, StagesMask.Fragment, StagesMask.VertexTessellationGeometry);
+            // nxnative: the pixel's barycentric coordinates (Mesa NAK's NAK_ATTR_BARY_COORD_NO_PERSP at 0x3a8, three words, and NAK_ATTR_BARY_COORD at 0x3b4, two:
+            // the third is 1 - x - y). The perspective pair is read like a perspective attribute, divided by w (InstEmitAttribute.EmitIpa)
+            Add(map, 0x3a8, AggregateType.Vector3 | AggregateType.FP32, IoVariable.BaryCoordNoPersp, StagesMask.Fragment, StagesMask.None);
+            Add(map, AttributeConsts.BaryCoordX, AggregateType.Vector3 | AggregateType.FP32, IoVariable.BaryCoord, StagesMask.Fragment, StagesMask.None, 1, AttributeConsts.BaryCoordX + 8);
             Add(map, 0x3fc, AggregateType.Bool, IoVariable.FrontFacing, StagesMask.Fragment, StagesMask.None);
 
             return map.AsReadOnly();

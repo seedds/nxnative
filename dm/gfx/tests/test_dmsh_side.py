@@ -4,6 +4,8 @@ import pathlib, shutil, subprocess, sys, tempfile, unittest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / 'tools'))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))   # its sibling test modules, also when the file runs alone (python -m unittest <file>, as CI does)
 import dmsh_side, pso_offline
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / 'ios/tools'))
+import ios_metal   # noqa: E402  (the iPhone's deployment target and math mode)
 from test_dmsh_logic import BASE   # noqa: E402
 
 ONE = BASE.split('\nstruct main0_out_u')[0] + '\n'
@@ -25,7 +27,7 @@ class Unit(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which('xcrun'), 'requires Metal compilers')
 class Cut(unittest.TestCase):
-    FLAGS = (('macosx', ()), ('iphoneos', ('-mios-version-min=18.0', '-fmetal-math-mode=relaxed')))
+    FLAGS = (('macosx', ()), ('iphoneos', tuple(ios_metal.IOS_FLAGS)))
 
     def compile(self, d, src, sdk, flags):   # → (the .air, the library)
         msl = d / 'u.metal'; air = d / f'{sdk}.air'; lib = d / f'{sdk}.metallib'; msl.write_text(src)

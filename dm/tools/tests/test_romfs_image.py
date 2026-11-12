@@ -159,6 +159,15 @@ class Images(unittest.TestCase):
         self.assertTrue(self.valid()); self.assertEqual(self.content('A'), b'upper')
         self.assertEqual(self.content('a'), b'lower')
 
+    def test_dump_tool_listings_are_left_out(self):   # an FTP dump's .listing in every folder (Nintendo Switch Sports Resort's dump): not a game file
+        (self.src / 'Parameter/P').mkdir(parents=True)
+        (self.src / 'Parameter/P/Body00.bgyml').write_bytes(b'b')
+        for d in ('', 'Parameter', 'Parameter/P'): (self.src / d / '.listing').write_bytes(b'-r--r--r-- 1 ftp ftp')
+        (self.src / '.other').write_bytes(b'o')   # another dot file is a game file
+        image.pack(self.src, self.dst)
+        self.assertTrue(self.valid())
+        self.assertEqual(sorted(image.read_index(self.dst)), ['.other', 'Parameter', 'Parameter/P', 'Parameter/P/Body00.bgyml'])
+
     def test_size_consistent_invalid_index_is_rejected(self):
         for raw in (image.HEAD.pack(image.MAGIC, 32, 0, 0),
                     image.HEAD.pack(image.MAGIC, 32, 24, 1) + image.ENT.pack(1, 0, 0, 0, 1, 0)):

@@ -276,7 +276,7 @@ HLE_FORCE("_ZN2nn3jit21DestroyJitEnvironmentENS0_9JitHandleE", "unload the plugi
         (unsigned long long)e->ncalls[3], (unsigned long long)e->ncalls[4]);
     if (e->plugin) {
         if (e->plugin->fini) ((void (*)(void))(e->plugin->base + e->plugin->fini))();
-        e->plugin->loaded = 0;
+        nro_unload_alone(e->plugin);   // the loader's: under its locks, with its check of stacks borrowing the plugin's data
         munmap((void *)e->rx, e->rx_size);
     }   // a served image stays mapped in the layout
     munmap((void *)e->ro, e->ro_size); if (g_jit_env == e) g_jit_env = NULL;

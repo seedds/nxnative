@@ -76,6 +76,16 @@ To enroll a cut for any game's own module:
   - FINAL FANTASY CRYSTAL CHRONICLES Remastered Edition: the 1.0.1 cheatslips file, anchored on the cartridge's `main`, compiles to exactly the hand-verified +0x43680 on 1.0.3 (12 of 12 cheats, 4 of 4 references each). The 1.0.3 file (5 ASM cheats with a code cave, 7 stat cheats, Mog's fatigue) compiles back to identical writes on 1.0.3 and to all 18 entries on the cartridge's build (code sites: 4 exact, 3 by body digest, 2 by window).
   - [13 Sentinels: Aegis Rim](../../dm/games/01003FC01670C000/README.md#cheats): a 1.10 Ryujinx list compiles back to identical writes and to 1.00, where every site lies 0x330 lower and the hook site was found by its body digest.
 
+## Thread registers
+
+### System register accesses through x18
+
+- **Symptom:** a crash (`sig=11`) in the patch area a few seconds into a run, at an `x18` site's load, with an address a little above a small stale value (`addr=0x33220`, the thread's `K18` slot at `0x33200`), shortly after the game read `tpidr_el0` into `x18`.
+- **Cause:** the guest's `x18` lives in the thread slot `K18`, since the Apple kernel may change the register at any instruction, and every `x18` site loads and stores the slot. The system register sites did not: `mrs x18, tpidr_el0` / `tpidrro_el0` put the value in the register only, `msr tpidr_el0, x18` stored the register into `KTLS`, and the gate for `mrs x18, cntpct_el0` / `cntvct_el0` wrote the saved `x18`, which `dm_gate` does not restore. The next `x18` site read whatever `K18` held before. `mrs x18, ctr_el0` stopped the rewrite with an assertion.
+- **Fix:** with `x18` as the register, the rewriter copies between thread slots (`site_slot_copy`: `KTLS` or `KTLR` into `K18`, `K18` into `KTLS`, the cache type constant into `K18`), carrying the value in `x15` with `x16` / `x17` for the slot addresses, all saved in the red zone; the value never passes through `x18`. The host's counter gate writes `K18` for a destination of `x18`. The other registers keep their blocks, so every other rewrite is byte-identical: none of 203 modules on hand has one of these instructions.
+- **Check:** `test_x18_sysreg.py` checks that no block names `x18`, and runs each block on a thread slot area with unicorn (optional); it fails without the fix.
+- **Found on:** The Hinokami Chronicles 2 (`0100AD80208A8000`, 1.70, SDK 22.0.0; not in the [games table](../../dm/games/README.md#games); [issue #2123](https://github.com/seedds/nxnative/issues/2123)): one `mrs x18, tpidr_el0` in `main`, at `+0x23f5ec0`. Its reporter's version of the fix ran 19 minutes into a battle; this one awaits their run.
+
 ## Jump tables
 
 ### Offset jump tables through x18 read at rewrite time
@@ -417,6 +427,13 @@ To enroll a cut for any game's own module:
 - **Fix:** the rewriter now sends every `sub sp, sp, xN` (extended-register form, no shift) through a stub that rounds xN up to 16 first (`site_sp_align`); the `add` then gives back the same amount. Compiled code keeps such sizes 16-aligned, so there it changes nothing. `insn_census.py` counts the sites as `sub sp, sp, xN`.
 - **Found on:** [Paper Mario: The Thousand-Year Door](../../dm/games/0100ECD018EBE000/README.md) `main` (its AngelScript call bridges).
 - **Check:** of the 22 games' modules on hand only this `main` has the form (6 sites), so every other rewrite is byte-identical.
+
+### Stack frames of an odd size: sub sp, sp, #imm
+
+- **Symptom:** `CRASH sig=10 addr=0 pc=main+0x4e8a18` on `str x1, [sp]` right after `sub sp, sp, #0x98`, with `sp` ending in `…8`; the game runs until its UI changes screen for the second time (Civilization VII's first-run options: Continue, then Continue or Back).
+- **Cause:** the same alignment rule as [Stack arguments reserved with sub sp, sp, xN](#stack-arguments-reserved-with-sub-sp-sp-xn), with an immediate. Civilization VII's `main` has four hand-written blocks (`main+0x4e8a14`, `+0x556914`, `+0x57e914`, `+0x57ec18`) that save x1–x17 in a 0x98-byte frame around `svc #0x29` (GetInfo with info type 0x55) and give it back with `add sp, sp, #0x98`; the frame leaves `sp` 8 bytes off. These eight are the only `sp` adjustments in its code that are not a multiple of 16.
+- **Fix:** `odd_sp_frames` in `patch_nso.py` rounds both immediates of such a pair up to 16 (0x98 → 0xa0), in place; a frame of 0xff1–0xfff rounds to 0x1000, which only the shifted immediate holds (`#1, lsl #12`; `sp_adjust`). It takes a pair only when the `add` with the same immediate follows within 64 instructions and every instruction between leaves `sp` alone, is a call or an `svc`, or loads / stores with `sp` as its only base, no writeback, inside the frame; a branch, another `sp` write, a copy of `sp` or an access past the frame leaves it as it was. `test_sp_frame.py` covers Civilization VII's block, aligned frames, calls inside a frame, an access past it, its last slot, writeback, a branch, a `ret`, a copy of `sp`, and a `sub` with no `add`, and the 0x1000 encoding.
+- **Found on:** Sid Meier's Civilization VII (`0100C3601518C000`, 1.5.0.1, provisional profile, no game note yet): 4 frames in `main`; its `sdk` and NRO have none. The host's GetInfo answers 0 for the unknown info type, so the block returns as it does on the console. With the rule the game got past the crash to its first-run Auto Save screen, and a 14-minute Mac session (49,800 frames) ended without a crash. The rule takes no frame in the `main`, `sdk` and `subsdk0` of The Legend of Zelda: Tears of the Kingdom (v393216) or METAL GEAR SOLID 4 (0100D0B01C4F4000, v1), so their rewrites are unchanged.
 
 ### System register reads that macOS traps
 

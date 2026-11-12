@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # The rewrites dmsh_build.py makes in a translated shader's MSL before it compiles it, where Metal or the translator falls short of what the Switch code does: precise
-# arithmetic (precise), memory barriers as fences (membar_fence, tg_fence), 64-bit products (mul_extended), Ampere's HMMA as simdgroup matrices (hmma_msl), first stores and shared-memory stores (first_store,
-# shared_store_msl), threadgroup memory past Metal's limit (tg_spill), texture gathers with offsets (gather_offsets), border colours Metal has no sampler state for
-# (border_emu) and a pixel shader's depth snapped to its position (frag_z_snap). Functions of the MSL text and the library ABI only, with no build state, so tests import
-# them. Part of the translation chain (dmsh_chain.FILES) and of every shader's cache key (dmsh_build.py CODE_FP).
+# arithmetic (precise), memory barriers as fences (membar_fence, tg_fence), 64-bit products (mul_extended), uniform words tested against constants, which the front end would
+# fold into switches (uniform_tests), Ampere's HMMA as simdgroup matrices (hmma_msl), first stores and shared-memory stores (first_store, shared_store_msl), threadgroup memory
+# past Metal's limit (tg_spill), texture gathers with offsets (gather_offsets), border colours Metal has no sampler state for (border_emu) and a pixel shader's depth snapped to
+# its position (frag_z_snap). Functions of the MSL text and the library ABI only, with no build state, so tests import them. Part of the translation chain (dmsh_chain.FILES)
+# and of every shader's cache key (dmsh_build.py CODE_FP).
 import bisect, collections, itertools, re
 import dmsh_abi as abi, dmsh_side
 
@@ -53,6 +54,39 @@ def mul_extended(msl):
     scalar = ''.join(f'template<typename T, typename U> static inline __attribute__((always_inline)) T spvMulExtended({t} l, {t} r) {{ {w} p = {w}(l) * {w}(r); return T{{U(p), U(p >> 32)}}; }}\n'
                      for t, w in (('uint', 'ulong'), ('int', 'long')))
     return msl[:found[0].end()] + scalar + msl[found[0].end():]
+
+# A game uniform word tested against integer constants, as the translator writes a GLSL switch (Ryujinx's structurizer: one test of the word per case, flags for the fall-throughs,
+# the cases nested in each other): bool _5 = as_type<int>((*spvDescriptorSet0.fp_c5)._m0[16].w) != 102. The Metal front end's SimplifyCFG (at -O1 too) folds a chain of blocks
+# that each hold only such a test of one value into a switch, whose cases jump into the nested blocks past their joins. Apple's GPU compiler then takes a pixel shader with dozens of
+# such switches for hours and tens of gigabytes (applegpu-nt, metal-tt 32023.922): Nintendo Switch Sports Resort's material pixel shader 692008b305ce264f (42 switches) ran past
+# 10 minutes and 13 GB alone where it had taken 7 s, and the Mac app's pipeline archive spent 15 hours on four pipelines. The reads were plain since the host pads a short binding
+# (dmsh_fetch.select_guards): before that, each read's bounds test sat in the test's block and nothing was folded. Each tested read becomes a volatile load of its word
+# (dm_uword), which the front end can neither merge with the next test's nor move out of its block, so no chain is folded; a uniform load per test is less than the bounds test
+# each read had then. Only words of the game's uniform slots (c3 and up) tested against a constant more than once: a single test is no chain, and the driver's banks (c0 to c2)
+# are left as written, since later rewrites look for their reads (dmsh_entry.vs_base_instance) and the host fills them. Returns the shader unchanged when there are none
+_UTEST_READ = r'as_type<(u?int)>\((\(\*spvDescriptorSet0\.[a-z]+_c(?:[3-9]|\d\d)\)\._m0\[\d+\])\.([xyzw])\)'   # game slots c3 and up, not the driver's banks
+_UTEST = re.compile(r'(?<![\w.])%s(?= [!=]= -?\d+u?(?![\w.]))|(?<=[!=]= )%s' % (_UTEST_READ, _UTEST_READ.replace('(u?int)', '(?P<t2>u?int)').replace(r'(\(\*', r'(?P<r2>\(\*').replace('([xyzw])', '(?P<c2>[xyzw])')))
+_UTEST_LEFT = re.compile(r'(?<![\w.])-?\d+u? [!=]= $')
+UWORD = ('#ifndef DM_UWORD\n#define DM_UWORD\ntemplate<typename T, int N> static inline __attribute__((always_inline)) T dm_uword(const constant vec<T, N>& v, int i) '
+         '{ return ((const volatile constant T*)&v)[i]; }\n#endif\n')
+def uniform_tests(msl):
+    if 'spvDescriptorSet0' not in msl or 'as_type<' not in msl: return msl
+    def parts(m):
+        if m.group(1): return m.group(1), m.group(2), m.group(3)
+        if not _UTEST_LEFT.search(msl, max(0, m.start() - 16), m.start()): return None   # [!=]= after something other than a constant
+        return m.group('t2'), m.group('r2'), m.group('c2')
+    found = [(m, p) for m in _UTEST.finditer(msl) for p in [parts(m)] if p]
+    tested = collections.Counter(r + c for _, (_, r, c) in found)
+    chains = {w for w, n in tested.items() if n > 1}
+    if not chains: return msl
+    out, at = [], 0
+    for m, (t, r, c) in found:
+        if r + c not in chains: continue
+        out += [msl[at:m.start()], 'as_type<%s>(dm_uword(%s, %d))' % (t, r, 'xyzw'.index(c))]; at = m.end()
+    body = ''.join(out) + msl[at:]
+    head = re.search(r'^using namespace metal;\n', body, re.M)
+    if not head: raise ValueError('uniform tests: no "using namespace metal;" to put dm_uword after')
+    return body[:head.end()] + UWORD + body[head.end():]
 
 # Ampere HMMA.16816 with an f16 accumulator (agl's upscaler networks, the NDVE video networks) reaches the MSL as calls of dmsh_hmma16816_f16(lane, block, A0..A3, B0, B1, C0, C1,
 # flags, A's LDSM address, A0..A3's offsets, A's row stride, out D1) → D0, the subgroup's 256-word block of the scratch shared memory as the last argument (InstEmitAmpereTensor.AHmma,

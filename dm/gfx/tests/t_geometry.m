@@ -443,7 +443,7 @@ static void replay(int mode) {
     p_draw d={.prim=0,.first=7,.count=kind==6?9000:3,.instances=2,.base_instance=5};
     if((kind>=1&&kind<=3)||kind==5) {
         int type=kind==5?1:kind-1;uint32_t ix[]={12,10,UINT32_MAX,11};
-        for(int i=0;i<4;i++)memcpy(commands+8192+(i<<type),ix+i,1<<type);
+        for(int i=0;i<4;i++)memcpy(commands+8192+(i<<type),ix+i,1<<type);   // NOLINT(clang-analyzer-unix.cstring.UninitializedRead): 1 << type is 1, 2 or 4 bytes of an initialized uint32_t (type 0 to 2), never 0
         p_prim_restart restart={1,UINT32_MAX};EMIT(OP_PRIM_RESTART,restart);
         p_draw_idx di={.prim=0,.itype=type,.count=4,.instances=2,.base_vertex=-3,.base_instance=5,.ibuf=(uint64_t)(commands+8192)};
         if(kind==5){uint32_t args[]={4,2,mode==17?16:0,(uint32_t)-3,5};memcpy(commands+16384,args,sizeof args);di.ind=(uint64_t)(commands+16384);if(mode==17)di.ibuf-=32;}
@@ -543,7 +543,7 @@ static void replay_local(int mode) {
     if((mode>=1&&mode<=3)||mode==5||mode>=7) {
         int type=mode>=7||mode==5?1:mode-1;uint32_t ix[]={mode==10?80:12,10,UINT32_MAX,11,mode==10?80:12,10};
         int index_count=mode>=9?6:4;
-        for(int i=0;i<index_count;i++)memcpy(commands+8192+(i<<type),ix+i,1<<type);
+        for(int i=0;i<index_count;i++)memcpy(commands+8192+(i<<type),ix+i,1<<type);   // NOLINT(clang-analyzer-unix.cstring.UninitializedRead): 1 << type is 1, 2 or 4 bytes of an initialized uint32_t (type 0 to 2), never 0
         if(mode==7||mode==8) {
             memcpy(commands+32768,commands+8192,8); memset(commands+8192,0,8);
             if(mode==7) { struct {uint64_t src,dst,n;} copy={(uint64_t)(commands+32768),(uint64_t)(commands+8192),8};EMIT(OP_COPY_B2B,copy); }

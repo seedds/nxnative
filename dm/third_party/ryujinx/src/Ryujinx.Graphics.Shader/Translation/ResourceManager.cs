@@ -507,6 +507,85 @@ namespace Ryujinx.Graphics.Shader.Translation
             return types;
         }
 
+        // nxnative: one texture read as an array by some instructions and as a plain texture by others. A handle has one binding, declared with one type: the declaration took the
+        // last instruction's and the descriptor the first accurate one's, and each instruction built its coordinates for its own, so a 2D read of a binding declared a 2D array had
+        // no layer (SPIRV-Cross then wrote `coord.z` of a float2, which Metal refuses: PRAGMATA, 24 pixel shaders, cb65542 handle 0x3041000E sampled with TEX 2D at level 0 and with
+        // TXD ARRAY_2D). The GPU reads the texture the handle names with the coordinates each instruction gives, and without a layer that is layer 0. So such a binding is an
+        // array for every instruction, and those that give no layer read layer 0. 1D and 2D only (a cube array's layer goes with the reference of a shadow read, and 3D has none);
+        // a level-of-detail query takes no layer either way. Runs once every function is translated (TranslatorContext)
+        public void UnifyArrayTypes(IReadOnlyList<Function> funcs)
+        {
+            Dictionary<SetBindingPair, List<TextureOperation>> ops = new();
+
+            foreach (Function func in funcs)
+            {
+                foreach (BasicBlock block in func.Blocks)
+                {
+                    foreach (INode node in block.Operations)
+                    {
+                        if (node is TextureOperation texOp && !texOp.Inst.IsImage() && (texOp.Flags & TextureFlags.Bindless) == 0 && texOp.Type != SamplerType.None)
+                        {
+                            SetBindingPair pair = new(texOp.Set, texOp.Binding);
+
+                            if (!ops.TryGetValue(pair, out List<TextureOperation> list))
+                            {
+                                ops.Add(pair, list = new());
+                            }
+
+                            list.Add(texOp);
+                        }
+                    }
+                }
+            }
+
+            foreach ((SetBindingPair pair, List<TextureOperation> list) in ops)
+            {
+                if (!Properties.Textures.TryGetValue(pair, out TextureDefinition definition) || definition.ArrayLength != 1)
+                {
+                    continue;   // an array of textures: its instructions' first source is the index
+                }
+
+                SamplerType kind = list[0].Type & SamplerType.Mask;
+                bool sameKind = list.TrueForAll(o => (o.Type & SamplerType.Mask) == kind && (o.Type & SamplerType.Multisample) == 0);
+                bool mixed = list.Exists(o => (o.Type & SamplerType.Array) != 0) && list.Exists(o => (o.Type & SamplerType.Array) == 0);
+
+                if (!sameKind || !mixed || kind is not (SamplerType.Texture1D or SamplerType.Texture2D))
+                {
+                    continue;
+                }
+
+                foreach (TextureOperation texOp in list)
+                {
+                    if ((texOp.Type & SamplerType.Array) != 0)
+                    {
+                        continue;
+                    }
+
+                    if (texOp.Inst == Instruction.TextureSample)
+                    {
+                        bool intCoords = (texOp.Flags & TextureFlags.IntCoords) != 0;
+
+                        texOp.InsertSource(texOp.Type.Dimensions, intCoords ? OperandHelper.Const(0) : OperandHelper.ConstF(0f));
+                    }
+
+                    texOp.Type |= SamplerType.Array;
+                }
+
+                Properties.AddOrUpdateTexture(new TextureDefinition(
+                    definition.Set, definition.Binding, definition.ArrayLength, definition.Separate, definition.Name, definition.Type | SamplerType.Array, definition.Format, definition.Flags));
+
+                foreach ((TextureInfo info, TextureMeta meta) in new List<KeyValuePair<TextureInfo, TextureMeta>>(_usedTextures))
+                {
+                    if (meta.Set == pair.SetIndex && meta.Binding == pair.Binding && meta.Type != SamplerType.None)
+                    {
+                        TextureMeta array = meta;
+                        array.Type |= SamplerType.Array;
+                        _usedTextures[info] = array;
+                    }
+                }
+            }
+        }
+
         private static TextureMeta MergeTextureMeta(TextureMeta meta, TextureMeta existingMeta)
         {
             meta.Set = existingMeta.Set;

@@ -323,7 +323,7 @@ def pack(a):
     if fonts: copy(fonts, dm / 'font', False)
     if a.env_file: shutil.copyfile(a.env_file, dm / 'env.txt')
     if a.settings: shutil.copyfile(a.settings, dm / 'launcher.json')
-    step('shader libraries'); msl_dst = res / 'msl' / (a.msl_name or msl.name); msl_dst.parent.mkdir(exist_ok=True); copy_msl(msl, msls, msl_dst, clone['msl'])
+    step('shader libraries'); msl_dst = res / 'msl' / (a.msl_name or shader_lib.name_of(msl)); msl_dst.parent.mkdir(exist_ok=True); copy_msl(msl, msls, msl_dst, clone['msl'])
     if aoc: step('add-on content'); copy([aoc], res / 'aoc', clone['aoc'])
     if pso: step('pipeline archive'); (res / 'pso').mkdir(); copy(pso, res / 'pso', clone['pso'])
     step('game files'); copy([romfs], res / ('romfs.img' if romfs.is_file() else 'romfs'), clone['romfs'])
@@ -333,7 +333,7 @@ def pack(a):
         rows = ['# The programs of this game (dm/mac/pack_app.py; hle_oe.c DM_PROGRAMS)',
                 '\t'.join(['0', 'exe=@C@/MacOS/dmhost', 'arg=@R@/dm', 'cwd=@S@', f'DM_ROMFS=@R@/{"romfs.img" if romfs.is_file() else "romfs"}', 'DM_MSL_DIR=@R@/msl'] + (['DM_NVN_SHMAP=@R@/dm/shader_map.tsv'] if (dm / 'shader_map.tsv').is_file() else []) + (['DM_PSO_BUNDLE=@R@/pso'] if pso else []))]
         for n, prom, pmsl, phtml, pmods, pmsls, ptables in programs:
-            step(f'program {n}'); pdm, pres, pm = dm / f'p{n}', res / f'p{n}', res / 'msl' / f'p{n}' / pmsl.name
+            step(f'program {n}'); pdm, pres, pm = dm / f'p{n}', res / f'p{n}', res / 'msl' / f'p{n}' / shader_lib.name_of(pmsl)
             for d in (pdm, pres, pm.parent): d.mkdir(parents=True)
             copy(pmods, pdm, can_clone(pmods[0], res)); copy(ptables, pdm, False); copy_msl(pmsl, pmsls, pm, can_clone(pmsls[0], res))
             copy([prom], pres / ('romfs.img' if prom.is_file() else 'romfs'), can_clone(prom, res))

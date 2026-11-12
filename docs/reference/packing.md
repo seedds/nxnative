@@ -238,6 +238,13 @@
 - **Measured** on an M4 Pro, every shader translated again (the chain changed), the Metal libraries from the cache: Octopath Traveler 0, 10,324 shaders, at most 405 files under `shader/` and `tmp/` (12 outside a build), 2:48 for the step (2:55 with batches of 4 × 128); Minecraft Dungeons II, 15,826 shaders, at most 3,279 with batches of 256 removed whole. Stopped with SIGKILL near the end of a compile: 40 files in `b-<chain>/` and 7 in `tmp/dmsh_*`; the next run cleared them and wrote the same library from the cache in 59 s. A partial build of 42 shaders for the Mac and the iPhone leaves one image each, also when run again over them.
 - **Found on:** [Minecraft Dungeons II](../../dm/games/0100A7C01B792000/README.md#found-on-this-game) and [Octopath Traveler 0](../../dm/games/01005270232F2000/README.md#found-on-this-game) builds, reported by the user.
 
+### A Mac app packed with the library's image names it `b-<chain>.img.img`
+
+- **Symptom:** the Mac app logs `[RED] shader library …/Contents/Resources/msl/b-<chain> (a folder or a .img file) does not exist` and then `failed to load shader` for its shaders. Its `msl/` holds `b-<chain>.img.img`, and its `Info.plist` has `DMChain` `<chain>.img`.
+- **Cause:** `pack_app.py --msl` takes a library as its folder or as its image (`shader_lib.py`), but named the app's copy after the path it was given. An image path kept its `.img`, and `copy_msl` writes the copy as `<name>.img`. The NSP script passes the folder's path, so only a hand-run `pack_app.py` given `shader/cache/b-<chain>.img` met it.
+- **Fix:** `dm/mac/pack_app.py` names the copy by `shader_lib.name_of`, as `is_chain_library` already reads it, for the first program and for the others (`--program`). `--msl-name` still sets another name.
+- **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md), a Mac app packed by hand from the build's `shader/cache/b-<chain>.img`. `test_nsp_mac_app.py` packs a library given as its image.
+
 ### A work folder holds millions of small files
 
 - **Symptom:** a game's `<id>-work` folder is too slow to count: Tears of the Kingdom's held 8,893,028 files and 509 GB, and its count ran past ten minutes.

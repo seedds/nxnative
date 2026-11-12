@@ -512,6 +512,17 @@ class App(unittest.TestCase):
         self.assertRegex(p['DMCommit'], r'^[0-9a-f]{12}(\+dirty)?$')   # the packing checkout (scripts/bug_report.py, the host's start line)
         self.assertEqual(p['DMChain'], '0123456789ab')   # the chain of the libraries packed (msl/b-<chain>)
 
+    def test_library_given_as_its_image(self):
+        # --msl naming the library's image (shader/cache/b-<chain>.img, as a build leaves it) packs it under the same name as its folder would: msl/b-<chain>.img, which the host opens
+        # (DM_MSL_DIR/b-<chain> or that + .img). Named after the path, it was msl/b-<chain>.img.img with DMChain <chain>.img, and the app's host found no shader library
+        lib = self.tmp / 'packed/b-0123456789ab'
+        shutil.copytree(self.tmp / 'cache/b-0123456789ab', lib)
+        self.assertTrue(pack_app.shader_lib.pack(str(lib), say=lambda s: None)); self.assertFalse(lib.exists())
+        app = self.tmp / 'Image.app'
+        with contextlib.redirect_stdout(io.StringIO()): pack_app.pack(types.SimpleNamespace(**{**vars(self.args), 'out': str(app), 'msl': str(lib) + '.img'}))
+        self.assertEqual([p.name for p in (app / 'Contents/Resources/msl').iterdir()], ['b-0123456789ab.img'])
+        self.assertEqual(plistlib.loads((app / 'Contents/Info.plist').read_bytes())['DMChain'], '0123456789ab')
+
     def test_packed_language_is_the_lists(self):   # --lang a game lacks: the Game language row's default (settings.py: the game's first), with or without the window
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as d:
             listed = Path(d) / 'launcher.json'

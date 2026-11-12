@@ -128,6 +128,7 @@ Its 37 kernels that correct samples, NDSR's network among them, gave about 0.25 
 
 ## Found on this game
 
+- [A clear pass on a large depth texture fails with `Insufficient Memory`](../../../docs/reference/memory.md#a-clear-pass-on-a-large-depth-texture-fails-with-insufficient-memory): resolved, its save load makes a 12288x12288 Depth16 (296 MB) and a 4096x4096 Depth32F, and on an M3 Pro the clear pass that zeroed them failed with `kIOGPUCommandBufferCallbackErrorOutOfMemory` and took the queue with it: about half the loads ended at the 32-failures stop (PR #2306). Depth textures are now zeroed by copies; the author's 203 runs on its build with copies (and a retry throttle not landed here) had no failure. Not seen on an M4 Pro.
 - [Regression shader compilations grow the normal build cache](../../../docs/reference/packing.md#regression-shader-compilations-grow-the-normal-build-cache): resolved in cache and harness tests. Its normal build's `cas.db` held 40.8 GB; future regression writes use a separate bounded cache, while the existing mixed cache is preserved.
 
 - [Draw passes that wait for each other again while images share memory](../../../docs/reference/frame-rate.md#draw-passes-that-wait-for-each-other-again-while-images-share-memory): resolved, `draw_barriers game` was off whenever family heaps existed, and fragment-only barriers forced full ones; M1 Max gameplay frame 23.4 → 21.7 ms.

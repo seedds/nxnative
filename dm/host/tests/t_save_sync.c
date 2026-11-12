@@ -360,6 +360,16 @@ int main(void) {
     CHECK(access(q, F_OK), "the reports leave no files behind");
 #undef REPORT
 
+    {   // (15) a pull's journal the start cannot put back (this device's folder is neither in place nor in the backups it names): the game's save mount stops rather than
+        // play on, commit and send a half-replaced save; the save and the journal are left as they were. With the journal gone, the mount goes on
+        char S15[1200], J[1300], A[1300]; snprintf(S15, sizeof S15, "%s/s15/save", root); mkd(S15);
+        snprintf(A, sizeof A, "%s/a", S15); put(A, "mine");
+        snprintf(J, sizeof J, "%s.pull", S15); put(J, "kept\t/nonexistent/backup\nfolder\t0\t2\t1\t1\nfolder\t1\t0\t0\t0\n");
+        CHECK(session(S15, NULL, NULL, NULL) != 0, "(15) the save mount stops");
+        CHECK(same(A, "mine") && exists(J), "(15) the save and the journal are left as they were");
+        unlink(J);
+        CHECK(session(S15, NULL, NULL, NULL) == 0 && same(A, "mine"), "(15) with no journal the mount goes on");
+    }
     printf("== save sync: %d checks, %d failed ==\n", checks, fails);
     if (!fails) { char c[1200]; snprintf(c, sizeof c, "rm -rf '%s'", root); system(c); }
     return fails != 0;

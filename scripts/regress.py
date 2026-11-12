@@ -87,6 +87,7 @@ def load_module(name, path):   # a module from a file (another script, or a tool
 bench = load_module('bench', REPO / 'scripts/bench.py')
 shader_regressions = load_module('shader_regressions', REPO / 'dm/gfx/tools/shader_regressions.py')
 usage = load_module('usage', REPO / 'dm/tools/usage.py')   # usage manifests and change impact (regress.py usage / impact)
+run_saves = load_module('run_saves', REPO / 'dm/tools/run_saves.py')   # cloud saves off in every run (run_env)
 proc_group = load_module('proc_group', REPO / 'dm/tools/proc_group.py')   # a heavy job in a process group of its own, stopped whole (run_heavy)
 tree_tar = load_module('tree_tar', REPO / 'dm/tools/tree_tar.py')   # a work folder's quiet folders as one file each, and an old revision's compile cache
 shader_cache = load_module('shader_cache', REPO / 'dm/tools/shader_cache.py')   # the per-game regression compile cache, with read-only reuse of the player's
@@ -1023,9 +1024,8 @@ def run_env(g, art, route, outdir, a):
         if not (prof / 'pso_pairs.tsv').is_file() and (g.build / 'shader/pso_pairs.tsv').is_file(): env['DM_PSO_PAIRS'] = str(g.build / 'shader/pso_pairs.tsv')
     if (g.build / 'aoc').is_dir(): env['DM_AOC_DIR'] = str(g.build / 'aoc')
     for kv in a.env: k, _, v = kv.partition('='); env[k] = v
-    if env.get('DM_SAVE_SYNC', '0') not in ('', '0') and any(kv.partition('=')[0] == 'DM_SAVE_SYNC' for kv in a.env):
-        raise HarnessError('--env DM_SAVE_SYNC: a run does not sync its save with a cloud (dm/host/tests/t_save_sync.c covers cloud saves)')
-    env['DM_SAVE_SYNC'] = '0'   # cloud saves off: one inherited from the shell would pull the player's cloud save into the route and send the run's over it (save_sync.c names the file by title ID)
+    try: run_saves.cloud_off(env, run_saves.asked(a.env))   # last, after every override: cloud saves off (dm/tools/run_saves.py)
+    except run_saves.CloudSync as e: raise HarnessError(f'--env {e}') from None
     return env, src_save
 
 

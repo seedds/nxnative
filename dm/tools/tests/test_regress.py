@@ -56,9 +56,11 @@ class Regress(unittest.TestCase):
             g = NS(id='0100000000000000', folder=root, build=root / 'build', kind='nvn', romfs=lambda: root / 'romfs')
             art = {'lib': root / 'lib', 'profile': root / 'profile'}
             route = {'save': 'new'}
-            with patch.dict(os.environ, DM_SAVE_SYNC=str(root / 'cloud')):
+            with patch.dict(os.environ, DM_SAVE_SYNC=str(root / 'cloud'), DM_SAVE_SYNC_CHOICE='cloud'):
                 env, src = regress.run_env(g, art, route, root / 'run', NS(env=[], no_hud=True))
                 self.assertEqual((env['DM_SAVE_SYNC'], env['DM_SAVE'], src), ('0', str(root / 'run/save'), None))
+                self.assertNotIn('DM_SAVE_SYNC_CHOICE', env)   # the player's answer to which save to keep
+                self.assertNotIn('DM_SAVE_SYNC_CHOICE', regress.run_env(g, art, route, root / 'run', NS(env=['DM_SAVE_SYNC_CHOICE=cloud'], no_hud=True))[0])
                 with self.assertRaises(regress.HarnessError): regress.run_env(g, art, route, root / 'run', NS(env=[f'DM_SAVE_SYNC={root}/cloud'], no_hud=True))
                 self.assertEqual(regress.run_env(g, art, route, root / 'run', NS(env=['DM_SAVE_SYNC=0'], no_hud=True))[0]['DM_SAVE_SYNC'], '0')
 

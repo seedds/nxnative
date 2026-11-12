@@ -50,7 +50,10 @@ int save_sync_report(const char *save, const char *title, const char *folder, in
 
 // ---- the host ----
 const char *dm_save_title(void);          // the title ID the cloud file is named after (hle_fs.c, from the game's profile): for a front end in the host's process (the iPhone launcher)
-void save_sync_mount(const char *save, const char *title);   // the game's first save mount (hle_fs.c): brings the cloud's save in when it is the one to keep, starts the sender
+// The game's first save mount (hle_fs.c): puts back this device's save from a pull of the cloud's that did not finish (<save>.pull, whatever DM_SAVE_SYNC says), then
+// brings the cloud's save in when it is the one to keep, and starts the sender. 0: the save may be mounted (whether or not the cloud's came in); -1: it may not, as this
+// device's save could not be put back whole (the log says where it is; the next start tries again). A second mount gets the first's answer
+int save_sync_mount(const char *save, const char *title);
 void save_sync_committed(void);           // a Commit went through (hle_fs.c, under its locks: it only wakes the sender)
 int save_sync_flush(int timeout_ms);      // sends now what was committed and not sent (the iPhone app going to the background): 1 = in step with the cloud, 0 = not (yet)
 int save_sync_after_exit(const char *save, const char *title);   // the Mac launcher once the host has exited (a crash included): 1 = in step, 0 = not

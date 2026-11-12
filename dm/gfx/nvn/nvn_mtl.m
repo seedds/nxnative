@@ -6073,7 +6073,7 @@ static MTL4FunctionDescriptor *fn4_of(id<MTLFunction> f) {
 static NSString *fd_label(MTL4FunctionDescriptor *given) {
     MTL4FunctionDescriptor *fd = [given isKindOfClass:MTL4SpecializedFunctionDescriptor.class] ? ((MTL4SpecializedFunctionDescriptor *)given).functionDescriptor : given;
     if (![fd isKindOfClass:MTL4LibraryFunctionDescriptor.class]) return @"-";
-    MTL4LibraryFunctionDescriptor *ld = (MTL4LibraryFunctionDescriptor *)fd; NSString *lib = objc_getAssociatedObject(ld.library, &g_lib_tag);
+    MTL4LibraryFunctionDescriptor *ld = (MTL4LibraryFunctionDescriptor *)fd; id<MTLLibrary> l = ld.library; NSString *lib = l ? objc_getAssociatedObject(l, &g_lib_tag) : nil;   // a descriptor without a library has no tag
     return lib ? ([lib hasSuffix:@".metallib"] ? lib.stringByDeletingPathExtension : lib) : ld.name ?: @"-";
 }
 // A function that declares function constants, specialized with cv (an empty set keeps every default). On the Metal 4 path the pipeline's descriptor specializes it (fn4_note

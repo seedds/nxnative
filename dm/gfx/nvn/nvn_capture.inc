@@ -271,12 +271,11 @@ static void cap_tex_read(const tex_t *t, int rec) {   // rec: named by a record 
                 // their content from the frame before was not captured, the replay made them empty, and the G-buffer differed from the live run in about 50 pixels (and
                 // a second replay from the first). Only for textures a record names: through the registry (even only those the GPU writes, or
                 // only those shared within the last 16 submissions) it reached about 19,500 textures (18.5 GB) in Breath of the Wild
-        alias_key ak; memset(&ak, 0, sizeof ak); ak.pool = (uint64_t)(uintptr_t)t->pool; ak.off = t->off; ak.d = t->d; ak.d.flags &= ~NVN_TEXTURE_FLAGS_IMAGE;
-        if (rec) { pthread_mutex_lock(&g_smu); o = hm_get_id(&g_alias, &ak); pthread_mutex_unlock(&g_smu); }
+        if (rec) { alias_key ak = tex_alias_key(t); o = own_alias_peek(&ak); }
     }
     nvn_hm_put(&g_cap_read, &t->serial, (void *)(uintptr_t)(!o && !rec ? 2 : 1));
     if (!seen) {   // how the replay layer holds it
-        pthread_mutex_lock(&g_smu); int live = nvn_hm_get(&g_tex_live, &t->serial) != NULL; pthread_mutex_unlock(&g_smu);
+        int live = own_tex_live(t->serial);
         int cpu = tex_cpu_written(t->serial) || ([o isKindOfClass:[NvPkg class]] && !t->has_layout);
         cap_tknd k = {*t, (live ? CAP_TK_LIVE : 0) | (cpu ? CAP_TK_CPU : 0), 0};
         if (k.kind) { cap_tex_enc(&k.t, "texture kind"); cap_buf_put(&g_cap_kind, &k, sizeof k); }

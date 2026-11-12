@@ -41,6 +41,29 @@ int main(void) { @autoreleasepool {
     // An upgrade asked through the view upgrades the parent; the view is made again on it
     id<MTLTexture> up2 = tex_upgrade(&srgb, view2, MTLTextureUsageRenderTarget, view2.pixelFormat);
     CHECK(up2.pixelFormat == MTLPixelFormatRGBA8Unorm_sRGB && up2.parentTexture == tex_mtl(&lin) && tex_mtl(&lin) != up && tex_mtl(&srgb) == up2, "an upgrade through the view upgrades the parent and keeps the pair sharing");
+    {   // A finalized sRGB texture resolved again (a replayed record): its view goes to the ghost ring. Its parent then leaves the sharing table: the next resolution takes the stale
+        // view's ghost entry (own_view_drop_stale) and makes the texture's own, and the held counts match the tables throughout
+        tex_t l2 = lin; l2.serial = 99511; l2.d.width = l2.d.height = 8; nvn_tex_layout(&l2.d, &l2.L);
+        tex_t s2 = l2; s2.serial = 99512; s2.d.format = NVN_FORMAT_RGBA8_SRGB;
+        mtl_tex_init(&l2); mtl_tex_init(&s2);
+        id<MTLTexture> p = tex_mtl(&l2), v = tex_mtl(&s2);
+        CHECK(p && v.parentTexture == p && serial_get(s2.serial) == v, "a live sRGB texture is a view of the shared linear one");
+        mtl_tex_release(&s2);
+        CHECK(!tex_get(s2.serial), "finalized: its live entry goes");
+        id<MTLTexture> gv = tex_mtl(&s2);
+        CHECK(gv.parentTexture == p && tex_get(s2.serial) == gv && !serial_get(s2.serial), "resolved again after its finalize: a view of the shared texture, in the ghost ring");
+        char why[256] = ""; pthread_mutex_lock(&g_smu); int ok = own_check_locked(why, sizeof why); pthread_mutex_unlock(&g_smu);
+        CHECK(ok, why);
+        alias_key ak = tex_alias_key(&l2);
+        pthread_mutex_lock(&g_smu); int gone = own_alias_del_locked(&ak); pthread_mutex_unlock(&g_smu);   // as a pool's finalize evicts it
+        CHECK(gone && tex_get(s2.serial) == gv, "the parent leaves the sharing table; the ghost entry still names the view");
+        id<MTLTexture> own = tex_mtl(&s2);
+        pthread_mutex_lock(&g_smu); int held = entry_holds((__bridge void *)gv); pthread_mutex_unlock(&g_smu);
+        CHECK(own && own != gv && !own.parentTexture && tex_get(s2.serial) == own && !held, "the next resolution drops the stale view and makes the texture's own, in its ghost entry");
+        pthread_mutex_lock(&g_smu); ok = own_check_locked(why, sizeof why); pthread_mutex_unlock(&g_smu);
+        CHECK(ok, why);
+        mtl_tex_release(&l2);
+    }
     printf("sRGB / linear aliases: %d checks, %d failed\n", checks, failed);
     return failed != 0;
 } }

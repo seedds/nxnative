@@ -8,12 +8,13 @@ On the Mac: a new game through Tom Nook's counter (name entry on the game's own 
 
 | Setting | Where | Why |
 |---|---|---|
-| `render_cond on` | [`game.tsv`](game.tsv) | the game wraps its clears in render conditions that skip a target nothing drew into since its last clear, as Tears of the Kingdom does ([0100F2C0115B6000](../0100F2C0115B6000/README.md)). Without the key, four clear-only passes wiped the composite before the window copy at frame 900, and every frame came out black (the island probe and the loading icon were drawn into render targets) |
 | `sys_resource 0x0` | `game.tsv` | the NPDM declares no system resource (META +0x14 = 0): `nninitStartup` sets a heap (3.09 GB) |
 | 4 GB layout: `mem_reserve 0x100000000`, `mem_alias 0x10000000`, `mem_stack 0x10000000`, `app_pool 0xCD500000` | `game.tsv` | 256 MB in front + 256 MB alias region + 256 MB stack region + 3.25 GB heap region |
 | `mem_used 0x7a00000` (122 MB) | `game.tsv` | the rewritten modules are larger than the default 64 MB of used memory (`main` alone is 63 MB of text and 15 MB of bss); the NSP script's guess after the rewrite, which leaves a 3.09 GB heap |
 | `pad_layout full` | `game.tsv` | the 3D layout: the D-pad holds the tool ring and the right stick turns the camera |
 | `shader_groups` `/Shader/` `/System/` `/Effect/` `/Model/` `/Layout/` `/Swkbd/` | `game.tsv` | see [Files and shaders](#files-and-shaders) |
+
+Render conditions, which the host evaluates for every game ([Conditional rendering evaluated at replay](../../../docs/reference/rendering.md#conditional-rendering-evaluated-at-replay); until 2026-11-12 the profile key `render_cond`): the game wraps its clears in render conditions that skip a target nothing drew into since its last clear, as Tears of the Kingdom does ([0100F2C0115B6000](../0100F2C0115B6000/README.md)). Without the key, four clear-only passes wiped the composite before the window copy at frame 900, and every frame came out black (the island probe and the loading icon were drawn into render targets).
 
 ## Rewriter
 

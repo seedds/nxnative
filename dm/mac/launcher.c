@@ -198,6 +198,7 @@ int main(int argc, char **argv) {
     snprintf(p, sizeof p, "%s/env.txt", dm); env_file(p);
     setenv("DM_ENV_FILE_KEYS", g_file_keys ? g_file_keys : "", 1); setenv("DM_ENV_LAUNCH_KEYS", g_launch_keys ? g_launch_keys : "", 1);
     free(g_file_keys); free(g_launch_keys);
+    setenv("DM_SAVE", save, 0);   // before the window: its cloud-save check compares this save with the cloud's (Launcher.swift SaveCheck)
     int window = !(getenv("DM_LAUNCHER") && !strcmp(getenv("DM_LAUNCHER"), "0"));
     for (int i = 1; i < argc; i++) if (!strcmp(argv[i], "--no-launcher")) window = 0;
     if (!window) fprintf(stderr, "launcher: no settings window (DM_LAUNCHER=0 or --no-launcher)\n");
@@ -205,7 +206,7 @@ int main(int argc, char **argv) {
     if (!shown) return 0;   // Quit: no game
     if (shown == 2) saved_choices();
     cloud_saves_folder();
-    setenv("DM_ROOT", sup, 0); setenv("DM_ROMFS", romfs, 0); setenv("DM_SAVE", save, 0); setenv("DM_TEMP", temp, 0);
+    setenv("DM_ROOT", sup, 0); setenv("DM_ROMFS", romfs, 0); setenv("DM_TEMP", temp, 0);
     snprintf(p, sizeof p, "%s/msl", res); setenv("DM_MSL_DIR", p, 0);
     snprintf(p, sizeof p, "%s/font", dm); setenv("DM_FONT_DIR", p, 0);
     snprintf(p, sizeof p, "%s/shader_map.tsv", dm); if (!stat(p, &st)) setenv("DM_NVN_SHMAP", p, 0);

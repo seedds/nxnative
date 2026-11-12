@@ -67,6 +67,7 @@ General changes first needed here; each applies to every game:
 - **Provisional profiles:** Unreal's 64 GB alias layout only with virtual address memory (`profile_guess.py`): [Unreal's engine address region](../../../docs/reference/memory.md#unreals-engine-address-region-and-its-options).
 - **NVN:** `nvnTextureBuilderGetSparseTileLayout` / `nvnTextureGetSparseTileLayout`: [The sparse tile layout of a texture](../../../docs/reference/nvn-objects.md#the-sparse-tile-layout-of-a-texture); every virtual pool with a range of its own until its first mapping decides: [Virtual pools of one texture each](../../../docs/reference/nvn-objects.md#virtual-pools-of-one-texture-each-mapped-before-and-after-the-texture); sparse textures' block height: [Sparse textures take the block height of their 64 KB tile](../../../docs/reference/rendering.md#sparse-textures-take-the-block-height-of-their-64-kb-tile).
 - **Audio:** the update lock without `SdkMutexType`: [No `SdkMutexType` in SDK 3](../../../docs/reference/audio.md#no-sdkmutextype-in-sdk-3).
+- **Shaders:** blocks on dither-fading trees on an M1, from a branch for each bounded uniform read: [Bounded uniform reads written as select](../../../docs/reference/shaders.md#bounded-uniform-reads-written-as-select).
 - **Frame rate:** Unreal console variables registered by inlined static constructors, from a page base made far before the name: [Unreal's frame limit and present interval, found by name](../../../docs/reference/frame-rate.md#unreals-frame-limit-and-present-interval-found-by-name).
 
 ## Open

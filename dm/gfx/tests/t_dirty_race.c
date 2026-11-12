@@ -35,7 +35,7 @@ static int g_fail;
     if (want_ != got_) g_fail++; \
 } while (0)
 
-static uint8_t *g_page; static _Atomic int g_armed, g_go, g_b_done;
+static uint8_t *g_page, *g_shared_write; static _Atomic int g_armed, g_go, g_b_done;
 static int g_publish_armed, g_observed_clean;
 static uint8_t *g_publish_page;
 static const volatile void *g_publish_gen;
@@ -50,7 +50,13 @@ static void t_before_store(const volatile void *object) {
 static void *thread_b(void *arg) { (void)arg; while (!atomic_load(&g_go)) usleep(200); prep_write(g_page, 16); atomic_store(&g_b_done, 1); return NULL; }
 int t_mprotect(void *a, size_t n, int prot) {
     if (prot == PROT_READ && atomic_exchange(&g_armed, 0)) { atomic_store(&g_go, 1); usleep(100000); }   // Before A's mprotect lands: let B in and wait until it runs to the end or gets stuck waiting
-    return mprotect(a, n, prot);
+    int result = mprotect(a, n, prot);
+    // A guest store after the first range opens a shared page, before the next range hashes it.
+    if (!result && prot == (PROT_READ | PROT_WRITE) && g_shared_write &&
+        (uintptr_t)g_shared_write >= (uintptr_t)a && (uintptr_t)g_shared_write < (uintptr_t)a + n) {
+        *g_shared_write = 9; g_shared_write = NULL;
+    }
+    return result;
 }
 
 // A page another thread is unprotecting (its mprotect to writable done and the new generation stored, the state still BUSY) must be waited out by nvn_dirty_protect and
@@ -139,6 +145,7 @@ static void open_close(size_t pg) {
     EXPECT("written while open: protected again", PG_PROT, atomic_load(&r->state[p0]));
     EXPECT("written while open: counted as written", 1, nvn_dirty_since(m, 16, stamp));
     EXPECT("the host's page: left writable", PG_NONE, atomic_load(&r->state[p0 + 1]));
+    // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection): nvn_dirty_close above released g_slot_mu, which nvn_dirty_open took (the analyzer does not follow the pair)
     int fd = open("/dev/zero", O_RDONLY); ssize_t n = read(fd, m + pg, 16); close(fd);
     EXPECT("the host's page: a file read after the close lands (no EFAULT)", 16, n);
     EXPECT("the host's page: counted as written", 1, nvn_dirty_since(m + pg, 16, stamp));
@@ -148,6 +155,26 @@ static void open_close(size_t pg) {
     m[2 * pg] = 1;   // protected again: a write faults and is seen
     EXPECT("unwritten page: a later write is seen", 1, nvn_dirty_since(m + 2 * pg, pg, later));
     nvn_dirty_remove_range(m); munmap(m, 3 * pg);
+}
+// Adjacent 4 KB-aligned pools share a 16 KB host page. Opening A makes B's bytes
+// writable too, before B takes its own hash. A write in that window must dirty B
+// even though B's own before/after hashes match. No game data or GPU is involved.
+static void open_shared_page(size_t pg) {
+    if (pg <= 4096) return;   // no shared host page for 4 KB-aligned pools
+    uint8_t *m = mmap(NULL, 3 * pg, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (m == MAP_FAILED) { perror("mmap"); g_fail++; return; }
+    size_t na = pg - 4096, nb = pg + 4096;
+    uint8_t *b = m + na;
+    nvn_dirty_add_range(m, na); nvn_dirty_add_range(b, nb);
+    uint64_t stamp = nvn_dirty_now();
+    nvn_dirty_protect(m, na); nvn_dirty_protect(b, nb);
+    nvn_dirty_open(m, 2 * pg); nvn_dirty_close();
+    EXPECT("shared page with no writes: B stays clean", 0, nvn_dirty_since(b, nb, stamp));
+    g_shared_write = b + 16;
+    nvn_dirty_open(m, 2 * pg); nvn_dirty_close();
+    EXPECT("the guest store reached B's shared-page bytes", 9, b[16]);
+    EXPECT("write while A opens: B's texture is dirty", 1, nvn_dirty_since(b, nb, stamp));
+    nvn_dirty_remove_range(b); nvn_dirty_remove_range(m); munmap(m, 3 * pg);
 }
 // A page another thread is unprotecting (BUSY, still read-only) when nvn_dirty_open looks: the buffer must not be made over it while it is read-only, so the open waits for it
 static void open_waits_busy(size_t pg) {
@@ -193,5 +220,6 @@ int main(void) {
     generation_publish(pg, 1);
     open_close(pg);
     open_waits_busy(pg);
+    open_shared_page(pg);
     printf("t_dirty_race: %s\n", g_fail ? "FAILED" : "all passed"); return g_fail != 0;
 }

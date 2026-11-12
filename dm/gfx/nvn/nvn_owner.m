@@ -66,6 +66,7 @@ static nvn_hmap g_tex_pins = {.klen = 8}, g_tex_pin_objects = {.klen = sizeof(ui
 
 int serial_table_holds(const void *o) { uintptr_t k = (uintptr_t)o; return nvn_hm_get(&g_by_serial_held, &k) != NULL; }
 int entry_holds(const void *o) { uintptr_t k = (uintptr_t)o; return serial_table_holds(o) || (g_ghost_held.n && nvn_hm_get(&g_ghost_held, &k)); }
+int own_ghost_holds_locked(const void *o) { uintptr_t k = (uintptr_t)o; return g_ghost_held.n && nvn_hm_get(&g_ghost_held, &k) != NULL; }
 int tex_object_pinned(id o) { uintptr_t key = (uintptr_t)(__bridge void *)o; return o && nvn_hm_get(&g_tex_pin_objects, &key) != NULL; }
 int own_object_free(id o) { pthread_mutex_lock(&g_smu); int r = !entry_holds((__bridge void *)o); pthread_mutex_unlock(&g_smu); return r; }
 
@@ -166,6 +167,7 @@ static void alias_put(const alias_key *k, id o, uint64_t seen) {   // an entry k
     if (!g_alias_set) g_alias_set = CFSetCreateMutable(NULL, 0, NULL);
     hm_put_id(&g_alias, k, o); alias_index(k, 1); CFSetAddValue(g_alias_set, (__bridge const void *)o); if (seen) alias_seen(k, seen);
 }
+uint64_t own_alias_seen_locked(const alias_key *k) { return (uint64_t)(uintptr_t)nvn_hm_get(&g_alias_seen, k); }
 id own_alias_get_locked(const alias_key *k) { return hm_get_id(&g_alias, k); }
 id own_alias_peek(const alias_key *k) { pthread_mutex_lock(&g_smu); id o = hm_get_id(&g_alias, k); pthread_mutex_unlock(&g_smu); return o; }
 void own_alias_put_locked(const alias_key *k, id o, uint64_t seen) { alias_put(k, o, seen); }
@@ -429,6 +431,19 @@ void own_each_locked(void (^fn)(uint64_t serial, id o, int ghost)) {
         if (!tables[j]->vals[i]) continue;
         uint64_t k; memcpy(&k, tables[j]->keys + (size_t)i * 8, 8); fn(k, (__bridge id)tables[j]->vals[i], j);
     }
+}
+uint32_t own_drop_where_locked(int (^gone)(id o), void (^each)(uint64_t serial)) {
+    uint32_t n = 0;
+    for (int j = 0; j < 2; j++) {   // the keys first, then the deletes (a delete moves entries)
+        nvn_hmap *t = j ? &g_ghost : &g_by_serial; uint64_t *ks = NULL; uint32_t nk = 0;
+        for (uint32_t i = 0; i < t->cap; i++) {
+            if (!t->vals[i] || !gone((__bridge id)t->vals[i])) continue;
+            uint64_t *nks = realloc(ks, (nk + 1) * sizeof *ks); if (!nks) ODIE("the dropped serials"); ks = nks; memcpy(&ks[nk++], t->keys + (size_t)i * 8, 8);
+        }
+        for (uint32_t i = 0; i < nk; i++) { if (j) ghost_del_locked(ks[i]); else live_del_locked(ks[i]); if (each) each(ks[i]); }
+        n += nk; free(ks);
+    }
+    return n;
 }
 static void expect_one(CFMutableDictionaryRef want, id o) {   // o, and each texture it is a view of, once more
     for (; o; o = [o respondsToSelector:@selector(parentTexture)] ? ((id<MTLTexture>)o).parentTexture : nil)

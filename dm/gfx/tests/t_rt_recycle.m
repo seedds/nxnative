@@ -92,11 +92,37 @@ int main(void) { @autoreleasepool {
         CHECK(tex_mtl(&g) && !tex_mtl(&g).heap, "a block-compressed texture (an asset, never rendered to) keeps its own allocation");
         mtl_tex_release(&e); mtl_tex_release(&f); mtl_tex_release(&g); mtl_alias_drop_pool(&cpu); mtl_alias_drop_pool(&pool); settle();
     }
-    unsigned before = waiting();
+    {   // memory pressure (mem_pressure_event, mem_trim): a warn does nothing on the Mac, a critical frees every waiting heap at the next submission's start, however fresh,
+        // and the idle upload slots' staging blocks
+        tex_t g = target(&pool, 95007, 0, 640, 360); mtl_tex_init(&g); id<MTLTexture> tg = tex_mtl(&g);
+        __weak id<MTLHeap> gh = tg.heap; tg = nil; mtl_tex_release(&g); mtl_alias_drop_pool(&pool); settle();
+        unsigned w0 = waiting(); uint64_t t0 = g_rh_trimmed;
+        CHECK(w0 == 3, "three heaps wait, one of them just freed (its target took a waiting heap and gave it back)");
+        size_t off; up_begin(); (void)up_alloc(1 << 20, &off); up_flush(); mtl_sub_commit(); mtl_drain(); dispatch_sync(g_feedback_q, ^{});   // a slot's staging block, its batch done
+        int slot_blocks = 0; for (int i = 0; i < 3; i++) slot_blocks += g_up_slot_blk[i] != nil;
+        CHECK(slot_blocks >= 1, "an upload slot keeps its staging block");
+        mem_pressure_event(1); mtl_sub_begin();
+        CHECK(TARGET_OS_IPHONE || waiting() == w0, "a warn leaves the Mac's waiting heaps alone");
+        mtl_sub_commit(); mtl_drain(); mem_pressure_event(2); mtl_sub_begin();
+        slot_blocks = 0; for (int i = 0; i < 3; i++) slot_blocks += g_up_slot_blk[i] != nil;
+        CHECK(waiting() == 0 && g_rh_trimmed == t0 + w0 && g_rh_bytes == 0, "a critical frees every waiting heap at the next submission's start");
+        CHECK(!gh || !resident(gh), "the fresh heap leaves the residency set too");
+        CHECK(slot_blocks == 0, "the idle upload slots give back their staging blocks");
+        CHECK(atomic_load(&g_mp_trims) == 1 && atomic_load(&g_mp_n[2]) == 1, "the trim is counted");
+        mtl_sub_commit(); mtl_drain(); mtl_sub_begin();
+    }
+    {   // the heaps of the checks below again
+        tex_t h[3]; unsigned hw[3] = {640, 1280, 160}, hh[3] = {360, 720, 90};
+        for (int i = 0; i < 3; i++) { h[i] = target(&pool, 95010 + i, (uint64_t)i << 23, hw[i], hh[i]); mtl_tex_init(&h[i]); (void)tex_mtl(&h[i]); }
+        for (int i = 0; i < 3; i++) mtl_tex_release(&h[i]);
+        mtl_alias_drop_pool(&pool); settle();
+        first_heap = nil;
+    }
+    unsigned before = waiting(); uint64_t trimmed0 = g_rh_trimmed;
     CHECK(before == 3, "three heaps wait");
     os_unfair_lock_lock(&g_rh_lk); for (unsigned i = 0; i < g_rh_n; i++) g_rh[i].t -= RH_IDLE_NS; os_unfair_lock_unlock(&g_rh_lk);
     mtl_sub_commit(); mtl_drain(); mtl_sub_begin();   // rh_trim
-    CHECK(waiting() == 0 && g_rh_trimmed == before && g_rh_bytes == 0, "heaps that waited too long are freed when a submission begins");
+    CHECK(waiting() == 0 && g_rh_trimmed == trimmed0 + before && g_rh_bytes == 0, "heaps that waited too long are freed when a submission begins");
     CHECK(!first_heap || !resident(first_heap), "and leave the residency set");
     {   // a same-pass feedback snapshot is placed in recycled memory, and its heap waits once the snapshot goes
         int fresh = 0; uint64_t made = g_rh_made; fb_cache_t *e = fb_snap(95007, 0, 0, MTLPixelFormatRGBA16Float, 640, 360, 1, &fresh);

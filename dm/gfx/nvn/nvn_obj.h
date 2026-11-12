@@ -295,6 +295,7 @@ void mtl_sub_index(const uint64_t *h, int n);   // Start of submission: build th
 void xv_test_counts(int *dc, int *viol);
 int mtl_gpu_span(uint64_t f, uint64_t *t0, uint64_t *t1);   // The frame's earliest GPUStart / latest GPUEnd (mach absolute time, ns); returns 0 if not all complete or there is no GPU time
 void mtl_stats(uint64_t *passes, uint64_t *draws);
+uint64_t mtl_dispatches(void);
 void mtl_args_stats(uint64_t *enc, uint64_t *reuse, uint64_t *patch);
 void mtl_use_stats(uint64_t *call, uint64_t *skip);
 uint64_t mtl_ds_omit(void);   // Cumulative number of passes with no depth attachment because the lookahead proved depth-stencil unused
@@ -320,6 +321,7 @@ void mtl_tex_release(tex_t *t);
 void mtl_tex_pin(uint64_t serial);
 void mtl_tex_unpin(uint64_t serial);
 void mtl_pkg_stats(uint64_t *uploads, uint64_t *reuploads);
+void mtl_spare_stats(uint64_t *held, uint64_t *trimmed, uint64_t *trimmed_mb);   // packaged textures holding a spare now; spares retired so far (spare_trim) and their MB
 unsigned mtl_cpu_tex_count(void);   // live textures the CPU writes (retired snapshots are excluded)
 uint64_t mtl_pkg_edge_skips(void);   // packaged texture checks that found only writes beside the texture (pkg_edges_clean)
 uint64_t mtl_pkg_miss(void);

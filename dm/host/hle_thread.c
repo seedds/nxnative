@@ -74,13 +74,14 @@ typedef struct thr {
     int closed, sync_refs;      // Reclaim only after handle close, thread exit and the final synchronization wait reference
     uint64_t nsvc;             // SVC count (for the state dump)
     uint64_t nyield, nyield_seen, nbackoff, nbackoff_seen;   // Yields (SleepThread 0/-1/-2) and those the back-off turned into short sleeps, with both counts at the last power report (dm_yield_top)
-    uint64_t nclkyield, nclkyield_seen;       // Yields of clock waits (thr_yield), and their count at the last power report
+    uint64_t nclkyield, nclkyield_seen, nclkyield_rep;       // Yields of clock waits (thr_yield), and their count at the last power report
     uint64_t nspin, nspin_seen, spin_site; const char *spin_mod;   // Spin wait passes (dm_spin_wait; those that yield count in nyield too) and where the last one was
     uint64_t srun_svc, srun_t0, spin_ret;     // Current spin wait: nsvc at its passes, when it began, when the last pass returned
     uint64_t cpu_seen_us;                     // CPU time (µs) at the last power report (dm_thread_cpu)
     uint64_t yrun_svc, yrun_t0, yrun_sig, yrun_sig2, poll_ret;   // Current run of yields: nsvc of the last yield, when the run began, and the caller's x19–x28 at the last two yields (a run lasts while no other SVC comes between two yields and those registers match one of the last two, thr_yield); when the last yield or short timed-out wait returned (poll_wait_begin)
     uint64_t yrun_clk;                        // dm_clock_reads at the last yield: a pass that read the clock since makes the yield a clock wait (thr_yield)
     uint64_t cw_sig, cw_run, cw_last, cw_end, cw_per, cw_per2, cw_wake, ncwpred, ncwpred_seen;   // The clock wait followed (clock_wait): its x19–x28, the run it was last seen in, when its last yield returned,
+    uint64_t ncwfirst, cw_late_sum, cw_late_max, ncwfirst_seen, ncwpred_rep, cw_late_seen;   // predicted sleeps whose wait had ended at the first poll after them, how late those sleeps woke (sum, max), at the last report (dm_clock_top)
     int cw_ok, cw_pred, cw_after, cw_trip;    // when its last wait ended, the last two periods between ends, when the predicted sleep ended, predicted sleeps (and at the last power report); periods in a row that matched, a predicted sleep in this run, yields after it, waits in a row that ended at the first poll after it
     mach_port_t mport;         // Host thread port (to get CPU time)
     _Atomic int qos_pending;   // SetThreadPriority from another thread changed prio: the thread applies the new class at its next SVC (only a thread can set its own QoS)
@@ -862,6 +863,7 @@ static void clock_wait(thr_t *me, uint64_t sig, uint64_t now, int predict) {
             if (me->cw_sig && now - me->cw_last < 1000000000ull) { yield_for(me, now - me->yrun_t0, 1); return; }   // another clock wait: the followed loop is still in use
             me->cw_sig = sig; me->cw_end = me->cw_per = me->cw_per2 = 0; me->cw_ok = me->cw_pred = me->cw_trip = 0;
         } else {
+            if (me->cw_pred && !me->cw_after) me->ncwfirst++;
             if (me->cw_pred && !me->cw_after) {   // the last wait ended at the first poll after its predicted sleep: maybe late
                 // once: the period learned from waits the back-off ended carries their lateness (up to 250 µs, and nanosleep's quarter): predict it shorter;
                 // twice in a row: the period changed, learn it again
@@ -880,7 +882,9 @@ static void clock_wait(thr_t *me, uint64_t sig, uint64_t now, int predict) {
             uint64_t per = me->cw_per2 && me->cw_per2 < me->cw_per ? me->cw_per2 : me->cw_per, dl = me->cw_end + per;   // the shorter of the last two periods
             if (dl > now + 2 * CW_MARGIN) {
                 me->nbackoff++; me->ncwpred++; me->sleeping = 1; sleep_precise(dl - CW_MARGIN); me->sleeping = 0;
-                me->cw_pred = 1; me->cw_wake = now_ns(); return;
+                me->cw_pred = 1; me->cw_wake = now_ns();
+                { uint64_t late = me->cw_wake > dl - CW_MARGIN ? me->cw_wake - (dl - CW_MARGIN) : 0; me->cw_late_sum += late; if (late > me->cw_late_max) me->cw_late_max = late; }
+                return;
             }
         }
     } else if (me->cw_pred) {   // polling after the predicted sleep
@@ -973,6 +977,21 @@ void dm_yield_top(char *out, size_t n) {
     }
     pthread_mutex_unlock(&G);
     if (!o && n) snprintf(out, n, "none");
+}
+// The threads that made most clock waits since the last call (the power line every 300 frames, hle_nvn.c), at most two: "handle name: N yields, M predicted sleeps (ended at the first
+// poll after it K; the sleeps woke late by mean / max µs), period P ms". A wait that had ended by the first poll after its predicted sleep was slept through: it ended before the sleep did
+void dm_clock_top(char *out, size_t n) {
+    thr_t *top[2] = {0}; uint64_t c[2] = {0};
+    pthread_mutex_lock(&G);
+    for (thr_t *t = g_all; t; t = t->all) { uint64_t k = t->nclkyield - t->nclkyield_rep; if (k > c[0]) { top[1] = top[0]; c[1] = c[0]; top[0] = t; c[0] = k; } else if (k > c[1]) { top[1] = t; c[1] = k; } }
+    size_t o = 0; char nb[32]; if (n) out[0] = 0;
+    for (int i = 0; i < 2 && top[i] && o < n; i++) { thr_t *t = top[i];
+        uint64_t pr = t->ncwpred - t->ncwpred_rep, fi = t->ncwfirst - t->ncwfirst_seen, ls = t->cw_late_sum - t->cw_late_seen;
+        o += snprintf(out + o, n - o, "%s%#x '%s' %llu yields, %llu predicted sleeps (wait over at the first poll after it %llu; woke late by %.0f / %.0f us), period %.2f ms", i ? ", " : "", t->handle, thr_name(t, nb, sizeof nb),
+                      (unsigned long long)c[i], (unsigned long long)pr, (unsigned long long)fi, pr ? ls / 1e3 / (double)pr : 0.0, t->cw_late_max / 1e3, t->cw_per / 1e6);
+    }
+    for (thr_t *t = g_all; t; t = t->all) { t->nclkyield_rep = t->nclkyield; t->ncwpred_rep = t->ncwpred; t->ncwfirst_seen = t->ncwfirst; t->cw_late_seen = t->cw_late_sum; t->cw_late_max = 0; }
+    pthread_mutex_unlock(&G);
 }
 // CPU time of the guest threads since the last call, by Switch priority band (<= 44: the main thread's level and above; 45-59; >= 60) and the three busiest threads with their priority.
 // For the power line (hle_nvn.c power_line): it shows which threads a priority-to-QoS mapping would move and how much CPU they use. secs = the window length

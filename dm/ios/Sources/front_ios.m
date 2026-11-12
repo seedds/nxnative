@@ -18,6 +18,7 @@
 void dm_gamepad_active(void);
 #import "DmLayout.h"
 #import "DmGameMenu.h"
+#import "DmRotation.h"
 
 void front_ios_boot(void);
 int front_ios_boot_ok(void);
@@ -96,6 +97,24 @@ static void tv_attach(void);
 @end
 static DmRootVC *g_root;
 static CGFloat g_picture_aspect = DM_PICTURE_16_9;   // the presented picture's width / height (front_picture_shape); main thread
+// The game view's shape for a profile with screen_aspect any (front.h front_view_aspect, dm_screen_view_changed): the shape of the picture's area (DmLayout.h DmLayout.area), so
+// the game renders the space it is shown in with no bars: in landscape the app window (an iPad's 1.43, an iPhone's 2.17, a window under Stage Manager), upright the part above the
+// touch controls (an iPhone 17's 402x375 points, 1.07) or, with a controller, the whole safe area; on a TV the TV's. A change is handed to the host once the layout has settled for 300 ms
+static _Atomic double g_view_aspect; static uint64_t g_view_change;   // g_view_change: main thread
+double front_view_aspect(void) { return g_view_aspect; }
+static void view_shape(CGSize sz, int notify) {
+    if (sz.width <= 0 || sz.height <= 0) return;
+    double a = sz.width / sz.height; if (a == g_view_aspect) return;
+    g_view_aspect = a; if (!notify) return;
+    uint64_t n = ++g_view_change;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 300 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{ if (n == g_view_change) dm_screen_view_changed(a); });
+}
+// Portrait layout (DM_PORTRAIT_LAYOUT): full (the default) or split. Full screen needs a picture that takes the screen's shape: a profile with screen_aspect any following the view
+// (DM_SCREEN_ASPECT auto); any other picture stays above the controls, where a 16:9 one centred on an upright screen would sit under them
+static BOOL portrait_full(void) {
+    const char *a = getenv("DM_SCREEN_ASPECT"), *p = getenv("DM_PORTRAIT_LAYOUT");
+    return DM_GAME_SCREEN_ASPECT == 2 && (!a || !*a || !strcmp(a, "auto")) && !(p && !strcmp(p, "split"));
+}
 static void launcher_done(void) { [g_root startGame]; }
 @implementation DmRootVC
 - (void)loadView { self.view = [DmRootView new]; }
@@ -154,12 +173,15 @@ static void launcher_done(void) { [g_root startGame]; }
         // takes 1.3 to 1.77), else 16:9. The window's, not the screen's: on an iPad under Stage Manager or Split View the app does not fill the screen. Resolved here, before the
         // host writes the state page (main.c dm_fps_state_apply)
         const char *a = getenv("DM_SCREEN_ASPECT");
-        if (a && !strcmp(a, "auto")) {
+        if (DM_GAME_SCREEN_ASPECT == 2) {   // a profile whose stubs take any shape (screen_aspect any) follows the picture's area, wider or taller (loader.c, front_view_aspect):
+            // the layout pass below sets it (viewDidLayoutSubviews), before the host starts
+        } else if (a && !strcmp(a, "auto")) {
             CGSize sz = self.view.window ? self.view.window.bounds.size : UIScreen.mainScreen.bounds.size; double r = MAX(sz.width, sz.height) / MAX(MIN(sz.width, sz.height), 1);
             char v[16]; if (r >= 1.3 && r < 1.77) snprintf(v, sizeof v, "%.3f", r); else strcpy(v, "0");
             setenv("DM_SCREEN_ASPECT", v, 1); LOG("front end: picture shape auto: window %.0fx%.0f points (%.3f:1) → DM_SCREEN_ASPECT=%s", sz.width, sz.height, r, v);
         }
     }
+    dm_rotation_set(NULL);   // the launcher's pick (Play put it in the environment), a saved one with DM_LAUNCHER=0, or an env file's
     self.fill = dm_picture_fill(getenv("DM_PICTURE_FIT"));
     if (self.fill) LOG("front end: picture Fill (DM_PICTURE_FIT=fill), the 16:9 picture covers the screen in landscape and its edges are cropped");
     self.view.clipsToBounds = YES;   // with Fill the game view is larger than the screen
@@ -196,10 +218,14 @@ static void launcher_done(void) { [g_root startGame]; }
     BOOL duoPortrait = b.size.height > b.size.width && (self.hingeStatus != 0 || !CGRectIsNull(division));
     UIEdgeInsets gameInsets = dm_game_safe_insets(b, self.view.safeAreaInsets, duoPortrait);
     BOOL onTV = self.game.superview != self.view;   // the TV's view lays the picture out; the phone is all pad
-    DmLayout layout = onTV ? dm_layout_pad_only(b) : dm_layout_picture(dm_layout(b, gameInsets, self.partiallyOpen, division, g_picture_aspect), b, self.fill, g_picture_aspect);
+    DmLayout layout = dm_layout(b, gameInsets, self.partiallyOpen, division, g_picture_aspect);
+    if (portrait_full()) layout = dm_layout_full_picture(layout, b, self.partiallyOpen, division, g_picture_aspect);
+    else if (dm_gamepad_off(self.pad)) layout = dm_layout_controls_hidden(layout, b, gameInsets, self.partiallyOpen, division, g_picture_aspect);
+    layout = onTV ? dm_layout_pad_only(b) : dm_layout_picture(layout, b, self.fill, g_picture_aspect);
+    view_shape(onTV ? self.game.superview.bounds.size : layout.area.size, 1);
     if (!onTV) self.game.frame = layout.game;
     layout.topSafeOnly = duoPortrait;
-    NSString *line = [NSString stringWithFormat:@"%@, hinge %ld%s, divisions %@, picture %@, controls %@", onTV ? @"pad only (picture on the TV)" : layout.separated ? @"split" : self.fill ? @"overlay, Fill" : @"overlay",
+    NSString *line = [NSString stringWithFormat:@"%@, hinge %ld%s, divisions %@, picture %@, controls %@", onTV ? @"pad only (picture on the TV)" : layout.separated ? (CGRectIntersectsRect(layout.game, layout.controls) ? @"portrait full screen, controls over the picture" : @"split") : self.fill ? @"overlay, Fill" : @"overlay",
                       (long)self.hingeStatus, self.partiallyOpen ? " (half open)" : "", regionLog, NSStringFromCGRect(layout.game), NSStringFromCGRect(layout.controls)];
     if (![line isEqualToString:self.layoutLog]) { self.layoutLog = line; LOG("front end: layout %s", line.UTF8String); }
     self.pad.frame = b;
@@ -229,9 +255,42 @@ static void launcher_done(void) { [g_root startGame]; }
 - (BOOL)prefersHomeIndicatorAutoHidden { return YES; }
 - (UIRectEdge)preferredScreenEdgesDeferringSystemGestures { return UIRectEdgeAll; }   // Edge gestures need two swipes, to avoid accidental exits
 - (BOOL)prefersStatusBarHidden { return YES; }
-- (UIInterfaceOrientationMask)supportedInterfaceOrientations { return UIInterfaceOrientationMaskAll; }
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations { return dm_rotation_vc_mask(); }
 @end
 UIViewController *front_ios_root(void) { return [DmRootVC new]; }
+
+// Rotation (DM_ROTATION; DmRotation.h, DmLayout.h dm_rotation_mask). The phone's Info.plist lists only the two landscapes (the Duo's inner display follows its bounds) and the iPad's
+// all four; the app delegate (main.m) answers with this, which replaces that list, so portrait can be chosen on a phone too while auto keeps each device's list
+UIInterfaceOrientationMask dm_rotation_vc_mask(void) { return dm_rotation_mask(getenv("DM_ROTATION"), UIInterfaceOrientationMaskAll); }
+static UIInterfaceOrientationMask plist_orientations(void) {
+    NSArray *list = nil;
+    if (UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad) list = [NSBundle.mainBundle objectForInfoDictionaryKey:@"UISupportedInterfaceOrientations~ipad"];
+    if (![list isKindOfClass:NSArray.class]) list = [NSBundle.mainBundle objectForInfoDictionaryKey:@"UISupportedInterfaceOrientations"];
+    UIInterfaceOrientationMask m = 0;
+    if ([list isKindOfClass:NSArray.class]) for (id o in list) {
+        if ([o isEqual:@"UIInterfaceOrientationPortrait"]) m |= UIInterfaceOrientationMaskPortrait;
+        else if ([o isEqual:@"UIInterfaceOrientationPortraitUpsideDown"]) m |= UIInterfaceOrientationMaskPortraitUpsideDown;
+        else if ([o isEqual:@"UIInterfaceOrientationLandscapeLeft"]) m |= UIInterfaceOrientationMaskLandscapeLeft;
+        else if ([o isEqual:@"UIInterfaceOrientationLandscapeRight"]) m |= UIInterfaceOrientationMaskLandscapeRight;
+    }
+    return m ? m : UIInterfaceOrientationMaskAll;
+}
+UIInterfaceOrientationMask front_ios_app_orientations(void) { return dm_rotation_mask(getenv("DM_ROTATION"), plist_orientations()); }
+void dm_rotation_set(const char *value) {
+    if (value) setenv("DM_ROTATION", value, 1);
+    const char *now = getenv("DM_ROTATION"); if (!now || !*now) now = "auto";
+    static char was[16]; if (strcmp(was, now)) { snprintf(was, sizeof was, "%s", now); LOG("front end: rotation %s (DM_ROTATION)", now); }
+    UIInterfaceOrientationMask m = front_ios_app_orientations() & dm_rotation_vc_mask();
+    for (UIScene *sc in UIApplication.sharedApplication.connectedScenes) {
+        if (![sc isKindOfClass:UIWindowScene.class] || ![sc.session.role isEqualToString:UIWindowSceneSessionRoleApplication]) continue;   // not a TV's
+        UIWindowScene *ws = (UIWindowScene *)sc;
+        for (UIWindow *w in ws.windows) for (UIViewController *vc = w.rootViewController; vc; vc = vc.presentedViewController) [vc setNeedsUpdateOfSupportedInterfaceOrientations];
+        // UIKit turns a window whose orientation the new mask leaves out only when asked: a lock chosen while upright turns the screen at once
+        if (m && !(m & (1u << ws.effectiveGeometry.interfaceOrientation)))
+            [ws requestGeometryUpdateWithPreferences:[[UIWindowSceneGeometryPreferencesIOS alloc] initWithInterfaceOrientations:m] errorHandler:^(NSError *e) {
+                LOG("front end: rotation %s: the window did not turn (%s)", now, e.localizedDescription.UTF8String); }];
+    }
+}
 
 // A TV (cable or AirPlay): iOS gives the app the TV as a scene of its own instead of mirroring the phone. The game's view moves there, 16:9 fills the TV, and the game is
 // docked as a Switch on its dock (1080p, the operation mode change notification); the phone keeps the pad. Unplugging puts the view back and the mode the game had before
@@ -285,6 +344,8 @@ bool dm_setting_live(const char *env, const char *value) {
         dm_set_opmode(m); dm_gamepad_opmode_changed(); LOG("front end: console mode %s (in-game menu)", m ? "docked" : "handheld");
         return true;
     }
+    if (!strcmp(env, "DM_ROTATION")) { if (value) dm_rotation_set(value); return true; }
+    if (!strcmp(env, "DM_PORTRAIT_LAYOUT")) { if (value) { [g_root.view setNeedsLayout]; LOG("front end: portrait layout %s (in-game menu)", value); } return true; }
     if (!strcmp(env, "DM_SHOW_FPS")) { if (value) [g_root showFPS:atoi(value) != 0]; return true; }
     if (!strcmp(env, "DM_TOUCH_HAPTICS")) { if (value) dm_gamepad_touch_feedback(atoi(value) != 0); return true; }
     if (!strcmp(env, "DM_RUMBLE")) { if (value) { dm_haptics_set_enabled(atoi(value) != 0); LOG("front end: game rumble %s (in-game menu)", atoi(value) ? "on" : "off"); } return true; }

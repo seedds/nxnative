@@ -52,6 +52,7 @@ static void upload_all(upl *u, int n, uint64_t *made, unsigned *batches) {
 }
 
 int main(void) { @autoreleasepool {
+    setenv("DM_NVN_UPLOAD_SRC_MB", "0", 1);   // no budget on an upload batch's reads (up_big_src): only staging splits the batches here; t_upload_budget tests the budget
     mtl_init();
     CHECK("GPU deswizzle is available", g_nvn_deswz_gpu);
     uint8_t *mem = mmap(NULL, POOL_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);

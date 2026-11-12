@@ -27,6 +27,12 @@ void front_screen_match(int fps);
 // lays the picture out in that shape instead of 16:9, so a profile with screen_aspect under DM_SCREEN_ASPECT (1920x1344) fills a 1.43:1 screen and touches map onto the picture
 // as drawn. Before the first call the picture is 16:9. Called from the present thread; the front end switches to its main thread and does not block
 void front_picture_shape(int w, int h);
+// The game view's width / height (front_mac.m: the window's content view; front_ios.m: the app window), 0 when there is no view (a run with no window). Any thread. A profile with
+// screen_aspect any renders this shape under DM_SCREEN_ASPECT auto (loader.c)
+double front_view_aspect(void);
+// The front end's game view changed shape (loader.c): a profile with screen_aspect any under DM_SCREEN_ASPECT auto renders the new shape. Called from the main thread once a resize
+// has settled, not for every step of a live resize
+void dm_screen_view_changed(double aspect);
 // Progress screen of the first-start prepare step (nvn_mtl.m warm_prepare: "Preparing shaders" while the pipelines of the prewarm lists are built before the game's first frame):
 // title and done of total shown over the game's view (a dark screen, the title, a bar and a count), updated on each call; title NULL hides it. Any thread; the front end switches to its main
 // thread and does not block. Nothing is shown without a window

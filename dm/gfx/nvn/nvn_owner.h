@@ -127,6 +127,9 @@ int own_note_at(uint64_t gen, uint64_t *serial);                 // the serial n
 typedef struct { uint32_t live, live_cap, ghost, retire_wait; uint64_t ghost_puts; } own_stats;
 own_stats own_stats_locked(void);
 void own_each_locked(void (^fn)(uint64_t serial, id o, int ghost));
+// Every entry, live or ghost, whose object gone() names goes (each serial noted, its ring slot freed, its object dropped as serial_del drops it); each(serial) is told of
+// each. The replay layer's eviction of idle uploaded textures at memory pressure (nvn_mtl.m pkg_evict_idle). → how many went
+uint32_t own_drop_where_locked(int (^gone)(id o), void (^each)(uint64_t serial));
 
 // ---- What the replay layer provides (nvn_mtl.m). Called with g_smu held
 void own_hook_drop(id o, int keep_resident);   // an object the owner lets go: released after the submission in flight (keep_resident: it stays in the residency set, as something else holds it)
@@ -137,6 +140,8 @@ uint64_t own_hook_frame(void);                 // the frame being replayed (pres
 const void *own_live_ref_locked(uint64_t k);
 int serial_table_holds(const void *o);   // a live entry or a texture pin holds o (or a view of it)
 int entry_holds(const void *o);          // that, or a ghost entry
+int own_ghost_holds_locked(const void *o);              // a ghost entry holds o (or a view of it): the replay layer's census
+uint64_t own_alias_seen_locked(const alias_key *k);     // the submission of k's last lookup (0: none recorded): the census
 int tex_object_pinned(id o);
 int own_shared_locked(id o);             // the sharing table holds o
 id own_alias_get_locked(const alias_key *k);

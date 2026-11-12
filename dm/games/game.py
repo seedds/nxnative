@@ -101,8 +101,9 @@ def by_build(main_id):   # the profile whose build rows register this main build
     return next((g for g in all_games() if any(b.get('main') == main_id for b in g.builds().values())), None)
 
 
-# agl's upscaler network (NDSR), by where the shader map found each key: the compute shaders of agl_ndsr.pck (Donkey Kong Bananza's 24 in its release library, Splatoon Raiders' 20 in its debug one)
-UPSCALER_SOURCE = re.compile(r'/agl_ndsr\.pck#')
+# agl's upscaler network (NDSR), by where the shader map found each key: the compute shaders of agl_ndsr.pck (Donkey Kong Bananza's 24 in its release library, Splatoon Raiders' 20 in its debug one),
+# and of its variable-ratio packs agl_ndsr_vr.pck and agl_ndsr_vr_light.pck (Ocarina of Time: 59 in all three; the host draws only the variants whose colour it reads, nvn_mtl.m up_mfx_color)
+UPSCALER_SOURCE = re.compile(r'/agl_ndsr(_vr)?(_light)?\.pck#')
 
 
 def upscaler_keys(g):
@@ -236,7 +237,7 @@ def header_one(g):
          f'#define DM_GAME_LAUNCH_PARAM {q(g.get("launch_param", ""))}',   # what oe::TryPopLaunchParameter hands over once (hle_oe.c; a program another program of the application launches: Super Mario 3D All-Stars)
          f'#define DM_GAME_MEM_MAP_LIMIT {int(mml == "on")}',
          f'#define DM_GAME_STDALLOC_CAP {int(g.get("stdalloc_cap", "0"), 0):#x}ull',   # StandardAllocator's address space with virtual address memory (hle_svc.c); 0 = what the alias region has room for
-         f'#define DM_GAME_SCREEN_ASPECT {("off", "on").index(g.get("screen_aspect", "off"))}',   # stubs that follow a screen taller than 16:9 (DM_SCREEN_ASPECT): off / on
+         f'#define DM_GAME_SCREEN_ASPECT {("off", "on", "any").index(g.get("screen_aspect", "off"))}',   # stubs that follow the screen's shape (DM_SCREEN_ASPECT): off / on (taller than 16:9, set at the start) / any (any shape from 0.25 to 6, followed while the game runs)
          f'#define DM_GAME_DISPLAY_VERSIONS {vers}',
          f'#define DM_GAME_PRESENT_DISPLAY {int(pi == "display")}',
          f'#define DM_GAME_CORE_PREEMPT {int(cp == "on")}',

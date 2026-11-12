@@ -8,6 +8,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <limits.h>
+#include <math.h>
 #include <mach-o/getsect.h>
 #include <mach-o/ldsyms.h>
 #include "hle.h"
@@ -314,6 +315,99 @@ static void install_fps_state(module_t *m) {
     dm_fps_state = m->base + m->fps_state_off; g_fps_mod = m->name; dm_fps_step_max = (int)m->step_max;
     if (m->render_scale_max > 1) g_render_scale_max = (float)m->render_scale_max;
 }
+// Screen shape for a profile whose stubs take any shape (game.tsv screen_aspect any, DM_GAME_SCREEN_ASPECT 2: Ocarina of Time's patches.py), wider or taller than 16:9, and follow it
+// while the game runs. State +0xa0 float the screen's width / height (0 = 16:9: the stubs run the game's own code), +0xa4 float the width factor (the ratio over 16:9, at least 1),
+// +0xa8 float the height factor (16:9 over the ratio, at least 1; both lowered by one number under DM_SCREEN_PIXELS: screen_pixels_cap), +0xac u32 a count bumped at each change, +0xc4 / +0xc8 floats the camera's x / y multipliers (below). A wider screen keeps the game's height and vertical angle and shows more
+// at the sides; a taller one keeps its width and horizontal angle and shows more above and below, whatever the shape, as a PC game in a window does: a portrait window too (the
+// profile's stubs keep the picture's pixel count in bounds and grow the window textures). The bounds below only keep a degenerate window (a few pixels high) out
+#define SCREEN_MIN 0.25
+#define SCREEN_MAX 6.0
+static int g_screen_follow;          // DM_SCREEN_ASPECT auto (the default): the front end's view gives the shape, now and when it changes
+static double g_screen_ratio = -1;   // what the state page holds (0 = 16:9), -1 = not written yet
+__attribute__((weak)) double front_view_aspect(void) { return 0; }   // front.h: the game view's width / height, 0 = no view (a run with no window); front_mac.m, front_ios.m
+static pthread_mutex_t g_screen_mu = PTHREAD_MUTEX_INITIALIZER;   // the game's start (main.c) and the front end's main thread both write the shape
+static void screen_any_write_(double a, const char *why);
+static void screen_any_write(double a, const char *why) { pthread_mutex_lock(&g_screen_mu); screen_any_write_(a, why); pthread_mutex_unlock(&g_screen_mu); }
+// The camera's x / y multipliers for a shape (state +0xc4 / +0xc8; 0 = 16:9). Landscape: wider than 16:9 keeps the vertical angle (x × 16:9 / r), narrower keeps the horizontal one
+// (y × r / 16:9). Portrait takes the scale of the same screen turned landscape, its width getting what that one's height gets: a phone or a window turned keeps the characters'
+// size and shows another part of the world. Their ratio y / x is always r × 9 / 16, the projection's aspect over 16:9's
+static void screen_camera(double r, float c[2]) {
+    double l = r >= 1 ? r : 1 / r, xl = l >= 16.0 / 9 ? 16.0 / 9 / l : 1, yl = l >= 16.0 / 9 ? 1 : l * 9 / 16;
+    c[0] = r == 0 ? 1 : r >= 1 ? (float)xl : (float)(yl * 16 / 9); c[1] = r == 0 ? 1 : r >= 1 ? (float)yl : (float)(xl * 9 / 16);
+}
+// Upright, the vertical angle is capped (DM_SCREEN_UPRIGHT_FOV, read once): an upright screen shows no more height than a picture of that shape (default 1, a square) would, its
+// width narrowing instead. A phone upright with the rule above sees about 90° vertically (Ocarina's fovy 50° at 16:9, 79° at 1:1), past what the game ever shows: above Link's
+// house the world is not built. 0 turns the cap off; another shape from 0.25 to 6 moves it (1.777: the game's own vertical angle; under 1 only screens taller than it are held).
+// Landscape is never capped. The y multiplier is raised to the cap's and x follows it, so the projection keeps the screen's aspect
+static double g_upright_cap = -1;
+static double screen_upright_cap(void) {
+    if (g_upright_cap >= 0) return g_upright_cap;
+    const char *e = getenv("DM_SCREEN_UPRIGHT_FOV"); double v = 1;
+    if (e && *e) {
+        char *end; v = strtod(e, &end);
+        if (end == e || *end || !(v == 0 || (v >= SCREEN_MIN && v <= SCREEN_MAX))) { LOG("[RED] DM_SCREEN_UPRIGHT_FOV=%s: 0 (off) or a width / height from 0.25 to 6; keeping 1", e); v = 1; }
+        else LOG("%s: upright vertical angle %s (DM_SCREEN_UPRIGHT_FOV)", g_fps_mod, v ? "held to that shape's" : "not capped");
+    }
+    return g_upright_cap = v;
+}
+// The picture's pixels in a shape other than 16:9 (DM_SCREEN_PIXELS, read once): at most that many times those of the size the game asks for, 0.5 to 1.5. Unset (or 1.5) the
+// profile's stub alone bounds them (Ocarina of Time's output size: 1.5, so a phone upright renders 1200x2600 for the game's handheld 1920x1080, and the upscaler and the
+// output-resolution passes run at that size). Lower, both size factors (+0xa4 / +0xa8) are scaled by one number so their product is the bound: the stub keeps the shape and
+// rounds each side to a multiple of 8 as before, under its own bound (1.0 upright: 976x2120). The camera (+0xc4 / +0xc8) and the shape are unchanged: the same picture with
+// fewer pixels, which the presenter scales to the view
+static double g_screen_pixels = -1;
+static double screen_pixels_cap(void) {
+    if (g_screen_pixels >= 0) return g_screen_pixels;
+    const char *e = getenv("DM_SCREEN_PIXELS"); double v = 0;
+    if (e && *e) {
+        char *end; v = strtod(e, &end);
+        if (end == e || *end || !(v >= 0.5 && v <= 1.5)) { LOG("[RED] DM_SCREEN_PIXELS=%s: 0.5 to 1.5 times the game's own pixels; keeping the profile's bound", e); v = 0; }
+        else if (v == 1.5) v = 0;   // the stub's own bound
+    }
+    return g_screen_pixels = v;
+}
+static void screen_any_write_(double a, const char *why) {
+    if (!dm_fps_state) return;
+    double r = a < SCREEN_MIN ? SCREEN_MIN : a > SCREEN_MAX ? SCREEN_MAX : a;
+    if (fabs(r / (16.0 / 9.0) - 1) < 0.005) r = 0;   // 16:9 within half a percent: the game's own picture
+    if (r == g_screen_ratio) return;
+    float f[3] = {(float)r, r ? (float)fmax(r * 9 / 16, 1) : 1, r ? (float)fmax(16 / (9 * r), 1) : 1};
+    double px = screen_pixels_cap(), area = (double)f[1] * f[2]; int fewer = 0;
+    if (r && px && area > px) { double s = sqrt(px / area); f[1] = (float)(f[1] * s); f[2] = (float)(f[2] * s); fewer = 1; }   // screen_pixels_cap
+    memcpy(dm_fps_state + 0xa0, f, sizeof f);
+    // +0xc4 / +0xc8: the camera's x / y multipliers (the projection's rows; screen_camera), upright capped (screen_upright_cap). The size stub copies them with the size it sets
+    // (patches.py screen_shape), and the HUD's follow from them
+    float c[2]; screen_camera(r, c); double cap = screen_upright_cap(); int capped = 0;
+    { float k[2];
+      if (r && cap && r < 1 && r < cap) { screen_camera(cap, k); if (c[1] < k[1]) { c[1] = k[1]; c[0] = (float)(k[1] * 16 / (9 * r)); capped = 1; } } }
+    memcpy(dm_fps_state + 0xc4, c, sizeof c);
+    uint32_t gen; memcpy(&gen, dm_fps_state + 0xac, 4); gen++; memcpy(dm_fps_state + 0xac, &gen, 4);
+    extern void mtl_present_screen(uint32_t w, uint32_t h); mtl_present_screen(r ? (uint32_t)(r * 10000 + 0.5) : 0, r ? 10000 : 0);   // the picture's shape for a crop of that shape (nvn_mtl.m present_shape)
+    int first = g_screen_ratio < 0; g_screen_ratio = r;
+    if (r) {
+        LOG("%s: screen shape %.3f (%s%s): %s, picture %.3f x %.3f of 16:9, camera x %.3f y %.3f%s", g_fps_mod, r, why, a != r && a > 0 ? ", held to 0.25..6" : "",
+            r > 16.0 / 9 ? "more at the sides" : "more above and below", f[1], f[2], c[0], c[1], capped ? ", upright cap" : "");
+        if (fewer) LOG("%s: picture held to %.2f of the game's pixels (DM_SCREEN_PIXELS)", g_fps_mod, px);
+    } else LOG("%s: screen shape 16:9 (%s)", g_fps_mod, why);
+    if (capped) LOG("%s: upright: vertical angle held to a %.2f picture's (DM_SCREEN_UPRIGHT_FOV)", g_fps_mod, cap);
+    if (!first) { void dm_display_changed(void); dm_display_changed(); }   // the game lays its picture out again (hle_oe.c)
+}
+static void screen_any_apply(const char *as) {
+    if (!as || !*as || !strcmp(as, "auto")) {   // the default: follow the view (16:9 until there is one)
+        g_screen_follow = 1; double v = front_view_aspect(); screen_any_write(v > 0 ? v : 16.0 / 9.0, v > 0 ? "the window's shape" : "no window yet");
+        return;
+    }
+    char *end; double a = strtod(as, &end);
+    if (!strcmp(as, "0")) a = 16.0 / 9.0;
+    else if (end == as || *end || !(a >= SCREEN_MIN && a <= SCREEN_MAX)) { LOG("[RED] DM_SCREEN_ASPECT=%s: auto, 0 or a width / height (0.25 to 6); keeping 16:9", as); a = 16.0 / 9.0; }
+    screen_any_write(a, "DM_SCREEN_ASPECT");
+}
+// front.h: the front end's game view changed shape (a window resized, full screen, a rotated or resized iPad window). Followed only under DM_SCREEN_ASPECT auto by a profile with
+// screen_aspect any; a fixed DM_SCREEN_ASPECT keeps its shape
+void dm_screen_view_changed(double aspect) {
+    if (DM_GAME_SCREEN_ASPECT != 2 || !g_screen_follow || g_screen_ratio < 0 || !(aspect > 0)) return;
+    screen_any_write(aspect, "the window's shape");
+}
 // The settings in the state page, written when the game starts (main.c, after host loading): on iOS the loading runs at app launch, before the launcher has set DM_FPS_TARGET and
 // DM_RENDER_SCALE (Launcher.swift), and nothing reads the page before the game runs
 void dm_fps_state_apply(void) {
@@ -336,7 +430,8 @@ void dm_fps_state_apply(void) {
     // (Breath of the Wild 1.9.0's patches.py) render that shape: the output keeps its width (1920) and takes the height that gives the ratio, a multiple of 48 so the
     // 2/3-size layout space (1280 wide) stays whole: 1.43 → 1920x1344 and 1280x896. State +0x48 u32 output height, +0x4c u32 layout height, +0x50 its float; 0 = 16:9
     const char *as = getenv("DM_SCREEN_ASPECT");
-    if (as && *as && strcmp(as, "0") && strcmp(as, "auto")) {   // 0: 16:9; auto: the iOS front end resolves it to the screen's shape (a Mac window has none)
+    if (DM_GAME_SCREEN_ASPECT == 2) screen_any_apply(as);   // a profile whose stubs take any shape (screen_aspect any): below
+    else if (as && *as && strcmp(as, "0") && strcmp(as, "auto")) {   // 0: 16:9; auto: the iOS front end resolves it to the screen's shape (a Mac window has none)
         char *end; float a = strtof(as, &end);
         if (end == as || *end || !(a >= 1.3f && a < 1.77f)) LOG("[RED] DM_SCREEN_ASPECT=%s: a width / height from 1.3 to 1.77; keeping 16:9", as);
         else {

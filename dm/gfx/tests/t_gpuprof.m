@@ -43,10 +43,17 @@ static int checks, failed;
 @end
 // A draw pass answers only the render encoder's timestamp selector, an upload encoder only the compute one: a stamp sent to the wrong kind throws, as Metal 4's encoders do.
 @interface ProfileRender : NSObject
-@property int stamps; @property NSUInteger last;
+@property int stamps, geom; @property NSUInteger last; @property MTLRenderStages geom_stages;
 @end
 @implementation ProfileRender
-- (void)writeTimestampWithGranularity:(MTL4TimestampGranularity)g afterStage:(MTLRenderStages)s intoHeap:(id)h atIndex:(NSUInteger)i { (void)g; (void)s; (void)h; _stamps++; _last = i; }
+- (void)writeTimestampWithGranularity:(MTL4TimestampGranularity)g afterStage:(MTLRenderStages)s intoHeap:(id)h atIndex:(NSUInteger)i { (void)g; _stamps++; _last = i; if (h && h == (id)g_gp_gheap) { _geom++; _geom_stages |= s; } }
+@end
+@interface ProfileQueue : NSObject
+@property int commits;
+@end
+@implementation ProfileQueue
+- (void)commit:(id const *)b count:(NSUInteger)n { (void)b; (void)n; _commits++; }
+- (void)commit:(id const *)b count:(NSUInteger)n options:(id)o { (void)b; (void)n; (void)o; _commits++; }
 @end
 @interface ProfileCompute : NSObject
 @property int stamps;
@@ -85,5 +92,31 @@ int main(void) { @autoreleasepool {
     @try { gp_end(upload); } @catch (NSException *x) { CHECK(0, "another queue's encoder got the open pass's timestamp"); }
     CHECK(upload.stamps == 0 && g_gp_cur == k, "another queue's encoder does not close the open pass");
     gp_end(pass); CHECK(pass.stamps == 2 && pass.last == 2 * (NSUInteger)k + 1 && g_gp_cur < 0, "the pass's own end writes its end stamp");
+    CHECK(pass.geom == 0, "without DM_NVN_GPUPROF_GEOM a pass writes no geometry stamps");
+    // DM_NVN_GPUPROF_GEOM: a pass's end also stamps where its vertex and mesh stages finish, in the second heap, before its fragment end stamp
+    g_gp_gheap = (id)[ProfileHeap new]; g_gp_geom = 1; ProfileRender *gpass = [ProfileRender new];
+    gp_begin(gpass, 'R', nil); int k2 = g_gp_cur; gp_end(gpass);
+    CHECK(gpass.stamps == 4 && gpass.geom == 2 && gpass.geom_stages == (MTLRenderStageVertex | MTLRenderStageMesh), "a pass's end stamps its vertex and mesh stages");
+    CHECK(gpass.last == 2 * (NSUInteger)k2 + 1, "the fragment end stamp still comes last, at the pass's own index");
+    // The CPU timeline: recorded only while a frame is profiled, through the real wait and commit paths, and handed to the report with the labels
+    if (g_gp_state == 1) { gp_snap open = gp_close(); free(open.lab); free(open.gt); atomic_store(&g_gp_busy, 0); }   // the pass frame above, left open
+    g_gp_every = 1; g_gp_state = 0; g_gp_geom = 0;
+    atomic_store(&g_gt_n, 0);
+    g_done = 0; mtl_wait_at(5, 1000000ull, WS_ALLOC); CHECK(atomic_load(&g_gt_n) == 0, "no timeline is kept outside a profiled frame");
+    g_sub_serial = 41; g_gt_queue = 7; g_gt_sub0 = mach_absolute_time();
+    atomic_store(&g_cur_frame, 20); gp_begin(nil, 'C', nil); gp_end(nil);
+    CHECK(atomic_load(&g_gt_on) && atomic_load(&g_gt_n) == 1 && g_gt[0].kind == GT_SUB && g_gt[0].a == 41 && g_gt[0].b == (7 | 1ull << 63), "the timeline opens with the submission being encoded");
+    CHECK(g_gp_lab[g_gp_n - 1].sub == 41, "an encoder's label names its submission");
+    uint64_t w0 = mach_absolute_time(); mtl_wait_at(5, 2000000ull, WS_ALLOC);   // a fence the GPU never reaches: the wait times out after 2 ms
+    CHECK(atomic_load(&g_gt_n) == 2 && g_gt[1].kind == GT_WAIT && g_gt[1].a == WS_ALLOC && g_gt[1].b == 5 && g_gt[1].t0 >= w0 && g_gt[1].t1 > g_gt[1].t0, "a blocking wait is placed on the timeline with its site and fence");
+    ProfileQueue *queue = [ProfileQueue new]; g_q4 = (id)queue; g_seg = 3; g_rec = 0;
+    rec_commit((id)[NSObject new], nil);
+    CHECK(queue.commits == 1 && atomic_load(&g_gt_n) == 3 && g_gt[2].kind == GT_COMMIT && g_gt[2].a == 41 && g_gt[2].b == 3, "a commit is placed on the timeline with its submission and segment");
+    mtl_gp_note_park(mach_absolute_time(), 1, 9);
+    CHECK(atomic_load(&g_gt_n) == 4 && g_gt[3].kind == GT_QPARK && g_gt[3].a == 1 && g_gt[3].b == 9, "the queue worker's park is placed on the timeline");
+    gp_snap snap = gp_close();
+    CHECK(snap.ngt == 4 && snap.n == 1 && snap.frame == 20 && !atomic_load(&g_gt_on), "closing the frame hands its timeline to the report and stops recording");
+    mtl_wait_at(5, 1000000ull, WS_ALLOC); CHECK(atomic_load(&g_gt_n) == 4, "nothing is recorded after the frame closed");
+    gp_report(snap); CHECK(!atomic_load(&g_gp_busy), "the report frees the heap");
     printf("t_gpuprof: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

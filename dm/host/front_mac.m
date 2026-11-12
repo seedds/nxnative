@@ -620,6 +620,15 @@ static void pads_start(void) {
 // The picture's width / height (front.h front_picture_shape; 16:9 until the first present), which the present fits into the view
 static _Atomic double g_picture_aspect = 16.0 / 9.0;
 void front_picture_shape(int w, int h) { if (w > 0 && h > 0) g_picture_aspect = (double)w / h; }
+// The game view's width / height (front.h front_view_aspect; 0 before the window), and the shape changes handed to the host once a resize has settled (dm_screen_view_changed):
+// a live resize steps through many sizes, and each new shape makes a profile with screen_aspect any lay its picture out again
+static _Atomic double g_view_aspect; static uint64_t g_view_change;   // g_view_change: main thread
+double front_view_aspect(void) { return g_view_aspect; }
+static void view_shape(NSSize px) {
+    double a = px.width / px.height; if (a == g_view_aspect) return;
+    g_view_aspect = a; uint64_t n = ++g_view_change;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 300 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{ if (n == g_view_change) dm_screen_view_changed(a); });
+}
 @interface DmGameView : NSView @end
 @implementation DmGameView
 - (void)mouseDown:(NSEvent *)e { [self mouseDragged:e]; }
@@ -641,6 +650,7 @@ void front_picture_shape(int w, int h) { if (w > 0 && h > 0) g_picture_aspect = 
     l.contentsScale = self.window.backingScaleFactor;
     NSSize px = [self convertSizeToBacking:self.bounds.size]; if (px.width < 1 || px.height < 1 || CGSizeEqualToSize(l.drawableSize, px)) return;
     l.drawableSize = px; LOG("front end: drawable %.0fx%.0f", px.width, px.height);
+    view_shape(px);
 }
 - (void)setFrameSize:(NSSize)s { [super setFrameSize:s]; [self fitDrawable]; }
 - (void)viewDidChangeBackingProperties { [super viewDidChangeBackingProperties]; [self fitDrawable]; }

@@ -55,7 +55,7 @@ int main(void) { @autoreleasepool {
         char why[256] = ""; pthread_mutex_lock(&g_smu); int ok = own_check_locked(why, sizeof why); pthread_mutex_unlock(&g_smu);
         CHECK(ok, why);
         alias_key ak = tex_alias_key(&l2);
-        pthread_mutex_lock(&g_smu); int gone = alias_del(&ak); pthread_mutex_unlock(&g_smu);   // as a pool's finalize evicts it
+        pthread_mutex_lock(&g_smu); int gone = own_alias_del_locked(&ak); pthread_mutex_unlock(&g_smu);   // as a pool's finalize evicts it
         CHECK(gone && tex_get(s2.serial) == gv, "the parent leaves the sharing table; the ghost entry still names the view");
         id<MTLTexture> own = tex_mtl(&s2);
         pthread_mutex_lock(&g_smu); int held = entry_holds((__bridge void *)gv); pthread_mutex_unlock(&g_smu);

@@ -1,6 +1,7 @@
 #import <XCTest/XCTest.h>
 #import <GameController/GameController.h>
 #import <QuartzCore/CAMetalLayer.h>
+#import <objc/message.h>
 #import <objc/runtime.h>
 #if __has_include(<UIKit/UIHingeInteraction.h>)
 #import <UIKit/UIHingeInteraction.h>
@@ -654,6 +655,35 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
     XCTAssertEqual(duo_harness_input().buttons, 0);
 }
 
+- (void)testHiddenMenuButtonFadesAndComesBackOnATouch {   // DM_MENU_BUTTON=fade (GitHub issue #1647)
+    CGRect bounds = CGRectMake(0, 0, 844, 390);
+    UIView *pad = [self padForLayout:dm_layout(bounds, UIEdgeInsetsZero, NO, CGRectNull, DM_PICTURE_16_9) bounds:bounds];
+    UIButton *menu = [self menuButtonInPad:pad];
+    SEL fade = NSSelectorFromString(@"fadeMenu");
+    XCTAssertEqual(menu.alpha, 1, @"Shown, the default");
+    ((void (*)(id, SEL))objc_msgSend)(pad, fade);
+    XCTAssertEqual(menu.alpha, 1, @"Shown: the button never fades");
+
+    [pad setValue:@YES forKey:@"menuFade"];
+    ((void (*)(id, SEL))objc_msgSend)(pad, fade);
+    XCTAssertEqual(menu.alpha, 0);
+    XCTAssertNotEqual([pad hitTest:menu.center withEvent:nil], menu, @"A hidden button takes no touch: the one that brings it back does not open the menu");
+    DuoFakeTouch *touch = [self touchAt:[self faceDiamondCenterInPad:pad] time:1];
+    [self beginTouches:@[touch] onPad:pad];
+    XCTAssertEqual(menu.alpha, 1, @"Any touch brings it back");
+    [self endTouches:@[touch] onPad:pad cancelled:NO];
+    XCTAssertEqual([pad hitTest:menu.center withEvent:nil], menu);
+
+    ((void (*)(id, SEL, BOOL))objc_msgSend)(pad, NSSelectorFromString(@"menuOpen:"), YES);
+    ((void (*)(id, SEL))objc_msgSend)(pad, fade);
+    XCTAssertEqual(menu.alpha, 1, @"The button stays while its menu is open");
+    ((void (*)(id, SEL, BOOL))objc_msgSend)(pad, NSSelectorFromString(@"menuOpen:"), NO);
+    XCTAssertTrue(dm_setting_live("DM_MENU_BUTTON", NULL));
+    [pad setValue:@NO forKey:@"menuFade"];
+    ((void (*)(id, SEL))objc_msgSend)(pad, fade);
+    XCTAssertEqual(menu.alpha, 1);
+}
+
 - (void)testMenuLayoutPickReleasesHeldKeysAndIsSaved {
     dm_set_opmode(0);
     CGRect bounds = CGRectMake(0, 0, 844, 390);
@@ -696,7 +726,7 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
     [root.view layoutIfNeeded];
     UIView *game = [root valueForKey:@"game"];
     XCTAssertTrue(dm_setting_live("DM_PICTURE_FIT", NULL) && dm_setting_live("DM_OPMODE", NULL) && dm_setting_live("DM_RUMBLE", NULL)
-                  && dm_setting_live("DM_SHOW_FPS", NULL) && dm_setting_live("DM_TOUCH_HAPTICS", NULL));
+                  && dm_setting_live("DM_SHOW_FPS", NULL) && dm_setting_live("DM_TOUCH_HAPTICS", NULL) && dm_setting_live("DM_MENU_BUTTON", NULL));
     XCTAssertFalse(dm_setting_live("DM_LANG", NULL), @"A setting the game reads once at start is not offered");
     XCTAssertFalse(dm_setting_live("DM_FPS_TARGET", NULL));
 

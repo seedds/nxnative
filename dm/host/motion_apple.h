@@ -9,6 +9,7 @@
 
 static inline void dm_motion_attach(GCController *c, int player) {
     const char *e = getenv("DM_MOTION"); if (e && !atoi(e)) return;
+    dm_motion_clear(player);   // another controller takes the player: its stream and learned gyro offset start again (hle_hid.c)
     GCMotion *mo = c.motion;
     if (!mo || !mo.hasRotationRate) return;
     if (mo.sensorsRequireManualActivation) mo.sensorsActive = YES;   // DualSense / DualShock 4: off until asked for

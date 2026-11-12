@@ -13,7 +13,7 @@ static _Atomic uint64_t *test_done;
 static struct {
     uint64_t now, event_elapsed, event_ms, event_fence;
     int event_calls, event_success, cond_calls, cond_complete;
-    int64_t cond_remaining;
+    int64_t cond_remaining, cond_first;   // the last and the first condition wait's deadline, from the virtual now
 } test_budget;
 static uint64_t test_clock_gettime_nsec_np(clockid_t clock) {
     return test_budget_active ? test_budget.now : clock_gettime_nsec_np(clock);
@@ -29,6 +29,7 @@ static int test_pthread_cond_timedwait(pthread_cond_t *cond, pthread_mutex_t *mu
     test_budget.cond_calls++;
     test_budget.cond_remaining = (int64_t)deadline->tv_sec * 1000000000ll + deadline->tv_nsec
         - (int64_t)(test_budget.now + 1000000000000ull);
+    if (test_budget.cond_calls == 1) test_budget.cond_first = test_budget.cond_remaining;
     if (test_budget.cond_complete && test_budget.cond_remaining > 0) { *test_done = 1; return 0; }
     return ETIMEDOUT;
 }
@@ -246,7 +247,10 @@ static void wait_budgets(void) {
             CHECK("only the virtual event advances time", test_budget.now == 1999750000 + (fast ? c->elapsed : 0));
             int fallback = fast ? c->fallback : 1;
             uint64_t remaining = fast ? c->remaining : (c->timeout > hour ? hour : c->timeout);
-            CHECK("feedback wait count", test_budget.cond_calls == fallback);
+            // An unbounded wait first waits to the 10 s mark, where it reports a hang (mtl_wait_at, "[RED] the host has waited 10 s"), then on to its deadline
+            int hang_mark = fallback && c->timeout == UINT64_MAX;
+            CHECK("feedback wait count", test_budget.cond_calls == fallback + hang_mark);
+            CHECK("an unbounded wait reports a hang at 10 s first", !hang_mark || test_budget.cond_first == 10000000000ll);
             CHECK("feedback absolute deadline has only remaining budget", !fallback
                 || test_budget.cond_remaining == (int64_t)remaining);
         }
@@ -417,7 +421,7 @@ static void trace_guest_wrapper(void) {
     test_budget_active = 1; test_trace_lock = &g_fence_trace_buffer.lock; test_trace_delay = 2000000;
     NVNsync sync = {0}; sync_t *obj = (sync_t *)&sync;
     test_budget = (typeof(test_budget)){.now = 1999750000};
-    CHECK("unfenced guest sync times out without waiting", wait(&sync, 20000000) == NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED
+    CHECK("unfenced guest sync is signalled without waiting", wait(&sync, 20000000) == NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED
         && !test_budget.event_calls && !test_budget.cond_calls && !g_ft_sync);
     obj->fenced = 1; obj->fence = 1; g_done = 1;
     CHECK("completed guest sync reports already signaled", wait(&sync, 20000000) == NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED && !g_ft_sync);

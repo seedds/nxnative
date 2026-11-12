@@ -65,6 +65,32 @@ class Base(unittest.TestCase):
     def blobs(self): return self.store.db.execute('SELECT count(*) FROM blob').fetchone()[0]
 
 
+class NewFile(unittest.TestCase):
+    """A new file is opened again once its header is written (macOS's exFAT driver renumbers a file's inode at its first data, which SQLite takes for a moved file).
+    DM_EXFAT_DIR=<a folder on an exFAT volume> also runs it there: without the reopen, the WAL pragma after the header fails (SQLITE_READONLY_DBMOVED)"""
+    def setUp(self):
+        t = tempfile.TemporaryDirectory(dir=os.environ.get('DM_EXFAT_DIR')); self.addCleanup(t.cleanup)
+        self.path = Path(t.name) / 'sub' / 'cas.db'
+        self.opened = []; connect = shader_cache.sqlite3.connect
+        def counted(*a, **k): self.opened.append(a[0]); return connect(*a, **k)
+        patcher = mock.patch.object(shader_cache.sqlite3, 'connect', counted); patcher.start(); self.addCleanup(patcher.stop)
+
+    def check(self, connects):
+        s = shader_cache.Store(self.path); self.addCleanup(s.close)
+        self.assertEqual(len(self.opened), connects)
+        for i in range(200): s.put(f'x/{i}', os.urandom(5000))
+        self.assertEqual(len(s.names('x/')), 200)
+        self.assertEqual([s.db.execute(f'PRAGMA {p}').fetchone()[0] for p in ('page_size', 'auto_vacuum', 'journal_mode')], [16384, 2, 'wal'])
+
+    def test_a_new_file_is_reopened(self): self.check(2)
+
+    def test_an_empty_file_is_reopened(self):
+        self.path.parent.mkdir(); self.path.write_bytes(b''); self.check(2)
+
+    def test_a_file_with_data_is_opened_once(self):
+        shader_cache.Store(self.path).close(); self.opened.clear(); self.check(1)
+
+
 class Entries(Base):
     def test_in_and_out(self):
         self.store.put('x/y', b'bytes')

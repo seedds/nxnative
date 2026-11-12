@@ -90,9 +90,17 @@ class Store(_Files):
 
     def _open(self):
         os.makedirs(os.path.dirname(os.path.abspath(self.path)), exist_ok=True)
+        try: new = os.path.getsize(self.path) == 0
+        except FileNotFoundError: new = True
         self.db = sqlite3.connect(self.path, timeout=WAIT, check_same_thread=False, isolation_level=None)
         try:
             self.db.execute('PRAGMA page_size=16384'); self.db.execute('PRAGMA auto_vacuum=INCREMENTAL')   # both only before the first table
+            # A new file is opened again once these have written its header: macOS's exFAT driver (FSKit) numbers an empty file with a placeholder inode and gives it its
+            # first cluster's number once it has data, and SQLite, which compares a file's inode with the one it opened before each write, takes the change for a moved
+            # file and refuses the next write (SQLITE_READONLY_DBMOVED, "attempt to write a readonly database"). Reopened, it records the number the file keeps
+            if new:
+                self.db.close()
+                self.db = sqlite3.connect(self.path, timeout=WAIT, check_same_thread=False, isolation_level=None)
             # WAL: a reader in another process does not wait for a writer, and a commit needs no fsync. A drive that cannot share its memory file stays on the rollback journal, unsynced: a stop costs the cache at worst
             if self.db.execute('PRAGMA journal_mode=WAL').fetchone()[0].lower() == 'wal': self.db.execute('PRAGMA synchronous=NORMAL')
             else: self.db.execute('PRAGMA synchronous=OFF')

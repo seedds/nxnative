@@ -243,6 +243,13 @@
 - **Fix:** `build_folder` in `scripts/build_ipa_from_nsp.py` gives a program packed with the first `<work dir>/programs/<id>_build` under `--work-dir`; the first program, a game of one program and `--program N` alone keep the folder as named. Test: `test_nsp_build_folder.py`.
 - **Found on:** [Super Mario 3D All-Stars](../../dm/games/010049900F546000/README.md#found-on-this-game), 1.1.4, built by NX2Apple 1.2.1 as one IPA.
 
+### A dump tool's `.listing` files in the game's folders
+
+- **Symptom:** a game built from a dump folder crashes in its own code while it loads, where builds from other dumps of the same version play: Nintendo Switch Sports Resort at `main+0x9d7c60`, listing its `Parameter` folders.
+- **Cause:** an FTP dump keeps the server's directory listing as `.listing` in every folder, which the NUP spec (§6.3) allows a producer to keep. The RomFS image packed it as a game file, so a game that lists a folder saw one more entry. Switch Sports Resort cuts each name at its first `.`, got an empty name, loaded `Parameter/<folder>/` and found no resource.
+- **Fix:** `ARTIFACTS` in `dm/tools/romfs_image.py`, the dump-tool files that are not game files (`.listing`), is left out of the image, out of a NUP's RomFS (`scripts/pack_nup.py`) and out of the survey's file list (`dm/games/profile_guess.py`). Other dot files stay game files. Test: `test_romfs_image.py` (`test_dump_tool_listings_are_left_out`).
+- **Found on:** [Nintendo Switch Sports Resort](../../dm/games/04008E001F098000/README.md#found-on-this-game) (v65536, from a dump folder).
+
 ## Add-on content
 
 ### DLC in Documents is ignored or removed DLC remains installed

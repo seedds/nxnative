@@ -511,4 +511,24 @@ class OodleTables(unittest.TestCase):
         self.assertEqual((rel, len(keys), extra), ('Game.pak', 1, ('unreadable', '/Game.pak#A: why', 3)))
 
 
+class Switch2Archives(unittest.TestCase):
+    """ue_shaders on a decoded version 2 shader code archive whose shaders are NVN2 records (Unreal Engine 5.6, SF_GLSL_SWITCH2: Orbitals)"""
+    @staticmethod
+    def archive(rec, freq):   # one stored shader
+        return struct.pack('<5I', 2, 0, 0, 0, 1) + struct.pack('<QIIB', 0, len(rec), len(rec), freq) + bytes(8) + rec
+
+    def test_an_nvn2_record_is_read_with_its_stage_from_the_shader(self):
+        out = ss.ue_shaders(self.archive(OodleTables.record(), 0), '/A.ushaderbytecode')
+        self.assertEqual([(where, st) for where, st, _, _ in out], [('/A.ushaderbytecode#UE0', 'vs')])
+
+    def test_the_stage_is_checked_against_unreal_engine_5s_frequency(self):
+        with self.assertRaisesRegex(SystemExit, r'shader 0 is an NVN2 vs shader but has frequency 3'):
+            ss.ue_shaders(self.archive(OodleTables.record(), 3), '/A.ushaderbytecode')
+        self.assertEqual(uepak.FREQ5[1], 'ms')   # Unreal Engine 4's 1 was the hull shader
+
+    def test_neither_record(self):
+        with self.assertRaisesRegex(SystemExit, r'shader 0 is neither an LSLG nor an NVN2 record'):
+            ss.ue_shaders(self.archive(b'no record here' * 8, 0), '/A.ushaderbytecode')
+
+
 if __name__ == '__main__': unittest.main()

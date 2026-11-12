@@ -3178,14 +3178,20 @@ def glslc_module(exefs):   # a module of the profile's that defines glslcCompile
 def ue_shaders(d, label):
     """An Unreal Engine shader code archive with every shader decoded (Octopath Traveler 0: the two .ushaderbytecode files of its pak, whose shaders are Oodle-compressed; the NSP script decodes them
     on the Mac with the game's own Oodle, uepak.py): each shader is an LSLG record holding one stage's code area and control section (uepak.lslg); the stage is the record's tag (SV vertex,
-    SP pixel, SC compute), checked against the archive entry's frequency. The engine combines vertex and pixel shaders per draw, so they are paired as single-stage programs (separable_pairs)"""
+    SP pixel, SC compute), checked against the archive entry's frequency. Unreal Engine 5.6's Switch 2 archives (SF_GLSL_SWITCH2, Orbitals) hold the NVN2 record of the 5.4 shaders
+    instead (uepak.sage_record: no LSLG, no stage tag), so the stage comes from the shader (nvn2_stage), checked against Unreal Engine 5's frequency numbering (uepak.FREQ5).
+    The engine combines vertex and pixel shaders per draw, so they are paired as single-stage programs (separable_pairs)"""
     a, out = uepak.archive(d), []
     for i, (off, size, raw, fr) in enumerate(a['shaders']):
         if size != raw: red(f'{label}: shader {i} is still compressed (an archive the NSP script has not decoded)')
-        rec = uepak.lslg(d[a['code'] + off:a['code'] + off + size])
-        if not rec: red(f'{label}: shader {i} is not an LSLG record')
-        tag, ctl, code = rec; st = UE_TAG.get(tag)
-        if not st or uepak.FREQ.get(fr) != st: red(f'{label}: shader {i} has tag {tag} but frequency {fr}')
+        s = d[a['code'] + off:a['code'] + off + size]
+        if rec := uepak.lslg(s):
+            tag, ctl, code = rec; st = UE_TAG.get(tag)
+            if not st or uepak.FREQ.get(fr) != st: red(f'{label}: shader {i} has tag {tag} but frequency {fr}')
+        elif rec := uepak.sage_record(s):
+            ctl, code = bytes(rec[1]), bytes(rec[2]); st = nvn2_stage(ctl, code)
+            if not st or uepak.FREQ5.get(fr) != st: red(f'{label}: shader {i} is an NVN2 {st} shader but has frequency {fr}')
+        else: red(f'{label}: shader {i} is neither an LSLG nor an NVN2 record')
         why = check(label, st, ctl, code)
         if why: red(f'{label}: shader {i} ({st}): {why}')
         out.append((f'{label}#UE{i}', st, ctl, code))

@@ -87,6 +87,7 @@ import Foundation
         expect(launched.values["DM_OPMODE"] == "0" && d.string(forKey: "launcher.DM_OPMODE") == "1", "Reset then Play keeps the saved choice of a setting fixed at launch")
         unsetenv("DM_OPMODE"); setenv("DM_ENV_LAUNCH_KEYS", "", 1); d.removeObject(forKey: "launcher.DM_OPMODE")
         failed += checkLauncherLayout(LauncherModel(mac.settings, defaults: d), defaults: d)
+        failed += checkLauncherPad()
         print("launcher storage: \(failed) failed")
         exit(failed == 0 ? 0 : 1)
     }

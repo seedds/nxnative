@@ -160,6 +160,19 @@ static void udp(void) {
     int one = 1, value = 0; n = 4; CHECK(SETOPT(guest, 0xffff, 0x20, &one, 4) == 0 && GETOPT(guest, 0xffff, 0x20, &value, &n) == 0 && value, "broadcast option is real");
     uint64_t read[16] = {0}, write[16] = {0}; read[guest >> 6] |= 1ull << (guest & 63); write[guest >> 6] |= 1ull << (guest & 63); int64_t tv[2] = {0, 0};
     CHECK(SELECT(guest + 1, read, write, NULL, tv) == 1 && !read[guest >> 6] && write[guest >> 6], "select fd_set layout and output bits translated");
+    // gRPC's reads and writes: SendMsg gathers its iovecs into one datagram, RecvMsg scatters one into its iovecs and reports the sender (Horizon's 0x30-byte msghdr)
+    typedef struct { void *base; uint64_t len; } iovec_h; typedef struct { void *name; uint32_t namelen, pad0; iovec_h *iov; int32_t iovlen, pad1; void *control; uint32_t controllen; int32_t flags; } msghdr_h;
+    typedef long (*fn_msg)(int, void *, int);
+    iovec_h out_iov[2] = {{"abc", 3}, {"defg", 4}}; msghdr_h out_msg = {&peer, 16, 0, out_iov, 2, 0, NULL, 0, 0};
+    CHECK(GET(fn_msg, "nnsocketSendMsg")(guest, &out_msg, 0) == 7, "SendMsg gathers two iovecs");
+    size = sizeof sender; CHECK(recvfrom(native, bytes, sizeof bytes, 0, (struct sockaddr *)&sender, &size) == 7 && !memcmp(bytes, "abcdefg", 7), "native peer received the gathered bytes in order");
+    CHECK(sendto(native, "scatter", 7, 0, (struct sockaddr *)&sender, size) == 7, "native peer replies for RecvMsg");
+    char head[3] = {0}, tail[10] = {0}; iovec_h in_iov[2] = {{head, 3}, {tail, 10}}; address src = {0}; uint8_t control[8];
+    msghdr_h in_msg = {&src, sizeof src, 0, in_iov, 2, 0, control, sizeof control, 0x55};
+    CHECK(GET(fn_msg, "nnsocketRecvMsg")(guest, &in_msg, 0) == 7 && !memcmp(head, "sca", 3) && !memcmp(tail, "tter", 4) && in_msg.namelen == 16 && src.port == peer.port && !in_msg.controllen && !in_msg.flags,
+          "RecvMsg scatters one datagram, reports its sender and no ancillary data");
+    out_msg.control = control; out_msg.controllen = sizeof control; CHECK(GET(fn_msg, "nnsocketSendMsg")(guest, &out_msg, 0) < 0 && dm_net_errno() == 95, "SendMsg refuses ancillary data rather than drop it");
+    out_msg.control = NULL; out_msg.controllen = 0; out_msg.iovlen = -1; CHECK(GET(fn_msg, "nnsocketSendMsg")(guest, &out_msg, 0) < 0 && dm_net_errno() == 22, "SendMsg rejects a negative iovec count");
     int first_close = CLOSE(guest), repeated_close = CLOSE(guest);
     CHECK(first_close == 0 && repeated_close < 0 && dm_net_errno() == 9, "close owns guest socket only, second close EBADF");
     close(native);
@@ -227,7 +240,7 @@ static void errors_and_resolver(void) {
     resolver_abi = 1;
     CHECK(GET(fn_gai, "nnsocketGetAddrInfo")("127.0.0.1", "1", &hints, &out) == 0 && out && ((dm_net_addrinfo *)out)->addr, "C resolver selects the exported modern SDK ABI"); dm_net_freeaddrinfo(out);
     resolver_abi = 2;
-    CHECK(GET(fn_gai, "nnsocketGetAddrInfo")("127.0.0.1", "1", &hints, &out) == 4 && !out, "C resolver refuses ambiguous exported ABIs"); resolver_abi = 0;
+    CHECK(GET(fn_gai, "nnsocketGetAddrInfo")("127.0.0.1", "1", &hints, &out) == 0 && out && ((dm_net_addrinfo_legacy *)out)->addr, "C resolver takes the C struct addrinfo layout when an SDK exports both (Wonder 1.2.1)"); dm_net_freeaddrinfo(out); resolver_abi = 0;
     CHECK(dm_net_getaddrinfo("127.0.0.1", "1", &(dm_net_addrinfo){.family = 28}, &out) == 5 && !out, "unsupported resolver family returns EAI_FAMILY");
     CHECK(GET(void *(*)(const char *), "_ZN2nn6socket13GetHostByNameEPKc")("127.0.0.1") != NULL, "automatic mode resolves a real numeric LAN peer through legacy hostent");
     CHECK(GET(void *(*)(const char *), "_ZN2nn6socket13GetHostByNameEPKc")("localhost") != NULL, "local mode resolves the host loopback name without an online provider");

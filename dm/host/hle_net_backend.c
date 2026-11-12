@@ -634,8 +634,19 @@ static int net_getaddrinfo(const char *host, const char *service, const void *hi
     allocation->root = first; pthread_mutex_lock(&g_net_lock); allocation->next = g_ai; g_ai = allocation; pthread_mutex_unlock(&g_net_lock);
     *result = first; return 0;
 }
-int dm_net_getaddrinfo(const char *host, const char *service, const void *hints, void **result) { return net_getaddrinfo(host, service, hints, result, 0); }
-int dm_net_getaddrinfo_legacy(const char *host, const char *service, const void *hints, void **result) { return net_getaddrinfo(host, service, hints, result, 1); }
+// Every lookup in a network mode is logged with its name and result (a failed one in red; the name is a server's, never an account's), so a game that stops before its
+// first socket shows which name it could not resolve
+static int net_getaddrinfo_logged(const char *host, const char *service, const void *hints, void **result, int legacy) {
+    int code = net_getaddrinfo(host, service, hints, result, legacy);
+    if (dm_net_enabled()) {
+        const dm_net_addrinfo *h = hints; char name[96]; snprintf(name, sizeof name, "%s", host ? host : "(none)");
+        fprintf(stderr, "%snet: name lookup %s port %s (family %d, flags %#x, %s layout) -> %d\n", code ? "[RED] " : "", name, service ? service : "-",
+                h ? h->family : 0, h ? (unsigned)h->flags : 0u, legacy ? "addrinfo" : "AddrInfo", code);
+    }
+    return code;
+}
+int dm_net_getaddrinfo(const char *host, const char *service, const void *hints, void **result) { return net_getaddrinfo_logged(host, service, hints, result, 0); }
+int dm_net_getaddrinfo_legacy(const char *host, const char *service, const void *hints, void **result) { return net_getaddrinfo_logged(host, service, hints, result, 1); }
 void dm_net_freeaddrinfo(void *result) {
     if (!result) return;
     pthread_mutex_lock(&g_net_lock); net_ai_allocation **link = &g_ai; while (*link && (*link)->root != result) link = &(*link)->next;

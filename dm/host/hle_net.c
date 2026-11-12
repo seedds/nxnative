@@ -76,8 +76,17 @@ SKW("_ZN2nn6socket6SelectEiPNS0_5FdSetES2_S2_PNS0_7TimeValE", h_sk_Select, int n
 SKF("_ZN2nn6socket7EventFdEmNS0_12EventFdFlagsE", h_sk_EventFd, unsigned long v, int f) { (void)v; (void)f; return sk_fail(); }
 SKF("_ZN2nn6socket11EventFdReadEiPm", h_sk_EventFdRead, int s, unsigned long *v) { (void)s; (void)v; return sk_fail(); }
 SKF("_ZN2nn6socket12EventFdWriteEim", h_sk_EventFdWrite, int s, unsigned long v) { (void)s; (void)v; return sk_fail(); }
-SKF("_ZN2nn6socket17ResolverGetOptionEPNS0_14ResolverOptionENS0_17ResolverOptionKeyE", h_sk_ResGet, void *o, int k) { (void)o; (void)k; return sk_fail(); }
-SKF("_ZN2nn6socket17ResolverSetOptionERKNS0_14ResolverOptionE", h_sk_ResSet, const void *o) { (void)o; return sk_fail(); }
+// Resolver options (nn::socket::ResolverOption: its key is the first word). The host resolver has none to apply: setting one is accepted and not applied, and reading one fails,
+// as there is no value to give. Each key is logged once, so a game that depends on one shows it
+static int sk_res_option(const void *o, int key, int set) {
+    if (set) key = o ? *(const int32_t *)o : -1;
+    static _Atomic uint64_t seen[2]; uint64_t bit = key >= 0 && key < 64 ? 1ull << key : 1ull << 63;
+    if (!(atomic_fetch_or(&seen[set], bit) & bit)) LOG("%ssocket: resolver option %d %s", set ? "" : "[RED] ", key, set ? "set: accepted, the host resolver does not apply it" : "read: the host resolver has none, fails");
+    if (set && dm_net_enabled() && o) return 0;
+    return sk_fail();
+}
+SKF("_ZN2nn6socket17ResolverGetOptionEPNS0_14ResolverOptionENS0_17ResolverOptionKeyE", h_sk_ResGet, void *o, int k) { (void)o; return sk_res_option(NULL, k, 0); }
+SKF("_ZN2nn6socket17ResolverSetOptionERKNS0_14ResolverOptionE", h_sk_ResSet, const void *o) { return sk_res_option(o, 0, 1); }
 HLE_FORCE_WAIT("_ZN2nn6socket4RecvEiPvmNS0_7MsgFlagE", "socket transport, offline by default", long, h_sk_Recv, int s, void *b, unsigned long n, int f) { return dm_net_recv(s, b, n, f, NULL, NULL); }
 HLE_FORCE_WAIT("_ZN2nn6socket8RecvFromEiPvmNS0_7MsgFlagEPNS0_8SockAddrEPj", "socket transport, offline by default", long, h_sk_RecvFrom, int s, void *b, unsigned long n, int f, void *a, unsigned *al) { return dm_net_recv(s, b, n, f, a, al); }
 HLE_FORCE_WAIT("_ZN2nn6socket4SendEiPKvmNS0_7MsgFlagE", "socket transport, offline by default", long, h_sk_Send, int s, const void *b, unsigned long n, int f) { return dm_net_send(s, b, n, f, NULL, 0); }
@@ -104,8 +113,8 @@ HLE_FORCE("nnsocketRequestCancelHandle", "allocate a nonzero resolver cancellati
 HLE_FORCE("_ZN2nn6socket19RequestCancelHandleEv", "allocate a nonzero resolver cancellation identity, not a socket", uint32_t, h_sk_RequestCancel, void) { return dm_net_request_cancel_handle(); }
 SKW("nnsocketCancel", h_nsk_Cancel, uint32_t id) { return dm_net_cancel(id); }
 SKW("_ZN2nn6socket6CancelEi", h_sk_Cancel, uint32_t id) { return dm_net_cancel(id); }
-SKF("nnsocketResolverGetOption", h_nsk_ResGet, void *o, int k) { (void)o; (void)k; return sk_fail(); }
-SKF("nnsocketResolverSetOption", h_nsk_ResSet, const void *o) { (void)o; return sk_fail(); }
+SKF("nnsocketResolverGetOption", h_nsk_ResGet, void *o, int k) { (void)o; return sk_res_option(NULL, k, 0); }
+SKF("nnsocketResolverSetOption", h_nsk_ResSet, const void *o) { return sk_res_option(o, 0, 1); }
 HLE_FORCE_WAIT("nnsocketRecv", "socket transport, offline by default", long, h_nsk_Recv, int s, void *b, unsigned long n, int f) { return dm_net_recv(s, b, n, f, NULL, NULL); }
 HLE_FORCE_WAIT("nnsocketSend", "socket transport, offline by default", long, h_nsk_Send, int s, const void *b, unsigned long n, int f) { return dm_net_send(s, b, n, f, NULL, 0); }
 HLE_FORCE_WAIT("nnsocketGetHostByNameWithOptions", "name resolution, offline by default", void *, h_nsk_GetHost, const char *n, const void *o, unsigned long c) { (void)o; (void)c; return dm_net_gethostbyname(n); }

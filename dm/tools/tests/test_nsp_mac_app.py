@@ -955,4 +955,5 @@ if __name__ == '__main__':
 
 def po_exit():   # pso_offline.py's exit status for an archive with pipelines left out, which the NSP script and build_ipa.sh keep
     spec = importlib.util.spec_from_file_location('pso_offline_exit', REPO / 'dm/gfx/tools/pso_offline.py')
+    assert spec and spec.loader
     m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m); return m.LEFT_OUT_EXIT

@@ -786,7 +786,7 @@ def build(a, ap):
                                      f'platform\t{a.platform}\t{osmin}\ntoolchain\t{tv}\nbases\t{len(bases)}\nrest\t{len(rest)}\ncompute\t{len(computes)}\n'
                                      + (f'failed\t{sum(len(x) == 4 for x in dropped)} bases, {sum(len(x) == 2 for x in dropped)} compute pipelines (metal-tt could not compile them: left to the device)\n' if dropped else ''))
     if any(lost.values()):
-        print(f'[RED] pso_offline: archives made without the pipelines metal-tt did not compile alone: '
+        print('[RED] pso_offline: archives made without the pipelines metal-tt did not compile alone: '
               + ', '.join(f'{arch} {n}' for arch, n in lost.items() if n) + f'; {sum(len(x) == 4 for x in dropped)} bases\' pairs go to the device in rest_pairs.tsv (exit status {LEFT_OUT_EXIT})', flush=True)
         return LEFT_OUT_EXIT
     return 0

@@ -170,6 +170,19 @@ class Store(_Files):
         self._run('PRAGMA incremental_vacuum')
         return len(gone), sum(size.get(d, 0) for d in gone)
 
+    def slim(self, since):
+        """Remove every shader/<64 hex digits>/ entry written before since, the listed ones too, and every index/ entry written before it, and the bytes nothing names any more, giving their pages back. These are the
+        per-shader hit cache (the Mac sources, reflection and the entries' own copies of the libraries) which only a later build of the same chain reads; metallib/ and variant/ stay, and so does anything written since.
+        Returns (shaders removed, bytes of their sources and reflection and of the index entries: the libraries are shared with metallib/)"""
+        n, size = self.prune_shaders(set(), since)
+        rows = self._run("SELECT e.name, length(b.data) FROM entry e JOIN blob b ON b.id=e.blob WHERE e.name>='index/' AND e.name<'index0' AND e.mtime<?", since)
+        if rows:
+            with self.lock, self.batch():
+                self.db.executemany('DELETE FROM entry WHERE name=? AND mtime<?', ((name, since) for name, _ in rows))
+                self.db.execute('DELETE FROM blob WHERE id NOT IN (SELECT blob FROM entry)')
+            self._run('PRAGMA incremental_vacuum')
+        return n, size + sum(k for _, k in rows)
+
     def delete_prefix(self, prefix):
         """Remove every entry whose name starts with prefix, and the bytes nothing names any more, giving their pages back (dmsh_build.py's staged outputs once its image is written)"""
         with self.lock:

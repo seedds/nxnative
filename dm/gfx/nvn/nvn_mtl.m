@@ -281,7 +281,21 @@ static void ws_report(uint64_t frame, uint64_t frames) {
 #include "nvn_rec.h"   // deferred encoding (DM_NVN_ENC_THREAD)
 static NSHashTable *g_res_objects;
 static _Atomic unsigned g_image_heap_n, g_big_n;   // g_big_n: large pools in chunks, whose buffers overlap (BIG_MIN)
-static inline MTL4VisibilityOptions resource_vis(void) { return MTL4VisibilityOptionDevice | (g_image_heap_n || g_big_n ? MTL4VisibilityOptionResourceAlias : 0); }
+// Image heaps (a resolution family's sizes sharing one storage) take the alias flush only at the first barrier of each submission (g_alias_heap_pend, set by mtl_sub_begin)
+// and after an encoder that may have written memory (g_alias_pend: a compute or copy encoder, or a draw pass with shader writes), not on every barrier: a family changes the
+// size it draws at between frames (dynamic resolution), not inside one. With the flush on every barrier a Metal System Trace of Ocarina of Time on an M1 (its dynamic-resolution
+// targets are a family from the first frame) showed the GPU's stages never overlapping: vertex work started under a running fragment phase in 0.9 % of kicks, and the GPU was
+// idle a quarter of each frame; flushed this way, 32.8 %, and frames take 1.3 ms less. DM_NVN_VIS_HEAPFRAME=0 flushes on every barrier again (ab for the DM_AB phases)
+static int sw_mode(const char *name, int dflt); static inline int sw_on(int m);
+static int vis_heapframe(void) { static int m = -1; if (m < 0) { m = sw_mode("DM_NVN_VIS_HEAPFRAME", 1); if (!m) MLOG("DM_NVN_VIS_HEAPFRAME=0: the image-heap alias flush on every barrier"); } return m && sw_on(m); }
+static _Atomic int g_alias_pend = 1, g_alias_heap_pend = 1;
+static inline MTL4VisibilityOptions resource_vis(void) {
+    if (g_image_heap_n && vis_heapframe()) {
+        int need = atomic_exchange_explicit(&g_alias_heap_pend, 0, memory_order_relaxed) | atomic_exchange_explicit(&g_alias_pend, 0, memory_order_relaxed);
+        return MTL4VisibilityOptionDevice | (need ? MTL4VisibilityOptionResourceAlias : 0);
+    }
+    return MTL4VisibilityOptionDevice | (g_image_heap_n || g_big_n ? MTL4VisibilityOptionResourceAlias : 0);
+}
 // Residency churn by call site (the power line every 300 frames, mtl_res_stats): each commit with changes is a kernel call whose cost grows with what was added or removed
 enum { RS_SITES = 16 }; static struct { int line; uint64_t n, bytes; } g_rs_site[RS_SITES]; static uint64_t g_rs_rm, g_rs_commits, g_rs_commit_ns;
 #define res_add(r) res_add_at((r), __LINE__)
@@ -1479,6 +1493,7 @@ static void sub_cut_begin(void); static void ts_sub_begin(void), ts_boundary(voi
 static void gmem_commit_patch(void);   // the raw pool table words of the arguments encoded so far follow the pools (gmem_slot_note)
 void mtl_sub_begin(void) {
     mtl_init(); g_sub_serial++; g_seg = 0;
+    atomic_store_explicit(&g_alias_heap_pend, 1, memory_order_relaxed);   // the submission's first barrier carries the image-heap alias flush (resource_vis)
     if (g_pkg_kept) { g_pkg_kept = 0; nvn_dirty_touch(); } seg_clk_put(g_sclk); g_sclk = NULL;
     sub_cut_begin();
     defer_drain();
@@ -1563,6 +1578,7 @@ static inline void m4_end(id e) {
     MTL4VisibilityOptions vis = e == g_blit && g_blit_alias ? blit_vis() : end_alias && sw_on(end_alias) ? resource_vis() : MTL4VisibilityOptionDevice; if (e == g_blit) g_blit_alias = 0;
     if ([e conformsToProtocol:@protocol(MTL4CommandEncoder)]) [(id<MTL4CommandEncoder>)e barrierAfterStages:MTLStageAll beforeQueueStages:MTLStageAll visibilityOptions:vis];
     [e endEncoding]; g_last_end_relaxed = 0; cm_enc_mark(-1);
+    if (![e conformsToProtocol:@protocol(MTL4RenderCommandEncoder)] || g_pass_swrite) atomic_store_explicit(&g_alias_pend, 1, memory_order_relaxed);   // a write the alias flush may be needed for (resource_vis)
 }
 // DM_NVN_BARRIER=game (default the profile's draw_barriers, full unless it says game): draw passes are ordered by the game's own barriers. A draw pass ends with a barrier from its vertex and fragment stages to the fragment, compute and copy stages of
 // later work, so the next pass's vertex work can overlap this pass's fragments (with the full barriers every pass waited for the previous one to finish completely: about 350 passes a frame in Breath of
@@ -1664,6 +1680,7 @@ static inline void enc_r_end_pass(id e) {
     if (!barrier_game()) { m4_end(e); return; }
     gp_end(e); [(id<MTL4CommandEncoder>)e barrierAfterStages:MTLStageVertex | MTLStageObject | MTLStageMesh | MTLStageFragment beforeQueueStages:MTLStageFragment | MTLStageDispatch | MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];
     [e endEncoding]; g_last_end_relaxed = 1;
+    if (g_pass_swrite) atomic_store_explicit(&g_alias_pend, 1, memory_order_relaxed);   // the pass's shaders wrote memory (resource_vis)
 }
 static inline id<MTL4RenderCommandEncoder> enc_r_begin(MTL4RenderPassDescriptor *d) { g_cm_enc++; cm_enc_mark(2); id<MTL4RenderCommandEncoder> e = [g_cb renderCommandEncoderWithDescriptor:d]; cm_enc_mark(0); [e barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:resource_vis()]; [e setArgumentTable:g_vt atStages:MTLRenderStageVertex]; [e setArgumentTable:g_ft atStages:MTLRenderStageFragment]; gp_begin(e, 'R', d); return e; }
 static inline void enc_r_end(id e) { m4_end(e); }

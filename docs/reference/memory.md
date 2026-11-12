@@ -652,8 +652,8 @@ The guest address space, heaps, pools, virtual address memory and the allocators
 - **Open:** release the staging only once uploads have gone quiet (after a scene's load), which would keep the reuse for loads on small devices too.
 - **Check:** `make -C dm/gfx/tests GAME=<id> check_t_upload_slots`: the 6 GB rule, then staging reuse forced on and off over batches in flight; `check_t_upload_budget` the staging left after a burst either way.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#for-an-iphone-or-ipad-build).
-### The census counted a resolution family's textures each at its own size
 
+### The census counted a resolution family's textures each at its own size
 
 - **Symptom:** `DM_CTL restop`'s census gives hundreds of MB of `storage addresses with several Metal textures`, moving with the dynamic resolution (Ocarina of Time on a 16 GB Mac: 214-923 MB), which nothing else in the set accounts for.
 - **Cause:** it summed each texture's `allocatedSize`. Textures placed in one heap (a [resolution family's](rendering.md#live-resolution-variants-share-physical-image-storage), a span's) share its bytes: a family of 36 sizes of one shadow target in one 15 MB heap counted as 490 MB.

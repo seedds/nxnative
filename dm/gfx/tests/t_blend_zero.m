@@ -35,6 +35,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     mtl_init(); g_msl_dir = @(argv[1]);
     int on = bz_on();
     NSError *error = nil; NSString *source = [NSString stringWithContentsOfFile:[g_msl_dir stringByAppendingString:@"/blend.metal"] encoding:NSUTF8StringEncoding error:&error];
+    if (!source) { fprintf(stderr, "%s\n", error.localizedDescription.UTF8String); abort(); }
     id<MTLLibrary> lib = [g_dev newLibraryWithSource:source options:nil error:&error];
     if (!lib) { fprintf(stderr, "%s\n", error.localizedDescription.UTF8String); abort(); }
     NvProg *pr = [NvProg new];

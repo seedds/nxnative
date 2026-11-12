@@ -61,6 +61,9 @@ namespace Ryujinx.Graphics.Shader.Translation
         // nxnative: TranslationFlags.MetalUniformBounds
         public bool UniformBounds { get; set; }
 
+        // nxnative: TranslationFlags.MetalBufferImageBias
+        public bool BufferImageBias { get; set; }
+
         public ResourceManager(ShaderStage stage, IGpuAccessor gpuAccessor, ResourceReservations reservations = null)
         {
             _gpuAccessor = gpuAccessor;
@@ -69,8 +72,9 @@ namespace Ryujinx.Graphics.Shader.Translation
             _stage = stage;
             _stagePrefix = GetShaderStagePrefix(stage);
 
-            // Constant buffer banks 0-17 (Maxwell's), 24: NVN2's push constants (c[24]), and 25: the uniform slots' sizes (Constants.NxUniformSizesBank)
-            _cbSlotToBindingMap = new SetBindingPair[Constants.NxUniformSizesBank + 1];
+            // Constant buffer banks 0-17 (Maxwell's), 24: NVN2's push constants (c[24]), 25: the uniform slots' sizes (Constants.NxUniformSizesBank), and 26: the
+            // buffer images' offsets (Constants.NxBufferImageBiasBank)
+            _cbSlotToBindingMap = new SetBindingPair[Constants.NxBufferImageBiasBank + 1];
             // Storage buffers the global-to-storage pass found: the stage's storage buffer table and, for compute, its uniform buffer address table (NVN 16 + 16 slots)
             _sbSlotToBindingMap = new SetBindingPair[32];
             _cbSlotToBindingMap.AsSpan().Fill(new(-1, -1));
@@ -242,6 +246,71 @@ namespace Ryujinx.Graphics.Shader.Translation
                 StructureType type = new(new[]
                 {
                     new StructureField(AggregateType.Array | AggregateType.Vector4 | AggregateType.U32, "data", (Constants.NxUniformSlots + 3) / 4),
+                });
+
+                Properties.AddOrUpdateConstantBuffer(new(BufferLayout.Std140, setAndBinding.SetIndex, setAndBinding.Binding, $"{_stagePrefix}_c{slot.ToString(CultureInfo.InvariantCulture)}", type));
+                SetUsedConstantBufferBinding(setAndBinding.Binding);
+            }
+
+            return setAndBinding.Binding;
+        }
+
+        // nxnative: each image operation, as the structured program meets it (TranslationFlags.MetalBufferImageBias). A buffer image gets the next index of the offset
+        // table at its first operation, and the shader declares the table with its first buffer image (CodeGen/Spirv/Instructions.cs BiasBufferImageCoordinate). The
+        // index is the handle's: declarations of one handle in other formats are one texture at one offset, and the build finds an image's index by its slot and handle
+        // (dmsh_reflect.py buffer_image_bias). An array of images keeps its coordinates: the host binds it as it is
+        private readonly Dictionary<(int CbufSlot, int Handle), int> _bufferImageBiasByHandle = new();
+
+        public void NoteBufferImage(int setIndex, int binding)
+        {
+            SetBindingPair image = new(setIndex, binding);
+
+            if (!BufferImageBias || Properties.BufferImageBiases.ContainsKey(image) ||
+                !Properties.Images.TryGetValue(image, out TextureDefinition definition) || definition.ArrayLength != 1)
+            {
+                return;
+            }
+
+            (int, int) handle = (-1, -1);
+
+            foreach ((TextureInfo info, TextureMeta meta) in _usedImages)
+            {
+                if (meta.Set == setIndex && meta.Binding == binding)
+                {
+                    handle = (info.CbufSlot, info.Handle);
+                    break;
+                }
+            }
+
+            if (!_bufferImageBiasByHandle.TryGetValue(handle, out int index))
+            {
+                if (_bufferImageBiasByHandle.Count >= Constants.NxBufferImageBiases)
+                {
+                    return;
+                }
+
+                index = _bufferImageBiasByHandle.Count;
+                _bufferImageBiasByHandle.Add(handle, index);
+            }
+
+            Properties.AddBufferImageBias(image, index);
+            Properties.BufferImageBiasBinding = GetBufferImageBiasBinding();
+        }
+
+        // nxnative: the offset table, bank Constants.NxBufferImageBiasBank: one u32 a buffer image, in uint4 data[4]
+        private int GetBufferImageBiasBinding()
+        {
+            int slot = Constants.NxBufferImageBiasBank;
+            SetBindingPair setAndBinding = _cbSlotToBindingMap[slot];
+
+            if (setAndBinding.Binding < 0)
+            {
+                setAndBinding = _gpuAccessor.CreateConstantBufferBinding(slot);
+                _cbSlotToBindingMap[slot] = setAndBinding;
+
+                StructureType type = new(new[]
+                {
+                    new StructureField(AggregateType.Array | AggregateType.Vector4 | AggregateType.U32, "data", (Constants.NxBufferImageBiases + 3) / 4),
                 });
 
                 Properties.AddOrUpdateConstantBuffer(new(BufferLayout.Std140, setAndBinding.SetIndex, setAndBinding.Binding, $"{_stagePrefix}_c{slot.ToString(CultureInfo.InvariantCulture)}", type));
@@ -507,6 +576,85 @@ namespace Ryujinx.Graphics.Shader.Translation
             return types;
         }
 
+        // nxnative: one texture read as an array by some instructions and as a plain texture by others. A handle has one binding, declared with one type: the declaration took the
+        // last instruction's and the descriptor the first accurate one's, and each instruction built its coordinates for its own, so a 2D read of a binding declared a 2D array had
+        // no layer (SPIRV-Cross then wrote `coord.z` of a float2, which Metal refuses: PRAGMATA, 24 pixel shaders, cb65542 handle 0x3041000E sampled with TEX 2D at level 0 and with
+        // TXD ARRAY_2D). The GPU reads the texture the handle names with the coordinates each instruction gives, and without a layer that is layer 0. So such a binding is an
+        // array for every instruction, and those that give no layer read layer 0. 1D and 2D only (a cube array's layer goes with the reference of a shadow read, and 3D has none);
+        // a level-of-detail query takes no layer either way. Runs once every function is translated (TranslatorContext)
+        public void UnifyArrayTypes(IReadOnlyList<Function> funcs)
+        {
+            Dictionary<SetBindingPair, List<TextureOperation>> ops = new();
+
+            foreach (Function func in funcs)
+            {
+                foreach (BasicBlock block in func.Blocks)
+                {
+                    foreach (INode node in block.Operations)
+                    {
+                        if (node is TextureOperation texOp && !texOp.Inst.IsImage() && (texOp.Flags & TextureFlags.Bindless) == 0 && texOp.Type != SamplerType.None)
+                        {
+                            SetBindingPair pair = new(texOp.Set, texOp.Binding);
+
+                            if (!ops.TryGetValue(pair, out List<TextureOperation> list))
+                            {
+                                ops.Add(pair, list = new());
+                            }
+
+                            list.Add(texOp);
+                        }
+                    }
+                }
+            }
+
+            foreach ((SetBindingPair pair, List<TextureOperation> list) in ops)
+            {
+                if (!Properties.Textures.TryGetValue(pair, out TextureDefinition definition) || definition.ArrayLength != 1)
+                {
+                    continue;   // an array of textures: its instructions' first source is the index
+                }
+
+                SamplerType kind = list[0].Type & SamplerType.Mask;
+                bool sameKind = list.TrueForAll(o => (o.Type & SamplerType.Mask) == kind && (o.Type & SamplerType.Multisample) == 0);
+                bool mixed = list.Exists(o => (o.Type & SamplerType.Array) != 0) && list.Exists(o => (o.Type & SamplerType.Array) == 0);
+
+                if (!sameKind || !mixed || kind is not (SamplerType.Texture1D or SamplerType.Texture2D))
+                {
+                    continue;
+                }
+
+                foreach (TextureOperation texOp in list)
+                {
+                    if ((texOp.Type & SamplerType.Array) != 0)
+                    {
+                        continue;
+                    }
+
+                    if (texOp.Inst == Instruction.TextureSample)
+                    {
+                        bool intCoords = (texOp.Flags & TextureFlags.IntCoords) != 0;
+
+                        texOp.InsertSource(texOp.Type.Dimensions, intCoords ? OperandHelper.Const(0) : OperandHelper.ConstF(0f));
+                    }
+
+                    texOp.Type |= SamplerType.Array;
+                }
+
+                Properties.AddOrUpdateTexture(new TextureDefinition(
+                    definition.Set, definition.Binding, definition.ArrayLength, definition.Separate, definition.Name, definition.Type | SamplerType.Array, definition.Format, definition.Flags));
+
+                foreach ((TextureInfo info, TextureMeta meta) in new List<KeyValuePair<TextureInfo, TextureMeta>>(_usedTextures))
+                {
+                    if (meta.Set == pair.SetIndex && meta.Binding == pair.Binding && meta.Type != SamplerType.None)
+                    {
+                        TextureMeta array = meta;
+                        array.Type |= SamplerType.Array;
+                        _usedTextures[info] = array;
+                    }
+                }
+            }
+        }
+
         private static TextureMeta MergeTextureMeta(TextureMeta meta, TextureMeta existingMeta)
         {
             meta.Set = existingMeta.Set;
@@ -624,10 +772,11 @@ namespace Ryujinx.Graphics.Shader.Translation
 
         public TextureDescriptor[] GetImageDescriptors(bool includeArrays = true)
         {
-            return GetDescriptors(_usedImages, includeArrays);
+            // nxnative: with each buffer image's index in the offset table (NoteBufferImage)
+            return GetDescriptors(_usedImages, includeArrays, meta => Properties.BufferImageBiases.TryGetValue(new(meta.Set, meta.Binding), out int index) ? index : -1);
         }
 
-        private static TextureDescriptor[] GetDescriptors(IReadOnlyDictionary<TextureInfo, TextureMeta> usedResources, bool includeArrays)
+        private static TextureDescriptor[] GetDescriptors(IReadOnlyDictionary<TextureInfo, TextureMeta> usedResources, bool includeArrays, Func<TextureMeta, int> bufferBias = null)
         {
             List<TextureDescriptor> descriptors = new();
 
@@ -650,7 +799,8 @@ namespace Ryujinx.Graphics.Shader.Translation
                     info.Handle,
                     info.ArrayLength,
                     info.Separate,
-                    meta.UsageFlags));
+                    meta.UsageFlags,
+                    bufferBias?.Invoke(meta) ?? -1));
             }
 
             if (hasAnyArray && includeArrays)

@@ -2,7 +2,9 @@
 // gives back the game's call site both after a switch and straight through off the guest block (the audio Start / Stop / Close log it, PR #721)
 #include "../hle.h"
 #include <stdio.h>
+#include <string.h>
 #include <sys/mman.h>
+#include <unistd.h>
 
 static uintptr_t g_lo, g_hi;   // the fake guest stack: 16 KB above a guard page
 int dm_guest_as_contains(uintptr_t a) { return a >= g_lo && a < g_hi; }
@@ -16,6 +18,13 @@ HLE_FORCE_BIG("_ZN4test5probeEmmd", "unit test", uint64_t, probe, uint64_t a, ui
     g_fp = (uintptr_t)__builtin_frame_address(0);
     g_site = dm_bigstack_caller(__builtin_return_address(0));
     return a * 3 + b + (uint64_t)d + (uint64_t)(big[0] + big[sizeof big - 1]);
+}
+
+// a take-over on the guest stack (plain HLE_FORCE) that logs, with integer, string and floating-point arguments
+HLE_FORCE("_ZN4test4logsEm", "unit test", uint64_t, logs, uint64_t a) {
+    g_fp = (uintptr_t)__builtin_frame_address(0);
+    LOG("big-stack test line %llu from a %s stack %.2f", (unsigned long long)a, "guest", 2.5);
+    return a + 1;
 }
 
 // call_on(a, b, d, top, fn): calls fn(a, b, d) with sp = top (0: on this stack); _call_on_site is the return address the call leaves, the "game's call site"
@@ -52,6 +61,18 @@ int main(void) {
     g_site = NULL; r = call_on(2, 0, 0.0, 0, probe_bs);
     CHECK(r == 6 + 3, "arguments on the direct path");
     CHECK(g_site == (void *)call_on_site, "dm_bigstack_caller passes the call site through on the direct path");
+
+    // a log line from a take-over that is not registered through HLE_FORCE_BIG: 1 KB of guest stack is left, less than one line's formatting needs (about 2.7 KB), and the line
+    // still comes out whole, written on the host stack (dm_log)
+    int saved = dup(2), fds[2];
+    if (saved < 0 || pipe(fds) || dup2(fds[1], 2) < 0) { perror("pipe"); return 1; }
+    r = call_on(41, 0, 0.0, g_lo + guard + 1024, logs);
+    fflush(stderr); dup2(saved, 2); close(saved); close(fds[1]);
+    char got[256]; ssize_t n = read(fds[0], got, sizeof got - 1); close(fds[0]);
+    got[n > 0 ? n : 0] = 0;
+    CHECK(r == 42, "the logging take-over returned on its own stack");
+    CHECK(g_fp && dm_guest_as_contains(g_fp), "the logging take-over itself ran on the guest stack");
+    CHECK(!strcmp(got, "[dm] big-stack test line 41 from a guest stack 2.50\n"), "the log line written from 1 KB of guest stack");
 
     printf("big-stack entry: %d/%d checks %s\n", checks - fails, checks, fails ? "✗" : "✓");
     return fails != 0;

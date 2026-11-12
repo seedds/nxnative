@@ -356,6 +356,25 @@ def shared_store_msl(msl):
         u += len('using namespace metal;\n'); src = src[:u] + SHARED_ALIAS + src[u:]
     return src
 
+# A compute shader's local size as the kernel's [[max_total_threads_per_threadgroup]]. A Metal compute pipeline's maxTotalThreadsPerThreadgroup is not fixed at 1,024: on GPUs without
+# Dynamic Caching (the M1 and M2, applegpu_g13* / g14*, and the iPhone GPUs of their generation) it falls with the registers the kernel's code takes, 1,024 threads at up to 52 32-bit
+# registers, 512 at up to 104, 384 at 128, and the GPU compiler chooses the registers without knowing the size the host will dispatch. The host dispatches the Switch shader's own local size
+# (nvn_mtl.m), so a kernel compiled past that size's budget gets a dispatch larger than its pipeline allows, which runs no invocation: Ocarina of Time's froxel light injection 9ed48d1011f1b48b
+# (8x8x8) took 128 registers on applegpu_g14g once its 195 uniform reads at computed offsets were bounded as selects (918e9f34) and 104, exactly the 512-thread budget, as plain reads, and its
+# 128x72x96 volumes stayed zero on M2s, so the forest haze was gone (issue #2425); on the M3 and later (g15 / g16) every size up to 1,024 fits and the code is the same with the attribute.
+# With it, the compiler fits the kernel to the size (spilling where it must), as it does for a pipeline descriptor's maxTotalThreadsPerThreadgroup. Only sizes above 384 get it: 128
+# registers, the most a thread has, still allow 384, so no smaller size can be refused, and on g13 / g14 the attribute changes the code of most kernels that already fit (a 64-thread kernel's
+# registers and spill go down a little), which those sizes are left out of. The line goes before the kernel's, which tools match at the start of a line. local: the translator's [x, y, z];
+# a missing or out-of-range size leaves the shader as it is
+MAX_THREADS = 1024   # Metal's limit for a compute threadgroup on every Apple GPU
+ALWAYS_FITS = 384   # threads a pipeline allows at the most registers a thread can take (128) on g13 / g14
+
+def max_threads(msl, local):
+    if not local or len(local) != 3 or any(not isinstance(v, int) or v < 1 for v in local): return msl
+    n = local[0] * local[1] * local[2]
+    if n <= ALWAYS_FITS or n > MAX_THREADS or '[[max_total_threads_per_threadgroup(' in msl: return msl
+    return re.sub(r'^(kernel void main0\()', '[[max_total_threads_per_threadgroup(%d)]]\n\\1' % n, msl, count=1, flags=re.M)
+
 # Compute shared memory past Metal's limit: Apple's GPUs give a kernel 32 KB of threadgroup memory (maxThreadgroupMemoryLength), and Metal refuses a pipeline that declares more, while Ampere
 # gives up to 100 KB. Mario Kart World's DrivePassShaderDefault has 168 compute shaders of 48 KB (spvUnsafeArray<uint, 12288>), seven of them run on the way to the first race; refused, their
 # dispatches were skipped. Such a kernel takes its threadgroup arrays from a device buffer the host binds (abi.TG_SLOT): one slice of the arrays' total per workgroup, at the workgroup's index in

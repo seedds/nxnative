@@ -435,15 +435,24 @@ def find_nx_extract(repo, env):
 def swap_in(tmp, dst):
     """Publish the finished output tmp (a sibling of dst, so the same volume) as dst. dst is always the whole old output, the whole new one, or absent; never half deleted, which a
     reuse check could take for a finished output: the old one is renamed aside first (<dst>.old.partial: as every unfinished folder, a name the build ignores), the new one renamed in,
-    and only then the old one deleted. A failure or an interrupt before the new one is in renames the old one back. Recoverable, not atomic: two renames, and a hard kill between
-    them leaves dst absent (the old output in the aside folder), which a rerun rebuilds. An aside folder an earlier run left is deleted before it is needed again"""
+    and only then the old one deleted. Recoverable, not atomic: two renames. What stops it before the new one is in (a failure, an interrupt or SIGTERM, also between the two
+    renames) puts the old one back, judged by what is on the disk rather than by which step ran; if that rename fails too, BuildError says where the old output is kept. An aside
+    folder an earlier run left is put back when nothing is in place (a hard kill between the renames: the old output, whole) and deleted only when the new output went in (the old
+    one's remains, cut short while being deleted)"""
     old = dst.with_name(dst.name + '.old.partial')
-    rmtree(old)
-    if not (dst.is_symlink() or dst.exists()): tmp.rename(dst); return
-    dst.rename(old)
-    try: tmp.rename(dst)
-    except BaseException:
-        old.rename(dst); raise   # an interrupt or SIGTERM too: the window is two renames
+    here, aside = (lambda: dst.is_symlink() or dst.exists()), (lambda: old.is_symlink() or old.exists())
+    if aside():
+        if here(): rmtree(old)
+        else: old.rename(dst)
+    if not here(): tmp.rename(dst); return
+    try:
+        dst.rename(old)
+        tmp.rename(dst)
+    except BaseException as e:
+        if aside() and not here():
+            try: old.rename(dst)
+            except OSError as back: raise BuildError(f'publishing {dst} failed ({e!r}), and the old output could not be put back ({back}): it is kept in {old}') from e
+        raise
     rmtree(old)
 
 
@@ -637,14 +646,14 @@ def decompress_nsz(nsp_dir, app, fam, keys, env, work=None):
         st = p.stat(); key = fingerprint(p.name, st.st_size, st.st_mtime_ns)
         if not (dst.is_file() and reused(keyfile, key) is not None):
             PROG.set(done=i, step=p.name)
-            rmtree(tmp); tmp.mkdir(parents=True); rmtree(dst); keyfile.unlink(missing_ok=True)
+            rmtree(tmp); tmp.mkdir(parents=True); keyfile.unlink(missing_ok=True)   # the stale output stays until the new one replaces it (swap_in)
             log = logs / f'nsz_{p.stem}.log'
             try:
                 # nsz 4.6.1 loads keys.txt beside argv[0] at import time; with argv[0] = 'nsz' that is cwd. That release has no --keys option.
                 (tmp / 'keys.txt').symlink_to(keys.resolve())
                 run([*nsz, *keys_opt, '-D', '-o', tmp, nsz_source(p, tmp)], log, env=env, cwd=tmp)
                 if not (tmp / dst.name).is_file(): raise BuildError(f'nsz made no {dst.name} (full output: {log})')
-                (tmp / dst.name).rename(dst)
+                swap_in(tmp / dst.name, dst)
             finally: rmtree(tmp)
             keyfile.write_text(key + '\n'); made += 1
         conv[p] = dst

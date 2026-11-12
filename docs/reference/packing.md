@@ -313,6 +313,13 @@
 - **Fix:** `finish` sets the window's `animationBehavior` to `.none` before the order-out, and `dm_mac_launcher` calls `CATransaction.flush()` after `run()` returns, before it hands back to `launcher.c`. Neither alone was enough. Check: a copy of the window with a timed Play and a `CGWindowListCopyWindowInfo` probe while the thread then blocks; the window was still listed 2 and 4 s after Play before the fix, and gone 3 times in 3 after it. `test_launcher_storage.py` and `test_nsp_mac_app.py` pass.
 - **Found on:** the Mac app of [Breath of the Wild](../../dm/games/01007EF00011E000/README.md); applies to every Mac app.
 
+### A bug report for an NSP folder left out the Mac app packed there
+
+- **Symptom:** `scripts/bug_report.py <NSP folder>` (or its `<title ID>_build`) writes `unknown (not recorded by the build)` under both "nxnative commit" and "Shader chain version" in `report.md`, although the Mac app the NSP script packed into that folder records both; given the `.app` itself, the script names them.
+- **Cause:** for an NSP folder, `resolve` took only the `<title ID>_build` folder, which records neither: the commit and the chain are stamped only into an app's `Info.plist` (`DMCommit`, `DMChain`, written by `dm/mac/pack_app.py`). The NSP script writes its Mac app directly into the NSP folder (`<game name>.app`, or `-provisional.app`), so the stamps were one folder away.
+- **Fix:** `resolve` lists the apps directly in the NSP folder whose `DMTitleID` is the build's title ID. With exactly one, `collect` takes its `DMCommit` and `DMChain` (or its sole `b-<chain>` library), names the app beside each value, lists its library before the build's shader folders, and keeps the build's logs. With none or several, both stay unknown and the report's file list says why: a folder never guesses which app ran. Only the stamps are taken: the name, version, settings and `env.txt` of an app that the player may not have run stay out, and "How it was built and run" is left to fill in.
+- **Found on:** the NSP folder of [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md): commit and chain unknown before; after, `786715256f37` and `ded41f8d62ed` from its app, the values the same script reports for the app, with the same 18 files in the zip. `dm/tools/tests/test_bug_report.py` covers one app, two apps and an app of another title.
+
 ## External drives
 
 ### A game folder on an exFAT drive reads one update as two, or fails to remove a folder

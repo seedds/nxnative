@@ -492,6 +492,9 @@ t_serial_owner: t_serial_owner.m ../nvn/nvn_owner.m ../nvn/nvn_owner.h ../nvn/nv
 t_partial_upload: t_partial_upload.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_partial_upload.m $(MTL_T_SRC) $(FW)
 check_t_partial_upload: RUN_ENV = MTL_DEBUG_LAYER=1
+t_view_cache: t_view_cache.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_view_cache.m $(MTL_T_SRC) $(FW)
+check_t_view_cache: RUN_ENV = MTL_DEBUG_LAYER=1
 t_srgb_alias: t_srgb_alias.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_srgb_alias.m $(MTL_T_SRC) $(FW)
 check_t_srgb_alias: RUN_ENV = MTL_DEBUG_LAYER=1
@@ -600,13 +603,23 @@ t_wait_event: t_wait_event.m $(MTL_T_DEP)
 t_queue_lifetime: t_queue_lifetime.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_queue_lifetime.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
 
+# A queue parked on an event the game's CPU signals: translated meanwhile, nothing of it on the GPU before the signal (nvn_rec.h hold_*, DM_NVN_REPLAY_AHEAD)
+t_replay_ahead: t_replay_ahead.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_replay_ahead.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+.PHONY: check_t_replay_ahead
+check_t_replay_ahead: t_replay_ahead
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 DM_NVN_REPLAY_AHEAD=0 ./$<
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 DM_NVN_REPLAY_AHEAD=1 ./$<
+
 .PHONY: check_t_wait_event check_t_queue_lifetime
 check_t_wait_event: t_wait_event
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./$<
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./$<
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 DM_NVN_REPLAY_AHEAD=1 ./$<
 check_t_queue_lifetime: t_queue_lifetime
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./$<
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./$<
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 DM_NVN_REPLAY_AHEAD=1 ./$<
 
 t_render_enable_queue: t_render_enable_queue.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_render_enable_queue.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)

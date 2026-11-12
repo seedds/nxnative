@@ -59,7 +59,6 @@ dm/gfx/tests/t_primitive_restart.m	clang-analyzer-unix.cstring.UninitializedRead
 dm/gfx/tests/t_pso_archive.m	bugprone-suspicious-memory-comparison	1
 dm/gfx/tests/t_pso_archive.m	clang-analyzer-nullability.NullablePassedToNonnull	2
 dm/gfx/tests/t_pso_bundle.m	bugprone-command-processor	1
-dm/gfx/tests/t_pso_skey.m	bugprone-suspicious-memory-comparison	4
 dm/gfx/tests/t_pso_stall.m	bugprone-command-processor	1
 dm/gfx/tests/t_pull.m	bugprone-random-generator-seed	1
 dm/gfx/tests/t_pull_inv.m	bugprone-command-processor	1

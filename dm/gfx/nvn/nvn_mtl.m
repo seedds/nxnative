@@ -3341,7 +3341,8 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
     // and wires it, for a pool the GPU may otherwise never address. sk shifts every read one level down (the host texture is level 1 of the game's)
     int keep_cpu = tex_soft(t) && t->has_layout && !mtl_pool_wrapped(t->mem, t->L.size);
     unsigned sk = tex_soft(t) ? 1 : 0;   // source level = host level + sk
-    int direct = !keep_cpu && !linear && !rb_shift && stamp && direct_upload_on() && g_nvn_deswz_gpu && !(t->pool && nvn_sparse_pool(t->pool)) && nvn_deswz_gpu_direct_supported(&t->d);
+    // The direct path writes the game's level l into host level l, with no sk (nvn_deswz_gpu_direct_m4 takes one level for both): a soft texture takes the staged path, which shifts
+    int direct = !sk && !keep_cpu && !linear && !rb_shift && stamp && direct_upload_on() && g_nvn_deswz_gpu && !(t->pool && nvn_sparse_pool(t->pool)) && nvn_deswz_gpu_direct_supported(&t->d);
     if (direct) d.usage |= MTLTextureUsageShaderWrite | MTLTextureUsagePixelFormatView;
     id<MTLTexture> mt = reuse && reuse.pixelFormat == d.pixelFormat && reuse.width == d.width && reuse.height == d.height && reuse.mipmapLevelCount == d.mipmapLevelCount && reuse.textureType == d.textureType
                         && (reuse.usage & d.usage) == d.usage

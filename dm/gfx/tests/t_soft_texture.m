@@ -242,6 +242,18 @@ int main(void) { @autoreleasepool {
         CHECK("a copy from its level 0 is skipped", untouched);
         CHECK("it is still soft", half_size(resolve(&t)) && tex_soft(&t));
     }
+    // The direct upload (nvn_deswz_gpu_direct_m4, switched on here) writes the game's level l into host level l: a soft texture in a wrapped pool must not take it, as the host's level l is the game's l + 1.
+    // No soft texture is eligible today (tex_soft wants a block-compressed format, the direct path RGBA16F), so this holds the selection and the result together
+    {
+        g_direct_upload_on = 1;
+        tex_t t = soft_tex(&pools[7], 880010, 0);
+        CHECK("a wrapped pool's soft texture", tex_soft(&t) && mtl_pool_wrapped(t.mem, t.L.size));
+        uint64_t direct = g_direct_uploads, dispatches = g_direct_dispatches;
+        id<MTLTexture> img = resolve(&t);
+        CHECK("it is not taken by the direct upload", g_direct_uploads == direct && g_direct_dispatches == dispatches);
+        CHECK("it is half the size", half_size(img));
+        for (unsigned hl = 0; hl + 1 < LV; hl++) CHECK("host level l holds the game's level l + 1, with the direct upload on", host_is(img, hl, ref[hl + 1], lpitch(hl + 1) * lrows(hl + 1)));
+    }
     log_out();
     dprintf(g_err, "t_soft_texture: %d checks, %d failed\n", checks, failed);
     return failed != 0;

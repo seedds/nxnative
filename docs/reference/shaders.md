@@ -1209,7 +1209,7 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Symptom:** a small scan or sort in a compute shader gives wrong results every frame, with no barrier in its loop (Orbitals: Niagara's sorted particle indices).
 - **Cause:** Ampere compilers rely on lockstep warps and leave the barrier out of small scans: a thread stores its word to shared memory, then loads its neighbour's. For one thread the load and its own earlier store do not alias, so Metal may move the load above the store and read the neighbour's old value.
 - **Fix:** `tg_fence` in `dmsh_build.py` puts a simdgroup-scope memory fence (`atomic_thread_fence(mem_flags::mem_threadgroup, …, thread_scope_simdgroup)`, not an execution barrier, so safe in divergent code) after each store to a threadgroup array, plain, compound or to a member. A kernel whose arrays spill to device memory gets the device scope too (`tg_spill`). Ported from uncraftablexd's Orbitals bring-up ([PR #1775](https://github.com/seedds/nxnative/pull/1775)).
-- **Found on:** Orbitals (no profile here), by PR #1775; taken for [PRAGMATA](../../dm/games/0400C76024710000/README.md)'s GPU-driven passes.
+- **Found on:** [Orbitals](../../dm/games/040004F027560000/README.md), by PR #1775; taken for [PRAGMATA](../../dm/games/0400C76024710000/README.md)'s GPU-driven passes.
 - **Check:** `python3 dm/gfx/tests/test_dmsh_tg_fence.py`.
 
 ### Tessellation stages are not drawn

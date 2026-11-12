@@ -1,0 +1,51 @@
+# Orbitals (Switch 2, v327680). Plays on the Mac: see README.md
+# Unreal Engine 5.6.1, SDK 21.4.2 built for the Switch 2 (Ounce), NVN2 (Ampere shaders), Wwise 2024.1; modules main + subsdk0 (movie) + sdk. A two-player co-op game.
+# Packed from a dump folder (no NACP in it, so the app takes the name below). Shaders: Unreal's IoStore shader libraries (ShaderArchive-*-SF_GLSL_SWITCH2), Oodle.
+
+# ---- Identity ----
+title_id	040004F027560000
+program_id	040004F027560000
+
+# ---- App ----
+name	Orbitals
+ipa	Orbitals.ipa
+app_category	public.app-category.action-games
+
+# ---- Versions ----
+build	v327680	v327680	main=84dc546cd0896d09582f02293c4edbce	subsdk0=caf9437bacb2aa161d837d5886f19ae8	sdk=daa31832ca979cdfbe07b3b09488d8e0
+package	v327680
+shader_versions	v327680
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 sdk
+romfs_marker	Orbitals/Content/Paks/Orbitals-Switch2.ucas
+zip_store	.bk2:.pak:.ttf:.txt:.ucas:.utoc:.metallib
+
+# ---- Memory ----
+# Unreal: nninitStartup reserves a 62 GB address region and its FMallocBinned3 takes 37 GB of it, so a 64 GB alias region on the Mac. The rewriter cuts the allocator in any Unreal 4 / 5 main
+# (dm/tools/ue_malloc.py) and gives the region what the alias region has room for (dm/tools/ue_region.py), as Octopath Traveler 0's profile (docs/reference/memory.md). In its first 15 s
+# in nnMain the game's regions reach alias +63.00 GB (what it takes later in play is not measured)
+mem_reserve	0x1028000000
+mem_alias	0x1000000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 20 MB of system resource
+sys_resource	0x1400000
+
+# ---- Shader split ----
+# the decoded shader code archives: the engine's global shaders and the game's material shaders
+shader_groups	ShaderArchive-Global-=global ShaderArchive-=game
+shader_note	Orbitals shaders
+
+# ---- Graphics ----
+# Unreal issues its own NVN barriers, so its passes order themselves: full barriers between passes serialised about 54 full-screen passes a frame at the character select (15 -> 18 fps there,
+# no visual change). nvn_mtl.m barrier_game; DM_NVN_BARRIER overrides
+draw_barriers	game
+# Metal encoding on its own thread: the game's frame is bound by the submitting thread (about 10,000 draws a frame in the 3D scenes)
+enc_thread	on
+
+# ---- Frame rate ----
+# The game's own 30 fps: its config sets t.MaxFPS 30 and rhi.SyncInterval 2. The Switch 2 holds an even 30 here (a 60 fps capture of it: 173 of 182 frames 33.3 ms apart). With the cap
+# at 30 the Mac (M4 Pro) gives 1198 of 1199 presents two refreshes apart; unlocked to 60 (the rewriter finds both variables by name, hle_fpslock.c) it gave 55-59 fps with missed vsyncs
+fps_target	30

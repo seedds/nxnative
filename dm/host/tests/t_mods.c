@@ -88,6 +88,7 @@ int main(void) {
     snprintf(p, sizeof p, "%s/dm/main.changed.tsv", base);
     puts_file(p, "# BUILD_ID " BUILD "\n80\t8\n");
 
+    char check[1536]; snprintf(check, sizeof check, "%s/check.tsv", base); setenv("DM_MODS_CHECK", check, 1);
     snprintf(p, sizeof p, "%s/mods", base); setenv("DM_MODS", p, 1);
     setenv("DM_ROMFS_OVERLAY", "/explicit", 1);
     dm_mods_init();
@@ -126,6 +127,38 @@ int main(void) {
     CHECK(m->base[0x4008] == 0xAB && m->base[0x400A] == 0xAB && m->base[0x400B] == 0x55, "IPS32: a run-length record");
     CHECK(word_at(m, 0x50) == 0xAA0103E0 && word_at(m, 0x54) == 0xAA0103E0, "a file with an x18 instruction is refused whole");
     CHECK(word_at(m, 0x80) == 0xAA0103E0, "a patch over a word the rewriter moved is refused");
+
+    fflush(g_check);
+    size_t cn; char *ct = (char *)read_file(check, &cn);
+    CHECK(ct && strstr(ct, "\trefused\tGamma\t") && strstr(ct, "x18.pchtxt\t") && strstr(ct, "\nrec\t50\t1f2003d5\nrec\t54\tf20300aa\n"), "DM_MODS_CHECK: a refused file with its patches as image offsets");
+    CHECK(ct && strstr(ct, "\tapplied\tAlpha\t") && strstr(ct, "\nrec\t4000\t686900\n"), "DM_MODS_CHECK: an applied file with its patches");
+    CHECK(ct && strstr(ct, "file\tmain\t" BUILD "\tapplied\tBeta\t") < strstr(ct, "\tapplied\tAlpha\t"), "DM_MODS_CHECK: the files in the order they are applied, the lowest priority first");
+    free(ct);
+
+    char sha[65], q[1536], list[6000]; size_t fn; uint8_t *fb;
+    snprintf(q, sizeof q, "%s/mods/Gamma/exefs/x18.pchtxt", base); fb = read_file(q, &fn); sha256_hex(fb, fn, sha); free(fb);
+    char abc[65]; sha256_hex((const uint8_t *)"abc", 3, abc);
+    CHECK(!strcmp(abc, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"), "SHA-256 of \"abc\"");
+    int o = snprintf(list, sizeof list, "baked\t%s\t%s\n", sha, q);
+    snprintf(q, sizeof q, "%s/mods/Gamma/exefs/moved.pchtxt", base); fb = read_file(q, &fn); sha256_hex(fb, fn, sha); free(fb);
+    o += snprintf(list + o, sizeof list - (size_t)o, "refused\t%s\t%s\tit patches a place where the rewriter has a cut\n", sha, q);
+    snprintf(q, sizeof q, "%s/mods/Alpha/exefs/patch.pchtxt", base);
+    o += snprintf(list + o, sizeof list - (size_t)o, "baked\t%064d\t%s\nbaked\t%064d\t%s/mods/Gone/exefs/gone.pchtxt\n", 0, q, 0, base);
+    snprintf(p, sizeof p, "%s/dm2/main.mods.tsv", base); puts_file(p, list);
+    snprintf(p, sizeof p, "%s/dm2/main.changed.tsv", base); puts_file(p, "# BUILD_ID " BUILD "\n");
+    for (uint64_t a = 0; a < 0x4000; a += 4) { uint32_t w = 0xAA0103E0; memcpy(m->base + a, &w, 4); }
+    snprintf(p, sizeof p, "%s/dm2", base);
+    int nbaked = 0; baked_t *bl = baked_read(m, p, &nbaked);
+    CHECK(bl && nbaked == 4 && !bl[0].refused && bl[1].refused && strstr(bl[1].why, "a cut") && strstr(bl[3].path, "gone.pchtxt"), "the rewritten module's list of patch files");
+    free(bl);
+    dm_mods_patch_module(m, p);
+    CHECK(word_at(m, 0x50) == 0xAA0103E0 && word_at(m, 0x54) == 0xAA0103E0, "a file the module was rewritten with is not applied again");
+    CHECK(word_at(m, 0x80) == 0xAA0103E0, "a file the rewriter refused is not applied");
+    CHECK(word_at(m, 0x30) == 0xAA0103E0 && word_at(m, 0x10) == 0xD65F03C0, "a file that changed after the rewrite is not applied over it; one outside the list still is (Beta's ret)");
+    fflush(g_check);
+    ct = (char *)read_file(check, &cn);
+    CHECK(ct && strstr(ct, "\tbaked\tGamma\t") && strstr(ct, "\trewriter-refused\tGamma\t"), "DM_MODS_CHECK on a rewritten module: what is in it and what the rewriter refused");
+    free(ct);
 
     int green = -1, pink = -1;
     for (int i = 0; i < dm_mods_count(); i++) { if (!strcmp(dm_mods_name(i), "Tunics/Green")) green = i; if (!strcmp(dm_mods_name(i), "Tunics/Pink")) pink = i; }

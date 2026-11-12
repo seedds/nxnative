@@ -479,3 +479,11 @@ To enroll a cut for any game's own module:
 ## Checking a rewriter change
 
 Rewrite every extracted module of every title with the old and the new `patch_nso.py` and compare all outputs; only `build_src.sha256` (the rewriter's own hash) may differ for titles the change is not meant for.
+
+### Mod code patches the host cannot make at load time
+
+- **Symptom:** `[RED] mods: <mod>: <file> is not applied: … cannot be made in the running image, the first at main+0x…, which uses x18, which Apple's kernel owns` (or `… replaces an instruction the rewriter already moved out of line`): a mod's `.pchtxt` or `.ips` does nothing.
+- **Cause:** the host patches a module after the rewriter. An instruction the rewriter must replace (an `svc`, x18, a thread or timer system register, an exclusive access, `sub sp, sp, xN`) would run raw against Apple's kernel, and a word the rewriter moved out of line no longer runs where the patch writes.
+- **Fix:** such a file is written into the original module before it is rewritten, at launch: `dm/tools/mods_rewrite.py` asks the host which files it refuses (`DM_MODS_CHECK`), runs `patch_nso.py` on the original module with them (`DM_MOD_PATCHES`), and caches the result by the rewriter's sources, the build ID and the patch files ([Code patches through the rewriter](../development.md#code-patches-through-the-rewriter)). The build ID stays the module's own. Cuts and the frame step are found on the game's code before the patches are written; a patch over one of them is refused by the mod's name (`MOD_REFUSED`, exit status 4) instead of failing an original-bytes assertion.
+- **Open:** nothing in the repository calls the tool yet: the NSP script's Mac launcher and the packed `.app`, which has no original modules, leave such patches refused. No downloaded mod with such a patch has been run.
+- **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game), with synthetic patches: `mov x18, x0` over an alignment `nop` (main+0x23d960), an equivalent instruction over a moved word (main+0x1752c) and an `.ips` over a frame step cut, refused. An unpatched rewrite of its main stays byte-identical.

@@ -140,6 +140,7 @@ static void host_preload(int argc, char **argv) {
     dm_mods_init();
     load_modules(argv[1], names, n);
     dm_mods_report_unmatched();
+    dm_mods_check_done();
     dm_cheats_init();   // the Atmosphère cheat files for this build (hle_cheats.c): picked by first 16 hex digits of main's build ID, which the loader knows now
     dm_sdk_major();   // logs the SDK version, which SDK-dependent behaviour follows (loader.c)
     uint64_t ta = now_ns();

@@ -1372,6 +1372,6 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** `dm/host/hle_mods.c` reads a mods folder (`DM_MODS`, default `<DM_ROOT>/mods`), one folder per mod in any of the layouts mods ship in, ordered and switched by `order.txt` ([Mods](../development.md#mods)):
   - `romfs/` folders join the RomFS overlay and follow the Mods menu while the game runs; a `<name>.dm-delete` marker hides a game file or directory, and a name that differs from the game's only in case is taken with a warning;
   - every `cheats/<build ID>.txt` joins the cheats folder's own as one list ([Cheat files from several places](../development.md#cheat-files-from-several-places));
-  - `.pchtxt` and `.ips` patches are written into a module as it is mapped, before its code is sealed, each file whole or not at all, and never over what the rewriter changed: such a file is refused with a `[RED]` line (open: applying it before the rewriter runs).
-- **Open:** code modules of a mod (ExLaunch, Skyline) are not loaded; no exefs patch on iOS.
+  - `.pchtxt` and `.ips` patches are written into a module as it is mapped, before its code is sealed, each file whole or not at all, and never over what the rewriter changed ([the launch-time rewrite](rewriter.md#mod-code-patches-the-host-cannot-make-at-load-time) takes those).
+- **Open:** code modules of a mod (ExLaunch, Skyline) are not loaded ([what one would need](../development.md#what-an-exlaunch-mod-would-need-open)); no exefs patch on iOS.
 - **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game), with two RomFS mods (a controller UI, a pack of tunic recolours) and synthetic patches and cheat files.

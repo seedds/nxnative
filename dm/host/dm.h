@@ -182,6 +182,7 @@ int dm_guest_heap_write(uint64_t addr, const void *src, size_t len);   // hle_sv
 // Cheats (hle_cheats.c): Atmosphère-format cheat code files applied to the running game (docs/development.md "Cheats")
 void dm_mods_init(void);              // Before load_modules (main.c): finds the mods folder's mods, in order, and puts their romfs folders into DM_ROMFS_OVERLAY (hle_mods.c)
 void dm_mods_patch_module(module_t *m, const char *dir);   // A mapped, still writable module: the mods' .pchtxt / .ips patches for its build (loader.c map_image)
+void dm_mods_check_done(void);        // DM_MODS_CHECK: writes the verdicts and ends the host (after dm_mods_report_unmatched)
 void dm_mods_report_unmatched(void);  // After load_modules: the patch files no loaded module's build matched
 const char *dm_mods_dir_path(void);   // The mods folder ("" when neither DM_MODS nor DM_ROOT is set); it need not exist
 int dm_mods_count(void); const char *dm_mods_name(int i); int dm_mods_on(int i);   // Every mod folder found at the start, in priority order, on or off (the Mac window's Mods menu)

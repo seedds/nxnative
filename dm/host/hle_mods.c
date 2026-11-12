@@ -1,5 +1,6 @@
 // Mods folder (DM_MODS, default <DM_ROOT>/mods): emulator-style mods, one folder each, feeding the RomFS overlay, the cheat engine and load-time exefs patches (docs/development.md "Mods")
 #include "dm.h"
+#include <CommonCrypto/CommonDigest.h>
 #include <ctype.h>
 #include <dirent.h>
 #include <strings.h>
@@ -16,6 +17,7 @@ typedef struct { char path[1536]; char bid[65]; int mod, ips; } pfile_t;
 typedef struct { uint64_t off; uint32_t len; uint8_t *data; } rec_t;
 typedef struct { rec_t *r; int n, cap; } recs_t;
 typedef struct { const module_t *m; uint64_t off, len; int mod; } applied_t;
+typedef struct { char path[1536], sha[65], why[400]; int refused, seen; } baked_t;
 
 static mod_t g_mods[MOD_MAX]; static int g_nmods;
 static char g_cheat_dirs[MOD_MAX][1024]; static int g_cheat_mod[MOD_MAX], g_ncheat_dirs;
@@ -24,6 +26,7 @@ static applied_t *g_applied; static int g_napplied, g_applied_cap;
 static struct { char name[256]; char romfs[1300]; int on, at_start; } g_all[MOD_MAX * 4]; static int g_nall, g_edited;
 static char g_overlay_first[4096];
 static char g_base[1024];
+static FILE *g_check;
 
 static int is_dir(const char *p) { struct stat st; return !stat(p, &st) && S_ISDIR(st.st_mode); }
 static int is_hex(char c) { return isxdigit((unsigned char)c) != 0; }
@@ -218,7 +221,9 @@ int dm_mods_exclusive(int i) { for (int k = 0; i >= 0 && i < g_nall && k < g_nal
 // order.txt lists mod folder names, highest priority first; a leading '#' turns a mod off. Folders it does not name follow in name order
 void dm_mods_init(void) {
     char *base = g_base;
-    const char *e = getenv("DM_MODS");
+    const char *e = getenv("DM_MODS_CHECK");
+    if (e && *e && !(g_check = fopen(e, "w"))) die("DM_MODS_CHECK: cannot write %s: %s", e, strerror(errno));
+    e = getenv("DM_MODS");
     if (e && *e) snprintf(base, sizeof g_base, "%s", e);
     else { e = getenv("DM_ROOT"); if (e && *e) snprintf(base, sizeof g_base, "%s/mods", e); }
     if (!base[0] || !is_dir(base)) return;
@@ -474,12 +479,14 @@ static int changed_hit(const changed_t *c, uint64_t off, uint64_t len) {
     return lo < c->n && c->run[lo][0] < off + len;
 }
 
-static const char *rec_refusal(const module_t *m, const changed_t *c, const rec_t *r, uint64_t *at) {
-    *at = r->off;
+// *final: no rewrite of the module can make the patch either
+static const char *rec_refusal(const module_t *m, const changed_t *c, const rec_t *r, uint64_t *at, int *final) {
+    *at = r->off; *final = 1;
     if (r->off < NSO_HEADER) return "lies in the NSO header";
     uint64_t off = r->off - NSO_HEADER, end = off + r->len;
     *at = off;
     if (end > m->key_page_off) return "lies outside the module's image";
+    *final = 0;
     if (off >= m->text_end) return NULL;
     if (!c->ok) return "is code, and the module has no changed-words list of its build beside it (rewrite it with dm/tools/patch_nso.py)";
     uint64_t text_end = end < m->text_end ? end : m->text_end;
@@ -508,37 +515,94 @@ static void note_applied(const module_t *m, uint64_t off, uint64_t len, int mod)
     g_applied[g_napplied++] = (applied_t){m, off, len, mod};
 }
 
+static void sha256_hex(const uint8_t *buf, size_t n, char out[65]) {
+    uint8_t d[CC_SHA256_DIGEST_LENGTH]; CC_SHA256(buf, (CC_LONG)n, d);
+    for (int k = 0; k < CC_SHA256_DIGEST_LENGTH; k++) snprintf(out + 2 * k, 3, "%02x", d[k]);
+}
+
+// <name>.mods.tsv beside a module the launch-time rewrite made (dm/tools/mods_rewrite.py): the patch files that are in its code already
+// ("baked", digest, path) and those the rewriter refused ("refused", digest, path, reason)
+static baked_t *baked_read(const module_t *m, const char *dir, int *n) {
+    *n = 0;
+    char p[1280]; snprintf(p, sizeof p, "%s/%s.mods.tsv", dir, m->name);
+    FILE *f = fopen(p, "r");
+    if (!f) return NULL;
+    baked_t *b = NULL; char line[2400];
+    while (fgets(line, sizeof line, f)) {
+        char *fld[4] = {0}; int nf = 0;
+        for (char *t = line; t && nf < 4; nf++) { fld[nf] = t; t = strchr(t, '\t'); if (t) *t++ = 0; }
+        if (nf < 3 || (strcmp(fld[0], "baked") && strcmp(fld[0], "refused"))) continue;
+        if (!(b = realloc(b, (size_t)(*n + 1) * sizeof *b))) die("mods: baked list allocation failed");
+        baked_t *e = &b[(*n)++]; *e = (baked_t){0};
+        e->refused = fld[0][0] == 'r';
+        strlcpy(e->sha, trim(fld[1]), sizeof e->sha); strlcpy(e->path, trim(fld[2]), sizeof e->path);
+        if (fld[3]) strlcpy(e->why, trim(fld[3]), sizeof e->why);
+    }
+    fclose(f);
+    return b;
+}
+
+static void check_file(const module_t *m, const pfile_t *p, const char *status, const char *sha, const char *why, const recs_t *rs) {
+    if (!g_check) return;
+    fprintf(g_check, "file\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", m->name, m->build_id, status, g_mods[p->mod].name, p->path, sha, why ? why : "-");
+    for (int k = 0; rs && k < rs->n; k++) {
+        fprintf(g_check, "rec\t%llx\t", (unsigned long long)(rs->r[k].off - NSO_HEADER));
+        for (uint32_t j = 0; j < rs->r[k].len; j++) fprintf(g_check, "%02x", rs->r[k].data[j]);
+        fputc('\n', g_check);
+    }
+}
+
 // Called while the image is still writable, before the loader seals its code and relocates it: the point at which Horizon's loader
 // applies the same patches to the NSO. A file is applied whole or not at all, since half a hook is worse than none
 void dm_mods_patch_module(module_t *m, const char *dir) {
-    changed_t changed = {0}; int read_changed = 0;
+    changed_t changed = {0}; int read_changed = 0, nbaked = 0;
+    baked_t *baked = baked_read(m, dir, &nbaked);
     for (int i = g_npfiles - 1; i >= 0; i--) {
         pfile_t *p = &g_pfiles[i];
         if (!bid_matches(p->bid, m->build_id)) continue;
         size_t n; uint8_t *buf = read_file(p->path, &n);
         if (!buf) { LOG("[RED] mods: %s: cannot read %s (or it is larger than %u bytes)", g_mods[p->mod].name, p->path, PATCH_FILE_MAX); continue; }
+        char sha[65]; sha256_hex(buf, n, sha);
+        baked_t *in = NULL;
+        for (int k = 0; k < nbaked && !in; k++) if (!strcmp(baked[k].path, p->path)) in = &baked[k];
+        if (in) {
+            in->seen = 1; free(buf);
+            if (strcmp(in->sha, sha)) LOG("[RED] mods: %s: %s changed after %s was rewritten with it: the older patch runs. Start the game through its launch script, which rewrites the module again (dm/tools/mods_rewrite.py)", g_mods[p->mod].name, p->path, m->name);
+            else if (in->refused) LOG("[RED] mods: %s: %s is not applied: %s", g_mods[p->mod].name, p->path, in->why);
+            else LOG("mods: %s: %s is in the code of %s, rewritten with it (build %s)", g_mods[p->mod].name, strrchr(p->path, '/') + 1, m->name, m->build_id);
+            check_file(m, p, in->refused ? "rewriter-refused" : "baked", sha, in->why[0] ? in->why : NULL, NULL);
+            continue;
+        }
         recs_t rs = {0};
         if (p->ips) { if (parse_ips(buf, n, &rs)) { LOG("[RED] mods: %s: %s is not a whole IPS or IPS32 file: not applied", g_mods[p->mod].name, p->path); recs_free(&rs); free(buf); continue; } }
         else parse_pchtxt((char *)buf, &rs);
         free(buf);
         if (!read_changed) { changed_read(&changed, m, dir); read_changed = 1; }
-        const char *why = NULL; uint64_t at = 0; int refused = 0;
+        const char *why = NULL; uint64_t at = 0; int refused = 0, final = 0;
         for (int k = 0; k < rs.n; k++) {
-            uint64_t a; const char *w = rec_refusal(m, &changed, &rs.r[k], &a);
-            if (w && !refused++) { why = w; at = a; }
+            uint64_t a; int fin; const char *w = rec_refusal(m, &changed, &rs.r[k], &a, &fin);
+            if (w && (!refused++ || (fin && !final))) { why = w; at = a; }
+            if (w && fin) final = 1;
         }
-        if (refused) LOG("[RED] mods: %s: %s is not applied: %d of its %d patches cannot be made in the running image, the first at %s+%#llx, which %s. It needs the module rewritten with the patch (not supported yet)",
-                         g_mods[p->mod].name, p->path, refused, rs.n, m->name, (unsigned long long)at, why);
-        else {
+        if (refused) {
+            LOG("[RED] mods: %s: %s is not applied: %d of its %d patches cannot be made in the running image, the first at %s+%#llx, which %s.%s",
+                g_mods[p->mod].name, p->path, refused, rs.n, m->name, (unsigned long long)at, why,
+                final ? "" : " It needs the module rewritten with the patch, which dm/tools/mods_rewrite.py does before the game starts (the launch script of a Mac build calls it)");
+            check_file(m, p, final ? "invalid" : "refused", sha, why, final ? NULL : &rs);
+        } else {
             for (int k = 0; k < rs.n; k++) {
                 uint64_t off = rs.r[k].off - NSO_HEADER;
                 memcpy(m->base + off, rs.r[k].data, rs.r[k].len);
                 note_applied(m, off, rs.r[k].len, p->mod);
             }
             LOG("mods: %s: %d patch(es) from %s applied to %s (build %s)", g_mods[p->mod].name, rs.n, strrchr(p->path, '/') + 1, m->name, m->build_id);
+            check_file(m, p, "applied", sha, NULL, &rs);
         }
         recs_free(&rs);
     }
+    for (int k = 0; k < nbaked; k++) if (!baked[k].seen && !baked[k].refused)
+        LOG("[RED] mods: %s was rewritten with %s, a patch of a mod that is not on now: it still runs. Start the game through its launch script, which picks the module for the mods that are on (dm/tools/mods_rewrite.py)", m->name, baked[k].path);
+    free(baked);
     free(changed.run);
 }
 
@@ -548,4 +612,13 @@ void dm_mods_report_unmatched(void) {
         for (int k = 0; k < g_nmod && !hit; k++) hit = bid_matches(p->bid, g_mod[k].build_id);
         if (!hit) LOG("[RED] mods: %s: %s is for build %s, which no loaded module has (main is %s): made for another version of the game, not applied", g_mods[p->mod].name, p->path, p->bid, dm_main_build());
     }
+}
+
+// DM_MODS_CHECK=<file>: the verdict on every patch file of a loaded module's build, with its patches, then the host ends before the
+// game starts. dm/tools/mods_rewrite.py asks this way which files the modules have to be rewritten with
+void dm_mods_check_done(void) {
+    if (!g_check) return;
+    fclose(g_check);
+    LOG("mods: DM_MODS_CHECK: the patch files' verdicts are written, the game is not started");
+    exit(0);
 }

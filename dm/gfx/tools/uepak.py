@@ -158,14 +158,17 @@ class R:
         return self.raw(n)[:-1].decode('utf-8', 'replace') if n else ''
 
 LEGACY = (4, 8)   # legacy pak versions read (the per-file index); 11 has the encoded one. Version 8 (DRAGON BALL Z: KAKAROT, UE 4.2x) keeps version 4's index with the FPakEntry
-#   compression method as an index (from 1) into the footer's method names, and version 11's footer: key GUID, encrypted flag, magic 0xcc from the end, five 32-byte names after the SHA-1
+#   compression method as an index (from 1) into the footer's method names, and version 11's footer: key GUID, encrypted flag, magic 0xcc from the end, five 32-byte names after the SHA-1.
+PER_FILE = LEGACY + (9,)   # versions with the per-file index: 9 (UE 4.25, PakFile_Version_FrozenIndex: Monster Jam Steel Titans 2) is version 8 with a u8 frozen index flag between the SHA-1
+#   and the names (magic 0xcd from the end); unlike 4 and 8 it is not taken as inline outright: Monster Jam's paks hold shader code archives (inline_shaders reads the names)
 LEGACY_METHODS = {1: 'Zlib', 2: 'Gzip', 3: 'LZ5', 4: 'Custom'}   # compression flags of a legacy pak (3: DRAGON QUEST XI S's engine, see the header)
 
 def magic_back(f):
     """(how far from the end the footer's magic is, the pak version): a legacy footer is the last 0x2d bytes (magic 0x2c from the end); version 11's magic is 0xc8 from the end in
-    Octopath Traveler 0 (UE5) and 0xcc in Unreal Engine 4.27 (DRAGON QUEST VII Reimagined: five whole 32-byte compression method names after the SHA-1)"""
+    Octopath Traveler 0 (UE5) and 0xcc in Unreal Engine 4.27 (DRAGON QUEST VII Reimagined: five whole 32-byte compression method names after the SHA-1); version 9's is 0xcd
+    (the frozen index flag, u8, between the SHA-1 and the names: Monster Jam Steel Titans 2)"""
     size = f.seek(0, 2)
-    for back, foot in ((0x2c, 0x2d), (0xc8, 0xc8 + 21), (0xcc, 0xcc + 21)):
+    for back, foot in ((0x2c, 0x2d), (0xc8, 0xc8 + 21), (0xcc, 0xcc + 21), (0xcd, 0xcd + 21)):
         if size < foot: continue   # shorter than this footer
         f.seek(-back, 2); m, ver = struct.unpack('<II', f.read(8))
         if m == PAK_MAGIC: return back, ver
@@ -177,15 +180,17 @@ def pak_version(f):
 def footer(f):
     """(encrypted index, index offset, index size, compression method names by number from 1, version); ValueError when the index does not lie inside the file"""
     back, ver = magic_back(f)
-    if ver in (4, 11) and (ver == 4) != (back == 0x2c) or ver == 8 and back == 0x2c: raise ValueError(f'a version {ver} pak footer with its magic {back:#x} bytes from the end, where that version has none')
+    if ver in (4, 11) and (ver == 4) != (back == 0x2c) or ver == 8 and back == 0x2c or (ver == 9) != (back == 0xcd): raise ValueError(f'a version {ver} pak footer with its magic {back:#x} bytes from the end, where that version has none')
     if ver == 4:
         f.seek(-0x2d, 2); ft = f.read(0x2d); ioff, isz = struct.unpack_from('<QQ', ft, 9)
         enc, methods = ft[0], [LEGACY_METHODS.get(i, f'flags {i}') for i in range(1, 8)]
-    elif ver not in (8, 11): raise ValueError(f'pak version {ver}, only {", ".join(map(str, LEGACY))} and 11 are read')
+    elif ver not in (8, 9, 11): raise ValueError(f'pak version {ver}, only {", ".join(map(str, PER_FILE))} and 11 are read')
     else:
         f.seek(-(back + 21), 2); ft = f.read(back + 21); k = 21
         ioff, isz = struct.unpack_from('<QQ', ft, k + 8)
-        enc, methods = ft[k - 1], [ft[k + 44 + 32 * i:k + 76 + 32 * i].rstrip(b'\0').decode('latin1') for i in range(5)]
+        n = k + 44 + (ver == 9)   # version 9: the frozen index flag first
+        if ver == 9 and ft[k + 44]: raise ValueError('a frozen pak index (a memory image of the engine\'s index) is not read')
+        enc, methods = ft[k - 1], [ft[n + 32 * i:n + 32 + 32 * i].rstrip(b'\0').decode('latin1') for i in range(5)]
     if ioff + isz > f.seek(0, 2): raise ValueError(f'the index ({isz:#x} bytes at {ioff:#x}) runs past the end of the pak')
     return enc, ioff, isz, methods, ver
 
@@ -260,7 +265,7 @@ class Pak:
         if enc and not key: raise ValueError(f'{path}: the index is encrypted and no key was given')
         r = R(self.read_at(ioff, isz, enc), what=f'{path}: the index')
         self.mount = r.fstr(); self.count = r.take('<i')
-        if self.version in LEGACY:   # one FPakEntry per file, kept as parsed
+        if self.version in PER_FILE:   # one FPakEntry per file, kept as parsed
             self.files = {}
             for _ in range(self.count):
                 name = r.fstr(); off, size, raw, meth = r.take('<qqqi'); r.raw(20)
@@ -285,7 +290,7 @@ class Pak:
         b = read_range(self.f, off, (n + 15) & ~15 if enc else n, self.path)
         return aes_decrypt(self.key, b)[:n] if enc else b
     def entry(self, path):
-        if self.version in LEGACY: return self.files[path]
+        if self.version in PER_FILE: return self.files[path]
         r = R(self.enc, self.files[path], what=f'{self.path}: the entry of {path}'); v = r.take('<I')
         bsz = (v & 0x3f) << 11
         if v & 0x3f == 0x3f: bsz = r.take('<I')
@@ -541,11 +546,16 @@ def inline_shaders(path, key=None):
     (inline_in_containers; Mario & Luigi: Brothership and Yoshi and the Mysterious Book: the same setting with IoStore on). FINAL FANTASY RESONANCE's pak names the global shader cache too, but its
     shaders are in its container's shader libraries (neither counts). An encrypted index is read with key, main's (Keys; Octopath Traveler 0's holds the archives, DRAGON BALL Sparking! ZERO's
     pakchunk0-Switch.pak the global shader cache, its cooked packages in the encrypted containers beside it); without a key it counts as one with archives, as before keys were tried here.
-    None: the pak names no file, so it holds neither (the empty pakchunk1-17-Switch.pak beside Sparking! ZERO's containers, mount point "/")"""
+    None: the pak names no file, so it holds neither (the empty pakchunk1-17-Switch.pak beside Sparking! ZERO's containers, mount point "/"). A version 9 pak (per-file index) is read
+    through Pak and counts when it names cooked packages and no .ushaderbytecode (Monster Jam Steel Titans 2's two paks hold shader code archives, so they do not)"""
     with open(path, 'rb') as f:
         enc, ioff, isz, _, ver = footer(f)
         if ver in LEGACY: return True
         if enc and not key: return False
+        if ver in PER_FILE:
+            pk = Pak(path, key); pk.f.close(); names = pk.files   # Pak reads the index in __init__
+            if not names: return None
+            return not any(n.endswith('.ushaderbytecode') for n in names) and any(n.endswith('.uexp') for n in names)
         def at(off, n):   # the index and the full directory index are encrypted alike (Pak.read_at)
             b = read_range(f, off, (n + 15) & ~15 if enc else n, path)
             return aes_decrypt(key, b)[:n] if enc else b

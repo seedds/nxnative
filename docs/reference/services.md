@@ -100,8 +100,16 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Symptom:** `game called nn::diag abort: Result 0x7802` (`MountNameAlreadyExists`) when a game mounts a RAM disk under a name it has just unmounted.
 - **Cause:** the host's mount table is permanent and `nn::fs::Unmount` did nothing. `nn::fs::MountRamDisk` has no host version, so it runs in `sdk` and registers in the SDK's own table, and the no-op left that entry there while the game freed the disk's buffer.
 - **Fix:** `h_fs_Unmount` leaves a host mount alone and sends any other name to the SDK: its `IsMounted`, then its `Unmount` if it holds the name (the SDK's `Unmount` aborts on a name it does not hold). `guest_sym` gives the module's own definitions, not the host's take-overs. A name in neither table stays a no-op. `t_fs.c` covers each case.
-- **Note:** this makes such a mount releasable, not usable. The host's file calls and `IsMounted` answer from the host's table only, so a file path on a RAM disk is "path not found". A game that needs the files back would need those calls routed to the SDK as well; none is known.
+- **Note:** the file calls on such a mount now reach the SDK too: [File calls on a mount in the SDK's own table](#file-calls-on-a-mount-in-the-sdks-own-table).
 - **Found on:** [Paper Mario: The Thousand-Year Door](../../dm/games/0100ECD018EBE000/README.md) ([GitHub issue #1012](https://github.com/seedds/nxnative/issues/1012)).
+
+### File calls on a mount in the SDK's own table
+
+- **Symptom:** `game called nn::diag abort: Result 0x202` (path not found) right after `fs path not found: <name>:/...` lines (`DM_FS=1`) for a mount name no `fs mount` line ever named.
+- **Cause:** `nn::fs::MountRamDisk` runs in `sdk` and registers in the SDK's own mount table ([A mount in the SDK's own table stays until the SDK releases it](#a-mount-in-the-sdks-own-table-stays-until-the-sdk-releases-it)), while every file call the host takes over looked in the host's table only. Nintendo Switch Sports Resort mounts its VoiceText speech data as the RAM disk `vtapi`, copies `VoiceText/` from `content:` into it at boot and aborted on its first `GetEntryType` (`main+0x414dbc`).
+- **Fix:** a path whose mount name the host does not hold but the SDK's `IsMounted` does goes to the SDK's own call (`sdk_path_call` in `hle_fs.c`; `guest_sym` gives the module's definition, not the host's take-over), with no host lock held. The file and directory handles that call opens are listed (`sdk_handle_add`, up to 256 open at once; past that the open is closed in the SDK and fails), and the calls that take a handle go to the SDK when it is listed; a close forgets the handle before the SDK frees it. `IsMounted` and `IsPathMounted` answer from both tables. A rename between the SDK's mount and another fails without reaching either. A path on a host mount never asks the SDK. `t_fs.c` (⑩) covers routing, handle tracking and isolation.
+- **Note:** Paper Mario: The Thousand-Year Door's file cache (the RAM disk `cache`) takes this path as well: its `CreateFile` on `cache:/<hash>` was "path not found" and the game skipped the cache ([its note](../../dm/games/0100ECD018EBE000/README.md)); not checked on that game.
+- **Found on:** Nintendo Switch Sports Resort (`04008E001F098000`, no profile yet).
 
 ### File handles with low bits set, and backslash paths
 

@@ -12,9 +12,9 @@
 #   · a push-constant block gets the buffer slot after the descriptor buffers (spirv-cross puts it at buffer(0), where the first uniform buffer goes), listed as p:0.0=slot;
 #     the host sets the pushed bytes there (Super Mario Galaxy: 54 of its 56 built-in shaders have one)
 #   · stages other than vertex and fragment are skipped and counted: Metal has no geometry shaders (Super Mario Galaxy has 2)
-#   · a fragment shader with an output at location 1 also gets a variant vk_<key>_d where that output is [[color(0), index(1)]]: Super Mario Galaxy's GX shaders write
-#     the second blend source at location 1 (no Index decoration), which NVIDIA's hardware feeds to dual-source blending; the host picks the variant for pipelines
-#     whose blend factors read source 1
+#   · a fragment shader whose outputs are locations 0 and 1 of one type also gets a variant vk_<key>_d where the output at location 1 is [[color(0), index(1)]]: Super Mario Galaxy's
+#     GX shaders write the second blend source at location 1 (no Index decoration), which NVIDIA's hardware feeds to dual-source blending; the host picks the variant for pipelines
+#     whose blend factors read source 1. An output at location 1 of another type, or one at location 2 or more, is a real render target and gets no variant
 # Super Mario Galaxy generates its GX shaders at run time; they come from a capture folder (the Mac host's DM_VK_CAPTURE), read like a RomFS: every input folder is
 # searched for SPIR-V files by their magic
 # Output: <out>/vk/vk_shaders.metallib and <out>/vk/vk_shaders.tsv; --ios <dir> also writes <dir>/vk/ with an iPhone library (same table)
@@ -80,6 +80,12 @@ def fix_strides(words):
     if not add: return words
     return words[:at] + [w for t, s in add.items() for w in ((4 << 16) | OP_DECORATE, t, DEC_ARRAY_STRIDE, s)] + words[at:]
 
+def entry_args(src, key, path):
+    """The match of the translated entry point vk_<key>: group 1 is its argument list"""
+    m = re.search(r'\bvk_' + key + r'\((.*?)\)\s*\{', src, re.S)
+    if not m: red(f'{path}: entry point vk_{key} not found in the translated MSL')
+    return m
+
 def one(path, tmp, root):
     data = open(path, 'rb').read()
     if len(data) % 4: red(f'{path}: SPIR-V length {len(data)} is not a multiple of 4')
@@ -118,27 +124,31 @@ def one(path, tmp, root):
     if nxt['buffer'] > 16 or nxt['texture'] > 31 or nxt['sampler'] > 16: red(f'{path}: resource slots exceeded {nxt}')
     spv = os.path.join(tmp, key + '.spv'); msl = os.path.join(tmp, key + '.metal')
     open(spv, 'wb').write(struct.pack(f'<{len(words)}I', *words))
-    cmd = [SPIRV_CROSS, spv, '--msl', '--msl-version', '20300', '--msl-decoration-binding', '--rename-entry-point', 'main', f'vk_{key}', stage, '--output', msl]
+    # the entry point keeps the name it has in the SPIR-V (HLSL-compiled shaders name theirs PSMain or ps_*, not main); the host finds the function by key, not pName
+    cmd = [SPIRV_CROSS, spv, '--msl', '--msl-version', '20300', '--msl-decoration-binding', '--rename-entry-point', eps[0]['name'], f'vk_{key}', stage, '--output', msl]
     if stage == 'vert': cmd.append('--flip-vert-y')
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode: red(f'{path}: spirv-cross failed: {r.stderr.strip()[:300]}')
     # The reflection lists every declared resource; the Metal entry point only takes the ones the shader uses (Hades' ShadowMap.frag declares a buffer it never reads,
     # which the game's own pipeline layout leaves out): keep the rows whose slot is an argument of the entry point, so the host only binds, and only reports, real ones
-    src = open(msl).read(); m = re.search(r'\bvk_' + key + r'\((.*?)\)\s*\{', src, re.S)
-    if not m: red(f'{path}: entry point vk_{key} not found in the translated MSL')
+    src = open(msl).read(); m = entry_args(src, key, path)
     if pcs:   # the push-constant argument is `constant <block type>& name [[buffer(0)]]`: move it to its own slot
-        tname = refl['types'][pcs[0]['type']]['name']
+        # spirv-cross writes the type's name with every character C does not allow as '_' (DXC's HLSL names it type.PushConstant.RootConstants)
+        tname = re.sub(r'[^A-Za-z0-9_]', '_', refl['types'][pcs[0]['type']]['name'])
         a = re.search(r'constant\s+' + re.escape(tname) + r'&\s+\w+\s+\[\[buffer\((\d+)\)\]\]', m.group(1))
         if a:
             s0, s1 = m.start(1) + a.start(1), m.start(1) + a.end(1)
             src = src[:s0] + str(pc_slot) + src[s1:]; open(msl, 'w').write(src)
-            m = re.search(r'\bvk_' + key + r'\((.*?)\)\s*\{', src, re.S)
+            m = entry_args(src, key, path)
             res.append(f'p:0.0={pc_slot}')
     used = {(c, int(n)) for c, n in re.findall(r'\[\[(buffer|texture|sampler)\((\d+)\)\]\]', m.group(1))}
     res = [x for x in res if (SLOT_CLASS[x[0]], int(x.rsplit('=', 1)[1].split('*')[0])) in used]
     src = PRECISE.sub(r'precise::\1(', src); open(msl, 'w').write(src)
     msls = [msl]
-    if stage == 'frag' and '[[color(1)]]' in src:   # dual-source variant vk_<key>_d: the output at location 1 becomes the second blend source of attachment 0
+    # Dual-source variant vk_<key>_d: the output at location 1 becomes the second blend source of attachment 0. Dual-source blending needs both outputs of one type and no others: a
+    # second render target of another type (Re:ZERO: a float2 beside a float4 colour) is a real second attachment, and Metal refuses the variant
+    outs = dict((int(i), t) for t, i in re.findall(r'(\w+)\s+\w+\s+\[\[color\((\d+)\)\]\]', src))
+    if stage == 'frag' and 1 in outs and outs.get(0) == outs[1] and not set(outs) - {0, 1}:
         msl_d = os.path.join(tmp, key + '_d.metal'); msls.append(msl_d)
         open(msl_d, 'w').write(src.replace(f'vk_{key}', f'vk_{key}_d').replace('[[color(1)]]', '[[color(0), index(1)]]'))
     return key, stage, res, msls, '/' + os.path.relpath(path, root)

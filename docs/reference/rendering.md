@@ -1572,7 +1572,7 @@ The Vulkan layer (`dm/gfx/vk/hle_vk.m`) was written for Hades; Super Mario Galax
 
 - **Symptom:** Metal refuses the pipeline: "Fragment shader does not write to render target color(0), index(1)".
 - **Cause:** the GX shaders write the second blend source as an ordinary output at location 1 (no `Index` decoration), and pipelines blend with `SRC1` factors; NVIDIA's hardware feeds MRT 1 to source 1.
-- **Fix:** `vk_shaders.py` builds a variant `vk_<key>_d` with that output at `[[color(0), index(1)]]`, which the host takes for pipelines whose blend reads source 1.
+- **Fix:** `vk_shaders.py` builds a variant `vk_<key>_d` with that output at `[[color(0), index(1)]]`, which the host takes for pipelines whose blend reads source 1. Only for outputs 0 and 1 of the same type and none at location 2 or more ([SPIR-V compiled by DXC](#spir-v-compiled-by-dxc)).
 - **Found on:** [Super Mario Galaxy](../../dm/games/010099C022B96000/README.md).
 
 ### Scaled and three-component vertex formats
@@ -1673,6 +1673,14 @@ The Vulkan layer (`dm/gfx/vk/hle_vk.m`) was written for Hades; Super Mario Galax
 - **Cause:** two geometry shaders (GX points and lines expanded to quads) are not translated (Metal has no geometry stage).
 - **Found on:** [Super Mario Galaxy](../../dm/games/010099C022B96000/README.md).
 
+### SPIR-V compiled by DXC
+
+- **Symptom:** `vk_shaders.py` stops with `spirv-cross failed: SPIRV-Cross threw an exception: Entry point does not exist.`; a shader with push constants gets no `p:` row in the table, so the host never sets them; a pipeline Metal refuses with "Fragment shader does not write to render target color(0), index(1)" for a shader whose second output is a real render target.
+- **Cause:** an HLSL-compiled shader names its entry point itself (`PSMain`, `ps_*`) where the translator renamed `main`; DXC names the push-constant block's type `type.PushConstant.<name>`, which SPIRV-Cross writes into the MSL with every character C does not allow as `_`, so the translator looked for a type of another name; and the dual-source variant was made for any shader with an output at location 1, though a second output of another type (Re:ZERO: a float2 beside a float4 colour) is a render target of its own, which dual-source blending (two outputs of one type) cannot be.
+- **Fix:** `vk_shaders.py` renames the entry point the SPIR-V declares (`--rename-entry-point <its name> vk_<key>`), finds the push-constant argument under the sanitized type name, and makes the `_d` variant only when outputs 0 and 1 have the same type and there is no output at location 2 or more. `profile_guess.py` takes a `main` that imports only `vkGetInstanceProcAddr`, no EGL and no `nvnBootstrapLoader`, with SPIR-V files in the RomFS, as a Vulkan game (Re:ZERO gets every Vulkan function through it), unless an NRO the game loads draws with NVN.
+- **Found on:** Re:ZERO -Starting Life in Another World- The Prophecy of the Throne (`01000B20117B8000`, The Forge renderer on Vulkan, SDK 9.5.0).
+- **Check:** `dm/tools/tests/test_vk_shaders.py` assembles fragment shaders with `spirv-as` and translates them with the committed SPIRV-Cross: an entry point named `PSMain`, a push-constant block of type `type.PushConstant.RootConstants` beside a uniform buffer, and outputs of one type, of two types and three. `test_nro_graphics.py` takes the loader-only `main` as Vulkan with SPIR-V files, and as GL beside EGL (Balatro), NVN without SPIR-V files and NVN with NVN NROs. Against the code before, five of the new tests fail.
+
 ## OpenGL layer
 
 Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.4.0) and Balatro (LÖVE 11.4, "love-nx", with SDL and LuaJIT) render with **NVIDIA's desktop OpenGL 4.5 core profile through EGL**, not NVN. The host implements GL itself on Metal (`dm/gfx/gl/hle_gl.m`), as it does Vulkan for Hades; NVIDIA's GL driver (`subsdk0`) is not loaded. Balatro's graphics module is LÖVE's own OpenGL backend, so its choices follow what the context reports.
@@ -1703,7 +1711,7 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 
 - **Symptom:** the NSP script's provisional profile said Vulkan, and the capture boot crashed in the GL layer.
 - **Cause:** `main` imports `vkGetInstanceProcAddr` for SDL's Vulkan loader, which nothing uses; the game draws with EGL and GL.
-- **Fix:** `profile_guess.py` decides `graphics gl` when `main` imports `eglCreateWindowSurface` and names `glShaderSource`, and now leaves `vkGetInstanceProcAddr` out of its Vulkan count.
+- **Fix:** `profile_guess.py` decides `graphics gl` when `main` imports `eglCreateWindowSurface` and names `glShaderSource`, and leaves `vkGetInstanceProcAddr` out of its Vulkan count. One exception: a `main` that imports `vkGetInstanceProcAddr` and no Vulkan function else, no EGL and no `nvnBootstrapLoader`, with SPIR-V files in the RomFS and no NRO that draws with NVN, loads every Vulkan function through it (the Vulkan loader of SDK 9.x) and is Vulkan. Re:ZERO's `main` is that; Balatro's SDL loader comes with EGL, and a game whose NROs draw with NVN stays NVN.
 - **Found on:** [Digimon Story Cyber Sleuth: Complete Edition](../../dm/games/010014E00DB56000/README.md): `main` imports `nvnBootstrapLoader` and 13 EGL functions. Its graphics setup (`main+0x5ed8f0`) makes an NVN device first, which only a helper beside the movie player uses (`main+0x528000`–`+0x52c400`: a memory pool and four textures next to the movie's GL textures). Then `eglGetDisplay`, `eglBindAPI(EGL_OPENGL_API)`, a 4.5 core context, a window surface on `vi::CreateLayer(w, h)` and a glad loader (`main+0x52c460`). Of the 22 games extracted here (at the time), only Digimon matches the rule. [Balatro](../../dm/games/0100CD801CE5E000/README.md) (SDK 18.3.2, LÖVE 11.4 on OpenGL with SDL and LuaJIT; one boot): `main` imports the EGL functions and `vkGetInstanceProcAddr`, SDL's Vulkan loader, which nothing calls (`subsdk1` is NVIDIA's Vulkan driver); Hades and both Galaxies import 99 or 100 Vulkan functions, `vkCreateInstance` among them.
 - **Note:** [Absolum](../../dm/games/0100A83022A22000/README.md) imports the same EGL functions (SDL3) but renders with NVN and names no GL function.
 

@@ -1636,9 +1636,14 @@ def cmd_impact(a):
     return 0
 
 
-def select(a, smoke):
-    games = find_games(a.games.split(',') if a.games else None)
+def local_games(want=None):   # every command that works on the games stops here when there is none: a mistyped --games-dir is not an empty list
+    games = find_games(want)
     if not games: raise HarnessError(f'no game with a Mac build under {GAMES}')
+    return games
+
+
+def select(a, smoke):
+    games = local_games(a.games.split(',') if a.games else None)
     say('games: ' + ', '.join(f"{g.id} ({g.name}, {g.kind}{', route' if g.route() else ''}{', the build profile' if g.derived else ''})" for g in games))
     return games
 
@@ -1733,7 +1738,7 @@ def validated_text(gid):   # the last green chain per mode, and whether it is th
 
 
 def cmd_list(a):
-    for g in find_games():
+    for g in local_games():
         r = g.route()
         bl = sorted(p.parent.name + '/' + p.stem for p in (game_root(g) / 'baselines').glob('*/smoke-*.json'))
         say(f'{g.id}  {g.name}  {g.kind}  build {g.ver}  route: {"yes" if r else "no (dm/games/" + g.id + "/smoke.tsv)"}  baselines: {", ".join(bl) or "none"}  green: {validated_text(g.id)}')

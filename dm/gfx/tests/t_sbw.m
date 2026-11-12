@@ -84,6 +84,42 @@ int main(void){@autoreleasepool{
     rc_note((uint64_t)rec,1);
     CHECK("a later timestamp restores known zero after the opaque writer",rc_value((uint64_t)rec,&x)&&x==0);
     rc_forget();atomic_store(&g_rc_complete,completed);}
+    // The submission's commit puts its GPU-written pages into the tables of running writes (gw_commit): the pages kept one by one, whichever order
+    // the set took them in, and not the pages that hold only a counter report
+    {uint64_t fin=g_fence>done+3000?g_fence:done+3000;atomic_store(&g_done,fin);g_gw_all=0;pend_reset();   // every earlier write of this test has completed
+    const uint64_t reg=0x7300000000ull,pages[]={reg+0x5000,reg+0x4000,reg+0x9abc000,0x7412345000ull,reg+0x6000};int live=1,quiet=1;
+    for(unsigned i=0;i<sizeof pages/sizeof *pages;i++)sbw_note(pages[i]+0x800,16,SBW_GPU);
+    sbw_note(reg+0x20000,16,SBW_REPORT);sbw_note(reg+0x5000,16,SBW_REPORT);
+    gw_commit(fin+1);
+    for(unsigned i=0;i<sizeof pages/sizeof *pages;i++)live&=gw_live_in(g_gw,pages[i],pages[i]+16)&&gw_live_in(g_gwx,pages[i]+0xff0,pages[i]+0x1000);
+    CHECK("each page a running submission wrote is seen by the next",live);
+    CHECK("a page that holds only its counter report is not a GPU write",!gw_live_in(g_gw,reg+0x20000,reg+0x21000));
+    for(uint64_t a=reg+0x7000;a<reg+0x17000;a+=0x1000)quiet&=!gw_live_in(g_gw,a,a+0x1000);
+    CHECK("the pages beside them are not",quiet);
+    pend_reset();gw_commit(fin+2);atomic_store(&g_done,fin+1);
+    CHECK("a submission with no write adds none, and the pages are free once theirs completes",!gw_live_in(g_gw,pages[0],pages[0]+16)&&!gw_live_in(g_gwx,pages[2],pages[2]+16));
+    // The widest write kept by page (one page short of GW_PAGES): every page inside is seen, and no other page of its 256 MB of address space reads as
+    // written (no two pages of the run meet in a slot, which would then count for any page)
+    atomic_store(&g_done,fin+2);pend_reset();
+    const uint64_t run=reg+0x123000,len=(uint64_t)(GW_PAGES-1)<<12;int in=1,out=0,outx=0;
+    sbw_note(run+0x10,len-0x20,SBW_GPU);gw_commit(fin+3);
+    CHECK("the run is kept by page",g_gw_all<=fin+2&&!gw_live_in(g_gw,0x7100000000ull,0x7100000010ull));
+    for(uint64_t a=run;a<run+len;a+=0x1000)in&=gw_live_in(g_gw,a,a+16)&&gw_live_in(g_gwx,a,a+16);
+    CHECK("every page of a running 4,095-page write is seen",in);
+    for(uint64_t a=reg;a<reg+0x10000000ull;a+=0x1000)if(a<run||a>=run+len){out+=gw_live_in(g_gw,a,a+16);outx+=gw_live_in(g_gwx,a,a+16);}
+    if(out||outx)fprintf(stderr,"pages outside the run read as written: %d (g_gw), %d (g_gwx)\n",out,outx);
+    CHECK("no page outside the run reads as written",!out);
+    CHECK("nor in the table uniform shadows ask",!outx);
+    // Pools often start on 256 MB boundaries: the same offsets in two of them must not share their slots
+    atomic_store(&g_done,fin+3);pend_reset();
+    const uint64_t rb=0x7400000000ull,rc=0x7410000000ull;int both=1,beside=0;
+    sbw_note(rb,64<<12,SBW_GPU);sbw_note(rc,64<<12,SBW_GPU);gw_commit(fin+4);
+    for(uint64_t o=0;o<64<<12;o+=0x1000)both&=gw_live_in(g_gw,rb+o,rb+o+16)&&gw_live_in(g_gw,rc+o,rc+o+16);
+    for(uint64_t o=64<<12;o<4096<<12;o+=0x1000)beside+=gw_live_in(g_gw,rb+o,rb+o+16)+gw_live_in(g_gw,rc+o,rc+o+16);
+    CHECK("the same offsets of two 256 MB regions are both seen",both);
+    CHECK("and the pages after them in neither",!beside);
+    CHECK("nor the same offsets of a third",!gw_live_in(g_gw,0x7420000000ull,0x7420000000ull+(64<<12)));
+    atomic_store(&g_done,fin+4);}
     pend_reset();
     printf("t_sbw: %d checks, %d failed\n",checks,failed);return failed!=0;
 }}

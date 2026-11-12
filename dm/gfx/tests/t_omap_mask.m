@@ -40,7 +40,7 @@ int main(void) { @autoreleasepool {
     MTLRenderPipelineDescriptor *d = pso_desc(&k, vs, fs, nil, 0);
     CHECK(d.colorAttachments[0].writeMask == (MTLColorWriteMaskRed | MTLColorWriteMaskGreen | MTLColorWriteMaskBlue), "alpha outside the output map is masked");
     for (int metal4 = 0; metal4 < 2; metal4++) {
-        id<MTLRenderPipelineState> ps = metal4 ? pso_build(d, &error) : [g_dev newRenderPipelineStateWithDescriptor:d error:&error];
+        id<MTLRenderPipelineState> ps = metal4 ? pso_build(d, 0, &error) : [g_dev newRenderPipelineStateWithDescriptor:d error:&error];
         CHECK(ps != nil, "pipeline compiles on both paths");
         if (ps) { __fp16 got[4]; pixels(ps, got); CHECK(got[0] == (__fp16).125 && got[1] == (__fp16).25 && got[2] == (__fp16).5 && got[3] == (__fp16).875, "mapped components written, alpha left as cleared"); }
     }

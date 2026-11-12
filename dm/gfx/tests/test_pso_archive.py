@@ -21,6 +21,34 @@ class ArchiveRestartTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, phase + '\n' + result.stdout + result.stderr)
                 self.assertEqual(len(list(Path(folder).glob('*.mtl4a'))), files, phase)
 
+    def test_old_index_removed(self):
+        with tempfile.TemporaryDirectory(prefix='pso-oldix-') as folder:
+            env = dict(os.environ, DM_PSO_MTL4='1', MTL_DEBUG_LAYER='1')
+            for name in ('DM_GPU_CAPTURE', 'MTL_CAPTURE_ENABLED', 'DM_TEST_ARCHIVE_CONSTANTS', 'DM_TEST_ARCHIVE_MIXED'):
+                env.pop(name, None)
+            def run(phase):
+                result = subprocess.run([executable, '--cold-' + phase, folder], env=env, capture_output=True, text=True, timeout=60)
+                self.assertEqual(result.returncode, 0, phase + '\n' + result.stdout + result.stderr)
+                return result.stdout + result.stderr
+            run('seed')
+            # the archive as the keys by library file name left it (DMPSOIX1), a prebuild file among it: no key a lookup makes leads to them, so a start removes them, the
+            # prebuild's stamp with its file, and builds the bases again once into indexed files; the start after takes them all
+            root = Path(folder)
+            first = sorted(root.glob('*.mtl4a'))[0]
+            (root / 'p00009.mtl4a').write_bytes(first.read_bytes())
+            (root / 'p00009.keys').write_bytes(first.with_suffix('.keys').read_bytes())
+            (root / 'prebuilt.tsv').write_text('chain\tx\n')
+            for keys in root.glob('*.keys'):
+                data = keys.read_bytes()
+                self.assertEqual(data[:8], b'DMPSOIX2')
+                keys.write_bytes(b'DMPSOIX1' + data[8:])
+            log = run('seed')   # the cold start's checks: every base compiled, none from the archive
+            self.assertIn('4 files indexed by library file names removed (1 of them the prebuild', log)
+            self.assertFalse((root / 'p00009.mtl4a').exists() or (root / 'prebuilt.tsv').exists())
+            self.assertEqual(len(list(root.glob('*.mtl4a'))), 3)
+            self.assertTrue(all(k.read_bytes()[:8] == b'DMPSOIX2' for k in root.glob('*.keys')))
+            run('next')   # every base from the archive
+
     def test_cold_start_cut_short(self):
         with tempfile.TemporaryDirectory(prefix='pso-cold-cut-') as folder:
             env = dict(os.environ, DM_PSO_MTL4='1', MTL_DEBUG_LAYER='1')

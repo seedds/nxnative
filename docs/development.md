@@ -156,6 +156,31 @@ and `memory-tsan`; `memory` includes undefined-behavior and address sanitizers.
 The heap-probe check imports the production profile reader and needs only the
 Python standard library; LZ4 is loaded when decoding NSO files.
 
+## Instruments frame markers
+
+`DM_SIGNPOST=1` enables `os_signpost` under subsystem `org.nxnative`, category
+`PointsOfInterest`, on macOS and iOS. Unset or `0` creates no log handle.
+`GuestFrame` spans successive guest presents, using the same frame counter as
+scripted input. The first interval starts at the first present. `Submit` covers
+the NVN submit call. `Encode` covers one queue continuation's translation and
+Metal encoding. With deferred encoding, `MetalEncode` marks the encode thread's
+record blocks separately. `Present` starts when the shared Metal present queue
+accepts a frame and ends in the drawable's presented callback. Dropped or headless
+frames have no completed present interval. Intervals may overlap.
+`GuestModule` events carry each module's name, hexadecimal runtime base, mapping
+size, original image extent and the front/appended and back patch ranges at
+startup and NRO activation. `patch_off` may be negative. The image extent ends
+at the host-page-aligned key page after the original image and bss; rewritten
+patch code is not an original module offset. A zero mapping size marks NRO
+unload. Hexadecimal arguments avoid locale-specific digit grouping. These
+addresses are for this run only, not file offsets.
+
+On the Mac, launch the packed host with its usual environment and add
+`xctrace record --template 'Time Profiler' --instrument os_signpost --env DM_SIGNPOST=1 --time-limit 20s --output frames.trace --launch -- APP.app/Contents/MacOS/dmhost APP.app/Contents/Resources/dm`.
+Open the trace in Instruments to inspect the frame, submit, encode and present
+lanes. Add Metal System Trace when GPU queue events are needed. Diagnostics
+change the workload; a trace alone is not a performance comparison.
+
 ## Continuous integration
 
 `.github/workflows/tests.yml` runs host and CPU graphics tests, Python tool

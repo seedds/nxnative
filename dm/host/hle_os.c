@@ -65,9 +65,14 @@ uint64_t guest_ns_at_host_time(uint64_t host_ns) {
 // same clock's GPU timestamps 1.63 times too late: Donkey Kong Bananza's frame-rate controller took its frame for seconds long and held it at 20 fps (present interval 3)
 uint64_t guest_ticks(void) { return dm_sdk_ounce() ? guest_ns() / 32 : guest_ns() * 12 / 625; }
 int dm_detclock_enabled(void) { return detclock_cfg() && atomic_load(&g_gdet_on); }
+#include "signpost.h"
 void dm_guest_frame_tick(void) {
     crash_watch_frame();
-    atomic_fetch_add(&g_guest_frame, 1);
+    uint64_t frame = atomic_fetch_add(&g_guest_frame, 1);
+    if (dm_signpost_on) {
+        if (frame) DM_SP_END("GuestFrame", OS_SIGNPOST_ID_EXCLUSIVE);
+        DM_SP_BEGIN("GuestFrame", OS_SIGNPOST_ID_EXCLUSIVE, frame + 1);
+    }
     if (!detclock_cfg()) return;
     if (!atomic_load(&g_gdet_on)) {
         atomic_store(&g_gdet, wall_guest_ns()); atomic_store(&g_gdet_on, 1);

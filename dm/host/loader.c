@@ -1,6 +1,19 @@
 // Multi-module loading (playing the role of Horizon's rtld): mapping, claiming thread slots, gate registration, cross-module relocation, take-over by name, segment permissions.
 // The code area (original text and patch area) is set to read-only+execute as soon as it is copied in, and from then on the loader only writes data: on iOS these two blocks must be embedded as is as signed code segments.
 #include "dm.h"
+#include "signpost.h"
+int dm_signpost_on;
+os_log_t dm_signpost_log;
+static void signpost_module(const module_t *m, uint64_t size) {
+    if (!dm_signpost_on) return;
+    uint64_t patch_len = m->patch_off < 0 ? m->patch_len : m->size - (uint64_t)m->patch_off;
+    // The key page starts after the original image/bss, rounded to a host page.
+    os_signpost_event_emit(dm_signpost_log, OS_SIGNPOST_ID_EXCLUSIVE, "GuestModule",
+        "module=%{public}s base=0x%{public}llx size=0x%{public}llx image_size=0x%{public}llx patch_off=%{public}s0x%{public}llx patch_len=0x%{public}llx back_off=0x%{public}llx back_len=0x%{public}llx",
+        m->name, (unsigned long long)(uintptr_t)m->base, (unsigned long long)size, (unsigned long long)m->key_page_off,
+        m->patch_off < 0 ? "-" : "", (unsigned long long)(m->patch_off < 0 ? -(uint64_t)m->patch_off : (uint64_t)m->patch_off),
+        (unsigned long long)patch_len, (unsigned long long)m->back_off, (unsigned long long)m->back_len);
+}
 #include <TargetConditionals.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -571,6 +584,7 @@ void nro_load(module_t *m) {
     pthread_rwlock_wrlock(&g_modules_mu);
     nro_reset_data(m); g_loaded[g_nloaded++] = m;
     relocate(m);
+    signpost_module(m, m->size);
     unsigned n = 0;
     for (int i = 0; i < g_nmod; i++) if (g_mod[i].loaded && &g_mod[i] != m) n += rebind(&g_mod[i], m, 1);
     pthread_rwlock_unlock(&g_modules_mu);
@@ -595,6 +609,7 @@ void nro_load_alone(module_t *m) {
             uint64_t v = s->st_shndx ? (uint64_t)m->base + s->st_value : 0;
             *where = type == R_AARCH64_JUMP_SLOT ? v : v + r->r_addend; nsym++;
         }
+    signpost_module(m, m->size);
     pthread_rwlock_unlock(&g_modules_mu);
     LOG("NRO %s loaded alone (load %u, base %p): %u relative relocations, %u to its own or undefined weak symbols", m->name, m->loads, m->base, nrel, nsym);
 }
@@ -602,6 +617,7 @@ void nro_load_alone(module_t *m) {
 void nro_unload(module_t *m) {
     pthread_rwlock_wrlock(&g_modules_mu);
     if (!svc_nro_deactivate(m)) die("NRO %s: cannot unload while a mapped stack borrows its data", m->name);
+    signpost_module(m, 0);   // A zero size ends this module's active mapping in the trace.
     for (int i = 0; i < g_nloaded; i++) if (g_loaded[i] == m) { memmove(g_loaded + i, g_loaded + i + 1, (size_t)(--g_nloaded - i) * sizeof *g_loaded); break; }
     unsigned n = 0;
     for (int i = 0; i < g_nmod; i++) if (g_mod[i].loaded) n += rebind(&g_mod[i], m, 0);
@@ -837,6 +853,9 @@ static char g_module_dir[1024];   // the folder the modules were loaded from (dm
 const char *dm_module_dir(void) { return g_module_dir; }
 
 void load_modules(const char *dir, const char **names, int n) {
+    const char *sp = getenv("DM_SIGNPOST");
+    dm_signpost_on = sp && !strcmp(sp, "1");
+    if (dm_signpost_on) dm_signpost_log = os_log_create("org.nxnative", "PointsOfInterest");
     strlcpy(g_module_dir, dir, sizeof g_module_dir);
     // Map everything and parse the symbol tables first, then relocate all at once (cross-module symbols must all be in place first)
     // DM_BOOTPROF: breakdown of ① host loading (milliseconds), to set the upper bound for ③ pre-relocation / mmap
@@ -857,6 +876,7 @@ void load_modules(const char *dir, const char **names, int n) {
         t = now_ns(); parse_dynamic(m); tp += now_ns() - t;
         t = now_ns(); register_gates(m, dir); tg += now_ns() - t;
         LOG("%s: base %p size %#zx", names[i], m->base, m->size);
+        signpost_module(m, m->size);
         m->loaded = 1; g_loaded[g_nloaded++] = m; g_nmod++;
     }
     force_init();

@@ -11616,6 +11616,54 @@ static void cbs_fly_report(uint64_t fence) {
     }
     pthread_mutex_unlock(&g_cbs_mu);
 }
+// A storage buffer bound by its address alone (NVN_RB_SBUFU, NVN_RB_SBUFQ: the shader does not say its size) in a sparse pool whose mapping has a hole after its first run: the lookup
+// with length 1 found the mapped run holding the first byte, so the shader read past that run's buffer (PRAGMATA's SDF GI surfel colours: 64 KB of a 768 KB buffer, a green flare).
+// Such a binding gets one buffer over its whole span (hle_nvn.c nvn_sparse_span_bind, at most 64 MB): the pages before the hole, zeros in it, the pages after it. The buffers are
+// cached by address and span (g_span_c, under g_span_mu, taken inside g_vp_mu). A mapping request over a span buffer's pages, the pool going, or an eviction retires it as a run's
+// buffer is retired (pool_gone_release): out of the cache at once, then released with the fence of the submission open now, or of the last one when none is open, so it stays in
+// no residency set past the work that may use it, and an unmap's pages (released at the fence after it, vunmap_defer) are never under it. DM_NVN_SPARSE_SPAN=0 resolves the
+// address as before
+void *nvn_sparse_span_bind(uint64_t a, uint64_t cap);
+enum { SPAN_C = 32 };
+static struct { uint64_t addr, span; uintptr_t lo, hi; __strong id<MTLBuffer> buf; } g_span_c[SPAN_C]; static unsigned g_span_next; static pthread_mutex_t g_span_mu = PTHREAD_MUTEX_INITIALIZER;
+static _Atomic uint64_t g_span_made, g_span_retired;   // changed under g_span_mu
+static void span_gone(NSMutableArray<id<MTLBuffer>> *gone) { if (!gone.count) return; pthread_mutex_lock(&g_mu); pool_gone_release(gone); pthread_mutex_unlock(&g_mu); }
+void *mtl_span_find(uint64_t addr, uint64_t span) {
+    void *r = NULL; pthread_mutex_lock(&g_span_mu);
+    for (int i = 0; i < SPAN_C && !r; i++) if (g_span_c[i].buf && g_span_c[i].addr == addr && g_span_c[i].span == span) r = (__bridge void *)g_span_c[i].buf;
+    pthread_mutex_unlock(&g_span_mu); return r;
+}
+void *mtl_span_put(uint64_t addr, uint64_t span, uintptr_t lo, uintptr_t hi) { @autoreleasepool {
+    id<MTLBuffer> b = [g_dev newBufferWithBytesNoCopy:(void *)lo length:hi - lo options:MTLResourceStorageModeShared deallocator:nil];
+    if (!b) return NULL;
+    res_add(b);
+    NSMutableArray<id<MTLBuffer>> *gone = [NSMutableArray array];
+    pthread_mutex_lock(&g_span_mu);
+    int at = -1; for (int i = 0; i < SPAN_C && at < 0; i++) if (g_span_c[i].buf && g_span_c[i].addr == addr) at = i;   // the same address with another span: replaced
+    if (at < 0) at = (int)(g_span_next++ % SPAN_C);
+    if (g_span_c[at].buf) { [gone addObject:g_span_c[at].buf]; g_span_retired++; }
+    g_span_c[at].addr = addr; g_span_c[at].span = span; g_span_c[at].lo = lo; g_span_c[at].hi = hi; g_span_c[at].buf = b; g_span_made++;
+    pthread_mutex_unlock(&g_span_mu);
+    span_gone(gone);
+    return (__bridge void *)b;
+} }
+void mtl_span_retire(uintptr_t lo, uintptr_t hi) { @autoreleasepool {
+    if (!g_span_made) return;   // no span buffer was ever made (a read without the lock: a stale 0 only when none is made, and the replay makes them under g_vp_mu, which the callers hold)
+    NSMutableArray<id<MTLBuffer>> *gone = [NSMutableArray array];
+    pthread_mutex_lock(&g_span_mu);
+    for (int i = 0; i < SPAN_C; i++) if (g_span_c[i].buf && g_span_c[i].lo < hi && g_span_c[i].hi > lo) { [gone addObject:g_span_c[i].buf]; g_span_c[i].buf = nil; g_span_retired++; }
+    pthread_mutex_unlock(&g_span_mu);
+    span_gone(gone);
+} }
+static int sbuf_span(uint64_t addr, void **mb, uint64_t *mo, uint64_t *gpu) {   // → 0 when the address needs no span buffer or none could be made
+    static int on = -1; if (on < 0) { const char *e = getenv("DM_NVN_SPARSE_SPAN"); on = !e || atoi(e); }
+    void *nb = on ? nvn_sparse_span_bind(addr, 64u << 20) : NULL;
+    if (!nb) return 0;
+    id<MTLBuffer> b = (__bridge id<MTLBuffer>)nb;
+    *mb = nb; *mo = addr - (uint64_t)(uintptr_t)b.contents; *gpu = b.gpuAddress + *mo;
+    return 1;
+}
+static int sbuf_addr(uint64_t addr, void **mb, uint64_t *mo, uint64_t *gpu) { return sbuf_span(addr, mb, mo, gpu) || mtl_gpu_addr(addr, 1, mb, mo, gpu); }
 static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, int metal_vertex);
 static int encode_args(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, int metal_vertex) { cbs_note(sh); AP_B; int r = encode_args_(en, sh, nvn_stage, metal_vertex); AP_E(3); return r; }
 static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, int metal_vertex) {
@@ -11836,14 +11884,14 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
         } else if (b->kind == NVN_RB_SBUFU) {   // B: a storage buffer whose GPU address the game keeps in its own uniform buffer (Monster Hunter Rise's compute shaders: c3 + 0x38); read like a bindless handle
             uint64_t addr; ubo_read(nvn_stage, reg, b->off, 8, &addr); addr = ucb_handle_addr(addr);
             void *mb; uint64_t mo, gpu;
-            if (addr && mtl_gpu_addr(addr, 1, &mb, &mo, &gpu)) { slots[aid] = gpu; USE((__bridge id<MTLBuffer>)mb, b->rw ? MTLResourceUsageRead | MTLResourceUsageWrite : MTLResourceUsageRead); if (b->rw) sbw_note(addr, sbw_len(0, mb, mo), SBW_GPU); }   // size not known
+            if (addr && sbuf_addr(addr, &mb, &mo, &gpu)) { slots[aid] = gpu; USE((__bridge id<MTLBuffer>)mb, b->rw ? MTLResourceUsageRead | MTLResourceUsageWrite : MTLResourceUsageRead); if (b->rw) sbw_note(addr, sbw_len(0, mb, mo), SBW_GPU); }   // size not known
             else { slots[aid] = dummy_buf_gpu(); USE(dummy_buf(), MTLResourceUsageRead); }
             if (bl) PD("B %llu st%d sbufu reg%d+%#x addr=%#llx %s", g_stat_pass, nvn_stage, reg, b->off, (unsigned long long)addr, b->rw ? "rw" : "ro");
         } else if (b->kind == NVN_RB_SBUFQ) {   // B: a storage buffer whose GPU address the game pushed (c[24] at b->off, both blocks: PRAGMATA's compute buffer entries); resolved like NVN_RB_SBUFU
             uint64_t addr = 0; const uint8_t *pb = S.push[nvn_stage == 5 ? 1 : 0]; if (b->off + 8u <= sizeof S.push[0]) memcpy(&addr, pb + b->off, 8);
             addr = ucb_handle_addr(addr);
             void *mb; uint64_t mo, gpu;
-            if (addr && mtl_gpu_addr(addr, 1, &mb, &mo, &gpu)) { slots[aid] = gpu; USE((__bridge id<MTLBuffer>)mb, b->rw ? MTLResourceUsageRead | MTLResourceUsageWrite : MTLResourceUsageRead); if (b->rw) sbw_note(addr, sbw_len(0, mb, mo), SBW_GPU); }
+            if (addr && sbuf_addr(addr, &mb, &mo, &gpu)) { slots[aid] = gpu; USE((__bridge id<MTLBuffer>)mb, b->rw ? MTLResourceUsageRead | MTLResourceUsageWrite : MTLResourceUsageRead); if (b->rw) sbw_note(addr, sbw_len(0, mb, mo), SBW_GPU); }
             else { slots[aid] = dummy_buf_gpu(); USE(dummy_buf(), MTLResourceUsageRead);
                    // An unmapped page of a sparse pool's reservation reads 0 on the GPU, as the dummy does: Resident Evil 4's 0ee0c5f004239ce2 at frame 5 is pushed an address 0x4400000 into
                    // a 1 GB sparse pool, on a page the game has not mapped by then. Noted once, not red; any other address is

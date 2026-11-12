@@ -32,7 +32,7 @@ static tex_t picture(void) {
     serial_put(t.serial, mt); res_add(mt); res_commit(); return t;
     // NOLINTEND(clang-analyzer-osx.cocoa.RetainCount)
 }
-static int present_asks(const tex_t *t) { int before = atomic_load(&g_layer_asks); mtl_present_wait(mtl_present(t, 1. / 60, NULL)); return atomic_load(&g_layer_asks) - before; }
+static int present_asks(const tex_t *t) { int before = atomic_load(&g_layer_asks); mtl_present_wait(mtl_present(t, 1. / 60, NULL, NULL)); return atomic_load(&g_layer_asks) - before; }
 int main(void) { @autoreleasepool {
     alarm(60); setvbuf(stdout, NULL, _IONBF, 0);
     setenv("DM_TEST_GPU_LOST", "3", 1);

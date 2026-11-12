@@ -139,6 +139,7 @@ DM_NVN_CMDSTAT	diagnostic	`=1` logs every 300 frames the command recording usage
 DM_NVN_COUNT	diagnostic	`1` counts every NVN call (the counting trampolines) and writes the per-frame call lines; off by default (on with a `DM_NVN_TSV` table that has call rows), the count is an atomic add all recording threads share
 DM_NVN_CPUPROF	diagnostic	1 records CPU wall/time/instruction totals by renderer operation; off by default.
 DM_NVN_CSH_PRESCAN	diagnostic	`0` runs the compute-hoist scan at every pass's first draw even when no dispatch follows (as before; for timing)
+DM_NVN_COMPUTE_GAME_BAR	switch	`=0`, `1` or `ab` (on by default on a Mac without mesh-shading hardware, the M1 and M2; off elsewhere): a draw pass ends without ordering later dispatches, and a copy encoder opened for a dispatch right after it waits for earlier rendering only after a game barrier (NVN's ordering); copies and other encoders keep the full barrier
 DM_NVN_CS_HOIST	switch	`0` makes a compute dispatch between the draws of a pass end it (on by default: the dispatch runs ahead of the pass when that changes nothing the draws before it read)
 DM_NVN_CUT	switch	`=<draws>`: the replay commits its command buffer every that many draws, between passes (default 64; `0` one command buffer per submission, except the cut after a buffer-to-texture copy)
 DM_NVN_CUT_BUSY	switch	`=0`: a segment boundary commits whatever the GPU is doing (the default commits only when earlier work has reported back, keeping the boundary's GPU timestamp otherwise)

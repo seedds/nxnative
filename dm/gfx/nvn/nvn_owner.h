@@ -4,8 +4,10 @@
 //
 // Tables (all under g_smu but the program pins):
 //   live    serial → object (MTLTexture, NvPkg, NvProg) of a live serial: serial_put / serial_del, and tex_put for a texture whose object is live or an external texture (2^62 and up)
-//   ghost   serial → object of a finalized texture serial a replayed record still resolves (tex_put), a ring of NGHOST: the oldest goes when a new serial comes; a stale view's
-//           entry goes with its slot (own_view_drop_stale). Each ghost serial has one ring slot
+//   ghost   serial → object of a finalized texture serial a replayed record or a retired registration still resolves (tex_put), with its last use (a lookup or a put: frame and
+//           submission) in a list from least to most recently used. Past NGHOST entries, the least recently used goes once it is idle (unused for GHOST_IDLE frames or
+//           GHOST_IDLE_SUBS submissions): on a put, and at each submission's commit (own_ghost_trim); an entry in use stays however many there are. A stale view's entry goes
+//           with its place in the list (own_view_drop_stale)
 //   tex live    serial → the texture object it was initialized in (mtl_tex_init until its finalize), which decides between live and ghost
 //   tex pins    serial → a retained object a queued descriptor or saved binding still resolves after the serial's entries go (mtl_tex_pin / mtl_tex_unpin)
 //   prog pins   serial → pins on a program a queued descriptor or saved binding holds: its release waits for the last unpin (under the submission lock, not g_smu)
@@ -53,20 +55,24 @@ static inline void hm_put_id(nvn_hmap *m, const void *k, id o) {   // the map ow
 static inline void hm_del_id(nvn_hmap *m, const void *k) { void *old = nvn_hm_del(m, k); if (old) CFRelease(old); }
 
 extern pthread_mutex_t g_smu;
-enum { NGHOST = 512 };
+enum { NGHOST = 512,             // ghost entries kept once idle
+       GHOST_IDLE = 16,          // frames without a use that make a ghost entry idle (frames: a game makes many submissions a frame, Ocarina of Time about 25)
+       GHOST_IDLE_SUBS = 1024,   // or submissions without one, so a stretch with no present (the frame stands still) does not keep every entry
+       GHOST_TRIM = 32 };        // idle entries evicted at most per commit (each one a note: under SER_NOTES)
 
 // ---- What the replay layer calls
 
 // Lookups (borrowed, see above)
 const void *own_live_ref(uint64_t k);       // the live entry
-const void *own_resolve_ref(uint64_t k);    // live, then ghost, then a texture pin
+const void *own_resolve_ref(uint64_t k);    // live, then ghost (a use of the ghost entry), then a texture pin
 static inline id serial_get(uint64_t k) { return (__bridge id)own_live_ref(k); }
 static inline id tex_get(uint64_t k) { return (__bridge id)own_resolve_ref(k); }
 
 // Changes (each takes g_smu)
 void serial_put(uint64_t k, id o);   // a live serial's object; the one it replaces is dropped
 void serial_del(uint64_t k);         // a live serial's entry goes (a finalize, a program's release); a ghost entry of the serial stays, as a replayed record may still resolve it
-void tex_put(uint64_t k, id o);      // a texture serial's object: live table for a live texture object or an external texture, else the ghost ring
+void tex_put(uint64_t k, id o);      // a texture serial's object: live table for a live texture object or an external texture, else the ghost table (its use stamped)
+void own_ghost_trim(void);           // a submission's commit: idle ghost entries past NGHOST go, GHOST_TRIM at most
 
 // The sharing table. A key's padding is zero (it is hashed): build one with memset or a zeroed initializer, and change a copy's fields
 typedef struct { uint64_t pool; int64_t off; nvn_texdesc d; } alias_key;
@@ -81,7 +87,7 @@ id own_alias_peek(const alias_key *k);                                  // k's s
 // sRGB / linear views of a shared texture (tex_mtl_'s twins). A view is valid while its parent is in the sharing table or it or its parent is pinned; each decision is taken in the
 // same hold of g_smu as the entry it changes (docs/reference/nvn-objects.md, A finalized twin view left in the ghost ring)
 int own_view_put(uint64_t k, const alias_key *pk, id<MTLTexture> view);   // tex_put of the view only while its parent is pk's shared texture (pk marked looked up): 1 published, 0 nothing changed
-int own_view_drop_stale(uint64_t k, id view);        // a view no longer valid: 1, and k's live entry, or with none its ghost entry (and ring slot), goes if it still names the view; 0 valid
+int own_view_drop_stale(uint64_t k, id view);        // a view no longer valid: 1, and k's live entry, or with none its ghost entry (and its place in the list), goes if it still names the view; 0 valid
 // An upgrade (a texture made again with more usage): every name of `from`, the serial tables, the pins and the sharing table, moves to `to` in place (a new epoch); then `put` (when not
 // nil) is published under serial unless the rename already named it there (an sRGB / linear twin passes its view made again on `to`). One hold of g_smu. → whether serial was one of from's names
 int own_upgrade(id from, id to, uint64_t serial, id put);
@@ -124,7 +130,8 @@ void own_each_locked(void (^fn)(uint64_t serial, id o, int ghost));
 
 // ---- What the replay layer provides (nvn_mtl.m). Called with g_smu held
 void own_hook_drop(id o, int keep_resident);   // an object the owner lets go: released after the submission in flight (keep_resident: it stays in the residency set, as something else holds it)
-uint64_t own_hook_submission(void);            // the submission being encoded (g_fence + 1): a lookup's mark, which ALIAS_IDLE counts from
+uint64_t own_hook_submission(void);            // the submission being encoded (g_fence + 1): a lookup's mark, which ALIAS_IDLE and GHOST_IDLE_SUBS count from
+uint64_t own_hook_frame(void);                 // the frame being replayed (presents so far): a ghost entry's use, which GHOST_IDLE counts from
 
 // ---- Queries and seams for the tests (t_serial_owner links the owner alone; the replay layer does not call these). Caller holds g_smu
 const void *own_live_ref_locked(uint64_t k);

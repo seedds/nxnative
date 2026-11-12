@@ -41,15 +41,25 @@ static nvn_hmap g_by_serial = {.klen = 8};     // Serial → MTLTexture / NvPkg 
 // each candidate instead: in Ocarina of Time's cutscenes, with about 7,500 serials and thousands of shared textures, that walk was the submit thread's hottest function and
 // frames took up to a second. An entry holds its object (CFBridgingRetain), so a counted address cannot be reused while counted. Under g_smu
 static nvn_hmap g_by_serial_held = {.klen = sizeof(uintptr_t)};
-// The same count for the ghost ring (g_ghost, finalized serials a replayed record still resolves; tex_put and the upgrade's in-place replacement write it)
+// The same count for the ghost table (g_ghost, finalized serials a replayed record still resolves; tex_put and the upgrade's in-place replacement write it)
 static nvn_hmap g_ghost_held = {.klen = sizeof(uintptr_t)};
 // Texture serials owned by a live NVN texture object (TextureInitialize until Finalize or re-initialization, hle_nvn.c). Command records and texture pool registrations snapshot the
 // texture object (tex_snap in hle_nvn.c, mtl_reg_tex), so replay can resolve a texture the game has already finalized: Breath of the Wild records each frame's transient render targets
 // (the HUD captures, the 640x360 half-resolution buffers) and finalizes their objects before it submits. Those serials went back into g_by_serial and stayed there for good, as no second
-// Finalize comes: about 10 a frame, 200,000 after an hour in the first shrine. A dead serial resolves through g_ghost instead, a small table whose oldest entry goes when a new one comes,
-// so a record replayed again soon still finds its texture
+// Finalize comes: about 10 a frame, 200,000 after an hour in the first shrine. A dead serial resolves through g_ghost instead, so a record replayed again soon still finds its texture.
+// So does a registered ID whose texture the game finalized (a retired registration): its view goes at the end of each submission (treg_finish_submission in nvn_mtl.m) and the next
+// one resolves it again. The table was a ring of NGHOST (512) whose oldest entry went when a new one came, whatever its use: while Ocarina of Time streams an area in, or rides into
+// Hyrule Field, its pools name thousands of finalized textures at once, so each resolution evicted one the next would need, whose note sent its ID to be resolved again, and the ring
+// never settled (3.7 million puts in 300 frames at an area transition, frames of 100-490 ms on the submit thread; up to 43 million in a window and 10-25 fps for minutes in
+// GitHub issue #2213). The table is now kept by use: each entry's last lookup or put (frame and submission) in a list from least to most recently used, and past NGHOST entries
+// the least recently used goes only once it is idle (GHOST_IDLE frames or GHOST_IDLE_SUBS submissions without a use: ghost_trim), so a working set larger than NGHOST stays while
+// it is used and the table is back at NGHOST once it idles. Frames, not submissions alone: that game makes about 25 submissions a frame, and a window of 16 submissions left
+// 99.6 % of the evictions coming back within a frame (PR #2389)
 static nvn_hmap g_tex_live = {.klen = 8};   // serial → the texture object it was initialized in (mtl_tex_release), under g_smu
-static nvn_hmap g_ghost = {.klen = 8}; static uint64_t g_ghost_ring[NGHOST]; static unsigned g_ghost_next; static uint64_t g_ghost_puts;
+static nvn_hmap g_ghost = {.klen = 8}; static uint64_t g_ghost_puts;
+typedef struct ghost_use { struct ghost_use *prev, *next; uint64_t serial, frame, sub; } ghost_use;   // a ghost entry's last use
+static nvn_hmap g_ghost_use = {.klen = 8};    // serial → its ghost_use: the same serials as g_ghost
+static ghost_use *g_ghost_lru, *g_ghost_mru;  // the list, least recently used first
 // Deferred command descriptors and persistent bindings retain a texture serial independently of the guest descriptor and the bounded recently-finalized cache
 typedef struct { unsigned refs; void *object; } tex_pin;
 static nvn_hmap g_tex_pins = {.klen = 8}, g_tex_pin_objects = {.klen = sizeof(uintptr_t)};
@@ -62,7 +72,7 @@ int own_object_free(id o) { pthread_mutex_lock(&g_smu); int r = !entry_holds((__
 // Retirement eligibility. The replay layer retires a resource through its deferred-release queue (own_hook_drop(o, 0): out of the residency set once the submissions encoded up to
 // then have completed), and asks here, once that completion has come, whether it may really leave (own_retire_locked): GPU completion says the work encoded before the retirement is
 // done, not that no serial resolves to the object any more. Several entries can hold one texture that no table owns: at the GPU's first write over storage a packaged texture was
-// taken from (cpu_unc_drop), every serial of the package gets the package's texture itself, live serials and finalized ones in the ghost ring. The package's release and each
+// taken from (cpu_unc_drop), every serial of the package gets the package's texture itself, live serials and finalized ones in the ghost table. The package's release and each
 // holder's retired it, taking it out of the residency set while the others still drew with it: GPU address faults 15-45 minutes into Ocarina of Time, on 260x260 terrain tiles
 // (GitHub issue #1326). So an object an entry (live, ghost or pin, or a view's parent) still holds waits here, retained, and the queue drops only its own reference; the last count
 // of it going hands it back to the queue (retire_resume: own_hook_drop(o, 0), behind the submission then in flight, as the entries' last encodings may be in it), unless it is
@@ -183,9 +193,9 @@ uint32_t own_alias_drop_pool_locked(const void *pool) {
 // (Breath of the Wild finalizes its transient render targets before it submits and makes them again the next frame: targets sharing storage would evict each other every frame). On NVN
 // the memory now belongs to the new texture; the old private Metal texture only held a copy nothing can name again. STEINS;GATE RE:BOOT decodes every image it shows into one scratch
 // region of a pool that lives for good and finalizes the texture before the next one: each image added an entry, 468 of them and 1.58 GB of GPU memory 24,000 frames into a new game.
-// The texture is retired (deferred until the submissions that used it complete); one a finalized object still resolves through the ghost ring stays resident until the ring lets it go
+// The texture is retired (deferred until the submissions that used it complete); one a finalized object still resolves through the ghost table stays resident until that table lets it go
 // (own_retire_locked). The change reports no serial (own_note(0)), as it changes no serial's texture: an entry a live serial holds is not evicted
-// (serial_table_holds), and one a finalized serial holds through the ghost ring keeps its texture. A live sRGB / linear twin's serial holds a view of the shared texture, which counts as
+// (serial_table_holds), and one a finalized serial holds through the ghost table keeps its texture. A live sRGB / linear twin's serial holds a view of the shared texture, which counts as
 // holding the texture (count_add), so a twin keeps its parent as a texture of the parent's own format would; with the view alone counted the parent went, and no note sent the twin's
 // texture IDs to tex_mtl_'s stale-view check (GitHub issue #2125). A retired ID's view goes at the submission's end (nvn_mtl.m's treg_finish_submission), and the pool tables take
 // those IDs again at the next one (pool_snap.trans). With no note, every takeover (about 8,400 in six minutes walking through Ocarina of Time's Kokiri Forest) sent every
@@ -272,21 +282,49 @@ void mtl_tex_unpin(uint64_t serial) {
     if (pin && !--pin->refs) { nvn_hm_del(&g_tex_pins, &serial); tex_pin_set(pin, nil); free(pin); }
     pthread_mutex_unlock(&g_smu);
 }
+// The ghost table's order of use. Caller holds g_smu
+static void use_unlink(ghost_use *u) {
+    if (u->prev) u->prev->next = u->next; else g_ghost_lru = u->next;
+    if (u->next) u->next->prev = u->prev; else g_ghost_mru = u->prev;
+    u->prev = u->next = NULL;
+}
+static void ghost_used(uint64_t k) {   // a lookup or a put of k's ghost entry: stamped, and the most recently used
+    ghost_use *u = nvn_hm_get(&g_ghost_use, &k);
+    if (!u) { u = calloc(1, sizeof *u); if (!u) ODIE("ghost table allocation failed"); u->serial = k; nvn_hm_put(&g_ghost_use, &k, u); }
+    else if (u != g_ghost_mru) use_unlink(u);
+    u->frame = own_hook_frame(); u->sub = own_hook_submission();
+    if (u != g_ghost_mru) { u->prev = g_ghost_mru; if (g_ghost_mru) g_ghost_mru->next = u; else g_ghost_lru = u; g_ghost_mru = u; }
+}
+static void ghost_del_locked(uint64_t k) {   // k's ghost entry goes with its place in the list; the serial resolves anew (a note)
+    ghost_use *u = nvn_hm_del(&g_ghost_use, &k); if (u) { use_unlink(u); free(u); }
+    id old = hm_get_id(&g_ghost, &k); if (!old) return;
+    ghost_held_add((__bridge void *)old, -1); obj_drop(old); hm_del_id(&g_ghost, &k); own_note(k);
+}
+// Idle entries past NGHOST go, least recently used first, at most `budget` of them; the first entry in use ends the walk (every one after it was used later)
+static void ghost_trim(unsigned budget) {
+    uint64_t frame = own_hook_frame(), sub = own_hook_submission();
+    for (; budget && g_ghost.n > NGHOST && g_ghost_lru; budget--) {
+        const ghost_use *u = g_ghost_lru;
+        if (frame - u->frame < GHOST_IDLE && sub - u->sub < GHOST_IDLE_SUBS) break;
+        ghost_del_locked(u->serial);
+    }
+}
+void own_ghost_trim(void) { pthread_mutex_lock(&g_smu); ghost_trim(GHOST_TRIM); pthread_mutex_unlock(&g_smu); }
 const void *own_resolve_ref(uint64_t k) {
-    pthread_mutex_lock(&g_smu); const void *o = nvn_hm_get(&g_by_serial, &k); if (!o && g_ghost.n) o = nvn_hm_get(&g_ghost, &k); if (!o) { tex_pin *pin = nvn_hm_get(&g_tex_pins, &k); if (pin) o = pin->object; } pthread_mutex_unlock(&g_smu); return o;
+    pthread_mutex_lock(&g_smu); const void *o = nvn_hm_get(&g_by_serial, &k);
+    if (!o && g_ghost.n && (o = nvn_hm_get(&g_ghost, &k))) ghost_used(k);
+    if (!o) { tex_pin *pin = nvn_hm_get(&g_tex_pins, &k); if (pin) o = pin->object; }
+    pthread_mutex_unlock(&g_smu); return o;
 }
 static void tex_put_locked(uint64_t k, id o) {   // serials from 2^62 up are external textures (mtl_ext_tex), never initialized by the game
     nvn_hmap *m = k >= (1ull << 62) || nvn_hm_get(&g_tex_live, &k) ? &g_by_serial : &g_ghost;
     id old = hm_get_id(m, &k);
     if (old) count_add(m == &g_by_serial ? &g_by_serial_held : &g_ghost_held, (__bridge void *)old, -1);
     if (old) obj_drop(old);
-    else if (m == &g_ghost) {
-        uint64_t *slot = &g_ghost_ring[g_ghost_next++ % NGHOST];
-        if (*slot) { id ev = hm_get_id(&g_ghost, slot); if (ev) { ghost_held_add((__bridge void *)ev, -1); obj_drop(ev); } hm_del_id(&g_ghost, slot); own_note(*slot); }   // the evicted serial resolves anew too
-        *slot = k; g_ghost_puts++;
-    }
+    else if (m == &g_ghost) g_ghost_puts++;
     hm_put_id(m, &k, o); tex_pin *pin = nvn_hm_get(&g_tex_pins, &k); if (pin) tex_pin_set(pin, o); own_note(k);
     count_add(m == &g_by_serial ? &g_by_serial_held : &g_ghost_held, (__bridge void *)o, 1);
+    if (m == &g_ghost) { ghost_used(k); ghost_trim(2); }   // two per put: idle entries drain faster than new ones come
 }
 void tex_put(uint64_t k, id o) { pthread_mutex_lock(&g_smu); tex_put_locked(k, o); pthread_mutex_unlock(&g_smu); }
 
@@ -311,7 +349,7 @@ id own_alias_publish(uint64_t serial, const alias_key *k, id o) {
 // sRGB / linear views (tex_mtl_'s twin of a shared texture). A view shares its parent's bytes only while the parent is in the sharing table: a parent that left it (evicted with its
 // pool, taken over, upgraded) no longer holds the storage's bytes, and neither does the view. The parent's place there is checked in the same hold of g_smu as the view's entry
 // changes, so no entry names a view whose parent had already gone. Publishing first and taking the entry back with serial_del when the parent turned out gone (as tex_mtl_ did)
-// let another thread resolve the view in between, and for a finalized serial left it in the ghost ring for good: serial_del ends a live entry only, which is what a finalize wants.
+// let another thread resolve the view in between, and for a finalized serial left it in the ghost table for good: serial_del ends a live entry only, which is what a finalize wants.
 static id view_parent(id o) { return [o respondsToSelector:@selector(parentTexture)] ? ((id<MTLTexture>)o).parentTexture : nil; }
 static int view_kept(id o) { return own_keeps_locked(o); }   // a pinned or shared object keeps its view valid
 int own_view_put(uint64_t k, const alias_key *pk, id<MTLTexture> view) {
@@ -319,12 +357,6 @@ int own_view_put(uint64_t k, const alias_key *pk, id<MTLTexture> view) {
     id p = view_parent(view); int ok = p && hm_get_id(&g_alias, pk) == p;
     if (ok) { alias_seen(pk, own_hook_submission()); tex_put_locked(k, view); }
     pthread_mutex_unlock(&g_smu); return ok;
-}
-// The ring slot goes with the entry: left behind, it would evict a later ghost entry of the serial early. Caller holds g_smu
-static void ghost_del_locked(uint64_t k) {
-    id old = hm_get_id(&g_ghost, &k); if (!old) return;
-    for (unsigned i = 0; i < NGHOST; i++) if (g_ghost_ring[i] == k) { g_ghost_ring[i] = 0; break; }
-    ghost_held_add((__bridge void *)old, -1); obj_drop(old); hm_del_id(&g_ghost, &k); own_note(k);
 }
 int own_view_drop_stale(uint64_t k, id view) {
     pthread_mutex_lock(&g_smu);
@@ -418,15 +450,18 @@ int own_check_locked(char *why, size_t n) {
     for (uint32_t i = 0; i < g_tex_pins.cap; i++) { tex_pin *pin = g_tex_pins.vals[i]; if (pin && pin->object) expect_one(live, (__bridge id)pin->object); }
     for (uint32_t i = 0; i < g_ghost.cap; i++) if (g_ghost.vals[i]) expect_one(ghost, (__bridge id)g_ghost.vals[i]);
     int ok = counts_match("live", live, &g_by_serial_held, why, n) && counts_match("ghost", ghost, &g_ghost_held, why, n);
-    if (ok && g_ghost.n > NGHOST) { snprintf(why, n, "%u ghost serials, more than the ring's %d", g_ghost.n, NGHOST); ok = 0; }
-    uint32_t slots = 0;   // each ghost serial has one ring slot, and each slot a ghost serial: a second slot would evict the serial's entry before its time
-    for (unsigned i = 0; ok && i < NGHOST; i++) {
-        if (!g_ghost_ring[i]) continue;
-        slots++;
-        if (!nvn_hm_get(&g_ghost, &g_ghost_ring[i])) { snprintf(why, n, "ring slot %u names serial %llu, which has no ghost entry", i, (unsigned long long)g_ghost_ring[i]); ok = 0; }
-        for (unsigned j = i + 1; ok && j < NGHOST; j++) if (g_ghost_ring[j] == g_ghost_ring[i]) { snprintf(why, n, "ring slots %u and %u both name serial %llu", i, j, (unsigned long long)g_ghost_ring[i]); ok = 0; }
+    // Each ghost serial has one place in the list of use and each place a ghost serial (a place left behind would evict a later entry of the serial, one missing would keep its
+    // entry for good), the list's links agree both ways, and its uses go from oldest to newest (ghost_trim stops at the first entry in use)
+    uint32_t places = 0; const ghost_use *prev = NULL;
+    for (const ghost_use *u = g_ghost_lru; ok && u; prev = u, u = u->next) {
+        if (++places > g_ghost_use.n) { snprintf(why, n, "the ghost list is longer than its %u records (a cycle)", g_ghost_use.n); ok = 0; break; }
+        if (u->prev != prev) { snprintf(why, n, "ghost list: serial %llu's back link is wrong", (unsigned long long)u->serial); ok = 0; }
+        else if (nvn_hm_get(&g_ghost_use, &u->serial) != u) { snprintf(why, n, "ghost list: serial %llu's record is not the one its table names", (unsigned long long)u->serial); ok = 0; }
+        else if (!nvn_hm_get(&g_ghost, &u->serial)) { snprintf(why, n, "ghost list: serial %llu has no ghost entry", (unsigned long long)u->serial); ok = 0; }
+        else if (prev && (u->frame < prev->frame || u->sub < prev->sub)) { snprintf(why, n, "ghost list: serial %llu (frame %llu, submission %llu) used before the one ahead of it", (unsigned long long)u->serial, (unsigned long long)u->frame, (unsigned long long)u->sub); ok = 0; }
     }
-    if (ok && slots != g_ghost.n) { snprintf(why, n, "%u ring slots for %u ghost serials", slots, g_ghost.n); ok = 0; }
+    if (ok && prev != g_ghost_mru) { snprintf(why, n, "the ghost list does not end at its most recently used entry"); ok = 0; }
+    if (ok && (places != g_ghost.n || g_ghost_use.n != g_ghost.n)) { snprintf(why, n, "%u places in the ghost list, %u records, %u ghost serials", places, g_ghost_use.n, g_ghost.n); ok = 0; }
     // The sharing table: g_alias_set is the set of its textures, each key lies in every cell its bytes reach and in no other, and a last lookup is kept for entries only
     CFMutableSetRef vals = CFSetCreateMutable(NULL, 0, NULL); uint64_t want_ents = 0;
     for (uint32_t i = 0; ok && i < g_alias.cap; i++) {

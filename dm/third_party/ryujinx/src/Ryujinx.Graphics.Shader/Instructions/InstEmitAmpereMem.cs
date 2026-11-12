@@ -80,10 +80,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
             AmpereOp x = new(context.CurrOp);
             int addr = x.Bits(64, 72) << 2;
 
-            if (x.Bits(76, 78) == 2)
-            {
-                throw AFail(context, "IPA at an offset");
-            }
+            // At an offset (location 2): the offset word is in the second source register (Mesa NAK's OpIpa, 32..40)
+            Operand at = x.Bits(76, 78) == 2 ? Register(x.Bits(32, 40), RegisterType.Gpr) : null;
 
             Operand idxAddress = null;
 
@@ -94,7 +92,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             IpaOp ipaOp = x.Bits(78, 80) == 1 ? IpaOp.Constant : IpaOp.Pass;
 
-            EmitIpa(context, idxAddress, addr, ipaOp, RegisterConsts.RegisterZeroIndex, false, x.Rd);
+            EmitIpa(context, idxAddress, addr, ipaOp, RegisterConsts.RegisterZeroIndex, false, x.Rd, at);
         }
 
         // Geometry and tessellation stages. OUT (opcode 0x124 in the ALU forms): Rd = the new output handle, Ra the old, the stream in the second source; 78..80 emit (1),

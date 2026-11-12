@@ -289,6 +289,13 @@ A game may tell NVN objects apart by their bytes, without an NVN call. A host re
 - **Fix:** the queue builder keeps each size with a set flag (`qb_set`, `qb_get` in `hle_nvn.c`); the getters answer from them, and `GetQueueMemorySize` takes the device defaults for the sizes not set, as before. The ray tracing size is kept and reported only: the host traces no rays.
 - **Found on:** [PRAGMATA](../../dm/games/0400C76024710000/README.md), which reads all four after `SetDefaults` and its setters.
 
+### Float blend clamp (`nvnCommandBufferSetFloatBlendClamp`)
+
+- **Symptom:** `[RED] NVN unimplemented function called: nvnCommandBufferSetFloatBlendClamp`; now `[RED] nvnCommandBufferSetFloatBlendClamp 1 (a float blend result that overflows becomes the largest finite value): Metal stores infinity`, once.
+- **Cause:** an NVN2 call the host did not have. The driver writes its flag into 3D method 0x10b0, which NVIDIA's class headers list only as a reserved software method (`clb197.h`, `clc797.h`: `SET_RESERVED_SW_METHOD03`). The Tegra kernel driver names it: `SET_BES_CROP_DEBUG4` (nvgpu `gr_gp10b_set_bes_crop_debug4`, also the handler of the later chips), whose bit 0 sets the `clamp_fp_blend` field of the register: what a floating-point blend result that overflows becomes, infinity (0, `CLAMP_FP_BLEND_TO_INF`) or the format's largest finite value (1, `CLAMP_FP_BLEND_TO_MAXVAL`).
+- **Fix:** the call exists (`hle_nvn.c`). Metal has no such setting: a blend result above a 16- or 32-bit float target's range is stored as infinity, which is mode 0, so mode 0 is silent and mode 1 logs the red line once. Mode 1 would need every blending pixel shader to read its target and clamp there (a platform limit, left as it is): it differs only where a blend overflows, about 65,504 in a half-float target.
+- **Found on:** [PRAGMATA](../../dm/games/0400C76024710000/README.md), which sets 1; no frame has been seen with an infinity in a float target.
+
 ### Host-lent command memory segments
 
 - **Symptom:** `FATAL NVN command memory: the game's pool is empty…`.

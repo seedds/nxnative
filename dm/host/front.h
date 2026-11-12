@@ -1,6 +1,7 @@
 // Host front end (Mac: front_mac.m; iOS: dm/ios separately implements the same-named interface).
 #pragma once
 #include <stdlib.h>
+#include <stdint.h>
 // Metal reads HUD switches when the first device is made. Called before host preload and again after the launcher applies its settings; explicit environment values win.
 static inline void front_hud_env(void) {
     const char *e = getenv("DM_METAL_HUD");
@@ -13,6 +14,20 @@ static inline void front_hud_env(void) {
 void front_run(void (*guest)(void));
 // The CAMetalLayer the graphics backend presents frames to (NULL when there is no window)
 void *front_metal_layer(void);
+// Opt-in window-lifetime linear EDR transport (Mac DM_OOT_HDR=1). Zero with no
+// window, when disabled or when the initial screen is SDR. This is a transport
+// capability, not proof that a game's pixels are HDR. Getters are thread-safe.
+int front_hdr_enabled(void);
+// Present thread only, before each nextDrawable: apply the frame's immutable
+// content mastering parameters. Initial defaults are white203/peak1000 nits,
+// not physical screen limits. White0 falls back to203; peak is at least white.
+// Cached parameters avoid a setter or allocation for an unchanged frame.
+void front_hdr_prepare(uint16_t paper_white_nits, uint16_t peak_nits);
+// Current/potential headroom of that transport's current screen; 1 when unknown
+// or disabled. Current can initially be 1 on a capable display, and changes with
+// brightness/system conditions. EDRMetadata may tone-map to the current display.
+double front_hdr_headroom(void);
+double front_hdr_potential_headroom(void);
 // The highest refresh rate of the window's screen in Hz, 0 = not known (Mac front_mac.m; none on iOS, whose screens run at multiples of 60 Hz). Any thread
 int front_screen_max_fps(void);
 // The pixel size of the display the game is shown on: on the Mac the window's screen in its current mode (the main display before the window is up) (a scaled Retina mode's pixels), an iPhone's or iPad's screen (nativeBounds).

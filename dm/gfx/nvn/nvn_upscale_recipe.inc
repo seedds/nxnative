@@ -59,8 +59,8 @@ static void up_recipe_compute(id<MTLComputePipelineState> ps, id<MTLTexture> in,
 }
 static int up_recipe_draw(const up_recipe *r, id<MTLTexture> in, id<MTLTexture> out) {
     if (!up_recipe_valid(r, in, out) || !up_recipe_pipelines()) return 0;
-    up_mfx_scaler *e = up_mfx_scaler_for(r->iw, r->ih, r->ow, r->oh, 2);
-    if (!e) return 0;
+    up_mfx_scaler *e = up_mfx_scaler_for(r->iw, r->ih, r->ow, r->oh, front_hdr_enabled()?3:2);
+    if (!e || !(e->in.usage & MTLTextureUsageShaderWrite)) return 0;
     // Capture strong object values, never the mutable cache entry, for deferred encoding.
     id<MTL4FXSpatialScaler> sc = e->sc; id<MTLTexture> color = e->in, result = e->out;
     rp_end(); if (g_blit) { enc_b_end(g_blit); g_blit = nil; } ubd_land_compute();
@@ -106,6 +106,6 @@ static int up_recipe_encode(NvShader *cs, const p_dispatch *dp) {
     zskip_del(dst.serial); sparse_gpu_wrote(&dst);
     uint64_t drawn = atomic_fetch_add(&g_up_recipe_drawn,1)+1;
     if (drawn%300==0) up_recipe_report();
-    g_up_mfx_n++; static int logged; if (!logged++) MLOG("upscaler: experimental profile stage %s intercepted, %ux%u RGB9E5 sqrt(linear) -> square -> MetalFX Linear -> %ux%u RG11B10; preceding native AA preserved", cs->key,r->iw,r->ih,r->ow,r->oh);
+    g_up_mfx_n++; static int logged; if (!logged++) MLOG("upscaler: experimental profile stage %s intercepted, %ux%u RGB9E5 sqrt(linear) -> square -> MetalFX %s -> %ux%u RG11B10; preceding native AA preserved", cs->key,r->iw,r->ih,front_hdr_enabled()?"HDR":"Linear",r->ow,r->oh);
     return 1;
 }

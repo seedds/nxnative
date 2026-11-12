@@ -847,6 +847,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - asynchronous final MetalFX scaling writes a full-size offscreen image and immediately samples it into an identical drawable. → [Final spatial scaling can write an identity drawable directly](../reference/rendering.md#final-spatial-scaling-can-write-an-identity-drawable-directly)
 - Metal API Validation aborts with `outputTexture must have private storage mode` when spatial MetalFX encodes directly into a drawable. → [Spatial MetalFX output must use private storage](../reference/rendering.md#spatial-metalfx-output-must-use-private-storage)
 - a smaller Mac panel prevents measuring the workload of a higher-resolution output by resizing its game window. → [Explicit drawable dimensions measure output work independently of the panel](../reference/rendering.md#explicit-drawable-dimensions-measure-output-work-independently-of-the-panel)
+- Advertising HDR to a game while the Mac layer remains BGRA8 SDR produces washed colours. Copying PQ codes into a linear float layer is also incorrect. An HDR spatial scratch texture without its compute writer usage can instead leave the world black while the independently composed HUD remains visible. → [Native HDR through a linear EDR display layer](../reference/rendering.md#native-hdr-through-a-linear-edr-display-layer)
 
 ## Shaders
 

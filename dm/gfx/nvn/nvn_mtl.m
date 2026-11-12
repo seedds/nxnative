@@ -2444,7 +2444,10 @@ void mtl_drain(void) { present_drop_for_suspend(); mtl_present_flush(); snap_dra
 
 // ================= Render replay =================
 #include "../../host/front.h"
-static int g_red_once[164];   // one past the highest key: a new key raises this, and the macro refuses to compile otherwise
+__attribute__((weak)) int front_hdr_enabled(void) { return 0; }
+__attribute__((weak)) void front_hdr_prepare(uint16_t white,uint16_t peak) { (void)white;(void)peak; }
+__attribute__((weak)) uint32_t dm_vi_hdr_content(void) { return 203u|(1000u<<16); }
+static int g_red_once[166];   // one past the highest key: a new key raises this, and the macro refuses to compile otherwise
 #define RED_ONCE(k, ...) do { _Static_assert((k) < sizeof g_red_once / sizeof *g_red_once, "a RED_ONCE key past g_red_once: raise its size"); if (!g_red_once[k]++) MLOG("[RED] " __VA_ARGS__); } while (0)
 // NVN vertex streams 0–15 → Metal vertex buffer slots: 0–13 go to 16–29 (30 is the constant fallback buffer), 14 and 15 to 14 and 15. Metal has only the 31 slots 0–30; translated shaders use only buffer(0) (the argument buffer),
 // and the host's own vertex functions read no vertex buffers. 13 Sentinels uses stream 15, and the old 16 + stream went out of range (Metal assertion: buffer index (31) must be < 31)
@@ -15674,7 +15677,7 @@ static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTex
 // bytes), then draw 1:1 with the usual origin and output format. Queue barriers serialize both the frame's rendering and reuse of the scaler's textures across presents.
 // Replacing those textures waits for earlier presents; throttle replacement during resizing, and keep standard scaling for refused sizes. Offscreen captures own separate state.
 #define FX_REMAKE_PRESENTS 30
-typedef struct { id<MTL4FXSpatialScaler> sc; id<MTLTexture> in, out; uint64_t made_at; int made; NSUInteger refused[6]; } fx_state;
+typedef struct { id<MTL4FXSpatialScaler> sc; id<MTLTexture> in, out; uint64_t made_at; int made,hdr; NSUInteger refused[7]; } fx_state;
 static fx_state g_fx_present;   // only the present thread encodes or replaces the scaler
 static id<MTL4Compiler> g_fx_comp;
 static int g_fx_mode = -1;   // 1 = metalfx, 0 = off
@@ -15698,8 +15701,9 @@ static int fx_wanted(MTLViewport vp, NSUInteger cw, NSUInteger ch) {
 static id<MTLTexture> fx_encode(fx_state *fx, id<MTL4CommandBuffer> cb, id<MTLTexture> raw, const NSUInteger r[4], MTLViewport vp, MTLPixelFormat out_pf, int remake_wait) {
     NSUInteger cw = r[2], ch = r[3], ow = (NSUInteger)vp.width, oh = (NSUInteger)vp.height;
     if (fx_mode() != 1 || !fx_wanted(vp, cw, ch)) return nil;
-    if (!fx->sc || fx->in.width != cw || fx->in.height != ch || fx->in.pixelFormat != raw.pixelFormat || fx->out.width != ow || fx->out.height != oh || fx->out.pixelFormat != out_pf) {
-        NSUInteger key[6] = {cw, ch, raw.pixelFormat, ow, oh, out_pf};
+    int hdr=front_hdr_enabled() && raw.pixelFormat==MTLPixelFormatRGBA16Float && out_pf==MTLPixelFormatRGBA16Float;
+    if (!fx->sc || fx->hdr!=hdr || fx->in.width != cw || fx->in.height != ch || fx->in.pixelFormat != raw.pixelFormat || fx->out.width != ow || fx->out.height != oh || fx->out.pixelFormat != out_pf) {
+        NSUInteger key[7] = {cw, ch, raw.pixelFormat, ow, oh, out_pf,(NSUInteger)hdr};
         if (!memcmp(key, fx->refused, sizeof key)) return nil;
         if (remake_wait && fx->made && g_present_n < fx->made_at + FX_REMAKE_PRESENTS) return nil;
         if (remake_wait) { pthread_mutex_lock(&g_pq_mu); while (g_pq_inflight) pthread_cond_wait(&g_pq_cv, &g_pq_mu); pthread_mutex_unlock(&g_pq_mu); }
@@ -15708,7 +15712,7 @@ static id<MTLTexture> fx_encode(fx_state *fx, id<MTL4CommandBuffer> cb, id<MTLTe
         if (!g_fx_comp) g_fx_comp = [g_dev newCompilerWithDescriptor:[MTL4CompilerDescriptor new] error:&e];
         MTLFXSpatialScalerDescriptor *d = [MTLFXSpatialScalerDescriptor new];
         d.colorTextureFormat = raw.pixelFormat; d.outputTextureFormat = out_pf; d.inputWidth = cw; d.inputHeight = ch; d.outputWidth = ow; d.outputHeight = oh;
-        d.colorProcessingMode = MTLFXSpatialScalerColorProcessingModePerceptual;
+        d.colorProcessingMode = hdr?MTLFXSpatialScalerColorProcessingModeHDR:MTLFXSpatialScalerColorProcessingModePerceptual;
         id<MTL4FXSpatialScaler> sc = g_fx_comp ? [d newSpatialScalerWithDevice:g_dev compiler:g_fx_comp] : nil;
         fx->made_at = g_present_n; fx->made++;
         if (!sc) { memcpy(fx->refused, key, sizeof key);
@@ -15723,7 +15727,7 @@ static id<MTLTexture> fx_encode(fx_state *fx, id<MTL4CommandBuffer> cb, id<MTLTe
         if (!in || !out) { memcpy(fx->refused, key, sizeof key); MLOG("[RED] present upscaling: cannot create the scaler's textures (%lux%lu, %lux%lu)", (unsigned long)cw, (unsigned long)ch, (unsigned long)ow, (unsigned long)oh); return nil; }
         in.label = @"present upscale input"; out.label = @"present upscale output";
         res_add(in); res_add(out); res_commit();
-        fx->sc = sc; fx->in = in; fx->out = out;
+        fx->sc = sc; fx->in = in; fx->out = out;fx->hdr=hdr;
         MLOG("present upscaling: MetalFX spatial scaler %lux%lu → %lux%lu (format %lu → %lu, scaler #%d, made in %.1f ms)", (unsigned long)cw, (unsigned long)ch, (unsigned long)ow, (unsigned long)oh,
              (unsigned long)raw.pixelFormat, (unsigned long)out_pf, fx->made, (now_ns() - t0) / 1e6);
     }
@@ -15820,7 +15824,7 @@ static up_mfx_scaler *up_mfx_scaler_for(NSUInteger iw, NSUInteger ih, NSUInteger
     id<MTLTexture> in = nil, out = nil, read = nil;
     if (sc) {
         MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float width:iw height:ih mipmapped:NO];
-        td.storageMode = MTLStorageModePrivate; td.usage = sc.colorTextureUsage | MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead | (srgb == 2 ? MTLTextureUsageShaderWrite : 0); in = [g_dev newTextureWithDescriptor:td];
+        td.storageMode = MTLStorageModePrivate; td.usage = sc.colorTextureUsage | MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead | ((srgb == 2 || srgb == 3) ? MTLTextureUsageShaderWrite : 0); in = [g_dev newTextureWithDescriptor:td];
         td.pixelFormat = of; td.width = ow; td.height = oh; td.usage = sc.outputTextureUsage | MTLTextureUsageShaderRead | (srgb == 1 ? MTLTextureUsagePixelFormatView : 0); out = [g_dev newTextureWithDescriptor:td];
         read = srgb == 1 ? [out newTextureViewWithPixelFormat:MTLPixelFormatRGBA8Unorm_sRGB] : out;
     }
@@ -16021,7 +16025,7 @@ static void present_note_latency(double target_ts) {
         }
     }
 }
-static int present_now_kind(const tex_t *t, double period, uint64_t frame, uint64_t ticket, const int crop[4], id<CAMetalDrawable> supplied, double target_ts,int generated) {
+static int present_now_kind(const tex_t *t, double period, uint64_t frame, uint64_t ticket, const int crop[4], id<CAMetalDrawable> supplied, double target_ts,int generated,uint32_t hdr_content) {
     if (g_present_stall_ns) { struct timespec ts = {0, (long)g_present_stall_ns}; nanosleep(&ts, NULL); }
     g_present_n++;
     if (bootprof() && (g_present_n == 1 || g_present_n % 120 == 0)) {
@@ -16087,6 +16091,10 @@ static int present_now_kind(const tex_t *t, double period, uint64_t frame, uint6
 #endif
     present_pipeline(layer.pixelFormat);   // Same as the original path: the first frame compiles the pipeline before taking the drawable
     if (g_grab_cb) { temporal_async_wait_source(t->serial); grab_present(src,crop,layer.drawableSize); }   // Game picture needed by the whole-window screenshot (peek without the lock first; the real take locks inside the function)
+    if(front_hdr_enabled()) {
+        if(supplied || src.pixelFormat!=MTLPixelFormatRGBA16Float) { RED_ONCE(164,"HDR refuses an unconverted source or an already acquired display-link drawable");return 0; }
+        front_hdr_prepare((uint16_t)hdr_content,(uint16_t)(hdr_content>>16));
+    }
     uint64_t dt0 = now_ns();
     id<CAMetalDrawable> dr = supplied ? supplied : [layer nextDrawable];
     if (!supplied && nvn_flow_on()) nvn_flow_cpu("nextDrawable", dt0 * 1e-9);
@@ -16147,7 +16155,7 @@ static int present_now_kind(const tex_t *t, double period, uint64_t frame, uint6
 // Swapchain texture return: before AcquireTexture gets a texture it waits for the ticket of that texture's previous present to be processed (mtl_present_wait), after which the commands the game draws into it
 // are necessarily ordered after that blit on the GPU queue.
 #define PQ 8
-typedef struct { tex_t t; double period; uint64_t frame; int crop[4]; double t_in; uint64_t ev_val, snap_v; tex_t generated; int phase; int generated_crop[4]; } pq_item;   // snap_v: the snapshot copy this present shows (snap_commit_wait)   // t_in: the time the game handed this frame into the present queue (CACurrentMediaTime); ev_val: see g_ext_ev
+typedef struct { tex_t t; double period; uint64_t frame; int crop[4]; double t_in; uint64_t ev_val, snap_v; tex_t generated; int phase; int generated_crop[4]; uint32_t hdr_content; } pq_item;   // snap_v: the snapshot copy this present shows (snap_commit_wait)   // t_in: the time the game handed this frame into the present queue (CACurrentMediaTime); ev_val: see g_ext_ev
 // External producer (the Vulkan layer, dm/gfx/vk) renders on its own queue and signals this event when a frame's rendering is done: the present of that frame waits for the value on g_q4
 static id<MTLSharedEvent> g_ext_ev;
 static void ext_wait(uint64_t v) { if (v && g_ext_ev) [g_q4 waitForEvent:g_ext_ev value:v]; }
@@ -16240,7 +16248,7 @@ __attribute__((weak)) uint64_t dm_focus_in_since(void) { return 0; }
     ext_wait(it.ev_val); snap_commit_wait(it.snap_v);
     @autoreleasepool {
         const tex_t *picture=generated?&it.generated:&it.t;
-        submitted=present_now_kind(picture,it.generated.serial?it.period*.5:it.period,it.frame,ticket,pq_picture_crop(&it,generated),update.drawable,update.targetPresentationTimestamp,generated);
+        submitted=present_now_kind(picture,it.generated.serial?it.period*.5:it.period,it.frame,ticket,pq_picture_crop(&it,generated),update.drawable,update.targetPresentationTimestamp,generated,it.hdr_content);
         mtl_tex_unpin(picture->serial);
     }
     g_link_hold_until = submitted && (it.generated.serial || it.period>0.025) ? update.targetPresentationTimestamp + (it.generated.serial?it.period*.5:it.period) : 0;
@@ -16328,6 +16336,7 @@ static void link_sync(void) {   // Called every frame by the game's present thre
         g_dm_present_link=front_screen_max_fps()>=120?2:1;
 #endif
     }
+    if(front_hdr_enabled())g_dm_present_link=0; // HDR metadata must be installed before our own nextDrawable, not after a link acquired it.
     int want = g_dm_present_link;
     if (want < 0 || want > 2) { g_dm_present_link = applied == 3 ? 1 : applied; pthread_mutex_unlock(&g_pq_mu); return; }
     if (g_rescue_mode && (want != g_rescue_mode || now_ns() >= g_rescue_back_at)) {
@@ -16395,7 +16404,7 @@ static void *present_main(void *arg) {
         ext_wait(it.ev_val); snap_commit_wait(it.snap_v);
         @autoreleasepool {
             const tex_t *picture = generated ? &it.generated : &it.t;
-            submitted = present_now_kind(picture, it.generated.serial ? it.period * .5 : it.period, it.frame, ticket, pq_picture_crop(&it, generated), nil, 0, generated);
+            submitted = present_now_kind(picture, it.generated.serial ? it.period * .5 : it.period, it.frame, ticket, pq_picture_crop(&it, generated), nil, 0, generated,it.hdr_content);
             mtl_tex_unpin(picture->serial);
         }
         pthread_mutex_lock(&g_pq_mu); g_classic_busy = 0; pthread_cond_broadcast(&g_pq_cv); pthread_mutex_unlock(&g_pq_mu);
@@ -16467,7 +16476,7 @@ int mtl_snap_on(void) {
     static int v = -1; if (v >= 0) return v;
     const char *e = getenv("DM_PRESENT_SNAP");
     int n = e ? atoi(e) : DM_GAME_PRESENT_SNAP ? 2 : 0;   // the profile's present_snap (a ring of 2)
-    if(temporal_preview_on()==3 && n<2)n=2;
+    if((temporal_preview_on()==3 || front_hdr_enabled()) && n<2)n=2;
     v = n > 0; g_snap_n = n < 2 ? 2 : n > SNAP_MAX ? SNAP_MAX : n;
     if (v) MLOG("present snapshots (DM_PRESENT_SNAP=%d): each present is copied into a ring of %d host textures and the game's texture is free at once", n, g_snap_n);
     return v;
@@ -16496,6 +16505,34 @@ uint64_t mtl_snap_acquire_wait(void) {
     if (ws_on()) ws_put(WS_SNAP, w0, blocked);
     return ws_t0() - w0;
 }
+// Each native HDR slot owns its conversion arguments through the old-reader wait.
+// The game's target is never rewritten, and no 8-bit intermediate is introduced.
+static id<MTL4ArgumentTable> g_hdr_snap_args[SNAP_MAX];
+static id<MTLBuffer> g_hdr_snap_uniform[SNAP_MAX];
+static int hdr_snap_encode(id<MTL4CommandBuffer> cb,unsigned k,id<MTLTexture> src,id<MTLTexture> dst,const NSUInteger content[4]) {
+    if(!g_hdr_snap_args[k]) {
+        g_hdr_snap_args[k]=temporal_snap_table(0);
+        g_hdr_snap_uniform[k]=[g_dev newBufferWithLength:32 options:MTLResourceStorageModeShared];
+        if(!g_hdr_snap_args[k] || !g_hdr_snap_uniform[k])return 0;
+        [g_snap_res addAllocation:g_hdr_snap_uniform[k]];[g_snap_res commit];
+    }
+    if(!g_temporal_snap_sampler) {
+        MTLSamplerDescriptor *sd=[MTLSamplerDescriptor new];sd.minFilter=sd.magFilter=MTLSamplerMinMagFilterNearest;
+        sd.sAddressMode=sd.tAddressMode=MTLSamplerAddressModeClampToEdge;sd.supportArgumentBuffers=YES;
+        g_temporal_snap_sampler=[g_dev newSamplerStateWithDescriptor:sd];
+    }
+    id<MTLRenderPipelineState> ps=temporal_snap_copy_pipeline(MTLPixelFormatRGBA16Float);if(!ps)return 0;
+    float *v=g_hdr_snap_uniform[k].contents;v[0]=content[0];v[1]=content[1];v[2]=v[3]=1;v[4]=v[5]=0;v[6]=src.width;v[7]=src.height;
+    id<MTL4ArgumentTable> table=g_hdr_snap_args[k];[table setAddress:g_hdr_snap_uniform[k].gpuAddress atIndex:0];[table setTexture:src.gpuResourceID atIndex:0];[table setSamplerState:g_temporal_snap_sampler.gpuResourceID atIndex:0];
+    MTL4RenderPassDescriptor *rp=[MTL4RenderPassDescriptor new];rp.colorAttachments[0].texture=dst;
+    rp.colorAttachments[0].loadAction=MTLLoadActionDontCare;rp.colorAttachments[0].storeAction=MTLStoreActionStore;
+    id<MTL4RenderCommandEncoder> e=[cb renderCommandEncoderWithDescriptor:rp];
+    [e barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageFragment visibilityOptions:resource_vis()];
+    [e setRenderPipelineState:ps];[e setArgumentTable:table atStages:MTLRenderStageFragment];
+    [e setViewport:(MTLViewport){0,0,dst.width,dst.height,0,1}];[e setScissorRect:(MTLScissorRect){0,0,dst.width,dst.height}];
+    [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    [e barrierAfterStages:MTLStageFragment beforeQueueStages:MTLStageAll visibilityOptions:resource_vis()];[e endEncoding];return 1;
+}
 // Copy the presented texture into the next ring slot; returns the slot's serial (0 = no snapshot: the game's texture is presented as before)
 static uint64_t snap_take(const tex_t *t,const int present_crop[4],uint64_t *generated) {
     *generated=0;
@@ -16522,7 +16559,10 @@ static uint64_t snap_take(const tex_t *t,const int present_crop[4],uint64_t *gen
     // The texture this slot held before it was last replaced: every present that read it had been committed when the replacing copy was (the busy check then), and the queue
     // signals g_snap_ev only after all work committed before the signal, so those presents have run and it can leave the residency set
     if (g_snap[k].old) { [g_snap_res removeAllocation:g_snap[k].old]; [g_snap_res commit]; g_snap[k].old = nil; }
-    id<MTLTexture> src = tex_mtl(t); if (!src) return 0;
+    int hdr=front_hdr_enabled();
+    uint64_t hdr_frame=atomic_load(&g_cur_frame);
+    id<MTLTexture> src=hdr && g_hdr_native_frame==hdr_frame && g_hdr_native_window==t->serial?g_hdr_native_linear:hdr?nil:tex_mtl(t);
+    if(!src){if(hdr)RED_ONCE(165,"HDR snapshot has no validated pre-PQ linear source; frame not displayed");return 0;}
     // The copy reads the source before present_now runs, so it needs the same commit as present_now: a window texture presented before any submission has used it was made just
     // now and is outside the committed residency set. DRAGON QUEST XI S presents three times before its first submission; on an A17 Pro the copy faulted silently (its command buffer
     // has no error handler) and every later command buffer of the process was ignored (GitHub issue #626). A commit with nothing new costs nothing
@@ -16541,10 +16581,11 @@ static uint64_t snap_take(const tex_t *t,const int present_crop[4],uint64_t *gen
     int compact=temporal_preview_on()==3 && present_crop && present_crop[2]>0 && present_crop[3]>0 &&
         present_crop_rect(src,present_crop,content) && content[2]*src.height==content[3]*src.width;
     NSUInteger copy_w=compact?content[2]:src.width,copy_h=compact?content[3]:src.height;
+    MTLPixelFormat copy_format=hdr?MTLPixelFormatRGBA16Float:src.pixelFormat;
     id<MTLTexture> dst = g_snap[k].tex;
-    if (!dst || dst.width != copy_w || dst.height != copy_h || dst.pixelFormat != src.pixelFormat) {
-        MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:src.pixelFormat width:copy_w height:copy_h mipmapped:NO];
-        d.storageMode = MTLStorageModePrivate; d.usage = MTLTextureUsageShaderRead;
+    if (!dst || dst.width != copy_w || dst.height != copy_h || dst.pixelFormat != copy_format) {
+        MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:copy_format width:copy_w height:copy_h mipmapped:NO];
+        d.storageMode = MTLStorageModePrivate; d.usage = MTLTextureUsageShaderRead | (hdr?MTLTextureUsageRenderTarget:0);
         // The old texture stays resident (and referenced) until the slot's next use: the busy check above means its last present was committed, not that the GPU has run it,
         // and a texture removed here was sampled outside the residency set by a display command buffer still queued
         g_snap[k].old = dst;
@@ -16557,11 +16598,14 @@ static uint64_t snap_take(const tex_t *t,const int present_crop[4],uint64_t *gen
     [g_snap_alloc[k] reset];
     id<MTL4CommandBuffer> cb = g_snap_cb[k];
     [cb beginCommandBufferWithAllocator:g_snap_alloc[k]];
+    if(hdr) { if(!hdr_snap_encode(cb,k,src,dst,content))return 0; }
+    else {
     id<MTL4ComputeCommandEncoder> ce = [cb computeCommandEncoder];
     [ce barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageBlit visibilityOptions:resource_vis()];   // after the frame's work and the slot's last blit to the screen
     [ce copyFromTexture:src sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(compact?content[0]:0, compact?content[1]:0, 0) sourceSize:MTLSizeMake(copy_w, copy_h, 1) toTexture:dst destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
     [ce barrierAfterStages:MTLStageBlit beforeQueueStages:MTLStageAll visibilityOptions:resource_vis()];   // the game's next writes to its texture come after the copy
     [ce endEncoding];
+    }
     uint64_t frame=atomic_load(&g_cur_frame);
     if(temporal_preview_on()==3) {
         static unsigned notes;
@@ -16572,7 +16616,7 @@ static uint64_t snap_take(const tex_t *t,const int present_crop[4],uint64_t *gen
                  front_screen_max_fps(),g_temporal_pair_viewport[0],g_temporal_pair_viewport[1],g_temporal_pair_viewport[2],g_temporal_pair_viewport[3]);
     }
     if(temporal_preview_on()==3 && front_screen_max_fps()>=120 && g_temporal_pair_final_frame==frame && g_temporal_pair_final_serial==t->serial)
-        *generated=temporal_snap_encode_producer(cb,k,src,g_temporal_pair_viewport,frame,now_ns(),g_temporal_full_scene,g_temporal_pair_ui,g_temporal_game_depth,g_temporal_full_camera,g_snap_ev,g_snap_v+1,present_crop);
+        *generated=temporal_snap_encode_producer(cb,k,hdr?dst:src,g_temporal_pair_viewport,frame,now_ns(),g_temporal_full_scene,g_temporal_pair_ui,g_temporal_game_depth,g_temporal_full_camera,g_snap_ev,g_snap_v+1,present_crop);
     else if(temporal_preview_on()==3) {
         double at=nvn_flow_begin();
         if(at)nvn_flow_event(g_temporal_pair_final_frame!=frame?"snapshot final frame missing":g_temporal_pair_final_serial!=t->serial?"snapshot final serial mismatch":"snapshot screen below 120",frame,0,at,nvn_flow_clock());
@@ -16597,7 +16641,7 @@ static uint64_t snap_take(const tex_t *t,const int present_crop[4],uint64_t *gen
         r = rec_own_put(b, RO_NOTE, 0); r->a[0] = (uint64_t)(uintptr_t)&g_snap_cmt; r->a[1] = v;
         rec_own_push(b);
     } else {
-        pthread_mutex_lock(&g_res_mu); temporal_async_copy_wait(old_reader); double flow_submit = nvn_flow_begin(); [g_q4 commit:&cb count:1 options:options]; if (flow_submit) nvn_flow_event("snapshot submit", frame, 0, flow_submit, nvn_flow_clock()); [g_q4 signalEvent:g_snap_ev value:v]; pthread_mutex_unlock(&g_res_mu);
+        pthread_mutex_lock(&g_res_mu); temporal_async_copy_wait(old_reader); double flow_submit = nvn_flow_begin(); if(options)[g_q4 commit:&cb count:1 options:options];else [g_q4 commit:&cb count:1]; if (flow_submit) nvn_flow_event("snapshot submit", frame, 0, flow_submit, nvn_flow_clock()); [g_q4 signalEvent:g_snap_ev value:v]; pthread_mutex_unlock(&g_res_mu);
         atomic_store(&g_snap_cmt, v);
     }
     g_snap[k].ev = v;g_snap[k].compact=compact;
@@ -16628,11 +16672,13 @@ static uint64_t present_enqueue(const tex_t *t, double period, const int crop[4]
         slot = (int)(atomic_load(&g_snap_next) % (uint64_t)g_snap_n);
         if ((ss = snap_take(t,crop,&generated))) { memset(&snap, 0, sizeof snap); snap.magic = MAGIC('T', 'E', 'X', 0); snap.serial = ss; t = &snap; }
     }
+    if(front_hdr_enabled() && !ss)return 0;
     mtl_tex_pin(t->serial);
     if(generated)mtl_tex_pin(generated);
     pthread_mutex_lock(&g_pq_mu);
     while (g_pq_in - g_pq_done >= PQ) pthread_cond_wait(&g_pq_cv, &g_pq_mu);   // Wait only when the queue is full; normally AcquireTexture blocks first
     pq_item *it = &g_pq[g_pq_in % PQ]; *it = (pq_item){*t, period, atomic_load(&g_cur_frame), {0}, CACurrentMediaTime(), ev_val, ss ? g_snap[slot].ev : 0};
+    it->hdr_content=dm_vi_hdr_content();
     if(generated){
         it->generated.magic=MAGIC('T','E','X',0);it->generated.serial=generated;
         if(crop)memcpy(it->generated_crop,crop,sizeof it->generated_crop);

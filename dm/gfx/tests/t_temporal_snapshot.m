@@ -9,6 +9,14 @@ static int test_ui_visible=1;
 #define CHECK(x,m) do{checks++;if(!(x)){failed++;fprintf(stderr,"FAIL: %s\n",m);}}while(0)
 static uint8_t srgb_byte(float x){float v=x<=.0031308f?12.92f*x:1.055f*powf(x,1.f/2.4f)-.055f;return(uint8_t)lroundf(fminf(1,fmaxf(0,v))*255);}
 static void pixel(float out[4],int x,int y,int left,int ui) {
+    if(getenv("DM_TEST_HDR")) {
+        float z=.01f;if(y>=52){const float levels[5]={0,.18f,1,4,8};z=levels[MIN(x*5/128,4)];}
+        out[0]=out[1]=out[2]=z;out[3]=1;
+        if(x>=left && x<left+16 && y>=24 && y<48){out[0]=4;out[1]=out[2]=.01f;}
+        if(ui && x>=8 && x<40 && y>=4 && y<12)out[0]=out[1]=out[2]=1;
+        return;
+    }
+
     out[0]=x>=left && x<left+16 && y>=24 && y<48?1:.01f;out[1]=out[2]=.01f;out[3]=1;
     if(ui && x>=8 && x<40 && y>=4 && y<12){out[0]=.01f;out[1]=1;}
 }
@@ -181,7 +189,7 @@ static void diagnostic_flush_test(void) {
     rmdir(dir);
 }
 
-int main(void){@autoreleasepool{
+int sdr_main(void){@autoreleasepool{
     alarm(45);int asynchronous=getenv("DM_TEST_ASYNC")!=NULL;
     if(getenv("DM_TEST_FRAMEGEN_FLUSH")){diagnostic_flush_test();printf("t_framegen_trace_flush: %d checks, %d failures\n",checks,failed);return failed!=0;}
     test_ui_visible=!getenv("DM_TEST_NO_UI");
@@ -371,4 +379,173 @@ int main(void){@autoreleasepool{
         CHECK(generated_matches(out,44),"in-flight old generated display retains its original pixels across resize");
     }
     printf("t_temporal_snapshot: %d checks, %d failures\n",checks,failed);return failed!=0;
+}}
+
+static NSData *hdr_read(id<MTLTexture> t) {
+    NSUInteger pitch=(t.width*8+255)&~255ul;id<MTLBuffer> b=[g_dev newBufferWithLength:pitch*t.height options:MTLResourceStorageModeShared];
+    id<MTLCommandBuffer> cb=q_cb();id<MTLBlitCommandEncoder> e=[cb blitCommandEncoder];
+    [e copyFromTexture:t sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(t.width,t.height,1) toBuffer:b destinationOffset:0 destinationBytesPerRow:pitch destinationBytesPerImage:b.length];
+    [e endEncoding];[cb commit];[cb waitUntilCompleted];CHECK(!cb.error,"HDR readback GPU completes");return[NSData dataWithBytes:b.contents length:b.length];
+}
+static float hdr_sample(NSData *d,id<MTLTexture> t,int x,int y,int c){NSUInteger pitch=(t.width*8+255)&~255ul;return*((const __fp16*)((const uint8_t*)d.bytes+y*pitch)+x*4+c);}
+static void hdr_values(id<MTLTexture> t,int scale) {
+    CHECK(t.pixelFormat==MTLPixelFormatRGBA16Float,"HDR native/generated remainsRGBA16Float");NSData *d=hdr_read(t);
+    for(int c=0;c<3;c++){CHECK(fabsf(hdr_sample(d,t,20*scale,8*scale,c)-1)<.015f,"HDR HUD stays reference white");CHECK(fabsf(hdr_sample(d,t,116*scale,60*scale,c)-8)<.3f,"HDR8 highlight survives FI/scaler");}
+    const __fp16 *v=d.bytes;for(NSUInteger i=0;i<d.length/2;i++)if(!isfinite((float)v[i])){CHECK(0,"HDR pixels finite");break;}
+}
+static void hdr_control_tests(void) {
+    for(int kind=0;kind<4;kind++) {
+        temporal_snap_slot q={0};q.check_hdr=1;q.check_generation=g_temporal_snap_generation;q.check_width=2;q.check_height=1;q.check_pitch=256;
+        q.native_check=[g_dev newBufferWithLength:256 options:MTLResourceStorageModeShared];q.converted_check=[g_dev newBufferWithLength:256 options:MTLResourceStorageModeShared];
+        memset(q.native_check.contents,0,256);memset(q.converted_check.contents,0,256);
+        __fp16 *a=q.native_check.contents,*b=q.converted_check.contents;
+        for(int i=0;i<8;i++)a[i]=b[i]=i<4?.18f:8.f;
+        if(kind==1)b[4]=7.f;if(kind==2)b[4]=NAN;if(kind==3)for(int i=0;i<8;i++)a[i]=b[i]=0;
+        g_temporal_snap_fidelity=1;temporal_snap_check_completed(&q);
+        CHECK(g_temporal_snap_fidelity==(kind==0?2:kind==3?0:-1),"HDR fidelity accepts matching pixels, rejects corruption/NaN, and waits on uniform black");
+    }
+    g_temporal_snap_fidelity=2;
+}
+static int hdr_observer_only(void) {
+    setenv("DM_OOT_INTERPOLATION_PREVIEW","0",1);mtl_init();
+    prog_t pg={.serial=97003};tex_t src={.magic=MAGIC('T','E','X',0),.serial=97001},target={.magic=MAGIC('T','E','X',0),.serial=97002};
+    src.d=(nvn_texdesc){.target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_R11G11B10F,.width=128,.height=72,.depth=1,.levels=1,.samples=1};
+    target.d=src.d;target.d.format=NVN_FORMAT_RGB10A2;
+    id<MTLTexture> linear=temporal_snap_texture(MTLPixelFormatRG11B10Float,128,72),pq=temporal_snap_texture(MTLPixelFormatRGB10A2Unorm,128,72);
+    serial_put(src.serial,linear);serial_put(target.serial,pq);mtl_reg_tex(721,&src,NULL);
+    NvProg *program=[NvProg new];program->sh[0]=[NvShader new];program->sh[1]=[NvShader new];strcpy(program->sh[0]->key,"a5b1bd74e47458d7_b");strcpy(program->sh[1]->key,"a4200b53be47212c_b");serial_put(pg.serial,program);
+    state_reset();memset(&R,0,sizeof R);S.prog=&pg;S.tex[1][0]=721;S.has_vp=1;S.vp[0][2]=128;S.vp[0][3]=72;R.rt.n=1;R.rt.color[0]=&target;
+    for(unsigned test=0;test<18;test++) {
+        view_t source_view={0};src.set_swz=0;src.serial=97001;target.serial=97002;
+        serial_put(src.serial,linear);serial_put(target.serial,pq);
+        if(test==13){NvPkg *wrapped=[NvPkg new];wrapped->tex=pq;wrapped->view=linear;serial_put(src.serial,wrapped);}
+        if(test==14)src.serial=97004; // No storage exists: observation must not build or upload one.
+        if(test==15){NvPkg *wrapped=[NvPkg new];wrapped->tex=linear;wrapped->view=pq;serial_put(target.serial,wrapped);}
+        if(test==16)target.serial=97005;
+        if(test==17)serial_put(src.serial,@[]); // Cached non-textures must be refused before texture messages.
+
+        strcpy(program->sh[1]->key,"a4200b53be47212c_b");
+        if(test==5){source_view.set_format=1;source_view.format=NVN_FORMAT_RGBA8;}
+        if(test==6){source_view.set_swizzle=1;source_view.swz[0]=4;source_view.swz[1]=3;source_view.swz[2]=2;source_view.swz[3]=5;}
+        if(test==7){src.set_swz=1;src.swz=4|(3<<3)|(2<<6)|(5<<9);}
+        if(test==8){source_view.set_target=1;source_view.target=NVN_TEXTURE_TARGET_3D;}
+        if(test==9){source_view.set_swizzle=1;source_view.swz[0]=2;source_view.swz[1]=3;source_view.swz[2]=4;source_view.swz[3]=1;}
+        mtl_reg_tex(721,&src,&source_view);
+        uint64_t frame=100+test;mtl_set_frame(frame);g_hdr_native_frame=UINT64_MAX;
+        if(test==1)strcpy(program->sh[0]->key,"0000000000000000_b");
+        if(test==2){R.rt.has_cview[0]=1;R.rt.cview[0]=(view_t){.set_levels=1,.base_level=1,.nlevels=1};}
+        if(test==10){R.rt.has_cview[0]=1;R.rt.cview[0]=(view_t){.set_format=1,.format=NVN_FORMAT_RGBA8};}
+        if(test==11){R.rt.has_cview[0]=1;R.rt.cview[0]=(view_t){.set_target=1,.target=NVN_TEXTURE_TARGET_3D};}
+        if(test==12){R.rt.has_cview[0]=1;R.rt.cview[0]=(view_t){.set_layers=1,.min_layer=1,.nlayers=1};}
+        if(test==3)S.vp[0][2]=64;
+        if(test==4)strcpy(program->sh[1]->key,"0000000000000000_b");
+        temporal_after_draw();
+        CHECK((g_hdr_native_frame==frame)==(test==0||test==9||test==13||test==15),"HDR final observation works without FI and refuses wrong shader/view/crop/cache");
+        if(test==0||test==13||test==15)CHECK(g_hdr_native_linear==linear&&g_hdr_native_window==target.serial,"HDR observer binds the actual cached pre-PQ source, including wrapped selected views");
+        strcpy(program->sh[0]->key,"a5b1bd74e47458d7_b");R.rt.has_cview[0]=0;S.vp[0][2]=128;
+    }
+    src.serial=97001;target.serial=97002;serial_put(src.serial,linear);serial_put(target.serial,pq);mtl_reg_tex(721,&src,NULL);
+    // Exercise the real native-only snapshot submit, including the no-feedback
+    // options path, not just the observer's selected pointer.
+    strcpy(program->sh[1]->key,"a4200b53be47212c_b");mtl_set_frame(150);temporal_after_draw();
+    upload(linear,48,1,0);CHECK(mtl_snap_on(),"HDR enables the owned native snapshot ring without FI");
+    uint64_t generated=0,serial=snap_take(&target,NULL,&generated);
+    CHECK(serial && !generated,"native-only HDR takes a real snapshot without a generated frame");
+    CHECK([g_snap_ev waitUntilSignaledValue:g_snap_v timeoutMS:10000],"native-only HDR snapshot GPU completes with absent feedback options");
+    if(serial)hdr_values(tex_get(serial),1);snap_drain();
+    printf("HDR_OBSERVER_WITHOUT_FI checks=%d failures=%d\n",checks,failed);return failed!=0;
+}
+
+int main(void){if(!getenv("DM_TEST_HDR"))return sdr_main();@autoreleasepool{
+    if(getenv("DM_TEST_HDR_OBSERVER"))return hdr_observer_only();
+    alarm(45);CHECK(front_hdr_enabled(),"strong test frontend overrides real weak default");
+    setenv("DM_OOT_INTERPOLATION_PREVIEW","3",1);int async=getenv("DM_TEST_ASYNC")!=NULL;
+    if(async)setenv("DM_OOT_FRAMEGEN_ASYNC","1",1);
+    setenv("DM_PRESENT_UPSCALE","metalfx",1);setenv("DM_PRESENT_UPSCALE_DIRECT","1",1);mtl_init();
+    MTLPixelFormat fmt=getenv("DM_TEST_PACKED_COLOR")?MTLPixelFormatRG11B10Float:MTLPixelFormatRGBA16Float;
+    id<MTLTexture> world=temporal_snap_texture(fmt,128,72),ui=temporal_snap_texture(fmt,128,72),native=temporal_snap_texture(MTLPixelFormatRGBA16Float,128,72),depth=temporal_snap_texture(MTLPixelFormatDepth32Float,64,36);
+    res_add(world);res_add(ui);res_add(native);res_add(depth);res_commit();
+    MTLResidencySetDescriptor *rd=[MTLResidencySetDescriptor new];g_snap_res=[g_dev newResidencySetWithDescriptor:rd error:nil];[g_q4 addResidencySet:g_snap_res];
+    id<MTLCommandBuffer> z=q_cb();MTLRenderPassDescriptor *rp=[MTLRenderPassDescriptor renderPassDescriptor];rp.depthAttachment.texture=depth;rp.depthAttachment.loadAction=MTLLoadActionClear;rp.depthAttachment.storeAction=MTLStoreActionStore;rp.depthAttachment.clearDepth=.95095095095;[[z renderCommandEncoderWithDescriptor:rp]endEncoding];[z commit];[z waitUntilCompleted];CHECK(!z.error,"HDR depth prepared");
+    nvn_camera_input camera={0};camera.width=64;camera.height=36;camera.near_plane=.1;camera.far_plane=100;camera.fov=(float)M_PI/2;
+    float x=72.f/128,az=-100.f/99.9f,bz=-10.f/99.9f;camera.clip_to_world[0]=1/x;camera.clip_to_world[5]=1;camera.clip_to_world[11]=-1;camera.clip_to_world[14]=1/bz;camera.clip_to_world[15]=az/bz;camera.previous_world_to_clip[0]=x;camera.previous_world_to_clip[5]=1;camera.previous_world_to_clip[10]=az;camera.previous_world_to_clip[11]=bz;camera.previous_world_to_clip[14]=-1;
+    id<MTLSharedEvent> event=[g_dev newSharedEvent];id<MTL4CommandAllocator> alloc[2]={[g_dev newCommandAllocator],[g_dev newCommandAllocator]};int rect[4]={0,0,128,72};NSUInteger area[4]={0,0,128,72};
+    for(uint64_t frame=1;frame<=8;frame++) {
+        int slot=(frame-1)%2,left=96-(int)(frame-1)*8;upload(world,left,0,0);upload(ui,left,1,0);mtl_set_frame(frame);
+        temporal_async_readers reader=temporal_async_reader(slot);[alloc[slot]reset];id<MTL4CommandBuffer> cb=[g_dev newCommandBuffer];[cb beginCommandBufferWithAllocator:alloc[slot]];
+        CHECK(hdr_snap_encode(cb,slot,ui,native,area),"actual native HDR snapshot conversion encodes");
+        uint64_t gen=temporal_snap_encode_producer(cb,slot,native,rect,frame,1000000000ull+frame*16666667ull,world,ui,depth,camera,async?event:nil,async?frame:0,rect);
+        [cb endCommandBuffer];temporal_async_copy_wait(reader);[g_q4 commit:&cb count:1];[g_q4 signalEvent:event value:frame];CHECK([event waitUntilSignaledValue:frame timeoutMS:10000],"HDR snapshot GPU completes");if(async)temporal_async_drain();
+        CHECK(g_temporal_snap[slot].display.pixelFormat==MTLPixelFormatRGBA16Float && g_temporal_snap[slot].srgb==g_temporal_snap[slot].display,"HDR generated display has no8-bit/sRGB intermediate");
+        CHECK(tex_get(g_temporal_snap[slot].serial)==g_temporal_snap[slot].display,"serial lookup follows selected immutable slot display");
+        CHECK([g_temporal_snap[slot].residence containsAllocation:g_temporal_snap[slot].output]&&[g_temporal_snap[slot].residence containsAllocation:g_temporal_snap[slot].separate_display],"both display arms remain resident");
+        if(frame>=4 && getenv("DM_ALIAS_DUMP")) {
+            NSData *o=hdr_read(g_temporal_snap[slot].output),*d=hdr_read(g_temporal_snap[slot].display);
+            NSString *dir=@(getenv("DM_ALIAS_DUMP"));[[NSFileManager defaultManager]createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+            CHECK(([o writeToFile:[dir stringByAppendingPathComponent:[NSString stringWithFormat:@"f%llu-output.raw",frame]] atomically:YES]),"whole HDR FI output exported");
+            CHECK(([d writeToFile:[dir stringByAppendingPathComponent:[NSString stringWithFormat:@"f%llu-display.raw",frame]] atomically:YES]),"whole HDR display exported");
+        }
+        hdr_values(native,1);if(frame>=4){CHECK(gen && g_temporal_snap_fidelity==2,"HDR realFI ready after verified history");hdr_values(g_temporal_snap[slot].display,1);NSData *d=hdr_read(g_temporal_snap[slot].display);double sum=0,weight=0;for(int yy=20;yy<50;yy++)for(int xx=0;xx<128;xx++){float rr=hdr_sample(d,g_temporal_snap[slot].display,xx,yy,0),gg=hdr_sample(d,g_temporal_snap[slot].display,xx,yy,1);double w=fmax(0,rr-gg-.5);sum+=(xx+.5)*w;weight+=w;}CHECK(weight>0&&fabs(sum/weight-(left+12))<1,"HDR generated actor is at midpoint, independent of bright static bands");}
+    }
+    for(int kind=0;kind<2;kind++) {
+        id<MTLTexture> src=kind?g_temporal_snap[1].display:native,dst=temporal_snap_texture(MTLPixelFormatRGBA16Float,256,144);NSArray *keep=nil;
+        id<MTLCommandBuffer> cb=[g_temporal_display_queue commandBuffer];if(!cb)cb=q_cb();
+        id<MTLTexture> shown=temporal_async_upscale(cb,src,rect,dst,&keep);CHECK(shown==dst,"HDR final MetalFX writes direct float destination");[cb commit];[cb waitUntilCompleted];CHECK(!cb.error,"HDR final scaler completes");if(shown)hdr_values(shown,2);
+    }
+    // An actual display read is held while a new producer tries to reuse its slot.
+    // Queue completion and a whole readback prove ordering; object checks prove
+    // retirement, not merely the Objective-C command buffer's hidden retention.
+    if(async && getenv("DM_ALIAS_READER")) {
+        const uint64_t frames[]={9,10,11,12,13,14};
+        for(unsigned test=0;test<6;test++) {
+            unsigned slot=1;temporal_snap_slot *s=&g_temporal_snap[slot];
+            id<MTLTexture> old=s->display,old_output=s->output,old_separate=s->separate_display,old_world=s->world;
+            uint64_t generation=g_temporal_snap_generation;NSData *before=hdr_read(old);
+            NSUInteger pitch=(old.width*8+255)&~255ul;
+            id<MTLBuffer> readback=[g_dev newBufferWithLength:pitch*old.height options:MTLResourceStorageModeShared];
+            id<MTLSharedEvent> gate=[g_dev newSharedEvent],done=[g_dev newSharedEvent];
+            uint64_t display_value=++g_temporal_display_sequence;
+            id<MTLCommandBuffer> consumer=[g_temporal_display_queue commandBuffer];
+            [consumer encodeWaitForEvent:gate value:1];id<MTLBlitCommandEncoder> blit=[consumer blitCommandEncoder];
+            [blit copyFromTexture:old sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(old.width,old.height,1) toBuffer:readback destinationOffset:0 destinationBytesPerRow:pitch destinationBytesPerImage:readback.length];
+            [blit endEncoding];[consumer encodeSignalEvent:g_temporal_display_done value:display_value];
+            atomic_store(&s->display_reader,display_value);atomic_store(&g_temporal_display_latest,display_value);[consumer commit];
+            int big=test==5;
+            if(big) {
+                world=temporal_snap_texture(fmt,256,144);ui=temporal_snap_texture(fmt,256,144);native=temporal_snap_texture(MTLPixelFormatRGBA16Float,256,144);depth=temporal_snap_texture(MTLPixelFormatDepth32Float,128,72);
+                res_add(world);res_add(ui);res_add(native);res_add(depth);res_commit();camera.width=128;camera.height=72;
+                rect[2]=256;rect[3]=144;area[2]=256;area[3]=144;
+                id<MTLCommandBuffer> z=q_cb();MTLRenderPassDescriptor *rp=[MTLRenderPassDescriptor renderPassDescriptor];rp.depthAttachment.texture=depth;rp.depthAttachment.loadAction=MTLLoadActionClear;rp.depthAttachment.storeAction=MTLStoreActionStore;rp.depthAttachment.clearDepth=.95095095095;[[z renderCommandEncoderWithDescriptor:rp]endEncoding];[z commit];[z waitUntilCompleted];CHECK(!z.error,"resized depth completes independently of held display reader");
+            }
+            upload(world,16+(int)test*8,0,0);upload(ui,16+(int)test*8,1,0);
+            temporal_async_readers reader=temporal_async_reader(slot);uint64_t frame=frames[test];mtl_set_frame(frame);
+            [alloc[slot]reset];id<MTL4CommandBuffer> producer=[g_dev newCommandBuffer];[producer beginCommandBufferWithAllocator:alloc[slot]];
+            CHECK(hdr_snap_encode(producer,slot,ui,native,area),"gated HDR producer conversion encodes");
+            temporal_snap_encode_producer(producer,slot,native,rect,frame,1000000000ull+frame*16666667ull,world,ui,depth,camera,event,frame,rect);
+            [producer endCommandBuffer];temporal_async_copy_wait(reader);[g_q4 commit:&producer count:1];[g_q4 signalEvent:event value:frame];[g_q4 signalEvent:done value:1];
+            CHECK(![done waitUntilSignaledValue:1 timeoutMS:20],"new producer cannot overwrite while an old display reader is gated");
+            CHECK(tex_get(s->serial)==s->display,"serial follows selected display at slot reuse");
+            CHECK(s->output_alias==temporal_hdr_output_alias_wanted(),"full HDR slot follows A/B fixed alias selection");
+            CHECK([s->residence containsAllocation:s->output]&&[s->residence containsAllocation:s->separate_display],"both A/B allocations remain resident through selection");
+            if(!big) {
+                CHECK(s->output==old_output&&s->separate_display==old_separate&&s->world==old_world,"slot reuse does not replace allocations");
+                CHECK(g_temporal_snap_generation==generation,"fixed alias selection does not rebuild interpolation context");
+            } else {
+                CHECK(s->output!=old_output&&s->separate_display!=old_separate&&s->output.width==256,"resize creates correctly sized independent allocations");
+                CHECK([s->retired_keep containsObject:old_output]&&[s->retired_keep containsObject:old_separate],"resize retains both old backing allocations");
+                CHECK([s->residence containsAllocation:old_output]&&[s->residence containsAllocation:old_separate],"old allocations remain resident while display is gated");
+            }
+            gate.signaledValue=1;CHECK([done waitUntilSignaledValue:1 timeoutMS:10000],"producer completes after old display reader is released");
+            [consumer waitUntilCompleted];CHECK(!consumer.error,"gated display GPU read completes");
+            CHECK(before.length==readback.length&&!memcmp(before.bytes,readback.contents,before.length),"every old displayed byte survives slot reuse and resize");
+            temporal_async_drain();printf("HDR_ALIAS_READER frame=%llu alias=%d resized=%d checks=%d failures=%d\n",frame,s->output_alias,big,checks,failed);
+        }
+    }
+    for(int axis=0;axis<2;axis++) {
+        int invalid[4]={0,0,128,72};invalid[axis]=INT_MAX;invalid[axis+2]=INT_MAX;
+        [alloc[0]reset];id<MTL4CommandBuffer> cb=[g_dev newCommandBuffer];[cb beginCommandBufferWithAllocator:alloc[0]];
+        CHECK(!temporal_snap_encode_producer(cb,0,native,invalid,999,2000000000ull,world,ui,depth,camera,async?event:nil,async?999:0,invalid),"extreme positive crop extent is refused before overflow or GPU writes");
+        [cb endCommandBuffer]; // Refused before encoding; no work is submitted.
+    }
+    hdr_control_tests();temporal_async_drain();mtl_drain();printf("HDR_FIXTURE async=%d packed=%d checks=%d failures=%d\n",async,fmt==MTLPixelFormatRG11B10Float,checks,failed);return failed!=0;
 }}

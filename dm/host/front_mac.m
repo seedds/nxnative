@@ -69,6 +69,68 @@ static int g_rl, g_ru, g_rr, g_rd;   // arrow keys pressed with Shift held: the 
 static int g_input_on = 1;   // main thread: the game window is key, so its keyboard, mouse and controllers reach the game (input_release / input_resume)
 
 void *front_metal_layer(void) { return (__bridge void *)g_layer; }
+// DM_OOT_HDR=1 selects a linear float EDR transport at launch, only on a
+// capable screen. Current EDR can still be 1 before a context requests it, so
+// capability is tested against potential headroom, never current headroom.
+// The transport is fixed for this window's lifetime: changing pixelFormat under
+// in-flight drawables would also require a drained/reconfigured renderer.
+static _Atomic int g_hdr_enabled;
+static _Atomic double g_hdr_headroom = 1, g_hdr_potential_headroom = 1;
+static int g_hdr_configured;   // main thread only
+// Set once on the main thread before the guest starts, then owned exclusively by
+// the present thread. Cache both the object and its content mastering parameters.
+static CAEDRMetadata *g_hdr_metadata;
+static uint16_t g_hdr_metadata_white, g_hdr_metadata_peak;
+int front_hdr_enabled(void) { return atomic_load_explicit(&g_hdr_enabled, memory_order_acquire); }
+double front_hdr_headroom(void) { return atomic_load_explicit(&g_hdr_headroom, memory_order_relaxed); }
+double front_hdr_potential_headroom(void) { return atomic_load_explicit(&g_hdr_potential_headroom, memory_order_relaxed); }
+// Caller supplies immutable metadata for the frame about to acquire a drawable.
+// The layer must receive this before nextDrawable, not in a completion handler.
+void front_hdr_prepare(uint16_t paper_white_nits, uint16_t peak_nits) {
+    if (!front_hdr_enabled() || !g_layer) return;
+    uint16_t white = paper_white_nits ? paper_white_nits : 203;
+    uint16_t peak = peak_nits < white ? white : peak_nits;
+    if (g_hdr_metadata && g_hdr_metadata_white == white && g_hdr_metadata_peak == peak) return;
+    CAEDRMetadata *metadata = [CAEDRMetadata HDR10MetadataWithMinLuminance:0
+                                                          maxLuminance:(float)peak
+                                                    opticalOutputScale:(float)white];
+    g_layer.EDRMetadata = metadata;
+    g_hdr_metadata = metadata; g_hdr_metadata_white = white; g_hdr_metadata_peak = peak;
+}
+static void hdr_refresh(NSScreen *screen) {   // main thread, before the guest starts and on screen capability changes
+    if (!g_layer || !screen) return;
+    double potential = screen.maximumPotentialExtendedDynamicRangeColorComponentValue;
+    double current = screen.maximumExtendedDynamicRangeColorComponentValue;
+    if (!isfinite(potential) || potential < 1) potential = 1;
+    if (!isfinite(current) || current < 1) current = 1;
+    current = fmin(current, potential);
+    if (!g_hdr_configured) {
+        g_hdr_configured = 1;
+        const char *request = getenv("DM_OOT_HDR");
+        if (request && !strcmp(request, "1")) {
+            if (potential > 1) {
+                CGColorSpaceRef space = CGColorSpaceCreateWithName(kCGColorSpaceExtendedLinearSRGB);
+                if (space) {
+                    g_layer.pixelFormat = MTLPixelFormatRGBA16Float;
+                    g_layer.colorspace = space;
+                    CGColorSpaceRelease(space);
+                    g_layer.wantsExtendedDynamicRangeContent = YES;
+                    atomic_store_explicit(&g_hdr_enabled, 1, memory_order_release);
+                    // Virtual content mastering defaults, not a physical-screen
+                    // peak claim. Per-frame game metadata replaces these values.
+                    front_hdr_prepare(203, 1000);
+                    LOG("front end: linear sRGB EDR transport, current %.3f / potential %.3f (DM_OOT_HDR=1)", current, potential);
+                } else LOG("[RED] front end: cannot create extended-linear sRGB color space; keeping SDR");
+            } else LOG("front end: DM_OOT_HDR=1 refused on an SDR screen; keeping BGRA8 SDR");
+        }
+    }
+    // On a later move to SDR, keep the linear float contract and report headroom
+    // 1. EDRMetadata lets CoreAnimation map content to the current display. A window
+    // launched in SDR stays SDR until a renderer-coordinated restart/reconfigure.
+    if (!front_hdr_enabled()) current = potential = 1;
+    atomic_store_explicit(&g_hdr_headroom, current, memory_order_relaxed);
+    atomic_store_explicit(&g_hdr_potential_headroom, potential, memory_order_relaxed);
+}
 static _Atomic int g_screen_fps;   // the window's screen's maximumFramesPerSecond, kept up to date when the window moves to another screen
 int front_screen_max_fps(void) { return g_screen_fps; }
 static _Atomic CGDirectDisplayID g_screen_id;   // the window's screen (screen_refresh); 0 until the window is up, then the main display stands in
@@ -85,6 +147,7 @@ static void screen_refresh(NSScreen *screen) {   // main thread: refresh capabil
     g_screen_fps = (int)screen.maximumFramesPerSecond;
     g_screen_id = [screen.deviceDescription[@"NSScreenNumber"] unsignedIntValue];
     g_screen_variable_refresh = screen.minimumRefreshInterval > 0 && screen.maximumRefreshInterval > screen.minimumRefreshInterval;
+    hdr_refresh(screen);
 }
 static _Atomic int g_fullscreen;   // the window is in fullscreen (set when it has entered and when it has left)
 // The software keyboard input box is up (front_text_input). The game window is not key then, which is not a focus change the game should see: on hardware the inline keyboard is drawn inside

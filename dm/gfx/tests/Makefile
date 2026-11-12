@@ -31,7 +31,7 @@ MTL_T_SRC=../nvn/hle_nvn.c ../../host/crash.c ../../host/hle_bigstack.c t_host_s
 # runs several ways. A new test needs its source and its build rule; no list to add it to. NOT_RUN: helpers linked into other tests (t_host_stubs, t_present_rescue_focus, t_gpu_lost_front),
 # a fixture test_image_atomic_bounds.py builds itself (t_atomic_return), t_geometry_primitive_id (the GPU half of test_dmsh_geometry.py, which gives it the directory of
 # its translated fixtures), and t_gpuprof, which CI's CPU subset runs (.github/workflows/tests.yml)
-NOT_RUN = t_host_stubs t_present_rescue_focus t_gpu_lost_front t_atomic_return t_geometry_primitive_id t_gpuprof t_present_classic_pair_front
+NOT_RUN = t_hdr_front t_host_stubs t_present_rescue_focus t_gpu_lost_front t_atomic_return t_geometry_primitive_id t_gpuprof t_present_classic_pair_front
 RUN_TESTS = $(filter-out $(NOT_RUN),$(basename $(sort $(wildcard t_*.c t_*.m))))
 check_t_%: t_%
 	$(RUN_ENV) ./$<
@@ -623,8 +623,8 @@ check_t_temporal_preview: t_temporal_preview
 	DM_NVN_ENC_THREAD=0 ./t_temporal_preview
 	DM_NVN_ENC_THREAD=1 ./t_temporal_preview
 
-t_temporal_snapshot: t_temporal_snapshot.m $(MTL_T_DEP)
-	clang $(CFLAGS) -fobjc-arc -o $@ t_temporal_snapshot.m $(MTL_T_SRC) $(FW)
+t_temporal_snapshot: t_temporal_snapshot.m t_hdr_front.c $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_temporal_snapshot.m t_hdr_front.c $(MTL_T_SRC) $(FW)
 check_t_framegen_trace_flush: t_temporal_snapshot
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 DM_TEST_FRAMEGEN_FLUSH=1 ./t_temporal_snapshot
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 DM_TEST_FRAMEGEN_FLUSH=1 ./t_temporal_snapshot
@@ -712,8 +712,8 @@ check_t_native_upscale_capture: t_native_upscale_capture
 	MTL_DEBUG_LAYER=1 ./t_native_upscale_capture
 
 # Experimental profile spatial stage: procedural packed pixels, no game assets.
-t_upscale_recipe: t_upscale_recipe.m $(MTL_T_DEP)
-	clang $(CFLAGS) -fobjc-arc -o $@ t_upscale_recipe.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
+t_upscale_recipe: t_upscale_recipe.m t_hdr_front.c $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_upscale_recipe.m t_hdr_front.c ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
 .PHONY: check_t_upscale_recipe
 check_t_upscale_recipe: t_upscale_recipe
 	DM_UPSCALER=metalfx DM_UPSCALER_EXPERIMENTAL=0 ./t_upscale_recipe
@@ -727,3 +727,16 @@ t_tsv_exit: t_tsv_exit.c $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_tsv_exit.c ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(GFX) $(FW)
 check_t_tsv_exit: t_tsv_exit
 	@trace=$$(mktemp); trap 'rm -f "$$trace"' EXIT; DM_NVN_TSV="$$trace" ./t_tsv_exit; grep -q '^123[[:space:]]@deferred_exit_probe[[:space:]]8.333$$' "$$trace"
+
+# Native HDR transport/FI, without game assets or a real HDR layer.
+.PHONY: hdr-transport
+hdr-transport: t_temporal_snapshot t_upscale_recipe
+	@for enc in 0 1; do \
+	  MTL_DEBUG_LAYER=1 DM_TEST_HDR=1 DM_TEST_HDR_OBSERVER=1 DM_NVN_ENC_THREAD=$$enc ./t_temporal_snapshot || exit $$?; \
+	  MTL_DEBUG_LAYER=1 DM_TEST_HDR=1 DM_NVN_ENC_THREAD=$$enc ./t_temporal_snapshot || exit $$?; \
+	  DM_TEST_HDR=1 DM_NVN_ENC_THREAD=$$enc DM_UPSCALER=metalfx DM_UPSCALER_EXPERIMENTAL=1 ./t_upscale_recipe || exit $$?; \
+	  for alias in 0 1; do \
+	    MTL_DEBUG_LAYER=1 DM_TEST_HDR=1 DM_TEST_ASYNC=1 DM_TEST_PACKED_COLOR=1 DM_ALIAS_READER=1 DM_NVN_ENC_THREAD=$$enc DM_OOT_HDR_OUTPUT_ALIAS=$$alias ./t_temporal_snapshot || exit $$?; \
+	  done; \
+	done
+run: hdr-transport

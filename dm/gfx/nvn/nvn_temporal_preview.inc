@@ -193,7 +193,8 @@ static int temporal_encode_scene(id<MTLTexture> scene, id<MTLTexture> depth, id<
 
 // A final scene copy is a proof that UI work is finished even when this frame draws no HUD.
 static int temporal_final_copy(NvProg *program,int rect[4]) {
-    if(!program || !program->sh[1] || strncmp(program->sh[1]->key,"29e3c9dd92b8a571",16) ||
+    if(!program || !program->sh[1] || (strncmp(program->sh[1]->key,"29e3c9dd92b8a571",16) &&
+        !(front_hdr_enabled() && !strncmp(program->sh[1]->key,"a4200b53be47212c",16))) ||
        R.rt.n!=1 || !R.rt.color[0] || !S.has_vp)return 0;
     int tid=(int)(tex_slot_h(S.tex[1],S.img[1],0)&0xfffff);
     os_unfair_lock_lock(&g_rmu);
@@ -227,16 +228,60 @@ static int temporal_scene_copy(NvProg *program) {
     }
     os_unfair_lock_unlock(&g_rmu);return valid;
 }
+// Source proven by the OOT HDR final shader and captured uniforms: linear709
+// relative to the game's paperwhite. The final shader converts this to2020/PQ.
+static id<MTLTexture> g_hdr_native_linear;
+static uint64_t g_hdr_native_frame=UINT64_MAX,g_hdr_native_window;
+static void hdr_observe_final(NvProg *program) {
+    if(!front_hdr_enabled() || !program || !program->sh[0] || !program->sh[1] ||
+       strncmp(program->sh[0]->key,"a5b1bd74e47458d7",16) || strncmp(program->sh[1]->key,"a4200b53be47212c",16) ||
+       R.rt.n!=1 || !R.rt.color[0] || !S.has_vp ||
+       (R.rt.has_cview[0] && ((R.rt.cview[0].set_levels && R.rt.cview[0].base_level) || (R.rt.cview[0].set_layers && R.rt.cview[0].min_layer) ||
+        (R.rt.cview[0].set_format && R.rt.cview[0].format!=R.rt.color[0]->d.format) || (R.rt.cview[0].set_target && R.rt.cview[0].target!=R.rt.color[0]->d.target))))return;
+    int tid=(int)(tex_slot_h(S.tex[1],S.img[1],0)&0xfffff);
+    id<MTLTexture> src=nil;
+    os_unfair_lock_lock(&g_rmu);
+    if(tid>0 && tid<g_ntreg && g_treg[tid].ok && !g_treg[tid].gone) {
+        treg_t *r=&g_treg[tid];
+        int base=!r->has_v || ((!r->v.set_levels || !r->v.base_level) && (!r->v.set_layers || !r->v.min_layer) &&
+            (!r->v.set_format || r->v.format==r->t.d.format) && (!r->v.set_target || r->v.target==r->t.d.target));
+        // The proven source is RGB-identity R11; its absent alpha reads as one.
+        // A descriptor view can override the builder's swizzle, but not its RGB.
+        uint8_t sw[4]={MTLTextureSwizzleRed,MTLTextureSwizzleGreen,MTLTextureSwizzleBlue,MTLTextureSwizzleAlpha};
+        if(r->has_v && r->v.set_swizzle)memcpy(sw,r->v.swz,sizeof sw);
+        else if(r->t.set_swz)for(int c=0;c<4;c++)sw[c]=(uint8_t)(r->t.swz>>(3*c)&7);
+        if(sw[0]!=MTLTextureSwizzleRed || sw[1]!=MTLTextureSwizzleGreen || sw[2]!=MTLTextureSwizzleBlue ||
+           (sw[3]!=MTLTextureSwizzleAlpha && sw[3]!=MTLTextureSwizzleOne))base=0;
+        if(base) {
+            // Observation must not create or refresh guest storage after a draw.
+            // tex_made preserves a cached NvPkg's selected view/texture too.
+            id cached=tex_made(&r->t);
+            if([cached conformsToProtocol:@protocol(MTLTexture)])src=cached;
+        }
+    }
+    os_unfair_lock_unlock(&g_rmu);
+    if(!src || src.pixelFormat!=MTLPixelFormatRG11B10Float || src.textureType!=MTLTextureType2D || src.sampleCount!=1 ||
+       S.vp[0][0]!=0 || S.vp[0][1]!=0 || S.vp[0][2]!=src.width || S.vp[0][3]!=src.height)return;
+    id cached_window=tex_made(R.rt.color[0]);
+    if(![cached_window conformsToProtocol:@protocol(MTLTexture)])return;
+    id<MTLTexture> window=cached_window;
+    if(window.pixelFormat!=MTLPixelFormatRGB10A2Unorm || window.textureType!=MTLTextureType2D || window.sampleCount!=1)return;
+    g_hdr_native_linear=src;g_hdr_native_frame=atomic_load(&g_cur_frame);g_hdr_native_window=R.rt.color[0]->serial;
+}
 static void temporal_after_draw(void) {
-    if (!temporal_preview_on()) return;
+    int preview=temporal_preview_on();
+    if (!preview && !front_hdr_enabled()) return;
+    NvProg *program = S.prog ? prog_get(S.prog) : nil;
+    // HDR native transport is independent of whether extra frames are requested.
+    hdr_observe_final(program);
+    if (!preview) return;
     // Immutable shader identity of the observed Ocarina pre-UI scene composition.
     // This is a development adapter, not a general "all games" recognition rule.
-    NvProg *program = S.prog ? prog_get(S.prog) : nil;
     if(temporal_preview_on()==3 && g_temporal_pair_frame==atomic_load(&g_cur_frame) &&
        temporal_final_copy(program,g_temporal_pair_viewport)) {
         g_temporal_pair_final_frame=g_temporal_pair_frame;g_temporal_pair_final_serial=R.rt.color[0]->serial;
     }
-    int graded=program && program->sh[1] && (!strncmp(program->sh[1]->key,"9e09b406de439a34",16) || !strncmp(program->sh[1]->key,"99d1ecbf2947464b",16));
+    int graded=program && program->sh[1] && (!strncmp(program->sh[1]->key,"9e09b406de439a34",16) || !strncmp(program->sh[1]->key,"99d1ecbf2947464b",16) || (front_hdr_enabled() && !strncmp(program->sh[1]->key,"774f2663242dbfcf",16)));
     int copied=!graded && g_temporal_depth_frame!=atomic_load(&g_cur_frame) && temporal_scene_copy(program);
     if(!graded && !copied)return;
     uint64_t frame = atomic_load(&g_cur_frame), now = now_ns();
@@ -301,7 +346,7 @@ static void temporal_after_dispatch(NvShader *cs) {
         if(t.pixelFormat==MTLPixelFormatR32Uint && backing.pixelFormat==MTLPixelFormatRG11B10Float &&
            t.width==backing.width && t.height==backing.height)t=backing;
         if(real && t.pixelFormat==MTLPixelFormatRG11B10Float && t.sampleCount==1 &&
-           t.width>=g_temporal_game_depth.width && t.width*g_temporal_game_depth.height==t.height*g_temporal_game_depth.width) {
+           t.width>=g_temporal_game_depth.width && (!front_hdr_enabled() || t.width>g_temporal_game_depth.width) && t.width*g_temporal_game_depth.height==t.height*g_temporal_game_depth.width) {
             out=t;serial=g_treg[id_].t.serial;break;
         }
     }

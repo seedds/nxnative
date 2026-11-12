@@ -45,7 +45,7 @@ static void composed_dispatch(const up_recipe *profile) {
     id<MTLTexture> output=texture(MTLPixelFormatRG11B10Float,profile->ow,profile->oh,MTLTextureUsageShaderRead|MTLTextureUsageShaderWrite);
     // Nonuniform tiles expose missing rows, sampling shifts and format changes.
     uint32_t *pixels=malloc(profile->iw*profile->ih*4);CHECK(pixels!=NULL,"procedural tiled input allocation");if(!pixels)abort();
-    for(unsigned y=0;y<profile->ih;y++)for(unsigned x=0;x<profile->iw;x++)pixels[y*profile->iw+x]=(15u<<27)|(256u+x/32)|((128u+y/24)<<9)|((384u+(x+y)/48%128)<<18);
+    for(unsigned y=0;y<profile->ih;y++)for(unsigned x=0;x<profile->iw;x++)pixels[y*profile->iw+x]=((front_hdr_enabled()?17u:15u)<<27)|(256u+x/32)|((128u+y/24)<<9)|((384u+(x+y)/48%128)<<18);
     [input replaceRegion:MTLRegionMake2D(0,0,profile->iw,profile->ih) mipmapLevel:0 withBytes:pixels bytesPerRow:profile->iw*4];free(pixels);setall(output,0);
     mtl_tex_init(&src);mtl_tex_init(&dst);serial_put(src.serial,input);serial_put(dst.serial,output);
     mtl_reg_tex(811,&src,NULL);mtl_reg_image(812,&dst,NULL);
@@ -75,7 +75,7 @@ static void composed_dispatch(const up_recipe *profile) {
         id<MTLBuffer> rb=[g_dev newBufferWithLength:profile->ow*profile->oh*4 options:MTLResourceStorageModeShared];res_add(rb);
         mtl_sub_begin();enc_b_copy_texture_buffer(blit(),g_temporal_full_scene,0,0,MTLOriginMake(0,0,0),MTLSizeMake(profile->ow,profile->oh,1),rb,0,profile->ow*4,profile->ow*profile->oh*4);finish();
         uint32_t first=((uint32_t*)rb.contents)[0];
-        CHECK(abs((int)(first&2047u)-(13<<6))<=1,"observer snapshot contains actual scaled procedural pixels");
+        CHECK(front_hdr_enabled()?(first&2047u)>(16u<<6):abs((int)(first&2047u)-(13<<6))<=1,"observer snapshot contains actual scaled procedural pixels, above SDR white in HDR");
         void *expected=malloc(profile->ow*profile->oh*4);CHECK(expected!=NULL,"complete snapshot comparison allocation");if(!expected)abort();
         [output getBytes:expected bytesPerRow:profile->ow*4 fromRegion:MTLRegionMake2D(0,0,profile->ow,profile->oh) mipmapLevel:0];
         CHECK(!memcmp(expected,rb.contents,profile->ow*profile->oh*4),"every pre-UI packed pixel is preserved without sampling");free(expected);
@@ -96,19 +96,39 @@ int main(void) { @autoreleasepool {
     up_recipe r={.iw=32,.ih=24,.ow=64,.oh=48};
     id<MTLTexture> in=texture(MTLPixelFormatRGB9E5Float,r.iw,r.ih,MTLTextureUsageShaderRead);
     // Exact RGB=[.5,.25,.75], shared exponent=15 -> linear=[.25,.0625,.5625].
-    setall(in,(15u<<27)|256u|(128u<<9)|(384u<<18));
+    setall(in,((front_hdr_enabled()?17u:15u)<<27)|256u|(128u<<9)|(384u<<18));
     id<MTLTexture> out=texture(MTLPixelFormatRG11B10Float,r.ow,r.oh,MTLTextureUsageShaderWrite);
     CHECK(!(out.usage&MTLTextureUsageRenderTarget),"output is image-only, no render-target upgrade");
+    if(front_hdr_enabled()) {
+        up_mfx_scaler *old=up_mfx_scaler_for(r.iw,r.ih,r.ow,r.oh,0);
+        CHECK(old && !(old->in.usage&MTLTextureUsageShaderWrite),"old generic HDR mode lacks compute-write usage; bad descriptor reproduced without illegal GPU work");
+        up_mfx_scaler *fixed=up_mfx_scaler_for(r.iw,r.ih,r.ow,r.oh,3);
+        CHECK(fixed && (fixed->in.usage&MTLTextureUsageShaderWrite),"HDR recipe declares actual compute writer");
+    }
     mtl_sub_begin();CHECK(up_recipe_draw(&r,in,out),"recipe encoded");finish();
-    up_mfx_scaler *cached=up_mfx_scaler_for(r.iw,r.ih,r.ow,r.oh,2);CHECK(cached!=NULL,"scaler cached");
-    CHECK(cached->sc.colorProcessingMode==MTLFXSpatialScalerColorProcessingModeLinear,"Linear mode");
+    up_mfx_scaler *cached=up_mfx_scaler_for(r.iw,r.ih,r.ow,r.oh,front_hdr_enabled()?3:2);CHECK(cached!=NULL,"scaler cached");
+    CHECK(cached->sc.colorProcessingMode==(front_hdr_enabled()?MTLFXSpatialScalerColorProcessingModeHDR:MTLFXSpatialScalerColorProcessingModeLinear),"Linear mode");
     id<MTLBuffer> rb=[g_dev newBufferWithLength:r.iw*r.ih*8 options:MTLResourceStorageModeShared];res_add(rb);
     mtl_sub_begin();enc_b_copy_texture_buffer(blit(),cached->in,0,0,MTLOriginMake(0,0,0),MTLSizeMake(r.iw,r.ih,1),rb,0,r.iw*8,r.iw*r.ih*8);finish();
-    __fp16 *v=rb.contents;int bad=0;for(unsigned i=0;i<r.iw*r.ih;i++)bad+=v[4*i]!=.25f||v[4*i+1]!=.0625f||v[4*i+2]!=.5625f||v[4*i+3]!=1.f;
+    __fp16 *v=rb.contents;int bad=0;for(unsigned i=0;i<r.iw*r.ih;i++)bad+=v[4*i]!=(front_hdr_enabled()?4.f:.25f)||v[4*i+1]!=(front_hdr_enabled()?1.f:.0625f)||v[4*i+2]!=(front_hdr_enabled()?9.f:.5625f)||v[4*i+3]!=1.f;
     CHECK(!bad,"GPU square decode matches exact procedural RGB and alpha");
     uint32_t packed=first(out);CHECK(out.pixelFormat==MTLPixelFormatRG11B10Float,"original image format preserved");
-    unsigned want[3]={13u<<6,11u<<6,(14u<<5)|4u},got[3]={packed&2047u,(packed>>11)&2047u,packed>>22};
-    for(int k=0;k<3;k++)CHECK(abs((int)got[k]-(int)want[k])<=1,"constant color survives native format conversion");
+    fprintf(stderr,"RECIPE_PACKED %#x channels %u %u %u\n",packed,packed&2047u,(packed>>11)&2047u,packed>>22);
+    id<MTLBuffer> detail=[g_dev newBufferWithLength:r.ow*r.oh*8 options:MTLResourceStorageModeShared];res_add(detail);
+    mtl_sub_begin();enc_b_copy_texture_buffer(blit(),cached->out,0,0,MTLOriginMake(0,0,0),MTLSizeMake(r.ow,r.oh,1),detail,0,r.ow*8,r.ow*r.oh*8);finish();
+    __fp16 *dv=detail.contents;fprintf(stderr,"MFX_INTERMEDIATE %.9g %.9g %.9g %.9g inUsage%lu outUsage%lu\n",(double)dv[0],(double)dv[1],(double)dv[2],(double)dv[3],(unsigned long)cached->in.usage,(unsigned long)cached->out.usage);
+
+    unsigned want[3]={((front_hdr_enabled()?17u:13u)<<6),((front_hdr_enabled()?15u:11u)<<6),((front_hdr_enabled()?18u:14u)<<5)|4u},got[3]={packed&2047u,(packed>>11)&2047u,packed>>22};
+    if(front_hdr_enabled()) {
+        // HDR MetalFX uses reversible tone mapping; its output is not required
+        // to be identical to Linear mode. Verify the native encoder against the
+        // actual scaler output, while the independent decode check above is exact.
+        unsigned bits[3];for(int k=0;k<3;k++){uint16_t h;memcpy(&h,&dv[k],2);unsigned shift=k==2?5:4;bits[k]=((uint32_t)h+(1u<<(shift-1))-1+((h>>shift)&1))>>shift;CHECK(abs((int)got[k]-(int)bits[k])<=1,"native HDR store matches actual MetalFX float output within one packed step");CHECK(isfinite((float)dv[k])&&dv[k]>.5f,"HDR scaler output is finite and nonblack");}
+        float rg=(float)dv[0]/4,gg=(float)dv[1],bg=(float)dv[2]/9;
+        CHECK(fabsf(rg-gg)<.01f&&fabsf(rg-bg)<.01f,"constant HDR color ratios survive MetalFX tone processing");
+    } else for(int k=0;k<3;k++)CHECK(abs((int)got[k]-(int)want[k])<=1,"constant color survives native format conversion");
+    const uint32_t expected_before_eviction=packed;
+
     const uint32_t sentinel=0x12345678;id<MTLTexture> wrong=texture(MTLPixelFormatRG11B10Float,r.iw,r.ih,MTLTextureUsageShaderRead);
     for(int test=0;test<3;test++) {
         setall(out,sentinel);up_recipe shape=r; if(test==1)shape.ow++;
@@ -122,8 +142,8 @@ int main(void) { @autoreleasepool {
     dp.x--; mtl_sub_begin();CHECK(!up_recipe_encode(cs,&dp),"partial dispatch grid retained");finish();CHECK(first(out)==sentinel,"partial grid fallback leaves output unchanged");
     // Force eviction before deferred encoding drains: old scratch and scaler remain resident/alive through the fence.
     mtl_sub_begin();CHECK(up_recipe_draw(&r,in,out),"encode before cache eviction");
-    for(int i=0;i<5;i++)CHECK(up_mfx_scaler_for(16+i*2,16,40+i*2,40,2)!=NULL,"cache shape churn");finish();
-    packed=first(out);CHECK(abs((int)(packed&2047u)-(int)want[0])<=1,"recorded work survives cache eviction");
+    for(int i=0;i<5;i++)CHECK(up_mfx_scaler_for(64+i*2,64,128+i*2,128,front_hdr_enabled()?3:2)!=NULL,"cache shape churn");finish();
+    packed=first(out);CHECK(front_hdr_enabled()?packed==expected_before_eviction:abs((int)(packed&2047u)-(int)want[0])<=1,"recorded work survives cache eviction");
     composed_dispatch(profile);
     printf("upscale recipe GPU: %d checks, %d failed; deferred=%s\n",checks,failed,getenv("DM_NVN_ENC_THREAD")?:"default");return failed!=0;
 } }

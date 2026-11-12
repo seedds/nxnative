@@ -6,7 +6,7 @@
 typedef struct {
     id<MTLResidencySet> residence; NSArray *keep,*retired_keep;
     NSArray *capture_buffers; NSDictionary *capture_info; NSString *capture_path;
-    id<MTLTexture> world,ui,motion,output,display,srgb,control,control_srgb;
+    id<MTLTexture> world,ui,motion,output,display,separate_display,srgb,control,control_srgb;
     id<MTLBuffer> motion_uniform,copy_uniform[3],native_check,converted_check;
     id<MTL4ArgumentTable> motion_args,copy_args[3];
     id<MTL4FXFrameInterpolator> used_interpolator;
@@ -15,7 +15,7 @@ typedef struct {
     id<MTL4CounterHeap> profile;uint64_t profile_frame;int profile_pending;
     uint64_t serial,check_generation;
     NSUInteger check_pitch,check_width,check_height;
-    int compact_display;
+    int compact_display, hdr, check_hdr, output_alias;
 } temporal_snap_slot;
 static temporal_snap_slot g_temporal_snap[SNAP_MAX];
 static id<MTL4FXFrameInterpolator> g_temporal_snap_interp;
@@ -27,6 +27,7 @@ static int g_temporal_snap_disabled,g_temporal_snap_fidelity; // 0 unknown,1 che
 static NSUInteger g_temporal_snap_dimensions[6];
 static int g_temporal_snap_rect[4];
 static MTLPixelFormat g_temporal_snap_format,g_temporal_snap_color_format,g_temporal_snap_ui_format;
+static int g_temporal_snap_hdr;
 static id<MTLSamplerState> g_temporal_snap_sampler;
 static NSMutableDictionary<NSNumber *,id<MTLRenderPipelineState>> *g_temporal_snap_copy_ps;
 static id<MTLTexture> temporal_snap_texture_with_usage(MTLPixelFormat format,NSUInteger w,NSUInteger h,MTLTextureUsage usage) {
@@ -84,6 +85,16 @@ static int temporal_snap_copy(id<MTL4CommandBuffer> cb,temporal_snap_slot *s,int
     [e barrierAfterStages:MTLStageAll beforeQueueStages:MTLStageAll visibilityOptions:MTL4VisibilityOptionDevice|MTL4VisibilityOptionResourceAlias];[e endEncoding];
     return 1;
 }
+// Optional identity-copy elision. Both outputs remain allocated/resident;
+// fallback selection and resize keep the same slot ownership contract.
+static int temporal_hdr_output_alias_wanted(void) {
+    static int on=-1;
+    if(on<0) {
+        const char *value=getenv("DM_OOT_HDR_OUTPUT_ALIAS");
+        on=value && !strcmp(value,"1");
+    }
+    return on;
+}
 static NSMutableArray *g_temporal_capture_pending;
 static void temporal_snap_capture_flush(void) {
     // A short sequence stays in memory until its inputs are captured: disk writes
@@ -123,14 +134,34 @@ static void temporal_snap_check_completed(temporal_snap_slot *s) {
     }
     if(!s->native_check)return;
     if(s->check_generation==g_temporal_snap_generation && g_temporal_snap_fidelity==1) {
-        const uint8_t *a=s->native_check.contents,*b=s->converted_check.contents;unsigned worst=0,lo=255,hi=0;
-        for(NSUInteger y=0;y<s->check_height;y++)for(NSUInteger x=0;x<s->check_width;x++)for(int c=0;c<3;c++) {
-            unsigned av=a[y*s->check_pitch+4*x+c],bv=b[y*s->check_pitch+4*x+c],d=av>bv?av-bv:bv-av;
-            if(d>worst)worst=d;if(av<lo)lo=av;if(av>hi)hi=av;
+        const uint8_t *a=s->native_check.contents,*b=s->converted_check.contents;
+        if(s->check_hdr) {
+            unsigned worst=0;int invalid=0;float lo=INFINITY,hi=-INFINITY;
+            for(NSUInteger y=0;y<s->check_height;y++)for(NSUInteger x=0;x<s->check_width;x++)for(int c=0;c<3;c++) {
+                const uint16_t *aa=(const uint16_t *)(a+y*s->check_pitch),*bb=(const uint16_t *)(b+y*s->check_pitch);
+                uint16_t ah=aa[4*x+c],bh=bb[4*x+c];__fp16 avh,bvh;memcpy(&avh,&ah,2);memcpy(&bvh,&bh,2);
+                float av=avh,bv=bvh;if(!isfinite(av)||!isfinite(bv)){invalid=1;continue;}
+                // Ordered half codes give one representable step even near zero;
+                // +0 and -0 compare equal. Never quantize HDR to 8 bits to check it.
+                int ai=ah&0x8000?0x8000-(ah&0x7fff):0x8000+ah;
+                int bi=bh&0x8000?0x8000-(bh&0x7fff):0x8000+bh;
+                unsigned d=(unsigned)abs(ai-bi);if(d>worst)worst=d;
+                if(av<lo)lo=av;if(av>hi)hi=av;
+            }
+            // A nearly uniform loading image cannot prove crop/orientation.
+            // Do not require highlights in this frame: dark HDR scenes are valid.
+            g_temporal_snap_fidelity=invalid||worst>1?-1:hi-lo<1.f/256?0:2;
+            MLOG("%sframe generation HDR final-copy control: RGB max error %u half-float steps, range %.6g, %s",g_temporal_snap_fidelity<0?"[RED] ":"",worst,(double)(hi-lo),g_temporal_snap_fidelity==2?"passed":g_temporal_snap_fidelity<0?"failed":"waiting for nonuniform content");
+        } else {
+            unsigned worst=0,lo=255,hi=0;
+            for(NSUInteger y=0;y<s->check_height;y++)for(NSUInteger x=0;x<s->check_width;x++)for(int c=0;c<3;c++) {
+                unsigned av=a[y*s->check_pitch+4*x+c],bv=b[y*s->check_pitch+4*x+c],d=av>bv?av-bv:bv-av;
+                if(d>worst)worst=d;if(av<lo)lo=av;if(av>hi)hi=av;
+            }
+            // A black loading frame cannot establish the orientation/crop equivalence.
+            g_temporal_snap_fidelity=hi-lo<16?0:worst<=1?2:-1;
+            MLOG("%sframe generation final-copy control: RGB max error %u LSB, range %u, %s",g_temporal_snap_fidelity<0?"[RED] ":"",worst,hi-lo,g_temporal_snap_fidelity==2?"passed":g_temporal_snap_fidelity<0?"failed":"waiting for nonuniform content");
         }
-        // A black loading frame cannot establish the orientation/crop equivalence.
-        g_temporal_snap_fidelity=hi-lo<16?0:worst<=1?2:-1;
-        MLOG("%sframe generation final-copy control: RGB max error %u LSB, range %u, %s",g_temporal_snap_fidelity<0?"[RED] ":"",worst,hi-lo,g_temporal_snap_fidelity==2?"passed":g_temporal_snap_fidelity<0?"failed":"waiting for nonuniform content");
     }
     s->native_check=s->converted_check=nil;
     s->control=s->control_srgb=nil;
@@ -152,13 +183,15 @@ static uint64_t temporal_snap_encode_producer(id<MTL4CommandBuffer> cb,unsigned 
     if(asynchronous && (!producer || !producer_value))return 0;
     if(slot>=SNAP_MAX || g_temporal_snap_disabled || !world || !ui || !depth || !native)return 0;
     temporal_snap_slot *s=&g_temporal_snap[slot];temporal_snap_check_completed(s);
-    if(g_temporal_snap_fidelity<0)return 0;
-    MTLPixelFormat base=native.pixelFormat,srgb=MTLPixelFormatInvalid;
+    int hdr=front_hdr_enabled();
+    // Capability is explicit; a float texture alone never opts an SDR run in.
+    if(hdr && native.pixelFormat!=MTLPixelFormatRGBA16Float)return 0;
+    MTLPixelFormat base=native.pixelFormat,srgb=hdr?MTLPixelFormatRGBA16Float:MTLPixelFormatInvalid;
     if(base==MTLPixelFormatRGBA8Unorm || base==MTLPixelFormatRGBA8Unorm_sRGB){base=MTLPixelFormatRGBA8Unorm;srgb=MTLPixelFormatRGBA8Unorm_sRGB;}
     if(base==MTLPixelFormatBGRA8Unorm || base==MTLPixelFormatBGRA8Unorm_sRGB){base=MTLPixelFormatBGRA8Unorm;srgb=MTLPixelFormatBGRA8Unorm_sRGB;}
     if(!srgb || (world.pixelFormat!=MTLPixelFormatRGBA16Float && world.pixelFormat!=MTLPixelFormatRG11B10Float) || (ui.pixelFormat!=MTLPixelFormatRGBA16Float && ui.pixelFormat!=MTLPixelFormatRG11B10Float) || depth.pixelFormat!=MTLPixelFormatDepth32Float || depth.sampleCount!=1 || world.sampleCount!=1 || ui.sampleCount!=1 ||
        depth.width!=camera.width || depth.height!=camera.height || ui.width!=world.width || ui.height!=world.height ||
-       rect[0]<0 || rect[1]<0 || rect[2]<=0 || rect[3]<=0 || (NSUInteger)(rect[0]+rect[2])>native.width || (NSUInteger)(rect[1]+rect[3])>native.height)return 0;
+       rect[0]<0 || rect[1]<0 || rect[2]<=0 || rect[3]<=0 || (NSUInteger)rect[0]+(NSUInteger)rect[2]>native.width || (NSUInteger)rect[1]+(NSUInteger)rect[3]>native.height)return 0;
     // Compact only when the presented crop exactly matches the proven final viewport.
     // Other crops may include meaningful black canvas pixels; preserve the legacy backing.
     int compact=present_crop && !memcmp(present_crop,rect,4*sizeof(int)) &&
@@ -168,7 +201,7 @@ static uint64_t temporal_snap_encode_producer(id<MTL4CommandBuffer> cb,unsigned 
     if(compact)output_rect[0]=output_rect[1]=0;
     s->compact_display=compact;
     NSUInteger dimensions[6]={world.width,world.height,depth.width,depth.height,native.width,native.height};
-    int changed=world.pixelFormat!=g_temporal_snap_color_format || ui.pixelFormat!=g_temporal_snap_ui_format || memcmp(dimensions,g_temporal_snap_dimensions,sizeof dimensions)||base!=g_temporal_snap_format||memcmp(rect,g_temporal_snap_rect,sizeof g_temporal_snap_rect);
+    int changed=hdr!=g_temporal_snap_hdr || world.pixelFormat!=g_temporal_snap_color_format || ui.pixelFormat!=g_temporal_snap_ui_format || memcmp(dimensions,g_temporal_snap_dimensions,sizeof dimensions)||base!=g_temporal_snap_format||memcmp(rect,g_temporal_snap_rect,sizeof g_temporal_snap_rect);
     if(changed || (asynchronous?!g_temporal_async_interp:!g_temporal_snap_interp)) {
         if(asynchronous) {
             g_temporal_async_interp=temporal_async_create(world.width,world.height,depth.width,depth.height,world.pixelFormat,ui.pixelFormat);
@@ -177,9 +210,11 @@ static uint64_t temporal_snap_encode_producer(id<MTL4CommandBuffer> cb,unsigned 
             g_temporal_snap_interp=temporal_create_formats(world.width,world.height,depth.width,depth.height,world.pixelFormat,MTLPixelFormatRGBA16Float,ui.pixelFormat);
             if(!g_temporal_snap_interp){g_temporal_snap_disabled=1;return 0;}
         }
-        memcpy(g_temporal_snap_dimensions,dimensions,sizeof dimensions);memcpy(g_temporal_snap_rect,rect,sizeof g_temporal_snap_rect);g_temporal_snap_format=base;g_temporal_snap_color_format=world.pixelFormat;g_temporal_snap_ui_format=ui.pixelFormat;
+        memcpy(g_temporal_snap_dimensions,dimensions,sizeof dimensions);memcpy(g_temporal_snap_rect,rect,sizeof g_temporal_snap_rect);g_temporal_snap_format=base;g_temporal_snap_color_format=world.pixelFormat;g_temporal_snap_ui_format=ui.pixelFormat;g_temporal_snap_hdr=hdr;
         g_temporal_snap_previous=nil;g_temporal_snap_frame=UINT64_MAX;g_temporal_snap_age=0;g_temporal_snap_fidelity=0;g_temporal_snap_generation++;
     }
+    if(g_temporal_snap_fidelity<0)return 0;
+    s->hdr=hdr;
     if(!s->residence) {
         MTLResidencySetDescriptor *d=[MTLResidencySetDescriptor new];d.initialCapacity=24;
         s->residence=[g_dev newResidencySetWithDescriptor:d error:nil];[g_q4 addResidencySet:s->residence];
@@ -191,7 +226,7 @@ static uint64_t temporal_snap_encode_producer(id<MTL4CommandBuffer> cb,unsigned 
     }
     id<MTLFXFrameInterpolatorBase> requirements=asynchronous?(id<MTLFXFrameInterpolatorBase>)g_temporal_async_interp:(id<MTLFXFrameInterpolatorBase>)g_temporal_snap_interp;
     int resized=(asynchronous && !s->depth_copy) || !s->world || s->world.pixelFormat!=world.pixelFormat || s->ui.pixelFormat!=ui.pixelFormat || s->world.width!=world.width || s->world.height!=world.height || s->motion.width!=depth.width || s->motion.height!=depth.height ||
-                s->display.width!=display_w || s->display.height!=display_h || s->display.pixelFormat!=base;
+                !s->display || s->separate_display.width!=display_w || s->separate_display.height!=display_h || s->separate_display.pixelFormat!=base;
     // Old display allocations may still be read by an already submitted present.
     // Keep their residency through this copy's queue position; the next safe reuse
     // proves that those earlier reads have completed, including a resize/grab.
@@ -203,11 +238,23 @@ static uint64_t temporal_snap_encode_producer(id<MTL4CommandBuffer> cb,unsigned 
         s->depth_copy=asynchronous?temporal_snap_texture_with_usage(MTLPixelFormatDepth32Float,depth.width,depth.height,requirements.depthTextureUsage|MTLTextureUsageShaderRead):nil;
         s->output=temporal_snap_texture_with_usage(MTLPixelFormatRGBA16Float,world.width,world.height,requirements.outputTextureUsage|MTLTextureUsageShaderRead);s->motion=temporal_snap_texture_with_usage(MTLPixelFormatRG16Float,depth.width,depth.height,requirements.motionTextureUsage|MTLTextureUsageShaderRead|MTLTextureUsageShaderWrite);
         // Keep only the pixels that will be shown. The game's native canvas is unchanged.
-        s->display=temporal_snap_texture_with_usage(base,display_w,display_h,MTLTextureUsageShaderRead|MTLTextureUsageRenderTarget);s->srgb=[s->display newTextureViewWithPixelFormat:srgb];
+        s->separate_display=temporal_snap_texture_with_usage(base,display_w,display_h,MTLTextureUsageShaderRead|MTLTextureUsageRenderTarget);s->display=s->separate_display;s->srgb=hdr?s->display:[s->display newTextureViewWithPixelFormat:srgb];
         if((asynchronous && !s->depth_copy) || !s->world || !s->ui || !s->output || !s->motion || !s->display || !s->srgb){g_temporal_snap_disabled=1;return 0;}
-        serial_put(s->serial,s->display);
         MLOG("snapshot surfaces: native %lux%lu -> display %lux%lu, compact=%d; usage world=%lx ui=%lx depth=%lx output=%lx motion=%lx display=%lx",(unsigned long)native.width,(unsigned long)native.height,(unsigned long)s->display.width,(unsigned long)s->display.height,compact,(unsigned long)s->world.usage,(unsigned long)s->ui.usage,(unsigned long)s->depth_copy.usage,(unsigned long)s->output.usage,(unsigned long)s->motion.usage,(unsigned long)s->display.usage);
     }
+    // A compact HDR output already has the final pixel format and bounds. The
+    // original display stays retained for both A/B arms, including through resize.
+    int alias=hdr && compact && temporal_hdr_output_alias_wanted() &&
+        s->output.pixelFormat==MTLPixelFormatRGBA16Float && s->separate_display.pixelFormat==MTLPixelFormatRGBA16Float &&
+        s->output.width==display_w && s->output.height==display_h &&
+        !output_rect[0] && !output_rect[1] && output_rect[2]==(int)s->output.width && output_rect[3]==(int)s->output.height;
+    if(s->output_alias!=alias)MLOG("HDR output alias: frame %llu slot %u %s",(unsigned long long)frame,slot,alias?"identity copy elided":"separate display copy");
+    s->output_alias=alias;
+    id<MTLTexture> selected_display=alias?s->output:s->separate_display;
+    int display_changed=s->display!=selected_display;
+    s->display=selected_display;
+    if(hdr)s->srgb=s->display; // SDR retains the matching sRGB view made at allocation.
+    if(resized || display_changed)serial_put(s->serial,s->display); // stable until this slot's native ticket retires
     int matrices=camera.has_current_transform&&g_temporal_snap_camera.has_current_transform;
     int continuous=matrices?nvn_camera_previous_matches(&camera,&g_temporal_snap_camera):frame==g_temporal_snap_frame+1;
     int reset=!g_temporal_snap_previous || g_temporal_snap_previous==s->world || !continuous || now<=g_temporal_snap_ns || frame<=g_temporal_snap_frame;
@@ -219,16 +266,16 @@ static uint64_t temporal_snap_encode_producer(id<MTL4CommandBuffer> cb,unsigned 
     if(check) {
         // A matching linear/sRGB view needs no PixelFormatView usage. No compute writes.
         s->control=temporal_snap_texture_with_usage(base,native.width,native.height,MTLTextureUsageShaderRead|MTLTextureUsageRenderTarget);
-        s->control_srgb=[s->control newTextureViewWithPixelFormat:srgb];
+        s->control_srgb=hdr?s->control:[s->control newTextureViewWithPixelFormat:srgb];
         if(!s->control || !s->control_srgb){g_temporal_snap_disabled=1;return 0;}
-        s->check_width=rect[2];s->check_height=rect[3];s->check_pitch=(s->check_width*4+255)&~255ul;
+        s->check_width=rect[2];s->check_height=rect[3];s->check_pitch=(s->check_width*(hdr?8:4)+255)&~255ul;s->check_hdr=hdr;
         s->native_check=[g_dev newBufferWithLength:s->check_pitch*s->check_height options:MTLResourceStorageModeShared];
         s->converted_check=[g_dev newBufferWithLength:s->check_pitch*s->check_height options:MTLResourceStorageModeShared];s->check_generation=g_temporal_snap_generation;
         if(!s->native_check || !s->converted_check){g_temporal_snap_disabled=1;return 0;}
         g_temporal_snap_fidelity=1;
     }
     [s->residence removeAllAllocations];
-    NSArray *allocations=@[world,ui,depth,native,previous,s->world,s->ui,s->output,s->motion,s->display,s->motion_uniform,s->copy_uniform[0],s->copy_uniform[1],s->copy_uniform[2]];
+    NSArray *allocations=@[world,ui,depth,native,previous,s->world,s->ui,s->output,s->motion,s->separate_display,s->motion_uniform,s->copy_uniform[0],s->copy_uniform[1],s->copy_uniform[2]];
     if(asynchronous)allocations=[allocations arrayByAddingObject:s->depth_copy];
     s->keep=check?[allocations arrayByAddingObjectsFromArray:@[s->control,s->native_check,s->converted_check]]:allocations;
     for(id a in s->keep)[s->residence addAllocation:a];
@@ -258,7 +305,7 @@ static uint64_t temporal_snap_encode_producer(id<MTL4CommandBuffer> cb,unsigned 
         nvn_cam_mul(camera.previous_world_to_clip,camera.clip_to_world,(float *)s->motion_uniform.contents);
         [s->motion_args setAddress:s->motion_uniform.gpuAddress atIndex:0];[s->motion_args setTexture:depth.gpuResourceID atIndex:0];[s->motion_args setTexture:s->motion.gpuResourceID atIndex:1];
         temporal_encode_fx(cb,s->used_interpolator,s->motion_args,g_temporal_motion_ps,depth.width,depth.height,camera,delta_time,reset,s->world,previous,depth,s->motion,s->output,s->ui,profile);
-        if(!temporal_snap_copy(cb,s,1,s->output,s->srgb,output_rect))return 0;
+        if(s->output!=s->srgb && !temporal_snap_copy(cb,s,1,s->output,s->srgb,output_rect))return 0;
         if(profile)[cb writeTimestampIntoHeap:profile atIndex:5];
     }
     if(check) {
@@ -284,8 +331,8 @@ static uint64_t temporal_snap_encode_producer(id<MTL4CommandBuffer> cb,unsigned 
     int armed=!(wait&&atoi(wait)) || (path&&[[NSFileManager defaultManager] fileExistsAtPath:[path stringByAppendingPathComponent:@"ARM"]]);
     if(!asynchronous && path && captured<capture_count && armed && !reset && g_temporal_snap_age>=min_age) {
         id<MTLTexture> textures[]={s->world,previous,depth,s->motion,s->output,s->ui,native,s->display};
-        NSString *names[]={world.pixelFormat==MTLPixelFormatRGBA16Float?@"current.rgba16f":@"current.rgb11f",world.pixelFormat==MTLPixelFormatRGBA16Float?@"previous.rgba16f":@"previous.rgb11f",@"depth.f32",@"motion.rg16f",@"generated.rgba16f",ui.pixelFormat==MTLPixelFormatRGBA16Float?@"ui.rgba16f":@"ui.rgb11f",@"native.rgba8",@"display.rgba8"};
-        int bpp[]={world.pixelFormat==MTLPixelFormatRGBA16Float?8:4,world.pixelFormat==MTLPixelFormatRGBA16Float?8:4,4,4,8,ui.pixelFormat==MTLPixelFormatRGBA16Float?8:4,4,4};
+        NSString *names[]={world.pixelFormat==MTLPixelFormatRGBA16Float?@"current.rgba16f":@"current.rgb11f",world.pixelFormat==MTLPixelFormatRGBA16Float?@"previous.rgba16f":@"previous.rgb11f",@"depth.f32",@"motion.rg16f",@"generated.rgba16f",ui.pixelFormat==MTLPixelFormatRGBA16Float?@"ui.rgba16f":@"ui.rgb11f",native.pixelFormat==MTLPixelFormatRGBA16Float?@"native.rgba16f":@"native.rgba8",s->display.pixelFormat==MTLPixelFormatRGBA16Float?@"display.rgba16f":@"display.rgba8"};
+        int bpp[]={world.pixelFormat==MTLPixelFormatRGBA16Float?8:4,world.pixelFormat==MTLPixelFormatRGBA16Float?8:4,4,4,8,ui.pixelFormat==MTLPixelFormatRGBA16Float?8:4,native.pixelFormat==MTLPixelFormatRGBA16Float?8:4,s->display.pixelFormat==MTLPixelFormatRGBA16Float?8:4};
         NSMutableArray *buffers=[NSMutableArray array],*metadata=[NSMutableArray array];
         for(int i=0;i<8;i++) {
             id<MTLTexture> t=textures[i];NSUInteger pitch=(t.width*bpp[i]+255)&~255ul;
@@ -311,7 +358,7 @@ static uint64_t temporal_snap_encode_producer(id<MTL4CommandBuffer> cb,unsigned 
             s->capture_buffers=buffers;s->capture_path=destination;
             NSMutableArray *view=[NSMutableArray array],*projection=[NSMutableArray array];
             for(int i=0;i<16;i++){[view addObject:@(camera.world_to_view[i])];[projection addObject:@(camera.view_to_clip[i])];}
-            s->capture_info=@{@"frame":@(frame),@"capture_count":@(capture_count),@"delta_time":@(delta_time),@"near":@(camera.near_plane),@"far":@(camera.far_plane),@"fov_radians":@(camera.fov),@"reset":@(reset),@"history_age":@(g_temporal_snap_age),@"textures":metadata,@"clip_to_world":inverse,@"previous_world_to_clip":prev,@"world_to_clip":current,@"has_render_matrices":@(camera.has_render_matrices),@"world_to_view":view,@"view_to_clip":projection,@"ready":@(g_temporal_snap_fidelity==2)};
+            s->capture_info=@{@"output_alias":@(s->output_alias),@"hdr_linear":@(hdr),@"frame":@(frame),@"capture_count":@(capture_count),@"delta_time":@(delta_time),@"near":@(camera.near_plane),@"far":@(camera.far_plane),@"fov_radians":@(camera.fov),@"reset":@(reset),@"history_age":@(g_temporal_snap_age),@"textures":metadata,@"clip_to_world":inverse,@"previous_world_to_clip":prev,@"world_to_clip":current,@"has_render_matrices":@(camera.has_render_matrices),@"world_to_view":view,@"view_to_clip":projection,@"ready":@(g_temporal_snap_fidelity==2)};
             captured++;
             pose_probe_temporal_capture(frame,(unsigned)depth.width,(unsigned)depth.height,captured==capture_count);
         }

@@ -91,8 +91,8 @@ static void temporal_async_capture(id<MTLCommandBuffer> cb,temporal_snap_slot *s
     NSString *prefix=@(path);const char *wait=getenv("DM_OOT_TEMPORAL_CAPTURE_WAIT_FOR_ARM");
     if(wait && atoi(wait) && ![[NSFileManager defaultManager]fileExistsAtPath:[prefix stringByAppendingPathComponent:@"ARM"]])return;
     id<MTLTexture> textures[]={s->world,previous,s->depth_copy,s->motion,s->output,s->ui,native,s->display};
-    NSString *names[]={s->world.pixelFormat==MTLPixelFormatRGBA16Float?@"current.rgba16f":@"current.rgb11f",s->world.pixelFormat==MTLPixelFormatRGBA16Float?@"previous.rgba16f":@"previous.rgb11f",@"depth.f32",@"motion.rg16f",@"generated.rgba16f",s->ui.pixelFormat==MTLPixelFormatRGBA16Float?@"ui.rgba16f":@"ui.rgb11f",@"native.rgba8",@"display.rgba8"};
-    int bytes[]={s->world.pixelFormat==MTLPixelFormatRGBA16Float?8:4,s->world.pixelFormat==MTLPixelFormatRGBA16Float?8:4,4,4,8,s->ui.pixelFormat==MTLPixelFormatRGBA16Float?8:4,4,4};
+    NSString *names[]={s->world.pixelFormat==MTLPixelFormatRGBA16Float?@"current.rgba16f":@"current.rgb11f",s->world.pixelFormat==MTLPixelFormatRGBA16Float?@"previous.rgba16f":@"previous.rgb11f",@"depth.f32",@"motion.rg16f",@"generated.rgba16f",s->ui.pixelFormat==MTLPixelFormatRGBA16Float?@"ui.rgba16f":@"ui.rgb11f",native.pixelFormat==MTLPixelFormatRGBA16Float?@"native.rgba16f":@"native.rgba8",s->display.pixelFormat==MTLPixelFormatRGBA16Float?@"display.rgba16f":@"display.rgba8"};
+    int bytes[]={s->world.pixelFormat==MTLPixelFormatRGBA16Float?8:4,s->world.pixelFormat==MTLPixelFormatRGBA16Float?8:4,4,4,8,s->ui.pixelFormat==MTLPixelFormatRGBA16Float?8:4,native.pixelFormat==MTLPixelFormatRGBA16Float?8:4,s->display.pixelFormat==MTLPixelFormatRGBA16Float?8:4};
     NSMutableArray *buffers=[NSMutableArray array],*metadata=[NSMutableArray array];
     for(int i=0;i<8;i++) {
         id<MTLTexture> t=textures[i];if(!t)return;NSUInteger pitch=(t.width*bytes[i]+255)&~255ul;
@@ -107,7 +107,7 @@ static void temporal_async_capture(id<MTLCommandBuffer> cb,temporal_snap_slot *s
     for(int i=0;i<16;i++){[inverse addObject:@(camera.clip_to_world[i])];[prior addObject:@(camera.previous_world_to_clip[i])];[current addObject:@(camera.world_to_clip[i])];}
     NSMutableArray *view=[NSMutableArray array],*projection=[NSMutableArray array];
     for(int i=0;i<16;i++){[view addObject:@(camera.world_to_view[i])];[projection addObject:@(camera.view_to_clip[i])];}
-    NSDictionary *info=@{@"backend":@"asynchronous Metal3",@"frame":@(frame),@"reset":@(reset),@"history_age":@(g_temporal_snap_age),@"textures":metadata,@"clip_to_world":inverse,@"previous_world_to_clip":prior,@"world_to_clip":current,@"has_render_matrices":@(camera.has_render_matrices),@"world_to_view":view,@"view_to_clip":projection,@"near":@(camera.near_plane),@"far":@(camera.far_plane),@"fov_radians":@(camera.fov)};
+    NSDictionary *info=@{@"output_alias":@(s->output_alias),@"hdr_linear":@(s->hdr),@"backend":@"asynchronous Metal3",@"frame":@(frame),@"reset":@(reset),@"history_age":@(g_temporal_snap_age),@"textures":metadata,@"clip_to_world":inverse,@"previous_world_to_clip":prior,@"world_to_clip":current,@"has_render_matrices":@(camera.has_render_matrices),@"world_to_view":view,@"view_to_clip":projection,@"near":@(camera.near_plane),@"far":@(camera.far_plane),@"fov_radians":@(camera.fov)};
     captured=1;
     [cb addCompletedHandler:^(id<MTLCommandBuffer> finished) {
         if(finished.error)return;
@@ -137,7 +137,7 @@ static int temporal_async_submit(temporal_snap_slot *s,unsigned slot,id<MTLTextu
     if(@available(macOS 27.0,iOS 27.0,tvOS 27.1,*)){f.worldToViewMatrix=camera.has_render_matrices?temporal_camera_matrix(camera.world_to_view):matrix_identity_float4x4;
         f.viewToClipMatrix=camera.has_render_matrices?temporal_camera_matrix(camera.view_to_clip):matrix_identity_float4x4;}
     [f encodeToCommandBuffer:cb];
-    if(!temporal_async_copy(cb,s->output,s->srgb,rect)){pthread_mutex_unlock(&g_temporal_async_mu);return 0;}
+    if(s->output!=s->srgb && !temporal_async_copy(cb,s->output,s->srgb,rect)){pthread_mutex_unlock(&g_temporal_async_mu);return 0;}
     temporal_async_capture(cb,s,previous,native,camera,frame,reset);
     uint64_t value=++g_temporal_async_sequence;
     atomic_store(&s->async_reader,value);atomic_store(&s->async_ready,value);
@@ -151,7 +151,7 @@ static int temporal_async_submit(temporal_snap_slot *s,unsigned slot,id<MTLTextu
     [cb commit];atomic_store(&g_temporal_async_latest,value);
     pthread_mutex_unlock(&g_temporal_async_mu);(void)slot;return 1;
 }
-typedef struct { id<MTLFXSpatialScaler> scaler;id<MTLTexture> input,output;uint64_t made_at;NSUInteger refused[6]; } temporal_async_spatial;
+typedef struct { id<MTLFXSpatialScaler> scaler;id<MTLTexture> input,output;uint64_t made_at;NSUInteger refused[7];int hdr; } temporal_async_spatial;
 static temporal_async_spatial g_temporal_async_spatial;
 // Writable drawables can receive the scaler directly when the final quad is an
 // identity copy. Keep the intermediate path for letterboxing, origin flips and
@@ -165,15 +165,16 @@ static id<MTLTexture> temporal_async_upscale(id<MTLCommandBuffer> cb,id<MTLTextu
     NSUInteger r[4];if(fx_mode()!=1 || !present_crop_rect(source,crop,r))return nil;
     MTLViewport vp=present_fit(source,destination.width,destination.height);if(!fx_wanted(vp,r[2],r[3]))return nil;
     temporal_async_spatial *s=&g_temporal_async_spatial;id<MTLTexture> raw=present_raw_src(source);
-    NSUInteger key[6]={r[2],r[3],raw.pixelFormat,(NSUInteger)vp.width,(NSUInteger)vp.height,destination.pixelFormat};
-    if(!s->scaler || s->input.width!=key[0] || s->input.height!=key[1] || s->input.pixelFormat!=key[2] || s->output.width!=key[3] || s->output.height!=key[4] || s->output.pixelFormat!=key[5]) {
+    int hdr=front_hdr_enabled() && raw.pixelFormat==MTLPixelFormatRGBA16Float && destination.pixelFormat==MTLPixelFormatRGBA16Float;
+    NSUInteger key[7]={r[2],r[3],raw.pixelFormat,(NSUInteger)vp.width,(NSUInteger)vp.height,destination.pixelFormat,(NSUInteger)hdr};
+    if(!s->scaler || s->hdr!=hdr || s->input.width!=key[0] || s->input.height!=key[1] || s->input.pixelFormat!=key[2] || s->output.width!=key[3] || s->output.height!=key[4] || s->output.pixelFormat!=key[5]) {
         if(!memcmp(key,s->refused,sizeof key) || (s->scaler && g_present_n<s->made_at+FX_REMAKE_PRESENTS))return nil;
-        MTLFXSpatialScalerDescriptor *d=[MTLFXSpatialScalerDescriptor new];d.inputWidth=key[0];d.inputHeight=key[1];d.colorTextureFormat=raw.pixelFormat;d.outputWidth=key[3];d.outputHeight=key[4];d.outputTextureFormat=destination.pixelFormat;d.colorProcessingMode=MTLFXSpatialScalerColorProcessingModePerceptual;
+        MTLFXSpatialScalerDescriptor *d=[MTLFXSpatialScalerDescriptor new];d.inputWidth=key[0];d.inputHeight=key[1];d.colorTextureFormat=raw.pixelFormat;d.outputWidth=key[3];d.outputHeight=key[4];d.outputTextureFormat=destination.pixelFormat;d.colorProcessingMode=hdr?MTLFXSpatialScalerColorProcessingModeHDR:MTLFXSpatialScalerColorProcessingModePerceptual;
         id<MTLFXSpatialScaler> f=[d newSpatialScalerWithDevice:g_dev];if(!f){memcpy(s->refused,key,sizeof key);return nil;}
         MTLTextureDescriptor *td=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:raw.pixelFormat width:key[0] height:key[1] mipmapped:NO];td.storageMode=MTLStorageModePrivate;td.usage=f.colorTextureUsage|MTLTextureUsageShaderRead;
         id<MTLTexture> in=[g_dev newTextureWithDescriptor:td];td=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:destination.pixelFormat width:key[3] height:key[4] mipmapped:NO];td.storageMode=MTLStorageModePrivate;td.usage=f.outputTextureUsage|MTLTextureUsageShaderRead;
         id<MTLTexture> out=[g_dev newTextureWithDescriptor:td];if(!in || !out)return nil;
-        s->scaler=f;s->input=in;s->output=out;s->made_at=g_present_n;
+        s->scaler=f;s->input=in;s->output=out;s->made_at=g_present_n;s->hdr=hdr;
     }
     // Exact physical bounds are required: inputContent alone does not clamp padded texels.
     int exact=!r[0] && !r[1] && r[2]==raw.width && r[3]==raw.height &&

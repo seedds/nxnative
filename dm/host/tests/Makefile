@@ -417,3 +417,12 @@ $(B)/t_screen_mode: t_screen_mode.c ../front_screen_mode.h | $(B)
 screen-mode: $(B)/t_screen_mode
 	$(B)/t_screen_mode
 run: screen-mode
+
+# Native EDR capability/content metadata; the forensic vi-hdr probe is separate.
+$(B)/t_vi_edr: t_vi_edr.c ../../gfx/hle_vi.c ../../gfx/tests/t_hdr_front.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_vi_edr.c ../../gfx/tests/t_hdr_front.c
+.PHONY: vi-edr
+vi-edr: $(B)/t_vi_edr
+	DM_TEST_HDR=0 $(B)/t_vi_edr
+	DM_TEST_HDR=1 $(B)/t_vi_edr
+run: vi-edr

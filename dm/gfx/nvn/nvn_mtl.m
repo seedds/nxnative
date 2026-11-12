@@ -8021,11 +8021,13 @@ static void at_bind(id<MTLCommandEncoder> en) {
 // source colour keeps 0: zeroing the source would also change that term, where NVIDIA keeps the NaN. With blending off, MIN / MAX (no weights) and every other factor the bits are 0
 // and the shader returns its colour as it is. DM_NVN_BLEND_ZERO=0 gives 0 for every draw (Apple's blender as it is), for A/B runs
 static int bz_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_BLEND_ZERO"); v = !(e && !strcmp(e, "0")); if (!v) MLOG("DM_NVN_BLEND_ZERO=0: a non-finite colour with a zero blend weight is blended as Apple's blender does (NaN kept)"); } return v; }
-static uint32_t bz_word(void) {
+// lmap: the map of a merged pass (physical target -> the shader's output) or NULL. draw clears g_pso_lmap before it binds the arguments, so bz_bind reads the map from g_draw_lmap
+static const uint8_t *g_draw_lmap;
+static uint32_t bz_word(const uint8_t *lmap) {
     if (!S.color.blend_en || !bz_on()) return 0;
     uint32_t w = 0;
     for (int i = 0; i < 8; i++) {
-        unsigned l = g_pso_lmap ? g_pso_lmap[i] : (unsigned)i;
+        unsigned l = lmap ? lmap[i] : (unsigned)i;
         if (l >= 8 || !g_pass.cfmt[i] || !(S.color.blend_en >> l & 1) || !pf_is_float((MTLPixelFormat)g_pass.cfmt[i])) continue;
         blend_st b = adv_blend(S.blend[l]);
         if (b.eq_rgb == NVN_BLEND_EQUATION_MIN || b.eq_rgb == NVN_BLEND_EQUATION_MAX) continue;
@@ -8038,7 +8040,7 @@ static uint32_t bz_word(void) {
 // The word at fragment buffer DMSH_BLEND_BUFFER, for every draw of a shader that reads it: a copy in the frame arena per value and pass, as at_bind
 static void bz_bind(id<MTLCommandEncoder> en) {
     static uint64_t gpu, pass; static uint32_t last;
-    uint32_t v = bz_word();
+    uint32_t v = bz_word(g_draw_lmap);
     if (!gpu || pass != g_pass.serial || v != last) {
         __strong id<MTLBuffer> b; size_t off = arena_alloc(16, &b); memset((uint8_t *)b.contents + off, 0, 16); memcpy((uint8_t *)b.contents + off, &v, sizeof v);
         gpu = b.gpuAddress + off; pass = g_pass.serial; last = v;
@@ -14118,6 +14120,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
         rp_end(); en = rp_begin_ex(mode); if (!en) return;
         cur_ps = pso_get(pr, nil); cur_pull = g_pso_pull; cur_pr = pr; cur_ps_pass = g_pass.serial; cur_border = border; g_pso_dirty = !cur_ps || cur_pull; }
     uint32_t raster_mask = draw_color_writes(pr);   // Capture the physical mapping before resetting the merged pipeline state.
+    g_draw_lmap = g_pso_lmap;   // kept for bz_bind, whose word needs the map the pipeline was made with: the reset below ran before it, so a merged draw bound the word of an unmapped pass
     if (g_pso_lmap) { g_pso_lmap = NULL; g_pso_fsfn = nil; memset(&g_pso_fz, 0, sizeof g_pso_fz); g_pso_dirty = 1; }   // The next draw fetches again according to its own situation
     __unsafe_unretained id<MTLRenderPipelineState> ps = cur_ps;
     if (!ps) { PD("Z %llu draw skipped: no render pipeline (vertex %s fragment %s)", g_stat_pass, pr->sh[0] ? pr->sh[0]->key : "-", pr->sh[1] ? pr->sh[1]->key : "-"); return; }

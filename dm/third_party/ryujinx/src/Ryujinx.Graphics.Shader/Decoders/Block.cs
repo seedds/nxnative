@@ -70,6 +70,20 @@ namespace Ryujinx.Graphics.Shader.Decoders
 
             rightBlock.EndAddress = EndAddress;
             rightBlock.Successors.AddRange(Successors);
+            // The successors move to the right half, so their predecessor is the right half now: both decoders walk these lists back from a BRX to the load of its jump
+            // table, and a list still naming the left half sent the walk into code before the load (Pokémon Pokopia: 16 pixel shaders, an LDC c[0x1][R20+0x790] and a
+            // conditional BRA to the BRX in a block split later at a branch target). One entry a successor edge, so a successor listed twice has two entries moved; a
+            // block that jumps to its own start or into its own middle is its own successor, and its entry moves the same way
+            foreach (Block successor in Successors)
+            {
+                int i = successor.Predecessors.IndexOf(this);
+
+                if (i >= 0)
+                {
+                    successor.Predecessors[i] = rightBlock;
+                }
+            }
+
             rightBlock.Predecessors.Add(this);
 
             EndAddress = rightBlock.Address;

@@ -219,6 +219,7 @@ namespace Ryujinx.Graphics.Shader.Decoders
         CircularQueueEntryIndex = 97,
         CircularQueueEntryAddressLow = 98,
         CircularQueueEntryAddressHigh = 99,
+        VariableRate = 132,
     }
 
     enum RoundMode

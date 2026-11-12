@@ -1,0 +1,46 @@
+# Game profile of Diablo III: Eternal Collection (Switch, update 2.7.7.92380 = v1441792). Plays on the Mac (logos, the intro movie, hero creation, the Act I opening cinematic, the road into
+# New Tristram, walking and fighting at 60 fps with sound)
+# Format: see dm/games/README.md
+# Blizzard's own engine (no Unreal: the survey's Unreal 4 marker is a false one), FMOD, SDK 8.2.0. The game's data are SNO assets in Blizzard's console packages (CPKs/*.cpk and
+# Update/CPKs/*.cpk, not CRI's CPK: dm/gfx/tools/d3cpk.py); its shaders are control sections each followed by its code area in the zlib streams of those packages (shader_split.py d3cpk_shaders).
+# The provisional profile's guesses held: no key needed changing
+
+# ---- Identity ----
+title_id	01001B300B9BE000
+program_id	01001B300B9BE000
+
+# ---- App ----
+# Game name: only a label for profile listings and the Mac window title; the iOS app name is the game name in the base NSP, and the bundle ID comes from the base game title ID (build_ipa.sh / NSP script)
+name	Diablo III: Eternal Collection
+ipa	DiabloIiiEternalCollection.ipa
+app_category	public.app-category.role-playing-games
+
+# ---- Versions ----
+build	v1441792	2.7.7.92380	main=2607a74f5df7754cc0357b5df7e49693	sdk=3ae34e689d7a35f13cbf42bfd672af8b
+package	v1441792
+shader_versions	v1441792
+
+# ---- Files ----
+# every module main imports from
+modules	main sdk
+romfs_marker	CPKs/Common.cpk
+zip_store	.cpk:.metallib
+
+# ---- Memory ----
+# The NPDM declares 16 MB of system resource (virtual address memory). The game sets no heap: it takes its memory as address regions in the alias region (nn::os::AllocateAddressRegion,
+# 0.75 GB from main+0xa70 and 0.36 GB from main+0xa36c58 at boot) and maps them; on the Mac they reach alias +3.00 GB in seven minutes of play from a fresh save, within the 4.38 GB below.
+# A 5 GB block with a large alias region (the NSP script's guess)
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 16 MB of system resource
+sys_resource	0x1000000
+
+# ---- Shader split ----
+shader_groups	/CPKs/=cpks /Update/=update
+shader_note	Diablo III: Eternal Collection shaders
+
+# ---- Graphics ----
+# the game calls nvnDeviceSetDepthMode with near = 0 at boot (the NSP script's heap check): the pipeline bases made before it runs are made for that mode
+depth_mode	zero

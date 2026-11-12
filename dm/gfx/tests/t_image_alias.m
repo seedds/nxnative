@@ -138,6 +138,15 @@ static void separate_storage(pool_t *pool, id<MTLHeap> original) {
     for (int i=0;i<8;i++) mtl_tex_release(&t[i]);
     mtl_alias_drop_pool(&other_pool); mtl_alias_drop_pool(&cpu_pool);
 }
+// Two families whose offsets lie in one 64 KB cell of the sharing table's index (alias_index): the owner lookup reads that cell and takes only the entries at its own offset
+static void same_cell(pool_t *pool) {
+    tex_t t[4];
+    for (int i=0;i<4;i++) { t[i]=image(pool,996000+i,(i%2+1)*64,64); t[i].off=(11<<20)+(i/2)*0x4000; t[i].mem=pool->mem+t[i].off; mtl_tex_init(&t[i]); }
+    id<MTLTexture> m[4]; for (int i=0;i<4;i++) m[i]=tex_mtl(&t[i]);
+    CHECK(m[0].heap && m[0].heap==m[1].heap && m[2].heap && m[2].heap==m[3].heap,"each family in the cell shares its own heap");
+    CHECK(m[0].heap!=m[2].heap,"an offset 16 KB further in the same cell is another family");
+    for (int i=0;i<4;i++) mtl_tex_release(&t[i]);
+}
 // A resolution family member read after another size wrote the shared storage sees that size's texels, misplaced but of the same format, as on the console (ASTRAL CHAIN, issue #1935)
 static void cross_size_read(void) {
     void *mem=NULL; posix_memalign(&mem,16384,16<<20); memset(mem,0,16<<20);
@@ -178,7 +187,7 @@ int main(void) { @autoreleasepool {
     CHECK(!small.allowGPUOptimizedContents,"family textures are uncompressed: a size reading another's compressed blocks decodes garbage");
     MTLTextureDescriptor *largest=tex_desc(&a[N-1],0); largest.allowGPUOptimizedContents=NO;   // family members are sized uncompressed, as they are made (image_texture)
     MTLSizeAndAlign max_size=[g_dev heapTextureSizeAndAlignWithDescriptor:largest];
-    CHECK(small.heap.size==max_size.size,"heap capacity is the exact largest declared size");
+    CHECK(small.heap.size>=max_size.size && small.heap.size<=(sw_on(rh_mode()) ? max_size.size+max_size.size/4 : max_size.size),"heap capacity holds the largest declared size (with the recycled heaps' eighth of headroom)");
     is_zero(small);
     id<MTLTexture> big=tex_mtl(&a[N-1]); is_zero(big);
     pixels(small,0x10203040);
@@ -196,6 +205,7 @@ int main(void) { @autoreleasepool {
     CHECK(delta<max_size.size+(12<<20),"allocation is bounded by one image plus upload/readback scratch");
     pixels(big,0x55667788); pixels(tex_mtl(&a[63]),0xa1b2c3d4); pixels(small,0x76543210);
     separate_storage(&pool,small.heap);
+    same_cell(&pool);
     indirect_pixels(small,0x76543210);   // writes to other pools, offsets and formats left it intact
     atomic_colour(&pool);
     depth_planes(&pool);
@@ -227,7 +237,10 @@ int main(void) { @autoreleasepool {
     dispatch_sync(g_feedback_q, ^{}); defer_drain();
     CHECK(g_image_desc.n==0,"finalization releases every recorded description");
     }
-    CHECK(!weak_heap || ![g_res_objects containsObject:weak_heap],"the last texture retires its heap from residency");
+    if (sw_on(rh_mode())) {   // the heap waits, resident, for the next texture it fits (rh_wait)
+        int waits=0; os_unfair_lock_lock(&g_rh_lk); for (unsigned i=0;i<g_rh_n;i++) waits |= (__bridge id)g_rh[i].heap==weak_heap; os_unfair_lock_unlock(&g_rh_lk);
+        CHECK(weak_heap && waits && [g_res_objects containsObject:weak_heap],"the last texture hands its heap to the recycled heaps, resident while it waits");
+    } else CHECK(!weak_heap || ![g_res_objects containsObject:weak_heap],"the last texture retires its heap from residency");
     CHECK(g_image_heap_n==0,"every family heap is released after its textures and views go");
     uint64_t settled=g_dev.currentAllocatedSize;
     for (int i=0;i<8;i++) { @autoreleasepool {

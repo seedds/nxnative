@@ -193,8 +193,6 @@ pyright	scripts/build_ipa_from_nsp.py	reportArgumentType	1	Argument of type "str
 pyright	scripts/build_ipa_from_nsp.py	reportArgumentType	1	Argument of type "str | ((n: Unknown) -> (Unknown | None))" cannot be assigned to parameter "func" of type "(_T1@__new__) -> _S@map" in function "__new__" Type "str | ((n: Unknown) -> (Unknown | None))" is not assignable to type "(_T1@__new__) -> _S@map" Type "str" is not assignable to type "(_T1@__new__) -> _S@map"
 pyright	scripts/build_ipa_from_nsp.py	reportCallIssue	1	Argument expression after ** must be a mapping with a "str" key type
 pyright	scripts/build_ipa_from_nsp.py	reportCallIssue	1	No overloads for "__init__" match the provided arguments Argument types: (Unknown, str, str, str, str, **dict[str | ((n: Unknown) -> (Unknown | None)), str])
-pyright	scripts/build_ipa_from_nsp.py	reportOptionalIterable	1	Object of type "None" cannot be used as iterable value
-pyright	scripts/build_ipa_from_nsp.py	reportOptionalMemberAccess	1	"close" is not a known attribute of "None"
 pyright	scripts/build_ipa_from_nsp.py	reportOptionalOperand	1	Operator "-" not supported for "None"
 ruff	dm/gfx/tools/shader_split.py	B006	1	Do not use mutable data structures for argument defaults
 ruff	dm/gfx/tools/shader_split.py	B023	1	Function definition does not bind loop variable `c`

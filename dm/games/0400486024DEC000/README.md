@@ -29,6 +29,8 @@ One [NUP container](../../../docs/development.md#the-packing-script-in-detail) o
 
 ## Frame rate
 
+- Detailed bounded captures can use [deferred NVN timing output](../../../docs/reference/frame-rate.md#bounded-nvn-timing-captures-without-filesystem-work-per-frame) to keep filesystem writes out of the per-frame instrumentation. This is a measurement fix; the rare original hitch is not conclusively attributed.
+
 Measured on an M6 Mac with 16 GB, headless, on one walk with camera turns (`walk.sh` in the work folder).
 
 - Current on an M5 Pro MacBook Pro (16-inch, 20-core GPU, 24 GB, macOS 27.2, 2026-11-09), `kokiri-deck` from a deck autosave with the full library of chain `dedc9391c30b`, at full resolution (Dynamic resolution off), two runs a variant: in a window a locked 60 fps (59.8–60.0, frame p99 16.8–19.4 ms, GPU p50 10.2 ms). In fullscreen on its ProMotion screen it held 40 fps (39.6–40.1) at the same GPU time, with every present a 120 Hz refresh late and every other link tick skipped: [The 60 Hz link at 40 fps in fullscreen on a ProMotion screen](../../../docs/reference/frame-rate.md#the-60-hz-link-at-40-fps-in-fullscreen-on-a-promotion-screen). With the 120 Hz link there, 58.8–59.6 fps, frame p99 25.3 ms; with the screen held at its fixed 60 Hz mode, 60.0 fps, frame p99 16.9 ms, which fullscreen now switches to. MetalFX present upscaling to the 3456-wide fullscreen cost no measurable GPU time (59.4–59.7 fps). Resident about 10 GB, GPU allocated 11.2–11.4 GB; the prepare step took 7.3 s on a first start.

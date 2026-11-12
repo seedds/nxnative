@@ -714,3 +714,11 @@ check_t_upscale_recipe: t_upscale_recipe
 	DM_UPSCALER=metalfx DM_UPSCALER_EXPERIMENTAL=0 ./t_upscale_recipe
 	DM_UPSCALER=metalfx DM_UPSCALER_EXPERIMENTAL=1 DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_upscale_recipe
 	DM_UPSCALER=metalfx DM_UPSCALER_EXPERIMENTAL=1 DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_upscale_recipe
+
+# Diagnostic TSV capture: no file I/O on deferred producers, real graceful exit.
+t_tsv_stream: t_tsv_stream.c ../nvn/nvn_tsv_stream.h
+	clang $(CFLAGS) -pthread -o $@ $<
+t_tsv_exit: t_tsv_exit.c $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_tsv_exit.c ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(GFX) $(FW)
+check_t_tsv_exit: t_tsv_exit
+	@trace=$$(mktemp); trap 'rm -f "$$trace"' EXIT; DM_NVN_TSV="$$trace" ./t_tsv_exit; grep -q '^123[[:space:]]@deferred_exit_probe[[:space:]]8.333$$' "$$trace"

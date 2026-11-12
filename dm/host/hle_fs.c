@@ -607,8 +607,11 @@ HLE_FORCE("_ZN2nn2fs17MountAddOnContentEPKciPvm", "fsp-srv; add-on content → D
 // System data archives are firmware content, which the host does not ship. A player can supply their own console's: <DM_SYSTEM_DIR>/sysdata/<id as 16 hex digits>/ holds an archive's
 // RomFS files, mounted read-only (Nintendo Switch Sports Resort's MiiResource, 0400000000000849: the Mii head textures and shapes). Without it, 0100000000000802, MiiModel (Mario Kart 8
 // Deluxe mounts it as MiiResource: and builds Mii heads from it at boot, for the title screen's demo race), is a stand-in with every part empty (hle_mii.c dm_mii_standin), written into
-// <DM_TEMP>_sysdata/<id>; any other archive answers "target not found", as for a title that is not installed
+// <DM_TEMP>_sysdata/<id>. The Switch 2's Mii model archive, 0400000000000849 (Nintendo Switch Sports Resort mounts it as MiiResource:), has the same files plus its own texture sets and
+// gets the same stand-in when the player supplies none: with the mount refused the game went on with an empty Mii resource and, minutes later in two-player Avioneta, read its texture
+// file's part sizes through a null pointer (main+0x1cdcfb4 under main+0x1cd2e30, a read at 0xc). Any other archive answers "target not found", as for a title that is not installed
 #define SYSDATA_MIIMODEL 0x0100000000000802ull
+#define SYSDATA_MIIRESOURCE_SW2 0x0400000000000849ull
 int dm_mii_standin(const char *dir);
 // The player's own console files: $DM_SYSTEM_DIR (default $DM_ROOT/run/platform/system), shared by every game: system data here, the Mii databases in hle_mii.c
 const char *dm_system_dir(char *buf, size_t n) { return envdir("DM_SYSTEM_DIR", "run/platform/system", buf, n); }
@@ -619,7 +622,7 @@ static int sysdata_own(char *dir, size_t n, uint64_t id) {
 static int sysdata_dir(char *dir, size_t n, uint64_t id) {
     char t[1024];
     if (sysdata_own(dir, n, id)) return 1;
-    if (id != SYSDATA_MIIMODEL || snprintf(dir, n, "%s_sysdata/%016llx", envdir("DM_TEMP", "run/platform/temp", t, sizeof t), (unsigned long long)id) >= (int)n) return 0;
+    if ((id != SYSDATA_MIIMODEL && id != SYSDATA_MIIRESOURCE_SW2) || snprintf(dir, n, "%s_sysdata/%016llx", envdir("DM_TEMP", "run/platform/temp", t, sizeof t), (unsigned long long)id) >= (int)n) return 0;
     return dm_mii_standin(dir);
 }
 HLE_FORCE("_ZN2nn2fs29QueryMountSystemDataCacheSizeEPmNS_3ncm12SystemDataIdE", "fsp-srv; system data reads the host directory directly, the cache is the size of its RomFS file table", Result, h_fs_QuerySysDataCache, size_t *out, uint64_t id) {
@@ -627,7 +630,7 @@ HLE_FORCE("_ZN2nn2fs29QueryMountSystemDataCacheSizeEPmNS_3ncm12SystemDataIdE", "
     *out = sysdata_dir(dir, sizeof dir, id) ? romfs_work_size(dir) : 0x1000;
     return RES_OK;
 }
-HLE_FORCE("_ZN2nn2fs15MountSystemDataEPKcNS_3ncm12SystemDataIdEPvm", "fsp-srv; system data: the console's own from DM_SYSTEM_DIR, else the host's MiiModel stand-in", Result, h_fs_MountSysData, const char *name, uint64_t id, void *cache, size_t sz) {
+HLE_FORCE("_ZN2nn2fs15MountSystemDataEPKcNS_3ncm12SystemDataIdEPvm", "fsp-srv; system data: the console's own from DM_SYSTEM_DIR, else the host's Mii model stand-in (MiiModel, the Switch 2's MiiResource)", Result, h_fs_MountSysData, const char *name, uint64_t id, void *cache, size_t sz) {
     (void)cache; (void)sz; char dir[1024];
     if (!sysdata_dir(dir, sizeof dir, id)) { LOG("[RED] fs mount system data %s: the host has no %016llx (a console's own goes in <DM_SYSTEM_DIR>/sysdata/%016llx)", name, (unsigned long long)id, (unsigned long long)id); return RES_TARGET_NOT_FOUND; }
     char own[1024]; if (sysdata_own(own, sizeof own, id)) LOG("fs mount system data %s: %016llx from %s", name, (unsigned long long)id, dir);

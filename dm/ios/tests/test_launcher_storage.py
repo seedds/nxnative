@@ -45,7 +45,7 @@ class LauncherStorageTests(unittest.TestCase):
             compile_result = subprocess.run(['xcrun', '-sdk', 'macosx', 'clang', '-I', str(REPO / 'dm/host'), '-c', '-o', str(sync), str(REPO / 'dm/host/save_sync.c')], capture_output=True, text=True, timeout=300)
             self.assertEqual(compile_result.returncode, 0, compile_result.stdout + compile_result.stderr)
             compile_result = subprocess.run(['xcrun', '-sdk', 'macosx', 'swiftc', '-swift-version', '5', '-parse-as-library', '-module-cache-path', str(tmp / 'module-cache'),
-                            '-o', str(exe), str(REPO / 'dm/ios/Sources/LauncherSettings.swift'), str(REPO / 'dm/ios/Sources/LauncherRow.swift'), str(REPO / 'dm/ios/Sources/SaveSyncReport.swift'),
+                            '-o', str(exe), str(REPO / 'dm/ios/Sources/LauncherSettings.swift'), str(REPO / 'dm/ios/Sources/SaveSyncReport.swift'),
                             str(REPO / 'dm/mac/Launcher.swift'), str(Path(__file__).with_name('launcher_layout_check.swift')), str(Path(__file__).with_name('launcher_storage_check.swift')), str(sync)],
                             capture_output=True, text=True, timeout=300)
             self.assertEqual(compile_result.returncode, 0, compile_result.stdout + compile_result.stderr)

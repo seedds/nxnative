@@ -81,6 +81,13 @@ class LauncherSettingsTests(unittest.TestCase):
         s = mac['DM_FULLSCREEN']
         self.assertEqual((s['kind'], s['default'], s['options'], s['level']), ('choice', '0', [['0', 'Window'], ['1', 'Fullscreen']], 'basic'))
 
+    def test_motion_controls_toggle_on_every_platform_and_api(self):   # hle_hid.c, motion_apple.h and DmGamepad.m take DM_MOTION=0 as off, anything else or unset as on
+        for api, gid, platform in [('nvn', BOTW, 'ios'), ('nvn', BOTW, 'mac'), ('vulkan', '0100535012974000', 'mac'), ('gl', '010014E00DB56000', 'ios')]:
+            with self.subTest(api=api, platform=platform):
+                s = build(gid, api, platform)['DM_MOTION']
+                self.assertEqual((s['kind'], s['section'], s['label'], s['default'], s['on'], s['off']), ('toggle', 'Controls', 'Motion controls', '1', '1', '0'))
+                self.assertFalse({'level', 'needs'} & set(s))
+
     def test_defaults_follow_each_platform_host(self):
         # nvn_mtl.m pso4_on: Mac defaults on, iOS follows the profile. nvn_rec.h rec_on: iOS on, Mac off.
         for gid, ios_pso in ((BOTW, '1'), (WONDER, '0')):

@@ -24,7 +24,7 @@ Game vibration uses the iPhone's haptic engine or a compatible connected control
 
 A controller that supplies gyro data through Apple's controller support (DualSense, DualShock 4) drives the game's motion controls, on the Mac and the iPhone: aiming and tilt puzzles in games that read the controller's motion, such as Breath of the Wild with its Motion Controls option on. A controller without one (Backbone One, Razer Kishi and other controllers the phone mounts in) uses the iPhone's own gyro, as a Switch in handheld. Motion follows the controller in docked mode, the default.
 
-`DM_PHONE_MOTION=0` in `Documents/env.txt` stops the phone's gyro, `DM_MOTION=0` all motion. If motion misbehaves, pack with `--no-motion` (`MOTION = False` in Spyder) for an app without it; `DM_MOTION=1` in `Documents/env.txt` turns it back on.
+To turn all motion off, turn off [Motion controls](settings.md#motion-controls) in the settings (`DM_MOTION=0` in `env.txt`); `DM_PHONE_MOTION=0` in `Documents/env.txt` stops only the phone's gyro. If motion misbehaves, pack with `--no-motion` (`MOTION = False` in Spyder) for an app without it; `DM_MOTION=1` in `Documents/env.txt` turns it back on.
 
 Joy-Con 2 and Pro Controller 2 gyro come over Bluetooth LE ([Switch 2 controllers](#switch-2-controllers-mac)). Switch Pro Controller gyro on the Mac still needs the HID support being developed in [PR #296](https://github.com/seedds/nxnative/pull/296).
 

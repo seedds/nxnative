@@ -268,6 +268,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - the island lives in device save data, which the host did not mount. → [Device save data on the account save's directory](../reference/services.md#device-save-data-on-the-account-saves-directory)
 - every boot asks to pick a Mii again (`DM_FS=1`: `UserSave:/userdata.dat` not found although the host save has it). → [Device and account save data as two saves](../reference/services.md#device-and-account-save-data-as-two-saves)
 - abort in `fs::detail::GetFileSystemProxyServiceObject` under `fs::QueryMountSystemDataCacheSize` (`main+0x8f23bc`). → [System data stand-in for the MiiModel archive](../reference/services.md#system-data-stand-in-for-the-miimodel-archive)
+- a game that shows a Mii whole draws a body with nothing on its neck (Golf Adventure played as a Mii). → [The Mii stand-in head](../reference/services.md#the-mii-stand-in-head)
 - a failed write of `<DM_SAVE>.sync.tmp` leaks its stream, and the diagnostic can report a cleanup error instead of the write error. → [Save-sync metadata errors close the temporary file](../reference/services.md#save-sync-metadata-errors-close-the-temporary-file)
 - DLC the player owns is not unlocked. → [Add-on content from `DM_AOC_DIR`](../reference/services.md#add-on-content-from-dm_aoc_dir)
 - some owned DLC is missing, and `aoc: reporting` stops at 64 add-on contents. → [Owned add-on content lists beyond 64 entries](../reference/services.md#owned-add-on-content-lists-beyond-64-entries)

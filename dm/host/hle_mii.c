@@ -7,6 +7,9 @@
 // every field is within CharInfoRaw::Verify's ranges (SDK 4.4.0 sdk+0x1b68c8), so CharInfoAccessor::IsValid accepts it.
 #include "hle.h"
 #include <sys/stat.h>
+#include <math.h>
+#include "../gfx/nvn/nvn_tex.h"
+#include "../gfx/tex/nvn_deswizzle.h"
 
 uint64_t dm_entropy64(void);
 
@@ -113,7 +116,123 @@ HLE_FORCE("_ZNK2nn3mii8Database6ExportEPvm", "mii:u service; nothing to export",
 enum { MII_TEX_SIZE = 0x64 + 0x1c * 327, MII_SHAPE_TABLES = 0x6c + 0x58 * 857 + 0x48 * 132 + 0x24 * 12, MII_MESH_AT = 0x14de0, MII_MESH = 0x20 };
 _Static_assert(MII_TEX_SIZE == 0x2428 && MII_SHAPE_TABLES == 0x14dd4, "MiiModel stand-in layout");
 static const uint8_t mii_mesh_z[] = {0x78, 0x01, 0x01, MII_MESH, 0, (uint8_t)~MII_MESH, 0xff, [7 ... 7 + MII_MESH - 1] = 0, 0x00, MII_MESH, 0x00, 0x01};   // zlib: stored block, Adler-32 of 32 zeros
-enum { MII_SHAPE_SIZE = MII_MESH_AT + sizeof mii_mesh_z };
+// A plain head in place of the facelines (entries 4..15 of the shape table) and a face on it, so a Mii a game shows whole is not a body with nothing on its neck (Mario Golf:
+// Super Rush's Golf Adventure plays as a Mii). None of it is a Mii's own face: every Mii gets the same head and the same drawn eyes, eyebrows and mouth, no nose and no hair.
+//   Shapes: ellipsoid patches of MII_HEAD_U x MII_HEAD_V quads, positions as 4 halves (attribute 0), normals as signed 10:10:10:2 (attribute 1) and texture coordinates as 2
+//   halves (attribute 2), u16 indices, each stored as one zlib block. The 12 facelines are the whole ellipsoid; the 12 masks (entries 16..27), which the model draws its mask
+//   texture on (eyes, eyebrows, mouth, composed by the SDK's Mii code from the texture file's parts), are its front, a little outside it.
+//   Textures: the entry's texture part is {+0x14 u16 width, height, +0x18 u8 format, mip count, kind}; the format indexes nn::gfx formats R8, R8_G8, R8_G8_B8_A8, BC4, BC5, BC7,
+//   ASTC 4x4 (Mario Golf: Super Rush 4.0.0 main+0x132c9c, table main+0x304b54), and the data is the texture's storage as NVN lays it out (block-linear). The host's are 64x64
+//   R8_G8_B8_A8: the 62 eyes one drawn eye (the red channel its dark part, green its white: the SDK tints the channels), the 24 eyebrows one arc and the 37 mouths one smile.
+// DM_MII_HEAD=cx,cy,cz,rx,ry,rz[,flags] places and sizes the head (flags 1: the other winding, 2: positions only, 4: no face); DM_MII_FACE=su,sv,ov maps the mask's texture
+// coordinates (u = 0.5 + su·nx, v = 0.5 − sv·ny + ov over the head's unit normal); DM_MII_HEAD=0 leaves the facelines empty as before
+enum { MII_HEAD_U = 20, MII_HEAD_V = 14, MII_HEAD_NV = (MII_HEAD_U + 1) * (MII_HEAD_V + 1), MII_HEAD_NI = MII_HEAD_U * MII_HEAD_V * 6,
+       MII_HEAD_RAW = MII_HEAD_NV * 16 + MII_HEAD_NI * 2, MII_HEAD_Z = MII_HEAD_RAW + 11, MII_HEAD_AT = MII_MESH_AT + 0x40, MII_MASK_AT = (MII_HEAD_AT + MII_HEAD_Z + 0x3f) & ~0x3f };
+enum { MII_SHAPE_SIZE = MII_MASK_AT + MII_HEAD_Z };
+enum { MII_FACE_W = 64, MII_FACE_MAX = 0x8000, MII_TEX_AT = (MII_TEX_SIZE + 0x3f) & ~0x3f, MII_TEX_FILE = MII_TEX_AT + 3 * MII_FACE_MAX };
+static uint16_t mii_half(float f) {   // a float in the range of these meshes as an IEEE half
+    uint32_t x; memcpy(&x, &f, 4); uint32_t s = x >> 16 & 0x8000; int e = (int)(x >> 23 & 0xff) - 112; uint32_t m = x >> 13 & 0x3ff;
+    return e <= 0 ? (uint16_t)s : e >= 31 ? (uint16_t)(s | 0x7bff) : (uint16_t)(s | (uint32_t)e << 10 | m);
+}
+static size_t mii_stored(uint8_t *z, const uint8_t *raw, size_t n) {   // zlib: one stored block (n < 65536) and its Adler-32
+    uint32_t s1 = 1, s2 = 0;
+    z[0] = 0x78; z[1] = 0x01; z[2] = 0x01; z[3] = (uint8_t)n; z[4] = (uint8_t)(n >> 8); z[5] = (uint8_t)~z[3]; z[6] = (uint8_t)~z[4];
+    memcpy(z + 7, raw, n);
+    for (size_t i = 0; i < n; i++) { s1 = (s1 + raw[i]) % 65521; s2 = (s2 + s1) % 65521; }
+    z[7 + n] = (uint8_t)(s2 >> 8); z[8 + n] = (uint8_t)s2; z[9 + n] = (uint8_t)(s1 >> 8); z[10 + n] = (uint8_t)s1;
+    return n + 11;
+}
+static float g_mii_head[6] = {0, 25, -2, 30.5f, 34, 29.5f}, g_mii_face[3] = {0.34f, 0.34f, 0.03f};   // sized so that Mario Golf: Super Rush's cap sits on it
+static int g_mii_flags = -1;
+static int mii_params(void) {
+    if (g_mii_flags >= 0) return g_mii_flags;
+    const char *e = getenv("DM_MII_HEAD"), *f = getenv("DM_MII_FACE"); g_mii_flags = 0;
+    if (e && !strcmp(e, "0")) return g_mii_flags = 0x100;
+    if (e) sscanf(e, "%f,%f,%f,%f,%f,%f,%d", &g_mii_head[0], &g_mii_head[1], &g_mii_head[2], &g_mii_head[3], &g_mii_head[4], &g_mii_head[5], &g_mii_flags);
+    if (f) sscanf(f, "%f,%f,%f", &g_mii_face[0], &g_mii_face[1], &g_mii_face[2]);
+    return g_mii_flags &= 0xff;
+}
+// An ellipsoid patch into the shape entries first..last: longitudes a0..a1 (0 faces +z, the front), latitudes t0..t1 from the top, radii scaled by grow
+static void mii_patch(uint8_t *b, uint32_t at, int first, int last, float a0, float a1, float t0, float t1, float grow, int mask) {
+    const float *v = g_mii_head; int flags = g_mii_flags;
+    uint8_t *raw = calloc(1, MII_HEAD_RAW); if (!raw) return;
+    uint16_t *pos = (uint16_t *)raw, *uv = (uint16_t *)(raw + MII_HEAD_NV * 12), *ix = (uint16_t *)(raw + MII_HEAD_NV * 16); uint32_t *nrm = (uint32_t *)(raw + MII_HEAD_NV * 8);
+    int k = 0;
+    for (int j = 0; j <= MII_HEAD_V; j++) for (int i = 0; i <= MII_HEAD_U; i++, k++) {
+        float a = a0 + (a1 - a0) * (float)i / MII_HEAD_U, t = t0 + (t1 - t0) * (float)j / MII_HEAD_V;
+        float nx = sinf(t) * sinf(a), ny = cosf(t), nz = sinf(t) * cosf(a);
+        pos[k * 4] = mii_half(v[0] + v[3] * grow * nx); pos[k * 4 + 1] = mii_half(v[1] + v[4] * grow * ny); pos[k * 4 + 2] = mii_half(v[2] + v[5] * grow * nz); pos[k * 4 + 3] = mii_half(1.0f);
+        nrm[k] = ((uint32_t)lroundf(nx * 511) & 0x3ff) | ((uint32_t)lroundf(ny * 511) & 0x3ff) << 10 | ((uint32_t)lroundf(nz * 511) & 0x3ff) << 20;
+        float su = mask ? g_mii_face[0] : 0.5f, sv = mask ? g_mii_face[1] : 0.5f, ov = mask ? g_mii_face[2] : 0;
+        uv[k * 2] = mii_half(0.5f + su * nx); uv[k * 2 + 1] = mii_half(0.5f - sv * ny + ov);
+    }
+    k = 0;
+    for (int j = 0; j < MII_HEAD_V; j++) for (int i = 0; i < MII_HEAD_U; i++) {
+        uint16_t p0 = (uint16_t)(j * (MII_HEAD_U + 1) + i), p1 = p0 + 1, p2 = p0 + MII_HEAD_U + 1, p3 = p2 + 1;
+        uint16_t q[6] = {p0, p2, p1, p1, p2, p3};
+        for (int n = 0; n < 6; n++) ix[k++] = q[flags & 1 ? 5 - n : n];
+    }
+    mii_stored(b + at, raw, MII_HEAD_RAW); free(raw);
+    for (int i = first; i <= last; i++) {
+        uint32_t *t = (uint32_t *)(b + 0x6c + 0x58 * i); memset(t, 0, 0x58);
+        t[0] = at; t[1] = MII_HEAD_RAW; t[2] = MII_HEAD_Z;
+        t[4] = 0; t[9] = MII_HEAD_NV * 8;
+        if (!(flags & 2)) { t[5] = MII_HEAD_NV * 8; t[10] = MII_HEAD_NV * 4; t[6] = MII_HEAD_NV * 12; t[11] = MII_HEAD_NV * 4; }
+        t[14] = MII_HEAD_NV * 16; t[15] = MII_HEAD_NI * 2;
+        float box[6] = {v[0] - v[3], v[1] - v[4], v[2] - v[5], v[0] + v[3], v[1] + v[4], v[2] + v[5]}; memcpy(t + 16, box, sizeof box);
+    }
+}
+static int mii_head(uint8_t *b) {
+    int flags = mii_params(); if (flags & 0x100) return 0;
+    const float *v = g_mii_head; uint32_t largest = (MII_HEAD_RAW + 0xfff) & ~0xfffu;
+    mii_patch(b, MII_HEAD_AT, 4, 15, 0, 6.2831853f, 0, 3.14159265f, 1, 0);   // the 12 facelines
+    memcpy(b + 0xc + 4 * 1, &largest, 4);                                    // the faceline kind's largest inflated size
+    if (!(flags & 4)) { mii_patch(b, MII_MASK_AT, 16, 27, -1.35f, 1.35f, 0.45f, 2.75f, 1.015f, 1); memcpy(b + 0xc + 4 * 2, &largest, 4); }   // the 12 masks: the front
+    LOG("mii: the stand-in's facelines are a plain head (centre %g %g %g, radii %g %g %g, flags %d)%s: no Mii's own face", v[0], v[1], v[2], v[3], v[4], v[5], flags,
+        flags & 4 ? "" : ", with a mask surface for its drawn features");
+    return 1;
+}
+// The drawn features: coverage of a shape at texel centre (x, y) of the 64x64 picture, 0..1, edges one texel soft
+static float mii_cov(float d) { return d <= -0.5f ? 1 : d >= 0.5f ? 0 : 0.5f - d; }
+static void mii_textures(uint8_t *b) {
+    int flags = mii_params(); if (flags & 0x104) return;
+    enum { W = MII_FACE_W };
+    nvn_texdesc d = {.target = 1, .format = 0x25, .width = W, .height = W, .depth = 1, .levels = 1};   // NVN_TEXTURE_TARGET_2D, NVN_FORMAT_RGBA8
+    nvn_texlayout L; nvn_tex_layout(&d, &L);
+    if (!L.size || L.size + 11 > MII_FACE_MAX || L.size > 0xffff) { LOG("[RED] mii: the stand-in's face textures need %llu bytes of storage, more than their place", (unsigned long long)L.size); return; }
+    static const struct { int first, n, kind; } part[3] = {{132, 62, 1}, {132 + 62, 24, 2}, {132 + 62 + 24 + 2 + 12 + 12 + 20 + 2, 37, 8}};   // eyes, eyebrows, mouths
+    uint8_t *lin = malloc(W * W * 4), *sto = calloc(1, L.size);
+    for (int p = 0; lin && sto && p < 3; p++) {
+        for (int y = 0; y < W; y++) for (int x = 0; x < W; x++) {
+            float fx = x + 0.5f - W / 2, fy = y + 0.5f - W / 2, r = 0, g = 0, a = 0;
+            if (p == 0) {   // an eye: a dark upright oval with a small light in it
+                a = mii_cov((sqrtf(fx * fx / (9.0f * 9.0f) + fy * fy / (13.0f * 13.0f)) - 1) * 10.5f);
+                float hl = mii_cov(sqrtf((fx - 3) * (fx - 3) + (fy + 6) * (fy + 6)) - 2.6f);
+                g = hl * a; r = a - g;
+            } else if (p == 1) {   // an eyebrow: an arc, its ends lower
+                float yc = -3 + 7 * (fx / 21) * (fx / 21);
+                a = mii_cov(fabsf(fy - yc) - 2.6f) * mii_cov(fabsf(fx) - 21); r = g = a;
+            } else {        // a mouth: a smile, its corners up
+                float yc = 5 - 8 * (fx / 17) * (fx / 17);
+                a = mii_cov(fabsf(fy - yc) - 1.9f) * mii_cov(fabsf(fx) - 17); r = a;
+            }
+            uint8_t *t = lin + (y * W + x) * 4;
+            uint8_t dark = (uint8_t)lroundf(r * 255);   // an eye's dark part is its blue channel (the SDK tints red, green and blue apart; red came out cyan)
+            t[0] = p == 0 ? 0 : dark; t[1] = (uint8_t)lroundf(g * 255); t[2] = p == 2 ? 0 : dark; t[3] = (uint8_t)lroundf(a * 255);
+        }
+        memset(sto, 0, L.size);
+        if (nvn_swizzle(&d, 0, 0, lin, W * 4, sto)) { LOG("[RED] mii: the stand-in's face texture %d could not be laid out", p); break; }
+        uint32_t at = MII_TEX_AT + (uint32_t)p * MII_FACE_MAX, zn = (uint32_t)mii_stored(b + at, sto, L.size);
+        for (int i = 0; i < part[p].n; i++) {
+            uint8_t *e = b + 0x64 + 0x1c * (part[p].first + i); memset(e, 0, 0x1c);
+            uint32_t h[3] = {at, (uint32_t)L.size, zn}; memcpy(e, h, 12);
+            uint16_t wh[2] = {W, W}; memcpy(e + 0x14, wh, 4);
+            e[0x18] = 2; e[0x19] = 1; e[0x1a] = 0;   // R8_G8_B8_A8, one level
+        }
+        uint32_t largest = ((uint32_t)L.size + 0xfff) & ~0xfffu; memcpy(b + 0xc + 4 * part[p].kind, &largest, 4);
+    }
+    free(lin); free(sto);
+}
 static void mii_shapes(uint8_t *b) {
     for (int i = 0; i < 857; i++) {
         uint32_t *e = (uint32_t *)(b + 0x6c + 0x58 * i);
@@ -122,12 +241,14 @@ static void mii_shapes(uint8_t *b) {
         e[14] = 0x10; e[15] = 6;                                         // index offset and size: three u16 indices
     }
     memcpy(b + MII_MESH_AT, mii_mesh_z, sizeof mii_mesh_z);
+    mii_head(b);
 }
 static int mii_write(const char *dir, const char *name, int parts, size_t size) {
     char p[1280]; snprintf(p, sizeof p, "%s/%s", dir, name);
     uint8_t *b = calloc(1, size); FILE *f = fopen(p, "wb");
     for (int i = 0; b && i < parts; i++) { uint32_t page = 0x1000; memcpy(b + 0xc + 4 * i, &page, 4); memcpy(b + 0xc + 4 * parts + 4 * i, &page, 4); }
     if (b && parts == 12) mii_shapes(b);
+    if (b && parts == 11) mii_textures(b);
     int ok = b && f && fwrite(b, 1, size, f) == size;
     if (f && fclose(f)) ok = 0;
     free(b);
@@ -143,7 +264,7 @@ int dm_mii_standin(const char *dir) {   // written once per process (the query a
     mkdir(p, 0755);
     static const char *tex[] = {"NXTextureLowLinear.dat", "NXTextureLowSRGB.dat", "NXTextureMidLinear.dat", "NXTextureMidSRGB.dat"}, *shape[] = {"ShapeMid.dat", "ShapeHigh.dat"};
     int ok = 1;
-    for (int i = 0; i < 4; i++) ok &= mii_write(dir, tex[i], 11, MII_TEX_SIZE);
+    for (int i = 0; i < 4; i++) ok &= mii_write(dir, tex[i], 11, MII_TEX_FILE);
     for (int i = 0; i < 2; i++) ok &= mii_write(dir, shape[i], 12, MII_SHAPE_SIZE);
     LOG("mii: MiiModel system data is the host's stand-in (no textures, every shape one degenerate triangle: Mii heads draw nothing) in %s", dir);
     done = ok ? 1 : -1;

@@ -14,6 +14,8 @@ TOOLS = Path(__file__).resolve().parents[1] / 'tools'
 sys.path.insert(0, str(TOOLS))
 import dmsh_abi   # noqa: E402
 import dmsh_chain   # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'ios/tools'))
+import ios_metal  # noqa: E402  (the iPhone's deployment target and math mode)
 import dmsh_entry   # noqa: E402
 import dmsh_fetch   # noqa: E402
 import dmsh_rewrite   # noqa: E402
@@ -165,7 +167,7 @@ class BlendZero(unittest.TestCase):
             u, info = dmsh_side.unit(text)
             f, meta = dmsh_fetch.fold(u, [], om_only_ok=True)
             texts += [(name, text), (name + '_unit', u), (name + '_fold', f)]   # each text a library is compiled from
-        for sdk, flags in (('macosx', (dmsh_chain.MAC_MIN_FLAG,)), ('iphoneos', ('-mios-version-min=18.0', '-fmetal-math-mode=relaxed'))):
+        for sdk, flags in (('macosx', (dmsh_chain.MAC_MIN_FLAG,)), ('iphoneos', tuple(ios_metal.IOS_FLAGS))):
             for name, out in texts:
                 with self.subTest(sdk=sdk, variant=name), tempfile.TemporaryDirectory() as d:
                     p = Path(d) / f'{name}.metal'; p.write_text(out)

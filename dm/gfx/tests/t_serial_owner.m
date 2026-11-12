@@ -3,9 +3,10 @@
 // a live serial's registration, replacement and removal; where tex_put sends a serial (live table for a live texture object or an external texture from 2^62 up, ghost ring for a
 // finalized one); a finalize, and a copy's finalize that ends nothing; ghost replacement in place and eviction at NGHOST; texture pins and program pins; a view's entry counting its
 // parent; renaming an object everywhere; and after every step the held counts against the tables (own_check_locked). The owner releases nothing itself: everything it lets go goes
-// to own_hook_drop, which nvn_mtl.m releases once the submission in flight completes, so what a lookup returned outlives the change that dropped it.
-// DM_TEST_SERIAL_TWIN=1 asserts what serial_del should do for a finalized texture serial, which it does not yet (the twin path of tex_mtl_: tex_put sends a finalized serial's view to
-// the ghost ring, and serial_del, called when the view has to go, removes only a live entry). Without it the run prints what it found and counts no failure for it
+// to own_hook_drop, which nvn_mtl.m releases once the submission in flight completes, so what a lookup returned outlives the change that dropped it. Each ghost serial has one ring slot.
+// sRGB / linear views (tex_mtl_'s twins): the old sequence, publish then serial_del when the parent turned out gone, left a finalized serial resolving to the stale view (the evidence,
+// kept as a case); own_view_put publishes only while the parent is shared, and own_view_drop_stale takes a stale view's live or ghost entry (with its ring slot) only while it still
+// names the view, in each order of finalize, publish, the parent leaving and resolution
 #import <Metal/Metal.h>
 #include "../nvn/nvn_owner.h"
 #include <stdio.h>
@@ -185,14 +186,111 @@ int main(void) { @autoreleasepool {
         }
     }
 
-    {   // the finalized twin: a finalized serial's view is put in the ghost ring, then has to go, and serial_del removes only a live entry
-        uint64_t k = 93061; id v = [NSObject new];
-        tex_put(k, v);   // as tex_mtl_ does for a twin view of a texture whose object is finalized
-        serial_del(k);   // as it does when the shared texture left the sharing table meanwhile (kept == 0)
-        int stays = tex_get(k) == v && ghost(k) && holds(v);
-        if (getenv("DM_TEST_SERIAL_TWIN")) CHECK(!stays, "serial_del of a finalized texture serial: it resolves to nothing and its view is not held");
-        else printf("finalized twin: serial_del %s the ghost entry (DM_TEST_SERIAL_TWIN=1 asserts that it goes)\n", stays ? "leaves" : "removes");
-        step("finalized twin");
+    {   // sRGB / linear views of a shared texture (tex_mtl_'s twins); g_shared stands for the sharing table, changed under g_smu as nvn_mtl.m changes it
+        id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
+        MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:4 height:4 mipmapped:NO];
+        d.usage = MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView;
+        id<MTLTexture> b = [dev newTextureWithDescriptor:d], b2 = [dev newTextureWithDescriptor:d];
+        id<MTLTexture> (^view_of)(id<MTLTexture>) = ^(id<MTLTexture> p) { return [p newTextureViewWithPixelFormat:MTLPixelFormatRGBA8Unorm_sRGB]; };
+        void (^share)(id, int) = ^(id o, int on) { pthread_mutex_lock(&g_smu); if (on) [g_shared addObject:o]; else [g_shared removeObject:o]; pthread_mutex_unlock(&g_smu); };
+        CHECK(b && b2 && view_of(b), "two shared textures and a view of one");
+        if (b && b2) {
+            {   // the evidence: the old sequence (publish, find the parent gone, serial_del) on a finalized serial leaves the stale view reachable, as serial_del ends a live entry only
+                uint64_t k = 93061; id<MTLTexture> v = view_of(b);
+                share(b, 1); tex_put(k, v); share(b, 0);   // the parent leaves on another thread between the lookup and the check
+                CHECK(tex_get(k) == v, "old sequence: a reader between the publish and the check resolves the view of a parent already gone");
+                serial_del(k);
+                CHECK(tex_get(k) == v && ghost(k) && holds(v) && holds(b), "old sequence: after serial_del the finalized serial still resolves to the stale view, which holds its parent");
+                step("old twin sequence");
+                CHECK(own_view_drop_stale(k, v) == 1 && !tex_get(k) && !ghost(k) && !holds(v) && !holds(b) && dropped(v, 0), "own_view_drop_stale takes the stale view's ghost entry");
+                step("old twin sequence cleared");
+            }
+            {   // own_view_put: published only while the parent is shared
+                uint64_t fk = 93062; tex_t lt = texture(93063); tex_live(&lt);
+                id<MTLTexture> v = view_of(b);
+                int notes = g_changed_n;
+                CHECK(own_view_put(fk, v) == 0 && !tex_get(fk) && !holds(v) && !holds(b) && g_changed_n == notes, "a parent not shared: the view is not published, nothing is held or reported");
+                id x = [NSObject new]; tex_put(fk, x);
+                CHECK(own_view_put(fk, v) == 0 && tex_get(fk) == x, "and an entry the serial has stays as it was");
+                step("view refused");
+                share(b, 1);
+                CHECK(own_view_put(fk, v) == 1 && tex_get(fk) == v && ghost(fk) && holds(b) && !holds(x) && dropped(x, 0), "a shared parent: a finalized serial's view goes to the ghost ring in place of its old entry, holding its parent");
+                id<MTLTexture> lv = view_of(b);
+                CHECK(own_view_put(lt.serial, lv) == 1 && serial_get(lt.serial) == lv && live_holds(b), "a live texture object's view goes to the live table");
+                step("view published");
+                CHECK(own_view_drop_stale(fk, v) == 0 && own_view_drop_stale(lt.serial, lv) == 0 && tex_get(fk) == v && tex_get(lt.serial) == lv, "a view whose parent is shared is valid: its entries stay");
+                share(b, 0); mtl_tex_pin(fk);
+                CHECK(own_view_drop_stale(fk, v) == 0 && tex_get(fk) == v, "a pinned view stays valid after its parent leaves the sharing table");
+                mtl_tex_unpin(fk);
+                uint64_t pk = (1ull << 62) + 93064; tex_put(pk, b); mtl_tex_pin(pk); serial_del(pk);
+                CHECK(own_view_drop_stale(fk, v) == 0, "and so does a view whose parent is pinned");
+                mtl_tex_unpin(pk);
+                step("valid views");
+                // stale-entry rejection: the view a caller resolved is stale, but the serial's entry changed meanwhile: the new entry stays
+                id y = [NSObject new]; tex_put(lt.serial, y);
+                CHECK(own_view_drop_stale(lt.serial, lv) == 1 && serial_get(lt.serial) == y && live_holds(y), "a stale view whose live entry was replaced meanwhile: the replacement stays");
+                tex_t again = texture(fk); tex_live(&again); tex_put(fk, y);   // the serial is live again, and its live entry is another object
+                CHECK(own_view_drop_stale(fk, v) == 1 && serial_get(fk) == y && ghost(fk) && tex_get(fk) == y, "with a live entry that is not the view, the ghost entry is not touched (the live one resolves)");
+                CHECK(tex_end(&again) == 1, "the serial's object finalizes again");
+                CHECK(own_view_drop_stale(fk, v) == 1 && !ghost(fk) && !tex_get(fk) && !holds(v), "then the stale view's ghost entry goes");
+                step("stale views");
+                CHECK(own_view_drop_stale(lt.serial, y) == 0, "an object that is no view is never stale");
+                tex_end(&lt);
+                step("views removed");
+            }
+            {   // orders of finalize, publish, the parent leaving and resolution
+                tex_t t = texture(93065); tex_live(&t);
+                id<MTLTexture> v = view_of(b);
+                share(b, 1);
+                CHECK(own_view_put(t.serial, v) == 1 && serial_get(t.serial) == v, "published live");
+                tex_end(&t);
+                CHECK(!tex_get(t.serial) && !holds(v) && !holds(b), "finalized: the live entry goes (a finalize, not an invalidation)");
+                CHECK(own_view_put(t.serial, v) == 1 && ghost(t.serial) && tex_get(t.serial) == v, "a replayed record publishes it again: ghost ring");
+                share(b, 0);
+                CHECK(tex_get(t.serial) == v, "the parent leaves after the publish: the entry still names the view until a resolution finds it stale");
+                CHECK(own_view_drop_stale(t.serial, v) == 1 && !tex_get(t.serial) && !holds(b), "that resolution takes it");
+                CHECK(own_view_put(t.serial, view_of(b)) == 0 && !tex_get(t.serial), "the parent gone before the publish: nothing is published");
+                step("orders");
+                // parent replacement (an upgrade): every name of the parent moves to the upgraded texture, which takes its place in the sharing table; a view of the old one is stale
+                share(b, 1); tex_t u = texture(93066); tex_live(&u); id<MTLTexture> uv = view_of(b); uint64_t pn = (1ull << 62) + 93067;
+                tex_put(pn, b); CHECK(own_view_put(u.serial, uv) == 1, "a view and its parent's own name");
+                pthread_mutex_lock(&g_smu); own_rename_locked(b, b2, pn); [g_shared removeObject:b]; [g_shared addObject:b2]; pthread_mutex_unlock(&g_smu);
+                CHECK(tex_get(pn) == b2 && serial_get(u.serial) == uv && live_holds(b), "after the upgrade the parent's name is the new texture; the view still holds the old one");
+                step("parent upgraded");
+                [g_unheld removeAllObjects];
+                CHECK(own_view_drop_stale(u.serial, uv) == 1 && !serial_get(u.serial) && !holds(b) && unheld(b), "the view of the old parent is stale: it goes, and the old parent with it");
+                CHECK(own_view_put(u.serial, view_of(b2)) == 1 && [(id<MTLTexture>)serial_get(u.serial) parentTexture] == b2, "made again on the upgraded parent");
+                tex_end(&u); serial_del(pn); share(b2, 0);
+                step("parent upgraded, view made again");
+            }
+            {   // a ghost entry taken away leaves no ring slot: the serial put again keeps its entry for NGHOST - 1 newer serials
+                uint64_t k = 93070; id<MTLTexture> v = view_of(b); id x = [NSObject new];
+                share(b, 1); own_view_put(k, v); share(b, 0);
+                own_view_drop_stale(k, v); tex_put(k, x);
+                step("ring slot after a stale view");
+                NSMutableArray *objs = [NSMutableArray array];
+                for (int i = 0; i < NGHOST - 1; i++) { id o = [NSObject new]; [objs addObject:o]; tex_put(950000 + (uint64_t)i, o); }
+                CHECK(tex_get(k) == x, "the serial put again after its stale view went stays for NGHOST - 1 newer serials");
+                tex_put(950000 + NGHOST, [NSObject new]);
+                CHECK(!tex_get(k), "and goes with the NGHOST-th, in its turn");
+                step("ring after a stale view");
+            }
+        }
+    }
+
+    {   // teardown: every ghost serial evicted by NGHOST new ones, then those taken away as stale views; nothing is held, every count is gone
+        id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
+        id<MTLTexture> p = [dev newTextureWithDescriptor:[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:4 height:4 mipmapped:NO]];
+        NSMutableArray *views = [NSMutableArray array];
+        if (p) {
+            pthread_mutex_lock(&g_smu); [g_shared addObject:p]; pthread_mutex_unlock(&g_smu);
+            for (int i = 0; i < NGHOST; i++) { id<MTLTexture> v = [p newTextureViewWithPixelFormat:MTLPixelFormatRGBA8Unorm]; [views addObject:v]; own_view_put(960000 + (uint64_t)i, v); }
+            pthread_mutex_lock(&g_smu); [g_shared removeObject:p]; pthread_mutex_unlock(&g_smu);
+            for (int i = 0; i < NGHOST; i++) own_view_drop_stale(960000 + (uint64_t)i, views[i]);
+            pthread_mutex_lock(&g_smu); own_stats st = own_stats_locked(); pthread_mutex_unlock(&g_smu);
+            CHECK(st.ghost == 0 && st.live == 0 && !holds(p), "after teardown no serial resolves and nothing is held");
+            step("teardown");
+        }
     }
 
     printf("serial owner: %d checks, %d failed\n", checks, failed);

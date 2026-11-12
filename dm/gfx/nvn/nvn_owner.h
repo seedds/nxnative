@@ -3,7 +3,8 @@
 //
 // Tables (all under g_smu but the program pins):
 //   live    serial → object (MTLTexture, NvPkg, NvProg) of a live serial: serial_put / serial_del, and tex_put for a texture whose object is live or an external texture (2^62 and up)
-//   ghost   serial → object of a finalized texture serial a replayed record still resolves (tex_put), a ring of NGHOST: the oldest goes when a new serial comes
+//   ghost   serial → object of a finalized texture serial a replayed record still resolves (tex_put), a ring of NGHOST: the oldest goes when a new serial comes; a stale view's
+//           entry goes with its slot (own_view_drop_stale). Each ghost serial has one ring slot
 //   tex live    serial → the texture object it was initialized in (mtl_tex_init until its finalize), which decides between live and ghost
 //   tex pins    serial → a retained object a queued descriptor or saved binding still resolves after the serial's entries go (mtl_tex_pin / mtl_tex_unpin)
 //   prog pins   serial → pins on a program a queued descriptor or saved binding holds: its release waits for the last unpin (under the submission lock, not g_smu)
@@ -14,13 +15,14 @@
 // flight has completed (defer_obj_release / defer_obj_unref). So an object looked up while encoding stays valid at least until the submission it is encoded in completes. A caller that
 // keeps one longer retains it (a strong reference). Every change of a serial's object is reported (own_hook_changed: ser_note, which bumps g_ser_gen for the replay layer's caches).
 //
-// Lock order: g_smu, then the replay layer's g_cpu_tex_mu. Until the sharing table moves here, nvn_mtl.m's sharing table, the upgrade path and the twin check use g_smu as well.
+// Lock order: g_smu, then the replay layer's g_cpu_tex_mu. Until the sharing table moves here, nvn_mtl.m's sharing table and the upgrade path use g_smu as well.
 #pragma once
 #import <Foundation/Foundation.h>
 #include <pthread.h>
 #include <stdint.h>
 #include "nvn_hmap.h"
 #include "nvn_obj.h"
+@protocol MTLTexture;
 
 // Tables from serial (or key) to a retained object
 #ifdef __clang_analyzer__
@@ -48,8 +50,13 @@ static inline id tex_get(uint64_t k) { return (__bridge id)own_resolve_ref(k); }
 
 // Changes (each takes g_smu)
 void serial_put(uint64_t k, id o);   // a live serial's object; the one it replaces is dropped
-void serial_del(uint64_t k);         // a live serial's entry goes; a ghost entry of the serial is left (see docs/reference/nvn-objects.md, A finalized twin view left in the ghost ring)
+void serial_del(uint64_t k);         // a live serial's entry goes (a finalize, a program's release); a ghost entry of the serial stays, as a replayed record may still resolve it
 void tex_put(uint64_t k, id o);      // a texture serial's object: live table for a live texture object or an external texture, else the ghost ring
+
+// sRGB / linear views of a shared texture (tex_mtl_'s twins). A view is valid while its parent is in the sharing table (own_hook_shared) or it or its parent is pinned; each decision
+// is taken in the same hold of g_smu as the entry it changes (docs/reference/nvn-objects.md, A finalized twin view left in the ghost ring)
+int own_view_put(uint64_t k, id<MTLTexture> view);   // tex_put of the view only while its parent is shared: 1 published, 0 nothing changed (the parent left the sharing table)
+int own_view_drop_stale(uint64_t k, id view);        // a view no longer valid: 1, and k's live entry, or with none its ghost entry (and ring slot), goes if it still names the view; 0 valid
 
 // Live texture objects. Caller holds g_smu
 void own_tex_live_put_locked(const tex_t *t);   // mtl_tex_init

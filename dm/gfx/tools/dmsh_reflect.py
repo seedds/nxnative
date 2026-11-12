@@ -96,7 +96,7 @@ def decode_tex(name):
     words = [o0] + ([o1] if ty else [])
     if re.match(r'[a-z]+_i', name):   # image
         return next((slot(x, IMG_BASE, tb) for x in words if IMG_BASE <= x * 4 < IMG_BASE + abi.C2_ROW * IMG_SLOTS and slot(x, IMG_BASE, tb) is not None), None), None, ty
-    tw = [o0] if ty == 3 else words
+    tw = [o0] if ty in (2, 3) else words
     t = next((slot(x, TEX_BASE, tb) for x in tw if slot(x, TEX_BASE, tb) is not None and x * 4 < SEPTEX_BASE), None)
     if t is None: t = next((SEPTEX_SLOT0 + slot(x, SEPTEX_BASE, tb) for x in tw if slot(x, SEPTEX_BASE, tb) is not None and x * 4 < SAMP_BASE), None)
     s = next((slot(x, SAMP_BASE, sb) for x in words if x * 4 >= SAMP_BASE and slot(x, SAMP_BASE, sb) is not None), None) if ty != 3 else None
@@ -122,6 +122,17 @@ def decode_ubo_tex(name):
     o0, o1, ty = h & 0x3fff, (h >> 14) & 0x3fff, h >> 28
     if not 3 <= tb <= 16 or ty not in (0, 1, 3) or (ty == 1 and sb != 2 and not 3 <= sb <= 16): return None
     return (tb - 3, o0 * 4), (('id', o1) if ty == 3 else ('c2', o1 * 4) if ty and sb == 2 else (sb - 3, o1 * 4) if ty else (tb - 3, o0 * 4))
+
+def decode_ubo_samp_id(name):
+    """Handle type 2 (Ryujinx's SeparateSamplerId: the shader ORs the texture word with a second word shifted left by 20) with the texture in the driver table c2 and the second word, the sampler ID
+    itself, in the game's own uniform buffer (its bank the high 16 bits of slots, less one). The Witcher 3: fp_t_cb720898_2000005A, texture at c2 word 0x5A, sampler ID at c[10] word 0.
+    Returns the sampler word's (uniform slot, byte offset), or None. A texture in a uniform buffer with such a sampler, and arrays of them (the handle tables, nvn_mtl.m htab_snap), are
+    not decoded: no game is known to have one"""
+    m = re.fullmatch(r'[a-z]+_t\w*?_cb(\d+)_([0-9A-F]+)', name)
+    if not m: return None
+    slots, h = int(m.group(1)), int(m.group(2), 16)
+    sb = (slots >> 16) - 1
+    return (sb - 3, ((h >> 14) & 0x3fff) * 4) if h >> 28 == 2 and slots & 0xffff == 2 and 3 <= sb <= 16 else None
 
 def decode_ubo_img(name):
     """An image whose handle the game keeps in its own uniform buffer (<stage>_i_cb<n>_<word>_<format>: Unreal Engine 5.4 on the Switch 2 keeps every image in c[3]). Returns (uniform slot, byte offset)"""
@@ -243,6 +254,8 @@ def reflect(key, stage, msl, res):
             else: e.update(kind=abi.KIND_C1 if n == 1 else abi.KIND_DRVCB, bank=n)
         elif sb := re.fullmatch(r'[a-z]+_s(\d+)', nm):
             e.update(kind=abi.KIND_SBUF, index=int(sb.group(1)))
+        elif ty == 'sampler' and nm.endswith('Smplr') and (si := decode_ubo_samp_id(nm[:-5])):   # a sampler ID itself in a uniform buffer word (handle type 2): the replay shifts it into a handle
+            e.update(kind=abi.KIND_SAMP_UBO, reg=si[0], off=si[1], raw_id=True)
         elif u := decode_ubo_tex(nm[:-5] if nm.endswith('Smplr') else nm):   # bindless: the handle is in a uniform buffer (reg = uniform slot, off = byte offset)
             ut, us = u
             other = () if us[0] in ('id', 'c2') or us == ut else (ut, us)   # handle type 1: the word of the other half, which the host ORs in (the compiler puts texture and sampler words in either order)

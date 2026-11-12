@@ -42,6 +42,7 @@ typedef struct {
     uint8_t atom;            // IMG: the shader runs image atomics on it (dmsh_build.py "atomic"): the texture must allow Metal's texture atomics (nvn_mtl.m dummy_img_atomic); 2: 64-bit ones (texture2d<ulong>, an RG32Uint texture: pf_atomic)
     uint16_t fixw;           // CBUF: the slot's words the shader reads at fixed offsets, from its start to the end of the highest (dmsh_reflect.py "fixed"): a binding shorter than that is encoded with zeros up to there (nvn_mtl.m ub_padded)
     uint8_t bw;              // SAMP / SAMPT / SAMPU / SAMPI: a twin sampler for border colours (dmsh_rewrite.py border_emu), its bit in the BORDER block + 1; 0 = an ordinary sampler binding
+    uint8_t raw_id;          // SAMPU: the uniform word holds a SeparateSamplerId (the sampler ID itself), not a handle with the sampler ID in its high 12 bits
 } nvn_rbind;
 typedef struct {
     int nb, abi, nv;         // Binding count, argument buffer slot, vertex input count

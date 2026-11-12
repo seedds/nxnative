@@ -379,12 +379,14 @@ int main(int argc, char **argv) { @autoreleasepool {
         cap_buf_free(&mine);
         if (g_td_frame == (long)frame_no && !g_td_done) td_dump();
         if (rep == 0) {   // textures the GPU writes that the frame made itself (no captured content): a second replay starts from what this one left in them
-            uint64_t n = 0, bytes = 0; nvn_hmap *maps[2] = {&g_by_serial, &g_ghost};
-            for (int m = 0; m < 2; m++) for (uint32_t i = 0; i < maps[m]->cap; i++) { if (!maps[m]->vals[i]) continue; id o = (__bridge id)maps[m]->vals[i];
-                if (![o conformsToProtocol:@protocol(MTLTexture)]) continue; id<MTLTexture> t = o; if (t.parentTexture) t = t.parentTexture;
-                uint64_t k = (uint64_t)(uintptr_t)(__bridge void *)t; if (t.buffer || nvn_hm_get(&g_filled, &k)) continue;
-                uint64_t ser; memcpy(&ser, maps[m]->keys + (size_t)i * 8, 8); n++; bytes += t.allocatedSize;
-                if (opt_made) printf("  made by the frame: ser=%llu %lux%lux%lu format %lu levels %lu%s\n", (unsigned long long)ser, (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.arrayLength, (unsigned long)t.pixelFormat, (unsigned long)t.mipmapLevelCount, m ? " (ghost)" : ""); }
+            __block uint64_t n = 0, bytes = 0;
+            pthread_mutex_lock(&g_smu);
+            own_each_locked(^(uint64_t ser, id o, int ghost) {
+                if (![o conformsToProtocol:@protocol(MTLTexture)]) return; id<MTLTexture> t = o; if (t.parentTexture) t = t.parentTexture;
+                uint64_t k = (uint64_t)(uintptr_t)(__bridge void *)t; if (t.buffer || nvn_hm_get(&g_filled, &k)) return;
+                n++; bytes += t.allocatedSize;
+                if (opt_made) printf("  made by the frame: ser=%llu %lux%lux%lu format %lu levels %lu%s\n", (unsigned long long)ser, (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.arrayLength, (unsigned long)t.pixelFormat, (unsigned long)t.mipmapLevelCount, ghost ? " (ghost)" : ""); });
+            pthread_mutex_unlock(&g_smu);
             printf("render targets and images the frame made without captured content: %llu (%.1f MB)\n", (unsigned long long)n, bytes / 1048576.0);
         }
         if (1) {   // pool blocks after the frame against the live run's: written live but not here = the CPU wrote them while the frame ran (or a GPU write the replay missed)

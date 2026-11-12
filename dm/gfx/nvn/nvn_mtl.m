@@ -5931,7 +5931,7 @@ static void shmap_read(void) {
 @interface NvShader : NSObject { @public id<MTLFunction> fn, tf_fn, discard_fn, fn_u, fn_m, fn_d, geo_fn; uint8_t mask_m;   // fn_u: the integer-output entry point (dmsh_entry.py fs_uint), for pipelines whose colour attachments are all unsigned integer (pso_desc); fn_m: the mixed one, its outputs in mask_m unsigned integer; fn_d: the dual-source one (dmsh_entry.py fs_dual)
     uint16_t tf_stride[4]; uint32_t cb_ext[16], sb_ro; nvn_refl rf; id<MTLArgumentEncoder> ae; NSUInteger arg_len; int stage, range_ro, layer_out; const char *builtin; uint64_t logged; char key[24]; id<MTLBuffer> c1buf; uint64_t c1_gpu; size_t c1off;
     uint32_t geo_vertices, geo_invocations, geo_output, geo_stride, geo_index_stride;
-    uint8_t mesh_kind, mesh_notask; uint16_t mesh_threads, mesh_payload;   // an NVN2 task (1) or mesh (2) shader, a mesh shader with no task, its workgroup's threads, its payload's bytes (dmsh_meshstage.py)
+    uint8_t mesh_kind, mesh_notask, mk_eq; uint16_t mesh_threads, mesh_payload;   // mk_eq: drawn with an equal depth test somewhere, so its draws stay native everywhere (mk_eq_note)   // an NVN2 task (1) or mesh (2) shader, a mesh shader with no task, its workgroup's threads, its payload's bytes (dmsh_meshstage.py)
     id<MTLFunction> mesh_obj;   // a mesh shader with no task: the object function that launches its workgroups in blocks of DMSH_MESH_GRID (dmsh_meshstage.py main0_o)
     id<MTLComputePipelineState> geo_pso; int geo_pso_failed, cps_failed;   // cps_failed: Metal refused this compute shader's pipeline (dispatch): its dispatches are skipped without asking again
     int16_t *geo_slot; uint32_t geo_words;   // a lean passthrough kernel (dmsh_geometry.lean): capture word -> record slot (-1: not read), record words
@@ -10688,7 +10688,11 @@ static inline void args_sync_dirty(void) {
     }
 }
 static NSUInteger g_args_mesh;   // nonzero: geometry-stage arguments go to this slot of the vertex table, which the mesh stage shares (geo_mesh_draw)
+// Mesh as compute (mk_hoist_try): a task / mesh stage's arguments are taken down as (slot, address) pairs instead, set in the compute table when the job's kernel is encoded
+enum { MK_CAP = 16 };
+static int g_mk_cap; static int g_mk_cap_n; static uint32_t g_mk_cap_i[MK_CAP]; static uint64_t g_mk_cap_a[MK_CAP];
 static void bind_args(id<MTLCommandEncoder> en, int nvn_stage, int metal_vertex, id<MTLBuffer> ab, uint64_t gpu, size_t off, NSUInteger ai) {
+    if (g_mk_cap && (nvn_stage == 3 || nvn_stage == 4)) { if (g_mk_cap_n < MK_CAP) { g_mk_cap_i[g_mk_cap_n] = (uint32_t)ai; g_mk_cap_a[g_mk_cap_n++] = gpu; } else g_mk_cap = 2; return; }
     if (g_args_mesh && nvn_stage == 2) { enc_r_vbuf((id<MTL4RenderCommandEncoder>)en, g_args_mesh, gpu); return; }
     if (nvn_stage == 3) { if (rec_on()) rec_table_op(RO_T_ADDR, g_ot, gpu, ai); else [g_ot setAddress:gpu atIndex:ai]; return; }   // a task shader: the object stage's table (mesh_tasks_draw)
     if (nvn_stage == 5 || nvn_stage == 2) enc_c_args((id<MTLComputeCommandEncoder>)en, gpu, ai);
@@ -13956,6 +13960,330 @@ static void cs_hoist_try(NvProg *pr0, const p_draw *dw0, const p_draw_idx *di0) 
     memcpy(&S, &Ssave, sizeof S); args_dirty_all(); R = Rsave; g_pso_dirty = pso_dirty || moved; g_dss_dirty = dss_dirty || moved; prog_resolve();
     { static int once; if (moved && !once++) MLOG("compute dispatches moved ahead of the render pass they would split (DM_NVN_CS_HOIST): first case pass %llu, %d dispatches", g_stat_pass + 1, moved); }
 }
+// ---------- NVN2 mesh shaders as compute on GPUs without mesh-shading hardware (DM_NVN_MESH_COMPUTE) ----------
+// The M1 and M2 have no mesh-shading hardware (Apple added it with the M3, MTLGPUFamilyApple9), so Metal runs a mesh pipeline its own way, and a render pass with even one mesh draw
+// in it costs 0.14-0.24 ms more on an M1 whatever its size (39 vertex draws and one mesh draw: 0.323 ms a pass at 1366x768 against 0.085 with vertex draws only). Ocarina of Time
+// draws its scene's geometry through task and mesh shaders in about 11-13 passes a frame. Here a pass's mesh draws are compute jobs instead: when a draw opens the pass, the ops
+// after it are scanned up to the first that would end the pass (as cs_hoist_try scans for dispatches), and each task / mesh draw met on the way runs, before the pass opens, as
+// the side library's kernels (<mesh key>_bk / <task key>_bk, apps/runs/oot-meshk/genk.py for now): the task kernel writes each task workgroup's payload and launch count, a scan
+// turns the counts into offsets and the indirect arguments, and the mesh kernel writes each meshlet's vertices and index triples (degenerate past its primitive count) into
+// scratch memory. Replay then draws the draw as one indexed draw of those triangles with the library's pass-through vertex function (main0_kv) and the game's fragment shader:
+// the pass holds plain draws only. A draw moves ahead of the draws before it only if they write no memory (draw_note_writes), and no uniform update the scan passed touches a
+// uniform buffer of its stages; dispatches the scan cannot move, copies, other targets stop it. Indirect mesh draws, and shaders with no side library, stay native.
+// DM_NVN_MESH_COMPUTE=1 on, 0 off; off by default while it is measured. ab alternates it with the DM_AB phases: separate runs of Ocarina of Time's slow spot drifted 3-4 ms
+// apart (window state, the time into the session), more than the gain measured
+static int mk_on(void) {
+    static int m = -1;
+    if (m < 0) { m = tbdr_on() ? 0 : sw_mode("DM_NVN_MESH_COMPUTE", 0); if (m) MLOG("DM_NVN_MESH_COMPUTE: task / mesh draws as compute before their pass (GPU family Apple9: %d)", (int)[g_dev supportsFamily:MTLGPUFamilyApple9]); }
+    return sw_on(m);
+}
+@interface NvMk : NSObject { @public id<MTLComputePipelineState> k[2], t[2]; id<MTLFunction> kv; uint32_t maxv, maxp, rec; int ok; } @end   // k: mesh kernel (border corrections on / off), t: task kernel, kv: the vertex function
+@implementation NvMk @end
+static NSMutableDictionary *g_mk_lib;   // NvShader pointer → NvMk, or NSNull: no side library
+static NvMk *mk_lib(NvShader *sh, int task) {
+    if (!g_mk_lib) g_mk_lib = [NSMutableDictionary dictionary];
+    NSValue *key = [NSValue valueWithPointer:(__bridge const void *)sh]; id o = g_mk_lib[key];
+    if (o) return o == NSNull.null ? nil : o;
+    NvMk *m = nil; NSError *e = nil;
+    id<MTLLibrary> lib = lib_from_file([NSString stringWithFormat:@"%@/%.16s_bk.metallib", g_msl_dir, sh->key], &e);
+    { static int n; if (!lib && n++ < 4) MLOG("mesh as compute: no side library %s/%.16s_bk.metallib (%s)", g_msl_dir.UTF8String, sh->key, e ? e.localizedDescription.UTF8String : "-"); }
+    if (lib) {
+        m = [NvMk new];
+        if (task) { id<MTLFunction> f = geo_mesh_entry(lib, @"main0_tk"); for (int off = 0; f && off < 2; off++) m->t[off] = cps_new_b(f, off, &e); m->ok = m->t[0] && m->t[1]; }
+        else {
+            id<MTLFunction> f = geo_mesh_entry(lib, [sh->fn.name isEqualToString:@"main0_z"] ? @"main0_k_z" : @"main0_k");
+            for (int off = 0; f && off < 2; off++) m->k[off] = cps_new_b(f, off, &e);
+            m->kv = geo_mesh_entry(lib, @"main0_kv");
+            for (NSString *n in lib.functionNames) if ([n hasPrefix:@"dm_kinfo_"]) { NSArray *p = [[n substringFromIndex:9] componentsSeparatedByString:@"_"];
+                if (p.count == 3) { m->maxv = (uint32_t)[p[0] intValue]; m->maxp = (uint32_t)[p[1] intValue]; m->rec = (uint32_t)[p[2] intValue]; } }
+            m->ok = m->k[0] && m->k[1] && m->kv && m->maxv && m->maxp && m->rec;
+        }
+        if (!m->ok) MLOG("[RED] mesh as compute: the side library of %s did not give its %s: %s", sh->key, task ? "task kernel" : "kernels", e ? e.localizedDescription.UTF8String : "entry missing");
+    }
+    g_mk_lib[key] = m && m->ok ? m : NSNull.null;
+    return m && m->ok ? m : nil;
+}
+static id<MTLComputePipelineState> g_mk_ind_ps;
+static int mk_fb_slot(uint64_t ind, const void *ms, uint32_t first_cap, uint32_t *cap, uint32_t *gcap);
+static id<MTLComputePipelineState> mk_scan_pso(void) {
+    static id<MTLComputePipelineState> ps; static int failed;
+    if (ps || failed) return ps;
+    NSError *e = nil;
+    id<MTLLibrary> l = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
+        // groups: the meshlet slots the job has; slot: an indirect draw's feedback slot (~0u: none), whose meshlet total sizes the next frames (ov[4 + slot])
+        "struct mk_scan_job { uint ntask, bound, maxp3, groups, slot, pad0, pad1, pad2; };\n"
+        // ov: [0] the largest launch count past the bound, [1] how many task workgroups were cut to it (diagnostic), [2] totals cut to the slots, [4 + slot] each record's largest total
+        "kernel void mk_scan(constant mk_scan_job& j [[buffer(0)]], device const uint* cnt [[buffer(1)]], device uint* moff [[buffer(2)]], device uint* args [[buffer(3)]], device const uint* dr [[buffer(4)]], device atomic_uint* ov [[buffer(5)]], uint lid [[thread_position_in_threadgroup]]) {\n"
+        "  if (lid) return; uint t = 0, nt = dr[2];\n"
+        "  for (uint i = 0; i < nt; i++) { moff[i] = t; uint c = cnt[i]; if (c > j.bound) { atomic_fetch_max_explicit(&ov[0], c, memory_order_relaxed); atomic_fetch_add_explicit(&ov[1], 1u, memory_order_relaxed); } t += min(c, j.bound); }\n"
+        // past the count up to the slots (j.ntask): the total, so a mesh kernel whose search bound (its constant dm_draw[2]) read the capacity, not the count mk_ind wrote, still finds its task
+        "  for (uint i = nt; i <= j.ntask; i++) moff[i] = t;\n"
+        "  if (j.slot != ~0u) atomic_fetch_max_explicit(&ov[4 + j.slot], t, memory_order_relaxed);\n"
+        "  if (t > j.groups) { atomic_fetch_add_explicit(&ov[2], 1u, memory_order_relaxed); t = j.groups; }\n"   // the later tasks' meshlets are dropped that frame
+        "  args[0] = t; args[1] = 1; args[2] = 1; args[3] = 0;\n"
+        "  args[4] = t * j.maxp3; args[5] = 1; args[6] = 0; args[7] = 0; args[8] = 0; }\n"
+        // An indirect draw's {count, first} as the GPU wrote it: clamped to the slots the job has, the real count kept for the next frames' size (feedback slot)
+        "struct mk_ind_job { uint cap, maxp3, slot, pad; };\n"
+        "kernel void mk_ind(constant mk_ind_job& j [[buffer(0)]], device const uint* rec [[buffer(1)]], device uint* draw [[buffer(2)]], device uint* ia [[buffer(3)]], device uint* fb [[buffer(4)]], uint lid [[thread_position_in_threadgroup]]) {\n"
+        "  if (lid) return; uint c = rec[0], n = min(c, j.cap); fb[j.slot] = max(fb[j.slot], c);\n"
+        "  draw[0] = n; draw[1] = rec[1]; draw[2] = n; draw[3] = 0;\n"
+        "  ia[0] = n; ia[1] = 1; ia[2] = 1; ia[3] = 0; ia[4] = n * j.maxp3; ia[5] = 1; ia[6] = 0; ia[7] = 0; ia[8] = 0; }\n" options:nil error:&e];
+    id<MTLFunction> f = [l newFunctionWithName:@"mk_scan"], fi = [l newFunctionWithName:@"mk_ind"];
+    if (f) ps = [g_dev newComputePipelineStateWithFunction:f error:&e];
+    if (fi) g_mk_ind_ps = [g_dev newComputePipelineStateWithFunction:fi error:&e];
+    if (!ps || !g_mk_ind_ps) { failed = 1; ps = nil; MLOG("[RED] mesh as compute: the scan kernels did not build: %s", e.localizedDescription.UTF8String); }
+    if (ps) { uint32_t cap, gcap; mk_fb_slot(0, NULL, 0, &cap, &gcap); }   // creates the feedback buffer, which the scans also write (their cut launches); key 0 is no record
+    return ps;
+}
+// Feedback for indirect draws: the most workgroups each (record address, mesh shader) has asked for, which the GPU writes (mk_ind) and the next frames size their slots by
+enum { MK_FB = 4096 };
+static id<MTLBuffer> g_mk_fb; static struct { uint64_t ind; const void *ms; uint32_t cap, gcap; } g_mk_fbk[MK_FB];   // gcap: meshlet slots for a task draw, from the largest total the scans kept (0: not known yet)
+static uint64_t g_mk_over, g_mk_first, g_mk_eq_sh, g_mk_eq_rej;   // eq: mesh shaders drawn with an equal depth test, draws they kept native (mk_eq_note)
+static int mk_fb_slot(uint64_t ind, const void *ms, uint32_t first_cap, uint32_t *cap, uint32_t *gcap) {
+    if (!g_mk_fb) { g_mk_fb = [g_dev newBufferWithLength:(2 * MK_FB + 4) * 4 options:MTLResourceStorageModeShared]; memset(g_mk_fb.contents, 0, (2 * MK_FB + 4) * 4); res_add(g_mk_fb); }   // past MK_FB: mk_scan's counters, then each slot's largest meshlet total
+    uint32_t h = (uint32_t)(((ind >> 4) ^ ((uintptr_t)ms >> 4)) * 2654435761u) & (MK_FB - 1);
+    for (int k = 0; k < 64; k++, h = (h + 1) & (MK_FB - 1)) {
+        if (g_mk_fbk[h].ind == ind && g_mk_fbk[h].ms == ms) {
+            uint32_t tot = ((volatile uint32_t *)g_mk_fb.contents)[MK_FB + 4 + h];
+            if (tot > g_mk_fbk[h].gcap || (tot && !g_mk_fbk[h].gcap)) g_mk_fbk[h].gcap = tot + tot / 2 + 64;   // half again and a margin: totals move with the camera
+            *gcap = g_mk_fbk[h].gcap;
+            uint32_t seen = ((volatile uint32_t *)g_mk_fb.contents)[h];
+            if (!g_mk_fbk[h].cap) { if (seen) g_mk_fbk[h].cap = seen + seen / 2 + 8; }   // probed (mk_prep): sized from the count the GPU kept; still 0 until the probe has run
+            else if (seen > g_mk_fbk[h].cap) { g_mk_over++; static int n; if (n++ < 8) MLOG("mesh as compute: an indirect draw asked for %u workgroups with %u slots (cut that frame); now %u", seen, g_mk_fbk[h].cap, seen + seen / 2 + 8); g_mk_fbk[h].cap = seen + seen / 2 + 8; }
+            *cap = g_mk_fbk[h].cap; return (int)h; }
+        if (!g_mk_fbk[h].ind) { g_mk_fbk[h].ind = ind; g_mk_fbk[h].ms = ms; g_mk_fbk[h].cap = first_cap; g_mk_fbk[h].gcap = 0; ((uint32_t *)g_mk_fb.contents)[h] = 0; ((uint32_t *)g_mk_fb.contents)[MK_FB + 4 + h] = 0; *cap = first_cap; *gcap = 0; return (int)h; }
+    }
+    return -1;
+}
+enum { MK_JOBS = 128, MK_KV = 27, MK_KI = 28, MK_DRAW = 29, MK_PL = 26, MK_CNT = 25, MK_MOFF = 24 };
+typedef struct {
+    const uint8_t *op; __unsafe_unretained NvMk *m, *t; __unsafe_unretained NvShader *ms, *ts;
+    int moff_b, toff_b, nm, nt; uint32_t mi[MK_CAP], ti[MK_CAP]; uint64_t ma[MK_CAP], ta[MK_CAP];   // the stages' arguments (bind_args, g_mk_cap)
+    int probe;   // only records an indirect record's count (mk_prep): no task or mesh phase, never drawn
+    uint32_t count, first, groups; int slot; uint64_t kv, ki, ki_bytes, draw, pl, cnt, moff, args, scan, ind, ia, ij;   // ind: an indirect draw's record (count: its slots then); ia: its dispatch {x,1,1} and, with no task, draw arguments (mk_ind)   // groups: the meshlet slots (count with no task; count × the task's launch bound)
+} mk_job;
+static mk_job g_mkj[MK_JOBS]; static int g_mkj_n; static uint64_t g_mk_met;
+static uint64_t g_mk_rej[8];   // why a task / mesh draw stayed native: 0 indirect, 1 count / feedback / discard, 2 shaders, 3 no mesh library, 4 no task library, 5 size, 6 arguments
+static uint64_t g_mk_jobs, g_mk_drawn, g_mk_scans, g_mk_stop[8], g_mk_native;   // jobs run, drawn; scans; why scans stopped (0 draw writes memory, 1 uniform update, 2 dispatch, 3 other op, 4 full, 5 targets); mesh draws drawn natively
+// The jobs belong to the pass their scan opened (g_mk_pass): a pass opened without a scan (a geometry-emulated draw, a clear) must not take them, though replay meets the same ops
+// again when a command list runs twice (another view, other uniforms): the old job's vertices were drawn with this pass's state (flickering stray triangles)
+static uint64_t g_mk_pass, g_mk_stale;
+static void *mk_take(const uint8_t *op) {
+    if (g_mkj_n && g_mk_pass != g_stat_pass + (g_enc ? 0 : 1)) {
+        for (int i = 0; i < g_mkj_n; i++) if (g_mkj[i].op == op) { g_mk_stale++; static int n; if (n++ < 4) MLOG("mesh as compute: a draw met a job of pass %llu in pass %llu (drawn natively)", (unsigned long long)g_mk_pass, (unsigned long long)(g_stat_pass + (g_enc ? 0 : 1))); break; }
+        g_mkj_n = 0; }
+    for (int i = 0; i < g_mkj_n; i++) if (g_mkj[i].op == op) { g_mkj[i].op = NULL; g_mk_drawn++; return &g_mkj[i]; }
+    g_mk_native++;
+    return NULL;
+}
+// Every task / mesh draw (mesh_tasks_draw), indirect ones too: a line every 300 frames
+static uint64_t g_mk_all, g_mk_ind;
+static void mk_note(int ind) {
+    g_mk_all++; g_mk_ind += ind != 0;
+    static uint64_t last; uint64_t f = atomic_load(&g_cur_frame);
+    if (f / 300 == last / 300) return;
+    last = f;
+    const uint32_t *ov = g_mk_fb ? (const uint32_t *)g_mk_fb.contents + MK_FB : NULL;
+    if (g_mk_first) { int used = 0; for (int i = 0; i < MK_FB; i++) used += g_mk_fbk[i].ind != 0; MLOG("mesh as compute: %llu indirect task draws probed (first sight, drawn natively); %d records known", (unsigned long long)g_mk_first, used); }
+    if (g_mk_eq_sh) MLOG("mesh as compute: %llu mesh shaders drawn with an equal depth test, %llu of their draws left native", (unsigned long long)g_mk_eq_sh, (unsigned long long)g_mk_eq_rej);
+    if (g_mk_stale) MLOG("mesh as compute: %llu draws met a job of another pass (drawn natively)", (unsigned long long)g_mk_stale);
+    if (ov && ov[2]) MLOG("mesh as compute: %u indirect task draws had more meshlets than their slots (later tasks dropped that frame)", ov[2]);
+    if (ov && ov[1]) MLOG("mesh as compute: %u task workgroups launched more mesh workgroups than their bound (largest %u): those were cut", ov[1], ov[0]);
+    MLOG("mesh as compute up to frame %llu: %llu task / mesh draws, %llu indirect, %llu indirect draws cut to their slots, %llu drawn from compute, %llu native; %llu jobs in %llu scans; scans stopped by a draw writing memory %llu, a uniform update %llu, a dispatch %llu, another op %llu, a full table %llu, other targets %llu; left native: indirect %llu, count %llu, shaders %llu, no mesh library %llu, no task library %llu, size %llu, arguments %llu; mesh draws met by scans %llu",
+        (unsigned long long)f, g_mk_all, g_mk_ind, g_mk_over, g_mk_drawn, g_mk_native, g_mk_jobs, g_mk_scans, g_mk_stop[0], g_mk_stop[1], g_mk_stop[2], g_mk_stop[3], g_mk_stop[4], g_mk_stop[5], g_mk_rej[0], g_mk_rej[1], g_mk_rej[2], g_mk_rej[3], g_mk_rej[4], g_mk_rej[5], g_mk_rej[6], g_mk_met);
+}
+// Whether this draw may write memory (draw_note_writes, without keeping its note)
+static int mk_draw_writes(NvProg *pr) {
+    int w0 = g_pass_memw, n0 = g_mpw_n; uint64_t k0[6]; memcpy(k0, g_pw_kind, sizeof k0);
+    g_pass_memw = 0; draw_note_writes(pr);
+    int w = g_pass_memw || g_mpw_n > n0;
+    g_pass_memw = w0; g_mpw_n = n0; memcpy(g_pw_kind, k0, sizeof k0);
+    return w;
+}
+static int mk_ub_hit(NvShader *sh, int st, const csh_rng *up, int nup) {
+    if (!sh || !nup) return 0;
+    for (int i = 0; i < sh->rf.nb; i++) { const nvn_rbind *b = &sh->rf.b[i];
+        if ((b->kind == NVN_RB_CBUF || b->kind == NVN_RB_UBOP) && b->reg < 16) { csh_rng r = {S.ubo[st][b->reg].addr, S.ubo[st][b->reg].addr + S.ubo[st][b->reg].size};
+            if (r.lo && csh_hit(&r, 1, up, nup)) return 1; } }
+    return 0;
+}
+// A task / mesh draw at its place in the scan (S as it is there): its job's memory and arguments, 0 when it stays native
+#define MK_REJ(i) do { if (!g_mk_rej[i]++) MLOG("mesh as compute: first draw left native for reason %d (task %s mesh %s count %d ind %llx)", i, pr && pr->sh[3] ? pr->sh[3]->key : "-", pr && pr->sh[4] ? pr->sh[4]->key : "-", dw->count, (unsigned long long)dw->ind); return 0; } while (0)
+// A mesh shader drawn with an equal depth test (a depth prepass, then the colour pass on equal depth): both draws must take the same path, since the kernel's position can differ
+// from the native mesh stage's in the last bit and the test then fails on scattered pixels (Ocarina of Time's grass: blades flickering white).
+// DM_NVN_MK_EQ=1 (diagnostic, off by default) keeps such a shader native; it made things worse in game, since the depth prepass draws with another shader that still converted
+static int mk_eq_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("DM_NVN_MK_EQ"); on = e && !strcmp(e, "1"); if (on) MLOG("DM_NVN_MK_EQ=1: mesh shaders drawn with an equal depth test stay native (diagnostic: their depth prepass, another shader, still converts)"); } return on; }
+static void mk_eq_note(NvShader *ms) {
+    if (!ms || ms->mk_eq || !R.rt.depth || !S.ds.dt || S.ds.df != NVN_DEPTH_FUNC_EQUAL) return;
+    ms->mk_eq = 1; g_mk_eq_sh++;
+    static int n; if (n++ < 8) MLOG("mesh as compute: mesh %s is drawn with an equal depth test: it stays native", ms->key);
+}
+static int mk_prep(NvProg *pr, const p_draw *dw, mk_job *j) {
+    if ((!dw->ind && dw->count <= 0) || S.tf_on || S.rast_discard || !pr) MK_REJ(1);
+    NvShader *ts = pr->sh[3], *ms = pr->sh[4];
+    if (mk_eq_on()) { mk_eq_note(ms); if (ms && ms->mk_eq) { g_mk_eq_rej++; return 0; } }
+    if (ts && ts->mesh_kind != 1) ts = nil;
+    if (!ms || ms->mesh_kind != 2 || !ms->fn || (!ts && !ms->mesh_notask)) MK_REJ(2);
+    NvMk *m = mk_lib(ms, 0), *t = ts ? mk_lib(ts, 1) : nil;
+    if (!m) MK_REJ(3);
+    if (ts && !t) MK_REJ(4);
+    if (!mk_scan_pso()) MK_REJ(6);   // also builds mk_ind
+    uint32_t count = (uint32_t)dw->count; uint64_t ind_rec = 0; int slot = -1;
+    // DM_NVN_MK_IND (diagnostic): 0 every indirect task / mesh draw stays native, task only those with a task shader convert, notask only those without
+    { static int ind_on = -1; if (ind_on < 0) { const char *e = getenv("DM_NVN_MK_IND"); ind_on = !e ? 1 : !strcmp(e, "0") ? 0 : !strcmp(e, "task") ? 2 : !strcmp(e, "notask") ? 3 : 1;
+        if (ind_on != 1) MLOG("DM_NVN_MK_IND=%s: %s", e, ind_on == 0 ? "indirect task / mesh draws stay native" : ind_on == 2 ? "only indirect draws with a task shader convert" : "only indirect draws without a task shader convert"); }
+      if (dw->ind && (!ind_on || (ind_on == 2 && !ts) || (ind_on == 3 && ts))) MK_REJ(0); }
+    uint32_t gcap = 0;
+    if (dw->ind) { void *mb; uint64_t mo; uint32_t cap = 0;
+        if (!mtl_gpu_addr(dw->ind, 8, &mb, &mo, &ind_rec) || (slot = mk_fb_slot(dw->ind, (__bridge const void *)ms, ts ? 0 : 256, &cap, &gcap)) < 0) MK_REJ(0);
+        // A task draw's record seen for the first time: drawn natively, with a probe (mk_ind with no slots) that keeps its count for the next frames. A guess cut it silently
+        // (Ocarina of Time's grass: 16 of about 300 task workgroups, other ones every frame, blades flickering white), since only a record met again reports its cut
+        if (!cap) { id<MTLBuffer> b; size_t o; g_mk_first++;
+            *j = (mk_job){.probe = 1, .ind = ind_rec, .slot = slot};
+            o = arena_alloc(16, &b); j->draw = b.gpuAddress + o;
+            o = arena_alloc(48, &b); j->ia = b.gpuAddress + o;
+            o = arena_alloc(16, &b); { uint32_t ij[4] = {0, 0, (uint32_t)slot, 0}; memcpy((uint8_t *)b.contents + o, ij, 16); } j->ij = b.gpuAddress + o;
+            return 1; }
+        count = cap; }
+    uint32_t bound = ts ? ts->mesh_threads : 1, groups = count * bound;
+    // An indirect task draw: slots for the meshlets its scans have counted (gcap), not count × the launch bound, which is many times what the tasks launch: sized that way a record
+    // whose shader writes a large vertex record went past the size limit and stayed native while its depth prepass, a small record, converted, and the colour pass's equal depth test
+    // failed on scattered pixels (Ocarina of Time's grass blades flickering white). Not known yet: 4 a task, which the first scan corrects
+    if (ts && dw->ind) groups = MIN(groups, gcap ? gcap : count * MIN(bound, 4u));
+    uint64_t kvb = (uint64_t)groups * m->maxv * m->rec, kib = (uint64_t)groups * m->maxp * 12;
+    if (!groups || kvb + kib > (64u << 20)) MK_REJ(5);
+    *j = (mk_job){.m = m, .t = t, .ms = ms, .ts = ts, .count = count, .first = (uint32_t)dw->first, .groups = groups, .ki_bytes = kib, .ind = ind_rec, .slot = slot};
+    j->moff_b = !border_need(ms, 4); j->toff_b = ts ? !border_need(ts, 3) : 0;
+    image_prepare(pr, 1u << 3 | 1u << 4);
+    g_mk_cap = 1;
+    if (ts) { g_mk_cap_n = 0; args_dirty_all(); encode_args(nil, ts, 3, 0); j->nt = g_mk_cap_n; memcpy(j->ti, g_mk_cap_i, sizeof j->ti); memcpy(j->ta, g_mk_cap_a, sizeof j->ta); }
+    g_mk_cap_n = 0; args_dirty_all(); encode_args(nil, ms, 4, 1); j->nm = g_mk_cap_n; memcpy(j->mi, g_mk_cap_i, sizeof j->mi); memcpy(j->ma, g_mk_cap_a, sizeof j->ma);
+    int over = g_mk_cap == 2; g_mk_cap = 0; g_mk_cap_n = 0; args_dirty_all();
+    if (over || !j->nm) MK_REJ(6);
+    id<MTLBuffer> b; size_t o;
+    o = arena_alloc(kvb, &b); j->kv = b.gpuAddress + o;
+    o = arena_alloc(kib, &b); j->ki = b.gpuAddress + o;
+    o = arena_alloc(16, &b); { uint32_t d[4] = {j->count, j->first, j->count, 0}; memcpy((uint8_t *)b.contents + o, d, 16); } j->draw = b.gpuAddress + o;
+    if (ts) {
+        o = arena_alloc((size_t)j->count * ((ts->mesh_payload + 15u) & ~15u), &b); j->pl = b.gpuAddress + o;
+        o = arena_alloc((size_t)j->count * 4, &b); j->cnt = b.gpuAddress + o;
+        o = arena_alloc((size_t)j->count * 4 + 4, &b); j->moff = b.gpuAddress + o;
+        o = arena_alloc(48, &b); j->args = b.gpuAddress + o;
+        o = arena_alloc(32, &b); { uint32_t sj[8] = {j->count, bound, m->maxp * 3, groups, dw->ind ? (uint32_t)slot : ~0u, 0, 0, 0}; memcpy((uint8_t *)b.contents + o, sj, 32); } j->scan = b.gpuAddress + o;
+    }
+    if (j->ind) {
+        o = arena_alloc(48, &b); j->ia = b.gpuAddress + o;
+        o = arena_alloc(16, &b); { uint32_t ij[4] = {j->count, m->maxp * 3, (uint32_t)slot, 0}; memcpy((uint8_t *)b.contents + o, ij, 16); } j->ij = b.gpuAddress + o;
+    }
+    return 1;
+}
+static void mk_set(int n, const uint32_t *ix, const uint64_t *a) { for (int i = 0; i < n; i++) enc_c_args(nil, a[i], ix[i]); }
+// The jobs found, in three phases with a barrier between: task kernels, scans, mesh kernels
+static void mk_run(int n) {
+    int tasks = 0, inds = 0; for (int i = 0; i < n; i++) { tasks += g_mkj[i].ts != nil; inds += g_mkj[i].ind != 0; }
+    id<MTL4ComputeCommandEncoder> ce = dispatch_enc();
+    if (inds) {
+        enc_c_pso(ce, g_mk_ind_ps);
+        for (int i = 0; i < n; i++) { mk_job *j = &g_mkj[i]; if (!j->ind) continue;
+            enc_c_args(ce, j->ij, 0); enc_c_args(ce, j->ind, 1); enc_c_args(ce, j->draw, 2); enc_c_args(ce, j->ia, 3); enc_c_args(ce, g_mk_fb.gpuAddress, 4);
+            enc_c_dispatch(ce, MTLSizeMake(1, 1, 1), MTLSizeMake(32, 1, 1)); }
+        [ce barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
+    }
+    if (tasks) {
+        for (int i = 0; i < n; i++) { mk_job *j = &g_mkj[i]; if (!j->ts || j->probe) continue;
+            mk_set(j->nt, j->ti, j->ta); enc_c_args(ce, j->draw, MK_DRAW); enc_c_args(ce, j->pl, MK_PL); enc_c_args(ce, j->cnt, MK_CNT);
+            enc_c_pso(ce, j->t->t[j->toff_b]);
+            if (j->ind) enc_c_dispatch_indirect(ce, j->ia, MTLSizeMake(j->ts->mesh_threads, 1, 1)); else enc_c_dispatch(ce, MTLSizeMake(j->count, 1, 1), MTLSizeMake(j->ts->mesh_threads, 1, 1)); }
+        [ce barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
+        enc_c_pso(ce, mk_scan_pso());
+        for (int i = 0; i < n; i++) { mk_job *j = &g_mkj[i]; if (!j->ts) continue;
+            enc_c_args(ce, j->scan, 0); enc_c_args(ce, j->cnt, 1); enc_c_args(ce, j->moff, 2); enc_c_args(ce, j->args, 3); enc_c_args(ce, j->draw, 4); enc_c_args(ce, g_mk_fb.gpuAddress + MK_FB * 4, 5);
+            enc_c_dispatch(ce, MTLSizeMake(1, 1, 1), MTLSizeMake(32, 1, 1)); }
+        [ce barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch | MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];
+    }
+    for (int i = 0; i < n; i++) { mk_job *j = &g_mkj[i]; if (j->probe) continue;
+        mk_set(j->nm, j->mi, j->ma); enc_c_args(ce, j->kv, MK_KV); enc_c_args(ce, j->ki, MK_KI); enc_c_args(ce, j->draw, MK_DRAW);
+        if (j->ts) { enc_c_args(ce, j->pl, MK_PL); enc_c_args(ce, j->moff, MK_MOFF); }
+        enc_c_pso(ce, j->m->k[j->moff_b]);
+        if (j->ts) enc_c_dispatch_indirect(ce, j->args, MTLSizeMake(j->ms->mesh_threads, 1, 1));
+        else if (j->ind) enc_c_dispatch_indirect(ce, j->ia, MTLSizeMake(j->ms->mesh_threads, 1, 1));
+        else enc_c_dispatch(ce, MTLSizeMake(j->count, 1, 1), MTLSizeMake(j->ms->mesh_threads, 1, 1)); }
+    args_dirty_all();
+    g_mk_jobs += (uint64_t)n;
+    { static int once; if (!once++) MLOG("mesh as compute: first jobs, %d draws (%d with a task shader) before pass %llu", n, tasks, g_stat_pass + 1); }
+}
+// When a draw opens a pass (from: the first op to look at; the opening task / mesh draw itself when it is one)
+static void mk_hoist_try(const uint8_t *from) {
+    g_mkj_n = 0;   // what an earlier scan left is not drawn now: replay never reached it in its pass
+    g_mk_pass = g_stat_pass + 1;   // the pass the draw is about to open (mk_take)
+    if (!from || g_ret_n > 8 || g_fz_checking || g_defer_replaying) return;
+    fz_cursor cur = {.p = from}; for (int k = 0; k < g_ret_n; k++) cur.ret[cur.ret_n++] = g_ret[k];
+    static typeof(S) Ssave; memcpy(&Ssave, &S, sizeof S); typeof(R) Rsave = R; int pso_dirty = g_pso_dirty, dss_dirty = g_dss_dirty;
+    static csh_rng up[CSH_RN]; int nup = 0, n = 0, landed = 0, stop = -1;
+    g_mk_scans++;
+    for (int guard = 0; guard < 4096 && stop < 0; guard++) {
+        const uint8_t *q; op_hdr hq; const void *aq;
+        if (!fz_next(&cur, &q, &hq, &aq)) break;
+        switch (hq.op) {
+            case OP_DRAW: case OP_DRAW_IDX: {
+                p_draw tdw; p_draw_idx tdi; const p_draw *d = hq.op == OP_DRAW ? draw_rec(aq, hq.size, &tdw) : NULL; if (hq.op == OP_DRAW_IDX) draw_idx_rec(aq, hq.size, &tdi);
+                prog_resolve(); __unsafe_unretained NvProg *pr = S.prog ? prog_get(S.prog) : nil;
+                if (d && d->prim == DM_PRIM_MESH_TASKS) g_mk_met++;
+                csh_rng irec = {d ? d->ind : 0, d ? d->ind + 8 : 0};
+                if (d && d->prim == DM_PRIM_MESH_TASKS && pr && !mk_ub_hit(pr->sh[3], 3, up, nup) && !mk_ub_hit(pr->sh[4], 4, up, nup) && !(d->ind && nup && csh_hit(&irec, 1, up, nup))) {
+                    if (n == MK_JOBS) { stop = 4; break; }
+                    if (!landed && g_nubd) { ubd_land(); landed = 1; }   // deferred uniform updates land first: the kernels read memory, not the draws' shadows
+                    if (mk_prep(pr, d, &g_mkj[n])) { g_mkj[n].op = g_mkj[n].probe ? NULL : q; n++; }
+                }
+                if (mk_draw_writes(pr)) stop = 0;   // later jobs could read what it writes
+                break; }
+            case OP_UPDATE_UB: { uint64_t dd, nn; memcpy(&dd, aq, 8); memcpy(&nn, (const uint8_t *)aq + 8, 8); if (nn && !csh_add(up, &nup, dd, nn)) stop = 1;
+                static int ubstop = -1; if (ubstop < 0) { const char *e = getenv("DM_NVN_MK_UBSTOP"); ubstop = e && !strcmp(e, "1"); if (ubstop) MLOG("DM_NVN_MK_UBSTOP=1: a uniform update stops the mesh scan (the kernels may read it through global memory)"); }
+                if (ubstop && nn) stop = 1; break; }
+            case OP_BARRIER: case OP_RENDER_COND: break;
+            case OP_REPORT_COUNTER: case OP_RESET_COUNTER: { uint64_t t; memcpy(&t, aq, 8); if (t != NVN_COUNTER_TYPE_SAMPLES_PASSED) stop = 3; break; }
+            case OP_DISPATCH: { int moved = 0; for (int i = 0; i < g_csh_n; i++) moved |= g_csh_op[i] == q; if (!moved) stop = 2; break; }   // one cs_hoist_try ran ahead already ran before these jobs
+            case OP_SET_RT: if (!csh_rt_same(q, aq)) stop = 5; break;
+            default: if (!state_op(hq.op, aq)) stop = 3; break;
+        }
+    }
+    if (stop >= 0) g_mk_stop[stop]++;
+    memcpy(&S, &Ssave, sizeof S); args_dirty_all(); R = Rsave; g_pso_dirty = pso_dirty || n; g_dss_dirty = dss_dirty || n; prog_resolve();
+    if (n) mk_run(n);
+    g_mkj_n = n;
+}
+// The draw's pipeline: the job's vertex function and the program's fragment shader, built in the background (nil until then: the native mesh draw)
+static nvn_hmap g_pso_mk = {.klen = sizeof(pso_key)}; static os_unfair_lock g_pso_mk_lock = OS_UNFAIR_LOCK_INIT; static NSObject *g_pso_mk_building;
+static id<MTLRenderPipelineState> mk_pso(NvProg *raster) {
+    mk_job *j = g_mtk.mk; NvShader *fs = raster->sh[1];
+    pso_key k; pso_key_fill(&k, j->ms, fs, g_pass.cfmt, g_pass.dfmt, g_pass.sfmt, g_pass.samples, 0);
+    memset(k.attr, 0, sizeof k.attr); memset(k.attr_hi, 0, sizeof k.attr_hi); memset(k.stream, 0, sizeof k.stream);
+    k.vs = (__bridge void *)j->ms; k.fs = (__bridge void *)fs; k.fsfn = (__bridge void *)j->m->kv;
+    os_unfair_lock_lock(&g_pso_mk_lock); id ps = hm_get_id(&g_pso_mk, &k);
+    if (!ps) { if (!g_pso_mk_building) g_pso_mk_building = [NSObject new]; hm_put_id(&g_pso_mk, &k, g_pso_mk_building); }
+    os_unfair_lock_unlock(&g_pso_mk_lock);
+    if (!ps) {
+        MTLRenderPipelineDescriptor *d = pso_desc(&k, nil, fs, nil, 0);
+        if (!pso_ds_valid((uint32_t)d.depthAttachmentPixelFormat, (uint32_t)d.stencilAttachmentPixelFormat)) { os_unfair_lock_lock(&g_pso_mk_lock); hm_put_id(&g_pso_mk, &k, NSNull.null); os_unfair_lock_unlock(&g_pso_mk_lock); return nil; }
+        d.vertexFunction = fn_dev_b(j->m->kv, 1); if (d.fragmentFunction) d.fragmentFunction = fn_dev_b(d.fragmentFunction, !k.border); d.vertexDescriptor = nil;
+        const char *mk_ = j->ms->key, *fk = fs ? fs->key : "-"; pso_key kk = k;
+        dispatch_async(pp_bg_queue(), ^{
+            NSError *e = nil; uint64_t t0 = bp_now();
+            id<MTLRenderPipelineState> p = [g_dev newRenderPipelineStateWithDescriptor:d error:&e];
+            static int n; if (!p || n++ < 8) MLOG("%smesh as compute: pipeline for mesh %s fragment %s, %.1f ms in the background%s%s", p ? "" : "[RED] ", mk_, fk, (bp_now() - t0) / 1e6, p ? "" : ": ", p ? "" : e.localizedDescription.UTF8String);
+            os_unfair_lock_lock(&g_pso_mk_lock); hm_put_id(&g_pso_mk, &kk, p ?: NSNull.null); os_unfair_lock_unlock(&g_pso_mk_lock);
+        });
+        return nil;
+    }
+    return ps == NSNull.null || ps == g_pso_mk_building ? nil : ps;
+}
+static void mk_encode(id<MTLRenderCommandEncoder> en_) {
+    id<MTL4RenderCommandEncoder> en = (id<MTL4RenderCommandEncoder>)en_; mk_job *j = g_mtk.mk;
+    enc_r_vbuf(en, MK_KV, j->kv);
+    if (j->ts) enc_r_draw_indexed_indirect(en, MTLPrimitiveTypeTriangle, MTLIndexTypeUInt32, j->ki, j->ki_bytes, j->args + 16);
+    else if (j->ind) enc_r_draw_indexed_indirect(en, MTLPrimitiveTypeTriangle, MTLIndexTypeUInt32, j->ki, j->ki_bytes, j->ia + 16);
+    else enc_r_draw_indexed(en, MTLPrimitiveTypeTriangle, (NSUInteger)j->groups * j->m->maxp * 3, MTLIndexTypeUInt32, j->ki, j->ki_bytes, 1, 0, 0);
+}
 void mtl_geomesh_stats(uint64_t *n, uint64_t *wait, uint64_t *run_draws, uint64_t *runs, uint64_t ends[4]) { *n = g_geo_mesh_n; *wait = g_geo_mesh_wait; *run_draws = g_mrun_draws; *runs = g_mrun_runs; memcpy(ends, g_mrun_ends, sizeof g_mrun_ends); }
 void mtl_geohoist_stats(uint64_t *moved, uint64_t *runs, uint64_t *stops) { *moved = g_geo_hoisted; *runs = g_geo_hoist_runs; memset(stops, 0, 6 * sizeof *stops); stops[3] = g_geo_dependency_splits; }
 void mtl_cshoist_stats(uint64_t *moved, uint64_t *depth, uint64_t *stops) { *moved = g_csh_moved; *depth = g_csh_depth; for (int i = 0; i < 8; i++) stops[i] = g_csh_stop[i]; }
@@ -14114,6 +14442,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     if (!g_enc && tbdr_on() && !g_geo_program && !defer_has_in_p() && !g_defer_replaying && !g_fz.active && !g_fz_checking && g_exec_next) { defer_try(dw, di); if (g_defer_cur->active && g_defer_cur->in_p) return; }
     if (!g_enc && tbdr_on() && !g_fz_checking && !g_geo_program) fuse_try();   // Readable tile render pass merge is on by default; when the structure / same-pixel proof does not hold it still falls back to a normal render pass, and it is not re-entered during the CHECK redraw
     if (!g_enc && !tbdr_on() && !g_geo_program && cshoist_on()) cs_hoist_try(pr, dw, di);   // see DM_NVN_CS_HOIST
+    if (!g_enc && !tbdr_on() && !g_geo_program && mk_on()) mk_hoist_try(g_exec_next);   // the pass's mesh draws as compute before it opens (see mk_hoist_try)
     int need = g_enc || !tbdr_on() ? 3 : pass_ds_need(), mode = defer_q_draw ? 0 : need == 0 ? 2 : need == 2 ? 3 : need == 1 ? 4 : 0;   // 2 attach neither, 3 attach stencil only, 4 attach depth only
     int skip_d = mode != 0;
     if (!g_enc) { g_fd_dw = dw; g_fd_di = di; }

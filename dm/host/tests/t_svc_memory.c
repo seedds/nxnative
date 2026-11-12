@@ -588,6 +588,12 @@ int main(int argc, char **argv) {
         assert(resize(0x800000) == LIMIT);
         return 0;
     }
+    if (argc == 2 && !strcmp(argv[1], "--cutoff-probe")) {   // run with DM_MEM_CUTOFF_MB=1 in the unlimited build: the memory cutoff refuses a map (hle_svc.c mem_cutoff_hit)
+        mem_init(); alias = info(I_AliasAddr);
+        assert(!DM_GAME_MEM_MAP_LIMIT && getenv("DM_MEM_CUTOFF_MB"));
+        assert(pages(1, alias, P) == LIMIT && !g_alias_mapped);
+        return 0;
+    }
     if (argc == 2 && !strcmp(argv[1], "--alias-probe")) {   // DM_ALIAS_SIZE sets the alias region; the heap and stacks stay as the profile has them
         mem_init();
         assert(info(I_AliasSize) == 0x10000000);

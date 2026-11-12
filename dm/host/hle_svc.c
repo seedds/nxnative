@@ -297,6 +297,27 @@ static void guest_file_init(void) {
 }
 
 static void *alias_windows_thread(void *arg);
+// The last-resort memory cutoff of a game that runs without mem_map_limit. MapPhysicalMemory is refused with ResultLimitReached, so the SDK unmaps its cached pages and
+// retries (as under mem_map_limit), only on iOS when less than DM_MEM_ROOM_MIN_MB (768) is left to the limit iOS stops the app at, or when the process holds more than
+// DM_MEM_CUTOFF_MB (its footprint plus the guest files' pages in memory; off by default). 0 turns either off. The figures are read at most every 200 ms: a map is not a
+// hot call, but a scene load makes thousands. From HookLink's def48bdb (dsi-hub/nxnative), where Ocarina of Time on an iPhone runs without mem_map_limit
+static int mem_cutoff_hit(double *held_gb, double *room_gb) {
+    static _Atomic uint64_t at; static _Atomic int hit; static double held, room; static int64_t cut = -1, min_room;
+    if (cut < 0) { const char *c = getenv("DM_MEM_CUTOFF_MB"), *r = getenv("DM_MEM_ROOM_MIN_MB"); cut = (c && *c ? atoll(c) : 0) << 20; min_room = (r && *r ? atoll(r) : 768) << 20; }
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); uint64_t now = (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
+    if (now - atomic_load(&at) >= 200) {
+        atomic_store(&at, now);
+        task_vm_info_data_t vi; mach_msg_type_number_t n = TASK_VM_INFO_COUNT; int h = 0;
+        if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vi, &n) == KERN_SUCCESS) { held = (double)vi.phys_footprint + (double)vi.external; if (cut > 0 && held > (double)cut) h = 1; }
+#if TARGET_OS_IPHONE
+        uint64_t left = os_proc_available_memory(); room = (double)left; if (min_room > 0 && left && left < (uint64_t)min_room) h = 1;
+#else
+        (void)min_room;   // the room to the memory limit is iOS's
+#endif
+        atomic_store(&hit, h);
+    }
+    *held_gb = held / 1073741824.0; *room_gb = room / 1073741824.0; return atomic_load(&hit);
+}
 static void *regions_thread(void *arg);
 static void mem_init_once(void) {
     size_t pg = (size_t)getpagesize();
@@ -977,6 +998,15 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
                 pthread_mutex_unlock(&g_map_lock);
                 static _Atomic int nref; if (atomic_fetch_add(&nref, 1) < 8) LOG("[mem] MapPhysicalMemory +%#zx refused: %.2f GB mapped, the application pool is full (ResultLimitReached, the SDK frees cached pages and retries)",
                                                                        size, atomic_load(&g_alias_mapped) / 1073741824.0);
+                regs[0] = 0x10801; return 0;
+            }
+        }
+        if (!DM_GAME_MEM_MAP_LIMIT && num == 0x2C && need) {   // no limit: only the last-resort cutoff (mem_cutoff_hit)
+            double held, room;
+            if (mem_cutoff_hit(&held, &room)) {
+                pthread_mutex_unlock(&g_map_lock);
+                static _Atomic int ncut; if (atomic_fetch_add(&ncut, 1) < 8) LOG("[RED] [mem] MapPhysicalMemory +%#zx refused by the memory cutoff: %.2f GB held, %.2f GB left to the limit, %.2f GB mapped (ResultLimitReached: the SDK frees cached pages and retries; DM_MEM_CUTOFF_MB, DM_MEM_ROOM_MIN_MB)",
+                                                                       size, held, room, atomic_load(&g_alias_mapped) / 1073741824.0);
                 regs[0] = 0x10801; return 0;
             }
         }

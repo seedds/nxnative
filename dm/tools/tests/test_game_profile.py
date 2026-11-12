@@ -61,13 +61,13 @@ def macros(shader_map, extra=''):
 
 class UpscalerKeys(unittest.TestCase):
     def test_from_shader_map(self):
-        sq = '#define DM_GAME_UPSCALER_SQRT_KEYS ""'
-        none = ['#define DM_GAME_UPSCALER_KEYS ""', '#define DM_GAME_UPSCALER_N 0', sq]   # the launcher hides the setting
+        sq, sh = '#define DM_GAME_UPSCALER_SQRT_KEYS ""', '#define DM_GAME_UPSCALER_SHARPNESS 1.0'
+        none = ['#define DM_GAME_UPSCALER_KEYS ""', '#define DM_GAME_UPSCALER_N 0', sq, sh]   # the launcher hides the setting
         self.assertEqual(macros(None), none)
         self.assertEqual(macros(MAP.split('cs_other.bin')[0]), none)
-        self.assertEqual(macros(MAP), ['#define DM_GAME_UPSCALER_KEYS "7629d857a0a93833,c56db3d5a0f1b5af"', '#define DM_GAME_UPSCALER_N 2', sq])
-        self.assertEqual(macros(None, 'upscaler_sqrt\tfa3033d05c0a41d6\n'),   # a shader the profile names for its square-root colour is an upscaler too
-                         ['#define DM_GAME_UPSCALER_KEYS "fa3033d05c0a41d6"', '#define DM_GAME_UPSCALER_N 1', '#define DM_GAME_UPSCALER_SQRT_KEYS "fa3033d05c0a41d6"'])
+        self.assertEqual(macros(MAP), ['#define DM_GAME_UPSCALER_KEYS "7629d857a0a93833,c56db3d5a0f1b5af"', '#define DM_GAME_UPSCALER_N 2', sq, sh])
+        self.assertEqual(macros(None, 'upscaler_sqrt\tfa3033d05c0a41d6\nupscaler_sharpness\t0.7\n'),   # a shader the profile names for its square-root colour is an upscaler too
+                         ['#define DM_GAME_UPSCALER_KEYS "fa3033d05c0a41d6"', '#define DM_GAME_UPSCALER_N 1', '#define DM_GAME_UPSCALER_SQRT_KEYS "fa3033d05c0a41d6"', '#define DM_GAME_UPSCALER_SHARPNESS 0.7'])
 
 
 if __name__ == '__main__':

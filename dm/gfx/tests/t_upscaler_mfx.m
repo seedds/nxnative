@@ -136,6 +136,11 @@ int main(void) { @autoreleasepool {
         CHECK(up_mfx_encode(named), "MetalFX takes square-root-encoded input");
         CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "the square-root submission completes");
         CHECK(matches(written, squared, MTLRegionMake2D(0, 0, 1920, 1080), black), "the square-root input comes out squared");
+        g_up_sharp = 0.5f; fill(written, MTLClearColorMake(0, 0, 0, 1)); mtl_sub_begin();   // half of a bilinear picture of the same squared input blended in: a flat colour stays itself
+        CHECK(up_mfx_encode(named), "MetalFX's picture blended with a bilinear one (sharpness 0.5)");
+        CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "the blended submission completes");
+        CHECK(matches(written, squared, MTLRegionMake2D(0, 0, 1920, 1080), black), "the blend of two pictures of one colour is that colour, squared once");
+        g_up_sharp = 1;
         named->up_color = UP_COLOR_LINEAR;
         NvShader *encoded_out = upscaler(key); encoded_out->up_color = UP_COLOR_KEEP;
         CHECK(!up_mfx_wanted(encoded_out), "a named shader whose output stays encoded is left to its shader");

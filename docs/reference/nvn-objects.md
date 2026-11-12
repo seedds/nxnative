@@ -464,6 +464,13 @@ Games read this count as a position in their own command memory and size their h
 - **Budget regression:** the `--cpu` path also uses a synthetic event, clock and condition-wait deadline to exercise the actual `mtl_wait_at` function without a Metal device. Run with `DM_NVN_FAST_WAKE=0/1` and `DM_NVN_WAITS=0/1`; no gameplay or FPS improvement is inferred from these timeout cases.
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md): it reads 5 timestamp reports a frame right after the wait (its interval controller and dynamic resolution), which is why the waiter makes them itself. Wake after the GPU end 0.29 → 0.08 ms on an M2 Max, 0.147 ms on an iPhone 17 Pro Max.
 
+### Post-completion ring overrun when a frame has many submissions
+
+- **Symptom:** `[nvn-mtl] FATAL post ring: the writes of fence <N> never ran` (`mtl_sub_commit`), while the feedback queue is already inside `post_complete`.
+- **Cause:** `ALLOC_SHARE` lets up to `ALLOC_MAX * ALLOC_SHARE` (512) submissions stand in flight across the command allocator pool before `mtl_sub_begin` waits, while `POST_RING` held only 128 records. A game that makes 70–80 submissions a frame wraps the 128-entry ring after less than two frames of feedback-queue scheduling delay and aborts under `g_post_mu` instead of waiting for the older fence's writes to land.
+- **Fix:** size `POST_RING` to 1024 (`>= ALLOC_MAX * ALLOC_SHARE`) and make `post_put` drop `g_post_mu` and wait on the older slot's fence (`WS_POST`) when a slot is still unclaimed, completing its CPU-side writes before reusing the slot.
+- **Found on:** Super Mario Party (`010036B0034E4000`, Apple M1 Pro).
+
 ### `nvnQueueFinish` waits for the GPU, not the display
 
 - **Symptom:** loading screens many times slower on the iPhone than on the Mac (Three Houses' first loading screen 78 s on the iPhone, 5 s on the Mac).

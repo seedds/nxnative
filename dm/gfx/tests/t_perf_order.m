@@ -268,6 +268,9 @@ static dispatch_semaphore_t waiter_started, waiter_done;
 static void *early_waiter(void *arg) {
     dispatch_semaphore_signal(waiter_started); post_early((uintptr_t)arg); dispatch_semaphore_signal(waiter_done); return NULL;
 }
+static void *delayed_feedback(void *arg) {
+    dispatch_semaphore_signal(waiter_started); usleep(20000); post_complete((uintptr_t)arg,0,0); return NULL;
+}
 static void posts(void) {
     // Pause the real completion owner between claim and its first event write.
     uint64_t f=g_fence+1; post_rec *r=&g_postr[f%POST_RING]; volatile uint32_t event=0;
@@ -300,6 +303,24 @@ static void posts(void) {
     CHECK("later completion applies earlier events in order",event==15 && g_done==f+2);
     post_complete(f+1,0,0); post_complete(f+2,0,0);
     CHECK("callbacks never repeat an event",event==15);
+
+    // An unclaimed slot at a ring wrap waits outside g_post_mu for the older fence to complete.
+    CHECK("post ring covers shared command allocators",POST_RING>=ALLOC_MAX*ALLOC_SHARE);
+    uint64_t old=f+3, next=old+POST_RING;
+    post_op *old_ops=calloc(1,sizeof *old_ops), *next_ops=calloc(1,sizeof *next_ops);
+    old_ops[0]=(post_op){.kind=1,.val=&event,.v=21};
+    next_ops[0]=(post_op){.kind=1,.val=&event,.mode=1,.v=8};
+    g_fence=next;
+    post_put(old,1,old_ops,NULL,0);
+    waiter_started=dispatch_semaphore_create(0);
+    pthread_create(&th,NULL,delayed_feedback,(void *)(uintptr_t)old);
+    dispatch_semaphore_wait(waiter_started,DISPATCH_TIME_FOREVER);
+    post_put(next,1,next_ops,NULL,0);
+    pthread_join(th,NULL);
+    CHECK("wrapped post_put waits for older slot's event",event==21 && g_done==old
+        && g_postr[next%POST_RING].fence==next && !g_postr[next%POST_RING].claimed);
+    post_complete(next,0,0);
+    CHECK("wrapped slot runs after older slot completes",event==29 && g_done==next && g_postr[next%POST_RING].claimed);
 }
 int main(int argc, char **argv) { @autoreleasepool {
     if(argc==2 && !strcmp(argv[1],"--cpu")) {

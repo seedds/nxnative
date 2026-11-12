@@ -236,9 +236,9 @@ static NSError *gpu_lost_test_error(void) {
 static pthread_mutex_t g_res_mu = PTHREAD_MUTEX_INITIALIZER;   // Dedicated lock for the residency set: res_add is called on paths that hold g_mu (arena_new), so it cannot share g_mu
 // Wait ledger (DM_NVN_WAITS=1): every place a thread of the host or the game waits on the CPU for the GPU or for the encode thread, counted per frame (calls, calls that blocked,
 // the time they blocked) and logged every 300 frames with the frame's GPU idle. The game's own SyncWait is split by how far its fence is behind the newest one (0: the last submission)
-enum { WS_SYNC, WS_SYNC_NEWEST, WS_SYNC_POLL, WS_ACQ, WS_FINISH, WS_ALLOC, WS_VIS, WS_PG, WS_MDI, WS_READTEX, WS_T2T, WS_DIAG, WS_SNAP, WS_UPZERO, WS_UPALLOC, WS_DRAIN, WS_UBC, WS_OLDQ, WS_N };
+enum { WS_SYNC, WS_SYNC_NEWEST, WS_SYNC_POLL, WS_ACQ, WS_FINISH, WS_ALLOC, WS_VIS, WS_PG, WS_MDI, WS_READTEX, WS_T2T, WS_DIAG, WS_SNAP, WS_UPZERO, WS_UPALLOC, WS_DRAIN, WS_UBC, WS_OLDQ, WS_POST, WS_N };
 static const char *const ws_name[WS_N] = {"SyncWait (game, older fence)", "SyncWait (game, newest fence)", "SyncWait polls", "SyncWait on an acquire sync", "QueueFinish", "allocator", "occlusion ring", "PASSGPU ring",
-    "indirect-count multi-draw", "texture readback", "texture copy t2t", "diagnostics", "snapshot ring", "upload batches", "upload slot", "encode thread drain", "uniform copy worker", "old-queue command buffer"};
+    "indirect-count multi-draw", "texture readback", "texture copy t2t", "diagnostics", "snapshot ring", "upload batches", "upload slot", "encode thread drain", "uniform copy worker", "old-queue command buffer", "post ring"};
 static _Atomic uint64_t g_ws_n[WS_N], g_ws_blk[WS_N], g_ws_ns[WS_N];
 static int ws_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_WAITS"); v = e && atoi(e) > 0; } return v; }
 static inline uint64_t ws_t0(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
@@ -2387,7 +2387,8 @@ static void lc_land(void);
 // A submission's CPU-side writes at its end (events, samples-passed and counter reports): run once, by its feedback handler or, when a game's SyncWait wakes on the
 // GPU's own signal of the fence first, by that waiter (DM_NVN_FAST_WAKE, on by default): the feedback handler comes 0.26 ms after the GPU end on an M2 Max
 typedef struct { _Atomic uint64_t fence; _Atomic int claimed; int n; post_op *ops; seg_clk *sc; uint32_t seg_last; uint64_t t_commit; } post_rec;   // t_commit: guest ns when it was committed
-#define POST_RING 128
+#define POST_RING 1024
+_Static_assert(POST_RING >= ALLOC_MAX * ALLOC_SHARE, "POST_RING must cover shared command allocators");
 static post_rec g_postr[POST_RING];
 static pthread_mutex_t g_post_mu = PTHREAD_MUTEX_INITIALIZER;
 // A successful claim holds the lock until post_run finishes. Ownership alone
@@ -2442,6 +2443,19 @@ static void post_complete(uint64_t fence, uint64_t c0, uint64_t c1) {
     nvn_queue_gpu_progress();
 }
 static _Atomic int g_seg_inflight;   // main command buffers committed and not reported back yet (sub_cut)
+static void post_put(uint64_t fence, int n, post_op *ops, seg_clk *sc, uint32_t seg_last) {
+    post_rec *pr = &g_postr[fence % POST_RING];
+    pthread_mutex_lock(&g_post_mu);
+    while (!atomic_load(&pr->claimed) && atomic_load(&pr->fence)) {
+        uint64_t old = atomic_load(&pr->fence);
+        pthread_mutex_unlock(&g_post_mu);
+        if (!mtl_wait_at(old, UINT64_MAX, WS_POST)) MDIE("post ring: fence %llu did not complete", (unsigned long long)old);
+        if (post_claim(pr, old)) post_run(pr, 0, 0);
+        pthread_mutex_lock(&g_post_mu);
+    }
+    pr->n = n; pr->ops = ops; pr->sc = sc; pr->seg_last = seg_last; pr->t_commit = guest_ns(); atomic_store(&pr->claimed, 0); atomic_store(&pr->fence, fence);
+    pthread_mutex_unlock(&g_post_mu);
+}
 static void rt_preserve_bound(void);
 static void queue_program_preserve(void);
 uint64_t mtl_sub_commit(void) {
@@ -2462,7 +2476,7 @@ uint64_t mtl_sub_commit(void) {
     gw_commit(fence); rc_commit(fence);
     if (g_vis_ring_i >= 0) g_vis_ring[g_vis_ring_i].fence = fence;
     // CPU-visible effects after completion: copy the op table into the callback
-    int n = g_npost; post_op *ops = n ? malloc(n * sizeof *ops) : NULL; post_rec *pr = &g_postr[fence % POST_RING];
+    int n = g_npost; post_op *ops = n ? malloc(n * sizeof *ops) : NULL;
     if (ws_on()) for (int i = 0; i < n; i++) { int k = g_post[i].kind == 2 ? (g_post[i].type == 0 || g_post[i].type == 0x10 ? 3 : 4) : g_post[i].kind == 3 ? (g_post[i].mode == VIS_REPORT ? 2 : 0) : 1; atomic_fetch_add(&g_ws_post[k], 1); }   // 1 event, 2 samples passed, 3 timestamp, 4 other counter
     if (n) memcpy(ops, g_post, n * sizeof *ops);
     NSArray<dispatch_block_t> *commit_blocks = [g_commit_blocks copy];
@@ -2473,10 +2487,7 @@ uint64_t mtl_sub_commit(void) {
     NSString *cctx = @(cctx_snap());
     cbs_list *cbs = cbs_take(); cbs_fly_put(fence, cbs);
     seg_clk *sc = g_sclk; uint32_t seg_last = g_seg; g_sclk = NULL;
-    pthread_mutex_lock(&g_post_mu);
-    if (!atomic_load(&pr->claimed) && pr->fence) MDIE("post ring: the writes of fence %llu never ran", (unsigned long long)pr->fence);
-    pr->n = n; pr->ops = ops; pr->sc = sc; pr->seg_last = seg_last; pr->t_commit = guest_ns(); atomic_store(&pr->claimed, 0); atomic_store(&pr->fence, fence);
-    pthread_mutex_unlock(&g_post_mu);
+    post_put(fence, n, ops, sc, seg_last);
     int lost_test = gpu_lost_test();
     [o addFeedbackHandler:^(id<MTL4CommitFeedback> cb) {
         gpu_tag_done(gpu_f, cb.GPUStartTime, cb.GPUEndTime);

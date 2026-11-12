@@ -60,7 +60,7 @@ Update 1.0.1 (v65536), SDK 15.3.2. Intelligent Systems' engine on NintendoWare (
 - **Resolved: a format-converting copy into a packaged texture** (a 128x128 RGBA8 render target into an RG8 texture, mirrored in Y, as the boat arrives in Rogueport, about frame 10,950): `copy_t2t_draw` declined a destination made without render-target use.
 - **Resolved: an unbound uniform slot** (`stage 0 cb5 has no uniform buffer bound`, at the title): the argument buffer kept a null pointer there.
 - **Resolved in the chain, retest open: a GPU hang in Peach's invisibility-potion scene** ([GitHub issue #1860](https://github.com/seedds/nxnative/issues/1860), Mac and iPad, MetalFX and Standard). `forward.bfsha` variant `f1e0f08cc43e21e3` reads its light count at byte 0x900 of uniform slot 11 and loops over that many lights; the game binds 16 bytes to that slot for some materials, relying on Maxwell's 0 past a binding, and Metal read whatever lay there. Reads past a binding now give 0 for every game ([Reads past a uniform binding's size](../../../docs/reference/shaders.md#reads-past-a-uniform-bindings-size)). The fix was not run through the scene here (no save there); the reporter's checkpoint run on both devices is open.
-- Conditional rendering: the engine calls `SetRenderEnableConditional`; drawn unconditionally (the profile has no `render_cond`), no screen played looked wrong.
+- Conditional rendering: the engine calls `SetRenderEnableConditional`; drawn unconditionally, no screen played looked wrong; the host now evaluates it for every game, not checked on this game since.
 - The 4 domain shaders of `shaders/tessellation.bfsha` have no Metal stage; nothing seen so far draws with them.
 
 ## Movies

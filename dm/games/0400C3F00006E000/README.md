@@ -9,8 +9,9 @@ A Switch 2 game. Brought up on the base game (v0), SDK 19.3.3 built for the Swit
 | `sys_resource 0x4000000` | [`game.tsv`](game.tsv) | the NPDM declares 64 MB of system resource: virtual address memory on, and `nninitStartup` still sets a heap |
 | `app_pool 0x240000000`, `mem_reserve 0x320000000`, `mem_alias 0x100000000` | `game.tsv` | the Switch 2's 9 GB, as Donkey Kong Bananza's. `SetHeapSize` asks for 0x1dbc00000 (7.43 GB; 1.8.0 asks 0x1de400000 by pull request #1116), and with a 7.5 GB heap region the first boot stopped there (`SetHeapSize OOM`): an 8 GB heap region. The alias region is mapped up to +1.75 GB by the title |
 | `modules main subsdk0 subsdk1 sdk` | `game.tsv` | the base game has no `subsdk1`; each build row names its own modules ([A version without one of the profile's modules](../../../docs/reference/packing.md#a-version-without-one-of-the-profiles-modules-stops-the-host-at-boot)) |
-| `render_cond on` | `game.tsv` | agl wraps its clears in render conditions, as in Donkey Kong Bananza and Splatoon Raiders; not tried without it here |
 | `romfs_marker Movie/StaffRoll_00.webm` | `game.tsv` | a file of both versions' RomFS |
+
+Render conditions, which the host evaluates for every game ([Conditional rendering evaluated at replay](../../../docs/reference/rendering.md#conditional-rendering-evaluated-at-replay); until 2026-11-12 the profile key `render_cond`): agl wraps its clears in render conditions, as in Donkey Kong Bananza and Splatoon Raiders; not tried without it here.
 
 ## Files
 

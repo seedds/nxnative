@@ -9,12 +9,13 @@ A Switch 2 game: update v131072, SDK 22.2.8 (`Ounce`). Nintendo EPD's engine (se
 | `mem_reserve 0x320000000`, `mem_alias 0x100000000`, `mem_stack 0x10000000`, `app_pool 0x240000000` | [`game.tsv`](game.tsv) | the game asks `SetHeapSize` for 0x18ce00000; the rest as Donkey Kong Bananza, the Switch 2's 9 GB |
 | `mem_map_limit on` | [`game.tsv`](game.tsv) | a map past the application pool fails with ResultLimitReached, as on Horizon. The SDK's allocator keeps freed pages mapped until a map fails, then gives them back ([PR 1444](https://github.com/seedds/nxnative/pull/1444) reports a black screen leaving the Deku Tree without it; not reached here) |
 | `sys_resource 0x3000000` | `game.tsv` | 48 MB, as the NPDM declares |
-| `render_cond on` | `game.tsv` | agl clears a copy of the prepass depth again under a render condition the console skips. Run unconditionally, the opaque pass's `EQUAL` test fails everywhere ([PR 1299](https://github.com/seedds/nxnative/pull/1299)'s finding) |
 | Dynamic-resolution stub | [`patches.py`](patches.py) (frame step rule, `others`) | full resolution unless the launcher's Dynamic resolution is on ([Dynamic resolution](#dynamic-resolution)) |
 | `draw_barriers game` | `game.tsv` | about 180 full barriers a frame NVN does not ask for: GPU 25 → 18 ms at full resolution. From 7f50222 until the fix in [Draw passes that wait for each other again while images share memory](../../../docs/reference/frame-rate.md#draw-passes-that-wait-for-each-other-again-while-images-share-memory) it had no effect, since the dynamic resolution's family heaps turned it off; with the fix, M1 Max gameplay GPU 22.2 → 20.3 ms; no change on an M2 Air or an M4 Pro |
 | `tex_flush_upload on`, `tex_dirty_upload on` | `game.tsv` | as Tears of the Kingdom: the CPU writes the terrain tiles' height (R32F), blend and hole (RGBA8) maps into textures after creating them. Without the keys those textures stay zero: flat blue holes in the ground around the path with grass floating in them, and grey stone where the console shows dirt |
 | `shader_groups`, `shader_note` | `game.tsv` | shaders grouped as `/Shader/`, `/Effect/`, `/Lib/`, `/UI/` |
 | `pad_layout full` | `game.tsv` | a 3D field and both sticks |
+
+Render conditions, which the host evaluates for every game ([Conditional rendering evaluated at replay](../../../docs/reference/rendering.md#conditional-rendering-evaluated-at-replay); until 2026-11-12 the profile key `render_cond`): agl clears a copy of the prepass depth again under a render condition the console skips. Run unconditionally, the opaque pass's `EQUAL` test fails everywhere ([PR 1299](https://github.com/seedds/nxnative/pull/1299)'s finding).
 
 ## Files
 

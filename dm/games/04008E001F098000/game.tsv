@@ -1,6 +1,6 @@
 # Game profile of Nintendo Switch Sports Resort (Switch 2, update v65536, which holds the whole game). Plays on the Mac: see README.md
 # Format: see dm/games/README.md
-# Nintendo EPD's sead / agl / gsys with Havok, SDK 22.2.10 built for the Switch 2 (Ounce), NVN2. From the NSP script's provisional profile (its heap and address-region checks), plus render_cond
+# Nintendo EPD's sead / agl / gsys with Havok, SDK 22.2.10 built for the Switch 2 (Ounce), NVN2. From the NSP script's provisional profile (its heap and address-region checks)
 
 # ---- Identity ----
 title_id	04008E001F098000
@@ -39,5 +39,3 @@ shader_note	Nintendo Switch Sports Resort shaders
 # ---- Graphics ----
 # the game calls nvnDeviceSetDepthMode with near = 0: the pipeline bases made before it runs are made for that mode
 depth_mode	zero
-# the game wraps draws in render conditions; drawn anyway, the Select User background is grey and the outfits black (README.md, Rendering)
-render_cond	on

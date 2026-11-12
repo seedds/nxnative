@@ -1050,7 +1050,7 @@ typedef struct { int kind; volatile uint32_t *val; uint32_t mode, v; uint64_t ad
 static uint32_t g_seg;   // Index of the segment being encoded in this submission (0 until the first sub_cut)
 static uint64_t g_cbgen; static int gsb_held(uint64_t serial);   // main command buffers committed; a texture whose storage the one being encoded writes on the GPU (gsb_store)
 typedef struct seg_clk seg_clk; static seg_clk *g_sclk; static void seg_clk_put(seg_clk *c);   // Counter timestamps by segment (see gpu_ticks)
-// ---------- Conditional rendering (profile render_cond) ----------
+// ---------- Conditional rendering ----------
 // SetRenderEnableConditional(mode, rec) enables rendering if the 64-bit counter of the report at rec equals (RENDER_IF_EQUAL) or differs from (RENDER_IF_NOT_EQUAL) the one at
 // rec + 16, until the next SetRenderEnable(true). Tears of the Kingdom wraps nearly every ClearColor / ClearDepthStencil this way: rec is set to 1 from the CPU when the target
 // needs a clear, each clear is followed by ReportCounter(TIMESTAMP_TOP, rec), and rec + 16 is never written. A timestamp report puts 0 in the counter field (the time goes in the
@@ -1154,6 +1154,7 @@ static int rc_gpu_unknown(rc_report *r, uint64_t done) {
     if (r->reported || g_rc_gpu_dirty || g_rc_gpu_fence>done) return 1;
     r->gpu_epoch=g_rc_gpu_epoch; return 0;
 }
+static uint8_t rc_source(uint64_t a, unsigned n, uint8_t *out, int *unreliable);
 static int rc_value(uint64_t addr, uint64_t *v) {   // 0 = unknown at encode time
     rc_report *r=rc_find(addr);
     uint64_t done=atomic_load_explicit(&g_rc_complete,memory_order_acquire);
@@ -1162,8 +1163,14 @@ static int rc_value(uint64_t addr, uint64_t *v) {   // 0 = unknown at encode tim
         if (rc_gpu_unknown(r,done)) return 0;
         if (r->dirty || r->fence>done) { *v=r->value; return r->known==255; }
         if (!r->readable || r->unreliable) return 0;
+        *v=*(const volatile uint64_t *)addr; return 1;
     }
-    *v=*(const volatile uint64_t *)addr; return 1;
+    // No report of its own: memory holds the operand only when nothing queued before the condition writes it later (rc_source: an inline update of this submission is known by its
+    // bytes; a copy, fill or shader write of this submission, or a GPU write of one still running, is not). Portal 2's D3D9 layer has a shader write each mesh's visibility into a
+    // storage buffer and draws the mesh if that word differs from the next record's; read from memory before that shader ran, both were 0 and the vault's furniture was dropped
+    uint8_t b[8]; int unreliable=0;
+    if (rc_source(addr,8,b,&unreliable)!=0xff || unreliable) return 0;
+    memcpy(v,b,8); return 1;
 }
 // Counter records need not share a page with the buffer write. Include the previous
 // seven bytes so even an unaligned eight-byte counter crossing a page is covered.
@@ -1174,7 +1181,6 @@ static rc_report *rc_containing(uint64_t addr) {
             if (addr>=r->addr && addr-r->addr<8) return r;
     return NULL;
 }
-static uint8_t rc_source(uint64_t a, unsigned n, uint8_t *out, int *unreliable);
 static void rc_overwrite(rc_report *r, uint64_t dst, uint64_t n, const void *data, unsigned period, uint64_t src, uint64_t done, int opaque) {
     uint64_t lo=MAX(dst,r->addr), hi=MIN(dst+n,r->addr+8);
     if (hi<=lo) return;
@@ -1948,6 +1954,9 @@ static void hw_note(uint64_t addr) {
     if (g_nhw_sub == g_hw_cap) { int c = g_hw_cap ? g_hw_cap * 2 : 256; uint64_t *p = realloc(g_hw_sub, (size_t)c * sizeof *p); if (!p) { g_sbw_over = 1; return; } g_hw_sub = p; g_hw_cap = c; }   // over: every page counts as written (gw_commit)
     g_hw_sub[g_nhw_sub++] = addr;
 }
+// The records this submission's reports write (hw_note), by their own 16 bytes: a report's page holds other words no report writes (Nintendo Switch Sports Resort's agl compares a
+// timestamp record with the word 16 bytes on, which only the CPU writes; counted by page, that word was unknown and the clear the condition skips ran)
+static int hw_sub_hits(uint64_t lo, uint64_t hi) { for (int i = 0; i < g_nhw_sub; i++) if (lo < g_hw_sub[i] + 16 && g_hw_sub[i] < hi) return 1; return 0; }
 static int hw_live(uint64_t lo, uint64_t hi) {
     if (!gw_live_in(g_gwr, lo, hi)) return 0;
     if (!hw_exact_on()) return 1;
@@ -2039,7 +2048,7 @@ static uint8_t rc_source(uint64_t a, unsigned n, uint8_t *out, int *unreliable) 
         }
         int kind, page=sbw_slot(p>>12,0);
         if (pend_read(p,1,&out[b],&kind)) known|=(uint8_t)(1u<<b);
-        else if (!pend_hits(p,1) && !g_sbw_over && !sbw_hits(p,p+1) && (page<0 || !g_sbwp[page].src) && !gw_live(p,p+1) && nvn_host_readable(p,1)) {
+        else if (!pend_hits(p,1) && !g_sbw_over && !sbw_hits(p,p+1) && !(page>=0 && (g_sbwp[page].src & SBW_REPORT) && hw_sub_hits(p,p+1)) && !gw_live(p,p+1) && nvn_host_readable(p,1)) {
             out[b]=*(const uint8_t *)p; known|=(uint8_t)(1u<<b);
         }
     }
@@ -2397,7 +2406,7 @@ static void post_run(post_rec *r, uint64_t c0, uint64_t c1) {
             for (int k = 0; k < l->n; k++) { g_vis_acc += ((const uint64_t *)((__bridge id<MTLBuffer>)l->s[k].buf).contents)[l->s[k].slot]; CFRelease(l->s[k].buf); }
             free(l); if (ops[i].mode == VIS_REPORT) { uint64_t rec[2] = {g_vis_acc, gpu_ticks()}; memcpy((void *)ops[i].addr, rec, sizeof rec); }
         }
-        else { uint64_t t = rep_ticks(&ops[i], sc, seg_last, c0, c1), rec[2] = {(ops[i].type == 0 || ops[i].type == 0x10) && !DM_GAME_RENDER_COND ? t : 0, t}; memcpy((void *)ops[i].addr, rec, sizeof rec); }   // render_cond: a timestamp report's counter field is 0, as on the GPU (see rc_value)
+        else { uint64_t t = rep_ticks(&ops[i], sc, seg_last, c0, c1), rec[2] = {0, t}; memcpy((void *)ops[i].addr, rec, sizeof rec); }   // a timestamp report's counter field is 0, as on the GPU (see rc_value)
     }
     // Forwarded counter values expire once their CPU-visible reports have landed.
     // This precedes event publication so a released CPU writer is never hidden by stale knowledge.
@@ -15277,7 +15286,7 @@ void mtl_exec(const uint8_t *p) {
                 PD("Y signal_event cmd=%p dst=%p mode=%u value=%u", p, val, m, v); mtl_sub_event(val, m, v); break; }
             case OP_REPORT_COUNTER: { uint64_t t, ad; memcpy(&t, a, 8); memcpy(&ad, (const uint8_t *)a + 8, 8); g_cnt_report[t & 31]++;
                 PD("Q report type=%llu cmd=%p dst=%#llx", (unsigned long long)t, p, (unsigned long long)ad);
-                if (DM_GAME_RENDER_COND) rc_note(ad, t == 0 || t == 0x10 ? 1 : t == NVN_COUNTER_TYPE_SAMPLES_PASSED ? 2 : 3);
+                rc_note(ad, t == 0 || t == 0x10 ? 1 : t == NVN_COUNTER_TYPE_SAMPLES_PASSED ? 2 : 3);
                 if (t == NVN_COUNTER_TYPE_SAMPLES_PASSED) {
                     if (!g_vis_on) {   // a report with no reset before it: the counter runs from the queue's creation, so counting starts here (Occlusion queries)
                         g_vis_on = 1; g_vis_counting = 1; MLOG("occlusion queries: samples passed reported with no ResetCounter before it: counting from this report");
@@ -15285,7 +15294,7 @@ void mtl_exec(const uint8_t *p) {
                     hw_note(ad); post((post_op){3, NULL, VIS_REPORT, 0, ad, (uint32_t)t, vis_snapshot()}); vis_clear(); }   // written at completion, as a counter report
                 else mtl_sub_counter(ad, (uint32_t)t);
                 break; }
-            case OP_RENDER_COND: { const p_render_cond *rc = a;   // recorded only with the profile key render_cond (hle_nvn.c)
+            case OP_RENDER_COND: { const p_render_cond *rc = a;   // SetRenderEnable / SetRenderEnableConditional (hle_nvn.c)
                 if (rc->mode >= 2) { g_rc_skip = rc->mode == 3; PD("E %llu render enable %d", g_stat_pass, rc->mode == 2); }
                 else { uint64_t x = 0, y = 0; int known = rc_value(rc->addr, &x) & rc_value(rc->addr + 16, &y);
                     g_rc_skip = known && (rc->mode ? x == y : x != y);

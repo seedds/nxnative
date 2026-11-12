@@ -39,6 +39,7 @@ There is no game-specific patch and no rewriter cut. Everything else it needed i
 
 - In the doubles match on the M6 (window, 2026-11-12): frame time p50 16.67 / p95 17.3-17.9 ms, NVN submit and present about 3.4 ms, CPU about 92% of one core.
 - bymaxmarc's measurements on the M2 Max (scene loads of 110-225 ms, a 250 ms GPU frame at boot) are in [PR #2387](https://github.com/seedds/nxnative/pull/2387)'s note.
+- **Dynamic resolution.** Docked the game's output is 2560x1440; its dynamic resolution steps between that and 854x480 (2134x1200, 2048x1152, 1862x1048, 1707x960, 1536x864, 1494x840, 1397x786, 1280x720 and 1164x655 between), and agl's NDSR network upscales to 2560x1440 (`DM_UPSCALER=metalfx`: MetalFX's spatial scaler instead). Every 600 presents the log's `game upscaler input over 600 presents` line counts the frames at each input size (`none (full size)` for frames drawn without an upscale). On the pointer calibration screen (M2 Max, `DM_UPSCALER=game`, one 150 s run) most windows were at full size at a GPU p50 of about 12.4 ms, then windows at 854x480-1280x720 (one with 333 frames at 854x480) while the GPU p50 stayed 12.2-12.4 ms.
 - Out of focus the game pauses and its GPU queues wait on it for 6-10 s at a time (`[RED] queue 4: an event wait has held it …`); runs set `DM_FOCUS_KEEP=1`.
 
 ## Motion controls

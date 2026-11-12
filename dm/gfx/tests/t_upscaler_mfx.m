@@ -136,6 +136,15 @@ int main(void) { @autoreleasepool {
         CHECK(!up_mfx_encode(named) && g_up_mfx_kept == kept + 1, "an image no larger than the texture leaves the dispatch to the shader");
         mtl_wait(mtl_sub_commit(), 5000000000ull);
     }
+    if (DM_GAME_UPSCALER_N) {   // the dynamic-resolution line (up_in_note / up_in_present): the input size of the frame's upscale, noted by any named upscaler dispatch whatever DM_UPSCALER says
+        const uint32_t r[8] = {0, 0, 2133, 1199, 0, 0, 2559, 1439}; memcpy(S.push[1], r, sizeof r); atomic_store(&g_up_in_last, 0);
+        up_in_note(other);
+        CHECK(!atomic_load(&g_up_in_last), "a shader the profile does not name notes no upscale");
+        up_in_note(named);
+        CHECK(atomic_load(&g_up_in_last) == (2134u | 1200u << 16), "the named upscaler notes its input, 2134x1200");
+        up_in_present();
+        CHECK(!atomic_load(&g_up_in_last), "the present takes it: a frame without an upscale counts at full size");
+    }
     printf("t_upscaler_mfx (%s): %d checks, %d failed\n", on ? "metalfx" : "game", checks, failed);
     return failed != 0;
 }}

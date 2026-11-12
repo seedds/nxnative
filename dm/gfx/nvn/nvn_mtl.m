@@ -13821,6 +13821,7 @@ static int lc_keeps(uint32_t op) {
 
 static void dispatch(const p_dispatch *dp);
 static int up_mfx_wanted(NvShader *cs); static int up_mfx_encode(NvShader *cs);   // a game's upscaler through MetalFX (see up_mfx_encode)
+static void up_in_note(NvShader *cs);   // the game's upscaler input size, for the dynamic-resolution line (see up_in_present)
 static int ndve_engine_dispatch(NvShader *cs, const p_dispatch *dp);   // nn::ndve's movie network as the host's kernels (DM_NDVE_ENGINE=1, nvn_ndve.inc)
 // ---------- Compute dispatches moved ahead of the render pass they would split (DM_NVN_CS_HOIST) ----------
 // Metal cannot run a compute dispatch inside a render pass, so a dispatch between two draws of one pass ends it, and on a tile-based GPU every attachment is stored and loaded again:
@@ -14582,6 +14583,7 @@ static void dispatch(const p_dispatch *dp) {
     rp_flush();   // A full clear with no draw after it waits for the next pass on its targets, but it comes before this dispatch, which may read or write them as images: land it first, as copy_t2t does
     image_prepare(prog_get(S.cprog), 0x20);
     if (ndve_engine_dispatch(cs, dp)) return;   // nn::ndve's movie network as the host's kernels (DM_NDVE_ENGINE=1)
+    up_in_note(cs);
     if (up_mfx_wanted(cs) && !dp->ind && up_mfx_encode(cs)) return;   // the game's upscaler, drawn by MetalFX instead (DM_UPSCALER=metalfx)
     // Threadgroup memory past Metal's 32 KB, in a device buffer (dmsh_rewrite.py tg_spill): a slice for every workgroup of the grid. An indirect dispatch's grid is in GPU memory, written earlier
     // in the frame: the replay waits for the GPU (as an indirect-count multi-draw does, mdi_wait) and reads it. Mario Kart World's spilled dispatches are all direct, of 1 to 3 workgroups
@@ -16246,6 +16248,31 @@ static void up_mfx_read_color(NvShader *cs, const NVNshaderData *sd) {
     cs->up_color = sd->data && ncode && ncode < (1u << 24) ? up_mfx_color((const void *)(uintptr_t)sd->data, ncode) : UP_COLOR_KEEP;
     MLOG("upscaler %s: %s", cs->key, cs->up_color == UP_COLOR_LINEAR ? "linear input and output, MetalFX in HDR mode" : cs->up_color == UP_COLOR_SRGB ? "sRGB-encoded input, linear output, MetalFX in perceptual mode" : "neither of the colour shapes MetalFX draws; the game's shader runs");
 }
+// The resolution a game with an upscaler (DM_GAME_UPSCALER_KEYS) renders its scene at, frame by frame: each dispatch of a named upscaler shader notes its input rectangle (push
+// constants, as up_mfx_encode reads them) and each present takes the last one noted since the previous present, or none when the frame drew at full size. Every 600 presents one
+// line counts the frames at each size: how far the game's dynamic resolution moves, and how often the picture is upscaled at all
+static _Atomic uint32_t g_up_in_last;   // w | h << 16 of the last upscaler input since the last present, 0 = none
+static void up_in_note(NvShader *cs) {
+    if (!DM_GAME_UPSCALER_N || !up_mfx_named(cs)) return;
+    uint32_t v[4]; memcpy(v, S.push[1], sizeof v);
+    if (v[2] < 0xffff && v[3] < 0xffff) atomic_store_explicit(&g_up_in_last, (v[2] + 1) | (v[3] + 1) << 16, memory_order_relaxed);
+}
+#define UP_IN_SIZES 8
+static void up_in_present(void) {   // present thread
+    static uint32_t size[UP_IN_SIZES], count[UP_IN_SIZES], none, other, n, seen;   // seen: the game has upscaled at least once
+    if (!DM_GAME_UPSCALER_N) return;
+    uint32_t v = atomic_exchange_explicit(&g_up_in_last, 0, memory_order_relaxed); int i = 0;
+    if (!v) none++;
+    else { seen = 1; while (i < UP_IN_SIZES && count[i] && size[i] != v) i++; if (i == UP_IN_SIZES) other++; else { size[i] = v; count[i]++; } }
+    if (++n < 600) return;
+    if (seen) {
+        char line[512]; int len = snprintf(line, sizeof line, "game upscaler input over 600 presents: none (full size) %u", none);
+        for (i = 0; i < UP_IN_SIZES && count[i] && len < (int)sizeof line; i++) len += snprintf(line + len, sizeof line - len, ", %ux%u %u", size[i] & 0xffff, size[i] >> 16, count[i]);
+        if (other && len < (int)sizeof line) snprintf(line + len, sizeof line - len, ", other sizes %u", other);
+        MLOG("%s", line);
+    }
+    memset(size, 0, sizeof size); memset(count, 0, sizeof count); none = other = n = 0;   // seen stays: windows at full size are reported too once the game has upscaled
+}
 // Whether cs is one of the game's upscaler shaders, the player chose MetalFX and its colour is one MetalFX draws
 static int up_mfx_wanted(NvShader *cs) {
     if (cs->up_mfx) return cs->up_mfx == 1;
@@ -16419,6 +16446,7 @@ static double g_link_it_tin;   // Enqueue time of the frame the display-link cal
 static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t ticket, const int crop[4], id<CAMetalDrawable> supplied, double target_ts) {
     if (g_present_stall_ns) { struct timespec ts = {0, (long)g_present_stall_ns}; nanosleep(&ts, NULL); }
     g_present_n++;
+    up_in_present();
     if (bootprof() && (g_present_n == 1 || g_present_n % 120 == 0)) {
         if (g_present_n == 1) g_bp_first_present = bp_now() - g_bp_t0;
         MLOG("[bootprof] t=%.3f s present #%llu: metallibs loaded %llu / %.1f ms; pipelines created %llu / %.1f ms (all synchronous on the submit thread); prewarmed and used: shaders %llu / render pipelines %llu / compute pipelines %llu; "

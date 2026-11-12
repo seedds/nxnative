@@ -46,6 +46,7 @@ General host changes first needed here; each applies to every game:
 - **Overlapping copies in the pass dump** as the sign of a broken game allocator: [05, Intermittent rendering glitches](../../../docs/agents/05-debugging.md#intermittent-rendering-glitches).
 - **`mem_used`** for rewritten modules over 64 MB, which the NSP script now sets after the rewrite: [dm/games/README.md, Keys](../README.md#keys) and [Adding a game](../README.md#adding-a-game).
 - **A table base register that another loop holds a small constant in** (`main+0x59dc90`; the NSP script stopped at `jump table 59dc90` from e5620b1a until the fix, GitHub issue #1532): [rewriter.md](../../../docs/reference/rewriter.md#a-table-base-register-that-another-loop-holds-a-small-constant-in).
+- **Pipeline archive keys name a library by its bytes**: its sprite shaders' libraries are one file's bytes under several keys, and the archive's index named whichever Metal's shared function was noted with last, so 8 or 9 of the 28 prewarm bases were compiled again at every start: [rendering.md](../../../docs/reference/rendering.md#bases-of-byte-identical-libraries-compiled-again-at-every-start).
 - **Unity 2017.4 serialized and `Shader` formats** (`unityfs.py`, `shader_split.py`) and the rewriter's jump-table form (`patch_nso.py`), by armyja: [shaders.md, Containers by engine](../../../docs/reference/shaders.md#containers-by-engine), [Offset jump tables with the bounds check on another register](../../../docs/reference/rewriter.md#offset-jump-tables-with-the-bounds-check-on-another-register).
 
 ## Open

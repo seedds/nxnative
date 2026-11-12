@@ -5911,26 +5911,30 @@ static void pso_user_record(const char *fmt, ...) {
     if (!s || [g_pso_user_seen containsObject:s]) return;
     [g_pso_user_seen addObject:s]; fputs(line, f); fflush(f);
 }
-// Build the library from a .metallib file without permanently occupying a file descriptor: newLibraryWithURL keeps that file open for as long as the library object lives (one per game shader - of the 258 descriptors the iOS app permanently holds in a run, 213 are these,
-// while the default soft limit of an iOS process is 256; new shaders created in other acts raise it further). Here the file is mapped into memory and closed immediately, and the library is built from the in-memory data; the mapping is released when the library's data object is freed
-// A library's name that stays the same from one start to the next, for the pipeline archive's index (arch_key): the file it came from, by its path under the shader folder (an app
-// update or another container moves the folder). A pipeline from a library with no name has no key: it is looked up in the files without an index, as every pipeline was before
+// A library's name for the pipeline archive's index (arch_key): a digest of its bytes (SHA-256, first 16 bytes in hex), the same at every start and in every container. Not the file
+// it came from: Metal hands out one MTLFunction per function content, device-wide, so two shader keys whose libraries are the same bytes (Unity's sprite shaders: Cuphead's
+// c58ee1901c9eaaff, 229e46ed4370120b, bf6707736e88cca0 and 8e36438c7208b3c6 are one 23,038-byte library) share one function object, and fn4_note keeps the descriptor of whichever
+// of them was noted last. Which one that is depends on the order the prewarm's workers and the draws load them, so a key by file name changed from one start to the next and the
+// index missed bases the archive held: Cuphead compiled 8 or 9 of its 28 prewarm bases again at every start. By content, any of them gives the same key, and the pipeline is the same:
+// one compile serves them all. A library with no name (one made from source: the diagnostic overrides, embedded kernels) has no key and is looked up in the files without an index
 static char g_lib_tag;
 static id<MTLLibrary> lib_tag(id<MTLLibrary> lib, NSString *name) { if (lib && name) objc_setAssociatedObject(lib, &g_lib_tag, name, OBJC_ASSOCIATION_COPY_NONATOMIC); return lib; }
-static NSString *lib_name(NSString *path) {
-    NSString *dir = g_msl_dir ? [g_msl_dir stringByAppendingString:@"/"] : nil;
-    return dir && [path hasPrefix:dir] ? [path substringFromIndex:dir.length] : path.lastPathComponent;
+static NSString *lib_digest(const void *p, size_t n) {
+    uint8_t h[CC_SHA256_DIGEST_LENGTH]; CC_SHA256(p, (CC_LONG)n, h);
+    char hex[33]; for (int i = 0; i < 16; i++) snprintf(hex + 2 * i, 3, "%02x", h[i]);
+    return @(hex);
 }
-static id<MTLLibrary> lib_from_file_(NSString *path, NSError **err);
-static id<MTLLibrary> lib_from_file(NSString *path, NSError **err) { return lib_tag(lib_from_file_(path, err), lib_name(path)); }
-static id<MTLLibrary> lib_from_file_(NSString *path, NSError **err) {
+// Build the library from a .metallib file without permanently occupying a file descriptor: newLibraryWithURL keeps that file open for as long as the library object lives (one per game shader - of the 258 descriptors the iOS app permanently holds in a run, 213 are these,
+// while the default soft limit of an iOS process is 256; new shaders created in other acts raise it further). Here the file is mapped into memory and closed immediately, and the library is built from the in-memory data; the mapping is released when the library's data object is freed.
+// The library is tagged with its digest (lib_tag), from the mapped bytes
+static id<MTLLibrary> lib_from_file(NSString *path, NSError **err) {
     int fd = open(path.fileSystemRepresentation, O_RDONLY); struct stat st;
     if (fd < 0) {   // not in the folder: the library's image, whose one descriptor is shared, and only this file's pages are mapped
         int open_errno = errno; romfs_img *img; const img_ent *x = msl_image_file(path, &img); msl_map f;
         if (x && msl_image_map(img, x, &f)) {
             void *base = f.base; size_t base_len = f.base_len;
             dispatch_data_t d = dispatch_data_create(f.data, f.size, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ munmap(base, base_len); });
-            return [g_dev newLibraryWithData:d error:err];
+            return lib_tag([g_dev newLibraryWithData:d error:err], lib_digest(f.data, f.size));
         }
         if (!x) errno = open_errno;
     }
@@ -5938,7 +5942,7 @@ static id<MTLLibrary> lib_from_file_(NSString *path, NSError **err) {
     size_t len = (size_t)st.st_size; void *m = mmap(NULL, len, PROT_READ, MAP_PRIVATE, fd, 0); close(fd);
     if (m == MAP_FAILED) { if (err) *err = [NSError errorWithDomain:NSPOSIXErrorDomain code:errno userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"mmap failed %@", path]}]; return nil; }
     dispatch_data_t d = dispatch_data_create(m, len, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ munmap(m, len); });
-    return [g_dev newLibraryWithData:d error:err];
+    return lib_tag([g_dev newLibraryWithData:d error:err], lib_digest(m, len));
 }
 // NVN depth mode (nvnDeviceSetDepthMode): every vertex library has two entry points (dmsh_entry.py vs_depth): main0 rewrites z for the GL convention (near = -w, NVN's default),
 // main0_z leaves z as is (near = 0, which Link's Awakening, 13 Sentinels and Engage set). Loading picks by the mode the game set, so no game needs a setting for it
@@ -8351,7 +8355,7 @@ static dispatch_queue_t g_arch_q; static _Atomic int g_arch_new, g_arch_new_vd, 
 // the one file that holds the pipeline and a miss asks none. Before, a lookup asked every file in turn, about 0.06 ms each one the pipeline is not in, so each flush's file made every
 // later lookup dearer, and more than PSO_ARCH_COMPACT files made a start a compaction: one that compiles every base again (the #342 workaround, a full compile each; Ocarina of Time
 // on an M4: 8,859 bases, 762 s before the first frame, GitHub issue #1747 and PR #1880). A pipeline's key is what its Metal 4 descriptor sets, digested (SHA-256, first 8 bytes): its
-// functions by library name, entry name and constant values (lib_tag, akb_fn), the vertex layout, the colour attachments and every other field the descriptor has, so the same
+// functions by library (a digest of its bytes: lib_tag), entry name and constant values (akb_fn), the vertex layout, the colour attachments and every other field the descriptor has, so the same
 // pipeline has the same key at every start, and two that Metal tells apart have two. A field the host starts setting must go in the key too, or two pipelines that differ only there
 // share a key: the index names one's file for both, and the other misses there, is compiled and written again at every start. A key the index names a file for is looked up in that
 // file alone: a miss there (the file's binaries no longer fit this system, a library changed under the same name) compiles it, and its new file, newer, holds it from the next start
@@ -8421,20 +8425,26 @@ static uint64_t arch_key(MTL4PipelineDescriptor *d) {
     uint64_t v; memcpy(&v, h, sizeof v);
     return v ? v : 1;   // 0 means no key
 }
-// <file>.keys: "DMPSOIX1", then complete (1: every pipeline in the file has its key here) and the count (two uint32), then the keys (uint64 each)
+// <file>.keys: "DMPSOIX2", then complete (1: every pipeline in the file has its key here) and the count (two uint32), then the keys (uint64 each). "DMPSOIX1": keys that named a
+// library by its file (before lib_tag took its bytes), which no lookup computes now: such a file is reached through the index alone, so pso4_init removes it (arch_keys_old)
 static NSString *arch_keys_path(NSString *archive) { return [archive.stringByDeletingPathExtension stringByAppendingString:@".keys"]; }
 static int arch_keys_write(NSString *path, NSData *keys, int complete) {
     uint32_t head[2] = {complete != 0, (uint32_t)(keys.length / sizeof(uint64_t))};
-    NSMutableData *d = [NSMutableData dataWithBytes:"DMPSOIX1" length:8]; [d appendBytes:head length:sizeof head]; if (keys) [d appendData:keys];
+    NSMutableData *d = [NSMutableData dataWithBytes:"DMPSOIX2" length:8]; [d appendBytes:head length:sizeof head]; if (keys) [d appendData:keys];
     return [d writeToFile:path atomically:YES];   // a temporary file renamed into place
 }
 static NSData *arch_keys_read(NSString *path, int *complete) {   // nil: no index, or not one this code wrote
     NSData *d = [NSData dataWithContentsOfFile:path]; uint32_t head[2];
-    if (d.length < 16 || memcmp(d.bytes, "DMPSOIX1", 8)) return nil;
+    if (d.length < 16 || memcmp(d.bytes, "DMPSOIX2", 8)) return nil;
     memcpy(head, (const uint8_t *)d.bytes + 8, sizeof head);
     if (head[0] > 1 || d.length != 16 + (uint64_t)head[1] * sizeof(uint64_t)) return nil;
     *complete = head[0] == 1;
     return [d subdataWithRange:NSMakeRange(16, d.length - 16)];
+}
+static int arch_keys_old(NSString *path) {   // an index of keys by library file (DMPSOIX1)
+    char m[8]; int fd = open(path.fileSystemRepresentation, O_RDONLY); if (fd < 0) return 0;
+    ssize_t n = read(fd, m, sizeof m); close(fd);
+    return n == (ssize_t)sizeof m && !memcmp(m, "DMPSOIX1", 8);
 }
 // g_arch_ix: key → the newest file whose index names it, filled in pso4_init and read only after (so with no lock). g_arch_ixf: the files with a complete index, which only the
 // index leads to (it holds them; g_arch4 and g_arch4p hold the files without one, and those whose index is not complete). g_arch_run: every plain run file, in g_compact_files'
@@ -8769,6 +8779,18 @@ static void pso4_init(void) {
             }];
             for (NSString *n in all) if ([n hasSuffix:@".keys"] && ![present containsObject:[n.stringByDeletingPathExtension stringByAppendingString:@".mtl4a"]])
                 unlink([g_arch_dir stringByAppendingPathComponent:n].fileSystemRepresentation);   // an index whose file was never renamed into place (arch_write_file)
+            // A file indexed by library file names (arch_keys_old): its index promises it complete, so only a key it names leads to it, and none does now. Kept, it would be opened at
+            // every start and never asked; read as unindexed instead, every lookup that misses would ask it. So it goes, and its bases are built again once, into indexed files; a
+            // prebuild file going takes the prebuild's stamp (prebuilt.tsv) with it, so the prebuild runs again instead of leaving its bases to the draws
+            NSMutableArray<NSString *> *keep = [NSMutableArray array]; int nold = 0, pold = 0;
+            for (NSString *n in names) {
+                NSString *p = [g_arch_dir stringByAppendingPathComponent:n];
+                if (!arch_keys_old(arch_keys_path(p))) { [keep addObject:n]; continue; }
+                unlink(p.fileSystemRepresentation); unlink(arch_keys_path(p).fileSystemRepresentation); nold++; pold += [n hasPrefix:@"p"];
+            }
+            if (pold) unlink([g_arch_dir stringByAppendingPathComponent:@"prebuilt.tsv"].fileSystemRepresentation);
+            if (nold) MLOG("pipeline archive: %d files indexed by library file names removed (%d of them the prebuild's): their bases are built again once", nold, pold);
+            names = keep;
             // each file with its index, in parallel: opening one takes about 15 ms (Breath of the Wild: 52 files in 715 ms, 78 in 1.2 s, one at a time)
             NSUInteger nn = names.count; NSMutableArray *opened = [NSMutableArray arrayWithCapacity:nn], *ixs = [NSMutableArray arrayWithCapacity:nn], *why = [NSMutableArray arrayWithCapacity:nn];
             for (NSUInteger i = 0; i < nn; i++) { [opened addObject:NSNull.null]; [ixs addObject:NSNull.null]; [why addObject:NSNull.null]; }

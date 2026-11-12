@@ -4,7 +4,8 @@ import SceneKit
 import simd
 
 @MainActor final class Sensor: ObservableObject, Identifiable {
-    let id = UUID()
+    let id:UUID
+    init(id:UUID = UUID()) { self.id=id }
     var onEdit: (() -> Void)?
     @Published var axes = AxisMap() { didSet { orientation = Orientation(); onEdit?() } }
     @Published var name = "Phone" { didSet { onEdit?() } }

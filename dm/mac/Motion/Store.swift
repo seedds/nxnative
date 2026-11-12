@@ -11,7 +11,7 @@ import Combine
         do {
             let config=try DSUConfiguration.load(from:url)
             for d in config.devices {
-                let s=Sensor();s.name=d.name;s.player=d.player;s.host=d.host;s.port=String(d.port);s.slot=d.slot
+                let s=Sensor(id:d.id);s.name=d.name;s.player=d.player;s.host=d.host;s.port=String(d.port);s.slot=d.slot
                 // Switch x/right,y/forward,z/up -> preview x/right,y/up,z/back.
                 s.axes=AxisMap(x:d.axes[0],y:d.axes[2],z:-d.axes[1]);s.gyroBias=SIMD3(d.bias[0],d.bias[1],d.bias[2]);s.calibrated=d.calibrated ?? d.enabled
                 if let axes=d.displayAxes,axes.count==3 { s.axes=AxisMap(x:axes[0],y:axes[1],z:axes[2]) }

@@ -21,6 +21,7 @@ struct DSUDevice: Codable, Equatable, Identifiable {
         } && (1...8).contains(player) && (1...65535).contains(port) && (0...3).contains(slot)
             && axes.count==3 && axes.allSatisfy { (-3...3).contains($0) && $0 != 0 }
             && Set(axes.map { abs($0) })==Set([1,2,3])
+            && (displayAxes == nil || (displayAxes!.count==3 && displayAxes!.allSatisfy { (-3...3).contains($0) && $0 != 0 } && Set(displayAxes!.map { abs($0) })==Set([1,2,3])))
             && bias.count==3 && bias.allSatisfy { $0.isFinite && abs($0)<=10000 }
     }
     var environmentValue: String? {

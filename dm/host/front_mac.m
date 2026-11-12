@@ -241,8 +241,9 @@ static void pro_players_changed(GCController *gone) {
 static void pro_devices_changed(void) { pro_players_changed(nil); }
 // DM_PAD_PRESS_TO_JOIN=1: a controller is no player until one of its buttons is pressed, then it is the lowest player free, as a console's "press a button" screen.
 // Whatever the port, the order of connection or the link (Bluetooth has no port), and for identical pads too: so the players pick their own order. Not with DM_PAD_MERGE
+// A raw HID pad joins this way without the setting too (hidpad_first_press), and then takes its slot as a connecting controller does (pad_slot_take)
 static int pad_join(const void *owner, const char *name) {
-    int p = pad_slot_take_lowest(&g_slots, owner, name); char nb[16];
+    int p = g_press_to_join ? pad_slot_take_lowest(&g_slots, owner, name) : pad_slot_take(&g_slots, owner, name); char nb[16];
     if (p < 0) { LOG("controller '%s': a button pressed, but all %d players are taken", name, DM_PLAYERS); return -1; }
     npad_name(p, nb, sizeof nb); LOG("controller '%s': a button pressed: player %d (npad %s)", name, p + 1, nb);
     dm_pad_players(pad_slot_mask(&g_slots));
@@ -349,19 +350,24 @@ static void input_resume(void) {
     pads_reread();
 }
 // Raw HID gamepads (pad_hid_mac.h): a player slot each, as a GameController controller, named by the device's product name. Identical pads that GameController lists
-// fewer of are read the same way, an identical Pro Controller from its report 0x30
+// fewer of are read the same way, an identical Pro Controller from its report 0x30.
+// A HID device that declares a GamePad or Joystick collection only claims to be a controller: a keyboard and mouse receiver can declare one and never send a report through it
+// (a Keychron Link, 3434:d030, GitHub issue #1657), and nothing in its descriptor tells it from a pad at rest. So a raw HID pad is a player from its first button press, not
+// from its connection, with or without DM_PAD_PRESS_TO_JOIN: a device that never presses takes no player from a real controller. An identical pad (twin) is a model
+// GameController lists, so it is a player at its connection unless the setting is on
+static int hidpad_first_press(const hid_pad *d) { return !g_merge && (g_press_to_join || !d->twin); }
 static void hidpad_read(hid_pad *d) {
     if (!g_input_on || hq_blocks_input(g_hq.phase)) return;
     int p = g_merge ? 0 : pad_slot_of(&g_slots, d);
     int pro = d->twin && hidpad_is_pro(d);
-    if (p < 0 && (!g_press_to_join || !(pro ? d->pro_m : pad_hid_buttons(&d->st)) || (p = pad_join(d, d->name)) < 0)) return;   // DM_PAD_PRESS_TO_JOIN=1: joins at its first button
+    if (p < 0 && (!hidpad_first_press(d) || !(pro ? d->pro_m : pad_hid_buttons(&d->st)) || (p = pad_join(d, d->name)) < 0)) return;   // joins at its first button
     if (cp_poll()) return;   // the controller applet's prompt has the controllers
     if (pro) { pad_set(p, d->pro_m, d->pro_s[0], d->pro_s[1], d->pro_s[2], d->pro_s[3]); return; }
     int32_t s[4]; pad_hid_sticks(&d->st, s);
     pad_set(p, pad_hid_buttons(&d->st), s[0], s[1], s[2], s[3]);
 }
 static void hidpad_attach(hid_pad *d) {
-    if (g_press_to_join && !g_merge) { LOG("controller '%s' (HID) connected: press a button to play (DM_PAD_PRESS_TO_JOIN)", d->name); hidpad_read(d); return; }
+    if (hidpad_first_press(d)) { LOG("controller '%s' (HID) connected: press a button to play%s", d->name, g_press_to_join ? " (DM_PAD_PRESS_TO_JOIN)" : ""); hidpad_read(d); return; }
     int p = g_merge ? 0 : pad_slot_take(&g_slots, d, d->name); char nb[16];
     if (p < 0) { LOG("controller '%s' (HID) connected: all %d players are taken, not used", d->name, DM_PLAYERS); return; }
     npad_name(p, nb, sizeof nb); LOG("controller '%s' (HID) connected: player %d (npad %s)", d->name, p + 1, nb);
@@ -407,13 +413,14 @@ static void s2pad_read(s2_pad *d) {
     if (m) merge_rumble_to_s2(1);
     pad_set(p, m, s[0], s[1], s[2], s[3]);
 }
-static void s2pad_attach(s2_pad *d) {
-    if (g_press_to_join && !g_merge) { LOG("controller '%s' (Bluetooth) connected: press a button to play (DM_PAD_PRESS_TO_JOIN)", d->name); cp_poll(); return; }
+static int s2pad_attach(s2_pad *d) {   // 1: kept (a player, or waiting for its first button press); 0: no free player (pad_switch2_apple.h)
+    if (g_press_to_join && !g_merge) { LOG("controller '%s' (Bluetooth) connected: press a button to play (DM_PAD_PRESS_TO_JOIN)", d->name); cp_poll(); return 1; }
     int p = g_merge ? 0 : pad_slot_take(&g_slots, d, d->name); char nb[16];
-    if (p < 0) { LOG("controller '%s' (Bluetooth) connected: all %d players are taken, not used", d->name, DM_PLAYERS); return; }
+    if (p < 0) { LOG("controller '%s' (Bluetooth) connected: all %d players are taken, not used", d->name, DM_PLAYERS); return 0; }
     npad_name(p, nb, sizeof nb); LOG("controller '%s' (Bluetooth) connected: player %d (npad %s)", d->name, p + 1, nb);
     if (!g_merge) { dm_pad_players(pad_slot_mask(&g_slots)); dm_haptics_apple_set_sink(p, dm_switch2_rumble); }   // its rumble goes over Bluetooth, not to a Core Haptics engine
     cp_poll();   // one controller fewer to wait for
+    return 1;
 }
 static void s2pad_detach(s2_pad *d) {   // d is already off g_s2pads
     if (g_merge) {

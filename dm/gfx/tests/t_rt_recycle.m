@@ -1,6 +1,7 @@
-// Recycled render-target memory (nvn_mtl.m rh_texture, GitHub issue #1831): a shared render target in a GPU-only pool is made in a placement heap of its own; once its texture is
-// freed the heap stays resident and the next target it fits (up to an eighth larger) is placed in it, cleared as a new allocation is. Heaps that wait too long leave the residency
-// set when a submission begins. CPU-visible pools, textures without COMPRESSIBLE and DM_NVN_RT_RECYCLE=0 keep allocations of their own.
+// Recycled texture memory (nvn_mtl.m rh_texture, rh_place, GitHub issues #1831, #1823): a shared texture in a GPU-only pool is made in a placement heap of its own, an eighth larger
+// than the texture; once its texture is freed the heap stays resident, and the smallest waiting heap that fits, up to half as large again, takes the next texture, cleared as a new
+// allocation is: one a step of Metal's sizes larger included, COMPRESSIBLE or not. Same-pass feedback snapshots draw from the same heaps. Heaps that wait too long leave the
+// residency set when a submission begins. CPU-visible pools, block-compressed textures and DM_NVN_RT_RECYCLE=0 keep allocations of their own.
 #include "../nvn/nvn_mtl.m"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
@@ -53,6 +54,8 @@ int main(void) { @autoreleasepool {
         CHECK(ta && ta.heap && ta.width == 640 && ta.height == 360, "a GPU-only pool's target is placed in a heap of its own, at its own size");
         CHECK(resident(ta.heap) && !resident(ta), "its heap is what the residency set holds");
         CHECK(g_rh_made == 1 && g_rh_reused == 0, "a new heap is counted as made");
+        MTLSizeAndAlign need = [g_dev heapTextureSizeAndAlignWithDescriptor:tex_desc(&a, 0)];
+        CHECK(ta.heap.size >= need.size + need.size / 8, "the heap is made an eighth larger than its first target");
         fill(ta, 0x5a);
         first_heap = ta.heap;
         ta = nil; mtl_tex_release(&a); mtl_alias_drop_pool(&pool);   // the pool goes: the sharing table lets its texture go (deferred)
@@ -79,13 +82,15 @@ int main(void) { @autoreleasepool {
         CHECK(td && td.heap && g_rh_made == 3 && waiting() == 2, "a much smaller target leaves the waiting heaps alone");
         td = nil; mtl_tex_release(&d); mtl_alias_drop_pool(&pool); settle();
     }
-    {   // outside: a CPU-visible pool, a texture without COMPRESSIBLE
+    {   // outside: a CPU-visible pool; inside: a texture without COMPRESSIBLE
         pool_t cpu = pool; cpu.flags = NVN_MEMORY_POOL_FLAGS_CPU_CACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED | NVN_MEMORY_POOL_FLAGS_COMPRESSIBLE;
         tex_t e = target(&cpu, 95005, 0, 640, 360); mtl_tex_init(&e);
         CHECK(tex_mtl(&e) && !tex_mtl(&e).heap, "a CPU-visible pool's texture keeps its own allocation");
-        tex_t f = target(&pool, 95006, 24 << 20, 640, 360); f.d.flags = 0; mtl_tex_init(&f);
-        CHECK(tex_mtl(&f) && !tex_mtl(&f).heap, "a texture without COMPRESSIBLE keeps its own allocation");
-        mtl_tex_release(&e); mtl_tex_release(&f); mtl_alias_drop_pool(&cpu); mtl_alias_drop_pool(&pool); settle();
+        tex_t f = target(&pool, 95006, 24 << 20, 644, 360); f.d.flags = 0; mtl_tex_init(&f);   // one step of Metal's sizes above the first target (1,982,464 -> 2,179,072 bytes on an M6)
+        CHECK(tex_mtl(&f) && tex_mtl(&f).heap == first_heap, "a texture without COMPRESSIBLE, a size step larger than the heap's first target, takes the waiting heap");
+        tex_t g = target(&pool, 95008, 32 << 20, 512, 512); g.d.flags = 0; g.d.format = NVN_FORMAT_RGBA_DXT1; nvn_tex_layout(&g.d, &g.L); mtl_tex_init(&g);
+        CHECK(tex_mtl(&g) && !tex_mtl(&g).heap, "a block-compressed texture (an asset, never rendered to) keeps its own allocation");
+        mtl_tex_release(&e); mtl_tex_release(&f); mtl_tex_release(&g); mtl_alias_drop_pool(&cpu); mtl_alias_drop_pool(&pool); settle();
     }
     unsigned before = waiting();
     CHECK(before == 3, "three heaps wait");
@@ -93,6 +98,13 @@ int main(void) { @autoreleasepool {
     mtl_sub_commit(); mtl_drain(); mtl_sub_begin();   // rh_trim
     CHECK(waiting() == 0 && g_rh_trimmed == before && g_rh_bytes == 0, "heaps that waited too long are freed when a submission begins");
     CHECK(!first_heap || !resident(first_heap), "and leave the residency set");
+    {   // a same-pass feedback snapshot is placed in recycled memory, and its heap waits once the snapshot goes
+        int fresh = 0; uint64_t made = g_rh_made; fb_cache_t *e = fb_snap(95007, 0, 0, MTLPixelFormatRGBA16Float, 640, 360, 1, &fresh);
+        CHECK(e && fresh && e->snap.heap && g_rh_made == made + 1 && resident(e->snap.heap), "a snapshot is placed in a recycled heap, resident");
+        if (e) { defer_obj_release(e->snap); e->snap = nil; e->ser = 0; }
+        settle();
+        CHECK(waiting() == 1, "its heap waits once the snapshot is freed");
+    }
     mtl_sub_commit(); mtl_drain(); free(mem);
     printf("t_rt_recycle: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

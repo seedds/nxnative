@@ -87,6 +87,64 @@ int main(void) {
             h_vkDestroyImageView(dev, sv, NULL); h_vkDestroyImage(dev, im, NULL);
         }
     }
+    // A combined image sampler copied into a binding with an immutable sampler takes the source's image and keeps the destination's sampler, as a write does
+    @autoreleasepool {
+        VkSamplerCreateInfo sci = {.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .magFilter = VK_FILTER_LINEAR, .minFilter = VK_FILTER_LINEAR};
+        VkSampler sa, sb; h_vkCreateSampler(dev, &sci, NULL, &sa);
+        sci.magFilter = sci.minFilter = VK_FILTER_NEAREST; h_vkCreateSampler(dev, &sci, NULL, &sb);
+        CHECK(sa->s && sb->s && sa->s != sb->s, "two distinct sampler states");
+        VkImageCreateInfo ici = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = VK_FORMAT_R8G8B8A8_UNORM, .extent = {4, 4, 1},
+                                 .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = VK_IMAGE_USAGE_SAMPLED_BIT};
+        VkImage im; h_vkCreateImage(dev, &ici, NULL, &im);
+        VkImageViewCreateInfo vci = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = im, .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = VK_FORMAT_R8G8B8A8_UNORM,
+                                     .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+        VkImageView view; h_vkCreateImageView(dev, &vci, NULL, &view);
+        VkDescriptorSetLayoutBinding lsrc = {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL},
+                                     ldst = {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, &sb};
+        VkDescriptorSetLayoutCreateInfo lci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 1, .pBindings = &lsrc};
+        VkDescriptorSetLayout Ls[2]; h_vkCreateDescriptorSetLayout(dev, &lci, NULL, &Ls[0]);
+        lci.pBindings = &ldst; h_vkCreateDescriptorSetLayout(dev, &lci, NULL, &Ls[1]);
+        VkDescriptorPool cp; VkDescriptorPoolCreateInfo pci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 2};
+        h_vkCreateDescriptorPool(dev, &pci, NULL, &cp);
+        VkDescriptorSetAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, .descriptorPool = cp, .descriptorSetCount = 2, .pSetLayouts = Ls};
+        VkDescriptorSet sets[2]; h_vkAllocateDescriptorSets(dev, &ai, sets);
+        CHECK(sets[1]->d[0].smp == sb->s, "the destination starts with its immutable sampler");
+        VkDescriptorImageInfo ii = {sa, view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        VkWriteDescriptorSet w = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = sets[0], .descriptorCount = 1,
+                                  .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ii};
+        VkCopyDescriptorSet c = {.sType = VK_STRUCTURE_TYPE_COPY_DESCRIPTOR_SET, .srcSet = sets[0], .dstSet = sets[1], .descriptorCount = 1};
+        h_vkUpdateDescriptorSets(dev, 1, &w, 1, &c);
+        CHECK(sets[0]->d[0].tex == view->tex && sets[0]->d[0].smp == sa->s, "the source holds the view and its own sampler");
+        CHECK(sets[1]->d[0].tex == view->tex, "the copy takes the source's image");
+        CHECK(sets[1]->d[0].smp == sb->s, "the copy keeps the destination's immutable sampler");
+        c.srcSet = sets[1]; c.dstSet = sets[0]; ii.sampler = NULL;
+        w.dstSet = sets[0]; h_vkUpdateDescriptorSets(dev, 1, &w, 0, NULL);   // the source sampler cleared, then the immutable one copied back into the mutable binding
+        h_vkUpdateDescriptorSets(dev, 0, NULL, 1, &c);
+        CHECK(sets[0]->d[0].smp == sb->s, "a copy out of an immutable binding carries its sampler into a mutable one");
+        // An array copy that runs on into the next binding (Vulkan's consecutive bindings): source elements 1-3 of one mutable binding of 4, each with its own image and
+        // sampler, into the last element of an immutable binding of 2 and the 2 of the mutable binding after it: per element, the immutable one keeps its sampler
+        VkImageView views[4]; VkSampler smp[4];
+        for (int k = 0; k < 4; k++) { h_vkCreateImageView(dev, &vci, NULL, &views[k]); sci.magFilter = sci.minFilter = k & 1 ? VK_FILTER_NEAREST : VK_FILTER_LINEAR; sci.maxLod = (float)k; h_vkCreateSampler(dev, &sci, NULL, &smp[k]); }
+        VkSampler imm2[2] = {sb, sb};
+        VkDescriptorSetLayoutBinding asrc = {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4, VK_SHADER_STAGE_FRAGMENT_BIT, NULL},
+                                     adst[2] = {{0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2, VK_SHADER_STAGE_FRAGMENT_BIT, imm2}, {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2, VK_SHADER_STAGE_FRAGMENT_BIT, NULL}};
+        VkDescriptorSetLayout La[2]; lci.bindingCount = 1; lci.pBindings = &asrc; h_vkCreateDescriptorSetLayout(dev, &lci, NULL, &La[0]);
+        lci.bindingCount = 2; lci.pBindings = adst; h_vkCreateDescriptorSetLayout(dev, &lci, NULL, &La[1]);
+        VkDescriptorPool ap; h_vkCreateDescriptorPool(dev, &pci, NULL, &ap);
+        ai.descriptorPool = ap; ai.pSetLayouts = La; VkDescriptorSet as[2]; h_vkAllocateDescriptorSets(dev, &ai, as);
+        VkDescriptorImageInfo infos[4]; for (int k = 0; k < 4; k++) infos[k] = (VkDescriptorImageInfo){smp[k], views[k], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        VkWriteDescriptorSet aw = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = as[0], .descriptorCount = 4, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = infos};
+        VkCopyDescriptorSet ac = {.sType = VK_STRUCTURE_TYPE_COPY_DESCRIPTOR_SET, .srcSet = as[0], .srcArrayElement = 1, .dstSet = as[1], .dstBinding = 0, .dstArrayElement = 1, .descriptorCount = 3};
+        h_vkUpdateDescriptorSets(dev, 1, &aw, 1, &ac);
+        CHECK(as[1]->d[0].tex == nil && as[1]->d[0].smp == sb->s, "element 0 of the immutable binding, not copied into, is untouched");
+        CHECK(as[1]->d[1].tex == views[1]->tex && as[1]->d[1].smp == sb->s, "element 1 of the immutable binding takes source element 1's image and keeps its sampler");
+        CHECK(as[1]->d[2].tex == views[2]->tex && as[1]->d[2].smp == smp[2]->s, "the copy runs on into the next binding, which takes source element 2's image and sampler");
+        CHECK(as[1]->d[3].tex == views[3]->tex && as[1]->d[3].smp == smp[3]->s, "and source element 3's");
+        h_vkDestroyDescriptorPool(dev, ap, NULL);
+        for (int k = 0; k < 4; k++) { h_vkDestroyImageView(dev, views[k], NULL); h_vkDestroySampler(dev, smp[k], NULL); }
+        h_vkDestroyDescriptorPool(dev, cp, NULL); h_vkDestroyImageView(dev, view, NULL); h_vkDestroyImage(dev, im, NULL);
+        h_vkDestroySampler(dev, sa, NULL); h_vkDestroySampler(dev, sb, NULL);
+    }
     printf("Vulkan descriptors: %d checks, %d failed\n", checks, fails);
     return fails != 0;
 }

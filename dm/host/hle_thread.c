@@ -788,21 +788,28 @@ static int svc_thread_impl(int num, uint64_t *regs);
 // Waits under 2 ms are handoffs between threads that do work; waits beyond it are limiters and idle polls. Returns the sleep for a yield whose run started `run_ns` ago (0 = plain yield);
 // a clock wait (`clock`, thr_yield) has no start: it waits for a time, not for another thread, and sleeps from its first yield on.
 // DM_YIELD_BACKOFF=0 turns it off; DM_YIELD_BACKOFF=<cap µs>[:<start µs>] sets the cap and the run length after which it starts (default 250:2000)
+static int64_t g_bo_cap = -1, g_bo_start = 2000000;
+static void backoff_init(void) {
+    if (g_bo_cap >= 0) return;
+    const char *e = getenv("DM_YIELD_BACKOFF"); g_bo_cap = 250000;
+    if (e && *e) { g_bo_cap = atoll(e) * 1000; const char *c = strchr(e, ':'); if (c) g_bo_start = atoll(c + 1) * 1000; }
+    if (!g_bo_cap) LOG("DM_YIELD_BACKOFF=0: no back-off on repeated yields (plain sched_yield spin)"); else if (e && *e) LOG("DM_YIELD_BACKOFF: back off after %lld µs of repeated yields, sleeping at most %lld µs at a time", (long long)(g_bo_start / 1000), (long long)(g_bo_cap / 1000));
+}
+// The back-off's longest sleep (0: off)
+static uint64_t yield_backoff_cap(void) { backoff_init(); return (uint64_t)g_bo_cap; }
 static uint64_t yield_backoff_ns(uint64_t run_ns, int clock) {
-    static int64_t cap = -1, start = 2000000;
-    if (cap < 0) { const char *e = getenv("DM_YIELD_BACKOFF"); cap = 250000;
-        if (e && *e) { cap = atoll(e) * 1000; const char *c = strchr(e, ':'); if (c) start = atoll(c + 1) * 1000; }
-        if (!cap) LOG("DM_YIELD_BACKOFF=0: no back-off on repeated yields (plain sched_yield spin)"); else if (e && *e) LOG("DM_YIELD_BACKOFF: back off after %lld µs of repeated yields, sleeping at most %lld µs at a time", (long long)(start / 1000), (long long)(cap / 1000)); }
-    if (!cap || (!clock && run_ns < (uint64_t)start)) return 0;
+    backoff_init();
+    if (!g_bo_cap || (!clock && run_ns < (uint64_t)g_bo_start)) return 0;
     uint64_t s = run_ns / 8; if (s < 10000) s = 10000;
-    return s < (uint64_t)cap ? s : (uint64_t)cap;
+    return s < (uint64_t)g_bo_cap ? s : (uint64_t)g_bo_cap;
 }
 static void sleep_precise(uint64_t dl);
+// One back-off sleep of bo ns, counted for the power line
+static void backoff_sleep(thr_t *me, uint64_t bo) { me->nbackoff++; me->sleeping = 1; struct timespec ts = {0, (long)bo}; nanosleep(&ts, 0); me->sleeping = 0; }
 // sched_yield, or a short sleep once the wait has lasted run_ns past the back-off's start
 static void yield_for(thr_t *me, uint64_t run_ns, int clock) {
     uint64_t bo = yield_backoff_ns(run_ns, clock);
-    if (bo) { me->nbackoff++; me->sleeping = 1; struct timespec ts = {0, (long)bo}; nanosleep(&ts, 0); me->sleeping = 0; }
-    else sched_yield();
+    if (bo) backoff_sleep(me, bo); else sched_yield();
 }
 // One yield SVC of the calling thread (me may be NULL); regs = the guest registers at the SVC.
 // A run of yields is a wait only while the loop makes no progress: it also starts again when the caller's callee-saved registers x19–x28 differ from the last yield's. The SDK's
@@ -929,6 +936,23 @@ static void poll_wait_end(int64_t ns, int64_t r) {
     thr_t *me = pthread_getspecific(g_keythr); if (!me) return;
     if (r == R_TIMEOUT) me->poll_ret = now_ns(); else me->yrun_svc = 0;
 }
+// Short sleeps as polls. A loop that sleeps a few tens of microseconds between checks of a flag polls: on the Switch such a sleep costs little, here each one wakes a host
+// core. Unity 6's job workers do it while idle (Hollow Knight: Silksong, main+0xbd99e0: SleepThread of a global 25 µs between looks at the job queue, or a yield, by another global),
+// about 25,000 times a second from one worker, which kept a performance core awake (CPU 22% of a core, 29,000 wakeups a second on the Mac). A sleep shorter than the back-off's
+// longest sleep (yield_backoff_cap, 250 µs; DM_YIELD_BACKOFF sets both) is a step of the run of yields, as a short timed wait is (poll_wait_begin): it continues the run when the SVC
+// before it was one of the run's steps and under SPIN_GAP_NS of guest work came after it, and once the run has lasted the back-off's start (2 ms) it sleeps the back-off's length
+// when that is longer (one nanosleep). A loop that does work between its sleeps starts a new run each time, and the first 2 ms of a wait (a handoff between threads) keep the
+// guest's own sleep. Not a clock wait (clock_wait): a loop that sleeps until a time it reads is lengthened the same way, up to the cap late (no such game is known)
+void dm_guest_sleep_ns(int64_t ns);
+static void poll_sleep(thr_t *me, int64_t ns) {
+    uint64_t now = now_ns();
+    if (me->yrun_svc + 1 != me->nsvc || now - me->poll_ret > SPIN_GAP_NS) me->yrun_t0 = now;   // a new run
+    me->yrun_svc = me->nsvc;
+    uint64_t bo = yield_backoff_ns(now - me->yrun_t0, 0);
+    if (bo > (uint64_t)ns) { me->nyield++; backoff_sleep(me, bo); }
+    else dm_guest_sleep_ns(ns);
+    me->poll_ret = now_ns();
+}
 // The threads that yielded or passed through spin waits most since the last call (the power line every 300 frames, hle_nvn.c): "handle name N (back-off sleeps M)", at most two,
 // N the yields (spin wait passes that yielded among them), with the clock waits' yields among them ("; clock waits C"), the spin wait passes and the last one's site ("; spin passes K, last at main+0x…")
 void dm_yield_top(char *out, size_t n) {
@@ -1049,14 +1073,16 @@ static int svc_thread_impl(int num, uint64_t *regs) {
     case 0x0A: thread_exit(cur()); return 1;
     case 0x0B: {  // SleepThread(x0 ns); 0/-1/-2 = the various kinds of yield
         int64_t ns = (int64_t)regs[0];
+        thr_t *me = pthread_getspecific(g_keythr);
         // A sleep, and YieldToAnyThread (-2), which takes the thread off its core so that lower-priority threads run there, end its part in a handoff;
         // the other yields (0, -1) pass the core only to threads of its own priority or higher
-        if (ns > 0 || ns == -2) { thr_t *me = pthread_getspecific(g_keythr); if (me && me->nhand) { pthread_mutex_lock(&G); hand_leave(me); pthread_mutex_unlock(&G); } }
-        if ((ns > 0 && dm_detclock_enabled()) || ns >= 20000) dm_guest_sleep_ns(ns);
+        if ((ns > 0 || ns == -2) && me && me->nhand) { pthread_mutex_lock(&G); hand_leave(me); pthread_mutex_unlock(&G); }
+        if (me && ns >= 20000 && (uint64_t)ns < yield_backoff_cap() && !dm_detclock_enabled()) poll_sleep(me, ns);   // a short sleep: a poll
+        else if ((ns > 0 && dm_detclock_enabled()) || ns >= 20000) dm_guest_sleep_ns(ns);
         // Yield (0 / -1 / -2), and sleeps shorter than 20 µs, which sleep_precise would return from at once: Super Mario Galaxy's Hagi polls with SleepThread(100 ns) (main+0x517c),
         // which kept a core at 100% (1.4 billion calls in 200 s); as yields they get the back-off below.
         // Count and time of the main thread's yields are recorded: a render task graph's "wait for everything to finish" is often pure polling + yield; measure how much of a frame it takes
-        else thr_yield(pthread_getspecific(g_keythr), regs);
+        else thr_yield(me, regs);
         return 1;
     }
     case 0x0C: { pthread_mutex_lock(&G); thr_t *t = h_get((uint32_t)regs[1], O_THREAD);

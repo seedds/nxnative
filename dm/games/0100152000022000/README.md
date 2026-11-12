@@ -10,11 +10,12 @@ Brought up on the Mac from 4.0.0: boot, the title with its demo race, the Mii pi
 
 | Setting | Where | Why |
 |---|---|---|
-| `render_cond on` | [`game.tsv`](game.tsv) | the race records `SetRenderEnableConditional` as a course loads: evaluated at replay, as on the GPU (drawn anyway, the same race route at the same frames looked the same; evaluated is NVN's behaviour) |
 | 4 GB layout: `mem_reserve 0x100000000`, `mem_alias 0x10000000`, `mem_stack 0x10000000`, `app_pool 0xCD500000` | `game.tsv` | no virtual address memory: the game sets a 3.03 GB heap (pool − 64 MB) in the 3.25 GB heap region |
 | `sys_resource 0x0` | `game.tsv` | the NPDM declares 0 MB of system resource: `IsVirtualAddressMemoryEnabled` is false, as on Horizon |
 | `modules main subsdk0 sdk` | `game.tsv` | every module `main` imports from |
 | `shader_groups` (`/MapObj/`, `/Course/`, `/UI/`, `/Kart/`, `/Driver/`, …) | `game.tsv` | the shader split's groups; see [Files and shaders](#files-and-shaders) |
+
+Render conditions, which the host evaluates for every game ([Conditional rendering evaluated at replay](../../../docs/reference/rendering.md#conditional-rendering-evaluated-at-replay); until 2026-11-12 the profile key `render_cond`): the race records `SetRenderEnableConditional` as a course loads: evaluated at replay, as on the GPU (drawn anyway, the same race route at the same frames looked the same; evaluated is NVN's behaviour).
 
 ## Miis
 
@@ -41,7 +42,7 @@ The game builds Mii heads from the console's MiiModel system data, starting at b
 ## Rendering
 
 - **Resolved: a 2D array in a cube slot.** As a race loads, the game binds a one-layer 2D array (format 0x44) at slot 10 of two pixel shaders that declare a cube there, and it was bound as is (`texture type mismatch … declares slot 10 as Metal type 5, texture … is type 3`). The zero cube is now bound for a 2D array of fewer than six layers in a cube slot (`tex_fit`).
-- The race records conditional rendering as a course loads; `render_cond on` evaluates it at replay.
+- The race records conditional rendering as a course loads; the host evaluates it at replay.
 
 ## Files and shaders
 

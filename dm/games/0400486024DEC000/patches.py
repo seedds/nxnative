@@ -52,7 +52,7 @@ def frame_step(ctx):
 # The function is a leaf: x2..x11, x16, x17 and s0..s2 are free, w0 its only result (the original also stores its predicted cost at +0x18, which only it and the update's own
 # decision read). The update's fingerprint is required too: +0x8 and +0x174 are its fields
 drs_controller = (   # drs_stub.s, assembled with clang; x0 the controller, x16 the state page (the ADRP before it)
-    0xb9404211, 0x35000071, 0x2a1f03e0, 0xd65f03c0,                                                   # off (state +0x40 0): level 0
+    0xb9404211, 0x35000071, 'DRS_OFF_B', 0xd65f03c0,                                                    # off (state +0x40 0): level 0 at the render scale (the block at the end)
     0xbd400800, 0xbd401001, 0xb9417402, 0xb941a003, 0x7100005f, 0x1a9fa042, 0x528001e9, 0x6b09005f,   # load, threshold, level (0..15), count
     0x1a89d042, 0xb9420204, 0x11000484, 0xb9020204, 0xb9420605, 0xb9420a06, 0x6b0200bf, 0x1a8617e6,   # calls + 1; calls at this level
     0xb9020602, 0xb9020a06, 0x35000046, 0xb9020e1f, 0x91084207, 0x91094208, 0x710020df, 0x5400040b,   # a new level: none over; under 8 calls: stay
@@ -60,7 +60,13 @@ drs_controller = (   # drs_stub.s, assembled with clang; x0 the controller, x16 
     0xbc2258e0, 0xb8225904, 0x51000469, 0x1100044a, 0x6b09015f, 0x1a89d140, 0xd65f03c0,               # 8 in a row: record it, down one (to the floor)
     0xb9020e1f, 0xbc2258e0, 0xb8225904, 0x34000182, 0x51000449, 0xb869590a, 0x340000ea, 0x4b0a008a,   # fits: record it; at 0 stay; the level above's record
     0x7109615f, 0x54000088, 0xbc6958e2, 0x1e212040, 0x540000aa, 0x2a0903e0, 0xd65f03c0,               # never, stale or fitting: up one
-    0x2a1f03e0, 0xd65f03c0, 0x2a0203e0, 0xd65f03c0)                                                   # 0; or stay
+    0x2a1f03e0, 0xd65f03c0, 0x2a0203e0, 0xd65f03c0,                                                   # 0; or stay
+    # off, level 0 at the host's render scale (state +0x10, DM_RENDER_SCALE): its scale (the list's first entry, [first + -8]; head +0x198, end +0x190) = the game's own (kept at
+    # state +0x2a0 on the first call) x the render scale, at most 1.0, the native size of the output. 1.0, the default, writes the game's own back
+    0xf940cc03, 0x91064004, 0xeb04007f, 0x540001a0, 0xbd42a201, 0x1e202028, 0x54000061, 0xbc5f8061,   # first entry (none: level 0); the game's scale, kept once
+    0xbd02a201, 0xbd401200, 0x1e202008, 0x540000ad, 0x1e200821, 0x1e2e1002, 0x1e227821, 0xbc1f8061,   # x the render scale (0 or less: as it is), at most 1.0
+    0x2a1f03e0, 0xd65f03c0)                                                                           # level 0
+drs_controller = tuple(0x14000000 | (len(drs_controller) - 18 - 2) if w == 'DRS_OFF_B' else w for w in drs_controller)   # b +((n-18)-2) words: the off block, the last 18
 def dynamic_resolution(ctx):
     here, emit, fs_site, fs_put, FS_STATE_OFF = ctx.here, ctx.emit, ctx.site, ctx.put, ctx.state
     site = ctx.others.get('dynamic resolution')
@@ -70,6 +76,7 @@ def dynamic_resolution(ctx):
     for w in drs_controller: emit(w)
     fs_put(site, [B(site, start)], 'dynamic resolution level: 0 (full resolution), or with state +0x40 (DM_DYNAMIC_RESOLUTION) a climb on the load measured at each level')
     ctx.capabilities.add('DYNAMIC_RESOLUTION')
+    ctx.render_scale = 2   # DM_RENDER_SCALE up to 2.0 of level 0 (0.75 of the output: 1.333 is native); the stub holds it at 1.0 of the output
 
 MATCH_FRAME_STEP = {'main': [
     {'name': 'frame ratio from the host\'s step', 'size': 0x9b4, 'fingerprints': ['6ae2aff5344d14568e4dbaf93455e2d8278384bf892ed6c6eca87fef98fbcd1d'], 'stub': frame_step,   # v131072 main+0x6e6be0

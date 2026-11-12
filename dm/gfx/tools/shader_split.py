@@ -2184,6 +2184,15 @@ def phyre_shaders(d, label):
     return out
 
 
+def phyre_main(d, label, files):
+    """A PhyreEngine game's main holds the engine's built-in programs in Phyre's own form, the code area right before its control section, unaligned and with no RYHP container
+    (FFXII TZA: 23 programs at main+0xfc3e13 to +0xfd5d88, among them the UI's and the cutscenes' composite passes; each pair 9 bytes after the last). Nothing points at them in a form
+    raw_shaders follows (no data record, no adrp + add to either part), so before this they were left out with a red line each and drew nothing. Read only for a game whose files are
+    Phyre's (a .vbf archive or a .phyre effect), so other games' mains are not searched for this form."""
+    if not any(r.lower().endswith(('.vbf', '.phyre')) for _, r in files): return []
+    return phyre_shaders(d, label)
+
+
 def raw_shaders(d, label, known=()):
     """Control sections in main that are in no GLSLC output and no BNSH file: a shader compiled offline whose control section and code area the code hands to nvnShaderData itself (Advance Wars 1+2:
     Re-Boot Camp, Unity 2020.2 with Bink 2: the movie player's 32: 2 vertex, 22 pixel and 8 compute shaders; without them its movies drew white). Most are 0x20-byte records in data {code area
@@ -3412,6 +3421,7 @@ def main():
         found += tfxo_streams(img, 'main' + ('@' + tag if tag else ''))   # YEBIS's effect file, a zlib stream in main (Pokémon Sword)
         found += retro_main_forms(img, 'main' + ('@' + tag if tag else ''))   # Retro's startup material archive, LZSS in main (Donkey Kong Country: Tropical Freeze)
         if RGXD in img: found += rgxd_shaders(img, 'main' + ('@' + tag if tag else ''))   # RAGE's built-in effects (Red Dead Redemption: 20 in main's data, 168 shaders that shaders.rpf lacks)
+        found += phyre_main(img, 'main' + ('@' + tag if tag else ''), files)   # PhyreEngine's built-in programs, code area right before the control section (FFXII TZA: 23)
         found += raw_shaders(img, 'main' + ('@' + tag if tag else ''), {c[:struct.unpack_from('<I', c, 0x20)[0]] for _, _, c, _ in found})   # compared at their own length, as raw_shaders reads them
         # NROs the game decodes at run time (Mario Tennis Fever: main is a boot stub, and the real code's data holds 11 shaders the game draws its UI and sky with): scanned like main, as no RomFS file holds them
         if not i:

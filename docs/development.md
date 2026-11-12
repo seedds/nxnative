@@ -494,6 +494,9 @@ Reuse works as for the IPA. Each shader output has its own key, named after the 
 - the frame time (start to start) and the time each frame stayed on screen, at p50 / p95 / p99 / max, with the frames that stayed longer than 1.5 frame times;
 - the GPU time per frame (p50 / p95), the frames the system dropped, and the game's speed against real time where the frame step logs it;
 - the `[RED]` lines of the run.
+- frames of 1 s or more, the times a GPU queue was held by an event wait (`an event wait has held it`), and the median frame time of each stretch of 1000 frames (`--stretch`), whose worst is reported: a slow stretch that the window's percentiles hide.
+
+`--verdict` judges each run CLEAN or BAD on those: BAD on a frame of 1 s or more, an event-wait hold, or a stretch whose median is over `--slow-factor` (1.5) times the run's own frame p50, or over `--slow-ms` when given. results.md gets a verdict line and the exit code is 1 when any run is BAD. It is a long-play check: give it a route whose window holds several stretches (at 30 fps, 1000 frames is about 33 s).
 
 `--variant 'label:KEY=VALUE,…'` adds a variant: environment switches, or another host (`host=`), other Mac shader libraries (`msl=` with `shmap=`), other rewritten modules (`patched=`) or another pipeline archive (`pso=`). Variants run in turn, `--runs` times each (2 by default), and the results are medians with their range. `--fps` and `--scale` set the frame rate target and the render scale for every variant. Each run's log, `frames.tsv` and two screenshots, taken at the same moments of the route, are in the output folder (`<id>_build/bench/<date-time>/`), with `results.md` and `results.json`. Load on the Mac moves the numbers, so compare the variants of one run of the script rather than separate runs.
 

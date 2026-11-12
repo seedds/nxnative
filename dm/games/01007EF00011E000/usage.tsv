@@ -6,7 +6,6 @@ key	app_category	1
 key	app_pool	1
 key	build	1
 key	fps_target	1
-key	gpu_timestamps	1
 key	ipa	1
 key	mem_alias	1
 key	mem_reserve	1

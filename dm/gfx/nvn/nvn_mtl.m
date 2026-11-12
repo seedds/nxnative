@@ -1699,11 +1699,13 @@ static void blit_note(void);   // Per-pass dump: a copy / buffer update ended th
 // allocator gave out overlapping blocks, see hle_nvn.c zcull_size; NVN runs copies in order for any game)
 enum { BW_MAX = 64 };
 static uint64_t g_bw_lo[BW_MAX], g_bw_hi[BW_MAX], g_br_lo[BW_MAX], g_br_hi[BW_MAX]; static int g_bw_n, g_br_n, g_blit_ops; static uint64_t g_blit_barriers;
+enum { DW_MAX = 256 };
+static uint64_t g_dw_lo[DW_MAX], g_dw_hi[DW_MAX], g_dr_lo[DW_MAX], g_dr_hi[DW_MAX]; static int g_dw_n, g_dr_n, g_dsp_game_bar;   // what dispatches ordered by the game's barriers wrote and read since the last barrier (dispatch_enc_cs), apart from the copies' sets: copies are ordered after them, dispatches only when the game asked (g_dsp_game_bar). Emptied by every barrier and by a new copy encoder; empty with DM_NVN_DISPATCH_BARRIER=full
 static uint64_t g_blit_splits;   // copies / buffer updates / fills that ended an open draw pass (the residency set line; a pass ended this way stores and the next one reloads its attachments)
 uint64_t mtl_blit_splits(void) { return g_blit_splits; }
 static int enc_open(void);
 static int g_blit_ct;   // the open copy encoder has the compute argument table set (dispatches share it, dispatch_enc)
-static id<MTL4ComputeCommandEncoder> blit_open(void) { if (!g_blit) { ser_gate(); g_blit = enc_b_begin(g_cb); [g_blit barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:blit_vis()]; gp_begin(g_blit, 'C', nil); g_bw_n = g_br_n = 0; g_blit_ops = 0; g_blit_ct = 0; } return g_blit; }
+static id<MTL4ComputeCommandEncoder> blit_open(void) { if (!g_blit) { ser_gate(); g_blit = enc_b_begin(g_cb); [g_blit barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:blit_vis()]; gp_begin(g_blit, 'C', nil); g_bw_n = g_br_n = g_dw_n = g_dr_n = 0; g_blit_ops = 0; g_blit_ct = 0; } return g_blit; }
 static void ubd_flush(void); static int g_nubd;   // the inline updates deferred (see mtl_sub_update)
 static int g_ubd_landing;
 static id<MTL4ComputeCommandEncoder> blit_raw(void) {
@@ -1718,11 +1720,13 @@ static void blit_barrier(void) {
     static int off = -1; if (off < 0) { const char *e = getenv("DM_NVN_BLIT_ORDER"); off = e && !strcmp(e, "0"); if (off) MLOG("DM_NVN_BLIT_ORDER=0: no barriers inside the copy encoder (diagnostic; brings back the fountain's vertical stripes)"); }
     // Only the stages a compute encoder has: MTLStageAll here fails Metal validation (macOS 27: "must be a valid combination of MTLStages for the current encoder type")
     if (!off) [g_blit barrierAfterEncoderStages:MTLStageDispatch | MTLStageBlit beforeEncoderStages:MTLStageDispatch | MTLStageBlit visibilityOptions:blit_vis()];
-    g_bw_n = g_br_n = 0; g_blit_ops = 0; g_blit_barriers++;
+    g_bw_n = g_br_n = g_dw_n = g_dr_n = 0; g_blit_ops = 0; g_blit_barriers++;
 }
 uint64_t mtl_blit_barriers(void) { return g_blit_barriers; }
 static int bw_hit(uint64_t lo, uint64_t hi) { for (int i = 0; i < g_bw_n; i++) if (lo < g_bw_hi[i] && g_bw_lo[i] < hi) return 1; return 0; }
 static int br_hit(uint64_t lo, uint64_t hi) { for (int i = 0; i < g_br_n; i++) if (lo < g_br_hi[i] && g_br_lo[i] < hi) return 1; return 0; }
+static int dw_hit(uint64_t lo, uint64_t hi) { for (int i = 0; i < g_dw_n; i++) if (lo < g_dw_hi[i] && g_dw_lo[i] < hi) return 1; return 0; }
+static int dr_hit(uint64_t lo, uint64_t hi) { for (int i = 0; i < g_dr_n; i++) if (lo < g_dr_hi[i] && g_dr_lo[i] < hi) return 1; return 0; }
 // buffer → buffer / fill: reads [rlo, rhi) (0, 0 when nothing is read), writes [wlo, whi)
 static uint64_t g_wr_epoch;   // Bumped by every buffer write outside a render pass (copy / update / fill, texture → buffer, dispatch): indirect-draw conversions made before it are stale (ixc_run)
 static uint64_t g_mdx_epoch;  // Bumped by GPU writes that can change an indirect-count multi-draw's records or count (copy, fill, texture → buffer, dispatch; see mdx_run)
@@ -1756,7 +1760,7 @@ static id<MTL4ComputeCommandEncoder> blit_buf(uint64_t rlo, uint64_t rhi, uint64
     // their operations with everything before and after. Ordinary pools keep the
     // range-based batching, including separate Metal buffers over one CPU range.
     if (nvn_sparse_alias(rlo, rhi) || nvn_sparse_alias(wlo, whi)) { wlo = 0; whi = ~0ull; }
-    if (g_blit_ops && (g_bw_n == BW_MAX || g_br_n == BW_MAX || (rhi > rlo && bw_hit(rlo, rhi)) || bw_hit(wlo, whi) || br_hit(wlo, whi))) blit_barrier();
+    if (g_blit_ops && (g_bw_n == BW_MAX || g_br_n == BW_MAX || (rhi > rlo && (bw_hit(rlo, rhi) || dw_hit(rlo, rhi))) || bw_hit(wlo, whi) || br_hit(wlo, whi) || dw_hit(wlo, whi) || dr_hit(wlo, whi))) blit_barrier();
     g_bw_lo[g_bw_n] = wlo; g_bw_hi[g_bw_n++] = whi; g_blit_ops++; g_gp_copies++;
     if (rhi > rlo) { g_br_lo[g_br_n] = rlo; g_br_hi[g_br_n++] = rhi; }
     return e;
@@ -14291,10 +14295,64 @@ static void bufsnap_after(NvShader *cs, id ce) {
     res_add(dst); res_commit();
     [(id<MTL4ComputeCommandEncoder>)ce barrierAfterEncoderStages:MTLStageDispatch | MTLStageBlit beforeEncoderStages:MTLStageDispatch | MTLStageBlit visibilityOptions:blit_vis()];
     [(id<MTL4ComputeCommandEncoder>)ce copyFromBuffer:(__bridge id<MTLBuffer>)mb sourceOffset:mo toBuffer:dst destinationOffset:0 size:n];
-    g_blit_ops = 1;   // the next copy or dispatch is ordered after it
+    g_bw_lo[0] = 0; g_bw_hi[0] = ~0ull; g_bw_n = 1; g_br_n = 0; g_blit_ops = 1;   // recorded as "everything written", as blit() does: the next copy or dispatch is ordered after it (a dispatch ordered by the game's barriers would otherwise overwrite what the copy still reads)
     NSString *key = @(cs->key);
     [g_commit_blocks addObject:^{ BOOL ok = [[NSData dataWithBytes:dst.contents length:n] writeToFile:path atomically:NO];
         MLOG("bufsnap after %s: %zu bytes %s %s", key.UTF8String, n, ok ? "saved to" : "could not be written to", path.UTF8String); }];
+}
+// Compute dispatches are ordered by the game's own barriers, as NVN orders them (DM_NVN_DISPATCH_BARRIER=full: each after everything before it in its encoder, as before; game, the
+// default; ab alternates the two with the DM_AB phases, for measurement). NVN makes a dispatch's writes visible to later work when the game asks with nvnCommandBufferBarrier; the full
+// order made the GPU run every dispatch of an encoder one at a time. Kirby Air Riders' particle systems are about 230 dispatches a frame in one encoder: 6.6-9.8 ms of GPU time at
+// about 30 us each, 0.4-1.2 ms ordered by the game's barriers, 0.15 ms with no barrier at all (DM_NVN_BLIT_ORDER=0, which also drops the ones the game asked for, and faults). Their
+// memory ranges cannot replace the game's barriers: the systems share the buffers they write, and 91 % of the dispatches met an earlier one's range. A dispatch gets a barrier when the
+// game issued one since the dispatch before it, when it reads a range a copy wrote or writes one a copy read or wrote since the last barrier (uniform updates, uploads: the host's own
+// order), or when its sets are full; what it writes and reads is kept apart from the copies' sets (g_dw, g_dr), so that later copies are ordered after it and later dispatches are not.
+// A dispatch with a binding whose reach is no range (an image, a buffer texture, a handle in a uniform slot, global memory traced to no storage buffer) keeps the full order on both
+// sides, as do the host's own dispatches (dispatch_enc). The driver's own segments are no guest memory. A draw pass ends the copy encoder and begins with its own barrier
+static int dbar_game(void) {
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("DM_NVN_DISPATCH_BARRIER"); v = e && !strncmp(e, "ab", 2) ? sw_mode("DM_NVN_DISPATCH_BARRIER", 0) : !(e && !strcmp(e, "full"));
+        if (!v) MLOG("DM_NVN_DISPATCH_BARRIER=full: every compute dispatch is ordered after everything before it in its encoder (diagnostic)"); }
+    return sw_on(v);
+}
+static geo_access cs_access_of(NvShader *sh, uint64_t ind) {   // the guest memory a dispatch reads and writes through its bindings and its indirect record; unknown when a binding's reach is no range
+    geo_access a = {0};
+    if (ind) geo_access_add(&a, ind, 12, 0);
+    for (int i = 0; i < sh->rf.nb && !a.unknown; i++) {
+        const nvn_rbind *b = &sh->rf.b[i];
+        switch (b->kind) {
+        case NVN_RB_CBUF: case NVN_RB_UBOP: case NVN_RB_SBUFP: {
+            if (b->reg >= 16) { a.unknown = 1; break; }
+            const p_bind_buf *u = b->kind == NVN_RB_SBUFP ? &S.ssbo[5][b->reg] : &S.ubo[5][b->reg];
+            geo_access_add(&a, u->addr, b->kind == NVN_RB_CBUF ? cb_len(sh, b->reg, u->size) : u->size, b->kind == NVN_RB_SBUFP && b->rw && !(sh->sb_ro >> b->reg & 1));
+            break; }
+        case NVN_RB_SUPPORT: case NVN_RB_C1: case NVN_RB_DRV0: case NVN_RB_DRV2: case NVN_RB_CBSIZE: break;
+        default: a.unknown = 1;
+        }
+    }
+    return a;
+}
+static uint64_t g_dbar_game, g_dbar_copy, g_dbar_unknown, g_dbar_free;
+void mtl_dispatch_barrier_stats(uint64_t *game, uint64_t *copy, uint64_t *unknown, uint64_t *none) {   // the periodic [nvn] line (hle_nvn.c)
+    *game = g_dbar_game; *copy = g_dbar_copy; *unknown = g_dbar_unknown; *none = g_dbar_free; }
+static id<MTL4ComputeCommandEncoder> dispatch_enc_cs(NvShader *cs, uint64_t ind) {
+    if (!dbar_game()) { g_dsp_game_bar = 0; return dispatch_enc(); }
+    geo_access a = cs_access_of(cs, ind);
+    if (a.unknown) { g_dbar_unknown++; g_dsp_game_bar = 0; return dispatch_enc(); }
+    id<MTL4ComputeCommandEncoder> e = blit_open(); g_gp_disp++;
+    int copy = g_dr_n + a.n > DW_MAX || g_dw_n + a.n > DW_MAX;
+    for (int i = 0; i < a.n && !copy; i++) copy = bw_hit(a.r[i].lo, a.r[i].hi) || (a.r[i].write && br_hit(a.r[i].lo, a.r[i].hi));
+    if (g_blit_ops && (g_dsp_game_bar || copy)) { if (g_dsp_game_bar) g_dbar_game++; else g_dbar_copy++; blit_barrier(); } else g_dbar_free++;
+    g_dsp_game_bar = 0;
+    for (int i = 0; i < a.n; i++) {   // a range already in its set is not added again: the systems share their tables
+        uint64_t *lo = a.r[i].write ? g_dw_lo : g_dr_lo, *hi = a.r[i].write ? g_dw_hi : g_dr_hi; int *n = a.r[i].write ? &g_dw_n : &g_dr_n, have = 0;
+        for (int k = 0; k < *n && !have; k++) have = lo[k] == a.r[i].lo && hi[k] == a.r[i].hi;
+        if (!have) { lo[*n] = a.r[i].lo; hi[(*n)++] = a.r[i].hi; }
+    }
+    g_blit_ops++;
+    if (!g_blit_ct) { [e setArgumentTable:g_ct]; g_blit_ct = 1; }
+    args_dirty_all();
+    return e;
 }
 static void dispatch(const p_dispatch *dp) {
     zskip_clear();
@@ -14368,7 +14426,7 @@ static void dispatch(const p_dispatch *dp) {
     // or before dispatch_enc's copy-to-dispatch barrier: otherwise the upgrade opens a second encoder, or its copy races the dispatch (#1743).
     encode_args(nil, cs, 5, 0);
     if (own && g_blit) { enc_b_end(g_blit); g_blit = nil; }
-    id<MTLComputeCommandEncoder> ce = own ? pg_compute() : (id<MTLComputeCommandEncoder>)dispatch_enc();
+    id<MTLComputeCommandEncoder> ce = own ? pg_compute() : (id<MTLComputeCommandEncoder>)dispatch_enc_cs(cs, dp->ind);
     enc_c_pso(ce, ps);
     if (tg_groups) {
         __strong id<MTLBuffer> tb = nil; size_t to = arena_alloc((size_t)(tg_groups * cs->rf.tg_spill), &tb);
@@ -15418,7 +15476,7 @@ void mtl_exec(const uint8_t *p) {
                 PD("I %llu barrier bits %#x%s", g_stat_pass, bits, split ? ": ends the pass (shader writes)" : order ? " (render pass open; a later shader write is ordered after its draws)" : g_enc ? " (render pass open)" : "");
                 if (split) { rp_end(); static int once; if (!once++) MLOG("a game barrier (bits %#x) after shader writes in a draw pass: the pass ends there (first case pass %llu)", bits, (unsigned long long)g_stat_pass); }
                 else if (order) g_pass_order |= (bits & NVN_BARRIER_ORDER_PRIMITIVES_BIT ? 1 : 0) | (bits & (NVN_BARRIER_ORDER_FRAGMENTS_BIT | NVN_BARRIER_ORDER_FRAGMENTS_TILED_BIT) ? 2 : 0);
-                if (bits) { g_game_barrier |= bits; g_fb_bar++; } break; }   // g_fb_bar: snapshots taken before it are stale (see fb_prepare)
+                if (bits) { g_game_barrier |= bits; g_fb_bar++; g_dsp_game_bar = 1; } break; }   // g_fb_bar: snapshots taken before it are stale (see fb_prepare)
             case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL: state_op(h.op, a); break;
             default: break;
         }

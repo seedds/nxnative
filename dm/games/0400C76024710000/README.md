@@ -40,6 +40,7 @@ Measured on the M4 Pro, in a 1920x1080 window: 60 fps at the title, 44 to 52 fps
 - [The provoking vertex is the first](../../../docs/reference/rendering.md#the-provoking-vertex-is-the-first): it sets mode 0.
 - [Touch gestures recognized from the touch points](../../../docs/reference/services.md#touch-gestures-recognized-from-the-touch-points).
 - [SDF definitions in RE Engine PAKs](../../../docs/reference/shaders.md#sdf-definitions-in-re-engine-paks).
+- [Pool tables that held only their own texture type](../../../docs/reference/nvn-objects.md#pool-tables-that-held-only-their-own-texture-type): Cabin's monitor face (sprites read as 2D arrays) and every cube map read by handle.
 - [Integer outputs told from float bits](../../../docs/reference/shaders.md#integer-outputs-told-from-float-bits).
 - [Mesh shader per-primitive system values: the primitive count overwritten, the primitive id lost](../../../docs/reference/shaders.md#mesh-shader-per-primitive-system-values-the-primitive-count-overwritten-the-primitive-id-lost).
 - [Mesh shaders that also address their vertices as records](../../../docs/reference/shaders.md#mesh-shaders-that-also-address-their-vertices-as-records).

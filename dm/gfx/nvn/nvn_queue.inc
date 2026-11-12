@@ -11,7 +11,7 @@ typedef struct nq_signal { volatile uint32_t *event; unsigned mode; uint32_t val
 typedef struct nq_node {
     struct nq_node *next;
     uint8_t *bytes; size_t length, capacity;
-    unsigned kind, mode, closed, waiting; volatile uint32_t *event; uint32_t value;
+    unsigned kind, mode, closed, waiting, ahead; volatile uint32_t *event; uint32_t value;   // ahead: an event wait passed under a hold (mtl_hold_begin)
     uint64_t wait_fence, event_predecessor, wait_since; unsigned wait_kind, wait_said; const sync_t *sync_source; nq_receipt *receipt;
     nq_signal *signals; unsigned signal_count;   // NQ_COMMANDS: every event signal it records, in order (nq_event_issued at its commit)
     tex_t texture; double period; int crop[4];
@@ -79,8 +79,25 @@ void nvn_queue_gpu_progress(void) {
     while(*p) { nq_event_write *w=*p; if(w->fence<=done) { *p=w->next; free(w); } else p=&w->next; }
     pthread_cond_broadcast(&nq_cv); pthread_mutex_unlock(&nq_mu);
 }
+// Who signals each event word: the game's CPU (nvnEventSignal) or its commands. Replay ahead takes only a wait on a word the CPU has signalled NQ_AHEAD_SIGNALS times and no
+// command ever has, a frame gate's pattern: commands that signal the awaited word would be translated behind the wait and held with it, so the signal could not come
+// (t_wait_event: a consumer parked on an event the CPU had reset, released by a producer submitted later on another queue). The count is evidence, not proof: such commands
+// submitted behind a hold end it at once, in red (mtl_hold_force), and the word is never taken again. A hold that ran into its limit (nvn_rec.h HOLD_MAX_NS: a slow signal
+// at an area load, or a thread the signal depends on) leaves the word out for NQ_AHEAD_SIGNALS signals more
+enum { NQ_AHEAD_SIGNALS = 30 };
+typedef struct nq_event_src { struct nq_event_src *next; volatile uint32_t *word; unsigned cpu, gpu; } nq_event_src;
+static nq_event_src *nq_event_srcs;
+static int nq_event_cpu(volatile uint32_t *word) { for(nq_event_src *e=nq_event_srcs;e;e=e->next) if(e->word==word) return e->cpu>=NQ_AHEAD_SIGNALS && !e->gpu; return 0; }
+static nq_event_src *nq_event_src_get(volatile uint32_t *word) {
+    nq_event_src *e=nq_event_srcs; while(e && e->word!=word) e=e->next;
+    if(!e) { e=calloc(1,sizeof *e); if(!e) die("event source allocation failed"); e->word=word; e->next=nq_event_srcs; nq_event_srcs=e; }
+    return e;
+}
+static void nq_event_src_note(volatile uint32_t *word,int cpu) { nq_event_src *e=nq_event_src_get(word); if(cpu) { if(e->cpu<NQ_AHEAD_SIGNALS) e->cpu++; } else e->gpu=1; }
+void nvn_queue_ahead_refuse(volatile uint32_t *word) { pthread_mutex_lock(&nq_mu); nq_event_src_get(word)->cpu=0; pthread_mutex_unlock(&nq_mu); }   // a hold on it had to be forced (nvn_rec.h hold_check): its signals are counted again
 static void nq_event_publish(volatile uint32_t *word,unsigned mode,uint32_t value,uint64_t gpu_fence) {
     pthread_mutex_lock(&nq_mu);
+    nq_event_src_note(word,!gpu_fence);
     if(mode==1) atomic_fetch_add_explicit((_Atomic uint32_t *)word,value,memory_order_release);
     else atomic_store_explicit((_Atomic uint32_t *)word,value,memory_order_release);
     atomic_thread_fence(memory_order_seq_cst);
@@ -89,7 +106,9 @@ static void nq_event_publish(volatile uint32_t *word,unsigned mode,uint32_t valu
         nq_node *n=q->first->first;
         if(n->kind==NQ_EVENT && n->waiting && n->event==word && (gpu_fence ? gpu_fence>=n->event_predecessor : nq_event_pending(word)<=mtl_completed_fence()) && nq_predicate(atomic_load_explicit((_Atomic uint32_t *)word,memory_order_acquire),n->mode,n->value)) { n->event=NULL; n->wait_fence=gpu_fence; }
     }
+    uint32_t left=atomic_load_explicit((_Atomic uint32_t *)word,memory_order_acquire);
     pthread_cond_broadcast(&nq_cv); pthread_mutex_unlock(&nq_mu);
+    mtl_hold_signal(word,left);
 }
 void nvn_event_publish(volatile uint32_t *word,unsigned mode,uint32_t value) { nq_event_publish(word,mode,value,0); }
 void nvn_event_publish_gpu(volatile uint32_t *word,unsigned mode,uint32_t value,uint64_t fence) { nq_event_publish(word,mode,value,fence); }
@@ -118,11 +137,12 @@ static void *nq_worker(void *unused) {
         for(;;) {
         scan_again:;
             if(nq_test_held) { pthread_cond_wait(&nq_cv,&nq_mu); continue; }
-            int mapped_event_wait=0;
+            int mapped_event_wait=0; nq_node *ahead=NULL;
             for(q=nq_queues;q;q=q->next) {
                 j=q->first; if(!j) continue; n=j->first;
                 if(!n) { nq_publish(j->receipt,q->physical); q->first=j->next; if(!q->first) q->last=NULL; nq_put(j->receipt);
                     pthread_mutex_unlock(&nq_mu); pthread_mutex_lock(&g_sub_mu); void *pool=objc_autoreleasePoolPush(); nq_job_free(j); objc_autoreleasePoolPop(pool); pthread_mutex_unlock(&g_sub_mu); pthread_mutex_lock(&nq_mu); goto scan_again; }
+                if(n->kind==NQ_EVENT && n->event && n->ahead) { if(mtl_hold_active()) break; n->ahead=0; }   // its hold ended otherwise than by the signal: the wait stands again
                 if(n->kind==NQ_EVENT && n->event) {
                     uint64_t predecessor=nq_event_pending(n->event);
                     if(!n->waiting) n->event_predecessor=predecessor;
@@ -136,6 +156,7 @@ static void *nq_worker(void *unused) {
                         else if(t-n->wait_since>5000000000ull && !n->wait_said) { static _Atomic int said; n->wait_said=1; if(atomic_fetch_add(&said,1)<8)
                             LOG("[RED] queue %llu: an event wait has held it %.1f s: word %p is %#x, waiting for %s %#x; a GPU write of it is %s",(unsigned long long)q->serial,(t-n->wait_since)/1e9,(void *)n->event,
                                 atomic_load_explicit((_Atomic uint32_t *)n->event,memory_order_acquire),n->mode==0?"equal to":"at least",n->value,predecessor>mtl_completed_fence()?"queued, not completed":"not queued"); }
+                        if(!ahead && predecessor<=mtl_completed_fence() && (n->next || j->next) && nq_event_cpu(n->event)) ahead=n;
                         n->waiting=1; mapped_event_wait=1; continue; }
                 }
                 if(n->kind==NQ_SYNC) {
@@ -151,6 +172,13 @@ static void *nq_worker(void *unused) {
                 break;
             }
             if(q) break;
+            // Every queue waits, one of them only for the game's CPU: its commands are translated meanwhile, and what they send to the Metal queue is held until that wait is
+            // satisfied (nvn_rec.h hold_*). The node stays this queue's first while the lock is dropped: only this thread takes nodes
+            if(ahead && mtl_replay_ahead() && !mtl_hold_active()) {
+                volatile uint32_t *word=ahead->event; unsigned mode=ahead->mode; uint32_t value=ahead->value;
+                pthread_mutex_unlock(&nq_mu); dm_host_mutex_lock(&g_sub_mu); int held=mtl_hold_begin(word,mode,value); pthread_mutex_unlock(&g_sub_mu); pthread_mutex_lock(&nq_mu);
+                if(held) { ahead->ahead=1; if(!ahead->event) mtl_hold_satisfied(); goto scan_again; }
+            }
             // NVN events can also be changed by plain stores through mapped pool memory.
             // A bounded notification poll only while such a word is awaited complements API/callback wakes.
             if(mapped_event_wait) { struct timespec tick={0,1000000}; pthread_cond_timedwait_relative_np(&nq_cv,&nq_mu,&tick); }
@@ -169,6 +197,7 @@ static void *nq_worker(void *unused) {
             gfx_enter(); nq_cost cost=nq_cost_begin();
             if(frame!=j->frame) { frame=j->frame; mtl_set_frame(frame); }
             mtl_queue_activate(q->serial); mtl_set_queue_origin_lower_left(q->origin);
+            if(n->kind==NQ_PRESENT) mtl_hold_wait();   // a present goes to the display once the work before it has reached the GPU
             if(n->kind==NQ_COMMANDS) {
                 uint64_t handle=(uintptr_t)n->bytes;
                 nvn_cap_submit(1,&handle);
@@ -231,7 +260,8 @@ static void nq_flatten(nq_job *j,const uint8_t *list) {
         if(v&CTL_LAST) return;
     }
 }
-static void nq_enqueue(nq_queue *q,nq_job *j) { if(q->last) q->last->next=j; else q->first=j; q->last=j; nq_put(q->tail); q->tail=j->receipt; q->tail->refs++; pthread_cond_broadcast(&nq_cv); }
+static void nq_enqueue(nq_queue *q,nq_job *j) { for(nq_node *n=j->first;n;n=n->next) for(unsigned i=0;i<n->signal_count;i++) { nq_event_src_note(n->signals[i].event,0); mtl_hold_force(n->signals[i].event); }   // before any wait on it can be taken ahead; a hold on it now could not be satisfied
+    if(q->last) q->last->next=j; else q->first=j; q->last=j; nq_put(q->tail); q->tail=j->receipt; q->tail->refs++; pthread_cond_broadcast(&nq_cv); }
 void nvn_queue_submit(queue_t *q,int count,const uint64_t *handles) {
     pthread_once(&nq_once,nq_start); nq_job *j=calloc(1,sizeof *j); if(!j) die("queue job allocation failed"); j->receipt=nq_new();
     j->objects.klen=16; j->frame=dm_nvn_frame_count();

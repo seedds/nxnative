@@ -603,13 +603,23 @@ t_wait_event: t_wait_event.m $(MTL_T_DEP)
 t_queue_lifetime: t_queue_lifetime.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_queue_lifetime.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
 
+# A queue parked on an event the game's CPU signals: translated meanwhile, nothing of it on the GPU before the signal (nvn_rec.h hold_*, DM_NVN_REPLAY_AHEAD)
+t_replay_ahead: t_replay_ahead.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_replay_ahead.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+.PHONY: check_t_replay_ahead
+check_t_replay_ahead: t_replay_ahead
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 DM_NVN_REPLAY_AHEAD=0 ./$<
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 DM_NVN_REPLAY_AHEAD=1 ./$<
+
 .PHONY: check_t_wait_event check_t_queue_lifetime
 check_t_wait_event: t_wait_event
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./$<
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./$<
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 DM_NVN_REPLAY_AHEAD=1 ./$<
 check_t_queue_lifetime: t_queue_lifetime
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./$<
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./$<
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 DM_NVN_REPLAY_AHEAD=1 ./$<
 
 t_render_enable_queue: t_render_enable_queue.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_render_enable_queue.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)

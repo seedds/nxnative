@@ -1160,6 +1160,10 @@ static uint8_t rc_source(uint64_t a, unsigned n, uint8_t *out, int *unreliable);
 static int rc_value(uint64_t addr, uint64_t *v) {   // 0 = unknown at encode time
     rc_report *r=rc_find(addr);
     uint64_t done=atomic_load_explicit(&g_rc_complete,memory_order_acquire);
+    // Replay ahead (nvn_rec.h) reaches a condition before the GPU has run the report it reads, and an unknown condition draws its block: Ocarina of Time's Kakariko Village had
+    // 360-480 more draws a frame (2,930 to 3,290-3,410). The translation waits here for the game's signal, as it does without the hold; what it has translated by then goes to
+    // the GPU at the signal. Waiting for the report's fence as well cost more than it saved (57.4 to 55.2 fps, the translation stalled 0.8 times a frame)
+    if (r && !r->conservative && r->fence>done && atomic_load(&g_hold_on) && on_sub_thread()) { hold_block(1); g_rc_ahead_waits++; done=atomic_load_explicit(&g_rc_complete,memory_order_acquire); }
     if (r) {
         if (r->conservative) return 0;
         if (rc_gpu_unknown(r,done)) return 0;
@@ -1454,6 +1458,7 @@ void mtl_prepare(void) {
 }
 static void sub_cut_begin(void); static void ts_sub_begin(void), ts_boundary(void); static int ts_on(void);
 static void gmem_commit_patch(void);   // the raw pool table words of the arguments encoded so far follow the pools (gmem_slot_note)
+#define POST_RING 128   // mtl_sub_commit's ring of completion records, one a fence
 void mtl_sub_begin(void) {
     mtl_init(); g_sub_serial++; g_seg = 0;
     if (g_pkg_kept) { g_pkg_kept = 0; nvn_dirty_touch(); } seg_clk_put(g_sclk); g_sclk = NULL;
@@ -1464,6 +1469,7 @@ void mtl_sub_begin(void) {
     mtl_prepare();   // done by then in the submit entry; the replay tool (nvn_replay) reaches it here
     warm_claim();
     if (g_cb) MDIE("submit re-entered");
+    if (atomic_load(&g_hold_on) && g_fence - g_done >= POST_RING - 16) hold_block(0);   // a hold's fences complete only after it: the post ring (mtl_sub_commit) must not come round to one
     if (!atomic_load(&g_sub_thread_set) || !pthread_equal(g_sub_thread, pthread_self())) nvn_dirty_own_thread();
     g_sub_thread = pthread_self(); atomic_store(&g_sub_thread_set, 1);
     atomic_store(&g_last_commit_error, 0);
@@ -2389,7 +2395,6 @@ static void lc_land(void);
 // A submission's CPU-side writes at its end (events, samples-passed and counter reports): run once, by its feedback handler or, when a game's SyncWait wakes on the
 // GPU's own signal of the fence first, by that waiter (DM_NVN_FAST_WAKE, on by default): the feedback handler comes 0.26 ms after the GPU end on an M2 Max
 typedef struct { _Atomic uint64_t fence; _Atomic int claimed; int n; post_op *ops; seg_clk *sc; uint32_t seg_last; uint64_t t_commit; } post_rec;   // t_commit: guest ns when it was committed
-#define POST_RING 128
 static post_rec g_postr[POST_RING];
 static pthread_mutex_t g_post_mu = PTHREAD_MUTEX_INITIALIZER;
 // A successful claim holds the lock until post_run finishes. Ownership alone
@@ -2496,9 +2501,10 @@ uint64_t mtl_sub_commit(void) {
     if (g_gp_state == 1 && !gp_active()) { int gn = g_gp_n; gp_lab *gl = malloc(sizeof(gp_lab) * (gn ? gn : 1)); memcpy(gl, g_gp_lab, sizeof(gp_lab) * gn); uint64_t gf = g_gp_frame; g_gp_state = 2; atomic_store(&g_gp_busy, 1);
         [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) { (void)f; gp_report(gn, gl, gf); }]; }
     [g_cb endCommandBuffer];
+    if (atomic_load(&g_hold_on)) rec_queue_block(^{ pthread_mutex_lock(&g_post_mu); if (atomic_load(&pr->fence) == fence) pr->t_commit = guest_ns(); pthread_mutex_unlock(&g_post_mu); });   // a held commit: its time is when the queue gets it
     rec_commit(g_cb, o); g_cbgen++;   // the stores it holds come before any later upload batch (gsb_held)
     if (!lost_test) rec_signal(g_ev, fence);
-    rec_drain();
+    rec_drain_soft();
     g_alloc_fence[g_alloc_cur] = fence;
     g_cb = nil;
     atomic_store(&g_sub_on, 0);   // after ++g_fence and the last encoding: a buffer retired from now on waits for this fence at most
@@ -2509,6 +2515,21 @@ uint64_t mtl_sub_commit(void) {
 }
 
 uint64_t mtl_completed_fence(void) { return atomic_load_explicit(&g_done,memory_order_acquire); }
+// Replay ahead (profile key replay_ahead, DM_NVN_REPLAY_AHEAD overrides; needs the encode thread): nvn_queue.inc nq_worker translates a queue parked on an event the game's CPU
+// signals, and nvn_rec.h keeps what that sends to the Metal queue until the wait is satisfied
+int mtl_replay_ahead(void) {
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("DM_NVN_REPLAY_AHEAD"); v = (e ? atoi(e) != 0 : DM_GAME_REPLAY_AHEAD) && rec_on();
+        if (v) MLOG("replay ahead: a queue parked on an event the game signals is translated meanwhile, its commits held until the signal (DM_NVN_REPLAY_AHEAD=0 turns it off)"); }
+    return v;
+}
+int mtl_hold_begin(volatile uint32_t *word, unsigned mode, uint32_t value) { return mtl_replay_ahead() && !g_cb && hold_begin(word, mode, value, g_fence + 1); }
+int mtl_hold_active(void) { return atomic_load_explicit(&g_hold_on, memory_order_acquire); }
+void mtl_hold_signal(volatile uint32_t *word, uint32_t value) { uint32_t gen = atomic_load(&g_hold_gen); if (atomic_load_explicit(&g_hold_on, memory_order_acquire) && g_hold_word == word && hold_pred(value)) hold_poke(NULL, gen); }   // value: the word as the signal left it, so a later reset does not hide it
+void mtl_hold_force(volatile uint32_t *word) { uint32_t gen = atomic_load(&g_hold_gen); if (atomic_load_explicit(&g_hold_on, memory_order_acquire) && g_hold_word == word) hold_poke("commands that signal its event were submitted behind it", gen); }
+void mtl_hold_drain(void) { hold_poke(HOLD_DRAIN, atomic_load(&g_hold_gen)); }
+void mtl_hold_wait(void) { if (on_sub_thread()) hold_block(1); }
+void mtl_hold_satisfied(void) { hold_poke(NULL, atomic_load(&g_hold_gen)); }
 uint64_t mtl_last_fence(void) { return g_fence; }
 int mtl_last_commit_error(void) { return atomic_load(&g_last_commit_error); }
 
@@ -2518,7 +2539,16 @@ static int fast_wake(void) { static int v = -1; if (v < 0) { const char *e = get
 static void post_early(uint64_t fence) {
     post_complete(fence, 0, 0);
 }
+static int mtl_wait_at_(uint64_t fence, uint64_t timeout_ns, int site);
 static int mtl_wait_at(uint64_t fence, uint64_t timeout_ns, int site) {
+    if (g_done >= fence) { if (ws_on()) ws_put(site, 0, 0); return 1; }
+    if (atomic_load(&g_hold_on) && fence >= g_hold_first) {   // held work reaches the GPU first (nvn_rec.h): the submit thread stops for the signal; another thread waits as for parked work, and the hold's limit runs
+        if (on_sub_thread()) hold_block(0);
+        else hold_stuck();   // a poll counts: the game may ask again until it lands, and signal only then
+    }
+    return mtl_wait_at_(fence, timeout_ns, site);
+}
+static int mtl_wait_at_(uint64_t fence, uint64_t timeout_ns, int site) {
     if (g_done >= fence) { if (ws_on()) ws_put(site, 0, 0); return 1; }
     uint64_t w0 = ws_t0();
     if ((site == WS_SYNC || site == WS_SYNC_NEWEST || site == WS_ACQ) && fast_wake() && g_ev && fence <= g_fence) {   // the game's own wait: wake on the GPU's signal (rec_signal(g_ev, fence) after each submission)
@@ -2575,7 +2605,7 @@ void mtl_present_flush(void);
 void mtl_finish(void) { mtl_finish_gpu_at(WS_FINISH); }
 static void present_drop_for_suspend(void);
 static void snap_drain(void);
-void mtl_drain(void) { present_drop_for_suspend(); mtl_present_flush(); snap_drain(); mtl_init(); id<MTLCommandBuffer> cb = q_cb(); [cb commit]; [cb waitUntilCompleted]; mtl_finish_gpu(); }
+void mtl_drain(void) { mtl_hold_drain(); present_drop_for_suspend(); mtl_present_flush(); snap_drain(); mtl_init(); id<MTLCommandBuffer> cb = q_cb(); [cb commit]; [cb waitUntilCompleted]; mtl_finish_gpu(); }
 
 // ================= Render replay =================
 #include "../../host/front.h"
@@ -2928,6 +2958,7 @@ static pthread_mutex_t g_up_wmu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond
 static void up_wake(void) { pthread_mutex_lock(&g_up_wmu); pthread_cond_broadcast(&g_up_wcv); pthread_mutex_unlock(&g_up_wmu); }
 static void up_wait_zero(_Atomic int *v, int site) {
     if (!atomic_load(v)) { if (ws_on()) ws_put(site, 0, 0); return; }
+    if (atomic_load(&g_hold_on) && on_sub_thread()) hold_block(0);   // the batch may be a held commit (nvn_rec.h)
     uint64_t w0 = ws_t0();
     pthread_mutex_lock(&g_up_wmu);
     while (atomic_load(v)) { struct timespec dl; clock_gettime(CLOCK_REALTIME, &dl); dl.tv_nsec += 10000000; if (dl.tv_nsec >= 1000000000) { dl.tv_sec++; dl.tv_nsec -= 1000000000; } pthread_cond_timedwait(&g_up_wcv, &g_up_wmu, &dl); }

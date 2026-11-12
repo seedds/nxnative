@@ -341,6 +341,12 @@ int main(void) {
     snprintf(p, sizeof p, "%s/game.dat", R2); put(p, "new"); set_mtime(p, time(NULL) + 45);
     CHECK(REPORT(R2, cloud4) && strstr(line, "conflict=1") && strstr(line, "cfiles=1 ") && strstr(line, "cdevice=Mac"),
           "both changed: the report says conflict, with the cloud's device (%s)", line);
+    CHECK(strstr(line, " pull=0") != NULL, "no pull pending (%s)", line);
+    {   // a pull that did not finish: what is in place may be half the cloud's, so no comparison is offered; the start's mount puts this device's save back first
+        char J[1300]; snprintf(J, sizeof J, "%s.pull", R2); put(J, "kept\t\nfolder\t0\t1\t0\t0\nfolder\t1\t0\t0\t0\n");
+        CHECK(REPORT(R2, cloud4) && strstr(line, " pull=1") && strstr(line, "conflict=0"), "a pending pull: said so, and no conflict offered (%s)", line);
+        unlink(J);
+    }
     {   // the incident of the PR: the new game's save is the newer by date, so the player needs the sizes to tell them apart
         char *cs = strstr(line, "csaved="), *sv = strstr(line, " saved=");
         CHECK(cs && sv && atoll(sv + 7) > atoll(cs + 7) && strstr(line, " size=3 ") && strstr(line, "csize=16 "),

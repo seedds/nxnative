@@ -167,6 +167,10 @@ void dm_host_preload_start(int argc, char **argv) {
     if (pthread_create(&g_pre.th, &a, preload_thread, NULL)) die("dm_host_preload_start: cannot start the thread");
 }
 int main(int argc, char **argv) {
+    {   // DM_FRAMEGEN=1: the game runs its 30 fps step and every second 60 Hz picture is generated (nvn_fg.inc), so the frame-rate target is 30 whatever the launcher set
+        const char *fg = getenv("DM_FRAMEGEN");
+        if (fg && *fg && strcmp(fg, "0")) { const char *t = getenv("DM_FPS_TARGET"); if (!t || strcmp(t, "30")) { setenv("DM_FPS_TARGET", "30", 1); LOG("DM_FRAMEGEN: frame-rate target 30 (was %s): the game renders 30, the display shows 60", t ? t : "the profile's"); } }
+    }
     { int mtl_pso_prebuild_tool(void); int r = mtl_pso_prebuild_tool(); if (r) return r == 2; }   // DM_PSO_PREBUILD=tool: what a first start would build, made with no game (nvn_mtl.m)
     if (getenv("DM_PRELOAD")) dm_host_preload_start(argc, argv);   // Exercise the early-start path on Mac (on iOS it is called from the App's main())
     if (atomic_load(&g_pre.started)) {

@@ -16996,6 +16996,7 @@ static void present_gpu_note(double s, int fx) {
     n[fx] = 0;
 }
 static double g_link_it_tin;   // Enqueue time of the frame the display-link callback is presenting (read and written only on the display-link thread)
+#include "nvn_fg.inc"
 static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t ticket, const int crop[4], id<CAMetalDrawable> supplied, double target_ts) {
     if (g_present_stall_ns) { struct timespec ts = {0, (long)g_present_stall_ns}; nanosleep(&ts, NULL); }
     g_present_n++;
@@ -17008,7 +17009,7 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
              g_up_total_ns / 1e6, g_bp_first_present / 1e9);
     }
     PD("X ser=%llu", t->serial);
-    id<MTLTexture> src = tex_mtl(t);
+    id<MTLTexture> src = g_fg_force_src ? g_fg_force_src : tex_mtl(t);
     if (!src) { RED_ONCE(8, "present texture could not get an MTLTexture"); return 0; }
     // The picture's shape for the front end's layout (front.h front_picture_shape): reported when its width / height changes by more than 0.1 %, not on a size change of the same
     // shape (1280x720 handheld, 1920x1080 docked)
@@ -17065,7 +17066,7 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     id<CAMetalDrawable> dr = supplied ? supplied : [layer nextDrawable];
     if (!supplied) g_drawable_ns += now_ns() - dt0;
     if (!dr) return 0;
-    int alloc_i = (int)(ticket % 3);
+    int alloc_i = (int)((ticket + (g_fg_force_src ? 1 : 0)) % 3);   // frame generation's held tick: the next slot (its last use, two tickets back, is done), not the generation's own
     if (g_present_alloc_fence[alloc_i]) {
         pthread_mutex_lock(&g_pq_mu);
         while (g_present_alloc_done[alloc_i] < g_present_alloc_fence[alloc_i]) pthread_cond_wait(&g_pq_cv, &g_pq_mu);
@@ -17075,7 +17076,17 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     [g_q4 waitForDrawable:dr];
     id<MTL4CommandBuffer> cb = g_present_cb[alloc_i];
     [cb beginCommandBufferWithAllocator:g_present_alloc4[alloc_i]];
-    int kind = present_encode_m4(cb, src, dr.texture, crop, g_present_uv[alloc_i], &g_fx_present);
+    id<MTLTexture> psrc = src; int fg_gen = 0;
+    int gcrop[4];
+    if (g_fg_req) { g_fg_req = 0; id<MTLTexture> gen = fg_generate(cb, src, crop, target_ts); if (gen) { psrc = gen; fg_gen = 1; } }
+    if (psrc != src && (psrc.width != src.width || psrc.height != src.height)) {   // a generated picture made smaller than the frame (DM_FG_SCALE): the crop in its pixels
+        double sx = (double)psrc.width / src.width, sy = (double)psrc.height / src.height;
+        gcrop[0] = (int)lround(crop[0] * sx); gcrop[1] = (int)lround(crop[1] * sy); gcrop[2] = (int)lround(crop[2] * sx); gcrop[3] = (int)lround(crop[3] * sy);
+        if (gcrop[0] + gcrop[2] > (int)psrc.width) gcrop[2] = (int)psrc.width - gcrop[0];
+        if (gcrop[1] + gcrop[3] > (int)psrc.height) gcrop[3] = (int)psrc.height - gcrop[1];
+        crop = gcrop;
+    }
+    int kind = present_encode_m4(cb, psrc, dr.texture, crop, g_present_uv[alloc_i], &g_fx_present);
     if (!kind) { [cb endCommandBuffer]; [g_q4 signalDrawable:dr]; return 0; }
     int fx_kind = kind == PRESENT_METALFX;
     [cb endCommandBuffer];
@@ -17086,6 +17097,7 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
         NSArray *retire = nil; if (!g_pq_inflight && g_ext_retire.count) { retire = g_ext_retire; g_ext_retire = nil; }   // every present committed before their release has completed
         present_gpu_note(f.GPUEndTime - f.GPUStartTime, fx_kind); pthread_mutex_unlock(&g_pq_mu);
         if (retire) ext_retire(retire);
+        if (fg_gen) { atomic_fetch_add(&g_fg_gpu_ns, (uint64_t)((f.GPUEndTime - f.GPUStartTime) * 1e9)); atomic_fetch_add(&g_fg_gpu_cnt, 1); }
     }];
     id<MTL4CommandBuffer> buffers[] = {cb};
     pthread_mutex_lock(&g_pq_mu); g_pq_inflight++; pthread_mutex_unlock(&g_pq_mu);
@@ -17111,8 +17123,11 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     (void)period; [dr present];
 #else
     uint64_t pn = ticket;   // Record the present time by the game's present sequence number (ticket number): hle's present statistics are taken by "the game's nth present"; in the display link path the actual present count != the game's present count (old frames get merged and dropped)
+    int tl_kind = fg_gen ? 1 : g_fg_force_src ? 2 : 0;
     [dr addPresentedHandler:^(id<MTLDrawable> d) {   // Actual presentation time (the time this frame is really put on screen, CACurrentMediaTime base)
         CFTimeInterval tt = d.presentedTime;
+        {   static FILE *tl; static int tl_init; if (!tl_init) { tl_init = 1; const char *e = getenv("DM_PRESENT_TLOG"); if (e && *e) tl = fopen(e, "w"); }   // every picture the screen showed: ticket, kind (0 frame, 1 generated, 2 held frame), presented time
+            if (tl) { fprintf(tl, "%llu\t%d\t%.6f\n", (unsigned long long)pn, tl_kind, tt); fflush(tl); } }
         g_pres[pn % PRING] = (pres_ent){pn, tt > 0 ? tt : -1};
     }];
     // Each frame is displayed for at least one present period: when the GPU completion time jitters around a 120 Hz refresh boundary, the paired "25 ms + 8.33 ms" stutter no longer appears
@@ -17183,10 +17198,25 @@ __attribute__((weak)) uint64_t dm_focus_in_since(void) { return 0; }
     pthread_cond_broadcast(&g_link_cv);
     pthread_mutex_unlock(&g_link_mu);
     pthread_mutex_lock(&g_pq_mu);
-    if (!g_dm_present_link || g_rescue_mode || g_pq_read == g_pq_in) { if (g_dm_present_link && !g_rescue_mode) g_link_empty++; pthread_mutex_unlock(&g_pq_mu); return; }
+    // Frame generation's held tick shows the real frame's copy whether or not the game's next frame is queued yet: a game that enqueues just in time (its frame landing after the held tick)
+    // left every held tick empty before, so only the generated pictures were shown, 30 a second, and the frames themselves never (DM_FG_EMPTYHOLD=0: the old order, for comparison)
+    static int eh = -1; if (eh < 0) { const char *e = getenv("DM_FG_EMPTYHOLD"); eh = !(e && !strcmp(e, "0")); }
+    int empty = g_pq_read == g_pq_in, fg_late = eh && empty && g_fg_pending && g_dm_present_link && !g_rescue_mode && g_pq_read > 0;
+    if (!fg_late && (!g_dm_present_link || g_rescue_mode || empty)) { if (g_dm_present_link && !g_rescue_mode) g_link_empty++; pthread_mutex_unlock(&g_pq_mu); return; }
     // The previous frame's present interval was >= 2 (period > 25 ms): keep it on screen for its whole period before taking the next one, as the Switch flips only every N vertical syncs. This also holds while the link runs at 60 Hz (Mario 1.2.1 sets 2 for single frames, see nvn_game_fps in hle_nvn.c);
     //   before, every tick took the newest frame, so that frame, carrying the extra time step the game advanced for it, was shown for only 16.7 ms and the game looked like it jumped ahead
-    if (g_link_hold_until > 0 && update.targetPresentationTimestamp < g_link_hold_until - tol) { g_link_held++; pthread_mutex_unlock(&g_pq_mu); return; }
+    if (fg_late || (g_link_hold_until > 0 && update.targetPresentationTimestamp < g_link_hold_until - tol)) {
+        if (fg_late) { static uint64_t n; if (!(n++ & 1023)) MLOG("frame generation: held tick shown with no new frame queued (%llu so far)", (unsigned long long)n); }
+        g_link_held++;
+        id<MTLTexture> fgp = g_fg_pending; g_fg_pending = nil; uint64_t fgt = g_pq_read; pq_item fgi = g_pq[(fgt - 1) % PQ];
+        pthread_mutex_unlock(&g_pq_mu);
+        if (fgp) {   // frame generation: the frame itself, after the generated picture shown on the tick before
+            g_fg_force_src = fgp; g_fg_held_n++;
+            @autoreleasepool { present_now(&fgi.t, fgi.period, fgi.frame, fgt, g_fg_pending_crop, update.drawable, update.targetPresentationTimestamp); }
+            g_fg_force_src = nil;
+        }
+        return;
+    }
     uint64_t first = g_pq_read + 1, ticket = g_pq_in;
     // In order, one frame per tick and at most one behind the newest: two waiting, the older now and the newer on the next tick; three or more, the older ones are dropped. Taking the newest
     // dropped the one before whenever two frames landed in the same refresh, as frames of a 60 fps game that take 16-17.5 ms do, and the next frame then stayed up 33 ms
@@ -17202,7 +17232,9 @@ __attribute__((weak)) uint64_t dm_focus_in_since(void) { return 0; }
     pthread_mutex_unlock(&g_pq_mu);
     int submitted;
     ext_wait(it.ev_val); snap_commit_wait(it.snap_v);
+    g_fg_pending = nil; g_fg_req = fg_enabled() && it.period > 0.025;
     @autoreleasepool { submitted = present_now(&it.t, it.period, it.frame, ticket, it.crop, update.drawable, update.targetPresentationTimestamp); mtl_tex_unpin(it.t.serial); }
+    g_fg_req = 0; if (fg_enabled()) fg_stats();
     g_link_hold_until = submitted && it.period > 0.025 ? update.targetPresentationTimestamp + it.period : 0;
     if (!submitted) {
         pthread_mutex_lock(&g_pq_mu);
@@ -17287,9 +17319,9 @@ static void link_sync(void) {   // Called every frame by the game's present thre
     }
     if (g_rescue_mode) want = 0;
     pthread_mutex_unlock(&g_pq_mu);
-    if (want && mtl_fps_target() == 30 && link_30hz()) want = 3;   // Power-saving mode: display link at 30 Hz
+    if (want && mtl_fps_target() == 30 && link_30hz() && !fg_enabled()) want = 3;   // Power-saving mode: display link at 30 Hz (not with frame generation, which needs the 60 Hz ticks)
     if (want) front_screen_match(want == 3 ? 30 : want == 2 ? 120 : 60);   // the game's rate: a variable-refresh screen goes to a fixed-rate mode at a multiple where it has one
-    static int vrr_was; int vrr = want == 1 && link_vrr_120();   // variable-refresh fullscreen that kept its mode: the 120 Hz link paces the 60 (link_vrr_120)
+    static int vrr_was; int vrr = want == 1 && link_vrr_120() && !fg_enabled();   // variable-refresh fullscreen that kept its mode: the 120 Hz link paces the 60 (link_vrr_120)
     if (vrr != vrr_was) { vrr_was = vrr; MLOG("display link: %s (frame %llu)", vrr ? "120 Hz in fullscreen on a variable-refresh screen, a frame every other tick (DM_PRESENT_LINK=1 keeps 60 Hz)" : "60 Hz again (window, fixed-rate screen or another frame rate)", (unsigned long long)atomic_load(&g_cur_frame)); }
     if (vrr) want = 2;
     // The screen's rate changed (switched by front_screen_match, or another screen): the range again, virtual ticks or none. Taken only once the link object exists, so a change

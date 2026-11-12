@@ -77,10 +77,13 @@ final class LauncherModel: ObservableObject {
     }
     func rows(in section: String, basic: Bool) -> [Setting] { rows(in: section).filter { $0.basic == basic } }
     // A range's label: its percentage, with the size in pixels for the chosen console mode when the list has the base size (the render scale)
-    func rangeLabel(_ s: Setting, _ v: Double) -> String {
+    func rangeLabel(_ s: Setting, _ v: Double) -> String { Self.rangeLabel(s, v, handheld: handheld) }
+    var handheld: Bool { (values["DM_OPMODE"] ?? "1") == "0" }   // the chosen console mode
+    // The same from the console mode alone, for a row that is drawn from its own value and not from the whole model (the Mac window)
+    static func rangeLabel(_ s: Setting, _ v: Double, handheld: Bool) -> String {
         let p = "\(Int((v * 100).rounded())) %"
         guard let b = s.base else { return p }
-        let size = (values["DM_OPMODE"] ?? "1") == "0" ? b.handheld : b.docked
+        let size = handheld ? b.handheld : b.docked
         guard size.count == 2 else { return p }
         return "\(Int((Double(size[0]) * v).rounded())) × \(Int((Double(size[1]) * v).rounded())) (\(p))"
     }

@@ -91,6 +91,7 @@ static s2_pad *s2_pad_for(uint16_t pid) {   // a Joy-Con joins a pad that has th
     NSTimer *_tick; uint64_t _reports; BOOL _handshaken; s2_rest _rest;
     s2_clock _clk; uint64_t _lost; char _serial[15]; uint64_t _restSaved;   // sample times from the controller's clock; the serial its learned gyro offset is kept under
     CBCharacteristic *_vib; uint8_t _vseq; int _offLeft; s2_rumble_cursor _rcur;   // _rcur: where this controller is in its player's rumble log
+    int _player;   // the player at the last read (playerSync): a pad waiting for its first button press (DM_PAD_PRESS_TO_JOIN) gets one later
     int16_t _mouseX, _mouseY; BOOL _mouseSeen, _mouseOn;   // _mouseOn: its mouse sensor is turned on (features)   // the mouse sensor's counters at the last report
     s2_hold _hold;   // the choosing gesture this Joy-Con holds now (s2_gesture)
 }
@@ -164,6 +165,12 @@ static s2_pad *s2_pad_for(uint16_t pid) {   // a Joy-Con joins a pad that has th
 - (void)setLEDs:(void (^)(void))done {
     int p = s2_player(_pad); uint8_t pl[4] = {s2_led_pattern[p >= 0 && p < 8 ? p : 0], 0, 0, 0};
     [self send:S2_CMD_LEDS sub:S2_SUB_LEDS_SET payload:pl len:4 done:^(NSData *r) { (void)r; if (done) done(); }];
+}
+// After the front end's read(): it may have given the pad a player at its first button press (DM_PAD_PRESS_TO_JOIN), and the pad's Joy-Con styles and player lights follow
+- (void)playerSync {
+    int player = s2_player(_pad); if (player == _player) return;
+    _player = player;
+    if (player >= 0) { s2_sync_sides(_pad); [self setLEDs:nil]; }
 }
 - (void)handshake {
     __weak S2Session *w = self;
@@ -277,11 +284,12 @@ static s2_pad *s2_pad_for(uint16_t pid) {   // a Joy-Con joins a pad that has th
     _pad = p; _live = YES; _handshaken = YES;
     s2_rumble_timer();
     if (fresh) {
-        if (g_front.attach) g_front.attach(p);
-        if (s2_player(p) < 0) { LOG("[sw2] %s: no free player, not used", s2_kind(_pid)); [self fail:@"all players are taken"]; return; }
+        if (!g_front.attach || !g_front.attach(p)) { LOG("[sw2] %s: no free player, not used", s2_kind(_pid)); [self fail:@"all players are taken"]; return; }
     } else if (g_front.read) g_front.read(p);
     s2_sync_sides(p);
-    LOG("[sw2] %s connected: player %d%s", s2_kind(_pid), s2_player(p) + 1, fresh ? "" : " (joined the Joy-Con already there)");
+    _player = s2_player(p);
+    if (_player < 0) LOG("[sw2] %s connected: a player once a button is pressed%s", s2_kind(_pid), fresh ? "" : " (joined the Joy-Con already there)");
+    else LOG("[sw2] %s connected: player %d%s", s2_kind(_pid), _player + 1, fresh ? "" : " (joined the Joy-Con already there)");
     [self setLEDs:nil];
     [_peripheral setNotifyValue:YES forCharacteristic:_inp];
     __weak S2Session *w = self;   // the link drops after about ten seconds without a write from the host, so the LEDs are written once a second
@@ -322,10 +330,16 @@ static s2_pad *s2_pad_for(uint16_t pid) {   // a Joy-Con joins a pad that has th
     int had = _rest.have; float was[3] = {_rest.bias[0], _rest.bias[1], _rest.bias[2]};
     s2_rest_update(&_rest, r.raw);
     if (_rest.have && (!had || was[0] != _rest.bias[0] || was[1] != _rest.bias[1] || was[2] != _rest.bias[2]) && ts - _restSaved > 30000000000ull) { [self saveRest]; _restSaved = ts; }
-    if (g_verbose && _reports % 33 == 1)
-        LOG("[sw2] %s: clock %u ms, %llu reports lost so far; buttons 0x%08x sticks %u,%u %u,%u accel %d,%d,%d gyro %d,%d,%d battery %u mV mouse %d,%d %u,%u", s2_kind(_pid), r.clock_ms, (unsigned long long)_lost, r.buttons, r.lx, r.ly, r.rx, r.ry, r.raw[0], r.raw[1], r.raw[2], r.raw[3], r.raw[4], r.raw[5], r.battery_mv, r.mouse_x, r.mouse_y, r.mouse_q, r.mouse_s);
+    if (g_verbose && _reports % 33 == 1) {
+        // The bytes the parser does not read (0x18..0x2F around the battery, and past the sensor at 0x3C), in hex: whether a report carries more than one IMU sample, or the
+        // sensor's own timestamp, is not known yet (the report has room for one 12-byte sample at 0x30)
+        char hex[3 * 0x50 + 1] = ""; const uint8_t *b = d.bytes; size_t len = d.length, o = 0;
+        for (size_t i = 0x18; i < len && o + 4 < sizeof hex; i++) if (i < 0x30 || i >= 0x3C) o += (size_t)snprintf(hex + o, sizeof hex - o, "%s%02x", i == 0x3C ? " | " : "", b[i]);
+        LOG("[sw2] %s: clock %u ms, %llu reports lost so far; buttons 0x%08x sticks %u,%u %u,%u accel %d,%d,%d gyro %d,%d,%d battery %u mV mouse %d,%d %u,%u; %zu bytes, 0x18..0x2f %s", s2_kind(_pid), r.clock_ms, (unsigned long long)_lost, r.buttons, r.lx, r.ly, r.rx, r.ry, r.raw[0], r.raw[1], r.raw[2], r.raw[3], r.raw[4], r.raw[5], r.battery_mv, r.mouse_x, r.mouse_y, r.mouse_q, r.mouse_s, len, hex);
+    }
     if (g_front.read) g_front.read(_pad);
     int player = s2_player(_pad), blocked = s2_blocked();
+    [self playerSync];
     if (g_motion && !blocked && player >= 0 && s2_pad_motion_dev(&_pad->st, g_motion_right) == dev) {
         const int8_t *map = g_map_set ? g_map : s2_pad_map(&_pad->st, dev);
         float acc[3], rot[3]; s2_motion(r.raw, map, _rest.have ? _rest.bias : NULL, g_gyro, acc, rot);
@@ -368,13 +382,15 @@ static s2_pad *s2_pad_for(uint16_t pid) {   // a Joy-Con joins a pad that has th
     s2_dev *d = s2_dev_of(old, _pid), *nd = s2_dev_of(p, _pid); *nd = *d; memset(d, 0, sizeof *d);
     s2_joy_release(was, side); s2_sync_sides(old); if (g_front.read) g_front.read(old);
     p->next = g_pads; g_pads = p; _pad = p;
-    if (g_front.attach) g_front.attach(p);
-    if (s2_player(p) < 0) {   // no free player: back into the pair
+    if (!g_front.attach || !g_front.attach(p)) {   // no free player: back into the pair
         LOG("[sw2] %s: no free player to play alone, it stays in the pair", s2_kind(_pid));
         s2_pad_unlink(p); *d = *nd; _pad = old; free(p); s2_sync_sides(old); return;
     }
-    s2_sync_sides(p); if (g_front.read) g_front.read(p);
-    LOG("[sw2] %s plays alone now: player %d (SL + SR held); the other Joy-Con stays player %d", s2_kind(_pid), s2_player(p) + 1, was + 1);
+    s2_sync_sides(p); _player = s2_player(p);
+    if (g_front.read) g_front.read(p);
+    [self playerSync];   // waiting for a press, the held SL + SR are that press: read() made it a player just now
+    if (_player < 0) LOG("[sw2] %s plays alone once a button is pressed (SL + SR held); the other Joy-Con stays player %d", s2_kind(_pid), was + 1);
+    else LOG("[sw2] %s plays alone now: player %d (SL + SR held); the other Joy-Con stays player %d", s2_kind(_pid), _player + 1, was + 1);
     [self setLEDs:nil];
 }
 - (void)joinPadOf:(S2Session *)stay {

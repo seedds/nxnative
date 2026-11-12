@@ -42,7 +42,7 @@ BASE, UPDATE, ADDON = 0, 1, 2
 KINDS = ('base', 'update', 'addon', 'addon_update', 'system')
 STANDALONE = 1   # package flags bit 0: an update in a container without a base
 T_NACP, T_ICON, T_LICONS = 2, 3, 10
-ARTIFACTS = {b'.listing'}   # dump-tool files a producer may have kept (SPEC §6.3): not game files
+ARTIFACTS = romfs_image.ARTIFACTS   # dump-tool files a producer may have kept (SPEC §6.3): not game files
 NO_BASE = 'no base game in this NUP: its update is taken as the whole game (if the game then stops on missing files, the update holds only what changed: pack a NUP with the base game)'
 
 

@@ -644,10 +644,21 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
             }
             // Metal's texture atomics (MSL 3.1) cover buffer, 2D, 2D-array and 3D textures of
             // R32Uint / R32Sint; source 1D surfaces arrive here already normalized to 2D.
+            // nxnative: a 64-bit max / min (InstEmitSurface.EmitSuatom, Ampere SURED.U64) on an rg32ui image, value low word then high word. SPIRV-Cross has no 64-bit
+            // atomics ("MSL currently does not support 64-bit atomics"), so it is written as two 32-bit atomics of the same operation on the same texel pointer, low word
+            // first; dmsh_atomic.wide_atomics turns that pair into one texture2d<ulong>::atomic_max / atomic_min on the RG32Uint texture and fails the shader on any other
+            // access of the image. The pair is only ever a marker: it never runs as two 32-bit atomics. After uncraftablexd's PR #1801
+            bool wide = bounded && texOp.Format == TextureFormat.R32G32Uint;
+            if (wide && (!texOp.Flags.HasFlag(TextureFlags.AtomicDiscardResult) ||
+                ((texOp.Flags & TextureFlags.AtomicMask) != TextureFlags.Minimum && (texOp.Flags & TextureFlags.AtomicMask) != TextureFlags.Maximum) ||
+                texOp.Type == SamplerType.TextureBuffer))
+            {
+                throw new NotSupportedException("Metal 64-bit image atomics support a max or min with no result on 2D/2D-array/3D images only.");
+            }
             if (bounded && (declaration.IsIndexed ||
                 (texOp.Type != SamplerType.TextureBuffer && texOp.Type != SamplerType.Texture2D &&
                  texOp.Type != (SamplerType.Texture2D | SamplerType.Array) && texOp.Type != SamplerType.Texture3D) ||
-                (texOp.Format != TextureFormat.R32Uint && texOp.Format != TextureFormat.R32Sint)))
+                (texOp.Format != TextureFormat.R32Uint && texOp.Format != TextureFormat.R32Sint && !wide)))
             {
                 throw new NotSupportedException("Metal image atomics support non-indexed 32-bit buffer/2D/2D-array/3D images only.");
             }
@@ -687,6 +698,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
             }
 
             SpvInstruction value = Src(componentType);
+            SpvInstruction valueHigh = wide ? Src(componentType) : null;
 
             SpvInstruction merge = null;
             SpvInstruction valid = null;
@@ -741,6 +753,13 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                 TextureFlags.CAS => context.AtomicCompareExchange(resultType, pointer, one, zero, zero, Src(componentType), value),
                 _ => context.AtomicIAdd(resultType, pointer, one, zero, value),
             };
+
+            if (wide)
+            {
+                result = (texOp.Flags & TextureFlags.AtomicMask) == TextureFlags.Minimum
+                    ? context.AtomicUMin(resultType, pointer, one, zero, valueHigh)
+                    : context.AtomicUMax(resultType, pointer, one, zero, valueHigh);
+            }
 
             if (bounded)
             {

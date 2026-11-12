@@ -263,9 +263,8 @@ class Merged(unittest.TestCase):
     def test_extraction_names_the_application(self):   # nx_extract reads the scanned game's own content metas (--app), whichever package holds them
         m = self.merged_nsp(); calls = []
         def fake_run(cmd, log, **k): calls.append(cmd); (Path(cmd[4]) / 'ExeFS').mkdir(parents=True)
-        with mock.patch.object(nsp, 'run', fake_run), mock.patch.object(nsp, 'swap_in'), mock.patch.object(nsp, 'extracted', return_value=None), \
-             mock.patch.object(nsp, 'PROG', mock.MagicMock()):
-            nsp.extract('nx', 'k', self.tmp / 'ex', 'v1507328', m, m, None, self.tmp / 'logs', mock.MagicMock(), APP)
+        with mock.patch.object(nsp, 'run', fake_run), mock.patch.object(nsp, 'extracted', return_value=None), mock.patch.object(nsp, 'PROG', mock.MagicMock()):
+            nsp.extract('nx', 'k', self.tmp / 'ex', 'v1507328', m, m, self.tmp / 'logs', mock.MagicMock(), APP, REPO)
         self.assertEqual(calls[0][calls[0].index('--app') + 1], f'{APP:016x}')
 
     def test_dlc_extraction_names_the_dlc(self):   # --aoc takes one DLC's data NCA by its content meta's title ID, from a merged package or a DLC NSP alike

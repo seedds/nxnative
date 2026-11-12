@@ -7,6 +7,7 @@
 #   any of these with x18 as its register → a copy between thread slots, K18 among them (site_slot_copy; the host gate writes K18 for mrs x18, cntpct_el0)
 #   svc #n, mrs cntpct_el0 → host gate (gate address taken from thread slot KGATE; once in C, gates.tsv is looked up by return point)
 #   sub sp, sp, xN      → xN rounded up to 16 first (Apple's kernel faults on a misaligned sp, Horizon does not; site_sp_align)
+#   sub sp, sp, #imm … add sp, sp, #imm with imm not a multiple of 16 → both rounded up to 16, when nothing between them reaches past the frame (odd_sp_frames)
 #   ldxr* / ldxp → ldaxr* / ldaxp, stxr* / stxp → stlxr* / stlxp: every exclusive access gets acquire or release ordering (exclusive_order_sites; the games ran on the Switch's Cortex-A57 without it, Apple cores need it)
 #   the completer of Trinity's per-frame rendezvous: dmb ish between its flag store and its load of the state word (trinity_completer_sites; exactly one such function in a module, or no change)
 #   spin wait loops     → a copy whose back-edges pass a spin gate (the host yields there; a busy poll costs nothing on the Switch, see "Spin waits")
@@ -705,6 +706,53 @@ ORDERED = set(exclusive_order_sites(IMG, CODE_RANGES))   # changed_runs leaves t
 for o in ORDERED:
     struct.pack_into('<I', IMG, o, struct.unpack_from('<I', IMG, o)[0] | 0x8000)   # ldxr → ldaxr, stxr → stlxr, ldxp → ldaxp, stxp → stlxp
 if ORDERED: stats['exclusive_ordered'] = len(ORDERED)
+def odd_sp_frames(img, ranges, md):
+    """(sub offset, add offset, size) of stack frames whose size is not a multiple of 16: sub sp, sp, #imm, then within 64 instructions add sp, sp, #imm with the same imm. Horizon leaves stack
+    alignment checking off for user code, Apple's kernel does not, so the first sp-based access in such a frame faults (SIGBUS, addr=0). Civilization VII's main has four hand-written blocks
+    (main+0x4e8a14, +0x556914, +0x57e914, +0x57ec18) that save x1–x17 in a 0x98-byte frame around an svc GetInfo; the first of them runs on the UI's second screen change. Rounding both
+    immediates up to 16 leaves the code as it was only when nothing between them reaches past the frame, so a frame is taken only when every instruction between is: one that does not use sp,
+    a call or an svc (no other branch: the add must close every path), or a load / store with sp as its only base, no writeback, at an offset whose bytes all lie inside the frame. Any
+    other use of sp (a copy of it, another adjustment) leaves the frame alone. Compiled code keeps frames 16-aligned, so there it finds nothing"""
+    from capstone import CS_GRP_CALL, CS_GRP_INT, CS_GRP_JUMP, CS_GRP_RET
+    from capstone.arm64 import ARM64_OP_MEM, ARM64_OP_REG, ARM64_REG_SP
+    WIN = 64
+    NARROW = {'ldrb': 1, 'strb': 1, 'ldrsb': 1, 'ldurb': 1, 'sturb': 1, 'ldursb': 1, 'ldrh': 2, 'strh': 2, 'ldrsh': 2, 'ldurh': 2, 'sturh': 2, 'ldursh': 2, 'ldrsw': 4, 'ldursw': 4}
+    REG_BYTES = {'x': 8, 'w': 4, 'q': 16, 'd': 8, 's': 4, 'h': 2, 'b': 1}
+    def inside(ins, size):   # True when the instruction leaves sp alone, or reads the frame within its first size bytes
+        if ins.group(CS_GRP_RET) or ins.group(CS_GRP_JUMP) and not ins.group(CS_GRP_CALL): return False
+        if ins.group(CS_GRP_CALL) or ins.group(CS_GRP_INT): return True
+        r, w = ins.regs_access()
+        if ARM64_REG_SP not in r and ARM64_REG_SP not in w: return True
+        mems = [op.mem for op in ins.operands if op.type == ARM64_OP_MEM]
+        regs = [ins.reg_name(op.reg) for op in ins.operands if op.type == ARM64_OP_REG]
+        if ARM64_REG_SP in w or ins.writeback or len(mems) != 1 or mems[0].base != ARM64_REG_SP or mems[0].index or not regs or len(regs) > 2: return False
+        width = NARROW.get(ins.mnemonic) or REG_BYTES.get(regs[0][0])
+        return width is not None and 0 <= mems[0].disp and mems[0].disp + width * len(regs) <= size
+    out = []
+    for s, e in ranges:
+        for m in re.finditer(rb'\xD1', img[s:e]):   # the top byte of sub (immediate, 64-bit): a word-by-word walk took 2.7 s on a 134 MiB main
+            o = s + m.start() - 3
+            if o & 3 or o < s or o + 4 > e: continue
+            w = struct.unpack_from('<I', img, o)[0]
+            if w & 0xFFC003FF != 0xD10003FF or not w >> 10 & 15: continue   # sub sp, sp, #imm (64-bit, no shift), imm not a multiple of 16
+            size = w >> 10 & 0xFFF
+            add = 0x910003FF | size << 10
+            for q in range(o + 4, min(e, o + 4 + 4 * WIN), 4):
+                if struct.unpack_from('<I', img, q)[0] == add:
+                    out.append((o, q, size)); break
+                ins = next(md.disasm(bytes(img[q:q + 4]), q), None)
+                if ins is None or not inside(ins, size): break
+    return out
+def sp_adjust(op, n):
+    """sub (op 0xD10003FF) or add (op 0x910003FF) sp, sp, #n. The immediate is 12 bits, optionally shifted left by 12: a frame of 0xff1–0xfff rounds up to 0x1000, which
+    only the shifted form holds (#1, lsl #12); written unshifted, its bit 12 would land in the shift bit and make the instruction sub sp, sp, #0, lsl #12, a frame of nothing"""
+    if n <= 0xFFF: return op | n << 10
+    assert not n & 0xFFF and n >> 12 <= 0xFFF, hex(n)
+    return op | 1 << 22 | n >> 12 << 10
+for s, a, size in odd_sp_frames(IMG, CODE_RANGES, md):   # both immediates rounded up to 16 (odd_sp_frames)
+    r = (size + 15) & ~15
+    struct.pack_into('<I', IMG, s, sp_adjust(0xD10003FF, r)); struct.pack_into('<I', IMG, a, sp_adjust(0x910003FF, r))
+    stat('sp_frame')
 def trinity_completer_sites(img, ranges):
     """Offsets of the completer of Trinity's per-frame rendezvous (Game Freak; Pokémon Scarlet 1.0.0 main+0x28f872c, 4.0.0 main+0x2d0010c):
       stp x29,x30,[sp,#-0x20]!; stp x20,x19,[sp,#0x10]; mov x29,sp; ldr x8,[x0,#imm]; mov w9,#1; strb w9,[x8,#A]; ldrb w9,[x8,#A+1]; cbz w9,..;

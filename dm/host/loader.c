@@ -332,6 +332,8 @@ void dm_fps_state_apply(void) {
     const char *dr = getenv("DM_DYNAMIC_RESOLUTION"); uint32_t dyn = dr && !strcmp(dr, "1");
     if (dr && strcmp(dr, "0") && strcmp(dr, "1")) LOG("[RED] DM_DYNAMIC_RESOLUTION=%s: must be 0 or 1; keeping full resolution", dr);
     memcpy(dm_fps_state + 0x40, &dyn, sizeof dyn);
+    // A full model heap (Ocarina of Time's patches.py heap_retry): DM_HEAP_RETRY=0 writes 1 at +0x17c, and the game's allocations that found their heap full stay as shipped
+    { const char *hr = getenv("DM_HEAP_RETRY"); if (hr && !strcmp(hr, "0")) { uint32_t off = 1; memcpy(dm_fps_state + 0x17c, &off, 4); LOG("%s: full model heap retry off (DM_HEAP_RETRY=0)", g_fps_mod); } }
     // Screen shape: DM_SCREEN_ASPECT, the screen's width / height between 1.3 and 1.77, makes the builds with screen-shape stubs
     // (Breath of the Wild 1.9.0's patches.py) render that shape: the output keeps its width (1920) and takes the height that gives the ratio, a multiple of 48 so the
     // 2/3-size layout space (1280 wide) stays whole: 1.43 → 1920x1344 and 1280x896. State +0x48 u32 output height, +0x4c u32 layout height, +0x50 its float; 0 = 16:9

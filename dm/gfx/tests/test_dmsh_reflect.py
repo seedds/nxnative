@@ -47,6 +47,33 @@ class StorageBuffers(unittest.TestCase):
         self.assertIsNone(bindings('hs', [0x410], [1])[0]['reg'])
 
 
+class BufferImageOffsets(unittest.TestCase):
+    # The translator gives each buffer image an index in the offset table (Program.cs "tbx", TranslationFlags.MetalBufferImageBias), and the reflection
+    # gives it to the image's binding, found by the slot and the handle its name carries; the table itself is bank DMSH_TBIAS_BANK
+    def test_offset_table_and_image_indices(self):
+        source = ('struct spvDescriptorSetBuffer0\n{\n'
+                  f'    constant _17* cp_c{dmsh_abi.TBIAS_BANK} [[id(0)]];\n'
+                  '    texture_buffer<uint, access::read_write> cp_i_tcb_48_r32ui [[id(1)]];\n'
+                  '    texture2d<uint, access::write> cp_i_tcb_4A_r32ui [[id(2)]];\n'
+                  '    texture_buffer<uint, access::write> cp_i_cb3_A_r32ui [[id(3)]];\n'
+                  '    texture_buffer<uint, access::write> cp_i_tcb_4C_r32ui [[id(4)]];\n'
+                  '};\n')
+        res = {'sbufs': [], 'images': [
+            {'binding': 1, 'cbuf_slot': -1, 'handle': 0x48, 'tbx': 0},
+            {'binding': 2, 'cbuf_slot': -1, 'handle': 0x4A},
+            {'binding': 3, 'cbuf_slot': 3, 'handle': 0xA, 'tbx': 1},
+            {'binding': 4, 'cbuf_slot': -1, 'handle': 0x4C}]}   # past the table: no index
+        got = REFLECT('synthetic', 'cs', source, res)
+        self.assertEqual([(b['kind'], b.get('tbx')) for b in got],
+                         [(dmsh_abi.KIND_TBIAS, None), (dmsh_abi.KIND_IMG, 0), (dmsh_abi.KIND_IMG, None), (dmsh_abi.KIND_IMG_UBO, 1), (dmsh_abi.KIND_IMG, None)])
+        self.assertEqual([b.get('reg') for b in got[1:]], [0, 1, 0, 2])
+
+    def test_slot_must_match(self):   # the same handle word in another constant buffer is another image
+        res = {'images': [{'binding': 1, 'cbuf_slot': 3, 'handle': 0x48, 'tbx': 0}]}
+        self.assertIsNone(dmsh_reflect.buffer_image_bias('cp_i_tcb_48_r32ui', res))
+        self.assertEqual(dmsh_reflect.buffer_image_bias('cp_i_cb3_48_r32ui', res), 0)
+
+
 class PoolTable(unittest.TestCase):
     # Global memory traced to no storage buffer (Donkey Kong Bananza's gsys vertex shader c9a56f796ea4a4cd): the translator reserves the host's pool table as a storage buffer
     # under the sentinel cb slot; it is not a game buffer, and it writes when one of the notes is a store or an atomic

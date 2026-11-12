@@ -139,6 +139,14 @@ def decode_ubo_img(name):
     m = re.match(r'[a-z]+_i\w*?_cb(\d+)_([0-9A-F]+)', name)
     return (int(m.group(1)) - 3, int(m.group(2), 16) * 4) if m and 3 <= int(m.group(1)) <= 16 else None
 
+def buffer_image_bias(name, res):
+    """A buffer image's index in the offset table (dmsh_abi.h DMSH_TBIAS_BANK), which the translator gives the image as "tbx" (TranslationFlags.MetalBufferImageBias), found by the
+    constant buffer slot and the handle its name carries (<stage>_i_cb<slots>_<handle>_<format>, or _i_tcb_<handle>_ for a handle in no constant buffer); None for any other image"""
+    m = re.match(r'[a-z]+_i_(?:cb(\d+)|tcb)_([0-9A-F]+)_', name)
+    if not m: return None
+    slots, h = int(m.group(1)) if m.group(1) else None, int(m.group(2), 16)
+    return next((i['tbx'] for i in res.get('images', ()) if 'tbx' in i and i['handle'] == h and (i['cbuf_slot'] == slots if slots is not None else i['cbuf_slot'] < 0)), None)
+
 def c2_array(name, ty):
     """An array of handles in the driver table c2 that the shader indexes at run time (Ryujinx's texture array from a buffer, here bank 2: <stage>_t<type>_cb<slots>_<handle>, declared
     array<element, n>, one element per c2 handle word; the index is the handle's byte offset ÷ 8). Luigi's Mansion 3: 586 pixel shaders sample their shadow cascades from
@@ -251,6 +259,7 @@ def reflect(key, stage, msl, res):
             if 3 <= n <= 16:   # fixed: the slot's bytes the shader reads at fixed offsets, which the host makes readable (zeros past a shorter binding); the translator's own count (Program.cs)
                 e.update(kind=abi.KIND_CBUF, reg=n - 3, fixed=next((b['fixed'] for b in res['cbufs'] if b['slot'] == n), 0))
             elif n == abi.CBSIZE_BANK: e.update(kind=abi.KIND_CBSIZE)   # the uniform slots' bound sizes, which the translator's reads at computed offsets compare with
+            elif n == abi.TBIAS_BANK: e.update(kind=abi.KIND_TBIAS)   # the buffer images' element offsets, which the translator adds to their coordinates (buffer_image_bias)
             else: e.update(kind=abi.KIND_C1 if n == 1 else abi.KIND_DRVCB, bank=n)
         elif sb := re.fullmatch(r'[a-z]+_s(\d+)', nm):
             e.update(kind=abi.KIND_SBUF, index=int(sb.group(1)))
@@ -265,6 +274,7 @@ def reflect(key, stage, msl, res):
             else: e.update(kind=abi.KIND_TEX_UBO, reg=ut[0], off=ut[1], **({'soff': us[1], 'sreg': us[0]} if other else {}))
         elif decode_ubo_img(nm):
             e.update(kind=abi.KIND_IMG_UBO, reg=decode_ubo_img(nm)[0], off=decode_ubo_img(nm)[1])   # pyright: ignore[reportOptionalSubscript]  (not None: tested above)
+            if (x := buffer_image_bias(nm, res)) is not None: e['tbx'] = x   # as KIND_IMG below
             if has_word(msl, nm + '.atomic_'): e['atomic'] = True   # as KIND_IMG below
         elif c2_array(nm, ty) is not None:   # an array of the driver table's handles (c2_array): the replay fills element k from the slot whose c2 word is at off + 8k
             off, soff = c2_array(nm, ty)   # pyright: ignore[reportGeneralTypeIssues]  (not None: tested above)
@@ -278,6 +288,7 @@ def reflect(key, stage, msl, res):
             else: e.update(kind=abi.KIND_IMG if re.match(r'[a-z]+_i', nm) else (abi.KIND_TBUF if 'texture_buffer' in ty else abi.KIND_TEX), reg=d[0])
             # native texture atomics (dmsh_atomic.py): Metal allows them only on an R32Uint / R32Sint texture made with the shader-atomic usage, which the host checks for this slot
             if e.get('kind') == abi.KIND_IMG and has_word(msl, nm + '.atomic_'): e['atomic'] = True
+            if e.get('kind') == abi.KIND_IMG and (x := buffer_image_bias(nm, res)) is not None: e['tbx'] = x   # a buffer image: its index in the offset table
             # a 1D integer fetch the translator read as 2D rows of 16384 texels (Program.cs RecordTexelFetch1D): the host binds a texture buffer in this slot as such rows (nvn_mtl.m tbuf_as_2d)
             if e.get('kind') == abi.KIND_TEX and e.get('reg') in res.get('fetch1d', ()):
                 e['fetch1d'] = True

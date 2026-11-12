@@ -127,7 +127,7 @@ static int net_discovery_unicast_plan(dm_net_discovery_plan *p) {
     if (dm_net_discovery_subnet(p, adapter.address, adapter.mask)) {
         // Tailscale and NetBird give each device its own address in a /10: nothing to sweep, so a joiner needs the host's address
         if (vpn) net_vpn_note(NET_VPN_SEARCH, "[dm] [RED] net: VPN play can't search this VPN's network (each device has its own address in a block too large to search). "
-                              "Joiners: set DM_NET_DISCOVERY_PEER=<the host's VPN address> in env.txt");
+                              "Joiners: type the host's VPN address in the launcher's VPN play section (DM_NET_DISCOVERY_PEER)");
         dm_net_set_errno(95); return -1;
     }
     return 0;

@@ -1,0 +1,352 @@
+{
+  "Name": {
+    "pt-BR": "Nome",
+    "es": "Nombre",
+    "zh-Hant": "名稱"
+  },
+  "Player": {
+    "pt-BR": "Jogador",
+    "es": "Jugador",
+    "zh-Hant": "玩家"
+  },
+  "Remove": {
+    "pt-BR": "Remover",
+    "es": "Eliminar",
+    "zh-Hant": "移除"
+  },
+  "Phone IP": {
+    "pt-BR": "IP do celular",
+    "es": "IP del teléfono",
+    "zh-Hant": "手機 IP"
+  },
+  "Port": {
+    "pt-BR": "Porta",
+    "es": "Puerto",
+    "zh-Hant": "連接埠"
+  },
+  "DSU slot": {
+    "pt-BR": "Slot DSU",
+    "es": "Ranura DSU",
+    "zh-Hant": "DSU 插槽"
+  },
+  "Auto": {
+    "pt-BR": "Automático",
+    "es": "Automático",
+    "zh-Hant": "自動"
+  },
+  "Connect": {
+    "pt-BR": "Conectar",
+    "es": "Conectar",
+    "zh-Hant": "連線"
+  },
+  "Disconnect": {
+    "pt-BR": "Desconectar",
+    "es": "Desconectar",
+    "zh-Hant": "中斷連線"
+  },
+  "Disconnected": {
+    "pt-BR": "Desconectado",
+    "es": "Desconectado",
+    "zh-Hant": "未連線"
+  },
+  "Calibrate…": {
+    "pt-BR": "Calibrar…",
+    "es": "Calibrar…",
+    "zh-Hant": "校正…"
+  },
+  "Add connection": {
+    "pt-BR": "Adicionar conexão",
+    "es": "Añadir conexión",
+    "zh-Hant": "新增連線"
+  },
+  "Automatic discovery": {
+    "pt-BR": "Busca automática",
+    "es": "Búsqueda automática",
+    "zh-Hant": "自動搜尋"
+  },
+  "UDP port": {
+    "pt-BR": "Porta UDP",
+    "es": "Puerto UDP",
+    "zh-Hant": "UDP 連接埠"
+  },
+  "Start over": {
+    "pt-BR": "Recomeçar",
+    "es": "Reiniciar",
+    "zh-Hant": "重新開始"
+  },
+  "Cancel": {
+    "pt-BR": "Cancelar",
+    "es": "Cancelar",
+    "zh-Hant": "取消"
+  },
+  "Continue": {
+    "pt-BR": "Continuar",
+    "es": "Continuar",
+    "zh-Hant": "繼續"
+  },
+  "OK": {
+    "pt-BR": "OK",
+    "es": "Aceptar",
+    "zh-Hant": "確定"
+  },
+  "Place flat": {
+    "pt-BR": "Coloque na mesa",
+    "es": "Colócalo plano",
+    "zh-Hant": "平放手機"
+  },
+  "Hold still": {
+    "pt-BR": "Fique parado",
+    "es": "Mantén inmóvil",
+    "zh-Hant": "保持靜止"
+  },
+  "Hold like a wheel": {
+    "pt-BR": "Segure como volante",
+    "es": "Sujeta como volante",
+    "zh-Hant": "像方向盤般握住"
+  },
+  "Steer": {
+    "pt-BR": "Gire",
+    "es": "Gira",
+    "zh-Hant": "轉動"
+  },
+  "Tilt": {
+    "pt-BR": "Incline",
+    "es": "Inclina",
+    "zh-Hant": "傾斜"
+  },
+  "Rotate": {
+    "pt-BR": "Rotacione",
+    "es": "Rota",
+    "zh-Hant": "旋轉"
+  },
+  "Waiting": {
+    "pt-BR": "Aguardando",
+    "es": "Esperando",
+    "zh-Hant": "等候中"
+  },
+  "You Got It! Move Freely To Test": {
+    "pt-BR": "Conseguiu! Mova para testar",
+    "es": "¡Lo lograste! Muévete para probar",
+    "zh-Hant": "成功了！自由移動以測試"
+  },
+  "Calibrate {0}": {
+    "pt-BR": "Calibrar {0}",
+    "es": "Calibrar {0}",
+    "zh-Hant": "校正 {0}"
+  },
+  "{0} samples": {
+    "pt-BR": "{0} amostras",
+    "es": "{0} muestras",
+    "zh-Hant": "{0} 筆樣本"
+  },
+  "Phone": {
+    "pt-BR": "Celular",
+    "es": "Teléfono",
+    "zh-Hant": "手機"
+  },
+  "Phone {0}": {
+    "pt-BR": "Celular {0}",
+    "es": "Teléfono {0}",
+    "zh-Hant": "手機 {0}"
+  },
+  "Language": {
+    "pt-BR": "Idioma",
+    "es": "Idioma",
+    "zh-Hant": "語言"
+  },
+  "Keep the phone app open and wait for motion data.": {
+    "pt-BR": "Mantenha o app do celular aberto e aguarde os dados de movimento.",
+    "es": "Mantén abierta la app del teléfono y espera los datos de movimiento.",
+    "zh-Hant": "請保持手機應用程式開啟，並等候動作資料。"
+  },
+  "Place the phone screen-up on a flat, stable table. When the bar fills, click Continue to confirm its position.": {
+    "pt-BR": "Coloque o celular com a tela para cima numa mesa plana e estável. Quando a barra encher, clique em Continuar para confirmar.",
+    "es": "Coloca el teléfono con la pantalla hacia arriba sobre una mesa plana y estable. Cuando se llene la barra, pulsa Continuar.",
+    "zh-Hant": "將手機螢幕朝上平放在穩固的桌面上。進度條填滿後，按「繼續」確認位置。"
+  },
+  "Hold still until the bar fills.": {
+    "pt-BR": "Fique parado até a barra encher.",
+    "es": "Mantén inmóvil hasta que se llene la barra.",
+    "zh-Hant": "保持靜止，直到進度條填滿。"
+  },
+  "Pick up your phone and hold it like the controller shown.": {
+    "pt-BR": "Pegue o celular e segure como o controle mostrado.",
+    "es": "Levanta el teléfono y sujétalo como el mando mostrado.",
+    "zh-Hant": "拿起手機，像畫面中的控制器一樣握住。"
+  },
+  "Return to your starting grip and hold still. Wait for the next arrow.": {
+    "pt-BR": "Volte à posição inicial e fique parado. Aguarde a próxima seta.",
+    "es": "Vuelve a la posición inicial y mantén inmóvil. Espera la siguiente flecha.",
+    "zh-Hant": "回到起始握姿並保持靜止，等候下一個箭頭。"
+  },
+  "Make one broad movement following the arrow, then stop.": {
+    "pt-BR": "Faça um movimento amplo seguindo a seta e pare.",
+    "es": "Haz un movimiento amplio siguiendo la flecha y detente.",
+    "zh-Hant": "沿箭頭方向做一次大幅度動作，然後停下。"
+  },
+  "Move freely to test. Press OK to save, or Start over.": {
+    "pt-BR": "Mova livremente para testar. Clique em OK para salvar ou Recomeçar.",
+    "es": "Muévete libremente para probar. Pulsa Aceptar para guardar o Reiniciar.",
+    "zh-Hant": "自由移動以測試。按「確定」儲存，或按「重新開始」。"
+  },
+  "Return to your normal grip and HOLD STILL to center the live test.": {
+    "pt-BR": "Volte à posição normal e FIQUE PARADO para centralizar o teste.",
+    "es": "Vuelve a la posición normal y MANTÉN INMÓVIL para centrar la prueba.",
+    "zh-Hant": "回到正常握姿並保持靜止，以置中即時測試。"
+  },
+  "No packets received": {
+    "pt-BR": "Nenhum pacote recebido",
+    "es": "Ningún paquete recibido",
+    "zh-Hant": "未收到封包"
+  },
+  "Invalid IP or port": {
+    "pt-BR": "IP ou porta inválidos",
+    "es": "IP o puerto inválido",
+    "zh-Hant": "IP 或連接埠無效"
+  },
+  "Contacting phone — not confirmed": {
+    "pt-BR": "Contatando celular — não confirmado",
+    "es": "Contactando teléfono — sin confirmar",
+    "zh-Hant": "正在聯絡手機，尚未確認"
+  },
+  "Waiting for a valid reply — not connected yet": {
+    "pt-BR": "Aguardando resposta válida — ainda não conectado",
+    "es": "Esperando respuesta válida — aún sin conexión",
+    "zh-Hant": "等候有效回覆，尚未連線"
+  },
+  "NO RESPONSE YET — still sending requests. Check IP, port, slot and Local Network permission.": {
+    "pt-BR": "SEM RESPOSTA — continuamos enviando pedidos. Confira IP, porta, slot e permissão de rede local.",
+    "es": "SIN RESPUESTA — seguimos enviando solicitudes. Revisa IP, puerto, ranura y permiso de red local.",
+    "zh-Hant": "尚無回覆，仍在傳送請求。請檢查 IP、連接埠、插槽及區域網路權限。"
+  },
+  "SIGNAL LOST — no reply for 3 seconds": {
+    "pt-BR": "SINAL PERDIDO — sem resposta há 3 segundos",
+    "es": "SEÑAL PERDIDA — sin respuesta durante 3 segundos",
+    "zh-Hant": "訊號中斷，已 3 秒未收到回覆"
+  },
+  "REPLY RECEIVED — inspect packet details below": {
+    "pt-BR": "RESPOSTA RECEBIDA — confira os pacotes abaixo",
+    "es": "RESPUESTA RECIBIDA — revisa los paquetes abajo",
+    "zh-Hant": "已收到回覆，請查看下方封包資訊"
+  },
+  "SIGNAL LOST — no valid motion for 3 seconds": {
+    "pt-BR": "SINAL PERDIDO — sem movimento válido há 3 segundos",
+    "es": "SEÑAL PERDIDA — sin movimiento válido durante 3 segundos",
+    "zh-Hant": "訊號中斷，已 3 秒無有效動作"
+  },
+  "CONNECTED — receiving DSU slot {0}": {
+    "pt-BR": "CONECTADO — recebendo slot DSU {0}",
+    "es": "CONECTADO — recibiendo ranura DSU {0}",
+    "zh-Hant": "已連線，正在接收 DSU 插槽 {0}"
+  },
+  "Send error: {0}": {
+    "pt-BR": "Erro de envio: {0}",
+    "es": "Error de envío: {0}",
+    "zh-Hant": "傳送錯誤：{0}"
+  },
+  "Axis mapping (saved for this phone)": {
+    "pt-BR": "Mapeamento de eixos (salvo neste celular)",
+    "es": "Ejes (guardados para este teléfono)",
+    "zh-Hant": "軸向設定（儲存於此手機）"
+  },
+  "Display X · tilt toward you": {
+    "pt-BR": "Eixo X · inclinar para você",
+    "es": "Eje X · inclinar hacia ti",
+    "zh-Hant": "顯示 X 軸・朝自己傾斜"
+  },
+  "Display Y · turn flat on table": {
+    "pt-BR": "Eixo Y · girar sobre a mesa",
+    "es": "Eje Y · girar sobre la mesa",
+    "zh-Hant": "顯示 Y 軸・在桌面上轉動"
+  },
+  "Display Z · lean left/right": {
+    "pt-BR": "Eixo Z · inclinar para os lados",
+    "es": "Eje Z · inclinar a los lados",
+    "zh-Hant": "顯示 Z 軸・左右傾斜"
+  },
+  "Choose three different input axes.": {
+    "pt-BR": "Escolha três eixos de entrada diferentes.",
+    "es": "Elige tres ejes de entrada diferentes.",
+    "zh-Hant": "請選擇三個不同的輸入軸。"
+  },
+  "Swap X / Y": {
+    "pt-BR": "Trocar X / Y",
+    "es": "Intercambiar X / Y",
+    "zh-Hant": "交換 X / Y"
+  },
+  "Buttons face you · white shoulder edge = top · two grips = bottom": {
+    "pt-BR": "Botões para você · borda branca = topo · duas alças = base",
+    "es": "Botones hacia ti · borde blanco = arriba · dos empuñaduras = abajo",
+    "zh-Hant": "按鈕朝向自己・白色肩部邊緣為頂端・兩個握把為底部"
+  },
+  "Recent packets (all types and slots)": {
+    "pt-BR": "Pacotes recentes (todos os tipos e slots)",
+    "es": "Paquetes recientes (todos los tipos y ranuras)",
+    "zh-Hant": "最近封包（所有類型及插槽）"
+  },
+  "Phone motion over Cemuhook UDP · local network only": {
+    "pt-BR": "Movimento por Cemuhook UDP · apenas rede local",
+    "es": "Movimiento por Cemuhook UDP · solo red local",
+    "zh-Hant": "透過 Cemuhook UDP 傳送動作・僅限區域網路"
+  },
+  "Automatic discovery off": {
+    "pt-BR": "Busca automática desligada",
+    "es": "Búsqueda automática desactivada",
+    "zh-Hant": "自動搜尋已關閉"
+  },
+  "Invalid discovery port": {
+    "pt-BR": "Porta de busca inválida",
+    "es": "Puerto de búsqueda inválido",
+    "zh-Hant": "搜尋連接埠無效"
+  },
+  "No small local IPv4 subnet found (limit 1024 addresses). Use manual connection.": {
+    "pt-BR": "Nenhuma sub-rede IPv4 pequena encontrada (limite de 1024 endereços). Conecte manualmente.",
+    "es": "No se encontró una subred IPv4 pequeña (máximo 1024 direcciones). Conecta manualmente.",
+    "zh-Hant": "找不到小型本機 IPv4 子網路（最多 1024 個位址）。請手動連線。"
+  },
+  "Place Flat and Click Continue": {
+    "pt-BR": "Coloque na mesa e clique em Continuar",
+    "es": "Colócalo plano y pulsa Continuar",
+    "zh-Hant": "平放手機並按繼續"
+  },
+  "Input X = DSU pitch, Y = yaw, Z = roll. Choose each input once. Minus reverses direction. Mapping changes reset orientation.": {
+    "pt-BR": "Entrada X = pitch, Y = yaw, Z = roll do DSU. Use cada eixo uma vez. O sinal negativo inverte o sentido. Alterar reinicia a orientação.",
+    "es": "Entrada X = pitch, Y = yaw, Z = roll de DSU. Usa cada eje una vez. El signo negativo invierte el sentido. Cambiar reinicia la orientación.",
+    "zh-Hant": "輸入 X 為 DSU pitch，Y 為 yaw，Z 為 roll。每個軸只能選一次。負號會反轉方向，變更設定會重設姿態。"
+  },
+  "Open DSUController on your phone. Enter its IP, port and slot. Use Calibrate for three guided movements. Hold the phone horizontally like a controller. Orientation integrates the gyroscope and may drift.": {
+    "pt-BR": "Abra o DSUController no celular. Informe IP, porta e slot. Use Calibrar para seguir os movimentos guiados. Segure o celular como controle. A orientação pode apresentar deriva.",
+    "es": "Abre DSUController en el teléfono. Introduce IP, puerto y ranura. Usa Calibrar para seguir los movimientos guiados. Sujeta el teléfono como un mando. La orientación puede derivar.",
+    "zh-Hant": "在手機開啟 DSUController，輸入 IP、連接埠及插槽。按校正並跟隨引導動作，像控制器般握住手機。姿態可能隨時間漂移。"
+  },
+  "Phone is still. Confirm it is flat on the table, then Continue.": {
+    "pt-BR": "Celular parado. Confirme que está plano na mesa e clique em Continuar.",
+    "es": "Teléfono inmóvil. Confirma que está plano sobre la mesa y pulsa Continuar.",
+    "zh-Hant": "手機已靜止。請確認已平放桌面，再按繼續。"
+  },
+  "Recenter": {
+    "pt-BR": "Recentrar",
+    "es": "Recentrar",
+    "zh-Hant": "重新置中"
+  },
+  "Recenter without changing axes": {
+    "pt-BR": "Recentrar sem alterar eixos",
+    "es": "Recentrar sin cambiar ejes",
+    "zh-Hant": "重新置中而不變更軸向"
+  },
+  "Flat on table": {
+    "pt-BR": "Plano na mesa",
+    "es": "Plano sobre la mesa",
+    "zh-Hant": "平放桌面"
+  },
+  "Holding like a wheel": {
+    "pt-BR": "Segurando como volante",
+    "es": "Sujetando como volante",
+    "zh-Hant": "像方向盤般握住"
+  },
+  "Hold still, then choose the current pose. Axis mapping and gyro bias stay unchanged.": {
+    "pt-BR": "Fique parado e escolha a posição atual. Os eixos e a compensação do giroscópio serão mantidos.",
+    "es": "Mantén inmóvil y elige la postura actual. Se mantienen los ejes y la compensación del giroscopio.",
+    "zh-Hant": "保持靜止，然後選擇目前姿勢。軸向設定與陀螺儀偏差補償保持不變。"
+  }
+}

@@ -17,6 +17,9 @@ void front_web_shot(const char *path) { (void)path; }
 static int g_prompt_answer = -1, g_prompt_calls, g_prompt_min, g_prompt_max; static uint32_t g_prompt_join;
 int front_ctrl_support(int min, int max) { g_prompt_calls++; g_prompt_min = min; g_prompt_max = max; if (g_prompt_join) dm_pad_players(g_prompt_join); return g_prompt_answer; }
 
+void probe_atrace(uint64_t lo, uint64_t n) { (void)lo; (void)n; }
+void dm_gfx_addr_note(uint64_t a, char *note, size_t n) { (void)a; if(n) note[0]=0; }
+void dm_gfx_bufsnap(const char *key, uint64_t a, size_t n, const char *path) { (void)key;(void)a;(void)n;(void)path; }
 static int checks, fails, g_mode = 1, g_signals;
 static void *g_signalled;
 static time_t rumble_second = 1;
@@ -687,7 +690,18 @@ static void t_touch_sampling(void) {
     g_mode = 1;
 }
 
+static void t_motion_dsu(void) {
+    motion_state out;float acc[3]={0,0,-1},physical[3]={0.2f,0,0},remote[3]={0,0.4f,0};
+    motion_now += 1000000000ull;
+    dm_motion_set(1,acc,physical);dm_motion_set_dsu(1,acc,remote,motion_now);
+    CHECK(motion_live(1,&out) && out.gyro[1]>0, "DSU motion reaches assigned guest sensor");
+    CHECK(!motion_copy(&g_dsu_motion[0],&out), "DSU does not leak to another player");
+    motion_now += MOTION_STALE_NS+1;dm_motion_set(1,acc,physical);
+    CHECK(motion_live(1,&out) && out.gyro[0]>0 && out.gyro[1]==0, "stale DSU falls back to physical motion");
+}
+
 int main(void) {
+    t_motion_dsu();
     CHECK(setenv("DM_RUMBLE_LOG", "1", 1) == 0, "enable rumble diagnostics");
     t_slots();
     t_npads();

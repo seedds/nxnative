@@ -134,6 +134,16 @@ Most commits have none, and commits from before this section have none either. A
 
 **Data a player already has moves by itself.** When a change makes the host read saves or other kept data differently, the host carries the old form forward, as with [saves named before backslash paths](reference/services.md#saves-named-before-backslash-paths): a front end has nothing to patch, and a player of nxnative's own apps gets the same fix.
 
+## Phone motion over DSU (proposed)
+
+Front-ends: the optional `NXMotion` Swift package in `dm/mac/Motion` provides the same device list and calibration UI as generated Mac games. It needs macOS 14 for the UI. The launcher itself keeps its existing deployment target.
+
+The per-user configuration is `~/Library/Application Support/nxnative/motion/dsu-v1.json`, version 1. It is not embedded in distributed game bundles. Enabled devices must have unique players 1–8, numeric IPv4, a port, slot 0–3, a signed gyro-axis permutation and gyro bias in degrees/s. Invalid configuration fails closed. Explicit `DM_DSU_1` through `DM_DSU_8` launch overrides win. Each value is `IPv4,port,slot,x,y,z,biasX,biasY,biasZ`. The signed axes map DSU gyro components to Switch right/forward/up. Acceleration uses the corresponding polar transform, including the determinant correction.
+
+The runtime subscribes over UDP once per second. It validates CRC, packet lengths, finite sensor values, sequence and timestamps. Fresh remote motion overrides that player’s physical motion, not their buttons or controller connection. Stale remote motion falls back to physical motion. Phone timestamps are mapped to the host monotonic clock, not treated as host epoch timestamps. DSU is unauthenticated: use trusted local networks only.
+
+Calibration establishes axis mapping and gyro bias, not absolute compass heading. The UI preview remains a gyro integration diagnostic. Full motion-game validation is still required. Related proposal: [NX2Apple #1206](https://github.com/LNPANDY/NX2Apple/issues/1206).
+
 ## What a front end cannot see yet
 
 While a game runs, the host says what happens only in its log, as text meant for people: a controller that connects or goes away, the preparing of shaders before the first frame, a red line. A front end that reads the log to show these would break when a line's wording changes. Events a program can read (one JSON object per line, as the NSP script's) would be the next piece of this interface; until then, treat log lines as diagnostics, not as an interface.

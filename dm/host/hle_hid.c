@@ -747,6 +747,7 @@ typedef struct { pthread_mutex_t mu; motion_state st; uint64_t last_ns, received
 static live_motion g_motion[DM_PLAYERS] = {[0 ... DM_PLAYERS - 1] = {.mu = PTHREAD_MUTEX_INITIALIZER}};
 static live_motion g_hid_motion[DM_PLAYERS] = {[0 ... DM_PLAYERS - 1] = {.mu = PTHREAD_MUTEX_INITIALIZER}};
 static live_motion g_joy_motion[DM_PLAYERS][2] = {[0 ... DM_PLAYERS - 1] = {[0 ... 1] = {.mu = PTHREAD_MUTEX_INITIALIZER}}};   // each Joy-Con's own sensor (dm_motion_set_joy)
+static live_motion g_dsu_motion[DM_PLAYERS] = {[0 ... DM_PLAYERS - 1] = {.mu = PTHREAD_MUTEX_INITIALIZER}};
 static live_motion g_phone_motion = {.mu = PTHREAD_MUTEX_INITIALIZER};
 static pthread_once_t g_motion_once = PTHREAD_ONCE_INIT;
 static motion_map g_motion_map; static float g_motion_gain = 0.5f; static int g_motion_off, g_motion_log, g_phone_mode;
@@ -782,6 +783,9 @@ static void motion_set_to(live_motion *m, int p, const float acc[3], const float
     m->last_ns = t; m->received_ns = now;
     pthread_mutex_unlock(&m->mu);
 }
+void dm_motion_set_dsu(int p, const float acc[3], const float rot[3], uint64_t t) {
+    if (t && p >= 0 && p < DM_PLAYERS) motion_set_to(&g_dsu_motion[p], p, acc, rot, 3, t);
+}
 void dm_motion_set(int p, const float acc[3], const float rot[3]) { motion_set(p, acc, rot, 0, 0); }
 void dm_motion_set_switch(int p, const float acc[3], const float rot[3]) { motion_set(p, acc, rot, 1, 0); }
 void dm_motion_set_hid(int p, const float acc[3], const float rot[3], uint64_t t) { if (t) motion_set(p, acc, rot, 2, t); }
@@ -811,6 +815,7 @@ static uint64_t motion_copy(live_motion *m, motion_state *out) {   // copies a s
 static int motion_live(int p, motion_state *out) {
     if (p < 0 || p >= DM_PLAYERS) return 0;
     pthread_once(&g_motion_once, motion_env);
+    if (!g_motion_off && motion_copy(&g_dsu_motion[p], out)) return 1;
     if (!p && g_phone_mode > 0) return motion_copy(&g_phone_motion, out) != 0;
     // Match the button path: in a one-player game, a controller in another slot also drives player 1.
     uint32_t src = p ? 1u << p : 1u | merged_players(); uint64_t newest = 0;
@@ -824,6 +829,7 @@ static int motion_live(int p, motion_state *out) {
 }
 // One Joy-Con's sensor: its own stream while fresh, else the pad's merged one (a controller that reports no per-Joy-Con motion)
 static int motion_joy(int p, int side, motion_state *out) {
+    if (p >= 0 && p < DM_PLAYERS) { pthread_once(&g_motion_once, motion_env); if (!g_motion_off && motion_copy(&g_dsu_motion[p], out)) return 1; }
     if (p >= 0 && p < DM_PLAYERS && (side == 0 || side == 1)) { pthread_once(&g_motion_once, motion_env); if (!g_motion_off && motion_copy(&g_joy_motion[p][side], out)) return 1; }
     return motion_live(p, out);
 }

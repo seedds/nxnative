@@ -2,6 +2,7 @@
 // Layout follows the public Horizon ABI: PosixTime = int64 seconds; CalendarTime = {s16 year, s8 month/day/hour/minute/second};
 // CalendarAdditionalInfo = {u32 day of week, u32 day of year, char time zone name[8], u32 DST, s32 UTC offset in seconds}.
 #include "hle.h"
+#include "time_zone.h"
 #include <stdatomic.h>
 #include <time.h>
 
@@ -98,7 +99,7 @@ HLE_FORCE("_ZN2nn4time13ClockSnapshot29CreateWithStandardSystemClockEPS1_", "sna
     memcpy(s + 0x40, &now, 8);
     h_time_ToCalendarTime((CalendarTime *)(s + 0x50), (CalendarAdditionalInfo *)(s + 0x60), &now);
     memcpy(s + 0x90, tp, 0x18);
-    tzset(); strlcpy((char *)s + 0xa8, tzname[0] && *tzname[0] ? tzname[0] : "UTC", 0x24);
+    dm_device_location_name((char *)s + 0xa8);   // the IANA name, as GetDeviceLocationName (time_zone.h)
     s[0xcd] = 1;   // The SDK passes type 1 for standard snapshots, 2 for adjustable snapshots; 0 is uninitialized.
     return RES_OK;
 }
@@ -144,8 +145,8 @@ HLE_FORCE("_ZN2nn4time39ClaimPeriodicBenefitWithUserSystemClockEPNS0_27PeriodicB
     LOG("time: periodic benefit claim → %u", (unsigned)r);
     return r;
 }
-// The two service questions of the claim above (each through g_pStaticService in the SDK, which the host never sets). A saved claim context from a Switch (a location such as Asia/Tokyo where the
-// host's is its zone abbreviation, automatic correction on) or a Mac whose time zone changed reaches them. The host knows neither moment, so the time point comes back cleared: its source ID matches
+// The two service questions of the claim above (each through g_pStaticService in the SDK, which the host never sets). A saved claim context from a Switch in another zone, one saved
+// before the host answered IANA names (its zone abbreviation, such as JST), one with automatic correction on, or one from a Mac whose time zone changed reaches them. The host knows neither moment, so the time point comes back cleared: its source ID matches
 // no snapshot's, and the claim then uses only the snapshots (it takes the time point only when its source ID is the current snapshot's steady clock's, SDK 6.5's detail:: +0x2e8 and +0x3b0)
 HLE_FORCE("_ZN2nn4time6detail56GetStandardUserSystemClockAutomaticCorrectionUpdatedTimeEPNS0_20SteadyClockTimePointE",
           "when automatic correction was last switched (time service); not known on the host: a time point of no clock", Result, h_time_AutoCorrUpdated, uint8_t *tp) {
@@ -153,16 +154,18 @@ HLE_FORCE("_ZN2nn4time6detail56GetStandardUserSystemClockAutomaticCorrectionUpda
 }
 HLE_FORCE("_ZN2nn4time6detail35GetDeviceLocationNameAndUpdatedTimeEPNS0_12LocationNameEPNS0_20SteadyClockTimePointE",
           "device location and when it was set (time service): the host's zone, as in its snapshots, and a time point of no clock", Result, h_time_LocUpdated, char *name, uint8_t *tp) {
-    memset(name, 0, 0x24); tzset(); strlcpy(name, tzname[0] && *tzname[0] ? tzname[0] : "UTC", 0x24);
+    dm_device_location_name(name);
     memset(tp, 0, 0x18); return RES_OK;
 }
-// The reverse: local calendar → absolute seconds (13 Sentinels). Around a daylight-saving switch one local time maps to 0 or 2 absolute seconds; the host's mktime gives one
+// The reverse: local calendar → absolute seconds (13 Sentinels). A local time the end of daylight saving time repeats names two absolute times, given earliest first, up to the
+// n the caller has room for; one otherwise. A time the start of daylight saving time skips gets mktime's normalized one, as before (time_zone.h dm_local_to_posix)
 HLE_FORCE("_ZN2nn4time11ToPosixTimeEPiPNS0_9PosixTimeEiRKNS0_12CalendarTimeE",
-          "time zone rules of the time service; uses the host mktime instead", Result, h_time_ToPosixTime, int *count, int64_t *out, int n, const CalendarTime *ct) {
-    struct tm tm = {.tm_year = ct->year - 1900, .tm_mon = ct->month - 1, .tm_mday = ct->day, .tm_hour = ct->hour, .tm_min = ct->minute, .tm_sec = ct->second, .tm_isdst = -1};
-    time_t t = mktime(&tm);
-    if (count) *count = n > 0;
-    if (n > 0 && out) out[0] = (int64_t)t;
+          "time zone rules of the time service; the host zone's (mktime), both times of a repeated hour", Result, h_time_ToPosixTime, int *count, int64_t *out, int n, const CalendarTime *ct) {
+    int64_t t[2]; int k = dm_local_to_posix(ct->year, ct->month, ct->day, ct->hour, ct->minute, ct->second, t);
+    if (n < 0 || !out) n = 0;
+    if (k > n) k = n;
+    for (int i = 0; i < k; i++) out[i] = t[i];
+    if (count) *count = k;
     return RES_OK;
 }
 // With an explicit time zone rule (Pokémon Legends: Z-A, SDK 19; the rule came from the host's LoadTimeZoneRule above and stays unused): the device zone, as for ToCalendarTime

@@ -1,6 +1,7 @@
 // System service interfaces used by games on newer SDKs (16.x): oe / time / pl (shared font) / vi vsync / diag.
 // On the real device all of these go through Horizon system services (IPC); the host gives values directly or makes them "unavailable".
 #include "hle.h"
+#include "time_zone.h"
 #include <fcntl.h>
 #include <pthread.h>
 #include <pthread/qos.h>
@@ -34,9 +35,10 @@ HLE_FORCE("_ZN2nn4time19ToCalendarTimeInUtcERKNS0_9PosixTimeE", "absolute second
     return (uint64_t)(uint16_t)(tm.tm_year + 1900) | (uint64_t)(uint8_t)(tm.tm_mon + 1) << 16 | (uint64_t)(uint8_t)tm.tm_mday << 24 |
            (uint64_t)(uint8_t)tm.tm_hour << 32 | (uint64_t)(uint8_t)tm.tm_min << 40 | (uint64_t)(uint8_t)tm.tm_sec << 48;
 }
-// LocationName = char[0x24] (time zone name): follows the host's system time zone
-HLE_FORCE("_ZN2nn4time21GetDeviceLocationNameEPNS0_12LocationNameE", "device time zone name → host time zone", Result, h_time_LocName, char *out) {
-    memset(out, 0, 0x24); tzset(); strlcpy(out, tzname[0] && *tzname[0] ? tzname[0] : "UTC", 0x24); return RES_OK;
+// LocationName = char[0x24] (time zone name): the host's system time zone by its IANA name ("Asia/Tokyo"), as a Switch reports its location; the zone abbreviation ("JST") was
+// no name a Switch gives, so a saved snapshot from a Switch in the same zone still looked like another location (time_zone.h dm_device_location_name)
+HLE_FORCE("_ZN2nn4time21GetDeviceLocationNameEPNS0_12LocationNameE", "device time zone name → host time zone (IANA name)", Result, h_time_LocName, char *out) {
+    dm_device_location_name(out); return RES_OK;
 }
 HLE_FORCE("_ZN2nn4time26StandardNetworkSystemClock14GetCurrentTimeEPNS0_9PosixTimeE", "network clock (offline, unavailable)", Result, h_time_NetNow, int64_t *out) { (void)out; return RES_FAIL; }
 HLE_FORCE("_ZN2nn4time8FinalizeEv", "pairs with Initialize; the host has no session", Result, h_time_Finalize, void) { return RES_OK; }

@@ -1434,7 +1434,7 @@ def extract_aoc(nx, keys, repo, work, app, fam, logs):
 def build_mismatch(d, name, g):   # the modules of an extraction whose build ID is not the one the profile's build row of that version registers ([] = the registered build)
     want = g.builds().get(name)
     if want is None: return [f'{name} has no build row']
-    return [f'{m} {build_id(d / "ExeFS" / m)} (registered {bid})' for m, bid in want.items() if m != 'display' and build_id(d / 'ExeFS' / m) != bid]
+    return [f'{m} {build_id(d / "ExeFS" / m)} (registered {bid})' for m, bid in want.items() if m != 'display' and not m.startswith('nro') and build_id(d / 'ExeFS' / m) != bid]   # an NRO's row (nro0=) has no ExeFS file: its build ID is checked when it is rewritten
 
 
 def patch_files(repo, exe_dir, mods, game_id=None):

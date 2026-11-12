@@ -311,7 +311,7 @@ For a replaced DSP renderer the size query keeps the service's work-buffer contr
 - **Cause:** SDK 21 and 22 name the output device notification `AcquireAudioOutputDeviceNotification` (older SDKs: `AcquireAudioDeviceNotificationForOutput`, and SDK 7's `AcquireAudioDeviceSwitchNotification`). SDK 22.2.0's version (`sdk+0x1f1e00`) opens a user session with `aud:u`, which the host does not serve, asks it for a read end and attaches it AutoClear. It keeps no per-process flag (the service keys each acquire by its event) and returns a Result.
 - **Fix:** `hle_audren.c` takes the name over, first for SDK 21 (Splatoon Raiders); the same takeover serves SDK 22. The event is bound and never signaled, and the Result is 0. The takeover keeps the older names' once-per-process flag, so a second acquire returns 0x499 where SDK 22.2.0's code would bind again. No game has been seen to acquire twice.
 - **The release:** `ReleaseAudioOutputDeviceNotification` (`sdk+0x1f2ac0` in Nintendo Switch Sports Resort's sdk) asks `aud:u` through the device session coordinator, then destroys the event. The game destroys the event itself only if it is still initialized afterwards (`main+0x3af11a0`). `hle_audren.c` takes it over: it destroys the event it bound (which drops the binding) and clears the flag, so a later acquire binds again. With nothing acquired it does nothing. `t_audren_work` covers acquire, the refused second acquire, release and acquire again.
-- **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md) (Switch 2, SDK 22.2.0, `main+0xe7b9c`); Nintendo Switch Sports Resort (`04008E001F098000`, no profile yet: the release, `main+0x3af119c`).
+- **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md) (Switch 2, SDK 22.2.0, `main+0xe7b9c`); [Nintendo Switch Sports Resort](../../dm/games/04008E001F098000/README.md) (`04008E001F098000`: the release, `main+0x3af119c`).
 
 ### No audio input devices
 
@@ -351,7 +351,7 @@ For a replaced DSP renderer the size query keeps the service's work-buffer contr
 - **The properties:** `VirtualDeviceProperties` is 0x110 bytes, filled from the profile at `sdk+0x224cd4`: the name asked about (+0x00, 0x100 bytes); the profile's +0x218 at +0x100, the device's shortest stream as a duration in ns (`OutputStreamImpl::Open` refuses a capacity under ceil(duration x rate / 1e9) frames with 0x899, `sdk+0x225a94`; the input stream open the same); and the profile's +0x108 at +0x108, a 32-bit word nothing in the sdk reads. Both of the game's callers, and Donkey Kong Bananza's two (`main+0x57cadc`, `main+0x187cee4`), only test the Result.
 - **Fix:** `hle_audio.c` answers for its one device, `AudioVirtualOutput`: the name, a shortest stream of 10 ms (one period as Xenoblade Chronicles 2 and Star Fox write it; the host's own open sets no minimum) and 0 in the unidentified word. Any other name gets a red line and a failure. The overload without flags opens like the others. `t_output_stream` covers both.
 - **Open:** what the +0x108 word means; no caller seen reads it.
-- **Found on:** Nintendo Switch Sports Resort (`04008E001F098000`, no profile yet; SDK 20+).
+- **Found on:** [Nintendo Switch Sports Resort](../../dm/games/04008E001F098000/README.md) (`04008E001F098000`; SDK 20+).
 
 ## Codecs
 

@@ -1,0 +1,7 @@
+# Fresh save: the boot to the title menu with its ship (the DLSS scene behind the menu), about 3,300 frames by 58 s on an M1 Max (64 GB) in a window. No screenshots: the ship turns.
+save	new
+secs	75
+quick	60
+reach	2400@60
+window	50	20
+hang	30

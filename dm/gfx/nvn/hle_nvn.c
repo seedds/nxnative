@@ -1900,7 +1900,6 @@ static void dump_frame(void) {
         if (g_tsv && calls) fprintf(g_tsv, "%llu\t%s\t%llu\n", g_frame, nvn_names[i], d);
         if (g_frame <= (uint64_t)nframes && o < sizeof line - 96) o += snprintf(line + o, sizeof line - o, " %s=%llu", nvn_names[i] + 3, d);
     }
-    if (g_tsv) fflush(g_tsv);
     if (g_frame <= (uint64_t)nframes) LOG("[nvn] %s %llu: %u functions %llu calls |%s", g_frame ? "frame" : "init", g_frame, nfn, total, line);
     else if (g_frame % 300 == 0) LOG("[nvn] frame %llu: %u functions %llu calls", g_frame, nfn, total);
     g_frame++; cs_dump();
@@ -2558,6 +2557,9 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
         // before that target, the callbacks since the previous frame's (1 = every tick took a frame) and the longest interval between them (33 ms on a 60 Hz link = a refresh the link skipped)
         double lt, ll, lg; int lk;
         if (g_tsv && mtl_link_tick(n, &lt, &ll, &lk, &lg)) { trow(f - 8, "@link_target_ms", lt * 1e3 - g_t0_ns / 1e6); trow(f - 8, "@link_lead_ms", ll); trow(f - 8, "@link_ticks", lk); trow(f - 8, "@link_gap_ms", lg); } }
+    // The frame's rows reach the file now, call counts or not: stdio buffers a file by its filesystem's block size (1 MB on an exFAT drive), so without this the rows of a run
+    // with DM_NVN_TSV_CALLS=0 arrived a megabyte at a time and the last one was lost at exit (regress.py and bench.py read them while the game runs)
+    if (g_tsv) fflush(g_tsv);
     if (f >= 8 && slow_on()) slow_emit(f - 8);
     prev_out = now_ns();
 }

@@ -81,6 +81,23 @@ class GuardedWrites(Translated):
         msl = self.translate(inst(0x000f4200080001ff, 0x000006000a0a7f6f) + inst(SUATOM[0], 0x00000c0a030c7593) + inst(*EXIT))   # the size added by an image atomic, so it stays
         self.assertIn('get_width(', msl)
 
+    def test_texel_fetch_through_a_uniform_register_translates(self):   # TLD through UR4 (FAST Fusion's terrain vertex shaders, terrain.shdr, as encoded there); the result atomically added so it stays
+        ur4, tld, used = (0x000fe20000000a00, 0x00c0040000047ab9), (0x001f4200089e03ff, 0x3000040a090a7f66), (0x020ea200001ee000, 0x00000c0a030c7593)
+        self.assertIn('.read(', self.translate(inst(*ur4) + inst(*tld) + inst(*used) + inst(*EXIT)))
+
+    def test_a_compute_shaders_c0_handle_at_a_computed_offset_reads_nvn_s_table(self):
+        # FAST Fusion's volumetric fog (cded8d0899ba4a6d, c[0] of 1 uniform buffer, 4 textures, 4 separate textures, 1 separate sampler, 1 image): separate texture i read as
+        # c[0][8 i + 0x40], i from the game's c[3], ORed with its sampler word c[0][0x60] (c[2] + 0x568). The table read at a computed offset is c[2]'s from 0x168: element k of c[0] is k + 37
+        idx = (0x000ea20000000800, 0x00c00000ff2a7b82)    # LDC R42, c[3][RZ]
+        lea = (0x000fe200078e18ff, 0x000000402a2c7811)    # LEA R44, R42, 0x40, 3
+        ldc = (0x000e620000000800, 0x000000002c2c7b82)    # LDC R44, c[0][R44]
+        lop = (0x002fe200078efcff, 0x000018002c2c7a12)    # LOP3 R44 = R44 | c[0][0x60]
+        tex = (0x000f4600049e01ff, 0x3800002c24247361)    # TEX R36, R36, handle R44
+        used = (0x020ea200001ee000, 0x00001a24030c7593)   # SUATOM.ADD [R3], R36 on the image (c[0] word 0x1a)
+        self.translate(b''.join(inst(*c) for c in (idx, lea, ldc, lop, tex, used, EXIT)), nvn2_cs=[1, 0, 4, 0x70, 0, 4, 1])
+        tables = [t for t in self.res['textures'] if t['array'] > 1]
+        self.assertEqual([(t['cbuf_slot'], t['handle']) for t in tables], [(2 | 3 << 16, 346 << 14 | 1 << 28)])   # c[2] with the sampler at c[2] word 346 (0x568)
+
     def test_lod_query_handle_forms_translate(self):   # TMML through a uniform register and a register (Kirby Air Riders' 4,776 pixel shaders, as encoded there)
         for code in ((0x000f4200080002ff, 0x600004ff20277f69), (0x000f4200000002ff, 0x68000018141d736a)):
             self.translate(inst(*code) + inst(*EXIT))
@@ -319,6 +336,10 @@ class StageMemory(Translated):
     COUNT_ZERO = (0x000fe20000008800, 0x000003ffff007927)  # 0x927 [RZ + 3], RZ, mode 0x88: every thread clears the count first
     COUNT = (0x0001e20000008800, 0x00000307ff007927)       # 0x927 [RZ + 3], R7, mode 0x88: the thread with the count
     INDEX = (0x0001e20000008000, 0x0000040605057927)       # 0x927 [R5 + 4], R6, mode 0x80: an index byte
+    # FAST Fusion's HUD programs (hud_energy.w3d): the task stores half words of its payload at [2 * index + 0x18], the mesh shader reads them back and masks them with 0xffff
+    HALF_PAYLOAD = (0x0003e2000000b400, 0x0000180003000927)  # 0x927 [R3 + 0x18], R0, mode 0xb4 (task 36bd689a2ec78a15 +0xe40)
+    HALF_INPUT = (0x000fe20000003400, 0x0000180007017923)    # ISBERD R1, [R7 + 0x18], mode 0x34 (mesh 25c42a8271e68962 +0x220)
+    KEEP_R1 = (0x0041e8000000b800, 0x00001001ff007927)       # 0x927 [RZ + 0x10], R1, mode 0xb8
 
     def msl(self, *code):
         return self.translate(b''.join(inst(*c) for c in code) + inst(*EXIT), **self.MEMORY)
@@ -358,6 +379,12 @@ class StageMemory(Translated):
         self.assertRegex(mesh, r'< 32640u')                    # inside the records only
         self.assertNotRegex(mesh, r'\* %du?\b' % (((1 << 18) + 50) // 51))   # no reciprocal
         self.assertRegex(mesh, r'/ 51\b')                      # an integer division
+
+    def test_a_half_word_of_the_payload_goes_through_its_word_atomically(self):   # mode 0xb4: 16 bits, beside another thread's half
+        self.assertIn('dmsh_shared_store16', self.msl(self.HALF_PAYLOAD))
+
+    def test_a_half_word_of_the_input_is_zero_extended(self):   # mode 0x34: 16 bits of the input at 0x10 + 0x18 + R7
+        self.assertIn('& 65535', self.msl(self.HALF_INPUT, self.KEEP_R1))
 
     def test_outside_a_task_or_mesh_shader_it_is_refused(self):
         with self.assertRaises(AssertionError) as e: self.translate(inst(*self.PAYLOAD) + inst(*EXIT))

@@ -141,19 +141,22 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 // read back a word the shader's own ISBEWR of the same mode wrote: a mesh shader's attributes (0xb8 through its vertex records, AosToSoa), a task's payload
                 // (AStageOut). PRAGMATA's mesh shaders 5aab38bb5ba67ef7 and 28ef097c07ceb429 (the title's lunar terrain) read the x, y and w of each triangle's three positions
                 // back this way and swap two of its indices by the sign of their determinant (a mirrored instance's winding). Ocarina of Time's task shader 5d3a096025e375a1
-                // reads its payload back with 0xb8 in a later thread. From uncraftablexd's PRAGMATA bring-up (PR #1407)
+                // reads its payload back with 0xb8 in a later thread. From uncraftablexd's PRAGMATA bring-up (PR #1407).
+                // 0x34 / 0xb4: the same places as 0x38 / 0xb8, 16 bits zero-extended: FAST Fusion's HUD mesh shaders read [2 * index + 0x18] of their task's payload with 0x34 and
+                // mask the result with 0xffff, where the task stored it with 0x927's mode 0xb4 at [2 * index + 0x18]
                 int mode = x.Bits(72, 80);
 
-                if (mode != 0x78 && mode != 0x38 && mode != 0xf8 && mode != 0xb8)
+                if (mode != 0x78 && mode != 0x38 && mode != 0xf8 && mode != 0xb8 && mode != 0x34 && mode != 0xb4)
                 {
                     throw AFail(context, $"ISBERD mode {mode:x2} in a task or mesh shader");
                 }
 
-                int baseOffset = mode switch { 0x38 => stage[1], 0xf8 or 0xb8 => stage[2], _ => 0 };
+                bool half = mode == 0x34 || mode == 0xb4;
+                int baseOffset = mode switch { 0x38 or 0x34 => stage[1], 0xf8 or 0xb8 or 0xb4 => stage[2], _ => 0 };
                 Operand addr = mode == 0x78 ? Const(stage[0])
                     : mode == 0xb8 && stage.Length >= 7 ? context.IAdd(Const(stage[2]), AosToSoa(context, context.IAdd(AGpr(x.Ra), Const((int)x.SignedField(40, 64))), stage))
                     : context.IAdd(AGpr(x.Ra), Const(baseOffset + (int)x.SignedField(40, 64)));
-                EmitLoad(context, StorageKind.SharedMemory, LsSize2.B32, addr, x.Rd, 0);
+                EmitLoad(context, StorageKind.SharedMemory, half ? LsSize2.U16 : LsSize2.B32, addr, x.Rd, 0);
                 return;
             }
 
@@ -163,7 +166,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
         }
 
-        // Task and mesh shaders' stage output (0x927), [Ra + offset], Rb, mode 72..79: 0xb8 a word of the task's payload; 0xf8 a word of a mesh shader's attributes (each component
+        // Task and mesh shaders' stage output (0x927), [Ra + offset], Rb, mode 72..79: 0xb8 a word of the task's payload, 0xb4 its low 16 bits there (FAST Fusion's HUD task shaders,
+        // at [2 * index + 0x18], which their mesh shaders read with ISBERD mode 0x34); 0xf8 a word of a mesh shader's attributes (each component
         // 0x80 bytes for 32 vertices or primitives); 0x88 the primitive count byte, 0x80 a primitive index byte. Bytes go through the shared memory's byte store, a compare-and-swap
         // on the word (SharedStoreSmallIntCas), since neighbouring threads write neighbouring bytes. A mesh workgroup of 32 threads is one warp on the console, all at the same
         // instruction, so the zero count each thread writes first (Mario Kart World: at its start) cannot pass the count one thread writes later; Metal's threads run in no such step,
@@ -174,9 +178,14 @@ namespace Ryujinx.Graphics.Shader.Instructions
             int[] stage = context.TranslatorContext.GpuAccessor.QueryAmpereStageMemory();
             int mode = x.Bits(72, 80);
 
-            if (stage == null || (mode != 0xb8 && mode != 0xf8 && mode != 0x88 && mode != 0x80))
+            if (stage == null)
             {
                 throw AFail(context, $"stage output store mode {mode:x2} outside a task or mesh shader");
+            }
+
+            if (mode != 0xb8 && mode != 0xb4 && mode != 0xf8 && mode != 0x88 && mode != 0x80)
+            {
+                throw AFail(context, $"stage output store mode {mode:x2} in a task or mesh shader");
             }
 
             if (mode == 0x88 && x.Rb == RegisterConsts.RegisterZeroIndex)
@@ -184,11 +193,11 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 return;
             }
 
-            bool word = mode == 0xb8 || mode == 0xf8;
+            bool word = mode == 0xb8 || mode == 0xf8, payload = mode == 0xb8 || mode == 0xb4;
             Operand addr = mode == 0xb8 && stage.Length >= 7
                 ? context.IAdd(Const(stage[2]), AosToSoa(context, context.IAdd(AGpr(x.Ra), Const((int)x.SignedField(40, 64))), stage))
-                : context.IAdd(AGpr(x.Ra), Const((word ? stage[2] : stage[3]) + (int)x.SignedField(40, 64)));
-            EmitStore(context, StorageKind.SharedMemory, word ? LsSize2.B32 : LsSize2.U8, addr, x.Rb, 0);
+                : context.IAdd(AGpr(x.Ra), Const((word || payload ? stage[2] : stage[3]) + (int)x.SignedField(40, 64)));
+            EmitStore(context, StorageKind.SharedMemory, word ? LsSize2.B32 : mode == 0xb4 ? LsSize2.U16 : LsSize2.U8, addr, x.Rb, 0);
         }
 
         // A mesh shader's attribute word by its non-skew address (ISBEWR / ISBERD .O.ATTR.32, mode 0xb8 in a mesh shader; in a task shader it is the payload). Besides the
@@ -812,7 +821,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             // (PRAGMATA's pixel shader b8246ccc36f8d648: Ra = R0, the texture word ORed with c[2] + 0x568, a separate sampler; R1, R2 the coordinates; Rb = R20..R23, four
             // products of the screen-space gradients; 84 of 164 shaders of a sample of its shaders stopped here)
             bool handleInA = opcode == 0x36d;
-            // 0xf66 is TLD the same way (0xb66's other fields), by the family's pattern: uniform-register forms at 0xf60 + 3n beside 0xb60 + 3n (PRAGMATA: 17 shaders)
+            // 0xf66 is TLD the same way (0xb66's other fields), by the family's pattern: uniform-register forms at 0xf60 + 3n beside 0xb60 + 3n (PRAGMATA: 17 shaders; FAST Fusion's terrain vertex shaders, terrain.shdr: 8)
             bool bindless = handleInB || handleInA || opcode is 0xf60 or 0xf63 or 0xf66 or 0xf6c or 0xf69;
 
             if (opcode is 0xf60 or 0xf63 or 0xf66 or 0xf6c or 0xf69)

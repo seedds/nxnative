@@ -47,6 +47,8 @@
 #       Mac host), each a VNVN record with one code area and control section (frostbite.py), see frostbite_jobs and frostbite_shaders
 #   · PDAT (the engine with the namespace phx, Kirby Air Riders): flatbuffer records tagged PMAP, zstd frames in the .dat archives, each holding a program's control sections and code areas, see pdat_jobs and pdat_shaders
 #   · Unreal Engine 3 (Batman: Arkham Knight): shader records in its global shader cache (BMSG) and in the packages (the combined shader cache), whose compressed chunks are Oodle blocks decoded by the game's own decoder in the Mac host, see ue3_body and ue3_shaders
+#   · SHN! (Shin'en's engine, FAST Fusion): every resource file (.shdr shader sets, .w3d / .w3p models with their materials' programs, .tex) is a structure block, a relocation table and a data block
+#       (each LZ4 or stored); the relocations into the data block give each stage record's code area and control section, see shn_shaders
 # Code area: 0x30 header + (graphics) 0x50 SPH + instructions; header magic 0x12345678 for graphics, 0x12345679 for compute. The control section starts with 0x98761234, +0x704 = code area length,
 #   +0x700 = start of the c1 constant segment within the code area; for compute +0x748 thread group xyz (u32 ×3), +0x754 shared memory bytes (checked one by one against PC reflection on D2R's 22 compute shaders).
 # Stage: BNSH uses the stage slot; BAHS uses bits 10..13 of SPH word 0 (1 vertex 2 hull 3 domain 4 geometry 5 pixel), and a compute header means compute.
@@ -270,6 +272,49 @@ def ndve_shaders(d, label):
             st = nvn2_stage(ctl, code)
             if st and len(code) == n and not check(label, st, ctl, code): out.append((f'{label}#NDVE@{c:#x}', st, ctl, code))
         c = d.find(CTL_MAGIC, c + 4)
+    return out
+
+SHN_STAGE_REC = 0x50
+def shn_shaders(d, label):
+    """Shin'en's resource container (FAST Fusion: shaders/*.shdr, and the .w3d models, which carry their materials' programs; its .tex, .w3p, .loc and .vma files have the same layout). 'SHN!', then
+    the structure block (u32 offset, which is the header's length 0x44, stored length, length, alignment, flags), the relocation table (offset, stored length, length) and the data block (offset, stored length, length, alignment, flags); a block whose
+    stored length is its length is stored, else it is one LZ4 block. The relocation table: u32 group count, then per group u32 target (-1 = the structure block, 1 = the data block), u32 count and
+    that many u32 offsets of u64 pointers in the structure block. A stage record (0x50 bytes) starts with two of them: its code area in the data block, then its NVN2 control section in the structure
+    block, which names the code area's length (+0x44). A program's records are consecutive slots: vertex, pixel at the next one, task and mesh four and five after the pixel. A record's
+    +0x40 is its code length and +0x44 its control length; an empty slot has a code length of 0 but points at a control section all the same (two test models, track_introduction.w3d and
+    testcubes.w3d, whose code areas there run past the data block)"""
+    import lz4.block
+    f = struct.unpack_from('<14I', d, 4) if len(d) >= 0x44 else (0,)
+    if f[0] < 0x44: return []
+    def block(at, what):   # the block whose (offset, stored length, length) start at f[at]
+        off, stored, n = f[at:at + 3]
+        if not n: return b''
+        if off + stored > len(d): red(f'{label} SHN! {what} block {off:#x}+{stored:#x} past the file end {len(d):#x}')
+        if stored == n: return d[off:off + n]
+        try: return lz4.block.decompress(d[off:off + stored], uncompressed_size=n)
+        except lz4.block.LZ4BlockError as e: red(f'{label} SHN! {what} block at {off:#x}: {e}')
+    a, t, b = block(0, 'structure'), block(5, 'relocation'), block(8, 'data')
+    out, recs, o = [], {}, 4
+    for _ in range(struct.unpack_from('<I', t)[0] if len(t) >= 4 else 0):
+        tgt, n = struct.unpack_from('<iI', t, o); o += 8
+        offs = struct.unpack_from(f'<{n}I', t, o); o += 4 * n
+        if tgt != 1: continue
+        for r in offs:
+            if r + 16 > len(a): continue
+            co, cc = struct.unpack_from('<QQ', a, r)
+            if cc + NVN2_KEY_CTL > len(a) or not nvn2_ctl(a[cc:cc + NVN2_KEY_CTL]): continue
+            own, n = struct.unpack_from('<I', a, cc + 0x30)[0], struct.unpack_from('<I', a, cc + 0x44)[0]
+            if r + 0x48 <= len(a) and not struct.unpack_from('<I', a, r + 0x40)[0]: continue   # the record's own code length (+0x40, control length +0x44): 0 in an empty slot
+            ctl, code = a[cc:cc + max(own, NVN2_KEY_CTL)], b[co:co + n]
+            st = nvn2_stage(ctl, code)
+            if len(code) != n or st is None: red(f'{label} SHN! stage record @{r:#x}: code area {co:#x}+{n:#x} outside the data block ({len(b):#x}) or of no stage')
+            if why := check(label, st, ctl, code): red(f'{label} SHN! stage record @{r:#x} {st}: {why}')
+            recs[r] = (where := f'{label}#SHN@{r:#x}', st)
+            out.append((where, st, ctl, code))
+    for r, (where, st) in recs.items():   # pair each pixel stage with the vertex slot before it or the mesh slot five after it
+        if st != 'ps': continue
+        for prev, want in ((r - SHN_STAGE_REC, 'vs'), (r + 5 * SHN_STAGE_REC, 'ms')):
+            if recs.get(prev, (0, 0))[1] == want: BAHS_VAR[where] = BAHS_VAR[recs[prev][0]] = f'{label}#SHN#prog@{r:#x}'
     return out
 
 BAHS_VAR = {}   # BAHS entry label → the program variation it belongs to (bahs_variations; var_pairs pairs by it)
@@ -3027,6 +3072,7 @@ def scan_blob(d, label, out, depth=0, left=None):
     if d[:4] == RGXD: out.extend(rgxd_shaders(d, label)); return
     if d[:4] == b'NDSR': out.extend(ndsr_shaders(d, label)); return
     if d[:4] == b'NDVE': out.extend(ndve_shaders(d, label)); return
+    if d[:4] == b'SHN!': out.extend(shn_shaders(d, label)); return
     if shaders := sead_prim_shaders(d, label): out.extend(shaders); return
     if d[:len(TFXO)] == TFXO: out.extend(tfxo_shaders(d, label)); return
     if d[:8] == SHAD: out.extend(shad_shaders(d, label)); return
@@ -3352,7 +3398,7 @@ def scan_file_in(args):
         try: pairs = unity_shaders(d, '/' + rel, found, trees if not TREES else dict(TREES))
         except unityfs.NoTree: return rel, {}, set(), 'defer'
         return rel, uniq_keys(found), var_pairs(found) | {(a, b, 'prog') for a, b in pairs}, trees
-    elif b'BNSH\0\0\0\0' not in d and b'BAHS' not in d and d[:4] != b'MSHD' and d[:4] != b'NDSR' and d[:4] != b'NARC' and d[:4] != b'NDVE' and not (d[:4] == b'SARC' and b'Yaz0' in d) and b'\x91\x68\x86\x19' not in d and MGFX not in d and NEEDLE not in d and d[:8] != SUMO_MUX and SUMO_NX not in d and NVNSH not in d: return rel, {}, set(), {}   # a SARC may hold Yaz0 members, a NARC packed ones (cra.undo)
+    elif b'BNSH\0\0\0\0' not in d and b'BAHS' not in d and d[:4] != b'MSHD' and d[:4] != b'NDSR' and d[:4] != b'SHN!' and d[:4] != b'NARC' and d[:4] != b'NDVE' and not (d[:4] == b'SARC' and b'Yaz0' in d) and b'\x91\x68\x86\x19' not in d and MGFX not in d and NEEDLE not in d and d[:8] != SUMO_MUX and SUMO_NX not in d and NVNSH not in d: return rel, {}, set(), {}   # a SARC may hold Yaz0 members, a NARC packed ones (cra.undo)
     else:
         scan_blob(d, '/' + rel, found)
         # whole GLSLC outputs in a file no other reader takes (FINAL FANTASY TACTICS - The Ivalice Chronicles: its engine's technique files, resources_nx/…/shader/*.tec, 261 outputs beside

@@ -277,6 +277,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **DLC:** additional shader records ship in the DLC's data slices. The NSP script includes each extracted DLC RomFS as an extra shader root, without an ExeFS module, and fingerprints its index and extraction timestamps for split reuse. Vulkan and OpenGL builds include the DLC roots too. When installing or removing optional DLC changes an NVN shader union, the script uses an external profile with new shader tables only after every non-DLC shader row and fact matches the registered tables; package indices may change. The registered module builds, settings and build-gated cuts are preserved. A cached proof of this comparison permits repeat builds to reuse the split.
 - **Found on:** [Mario + Rabbids Sparks of Hope](../../dm/games/0100317013770000/README.md) (zstd); [Mario + Rabbids Kingdom Battle](../../dm/games/010067300059A000/README.md) (zlib records, some wrapped in zstd chunks; shorter control sections and headerless compute code).
 
+### SHN! resource files (Shin'en)
+
+- **Symptom:** the split finds only an NDSR file's shaders (28 for FAST Fusion); the game runs with sound over a black screen, its draws skipped for want of their shaders.
+- **How it is stored:** every resource file of Shin'en's engine (`.shdr` shader sets, `.w3d` models with their materials' programs; `.tex`, `.w3p`, `.loc` and `.vma` have the same layout) starts with `SHN!` and 14 u32s: the structure block (offset, stored length, length, alignment, flags), the relocation table (offset, stored length, length) and the data block (offset, stored length, length, alignment, flags). A block whose stored length is its length is stored, any other one LZ4 block. The relocation table is a u32 group count, then per group a u32 target (-1 the structure block, 1 the data block), a u32 count and that many u32 offsets of u64 pointers in the structure block. A stage record (0x50 bytes) starts with two of them: its code area in the data block, then its NVN2 control section in the structure block; a record whose code length (+0x40) is 0 is an empty slot. A pixel stage's program partner is the vertex record before it or the mesh record five after it.
+- **Fix:** `shader_split.py` `shn_shaders` reads the records through the data block's relocations, so it needs no layout of the structures around them, and checks each control section and code area as for the other containers.
+- **Found on:** [FAST Fusion](../../dm/games/040041E0212AE000/README.md): 2,948 shaders, 2,491 first found in 292 models and 457 in 152 shader sets.
+
 ### CompiledBytecode resources in Frostbite superbundles
 
 - **Symptom:** the survey finds no shader container in a RomFS of `.toc` and `.cas` files (`Data/NX`, `Patch/NX`, `Data/layout.toc`, `Data/initfs_NX`); the split reads every file loosely and finds nothing.
@@ -1204,6 +1211,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** `AIsberd` reads both from the stage memory's outputs, 0xb8 through the vertex records (previous entry). From uncraftablexd's PRAGMATA bring-up ([PR #1407](https://github.com/seedds/nxnative/pull/1407)).
 - **Found on:** [PRAGMATA](../../dm/games/0400C76024710000/README.md): `5aab38bb5ba67ef7` and `28ef097c07ceb429`, the title's lunar terrain, read back each triangle's positions to swap two indices of a mirrored instance's triangles.
 
+### Half words of a task's payload (ISBEWR 0xb4, ISBERD 0x34)
+
+- **Symptom:** `NotSupportedException: Ampere 927 …: stage output store mode b4` in a task shader, or `Ampere 923 …: ISBERD mode 34` in a mesh shader; the pair is left out and its draws skipped (`[RED] DrawMeshTasks without its task and mesh shaders`).
+- **Cause:** mode 0xb4 is 0xb8 (a word of the task's payload) with 16 bits, and 0x34 is 0x38 (a word of the payload the mesh shader receives) with 16 bits, zero-extended. The translator took only the 32-bit and byte modes.
+- **Fix:** a chain change (vendored `InstEmitAmpereMem.cs`): `AStageOut` stores 0xb4's low half into the payload through the shared memory's 16-bit store (a compare-and-swap on the word, since the other half is another thread's), and `AIsberd` reads 0x34 and 0xb4 as 16-bit loads at 0x38's and 0xb8's places.
+- **Found on:** [FAST Fusion](../../dm/games/040041E0212AE000/README.md): its HUD and title menu, task shaders such as `36bd689a2ec78a15` (+0xe40) storing `[2 * index + 0x18]` with 0xb4 and mesh shaders such as `25c42a8271e68962` (+0x220) reading it back with 0x34 and masking it with 0xffff.
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py` (`StageMemory`: the two half-word tests).
+
 ### Threadgroup stores in warp-synchronous code
 
 - **Symptom:** a small scan or sort in a compute shader gives wrong results every frame, with no barrier in its loop (Orbitals: Niagara's sorted particle indices).
@@ -1395,8 +1410,8 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Symptom:** `[translation failed] NotSupportedException: Ampere instruction f66 … is not implemented`, `Ampere instruction 595 … is not implemented`, or `Ampere 906 …: I2F byte select of a 32-bit source`.
 - **Cause:** three forms the emitters did not take. 0xf66 is TLD with its handle in a uniform register (40..46), the fetch beside 0xf60 (TEX), 0xf63 (TLD4), 0xf69 (TMML) and 0xf6c (TXD): its other fields are 0xb66's. That reading is the family's pattern (0xf60 + 3n beside 0xb60 + 3n), not a disassembly. 0x595 is SUATOM's compare-and-swap through a bound handle: Mesa's NAK encodes the bindless ones as 0x394 (atomic) and 0x396 (compare-and-swap, its data the pair compare value, new value), and 0x593 is 0x394 with the handle bound. I2F in its immediate form (0x906) has the value in 32..63, so 60..62 select no byte there; an immediate of -2 read as select 7.
 - **Fix:** a chain change (vendored `InstEmitAmpereMem.cs`: `ATex` takes 0xf66, `ASuatomCas`; `InstEmitAmpereAlu.cs`: `AI2f` reads no select from an immediate).
-- **Found on:** [PRAGMATA](../../dm/games/0400C76024710000/README.md): 17 shaders with 0xf66 (11 vertex, 6 pixel), compute shader `50fece0d891feba4` with 0x595, 3 compute shaders with the I2F. All build; none has been watched drawing.
-- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_alu.py -k I2fImmediate`; the other two forms are checked by PRAGMATA's build only.
+- **Found on:** [PRAGMATA](../../dm/games/0400C76024710000/README.md): 17 shaders with 0xf66 (11 vertex, 6 pixel), compute shader `50fece0d891feba4` with 0x595, 3 compute shaders with the I2F. All build; none has been watched drawing. [FAST Fusion](../../dm/games/040041E0212AE000/README.md): 8 terrain vertex shaders with 0xf66 (`terrain.shdr`), which draw its tracks.
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_alu.py -k I2fImmediate`; 0xf66 by `test_dmsh_ampere_mem.py` (`test_texel_fetch_through_a_uniform_register_translates`), the other two forms by PRAGMATA's build only.
 
 ### IPA at an offset, and the barycentric coordinates
 
@@ -1977,6 +1992,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** a chain change. `Program.cs` gives an array over c2 one element per handle word up to the end of the separate sampler table (`C2HandleWords`, 301; other buffers keep 32), `c2_array` decodes type 1 with the sampler word in c2 too (`soff` in the reflection), and the replay ORs that word into each element's handle for the samplers (`NVN_RB_SAMPA`; `c2_handle` now also answers the separate sampler table). `nvn_rbind.n` is 16 bits and `NVN_REFL_MAXARG` 768 (such a pair takes 602 argument entries). The same loop reads each handle word itself at a computed c2 index (`fp_c2._m0[int(_237)]`, to test the light's handle), which `unfillable` refused for any bank; the replay fills c2's handle tables whole (`DRV2` in `encode_args`), so a computed index into c2 is accepted, and one into c0, filled only in its tables, still refused. Luigi's Mansion 3's cascade arrays become 301 long as well; the host fills the elements past the handles with the dummy.
 - **Found on:** [EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md) (its lights in a match).
 - **Check:** `test_dmsh_reflect.py` (`DriverTableArrays`, `DriverReads`) and `test_dmsh_abi.py` (the translator's table length agrees with the header).
+
+### A compute shader's c0 handle table read at a computed offset
+
+- **Symptom:** `[RED] shader … reflection conversion failed`, then `failed to load` and `[RED] the dispatched program has no compute shader`; the dispatch is skipped.
+- **Cause:** an NVN2 compute shader keeps its own copy of its handles in c0 after its push constants and its buffer tables ([Compute `c0`](#compute-c0-dispatch-size-and-uniform-buffer-table)): textures, then separate textures, separate samplers and images, 8 bytes each, at offsets the control section's counts give (`QueryAmpereComputeC0Layout`). When the shader picks a handle at run time (LDC `c[0][8i + base]`), `BindlessToArray` made a texture array over c0, which the replay fills only in its fixed places, so the binding had no slot.
+- **Fix:** a chain change (vendored `BindlessToArray.cs`, `TryComputeC0Table`): an array over c0 is an array over the same kind of table in c2 (textures at 0x20, separate textures at 0x168, separate samplers at 0x568, images at 0x120, which the replay fills whole), its index shifted by the two tables' difference in words.
+- **Found on:** [FAST Fusion](../../dm/games/040041E0212AE000/README.md): the volumetric fog `cded8d0899ba4a6d` (1 uniform buffer, 4 textures, 4 separate textures, 1 separate sampler, 1 image) reads separate texture i at `c[0][8i + 0x40]` with its sampler word at `c[0][0x60]`; without it the race's sky was black.
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py` (`test_a_compute_shaders_c0_handle_at_a_computed_offset_reads_nvn_s_table`).
 
 ### A texture slot that shares its c2 word with an image slot
 

@@ -51,6 +51,13 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Fix:** `regress.py` runs the host with `DM_FOCUS_KEEP=1` (`front_mac.m`): the game stays in focus while its window is up, whichever app is active; minimizing still counts.
 - **Found on:** [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md#found-on-this-game) (the regress route, 2026-11-03 and 04).
 
+### Per-frame rows lost on an exFAT drive
+
+- **Symptom:** a `regress.py` or `bench.py` run of a game in an NSP folder on an exFAT drive reports a frame not reached, a low fps or a short window while the log shows the game at full rate to the end: `frames.tsv` is a whole number of megabytes and ends inside a row.
+- **Cause:** both tools run the host with `DM_NVN_TSV_CALLS=0` (timing rows only), and `hle_nvn.c` flushed the file only in the call-count branch, which that skips. The C library buffers a file by its filesystem's block size: 4 KB on APFS, 1 MB on an exFAT drive. So the rows reached the file a megabyte (about 1,000 frames) at a time, the tools read them that late, and the last megabyte was lost when the run was stopped.
+- **Fix:** the host flushes the file once per present, at the end of the frame's rows (`nvnQueuePresentTexture`), counts or not.
+- **Found on:** [FAST Fusion](../../dm/games/040041E0212AE000/README.md), whose NSP folder is on an exFAT drive: `frame 2400 not reached by 60 s (max 2954)` and 31 fps against the log's 60, with the file cut at exactly 3 MB.
+
 ### Benchmark captures perturb the measured frame pacing
 
 - **Symptom:** otherwise stationary gameplay benchmarks show roughly 125–135 ms frame spikes at their verification screenshots; adaptive-cap results vary between runs.

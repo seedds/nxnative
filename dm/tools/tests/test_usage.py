@@ -45,7 +45,7 @@ class Usage(unittest.TestCase):
 
     def test_rule_precedence(self):
         rules = usage.load_map()
-        rs, mapped = usage.rules_for('dm/gfx/tools/dmsh_build.py', {'fs_uint'}, rules)
+        rs, mapped = usage.rules_for('dm/gfx/tools/dmsh_entry.py', {'fs_uint'}, rules)
         self.assertTrue(mapped); self.assertEqual({r[2] for r in rs}, {'shader:integer_outputs'})   # the function's rule, not the file's catch-all
         rs, _ = usage.rules_for('dm/gfx/tools/dmsh_build.py', {'some_new_function'}, rules)
         self.assertEqual({r[2] for r in rs}, {'shader:stage:*'})

@@ -58,7 +58,7 @@ static int run(prog_t *pg, uint8_t *pool, int indexed, int maximum, int count, i
     uint32_t vertices = 3;
     h_nvnCommandBufferUpdateUniformBuffer(&parent, (uint64_t)(uintptr_t)sentinel, sizeof vertices, 0, sizeof vertices, &vertices);
     h_nvnCommandBufferCallCommands(&parent, 1, &draws);
-    uint64_t handle = h_nvnCommandBufferEndRecording(&parent);
+    uint64_t handle = (uintptr_t)nvn_rec_linear(h_nvnCommandBufferEndRecording(&parent), NULL);   // the recording's records with the call inlined, as the queue submits them
 
     tex_t rt = {.magic = MAGIC('T', 'E', 'X', 0), .serial = nvn_new_serial()};
     rt.d = (nvn_texdesc){.target = NVN_TEXTURE_TARGET_2D,
@@ -161,7 +161,7 @@ int main(void) {
         pr->sh[1]->rf.color_mask = 1;
         prog_t pg = {.serial = nvn_new_serial()};
         serial_put(pg.serial, pr);
-        int failures = 0; // NOLINT(clang-analyzer-osx.cocoa.RetainCount): serial_put retains pr in g_by_serial and serial_del releases it after the draws.
+        int failures = 0;
         for (int indexed = 0; indexed <= 1; indexed++) {
             failures += !run(&pg, pool, indexed, 1024, 1024, 1023, STRIDE);
             failures += !run(&pg, pool, indexed, 1025, 1025, 1024, STRIDE);

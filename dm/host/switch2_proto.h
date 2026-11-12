@@ -399,22 +399,37 @@ static inline int s2_gyro_cal_parse(const uint8_t *d, size_t n, float off[3]) {
 static inline int s2_gyro_cal_usable(uint16_t pid) { return pid == 0x2066; }
 
 // Sample times from the controller's own clock (the report's first four bytes: milliseconds, +30 a report on a Mac's 30 ms connection interval, +60 or +90 when a report was
-// lost). Arrival times come in bursts (a few reports of a connection event at once), and a lost report leaves a gap that only the clock shows, so the sample time is the
-// previous one plus the clock's step, never later than the arrival and never more than S2_CLOCK_LAG_NS before it (the clocks drift apart slowly; a long silence or a clock
-// that went back starts over at the arrival). *lost is the number of reports the step skipped.
+// lost). Arrival times come in bursts (a few reports of a connection event at once), and a lost report leaves a gap that only the clock shows, so a sample's time is its
+// controller time plus an anchor: about the smallest offset (arrival - controller time) seen, the reports that came with the least latency. The anchor rises by S2_CLOCK_DECAY
+// of the time passed, so the two clocks may drift apart (a controller clock running slow would otherwise put its samples ever further behind their arrival), and falls only on
+// S2_CLOCK_LOW_RUN reports in a row that arrived earlier than it predicts, to the later of their offsets: one report with an unusually short latency does not move it (it would
+// have set the anchor for a second per millisecond, the rise being 1 ms a second). A time is never later than the arrival (an early report waiting for its run takes its
+// arrival) nor more than S2_CLOCK_LAG_NS before it, and keeps at least half a report's step after the last where the arrival allows: a fall clamped against the last time would
+// put samples microseconds apart and lose the rotation integrated over them. That still happens to a burst read with a first report's anchor (connecting, the first report
+// late): those samples can only take their arrivals. A long silence or a clock that went back starts over at the arrival. *lost is the number of reports the step skipped
 #define S2_CLOCK_LAG_NS 60000000ull
 #define S2_CLOCK_REPORT_MS 30u
-typedef struct { int have; uint32_t ms; uint64_t ns; } s2_clock;
+#define S2_CLOCK_DECAY 0.001   // the anchor rises 1 ms a second: clocks up to 1000 ppm apart
+#define S2_CLOCK_LOW_RUN 2
+typedef struct { int have; uint32_t ms; uint64_t ns, dev; int64_t anchor, low; unsigned low_n; } s2_clock;   // dev: the controller's time unwrapped (ns since the first report); anchor: arrival - dev; low: the run's latest offset
 static inline uint64_t s2_clock_sample(s2_clock *c, uint32_t ms, uint64_t arrival, unsigned *lost) {
     uint32_t step = ms - c->ms; uint64_t t;
     if (lost) *lost = 0;
-    if (!c->have || step > 1000u) t = arrival;   // the first report, a second or more of silence, or the clock went back (a huge unsigned step)
+    if (!c->have || step > 1000u) { c->dev = 0; c->anchor = (int64_t)arrival; c->low_n = 0; t = arrival; }   // the first report, a second or more of silence, or the clock went back (a huge unsigned step)
     else {
-        t = c->ns + (uint64_t)step * 1000000ull;
-        if (t <= c->ns) t = c->ns + 1000;   // the same millisecond as the last: still after it
+        uint64_t step_ns = (uint64_t)step * 1000000ull; c->dev += step_ns;
+        int64_t off = (int64_t)(arrival - c->dev), rise = c->anchor + (int64_t)((double)step_ns * S2_CLOCK_DECAY);
+        if (off < c->anchor) {   // earlier than the anchor predicts
+            int64_t later = c->low_n && c->low > off ? c->low : off;
+            c->low = off;
+            if (++c->low_n >= S2_CLOCK_LOW_RUN) { c->anchor = later; c->low_n = 0; }
+        } else { c->low_n = 0; c->anchor = off < rise ? off : rise; }
+        if ((int64_t)arrival - (c->anchor + (int64_t)c->dev) > (int64_t)S2_CLOCK_LAG_NS) c->anchor = off - (int64_t)S2_CLOCK_LAG_NS;
+        t = (uint64_t)(c->anchor + (int64_t)c->dev);
         if (t > arrival) t = arrival;
-        if (arrival - t > S2_CLOCK_LAG_NS) t = arrival - S2_CLOCK_LAG_NS;
-        if (t <= c->ns) t = c->ns + 1000;
+        uint64_t floor = c->ns + step_ns / 2;   // half a step after the last, where the arrival allows
+        if (t < floor) t = floor < arrival ? floor : arrival;
+        if (t <= c->ns) t = c->ns + 1000;   // the same millisecond as the last, or a burst: still after it
         if (lost && step > S2_CLOCK_REPORT_MS + S2_CLOCK_REPORT_MS / 2) *lost = (step + S2_CLOCK_REPORT_MS / 2) / S2_CLOCK_REPORT_MS - 1;
     }
     c->have = 1; c->ms = ms; c->ns = t;

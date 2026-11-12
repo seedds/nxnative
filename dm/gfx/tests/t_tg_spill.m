@@ -1,4 +1,4 @@
-// Compute shared memory in a device buffer (dmsh_build.py tg_spill, docs/reference/shaders.md "Compute shared memory past 32 KB"): dispatch binds a slice of DMSH_TG_SLOT for every
+// Compute shared memory in a device buffer (dmsh_rewrite.py tg_spill, docs/reference/shaders.md "Compute shared memory past 32 KB"): dispatch binds a slice of DMSH_TG_SLOT for every
 // workgroup of the grid. 1,024 workgroups of 48 KB each fill their slice with their own index and, after the barrier, check a neighbour thread's part; with slices shared modulo 512 some
 // saw another workgroup's values. The indirect case takes its counts from a GPU fill earlier in the submission while the CPU's copy still names one workgroup: the slices must follow the
 // GPU's counts (the shape of pull request #1242's test)

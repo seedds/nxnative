@@ -10,6 +10,7 @@
 #include <math.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdint.h>
 
 typedef struct { int src[3]; float sign[3]; float acc_sign; float det; } motion_map;
 typedef struct {
@@ -133,4 +134,69 @@ static inline void motion_phone_to_switch(int orient, const float in[3], float o
     case 2: out[0] = -in[0]; out[1] = -in[1]; out[2] = in[2]; break;
     default: out[0] = in[0]; out[1] = in[1]; out[2] = in[2]; break;
     }
+}
+// Gyro rest offset of a controller the host receives raw rotation from (GameController: a DualSense at rest read 0.34, 0.20, -0.66 deg/s in Nintendo Switch Sports Resort's
+// session): a window of about MOTION_REST_S of samples in which the gyro varies by under MOTION_REST_GYRO_SPAN rad/s and the acceleration by under MOTION_REST_ACC_SPAN G per
+// axis is a controller lying or held still, and its mean rotation an offset candidate. A slow steady turn about gravity passes those spans too, so: a first offset needs two
+// windows in a row that agree within MOTION_REST_AGREE and is at most MOTION_REST_FIRST_MAX (real offsets are under 1 deg/s); later ones must lie within MOTION_REST_AGREE of the
+// offset in use and are averaged into it. motion_rest_apply takes the offset off, ramped in over MOTION_REST_RAMP_S from the one in use before, so a game's own bias estimate
+// sees no step. The caller starts the window again on a gap in the samples (motion_rest_break) and forgets the offset when the stream goes stale or another controller takes
+// the player (motion_rest_reset). As the Joy-Con 2 front end's s2_rest (switch2_proto.h), in the units dm_motion_set takes (G, rad/s), timed by the samples' own clock
+#define MOTION_REST_S 1.0
+#define MOTION_REST_GYRO_SPAN 0.03f       // rad/s (1.7 deg/s)
+#define MOTION_REST_ACC_SPAN 0.02f        // G
+#define MOTION_REST_FIRST_MAX 0.0349f     // rad/s (2 deg/s)
+#define MOTION_REST_AGREE 0.0218f         // rad/s (1.25 deg/s)
+#define MOTION_REST_RAMP_S 0.75
+typedef struct { int have, pending; double t0, sum[3], t_set; unsigned n; float bias[3], cand[3], from[3], gmin[3], gmax[3], amin[3], amax[3]; } motion_rest;
+static inline void motion_rest_break(motion_rest *r) { r->n = 0; r->pending = 0; }
+static inline void motion_rest_reset(motion_rest *r) { memset(r, 0, sizeof *r); }
+static inline int motion_rest_near(const float a[3], const float b[3]) { for (int i = 0; i < 3; i++) if (fabsf(a[i] - b[i]) > MOTION_REST_AGREE) return 0; return 1; }
+// The offset being taken off at time t: ramped from the last one to the newest over MOTION_REST_RAMP_S
+static inline void motion_rest_now(const motion_rest *r, double t, float out[3]) {
+    double f = r->have ? (t - r->t_set) / MOTION_REST_RAMP_S : 0; if (f < 0) f = 0; if (f > 1) f = 1;
+    for (int i = 0; i < 3; i++) out[i] = r->have ? (float)(r->from[i] + (r->bias[i] - r->from[i]) * f) : 0;
+}
+static inline void motion_rest_set(motion_rest *r, const float m[3], double t) {
+    float cur[3]; motion_rest_now(r, t, cur);
+    for (int i = 0; i < 3; i++) { r->from[i] = cur[i]; r->bias[i] = r->have ? 0.5f * r->bias[i] + 0.5f * m[i] : m[i]; }
+    r->have = 1; r->t_set = t;
+}
+static inline void motion_rest_update(motion_rest *r, const float acc[3], const float rot[3], double t) {
+    for (int i = 0; i < 3; i++) if (!isfinite(acc[i]) || !isfinite(rot[i])) { motion_rest_break(r); return; }
+    if (!r->n) { r->t0 = t; for (int i = 0; i < 3; i++) { r->sum[i] = 0; r->gmin[i] = r->gmax[i] = rot[i]; r->amin[i] = r->amax[i] = acc[i]; } }
+    for (int i = 0; i < 3; i++) {
+        r->sum[i] += rot[i];
+        if (rot[i] < r->gmin[i]) r->gmin[i] = rot[i]; if (rot[i] > r->gmax[i]) r->gmax[i] = rot[i];
+        if (acc[i] < r->amin[i]) r->amin[i] = acc[i]; if (acc[i] > r->amax[i]) r->amax[i] = acc[i];
+        if (r->gmax[i] - r->gmin[i] > MOTION_REST_GYRO_SPAN || r->amax[i] - r->amin[i] > MOTION_REST_ACC_SPAN) { motion_rest_break(r); return; }   // moving: start again
+    }
+    r->n++;
+    if (t - r->t0 < MOTION_REST_S || r->n < 10) return;
+    float m[3]; for (int i = 0; i < 3; i++) m[i] = (float)(r->sum[i] / r->n);
+    r->n = 0;
+    if (r->have) { if (motion_rest_near(m, r->bias)) motion_rest_set(r, m, t); return; }   // a later window: only one that agrees with the offset in use
+    for (int i = 0; i < 3; i++) if (fabsf(m[i]) > MOTION_REST_FIRST_MAX) { r->pending = 0; return; }
+    if (r->pending && motion_rest_near(m, r->cand)) { motion_rest_set(r, m, t); r->pending = 0; return; }   // the second window agreeing: the first offset
+    memcpy(r->cand, m, sizeof r->cand); r->pending = 1;   // the window right after this one must agree (a pending one is dropped by any break)
+}
+static inline void motion_rest_apply(const motion_rest *r, const float rot[3], double t, float out[3]) { float b[3]; motion_rest_now(r, t, b); for (int i = 0; i < 3; i++) out[i] = rot[i] - b[i]; }
+
+// Playout delay of a live stream (motion_lag): a source sends a sample every 15 to 30 ms while the game reads 5 ms ticks up to the present, so read at the present most ticks lie
+// past the newest sample and can only hold it. Played back a little late, every tick lies between two samples that have arrived. The delay a stream needs is how long after a
+// sample's time the next one arrives (arrival_{k+1} - t_k: the sample spacing plus the next one's transport lateness); the stream's delay is the 90th percentile of the last
+// MOTION_LAG_N of them, capped at MOTION_LAG_MAX_NS so a stream that stalls (a lost Joy-Con 2 report: 60 or 90 ms) does not add its stall to every tick
+#define MOTION_LAG_N 32
+#define MOTION_LAG_PCT 90
+#define MOTION_LAG_MAX_NS 40000000ull
+#define MOTION_LAG_CLIP_NS 1000000000ull   // a need past a second is a silence, not a spacing (the stream starts over anyway)
+typedef struct { uint32_t need_us[MOTION_LAG_N]; unsigned n, next; uint64_t delay_ns; } motion_lag;
+static inline void motion_lag_reset(motion_lag *l) { memset(l, 0, sizeof *l); }
+static inline void motion_lag_add(motion_lag *l, uint64_t need_ns) {
+    if (need_ns > MOTION_LAG_CLIP_NS) need_ns = MOTION_LAG_CLIP_NS;
+    l->need_us[l->next] = (uint32_t)(need_ns / 1000); l->next = (l->next + 1) % MOTION_LAG_N; if (l->n < MOTION_LAG_N) l->n++;
+    uint32_t s[MOTION_LAG_N]; memcpy(s, l->need_us, sizeof s);   // the window, sorted (insertion: 32 values at most, once a sample)
+    for (unsigned i = 1; i < l->n; i++) { uint32_t v = s[i]; unsigned j = i; while (j && s[j - 1] > v) { s[j] = s[j - 1]; j--; } s[j] = v; }
+    unsigned k = l->n * MOTION_LAG_PCT / 100; if (k >= l->n) k = l->n - 1;
+    uint64_t d = (uint64_t)s[k] * 1000; l->delay_ns = d < MOTION_LAG_MAX_NS ? d : MOTION_LAG_MAX_NS;
 }

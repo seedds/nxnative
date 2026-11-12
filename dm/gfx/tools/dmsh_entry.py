@@ -4,7 +4,7 @@
 # vs_layer, layer_out, vs_layer_entry), the depth entry point (vs_depth), and a pixel shader's integer and dual-source entry points (int_outputs, fs_uint, fs_dual). Functions of
 # the MSL text only, with no build state, so tests import them. Part of the translation chain (dmsh_chain.FILES) and of every shader's cache key (dmsh_build.py CODE_FP).
 import collections, re, sys
-import dmsh_fetch, dmsh_side
+import dmsh_side
 from dmsh_reflect import attributes, in_word
 
 def vs_writes(src, binds):
@@ -156,10 +156,19 @@ def int_outputs(src, body, cols):
     printed through the output's type. → the outputs with integers and no float bits, or, when none is that clean (a register reused by two branches), the outputs with integers"""
     types = {v: t for t, v in re.findall(r'^\s*(u?int\d?|float\d?|bool)\s+(_\d+)\b', body, re.M)}
     defs = collections.defaultdict(list)
-    for v, e in re.findall(r'^\s*(?:(?:u?int\d?|float\d?|bool)\s+)?(_\d+)\s*=\s*([^;]+);', body, re.M): defs[v].append(e.strip())
+    # An element of a local array (_30[0], a register the translator kept in one) is a local of its own: read as an expression it counted as a computed integer, and OCTOPATH
+    # TRAVELER II's 05af5b1924d3b8b7 got colour 2 (floats) as its integer output once a float local was followed to as_type<float>(_30[0])
+    for v, e in re.findall(r'^\s*(?:(?:u?int\d?|float\d?|bool)\s+)?(_\d+(?:\[\d+\])?)\s*=\s*([^;]+);', body, re.M): defs[v].append(e.strip())
     def kinds(e, seen):
-        if re.fullmatch(r'_\d+', e):
-            if types.get(e, '').startswith('float'): return {'float'}
+        if re.fullmatch(r'_\d+(?:\[\d+\])?', e):
+            if types.get(e, '').startswith('float'):   # a float local is float bits, unless every value it takes is a register's bits (as_type<float>(…)): PRAGMATA's visibility shaders
+                if not defs[e] or e in seen: return {'float'}
+                bits = []
+                for x in defs[e]:   # write float _n = as_type<float>(int(gl_PrimitiveID)) into an RG32Uint target
+                    b = re.fullmatch(r'as_type<float\d?>\((.*)\)', x)
+                    if b is None: return {'float'}
+                    bits.append(b[1].strip())
+                seen.add(e); return set().union(*(kinds(b, seen) for b in bits))
             if e in seen: return set()
             seen.add(e); return set().union(*(kinds(x, seen) for x in defs[e])) if defs[e] else set()
         if re.fullmatch(r'-?\d+u?', e): return {'int'} if 0 < abs(int(e.rstrip('u'))) < 0x800000 else set()
@@ -175,7 +184,7 @@ def int_outputs(src, body, cols):
             w = w.strip(); a = re.fullmatch(r'as_type<float\d?>\((.*)\)', w)
             if a: k |= kinds(a[1].strip(), set())
             elif re.fullmatch(r'-?[0-9.]+(?:e[-+]?\d+)?f?', w): k |= {'int'} if 0 < abs(float(w.rstrip('f'))) < 1.17549e-38 else set()
-            else: k.add('float')
+            else: k |= kinds(w, set()) if re.fullmatch(r'_\d+', w) else {'float'}   # a local: what it holds (a float local is float bits unless it holds a register's)
         found[nm] = k
     return {nm for nm, k in found.items() if k == {'int'}} or {nm for nm, k in found.items() if 'int' in k}
 
@@ -195,7 +204,8 @@ def fs_uint(src):
     cols = {nm: ty for ty, nm, at in mem if 'color(' in at and ty.startswith('float')}
     # The hardware writes an output's bits to an integer target whatever the shader computed, so main0_u is right for any pixel shader; only those that look like integer writers get one
     # (the library stays small): an output from integer bits, nothing but constants (a clear drawn into an integer target, 35e1865e313f0553 writes 0 into Luigi's Mansion 3's R32Uint target),
-    # or nothing but flat stage inputs passed through (the bits its vertex or mesh stage wrote: Mario Kart World's dcb0504c844f1ecc copies a primitive's id into an R8Uint target)
+    # or nothing but flat stage inputs passed through (the bits its vertex or mesh stage wrote: Mario Kart World's dcb0504c844f1ecc copies a primitive's id into an R8Uint target) and
+    # constants (Unreal's virtual texture page table update, 17eda07e4bac39f8 in DRAGON BALL: Sparking! ZERO, writes a flat input's x and 0 to y, z, w of an R16Uint target)
     stores = [m for m in re.finditer(r'out\.(\w+)(?:\.\w+)? = ([^;]+);', src) if m.group(1) in cols and not in_word(src, m.start())]   # one pass over the text, not one for each output and each question
     from_int = {m.group(1) for m in stores if re.match(r'as_type<float\d?>\(', m.group(2))}
     writes = [m.group(2) for m in stores]
@@ -204,13 +214,16 @@ def fs_uint(src):
         w = w.strip(); d = re.fullmatch(r'\w+', w) and re.search(r'\bfloat\d? %s = (in\.\w+(?:\.\w+)?);' % w, src)
         i = re.fullmatch(r'in\.(\w+)(?:\.\w+)?', d[1] if d else w)
         return bool(i and i[1] in flat)
-    body = src[m.start():]; body = body[:body.find('return out;') + 1 or len(body)]
-    ints = int_outputs(src, body, cols)
-    if not from_int and not ints and not (writes and (all(re.fullmatch(r'-?[0-9.]+f?|float\d\([-0-9., ]*\)', w.strip()) for w in writes) or all(passed(w) for w in writes))): return None, 0
-    uty = lambda ty: 'u' + ty.replace('float', 'int')   # float4 → uint4, float → uint
     try: e = dmsh_side.entry(src, 'main0')
     except ValueError: e = None
     if not e: return None, 0
+    # main0's whole body: every return's writes. Up to the first return out; only, PRAGMATA's visibility shaders (a9c1f9ea0c76a54c: an early return writing 0.0 after a discard, then the
+    # primitive id's bits and the depth into an RG32Uint target) showed nothing but zeros, got no main0_u, and their mesh pipelines failed (float4 into RG32Uint): the 3D scene stayed black
+    body = src[e['start']:e['end']]
+    ints = int_outputs(src, body, cols)
+    def constant(w): return re.fullmatch(r'-?[0-9.]+f?|float\d\([-0-9., ]*\)', w.strip())
+    if not from_int and not ints and not (writes and all(constant(w) or passed(w) for w in writes)): return None, 0
+    uty = lambda ty: 'u' + ty.replace('float', 'int')   # float4 → uint4, float → uint
     def entry(sfx, as_uint):   # main0_<sfx>: main0's body (dmsh_side.shared_body), its outputs in as_uint returned as the unsigned integer vectors of their bits
         struct = f'struct main0_out_{sfx}\n{{\n' + ''.join(f'    {uty(cols[nm]) if nm in as_uint else ty} {nm} {at};\n' for ty, nm, at in mem) + '};\n\n'
         conv = f'return main0_out_{sfx}{{' + ', '.join(f'as_type<{uty(cols[nm])}>(out.{nm})' if nm in as_uint else f'out.{nm}' for _, nm, _ in mem) + '};'

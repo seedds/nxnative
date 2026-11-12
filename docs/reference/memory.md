@@ -567,5 +567,5 @@ The guest address space, heaps, pools, virtual address memory and the allocators
 
 - **Symptom:** the Mac grows unresponsive for hours, then panics, with the host still submitting work that fails.
 - **Cause:** a command buffer that fails with `Insufficient Memory` frees nothing, and the game submits the next one.
-- **Fix:** general (`nvn_mtl.m` `res_top_once`): 32 such failures within 60 s end the process with a red line, as the session cannot recover and the machine may not either.
-- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md).
+- **Fix:** general (`nvn_mtl.m` `res_top_once`): on the Mac, more than 32 such failures within 60 s end the process with a red line, as the session cannot recover and the machine may not either. On iOS the first failure ends it, after the report of what the residency set holds: an iPad Pro (M5, iOS 27) running Ocarina of Time went down whole two failures in (the log stops), and a run that went on drew pink or broken frames of 120-600 ms of GPU time.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md), on the Mac and on an iPad (`GPU out of memory: the residency set holds 9476 objects, 8523 MB`, Metal's working set 8,192 MB).

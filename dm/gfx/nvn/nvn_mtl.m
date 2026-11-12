@@ -472,7 +472,11 @@ static void res_top_once(NSError *err) {
     if (!atomic_exchange(&done, 1)) res_top("[RED] GPU out of memory");
     uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC);
     if (now - atomic_load(&since) > 60000000000ull) { atomic_store(&since, now); atomic_store(&fails, 0); }
-    if (atomic_fetch_add(&fails, 1) >= 32) MDIE("the GPU is out of memory: 32 command buffers failed within a minute (GPU allocated %llu MB, recommended working set %llu MB)", (unsigned long long)(g_dev.currentAllocatedSize >> 20), (unsigned long long)(g_dev.recommendedMaxWorkingSetSize >> 20));
+    // On iOS the first failure ends the game: an iPad Pro (M5, Ocarina of Time at 8,523 of Metal's 8,192 MB) went down whole two failures in, and a run that went on drew broken frames
+    // that took 120-600 ms of GPU each. The Mac keeps going until the 33rd within a minute, as a failure there can pass
+    enum { OOM_FAILS_MAX = TARGET_OS_IPHONE ? 0 : 32 };
+    int n = atomic_fetch_add(&fails, 1) + 1;
+    if (n > OOM_FAILS_MAX) MDIE("the GPU is out of memory: %d command buffer%s failed within a minute (GPU allocated %llu MB, recommended working set %llu MB)", n, n == 1 ? "" : "s", (unsigned long long)(g_dev.currentAllocatedSize >> 20), (unsigned long long)(g_dev.recommendedMaxWorkingSetSize >> 20));
 }
 // Since the last call: residency commits (count, time), additions by source line (count, MB; the four largest by bytes) and removals
 void mtl_res_stats(char *out, size_t n) {

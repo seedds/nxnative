@@ -141,6 +141,13 @@ class IntegerOutputs(unittest.TestCase):
         self.assertIsNone(fs_uint(self.source(body))[0])
         self.assertIsNotNone(fs_uint(self.source(body.replace('as_type<uint>(_680)', '_681 << 3u')))[0])   # a computed integer in the element is one
 
+    def test_a_flat_input_passed_through_beside_constants(self):   # Unreal's virtual texture page table update (Sparking! ZERO's 17eda07e4bac39f8)
+        flat = 'struct main0_in\n{\n    float4 m_1 [[user(locn0), flat]];\n};\n\n'
+        src = self.source('    float _26 = in.m_1.x;\n    out.m_0.x = _26;\n    out.m_0.y = 0.0;\n    out.m_0.z = 0.0;\n    out.m_0.w = 0.0;', flat)
+        self.assertIsNotNone(fs_uint(src)[0])
+        self.assertIsNone(fs_uint(src.replace(', flat]]', ']]'))[0])
+        self.assertIsNone(fs_uint(self.source('    out.m_0.x = in.m_1.x * 2.0;\n    out.m_0.y = 0.0;', flat))[0])
+
 
 class ImageAtomics(unittest.TestCase):
     MAGIC = [0x07230203, 0x10000, 0, 8, 0]

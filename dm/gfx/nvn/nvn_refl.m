@@ -157,6 +157,7 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
             o->reads_prim_id = [ra[@"primitive_id"] intValue] != 0;
             for (NSNumber *c in ra[@"colors"]) if (c.intValue >= 0 && c.intValue < 8) o->color_mask |= (uint8_t)(1u << c.intValue);
             o->color_known = [ra[@"colors"] isKindOfClass:[NSArray class]];
+            if ([ra[@"float_colors"] isKindOfClass:[NSNumber class]]) { o->fcols = (uint8_t)[ra[@"float_colors"] unsignedIntValue]; o->fcols_known = 1; }
             if ([ra[@"omap"] isKindOfClass:[NSNumber class]]) { o->omap = (uint32_t)[ra[@"omap"] unsignedLongLongValue]; o->omap_known = 1; }
         }
         memset(o->uv_attr, -1, sizeof o->uv_attr); memset(o->uv_aff_attr, -1, sizeof o->uv_aff_attr);

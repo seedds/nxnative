@@ -583,7 +583,7 @@ static void read_pad(GCExtendedGamepad *g) {
         GCController *c = g.controller; char nb[16];
         if (!m) return;
         if ((p = pad_slot_take_lowest(&g_slots, (__bridge const void *)c, pad_name(c))) < 0) { LOG("controller '%s': a button pressed, but all %d players are taken", pad_name(c), DM_PLAYERS); return; }
-        g_held[p] = c; dm_motion_attach(c, p); dm_pad_players(pad_slot_mask(&g_slots));
+        g_held[p] = c; dm_motion_attach(c, p); dm_haptics_apple_controller(p, c); dm_pad_players(pad_slot_mask(&g_slots));
         npad_name(p, nb, sizeof nb); LOG("controller '%s': a button pressed: player %d (npad %s)", pad_name(c), p + 1, nb);
     }
     if (cp_poll()) return;   // the controller applet's prompt has the controllers (front_ctrl_support)
@@ -608,6 +608,7 @@ static BOOL pads_merged(GCController *gone) {
         if (c.motion.hasRotationRate) motion = 1;
         any = YES; pad_keep_system_buttons(c); c.extendedGamepad.valueChangedHandler = ^(GCExtendedGamepad *g, GCControllerElement *el) { (void)el; read_pad(g); };
         dm_motion_attach(c, 0);   // every controller is player 1: the last one moved drives its six-axis sensor
+        dm_haptics_apple_controller(0, c);
         read_pad(c.extendedGamepad);
     }
     if (!any || !motion) dm_motion_clear(0);   // the phone's gyro (if on) takes over from its next sample
@@ -636,6 +637,7 @@ static BOOL pads_slotted(GCController *gone) {
         g_held[p] = c; pad_keep_system_buttons(c);
         c.extendedGamepad.valueChangedHandler = ^(GCExtendedGamepad *g, GCControllerElement *el) { (void)el; read_pad(g); };
         dm_motion_attach(c, p);
+        dm_haptics_apple_controller(p, c);
         npad_name(p, nb, sizeof nb); LOG("controller '%s' connected: player %d (npad %s)%s", pad_name(c), p + 1, nb, c.motion.hasRotationRate ? ", with motion (gyro)" : "");
         read_pad(c.extendedGamepad);
     }
@@ -711,6 +713,7 @@ static void cp_show(void) {   // the card once per prompt; its count and its Don
     g_cp_count.text = @(t[CP_TEXT_COUNT]);
     g_cp_done_btn.enabled = cp_can_confirm(&g_cp);
 }
+void dm_gamepad_pads_read(void);
 // One step of the prompt (a button, a touch on the card, a controller joining, coming or going); returns whether it keeps the game's input
 static int cp_poll(void) {
     if (g_cp.phase == CP_IDLE) return 0;
@@ -724,7 +727,7 @@ static int cp_poll(void) {
         g_cp_ok = g_cp.ok; dispatch_semaphore_signal(g_cp_done);
         ph = cp_step(&g_cp, joined, 0, a, b, 0, 0);   // nothing held: the game has its input at once
     }
-    if (ph == CP_IDLE) { for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p].extendedGamepad) read_pad(g_held[p].extendedGamepad); return 0; }   // each controller read as it is now
+    if (ph == CP_IDLE) { dm_gamepad_pads_read(); return 0; }   // each controller read as it is now
     return 1;
 }
 int front_ctrl_support(int min, int max) {

@@ -1028,7 +1028,7 @@ HLE_FORCE("_ZN2nn3hid22GetSixAxisSensorStatesEPNS0_18SixAxisSensorStateEiRKNS0_1
 // Vibration handles: byte 0 = SDK style index (FullKey 3, Handheld 4), byte 1 = npad id, byte 2 = motor.
 // See libnx hid.c _hidGetVibrationDeviceHandles. Only the styles this host connects are exposed.
 // A Joy-Con style's handle (type 5 JoyDual, 6 JoyLeft, 7 JoyRight) reaches the pad's motor of its Joy-Con: the left one's is motor 0, the right one's motor 1, whichever npad the right one is on
-static uint32_t vib_targets(uint32_t h, int *motor) {
+static uint32_t vib_players(uint32_t h, int *motor) {
     unsigned type = h & 0xff, id = h >> 8 & 0xff, dev = h >> 16 & 0xff;
     *motor = (int)(dev & 1);
     if (h >> 24 || dev > 1 || type < 3 || type > 7) return 0;
@@ -1036,7 +1036,7 @@ static uint32_t vib_targets(uint32_t h, int *motor) {
     if (type >= 5) {
         if (r.kind != (type == 5 ? KIND_DUAL : type == 6 ? KIND_LEFT : KIND_RIGHT) || (type != 5 && dev)) return 0;
         if (type != 5) *motor = type == 7;
-        return dm_haptics_available() & (1u << r.pad);
+        return 1u << r.pad;
     }
     if (type > 4) return 0;
     int p = player_of(id);
@@ -1045,10 +1045,13 @@ static uint32_t vib_targets(uint32_t h, int *motor) {
     if (p >= 0 && r.kind >= KIND_DUAL && type == 3 && id != NPAD_HANDHELD) {
         if (r.kind == KIND_LEFT && dev) return 0;
         if (r.kind == KIND_RIGHT && !dev) return 0;
-        return dm_haptics_available() & (1u << r.pad);
+        return 1u << r.pad;
     }
     if (p < 0 || r.kind != KIND_PAD || kind_style(r, id) != (1u << (type - 3))) return 0;
-    return dm_haptics_available() & (p == 0 ? 1u | merged_players() : 1u << p);
+    return p == 0 ? 1u | merged_players() : 1u << p;
+}
+static uint32_t vib_targets(uint32_t h, int *motor) {
+    return dm_haptics_available() & vib_players(h, motor);
 }
 static void vib_send(const uint32_t *handles, const dm_vibration *values, int n) {
     if (!handles || !values || n <= 0) return;
@@ -1077,6 +1080,16 @@ static void vib_send(const uint32_t *handles, const dm_vibration *values, int n)
     dm_haptics_send(updates, count);
 }
 HLE_FORCE("_ZN2nn3hid20IsVibrationPermittedEv", "vibration permission: enabled and an output available", unsigned, h_hid_VibPermit, void) { return dm_haptics_available() != 0; }
+// Super Mario Party calls EndForcedVibrationSession at startup (main+0x5d503c) and BeginForcedVibrationSession for controller-find rumble; the SDK's own calls reach the hid service
+// (a null read in hid::detail::EndPermitVibrationSession, sdk+0x3526bc). Vibration permission on the host follows dm_haptics_available(), so the session hooks succeed as no-ops
+HLE_FORCE("_ZN2nn3hid27BeginForcedVibrationSessionEv", "forced vibration session: permitted while the host has haptics", void, h_hid_BeginForcedVib, void) {}
+HLE_FORCE("_ZN2nn3hid25EndForcedVibrationSessionEv", "forced vibration session: nothing to release", void, h_hid_EndForcedVib, void) {}
+HLE_FORCE("_ZN2nn3hid6detail27BeginPermitVibrationSessionEv", "permit vibration session: permitted while the host has haptics", Result, h_hid_DetailBeginPermitVib, void) { return RES_OK; }
+HLE_FORCE("_ZN2nn3hid6detail25EndPermitVibrationSessionEv", "permit vibration session: nothing to release", Result, h_hid_DetailEndPermitVib, void) { return RES_OK; }
+HLE_FORCE("_ZN2nn3hid6detail15PermitVibrationEb", "permit vibration: controlled by the host's haptics setting", Result, h_hid_DetailPermitVib, unsigned on) { (void)on; return RES_OK; }
+HLE_FORCE("_ZN2nn3hid6system27BeginPermitVibrationSessionEv", "system permit vibration session: permitted while the host has haptics", void, h_hid_SysBeginPermitVib, void) {}
+HLE_FORCE("_ZN2nn3hid6system25EndPermitVibrationSessionEv", "system permit vibration session: nothing to release", void, h_hid_SysEndPermitVib, void) {}
+HLE_FORCE("_ZN2nn3hid6system15PermitVibrationEb", "system permit vibration: controlled by the host's haptics setting", void, h_hid_SysPermitVib, unsigned on) { (void)on; }
 // Games can cache handles once at startup, before GameController routes the pad's haptics (Unicorn Overlord kept an empty answer and sent every value to handle 0).
 // On Horizon handles are computed from npad id and style (libnx _hidGetVibrationDeviceHandles); vib_send checks for an output at each send. With rumble off they are handed out too,
 // as on a Switch whose vibration setting is off (IsVibrationPermitted answers false and nothing is felt), so turning it on while the game runs works in a game that asked only once.
@@ -1229,8 +1242,10 @@ HLE_FORCE("_ZN2nn3hid32SetSixAxisSensorFusionParametersERKNS0_19SixAxisSensorHan
 HLE_FORCE("_ZN2nn3hid34ResetSixAxisSensorFusionParametersERKNS0_19SixAxisSensorHandleE", "six-axis sensor fusion parameters; ignored by the host", void, h_hid_FusionReset, const uint32_t *h) { (void)h; }
 HLE_FORCE("_ZN2nn3hid41IsFirmwareUpdateAvailableForSixAxisSensorERKNS0_19SixAxisSensorHandleE", "six-axis sensor firmware update: none", unsigned, h_hid_SixFw, const uint32_t *h) { (void)h; return 0; }
 // GetActual returns the sanitized guest value accepted by the host, before output-device adaptation.
+// GetVibrationDeviceInfo is queried right after GetVibrationDeviceHandles at startup, before a physical controller's
+// haptics route is registered, so it follows handle validity and sink presence rather than active route availability.
 HLE_FORCE("_ZN2nn3hid22GetVibrationDeviceInfoEPNS0_19VibrationDeviceInfoERKNS0_21VibrationDeviceHandleE", "vibration: linear resonant actuator, left or right", void, h_hid_VibInfo, uint32_t *info, const uint32_t *h) {
-    int m = 0, on = h && vib_targets(*h, &m) != 0; info[0] = on ? 1 : 0; info[1] = on ? 1 + m : 0;
+    int m = 0, on = h && dm_haptics_has_output() && vib_players(*h, &m) != 0; info[0] = on ? 1 : 0; info[1] = on ? 1 + m : 0;
 }
 // The SDK's own call reaches the hid service (a null read in hid::detail::IsVibrationDeviceMounted; Super Mario Odyssey asks for each handle of a controller).
 // On Horizon a device is mounted when the npad's connected controller has that style and an actuator on that side: here, when the channel has an output, as GetVibrationDeviceInfo reports it

@@ -329,9 +329,14 @@ static void t_vibration(void) {
     dm_vibration v = {0.25, 160, 0.5, 320}, got;
     g_mode = 1; ids((uint32_t[]){0, 1, NPAD_HANDHELD}, 3); dm_pad_players(3);
     CHECK(!h_hid_VibPermit() && !h_hid_VibHandles(h, 2, &id, STYLE_FULLKEY), "no sink: no vibration devices");
+    h_hid_VibInfo(info, &(uint32_t){3});
+    CHECK(info[0] == 0 && info[1] == 0, "no sink: vibration device info is empty");
     dm_haptics_init(vibration_sink, 1);
     CHECK(!h_hid_VibPermit() && h_hid_VibHandles(h, 2, &id, STYLE_FULLKEY) == 2,
           "startup handles do not wait for a routed haptics output");
+    h_hid_VibInfo(info, &h[0]); CHECK(info[0] == 1 && info[1] == 1, "startup left motor reports a left LRA before routing");
+    h_hid_VibInfo(info, &h[1]); CHECK(info[0] == 1 && info[1] == 2, "startup right motor reports a right LRA before routing");
+    h_hid_VibInfo(info, &(uint32_t){0x203}); CHECK(info[0] == 0 && info[1] == 0, "disconnected player reports no LRA before routing");
     CHECK(!h_hid_VibMounted(&h[0]), "no routed output: device not mounted");
     h_hid_SendVib(&h[0], &v);
     CHECK(dm_haptics_actual(0, 0).amplitude_low == 0, "a value before routing is not retained");
@@ -375,6 +380,10 @@ static void t_vibration(void) {
     CHECK(!h_hid_VibPermit() && h_hid_VibHandles(h, 2, &id, STYLE_HANDHELD) == 2, "rumble disabled: not permitted, but the handles exist, as on a Switch");
     dm_haptics_set_enabled(1);
     CHECK(h_hid_VibPermit(), "rumble turned on while the game runs: the handles it took work");
+    h_hid_BeginForcedVib(); h_hid_EndForcedVib();
+    h_hid_SysBeginPermitVib(); h_hid_SysEndPermitVib(); h_hid_SysPermitVib(1);
+    CHECK(h_hid_DetailBeginPermitVib() == RES_OK && h_hid_DetailEndPermitVib() == RES_OK && h_hid_DetailPermitVib(1) == RES_OK,
+          "forced/permit vibration session hooks succeed without hid service");
 }
 
 static void *vibration_sender(void *arg) {

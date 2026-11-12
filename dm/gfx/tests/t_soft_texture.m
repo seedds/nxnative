@@ -126,12 +126,17 @@ int main(void) { @autoreleasepool {
         uint64_t re = g_pkg_reuploads;
         CHECK("unchanged storage keeps its host texture", resolve(&t) == img && g_pkg_reuploads == re);
         uint8_t l2[lpitch(2) * lrows(2)]; pattern(l2, sizeof l2, 40);
-        dm_guest_write_prepare(t.mem, t.L.size); CHECK("swizzle of the rewritten level 2", !nvn_swizzle(&t.d, 2, 0, l2, lpitch(2), t.mem));
+        { uint64_t lo = nvn_tex_level_offset(&t.d, 2); dm_guest_write_prepare((uint8_t *)t.mem + lo, nvn_tex_level_offset(&t.d, 3) - lo); }   // the level's own pages, as a game writes a piece of a texture
+        CHECK("swizzle of the rewritten level 2", !nvn_swizzle(&t.d, 2, 0, l2, lpitch(2), t.mem));
         img = resolve(&t);
         CHECK("a CPU write uploads it again", g_pkg_reuploads == re + 1);
         CHECK("still half the size", half_size(img) && tex_soft(&t));
         CHECK("host level 1 holds the rewritten level 2", host_is(img, 1, l2, sizeof l2));
         CHECK("host level 0 still holds level 1", host_is(img, 0, ref[1], n1));
+        // The partial re-upload (pkg_written, DM_NVN_PARTIAL_UPLOAD) asks about the byte range of the game's level, host level + 1: only the rewritten one is read, the others are copied from the replaced texture
+        __unsafe_unretained id o = tex_get(t.serial); NvPkg *pk = [o isKindOfClass:[NvPkg class]] ? o : nil;
+        CHECK("only the rewritten level was read from the storage", pk && pk->part);
+        for (unsigned hl = 2; hl + 1 < LV; hl++) CHECK("the levels below it are as before", host_is(img, hl, ref[hl + 1], lpitch(hl + 1) * lrows(hl + 1)));
     }
     // A buffer-to-texture copy into the game's level 1
     {

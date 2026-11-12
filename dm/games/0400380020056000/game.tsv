@@ -34,7 +34,3 @@ sys_resource	0x2000000
 # ---- Shader split (shader_split.py) ----
 shader_groups	/Shader/=shader /Effect/=effect /UI/=layout
 shader_note	Splatoon Raiders shaders
-
-# ---- Graphics ----
-# agl wraps its clears in render conditions on Donkey Kong Bananza; the same library here, to be confirmed on this game
-render_cond	on

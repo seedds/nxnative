@@ -24,6 +24,18 @@ static inline int dm_net_ldn_enabled(void) {
     return mode == DM_NET_LDN || mode == DM_NET_AUTO;
 }
 int dm_net_enabled(void);
+// VPN play, DM_NET_VPN=1 in the lan and ldn modes: the adapter is the VPN's (net_vpn.h; hle_net_backend.c net_vpn_interface), never Wi-Fi, and discovery
+// never relies on native broadcast, which a tunnel does not carry
+static inline int dm_net_vpn(void) {
+    const char *v = getenv("DM_NET_VPN"); dm_net_mode_t mode = dm_net_mode();
+    return v && !strcmp(v, "1") && (mode == DM_NET_LAN || mode == DM_NET_LDN);
+}
+// The other members of the LDN room this device is in (hle_ldn.c publishes them; network order, at most 7, count 0 when there is no room). While there
+// are any, a game's broadcast goes to each of them instead of a native broadcast or a subnet sweep, unless native broadcast is available off a VPN.
+enum { DM_NET_SESSION_MAX = 7 };
+void dm_net_set_session_peers(const uint32_t *addresses, unsigned count);
+// Logs every IPv4 adapter's name, address, prefix, flags and functional type (LDN logs them as it starts)
+void dm_net_log_adapters(void);
 // Startup-only DNS policy: -1 refuses, 0 keeps the name, 1 supplies IPv4.
 // Only explicit Nextendo/auto modes consult the provider.
 typedef int (*dm_net_dns_provider)(const char *host, char *output, size_t capacity);

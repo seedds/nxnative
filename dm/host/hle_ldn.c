@@ -69,13 +69,20 @@ static void ldn_nonblock(int fd) { fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NON
 static void ldn_wake(dm_ldn_context *c) { uint8_t b = 1; (void)write(c->wake[1], &b, 1); }
 static void ldn_changed(dm_ldn_context *c) { pthread_cond_broadcast(&c->changed); if (c->notify) c->notify(c->opaque); }
 static void ldn_state_set(dm_ldn_context *c, int state) { if (c->state != state) { ldn_trace("state from=%d to=%d reason=%d", c->state, state, c->reason); c->state = state; ldn_changed(c); } }
+unsigned dm_ldn_members(const dm_ldn_network *n, uint32_t own, uint32_t out[7]) {
+    unsigned count = 0;
+    for (int i = 0; i < 8 && count < 7; ++i) if (n->nodes[i].connected && n->nodes[i].ip && htonl(n->nodes[i].ip) != own) out[count++] = htonl(n->nodes[i].ip);
+    return count;
+}
 static void ldn_network_set(dm_ldn_context *c, const dm_ldn_network *n) {
     if (!memcmp(&c->network, n, sizeof *n)) return;
     for (int i = 0; i < 8; ++i) {
         if (c->network.nodes[i].connected && (!n->nodes[i].connected || memcmp(c->network.nodes[i].mac, n->nodes[i].mac, 6))) c->updates[i].change |= 2;
         if (n->nodes[i].connected && (!c->network.nodes[i].connected || memcmp(c->network.nodes[i].mac, n->nodes[i].mac, 6))) c->updates[i].change |= 1;
     }
-    c->network = *n; ldn_changed(c);
+    c->network = *n;
+    if (c->transport.publish_members) { uint32_t members[7]; dm_net_set_session_peers(members, dm_ldn_members(n, c->transport.address, members)); }
+    ldn_changed(c);
 }
 static void ldn_mac(uint8_t out[6], uint32_t address) { out[0] = 2; out[1] = 0; memcpy(out + 2, &address, 4); }
 static void ldn_local_mac(dm_ldn_context *c, uint8_t out[6]) { static const uint8_t zero[6]; if (memcmp(c->transport.mac, zero, 6)) memcpy(out, c->transport.mac, 6); else ldn_mac(out, c->transport.address); }
@@ -251,6 +258,7 @@ fail:
 void dm_ldn_stop(dm_ldn_context *c) {
     if (!c) return; pthread_mutex_lock(&c->lock); c->stopping = 1; ldn_wake(c); pthread_cond_broadcast(&c->changed); pthread_mutex_unlock(&c->lock);
     pthread_join(c->worker, NULL); for (int i = 0; i < 8; ++i) ldn_peer_close(c, i);
+    if (c->transport.publish_members) dm_net_set_session_peers(NULL, 0);
     if (c->listener >= 0) close(c->listener); close(c->udp); close(c->wake[0]); close(c->wake[1]); pthread_cond_destroy(&c->changed); pthread_mutex_destroy(&c->lock); free(c);
 }
 int dm_ldn_state(dm_ldn_context *c) { if (!c) return 0; pthread_mutex_lock(&c->lock); int n = c->state; pthread_mutex_unlock(&c->lock); return n; }
@@ -416,10 +424,12 @@ static Result ldn_hook_info(dm_ldn_network *out, dm_ldn_update *updates, int cou
 static int ldn_enabled(void) { const char *m = getenv("DM_NETWORK"); return m && (!strcmp(m, "ldn") || !strcmp(m, "auto")); }
 HLE_FORCE_WAIT("_ZN2nn3ldn10InitializeEv", "native ldn_mitm control transport", Result, h_ldn_Init, void) { LDN_WRITE();
     if (!ldn_enabled()) return ldn_hook_result("InitDisabled", LDN_ERROR(22)); if (g_ldn) return ldn_hook_result("InitExisting",0);
-    dm_ldn_transport t = {.port=11452, .discovery_port=11452, .scan_ms=1000, .connect_ms=4000};
+    dm_ldn_transport t = {.port=11452, .discovery_port=11452, .scan_ms=1000, .connect_ms=4000, .publish_members=1};
+    dm_net_log_adapters();
     if (dm_net_ipconfig(&t.address, &t.mask, NULL, NULL, NULL)) return LDN_ERROR(16);
     t.discovery = t.address | ~t.mask; dm_net_discovery_plan plan;
-    if (dm_net_discovery_prepare(t.discovery, &plan)) {
+    // Over a VPN only a joiner searches, and Scan reports what it lacks (a host's address on a /32 VPN): a host must still start
+    if (!dm_net_vpn() && dm_net_discovery_prepare(t.discovery, &plan)) {
         LOG("[RED] LDN discovery unavailable (errno %d): no eligible bounded IPv4 LAN or valid explicit peer", dm_net_errno());
         return LDN_ERROR(22);
     }

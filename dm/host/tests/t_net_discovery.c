@@ -1,6 +1,7 @@
 // Real UDP discovery/reply traffic through the production socket translator.
 // The adapter fixture is confined to 127/8. No LAN is scanned or broadcast sent.
 #include "../net_socket.h"
+#include "../net_vpn.h"
 #include <assert.h>
 #include <errno.h>
 #include <net/if.h>
@@ -225,8 +226,83 @@ static void supplemental_queries(void) {
     int reused=dm_net_socket(2,2,0);CHECK(reused==guest);destination=endpoint(INADDR_LOOPBACK,30000);CHECK(dm_net_send(reused,"ordinary",8,0,&destination,sizeof destination)==8);CHECK(!dm_net_test_discovery_pending());CHECK(!dm_net_close(reused));
     dm_net_test_set_discovery_sender(NULL);dm_net_set_multicast_allowed(0);close(native);close(phone);
 }
+// VPN play's adapter choice and mask (net_vpn.h), then the backend over a tunnel through the adapter fixture
+static void vpn(void) {
+    const dm_net_vpn_candidate wifi={htonl(0xc0a80105),htonl(0xffffff00),1,IFF_UP|IFF_BROADCAST,IFRTYPE_FUNCTIONAL_WIFI_INFRA},
+        cell={htonl(0x0a400001),htonl(0xffffffff),2,IFF_UP|IFF_POINTOPOINT,IFRTYPE_FUNCTIONAL_CELLULAR},
+        lo={htonl(INADDR_LOOPBACK),htonl(0xff000000),3,IFF_UP|IFF_LOOPBACK,IFRTYPE_FUNCTIONAL_LOOPBACK},
+        tail={htonl(0x64650203),htonl(0xffffffff),4,IFF_UP|IFF_POINTOPOINT,IFRTYPE_FUNCTIONAL_UNKNOWN},   // Tailscale: 100.101.2.3/32
+        zt={htonl(0x0a931105),htonl(0xffffff00),5,IFF_UP|IFF_POINTOPOINT,IFRTYPE_FUNCTIONAL_UNKNOWN},     // ZeroTier: 10.147.17.5/24
+        down={htonl(0x64650204),htonl(0xffffffff),6,IFF_POINTOPOINT,IFRTYPE_FUNCTIONAL_UNKNOWN},
+        linklocal={htonl(0xa9fe0102),htonl(0xffff0000),7,IFF_UP,IFRTYPE_FUNCTIONAL_UNKNOWN};
+    const dm_net_vpn_candidate one[]={wifi,cell,lo,down,tail},two[]={wifi,tail,zt},none[]={wifi,cell,lo,down,linklocal};
+    CHECK(dm_net_vpn_pick(one,5,0)==4);
+    CHECK(dm_net_vpn_pick(two,3,0)==DM_NET_VPN_SEVERAL);                    // two tunnels and nothing to tell them apart: never a guess
+    CHECK(dm_net_vpn_pick(two,3,zt.address)==2 && dm_net_vpn_pick(two,3,tail.address)==1);   // the route to the host's address settles it
+    CHECK(dm_net_vpn_pick(two,3,wifi.address)==DM_NET_VPN_NONE);            // the host is reached over Wi-Fi: not through a VPN
+    CHECK(dm_net_vpn_pick(none,5,0)==DM_NET_VPN_NONE);
+    CHECK(dm_net_vpn_mask(tail.address,tail.mask)==htonl(0xffc00000) && dm_net_vpn_mask(tail.address,0)==htonl(0xffc00000));
+    CHECK(dm_net_vpn_mask(htonl(0x0a000005),htonl(0xfffffffe))==htonl(0xff000000));
+    CHECK(dm_net_vpn_mask(htonl(0xac140001),htonl(0xffffffff))==htonl(0xfff00000));
+    CHECK(dm_net_vpn_mask(htonl(0xc0a80a02),htonl(0xffffffff))==htonl(0xffff0000));
+    CHECK(dm_net_vpn_mask(zt.address,zt.mask)==zt.mask);                    // a mask that names a network is kept
+    CHECK(dm_net_vpn_mask(htonl(0x08080808),htonl(0xffffffff))==htonl(0xffffffff));   // no private block to name
+    // A Tailscale tunnel: the game is told the /10, its broadcast address is still a broadcast, and a search needs the host's address. Even where native
+    // broadcast works (the Mac), a tunnel does not carry it.
+    setenv("DM_NETWORK","ldn",1); setenv("DM_NET_VPN","1",1); dm_net_set_multicast_allowed(1);
+    dm_net_test_interface t={tail.address,tail.mask,if_nametoindex("lo0"),IFF_UP|IFF_POINTOPOINT,0}; dm_net_test_set_interface(&t);
+    uint32_t own,mask; CHECK(!dm_net_ipconfig(&own,&mask,NULL,NULL,NULL) && own==tail.address && mask==htonl(0xffc00000));
+    dm_net_discovery_plan plan,extra; CHECK(dm_net_discovery_prepare(htonl(UINT32_MAX),&plan)<0 && dm_net_errno()==95);
+    CHECK(!dm_net_discovery_supplement(htonl(UINT32_MAX),&extra));
+    int guest=dm_net_socket(2,2,0); CHECK(guest>=0); address directed=endpoint(0x647fffff,30000);   // 100.127.255.255, from the /10
+    CHECK(dm_net_send(guest,"query",5,0,&directed,sizeof directed)<0 && dm_net_errno()==95); CHECK(!dm_net_close(guest));
+    setenv("DM_NET_DISCOVERY_PEER","100.101.9.9",1);
+    CHECK(!dm_net_discovery_prepare(htonl(UINT32_MAX),&plan) && !plan.automatic && plan.target==htonl(0x64650909)); unsetenv("DM_NET_DISCOVERY_PEER");
+    // A ZeroTier tunnel: its /24 is searched, over the tunnel
+    dm_net_test_interface z={zt.address,zt.mask,if_nametoindex("lo0"),IFF_UP|IFF_POINTOPOINT,0}; dm_net_test_set_interface(&z);
+    CHECK(!dm_net_discovery_prepare(htonl(UINT32_MAX),&plan) && plan.automatic && plan.count==253);
+    // Off a VPN the same tunnel is no local network
+    unsetenv("DM_NET_VPN"); dm_net_set_multicast_allowed(0); CHECK(dm_net_discovery_prepare(htonl(UINT32_MAX),&plan)<0 && dm_net_errno()==99);
+    setenv("DM_NETWORK","auto",1); dm_net_test_set_interface(NULL);
+}
+// In a room a broadcast goes to each other member (dm_net_set_session_peers), which a recording sender sees without sending anything
+static _Atomic unsigned recorded;
+static uint32_t recorded_to[8], refused;
+static uint16_t recorded_port;
+static long record(int fd,const void *bytes,size_t size,int flags,uint32_t ip,uint16_t port) {
+    (void)fd;(void)bytes;(void)flags; unsigned i=atomic_fetch_add(&recorded,1); if(i<8)recorded_to[i]=ip; recorded_port=port;
+    if(ip==refused){errno=EHOSTUNREACH;return -1;}
+    return (long)size;
+}
+static void room_broadcasts(void) {
+    dm_net_test_interface a=adapter(0xffffff00); dm_net_test_set_interface(&a); dm_net_test_set_discovery_sender(record);
+    int guest=dm_net_socket(2,2,0); CHECK(guest>=0);
+    const uint32_t room[]={htonl(0x0a000002),htonl(0x0a000003),htonl(0x0a000004)}; dm_net_set_session_peers(room,3);
+    address everyone=endpoint(UINT32_MAX,49152),subnet=endpoint(0x7f0000ff,49152),one=endpoint(0x0a000002,49152);
+    atomic_store(&recorded,0); CHECK(dm_net_send(guest,"hello",5,0,&everyone,sizeof everyone)==5);
+    CHECK(atomic_load(&recorded)==3 && !memcmp(recorded_to,room,sizeof room) && recorded_port==htons(49152));
+    atomic_store(&recorded,0); CHECK(dm_net_send(guest,"hello",5,0,&subnet,sizeof subnet)==5 && atomic_load(&recorded)==3);
+    // One unreachable member does not fail the broadcast; when none is reachable it fails with that error
+    refused=room[1]; atomic_store(&recorded,0); CHECK(dm_net_send(guest,"hello",5,0,&everyone,sizeof everyone)==5 && atomic_load(&recorded)==3);
+    dm_net_set_session_peers(room+1,1); atomic_store(&recorded,0);
+    CHECK(dm_net_send(guest,"hello",5,0,&everyone,sizeof everyone)<0 && dm_net_errno()==113 && atomic_load(&recorded)==1); refused=0;
+    // Ordinary unicast is never fanned out
+    dm_net_set_session_peers(room,3); atomic_store(&recorded,0);
+    CHECK(dm_net_send(guest,"hello",5,0,&one,sizeof one)==5 && atomic_load(&recorded)==1 && recorded_to[0]==room[0]);
+    // Where native broadcast works and no VPN is in the way it is used; over a VPN the room is used even there
+    dm_net_set_multicast_allowed(1); atomic_store(&recorded,0);
+    CHECK(dm_net_send(guest,"hello",5,0,&everyone,sizeof everyone)==5 && atomic_load(&recorded)==1 && recorded_to[0]==htonl(UINT32_MAX));
+    setenv("DM_NETWORK","ldn",1); setenv("DM_NET_VPN","1",1); atomic_store(&recorded,0);
+    CHECK(dm_net_send(guest,"hello",5,0,&everyone,sizeof everyone)==5 && atomic_load(&recorded)==3);
+    unsetenv("DM_NET_VPN"); setenv("DM_NETWORK","auto",1); dm_net_set_multicast_allowed(0);
+    // Out of the room, discovery is as before: here the host's address
+    dm_net_set_session_peers(NULL,0); setenv("DM_NET_DISCOVERY_PEER","127.0.0.1",1); atomic_store(&recorded,0);
+    CHECK(dm_net_send(guest,"hello",5,0,&everyone,sizeof everyone)==5 && atomic_load(&recorded)==1 && recorded_to[0]==htonl(INADDR_LOOPBACK));
+    unsetenv("DM_NET_DISCOVERY_PEER"); CHECK(!dm_net_close(guest)); dm_net_test_set_discovery_sender(NULL); dm_net_test_set_interface(NULL);
+}
 int main(void) {
-    setenv("DM_NETWORK","auto",1); unsetenv("DM_NET_DISCOVERY_PEER"); dm_net_set_multicast_allowed(0);
+    setenv("DM_NETWORK","auto",1); unsetenv("DM_NET_DISCOVERY_PEER"); unsetenv("DM_NET_VPN"); dm_net_set_multicast_allowed(0);
     ranges(); traffic(); unreachable_neighbor(); supplemental_queries(); bounds_and_lifetime(); dm_net_test_set_interface(NULL);
-    printf("automatic discovery: %u checks passed (real UDP reply, ranges, bounded queue, close/reuse).\n",checks); return 0;
+    vpn(); room_broadcasts();
+    printf("automatic discovery: %u checks passed (real UDP reply, ranges, bounded queue, close/reuse, VPN adapters, room broadcasts).\n",checks); return 0;
 }

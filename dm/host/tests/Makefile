@@ -468,7 +468,7 @@ coverage:
 
 # Local transport fixtures use only synthetic packets and loopback peers.
 NET_SOURCES = ../hle_net_backend.c ../hle_nsd_backend.c t_net_write_stub.c
-NET_HEADERS = ../nsd.h ../net_socket.h ../net_discovery.h ../net_discovery_queue.inc ../discovery_protocol.h
+NET_HEADERS = ../nsd.h ../net_socket.h ../net_discovery.h ../net_vpn.h ../net_discovery_queue.inc ../discovery_protocol.h
 NET_FLAGS = -O1 -g -Wall -Wextra -Werror -Wno-unused-function
 $(B)/t_hle_wait: t_hle_wait.c t_hle_wait.S ../hle.h ../entry.S ../hle_bigstack.c $(GAME_H) | $(B)
 	$(CLANG) $(NET_FLAGS) $(GINC) -o $@ t_hle_wait.c t_hle_wait.S ../entry.S ../hle_bigstack.c

@@ -6,6 +6,7 @@
 #include "net_socket.h"
 #include "nsd.h"
 #include "discovery_protocol.h"
+#include "net_vpn.h"
 #include <TargetConditionals.h>
 #include <arpa/inet.h>
 #include <errno.h>
@@ -23,6 +24,7 @@
 #include <netinet/tcp.h>
 #include <poll.h>
 #include <pthread.h>
+#include <stdarg.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -58,6 +60,31 @@ static _Atomic uint32_t g_net_broadcast;
 static _Atomic int g_net_broadcast_known;
 typedef struct { uint32_t address, mask, gateway; unsigned index, flags; int local_link; } net_interface;
 static int net_interface_get(net_interface *out);
+static pthread_mutex_t g_session_lock = PTHREAD_MUTEX_INITIALIZER;
+static uint32_t g_session_peers[DM_NET_SESSION_MAX];
+static unsigned g_session_count;
+void dm_net_set_session_peers(const uint32_t *addresses, unsigned count) {
+    if (!addresses) count = 0;
+    if (count > DM_NET_SESSION_MAX) count = DM_NET_SESSION_MAX;
+    pthread_mutex_lock(&g_session_lock);
+    if (count) memcpy(g_session_peers, addresses, count * sizeof *addresses);
+    g_session_count = count; pthread_mutex_unlock(&g_session_lock);
+}
+// VPN play's notices are about the adapter, which net_interface_get reads on every socket call: each kind is logged when its text differs from the last
+enum { NET_VPN_ADAPTER, NET_VPN_SEARCH };
+__attribute__((format(printf, 2, 3))) static void net_vpn_note(int kind, const char *format, ...) {
+    static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER; static char last[2][512];
+    char text[512]; va_list args; va_start(args, format); vsnprintf(text, sizeof text, format, args); va_end(args);
+    pthread_mutex_lock(&lock); int fresh = strcmp(text, last[kind]) != 0; if (fresh) strlcpy(last[kind], text, sizeof last[kind]); pthread_mutex_unlock(&lock);
+    if (fresh) fprintf(stderr, "%s\n", text);
+}
+// The room's members a broadcast goes to instead (net_socket.h), none where native broadcast works and no VPN is in the way
+static unsigned net_session_peers(uint32_t out[DM_NET_SESSION_MAX]) {
+    if (dm_net_multicast_allowed() && !dm_net_vpn()) return 0;
+    pthread_mutex_lock(&g_session_lock);
+    unsigned count = g_session_count; memcpy(out, g_session_peers, count * sizeof *out);
+    pthread_mutex_unlock(&g_session_lock); return count;
+}
 #ifdef DM_NET_TEST
 static net_interface g_test_interface;
 static int g_test_interface_set;
@@ -86,15 +113,21 @@ int dm_net_enabled(void) { return dm_net_mode() != DM_NET_OFFLINE; }
 void dm_net_set_multicast_allowed(int allowed) { atomic_store(&g_net_multicast_allowed, !!allowed); }
 int dm_net_multicast_allowed(void) { return atomic_load(&g_net_multicast_allowed); }
 static int net_discovery_unicast_plan(dm_net_discovery_plan *p) {
-    net_interface adapter;
+    net_interface adapter; int vpn = dm_net_vpn();
+    // A VPN's tunnel is point-to-point and has no broadcast: its sweep goes over the tunnel to each address of the network the VPN gives it
     if (net_interface_get(&adapter) || !adapter.index || !(adapter.flags & IFF_UP) ||
-        !(adapter.flags & IFF_BROADCAST) || (adapter.flags & (IFF_LOOPBACK | IFF_POINTOPOINT))) {
+        (!vpn && (!(adapter.flags & IFF_BROADCAST) || (adapter.flags & IFF_POINTOPOINT))) || (adapter.flags & IFF_LOOPBACK)) {
         dm_net_set_errno(99); return -1;
     }
 #if TARGET_OS_IOS
-    if (!adapter.local_link) { dm_net_set_errno(99); return -1; }
+    if (!vpn && !adapter.local_link) { dm_net_set_errno(99); return -1; }
 #endif
-    if (dm_net_discovery_subnet(p, adapter.address, adapter.mask)) { dm_net_set_errno(95); return -1; }
+    if (dm_net_discovery_subnet(p, adapter.address, adapter.mask)) {
+        // Tailscale and NetBird give each device its own address in a /10: nothing to sweep, so a joiner needs the host's address
+        if (vpn) net_vpn_note(NET_VPN_SEARCH, "[dm] [RED] net: VPN play can't search this VPN's network (each device has its own address in a block too large to search). "
+                              "Joiners: set DM_NET_DISCOVERY_PEER=<the host's VPN address> in env.txt");
+        dm_net_set_errno(95); return -1;
+    }
     return 0;
 }
 int dm_net_discovery_prepare(uint32_t destination, dm_net_discovery_plan *p) {
@@ -108,7 +141,7 @@ int dm_net_discovery_prepare(uint32_t destination, dm_net_discovery_plan *p) {
             ntohl(address.s_addr) >= 0xf0000000u) { dm_net_set_errno(22); return -1; }
         p->target = address.s_addr; p->count = 1; return 0;
     }
-    if (dm_net_multicast_allowed()) { p->target = destination; p->count = 1; return 0; }
+    if (dm_net_multicast_allowed() && !dm_net_vpn()) { p->target = destination; p->count = 1; return 0; }
     return net_discovery_unicast_plan(p);
 }
 int dm_net_discovery_target(uint32_t destination, uint32_t *target) {
@@ -139,7 +172,7 @@ static int net_is_discovery(uint32_t address, int type) {
 int dm_net_discovery_supplement(uint32_t destination,dm_net_discovery_plan *plan) {
     if(!plan)return 0;memset(plan,0,sizeof *plan);
     const char *peer=getenv("DM_NET_DISCOVERY_PEER");dm_net_mode_t mode=dm_net_mode();
-    if(!dm_net_multicast_allowed()||(peer&&*peer)||(mode!=DM_NET_LAN&&mode!=DM_NET_LDN&&mode!=DM_NET_AUTO)||!net_is_discovery(destination,2))return 0;
+    if(!dm_net_multicast_allowed()||dm_net_vpn()||(peer&&*peer)||(mode!=DM_NET_LAN&&mode!=DM_NET_LDN&&mode!=DM_NET_AUTO)||!net_is_discovery(destination,2))return 0;
     int saved=t_net_errno,result=!net_discovery_unicast_plan(plan);t_net_errno=saved;return result;
 }
 int dm_net_errno(void) { return t_net_errno; }
@@ -515,6 +548,34 @@ long dm_net_recv(int guest, void *buf, unsigned long len, int flags, void *addr,
     }
     close(r.fd); net_trace("recv", guest, result); return result;
 }
+// One datagram (to a, or the connected peer when a is NULL), waiting for buffer space as the socket's blocking mode and MSG_DONTWAIT (0x80) say
+static long net_send_one(net_ref *r, const void *buf, unsigned long len, int hostflags, int flags, const struct sockaddr_in *a) {
+    uint64_t start = net_ms(); long result; int reported = 0;
+    for (;;) {
+        result = a ? net_discovery_packet(r->fd,buf,len,hostflags,a) : sendto(r->fd,buf,len,hostflags,NULL,0); int err = errno;
+        if (result >= 0) { net_udp_note(r, 0, 1); break; }
+        if (err != EAGAIN) net_udp_error(r, 1, err);
+        // As on a receive (dm_net_recv): the host hands an earlier datagram's ICMP report to the next call on a UDP socket, a send too, and then
+        // does not send this datagram (the report is cleared). In Nextendo mode it is sent again once
+        if (r->type == 2 && !reported && (err == ECONNREFUSED || err == ECONNRESET || err == ENETRESET) && dm_net_nextendo_enabled()) { reported = 1; continue; }
+        if (err != EAGAIN || r->nonblock || (flags & 0x80)) { result = net_error(net_errno(err)); break; }
+        if (net_wait(r, POLLOUT, r->send_ms, start)) { result = -1; break; }
+    }
+    return result;
+}
+// A broadcast in a room: one datagram to each member, which is what a broadcast on the room's own network delivers. It succeeds when one member's send
+// does (a broadcast reports no delivery either); when none does, the result is the first member's error.
+static long net_send_session(net_ref *r, const void *buf, unsigned long len, int hostflags, int flags, struct sockaddr_in a,
+                             const uint32_t *members, unsigned count) {
+    long result = -1; int error = 0;
+    for (unsigned i = 0; i < count; i++) {
+        a.sin_addr.s_addr = members[i];
+        long sent = net_send_one(r, buf, len, hostflags, flags, &a);
+        if (sent >= 0) result = sent; else if (!error) error = t_net_errno;
+    }
+    if (result < 0) t_net_errno = error;
+    return result;
+}
 long dm_net_send(int guest, const void *buf, unsigned long len, int flags, const void *addr, unsigned addrlen) {
     if (!net_gate()) return -1;
     if (!buf && len) return net_error(14);
@@ -524,6 +585,11 @@ long dm_net_send(int guest, const void *buf, unsigned long len, int flags, const
     net_ref r; if (net_borrow(guest, &r)) return -1;
     int discovery=addr&&net_is_discovery(a.sin_addr.s_addr,r.type);
     if (discovery) {
+        uint32_t members[DM_NET_SESSION_MAX]; unsigned count = net_session_peers(members);
+        if (count) {
+            long result = net_send_session(&r, buf, len, hostflags, flags, a, members, count);
+            close(r.fd); net_trace("send-session", guest, result); return result;
+        }
         dm_net_discovery_plan plan;
         if (dm_net_discovery_prepare(a.sin_addr.s_addr, &plan)) { close(r.fd); return -1; }
         if (plan.automatic) {
@@ -532,17 +598,7 @@ long dm_net_send(int guest, const void *buf, unsigned long len, int flags, const
         }
         a.sin_addr.s_addr = plan.target;
     }
-    uint64_t start = net_ms(); long result; int reported = 0;
-    for (;;) {
-        result = addr ? net_discovery_packet(r.fd,buf,len,hostflags,&a) : sendto(r.fd,buf,len,hostflags,NULL,0); int err = errno;
-        if (result >= 0) { net_udp_note(&r, 0, 1); break; }
-        if (err != EAGAIN) net_udp_error(&r, 1, err);
-        // As on a receive (dm_net_recv): the host hands an earlier datagram's ICMP report to the next call on a UDP socket, a send too, and then
-        // does not send this datagram (the report is cleared). In Nextendo mode it is sent again once
-        if (r.type == 2 && !reported && (err == ECONNREFUSED || err == ECONNRESET || err == ENETRESET) && dm_net_nextendo_enabled()) { reported = 1; continue; }
-        if (err != EAGAIN || r.nonblock || (flags & 0x80)) { result = net_error(net_errno(err)); break; }
-        if (net_wait(&r, POLLOUT, r.send_ms, start)) { result = -1; break; }
-    }
+    long result = net_send_one(&r, buf, len, hostflags, flags, addr ? &a : NULL);
     if(result>=0&&discovery&&dm_discovery_query_protocol(ntohs(a.sin_port),buf,len)) {
         dm_net_discovery_plan extra;int saved=t_net_errno;
         if(dm_net_discovery_supplement(a.sin_addr.s_addr,&extra)) {
@@ -1040,11 +1096,91 @@ static uint32_t net_route_source(void) {
     close(s); return a;
 }
 #endif
-static int net_interface_get(net_interface *out) {
+static unsigned net_functional_type(int control, const char *name) {
+    struct ifreq request = {0}; strlcpy(request.ifr_name, name, sizeof request.ifr_name);
+    return control >= 0 && !ioctl(control, SIOCGIFFUNCTIONALTYPE, &request) ? request.ifr_ifru.ifru_functional_type : IFRTYPE_FUNCTIONAL_UNKNOWN;
+}
+static int net_prefix(uint32_t mask) { return __builtin_popcount(mask); }
+// Every IPv4 adapter as the system reports it, for the log: which one VPN or local play can use is decided from these fields, and a device's log is
+// where an unexpected one shows
+void dm_net_log_adapters(void) {
+    struct ifaddrs *list = NULL; if (getifaddrs(&list)) { fprintf(stderr, "[dm] net: adapters unreadable (errno %d)\n", errno); return; }
+    int control = socket(AF_INET, SOCK_DGRAM, 0);
+    for (struct ifaddrs *p = list; p; p = p->ifa_next) {
+        if (!p->ifa_addr || p->ifa_addr->sa_family != AF_INET) continue;
+        char address[INET_ADDRSTRLEN]; inet_ntop(AF_INET, &((struct sockaddr_in *)p->ifa_addr)->sin_addr, address, sizeof address);
+        uint32_t mask = p->ifa_netmask && p->ifa_netmask->sa_family == AF_INET ? ((struct sockaddr_in *)p->ifa_netmask)->sin_addr.s_addr : 0;
+        fprintf(stderr, "[dm] net: adapter %s %s/%d flags=0x%x type=%u\n", p->ifa_name, address, net_prefix(mask), p->ifa_flags, net_functional_type(control, p->ifa_name));
+    }
+    if (control >= 0) close(control);
+    freeifaddrs(list);
+}
+// The local address the system routes DM_NET_DISCOVERY_PEER through: a connected UDP socket sends nothing, but getsockname then names the source
+// address its route chose. 0 when no host address is set or it has no route.
+static uint32_t net_vpn_routed(void) {
+    const char *peer = getenv("DM_NET_DISCOVERY_PEER"); struct in_addr host;
+    if (!peer || !*peer || inet_pton(AF_INET, peer, &host) != 1) return 0;
+    int fd = socket(AF_INET, SOCK_DGRAM, 0); if (fd < 0) return 0;
+    struct sockaddr_in to = {0}, local = {0}; socklen_t len = sizeof local; uint32_t routed = 0;
+    to.sin_len = sizeof to; to.sin_family = AF_INET; to.sin_port = htons(9); to.sin_addr = host;
+    if (!connect(fd, (struct sockaddr *)&to, sizeof to) && !getsockname(fd, (struct sockaddr *)&local, &len)) routed = local.sin_addr.s_addr;
+    close(fd); return routed;
+}
+// VPN play's adapter (net_vpn.h dm_net_vpn_pick), or none with the reason logged: never Wi-Fi in its place, which would host a room no remote player can
+// reach. DM_NETWORK_INTERFACE narrows the choice to one adapter.
+enum { NET_VPN_LIST = 16 };
+static int net_vpn_interface(net_interface *out) {
+    const char *name = getenv("DM_NETWORK_INTERFACE"); unsigned wanted = name && *name ? if_nametoindex(name) : 0;
+    if (name && *name && !wanted) { net_vpn_note(NET_VPN_ADAPTER, "[dm] [RED] net: VPN play: DM_NETWORK_INTERFACE=%s is not an adapter", name); return -1; }
+    uint32_t routed = net_vpn_routed();
+    struct ifaddrs *list = NULL; if (getifaddrs(&list)) return -1;
+    int control = socket(AF_INET, SOCK_DGRAM, 0);
+    dm_net_vpn_candidate seen[NET_VPN_LIST]; char names[NET_VPN_LIST][IFNAMSIZ]; int count = 0;
+    for (struct ifaddrs *p = list; p && count < NET_VPN_LIST; p = p->ifa_next) {
+        if (!p->ifa_addr || p->ifa_addr->sa_family != AF_INET) continue;
+        unsigned index = if_nametoindex(p->ifa_name);
+        if (!index || (wanted && index != wanted)) continue;
+        dm_net_vpn_candidate *c = &seen[count]; strlcpy(names[count], p->ifa_name, IFNAMSIZ); count++;
+        c->address = ((struct sockaddr_in *)p->ifa_addr)->sin_addr.s_addr; c->index = index; c->flags = p->ifa_flags;
+        c->mask = p->ifa_netmask && p->ifa_netmask->sa_family == AF_INET ? ((struct sockaddr_in *)p->ifa_netmask)->sin_addr.s_addr : 0;
+        c->type = net_functional_type(control, p->ifa_name);
+    }
+    if (control >= 0) close(control);
+    freeifaddrs(list);
+    int pick = dm_net_vpn_pick(seen, count, routed);
+    char address[INET_ADDRSTRLEN];
+    if (pick >= 0) {
+        dm_net_vpn_candidate *c = &seen[pick];
+        out->address = c->address; out->mask = c->mask; out->index = c->index; out->flags = c->flags; out->local_link = 0;
+        inet_ntop(AF_INET, &c->address, address, sizeof address);
+        net_vpn_note(NET_VPN_ADAPTER, "[dm] net: VPN play uses %s %s/%d (told to the game as /%d)%s", names[pick], address, net_prefix(c->mask),
+                     net_prefix(dm_net_vpn_mask(c->address, c->mask)), routed ? ", the route to the host's address" : "");
+        return 0;
+    }
+    if (pick == DM_NET_VPN_SEVERAL) {
+        char found[384] = ""; size_t used = 0;
+        for (int i = 0; i < count && used < sizeof found; i++) if (dm_net_vpn_eligible(&seen[i])) {
+            inet_ntop(AF_INET, &seen[i].address, address, sizeof address);
+            int n = snprintf(found + used, sizeof found - used, "%s%s %s", used ? ", " : "", names[i], address); if (n > 0) used += (size_t)n;
+        }
+        net_vpn_note(NET_VPN_ADAPTER, "[dm] [RED] net: VPN play: several adapters could be the VPN (%s). Set DM_NETWORK_INTERFACE to the VPN's, or "
+                     "DM_NET_DISCOVERY_PEER to the host's VPN address", found);
+    } else if (routed) {
+        inet_ntop(AF_INET, &routed, address, sizeof address);
+        net_vpn_note(NET_VPN_ADAPTER, "[dm] [RED] net: VPN play: the host's address %s is not reached through a VPN (this device would send from %s). Connect "
+                     "the VPN app, or check DM_NET_DISCOVERY_PEER", getenv("DM_NET_DISCOVERY_PEER"), address);
+    } else {
+        net_vpn_note(NET_VPN_ADAPTER, "[dm] [RED] net: VPN play: VPN not connected (no adapter other than Wi-Fi, wired, cellular and loopback has an "
+                     "IPv4 address). Connect the VPN app, or turn DM_NET_VPN off for play on one Wi-Fi");
+    }
+    return -1;
+}
+static int net_interface_find(net_interface *out) {
     memset(out, 0, sizeof *out);
 #ifdef DM_NET_TEST
     if (g_test_interface_set) { *out = g_test_interface; return out->address ? 0 : -1; }
 #endif
+    if (dm_net_vpn()) return net_vpn_interface(out);
     const char *name = getenv("DM_NETWORK_INTERFACE"); unsigned wanted = name && *name ? if_nametoindex(name) : 0;
     if (name && *name && !wanted) return -1;
     unsigned primary = net_route(wanted, &out->gateway); if (wanted) primary = wanted;
@@ -1066,9 +1202,7 @@ static int net_interface_get(net_interface *out) {
         if (!p->ifa_addr || p->ifa_addr->sa_family != AF_INET || !(p->ifa_flags & IFF_UP) || (!wanted && (p->ifa_flags & IFF_LOOPBACK))) continue;
         unsigned index = if_nametoindex(p->ifa_name);
         if (!index || (primary && index != primary)) continue;
-        struct ifreq request = {0}; strlcpy(request.ifr_name, p->ifa_name, sizeof request.ifr_name);
-        unsigned type = control >= 0 && !ioctl(control, SIOCGIFFUNCTIONALTYPE, &request) ?
-                        request.ifr_ifru.ifru_functional_type : IFRTYPE_FUNCTIONAL_UNKNOWN;
+        unsigned type = net_functional_type(control, p->ifa_name);
         int local_link = type == IFRTYPE_FUNCTIONAL_WIFI_INFRA || type == IFRTYPE_FUNCTIONAL_WIRED;
 #if TARGET_OS_IOS
         // TN3179: BSD names such as en0 are not API. Ask the functional type.
@@ -1095,6 +1229,12 @@ static int net_interface_get(net_interface *out) {
     freeifaddrs(list);
     return out->address ? 0 : -1;
 }
+// The adapter local and VPN play use, with the mask the game is told (net_vpn.h dm_net_vpn_mask: a VPN's /32 becomes its block)
+static int net_interface_get(net_interface *out) {
+    int result = net_interface_find(out);
+    if (!result && dm_net_vpn()) out->mask = dm_net_vpn_mask(out->address, out->mask);
+    return result;
+}
 int dm_net_ipconfig(uint32_t *address, uint32_t *mask, uint32_t *gateway, uint32_t *dns1, uint32_t *dns2) {
     uint32_t values[5] = {0}; uint32_t *outputs[] = {address, mask, gateway, dns1, dns2};
     for (int i = 0; i < 5; i++) if (outputs[i]) *outputs[i] = 0;
@@ -1102,7 +1242,8 @@ int dm_net_ipconfig(uint32_t *address, uint32_t *mask, uint32_t *gateway, uint32
     net_interface adapter;
     if (net_interface_get(&adapter)) return -1;
     values[0] = adapter.address; values[1] = adapter.mask; values[2] = adapter.gateway;
-    atomic_store(&g_net_broadcast, adapter.mask && (adapter.flags & IFF_BROADCAST) ? adapter.address | ~adapter.mask : 0);
+    // A tunnel has no broadcast flag, but the game derives its broadcast address from the mask it is told: that address is still a broadcast to redirect
+    atomic_store(&g_net_broadcast, adapter.mask && ((adapter.flags & IFF_BROADCAST) || dm_net_vpn()) ? adapter.address | ~adapter.mask : 0);
     atomic_store(&g_net_broadcast_known, 1);
     if (!values[0]) return -1;
     // DNS is advisory for LAN and never invented. macOS publishes the default resolver here;

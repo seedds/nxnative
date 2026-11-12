@@ -106,6 +106,39 @@ static void local(void) {
     CHECK(!dm_ldn_disconnect(host, 1)); CHECK(dm_ldn_state(host) == 2 && dm_ldn_reason(host) == 3); CHECK(!dm_ldn_close(host, 1)); CHECK(dm_ldn_state(host) == 1);
     dm_ldn_stop(station); dm_ldn_stop(host);
 }
+// Three players in one room: the host hands each member the whole roster, so every joiner knows the others (the addresses a broadcast in the room goes
+// to, dm_ldn_members), and one leaving reaches the rest. The loopback players share 127.0.0.1 and differ by MAC, as in local() above.
+static int roster(dm_ldn_context *c, unsigned want) {
+    for (int t = 0; t < 200; ++t) {
+        dm_ldn_network n; unsigned macs = 0;
+        if (!dm_ldn_get_network(c, &n, NULL, 0)) for (int i = 0; i < 8; ++i) if (n.nodes[i].connected) macs |= 1u << n.nodes[i].mac[5];
+        if (macs == want) return 1;
+        pause_ms(5);
+    }
+    return 0;
+}
+static void three_players(void) {
+    unsigned port = free_port(SOCK_STREAM); dm_ldn_transport ht = transport(port, port, 1); dm_ldn_context *host = dm_ldn_start(&ht, NULL, NULL); CHECK(host);
+    dm_ldn_network_config cfg = config(); dm_ldn_security_config sec = security(); dm_ldn_user hu = user("host");
+    CHECK(!dm_ldn_open(host, 1)); CHECK(!dm_ldn_create(host, &cfg, &sec, &hu, NULL, 0, NULL));
+    dm_ldn_context *station[2];
+    for (int i = 0; i < 2; ++i) {
+        dm_ldn_transport st = transport(free_port(SOCK_DGRAM), port, 2 + i); station[i] = dm_ldn_start(&st, NULL, NULL); CHECK(station[i]); CHECK(!dm_ldn_open(station[i], 0));
+        dm_ldn_filter f = {0}; dm_ldn_network rooms[24]; int count; CHECK(!dm_ldn_scan(station[i], rooms, &count, 24, &f, 0) && count == 1);
+        dm_ldn_user su = user(i ? "second" : "first"); CHECK(!dm_ldn_connect(station[i], rooms, &sec, &su, 5, 0));
+    }
+    const unsigned all = 1u << 1 | 1u << 2 | 1u << 3;
+    CHECK(roster(host, all)); CHECK(roster(station[0], all)); CHECK(roster(station[1], all));
+    CHECK(!dm_ldn_disconnect(station[0], 0)); CHECK(roster(host, all & ~(1u << 2))); CHECK(roster(station[1], all & ~(1u << 2)));
+    dm_ldn_stop(station[0]); dm_ldn_stop(station[1]); dm_ldn_stop(host);
+    // Members are the connected nodes other than this device, in slot order
+    dm_ldn_network n = example(); uint32_t out[7];
+    n.nodes[0].ip = 0x0a000001; n.nodes[2] = n.nodes[0]; n.nodes[2].ip = 0x0a000003; n.nodes[2].mac[5] = 3;
+    n.nodes[5] = n.nodes[0]; n.nodes[5].ip = 0x0a000006; n.nodes[5].mac[5] = 6; n.nodes[3].ip = 0x0a000004;   // slot 3 holds an address but no member
+    CHECK(dm_ldn_members(&n, htonl(0x0a000003), out) == 2 && out[0] == htonl(0x0a000001) && out[1] == htonl(0x0a000006));
+    CHECK(dm_ldn_members(&n, htonl(0x0a000009), out) == 3);
+    dm_ldn_network empty = {0}; CHECK(!dm_ldn_members(&empty, 0, out));
+}
 static void peer_fixture(void) {
     // Fork before creating either worker. Child and parent then own completely
     // separate contexts, descriptors, locks and address-space snapshots.
@@ -207,9 +240,9 @@ int main(void) {
 #ifdef DM_LDN_NET_TEST
     setenv("DM_NETWORK","ldn",1); CHECK(dm_net_enabled());
 #endif
-    protocol(); local(); peer_fixture();
+    protocol(); local(); three_players(); peer_fixture();
 #ifdef DM_NET_TEST
     automatic_discovery();
 #endif
-    printf("LDN: %u checks passed (protocol, malformed streams, real two-process discovery/session).\n",checks); return 0;
+    printf("LDN: %u checks passed (protocol, malformed streams, real two-process discovery/session, a three-player room).\n",checks); return 0;
 }

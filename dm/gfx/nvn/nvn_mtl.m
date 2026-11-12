@@ -496,10 +496,12 @@ static pthread_mutex_t g_deferred_mu = PTHREAD_MUTEX_INITIALIZER;
 // Previously only the former existed: when the view cache was invalidated, a texture that 'is still the current storage of some serial' was also removed from the residency set. Invalidation used to happen only when the base texture was really replaced, so it was never hit;
 // after the transparency chain's in-place composite swapped the storage of two textures, each of the two live textures was removed once this way, and afterwards they are used as attachments and sampled every frame as usual - the GPU accesses non-resident memory.
 static void defer_kick(void);
+static void vb_drop(const void *base);
 // Most objects wait for the next submission's fence. A caller that knows no submission still to come can reach the object passes an earlier one (mtl_pool_del); a fence the GPU has
 // already passed is then drained at once (defer_kick), as no feedback handler is left to do it
 static void defer_obj_at(id obj, int keep_resident, uint64_t fence) {
     if (!obj) return;
+    if (!keep_resident) vb_drop((__bridge const void *)obj);
     NvDeferredRelease *d = [NvDeferredRelease new]; d->object = obj; d->fence = fence; d->keep_resident = keep_resident;
     pthread_mutex_lock(&g_deferred_mu);
     if (!g_deferred) g_deferred = [NSMutableArray array];
@@ -6433,8 +6435,48 @@ static void vc_put(uint64_t ser, const void *pool, const vc_key *k, id<MTLTextur
     if (s->view[i]) { defer_obj_unref((__bridge id)s->view[i]); CFRelease(s->view[i]); }
     s->k[i] = *k; s->view[i] = (void *)CFBridgingRetain(v); g_vc_new++;
 }
+// Views by the Metal texture they are made of, behind the cache by texture above, whose entries go with the game's texture object. A game that makes its render targets on new
+// texture objects every frame over storage that stays, or finalizes the objects and keeps their IDs, missed that cache for every view every frame: Ocarina of Time made 77 views
+// a frame of 39 Metal textures that were the same ones each frame, 0.9 ms of the replay thread. A view holds its parent, so an entry goes when the host retires the Metal texture
+// (defer_obj_at: its recycled heap waits for the texture to be freed, rh_take) or has gone VB_AGE frames unused. Not for textures uploaded from guest memory: a finalized one
+// is uploaded again as a new Metal texture, and its views would hold every upload. Its own lock, taken last
+enum { VB_AGE = 120, VB_MAX = 4096 };
+typedef struct { vc_key k[VC_WAYS]; void *view[VC_WAYS]; unsigned next; uint64_t used; } vb_set;   // view: retained
+static nvn_hmap g_vb = {.klen = 8};   // Metal texture → vb_set
+static os_unfair_lock g_vb_lk = OS_UNFAIR_LOCK_INIT; static uint64_t g_vb_swept; static _Atomic uint64_t g_vb_hit;
+static void vb_set_free(void *p) { vb_set *s = p; for (int i = 0; i < VC_WAYS; i++) if (s->view[i]) { defer_obj_unref((__bridge id)s->view[i]); CFRelease(s->view[i]); } free(s); }
+static void vb_drop(const void *base) {
+    if (!g_vb.n) return;
+    os_unfair_lock_lock(&g_vb_lk); vb_set *s = nvn_hm_del(&g_vb, &base); os_unfair_lock_unlock(&g_vb_lk);
+    if (s) vb_set_free(s);
+}
+static id<MTLTexture> vb_get(id<MTLTexture> base, const vc_key *k, uint64_t frame) {
+    const void *b = (__bridge const void *)base; id<MTLTexture> v = nil;
+    os_unfair_lock_lock(&g_vb_lk);
+    vb_set *s = nvn_hm_get(&g_vb, &b);
+    for (int i = 0; s && i < VC_WAYS; i++) if (s->view[i] && !memcmp(&s->k[i], k, sizeof *k)) { v = (__bridge id<MTLTexture>)s->view[i]; s->used = frame; break; }
+    os_unfair_lock_unlock(&g_vb_lk);
+    if (v) atomic_fetch_add(&g_vb_hit, 1);
+    return v;
+}
+static void vb_put(id<MTLTexture> base, const vc_key *k, id<MTLTexture> v, uint64_t frame) {
+    const void *b = (__bridge const void *)base; void *old = NULL, **gone = NULL; unsigned ngone = 0;
+    os_unfair_lock_lock(&g_vb_lk);
+    if (frame >= g_vb_swept + VB_AGE || g_vb.n >= VB_MAX) {   // entries unused for VB_AGE frames, or all of them at the cap
+        g_vb_swept = frame; gone = malloc(sizeof *gone * (g_vb.n ? g_vb.n : 1));
+        for (uint32_t i = 0; gone && i < g_vb.cap;) { vb_set *e = g_vb.vals[i];
+            if (e && (e->used + VB_AGE < frame || g_vb.n >= VB_MAX)) { const void *key; memcpy(&key, g_vb.keys + (size_t)i * 8, 8); nvn_hm_del(&g_vb, &key); gone[ngone++] = e; } else i++; }   // a delete moves later entries back into slot i
+    }
+    vb_set *s = nvn_hm_get(&g_vb, &b);
+    if (!s && (s = calloc(1, sizeof *s))) nvn_hm_put(&g_vb, &b, s);
+    if (s) { unsigned i = s->next++ % VC_WAYS; old = s->view[i]; s->k[i] = *k; s->view[i] = (void *)CFBridgingRetain(v); s->used = frame; }
+    os_unfair_lock_unlock(&g_vb_lk);
+    if (old) { defer_obj_unref((__bridge id)old); CFRelease(old); }
+    for (unsigned i = 0; i < ngone; i++) vb_set_free(gone[i]);
+    free(gone);
+}
 void mtl_vc_drop(uint64_t ser) { os_unfair_lock_lock(&g_rmu); vc_set *s = nvn_hm_del(&g_vc, &ser); if (s) vc_set_free(s); os_unfair_lock_unlock(&g_rmu); }
-void mtl_vc_stats(unsigned *n, uint64_t *hit, uint64_t *made) { os_unfair_lock_lock(&g_rmu); *n = g_vc.n; *hit = g_vc_hit; *made = g_vc_new; os_unfair_lock_unlock(&g_rmu); }
+void mtl_vc_stats(unsigned *n, uint64_t *hit, uint64_t *made) { os_unfair_lock_lock(&g_rmu); *n = g_vc.n; *hit = g_vc_hit + atomic_load(&g_vb_hit); *made = g_vc_new; os_unfair_lock_unlock(&g_rmu); }
 static void tb2_gone_clear(void);
 static void vc_drop_pool(const void *pool) {   // caller holds g_rmu
     tb2_gone_clear();
@@ -6754,11 +6796,12 @@ static id<MTLTexture> tex_by_id(int tid) {   // Caller holds g_rmu
             if (fits) { s0 *= 6; ns *= 6; } else tt = MTLTextureType2DArray;
         }
         vc_key k; memset(&k, 0, sizeof k); k.pf = pf; k.tt = (uint8_t)tt; k.l0 = (uint32_t)l0; k.nl = (uint32_t)nl; k.s0 = (uint32_t)s0; k.ns = (uint32_t)ns; memcpy(k.sw, sw, 4);
-        if (!(v = vc_get(rp->t.serial, &k, base))) {
+        uint64_t vb_f = atomic_load(&g_cur_frame); int vb_on = !rp->view_pkg;
+        if (!(v = vc_get(rp->t.serial, &k, base)) && !(vb_on && (v = vb_get(base, &k, vb_f)))) {
             v = need_sw ? [base newTextureViewWithPixelFormat:(MTLPixelFormat)pf textureType:tt levels:NSMakeRange(l0, nl) slices:NSMakeRange(s0, ns) swizzle:MTLTextureSwizzleChannelsMake(sw[0], sw[1], sw[2], sw[3])]
                         : [base newTextureViewWithPixelFormat:(MTLPixelFormat)pf textureType:tt levels:NSMakeRange(l0, nl) slices:NSMakeRange(s0, ns)];
             if (!v) { RED_ONCE(11, "cannot create texture view id %d", tid); v = base; }
-            else vc_put(rp->t.serial, rp->t.pool, &k, v);
+            else { vc_put(rp->t.serial, rp->t.pool, &k, v); if (vb_on) vb_put(base, &k, v, vb_f); }
         }
     }
     if (rp->retired && rp->transient_sub != g_sub_serial) {

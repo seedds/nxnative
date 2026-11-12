@@ -134,7 +134,7 @@ static void saved_choices(void) {   // after the env files, before the bundle's 
     }
 }
 
-// Cloud saves: the folder chosen in the settings window (Launcher.swift CloudSavesSection, cloudSaves.folder in the app's preferences) becomes DM_SAVE_SYNC
+// Cloud saves: the folder chosen in the settings window (Launcher.swift CloudSavesRow, cloudSaves.folder in the app's preferences) becomes DM_SAVE_SYNC
 // (dm/host/save_sync.h), with or without the window; a DM_SAVE_SYNC the launch environment or an env file set wins. A front end may write the key too (docs/frontends.md, The cloud saves folder)
 static void cloud_saves_folder(void) {
     CFStringRef domain = CFBundleGetIdentifier(CFBundleGetMainBundle());

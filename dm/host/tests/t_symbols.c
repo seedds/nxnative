@@ -20,6 +20,7 @@ static uint8_t *test_section(const struct mach_header_64 *mh, const char *seg, c
 #define getsectiondata test_section
 #include "../hle.c"
 #include "../loader.c"
+void dm_mods_patch_module(module_t *m, const char *dir) { (void)m; (void)dir; }
 void mtl_present_screen(uint32_t w, uint32_t h) { (void)w; (void)h; }   // loader.c: a screen taller than 16:9; no renderer here
 #undef getsectiondata
 

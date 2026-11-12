@@ -1364,3 +1364,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Cause:** an NRR with 1 in the byte at +5 (the Switch 2's) has a header 0x180 bytes longer. The same fields follow it: program ID +0x4b0, size +0x4b8, hash table +0x4c0, its count +0x4c4.
 - **Fix:** `hle_ro.c` and `nro_collect.py` read the table by that byte.
 - **Found on:** [Mario Tennis Fever](../../dm/games/0400D4201C6EA000/README.md).
+
+### Mods made for emulators do nothing, or only half of them does
+
+- **Symptom:** a mod folder as Ryujinx, the yuzu family or Atmosphère take it (`romfs/`, `exefs/`, `cheats/`) had no place to go: only `DM_ROMFS_OVERLAY` replaced RomFS files, by hand, and only one cheat file per build was read. With the mods folder: `[RED] mods: … is not applied` for a code patch, `mods: warning: … differ only in case` for a file a Switch would not have matched.
+- **Cause:** the host had no notion of a mod: no folder, no order, no way to turn one off, and no patching of a module after the rewriter.
+- **Fix:** `dm/host/hle_mods.c` reads a mods folder (`DM_MODS`, default `<DM_ROOT>/mods`), one folder per mod in any of the layouts mods ship in, ordered and switched by `order.txt` ([Mods](../development.md#mods)):
+  - `romfs/` folders join the RomFS overlay and follow the Mods menu while the game runs; a `<name>.dm-delete` marker hides a game file or directory, and a name that differs from the game's only in case is taken with a warning;
+  - every `cheats/<build ID>.txt` joins the cheats folder's own as one list ([Cheat files from several places](../development.md#cheat-files-from-several-places));
+  - `.pchtxt` and `.ips` patches are written into a module as it is mapped, before its code is sealed, each file whole or not at all, and never over what the rewriter changed: such a file is refused with a `[RED]` line (open: applying it before the rewriter runs).
+- **Open:** code modules of a mod (ExLaunch, Skyline) are not loaded; no exefs patch on iOS.
+- **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game), with two RomFS mods (a controller UI, a pack of tunic recolours) and synthetic patches and cheat files.

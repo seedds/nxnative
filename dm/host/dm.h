@@ -180,6 +180,16 @@ void dm_guest_heap_range(uint64_t *base, size_t *open_len);   // hle_svc.c: the 
 int dm_guest_heap_read(uint64_t addr, void *out, size_t len);    // hle_svc.c: hole-free guest heap read for the cheat VM (under the memory lock); 0 = ok, 1 = a byte outside the opened span
 int dm_guest_heap_write(uint64_t addr, const void *src, size_t len);   // hle_svc.c: hole-free guest heap write (the dirty tracking sees it first)
 // Cheats (hle_cheats.c): Atmosphère-format cheat code files applied to the running game (docs/development.md "Cheats")
+void dm_mods_init(void);              // Before load_modules (main.c): finds the mods folder's mods, in order, and puts their romfs folders into DM_ROMFS_OVERLAY (hle_mods.c)
+void dm_mods_patch_module(module_t *m, const char *dir);   // A mapped, still writable module: the mods' .pchtxt / .ips patches for its build (loader.c map_image)
+void dm_mods_report_unmatched(void);  // After load_modules: the patch files no loaded module's build matched
+const char *dm_mods_dir_path(void);   // The mods folder ("" when neither DM_MODS nor DM_ROOT is set); it need not exist
+int dm_mods_count(void); const char *dm_mods_name(int i); int dm_mods_on(int i);   // Every mod folder found at the start, in priority order, on or off (the Mac window's Mods menu)
+void dm_mods_set(int i, int on);      // Turn a mod on or off: its romfs folder at once, and in order.txt; dm_mods_edited() is 1 once a mod with code patches or cheats changed (those wait for the next start)
+void dm_fs_overlay_set(const char *list);   // Replace the RomFS overlay folders while the game runs (hle_fs.c)
+int dm_mods_edited(void);
+int dm_mods_exclusive(int i);         // 1 for a pack's variant that replaces the same files as another of the pack: turning it on turns that one off
+const char *dm_mods_cheat_dir(int i, const char **mod); // The i-th mod cheats folder in priority order and its mod's name, NULL past the last
 void dm_cheats_init(void);            // Called once in host_preload after loading the modules (main.c): reads DM_CHEATS and friends, loads the build's file
 void dm_cheats_present(void);         // Per presented frame (hle_nvn.c presents): applies the enabled cheats once
 // The Cheats submenu's rows (front_mac.m, Mac window only). Readers of the list of cheats; the front end copies the strings out immediately

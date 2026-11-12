@@ -23,6 +23,12 @@ static module_t mods[3]; module_t *g_mod = mods; int g_nmod;
 // The test's clock starts at 0 and moves 1 µs a call, so the idle thread (started by the first loaded file) always finds a present in its last 250 ms and stands down:
 // every pass is the test's own. On the real clock it ran passes of its own between the test's whenever a step took longer than 250 ms (a loaded machine), and the C4
 // auto-repeat counter rose once more while A was held ("C4: released: nothing fires" failed)
+static char mod_cheats[2][1024]; static const char *mod_names[2] = {"Alpha", "Beta"}; static int nmod_cheats;
+const char *dm_mods_cheat_dir(int i, const char **mod) {
+    if (i < 0 || i >= nmod_cheats) return NULL;
+    if (mod) *mod = mod_names[i];
+    return mod_cheats[i];
+}
 uint64_t now_ns(void) { static _Atomic uint64_t t; return atomic_fetch_add(&t, 1000) + 1000; }
 void dm_guest_write_prepare(void *addr, size_t len) { (void)addr; (void)len; }   // no dirty-page tracking in the test
 static uint8_t *heap; static size_t heap_open;   // the guest heap (hle_svc.c): a plain buffer, opened in full
@@ -181,7 +187,7 @@ int main(void) {
     g_static[0x05] = 42;   // a value a tool put into a readable static register
     put("1111111111111111.txt", "[C3]\nC3000051\nA4100400 00004064\n");   // r1 = static[5]; [main+0x4064] = r1 (A: S = 1, O = 4)
     snprintf(g_path, sizeof g_path, "%s/1111111111111111.txt", g_dir);
-    g_ncheat = 0; parse_file(g_path); g_active = 1; on_and_pass(at("C3", 0));   // parsed without load_all, which clears the static registers
+    g_ncheat = 0; parse_file(g_path, 0); g_active = 1; on_and_pass(at("C3", 0));   // parsed without load_all, which clears the static registers
     CHECK(rd32(0x4064) == 42, "C3: a readable static register into a register");
     load_all();
     CHECK(g_static[0x05] == 0 && g_static[0x80] == 0, "C3: loading a file clears the static registers");
@@ -644,6 +650,35 @@ int main(void) {
     CHECK(exists(".cheats-running-0100000000000000"), "a cheat on: the safe-mode flag is there");
     rm("1111111111111111.txt"); load_all();
     CHECK(!dm_cheats_found() && !exists(".cheats-running-0100000000000000"), "a reload that finds no file removes the flag: nothing runs now");
+
+    // ---- several files of one build: the cheats folder's own, then each mod's, as one list ----
+    fresh("multi", "{M}\n04000000 00004800 00000001\n[Shared]\n04000000 00004804 00000002\n[Same name]\n04000000 00004808 00000003\n");
+    for (int k = 0; k < 2; k++) { snprintf(mod_cheats[k], sizeof mod_cheats[k], "%s/mod%d", g_dir, k); mkdir(mod_cheats[k], 0755); }
+    put("mod0/1111111111111111.txt", "[Credits]\n[Shared]\n04000000 00004804 00000002\n[Same name]\n04000000 0000480C 00000004\n[Asked]\n04000000 00004810 00000005\n"
+                                     "[--SectionStart:Own--]\n[In section]\n04000000 00004814 00000006\n[--SectionEnd:Own--]\n");
+    put("mod0/1111111111111111.meta.tsv", "# cheat_anchor.py: compiled from a.cheats.toml for build 1111111111111111\nname\tkind\ttype\task\tvalue_words\n"
+                                          "Shared\tcheat\tu32\t0..9\t2\nAsked\tcheat\tu32\t0..9\t2\n");
+    put("mod1/1111111111111111.txt", "[Shared]\n04000000 00004804 00000002\n[Credits]\n");
+    put("mod1/2222222222222222.txt", "[Other build]\n04000000 00004818 00000007\n");
+    nmod_cheats = 2; load_all();
+    CHECK(g_nfiles == 3 && g_ncopies == 2 && at("Shared", 1) < 0, "several files: a cheat an earlier file has, by name and code, is left out");
+    CHECK(at("Other build", 0) < 0 && at("Credits", 1) < 0 && at("Credits", 0) >= 0, "several files: another build's file stays out, and a file left with no cheat of its own adds no labels");
+    CHECK(at("M", 0) == 0 && at("Same name", 0) == 2 && at("Same name", 1) > at("Credits", 0), "several files: the cheats folder's entries first, then the mods' in priority order");
+    CHECK(entry("Same name")->dup == 0 && g_cheat[at("Same name", 1)].dup == 1, "several files: the same name with other code is a second entry, keyed \"Same name #2\"");
+    CHECK(!entry("Shared")->ask && entry("Asked")->ask, "several files: a meta file describes the entries of its own file only");
+    CHECK(!entry("M")->section[0] && !strcmp(entry("Asked")->section, "Alpha") && !strcmp(entry("In section")->section, "Own"), "several files: a mod's entries outside a section are listed under the mod's name");
+    dm_cheat_toggle(at("Same name", 1)); dm_cheat_toggle(at("In section", 0)); cheats_pass();
+    CHECK(rd32(0x4800) == 1 && rd32(0x480C) == 4 && rd32(0x4814) == 6 && rd32(0x4808) == 0, "several files: masters and toggled cheats of every file run in one pass");
+    CHECK(!strcmp(get("1111111111111111.enabled"), "Same name #2\nIn section\n") && !exists("mod0/1111111111111111.enabled"), "several files: one <build>.enabled, in the cheats folder, for the whole list");
+    CHECK(!dm_cheat_value_set(at("Asked", 0), "8") && strstr(get("1111111111111111.values"), "Asked\t8") && !exists("mod0/1111111111111111.values"), "several files: one <build>.values, in the cheats folder");
+    load_all();
+    CHECK(g_cheat[at("Same name", 1)].on && !entry("Same name")->on && entry("Asked")->ins[2] == 8, "several files: toggles and values come back after a reload");
+    CHECK(strstr(dm_cheats_report(), "3 files of this build, as one list: the cheats folder, Alpha, Beta") && strstr(dm_cheats_report(), "2 cheats left out"), "several files: the report names the files and the copies");
+    nmod_cheats = 1; load_all();
+    CHECK(g_nfiles == 2 && g_ncopies == 1, "several files: a mod turned off takes its file with it at the next load");
+    rm("1111111111111111.txt"); load_all();
+    CHECK(dm_cheats_found() && at("Shared", 0) >= 0 && !strcmp(entry("Shared")->section, "Alpha") && strstr(g_path, "mod0/"), "several files: with no file in the cheats folder a mod's file loads alone");
+    nmod_cheats = 0;
 
     // ---- Atmosphère's limits in the report ----
     size_t cap = 0x200 * 9 + 64; char *big = malloc(cap); size_t o = (size_t)snprintf(big, cap, "[Big]\n");

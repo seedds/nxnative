@@ -137,7 +137,9 @@ static void host_preload(int argc, char **argv) {
         LOG("game arguments from the game profile: %s", DM_GAME_ARGS);
     }
     if (!n) n = profile_modules(argv[1], names);
+    dm_mods_init();
     load_modules(argv[1], names, n);
+    dm_mods_report_unmatched();
     dm_cheats_init();   // the Atmosphère cheat files for this build (hle_cheats.c): picked by first 16 hex digits of main's build ID, which the loader knows now
     dm_sdk_major();   // logs the SDK version, which SDK-dependent behaviour follows (loader.c)
     uint64_t ta = now_ns();

@@ -3407,7 +3407,7 @@ static BOOL obj_is_tex(id object) {
     return is_texture;
 }
 
-static int g_red_once[179];   // one past the highest key: a new key raises this, and the macro refuses to compile otherwise
+static int g_red_once[184];   // one past the highest key: a new key raises this, and the macro refuses to compile otherwise
 #define RED_ONCE(k, ...) do { _Static_assert((k) < sizeof g_red_once / sizeof *g_red_once, "a RED_ONCE key past g_red_once: raise its size"); if (!g_red_once[k]++) MLOG("[RED] " __VA_ARGS__); } while (0)
 // NVN vertex streams 0–15 → Metal vertex buffer slots: 0–13 go to 16–29 (30 is the constant fallback buffer), 14 and 15 to 14 and 15. Metal has only the 31 slots 0–30; translated shaders use only buffer(0) (the argument buffer),
 // and the host's own vertex functions read no vertex buffers. 13 Sentinels uses stream 15, and the old 16 + stream went out of range (Metal assertion: buffer index (31) must be < 31)
@@ -6134,7 +6134,7 @@ static id<MTLTexture> tex_undrop(const tex_t *t, id<MTLTexture> r, int line) {
     if (!g_drop_full) g_drop_full = [NSMutableSet set];
     [g_drop_full addObject:@((uintptr_t)t->mem)];
     uint64_t st, lg = atomic_load(&g_up_lost_gen); t_drop_off = 1; id<MTLTexture> nt = pkg_upload(t, &st, nil, pk->tex.usage, nil, NULL, 0, NULL); t_drop_off = 0;
-    if (!nt) { RED_ONCE(160, "a texture that left out its largest level could not be made whole again (ser=%llu %ux%u format %#x): kept smaller", (unsigned long long)t->serial, t->d.width, t->d.height, t->d.format); return r; }
+    if (!nt) { RED_ONCE(183, "a texture that left out its largest level could not be made whole again (ser=%llu %ux%u format %#x): kept smaller", (unsigned long long)t->serial, t->d.width, t->d.height, t->d.format); return r; }
     id<MTLTexture> old = pk->tex; pk->tex = nt; pk->stored = 0; pk->part = 0; pk->lost_gen = lg; defer_obj_release(old);   // read whole
     if (pk->spare) { defer_obj_release(pk->spare); pk->spare = nil; }   // of the smaller shape
     pk->stamp = pk->seen = st; pk->span = nvn_dirty_span(t->mem, t->L.size); if (dirtycheck()) pk->hash = full_hash(t->mem, t->L.size);

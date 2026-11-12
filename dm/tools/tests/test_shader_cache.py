@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # The compile cache as one file (dm/tools/shader_cache.py): entries in and out, bytes stored once, several threads and processes, a damaged file, pruning, and taking in a cache from before it.
-import fcntl, hashlib, os, subprocess, sys, tarfile, tempfile, threading, time, unittest
+import hashlib, os, subprocess, sys, tarfile, tempfile, threading, time, unittest
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[3]
@@ -127,6 +127,7 @@ class ReadOnly(Base):
         self.assertEqual(s.get('metallib/mac/a.metallib'), b'local')
         self.assertEqual(s.names('metallib/mac/'), {'metallib/mac/a.metallib', 'metallib/mac/new.metallib'})
         s.delete_prefix('variant/'); self.assertEqual(s.get('variant/v/mac.metallib'), b'variant')
+        assert s.readonly is not None and s.readonly.db is not None   # the store opened over a read-only one, open
         with self.assertRaises(shader_cache.sqlite3.OperationalError): s.readonly.db.execute('DELETE FROM entry')
         s.close()
         self.assertEqual(self.path.read_bytes(), before); self.assertEqual(self.path.stat().st_mtime_ns, stamp)
@@ -218,6 +219,7 @@ class Bounded(Base):
         self.fill(); self.store.db.execute('PRAGMA wal_checkpoint(TRUNCATE)')
         code = "import fcntl,sys; f=open(sys.argv[1], 'a'); fcntl.flock(f,fcntl.LOCK_SH); print('held',flush=True); sys.stdin.read()"
         p = subprocess.Popen([sys.executable, '-c', code, str(self.path) + '.lock'], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        assert p.stdout is not None
         try:
             self.assertEqual(p.stdout.readline().strip(), 'held')
             before = self.store.names('')
@@ -237,6 +239,7 @@ class Bounded(Base):
                 "s.db.execute('PRAGMA wal_checkpoint(TRUNCATE)')\n"
                 "print('ready',flush=True); sys.stdin.read()\n")
         p = subprocess.Popen([sys.executable, '-c', code, str(REPO / 'dm/tools'), str(self.path), str(source)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        assert p.stdout is not None
         try:
             self.assertEqual(p.stdout.readline().strip(), 'ready')
             before = self.store.names('stage/')

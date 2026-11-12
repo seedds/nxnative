@@ -456,7 +456,7 @@ def regression_cache(tree, g, a):
 
 def shader_cache_gb(value):
     try: n = float(value)
-    except ValueError: raise argparse.ArgumentTypeError('the shader cache limit must be a number in GiB')
+    except ValueError: raise argparse.ArgumentTypeError('the shader cache limit must be a number in GiB') from None
     if not math.isfinite(n) or n < 1 / 1024: raise argparse.ArgumentTypeError('the shader cache limit must be at least 1 MiB (0.0009765625 GiB)')
     return n
 

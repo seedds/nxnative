@@ -55,6 +55,7 @@ void mtl_arch_save(int wait_ms, int ending);         // The pipeline archive's u
 void mtl_xv_window_tex(uint64_t serial);   // Register a window (swapchain) texture: the cross-submit validity ledger never collects it
 // External producers (the Vulkan layer, dm/gfx/vk): the shared Metal device; a serial for one of their textures; present it once their event reaches ev_val (ticket for mtl_present_wait)
 void *mtl_device(void);
+void nvn_gpu_busy_start(void *dev);   // nvn_gpu_busy.m: DM_NVN_GPU_BUSY read once at mtl_init, the keep-busy thread started when it is on
 void *mtl_device_classic(void);   // the same for a layer that draws only on classic queues: a device without Metal 4 (a virtual Mac) starts too, and its presents are dropped
 uint64_t mtl_ext_tex(void *tex);
 uint64_t mtl_present_ext(uint64_t serial, double period, void *ev, uint64_t ev_val, const int crop[4]);   // crop: x, y, w, h of the texture to show (NULL = all of it)

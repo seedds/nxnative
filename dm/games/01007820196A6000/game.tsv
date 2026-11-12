@@ -1,4 +1,4 @@
-# Red Dead Redemption: the NSP script's provisional profile (dm/games/profile_guess.py), checked on the Mac through the opening into Armadillo; render_cond added (README.md)
+# Red Dead Redemption: the NSP script's provisional profile (dm/games/profile_guess.py), checked on the Mac through the opening into Armadillo
 # SDK 15.3.2, RAGE (Double Eleven port), NVN
 
 # ---- Identity ----
@@ -40,8 +40,6 @@ shader_note	Red Dead Redemption shaders (RAGE effects in shaders.rpf and main, D
 # ---- After the rewrite ----
 # used memory for the rewritten modules, at least the default 64 MB: 1.0.0's (1.0.4's fit in the default)
 mem_used	0x4ca4000
-# render_cond: the game draws under SetRenderEnableConditional (its only [RED] line in a 5-minute run); without the key small black squares showed in the title scene and the opening cutscene
-render_cond	on
 
 # ---- Frame rate ----
 # 60 fps (30 on the Switch): the game asks for present interval 2 once (main+0x38ea0) and has no other limit; it steps by the time that passed (the opening cutscene's

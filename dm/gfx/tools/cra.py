@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Camelot's archive (Mario Tennis Fever): the whole game in one RomFS file, rom:/42, magic 'CRA.', its index built into the game's code.
+"""Camelot's archive (Mario Tennis Fever; Mario Golf: Super Rush has an older layout of it, see "The 2021 layout" below): the whole game in one RomFS file, rom:/42, magic 'CRA.', its index built into the game's code.
 The file starts with its own table of chunks (u32 'CRA.', u16 0x200, u16 0x100, u32 0x2a0, u32 length, then 16-byte rows); nothing here needs it, as the game's NRO lists the files itself:
   · a file table in read-only data, found by the code that reads it (index_of): one i16 per file, then records at table + i16[i] + i × 18 + 2 × count, each:
     +0 u16 how far back the record holding the path's prefix is, +2 u8 the prefix's length, +3 i8 a suffix's index (-1 none), +4 u32 size ^ 0xff00ff00, +8 u40 offset ^ 0xff00ff00ff, +0xd the rest of the
@@ -115,6 +115,93 @@ def index_of(nro):
     return table, count, sums, names
 
 
+# ---- The 2021 layout (Mario Golf: Super Rush 4.0.0) ----
+# The same archive two engine generations earlier: rom:/42 starts with the same 'CRA.' header and tables nothing needs, and its file table is again in the NRO's read-only data, found by the code
+# that reads it (index_2021): one i32 per file, then records at table - i32[i], each:
+#   +0 u16 how far back the record holding the path's prefix is, +2 u8 the prefix's length, +4 u32 size ^ 0xce462eca, +8 u32 checksum, +0xc u40 offset ^ 0x46f636762a, +0x11 the rest of the path
+#   up to a zero. A character is stored bit-reversed and xored: c = rev8(b) ^ ((i & 15) + 1), i the index of the record holding it.
+# A file is xored in 16-byte blocks from its own start with two 8-byte keys, and each byte's bits are then reversed (nro0+0x54baf8 on 4.0.0). The keys come from 8 characters of the last path
+# element, bit-reversed, read from its start again at its end or before a '.', as a big-endian number K: the first 8 bytes of a block take K ^ KEY_A and the last 8 K ^ KEY_B, low byte first.
+# The checksum is the CRC-32 of the plain file ^ 0x12345678 (the game: a CRC without the final inversion, ^ 0xedcba987).
+LAYOUT, LAYOUT_2021 = 'cra', 'cra2021'   # the last field of a file's entry: which layout read() and head() take it in (the entries go to the split's workers as plain tuples)
+REV8 = bytes(int(f'{i:08b}'[::-1], 2) for i in range(256))
+SIZE_2021, OFF_2021, SUM_2021 = 0xce462eca, 0x46f636762a, 0x12345678
+KEY_A, KEY_B = 0x4adfc980eae9731b, 0xfbccb4fac6ff003e
+
+
+def index_2021(nro):
+    """Where the 2021 layout's file table is, from the code that reads a record: mov w, #0x2eca; movk w, #0xce46, lsl #16 (the size's mask), a few instructions after adrp + add x, table; ldrsw [x, x, lsl #2]"""
+    end = text_end(nro)
+    w = struct.unpack_from(f'<{end // 4}I', nro)
+    for i in range(8, len(w) - 1):
+        if w[i] & 0xffffffe0 != 0x52800000 | 0x2eca << 5 or w[i + 1] & 0xffffffe0 != 0x72a00000 | 0xce46 << 5 or (w[i] ^ w[i + 1]) & 31: continue
+        for k in range(i - 8, i):
+            reg = w[k] & 31
+            if (a := adrp_add(w, k, reg)) is not None and w[k + 2] & 0xffe0fc00 == 0xb8a07800 and w[k + 2] >> 5 & 31 == reg: return a
+    raise Error('this NRO has no CRA file table (or another layout of it)')
+
+
+class Index2021:
+    def __init__(self, nro):
+        self.d = nro
+        self.table = index_2021(nro)
+        first = struct.unpack_from('<i', nro, self.table)[0]
+        if first >= 0 or first % 4: raise Error('the 2021 file table does not start with its records\' distance')
+        self.count = -first // 4   # the records follow the table
+
+    def rec(self, i):
+        return self.table - struct.unpack_from('<i', self.d, self.table + i * 4)[0]
+
+    def chars(self, i, r):
+        d = self.d; o = r + 0x11; k = (i & 15) + 1; out = bytearray()
+        while d[o]:
+            out.append(REV8[d[o]] ^ k); o += 1
+        return out
+
+    def name(self, i):
+        d = self.d; r = self.rec(i); need = d[r + 2]; out = bytearray(need) + self.chars(i, r)
+        k = i
+        while need:
+            back = struct.unpack_from('<H', d, r)[0]
+            if not back: raise Error(f'file {i}: a path prefix with no record behind it')
+            k -= back; r = self.rec(k)
+            have = min(need, d[r + 2])
+            out[have:need] = self.chars(k, r)[:need - have]
+            need = have
+        return out.decode('latin1')
+
+    def files(self):   # (index, path, size, offset, checksum, LAYOUT_2021), the empty first record left out
+        out = []
+        for i in range(self.count):
+            r = self.rec(i)
+            raw = struct.unpack_from('<I', self.d, r + 4)[0]; size = raw ^ SIZE_2021
+            if not raw or not size: continue   # the first record is all zeros
+            off = (struct.unpack_from('<Q', self.d, r + 0xc)[0] & 0xffffffffff) ^ OFF_2021
+            out.append((i, self.name(i), size, off, struct.unpack_from('<I', self.d, r + 8)[0], LAYOUT_2021))
+        return out
+
+
+def keys_2021(path):   # the 16 key bytes of a file, as they lie over each of its blocks
+    st = path.rfind('/') + 1; q = st; kb = bytearray()
+    if st >= len(path): raise Error(f'{path}: no last path element to take the key from')
+    for _ in range(8):
+        kb.append(REV8[ord(path[q])]); q += 1
+        if q >= len(path) or path[q] == '.': q = st
+    k = int.from_bytes(kb, 'big')
+    return (k ^ KEY_A).to_bytes(8, 'little') + (k ^ KEY_B).to_bytes(8, 'little')
+
+
+def plain_2021(path, raw):
+    n = len(raw)
+    ks = (keys_2021(path) * (n // 16 + 1))[:n]
+    return (int.from_bytes(raw, 'little') ^ int.from_bytes(ks, 'little')).to_bytes(n, 'little').translate(REV8)
+
+
+def index(nro):   # the file table of the layout this NRO's code reads: today's (Index), else the 2021 one (Index2021)
+    try: return Index(nro)
+    except Error: return Index2021(nro)
+
+
 class Index:
     def __init__(self, nro):
         self.d = nro
@@ -146,29 +233,34 @@ class Index:
             parts.append(c.replace('$', parts[-1]) if parts else c)
         return '/'.join(parts)
 
-    def files(self):   # (index, path, size, offset, checksum), the empty first record left out
+    def files(self):   # (index, path, size, offset, checksum, LAYOUT), the empty first record left out
         out = []
         for i in range(self.count):
             r = self.rec(i)
             size = struct.unpack_from('<I', self.d, r + 4)[0] ^ 0xff00ff00
             if not size: continue
             off = (struct.unpack_from('<Q', self.d, r + 8)[0] & 0xffffffffff) ^ 0xff00ff00ff
-            out.append((i, self.name(i), size, off, struct.unpack_from('<I', self.d, self.sums + i * 4)[0]))
+            out.append((i, self.name(i), size, off, struct.unpack_from('<I', self.d, self.sums + i * 4)[0], LAYOUT))
         return out
 
 
 def read(f, entry):
     """A file's bytes from the open archive, unscrambled and checked (the checksum covers whole blocks; the last block's tail past the size is padding)"""
-    i, path, size, off, want = entry
+    i, path, size, off, want, layout = entry
     f.seek(off)
+    if layout == LAYOUT_2021:
+        plain = plain_2021(path, f.read(size))
+        if len(plain) != size or zlib.crc32(plain) ^ SUM_2021 != want: raise Error(f'{path}: the checksum differs')
+        return plain
     plain, total = unscramble(path, f.read((size + 15) & ~15))
     if ((total >> 32) ^ total) & 0xffffffff != want: raise Error(f'{path}: the checksum differs')
     return plain[:size]
 
 
 def head(f, entry):   # the first block of a file, unscrambled: its magic, to leave out what holds no shaders without unscrambling the rest
-    i, path, size, off, want = entry
+    i, path, size, off, want, layout = entry
     f.seek(off)
+    if layout == LAYOUT_2021: return plain_2021(path, f.read(min(16, size)))
     return unscramble(path, f.read(16))[0]
 
 
@@ -242,7 +334,7 @@ def undo(d):
 
 def main():
     if len(sys.argv) < 3: sys.exit(__doc__)
-    idx = Index(open(sys.argv[2], 'rb').read())
+    idx = index(open(sys.argv[2], 'rb').read())
     with open(sys.argv[1], 'rb') as f:
         for e in idx.files():
             print(f'{e[0]}\t{e[1]}\t{e[2]}\t{e[3]:#x}')

@@ -49,7 +49,7 @@ static int move(const nvn_texdesc *d, unsigned level, unsigned layer, uint8_t *b
     uint32_t row_bytes, rows, slices, bpb; uint64_t base; unsigned th, td;
     if (nvn_deswizzle_geom(d, level, layer, &row_bytes, &rows, &slices, &base, &th, &td, &bpb)) return -1;
     if (pitch < row_bytes || base < bl_at) return -1;
-    bl += base - bl_at; uint32_t lb = nvn_tex_level_gobs(d, level) * 64;   // the row as laid out (padded in a sparse texture's tiled levels)
+    bl += base - bl_at; uint32_t lb = nvn_tex_level_gobs(d, level) * 64;   // the row as laid out (padded in the tiled levels of a sparse texture or a packaged layout with width alignment)
     if (lb < row_bytes) lb = row_bytes;
     // Hoist nvn_bl_offset's slice and row terms out of the segment loop. The block height and depth are powers of two,
     // so their division / remainder become shifts and masks. At x = 16*j the block column is j >> 2, and the segment

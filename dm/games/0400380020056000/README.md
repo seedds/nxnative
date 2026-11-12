@@ -9,8 +9,9 @@ A Switch 2 game: update v65536 over the base game, SDK 21.4.4 built for the Swit
 | `mem_alias 0x400000000`, `mem_reserve 0x550000000` | [`game.tsv`](game.tsv) | with the 4.5 GB of an earlier profile the region ran out at the first level: [An SDK 21 Switch 2 game with a 4.5 GB alias region](../../../docs/reference/memory.md#an-sdk-21-switch-2-game-with-a-45-gb-alias-region) |
 | `mem_stack 0x10000000`, `app_pool 0x240000000` | `game.tsv` | as Donkey Kong Bananza, the Switch 2's 9 GB |
 | `sys_resource 0x2000000` | `game.tsv` | the NPDM declares 32 MB, so virtual address memory is on |
-| `render_cond on` | `game.tsv` | agl wraps its clears in render conditions; when those clears ran, the lit scene was wiped: the black dialogue scene ([Report tables that dropped entries](../../../docs/reference/rendering.md#report-tables-that-dropped-entries)) |
 | `pad_layout full` | `game.tsv` | the game asks for most of the controller at once |
+
+Render conditions, which the host evaluates for every game ([Conditional rendering evaluated at replay](../../../docs/reference/rendering.md#conditional-rendering-evaluated-at-replay); until 2026-11-12 the profile key `render_cond`): agl wraps its clears in render conditions; when those clears ran, the lit scene was wiped: the black dialogue scene ([Report tables that dropped entries](../../../docs/reference/rendering.md#report-tables-that-dropped-entries)).
 
 ## Files
 
@@ -69,3 +70,4 @@ The work folder's `run/drive.sh <name> <secs> "<sec> <control line>"…` boots i
 - [A submission past 8,192 queued writes counted as writing everywhere](../../../docs/reference/rendering.md#a-submission-past-8192-queued-writes-counted-as-writing-everywhere): the first boss fight's third stage at 1-2 fps.
 - [Same-pass feedback read from the tile](../../../docs/reference/rendering.md#same-pass-feedback-read-from-the-tile): each ink stamp's one-draw pass and whole-map snapshot ([#1063](https://github.com/seedds/nxnative/issues/1063)).
 - [An upscaler's colour read from its code](../../../docs/reference/rendering.md#an-upscalers-colour-read-from-its-code): the washed-out picture with `DM_UPSCALER=metalfx` ([#1156](https://github.com/seedds/nxnative/issues/1156)).
+- [Unused border corrections retain sample registers](../../../docs/reference/rendering.md#unused-border-corrections-retain-sample-registers): after the first cutscene a 236-draw 1920x1080 pass took 20-21 ms of a 31.6 ms frame on an M1 in handheld, its pixel shaders spilling 592-720 bytes a thread for a correction none of its samplers needs; 9.3 ms and 19.8 ms with the corrections taken out at build time (PR #1203). Open: not measured again with the function constant that landed.

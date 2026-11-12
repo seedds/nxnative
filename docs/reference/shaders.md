@@ -1469,6 +1469,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Star Fox](../../dm/games/0400E88025B1A000/README.md): 1 compute and 2 pixel shaders, none asked for in play so far, so neither instruction has run. Neither opcode is in the shaders of Donkey Kong Bananza, Splatoon Raiders, Mario Tennis Fever or Pokopia.
 - **Form 3, the sample index:** `[RED] … 0x925 form 3 outside a covered pixel's read` for 154 of [PRAGMATA](../../dm/games/0400C76024710000/README.md)'s pixel shaders, at their first instruction. The register indexes the driver's sample position table (`LDC c[0][R + 0x620]`, a byte of x and y nibbles), which is what GLSLC's Maxwell code does with PIXLD.MY_INDEX (numbered 5 there), so form 3 is the index of the sample the fragment runs for: `IoVariable.SampleId`, Metal's `[[sample_id]]`. Check: `PixelCovered.test_form_3_reads_the_sample_index`.
 
+### The fragment's shading-rate size reads 1 x 1
+
+- **Symptom:** a Switch 2 game's water or another full-screen surface draws black (or as a flat dark colour under the fog) while its normals and depth are right; a texture dump of the target shows the colour channel at 0 where the surface is, and building the shader without fast maths changes nothing.
+- **Cause:** S2UR of system register 0x84 (Mesa NAK's `NAK_SV_VARIABLE_RATE`): the fragment's size in pixels, X in bits 8..15 and Y in bits 16..23, which variable rate shading makes 2 or 4. The translator did not know the register and gave 0, the default for an unknown one. Nintendo Switch Sports Resort's sea shaders divide a blend weight by the fragment's area: 0, an infinite weight, and the colour came out NaN, which `blend_zero` (`dm_az`) writes as 0.
+- **Fix:** `SReg.VariableRate` (132, `Decoders/InstDecoders.cs`) reads `0x10100` in `EmitSReg` (`Instructions/InstEmitMove.cs`): the host shades every pixel, so 1 x 1 (chain change).
+- **Found on:** Nintendo Switch Sports Resort (`04008E001F098000`, v65536; no profile yet): 612 of its 11,059 shaders, all pixel shaders, read the register; its title screen's sea was black and draws blue with the change, on the Mac.
+- **Check:** `test_dmsh_ampere_mem.py` (`ShadingRate`, with `DMSH_TEST_XLATE`).
+
 ### VOTEU writes the uniform predicate
 
 - **Symptom:** no wrong picture seen so far. In the MSL, a shader with a 0x886 vote has `if (false)` and `false ? a : b` where a uniform predicate guards a value or a branch, and a lane guard on the same number reads `simd_all` or `simd_any` of its own predicate.

@@ -52,6 +52,11 @@
 // the current bindings; only a shader with such a read has the table
 #define DMSH_CBSIZE_BANK 25
 #define DMSH_CBSIZE_SLOTS 14             // a u32 for each of uniform slots 0 to 13, as four uint4: 64 bytes
+// Buffer image offsets: Metal makes a buffer texture only at an aligned offset of its buffer, and an Apple GPU addresses a view below that alignment from the boundary below
+// its offset, so every access landed that many bytes early. The host binds such an image as a view from that boundary, wider by the elements in between, and gives their count
+// in a table in a bank of its own (Ryujinx Constants.NxBufferImageBiasBank), which the shader adds to each coordinate of the image; only a shader with a buffer image has it
+#define DMSH_TBIAS_BANK 26
+#define DMSH_TBIAS_SLOTS 16              // a u32 for each of a shader's first 16 buffer images, as four uint4: 64 bytes (the image's index: its binding's "tbx")
 // The push call's word before the offset names a block of the stage group; c[24] holds block b at b * DMSH_PUSH_SIZE. Block 0 holds the group's constants. Block 1 + i holds
 // stage i's buffer entries: compute has one stage and reads block 1 where its c0 layout counts it (control +0xaa, in words, right after block 0's +0xa9; the translator maps it
 // to c[24] + DMSH_PUSH_SIZE); graphics stage i reads its block through its own bank (DMSH_NVN2_STAGE_BANK + i), up to the pixel stage's block 5. PRAGMATA pushes 16-byte buffer
@@ -68,6 +73,7 @@
 #define DMSH_KIND_C1 "c1"                // the shader's own constant segment c[1] (its bytes are the json's c1)
 #define DMSH_KIND_DRVCB "drvcb"          // a driver segment, c[bank] (bank 0 or 2): NVN_RB_DRV0 / NVN_RB_DRV2
 #define DMSH_KIND_CBSIZE "cbsize"        // the uniform slots' bound sizes, c[DMSH_CBSIZE_BANK]: NVN_RB_CBSIZE
+#define DMSH_KIND_TBIAS "tbias"          // the buffer images' element offsets, c[DMSH_TBIAS_BANK]: NVN_RB_TBIAS
 #define DMSH_KIND_SUPPORT "support"      // the translator's support buffer
 #define DMSH_KIND_GEOMETRY "geometry"    // one of the geometry lowering's helper buffers, reg = its index (dmsh_geometry.py HELPERS)
 #define DMSH_KIND_SBUF "sbuf"            // storage buffer slot reg, its address in the stage's c0 table; rw = the shader writes it

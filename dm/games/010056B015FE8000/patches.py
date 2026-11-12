@@ -25,6 +25,7 @@ CAPABILITIES = {"3c10ec35c5ef4c3686b4053afb0e58e7": ("DYNAMIC_RESOLUTION",)}
 # purpose, why; blocked or kept: why the gap stays open (cannot close yet, or left open on purpose); checked: what was checked on game files (else a judgement)
 BINDING = [
     {'what': '60 fps intervals and dynamic-resolution constants', 'now': 'build', 'goal': 'game', 'purpose': 'frame rate',
-     'checked': "both releases' mains, where the host's rows for them were found",
-     'why': "the game's own constants; the Asian release's function is the global one's 0x13c0 further on, so one function-matched rule could serve both releases"},
+     'checked': "both releases' mains, where the host's rows for them were found; the global main's sites mapped into ASTRAL CHAIN and Bayonetta 1-3 (2026-11-09)",
+     'why': "the game's own constants; the Asian release's function is the global one's 0x13c0 further on, so one function-matched rule could serve both releases. No PlatinumGames sibling shares the code: none of its sites has an exact match in ASTRAL CHAIN or Bayonetta 1-3 (nso_fnmap, 2026-11-09)",
+     'kept': "1.0.3 (v131072) is the newest update of both releases and likely their last: a function match would serve no other build; the rewriter would also need matched rules that write fixups and declare capabilities, a new mechanism (2026-11-09)"},
 ]

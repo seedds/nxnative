@@ -65,4 +65,4 @@ General host changes first needed here; each applies to every game:
 
 ## Open
 
-- The player-facing [README](../../../README.md) says the games outside its 2D list start in the 3D layout; Balatro starts in Tap (its gallery entry says "played by touch").
+- Resolved: the player-facing [README](../../../README.md) now links to the full games table instead of describing original Switch games' control layouts. Balatro's Tap layout is documented in this note.

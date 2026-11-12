@@ -12,7 +12,7 @@ QUIET = $(if $(findstring -fsanitize,$(SAN)),,2>/dev/null)
 GINC = $(if $(strip $(GAME)),-I../gen/$(GAME) -I../../games/$(GAME),$(error GAME is not set: make GAME=<base game title ID>: $(shell python3 ../../games/game.py list | awk -F'\t' '{printf "%s (%s)  ", $$1, $$3}')))
 $(B)/t_fs $(B)/t_fs_case $(B)/t_fs_commit_list $(B)/t_fs_commit_list_tsan $(B)/t_fs_prefetch: ../romfs_image.h
 GAME_H = ../gen/$(GAME)/game_profile.h
-run: $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_touch $(B)/t_gesture $(B)/t_oe $(B)/t_fs $(B)/t_fs_commit_list $(B)/t_thread_leak $(B)/t_fs_case $(B)/t_audio $(B)/t_output_stream $(B)/t_audio_spsc $(B)/t_swkbd $(B)/t_altstack $(B)/t_condvar $(B)/t_condvar_old $(B)/t_pollwait $(B)/t_clockwait $(B)/t_pctl $(B)/t_sf $(B)/t_time $(B)/t_shared_font $(B)/t_vorbis $(B)/t_vorbis_divides $(B)/t_hid $(B)/t_haptics $(B)/t_haptics_apple $(B)/t_cheats $(B)/t_pad_hid
+run: $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_touch $(B)/t_gesture $(B)/t_oe $(B)/t_fs $(B)/t_fs_commit_list $(B)/t_thread_leak $(B)/t_fs_case $(B)/t_audio $(B)/t_output_stream $(B)/t_audio_spsc $(B)/t_swkbd $(B)/t_altstack $(B)/t_condvar $(B)/t_condvar_old $(B)/t_pollwait $(B)/t_clockwait $(B)/t_pause $(B)/t_pause_stress $(B)/t_pctl $(B)/t_sf $(B)/t_time $(B)/t_shared_font $(B)/t_vorbis $(B)/t_vorbis_divides $(B)/t_hid $(B)/t_haptics $(B)/t_haptics_apple $(B)/t_cheats $(B)/t_pad_hid $(B)/t_switch2
 	$(B)/t_language
 	$(B)/t_heap_size
 	$(B)/t_touch
@@ -42,6 +42,8 @@ run: $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_to
 	$(B)/t_clockwait
 	$(B)/t_preempt
 	$(B)/t_preempt --all-peers
+	$(B)/t_pause
+	$(B)/t_pause_stress --seconds 1
 	$(B)/t_pctl
 	$(B)/t_net_eventfd
 	$(B)/t_sf
@@ -67,7 +69,9 @@ run: $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_to
 	$(B)/t_motion_pro_mac
 	TMPDIR="$(abspath $(B))" $(B)/t_hid
 	$(B)/t_pad_hid
+	$(B)/t_pad_hid_mac
 	$(B)/t_pad_pro
+	$(B)/t_switch2
 	$(B)/t_haptics
 	$(B)/t_haptics_apple
 	TMPDIR="$(abspath $(B))" $(B)/t_cheats $(QUIET)
@@ -119,7 +123,7 @@ cheats: $(B)/t_cheats
 $(GAME_H): FORCE
 	$(MAKE) -C .. game_profile GAME=$(GAME)
 $(B)/t_heap_size: t_heap_size.c ../hle_svc.c ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -fsanitize=undefined -I.. $(GINC) -o $@ t_heap_size.c
+	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -fsanitize=undefined -I.. $(GINC) -o $@ t_heap_size.c -framework CoreFoundation
 .PHONY: heap_size
 heap_size: $(B)/t_heap_size
 	$(B)/t_heap_size
@@ -247,15 +251,17 @@ $(B)/t_home_quit_mac: t_home_quit_mac.m ../home_quit_mac.h | $(B)
 run: $(B)/t_ctrl_prompt
 $(B)/t_ctrl_prompt: t_ctrl_prompt.c ../ctrl_prompt.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -fsanitize=address,undefined -I.. -o $@ t_ctrl_prompt.c
-run: $(B)/t_motion_pro $(B)/t_motion_pro_mac
+run: $(B)/t_motion_pro $(B)/t_motion_pro_mac $(B)/t_pad_hid_mac
 $(B)/t_motion_pro: t_motion_pro.c ../motion_pro.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -fsanitize=address,undefined -o $@ t_motion_pro.c
+$(B)/t_pad_hid_mac: t_pad_hid_mac.m ../pad_hid_mac.h ../pad_hid.h ../pad_pro.h ../motion_pro.h ../dm_input.h | $(B)
+	$(CLANG) -O1 -g -fobjc-arc -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_pad_hid_mac.m -framework Foundation -framework GameController -framework IOKit
 $(B)/t_motion_pro_mac: t_motion_pro_mac.m ../motion_pro_mac.h ../motion_pro.h ../dm_input.h | $(B)
 	$(CLANG) -O1 -g -fobjc-arc -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_motion_pro_mac.m -framework Foundation -framework GameController -framework IOKit
-$(B)/t_hid: t_hid.c ../hle_hid.c ../motion_fusion.h ../hle_haptics.c ../hle_haptics.h ../pad_slots.h ../dm_input.h ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_hid.c ../hle_haptics.c
-$(B)/t_hid_tsan: t_hid.c ../hle_hid.c ../motion_fusion.h ../hle_haptics.c ../hle_haptics.h ../pad_slots.h ../dm_input.h ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -g -fsanitize=thread -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_hid.c ../hle_haptics.c
+$(B)/t_hid: t_hid.c ../hle_hid.c ../motion_fusion.h ../hle_haptics.c ../hle_haptics.h ../pad_slots.h ../dm_input.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_hid.c ../hle_haptics.c ../hle_bigstack.c
+$(B)/t_hid_tsan: t_hid.c ../hle_hid.c ../motion_fusion.h ../hle_haptics.c ../hle_haptics.h ../pad_slots.h ../dm_input.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -fsanitize=thread -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_hid.c ../hle_haptics.c ../hle_bigstack.c
 $(B)/t_haptics: t_haptics.c ../hle_haptics.c ../hle_haptics.h ../dm_input.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -I.. -o $@ t_haptics.c ../hle_haptics.c
 $(B)/t_haptics_apple: t_haptics_apple.m ../haptics_apple.m ../haptics_apple.h ../hle_haptics.c ../hle_haptics.h | $(B)
@@ -274,10 +280,20 @@ $(B)/t_clockwait: t_clockwait.c t_condvar_stub.c ../hle_thread.c ../dm.h $(GAME_
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_clockwait.c t_condvar_stub.c
 $(B)/t_preempt: t_preempt.c t_condvar_stub.c ../hle_thread.c ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_preempt.c t_condvar_stub.c
+# the pause tests supply module_of (the stub's reports no guest code) through DM_TEST_MODULE_OF
+$(B)/t_pause: t_pause.c t_condvar_stub.c ../hle_thread.c ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -DDM_TEST_MODULE_OF -I.. $(GINC) -o $@ t_pause.c t_condvar_stub.c
+$(B)/t_pause_stress: t_pause_stress.c t_condvar_stub.c ../hle_thread.c ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -DDM_TEST_MODULE_OF -I.. $(GINC) -o $@ t_pause_stress.c t_condvar_stub.c
 .PHONY: preempt
 preempt: $(B)/t_preempt
 	$(B)/t_preempt
 	$(B)/t_preempt --all-peers
+# the stop-the-world stress for longer: make pause-stress [PAUSE_STRESS_SECONDS=N] (run does 1 s, where the stale pause showed in the first few dozen of about 3,700 cycles)
+PAUSE_STRESS_SECONDS ?= 30
+.PHONY: pause-stress
+pause-stress: $(B)/t_pause_stress
+	$(B)/t_pause_stress --seconds $(PAUSE_STRESS_SECONDS)
 run: $(B)/t_preempt
 # the Vorbis tests build their own packets and need no game profile (they build without GAME)
 $(B)/t_vorbis: t_vorbis.c ../../third_party/stb_vorbis/stb_vorbis.c | $(B)
@@ -317,7 +333,7 @@ tsan: $(B)/t_audio_spsc_tsan $(B)/t_hid_tsan
 	$(B)/t_audio_spsc_tsan
 	TMPDIR="$(abspath $(B))" $(B)/t_hid_tsan
 
-MEM_FLAGS = -O1 -Wall -Werror -Wno-unused-function -Imemory_profile -I..
+MEM_FLAGS = -O1 -Wall -Werror -Wno-unused-function -Imemory_profile -I.. -framework CoreFoundation
 MEM_DEPS = t_svc_memory.c memory_profile/game_profile.h ../hle_svc.c ../hle_guestthread.c ../hle.h ../dm.h
 $(B)/t_svc_memory: $(MEM_DEPS) | $(B)
 	$(CLANG) $(MEM_FLAGS) -fsanitize=undefined -o $@ t_svc_memory.c
@@ -395,6 +411,8 @@ $(B)/t_pad_hid: t_pad_hid.c ../pad_hid.h ../dm_input.h | $(B)
 run: $(B)/t_pad_pro
 $(B)/t_pad_pro: t_pad_pro.c ../pad_pro.h ../dm_input.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_pad_pro.c
+$(B)/t_switch2: t_switch2.c ../switch2_proto.h ../dm_input.h | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_switch2.c
 
 # Line coverage (../../sanitizers/coverage.mk): make coverage builds every test of run into $(B)/cov with COV_FLAGS, runs them and writes $(B)/cov/coverage.lcov.
 # It measures, it does not test: make -i runs every test even after one fails (the plain run reports that), so the coverage of the others is kept.

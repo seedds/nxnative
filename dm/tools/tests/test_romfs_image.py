@@ -134,7 +134,7 @@ class Images(unittest.TestCase):
         xcrun.write_text('#!/bin/sh\nprintf "%s\\n" "$@" >> "$ROMFS_PUSH_ARGS"\nexit "${ROMFS_PUSH_RC:-0}"\n')
         xcrun.chmod(0o755)
         args_file = self.root / 'copy-args'
-        env = dict(os.environ, PATH=str(bin_dir) + os.pathsep + os.environ['PATH'], ROMFS_PUSH_ARGS=str(args_file))
+        env = dict(os.environ, PATH=str(bin_dir) + os.pathsep + os.environ['PATH'], ROMFS_PUSH_ARGS=str(args_file), ROMFS_PUSH_VIA='devicectl')
         cmd = ['bash', str(REPO / 'scripts/push_romfs.sh'), 'fixture-device', 'fixture.bundle', str(resources)]
         (self.src / 'a').write_bytes(b'old')
         def push(*args): return subprocess.run(cmd + list(args), env=env, capture_output=True, text=True)
@@ -158,6 +158,15 @@ class Images(unittest.TestCase):
         image.pack(self.src, self.dst)
         self.assertTrue(self.valid()); self.assertEqual(self.content('A'), b'upper')
         self.assertEqual(self.content('a'), b'lower')
+
+    def test_dump_tool_listings_are_left_out(self):   # an FTP dump's .listing in every folder (Nintendo Switch Sports Resort's dump): not a game file
+        (self.src / 'Parameter/P').mkdir(parents=True)
+        (self.src / 'Parameter/P/Body00.bgyml').write_bytes(b'b')
+        for d in ('', 'Parameter', 'Parameter/P'): (self.src / d / '.listing').write_bytes(b'-r--r--r-- 1 ftp ftp')
+        (self.src / '.other').write_bytes(b'o')   # another dot file is a game file
+        image.pack(self.src, self.dst)
+        self.assertTrue(self.valid())
+        self.assertEqual(sorted(image.read_index(self.dst)), ['.other', 'Parameter', 'Parameter/P', 'Parameter/P/Body00.bgyml'])
 
     def test_size_consistent_invalid_index_is_rejected(self):
         for raw in (image.HEAD.pack(image.MAGIC, 32, 0, 0),
@@ -184,8 +193,60 @@ class Images(unittest.TestCase):
                 self.dst.write_bytes(raw); self.assertFalse(self.valid())
 
 
+# libimobiledevice's afcclient as push_romfs.sh drives it: one command after the options and "--", files in the app's data container (here a folder),
+# and, as the real one does, exit status 0 even when the command fails (the error goes to stderr); a put does not make missing parent folders, rm needs -r for a
+# folder that is not empty, and rm -r asks on stdin unless -f. AFC_PUT_SHORT cuts a put off halfway; DLC_PUSH_FAIL fails every put into Documents/aoc;
+# AFC_NO_DEVICE finds no device with that UDID (a devicectl identifier, a device name, or one on Wi-Fi only).
+FAKE_AFC = '''#!/usr/bin/env python3
+import json, os, shutil, sys
+from pathlib import Path
+args = sys.argv[1:]
+with open(os.environ['AFC_CALLS'], 'a') as f: f.write(' '.join(args) + '\\n')
+assert args[0] == '-u' and args[2] == '--container' and args[4] == '--', args
+if os.environ.get('AFC_NO_DEVICE'): print(f'ERROR: Device {args[1]} not found!', file=sys.stderr); sys.exit(1)
+cmd = args[5]; flags = ''.join(a[1:] for a in args[6:] if a.startswith('-')); rest = [a for a in args[6:] if not a.startswith('-')]
+root = Path(os.environ['AFC_DEVICE'])
+def at(p): return root / p.lstrip('/')
+def fail(msg): print('Error: ' + msg, file=sys.stderr); sys.exit(0)
+if cmd == 'put':
+    src, dst = Path(rest[0]), at(rest[1])
+    if os.environ.get('DLC_PUSH_FAIL') and rest[1].startswith('/Documents/aoc'): fail('Failed to open remote file')
+    if not dst.parent.is_dir(): fail('Not found (8)')
+    if src.is_dir():
+        if 'r' not in flags: fail(f'{src} is a directory')
+        shutil.copytree(src, dst, dirs_exist_ok=True)
+    else:
+        if dst.exists() and 'f' not in flags: fail('Failed to write into existing file without -f option')
+        data = src.read_bytes(); dst.write_bytes(data[:len(data) // 2] if os.environ.get('AFC_PUT_SHORT') else data)
+elif cmd == 'info':
+    p = at(rest[0])
+    if not p.exists(): fail('Failed to get file info: Not found (8)')
+    print(json.dumps({'st_size': p.stat().st_size, 'st_ifmt': 'S_IFDIR' if p.is_dir() else 'S_IFREG'}, indent=2))
+elif cmd == 'mkdir':
+    p = at(rest[0])
+    if p.exists() or not p.parent.is_dir(): fail('Failed to create directory')
+    p.mkdir()
+elif cmd == 'rm':
+    p = at(rest[0])
+    if not p.exists(): fail('Failed to remove: Not found (8)')
+    if p.is_dir() and 'r' in flags:
+        if 'f' not in flags and sys.stdin.readline().strip() != 'y': fail('cancelled')
+        shutil.rmtree(p)
+    elif p.is_dir():
+        if any(p.iterdir()): fail('Directory not empty (33)')
+        p.rmdir()
+    else: p.unlink()
+elif cmd == 'mv':
+    src, dst = at(rest[0]), at(rest[1])
+    if not src.exists(): fail('Failed to rename: Not found (8)')
+    src.replace(dst)
+else: sys.exit(f'fake afcclient: no command {cmd}')
+'''
+
+
 class DlcTransfers(unittest.TestCase):
-    """Run the push helper against devicectl's directory merge/replacement semantics."""
+    """The DLC set replaces Documents/aoc over AFC, and nothing else in the app's data container: devicectl's --remove-existing-content empties the whole
+    container (CoreDevice 651.32, docs/reference/packing.md), saves included, so the script never passes it."""
 
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix='dlc push '); self.addCleanup(temporary.cleanup)
@@ -193,28 +254,15 @@ class DlcTransfers(unittest.TestCase):
         source = self.root / 'RomFS'; source.mkdir(); (source / 'marker').write_text('base game')
         self.img = self.root / 'RomFS.img'; image.pack(source, self.img)
         self.aoc = self.root / 'add-on content'; self.aoc.mkdir()
-        self.device = self.root / 'device'; self.device.mkdir()
+        self.device = self.root / 'device'; (self.device / 'Documents').mkdir(parents=True)
         self.scratch = self.root / 'scratch'; self.scratch.mkdir()
         bin_dir = self.root / 'bin'; bin_dir.mkdir()
-        xcrun = bin_dir / 'xcrun'
-        xcrun.write_text('''#!/usr/bin/env python3
-import os, shutil, sys
-from pathlib import Path
-args = sys.argv[1:]
-assert args[:4] == ['devicectl', 'device', 'copy', 'to']
-src = Path(args[args.index('--source') + 1])
-dst = Path(os.environ['DLC_PUSH_DEVICE']) / args[args.index('--destination') + 1]
-if dst.name == 'aoc' and os.environ.get('DLC_PUSH_FAIL'): sys.exit(int(os.environ['DLC_PUSH_FAIL']))
-dst.parent.mkdir(parents=True, exist_ok=True)
-if src.is_dir():
-    # devicectl defaults to merging; only an explicit true removes old content.
-    if '--remove-existing-content' in args and args[args.index('--remove-existing-content') + 1] == 'true' and dst.exists(): shutil.rmtree(dst)
-    shutil.copytree(src, dst, dirs_exist_ok=True)
-else: shutil.copyfile(src, dst)
-''')
-        xcrun.chmod(0o755)
-        self.env = dict(os.environ, PATH=str(bin_dir) + os.pathsep + os.environ['PATH'],
-                        DLC_PUSH_DEVICE=str(self.device), TMPDIR=str(self.scratch))
+        (bin_dir / 'afcclient').write_text(FAKE_AFC); (bin_dir / 'afcclient').chmod(0o755)
+        self.xcrun_calls = self.root / 'xcrun-calls'
+        (bin_dir / 'xcrun').write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$XCRUN_CALLS"\n'); (bin_dir / 'xcrun').chmod(0o755)
+        self.env = dict(os.environ, PATH=str(bin_dir) + os.pathsep + os.environ['PATH'], AFC_DEVICE=str(self.device),
+                        AFC_CALLS=str(self.root / 'afc-calls'), XCRUN_CALLS=str(self.xcrun_calls), TMPDIR=str(self.scratch))
+        self.env.pop('ROMFS_PUSH_VIA', None)
 
     def push(self, aoc=None, *, image_only=False):
         resources = self.root / 'resources.env'
@@ -229,10 +277,12 @@ else: shutil.copyfile(src, dst)
         result = self.push(self.aoc); self.assertEqual(result.returncode, 0, result.stderr)
         remote = self.device / 'Documents/aoc'
         self.assertEqual({p.name for p in remote.iterdir()}, {'1.img', '2'})
+        self.assertEqual((remote / '2/marker').read_text(), 'legacy DLC')
         (self.aoc / '1.img').write_text('updated'); shutil.rmtree(self.aoc / '2')
         result = self.push(self.aoc); self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual({p.name for p in remote.iterdir()}, {'1.img'})
         self.assertEqual((remote / '1.img').read_text(), 'updated')
+        self.assertIn('DLC on the phone', result.stdout)
 
     def test_empty_dlc_set_clears_previous_content(self):
         for aoc in ('', None, self.aoc):
@@ -243,6 +293,16 @@ else: shutil.copyfile(src, dst)
                 result = self.push(aoc); self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertTrue(remote.is_dir()); self.assertEqual(list(remote.iterdir()), [])
                 self.assertEqual(list(self.scratch.iterdir()), [])
+
+    def test_dlc_sync_keeps_saves_and_the_rest_of_the_container(self):
+        save = self.device / 'Documents/save/slot_00'; save.parent.mkdir(); save.write_text('progress')
+        prefs = self.device / 'Library/Preferences/app.plist'; prefs.parent.mkdir(parents=True); prefs.write_text('choices')
+        for aoc in ('', self.aoc):
+            with self.subTest(aoc=aoc):
+                (self.aoc / '1.img').write_text('dlc')
+                result = self.push(aoc); self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(save.read_text(), 'progress'); self.assertEqual(prefs.read_text(), 'choices')
+        self.assertFalse(self.xcrun_calls.exists())   # neither the image nor the DLC goes through devicectl
 
     def test_image_only_push_preserves_dlc(self):
         remote = self.device / 'Documents/aoc'; remote.mkdir(parents=True)
@@ -256,14 +316,87 @@ else: shutil.copyfile(src, dst)
         result = self.push(self.root / 'missing')
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('Add-on content unavailable', result.stderr)
-        self.assertEqual(list(self.device.iterdir()), [])
+        self.assertEqual(list((self.device / 'Documents').iterdir()), [])
 
     def test_dlc_transfer_failure_is_reported(self):
-        self.env['DLC_PUSH_FAIL'] = '7'
+        (self.aoc / '1.img').write_text('dlc')
+        self.env['DLC_PUSH_FAIL'] = '1'   # afcclient exits 0 all the same: the script checks the device
         result = self.push(self.aoc)
-        self.assertEqual(result.returncode, 7)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('1.img', result.stderr)
         self.assertNotIn('DLC on the phone', result.stdout)
         self.assertNotIn('game files on the phone', result.stdout)
+
+    def test_devicectl_never_empties_the_container(self):
+        self.env['ROMFS_PUSH_VIA'] = 'devicectl'
+        result = self.push(''); self.assertEqual(result.returncode, 0, result.stderr)   # no DLC in the build: Documents/aoc left as it is
+        (self.aoc / '1.img').write_text('dlc')
+        result = self.push(self.aoc)
+        self.assertNotEqual(result.returncode, 0)   # a DLC set needs afcclient
+        self.assertIn('afcclient', result.stderr)
+        self.assertNotIn('--remove-existing-content', self.xcrun_calls.read_text())
+
+
+class AfcTransfers(unittest.TestCase):
+    """The image goes over AFC (afcclient), which streams it, where devicectl copies the whole file through CoreDeviceService's memory."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix='afc push '); self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        source = self.root / 'RomFS'; source.mkdir(); (source / 'marker').write_text('base game ' * 100)
+        self.img = self.root / 'RomFS.img'; image.pack(source, self.img)
+        self.device = self.root / 'device'; (self.device / 'Documents').mkdir(parents=True)
+        self.bin = self.root / 'bin'; self.bin.mkdir()
+        self.calls = self.root / 'afc-calls'; self.xcrun_calls = self.root / 'xcrun-calls'
+        (self.bin / 'xcrun').write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$XCRUN_CALLS"\n'); (self.bin / 'xcrun').chmod(0o755)
+        self.env = dict(os.environ, PATH=str(self.bin) + os.pathsep + os.environ['PATH'], AFC_DEVICE=str(self.device),
+                        AFC_CALLS=str(self.calls), XCRUN_CALLS=str(self.xcrun_calls))
+        self.env.pop('ROMFS_PUSH_VIA', None)
+
+    def afc(self):
+        (self.bin / 'afcclient').write_text(FAKE_AFC); (self.bin / 'afcclient').chmod(0o755)
+
+    def push(self):
+        return subprocess.run(['bash', str(REPO / 'scripts/push_romfs.sh'), 'fixture-device', 'fixture.bundle', str(self.img)],
+                              env=self.env, capture_output=True, text=True)
+
+    def test_image_goes_over_afc_and_is_renamed_once_complete(self):
+        self.afc(); (self.device / 'Documents/romfs.img').write_bytes(b'an older image')
+        result = self.push(); self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.device / 'Documents/romfs.img').read_bytes(), self.img.read_bytes())
+        self.assertFalse((self.device / 'Documents/romfs.img.part').exists())
+        calls = self.calls.read_text()
+        self.assertIn(f'put -f {self.img} /Documents/romfs.img.part', calls)
+        self.assertIn('mv /Documents/romfs.img.part /Documents/romfs.img', calls)
+        self.assertFalse(self.xcrun_calls.exists())   # devicectl is not used for the image
+        self.assertIn('game files on the phone', result.stdout)
+
+    def test_cut_off_afc_copy_fails_and_never_replaces_the_image(self):
+        self.afc(); old = b'an older image'; (self.device / 'Documents/romfs.img').write_bytes(old)
+        self.env['AFC_PUT_SHORT'] = '1'
+        result = self.push()
+        self.assertNotEqual(result.returncode, 0)   # afcclient itself exits 0: the script checks the size on the device
+        self.assertIn('incomplete', result.stderr)
+        self.assertEqual((self.device / 'Documents/romfs.img').read_bytes(), old)
+        self.assertNotIn('game files on the phone', result.stdout)
+
+    def test_unknown_device_is_named_before_any_copy(self):
+        self.afc(); self.env['AFC_NO_DEVICE'] = '1'
+        result = self.push()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('UDID', result.stderr); self.assertNotIn('incomplete', result.stderr)
+        self.assertNotIn(' put ', self.calls.read_text())
+
+    def test_without_afcclient_a_large_image_is_not_copied_through_devicectl(self):
+        self.env['PATH'] = str(self.bin) + os.pathsep + '/usr/bin:/bin'   # no afcclient; sysctl is the fake below
+        (self.bin / 'sysctl').write_text('#!/bin/sh\necho 64\n'); (self.bin / 'sysctl').chmod(0o755)   # a "Mac" with 64 bytes of memory
+        result = self.push()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('afcclient', result.stderr)
+        self.assertFalse(self.xcrun_calls.exists())
+        self.env['ROMFS_PUSH_VIA'] = 'devicectl'   # chosen explicitly, it goes through devicectl
+        result = self.push(); self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Documents/romfs.img', self.xcrun_calls.read_text())
 
 
 if __name__ == '__main__': unittest.main()

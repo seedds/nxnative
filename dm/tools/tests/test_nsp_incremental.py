@@ -199,6 +199,8 @@ class DeriveProfile(Base):
         (self.src / 'patches.py').write_text(f'FRAME_STEP = {{"{BID}": 1}}\n'); self.derive()
         nsp.derive_profile(game.Game(self.src), self.pdir, 'v65536', self.ex, ['main'], shader_only=True)   # shader tables only: the settings stay
         self.assertEqual(game.Game(self.pdir).get('fps_target'), '60')
+        (self.src / 'patches.py').write_text(f'FRAME_STEP = {{"{BID}": 1}}\nMATCH_FRAME_STEP = {{"main": []}}\n'); self.derive()   # stubs placed by function may serve it
+        self.assertEqual(game.Game(self.pdir).get('fps_target'), '60')
 
     def test_missing_corrupt_and_duplicate_override_rows_derive_again(self):
         for change in ('missing', 'corrupt', 'override', 'indented override', 'truncated'):
@@ -413,6 +415,50 @@ class DeriveProfile(Base):
         self.assertFalse(key.exists())
         self.derive()
         self.assertFalse(game.Game(self.pdir).values('mem_alias'))
+
+
+class ProvisionalModules(Base):
+    """provisional_modules: the subsdks the NROs import from go into modules, and the build row of this ExeFS's main names every module of modules the ExeFS has, which the host loads
+    (game.py build_modules). Mario Golf: Super Rush's movie module went into modules alone and stayed unloaded (PR #2215)"""
+    SUB = 'ee' * 16
+
+    def setUp(self):
+        super().setUp()
+        self.ex = self.tmp / 'extract/v0/ExeFS'; nso(self.ex / 'main', BID); nso(self.ex / 'sdk', BID2); nso(self.ex / 'subsdk0', self.SUB)
+        self.add = {}
+        cm = mock.patch.object(nsp.pg, 'nro_modules', lambda exefs, nros, modules: {m: k for m, k in self.add.items() if m not in modules})
+        cm.__enter__(); self.addCleanup(cm.__exit__, None, None, None)
+
+    def profile(self, modules, *rows):
+        (self.src / 'game.tsv').write_text('\n'.join([f'title_id\t{TID:016X}', 'name\tTest Game', f'modules\t{modules}', *rows]) + '\n')
+        return game.Game(self.src)
+
+    def test_a_module_the_nros_import_from_goes_into_modules_and_the_row(self):
+        self.add = {'subsdk0': 'NintendoSDK_movie'}
+        g = nsp.provisional_modules(self.profile('main sdk', f'build\tv0\t4.0.0\tmain={BID}\tsdk={BID2}'), self.ex, {'a.nro': 'x'})
+        self.assertEqual(g.words('modules'), ['main', 'subsdk0', 'sdk'])
+        self.assertEqual(g.build_modules()[BID], ['main', 'subsdk0', 'sdk'])
+        self.assertEqual(g.builds()['v0']['subsdk0'], self.SUB)
+
+    def test_a_profile_written_before_gets_its_row_completed(self):   # modules already lists subsdk0, the row does not: nothing is added, the row is repaired
+        g = nsp.provisional_modules(self.profile('main subsdk0 sdk', f'build\tv0\t4.0.0\tmain={BID}\tsdk={BID2}'), self.ex, {'a.nro': 'x'})
+        self.assertEqual(g.build_modules()[BID], ['main', 'subsdk0', 'sdk'])
+        g = nsp.provisional_modules(self.profile('main subsdk0 sdk', f'build\tv0\t4.0.0\tmain={BID}\tsdk={BID2}'), self.ex, {})   # also with no NROs
+        self.assertEqual(g.build_modules()[BID], ['main', 'subsdk0', 'sdk'])
+
+    def test_another_versions_row_is_left_as_it_is(self):   # a provisional profile is reused for the versions packed from its folder
+        other = f'build\tv65536\t4.1.0\tmain={"77" * 16}\tsdk={BID2}'
+        self.add = {'subsdk0': 'NintendoSDK_movie'}
+        g = nsp.provisional_modules(self.profile('main sdk', other, f'build\tv0\t4.0.0\tmain={BID}\tsdk={BID2}'), self.ex, {'a.nro': 'x'})
+        self.assertNotIn('subsdk0', g.builds()['v65536'])
+        self.assertEqual(g.builds()['v0']['subsdk0'], self.SUB)
+
+    def test_a_complete_profile_is_not_written(self):   # subsdk0 is in the ExeFS but not in modules: it stays out, and the file is not touched
+        self.profile('main sdk', f'build\tv0\t4.0.0\tmain={BID}\tsdk={BID2}'); p = self.src / 'game.tsv'
+        os.utime(p, ns=(10**18, 10**18))
+        g = nsp.provisional_modules(game.Game(self.src), self.ex, {'a.nro': 'x'})
+        self.assertEqual(p.stat().st_mtime_ns, 10**18)
+        self.assertEqual(g.build_modules()[BID], ['main', 'sdk'])
 
 
 class DlcOnlyShaders(Base):

@@ -320,6 +320,8 @@ namespace Ryujinx.Graphics.Shader.Translation
                 funcs[i] = new Function(cfg.Blocks, $"fun{i}", false, inArgumentsCount, outArgumentsCount);
             }
 
+            resourceManager.UnifyArrayTypes(funcs);   // nxnative
+
             return Generate(
                 funcs,
                 AttributeUsage,
@@ -396,6 +398,8 @@ namespace Ryujinx.Graphics.Shader.Translation
         private ResourceManager CreateResourceManager(bool vertexAsCompute)
         {
             ResourceManager resourceManager = new(Definitions.Stage, GpuAccessor, GetResourceReservations());
+
+            resourceManager.UniformBounds = Options.Flags.HasFlag(TranslationFlags.MetalUniformBounds);   // nxnative: before any uniform slot gets its binding
 
             if (IsTransformFeedbackEmulated)
             {

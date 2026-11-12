@@ -570,8 +570,9 @@ VKB(vkCreateImage, VkResult, VkDevice d, const VkImageCreateInfo *ci, const VkAl
         MTLTextureDescriptor *td = [MTLTextureDescriptor new];
         td.pixelFormat = f->pf; td.width = ci->extent.width; td.height = umax(1, ci->extent.height); td.depth = umax(1, ci->extent.depth);
         td.mipmapLevelCount = umax(1, ci->mipLevels); td.sampleCount = samples;
+        // A 1D image is a one-row 2D (array) texture, as in the NVN layer and in MoltenVK: Metal's 1D texture is no render target, has one level and no depth format, all of which
+        // Vulkan's 1D image allows (Hades draws into a 512x1 colour target), and vk_shaders.py translates 1D images as texture2d (spirv-cross --msl-texture-1d-as-2d)
         if (ci->imageType == VK_IMAGE_TYPE_3D) td.textureType = MTLTextureType3D;
-        else if (ci->imageType == VK_IMAGE_TYPE_1D) td.textureType = layers > 1 ? MTLTextureType1DArray : MTLTextureType1D;
         else if (samples > 1) td.textureType = layers > 1 ? MTLTextureType2DMultisampleArray : MTLTextureType2DMultisample;
         else if (cube) td.textureType = layers > 6 ? MTLTextureTypeCubeArray : MTLTextureTypeCube;
         else td.textureType = layers > 1 ? MTLTextureType2DArray : MTLTextureType2D;
@@ -658,8 +659,7 @@ VKB(vkCreateImageView, VkResult, VkDevice d, const VkImageViewCreateInfo *ci, co
     uint32_t ly = r->layerCount == VK_REMAINING_ARRAY_LAYERS ? im->layers - r->baseArrayLayer : r->layerCount;
     MTLTextureType tt;
     switch (ci->viewType) {
-        case VK_IMAGE_VIEW_TYPE_1D: tt = MTLTextureType1D; break;
-        case VK_IMAGE_VIEW_TYPE_1D_ARRAY: tt = MTLTextureType1DArray; break;
+        case VK_IMAGE_VIEW_TYPE_1D_ARRAY: tt = MTLTextureType2DArray; break;   // a 1D image is a one-row 2D texture (vkCreateImage); a 1D view takes the 2D default below
         case VK_IMAGE_VIEW_TYPE_3D: tt = MTLTextureType3D; break;
         case VK_IMAGE_VIEW_TYPE_CUBE: tt = MTLTextureTypeCube; break;
         case VK_IMAGE_VIEW_TYPE_CUBE_ARRAY: tt = MTLTextureTypeCubeArray; break;
@@ -802,6 +802,13 @@ static void desc_write(desc_t *e, const lbind *lb, VkDescriptorType t, const VkD
         default: RED1("descriptor type %d not implemented", t); break;
     }
 }
+// A copy takes the source descriptor whole, but a destination binding with immutable samplers keeps its own sampler, as a write does: Vulkan's updates (copies too)
+// change only the image of a combined image sampler there, and a sampler-only copy into one is not allowed. A source's immutable sampler is part of what it copies
+static void desc_copy(desc_t *e, const lbind *lb, const desc_t *s) {
+    id<MTLSamplerState> keep = e->smp;
+    *e = *s;
+    if (lb->imm) e->smp = keep;
+}
 VK(vkUpdateDescriptorSets, void, VkDevice d, uint32_t nw, const VkWriteDescriptorSet *w, uint32_t nc, const VkCopyDescriptorSet *c) {
     (void)d;
     for (uint32_t i = 0; i < nw; i++)
@@ -813,7 +820,7 @@ VK(vkUpdateDescriptorSets, void, VkDevice d, uint32_t nw, const VkWriteDescripto
     for (uint32_t i = 0; i < nc; i++)
         for (uint32_t j = 0; j < c[i].descriptorCount; j++) {
             const lbind *la, *lb; desc_t *s = set_elem(c[i].srcSet, c[i].srcBinding, c[i].srcArrayElement + j, &la), *t = set_elem(c[i].dstSet, c[i].dstBinding, c[i].dstArrayElement + j, &lb);
-            if (s && t) *t = *s;
+            if (s && t) desc_copy(t, lb, s);
         }
 }
 VK(vkCreateDescriptorUpdateTemplate, VkResult, VkDevice d, const VkDescriptorUpdateTemplateCreateInfo *ci, const VkAllocationCallbacks *a, VkDescriptorUpdateTemplate *out) {
@@ -1250,7 +1257,12 @@ static void resume_rp(rs_t *s) {
     s->applied = NULL; s->vp_dirty = s->sc_dirty = 1;
     occ_start(s);
 }
-static MTLLoadAction load_a(VkAttachmentLoadOp o) { return o == VK_ATTACHMENT_LOAD_OP_CLEAR ? MTLLoadActionClear : o == VK_ATTACHMENT_LOAD_OP_LOAD ? MTLLoadActionLoad : MTLLoadActionDontCare; }
+// An attachment opened with LOAD_OP_DONT_CARE is loaded, colour, depth and stencil alike: Vulkan leaves its contents undefined, the Switch's driver does no colour discard
+// at render-pass begin or end (the macro it runs there is a no-op) and for depth and stencil only drops the ZCULL hints, so they survive there, and games read them.
+// Re:ZERO's pfx pass blends its effects layer over the copy the pass before wrote into the same image, both opened with DONT_CARE; a DontCare load starts Apple's tiles
+// empty, and the 3D world came out black. Its particle pass reopens the half-res depth with DONT_CARE and STORE, draws nothing, and the pfx pass samples that depth: a
+// DontCare load stores whatever the tiles held (t_vk_dontcare; docs/reference/rendering.md, "Attachments opened with LOAD_OP_DONT_CARE")
+static MTLLoadAction load_a(VkAttachmentLoadOp o) { return o == VK_ATTACHMENT_LOAD_OP_CLEAR ? MTLLoadActionClear : MTLLoadActionLoad; }
 static MTLStoreAction store_a(VkAttachmentStoreOp o) { return o == VK_ATTACHMENT_STORE_OP_DONT_CARE ? MTLStoreActionDontCare : MTLStoreActionStore; }
 static void begin_rp(rs_t *s, const c_brp *c) {
     end_blit(s);

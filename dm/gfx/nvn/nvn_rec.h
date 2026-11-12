@@ -150,11 +150,11 @@ static void rec_exec(const rec_t *r) {
     case RO_COMMIT: case RO_COMMIT_REAL: {
         if (r->op == RO_COMMIT) ubc_wait(a[2]);   // the uniform shadows this command buffer reads
         id<MTL4CommandBuffer> buffers[] = {r->op == RO_COMMIT ? g_rx_cb : rec_id(a[1])}; MTL4CommitOptions *o = rec_id(a[0]);
-        pthread_mutex_lock(&g_res_mu);
+        pthread_mutex_lock(&g_res_commit_mu);   // apart from the residency set commit, as the present snapshot queue commit
         MTL4CommitOptions *flow_options = rec_flow_options(o); double flow_submit = nvn_flow_begin();
         if (flow_options) [g_q4 commit:buffers count:1 options:flow_options]; else [g_q4 commit:buffers count:1];
         if (flow_submit) nvn_flow_event("queue submit", UINT64_MAX, 0, flow_submit, nvn_flow_clock());
-        pthread_mutex_unlock(&g_res_mu);
+        pthread_mutex_unlock(&g_res_commit_mu);
         if (r->op == RO_COMMIT) g_rx_cb = nil;
         break; }
     case RO_SIGNAL: [g_q4 signalEvent:rec_id(a[0]) value:a[1]]; break;

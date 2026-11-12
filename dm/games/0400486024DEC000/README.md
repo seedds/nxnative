@@ -139,6 +139,8 @@ From an empty save: at about 45 s `A` (title), `A` (New Game), then the movie. F
 
 ## Found on this game
 
+- [Residency changes waiting for a slow commit](../../../docs/reference/memory.md#residency-changes-can-wait-for-a-slow-commit): queued allocation changes preserve HDR/FI and the texture-cache lifetime checks. The M4 Pro contention fixture falls from 112.41 to 0.74 ms for 200 operations while a commit lock is held for 100 ms. A copied-save forest/dialogue run passes HDR native-copy fidelity and interpolation; this is not a measured gameplay speedup or sustained-120 result.
+
 - [Private spatial MetalFX output](../../../docs/reference/rendering.md#spatial-metalfx-output-must-use-private-storage): the M4 Pro drawable is managed, so final scaling now uses a legal private output and exact GPU copy. The actual game and 27 validation checks pass; rare presentation gaps, HDR and object-motion validation remain open.
 
 - [Finalized texture serials kept while used](../../../docs/reference/nvn-objects.md#dead-texture-serials-kept-in-a-ghost-table): backport of upstream `034e91a8` into this branch’s monolithic owner. The former 512-entry ring could evict an active larger working set. The deterministic 1,024-object regression loses 409,600 lookups before the fix and none after it. Real long-session performance remains to be measured.

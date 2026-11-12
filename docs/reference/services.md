@@ -279,6 +279,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** a game whose `main` imports `MountSaveData` too gets its device save as `<DM_SAVE>_device`, a transaction of its own (`hle_fs.c`); of the games on hand only this one imports both, so Animal Crossing's islands stay where they are.
 - **Found on:** [Mario Kart 8 Deluxe](../../dm/games/0100152000022000/README.md) (4.0.0, SDK 4.4.0; one boot).
 
+### The Mii editor appends a default Mii
+
+- **Symptom:** Golf Adventure returns to its save slots at every press of the first button; the log shows `mii: AppendMii (the host has no Mii editor: cancelled)`.
+- **Cause:** a game that needs a Mii of the console's own and finds the database empty opens the editor with `nn::mii::AppendMii` to make one; with the editor cancelled (0xE7E) it cannot go on. The host has no editor.
+- **Fix:** `AppendMii` returns success with index 0 and adds one default Mii to the console's database for the rest of the run (`g_mii_made` in `hle_mii.c`): `Database::GetCount` and `Get` with the database source flag (1) then return it, ahead of the six defaults, and `GetIndex` finds it by its create ID. It is the default Mii 0 with favourite colour 0; a game keeps the CharInfo it chose in its own save, so the next boot finds the Mii again. `DM_MII_APPEND=0` cancels the editor as before.
+- **Found on:** Mario Golf: Super Rush (`0100C9C00E25C000`) 4.0.0, Golf Adventure (GitHub issue #814); the game has no profile or note yet.
+- **Note:** the Mii is the same for every player and cannot be edited; the heads are drawn by the stand-in of [System data stand-in for the MiiModel archive](#system-data-stand-in-for-the-miimodel-archive).
+
 ### System data stand-in for the MiiModel archive
 
 - **Symptom:** abort in `fs::detail::GetFileSystemProxyServiceObject` under `fs::QueryMountSystemDataCacheSize` (`main+0x8f23bc`).
@@ -899,7 +907,7 @@ Most service calls can be found before they crash, before the first boot or the 
 
 - **Symptom:** `[RED] sf: the game connects to service mii:e … mii:u itself`, then an abort.
 - **Cause:** `nn::mii::Database` keeps an `IDatabaseService` of the mii service at +0 (`Database::Initialize`, `sdk+0x1c5664`), and `AppendMii` / `ShowMiiEdit` start the MiiEdit applet.
-- **Fix:** `hle_mii.c` takes over the public methods: a console with no Mii of its own (an empty database: no index, nothing to update) that still has the six default Miis every console has. A CharInfo the host builds is the default Mii's parameters with Switch common colours, a create ID with version 4 and variant bits (fixed per default Mii, so a saved choice finds the same Mii; fresh for `BuildRandom`, which the title's demo race calls for 12 racers) and the nickname "no name"; every field is within `CharInfoRaw::Verify`'s ranges (`sdk+0x1b68c8`). The Mii editor is cancelled (0xE7E, which `ShowMiiEdit` itself treats as success).
+- **Fix:** `hle_mii.c` takes over the public methods: a console with no Mii of its own (an empty database: no index, nothing to update) that still has the six default Miis every console has. A CharInfo the host builds is the default Mii's parameters with Switch common colours, a create ID with version 4 and variant bits (fixed per default Mii, so a saved choice finds the same Mii; fresh for `BuildRandom`, which the title's demo race calls for 12 racers) and the nickname "no name"; every field is within `CharInfoRaw::Verify`'s ranges (`sdk+0x1b68c8`). `ShowMiiEdit` closes at once (0xE7E, which it treats as success itself); `AppendMii` is [answered separately](#the-mii-editor-appends-a-default-mii).
 - **Found on:** [Mario Kart 8 Deluxe](../../dm/games/0100152000022000/README.md) (4.0.0, SDK 4.4.0; one boot). The game asks for the default Miis with `Get(…, 6, SourceFlag 2)` and never reads the count (`main+0x81e954`): its boot-time list of Mii icons (`main+0x419dc8`) builds a head model for each of the six, and zeroed entries failed the model's `CharInfoAccessor::IsValid` (`CharModel::Initialize` returned 0xd67e, `main+0x8f15b0`) and crashed at `main+0x8f152c`.
 - **Note:** the heads' model data is a stand-in with every part empty ([System data stand-in for the MiiModel archive](#system-data-stand-in-for-the-miimodel-archive)).
 

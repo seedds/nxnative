@@ -964,6 +964,40 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** `Poll` and `Select` with nothing to wait on (no descriptors, or only negative ones, which POSIX ignores) now wait out their timeout and return 0, in every mangling the host takes over, including SDK 4's `Select(int, fd_set*, …, timeval*)`; an endless timeout returns 0 after 100 ms, since a thread inside a host hook pauses for IL2CPP's collector only once the hook returns (`hle_net.c`, `dm_guest_sleep_ns` in `hle_thread.c`).
 - **Found on:** [DARK SOULS: REMASTERED](../../dm/games/01004AB00A260000/README.md) (SDK 4.5.0; one boot). Guest CPU fell from 1,030 to 60 ms per second.
 
+### Real socket sends and interrupted polls retain their errors
+
+- **Symptom:** with `DM_NET=1`, an oversized broadcast datagram reports success although neither the broadcast nor its peer copies were sent; an interrupted `Poll` returns -1 but `GetLastError` reports 0.
+- **Cause:** broadcast replication discarded the peer sends' results and replaced any initial failure with the requested byte count. The live `Poll` path returned the host result without saving its error.
+- **Fix:** a successful original send or peer copy establishes success; if every send fails, keep an error. Save `Poll`'s error on failure and clear the previous error on success (`hle_net.c`).
+- **Found on:** the synthetic socket regression test, without game files.
+- **Check:** `t_net` sends a datagram beyond IPv4 UDP's payload limit and interrupts a socket poll with `SIGUSR1` on the polling thread; both return their actual error, and a subsequent successful poll clears it. The ordinary loopback and broadcast-delivery checks still pass.
+
+### Socket address outputs respect the caller's capacity
+
+- **Symptom:** with `DM_NET=1`, `RecvFrom` overwrites bytes beyond a short source-address buffer; `Accept` and `GetSockName` leave short buffers and their lengths unchanged.
+- **Cause:** the host-to-guest conversion always copied 16 bytes, while the other callers skipped conversion unless the entire address fit. `Accept` also discarded the output length.
+- **Fix:** copy only the supplied capacity and report the full 16-byte address length, including when the buffer is truncated (`hle_net.c`).
+- **Found on:** the synthetic socket regression test, without game files.
+- **Check:** `t_net` supplies four-byte address capacities to UDP receive, socket-name lookup and TCP accept, checking the returned length and the untouched bytes beyond each capacity.
+
+### A guest socket address is BSD: `sin_len`, then the family
+
+- **Symptom:** with `DM_NET=1`, every `Bind`, `Connect` and `SendTo` fails with EAFNOSUPPORT, and the game reports a network fault: Mario Kart 8 Deluxe shows "A communication error has occurred." on entering LAN Play, after all four of its `Bind` calls fail.
+- **Cause:** Horizon's `SockAddrIn` is the BSD one, `{u8 sin_len, u8 sin_family, u16 port, u32 address, u8 zero[8]}` (Atmosphere's `socket_types.hpp`), and a game fills it as `{16, 2, …}`. The host read a u16 family at offset 0, so `{16, 2}` was 0x0210 and not AF_INET. Going back it wrote `{2, 0}`, which the game reads as length 2 and family 0, in `Accept`, `GetSockName`, `GetPeerName` and `RecvFrom`. `t_net` built its addresses the same way, so it passed.
+- **Fix:** the family is byte 1 going in, and an address goes back as `{16, 2, port, address}` (`sk_addr_ok`, `sk_guest_addr` in `hle_net.c`). The game's `sin_len` is not relied on.
+- **Found on:** [Mario Kart 8 Deluxe](../../dm/games/0100152000022000/README.md) 4.0.1 (SDK 4.4.0) in LAN Play, two instances on one Mac (Apple M5 Max, macOS 27.2), reported by CatPawPrint on PR #565 with the cause. With the family read from byte 1 the game bound UDP 30000, 40000 and 49152 and opened the LAN lobby; with [the error numbers](#socket-error-numbers-are-horizons-not-the-hosts) changed as well, the two instances found each other's room, joined, voted and raced. That run was the reporter's build with their own two changes; no game was run on this one.
+- **Check:** `t_net` sends `{16, 2, …}` to `Bind`, `Connect` and `SendTo` and expects `{16, 2, …}` with the right port and address from `GetSockName`, `GetPeerName`, `RecvFrom` and `Accept`, at full and at four-byte capacity; an address with family byte 0 is refused. Without the fix its first `Bind` fails.
+- **Open:** a room outside the game's own /24 is not listed. `nifm` reports the host's real address with a 255.255.255.0 mask (`dm_net_ipconfig`), and addresses reach the game untranslated, so two peers in different subnets, as on a tailnet, receive each other's search replies (`DM_NET_PEERS`) and the game ignores them (the same report: 1361-byte replies on UDP 30000 arrived, no room appeared; reporting one shared virtual subnet to both and translating addresses made it appear). Not addressed here. A run between two devices is also open.
+
+### Socket error numbers are Horizon's, not the host's
+
+- **Symptom:** with `DM_NET=1`, a game takes an ordinary socket result as a fault: an empty non-blocking `RecvFrom` (EAGAIN) goes to its error branch on every poll, hundreds of times a second in Mario Kart 8 Deluxe's LAN lobby, and a connect in progress or already made reads as a failure.
+- **Cause:** `GetLastErrno` and `GetLastError` return Horizon's error numbers, which are Linux's (Atmosphere's `socket_errno.hpp`: EAGAIN 11, EMSGSIZE 90, ENOPROTOOPT 92, EAFNOSUPPORT 97, ENETDOWN 100, EISCONN 106, EINPROGRESS 115). The host stored its own `errno`, and Darwin's table differs from 35 up and at 11: EAGAIN is 35, EINPROGRESS 36, EISCONN 56, ENETDOWN 50. The game compares the result of `GetLastErrno` with 100, 11, 115 and 106 at 42 call sites (`cmp w0, #0x64`, `cmp w0, #0xb` at `main+0x9d5484`, from the report's disassembly).
+- **Fix:** `sk_errno` (`hle_net.c`) maps the host's `errno` to Horizon's number where each real socket call captures it, so the kept value is always the game's (`nnsocketSetLastErrno` stores the game's own number unchanged). The host's own two refusals, a family or an option level that is not wired, use 97 and 92. An `errno` with no row is reported as EIO (5) with one `[RED] net: host errno … has no Horizon number` line.
+- **Found on:** [Mario Kart 8 Deluxe](../../dm/games/0100152000022000/README.md) 4.0.1 (SDK 4.4.0) in LAN Play, reported by CatPawPrint on PR #565 from the game's disassembly; their run with both changes of this section's two entries found the room, joined and raced, and they did not run with only this one left out. No game was run on this build.
+- **Check:** `t_net` reads `GetLastErrno` after an empty non-blocking `RecvFrom` (11), an oversized datagram (90), a refused address and an unwired family (97), an unwired option level (92), a second `Connect` on a connected socket (106) and a `Connect` to a closed port (111), and checks the table's rows the game compares with. With the host's numbers stored, seven of those checks fail: the calls report 35, 40, 47, 42, 56 and 61.
+- **Open:** the offline path's own constants in the same file, `SK_ENETDOWN` 50 and `SK_EAGAIN` 35, are host numbers as well (Horizon's are 100 and 11). They are what every offline game has been brought up with, so they are unchanged here. With `DM_NET=1` they still reach a game from name resolution (cut, ENETDOWN) and from an empty non-blocking `EventFdRead`.
+
 ## Settings, languages and fonts
 
 ### Language codes

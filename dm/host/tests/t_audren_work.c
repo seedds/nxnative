@@ -193,7 +193,8 @@ int main(void) {
     // The output device notification: a second acquire is refused until a release, which destroys the event as the SDK's does (Nintendo Switch Sports Resort, main+0x3af119c)
     h_ad_NotifyRelease21(notify_event);   // never acquired: nothing to destroy
     assert(notify_destroys == 0);
-    assert(h_ad_Notify21(notify_event) == RES_OK && h_ad_Notify21(notify_event) == 0x499 && notify_binds == 1);
+    assert(h_ad_Notify21(notify_event) == RES_OK);
+    assert(h_ad_Notify21(notify_event) == 0x499 && notify_binds == 1);   // the second acquire, before a release, is refused
     h_ad_NotifyRelease21(notify_event);
     assert(notify_destroys == 1);
     assert(h_ad_Notify21(notify_event) == RES_OK && notify_binds == 2);

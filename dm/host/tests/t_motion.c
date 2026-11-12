@@ -106,7 +106,8 @@ static void mapping_and_precision(void) {
 // The rest offset learner (motion_rest): a controller held still with a gyro offset learns it from two agreeing one-second windows and takes it off, ramped in; moving, a slow
 // steady turn past 2 deg/s, or a later window far from the offset in use learns nothing; a break drops a pending window
 static int feed(motion_rest *r, const float a[3], const float w[3], double t0, double secs, double step) {   // returns the samples fed
-    int n = 0; for (double t = t0; t < t0 + secs; t += step, n++) motion_rest_update(r, a, w, t);
+    int n = 0;   // an integer sample index, the time from it: a double stepped by `step` drifts from the sample count
+    for (; n * step < secs; n++) motion_rest_update(r, a, w, t0 + n * step);
     return n;
 }
 static void rest_checks(void) {

@@ -284,7 +284,8 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Symptom:** some owned DLC is missing, and `aoc: reporting` stops at 64 add-on contents.
 - **Cause:** `hle_misc.c` stored only 64 indices and stopped reading `DM_AOC_DIR` when that array filled, before sorting. The omitted indices depended on directory order; its 256-byte log buffer also truncated longer lists.
 - **Fix:** the shared array holds 2000 indices, covering the scanner's existing accepted range (1..2000), and a static buffer holds the complete index log without increasing guest-stack use. Folder and `.img` discovery, sorting, deduplication, pagination and `DM_AOC_OWNED=0` retain their behavior. This applies to every game using the add-on content hooks.
-- **Open:** the existing 1..2000 acceptance range is retained; it is not established here as Horizon's full legal range. More than 2000 accepted folder/image entries can still fill the array before deduplication, even when their unique indices fit.
+- **Resolved:** more than 2000 accepted folder/image entries no longer fill the array before deduplication: duplicates are dropped as `readdir` returns them (a seen-set over 1..2000), so every unique index fits.
+- **Open:** the existing 1..2000 acceptance range is retained; it is not established here as Horizon's full legal range.
 - **Found on:** [Super Smash Bros. Ultimate](../../dm/games/01006A800016E000/README.md) (13.0.5, 99 DLC licences; PR #441).
 
 ### Add-on content mount cache sized as RomFS working memory
@@ -864,7 +865,7 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Symptom:** `[RED] sf: the game connects to service bsd:u itself, which the host does not serve` (and bsd:s, bsd:a) at the game's first socket call, then the game's own abort: Star Fox's `vsocket.nintendo.cpp:148` logs `socket: 4` and stops. With only the connection cut, the game's HTTP thread aborted a few seconds in: its event loop's `poll` returned -1 with errno 14 (EFAULT), and the loop tolerates only EINTR (`main+0xbe2efc4`).
 - **Cause:** SDK 21 inlines `nn::socket::Initialize(const Config &)` into the game and connects to the bsd services from `nn::socket::internal::Initialize(int)`, past the host's cut. nnmusl's `poll` then has no socket state and fails. Its socket functions also come in overloads with plain `sockaddr`, `ShutdownMethod`, `Read` / `Write`, a `GetHostEntByName(const char *)` without options and `SetAllocator(MemoryResource *)`, and `nifm::GetCurrentIpConfig` takes IPv4 and IPv6 configurations with their counts.
 - **Fix:** `internal::Initialize` is cut as the plain `Initialize` is, the C library's `poll` goes to the host's `Poll`, the overloads fail as the others do (`hle_net.c`), and `GetCurrentIpConfig` reports no configuration (`hle_offline.c`). `Poll` no longer fails on a descriptor the host never made, which only a garbage value can be: it reports nothing ready at the timeout, as a console's does for a socket with nothing to say. The game logs `socket: No error information` and goes on offline.
-- **Open:** the host refuses `nn::socket::EventFd`, so the HTTP thread polls without a wake-up, and with a garbage descriptor beside it. Harmless offline.
+- **Open:** written when the host refused `nn::socket::EventFd`, so the HTTP thread polled without a wake-up, with a garbage descriptor beside it. The host has made real event descriptors since ([`EventFd` needs no network](#eventfd-needs-no-network)); this game has not been run again to see its HTTP thread wait on one.
 - **Found on:** [Star Fox](../../dm/games/0400E88025B1A000/README.md).
 
 ### Bluetooth LE at boot

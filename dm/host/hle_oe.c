@@ -137,16 +137,28 @@ HLE_FORCE("_ZN2nn2oe21TryPopLaunchParameterEPmPvm", "launch parameter: what the 
         if (out) *out = got;
         return 1;
     }
-    uint8_t p[256]; size_t len = 0; char spec[512]; strlcpy(spec, DM_GAME_LAUNCH_PARAM, sizeof spec);
-    for (char *t = strtok(spec, " "); t && len < sizeof p - 8; t = strtok(NULL, " ")) {
-        if (!strcmp(t, "lang8")) { uint64_t v = h_oe_GetLang(); memcpy(p + len, &v, 8); len += 8; }
-        else if (!strncmp(t, "f32:", 4)) { float v = strtof(t + 4, NULL); memcpy(p + len, &v, 4); len += 4; }
-        else if (!strncmp(t, "u32:", 4)) { uint32_t u = (uint32_t)strtoul(t + 4, NULL, 0); memcpy(p + len, &u, 4); len += 4; }
-        else if (!strncmp(t, "hex:", 4)) for (const char *h = t + 4; h[0] && h[1] && len < sizeof p; h += 2) { unsigned b; sscanf(h, "%2x", &b); p[len++] = (uint8_t)b; }
-        else LOG("[RED] launch_param: field %s not understood", t);
+    // Each field is checked whole before it is written (game.py checks the profile's too): an odd or non-hex digit count, a number with trailing text, or a field past the
+    // 256 bytes is left out with a [RED] line, where sscanf / strtof used to write whatever they made of it. The spec is copied whole (a 256-byte hex field is 516 characters)
+    uint8_t p[256]; size_t len = 0; char *spec = strdup(DM_GAME_LAUNCH_PARAM), *save = NULL;
+    for (char *t = spec ? strtok_r(spec, " ", &save) : NULL; t; t = strtok_r(NULL, " ", &save)) {
+        uint8_t f[256]; size_t fl = 0; char *end = NULL;
+        if (!strcmp(t, "lang8")) { uint64_t v = h_oe_GetLang(); memcpy(f, &v, 8); fl = 8; }
+        else if (!strncmp(t, "f32:", 4)) { float v = strtof(t + 4, &end); if (end != t + 4 && !*end) { memcpy(f, &v, 4); fl = 4; } }
+        else if (!strncmp(t, "u32:", 4)) { unsigned long u = strtoul(t + 4, &end, 0); if (end != t + 4 && !*end && t[4] != '-' && u <= UINT32_MAX) { uint32_t v = (uint32_t)u; memcpy(f, &v, 4); fl = 4; } }
+        else if (!strncmp(t, "hex:", 4)) {
+            const char *h = t + 4; size_t hl = strlen(h);
+            if (hl && !(hl % 2) && strspn(h, "0123456789abcdefABCDEF") == hl && hl / 2 <= sizeof f)
+                for (; *h; h += 2) { char two[3] = {h[0], h[1], 0}; f[fl++] = (uint8_t)strtoul(two, NULL, 16); }
+        }
+        else { LOG("[RED] launch_param: field %s not understood, left out", t); continue; }
+        if (!fl) { LOG("[RED] launch_param: field %s is malformed, left out", t); continue; }
+        if (len + fl > sizeof p) { LOG("[RED] launch_param: field %s does not fit in %zu bytes, left out", t, sizeof p); continue; }
+        memcpy(p + len, f, fl); len += fl;
     }
+    free(spec);
     if (len > n) len = n;
-    memcpy(buf, p, len); if (out) *out = len;
+    if (buf) memcpy(buf, p, len); else len = 0;
+    if (out) *out = len;
     LOG("oe::TryPopLaunchParameter: %zu bytes from the profile (%s)", len, DM_GAME_LAUNCH_PARAM);
     return 1;
 }

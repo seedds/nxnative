@@ -21,6 +21,7 @@ import re
 import shutil
 import struct
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -28,6 +29,8 @@ ROOT = Path(__file__).resolve().parents[3]
 RYU = ROOT / 'dm/third_party/ryujinx/src/Ryujinx.Graphics.Shader'
 spec = importlib.util.spec_from_file_location('dmsh_atomic', ROOT / 'dm/gfx/tools/dmsh_atomic.py')
 atomic = importlib.util.module_from_spec(spec); spec.loader.exec_module(atomic)
+sys.path[:0] = [str(ROOT / 'dm/gfx/tools'), str(ROOT / 'dm/ios/tools')]
+import dmsh_chain, ios_metal   # noqa: E402  (the builds' Metal compiles)
 SPIRV_CROSS = ROOT / 'dm/gfx/tools/spirv_cross_bin/spirv-cross'   # the build dmsh_build.py runs (dmsh_chain.SPIRV_CROSS)
 XC = ['--msl', '--msl-version', '20300', '--msl-argument-buffers', '--msl-texture-buffer-native']  # dmsh_build.XC without fragment padding
 
@@ -325,13 +328,10 @@ class Compiler(unittest.TestCase):
         self.assertTrue(metal_sdks and all(sdk in ('macosx', 'iphoneos') for sdk in metal_sdks),
                         'DMSH_TEST_METAL_SDKS must be macosx, iphoneos or macosx,iphoneos')
         for sdk in metal_sdks:
-            # Match dmsh_build.MAC_METAL and ios_metal.METAL;
-            # the latter needs relaxed NaN-aware arithmetic.
-            flags = ['-fpreserve-invariance'] if sdk == 'macosx' else [
-                '-mios-version-min=18.0', '-fmetal-math-mode=relaxed', '-fpreserve-invariance']
+            metal = dmsh_chain.MAC_METAL if sdk == 'macosx' else ios_metal.METAL   # the builds' own compiles
             air = work / (key + '.' + sdk + '.air')
             library = work / (key + '.' + sdk + '.metallib')
-            subprocess.run(['xcrun','-sdk',sdk,'metal','-c',*flags,str(msl),'-o',str(air)],check=True)
+            subprocess.run([*metal,str(msl),'-o',str(air)],check=True)
             subprocess.run(['xcrun','-sdk',sdk,'metallib',str(air),'-o',str(library)],check=True)
             self.assertGreater(air.stat().st_size, 0)
             self.assertGreater(library.stat().st_size, 0)

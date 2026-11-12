@@ -27,9 +27,21 @@ FILES += ['../mac/min_os.mk']   # MAC_MIN below
 # The Mac libraries are compiled for the Mac host's minimum macOS (dm/mac/min_os.mk), as the host's own Metal libraries are (dm/host/Makefile MSL_MIN_macosx). The deployment target
 # sets the Metal language version: with none the compiler takes the build Mac's system, so one source compiled on macOS 27 and failed on macOS 26 (a reference parameter with no address
 # space, which the newer language accepts: GitHub issue #2272), and a library made on the newer system names a language version the older one does not load. The NVN chain
-# (dmsh_build.py MAC_METAL), vk_shaders.py and gl_shaders.py pass this flag on every Mac compile; the iPhone's is ios_metal.py's
+# (MAC_METAL below), vk_shaders.py and gl_shaders.py pass this flag on every Mac compile; the iPhone's is ios_metal.py's
 MAC_MIN = open(os.path.join(GFX, '../mac/min_os.mk')).read().split('MACOS_MIN := ')[1].split()[0]
 MAC_MIN_FLAG = f'-mmacosx-version-min={MAC_MIN}'
+# The Mac compile of a game's shaders (dmsh_build.py; the iPhone's is ios_metal.py METAL). It is here, not in dmsh_build.py, which runs a build when imported, so tests compile with it
+# -fpreserve-invariance: vertex positions are marked [[invariant]], but without this flag Metal does not promise that two different shaders compute the same expression to the same value; on Maxwell the same multiply-adds always agree.
+# Super Mario Odyssey draws a depth pre-pass with alRenderDepthOnly, then the G-buffer with another vertex shader and depth test less-or-equal: a hair off and the test failed, leaving those pixels with old content (Cap Kingdom's ground in 32x32 blocks)
+# -O1: the front end's -O2 (CorrelatedValuePropagation, then SimplifyCFG) folds the translated shaders' repeated tests of one value into switches whose cases jump past their own join.
+# Apple's GPU backend then exceeds its control-flow ID budget ("Max Unstruct ID 758 ... exceeds supported limit", a note, not an error) and falls back to a slower lowering:
+# Odyssey's alRenderMaterialUber took 25 minutes and 17.3 MB of GPU code, 31 s and 1.3 MB at -O1. Ordinary shaders come out within a few percent either way (the backend optimizes again)
+# -fwrapv: signed integer overflow wraps, as SPIR-V's integer arithmetic and the Switch's GPUs do; in MSL it is undefined, and the front end folds around it. Ocarina of Time's mesh shader
+# 35785cddc971290c sign-extends a packed 16-bit vertex field as a = w * 65536, then (a >> 31) << 16 | uint(a) >> 16; without the flag the compiler took the sign bits from bits 15-30 of w,
+# so the lightmap / probe UV's x came out far too large and models drawn with mesh shaders took their ambient light from the wrong texels (the bright band on the Deku Tree's walls).
+# The flag also drops inbounds from pointer arithmetic (Metal's clang has no -fwrapv-pointer) and keeps loop bounds that may wrap (test_dmsh_wrapv.py)
+# MAC_MIN_FLAG: the deployment target, above
+MAC_METAL = ['xcrun', '-sdk', 'macosx', 'metal', '-c', '-O1', MAC_MIN_FLAG, '-fpreserve-invariance', '-fwrapv']
 INPUT_TABLES = ['shader_facts.tsv', 'shader_map.tsv', 'shader_map.tsv.conflicts.tsv', 'shader_pairs.tsv', 'pso_pairs.tsv', 'bf_want.tsv', 'geo_mesh.tsv', 'dual_want.tsv']   # in the game profile folder
 LOCK = os.path.join(HERE, 'dmsh_chain.lock'); HEADER = os.path.join(GFX, 'nvn/dmsh_chain.h')
 STAMP = 'inputs.tsv'   # in the library directory b-<V>/

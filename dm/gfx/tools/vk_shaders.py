@@ -147,7 +147,7 @@ def metallib(msls, out, sdk, extra):
     airs = []
     def comp(m):
         a = m[:-6] + f'.{sdk}.air'
-        # -fwrapv: signed integer overflow wraps, as SPIR-V's integer arithmetic does; in MSL it is undefined and the compiler folds around it (dmsh_build.py MAC_METAL)
+        # -fwrapv: signed integer overflow wraps, as SPIR-V's integer arithmetic does; in MSL it is undefined and the compiler folds around it (dmsh_chain.py MAC_METAL)
         r = subprocess.run(['xcrun', '-sdk', sdk, 'metal', '-c', '-fpreserve-invariance', '-fwrapv', *extra, m, '-o', a], capture_output=True, text=True)
         if r.returncode: red(f'{m}: metal compile failed: {r.stderr.strip()[:400]}')
         return a

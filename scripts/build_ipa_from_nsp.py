@@ -1433,20 +1433,34 @@ def collect_nros(py, repo, romfs, dst, env, logs):
     return {l.split('\t')[0]: dst / (l.split('\t')[0] + '.nro') for l in (dst / 'nro.tsv').read_text().splitlines() if l and not l.startswith('#') and not l.startswith('refused\t')}
 
 
-def nro_modules(g, exe_dir, nros):
-    """modules of a provisional profile once the NROs are collected: the subsdks the NROs import from, which the survey could not see (dm/games/profile_guess.py nro_modules; Portal's movie
-    module and GLSLC). Returns the profile, reloaded when it changed"""
-    add = pg.nro_modules(exe_dir, nros, g.words('modules'))
-    if not add: return g
+def provisional_modules(g, exe_dir, nros):
+    """modules of a provisional profile once the NROs are collected, and the build row of this ExeFS's main: the subsdks the NROs import from, which the survey could not see
+    (dm/games/profile_guess.py nro_modules; Portal's movie module and GLSLC), go into modules, and that row names every module of modules this ExeFS has, with its build ID.
+    The host loads the modules of the row for main's build (game.py build_modules, main.c profile_modules): a module in modules alone stayed unloaded (Mario Golf: Super Rush's movie
+    module, black at its opening movie, PR #2215). The row is completed on every build, not only when a module is added, so a profile written before is repaired; another version's
+    row (a provisional profile is reused for the versions packed from its folder) is left as it is. Returns the profile, reloaded"""
+    add = pg.nro_modules(exe_dir, nros, g.words('modules')) if nros else {}
     mods = sorted(set(g.words('modules')) | set(add), key=pg.load_order)
+    ex = Path(exe_dir); bid = build_id(ex / 'main') if (ex / 'main').is_file() else None
+    def row(lines):   # the row of this main's build, completed
+        out = []
+        for line in lines:
+            c = [x.strip() for x in line.split('\t')]
+            if c[0] == 'build' and len(c) >= 3 and f'main={bid}' in c[3:]:
+                have = {x.split('=', 1)[0] for x in c[3:]}
+                if miss := [m for m in mods if m not in have and (ex / m).is_file()]:
+                    say(f'build {c[1]}: the row gains {" ".join(miss)}, which modules lists (the host loads what the row names)')
+                    line = '\t'.join(c + [f'{m}={build_id(ex / m)}' for m in miss])
+            out.append(line)
+        return out
     why = ', '.join(f'{m} ({k})' for m, k in add.items())
-    say(f'modules {" ".join(mods)}: the NROs the game loads import from {why}')
-    return set_keys(g, {'modules': (' '.join(mods), f'the NROs the game loads at run time import from {why}, which main does not')}, 'After the NRO collection')
+    if add: say(f'modules {" ".join(mods)}: the NROs the game loads import from {why}')
+    return set_keys(g, {'modules': (' '.join(mods), f'the NROs the game loads at run time import from {why}, which main does not')} if add else {}, 'After the NRO collection', edit=row)
 
 
 def rewrite(py, repo, exe_dir, out, env, logs, g, provisional=False):
     """patch_nso.py on every code module (each writes its own <module>.* files, all the same build_src.sha256 line), each with its log, as many at once as the Mac has cores.
-    The modules are the profile's and the NROs the game registers (collect_nros; nro.tsv beside them lists those); a provisional profile first gets the subsdks those NROs import from (nro_modules).
+    The modules are the profile's and the NROs the game registers (collect_nros; nro.tsv beside them lists those); a provisional profile first gets the subsdks those NROs import from, and its build row every module it lists (provisional_modules).
     Reused when the modules, patch_nso.py (with nso.py, nso_code.py, nso_asm.py and the selected profile's function rules / the patch files of their builds), its switches and capstone are as at the
     last successful rewrite (Monster Hunter Rise's main alone takes 5.5 min). Returns the profile"""
     import capstone
@@ -1456,7 +1470,7 @@ def rewrite(py, repo, exe_dir, out, env, logs, g, provisional=False):
     PROG.stage('rewrite', step='checking the inputs')
     nro_dir = out.with_name('nro_' + out.name.removeprefix('patched_'))
     nros = collect_nros(py, repo, rfs.source(exe_dir.parent), nro_dir, env, logs)
-    if provisional and nros: g = nro_modules(g, exe_dir, nros)
+    if provisional: g = provisional_modules(g, exe_dir, nros)
     mods = g.modules_in(exe_dir)   # a version may lack a module of the profile another version has (game.py build_modules)
     manifest = nro_dir / 'nro.tsv'
     src = {m: exe_dir / m for m in mods} | nros
@@ -1883,18 +1897,18 @@ def atomic_text(path, text):
     finally: Path(f.name).unlink(missing_ok=True)
 
 
-def set_keys(g, changes, section):
+def set_keys(g, changes, section, edit=None):
     """Write keys into a provisional game.tsv, each under its reason, in a section of their own at the end; earlier rows of the same keys (and the reason line right above one) go,
-    and a key whose value is None only goes. Returns the profile reloaded"""
+    and a key whose value is None only goes. edit: a function of the file's lines that changes other rows in the same write. Returns the profile reloaded (the file is written only when it changes)"""
     p = g.dir / 'game.tsv'; old = p.read_text(encoding='utf-8').splitlines(); out = []
-    for line in old:
+    for line in (edit(old) if edit else old):
         if line.split('\t', 1)[0] in changes:
             if out and out[-1].startswith('# ') and not out[-1].startswith('# ----'): out.pop()
             continue
         out.append(line)
     put = {k: vw for k, vw in changes.items() if vw[0] is not None}
     if put: out += ['', f'# ---- {section} ----'] + [x for k, (v, why) in put.items() for x in ([f'# {why}'] if why else []) + [f'{k}\t{v}']]
-    atomic_text(p, '\n'.join(out) + '\n')
+    if out != old: atomic_text(p, '\n'.join(out) + '\n')
     return type(g)(g.dir)
 
 

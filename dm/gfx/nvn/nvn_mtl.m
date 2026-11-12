@@ -12203,9 +12203,14 @@ static int g_defer_env_ab, g_defer_env_off;   // Environment switches: read once
 // no draw between P and Q may write memory (prog_swrites); dispatches, copies to buffers and uniform updates between them already stop it. A pass that opens Q runs no compute or
 // mesh hoist (cs_hoist_try, mk_hoist_try), since those would move work ahead of the replayed P draws they did not check against
 enum { PD_SCAN = 6000 };
+#if TARGET_OS_IPHONE
+#define PD_DFLT 0   // not measured there
+#else
+#define PD_DFLT (g_dev && ![g_dev supportsFamily:MTLGPUFamilyApple9])   // on by default on a Mac without mesh-shading hardware (M1, M2), where it was measured; =0 turns it off
+#endif
 static int g_defer_env_pd, g_defer_pd_bl; static uint64_t g_pd_rej[32], g_pd_acc, g_pd_draws;
 static void defer_env(void) { const char *x = getenv("DM_NVN_DEFER_AB"), *e = getenv("DM_NVN_DEFER"); g_defer_env_ab = x && !strcmp(x, "1"); g_defer_env_off = e && !strcmp(e, "0");
-    static int pm = -1; if (pm < 0) { pm = tbdr_on() ? 0 : sw_mode("DM_NVN_PASS_DEFER", 0); const char *b = getenv("DM_NVN_PASS_DEFER_BINDLESS"); g_defer_pd_bl = b && !strcmp(b, "1");
+    static int pm = -1; if (pm < 0) { pm = tbdr_on() ? 0 : sw_mode("DM_NVN_PASS_DEFER", PD_DFLT); const char *b = getenv("DM_NVN_PASS_DEFER_BINDLESS"); g_defer_pd_bl = b && !strcmp(b, "1");
         if (pm) MLOG("DM_NVN_PASS_DEFER: deferred pass merge without TBDR (bindless P draws %s)", g_defer_pd_bl ? "allowed" : "not deferred"); }
     g_defer_env_pd = pm && sw_on(pm);   // latched for the submission
     static uint64_t lastf; uint64_t f = atomic_load(&g_cur_frame);

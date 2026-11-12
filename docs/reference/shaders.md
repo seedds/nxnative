@@ -1964,6 +1964,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Kirby Air Riders](../../dm/games/040077201BE50000/README.md): about 5,700 pixel and compute shaders, its shadows and lights.
 - **Check:** `test_dmsh_reflect.py` (`UniformArraysWithDriverSampler`).
 
+### A separate sampler ID in a uniform buffer (handle type 2)
+
+- **Symptom:** `reflection conversion failed: B binding fp_t_cb720898_2000005ASmplr has no resolved slot number`, then `failed to load`; those draws are skipped. In The Witcher 3 245 of 602 shaders failed this way, its domain shaders among them, and the screen stayed black.
+- **Cause:** handle type 2, Ryujinx's `SeparateSamplerId`: the texture word is in the driver table c2 (the low half of the slots, 2), and the second word is a sampler ID itself, not a handle with the ID in its high 12 bits, in one of the game's uniform buffers (the high half less one: slots 0xb0002, bank 10; `(handle >> 14) & 0x3fff` its word). `decode_ubo_tex` decodes a uniform buffer only for the texture half, so the sampler had no slot. `decode_tex` also tried both words for the texture, so a sampler word at a byte offset that is a combined texture slot's in c2 (0x20 to 0x11f) would be named as the texture.
+- **Fix:** a chain change. `dmsh_reflect.py` gives a single sampler of this form `samp_ubo` with the uniform slot and the word's byte offset and `raw_id`, and `decode_tex` takes only the first word as the texture for type 2, as for type 3. The replay reads the word and shifts it into the handle's sampler field before the pool lookup (`nvn_refl.h` `raw_id`, `nvn_mtl.m` `sampu_id`). Arrays of such samplers are not covered; none is known.
+- **Found on:** The Witcher 3: Wild Hunt — Complete Edition (0100A0800E9C4000, profile not upstream yet): `fp_t_cb720898_2000005ASmplr` in 181 of its shaders, `fp_t_cb720898_2000405CSmplr` in 34.
+- **Check:** `test_dmsh_reflect.py` (`SeparateSamplerIds`) and `t_refl` (the `raw_id` key).
+
 ### A table of handles past the array's length
 
 - **Symptom:** characters shaded black; a shader indexes a table of cube maps, and every element it reads clamps to the array's last one, which holds no handle.

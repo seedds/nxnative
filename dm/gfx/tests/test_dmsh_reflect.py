@@ -104,6 +104,32 @@ class UniformArraysWithDriverSampler(unittest.TestCase):
         self.assertEqual((samp['kind'], samp['reg'], samp['off'], samp['soff'], samp['sreg']), ('samp_ubo', 3, 0, 0x570, dmsh_abi.SREG_C2))
 
 
+class SeparateSamplerIds(unittest.TestCase):   # handle type 2: the texture word in c2, the sampler a raw SeparateSamplerId in a word of a uniform buffer
+    def reflect(self, name):
+        source = f'struct spvDescriptorSetBuffer0\n{{\n    texture2d<float> {name} [[id(0)]];\n    sampler {name}Smplr [[id(1)]];\n}};\n'
+        return REFLECT('synthetic', 'ps', source, {'sbufs': []})
+
+    def test_texture_in_c2_sampler_id_in_c10(self):   # The Witcher 3 (181 of its shaders): slots 0xb0002 (texture bank 2, sampler bank 10), separate texture word 0x5a, sampler word 0 of c10
+        tex, samp = self.reflect('fp_t_cb720898_2000005A')
+        self.assertEqual(tex['kind'], 'tex')
+        self.assertEqual(tex['reg'], 128)   # c2 byte 0x168: separate texture slot 0 (NVN_SEPTEX_SLOT0)
+        self.assertEqual((samp['kind'], samp['reg'], samp['off'], samp['raw_id']), ('samp_ubo', 7, 0, True))
+
+    def test_sampler_word_offset(self):   # sampler word 1 of c10: byte 4
+        tex, samp = self.reflect('fp_t_cb720898_2000405C')
+        self.assertEqual(tex['reg'], 129)
+        self.assertEqual((samp['reg'], samp['off'], samp['raw_id']), (7, 4, True))
+
+    def test_sampler_word_is_not_taken_as_a_texture_word(self):   # sampler word 0x10 of c10 (byte 0x40) would be combined texture slot 4 if read as a c2 word
+        tex, samp = self.reflect('fp_t_cb720898_2004005A')
+        self.assertEqual(tex['reg'], 128)
+        self.assertEqual((samp['reg'], samp['off']), (7, 0x40))
+
+    def test_other_handle_types_carry_no_raw_id(self):   # type 1 with the same slots stays a separate texture + separate sampler pair
+        _, samp = self.reflect('fp_t_cb720898_1000005A')
+        self.assertNotIn('raw_id', samp)
+
+
 def builder_unfillable():
     return lambda src, stage='ps': dmsh_reflect.unfillable(dmsh_reflect.drv_reads(src), stage)
 

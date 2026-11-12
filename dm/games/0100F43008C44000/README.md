@@ -110,6 +110,7 @@ General host changes first needed here; each applies to every game:
 - **Bounds checks before image-atomic pointer construction and matched image/buffer admission:** [Bounds of image atomics](../../../docs/reference/shaders.md#bounds-of-image-atomics).
 - **The host's StandardAllocator cap** (`hle_svc.c` "StandardAllocator's address space", the `stdalloc_cap` key): [StandardAllocators over 12 to 62 GB of address space](../../../docs/reference/memory.md#standardallocators-over-12-to-62-gb-of-address-space).
 - **The address region table and the NSP script's region check** (`patch_nso.py` "Address regions", `hle_svc.c`, `DM_REGIONS`): its allocator region, 4 GB through `nn::mem::StandardAllocator::Initialize`, returning to `main+0x1b2e690` in `nninitStartup` (the function at `main+0x1b3e3b0` that sets the size tail-calls the SDK), opened to its end by the startup block, which is why the check judges a region by who lays it out: [Measuring address regions and commits](../../../docs/reference/memory.md#measuring-address-regions-and-commits).
+- **Specialized second functions in the offline pipeline archive** (`needs_cut` in `pso_offline.py`): with `depth_mode zero` a pulling vertex shader's base takes its library's second function `main0_z`, which `metal-tt` 32023.922 cannot specialize, so the Mac app's archive step failed and the app had no archive (26,030 bases planned; issue #2337): [Specialized second functions in the offline pipeline archive](../../../docs/reference/shaders.md#specialized-second-functions-in-the-offline-pipeline-archive).
 
 ## Open
 

@@ -10,7 +10,8 @@
 #     raster.primitive_id: the host builds its pipelines whole, since through a base every primitive reads 0), a missing library or entry point
 #   · a function that declares function constants is specialized as the host's prebuild specializes it (pre_fn in nvn_mtl.m): the border colour corrections' dm_border_off set (true:
 #     off), the specialization the draws that bind no sampler with a twin share (fn_off). metal-tt specializes a <key>_b or <key>_bp function, cut by dmsh_side.cut or not, and the host
-#     finds that base by its specialized descriptor (checked on Ocarina of Time's libraries, macOS 27.2, metal-tt 32023). It cannot lower a function unspecialized ("cannot lower module
+#     finds that base by its specialized descriptor (checked on Ocarina of Time's libraries, macOS 27.2, metal-tt 32023); one that is not its library's first function, as a near = 0
+#     game's <key>_bp main0_z, from a library of its own (needs_cut). It cannot lower a function unspecialized ("cannot lower module
 #     with unresolved function constants"), and failed with "cannot find private metadata" on a side library (<key>_bx), which no base uses. A pair whose functions declare any other
 #     constant is left to the device (rest_pairs.tsv), as before (HOST_CONSTANTS)
 # And a compute pipeline per compute shader, which depends on its function alone (the host makes it from the function, cps_new in nvn_mtl.m; the threadgroup size is the dispatch's):
@@ -45,7 +46,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'tools'))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import romfs, shader_lib   # the libraries may be one file (shader_lib.py), read in place; metal-tt alone needs files of its own (real_libraries)
-import dmsh_abi as abi
+import dmsh_abi as abi, dmsh_side
 
 # The function constants the host's prebuild sets in a base's functions (nvn_mtl.m pre_fn), by name: (index, bool value). A pair whose functions declare another constant is left to the
 # device: the host leaves it at its default, which metal-tt can do too, but no other constant was tried there, and one function metal-tt fails fails its whole group
@@ -185,19 +186,45 @@ def plan_compute(lib_dir, chain, shaders):
     return pipes, left
 
 
+# metal-tt specializes only a library's first function: the second's (Nintendo Switch Sports Resort's pulling libraries <key>_bp, entry main0_z for its near = 0 depth mode, behind
+# main0, with the border corrections' constant) fails in applegpu-nt with "cannot find private metadata at offset '8'" (the second function's entry), while
+# main0 of the same library specialized compiles (metal-tt 32023.922, macOS 27.2). So such a function is specialized from a library of its own, cut from its library (dmsh_side.cut,
+# the bytes metallib --function-name gives): the archive serves the host's lookup through the whole library, as the base is found by its function, not by its library file
+# (checked: an archive made from main0_z cut alone gives the host's specialized descriptor of main0_z in the whole library, and not main0)
+def needs_cut(declared, entry):   # declared: constants() of the function's library
+    return bool(declared.get(entry)) and next(iter(declared), entry) != entry
+
+
+def cut_name(lib, entry): return f'{lib}@{entry}'
+
+
+def cut_entries(lib_dir, bases, computes=()):
+    """The functions script specializes from a library of their own (needs_cut): {(library, entry)}"""
+    want, found = {(lib, e) for vl, ve, fl, fe in bases for lib, e in ((vl, ve), (fl, fe))} | set(computes), set()
+    declared = {}
+    for lib, entry in want:
+        if lib not in declared:
+            try: declared[lib] = constants(romfs.Path(lib_dir) / f'{lib}.metallib')
+            except (OSError, ValueError): declared[lib] = {}
+        if needs_cut(declared[lib], entry): found.add((lib, entry))
+    return found
+
+
 def script(lib_dir, bases, computes=()):
     """A Metal 4 pipelines script (metal4-pipelines-script(5), the .mtl4-json format metal-tt reads) with one render pipeline descriptor per base, and one compute pipeline descriptor per
     compute pipeline (library, entry) that names the function alone, as the host's lookup does (cps_bundle in nvn_mtl.m: no threadgroup size, no indirect command buffers).
-    A function that declares constants is named through its specialization by HOST_CONSTANTS (a pair with other constants is not among the bases: plan)"""
+    A function that declares constants is named through its specialization by HOST_CONSTANTS (a pair with other constants is not among the bases: plan), from a library of its
+    own when it is not its library's first function (needs_cut)"""
     libs, fns, specs, declared, pipes = {}, {}, {}, {}, []
     def fd(lib, entry):
-        if lib not in libs:
-            libs[lib] = {'label': lib, 'path': str(Path(lib_dir).resolve() / f'{lib}.metallib')}
+        if lib not in declared:
             try: declared[lib] = constants(romfs.Path(lib_dir) / f'{lib}.metallib')
             except (OSError, ValueError): declared[lib] = {}   # plan read every base's libraries; one it could not read is not among them
-        label = f'{lib}.{entry}'
-        if label not in fns: fns[label] = {'label': label, 'library': f'lib:{lib}', 'name': entry}
         cs = declared[lib].get(entry, ())
+        source = cut_name(lib, entry) if needs_cut(declared[lib], entry) else lib   # see needs_cut
+        if source not in libs: libs[source] = {'label': source, 'path': str(Path(lib_dir).resolve() / f'{source}.metallib')}
+        label = f'{lib}.{entry}'
+        if label not in fns: fns[label] = {'label': label, 'library': f'lib:{source}', 'name': entry}
         if not cs: return f'fnd:{label}'
         if label not in specs:
             specs[label] = {'label': f'{label}.host', 'function_descriptor': f'fnd:{label}',
@@ -296,12 +323,18 @@ def compile_archive(js, part, work, arch, platform, osmin, count):
 
 
 def real_libraries(lib_dir, bases, work, computes=()):
-    """Where metal-tt finds the bases' libraries: it takes file paths, so the libraries of one file get a temporary folder of what this compile reads, which clear_real_libraries removes after it.
+    """Where metal-tt finds the bases' libraries: it takes file paths, so the libraries of one file, and the functions specialized from a library of their own (needs_cut), get a
+    temporary folder of what this compile reads, which clear_real_libraries removes after it: a library of a folder is linked there, one of a single file copied.
     An archive whose key still holds compiles nothing and gets none"""
-    if os.path.isdir(lib_dir): return lib_dir
+    cuts = cut_entries(lib_dir, bases, computes)
+    folder = os.path.isdir(lib_dir)
+    if folder and not cuts: return lib_dir
     real = Path(work) / 'libraries'; shutil.rmtree(real, ignore_errors=True); real.mkdir(parents=True)
     for name in sorted({lib for vl, _, fl, _ in bases for lib in (vl, fl)} | {lib for lib, _ in computes}):
+        if folder: (real / f'{name}.metallib').symlink_to(Path(lib_dir).resolve() / f'{name}.metallib'); continue
         with romfs.open(os.path.join(lib_dir, f'{name}.metallib'), 'rb') as f, open(real / f'{name}.metallib', 'wb') as o: shutil.copyfileobj(f, o)
+    for lib, entry in sorted(cuts):   # a function specialized from a library of its own (needs_cut)
+        (real / f'{cut_name(lib, entry)}.metallib').write_bytes(dmsh_side.cut((real / f'{lib}.metallib').read_bytes(), {entry})[1])
     return real
 
 

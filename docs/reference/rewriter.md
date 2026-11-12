@@ -428,6 +428,13 @@ To enroll a cut for any game's own module:
 - **Found on:** [Paper Mario: The Thousand-Year Door](../../dm/games/0100ECD018EBE000/README.md) `main` (its AngelScript call bridges).
 - **Check:** of the 22 games' modules on hand only this `main` has the form (6 sites), so every other rewrite is byte-identical.
 
+### Stack frames of an odd size: sub sp, sp, #imm
+
+- **Symptom:** `CRASH sig=10 addr=0 pc=main+0x4e8a18` on `str x1, [sp]` right after `sub sp, sp, #0x98`, with `sp` ending in `…8`; the game runs until its UI changes screen for the second time (Civilization VII's first-run options: Continue, then Continue or Back).
+- **Cause:** the same alignment rule as [Stack arguments reserved with sub sp, sp, xN](#stack-arguments-reserved-with-sub-sp-sp-xn), with an immediate. Civilization VII's `main` has four hand-written blocks (`main+0x4e8a14`, `+0x556914`, `+0x57e914`, `+0x57ec18`) that save x1–x17 in a 0x98-byte frame around `svc #0x29` (GetInfo with info type 0x55) and give it back with `add sp, sp, #0x98`; the frame leaves `sp` 8 bytes off. These eight are the only `sp` adjustments in its code that are not a multiple of 16.
+- **Fix:** `odd_sp_frames` in `patch_nso.py` rounds both immediates of such a pair up to 16 (0x98 → 0xa0), in place; a frame of 0xff1–0xfff rounds to 0x1000, which only the shifted immediate holds (`#1, lsl #12`; `sp_adjust`). It takes a pair only when the `add` with the same immediate follows within 64 instructions and every instruction between leaves `sp` alone, is a call or an `svc`, or loads / stores with `sp` as its only base, no writeback, inside the frame; a branch, another `sp` write, a copy of `sp` or an access past the frame leaves it as it was. `test_sp_frame.py` covers Civilization VII's block, aligned frames, calls inside a frame, an access past it, its last slot, writeback, a branch, a `ret`, a copy of `sp`, and a `sub` with no `add`, and the 0x1000 encoding.
+- **Found on:** Sid Meier's Civilization VII (`0100C3601518C000`, 1.5.0.1, provisional profile, no game note yet): 4 frames in `main`; its `sdk` and NRO have none. The host's GetInfo answers 0 for the unknown info type, so the block returns as it does on the console. With the rule the game got past the crash to its first-run Auto Save screen, and a 14-minute Mac session (49,800 frames) ended without a crash. The rule takes no frame in the `main`, `sdk` and `subsdk0` of The Legend of Zelda: Tears of the Kingdom (v393216) or METAL GEAR SOLID 4 (0100D0B01C4F4000, v1), so their rewrites are unchanged.
+
 ### System register reads that macOS traps
 
 - **Symptom:** SIGILL / trap on a system register read.

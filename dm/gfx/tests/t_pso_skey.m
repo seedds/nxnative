@@ -23,8 +23,8 @@ int main(void) {
         for (int i = 0; i < 32; i++) fz.fx[i] = (int8_t)(i - 7);
         pso_skey a, b; char hex[sizeof a * 2 + 1];
         pso_skey_from(&k, vs, fs, seed & 1, &fz, &a); pso_skey_hex(&a, hex);
-        assert(pso_skey_parse(hex, &b) == 0); assert(memcmp(&a, &b, sizeof a) == 0);
-        hex[0] = hex[0] == '0' ? '1' : '0'; assert(pso_skey_parse(hex, &b) == 0); assert(memcmp(&a, &b, sizeof a) != 0);
+        assert(pso_skey_parse(hex, &b) == 0); assert(memcmp(&a, &b, sizeof a) == 0);  // NOLINT(bugprone-suspicious-memory-comparison): a pso_skey is its bytes (pso_skey_from zeroes it, pso_skey_hex writes them, the maps key on them)
+        hex[0] = hex[0] == '0' ? '1' : '0'; assert(pso_skey_parse(hex, &b) == 0); assert(memcmp(&a, &b, sizeof a) != 0);  // NOLINT(bugprone-suspicious-memory-comparison): a pso_skey is its bytes (pso_skey_from zeroes it, pso_skey_hex writes them, the maps key on them)
         assert(pso_skey_parse(hex + 1, &b) == -1); hex[0] = 'g'; assert(pso_skey_parse(hex, &b) == -1);
     }
     // A prewarm row written before pso_key.atest: the key without its last fields parses with the alpha test and the logic operation off
@@ -71,9 +71,9 @@ int main(void) {
         k1.blend[0].src_rgb = 1; k1.blend[0].dst_rgb = 2;
         pso_key k2 = k1; k2.blend[1].src_rgb = 7; k2.blend[3].dst_a = 5; k2.blend_en |= 1u << 5; k2.chmask |= 0xfu << 20;
         pso_skey a, b; char ha[sizeof a * 2 + 1], hb[sizeof b * 2 + 1];
-        pso_skey_from(&k1, vs, nil, 0, NULL, &a); pso_skey_from(&k2, vs, nil, 0, NULL, &b); assert(memcmp(&a, &b, sizeof a) != 0);
+        pso_skey_from(&k1, vs, nil, 0, NULL, &a); pso_skey_from(&k2, vs, nil, 0, NULL, &b); assert(memcmp(&a, &b, sizeof a) != 0);  // NOLINT(bugprone-suspicious-memory-comparison): a pso_skey is its bytes (pso_skey_from zeroes it, pso_skey_hex writes them, the maps key on them)
         pso_skey_hex(&a, ha); pso_skey_hex(&b, hb); assert(pso_skey_parse(ha, &a) == 0 && pso_skey_parse(hb, &b) == 0);
-        assert(memcmp(&a, &b, sizeof a) == 0 && a.k.blend[0].src_rgb == 1 && a.k.blend[0].dst_rgb == 2 && a.k.chmask == 0xff && a.k.blend_en == 1);
+        assert(memcmp(&a, &b, sizeof a) == 0 && a.k.blend[0].src_rgb == 1 && a.k.blend[0].dst_rgb == 2 && a.k.chmask == 0xff && a.k.blend_en == 1);  // NOLINT(bugprone-suspicious-memory-comparison): a pso_skey is its bytes (pso_skey_from zeroes it, pso_skey_hex writes them, the maps key on them)
         pso_skey_from(&k2, vs, nil, 1, NULL, &b); pso_skey_hex(&b, hb); assert(pso_skey_parse(hb, &b) == 0);
         assert(b.k.chmask == (0xffu | 0xfu << 20) && b.k.blend_en == (1u | 1u << 5) && b.k.blend[1].src_rgb == 0 && b.k.blend[3].dst_a == 0);
     }

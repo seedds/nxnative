@@ -52,7 +52,10 @@ int main(void){@autoreleasepool{
     for(uint64_t i=0;i<9000;i++)rc_note(0x7100000000ull+i*16,2);
     rc_note((uint64_t)&rec[0],1);
     CHECK("a timestamp report after 9000 query reports counts as 0",rc_value((uint64_t)&rec[0],&x)&&x==0);
-    CHECK("a record with no report reads memory",rc_value((uint64_t)&rec[1],&x)&&x==0);
+    CHECK("a record with no report is unknown while a GPU write anywhere still runs (above)",!rc_value((uint64_t)&rec[1],&x));
+    uint64_t was=g_done;g_done=done+100000;   // every write above has landed
+    CHECK("once nothing that could write it runs, a record with no report reads memory",rc_value((uint64_t)&rec[1],&x)&&x==0);
+    g_done=was;
     CHECK("a query's report stays unknown",!rc_value(0x7100000000ull+8999*16,&x)&&!rc_value(0x7100000000ull,&x));
     (void)q;for(uint64_t i=0;i<300;i++)rc_note((uint64_t)&big+0x1000+i,1);
     CHECK("more timestamp reports than the first table held",rc_value((uint64_t)&big+0x1000,&x)&&x==0);

@@ -1,7 +1,12 @@
 // Exercise the real metadata writer with stdio failures, and the real pull (the cloud's save swapped in) with rename failures, without cloud or game files.
 // pull: every step that can fail, failing: this device's save stays whole and nowhere but in place or in its backups, and the staging folder (cleared at every
-// start) never holds this device's save, also while a pull that succeeds is between two steps (the app killed there)
+// start) never holds this device's save, also while a pull that succeeds is between two steps (the app killed there).
+// The journal (<save>.pull): the app killed after each rename or swap of a pull (a longjmp out of it, nothing undone), with this device's folders holding a save, empty or
+// absent, then the next start's mount (sync off): this device's save is back as it was, the cloud's gone, the journal removed; killed again in the middle of that recovery,
+// the next one finishes it. A recovery that fails refuses the mount and keeps the journal, and the start after it recovers; an unreadable journal refuses the mount; a
+// second mount gets the first's answer. Older backups are pruned only when a pull completes, and nothing is sent after the host while a journal is pending
 #include <errno.h>
+#include <setjmp.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <stdarg.h>
@@ -52,18 +57,23 @@ static int faulted(int op, const char *from, const char *to) {
     return 0;
 }
 static int holds(const char *dir, const char *text);
+// The app killed: after `crash_after` more renames and swaps succeed, the next one's caller never comes back (crash_jmp)
+static int crash_after = -1; static jmp_buf crash_jmp;
+static void crash_point(void) { if (crash_after > 0 && !--crash_after) { crash_after = -1; longjmp(crash_jmp, 1); } }
 static int test_rename(const char *from, const char *to) {
     renames++;
     if (fail_rename) { errno = EROFS; return -1; }
     if (faulted(1, from, to)) return -1;
     int r = rename(from, to);
     if (*staging && holds(staging, "original")) staging_held = 1;
+    if (!r) crash_point();
     return r;
 }
 static int test_renamex_np(const char *from, const char *to, unsigned flags) {
     if (faulted(2, from, to)) return -1;
     int r = renamex_np(from, to, flags);
     if (*staging && holds(staging, "original")) staging_held = 1;
+    if (!r) crash_point();
     return r;
 }
 static int test_unlink(const char *path) {
@@ -171,6 +181,98 @@ static void pull_case(const char *root, const char *name, const char *bundle, in
         snprintf(p, sizeof p, "%s/save_device/b", kept); CHECK(is(p, "original 1"), "this device's device save is kept in the backup pull names");
     } else CHECK(*kept && holds(kept, "original"), "the backup pull names holds what is not in place");
 }
+// This device's save before a pull: save/a "original 0", and the device folder as `dev_had` says (HAD_SAVE: save_device/b "original 1", HAD_EMPTY: an empty folder, HAD_NONE: none)
+static void device_save(const char *root, int dev_had) {
+    char save[PATH_MAX], dev[PATH_MAX], p[PATH_MAX];
+    snprintf(save, sizeof save, "%s/save", root); snprintf(dev, sizeof dev, "%s/save_device", root);
+    rm_tree(save); rm_tree(dev); snprintf(p, sizeof p, "%s-backups", save); rm_tree(p); snprintf(p, sizeof p, "%s.pull", save); unlink(p);
+    mkdirs(save); snprintf(p, sizeof p, "%s/a", save); put(p, "original 0");
+    if (dev_had != HAD_NONE) mkdirs(dev);
+    if (dev_had == HAD_SAVE) { snprintf(p, sizeof p, "%s/b", dev); put(p, "original 1"); }
+}
+// This device's save as device_save made it, and nothing of the cloud's anywhere under root but the bundles
+static int as_before(const char *root, int dev_had) {
+    char p[PATH_MAX], dev[PATH_MAX], **v; size_t n; int ok = 1;
+    snprintf(p, sizeof p, "%s/save/a", root); ok &= is(p, "original 0");
+    snprintf(p, sizeof p, "%s/save", root); if (!names_of(p, &v, &n)) { ok &= n == 1; free_names(v, n); } else ok = 0;
+    snprintf(dev, sizeof dev, "%s/save_device", root);
+    if (dev_had == HAD_SAVE) { snprintf(p, sizeof p, "%s/b", dev); ok &= is(p, "original 1"); }
+    else if (dev_had == HAD_EMPTY) ok &= !access(dev, F_OK) && !has_entries(dev);
+    else ok &= access(dev, F_OK) == -1;
+    snprintf(p, sizeof p, "%s/save", root); ok &= !holds(p, "cloud") && !holds(dev, "cloud");
+    snprintf(p, sizeof p, "%s/save-backups", root); ok &= !holds(p, "cloud") && !holds(p, "original");
+    snprintf(p, sizeof p, "%s/save.pull", root); ok &= access(p, F_OK) == -1;
+    return ok;
+}
+static int count_backups(const char *save) {
+    char dir[PATH_MAX], **v; size_t n; int k = 0; snprintf(dir, sizeof dir, "%s-backups", save);
+    if (names_of(dir, &v, &n)) return 0;
+    for (size_t i = 0; i < n; i++) k += is_backup(v[i], "local");
+    free_names(v, n); return k;
+}
+static void journal_cases(const char *root, const char *both, const char *one) {
+    char save[PATH_MAX], kept[PATH_MAX], p[PATH_MAX]; ss_meta m; const char *name; struct fault none = {0};
+    snprintf(save, sizeof save, "%s/save", root);
+    unsetenv("DM_SAVE_SYNC");   // the next start's mount with sync off: the journal is put right whatever the setting
+    static const char *had_names[] = {"no device folder", "an empty device folder", "a device save"};
+    for (int dev_had = HAD_NONE; dev_had <= HAD_SAVE; dev_had++)
+        for (int b = 0; b < 2; b++) {   // the cloud's save with and without a device save
+            int steps = 0;
+            for (int k = 1; k < 16; k++) {   // killed after k renames and swaps; the first k that is not reached is the pull completing
+                device_save(root, dev_had);
+                char label[200]; snprintf(label, sizeof label, "killed after %d steps, %s, the cloud's %s a device save", k, had_names[dev_had], b ? "with" : "without"); name = label;
+                faults[0] = faults[1] = none; crash_after = k;
+                if (!setjmp(crash_jmp)) { int r = pull(save, b ? both : one, &m, kept, sizeof kept); crash_after = -1; CHECK(!r, "an uninterrupted pull completes"); steps = k - 1; break; }
+                snprintf(p, sizeof p, "%s.pull", save); CHECK(!access(p, F_OK), "the journal is there after the kill");
+                if (k == 3) {   // and killed again in the middle of the recovery: the next start finishes it
+                    crash_after = 1; pull_journal j;
+                    if (!setjmp(crash_jmp)) { CHECK(journal_read(save, &j) == 1, "the journal reads back"); recover(save, &j); }
+                    crash_after = -1;
+                }
+                CHECK(mount_once(save, "0100000000010000") == 0, "the next start's mount goes on");
+                CHECK(as_before(root, dev_had), "this device's save is back as it was, the cloud's gone, the journal removed");
+            }
+            name = had_names[dev_had]; CHECK(steps >= 2, "a pull has steps to be killed after");
+        }
+    // A recovery that fails refuses the mount and keeps the journal; the start after it recovers
+    name = "a recovery that fails";
+    device_save(root, HAD_SAVE); faults[0] = faults[1] = none; crash_after = 3;   // the journal, the cloud's save into the backups, then its swap: the cloud's in place
+    if (!setjmp(crash_jmp)) { pull(save, both, &m, kept, sizeof kept); crash_after = -1; CHECK(0, "the pull was killed"); }
+    faults[0] = (struct fault){2, "local/save", "/save", 0};   // the swap back fails
+    CHECK(mount_once(save, "0100000000010000") == -1, "the mount is refused");
+    snprintf(p, sizeof p, "%s.pull", save); CHECK(!access(p, F_OK), "the journal is kept");
+    CHECK(holds(root, "original 0") == 1 && holds(root, "original 1") == 1, "this device's save is whole, in place or in its backups");
+    CHECK(!faults[0].op, "the fault was reached");
+    CHECK(mount_once(save, "0100000000010000") == 0 && as_before(root, HAD_SAVE), "the next start puts it back");
+    // An unreadable journal refuses the mount and is left for the player
+    name = "an unreadable journal";
+    device_save(root, HAD_SAVE); put(p, "not a journal\n");
+    CHECK(mount_once(save, "0100000000010000") == -1 && !access(p, F_OK), "the mount is refused, the file left");
+    unlink(p);
+    // Pruning: a pull that fails keeps the older backups it found; one that completes leaves KEEP_BACKUPS
+    name = "pruning";
+    device_save(root, HAD_SAVE);
+    for (int i = 0; i < KEEP_BACKUPS + 2; i++) { snprintf(p, sizeof p, "%s-backups/2020-01-%02d 00.00.00 local", save, i + 1); mkdirs(p); }
+    faults[0] = (struct fault){1, "in/save", "local/save", 0}; faults[1] = none;
+    CHECK(pull(save, both, &m, kept, sizeof kept) == -1 && count_backups(save) == KEEP_BACKUPS + 2, "a pull that fails prunes nothing");
+    faults[0] = none;
+    CHECK(pull(save, both, &m, kept, sizeof kept) == 0 && count_backups(save) == KEEP_BACKUPS, "one that completes leaves the newest KEEP_BACKUPS, its own among them");
+    snprintf(p, sizeof p, "%s/save/a", kept); CHECK(is(p, "original 0"), "its own backup is kept");
+    // Nothing is sent after the host while a journal is pending: what is in place may be half the cloud's
+    name = "send after exit with a journal pending";
+    device_save(root, HAD_SAVE); faults[0] = none; crash_after = 3;
+    if (!setjmp(crash_jmp)) { pull(save, both, &m, kept, sizeof kept); crash_after = -1; }
+    char cloud[PATH_MAX], cf[PATH_MAX]; snprintf(cloud, sizeof cloud, "%s/cloud-folder", root); setenv("DM_SAVE_SYNC", cloud, 1);
+    CHECK(save_sync_after_exit(save, "0100000000010000") == 0, "not in step: nothing sent");
+    snprintf(cf, sizeof cf, "%s/0100000000010000/save.dmsync", cloud); CHECK(access(cf, F_OK) == -1, "the cloud has no file");
+    unsetenv("DM_SAVE_SYNC");
+    // The first mount's answer is the second's (the device save mounted after the account save)
+    name = "a second mount";
+    CHECK(save_sync_mount(save, "0100000000010000") == 0 && as_before(root, HAD_SAVE), "the first mount recovers and goes on");
+    device_save(root, HAD_SAVE); snprintf(p, sizeof p, "%s.pull", save); put(p, "not a journal\n");
+    CHECK(save_sync_mount(save, "0100000000010000") == 0, "a second mount gets the first's answer, not a new one");
+    unlink(p);
+}
 int main(void) {
     char folder[] = "/tmp/dm-save-sync-metadata-XXXXXX", save[PATH_MAX], path[PATH_MAX];
     if (!mkdtemp(folder)) return 1;
@@ -195,6 +297,11 @@ int main(void) {
         name = "pull, the device save's move to the backups fails"; pull_case(root, name, one, 0, (struct fault){1, "/save_device", "local/save_device", 0}, none, -1);
         name = "pull, the device save's swap and the save's swap back fail";
         pull_case(root, name, both, 1, (struct fault){2, "local/save_device", "/save_device", 0}, (struct fault){2, "local/save", "/save", 1}, -2);
+        {   char rs[PATH_MAX]; snprintf(rs, sizeof rs, "%s/save", root); snprintf(path, sizeof path, "%s.pull", rs);
+            CHECK(!access(path, F_OK), "a pull that could not be put back keeps its journal");
+            unsetenv("DM_SAVE_SYNC");
+            CHECK(mount_once(rs, "0100000000010000") == 0 && as_before(root, HAD_SAVE), "the next start puts this device's save back"); }
+        journal_cases(root, both, one);
         rm_tree(root);
     }
     rmdir(folder);

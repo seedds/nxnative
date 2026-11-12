@@ -63,6 +63,60 @@ static void *sdk_sym(const char *name) {
     if (!strcmp(name, "_ZN2nn2fs7UnmountEPKc")) return (void *)sdk_unmount;
     return NULL;
 }
+// A stand-in for an SDK-owned RAM disk with files, as Nintendo Switch Sports Resort's "vtapi": VoiceText/ holds vt/, and vt/vtpath.ini holds "ini". Each SDK file call is counted
+#define VT_FILE ((uint64_t)0x7bbd001230)   // the SDK's handles: FileAccessor / DirectoryAccessor pointers
+#define VT_DIR ((uint64_t)0x7bbd004560)
+#define VT_INI "vtapi:/VoiceText/vt/vtpath.ini"
+static int g_vt_calls, g_vt_closed, g_vt_dirs_closed, g_vt_mount_asks;
+static int vt_is_mounted(const char *n) { g_vt_mount_asks++; return !strcmp(n, "vtapi"); }
+static int vt_on(const char *p) { return !strncmp(p, "vtapi:", 6); }
+static Result vt_entry_type(int32_t *out, const char *p) { g_vt_calls++; if (!strcmp(p, VT_INI)) { *out = ENT_FILE; return RES_OK; } if (!strcmp(p, "vtapi:/VoiceText")) { *out = ENT_DIR; return RES_OK; } return RES_PATH_NOT_FOUND; }
+static Result vt_path(const char *p) { g_vt_calls++; return vt_on(p) ? RES_OK : RES_FAIL; }
+static Result vt_create_file(const char *p, int64_t sz) { (void)sz; return vt_path(p); }
+static Result vt_rename(const char *a, const char *b) { g_vt_calls++; return vt_on(a) && vt_on(b) ? RES_OK : RES_FAIL; }
+static Result vt_open(uint64_t *out, const char *p, int mode) { (void)mode; g_vt_calls++; if (strcmp(p, VT_INI)) return RES_PATH_NOT_FOUND; *out = VT_FILE; return RES_OK; }
+static Result vt_read(size_t *out, uint64_t h, int64_t off, void *buf, size_t sz) {
+    g_vt_calls++; if (h != VT_FILE) abort();   // the SDK's ReadFile takes its handle as a FileAccessor*: anything else would crash on hardware
+    size_t k = off >= 3 ? 0 : (size_t)(3 - off) < sz ? (size_t)(3 - off) : sz; memcpy(buf, &"ini"[off], k); *out = k; return RES_OK;
+}
+static Result vt_write(uint64_t h, int64_t off, const void *buf, size_t sz, const void *opt) { (void)off; (void)buf; (void)sz; (void)opt; g_vt_calls++; return h == VT_FILE ? RES_OK : RES_FAIL; }
+static Result vt_size(int64_t *out, uint64_t h) { g_vt_calls++; *out = 3; return h == VT_FILE ? RES_OK : RES_FAIL; }
+static Result vt_set_size(uint64_t h, int64_t sz) { (void)sz; g_vt_calls++; return h == VT_FILE ? RES_OK : RES_FAIL; }
+static Result vt_flush(uint64_t h) { g_vt_calls++; return h == VT_FILE ? RES_OK : RES_FAIL; }
+static void vt_close(uint64_t h) { g_vt_calls++; if (h == VT_FILE) g_vt_closed++; }
+static int vt_open_mode(uint64_t h) { g_vt_calls++; return h == VT_FILE ? (MODE_READ | MODE_WRITE) : 0; }
+static Result vt_open_dir(uint64_t *out, const char *p, int mode) { (void)mode; g_vt_calls++; if (strcmp(p, "vtapi:/VoiceText")) return RES_PATH_NOT_FOUND; *out = VT_DIR; return RES_OK; }
+static Result vt_read_dir(int64_t *n, DirectoryEntry *e, uint64_t h, int64_t max) { g_vt_calls++; if (h != VT_DIR || max < 1) abort(); memset(e, 0, sizeof *e); strcpy(e->name, "vt"); e->type = ENT_DIR; *n = 1; return RES_OK; }
+static Result vt_dir_count(int64_t *out, uint64_t h) { g_vt_calls++; if (h != VT_DIR) abort(); *out = 1; return RES_OK; }
+static void vt_close_dir(uint64_t h) { g_vt_calls++; if (h == VT_DIR) g_vt_dirs_closed++; }
+static void *vt_sym(const char *name) {
+    static const struct { const char *name; void *fn; } t[] = {
+        { "_ZN2nn2fs9IsMountedEPKc", (void *)vt_is_mounted },
+        { "_ZN2nn2fs12GetEntryTypeEPNS0_18DirectoryEntryTypeEPKc", (void *)vt_entry_type },
+        { "_ZN2nn2fs15CreateDirectoryEPKc", (void *)vt_path },
+        { "_ZN2nn2fs10CreateFileEPKcl", (void *)vt_create_file },
+        { "_ZN2nn2fs10DeleteFileEPKc", (void *)vt_path },
+        { "_ZN2nn2fs26DeleteDirectoryRecursivelyEPKc", (void *)vt_path },
+        { "_ZN2nn2fs25CleanDirectoryRecursivelyEPKc", (void *)vt_path },
+        { "_ZN2nn2fs15DeleteDirectoryEPKc", (void *)vt_path },
+        { "_ZN2nn2fs10RenameFileEPKcS2_", (void *)vt_rename },
+        { "_ZN2nn2fs15RenameDirectoryEPKcS2_", (void *)vt_rename },
+        { "_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci", (void *)vt_open },
+        { "_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm", (void *)vt_read },
+        { "_ZN2nn2fs9WriteFileENS0_10FileHandleElPKvmRKNS0_11WriteOptionE", (void *)vt_write },
+        { "_ZN2nn2fs11GetFileSizeEPlNS0_10FileHandleE", (void *)vt_size },
+        { "_ZN2nn2fs11SetFileSizeENS0_10FileHandleEl", (void *)vt_set_size },
+        { "_ZN2nn2fs9FlushFileENS0_10FileHandleE", (void *)vt_flush },
+        { "_ZN2nn2fs9CloseFileENS0_10FileHandleE", (void *)vt_close },
+        { "_ZN2nn2fs15GetFileOpenModeENS0_10FileHandleE", (void *)vt_open_mode },
+        { "_ZN2nn2fs13OpenDirectoryEPNS0_15DirectoryHandleEPKci", (void *)vt_open_dir },
+        { "_ZN2nn2fs13ReadDirectoryEPlPNS0_14DirectoryEntryENS0_15DirectoryHandleEl", (void *)vt_read_dir },
+        { "_ZN2nn2fs22GetDirectoryEntryCountEPlNS0_15DirectoryHandleE", (void *)vt_dir_count },
+        { "_ZN2nn2fs14CloseDirectoryENS0_15DirectoryHandleE", (void *)vt_close_dir },
+    };
+    for (size_t i = 0; i < sizeof t / sizeof *t; i++) if (!strcmp(name, t[i].name)) return t[i].fn;
+    return NULL;
+}
 
 int main(void) {
     char root[1024], save[1100], work[1200], p[1200];
@@ -300,6 +354,41 @@ int main(void) {
         CHECK(g_sdk_unmounts == 1, "unmounting it again does not reach the SDK's Unmount");
         g_sdk_cache_mounted = 1; g_sdk_no_is_mounted = 1; h_fs_Unmount("cache");
         CHECK(g_sdk_unmounts == 1 && g_sdk_cache_mounted, "an SDK without an IsMounted symbol: no blind Unmount");
+        t_guest_sym = NULL;
+    }
+
+    printf("⑩ paths and handles on a mount in the SDK's own table (a RAM disk) go to the SDK\n");
+    {   int32_t et = -1; uint64_t h = 0; size_t n = 0; int64_t sz = 0, cnt = 0; DirectoryEntry de[4]; char b[16] = {0}; int calls;
+        CHECK(h_fs_GetEntryType(&et, "vtapi:/VoiceText") == RES_PATH_NOT_FOUND, "with no SDK in the process, a name the host does not hold is not found");
+        t_guest_sym = vt_sym;
+        CHECK(h_fs_IsMounted("vtapi") && h_fs_IsPathMounted("vtapi:/VoiceText") && !h_fs_IsMounted("nowhere"), "IsMounted and IsPathMounted answer from the SDK's table too");
+        calls = g_vt_calls;
+        CHECK(h_fs_GetEntryType(&et, "vtapi:/VoiceText") == RES_OK && et == ENT_DIR && g_vt_calls == calls + 1, "GetEntryType on the RAM disk is the SDK's");
+        CHECK(h_fs_CreateDirectory("vtapi:/VoiceText/vt") == RES_OK && h_fs_CreateFile("vtapi:/VoiceText/vt/new", 4) == RES_OK && g_vt_calls == calls + 3, "CreateDirectory and CreateFile on the RAM disk are the SDK's");
+        CHECK(h_fs_OpenFile(&h, "vtapi:/VoiceText/vt/vtpath.ini", MODE_READ | MODE_WRITE) == RES_OK && h == VT_FILE, "OpenFile on the RAM disk returns the SDK's handle as it is");
+        CHECK(h_fs_GetFileSize(&sz, h) == RES_OK && sz == 3, "GetFileSize of an SDK handle is the SDK's");
+        CHECK(h_fs_ReadFile(&n, h, 0, b, sizeof b) == RES_OK && n == 3 && !memcmp(b, "ini", 3), "ReadFile of an SDK handle reads the SDK's file");
+        memset(b, 0, sizeof b);
+        CHECK(h_fs_ReadFileExact(h, 1, b, 2) == RES_OK && !memcmp(b, "ni", 2), "the ReadFile overload without a byte count reads through it too");
+        CHECK(h_fs_WriteFile(h, 0, "INI", 3, NULL) == RES_OK && h_fs_SetFileSize(h, 3) == RES_OK && h_fs_FlushFile(h) == RES_OK && h_fs_GetFileOpenMode(h) == (MODE_READ | MODE_WRITE), "WriteFile, SetFileSize, FlushFile and GetFileOpenMode of an SDK handle are the SDK's");
+        calls = g_vt_calls; h_fs_CloseFile(h);
+        CHECK(g_vt_closed == 1 && g_vt_calls == calls + 1, "CloseFile of an SDK handle closes it in the SDK");
+        calls = g_vt_calls;
+        CHECK(!sdk_handle_known(VT_FILE) && h_fs_GetFileSize(&sz, h) != RES_OK && g_vt_calls == calls, "a closed SDK handle is forgotten: the next call does not reach the SDK");
+        CHECK(h_fs_OpenDirectory(&h, "vtapi:/VoiceText", DIRMODE_DIR | DIRMODE_FILE) == RES_OK && h == VT_DIR, "OpenDirectory on the RAM disk returns the SDK's handle");
+        CHECK(h_fs_DirCount(&cnt, h) == RES_OK && cnt == 1 && h_fs_ReadDirectory(&cnt, de, h, 4) == RES_OK && cnt == 1 && !strcmp(de[0].name, "vt"), "GetDirectoryEntryCount and ReadDirectory of an SDK handle list the SDK's directory");
+        calls = g_vt_calls; h_fs_CloseDirectory(h);
+        CHECK(g_vt_dirs_closed == 1 && g_vt_calls == calls + 1 && !sdk_handle_known(VT_DIR), "CloseDirectory closes it in the SDK and forgets it");
+        calls = g_vt_calls;
+        CHECK(h_fs_RenameFile("vtapi:/VoiceText/vt/new", "vtapi:/VoiceText/vt/old") == RES_OK && h_fs_DeleteFile("vtapi:/VoiceText/vt/old") == RES_OK
+              && h_fs_DeleteDirRec("vtapi:/VoiceText/vt") == RES_OK && h_fs_CleanDirRec("vtapi:/VoiceText") == RES_OK && h_fs_DeleteDir("vtapi:/VoiceText") == RES_OK && g_vt_calls == calls + 5,
+              "RenameFile, DeleteFile and the directory deletes on the RAM disk are the SDK's");
+        calls = g_vt_calls;
+        CHECK(h_fs_RenameFile("vtapi:/VoiceText/vt/vtpath.ini", "save:/vtpath.ini") != RES_OK && g_vt_calls == calls, "a rename between the SDK's mount and the host's fails and reaches neither");
+        calls = g_vt_calls; g_vt_mount_asks = 0;
+        CHECK(h_fs_CreateFile("save:/vt", 0) == RES_OK && write_save("save:/vt", "x") == RES_OK && read_fs("save:/vt", b, sizeof b) && h_fs_GetEntryType(&et, "save:/vt") == RES_OK && g_vt_calls == calls && !g_vt_mount_asks,
+              "the host's own mounts never ask the SDK");
+        CHECK(h_fs_GetEntryType(&et, "nowhere:/x") == RES_PATH_NOT_FOUND && g_vt_calls == calls, "a name in neither table is still not found");
         t_guest_sym = NULL;
     }
 

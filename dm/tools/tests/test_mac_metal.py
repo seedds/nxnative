@@ -23,6 +23,20 @@ class MacMetal(unittest.TestCase):
         self.assertIn('*dmsh_chain.MAC_METAL[4:]]', src)
         self.assertEqual(dmsh_chain.MAC_METAL[:4], ['xcrun', '-sdk', 'macosx', 'metal'])
 
+    def test_the_inventory_imports_without_min_os_mk(self):   # pr_areas.py and the tests need FILES only: an import reads nothing; the flags read min_os.mk when used
+        import importlib.util, shutil, tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as d:
+            tools = Path(d) / 'dm/gfx/tools'; tools.mkdir(parents=True)
+            shutil.copy(Path(dmsh_chain.__file__), tools / 'dmsh_chain.py')
+            spec = importlib.util.spec_from_file_location('dmsh_chain_alone', tools / 'dmsh_chain.py')
+            assert spec is not None and spec.loader is not None
+            m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+            self.assertEqual(m.FILES, dmsh_chain.FILES)
+            self.assertIn('../mac/min_os.mk', m.FILES)
+            with self.assertRaises(FileNotFoundError): _ = m.MAC_METAL
+            with self.assertRaises(AttributeError): _ = m.NO_SUCH_NAME
+
     def test_chain_hashes_its_inputs(self):   # the command and its deployment target are in DMSH_CHAIN's files
         self.assertIn('tools/dmsh_chain.py', dmsh_chain.FILES)
         self.assertIn('../mac/min_os.mk', dmsh_chain.FILES)

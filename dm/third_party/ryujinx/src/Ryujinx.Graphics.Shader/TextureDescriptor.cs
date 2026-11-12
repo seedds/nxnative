@@ -18,6 +18,9 @@ namespace Ryujinx.Graphics.Shader
 
         public readonly TextureUsageFlags Flags;
 
+        // nxnative: a buffer image's index in the offset table (TranslationFlags.MetalBufferImageBias), -1 for any other
+        public readonly int BufferBias;
+
         public TextureDescriptor(
             int set,
             int binding,
@@ -27,7 +30,8 @@ namespace Ryujinx.Graphics.Shader
             int handleIndex,
             int arrayLength,
             bool separate,
-            TextureUsageFlags flags)
+            TextureUsageFlags flags,
+            int bufferBias = -1)
         {
             Set = set;
             Binding = binding;
@@ -38,6 +42,7 @@ namespace Ryujinx.Graphics.Shader
             ArrayLength = arrayLength;
             Separate = separate;
             Flags = flags;
+            BufferBias = bufferBias;
         }
     }
 }

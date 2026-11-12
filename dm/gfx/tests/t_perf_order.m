@@ -10,7 +10,7 @@ static int test_budget_active;
 static struct {
     uint64_t now, event_elapsed, event_ms, event_fence;
     int event_calls, event_success, cond_calls;
-    int64_t cond_remaining;
+    int64_t cond_remaining, cond_first;   // the last and the first condition wait's deadline, from the virtual now
 } test_budget;
 static uint64_t test_clock_gettime_nsec_np(clockid_t clock) {
     return test_budget_active ? test_budget.now : clock_gettime_nsec_np(clock);
@@ -26,6 +26,7 @@ static int test_pthread_cond_timedwait(pthread_cond_t *cond, pthread_mutex_t *mu
     test_budget.cond_calls++;
     test_budget.cond_remaining = (int64_t)deadline->tv_sec * 1000000000ll + deadline->tv_nsec
         - (int64_t)(test_budget.now + 1000000000000ull);
+    if (test_budget.cond_calls == 1) test_budget.cond_first = test_budget.cond_remaining;
     return ETIMEDOUT;
 }
 @interface WaitBudgetEvent : NSObject
@@ -231,7 +232,10 @@ static void wait_budgets(void) {
             CHECK("only the virtual event advances time", test_budget.now == 1999750000 + (fast ? c->elapsed : 0));
             int fallback = fast ? c->fallback : 1;
             uint64_t remaining = fast ? c->remaining : (c->timeout > hour ? hour : c->timeout);
-            CHECK("feedback wait count", test_budget.cond_calls == fallback);
+            // An unbounded wait first waits to the 10 s mark, where it reports a hang (mtl_wait_at, "[RED] the host has waited 10 s"), then on to its deadline
+            int hang_mark = fallback && c->timeout == UINT64_MAX;
+            CHECK("feedback wait count", test_budget.cond_calls == fallback + hang_mark);
+            CHECK("an unbounded wait reports a hang at 10 s first", !hang_mark || test_budget.cond_first == 10000000000ll);
             CHECK("feedback absolute deadline has only remaining budget", !fallback
                 || test_budget.cond_remaining == (int64_t)remaining);
         }

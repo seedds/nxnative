@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # The compile cache as one file (dm/tools/shader_cache.py): entries in and out, bytes stored once, several threads and processes, a damaged file, pruning, and taking in a cache from before it.
-import os, subprocess, sys, tarfile, tempfile, threading, time, unittest
+import hashlib, os, subprocess, sys, tarfile, tempfile, threading, time, unittest
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[3]
@@ -103,6 +103,154 @@ class Entries(Base):
         self.assertEqual(os.listdir(self.root), ['cas.db'])
         again = shader_cache.Store(self.path); self.addCleanup(again.close)
         self.assertEqual(again.get('x'), b'1')
+
+
+class ReadOnly(Base):
+    def overlay(self, source=None):
+        s = shader_cache.Store(self.root / 'regress/cas.db', self.said.append, readonly=source or self.path)
+        self.addCleanup(s.close)
+        return s
+
+    def test_fallback_local_precedence_and_source_unchanged(self):
+        self.store.put(f'shader/{D1}/mac/k_b.metal', b'source')
+        self.store.put('metallib/mac/a.metallib', b'library')
+        self.store.put('variant/v/mac.metallib', b'variant')
+        self.store.put('stage/build/mac/k', b'private'); self.store.put('metallib/filled.json', b'private'); self.store.put('index/k.json', b'private')
+        self.store.close(); before = self.path.read_bytes(); stamp = self.path.stat().st_mtime_ns
+        s = self.overlay()
+        self.assertEqual(s.get(f'shader/{D1}/mac/k_b.metal'), b'source')
+        self.assertTrue(s.has('metallib/mac/a.metallib'))
+        self.assertEqual(s.names('variant/'), {'variant/v/mac.metallib'})
+        for name in ('stage/build/mac/k', 'metallib/filled.json', 'index/k.json'):
+            self.assertIsNone(s.get(name)); self.assertFalse(s.has(name)); self.assertNotIn(name, s.names(''))
+        s.put('metallib/mac/a.metallib', b'local'); s.put('metallib/mac/new.metallib', b'new')
+        self.assertEqual(s.get('metallib/mac/a.metallib'), b'local')
+        self.assertEqual(s.names('metallib/mac/'), {'metallib/mac/a.metallib', 'metallib/mac/new.metallib'})
+        s.delete_prefix('variant/'); self.assertEqual(s.get('variant/v/mac.metallib'), b'variant')
+        assert s.readonly is not None and s.readonly.db is not None   # the store opened over a read-only one, open
+        with self.assertRaises(shader_cache.sqlite3.OperationalError): s.readonly.db.execute('DELETE FROM entry')
+        s.close()
+        self.assertEqual(self.path.read_bytes(), before); self.assertEqual(self.path.stat().st_mtime_ns, stamp)
+
+    def test_committed_wal_is_visible_while_normal_build_is_open(self):
+        s = self.overlay()
+        self.store.put('metallib/mac/new.metallib', b'committed in WAL')
+        self.assertEqual(s.get('metallib/mac/new.metallib'), b'committed in WAL')
+        self.assertTrue(s.has('metallib/mac/new.metallib'))
+
+    def test_missing_or_damaged_source_is_never_created_or_repaired(self):
+        missing = self.root / 'absent/cas.db'; s = self.overlay(missing)
+        self.assertIsNone(s.get('metallib/mac/x.metallib')); s.close()
+        self.assertFalse(missing.parent.exists())
+        damaged = self.root / 'damaged.db'; damaged.write_bytes(b'not a database' * 3000)
+        before = damaged.read_bytes(); s = self.overlay(damaged)
+        self.assertIsNone(s.get('metallib/mac/x.metallib')); s.put('new', b'works')
+        self.assertEqual(s.get('new'), b'works'); self.assertEqual(damaged.read_bytes(), before)
+        self.assertEqual(len(self.said), 1)
+
+    def test_historical_builder_uses_harness_reader_including_forked_workers(self):
+        self.store.put('metallib/mac/a.metallib', b'library'); self.store.close()
+        before = hashlib.sha256(self.path.read_bytes()).digest()
+        script = self.root / 'old/build.py'; script.parent.mkdir()
+        (script.parent / 'shader_cache.py').write_text('raise AssertionError("historical cache reader was used")\n')
+        script.write_text('''import atexit, multiprocessing, os, shader_cache, sys
+s = shader_cache.Store(sys.argv[1]); atexit.register(s.close)
+assert s.get('metallib/mac/a.metallib') == b'library'
+served = shader_cache.Served(s, 1)
+def worker():
+    remote = served.worker()
+    assert remote.get('metallib/mac/a.metallib') == b'library'
+    remote.put('metallib/mac/new.metallib', b'new')
+p = multiprocessing.get_context('fork').Process(target=worker)
+p.start(); served.start(); p.join(20)
+assert p.exitcode == 0, p.exitcode
+''')
+        dest = self.root / 'regress.db'
+        r = subprocess.run([sys.executable, shader_cache.__file__, '--run', '--readonly', str(self.path), str(script), str(dest)], capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        s = shader_cache.Store(dest); self.addCleanup(s.close)
+        self.assertEqual(s.get('metallib/mac/new.metallib'), b'new')
+        self.assertIsNone(s.get('metallib/mac/a.metallib'))   # reading the fallback does not copy it
+        self.assertEqual(hashlib.sha256(self.path.read_bytes()).digest(), before)
+
+
+class Bounded(Base):
+    def fill(self):
+        for i in range(12):
+            d = f'{i:064x}'; data = os.urandom(220000)
+            self.store.put(f'shader/{d}/mac/k_b.metal', data, i)
+            self.store.put(f'shader/{d}/mac/k_b.json', b'{}', i)
+            self.store.put(f'metallib/mac/{d}.metallib', data, i)
+            self.store.put(f'metallib/mac/{d}_x.metallib', b'split', i)
+            self.store.put(f'variant/{d}/mac.metallib', data, i)
+            self.store.put(f'variant/{d}/metal', b'variant source', i)
+        self.store.put('metallib/filled.json', b'{}', 99)
+        self.store.put('stage/stopped/mac/k', os.urandom(300000), 99)
+
+    def test_physical_limit_dedup_and_whole_groups(self):
+        self.fill()
+        self.store.trim(1 << 20)
+        self.assertLessEqual(self.path.stat().st_size, 1 << 20)
+        self.assertFalse(self.store.has('metallib/filled.json')); self.assertFalse(self.store.names('stage/'))
+        names = self.store.names('')
+        self.assertIn(f'metallib/mac/{11:064x}.metallib', names)
+        for i in range(12):
+            d = f'{i:064x}'
+            self.assertEqual(f'shader/{d}/mac/k_b.metal' in names, f'shader/{d}/mac/k_b.json' in names)
+            self.assertEqual(f'metallib/mac/{d}.metallib' in names, f'metallib/mac/{d}_x.metallib' in names)
+            self.assertEqual(f'variant/{d}/mac.metallib' in names, f'variant/{d}/metal' in names)
+        self.assertEqual(self.store.db.execute('SELECT count(*) FROM blob WHERE id NOT IN (SELECT blob FROM entry)').fetchone()[0], 0)
+
+    def test_failed_build_is_trimmed_when_last_user_leaves(self):
+        with self.assertRaises(RuntimeError):
+            with shader_cache.bounded(self.path, 1 << 20, self.said.append):
+                self.fill()
+                raise RuntimeError('build failed')
+        self.assertLessEqual(self.path.stat().st_size, 1 << 20)
+
+    def test_replaced_unreferenced_blobs_are_reclaimed_before_evicting_live_entries(self):
+        for i in range(12): self.store.put('index/k.json', os.urandom(200000), i)
+        self.store.put('index/k.json', b'current', 99)
+        self.assertEqual(self.store.trim(1 << 20), 0)
+        self.assertLessEqual(self.path.stat().st_size, 1 << 20)
+        self.assertEqual(self.store.get('index/k.json'), b'current')
+
+    def test_another_process_using_cache_prevents_eviction(self):
+        self.fill(); self.store.db.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+        code = "import fcntl,sys; f=open(sys.argv[1], 'a'); fcntl.flock(f,fcntl.LOCK_SH); print('held',flush=True); sys.stdin.read()"
+        p = subprocess.Popen([sys.executable, '-c', code, str(self.path) + '.lock'], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        assert p.stdout is not None
+        try:
+            self.assertEqual(p.stdout.readline().strip(), 'held')
+            before = self.store.names('')
+            with shader_cache.bounded(self.path, 1 << 20, self.said.append): pass
+            self.assertEqual(self.store.names(''), before)
+        finally:
+            p.communicate(timeout=10)
+        with shader_cache.bounded(self.path, 1 << 20, self.said.append): pass
+        self.assertLessEqual(self.path.stat().st_size, 1 << 20)
+
+    def test_writer_is_protected_without_a_live_harness(self):
+        # No parent bounded() lease: the builder itself must protect its staged outputs until it exits.
+        source = self.root / 'normal.db'; source.write_bytes(b'')
+        code = ("import atexit,os,sys; sys.path.insert(0,sys.argv[1]); import shader_cache\n"
+                "s=shader_cache.Store(sys.argv[2], readonly=sys.argv[3]); atexit.register(s.close)\n"
+                "for i in range(12): s.put(f'stage/build/{i}',os.urandom(200000))\n"
+                "s.db.execute('PRAGMA wal_checkpoint(TRUNCATE)')\n"
+                "print('ready',flush=True); sys.stdin.read()\n")
+        p = subprocess.Popen([sys.executable, '-c', code, str(REPO / 'dm/tools'), str(self.path), str(source)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        assert p.stdout is not None
+        try:
+            self.assertEqual(p.stdout.readline().strip(), 'ready')
+            before = self.store.names('stage/')
+            with shader_cache.bounded(self.path, 1 << 20, self.said.append): pass
+            self.assertEqual(self.store.names('stage/'), before)
+            self.assertGreater(self.path.stat().st_size, 1 << 20)
+        finally:
+            p.communicate(timeout=10)
+        self.assertEqual(p.returncode, 0)
+        with shader_cache.bounded(self.path, 1 << 20, self.said.append): pass
+        self.assertLessEqual(self.path.stat().st_size, 1 << 20)
 
 
 class Writers(Base):

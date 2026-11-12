@@ -1,19 +1,58 @@
 #!/usr/bin/env python3
 # The shader build's compile cache as one file, cas.db, read and written in place. It was a folder of a few files per shader (Metroid Dread: 84,541 files), kept as a tar between builds and unpacked
 # for each build that ran. Nothing is unpacked now: an entry goes in and comes out by its name, and a file a tool needs is written only then.
-# SQLite, as it is in Python and takes several writers: dmsh_build.py's threads share one connection (its worker processes use that one too, through this process: Served), and regress.py's chain builds and the NSP script can share a game's file at once (the wait is SQLite's).
+# SQLite, as it is in Python and takes several writers: dmsh_build.py's threads share one connection (its worker processes use that one too, through this process: Served). Regression builds share their own per-game file, with read-only reuse of the player's cache.
 # Two tables: entry (name, the blob it names, when it was written) and blob (the bytes, once each). A library kept under its MSL's digest and under its shader's digest was one APFS clone of the other; inside
 # one file it would be two copies, so bytes are stored by their hash. A file removed from the cache gives its pages back at the next prune (incremental vacuum), with no copy of the file.
 # It only saves work: a damaged file costs the work it held and is made anew, and a full drive is one [RED] line. An entry is written and read whole, so its file is never seen half written.
 # Names, as in the folder this replaces: metallib/<target>/<digest>[_x].metallib (dmsh_mtlcache.py), shader/<digest>/<mac|ios>/<output>, index/<key>.json, variant/<digest>/<file> (dmsh_build.py).
 # Not part of the translation chain: it decides no output (dmsh_chain.py), like dmsh_mtlcache.py.
-import contextlib, hashlib, json, multiprocessing, os, re, shutil, sqlite3, tarfile, threading, time
+import contextlib, fcntl, hashlib, json, multiprocessing, os, re, shutil, sqlite3, tarfile, threading, time
+from pathlib import Path
 
 SCHEMA = ('CREATE TABLE IF NOT EXISTS blob(id INTEGER PRIMARY KEY, hash BLOB UNIQUE NOT NULL, data BLOB NOT NULL)',
           'CREATE TABLE IF NOT EXISTS entry(name TEXT PRIMARY KEY, blob INTEGER NOT NULL, mtime REAL NOT NULL) WITHOUT ROWID')
 SHADER_ENTRY = re.compile(r'shader/([0-9a-f]{64})/')
 WAIT = 600   # seconds another process's write may hold this one up
 _DAMAGED = ('malformed', 'not a database', 'disk image')
+READ_ONLY = None   # set only by --run: the harness supplies this module to older SQLite-based builders too
+
+
+class _ReadOnly:
+    """A live SQLite reader: mode=ro sees a normal build's committed WAL, never migrates, repairs or writes its database. Mutable index/stage bookkeeping is local to each build."""
+    def __init__(self, path, say):
+        self.db, self.say, self.path, self.lock = None, say, os.fspath(path), threading.RLock()
+        if not os.path.isfile(self.path): return
+        try: self.db = sqlite3.connect(Path(self.path).resolve().as_uri() + '?mode=ro', uri=True, timeout=WAIT, check_same_thread=False, isolation_level=None)
+        except sqlite3.Error as e: self._failed(e)
+
+    def _failed(self, e):
+        self.say(f'[RED] the read-only shader cache {self.path} cannot be read and is ignored: {e}')
+        self.close()
+
+    @staticmethod
+    def shared(name): return name.startswith(('shader/', 'variant/', 'metallib/')) and name != 'metallib/filled.json'
+
+    def run(self, sql, *args):
+        with self.lock:
+            if self.db is None: return []
+            try: return self.db.execute(sql, args).fetchall()
+            except sqlite3.Error as e: self._failed(e); return []
+
+    def get(self, name):
+        rows = self.run('SELECT b.data FROM entry e JOIN blob b ON b.id=e.blob WHERE e.name=?', name) if self.shared(name) else []
+        return bytes(rows[0][0]) if rows else None
+
+    def has(self, name): return self.shared(name) and bool(self.run('SELECT 1 FROM entry WHERE name=?', name))
+
+    def names(self, prefix):
+        return {n for n, in self.run('SELECT name FROM entry WHERE name>=? AND name<?', prefix, prefix + '\U0010ffff') if self.shared(n)}
+
+    def close(self):
+        with self.lock:
+            if self.db is not None:
+                with contextlib.suppress(sqlite3.Error): self.db.close()
+                self.db = None
 
 
 class _Files:   # an entry from or to a file, by get and put
@@ -33,10 +72,19 @@ class _Files:   # an entry from or to a file, by get and put
 
 
 class Store(_Files):
-    def __init__(self, path, say=print):
+    def __init__(self, path, say=print, *, readonly=None):
         self.path, self.say = os.fspath(path), say
         self.lock = threading.RLock()   # one connection, for dmsh_build.py's threads: a read or a write of an entry takes microseconds next to a compile
         self.full = False
+        source = readonly if readonly is not None else READ_ONLY
+        if source and os.path.realpath(source) == os.path.realpath(self.path): raise ValueError('the writable and read-only shader caches must differ')
+        self.use_lock = None
+        if source:
+            # The writer keeps its own lease, independent of the harness: a killed harness may leave its builder (and forked workers) alive.
+            os.makedirs(os.path.dirname(os.path.abspath(self.path)), exist_ok=True)
+            self.use_lock = open(self.path + '.lock', 'a')
+            fcntl.flock(self.use_lock, fcntl.LOCK_SH)
+        self.readonly = _ReadOnly(source, say) if source else None
         self._open()
 
     def _open(self):
@@ -67,14 +115,15 @@ class Store(_Files):
                 if not self._damage(e): raise
                 return []
 
-    def has(self, name): return bool(self._run('SELECT 1 FROM entry WHERE name=?', name))
+    def has(self, name): return bool(self._run('SELECT 1 FROM entry WHERE name=?', name)) or bool(self.readonly and self.readonly.has(name))
 
     def get(self, name):   # an entry's bytes, None when there is none
         rows = self._run('SELECT b.data FROM entry e JOIN blob b ON b.id=e.blob WHERE e.name=?', name)
-        return bytes(rows[0][0]) if rows else None
+        return bytes(rows[0][0]) if rows else self.readonly.get(name) if self.readonly else None
 
     def names(self, prefix):   # the set of names starting with prefix
-        return {r[0] for r in self._run('SELECT name FROM entry WHERE name>=? AND name<?', prefix, prefix + '\U0010ffff')}
+        local = {r[0] for r in self._run('SELECT name FROM entry WHERE name>=? AND name<?', prefix, prefix + '\U0010ffff')}
+        return local | self.readonly.names(prefix) if self.readonly else local
 
     def put(self, name, data, when=None):
         """An entry's bytes, replacing what it held. A cache that cannot be written (a full drive) is one [RED] line: the build goes on without it"""
@@ -134,6 +183,68 @@ class Store(_Files):
 
     def close(self):   # also folds the write-ahead log into the file, so that one file is left
         with self.lock, contextlib.suppress(sqlite3.Error): self.db.close()
+        if self.readonly: self.readonly.close()
+        if self.use_lock:
+            self.use_lock.close(); self.use_lock = None
+
+    def trim(self, limit):
+        """Bound the physical database size, oldest-written groups first; split libraries, shader outputs and variants leave whole. Called only with no builders using this regression cache."""
+        if limit < 1 << 20: raise ValueError('the shader cache limit must be at least 1 MiB')
+        self._run('PRAGMA wal_checkpoint(TRUNCATE)')
+        self._run('PRAGMA incremental_vacuum')
+        before = os.path.getsize(self.path)
+        if before <= limit: return 0
+        with self.batch(): self.db.execute('DELETE FROM blob WHERE id NOT IN (SELECT blob FROM entry)')
+        self._run('PRAGMA incremental_vacuum'); self._run('PRAGMA wal_checkpoint(TRUNCATE)')
+        rows = self._run('SELECT e.name,e.blob,e.mtime,length(b.data) FROM entry e JOIN blob b ON b.id=e.blob')
+        groups, refs, sizes = {}, {}, {}
+        for name, blob, when, size in rows:
+            parts = name.split('/')
+            group = '/'.join(parts[:2]) if parts[0] in ('shader', 'variant', 'stage') else re.sub(r'_x\d*(?=\.metallib$)', '', name)
+            ns, newest = groups.setdefault(group, ([], when)); ns.append((name, blob)); groups[group] = ns, max(newest, when)
+            refs[blob] = refs.get(blob, 0) + 1; sizes[blob] = size
+        # A stopped build's stage is not a reusable result. Prefill bookkeeping must not claim evicted libraries are still present.
+        ordered = iter(sorted(groups, key=lambda g: (g != 'metallib/filled.json' and not g.startswith('stage/'), groups[g][1], g)))
+        removed = 0
+        while os.path.getsize(self.path) > limit:
+            names, freed = [], 0
+            target = max(os.path.getsize(self.path) - limit, before // 10)
+            for group in ordered:
+                for name, blob in groups[group][0]:
+                    names.append((name,)); refs[blob] -= 1
+                    if not refs[blob]: freed += sizes[blob]
+                if freed >= target: break
+            if not names: break
+            with self.batch():
+                self.db.executemany('DELETE FROM entry WHERE name=?', names)
+                self.db.execute('DELETE FROM blob WHERE id NOT IN (SELECT blob FROM entry)')
+            removed += len(names)
+            self._run('PRAGMA incremental_vacuum'); self._run('PRAGMA wal_checkpoint(TRUNCATE)')
+        self.say(f'regression shader cache: removed {removed:,} entries, {before / (1 << 30):.2f} → {os.path.getsize(self.path) / (1 << 30):.2f} GiB (limit {limit / (1 << 30):.2f} GiB)')
+        return removed
+
+
+@contextlib.contextmanager
+def bounded(path, limit, say=print, *, legacy=None):
+    """Builds share this per-game lock; only an idle cache is trimmed, before and after a build, including a failed one. Active builds may temporarily exceed the limit."""
+    path = Path(path); path.parent.mkdir(parents=True, exist_ok=True)
+    with open(str(path) + '.lock', 'a') as lock:
+        def trim():
+            try: fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError: return
+            try:
+                if legacy is not None: adopt(legacy, path, say)
+                if path.is_file():
+                    store = Store(path, say)
+                    try: store.trim(limit() if callable(limit) else limit)
+                    finally: store.close()
+            finally: fcntl.flock(lock, fcntl.LOCK_UN)
+        trim()
+        fcntl.flock(lock, fcntl.LOCK_SH)
+        try: yield
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+            trim()
 
 
 class _Gone(Exception): pass    # a worker's end closed inside its batch
@@ -274,6 +385,19 @@ def exists(path): return os.path.isfile(os.fspath(path))
 
 def main():
     import sys
+    if sys.argv[1:2] == ['--run']:
+        # The cache format decides no shader output: use this harness's reader for SQLite-based historical builders too, without changing their translator or chain identity.
+        import argparse, runpy
+        ap = argparse.ArgumentParser(description='Run a shader builder with read-only fallback to another compile cache.')
+        ap.add_argument('--readonly', required=True); ap.add_argument('script'); ap.add_argument('args', nargs=argparse.REMAINDER)
+        a = ap.parse_args(sys.argv[2:])
+        global READ_ONLY
+        READ_ONLY = a.readonly
+        sys.modules['shader_cache'] = sys.modules[__name__]
+        sys.path.insert(0, os.path.dirname(os.path.abspath(a.script)))
+        sys.argv = [a.script, *a.args]
+        runpy.run_path(a.script, run_name='__main__')
+        return
     if len(sys.argv) != 2: sys.exit('usage: shader_cache.py <cas.db>: what it holds')
     s = Store(sys.argv[1])
     kinds = {}

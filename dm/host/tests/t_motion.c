@@ -140,7 +140,7 @@ static void swing_checks(void) {
     CHECK(near(ang[2], -0.25f, 1e-4f) && near(dir[1], -1, 1e-4f) && near(gyro[2], 0, 1e-4f), "the backswing ends still, turned a quarter clockwise (x toward world -y)");
     swing_pose(&z, 0.3, acc, gyro, ang, dir);
     CHECK(gyro[2] < 0 && near(gyro[2], -300.f / 360, 1e-3f), "the backswing turns the other way at 300 deg/s at most");
-    double peak = 0; for (double t = 0; t < SWING_BACK_S; t += 0.001) { swing_pose(&z, t, acc, gyro, ang, dir); peak = fmax(peak, fabs(gyro[2]) * 360); }
+    double peak = 0; for (int i = 0; i * 0.001 < SWING_BACK_S; i++) { swing_pose(&z, i * 0.001, acc, gyro, ang, dir); peak = fmax(peak, fabs(gyro[2]) * 360); }   // every ms of the backswing (an integer step: a double stepped by 0.001 drifts)
     CHECK(peak < 301, "the backswing stays slow");
     swing_spec x = {0, -1, 1500};
     swing_pose(&x, SWING_BACK_S, acc, gyro, ang, dir);

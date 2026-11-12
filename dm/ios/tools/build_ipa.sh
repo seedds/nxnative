@@ -170,7 +170,8 @@ ICON=${DM_ICON:-$(dirname "$ROMFS")/icon.jpg}
 mkdir -p Gen/Assets.xcassets && printf '{"info":{"author":"xcode","version":1}}\n' > Gen/Assets.xcassets/Contents.json || die "asset catalog"
 if [ -f "$ICON" ]; then
   AI=Gen/Assets.xcassets/AppIcon.appiconset; mkdir -p "$AI" || die "mkdir $AI"
-  sips -s format png -z 1024 1024 "$ICON" --out "$AI/icon.png" > /dev/null || die "sips: cannot convert the icon $ICON"
+  # sips skips an empty file with a warning and exits 0 without writing the PNG; actool then builds the app without an icon and says nothing, so the PNG itself is checked
+  sips -s format png -z 1024 1024 "$ICON" --out "$AI/icon.png" > /dev/null && [ -s "$AI/icon.png" ] || die "the icon $ICON is not an image sips can read (empty, unreadable or not an image): give a JPEG or PNG"
   printf '{"images":[{"filename":"icon.png","idiom":"universal","platform":"ios","size":"1024x1024"}],"info":{"author":"xcode","version":1}}\n' > "$AI/Contents.json"
   echo "DM_APPICON = AppIcon" >> Gen/dm.xcconfig
   t "app icon: $ICON"

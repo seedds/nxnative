@@ -134,6 +134,13 @@
 - **Fix:** count uncompressed bytes as they are read and compare them with the listed size before completing either streamed method. A mismatch stops the pack and removes the partial archive, preserving the previous IPA and its reuse index. Regression tests cover growth and shrinkage with both deflate and store.
 - **Found on:** synthetic IPA inputs while reviewing [PR #279](https://github.com/seedds/nxnative/pull/279); no game files required.
 
+### An empty icon file gives the app a blank icon and the log names it as the icon
+
+- **Symptom:** the build logs `app icon: <file>` and succeeds, but the app's home-screen icon is blank.
+- **Cause:** `build_ipa.sh` scales the icon (`DM_ICON`, `--icon` / `--fallback-icon` in the NSP script, or the extracted `icon.jpg`) to the asset catalog's `icon.png` with `sips`. `sips` skips an empty file with `Warning: … not a valid file - skipping`, exits 0 and writes nothing, so the catalog named a PNG that does not exist and `DM_APPICON` was set. `actool` then compiles that catalog with exit 0 and no message, and its partial Info.plist has no icon keys. A text file named `.jpg` or `.png` and an unreadable file already stopped the build (`sips` exits 13), naming the file.
+- **Fix:** `build_ipa.sh` also checks that the PNG was written and is not empty, and in every case stops with `the icon <file> is not an image sips can read (empty, unreadable or not an image): give a JPEG or PNG`. `dm/ios/tests/test_app_icon.py` runs the icon step alone: an image becomes a 1024x1024 icon, no file leaves the icon blank, an empty file or a text file named `.jpg` / `.png` stops naming the file.
+- **Found on:** reading the icon step; reproduced with a zero-byte `DM_ICON` (and `actool` run on the resulting catalog), no game files required. Applies to every game's iPhone build.
+
 ## RomFS images
 
 ### RomFS folder transfers fail or leave stale game files

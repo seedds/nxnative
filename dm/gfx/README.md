@@ -24,6 +24,8 @@ For the build steps of the whole project see [README.md](../../README.md) and [d
   - The game's packaged textures are in Tegra block-linear layout and are deswizzled before upload (see `tex/README.md`).
   - Presentation: the game's swapchain texture is drawn to a `CAMetalLayer`, and presentation timing is scheduled by the pacer in `nvn/nvn_pace.h`.
 
+- **The serial tables' owner `nvn/nvn_owner.m`** (`nvn_owner.h`): what a texture or program serial resolves to and who holds each object. It owns the live table (`serial_put`, `serial_del`), the ghost ring of finalized texture serials (`tex_put`, `NGHOST`), the live texture objects (`mtl_tex_init`'s part, `own_tex_end_locked` for a finalize), texture pins (`mtl_tex_pin`) and program pins (`own_prog_pin`, `mtl_prog_release`, `mtl_prog_unpin`), the held counts (`serial_table_holds`, `entry_holds`), and renaming an object everywhere (`own_rename_locked`, the upgrade path). It makes, encodes and releases nothing: what it lets go goes to the replay layer through four hooks (`own_hook_drop`: deferred release after the submission in flight; `own_hook_shared`: the sharing table; `own_hook_unheld`: retirement; `own_hook_changed`: `ser_note`). Rules the next moves keep: a lookup is borrowed and stays valid until the submission it is encoded in completes; every change of a serial's object is reported; the held counts match the tables and pins (`own_check_locked`); the lock order is `g_smu`, then `g_cpu_tex_mu`. Still in `nvn_mtl.m` under the same `g_smu`: the sharing table (`g_alias`, `alias_take_over`, which asks `serial_table_holds`), retirement (`defer_drain`, `g_retire_held`, which asks `entry_holds`), the twin path of `tex_mtl_`, and the change generation (`g_ser_gen`, `ser_note`). Open: `serial_del` leaves a finalized serial's ghost entry ([docs/reference/nvn-objects.md](../../docs/reference/nvn-objects.md#a-finalized-twin-view-left-in-the-ghost-ring)).
+
 For which Metal object each NVN object and command lands on, see [nvn_metal_mapping.md](nvn_metal_mapping.md).
 
 ### Shader translation chain
@@ -72,6 +74,7 @@ Binding conventions followed during translation (the NVN driver's layout, the sa
 |---|---|
 | `nvn/hle_nvn.c` | Interface layer: NVN takeover, object implementations, command recording, presentation pacing |
 | `nvn/nvn_mtl.m`, `nvn/nvn_mtl.h` | Replay layer: Metal device, memory pools, textures, shader loading, pipelines, drawing, presentation |
+| `nvn/nvn_owner.m`, `nvn/nvn_owner.h` | The serial tables' owner: live and ghost serials, live texture objects, texture and program pins, the held counts |
 | `nvn/nvn_obj.h` | Host-side object layouts and the command record format, shared by both layers |
 | `nvn/nvn_entry.S`, `nvn/nvn_thunks.S` | Entries for the unimplemented stub and the timing wrapper, per-function thunks |
 | `nvn/nvn_tex.c`, `nvn/nvn_tex.h` | Storage size, alignment and per-level offsets of block-linear textures (ported from deko3d) |
@@ -137,6 +140,7 @@ The tests in `dm/gfx/tests` compile the production code in directly and need a M
 | `t_deswz_gpu` | GPU deswizzling |
 | `t_present_crop` | Presentation cropping |
 | `t_mip_extent` | Effective size when rendering to a mip level other than level 0 |
+| `t_serial_owner` | The serial tables' owner alone (`nvn_owner.m` with stand-ins for the replay layer's hooks): registration, replacement, removal, finalize, the ghost ring, pins, views and renames, the held counts after every step; `DM_TEST_SERIAL_TWIN=1` asserts the open finalized-twin case |
 | `t_fuse_check`, `t_reorder_chain`, `t_defer_chain`, `t_zskip`, `t_xv`, `t_ub`, `t_pfv`, `t_rt_range`, `t_rt_range_shape`, `t_rt_range_ro`, `t_rt_depth_ro` | Compile the replay layer `nvn_mtl.m` in directly and check the various optimization and diagnostic logic inside the replay layer |
 | `test_tbdr_budget.py` | The parsing in `tools/tbdr_budget.py` |
 

@@ -69,9 +69,9 @@ int main(void) { @autoreleasepool {
         pthread_mutex_lock(&g_smu);
         uint32_t before = g_alias.n; uint64_t t0 = bp_now();
         alias_take_over(&nk);
-        double ms = (bp_now() - t0) / 1e6; uint32_t after = g_alias.n;
+        double ms = (bp_now() - t0) / 1e6; uint32_t after = g_alias.n, nser = own_stats_locked().live;
         pthread_mutex_unlock(&g_smu);
-        printf("a takeover past %d held entries with %u serials in the table: %.3f ms\n", NA, g_by_serial.n, ms);
+        printf("a takeover past %d held entries with %u serials in the table: %.3f ms\n", NA, nser, ms);
         CHECK(after == before, "held entries are kept");
         CHECK(ms < 1, "the takeover asks each entry in one lookup (under 1 ms; walking the serial table for each took 4.3 ms on an M5 Max)");
         for (int i = 0; i < NS; i++) serial_del((1ull << 62) + 100 + i);

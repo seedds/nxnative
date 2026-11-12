@@ -41,7 +41,6 @@ dm/gfx/tests/t_defer_chain.m	clang-analyzer-nullability.NullablePassedToNonnull	
 dm/gfx/tests/t_float_pad.m	bugprone-suspicious-memory-comparison	1
 dm/gfx/tests/t_geometry.m	clang-analyzer-nullability.NullablePassedToNonnull	8
 dm/gfx/tests/t_geometry.m	clang-analyzer-security.ArrayBound	1
-dm/gfx/tests/t_geometry.m	clang-analyzer-unix.cstring.UninitializedRead	1
 dm/gfx/tests/t_geometry_feedback.m	clang-analyzer-nullability.NullablePassedToNonnull	1
 dm/gfx/tests/t_geometry_primitive_id.m	clang-analyzer-nullability.NullablePassedToNonnull	1
 dm/gfx/tests/t_image_alias.m	clang-analyzer-nullability.NullablePassedToNonnull	1

@@ -294,9 +294,9 @@ int main(int argc, const char **argv) { @autoreleasepool {
     cpy = own; mtl_tex_release(&cpy);
     CHECK(tex_cpu_written(own.serial) == 1, "finalizing a copy leaves the texture live");
     mtl_tex_release(&own);
-    CHECK(!nvn_hm_get(&g_tex_live, &own.serial), "finalizing the object itself ends it");
+    CHECK(!own_tex_live(own.serial), "finalizing the object itself ends it");
     own.serial = 900002; mtl_tex_init(&own); moved = own; own.magic = 0; mtl_tex_release(&moved);
-    CHECK(!nvn_hm_get(&g_tex_live, &moved.serial), "a copy outliving the object it was initialized in ends the texture");
+    CHECK(!own_tex_live(moved.serial), "a copy outliving the object it was initialized in ends the texture");
     retired_classification(); descriptor_replacement();
     if (argc > 1 && !strcmp(argv[1], "--metal")) { mtl_init(); finalized_upload(0); finalized_upload(1); finalize_during_walk(); poll_asks_again(); poll_beside(); handover_holders(); }
     printf("t_cpu_tex: %d checks, %d failed\n", checks, failed); return failed != 0;

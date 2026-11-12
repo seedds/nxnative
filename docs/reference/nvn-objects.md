@@ -229,6 +229,14 @@ A game may tell NVN objects apart by their bytes, without an NVN call. A host re
 - **Cause:** a game that records transient render targets and finalizes them before it submits: replay put the dead serials back into `g_by_serial`.
 - **Fix:** dead serials go to a 512-entry table (`tex_put`, `g_ghost`; the memory line's `finalized textures still referenced`).
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) (the HUD captures, the 640×360 buffers; found while fixing GitHub issue #9).
+- **Note:** the tables are `nvn_owner.m`'s (dm/gfx/README.md). `t_serial_owner` holds them to their behaviour, linked with the owner alone: live registration, replacement and removal, where `tex_put` sends a serial (live table for a live texture object or an external texture, ghost ring for a finalized one), finalizing, ring eviction at 512, texture and program pins, a view's entry counting its parent, and the held counts (`g_by_serial_held`, `g_ghost_held`, pins included) against the tables after every step.
+
+### A finalized twin view left in the ghost ring
+
+- **Symptom:** none seen on a game. A finalized texture can resolve to an sRGB / linear view of storage that no longer holds its bytes.
+- **Cause:** the twin path of `tex_mtl_` puts the view it made for a finalized serial with `tex_put`, which sends a finalized serial to the ghost ring; when the shared texture left the sharing table meanwhile, it drops the view with `serial_del` (`nvn_owner.m`), which removes only a live entry. The ghost entry stays, and holds the view. The next `tex_put` of the serial normally replaces it a few lines later; it stays when making the texture's own one fails (`tex_mtl_` returns nil), and another thread can resolve it in between.
+- **Fix:** open. `DM_TEST_SERIAL_TWIN=1 ./t_serial_owner` reproduces it at the table level (without the switch the run prints what it finds and counts no failure).
+- **Found on:** no game; found in a review of the serial tables.
 
 ### A replay's own objects take serials above a capture's
 

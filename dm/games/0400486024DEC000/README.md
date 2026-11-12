@@ -73,6 +73,31 @@ Measured on an M6 Mac with 16 GB, headless, on one walk with camera turns (`walk
 - Where the full-resolution GPU frame goes (M4 Pro, Metal System Trace, 2026-11-08): vertex/mesh 4.9, fragment 5.2, compute 4.3 ms per 1/60 s, and they do not overlap (their union is 14.4 ms, their sum 14.4). The heaviest passes: the main mesh pass (task `a5288d0a6c4971fd`, mesh `3439aaa071d868ae`, fragment `a1a56cf6d62ae798`), two foliage passes (task `47f9b38490dcf9a2`), and the upscaler's compute (`fa3033d05c0a41d6`, 177 HMMA calls, already on `simdgroup` matrices). Ruled out: the stage serialization is mostly the game's own barriers (about 70 a frame, 39 of them `ORDER_PRIMITIVES | INVALIDATE_TEXTURE`). The relaxed draw-pass barriers of `draw_barriers game` were then off whenever an image family heap existed (this game's dynamic-resolution depth buffer makes one). Keeping them on with the alias flush moved to a start barrier skipped 22% of the full barriers, but the real GPU span on this M4 Pro did not change (14.7 ms p50 either way, two runs each). That change is on main now, with fragment-only barriers no longer forcing the full one, for its gain on the M1 Max ([Draw passes that wait for each other again while images share memory](../../../docs/reference/frame-rate.md#draw-passes-that-wait-for-each-other-again-while-images-share-memory)). Also ruled out: mesh shaders writing only the vertices their primitives use (the highest index + 1, instead of all `max_v`), as an overlay of the 31 play mesh shaders against the same shaders recompiled: span 14.7 / 15.5 ms against 16.0 / 15.6, so the game's meshlets are full. A shader timeline needs the trace attached before the pipelines are made, and a recording from 3 s to the play window (9 GB, or 45 s with the shader profiler) never finished saving.
 - Measured on the M4 Pro (20-core GPU, 2026-11-08, `kokiri-deck`, one run each): at full resolution (the main passes 1536x864 in pass dumps at 75, 100 and 125 s) 48.1 fps, frame p50 16.74 / p95 33.41 ms, GPU p50 15.0 / p95 16.9 ms: the GPU needs about one vsync a frame, so the frame step holds 2 vsyncs much of the time. With the game's own dynamic resolution and the host fixes above: 60 fps, GPU p50 12.6 ms, at a lower resolution. A second dynamic-resolution run wandered off the route into Saria's dialogue and is not counted.
 
+## Frame generation (60 fps on slower Macs)
+
+Docked, an M1 Max (32-core GPU) needs about 22-28 ms of GPU work a frame at any render size (the mesh passes, compute post-processing and the upscaler barely scale with the resolution). The game can't render 60 there, so `DM_FRAMEGEN=1` makes it render 30 and the host shows 60:
+
+- The game runs its 30 fps step (`main.c` sets `DM_FPS_TARGET=30`), and the display link stays at 60 Hz (no 30 Hz link, no 120 Hz VRR pacing). On the tick a new frame arrives, a picture between it and the previous frame is shown; on the next tick, the frame itself. That adds one tick of latency. [`nvn_fg.inc`](../../gfx/nvn/nvn_fg.inc), [`fg_core.h`](../../gfx/nvn/fg_core.h).
+- The picture comes from MetalFX's frame interpolator (`MTL4FXFrameInterpolator`). The game gives no motion vectors, so the host computes them by block matching on a quarter-resolution luma pyramid (5 levels).
+- A guard pass puts the real frame's pixels back where the motion doesn't fit, such as Link running against a still background. Its thresholds are relative to local contrast: `DM_FG_GT0` 0.6, `DM_FG_GT1` 1.2.
+- Fast camera turns: above `DM_FG_MVBAIL` permille of the width of mean motion per frame (12), the host blends the two frames along the best-matching motion per pixel instead of MetalFX's picture, which breaks into blocks there (`DM_FG_WARP`).
+- A detail pass carries the real frame's high frequencies into the generated picture when it is made at half scale. `DM_FG_SCALE` (0.5 recommended, 2.3 ms of GPU), `DM_FG_GUARD`, `DM_FG_DETAIL`.
+- A display-link tick with no new frame queued still shows the held real frame (`DM_FG_EMPTYHOLD`, on). Before this, a game that queued its frame just in time lost every held tick and showed only generated pictures, 30 a second, with random drops to 9-17 real frames a second.
+- `DM_UP_SHARPEN` (0 to 1, default 0.5): FSR1's RCAS after MetalFX's spatial scaler, in place of the copy to the drawable, so it costs nothing. It only applies when MetalFX scales the picture, which this game docked doesn't use on `main`.
+- Resolution: the game's dynamic resolution steers by a load measured against a 60 fps budget, so at 30 it sits at its floor (1067x600). Use one fixed size: a RomFS overlay with every docked `DynamicResolutionParam` level at 0.8 (2048x1152), given as `DM_ROMFS_OVERLAY=<folder holding Pack/>`.
+
+Measured on an M1 Max MacBook Pro (64 GB, on AC, macOS 27.2), docked, Kokiri Forest, the packed Mac app with a warm pipeline cache, `DM_FRAMEGEN=1 DM_FG_SCALE=0.5`, at a fixed 2048x1152 (2026-11-12): the game's base rate is 30.0 in steady play, and a played session held 60 on screen; fast camera turns still feel less smooth than walking. The same changes on the older base `ed97f31d` (with the MetalFX upscaler), as pictures shown per second over 20 s segments:
+
+| Render size | Walk: mean / worst segment | Camera spin |
+|---|---|---|
+| 1707x960 (0.66) | 59.9-60.0 / 59.5 (3 runs) | |
+| 1906x1072 (0.73) | 59.9 / 58.8 | |
+| 2048x1152 (0.80) | 59.9 / 59.0 (25 segments) | 60.0 / 59.8 |
+| 2276x1280 (0.88) | 59.1 / 56.6 | |
+| 2439x1372 (0.9375) | 58.1 / 52.9 | |
+
+Without frame generation the same Mac ran 25-36 fps docked. Not measured: Hyrule Field and other heavy areas, and other Macs.
+
 ## Memory
 
 - Current: on the walk, run from an external drive with a 3.5 GB pipeline archive: resident 10.9-11.4 GB, wired about 9.4 GB, on a 16 GB Mac. `vmmap` and `footprint`: 6.4 GB of guest memory and 3.8 GB of Metal textures and targets, 1 GB of IOAccelerator memory. [Reading the archive into memory](../../../docs/reference/memory.md#a-pipeline-archive-on-an-external-drive-is-read-into-memory) used to add 3.5 GB (footprint 15.0, peak 16.7). `mem_map_limit on`: a map past the application pool fails as on Horizon, and the SDK's allocator then gives back the pages it keeps. Other apps' memory adds to the swap: other games running beside it can push the Mac over.

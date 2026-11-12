@@ -31,6 +31,7 @@ static void merge_rumble_to_s2(int on);
 #include "home_quit.h"
 #include "home_quit_mac.h"
 #include "ctrl_prompt.h"
+#include "err_dialog_mac.h"
 #include <signal.h>
 #include <math.h>
 #include <sys/stat.h>
@@ -60,8 +61,8 @@ static void screen_refresh(NSScreen *screen) {   // main thread: refresh capabil
     g_screen_variable_refresh = screen.minimumRefreshInterval > 0 && screen.maximumRefreshInterval > screen.minimumRefreshInterval;
 }
 static _Atomic int g_fullscreen;   // the window is in fullscreen (set when it has entered and when it has left)
-// The software keyboard input box is up (front_text_input). The game window is not key then, which is not a focus change the game should see: on hardware the inline keyboard is drawn inside
-// the game, which keeps its focus, and ShowKeyboard's applet sends its own out-of-focus / in-focus pair (DM_APPLET). Monster Hunter Rise dropped the hunter's name after the round trip and asked again. Main thread only
+// The software keyboard input box (front_text_input) or the error dialog (front_message) is up. The game window is not key then, which is not a focus change the game should see: on hardware the inline keyboard is drawn inside
+// the game, which keeps its focus, and ShowKeyboard's and the error applet's stand-ins send their own out-of-focus / in-focus pair (DM_APPLET). Monster Hunter Rise dropped the hunter's name after the round trip and asked again. Main thread only
 static int g_text_box;
 int front_fullscreen(void) { return g_fullscreen; }   // nvn_mtl.m link_latency: frame latency 2 in variable-refresh fullscreen
 // The screen's refresh rate matched to the game's frame rate in fullscreen (front_screen_match, from PR #79; DM_SCREEN_MATCH=0 turns it off). 60 fps on a 144 Hz screen cannot be paced
@@ -1669,6 +1670,12 @@ void front_progress(const char *title, long done, long total) {
 void front_web_attach(NSView *box) { NSView *v = g_win.contentView; box.frame = v.bounds; [v addSubview:box]; }
 void front_web_detach(NSView *box) { if (box.window && box.window.firstResponder != box.window.contentView) [box.window makeFirstResponder:box.window.contentView]; }
 
+// A box (the input box, the error dialog) takes the keyboard and the mouse, so the game window never sees the key-up of the button or the touch-up of the click that opened it: nothing
+// may stay pressed while it is up, or the game reads the stuck button / touch the moment the box closes (Stardew Valley's character creation re-opened the keyboard endlessly). Main thread
+static void box_input_clear(void) {
+    g_btn = 0; g_w = g_a = g_s = g_d = 0; g_rl = g_ru = g_rr = g_rd = 0; push();
+    dm_touch_set(NULL, 0);
+}
 // Software keyboard input box (front.h): the main thread shows an NSAlert + text field and the guest thread waits synchronously for the result. Not shown in windowless mode (returns -1, the caller treats it as cancel)
 extern int g_swkbd_min_chars;   // hle_swkbd.c: this input's minimum length from ShowKeyboardArg; the applet keeps OK disabled until the text is long enough
 int front_text_input(const char *title, const char *sub, const char *guide, const char *initial, int max_chars, char *out, int out_cap) {
@@ -1676,10 +1683,7 @@ int front_text_input(const char *title, const char *sub, const char *guide, cons
     __block int r = 0;
     __block NSString *text = nil;
     dispatch_sync(dispatch_get_main_queue(), ^{
-        // The box takes the keyboard and the mouse, so the game window never sees the key-up of the button or the touch-up of the click that opened it: nothing may stay pressed
-        // while it is up, or the game reads the stuck button / touch the moment the box closes (Stardew Valley's character creation re-opened the keyboard endlessly)
-        g_btn = 0; g_w = g_a = g_s = g_d = 0; g_rl = g_ru = g_rr = g_rd = 0; push();
-        dm_touch_set(NULL, 0);
+        box_input_clear();
         int min_chars = g_swkbd_min_chars > 0 ? g_swkbd_min_chars : 0;
         NSString *info = [NSString stringWithFormat:@"%s%s%s", sub ? sub : "", sub && *sub && guide && *guide ? "\n" : "", guide ? guide : ""];
         for (;;) {
@@ -1701,6 +1705,19 @@ int front_text_input(const char *title, const char *sub, const char *guide, cons
     if (!r) return 0;
     (void)max_chars;                              // Truncation is done uniformly in hle_swkbd.c in UTF-16 units
     snprintf(out, out_cap, "%s", text.UTF8String);
+    return 1;
+}
+
+// Error applet dialog (front.h): the main thread shows the alert (err_dialog_mac.h) and the game's thread waits until the player closes it. Not shown in windowless mode (returns -1).
+// Quit ends the game as ⌘Q does
+int front_message(const char *title, const char *text) {
+    if (!g_layer) return -1;
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        box_input_clear();
+        NSAlert *a = err_dialog_alert(title, text, @(DM_GAME_NAME));
+        g_text_box = 1; NSModalResponse r = [a runModal]; g_text_box = 0;
+        if (r == ERR_DIALOG_QUIT) { LOG("front end: quit from the error dialog"); [NSApp terminate:nil]; }
+    });
     return 1;
 }
 

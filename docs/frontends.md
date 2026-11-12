@@ -107,6 +107,7 @@ Cheats are files, not settings: the host (`dm/host/hle_cheats.c`) reads Atmosph√
 An app that links the host and the front end's game view into its own process (a launcher holding several games, say) has these hooks in `dm/host/front.h`. nxnative's own apps do not use them, so its tests and regression runs do not cover them. Each one is unset by default, and a hook must be set before the game starts.
 
 - **`front_progress_hook`**: draws the prepare step's progress ("Preparing shaders", "Preparing pipelines") instead of the front end's screen. With a window, it gets each call's title, done and total on the main thread; the title is `NULL` when the step ends.
+- **`front_message`**: a front end that replaces nxnative's Mac or iOS front end may implement it to show the error applet's dialog (title: the error code; text: the game's message), blocking the calling thread until the player closes it and returning 1, or -1 with no window. Without it, `hle_err.c`'s weak default shows nothing and the game goes on after the log line.
 - **`dm_set_game_image_header`** (iOS): names the image that carries the game's rewritten modules, when the app links them into a framework it `dlopen`s from its signed bundle instead of into its executable. Call it with that image's mach header before `dm_host_preload_start`. Only the module sections are read from it.
 
 ## Following main

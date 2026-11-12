@@ -474,6 +474,28 @@ int front_text_input(const char *title, const char *sub, const char *guide, cons
     return 1;
 }
 
+// Error applet dialog (front.h): a UIAlertController on the main thread, the game's thread waits until the player closes it. OK only: an iOS app does not end itself, and the
+// player leaves a game that shows an error again and again from the app switcher
+int front_message(const char *title, const char *text) {
+    if (!g_layer) return -1;
+    dispatch_semaphore_t done = dispatch_semaphore_create(0);
+    // stringWithUTF8String: the texts are UTF-8 (hle_err.c checked the game's); nil only for text that is not, shown as nothing
+    NSString *t = (title ? [NSString stringWithUTF8String:title] : nil) ?: @"", *m = (text ? [NSString stringWithUTF8String:text] : nil) ?: @"";
+    __block int shown = 0;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIViewController *vc = nil;
+        for (UIScene *s in UIApplication.sharedApplication.connectedScenes) if ([s isKindOfClass:UIWindowScene.class]) for (UIWindow *w in ((UIWindowScene *)s).windows) if (w.isKeyWindow) vc = w.rootViewController;
+        while (vc.presentedViewController) vc = vc.presentedViewController;
+        if (!vc) { dispatch_semaphore_signal(done); return; }
+        UIAlertController *ac = [UIAlertController alertControllerWithTitle:t message:m preferredStyle:UIAlertControllerStyleAlert];
+        [ac addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:^(UIAlertAction *x) { (void)x; dispatch_semaphore_signal(done); }]];
+        shown = 1;
+        [vc presentViewController:ac animated:YES completion:nil];
+    });
+    dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
+    return shown ? 1 : -1;
+}
+
 // Save write failed (most likely the phone's storage is full): show a notice on the main thread without blocking the game. hle_fs.c calls this when a save transaction is refused or a mount has to fall back to read-only;
 // the iOS front end used not to implement it, so there was only a log line and the player never learned that progress was not being saved
 void front_save_failed(int err) {

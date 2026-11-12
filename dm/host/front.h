@@ -46,6 +46,10 @@ int front_text_input(const char *title, const char *sub, const char *guide, cons
 // prompt over the game while controllers join and the calling thread blocks until it closes. 1: done (A or Return with the minimum in, the maximum in, or nobody left to join);
 // 0: closed (B, Escape); -1 with no window: nothing shown, the caller answers as the player closing it
 int front_ctrl_support(int min, int max);
+// Error applet (hle_err.c: nn::err's Show calls): the main thread shows a dialog with title (the error code) and text (the game's message, or a line saying it reported an error),
+// both valid UTF-8 and taken as text, and the calling thread blocks until the player closes it. 1: closed; -1 with no window: nothing shown. The Mac's has a Quit button as well, the
+// way the console's Home button closes the software over the applet. A front end without one gets hle_err.c's weak default: nothing shown, the log line only
+int front_message(const char *title, const char *text);
 
 // Early start of host loading (main.c): reading the NSO / relocation / forced takeover / prefetch start are moved to a background thread, in parallel with the front end (UIKit launch chain, Metal view);
 // the dm_main / main called afterwards waits for it to finish. For call timing and preconditions see the comments in main.c (set DM_ROMFS and the other environment variables and the cwd first; arguments identical item by item to those of the later main).

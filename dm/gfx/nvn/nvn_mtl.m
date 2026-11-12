@@ -4918,6 +4918,8 @@ static int sw_mode(const char *name, int dflt) {
     return m;
 }
 static inline int sw_on(int m) { return sw_on_at(m, atomic_load_explicit(&g_ab_phase, memory_order_relaxed)); }
+int mtl_sw_mode(const char *name, int dflt) { return sw_mode(name, dflt); }   // for switches outside this file (DM_NVN_QDEFER in nvn_queue.inc)
+int mtl_sw_on(int m) { return sw_on(m); }
 // Each phase is reported once its frames' GPU times have arrived (8 frames late) as an [ab] line: the switches on in it, GPU time and whole frame time (p50 / p90 / mean over the phase
 // without its first quarter, while the GPU clock and the frame step settle), and attachment traffic and render passes per frame (the bandwidth ledger)
 enum { AB_MAXF = 4096 };

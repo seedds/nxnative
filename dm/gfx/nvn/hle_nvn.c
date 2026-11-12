@@ -1986,6 +1986,11 @@ static void power_line(uint64_t frame) {
         if (dg + dc + du + dn != pdg + pdc + pdu + pdn) LOG("[nvn] compute dispatches up to frame %llu: %llu after a barrier of the game's, %llu after a copy's range, %llu in the full order (a binding with no range), %llu with no barrier (DM_NVN_DISPATCH_BARRIER)", frame,
             (unsigned long long)(dg - pdg), (unsigned long long)(dc - pdc), (unsigned long long)(du - pdu), (unsigned long long)(dn - pdn));
         pdg = dg; pdc = dc; pdu = du; pdn = dn;
+        { static uint64_t pd[NQD_N+1]; uint64_t d[NQD_N+1]; nq_defer_stats(d);   // DM_NVN_QDEFER
+          if (d[NQD_N] != pd[NQD_N] || d[NQD_DEFER] != pd[NQD_DEFER]) LOG("[nvn] queue defer up to frame %llu, per frame: pieces held %.2f (another queue's node went first %.2f times); held pieces run because nothing else qualified %.2f, at the cap %.2f, before a present %.2f, before a later frame %.2f, before a piece of the other class %.2f",
+            frame, (d[NQD_N] - pd[NQD_N]) / nf, (d[NQD_DEFER] - pd[NQD_DEFER]) / nf, (d[NQD_RUN_NONE_ELSE] - pd[NQD_RUN_NONE_ELSE]) / nf, (d[NQD_RUN_CAP] - pd[NQD_RUN_CAP]) / nf,
+            (d[NQD_RUN_BEFORE_PRESENT] - pd[NQD_RUN_BEFORE_PRESENT]) / nf, (d[NQD_RUN_LATER_FRAME] - pd[NQD_RUN_LATER_FRAME]) / nf, (d[NQD_RUN_OTHER_CLASS] - pd[NQD_RUN_OTHER_CLASS]) / nf);
+          memcpy(pd, d, sizeof pd); }
         char rs[400]; mtl_res_stats(rs, sizeof rs); static uint64_t pbs, pbf; uint64_t bs, bf; mtl_barrier_stats(&bs, &bf);
         uint64_t mtl_cut_count(void), mtl_copy_cut_count(void), mtl_blit_splits(void); void mtl_ubd_stats(uint64_t *, uint64_t *); static uint64_t pcut, pccut, pbsp, pud, puc; uint64_t cut = mtl_cut_count(), ccut = mtl_copy_cut_count(), bsp = mtl_blit_splits(), ud, uc; mtl_ubd_stats(&ud, &uc);
         void mtl_ubp_stats(uint64_t *, uint64_t *, uint64_t *); static uint64_t ppm, ppr, ppf; uint64_t pm, pr, pf_; mtl_ubp_stats(&pm, &pr, &pf_);

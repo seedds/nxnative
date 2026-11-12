@@ -118,6 +118,31 @@ static void case_cross_queue(void) {
     if(!drained) _Exit(2);
     P(nvnSyncFinalize)(&consumed); P(nvnSyncFinalize)(&produced);
 }
+// DM_NVN_QDEFER's policy and its classification of recorded pieces (the replay order it changes is exercised by every case above, run again with the switch on in the check)
+static void case_qdefer(void) {
+    printf("CASE queue defer: policy and piece classes\n");
+    nq_node render={.kind=NQ_COMMANDS,.cls_first=NQC_RENDER,.cls_last=NQC_RENDER}, comp={.kind=NQ_COMMANDS,.cls_first=NQC_COMPUTE,.cls_last=NQC_COMPUTE}, ev={.kind=NQ_EVENT}, empty={.kind=NQ_COMMANDS};
+    uint64_t cap=3000000; nq_node pres={.kind=NQ_PRESENT};
+    CHECK(nq_holdable(&comp,NQC_RENDER,0) && nq_holdable(&render,NQC_COMPUTE,0),"defer: a piece of the other class than the last one's is held");
+    CHECK(!nq_holdable(&render,NQC_RENDER,0) && !nq_holdable(&comp,NQC_COMPUTE,0) && !nq_holdable(&comp,NQC_NONE,0) && !nq_holdable(&ev,NQC_RENDER,0) && !nq_holdable(&empty,NQC_RENDER,0),"defer: same class, nothing replayed yet, waits and state-only pieces are not held");
+    CHECK(!nq_holdable(&comp,NQC_RENDER,1),"defer: nothing is held while a CPU thread waits on a fence");
+    CHECK(nq_defer_decide(NQC_RENDER,10,0,&render,10,100,cap)==NQD_DEFER,"defer: render → (held compute) → render: the render piece goes first");
+    CHECK(nq_defer_decide(NQC_COMPUTE,10,0,&comp,10,100,cap)==NQD_DEFER,"defer: compute → (held render) → compute: the compute piece goes first");
+    CHECK(nq_defer_decide(NQC_RENDER,10,0,&ev,10,100,cap)==NQD_DEFER && nq_defer_decide(NQC_RENDER,10,0,&empty,10,100,cap)==NQD_DEFER,"defer: a ready wait or state-only piece goes first");
+    CHECK(nq_defer_decide(NQC_RENDER,10,0,&comp,10,100,cap)==NQD_RUN_OTHER_CLASS,"defer: another piece of the held one's class does not qualify");
+    CHECK(nq_defer_decide(NQC_RENDER,10,0,&pres,10,100,cap)==NQD_RUN_BEFORE_PRESENT,"defer: never behind a present");
+    CHECK(nq_defer_decide(NQC_RENDER,10,0,&render,11,100,cap)==NQD_RUN_LATER_FRAME,"defer: never behind a later frame's work");
+    CHECK(nq_defer_decide(NQC_RENDER,10,0,NULL,0,100,cap)==NQD_RUN_NONE_ELSE,"defer: nothing else ready: the held piece runs");
+    CHECK(nq_defer_decide(NQC_RENDER,10,50,&render,10,50+cap,cap)==NQD_RUN_CAP && nq_defer_decide(NQC_RENDER,10,50,&render,10,49+cap,cap)==NQD_DEFER,"defer: the cap runs it, not a nanosecond earlier");
+    CHECK(nq_op_class(OP_DISPATCH)==NQC_COMPUTE && nq_op_class(OP_COPY_B2B)==NQC_COMPUTE && nq_op_class(OP_DRAW_IDX)==NQC_RENDER && nq_op_class(OP_CLEAR_TEX)==NQC_RENDER && nq_op_class(OP_SIGNAL_EVENT)==NQC_NONE && nq_op_class(OP_BARRIER)==NQC_NONE,"defer: op classes");
+    // A recorded copy-only piece is compute-only (the class DM_NVN_QDEFER holds)
+    nq_job *j=calloc(1,sizeof *j); if(!j) _Exit(2); j->objects.klen=16; NVNsync f; P(nvnSyncInitialize)(&f,&device);
+    pthread_mutex_lock(&g_sub_mu); nq_flatten(j,(const uint8_t *)(uintptr_t)consumer(0,0,&f,0)); nq_end(j); pthread_mutex_unlock(&g_sub_mu);
+    nq_node *c=j->first; while(c && c->kind!=NQ_COMMANDS) c=c->next;
+    CHECK(c && c->cls_any==1u<<NQC_COMPUTE && c->cls_first==NQC_COMPUTE && c->cls_last==NQC_COMPUTE,"defer: a recorded copy-only piece is compute-only");
+    for(nq_node *m=j->first,*nx;m;m=nx) { nx=m->next; if(m->receipt) nq_put(m->receipt); free(m->signals); free(m->bytes); free(m); }
+    pthread_mutex_lock(&g_sub_mu); nq_job_free(j); pthread_mutex_unlock(&g_sub_mu); P(nvnSyncFinalize)(&f);
+}
 // Receipt tests observe public sync completion. This helper only waits until the scheduler has encoded the logical fence, so a negative GPU assertion cannot pass merely because its CPU worker has not run yet.
 static int receipt_encoded(NVNsync *sync,uint64_t timeout) {
     uint64_t start=now_ns(),fence=0; int ready=0;
@@ -382,6 +407,7 @@ int main(void) { @autoreleasepool {
     case_wait("wrap accepts half-range minus one",1,0x7fffffff,0,1);
     case_wait("wrap rejects exactly half-range",1,0x80000000,0,0);
     case_cross_queue();
+    case_qdefer();
     event_stale_gpu_reset();
     event_queued_write(NVN_EVENT_SIGNAL_MODE_WRITE);
     event_queued_write(NVN_EVENT_SIGNAL_MODE_ADD);

@@ -611,9 +611,11 @@ t_queue_lifetime: t_queue_lifetime.m $(MTL_T_DEP)
 check_t_wait_event: t_wait_event
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./$<
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./$<
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 DM_NVN_QDEFER=1 ./$<
 check_t_queue_lifetime: t_queue_lifetime
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./$<
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./$<
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 DM_NVN_QDEFER=1 ./$<
 
 t_render_enable_queue: t_render_enable_queue.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_render_enable_queue.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)

@@ -12,7 +12,7 @@ typedef struct nq_node {
     struct nq_node *next;
     uint8_t *bytes; size_t length, capacity;
     unsigned kind, mode, closed, waiting; volatile uint32_t *event; uint32_t value;
-    uint64_t wait_fence, event_predecessor, wait_since; unsigned wait_kind, wait_said; const sync_t *sync_source; nq_receipt *receipt;
+    uint64_t wait_fence, event_predecessor, wait_since; unsigned wait_kind, wait_said, cls_first, cls_last, cls_any, defers; uint64_t defer_since; const sync_t *sync_source; nq_receipt *receipt;
     nq_signal *signals; unsigned signal_count;   // NQ_COMMANDS: every event signal it records, in order (nq_event_issued at its commit)
     tex_t texture; double period; int crop[4];
 } nq_node;
@@ -98,6 +98,46 @@ static void nq_snapshot_sync(nq_node *n,const sync_t *s) {
     if(s->fenced==3) { n->receipt=(nq_receipt *)(uintptr_t)s->fence; n->receipt->refs++; }
 }
 typedef struct { uint64_t wall, cpu, instr, cycles, sys; } nq_cost;
+// DM_NVN_QDEFER (0 / 1 / ab, off by default): between ready pieces of different NVN queues, the replay keeps to the class of work it is in. Each piece the scheduler
+// replays is a Metal command buffer whose render passes and compute encoders end with it, and the order between pieces of different queues is the host's choice wherever no
+// event or sync wait orders them; round robin alternates them. Ocarina of Time's queue 5 holds all of its frame's compute (culling, wind, particles, AO, the ambient cache: 139
+// dispatches in 11 pieces, no render pass) and queue 1 every render pass, and round robin replays them RCRCRC...: 22 switches between compute and render a frame from the
+// pieces alone, at 35-46 us median each on an M2 with a long compute → render tail. Ampere runs the two queues side by side; one Metal queue cannot, but it can keep runs
+// together. With the switch on, a ready command piece whose first class (render or compute) is not the class the last replayed piece ended in is held while the scan looks for
+// a ready wait (bookkeeping, which may release more of the same class) or a ready piece of the last class, and goes first otherwise. On a frame of Ocarina of Time's (its queue order replayed
+// offline with its waits) that is 5 switches between pieces instead of 22, the same as the best order its waits allow. A held piece runs at once when a CPU thread waits
+// on a fence (nvn_sync_wait), when it has been held DM_NVN_QDEFER_US (default 3000 us), when the alternative is a present or of a later frame, or when nothing else qualifies.
+// NVN allows this: work of two queues is ordered only by event and sync waits, the scan takes only pieces whose waits are met, and one queue's order never changes
+enum { NQC_NONE, NQC_RENDER, NQC_COMPUTE };
+static unsigned nq_op_class(uint32_t op) {
+    switch(op) {
+    case OP_DRAW: case OP_DRAW_IDX: case OP_MULTI_DRAW: case OP_DRAW_TEX: case OP_CLEAR_COLOR: case OP_CLEAR_DS: case OP_CLEAR_TEX: return NQC_RENDER;   // a texture clear lands as a pass
+    case OP_DISPATCH: case OP_COPY_B2B: case OP_COPY_B2T: case OP_COPY_STRIDE: case OP_COPY_T2B: case OP_COPY_T2T: case OP_CLEAR_BUF: case OP_DLSS: return NQC_COMPUTE;
+    default: return NQC_NONE;
+    }
+}
+// Whether the first ready node is held: a command piece of a class other than the one the last replayed piece ended in, unless a CPU thread waits on a fence
+static int nq_holdable(const nq_node *n,unsigned last_cls,unsigned cpu_waiters) {
+    return !cpu_waiters && n->kind==NQ_COMMANDS && n->cls_first!=NQC_NONE && last_cls!=NQC_NONE && n->cls_first!=last_cls;
+}
+enum { NQD_RUN_NONE_ELSE, NQD_RUN_CAP, NQD_RUN_BEFORE_PRESENT, NQD_RUN_LATER_FRAME, NQD_RUN_OTHER_CLASS, NQD_DEFER, NQD_N };
+// For a held piece and another queue's ready node: NQD_DEFER takes the other node first; NQD_RUN_* says why the other does not qualify (the scan keeps looking; NQD_RUN_CAP
+// runs the held piece at once)
+static unsigned nq_defer_decide(unsigned last_cls,uint64_t held_frame,uint64_t held_since,const nq_node *other,uint64_t other_frame,uint64_t now,uint64_t cap_ns) {
+    if(held_since && now-held_since>=cap_ns) return NQD_RUN_CAP;
+    if(!other) return NQD_RUN_NONE_ELSE;
+    if(other->kind==NQ_PRESENT) return NQD_RUN_BEFORE_PRESENT;
+    if(other_frame>held_frame) return NQD_RUN_LATER_FRAME;
+    if(other->kind!=NQ_COMMANDS) return NQD_DEFER;   // a wait, sync or fence: bookkeeping, no GPU work
+    if(other->cls_first==NQC_NONE || other->cls_first==last_cls) return NQD_DEFER;
+    return NQD_RUN_OTHER_CLASS;
+}
+static uint64_t nq_defer_n[NQD_N+1];   // decisions by reason; [NQD_N]: pieces that waited at least once
+static unsigned nq_last_cls, nq_cpu_waiters;
+int mtl_sw_mode(const char *name, int dflt); int mtl_sw_on(int m);
+static int nq_defer_mode(void) { static int m=-1; if(m<0) m=mtl_sw_mode("DM_NVN_QDEFER",0); return m; }
+static uint64_t nq_defer_cap(void) { static uint64_t c; if(!c) { const char *e=getenv("DM_NVN_QDEFER_US"); long v=e?atol(e):0; c=(uint64_t)(v>0?v:3000)*1000; } return c; }
+static void nq_defer_stats(uint64_t s[NQD_N+1]) { pthread_mutex_lock(&nq_mu); memcpy(s,nq_defer_n,sizeof nq_defer_n); pthread_mutex_unlock(&nq_mu); }
 static nq_cost nq_cost_begin(void) {
     nq_cost c={.wall=now_ns(),.cpu=clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID),.sys=thr_sys_ns()};
     thr_counts(&c.instr,&c.cycles); return c;
@@ -118,7 +158,7 @@ static void *nq_worker(void *unused) {
         for(;;) {
         scan_again:;
             if(nq_test_held) { pthread_cond_wait(&nq_cv,&nq_mu); continue; }
-            int mapped_event_wait=0;
+            int mapped_event_wait=0, qdefer=mtl_sw_on(nq_defer_mode()); nq_queue *hq=NULL; nq_node *hn=NULL; nq_job *hj=NULL; unsigned hwhy=NQD_RUN_NONE_ELSE;   // hq: a piece held (DM_NVN_QDEFER)
             for(q=nq_queues;q;q=q->next) {
                 j=q->first; if(!j) continue; n=j->first;
                 if(!n) { nq_publish(j->receipt,q->physical); q->first=j->next; if(!q->first) q->last=NULL; nq_put(j->receipt);
@@ -148,7 +188,18 @@ static void *nq_worker(void *unused) {
                     // (wait_kind 0) is a snapshot of nothing to wait for, and the wait passes. Sparking! ZERO, on one NVN queue, waits on a sync before that queue's own first
                     // fence of it at its first load, which runs on the console; parked here, the fence behind the wait never published and its SyncWait stalled the game (#1808)
                 }
+                if(qdefer) {   // DM_NVN_QDEFER: hold a piece of the other class while another queue offers a wait or a piece of the class in progress
+                    if(!hq) { if(nq_holdable(n,nq_last_cls,nq_cpu_waiters)) { hq=q; hn=n; hj=j; continue; } break; }
+                    unsigned why=nq_defer_decide(nq_last_cls,hj->frame,hn->defer_since,n,j->frame,now_ns(),nq_defer_cap());
+                    if(why==NQD_DEFER) break;
+                    hwhy=why; if(why==NQD_RUN_CAP) { q=NULL; break; }
+                    continue;
+                }
                 break;
+            }
+            if(hq) {
+                if(q) { nq_defer_n[NQD_DEFER]++; if(!hn->defers) { hn->defer_since=now_ns(); nq_defer_n[NQD_N]++; } hn->defers++; }
+                else { nq_defer_n[hwhy]++; q=hq; n=hn; j=hj; }
             }
             if(q) break;
             // NVN events can also be changed by plain stores through mapped pool memory.
@@ -180,6 +231,7 @@ static void *nq_worker(void *unused) {
             }
             nq_cost_end(cost); gfx_leave(); objc_autoreleasePoolPop(pool); pthread_mutex_unlock(&g_sub_mu);
         }
+        if(n->kind==NQ_COMMANDS && n->cls_last) nq_last_cls=n->cls_last;   // DM_NVN_QDEFER: what the last replayed piece ended in
         pthread_mutex_lock(&nq_mu); if(n->kind==NQ_PRESENT) { q->present=present; q->copy=copy; j->receipt->present=present; j->receipt->copy=copy; } if(fence) { q->physical=fence; for(unsigned i=0;i<n->signal_count;i++) nq_event_issued(n->signals[i].event,fence,n->signals[i].mode,n->signals[i].value); } if(n->receipt) nq_put(n->receipt); free(n->signals); free(n->bytes); free(n); pthread_cond_broadcast(&nq_cv); pthread_mutex_unlock(&nq_mu);
     }
     return NULL;
@@ -205,6 +257,7 @@ static void nq_record_one(nq_job *j,const uint8_t *p,op_hdr h) {
         else { memcpy(&n->sync_source,a,8); if(h.op==OP_FENCE_SYNC) n->receipt=nq_new(); }
     } else {
         nq_node *n=j->last; if(!n || n->kind!=NQ_COMMANDS || n->closed) n=nq_append(j,NQ_COMMANDS);
+        unsigned cls=nq_op_class(h.op); if(cls) { if(!n->cls_first) n->cls_first=cls; n->cls_last=cls; n->cls_any|=1u<<cls; }   // DM_NVN_QDEFER
         size_t offset=n->length; nq_bytes(n,p,h.size); if(!n->bytes) die("queue commands: a record of %u bytes",h.size);
         if(!cap_rec_fields(h.op,n->bytes+offset+8,h.size,&nq_snapshot_ops,j)) die("queue snapshot: unknown command %u",h.op);
         if(h.op==OP_SIGNAL_EVENT) {
@@ -273,13 +326,13 @@ void nvn_queue_fence(queue_t *q,sync_t *s) {
     pthread_mutex_unlock(&nq_mu);
 }
 int nvn_sync_wait(const sync_t *s,uint64_t timeout) {
-    uint64_t start=now_ns(),fence=0; pthread_mutex_lock(&nq_mu);
+    uint64_t start=now_ns(),fence=0; pthread_mutex_lock(&nq_mu); nq_cpu_waiters++; pthread_cond_broadcast(&nq_cv);   // DM_NVN_QDEFER: a held piece runs while the CPU waits
     while(!nq_sync_encoded(s,&fence)) {
-        uint64_t elapsed=now_ns()-start; if(timeout!=UINT64_MAX && elapsed>=timeout) { pthread_mutex_unlock(&nq_mu); return 0; }
+        uint64_t elapsed=now_ns()-start; if(timeout!=UINT64_MAX && elapsed>=timeout) { nq_cpu_waiters--; pthread_mutex_unlock(&nq_mu); return 0; }
         if(timeout==UINT64_MAX) pthread_cond_wait(&nq_cv,&nq_mu);
         else { uint64_t left=timeout-elapsed; struct timespec ts={(time_t)(left/1000000000ull),(long)(left%1000000000ull)}; pthread_cond_timedwait_relative_np(&nq_cv,&nq_mu,&ts); }
     }
-    pthread_mutex_unlock(&nq_mu); uint64_t elapsed=now_ns()-start;
+    nq_cpu_waiters--; pthread_mutex_unlock(&nq_mu); uint64_t elapsed=now_ns()-start;
     return mtl_wait(fence,timeout==UINT64_MAX?timeout:elapsed>=timeout?0:timeout-elapsed);
 }
 void nvn_queue_wait_sync(queue_t *q,const sync_t *s) {

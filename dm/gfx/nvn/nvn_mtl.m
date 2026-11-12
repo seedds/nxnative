@@ -6012,23 +6012,26 @@ static id<MTLFunction> fn_dev(id<MTLFunction> f) {
         return dev->fn;
     }
 }
-// A pipeline without the border corrections (dmsh_rewrite.py BORDER_LIVE_FC, DMSH_BORDER_FC): the second specialization of a function already in use. Metal hands out one MTLFunction
+// A pipeline without the border corrections (dmsh_rewrite.py BORDER_LIVE_FC, DMSH_BORDER_FC) or without the blend-zero guard (dmsh_rewrite.py BLEND_ZERO, DMSH_BLEND_FC): the second specialization of a function already in use. Metal hands out one MTLFunction
 // per function content, device-wide: newFunctionWithName: on the same library, or on another library loaded from the same data, returns the same object (macOS 27.2, M4), and the host
 // keys a function's Metal 4 descriptor and its MTLDevice specialization by that object (fn4_note, fn_dev). So the variant is not a function object of its own: whoever builds a pipeline
-// says which one it builds (off: pso_build, cps_new_b, the mesh pipelines, from pso_key.border), and takes the descriptor from fn4_of_b and the device function from fn_dev_b.
-// A descriptor always holds the shader's own function. fn_off keeps every prior constant of f's descriptor (alpha test, logic operation, merged outputs) and adds the border one;
-// cached by that descriptor. nil: f has no variant (no library descriptor, or its entry point does not declare the constant), and off builds what on builds
+// says which one it builds (off: pso_build, cps_new_b, the mesh pipelines, from pso_off of the key), and takes the descriptor from fn4_of_b and the device function from fn_dev_b.
+// A descriptor always holds the shader's own function. fn_off keeps every prior constant of f's descriptor (alpha test, logic operation, merged outputs) and adds the ones the mask names
+// that the entry declares; cached by that descriptor and mask. nil: f has no variant (no library descriptor, or its entry point declares none of the constants), and off builds what on builds
+// off is a mask of the constants set true: FN_OFF_BORDER (no sampler the draw binds has a twin, pso_key.border 0), FN_OFF_BLEND (the blend state leaves the blend-zero word 0, pso_key.bz_off)
+enum { FN_OFF_BORDER = 1, FN_OFF_BLEND = 2, FN_OFF_MASK = 3 };
 @interface FnOff : NSObject { @public MTL4FunctionDescriptor *d4; MTLFunctionConstantValues *cv; id<MTLFunction> dev; int none, dev_failed; } @end
 @implementation FnOff @end
 static os_unfair_lock g_fn_off_lock = OS_UNFAIR_LOCK_INIT;
-static NSMapTable *g_fn_off;   // MTL4FunctionDescriptor (fn4_of) → FnOff
-static FnOff *fn_off(id<MTLFunction> f) {
-    MTL4FunctionDescriptor *fd = fn4_of(f);
-    if (!fd) return nil;   // no library to specialize from (diagnostic overrides)
+static NSMapTable *g_fn_off[FN_OFF_MASK + 1];   // by off mask: MTL4FunctionDescriptor (fn4_of) → FnOff
+static FnOff *fn_off(id<MTLFunction> f, int off) {
+    off &= FN_OFF_MASK;
+    MTL4FunctionDescriptor *fd = off ? fn4_of(f) : nil;
+    if (!fd) return nil;   // nothing off, or no library to specialize from (diagnostic overrides)
     os_unfair_lock_lock(&g_fn_off_lock);
-    if (!g_fn_off) g_fn_off = [[NSMapTable alloc] initWithKeyOptions:NSPointerFunctionsStrongMemory | NSPointerFunctionsObjectPointerPersonality valueOptions:NSPointerFunctionsStrongMemory capacity:0];
-    FnOff *o = [g_fn_off objectForKey:fd];
-    if (!o) { o = [FnOff new]; [g_fn_off setObject:o forKey:fd]; }
+    if (!g_fn_off[off]) g_fn_off[off] = [[NSMapTable alloc] initWithKeyOptions:NSPointerFunctionsStrongMemory | NSPointerFunctionsObjectPointerPersonality valueOptions:NSPointerFunctionsStrongMemory capacity:0];
+    FnOff *o = [g_fn_off[off] objectForKey:fd];
+    if (!o) { o = [FnOff new]; [g_fn_off[off] setObject:o forKey:fd]; }
     os_unfair_lock_unlock(&g_fn_off_lock);
     @synchronized(o) {
         if (o->d4 || o->none) return o->none ? nil : o;
@@ -6039,26 +6042,30 @@ static FnOff *fn_off(id<MTLFunction> f) {
         }
         MTL4LibraryFunctionDescriptor *ld = [fd isKindOfClass:MTL4LibraryFunctionDescriptor.class] ? (MTL4LibraryFunctionDescriptor *)fd : nil;
         // NOLINTNEXTLINE(clang-analyzer-nullability.NullablePassedToNonnull): the descriptor's name is set when it is made (fn4_note refuses a nil name, pre_fn takes the name its function was made from) and never changed
-        if (!ld || ![ld.library newFunctionWithName:ld.name].functionConstantsDictionary[@"dm_border_off"]) { o->none = 1; return nil; }   // the entry's, not f's: a specialized f lists no constants
+        NSDictionary *declared = ld ? [ld.library newFunctionWithName:ld.name].functionConstantsDictionary : nil;   // the entry's, not f's: a specialized f lists no constants
+        int border = (off & FN_OFF_BORDER) && declared[@"dm_border_off"], blend = (off & FN_OFF_BLEND) && declared[@"dm_blend_off"];
+        if (!border && !blend) { o->none = 1; return nil; }   // sets only the constants the entry declares
         if (!cv) cv = [MTLFunctionConstantValues new];
-        BOOL yes = YES; [cv setConstantValue:&yes type:MTLDataTypeBool atIndex:DMSH_BORDER_FC];
+        BOOL yes = YES;
+        if (border) [cv setConstantValue:&yes type:MTLDataTypeBool atIndex:DMSH_BORDER_FC];
+        if (blend) [cv setConstantValue:&yes type:MTLDataTypeBool atIndex:DMSH_BLEND_FC];
         MTL4SpecializedFunctionDescriptor *sd = [MTL4SpecializedFunctionDescriptor new]; sd.functionDescriptor = ld; sd.constantValues = cv;
         o->cv = cv; o->d4 = sd;
         return o;
     }
 }
 // f's Metal 4 descriptor, without the border corrections when off
-static MTL4FunctionDescriptor *fn4_of_b(id<MTLFunction> f, int off) { FnOff *o = off ? fn_off(f) : nil; return o ? o->d4 : fn4_of(f); }
+static MTL4FunctionDescriptor *fn4_of_b(id<MTLFunction> f, int off) { FnOff *o = off ? fn_off(f, off) : nil; return o ? o->d4 : fn4_of(f); }
 // The function an MTLDevice pipeline is built from (fn_dev), without the border corrections when off: specialized through its library, once. A failed specialization keeps the corrections
 static id<MTLFunction> fn_dev_b(id<MTLFunction> f, int off) {
-    FnOff *o = off ? fn_off(f) : nil;
+    FnOff *o = off ? fn_off(f, off) : nil;
     if (!o) return fn_dev(f);
     @synchronized(o) {
         if (!o->dev && !o->dev_failed) {
             MTL4LibraryFunctionDescriptor *ld = (MTL4LibraryFunctionDescriptor *)((MTL4SpecializedFunctionDescriptor *)o->d4).functionDescriptor;
             // NOLINTNEXTLINE(clang-analyzer-nullability.NullablePassedToNonnull): fn_off made o->d4 from this ld after looking its name up; names are never nil (fn4_note, pre_fn)
             NSError *e = nil; o->dev = [ld.library newFunctionWithName:ld.name constantValues:o->cv error:&e];
-            if (!o->dev) { o->dev_failed = 1; MLOG("[RED] function %s: specializing it without the border corrections failed: %s (its pipelines keep them)", f.name.UTF8String, e.localizedDescription.UTF8String); }
+            if (!o->dev) { o->dev_failed = 1; MLOG("[RED] function %s: specializing it without the border corrections or the blend guard (mask %d) failed: %s (its pipelines keep them)", f.name.UTF8String, off & FN_OFF_MASK, e.localizedDescription.UTF8String); }
         }
         if (o->dev) return o->dev;
     }
@@ -8021,13 +8028,15 @@ static void at_bind(id<MTLCommandEncoder> en) {
 // source colour keeps 0: zeroing the source would also change that term, where NVIDIA keeps the NaN. With blending off, MIN / MAX (no weights) and every other factor the bits are 0
 // and the shader returns its colour as it is. DM_NVN_BLEND_ZERO=0 gives 0 for every draw (Apple's blender as it is), for A/B runs
 static int bz_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_BLEND_ZERO"); v = !(e && !strcmp(e, "0")); if (!v) MLOG("DM_NVN_BLEND_ZERO=0: a non-finite colour with a zero blend weight is blended as Apple's blender does (NaN kept)"); } return v; }
-static uint32_t bz_word(void) {
-    if (!S.color.blend_en || !bz_on()) return 0;
+// The word of a blend state: blend_en and blend[] by logical target, cfmt[] the pass's formats by physical target, lmap a merged pass's physical → logical map (NULL: not merged). One function for the
+// word a draw binds (bz_word) and the key's bz_off (pso_key_bz_off), so a pipeline compiled without the guard is never drawn with a word that needs it
+static uint32_t bz_word_of(uint32_t blend_en, const blend_st blend[8], const uint32_t cfmt[8], const uint8_t *lmap) {
+    if (!blend_en || !bz_on()) return 0;
     uint32_t w = 0;
     for (int i = 0; i < 8; i++) {
-        unsigned l = g_pso_lmap ? g_pso_lmap[i] : (unsigned)i;
-        if (l >= 8 || !g_pass.cfmt[i] || !(S.color.blend_en >> l & 1) || !pf_is_float((MTLPixelFormat)g_pass.cfmt[i])) continue;
-        blend_st b = adv_blend(S.blend[l]);
+        unsigned l = lmap ? lmap[i] : (unsigned)i;
+        if (l >= 8 || !cfmt[i] || !(blend_en >> l & 1) || !pf_is_float((MTLPixelFormat)cfmt[i])) continue;
+        blend_st b = adv_blend(blend[l]);
         if (b.eq_rgb == NVN_BLEND_EQUATION_MIN || b.eq_rgb == NVN_BLEND_EQUATION_MAX) continue;
         if (b.dst_rgb == NVN_BLEND_FUNC_SRC_COLOR || b.dst_rgb == NVN_BLEND_FUNC_ONE_MINUS_SRC_COLOR || blend_is_src1(b.dst_rgb)) continue;
         uint32_t m = b.src_rgb == NVN_BLEND_FUNC_SRC_ALPHA ? 1 : b.src_rgb == NVN_BLEND_FUNC_ONE_MINUS_SRC_ALPHA ? 2 : 0;
@@ -8035,10 +8044,27 @@ static uint32_t bz_word(void) {
     }
     return w;
 }
+// lmap: the map of a merged pass (physical target -> the shader's output) or NULL. draw clears g_pso_lmap before it binds the arguments, so bz_bind reads the map from g_draw_lmap
+static const uint8_t *g_draw_lmap;
+static uint32_t bz_word(const uint8_t *lmap) { return bz_word_of(S.color.blend_en, S.blend, g_pass.cfmt, lmap); }
+// g_pso_bzoff: the pso_key.bz_off of the pipeline the last pso_get (or the mesh paths' key) chose; g_draw_bzoff: that of the pipeline the draw being encoded is bound to, set by draw before its
+// arguments are bound, so bz_bind knows it without a lookup
+static int g_pso_bzoff, g_draw_bzoff;
+// The invariant the guard's compile-out rests on: a pipeline made with bz_off is never drawn while the word is not 0 (the key and the draw evaluate bz_word_of on the same state). If it ever is, the guard is
+// missing where the game's colour needs it: one red line, no change in what is drawn (the first few, then each power of two, as bz_bind's own line)
+static void bz_audit(const NvShader *fs, uint32_t v) {
+    static uint64_t n; if (++n > 3 && (n & (n - 1))) return;
+    char t[320]; size_t o = 0; t[0] = 0;
+    for (int l = 0; l < 8 && o < sizeof t - 48; l++) if (v >> (DMSH_BLEND_ZERO_BITS * l) & ((1u << DMSH_BLEND_ZERO_BITS) - 1))
+        o += (size_t)snprintf(t + o, sizeof t - o, " out%d src %u dst %u eq %u", l, (unsigned)S.blend[l].src_rgb, (unsigned)S.blend[l].dst_rgb, (unsigned)S.blend[l].eq_rgb);
+    MLOG("[RED] blend-zero guard compiled out but this draw needs it: fragment %s, word %#x, blend_en %#x, formats %u %u %u %u %u %u %u %u,%s (%llu draws so far)", fs ? fs->key : "-", v, S.color.blend_en,
+         g_pass.cfmt[0], g_pass.cfmt[1], g_pass.cfmt[2], g_pass.cfmt[3], g_pass.cfmt[4], g_pass.cfmt[5], g_pass.cfmt[6], g_pass.cfmt[7], t, (unsigned long long)n);
+}
 // The word at fragment buffer DMSH_BLEND_BUFFER, for every draw of a shader that reads it: a copy in the frame arena per value and pass, as at_bind
-static void bz_bind(id<MTLCommandEncoder> en) {
+static void bz_bind(id<MTLCommandEncoder> en, const NvShader *fs) {
     static uint64_t gpu, pass; static uint32_t last;
-    uint32_t v = bz_word();
+    uint32_t v = bz_word(g_draw_lmap);
+    if (v && g_draw_bzoff) bz_audit(fs, v);
     if (!gpu || pass != g_pass.serial || v != last) {
         __strong id<MTLBuffer> b; size_t off = arena_alloc(16, &b); memset((uint8_t *)b.contents + off, 0, 16); memcpy((uint8_t *)b.contents + off, &v, sizeof v);
         gpu = b.gpuAddress + off; pass = g_pass.serial; last = v;
@@ -8469,7 +8495,7 @@ static dispatch_group_t g_arch_pending;   // periods handed over and not written
 static _Atomic uint64_t g_pb_built, g_pb_archived, g_pb_reused, g_pb_spec, g_pb_legacy, g_pb_base_ns;
 // Time by kind, all threads (the 'pipelines up to frame' line): archive lookups that found the base / found none, specializations, base compiles; predictions (submit thread)
 static _Atomic uint64_t g_pt_hit_n, g_pt_hit_ns, g_pt_miss_n, g_pt_miss_ns, g_pt_spec_ns, g_pt_comp_ns, g_pt_pred_n, g_pt_pred_ns, g_pp_done_n;   // bases compiled / taken from the archive / reused, specializations, MTLDevice builds
-typedef struct { const void *vf, *ff; uint32_t samples, a2c, rast, topo, amp, off; uint32_t va[31][3], vl[31][3]; } pbase_key;   // off: its functions without the border corrections (fn_off);   // what a base depends on: pso_desc's descriptor less the colour attachments
+typedef struct { const void *vf, *ff; uint32_t samples, a2c, rast, topo, amp, off; uint32_t va[31][3], vl[31][3]; } pbase_key;   // off: its functions' FN_OFF_* mask (fn_off);   // what a base depends on: pso_desc's descriptor less the colour attachments
 static nvn_hmap g_pbase = {.klen = sizeof(pbase_key)};
 // Bases the archives do not have. pso4_init opens the archives once and nothing adds to them in a run, so a miss holds for the process: a later call for the base skips the search
 // (a compile 0 one returns nil, a compiling one goes straight to the compiler), and g_pbase, looked at first, takes the base once it is built. Without it every draw of a pipeline
@@ -8974,7 +9000,7 @@ static void pso_col4(MTL4RenderPipelineColorAttachmentDescriptor *a, MTLRenderPi
     a.sourceAlphaBlendFactor = c.sourceAlphaBlendFactor; a.destinationAlphaBlendFactor = c.destinationAlphaBlendFactor; a.alphaBlendOperation = c.alphaBlendOperation;
 }
 // pso_desc's descriptor as a Metal 4 one: unspec leaves every colour attachment unspecialized (the base), else copies them. nil when a function has no Metal 4 descriptor (fn4_of)
-static MTL4RenderPipelineDescriptor *pso_desc4(MTLRenderPipelineDescriptor *d, int unspec, int off) {   // off: without the border corrections (fn4_of_b)
+static MTL4RenderPipelineDescriptor *pso_desc4(MTLRenderPipelineDescriptor *d, int unspec, int off) {   // off: the FN_OFF_* mask (fn4_of_b)
     // Metal 4 requires a fragment function when rasterization is enabled. Depth-only draws still need rasterization.
     if (d.rasterizationEnabled && !d.fragmentFunction) return nil;
     MTL4FunctionDescriptor *vf = fn4_of_b(d.vertexFunction, off), *ff = d.fragmentFunction ? fn4_of_b(d.fragmentFunction, off) : nil;
@@ -8994,7 +9020,7 @@ static MTL4RenderPipelineDescriptor *pso_desc4(MTLRenderPipelineDescriptor *d, i
     return m;
 }
 static void pbase_key_of(MTLRenderPipelineDescriptor *d, int off, pbase_key *k) {
-    memset(k, 0, sizeof *k); k->off = off != 0;
+    memset(k, 0, sizeof *k); k->off = (uint32_t)off & FN_OFF_MASK;
     k->vf = (__bridge const void *)d.vertexFunction; k->ff = (__bridge const void *)d.fragmentFunction;
     k->samples = (uint32_t)d.rasterSampleCount; k->a2c = d.alphaToCoverageEnabled; k->rast = d.rasterizationEnabled; k->topo = (uint32_t)d.inputPrimitiveTopology; k->amp = (uint32_t)d.maxVertexAmplificationCount;
     MTLVertexDescriptor *vd = d.vertexDescriptor;
@@ -9114,7 +9140,12 @@ static id<MTLRenderPipelineState> pso_build_ex(MTLRenderPipelineDescriptor *d, i
     g_pt_spec_ns += bp_now() - ts;
     return ps;
 }
-static id<MTLRenderPipelineState> pso_build(MTLRenderPipelineDescriptor *d, int off, NSError **e) { return pso_build_ex(d, off, e, 1); }   // off: !pso_key.border of the key d was made from
+static id<MTLRenderPipelineState> pso_build(MTLRenderPipelineDescriptor *d, int off, NSError **e) { return pso_build_ex(d, off, e, 1); }   // off: pso_off of the key d was made from
+// Which constants a pipeline of the key sets true (fn_off): the border corrections go when no sampler the draw binds has a twin (bit 0: border is 0), and the blend-zero guard goes when the
+// pixel shader has one and the blend state leaves its word 0 (bit 1: bz_off), the usual case, a normalized target. A key made for a merged pass has no lmap until pso_get fills it in, so it keeps the guard
+// (bz_off 0) until pso_key_bz_off sets it from the whole key
+static int pso_off(const pso_key *k) { return (!k->border ? FN_OFF_BORDER : 0) | (k->bz_off ? FN_OFF_BLEND : 0); }
+static uint32_t pso_key_bz_off(const pso_key *k, NvShader *fs, int merged) { return fs && fs->has_bz && !bz_word_of(k->blend_en, k->blend, k->cfmt, merged ? k->lmap : NULL); }
 // Pipeline key: current state S + pass formats (normal pass; a merged pass additionally carries lmap / specialized function, filled in by pso_get)
 static void pso_key_fill(pso_key *k, NvShader *vs, NvShader *fs, const uint32_t cfmt[8], uint32_t dfmt, uint32_t sfmt, uint32_t samples, int lmap) {
     memset(k, 0, sizeof *k);
@@ -9127,6 +9158,7 @@ static void pso_key_fill(pso_key *k, NvShader *vs, NvShader *fs, const uint32_t 
     const nvn_refl *rf = &vs->rf;
     for (int v = 0; v < rf->nv; v++) { int a = rf->v[v].nvn; if (a < 32 && a < S.nattr) { if (a < 16) k->attr[a] = S.attr[a]; else k->attr_hi[a - 16] = S.attr[a]; int st = S.attr[a].stream; if (st < 16) k->stream[st] = S.stream[st]; } }
     pso_key_norm(k, lmap);
+    if (!lmap) k->bz_off = pso_key_bz_off(k, fs, 0);
 }
 // ---- Parallel precompile: pipelines met for the first time used to be compiled synchronously one by one on the submit thread; 9 misses in a row in one frame = 284 ms (heavy scene on a real device).
 // After satisfying the first pipeline miss in a submission, scan ahead once along the remaining commands (replaying state only, no drawing) and kick a bounded number of normal-pass pipelines to the background;
@@ -9189,7 +9221,7 @@ static int pso_pend_kick(const pso_key *k, NvShader *vs, NvShader *fs) {   // No
     pthread_mutex_lock(&g_pp_mu); uint32_t gen = 0; int slot = pso_pend_slot(k, 1, &gen); pthread_mutex_unlock(&g_pp_mu);
     if (slot < 0) return 0;
     PD("J pipeline source=predict key=%016llx vs=%s fs=%s depth=%u stencil=%u samples=%u", (unsigned long long)nvn_hm_hash(k, sizeof *k), vs->key, fs ? fs->key : "-", k->dfmt, k->sfmt, k->samples);
-    pso_pend_start(slot, gen, pso_desc(k, vs, fs, nil, 0), !k->border, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0));
+    pso_pend_start(slot, gen, pso_desc(k, vs, fs, nil, 0), pso_off(k), dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0));
     return 1;
 }
 // The build a hybrid draw asked for while it draws with its stand-in: outside the speculative limit, on pp_bg_queue
@@ -9197,7 +9229,7 @@ static int pso_pend_demand(const pso_key *k, NvShader *vs, NvShader *fs) {
     if (hm_get_id(&g_pso, k)) return 0;
     pthread_mutex_lock(&g_pp_mu); uint32_t gen = 0; int slot = pso_pend_slot(k, 0, &gen); pthread_mutex_unlock(&g_pp_mu);
     if (slot < 0) return 0;
-    pso_pend_start(slot, gen, pso_desc(k, vs, fs, nil, 0), !k->border, pp_bg_queue());
+    pso_pend_start(slot, gen, pso_desc(k, vs, fs, nil, 0), pso_off(k), pp_bg_queue());
     return 1;
 }
 // Called by the submit thread: a build in the table is taken (waited for while its worker runs it; made here at once while it is still queued, so a draw that waits waits for its
@@ -9208,7 +9240,7 @@ static id<MTLRenderPipelineState> pso_pend_take(const pso_key *k) {
     if (at >= 0 && !g_pp[at].done && !g_pp[at].run && g_pp[at].d) {
         MTLRenderPipelineDescriptor *d = g_pp[at].d; g_pp[at].d = nil; g_pp[at].used = 0;
         pthread_mutex_unlock(&g_pp_mu);
-        g_pp_stolen++; NSError *e = nil; return pso_build(d, !k->border, &e);
+        g_pp_stolen++; NSError *e = nil; return pso_build(d, pso_off(k), &e);
     }
     if (at >= 0) { while (!g_pp[at].done) pthread_cond_wait(&g_pp_cv, &g_pp_mu); ps = g_pp[at].ps; g_pp[at].ps = nil; g_pp[at].used = 0; }
     pthread_mutex_unlock(&g_pp_mu);
@@ -9251,7 +9283,7 @@ static __unsafe_unretained id<MTLRenderPipelineState> hybrid_get(const pso_key *
     if (h) return h;
     MTLRenderPipelineDescriptor *d = vs->has_pull ? pso_desc_pull(k, vs, fs) : nil;
     if (!d) return nil;
-    NSError *e = nil; int off = !k->border; id<MTLRenderPipelineState> ps = pso_build_ex(d, off, &e, 0);
+    NSError *e = nil; int off = pso_off(k); id<MTLRenderPipelineState> ps = pso_build_ex(d, off, &e, 0);
     if (!ps) {   // the pulling base is neither made nor archived: build it in the background for the pair's next miss
         pbase_key bk; pbase_key_of(d, off, &bk); NSData *kd = [NSData dataWithBytes:&bk length:sizeof bk];
         os_unfair_lock_lock(&g_hy_lock); if (!g_hy_kick_set) g_hy_kick_set = [NSMutableSet set];
@@ -9326,12 +9358,14 @@ static NSDictionary<NSString *, NSString *> *pre_fail_load(NSString *path, NSStr
     if ([head isEqualToString:pre_fail_head(want)]) return pairs;
     *other = 1; return @{};
 }
-static MTL4FunctionDescriptor *pre_fn(id<MTLLibrary> lib, NSString *name) {   // the common draw's specialization: defaults, with unused border corrections off (as fn_off's)
+static MTL4FunctionDescriptor *pre_fn(id<MTLLibrary> lib, NSString *name) {   // the common draw's specialization: defaults, with unused border corrections and the blend-zero guard off (as fn_off's)
     id<MTLFunction> f = [lib newFunctionWithName:name]; if (!f) return nil;
     MTL4LibraryFunctionDescriptor *ld = [MTL4LibraryFunctionDescriptor new]; ld.library = lib; ld.name = name;
     if (!f.functionConstantsDictionary.count) return ld;
     MTLFunctionConstantValues *cv = [MTLFunctionConstantValues new];
-    if (f.functionConstantsDictionary[@"dm_border_off"]) { BOOL yes = YES; [cv setConstantValue:&yes type:MTLDataTypeBool atIndex:DMSH_BORDER_FC]; }
+    BOOL yes = YES;
+    if (f.functionConstantsDictionary[@"dm_border_off"]) [cv setConstantValue:&yes type:MTLDataTypeBool atIndex:DMSH_BORDER_FC];
+    if (f.functionConstantsDictionary[@"dm_blend_off"]) [cv setConstantValue:&yes type:MTLDataTypeBool atIndex:DMSH_BLEND_FC];
     MTL4SpecializedFunctionDescriptor *sd = [MTL4SpecializedFunctionDescriptor new]; sd.functionDescriptor = ld; sd.constantValues = cv; return sd;
 }
 static NSDictionary *pre_json(NSString *key) { NSData *d = msl_data([NSString stringWithFormat:@"%@/%@_b.json", g_msl_dir, key]); return d ? [NSJSONSerialization JSONObjectWithData:d options:0 error:nil] : nil; }
@@ -9533,7 +9567,7 @@ static __unsafe_unretained id<MTLRenderPipelineState> sm_amp_get(const pso_key *
     if (i < g_sm_amp_n) { id ps = g_sm_amp[i].done ? g_sm_amp[i].ps : nil; os_unfair_lock_unlock(&g_sm_amp_lock); if (ps) { hm_put_id(&g_pso, k, ps); return hm_get_id(&g_pso, k); } return nil; }
     if (g_sm_amp_n >= SM_AMP_MAX) { os_unfair_lock_unlock(&g_sm_amp_lock); return nil; }
     g_sm_amp[i].k = *k; g_sm_amp[i].ps = nil; g_sm_amp[i].done = 0; g_sm_amp_n++; os_unfair_lock_unlock(&g_sm_amp_lock);
-    MTLRenderPipelineDescriptor *d = pso_desc(k, vs, fs, nil, 0); int off = !k->border;
+    MTLRenderPipelineDescriptor *d = pso_desc(k, vs, fs, nil, 0); int off = pso_off(k);
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ NSError *e = nil; id<MTLRenderPipelineState> ps = pso_build(d, off, &e);
         if (!ps) MLOG("[RED] slice-merged pass: no amplified pipeline for vertex %s fragment %s: %s (those passes stay apart)", vs->key, fs ? fs->key : "-", e.localizedDescription.UTF8String);
         os_unfair_lock_lock(&g_sm_amp_lock); g_sm_amp[i].ps = ps; g_sm_amp[i].done = 1; os_unfair_lock_unlock(&g_sm_amp_lock); });
@@ -9541,7 +9575,7 @@ static __unsafe_unretained id<MTLRenderPipelineState> sm_amp_get(const pso_key *
 }
 static __unsafe_unretained id<MTLRenderPipelineState> pso_get_(NvProg *pr, MTLRenderPassDescriptor *unused) {
     (void)unused;
-    g_pso_pull = 0;   // set again only where a pulling pipeline is returned: a stale 1 made the next draw, whose pipeline came from the cache, bind the layout block instead of its streams
+    g_pso_pull = 0; g_pso_bzoff = 0;   // set again only where a pulling pipeline is returned: a stale 1 made the next draw, whose pipeline came from the cache, bind the layout block instead of its streams
     __unsafe_unretained NvShader *vs = pr->sh[0], *fs = pr->sh[1];
     if (!vs) { RED_ONCE(13, "program has no vertex shader (or it is not mapped)"); return nil; }
     pso_key k; pso_key_fill(&k, vs, fs, g_pass.cfmt, g_pass.dfmt, g_pass.sfmt, g_pass.samples, g_pso_lmap != NULL);
@@ -9551,12 +9585,13 @@ static __unsafe_unretained id<MTLRenderPipelineState> pso_get_(NvProg *pr, MTLRe
         if (cached) return cached;
         if (hm_get_id(&g_pso_fail, &k)) return nil;
         NSError *error = nil;
-        id<MTLRenderPipelineState> ps = pso_build(pso_desc(&k, vs, nil, nil, 0), !k.border, &error);
+        id<MTLRenderPipelineState> ps = pso_build(pso_desc(&k, vs, nil, nil, 0), pso_off(&k), &error);
         if (ps) hm_put_id(&g_pso, &k, ps);
         else { MLOG("[RED] rasterizer-discard pipeline (vertex %s): %s", vs->key, error.localizedDescription.UTF8String); hm_put_id(&g_pso_fail, &k, NSNull.null); }
         return ps;
     }
-    if (g_pso_lmap) { memcpy(k.lmap, g_pso_lmap, 8); k.fsfn = (__bridge void *)g_pso_fsfn; }
+    if (g_pso_lmap) { memcpy(k.lmap, g_pso_lmap, 8); k.fsfn = (__bridge void *)g_pso_fsfn; k.bz_off = pso_key_bz_off(&k, fs, 1); }
+    g_pso_bzoff = (int)k.bz_off;   // the pipeline this key names was built with it (pso_off), so the draw knows without a lookup (bz_audit)
     id<MTLFunction> ms_fn = ms_fs_override(fs); if (ms_fn) k.fsfn = (__bridge void *)ms_fn;   // DM_NVN_MAGSCAN phases 2 / 3
     if (g_pso_amp) { if (k.fsfn || g_pso_lmap) return nil; k.fsfn = AMP_MARK; return sm_amp_get(&k, vs, fs); }   // a slice-merged pass's pipeline: built in the background, nil until then
     // DM_PSO_PULL_ALL=1 (diagnostic): every draw that has a pulling pipeline draws with it, never with the pipeline for its layout
@@ -9575,7 +9610,7 @@ static __unsafe_unretained id<MTLRenderPipelineState> pso_get_(NvProg *pr, MTLRe
         int st = pso_pend_try(&k, &ps);
         if (st == 2) took = 1;   // built in the background (nil: it failed, and is built again below for its message)
         else {
-            if (st == 0) ps = pso_build_ex(pso_desc(&k, vs, fs, nil, 0), !k.border, &e, 0);   // its base made or archived: no compile
+            if (st == 0) ps = pso_build_ex(pso_desc(&k, vs, fs, nil, 0), pso_off(&k), &e, 0);   // its base made or archived: no compile
             if (!ps) {
                 // Demand first (main's order): the draw's own pipeline is queued before the prediction admits speculative builds; with a stand-in nothing waits for it
                 __unsafe_unretained id<MTLRenderPipelineState> h = hybrid_get(&k, vs, fs);
@@ -9592,7 +9627,7 @@ static __unsafe_unretained id<MTLRenderPipelineState> pso_get_(NvProg *pr, MTLRe
     if (ps) g_pp_taken++;
     else {
         MTLRenderPipelineDescriptor *d = pso_desc(&k, vs, fs, ms_fn ? ms_fn : g_pso_fsfn, g_pso_lmap != NULL);
-        ps = pso_build(d, !k.border, &e);
+        ps = pso_build(d, pso_off(&k), &e);
     }
     if (!took) {   // the draw waited (built here, made from its queued build, or waited for its running build)
         uint64_t w = bp_now() - bt - (g_pt_pred_ns - pred0); g_pw_n[why]++; g_pw_ns[why] += w;
@@ -9742,7 +9777,7 @@ static void warm_task(WarmTask *t) {
             if (vs && vs->stage == 4 && vs->mesh_kind == 2 && vs->fn &&
                 (!t->fkey.length || (fs && fs->stage == 1 && fs->fn)) &&
                 (t->tkey ? (ts && ts->stage == 3 && ts->mesh_kind == 1 && ts->fn && !vs->mesh_notask) : vs->mesh_notask)) {
-                NSError *error = nil;
+                NSError *error = nil; sk.k.bz_off = pso_key_bz_off(&sk.k, fs, 0);   // as the draw's key has it (rows before the field read 0)
                 id<MTLRenderPipelineState> ps = mtk_build(&sk.k, ts, vs, fs, &error, NULL);
                 if (ps && g_pre_tool) g_warm_mps++;   // the prebuild tool: captured for the archive, nothing kept
                 else if (ps) {
@@ -9763,7 +9798,8 @@ static void warm_task(WarmTask *t) {
                 if (!fsfn) { g_warm_skip_fz++; g_warm_done++; continue; }
             }
             pso_key k = sk.k; k.vs = (__bridge void *)vs; k.fs = (__bridge void *)fs; k.fsfn = (__bridge void *)fsfn;   // pso_skey_parse normalized rows written before the key was
-            NSError *e = nil; id ps = pso_build(pso_desc(&k, vs, fs, fsfn, sk.merged), !k.border, &e);
+            k.bz_off = pso_key_bz_off(&k, fs, sk.merged);   // as the draw's key has it, whatever the row says (rows before the field read 0)
+            NSError *e = nil; id ps = pso_build(pso_desc(&k, vs, fs, fsfn, sk.merged), pso_off(&k), &e);
             g_warm_done++;
             if (!ps) { g_pre_warm_failed++; MLOG("[RED] background render pipeline creation failed: %s", e.localizedDescription.UTF8String); continue; }
             if (g_pre_tool) { g_warm_rps++; continue; }   // the prebuild tool: the base is in the serializer; keep nothing
@@ -11116,7 +11152,7 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
 static int encode_args(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, int metal_vertex) { cbs_note(sh); AP_B; int r = encode_args_(en, sh, nvn_stage, metal_vertex); AP_E(3); return r; }
 static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, int metal_vertex) {
     if (nvn_stage == 1 && !metal_vertex && sh->has_alpha && atest_on()) at_bind(en);   // also for a shader without bindings
-    if (nvn_stage == 1 && !metal_vertex && sh->has_bz) bz_bind(en);
+    if (nvn_stage == 1 && !metal_vertex && sh->has_bz) bz_bind(en, sh);
     if (nvn_stage == 1 && !metal_vertex && sh->has_logic && lop_on()) lo_bind(en);
     if (!sh->ae) return 1;
     args_sync_dirty();
@@ -11775,7 +11811,7 @@ static int pso_base_made(const pso_key *k, NvShader *vs, NvShader *fs) {
     pso4_init(); if (!g_comp4) return 0;
     MTLRenderPipelineDescriptor *d = pso_desc(k, vs, fs, nil, 0);
     if ([d.label isEqualToString:PSO_WHOLE] || !pso_ds_valid((uint32_t)d.depthAttachmentPixelFormat, (uint32_t)d.stencilAttachmentPixelFormat)) return 0;
-    pbase_key bk; pbase_key_of(d, !k->border, &bk);
+    pbase_key bk; pbase_key_of(d, pso_off(k), &bk);
     os_unfair_lock_lock(&g_pbase_lock); int made = hm_get_id(&g_pbase, &bk) != nil; os_unfair_lock_unlock(&g_pbase_lock);
     return made;
 }
@@ -13137,7 +13173,7 @@ static struct { pso_key k; id<MTLRenderPipelineState> ps; int done; } g_fb_tp[FB
 static int fb_tile_ready(NvShader *vs, NvShader *fs, id<MTLFunction> fn, const uint8_t lmap[8], const pso_fz_desc *fz) {
     const uint8_t *l0 = g_pso_lmap; g_pso_lmap = lmap;   // the key pso_get makes for this draw (atest_key and lop_key read the mapping)
     pso_key k; pso_key_fill(&k, vs, fs, g_pass.cfmt, g_pass.dfmt, g_pass.sfmt, g_pass.samples, 1); g_pso_lmap = l0;
-    memcpy(k.lmap, lmap, 8); k.fsfn = (__bridge void *)fn;
+    memcpy(k.lmap, lmap, 8); k.fsfn = (__bridge void *)fn; k.bz_off = pso_key_bz_off(&k, fs, 1);
     if (hm_get_id(&g_pso, &k)) return 1;
     os_unfair_lock_lock(&g_fb_tp_lock); int i = 0; for (; i < g_fb_tp_n; i++) if (!memcmp(&g_fb_tp[i].k, &k, sizeof k)) break;   // NOLINT(bugprone-suspicious-memory-comparison): pso_key_fill zeroes the whole key first, padding included (as for sm_amp_get's table)
     if (i < g_fb_tp_n) { id ps = g_fb_tp[i].done ? g_fb_tp[i].ps : nil; os_unfair_lock_unlock(&g_fb_tp_lock);
@@ -13147,7 +13183,7 @@ static int fb_tile_ready(NvShader *vs, NvShader *fs, id<MTLFunction> fn, const u
         return 1; }
     if (g_fb_tp_n >= FB_TP_MAX) { os_unfair_lock_unlock(&g_fb_tp_lock); static int once; if (!once++) MLOG("same-pass feedback sampling: %d tile-reading pipelines built; later ones keep the snapshot", FB_TP_MAX); return 0; }
     g_fb_tp[i].k = k; g_fb_tp[i].ps = nil; g_fb_tp[i].done = 0; g_fb_tp_n++; os_unfair_lock_unlock(&g_fb_tp_lock);
-    MTLRenderPipelineDescriptor *d = pso_desc(&k, vs, fs, fn, 1); int off = !k.border;
+    MTLRenderPipelineDescriptor *d = pso_desc(&k, vs, fs, fn, 1); int off = pso_off(&k);
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ NSError *e = nil; id<MTLRenderPipelineState> ps = pso_build(d, off, &e);
         if (!ps) MLOG("[RED] same-pass feedback sampling: no tile-reading pipeline for vertex %s fragment %s: %s (its draws keep the snapshot)", vs->key, fs->key, e.localizedDescription.UTF8String);
         os_unfair_lock_lock(&g_fb_tp_lock); g_fb_tp[i].ps = ps; g_fb_tp[i].done = 1; os_unfair_lock_unlock(&g_fb_tp_lock); });
@@ -14107,17 +14143,18 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     // … and on whether a sampler the draw binds has a border colour twin (pso_key.border), which follows the bindings: binding a sampler, or a handle a uniform buffer holds,
     // does not mark the pipeline dirty, so the draw compares it with the last pipeline's (found by the iPhone port, PR #1073). No look at the bindings while no registered sampler has a twin
     static int cur_border; int border = prog_border(pr);
-    static id<MTLRenderPipelineState> cur_ps; static NvProg *cur_pr; static uint64_t cur_ps_pass; static int cur_pull;   // cur_pull: a hybrid (pulling) pipeline, asked for again at the next draw
+    static id<MTLRenderPipelineState> cur_ps; static NvProg *cur_pr; static uint64_t cur_ps_pass; static int cur_pull, cur_bz;   // cur_pull: a hybrid (pulling) pipeline, asked for again at the next draw; cur_bz: the pipeline's pso_key.bz_off
     if (g_fz.active && !g_defer_replaying) { g_pso_lmap = g_fz.phase == 1 ? g_fz.lmap1 : g_fz.lmap2; g_pso_fsfn = g_fz.phase == 1 ? nil : fz_fn; g_pso_fz = g_fz.phase == 1 ? (pso_fz_desc){0} : g_fz_desc; g_pso_dirty = 1; }   // Readable tile merge: fetch the pipeline by the physical -> logical mapping and the specialization
     else if (g_fb_tseq == g_draw_seq && g_fb_tfn && !g_defer_replaying) { g_pso_lmap = g_fb_tlmap; g_pso_fsfn = g_fb_tfn; g_pso_fz = g_fb_tdesc; g_pso_dirty = 1; }   // same-pass feedback read from the tile (fb_tile_plan)
-    if (g_mtk.on) { cur_ps = mtk_pso(pr); cur_pull = 0; cur_pr = nil; if (!cur_ps) { g_mtk.miss = 1; return; } }   // a task / mesh draw (mesh_tasks_draw)
-    else if (g_geo_mesh.on) { cur_ps = geo_mesh_pso(pr); cur_pull = 1; cur_pr = nil; if (!cur_ps) { g_geo_mesh.miss = 1; return; } }   // a mesh draw (geo_mesh_draw): pulls its streams; the next draw fetches its own pipeline; none yet: the compute path draws
-    else if (g_pso_dirty || pr != cur_pr || cur_ps_pass != g_pass.serial || border != cur_border) { g_pso_amp = g_sm_pass; cur_ps = pso_get(pr, nil); g_pso_amp = 0; cur_pull = g_pso_pull; cur_pr = pr; cur_ps_pass = g_pass.serial; cur_border = border; g_pso_dirty = !cur_ps || cur_pull; }
+    if (g_mtk.on) { cur_ps = mtk_pso(pr); cur_bz = g_pso_bzoff; cur_pull = 0; cur_pr = nil; if (!cur_ps) { g_mtk.miss = 1; return; } }   // a task / mesh draw (mesh_tasks_draw)
+    else if (g_geo_mesh.on) { cur_ps = geo_mesh_pso(pr); cur_bz = g_pso_bzoff; cur_pull = 1; cur_pr = nil; if (!cur_ps) { g_geo_mesh.miss = 1; return; } }   // a mesh draw (geo_mesh_draw): pulls its streams; the next draw fetches its own pipeline; none yet: the compute path draws
+    else if (g_pso_dirty || pr != cur_pr || cur_ps_pass != g_pass.serial || border != cur_border) { g_pso_amp = g_sm_pass; cur_ps = pso_get(pr, nil); g_pso_amp = 0; cur_bz = g_pso_bzoff; cur_pull = g_pso_pull; cur_pr = pr; cur_ps_pass = g_pass.serial; cur_border = border; g_pso_dirty = !cur_ps || cur_pull; }
     if (!cur_ps && g_sm_pass) {   // a draw whose amplified pipeline is not built yet (sm_amp_get queued it): the slice-merged pass ends and the draw opens a pass of its own
         g_sm_nwait++; PD("M %llu slice-merged pass: no amplified pipeline yet for vertex %s fragment %s; split here", g_stat_pass, pr->sh[0] ? pr->sh[0]->key : "-", pr->sh[1] ? pr->sh[1]->key : "-");
         rp_end(); en = rp_begin_ex(mode); if (!en) return;
-        cur_ps = pso_get(pr, nil); cur_pull = g_pso_pull; cur_pr = pr; cur_ps_pass = g_pass.serial; cur_border = border; g_pso_dirty = !cur_ps || cur_pull; }
+        cur_ps = pso_get(pr, nil); cur_bz = g_pso_bzoff; cur_pull = g_pso_pull; cur_pr = pr; cur_ps_pass = g_pass.serial; cur_border = border; g_pso_dirty = !cur_ps || cur_pull; }
     uint32_t raster_mask = draw_color_writes(pr);   // Capture the physical mapping before resetting the merged pipeline state.
+    g_draw_lmap = g_pso_lmap;   // kept for bz_bind, whose word needs the map the pipeline was made with: the reset below ran before it, so a merged draw bound the word of an unmapped pass
     if (g_pso_lmap) { g_pso_lmap = NULL; g_pso_fsfn = nil; memset(&g_pso_fz, 0, sizeof g_pso_fz); g_pso_dirty = 1; }   // The next draw fetches again according to its own situation
     __unsafe_unretained id<MTLRenderPipelineState> ps = cur_ps;
     if (!ps) { PD("Z %llu draw skipped: no render pipeline (vertex %s fragment %s)", g_stat_pass, pr->sh[0] ? pr->sh[0]->key : "-", pr->sh[1] ? pr->sh[1]->key : "-"); return; }
@@ -14171,6 +14208,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
         if (pr->sh[0]) vconv_bind(en, pr->sh[0], S.rast_discard, g_geo_vrange ? g_geo_vrange : dw, g_geo_vrange ? NULL : di);   // integer inputs fed float-type formats or 8 / 16-bit integers of the other sign (see vconv_ncomp, vconv_int); a lean geometry draw: the vertices its indices name
     }
     g_kd_force = kd_draw(pr, dw, di);
+    g_draw_bzoff = cur_bz;   // the bound pipeline's bz_off, for bz_bind's check
     if (pr->sh[0]) encode_args(en, pr->sh[0], 0, 1);
     if (pr->sh[1] && !S.rast_discard) encode_args(en, pr->sh[1], 1, 0);
     // Binding a texture view can upgrade its texture first (tex_upgrade: a format view of a texture made without PixelFormatView), and the upgrade's copy goes through blit(),

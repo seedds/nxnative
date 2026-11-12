@@ -8,8 +8,8 @@
 #   · left out as the host leaves them out (to the draws): a reflection of another chain version or none, a vertex shader with stage inputs and no pulling library, a vertex library that
 #     writes the layer (its reflection's layer_out, dmsh_entry.py layer_out: its pipelines take an input primitive class), a pixel shader that reads the primitive ID (its reflection's
 #     raster.primitive_id: the host builds its pipelines whole, since through a base every primitive reads 0), a missing library or entry point
-#   · a function that declares function constants is specialized as the host's prebuild specializes it (pre_fn in nvn_mtl.m): the border colour corrections' dm_border_off set (true:
-#     off), the specialization the draws that bind no sampler with a twin share (fn_off). metal-tt specializes a <key>_b or <key>_bp function, cut by dmsh_side.cut or not, and the host
+#   · a function that declares function constants is specialized as the host's prebuild specializes it (pre_fn in nvn_mtl.m): the border colour corrections' dm_border_off and the
+#     blend-zero guard's dm_blend_off set (true: off), the specialization the draws share that bind no sampler with a twin and blend in a way that leaves the guard's word 0 (fn_off). metal-tt specializes a <key>_b or <key>_bp function, cut by dmsh_side.cut or not, and the host
 #     finds that base by its specialized descriptor (checked on Ocarina of Time's libraries, macOS 27.2, metal-tt 32023); one that is not its library's first function, as a near = 0
 #     game's <key>_bp main0_z, from a library of its own (needs_cut). It cannot lower a function unspecialized ("cannot lower module
 #     with unresolved function constants"), and failed with "cannot find private metadata" on a side library (<key>_bx), which no base uses. A pair whose functions declare any other
@@ -51,7 +51,7 @@ import dmsh_abi as abi, dmsh_side
 
 # The function constants the host's prebuild sets in a base's functions (nvn_mtl.m pre_fn), by name: (index, bool value). A pair whose functions declare another constant is left to the
 # device: the host leaves it at its default, which metal-tt can do too, but no other constant was tried there, and one function metal-tt fails fails its whole group
-HOST_CONSTANTS = {'dm_border_off': (abi.BORDER_FC, True)}
+HOST_CONSTANTS = {'dm_border_off': (abi.BORDER_FC, True), 'dm_blend_off': (abi.BLEND_FC, True)}
 
 BATCH = 1000   # bases per metal-tt run: Odyssey's largest compiler lifetime footprint at this size was 2.065 GiB on an 8 GB M2
 MAX_FAILED = 8   # pipelines of one group metal-tt may fail on before the run counts as failed (compile_isolating)

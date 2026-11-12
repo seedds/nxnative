@@ -583,7 +583,12 @@ def frag_z_snap(msl):
 # Not covered, as a shader cannot see it: a NaN or Inf already in the target under a zero destination weight, and a non-finite weight on a colour of 0.
 # The guard goes into main0 before the build makes its other entry points, so each of them has it: they call main0's body (dmsh_side.shared_body: main0_u / main0_m, main0_d, main0_f and
 # the side library's) and take main0's parameters, the word's among them. It is written as a call, not as stores to out, which dmsh_entry.fs_uint reads to tell what a shader writes
-BLEND_ZERO = '''struct dm_blend_state { uint zero; };   // see dmsh_rewrite.py blend_zero
+# The guard also depends on the function constant abi.BLEND_FC, as the border corrections do (BORDER_LIVE_FC): the host sets it (true: off) for a pipeline whose blend state leaves the word 0, which
+# is nearly every pipeline of a game that blends into normalized targets only, and dm_blend0 returns before it reads the word, so the load, the tests and the selects are not in the pipeline.
+# A pipeline the host does not specialize leaves the constant undefined: the guard reads the word. The rule for "leaves the word 0" is the host's (nvn_mtl.m bz_word_of, the one function of the word and of the key)
+BLEND_ZERO = '''constant bool dm_blend_off [[function_constant(%d)]];
+constant bool dm_blend_live = !is_function_constant_defined(dm_blend_off) || !dm_blend_off;
+struct dm_blend_state { uint zero; };   // see dmsh_rewrite.py blend_zero
 static inline __attribute__((always_inline)) float4 dm_bz(float4 c, uint m)
 {
     m &= %du;
@@ -592,6 +597,7 @@ static inline __attribute__((always_inline)) float4 dm_bz(float4 c, uint m)
 }
 static inline __attribute__((always_inline)) void dm_blend0(thread main0_out& dm_o, constant dm_blend_state& dm_s)
 {
+    if (!dm_blend_live) return;
     uint m = dm_s.zero;
     if (m == 0u) return;
 %s}
@@ -613,5 +619,5 @@ def blend_zero(msl):
     body, k = re.subn(r'^([ \t]*)return out;$', lambda m: f'{m.group(1)}dm_blend0(out, dm_blend);\n{m.group(1)}return out;', body, flags=re.M)
     if not k or k != n: return msl, 0
     bits = abi.BLEND_ZERO_BITS
-    helper = BLEND_ZERO % ((1 << bits) - 1, ''.join(f'    dm_o.{nm} = dm_bz(dm_o.{nm}, m >> {bits * c}u);\n' for nm, c in cols))
+    helper = BLEND_ZERO % (abi.BLEND_FC, (1 << bits) - 1, ''.join(f'    dm_o.{nm} = dm_bz(dm_o.{nm}, m >> {bits * c}u);\n' for nm, c in cols))
     return msl[:e['start']] + helper + '\n' + msl[e['start']:e['head'] - 1] + (', ' if e['params'] else '') + BLEND_ZERO_PARAM + ')' + body + msl[e['end']:], k

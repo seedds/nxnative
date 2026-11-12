@@ -32,12 +32,15 @@ romfs_marker	root_000.pkz
 zip_store	.avi:.pkz:.webm:.metallib
 
 # ---- Memory ----
-# The NPDM declares no system resource (META +0x14 = 0): nninitStartup sets a heap of the pool − used memory (3.09 GB here), which the game maps only as it touches it. The 4 GB block
-# of the other games without virtual address memory (256 MB in front + 256 MB alias region + 256 MB stack region + 3.25 GB heap region)
-mem_reserve	0x100000000
+# The NPDM declares no system resource (META +0x14 = 0): nninitStartup sets a heap of the pool − used memory, which the game maps only as it touches it, and the engine takes
+# its heaps from it as memory blocks of fixed sizes (2.75 GB of the game's own, the 260 MB FrameBufferHeap, the 42 MB ShaderCodeHeap; 96 MB of a Switch's pool stay free).
+# The render scale stubs (patches.py) make the FrameBufferHeap up to 1172 MB at scale 2.0, 912 MB more, so the pool is the Switch's 3285 MB and 925 MB: a heap of 4094 MB,
+# under 4 GB so that no size of the game's needs more than 32 bits. A 5 GB block (256 MB in front + 256 MB alias region + 256 MB stack region + 4.25 GB heap region);
+# at scale 1.0 the game takes what it does on a Switch and the rest of the heap is never touched
+mem_reserve	0x140000000
 mem_alias	0x10000000
 mem_stack	0x10000000
-app_pool	0xCD500000
+app_pool	0x107200000
 sys_resource	0x0
 # the rewritten modules are larger than the default 64 MB of used memory (the game's SetHeapSize asks for pool − used)
 mem_used	0x7400000

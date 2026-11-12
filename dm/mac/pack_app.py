@@ -195,9 +195,13 @@ def msl_inputs(msl):
     return files if any(p.suffix == '.metallib' for p in files) else []
 
 
-def copy_msl(msl, msls, dst, clone):
-    """The shader libraries to dst, msl/<their name> in the app: an NVN game's as the one file dst.img, of what the host reads. Writing it costs the space of a copy, not a clone, as it leaves out the Mac build's sources"""
-    if is_chain_library(msl): shader_lib.subset(msl, f'{dst}.img'); return
+def msl_extra(a):   # --msl-extra: side libraries (<key>_bk.metallib, mesh shaders as compute) that go into the chain library's image beside its own files
+    return sorted(Path(a.msl_extra).glob('*.metallib')) if getattr(a, 'msl_extra', None) and is_chain_library(a.msl) else []
+
+
+def copy_msl(msl, msls, dst, clone, extra=()):
+    """The shader libraries to dst, msl/<their name> in the app: an NVN game's as the one file dst.img, of what the host reads (and the extra files). Writing it costs the space of a copy, not a clone, as it leaves out the Mac build's sources"""
+    if is_chain_library(msl): shader_lib.subset(msl, f'{dst}.img', extra={p.name: str(p) for p in extra}); return
     dst.mkdir(parents=True); copy(msls, dst, clone)
 
 
@@ -220,7 +224,7 @@ def selected_inputs(a):
     tables = [Path(a.tables) / n for n in TABLES if (Path(a.tables) / n).is_file()]
     pairs = Path(a.pso_pairs) if a.pso_pairs and not any(p.name == 'pso_pairs.tsv' for p in tables) else None
     fonts = sorted(p for p in Path(a.font).glob('*.ttf') if not detritus(p.name))
-    files = [Path(a.host)] + mods + msls + pso + tables + fonts + ([pairs] if pairs else [])
+    files = [Path(a.host)] + mods + msls + msl_extra(a) + pso + tables + fonts + ([pairs] if pairs else [])
     files += [Path(p) for p in (a.env_file, a.settings, a.icon) if p]
     for p in files:
         if not p.is_file(): raise SystemExit(f'no input file at {p}')
@@ -323,7 +327,7 @@ def pack(a):
     if fonts: copy(fonts, dm / 'font', False)
     if a.env_file: shutil.copyfile(a.env_file, dm / 'env.txt')
     if a.settings: shutil.copyfile(a.settings, dm / 'launcher.json')
-    step('shader libraries'); msl_dst = res / 'msl' / (a.msl_name or msl.name); msl_dst.parent.mkdir(exist_ok=True); copy_msl(msl, msls, msl_dst, clone['msl'])
+    step('shader libraries'); msl_dst = res / 'msl' / (a.msl_name or msl.name); msl_dst.parent.mkdir(exist_ok=True); copy_msl(msl, msls, msl_dst, clone['msl'], msl_extra(a))
     if aoc: step('add-on content'); copy([aoc], res / 'aoc', clone['aoc'])
     if pso: step('pipeline archive'); (res / 'pso').mkdir(); copy(pso, res / 'pso', clone['pso'])
     step('game files'); copy([romfs], res / ('romfs.img' if romfs.is_file() else 'romfs'), clone['romfs'])
@@ -373,6 +377,7 @@ def parse(argv):
     ap.add_argument('--patched', required=True, help='the rewritten modules (patch_nso.py output)')
     ap.add_argument('--romfs', required=True, help='the RomFS of the packed version')
     ap.add_argument('--msl', required=True, help='the Mac shader libraries: <shader>/cache/b-<chain>, or a Vulkan or GL game\'s <shader>/vk or gl')
+    ap.add_argument('--msl-extra', help='a folder of side libraries (*.metallib: mesh shaders as compute, dmsh_meshcompute.py) to add to the chain library\'s image')
     ap.add_argument('--msl-name', help='its folder name in the app (default: its own)')
     ap.add_argument('--tables', required=True, help='the game profile folder (shader_map.tsv and the tables beside it)')
     ap.add_argument('--font', required=True, help='the folder of the shared-font stand-ins (nintendo_ext.ttf)')

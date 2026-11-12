@@ -560,7 +560,9 @@ static void geo_mesh_encode(id<MTLRenderCommandEncoder> en_) {
 // Metal holds a mesh grid to DMSH_MESH_GRID threadgroups, so it launches the draw's workgroups in blocks of that many, one object threadgroup a block. Native mesh draws have no
 // equivalent fallback: the demanded pipeline must finish compiling before its first draw, so each one built at a draw is recorded as an M row (pso_user.tsv) and the prewarm builds
 // the rows before the game reaches them (docs/reference/shaders.md, Native mesh pipelines compiled at their first draw)
-static struct { int on, miss; NvShader *ts, *ms; uint32_t first, count; uint64_t ind, ind_rec; } g_mtk;   // ind: an indirect draw's threadgroups (mdx_mask), ind_rec: its {count, first} record
+static struct { int on, miss; NvShader *ts, *ms; uint32_t first, count; uint64_t ind, ind_rec; void *mk; } g_mtk;   // ind: an indirect draw's threadgroups (mdx_mask), ind_rec: its {count, first} record
+// Mesh as compute on GPUs without mesh-shading hardware (nvn_mtl.m mk_hoist_try): mk, the job this draw draws from (its vertices and indices written before the pass)
+static int mk_on(void); static void mk_hoist_try(const uint8_t *from); static void *mk_take(const uint8_t *op); static void mk_note(int ind); static int mk_eq_on(void); static void mk_eq_note(NvShader *ms); static id<MTLRenderPipelineState> mk_pso(NvProg *raster); static void mk_encode(id<MTLRenderCommandEncoder> en);
 static void draw_(const p_draw *dw, const p_draw_idx *di);
 static uint64_t g_mtk_n, g_mtk_wait;
 static nvn_hmap g_pso_mtk = {.klen = sizeof(pso_key)};   // only the submit thread uses it: prewarm workers build pipelines (mtk_build) and the submit thread claims them (warm_claim)
@@ -629,6 +631,7 @@ static void mtk_claim(pso_key *k, NvShader *ts, NvShader *ms, NvShader *fs, id<M
 }
 static id<MTLRenderPipelineState> mtk_pso(NvProg *raster) {
     if (!raster || !g_mtk.ms || !g_mtk.ms->fn) return nil;
+    if (g_mtk.mk) { id<MTLRenderPipelineState> ps = mk_pso(raster); if (ps) return ps; g_mtk.mk = NULL; }   // its pipeline is still being built: the native mesh draw (the job ran for nothing)
     NvShader *ts = g_mtk.ts, *ms = g_mtk.ms, *fs = raster->sh[1];
     pso_key k; pso_key_fill(&k, ms, fs, g_pass.cfmt, g_pass.dfmt, g_pass.sfmt, g_pass.samples, 0);
     k.border |= border_need(ts, 3);
@@ -656,6 +659,7 @@ static id<MTLRenderPipelineState> mtk_pso(NvProg *raster) {
     return ps;
 }
 static void mtk_encode(id<MTLRenderCommandEncoder> en_) {
+    if (g_mtk.mk) { mk_encode(en_); return; }
     id<MTL4RenderCommandEncoder> en = (id<MTL4RenderCommandEncoder>)en_; NvShader *ts = g_mtk.ts, *ms = g_mtk.ms;
     [en setArgumentTable:g_vt atStages:MTLRenderStageMesh];
     uint64_t draw_gpu = g_mtk.ind_rec;
@@ -693,12 +697,17 @@ static void mesh_tasks_draw(const p_draw *dw) {
         if (!ind || !mtl_gpu_addr(dw->ind, 8, &mb, &mo, &ind_rec)) { RED_ONCE(154, "DrawMeshTasksIndirect record at %#llx is in no memory pool: draw skipped", (unsigned long long)dw->ind); return; }
     }
     PD("m %llu mesh tasks task=%s mesh=%s fs=%s first=%d count=%d indirect=%#llx", g_stat_pass + !g_enc, ts ? ts->key : "-", ms->key, pr->sh[1] ? pr->sh[1]->key : "-", dw->first, dw->count, (unsigned long long)dw->ind);   // the draw_ below is a stand-in triangle
+    if (mk_on()) { if (!g_enc && !tbdr_on()) mk_hoist_try(g_exec_cur); }   // the draw opens the pass: its mesh jobs and the later ones of the pass run first
+    void *mk = mk_on() ? mk_take(g_exec_cur) : NULL;
+    if (mk_on() && mk_eq_on()) { mk_eq_note(ms); if (ms->mk_eq) mk = NULL; }   // the draw's own state: a shader found here drawn with an equal depth test stays native from now on
+    if (mk_on()) mk_note(ind != 0);
     g_mtk.on = 1; g_mtk.miss = 0; g_mtk.ts = ts; g_mtk.ms = ms; g_mtk.first = (uint32_t)dw->first; g_mtk.count = (uint32_t)dw->count;
+    g_mtk.mk = mk;
     g_mtk.ind = ind; g_mtk.ind_rec = ind_rec;
     g_geo_program = raster;
     p_draw triangle = {.prim = 4, .count = 3, .instances = 1};
     draw_(&triangle, NULL);
-    g_geo_program = nil; g_mtk.on = 0; args_dirty_all();
+    g_geo_program = nil; g_mtk.on = 0; g_mtk.mk = NULL; args_dirty_all();
     if (g_mtk.miss) { g_mtk_wait++; return; }
     swrite_note(pr); g_wr_epoch++;
     if (!g_mtk_n++) MLOG("task / mesh: first draw, task %s mesh %s fragment %s, %u workgroups from %u%s", ts ? ts->key : "-", ms->key, pr->sh[1] ? pr->sh[1]->key : "-", g_mtk.count, g_mtk.first, ind ? " (indirect)" : "");

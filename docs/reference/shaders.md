@@ -6,11 +6,11 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 
 ### One scrambled archive indexed by the NRO
 
-- **Symptom:** the split finds no shaders, and the RomFS is one huge file with a short name (`42`) whose bytes look random past a table at its start (magic `CRA.`).
+- **Symptom:** the split finds no shaders, and the RomFS is one huge file with a short name (`42`) whose bytes look random past a table at its start (magic `CRA.`). Or the split stops with `[RED] /42: a CRA archive, and no NRO in DM_NRO_DIR (…) holds its file table`: the NRO reads a layout `cra.py` does not know.
 - **Cause:** [Mario Tennis Fever](../../dm/games/0400D4201C6EA000/README.md)'s engine keeps its 8,671 files in that archive, listed only in the game's code: a file table in read-only data, which an NRO the game decodes at run time holds ([A game that decodes its code at run time](services.md#a-game-that-decodes-its-code-at-run-time)). Each file is scrambled in 16-byte blocks with a key from its name, and most are NARC containers (the DS's format) whose members are packed by their first byte (LZ4, zstd, deflate, an LZ of the game's own, or chunks of these). The shaders are BNSH in the FSHA, VFXB and SARC members, one FSHA per model, and 40 more in the NRO's own data.
-- **Fix:** `dm/gfx/tools/cra.py` finds the table from the code that reads it, in any build, and reads a file as the game does; the game's checksum of each file catches a wrong key. `shader_split.py` (`cra_jobs`) reads the NRO from `DM_NRO_DIR`, scans each file but sound and movies (by their magics), and expands NARC members in `scan_blob`. The whole archive unscrambles in 30 s with numpy; the split, in pure Python with 12 workers and a warm file cache, takes under a minute.
-- **Check:** `dm/gfx/tests/test_cra.py`. All 8,671 files of 1.1.1 pass the game's checksums.
-- **Found on:** [Mario Tennis Fever](../../dm/games/0400D4201C6EA000/README.md): 35,045 shaders.
+- **Fix:** `dm/gfx/tools/cra.py` finds the table from the code that reads it, in any build, and reads a file as the game does; the game's checksum of each file catches a wrong key. `cra.index` takes the layout the NRO's code reads: Mario Tennis Fever's, else the older one of Mario Golf: Super Rush (`Index2021`: an i32 per file, records behind the table with the size, a CRC-32 checksum and the offset under other masks, bit-reversed path characters, files xored in 16-byte blocks with two keys from the last path element and each byte bit-reversed; `cra.py` documents both). Each file's entry names its layout, which `read` and `head` take it in. `shader_split.py` (`cra_jobs`) reads the NRO from `DM_NRO_DIR`, scans each file but sound and movies (by their magics), and expands NARC members in `scan_blob`. The whole archive unscrambles in 30 s with numpy; the split, in pure Python with 12 workers and a warm file cache, takes under a minute.
+- **Check:** `dm/gfx/tests/test_cra.py`. All 8,671 files of Mario Tennis Fever 1.1.1 pass the game's checksums; all 5,101 of Mario Golf: Super Rush 4.0.0 (4.1 GB) do too, read in 37 s.
+- **Found on:** [Mario Tennis Fever](../../dm/games/0400D4201C6EA000/README.md): 35,045 shaders. Mario Golf: Super Rush (`0100C9C00E25C000`, 4.0.0, issue #814; no profile in the repository), the older layout, decoded by the author of [PR #2216](https://github.com/seedds/nxnative/pull/2216) from the game's reader at `nro0+0x54b6d4`: 25,270 shaders in 18 s.
 
 ### Packed shader banks in loose NARC files
 
@@ -1971,6 +1971,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** `decode_ubo_tex` answers ('c2', byte), the reflection gives the sampler `sreg` `DMSH_SREG_C2`, and the replay takes every element's sampler from that c2 word (`sampu_id`), whose IDs are moved already, as those of `NVN_RB_SAMPA`.
 - **Found on:** [Kirby Air Riders](../../dm/games/040077201BE50000/README.md): about 5,700 pixel and compute shaders, its shadows and lights.
 - **Check:** `test_dmsh_reflect.py` (`UniformArraysWithDriverSampler`).
+
+### A separate sampler ID in a uniform buffer (handle type 2)
+
+- **Symptom:** `reflection conversion failed: B binding fp_t_cb720898_2000005ASmplr has no resolved slot number`, then `failed to load`; those draws are skipped. In The Witcher 3 245 of 602 shaders failed this way, its domain shaders among them, and the screen stayed black.
+- **Cause:** handle type 2, Ryujinx's `SeparateSamplerId`: the texture word is in the driver table c2 (the low half of the slots, 2), and the second word is a sampler ID itself, not a handle with the ID in its high 12 bits, in one of the game's uniform buffers (the high half less one: slots 0xb0002, bank 10; `(handle >> 14) & 0x3fff` its word). `decode_ubo_tex` decodes a uniform buffer only for the texture half, so the sampler had no slot. `decode_tex` also tried both words for the texture, so a sampler word at a byte offset that is a combined texture slot's in c2 (0x20 to 0x11f) would be named as the texture.
+- **Fix:** a chain change. `dmsh_reflect.py` `decode_ubo_samp_id` gives a single sampler of this form `samp_ubo` with the uniform slot and the word's byte offset and `raw_id`, and `decode_tex` takes only the first word as the texture for type 2, as for type 3. The replay reads the word and shifts it into the handle's sampler field before the pool lookup (`nvn_refl.h` `raw_id`, `nvn_mtl.m` `sampu_id`). Arrays of such samplers are not covered; none is known.
+- **Found on:** The Witcher 3: Wild Hunt — Complete Edition (0100A0800E9C4000, profile not upstream yet): `fp_t_cb720898_2000005ASmplr` in 181 of its shaders, `fp_t_cb720898_2000405CSmplr` in 34.
+- **Check:** `test_dmsh_reflect.py` (`SeparateSamplerIds`) and `t_refl` (the `raw_id` key).
 
 ### A table of handles past the array's length
 

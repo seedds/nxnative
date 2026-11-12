@@ -289,6 +289,28 @@ class Supervisor(Tree):
         self.assertEqual(g.stragglers, [])   # a stop, not a straggler: the caller reports its own error
 
 
+class Spawn(unittest.TestCase):
+    """popen: a start refused with EACCES (a program on an SMB share, for a few seconds after its last run) is tried again until SPAWN s have passed"""
+
+    def test_a_refused_start_is_tried_again(self):
+        real, tries = subprocess.Popen, []
+        def refuse_twice(cmd, **kw):
+            tries.append(cmd)
+            if len(tries) < 3: raise PermissionError(13, 'Permission denied', cmd[0])
+            return real(cmd, **kw)
+        with mock.patch.object(proc_group.subprocess, 'Popen', refuse_twice):
+            p = proc_group.popen(['/usr/bin/true'])
+        self.assertEqual((p.wait(), len(tries)), (0, 3))
+
+    def test_a_program_that_is_not_executable_still_fails(self):
+        d = tempfile.TemporaryDirectory(); self.addCleanup(d.cleanup)
+        f = Path(d.name) / 'tool'; f.write_text('#!/bin/sh\n'); f.chmod(0o644)
+        with mock.patch.object(proc_group, 'SPAWN', 0.3):
+            start = time.monotonic()
+            with self.assertRaises(PermissionError): proc_group.popen([str(f)])
+        self.assertGreaterEqual(time.monotonic() - start, 0.3)
+
+
 def proc_status(pid):   # a process's state from its proc_bsdinfo: gone, zombie, stopped or running
     info = ctypes.create_string_buffer(136)
     if proc_group._libproc.proc_pidinfo(pid, 3, 0, info, 136) != 136: return 'gone'

@@ -18,6 +18,7 @@ GRACE = 5.0   # seconds the group has to end after the stopping signal, before S
 DRAIN = 5.0   # seconds members may outlive the direct child's normal exit
 REAP = 2.0    # seconds for the killed members to go (launchd reaps the orphans among them)
 TICK = 0.05   # seconds between looks at the group while waiting for it to end
+SPAWN = 5.0   # seconds a start refused with EACCES is tried again (popen: a program on an SMB share)
 
 _libproc = ctypes.CDLL('/usr/lib/libproc.dylib', use_errno=True) if sys.platform == 'darwin' else None
 if _libproc is not None:
@@ -43,15 +44,30 @@ def members(pgid):
     return out
 
 
+def popen(cmd, **kw):
+    """subprocess.Popen, tried again every 0.1 s for SPAWN s while the start is refused with PermissionError (EACCES).
+    macOS refuses to start a program on an SMB share for about 3 s after the program's last process ended, and at times just after it was written: a build folder on a
+    NAS then fails the step that runs the Mac host a second time (the Pipeline prebuild after the host's other runs) with `[Errno 13] Permission denied: .../tools/dmhost`,
+    though the file is executable and a start a few seconds later works (measured on a UniFi Drive share over SMB 3.1.1, macOS 27.2 and 27.3: 2.4 to 3.0 s after each
+    run; a copy on a local disk starts at once). The cause is outside nxnative (the share's client or server, holding the ended run's image a few seconds), so this waits
+    for it, a workaround: a program that really is not executable fails the same way SPAWN s later."""
+    deadline = time.monotonic() + SPAWN
+    while True:
+        try: return subprocess.Popen(cmd, **kw)
+        except PermissionError:
+            if time.monotonic() >= deadline: raise
+            time.sleep(0.1)
+
+
 class Group:
     """The direct child (p, a subprocess.Popen started with these Popen arguments; for lines(), stdout=PIPE in binary mode) leads a new session and process group.
     `with Group(...) as g:` stops the group when the block ends by an exception, and finishes it (finish) when it ends otherwise.
     stragglers: [(pid, name)] that outlived the direct child's normal exit and were stopped (pid None: a holder of the output outside the group), for the caller to report"""
 
-    def __init__(self, cmd, grace=None, drain=None, **popen):   # grace, drain: GRACE and DRAIN when None
+    def __init__(self, cmd, grace=None, drain=None, **kw):   # grace, drain: GRACE and DRAIN when None; kw: Popen's
         self.grace, self.drain = GRACE if grace is None else grace, DRAIN if drain is None else drain
         self.paused, self.stragglers, self.done = False, [], False
-        self.p = subprocess.Popen([str(c) for c in cmd], start_new_session=True, **popen)
+        self.p = popen([str(c) for c in cmd], start_new_session=True, **kw)
         self.pgid = self.p.pid
 
     def __enter__(self): return self

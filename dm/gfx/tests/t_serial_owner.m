@@ -21,15 +21,17 @@ static int checks, failed;
 // The replay layer's side, recorded
 static NSMutableArray *g_dropped;   // what the owner let go, kept alive here as the deferred release keeps it until the submission completes
 static NSMutableArray<NSNumber *> *g_dropped_keep;
-static NSMutableArray<NSValue *> *g_unheld;
-static uint64_t g_changed_last; static int g_changed_n;
+// The owner's change generation and its last note, read as the replay layer's caches read them
+static uint64_t last_note(void) { uint64_t s = ~0ull; own_note_at(atomic_load(&g_ser_gen), &s); return s; }
+#define g_changed_n ((int)atomic_load(&g_ser_gen))
+#define g_changed_last (last_note())
 static uint64_t g_sub = 1;          // the submission being encoded
 void own_hook_drop(id o, int keep_resident) { [g_dropped addObject:o]; [g_dropped_keep addObject:@(keep_resident)]; }
 uint64_t own_hook_submission(void) { return g_sub; }
-void own_hook_unheld(const void *o) { [g_unheld addObject:[NSValue valueWithPointer:o]]; }
-void own_hook_changed(uint64_t serial) { g_changed_last = serial; g_changed_n++; }
 static int dropped(id o, int keep) { for (NSUInteger i = 0; i < g_dropped.count; i++) if (g_dropped[i] == o && g_dropped_keep[i].intValue == keep) return 1; return 0; }
-static int unheld(id o) { for (NSValue *v in g_unheld) if (v.pointerValue == (__bridge void *)o) return 1; return 0; }
+static int ndropped(id o, int keep) { int n = 0; for (NSUInteger i = 0; i < g_dropped.count; i++) n += g_dropped[i] == o && g_dropped_keep[i].intValue == keep; return n; }
+static int retire(id o) { pthread_mutex_lock(&g_smu); int r = own_retire_locked(o); pthread_mutex_unlock(&g_smu); return r; }   // the drain's question, once the fence has passed
+static uint32_t waiting(void) { pthread_mutex_lock(&g_smu); uint32_t n = own_stats_locked().retire_wait; pthread_mutex_unlock(&g_smu); return n; }
 
 static int live(uint64_t k) { return serial_get(k) != nil; }
 static int ghost(uint64_t k) { __block int r = 0; pthread_mutex_lock(&g_smu); own_each_locked(^(uint64_t s, id o, int g) { (void)o; if (s == k && g) r = 1; }); pthread_mutex_unlock(&g_smu); return r; }
@@ -58,7 +60,7 @@ static int has(const alias_key *k) { pthread_mutex_lock(&g_smu); int r = own_ali
 static own_alias_stats ast(void) { pthread_mutex_lock(&g_smu); own_alias_stats s = own_alias_stats_locked(); pthread_mutex_unlock(&g_smu); return s; }
 
 int main(void) { @autoreleasepool {
-    g_dropped = [NSMutableArray array]; g_dropped_keep = [NSMutableArray array]; g_unheld = [NSMutableArray array];
+    g_dropped = [NSMutableArray array]; g_dropped_keep = [NSMutableArray array];
     g_keys = [NSMapTable mapTableWithKeyOptions:NSPointerFunctionsObjectPointerPersonality valueOptions:NSPointerFunctionsStrongMemory];
     step("start");
 
@@ -73,7 +75,7 @@ int main(void) { @autoreleasepool {
         serial_put(k, b);
         CHECK(serial_get(k) == b && live_holds(b) && !live_holds(wa), "replacement: the new object is held, the old one no longer");
         CHECK(dropped(wa, 0) && wa != nil, "replacement: the old object goes to the replay layer's deferred release, not released by the owner");
-        CHECK(unheld(wa), "replacement: the old object's last count went, which the replay layer hears (a retired object waiting for its holders)");
+        CHECK(retire(wa) == 1 && !waiting(), "replacement: nothing holds the old object, so its retirement may take it out of the residency set");
         step("replacement");
         serial_del(k);
         CHECK(!live(k) && !tex_get(k) && !live_holds(b) && dropped(b, 0), "serial_del: nothing resolves the serial, its object is dropped and not held");
@@ -93,9 +95,11 @@ int main(void) { @autoreleasepool {
         id o = [NSObject new]; uint64_t s1 = (1ull << 62) + 93011, s2 = s1 + 1;
         tex_put(s1, o); tex_put(s2, o);
         serial_del(s1);
-        CHECK(live_holds(o) && !unheld(o), "an object two serials name stays held when one of them goes");
+        CHECK(live_holds(o) && retire(o) == 0 && waiting() == 1, "an object two serials name stays held when one of them goes: a retirement of it waits, the owner keeping it");
+        CHECK(retire(o) == 0 && waiting() == 1, "asked again, it waits once");
+        int before = ndropped(o, 0);
         serial_del(s2);
-        CHECK(!holds(o) && unheld(o), "and is not held once both have gone");
+        CHECK(!holds(o) && !waiting() && ndropped(o, 0) == before + 2, "once both have gone it is not held, and besides the entry's own drop the owner hands it back to retirement");
         step("two serials");
     }
 
@@ -277,8 +281,7 @@ int main(void) { @autoreleasepool {
                 CHECK(tex_get(pn) == b2 && serial_get(u.serial) == uv && live_holds(b), "after the upgrade the parent's name is the new texture; the view still holds the old one");
                 CHECK(under == b2 && shared(b2) && !shared(b), "the rename moves the parent's place in the sharing table: its key names the new texture");
                 step("parent upgraded");
-                [g_unheld removeAllObjects];
-                CHECK(own_view_drop_stale(u.serial, uv) == 1 && !serial_get(u.serial) && !holds(b) && unheld(b), "the view of the old parent is stale: it goes, and the old parent with it");
+                CHECK(own_view_drop_stale(u.serial, uv) == 1 && !serial_get(u.serial) && !holds(b), "the view of the old parent is stale: it goes, and the old parent with it");
                 CHECK(own_view_put(u.serial, &kb, view_of(b)) == 0, "a view of the old parent made after the rename is refused (its key names the new texture)");
                 CHECK(own_view_put(u.serial, &kb, view_of(b2)) == 1 && [(id<MTLTexture>)serial_get(u.serial) parentTexture] == b2, "made again on the upgraded parent");
                 tex_end(&u); serial_del(pn); share(b, 0);   // b's key, which names b2 now
@@ -354,7 +357,9 @@ int main(void) { @autoreleasepool {
         id q = [NSObject new]; tex_t s8 = texture(97009); tex_live(&s8);
         own_alias_publish(s8.serial, &kq, q);
         own_alias_stats before = ast();
+        uint64_t g0 = atomic_load(&g_ser_gen), noted = 0;
         pthread_mutex_lock(&g_smu); uint32_t gone = own_alias_drop_pool_locked((const void *)(uintptr_t)P); pthread_mutex_unlock(&g_smu);
+        CHECK(atomic_load(&g_ser_gen) == g0 + 1 && !own_note_at(g0 + 1, &noted), "a pool drop is one change no serial is noted for (a new epoch)");
         own_alias_stats after = ast();
         CHECK(gone == before.n - 1 && after.n == 1 && has(&kq) && after.evicted == before.evicted + gone, "a pool drop takes the pool's entries, counted, and leaves another pool's");
         CHECK(!own_alias_take(s7.serial + 100, &ka) && serial_get(s7.serial) == a3 && live_holds(a3) && !shared(a3), "after it a lookup finds nothing; a serial keeps the texture it had, no longer shared");
@@ -379,7 +384,10 @@ int main(void) { @autoreleasepool {
             step("twin interleavings");
             // own_upgrade: the rename and the twin's view made again, in one hold
             id<MTLTexture> nv = [up newTextureViewWithPixelFormat:MTLPixelFormatRGBA8Unorm_sRGB];
-            CHECK(own_upgrade(pt, up, twin.serial, nv) == 0 && serial_get(twin.serial) == nv && serial_get(base.serial) == up && shared(up) && !shared(pt) && !holds(pt),
+            uint64_t u0 = atomic_load(&g_ser_gen), us = 0;
+            int named = own_upgrade(pt, up, twin.serial, nv);
+            CHECK(atomic_load(&g_ser_gen) == u0 + 2 && !own_note_at(u0 + 1, &us) && own_note_at(u0 + 2, &us) && us == twin.serial, "an upgrade is a new epoch, then the twin's note");
+            CHECK(named == 0 && serial_get(twin.serial) == nv && serial_get(base.serial) == up && shared(up) && !shared(pt) && !holds(pt),
                   "an upgrade through the twin: every name of the parent moves, the twin's serial gets its new view, the old parent is held by nothing");
             CHECK(own_view_drop_stale(twin.serial, nv) == 0, "and the new view is valid");
             id<MTLTexture> up2 = [dev newTextureWithDescriptor:d];
@@ -396,6 +404,45 @@ int main(void) { @autoreleasepool {
         step("sharing table torn down");
     }
 
+    {   // retirement eligibility: the queue's fence has passed (completion); the owner says whether the object may leave the residency set (no entry, pin or view's entry holds it)
+        id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
+        MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:4 height:4 mipmapped:NO];
+        d.usage = MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView;
+        id<MTLTexture> p = [dev newTextureWithDescriptor:d];
+        if (p) {
+            uint64_t lk = (1ull << 62) + 98001, gk = 98002, pk = (1ull << 62) + 98003; [g_dropped removeAllObjects]; [g_dropped_keep removeAllObjects];
+            id<MTLTexture> v = [p newTextureViewWithPixelFormat:MTLPixelFormatRGBA8Unorm_sRGB];
+            tex_put(lk, v);   // a live entry holds a view of p
+            CHECK(retire(p) == 0 && waiting() == 1, "a parent a live view's entry holds waits");
+            step("retire: a view's parent waits");
+            serial_del(lk);
+            CHECK(!waiting() && ndropped(p, 0) == 1 && retire(p) == 1, "the view's entry gone, the parent is handed back to retirement (behind the submission then in flight) and is eligible");
+            step("retire: handed back");
+            tex_put(gk, p);   // a ghost entry
+            CHECK(retire(p) == 0, "a ghost entry keeps it too");
+            mtl_tex_pin(pk); tex_put(pk, p); serial_del(pk);   // and a pin, after its entry went
+            for (int i = 0; i < NGHOST; i++) tex_put(990000 + (uint64_t)i, [NSObject new]);   // the ring evicts the ghost entry
+            CHECK(!ghost(gk) && waiting() == 1 && retire(p) == 0, "with the ghost entry evicted, the pin still holds it: it keeps waiting");
+            int before = ndropped(p, 0);
+            mtl_tex_unpin(pk);
+            CHECK(!waiting() && ndropped(p, 0) == before + 2, "the last unpin hands it back (besides the pin's own drop)");
+            step("retire: ghost and pin");
+            // a shared texture: when its last entry goes it is not handed back, as the sharing table keeps it resident and retires it itself when it lets it go
+            share(p, 1); tex_put(lk, p);
+            CHECK(retire(p) == 0, "a shared texture a live entry holds waits");
+            before = ndropped(p, 0); serial_del(lk);
+            CHECK(!waiting() && ndropped(p, 0) == before, "its entry gone, the sharing table still keeps it: not handed back");
+            share(p, 0);
+            CHECK(ndropped(p, 0) == before + 1 && retire(p) == 1, "the sharing table lets it go and retires it; then it is eligible");
+            step("retire: shared");
+            CHECK(own_object_free(p), "nothing holds it: the replay layer may write it over");
+            tex_put(lk, v);
+            CHECK(!own_object_free(p), "a view's entry holding it: it may not");
+            serial_del(lk);
+            step("retire: free");
+        }
+    }
+
     {   // teardown: every ghost serial evicted by NGHOST new ones, then those taken away as stale views; nothing is held, every count is gone
         id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
         id<MTLTexture> p = [dev newTextureWithDescriptor:[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:4 height:4 mipmapped:NO]];
@@ -408,7 +455,7 @@ int main(void) { @autoreleasepool {
             pthread_mutex_lock(&g_smu); own_stats st = own_stats_locked(); pthread_mutex_unlock(&g_smu);
             own_alias_stats as = ast();
             CHECK(st.ghost == 0 && st.live == 0 && !holds(p), "after teardown no serial resolves and nothing is held");
-            CHECK(as.n == 0 && as.cells == 0 && !shared(p), "and the sharing table and its index are empty");
+            CHECK(as.n == 0 && as.cells == 0 && !shared(p) && st.retire_wait == 0, "and the sharing table, its index and the retired objects waiting are empty");
             step("teardown");
         }
     }

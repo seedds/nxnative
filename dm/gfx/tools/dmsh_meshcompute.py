@@ -152,7 +152,7 @@ def build(shader_map, lib, out):
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / 'tools'))
     import shader_lib
     v = pathlib.Path(lib) if os.path.isdir(lib) else shader_lib.view(lib)
-    rows = [r for r in csv.reader(open(shader_map), delimiter='\t') if len(r) > 3 and r[2] == 'mesh']
+    rows = [r for r in csv.reader(open(shader_map), delimiter='\t') if len(r) > 3 and r[2] in ('mesh', 'task')]   # the map names task shaders' stage task
     keys = sorted({r[3] for r in rows})
     os.makedirs(out, exist_ok=True)
     jobs, notes = [], collections.Counter()

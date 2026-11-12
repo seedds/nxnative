@@ -240,6 +240,13 @@ static void tile_case(const char *dir) {
     NSError *bfe = nil;
     id<MTLLibrary> bfl = lib_from_file([d stringByAppendingPathComponent:@"fedcba9876543210_bf.metallib"], &bfe);
     CHECK(bfl && [bfl.functionNames containsObject:@"main0_f"], "the folded tile-read library exposes main0_f");
+    NSString *bfp = [d stringByAppendingPathComponent:@"fedcba9876543210_bf.metallib"];
+    id<MTLLibrary> pxl = lib_from_file_stage(bfp, "pixel", &bfe);
+    CHECK(pxl && [pxl.label isEqualToString:@"fedcba9876543210 pixel _bf"], "a guest library's label is its key, stage and variant");
+    CHECK(bfl && [bfl.label isEqualToString:@"fedcba9876543210 lib _bf"], "a library loaded with no stage says lib");
+    CHECK(lib_label(vl, @"/shaders/0123456789abcdef.metallib", "vertex") == vl && [vl.label isEqualToString:@"0123456789abcdef vertex"], "a 16-hex name with no variant has no trailing space");
+    fl.label = @"unchanged";
+    CHECK(lib_label(fl, @"/shaders/fedcba987654321g_b.metallib", "pixel") == fl && lib_label(fl, @"/shaders/fedcba98765432.metallib", "pixel") == fl && [fl.label isEqualToString:@"unchanged"], "a name that is not 16 hex characters first leaves the label alone");
     NvProg *pr = [NvProg new]; NvShader *vs = [NvShader new], *fs = [NvShader new]; pr->sh[0] = vs; pr->sh[1] = fs;
     vs->stage = 0; strcpy(vs->key, "0123456789abcdef_b"); vs->fn = [vl newFunctionWithName:@"main0"]; vs->rf.pos_attr = -1;
     for (NSNumber *k in facts[@"screen"]) vs->rf.scr_locn |= 1u << k.intValue;

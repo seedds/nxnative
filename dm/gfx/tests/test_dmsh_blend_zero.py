@@ -130,6 +130,8 @@ class BlendZero(unittest.TestCase):
                 self.assertNotIn('dm_blend0(', t, name)   # not twice
             t = fn_text(f, 'main0_f')
             self.assertIn(PARAM, t); self.assertRegex(t, r'dm_body_main0\([^;]*\bdm_blend\)')
+            for name, text in (('unit', u), ('fold', f)):
+                self.assertEqual(text.count(f'[[function_constant({dmsh_abi.BLEND_FC})]]'), 1, name)   # declared once for every entry point of the file: the host sets it by the entry's declaration (fn_off)
 
     def test_not_applied(self):
         ints = PLAIN.replace('float4 m_79 [[color(0)]];', 'uint4 m_79 [[color(0)]];').replace('float4 m_81 [[color(2)]];', 'uint4 m_81 [[color(2)]];')
@@ -155,6 +157,10 @@ class BlendZero(unittest.TestCase):
         self.assertIn('if (!((m == 1u && c.w == 0.0f) || (m == 2u && c.w == 1.0f))) return c;', h)
         self.assertIn('(as_type<uint3>(c.xyz) & uint3(0x7f800000u)) == uint3(0x7f800000u)', h)
         self.assertIn('if (m == 0u) return;', h)   # a draw with no such weight pays one load and one test
+        self.assertIn(f'constant bool dm_blend_off [[function_constant({dmsh_abi.BLEND_FC})]];', dmsh_rewrite.BLEND_ZERO % (dmsh_abi.BLEND_FC, 3, ''))
+        self.assertIn('constant bool dm_blend_live = !is_function_constant_defined(dm_blend_off) || !dm_blend_off;', h)   # undefined: live, as the border corrections' constant is
+        self.assertLess(h.index('if (!dm_blend_live) return;'), h.index('dm_s.zero'))   # the pipeline without the guard never reads the word
+        self.assertNotIn(dmsh_abi.BLEND_FC, (dmsh_abi.BORDER_FC, *range(dmsh_abi.LOGIC_FC, dmsh_abi.LOGIC_FC + 8), *range(0, 128)))   # dmsh_fetch's FX_ (< 32), FB_ (32 + k) and OM_ (64 + 8 j + k) constants
         self.assertEqual(PARAM, f'constant dm_blend_state& dm_blend [[buffer({dmsh_abi.BLEND_BUFFER})]]')
         self.assertNotIn(dmsh_abi.BLEND_BUFFER, (dmsh_abi.ALPHA_BUFFER, dmsh_abi.LOGIC_BUFFER, 0))
 

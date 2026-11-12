@@ -96,7 +96,7 @@ static void specialization_cases(void) {
         id<MTLFunction> f = deferred == 2 ? geo_mesh_entry(lib, @"probe") : deferred ? fn_spec(lib, @"probe", cv, &error) : fn_lib_spec(lib, @"probe", cv, &error);
         CHECK(f != nil, "original specialization exists (%d)", deferred); if (!f) continue;
         id<MTLFunction> off = fn_dev_b(f, 1);   // the variant is no function object of its own (fn_off): a descriptor and a device function beside f's
-        CHECK(fn_off(f) && fn4_of_b(f, 1) != fn4_of(f) && fn4_of_b(f, 1) == fn4_of_b(f, 1) && fn4_of_b(f, 0) == fn4_of(f), "border specialization has a descriptor of its own, cached (%d)", deferred);
+        CHECK(fn_off(f, 1) && fn4_of_b(f, 1) != fn4_of(f) && fn4_of_b(f, 1) == fn4_of_b(f, 1) && fn4_of_b(f, 0) == fn4_of(f), "border specialization has a descriptor of its own, cached (%d)", deferred);
         CHECK(off && off != fn_dev(f) && off == fn_dev_b(f, 1) && fn_dev_b(f, 0) == fn_dev(f), "its device function is distinct and cached (%d)", deferred);
         MTL4SpecializedFunctionDescriptor *pre = (MTL4SpecializedFunctionDescriptor *)pre_fn(lib, @"probe");
         id<MTLFunction> warm = fn_lib_spec(lib, @"probe", pre.constantValues, &error);

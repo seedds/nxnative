@@ -38,7 +38,7 @@ def metallib(funcs, layer=False):   # layer: the layer's name in the library, as
     pm = b''
     for _, const in funcs:
         names = const if isinstance(const, tuple) else ('spvLinearTextureAlignmentOverride',) if const else ()
-        cnst = struct.pack('<H', len(names)) + b''.join(n.encode() + b'\0\x35' + struct.pack('<H', 216 if n == 'dm_border_off' else 0xffff) + b'\0' for n in names)
+        cnst = struct.pack('<H', len(names)) + b''.join(n.encode() + b'\0\x35' + struct.pack('<H', {'dm_border_off': 216, 'dm_blend_off': 217}.get(n, 0xffff)) + b'\0' for n in names)
         body = (tag(b'CNST', cnst) if names else b'') + b'ENDT'
         pm += struct.pack('<I', len(body)) + body
     fo = 0x58; po_ = fo + len(fl)
@@ -82,6 +82,7 @@ class Functions(unittest.TestCase):
             self.assertEqual(po.constants(p), {'main0': ('dm_border_off',), 'main0_u': ('dm_border_off', 'spvLinearTextureAlignmentOverride'), 'vs': ()})
             self.assertEqual(po.functions(p), {'main0': True, 'main0_u': True, 'vs': False})
             self.assertEqual(po.HOST_CONSTANTS['dm_border_off'], (216, True))   # dmsh_abi.h DMSH_BORDER_FC, set as nvn_mtl.m pre_fn sets it
+            self.assertEqual(po.HOST_CONSTANTS['dm_blend_off'], (217, True))   # DMSH_BLEND_FC, the blend-zero guard's, set the same way
 
     @unittest.skipUnless(shutil.which('xcrun'), 'needs the Metal compiler')
     def test_a_real_library(self):
@@ -148,6 +149,16 @@ class Plan(unittest.TestCase):
                          [('fnd:pull_bp.main0.host', 'fnd:fb_b.main0.host'), ('fnd:pull_bp.main0.host', 'fnd:fs_b.main0')])
         self.shader('plain', {}, {'_b': vz})
         self.assertNotIn('specialized_function_descriptors', po.script(self.d, [('plain_b', 'main0', 'fs_b', 'main0')])['function_descriptors'])   # none: the script as before
+
+    def test_blend_constant_is_specialized_with_the_border_one(self):   # pre_fn sets each constant a function declares: a pair with the guard's constant is a base, not a rest pair
+        self.shader('vb', {}, {'_b': [('main0', ('dm_border_off',))]})
+        self.shader('both', {}, {'_b': [('main0', ('dm_border_off', 'dm_blend_off'))]})
+        self.shader('blend', {}, {'_b': [('main0', ('dm_blend_off',))]})
+        bases, rest, _ = po.plan(self.d, CHAIN, [('vb', 'both'), ('vb', 'blend'), ('vb', 'both')], False)
+        self.assertEqual(bases, [('vb_b', 'main0', 'both_b', 'main0'), ('vb_b', 'main0', 'blend_b', 'main0')]); self.assertEqual(rest, [])
+        spec = {s['label']: s['constant_values'] for s in po.script(self.d, bases)['function_descriptors']['specialized_function_descriptors']}
+        ids = lambda cv: [(c['id']['data'], c['value']['data']) for c in cv]
+        self.assertEqual({k: ids(v) for k, v in spec.items()}, {'vb_b.main0.host': [(216, True)], 'both_b.main0.host': [(216, True), (217, True)], 'blend_b.main0.host': [(217, True)]})
 
     def test_a_specialized_function_after_the_first_has_a_library_of_its_own(self):   # metal-tt fails on it ("cannot find private metadata at offset '8'"): needs_cut
         both = [('main0', ('dm_border_off',)), ('main0_z', ('dm_border_off',))]

@@ -118,6 +118,9 @@
 // 2 = where its alpha is 1 (ONE_MINUS_SRC_ALPHA) (nvn_mtl.m bz_bind). A factor of ZERO needs none: Apple's blender leaves that term out (dm/gfx/tests/t_blend_zero.m)
 #define DMSH_BLEND_BUFFER 28
 #define DMSH_BLEND_ZERO_BITS 2
+// Its function constant (bool, pixel stages): true compiles the guard out, for a pipeline whose blend state leaves the word 0 (nvn_mtl.m bz_word_of, pso_key.bz_off, fn_off): the guard's loads, tests and
+// selects were 19 of the 49 instructions of Axiom Verge's SpriteBatch shader, on a normalized target that can never fire them. Undefined, the guard reads the word
+#define DMSH_BLEND_FC 217
 
 // Border colours Metal has no sampler state for (it has transparent black, opaque black and opaque white): the build gives each sampler member a shader samples through a twin,
 // <member>_w, and the shader a block it reads per sample, r + (twin sample - r) * k when the sampler's bit is set (dmsh_rewrite.py border_emu, nvn_border.h)

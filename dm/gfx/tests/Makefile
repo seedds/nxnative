@@ -570,6 +570,11 @@ t_blend_zero: t_blend_zero.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_blend_zero.m $(MTL_T_SRC) $(FW)
 check_t_blend_zero: t_blend_zero
 	@set -e; work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; python3 test_dmsh_blend_zero.py --fixture "$$work"; MTL_DEBUG_LAYER=1 ./t_blend_zero "$$work"; DM_NVN_BLEND_ZERO=0 MTL_DEBUG_LAYER=1 ./t_blend_zero "$$work"
+# The word's rule against a reference from the specification on every per-target combination, the key's bz_off against it, and bz_bind's check of the invariant (t_blend_zero_rule.m); no shader or GPU work
+t_blend_zero_rule: t_blend_zero_rule.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_blend_zero_rule.m $(MTL_T_SRC) $(FW)
+check_t_blend_zero_rule: t_blend_zero_rule
+	@set -e; work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; ./t_blend_zero_rule "$$work"; DM_NVN_BLEND_ZERO=0 ./t_blend_zero_rule "$$work"
 # Logic operations through the replay (t_logic.m), with its shaders from test_dmsh_logic.py
 t_logic: t_logic.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_logic.m $(MTL_T_SRC) $(FW)

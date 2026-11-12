@@ -95,7 +95,7 @@ static id<MTLRenderPipelineState> geo_capture_pso(NvShader *vs) {
     id<MTLRenderPipelineState> ps = hm_get_id(&g_pso, &k);
     if (ps || hm_get_id(&g_pso_fail, &k)) return ps;
     NSError *e = nil;
-    ps = pso_build_dev(pso_desc(&k, vs, nil, nil, 0), !k.border, &e);   // a vertex shader that samples declares the border corrections' constant: specialized, as every device pipeline's (fn_dev_b)
+    ps = pso_build_dev(pso_desc(&k, vs, nil, nil, 0), pso_off(&k), &e);   // a vertex shader that samples declares the border corrections' constant: specialized, as every device pipeline's (fn_dev_b)
     if (ps) hm_put_id(&g_pso, &k, ps);
     else { hm_put_id(&g_pso_fail, &k, NSNull.null); MLOG("[RED] geometry vertex capture %s: %s", vs->key, e.localizedDescription.UTF8String); }
     return ps;
@@ -422,6 +422,7 @@ static NSObject *g_pso_mesh_building;
 static id<MTLRenderPipelineState> geo_mesh_pso_for(NvProg *pr, id<MTLFunction> fn, int run) {
     NvShader *vs = pr->sh[0], *fs = pr->sh[1];
     pso_key k; pso_key_fill(&k, vs, fs, g_pass.cfmt, g_pass.dfmt, g_pass.sfmt, g_pass.samples, 0);
+    g_pso_bzoff = (int)k.bz_off;   // for bz_audit
     memset(k.attr, 0, sizeof k.attr); memset(k.attr_hi, 0, sizeof k.attr_hi); memset(k.stream, 0, sizeof k.stream);   // the pipeline pulls its streams: no vertex layout in it
     k.fsfn = (__bridge void *)fn;
     os_unfair_lock_lock(&g_pso_mesh_lock); id ps = hm_get_id(&g_pso_mesh, &k);
@@ -430,7 +431,7 @@ static id<MTLRenderPipelineState> geo_mesh_pso_for(NvProg *pr, id<MTLFunction> f
     if (!ps) {
         MTLRenderPipelineDescriptor *d = pso_desc(&k, vs, fs, nil, 0);
         MTLMeshRenderPipelineDescriptor *m = [MTLMeshRenderPipelineDescriptor new];
-        m.meshFunction = fn_dev_b(fn, !k.border); m.fragmentFunction = fn_dev_b(d.fragmentFunction, !k.border);
+        m.meshFunction = fn_dev_b(fn, pso_off(&k)); m.fragmentFunction = fn_dev_b(d.fragmentFunction, pso_off(&k));
         m.rasterSampleCount = d.rasterSampleCount; m.alphaToCoverageEnabled = d.alphaToCoverageEnabled;
         for (int i = 0; i < 8; i++) m.colorAttachments[i] = d.colorAttachments[i];
         m.depthAttachmentPixelFormat = d.depthAttachmentPixelFormat; m.stencilAttachmentPixelFormat = d.stencilAttachmentPixelFormat;
@@ -574,8 +575,8 @@ static id<MTLFunction> mtk_nop_fragment(void) {
 }
 // The Metal 4 descriptor of a native mesh pipeline, whole: no base with open colour state, as a game has some hundred of them, each with functions of its own. Its depth / stencil
 // formats are not named (Metal 4 pipelines serve any). nil when a function has no Metal 4 descriptor (fn4_of: the diagnostic fragment overrides)
-static MTL4MeshRenderPipelineDescriptor *mtk_desc4(MTLRenderPipelineDescriptor *d, NvShader *ts, NvShader *ms, id<MTLFunction> ff, int border) {
-    MTL4FunctionDescriptor *mf = fn4_of_b(ms->fn, !border), *of = ts ? fn4_of_b(ts->fn, !border) : fn4_of(ms->mesh_obj), *f4 = fn4_of_b(ff, !border);
+static MTL4MeshRenderPipelineDescriptor *mtk_desc4(MTLRenderPipelineDescriptor *d, NvShader *ts, NvShader *ms, id<MTLFunction> ff, int off) {
+    MTL4FunctionDescriptor *mf = fn4_of_b(ms->fn, off), *of = ts ? fn4_of_b(ts->fn, off) : fn4_of(ms->mesh_obj), *f4 = fn4_of_b(ff, off);
     if (!mf || !of || !f4) return nil;
     MTL4MeshRenderPipelineDescriptor *m = [MTL4MeshRenderPipelineDescriptor new];
     m.meshFunctionDescriptor = mf; m.fragmentFunctionDescriptor = f4; m.maxTotalThreadsPerMeshThreadgroup = ms->mesh_threads;
@@ -597,7 +598,7 @@ static id<MTLRenderPipelineState> mtk_build(const pso_key *k, NvShader *ts, NvSh
     if (!pso_ds_valid((uint32_t)d.depthAttachmentPixelFormat, (uint32_t)d.stencilAttachmentPixelFormat)) return nil;
     id<MTLFunction> ff = d.fragmentFunction ?: mtk_nop_fragment();
     pso4_init();
-    MTL4MeshRenderPipelineDescriptor *m4 = g_comp4 ? mtk_desc4(d, ts, ms, ff, k->border) : nil;
+    MTL4MeshRenderPipelineDescriptor *m4 = g_comp4 ? mtk_desc4(d, ts, ms, ff, pso_off(k)) : nil;
     if (m4) {
         id<MTLRenderPipelineState> ps = nil; int from_run = 0;
         ps = arch_lookup(m4, 0, &from_run);   // a period of mesh pipelines alone is a p file (no vertex layout)
@@ -608,8 +609,8 @@ static id<MTLRenderPipelineState> mtk_build(const pso_key *k, NvShader *ts, NvSh
         }
     }
     MTLMeshRenderPipelineDescriptor *m = [MTLMeshRenderPipelineDescriptor new];
-    m.meshFunction = fn_dev_b(ms->fn, !k->border); m.fragmentFunction = fn_dev_b(ff, !k->border); m.maxTotalThreadsPerMeshThreadgroup = ms->mesh_threads;
-    m.objectFunction = ts ? fn_dev_b(ts->fn, !k->border) : fn_dev(ms->mesh_obj); m.payloadMemoryLength = ts ? (ts->mesh_payload + 15u) & ~15u : 16; m.maxTotalThreadsPerObjectThreadgroup = ts ? ts->mesh_threads : 1;
+    m.meshFunction = fn_dev_b(ms->fn, pso_off(k)); m.fragmentFunction = fn_dev_b(ff, pso_off(k)); m.maxTotalThreadsPerMeshThreadgroup = ms->mesh_threads;
+    m.objectFunction = ts ? fn_dev_b(ts->fn, pso_off(k)) : fn_dev(ms->mesh_obj); m.payloadMemoryLength = ts ? (ts->mesh_payload + 15u) & ~15u : 16; m.maxTotalThreadsPerObjectThreadgroup = ts ? ts->mesh_threads : 1;
     m.rasterSampleCount = d.rasterSampleCount; m.alphaToCoverageEnabled = d.alphaToCoverageEnabled;
     for (int i = 0; i < 8; i++) m.colorAttachments[i] = d.colorAttachments[i];
     m.depthAttachmentPixelFormat = d.depthAttachmentPixelFormat; m.stencilAttachmentPixelFormat = d.stencilAttachmentPixelFormat;
@@ -631,6 +632,7 @@ static id<MTLRenderPipelineState> mtk_pso(NvProg *raster) {
     if (!raster || !g_mtk.ms || !g_mtk.ms->fn) return nil;
     NvShader *ts = g_mtk.ts, *ms = g_mtk.ms, *fs = raster->sh[1];
     pso_key k; pso_key_fill(&k, ms, fs, g_pass.cfmt, g_pass.dfmt, g_pass.sfmt, g_pass.samples, 0);
+    g_pso_bzoff = (int)k.bz_off;   // for bz_audit
     k.border |= border_need(ts, 3);
     memset(k.attr, 0, sizeof k.attr); memset(k.attr_hi, 0, sizeof k.attr_hi); memset(k.stream, 0, sizeof k.stream);
     mtk_bind_key(&k, ts, ms, fs);

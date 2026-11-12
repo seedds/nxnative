@@ -64,6 +64,46 @@ static void check(id<MTLTexture> src, const char *name, const int crop[4], int w
     EXPECT(name,0,bad);free(out);
 }
 
+#ifndef CROP_LEGACY_HEADER
+// A picture shown smaller than its texels (minification): the present filters each pixel's footprint with a Catmull-Rom kernel stretched by the scale (at most 3), two texels
+// an axis per bilinear fetch at the pair's weighted centre, fetch positions clamped to the crop's first and last texel centres (present.metal). The CPU model below is that filter
+static double bil_ref(const uint8_t *v, int w, int h, double u, double t) {   // channel 0 of an RGBA8 image, bilinear at texel coordinates (centres at +0.5)
+    u = fmin(fmax(u, 0.5), w - 0.5) - 0.5; t = fmin(fmax(t, 0.5), h - 0.5) - 0.5;
+    int x0 = (int)u, y0 = (int)t, x1 = x0 + 1 < w ? x0 + 1 : x0, y1 = y0 + 1 < h ? y0 + 1 : y0; double fx = u - x0, fy = t - y0;
+    return (v[4*(y0*w+x0)] * (1-fx) + v[4*(y0*w+x1)] * fx) * (1-fy) + (v[4*(y1*w+x0)] * (1-fx) + v[4*(y1*w+x1)] * fx) * fy;
+}
+static double cr_ref(double x) { x = fabs(x); return x < 1 ? (1.5 * x - 2.5) * x * x + 1 : x < 2 ? ((-0.5 * x + 2.5) * x - 4) * x + 2 : 0; }
+static double pair_ref(int a, int last, double c, double s, double *pos) {
+    double wa = cr_ref((a + 0.5 - c) / s), wb = a + 1 <= last ? cr_ref((a + 1.5 - c) / s) : 0, w = wa + wb;
+    *pos = a + 0.5 + (fabs(w) > 1e-6 ? fmin(fmax(wb / w, 0), 1) : 0.5); return w;
+}
+static double minify_ref(const uint8_t *v, int w, int h, int ow, int oh, int x, int y) {
+    double sx = fmin(fmax((double)w / ow, 1), 3), sy = fmin(fmax((double)h / oh, 1), 3), cx = (x + 0.5) * w / ow, cy = (y + 0.5) * h / oh, sum = 0, ws = 0;
+    int x0 = (int)ceil(cx - 0.5 - 2 * sx), xl = (int)floor(cx - 0.5 + 2 * sx), y0 = (int)ceil(cy - 0.5 - 2 * sy), yl = (int)floor(cy - 0.5 + 2 * sy);
+    for (int j = y0; j <= yl; j += 2) { double py, wy = pair_ref(j, yl, cy, sy, &py);
+        for (int i = x0; i <= xl; i += 2) { double px, wx = pair_ref(i, xl, cx, sx, &px); sum += wx * wy * bil_ref(v, w, h, px, py); ws += wx * wy; } }
+    return fmin(fmax(sum / ws, 0), 255);
+}
+// Presents a w x h image whose red channel is pattern(x, y) into an ow x oh square canvas (a 1:1 layer: the picture fills it); returns the red channel's largest difference from
+// the model and the spread (max - min) of the output's red channel between its first and last columns (those two take the edge clamp)
+static void check_minify(const char *name, int w, int h, int ow, int oh, uint8_t (*pattern)(int, int), int *maxdiff, int *spread) {
+    int flip = atomic_load(&g_origin_ll);   // lower-left origin: the image is stored bottom-up, so output row y is the model's row oh - 1 - y
+    MTLTextureDescriptor *sd=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:w height:h mipmapped:NO];sd.storageMode=MTLStorageModeShared;sd.usage=MTLTextureUsageShaderRead;
+    id<MTLTexture> s=[g_dev newTextureWithDescriptor:sd];uint8_t *px=calloc((size_t)w*h,4);
+    for(int y=0;y<h;y++)for(int x=0;x<w;x++){px[4*(y*w+x)]=pattern(x,y);px[4*(y*w+x)+3]=255;}
+    [s replaceRegion:MTLRegionMake2D(0,0,w,h) mipmapLevel:0 withBytes:px bytesPerRow:w*4];
+    MTLTextureDescriptor *od=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:ow height:oh mipmapped:NO];od.storageMode=MTLStorageModeShared;od.usage=MTLTextureUsageRenderTarget;
+    id<MTLTexture> dst=[g_dev newTextureWithDescriptor:od];id<MTLCommandBuffer> cb=[g_q commandBuffer];
+    EXPECT(name,1,ENCODE(cb,s,dst,NULL));[cb commit];[cb waitUntilCompleted];
+    uint8_t *o=malloc((size_t)ow*oh*4);[dst getBytes:o bytesPerRow:ow*4 fromRegion:MTLRegionMake2D(0,0,ow,oh) mipmapLevel:0];
+    int md=0,lo=255,hi=0;
+    for(int y=0;y<oh;y++)for(int x=0;x<ow;x++){int r=o[4*(y*ow+x)],d=abs(r-(int)lround(minify_ref(px,w,h,ow,oh,x,flip?oh-1-y:y)));md=d>md?d:md;if(x>0&&x<ow-1){lo=r<lo?r:lo;hi=r>hi?r:hi;}}
+    *maxdiff=md;*spread=hi-lo;free(px);free(o);
+}
+static uint8_t stripes(int x, int y) { (void)y; return x & 1 ? 255 : 0; }   // the finest detail a picture holds: one texel on, one off
+static uint8_t ramp(int x, int y) { return (uint8_t)((x * 37 + y * 91) & 255); }
+#endif
+
 // This fixture is the only present producer. A window now holds a logical queue receipt;
 // wait for replay, then for the display ticket (snapshots do not return that ticket).
 static uint64_t display_ticket(uint64_t receipt, uint64_t before) {
@@ -97,6 +137,23 @@ int main(void) { @autoreleasepool {
     check(src,"non-zero x and y offset, 16 pixels byte-identical to a hand-written sub-rectangle",inset,4,4,-2);
     check(src,"aspect of the valid area kept, 128 pixels red in the middle / black on both sides",tl,16,8,4);
 #ifndef CROP_LEGACY_HEADER
+    {   // Minification: 3:2 (a 2560x1440 frame in a 1920x1080 rectangle), 2:1 (a 1280x720 window), 5:1 (the kernel's width capped at 3:1) and 1:1
+        int md,sp;
+        check_minify("3:2 stripes present",12,12,8,8,stripes,&md,&sp);
+        EXPECT("3:2 stripes match the footprint filter within 1",1,md<=1);
+        // one bilinear tap gave columns of 64 and 191 here (spread 127): the stripes aliased into a coarser pattern of their own
+        EXPECT("3:2 stripes: spread at most 50 (one tap: 127)",1,sp<=50);
+        check_minify("2:1 ramp present",16,16,8,8,ramp,&md,&sp);
+        EXPECT("2:1 ramp matches the filter within 1",1,md<=1);
+        check_minify("5:1 ramp present",40,40,8,8,ramp,&md,&sp);
+        EXPECT("5:1 ramp matches the filter at 3:1 width within 1",1,md<=1);
+        check_minify("1:1 ramp present",8,8,8,8,ramp,&md,&sp);
+        EXPECT("1:1 ramp: the texels as they are",0,md);
+        atomic_store(&g_origin_ll,1);
+        check_minify("3:2 ramp present, lower-left origin",24,24,16,16,ramp,&md,&sp);
+        EXPECT("3:2 ramp with the lower-left origin is the filter's picture upside down, within 1",1,md<=1);
+        atomic_store(&g_origin_ll,0);
+    }
     {
         // sRGB swapchain: present sends the raw bytes (as the Switch's scan-out does) without decoding first; unfixed, 128/64/200 decode to about 55/13/148
         MTLTextureDescriptor *sd=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm_sRGB width:8 height:8 mipmapped:NO];sd.storageMode=MTLStorageModeShared;sd.usage=MTLTextureUsageShaderRead;

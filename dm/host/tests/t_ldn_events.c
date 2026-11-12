@@ -34,7 +34,7 @@ long dm_net_discovery_send_native(int fd,const void *bytes,size_t size,int flags
 int dm_net_errno(void) { return 13; }
 int dm_net_multicast_allowed(void) { return 0; }
 dm_net_mode_t dm_net_mode(void) { return DM_NET_LDN; }
-void dm_net_set_session_peers(const uint32_t *addresses, unsigned count) { (void)addresses; (void)count; }
+void dm_net_set_session(int room, const uint32_t *members, unsigned count) { (void)room; (void)members; (void)count; }
 void dm_net_log_adapters(void) {}
 static void *read_during_finalize(void *argument) {
     int which=(int)(uintptr_t)argument; Result r;

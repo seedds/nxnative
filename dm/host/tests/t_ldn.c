@@ -106,8 +106,19 @@ static void local(void) {
     CHECK(!dm_ldn_disconnect(host, 1)); CHECK(dm_ldn_state(host) == 2 && dm_ldn_reason(host) == 3); CHECK(!dm_ldn_close(host, 1)); CHECK(dm_ldn_state(host) == 1);
     dm_ldn_stop(station); dm_ldn_stop(host);
 }
-// Three players in one room: the host hands each member the whole roster, so every joiner knows the others (the addresses a broadcast in the room goes
-// to, dm_ldn_members), and one leaving reaches the rest. The loopback players share 127.0.0.1 and differ by MAC, as in local() above.
+// Three players in one room: the host hands each member the whole roster, so every joiner knows the others, and one leaving reaches the rest. The first
+// joiner publishes its room as the service does, and a game broadcast from it goes to the two others (a recording sender sees them; the loopback
+// players share 127.0.0.1 and differ by MAC, as in local() above).
+#if defined(DM_LDN_NET_TEST) && defined(DM_NET_TEST)
+static _Atomic unsigned room_sends;
+static uint32_t room_last;
+static long room_record(int fd,const void *bytes,size_t size,int flags,uint32_t ip,uint16_t port) { (void)fd;(void)bytes;(void)flags;(void)port; atomic_fetch_add(&room_sends,1); room_last=ip; return (long)size; }
+static unsigned room_broadcast(void) {
+    int guest = dm_net_socket(2, 2, 0); CHECK(guest >= 0); guest_address everyone = guest_addr(htonl(UINT32_MAX), 49152);
+    atomic_store(&room_sends, 0); CHECK(dm_net_send(guest, "hello", 5, 0, &everyone, sizeof everyone) == 5); CHECK(!dm_net_close(guest));
+    return atomic_load(&room_sends);
+}
+#endif
 static int roster(dm_ldn_context *c, unsigned want) {
     for (int t = 0; t < 200; ++t) {
         dm_ldn_network n; unsigned macs = 0;
@@ -123,21 +134,32 @@ static void three_players(void) {
     CHECK(!dm_ldn_open(host, 1)); CHECK(!dm_ldn_create(host, &cfg, &sec, &hu, NULL, 0, NULL));
     dm_ldn_context *station[2];
     for (int i = 0; i < 2; ++i) {
-        dm_ldn_transport st = transport(free_port(SOCK_DGRAM), port, 2 + i); station[i] = dm_ldn_start(&st, NULL, NULL); CHECK(station[i]); CHECK(!dm_ldn_open(station[i], 0));
+        dm_ldn_transport st = transport(free_port(SOCK_DGRAM), port, 2 + i); st.publish_members = i == 0; station[i] = dm_ldn_start(&st, NULL, NULL); CHECK(station[i]); CHECK(!dm_ldn_open(station[i], 0));
         dm_ldn_filter f = {0}; dm_ldn_network rooms[24]; int count; CHECK(!dm_ldn_scan(station[i], rooms, &count, 24, &f, 0) && count == 1);
         dm_ldn_user su = user(i ? "second" : "first"); CHECK(!dm_ldn_connect(station[i], rooms, &sec, &su, 5, 0));
     }
     const unsigned all = 1u << 1 | 1u << 2 | 1u << 3;
     CHECK(roster(host, all)); CHECK(roster(station[0], all)); CHECK(roster(station[1], all));
-    CHECK(!dm_ldn_disconnect(station[0], 0)); CHECK(roster(host, all & ~(1u << 2))); CHECK(roster(station[1], all & ~(1u << 2)));
+#if defined(DM_LDN_NET_TEST) && defined(DM_NET_TEST)
+    dm_net_set_multicast_allowed(0); dm_net_test_set_discovery_sender(room_record);
+    CHECK(room_broadcast() == 2 && room_last == htonl(INADDR_LOOPBACK));
+    CHECK(!dm_ldn_disconnect(station[1], 0)); CHECK(roster(host, all & ~(1u << 3))); CHECK(roster(station[0], all & ~(1u << 3)));
+    CHECK(room_broadcast() == 1);
+    // Out of the room the broadcast is discovery again, here to the address a joiner enters
+    CHECK(!dm_ldn_disconnect(station[0], 0)); setenv("DM_NET_DISCOVERY_PEER", "127.0.0.9", 1);
+    CHECK(room_broadcast() == 1 && room_last == htonl(0x7f000009)); unsetenv("DM_NET_DISCOVERY_PEER");
+    dm_net_test_set_discovery_sender(NULL); dm_net_set_multicast_allowed(1);
+#else
+    CHECK(!dm_ldn_disconnect(station[1], 0)); CHECK(roster(host, all & ~(1u << 3))); CHECK(roster(station[0], all & ~(1u << 3)));
+#endif
     dm_ldn_stop(station[0]); dm_ldn_stop(station[1]); dm_ldn_stop(host);
     // Members are the connected nodes other than this device, in slot order
-    dm_ldn_network n = example(); uint32_t out[7];
+    dm_ldn_network n = example(); uint32_t out[8];
     n.nodes[0].ip = 0x0a000001; n.nodes[2] = n.nodes[0]; n.nodes[2].ip = 0x0a000003; n.nodes[2].mac[5] = 3;
     n.nodes[5] = n.nodes[0]; n.nodes[5].ip = 0x0a000006; n.nodes[5].mac[5] = 6; n.nodes[3].ip = 0x0a000004;   // slot 3 holds an address but no member
-    CHECK(dm_ldn_members(&n, htonl(0x0a000003), out) == 2 && out[0] == htonl(0x0a000001) && out[1] == htonl(0x0a000006));
-    CHECK(dm_ldn_members(&n, htonl(0x0a000009), out) == 3);
-    dm_ldn_network empty = {0}; CHECK(!dm_ldn_members(&empty, 0, out));
+    CHECK(dm_ldn_members(&n, n.nodes[2].mac, out) == 2 && out[0] == htonl(0x0a000001) && out[1] == htonl(0x0a000006));
+    const uint8_t stranger[6] = {2, 0, 0, 0, 0, 9}; CHECK(dm_ldn_members(&n, stranger, out) == 3);
+    dm_ldn_network empty = {0}; CHECK(!dm_ldn_members(&empty, stranger, out));
 }
 static void peer_fixture(void) {
     // Fork before creating either worker. Child and parent then own completely

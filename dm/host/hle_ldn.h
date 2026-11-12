@@ -42,7 +42,7 @@ typedef struct dm_ldn_context dm_ldn_context;
 // use the SDK's host numeric order. A zero bind address listens on all adapters.
 // A supplied locally administered MAC identifies a virtual adapter; zero derives
 // the conventional ldn_mitm identity from its IPv4 address.
-// publish_members hands the room's other members to the socket layer (dm_net_set_session_peers) as they change: the service's one context does,
+// publish_members hands the room and its other members to the socket layer (dm_net_set_session) as they change: the service's one context does,
 // a test's several contexts in one process choose which one.
 typedef struct { uint32_t address, mask, discovery, bind_address; uint16_t port, discovery_port; unsigned scan_ms, connect_ms; uint8_t mac[6]; int publish_members; } dm_ldn_transport;
 typedef void (*dm_ldn_notify)(void *opaque);
@@ -62,5 +62,6 @@ uint32_t dm_ldn_policy(dm_ldn_context *context, int policy);
 uint32_t dm_ldn_filter_add(dm_ldn_context *context, const uint8_t mac[6]);
 uint32_t dm_ldn_filter_clear(dm_ldn_context *context);
 uint32_t dm_ldn_reject(dm_ldn_context *context, uint32_t ip);
-// The connected members of network other than own (native order), as native-order addresses in out; returns how many (at most 7)
-unsigned dm_ldn_members(const dm_ldn_network *network, uint32_t own, uint32_t out[7]);
+// The addresses (native order) of network's connected members other than the one with MAC own, into out (room for DM_NET_SESSION_MAX); returns how many.
+// MAC, not address, tells a device from the others: each derives its own from its address, and loopback fixtures share one address.
+unsigned dm_ldn_members(const dm_ldn_network *network, const uint8_t own[6], uint32_t *out);

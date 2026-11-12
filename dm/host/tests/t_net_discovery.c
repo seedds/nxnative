@@ -265,7 +265,7 @@ static void vpn(void) {
     unsetenv("DM_NET_VPN"); dm_net_set_multicast_allowed(0); CHECK(dm_net_discovery_prepare(htonl(UINT32_MAX),&plan)<0 && dm_net_errno()==99);
     setenv("DM_NETWORK","auto",1); dm_net_test_set_interface(NULL);
 }
-// In a room a broadcast goes to each other member (dm_net_set_session_peers), which a recording sender sees without sending anything
+// In a room a broadcast goes to each other member (dm_net_set_session), which a recording sender sees without sending anything
 static _Atomic unsigned recorded;
 static uint32_t recorded_to[8], refused;
 static uint16_t recorded_port;
@@ -277,18 +277,22 @@ static long record(int fd,const void *bytes,size_t size,int flags,uint32_t ip,ui
 static void room_broadcasts(void) {
     dm_net_test_interface a=adapter(0xffffff00); dm_net_test_set_interface(&a); dm_net_test_set_discovery_sender(record);
     int guest=dm_net_socket(2,2,0); CHECK(guest>=0);
-    const uint32_t room[]={htonl(0x0a000002),htonl(0x0a000003),htonl(0x0a000004)}; dm_net_set_session_peers(room,3);
+    const uint32_t room[]={htonl(0x0a000002),htonl(0x0a000003),htonl(0x0a000004)}; dm_net_set_session(1,room,3);
     address everyone=endpoint(UINT32_MAX,49152),subnet=endpoint(0x7f0000ff,49152),one=endpoint(0x0a000002,49152);
     atomic_store(&recorded,0); CHECK(dm_net_send(guest,"hello",5,0,&everyone,sizeof everyone)==5);
     CHECK(atomic_load(&recorded)==3 && !memcmp(recorded_to,room,sizeof room) && recorded_port==htons(49152));
     atomic_store(&recorded,0); CHECK(dm_net_send(guest,"hello",5,0,&subnet,sizeof subnet)==5 && atomic_load(&recorded)==3);
     // One unreachable member does not fail the broadcast; when none is reachable it fails with that error
     refused=room[1]; atomic_store(&recorded,0); CHECK(dm_net_send(guest,"hello",5,0,&everyone,sizeof everyone)==5 && atomic_load(&recorded)==3);
-    dm_net_set_session_peers(room+1,1); atomic_store(&recorded,0);
+    dm_net_set_session(1,room+1,1); atomic_store(&recorded,0);
     CHECK(dm_net_send(guest,"hello",5,0,&everyone,sizeof everyone)<0 && dm_net_errno()==113 && atomic_load(&recorded)==1); refused=0;
     // Ordinary unicast is never fanned out
-    dm_net_set_session_peers(room,3); atomic_store(&recorded,0);
+    dm_net_set_session(1,room,3); atomic_store(&recorded,0);
     CHECK(dm_net_send(guest,"hello",5,0,&one,sizeof one)==5 && atomic_load(&recorded)==1 && recorded_to[0]==room[0]);
+    // Alone in the room (a host before anyone joins), a broadcast reaches nobody and is no error, even with nothing to search over a VPN
+    dm_net_set_session(1,NULL,0); setenv("DM_NETWORK","ldn",1); setenv("DM_NET_VPN","1",1); atomic_store(&recorded,0);
+    CHECK(dm_net_send(guest,"hello",5,0,&everyone,sizeof everyone)==5 && !atomic_load(&recorded));
+    unsetenv("DM_NET_VPN"); setenv("DM_NETWORK","auto",1); dm_net_set_session(1,room,3);
     // Where native broadcast works and no VPN is in the way it is used; over a VPN the room is used even there
     dm_net_set_multicast_allowed(1); atomic_store(&recorded,0);
     CHECK(dm_net_send(guest,"hello",5,0,&everyone,sizeof everyone)==5 && atomic_load(&recorded)==1 && recorded_to[0]==htonl(UINT32_MAX));
@@ -296,7 +300,7 @@ static void room_broadcasts(void) {
     CHECK(dm_net_send(guest,"hello",5,0,&everyone,sizeof everyone)==5 && atomic_load(&recorded)==3);
     unsetenv("DM_NET_VPN"); setenv("DM_NETWORK","auto",1); dm_net_set_multicast_allowed(0);
     // Out of the room, discovery is as before: here the host's address
-    dm_net_set_session_peers(NULL,0); setenv("DM_NET_DISCOVERY_PEER","127.0.0.1",1); atomic_store(&recorded,0);
+    dm_net_set_session(0,NULL,0); setenv("DM_NET_DISCOVERY_PEER","127.0.0.1",1); atomic_store(&recorded,0);
     CHECK(dm_net_send(guest,"hello",5,0,&everyone,sizeof everyone)==5 && atomic_load(&recorded)==1 && recorded_to[0]==htonl(INADDR_LOOPBACK));
     unsetenv("DM_NET_DISCOVERY_PEER"); CHECK(!dm_net_close(guest)); dm_net_test_set_discovery_sender(NULL); dm_net_test_set_interface(NULL);
 }

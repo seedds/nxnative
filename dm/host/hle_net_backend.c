@@ -61,16 +61,17 @@ static _Atomic int g_net_broadcast_known;
 typedef struct { uint32_t address, mask, gateway; unsigned index, flags; int local_link; } net_interface;
 static int net_interface_get(net_interface *out);
 static pthread_mutex_t g_session_lock = PTHREAD_MUTEX_INITIALIZER;
-static uint32_t g_session_peers[DM_NET_SESSION_MAX];
-static unsigned g_session_count;
-void dm_net_set_session_peers(const uint32_t *addresses, unsigned count) {
-    if (!addresses) count = 0;
+static uint32_t g_session_members[DM_NET_SESSION_MAX];
+static int g_session_count = -1;   // -1: no room
+void dm_net_set_session(int room, const uint32_t *members, unsigned count) {
+    if (!room || !members) count = 0;
     if (count > DM_NET_SESSION_MAX) count = DM_NET_SESSION_MAX;
     pthread_mutex_lock(&g_session_lock);
-    if (count) memcpy(g_session_peers, addresses, count * sizeof *addresses);
-    g_session_count = count; pthread_mutex_unlock(&g_session_lock);
+    if (count) memcpy(g_session_members, members, count * sizeof *members);
+    g_session_count = room ? (int)count : -1; pthread_mutex_unlock(&g_session_lock);
 }
-// VPN play's notices are about the adapter, which net_interface_get reads on every socket call: each kind is logged when its text differs from the last
+// VPN play's notices are about the adapter, which net_interface_get reads again for every ipconfig and discovery plan: each kind is logged when its
+// text differs from the last
 enum { NET_VPN_ADAPTER, NET_VPN_SEARCH };
 __attribute__((format(printf, 2, 3))) static void net_vpn_note(int kind, const char *format, ...) {
     static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER; static char last[2][512];
@@ -78,11 +79,12 @@ __attribute__((format(printf, 2, 3))) static void net_vpn_note(int kind, const c
     pthread_mutex_lock(&lock); int fresh = strcmp(text, last[kind]) != 0; if (fresh) strlcpy(last[kind], text, sizeof last[kind]); pthread_mutex_unlock(&lock);
     if (fresh) fprintf(stderr, "%s\n", text);
 }
-// The room's members a broadcast goes to instead (net_socket.h), none where native broadcast works and no VPN is in the way
-static unsigned net_session_peers(uint32_t out[DM_NET_SESSION_MAX]) {
-    if (dm_net_multicast_allowed() && !dm_net_vpn()) return 0;
+// The room's members a broadcast goes to instead (net_socket.h): how many (0 alone in the room), or -1 when there is no room or native broadcast works
+// and no VPN is in the way
+static int net_session_members(uint32_t out[DM_NET_SESSION_MAX]) {
+    if (dm_net_multicast_allowed() && !dm_net_vpn()) return -1;
     pthread_mutex_lock(&g_session_lock);
-    unsigned count = g_session_count; memcpy(out, g_session_peers, count * sizeof *out);
+    int count = g_session_count; if (count > 0) memcpy(out, g_session_members, (unsigned)count * sizeof *out);
     pthread_mutex_unlock(&g_session_lock); return count;
 }
 #ifdef DM_NET_TEST
@@ -585,9 +587,9 @@ long dm_net_send(int guest, const void *buf, unsigned long len, int flags, const
     net_ref r; if (net_borrow(guest, &r)) return -1;
     int discovery=addr&&net_is_discovery(a.sin_addr.s_addr,r.type);
     if (discovery) {
-        uint32_t members[DM_NET_SESSION_MAX]; unsigned count = net_session_peers(members);
-        if (count) {
-            long result = net_send_session(&r, buf, len, hostflags, flags, a, members, count);
+        uint32_t members[DM_NET_SESSION_MAX]; int count = net_session_members(members);
+        if (count >= 0) {
+            long result = count ? net_send_session(&r, buf, len, hostflags, flags, a, members, (unsigned)count) : (long)len;
             close(r.fd); net_trace("send-session", guest, result); return result;
         }
         dm_net_discovery_plan plan;

@@ -69,11 +69,13 @@ static void ldn_nonblock(int fd) { fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NON
 static void ldn_wake(dm_ldn_context *c) { uint8_t b = 1; (void)write(c->wake[1], &b, 1); }
 static void ldn_changed(dm_ldn_context *c) { pthread_cond_broadcast(&c->changed); if (c->notify) c->notify(c->opaque); }
 static void ldn_state_set(dm_ldn_context *c, int state) { if (c->state != state) { ldn_trace("state from=%d to=%d reason=%d", c->state, state, c->reason); c->state = state; ldn_changed(c); } }
-unsigned dm_ldn_members(const dm_ldn_network *n, uint32_t own, uint32_t out[7]) {
+unsigned dm_ldn_members(const dm_ldn_network *n, const uint8_t own[6], uint32_t *out) {
     unsigned count = 0;
-    for (int i = 0; i < 8 && count < 7; ++i) if (n->nodes[i].connected && n->nodes[i].ip && htonl(n->nodes[i].ip) != own) out[count++] = htonl(n->nodes[i].ip);
+    for (int i = 0; i < 8 && count < DM_NET_SESSION_MAX; ++i)
+        if (n->nodes[i].connected && n->nodes[i].ip && memcmp(n->nodes[i].mac, own, 6)) out[count++] = htonl(n->nodes[i].ip);
     return count;
 }
+static void ldn_local_mac(dm_ldn_context *c, uint8_t out[6]);
 static void ldn_network_set(dm_ldn_context *c, const dm_ldn_network *n) {
     if (!memcmp(&c->network, n, sizeof *n)) return;
     for (int i = 0; i < 8; ++i) {
@@ -81,7 +83,10 @@ static void ldn_network_set(dm_ldn_context *c, const dm_ldn_network *n) {
         if (n->nodes[i].connected && (!c->network.nodes[i].connected || memcmp(c->network.nodes[i].mac, n->nodes[i].mac, 6))) c->updates[i].change |= 1;
     }
     c->network = *n;
-    if (c->transport.publish_members) { uint32_t members[7]; dm_net_set_session_peers(members, dm_ldn_members(n, c->transport.address, members)); }
+    if (c->transport.publish_members) {
+        uint8_t own[6]; ldn_local_mac(c, own); uint32_t members[DM_NET_SESSION_MAX];
+        dm_net_set_session(n->node_count > 0, members, dm_ldn_members(n, own, members));
+    }
     ldn_changed(c);
 }
 static void ldn_mac(uint8_t out[6], uint32_t address) { out[0] = 2; out[1] = 0; memcpy(out + 2, &address, 4); }
@@ -258,7 +263,7 @@ fail:
 void dm_ldn_stop(dm_ldn_context *c) {
     if (!c) return; pthread_mutex_lock(&c->lock); c->stopping = 1; ldn_wake(c); pthread_cond_broadcast(&c->changed); pthread_mutex_unlock(&c->lock);
     pthread_join(c->worker, NULL); for (int i = 0; i < 8; ++i) ldn_peer_close(c, i);
-    if (c->transport.publish_members) dm_net_set_session_peers(NULL, 0);
+    if (c->transport.publish_members) dm_net_set_session(0, NULL, 0);
     if (c->listener >= 0) close(c->listener); close(c->udp); close(c->wake[0]); close(c->wake[1]); pthread_cond_destroy(&c->changed); pthread_mutex_destroy(&c->lock); free(c);
 }
 int dm_ldn_state(dm_ldn_context *c) { if (!c) return 0; pthread_mutex_lock(&c->lock); int n = c->state; pthread_mutex_unlock(&c->lock); return n; }

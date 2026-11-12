@@ -882,6 +882,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - `draw outside a render pass`; the rest of the pass was dropped. → [Copies inside a render pass](../reference/rendering.md#copies-inside-a-render-pass)
 - an assert (a stripped trap, `main+0x4d26e0`) when the surface does not list `preTransform` INHERIT. → [Swapchain pre-transform and layer crop](../reference/rendering.md#swapchain-pre-transform-and-layer-crop)
 - a pipeline with no Metal pipeline state, and its draws missing. → [Specialization constants](../reference/rendering.md#specialization-constants)
+- none seen in a game. An integer colour attachment opened with `VK_ATTACHMENT_LOAD_OP_CLEAR` would hold another value than the game's clear value (in the check below, 0 instead of 4,000,000,000 and instead of −5), and a signed integer image cleared by `vkCmdClearColorImage` to a negative value would hold `INT32_MAX`. → [Clear values of integer attachments](../reference/rendering.md#clear-values-of-integer-attachments)
 - a crash in `set_free` from `vkFreeDescriptorSets` as a game leaves. → [What a game tears down that it should not](../reference/rendering.md#what-a-game-tears-down-that-it-should-not)
 - `[RED] occlusion query outside a render pass or past the buffer`; a query's result stays 0. → [Occlusion queries that span render encoders](../reference/rendering.md#occlusion-queries-that-span-render-encoders)
 - a call to address 0 at boot. → [`VK_EXT_debug_report`](../reference/rendering.md#vk_ext_debug_report)

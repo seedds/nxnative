@@ -16,6 +16,7 @@ Update 1.0.30000 (v655360) over the base game, SDK 20.5.8. Unity 6000.0.50f1 IL2
 ## Frame rate
 
 - 60 fps, as on the Switch. While a cinematic plays the game draws 1280x720 with a window crop and asks for present interval 2 (30 fps).
+- **Resolved: an idle job worker kept a performance core awake.** Unity's job workers sleep 25 µs between looks at their queue (`main+0xbd99e0`), about 25,000 host wakeups a second, and on the iPhone the game ran on performance cores and warmed the phone more than heavier games. Those sleeps now back off like other polls: [Short sleeps are polls](../../../docs/reference/threads.md#short-sleeps-are-polls) (iPhone Duo: CPU energy 0.63 → 0.09 W, on efficiency cores). Open: dropped frames went from 0.17% to 0.25% in the comparison (different routes), as short hitches of 2 to 6 frames.
 
 ## Memory
 
@@ -51,6 +52,7 @@ General host changes first needed here; each applies to every game:
 - **`hid::GetDebugPadStates`**, the history form (`hle_hid.c`): [History reads fill every requested entry](../../../docs/reference/services.md#history-reads-fill-every-requested-entry).
 - **Unity 6 memory with no StandardAllocator and no heap**, and the NSP script's 5 GB block for every game with an NPDM system resource (`profile_guess.py`): [Unity 6 takes its memory with no StandardAllocator and no heap](../../../docs/reference/memory.md#unity-6-takes-its-memory-with-no-standardallocator-and-no-heap), [dm/games/README.md, Adding a game](../README.md#adding-a-game).
 - **Unity 6 `Shader` objects** read from the bundles' own type trees: [Unity 6 Shader objects](../../../docs/reference/shaders.md#unity-6-shader-objects).
+- **Short sleeps of an idle job worker** (`hle_thread.c`): [Short sleeps are polls](../../../docs/reference/threads.md#short-sleeps-are-polls).
 
 ## Open
 

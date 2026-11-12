@@ -9931,6 +9931,10 @@ static long pre_warm_lists(NSArray<NSString *> *paths, int threads) {
              (unsigned long long)(g_pb_archived - arch0), (int)atomic_load(&g_pre_warm_failed), (bp_now() - t0) / 1e9);
         if (atomic_load(&g_arch_new) >= 1000) arch_flush();   // the serializer holds what it captured until written
     }
+    // The compute and native mesh pipelines the MTLDevice built are captured on the harvest queue (arch_harvest), outside g: wait for them, so the flush below holds them
+    // and nothing is left for mtl_arch_save at exit. A capture still running there was written by the atexit handler, after the bundle was made, and in the bundle form
+    // its pipelines script crashed the tool in Metal's serializer (Ocarina of Time, 2026-11-12), and the NSP script dropped every file the tool had made
+    dispatch_sync(arch_harvest_q(), ^{});
     arch_flush_wait();
     g_warm_dict = nil; g_warm_loads = nil;
     MLOG("pipeline prebuild: the prewarm lists' %ld lines in %.1f s: %llu render pipelines (bases %llu compiled, %llu from the archives), %llu compute, %llu mesh, %d failed",

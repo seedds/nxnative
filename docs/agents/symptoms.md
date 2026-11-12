@@ -400,6 +400,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - a Switch 2 game presents at 720p, with its upscaler at the matching low size. → [The display's largest buffer](../reference/services.md#the-displays-largest-buffer)
 - `registered NROs not found` from `nro_collect.py` in a game whose RomFS has an NRR, or `[RED] ro::LoadModule: no rewritten NRO with SHA-256 …`. `main` is small (about 600 KB of code) beside a data segment of random-looking bytes. → [A game that decodes its code at run time](../reference/services.md#a-game-that-decodes-its-code-at-run-time)
 - a crash in `ro::RegisterModuleInfo`, or an NRR that seems to register millions of hashes: the words at +0x340 and +0x344 are random. → [NRR version 1](../reference/services.md#nrr-version-1)
+- a mod folder as Ryujinx, the yuzu family or Atmosphère take it (`romfs/`, `exefs/`, `cheats/`) had no place to go: only `DM_ROMFS_OVERLAY` replaced RomFS files, by hand, and only one cheat file per build was read. With the mods folder: `[RED] mods: … is not applied` for a code patch, `mods: warning: … differ only in case` for a file a Switch would not have matched. → [Mods made for emulators do nothing, or only half of them does](../reference/services.md#mods-made-for-emulators-do-nothing-or-only-half-of-them-does)
 
 ## Movies
 

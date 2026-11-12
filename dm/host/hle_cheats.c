@@ -72,10 +72,11 @@
 
 // Limits of Atmosphère's own order (0x2000 dwords of program, 256 cheats per file): no shared cheat-site file and no
 // hand-made one can exhaust the arrays
-#define CHEAT_MAX 256          // cheats in one file
+#define CHEAT_MAX 512          // entries of all loaded files together
 #define INS_MAX  0x2000        // dwords of one cheat's program
 #define NAME_MAX 128           // characters of a [Name] / {Name} header
 #define OTHER_MAX 24           // another build's .txt files listed in the menu
+#define SCAN_MAX 67            // the cheats folder's three layouts, then the mods' cheats folders (hle_mods.c)
 #define CAND_MAX 64            // .txt files scanned in the cheats folder and its Atmosphère tree
 #define VM_STEP_CAP 4000000    // instructions of one cheat in one pass (the reference has none; a runaway loop must never stall a frame)
 #define VW_MAX 8               // program words holding a settable value (a min / max writes it twice, an 8-byte value is two words)
@@ -126,7 +127,7 @@ typedef struct {
 
 static cheat_t g_cheat[CHEAT_MAX]; static int g_ncheat;
 static char g_dir[1024];       // cheats folder (DM_CHEATS or <DM_ROOT>/cheats), "" when neither is set
-static char g_path[2048];      // the loaded file (logged; "Reload cheats" re-reads exactly this path)
+static char g_path[2048];      // the first loaded file (logged)
 static char g_build[17];       // the loaded file's build ID: main's build ID cut to 16 hex digits, upper case as the
                                // cheat files name it (dmnt matches the file name case-insensitively on disk)
 static char g_tid[17];         // this game's title ID (the profile's DM_GAME_PROGRAM_ID), for the Atmosphère tree
@@ -137,7 +138,8 @@ static char g_on[16][NAME_MAX]; static int g_non;            // the names of DM_
 static char g_skip_name[SKIP_MAX][NAME_MAX], g_skip_why[SKIP_MAX][160]; static int g_nskip;   // the compiler's left-outs
 static char g_src[SRC_MAX][256]; static int g_nsrc;          // *.cheats.toml sources in the folder
 static char g_report[4096];    // the load report (dm_cheats_report)
-static int g_have_meta;        // the loaded file came with a meta file
+static int g_have_meta;        // a loaded file came with a meta file
+static int g_nfiles, g_ncopies; static char g_files[1024];   // the files loaded for this build, the cheats left out as copies, and where the files came from
 static int g_junk, g_junk_line, g_glued;   // prose lines ignored and the first one; headers split off a code line
 static char g_carried[64];     // the other build whose <build>.enabled gave the toggles ("" none)
 static char g_meta_src[256];   // the source the meta file names ("compiled from <source>"), "" without a meta file
@@ -1329,12 +1331,14 @@ static void values_load(void) {
 
 // The folders scanned, in the brief's order: the flat folder, the Atmosphère tree under it
 // (atmosphere/contents/<tid>/cheats) and the tree with the folder itself as the "atmosphere" half (contents/<tid>/cheats)
-static int scan_dirs(char out[3][1024]) {
+static int scan_dirs(char out[SCAN_MAX][1024]) {
     if (!g_dir[0] || !g_tid[0]) return 0;
     snprintf(out[0], 1024, "%s", g_dir);
     snprintf(out[1], 1024, "%s/atmosphere/contents/%s/cheats", g_dir, g_tid);
     snprintf(out[2], 1024, "%s/contents/%s/cheats", g_dir, g_tid);
-    return 3;
+    int n = 3;
+    for (const char *d; n < SCAN_MAX && (d = dm_mods_cheat_dir(n - 3, NULL)); n++) snprintf(out[n], 1024, "%s", d);
+    return n;
 }
 
 // Does the file name hold exactly this build ID (any case), as the atmosphere loader names its cheat files?
@@ -1422,7 +1426,7 @@ static int section_marker(const char *name, char *sec, size_t n) {
 // separated by spaces are ignored (the brief), with one [RED] line for a line whose words are code-like but not valid.
 // An entry without code words is a label (its name only: credits, or a section marker that sets the section of the
 // entries after it); every entry notes how many earlier entries carry its name (dup, the key of a duplicate)
-static void parse_file(const char *path) {
+static void parse_file(const char *path, int first) {
     char *text = read_text(path);
     if (!text) { LOG("[RED] cheats: cannot read %s (errno %d)", path, errno); return; }
     cheat_t *cur = NULL;
@@ -1466,7 +1470,6 @@ static void parse_file(const char *path) {
             if (mark) cur->sec_mark = (uint8_t)mark;
             snprintf(cur->section, NAME_MAX, "%s", mark == 1 ? sec : section);
             if (mark == 2) section[0] = 0;
-            for (int i = 0; i < g_ncheat - 1; i++) if (!strcmp(g_cheat[i].name, cur->name)) cur->dup++;
             p = q + 1;                 // dmnt reads on after the header: code words may follow on the same line
             while (*p == ' ' || *p == '\t' || *p == '\r') p++;
             if (!*p) continue;
@@ -1522,7 +1525,7 @@ static void parse_file(const char *path) {
 // under it were dropped as prose (then it is broken, with the first such line named); anything
     // else is decoded word by word, and one instruction the VM does not run (unsupported opcode, region, width,
     // condition) or the words ending inside a field turns the whole cheat off, shown in the menu with the reason, never run
-    for (int i = 0; i < g_ncheat; i++) {
+    for (int i = first; i < g_ncheat; i++) {
         cheat_t *c = &g_cheat[i];
         if (c->broken) continue;   // already off with its own reason (a malformed line): the decode would overwrite why
         if (c->nins == 0 && c->junk_line) {   // its lines were all prose: a broken cheat (a typo), not a label
@@ -1583,19 +1586,19 @@ static int value_word(const cheat_t *c, int k) {
 // <txt>.meta.tsv: the companion scripts/cheat_anchor.py writes beside a compiled <build>.txt. Its rows go to the
 // entries of the same name in file order (a duplicate name's rows to its entries in turn); "unresolved" rows (cheats the
 // compiler left out) are listed for the panel. Columns are read by their header names
-static void meta_load(const char *txt_path) {
+static void meta_load(const char *txt_path, int first) {
     char path[2100];
     size_t L = strlen(txt_path);
     if (L < 4 || strcasecmp(txt_path + L - 4, ".txt")) return;
     snprintf(path, sizeof path, "%.*s.meta.tsv", (int)(L - 4), txt_path);
     FILE *f = fopen(path, "r");
     if (!f) return;
+    if (!g_have_meta) meta_source(path, g_meta_src, sizeof g_meta_src);
     g_have_meta = 1;
-    meta_source(path, g_meta_src, sizeof g_meta_src);
     enum { NAME, KIND, SECTION, TYPE, ACTION, ASK, VWORDS, ONCE, PAIR, RESOLVED, NOTE, ADDRESS, NCOL };
     static const char *cols[NCOL] = {"name", "kind", "section", "type", "action", "ask", "value_words", "once", "pair", "resolved", "note", "address"};
     int at[NCOL]; for (int k = 0; k < NCOL; k++) at[k] = -1;
-    char line[4096]; int cursor = 0, head = 0;
+    char line[4096]; int cursor = first, head = 0;
     while (fgets(line, sizeof line, f)) {
         if (line[0] == '#') {
             if (!g_version[0] && !strncmp(line, "# build ", 8) && !strncasecmp(line + 8, g_build, 16) && line[24] == ' ') {
@@ -1718,6 +1721,8 @@ static void report_build(void) {
     int dups = 0;
     for (int i = 0; i < g_ncheat; i++) if (g_cheat[i].dup == 1 && !g_cheat[i].label) { if (!dups++) ADD("Duplicate names (saved as \"Name #2\", …):"); ADD(" \"%s\"", g_cheat[i].name); }
     if (dups) ADD("\n");
+    if (g_nfiles > 1) ADD("%d files of this build, as one list: %s\n", g_nfiles, g_files);
+    if (g_ncopies) ADD("%d cheats left out: an earlier file has them under the same name with the same code\n", g_ncopies);
     if (g_junk) ADD("%d lines that are not code words were ignored (the first: line %d)\n", g_junk, g_junk_line);
     if (g_glued) ADD("%d headers glued to a code line were split off\n", g_glued);
     if (g_carried[0]) ADD("Toggles carried over from %s (no %s.enabled yet)\n", g_carried, g_build);
@@ -1751,19 +1756,49 @@ static void sources_scan(void) {
     closedir(d);
 }
 
+static int same_cheat(const cheat_t *a, const cheat_t *b) {
+    return a->master == b->master && a->nins == b->nins && a->nd == b->nd && a->nd_region == b->nd_region && a->nd_off == b->nd_off
+        && !strcmp(a->name, b->name) && !memcmp(a->ins, b->ins, sizeof(uint32_t) * (size_t)a->nins);
+}
+
+// One more file of this build into the list. A cheat that an earlier file already has, by name and code words, is left out (the same
+// cheat file shipped by two mods); a file left with no cheat of its own adds nothing, its labels neither. Returns the copies left out
+static int file_add(const char *path, const char *mod) {
+    int first = g_ncheat, kept = first, cheats = 0, copies = 0;
+    parse_file(path, first);
+    meta_load(path, first);
+    for (int i = first; i < g_ncheat; i++) {
+        cheat_t *c = &g_cheat[i]; int same = 0;
+        for (int k = 0; k < first && !same && !c->label; k++) same = !g_cheat[k].label && same_cheat(&g_cheat[k], c);
+        if (same) { copies++; continue; }
+        cheats += !c->label;
+        if (kept != i) g_cheat[kept] = *c;
+        kept++;
+    }
+    g_ncheat = first && !cheats ? first : kept;
+    for (int i = first; i < g_ncheat; i++) {
+        cheat_t *c = &g_cheat[i];
+        c->dup = 0;
+        for (int k = 0; k < i; k++) if (!strcmp(g_cheat[k].name, c->name)) c->dup++;
+        if (mod && !c->section[0]) snprintf(c->section, NAME_MAX, "%s", mod);
+    }
+    return copies;
+}
+
 // (Re)load: choose the file, note the other builds, parse, read the meta file and the values, link pairs, restore the
 // states, build the report. Called at init and from "Reload cheats" (safe mode and the master switch stay as they are)
 static void load_all(void) {
-    g_ncheat = 0; g_ncand = 0; g_nothers = 0; g_path[0] = 0; g_nskip = 0; g_have_meta = 0;
+    g_ncheat = 0; g_ncand = 0; g_nothers = 0; g_path[0] = 0; g_nskip = 0; g_have_meta = 0; g_nfiles = g_ncopies = 0;
     g_junk = g_junk_line = g_glued = 0; g_carried[0] = 0; g_version[0] = 0; g_meta_src[0] = 0;
     memset(g_static, 0, sizeof g_static);   // the reference clears its static registers when it loads cheats
     atomic_store(&g_active, 0);
     profile_version();
     sources_scan();
-    char dirs[3][1024]; int nd = scan_dirs(dirs);
+    static char dirs[SCAN_MAX][1024]; int nd = scan_dirs(dirs);
     for (int i = 0; i < nd; i++) collect_dir(dirs[i]);
     if (!g_build[0]) { LOG("[RED] cheats: the main NSO has no build ID, so no file can be picked from %s", g_dir); return; }
-    int pick = -1, other = 0;   // pick = the matching candidate; other = when a non-matching one is used by DM_CHEATS_ANY_BUILD
+    int pick = -1, other = 0;   // pick = the first matching candidate; other = when a non-matching one is used by DM_CHEATS_ANY_BUILD
+    static int picks[CAND_MAX]; int npick = 0;
     int nbuild = 0, lone = -1;  // the candidates named after a build ID, and the last of them: DM_CHEATS_ANY_BUILD takes the
                                 // single such file, never a readme.txt that collect_dir listed beside it
     for (int i = 0; i < g_ncand; i++) {   // the whole list is walked: the build's file may lie after an "another version" one
@@ -1772,7 +1807,8 @@ static void load_all(void) {
         if (!hex) continue;
         nbuild++; lone = i;
         if (name_is_build(nm, g_build)) {
-            if (pick < 0) pick = i;   // the first matching candidate wins (the flat folder, then the Atmosphere tree)
+            if (pick < 0) pick = i;
+            picks[npick++] = i;   // every file of this build is loaded, in the order found: the cheats folder's layouts, then the mods by priority
             continue;   // keep walking: the other builds get collected below either way
         }
         // the other versions of the game (max OTHER_MAX, the menu shows them disabled), with their versions when a meta file names them
@@ -1796,7 +1832,7 @@ static void load_all(void) {
         running_update();   // no cheat runs now: a reload that lost its file must not leave the safe-mode flag behind
         return;
     }
-    if (pick < 0) { pick = lone; other = 1; }   // DM_CHEATS_ANY_BUILD and a single file of another build: load it
+    if (pick < 0) { pick = lone; other = 1; picks[npick++] = lone; }   // DM_CHEATS_ANY_BUILD and a single file of another build: load it
     g_nothers = 0;   // a file is loaded (this build's own, or DM_CHEATS_ANY_BUILD's): no "another version" rows
     snprintf(g_path, sizeof g_path, "%s", g_cand[pick]);
     // The writable alias of main is mapped once a cheat file is actually picked, not at init merely because DM_ROOT is
@@ -1809,8 +1845,19 @@ static void load_all(void) {
         else LOG("[RED] cheats: no writable alias of main (mach_vm_remap failed): cheats write data only");
     }
     if (g_alias) changed_load();   // which text words a code write must leave alone (only where code can be written at all)
-    parse_file(g_path);
-    meta_load(g_path);
+    g_nfiles = npick; g_ncopies = 0; g_files[0] = 0;
+    for (int k = 0; k < npick; k++) {
+        const char *path = g_cand[picks[k]], *mod = NULL;
+        for (int d = 0; d < nd; d++) if (!strncmp(path, dirs[d], strlen(dirs[d])) && path[strlen(dirs[d])] == '/' && !strchr(path + strlen(dirs[d]) + 1, '/')) { if (d >= 3) dm_mods_cheat_dir(d - 3, &mod); break; }
+        int before = g_ncheat, copies = file_add(path, mod);
+        g_ncopies += copies;
+        if (npick > 1) {
+            LOG("cheats: %s: %d entries%s%s", path, g_ncheat - before, mod ? " from the mod " : "", mod ? mod : "");
+            if (copies) LOG("cheats: %s: %d cheats left out, an earlier file has them under the same name with the same code", path, copies);
+            size_t o = strlen(g_files);
+            snprintf(g_files + o, sizeof g_files - o, "%s%s", k ? ", " : "", mod ? mod : "the cheats folder");
+        }
+    }
     pairs_link();
     values_load();
     states_load();
@@ -1823,8 +1870,8 @@ static void load_all(void) {
         else if (!g_cheat[i].master && g_cheat[i].on) on++;
     }
     if (other) LOG("[RED] cheats: no file for build %s, loading %s of another build on DM_CHEATS_ANY_BUILD: its addresses may be wrong", g_build, g_cand[pick]);
-    LOG("cheats: %s: build %s: %d cheats (%d master, %d on, %d broken, %d runnable)%s", g_path, g_build, g_ncheat - labels, masters, on, bad, g_ncheat - labels - bad,
-        g_have_meta ? ", with its meta file" : "");
+    LOG("cheats: %s: build %s: %d cheats (%d master, %d on, %d broken, %d runnable)%s%s", g_path, g_build, g_ncheat - labels, masters, on, bad, g_ncheat - labels - bad,
+        g_have_meta ? ", with its meta file" : "", npick > 1 ? ", from several files" : "");
     report_build();
     atomic_store(&g_active, g_ncheat > labels);
     if (atomic_load(&g_active)) tick_start();

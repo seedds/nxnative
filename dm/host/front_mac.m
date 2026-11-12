@@ -875,6 +875,37 @@ static DmCheatsPanel *g_cheats_panel;   // created on the first Show Cheats Wind
     [g_cheats_panel show];
 }
 @end
+// The Mods menu (hle_mods.c), rebuilt on every open
+@interface DmModsMenuDelegate : NSObject <NSMenuDelegate>
+@end
+@implementation DmModsMenuDelegate
+- (void)menuNeedsUpdate:(NSMenu *)menu {
+    [menu removeAllItems];
+    int n = dm_mods_count();
+    NSString *pack = nil;
+    for (int i = 0; i < n; i++) {
+        NSArray<NSString *> *parts = [@(dm_mods_name(i)) componentsSeparatedByString:@"/"];
+        if (parts.count > 1 && ![parts[0] isEqualToString:pack]) [menu addItemWithTitle:parts[0] action:nil keyEquivalent:@""].enabled = NO;
+        pack = parts.count > 1 ? parts[0] : nil;
+        NSMenuItem *it = [menu addItemWithTitle:parts.lastObject action:@selector(toggleMod:) keyEquivalent:@""];
+        if (dm_mods_exclusive(i)) it.toolTip = @"Replaces the same files as another mod of this pack: turning it on turns that one off";
+        it.target = self; it.tag = i; it.state = dm_mods_on(i) ? NSControlStateValueOn : NSControlStateValueOff; it.indentationLevel = pack ? 1 : 0;
+    }
+    if (!n) [menu addItemWithTitle:@"No mods in the mods folder" action:nil keyEquivalent:@""].enabled = NO;
+    if (dm_mods_edited()) [menu addItemWithTitle:@"Code patches and cheats change at the next start" action:nil keyEquivalent:@""].enabled = NO;
+    [menu addItem:[NSMenuItem separatorItem]];
+    const char *dir = dm_mods_dir_path();
+    NSMenuItem *op = [menu addItemWithTitle:@"Open Mods Folder" action:*dir ? @selector(openModsFolder:) : nil keyEquivalent:@""];
+    op.target = self; op.enabled = *dir != 0;
+}
+- (void)toggleMod:(NSMenuItem *)it { dm_mods_set((int)it.tag, !dm_mods_on((int)it.tag)); }
+- (void)openModsFolder:(NSMenuItem *)it {
+    (void)it; NSString *dir = @(dm_mods_dir_path());
+    [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    [[NSWorkspace sharedWorkspace] openURL:[NSURL fileURLWithPath:dir isDirectory:YES]];
+}
+@end
+static DmModsMenuDelegate *g_mods_menu;
 static DmCheatsMenuDelegate *g_cheats_menu;   // NSMenu keeps its delegate unretained
 
 @implementation DmCheatsPanel {
@@ -1559,6 +1590,10 @@ void front_run(void (*guest)(void)) {
         // Cheats menu has been opened once. Every open rebuilds them through the delegate as before
         [g_cheats_menu menuNeedsUpdate:cm];
         [[bar addItemWithTitle:@"Cheats" action:nil keyEquivalent:@""] setSubmenu:cm];
+        g_mods_menu = [DmModsMenuDelegate new];
+        NSMenu *mm = [[NSMenu alloc] initWithTitle:@"Mods"];
+        mm.delegate = g_mods_menu; mm.autoenablesItems = NO;
+        [[bar addItemWithTitle:@"Mods" action:nil keyEquivalent:@""] setSubmenu:mm];
         if (getenv("DM_CHEATS_WINDOW") && atoi(getenv("DM_CHEATS_WINDOW")))   // the Cheats panel open from the start (beside the game, not key)
             dispatch_async(dispatch_get_main_queue(), ^{ [g_cheats_menu showPanel:nil]; });
         [[bar addItemWithTitle:@"Window" action:nil keyEquivalent:@""] setSubmenu:wm];

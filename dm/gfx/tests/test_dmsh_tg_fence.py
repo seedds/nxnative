@@ -1,7 +1,7 @@
 """Warp-synchronous shared memory (dmsh_rewrite.py tg_fence): Ampere compilers drop the barrier in small scans whose lanes run in lockstep (Unreal's GPU radix sort downsweep,
 Orbitals' d032ce5090303e01: STS, then LDS of the neighbouring lane's word, then STS). For one thread such a load and its own earlier store do not alias, so Metal may move the
 load above the store. tg_fence puts a simdgroup-scope memory fence (not an execution barrier) after each threadgroup store. When the Metal compiler is installed, the result
-is compiled as the build compiles it (dmsh_build.py MAC_METAL), and a kernel whose array spills to device memory (tg_spill, after tg_fence) gets fences that order device memory as well."""
+is compiled as the build compiles it (dmsh_chain.py MAC_METAL), and a kernel whose array spills to device memory (tg_spill, after tg_fence) gets fences that order device memory as well."""
 from pathlib import Path
 import re
 import shutil
@@ -13,6 +13,7 @@ import unittest
 TOOLS = Path(__file__).resolve().parents[1] / 'tools'
 sys.path.insert(0, str(TOOLS))
 import dmsh_abi as abi, dmsh_rewrite
+from dmsh_chain import MAC_METAL   # noqa: E402  (the build's Mac compile)
 tg_fence, tg_spill, FENCE = dmsh_rewrite.tg_fence, dmsh_rewrite.tg_spill, dmsh_rewrite.TG_FENCE
 
 ARRAY = """template<typename T, size_t Num>
@@ -94,7 +95,7 @@ class TgFence(unittest.TestCase):
             with tempfile.TemporaryDirectory() as d:
                 p = Path(d) / 'k.metal'
                 p.write_text(src)
-                r = subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-c', '-O1', '-fpreserve-invariance', str(p), '-o', str(Path(d) / 'k.air')], capture_output=True, text=True)
+                r = subprocess.run(MAC_METAL + [str(p), '-o', str(Path(d) / 'k.air')], capture_output=True, text=True)
                 self.assertEqual(r.returncode, 0, r.stderr[-2000:])
 
 

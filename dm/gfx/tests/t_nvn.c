@@ -425,7 +425,7 @@ int main(void) {
     EXPECT("buffer copy 64 B identical", 0, memcmp(src, dst, 64));
     uint64_t ts[2]; memcpy(ts, cnt, 16);
     EXPECT("counter timestamp written (non-zero)", 1, ts[1] != 0);
-    EXPECT("its counter field: the time, 0 with the profile's render_cond (as on the GPU)", DM_GAME_RENDER_COND ? 0 : ts[1], ts[0]);
+    EXPECT("its counter field: 0, as on the GPU", 0, ts[0]);
     NVNcounterData fixed_counter = {0, 614400};
     EXPECT("614400 raw counter ticks = 1 ms", 1000000, P(nvnDeviceGetTimestampInNanoseconds)(&dev, &fixed_counter));
     NVNcounterData reported_counter; memcpy(&reported_counter, cnt, sizeof reported_counter);
@@ -795,7 +795,7 @@ int main(void) {
         EQ(P(nvnCommandBufferBindSeparateTexture)(CB_, NVN_SHADER_STAGE_FRAGMENT, 4, (NVNseparateTextureHandle){77}));
         EQ(h_nvnCommandBufferBindTexturesDeferred(CB_, NVN_SHADER_STAGE_FRAGMENT, 0, 2, th));
         EQ(P(nvnCommandBufferBindUniformBuffers)(CB_, NVN_SHADER_STAGE_VERTEX, 4, 3, r3));
-        EQ(P(nvnCommandBufferBindUniformBuffers)(CB_, NVN_SHADER_STAGE_VERTEX, 14, 3, r3));   // past slot 16: one by one both ways
+        EQ(P(nvnCommandBufferBindUniformBuffers)(CB_, NVN_SHADER_STAGE_VERTEX, 14, 3, r3));   // past slot 16: the two slots inside it
         EQ(P(nvnCommandBufferBindUniformBuffers)(CB_, NVN_SHADER_STAGE_FRAGMENT, 0, 2, rbig));
         EQ(P(nvnCommandBufferBindStorageBuffer)(CB_, NVN_SHADER_STAGE_COMPUTE, 5, 0x40000, 0x1000));
         EQ(P(nvnCommandBufferBindStorageBuffers)(CB_, NVN_SHADER_STAGE_COMPUTE, 1, 3, r3));
@@ -822,6 +822,20 @@ int main(void) {
         EQ(P(nvnCommandBufferBarrier)(CB_, 0x1f)); EQ(P(nvnCommandBufferBarrier)(CB_, 1 << 30));
         EQ(P(nvnCommandBufferSetPrimitiveRestart)(CB_, 1, -1)); EQ(P(nvnCommandBufferSetPrimitiveRestart)(CB_, 1, 0xffff)); EQ(P(nvnCommandBufferSetPrimitiveRestart)(CB_, 0, 0x7fffffff));
         EQ(P(nvnCommandBufferSetScissor)(CB_, 0, 0, 1920, 1080)); EQ(P(nvnCommandBufferSetScissor)(CB_, -4, 0, 70000, 8));
+        // A range a stage's table does not hold records nothing, either way (SetViewports with first -1 wrote S.vp[-1] at replay; a first near INT_MAX overflowed first + n)
+        size_t ln0; { P(nvnCommandBufferAddCommandMemory)(&ce, &mp, 0, sizeof m); P(nvnCommandBufferBeginRecording)(&ce); free(nvn_rec_linear(P(nvnCommandBufferEndRecording)(&ce), &ln0)); }
+        #define NONE(...) do { for (int k = 0; k < 2; k++) { size_t ln; g_rec_compact = !k; P(nvnCommandBufferAddCommandMemory)(&ce, &mp, 0, sizeof m); P(nvnCommandBufferBeginRecording)(&ce); __VA_ARGS__; \
+                free(nvn_rec_linear(P(nvnCommandBufferEndRecording)(&ce), &ln)); if (ln != ln0) { bad++; printf("out-of-range bind recorded at line %d (%s): %zu bytes\n", __LINE__, k ? "canonical" : "compact", ln); } } \
+            g_rec_compact = 1; } while (0)
+        NVNviewportSwizzle sw4[4] = {0};
+        NONE(P(nvnCommandBufferSetViewports)(CB_, -1, 1, vp)); NONE(P(nvnCommandBufferSetViewports)(CB_, 0x7fffffff, 1, vp)); NONE(P(nvnCommandBufferSetViewportSwizzles)(CB_, -1, 1, sw4));
+        NONE(P(nvnCommandBufferBindVertexBuffers)(CB_, -1, 1, r3)); NONE(P(nvnCommandBufferBindVertexBuffers)(CB_, 0x7fffffff, 2, r3));
+        NONE(P(nvnCommandBufferBindTextures)(CB_, NVN_SHADER_STAGE_FRAGMENT, -1, 1, th)); NONE(P(nvnCommandBufferBindTextures)(CB_, NVN_SHADER_STAGE_FRAGMENT, 0x7fffffff, 3, th));
+        NONE(P(nvnCommandBufferBindSeparateSamplers)(CB_, NVN_SHADER_STAGE_FRAGMENT, -2, 2, sh)); NONE(P(nvnCommandBufferBindImages)(CB_, NVN_SHADER_STAGE_FRAGMENT, 32, 1, ih));
+        NONE(h_nvnCommandBufferBindTexturesDeferred(CB_, NVN_SHADER_STAGE_FRAGMENT, -1, 1, th)); NONE(P(nvnCommandBufferBindTextures)(CB_, (NVNshaderStage)-1, 0, 1, th));
+        NONE(P(nvnCommandBufferBindUniformBuffer)(CB_, NVN_SHADER_STAGE_VERTEX, -1, 0x20000, 0x100)); NONE(P(nvnCommandBufferBindUniformBuffers)(CB_, (NVNshaderStage)-1, 0, 2, r3));
+        NONE(P(nvnCommandBufferBindStorageBuffer)(CB_, NVN_SHADER_STAGE_COMPUTE, 16, 0x40000, 0x1000)); NONE(P(nvnCommandBufferBindStorageBuffers)(CB_, NVN_SHADER_STAGE_COMPUTE, -1, 2, r3));
+        #undef NONE
         #undef EQ
         #undef CB_
         printf("(compact records: %d cases, %d smaller, %zu bytes saved)\n", cases, smaller, saved);

@@ -341,6 +341,12 @@ int main(void) {
     snprintf(p, sizeof p, "%s/game.dat", R2); put(p, "new"); set_mtime(p, time(NULL) + 45);
     CHECK(REPORT(R2, cloud4) && strstr(line, "conflict=1") && strstr(line, "cfiles=1 ") && strstr(line, "cdevice=Mac"),
           "both changed: the report says conflict, with the cloud's device (%s)", line);
+    CHECK(strstr(line, " pull=0") != NULL, "no pull pending (%s)", line);
+    {   // a pull that did not finish: what is in place may be half the cloud's, so no comparison is offered; the start's mount puts this device's save back first
+        char J[1300]; snprintf(J, sizeof J, "%s.pull", R2); put(J, "kept\t\nfolder\t0\t1\t0\t0\nfolder\t1\t0\t0\t0\n");
+        CHECK(REPORT(R2, cloud4) && strstr(line, " pull=1") && strstr(line, "conflict=0"), "a pending pull: said so, and no conflict offered (%s)", line);
+        unlink(J);
+    }
     {   // the incident of the PR: the new game's save is the newer by date, so the player needs the sizes to tell them apart
         char *cs = strstr(line, "csaved="), *sv = strstr(line, " saved=");
         CHECK(cs && sv && atoll(sv + 7) > atoll(cs + 7) && strstr(line, " size=3 ") && strstr(line, "csize=16 "),
@@ -360,6 +366,16 @@ int main(void) {
     CHECK(access(q, F_OK), "the reports leave no files behind");
 #undef REPORT
 
+    {   // (15) a pull's journal the start cannot put back (this device's folder is neither in place nor in the backups it names): the game's save mount stops rather than
+        // play on, commit and send a half-replaced save; the save and the journal are left as they were. With the journal gone, the mount goes on
+        char S15[1200], J[1300], A[1300]; snprintf(S15, sizeof S15, "%s/s15/save", root); mkd(S15);
+        snprintf(A, sizeof A, "%s/a", S15); put(A, "mine");
+        snprintf(J, sizeof J, "%s.pull", S15); put(J, "kept\t/nonexistent/backup\nfolder\t0\t2\t1\t1\nfolder\t1\t0\t0\t0\n");
+        CHECK(session(S15, NULL, NULL, NULL) != 0, "(15) the save mount stops");
+        CHECK(same(A, "mine") && exists(J), "(15) the save and the journal are left as they were");
+        unlink(J);
+        CHECK(session(S15, NULL, NULL, NULL) == 0 && same(A, "mine"), "(15) with no journal the mount goes on");
+    }
     printf("== save sync: %d checks, %d failed ==\n", checks, fails);
     if (!fails) { char c[1200]; snprintf(c, sizeof c, "rm -rf '%s'", root); system(c); }
     return fails != 0;

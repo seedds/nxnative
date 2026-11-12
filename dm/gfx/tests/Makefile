@@ -244,6 +244,13 @@ check_t_dispatch_own: t_dispatch_own
 	@set -e; for own in 0 1; do for enc in 0 1; do \
 	    DM_NVN_DISPATCH_OWN=$$own DM_NVN_ENC_THREAD=$$enc MTL_DEBUG_LAYER=1 ./t_dispatch_own; \
 	done; done
+t_dispatch_barrier: t_dispatch_barrier.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_dispatch_barrier.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_dispatch_barrier
+check_t_dispatch_barrier: t_dispatch_barrier
+	@set -e; for mode in full game; do for enc in 0 1; do \
+	    DM_NVN_DISPATCH_BARRIER=$$mode DM_NVN_ENC_THREAD=$$enc MTL_DEBUG_LAYER=1 ./t_dispatch_barrier; \
+	done; done
 t_vbuf: t_vbuf.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_vbuf.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_vbuf
@@ -471,6 +478,9 @@ check_t_upgrade_alias: RUN_ENV = MTL_DEBUG_LAYER=1
 t_alias_takeover: t_alias_takeover.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_alias_takeover.m $(MTL_T_SRC) $(FW)
 check_t_alias_takeover: RUN_ENV = MTL_DEBUG_LAYER=1
+# The resource owner alone: nvn_owner.m (and the texture layouts it sizes shared entries with) with this test's stand-ins for the replay layer's hooks, no nvn_mtl.m
+t_serial_owner: t_serial_owner.m ../nvn/nvn_owner.m ../nvn/nvn_owner.h ../nvn/nvn_tex.c ../nvn/nvn_tex.h ../nvn/nvn_hmap.h ../nvn/nvn_obj.h $(GAME_H)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_serial_owner.m ../nvn/nvn_owner.m ../nvn/nvn_tex.c -framework Metal -framework Foundation
 t_partial_upload: t_partial_upload.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_partial_upload.m $(MTL_T_SRC) $(FW)
 check_t_partial_upload: RUN_ENV = MTL_DEBUG_LAYER=1

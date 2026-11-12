@@ -4,7 +4,7 @@
 # vs_layer, layer_out, vs_layer_entry), the depth entry point (vs_depth), and a pixel shader's integer and dual-source entry points (int_outputs, fs_uint, fs_dual). Functions of
 # the MSL text only, with no build state, so tests import them. Part of the translation chain (dmsh_chain.FILES) and of every shader's cache key (dmsh_build.py CODE_FP).
 import collections, re, sys
-import dmsh_fetch, dmsh_side
+import dmsh_side
 from dmsh_reflect import attributes, in_word
 
 def vs_writes(src, binds):
@@ -162,9 +162,13 @@ def int_outputs(src, body, cols):
     def kinds(e, seen):
         if re.fullmatch(r'_\d+(?:\[\d+\])?', e):
             if types.get(e, '').startswith('float'):   # a float local is float bits, unless every value it takes is a register's bits (as_type<float>(…)): PRAGMATA's visibility shaders
-                bits = [re.fullmatch(r'as_type<float\d?>\((.*)\)', x) for x in defs[e]]   # write float _n = as_type<float>(int(gl_PrimitiveID)) into an RG32Uint target
-                if not bits or not all(bits) or e in seen: return {'float'}
-                seen.add(e); return set().union(*(kinds(b[1].strip(), seen) for b in bits))
+                if not defs[e] or e in seen: return {'float'}
+                bits = []
+                for x in defs[e]:   # write float _n = as_type<float>(int(gl_PrimitiveID)) into an RG32Uint target
+                    b = re.fullmatch(r'as_type<float\d?>\((.*)\)', x)
+                    if b is None: return {'float'}
+                    bits.append(b[1].strip())
+                seen.add(e); return set().union(*(kinds(b, seen) for b in bits))
             if e in seen: return set()
             seen.add(e); return set().union(*(kinds(x, seen) for x in defs[e])) if defs[e] else set()
         if re.fullmatch(r'-?\d+u?', e): return {'int'} if 0 < abs(int(e.rstrip('u'))) < 0x800000 else set()

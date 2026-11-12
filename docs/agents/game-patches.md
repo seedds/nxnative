@@ -59,6 +59,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [ASTRAL CHAIN](#astral-chain) | 0 | 0 | 112 | 0 | 0 | `build` → `game` |
 | [Batman: Arkham Knight](#batman-arkham-knight) | 8 | 0 | 0 | 0 | 1 | `build` → `game` ×2 |
 | [DARK SOULS: REMASTERED](#dark-souls-remastered) | 2 | 0 | 0 | 0 | 0 | `build` → `game` |
+| [Diablo II: Resurrected](#diablo-ii-resurrected) | 2 | 0 | 0 | 1 | 0 | `game` |
 | [EA SPORTS FC 27](#ea-sports-fc-27) | 0 | 0 | 0 | 0 | 1 | `build` → `engine` |
 | [FINAL FANTASY TACTICS - The Ivalice Chronicles](#final-fantasy-tactics---the-ivalice-chronicles) | 2 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Fire Emblem: Three Houses](#fire-emblem-three-houses) | 7 | 0 | 0 | 0 | 0 | `build` → `game` |
@@ -265,6 +266,17 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - cut `+0x706fa4`: frame limiter target: mov w1,#30 → mov w1,#60 (main+0x707090 sleeps out 1000 / fps ms since the last frame)
   - cut `+0x667904`: frame update step: ldr s8,[x8,#0x6ec] (1/30) → ldr s8,[x8,#0x834] (1/60), passed to main+0x6a337c
 
+### Diablo II: Resurrected
+
+[Diablo II: Resurrected](../../dm/games/0100726014352000/README.md), `0100726014352000`, [patches.py](../../dm/games/0100726014352000/patches.py).
+
+- **`game`**, runtime, at goal, checked: MATCH_CUTS enrolled on 1.0.34.0; the base game has no such check (2026-11-12): offline play without a Battle.net login in the last 30 days. The game's own offline policy (a saved last-online time), which an offline host cannot satisfy; function-matched (MATCH_CUTS) over the game's updates
+
+- **1.0.34.0 `main`** `db0507f3…` ([patches.py:9](../../dm/games/0100726014352000/patches.py#L9))
+  - cut `+0x1979bc`: offline allowed (last online within 30 days): cset w8,lt → mov w8,#1
+  - cut `+0x1979c4`: offline allowed (no "User Last Online" setting): mov w8,wzr → mov w8,#1
+- **function-matched** (`main` of builds without CUTS): offline allowed without a recent Battle.net login: 1 function, 2 cuts
+
 ### EA SPORTS FC 27
 
 [EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md), `0100C49025D3E000`.
@@ -344,9 +356,10 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 
 [Mario Kart World](../../dm/games/0400C3F00006E000/README.md), `0400C3F00006E000`, [patches.py](../../dm/games/0400C3F00006E000/patches.py).
 
-- **`game`**, frame rate, at goal, checked: v0 main: one function with this fingerprint, the site and its free registers read by disassembly (2026-11-08): frame interval from the host's step. The game's own interval choice, found by its function's fingerprint on any build that keeps the function
+- **`game`**, frame rate, at goal, checked: v0 and 1.8.0 mains: one function with each fingerprint, the sites and the free registers read by disassembly (2026-11-08, 1.8.0 2026-11-12): frame interval from the host's step. The game's own interval choice, found by its function's fingerprint on any build that keeps the function
 
 - **function-matched frame step** (`main` of builds without FRAME_STEP): frame interval from the host's step: a function of 0x290 bytes, `+0xa0` in it
+- **function-matched frame step** (`main` of builds without FRAME_STEP): frame interval from the host's step: a function of 0x28c bytes, `+0xa4` in it
 
 ### Monster Hunter Rise
 

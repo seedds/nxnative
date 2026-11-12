@@ -229,6 +229,49 @@ class PixelCovered(unittest.TestCase):
 
 
 @unittest.skipUnless(os.environ.get('DMSH_TEST_XLATE'), 'set DMSH_TEST_XLATE to the offline translator')
+class IpaAtOffset(unittest.TestCase):
+    """IPA at an offset from the pixel centre (location 2, the offset word in the second source register) and the barycentric coordinates a[0x3b4], as PRAGMATA's pixel
+    shader 4a9d4507eea6c837 reads them at the sample's position (+0x130: IPA R3, a[0x3b4], R5; R0 here, colour 0's x). The offset is the sample index here, which no
+    pass folds. What IPA.PASS reads is linear over the screen, so the value at the offset is the centre's plus the offset times its screen derivatives"""
+    run_job = PixelCovered.run_job
+    SPH = PixelCovered.SPH
+    SAMPLE_R5 = (0x040e0200000ec000, 0x0000000000057925)
+    BARY_AT = (0x000ee200000e20ed | 0x3f << 52, 0x0000000500007326)   # waits on every scoreboard: it reads the register just written
+    BARY = (0x000ee200000e00ed, 0x000000ff00007326)                   # the same read at the centre
+
+    def test_reads_the_centre_value_and_its_derivatives(self):
+        msl, log = self.run_job(self.SAMPLE_R5, self.BARY_AT)
+        self.assertIsNotNone(msl, log)
+        self.assertIn('[[barycentric_coord', msl)
+        self.assertRegex(msl, r'float (_\d+) = in\.gl_BaryCoordEXT\.x;\n\s*float (_\d+) = gl_FragCoord\.w;\n\s*float _\d+ = spvFMul\(\1, \2\);')   # over w, as a perspective attribute is read
+        self.assertRegex(msl, r'float (_\d+) = dfdx\((_\d+)\);\n\s*float (_\d+) = dfdy\(\2\);')
+        self.assertRegex(msl, r'int (_\d+) = as_type<int>\(_\d+\) << 20;\n\s*int _\d+ = \1 >> 28;')   # x: bits 8..11, signed
+        self.assertRegex(msl, r'int (_\d+) = as_type<int>\(_\d+\) << 4;\n\s*int _\d+ = \1 >> 28;')    # y: bits 24..27
+        self.assertIn('0.0625', msl)
+
+    def test_a_centre_read_takes_no_derivative(self):
+        msl, log = self.run_job(self.BARY)
+        self.assertIsNotNone(msl, log)
+        self.assertIn('[[barycentric_coord', msl)
+        self.assertNotIn('dfdx(', msl)
+
+
+@unittest.skipUnless(os.environ.get('DMSH_TEST_XLATE'), 'set DMSH_TEST_XLATE to the offline translator')
+class ShadingRate(unittest.TestCase):
+    """S2UR of system register 0x84, the fragment's size in pixels (X in bits 8..15, Y in 16..23), as Nintendo Switch Sports Resort's sea shaders encode it (2271b2e0293b3c55 +0x2600):
+    the host shades every pixel, so 1 x 1. It read 0 as an unknown register, and the sea's colour, divided by the fragment's area, was NaN"""
+    run_job = PixelCovered.run_job
+    SPH = PixelCovered.SPH
+    S2UR = (0x000e220000008400, 0x00000000000479c3)   # S2UR UR4, SR 0x84
+    I2F_R0 = (0x03ffe20008201400, 0x0000000400007c45)   # I2F R0, UR4 as the game reads it (+0x2d90), waiting on every barrier: colour 0's x, 65792 for 1 x 1
+
+    def test_reads_one_by_one(self):
+        msl, log = self.run_job(self.S2UR, self.I2F_R0)
+        self.assertIsNotNone(msl, log)
+        self.assertIn('float(65792)', msl)   # 0 before (an unknown system register)
+
+
+@unittest.skipUnless(os.environ.get('DMSH_TEST_XLATE'), 'set DMSH_TEST_XLATE to the offline translator')
 class DepthRegister(unittest.TestCase):
     """A pixel shader's depth output follows its colours at four registers per enabled render target, then the sample mask register. Ocarina of Time's agl_common depth pass
     (ps_lib 519, OmapTargets 0x10f: RT0 RGBA in R0..R3, RT2 R in R4) writes its depth to R9; the component count put it in R6, which holds a step before"""

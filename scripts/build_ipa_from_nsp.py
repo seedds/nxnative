@@ -15,7 +15,7 @@
 # SEEN_SHADERS / --seen-shaders, with PLATFORM 'mac' or 'mac-app': only the shaders the profile's shader_seen.tsv lists and the last runs' logs reported missing, in minutes instead of hours; the rest do not draw (build_shaders).
 # Two ways to run it: open this file in Spyder and press F5 (it uses the values under "Settings" below; an empty NSP folder or prod.keys is asked for at run time);
 #   or in a terminal: python3 scripts/build_ipa_from_nsp.py <NSP folder> -k <prod.keys> [options] (values given on the command line override "Settings", -h lists every option;
-#   without keyboard input a missing value is not asked for but reported as an error; exit code 0 on success, 1 on error, 130 when interrupted, 143 when stopped by SIGTERM). Command-line options entered in Spyder's run configuration work the same way.
+#   without keyboard input a missing value is not asked for but reported as an error; exit code 0 on success, 1 on error, 130 when interrupted, 143 when stopped by SIGTERM, 129 when the terminal closed (SIGHUP)). Command-line options entered in Spyder's run configuration work the same way.
 # Uses only three things: this repository, a folder holding one game's NSPs (the base game, with or without an update; DLC NSPs, when present, are packed too and unlock the add-on content already in the game), and prod.keys.
 #   Instead of NSPs, the folder may hold the game's files as a dump (base/, updates/<version>/, dlc/; scripts/pack_dump.py lists the layout): that needs no prod.keys. A game with no profile is surveyed from those files. A dump has no control data: the name comes from the profile (a provisional one takes the folder's name), and the app has no icon unless --icon / ICON gives it one (--fallback-icon / FALLBACK_ICON: only when the game has none).
 #   Or the folder may hold the game as one NUP container (a .nup file: base game, updates and DLC; scripts/pack_nup.py), or the .nup file may be given in its place: it needs no prod.keys, like a dump; a game with no profile is surveyed from the container's files (its newest version's code modules and RomFS file headers),
@@ -38,6 +38,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "dm/tools"))
 import romfs as rfs
 import proc_group   # a tool's run in a process group of its own, stopped whole
+import run_saves   # cloud saves off for the build's host runs (tool_env, the prebuild)
 import nso   # the code module loader: nso.Error is a damaged module (its file cut short or not what its header says)
 import tree_tar   # one file in place of a build's folders of many small files
 import shader_lib   # the shader libraries as one file, read in place
@@ -431,8 +432,28 @@ def find_nx_extract(repo, env):
     return nx
 
 
-def swap_in(tmp, dst):   # swap the new output in as a whole (the old one is untouched on failure)
-    rmtree(dst); tmp.rename(dst)
+def swap_in(tmp, dst):
+    """Publish the finished output tmp (a sibling of dst, so the same volume) as dst. dst is always the whole old output, the whole new one, or absent; never half deleted, which a
+    reuse check could take for a finished output: the old one is renamed aside first (<dst>.old.partial: as every unfinished folder, a name the build ignores), the new one renamed in,
+    and only then the old one deleted. Recoverable, not atomic: two renames. What stops it before the new one is in (a failure, an interrupt or SIGTERM, also between the two
+    renames) puts the old one back, judged by what is on the disk rather than by which step ran; if that rename fails too, BuildError says where the old output is kept. An aside
+    folder an earlier run left is put back when nothing is in place (a hard kill between the renames: the old output, whole) and deleted only when the new output went in (the old
+    one's remains, cut short while being deleted)"""
+    old = dst.with_name(dst.name + '.old.partial')
+    here, aside = (lambda: dst.is_symlink() or dst.exists()), (lambda: old.is_symlink() or old.exists())
+    if aside():
+        if here(): rmtree(old)
+        else: old.rename(dst)
+    if not here(): tmp.rename(dst); return
+    try:
+        dst.rename(old)
+        tmp.rename(dst)
+    except BaseException as e:
+        if aside() and not here():
+            try: old.rename(dst)
+            except OSError as back: raise BuildError(f'publishing {dst} failed ({e!r}), and the old output could not be put back ({back}): it is kept in {old}') from e
+        raise
+    rmtree(old)
 
 
 def free_gb(p):
@@ -442,9 +463,9 @@ def free_gb(p):
 
 def tool_env(environ=os.environ):
     """The environment the build's tools run in: the caller's PATH first, so the tools it selects (a venv's python3, mise's zstd) are the ones that run,
-    then TOOL_PATHS for the tools it lacks (a GUI app such as Spyder gets only the system PATH, or none). Cloud saves are off (DM_SAVE_SYNC=0): the build's host runs
+    then TOOL_PATHS for the tools it lacks (a GUI app such as Spyder gets only the system PATH, or none). Cloud saves are off (run_saves.cloud_off): the build's host runs
     (captures, checks, the prebuild) play on scratch saves, and one inherited from the shell would pull the player's cloud save into them and send theirs over it."""
-    return dict(environ, PATH=os.pathsep.join([environ.get('PATH') or '/usr/bin:/bin:/usr/sbin:/sbin'] + TOOL_PATHS), DM_SAVE_SYNC='0')
+    return run_saves.cloud_off(dict(environ, PATH=os.pathsep.join([environ.get('PATH') or '/usr/bin:/bin:/usr/sbin:/sbin'] + TOOL_PATHS)))
 
 
 # ---- NSP identification ----
@@ -625,14 +646,14 @@ def decompress_nsz(nsp_dir, app, fam, keys, env, work=None):
         st = p.stat(); key = fingerprint(p.name, st.st_size, st.st_mtime_ns)
         if not (dst.is_file() and reused(keyfile, key) is not None):
             PROG.set(done=i, step=p.name)
-            rmtree(tmp); tmp.mkdir(parents=True); rmtree(dst); keyfile.unlink(missing_ok=True)
+            rmtree(tmp); tmp.mkdir(parents=True); keyfile.unlink(missing_ok=True)   # the stale output stays until the new one replaces it (swap_in)
             log = logs / f'nsz_{p.stem}.log'
             try:
                 # nsz 4.6.1 loads keys.txt beside argv[0] at import time; with argv[0] = 'nsz' that is cwd. That release has no --keys option.
                 (tmp / 'keys.txt').symlink_to(keys.resolve())
                 run([*nsz, *keys_opt, '-D', '-o', tmp, nsz_source(p, tmp)], log, env=env, cwd=tmp)
                 if not (tmp / dst.name).is_file(): raise BuildError(f'nsz made no {dst.name} (full output: {log})')
-                (tmp / dst.name).rename(dst)
+                swap_in(tmp / dst.name, dst)
             finally: rmtree(tmp)
             keyfile.write_text(key + '\n'); made += 1
         conv[p] = dst
@@ -2652,7 +2673,7 @@ def mac_run(work, game, patched, host, font, msl, aoc, gfx, lang, env, logs, g, 
         # of waiting for the Metal compiler. The host's tool mode skips it when pso_archive/prebuilt.tsv matches (chain version, depth mode, pair list): Breath of the Wild's
         # 12,755 pairs took about 3 minutes on an M2 Max the first time. It takes the depth mode from the profile's depth_mode key (default gl, NVN's); with a wrong one the game builds its bases again in the app
         PROG.add(1); PROG.stage('Pipeline prebuild', step='building')
-        penv = dict(env, **{k: str(v) for k, v in renv.items()}, DM_PSO_PREBUILD='tool', DM_SAVE_SYNC='0')   # the environment file's DM_SAVE_SYNC is for the player's runs
+        penv = run_saves.cloud_off(dict(env, **{k: str(v) for k, v in renv.items()}, DM_PSO_PREBUILD='tool'))   # the environment file's DM_SAVE_SYNC is for the player's runs
         if g.get('depth_mode', 'gl') == 'zero': penv['DM_PSO_PREBUILD_DEPTH'] = 'zero'   # a game that sets the near = 0 depth mode (the profile says so: the host learns it only at run time, which for a provisional or derived profile includes its check boots)
         run([host], logs / 'pso_prebuild.log', env=penv, cwd=rd)
         PROG.end()
@@ -3261,21 +3282,26 @@ def main(args=None):
 NSP_FOLDER = None   # main's: the folder whose work folders cli tidies after a build that succeeded
 
 
-class Stopped(BaseException):   # a SIGTERM, raised by cli's handler: not an Exception, so no `except Exception` on the way keeps it from cli
-    pass
+class Stopped(BaseException):   # a SIGTERM or SIGHUP, raised by cli's handler: not an Exception, so no `except Exception` on the way keeps it from cli
+    def __init__(self, sig=signal.SIGTERM): super().__init__(sig); self.sig = sig
 
 
-def _sigterm(sig, frame): raise Stopped()
+def _sigterm(sig, frame): raise Stopped(sig)
 
 
-def cli(argv):   # returns the exit code: 0 done, 1 error, 130 interrupted, 143 stopped by SIGTERM
+STOPS = (signal.SIGTERM, signal.SIGHUP)   # the signals cli turns into Stopped
+
+
+def cli(argv):   # returns the exit code: 0 done, 1 error, 130 interrupted, 143 stopped by SIGTERM, 129 by SIGHUP
     # main points DM_GAMES_DIR (and DM_GAMES_FIRST) at this run's provisional or derived profile for its tools. Spyder runs the next F5 in the same process, where the game lookup
     # (game.py by_title) then found that profile and took it for a registered one: ASTRAL CHAIN's second run skipped every provisional step and stopped with no dmsh_chain.h
     environ = dict(os.environ)
-    # A SIGTERM (a front end's cancel) ends the build as an interrupt does: the running tool's process group stopped (run), the stage line ended, exit code 143. The handler
-    # is cli's only while it runs, and in the main thread only (Python's rule): Spyder's kernel, which runs the next F5 in the same process, gets its own back
+    # A SIGTERM (a front end's cancel) ends the build as an interrupt does: the running tool's process group stopped (run), the stage line ended, exit code 143. So does a SIGHUP
+    # (the terminal closed): the shell sends it to its job, which the tool's group, a session of its own (proc_group), is not in, and its default action ended this script
+    # with no cleanup and left the tool running. The handlers are cli's only while it runs, and in the main thread only (Python's rule): Spyder's kernel, which runs the next
+    # F5 in the same process, gets its own back
     main_thread = threading.current_thread() is threading.main_thread()
-    term = signal.signal(signal.SIGTERM, _sigterm) if main_thread else None
+    saved = {s: signal.signal(s, _sigterm) for s in STOPS} if main_thread else {}
     try:
         main(parse_args(argv))
         if NSP_FOLDER:   # a developer's work folder, which a player's NSP folder does not have (tree_tar.py)
@@ -3285,14 +3311,14 @@ def cli(argv):   # returns the exit code: 0 done, 1 error, 130 interrupted, 143 
         PROG.close(ok=False); PROG.say(f'[RED] {e}'); return 1
     except KeyboardInterrupt:
         PROG.close(ok=False); PROG.say('[RED] interrupted'); return 130
-    except Stopped:
-        PROG.close(ok=False); PROG.say('[RED] stopped (SIGTERM)'); return 143
+    except Stopped as e:
+        PROG.close(ok=False); PROG.say(f'[RED] stopped ({signal.Signals(e.sig).name})'); return 128 + int(e.sig)
     except Exception as e:   # an unexpected error: end the stage line before the traceback (which goes to stderr; json mode also sends the error as a message)
         PROG.close(ok=False)
         if PROG.mode == 'json': PROG.say(f'[RED] {type(e).__name__}: {e}')
         raise
     finally:
-        if main_thread: signal.signal(signal.SIGTERM, signal.SIG_DFL if term is None else term)   # first: a SIGTERM in this cleanup is the caller's again (None: one not set from Python)
+        for s, h in saved.items(): signal.signal(s, signal.SIG_DFL if h is None else h)   # first: a SIGTERM or SIGHUP in this cleanup is the caller's again (None: one not set from Python)
         PROG.close(ok=False)   # stop the ticker
         for k in os.environ.keys() - environ.keys(): del os.environ[k]
         os.environ.update(environ)

@@ -77,7 +77,9 @@ static size_t expect_read(fix_t *f, unsigned *count) {
     return n;
 }
 static int content_ok(fix_t *f, id<MTLTexture> image) {
-    id<MTLBuffer> rb = [g_dev newBufferWithLength:f->bytes + 512 options:MTLResourceStorageModeShared]; memset(rb.contents, 0xcd, rb.length);
+    if (!image) return 0;
+    id<MTLBuffer> rb = [g_dev newBufferWithLength:f->bytes + 512 options:MTLResourceStorageModeShared]; if (!rb) return 0;
+    memset(rb.contents, 0xcd, rb.length);
     id<MTLCommandBuffer> cb = q_cb(); id<MTLBlitCommandEncoder> ce = [cb blitCommandEncoder];
     for (unsigned l = 0; l < f->levels; l++) for (unsigned a = 0; a < f->layers; a++) {
         unsigned w, h, z; size_t pitch, rows; geom(f, l, &w, &h, &z, &pitch, &rows);

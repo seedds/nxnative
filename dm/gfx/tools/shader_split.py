@@ -35,6 +35,8 @@
 #   · HNSHV002 (Needle, Persona 5 Royal): NVN section descriptors in the shader containers embedded in main and the GSC files of its CPK archives, see needle_shaders
 #   · GFPAK (Game Freak, Pokémon Sword, Pokémon Legends: Arceus): BNSH entries of the archives under bin/archive (Sword's LZ4; Arceus's Oodle Kraken, decoded by the game's own decoder in the Mac host), see gfpak_members
 #   · .tfxo (Silicon Studio's YEBIS post effects, Pokémon Sword): control sections each followed by its code area, in a zlib stream in main, see tfxo_streams and tfxo_shaders
+#   · Diablo III's packages (Diablo III: Eternal Collection's .cpk files, not CRI's): control sections each followed by its code area in the zlib streams of the game's SNO assets, see d3cpk.py and d3cpk_shaders
+#   · CASC (Blizzard's storage, Diablo II: Resurrected's data/*.data with text manifests, casc.py): every current file decoded and scanned; its shaders are SHAD containers of BTCD records, see casc_jobs and shad_shaders
 #   · control sections loose in main, in no GLSLC output or BNSH file (Advance Wars 1+2: Re-Boot Camp's Bink 2 shaders): paired with their code areas by data records or adjacency, see raw_shaders
 #   · SNVN (Retro Studios, Donkey Kong Country: Tropical Freeze, Metroid Prime Remastered): zlib program records in the SNVN chunks of MaterialArchive.arc, of the MTRL resources in its
 #       .pak archives and of the startup material archive LZSS-compressed in main, see rfrm_shaders and retro_main_forms
@@ -893,6 +895,113 @@ def cpk_shaders(path, rel, ents, out):
         except (ValueError, IndexError) as x:   # a compression cpk.py does not decode: the entry is left out, and the split goes on
             print(f'[RED] /{rel}/{e[0]}: {x}; not scanned', flush=True); continue
         scan_blob(d, f'/{rel}/{e[0]}', out)
+
+D3CPK = b'D3CPK'   # job tag of a Diablo III package's byte range (d3cpk_jobs)
+def d3cpk_jobs(files, parts=64):
+    """Diablo III's console packages (d3cpk.py; .cpk like CRI's, another format) in byte ranges of about equal length: Diablo III: Eternal Collection 2.7.7 has 37, 16 GB.
+    → ([(path, rel, (D3CPK, start, end)), …], the package paths)"""
+    import d3cpk
+    ds = []
+    for p, r in files:
+        if not p.lower().endswith('.cpk'): continue
+        with open(p, 'rb') as f: h = f.read(8)
+        if d3cpk.is_d3cpk(h): ds.append((p, r, os.path.getsize(p)))
+    step = max(sum(n for *_, n in ds) // parts, 1 << 24)
+    return [(p, r, (D3CPK, a, min(a + step, n))) for p, r, n in ds for a in range(0, n, step)], {p for p, _, _ in ds}
+
+def d3cpk_shaders(path, rel, start, end, out):
+    """A byte range of a Diablo III package (d3cpk_jobs): every zlib stream whose record starts in it (d3cpk.streams), searched for control sections each directly followed by its code area
+    (control +0x704 bytes), as the game's shader SNO assets hold them (2.7.7: a control section of 0x850 bytes; the programs the game draws the title with are in ClientCommon.cpk). Each is a
+    program of one stage (separable_pairs). A control section of a plausible length (0x760 to 0x880 bytes, as tfxo_shaders) not followed by its code area in the same stream is counted and named:
+    in ClientCommon.cpk none is (3,528 control sections), so a stream that splits a file would show here"""
+    import d3cpk
+    with open(path, 'rb') as f:
+        f.seek(start); d = f.read(end - start + d3cpk.SPAN)
+    lost = []
+    for p, _, x in d3cpk.streams(d, 0, end - start, start):
+        label = f'/{rel}@{start + p:#x}'
+        for m in re.finditer(re.escape(CTL_MAGIC), x):
+            c = m.start()
+            if c + 0x708 > len(x): continue
+            n, k = struct.unpack_from('<I', x, c + 0x20)[0], struct.unpack_from('<I', x, c + 0x704)[0]
+            if not 0x760 <= n <= 0x880: continue   # the magic in other data
+            ctl, code = x[c:c + n], x[c + n:c + n + k]
+            st = glslc_stage(ctl, code) if len(code) == k else None
+            if st and not check(label, st, ctl, code): out.append((f'{label}#D3@{c:#x}', st, ctl, code))
+            else: lost.append(f'{label}+{c:#x}')
+    if lost: print(f'[RED] /{rel} {start:#x}..{end:#x}: {len(lost)} control section(s) not followed by their code area in the same stream, left out (first: {lost[0]})', flush=True)
+
+CASC = 'CASC'   # job tag of a range of one CASC archive's files (casc_jobs)
+def casc_jobs(files, parts=64):
+    """Blizzard's CASC as Diablo II: Resurrected ships it (casc.py: archives <chunk>-<archive>.data listed by text manifests, 8.4 GB in 1.0.34): the current build's files, by archive, in
+    ranges of about equal stored length. → ([(archive path, rel, (CASC, ((file ID, archive, offset, stored, decoded, encoding), …))), …], the archives taken: they hold nothing a loose scan reads)"""
+    import casc
+    jobs, taken = [], set()
+    for d in sorted({os.path.dirname(p) for p, _ in files if os.path.basename(p) == 'build_key.txt'}):
+        if not casc.is_casc(d): continue
+        rel_of = {p: r for p, r in files if os.path.dirname(p) == d}
+        try: es = casc.files(d)
+        except casc.Error as e: print(f'[RED] {d}: {e}; its archives are scanned as loose files', flush=True); continue
+        by = collections.defaultdict(list)
+        for e in es: by[os.path.join(d, e[1])].append(e)
+        if lost := [a for a in by if a not in rel_of]: red(f'{d}: the manifest names archive {os.path.basename(lost[0])}, which the RomFS lacks')
+        step = sum(e[3] for e in es) / parts
+        for a in sorted(by):
+            cur, size = [], 0
+            for e in sorted(by[a], key=lambda e: e[2]):
+                cur.append(e); size += e[3]
+                if size >= step: jobs.append((a, rel_of[a], (CASC, tuple(cur)))); cur, size = [], 0
+            if cur: jobs.append((a, rel_of[a], (CASC, tuple(cur))))
+        taken |= {p for p in rel_of if p.endswith('.data')}
+    return jobs, taken
+
+def casc_shaders(path, rel, ents, out):
+    """A range of one CASC archive's files (casc_jobs), each decoded and scanned like a loose file (Diablo II: Resurrected's shaders are SHAD containers, shad_shaders). Labels: /<folder>/<file ID>"""
+    import casc
+    with open(path, 'rb') as f:
+        for e in ents:
+            label = f'/{os.path.dirname(rel)}/{e[0]}'
+            try: d = casc.read(f, e)
+            except (casc.Error, zlib.error) as x: print(f'[RED] {label}: {x}; not scanned', flush=True); continue
+            scan_blob(d, label, out)
+
+SHAD = b'SHADSHAD'
+SHAD_CHUNK = struct.Struct('<4s4sIIIII')   # tag, second tag, count, -1 or 0, header length, data start, length (the whole chunk's, header included)
+def shad_shaders(d, label):
+    """Diablo II: Resurrected's shader containers (data/hd/shaders/*.bin in its CASC, one stage each: 'vs_', 'ps_', 'cs_', 'hs_', 'ds_'). A tree of chunks (SHAD_CHUNK): SHAD holds TXT[ (the
+    permutation option names), SYM[ (their symbols) and SHMD (tag SHMD, second word 0x2f); SHMD holds PRM[, a table of count u32 offsets from its data start, each to one BTCD chunk; a BTCD's
+    data (from its header length, 0x24) is the record raw_shaders also finds in main: {u32 5, control length, code length + 0xc, code length, u32 4}, the code area, the control section.
+    1.0.34: 162 files, 10,847 BTCD, 6,923 distinct shaders; every record's lengths add up to its chunk and control +0x704 is its code length. A chunk that does not fit its parent stops the file"""
+    out = []
+    def walk(at, end, depth):
+        while at < end:
+            if at + SHAD_CHUNK.size > end: red(f'{label}: chunk header at {at:#x} runs past {end:#x}')
+            tag, _, cnt, _, hl, ds, size = SHAD_CHUNK.unpack_from(d, at)
+            if not SHAD_CHUNK.size <= hl <= ds <= size or at + size > end: red(f'{label}: chunk {tag!r} at {at:#x} (header {hl:#x}, data {ds:#x}, length {size:#x}) does not fit {end:#x}')
+            if tag == b'BTCD':
+                sh = shad_record(d, at + hl, at + size)
+                if sh is None: red(f'{label}: BTCD at {at:#x} does not hold a record of its length')
+                (ctl, code), where = sh, f'{label}#SHAD@{at:#x}'
+                st = glslc_stage(ctl, code)
+                why = check(where, st, ctl, code) if st else 'no stage in the code area header'
+                if why: red(f'{where}: {why}')
+                out.append((where, st, ctl, code))
+            elif tag == b'PRM[':
+                if hl + 4 * cnt > ds: red(f'{label}: PRM[ at {at:#x}: {cnt} offsets do not fit before its data at {ds:#x}')
+                for o in struct.unpack_from(f'<{cnt}I', d, at + hl): walk(at + ds + o, at + size, depth + 1)
+            elif tag in (b'SHAD', b'SHMD'): walk(at + ds, at + size, depth + 1)
+            at += size
+            if tag == b'BTCD' and depth: return   # a PRM[ offset names one chunk
+    walk(0, len(d), 0)
+    return out
+
+def shad_record(d, at, end):
+    """Diablo II: Resurrected's shader record at d[at:end]: {u32 5, control length, code length + 0xc, code length, u32 4}, the code area, the control section → (control, code), or None
+    when its words or lengths are not that (a BTCD's data, and the 10 records in main)"""
+    if at + 0x14 > end: return None
+    w = struct.unpack_from('<5I', d, at)
+    if w[0] != 5 or w[4] != 4 or w[2] != w[3] + 0xc or at + 0x14 + w[3] + w[1] != end: return None
+    return d[at + 0x14 + w[3]:end], d[at + 0x14:at + 0x14 + w[3]]
 
 CRA = b'CRA.'
 def boot_nros():
@@ -2085,7 +2194,10 @@ def raw_shaders(d, label, known=()):
     main+0x1548014 / +0x1548034); after it lies another vertex shader's code area, whose first 0x100 bytes pass the header and length checks, and that area is the vertex shader main+0x4a2d290 takes from
     before itself (main+0x1548358 / +0x1548374, 0x324 bytes from the first). Compute code areas have no header (SDK 10), so the stage is glslc_stage's, and a headerless one is checked by its length only, never
     across a control section. known: the control sections the other readers took from this main (Celeste's MonoGame effect in main holds some outside any GLSLC output or BNSH file), left out.
-    Of 25 mains on hand only that one has such control sections, so the tables of every other game stay as they were"""
+    Of 25 mains on hand only that one has such control sections, so the tables of every other game stay as they were.
+    Diablo II: Resurrected's main holds 10 (3 vertex, 3 pixel, 4 compute; 9 distinct) in the record its SHAD containers hold (shad_record: a 0x14-byte header, the code area, the control section): the code points at
+    the record's start, not at either section (main+0x88d270 builds the first with adrp + add; four are relocated pointers at main+0x20ff410 + 0x28 i), so a record whose header gives
+    exactly this control section and the code area before it, referenced either way, gives that code area"""
     skip = []
     for m in re.finditer(b'\x91\x68\x86\x19', d):
         size, _, first, _ = glslc_layout(d, m.start())
@@ -2097,9 +2209,12 @@ def raw_shaders(d, label, known=()):
     for s, c in rel.items():
         if c in cset and s - 8 in rel and c not in code_of and struct.unpack_from('<I', d, s + 8)[0] == struct.unpack_from('<I', d, c + 0x704)[0]: code_of[c] = rel[s - 8]
     built = adrp_targets(d, min(ctls) - 0x100000, max(ctls) + 0x100000) if any(c not in code_of for c in ctls) else {}
+    targets = set(rel.values())
     out = []
     for c in ctls:
         nctl, n = struct.unpack_from('<I', d, c + 0x20)[0], struct.unpack_from('<I', d, c + 0x704)[0]
+        r = c - n - 0x14   # a SHAD record's start (shad_record), when this control section ends one
+        if c not in code_of and r >= 0 and (r in targets or r in built) and shad_record(d, r, r + 0x14 + n + struct.unpack_from('<I', d, r + 4)[0]): code_of[c] = c - n
         ctl, why = d[c:c + nctl], 'no code area: no data record points at one, and the code builds the address of none right after or right before it'
         near = lambda k: min(abs(a - b) for a in built[k] for b in built[c])   # how close the code builds this code area's address to the control section's
         for k in ([code_of[c]] if c in code_of else sorted((k for k in ((c + nctl + 15) & ~15, c - n) if k in built and c in built and near(k) < 0x400), key=near)):
@@ -2914,6 +3029,7 @@ def scan_blob(d, label, out, depth=0, left=None):
     if d[:4] == b'NDVE': out.extend(ndve_shaders(d, label)); return
     if shaders := sead_prim_shaders(d, label): out.extend(shaders); return
     if d[:len(TFXO)] == TFXO: out.extend(tfxo_shaders(d, label)); return
+    if d[:8] == SHAD: out.extend(shad_shaders(d, label)); return
     if d[:4] == b'MSHD': out.extend(mshd_shaders(d, label)); return
     if d[:4] == PGDAT and len(d) >= 0x1c and (mem := pgdat_members(d, label)) is not None:   # PlatinumGames
         for nm, m in mem: scan_blob(m, f'{label}/{nm}', out, depth + 1, left)
@@ -2952,11 +3068,12 @@ def pixel_input_cover(shaders):
         k = min(ins, key=lambda k: (-len(ins[k] & left), k)); cover.append(k); left -= ins[k]
     return cover
 
-SINGLE_STAGE = ('#GLSLC@', '#VIPER', '#UE', '#MTSPK@', '#MGFX@', '#NLG', '#PGSO', '#RAW@', '#TFXO@', '#NEEDLE@', '#SNOWDROP@', '#PHYRE@', '#SUMO@', '#NVNSH@')   # sources whose every shader is a program of one stage: GLSLC outputs, Unreal's shader records, MT Framework's shader package (BNSH variations, Unity programs, MSHD and SDF pair theirs);
+SINGLE_STAGE = ('#GLSLC@', '#VIPER', '#UE', '#MTSPK@', '#MGFX@', '#NLG', '#PGSO', '#RAW@', '#TFXO@', '#NEEDLE@', '#SNOWDROP@', '#PHYRE@', '#SUMO@', '#NVNSH@', '#D3@', '#SHAD@')   # sources whose every shader is a program of one stage: GLSLC outputs, Unreal's shader records, MT Framework's shader package (BNSH variations, Unity programs, MSHD and SDF pair theirs);
 # Unreal Engine 3's shader caches (ue3_shaders, '#UE3@'); MonoGame's effects, whose passes may name no vertex shader and keep the one bound (Celeste: 10 of its 13 effects draw through SpriteBatch's vertex shader, which is in main); Next Level Games'
 # archives (Luigi's Mansion 3 makes 5,317 programs of one stage each at boot); PlatinumGames' shader objects (Bayonetta 3: one stage each, pg_shader); control sections loose in main
 # (Advance Wars 1+2: Re-Boot Camp's Bink shaders, raw_shaders), which no file pairs; YEBIS's effect file (tfxo_shaders); and Sumo's Ninty_NX descriptors and NVNsh records, one stage
-# each (Team Sonic Racing: 2,116 vertex and 2,399 pixel programs, sumo_shaders)
+# each (Team Sonic Racing: 2,116 vertex and 2,399 pixel programs, sumo_shaders); Blizzard's: Diablo III's SNO assets (d3cpk_shaders) and Diablo II: Resurrected's SHAD containers, a file per stage
+# whose permutations the game binds per draw (shad_shaders)
 def separable_pairs(keys):
     """Single-stage programs (13 Sentinels: each GLSLC output becomes a program with one stage, and BindProgram's stage bits combine vertex and pixel programs per draw; Unreal combines its shaders per draw
     from the pipeline state) have their real pairs only at draw time. vs_pad uses only the union of the locations the paired pixel shaders read, so every single-stage vertex shader is paired with
@@ -3143,6 +3260,12 @@ def scan_file_in(args):
     if len(args) > 2 and head[:4] == CRA:   # files of Camelot's archive (cra_jobs)
         cra_shaders(path, rel, args[2], found)
         return rel, uniq_keys(found), var_pairs(found), trees
+    if len(args) > 2 and args[2][0] == CASC:   # files of a CASC archive (casc_jobs)
+        casc_shaders(path, rel, args[2][1], found)
+        return rel, uniq_keys(found), var_pairs(found), trees
+    if len(args) > 2 and args[2][0] == D3CPK:   # a byte range of a Diablo III package (d3cpk_jobs)
+        d3cpk_shaders(path, rel, args[2][1], args[2][2], found)
+        return rel, uniq_keys(found), var_pairs(found), trees
     if len(args) > 2 and head[:4] == CPK:   # entries of a CRI CPK (cpk_jobs)
         cpk_shaders(path, rel, args[2], found)
         return rel, uniq_keys(found), var_pairs(found), trees
@@ -3323,14 +3446,16 @@ def main():
     arc_jobs, arcs = smash_arc_jobs(files)   # Super Smash Bros. Ultimate's data.arc: its current files, in ranges
     pz_jobs, pkzs = pkz_jobs(files)   # Bayonetta 3's PKZ archives, Oodle Kraken decoded by the game's own decoder in the Mac host
     ck_jobs, cpks = cpk_jobs(files)   # Bayonetta 2's CRI CPK archives (CRILAYLA entries)
+    d3_jobs, d3s = d3cpk_jobs(files)   # Diablo III's packages (zlib streams, d3cpk.py)
+    ca_jobs, cascs = casc_jobs(files)   # Diablo II: Resurrected's CASC archives (casc.py)
     cr_jobs, cras = cra_jobs(files)   # Mario Tennis Fever's CRA archive, its index in the NRO the game decodes at run time
     zp_jobs, zips = zip_jobs(files)   # Portal's game.zip (Deflate members)
     ah_jobs, arhs = arh_jobs(files)   # Monolith's ARH1/ARD archives and embedded XBC1/HCPS programs
     fb_jobs, fbs = frostbite_jobs(files)   # EA SPORTS FC 27's Frostbite bundles, Oodle Leviathan decoded by the game's own decoder in the Mac host
     pd_jobs, pdats = pdat_jobs(files)   # Kirby Air Riders' PDAT archives: the PMAP records in byte ranges
     rp_jobs, rpfs = rpf_jobs(files, main_v)   # Red Dead Redemption's RPF6 archives, their tables decrypted with the key in main (rpf6.py)
-    big += pak_jobs + tr_jobs + ue_jobs + bd_jobs + arc_jobs + pz_jobs + ck_jobs + cr_jobs + zp_jobs + ah_jobs + fb_jobs + pd_jobs + rp_jobs
-    files = [(p, r) for p, r in files if not linkdata_jobs(p, r) and p not in paks and p not in trp and p not in uep and p not in bdts and p not in arcs and p not in pkzs and p not in cpks and p not in cras and p not in zips and p not in arhs and p not in fbs and p not in pdats and p not in rpfs]
+    big += pak_jobs + tr_jobs + ue_jobs + bd_jobs + arc_jobs + pz_jobs + ck_jobs + d3_jobs + ca_jobs + cr_jobs + zp_jobs + ah_jobs + fb_jobs + pd_jobs + rp_jobs
+    files = [(p, r) for p, r in files if not linkdata_jobs(p, r) and p not in paks and p not in trp and p not in uep and p not in bdts and p not in arcs and p not in pkzs and p not in cpks and p not in d3s and p not in cascs and p not in cras and p not in zips and p not in arhs and p not in fbs and p not in pdats and p not in rpfs]
     with cf.ProcessPoolExecutor(J, initializer=_pool_init, initargs=(common, {}, zdicts)) as ex:
         n = len(big) + len(files)
         results += pooled(ex, big, n) + pooled(ex, files, n, len(big), chunk=16)

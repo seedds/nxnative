@@ -11,6 +11,7 @@
 #       dmsh_chain.py --inputs        print the digest of the current game profile's inputs (DM_GAME), as b-<V>/inputs.tsv records it
 #       (checking the tools against dmsh_chain.lock, and rewriting it, is tool_lock.py's: the checks decide no output, so they are outside V and the shaders' cache keys)
 # Environment: XLATE_DEBUG / XLATE_REDUCED (same meaning as in dmsh_build.py, default 1 / 1; non-default options yield a different V, which the host will not load)
+from typing import Any
 import os, sys, ast, hashlib
 DM_ROOT = os.environ.get('DM_ROOT') or os.path.expanduser('~/dm-work')   # Workspace root (game files, build outputs and run artifacts are all under it)
 HERE = os.path.dirname(os.path.abspath(__file__)); GFX = os.path.dirname(HERE); HOME = os.path.expanduser('~')
@@ -27,9 +28,27 @@ FILES += ['../mac/min_os.mk']   # MAC_MIN below
 # The Mac libraries are compiled for the Mac host's minimum macOS (dm/mac/min_os.mk), as the host's own Metal libraries are (dm/host/Makefile MSL_MIN_macosx). The deployment target
 # sets the Metal language version: with none the compiler takes the build Mac's system, so one source compiled on macOS 27 and failed on macOS 26 (a reference parameter with no address
 # space, which the newer language accepts: GitHub issue #2272), and a library made on the newer system names a language version the older one does not load. The NVN chain
-# (dmsh_build.py MAC_METAL), vk_shaders.py and gl_shaders.py pass this flag on every Mac compile; the iPhone's is ios_metal.py's
-MAC_MIN = open(os.path.join(GFX, '../mac/min_os.mk')).read().split('MACOS_MIN := ')[1].split()[0]
-MAC_MIN_FLAG = f'-mmacosx-version-min={MAC_MIN}'
+# (MAC_METAL below), vk_shaders.py and gl_shaders.py pass this flag on every Mac compile; the iPhone's is ios_metal.py's
+# Read when asked (MAC_MIN, MAC_MIN_FLAG, MAC_METAL below), not at import: an import needs only the inventory (FILES), which pr_areas.py and the tests read without min_os.mk
+def mac_min():
+    with open(os.path.join(GFX, '../mac/min_os.mk')) as f: return f.read().split('MACOS_MIN := ')[1].split()[0]
+# The Mac compile of a game's shaders (dmsh_build.py; the iPhone's is ios_metal.py METAL). It is here, not in dmsh_build.py, which runs a build when imported, so tests compile with it
+# -fpreserve-invariance: vertex positions are marked [[invariant]], but without this flag Metal does not promise that two different shaders compute the same expression to the same value; on Maxwell the same multiply-adds always agree.
+# Super Mario Odyssey draws a depth pre-pass with alRenderDepthOnly, then the G-buffer with another vertex shader and depth test less-or-equal: a hair off and the test failed, leaving those pixels with old content (Cap Kingdom's ground in 32x32 blocks)
+# -O1: the front end's -O2 (CorrelatedValuePropagation, then SimplifyCFG) folds the translated shaders' repeated tests of one value into switches whose cases jump past their own join.
+# Apple's GPU backend then exceeds its control-flow ID budget ("Max Unstruct ID 758 ... exceeds supported limit", a note, not an error) and falls back to a slower lowering:
+# Odyssey's alRenderMaterialUber took 25 minutes and 17.3 MB of GPU code, 31 s and 1.3 MB at -O1. Ordinary shaders come out within a few percent either way (the backend optimizes again)
+# -fwrapv: signed integer overflow wraps, as SPIR-V's integer arithmetic and the Switch's GPUs do; in MSL it is undefined, and the front end folds around it. Ocarina of Time's mesh shader
+# 35785cddc971290c sign-extends a packed 16-bit vertex field as a = w * 65536, then (a >> 31) << 16 | uint(a) >> 16; without the flag the compiler took the sign bits from bits 15-30 of w,
+# so the lightmap / probe UV's x came out far too large and models drawn with mesh shaders took their ambient light from the wrong texels (the bright band on the Deku Tree's walls).
+# The flag also drops inbounds from pointer arithmetic (Metal's clang has no -fwrapv-pointer) and keeps loop bounds that may wrap (test_dmsh_wrapv.py)
+# -mmacosx-version-min: the deployment target, above
+def mac_metal(): return ['xcrun', '-sdk', 'macosx', 'metal', '-c', '-O1', f'-mmacosx-version-min={mac_min()}', '-fpreserve-invariance', '-fwrapv']
+def __getattr__(name) -> Any:   # MAC_MIN, MAC_MIN_FLAG and MAC_METAL as the module's constants (PEP 562), each read from min_os.mk when used
+    if name == 'MAC_MIN': return mac_min()
+    if name == 'MAC_MIN_FLAG': return f'-mmacosx-version-min={mac_min()}'
+    if name == 'MAC_METAL': return mac_metal()
+    raise AttributeError(f'module {__name__!r} has no attribute {name!r}')
 INPUT_TABLES = ['shader_facts.tsv', 'shader_map.tsv', 'shader_map.tsv.conflicts.tsv', 'shader_pairs.tsv', 'pso_pairs.tsv', 'bf_want.tsv', 'geo_mesh.tsv', 'dual_want.tsv']   # in the game profile folder
 LOCK = os.path.join(HERE, 'dmsh_chain.lock'); HEADER = os.path.join(GFX, 'nvn/dmsh_chain.h')
 STAMP = 'inputs.tsv'   # in the library directory b-<V>/

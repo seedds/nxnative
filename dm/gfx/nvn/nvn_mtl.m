@@ -2322,6 +2322,7 @@ static void post_complete(uint64_t fence, uint64_t c0, uint64_t c1) {
 static _Atomic int g_seg_inflight;   // main command buffers committed and not reported back yet (sub_cut)
 static void rt_preserve_bound(void);
 static void queue_program_preserve(void);
+static void tex_ghost_trim(void);
 uint64_t mtl_sub_commit(void) {
     lc_land();   // clears still waiting (the command list ends with them)
     defer_fallback();   // Deferred merged pass: at the end of the submission there are still P draws not replayed (the normal path never gets here)
@@ -2331,6 +2332,7 @@ uint64_t mtl_sub_commit(void) {
     up_flush();
     gmem_commit_patch();
     g_cut_copy = 0;
+    tex_ghost_trim();   // Idle finalized textures past NGHOST retire behind this submission's fence.
     treg_finish_submission();   // Late descriptor views retire behind this submission's fence.
     rt_preserve_bound();   // The game may reuse completed command memory; queue bindings must not point into its texture snapshots.
     queue_program_preserve(); // Submitted metadata may retire while these programs remain bound.
@@ -2506,7 +2508,7 @@ static nvn_hmap g_pkg_share = {.klen = sizeof(alias_key)};   // see NvPkgRef
 // each candidate instead: in Ocarina of Time's cutscenes, with about 7,500 serials and thousands of shared textures, that walk was the submit thread's hottest function and
 // frames took up to a second. An entry holds its object (CFBridgingRetain), so a counted address cannot be reused while counted. Under g_smu
 static nvn_hmap g_by_serial_held = {.klen = sizeof(uintptr_t)};
-// The same count for the ghost ring (g_ghost, finalized serials a replayed record still resolves; tex_put and the upgrade's in-place replacement write it)
+// The same count for the ghost table (g_ghost, finalized serials a replayed record still resolves; tex_put and the upgrade's in-place replacement write it)
 static nvn_hmap g_ghost_held = {.klen = sizeof(uintptr_t)};
 // A retired object a serial entry still holds stays in the residency set until the last such entry lets it go. Several entries can hold one texture that no table owns: at the GPU's
 // first write over storage a packaged texture was taken from (cpu_unc_drop), every serial of the package gets the package's texture itself, live serials and finalized ones in the ghost
@@ -2608,7 +2610,7 @@ void mtl_alias_drop_pool(const void *pool) {
 // (Breath of the Wild finalizes its transient render targets before it submits and makes them again the next frame: targets sharing storage would evict each other every frame). On NVN the memory now belongs to the new texture;
 // the old private Metal texture only held a copy nothing can name again. STEINS;GATE RE:BOOT decodes every image it shows into one scratch region of a pool that lives for good and
 // finalizes the texture before the next one: each image added an entry, 468 of them and 1.58 GB of GPU memory 24,000 frames into a new game. The texture is retired (deferred until
-// the submissions that used it complete); one a finalized object still resolves through g_ghost stays resident until the ring lets it go (defer_drain, g_retire_held).
+// the submissions that used it complete); one a finalized object still resolves through g_ghost stays resident until the table lets it go (defer_drain, g_retire_held).
 // The change records a note that names no texture (ser_note(0)), as it changes no serial's texture: an entry a live serial holds is not evicted (serial_table_holds), and one a finalized
 // serial holds through g_ghost keeps its texture. A live sRGB / linear twin's serial holds a view of the shared texture, not the texture, so that texture can go while the twin is live;
 // tex_mtl_ then finds the view stale and drops it (serial_del), a note naming that serial. A retired ID's view goes at the submission's end (treg_finish_submission), and the
@@ -2646,11 +2648,15 @@ static void serial_del(uint64_t k) { pthread_mutex_lock(&g_smu); id old = hm_get
 // Texture serials owned by a live NVN texture object (TextureInitialize until Finalize or re-initialization, hle_nvn.c). Command records and texture pool registrations snapshot the
 // texture object (tex_snap in hle_nvn.c, mtl_reg_tex), so replay can resolve a texture the game has already finalized: Breath of the Wild records each frame's transient render targets
 // (the HUD captures, the 640x360 half-resolution buffers) and finalizes their objects before it submits. Those serials went back into g_by_serial and stayed there for good, as no second
-// Finalize comes: about 10 a frame, 200,000 after an hour in the first shrine. A dead serial resolves through g_ghost instead, a small table whose oldest entry goes when a new one comes,
-// so a record replayed again soon still finds its texture
-enum { NGHOST = 512 };
+// Finalize comes: about 10 a frame, 200,000 after an hour in the first shrine. A dead serial resolves through g_ghost instead. Keep entries by use, so a working set larger
+// than NGHOST stays resolvable while used. Only idle extras go, least recently used first, with bounded work on each put and commit. Frames matter: Ocarina of Time can make
+// about 25 submissions a frame; a short submission-only window evicts textures still used every frame. The submission limit also drains extras when presents stop.
+enum { NGHOST = 512, GHOST_IDLE = 16, GHOST_IDLE_SUBS = 1024, GHOST_TRIM = 32 };
 static nvn_hmap g_tex_live = {.klen = 8};   // serial → the texture object it was initialized in (mtl_tex_release), under g_smu
-static nvn_hmap g_ghost = {.klen = 8}; static uint64_t g_ghost_ring[NGHOST]; static unsigned g_ghost_next; static uint64_t g_ghost_puts;
+static nvn_hmap g_ghost = {.klen = 8}; static uint64_t g_ghost_puts;
+typedef struct ghost_use { struct ghost_use *prev, *next; uint64_t serial, frame, sub; } ghost_use;
+static nvn_hmap g_ghost_use = {.klen = 8};   // one record per ghost entry, under g_smu
+static ghost_use *g_ghost_lru, *g_ghost_mru;
 void mtl_tex_init(const tex_t *t) {
     if (!t->serial) return;
     tex_t *desc = image_shape(t) ? malloc(sizeof *desc) : NULL; if (desc) *desc = *t;
@@ -2686,8 +2692,38 @@ void mtl_tex_unpin(uint64_t serial) {
     if(pin && !--pin->refs) { nvn_hm_del(&g_tex_pins,&serial); tex_pin_set(pin,nil); free(pin); }
     pthread_mutex_unlock(&g_smu);
 }
+// The ghost table's order of use. Caller holds g_smu.
+static void use_unlink(ghost_use *u) {
+    if (u->prev) u->prev->next = u->next; else g_ghost_lru = u->next;
+    if (u->next) u->next->prev = u->prev; else g_ghost_mru = u->prev;
+    u->prev = u->next = NULL;
+}
+static void ghost_used(uint64_t k) {
+    ghost_use *u = nvn_hm_get(&g_ghost_use, &k);
+    if (!u) { u = calloc(1, sizeof *u); if (!u) MDIE("ghost table allocation failed"); u->serial = k; nvn_hm_put(&g_ghost_use, &k, u); }
+    else if (u != g_ghost_mru) use_unlink(u);
+    u->frame = atomic_load(&g_cur_frame); u->sub = atomic_load(&g_fence) + 1;
+    if (u != g_ghost_mru) { u->prev = g_ghost_mru; if (g_ghost_mru) g_ghost_mru->next = u; else g_ghost_lru = u; g_ghost_mru = u; }
+}
+static void ghost_del_locked(uint64_t k) {
+    ghost_use *u = nvn_hm_del(&g_ghost_use, &k); if (u) { use_unlink(u); free(u); }
+    id old = hm_get_id(&g_ghost, &k); if (!old) return;
+    ghost_held_add((__bridge void *)old, -1); obj_drop(old); hm_del_id(&g_ghost, &k); ser_note(k);
+}
+static void ghost_trim(unsigned budget) {
+    uint64_t frame = atomic_load(&g_cur_frame), sub = atomic_load(&g_fence) + 1;
+    for (; budget && g_ghost.n > NGHOST && g_ghost_lru; budget--) {
+        const ghost_use *u = g_ghost_lru;
+        if (frame - u->frame < GHOST_IDLE && sub - u->sub < GHOST_IDLE_SUBS) break;
+        ghost_del_locked(u->serial);
+    }
+}
+static void tex_ghost_trim(void) { pthread_mutex_lock(&g_smu); ghost_trim(GHOST_TRIM); pthread_mutex_unlock(&g_smu); }
 static __unsafe_unretained id tex_get(uint64_t k) {
-    pthread_mutex_lock(&g_smu); __unsafe_unretained id o = hm_get_id(&g_by_serial, &k); if (!o && g_ghost.n) o = hm_get_id(&g_ghost, &k); if(!o) { tex_pin *pin=nvn_hm_get(&g_tex_pins,&k); if(pin) o=(__bridge id)pin->object; } pthread_mutex_unlock(&g_smu); return o;
+    pthread_mutex_lock(&g_smu); __unsafe_unretained id o = hm_get_id(&g_by_serial, &k);
+    if (!o && g_ghost.n && (o = hm_get_id(&g_ghost, &k))) ghost_used(k);
+    if (!o) { tex_pin *pin = nvn_hm_get(&g_tex_pins, &k); if (pin) o = (__bridge id)pin->object; }
+    pthread_mutex_unlock(&g_smu); return o;
 }
 static void tex_put(uint64_t k, id o) {   // serials from 2^62 up are external textures (mtl_ext_tex), never initialized by the game
     pthread_mutex_lock(&g_smu);
@@ -2695,14 +2731,22 @@ static void tex_put(uint64_t k, id o) {   // serials from 2^62 up are external t
     id old = hm_get_id(m, &k);
     if (old) count_add(m == &g_by_serial ? &g_by_serial_held : &g_ghost_held, (__bridge void *)old, -1);
     if (old) obj_drop(old);
-    else if (m == &g_ghost) {
-        uint64_t *slot = &g_ghost_ring[g_ghost_next++ % NGHOST];
-        if (*slot) { id ev = hm_get_id(&g_ghost, slot); if (ev) { ghost_held_add((__bridge void *)ev, -1); obj_drop(ev); } hm_del_id(&g_ghost, slot); ser_note(*slot); }   // the evicted serial resolves anew too
-        *slot = k; g_ghost_puts++;
-    }
+    else if (m == &g_ghost) g_ghost_puts++;
     hm_put_id(m, &k, o); tex_pin *pin=nvn_hm_get(&g_tex_pins,&k); if(pin) tex_pin_set(pin,o); ser_note(k);
     count_add(m == &g_by_serial ? &g_by_serial_held : &g_ghost_held, (__bridge void *)o, 1);
+    if (m == &g_ghost) { ghost_used(k); ghost_trim(2); }
     pthread_mutex_unlock(&g_smu);
+}
+// A stale view must leave the live or ghost table, together with its LRU record. Recheck under the same lock as deletion; a replacement must keep its entry.
+static int tex_drop_stale(uint64_t k, id<MTLTexture> view) {
+    pthread_mutex_lock(&g_smu);
+    id parent = view.parentTexture; int stale = parent && !alias_has(view) && !alias_has(parent);
+    if (stale) {
+        id old = hm_get_id(&g_by_serial, &k);
+        if (old == view) { held_add((__bridge void *)old, -1); obj_drop(old); hm_del_id(&g_by_serial, &k); ser_note(k); }
+        else if (!old && hm_get_id(&g_ghost, &k) == view) ghost_del_locked(k);
+    }
+    pthread_mutex_unlock(&g_smu); return stale;
 }
 // Host record of a packaged texture: the current MTLTexture, the upload stamp, and the global write generation at the last check
 // spare: the texture the last re-upload replaced, kept resident and written by the next re-upload once the GPU has passed spare_fence (a texture the CPU rewrites every frame, a movie frame,
@@ -4467,11 +4511,11 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
         return pk->view ? pk->view : pk->tex;
     }
     int stale = 0;
-    if (have && [have conformsToProtocol:@protocol(MTLTexture)] && ((id<MTLTexture>)have).parentTexture) { pthread_mutex_lock(&g_smu); stale = !alias_has(have) && !alias_has(((id<MTLTexture>)have).parentTexture); pthread_mutex_unlock(&g_smu); }
+    if (have && [have conformsToProtocol:@protocol(MTLTexture)] && ((id<MTLTexture>)have).parentTexture) stale = tex_drop_stale(t->serial, have);
     if (stale) {
         // An sRGB / linear view whose parent left the sharing table (upgraded, taken over or evicted) no longer shares the storage's bytes: dropped, and made again below on what holds them now
         static int nstale; if (nstale++ < 4) MLOG("stale sRGB / linear view dropped ser=%llu format %lu (%d so far)", (unsigned long long)t->serial, (unsigned long)((id<MTLTexture>)have).pixelFormat, nstale);
-        serial_del(t->serial); have = nil;
+        have = nil;
     }
     if (have) { if (t->pool && nvn_sparse_pool(t->pool)) sparse_gpu_look(t, have); return have; }
     if (t->d.target == 10) {   // Buffer texture (TARGET_BUFFER): create the texture-buffer view directly on the memory pool buffer (zero copy; the GPU reads the pool's current content at execution time, same as NVN semantics)

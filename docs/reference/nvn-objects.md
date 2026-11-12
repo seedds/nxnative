@@ -196,9 +196,9 @@ A game may tell NVN objects apart by their bytes, without an NVN call. A host re
 
 ### Dead texture serials kept in a ghost table
 
-- **Symptom:** the serial table grows by about 10 entries a frame (276,000 after 25,000 frames).
-- **Cause:** a game that records transient render targets and finalizes them before it submits: replay put the dead serials back into `g_by_serial`.
-- **Fix:** dead serials go to a 512-entry table (`tex_put`, `g_ghost`; the memory line's `finalized textures still referenced`).
+- **Symptom:** the live serial table grows by about 10 entries a frame (276,000 after 25,000 frames), or replay repeatedly resolves finalized textures once its active working set exceeds 512 entries.
+- **Cause:** replay put finalized transient render targets back into `g_by_serial`. Moving them to a fixed-size ghost ring bounded that table, but the ring evicted the oldest insertion without considering whether replay still used it; active larger working sets lost entries on each pass.
+- **Fix:** dead serials go to `g_ghost` instead of the live table. Its entries are kept by use (`tex_get`, `tex_put`): a working set larger than 512 remains resolvable while active. Idle extras expire after 16 frames or 1,024 submissions, least recently used first, at most two per put and 32 per commit, returning to 512 entries without a full-table scan. Ghost deletion removes its use record and held count together; pins and deferred GPU retirement retain their existing lifetime. The former fixed-size ring could evict an actively replayed finalized texture and force its resolution again. `t_ghost_lru` reproduces the loss of active serials with 1,024 objects across 800 submissions and verifies expiry, pins, replacement counts and stale views; `t_cpu_tex` verifies actual Metal residency.
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) (the HUD captures, the 640×360 buffers; found while fixing GitHub issue #9).
 
 ### A replay's own objects take serials above a capture's

@@ -139,6 +139,8 @@ From an empty save: at about 45 s `A` (title), `A` (New Game), then the movie. F
 
 ## Found on this game
 
+- [Finalized texture serials kept while used](../../../docs/reference/nvn-objects.md#dead-texture-serials-kept-in-a-ghost-table): backport of upstream `034e91a8` into this branch’s monolithic owner. The former 512-entry ring could evict an active larger working set. The deterministic 1,024-object regression loses 409,600 lookups before the fix and none after it. Real long-session performance remains to be measured.
+
 - [Fullscreen output can match the panel’s native pixels](../../../docs/reference/frame-rate.md#fullscreen-output-can-match-the-panels-native-pixels): opt-in picture layer and app-only native-pixel mode; real MetalFX interpolation/direct output and display restoration verified on an M4 Pro. Sustained 120 Hz and multizone temporal image quality remain open.
 
 - [The 60 Hz link at 40 fps in fullscreen on a ProMotion screen](../../../docs/reference/frame-rate.md#the-60-hz-link-at-40-fps-in-fullscreen-on-a-promotion-screen): 40 fps in fullscreen on an M5 Pro MacBook Pro with the GPU at 10 ms of the 16.7, every present one 120 Hz refresh late and every other display-link tick skipped; the screen's fixed 60 Hz mode held 60.0 fps there and fullscreen now switches to it, with the 120 Hz link (59 fps) for screens with no such mode.

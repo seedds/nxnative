@@ -9,8 +9,9 @@ A Switch 2 game: update v65536 over the base game, SDK 21.4.4 built for the Swit
 | `mem_alias 0x400000000`, `mem_reserve 0x550000000` | [`game.tsv`](game.tsv) | with the 4.5 GB of an earlier profile the region ran out at the first level: [An SDK 21 Switch 2 game with a 4.5 GB alias region](../../../docs/reference/memory.md#an-sdk-21-switch-2-game-with-a-45-gb-alias-region) |
 | `mem_stack 0x10000000`, `app_pool 0x240000000` | `game.tsv` | as Donkey Kong Bananza, the Switch 2's 9 GB |
 | `sys_resource 0x2000000` | `game.tsv` | the NPDM declares 32 MB, so virtual address memory is on |
-| `render_cond on` | `game.tsv` | agl wraps its clears in render conditions; when those clears ran, the lit scene was wiped: the black dialogue scene ([Report tables that dropped entries](../../../docs/reference/rendering.md#report-tables-that-dropped-entries)) |
 | `pad_layout full` | `game.tsv` | the game asks for most of the controller at once |
+
+Render conditions, which the host evaluates for every game ([Conditional rendering evaluated at replay](../../../docs/reference/rendering.md#conditional-rendering-evaluated-at-replay); until 2026-11-12 the profile key `render_cond`): agl wraps its clears in render conditions; when those clears ran, the lit scene was wiped: the black dialogue scene ([Report tables that dropped entries](../../../docs/reference/rendering.md#report-tables-that-dropped-entries)).
 
 ## Files
 
@@ -31,6 +32,10 @@ A Switch 2 game: update v65536 over the base game, SDK 21.4.4 built for the Swit
 - The first boss fight's third stage (resolved, 2026-11-05, 16 GB M2 Air, docked): it measures its ink map with about 1,550 occlusion queries a frame, each after 7 inline updates of the query block and with colour writes masked off (`wm=0xfffffff0`), so those draws read the map directly rather than from the tile. Their 11,010 writes in one submission overflowed the host's list of queued writes, and from then on each query ended its render pass, at 1-2 fps ([the reference entry](../../../docs/reference/rendering.md#a-submission-past-8192-queued-writes-counted-as-writing-everywhere)). With a list that grows as needed (a larger fixed limit in the measured build), the stage holds a median of 17.7-19.9 ms with at most 118 render passes. A later stretch of the same run sat at 32-34 ms (frames 15,300-16,200); where in the game that was is not known (open).
 - Focus: the game stops drawing its 3D scene when the window loses focus (10 passes, GPU 2 ms), so a frame rate read then says nothing.
 
+## Dynamic resolution
+
+The game writes 29 `ReportCounter(TIMESTAMP_TOP)` reports a frame and steers its dynamic resolution by the GPU time between them ([issue #1064](https://github.com/seedds/nxnative/issues/1064), M2 Air, 1920x1080 handheld). With one time for the whole submission it read about 0 and kept the 3D view at 1440x810 (render scale 0.75) at 26 ms of GPU a frame; with segment times it scaled between 0.39 and 1.0 of the render-scale size. With the GPU's idle gaps between command buffers counted it read about 16 ms where the GPU worked about 8 and held 0.50–0.57 of full size; without them its width median went to 0.94, and dropped frames from 4 to 35 per 300 ([issue #1290](https://github.com/seedds/nxnative/issues/1290)). Both are the host's default now ([GPU timestamps per submission segment](../../../docs/reference/frame-rate.md#gpu-timestamps-per-submission-segment)); not rerun on main.
+
 ## Driving it on the Mac
 
 The work folder's `run/drive.sh <name> <secs> "<sec> <control line>"…` boots in a window with the HUD, raises it and appends control lines (`A~0.1`, `LUp~4`, `shot <path>`, `passdump 1`, `texdump <path with %d>`). With the save at the start of the dialogue, four presses of A get to the beach at about 75 s. `DM_NVN_SHOT=<frames>:<relative path>` takes consecutive frames: the path must have no space, as the driver's environment is split on them.
@@ -44,6 +49,7 @@ The work folder's `run/drive.sh <name> <secs> "<sec> <control line>"…` boots i
 
 ## Found on this game
 
+- [GPU timestamps per submission segment](../../../docs/reference/frame-rate.md#gpu-timestamps-per-submission-segment): dynamic resolution that never moved, then held low by the GPU's idle gaps
 - [Naming the shaders of a GPU fault](../../../docs/reference/rendering.md#naming-the-shaders-of-a-gpu-fault): added for the address fault above, which names no pass.
 - [Compatible views for a mismatched declared texture type](../../../docs/reference/rendering.md#compatible-views-for-a-mismatched-declared-texture-type): resolved, a cube in a cube array slot. `d0ce73e71074df85_b` (NigoProc, layer index a literal 0) read texture ID 428 as `texture type mismatch … declares slot 0 as Metal type 6, … is type 5`, 180 binds at frame 0 and none after. With the view the count is 0. The opening looks the same, though the two runs are not frame-aligned, so no pixel comparison was possible.
 - [The split shader tables differ from a game profile's](../../../docs/reference/packing.md#the-split-shader-tables-differ-from-a-game-profiles): NigoProc's `800215a0f8d0c44d` is a mesh shader, and every pack stopped until its row was split again ([issue #1263](https://github.com/seedds/nxnative/issues/1263)).
@@ -64,3 +70,4 @@ The work folder's `run/drive.sh <name> <secs> "<sec> <control line>"…` boots i
 - [A submission past 8,192 queued writes counted as writing everywhere](../../../docs/reference/rendering.md#a-submission-past-8192-queued-writes-counted-as-writing-everywhere): the first boss fight's third stage at 1-2 fps.
 - [Same-pass feedback read from the tile](../../../docs/reference/rendering.md#same-pass-feedback-read-from-the-tile): each ink stamp's one-draw pass and whole-map snapshot ([#1063](https://github.com/seedds/nxnative/issues/1063)).
 - [An upscaler's colour read from its code](../../../docs/reference/rendering.md#an-upscalers-colour-read-from-its-code): the washed-out picture with `DM_UPSCALER=metalfx` ([#1156](https://github.com/seedds/nxnative/issues/1156)).
+- [Unused border corrections retain sample registers](../../../docs/reference/rendering.md#unused-border-corrections-retain-sample-registers): after the first cutscene a 236-draw 1920x1080 pass took 20-21 ms of a 31.6 ms frame on an M1 in handheld, its pixel shaders spilling 592-720 bytes a thread for a correction none of its samplers needs; 9.3 ms and 19.8 ms with the corrections taken out at build time (PR #1203). Open: not measured again with the function constant that landed.

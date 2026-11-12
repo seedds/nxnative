@@ -125,6 +125,22 @@ class IntegerOutputs(unittest.TestCase):
         self.assertIsNotNone(fs_uint(src)[0])
         self.assertIsNone(fs_uint(src.replace(', flat]]', ']]'))[0])
 
+    def test_a_float_local_holding_integer_bits(self):   # PRAGMATA's visibility shaders: the primitive id's bits and the depth into an RG32Uint target
+        body = '    float _439 = as_type<float>(int(gl_PrimitiveID));\n    float _437 = gl_FragCoord.z;\n    out.m_0.x = _439;\n    out.m_0.y = _437;'
+        self.assertIsNotNone(fs_uint(self.source(body))[0])
+        self.assertIsNone(fs_uint(self.source(body.replace('as_type<float>(int(gl_PrimitiveID))', 'gl_FragCoord.w')))[0])
+
+    def test_writes_after_an_early_return(self):   # a9c1f9ea0c76a54c: a discard's branch returns zeros first; the integer bits are written after it
+        early = '    if (!_435)\n    {\n        discard_fragment();\n    }\n    if (!_435)\n    {\n        out.m_0.x = 0.0;\n        out.m_0.y = 0.0;\n        return out;\n    }\n'
+        body = early + '    float _439 = as_type<float>(int(gl_PrimitiveID));\n    float _437 = gl_FragCoord.z;\n    out.m_0.x = _439;\n    out.m_0.y = _437;'
+        self.assertIsNotNone(fs_uint(self.source(body))[0])
+        self.assertIsNone(fs_uint(self.source(body.replace('as_type<float>(int(gl_PrimitiveID))', 'gl_FragCoord.w')))[0])
+
+    def test_a_float_local_holding_an_array_element_of_float_bits(self):   # OCTOPATH TRAVELER II's 05af5b1924d3b8b7: a register kept in a local array
+        body = '    uint _30[2];\n    _30[0] = 1065353216u;\n    _30[0] = as_type<uint>(_680);\n    float _884 = as_type<float>(_30[0]);\n    out.m_0.x = _884;\n    out.m_0.y = _680;'
+        self.assertIsNone(fs_uint(self.source(body))[0])
+        self.assertIsNotNone(fs_uint(self.source(body.replace('as_type<uint>(_680)', '_681 << 3u')))[0])   # a computed integer in the element is one
+
 
 class ImageAtomics(unittest.TestCase):
     MAGIC = [0x07230203, 0x10000, 0, 8, 0]

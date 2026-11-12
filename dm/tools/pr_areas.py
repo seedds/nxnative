@@ -3,7 +3,7 @@
 # shader chain, …), each game whose profile it changes (game: <title ID>), and "new game" for a profile main does not have yet. The workflow runs this file from main,
 # never from the pull request, and gives it only the list of paths.
 # Usage: pr_areas.py [--root DIR] < paths   (one path per line; DIR is main's checkout, default this repository)  → one line per label: name, color, description (tab-separated)
-import argparse, os, pathlib, re, runpy, sys
+import argparse, importlib.util, os, pathlib, re, sys
 
 AREAS = [   # label, color, description, paths (regular expression, matched from the start)
     ('host', '1d76db', 'The Horizon host: SVCs, services, threads, memory (dm/host)', r'dm/host/'),
@@ -32,7 +32,11 @@ def automatic(name):   # a label this file or issue_areas.py adds, so it says no
 def chain_paths(root):   # the files DMSH_CHAIN hashes (main's dmsh_chain.FILES, so the label cannot drift from the chain) and the header it writes
     src = root / 'dm/gfx/tools/dmsh_chain.py'
     if not src.is_file(): return set()
-    return {os.path.normpath('dm/gfx/' + f) for f in runpy.run_path(str(src))['FILES']} | {'dm/gfx/nvn/dmsh_chain.h'}
+    # An import: dmsh_chain.py reads nothing and builds nothing when imported (its compile flags are read when used), so main's FILES come without its other files
+    spec = importlib.util.spec_from_file_location('dmsh_chain_of_main', src)
+    if spec is None or spec.loader is None: return set()
+    chain = importlib.util.module_from_spec(spec); spec.loader.exec_module(chain)
+    return {os.path.normpath('dm/gfx/' + f) for f in chain.FILES} | {'dm/gfx/nvn/dmsh_chain.h'}
 
 
 def game_names(root):   # title ID → name, from the games table

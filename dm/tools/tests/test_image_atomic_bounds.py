@@ -21,6 +21,7 @@ import re
 import shutil
 import struct
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -28,6 +29,8 @@ ROOT = Path(__file__).resolve().parents[3]
 RYU = ROOT / 'dm/third_party/ryujinx/src/Ryujinx.Graphics.Shader'
 spec = importlib.util.spec_from_file_location('dmsh_atomic', ROOT / 'dm/gfx/tools/dmsh_atomic.py')
 atomic = importlib.util.module_from_spec(spec); spec.loader.exec_module(atomic)
+sys.path[:0] = [str(ROOT / 'dm/gfx/tools'), str(ROOT / 'dm/ios/tools')]
+import dmsh_chain, ios_metal   # noqa: E402  (the builds' Metal compiles)
 SPIRV_CROSS = ROOT / 'dm/gfx/tools/spirv_cross_bin/spirv-cross'   # the build dmsh_build.py runs (dmsh_chain.SPIRV_CROSS)
 XC = ['--msl', '--msl-version', '20300', '--msl-argument-buffers', '--msl-texture-buffer-native']  # dmsh_build.XC without fragment padding
 
@@ -36,7 +39,7 @@ def cross(spv, msl):
     """spirv-cross as dmsh_build runs it: MSL 3.1 for a module with image atomics, which must come out as native texture atomics"""
     subprocess.run([str(SPIRV_CROSS), *atomic.cross_args(XC, str(spv)), str(spv), '--output', str(msl)], check=True)
     source = atomic.check_msl(msl.read_text())
-    assert '.atomic_fetch_' in source and 'access::read_write' in source, msl
+    assert ('.atomic_fetch_' in source or re.search(r'<ulong, access::read_write>.*\.atomic_(max|min)\(', source, re.S)) and 'access::read_write' in source, msl
     return source
 
 
@@ -325,13 +328,10 @@ class Compiler(unittest.TestCase):
         self.assertTrue(metal_sdks and all(sdk in ('macosx', 'iphoneos') for sdk in metal_sdks),
                         'DMSH_TEST_METAL_SDKS must be macosx, iphoneos or macosx,iphoneos')
         for sdk in metal_sdks:
-            # Match dmsh_build.MAC_METAL and ios_metal.METAL;
-            # the latter needs relaxed NaN-aware arithmetic.
-            flags = ['-fpreserve-invariance'] if sdk == 'macosx' else [
-                '-mios-version-min=18.0', '-fmetal-math-mode=relaxed', '-fpreserve-invariance']
+            metal = dmsh_chain.MAC_METAL if sdk == 'macosx' else ios_metal.METAL   # the builds' own compiles
             air = work / (key + '.' + sdk + '.air')
             library = work / (key + '.' + sdk + '.metallib')
-            subprocess.run(['xcrun','-sdk',sdk,'metal','-c',*flags,str(msl),'-o',str(air)],check=True)
+            subprocess.run([*metal,str(msl),'-o',str(air)],check=True)
             subprocess.run(['xcrun','-sdk',sdk,'metallib',str(air),'-o',str(library)],check=True)
             self.assertGreater(air.stat().st_size, 0)
             self.assertGreater(library.stat().st_size, 0)
@@ -391,7 +391,18 @@ class Compiler(unittest.TestCase):
                         msl = work / (key + '.metal')
                         cross(spv, msl)
                         self.compile_metal(msl, work, key)
-                    else:  # U64, S64, descriptor-sized64, float and half2.
+                    elif size == 2:  # U64: a max with no result is Metal's 64-bit texture atomic (dmsh_atomic.wide_atomics); every other form is refused (PR #1801)
+                        if result.returncode == 0:
+                            # Universal SPIR-V, not Vulkan: the 32-bit atomic pair on the rg32ui texel is a marker for the Metal rewrite, which Vulkan's
+                            # texel-pointer format rule (R32 / R64 only) refuses; it never reaches a Vulkan driver.
+                            subprocess.run(['spirv-val', '--target-env', 'spv1.3', str(spv)], check=True)
+                            msl = work / (key + '.metal')
+                            self.assertIn('texture2d_array<ulong, access::read_write>', cross(spv, msl))
+                            self.compile_metal(msl, work, key)
+                        else:  # Maxwell's SURED (InstEmitSurface.EmitSured) keeps the 32-bit gate; SUATOM forms other than a max / min with no result name the 64-bit rule
+                            self.assertRegex(result.stderr, 'Metal 64-bit image atomics|require a 32-bit integer source size')
+                            self.assertFalse(spv.exists())
+                    else:  # S64, descriptor-sized64, float and half2.
                         self.assertNotEqual(result.returncode, 0, key)
                         self.assertIn('require a 32-bit integer source size', result.stderr)
                         self.assertFalse(spv.exists())

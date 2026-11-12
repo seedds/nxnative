@@ -644,10 +644,21 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
             }
             // Metal's texture atomics (MSL 3.1) cover buffer, 2D, 2D-array and 3D textures of
             // R32Uint / R32Sint; source 1D surfaces arrive here already normalized to 2D.
+            // nxnative: a 64-bit max / min (InstEmitSurface.EmitSuatom, Ampere SURED.U64) on an rg32ui image, value low word then high word. SPIRV-Cross has no 64-bit
+            // atomics ("MSL currently does not support 64-bit atomics"), so it is written as two 32-bit atomics of the same operation on the same texel pointer, low word
+            // first; dmsh_atomic.wide_atomics turns that pair into one texture2d<ulong>::atomic_max / atomic_min on the RG32Uint texture and fails the shader on any other
+            // access of the image. The pair is only ever a marker: it never runs as two 32-bit atomics. After uncraftablexd's PR #1801
+            bool wide = bounded && texOp.Format == TextureFormat.R32G32Uint;
+            if (wide && (!texOp.Flags.HasFlag(TextureFlags.AtomicDiscardResult) ||
+                ((texOp.Flags & TextureFlags.AtomicMask) != TextureFlags.Minimum && (texOp.Flags & TextureFlags.AtomicMask) != TextureFlags.Maximum) ||
+                texOp.Type == SamplerType.TextureBuffer))
+            {
+                throw new NotSupportedException("Metal 64-bit image atomics support a max or min with no result on 2D/2D-array/3D images only.");
+            }
             if (bounded && (declaration.IsIndexed ||
                 (texOp.Type != SamplerType.TextureBuffer && texOp.Type != SamplerType.Texture2D &&
                  texOp.Type != (SamplerType.Texture2D | SamplerType.Array) && texOp.Type != SamplerType.Texture3D) ||
-                (texOp.Format != TextureFormat.R32Uint && texOp.Format != TextureFormat.R32Sint)))
+                (texOp.Format != TextureFormat.R32Uint && texOp.Format != TextureFormat.R32Sint && !wide)))
             {
                 throw new NotSupportedException("Metal image atomics support non-indexed 32-bit buffer/2D/2D-array/3D images only.");
             }
@@ -687,6 +698,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
             }
 
             SpvInstruction value = Src(componentType);
+            SpvInstruction valueHigh = wide ? Src(componentType) : null;
 
             SpvInstruction merge = null;
             SpvInstruction valid = null;
@@ -741,6 +753,13 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                 TextureFlags.CAS => context.AtomicCompareExchange(resultType, pointer, one, zero, zero, Src(componentType), value),
                 _ => context.AtomicIAdd(resultType, pointer, one, zero, value),
             };
+
+            if (wide)
+            {
+                result = (texOp.Flags & TextureFlags.AtomicMask) == TextureFlags.Minimum
+                    ? context.AtomicUMin(resultType, pointer, one, zero, valueHigh)
+                    : context.AtomicUMax(resultType, pointer, one, zero, valueHigh);
+            }
 
             if (bounded)
             {
@@ -1867,9 +1886,11 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
 
         // nxnative: a read of a game uniform slot (TranslationFlags.MetalUniformBounds) gives 0 past the size the game bound, as Maxwell's constant buffers do. Metal has no
         // bounds of its own: the read reached the guest memory past the binding. Paper Mario: The Thousand-Year Door binds 16 bytes to a slot whose shader reads its light
-        // count at byte 0x900 and loops over that many lights, and the GPU hung on what lay there (GitHub issue #1860). The size is the u32 the host puts in the size table
-        // (Constants.NxUniformSizesBank); the word read is in bounds when its index is below the size in words. A read at a fixed offset keeps its constant address (Metal
-        // reads it as before) and only its value is chosen; a read at a computed offset reads row 0 when out of bounds, so it reaches no memory past the binding either
+        // count at byte 0x900 and loops over that many lights, and the GPU hung on what lay there (GitHub issue #1860).
+        // A read at a fixed offset is an ordinary load: the host knows how far such reads of the slot go (BufferDescriptor.FixedSize) and gives a binding shorter than that
+        // zeros up to there, once a binding instead of a comparison at every read (Donkey Kong Bananza's material shaders have 95 fixed reads in 100 and lost a fifth of the
+        // GPU's time to the comparisons, GitHub issue #2066). Only a read at a computed offset is bounded here: its word index is compared with the slot's size in words, the
+        // u32 the host puts in the size table (Constants.NxUniformSizesBank), and out of bounds it reads row 0 and gives 0, so it reaches no memory past the binding
         private static bool TryGenerateBoundedUniformLoad(CodeGenContext context, AstOperation operation, out OperationResult result)
         {
             result = OperationResult.Invalid;
@@ -1883,6 +1904,25 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
             if (operation.SourcesCount != 4 || operation.GetSource(1) is not AstOperand { Type: OperandType.Constant } fieldIndex)
             {
                 throw new InvalidOperationException($"A uniform slot read with {operation.SourcesCount} sources cannot be bounded (binding {bindingIndex.Value}).");
+            }
+
+            IAstNode vecNode = operation.GetSource(2);
+            IAstNode elemNode = operation.GetSource(3);
+
+            if (vecNode is AstOperand { Type: OperandType.Constant } fixedVec && elemNode is AstOperand { Type: OperandType.Constant } fixedElem)
+            {
+                // The host's zeros reach as far as the structured program saw fixed reads (ResourceManager.NoteUniformRead): a read it did not count would be unbounded
+                if (fixedVec.Value * 4 + fixedElem.Value >= context.Properties.FixedUniformWords[sizeIndex])
+                {
+                    throw new InvalidOperationException($"A uniform slot read at fixed word {fixedVec.Value * 4 + fixedElem.Value} is past the slot's fixed extent of {context.Properties.FixedUniformWords[sizeIndex]} words (binding {bindingIndex.Value}).");
+                }
+
+                return false;
+            }
+
+            if (context.Properties.UniformSizesBinding < 0)
+            {
+                throw new InvalidOperationException($"A uniform slot read at a computed offset has no size table (binding {bindingIndex.Value}).");
             }
 
             StructureField field = context.Properties.ConstantBuffers[bindingIndex.Value].Type.Fields[fieldIndex.Value];
@@ -1899,27 +1939,16 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                 context.Constant(s32, sizeIndex & 3));
             SpvInstruction sizeWords = context.ShiftRightLogical(u32, context.Load(u32, sizePointer), context.Constant(u32, 2u));
 
-            IAstNode vecNode = operation.GetSource(2);
-            IAstNode elemNode = operation.GetSource(3);
             SpvInstruction vec = context.Get(AggregateType.S32, vecNode);
             SpvInstruction elem = context.Get(AggregateType.S32, elemNode);
-            bool fixedOffset = vecNode is AstOperand { Type: OperandType.Constant } && elemNode is AstOperand { Type: OperandType.Constant };
-
-            SpvInstruction word = fixedOffset
-                ? context.Constant(u32, (uint)(((AstOperand)vecNode).Value * 4 + ((AstOperand)elemNode).Value))
-                : context.BitwiseOr(u32, context.ShiftLeftLogical(u32, context.Bitcast(u32, vec), context.Constant(u32, 2u)), context.Bitcast(u32, elem));
+            SpvInstruction word = context.BitwiseOr(u32, context.ShiftLeftLogical(u32, context.Bitcast(u32, vec), context.Constant(u32, 2u)), context.Bitcast(u32, elem));
             SpvInstruction inBounds = context.ULessThan(context.TypeBool(), word, sizeWords);
-
-            if (!fixedOffset)
-            {
-                vec = context.Select(s32, inBounds, vec, context.Constant(s32, 0));
-            }
 
             SpvInstruction pointer = context.AccessChain(
                 context.TypePointer(StorageClass.Uniform, type),
                 context.ConstantBuffers[bindingIndex.Value],
                 context.Get(AggregateType.S32, fieldIndex),
-                vec,
+                context.Select(s32, inBounds, vec, context.Constant(s32, 0)),
                 elem);
             SpvInstruction zero = varType switch
             {

@@ -30,6 +30,16 @@ class FrameRateOption(unittest.TestCase):
                 self.assertEqual(fps['default'],'60',gid)
                 self.assertEqual(fps['options'],[['30','30 fps'],['60','60 fps']]+([['120','120 fps']] if has else []),(gid,platform))
 
+class NativeResolutionSetting(unittest.TestCase):
+    def test_every_game_offers_it_on_by_default_only_on_the_mac_for_a_game_checked_at_that_size(self):
+        with tempfile.TemporaryDirectory() as tmp,patch.object(settings.nacp,'languages',return_value=['en-US']):
+            (Path(tmp)/'main.fixups.tsv').write_text('')
+            for gid,platform,default in [('0100C49025D3E000','mac','1'),('0100C49025D3E000','ios','0'),('010056B015FE8000','mac','0'),('010056B015FE8000','ios','0')]:   # FC 27 (native_res 1), NieR:Automata (none)
+                with patch.dict(settings.os.environ,{'SETTINGS_PLATFORM':platform}):
+                    nr=[s for s in settings.build(gid,tmp,'unused')['settings'] if s['env']=='DM_NATIVE_RESOLUTION']
+                self.assertEqual(len(nr),1,(gid,platform))
+                self.assertEqual((nr[0]['kind'],nr[0]['default']),('toggle',default),(gid,platform))
+
 class UpscalerSetting(unittest.TestCase):
     def test_only_for_games_naming_their_upscaler(self):
         with tempfile.TemporaryDirectory() as tmp,patch.object(settings.nacp,'languages',return_value=['en-US']):

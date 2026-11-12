@@ -68,6 +68,9 @@ static inline void dm_applet_leave_(const char *const *name) { (void)name; dm_ap
 // Audio pause / resume following the lifecycle (called by the front end on going to background / returning to foreground)
 extern uint8_t *dm_fps_state;   // frame step state page (loader.c install_fps_state): +0 float target fps, +4 movie flag (dm_movie_playing, written by the host at each present: Tears of the Kingdom's step stub caps its first, undecided steps by it), +0x10 float render scale, +0x18 double game seconds stepped; NULL when the build has none
 extern int dm_fps_step_max;   // loader.c: the largest step the frame step stubs give the game (patch_nso.py ctx.step_max; 0 = FSTEP_MAX)
+void nro_runtime_patch(void);   // hle_nro.c: the swapchain size rows of an NRO whose build ID the table knows (loader.c, after the NROs are mapped)
+int dm_display_target(int *w, int *h);   // hle_display.c: the display size games are told while Native resolution is on (1), 0 when they keep the Switch's
+void dm_display_fit(int dw, int dh, int *w, int *h);   // hle_display.c: the 16:9 picture that fits dw x dh
 int dm_movie_playing(void);   // hle_movie.c: a video decoder of the SDK's movie library handed out a picture in the last half second (the frame step then holds 30 fps)
 void dm_audio_suspend(int on);
 uint64_t dm_audio_render_calls(void);   // Cumulative sound card callback count (the silent sink is not counted)

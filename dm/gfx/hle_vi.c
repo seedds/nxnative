@@ -105,12 +105,16 @@ HLE_FORCE("_ZN2nn2vi16ListFrameHistoryEPNS0_9FrameInfoEiPKNS0_5LayerE", "the lay
 HLE_FORCE("_ZN2nn2vi32GetDefaultDisplayPanelIdentifierEPNS0_15PanelIdentifierE", "built-in panel identity; the host has no panel: all zero", Result, h_vi_PanelId, void *out) {
     memset(out, 0, 0x18); return RES_OK;
 }
+__attribute__((weak)) int dm_display_target(int *w, int *h) { (void)w; (void)h; return 0; }   // hle_display.c; graphics unit tests have none
 // The Great Ace Attorney Chronicles (SDK 10) lists up to 10 displays before opening the default one (main+0x808f08) and does not read the list. DisplayInfo is 0x60 bytes:
 //   name[0x40], bool has a layer limit at +0x40, then u64 layer count limit, largest layer width and height. One display, "Default", as Horizon lists for an application
 HLE_FORCE("_ZN2nn2vi12ListDisplaysEPNS0_11DisplayInfoEi", "list displays; the host has one, \"Default\"", int, h_vi_ListDisp, void *out, int n) {
     if (n <= 0 || !out) return 0;
     uint8_t *p = out; memset(p, 0, 0x60); strcpy((char *)p, "Default");
-    p[0x40] = 1; uint64_t lim[3] = {1, 1920, 1080}; memcpy(p + 0x48, lim, sizeof lim);
+    uint64_t lim[3] = {1, 1920, 1080};
+    int tw = 0, th = 0;   // the display size the host tells games with Native resolution on (hle_display.c; hle_nro.c gives FC 27's swapchain the same): the layer holds that much
+    if (dm_display_target(&tw, &th)) { lim[1] = (uint64_t)tw; lim[2] = (uint64_t)th; static atomic_int once; if (!atomic_exchange(&once, 1)) LOG("vi::ListDisplays %dx%d (the size Native resolution tells games)", tw, th); }
+    p[0x40] = 1; memcpy(p + 0x48, lim, sizeof lim);
     return 1;
 }
 HLE_FORCE("_ZN2nn2vi12DestroyLayerEPNS0_5LayerE", "destroy layer; host static object", void, h_vi_DestroyLayer, void *layer) { (void)layer; }

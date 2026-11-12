@@ -1350,6 +1350,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** `hle_vi.c` answers as a Switch 2 does: in handheld mode its own 1080p screen; in console mode the largest of the four that the display the game is shown on holds, as a docked Switch 2 does with its TV. The display's size comes from the front end (`front_display_pixels`: on the Mac the window's screen in its current mode, an iPhone's or iPad's screen), 1080p when it is not known. The host logs the answer once.
 - **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md): its DLSS output is 2048x1152 for 1440p and for 4K, from 1024x576; for 1080p it renders 960x540 into 1920x1080, a fifth fewer pixels at each stage, and the output matches the screen.
 
+### The display's size, with Native resolution
+
+- **Symptom:** text, HUD and 2D look soft on a large screen: the game draws at 1080p (or 720p) and the host enlarges the picture to the window.
+- **Cause:** the game sizes its picture from what it is told about the display, `nn::oe::GetDefaultDisplayResolution` (1920x1080 docked, 1280x720 handheld) or `nn::vi::ListDisplays`' largest layer, or from a table of its own that the host cannot see; the host answered the Switch's sizes every time.
+- **Fix:** with Native resolution on (`DM_NATIVE_RESOLUTION=1`, the launcher's setting, or the profile's `native_res 1` on the Mac) `hle_display.c` decides one size for the run, the 16:9 picture that fits the screen's pixels (`front_display_pixels`, at most 3840x2160, at least 1280x720), and both calls answer it in either console mode; `DM_DISPLAY_SIZE=WxH` sets another size and `off` none. A build whose renderer takes the size from elsewhere has rows in `hle_nro.c`, which rewrite the renderer's own size defaults in memory, keyed by the NRO's build ID and checked against the bytes the rewriter leaves there. A game that does neither keeps its size.
+- **Check:** the log's `main: native resolution: games are told the display is WxH`; `make -C dm/host/tests GAME=<id> run` (`t_display`).
+- **Found on:** [EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md) 1.8d.6523: its Frostbite renderer builds a 1280x720 swapchain and reads neither call, so it has rows in `hle_nro.c`.
+
 ### A game that decodes its code at run time
 
 - **Symptom:** `registered NROs not found` from `nro_collect.py` in a game whose RomFS has an NRR, or `[RED] ro::LoadModule: no rewritten NRO with SHA-256 …`. `main` is small (about 600 KB of code) beside a data segment of random-looking bytes.

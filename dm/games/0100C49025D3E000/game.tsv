@@ -48,3 +48,5 @@ shader_key_skip	0x7d0+0x18
 # target (hle_fpslock.c); the game asks for present interval 2, which display pacing ignores (README.md, Frame rate). 30 runs the game's own 30
 fps_target	60
 present_interval	display
+# Native resolution on by default on the Mac: the renderer's swapchain takes the display's size (README.md, Resolution)
+native_res	1

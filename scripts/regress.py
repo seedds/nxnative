@@ -1784,7 +1784,9 @@ def main():
     if missing and a.cmd != 'impact': ap.error(f'set {" and ".join(missing)}: where the harness keeps its trees and reports, and the folder of the games\' NSP folders, for example '
                          f'regress.py --root <drive>/harness --games-dir <drive>/nsp {a.cmd} ... (the options go before the command)')
     ROOT, GAMES = Path(a.root), Path(a.games_dir)
-    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))   # a stop runs the finally blocks: a game or a shader build in its own process group is stopped too
+    # A stop runs the finally blocks: a game or a shader build in its own process group is stopped too. A SIGHUP (the terminal closed) the same way: the shell sends it to its
+    # job, which that group, a session of its own (proc_group), is not in, and its default action ended this script with no cleanup and left the game or build running
+    for sig in (signal.SIGTERM, signal.SIGHUP): signal.signal(sig, lambda s, _: sys.exit(128 + s))
     try:
         if a.cmd == 'list': return cmd_list(a)
         if a.cmd == 'impact': return cmd_impact(a)

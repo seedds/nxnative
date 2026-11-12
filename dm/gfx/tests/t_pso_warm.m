@@ -125,7 +125,7 @@ static void check_draw(const pso_key *raw, int merged, const uint8_t expected[4]
     if (!warmed) { g_pso_lmap = NULL; return; }
     // Build the descriptor from the unnormalized historical state as a rendering oracle.
     pso_key original = *raw; original.vs = (__bridge void *)vs; original.fs = (__bridge void *)fs;
-    NSError *error = nil; id<MTLRenderPipelineState> reference = pso_build(pso_desc(&original, vs, fs, nil, merged), &error);
+    NSError *error = nil; id<MTLRenderPipelineState> reference = pso_build(pso_desc(&original, vs, fs, nil, merged), 0, &error);
     EXPECT("original descriptor builds", 1, reference != nil);
     if (reference) {
         uint8_t a[4], b[4]; pixels(warmed, 0, a); pixels(reference, 0, b);

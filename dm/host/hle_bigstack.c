@@ -8,9 +8,13 @@
 // and dm_bigstack_caller (hle.h) gives it back, so take-overs that log their call site (audio Start / Stop / Close) name the game's code on either path.
 // Only register arguments are carried over: functions with more than 8 integer / 8 floating-point arguments, or variadic ones reading from the stack, cannot use it.
 // iOS does not allow generating executable code at run time, so the stubs are generated at compile time by the macro, not written at run time as DM_HLECOUNT does
+// Log lines take the same entry (dm_log below, dm.h LOG): any take-over may log, and formatting one line takes about 2.7 KB of stack, so a line logged on a guest stack is
+// written on the host stack whether or not its take-over is registered through HLE_FORCE_BIG (the controller applet's stand-in from a game thread of Drag x Drive, PR #1943)
 #include <pthread.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <sys/mman.h>
+#define DM_LOG_IMPL   // dm_log is defined here, not by dm.h's weak definition
 #include "dm.h"
 
 int dm_guest_as_contains(uintptr_t a);   // hle_svc.c
@@ -30,7 +34,7 @@ uintptr_t dm_bigstack_top(uintptr_t sp) {
     uint8_t *top = pthread_getspecific(g_bs_key);
     if (!top) {
         uint8_t *m = mmap(NULL, BS_SIZE + BS_GUARD, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
-        if (m == MAP_FAILED) { LOG("[RED] big stack mapping failed, staying on the guest stack this time"); return 0; }
+        if (m == MAP_FAILED) { fputs("[dm] [RED] big stack mapping failed, staying on the guest stack this time\n", stderr); return 0; }   // not LOG: its dm_log comes back here for a stack
         mprotect(m, BS_GUARD, PROT_NONE);   // guard page: running off the host stack itself crashes here instead of quietly corrupting another mapping
         top = m + BS_GUARD + BS_SIZE;
         pthread_setspecific(g_bs_key, top);
@@ -94,4 +98,19 @@ void *dm_bigstack_caller(void *ra) {
     extern const char dm_bigstack_ret[];
     void **top = ra == (void *)dm_bigstack_ret ? pthread_getspecific(g_bs_key) : NULL;   // set: a switch happened on this thread
     return top ? top[-1] : ra;
+}
+
+// A log line (dm.h LOG). The variable arguments stay where the caller put them (on its stack, which stays mapped); only the formatting moves: log_emit is entered through
+// dm_bigstack_enter as a take-over is, with the argument list by address, so on a guest stack it runs on the host stack and anywhere else it is jumped to directly
+static void log_emit(const char *fmt, va_list *ap) __attribute__((used));
+static void log_emit(const char *fmt, va_list *ap) {
+    flockfile(stderr); vfprintf(stderr, fmt, *ap); fputc('\n', stderr); funlockfile(stderr);
+}
+void log_emit_bs(const char *fmt, va_list *ap);
+__asm__(".text\n.p2align 2\n.globl _log_emit_bs\n.private_extern _log_emit_bs\n_log_emit_bs:\n"
+        "    adrp x16, _log_emit@PAGE\n    add x16, x16, _log_emit@PAGEOFF\n    b _dm_bigstack_enter\n");
+void dm_log(const char *fmt, ...) {
+    va_list ap; va_start(ap, fmt);
+    log_emit_bs(fmt, &ap);
+    va_end(ap);
 }

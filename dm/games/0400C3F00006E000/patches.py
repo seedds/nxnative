@@ -13,6 +13,7 @@ from nso_asm import ADRP, B
 def frame_step(ctx):
     here, emit, fs_site, fs_put, FS_STATE_OFF, base = ctx.here, ctx.emit, ctx.site, ctx.put, ctx.state, ctx.base
     site, interval = base + 0xa0, base + 0x13c
+    ctx.step_max = 2   # the stub caps the step at the game's own intervals: the host holds frames at most 2 vsyncs, or hold 3 played at 2/3 speed and the debt it paid back was lost
     fs_site(site, '681242b9')       # ldr w8,[x19,#0x210]
     fs_site(interval, '681602b9')   # str w8,[x19,#0x214]: the interval, then the frame goes on
     start = here(); emit(ADRP(16, here(), FS_STATE_OFF))

@@ -790,6 +790,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** `hle_nvn.c` accepts the three calls and records nothing. Shading every pixel is the most any rate asks for, so the picture is the same or sharper, and the only cost is GPU time where the game meant to save it. This drops a feature rather than emulating it, and the choice is a platform limit.
 - **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md), every frame; [Splatoon Raiders](../../dm/games/0400380020056000/README.md), the palette.
 
+### Screenshots of a cropped window held what lay outside the crop
+
+- **Symptom:** `regress.py` flagged Bastion as a REGRESSION on a screenshot (RGB difference about 30) whose game picture was the same on both sides: a strip beside the picture was black in some runs and purple (68, 34, 136) in others, on the baseline as well as the candidate.
+- **Cause:** a screenshot (`DM_NVN_SHOT`, `DM_CTL shot`) saved the window texture whole, 1920x1080, while the game crops what it presents to 1600x900 (`nvnWindowSetCrop`, `[nvn] WindowCrop 0,0 1600x900`). Outside the crop the texture is never presented and holds whatever it held before, which differs from run to run.
+- **Fix:** a screenshot of a window the game crops is the picture as presented: the present pass draws the crop at the window texture's own size (as `DM_NVN_SHOT_OUT` draws it at a size of its own), so its size stays the same when a dynamic resolution moves the crop. An uncropped window is still saved as its texture's own pixels. Until a regression baseline includes this, a check of a cropping game against an older revision compares two kinds of shot.
+- **Found on:** [Bastion](../../dm/games/010038600B27E000/README.md), in regression checks of the review's steps (step 15's audit).
+
 ## Blend, depth and stencil
 
 ### Ten attachment records for eight colors and depth-stencil

@@ -206,7 +206,7 @@ DM_NVN_RT_RANGE_CHECK	diagnostic	With `DM_NVN_RT_RANGE=1` and `DM_NVN_PASSDUMP`,
 DM_NVN_RT_RECYCLE	switch	`0` makes each render target in a GPU-only pool, each feedback snapshot and each resolution family heap its own exact Metal allocation, freed with its texture, as before; by default they are placed in heaps from one free list, and a freed one's heap waits, resident, for the next texture it fits (`ab` alternates it with the `DM_AB` phases)
 DM_NVN_SHDUMP	diagnostic	`=<dir>` saves programs missing from the shader map as `<key>.ctl` (control section) and `<key>.code`, to find the files that hold them
 DM_NVN_SHMAP	path	The shader map (`shader_map.tsv`); `c1_full.tsv` and `pso_manifest.tsv` are taken from the same folder. Default: the game profile's folder on the Mac; the iOS app sets it
-DM_NVN_SHOT	diagnostic	`=<frame>[,<frame>…]:<path>` saves the swapchain texture as an image at those frames (`%d` in the path = frame number)
+DM_NVN_SHOT	diagnostic	`=<frame>[,<frame>…]:<path>` saves the swapchain texture as an image at those frames (`%d` in the path = frame number); a window the game crops is saved as presented (the crop drawn at the texture's own size)
 DM_NVN_SHOT_OUT	diagnostic	`=<W>x<H>` makes `DM_NVN_SHOT` capture the picture as the present pass upscales it to that size, the crop included, instead of the raw swapchain texture
 DM_NVN_SKIP_FS	diagnostic	`=<fragment key>[,…]` (up to 16) drops all draws of those fragment shaders, to measure their GPU cost or bisect a wrong draw; the picture is wrong
 DM_NVN_SKIP_MESH	diagnostic	`=1` drops every task and mesh draw, to measure what they cost in all; the picture is wrong

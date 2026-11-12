@@ -15468,6 +15468,7 @@ void mtl_res_counts(uint32_t tick, const char *why) {
 static struct { uint64_t frame; char path[1024]; } g_shotq[SHOTQ_MAX]; static int g_nshotq;
 static pthread_mutex_t g_shotq_mu = PTHREAD_MUTEX_INITIALIZER;
 static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTexture> dst, const int crop[4]);
+static int present_crop_rect(id<MTLTexture> src, const int crop[4], NSUInteger r[4]);
 enum { PRESENT_FAILED, PRESENT_STANDARD, PRESENT_METALFX };
 static int present_offscreen_m4(id<MTLTexture> src, const int crop[4], id<MTLTexture> out, void (^done)(int));
 static int present_offscreen_wait(id<MTLTexture> src, const int crop[4], id<MTLTexture> out);
@@ -15510,7 +15511,10 @@ void dm_gfx_shot_at(long k, const char *path) {
     pthread_mutex_unlock(&g_shotq_mu);
 }
 // DM_NVN_SHOT_OUT=WIDTHxHEIGHT (for picture quality metrics): the present-frame screenshot instead captures the result "upscaled to this resolution by the present pass", i.e. the picture the player sees on a screen
-// of that size (with DM_PRESENT_UPSCALE=metalfx through MetalFX, on the Metal 4 queue: present_offscreen_m4); screen=0 (texture dump) is unaffected
+// of that size (with DM_PRESENT_UPSCALE=metalfx through MetalFX, on the Metal 4 queue: present_offscreen_m4); screen=0 (texture dump) is unaffected.
+// Without it, a window the game crops (nvnWindowSetCrop) is captured the same way at the window texture's own size: what is outside the crop is never presented and holds
+// whatever the texture held before (Bastion crops its 1920x1080 window textures to 1600x900; the strip outside was black in some runs and purple in others, which regress.py
+// took for a rendering change). An uncropped window is read as it is, so its shots are the texture's own pixels
 static void shot(id<MTLTexture> src, const char *path, int screen, const int crop[4]) {
     static int out_w = -1, out_h;
     if (out_w < 0) {
@@ -15519,11 +15523,13 @@ static void shot(id<MTLTexture> src, const char *path, int screen, const int cro
         if (e && sscanf(e, "%d%c%d%c", &w, &sep, &h, &extra) == 3 && sep == 'x' && w > 0 && h > 0) { out_w = w; out_h = h; }
     }
     id<MTLTexture> read = src;
-    if (out_w && screen) {
-        MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:out_w height:out_h mipmapped:NO];
+    NSUInteger r[4]; int cropped = screen && !out_w && present_crop_rect(src, crop, r) && (r[0] || r[1] || r[2] != src.width || r[3] != src.height);
+    if ((out_w || cropped) && screen) {
+        NSUInteger ow = out_w ? (NSUInteger)out_w : src.width, oh = out_w ? (NSUInteger)out_h : src.height;
+        MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:ow height:oh mipmapped:NO];
         d.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead; d.storageMode = MTLStorageModePrivate;
         id<MTLTexture> out = [g_dev newTextureWithDescriptor:d];
-        if (!out) { MLOG("[RED] cannot create the screenshot output texture %dx%d", out_w, out_h); return; }
+        if (!out) { MLOG("[RED] cannot create the screenshot output texture %lux%lu", (unsigned long)ow, (unsigned long)oh); return; }
         if (g_q4) { if (!present_offscreen_wait(src, crop, out)) return; }
         else { id<MTLCommandBuffer> cb = q_cb(); if (!present_encode(cb, src, out, crop)) return; [cb commit]; [cb waitUntilCompleted]; }
         read = out;

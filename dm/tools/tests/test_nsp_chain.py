@@ -154,5 +154,30 @@ class TableDifference(unittest.TestCase):   # the row the build error names when
         self.assertEqual(nsp.table_difference('t.tsv', b'a\nb\n', b'b\na\n'), 't.tsv: the same rows in another order')
 
 
+
+class TranslatorKey(Base):   # the shader step's key takes the translator by content: a branch switched and back rewrites the same bytes with a new mtime, which rebuilt every shader
+    def setUp(self):
+        super().setUp()
+        self.xlate = self.tmp / 'dmsh_xlate_bin' / 'dmsh_xlate'; self.xlate.parent.mkdir(); self.xlate.write_bytes(b'translator v1')
+
+    def key(self): return nsp.fingerprint(('files', nsp.translator_files(self.xlate)))
+
+    def test_same_bytes_new_mtime_keep_the_key(self):
+        before = self.key(); st = self.xlate.stat()
+        self.xlate.write_bytes(b'translator v1'); os.utime(self.xlate, ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000_000))
+        self.assertEqual(self.key(), before)
+
+    def test_other_bytes_change_it(self):
+        before = self.key(); self.xlate.write_bytes(b'translator v2')
+        self.assertNotEqual(self.key(), before)
+
+    def test_a_file_added_beside_it_changes_it(self):
+        before = self.key(); (self.xlate.parent / 'helper.dylib').write_bytes(b'x')
+        self.assertNotEqual(self.key(), before)
+
+    def test_the_shader_step_uses_it(self):   # no ('stat', ...) of the translator's folder left in build_shaders' key
+        src = SCRIPT.read_text()
+        self.assertIn("('files', translator_files(xlate))", src); self.assertNotIn("('stat', xlate.parent)", src)
+
 if __name__ == '__main__':
     unittest.main()

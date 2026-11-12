@@ -103,6 +103,59 @@ static void mapping_and_precision(void) {
     CHECK(near(s.R[0][0], cosf(0.03f), 1e-4f) && near(s.R[1][0], sinf(0.03f), 1e-4f), "small rotations accumulate in orientation");
 }
 
+// The rest offset learner (motion_rest): a controller held still with a gyro offset learns it from two agreeing one-second windows and takes it off, ramped in; moving, a slow
+// steady turn past 2 deg/s, or a later window far from the offset in use learns nothing; a break drops a pending window
+static int feed(motion_rest *r, const float a[3], const float w[3], double t0, double secs, double step) {   // returns the samples fed
+    int n = 0; for (double t = t0; t < t0 + secs; t += step, n++) motion_rest_update(r, a, w, t);
+    return n;
+}
+static void rest_checks(void) {
+    motion_rest r; motion_rest_reset(&r);
+    float a[3] = {0, 0, -1}, w[3] = {0.006f, 0.0035f, -0.0115f}, o[3];   // the DualSense's 0.34, 0.20, -0.66 deg/s
+    feed(&r, a, w, 0, 1.05, 0.015);
+    CHECK(!r.have && r.pending, "rest: one still second is only a candidate");
+    feed(&r, a, w, 1.05, 1.05, 0.015);
+    CHECK(r.have && near(r.bias[0], w[0], 1e-5f) && near(r.bias[2], w[2], 1e-5f), "rest: two agreeing seconds: the offset");
+    motion_rest_apply(&r, w, r.t_set, o); CHECK(near(o[0], w[0], 1e-6f), "rest: ramped in: nothing taken off at once");
+    motion_rest_apply(&r, w, r.t_set + MOTION_REST_RAMP_S / 2, o); CHECK(near(o[0], w[0] / 2, 1e-5f), "rest: half after half the ramp");
+    motion_rest_apply(&r, w, r.t_set + MOTION_REST_RAMP_S, o); CHECK(near(o[0], 0, 1e-6f) && near(o[2], 0, 1e-6f), "rest: all of it after the ramp");
+    // a later window far from it (2 deg/s more) is no new offset; a near one is averaged in
+    float far[3] = {w[0] + 0.035f, w[1], w[2]}, nearw[3] = {w[0] + 0.01f, w[1], w[2]};
+    float b0 = r.bias[0]; motion_rest_break(&r); feed(&r, a, far, 10, 1.05, 0.015); motion_rest_break(&r); CHECK(r.bias[0] == b0, "rest: a later window 2 deg/s away is ignored");
+    feed(&r, a, nearw, 20, 1.05, 0.015); CHECK(near(r.bias[0], w[0] + 0.005f, 1e-5f), "rest: a near one is averaged in");
+    // a slow steady turn about gravity at 3 deg/s: no first offset
+    motion_rest_reset(&r); float slow[3] = {0, 0, 0.0524f}; feed(&r, a, slow, 0, 5, 0.015);
+    CHECK(!r.have, "rest: a slow steady turn (3 deg/s) is no offset");
+    // turning or moving: nothing
+    motion_rest_reset(&r);
+    for (int i = 0; i < 300; i++) { float wm[3] = {0.5f * sinf(i * 0.2f), 0, 0}; motion_rest_update(&r, a, wm, i * 0.015); }
+    CHECK(!r.have, "rest: a turning controller learns nothing");
+    motion_rest_reset(&r);
+    for (int i = 0; i < 300; i++) { float am[3] = {0.05f * sinf(i * 0.3f), 0, -1}; motion_rest_update(&r, am, w, i * 0.015); }
+    CHECK(!r.have, "rest: a moving controller (acceleration) learns nothing");
+    // a break between the two windows drops the candidate
+    motion_rest_reset(&r); feed(&r, a, w, 0, 1.05, 0.015); motion_rest_break(&r); feed(&r, a, w, 1.05, 1.05, 0.015);
+    CHECK(!r.have && r.pending, "rest: a break drops the pending window: the next is a new first");
+    motion_rest_apply(&r, w, 5, o); CHECK(o[0] == w[0], "rest: nothing learned, nothing taken off");
+    motion_rest_reset(&r); CHECK(!r.have && !r.pending, "rest: reset forgets");
+}
+
+// The playout delay: the 90th percentile of how late the next sample arrives, capped at 40 ms
+static void lag_checks(void) {
+    motion_lag l; motion_lag_reset(&l);
+    CHECK(l.delay_ns == 0, "lag: none before a second sample");
+    motion_lag_add(&l, 30000000); CHECK(l.delay_ns == 30000000, "lag: one spacing is the delay");
+    for (int i = 0; i < 40; i++) motion_lag_add(&l, i % 10 == 9 ? 34000000 : 30000000);   // a report in ten 4 ms late
+    CHECK(l.n == MOTION_LAG_N && l.delay_ns == 34000000, "lag: the 90th percentile covers the late ones that come one in ten");
+    for (int i = 0; i < 40; i++) motion_lag_add(&l, i % 20 == 19 ? 60000000 : 30000000);   // a lost report in twenty
+    CHECK(l.delay_ns == 30000000, "lag: a rare stall does not set the delay");
+    for (int i = 0; i < 40; i++) motion_lag_add(&l, 90000000);
+    CHECK(l.delay_ns == MOTION_LAG_MAX_NS, "lag: capped at 40 ms");
+    motion_lag_add(&l, 5000000000ull); CHECK(l.need_us[(l.next + MOTION_LAG_N - 1) % MOTION_LAG_N] == 1000000, "lag: a silence counts as a second");
+    motion_lag_reset(&l); for (int i = 0; i < 40; i++) motion_lag_add(&l, 15000000 + (uint64_t)(i % 4) * 1000000);
+    CHECK(l.delay_ns == 18000000, "lag: 67 Hz with 3 ms of jitter: 18 ms");
+}
+
 int main(void) {
     motion_map m;
     CHECK(motion_map_parse(&m, NULL) && m.src[0] == 0 && m.det == 1, "default map is the identity");
@@ -189,6 +242,8 @@ int main(void) {
     float rl[3] = {0, -1, 0}; motion_phone_to_switch(3, rl, o); CHECK(near(o[0], 1, 1e-6f) && near(o[1], 0, 1e-6f), "rotation axes follow the picture");
 
     invalid_samples();
+    rest_checks();
+    lag_checks();
     mapping_and_precision();
 
     printf("t_motion: %d checks, %d failed\n", checks, fails);

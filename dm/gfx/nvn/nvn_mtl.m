@@ -16348,13 +16348,13 @@ static uint64_t g_rescue_back_at, g_rescue_back_ns = 3000000000ull, g_rescue_n;
 __attribute__((weak)) int dm_focus_now(void) { return 1; }   // The host's hle_oe.c provides the strong definition; when graphics unit tests do not link the host it is treated as always active
 __attribute__((weak)) uint64_t dm_focus_in_since(void) { return 0; }
 // DM_PRESENT_DRAIN=1 / 0: whether frames standing in the present queue are drained (nvn_link_drain.h). On by default on the Mac; off on iOS, where it has not been measured
+static int g_link_drain_on = -1;   // -1 = not read yet (file-level so that t_present_rescue can set it)
 static int link_drain_on(void) {
-    static int v = -1;
-    if (v < 0) {
-        const char *e = getenv("DM_PRESENT_DRAIN"); v = e ? atoi(e) != 0 : TARGET_OS_OSX;
-        MLOG("display link: frames standing in the present queue are %s (DM_PRESENT_DRAIN)", v ? "drained: the acquire waits them out once the game has kept up for 2 s" : "left standing");
+    if (g_link_drain_on < 0) {
+        const char *e = getenv("DM_PRESENT_DRAIN"); g_link_drain_on = e ? atoi(e) != 0 : TARGET_OS_OSX;
+        MLOG("display link: frames standing in the present queue are %s (DM_PRESENT_DRAIN)", g_link_drain_on ? "drained: the acquire waits them out once the game has kept up for 2 s" : "left standing");
     }
-    return v;
+    return g_link_drain_on;
 }
 // Once per frame the display-link callback takes (its thread): cb the callback's time, age how long the frame waited in the queue (both seconds), dropped whether older
 // frames were merged away on this tick. Asks the next acquire for the ticks the queued frames have to spare (g_link_drain_req). Not with present snapshots, which run the
@@ -16457,7 +16457,11 @@ static const char *link_latency_why(void) { return g_present_latency > 0 ? "DM_P
 // 16.5-25 callbacks a second over stretches of 300 frames, also on frames with under 1 ms of GPU, and each skipped tick kept a frame on screen 66.7 ms (a 180 s walk: 388 and 996
 // frames over 50 ms; 3-4 in a window, where the same link held 30.0). Why is open (docs/reference/frame-rate.md). The 60 Hz link paces the 30 through the present interval, as it
 // does interval-2 frames (two ticks per acquire, mtl_link_wait_tick; each frame held for its period, g_link_hold_until): 7 frames over 50 ms on the same walk
-static int link_30hz(void) { return !front_fullscreen() || front_screen_variable_refresh(); }
+// In a window the 30 Hz link is kept only while standing frames are not drained (DM_PRESENT_DRAIN=0, iOS) or present snapshots run the game ahead. With the drain a
+// frame presented right after a tick waits one tick of the link whatever the frame rate, and the drain moves the game onto the 60 Hz ticks between the callback's takes:
+// 15.5 ms in the queue at 30 fps on the 60 Hz link against 32.2 ms on the 30 Hz one (Ocarina of Time in a window: 65 against 82 ms from the game's present to the screen),
+// for 60 callbacks a second instead of 30. Without the drain the 60 Hz link gains nothing reliably: the takes stay on the acquire's ticks or not as the last late frame left them
+static int link_30hz(void) { return front_fullscreen() ? front_screen_variable_refresh() : !link_drain_on() || mtl_snap_on(); }
 // The 120 Hz link (mode 2, a frame every other tick) in place of the 60 Hz one in fullscreen on a variable-refresh screen whose rate is a multiple of 120 (a ProMotion
 // screen), unless DM_PRESENT_LINK chose the mode. There, with the 60 Hz link at frame latency 2, the system showed every present one 120 Hz refresh after the link's
 // target time (@pres_at_ms − @link_target_ms = 8.33 ms) and the link then skipped every other tick (@link_gap_ms 16.7, 33.3, 16.7, …): 40 callbacks a second, so a game

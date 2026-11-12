@@ -22,7 +22,7 @@ static id<MTLRenderPipelineState> tf_pso(NvShader *vs) {
     pso_key k; static const uint32_t cf[8]; pso_key_fill(&k, vs, nil, cf, 0, 0, 1, 0); k.fsfn = TF_MARK;
     id<MTLRenderPipelineState> cached = hm_get_id(&g_pso, &k);
     if (cached || hm_get_id(&g_pso_fail, &k)) return cached;
-    NSError *e = nil; id<MTLRenderPipelineState> ps = pso_build(pso_desc(&k, vs, nil, nil, 0), &e);
+    NSError *e = nil; id<MTLRenderPipelineState> ps = pso_build(pso_desc(&k, vs, nil, nil, 0), !k.border, &e);
     if (!ps) { MLOG("[RED] transform feedback pipeline %s: %s", vs->key, e.localizedDescription.UTF8String); hm_put_id(&g_pso_fail, &k, NSNull.null); }
     else hm_put_id(&g_pso, &k, ps);
     return ps;

@@ -32,6 +32,7 @@ typedef struct {
 } DuoHarnessState;
 
 DuoHarnessInput duo_harness_input(void);
+double duo_harness_view_shape(void);   // the last shape front_ios.m handed the host (dm_screen_view_changed), 0 = none yet
 int duo_harness_rumble(void);   // the in-game menu's rumble switch (dm_haptics_set_enabled)
 void dm_set_opmode(int mode);
 int dm_opmode(void);

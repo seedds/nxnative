@@ -1,8 +1,10 @@
 // Present crop regression: colored 8×8 texture, closed-form RGBA expectations; real Metal rendering, no dependence on the game or on cross-run determinism.
 // nvn_mtl.m's nvn_game_fps is a weak default and hle_nvn.c gives the strong definition; in one translation unit that is a redefinition, so the weak one is renamed (this test does not look at the frame-rate target)
 #define nvn_game_fps nvn_game_fps_mtl_default
+#define nvn_fstep_fine nvn_fstep_fine_mtl_default
 #include "../nvn/nvn_mtl.m"
 #undef nvn_game_fps
+#undef nvn_fstep_fine
 #define g_ft g_ft_hle   // both files have a static g_ft (nvn_mtl.m's fragment argument table, hle_nvn.c's textures a flush can mark CPU-written), so hle_nvn.c's is renamed too
 #include "../nvn/hle_nvn.c"
 #undef g_ft
@@ -253,7 +255,7 @@ int main(void) { @autoreleasepool {
         for(int y=0;y<TH;y++)for(int x=0;x<TW;x++)memcpy(sp+4*(y*TW+x),colors[x>=crop54[2]||y>=crop54[3]],4);
         [sw replaceRegion:MTLRegionMake2D(0,0,TW,TH) mipmapLevel:0 withBytes:sp bytesPerRow:TW*4];free(sp);res_add(sw);res_commit();
         double sa,sb;
-        mtl_present_layer(0,0);present_shape(sw,&sa,&sb);EXPECT("no sized layer: the display's width",1920,(int)sa);EXPECT("no sized layer: the display's height",1080,(int)sb);
+        mtl_present_layer(0,0);present_shape(sw,NULL,&sa,&sb);EXPECT("no sized layer: the display's width",1920,(int)sa);EXPECT("no sized layer: the display's height",1080,(int)sb);
         for(int m4=0;m4<2;m4++) {
             int outH[2]={H,40};   // 16:9 fills; a 16:10 canvas keeps the bars above and below
             for(int k=0;k<2;k++) {
@@ -267,12 +269,30 @@ int main(void) { @autoreleasepool {
                 EXPECT(k?"5:4 crop on a 16:10 canvas: 16:9 of red, black above and below":"5:4 crop on a 16:9 canvas: all red, no side bars",0,bad);free(o);res_remove(ot);
             }
         }
-        mtl_present_layer(4,3);present_shape(sw,&sa,&sb);EXPECT("a sized layer gives its own shape",4*(int)sb,3*(int)sa);mtl_present_layer(0,0);
+        mtl_present_layer(4,3);present_shape(sw,NULL,&sa,&sb);EXPECT("a sized layer gives its own shape",4*(int)sb,3*(int)sa);mtl_present_layer(0,0);
         MTLTextureDescriptor *td2=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:1920 height:1344 mipmapped:NO];td2.storageMode=MTLStorageModePrivate;td2.usage=MTLTextureUsageShaderRead;
         id<MTLTexture> tall=[g_dev newTextureWithDescriptor:td2];
-        present_shape(tall,&sa,&sb);EXPECT("a taller texture without DM_SCREEN_ASPECT: 16:9",1080,(int)sb);
-        mtl_present_screen(1920,1344);present_shape(tall,&sa,&sb);EXPECT("DM_SCREEN_ASPECT: a texture that follows it keeps the taller shape",1344,(int)sb);
-        present_shape(sw,&sa,&sb);EXPECT("DM_SCREEN_ASPECT: a 16:9 texture of a build without stubs stays 16:9",1080,(int)sb);mtl_present_screen(0,0);
+        present_shape(tall,NULL,&sa,&sb);EXPECT("a taller texture without DM_SCREEN_ASPECT: 16:9",1080,(int)sb);
+        mtl_present_screen(1920,1344);present_shape(tall,NULL,&sa,&sb);EXPECT("DM_SCREEN_ASPECT: a texture that follows it keeps the taller shape",1344,(int)sb);
+        present_shape(sw,NULL,&sa,&sb);EXPECT("DM_SCREEN_ASPECT: a 16:9 texture of a build without stubs stays 16:9",1080,(int)sb);mtl_present_screen(0,0);
+        // A crop of the screen's shape inside larger window textures (Ocarina of Time keeps its window textures and moves its crop): the picture takes the crop's shape, wider or
+        // taller than 16:9; a crop of another shape, or no screen shape set, keeps 16:9 (the crop only picks texels)
+        { const int wide[4]={0,0,56,24};
+          mtl_present_screen(7,3);present_shape(sw,wide,&sa,&sb);EXPECT("a wider screen: a crop of its shape, width",56,(int)sa);EXPECT("a wider screen: a crop of its shape, height",24,(int)sb);
+          present_shape(sw,crop54,&sa,&sb);EXPECT("a wider screen: a crop of another shape stays 16:9",1080,(int)sb);
+          mtl_present_screen(5,4);present_shape(sw,crop54,&sa,&sb);EXPECT("a taller screen: a crop of its shape, width",40,(int)sa);EXPECT("a taller screen: a crop of its shape, height",32,(int)sb);
+          mtl_present_screen(0,0);present_shape(sw,wide,&sa,&sb);EXPECT("no screen shape: a wide crop stays 16:9",1080,(int)sb);
+          // drawn: the 5:4 crop under a 5:4 screen fills a 5:4 canvas (all red, no bars), on the classic and the Metal 4 present
+          mtl_present_screen(5,4);
+          for(int m4=0;m4<2;m4++){
+            MTLTextureDescriptor *od=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:50 height:40 mipmapped:NO];od.storageMode=MTLStorageModeShared;od.usage=MTLTextureUsageRenderTarget;
+            id<MTLTexture> ot=[g_dev newTextureWithDescriptor:od];res_add(ot);res_commit();
+            if(m4)present_offscreen_wait(sw,crop54,ot);else{id<MTLCommandBuffer> cb=[g_q commandBuffer];present_encode(cb,sw,ot,crop54);[cb commit];[cb waitUntilCompleted];}
+            uint8_t *o=malloc(50*40*4);[ot getBytes:o bytesPerRow:50*4 fromRegion:MTLRegionMake2D(0,0,50,40) mipmapLevel:0];int bad=0;
+            for(int i=0;i<50*40;i++)bad+=memcmp(o+4*i,colors[0],4)!=0;free(o);res_remove(ot);
+            EXPECT(m4?"Metal 4: a crop of the screen's shape fills a canvas of that shape":"classic: a crop of the screen's shape fills a canvas of that shape",0,bad);
+          }
+          mtl_present_screen(0,0); }
         // The front end's layout and the mouse follow the same shape, not the crop's (front_picture_shape): a real present of the 5:4 crop
         tex_t st={.magic=MAGIC('T', 'E', 'X', 0), .serial =10002};st.d.width=TW;st.d.height=TH;st.d.depth=st.d.levels=1;st.d.format=NVN_FORMAT_RGBA8;st.d.target=NVN_TEXTURE_TARGET_2D;serial_put(st.serial,sw);
         win_t w3={.ntex=1};w3.tex[0]=(NVNtexture *)&st;set((NVNwindow *)&w3,crop54[0],crop54[1],crop54[2],crop54[3]);

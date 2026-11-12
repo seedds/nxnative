@@ -16,6 +16,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <math.h>
 void crash_set_trap_hook(int (*fn)(ucontext_t *uc));
 #if !TARGET_OS_IPHONE
 // Syntax module:offset[@x0 offset]. Put a brk at the guest address; on hit print x0..x3 (and the readable strings they point to) and a backtrace, then execute the original instruction from a trampoline slot and jump back.
@@ -107,6 +108,7 @@ static void probe_dump_once(void) {
     fwrite(m->base + strtoull(o, 0, 16), 1, strtoull(n, 0, 16), fp); fclose(fp);
     LOG("probe dump %s+%s length %s → %s", mod, o, n, f ? f : def);
 }
+static void watch_from_hit(ucontext_t *uc);   // DM_PROBE_WATCH=@xN+<offset>: armed from the first printed probe hit (below)
 static int probe_hit(ucontext_t *uc) {   // Registered by probe_install with the SIGTRAP branch of crash.c
     uint64_t pc = uc->uc_mcontext->__ss.__pc;
     for (int i = 0; i < g_nprobe; i++) if (g_probe[i].at == pc) {
@@ -126,11 +128,13 @@ static int probe_hit(ucontext_t *uc) {   // Registered by probe_install with the
             if (!strstr(nm, g_hw.want)) { uc->uc_mcontext->__ss.__pc = (uint64_t)g_probe[i].slot; return 1; }
         }
         probe_dump_once();
+        watch_from_hit(uc);
         flockfile(stderr);   // One block per hit when threads hit at once
         { extern uint64_t g_t0_ns; uint64_t now_ns(void); uint32_t thr_cur_handle(void); ++g_probe[i].hits; fprintf(stderr, "[dm] PROBE %s #%u [%.4fs] F=%llu T=%x", g_probe[i].name, g_probe_every ? g_probe[i].seen : g_probe[i].hits, (now_ns() - g_t0_ns) / 1e9, (unsigned long long)frame, thr_cur_handle()); }
         for (int r = 0; r < 8; r++) { uint64_t v = uc->uc_mcontext->__ss.__x[r]; fprintf(stderr, " x%d=%#llx", r, v); probe_str(v); }
         for (int r = 19; r < 24; r++) fprintf(stderr, " x%d=%#llx", r, uc->uc_mcontext->__ss.__x[r]);
         if (getenv("DM_PROBE_ALL")) for (int r = 8; r < 19; r++) fprintf(stderr, " x%d=%#llx", r, uc->uc_mcontext->__ss.__x[r]);   // also print x8–x18
+        if (getenv("DM_PROBE_FP")) for (int r = 0; r < 8; r++) { float f; memcpy(&f, &uc->uc_mcontext->__ns.__v[r], 4); fprintf(stderr, " s%d=%g", r, f); }   // also print s0–s7 (float arguments)
         fprintf(stderr, " lr=%#llx", uc->uc_mcontext->__ss.__lr);
         { uint64_t x8 = uc->uc_mcontext->__ss.__x[8]; Dl_info di; fprintf(stderr, " x8=%#llx", x8);   // x8: indirect call targets are often here (probe placed before blr x8)
           if (dladdr((void *)x8, &di) && di.dli_sname) fprintf(stderr, " (%s+%#lx)", di.dli_sname, (unsigned long)(x8 - (uint64_t)di.dli_saddr)); }
@@ -145,9 +149,9 @@ static int probe_hit(ucontext_t *uc) {   // Registered by probe_install with the
                 fputc('=', stderr); for (int k = 0; k < 16; k++) fprintf(stderr, "%02x", b[k]); }
         }
         fputc('\n', stderr);
-        { static long xd = -2; if (xd == -2) { const char *e = getenv("DM_PROBE_X2"); xd = e ? strtol(e, 0, 16) : -1; }   // DM_PROBE_X2=bytes: also print the memory x2 points to (to read object fields)
-          if (xd > 0) { uint64_t at = uc->uc_mcontext->__ss.__x[2]; uint8_t b[512]; vm_size_t got = 0; long n = xd > 512 ? 512 : xd;
-            if (!vm_read_overwrite(mach_task_self(), at, n, (vm_address_t)b, &got)) { fprintf(stderr, "[dm]   [x2]:"); for (long k = 0; k < (long)got; k += 8) { uint64_t v; memcpy(&v, b + k, 8); fprintf(stderr, "%s%llx", k % 32 ? " " : "\n[dm]   ", (unsigned long long)v); } fputc('\n', stderr); } } }
+        { static long xd = -2, xr = 2; if (xd == -2) { const char *e = getenv("DM_PROBE_X2"); xd = e ? strtol(e, 0, 16) : -1; e = getenv("DM_PROBE_XREG"); if (e) xr = strtol(e, 0, 10) & 31; }   // DM_PROBE_X2=bytes: also print the memory x2 points to (to read object fields); DM_PROBE_XREG=N: xN's instead
+          if (xd > 0) { uint64_t at = uc->uc_mcontext->__ss.__x[xr]; uint8_t b[512]; vm_size_t got = 0; long n = xd > 512 ? 512 : xd;
+            if (!vm_read_overwrite(mach_task_self(), at, n, (vm_address_t)b, &got)) { fprintf(stderr, "[dm]   [x%ld]:", xr); for (long k = 0; k < (long)got; k += 8) { uint64_t v; memcpy(&v, b + k, 8); fprintf(stderr, "%s%llx", k % 32 ? " " : "\n[dm]   ", (unsigned long long)v); } fputc('\n', stderr); } } }
         if (g_probe[i].hreg >= 0) probe_heapwalk(uc->uc_mcontext->__ss.__x[g_probe[i].hreg]);
         dm_backtrace(uc->uc_mcontext->__ss.__fp);
         funlockfile(stderr);
@@ -184,6 +188,7 @@ static void probe_add(module_t *m, uint64_t off, long dump, probe_fn fn) {
 // (a store in that millisecond goes unseen). STEINS;GATE RE:BOOT: the engine object's page takes bursts of stores every frame, and a watch that unprotected the page for each fault missed
 // the one that matters; this one found it at once (main+0x389e90, a setter its start-up code calls with 0: the game renders 1280x720 docked by its own choice)
 static uint64_t g_wat, g_wlen, g_wpg, g_wpsz; static uint8_t *g_walias; static _Atomic int g_warmed;
+static unsigned g_wcap;   // printed watch hits left, 0 = no cap (DM_PROBE_FINDMAT)
 static void watch_where(const char *tag, uint64_t a) {
     module_t *m = module_of((void *)a); Dl_info di;
     if (m) fprintf(stderr, " %s=%s+%#llx", tag, m->name, (unsigned long long)(a - (uint64_t)m->base));
@@ -199,7 +204,16 @@ static int watch_decode(ucontext_t *uc, uint32_t in, uint64_t *ea, unsigned *len
     unsigned rt = in & 31, rn = (in >> 5) & 31, v = (in >> 26) & 1; *wb = -1;
     if ((in & 0xffffffe0) == 0xd50b7420) {                        // DC ZVA: zero the 64-byte block
         *ea = XT(rt) & ~63ull; *len = 64; memset(data, 0, 64); return 1; }
-    if ((in & 0x3a000000) == 0x28000000) {                                                               // STP / STNP: opc 101 V 0 type L imm7
+    if ((in & 0xbfff0000) == 0x0d000000 && !(((in >> 13) & 7) & 1)) {   // ST1 (single structure, no offset): one lane of Vt; opcode 000 / 010 / 100 = byte / half / word or double
+        unsigned op = (in >> 13) & 7, q = (in >> 30) & 1, s = (in >> 12) & 1, size = (in >> 10) & 3, sz, idx;
+        if (op == 0) { sz = 1; idx = q << 3 | s << 2 | size; }
+        else if (op == 2) { if (size & 1) return 0; sz = 2; idx = q << 2 | s << 1 | size >> 1; }
+        else if (size == 0) { sz = 4; idx = q << 1 | s; }
+        else if (size == 1 && !s) { sz = 8; idx = q; }
+        else return 0;
+        *ea = XN(rn); *len = sz; memcpy(data, (uint8_t *)&ns->__v[rt] + idx * sz, sz); return 1;
+    }
+    if ((in & 0x3a000000) == 0x28000000) {                                                             // STP / STNP: opc 101 V 0 type L imm7
         if (in & (1u << 22)) return 0;                                                                   // LDP
         unsigned opc = in >> 30, type = (in >> 23) & 3, sz = v ? 4u << opc : (opc & 2 ? 8 : 4);
         if ((!v && opc == 1) || opc == 3) return 0;                                                      // STGP / LDPSW, reserved
@@ -247,6 +261,8 @@ static int watch_fault(void *addr, int is_write, void *ucv) {
         }
         if (wb >= 0) { if (wb == 31) uc->uc_mcontext->__ss.__sp = wbv; else if (wb == 29) uc->uc_mcontext->__ss.__fp = wbv; else if (wb == 30) uc->uc_mcontext->__ss.__lr = wbv; else uc->uc_mcontext->__ss.__x[wb] = wbv; }
         uc->uc_mcontext->__ss.__pc = pc + 4;
+        if (hit && g_wcap == 1) hit = 0;   // DM_PROBE_FINDMAT's cap reached
+        else if (hit && g_wcap) g_wcap--;
         if (hit) {
             flockfile(stderr);
             { extern uint64_t g_t0_ns; uint64_t now_ns(void); uint32_t thr_cur_handle(void);
@@ -257,6 +273,36 @@ static int watch_fault(void *addr, int is_write, void *ucv) {
         }
         return 1;
     }
+    // CAS / CASA / CASL / CASAL (one register, any size): carried out atomically through the alias, so a page busy with them stays protected. Ocarina of Time: lock words beside
+    // the camera's projection matrix took CAS at every frame, and the 1 ms the page was left unprotected for each one hid the projection's own store
+    { uint32_t in = *(uint32_t *)pc;
+      if (g_walias && (in & 0x3fa07c00) == 0x08a07c00) {
+          _STRUCT_ARM_THREAD_STATE64 *ss = &uc->uc_mcontext->__ss; unsigned rs = (in >> 16) & 31, rn = (in >> 5) & 31, rt = in & 31, sz = 1u << (in >> 30);
+          uint64_t ea = rn == 31 ? ss->__sp : rn == 29 ? ss->__fp : rn == 30 ? ss->__lr : ss->__x[rn];
+          #define RX(r) ((r) == 31 ? 0 : (r) == 29 ? ss->__fp : (r) == 30 ? ss->__lr : ss->__x[r])
+          uint64_t exp = RX(rs), nv = RX(rt), was = 0;
+          #undef RX
+          if (ea >= g_wpg && ea + sz <= g_wpg + g_wpsz && !(ea & (sz - 1))) {
+              int hit = ea < g_wat + g_wlen && ea + sz > g_wat; uint64_t old = hit ? watch_val() : 0; void *p = g_walias + (ea - g_wpg);
+              switch (sz) {
+              case 1: { uint8_t e = (uint8_t)exp; __atomic_compare_exchange_n((uint8_t *)p, &e, (uint8_t)nv, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); was = e; break; }
+              case 2: { uint16_t e = (uint16_t)exp; __atomic_compare_exchange_n((uint16_t *)p, &e, (uint16_t)nv, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); was = e; break; }
+              case 4: { uint32_t e = (uint32_t)exp; __atomic_compare_exchange_n((uint32_t *)p, &e, (uint32_t)nv, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); was = e; break; }
+              default: { uint64_t e = exp; __atomic_compare_exchange_n((uint64_t *)p, &e, nv, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); was = e; break; }
+              }
+              if (rs != 31) { if (rs == 29) ss->__fp = was; else if (rs == 30) ss->__lr = was; else ss->__x[rs] = was; }   // Ws is zero-extended: was already is
+              ss->__pc = pc + 4;
+              if (hit && watch_val() != old) {
+                  flockfile(stderr);
+                  { extern uint64_t g_t0_ns; uint64_t now_ns(void); uint32_t thr_cur_handle(void);
+                    fprintf(stderr, "[dm] WATCH %#llx [%.4fs] T=%x CAS of %u bytes at %#llx: %#llx → %#llx", (unsigned long long)g_wat, (now_ns() - g_t0_ns) / 1e9, thr_cur_handle(), sz, (unsigned long long)ea, (unsigned long long)old, (unsigned long long)watch_val()); }
+                  watch_where("pc", pc); watch_where("lr", ss->__lr); fputc('\n', stderr);
+                  dm_backtrace(ss->__fp);
+                  funlockfile(stderr);
+              }
+              return 1;
+          }
+      } }
     // Exclusive and atomic stores (STXR / STLXR / STLR / STXP, CAS, SWP, LD<op>) address [Xn] with no offset: one that reaches the watched bytes is reported like a store, every time
     // (its new value lands when it runs on the unprotected page). Tears of the Kingdom's memory-shortage flag is set by such a store, and the page it lies on takes many of them
     { uint32_t in = *(uint32_t *)pc; int ex = (in & 0x3f000000) == 0x08000000, at = (in & 0x3f200c00) == 0x38200000;   // exclusive class (CAS / CASP among them); LD<op> / SWP
@@ -281,6 +327,16 @@ static int watch_fault(void *addr, int is_write, void *ucv) {
     return 1;
 }
 static uint64_t g_wrel; static int g_wheap;   // heap+<offset>: the address is that far past the guest heap's base, resolved once the game opens its heap
+// @xN+<offset>: the address is that register plus the offset at the first printed probe hit (an object the game allocates where addresses move from run to run, as Ocarina of Time's
+// layout resources and panes in the alias region do); the watch arms itself on it as on any other address
+static int g_wfrom = -1; static uint64_t g_wfoff;
+static void watch_from_hit(ucontext_t *uc) {
+    if (g_wfrom < 0 || g_wat) return;
+    uint64_t at = uc->uc_mcontext->__ss.__x[g_wfrom] + g_wfoff;
+    if ((at & (g_wpsz - 1)) + g_wlen > g_wpsz) { LOG("WATCH: [RED] %#llx + %#llx crosses a host page: not armed", (unsigned long long)at, (unsigned long long)g_wlen); g_wfrom = -1; return; }
+    g_wpg = at & ~(g_wpsz - 1); g_wat = at;
+    LOG("write watch from x%d + %#llx = %#llx", g_wfrom, (unsigned long long)g_wfoff, (unsigned long long)at);
+}
 static void *watch_arm(void *p) {
     (void)p;
     for (;;) {
@@ -352,14 +408,117 @@ static void *poll_run(void *p) {
     }
     return NULL;
 }
+// DM_PROBE_FINDMAT=<seconds>[,<n>]: who builds the camera's projection. That many seconds after start a host thread scans the guest heap for perspective matrices (4x4 floats,
+// row or column major, the w row or column 0,0,±1,0, off-diagonal zeros, x and y scales positive) and prints each with its y / x scale ratio (the projection's aspect), then arms the
+// write watch above on the n-th (default 0) whose ratio is 16:9 within 0.5 %, its 64 bytes, for 40 printed stores. Heap addresses move between runs, so the watch is armed in the same run.
+// Ocarina of Time: the game renders a wider crop but projects at 16:9, and neither sead::PerspectiveProjection nor tanf runs in play
+static void *findmat_run(void *p) {
+    double secs = ((double *)p)[0]; int pick = (int)((double *)p)[1]; extern uint64_t g_t0_ns; uint64_t now_ns(void);
+    while ((now_ns() - g_t0_ns) / 1e9 < secs) usleep(100000);
+    uint64_t hb = 0; size_t hl = 0; dm_guest_heap_range(&hb, &hl);
+    if (!hb || !hl) { LOG("FINDMAT: [RED] no guest heap"); return NULL; }
+    LOG("FINDMAT: scanning heap %#llx + %#zx", (unsigned long long)hb, hl);
+    enum { CH = 1 << 20 }; static float buf[CH / 4 + 16]; int found = 0, n16 = 0; uint64_t pickat = 0;
+    for (uint64_t a = hb; a < hb + hl; a += CH) {
+        vm_size_t got = 0; size_t want = a + CH + 64 <= hb + hl ? CH + 64 : hb + hl - a;
+        if (vm_read_overwrite(mach_task_self(), a, want, (vm_address_t)buf, &got) || got < 64) continue;
+        for (size_t i = 0; i + 16 <= got / 4 && i < CH / 4; i++) {
+            const float *f = buf + i;
+            if (!(f[0] > 0.05f && f[0] < 50 && f[5] > 0.05f && f[5] < 50) || f[1] != 0 || f[4] != 0 || f[3] != 0 || f[7] != 0 || f[15] != 0) continue;
+            int rowm = (f[14] == -1 || f[14] == 1) && f[12] == 0 && f[13] == 0 && f[8] == 0 && f[9] == 0 && f[11] != 0;   // sead::Matrix44 rows: w row 0,0,±1,0
+            int colm = (f[11] == -1 || f[11] == 1) && f[2] == 0 && f[6] == 0 && f[12] == 0 && f[13] == 0 && f[14] != 0;  // column major: w column
+            if (!rowm && !colm) continue;
+            float r = f[5] / f[0]; int is169 = fabsf(r / (16.0f / 9) - 1) < 0.005f;
+            uint64_t at = a + i * 4;
+            if (found++ < 200) LOG("FINDMAT %#llx (heap+%#llx) %s ratio %.4f%s  x %g y %g z %g %g", (unsigned long long)at, (unsigned long long)(at - hb), rowm ? "rows" : "cols",
+                                   r, is169 ? " 16:9" : "", f[0], f[5], f[10], rowm ? f[11] : f[14]);
+            if (is169 && n16++ == pick) pickat = at;
+        }
+    }
+    LOG("FINDMAT: %d matrices, %d at 16:9", found, n16);
+    if (!pickat) return NULL;
+    g_wpsz = (uint64_t)getpagesize(); g_wlen = 64; g_wcap = 41;
+    if ((pickat & (g_wpsz - 1)) + g_wlen > g_wpsz) g_wlen = g_wpsz - (pickat & (g_wpsz - 1));
+    g_wpg = pickat & ~(g_wpsz - 1); g_wat = pickat;
+    LOG("FINDMAT: watching %#llx + %#llx", (unsigned long long)g_wat, (unsigned long long)g_wlen);
+    return NULL;
+}
+// DM_PROBE_FINDF=<seconds>,<a>,<b>[,<gap>[,<n>]]: where a value the game computes lives. That many seconds after start a host thread scans the opened guest heap and the alias region
+// for the float a with the float b <gap> bytes after it (4 by default; 0 = both 4 and 16), prints each place (up to 100), and arms the write watch above on the n-th (default 0), both floats, for 40
+// printed stores. Ocarina of Time: the HUD's corner groups sit at (-1920, 1078) in its 3840x2160 layout space; their world matrices hold that translation
+static void *findf_run(void *p) {
+    double *arg = p; double secs = arg[0]; float fa = (float)arg[1], fb = (float)arg[2]; int pick = (int)arg[4]; extern uint64_t g_t0_ns; uint64_t now_ns(void);
+    int gaps[2] = { (int)arg[3], (int)arg[3] }; if (!gaps[0]) { gaps[0] = 4; gaps[1] = 16; }   // gap 0: both 4 (a vector, a column-major matrix) and 16 (a row-major 3x4 or 4x4)
+    void svc_alias_range(uint8_t **base, size_t *size);
+    while ((now_ns() - g_t0_ns) / 1e9 < secs) usleep(100000);
+    uint64_t hb = 0; size_t hl = 0; dm_guest_heap_range(&hb, &hl); uint8_t *ab = NULL; size_t al = 0; svc_alias_range(&ab, &al);
+    struct { uint64_t b; size_t n; const char *nm; } reg[2] = { { hb, hl, "heap" }, { (uint64_t)(uintptr_t)ab, al, "alias" } };
+    enum { CH = 1 << 20 }; static uint8_t buf[CH + 64]; int found = 0; uint64_t pickat = 0; int pickgap = 4;
+    for (int r = 0; r < 2; r++) {
+        if (!reg[r].b || !reg[r].n) continue;
+        LOG("FINDF: scanning %s %#llx + %#zx for %g, %g %d or %d bytes after", reg[r].nm, (unsigned long long)reg[r].b, reg[r].n, fa, fb, gaps[0], gaps[1]);
+        uint64_t end = reg[r].b + reg[r].n;
+        for (mach_vm_address_t ra = reg[r].b; ra < end; ) {   // the mapped, readable parts only (the alias region is 64 GB, mostly unmapped)
+            mach_vm_size_t rs = 0; vm_region_basic_info_data_64_t bi; mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64; mach_port_t obj;
+            if (mach_vm_region(mach_task_self(), &ra, &rs, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&bi, &cnt, &obj) || ra >= end) break;
+            uint64_t re = ra + rs < end ? ra + rs : end;
+            if (bi.protection & VM_PROT_READ) for (uint64_t a = ra; a < re; a += CH) {
+                vm_size_t got = 0; size_t want = a + CH + 64 <= re ? CH + 64 : re - a;
+                if (vm_read_overwrite(mach_task_self(), a, want, (vm_address_t)buf, &got) || got < 24) continue;
+                for (size_t i = 0; i + 20 <= got && i < CH; i += 4) {
+                    float x, y; memcpy(&x, buf + i, 4); if (x != fa) continue;
+                    for (int g = 0; g < 2; g++) {
+                        if (g && gaps[1] == gaps[0]) break;
+                        memcpy(&y, buf + i + gaps[g], 4); if (y != fb) continue;
+                        uint64_t at = a + i;
+                        if (found < 100) { float c[12] = { 0 }; size_t from = i >= 16 ? i - 16 : 0; memcpy(c, buf + from, from + 48 <= got ? 48 : got - from);
+                            LOG("FINDF %d %#llx (%s+%#llx) gap %d  around: %g %g %g %g | %g %g %g %g | %g %g %g %g", found, (unsigned long long)at, reg[r].nm, (unsigned long long)(at - reg[r].b),
+                                gaps[g], c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8], c[9], c[10], c[11]); }
+                        if (found++ == pick) { pickat = at; pickgap = gaps[g]; }
+                    }
+                }
+            }
+            ra = re;
+        }
+    }
+    LOG("FINDF: %d places", found);
+    if (!pickat) return NULL;
+    g_wpsz = (uint64_t)getpagesize(); g_wlen = (uint64_t)pickgap + 4; g_wcap = 41;
+    if ((pickat & (g_wpsz - 1)) + g_wlen > g_wpsz) g_wlen = g_wpsz - (pickat & (g_wpsz - 1));
+    g_wpg = pickat & ~(g_wpsz - 1); g_wat = pickat;
+    LOG("FINDF: watching %#llx + %#llx", (unsigned long long)g_wat, (unsigned long long)g_wlen);
+    return NULL;
+}
 static void watch_install(void) {
+    { const char *e = getenv("DM_PROBE_FINDMAT");
+      if (e) { static double arg[2]; char *end; arg[0] = strtod(e, &end); arg[1] = *end == ',' ? strtod(end + 1, 0) : 0;
+               dm_fault_hook_register(watch_fault);
+               pthread_t t; pthread_create(&t, NULL, findmat_run, arg); pthread_detach(t);
+               pthread_create(&t, NULL, watch_arm, NULL); pthread_detach(t); } }
+    { const char *e = getenv("DM_PROBE_FINDF");
+      if (e) { static double arg[5]; arg[3] = 4; char *end = (char *)e;
+               for (int k = 0; k < 5 && *end; k++) { arg[k] = strtod(end, &end); if (*end == ',') end++; else break; }
+               dm_fault_hook_register(watch_fault);
+               pthread_t t; pthread_create(&t, NULL, findf_run, arg); pthread_detach(t);
+               pthread_create(&t, NULL, watch_arm, NULL); pthread_detach(t); } }
     { const char *e = getenv("DM_PROBE_POLL");
       if (e) { char *end; g_pheap = !strncmp(e, "heap+", 5); if (g_pheap) e += 5; g_palias = !strncmp(e, "alias+", 6); if (g_palias) e += 6; g_poll = strtoull(e, &end, 16); g_plen = *end == '+' ? strtoull(end + 1, &end, 16) : 4;
                if (*end == '=') { g_pwant = 1; g_pval = strtoull(end + 1, 0, 16); }
                if ((!g_poll && !g_pheap && !g_palias) || !g_plen || g_plen > 8) die("DM_PROBE_POLL format: [heap+|alias+]<address>[+<length up to 8>][=<value>] (hex)");
                pthread_t t; pthread_create(&t, NULL, poll_run, NULL); pthread_detach(t); } }
     const char *e = getenv("DM_PROBE_WATCH"); if (!e) return;
-    char *end; g_wheap = !strncmp(e, "heap+", 5);
+    char *end;
+    if (e[0] == '@' && e[1] == 'x') {   // @xN+<offset>[+<length>]: armed at the first printed probe hit
+        g_wfrom = (int)strtol(e + 2, &end, 10) & 31; g_wfoff = *end == '+' ? strtoull(end + 1, &end, 16) : 0; g_wlen = *end == '+' ? strtoull(end + 1, 0, 16) : 8;
+        if (!g_wlen) die("DM_PROBE_WATCH format: @xN+<offset>[+<length>] (hex)");
+        g_wpsz = (uint64_t)getpagesize();
+        dm_fault_hook_register(watch_fault);
+        pthread_t t; pthread_create(&t, NULL, watch_arm, NULL); pthread_detach(t);
+        g_wcap = 41;   // a per-frame writer: 40 printed stores
+        LOG("write watch on x%d + %#llx + %#llx at the first probe hit", g_wfrom, (unsigned long long)g_wfoff, (unsigned long long)g_wlen);
+        return;
+    }
+    g_wheap = !strncmp(e, "heap+", 5);
     uint64_t at = strtoull(e + (g_wheap ? 5 : 0), &end, 16); g_wlen = *end == '+' ? strtoull(end + 1, 0, 16) : 8;
     if ((!at && !g_wheap) || !g_wlen) die("DM_PROBE_WATCH format: [heap+]<address>[+<length>] (hex)");
     g_wpsz = (uint64_t)getpagesize();

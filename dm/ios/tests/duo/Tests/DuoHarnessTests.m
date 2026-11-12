@@ -12,6 +12,7 @@
 #import "DmLayout.h"
 #import "DmGameMenu.h"
 #import "DuoHarnessRuntime.h"
+#import "DmRotation.h"
 #include "dm_input.h"
 #include <math.h>
 #include <stdio.h>
@@ -1362,4 +1363,150 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
 }
 
 
+// Rotation (DM_ROTATION): the view controllers' mask and the app's, which replaces the Info.plist list (main.m), so a phone can be locked upright
+- (void)testRotationSettingSetsTheOrientationMasks {
+    const UIInterfaceOrientationMask all = UIInterfaceOrientationMaskAll, land = UIInterfaceOrientationMaskLandscape,
+        upright = UIInterfaceOrientationMaskPortrait | UIInterfaceOrientationMaskPortraitUpsideDown;
+    XCTAssertEqual(dm_rotation_mask(NULL, all), all);
+    XCTAssertEqual(dm_rotation_mask("auto", land), land, @"auto keeps the device's own list");
+    XCTAssertEqual(dm_rotation_mask("landscape", all), land);
+    XCTAssertEqual(dm_rotation_mask("portrait", land), upright, @"portrait is allowed even where the Info.plist lists only landscape");
+    XCTAssertEqual(dm_rotation_mask("sideways", land), land, @"an unknown value is auto");
+
+    UIViewController *root = [self harnessRootViewController];
+    XCTAssertNotNil(root);
+    [root.view layoutIfNeeded];
+    unsetenv("DM_ROTATION");
+    BOOL pad = UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad;
+    XCTAssertEqual(root.supportedInterfaceOrientations, all);
+    XCTAssertEqual(front_ios_app_orientations(), pad ? all : land, @"auto: the Info.plist list for this device");
+    XCTAssertTrue(dm_setting_live("DM_ROTATION", NULL), @"the in-game menu offers Rotation");
+    dm_setting_live("DM_ROTATION", "landscape");
+    XCTAssertEqual(root.supportedInterfaceOrientations, land);
+    XCTAssertEqual(front_ios_app_orientations(), land);
+    dm_setting_live("DM_ROTATION", "auto");
+    XCTAssertEqual(root.supportedInterfaceOrientations, all);
+    XCTAssertEqual(front_ios_app_orientations(), pad ? all : land);
+    unsetenv("DM_ROTATION");
+}
+
+- (void)waitForRoot:(UIViewController *)root portrait:(BOOL)portrait {
+    NSPredicate *p = [NSPredicate predicateWithBlock:^BOOL(UIViewController *vc, NSDictionary *bindings) {
+        (void)bindings; CGSize sz = vc.view.window.bounds.size; return portrait ? sz.height > sz.width : sz.width > sz.height;
+    }];
+    XCTNSPredicateExpectation *e = [[XCTNSPredicateExpectation alloc] initWithPredicate:p object:root];
+    XCTAssertEqual([XCTWaiter waitForExpectations:@[e] timeout:8.0], XCTWaiterResultCompleted, @"the window turns %s", portrait ? "upright" : "to landscape");
+    [root.view layoutIfNeeded];
+}
+
+// The pick turns the window at once, a phone included (its Info.plist lists only landscape); upright the picture area is above the controls, and a screen_aspect any profile is
+// handed that area's shape, not 16:9 (front_ios.m view_shape)
+- (void)testRotationTurnsTheWindowAndTheGameTakesThePictureAreasShape {
+    UIViewController *root = [self harnessRootViewController];
+    XCTAssertNotNil(root);
+    UIView *game = [root valueForKey:@"game"];
+    setenv("DM_PORTRAIT_LAYOUT", "split", 1);   // Picture above controls; Full screen below
+    dm_setting_live("DM_ROTATION", "portrait");
+    [self waitForRoot:root portrait:YES];
+    XCTAssertEqual(root.supportedInterfaceOrientations, UIInterfaceOrientationMaskPortrait | UIInterfaceOrientationMaskPortraitUpsideDown);
+    CGRect b = root.view.bounds;
+    DmLayout l = dm_layout(b, root.view.safeAreaInsets, NO, CGRectNull, DM_PICTURE_16_9);
+    XCTAssertTrue(l.separated);
+    XCTAssertEqualWithAccuracy(front_view_aspect(), l.area.size.width / l.area.size.height, 1e-3, @"the area above the controls: %@", NSStringFromCGRect(l.area));
+    XCTAssertLessThan(front_view_aspect(), 16.0 / 9.0 - 0.1, @"not 16:9");
+    // the game presents that shape (its sides rounded to 8 pixels): the picture fills the area
+    CGFloat a = l.area.size.width / l.area.size.height;
+    front_picture_shape((int)(a * 10000), 10000);
+    XCTestExpectation *applied = [self expectationWithDescription:@"shape applied"];
+    dispatch_async(dispatch_get_main_queue(), ^{ [applied fulfill]; });
+    [self waitForExpectations:@[applied] timeout:2];
+    [root.view setNeedsLayout]; [root.view layoutIfNeeded];
+    XCTAssertEqualWithAccuracy(game.frame.size.width, l.area.size.width, 1.0, @"%@ in %@", NSStringFromCGRect(game.frame), NSStringFromCGRect(l.area));
+    XCTAssertEqualWithAccuracy(game.frame.size.height, l.area.size.height, 1.0);
+    // Full screen (the default): the picture covers the view, the controls stay in the lower half, over it
+    setenv("DM_PORTRAIT_LAYOUT", "full", 1); XCTAssertTrue(dm_setting_live("DM_PORTRAIT_LAYOUT", "full"));
+    [root.view layoutIfNeeded];
+    XCTAssertEqualWithAccuracy(front_view_aspect(), b.size.width / b.size.height, 1e-3, @"the whole view's shape");
+    front_picture_shape((int)(b.size.width / b.size.height * 10000), 10000);
+    XCTestExpectation *full = [self expectationWithDescription:@"full shape applied"];
+    dispatch_async(dispatch_get_main_queue(), ^{ [full fulfill]; });
+    [self waitForExpectations:@[full] timeout:2];
+    [root.view setNeedsLayout]; [root.view layoutIfNeeded];
+    XCTAssertEqualWithAccuracy(game.frame.size.width, b.size.width, 1.0, @"%@", NSStringFromCGRect(game.frame));
+    XCTAssertEqualWithAccuracy(game.frame.size.height, b.size.height, 1.0);
+    XCTAssertTrue(CGRectGetMaxY(game.frame) > CGRectGetMidY(b) + 100, @"the picture runs under the controls");
+    unsetenv("DM_PORTRAIT_LAYOUT");
+    front_picture_shape(1920, 1080);
+    dm_setting_live("DM_ROTATION", "landscape");
+    [self waitForRoot:root portrait:NO];
+    XCTAssertEqualWithAccuracy(front_view_aspect(), root.view.bounds.size.width / root.view.bounds.size.height, 1e-3, @"landscape: the whole view");
+    dm_setting_live("DM_ROTATION", "auto");
+    unsetenv("DM_ROTATION");
+    XCTestExpectation *restored = [self expectationWithDescription:@"16:9 restored"];
+    dispatch_async(dispatch_get_main_queue(), ^{ [restored fulfill]; });
+    [self waitForExpectations:@[restored] timeout:2];
+}
+
+- (void)testPictureAreaIsTheViewOrTheSpaceAboveTheControls {
+    CGRect land = CGRectMake(0, 0, 874, 402), up = CGRectMake(0, 0, 402, 874);
+    UIEdgeInsets landInsets = UIEdgeInsetsMake(0, 62, 21, 62), upInsets = UIEdgeInsetsMake(62, 0, 34, 0);
+    DmLayout l = dm_layout(land, landInsets, NO, CGRectNull, DM_PICTURE_16_9);
+    XCTAssertTrue(CGRectEqualToRect(l.area, land), @"landscape overlay: the whole view, %@", NSStringFromCGRect(l.area));
+    l = dm_layout(up, upInsets, NO, CGRectNull, DM_PICTURE_16_9);
+    XCTAssertTrue(l.separated);
+    XCTAssertTrue(CGRectEqualToRect(l.area, CGRectMake(0, 62, 402, 375)), @"upright: above the midpoint, inside the safe area, %@", NSStringFromCGRect(l.area));
+    CGFloat a = l.area.size.width / l.area.size.height;
+    DmLayout own = dm_layout(up, upInsets, NO, CGRectNull, a);
+    XCTAssertEqualWithAccuracy(own.game.size.width, 402, 1); XCTAssertEqualWithAccuracy(own.game.size.height, 375, 1);
+    XCTAssertTrue(CGRectEqualToRect(dm_layout_pad_only(up).area, CGRectZero));
+}
+
+// Portrait layout Full screen: the picture covers the view under the controls, which keep their lower-half rectangle; landscape and a half-folded Duo stay
+- (void)testFullScreenPortraitPutsTheControlsOverThePicture {
+    CGRect land = CGRectMake(0, 0, 874, 402), up = CGRectMake(0, 0, 402, 874);
+    UIEdgeInsets upInsets = UIEdgeInsetsMake(62, 0, 34, 0);
+    CGFloat a = up.size.width / up.size.height;
+    DmLayout split = dm_layout(up, upInsets, NO, CGRectNull, a);
+    DmLayout l = dm_layout_full_picture(split, up, NO, CGRectNull, a);
+    XCTAssertTrue(CGRectEqualToRect(l.area, up), @"%@", NSStringFromCGRect(l.area));
+    XCTAssertEqualWithAccuracy(l.game.size.width, 402, 1); XCTAssertEqualWithAccuracy(l.game.size.height, 874, 1);
+    XCTAssertTrue(l.separated && CGRectEqualToRect(l.controls, split.controls), @"the controls keep their portrait arrangement");
+    XCTAssertTrue(CGRectContainsRect(l.game, l.controls), @"and are drawn over the picture");
+    DmLayout over = dm_layout(land, UIEdgeInsetsZero, NO, CGRectNull, DM_PICTURE_16_9);
+    DmLayout same = dm_layout_full_picture(over, land, NO, CGRectNull, DM_PICTURE_16_9);
+    XCTAssertTrue(CGRectEqualToRect(same.game, over.game) && CGRectEqualToRect(same.area, over.area), @"landscape as it was");
+    DmLayout half = dm_layout(up, upInsets, YES, CGRectNull, a);
+    DmLayout halfFull = dm_layout_full_picture(half, up, YES, CGRectNull, a);
+    XCTAssertTrue(CGRectEqualToRect(halfFull.game, half.game) && CGRectEqualToRect(halfFull.area, half.area), @"a half-folded Duo keeps its split");
+}
+
+// A controller hides the touch controls: upright the picture takes the whole safe area; landscape and a half-folded Duo's split stay
+- (void)testHiddenControlsGiveAnUprightPictureTheWholeScreen {
+    CGRect land = CGRectMake(0, 0, 874, 402), up = CGRectMake(0, 0, 402, 874);
+    UIEdgeInsets upInsets = UIEdgeInsetsMake(62, 0, 34, 0);
+    DmLayout l = dm_layout_controls_hidden(dm_layout(up, upInsets, NO, CGRectNull, DM_PICTURE_16_9), up, upInsets, NO, CGRectNull, DM_PICTURE_16_9);
+    XCTAssertFalse(l.separated);
+    XCTAssertTrue(CGRectEqualToRect(l.area, CGRectMake(0, 62, 402, 778)), @"%@", NSStringFromCGRect(l.area));
+    XCTAssertTrue(CGRectEqualToRect(l.controls, up));
+    XCTAssertEqualWithAccuracy(l.game.size.width, 402, 1, @"16:9 fits the width");
+    DmLayout filled = dm_layout_picture(l, up, YES, DM_PICTURE_16_9);
+    XCTAssertTrue(CGRectEqualToRect(filled.game, l.game), @"Fill stays fitted upright: %@", NSStringFromCGRect(filled.game));
+    DmLayout over = dm_layout(land, UIEdgeInsetsZero, NO, CGRectNull, DM_PICTURE_16_9);
+    DmLayout same = dm_layout_controls_hidden(over, land, UIEdgeInsetsZero, NO, CGRectNull, DM_PICTURE_16_9);
+    XCTAssertTrue(CGRectEqualToRect(same.game, over.game) && CGRectEqualToRect(same.area, over.area), @"landscape as it was");
+    DmLayout half = dm_layout(up, upInsets, YES, CGRectNull, DM_PICTURE_16_9);
+    DmLayout halfHidden = dm_layout_controls_hidden(half, up, upInsets, YES, CGRectNull, DM_PICTURE_16_9);
+    XCTAssertTrue(halfHidden.separated && CGRectEqualToRect(halfHidden.area, half.area), @"a half-folded Duo keeps its split");
+}
+
+// In landscape the game is handed the whole view's shape, as before
+- (void)testProductionRootReportsThePictureAreaShape {
+    UIViewController *root = [self harnessRootViewController];
+    XCTAssertNotNil(root);
+    [root.view setNeedsLayout]; [root.view layoutIfNeeded];
+    CGRect b = root.view.bounds;
+    BOOL duo = [[root valueForKey:@"hingeStatus"] integerValue] != 0;
+    DmLayout l = dm_layout(b, dm_game_safe_insets(b, root.view.safeAreaInsets, duo), [[root valueForKey:@"partiallyOpen"] boolValue], CGRectNull, DM_PICTURE_16_9);
+    XCTAssertEqualWithAccuracy(front_view_aspect(), l.area.size.width / l.area.size.height, 1e-3, @"area %@ in %@", NSStringFromCGRect(l.area), NSStringFromCGRect(b));
+}
 @end

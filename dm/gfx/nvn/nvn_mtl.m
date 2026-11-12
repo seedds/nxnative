@@ -278,13 +278,70 @@ static void ws_report(uint64_t frame, uint64_t frames) {
         if (n && o < sizeof line - 160) o += snprintf(line + o, sizeof line - o, " %s %.2f/frame (blocked %.2f, %.3f ms);", ws_name[i], (double)n / frames, (double)b / frames, ns / 1e6 / frames); }
     MLOG("[waits] up to frame %llu, per frame:%s", (unsigned long long)frame, o ? line : " none");
 }
+// DM_NVN_GPUPROF's CPU timeline: while a frame is profiled, the host's CPU side is logged beside its encoders' GPU stamps, so a gap between two encoders says what the GPU waited
+// for: each submission's encoding (its begin to its end on the replay thread), each real commit to the queue (from before its uniform-copy wait to the commit's return; the encode
+// thread makes it), every blocking CPU wait for the GPU by its wait-ledger site (the game's SyncWait, the allocator, ...), and the NVN queue worker parked with nothing it can
+// replay (no work, or the first job of each queue held by an event or sync wait). Mach ticks: Metal 4's counter-heap timestamps are the same clock (measured on an M-series Mac:
+// a stamp falls between the commit's and the completion's mach_absolute_time), so the report places them on the encoders' timeline with no conversion
+enum { GT_SUB, GT_COMMIT, GT_WAIT, GT_QPARK, GT_MAX = 2048 };
+typedef struct { uint64_t t0, t1, a, b; uint32_t kind; } gt_ev;
+static gt_ev g_gt[GT_MAX]; static _Atomic int g_gt_n, g_gt_on;
+static uint64_t g_sub_serial; static uint32_t g_seg;   // tentative: defined with the submission state below
+static _Atomic uint64_t g_sub_cmt;   // the last submission whose commit the encode thread has made (its fence; with no encode thread, the last committed: mtl_sub_commit)
+static inline void gt_put(uint32_t kind, uint64_t t0, uint64_t a, uint64_t b) {
+    if (__builtin_expect(!atomic_load_explicit(&g_gt_on, memory_order_relaxed), 1)) return;
+    int i = atomic_fetch_add_explicit(&g_gt_n, 1, memory_order_relaxed); if (i < GT_MAX) g_gt[i] = (gt_ev){t0, mach_absolute_time(), a, b, kind};
+}
+// The NVN queue worker (nvn_queue.inc) parked from t0 until now: why (0 no work queued, 1 an event wait, 2 a sync wait) and the held queue's serial
+void mtl_gp_note_park(uint64_t t0, unsigned why, uint64_t queue) { gt_put(GT_QPARK, t0, why, queue); }
 #include "nvn_rec.h"   // deferred encoding (DM_NVN_ENC_THREAD)
 static NSHashTable *g_res_objects;
+static char g_tex_range_key;   // res_top: a GPU-made texture's storage (guest address, NVN size, pool flags)
+static NSMapTable *g_res_line;   // res_top: the source line that put each object in the set
 static _Atomic unsigned g_image_heap_n, g_big_n;   // g_big_n: large pools in chunks, whose buffers overlap (BIG_MIN)
 static inline MTL4VisibilityOptions resource_vis(void) { return MTL4VisibilityOptionDevice | (g_image_heap_n || g_big_n ? MTL4VisibilityOptionResourceAlias : 0); }
 // Residency churn by call site (the power line every 300 frames, mtl_res_stats): each commit with changes is a kernel call whose cost grows with what was added or removed
 enum { RS_SITES = 16 }; static struct { int line; uint64_t n, bytes; } g_rs_site[RS_SITES]; static uint64_t g_rs_rm, g_rs_commits, g_rs_commit_ns;
 #define res_add(r) res_add_at((r), __LINE__)
+// File pages under a shared buffer that joins the set are wired through the CPU's fault path (mlock) before the commit, and given back after it, when the commit holds them for the GPU.
+// The commit wires an added buffer's pages itself, and pages a file in from the GPU driver's wiring path (IOGPUResourceGroupUpdateResources → the VM → APFS pagein). With the guest's
+// memory in files (DM_GUEST_FILE) on the M1 iPad, that page-in waited for good on an APFS lock held for writing by a launchd thread (its background I/O queue), which itself had stopped
+// 4 ms after it and never ran again: the game froze with sound and no picture, the encode thread in res_commit, guest threads that touched the files stuck in their faults (a sysdiagnose
+// spindump, 2026-11-08). Hundreds of thousands of ordinary page-ins of the same files never hung, so the pages are brought in and held that way first, and the commit finds them resident.
+// What launchd's thread waited for is not known (the kernel had no symbols): memory.md, "The residency commit froze over the guest's files". Anonymous memory and Metal's own buffers are not
+// file-backed and are left alone. Under g_res_mu
+typedef struct { void *p; size_t n; } fwire_t; static fwire_t *g_fwire; static size_t g_nfwire, g_cfwire; static uint64_t g_fwire_n, g_fwire_bytes, g_fwire_ns, g_fwire_fail;
+static int range_file_backed(const void *p, size_t n) {
+    vm_address_t a = (vm_address_t)p, e = a + n; natural_t depth = 0;   // vm_region_recurse_64: mach_vm.h is not in the iOS SDK
+    while (a < e) {
+        vm_address_t r = a; vm_size_t sz = 0; vm_region_submap_info_data_64_t info; mach_msg_type_number_t c = VM_REGION_SUBMAP_INFO_COUNT_64;
+        if (vm_region_recurse_64(mach_task_self(), &r, &sz, &depth, (vm_region_recurse_info_t)&info, &c) || r >= e) return 0;
+        if (info.is_submap) { depth++; continue; }
+        if (info.external_pager) return 1;
+        a = r + sz;
+    }
+    return 0;
+}
+static void file_wire(id<MTLAllocation> r) {
+    if (![(id)r conformsToProtocol:@protocol(MTLBuffer)]) return;
+    id<MTLBuffer> b = (id<MTLBuffer>)r;
+    if (b.storageMode != MTLStorageModeShared || !b.length) return;
+    uintptr_t pg = (uintptr_t)getpagesize(), lo = (uintptr_t)b.contents & ~(pg - 1), hi = ((uintptr_t)b.contents + b.length + pg - 1) & ~(pg - 1);
+    if (!range_file_backed((void *)lo, hi - lo)) return;
+    uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    if (mlock((void *)lo, hi - lo)) {   // the commit pages them in itself, as before
+        if (!g_fwire_fail++) MLOG("[RED] residency: file pages under a buffer of %.1f MB could not be wired before the commit (mlock errno %d); the commit pages them in itself", (hi - lo) / 1048576.0, errno);
+        return;
+    }
+    g_fwire_ns += clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0; g_fwire_n++; g_fwire_bytes += hi - lo;
+    if (g_nfwire == g_cfwire) {   // the list file_unwire undoes; a range it cannot hold is unwired at once (the commit pages it in itself, as before)
+        size_t n = g_cfwire ? 2 * g_cfwire : 64; void *grown = realloc(g_fwire, n * sizeof *g_fwire);
+        if (!grown) { munlock((void *)lo, hi - lo); return; }
+        g_fwire = grown; g_cfwire = n;
+    }
+    g_fwire[g_nfwire].p = (void *)lo; g_fwire[g_nfwire++].n = hi - lo;
+}
+static void file_unwire(fwire_t *fw, size_t n) { for (size_t i = 0; i < n; i++) munlock(fw[i].p, fw[i].n); free(fw); }   // a range the game has mapped anew meanwhile fails, harmlessly
 // Both run on guest threads too (pool_res from mtl_addr, uploads), whose implicit autorelease pools never drain; containsObject: / removeObject: on a weak NSHashTable leave the object
 // autoreleased in the calling thread's pool (measured in a standalone test: the object outlived its last strong reference until the thread ended), so each has a pool of its own
 static void res_q_put(id<MTLAllocation> r, int add) {   // Caller holds g_res_mu
@@ -299,8 +356,11 @@ static void res_add_at(id<MTLAllocation> allocation, int line) { @autoreleasepoo
     if (!g_res_objects) g_res_objects = [NSHashTable weakObjectsHashTable];
     if ([g_res_objects containsObject:r]) { pthread_mutex_unlock(&g_res_mu); return; }   // already resident (a shared texture resolved again): marking the set dirty would cost a commit that changes nothing
     { int k = 0; while (k < RS_SITES - 1 && g_rs_site[k].line && g_rs_site[k].line != line) k++; g_rs_site[k].line = line; g_rs_site[k].n++; g_rs_site[k].bytes += r.allocatedSize; }
+    file_wire(r);   // before its change is queued: the commit that applies the change takes this range with it and gives it back after (res_commit)
     res_q_put(r, 1);
     [g_res_objects addObject:r];
+    if (!g_res_line) g_res_line = [NSMapTable weakToStrongObjectsMapTable];
+    [g_res_line setObject:@(line) forKey:r];
     pthread_mutex_unlock(&g_res_mu);
 } }
 static void res_remove(id<MTLAllocation> r) { @autoreleasepool {
@@ -352,9 +412,11 @@ static void rh_wait(id<MTLHeap> heap) {
 @implementation NvRecycledHeap
 - (void)dealloc { rh_wait(heap); }
 @end
-@interface NvImageHeap : NSObject { @public id<MTLHeap> heap; } @end   // a resolution family's heap (image_texture)
+// A resolution family's heap (image_texture), or with window set a heap over a span of GPU-only memory (window_texture), whose textures sit at their own offsets: a span's
+// heap goes with its last texture instead of waiting in the recycled list, where its 36 MB would serve only a texture at least two thirds as large
+@interface NvImageHeap : NSObject { @public id<MTLHeap> heap; int window; } @end
 @implementation NvImageHeap
-- (void)dealloc { rh_wait(heap); atomic_fetch_sub(&g_image_heap_n, 1); }
+- (void)dealloc { if (window) res_remove(heap); else rh_wait(heap); atomic_fetch_sub(&g_image_heap_n, 1); }
 @end
 static char g_image_heap_owner_key, g_rh_owner_key;
 // A placement heap of at least `size` bytes: the smallest waiting one up to half as large again, or a new one an eighth larger (its exact size with the switch off). nil if Metal
@@ -454,6 +516,7 @@ static void res_commit(void) { @autoreleasepool {
     pthread_mutex_lock(&g_res_commit_mu);
     pthread_mutex_lock(&g_res_mu);
     res_op *q = g_res_q; size_t n = g_res_qn; g_res_q = NULL; g_res_qn = g_res_qcap = 0;
+    fwire_t *fw = g_fwire; size_t nfw = g_nfwire; g_fwire = NULL; g_nfwire = g_cfwire = 0;   // the file pages wired for exactly these changes
     pthread_mutex_unlock(&g_res_mu);
     if (n) {
         uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
@@ -462,6 +525,7 @@ static void res_commit(void) { @autoreleasepool {
         uint64_t dt = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0;
         pthread_mutex_lock(&g_res_mu); g_rs_commits++; g_rs_commit_ns += dt; pthread_mutex_unlock(&g_res_mu);
     }
+    file_unwire(fw, nfw);   // after the commit that made those buffers resident; under g_res_commit_mu, so a later commit cannot run before them
     pthread_mutex_unlock(&g_res_commit_mu);
     for (size_t i = 0; i < n; i++) CFRelease(q[i].o);
     free(q);
@@ -469,6 +533,7 @@ static void res_commit(void) { @autoreleasepool {
 static int res_pending(void) { pthread_mutex_lock(&g_res_mu); int n = g_res_qn != 0; pthread_mutex_unlock(&g_res_mu); return n; }
 // What the residency set holds: totals by kind and the largest objects. At the first GPU out-of-memory error (the error names none of them), and for DM_CTL "restop" (hle_hid.c). The set holds
 // the game's pools (shared buffers over guest memory), textures, heaps and staging alike
+static void res_top_pools(const char *why);
 static void res_top(const char *why) { @autoreleasepool {
     enum { N = 24 }; id<MTLAllocation> top[N] = {nil}; uint64_t total = 0, n = 0, kind[4] = {0}, count[4] = {0};
     pthread_mutex_lock(&g_res_mu);
@@ -480,6 +545,18 @@ static void res_top(const char *why) { @autoreleasepool {
     MLOG("%s: the residency set holds %llu objects, %llu MB (Metal's recommended working set %llu MB, GPU allocated %llu MB): textures %llu, %llu MB; heaps %llu, %llu MB; shared buffers %llu, %llu MB; private buffers %llu, %llu MB; the largest:", why,
          (unsigned long long)n, (unsigned long long)(total >> 20), (unsigned long long)(g_dev.recommendedMaxWorkingSetSize >> 20), (unsigned long long)(g_dev.currentAllocatedSize >> 20),
          (unsigned long long)count[0], (unsigned long long)(kind[0] >> 20), (unsigned long long)count[1], (unsigned long long)(kind[1] >> 20), (unsigned long long)count[2], (unsigned long long)(kind[2] >> 20), (unsigned long long)count[3], (unsigned long long)(kind[3] >> 20));
+    {   // by the source line that added each (res_add), textures and buffers apart
+        enum { NL = 24 }; struct { int line, tex; uint64_t n, b; } bl[NL]; int nl = 0;
+        pthread_mutex_lock(&g_res_mu);
+        for (id<MTLAllocation> o in g_res_objects.allObjects) { int line = [[g_res_line objectForKey:o] intValue], tx = [(id)o conformsToProtocol:@protocol(MTLTexture)];
+            int i = 0; while (i < nl && (bl[i].line != line || bl[i].tex != tx)) i++; if (i == nl && nl < NL) { bl[nl].line = line; bl[nl].tex = tx; bl[nl].n = bl[nl].b = 0; nl++; }
+            if (i < NL) { bl[i].n++; bl[i].b += o.allocatedSize; } }
+        pthread_mutex_unlock(&g_res_mu);
+        char line[1400] = ""; size_t lo = 0;
+        for (int i = 0; i < nl && lo < sizeof line; i++) lo += snprintf(line + lo, sizeof line - lo, "%sline %d %s %llu, %llu MB", i ? "; " : "", bl[i].line, bl[i].tex ? "textures" : "other", (unsigned long long)bl[i].n, (unsigned long long)(bl[i].b >> 20));
+        MLOG("%s: residency by the line that added it: %s", why, line);
+    }
+    res_top_pools(why);
     for (int k = 0; k < N && top[k]; k++) { id o = top[k];
         if ([o conformsToProtocol:@protocol(MTLTexture)]) { id<MTLTexture> t = o; MLOG("  texture %lux%lux%lu format %lu levels %lu%s: %llu MB", (unsigned long)t.width, (unsigned long)t.height, (unsigned long)MAX(t.depth, t.arrayLength), (unsigned long)t.pixelFormat, (unsigned long)t.mipmapLevelCount, t.isSparse ? " (sparse)" : "", (unsigned long long)(t.allocatedSize >> 20)); }
         else if ([o conformsToProtocol:@protocol(MTLHeap)]) MLOG("  heap: %llu MB", (unsigned long long)(((id<MTLHeap>)o).size >> 20));
@@ -508,8 +585,14 @@ void mtl_res_stats(char *out, size_t n) {
     for (int i = 0; i < 4 && o < n; i++) { int best = -1; for (int k = 0; k < RS_SITES; k++) if (g_rs_site[k].n && (best < 0 || g_rs_site[k].bytes > g_rs_site[best].bytes)) best = k;
         if (best < 0) break; o += snprintf(out + o, n - o, "%sline %d: %llu, %.0f MB", i ? ", " : "", g_rs_site[best].line, (unsigned long long)g_rs_site[best].n, g_rs_site[best].bytes / 1048576.0); g_rs_site[best].n = 0; }
     if (o < n) snprintf(out + o, n - o, "), removed %llu, %lu allocations in the set (%.0f MB)", (unsigned long long)g_rs_rm, set_n, set_mb);
+    if (g_fwire_n + g_fwire_fail) { o = strlen(out); if (o < n) snprintf(out + o, n - o, ", file-backed buffers wired before their commit %llu, %.0f MB, %.1f ms (refused %llu)", (unsigned long long)g_fwire_n, g_fwire_bytes / 1048576.0, g_fwire_ns / 1e6, (unsigned long long)g_fwire_fail); }
+    g_fwire_n = g_fwire_bytes = g_fwire_ns = 0;
     memset(g_rs_site, 0, sizeof g_rs_site); g_rs_rm = g_rs_commits = g_rs_commit_ns = 0;
+    uint64_t held = g_res ? g_res.allocatedSize : 0;
     pthread_mutex_unlock(&g_res_mu);
+    // What the set is made of, once, when it first passes three quarters of Metal's working set: a device that later fails with GPU out-of-memory has said it before (the M1 iPad's
+    // 5,461 MB is passed going outside in Ocarina of Time), and one that does not still tells what to cut
+    static int told; if (!told && g_dev && held > g_dev.recommendedMaxWorkingSetSize / 4 * 3) { told = 1; res_top("[mem] the residency set passed three quarters of Metal's working set"); }
 }
 
 @interface NvDeferredRelease : NSObject { @public id object; uint64_t fence; int keep_resident; } @end
@@ -630,7 +713,7 @@ static want_list g_bf_want = {"DM_NVN_BF_WANT", PTHREAD_MUTEX_INITIALIZER}, g_du
 void bf_want_note(const char *key) { want_note(&g_bf_want, key); }
 
 // ---------- Memory pools ----------
-typedef struct { uintptr_t lo, hi; uintptr_t base; __unsafe_unretained id<MTLBuffer> buf; uint64_t gpu; const void *key; int res; uint64_t born; uintptr_t end; uint64_t unk; uint32_t n_tex_reads, n_other; } pool_ent;   // res: already in the residency set (on demand, see pool_res); born: when it was added (ns); end, unk: a large pool's chunk (see BIG_MIN); n_tex_reads / n_other: lookups by texture uploads / by anything else (mem_census)
+typedef struct { uintptr_t lo, hi; uintptr_t base; __unsafe_unretained id<MTLBuffer> buf; uint64_t gpu; const void *key; int res; uint64_t born; uintptr_t end; uint64_t unk; uint32_t n_tex_reads, n_other; uint32_t tag; } pool_ent;   // res: already in the residency set (on demand, see pool_res); born: when it was added (ns); end, unk: a large pool's chunk (see BIG_MIN); n_tex_reads / n_other: lookups by texture uploads / by anything else (mem_census)
 static pool_ent *g_pools; static int g_npool, g_cap;
 static int g_pidx_ok, g_plast = -1;   // whether the address→pool index is valid, the last hit (pool_find)
 static NSMutableArray *g_keep;                  // Holds the buffer references (pool_ent has non-owning pointers)
@@ -850,6 +933,32 @@ void mtl_pool_addressed(const void *mem, uint64_t size) {
     }
     pthread_mutex_unlock(&g_mu);
 }
+// Diagnostic (res_top): the addressed ranges again, by who gave the address out: 0 a pool's address (nvnMemoryPoolGetBufferAddress), 1 a buffer (its own range, though the
+// table above takes its whole pool), 2 a texture (nvnTextureGetTextureAddress), 3 a virtual pool's mapping. Under g_mu
+typedef struct { struct { uintptr_t lo, hi; } *r; int n, cap; } rng_tab;
+static rng_tab g_addrk[4];
+static void rng_put(rng_tab *t, uintptr_t lo, uintptr_t hi) {
+    int a = 0, b = t->n; while (a < b) { int m = (a + b) / 2; if (t->r[m].hi < lo) a = m + 1; else b = m; }
+    int j = a; while (j < t->n && t->r[j].lo <= hi) { lo = MIN(lo, t->r[j].lo); hi = MAX(hi, t->r[j].hi); j++; }
+    if (j == a && t->n == t->cap) { t->cap = t->cap ? t->cap * 2 : 256; t->r = realloc_or_die(t->r, (size_t)t->cap * sizeof *t->r, "the addressed range table by kind"); }
+    if (j != a + 1) memmove(t->r + a + 1, t->r + j, (size_t)(t->n - j) * sizeof *t->r);
+    t->n += 1 - (j - a); t->r[a].lo = lo; t->r[a].hi = hi;
+}
+static uint64_t rng_overlap(const rng_tab *t, uintptr_t lo, uintptr_t hi) {
+    int a = 0, b = t->n; while (a < b) { int m = (a + b) / 2; if (t->r[m].hi <= lo) a = m + 1; else b = m; }
+    uint64_t z = 0; for (int i = a; i < t->n && t->r[i].lo < hi; i++) z += MIN(hi, t->r[i].hi) - MAX(lo, t->r[i].lo);
+    return z;
+}
+static rng_tab g_addr_code;   // shader-code pools whose own address was asked for (kind 4, hle_nvn.c nvnMemoryPoolGetBufferAddress), kept out of the table. Under g_mu
+void mtl_pool_addressed_by(const void *mem, uint64_t size, int kind) {
+    if (kind == 4) {
+        pthread_mutex_lock(&g_mu); int first = !g_addr_code.n; rng_put(&g_addr_code, (uintptr_t)mem, (uintptr_t)mem + size); pthread_mutex_unlock(&g_mu);
+        if (first) MLOG("raw global memory: shader-code pools whose address the game asks for stay out of the pool table, so nothing makes them resident for its sake (first %p, %llu KB)", mem, (unsigned long long)(size >> 10));
+        return;
+    }
+    if (kind != 1) mtl_pool_addressed(mem, size);
+    pthread_mutex_lock(&g_mu); if (kind >= 0 && kind < 4) rng_put(&g_addrk[kind], (uintptr_t)mem, (uintptr_t)mem + size); pthread_mutex_unlock(&g_mu);
+}
 // On-demand residency of memory pools: putting a zero-copy buffer into the residency set makes iOS read the whole pool into memory and pin it as wired, even a pool the game never uses
 // (they measured on a 17 Pro Max a 512 MB render-target pool addressed 0 times in a run, with about 530 MB more device wired memory; a 4 GB A14 was ended by the system within seconds of launch because of it).
 // So a pool is not put into the residency set when created; it is put in, and the residency set committed on the spot, the first time the GPU gets its address through mtl_addr / mtl_gpu_addr -- these are the only two ways the GPU gets pool addresses,
@@ -865,10 +974,66 @@ static void pool_res(int i) {
 // pools' buffers do at shared pages; GPU addresses are not contiguous across them, so a lookup must say how far it reads. One that does not know (length 1: an indirect draw's index buffer, a raw storage
 // address) gets BIG_UNKNOWN past its address. Raw global memory, whose pool table the shader walks by itself, takes the whole pool: big_full
 enum { BIG_MIN = 512u << 20, BIG_S = 16u << 20, BIG_UNKNOWN = 64u << 20, BIG_MAX = 32 };
-typedef struct { uintptr_t lo, hi, a, b; const void *mem; int *chunk, full; NSMutableArray *old; } big_pool;   // chunk: stride → g_pools index + 1; full: the whole pool's entry + 1; old: buffers a longer chunk replaced, alive with the pool
+typedef struct { uintptr_t lo, hi, a, b; const void *mem; int *chunk, full; NSMutableArray *old; uint32_t tag; } big_pool;   // chunk: stride → g_pools index + 1; full: the whole pool's entry + 1; old: buffers a longer chunk replaced, alive with the pool
 static big_pool g_big[BIG_MAX]; static int g_nbig;
 static id<MTLBuffer> pool_buf(uintptr_t a, uintptr_t b);   // a pool's zero-copy buffer over [a, b), made over writable pages (below)
 static int big_of(uint64_t addr) { for (int i = 0; i < g_nbig; i++) if (addr >= g_big[i].lo && addr < g_big[i].hi) return i; return -1; }
+// Diagnostic (res_top): the pool's flags, or a virtual pool's for one of its mapped runs (bit 31)
+void mtl_pool_tag(const void *mem, uint32_t tag) {
+    pthread_mutex_lock(&g_mu);
+    for (int i = 0; i < g_npool; i++) if (g_pools[i].key == mem) g_pools[i].tag = tag;
+    for (int k = 0; k < g_nbig; k++) if (g_big[k].mem == mem) g_big[k].tag = tag;
+    pthread_mutex_unlock(&g_mu);
+}
+static _Atomic uint64_t g_win_n, g_win_bytes, g_win_fit[4], g_win_fit_b[4];   // textures placed / bytes; not placed by reason (0 no size, 1 Metal larger than its scaled NVN range, 2 past the window, 3 heap refused)
+static void res_top_pools(const char *why) {
+    {   // the memory pools in it: in the raw pool table or not, looked up by anything but texture uploads or not, by who gave an address in them, by pool flags
+        uint64_t cn[4] = {0}, cb[4] = {0}, mn[16] = {0}, mb[16] = {0}, mcov[16][4] = {{0}}, vn = 0, vb = 0, rn = 0, rb = 0; struct { uint32_t tag; uint64_t n, b, ln, lb; } tg[12]; int ntg = 0;
+        pthread_mutex_lock(&g_mu);
+        for (int i = 0; i < g_npool; i++) { pool_ent *p = &g_pools[i]; if (!p->res) continue;
+            uint64_t z = p->hi - p->lo; int raw = addr_meets(p->lo, p->hi), c = raw << 1 | (p->n_other != 0); cn[c]++; cb[c] += z; rn++; rb += z;
+            int m = 0; uint64_t cov[4]; for (int k = 0; k < 4; k++) { cov[k] = rng_overlap(&g_addrk[k], p->lo, p->hi); if (cov[k]) m |= 1 << k; }
+            mn[m]++; mb[m] += z; for (int k = 0; k < 4; k++) mcov[m][k] += cov[k];
+            if (p->tag >> 31) { vn++; vb += z; }
+            int j = 0; while (j < ntg && tg[j].tag != p->tag) j++; if (j == ntg && ntg < 12) { tg[ntg].tag = p->tag; tg[ntg].n = tg[ntg].b = tg[ntg].ln = tg[ntg].lb = 0; ntg++; } if (j < 12) { tg[j].n++; tg[j].b += z; if (p->n_other) { tg[j].ln++; tg[j].lb += z; } } }
+        uint64_t ak[4] = {0}; for (int k = 0; k < 4; k++) for (int i = 0; i < g_addrk[k].n; i++) ak[k] += g_addrk[k].r[i].hi - g_addrk[k].r[i].lo;
+        uint64_t code_n = 0, code_b = 0; for (int i = 0; i < g_addr_code.n; i++) if (!addr_meets(g_addr_code.r[i].lo, g_addr_code.r[i].hi)) { code_n++; code_b += g_addr_code.r[i].hi - g_addr_code.r[i].lo; }
+        pthread_mutex_unlock(&g_mu);
+        MLOG("%s: resident memory pools %llu, %llu MB: in the raw pool table and looked up otherwise %llu, %llu MB; in the table only %llu, %llu MB; not in it, looked up %llu, %llu MB; neither %llu, %llu MB; mapped runs of virtual pools %llu, %llu MB; addressed in all (MB): pools %llu, buffers %llu, textures %llu, virtual mappings %llu; shader-code ranges kept out of the table %llu, %llu MB", why,
+             (unsigned long long)rn, (unsigned long long)(rb >> 20), (unsigned long long)cn[3], (unsigned long long)(cb[3] >> 20), (unsigned long long)cn[2], (unsigned long long)(cb[2] >> 20), (unsigned long long)cn[1], (unsigned long long)(cb[1] >> 20), (unsigned long long)cn[0], (unsigned long long)(cb[0] >> 20),
+             (unsigned long long)vn, (unsigned long long)(vb >> 20), (unsigned long long)(ak[0] >> 20), (unsigned long long)(ak[1] >> 20), (unsigned long long)(ak[2] >> 20), (unsigned long long)(ak[3] >> 20),
+             (unsigned long long)code_n, (unsigned long long)(code_b >> 20));
+        char line[1400] = ""; size_t lo = 0;
+        for (int m = 0; m < 16 && lo < sizeof line; m++) if (mn[m]) lo += snprintf(line + lo, sizeof line - lo, "%s[%s%s%s%s] %llu, %llu MB (buffers' ranges %llu MB, textures' %llu MB)", lo ? "; " : "", m & 1 ? "P" : "", m & 2 ? "B" : "", m & 4 ? "T" : "", m & 8 ? "V" : "", (unsigned long long)mn[m], (unsigned long long)(mb[m] >> 20), (unsigned long long)(mcov[m][1] >> 20), (unsigned long long)(mcov[m][2] >> 20));
+        MLOG("%s: resident memory pools by who gave an address in them (P pool, B buffer, T texture, V virtual mapping): %s", why, line);
+        {   // GPU-made textures in the set: by the memory pool holding their storage, NVN bytes summed against the union of their storage (what aliasing as on NVN would keep)
+            enum { NQ = 48 }; struct { const void *key; uint32_t flags; uint64_t n, metal, nvn, uni, psize; NSMutableArray *r; } q[NQ]; int nq = 0;
+            NSArray *objs; pthread_mutex_lock(&g_res_mu); objs = g_res_objects.allObjects; pthread_mutex_unlock(&g_res_mu);
+            pthread_mutex_lock(&g_mu);
+            for (id o in objs) { if (![o conformsToProtocol:@protocol(MTLTexture)]) continue; NSArray *rg = objc_getAssociatedObject(o, &g_tex_range_key); if (!rg) continue;
+                uint64_t a = [rg[0] unsignedLongLongValue], z = [rg[1] unsignedLongLongValue]; uint32_t fl = [rg[2] unsignedIntValue];
+                const void *key = NULL; uint64_t ps = 0; int b = big_of(a);
+                if (b >= 0) { key = g_big[b].mem; ps = g_big[b].hi - g_big[b].lo; } else for (int i = 0; i < g_npool; i++) if (a >= g_pools[i].lo && a < g_pools[i].hi) { key = g_pools[i].key; ps = g_pools[i].hi - g_pools[i].lo; break; }
+                int j = 0; while (j < nq && (q[j].key != key || q[j].flags != fl)) j++;
+                if (j == nq && nq < NQ) { q[nq].key = key; q[nq].flags = fl; q[nq].n = q[nq].metal = q[nq].nvn = q[nq].uni = 0; q[nq].psize = ps; q[nq].r = [NSMutableArray array]; nq++; }
+                if (j < NQ) { q[j].n++; q[j].metal += ((id<MTLTexture>)o).allocatedSize; q[j].nvn += z; [q[j].r addObject:@[@(a), @(a + z)]]; } }
+            pthread_mutex_unlock(&g_mu);
+            for (int a = 0; a < nq; a++) for (int b = a + 1; b < nq; b++) if (q[b].metal > q[a].metal) { __typeof__(q[0]) x = q[a]; q[a] = q[b]; q[b] = x; }
+            lo = 0;
+            for (int j = 0; j < nq && j < 12 && lo < sizeof line; j++) {
+                [q[j].r sortUsingComparator:^NSComparisonResult(NSArray *x, NSArray *y) { return [x[0] compare:y[0]]; }];
+                uint64_t end = 0; for (NSArray *r in q[j].r) { uint64_t a = [r[0] unsignedLongLongValue], e = [r[1] unsignedLongLongValue]; if (e <= end) continue; q[j].uni += e - MAX(a, end); end = e; }
+                lo += snprintf(line + lo, sizeof line - lo, "%spool %p (%llu MB) texture pool flags %#x: %llu textures, Metal %llu MB, NVN %llu MB, union %llu MB", j ? "; " : "", q[j].key, (unsigned long long)(q[j].psize >> 20), q[j].flags,
+                               (unsigned long long)q[j].n, (unsigned long long)(q[j].metal >> 20), (unsigned long long)(q[j].nvn >> 20), (unsigned long long)(q[j].uni >> 20)); }
+            MLOG("%s: GPU-made textures in the set by the pool that holds their storage: %s", why, line);
+            MLOG("%s: GPU-only memory windows (window_texture): %llu textures placed, %llu MB; kept apart: no size %llu (%llu MB), Metal larger than 9/8 of NVN %llu (%llu MB), past the window %llu (%llu MB), heap refused %llu", why,
+                 (unsigned long long)g_win_n, (unsigned long long)(g_win_bytes >> 20), (unsigned long long)g_win_fit[0], (unsigned long long)(g_win_fit_b[0] >> 20), (unsigned long long)g_win_fit[1], (unsigned long long)(g_win_fit_b[1] >> 20),
+                 (unsigned long long)g_win_fit[2], (unsigned long long)(g_win_fit_b[2] >> 20), (unsigned long long)g_win_fit[3]);
+        }
+        lo = 0; for (int j = 0; j < ntg && lo < sizeof line; j++) lo += snprintf(line + lo, sizeof line - lo, "%s%#x: %llu, %llu MB (looked up otherwise %llu, %llu MB)", j ? "; " : "", tg[j].tag, (unsigned long long)tg[j].n, (unsigned long long)(tg[j].b >> 20), (unsigned long long)tg[j].ln, (unsigned long long)(tg[j].lb >> 20));
+        MLOG("%s: resident memory pools by flags (bit 31: a virtual pool's mapped run): %s", why, line);
+    }
+}
 // A pool to put into the table: its zero-copy buffer is made first, outside g_mu (pool_new_prep; it may retry for seconds), and the entry goes in under g_mu (pool_new_put), so a change
 // of several pools can be one step for every lookup (mtl_pool_replace)
 typedef struct { const void *mem; uint64_t size; uintptr_t lo, hi, a, b; __strong id<MTLBuffer> buf; } pool_new;   // buf nil: in chunks (a large pool)
@@ -997,7 +1162,7 @@ static int big_new(big_pool *b, uintptr_t lo, uintptr_t hi, uintptr_t end, uint6
     if (!buf) { MLOG("[RED] memory pool %p: the zero-copy buffer over %#lx..%#lx was refused", b->mem, (unsigned long)lo, (unsigned long)end); return -1; }
     if (g_npool == g_cap) { g_cap = g_cap ? g_cap * 2 : 64; g_pools = realloc_or_die(g_pools, g_cap * sizeof *g_pools, "the memory pool table"); }
     g_pidx_ok = 0; atomic_fetch_add(&g_pool_gen, 1);
-    g_pools[g_npool++] = (pool_ent){lo < b->lo ? b->lo : lo, hi > b->hi ? b->hi : hi, lo, buf, buf.gpuAddress, b->mem, 0, clock_gettime_nsec_np(CLOCK_MONOTONIC), end > b->hi ? b->hi : end, unk};
+    g_pools[g_npool++] = (pool_ent){lo < b->lo ? b->lo : lo, hi > b->hi ? b->hi : hi, lo, buf, buf.gpuAddress, b->mem, 0, clock_gettime_nsec_np(CLOCK_MONOTONIC), end > b->hi ? b->hi : end, unk, 0, 0, b->tag};
     [g_keep addObject:buf];
     return g_npool - 1;
 }
@@ -1477,7 +1642,10 @@ void mtl_prepare(void) {
 }
 static void sub_cut_begin(void); static void ts_sub_begin(void), ts_boundary(void); static int ts_on(void);
 static void gmem_commit_patch(void);   // the raw pool table words of the arguments encoded so far follow the pools (gmem_slot_note)
+static uint64_t g_gt_sub0;   // DM_NVN_GPUPROF's timeline: when this submission's encoding began
+static uint64_t g_gt_queue;   // the NVN queue being replayed (mtl_queue_activate)
 void mtl_sub_begin(void) {
+    g_gt_sub0 = mach_absolute_time();
     mtl_init(); g_sub_serial++; g_seg = 0;
     if (g_pkg_kept) { g_pkg_kept = 0; nvn_dirty_touch(); } seg_clk_put(g_sclk); g_sclk = NULL;
     sub_cut_begin();
@@ -1583,12 +1751,16 @@ uint64_t mtl_cut_count(void);
 // A render pass line also gives what it loaded and stored of its attachments (KB, the bandwidth ledger's view: DontCare stores are not counted) and the Metal pixel formats of
 // colour attachment 0 and of the depth / stencil attachment (0: none)
 enum { GP_MAX = 4096 };   // the largest timestamp heap Metal makes
-typedef struct { char kind; uint16_t w, h; uint8_t nc, depth, loads; uint32_t draws, seg; uint64_t pass; uint32_t ld_kb, st_kb; uint16_t cfmt, dfmt; } gp_lab;   // seg: the command buffer (segment) of the submission it is in
+typedef struct { char kind; uint16_t w, h; uint8_t nc, depth, loads; uint32_t draws, seg; uint64_t pass; uint32_t ld_kb, st_kb; uint16_t cfmt, dfmt; uint32_t sub; } gp_lab;   // seg: the command buffer (segment) of the submission it is in; sub: the submission (g_sub_serial)
 static id<MTL4CounterHeap> g_gp_heap; static gp_lab g_gp_lab[GP_MAX / 2]; static int g_gp_n, g_gp_state, g_gp_cur = -1; static long g_gp_f0 = -2, g_gp_f1, g_gp_every; static uint64_t g_gp_frame;
+// DM_NVN_GPUPROF_GEOM=1 (with DM_NVN_GPUPROF) also stamps each render pass where its vertex and its mesh stages finish (a second heap, at the pass's end), and the pass line gives
+// "geom <us>": the time from the pass's start to the later of the two, inside the pass. On a tile-based GPU a pass's vertex, object and mesh work (binning) runs ahead of most of its
+// fragment work, so geom against the rest splits a pass's time between geometry and pixels. Relaxed like the other stamps: a guide, not an exact boundary
+static id<MTL4CounterHeap> g_gp_gheap; static int g_gp_geom = -1;
 static const void *g_gp_e;   // the encoder g_gp_cur belongs to: m4_end also ends the upload / diagnostics / present encoders, which may end while a profiled pass is open (#531)
 static _Atomic int g_gp_busy;   // a periodic profile's report has not been printed yet: the heap is still being read
 static uint64_t g_bw_load, g_bw_store, g_gp_bw_l0, g_gp_bw_s0;   // the bandwidth ledger (defined with the pass statistics below) and its values at the last render pass end
-static uint64_t g_stat_pass, g_stat_draw; static _Atomic uint64_t g_cur_frame; static uint32_t g_seg; static uint32_t g_gp_copies, g_gp_disp, g_gp_ubd;   // copies / dispatches encoded (for the compute encoders' labels)
+static uint64_t g_stat_pass, g_stat_draw, g_stat_disp; static _Atomic uint64_t g_cur_frame; static uint32_t g_seg; static uint32_t g_gp_copies, g_gp_disp, g_gp_ubd;   // copies / dispatches encoded (for the compute encoders' labels)
 static int gp_active(void) {
     if (__builtin_expect(g_gp_f0 == -1, 1)) return 0;
     if (g_gp_f0 == -2) { const char *e = getenv("DM_NVN_GPUPROF");
@@ -1599,14 +1771,21 @@ static int gp_active(void) {
     if (g_gp_every > 0) return f > 0 && f % g_gp_every == 0;
     return f >= g_gp_f0 && f <= g_gp_f1;
 }
-static void gp_report(int n, gp_lab *lab, uint64_t frame);
+typedef struct { int n, ngt; gp_lab *lab; gt_ev *gt; uint64_t frame; } gp_snap;
+static void gp_report(gp_snap s);
+// The profiled frame is over: its labels and CPU timeline are copied for the report, which runs once its last command buffer completes, and the heap is busy until then
+static gp_snap gp_close(void) {
+    atomic_store(&g_gt_on, 0); int ngt = atomic_load(&g_gt_n); if (ngt > GT_MAX) ngt = GT_MAX;
+    gp_snap r = {g_gp_n, ngt, malloc(sizeof(gp_lab) * (g_gp_n ? g_gp_n : 1)), malloc(sizeof(gt_ev) * (ngt ? ngt : 1)), g_gp_frame};
+    memcpy(r.lab, g_gp_lab, sizeof(gp_lab) * r.n); memcpy(r.gt, g_gt, sizeof(gt_ev) * ngt);
+    g_gp_state = 2; atomic_store(&g_gp_busy, 1); return r;
+}
 static void gp_periodic_finish(void) {   // on the submit thread, before the next frame's first encoder can touch the heap
     if (!g_gp_every || g_gp_state != 1 || g_gp_frame == atomic_load(&g_cur_frame)) return;
-    int n = g_gp_n; gp_lab *lab = malloc(sizeof *lab * (n ? n : 1)); memcpy(lab, g_gp_lab, sizeof *lab * n); uint64_t frame = g_gp_frame;
-    g_gp_state = 2; atomic_store(&g_gp_busy, 1);
+    gp_snap snap = gp_close();
     static MTLSharedEventListener *listener; if (!listener) listener = [MTLSharedEventListener new];
     // g_fence covers all submissions of the sampled frame. No GPU wait or extra command buffer is needed, including for every:1.
-    [g_ev notifyListener:listener atValue:g_fence block:^(id<MTLSharedEvent> event, uint64_t value) { (void)event; (void)value; gp_report(n, lab, frame); }];
+    [g_ev notifyListener:listener atValue:g_fence block:^(id<MTLSharedEvent> event, uint64_t value) { (void)event; (void)value; gp_report(snap); }];
 }
 static id<MTL4CounterHeap> g_ts_heap; static int g_ts_pend = -1;   // ts_on; pend: the boundary the next encoder writes (ts_stamp)
 static void gp_begin(id e, char kind, MTL4RenderPassDescriptor *d) {   // right after an encoder of the main command buffer is made
@@ -1618,9 +1797,13 @@ static void gp_begin(id e, char kind, MTL4RenderPassDescriptor *d) {   // right 
     if (!gp_active() || g_gp_state == 2) return;
     if (!g_gp_heap) { MTL4CounterHeapDescriptor *hd = [MTL4CounterHeapDescriptor new]; hd.type = MTL4CounterHeapTypeTimestamp; hd.count = GP_MAX; NSError *er = nil;
         g_gp_heap = [g_dev newCounterHeapWithDescriptor:hd error:&er]; if (!g_gp_heap) { MLOG("[RED] GPUPROF: no counter heap: %s", er.description.UTF8String); g_gp_f0 = -1; return; } }
-    if (!g_gp_state) { g_gp_state = 1; g_gp_n = 0; g_gp_frame = atomic_load(&g_cur_frame); [g_gp_heap invalidateCounterRange:NSMakeRange(0, GP_MAX)]; }
+    if (g_gp_geom < 0) { const char *ge = getenv("DM_NVN_GPUPROF_GEOM"); g_gp_geom = ge && atoi(ge) > 0; if (g_gp_geom) MLOG("DM_NVN_GPUPROF_GEOM: render passes also stamped where their vertex and mesh stages finish"); }
+    if (g_gp_geom && !g_gp_gheap) { MTL4CounterHeapDescriptor *hd = [MTL4CounterHeapDescriptor new]; hd.type = MTL4CounterHeapTypeTimestamp; hd.count = GP_MAX; NSError *er = nil;
+        g_gp_gheap = [g_dev newCounterHeapWithDescriptor:hd error:&er]; if (!g_gp_gheap) { MLOG("[RED] GPUPROF_GEOM: no counter heap: %s", er.description.UTF8String); g_gp_geom = 0; } }
+    if (!g_gp_state) { g_gp_state = 1; g_gp_n = 0; g_gp_frame = atomic_load(&g_cur_frame); [g_gp_heap invalidateCounterRange:NSMakeRange(0, GP_MAX)]; if (g_gp_geom) [g_gp_gheap invalidateCounterRange:NSMakeRange(0, GP_MAX)];
+        atomic_store(&g_gt_n, 0); atomic_store(&g_gt_on, 1); if (g_gt_sub0) gt_put(GT_SUB, g_gt_sub0, g_sub_serial, g_gt_queue | 1ull << 63); }   // the timeline opens with the submission being encoded (its end not reached: bit 63)
     if (2 * g_gp_n + 2 > GP_MAX) return;
-    gp_lab l = {kind, 0, 0, 0, 0, 0, kind == 'R' ? (uint32_t)g_stat_draw : g_gp_copies, g_seg, g_stat_pass, 0, 0, 0, 0}; if (kind != 'R') { l.w = (uint16_t)g_gp_disp; l.h = (uint16_t)g_gp_ubd; }
+    gp_lab l = {kind, 0, 0, 0, 0, 0, kind == 'R' ? (uint32_t)g_stat_draw : g_gp_copies, g_seg, g_stat_pass, 0, 0, 0, 0, (uint32_t)g_sub_serial}; if (kind != 'R') { l.w = (uint16_t)g_gp_disp; l.h = (uint16_t)g_gp_ubd; }
     if (d) { for (int i = 0; i < 8; i++) { MTLRenderPassColorAttachmentDescriptor *c = d.colorAttachments[i]; if (!c.texture) continue;
             if (!l.nc) l.cfmt = (uint16_t)c.texture.pixelFormat; l.nc++; l.w = (uint16_t)MAX(c.texture.width >> c.level, 1); l.h = (uint16_t)MAX(c.texture.height >> c.level, 1); l.loads += c.loadAction == MTLLoadActionLoad; }
         MTLRenderPassDepthAttachmentDescriptor *z = d.depthAttachment;
@@ -1636,21 +1819,47 @@ static void gp_end(id e) {   // right before that encoder ends
     int k = g_gp_cur; g_gp_cur = -1; g_gp_e = NULL;
     if (g_gp_lab[k].kind == 'R') { g_gp_lab[k].ld_kb = (uint32_t)((g_bw_load - g_gp_bw_l0) >> 10); g_gp_lab[k].st_kb = (uint32_t)((g_bw_store - g_gp_bw_s0) >> 10); }   // since the previous pass end (rp_end); sd_finish has set the stores
     if (g_gp_lab[k].kind == 'R') g_gp_lab[k].draws = (uint32_t)g_stat_draw - g_gp_lab[k].draws; else { g_gp_lab[k].draws = g_gp_copies - g_gp_lab[k].draws; g_gp_lab[k].w = (uint16_t)(g_gp_disp - g_gp_lab[k].w); g_gp_lab[k].h = (uint16_t)(g_gp_ubd - g_gp_lab[k].h); }
+    if (g_gp_lab[k].kind == 'R' && g_gp_geom > 0) {   // where this pass's geometry work finishes (DM_NVN_GPUPROF_GEOM)
+        [(id<MTL4RenderCommandEncoder>)e writeTimestampWithGranularity:MTL4TimestampGranularityRelaxed afterStage:MTLRenderStageVertex intoHeap:g_gp_gheap atIndex:2 * k];
+        [(id<MTL4RenderCommandEncoder>)e writeTimestampWithGranularity:MTL4TimestampGranularityRelaxed afterStage:MTLRenderStageMesh intoHeap:g_gp_gheap atIndex:2 * k + 1]; }
     if (g_gp_lab[k].kind == 'R') [(id<MTL4RenderCommandEncoder>)e writeTimestampWithGranularity:MTL4TimestampGranularityRelaxed afterStage:MTLRenderStageFragment intoHeap:g_gp_heap atIndex:2 * k + 1];
     else [(id<MTL4ComputeCommandEncoder>)e writeTimestampWithGranularity:MTL4TimestampGranularityRelaxed intoHeap:g_gp_heap atIndex:2 * k + 1];
 }
-static void gp_report(int n, gp_lab *lab, uint64_t frame) {   // the frame's last command buffer has completed
-    NSData *r = [g_gp_heap resolveCounterRange:NSMakeRange(0, 2 * n)]; const uint64_t *t = r.bytes; if (!t) { free(lab); atomic_store(&g_gp_busy, 0); return; }
+static int gt_cmp(const void *x, const void *y) { const gt_ev *a = x, *b = y; return a->t0 < b->t0 ? -1 : a->t0 > b->t0; }
+static void gp_report(gp_snap snap) {   // the frame's last command buffer has completed
+    int n = snap.n; const gp_lab *lab = snap.lab; uint64_t frame = snap.frame;
+    NSData *r = [g_gp_heap resolveCounterRange:NSMakeRange(0, 2 * n)]; const uint64_t *t = r.bytes; if (!t) { free(snap.lab); free(snap.gt); atomic_store(&g_gp_busy, 0); return; }
+    NSData *gr = g_gp_geom > 0 ? [g_gp_gheap resolveCounterRange:NSMakeRange(0, 2 * n)] : nil; const uint64_t *gt = gr.bytes;   // DM_NVN_GPUPROF_GEOM's stamps, two per encoder
     double tick_ns = 1e9 / (double)[g_dev queryTimestampFrequency], tot[2] = {0}, span = 0; uint64_t t0 = 0, t1 = 0, ld = 0, st = 0; int np = 0;
     for (int i = 0; i < n; i++) { uint64_t a = t[2 * i], b = t[2 * i + 1]; if (!a || !b || b < a) continue;
         double us = (b - a) * tick_ns / 1e3; const gp_lab *l = &lab[i]; tot[l->kind != 'R'] += us;
         if (!t0 || a < t0) t0 = a; if (b > t1) t1 = b;
         if (l->kind == 'R') { np++; ld += l->ld_kb; st += l->st_kb;
-            MLOG("[gpuprof] F%llu %4d %8.1f us render pass %llu %ux%u colors %u depth %u loads %u draws %u start %+.1f seg %u load %u KB store %u KB fmt %u/%u", (unsigned long long)frame, i, us, (unsigned long long)l->pass, l->w, l->h, l->nc, l->depth, l->loads, l->draws, (a - t[0]) * tick_ns / 1e3, l->seg, l->ld_kb, l->st_kb, l->cfmt, l->dfmt); }
-        else MLOG("[gpuprof] F%llu %4d %8.1f us compute / copy after pass %llu start %+.1f seg %u copies %u (uniform updates %u) dispatches %u", (unsigned long long)frame, i, us, (unsigned long long)l->pass, (a - t[0]) * tick_ns / 1e3, l->seg, l->draws, l->h, l->w); }
+            char geom[32] = "";   // the later of the vertex and mesh stamps that falls inside the pass; none when neither does
+            if (gt) { uint64_t g = 0; for (int j = 0; j < 2; j++) { uint64_t v = gt[2 * i + j]; if (v >= a && v <= b && v > g) g = v; }
+                if (g) snprintf(geom, sizeof geom, " geom %.1f", (g - a) * tick_ns / 1e3); }
+            MLOG("[gpuprof] F%llu %4d %8.1f us render pass %llu %ux%u colors %u depth %u loads %u draws %u start %+.1f seg %u load %u KB store %u KB fmt %u/%u%s sub %u", (unsigned long long)frame, i, us, (unsigned long long)l->pass, l->w, l->h, l->nc, l->depth, l->loads, l->draws, (a - t[0]) * tick_ns / 1e3, l->seg, l->ld_kb, l->st_kb, l->cfmt, l->dfmt, geom, l->sub); }
+        else MLOG("[gpuprof] F%llu %4d %8.1f us compute / copy after pass %llu start %+.1f seg %u copies %u (uniform updates %u) dispatches %u sub %u", (unsigned long long)frame, i, us, (unsigned long long)l->pass, (a - t[0]) * tick_ns / 1e3, l->seg, l->draws, l->h, l->w, l->sub); }
     span = (t1 - t0) * tick_ns / 1e3;
     MLOG("[gpuprof] frame %llu: render %.2f ms, compute / copy %.2f ms over %d encoders (%d render passes, attachments load %.1f MB store %.1f MB), first start to last end %.2f ms", (unsigned long long)frame, tot[0] / 1e3, tot[1] / 1e3, n, np, ld / 1024.0, st / 1024.0, span / 1e3);
-    free(lab); atomic_store(&g_gp_busy, 0);
+    // The CPU timeline (gt_put), on the encoders' clock: microseconds from the frame's first stamp
+    if (snap.ngt && n && t[0]) {
+        mach_timebase_info_data_t tb; mach_timebase_info(&tb); double cpu_ns = (double)tb.numer / tb.denom;
+        #define GT_US(v) (((double)(int64_t)((v) - t[0])) * cpu_ns / 1e3)
+        qsort(snap.gt, (size_t)snap.ngt, sizeof *snap.gt, gt_cmp);
+        static const char *const park[3] = {"no work queued", "an event wait holds queue", "a sync wait holds queue"};
+        for (int i = 0; i < snap.ngt; i++) { const gt_ev *e = &snap.gt[i]; char what[160];
+            switch (e->kind) {
+            case GT_SUB: snprintf(what, sizeof what, "submission %llu (NVN queue %llu) encoded%s", (unsigned long long)e->a, (unsigned long long)(e->b & ~(1ull << 63)), e->b >> 63 ? " (still encoding when the profile began)" : ""); break;
+            case GT_COMMIT: if (e->b == UINT32_MAX) snprintf(what, sizeof what, "commit of an upload batch of submission %llu", (unsigned long long)e->a);
+                else snprintf(what, sizeof what, "commit of submission %llu segment %llu (from before its uniform-copy wait)", (unsigned long long)e->a, (unsigned long long)e->b); break;
+            case GT_WAIT: snprintf(what, sizeof what, "CPU wait for fence %llu: %s", (unsigned long long)e->b, e->a < WS_N ? ws_name[e->a] : "?"); break;
+            default: snprintf(what, sizeof what, "NVN queue worker parked: %s", park[e->a < 3 ? e->a : 0]); if (e->a) snprintf(what + strlen(what), sizeof what - strlen(what), " %llu", (unsigned long long)e->b); break; }
+            MLOG("[gpuprof] F%llu cpu %+.1f..%+.1f us %s", (unsigned long long)frame, GT_US(e->t0), GT_US(e->t1), what); }
+        MLOG("[gpuprof] F%llu cpu timeline: %d events%s; this report at %+.1f us (after the last end %+.1f: the CPU and GPU clocks agree when it is later)", (unsigned long long)frame, snap.ngt, snap.ngt == GT_MAX ? " (the limit: later ones lost)" : "", GT_US(mach_absolute_time()), (t1 - t[0]) * tick_ns / 1e3);
+        #undef GT_US
+    }
+    free(snap.lab); free(snap.gt); atomic_store(&g_gp_busy, 0);
 }
 static inline id<MTL4RenderCommandEncoder> enc_r_begin_pass(MTL4RenderPassDescriptor *d) { g_cm_enc++; cm_enc_mark(2);   // the draw passes (rp_begin_ex); see barrier_game
     id<MTL4RenderCommandEncoder> e = [g_cb renderCommandEncoderWithDescriptor:d]; cm_enc_mark(0);
@@ -2516,13 +2725,20 @@ uint64_t mtl_sub_commit(void) {
     }];
     void arena_commit(uint64_t fence); arena_commit(fence);
     res_commit();
-    if (g_gp_state == 1 && !gp_active()) { int gn = g_gp_n; gp_lab *gl = malloc(sizeof(gp_lab) * (gn ? gn : 1)); memcpy(gl, g_gp_lab, sizeof(gp_lab) * gn); uint64_t gf = g_gp_frame; g_gp_state = 2; atomic_store(&g_gp_busy, 1);
-        [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) { (void)f; gp_report(gn, gl, gf); }]; }
+    if (g_gp_state == 1 && !gp_active()) { gp_snap snap = gp_close(); [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) { (void)f; gp_report(snap); }]; }
     [g_cb endCommandBuffer];
     rec_commit(g_cb, o); g_cbgen++;   // the stores it holds come before any later upload batch (gsb_held)
     if (!lost_test) rec_signal(g_ev, fence);
-    rec_drain();
+    // With the encode thread the records go to it and the replay goes on with the next submission: what comes after it on the queue is a record too (the next submission's commits,
+    // upload batches, snapshot copies), a CPU wait for the GPU waits for the fence's signal behind this commit, and a present of the game's own texture waits for this note
+    // (sub_commit_wait). The replay used to wait for the encode thread here: Ocarina of Time makes about 30 submissions a frame (one at each event signal), and on the iPhone the GPU
+    // sat idle before most of them while the replay waited and then translated the next one (13.6 of 14.8 ms of gaps in a 35 ms frame; docs/reference/rendering.md)
+    // DM_NVN_SUB_DRAIN=1 waits for the encode thread here as before (ab: alternates with the DM_AB phases, for measurement)
+    static int drain = -1; if (drain < 0) drain = sw_mode("DM_NVN_SUB_DRAIN", 0);
+    if (rec_on() && g_rb_started) { rec_t *r = rec_put(RO_NOTE, 0); r->a[0] = (uint64_t)(uintptr_t)&g_sub_cmt; r->a[1] = fence; if (drain && sw_on(drain)) rec_drain(); else rec_publish(); }
+    else atomic_store(&g_sub_cmt, fence);
     g_alloc_fence[g_alloc_cur] = fence;
+    gt_put(GT_SUB, g_gt_sub0, g_sub_serial, g_gt_queue);
     g_cb = nil;
     atomic_store(&g_sub_on, 0);   // after ++g_fence and the last encoding: a buffer retired from now on waits for this fence at most
     defer_idle_commit();   // a feedback handler that drained since this submission's own commit saw it open
@@ -2531,6 +2747,8 @@ uint64_t mtl_sub_commit(void) {
     return fence;
 }
 
+// A present of the game's own texture waits for the submissions before it (g_sub_cmt), as the display command buffer goes to the queue directly and must come after the work that drew the picture
+static void sub_commit_wait(uint64_t fence) { if (fence && rec_on()) rec_note_wait(&g_sub_cmt, fence); }
 uint64_t mtl_completed_fence(void) { return atomic_load_explicit(&g_done,memory_order_acquire); }
 uint64_t mtl_last_fence(void) { return g_fence; }
 int mtl_last_commit_error(void) { return atomic_load(&g_last_commit_error); }
@@ -2543,11 +2761,12 @@ static void post_early(uint64_t fence) {
 }
 static int mtl_wait_at(uint64_t fence, uint64_t timeout_ns, int site) {
     if (g_done >= fence) { if (ws_on()) ws_put(site, 0, 0); return 1; }
-    uint64_t w0 = ws_t0();
+    uint64_t w0 = ws_t0(), gt0 = atomic_load_explicit(&g_gt_on, memory_order_relaxed) ? mach_absolute_time() : 0;   // gt0: DM_NVN_GPUPROF's timeline
     if ((site == WS_SYNC || site == WS_SYNC_NEWEST || site == WS_ACQ) && fast_wake() && g_ev && fence <= g_fence) {   // the game's own wait: wake on the GPU's signal (rec_signal(g_ev, fence) after each submission)
         uint64_t ms = timeout_ns / 1000000ull; if (ms > 3600000ull) ms = 3600000ull;
         if ([g_ev waitUntilSignaledValue:fence timeoutMS:ms]) post_early(fence);
         int ok = g_done >= fence;
+        if (gt0) gt_put(GT_WAIT, gt0, (uint64_t)site, fence);
         if (ws_on()) { ws_put(site, w0, 1); ws_wake(fence); }
         if (ok || timeout_ns < 1000000ull) return ok;
         // The event and feedback waits share a finite budget; a timeout must not buy another full wait.
@@ -2578,6 +2797,7 @@ static int mtl_wait_at(uint64_t fence, uint64_t timeout_ns, int site) {
     }
     int ok = g_done >= fence;
     pthread_mutex_unlock(&g_mu);
+    if (gt0) gt_put(GT_WAIT, gt0, (uint64_t)site, fence);
     if (ws_on()) { ws_put(site, w0, 1); if (site == WS_SYNC_NEWEST || site == WS_SYNC || site == WS_ACQ) ws_wake(fence); }
     return ok;
 }
@@ -4301,6 +4521,109 @@ static void sparse_view(NvPkg *pk, const tex_t *t) {
     if (r != (unsigned)pk->vbase) { static int nl; if (nl++ < 6) MLOG("sparse texture ser=%llu %ux%u: sampled from level %u of %u (finer levels not mapped)", (unsigned long long)t->serial, t->d.width, t->d.height, r, n); }
     pk->vbase = (int)r;
 }
+// GPU-only memory as on NVN: textures whose storage lies in a CPU_NO_ACCESS pool are placed in a placement heap that stands for an aligned span (window) of guest addresses, each at
+// its own address's offset in it, so textures that share bytes on NVN share them here and the GPU memory they take is bounded by the spans used, not by the descriptions made.
+// Ocarina of Time keeps its render targets in virtual pools (flags 0x2a1) over one 305 MB physical pool and describes the same bytes as targets of other sizes and formats from
+// pass to pass and as its dynamic resolution moves: walking in Link's house, 400 Metal textures of 793 MB stood for 89 MB of NVN storage, and on an 8 GB iPad the residency set
+// passed the GPU's working set going outside (docs/reference/memory.md). A texture goes there only if its Metal size fits within its NVN size and its offset meets Metal's alignment,
+// so textures that do not overlap on NVN do not overlap here; any other keeps its own allocation (image_texture, then a texture of its own). A window heap lives while one of its
+// textures does, and is made only once it saves memory: when a texture shares bytes with one made apart over its span, or those pass its size. Its memory starts as zeros: a texture over bytes no earlier texture of the window covered is zero-filled as before; one over covered bytes inherits them, as on NVN,
+// and is not filled, as a fill would wipe a live alias in the earlier upload batch
+enum { WIN_SHIFT = 25, WIN_SIZE = 1u << WIN_SHIFT };   // 32 MB spans
+// Metal's size for a texture can pass NVN's (an RGBA8 1024x1024 target: 4,227,072 bytes against 4,194,304, its compression metadata), so the heap is the span scaled by 9/8 and a
+// texture sits at its NVN offset scaled the same way (rounded up to Metal's alignment): it fits if it ends within its scaled NVN range
+#define WIN_SCALE(x) ((uint64_t)(x) * 9 / 8)
+#define WIN_HEAP ((NSUInteger)WIN_SCALE(WIN_SIZE))
+static NSMapTable *g_win;   // window index → NvImageHeap (weak), under g_win_mu
+static pthread_mutex_t g_win_mu = PTHREAD_MUTEX_INITIALIZER;
+static char g_win_cov_key;   // the owner's covered ranges (NSMutableData of rng_tab entries; under g_win_mu)
+// On only where Metal's working set is too small for the render targets' separate heaps (rh_texture), which keep each texture's own layout and are the default elsewhere: a game
+// that packs live targets into the part of a full-size target its current resolution leaves unused relies on NVN's layout (PR #1453), so sharing is the small device's choice, not
+// everyone's. The numbers, Ocarina of Time on the M1 iPad (8 GB, working set 5,461 MB): with the separate heaps the residency set reached 5,184 MB at the outdoor save load (544
+// heaps, 1,384 MB, over 1,455 MB of textures) and every command buffer then failed out of memory; sharing held 4.3 GB outdoors for 30 minutes. So the separate heaps need about
+// 5.2 GB plus what play outdoors adds (the set grew by up to 950 MB over a two-minute walk before sharing): under 8 GB of working set (8 GB devices: 5.3-5.5 GB) sharing is on;
+// a 16 GB Mac (12,124 MB on an M4) keeps the separate heaps. DM_NVN_WINDOW_ALIAS=0 / 1 forces it off / on
+enum { WIN_AUTO_BELOW_MB = 8192 };
+static int window_wants(uint64_t working_set) { return working_set && working_set < ((uint64_t)WIN_AUTO_BELOW_MB << 20); }
+static int window_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("DM_NVN_WINDOW_ALIAS"); uint64_t ws = g_dev ? g_dev.recommendedMaxWorkingSetSize : 0;
+        v = e && *e ? atoi(e) > 0 : window_wants(ws);
+        MLOG("textures in GPU-only memory %s (window_texture; Metal's working set %llu MB, %s)", v ? "share bytes in a heap per 32 MB span" : "keep allocations of their own",
+             (unsigned long long)(ws >> 20), e && *e ? "DM_NVN_WINDOW_ALIAS" : v ? "under 8192 MB" : "8192 MB or more");
+    }
+    return v;
+}
+static int window_ok(const tex_t *t) {
+    return t && t->pool && t->pool->mem && t->mem && (t->pool->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) && !nvn_sparse_pool(t->pool) && !t->has_layout && !t->d.stride
+        && !(t->d.flags & IMAGE_NOT_SHARED) && t->d.samples <= 1 && t->L.size && window_on();
+}
+// Eligible textures made apart while a span has no heap: their bytes, by span, so a heap is made only once it saves memory (a span with a few small targets keeps them as they are)
+static NSMutableDictionary<NSNumber *, NSNumber *> *g_win_live;   // under g_win_mu
+static NSMutableDictionary<NSNumber *, NSHashTable *> *g_win_apart;   // span → its textures made apart (weak NvWinLive), under g_win_mu
+@interface NvWinLive : NSObject { @public uint64_t win, size; uintptr_t lo, hi; } @end
+@implementation NvWinLive
+- (void)dealloc { pthread_mutex_lock(&g_win_mu); NSNumber *k = @(win); uint64_t v = [g_win_live[k] unsignedLongLongValue]; v = v > size ? v - size : 0; if (v) g_win_live[k] = @(v); else [g_win_live removeObjectForKey:k]; pthread_mutex_unlock(&g_win_mu); }
+@end
+static char g_win_live_key;
+static void window_note(id<MTLTexture> mt, const tex_t *t, uint64_t win, uint64_t size) {   // mt was made apart over span win: count it until it goes
+    if (!mt || !size) return;
+    NvWinLive *l = [NvWinLive new]; l->win = win; l->size = size; l->lo = (uintptr_t)t->mem; l->hi = l->lo + t->L.size;
+    pthread_mutex_lock(&g_win_mu); if (!g_win_live) { g_win_live = [NSMutableDictionary dictionary]; g_win_apart = [NSMutableDictionary dictionary]; }
+    g_win_live[@(win)] = @([g_win_live[@(win)] unsignedLongLongValue] + size);
+    NSHashTable *ap = g_win_apart[@(win)]; if (!ap) g_win_apart[@(win)] = ap = [NSHashTable weakObjectsHashTable]; [ap addObject:l];
+    pthread_mutex_unlock(&g_win_mu);
+    objc_setAssociatedObject(mt, &g_win_live_key, l, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+// → the texture placed in its span's heap, or nil: then *note_size, if set, is what the caller notes (window_note) for the texture it makes apart
+static id<MTLTexture> window_texture(const tex_t *t, MTLTextureDescriptor *gd, int *fill, uint64_t *note_win, uint64_t *note_size) {
+    *fill = 1; *note_size = 0;
+    if (!window_ok(t) || gd.storageMode != MTLStorageModePrivate) return nil;
+    // Without GPU-optimized contents. Textures that overlap here read each other's bytes, which on NVN mean the same thing (one block-linear layout) and in Metal do not: another
+    // description's writes leave a lossless-compressed texture's metadata invalid, and reading it is undefined. On the M1 iPad Ocarina of Time's GPU hung that way
+    // (kIOGPUCommandBufferCallbackErrorHang, a white flash, then GPU access revoked) turning the camera by Link's house, where its passes load targets that another format
+    // wrote over the same bytes in the same frame. Plain contents read as wrong values, as NVN's would after another format, but nothing the GPU can fail on
+    MTLTextureDescriptor *d = [gd copy]; d.allowGPUOptimizedContents = NO;
+    MTLSizeAndAlign need = [g_dev heapTextureSizeAndAlignWithDescriptor:d];
+    // A span is keyed by its index times 2; one across a span's end tries the spans offset by half a span (odd keys). Textures in different heaps do not share bytes, as before
+    uintptr_t a = (uintptr_t)t->mem, rel = 0; uint64_t win = 0, lo = 0; int why = 0;
+    for (int half = 0; half < 2; half++) {
+        uintptr_t b = a - (half ? WIN_SIZE / 2 : 0); rel = b & (WIN_SIZE - 1); win = (uint64_t)(b >> WIN_SHIFT) << 1 | (uint64_t)half;
+        lo = need.align ? (WIN_SCALE(rel) + need.align - 1) / need.align * need.align : 0;   // its NVN range scaled: containment and overlaps as on NVN
+        why = !need.size || !need.align ? 0 : lo + need.size > WIN_SCALE(rel + t->L.size) ? 1 : lo + need.size > WIN_HEAP ? 2 : -1;
+        if (why != 2) break;
+    }
+    if (why >= 0) { atomic_fetch_add(&g_win_fit[why], 1); atomic_fetch_add(&g_win_fit_b[why], need.size); return nil; }
+    pthread_mutex_lock(&g_win_mu);
+    if (!g_win) g_win = [NSMapTable strongToWeakObjectsMapTable];
+    NvImageHeap *owner = [g_win objectForKey:@(win)];
+    if (!owner && [g_win_live[@(win)] unsignedLongLongValue] + need.size <= WIN_HEAP) {   // apart, until a heap would save memory: the span's live textures pass its size, or this one shares bytes with one of them
+        int shares = 0; for (NvWinLive *l in g_win_apart[@(win)]) if (l->lo < a + t->L.size && a < l->hi) { shares = 1; break; }
+        if (!shares) { pthread_mutex_unlock(&g_win_mu); *note_win = win; *note_size = need.size; return nil; }
+    }
+    if (!owner) {
+        MTLHeapDescriptor *hd = [MTLHeapDescriptor new]; hd.type = MTLHeapTypePlacement; hd.size = WIN_HEAP;
+        hd.storageMode = MTLStorageModePrivate; hd.cpuCacheMode = d.cpuCacheMode; hd.hazardTrackingMode = d.hazardTrackingMode;
+        id<MTLHeap> heap = [g_dev newHeapWithDescriptor:hd];
+        if (!heap) { pthread_mutex_unlock(&g_win_mu); atomic_fetch_add(&g_win_fit[3], 1); atomic_fetch_add(&g_win_fit_b[3], need.size); return nil; }
+        owner = [NvImageHeap new]; owner->heap = heap; owner->window = 1; atomic_fetch_add(&g_image_heap_n, 1);
+        objc_setAssociatedObject(owner, &g_win_cov_key, [NSMutableData data], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        [g_win setObject:owner forKey:@(win)];
+        static int nl; if (nl++ < 8) MLOG("GPU-only memory %#llx..%#llx: textures there share a %lu MB placement heap at their own offsets (window_texture)", (unsigned long long)(((win >> 1) << WIN_SHIFT) + (win & 1) * WIN_SIZE / 2), (unsigned long long)(((win >> 1) << WIN_SHIFT) + (win & 1) * WIN_SIZE / 2 + WIN_SIZE), (unsigned long)(WIN_HEAP >> 20));
+    }
+    id<MTLTexture> mt = [owner->heap newTextureWithDescriptor:d offset:lo];
+    if (mt) {   // covered before: inherit the bytes; else zero-fill (fill stays 1)
+        NSMutableData *cov = objc_getAssociatedObject(owner, &g_win_cov_key); rng_tab tab = {cov.mutableBytes, (int)(cov.length / sizeof *tab.r), (int)(cov.length / sizeof *tab.r)};
+        if (rng_overlap(&tab, lo, lo + need.size)) *fill = 0;
+        rng_tab grown = {NULL, 0, 0}; for (int i = 0; i < tab.n; i++) rng_put(&grown, tab.r[i].lo, tab.r[i].hi); rng_put(&grown, lo, lo + need.size);
+        [cov setLength:0]; if (grown.n) [cov appendBytes:grown.r length:(size_t)grown.n * sizeof *grown.r]; free(grown.r);
+        objc_setAssociatedObject(mt, &g_image_heap_owner_key, owner, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        atomic_fetch_add(&g_win_n, 1); atomic_fetch_add(&g_win_bytes, need.size);
+    }
+    pthread_mutex_unlock(&g_win_mu);
+    return mt;
+}
 static uint64_t g_texinfo_ser[8]; static int g_texinfo_n;
 // Distinct compressible image descriptions at one NVN address alias physical memory, even while all their descriptor objects are live (LM3's resolution families).
 // Single-description storage keeps the ordinary allocation. Families share an exact-sized placement heap, found through the existing alias table rather than a pool-lifetime owner.
@@ -4323,7 +4646,7 @@ static id<MTLTexture> image_texture(const tex_t *t, MTLTextureDescriptor *d0) {
         NvImageHeap *o = objc_getAssociatedObject(other, &g_image_heap_owner_key);
         // Metal omits ShaderAtomic from usage; tex_desc gives every writable R32 integer image that capability.
         MTLTextureUsage usage = other.usage | (tex_atomic_capable(other) ? MTLTextureUsageShaderAtomic : 0);
-        if (o && o->heap.size >= need.size && usage == d.usage && (!owner || o->heap.size < owner->heap.size)) owner = o;
+        if (o && !o->window && o->heap.size >= need.size && usage == d.usage && (!owner || o->heap.size < owner->heap.size)) owner = o;
     });
     if (!owner) for (uint32_t i = 0; i < g_image_desc.cap; i++) if (g_image_desc.vals[i]) {
         const tex_t *other = g_image_desc.vals[i];
@@ -4546,9 +4869,12 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
     if (!mt) {
         MTLTextureDescriptor *d = tex_desc(t, 0);
         if (!d) return nil;
-        mt = image_texture(t, d);
+        int wfill = 1; uint64_t wwin = 0, wsize = 0; mt = window_texture(t, d, &wfill, &wwin, &wsize);   // on a small device only (window_on)
+        if (mt) { res_add(mt); if (wfill && !tex_init_fill(t, mt)) tex_zero_fill(mt); }
+        if (!mt) mt = image_texture(t, d);
         if (!mt) { mt = rh_texture(t, d); if (!mt) mt = [g_dev newTextureWithDescriptor:d];
             if (mt) { res_add(mt); if (!tex_init_fill(t, mt)) tex_zero_fill(mt); } }
+        if (mt && wsize) window_note(mt, t, wwin, wsize);
         if (!mt) { RED_ONCE(2, "failed to create MTLTexture %ux%u format %#x target %d", t->d.width, t->d.height, t->d.format, t->d.target); return nil; }
     }
     if (mt.allocatedSize >= (256u << 20)) { static int nb; if (nb++ < 20)   // the textures that take most of the GPU's memory (a GPU out-of-memory error says nothing of which)
@@ -4557,6 +4883,7 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
     if (g_allocprof > 0) { static int n; if (n++ < 30 || n % 500 == 0) MLOG("new texture (%s) #%d ser=%llu %ux%ux%u format %#x target %d levels %u storage %p", __func__, n, (unsigned long long)t->serial, t->d.width, t->d.height, t->d.depth, t->d.format, t->d.target, t->d.levels, (void *)t->mem); }
     if (getenv("DM_NVN_TEXCPU") && t->pool && !(t->pool->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS)) MLOG("non-swizzled texture on a CPU-visible pool ser=%llu %ux%ux%u format %#x target %d levels %u texture flags %#x pool flags %#x storage %p", (unsigned long long)t->serial, t->d.width, t->d.height, t->d.depth, t->d.format, t->d.target, t->d.levels, t->d.flags, t->pool->flags, (void *)t->mem);
     res_add(mt);
+    if (t->pool && t->mem) objc_setAssociatedObject(mt, &g_tex_range_key, @[@((uint64_t)(uintptr_t)t->mem), @(t->L.size), @(t->pool->flags)], OBJC_ASSOCIATION_RETAIN_NONATOMIC);   // res_top: its storage
     // The takeover of the storage, the entry and the serial's publication in one hold (nvn_owner.m). A texture another thread registered under the key since the lookup above is the
     // one the storage's serials share: this one is retired
     id<MTLTexture> got = own_alias_publish(t->serial, &ak, mt);
@@ -7420,6 +7747,7 @@ static void queue_program_preserve(void) {
     S.cprog=index[5]<0?NULL:&q->programs[index[5]]; S.prog=bind_stages(NULL,0); args_dirty_all();
 }
 void mtl_queue_activate(uint64_t serial) {   // caller holds the submission lock
+    g_gt_queue = serial;
     if (g_active_queue && g_active_queue->serial == serial) return;
     if (g_active_queue) { g_active_queue->s = S; g_active_queue->r = R; g_active_queue->rc_skip=g_rc_skip; }
     queue_state *q = g_queue_states;
@@ -14532,7 +14860,7 @@ static int dispatch_own(void) {
     return v;
 }
 static id<MTL4ComputeCommandEncoder> dispatch_enc(void) {
-    id<MTL4ComputeCommandEncoder> e = blit_open(); g_gp_disp++;
+    id<MTL4ComputeCommandEncoder> e = blit_open(); g_gp_disp++; g_stat_disp++;
     if (g_blit_ops) blit_barrier();
     g_bw_lo[0] = 0; g_bw_hi[0] = ~0ull; g_bw_n = 1; g_br_n = 0; g_blit_ops = 1;   // recorded as "everything written": the next copy or dispatch gets a barrier
     if (!g_blit_ct) { [e setArgumentTable:g_ct]; g_blit_ct = 1; }
@@ -16159,17 +16487,21 @@ static MTLViewport present_viewport(double pw, double ph, double dw, double dh) 
 }
 // The shape the picture is shown in, whatever part of the texture it comes from. The Switch's compositor stretches a buffer's crop to the layer, so a crop only picks texels: Super
 // Mario Galaxy 2 draws its storybook cutscenes anamorphically into 1200x960 of a 1920x1080 swapchain (800x640 handheld). The layer fills the display, 16:9, unless the game sized it
-// (vi::CreateLayer with a size, hle_vi.c). A screen taller than 16:9 (DM_SCREEN_ASPECT, loader.c) counts only for a texture of its shape: only builds with screen-shape stubs render it.
+// (vi::CreateLayer with a size, hle_vi.c). A screen of another shape than 16:9 (DM_SCREEN_ASPECT, loader.c) counts only for a crop or a texture of its shape: only builds with
+// screen-shape stubs render it. Breath of the Wild presents a whole texture of the taller shape; Ocarina of Time a crop of that shape inside larger window textures (the game's
+// window keeps its texture size and moves its crop, as it does between docked and handheld).
 static _Atomic uint64_t g_layer_shape, g_screen_shape;   // w | h << 32, 0 = none
 void mtl_present_layer(uint32_t w, uint32_t h) { atomic_store(&g_layer_shape, (uint64_t)w | (uint64_t)h << 32); }
 void mtl_present_screen(uint32_t w, uint32_t h) { atomic_store(&g_screen_shape, (uint64_t)w | (uint64_t)h << 32); }
-static void present_shape(id<MTLTexture> src, double *w, double *h) {
+static void present_shape(id<MTLTexture> src, const int crop[4], double *w, double *h) {
     uint64_t v = atomic_load(&g_screen_shape);
-    if (v && fabs(((double)src.width / src.height) / ((double)(uint32_t)v / (double)(v >> 32)) - 1) < 0.01) { *w = src.width; *h = src.height; return; }
+    double sr = v ? (double)(uint32_t)v / (double)(v >> 32) : 0;
+    if (v && crop && crop[2] > 0 && crop[3] > 0 && fabs(((double)crop[2] / crop[3]) / sr - 1) < 0.01) { *w = crop[2]; *h = crop[3]; return; }
+    if (v && fabs(((double)src.width / src.height) / sr - 1) < 0.01) { *w = src.width; *h = src.height; return; }
     v = atomic_load(&g_layer_shape);
     *w = v ? (double)(uint32_t)v : 1920; *h = v ? (double)(v >> 32) : 1080;
 }
-static MTLViewport present_fit(id<MTLTexture> src, double dw, double dh) { double w, h; present_shape(src, &w, &h); return present_viewport(w, h, dw, dh); }
+static MTLViewport present_fit(id<MTLTexture> src, const int crop[4], double dw, double dh) { double w, h; present_shape(src, crop, &w, &h); return present_viewport(w, h, dw, dh); }
 // The valid source rectangle of a present (x, y, width, height; the crop of nvnWindowSetCrop, zero = the whole texture); 0 when it lies outside the texture
 static int present_crop_rect(id<MTLTexture> src, const int crop[4], NSUInteger r[4]) {
     r[0] = 0; r[1] = 0; r[2] = src.width; r[3] = src.height;
@@ -16190,7 +16522,7 @@ static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTex
     present_pipeline(dst.pixelFormat);
     MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
     double dw = dst.width, dh = dst.height;
-    MTLViewport vp = present_fit(src, dw, dh);
+    MTLViewport vp = present_fit(src, crop, dw, dh);
     int full = vp.originX == 0 && vp.originY == 0 && vp.width == dw && vp.height == dh;
     static double last_vp[4];   // Log one line when the viewport changes (used by the real-device screen-level acceptance screen_check.py to check the aspect ratio)
     if (memcmp(last_vp, &vp, sizeof last_vp)) { memcpy(last_vp, &vp, sizeof last_vp);
@@ -16434,7 +16766,7 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
     NSUInteger r[4]; if (!present_crop_rect(src, crop, r)) return 0;
     present_pipeline(dst.pixelFormat);
     double dw = dst.width, dh = dst.height;
-    MTLViewport vp = present_fit(src, dw, dh);
+    MTLViewport vp = present_fit(src, crop, dw, dh);
     int full = vp.originX == 0 && vp.originY == 0 && vp.width == dw && vp.height == dh;
     id<MTLTexture> tex = present_raw_src(src), up = fx ? fx_encode(fx, cb, tex, r, vp, dst.pixelFormat, fx == &g_fx_present) : nil;
     if (up) { tex = up; r[0] = r[1] = 0; r[2] = up.width; r[3] = up.height; }   // the scaled picture, the viewport's size: drawn 1:1
@@ -16517,7 +16849,7 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     if (!src) { RED_ONCE(8, "present texture could not get an MTLTexture"); return 0; }
     // The picture's shape for the front end's layout (front.h front_picture_shape): reported when its width / height changes by more than 0.1 %, not on a size change of the same
     // shape (1280x720 handheld, 1920x1080 docked)
-    { static double last; double w, h; present_shape(src, &w, &h); double a = w / h;
+    { static double last; double w, h; present_shape(src, crop, &w, &h); double a = w / h;
       if (fabs(a - last) > last * 0.001) { last = a; MLOG("present: picture shape %.0fx%.0f (%.3f:1) for the front end's layout", w, h, a); front_picture_shape((int)w, (int)h); } }
     // A texture made on first resolution joins the residency set (res_add), which a submission commits; a window texture presented before any submission has used it was still
     // outside the committed set when the display command buffer sampled it. Super Smash Bros. Ultimate presents its window texture in its first frames before drawing into it:
@@ -16632,7 +16964,7 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
 // Swapchain texture return: before AcquireTexture gets a texture it waits for the ticket of that texture's previous present to be processed (mtl_present_wait), after which the commands the game draws into it
 // are necessarily ordered after that blit on the GPU queue.
 #define PQ 8
-typedef struct { tex_t t; double period; uint64_t frame; int crop[4]; double t_in; uint64_t ev_val, snap_v; } pq_item;   // snap_v: the snapshot copy this present shows (snap_commit_wait)   // t_in: the time the game handed this frame into the present queue (CACurrentMediaTime); ev_val: see g_ext_ev
+typedef struct { tex_t t; double period; uint64_t frame; int crop[4]; double t_in; uint64_t ev_val, snap_v, sub_v; } pq_item;   // snap_v: the snapshot copy this present shows (snap_commit_wait); sub_v: the submissions a present of the game's own texture follows (sub_commit_wait)   // t_in: the time the game handed this frame into the present queue (CACurrentMediaTime); ev_val: see g_ext_ev
 // External producer (the Vulkan layer, dm/gfx/vk) renders on its own queue and signals this event when a frame's rendering is done: the present of that frame waits for the value on g_q4
 static id<MTLSharedEvent> g_ext_ev;
 static void ext_wait(uint64_t v) { if (v && g_ext_ev) [g_q4 waitForEvent:g_ext_ev value:v]; }
@@ -16704,7 +17036,7 @@ __attribute__((weak)) uint64_t dm_focus_in_since(void) { return 0; }
     pthread_cond_broadcast(&g_pq_cv);
     pthread_mutex_unlock(&g_pq_mu);
     int submitted;
-    ext_wait(it.ev_val); snap_commit_wait(it.snap_v);
+    ext_wait(it.ev_val); snap_commit_wait(it.snap_v); sub_commit_wait(it.sub_v);
     @autoreleasepool { submitted = present_now(&it.t, it.period, it.frame, ticket, it.crop, update.drawable, update.targetPresentationTimestamp); mtl_tex_unpin(it.t.serial); }
     g_link_hold_until = submitted && it.period > 0.025 ? update.targetPresentationTimestamp + it.period : 0;
     if (!submitted) {
@@ -16745,9 +17077,14 @@ static CAFrameRateRange link_range(int mode) {
 // and why a fixed-rate screen still has about 20 ms more presentation delay with the link at either latency, remain open (docs/reference/frame-rate.md)
 __attribute__((weak)) int front_fullscreen(void) { return 0; }   // front_mac.m; graphics unit tests and iOS have none
 __attribute__((weak)) int front_screen_variable_refresh(void) { return 0; }   // front_mac.m; graphics unit tests and iOS have none
+// Latency 2 also while the 60 Hz link shows the late frames of a 30 fps cap at the next vsync (hle_nvn.c nvn_fstep_fine): at latency 1 it calls back 16.5 ms before the target
+// time and takes a frame whose GPU work is still running, so on a ProMotion screen the present lands one 120 Hz refresh late and the link skips its next tick; the acquire, which
+// counts ticks, then held each frame 50 ms (Ocarina of Time's title on an M1 iPad: 40 ms frames, 25 → 20 fps) or the screen showed them 33 / 38 / 42 ms apart. Latency 2 is the
+// 33 ms lead the 30 Hz link has at latency 1, so the input lag is that of the cap's own link.
+__attribute__((weak)) int nvn_fstep_fine(void) { return 0; }   // hle_nvn.c; graphics unit tests have no frame step
 // CAMetalDisplayLink accepts only 1 or 2. Compare its readback with the supported request, or an oversized override rewrites and logs every frame.
-static int link_latency(void) { return g_present_latency > 0 ? MIN(g_present_latency, 2) : front_fullscreen() && front_screen_variable_refresh() ? 2 : 1; }
-static const char *link_latency_why(void) { return g_present_latency > 0 ? "DM_PRESENT_LATENCY" : !front_fullscreen() ? "window" : front_screen_variable_refresh() ? "fullscreen, variable refresh" : "fullscreen, fixed refresh"; }
+static int link_latency(void) { return g_present_latency > 0 ? MIN(g_present_latency, 2) : (front_fullscreen() && front_screen_variable_refresh()) || nvn_fstep_fine() ? 2 : 1; }
+static const char *link_latency_why(void) { return g_present_latency > 0 ? "DM_PRESENT_LATENCY" : nvn_fstep_fine() ? "late frames of a 30 fps cap at the next vsync" : !front_fullscreen() ? "window" : front_screen_variable_refresh() ? "fullscreen, variable refresh" : "fullscreen, fixed refresh"; }
 // The 30 Hz link at a 30 fps target, except in fullscreen on a fixed-rate screen. There the link skipped ticks: Ocarina of Time at a 30 fps cap on a MacBook Air M4 (60 Hz) got
 // 16.5-25 callbacks a second over stretches of 300 frames, also on frames with under 1 ms of GPU, and each skipped tick kept a frame on screen 66.7 ms (a 180 s walk: 388 and 996
 // frames over 50 ms; 3-4 in a window, where the same link held 30.0). Why is open (docs/reference/frame-rate.md). The 60 Hz link paces the 30 through the present interval, as it
@@ -16844,7 +17181,7 @@ static void *present_main(void *arg) {
         uint64_t ticket = ++g_pq_read; g_classic_busy = 1;
         pthread_mutex_unlock(&g_pq_mu);
         int submitted;
-        ext_wait(it.ev_val); snap_commit_wait(it.snap_v);
+        ext_wait(it.ev_val); snap_commit_wait(it.snap_v); sub_commit_wait(it.sub_v);
         @autoreleasepool { submitted = present_now(&it.t, it.period, it.frame, ticket, it.crop, nil, 0); mtl_tex_unpin(it.t.serial); }
         pthread_mutex_lock(&g_pq_mu); g_classic_busy = 0; pthread_cond_broadcast(&g_pq_cv); pthread_mutex_unlock(&g_pq_mu);
         if (!submitted) {
@@ -17015,7 +17352,7 @@ static uint64_t present_enqueue(const tex_t *t, double period, const int crop[4]
     mtl_tex_pin(t->serial);
     pthread_mutex_lock(&g_pq_mu);
     while (g_pq_in - g_pq_done >= PQ) pthread_cond_wait(&g_pq_cv, &g_pq_mu);   // Wait only when the queue is full; normally AcquireTexture blocks first
-    pq_item *it = &g_pq[g_pq_in % PQ]; *it = (pq_item){*t, period, atomic_load(&g_cur_frame), {0}, CACurrentMediaTime(), ev_val, ss ? g_snap[slot].ev : 0};
+    pq_item *it = &g_pq[g_pq_in % PQ]; *it = (pq_item){*t, period, atomic_load(&g_cur_frame), {0}, CACurrentMediaTime(), ev_val, ss ? g_snap[slot].ev : 0, !ss && !ev_val && on_sub_thread() ? g_fence : 0};
     if (crop) memcpy(it->crop, crop, sizeof it->crop);   // The current frame's state is enqueued with the ticket number, rather than reading the mutable window late on the present thread
     uint64_t tk = ++g_pq_in;
     if (ss) { g_snap[slot].ticket = tk; atomic_fetch_add(&g_snap_next, 1); if (copy) *copy = g_snap[slot].ev; }
@@ -17076,6 +17413,7 @@ void mtl_present_wait(uint64_t tk) {
 // Wait until all queued presents have been processed (used by mtl_finish = nvnQueueFinish etc.): goes through mtl_present_wait, so there is still a fallback when the display link stops (real device: the game called QueueFinish once while the display link was stopped,
 // and this used to wait here without a timeout; nobody took the 3 queued frames and the game stalled; those two runs on Mac did not hit this call)
 void mtl_present_flush(void) { pthread_mutex_lock(&g_pq_mu); uint64_t h = g_pq_in; pthread_mutex_unlock(&g_pq_mu); mtl_present_wait(h); }
+uint64_t mtl_dispatches(void) { return g_stat_disp; }   // compute dispatches encoded so far, the game's and the host's (the frame step's work measure, nvn_fstep.h)
 void mtl_stats(uint64_t *passes, uint64_t *draws) { *passes = g_stat_pass; *draws = g_stat_draw; cp_report(); }
 void mtl_args_stats(uint64_t *enc, uint64_t *reuse, uint64_t *patch) { *enc = g_stat_args_enc; *reuse = g_stat_args_reuse; *patch = g_stat_args_patch; }
 void mtl_vbuf_stats(uint64_t *resolve, uint64_t *reuse, uint64_t *set, uint64_t *skip, uint64_t *copies, uint64_t *copy_bytes) {

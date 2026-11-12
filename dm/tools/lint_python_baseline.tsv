@@ -207,7 +207,6 @@ ruff	dm/tools/patch_nso.py	B023	1	Function definition does not bind loop variabl
 ruff	dm/tools/patch_nso.py	B023	2	Function definition does not bind loop variable `n`
 ruff	dm/tools/patch_nso.py	PIE808	1	Unnecessary `start` argument in `range`
 ruff	dm/tools/sdis.py	F841	1	Local variable `lo` is assigned to but never used
-ruff	dm/tools/tests/test_gpuprof.py	F401	1	`os` imported but unused
 ruff	dm/tools/tests/test_gpuprof.py	F401	1	`sys` imported but unused
 ruff	dm/tools/tests/test_image_atomic_bounds.py	B023	1	Function definition does not bind loop variable `dependencies`
 ruff	dm/tools/tests/test_nsp_incremental.py	B023	1	Function definition does not bind loop variable `build`

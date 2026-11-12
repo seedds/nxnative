@@ -138,12 +138,14 @@ static void rec_exec(const rec_t *r) {
     case RO_CB_END: [(id<MTL4CommandBuffer>)g_rx_cb endCommandBuffer]; break;
     case RO_CB_BLOCK: ((void (^)(id<MTL4CommandBuffer>))rec_id(a[0]))(g_rx_cb); break;
     case RO_COMMIT: case RO_COMMIT_REAL: {
+        uint64_t gt0 = atomic_load_explicit(&g_gt_on, memory_order_relaxed) ? mach_absolute_time() : 0;
         if (r->op == RO_COMMIT) ubc_wait(a[2]);   // the uniform shadows this command buffer reads
         id<MTL4CommandBuffer> buffers[] = {r->op == RO_COMMIT ? g_rx_cb : rec_id(a[1])}; MTL4CommitOptions *o = rec_id(a[0]);
         pthread_mutex_lock(&g_res_commit_mu);   // apart from the residency set's commit, as the present snapshot's queue commit (nvn_mtl.m res_commit)
         if (o) [g_q4 commit:buffers count:1 options:o]; else [g_q4 commit:buffers count:1];
         pthread_mutex_unlock(&g_res_commit_mu);
         if (r->op == RO_COMMIT) g_rx_cb = nil;
+        if (gt0) gt_put(GT_COMMIT, gt0, a[3], r->op == RO_COMMIT ? a[4] : UINT32_MAX);   // DM_NVN_GPUPROF's timeline: submission, segment (an upload batch: none)
         break; }
     case RO_SIGNAL: [g_q4 signalEvent:rec_id(a[0]) value:a[1]]; break;
     case RO_Q_BLOCK: ((void (^)(void))rec_id(a[0]))(); break;
@@ -367,14 +369,16 @@ static void rec_cb_block(id cb, void (^block)(id<MTL4CommandBuffer>)) {
 static id rec_table(id t) { if (!rec_on() || !t) return t; DmRecTable *s = [DmRecTable new]; s->real = t; return s; }
 // The replay's main command buffer: committed once the uniform shadows queued so far are made (ubc_wait)
 static void rec_commit(id cb, MTL4CommitOptions *o) {
-    if ([cb isKindOfClass:[DmRecCB class]]) { rec_t *r = rec_put(RO_COMMIT, 1); r->a[0] = rec_obj(o); r->a[2] = ubc_head(); return; }
+    if ([cb isKindOfClass:[DmRecCB class]]) { rec_t *r = rec_put(RO_COMMIT, 1); r->a[0] = rec_obj(o); r->a[2] = ubc_head(); r->a[3] = g_sub_serial; r->a[4] = g_seg; return; }
+    uint64_t gt0 = atomic_load_explicit(&g_gt_on, memory_order_relaxed) ? mach_absolute_time() : 0;
     ubc_wait(ubc_head());
     id<MTL4CommandBuffer> buffers[] = {cb};
     if (o) [g_q4 commit:buffers count:1 options:o]; else [g_q4 commit:buffers count:1];
+    if (gt0) gt_put(GT_COMMIT, gt0, g_sub_serial, g_seg);
 }
 // An upload batch: its place in the queue is after what is recorded so far (it reads no uniform shadow)
 static void rec_commit_upload(id cb, MTL4CommitOptions *o) {
-    if (rec_on() && g_rb_started) { rec_t *r = rec_put(RO_COMMIT_REAL, 2); r->a[0] = rec_obj(o); r->a[1] = rec_obj(cb); return; }
+    if (rec_on() && g_rb_started) { rec_t *r = rec_put(RO_COMMIT_REAL, 2); r->a[0] = rec_obj(o); r->a[1] = rec_obj(cb); r->a[3] = g_sub_serial; return; }
     id<MTL4CommandBuffer> buffers[] = {cb};
     if (o) [g_q4 commit:buffers count:1 options:o]; else [g_q4 commit:buffers count:1];
 }

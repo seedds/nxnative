@@ -25,6 +25,9 @@ host_msl_force:
 FW=-framework Metal -framework MetalFX -framework Foundation -framework QuartzCore -framework ImageIO -framework CoreGraphics -framework UniformTypeIdentifiers
 # Host crash.c is linked in as well: the write-protect unit tests go through the same page-fault hook as production
 # Tests that #include nvn_mtl.m link the rest of the NVN layer beside it (hle_nvn.c: memory pools, sparse pools, serials) and the host's large stack, with weak stubs of what they need of the host (t_host_stubs.c)
+# Textures in GPU-only memory sharing a heap per span (nvn_mtl.m window_on) turn on by themselves where Metal's working set is under 8 GB: the tests run as on a larger Mac
+# wherever they run, and t_window_alias turns the spans on itself
+export DM_NVN_WINDOW_ALIAS ?= 0
 MTL_T_DEP=../nvn/hle_nvn.c ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(GFX) $(GFX_H)
 MTL_T_SRC=../nvn/hle_nvn.c ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX))
 # The run list: every t_*.c and t_*.m but those in NOT_RUN. `make run` builds them all (in parallel with -j), then runs them one after another, each through its check_
@@ -166,6 +169,8 @@ check_t_tex_fit_root: t_tex_fit_root
 	MTL_DEBUG_LAYER=1 ./t_tex_fit_root
 t_addr_known: t_addr_known.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_addr_known.m $(MTL_T_SRC) $(FW)
+t_file_wire: t_file_wire.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_file_wire.m $(MTL_T_SRC) $(FW)
 t_pool_chunks: t_pool_chunks.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pool_chunks.m $(MTL_T_SRC) $(FW)
 t_pool_retire: t_pool_retire.m $(MTL_T_DEP)
@@ -237,6 +242,8 @@ t_ub: t_ub.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_ub.m $(MTL_T_SRC) $(FW)
 t_gpuprof: t_gpuprof.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_gpuprof.m $(MTL_T_SRC) $(FW)
+t_sub_overlap: t_sub_overlap.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_sub_overlap.m $(MTL_T_SRC) $(FW)
 t_dispatch_own: t_dispatch_own.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_dispatch_own.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_dispatch_own
@@ -501,9 +508,16 @@ check_t_partial_upload: RUN_ENV = MTL_DEBUG_LAYER=1
 t_srgb_alias: t_srgb_alias.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_srgb_alias.m $(MTL_T_SRC) $(FW)
 check_t_srgb_alias: RUN_ENV = MTL_DEBUG_LAYER=1
+t_window_alias: t_window_alias.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_window_alias.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_window_alias
+check_t_window_alias: t_window_alias
+	DM_NVN_WINDOW_ALIAS=1 DM_NVN_RT_RECYCLE=0 DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_window_alias
+	DM_NVN_WINDOW_ALIAS=1 DM_NVN_RT_RECYCLE=0 DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_window_alias
 t_image_alias: t_image_alias.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_image_alias.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_image_alias
+# t_image_alias checks the same-offset families (image_texture) a texture falls back to when its span's heap cannot take it: with the spans off, as every test runs (DM_NVN_WINDOW_ALIAS above)
 check_t_image_alias: t_image_alias
 	DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_image_alias
 	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_image_alias

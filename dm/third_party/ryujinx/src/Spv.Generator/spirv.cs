@@ -573,6 +573,8 @@ namespace Spv
             FragStencilRefEXT = 5014,
             ViewportMaskNV = 5253,
             SecondaryPositionNV = 5257,
+            BaryCoordKHR = 5286,   // nxnative: SPV_KHR_fragment_shader_barycentric
+            BaryCoordNoPerspKHR = 5287,
             SecondaryViewportMaskNV = 5258,
             PositionPerViewNV = 5261,
             ViewportMaskPerViewNV = 5262,
@@ -921,6 +923,7 @@ namespace Spv
             ShaderStereoViewNV = 5259,
             PerViewAttributesNV = 5260,
             FragmentFullyCoveredEXT = 5265,
+            FragmentBarycentricKHR = 5284,   // nxnative
             MeshShadingNV = 5266,
             ImageFootprintNV = 5282,
             FragmentBarycentricNV = 5284,

@@ -27,8 +27,20 @@ static inline int dm_host_thread_join(pthread_t thread, void **result) {
     return r;
 }
 
-// The message and its newline under one stream lock: written apart, another thread's line could land between them and two messages share a log line
-#define LOG(...) do { flockfile(stderr); fprintf(stderr, "[dm] " __VA_ARGS__); fputc('\n', stderr); funlockfile(stderr); } while (0)
+// One log line: the message and its newline under one stream lock (written apart, another thread's line could land between them and two messages share a log line).
+// The host's dm_log (hle_bigstack.c) writes it on the thread's big host stack when the caller is on a guest stack: formatting one line takes about 2.7 KB of stack, and a take-over
+// runs on the stack of the game thread that calls it, which can have less left (memory.md, Log lines on small guest stacks). The definition here is a weak one that writes on the
+// caller's stack, for the programs that do not link hle_bigstack.c (unit tests, whose stacks are host stacks); the host's replaces it at link time
+__attribute__((format(printf, 1, 2))) void dm_log(const char *fmt, ...);
+#ifndef DM_LOG_IMPL
+#include <stdarg.h>
+__attribute__((weak)) void dm_log(const char *fmt, ...) {
+    va_list ap; va_start(ap, fmt);
+    flockfile(stderr); vfprintf(stderr, fmt, ap); fputc('\n', stderr); funlockfile(stderr);
+    va_end(ap);
+}
+#endif
+#define LOG(...) dm_log("[dm] " __VA_ARGS__)
 #define die(...) do { LOG("FATAL " __VA_ARGS__); abort(); } while (0)
 
 typedef struct { uint32_t st_name; uint8_t st_info, st_other; uint16_t st_shndx; uint64_t st_value, st_size; } Elf64_Sym;
@@ -62,6 +74,7 @@ typedef struct {
     uint64_t unity_qs_ptr;     // Unity's QualitySettings (main's offset of the global pointer); the current level's vSyncCount, an int32, is at
     uint32_t unity_qs_idx, unity_qs_arr, unity_qs_size, unity_qs_vsync;   // [obj + arr] + (int32)[obj + idx] * size + vsync; 0 = none
     uint64_t fps_state_off;    // frame step state page (patch_nso.py FRAME_STEP: Tears of the Kingdom 1.4.3 and Breath of the Wild 1.9.0 main); 0 = none
+    uint32_t step_max;         // the largest step the frame step stubs give the game (the fixups table's STEP_MAX, patch_nso.py ctx.step_max); 0 = FSTEP_MAX
     uint32_t render_scale_max; // a render-scale stub's largest scale (the fixups table's RENDER_SCALE, patch_nso.py): DM_RENDER_SCALE is held to it; 0 = no such stub
     int64_t patch_off;         // patch area relative to the base; negative = before the base (image too large, see patch_nso.py FAR), and size does not include it
     uint64_t image_size, file_image_len, patch_len;   // only with the patch area before the base: whole image (with bss and key page), length of the image part of the file, patch area length
@@ -78,6 +91,7 @@ typedef struct {
     // NRO modules (nn::ro, loader.c "NRO modules"): mapped at start like the others, but they take part in symbol lookups only between LoadModule and UnloadModule
     int nro;
     _Atomic int loaded;        // the profile's modules always; NRO activation also synchronizes with borrowed stack backing
+    int alone;                 // loaded alone (a JIT plugin, nro_load_alone): not linked with the game, so no other module's load or unload rebinds its imports
     uint8_t sha256[32];        // an NRO's SHA-256 (what the game's NRR registers; LoadModule finds the module by the image it passes)
     uint32_t nro_size;         // an NRO's file size (header +0x18), the bytes the hash covers
     uint8_t *pristine; size_t pristine_len;   // an NRO's initialized data as rewritten; reload restores this and zeroes its bss
@@ -98,6 +112,7 @@ module_t *nro_find(const uint8_t sha256[32]);   // the mapped NRO with this hash
 int nro_refused(const uint8_t sha256[32]);      // an NRO the pack refused (an online SDK, nro.tsv "refused")
 void nro_load(module_t *m);     // relocate an NRO against the loaded modules and bind the earlier modules' imports it defines (the caller runs its init)
 void nro_load_alone(module_t *m);   // relocate an NRO against itself only: a JIT plugin, which on Horizon is not linked with the game (hle_jit.c)
+void nro_unload_alone(module_t *m); // the end of a load alone (DestroyJitEnvironment): inactive again, after its fini; its memory stays mapped in the layout
 const char *dm_jit_serve_dir(void); uint8_t *dm_jit_layout_base(void);   // a served nn::jit image and the layout the modules are mapped in for it (loader.c, hle_jit.c)
 void nro_unload(module_t *m);   // take an NRO out of the lookups and bind the imports that pointed into it again
 int svc_nro_deactivate(module_t *m);   // mark inactive under the memory map lock, refusing while a stack borrows its data
@@ -126,6 +141,7 @@ int gate_obs_present(int id);
 uint64_t now_ns(void);
 uint64_t guest_ns(void);              // Guest clock (hle_os.c; does not advance while frozen, guest_clock_freeze)
 uint64_t guest_ns_at_host_time(uint64_t host_ns);  // Host Mach-absolute ns projected into the current guest clock
+int guest_clock_pinned(void);  // the guest clock is frozen or DM_DETCLOCK's: guest_ns_at_host_time maps every host time to one
 uint64_t guest_ticks(void);           // The guest's system counter on that clock: 19.2 MHz, or 31.25 MHz for the Switch 2 (hle_os.c)
 int dm_detclock_enabled(void);
 void dm_guest_clock_advanced(void);

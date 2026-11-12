@@ -76,6 +76,16 @@ To enroll a cut for any game's own module:
   - FINAL FANTASY CRYSTAL CHRONICLES Remastered Edition: the 1.0.1 cheatslips file, anchored on the cartridge's `main`, compiles to exactly the hand-verified +0x43680 on 1.0.3 (12 of 12 cheats, 4 of 4 references each). The 1.0.3 file (5 ASM cheats with a code cave, 7 stat cheats, Mog's fatigue) compiles back to identical writes on 1.0.3 and to all 18 entries on the cartridge's build (code sites: 4 exact, 3 by body digest, 2 by window).
   - [13 Sentinels: Aegis Rim](../../dm/games/01003FC01670C000/README.md#cheats): a 1.10 Ryujinx list compiles back to identical writes and to 1.00, where every site lies 0x330 lower and the hook site was found by its body digest.
 
+## Thread registers
+
+### System register accesses through x18
+
+- **Symptom:** a crash (`sig=11`) in the patch area a few seconds into a run, at an `x18` site's load, with an address a little above a small stale value (`addr=0x33220`, the thread's `K18` slot at `0x33200`), shortly after the game read `tpidr_el0` into `x18`.
+- **Cause:** the guest's `x18` lives in the thread slot `K18`, since the Apple kernel may change the register at any instruction, and every `x18` site loads and stores the slot. The system register sites did not: `mrs x18, tpidr_el0` / `tpidrro_el0` put the value in the register only, `msr tpidr_el0, x18` stored the register into `KTLS`, and the gate for `mrs x18, cntpct_el0` / `cntvct_el0` wrote the saved `x18`, which `dm_gate` does not restore. The next `x18` site read whatever `K18` held before. `mrs x18, ctr_el0` stopped the rewrite with an assertion.
+- **Fix:** with `x18` as the register, the rewriter copies between thread slots (`site_slot_copy`: `KTLS` or `KTLR` into `K18`, `K18` into `KTLS`, the cache type constant into `K18`), carrying the value in `x15` with `x16` / `x17` for the slot addresses, all saved in the red zone; the value never passes through `x18`. The host's counter gate writes `K18` for a destination of `x18`. The other registers keep their blocks, so every other rewrite is byte-identical: none of 203 modules on hand has one of these instructions.
+- **Check:** `test_x18_sysreg.py` checks that no block names `x18`, and runs each block on a thread slot area with unicorn (optional); it fails without the fix.
+- **Found on:** The Hinokami Chronicles 2 (`0100AD80208A8000`, 1.70, SDK 22.0.0; not in the [games table](../../dm/games/README.md#games); [issue #2123](https://github.com/seedds/nxnative/issues/2123)): one `mrs x18, tpidr_el0` in `main`, at `+0x23f5ec0`. Its reporter's version of the fix ran 19 minutes into a battle; this one awaits their run.
+
 ## Jump tables
 
 ### Offset jump tables through x18 read at rewrite time

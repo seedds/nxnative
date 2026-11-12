@@ -41,9 +41,11 @@ int main(void) {
         CHECK(s2_clock_sample(&c, 1000, base, &lost) == base && lost == 0);   // the first report: its arrival
         // a burst: three reports arrive within 1 ms but were sampled 30 ms apart
         uint64_t t1 = s2_clock_sample(&c, 1030, base + 61 * ms, &lost), t2 = s2_clock_sample(&c, 1060, base + 61 * ms + 300000, &lost), t3 = s2_clock_sample(&c, 1090, base + 62 * ms, &lost);
-        CHECK(t1 == base + 30 * ms && t2 == base + 60 * ms && t3 == base + 62 * ms);   // 30 ms apart until the arrival caps it (never in the future)
-        CHECK(s2_clock_sample(&c, 1180, base + 160 * ms, &lost) == base + 152 * ms && lost == 2);   // a 90 ms step: two reports lost, the gap kept
-        uint64_t same = s2_clock_sample(&c, 1180, base + 161 * ms, &lost); CHECK(same > base + 152 * ms && same < base + 153 * ms);   // the same millisecond: still after it
+#define NEAR_MS(a, b) ((a) + 200000 > (b) && (b) + 200000 > (a))   // within 0.2 ms: the anchor rises 1 ms a second
+        CHECK(NEAR_MS(t1, base + 30 * ms) && NEAR_MS(t2, base + 60 * ms) && t3 == base + 62 * ms);   // 30 ms apart until the arrival caps it (never in the future)
+        // a 90 ms step: two reports lost, the gap kept; the second report in a row earlier than the anchor (-28 ms, then -20) moves it, to the later of the two
+        uint64_t t4 = s2_clock_sample(&c, 1180, base + 160 * ms, &lost); CHECK(t4 == base + 160 * ms && lost == 2);
+        uint64_t same = s2_clock_sample(&c, 1180, base + 161 * ms, &lost); CHECK(same > t4 && same < t4 + ms);   // the same millisecond: still after it
         CHECK(s2_clock_sample(&c, 1210, base + 400 * ms, &lost) == base + 340 * ms);   // arriving late: held to 60 ms behind the arrival
         CHECK(s2_clock_sample(&c, 9000, base + 9000 * ms, &lost) == base + 9000 * ms && lost == 0);   // seconds of silence: starts over at the arrival
         CHECK(s2_clock_sample(&c, 100, base + 9030 * ms, &lost) == base + 9030 * ms);   // the clock went back: starts over too
@@ -56,6 +58,50 @@ int main(void) {
             prev = t;
         }
         CHECK(fabs(deg - 100 * S2_GYRO_DPS * 0.99) < 0.06 * 100 * S2_GYRO_DPS);   // 33 intervals of 30 ms: 0.99 s of rotation, the arrival jitter mostly gone
+        // the anchor is a report with about the least latency, not the first: a first report 20 ms late, then reports 2..12 ms late, sample at the low end of their latency
+        s2_clock e = {0}; uint64_t worst = 0;
+        for (int i = 0; i < 100; i++) {
+            uint64_t sent = base + (uint64_t)i * 30 * ms, arr = sent + (i ? 2 * ms + (uint64_t)((i * 7919) % 11) * ms : 20 * ms);
+            uint64_t t = s2_clock_sample(&e, 3000 + 30 * (unsigned)i, arr, NULL);
+            if (i > 10 && t - sent > worst) worst = t - sent;
+        }
+        CHECK(worst >= 2 * ms && worst < 8 * ms);   // two quick reports in a row set it: under 8 ms of the 2..12, far from the first report's 20
+        // a controller clock 500 ppm slow (its 30 ms are 30.015 of the host's) for a minute: the anchor follows, the samples stay near their arrival instead of drifting to 60 ms
+        s2_clock g = {0}; uint64_t lag_max = 0;
+        for (int i = 0; i < 2000; i++) {
+            uint64_t sent = base + (uint64_t)i * 30015000ull, arr = sent + 2 * ms + (uint64_t)((i * 7919) % 6) * ms;
+            uint64_t t = s2_clock_sample(&g, 3000 + 30 * (unsigned)i, arr, NULL);
+            if (i > 100 && arr - t > lag_max) lag_max = arr - t;
+        }
+        CHECK(lag_max < 8 * ms);   // the arrival jitter (up to 5 ms) and the anchor's rise, not the drift (30 ms over the minute)
+        // one report with an unusually short latency (1 ms, the others 5 ms) does not move the anchor: the samples after it stay 5 ms before their arrival
+        s2_clock o = {0}; int moved = 0; uint64_t sp_min = ~0ull, prev_o = 0;
+        for (int i = 0; i < 200; i++) {
+            uint64_t sent = base + (uint64_t)i * 30 * ms, arr = sent + (i == 100 ? 1 : 5) * ms;
+            uint64_t t = s2_clock_sample(&o, 3000 + 30 * (unsigned)i, arr, NULL);
+            if (i > 100 && (t > arr || arr - t > 100000)) moved++;   // within 0.1 ms of the arrival (the 1 ms a second rise, re-pinned by each report)
+            if (prev_o && t - prev_o < sp_min) sp_min = t - prev_o;
+            prev_o = t;
+        }
+        CHECK(!moved && sp_min >= 26 * ms);   // and the early one itself only takes its arrival (26 ms after the last), no sample microseconds apart
+        // a controller clock 1000 ppm fast (its 30 ms are 29.97 of the host's), arrivals 2..7 ms late: the times step evenly, not each one its own arrival
+        s2_clock fc = {0}; unsigned uneven = 0; uint64_t prev_f = 0;
+        for (int i = 0; i < 2000; i++) {
+            uint64_t sent = base + (uint64_t)i * 29970000ull, arr = sent + 2 * ms + (uint64_t)((i * 7919) % 6) * ms;
+            uint64_t t = s2_clock_sample(&fc, 3000 + 30 * (unsigned)i, arr, NULL);
+            if (i > 100 && (t - prev_f < 27 * ms || t - prev_f > 33 * ms)) uneven++;
+            prev_f = t;
+        }
+        CHECK(uneven < 100);   // under 5% of the steps more than 3 ms off 30
+        // connecting: a first burst read with the first report's anchor (three reports at once, 60 ms late), then 2 ms reports: only that burst's samples crowd
+        s2_clock cb = {0}; unsigned crowded = 0; uint64_t prev_b = 0;
+        for (int i = 0; i < 50; i++) {
+            uint64_t sent = base + (uint64_t)i * 30 * ms, arr = i < 3 ? base + 62 * ms : sent + 2 * ms;
+            uint64_t t = s2_clock_sample(&cb, 3000 + 30 * (unsigned)i, arr, NULL);
+            if (prev_b && t - prev_b < 15 * ms) crowded++;
+            prev_b = t;
+        }
+        CHECK(crowded <= 3);
     }
     n = unhex("722e0000080000e0ff0ffff77ff2a77d000000000000000000a000160002ff880d002608000000000001af628a00fdff000000000000000000000000000000", b);
     CHECK(s2_report_parse(b, n, &r) && r.buttons == (0xE0000000u | S2_A) && r.rx == 2034 && r.ry == 2010 && r.lx == 2047 && r.ly == 2047);

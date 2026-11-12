@@ -1,29 +1,15 @@
 """Production reflection conversion with synthetic translator descriptors."""
-import ast
 from pathlib import Path
-import re
 import sys
 import unittest
 
 TOOLS = Path(__file__).resolve().parents[1] / 'tools'
 sys.path.insert(0, str(TOOLS))
 import dmsh_abi
-import dmsh_geometry
+import dmsh_reflect
 
 
-def builder_reflection():
-    # Isolate pure reflection code from the builder's CLI/profile initialization.
-    tree = ast.parse((TOOLS / 'dmsh_build.py').read_text())
-    names = {'reflect', 'decode_tex', 'decode_ubo_tex', 'decode_ubo_img', 'const_sampler', 'c2_array'}
-    selected = [n for n in tree.body if (isinstance(n, ast.FunctionDef) and n.name in names)
-                or (isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'SSBO' for t in n.targets))
-                or (isinstance(n, ast.Assign) and any(isinstance(t, ast.Tuple) and any(isinstance(e, ast.Name) and e.id == 'TEX_BASE' for e in t.elts) for t in n.targets))]
-    ns = {'re': re, 'dmsh_geometry': dmsh_geometry, 'abi': dmsh_abi}
-    exec(compile(ast.Module(body=selected, type_ignores=[]), str(TOOLS / 'dmsh_build.py'), 'exec'), ns)
-    return ns['reflect']
-
-
-REFLECT = builder_reflection()
+REFLECT = dmsh_reflect.reflect
 
 
 def bindings(stage, offsets, flags, cb_slot=0):
@@ -118,13 +104,34 @@ class UniformArraysWithDriverSampler(unittest.TestCase):
         self.assertEqual((samp['kind'], samp['reg'], samp['off'], samp['soff'], samp['sreg']), ('samp_ubo', 3, 0, 0x570, dmsh_abi.SREG_C2))
 
 
+class SeparateSamplerIds(unittest.TestCase):   # handle type 2: the texture word in c2, the sampler a raw SeparateSamplerId in a word of a uniform buffer
+    def reflect(self, name):
+        source = f'struct spvDescriptorSetBuffer0\n{{\n    texture2d<float> {name} [[id(0)]];\n    sampler {name}Smplr [[id(1)]];\n}};\n'
+        return REFLECT('synthetic', 'ps', source, {'sbufs': []})
+
+    def test_texture_in_c2_sampler_id_in_c10(self):   # The Witcher 3 (181 of its shaders): slots 0xb0002 (texture bank 2, sampler bank 10), separate texture word 0x5a, sampler word 0 of c10
+        tex, samp = self.reflect('fp_t_cb720898_2000005A')
+        self.assertEqual(tex['kind'], 'tex')
+        self.assertEqual(tex['reg'], 128)   # c2 byte 0x168: separate texture slot 0 (NVN_SEPTEX_SLOT0)
+        self.assertEqual((samp['kind'], samp['reg'], samp['off'], samp['raw_id']), ('samp_ubo', 7, 0, True))
+
+    def test_sampler_word_offset(self):   # sampler word 1 of c10: byte 4
+        tex, samp = self.reflect('fp_t_cb720898_2000405C')
+        self.assertEqual(tex['reg'], 129)
+        self.assertEqual((samp['reg'], samp['off'], samp['raw_id']), (7, 4, True))
+
+    def test_sampler_word_is_not_taken_as_a_texture_word(self):   # sampler word 0x10 of c10 (byte 0x40) would be combined texture slot 4 if read as a c2 word
+        tex, samp = self.reflect('fp_t_cb720898_2004005A')
+        self.assertEqual(tex['reg'], 128)
+        self.assertEqual((samp['reg'], samp['off']), (7, 0x40))
+
+    def test_other_handle_types_carry_no_raw_id(self):   # type 1 with the same slots stays a separate texture + separate sampler pair
+        _, samp = self.reflect('fp_t_cb720898_1000005A')
+        self.assertNotIn('raw_id', samp)
+
+
 def builder_unfillable():
-    tree = ast.parse((TOOLS / 'dmsh_build.py').read_text())
-    keep = lambda n: (isinstance(n, ast.FunctionDef) and n.name in ('drv_reads', 'unfillable')) or (isinstance(n, ast.Assign) and any(
-        (isinstance(t, ast.Name) and t.id in ('SSBO', 'DRV_FILL', 'SAMPLE_ROWS')) or (isinstance(t, ast.Tuple) and any(isinstance(e, ast.Name) and e.id == 'TEX_BASE' for e in t.elts)) for t in n.targets))
-    ns = {'re': re, 'abi': dmsh_abi}
-    exec(compile(ast.Module(body=[n for n in tree.body if keep(n)], type_ignores=[]), str(TOOLS / 'dmsh_build.py'), 'exec'), ns)
-    return lambda src, stage='ps': ns['unfillable'](ns['drv_reads'](src), stage)
+    return lambda src, stage='ps': dmsh_reflect.unfillable(dmsh_reflect.drv_reads(src), stage)
 
 
 UNFILLABLE = builder_unfillable()
@@ -149,6 +156,23 @@ class DriverReads(unittest.TestCase):
 
     def test_sample_rows_are_not_filled_for_other_stages(self):
         self.assertEqual(UNFILLABLE(self.SAMPLE_LOOKUP, 'vs'), ['c0 dynamic index', 'c0+0x630'])
+
+    # PRAGMATA's sample position lookup without the grid (a689530d00090ebf): a byte of the table at 0x620 + the sample index, row 98
+    SAMPLE_BYTE = ('float _115 = as_type<float>(gl_SampleID);\n'
+                   'int _141 = as_type<int>(_115) + 1568;\n'
+                   'uint _144 = uint(int(uint(_141) >> uint(2)));\n'
+                   'uint _146 = uint(int(uint(int(_144)) >> uint(2)));\n'
+                   'int _148 = int(_144) & 3;\n'
+                   'float _150 = (*spvDescriptorSet0.fp_c0)._m0[int(_146)][_148];')
+
+    def test_sample_byte_by_the_sample_index_is_filled_in_a_pixel_shader(self):
+        self.assertEqual(UNFILLABLE(self.SAMPLE_BYTE), [])
+
+    def test_sample_byte_is_not_filled_for_other_stages(self):
+        self.assertEqual(UNFILLABLE(self.SAMPLE_BYTE, 'vs'), ['c0+0x620'])
+
+    def test_index_reassigned_in_a_loop_stays_dynamic(self):
+        self.assertEqual(UNFILLABLE(self.SAMPLE_BYTE.replace('int _148', '_146 = 7u;\nint _148')), ['c0 dynamic index'])
 
 
 if __name__ == '__main__':

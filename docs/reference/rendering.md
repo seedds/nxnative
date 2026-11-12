@@ -861,6 +861,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - `DM_NVN_DEPTHOVR` (depth test forced to `ALWAYS`) with `HILITE` tells "rejected by depth" from "never rasterized". `TEXSNAP` copies used to run before the pass they were meant to show (classic-queue command buffer committed ahead of the Metal 4 one); they now go through the replay's copy encoder.
 - **Found on:** [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md), tracing the tile lighting: the G-buffer class byte selects per-class half-resolution passes through a depth buffer of class values (`gl_FragDepth = mix(0.5, 1, nibble-swapped class / 255)`, then full-screen or per-tile quads with depth `EQUAL`).
 
+### Front and back stencil reference values
+
+- **Symptom:** a two-sided stencil draw whose back faces test against their own reference value passes nowhere (or everywhere) on the back faces; nothing in the log. In Mario Golf: Super Rush the ground decals are missing: the driving range's scoring target in Golf Adventure (a ring with a blue centre on the fairway) is not drawn, in the normal view or the top view.
+- **Cause:** `SetStencilRef` takes a face, and the replay keeps both values, but sent Metal the front one for both faces (`setStencilReferenceValue:`), while the depth-stencil state (`dss_get`) already gave each face its own compare function, operations and masks. A back face therefore tested the front value. Mario Golf's decals are volumes drawn twice: front faces mark stencil bit 0x80 where the volume lies behind the ground, then back faces draw the colour where `stencil & 0x90` equals the back value 0x10 (the ground's mark, written by the terrain draws) while the front value is 0. With 0 for both, the colour draw passed nowhere on the ground.
+- **Fix:** `enc_r_stencil_ref` sends both values (`setStencilFrontReferenceValue:backReferenceValue:`), the per-encoder state cache compares both, and the deferred recorder (`nvn_rec.h` `RO_R_SREF`) carries both. The Vulkan layer already sent both (`hle_vk.m`).
+- **Found on:** Mario Golf: Super Rush (`0100C9C00E25C000`, 4.0.0, issue #814; no profile in the repository), Golf Adventure's driving-range lesson, the PR author's runs (PR #2351): pass with fragment shader `6f91c05c60985a33`, four draws of 384 indices (two decals, two draws each); the target shows in the top view and from the tee.
+
 ### Stencil-mode texture views read through `X32_Stencil8`
 
 - **Symptom:** striped lighting: black and white bands that follow depth on every lit surface, as if every pixel were in or out of shadow at random.

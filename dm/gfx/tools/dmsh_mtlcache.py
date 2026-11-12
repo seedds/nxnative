@@ -10,7 +10,7 @@
 # Not part of the chain version (dmsh_chain.py): the cache never changes an output, it only skips recompiling one. Change FORMAT when what it stores changes.
 import os, re, sys, json, shutil, ctypes, hashlib, threading, subprocess, collections
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'tools'))
-import romfs, shader_lib   # the libraries of an earlier build may be one file (shader_lib.py), read in place
+import romfs, shader_cache, shader_lib   # the libraries of an earlier build may be one file (shader_lib.py), read in place
 STAMPS = 'metallib/filled.json'   # the earlier builds' folders already read
 
 FORMAT = b'dmsh_mtlcache 2'   # earlier prefill could misclassify an unsampled library from another compiler
@@ -31,8 +31,8 @@ def compiler_id(sdk):
 
 
 class Cache:
-    def __init__(self, store, targets, work):
-        """store: shader_cache.Store; targets: {name: (sdk, record, compile)}, compile(msl, air, lib) as ios_metal.compile; work: a folder for temporary .air files"""
+    def __init__(self, store: 'shader_cache.Store | shader_cache.Remote', targets, work):
+        """store: the compile cache (in a worker process of dmsh_build.py, its Remote); targets: {name: (sdk, record, compile)}, compile(msl, air, lib) as ios_metal.compile; work: a folder for temporary .air files"""
         self.store, self.targets, self.work = store, targets, work
         self.ident = {t: hashlib.sha256(FORMAT + b'\0' + rec.encode() + b'\0' + compiler_id(sdk).encode()).digest() for t, (sdk, rec, _) in targets.items()}
         self.stats, self.lock = collections.Counter(), threading.Lock()

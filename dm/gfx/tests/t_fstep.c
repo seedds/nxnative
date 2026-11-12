@@ -18,16 +18,20 @@ static void run(sim *m, int n, double w, int kmin, int kmax, int fixed) {
     }
 }
 
+// A hitch that steps hold 1 up: six frames of 1.6 vsyncs (pipeline compiles), 3.6 vsyncs behind in the last 30 frames, more than FSTEP_LATE a frame on average. Three such
+// frames among frames on time are paid back by the step and keep hold 1 (below)
+static void hitch(sim *m) { run(m, 6, 1.6, 1, 3, 0); }
+
 int main(void) {
     {   // 120 fps (hle_nvn.c fps_high): kmin 1, kmax 2, in ticks of 1/120 s. The target follows the hold, so a hold above what frames take is the game at the right speed
-        sim m = {0}; m.s.per_vsync = 2;
+        sim m = {0}; m.s.per_vsync = 2; m.s.no_payback = 1;
         run(&m, 120, 0.7, 1, 2, 0); check(m.s.k == 1, "120 fps: frames of 5.8 ms hold 120");
         check(m.s.hold == FSTEP_HOLD0 * 2, "120 fps: the wait before a trial is the same real time");
         run(&m, 10, 1.6, 1, 2, 0); check(m.s.k == 2, "120 fps: frames of 13 ms step down to 60");
         run(&m, 600, 1.6, 1, 2, 0); check(m.s.k == 2, "120 fps: they stay at 60 while they do not fit");
         run(&m, 60, 4.0, 1, 2, 0); check(m.s.k == 2, "120 fps: 33 ms frames stop at 60, never a longer hold");
         run(&m, 1200, 0.7, 1, 2, 0); check(m.s.k == 1, "120 fps: frames that fit return to 120");
-        sim c = {0}; c.s.per_vsync = 2;
+        sim c = {0}; c.s.per_vsync = 2; c.s.no_payback = 1;
         run(&c, 120, 0.7, 1, 2, 0); run(&c, 30, 0.7, 2, 2, 0); check(c.s.k == 2, "120 fps: a cap of 60 (a movie, a 60 Hz screen) holds two ticks");
         run(&c, 120, 0.7, 1, 2, 0); check(c.s.k == 1, "120 fps: the cap's end returns to 120");
     }
@@ -40,6 +44,37 @@ int main(void) {
         check(m.s.k == 2 && m.s.ups == 1 && m.s.downs == 0, b);
         snprintf(b, sizeof b, "  game time %.0f against real time %.2f (debt %.2f)", m.game, m.real, m.s.debt);
         check(m.real - m.game - m.s.debt > -1.01 && m.real - m.game - m.s.debt < 1.01 && m.s.debt < 1, b);
+    }
+    {   // Mario Kart World on an M4 Max (issue #1823): frames scattered around one vsync, three in a row late by 4 ms every 20 frames, the rest on time. The rate holds 60
+        // and the step pays the late frames back, so hold 1 stays (three late frames alone stepped to 30 every second)
+        sim m = {0}; run(&m, 120, 0.5, 1, 3, 0);
+        for (int i = 0; i < 3000; i++) run(&m, 1, i % 20 < 3 ? 1.25 : 0.9, 1, 3, 0);
+        snprintf(b, sizeof b, "near-misses, 3 of every 20 frames late by 4 ms: hold 1 (k %d, ups %llu, late %llu)", m.s.k, (unsigned long long)m.s.ups, (unsigned long long)m.s.late);
+        check(m.s.k == 1 && m.s.ups == 0 && m.s.late >= 400, b);
+        snprintf(b, sizeof b, "  game time %.0f against real time %.2f (debt %.2f, paid %llu)", m.game, m.real, m.s.debt, (unsigned long long)m.s.paid);
+        check(m.real - m.game - m.s.debt > -1.01 && m.real - m.game - m.s.debt < 1.01 && m.s.paid > 0, b);
+        sim h = {0}; run(&h, 120, 0.5, 1, 3, 0); run(&h, 600, 0.9, 1, 3, 0); run(&h, 3, 1.6, 1, 3, 0); run(&h, 60, 0.9, 1, 3, 0);
+        check(h.s.k == 1 && h.s.ups == 0, "  a hitch of three 27 ms frames among frames on time: hold 1");
+    }
+    {   // a scene at 1.3 vsyncs whose eleventh late frame is a 50 ms hitch: the step goes to the cheapest of the last three (2), not to the hitch (3)
+        sim m = {0}; run(&m, 120, 0.5, 1, 3, 0); run(&m, 10, 1.3, 1, 3, 0);
+        check(m.s.k == 1, "scene at 1.3 vsyncs: ten late frames are 3 vsyncs behind, not yet short of hold 1");
+        run(&m, 1, 3.0, 1, 3, 0);
+        snprintf(b, sizeof b, "  a 3-vsync frame then: hold 2, not 3 (k %d)", m.s.k);
+        check(m.s.k == 2 && m.s.ups == 1, b);
+    }
+    {   // a game whose stub takes steps up to 2 (Mario Kart World's STEP_MAX): frames of 2.6 vsyncs stop at hold 2, and no step above 2 is handed out
+        sim m = {0}; m.s.smax = 2; int over = 0;
+        run(&m, 120, 0.5, 1, 3, 0);
+        for (int i = 0; i < 600; i++) { run(&m, 1, i < 300 ? 2.6 : 1.3, 1, 3, 0); over += m.next > 2; }
+        snprintf(b, sizeof b, "step cap 2: frames of 2.6 then 1.3 vsyncs hold 2 at most, steps at most 2 (k %d, steps over 2: %d)", m.s.k, over);
+        check(m.s.k == 2 && over == 0, b);
+        sim f = {0}; f.s.smax = 2; run(&f, 10, 0.5, 1, 3, 3);
+        check(f.s.k == 2 && f.next == 2, "  a step the game fixes at 3 is held at the cap");
+    }
+    {   // 120 fps (no payback: the game steps by its target, so a late frame is slow motion): three late frames step down to 60 whatever the average
+        sim m = {0}; m.s.per_vsync = 2; m.s.no_payback = 1; run(&m, 120, 0.7, 1, 2, 0); run(&m, 3, 1.25, 1, 2, 0);
+        check(m.s.k == 2, "120 fps, no payback: three frames late by 2 ms step down to 60");
     }
     {   sim m = {0}; run(&m, 120, 0.5, 1, 3, 0); run(&m, 300, 1.12, 1, 3, 0);   // 18.7 ms frames: 53 fps
         check(m.s.k == 2 && m.s.ups == 1, "steady 18.7 ms frames (53 fps): 30 fps, not 53 with a payback every 8 frames");
@@ -156,12 +191,12 @@ int main(void) {
         sim m = {0}; run(&m, 60, 0.5, 1, 3, 0); run(&m, 300, 1.3, 1, 3, 0); m.slow = 1;
         for (int i = 0; i < 1000 && m.s.probe != 2; i++) run(&m, 1, m.s.k == 1 ? 0.6 : 1.2, 1, 3, 0);
         double hold0 = m.s.hold; uint64_t failed = m.s.failed;
-        run(&m, 120, 0.6, 1, 3, 0); run(&m, 3, 1.5, 1, 3, 0);
+        run(&m, 120, 0.6, 1, 3, 0); hitch(&m);
         snprintf(b, sizeof b, "slowed, hold 1 lasts 2 s after the probe: counted as failed (failed %llu, hold-off %.0f → %.0f vsyncs)", (unsigned long long)m.s.failed, hold0, m.s.hold);
         check(m.s.k == 2 && m.s.failed == failed + 1 && m.s.hold == 2 * hold0 && m.s.probe == 0, b);
         for (int i = 0; i < 2000 && m.s.probe != 2; i++) run(&m, 1, m.s.k == 1 ? 0.6 : 1.2, 1, 3, 0);
         hold0 = m.s.hold; failed = m.s.failed;
-        run(&m, 600, 0.6, 1, 3, 0); run(&m, 3, 1.5, 1, 3, 0);
+        run(&m, 600, 0.6, 1, 3, 0); hitch(&m);
         snprintf(b, sizeof b, "  hold 1 lasts 10 s after the next probe: the hold-off returns to 1 s (failed %llu, hold-off %.0f → %.0f vsyncs)", (unsigned long long)m.s.failed, hold0, m.s.hold);
         check(m.s.k == 2 && m.s.failed == failed && hold0 == 120 && m.s.hold == FSTEP_HOLD0, b);
     }
@@ -206,11 +241,11 @@ int main(void) {
         snprintf(b, sizeof b, "  probes %.0f, %.0f, %.0f vsyncs apart; game time %.0f against real time %.2f (debt %.2f)", gaps[1], gaps[2], gaps[3], m.game, m.real, m.s.debt);
         check(gaps[1] >= 120 && gaps[2] >= 240 && gaps[3] >= 480 && m.real - m.game - m.s.debt > -1.01 && m.real - m.game - m.s.debt < 1.01, b);
     }
-    {   // Breath of the Wild on an iPhone (2026-10-21): frames of 0.80 / 0.92 vsyncs at hold 1 for 20 s, three pipeline compiles step to 2, and the scene costs the same there:
+    {   // Breath of the Wild on an iPhone (2026-10-21): frames of 0.80 / 0.92 vsyncs at hold 1 for 20 s, pipeline compiles step to 2, and the scene costs the same there:
         // every other frame is above FSTEP_FIT, so no 30 fit in a row; the cost that held hold 1 starts one probe, which holds
         sim m = {0};
         for (int i = 0; i < 1200; i++) run(&m, 1, i % 2 ? 0.92 : 0.80, 1, 3, 0);
-        run(&m, 3, 1.6, 1, 3, 0);
+        hitch(&m);
         int stepped = m.s.k == 2; double ref = m.s.cref;
         for (int i = 0; i < 600; i++) run(&m, 1, i % 2 ? 0.92 : 0.80, 1, 3, 0);
         snprintf(b, sizeof b, "hitch after 20 s at hold 1, same cost at hold 2 (BotW): one probe back that holds (k %d, probes %llu, failed %llu)", m.s.k, (unsigned long long)m.s.probes, (unsigned long long)m.s.failed);
@@ -229,13 +264,13 @@ int main(void) {
     {   // hold 1 held only 5 s before the hitch: that run proves nothing (a device that steps up every few seconds keeps 30 rather than flap)
         sim m = {0};
         for (int i = 0; i < 300; i++) run(&m, 1, i % 2 ? 0.92 : 0.80, 1, 3, 0);
-        run(&m, 3, 1.6, 1, 3, 0);
+        hitch(&m);
         for (int i = 0; i < 2000; i++) run(&m, 1, i % 2 ? 0.92 : 0.80, 1, 3, 0);
         check(m.s.k == 2 && m.s.probes == 0 && m.s.cref == 0, "hitch after 5 s at hold 1: no cost that held, no probe");
     }
     {   // the cost at hold 2 is what held, but hold 1 no longer fits (1.3 there): each probe fails, the probes spread out 1 → 2 → 4 → 8 s, and the cost that held is kept
         sim m = {0}; double last = 0, gaps[5]; int ng = 0; uint64_t probes = 0;
-        run(&m, 1200, 0.86, 1, 3, 0); run(&m, 3, 1.6, 1, 3, 0);
+        run(&m, 1200, 0.86, 1, 3, 0); hitch(&m);
         for (int i = 0; i < 6000 && ng < 5; i++) {
             run(&m, 1, m.s.k == 1 ? 1.3 : 0.86, 1, 3, 0);
             if (m.s.probes != probes) { probes = m.s.probes; gaps[ng++] = m.real - last; last = m.real; }
@@ -252,7 +287,7 @@ int main(void) {
         check(sustained ? m.s.cref_at[1] > 0.85 && m.s.cref_at[1] < 0.87 : m.s.cref_at[1] == 0,
               sustained ? "first movie after 20 s at 60: save the sustained run without an earlier hitch"
                         : "first movie after only 5 s at 60: no proven cost to save");
-        run(&m, 60, 0.86, 1, 3, 0); uint64_t probes = m.s.probes; run(&m, 3, 1.6, 1, 3, 0);
+        run(&m, 60, 0.86, 1, 3, 0); uint64_t probes = m.s.probes; hitch(&m);
         for (int i = 0; i < 1200; i++) run(&m, 1, m.s.k == 1 ? 0.86 : 0.9, 1, 3, 0);
         check(sustained ? m.s.k == 1 && m.s.probes > probes : m.s.k == 2 && m.s.probes == probes,
               sustained ? "  hitch 1 s after the first movie: the saved run brings 60 back"
@@ -265,17 +300,17 @@ int main(void) {
         run(&m, 1200, 0.6, 1, 3, 0); run(&m, 120, 0.5, 2, 2, 0);
         check(m.s.cref_at[1] > 0.59 && m.s.cref_at[1] < 0.61, "  another sustained run before a movie: update the proven cost");
     }
-    {   sim m = {0}; run(&m, 1200, 0.86, 1, 3, 0); run(&m, 3, 1.6, 1, 3, 0); double held = m.s.cref; run(&m, 1, 0.5, 2, 3, 0);
+    {   sim m = {0}; run(&m, 1200, 0.86, 1, 3, 0); hitch(&m); double held = m.s.cref; run(&m, 1, 0.5, 2, 3, 0);
         check(held > 0.85 && m.s.cref == 0 && m.s.run <= 2, "movie flag (kmin 2): the cost that held kmin 1 is set aside");
         run(&m, 120, 0.5, 2, 3, 0); run(&m, 1, 0.5, 1, 3, 0);
         check(m.s.cref == held, "  movie ends (kmin 1): the cost that held kmin 1 comes back");
     }
     {   // Tears of the Kingdom's prerendered movies set a 30 cap (kmin 2). A GPU-bound game at 0.86 vsyncs at hold 1 and 0.9 at hold 2 (the clock lowered for the longer hold)
-        // has learned the cost that held hold 1 from a hitch; after a 10 s movie, pipeline compiles 1 s in (three frames of 1.6) step it up before 8 s at hold 1 relearn it
-        sim m = {0}; run(&m, 1200, 0.86, 1, 3, 0); run(&m, 3, 1.6, 1, 3, 0);
+        // has learned the cost that held hold 1 from a hitch; after a 10 s movie, pipeline compiles 1 s in (hitch) step it up before 8 s at hold 1 relearn it
+        sim m = {0}; run(&m, 1200, 0.86, 1, 3, 0); hitch(&m);
         for (int i = 0; i < 1200; i++) run(&m, 1, m.s.k == 1 ? 0.86 : 0.9, 1, 3, 0);
         double held = m.s.cref; int at1 = 0;
-        run(&m, 600, 0.5, 2, 2, 0); run(&m, 60, 0.86, 1, 3, 0); run(&m, 3, 1.6, 1, 3, 0);
+        run(&m, 600, 0.5, 2, 2, 0); run(&m, 60, 0.86, 1, 3, 0); hitch(&m);
         for (int i = 0; i < 1200; i++) { run(&m, 1, m.s.k == 1 ? 0.86 : 0.9, 1, 3, 0); at1 += i >= 600 && m.s.k == 1; }
         snprintf(b, sizeof b, "  a hitch 1 s after a movie: the cost that held hold 1 starts a probe (k %d, at hold 1 %d of the last 600)", m.s.k, at1);
         check(held > 0.85 && m.s.k == 1 && at1 == 600, b);

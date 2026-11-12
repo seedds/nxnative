@@ -32,5 +32,8 @@ int main(void) {
     assert(pro_motion_player(1, 1, 2) == 2);
     assert(pro_motion_player(1, 1, -1) == -1 && pro_motion_player(0, 1, 0) == -1);
     assert(pro_motion_player(2, 1, 0) == -1 && pro_motion_player(1, 2, 0) == -1);
+    assert(!pro_live(0, t));                                                          // an entry that never sent report 0x30
+    assert(pro_live(t, t) && pro_live(t, t + PRO_SILENT_NS - 1));                     // still streaming
+    assert(!pro_live(t, t + PRO_SILENT_NS) && !pro_live(t + 1, t));                   // silent for a second; a stamp ahead of the clock
     puts("t_motion_pro: passed");
 }

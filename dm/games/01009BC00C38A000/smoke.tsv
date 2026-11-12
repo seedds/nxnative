@@ -1,0 +1,9 @@
+# Fresh save: skip the opening, title, file 1, New Run, Isaac; stand in the starting room.
+save	new
+keys	f300:A,f420:A,f540:A,f660:A,f780:A
+secs	45
+quick	35
+reach	1800@35
+window	25	10
+shots	25,33
+hang	15

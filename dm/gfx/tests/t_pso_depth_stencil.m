@@ -158,7 +158,7 @@ static void invalid_descriptors(NvProg *p) {
     for (unsigned i = 0; i < sizeof cases / sizeof *cases; i++) for (int compile = 0; compile <= 1; compile++) {
         pso_key k = {.dfmt = cases[i][0], .sfmt = cases[i][1], .samples = 1}; k.cfmt[0] = 70;
         NSError *error = nil;
-        CHECK(!pso_build_ex(pso_desc(&k, p->sh[0], p->sh[1], nil, 0), &error, compile), "invalid descriptor is rejected before either Metal compiler path");
+        CHECK(!pso_build_ex(pso_desc(&k, p->sh[0], p->sh[1], nil, 0), 0, &error, compile), "invalid descriptor is rejected before either Metal compiler path");
         CHECK(error.code == 1 && [error.domain isEqual:@"nxnative.NVN.Pipeline"], "invalid descriptor reports an explicit input error");
     }
 }
@@ -183,6 +183,35 @@ static void prediction(id<MTLLibrary> lib) {
     }
 }
 
+// The draw's pipeline is cached and its base made: the attachment-free variant shares that base, so the prediction hands nothing to the background for it, asks no archive,
+// and leaves it out of its next candidates. Without Metal 4 bases it is built as before
+static void prediction_made_base(id<MTLLibrary> lib) {
+    NvProg *p = program(lib); static prog_t pg = {.serial = 980101}; serial_put(pg.serial, p);
+    state_reset(); S.prog = &pg; memset(&g_pass, 0, sizeof g_pass); g_pass.cfmt[0] = 70; g_pass.dfmt = g_pass.sfmt = 260; g_pass.samples = 1;
+    pso_key k, alt; pso_key_fill(&k, p->sh[0], p->sh[1], g_pass.cfmt, 260, 260, 1, 0); pso_key_fill(&alt, p->sh[0], p->sh[1], g_pass.cfmt, 0, 0, 1, 0);
+    NSError *error = nil; id<MTLRenderPipelineState> ps = pso_build(pso_desc(&k, p->sh[0], p->sh[1], nil, 0), !k.border, &error);
+    CHECK(ps != nil, "the drawn pipeline builds"); if (!ps) return;
+    hm_put_id(&g_pso, &k, ps);
+    CHECK(pso_base_made(&alt, p->sh[0], p->sh[1]) == (g_comp4 != nil), "the attachment-free variant's base is the drawn pipeline's");
+    uint8_t commands[1024] = {0}; p_draw draw = {.prim = NVN_DRAW_PRIMITIVE_TRIANGLES, .count = 3};
+    unsigned size = (unsigned)((8 + sizeof draw + 7) & ~7u); op_hdr h = {OP_DRAW, size}, end = {OP_END, 8};
+    memcpy(commands, &h, 8); memcpy(commands + 8, &draw, sizeof draw); memcpy(commands + size, &end, 8);
+    for (int round = 0; round < 2; round++) {
+        uint64_t kicked = g_pp_kicked, asks = g_arch_asks, specs = g_pb_spec; uint32_t easy = g_pp_easy.n;
+        state_reset(); S.prog = &pg; g_exec_next = commands; pso_predict_rest_(); g_exec_next = NULL;
+        if (!g_comp4) {
+            CHECK(g_pp_kicked - kicked == 1, "with no bases the attachment-free variant is handed to the background");
+            CHECK(pso_pend_take(&alt) != nil, "and can be claimed");
+            continue;
+        }
+        CHECK(g_pp_kicked == kicked, "a predicted key whose base is made is not handed to the background");
+        CHECK(g_arch_asks == asks && g_pb_spec == specs, "and the prediction makes no pipeline for it");
+        CHECK(hm_get_id(&g_pp_easy, &alt) != nil && g_pp_easy.n == easy + !round, "it is remembered once, and left out of the next prediction's candidates");
+    }
+    uint64_t built = g_pb_built;
+    if (g_comp4) CHECK(pso_build_ex(pso_desc(&alt, p->sh[0], p->sh[1], nil, 0), !alt.border, &error, 0) != nil && g_pb_built == built, "its draw takes the pipeline without compiling");
+}
+
 int main(int argc, char **argv) { @autoreleasepool {
     keys();
     if (argc == 2 && !strcmp(argv[1], "--keys-only")) { printf("depth/stencil keys: %d checks, %d failed\n", checks, failed); return failed != 0; }
@@ -193,7 +222,11 @@ int main(int argc, char **argv) { @autoreleasepool {
         "vertex float4 v(uint n[[vertex_id]]) { float2 p[3]={float2(-1,-1),float2(3,-1),float2(-1,3)}; return float4(p[n],.25,1); }\n"
         "fragment float4 f() { return float4(1,0,0,1); }\n" options:nil error:&error];
     CHECK(lib != nil, "synthetic shaders compile"); if (!lib) { fprintf(stderr, "%s\n", error.localizedDescription.UTF8String); return 1; }
-    NvProg *p = program(lib); draws(p); invalid_descriptors(p); prediction(lib);
+    id<MTLLibrary> fresh = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
+        "vertex float4 v(uint n[[vertex_id]]) { float2 p[3]={float2(-1,-1),float2(3,-1),float2(-1,3)}; return float4(p[n],.5,1); }\n"
+        "fragment float4 f() { return float4(0,1,0,1); }\n" options:nil error:&error];   // no base made from it: its predicted keys need a compile
+    CHECK(fresh != nil, "second synthetic library compiles"); if (!fresh) { fprintf(stderr, "%s\n", error.localizedDescription.UTF8String); return 1; }
+    NvProg *p = program(lib); draws(p); invalid_descriptors(p); prediction(fresh); prediction_made_base(lib);
     const char *mode = getenv("DM_PSO_MTL4");
     CHECK((g_comp4 != nil) == (!mode || strcmp(mode, "0") != 0), "requested pipeline compiler path is exercised");
     printf("depth/stencil pipelines: %d checks, %d failed (%s)\n", checks, failed, g_comp4 ? "Metal 4" : "MTLDevice");

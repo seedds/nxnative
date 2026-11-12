@@ -1,0 +1,42 @@
+# Game profile of Ori and the Blind Forest: Definitive Edition (Switch, update 1.0.2 = v131072). Plays on the Mac
+# Format: see dm/games/README.md
+# Moon Studios' game (Microsoft) on Unity 2018.4.1f1 IL2CPP with FMOD, SDK 8.2.0, NVN. The NSP script's provisional profile, its keys unchanged: no rewriter cut, no host key of its own
+
+# ---- Identity ----
+title_id	010061D00DB74000
+program_id	010061D00DB74000
+
+# ---- App ----
+# Game name: only a label for profile listings and the Mac window title; the iOS app name is the game name in the base NSP, and the bundle ID comes from the base game title ID (build_ipa.sh / NSP script)
+name	Ori and the Blind Forest: Definitive Edition
+ipa	OriAndTheBlindForestDefinitiveEdition.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v131072	1.0.2	main=9c4f2a47916b6a5478548adc62a3a87c	subsdk0=8df876f80ce4ceee62360b31405c452f	sdk=3ae34e689d7a35f13cbf42bfd672af8b
+package	v131072
+shader_versions	v131072
+
+# ---- Files ----
+# every module main imports from (subsdk0 = the SDK's movie library)
+modules	main subsdk0 sdk
+romfs_marker	Data/data.unity3d
+zip_store	.dat:.mp4:.resource:.unity3d:.wmv:.metallib
+
+# ---- Memory ----
+# the NPDM declares 16 MB of system resource (virtual address memory): a 5 GB block with a 4.375 GB alias region and the hardware's application pool, which nninitStartup hands to
+# StandardAllocator as one 3.14 GB region (the game sets no heap); the alias region was mapped up to +1.76 GB from the title into the forest
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x1000000
+
+# ---- Shader split ----
+# every shader is in Data/ (data.unity3d and the Unity player's GLSLC outputs in main)
+shader_groups	/Data/=data
+shader_note	Ori and the Blind Forest: Definitive Edition shaders
+
+# ---- Graphics ----
+# the game calls nvnDeviceSetDepthMode with near = 0: the pipeline bases made before it runs are made for that mode
+depth_mode	zero

@@ -38,6 +38,7 @@ No host or rewriter rule is specific to this game.
 - [The offline pages of a sparse base game stop the build as a damaged NSP](../../../docs/reference/packing.md#the-offline-pages-of-a-sparse-base-game-stop-the-build-as-a-damaged-nsp)
 - [The survey's build ID lookup stops on the base game alone with a hash error](../../../docs/reference/packing.md#the-surveys-build-id-lookup-stops-on-the-base-game-alone-with-a-hash-error)
 - [A shader build leaves a file per shader output while it runs or after a stop](../../../docs/reference/packing.md#a-shader-build-leaves-a-file-per-shader-output-while-it-runs-or-after-a-stop): measured here, its 61,655 library files the same under the new chain
+- [Writes beside a packaged texture in a shared host page](../../../docs/reference/nvn-objects.md#writes-beside-a-packaged-texture-in-a-shared-host-page): after GPU stores into packaged textures' storage, 17 small textures were uploaded again by writes beside them, until the stores wrote their edge bytes too
 
 ## Open
 

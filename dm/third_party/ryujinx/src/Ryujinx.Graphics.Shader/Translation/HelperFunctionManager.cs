@@ -529,15 +529,20 @@ namespace Ryujinx.Graphics.Shader.Translation
         private static Operand GenerateSharedAtomicCasLoop(EmitterContext context, Operand wordOffset, int id, Func<Operand, Operand> opCallback)
         {
             Operand lblLoopHead = Label();
+            Operand oldValue = Local();
+            context.Copy(oldValue, context.Load(StorageKind.SharedMemory, id, wordOffset));
 
             context.MarkLabel(lblLoopHead);
 
-            Operand oldValue = context.Load(StorageKind.SharedMemory, id, wordOffset);
             Operand newValue = opCallback(oldValue);
 
             Operand casResult = context.AtomicCompareAndSwap(StorageKind.SharedMemory, id, wordOffset, oldValue, newValue);
 
             Operand casFail = context.ICompareNotEqual(casResult, oldValue);
+            // nxnative: a retry takes the value the exchange returned, not a new plain load: a plain reload can read a stale line, so the exchange never matches and the loop
+            // spins (uncraftablexd, PR #1796). A helper function's locals may be assigned more than once; the main program's sites keep their plain reload, as the Optimizer's
+            // PropagateCopy takes a local there as single-assignment
+            context.Copy(oldValue, casResult);
 
             context.BranchIfTrue(lblLoopHead, casFail);
 

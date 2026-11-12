@@ -1,4 +1,4 @@
-"""Border colours Metal has no sampler state for (dmsh_build.py border_emu): the rewrite of a shader's samples, the reflection of the twins and the block, the readable-tile variant
+"""Border colours Metal has no sampler state for (dmsh_rewrite.py border_emu): the rewrite of a shader's samples, the reflection of the twins and the block, the readable-tile variant
 of a rewritten shader, the compile on both platforms, and with DM_TEST_BORDER (the t_border executable) the samples on the GPU."""
 import ast
 import os
@@ -16,13 +16,8 @@ import dmsh_abi as abi   # noqa: E402
 import dmsh_fetch   # noqa: E402
 import dmsh_geometry   # noqa: E402
 
-tree = ast.parse((TOOLS / 'dmsh_build.py').read_text())
-names = {'border_emu', 'reflect', 'decode_tex', 'decode_ubo_tex', 'decode_ubo_img', 'const_sampler', 'c2_array'}
-selected = [n for n in tree.body if (isinstance(n, ast.FunctionDef) and n.name in names)
-            or (isinstance(n, ast.Assign) and any(getattr(e, 'id', None) in ('BORDER_HELPERS', 'SSBO', 'TEX_BASE') for t in n.targets for e in (t.elts if isinstance(t, ast.Tuple) else [t])))]
-scope = {'re': re, 'abi': abi, 'dmsh_geometry': dmsh_geometry}
-exec(compile(ast.Module(body=selected, type_ignores=[]), str(TOOLS / 'dmsh_build.py'), 'exec'), scope)
-border_emu, reflect = scope['border_emu'], scope['reflect']
+from dmsh_reflect import reflect   # noqa: E402
+from dmsh_rewrite import border_emu   # noqa: E402
 
 HEAD = '#include <metal_stdlib>\n#include <simd/simd.h>\n\nusing namespace metal;\n\n'
 # Tears of the Kingdom's ff9def5b3c418851 as spirv-cross writes it, cut down: a uniform segment, the bend map and its sampler
@@ -121,6 +116,14 @@ class Rewrite(unittest.TestCase):
         self.assertIn('spvDescriptorSet0.fp_t2d_cb14_0[1].sample(spvDescriptorSet0.fp_t2d_cb14_0Smplr[1], _182)', out, 'a sampler array keeps its samples')
         inner = 'dm_bs(spvDescriptorSet0.fp_t_tcb_8.sample(spvDescriptorSet0.fp_t_tcb_8Smplr, _182, level(0.0)), spvDescriptorSet0.dm_border, 0u, spvDescriptorSet0.fp_t_tcb_8, spvDescriptorSet0.fp_t_tcb_8Smplr_w, _182, level(0.0))'
         self.assertEqual(out.count(inner), 2, 'the inner sample, rewritten, in both of the outer one\'s samples')
+
+    def test_stages_and_the_function_constant(self):
+        frag, kern = border_emu(GRASS), border_emu(KERNEL)
+        self.assertIn(f'constant bool dm_border_off [[function_constant({abi.BORDER_FC})]];', frag, 'a fragment shader takes the host\'s specialization (nvn_mtl.m fn_off)')
+        self.assertIn('#define DM_BORDER_LIVE dm_border_live', frag)
+        self.assertIn('if (DM_BORDER_LIVE && (b->mask >> i & 1u))', frag)
+        self.assertIn(f'constant bool dm_border_off [[function_constant({abi.BORDER_FC})]];', kern, 'a kernel too (nvn_mtl.m cps_new_b, by its specialized descriptor)')
+        self.assertIn('#define DM_BORDER_LIVE dm_border_live', kern)
 
     def test_integer_textures_keep_their_samples(self):
         out = border_emu(INTEGER)

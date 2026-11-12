@@ -89,15 +89,11 @@ fragment float4 pixel() { return float4(1.0, 0.0, 0.0, 1.0); }
 
 
 def depth_entries(src):
-    # Exercise the same post-reader depth conversion as geometry_finish without
-    # importing the builder's command-line and game-profile initialization.
-    builder = Path(dmsh_geometry.__file__).with_name('dmsh_build.py').read_text()
-    node = next(n for n in ast.parse(builder).body if isinstance(n, ast.FunctionDef) and n.name == 'vs_depth')
-    ns = {'re': re, 'sys': sys}
-    exec(ast.get_source_segment(builder, node), ns)
+    # the same post-reader depth conversion as geometry_finish
+    import dmsh_entry
     # The production helper locates the translated vertex entry at file end.
     vertex, pixel = src.split('fragment float4 pixel()', 1)
-    return ns['vs_depth'](vertex)[1] + 'fragment float4 pixel()' + pixel
+    return dmsh_entry.vs_depth(vertex)[1] + 'fragment float4 pixel()' + pixel
 
 
 class GeometryReader(unittest.TestCase):
@@ -588,11 +584,8 @@ def mesh_fixture(out):
 
 class PointSize(unittest.TestCase):
     def drop(self, src):
-        builder = Path(dmsh_geometry.__file__).with_name('dmsh_build.py').read_text()
-        node = next(n for n in ast.parse(builder).body if isinstance(n, ast.FunctionDef) and n.name == 'drop_point_size')
-        ns = {'re': re, 'sys': sys}
-        exec(ast.get_source_segment(builder, node), ns)
-        return ns['drop_point_size'](src)
+        import dmsh_entry
+        return dmsh_entry.drop_point_size(src)
 
     def test_a_write_goes(self):
         self.assertNotIn('PointSize', self.drop('vertex main0l_out main0_l(uint i [[vertex_id]])\n{\n    main0l_out out = {};\n    out.gl_PointSize = 1.0;\n    return out;\n}\n'))

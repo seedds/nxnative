@@ -10907,6 +10907,23 @@ static uint64_t gml_take(id<MTLBuffer> map) {
 }
 static id<MTLBuffer> zero_bank(void) { static __strong id<MTLBuffer> b; if (!b) { b = [g_dev newBufferWithLength:65536 options:MTLResourceStorageModeShared]; res_add(b); } return b; }
 static uint64_t zero_bank_gpu(void) { static uint64_t gpu; if (!gpu) gpu = zero_bank().gpuAddress; return gpu; }
+// A uniform slot that reads the zero bank is reported once per shader, stage, slot and reason (unbound / unmapped), not once a run: one counter for every case let the first hide the
+// others, and which one came first changed with the scene (Ocarina of Time's foliage compute shader a039399e6336de1b printed cb3 in one scene and cb2 in another, and no other shader's
+// slot could show after either). At most CB_MISS_MAX cases are listed, then one closing line; the lock covers argument blocks encoded on more than one thread
+enum { CB_MISS_MAX = 64 };
+static uint64_t g_cb_miss[CB_MISS_MAX]; static int g_cb_miss_n, g_cb_miss_over;
+static int cb_miss_first(const char *name, int stage, int reg, int unmapped) {
+    static os_unfair_lock mu = OS_UNFAIR_LOCK_INIT;
+    uint64_t h = 1469598103934665603ull; for (const char *c = name; *c; c++) h = (h ^ (uint8_t)*c) * 1099511628211ull;
+    h = (h ^ ((uint64_t)(uint32_t)stage << 16 | (uint64_t)(uint32_t)reg << 1 | (unmapped != 0))) * 1099511628211ull;
+    int first = 0, over = 0;
+    os_unfair_lock_lock(&mu);
+    int i = 0; while (i < g_cb_miss_n && g_cb_miss[i] != h) i++;
+    if (i == g_cb_miss_n) { if (g_cb_miss_n < CB_MISS_MAX) { g_cb_miss[g_cb_miss_n++] = h; first = 1; } else over = !g_cb_miss_over++; }
+    os_unfair_lock_unlock(&mu);
+    if (over) MLOG("[RED] more than %d uniform slots have no buffer bound: the others are not listed", CB_MISS_MAX);
+    return first;
+}
 // Bindless handle (TEXU / SAMPU): the 32-bit word at byte offset off of uniform slot reg = the low 32 bits of the NVN handle the game wrote there (low 20 bits texture ID, high 12 bits sampler ID).
 // Read on the CPU side at replay time (the memory at the same moment a real GPU would read it at execution); slot unbound / out of range / unreadable = 0 (empty slot: dummy texture / dummy sampler).
 // A location with a GPU-side write queued in this submit (pend_hits) is still read at its current value; the first case is reported red.
@@ -11142,9 +11159,9 @@ static uint64_t cbuf_slot(NvShader *sh, int nvn_stage, const nvn_rbind *b, __str
     int reg = b->reg; const p_bind_buf *u = reg < 16 ? &S.ubo[nvn_stage][reg] : NULL;
     void *mb; uint64_t mo, gpu;
     if (!u || !u->addr || !mtl_gpu_addr(u->addr, u->size ? u->size : 1, &mb, &mo, &gpu)) {   // reads 0 (the all-zero bank), as an unbound texture slot does, instead of through a null pointer
-        if (!g_red_once[16]) { char note[400] = ""; if (u && u->addr) dm_gfx_addr_note(u->addr, note, sizeof note);   // which shader, and what the address is (unbound, or in no pool)
-            RED_ONCE(16, "stage %d cb%d has no uniform buffer bound: shader %s, address %#llx size %#llx (frame %llu)%s", nvn_stage, reg, sh->key, u ? (unsigned long long)u->addr : 0ull, u ? (unsigned long long)u->size : 0ull,
-                     (unsigned long long)atomic_load(&g_cur_frame), note); }
+        if (cb_miss_first(sh->key, nvn_stage, reg, u && u->addr)) { char note[400] = ""; if (u && u->addr) dm_gfx_addr_note(u->addr, note, sizeof note);   // which shader, and what the address is (unbound, or in no pool)
+            MLOG("[RED] stage %d cb%d has no uniform buffer bound: shader %s, address %#llx size %#llx (frame %llu)%s", nvn_stage, reg, sh->key, u ? (unsigned long long)u->addr : 0ull, u ? (unsigned long long)u->size : 0ull,
+                 (unsigned long long)atomic_load(&g_cur_frame), note); }
         *use = zero_bank(); return zero_bank_gpu(); }
     if (__builtin_expect(ub_bound(u->size) < 4u * b->fixw, 0)) {   // bound shorter than the shader reads it at fixed offsets: those reads give 0, as on Maxwell
         void *rb; uint64_t ro, rg, live = u->size && mtl_gpu_addr(u->addr, ub_bound(u->size), &rb, &ro, &rg) && rb == mb ? ub_bound(u->size) : u->size;   // the pool may end before the rounded size

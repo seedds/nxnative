@@ -555,9 +555,11 @@ static unsigned rebind(module_t *k, module_t *nm, int load) {
     return n;
 }
 
-// Every load of an NRO, linked or alone, starts from its data as rewritten and a zero bss. The first load snapshots the initialized data (only those bytes: no guest code can modify
+// Every load of an NRO, linked or alone, starts from its data as rewritten and a zero bss. A module already loaded is not loaded again: resetting its data under a live
+// user (a second CreateJitEnvironment for a plugin whose first environment is not destroyed, a LoadModule of a plugin's image) would pull its state from under it. The first load snapshots the initialized data (only those bytes: no guest code can modify
 // an inactive NRO before it, and copying FFX/X-2's 1,432 modules eagerly committed 5.8 GB of mostly unused bss); a reload restores it and zeroes the bss. Call with g_modules_mu held
 static void nro_reset_data(module_t *m) {
+    if (m->loaded) die("NRO %s: loaded again while it is loaded%s", m->name, m->alone ? " alone (a JIT plugin whose environment was not destroyed)" : "");
     if (!m->pristine) {
         if (!(m->pristine = malloc(m->pristine_len ? m->pristine_len : 1))) die("%s: pristine data copy", m->name);
         memcpy(m->pristine, m->base + m->data_off, m->pristine_len);
@@ -574,7 +576,7 @@ void nro_load(module_t *m) {
     nro_reset_data(m); g_loaded[g_nloaded++] = m;
     relocate(m);
     unsigned n = 0;
-    for (int i = 0; i < g_nmod; i++) if (g_mod[i].loaded && &g_mod[i] != m) n += rebind(&g_mod[i], m, 1);
+    for (int i = 0; i < g_nmod; i++) if (g_mod[i].loaded && !g_mod[i].alone && &g_mod[i] != m) n += rebind(&g_mod[i], m, 1);   // a module loaded alone binds nothing outside itself
     pthread_rwlock_unlock(&g_modules_mu);
     LOG("NRO %s loaded (load %u, base %p): %u imports of the modules loaded before bound to it", m->name, m->loads, m->base, n);
 }
@@ -583,7 +585,7 @@ void nro_load(module_t *m) {
 // undefined weak symbols 0; Super Mario 64's EmuSystemJITPlugin.nro has only those and relative relocations) and never takes part in the game's symbol lookups
 void nro_load_alone(module_t *m) {
     pthread_rwlock_wrlock(&g_modules_mu);
-    nro_reset_data(m);
+    nro_reset_data(m); m->alone = 1;
     relocs_t rl = relocs_of(m);
     unsigned nrel = rl.relr ? relr_apply(m, rl.relr, rl.relrsz, (uint64_t)m->base) : 0, nsym = 0;
     for (int t = 0; t < 2; t++)
@@ -601,12 +603,23 @@ void nro_load_alone(module_t *m) {
     LOG("NRO %s loaded alone (load %u, base %p): %u relative relocations, %u to its own or undefined weak symbols", m->name, m->loads, m->base, nrel, nsym);
 }
 
+// Its fini has run (the caller's). Deactivated as nro_unload deactivates a linked one, under the same locks and with the same check of stacks borrowing its data; nothing to
+// unbind, as no other module was bound to it
+void nro_unload_alone(module_t *m) {
+    pthread_rwlock_wrlock(&g_modules_mu);
+    if (!m->alone) die("NRO %s: unloaded alone but not loaded alone", m->name);
+    if (!svc_nro_deactivate(m)) die("NRO %s: cannot unload while a mapped stack borrows its data", m->name);
+    m->alone = 0;
+    pthread_rwlock_unlock(&g_modules_mu);
+    LOG("NRO %s unloaded (it was loaded alone)", m->name);
+}
+
 void nro_unload(module_t *m) {
     pthread_rwlock_wrlock(&g_modules_mu);
     if (!svc_nro_deactivate(m)) die("NRO %s: cannot unload while a mapped stack borrows its data", m->name);
     for (int i = 0; i < g_nloaded; i++) if (g_loaded[i] == m) { memmove(g_loaded + i, g_loaded + i + 1, (size_t)(--g_nloaded - i) * sizeof *g_loaded); break; }
     unsigned n = 0;
-    for (int i = 0; i < g_nmod; i++) if (g_mod[i].loaded) n += rebind(&g_mod[i], m, 0);
+    for (int i = 0; i < g_nmod; i++) if (g_mod[i].loaded && !g_mod[i].alone) n += rebind(&g_mod[i], m, 0);
     pthread_rwlock_unlock(&g_modules_mu);
     LOG("NRO %s unloaded: %u imports that pointed into it bound again", m->name, n);
 }

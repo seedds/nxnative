@@ -1073,6 +1073,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Found on:** no game: a synthetic test found it, and no game has been seen to create a second environment. [Super Mario 3D All-Stars: Super Mario 64](../../dm/games/010049900F546001/README.md) is the one game that takes this path.
 - **Check:** `t_nro` loads a module alone, dirties its data, bss and relocation slots, and loads it alone again: the data and bss are as rewritten and the slots relocated against the module itself. Without the fix it fails at the first load (no snapshot).
 
+### A JIT plugin loaded alone took bindings from the game's NROs
+
+- **Symptom:** none seen on a game. A JIT plugin's undefined weak import could end up pointing into a game NRO, though the plugin runs, on Horizon, in the jit service's own process and links with nothing of the game's; a second `CreateJitEnvironment` before the first was destroyed reset the live plugin's data under it; a plugin's deactivation skipped the loader's locks and its check of stacks borrowing NRO data.
+- **Cause:** `nro_load_alone` relocated the plugin against itself only, but left it marked loaded like any module, so the rebind loops of `nro_load` and `nro_unload` (a linked NRO coming or going: every loaded module's imports it defines or that point into it bound again) took it in. `h_jit_Destroy` cleared the plugin's `loaded` flag itself, outside `g_modules_mu`, without `svc_nro_deactivate`'s check. Nothing refused loading a module that was loaded.
+- **Fix:** a module loaded alone is marked so (`module_t.alone`), and both rebind loops leave it out. Its end is the loader's, `nro_unload_alone` (under `g_modules_mu`, through `svc_nro_deactivate`, as `nro_unload`), which `h_jit_Destroy` calls after the plugin's fini. `nro_reset_data` refuses a module already loaded (`die`): the host has one image of the plugin, where the jit service would load a copy per environment; `ro::LoadModule` already answered such a load with an error.
+- **Found on:** no game; the audit of the review's JIT fix (step 15). [Super Mario 3D All-Stars: Super Mario 64](../../dm/games/010049900F546001/README.md) is the one game that loads a plugin.
+- **Check:** `t_nro`: with the plugin loaded alone, a linked NRO that defines the plugin's undefined weak import is loaded (the main module's import is bound to it, the plugin's stays 0) and unloaded; a second load alone while it is loaded is refused in a child process and leaves its data as it was; `nro_unload_alone` ends it, and the reload is as rewritten; a module with no initialized data reloads with a zero bss. Without the rebind change the isolation check fails.
+
 ### `nn::jit` served from an image on iOS
 
 - **Symptom:** `[RED] jit::GenerateCode command <n>: request <key> … is not in the image …: capture it on the Mac (DM_JIT_CAPTURE) and rebuild the image`, then the game crashes there (the iPhone, or the Mac with `DM_JIT_SERVE`).

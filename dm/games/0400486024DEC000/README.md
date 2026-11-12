@@ -139,6 +139,8 @@ From an empty save: at about 45 s `A` (title), `A` (New Game), then the movie. F
 
 ## Found on this game
 
+- [Private spatial MetalFX output](../../../docs/reference/rendering.md#spatial-metalfx-output-must-use-private-storage): the M4 Pro drawable is managed, so final scaling now uses a legal private output and exact GPU copy. The actual game and 27 validation checks pass; rare presentation gaps, HDR and object-motion validation remain open.
+
 - [Finalized texture serials kept while used](../../../docs/reference/nvn-objects.md#dead-texture-serials-kept-in-a-ghost-table): backport of upstream `034e91a8` into this branch’s monolithic owner. The former 512-entry ring could evict an active larger working set. The deterministic 1,024-object regression loses 409,600 lookups before the fix and none after it. Real long-session performance remains to be measured.
 
 - [Fullscreen output can match the panel’s native pixels](../../../docs/reference/frame-rate.md#fullscreen-output-can-match-the-panels-native-pixels): opt-in picture layer and app-only native-pixel mode; real MetalFX interpolation/direct output and display restoration verified on an M4 Pro. Sustained 120 Hz and multizone temporal image quality remain open.

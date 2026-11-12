@@ -1779,9 +1779,17 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 
 - **Symptom:** asynchronous final MetalFX scaling writes a full-size offscreen image and immediately samples it into an identical drawable.
 - **Cause:** the final quad is retained even when it performs no crop, aspect fit, format conversion or origin flip.
-- **Fix:** opt in with `DM_PRESENT_UPSCALE_DIRECT=1`. The Mac front end makes the layer writable before acquiring its first drawable. The asynchronous scaler writes directly only for a full viewport, matching format/dimensions, upper-left origin and a destination supporting every required scaler usage. Other cases retain the offscreen texture and quad. Default presentation and texture dependencies are unchanged.
+- **Fix:** opt in with `DM_PRESENT_UPSCALE_DIRECT=1`. The Mac front end makes the layer writable before acquiring its first drawable. The asynchronous scaler writes directly only for a full viewport, matching format/dimensions, upper-left origin, private destination storage and every required scaler usage. Other cases retain the private offscreen texture, using an exact full-size GPU copy when compatible, or the quad for transforms. Default presentation and texture dependencies are unchanged.
 - **Check:** on OOT's M4 Pro at3840×2160, one actual native drawable and one generated drawable match same-input scaler-plus-quad references exactly (33,177,600 bytes each, zero differences). Three ABBA cycles reduce median native GPU command-buffer envelopes by 0.30–0.50 ms; physical delivery stays near 119.6/s with occasional gaps. These overlapping envelopes are not exclusive GPU timings. The ABBA uses a writable layer in both arms and does not isolate the layer flag's cost.
 - **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md). No all-game or constant 120 Hz claim.
+
+### Spatial MetalFX output must use private storage
+
+- **Symptom:** Metal API Validation aborts with `outputTexture must have private storage mode` when spatial MetalFX encodes directly into a drawable.
+- **Cause:** a writable IOSurface-backed drawable can use managed storage. Matching dimensions, format and usage bits do not satisfy the private-storage requirement documented by `MTLFXSpatialScalerBase.outputTexture`.
+- **Fix:** permit direct output only with `MTLStorageModePrivate`. Otherwise keep the scaler's private output. Copy its pixels with a GPU blit when dimensions, format, origin and texture kinds match and both textures allow it; retain the quad for crops, flips and framebuffer-only targets. No scaling algorithm or simulation clock changes.
+- **Check:** `t_spatial_output` runs the production scaler and copy with Metal API Validation for shared, managed and private destinations. Its 27 checks compare every output pixel bit-for-bit across direct and copied paths. An M4 Pro OOT run confirms a managed drawable takes the private-output route, both native/generated MetalFX phases complete, final-copy RGB error is zero and no RED lines occur. The 60–96 s window records 2,151 sources and 2,151 real FI, 4,302 positive and zero null presentations, about 119.50/s. Five gaps exceed 15 ms, with a 75 ms maximum: this fixes an API contract violation, not all stutters or HDR. No other-game launch was performed.
+- **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md).
 
 ### Explicit drawable dimensions measure output work independently of the panel
 

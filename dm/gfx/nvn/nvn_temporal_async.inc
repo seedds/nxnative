@@ -187,9 +187,28 @@ static id<MTLTexture> temporal_async_upscale(id<MTLCommandBuffer> cb,id<MTLTextu
         vp.originX==0 && vp.originY==0 && vp.width==destination.width && vp.height==destination.height &&
         s->output.width==destination.width && s->output.height==destination.height && s->output.pixelFormat==destination.pixelFormat &&
         !destination.framebufferOnly && (destination.usage & s->scaler.outputTextureUsage)==s->scaler.outputTextureUsage;
+    // MetalFX requires private output storage. IOSurface-backed drawables can
+    // be managed/shared even when their usage bits permit shader writes.
+    if(direct && destination.storageMode!=MTLStorageModePrivate) {
+        static int noted; if(!noted++)MLOG("MetalFX spatial output: drawable storage %lu is not private; using the scaler's private output",(unsigned long)destination.storageMode);
+        direct=0;
+    }
     id<MTLTexture> output=direct?destination:s->output;
     s->scaler.colorTexture=input;s->scaler.outputTexture=output;s->scaler.inputContentWidth=r[2];s->scaler.inputContentHeight=r[3];[s->scaler encodeToCommandBuffer:cb];
     *keep=@[s->scaler,input,output];return output;
+}
+// A full-size, same-format copy preserves the scaler's encoded pixels. It
+// avoids a render pass when the drawable cannot be a legal MetalFX output.
+// Crops, orientation changes and framebuffer-only destinations keep present_encode.
+static int temporal_async_present_copy(id<MTLCommandBuffer> cb,id<MTLTexture> source,id<MTLTexture> destination) {
+    if(atomic_load_explicit(&g_origin_ll,memory_order_relaxed) || source.framebufferOnly || destination.framebufferOnly ||
+       source.textureType!=MTLTextureType2D || destination.textureType!=MTLTextureType2D ||
+       source.storageMode==MTLStorageModeMemoryless || destination.storageMode==MTLStorageModeMemoryless ||
+       source.width!=destination.width || source.height!=destination.height || source.pixelFormat!=destination.pixelFormat)return 0;
+    id<MTLBlitCommandEncoder> copy=[cb blitCommandEncoder];if(!copy)return 0;
+    [copy copyFromTexture:source sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0)
+              sourceSize:MTLSizeMake(source.width,source.height,1) toTexture:destination destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0,0,0)];
+    [copy endEncoding];return 1;
 }
 static int temporal_async_present(uint64_t serial,id<MTLTexture> src,double period,uint64_t frame,uint64_t ticket,const int crop[4],id<CAMetalDrawable> drawable,double target,int generated) {
     int slot=temporal_async_slot(serial);if(slot<0 || !temporal_async_init())return -1;
@@ -202,7 +221,7 @@ static int temporal_async_present(uint64_t serial,id<MTLTexture> src,double peri
     if(ready)[cb encodeWaitForEvent:g_temporal_async_done value:ready];
     NSArray *keep=nil;id<MTLTexture> up=temporal_async_upscale(cb,src,crop,drawable.texture,&keep);int rect[4]={0,0,(int)up.width,(int)up.height};
     static int noted[2];if(up && !noted[!!generated]++){MLOG("asynchronous final MetalFX: %s, source %lux%lu -> drawable %lux%lu",generated?"generated":"native",(unsigned long)src.width,(unsigned long)src.height,(unsigned long)drawable.texture.width,(unsigned long)drawable.texture.height);}
-    if(up!=drawable.texture && !present_encode(cb,up?:src,drawable.texture,up?rect:crop)){pthread_mutex_unlock(&g_temporal_async_mu);return 0;}
+    if(up!=drawable.texture && !(up && temporal_async_present_copy(cb,up,drawable.texture)) && !present_encode(cb,up?:src,drawable.texture,up?rect:crop)){pthread_mutex_unlock(&g_temporal_async_mu);return 0;}
     uint64_t value=++g_temporal_display_sequence;atomic_store(&g_temporal_snap[slot].display_reader,value);
     [cb encodeSignalEvent:g_temporal_display_done value:value];
     present_track_drawable(drawable,frame,ticket,generated);

@@ -2577,7 +2577,7 @@ void mtl_drain(void) { present_drop_for_suspend(); mtl_present_flush(); snap_dra
 
 // ================= Render replay =================
 #include "../../host/front.h"
-static int g_red_once[166];   // one past the highest key: a new key raises this, and the macro refuses to compile otherwise
+static int g_red_once[168];   // one past the highest key: a new key raises this, and the macro refuses to compile otherwise
 #define RED_ONCE(k, ...) do { _Static_assert((k) < sizeof g_red_once / sizeof *g_red_once, "a RED_ONCE key past g_red_once: raise its size"); if (!g_red_once[k]++) MLOG("[RED] " __VA_ARGS__); } while (0)
 // NVN vertex streams 0–15 → Metal vertex buffer slots: 0–13 go to 16–29 (30 is the constant fallback buffer), 14 and 15 to 14 and 15. Metal has only the 31 slots 0–30; translated shaders use only buffer(0) (the argument buffer),
 // and the host's own vertex functions read no vertex buffers. 13 Sentinels uses stream 15, and the old 16 + stream went out of range (Metal assertion: buffer index (31) must be < 31)
@@ -4478,10 +4478,10 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
         // Metal requires 16-byte alignment for texture buffer views (minimumTextureBufferAlignmentForPixelFormat), and an Apple GPU addresses such a view from the 16-byte boundary below its
         // offset (measured on an M4 Pro: R32Float views at offsets 4, 8 and 12 read elements 0, 0 and 0 instead of 1, 2 and 3, shared and private buffers, bound directly or in an argument
         // buffer). Unreal puts buffer textures at 4-, 8- and 12-byte offsets in its pools (Octopath Traveler 0: offset 0x168; FINAL FANTASY RESONANCE's particle data), so the view is created
-        // there and shaders read it through an aligned copy (tbuf_shadow). Writes through such a view cannot be redirected. Below the element size the view stays a dummy
+        // there and shaders read it through an aligned copy (tbuf_shadow); an image slot binds a view from the boundary below and the shader moves its coordinates (tbias_view). Below
+        // the element size the view stays a dummy
         if (mo % al) {
             if (mo % (uint64_t)bpb) { RED_ONCE(38, "buffer texture offset %#llx not aligned to its %d-byte elements", (unsigned long long)mo, bpb); return nil; }
-            if (t->d.flags & NVN_TEXTURE_FLAGS_IMAGE) RED_ONCE(119, "image buffer texture at pool offset %#llx, below Metal's %lu-byte alignment: shader writes to it land at the 16-byte boundary below", (unsigned long long)mo, (unsigned long)al);
             static int once; if (!once++) MLOG("buffer texture at pool offset %#llx, below Metal's %lu-byte alignment: created there, read through an aligned copy (tbuf_shadow)", (unsigned long long)mo, (unsigned long)al);
         }
         MTLTextureDescriptor *d = [MTLTextureDescriptor textureBufferDescriptorWithPixelFormat:(MTLPixelFormat)pf width:t->d.width resourceOptions:b.resourceOptions
@@ -6193,7 +6193,7 @@ static int rt_range_bindings_ro(NSDictionary *j) {
         if (![b isKindOfClass:[NSDictionary class]] || ![b[@"kind"] isKindOfClass:[NSString class]] || ![b[@"msl_type"] isKindOfClass:[NSString class]]) return 0;
         NSString *k=b[@"kind"], *t=b[@"msl_type"];
         if (b[@"rw"] && (![b[@"rw"] isKindOfClass:[NSNumber class]] || [b[@"rw"] boolValue])) return 0;
-        if ([k isEqual:@DMSH_KIND_CBUF] || [k isEqual:@DMSH_KIND_C1] || [k isEqual:@DMSH_KIND_CBSIZE]) { if (![t hasPrefix:@"constant "]) return 0; }
+        if ([k isEqual:@DMSH_KIND_CBUF] || [k isEqual:@DMSH_KIND_C1] || [k isEqual:@DMSH_KIND_CBSIZE] || [k isEqual:@DMSH_KIND_TBIAS]) { if (![t hasPrefix:@"constant "]) return 0; }
         else if ([k isEqual:@DMSH_KIND_SBUF]) { if (![b[@"rw"] isKindOfClass:[NSNumber class]] || [b[@"rw"] boolValue] || ![t hasPrefix:@"const device "]) return 0; }
         else if ([k isEqual:@DMSH_KIND_SAMP] || [k isEqual:@DMSH_KIND_SAMP_TEX]) { if (![t isEqual:@"sampler"]) return 0; }
         else if ([k isEqual:@DMSH_KIND_TEX] || [k isEqual:@DMSH_KIND_TBUF]) {
@@ -6401,14 +6401,16 @@ static void treg_finish_submission(void) {
 typedef struct { uint32_t pf, l0, nl, s0, ns; uint8_t tt, sw[4], pad[3]; } vc_key;
 enum { VC_WAYS = 4, VC_MAX = 16384 };
 typedef struct { const void *pool; unsigned next; vc_key k[VC_WAYS]; void *view[VC_WAYS];   // view: retained
-                 void *rows, *rows_of; uint64_t rows_rid, rows_n; } vc_set;   // rows: a texture buffer as 2D rows (tbuf_as_2d; retained, resident), rows_of / rows_n: the buffer texture it was made from and its element count
+                 void *rows, *rows_of; uint64_t rows_rid, rows_n;   // rows: a texture buffer as 2D rows (tbuf_as_2d; retained, resident), rows_of / rows_n: the buffer texture it was made from and its element count
+                 void *tbv; uint64_t tbv_rid; } vc_set;   // tbv: a buffer image from the aligned boundary below its offset (tbias_view; retained, resident)
 static nvn_hmap g_vc = {.klen = 8};   // texture serial → vc_set
 static uint64_t g_vc_hit, g_vc_new;
 static void vc_rows_drop(vc_set *s) { if (s->rows) { defer_obj_release((__bridge id)s->rows); CFRelease(s->rows); s->rows = s->rows_of = NULL; s->rows_rid = s->rows_n = 0; } }
+static void vc_tbv_drop(vc_set *s) { if (s->tbv) { defer_obj_release((__bridge id)s->tbv); CFRelease(s->tbv); s->tbv = NULL; s->tbv_rid = 0; } }
 static void vc_set_free(void *p) {
     vc_set *s = p;
     for (int i = 0; i < VC_WAYS; i++) if (s->view[i]) { defer_obj_unref((__bridge id)s->view[i]); CFRelease(s->view[i]); }
-    vc_rows_drop(s);
+    vc_rows_drop(s); vc_tbv_drop(s);
     free(s);
 }
 static id<MTLTexture> vc_get(uint64_t ser, const vc_key *k, id<MTLTexture> base) {
@@ -7241,7 +7243,7 @@ static int prog_swrites(NvProg *pr) {
 static void order_note(NvProg *pr) {   // after each draw of the pass: does it read memory in a stage after the vertex stage (anything bound there but samplers and driver data)
     for (int st = 1; pr && st < 6 && !g_pass_late_res; st++) { __unsafe_unretained NvShader *sh = pr->sh[st]; if (!sh) continue;
         for (int i = 0; i < sh->rf.nb; i++) { int k = sh->rf.b[i].kind;
-            if (k != NVN_RB_SAMP && k != NVN_RB_SAMPT && k != NVN_RB_SAMPU && k != NVN_RB_SAMPI && k != NVN_RB_SAMPD && k != NVN_RB_SAMPA && k != NVN_RB_SAMPP && k != NVN_RB_SAMPH && k != NVN_RB_SUPPORT && k != NVN_RB_C1 && k != NVN_RB_DRV0 && k != NVN_RB_DRV2 && k != NVN_RB_PUSH && k != NVN_RB_CBSIZE) { g_pass_late_res = 1; break; } } }
+            if (k != NVN_RB_SAMP && k != NVN_RB_SAMPT && k != NVN_RB_SAMPU && k != NVN_RB_SAMPI && k != NVN_RB_SAMPD && k != NVN_RB_SAMPA && k != NVN_RB_SAMPP && k != NVN_RB_SAMPH && k != NVN_RB_SUPPORT && k != NVN_RB_C1 && k != NVN_RB_DRV0 && k != NVN_RB_DRV2 && k != NVN_RB_PUSH && k != NVN_RB_CBSIZE && k != NVN_RB_TBIAS) { g_pass_late_res = 1; break; } } }
 }
 // A draw that writes, after an ordering barrier in a pass whose earlier draws did not write (g_pass_order): when those draws read memory only in their vertex stage, or the barrier
 // orders only primitives (whose fragments NVN leaves unordered too), a barrier inside the pass from the vertex stage to the stages that write keeps the pass and its attachments (the
@@ -10119,6 +10121,43 @@ static id<MTLTexture> tbuf_shadow(id<MTLTexture> t, uint64_t *rid) {
     g_tbs_cache[k].src = t; g_tbs_cache[k].copy = c; g_tbs_cache[k].epoch = g_fence + 1; g_tbs_cache[k].rid = *rid = c.gpuResourceID._impl;
     return c;
 }
+// A buffer image below Metal's view alignment (tex_mtl, target BUFFER) is bound as a view from the aligned boundary below its offset, wider by the elements in between, whose count
+// (*bias) goes to the shader's offset table (dmsh_abi.h DMSH_TBIAS_BANK, filled in encode_args), and the shader adds it to every coordinate of the image (the translator's
+// TranslationFlags.MetalBufferImageBias). An M4 Pro addresses the view made at the offset itself from that boundary (an M6 does not: t_buffer_image_bias prints where it writes),
+// and Metal does not define such a view, so every write landed that many bytes early there: Assassin's Creed
+// II's occlusion culling marks "object k visible" in one of three rotating 4096-entry R32 buffers, two of them at pool offsets 8 mod 16, and in those frames each mark went to object
+// k - 2 and walls, floors and props vanished and came back (GitHub PR #1399). The shader reads, writes and runs atomics on the pool's own bytes, in place, so whatever else reads
+// them in the pass sees the writes; reads of the image through a texture slot still go through tbuf_shadow. Made once per texture and kept with its views (vc_set); for a texture
+// already finalized, made for this submission. t itself, bias 0, for any other texture. Caller holds g_rmu
+static uint64_t g_tbias_made, g_tbias_binds;
+static id<MTLTexture> tbias_view(int tid, id<MTLTexture> t, uint64_t *rid, uint32_t *bias) {
+    *bias = 0;
+    if (!t || t.textureType != MTLTextureTypeTextureBuffer || tid <= 0 || tid >= g_ntreg || !g_treg[tid].ok) return t;
+    id<MTLTexture> root = t; while (root.parentTexture) root = root.parentTexture;   // a format view (img_fit) keeps its parent's buffer
+    id<MTLBuffer> buf = root.buffer; NSUInteger off = root.bufferOffset;
+    NSUInteger al = tbuf_align([g_dev minimumLinearTextureAlignmentForPixelFormat:t.pixelFormat]); if (al < 16) al = 16;   // the GPU's boundary is 16 bytes even where Metal asks less
+    int bw, bh, bpb = nvn_fmt_bpb(g_treg[tid].t.d.format, &bw, &bh);
+    if (!buf || bpb <= 0 || !(off % al) || off % (NSUInteger)bpb) return t;   // aligned, or below the element size (tex_mtl reported it)
+    NSUInteger lead = off % al, aoff = off - lead, w = t.width + lead / (NSUInteger)bpb, row = (w * (NSUInteger)bpb + al - 1) / al * al;
+    if (aoff + row > buf.length) { RED_ONCE(166, "buffer image at pool offset %#lx, below Metal's %lu-byte alignment, ends too near its pool buffer's end for a view from the boundary below: its accesses land %lu bytes early",
+                                            (unsigned long)off, (unsigned long)al, (unsigned long)lead); return t; }
+    *bias = (uint32_t)(lead / (NSUInteger)bpb);
+    const tex_t *tt = &g_treg[tid].t; vc_set *s = vc_set_for(tt->serial, tt->pool);
+    if (s && s->tbv) {
+        id<MTLTexture> v = (__bridge id<MTLTexture>)s->tbv;
+        if (v.buffer == buf && v.bufferOffset == aoff && v.pixelFormat == t.pixelFormat && v.width == w && v.usage == t.usage) { g_tbias_binds++; *rid = s->tbv_rid; return v; }
+    }
+    MTLTextureDescriptor *d = [MTLTextureDescriptor textureBufferDescriptorWithPixelFormat:t.pixelFormat width:w resourceOptions:buf.resourceOptions usage:t.usage];
+    id<MTLTexture> v = [buf newTextureWithDescriptor:d offset:aoff bytesPerRow:row];
+    if (!v) { *bias = 0; RED_ONCE(167, "cannot make a buffer image's view from the aligned boundary below it (%lu elements, format %lu, pool offset %#lx): its accesses land %lu bytes early",
+                                  (unsigned long)w, (unsigned long)t.pixelFormat, (unsigned long)off, (unsigned long)lead); return t; }
+    res_add(v); g_tbias_binds++;
+    if (!g_tbias_made++) MLOG("buffer image at pool offset %#lx (below Metal's %lu-byte alignment) bound from %#lx, its coordinates moved by %u elements (first case)", (unsigned long)off, (unsigned long)al, (unsigned long)aoff, *bias);
+    *rid = v.gpuResourceID._impl;
+    if (s) { vc_tbv_drop(s); s->tbv = (void *)CFBridgingRetain(v); s->tbv_rid = *rid; }
+    else defer_obj_release(v);   // a finalized texture's view: until this submission is done
+    return v;
+}
 static id<MTLSamplerState> dummy_samp(void) {
     static id<MTLSamplerState> s; if (!s) { MTLSamplerDescriptor *d = [MTLSamplerDescriptor new]; d.supportArgumentBuffers = YES; s = [g_dev newSamplerStateWithDescriptor:d]; }
     return s;
@@ -11102,7 +11141,7 @@ static uint64_t cbsize_table(int nvn_stage, __strong id<MTLBuffer> *use) {
     return g_cur_arena->gpu + off;
 }
 // Whether a block of sh can be patched when only what the uniform bindings point at changed: every binding that reads through a uniform buffer is a plain CBUF slot (no handles or
-// addresses read out of one: TEXU, SAMPU, IMGU, TBUFU, TEXH, SAMPH, SBUFU, UBOP), or the slots' size table (CBSIZE, made from the bindings alone), and no slot is registered by its
+// addresses read out of one: TEXU, SAMPU, IMGU, TBUFU, TEXH, SAMPH, SBUFU, UBOP), or the slots' size table (CBSIZE, made from the bindings alone), or the buffer images' offsets (TBIAS, made from the images, which such a change leaves as they are), and no slot is registered by its
 // location (GMEM / GMEML: gmem_slot_note). An allow-list, so a new kind is never patched
 static int args_cbuf_only(NvShader *sh) {
     if (__builtin_expect(g_res_check_on, 0)) return 0;   // the resource check (USE) sees every slot of a full encode
@@ -11111,7 +11150,7 @@ static int args_cbuf_only(NvShader *sh) {
     for (int i = 0; i < sh->rf.nb && ok; i++) switch (sh->rf.b[i].kind) {
         case NVN_RB_CBUF: cb = 1; break;
         case NVN_RB_SAMP: case NVN_RB_SAMPT: case NVN_RB_SAMPI: case NVN_RB_TEX: case NVN_RB_IMG: case NVN_RB_SBUFP: case NVN_RB_SUPPORT: case NVN_RB_C1:
-        case NVN_RB_DRV0: case NVN_RB_DRV2: case NVN_RB_PUSH: case NVN_RB_BORDER: case NVN_RB_GEOMETRY: case NVN_RB_CBSIZE: break;
+        case NVN_RB_DRV0: case NVN_RB_DRV2: case NVN_RB_PUSH: case NVN_RB_BORDER: case NVN_RB_GEOMETRY: case NVN_RB_CBSIZE: case NVN_RB_TBIAS: break;   // TBIAS: made from the images alone
         default: ok = 0;
     }
     sh->ab_cbuf_only = ok && cb ? 1 : 2;
@@ -11182,6 +11221,7 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
     int bl = passdump() && (bl_all || g_kd_force || bl_pass[nvn_stage] != g_stat_pass);
     if (bl) { bl_pass[nvn_stage] = g_stat_pass; PD("K %llu st%d key=%s nb=%d", g_stat_pass, nvn_stage, sh->key[0] ? sh->key : sh->builtin ? sh->builtin : "?", sh->rf.nb); }
     uint32_t bmask = 0; float bk[DMSH_BORDER_SAMPLERS][4];   // the border colour block (see nvn_border.h): the twins that correct, their factors
+    uint32_t tbias[DMSH_TBIAS_SLOTS] = {0}; int tbias_aid = -1;   // the offset table (dmsh_abi.h DMSH_TBIAS_BANK): each buffer image's element offset (tbias_view), and its slot
     os_unfair_lock_lock(&g_rmu);   // The texture / sampler registration tables may be being grown or rewritten by the game thread
     for (int i = 0; i < sh->rf.nb; i++) {
         const nvn_rbind *b = &sh->rf.b[i];
@@ -11262,6 +11302,13 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
             id<MTLTexture> t = img_binding(tid, b, &trid, &real);
             int snap = real && g_fb_n && !b->rw && !b->atom && fb_image_view(tid, b, t) ? fb_snapshot_slot(nvn_stage, t) : -1;
             if (snap >= 0) { t = g_fb_use[snap]; trid = g_fb_rid[snap]; }
+            else if (real && t.textureType == MTLTextureTypeTextureBuffer) {   // a buffer image: from the aligned boundary below its offset, its coordinates moved in the shader (tbias_view)
+                uint32_t lead = 0;
+                if (b->tbx) { t = tbias_view(tid, t, &trid, &lead); tbias[b->tbx - 1] = lead; }
+                else { id<MTLTexture> root = t; while (root.parentTexture) root = root.parentTexture;
+                    if (root.bufferOffset & 15) RED_ONCE(119, "buffer image at pool offset %#lx, below the 16-byte alignment, in shader %s (stage %d) with no offset table entry for it (an array of images, or past %d buffer images): its accesses land %lu bytes early",
+                                                         (unsigned long)root.bufferOffset, sh->key, nvn_stage, DMSH_TBIAS_SLOTS, (unsigned long)(root.bufferOffset & 15)); }
+            }
             if (b->atom && !img_atomic_ok(t, b)) {   // see dummy_img_atomic; an unbound slot's write sink is not atomic-capable either
                 if (real) { id<MTLTexture> base = t; while (base.parentTexture) base = base.parentTexture;
                     RED_ONCE(93, "image atomics on a texture Metal cannot run them on (shader %s stage %d slot %d texture ID %d: Metal format %lu of base format %lu, type %lu for %u, %s): they go to a write sink",
@@ -11378,6 +11425,8 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
             USE(support_buf(), MTLResourceUsageRead);
         } else if (b->kind == NVN_RB_CBSIZE) {   // the uniform slots' bound sizes (cbsize_table)
             id<MTLBuffer> db; slots[aid] = cbsize_table(nvn_stage, &db); USE(db, MTLResourceUsageRead);
+        } else if (b->kind == NVN_RB_TBIAS) {   // the buffer images' element offsets: filled once every image is bound, below
+            tbias_aid = aid;
         } else if (b->kind == NVN_RB_PUSH) {   // NVN2 push constants (c[24]): the stage group's current block
             id<MTLBuffer> db; size_t doff = arena_alloc(sizeof S.push[0], &db);
             memcpy(g_cur_arena->cpu + doff, S.push[nvn_stage == 5 ? 1 : 0], sizeof S.push[0]);
@@ -11448,6 +11497,10 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
             slots[aid] = g_cur_arena->gpu + doff; USE(db, MTLResourceUsageRead);
             if (bl) PD("B %llu st%d border mask=%#x", g_stat_pass, nvn_stage, bmask);
         }
+    }
+    if (tbias_aid >= 0) {   // the offset table: 0 for an aligned image, an unbound slot or a texture of another kind
+        int reg = 0; id<MTLBuffer> db; size_t doff = arena_alloc(sizeof tbias, &db); memcpy(g_cur_arena->cpu + doff, tbias, sizeof tbias);
+        slots[tbias_aid] = g_cur_arena->gpu + doff; USE(db, MTLResourceUsageRead);
     }
     #undef USE
     os_unfair_lock_unlock(&g_rmu);
@@ -14511,7 +14564,7 @@ static geo_access cs_access_of(NvShader *sh, uint64_t ind) {   // the guest memo
             const p_bind_buf *u = b->kind == NVN_RB_SBUFP ? &S.ssbo[5][b->reg] : &S.ubo[5][b->reg];
             geo_access_add(&a, u->addr, b->kind == NVN_RB_CBUF ? cb_len(sh, b->reg, u->size) : u->size, b->kind == NVN_RB_SBUFP && b->rw && !(sh->sb_ro >> b->reg & 1));
             break; }
-        case NVN_RB_SUPPORT: case NVN_RB_C1: case NVN_RB_DRV0: case NVN_RB_DRV2: case NVN_RB_CBSIZE: break;
+        case NVN_RB_SUPPORT: case NVN_RB_C1: case NVN_RB_DRV0: case NVN_RB_DRV2: case NVN_RB_CBSIZE: case NVN_RB_TBIAS: break;
         default: a.unknown = 1;
         }
     }

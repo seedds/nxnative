@@ -400,6 +400,7 @@ namespace Ryujinx.Graphics.Shader.Translation
             ResourceManager resourceManager = new(Definitions.Stage, GpuAccessor, GetResourceReservations());
 
             resourceManager.UniformBounds = Options.Flags.HasFlag(TranslationFlags.MetalUniformBounds);   // nxnative: before any uniform slot gets its binding
+            resourceManager.BufferImageBias = Options.Flags.HasFlag(TranslationFlags.MetalBufferImageBias);   // nxnative: see ResourceManager.NoteBufferImage
 
             if (IsTransformFeedbackEmulated)
             {

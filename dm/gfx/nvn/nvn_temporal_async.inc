@@ -153,6 +153,14 @@ static int temporal_async_submit(temporal_snap_slot *s,unsigned slot,id<MTLTextu
 }
 typedef struct { id<MTLFXSpatialScaler> scaler;id<MTLTexture> input,output;uint64_t made_at;NSUInteger refused[6]; } temporal_async_spatial;
 static temporal_async_spatial g_temporal_async_spatial;
+// Writable drawables can receive the scaler directly when the final quad is an
+// identity copy. Keep the intermediate path for letterboxing, origin flips and
+// destinations without the scaler's required usage. The flag is opt-in.
+static int temporal_async_direct_on(void) {
+    static int on=-1;
+    if(on<0){const char *e=getenv("DM_PRESENT_UPSCALE_DIRECT");on=e && !strcmp(e,"1");}
+    return on;
+}
 static id<MTLTexture> temporal_async_upscale(id<MTLCommandBuffer> cb,id<MTLTexture> source,const int crop[4],id<MTLTexture> destination,NSArray *__strong *keep) {
     NSUInteger r[4];if(fx_mode()!=1 || !present_crop_rect(source,crop,r))return nil;
     MTLViewport vp=present_fit(source,destination.width,destination.height);if(!fx_wanted(vp,r[2],r[3]))return nil;
@@ -175,8 +183,13 @@ static id<MTLTexture> temporal_async_upscale(id<MTLCommandBuffer> cb,id<MTLTextu
     if(!exact){
         id<MTLBlitCommandEncoder> e=[cb blitCommandEncoder];[e copyFromTexture:raw sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(r[0],r[1],0) sourceSize:MTLSizeMake(r[2],r[3],1) toTexture:input destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0,0,0)];[e endEncoding];
     }
-    s->scaler.colorTexture=input;s->scaler.outputTexture=s->output;s->scaler.inputContentWidth=r[2];s->scaler.inputContentHeight=r[3];[s->scaler encodeToCommandBuffer:cb];
-    *keep=@[s->scaler,input,s->output];return s->output;
+    int direct=temporal_async_direct_on() && !atomic_load_explicit(&g_origin_ll,memory_order_relaxed) &&
+        vp.originX==0 && vp.originY==0 && vp.width==destination.width && vp.height==destination.height &&
+        s->output.width==destination.width && s->output.height==destination.height && s->output.pixelFormat==destination.pixelFormat &&
+        !destination.framebufferOnly && (destination.usage & s->scaler.outputTextureUsage)==s->scaler.outputTextureUsage;
+    id<MTLTexture> output=direct?destination:s->output;
+    s->scaler.colorTexture=input;s->scaler.outputTexture=output;s->scaler.inputContentWidth=r[2];s->scaler.inputContentHeight=r[3];[s->scaler encodeToCommandBuffer:cb];
+    *keep=@[s->scaler,input,output];return output;
 }
 static int temporal_async_present(uint64_t serial,id<MTLTexture> src,double period,uint64_t frame,uint64_t ticket,const int crop[4],id<CAMetalDrawable> drawable,double target,int generated) {
     int slot=temporal_async_slot(serial);if(slot<0 || !temporal_async_init())return -1;
@@ -189,7 +202,7 @@ static int temporal_async_present(uint64_t serial,id<MTLTexture> src,double peri
     if(ready)[cb encodeWaitForEvent:g_temporal_async_done value:ready];
     NSArray *keep=nil;id<MTLTexture> up=temporal_async_upscale(cb,src,crop,drawable.texture,&keep);int rect[4]={0,0,(int)up.width,(int)up.height};
     static int noted[2];if(up && !noted[!!generated]++){MLOG("asynchronous final MetalFX: %s, source %lux%lu -> drawable %lux%lu",generated?"generated":"native",(unsigned long)src.width,(unsigned long)src.height,(unsigned long)drawable.texture.width,(unsigned long)drawable.texture.height);}
-    if(!present_encode(cb,up?:src,drawable.texture,up?rect:crop)){pthread_mutex_unlock(&g_temporal_async_mu);return 0;}
+    if(up!=drawable.texture && !present_encode(cb,up?:src,drawable.texture,up?rect:crop)){pthread_mutex_unlock(&g_temporal_async_mu);return 0;}
     uint64_t value=++g_temporal_display_sequence;atomic_store(&g_temporal_snap[slot].display_reader,value);
     [cb encodeSignalEvent:g_temporal_display_done value:value];
     present_track_drawable(drawable,frame,ticket,generated);
@@ -198,7 +211,7 @@ static int temporal_async_present(uint64_t serial,id<MTLTexture> src,double peri
         (void)keep.count;
         if(finished.error){MLOG("[RED] auxiliary display GPU error: %s",finished.error.description.UTF8String);gpu_lost_check(finished.error,"auxiliary display");}
         pthread_mutex_lock(&g_pq_mu);if(!generated && ticket>g_pq_done)g_pq_done=ticket;g_pq_inflight--;present_gpu_note(finished.GPUEndTime-finished.GPUStartTime,up!=nil);pthread_cond_broadcast(&g_pq_cv);pthread_mutex_unlock(&g_pq_mu);
-        temporal_async_note_gpu(frame,generated?"generated display":"native display",finished.GPUStartTime,finished.GPUEndTime);
+        temporal_async_note_gpu(frame,up==drawable.texture?(generated?"generated display direct":"native display direct"):(generated?"generated display":"native display"),finished.GPUStartTime,finished.GPUEndTime);
     }];
     pthread_mutex_lock(&g_pq_mu);g_pq_inflight++;pthread_mutex_unlock(&g_pq_mu);
     [cb commit];atomic_store(&g_temporal_display_latest,value);

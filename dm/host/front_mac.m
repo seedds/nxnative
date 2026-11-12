@@ -36,6 +36,25 @@ static void merge_rumble_to_s2(int on);
 #include <sys/stat.h>
 
 static CAMetalLayer *g_layer;
+// Opt-in output-resolution diagnostic. Leave the view and the game's targets unchanged;
+// this measures the actual drawable/upscaler workload even on a smaller panel.
+static NSSize g_drawable_override;
+static void drawable_override_init(void) {
+    const char *e = getenv("DM_DRAWABLE_SIZE");
+    if (!e || !*e) return;
+    char *after_width, *after_height;
+    long w = strtol(e, &after_width, 10);
+    if (after_width == e || *after_width != 'x') {
+        LOG("front end: invalid DM_DRAWABLE_SIZE (expected WIDTHxHEIGHT)"); return;
+    }
+    long h = strtol(after_width + 1, &after_height, 10);
+    if (after_height == after_width + 1 || *after_height || w < 1 || h < 1 || w > 16384 || h > 16384) {
+        LOG("front end: invalid DM_DRAWABLE_SIZE (dimensions must be 1..16384)"); return;
+    }
+    g_drawable_override = NSMakeSize(w, h);
+    LOG("front end: forced drawable %ldx%ld (render resolution, not panel resolution)", w, h);
+}
+
 static uint64_t g_btn;
 static int g_w, g_a, g_s, g_d;
 static int g_rl, g_ru, g_rr, g_rd;   // arrow keys pressed with Shift held: the right stick (each goes back up as it went down, whatever Shift does meanwhile)
@@ -632,7 +651,7 @@ void front_picture_shape(int w, int h) { if (w > 0 && h > 0) g_picture_aspect = 
 - (void)fitDrawable {
     CAMetalLayer *l = (CAMetalLayer *)self.layer; if (![l isKindOfClass:CAMetalLayer.class] || !self.window) return;
     l.contentsScale = self.window.backingScaleFactor;
-    NSSize px = [self convertSizeToBacking:self.bounds.size]; if (px.width < 1 || px.height < 1 || CGSizeEqualToSize(l.drawableSize, px)) return;
+    NSSize px = g_drawable_override.width > 0 ? g_drawable_override : [self convertSizeToBacking:self.bounds.size]; if (px.width < 1 || px.height < 1 || CGSizeEqualToSize(l.drawableSize, px)) return;
     l.drawableSize = px; LOG("front end: drawable %.0fx%.0f", px.width, px.height);
 }
 - (void)setFrameSize:(NSSize)s { [super setFrameSize:s]; [self fitDrawable]; }
@@ -1518,9 +1537,13 @@ void front_run(void (*guest)(void)) {
         win.collectionBehavior = NSWindowCollectionBehaviorFullScreenPrimary;
         NSView *v = win.contentView = [[DmGameView alloc] initWithFrame:r];
         v.wantsLayer = YES;
+        drawable_override_init();
         g_layer = [CAMetalLayer layer];
         g_layer.device = MTLCreateSystemDefaultDevice();
         g_layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+        const char *direct = getenv("DM_PRESENT_UPSCALE_DIRECT");
+        if (direct && !strcmp(direct, "1")) g_layer.framebufferOnly = NO; // MetalFX requires shader-readable/writable output; opt-in, set before the first drawable
+
         g_layer.contentsScale = win.backingScaleFactor;
         // Apple's HUD over the game (frame rate, frame and GPU time, memory): front_hud_env turns it on before the first device. The layer's developerHUDProperties
         // stay unset: mode=default forces this layer's HUD on, so the Metal HUD menu's Hide HUD left it on screen

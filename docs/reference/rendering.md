@@ -1773,3 +1773,20 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 - **Fix:** use the existing ordered texture-copy encoder for a single-sample 2D image whose retained format and channel mapping are identical. The destination remains a separate host-owned texture; input lifetime, pre-UI timing, snapshot readers and scene continuity are unchanged. Conversion and nonidentity channel mappings keep the existing render path. This removes a fragment pass; it does not remove the protected scene copy or its bytes.
 - **Check:** the actual spatial replacement/scene-observer fixture uses nonuniform tiled packed colors and compares every retained RG11 pixel against the real output. Both direct and deferred encoding pass 64 checks; asynchronous interpolation, camera, UI completion and slot lifetime pass 179 checks in each encoding mode under Metal validation. An isolated performance gain is not established by these correctness checks.
 - **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md).
+
+
+### Final spatial scaling can write an identity drawable directly
+
+- **Symptom:** asynchronous final MetalFX scaling writes a full-size offscreen image and immediately samples it into an identical drawable.
+- **Cause:** the final quad is retained even when it performs no crop, aspect fit, format conversion or origin flip.
+- **Fix:** opt in with `DM_PRESENT_UPSCALE_DIRECT=1`. The Mac front end makes the layer writable before acquiring its first drawable. The asynchronous scaler writes directly only for a full viewport, matching format/dimensions, upper-left origin and a destination supporting every required scaler usage. Other cases retain the offscreen texture and quad. Default presentation and texture dependencies are unchanged.
+- **Check:** on OOT's M4 Pro at3840×2160, one actual native drawable and one generated drawable match same-input scaler-plus-quad references exactly (33,177,600 bytes each, zero differences). Three ABBA cycles reduce median native GPU command-buffer envelopes by 0.30–0.50 ms; physical delivery stays near 119.6/s with occasional gaps. These overlapping envelopes are not exclusive GPU timings. The ABBA uses a writable layer in both arms and does not isolate the layer flag's cost.
+- **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md). No all-game or constant 120 Hz claim.
+
+### Explicit drawable dimensions measure output work independently of the panel
+
+- **Symptom:** a smaller Mac panel prevents measuring the workload of a higher-resolution output by resizing its game window.
+- **Cause:** the default drawable correctly follows the window's backing-pixel dimensions.
+- **Fix:** `DM_DRAWABLE_SIZE=WIDTHxHEIGHT` explicitly overrides the drawable for diagnostics, including after AppKit resize/backing notifications. Each dimension must be 1..16384; malformed values keep the default. Without the setting, the window continues to determine the drawable. A forced 16:9 output should use a 16:9 window; this diagnostic does not change mouse mapping or the panel's mode.
+- **Check:** OOT's native and generated final scalers report 2048×1152→3840×2160 while the built-in panel remains 3024×1964. This establishes 4K render work, not 4K physical scanout.
+- **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md).

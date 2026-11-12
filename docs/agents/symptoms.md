@@ -842,6 +842,8 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - private world, UI, depth and display snapshots all request compute writes and arbitrary format views, even when they are only copied and read. These flags can prevent lossless GPU texture optimization. → [Host interpolation textures declare their actual usage](../reference/rendering.md#host-interpolation-textures-declare-their-actual-usage)
 - camera-only motion reconstructs world coordinates and applies a second transform for every depth pixel, with cancellation in single-precision intermediate world positions. → [Camera reprojection composes transforms once per image](../reference/rendering.md#camera-reprojection-composes-transforms-once-per-image)
 - preserving a reconstructed scene before UI draws adds a fullscreen fragment pass, a sampled texture view and copy arguments even when the retained image has identical dimensions and format. → [Pre-UI interpolation capture does not need a fragment pass](../reference/rendering.md#pre-ui-interpolation-capture-does-not-need-a-fragment-pass)
+- asynchronous final MetalFX scaling writes a full-size offscreen image and immediately samples it into an identical drawable. → [Final spatial scaling can write an identity drawable directly](../reference/rendering.md#final-spatial-scaling-can-write-an-identity-drawable-directly)
+- a smaller Mac panel prevents measuring the workload of a higher-resolution output by resizing its game window. → [Explicit drawable dimensions measure output work independently of the panel](../reference/rendering.md#explicit-drawable-dimensions-measure-output-work-independently-of-the-panel)
 
 ## Shaders
 

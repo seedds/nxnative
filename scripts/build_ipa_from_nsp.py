@@ -422,6 +422,14 @@ def nx_extract_source_sha(repo):   # the same convention as nx_extract --source-
     return hashlib.sha256(b''.join((repo / 'dm/tools/nx_extract' / f).read_bytes() for f in ('Program.cs', 'nx_extract.csproj'))).hexdigest()[:16]
 
 
+def extraction_key(repo, what, packages, *rest):
+    """The key of an output nx_extract wrote (extract, extract_html, extract_aoc): what it is, nx_extract's identity (its source sha, which find_nx_extract checked the executable
+    carries), each package's name, size and time, and the rest (its options). A stage that reused its output only because the output existed kept what an older nx_extract or another
+    copy of the game had written: Super Smash Bros. Ultimate 13.0.5's offline pages, 1,641 of their 2,798 files left out before a5c7234e, stayed in every later build (PR #1545), and an
+    image packed with --allow-damaged stayed after a good copy of the same file replaced the damaged one. A copy has the same name and size, so the time counts"""
+    return fingerprint(what, nx_extract_source_sha(repo), [(p.name, st.st_size, st.st_mtime_ns) for p in packages if p for st in (p.stat(),)], *rest)
+
+
 def find_nx_extract(repo, env):
     """The committed nx_extract, a native executable (no .NET needed, GitHub issue #1853), once it has shown that it runs and that it was built from the in-repo source: after an edit
     to Program.cs the old executable would extract with the old code"""
@@ -1226,14 +1234,18 @@ def extracted(log):   # (files, bytes) from the summary lines nx_extract wrote t
     return (sum(int(n) for n, _ in rows), int(sum(float(mb) for _, mb in rows) * 2**20)) if rows else None
 
 
-def extract(nx, keys, ex, name, base, upd, cmp_dir, logs, g, app):   # the build IDs are checked by the caller (build_mismatch); app: the application read from the packages (--app)
+def extract(nx, keys, ex, name, base, upd, logs, g, app, repo):
+    """One version of the packages (base, and upd when it has an update) → <ex>/<name>/: ExeFS/ and RomFS.img. The build IDs are checked by the caller (build_mismatch); app: the application
+    read from the packages (--app). Reused while its key (<name>/extract.key, extraction_key: nx_extract, the packages, the options) is that of the extraction that made it; a folder with no
+    key, from a build before the key, a NUP or a dump folder, is extracted again once"""
     dst, marker, log = ex / name, g.get('romfs_marker'), logs / f'extract_{name}.log'
+    kf, key = dst / 'extract.key', extraction_key(repo, 'program', (base, upd), extract_flags(app))
     try: reusable = (dst / 'ExeFS' / 'main').exists() and (dst / 'RomFS.img').is_file() and not (dst / 'RomFS').exists() and (rfs.source(dst) / marker).exists()
     except (OSError, ValueError, struct.error): reusable = False
-    if reusable:
+    if reusable and (note := reused(kf, key)) is not None:
         PROG.stage(f'extract {name}')
         say(f'reusing the extracted {name}: {dst}')
-        PROG.end('reused')
+        PROG.end(f'{note}, reused (inputs unchanged)' if note else 'reused')
         return dst
     tmp = ex / (name + '.partial'); rmtree(tmp)
     last = extracted(log)   # the last extraction of this version (its log is about to be overwritten) has the exact size; without one, the NSPs' size is the estimate
@@ -1241,20 +1253,24 @@ def extract(nx, keys, ex, name, base, upd, cmp_dir, logs, g, app):   # the build
         n, b = tree_size(tmp); return {'done': b, 'note': f'{n:,} files'}
     PROG.stage(f'extract {name}', poll=poll, unit='B', total=last[1] if last else base.stat().st_size + (upd.stat().st_size if upd and upd != base else 0), est=not last)
     run([nx, keys, base, upd or '-', tmp, '--romfs-image'] + extract_flags(app), log)
-    swap_in(tmp, dst)
+    swap_in(tmp, dst)   # the old folder goes whole, its key and offline pages with it
     n, b = extracted(log) or (0, 0)
+    kf.write_text(f'{key}\n{n:,} files, {amount(b, "B")}\n')
     PROG.end(f'{n:,} files, {amount(b, "B")}')
     return dst
 
 
-def extract_html(nx, keys, dst, base, upd, logs, app):
+def extract_html(nx, keys, dst, base, upd, logs, app, repo):
     """The offline HTML pages of the packed program (its HtmlDocument NCAs, which the web applet shows: the pause menu of Super Mario 3D All-Stars' games) → <dst>/html/html<n>/, beside the
-    RomFS, where the host looks for them (hle_web.c). Reused; a program without any has an empty folder"""
-    out, tmp = dst / 'html', dst / 'html.partial'
-    if out.is_dir(): return
-    rmtree(tmp); tmp.mkdir(parents=True)
+    RomFS, where the host looks for them (hle_web.c). A program without any has an empty folder. Reused while its key (html.key beside it, extraction_key) is that of the extraction
+    that made the folder; a folder with no key, from a build before the key, is read again once (Super Smash Bros. Ultimate 13.0.5: 4.5 s)"""
+    out, tmp, kf = dst / 'html', dst / 'html.partial', dst / 'html.key'
+    key = extraction_key(repo, 'html pages', (base, upd), extract_flags(app))
+    if out.is_dir() and reused(kf, key) is not None: return
+    rmtree(kf); rmtree(tmp); tmp.mkdir(parents=True)
     run([nx, keys, base, upd or '-', tmp, '--html'] + extract_flags(app), logs / f'extract_html_{dst.name}.log')
     swap_in(tmp, out)
+    kf.write_text(f'{key}\n')
 
 
 def dump_folder(folder):   # a folder of the game's files (pack_dump.py), with no game package beside them: NSPs in the folder are what the player asked for
@@ -1281,7 +1297,7 @@ def scan_nup(path, want=None):   # a NUP as scan_nsps gives a folder of NSPs, wi
 
 
 def extract_nup(ex, name, k, base, app, n):   # one version of a NUP (k: its base or an update package) into the layout extract makes; the code modules and the image are kept while unchanged
-    dst = ex / name; part = dst / 'RomFS.img.part'
+    dst = ex / name; part = dst / 'RomFS.img.part'; rmtree(dst / 'extract.key')   # not nx_extract's output: an NSP build of this version extracts it again
     def poll():
         try: return {'done': part.stat().st_size}
         except OSError: return None
@@ -1325,7 +1341,7 @@ def scan_dump(dump, want=None):   # a dump folder as scan_nsps gives a folder of
 
 
 def extract_dump(ex, name, src, app):   # one version of a dump folder (src: base/ or updates/<version>/) into the layout extract makes; the code modules and the image are kept while unchanged
-    dst = ex / name; part = dst / 'RomFS.img.part'
+    dst = ex / name; part = dst / 'RomFS.img.part'; rmtree(dst / 'extract.key')   # not nx_extract's output: an NSP build of this version extracts it again
     def poll():
         try: return {'done': part.stat().st_size}
         except OSError: return None
@@ -1339,7 +1355,7 @@ def extract_dump(ex, name, src, app):   # one version of a dump folder (src: bas
 def extract_aoc(nx, keys, repo, work, app, fam, logs):
     """DLC NSPs in the folder → <id>_build/aoc/<index>.img (the RomFS of each one's data NCA; index = title ID − base − 0x1000, base the application's title ID even for one of its programs,
     app + N, whose DLC are the application's). The host reports these indices as owned and mounts them (DM_AOC_DIR).
-    Returns None without DLC. Reused when the DLC NSPs (names, sizes and times) and nx_extract's sources are as at the last extraction (Monster Hunter Rise: 250 DLC, 30 s),
+    Returns None without DLC. Reused when the DLC NSPs (names, sizes and times) and nx_extract are as at the last extraction (extraction_key) (Monster Hunter Rise: 250 DLC, 30 s),
     and aoc/ holds the files that extraction wrote (names, sizes and times): a NUP or a dump folder packs its DLC into the same aoc/"""
     if not fam['dlc']: return None
     if fam.get('nup'):
@@ -1361,7 +1377,7 @@ def extract_aoc(nx, keys, repo, work, app, fam, logs):
         if tid not in best or k > best[tid][0]: best[tid] = (k, p)
     PROG.stage('extract DLC')
     kf = work / 'aoc.key'
-    key = fingerprint(sorted((tid, p.name, p.stat().st_size, p.stat().st_mtime_ns) for tid, (_, p) in best.items()), ('files', [repo / 'dm/tools/nx_extract' / f for f in ('Program.cs', 'nx_extract.csproj')]))
+    key = extraction_key(repo, 'dlc', [p for _, (_, p) in sorted(best.items())], sorted(best))
     base = app & ~0xFFF   # a program (--program N, or one a launcher's build packs) is app + N: its DLC are numbered from the application, as the game asks for them
     if base != app: key = fingerprint(key, 'indices from the application')   # a program's aoc/ numbered from its own title ID before is made again
     if dst.is_dir() and (note := reused(kf, fingerprint(key, ('stat', dst)))) is not None:
@@ -3236,8 +3252,8 @@ def main(args=None):
     dirs = {}
     for ver in versions:   # each merged version streams directly into its own image
         b, u = picks[ver]
-        dirs[ver] = extract_nup(ex, ver, u or b, b, app, fam['nup']) if nup else extract_dump(ex, ver, u or b, app) if dump else extract(nx, keys, ex, ver, b, u, None, logs, g, app)
-        if not nup and not dump: extract_html(nx, keys, dirs[ver], b, u, logs, app)
+        dirs[ver] = extract_nup(ex, ver, u or b, b, app, fam['nup']) if nup else extract_dump(ex, ver, u or b, app) if dump else extract(nx, keys, ex, ver, b, u, logs, g, app, repo)
+        if not nup and not dump: extract_html(nx, keys, dirs[ver], b, u, logs, app, repo)
     check_formats(dirs)
     check_versions_aarch64(dirs, logs, g, nacp.name(dirs[versions[0]] / 'control.nacp') or f'{app:016X}')   # before build_mismatch, derive_profile and build_sources read the modules
     bad = [] if derived else [f'{v}: {x}' for v in versions for x in build_mismatch(dirs[v], v, g)]   # every module's build ID must be the one the profile registers for its version

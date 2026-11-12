@@ -29,6 +29,12 @@ class Base(unittest.TestCase):
             cm.__enter__(); self.addCleanup(cm.__exit__, None, None, None)
 
 
+class Temporaries(unittest.TestCase):
+    def test_spotlight_leaves_the_build_folders_temporaries_out(self):   # by the folder's name: a .metadata_never_index file in it did not stop the indexing
+        self.assertTrue(nsp.TMP.endswith('.noindex'))
+        self.assertNotIn("WORK=str(work / 'tmp')", SCRIPT.read_text())
+
+
 class Header(Base):
     def setUp(self):   # a repository whose chain tools are the real ones (linked) and whose header is its own
         super().setUp()

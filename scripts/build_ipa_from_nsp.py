@@ -1484,7 +1484,7 @@ def capture_nro(py, repo, exe_dir, out, nro_dir, env, logs, g, provisional):
     PROG.add(2); PROG.stage('NRO capture', step='building the Mac host')   # and the rewrite again
     work = out.parent
     host = build_mac_host(repo, work / 'tools/dmhost', env, logs, g)
-    cap, rd, log = nro_dir / 'capture.partial', work / 'tmp/nro_run', logs / 'nro_capture.log'
+    cap, rd, log = nro_dir / 'capture.partial', work / f'{TMP}/nro_run', logs / 'nro_capture.log'
     rmtree(cap); rmtree(rd); cap.mkdir(parents=True)
     for d in ('save', 'temp'): (rd / d).mkdir(parents=True)
     PROG.set(step='booting the game')
@@ -1624,7 +1624,7 @@ def capture_glslc(repo, dirs, pkg_ver, patched, work, env, logs, g):
     if todo != [pkg_ver]: raise BuildError(f'the run-time shader capture runs the packed version {pkg_ver}\'s code; {", ".join(v for v in todo if v != pkg_ver)} needs a capture of its own')
     PROG.set(step='building the Mac host')
     host = build_mac_host(repo, work / 'tools/dmhost', env, logs, g)
-    d = dirs[pkg_ver]; cap, rd, log = d / 'glslc_capture.partial', work / 'tmp/glslc_run', logs / 'glslc_capture.log'
+    d = dirs[pkg_ver]; cap, rd, log = d / 'glslc_capture.partial', work / f'{TMP}/glslc_run', logs / 'glslc_capture.log'
     rmtree(cap); rmtree(rd)
     for s in ('save', 'temp'): (rd / s).mkdir(parents=True)
     # Only builds with no required captures can prove offline coverage. An empty map exposes submitted keys even if a previous split knows them.
@@ -1692,7 +1692,7 @@ def decode_ue_shaders(repo, dirs, pkg_ver, patched, work, env, logs, g):
         PROG.end('reused'); return
     t0, total, host = time.time(), 0, None
     for v, d in todo.items():
-        jd, rd, log = work / f'tmp/ue_job_{v}', work / 'tmp/ue_run', logs / f'ue_decode_{v}.log'
+        jd, rd, log = work / f'{TMP}/ue_job_{v}', work / f'{TMP}/ue_run', logs / f'ue_decode_{v}.log'
         rmtree(jd); rmtree(rd)
         for s in ('save', 'temp'): (rd / s).mkdir(parents=True)
         dec = None
@@ -1788,7 +1788,7 @@ def capture_jit(py, repo, d, patched, work, env, logs, g):
         c = caps / name
         if any(c.glob('*.jit')): continue
         if host is None: PROG.set(step='building the Mac host'); host = build_mac_host(repo, work / 'tools/dmhost', env, logs, g)
-        part, rd, log = caps / f'{name}.partial', work / 'tmp/jit_run', logs / f'jit_{name}.log'
+        part, rd, log = caps / f'{name}.partial', work / f'{TMP}/jit_run', logs / f'jit_{name}.log'
         rmtree(part); rmtree(rd); part.mkdir(parents=True)
         for x in ('save', 'temp', 'msl'): (rd / x).mkdir(parents=True)
         henv = dict(env, DM_ROMFS=str(rfs.source(d)), DM_SAVE=str(rd / 'save'), DM_TEMP=str(rd / 'temp'), DM_MSL_DIR=str(d.parent.parent / 'shader'), DM_JIT_CAPTURE=str(part))
@@ -1820,7 +1820,7 @@ def capture_shaders(repo, d, patched, work, env, logs, g, api):
         say(f'reusing the captured run-time shaders: {out}'); PROG.end('reused'); return out
     PROG.set(step='building the Mac host')
     host = build_mac_host(repo, work / 'tools/dmhost', env, logs, g)
-    cap, rd, log = d / f'{api}_capture.partial', work / f'tmp/{api}_run', logs / f'{api}_capture.log'
+    cap, rd, log = d / f'{api}_capture.partial', work / f'{TMP}/{api}_run', logs / f'{api}_capture.log'
     rmtree(cap); rmtree(rd); cap.mkdir(parents=True)
     for x in ('save', 'temp', 'msl'): (rd / x).mkdir(parents=True)
     # everything the run writes stays in <id>_build (DM_ROOT is already there): a fresh save and temporary storage, an empty shader library folder (pipelines fail, the game still creates every shader)
@@ -1954,7 +1954,7 @@ def heap_check(repo, d, patched, work, env, logs, g):
     HEAP_CHECK_NNMAIN_SECS in nnMain without one (Engage sets none): a few seconds. A boot that resized the heap region (mem_alias / mem_reserve) is followed by another on the new
     layout, up to HEAP_CHECK_ROUNDS, since the checks behind the request (the app pool's, mem_used) run only once it fits. The keys go into the profile (profile_guess.py heap_signals), which is stamped"""
     PROG.stage('heap check')
-    host, rd, log = work / 'tools/dmhost', work / 'tmp/heap_run', logs / 'heap_check.log'
+    host, rd, log = work / 'tools/dmhost', work / f'{TMP}/heap_run', logs / 'heap_check.log'
     # Up to HEAP_CHECK_ROUNDS boots: a heap request that did not fit the heap region stops the first one there (mem_alias / mem_reserve set), and only the next boot reaches the app pool
     # check behind it (Pokémon FireRed / LeafGreen 2026: a 3.15 GB heap plus 102 MB of modules over the 3.2 GB pool, which mem_used then covers)
     set_all, hows, t0 = {}, [], time.time()
@@ -2017,7 +2017,7 @@ def region_check(repo, d, patched, work, env, logs, g):
     by hand, which it checks instead (Absolum: 2.56 GB from its first seconds; 2.5 and 2.72 GB both play). Others are reported, not changed: the fix depends on who lays the region out. A derived profile gets it too: its build has none of the registered builds' fixed-address cuts, only the function-matched ones
     (Super Smash Bros. Ultimate 13.0.1, GitHub issue #375), so a region those cuts shrank shows here before the IPA aborts on an iPhone. The profile is stamped"""
     PROG.stage('address regions')
-    host, rd, log, table = work / 'tools/dmhost', work / 'tmp/region_run', logs / 'region_check.log', logs / 'regions.tsv'
+    host, rd, log, table = work / 'tools/dmhost', work / f'{TMP}/region_run', logs / 'region_check.log', logs / 'regions.tsv'
     PROG.set(step='building the Mac host'); build_mac_host(repo, host, env, logs, g)
     rmtree(rd); table.unlink(missing_ok=True)
     for x in ('save', 'temp', 'msl'): (rd / x).mkdir(parents=True)
@@ -2475,6 +2475,11 @@ def build_shaders(py, repo, sh, xlate, env, logs, g, pkg_key=None, mac=False, se
         prune_stale_chains(sh, chain); prune_shader_cache(sh, chain); pack_libraries(sh, chain, None if mac else pull)
         if mac: rmtree(sh / 'partial')   # the whole library replaces a partial one; partial-keys.txt stays
     return out
+
+
+# The build folder's temporary folder. Spotlight takes the translator's tens of thousands of short-lived files as they are written (mds_stores and mdworker held about 0.6 of a core through a
+# shader build): a folder named .noindex is left out, which a .metadata_never_index file inside one is not (macOS 27, checked against a control folder). The library and cache folders are still indexed
+TMP = 'tmp.noindex'
 
 
 def check_metal(py, repo, env):
@@ -3062,12 +3067,12 @@ def main(args=None):
     say(f'work folder (extracted game files in extract/, {"kept for the next build" if keep else "deleted after the IPA is built"}): {work}')
     xlate = repo / 'dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate'
     # DM_GAME picks the profile; DM_ROOT / WORK point at <id>_build: the tools' default paths and temporary directories all stay inside it
-    env.update(DM_GAME=g.id, DM_ROOT=str(work), WORK=str(work / 'tmp'))
+    env.update(DM_GAME=g.id, DM_ROOT=str(work), WORK=str(work / TMP))
     logs = work / 'logs'
     check_prereqs(env, xlate, mac)
     picks = pick_nsps(fam, have, versions)
 
-    ex = work / 'extract'; ex.mkdir(parents=True, exist_ok=True); (work / 'tmp').mkdir(exist_ok=True)
+    ex = work / 'extract'; ex.mkdir(parents=True, exist_ok=True); rmtree(work / 'tmp'); (work / TMP).mkdir(exist_ok=True)   # 'tmp': what a stopped build of before left
     gb = (sum(fam['nup'].tree_bytes(pack_nup.romfs_of(u or b, b)) for b, u in picks.values()) if nup else sum(tree_size((u or b) / 'romfs')[1] for b, u in picks.values()) if dump else extract_bytes(picks, False)) / 2**30 + 6   # every merged image is complete, including on APFS; shader cache + slack
     if free_gb(work) < gb and not all((ex / v).exists() for v in versions): raise BuildError(f'less than {gb:.0f} GB free on the volume of {work}')
     heapck = provisional and HEAP_CHECK and not args.no_heap_check and not heap_checked(g)   # the heap check, when the game needs one (once per provisional profile: it stamps the profile)
@@ -3184,13 +3189,13 @@ def main(args=None):
     if not motion: say('motion (gyro): off, DM_MOTION=0 is built in (on the iPhone, DM_MOTION=1 in the app\'s Documents/env.txt turns it back on)')
     if mac_pack:   # a Mac app: the Mac host, then the app packed from it and the build's files
         if getattr(args, 'in_programs', None) is not None:   # a program of the game: the app its first program's build packs takes these
-            rmtree(work / 'tmp'); return {'patched': patched, 'romfs': rfs.source(game), 'msl': ios / (f'b-{chain_of(repo)}' if gfx == 'nvn' else 'vk' if gfx == 'vulkan' else 'gl'), 'tables': g.table('shader_map.tsv').parent, 'html': game / 'html', 'gfx': gfx}
+            rmtree(work / TMP); return {'patched': patched, 'romfs': rfs.source(game), 'msl': ios / (f'b-{chain_of(repo)}' if gfx == 'nvn' else 'vk' if gfx == 'vulkan' else 'gl'), 'tables': g.table('shader_map.tsv').parent, 'html': game / 'html', 'gfx': gfx}
         host, font = mac_host(py, repo, work, env, logs, g)
         programs = other_programs(args, g)
         if not icon: say(('no game icon: the NUP carries none' if nup else 'no game icon: a dump folder has no control data') + '; the app\'s icon will be blank; --icon / ICON or --fallback-icon / FALLBACK_ICON gives it one' if dump else '[RED] no game icon in the extraction (an older extraction did not save it: delete extract/ and run again); the app\'s icon will be blank')
         mac_app(py, repo, out_ipa, app, work, game, patched, host, font, ios, aoc, gfx, lang, g, app_name, app_version, bundle_id, icon, args.mac_sign or MAC_SIGN, env, logs, env_file,
                 (args.gpu or PSO_GPUS).strip(), programs, control)
-        rmtree(work / 'tmp')
+        rmtree(work / TMP)
         say(f'done: {out_ipa} ({tree_size(out_ipa)[1] / 2**30:.1f} GB); '
             f'open it from Finder. Its save is in ~/Library/Application Support/nxnative/{app:016X}/, its log in ~/Library/Logs/nxnative/{app:016X}.log')
         if seen_shaders: say('a partial shader library: where a shader is missing, the log says so in red and the draw goes without it. Run this script again with --seen-shaders to add what the log names, or without it for the whole map')
@@ -3201,7 +3206,7 @@ def main(args=None):
         host, font = (first['host'], first['font']) if first else mac_host(py, repo, work, env, logs, g)
         parts = {'font': font}
         cmd = mac_run(work, game, patched, host, font, ios, aoc, gfx, lang, env, logs, g, env_file, partial=seen_shaders, parts=parts, jit=jit)
-        rmtree(work / 'tmp')
+        rmtree(work / TMP)
         if getattr(args, 'in_programs', False): return parts
         programs = None if PROGRAM_INDEX else mac_programs(args, g, parts)
         if programs: cmd = cmd.replace(' && ', f' && DM_PROGRAMS={shlex.quote(str(programs))} ', 1)
@@ -3212,7 +3217,7 @@ def main(args=None):
         return
 
     if getattr(args, 'in_programs', None) is not None:   # a program of the game: the app its first program's build packs takes these
-        rmtree(work / 'tmp'); return {'row': (PROGRAM_INDEX, g.id, patched, rfs.source(game), ios, gfx), 'ex': ex, 'keep': keep}
+        rmtree(work / TMP); return {'row': (PROGRAM_INDEX, g.id, patched, rfs.source(game), ios, gfx), 'ex': ex, 'keep': keep}
     programs = other_programs(args, g)
     if programs and romfs_mode == 'separate': raise BuildError('a game of several programs keeps its files in the app (ROMFS / --romfs bundle): Documents holds one RomFS image, one program\'s')
     if not prepare_xcode and free_gb(out_ipa.parent) < 5: raise BuildError(f'less than 5 GB free on the volume of {out_ipa.parent}')
@@ -3245,7 +3250,7 @@ def main(args=None):
         try: xcode_projects.register_project(workspace, project, app_name, workspace.with_name(workspace.stem + '-derived-data'))
         except ValueError as e: raise BuildError(str(e)) from e
         PROG.end()
-        rmtree(work / 'tmp')
+        rmtree(work / TMP)
         say(f'ready: {workspace}')
         say(f'game project: {project}')
         say(f'Xcode derived data: {work / "xcode-derived-data"}')
@@ -3261,7 +3266,7 @@ def main(args=None):
     if not out_ipa.is_file(): raise BuildError(f'no IPA at {out_ipa}')
     tree_tar.pack(xcode_data, say)
     PROG.end(f'{out_ipa.name}, {amount(out_ipa.stat().st_size, "B")}')
-    rmtree(work / 'tmp')
+    rmtree(work / TMP)
     if not keep:
         for d in [ex] + [r['ex'] for r in programs.values()]: say(f'deleting the extracted game files: {d}'); rmtree(d)
     say(f'done: {out_ipa} ({out_ipa.stat().st_size / 2**30:.1f} GB)')

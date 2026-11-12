@@ -875,6 +875,32 @@ static DmCheatsPanel *g_cheats_panel;   // created on the first Show Cheats Wind
     [g_cheats_panel show];
 }
 @end
+// The Amiibo menu (hle_sdk16.c), rebuilt on every open
+@interface DmAmiiboMenuDelegate : NSObject <NSMenuDelegate>
+@end
+@implementation DmAmiiboMenuDelegate
+- (void)menuNeedsUpdate:(NSMenu *)menu {
+    [menu removeAllItems];
+    NSMenuItem *scan = [menu addItemWithTitle:@"Scan Amiibo…" action:@selector(scanAmiibo:) keyEquivalent:@"a"];
+    scan.target = self; scan.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagShift;
+    const char *name = dm_amiibo_name();
+    NSMenuItem *rm = [menu addItemWithTitle:name ? [NSString stringWithFormat:@"Remove %@", @(name)] : @"No amiibo on the reader" action:name ? @selector(removeAmiibo:) : nil keyEquivalent:@""];
+    rm.target = self; rm.enabled = name != NULL;
+}
+- (void)scanAmiibo:(NSMenuItem *)it {
+    (void)it; NSOpenPanel *panel = [NSOpenPanel openPanel];
+    panel.message = @"Choose an amiibo dump (.bin)"; panel.allowsMultipleSelection = NO; panel.canChooseDirectories = NO;
+    [panel beginWithCompletionHandler:^(NSModalResponse r) {
+        if (r != NSModalResponseOK || !panel.URL) return;
+        if (!dm_amiibo_scan(panel.URL.fileSystemRepresentation)) {
+            NSAlert *a = [NSAlert new]; a.messageText = @"Not an amiibo dump";
+            a.informativeText = @"The file is not a raw amiibo image (a .bin of 520 to 572 bytes)."; [a runModal];
+        }
+    }];
+}
+- (void)removeAmiibo:(NSMenuItem *)it { (void)it; dm_amiibo_remove(); }
+@end
+static DmAmiiboMenuDelegate *g_amiibo_menu;
 static DmCheatsMenuDelegate *g_cheats_menu;   // NSMenu keeps its delegate unretained
 
 @implementation DmCheatsPanel {
@@ -1559,6 +1585,13 @@ void front_run(void (*guest)(void)) {
         // Cheats menu has been opened once. Every open rebuilds them through the delegate as before
         [g_cheats_menu menuNeedsUpdate:cm];
         [[bar addItemWithTitle:@"Cheats" action:nil keyEquivalent:@""] setSubmenu:cm];
+        if (dm_game_imports("_ZN2nn3nfp")) {
+            g_amiibo_menu = [DmAmiiboMenuDelegate new];
+            NSMenu *am = [[NSMenu alloc] initWithTitle:@"Amiibo"];
+            am.delegate = g_amiibo_menu; am.autoenablesItems = NO;
+            [g_amiibo_menu menuNeedsUpdate:am];   // so that the key equivalent exists before the menu is first opened
+            [[bar addItemWithTitle:@"Amiibo" action:nil keyEquivalent:@""] setSubmenu:am];
+        }
         if (getenv("DM_CHEATS_WINDOW") && atoi(getenv("DM_CHEATS_WINDOW")))   // the Cheats panel open from the start (beside the game, not key)
             dispatch_async(dispatch_get_main_queue(), ^{ [g_cheats_menu showPanel:nil]; });
         [[bar addItemWithTitle:@"Window" action:nil keyEquivalent:@""] setSubmenu:wm];

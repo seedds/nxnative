@@ -1364,3 +1364,11 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Cause:** an NRR with 1 in the byte at +5 (the Switch 2's) has a header 0x180 bytes longer. The same fields follow it: program ID +0x4b0, size +0x4b8, hash table +0x4c0, its count +0x4c4.
 - **Fix:** `hle_ro.c` and `nro_collect.py` read the table by that byte.
 - **Found on:** [Mario Tennis Fever](../../dm/games/0400D4201C6EA000/README.md).
+
+### A game that asks for an amiibo never finds one
+
+- **Symptom:** a game's amiibo screen waits for a figure forever; nothing in the host can put one on the reader.
+- **Cause:** `nn::nfp` was answered with one NFC device whose detection never finds a tag, as a console with no figure at hand.
+- **Fix:** the host's NFC device (`dm/host/hle_sdk16.c`) finds an amiibo from a raw dump of the figure's tag: **Amiibo › Scan Amiibo…** in the Mac window, `DM_AMIIBO=<file>`, or `DM_CTL`'s `amiibo <file>` ([Amiibo](../development.md#amiibo)). The UID, the model block and the write counter come from the dump; the owner, nickname and application area, which the tag holds encrypted, are the host's own.
+- **Open:** reading a dump's own encrypted data with the player's key file.
+- **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game).

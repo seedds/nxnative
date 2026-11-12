@@ -121,6 +121,14 @@ python3 scripts/cheat_anchor.py check FFCC.cheats.toml --nso <ExeFS/main>    # t
   - `import` refuses a file named after another build unless `--assume-build`; its unanchored cheats then stay bound to the file's own build. A file named after the game's title ID names no build, so it is taken as written for the NSO's build. `import` also counts the writes into the code that put back the word already there (restore entries): evidence that the file belongs to the NSO's build.
 - **Not yet:** `min` / `max` and never-decrease through pointer chains, anchors by IL2CPP names. Validation on FFCC and 13 Sentinels: [Cheats carried across game updates](reference/rewriter.md#cheats-carried-across-game-updates).
 
+## Amiibo
+
+The host's NFC device (`dm/host/hle_sdk16.c`, the `nn::nfp` family) finds an amiibo from a file: a raw dump of the figure's NTAG215 tag (a `.bin` of 520 to 572 bytes). **Amiibo › Scan Amiibo…** (⇧⌘A) in the Mac game window puts one on the reader, `DM_AMIIBO=<file>` has one there from the start, and `DM_CTL` takes `amiibo <file>` and `amiibo-remove`. The menu is there for a game that imports `nn::nfp`.
+
+- **A scan lasts one detection.** A scanned amiibo waits on the reader until the game looks for a tag; when the game stops the detection that found it, the amiibo is gone, as a figure lifted off the controller, and the next use needs a new scan. **Remove** in the menu takes it off earlier, which the game sees as a tag removed.
+- **What comes from the dump:** the tag's UID, the model block (character, variant, figure type, model number, series) and the write counter, which the tag holds unencrypted.
+- **What does not:** the owner's Mii, the nickname, the dates and the game's own data on the figure (the application area) are encrypted with keys the host does not have. The host answers a registered amiibo owned by the default Mii, nicknamed `nxnative`, written today, and keeps an application area of its own for each amiibo in `<DM_ROOT>/amiibo/<UID>.area`, which is empty until a game creates it. So a figure's unlocks by model work, and data a real figure carries (a trained fighter, Wolf Link's hearts) does not come across. Open: reading a dump's own data with the player's key file.
+
 ## Guest memory SVCs
 
 `dm/host/hle_svc.c` serializes heap resizing, physical map/unmap, stack

@@ -58,7 +58,7 @@ run: $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_to
 	$(B)/t_movie_avc
 	$(B)/t_nv
 	$(B)/t_vi_history $(QUIET)
-	$(B)/t_nfc
+	TMPDIR="$(abspath $(B))" $(B)/t_nfc
 	$(B)/t_motion
 	$(B)/t_motion_apple
 	$(B)/t_pad_apple
@@ -221,7 +221,7 @@ $(B)/t_nfc: t_nfc.c ../hle_sdk16.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -Wno-frame-address -I.. $(GINC) -o $@ t_nfc.c
 .PHONY: nfc
 nfc: $(B)/t_nfc
-	$(B)/t_nfc
+	TMPDIR="$(abspath $(B))" $(B)/t_nfc
 $(B)/t_language: t_language.c ../hle_sdk16.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -Wno-frame-address -fsanitize=address,undefined -I.. $(GINC) -o $@ t_language.c
 $(B)/t_motion: t_motion.c ../motion_fusion.h | $(B)

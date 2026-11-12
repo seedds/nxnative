@@ -915,7 +915,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 
 ## Shaders
 
-- the split finds no shaders, and the RomFS is one huge file with a short name (`42`) whose bytes look random past a table at its start (magic `CRA.`). → [One scrambled archive indexed by the NRO](../reference/shaders.md#one-scrambled-archive-indexed-by-the-nro)
+- the split finds no shaders, and the RomFS is one huge file with a short name (`42`) whose bytes look random past a table at its start (magic `CRA.`). Or the split stops with `[RED] /42: a CRA archive, and no NRO in DM_NRO_DIR (…) holds its file table`: the NRO reads a layout `cra.py` does not know. → [One scrambled archive indexed by the NRO](../reference/shaders.md#one-scrambled-archive-indexed-by-the-nro)
 - the split finds only a small part of a game's shaders, with no `[RED]` line, and its RomFS holds files that start `NARC` (`.narc`, `.nptl`, `.ntex` on Mario Tennis Aces). → [Packed shader banks in loose NARC files](../reference/shaders.md#packed-shader-banks-in-loose-narc-files)
 - the split finds no shaders in `main` or RomFS, while reporting control sections in `main` with no code area. The game has `.sp4` resources and loose `.nvnbin` files rather than BNSH archives or whole GLSLC outputs. → [Sumo Ninty_NX shaders and MuxFDMR streams](../reference/shaders.md#sumo-ninty_nx-shaders-and-muxfdmr-streams)
 - the shader split finds no game programs despite loose `.fx.phyre` effects and multi-GB `.vbf` archives. → [Phyre NVN effects in Virtuos VBF archives](../reference/shaders.md#phyre-nvn-effects-in-virtuos-vbf-archives)

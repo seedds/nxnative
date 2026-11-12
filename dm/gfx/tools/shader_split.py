@@ -1021,7 +1021,7 @@ def cra_jobs(files, parts=64):
         import cra
         idx = None
         for n in boot_nros():
-            try: idx = cra.Index(open(n, 'rb').read()); break
+            try: idx = cra.index(open(n, 'rb').read()); break
             except cra.Error: continue
         if idx is None: red(f'/{r}: a CRA archive, and no NRO in DM_NRO_DIR ({os.environ.get("DM_NRO_DIR")}) holds its file table')
         es = idx.files()

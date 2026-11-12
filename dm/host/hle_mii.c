@@ -60,16 +60,26 @@ HLE_FORCE("_ZNK2nn3mii8Database14IsFullDatabaseEv", "mii:u service; empty, so no
 // Source flags: 1 the console's database (empty here), 2 the six default Miis every console has. Mario Kart 8 Deluxe asks for the defaults with room for 6 and never reads the count
 // (main+0x81e954): its boot-time list of Mii icons (main+0x419dc8) builds a head for each of the six, and zeroed entries failed the model's CharInfo check
 enum { MII_SRC_DATABASE = 1, MII_SRC_DEFAULT = 2, MII_DEFAULTS = 6 };
+// The Mii the editor "made" (h_mii_Append): a game that needs a Mii of the console's own and finds none opens the editor to make one, and with the editor cancelled could not go on
+// (Mario Golf: Super Rush's Golf Adventure returned to its save slots at every press). The host has no editor, so AppendMii adds one default Mii to the console's database,
+// for this run: a game keeps the CharInfo it chose in its own save. DM_MII_APPEND=0 cancels the editor as before
+static int g_mii_made;
+static void mii_made(mii_charinfo *c) { mii_default(c, 0, MII_DEFAULTS); c->favorite_color = 0; }
 static int mii_get(void *buf, int n, int src, size_t stride) {
     int k = 0;
-    for (; (src & MII_SRC_DEFAULT) && buf && k < n && k < MII_DEFAULTS; k++) {
+    if ((src & MII_SRC_DATABASE) && g_mii_made && buf && n > 0) {
+        mii_made((mii_charinfo *)buf);
+        if (stride > sizeof(mii_charinfo)) { uint32_t source = 0; memcpy((uint8_t *)buf + sizeof(mii_charinfo), &source, 4); }   // source 0 = the database
+        k = 1;
+    }
+    for (int d = 0; (src & MII_SRC_DEFAULT) && buf && k < n && d < MII_DEFAULTS; k++, d++) {
         uint8_t *e = (uint8_t *)buf + (size_t)k * stride;
-        mii_default((mii_charinfo *)e, k >= 3, k);
+        mii_default((mii_charinfo *)e, d >= 3, d);
         if (stride > sizeof(mii_charinfo)) { uint32_t source = 1; memcpy(e + sizeof(mii_charinfo), &source, 4); }   // CharInfoElement: the CharInfo and its source (1 = default)
     }
     return k;
 }
-HLE_FORCE("_ZNK2nn3mii8Database8GetCountEi", "mii:u service; the six default Miis", int, h_mii_Count, const void *self, int src) { (void)self; return src & MII_SRC_DEFAULT ? MII_DEFAULTS : 0; }
+HLE_FORCE("_ZNK2nn3mii8Database8GetCountEi", "mii:u service; the six default Miis", int, h_mii_Count, const void *self, int src) { (void)self; return (src & MII_SRC_DEFAULT ? MII_DEFAULTS : 0) + ((src & MII_SRC_DATABASE) && g_mii_made); }
 HLE_FORCE("_ZN2nn3mii8Database3GetEPiPNS0_15CharInfoElementEii", "mii:u service; the six default Miis", Result, h_mii_GetE, void *self, int *out, void *buf, int n, int src) {
     (void)self; *out = mii_get(buf, n, src, sizeof(mii_charinfo) + 4); return RES_OK;
 }
@@ -77,7 +87,8 @@ HLE_FORCE("_ZN2nn3mii8Database3GetEPiPNS0_8CharInfoEii", "mii:u service; the six
     (void)self; *out = mii_get(buf, n, src, sizeof(mii_charinfo)); return RES_OK;
 }
 HLE_FORCE("_ZNK2nn3mii8Database8GetIndexEPiRKNS0_8CharInfoE", "mii:u service; no Mii is in the database", Result, h_mii_Index, const void *self, int *out, const void *info) {
-    (void)self; (void)info; *out = -1; return MII_RES_NOT_FOUND;
+    (void)self; mii_charinfo m; if (g_mii_made && info) { mii_made(&m); if (!memcmp(m.create_id, info, sizeof m.create_id)) { *out = 0; return RES_OK; } }
+    *out = -1; return MII_RES_NOT_FOUND;
 }
 HLE_FORCE("_ZNK2nn3mii8Database12UpdateLatestEPNS0_8CharInfoEi", "mii:u service; no Mii is in the database", Result, h_mii_Latest, const void *self, void *info, int src) {
     (void)self; (void)info; (void)src; return MII_RES_NOT_FOUND;
@@ -152,5 +163,12 @@ int dm_mii_standin(const char *dir) {   // written once per process (the query a
 }
 
 // The Mii editor (MiiEdit library applet): the player closed it without adding a Mii
-HLE_FORCE("_ZN2nn3mii9AppendMiiEPi", "MiiEdit applet; cancelled", Result, h_mii_Append, int *index) { DM_APPLET("Mii editor"); (void)index; LOG("mii: AppendMii (the host has no Mii editor: cancelled)"); return MII_RES_CANCELED; }
+HLE_FORCE("_ZN2nn3mii9AppendMiiEPi", "MiiEdit applet; one default Mii made", Result, h_mii_Append, int *index) {
+    DM_APPLET("Mii editor");
+    static int on = -1; if (on < 0) { const char *e = getenv("DM_MII_APPEND"); on = !e || strcmp(e, "0"); }
+    if (!on) { LOG("mii: AppendMii (the host has no Mii editor: cancelled)"); return MII_RES_CANCELED; }
+    g_mii_made = 1; if (index) *index = 0;
+    LOG("mii: AppendMii (the host has no Mii editor: a default Mii is added to the console's database, index 0)");
+    return RES_OK;
+}
 HLE_FORCE("_ZN2nn3mii11ShowMiiEditEv", "MiiEdit applet; closed at once", Result, h_mii_Edit, void) { DM_APPLET("Mii editor"); LOG("mii: ShowMiiEdit (the host has no Mii editor)"); return RES_OK; }

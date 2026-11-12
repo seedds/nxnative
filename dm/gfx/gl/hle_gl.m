@@ -1737,11 +1737,13 @@ GL(glDeleteShader, void, GLuint sh) {
     OLOG("DeleteShader %u%s", sh, s->refs ? " (attached: flagged)" : "");
     if (s->refs) s->deleted = 1; else shader_free(sh);
 }
-// One shader per stage: attaching another replaces it (GLES refuses a second one; the shader tables have one stage each)
+// One shader per stage: attaching another replaces it (GLES refuses a second one; the shader tables have one stage each), said once: desktop GL would link both. The same
+// shader again is GL_INVALID_OPERATION, which this host does not record (glGetError is 0): nothing changes, its count included
 GL(glAttachShader, void, GLuint pr, GLuint sh) {
     prog_t *p = prog_of(pr); shader_t *s = shader_of(sh); if (!p || !s) return;
     GLuint *slot = s->type == GL_VERTEX_SHADER ? &p->vs : &p->fs;
     if (*slot == sh) return;
+    if (*slot) RED1("program %u: a second %s shader (%u) replaces the first (%u): desktop GL links both, the shader tables have one per stage", pr, s->type == GL_VERTEX_SHADER ? "vertex" : "fragment", sh, *slot);
     shader_release(slot); *slot = sh; s->refs++;
 }
 GL(glDetachShader, void, GLuint pr, GLuint sh) {

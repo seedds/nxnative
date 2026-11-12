@@ -2752,6 +2752,22 @@ def mac_app_name(name):   # the app's file name: the game name with the characte
     return re.sub(r'\s*[:/]\s*', ' - ', name).strip(' .-') or 'nxnative'
 
 
+def mesh_side_libs(py, repo, work, lib, g, env, logs):
+    """Task and mesh shaders as compute, for Macs without mesh-shading hardware (M1, M2; the host turns it on there, DM_NVN_MESH_COMPUTE): a side library <key>_bk.metallib for each,
+    generated from the library's translated sources by dm/gfx/tools/dmsh_meshcompute.py into <work>/shader/mk-b-<chain>, which pack_app adds to the app's shader image (--msl-extra).
+    Reused while the library's image and the generator are unchanged. A failure leaves them out (those draws stay native) and does not stop the build"""
+    out, tool = work / 'shader' / f'mk-{lib.name}', repo / 'dm/gfx/tools/dmsh_meshcompute.py'
+    src = Path(shader_lib.image_of(lib)); src = src if src.is_file() else Path(lib)
+    if not src.exists(): return None
+    st = src.stat(); key = f'{st.st_size} {st.st_mtime_ns} {hashlib.sha256(tool.read_bytes()).hexdigest()}\n'
+    kf = out / 'key'
+    if kf.is_file() and kf.read_text() == key and any(out.glob('*_bk.metallib')): return out
+    rmtree(out); PROG.set(step='mesh shaders as compute')
+    if run([py, tool, 'build', g.table('shader_map.tsv'), lib, out], logs / 'mesh_compute.log', env=env, fatal=False): say('mesh shaders as compute: some side libraries failed (mesh_compute.log); those draws stay native')
+    if not any(out.glob('*_bk.metallib')): return None
+    kf.write_text(key); return out
+
+
 def mac_app(py, repo, out, app, work, game, patched, host, font, msl, aoc, gfx, lang, g, name, version, bundle_id, icon, sign, env, logs, env_file='', gpus='', programs=None, control=None):
     """The last stage of PLATFORM 'mac-app': pack the Mac app (dm/mac/pack_app.py) from what a Mac-only build made: the Mac host and font (mac_host), the packed version's RomFS and rewritten
     modules, the Mac shader libraries (msl: <shader>/cache, whose b-<chain> goes in, or a Vulkan or GL game's <shader>, whose vk / gl goes in), the DLC, the profile's tables (with the shader pairs
@@ -2761,11 +2777,13 @@ def mac_app(py, repo, out, app, work, game, patched, host, font, msl, aoc, gfx, 
     lib = msl / (f'b-{chain_of(repo)}' if gfx == 'nvn' else 'vk' if gfx == 'vulkan' else 'gl')
     pso = mac_pso(py, repo, work, lib, g, gpus, env, logs) if gfx == 'nvn' and g.table('shader_pairs.tsv').is_file() else None   # a stage of its own, before the app's
     PROG.stage('Mac app', step='starting')
+    mk = mesh_side_libs(py, repo, work, lib, g, env, logs) if gfx == 'nvn' else None
     # The launcher settings the IPA carries (dm/games/settings.py), without the iPhone's own switches: the app's settings window and Mac front ends show them (docs/frontends.md)
     settings = work / 'app/launcher.json'; settings.parent.mkdir(parents=True, exist_ok=True)
     run([py, repo / 'dm/games/settings.py', g.id, patched, control or game / 'control.nacp', settings], logs / 'mac_settings.log', env=dict(env, GFXAPI=gfx, SETTINGS_PLATFORM='mac', DM_LANG=lang))
     cmd = [py, repo / 'dm/mac/pack_app.py', out, '--host', host, '--patched', patched, '--romfs', rfs.source(game), '--msl', lib, '--tables', g.table('shader_map.tsv').parent,
            '--font', font, '--title-id', f'{app:016X}', '--name', name, '--bundle-id', bundle_id, '--lang', lang, '--sign', sign or '-']
+    if mk: cmd += ['--msl-extra', mk]
     split_pairs = work / 'shader/pso_pairs.tsv'   # the split's copy of pso_pairs.tsv, for a profile without the table (as mac_run's DM_PSO_PAIRS)
     for opt, v in (('--version', version), ('--category', g.get('app_category')), ('--marker', g.get('romfs_marker')), ('--aoc', aoc), ('--icon', icon),
                    ('--pso', pso), ('--pso-pairs', split_pairs if gfx == 'nvn' and not g.table('pso_pairs.tsv').is_file() and split_pairs.is_file() else None),

@@ -13974,7 +13974,13 @@ static void cs_hoist_try(NvProg *pr0, const p_draw *dw0, const p_draw_idx *di0) 
 // apart (window state, the time into the session), more than the gain measured
 static int mk_on(void) {
     static int m = -1;
-    if (m < 0) { m = tbdr_on() ? 0 : sw_mode("DM_NVN_MESH_COMPUTE", 0); if (m) MLOG("DM_NVN_MESH_COMPUTE: task / mesh draws as compute before their pass (GPU family Apple9: %d)", (int)[g_dev supportsFamily:MTLGPUFamilyApple9]); }
+    if (m < 0) {
+#if TARGET_OS_IPHONE
+        int dflt = 0;   // not measured there
+#else
+        int dflt = ![g_dev supportsFamily:MTLGPUFamilyApple9];   // on by default on a Mac without mesh-shading hardware (M1, M2); =0 turns it off
+#endif
+        m = tbdr_on() ? 0 : sw_mode("DM_NVN_MESH_COMPUTE", dflt); if (m) MLOG("DM_NVN_MESH_COMPUTE: task / mesh draws as compute before their pass (GPU family Apple9: %d)", (int)[g_dev supportsFamily:MTLGPUFamilyApple9]); }
     return sw_on(m);
 }
 @interface NvMk : NSObject { @public id<MTLComputePipelineState> k[2], t[2]; id<MTLFunction> kv; uint32_t maxv, maxp, rec; int ok; } @end   // k: mesh kernel (border corrections on / off), t: task kernel, kv: the vertex function
@@ -14092,14 +14098,8 @@ static void mk_note(int ind) {
     MLOG("mesh as compute up to frame %llu: %llu task / mesh draws, %llu indirect, %llu indirect draws cut to their slots, %llu drawn from compute, %llu native; %llu jobs in %llu scans; scans stopped by a draw writing memory %llu, a uniform update %llu, a dispatch %llu, another op %llu, a full table %llu, other targets %llu; left native: indirect %llu, count %llu, shaders %llu, no mesh library %llu, no task library %llu, size %llu, arguments %llu; mesh draws met by scans %llu",
         (unsigned long long)f, g_mk_all, g_mk_ind, g_mk_over, g_mk_drawn, g_mk_native, g_mk_jobs, g_mk_scans, g_mk_stop[0], g_mk_stop[1], g_mk_stop[2], g_mk_stop[3], g_mk_stop[4], g_mk_stop[5], g_mk_rej[0], g_mk_rej[1], g_mk_rej[2], g_mk_rej[3], g_mk_rej[4], g_mk_rej[5], g_mk_rej[6], g_mk_met);
 }
-// Whether this draw may write memory (draw_note_writes, without keeping its note)
-static int mk_draw_writes(NvProg *pr) {
-    int w0 = g_pass_memw, n0 = g_mpw_n; uint64_t k0[6]; memcpy(k0, g_pw_kind, sizeof k0);
-    g_pass_memw = 0; draw_note_writes(pr);
-    int w = g_pass_memw || g_mpw_n > n0;
-    g_pass_memw = w0; g_mpw_n = n0; memcpy(g_pw_kind, k0, sizeof k0);
-    return w;
-}
+// Whether this draw may write memory: any of its shaders stores to a buffer or image (prog_swrites)
+static int mk_draw_writes(NvProg *pr) { return prog_swrites(pr); }
 static int mk_ub_hit(NvShader *sh, int st, const csh_rng *up, int nup) {
     if (!sh || !nup) return 0;
     for (int i = 0; i < sh->rf.nb; i++) { const nvn_rbind *b = &sh->rf.b[i];
@@ -14243,7 +14243,7 @@ static void mk_hoist_try(const uint8_t *from) {
             case OP_BARRIER: case OP_RENDER_COND: break;
             case OP_REPORT_COUNTER: case OP_RESET_COUNTER: { uint64_t t; memcpy(&t, aq, 8); if (t != NVN_COUNTER_TYPE_SAMPLES_PASSED) stop = 3; break; }
             case OP_DISPATCH: { int moved = 0; for (int i = 0; i < g_csh_n; i++) moved |= g_csh_op[i] == q; if (!moved) stop = 2; break; }   // one cs_hoist_try ran ahead already ran before these jobs
-            case OP_SET_RT: if (!csh_rt_same(q, aq)) stop = 5; break;
+            case OP_SET_RT: stop = 5; break;   // a target change ends the pass's scan
             default: if (!state_op(hq.op, aq)) stop = 3; break;
         }
     }

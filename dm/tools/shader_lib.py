@@ -156,8 +156,8 @@ def app_files(lib, skip_suffix=()):
     return {p.name: str(p) for p in view(lib).iterdir() if p.name.endswith(APP_SUFFIXES) and p.name not in APP_LEAVE_OUT and not p.name.startswith('.') and '.tmp' not in p.name and not p.name.endswith(tuple(skip_suffix) or ('\0',))}
 
 
-def subset(lib, dst, skip_suffix=()):   # → the number of files in the image dst
-    files = app_files(lib, skip_suffix)
+def subset(lib, dst, skip_suffix=(), extra=None):   # → the number of files in the image dst; extra: {name: path} added (side libraries the build made beside the library)
+    files = app_files(lib, skip_suffix) | dict(extra or {})
     if not any(n.endswith('.metallib') for n in files): raise ValueError(f'no shader libraries at {lib}')
     write(files, os.fspath(dst))
     return len(files)

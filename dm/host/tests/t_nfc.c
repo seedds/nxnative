@@ -14,7 +14,8 @@ int dm_game_imports(const char *prefix) { (void)prefix; return 0; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 void dm_backtrace(uint64_t fp) { (void)fp; }
 void hle_bind_system_event(void *ev, int autoclear) { (void)ev; (void)autoclear; }
-void hle_signal_system_event(void *ev) { (void)ev; }
+static int signals; static void *signalled;
+void hle_signal_system_event(void *ev) { signals++; signalled = ev; }
 // The included SDK source also registers vsync hooks; NFC must never enter them.
 uint64_t hle_system_event_binding(void *ev) { (void)ev; abort(); }
 int hle_signal_system_event_binding(uint64_t binding) { (void)binding; abort(); }
@@ -82,6 +83,42 @@ int main(void) {
     nfp_init();
     CHECK(nfp_lib() == 1, "NFP initializes again after finalization");
     nfp_fini();
+    // A virtual amiibo (DM_AMIIBO, amiibo.h): found at detection with the activate event signalled, mounted, its area created, and found again at the next scan
+    {
+        char adir[] = "/tmp/t_nfc_amiibo.XXXXXX"; CHECK(mkdtemp(adir) != NULL, "a folder for the amiibo's area");
+        setenv("DM_AMIIBO", "0100000000040002", 1); setenv("DM_AMIIBO_DIR", adir, 1);
+        Result (*attach)(void *, const NfpDeviceHandle *) = forced(&hle_force_h_nfp_AttachAct, "_ZN2nn3nfp19AttachActivateEventEPNS_2os15SystemEventTypeERKNS0_12DeviceHandleE");
+        Result (*mount)(const NfpDeviceHandle *, int, int) = forced(&hle_force_h_nfp_Mount, "_ZN2nn3nfp5MountERKNS0_12DeviceHandleENS0_9ModelTypeENS0_11MountTargetE");
+        Result (*unmount)(const NfpDeviceHandle *) = forced(&hle_force_h_nfp_Unmount, "_ZN2nn3nfp7UnmountERKNS0_12DeviceHandleE");
+        Result (*model)(void *, const NfpDeviceHandle *) = forced(&hle_force_h_nfp_ModelInfo, "_ZN2nn3nfp12GetModelInfoEPNS0_9ModelInfoERKNS0_12DeviceHandleE");
+        Result (*reg)(void *, const NfpDeviceHandle *) = forced(&hle_force_h_nfp_RegInfo, "_ZN2nn3nfp15GetRegisterInfoEPNS0_12RegisterInfoERKNS0_12DeviceHandleE");
+        Result (*create)(const NfpDeviceHandle *, const NfpAreaCreateInfo *) = forced(&hle_force_h_nfp_CreateArea, "_ZN2nn3nfp21CreateApplicationAreaERKNS0_12DeviceHandleERKNS0_25ApplicationAreaCreateInfoE");
+        Result (*open_area)(const NfpDeviceHandle *, uint32_t) = forced(&hle_force_h_nfp_OpenArea, "_ZN2nn3nfp19OpenApplicationAreaERKNS0_12DeviceHandleEj");
+        Result (*get_area)(void *, uint64_t *, const NfpDeviceHandle *, uint64_t) = forced(&hle_force_h_nfp_GetArea, "_ZN2nn3nfp18GetApplicationAreaEPvPmRKNS0_12DeviceHandleEm");
+        uint8_t ev[0x30];
+        nfp_init(); CHECK(enabled() == 1, "NFC is on with a virtual amiibo");
+        CHECK(attach(ev, &device.handle) == RES_OK, "activate event attached");
+        signals = 0;
+        CHECK(start(&device.handle) == RES_OK && device_state(&device.handle) == DM_NFP_DEV_FOUND && signals == 1 && signalled == ev, "detection finds the amiibo and signals the activate event");
+        uint8_t tag[0x58], mi[0x40], ri[0x100];
+        CHECK(tag_info(tag, &device.handle) == RES_OK && tag[10] == 7, "the tag's info: a 7-byte UID");
+        CHECK(model(mi, &device.handle) == DM_NFP_WRONG_STATE, "model info needs the tag mounted");
+        CHECK(mount(&device.handle, 0, 1) == RES_OK && device_state(&device.handle) == DM_NFP_DEV_MOUNTED, "the amiibo mounts");
+        CHECK(model(mi, &device.handle) == RES_OK && mi[0] == 0x01 && mi[5] == 0x04, "model info is the amiibo ID");
+        CHECK(reg(ri, &device.handle) == RES_OK && !strcmp((const char *)ri + 0x5c, "amiibo"), "register info: an owner and a nickname");
+        uint8_t init[8] = {1, 2, 3, 4, 5, 6, 7, 8}; NfpAreaCreateInfo ci = {0x1019c800, 0, init, sizeof init};
+        CHECK(open_area(&device.handle, 0x1019c800) == DM_NFP_AREA_NOT_CREATED, "no area before it is created");
+        CHECK(create(&device.handle, &ci) == RES_OK && open_area(&device.handle, 0x1019c800) == RES_OK, "the area is created and opens");
+        CHECK(unmount(&device.handle) == RES_OK && stop(&device.handle) == RES_OK && device_state(&device.handle) == NFP_STATE_INIT, "unmount and stop");
+        uint8_t got[0xd8]; uint64_t n = 0;
+        CHECK(start(&device.handle) == RES_OK && mount(&device.handle, 0, 1) == RES_OK && open_area(&device.handle, 0x1019c800) == RES_OK
+              && get_area(got, &n, &device.handle, sizeof got) == RES_OK && n == 0xd8 && !memcmp(got, init, sizeof init), "the area is there at the next scan");
+        CHECK(stop(&device.handle) == RES_OK, "stop with the amiibo mounted");
+        char f[256]; snprintf(f, sizeof f, "%s/0100000000040002.area", adir); unlink(f); rmdir(adir);
+        unsetenv("DM_AMIIBO"); unsetenv("DM_AMIIBO_DIR");
+        CHECK(start(&device.handle) == RES_OK && device_state(&device.handle) == NFP_STATE_SEARCH && tag_info(tag, &device.handle) == (115u | 97u << 9), "without DM_AMIIBO detection finds nothing again");
+        stop(&device.handle); nfp_fini();
+    }
     CHECK(lookups == 0, "NFC and NFP hooks do not call an original SDK service path");
     printf("NFC availability: %d checks, %d failed\n", checks, fails);
     return fails != 0;

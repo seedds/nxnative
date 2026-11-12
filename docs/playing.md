@@ -34,6 +34,12 @@ Joy-Con 2 and Pro Controller 2 gyro come over Bluetooth LE ([Switch 2 controller
 
 English by default. Pick another when packing with `--language` (`-l`), by code or by name: `-l ja`, `-l zh-Hans`, `-l French` (`LANGUAGE` in Spyder). It must be one the game has; the script prints the game's languages and stops on one it lacks. To change it without rebuilding, pick another on the settings screen.
 
+## amiibo
+
+There is no NFC reader, so an amiibo is named instead: a line `DM_AMIIBO=<amiibo ID>` in the [settings file](#settings-in-a-file), with the figure's 16-digit ID as amiibo lists print it (Link, Super Smash Bros. series: `DM_AMIIBO=0100000000040002`). When the game asks you to touch an amiibo, it finds that one. The game can read which figure it is and create, read and write its own save data on it, which is kept in an `amiibo` folder beside the game's saves (or `DM_AMIIBO_DIR=<folder>`, to share figures between games). `DM_AMIIBO_NAME` sets the figure's nickname.
+
+To change figures while playing, make `DM_AMIIBO` the path of a text file that holds the ID (`DM_AMIIBO=/path/to/amiibo.txt`): the game reads it again at every scan, so write another ID into it before the next scan, or empty it for no amiibo. The figure's own data from a real amiibo is not read: the game sees a fresh figure the first time.
+
 ## Settings in a file
 
 Lines like `DM_OPMODE=0` (handheld mode: lower resolution, higher frame rate) in `Documents/env.txt` win over the settings screen, which then shows them greyed out ([the full list](settings.md#settings-in-a-file)). `DM_FPS_TARGET=30` keeps Breath of the Wild, Tears of the Kingdom, Octopath Traveler 0 and Octopath Traveler II at their original 30 fps, which saves battery; `DM_PRESENT_INTERVAL=game` does the same for Monster Train 2. `DM_SHOW_FPS=1` shows the frame rate at the top left (`--show-fps` when packing turns it on from the start). `DM_LAUNCHER=0` skips the settings screen.

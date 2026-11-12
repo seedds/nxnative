@@ -218,6 +218,35 @@ int main(void) { @autoreleasepool {
           "no table is built and no ID went down the slow path: the takeover's note names no ID");
     same_as_whole(b18, "the patched table holds what a table built whole does (a finalized twin's base taken over)");
 
+    // More registrations than the ring of notes holds since the table was made: the table is built whole, and the log line's split of "too many" names the registrations
+    table();
+    builds = g_stat_pool_builds; uint64_t many_reg = g_stat_pool_many[0], many_ser = g_stat_pool_many[1], many_ids = g_stat_pool_many[3];
+    for (int i = 0; i <= REG_LOG; i++) mtl_reg_tex(5, (const tex_t *)(i & 1 ? &t5 : &t9), NULL);   // a registration that repeats the ID's texture changes nothing, so alternate two
+    id<MTLBuffer> b19 = table();
+    CHECK(g_stat_pool_builds == builds + 1 && g_stat_pool_many[0] == many_reg + 1, "registrations past the log build the table whole, counted as such");
+    CHECK(g_stat_pool_many[1] == many_ser && g_stat_pool_many[3] == many_ids, "and not as storage changes past their log or IDs past the patch's limit");
+    CHECK(entry(b19, 5) != dummy_of(b19), "ID 5 still holds its texture");
+
+    // A sparse mapping: a sparse texture's page table follows no note, so a storage change after a mapping builds a table made before it whole and sends every ID down the slow path
+    // once. Only once: a table made after the last mapping is patched over noted storage changes, and no ID goes down the slow path again (Nintendo Switch Sports Resort maps a sparse
+    // pool a few times a minute in two-player skate; once any mapping existed, every storage change built its 33,024-entry table whole, about 3 times a frame)
+    uint64_t s5 = ((const tex_t *)&t5)->serial, many_sparse = g_stat_pool_many[2];
+    atomic_fetch_add(&g_vp_gen, 1);
+    builds = g_stat_pool_builds; ep = g_treg_ep; own_note(s5);
+    id<MTLBuffer> b20 = table();
+    CHECK(g_stat_pool_builds == builds + 1 && g_stat_pool_many[2] == many_sparse + 1, "a storage change after a mapping builds a table made before it whole, counted as a sparse mapping");
+    CHECK(g_treg_ep != ep && entry(b20, 5) != dummy_of(b20), "and sends every ID down the slow path, ID 5 still holding its texture");
+    builds = g_stat_pool_builds; ep = g_treg_ep; patched = g_stat_pool_patched; kept = g_stat_pool_kept; own_note(s5);
+    id<MTLBuffer> b21 = table();
+    CHECK(g_stat_pool_builds == builds && g_stat_pool_many[2] == many_sparse + 1 && g_stat_pool_patched + g_stat_pool_kept == patched + kept + 1,
+          "with no mapping since the table was made, a noted storage change patches or keeps it");
+    CHECK(g_treg_ep == ep && entry(b21, 5) == entry(b20, 5), "and no ID goes down the slow path");
+    same_as_whole(b21, "the table taken alone holds what a table built whole does (a mapping long before)");
+    atomic_fetch_add(&g_vp_gen, 1);
+    builds = g_stat_pool_builds; own_note(s5);
+    table();
+    CHECK(g_stat_pool_builds == builds + 1 && g_stat_pool_many[2] == many_sparse + 2, "another mapping builds the table whole again at the next storage change");
+
     mtl_reg_tex(1, NULL, NULL); mtl_reg_tex(2, NULL, NULL); mtl_reg_tex(5, NULL, NULL); mtl_reg_tex(6, NULL, NULL); mtl_reg_tex(7, NULL, NULL); mtl_reg_tex(9, NULL, NULL);
     mtl_tex_release(&t2); h_nvnTextureFinalize(&t1); h_nvnTextureFinalize(&t5); h_nvnTextureFinalize(&t9); h_nvnTextureFinalize(&t10);
     h_nvnMemoryPoolFinalize((NVNmemoryPool *)&dpool); h_nvnMemoryPoolFinalize((NVNmemoryPool *)&epool);

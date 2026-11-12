@@ -58,6 +58,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [Animal Crossing: New Horizons](#animal-crossing-new-horizons) | 0 | 0 | 14 | 0 | 0 | `build` → `game` |
 | [ASTRAL CHAIN](#astral-chain) | 0 | 0 | 112 | 0 | 0 | `build` → `game` |
 | [Batman: Arkham Knight](#batman-arkham-knight) | 8 | 0 | 0 | 0 | 1 | `build` → `game` ×2 |
+| [Bayonetta 3](#bayonetta-3) | 0 | 0 | 52 | 0 | 0 | `build` |
 | [DARK SOULS: REMASTERED](#dark-souls-remastered) | 2 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Diablo II: Resurrected](#diablo-ii-resurrected) | 2 | 0 | 0 | 1 | 0 | `game` |
 | [EA SPORTS FC 27](#ea-sports-fc-27) | 0 | 0 | 0 | 0 | 1 | `build` → `engine` |
@@ -255,6 +256,72 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - cut `+0xc5ab94`: queue pop: ldr w9, [x19, #0x1c] (the head again) → and x9, x8, #0xffff
   - cut `+0xc5ab98`: queue pop: and x9, x9, #0xffff → ldr x8, [x19] (the ring; then ldr x8, [x8, x9, lsl #3]: the item)
   - host [hle_uemalloc.c:41](../../dm/host/hle_uemalloc.c#L41): Unreal's allocator on a host malloc zone
+
+### Bayonetta 3
+
+[Bayonetta 3](../../dm/games/01004A4010FEA000/README.md), `01004A4010FEA000`, [patches.py](../../dm/games/01004A4010FEA000/patches.py).
+
+- **`build`**, rendering, at goal, checked: update 1.2.0 main: every site's instruction, and the set-up functions run in an interpreter with the stubs at scale 1.0, 1.2, 1.6 and 2.0 (2026-11-11): render scale. PlatinumGames' own engine: the sizes are 49 immediates and loads spread over five functions of this main, with no anchor that another build could be searched by, and no other game in the repository runs this engine build
+
+- **1.2.0 `main`** `b47cc79b…` ([patches.py:49](../../dm/games/01004A4010FEA000/patches.py#L49))
+  <details><summary>52 frame-step sites</summary>
+
+  - frame step `+0x69c6cc`: render scale: handheld mode and a scale below 1.0 keep the game's sizes (the scale is set to 1.0 before anything reads it)
+  - frame step `+0x69c6d4`: render scale: a width times the host's render scale (state +0x10; 1.0 = the game's value)
+  - frame step `+0x69c6e0`: render scale: a scene height times the render scale and 900/896 (896 becomes the window's height)
+  - frame step `+0x69c6f0`: render scale: the window's height times the render scale
+  - frame step `+0x69c6f4`: render scale: the padded height of the window's buffers
+  - frame step `+0x69c720`: render scale: a width times the host's render scale (state +0x10; 1.0 = the game's value)
+  - frame step `+0x69c728`: render scale: the window's height times the render scale
+  - frame step `+0x69c73c`: render scale: a width times the host's render scale (state +0x10; 1.0 = the game's value)
+  - frame step `+0x69c740`: render scale: a scene height times the render scale and 900/896 (896 becomes the window's height)
+  - frame step `+0x69d164`: render scale: the FrameBufferHeap grows with the scaled area
+  - frame step `+0x69d6d0`: render scale: a width times the host's render scale (state +0x10; 1.0 = the game's value)
+  - frame step `+0x69d6dc`: render scale: a scene height times the render scale and 900/896 (896 becomes the window's height)
+  - frame step `+0x69ddc8`: render scale: a width times the host's render scale (state +0x10; 1.0 = the game's value)
+  - frame step `+0x69ddcc`: render scale: a scene height times the render scale and 900/896 (896 becomes the window's height)
+  - frame step `+0x69df8c`: render scale: a width times the host's render scale (state +0x10; 1.0 = the game's value)
+  - frame step `+0x69df90`: render scale: a scene height times the render scale and 900/896 (896 becomes the window's height)
+  - frame step `+0x69dfbc`: render scale: a width times the host's render scale (state +0x10; 1.0 = the game's value)
+  - frame step `+0x69dfc0`: render scale: a scene height times the render scale and 900/896 (896 becomes the window's height)
+  - frame step `+0x69f0b8`: render scale: a width times the host's render scale (state +0x10; 1.0 = the game's value)
+  - frame step `+0x69f0c8`: render scale: a scene height times the render scale and 900/896 (896 becomes the window's height)
+  - frame step `+0x69f0f4`: render scale: a scene height times the render scale and 900/896 (896 becomes the window's height)
+  - frame step `+0x69f114`: render scale: a scene height times the render scale and 900/896 (896 becomes the window's height)
+  - frame step `+0x69f128`: render scale: a scene height times the render scale and 900/896 (896 becomes the window's height)
+  - frame step `+0x69f140`: render scale: a width times the host's render scale (state +0x10; 1.0 = the game's value)
+  - frame step `+0x69f144`: render scale: a scene height times the render scale and 900/896 (896 becomes the window's height)
+  - frame step `+0x69f180`: render scale: a width times the host's render scale (state +0x10; 1.0 = the game's value)
+  - frame step `+0x69f184`: render scale: a scene height times the render scale and 900/896 (896 becomes the window's height)
+  - frame step `+0x69f1c0`: render scale: a width times the host's render scale (state +0x10; 1.0 = the game's value)
+  - frame step `+0x69f1d0`: render scale: a scene height times the render scale and 900/896 (896 becomes the window's height)
+  - frame step `+0x69f1e4`: render scale: a scene height times the render scale and 900/896 (896 becomes the window's height)
+  - frame step `+0x69f1fc`: render scale: a width times the host's render scale (state +0x10; 1.0 = the game's value)
+  - frame step `+0x69f200`: render scale: a scene height times the render scale and 900/896 (896 becomes the window's height)
+  - frame step `+0x69f23c`: render scale: a scene height times the render scale and 900/896 (896 becomes the window's height)
+  - frame step `+0x69f248`: render scale: a width times the host's render scale (state +0x10; 1.0 = the game's value)
+  - frame step `+0x69f25c`: render scale: a width times the host's render scale (state +0x10; 1.0 = the game's value)
+  - frame step `+0x69f278`: render scale: a width times the host's render scale (state +0x10; 1.0 = the game's value)
+  - frame step `+0x69f27c`: render scale: a scene height times the render scale and 900/896 (896 becomes the window's height)
+  - frame step `+0x69f2d8`: render scale: a width times the host's render scale (state +0x10; 1.0 = the game's value)
+  - frame step `+0x69f2dc`: render scale: a scene height times the render scale and 900/896 (896 becomes the window's height)
+  - frame step `+0x69f2e8`: render scale: a scene height times the render scale and 900/896 (896 becomes the window's height)
+  - frame step `+0x69f2f0`: render scale: a width times the host's render scale (state +0x10; 1.0 = the game's value)
+  - frame step `+0x69f2f8`: render scale: a width times the host's render scale (state +0x10; 1.0 = the game's value)
+  - frame step `+0x69f300`: render scale: a scene height times the render scale and 900/896 (896 becomes the window's height)
+  - frame step `+0x69f308`: render scale: a scene height times the render scale and 900/896 (896 becomes the window's height)
+  - frame step `+0x69fde8`: render scale: a width times the host's render scale (state +0x10; 1.0 = the game's value)
+  - frame step `+0x69fdf8`: render scale: a scene height times the render scale and 900/896 (896 becomes the window's height)
+  - frame step `+0x69fe08`: render scale: a scene height times the render scale and 900/896 (896 becomes the window's height)
+  - frame step `+0x70a740`: render scale: a width times the host's render scale (state +0x10; 1.0 = the game's value)
+  - frame step `+0x70a748`: render scale: the window's height times the render scale
+  - frame step `+0xd57964`: render scale: the light grid holds the tiles of the largest level
+  - frame step `+0xd57994`: render scale: the light grid's buffers have 4 words for each tile of its capacity
+  - frame step `+0xd587b0`: render scale: the exposure's column buffer has an entry for every two columns of the quarter-size scene
+
+  </details>
+
+  - render scale stub (the launcher offers DM_RENDER_SCALE)
 
 ### DARK SOULS: REMASTERED
 

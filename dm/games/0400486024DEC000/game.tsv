@@ -49,3 +49,6 @@ draw_barriers	game
 # As Tears of the Kingdom: the terrain's height, blend and hole maps are written by the CPU into textures after they are created. Without these keys they stay zero: holes in the ground and the wrong materials
 tex_flush_upload	on
 tex_dirty_upload	on
+# The Metal 4 pipeline path on iOS, with the pipeline archive made offline (applegpu_g18p, the iPhone 17 family) and the hybrid pipelines: through the MTLDevice, a render pipeline
+# first drawn in a scene state the phone had never drawn compiled on the submit thread, about 400 ms each on an iPhone 17 (Kokiri Forest after the first boss: frames of 0.25-1.26 s)
+pso_mtl4	on

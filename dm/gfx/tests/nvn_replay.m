@@ -258,6 +258,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     apply_env(head, hn);
     mtl_init();
     if (head_get(stat, sn, "tex_pool_n", v, sizeof v)) mtl_set_tex_pool_n(atoi(v));
+    if (head_get(stat, sn, "samp_pool_n", v, sizeof v)) mtl_set_samp_pool_n(atoi(v));
     if (head_get(stat, sn, "origin_ll", v, sizeof v)) mtl_set_origin_lower_left(atoi(v));
     if (head_get(stat, sn, "depth_zero", v, sizeof v)) mtl_set_depth_zero(atoi(v));
     int qll = head_get(stat, sn, "queue_origin_ll", v, sizeof v) ? atoi(v) : 1;
@@ -282,7 +283,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     for (size_t i = 0; i < rp_nch; i++) {   // pools first: descriptor pools and textures point at them
         cap_chunk *c = &rp_ch[i].c; const uint8_t *d = rp_ch[i].d; if (c->tag != CAP_POBJ) continue;
         for (size_t o = 0; o + sizeof(cap_pobj) <= c->raw; o += sizeof(cap_pobj)) { cap_pobj p; memcpy(&p, d + o, sizeof p);
-            uint64_t m = p.mem; dec_addr(NULL, &m, 0, 0); rp_po[p.index] = (pool_t){MAGIC('P', 'O', 'O', 'L'), p.flags, (uint8_t *)(uintptr_t)m, p.size, NULL, p.vmode}; }
+            uint64_t m = p.mem; dec_addr(NULL, &m, 0, 0); rp_po[p.index] = (pool_t){MAGIC('P', 'O', 'O', 'L'), p.flags, (uint8_t *)(uintptr_t)m, p.size, NULL, p.vmode, p.vmode == 1 && p.host_flags ? p.host_flags : p.flags}; }
     }
     for (size_t i = 0; i < rp_nch; i++) {
         cap_chunk *c = &rp_ch[i].c; const uint8_t *d = rp_ch[i].d;

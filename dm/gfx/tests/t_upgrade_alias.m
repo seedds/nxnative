@@ -26,16 +26,19 @@ int main(void) { @autoreleasepool {
     CHECK(tex_mtl(&a) == old && tex_mtl(&b) == old && tex_mtl(&ghost) == old, "IMAGE usage does not split storage across existing descriptors");
     // Exercise replacement at the hash table's growth threshold: reinserting while iterating would resize and reshuffle it.
     uint64_t extra = 99400;
-    while ((g_by_serial.n + 1) * 4 <= g_by_serial.cap * 3) { hm_put_id(&g_by_serial, &extra, old); extra++; }
-    uint32_t capacity = g_by_serial.cap, count = g_by_serial.n;
+    pthread_mutex_lock(&g_smu); own_stats st = own_stats_locked(); pthread_mutex_unlock(&g_smu);
+    while ((st.live + 1) * 4 <= st.live_cap * 3) { tex_put((1ull << 62) + extra, old); extra++; pthread_mutex_lock(&g_smu); st = own_stats_locked(); pthread_mutex_unlock(&g_smu); }   // live entries (external serials), counted as the owner counts them
+    uint32_t capacity = st.live_cap, count = st.live;
     id<MTLTexture> upgraded = tex_upgrade_pfv(&a, old, MTLPixelFormatR32Uint);
     CHECK(upgraded && upgraded != old, "usage upgrade creates a replacement");
-    CHECK(g_by_serial.cap == capacity && g_by_serial.n == count, "replacement does not grow or reshape the serial table");
-    int all = 1; for (uint64_t serial = 99400; serial < extra; serial++) all &= tex_get(serial) == upgraded;
+    pthread_mutex_lock(&g_smu); st = own_stats_locked(); pthread_mutex_unlock(&g_smu);
+    CHECK(st.live_cap == capacity && st.live == count, "replacement does not grow or reshape the serial table");
+    int all = 1; for (uint64_t serial = 99400; serial < extra; serial++) all &= tex_get((1ull << 62) + serial) == upgraded;
     CHECK(all, "every shared serial at the growth threshold sees the replacement");
     CHECK(tex_get(b.serial) == upgraded, "other live serial sees the replacement");
     CHECK(tex_get(ghost.serial) == upgraded, "finalized serial sees the replacement");
-    CHECK(!alias_has(old) && alias_has(upgraded), "sharing membership follows the replacement");
+    pthread_mutex_lock(&g_smu); int moved = !own_shared_locked(old) && own_shared_locked(upgraded); pthread_mutex_unlock(&g_smu);
+    CHECK(moved, "sharing membership follows the replacement");
     uint32_t pixels[16]; for (int i = 0; i < 16; i++) pixels[i] = 0x44332211u;
     id<MTLBuffer> src = [g_dev newBufferWithBytes:pixels length:sizeof pixels options:MTLResourceStorageModeShared]; res_add(src);
     id<MTL4ComputeCommandEncoder> encoder = blit();

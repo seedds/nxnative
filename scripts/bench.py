@@ -19,6 +19,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / 'dm/tools'))
 import romfs as rfs
+import run_saves   # cloud saves off in every run (run_one)
 
 
 def fail(msg):
@@ -98,9 +99,8 @@ def run_one(a, gid, build, var, route, out, lock):
     for kv in a.env: k, _, v = kv.partition('='); env[k] = v
     for k, v in var.items():
         if k not in ('host', 'msl', 'shmap', 'patched', 'pso'): env[k] = v
-    if env.get('DM_SAVE_SYNC', '0') not in ('', '0') and ('DM_SAVE_SYNC' in var or any(kv.partition('=')[0] == 'DM_SAVE_SYNC' for kv in a.env)):
-        fail('DM_SAVE_SYNC: a benchmark run does not sync its save with a cloud (dm/host/tests/t_save_sync.c covers cloud saves)')
-    env['DM_SAVE_SYNC'] = '0'   # cloud saves off: one inherited from the shell would pull the player's cloud save into the run and send the run's over it (save_sync.c names the file by title ID)
+    try: run_saves.cloud_off(env, var['DM_SAVE_SYNC'] if 'DM_SAVE_SYNC' in var else run_saves.asked(a.env))   # last, after every override (dm/tools/run_saves.py)
+    except run_saves.CloudSync as e: fail(str(e))
     (out / 'ctl').write_text('')
     end = route['from'] + route['secs'] + 2
     # Readback/PNG capture can stall a frame and change adaptive pacing. Keep the

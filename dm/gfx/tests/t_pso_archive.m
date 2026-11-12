@@ -734,6 +734,29 @@ int main(int argc, char **argv) { @autoreleasepool {
         EXPECT("index: one with a pipeline with no key is not complete", 1, arch_keys_write(kp, keys, 0) && arch_keys_read(kp, &partial) && partial == 0);
         unlink(kp.fileSystemRepresentation);
     }
+    {   // two shader keys whose library files hold the same bytes (Cuphead's sprite shaders): Metal hands out one function object for both, and fn4_note keeps the descriptor of whichever
+        // was noted last, which the prewarm's workers make differ from start to start. The key names a library by its bytes, so it is the same either way; other bytes, another key
+        NSString *metal = [@(dir) stringByAppendingPathComponent:@"same.metal"], *la = [@(dir) stringByAppendingPathComponent:@"aaaa_b.metallib"],
+                 *lb = [@(dir) stringByAppendingPathComponent:@"bbbb_b.metallib"], *lc = [@(dir) stringByAppendingPathComponent:@"cccc_b.metallib"];
+        int (^compile)(NSString *, NSString *) = ^int(NSString *code, NSString *out) {
+            if (![code writeToFile:metal atomically:YES encoding:NSUTF8StringEncoding error:nil]) return 0;
+            NSTask *task = [NSTask new]; task.executableURL = [NSURL fileURLWithPath:@"/usr/bin/xcrun"]; task.arguments = @[@"-sdk", @"macosx", @"metal", metal, @"-o", out];
+            if (![task launchAndReturnError:nil]) return 0;
+            [task waitUntilExit]; return task.terminationStatus == 0;
+        };
+        int built = compile(src, la) && [NSFileManager.defaultManager copyItemAtPath:la toPath:lb error:nil] && compile([src stringByAppendingString:@"fragment O fs3() { return { float4(0.3), float4(0) }; }\n"], lc);
+        EXPECT("same bytes: the libraries built", 1, built);
+        id<MTLLibrary> a = built ? lib_from_file(la, &err) : nil, b = built ? lib_from_file(lb, &err) : nil, c = built ? lib_from_file(lc, &err) : nil;
+        EXPECT("same bytes: two library objects", 1, a && b && a != b);
+        MTLRenderPipelineDescriptor *k = desc(MTLPixelFormatRGBA8Unorm, 1, MTLPixelFormatRGBA16Float, MTLColorWriteMaskAll, 1);
+        k.vertexFunction = fn4_note([a newFunctionWithName:@"vs"], a, @"vs", nil); uint64_t ka = arch_key(pso_desc4(k, 1, 0));
+        id<MTLFunction> fb = fn4_note([b newFunctionWithName:@"vs"], b, @"vs", nil); uint64_t kb = arch_key(pso_desc4(k, 1, 0));
+        EXPECT("same bytes: Metal hands out one function", 1, fb == k.vertexFunction);   // what makes the noted library vary; the key must not depend on it either way
+        EXPECT("same bytes: the same key whichever library was noted last", 1, ka && ka == kb);
+        k.vertexFunction = fn4_note([c newFunctionWithName:@"vs"], c, @"vs", nil);
+        EXPECT("other bytes: another key", 1, arch_key(pso_desc4(k, 1, 0)) != ka);
+        for (NSString *p in @[metal, la, lb, lc]) unlink(p.fileSystemRepresentation);
+    }
     nvn_hm_clear(&g_pbase, hm_rel);   // as a new start: no base in memory, the archive opened
     g_arch4 = @[[g_dev newArchiveWithURL:[NSURL fileURLWithPath:file] error:&err]];
     uint64_t built = g_pb_built;

@@ -30,7 +30,7 @@
 # 1. Chain (static): the game's shaders translated by each revision's chain (dmsh_build.py through own_compilers.py; a Vulkan game: vk_shaders.py), compared shader by shader: built or failed
 #    (newly failing by the rule of dm/gfx/tools/shader_regressions.py, which the NSP script applies to one game's previous build; a new shader that fails is listed apart),
 #    the SHA-256 of the MSL (<key>_b.metal), of the reflection (<key>_b.json without its chain fields) and of the variant libraries (_bf, _bv, _bp, _bg*). A build is kept per chain version,
-#    shader package, profile inputs and compilers (<NSP folder>/<id>-work/regress/chain/<key>/; only the few used last stay, prune_chains), so a revision whose chain did not change costs nothing, and dmsh_build.py uses the build's own shader cache (DMSH_CAS), so MSL
+#    shader package, profile inputs and compilers (<NSP folder>/<id>-work/regress/chain/<key>/; only the few used last stay, prune_chains), so a revision whose chain did not change costs nothing, and dmsh_build.py uses a bounded per-game regression cache with read-only reuse of the player's cache (DMSH_CAS), so MSL
 #    that did not change is not compiled again. Then the vertex / pixel interface of every pipeline base pso_offline.py would put into the pipeline archive (shader_pairs.tsv and
 #    pso_pairs.tsv): a pixel shader input [[user(locnN)]] the vertex shader does not write, or writes with another type, makes metal-tt refuse the whole archive (GitHub issue #283).
 # 2. Smoke (runtime): the game in the Mac host (window, no audio), from a copy of the route's save, with the route's buttons, under a watchdog: the frame it must reach, crash (exit status,
@@ -71,7 +71,7 @@
 #   baseline (a deleted bindless access, extra entry points: shader_regressions.losses), the interface check, a crash, a hang, the frame not reached), REGRESSION (new [RED] lines, a screenshot beyond the tolerance, frame time, memory or prepare time worse beyond it), CHANGED (MSL or numbers differ, nothing worse),
 #   PASS. "known" lists failures the baseline has too (they do not fail the check).
 # Exit status: 0 = no regression, 1 = a regression (NEW-FAIL or REGRESSION) in some game, 2 = a harness error (and no regression found).
-import argparse, collections, concurrent.futures as cf, ctypes, datetime, fcntl, hashlib, importlib.util, json, os, re, shutil, signal, struct, subprocess, sys, time, traceback
+import argparse, collections, concurrent.futures as cf, contextlib, ctypes, datetime, fcntl, hashlib, importlib.util, json, math, os, re, shutil, signal, struct, subprocess, sys, time, traceback
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -87,9 +87,10 @@ def load_module(name, path):   # a module from a file (another script, or a tool
 bench = load_module('bench', REPO / 'scripts/bench.py')
 shader_regressions = load_module('shader_regressions', REPO / 'dm/gfx/tools/shader_regressions.py')
 usage = load_module('usage', REPO / 'dm/tools/usage.py')   # usage manifests and change impact (regress.py usage / impact)
+run_saves = load_module('run_saves', REPO / 'dm/tools/run_saves.py')   # cloud saves off in every run (run_env)
 proc_group = load_module('proc_group', REPO / 'dm/tools/proc_group.py')   # a heavy job in a process group of its own, stopped whole (run_heavy)
 tree_tar = load_module('tree_tar', REPO / 'dm/tools/tree_tar.py')   # a work folder's quiet folders as one file each, and an old revision's compile cache
-shader_cache = load_module('shader_cache', REPO / 'dm/tools/shader_cache.py')   # the player's build keeps the compile cache this shares as one file, read in place
+shader_cache = load_module('shader_cache', REPO / 'dm/tools/shader_cache.py')   # the per-game regression compile cache, with read-only reuse of the player's
 shader_lib = load_module('shader_lib', REPO / 'dm/tools/shader_lib.py')   # a chain build's libraries as one file, read in place
 rfs = shader_lib.romfs
 # Where they are depends on the machine (a drive with room for the trees and the games' NSP folders): set with --root / --games-dir or REGRESS_ROOT / REGRESS_GAMES, checked in main
@@ -379,7 +380,8 @@ def chain_build(tree, g, a):
         try: fcntl.flock(lk, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             say(f'  {g.id}: another process is building chain {key}: waiting for it'); fcntl.flock(lk, fcntl.LOCK_EX)
-        built = chain_build_locked(tree, g, a, v, inp, key, out)
+        cache = regression_cache(tree, g, a) if g.kind == 'nvn' else contextlib.nullcontext()
+        with cache: built = chain_build_locked(tree, g, a, v, inp, key, out)
     WORK_FOLDERS.add(game_root(g).parent)
     prune_chains(g)
     return built
@@ -417,14 +419,46 @@ def prune_chains(g):
 
 
 def chain_cache(tree, g):
-    """The compile cache a chain build of this revision uses: the player's build's one file when there is one, which a cache from before it moves into first, else the work folder's. A revision from before
-    shader_cache.py wants a folder, regress/cas, kept as a tar between builds. Its chain key differs, as it covers dmsh_mtlcache.py, and its compiles are not shared"""
+    """One regression cache per game, shared across revisions and runs. The player's cache is only a read-only fallback, never adopted or repaired here.
+    Revisions from before shader_cache.py want regress/cas as a folder, kept as a tar between builds."""
     if not (tree.path / 'dm/tools/shader_cache.py').is_file(): return game_root(g) / 'cas'
-    shared, own = g.build / 'shader/cache/cas.db', game_root(g) / 'cas.db'
-    shader_cache.adopt(g.build / 'shader/cache/cas', shared, say)
-    if shared.is_file(): return shared
-    shader_cache.adopt(game_root(g) / 'cas', own, say)
-    return own
+    return game_root(g) / 'cas.db'
+
+
+def shader_cache_limit(g, a):
+    """Four full libraries of headroom, at least 8 GiB; an explicit --shader-cache-gb is a fixed budget. Recomputed after a build, so a larger new library raises the automatic limit."""
+    explicit = getattr(a, 'shader_cache_gb', None)
+    if explicit is not None: return int(explicit * (1 << 30))
+    images = list((g.build / 'shader/cache').glob('b-*.img')) + list((game_root(g) / 'chain').glob('*/b-*.img'))
+    largest = 0
+    for p in images:
+        try: largest = max(largest, p.stat().st_size)
+        except FileNotFoundError: pass   # another session pruned an old library
+    return max(8 << 30, 4 * largest)
+
+
+@contextlib.contextmanager
+def regression_cache(tree, g, a):
+    root = game_root(g); limit = lambda: shader_cache_limit(g, a)
+    if (tree.path / 'dm/tools/shader_cache.py').is_file():
+        with shader_cache.bounded(root / 'cas.db', limit, say, legacy=root / 'cas'): yield
+        return
+    # Historical builders need a folder, not SQLite. Serialize them against modern builders and bound their archive too; the next modern run adopts it under the same exclusive lock.
+    with open(root / 'cas.db.lock', 'a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try: yield
+        finally:
+            tree_tar.pack(root / 'cas', say)
+            archive = root / 'cas.tar'
+            if archive.is_file() and archive.stat().st_size > limit():
+                archive.unlink(); say(f'  {g.id}: removed legacy regression shader cache above its size limit')
+
+
+def shader_cache_gb(value):
+    try: n = float(value)
+    except ValueError: raise argparse.ArgumentTypeError('the shader cache limit must be a number in GiB') from None
+    if not math.isfinite(n) or n < 1 / 1024: raise argparse.ArgumentTypeError('the shader cache limit must be at least 1 MiB (0.0009765625 GiB)')
+    return n
 
 
 def chain_lib(out):   # a chain build's library, to read: its folder or its one file
@@ -462,8 +496,14 @@ def chain_build_locked(tree, g, a, v, inp, key, out):
         lib = out / f'b-{v}'
         if not done:
             say(f'  {g.id}: chain {v} (inputs {inp}) of {tree.id}: translating the shaders ({jobs} workers) → {out}')
-            if cas.suffix != '.db': tree_tar.unpack(cas, say)
-            rc, paused = run_heavy([sys.executable, entry, g.build / 'shader/pkg', out], log, tree.path, env, a, f'{g.id} shader build'); t0 += paused
+            command = [sys.executable, entry, g.build / 'shader/pkg', out]
+            if cas.suffix == '.db':
+                command = [sys.executable, REPO / 'dm/tools/shader_cache.py', '--run', '--readonly', g.build / 'shader/cache/cas.db', entry, g.build / 'shader/pkg', out]
+                rc, paused = run_heavy(command, log, tree.path, env, a, f'{g.id} shader build')
+            else:
+                tree_tar.unpack(cas, say)
+                rc, paused = run_heavy(command, log, tree.path, env, a, f'{g.id} shader build')
+            t0 += paused
             if rc or not (shader_lib.view(lib) / '_b_build.json').is_file():   # a folder (an older revision's dmsh_build.py) or the image a newer one writes
                 raise HarnessError(f'{g.id}: dmsh_build.py of {tree.id} failed (exit {rc}); last lines of {log}:\n' + ''.join(collections.deque(open(log, errors='replace'), maxlen=8)))
             prof = out / 'profile'; prof.mkdir(exist_ok=True)   # the tables the host reads beside the shader map, as this build made them
@@ -984,9 +1024,8 @@ def run_env(g, art, route, outdir, a):
         if not (prof / 'pso_pairs.tsv').is_file() and (g.build / 'shader/pso_pairs.tsv').is_file(): env['DM_PSO_PAIRS'] = str(g.build / 'shader/pso_pairs.tsv')
     if (g.build / 'aoc').is_dir(): env['DM_AOC_DIR'] = str(g.build / 'aoc')
     for kv in a.env: k, _, v = kv.partition('='); env[k] = v
-    if env.get('DM_SAVE_SYNC', '0') not in ('', '0') and any(kv.partition('=')[0] == 'DM_SAVE_SYNC' for kv in a.env):
-        raise HarnessError('--env DM_SAVE_SYNC: a run does not sync its save with a cloud (dm/host/tests/t_save_sync.c covers cloud saves)')
-    env['DM_SAVE_SYNC'] = '0'   # cloud saves off: one inherited from the shell would pull the player's cloud save into the route and send the run's over it (save_sync.c names the file by title ID)
+    try: run_saves.cloud_off(env, run_saves.asked(a.env))   # last, after every override: cloud saves off (dm/tools/run_saves.py)
+    except run_saves.CloudSync as e: raise HarnessError(f'--env {e}') from None
     return env, src_save
 
 
@@ -1710,6 +1749,7 @@ def main():
     def common(p, smoke=True):
         p.add_argument('--games', help='title IDs, comma-separated (default: every game with a Mac build, and for the runs a smoke route)')
         p.add_argument('--jobs', type=int, help='workers for the shader builds (default: the cores; a build pauses while another process holds the measuring lock)')
+        p.add_argument('--shader-cache-gb', type=shader_cache_gb, help='per-game regression compile cache limit in GiB (default: at least 8 GiB, or four times the largest shader-library image); enforced between builds')
         p.add_argument('--out', help='the report folder (default <root>/reports/<date-time>-<command>)')
         p.add_argument('--min-free-gb', type=float, default=3.0, help='stop when the internal disk has less free once Metal\'s idle build folders are removed (scripts/clean_metal_cache.py; default 3)')
         p.add_argument('--lock', default=os.environ.get('DM_MEASURE_LOCK', ''), help='the measuring lock shared with bench.py --lock (DM_MEASURE_LOCK): held while a game runs; shader builds pause while another process holds it')
@@ -1744,7 +1784,9 @@ def main():
     if missing and a.cmd != 'impact': ap.error(f'set {" and ".join(missing)}: where the harness keeps its trees and reports, and the folder of the games\' NSP folders, for example '
                          f'regress.py --root <drive>/harness --games-dir <drive>/nsp {a.cmd} ... (the options go before the command)')
     ROOT, GAMES = Path(a.root), Path(a.games_dir)
-    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))   # a stop runs the finally blocks: a game or a shader build in its own process group is stopped too
+    # A stop runs the finally blocks: a game or a shader build in its own process group is stopped too. A SIGHUP (the terminal closed) the same way: the shell sends it to its
+    # job, which that group, a session of its own (proc_group), is not in, and its default action ended this script with no cleanup and left the game or build running
+    for sig in (signal.SIGTERM, signal.SIGHUP): signal.signal(sig, lambda s, _: sys.exit(128 + s))
     try:
         if a.cmd == 'list': return cmd_list(a)
         if a.cmd == 'impact': return cmd_impact(a)

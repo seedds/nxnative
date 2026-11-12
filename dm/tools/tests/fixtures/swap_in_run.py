@@ -4,6 +4,8 @@
 
 SCRIPT: the NSP script to load (the repository's, or another revision's for a comparison). ROOT holds the staged output new.partial and the destination out.
 FAULT: none; rename-fail or rename-int (the rename of new.partial onto out raises OSError or KeyboardInterrupt); rename-kill (that rename SIGKILLs the process);
+rename-fail-back (that rename fails, and so does putting the old output back: out.old.partial onto out); aside-int (the old output's rename aside raises KeyboardInterrupt
+right after it is done, before the next step);
 unlink-int:N or unlink-fail:N (the Nth unlink from then on raises KeyboardInterrupt or PermissionError), counted from the call's start.
 Prints "ok" or the exception's class name; a SIGKILL prints nothing."""
 import importlib.util, os, signal, sys
@@ -16,14 +18,18 @@ spec = importlib.util.spec_from_file_location('build_ipa_from_nsp', script)
 assert spec is not None and spec.loader is not None
 nsp = importlib.util.module_from_spec(spec); spec.loader.exec_module(nsp)
 tmp, dst = root / 'new.partial', root / 'out'
+old = root / 'out.old.partial'
 
 kind, _, n = fault.partition(':')
 rename, unlink, count = os.rename, os.unlink, [0]
 
 
 def fake_rename(a, b, *args, **kw):
+    if Path(a) == dst and Path(b) == old and kind == 'aside-int':
+        rename(a, b, *args, **kw); raise KeyboardInterrupt
+    if Path(a) == old and Path(b) == dst and kind == 'rename-fail-back': raise OSError(5, 'injected failure putting the old output back')
     if Path(a) == tmp and Path(b) == dst:
-        if kind == 'rename-fail': raise OSError(5, 'injected rename failure')
+        if kind in ('rename-fail', 'rename-fail-back'): raise OSError(5, 'injected rename failure')
         if kind == 'rename-int': raise KeyboardInterrupt
         if kind == 'rename-kill': os.kill(os.getpid(), signal.SIGKILL)
     return rename(a, b, *args, **kw)

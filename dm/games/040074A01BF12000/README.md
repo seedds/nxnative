@@ -17,7 +17,8 @@ A Switch 2 game: update v458752 over the base game, SDK 20.5.19 built for the Sw
 | `sys_resource 0x0` | [`game.tsv`](game.tsv) | the NPDM declares no system resource: virtual address memory off, the game sets a heap. Without the key the host answers 32 MB, and the SDK's VammManager then maps memory up front (GetInfo 0x21) |
 | `app_pool 0x240000000`, `mem_reserve 0x270000000` | `game.tsv` | the Switch 2 leaves games 9 GB of its 12 GB (not measured here); with a Switch 1 pool (3.2 GB) the game's heaps did not fit: `AudioSystemHeap` creation returned null (`main+0x564b48`) |
 | `romfs_marker System/Resource/ResourceSizeTable.Product.rsizetable.zs` | `game.tsv` | a file every version has |
-| `render_cond on` | `game.tsv` | agl's render buffer binding wraps its clears in render conditions (`SetRenderEnableConditional` at `main+0x12798c`, before the `ClearColor` at `main+0x1279d4`); drawn unconditionally, a clear-only rebinding of the composite target right after the composite draw wiped it before the upscaler read it, and every gameplay frame was black |
+
+Render conditions, which the host evaluates for every game ([Conditional rendering evaluated at replay](../../../docs/reference/rendering.md#conditional-rendering-evaluated-at-replay); until 2026-11-12 the profile key `render_cond`): agl's render buffer binding wraps its clears in render conditions (`SetRenderEnableConditional` at `main+0x12798c`, before the `ClearColor` at `main+0x1279d4`); drawn unconditionally, a clear-only rebinding of the composite target right after the composite draw wiped it before the upscaler read it, and every gameplay frame was black.
 
 ## Files
 
@@ -39,7 +40,7 @@ The scene renders into 1676×943 targets (R11G11B10F colour), agl's upscaler tak
 
 1. The upscaler's network did not translate (HMMA and the other tensor instructions): the window kept the output's clear colour (0.3, 0.3, 1).
 2. Six effect compute shaders (`d076142721d836a5` and others) did not load: a storage address was a c[0] entry plus an offset from c[1], and the translator took the c[1] term as the base.
-3. Black frames: the composite was cleared before the upscaler read it (`render_cond`, [What it needs](#what-it-needs)).
+3. Black frames: the composite was cleared before the upscaler read it (render conditions, [What it needs](#what-it-needs)).
 4. Black speckles and white blotches over a dark frame: NaN from the environment cube's mip chain ([Mip-chain pass sampling the level it renders](../../../docs/reference/rendering.md#mip-chain-pass-sampling-the-level-it-renders)). Found with raw dumps (`DM_NVN_SNAPRAW`) of the R11G11B10F targets, `DM_NVN_HILITE` to narrow the shaders (`cca896efc6bb7c21` and `c8637178e2818d18` wrote most of them), then those shaders' MSL instrumented to record their first NaN temporary: a fetch of the prefiltered cube, back through the prefilter to the cube's own mip passes.
 5. Woven rock surfaces and holes in the rock: the textures the game loads were untiled in the Tegra X1's order inside a GOB ([The Switch 2's order inside a GOB](../../../docs/reference/nvn-objects.md#the-switch-2s-order-inside-a-gob)). The rock material's albedo (ASTC 8×8) written straight to its output looked right and its BC7 normal map did not, so the BC7 file (`BaseRock000_Pnrm`) was decoded offline in every order of the GOB's address bits.
 6. The geometry shader `5d537f7630ec3671` (no vertex output: it writes its primitives to memory with ATOMG / STG) needed LEPC, OUT and ISBERD, and `7529699c7b7e49c0` (ActionLibraryPass compute) MATCH; with them all 468 shaders of the first gameplay minute translate.

@@ -204,7 +204,8 @@ def fs_uint(src):
     cols = {nm: ty for ty, nm, at in mem if 'color(' in at and ty.startswith('float')}
     # The hardware writes an output's bits to an integer target whatever the shader computed, so main0_u is right for any pixel shader; only those that look like integer writers get one
     # (the library stays small): an output from integer bits, nothing but constants (a clear drawn into an integer target, 35e1865e313f0553 writes 0 into Luigi's Mansion 3's R32Uint target),
-    # or nothing but flat stage inputs passed through (the bits its vertex or mesh stage wrote: Mario Kart World's dcb0504c844f1ecc copies a primitive's id into an R8Uint target)
+    # or nothing but flat stage inputs passed through (the bits its vertex or mesh stage wrote: Mario Kart World's dcb0504c844f1ecc copies a primitive's id into an R8Uint target) and
+    # constants (Unreal's virtual texture page table update, 17eda07e4bac39f8 in DRAGON BALL: Sparking! ZERO, writes a flat input's x and 0 to y, z, w of an R16Uint target)
     stores = [m for m in re.finditer(r'out\.(\w+)(?:\.\w+)? = ([^;]+);', src) if m.group(1) in cols and not in_word(src, m.start())]   # one pass over the text, not one for each output and each question
     from_int = {m.group(1) for m in stores if re.match(r'as_type<float\d?>\(', m.group(2))}
     writes = [m.group(2) for m in stores]
@@ -220,7 +221,8 @@ def fs_uint(src):
     # primitive id's bits and the depth into an RG32Uint target) showed nothing but zeros, got no main0_u, and their mesh pipelines failed (float4 into RG32Uint): the 3D scene stayed black
     body = src[e['start']:e['end']]
     ints = int_outputs(src, body, cols)
-    if not from_int and not ints and not (writes and (all(re.fullmatch(r'-?[0-9.]+f?|float\d\([-0-9., ]*\)', w.strip()) for w in writes) or all(passed(w) for w in writes))): return None, 0
+    def constant(w): return re.fullmatch(r'-?[0-9.]+f?|float\d\([-0-9., ]*\)', w.strip())
+    if not from_int and not ints and not (writes and all(constant(w) or passed(w) for w in writes)): return None, 0
     uty = lambda ty: 'u' + ty.replace('float', 'int')   # float4 → uint4, float → uint
     def entry(sfx, as_uint):   # main0_<sfx>: main0's body (dmsh_side.shared_body), its outputs in as_uint returned as the unsigned integer vectors of their bits
         struct = f'struct main0_out_{sfx}\n{{\n' + ''.join(f'    {uty(cols[nm]) if nm in as_uint else ty} {nm} {at};\n' for ty, nm, at in mem) + '};\n\n'

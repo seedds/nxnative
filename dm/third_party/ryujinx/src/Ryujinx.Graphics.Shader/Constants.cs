@@ -17,5 +17,12 @@ namespace Ryujinx.Graphics.Shader
         public const int NxFirstUniformSlot = 3;
         public const int NxUniformSlots = 14;
         public const int NxUniformSizesBank = 25;
+
+        // nxnative: buffer image offsets (TranslationFlags.MetalBufferImageBias). Metal creates a buffer texture only at an aligned offset of its buffer, and an Apple GPU
+        // addresses a view below that alignment from the aligned boundary below its offset, so a buffer image is bound as a view from that boundary and each access adds
+        // the elements in between, a u32 the host puts in the table of bank 26 (dm/gfx/nvn/dmsh_abi.h DMSH_TBIAS_BANK, kind DMSH_KIND_TBIAS), buffer image k of the
+        // shader at index k, in uint4s; a shader's buffer images past the table's NxBufferImageBiases are accessed unchanged
+        public const int NxBufferImageBiasBank = 26;
+        public const int NxBufferImageBiases = 16;
     }
 }

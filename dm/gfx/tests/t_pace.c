@@ -23,6 +23,12 @@ int main(void) {
         printf("%-52s expected wait %8.3f ms → got %8.3f ms %s\n", c[i].why, c[i].want / 1e6, got / 1e6, ok ? "✓" : "✗");
         fail += !ok;
     }
+    // A caller that never waits (acquire paced by the display link) and presents every 12.5 ms against a 16.67 ms period: the wait stays within one period
+    // (it grew by 4.2 ms a frame without bound before: 27.6 s after 18,000 frames on Ocarina of Time)
+    { nvn_pacer q = {0}; uint64_t worst = 0; int k;
+      for (k = 0; k < 18000; k++) { uint64_t w = nvn_pace(&q, 5000 * MS + (uint64_t)k * 12500000ull, P); if (w > worst) worst = w; }
+      int ok = worst <= P; n++; fail += !ok;
+      printf("%-52s worst wait %8.3f ms (at most one period) %s\n", "18,000 early frames, caller never waits", worst / 1e6, ok ? "✓" : "✗"); }
     printf("== %d checks, %d failed ==\n", n, fail);
     return fail != 0;
 }

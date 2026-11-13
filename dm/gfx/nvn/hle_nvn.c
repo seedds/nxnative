@@ -1879,6 +1879,12 @@ NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsyn
     *idx = n ? o->next++ % n : 0;
     // Vsync blocks here (real-device NVN: when all textures in the swapchain are waiting for display, wait for the next one to be released), not in present -- the game often calls present while holding a lock
     uint64_t at = *idx < 4 ? o->avail[*idx] : 0, now = dm_detclock_enabled() ? guest_ns() : now_ns(), wait = at > now ? at - now : 0, pace_ns = 0;
+    // Backstop: a slot is never waited for longer than two present periods. The pacer's lead is bounded in nvn_pace.h; a slot time further ahead than this
+    // (Ocarina of Time: 27.6 s, slept whole at a display-link silence) is a pacing fault, logged in red and cut to two periods
+    if (!dm_detclock_enabled()) { uint64_t per = present_period(o), cap = 2 * (per ? per : 16666667ull);
+        if (wait > cap) { static uint64_t n_cap, worst; n_cap++; if (wait > worst) worst = wait;
+            if (n_cap == 1 || n_cap % 1000 == 0) LOG("[RED] [nvn] acquire: swap-chain slot ready %.1f ms ahead (worst %.1f ms, %llu times): waiting two periods at most", wait / 1e6, worst / 1e6, (unsigned long long)n_cap);
+            at = now + cap; wait = cap; } }
     if (!dm_detclock_enabled()) {   // Register the acquire thread as a time-constraint thread (no longer registered only when it "arrived early": it must also declare itself when it is constantly behind in the hot state)
         static uint64_t rt_period; uint64_t period = present_period(o), rtp = rt_period_ns(o, period);
         if (rtp && rt_period != rtp) { rt_period = rtp; set_time_constraint(rtp); }

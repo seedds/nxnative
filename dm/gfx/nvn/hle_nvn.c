@@ -1276,6 +1276,8 @@ static void rec_draw_(NVNcommandBuffer *c, p_draw d) {
     }
     size_t n = d.ind || d.mdi_cnt ? sizeof d : offsetof(p_draw, ind); memcpy(rec(c, OP_DRAW, n), &d, n);
 }
+static _Thread_local const NVNcommandBuffer *g_rtt_cb;   // DM_NVN_RT_TRACE (below)
+static void rt_trace(const NVNcommandBuffer *c, const char *kind, uint64_t caller, const float *v);
 static void rec_draw(NVNcommandBuffer *c, p_draw d);
 static void rec_draw_idx(NVNcommandBuffer *c, p_draw_idx d);
 static void rec_draw_idx_(NVNcommandBuffer *c, p_draw_idx d) {
@@ -1291,16 +1293,16 @@ full:;
 // Every draw passes the profile's hooks (nvn_runtime.inc), which may set state for that draw alone
 static void rec_draw(NVNcommandBuffer *c, p_draw d) {
 #ifdef NVN_PROFILE_RUNTIME
-    int f = nvn_profile_draw_begin(c); rec_draw_(c, d); if (f) nvn_profile_draw_end(c);
+    int f = nvn_profile_draw_begin(c); if (g_rtt_cb == c) rt_trace(c, "draw", 0, NULL); rec_draw_(c, d); if (f) nvn_profile_draw_end(c);
 #else
-    rec_draw_(c, d);
+    if (g_rtt_cb == c) rt_trace(c, "draw", 0, NULL); rec_draw_(c, d);
 #endif
 }
 static void rec_draw_idx(NVNcommandBuffer *c, p_draw_idx d) {
 #ifdef NVN_PROFILE_RUNTIME
-    int f = nvn_profile_draw_begin(c); rec_draw_idx_(c, d); if (f) nvn_profile_draw_end(c);
+    int f = nvn_profile_draw_begin(c); if (g_rtt_cb == c) rt_trace(c, "draw", 0, NULL); rec_draw_idx_(c, d); if (f) nvn_profile_draw_end(c);
 #else
-    rec_draw_idx_(c, d);
+    if (g_rtt_cb == c) rt_trace(c, "draw", 0, NULL); rec_draw_idx_(c, d);
 #endif
 }
 // A compact record's canonical records, written to out (at least REC_EXPAND_MAX bytes); returns their bytes
@@ -1439,7 +1441,7 @@ static _Thread_local const NVNcommandBuffer *g_rtt_cb; static _Thread_local floa
 static unsigned rt_trace_size(unsigned *h) { static unsigned w = ~0u, hh; if (w == ~0u) { const char *e = getenv("DM_NVN_RT_TRACE"); w = 0; if (e && sscanf(e, "%ux%u", &w, &hh) != 2) w = 0; } *h = hh; return w; }
 static uint64_t rt_chain(uint64_t fp) {   // the return addresses of the first 6 frames, hashed (the same walk as crash.c dm_backtrace)
     uint64_t hsh = 1469598103934665603ull;
-    for (int i = 0; i < 6 && fp && !(fp & 7); i++) {
+    for (int i = 0; i < 12 && fp && !(fp & 7); i++) {
         uint64_t w[2]; vm_size_t got = 0;
         if (vm_read_overwrite(mach_task_self(), (vm_address_t)fp, sizeof w, (vm_address_t)w, &got) != KERN_SUCCESS || got != sizeof w) break;
         hsh = (hsh ^ w[1]) * 1099511628211ull;
@@ -1454,8 +1456,8 @@ static void rt_trace(const NVNcommandBuffer *c, const char *kind, uint64_t calle
     const float *r = k == 3 ? g_rtt_vp : v; uint64_t key = rt_chain((uint64_t)__builtin_frame_address(0));
     for (int i = 0; r && i < 4; i++) key = (key ^ (uint64_t)(int64_t)r[i]) * 1099511628211ull;
     if (k == 3) for (int i = 0; i < 4; i++) key = (key ^ (uint64_t)(int64_t)g_rtt_sc[i]) * 1099511628211ull;
-    static uint64_t seen[4][64]; static int n[4]; static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
-    pthread_mutex_lock(&mu); int fresh = n[k] < 64; for (int i = 0; i < n[k] && fresh; i++) if (seen[k][i] == key) fresh = 0; if (fresh) seen[k][n[k]++] = key; pthread_mutex_unlock(&mu);
+    static uint64_t seen[4][256]; static int n[4]; static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_lock(&mu); int fresh = n[k] < 256; for (int i = 0; i < n[k] && fresh; i++) if (seen[k][i] == key) fresh = 0; if (fresh) seen[k][n[k]++] = key; pthread_mutex_unlock(&mu);
     if (!fresh) return;
     if (k == 3) LOG("rt trace: draw in viewport %g,%g %gx%g scissor %g,%g %gx%g, called from %#llx", g_rtt_vp[0], g_rtt_vp[1], g_rtt_vp[2], g_rtt_vp[3], g_rtt_sc[0], g_rtt_sc[1], g_rtt_sc[2], g_rtt_sc[3], (unsigned long long)caller);
     else if (v) LOG("rt trace: %s %g,%g %gx%g, called from %#llx", kind, v[0], v[1], v[2], v[3], (unsigned long long)caller);
@@ -1639,7 +1641,7 @@ NVN(nvnCommandBufferSetStencilRef, void, NVNcommandBuffer *c, NVNface f, int v) 
 NVN(nvnCommandBufferSetPolygonOffsetClamp, void, NVNcommandBuffer *c, float fa, float un, float cl) {
     *REC(c, OP_POLY_OFFSET, p_poly_offset) = (p_poly_offset){fa, un, cl};
 }
-NVN(nvnCommandBufferDrawArrays, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, int first, int n) { if (g_rtt_cb == c) rt_trace(c, "draw", (uint64_t)(uintptr_t)__builtin_return_address(0), NULL); rec_draw(c, (p_draw){pr, first, n, 1, 0, 0}); }
+NVN(nvnCommandBufferDrawArrays, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, int first, int n) { rec_draw(c, (p_draw){pr, first, n, 1, 0, 0}); }
 // Indirect: the {count, instances, first, base instance} record at ind is usually written by the GPU earlier in the frame (Hyrule Warriors: Age of Calamity's first battle), so the replay
 // issues a Metal indirect draw from the pool buffer instead of reading it at record or replay time (nvn_mtl.m draw)
 // NVN2 mesh shading: count task workgroups from first, or mesh workgroups in a program with no task shader (nvn_geometry.inc mesh_tasks_draw)
@@ -1671,7 +1673,7 @@ static void draw_trace(const NVNcommandBuffer *c, int n) {
 }
 NVN(nvnCommandBufferDrawElementsInstanced, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNindexType it, int n, NVNbufferAddress ib,
     int bv, int bi, int inst) {
-    draw_trace(c, n); if (g_rtt_cb == c) rt_trace(c, "draw", (uint64_t)(uintptr_t)__builtin_return_address(0), NULL);
+    draw_trace(c, n);
     rec_draw_idx(c, (p_draw_idx){pr, it, n, bv, bi, inst, ib});
 }
 NVN(nvnCommandBufferDispatchCompute, void, NVNcommandBuffer *c, int x, int y, int z) {
@@ -3266,7 +3268,7 @@ NVN(nvnCommandBufferBindImage, void, NVNcommandBuffer *c, NVNshaderStage st, int
 NVN(nvnCommandBufferBindVertexBuffer, void, NVNcommandBuffer *c, int i, NVNbufferAddress a, size_t n) { NVNbufferRange r = {a, n}; h_nvnCommandBufferBindVertexBuffers(c, i, 1, &r); }
 
 // Draws
-NVN(nvnCommandBufferDrawElements, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNindexType it, int n, NVNbufferAddress ib) { if (g_rtt_cb == c) rt_trace(c, "draw", (uint64_t)(uintptr_t)__builtin_return_address(0), NULL); h_nvnCommandBufferDrawElementsInstanced(c, pr, it, n, ib, 0, 0, 1); }
+NVN(nvnCommandBufferDrawElements, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNindexType it, int n, NVNbufferAddress ib) { h_nvnCommandBufferDrawElementsInstanced(c, pr, it, n, ib, 0, 0, 1); }
 NVN(nvnCommandBufferDrawElementsBaseVertex, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNindexType it, int n, NVNbufferAddress ib, int bv) { h_nvnCommandBufferDrawElementsInstanced(c, pr, it, n, ib, bv, 0, 1); }
 NVN(nvnCommandBufferDrawArraysInstanced, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, int first, int n, int bi, int inst) {
     rec_draw(c, (p_draw){pr, first, n, inst, bi});

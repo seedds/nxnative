@@ -162,8 +162,10 @@ MATCH_CUTS = {'sdk': [
                '3549234b3e27a013791bbd834b5ff7dd501a5826c4216c80961bd996eef556ea'], 0x10, '08fca752', '087ca052', 0xa4, '09fca752', '097ca052'),
     # SDK 19.3.11 (Pokémon Legends: Z-A), 19.3.13 (Octopath Traveler 0), 20.5.19 (BALL x PIT), 20.5.22 (Tears of the Kingdom)
     node(244, ['b02f0514e2cc25a65261ec23cefa9a1fe7b244b3db741f183deb334935541eee'], 0x10, '08fca752', '087ca052', 0x7c, '09fca752', '097ca052'),
-    # SDK 22.2.0 (EA SPORTS FC 27, Well Dweller): the SDK 19 / 20 constructor, instruction for instruction up to its cold path, which gives each failing result its own abort (32 bytes more)
-    node(276, ['8960fe237061c387226a3775daf750a646dd0ee12eccf3d1340248683a6a7d78'], 0x10, '08fca752', '087ca052', 0x7c, '09fca752', '097ca052'),
+    # SDK 21.4.7 (Super Woden Rally Edge, Silver Pines: sdk ab3835b2…, the constructor at sdk+0x14fbe0), 22.2.0 (EA SPORTS FC 27, Well Dweller): the SDK 19 / 20 constructor, instruction for
+    # instruction up to its cold path, which gives each failing result its own abort (32 bytes more). Unity 6 takes all its memory as address regions (Hollow Knight: Silksong's reason)
+    node(276, ['5bd99a6aa6e6f4be9dcc6bef7a506abd9d0e5cd83e7d55bfa3efb9906a86c758', '8960fe237061c387226a3775daf750a646dd0ee12eccf3d1340248683a6a7d78'],
+         0x10, '08fca752', '087ca052', 0x7c, '09fca752', '097ca052'),
     # SDK 22.2.0 built for the Switch 2 (Fire Emblem Fortune's Weave): the constructor at sdk+0x16ba30 with return address signing and its own frame. The host's StandardAllocator cap counts on the
     # 62 MB (alias_room): with 1 GB the capped region did not fit the alias region
     node(328, ['5f2f7a70fa5c25aeb7020f75dc785fd6ffe6c2f5c72d8fcb30e0ea9a0bb4bbc5'], 0x18, '08fca752', '087ca052', 0xa4, '09fca752', '097ca052'),

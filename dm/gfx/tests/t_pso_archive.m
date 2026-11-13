@@ -162,6 +162,22 @@ static void compute_pipelines(void) {
     EXPECT("compute, compaction: waits for the flush", pending + 1, g_arch_new);
     atomic_store(&g_warm_running, 0); g_compact_enabled = 0; g_compacted = 0;
     arch_flush_wait();
+    // a recapture still queued when the prewarm ends (the harvest queue held 300 ms): the flush after the prewarm leaves the compaction open, and the recapture's own flush closes it
+    g_compact_enabled = 1; g_compacted = 0; g_compact_closed = 0; g_compact_periods = 0; atomic_store(&g_warm_running, 1);
+    dispatch_async(arch_harvest_q(), ^{ usleep(300000); });
+    EXPECT("compute, queued recapture: a pipeline", 1, cps_new(kf, &err) != nil);
+    atomic_store(&g_warm_running, 0); arch_flush();   // as warm_finish
+    EXPECT("compute, queued recapture: the compaction stays open", 0, g_compact_closed);
+    arch_harvest_wait(DISPATCH_TIME_FOREVER);
+    EXPECT("compute, queued recapture: captured again", 1, g_compacted);
+    EXPECT("compute, queued recapture: its flush closes the compaction", 1, g_compact_closed);
+    arch_flush_wait(); dispatch_sync(g_arch_q, ^{});
+    EXPECT("compute, queued recapture: its period written as the compaction's", 0, g_compact_periods + g_arch_new);
+    // a compaction due to close when the current period is empty (its recaptures all handed over): closed all the same
+    g_compact_closed = 0; g_compacted = 1;
+    arch_flush(); dispatch_sync(g_arch_q, ^{});
+    EXPECT("compaction, empty period: closed", 1, g_compact_closed);
+    g_compact_enabled = 0; g_compacted = 0; g_compact_closed = 0; g_compact_periods = 0;
     // no Metal 4 descriptor: built through the MTLDevice, no lookup, nothing captured
     int looked = la->lookups; built = g_cps_built; pending = g_arch_new;
     id<MTLComputePipelineState> up = cps_new(uf, &err);
@@ -171,6 +187,18 @@ static void compute_pipelines(void) {
     dispatch_sync(arch_harvest_q(), ^{});
     EXPECT("compute without a descriptor: not captured", pending, g_arch_new);
     EXPECT("compute without a descriptor: its dispatch writes", 1, run_kernel(up));
+    // a capture still queued behind a slow one (the harvest queue held 300 ms): a waiting flush and the quit's save each take it into the period they write (arch_harvest_wait)
+    for (int quit = 0; quit < 2; quit++) {
+        NSString *kn = quit ? @"kq" : @"kf", *s2 = [src stringByReplacingOccurrencesOfString:@"void k(" withString:[NSString stringWithFormat:@"void %@(", kn]];
+        id<MTLLibrary> l2 = [g_dev newLibraryWithSource:s2 options:nil error:&err];
+        id<MTLFunction> f2 = fn4_note([l2 newFunctionWithName:kn], l2, kn, nil);
+        NSUInteger files = archive_files(@(kdir)).count; built = g_cps_built;
+        dispatch_async(arch_harvest_q(), ^{ usleep(300000); });
+        EXPECT(quit ? "queued capture, quit: a pipeline" : "queued capture, flush: a pipeline", 1, cps_new(f2, &err) != nil && g_cps_built == built + 1);
+        if (quit) mtl_arch_save(ARCH_QUIT_WAIT_MS, 0); else arch_flush_wait();
+        EXPECT(quit ? "queued capture, quit: written" : "queued capture, flush: written", files + 1, archive_files(@(kdir)).count);
+        EXPECT(quit ? "queued capture, quit: nothing left" : "queued capture, flush: nothing left", 0, g_arch_new);
+    }
     [NSFileManager.defaultManager removeItemAtPath:@(kdir) error:nil]; g_arch_dir = saved; g_arch4 = @[];
 }
 // Draws mesh pipeline ps (one triangle over the target) into a 4x4 RGBA8 target cleared to red: 1 when the centre pixel is the fragment's colour, or red with no fragment
@@ -572,6 +600,7 @@ int main(int argc, char **argv) { @autoreleasepool {
         g_arch_period_max = 4; int seed = !strcmp(argv[1], "--cold-seed"), cut = !strcmp(argv[1], "--cold-cut-seed"), after_cut = !strcmp(argv[1], "--cold-after-cut");
         int quit = !strcmp(argv[1], "--cold-quit-seed"), after_quit = !strcmp(argv[1], "--cold-after-quit");
         // a crashed compaction's marker, left by an earlier run: the quit's write must not take it away
+        // NOLINTNEXTLINE(clang-analyzer-nullability.NullablePassedToNonnull): argc == 3 above, so argv[2] is set
         if (quit) [arch_compact_stamp() writeToFile:[@(argv[2]) stringByAppendingPathComponent:@"compacting"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
         pso4_init();
         EXPECT("cold restart: no compaction", 0, g_compact_enabled);
@@ -732,6 +761,29 @@ int main(int argc, char **argv) { @autoreleasepool {
         int partial = -1; NSString *kp = [@(dir) stringByAppendingPathComponent:@"t.keys"];
         EXPECT("index: one with a pipeline with no key is not complete", 1, arch_keys_write(kp, keys, 0) && arch_keys_read(kp, &partial) && partial == 0);
         unlink(kp.fileSystemRepresentation);
+    }
+    {   // two shader keys whose library files hold the same bytes (Cuphead's sprite shaders): Metal hands out one function object for both, and fn4_note keeps the descriptor of whichever
+        // was noted last, which the prewarm's workers make differ from start to start. The key names a library by its bytes, so it is the same either way; other bytes, another key
+        NSString *metal = [@(dir) stringByAppendingPathComponent:@"same.metal"], *la = [@(dir) stringByAppendingPathComponent:@"aaaa_b.metallib"],
+                 *lb = [@(dir) stringByAppendingPathComponent:@"bbbb_b.metallib"], *lc = [@(dir) stringByAppendingPathComponent:@"cccc_b.metallib"];
+        int (^compile)(NSString *, NSString *) = ^int(NSString *code, NSString *out) {
+            if (![code writeToFile:metal atomically:YES encoding:NSUTF8StringEncoding error:nil]) return 0;
+            NSTask *task = [NSTask new]; task.executableURL = [NSURL fileURLWithPath:@"/usr/bin/xcrun"]; task.arguments = @[@"-sdk", @"macosx", @"metal", metal, @"-o", out];
+            if (![task launchAndReturnError:nil]) return 0;
+            [task waitUntilExit]; return task.terminationStatus == 0;
+        };
+        int built = compile(src, la) && [NSFileManager.defaultManager copyItemAtPath:la toPath:lb error:nil] && compile([src stringByAppendingString:@"fragment O fs3() { return { float4(0.3), float4(0) }; }\n"], lc);
+        EXPECT("same bytes: the libraries built", 1, built);
+        id<MTLLibrary> a = built ? lib_from_file(la, &err) : nil, b = built ? lib_from_file(lb, &err) : nil, c = built ? lib_from_file(lc, &err) : nil;
+        EXPECT("same bytes: two library objects", 1, a && b && a != b);
+        MTLRenderPipelineDescriptor *k = desc(MTLPixelFormatRGBA8Unorm, 1, MTLPixelFormatRGBA16Float, MTLColorWriteMaskAll, 1);
+        k.vertexFunction = fn4_note([a newFunctionWithName:@"vs"], a, @"vs", nil); uint64_t ka = arch_key(pso_desc4(k, 1, 0));
+        id<MTLFunction> fb = fn4_note([b newFunctionWithName:@"vs"], b, @"vs", nil); uint64_t kb = arch_key(pso_desc4(k, 1, 0));
+        EXPECT("same bytes: Metal hands out one function", 1, fb == k.vertexFunction);   // what makes the noted library vary; the key must not depend on it either way
+        EXPECT("same bytes: the same key whichever library was noted last", 1, ka && ka == kb);
+        k.vertexFunction = fn4_note([c newFunctionWithName:@"vs"], c, @"vs", nil);
+        EXPECT("other bytes: another key", 1, arch_key(pso_desc4(k, 1, 0)) != ka);
+        for (NSString *p in @[metal, la, lb, lc]) unlink(p.fileSystemRepresentation);
     }
     nvn_hm_clear(&g_pbase, hm_rel);   // as a new start: no base in memory, the archive opened
     g_arch4 = @[[g_dev newArchiveWithURL:[NSURL fileURLWithPath:file] error:&err]];

@@ -6,8 +6,8 @@ from pathlib import Path
 import struct
 
 PROFILE = runpy.run_path(str(Path(__file__).with_name('patches.py')))
-BUILD = PROFILE['SCAN_BUILD_ID']
-SITES = PROFILE['RUMBLE_DIAGNOSTICS'][BUILD]
+BUILD = PROFILE['scan_build_id']
+SITES = PROFILE['rumble_diagnostics'][BUILD]
 
 
 def validate(module, rewritten, fixups):

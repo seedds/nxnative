@@ -38,6 +38,15 @@ English by default. Pick another when packing with `--language` (`-l`), by code 
 
 Lines like `DM_OPMODE=0` (handheld mode: lower resolution, higher frame rate) in `Documents/env.txt` win over the settings screen, which then shows them greyed out ([the full list](settings.md#settings-in-a-file)). `DM_FPS_TARGET=30` keeps Breath of the Wild, Tears of the Kingdom, Octopath Traveler 0 and Octopath Traveler II at their original 30 fps, which saves battery; `DM_PRESENT_INTERVAL=game` does the same for Monster Train 2. `DM_SHOW_FPS=1` shows the frame rate at the top left (`--show-fps` when packing turns it on from the start). `DM_LAUNCHER=0` skips the settings screen.
 
+## Miis and console files
+
+Mii heads and your own Miis come from your console, not from this project. Copy them from your own console into a `system` folder: `Documents/system` on iPhone and iPad, `~/Library/Application Support/nxnative/system` on the Mac (shared by every game):
+
+- `sysdata/<system data ID>/`: a system data archive's files, for example `sysdata/0100000000000802/` (the Switch's Mii heads) or `sysdata/0400000000000849/` (a Switch 2 game's);
+- `save/8000000000000030/MiiDatabase.dat`: your console's Miis, listed before the six default ones. The file is only read.
+
+Without them, Miis have no heads, and only the six default Miis are listed ([details](reference/services.md#a-consoles-own-mii-database-and-system-data)). When a game asks you to make a Mii, it gets the default Mii, kept in `system/host/` for every game ([details](reference/services.md#a-mii-made-in-the-editors-place)).
+
 ## On the Mac
 
 A Mac app shows the game's settings in a window before the game starts ([The Mac settings window](settings.md#the-mac-settings-window)). Its `env.txt` is `~/Library/Application Support/nxnative/<title ID>/env.txt`, and its log is `~/Library/Logs/nxnative/<title ID>.log`. [NX2Apple](https://github.com/LNPANDY/NX2Apple)'s library can also start it with the settings you pick there.

@@ -100,9 +100,9 @@ class ScanDiagnostics(unittest.TestCase):
 
     def test_probe_sites_do_not_overlap_runtime_patch_branches(self):
         profile = scan.PROFILE
-        probe_sites = {p[1] for table in (profile['SCAN_DIAGNOSTICS'], profile['SCAN_ACQUISITION_DIAGNOSTICS'], profile['SCAN_QUERY_DIAGNOSTICS'])
+        probe_sites = {p[1] for table in (profile['scan_diagnostics'], profile['scan_acquisition_diagnostics'], profile['scan_query_diagnostics'])
                        for probes in table.values() for p in probes}
-        self.assertTrue(probe_sites.isdisjoint({profile['scene_site'], profile['SCAN_SOURCE_SITE']}))
+        self.assertTrue(probe_sites.isdisjoint({profile['scene_site'], profile['scan_source_site']}))
 
     def test_query_probes_validate_and_decode_source_size(self):
         env = scan.environment(self.module, query=True)

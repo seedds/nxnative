@@ -46,15 +46,15 @@ def generate(module, patched, fixups):
     expected = b''.join(struct.pack('<I', word) for word in profile.scan_source_words(stub)) if stub >= 0 else b''
     if stub < max(text, patch_off) or stub + len(expected) > len(patched) or patched[stub:stub + len(expected)] != expected:
         raise ValueError('missing/out-of-range/mismatched rewritten scan-source stub')
-    for off, original in profile.SCAN_SOURCE_ABI + profile.SCENE_CONTROL_ABI:
+    for off, original in profile.scan_source_abi + profile.scene_control_abi:
         before = bytes.fromhex(original)
         if module.image[off:off + len(before)] != before or patched[off:off + len(before)] != before:
             raise ValueError(f'scan-source ABI mismatch at {off:#x}')
     # Both high-resolution choices use a native-size scan source. The previously
     # confirmed 1800p writes are unchanged; default/1440p/old diagnostics stay as before.
     for choice in ('1800p', '2160p') + tuple(c for c, *_ in FULL_CHOICES):
-        writes.append((choice, profile.SCAN_SOURCE_SITE, bytes.fromhex(profile.SCAN_SOURCE_ORIGINAL),
-                       struct.pack('<I', B(profile.SCAN_SOURCE_SITE, stub))))
+        writes.append((choice, profile.scan_source_site, bytes.fromhex(profile.scan_source_original),
+                       struct.pack('<I', B(profile.scan_source_site, stub))))
     for off, before in OUTPUT_ABI:
         if module.image[off:off + len(before)] != before or patched[off:off + len(before)] != before:
             raise ValueError(f'output ABI mismatch at {off:#x}')
@@ -67,7 +67,7 @@ def generate(module, patched, fixups):
 # sampler 288, a single-level scene), which at exactly 2:1 lands between four texels and averages them, a 2x2 box filter. At 2160p (2.4:1) the same tap
 # covers 4 of about 5.8 texels at a drifting phase, so the edges keep stair steps.
 CHOICES = (('1440p', 'SCENE_1440', 2560, 1440), ('2160p', 'SCENE_2160', 3840, 2160), ('1800p', 'SCENE_1800', 3200, 1800),
-           ('diag1792', 'SCENE_D1792', 3200, 1792))   # patches.py SCENE_SIZES. diag1792: a diagnostic, not a mode: its half-resolution target is 1600x896,
+           ('diag1792', 'SCENE_D1792', 3200, 1792))   # patches.py scene_sizes. diag1792: a diagnostic, not a mode: its half-resolution target is 1600x896,
 # inside the fixed 1600x900 one, where 1800p's is 1600x904 (900 rounded up to 8); whether scanning works there tells which size the Scan Visor needs
 
 
@@ -139,7 +139,7 @@ SHADOW_SITES = (
     (0xda3a98, 0xf2c1000a, 0xf2c2000a, 0xf2c4000a),    # atlas getter: movk x10,#0x800,lsl #32 -> #0x1000 / #0x2000
     (0xda3aa0, 0xd2810009, 0xd2820009, 0xd2840009),    # atlas getter: mov x9,#0x800 -> #0x1000 / #0x2000
 )
-SHADOW_CHOICES = (('2x', 'SHADOW_UV4096', 0x4580), ('4x', 'SHADOW_UV8192', 0x4600))   # patches.py SHADOW_UV_STUBS
+SHADOW_CHOICES = (('2x', 'SHADOW_UV4096', 0x4580), ('4x', 'SHADOW_UV8192', 0x4600))   # patches.py shadow_uv_stubs
 
 
 def shadow_writes(stubs):
@@ -176,7 +176,7 @@ LOD_SITES = (
 )
 
 
-LOD_DISTANCE = (('x2', 'LOD_DISTANCE_X2', 0x1e2c1002), ('x4', 'LOD_DISTANCE_X4', 0x1e2a1002))   # patches.py LOD_DISTANCE_STUBS: fmov s2,#0.5 / #0.25
+LOD_DISTANCE = (('x2', 'LOD_DISTANCE_X2', 0x1e2c1002), ('x4', 'LOD_DISTANCE_X4', 0x1e2a1002))   # patches.py lod_distance_stubs: fmov s2,#0.5 / #0.25
 
 
 def lod_writes(stubs=None):
@@ -203,7 +203,7 @@ def generate_lod(module, patched, fixups):
 
 
 # DM_FOG_QUALITY=high, a fourth manifest (main.fog.runtime.tsv): the volumetric fog's froxel grid twice as dense in each direction, 128 depth slices,
-# its target at full scene resolution (patches.py FOG_SCALE_STUBS). The grid scale is the game's own parameter, so the shaders take the grid size
+# its target at full scene resolution (patches.py fog_scale_stubs). The grid scale is the game's own parameter, so the shaders take the grid size
 # from the game: nothing else changes.
 FOG = (('high', 'FOG_SCALE_X2', 0x1e201001),)
 

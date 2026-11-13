@@ -30,6 +30,24 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
         public int[] FixedUniformWords { get; } = new int[Constants.NxUniformSlots];
         public int UniformSizesBinding { get; set; } = -1;
 
+        // nxnative: buffer texture offsets (TranslationFlags.MetalBufferImageBias): each buffer image's and each buffer texture's index in the offset table, and the
+        // binding of the table (Constants.NxBufferImageBiasBank), -1 when the shader has none
+        private readonly Dictionary<SetBindingPair, int> _bufferImageBiases = new();
+        public IReadOnlyDictionary<SetBindingPair, int> BufferImageBiases => _bufferImageBiases;
+        private readonly Dictionary<SetBindingPair, int> _bufferTextureBiases = new();
+        public IReadOnlyDictionary<SetBindingPair, int> BufferTextureBiases => _bufferTextureBiases;
+        public int BufferImageBiasBinding { get; set; } = -1;
+
+        public void AddBufferImageBias(SetBindingPair image, int index)
+        {
+            _bufferImageBiases[image] = index;
+        }
+
+        public void AddBufferTextureBias(SetBindingPair texture, int index)
+        {
+            _bufferTextureBiases[texture] = index;
+        }
+
         public void AddBoundedConstantBuffer(int binding, int sizeIndex)
         {
             _boundedConstantBuffers[binding] = sizeIndex;

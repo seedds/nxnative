@@ -129,7 +129,7 @@ class ScanSourcePatch(unittest.TestCase):
         text, base = 0x138ee20, 0x2000000
         original = bytearray(0x13c2000)  # include the verified RO format table
         original[self.profile.scene_site:self.profile.scene_site + 4] = bytes.fromhex('358108aa')
-        for off, hexbytes in self.profile.SCAN_SOURCE_ABI + self.profile.SCENE_CONTROL_ABI:
+        for off, hexbytes in self.profile.scan_source_abi + self.profile.scene_control_abi:
             original[off:off + len(bytes.fromhex(hexbytes))] = bytes.fromhex(hexbytes)
         for off, before in self.runtime.OUTPUT_ABI:
             original[off:off + len(before)] = before
@@ -137,11 +137,11 @@ class ScanSourcePatch(unittest.TestCase):
             original[off:off + len(before)] = before
         for off, before, *_ in self.runtime.SHADOW_SITES:
             struct.pack_into('<I', original, off, before)
-        original[self.profile.SHADOW_UV_SITE:self.profile.SHADOW_UV_SITE + 4] = bytes.fromhex('009942fd')
+        original[self.profile.shadow_uv_site:self.profile.shadow_uv_site + 4] = bytes.fromhex('009942fd')
         for off, before, _ in self.runtime.LOD_SITES:
             struct.pack_into('<I', original, off, before)
-        struct.pack_into('<I', original, self.profile.LOD_DISTANCE_SITE, 0xbd43c920)
-        struct.pack_into('<I', original, self.profile.FOG_SCALE_SITE, 0xbd41a280)
+        struct.pack_into('<I', original, self.profile.lod_distance_site, 0xbd43c920)
+        struct.pack_into('<I', original, self.profile.fog_scale_site, 0xbd41a280)
         patched = bytearray(base + 16384)
         patched[:len(original)] = original
         words, checked, exports = [], [], {}
@@ -176,7 +176,7 @@ class ScanSourcePatch(unittest.TestCase):
 
     def test_original_abi_and_rewritten_abi_must_both_match(self):
         module, patched, fixups = self.fixture()
-        for off, _ in self.profile.SCAN_SOURCE_ABI:
+        for off, _ in self.profile.scan_source_abi:
             module.image[off] ^= 1
             with self.assertRaisesRegex(ValueError, 'ABI mismatch'):
                 self.runtime.generate(module, patched, fixups)
@@ -216,7 +216,7 @@ class ScanSourcePatch(unittest.TestCase):
         self.assertEqual([i.op_str for i in ins if i.mnemonic == 'stp'], [i.op_str for i in ins if i.mnemonic == 'ldp'])
         self.assertEqual([i.op_str for i in ins if i.mnemonic == 'str' and i.op_str.startswith('q')], [i.op_str for i in ins if i.mnemonic == 'ldr' and i.op_str.startswith('q')])
         self.assertIn(('b', '#0x331710'), text)
-        self.assertIn(self.profile.SCENE_CONTROL_EXTENSION, code)
+        self.assertIn(self.profile.scene_control_extension, code)
 
     def test_output_abi_and_changed_instructions_reject_corruption(self):
         module, patched, fixups = self.fixture()
@@ -356,7 +356,7 @@ class ScanSourcePatch(unittest.TestCase):
         self.assertTrue(any(i.mnemonic == 'bl' and i.op_str == '#0x138df60' for i in ins))
         self.assertTrue(any(i.mnemonic == 'b' and i.op_str == '#0x336a90' for i in ins))
         self.assertFalse(any(i.mnemonic in ('svc', 'msr', 'mrs') or re.search(r'\bx18\b', i.op_str) for i in ins[:100]))
-        self.assertIn(self.profile.SCAN_EXTENSION, code)
+        self.assertIn(self.profile.scan_extension, code)
 
 
 if __name__ == '__main__':

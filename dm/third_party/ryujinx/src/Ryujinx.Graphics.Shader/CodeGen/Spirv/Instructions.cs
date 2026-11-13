@@ -616,6 +616,68 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
             }
         }
 
+        // nxnative: buffer texture offsets (TranslationFlags.MetalBufferImageBias). Metal makes a buffer texture only at an offset of its buffer aligned as the device
+        // asks (minimumTextureBufferAlignmentForPixelFormat: 16 bytes on an M4 Pro), and the GPU addresses a view made below it from the boundary below its offset, so
+        // every access of an image at a pool offset 8 mod 16 landed two R32 elements early (Assassin's Creed II's occlusion culling marked object k - 2 visible, GitHub
+        // PR #1399). The host makes each such buffer texture's view from that boundary, wider by the elements in between (nvn_mtl.m tex_mtl), and puts their count in the
+        // offset table (Constants.NxBufferImageBiasBank); every coordinate of a buffer image or of a buffer texture read through a texture slot moves by it, and a size
+        // query gives the view's width less it. A coordinate before the texture, -bias to -1, would move into the bytes in between: it keeps its value, past the view's
+        // end as before, so a bounds check of the view's size (the atomics') and Metal's own drop it. An array of buffer textures has an entry per element, and an access
+        // reads the entry of the element it indexes (its first source, as GenerateSampledImageLoad reads it). One without a table entry (an array of images, or past the
+        // table) is accessed unchanged
+        private static SpvInstruction BufferBias(CodeGenContext context, AstTextureOperation texOp)
+        {
+            bool isImage = texOp.Inst.IsImage();
+
+            if (!(isImage ? context.Properties.BufferImageBiases : context.Properties.BufferTextureBiases).TryGetValue(texOp.GetTextureSetAndBinding(), out int index))
+            {
+                return null;
+            }
+
+            SpvInstruction u32 = context.TypeU32();
+            SpvInstruction s32 = context.TypeS32();
+            SpvInstruction element, component;
+
+            if (!isImage && context.Samplers[texOp.GetTextureSetAndBinding()].IsIndexed)
+            {
+                SpvInstruction entry = context.IAdd(u32, context.Bitcast(u32, context.Get(AggregateType.S32, texOp.GetSource(0))), context.Constant(u32, index));
+                element = context.ShiftRightLogical(u32, entry, context.Constant(u32, 2));
+                component = context.BitwiseAnd(u32, entry, context.Constant(u32, 3));
+            }
+            else
+            {
+                element = context.Constant(s32, index >> 2);
+                component = context.Constant(s32, index & 3);
+            }
+
+            SpvInstruction biasPointer = context.AccessChain(
+                context.TypePointer(StorageClass.Uniform, u32),
+                context.ConstantBuffers[context.Properties.BufferImageBiasBinding],
+                context.Constant(s32, 0),
+                element,
+                component);
+
+            return context.Load(u32, biasPointer);
+        }
+
+        private static SpvInstruction BiasBufferImageCoordinate(CodeGenContext context, AstTextureOperation texOp, SpvInstruction coordinate)
+        {
+            SpvInstruction bias = BufferBias(context, texOp);
+
+            if (bias == null)
+            {
+                return coordinate;
+            }
+
+            SpvInstruction u32 = context.TypeU32();
+            SpvInstruction s32 = context.TypeS32();
+            SpvInstruction original = context.Bitcast(u32, coordinate);
+            SpvInstruction moved = context.IAdd(u32, original, bias);
+            SpvInstruction before = context.ULessThan(context.TypeBool(), moved, bias);
+
+            return context.Bitcast(s32, context.Select(u32, before, original, moved));
+        }
+
         private static OperationResult GenerateImageAtomic(CodeGenContext context, AstOperation operation)
         {
             AstTextureOperation texOp = (AstTextureOperation)operation;
@@ -644,10 +706,21 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
             }
             // Metal's texture atomics (MSL 3.1) cover buffer, 2D, 2D-array and 3D textures of
             // R32Uint / R32Sint; source 1D surfaces arrive here already normalized to 2D.
+            // nxnative: a 64-bit max / min (InstEmitSurface.EmitSuatom, Ampere SURED.U64) on an rg32ui image, value low word then high word. SPIRV-Cross has no 64-bit
+            // atomics ("MSL currently does not support 64-bit atomics"), so it is written as two 32-bit atomics of the same operation on the same texel pointer, low word
+            // first; dmsh_atomic.wide_atomics turns that pair into one texture2d<ulong>::atomic_max / atomic_min on the RG32Uint texture and fails the shader on any other
+            // access of the image. The pair is only ever a marker: it never runs as two 32-bit atomics. After uncraftablexd's PR #1801
+            bool wide = bounded && texOp.Format == TextureFormat.R32G32Uint;
+            if (wide && (!texOp.Flags.HasFlag(TextureFlags.AtomicDiscardResult) ||
+                ((texOp.Flags & TextureFlags.AtomicMask) != TextureFlags.Minimum && (texOp.Flags & TextureFlags.AtomicMask) != TextureFlags.Maximum) ||
+                texOp.Type == SamplerType.TextureBuffer))
+            {
+                throw new NotSupportedException("Metal 64-bit image atomics support a max or min with no result on 2D/2D-array/3D images only.");
+            }
             if (bounded && (declaration.IsIndexed ||
                 (texOp.Type != SamplerType.TextureBuffer && texOp.Type != SamplerType.Texture2D &&
                  texOp.Type != (SamplerType.Texture2D | SamplerType.Array) && texOp.Type != SamplerType.Texture3D) ||
-                (texOp.Format != TextureFormat.R32Uint && texOp.Format != TextureFormat.R32Sint)))
+                (texOp.Format != TextureFormat.R32Uint && texOp.Format != TextureFormat.R32Sint && !wide)))
             {
                 throw new NotSupportedException("Metal image atomics support non-indexed 32-bit buffer/2D/2D-array/3D images only.");
             }
@@ -683,10 +756,11 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
             }
             else
             {
-                pCoords = Src(AggregateType.S32);
+                pCoords = BiasBufferImageCoordinate(context, texOp, Src(AggregateType.S32));   // nxnative: a buffer image (see BiasBufferImageCoordinate)
             }
 
             SpvInstruction value = Src(componentType);
+            SpvInstruction valueHigh = wide ? Src(componentType) : null;
 
             SpvInstruction merge = null;
             SpvInstruction valid = null;
@@ -741,6 +815,13 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                 TextureFlags.CAS => context.AtomicCompareExchange(resultType, pointer, one, zero, zero, Src(componentType), value),
                 _ => context.AtomicIAdd(resultType, pointer, one, zero, value),
             };
+
+            if (wide)
+            {
+                result = (texOp.Flags & TextureFlags.AtomicMask) == TextureFlags.Minimum
+                    ? context.AtomicUMin(resultType, pointer, one, zero, valueHigh)
+                    : context.AtomicUMax(resultType, pointer, one, zero, valueHigh);
+            }
 
             if (bounded)
             {
@@ -817,7 +898,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
             }
             else
             {
-                pCoords = Src(AggregateType.S32);
+                pCoords = BiasBufferImageCoordinate(context, texOp, Src(AggregateType.S32));   // nxnative: a buffer image (see BiasBufferImageCoordinate)
             }
 
             SpvInstruction imageComponentType = context.GetType(componentType);
@@ -880,7 +961,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
             }
             else
             {
-                pCoords = Src(AggregateType.S32);
+                pCoords = BiasBufferImageCoordinate(context, texOp, Src(AggregateType.S32));   // nxnative: a buffer image (see BiasBufferImageCoordinate)
             }
 
             AggregateType componentType = texOp.Format.GetComponentType();
@@ -1321,6 +1402,11 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
 
             SpvInstruction pCoords = AssemblePVector(pCount);
 
+            if (intCoords && texOp.Type == SamplerType.TextureBuffer)
+            {
+                pCoords = BiasBufferImageCoordinate(context, texOp, pCoords);   // nxnative: a buffer texture (see BiasBufferImageCoordinate)
+            }
+
             if (!intCoords)
             {
                 SpvInstruction nfFp32 = context.TypeFP32();
@@ -1647,6 +1733,12 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                 else
                 {
                     result = context.ImageQuerySize(resultType, image);
+
+                    // nxnative: a buffer texture's view is wider by the elements before its offset (see BiasBufferImageCoordinate): its size leaves them out
+                    if (type == SamplerType.TextureBuffer && BufferBias(context, texOp) is SpvInstruction bias)
+                    {
+                        result = context.ISub(context.TypeS32(), result, context.Bitcast(context.TypeS32(), bias));
+                    }
                 }
 
                 if (dimensions != 1)
@@ -2051,6 +2143,10 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                     if (ioVariable == IoVariable.UserDefined)
                     {
                         varType = context.Definitions.GetUserDefinedType(location, isOutput);
+                    }
+                    else if (ioVariable == IoVariable.UserDefinedPerVertex)
+                    {
+                        varType = AggregateType.Vector4 | AggregateType.FP32;   // nxnative: LDTRAM's inputs (Declarations.DeclareInputOrOutput)
                     }
                     else if (ioVariable == IoVariable.FragmentOutputColor)
                     {

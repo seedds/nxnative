@@ -65,8 +65,9 @@ namespace Ryujinx.Graphics.Shader.Instructions
             X(AmpereOpcodes.Kill, InstName.Kil, InstEmit.AKill, B, writesRd: false);
             X(AmpereOpcodes.Ret, InstName.Ret, InstEmit.ARet, B, writesRd: false);
             X(AmpereOpcodes.Call, InstName.Cal, InstEmit.ACall, B, writesRd: false);
-            // ERRBAR 0x9ab, which follows a MEMBAR, only orders error reporting.
-            foreach (int op in new[] { 0x918, 0x91a, 0x945, 0x941, 0x942, 0x948, 0x9ab })
+            // ERRBAR 0x9ab, which follows a MEMBAR, only orders error reporting. YIELD 0x946 (CuAssembler's sm_86 records: 0x...7946 is "YIELD ;") only lets the scheduler
+            // run another of the warp's paths: Resident Evil 4's 21 compute shaders with it have it after MEMBAR; ERRBAR, before a branch.
+            foreach (int op in new[] { 0x918, 0x91a, 0x945, 0x941, 0x942, 0x946, 0x948, 0x9ab })
             {
                 X(op, InstName.Nop, InstEmit.ANop, InstProps.None, writesRd: false);
             }
@@ -136,6 +137,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
         UReg,
         Imm,
         Cbuf,
+        BindlessCbuf,   // cx[URb][offset]: Bank holds URb, the uniform register pair with the constant buffer's handle (ABindlessConstant)
     }
 
     readonly struct ASrc
@@ -249,7 +251,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
         {
             if (x.Bit(91))
             {
-                throw AFail(context, "constant buffer operand with its bank in a uniform register");
+                return new ASrc(AKind.BindlessCbuf, x.Bits(38, 54), x.Bits(32, 38), neg, abs);   // cx[URb][offset], URb at 32 where the register form has Rb
             }
 
             (int bank, int offset) = AMapC0(context, x.Bits(54, 59), x.Bits(38, 54));
@@ -264,8 +266,22 @@ namespace Ryujinx.Graphics.Shader.Instructions
         // They are mapped to the places the build's reflection and the host know: the push constants to c[24] (where the graphics stages read theirs), uniform slot r to
         // c[0] + 0x210 + 0x10 r and storage slot s to c[0] + 0x310 + 0x10 s (NVN's compute tables), texture slot t to c[2] + 0x20 + 8 t, separate texture r to
         // c[2] + 0x168 + 8 r, separate sampler r to c[2] + 0x568 + 8 r and image slot i to c[2] + 0x120 + 8 i (NVN's handle tables). Other offsets stay.
+        // Push block 1 (control +0xaa words; PRAGMATA's buffer entries and handles) lies between push block 0 and the uniform entries, mapped to c[24] + 0x100.
+        // NVN2 graphics stages read the buffer entries the game pushes for them from a bank of their own, c[25 + stage index] (QueryAmpereStageBank): mapped to their push block
+        // in c[24] (AStageBlock). A bank past the push constants' (24) that is not the stage's is refused here: the binding table ends there, and it failed later as an
+        // IndexOutOfRangeException (PRAGMATA: 18,198 shaders before the map)
         private static (int Bank, int Offset) AMapC0(EmitterContext context, int bank, int offset)
         {
+            if (bank > 24)
+            {
+                if (offset < 0 || offset >= 0x100)
+                {
+                    throw AFail(context, $"stage buffer bank c[{bank}] read at 0x{offset:x}, past its push block");
+                }
+
+                return (24, AStageBlock(context, bank) * 0x100 + offset);
+            }
+
             int[] layout = bank == 0 ? context.TranslatorContext.GpuAccessor.QueryAmpereComputeC0Layout() : null;
 
             if (layout == null || layout.Length < 5)
@@ -274,21 +290,39 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
 
             int ubos = layout[0], ssbos = layout[1], textures = layout[2], size = layout[3], push = (layout[4] + 0xf) & ~0xf;
-            int ub = 0x10 + push;
+            // Push block 1 (control +0xaa: the driver's accessor reads +0xa9 + block, the words of each push block; dmsh_abi.h DMSH_PUSH_BLOCKS) follows push block 0,
+            // before the uniform entries: PRAGMATA's c8f5a992ec204a44 reads {address, size} pairs at 0x20 / 0x28 and 0x30 / 0x38, right after its one push word, and
+            // b12078fe3bce1273, with no push words, the three 8-byte handles it pushes at 0x10, 0x18 and 0x20, then its uniform entries
+            int pushed = layout.Length > 7 ? (layout[7] + 0xf) & ~0xf : 0;
+            int pb = 0x10 + push;
+            int ub = pb + pushed;
             int sb = ub + 0x10 * ubos;
             int hb = sb + 0x10 * ssbos;
             int sepTextures = hb + 8 * textures;
             int sepSamplers = sepTextures + 8 * (layout.Length > 5 ? layout[5] : 0);
             int ib = sepSamplers + 8 * (layout.Length > 6 ? layout[6] : 0);
 
-            if (offset >= 0x10 && offset < ub)
+            if (offset >= 0x10 && offset < pb)
             {
                 return (24, offset - 0x10);
             }
 
             if (offset >= ub && offset < sb)
             {
+                // the host's table holds 16 uniform slots (dmsh_abi.h DMSH_C0_CS_UBO_SLOTS); past them lies the storage buffer table
+                if (offset - ub >= 0x100)
+                {
+                    throw AFail(context, $"compute uniform slot {(offset - ub) >> 4}, past the host's 16");
+                }
+
                 return (0, 0x210 + (offset - ub));
+            }
+
+            // Push block 1, mapped to c[24] + 0x100. PRAGMATA's compute shaders load and store through the buffer addresses it holds (a persistent kernel spins on a work counter
+            // behind one); taken for uniform slots, which the game never bound, or read at the wrong place, the GPU never finished its first 3D frame
+            if (offset >= pb && offset < ub)
+            {
+                return (24, 0x100 + (offset - pb));
             }
 
             if (offset >= sb && offset < hb)
@@ -319,6 +353,22 @@ namespace Ryujinx.Graphics.Shader.Instructions
             return (bank, offset);
         }
 
+        // A constant bank past the push constants' (24) is an NVN2 graphics stage's buffer bank: stage i (vertex 0, hull or mesh 1, domain 2, geometry 3, pixel 4) reads c[25 + i]
+        // (QueryAmpereStageBank), which holds what the game pushes into the graphics push block 1 + i with nvnCommandBufferPushGraphicsConstants: {address, size} entries, 16 bytes
+        // each, or 8-byte handles, as compute reads its own from push block 1. PRAGMATA pushes the mesh stage's six entries into block 2 and the pixel stage's five into block 5 before
+        // its visibility and material passes. The bank maps to that block of c[24] (dmsh_abi.h DMSH_PUSH_BLOCKS; an indexed read, LDC Ra / ULDC URa, is moved by the block's base
+        // with it). Taken for the uniform slots the game binds, the mesh shader read three unbound slots and the material pass the wrong tables: every object drawn through the
+        // visibility buffer came out black. Another stage's bank is refused.
+        private static int AStageBlock(EmitterContext context, int bank)
+        {
+            if (bank != context.TranslatorContext.GpuAccessor.QueryAmpereStageBank())
+            {
+                throw AFail(context, $"constant bank c[{bank}], which is not this stage's buffer bank");
+            }
+
+            return bank - 24;
+        }
+
         // The operand's 32-bit value, modifiers not applied.
         private static Operand AGet(EmitterContext context, ASrc s)
         {
@@ -330,6 +380,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
                     return Register(s.Value, RegisterType.Uniform);
                 case AKind.Imm:
                     return Const(s.Value);
+                case AKind.BindlessCbuf:
+                    return ABindlessConstant(context, s.Bank, Const(0), s.Value);
                 default:
                     if ((s.Value & 3) != 0)
                     {
@@ -348,8 +400,37 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 AKind.Reg => s.Value == RegisterConsts.RegisterZeroIndex ? Const(0) : Register(s.Value + 1, RegisterType.Gpr),
                 AKind.UReg => s.Value == RegisterConsts.UniformZeroIndex ? Const(0) : Register(s.Value + 1, RegisterType.Uniform),
                 AKind.Imm => Const(s.Value < 0 ? -1 : 0),
+                AKind.BindlessCbuf => ABindlessConstant(context, s.Bank, Const(0), s.Value + 4),
                 _ => Cbuf(s.Bank, (s.Value >> 2) + 1),
             };
+        }
+
+        // A bindless constant buffer read, cx[URb][index + offset]: URb and URb + 1 hold the buffer's 64-bit handle, the hardware's layout: bits 0..44 the address >> 4, 45..63 the
+        // size >> 4 (as NVK's nvk_bindless_cbuf). NVN2 compute shaders take it from c[0]'s uniform entries, which the host fills in that layout (nvn_mtl.m,
+        // DMSH_C0_CS_UBO) as NVN2's driver does (PRAGMATA's compute shader b12078fe3bce1273: ULDC.64 of c[0] + 0x220, uniform slot 1, then cx[UR][4]); the game
+        // builds its own too: those it pushes (b12078fe3bce1273's at push block 1: 0x5a0083055d124, 32 bytes at 0x83055d1240) and those its pixel shaders load with LDG.64 from
+        // its buffers. Read as a plain address, a game handle reached no memory pool: a dummy buffer, or 0 through the pool table. The word is read from global memory at the
+        // address plus the offset: the storage pass traces the address (handle << 4) back to the handle's constant buffer word (GlobalToStorage.cs TryUnwrapHandle), and an
+        // address loaded from memory goes through the memory pool table. An offset past the size reads what lies there, where the hardware reads 0 (open: not checked)
+        private static Operand ABindlessConstant(EmitterContext context, int ur, Operand index, int offset)
+        {
+            if (ur == RegisterConsts.UniformZeroIndex)
+            {
+                return Const(0);
+            }
+
+            Operand lo = Register(ur, RegisterType.Uniform);
+            Operand hi = Register(ur + 1, RegisterType.Uniform);
+
+            // The address, 49 bits: (handle & (2^45 - 1)) << 4
+            Operand baseLo = context.ShiftLeft(lo, Const(4));
+            Operand baseHi = context.BitwiseAnd(context.BitwiseOr(context.ShiftLeft(hi, Const(4)), context.ShiftRightU32(lo, Const(28))), Const(0x1ffff));
+
+            Operand add = context.IAdd(index, Const(offset));
+            Operand sum = context.IAdd(baseLo, add);
+            Operand carry = context.ConditionalSelect(context.ICompareLessUnsigned(sum, baseLo), Const(1), Const(0));
+
+            return context.Load(StorageKind.GlobalMemory, sum, context.IAdd(baseHi, carry));
         }
 
         private static Operand AFloat(EmitterContext context, ASrc s, Instruction fpType = Instruction.FP32)

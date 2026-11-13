@@ -13,9 +13,9 @@ import nso
 from runtime_patch import layout
 
 PROFILE = runpy.run_path(str(Path(__file__).with_name('patches.py')))
-BUILDS = PROFILE['SCAN_DIAGNOSTICS']
-ACQUISITION_BUILDS = PROFILE['SCAN_ACQUISITION_DIAGNOSTICS']
-QUERY_BUILDS = PROFILE['SCAN_QUERY_DIAGNOSTICS']
+BUILDS = PROFILE['scan_diagnostics']
+ACQUISITION_BUILDS = PROFILE['scan_acquisition_diagnostics']
+QUERY_BUILDS = PROFILE['scan_query_diagnostics']
 
 def selected_builds(acquisition=False, query=False):
     if acquisition and query:

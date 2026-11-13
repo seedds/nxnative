@@ -13,6 +13,9 @@ import unittest
 TOOLS = Path(__file__).resolve().parents[1] / 'tools'
 sys.path.insert(0, str(TOOLS))
 import dmsh_abi   # noqa: E402
+import dmsh_chain   # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'ios/tools'))
+import ios_metal  # noqa: E402  (the iPhone's deployment target and math mode)
 import dmsh_entry   # noqa: E402
 import dmsh_fetch   # noqa: E402
 import dmsh_rewrite   # noqa: E402
@@ -64,7 +67,7 @@ def fn_text(msl, name):   # an entry point's whole text found by its name alone 
 
 def built(src):   # the build's order (dmsh_build.py finish): blend_zero, then the integer entry points on the shared body
     out, n = blend_zero(src)
-    fu, _ = dmsh_entry.fs_uint(out)
+    fu = dmsh_entry.fs_uint(out)
     return (dmsh_side.shared_body(out) + fu if fu else out), n, bool(fu)
 
 
@@ -85,7 +88,7 @@ class BlendZero(unittest.TestCase):
         self.assertTrue(re.search(r'\n    dm_blend0\(out, dm_blend\);\n    return out;\n\}$', b))   # the last line is still the return other stages look for
         self.assertEqual(e['params'][-1], PARAM)
         self.assertEqual(e['args'].split(', ')[-1], 'dm_blend')
-        self.assertLess(out.index('struct main0_out'), out.index('void dm_blend0(main0_out& dm_o'))   # the helper takes the struct: after it, before main0
+        self.assertLess(out.index('struct main0_out'), out.index('void dm_blend0(thread main0_out& dm_o'))   # the helper takes main0's local output: after its struct, before main0
         self.assertLess(out.index('void dm_blend0('), out.index('fragment main0_out main0('))
 
     def test_each_float4_colour_by_its_index(self):
@@ -103,9 +106,8 @@ class BlendZero(unittest.TestCase):
         # fs_uint tells an integer writer by its stores to out: the guard is a call, so a shader gets the same entry points with it as without
         for src in (PLAIN, INT_BITS):
             out, _ = blend_zero(src)
-            self.assertEqual(dmsh_entry.fs_uint(out)[1], dmsh_entry.fs_uint(src)[1])
-            self.assertEqual(bool(dmsh_entry.fs_uint(out)[0]), bool(dmsh_entry.fs_uint(src)[0]))
-        self.assertTrue(dmsh_entry.fs_uint(INT_BITS)[0])
+            self.assertEqual(bool(dmsh_entry.fs_uint(out)), bool(dmsh_entry.fs_uint(src)))
+        self.assertTrue(dmsh_entry.fs_uint(INT_BITS))
 
     def test_every_entry_point_carries_the_guard_and_the_word(self):
         for src in (PLAIN, INT_BITS):
@@ -164,12 +166,13 @@ class BlendZero(unittest.TestCase):
             u, info = dmsh_side.unit(text)
             f, meta = dmsh_fetch.fold(u, [], om_only_ok=True)
             texts += [(name, text), (name + '_unit', u), (name + '_fold', f)]   # each text a library is compiled from
-        for name, out in texts:
-            with tempfile.TemporaryDirectory() as d:
-                p = Path(d) / f'{name}.metal'; p.write_text(out)
-                r = subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-c', '-O1', '-fpreserve-invariance', '-fwrapv', str(p), '-o', str(Path(d) / f'{name}.air')],
-                                   capture_output=True, text=True)
-                self.assertEqual(r.returncode, 0, name + ': ' + r.stderr[:500])
+        for sdk, flags in (('macosx', (dmsh_chain.MAC_MIN_FLAG,)), ('iphoneos', tuple(ios_metal.IOS_FLAGS))):
+            for name, out in texts:
+                with self.subTest(sdk=sdk, variant=name), tempfile.TemporaryDirectory() as d:
+                    p = Path(d) / f'{name}.metal'; p.write_text(out)
+                    r = subprocess.run(['xcrun', '-sdk', sdk, 'metal', '-c', '-O1', '-fpreserve-invariance', '-fwrapv', *flags, str(p), '-o', str(Path(d) / f'{name}.air')],
+                                       capture_output=True, text=True)
+                    self.assertEqual(r.returncode, 0, name + ': ' + r.stderr[:500])
 
 
 # t_blend_zero.m's shader: NaN, +Inf, -Inf and 2 by column, at alpha 0 (columns 0-3) and alpha 1 (4-7), with the guard

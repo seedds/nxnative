@@ -530,9 +530,11 @@ static int mp_act_level(void) {
     if (lv < 0) { const char *e = getenv("DM_NVN_MEM_PRESSURE"); lv = e && *e ? atoi(e) : (TARGET_OS_IPHONE ? 1 : 2); if (lv < 0 || lv > 2) lv = 2; }
     return lv;
 }
+static _Atomic uint64_t g_sweep_n, g_sweep_bytes;   // idle uploaded textures freed without memory pressure (pkg_sweep)
 static void mem_pressure_said(char *b, size_t n) {
-    snprintf(b, n, "memory pressure events warn %llu, critical %llu, back to normal %llu; trims %llu, %llu MB given back", (unsigned long long)atomic_load(&g_mp_n[1]), (unsigned long long)atomic_load(&g_mp_n[2]),
-             (unsigned long long)atomic_load(&g_mp_n[0]), (unsigned long long)atomic_load(&g_mp_trims), (unsigned long long)(atomic_load(&g_mp_freed) >> 20));
+    snprintf(b, n, "memory pressure events warn %llu, critical %llu, back to normal %llu; trims %llu, %llu MB given back; idle uploaded textures freed without pressure %llu, %llu MB",
+             (unsigned long long)atomic_load(&g_mp_n[1]), (unsigned long long)atomic_load(&g_mp_n[2]), (unsigned long long)atomic_load(&g_mp_n[0]), (unsigned long long)atomic_load(&g_mp_trims),
+             (unsigned long long)(atomic_load(&g_mp_freed) >> 20), (unsigned long long)atomic_load(&g_sweep_n), (unsigned long long)(atomic_load(&g_sweep_bytes) >> 20));
 }
 static void res_report(const char *why, int kind);
 static void mem_pressure_event(int lv) {   // lv: 0 normal, 1 warn, 2 critical (the source's handler; a test calls it directly)
@@ -1775,6 +1777,7 @@ static void gmem_commit_patch(void);   // the raw pool table words of the argume
 static uint64_t g_gt_sub0;   // DM_NVN_GPUPROF's timeline: when this submission's encoding began
 static uint64_t g_gt_queue;   // the NVN queue being replayed (mtl_queue_activate)
 static void mem_trim(void);
+static void pkg_sweep(void);
 static uint64_t spare_trim(int all, unsigned *n_out);
 static uint32_t g_use_now = 1; static _Thread_local int t_pool_walk;   // t_pool_walk: a pool walk's lookups, which are no use
 static unsigned g_evict_why[5];   // the last trim's packages (pkg_evict_idle): considered, used within PKG_IDLE_S, of a kind not freed (sparse, placed, a view), GPU-written, held (pin, sharing table, takeover)   // seconds of CLOCK_MONOTONIC + 1, set at each submission's start: the clock of the texture IDs' and packages' last uses (g_tid_used, NvPkg used_s)
@@ -1788,6 +1791,7 @@ void mtl_sub_begin(void) {
     g_use_now = (uint32_t)(clock_gettime_nsec_np(CLOCK_MONOTONIC) / 1000000000ull) + 1;   // the clock of the texture IDs' last uses (g_tid_used)
     spare_trim(0, NULL);   // packaged textures' spares no re-upload took
     mem_trim();   // memory pressure asked for one (mem_pressure_event)
+    pkg_sweep();   // small devices: uploaded textures idle for PKG_IDLE_S
     defer_reset();
     mtl_prepare();   // done by then in the submit entry; the replay tool (nvn_replay) reaches it here
     warm_claim();
@@ -11174,7 +11178,7 @@ static uint64_t pool_entry(int samp, int dtt, int id_, uint64_t limit, int *gone
 // then the content, so the next use uploads it again) and no pin, sharing-table entry or serial that took its texture over holds it. Everything that names the copy lets go at once: its serials' entries (live and finalized), its
 // storage's sharing entry (g_pkg_share), each texture ID's views, the view cache, and the IDs' entries in the pool tables, which their next use patches to the dummy (a draw already encoded
 // keeps the old table and the texture: it is retired through deferred release, after the submissions that used it). A pool walk leaves the ID its stand-in (pool_stand) or the dummy until a shader reads it (treg_t evicted),
-// and the first read after the eviction finds that for a frame, as any texture's first read does; a bind makes it again at once. Hence at memory pressure only (mem_trim). Submit thread
+// and the first read after the eviction finds that for a frame, as any texture's first read does; a bind makes it again at once. Hence at memory pressure (mem_trim), and on small devices every PKG_SWEEP_S (pkg_sweep). Submit thread
 enum { PKG_IDLE_S = 30 };
 static _Atomic uint64_t g_evict_n, g_evict_bytes;
 static uint64_t pkg_evict_idle(unsigned *n_out) { @autoreleasepool {
@@ -11232,6 +11236,27 @@ static uint64_t pkg_evict_idle(unsigned *n_out) { @autoreleasepool {
     if (n_out) *n_out = n;
     return bytes;
 } }
+// Small devices (small_working_set) free those copies without waiting for memory pressure: every PKG_SWEEP_S at a submission's start, with the rules above. A game keeps the texture
+// objects of an area it has left, so each area load adds its textures to the last one's, and on a small device they came back only once the system was short: Ocarina of Time on
+// the iPhone 17, walking Hyrule Field into Kakariko Village, warned of memory pressure at the village load with the field's copies still resident, and the warn's trim then freed
+// 206 MB of them; on the Mac the second Kakariko visit held 327 MB more uploaded textures than the first (docs/reference/memory.md). What a sweep frees is made again at its next
+// use: from its stand-in (a small copy of the texture) for the frame of a pool read, at once for a bind. Elsewhere memory pressure alone frees them. DM_NVN_TEX_EVICT_IDLE=0 / 1 forces it
+enum { PKG_SWEEP_S = 10 };
+static int g_sweep_on = -1; static uint32_t g_sweep_last;
+static int sweep_wants(uint64_t working_set) { return small_working_set(working_set); }
+static void pkg_sweep(void) {
+    if (g_sweep_on < 0) {
+        const char *e = getenv("DM_NVN_TEX_EVICT_IDLE"); g_sweep_on = e && *e ? atoi(e) > 0 : sweep_wants(g_dev ? g_dev.recommendedMaxWorkingSetSize : 0);
+        if (g_sweep_on) MLOG("uploaded textures nothing used for %d s are freed every %d s, not only at memory pressure (%s)", PKG_IDLE_S, PKG_SWEEP_S, e && *e ? "DM_NVN_TEX_EVICT_IDLE" : "Metal's working set under 6 GB");
+    }
+    if (!g_sweep_on || g_use_now - g_sweep_last < PKG_SWEEP_S) return;
+    g_sweep_last = g_use_now;
+    uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW); unsigned n = 0; uint64_t b = pkg_evict_idle(&n);
+    if (!n) return;
+    atomic_fetch_add(&g_sweep_n, n); atomic_fetch_add(&g_sweep_bytes, b);
+    static int nl; if (nl++ < 8) MLOG("[mem] idle uploaded textures freed: %u, %llu MB, %.1f ms (in all %llu, %llu MB)", n, (unsigned long long)(b >> 20), (clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0) / 1e6,
+                                     (unsigned long long)atomic_load(&g_sweep_n), (unsigned long long)(atomic_load(&g_sweep_bytes) >> 20));
+}
 static uint64_t pool_gpu(int samp, int dtt, int dpf, int base, __unsafe_unretained id<MTLBuffer> *out) {
     pool_seen_scan();
     uint64_t rg = atomic_load(&g_reg_gen), sg = samp ? 0 : atomic_load(&g_ser_gen);   // a sampler table follows registrations alone

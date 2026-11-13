@@ -1,5 +1,6 @@
 // Memory pressure frees the Metal copies of uploaded textures nothing used for 30 s (pkg_evict_idle): the copy leaves the residency set, its texture ID's pool table entry reads the dummy,
-// a pool walk does not make it again up front, and a shader's next read through the pool does. A texture used lately, one the GPU wrote and a pinned one stay
+// a pool walk does not make it again up front, and a shader's next read through the pool does. A texture used lately, one the GPU wrote and a pinned one stay. On small devices a
+// sweep every PKG_SWEEP_S frees them without pressure (pkg_sweep)
 #include "../nvn/nvn_mtl.m"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
@@ -68,6 +69,18 @@ int main(void) { @autoreleasepool {
     for (int i = 0; i < NT; i++) g_tid_used[ID0 + i] = old;
     was_n = g_evict_n; mtl_sub_begin(); finish();
     CHECK("no pressure, no eviction", g_evict_n == was_n && tex_get(t[0].serial));
+    // A small device's sweep (pkg_sweep): the same texture, idle again, goes without pressure; the next sweep waits PKG_SWEEP_S
+    for (int i = 0; i < NT; i++) { g_tid_used[ID0 + i] = i == 1 ? clock_s() : old; NvPkg *p = tex_get(t[i].serial); if ([p isKindOfClass:[NvPkg class]]) p->used_s = i == 1 ? clock_s() : old; }
+    g_sweep_on = 1; g_sweep_last = 0; was_n = g_evict_n; uint64_t sweep0 = g_sweep_n;
+    mtl_sub_begin(); finish();
+    CHECK("a small device's sweep frees the idle texture without pressure", g_evict_n == was_n + 1 && g_sweep_n == sweep0 + 1 && tex_get(t[0].serial) == nil);
+    CHECK("and leaves the used, GPU-written and pinned ones", tex_get(t[1].serial) && tex_get(t[2].serial) && tex_get(t[3].serial));
+    ((uint32_t *)g_seen_buf.contents)[ID0 / 32] |= 1u << (ID0 % 32);
+    CHECK("a read makes it again", entry(ID0, NULL) != dummy && [tex_get(t[0].serial) isKindOfClass:[NvPkg class]]);
+    { NvPkg *p = tex_get(t[0].serial); if (p) p->used_s = old; } g_tid_used[ID0] = old;
+    was_n = g_evict_n; mtl_sub_begin(); finish();
+    CHECK("the next sweep waits PKG_SWEEP_S", g_evict_n == was_n && tex_get(t[0].serial));
+    g_sweep_on = 0;
     mtl_tex_unpin(t[3].serial);
     for (int i = 0; i < NT; i++) { mtl_reg_tex(ID0 + i, NULL, NULL); mtl_tex_release(&t[i]); }
     mtl_drain(); mtl_alias_drop_pool(&pool); nvn_dirty_remove_range(mem); mtl_pool_del(mem); mtl_drain(); free(mem);

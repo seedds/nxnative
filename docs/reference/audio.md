@@ -51,6 +51,14 @@ For a replaced DSP renderer the size query keeps the service's work-buffer contr
 - **Check:** `t_audren_layout` deterministically substitutes a producer overwrite at the real condition-variable wake while a full ring is consumed. The old implementation plays replacement samples and fails the assertion; the corrected implementation preserves every sample in the four playback blocks. Existing SDK-layout and separate-renderer tests pass, including ASan/UBSan and TSan builds. Stream, 100000-block SPSC, callback-statistics, renderer-work and mocked device tests pass without opening real audio hardware.
 - **Found on:** [Metroid Prime 4: Beyond audio investigation](../../dm/games/010019A01E2F2000/README.md#audio-crackling-investigation-2026-11-12). The software defect is reproduced; its contribution to that game's reported crackling remains unconfirmed until a user test. The existing log establishes catch-up rendering, not a full ring at the instant of a click.
 
+### Catch-up frames that feed themselves
+
+- **Symptom:** crackle and echo in movies and some cutscenes while gameplay sounds right; the renderer's catch-up count jumps (5 to 96 within seconds) and repeated 5 ms blocks cluster there.
+- **Cause:** an update with no render since the previous one rendered a catch-up frame at once on the game's thread. While queued catch-ups play, the render thread renders nothing of its own, so the next update again finds no render and makes another: a game that switched to updating every 5 ms (Metroid Prime 4's movies: 200 updates a second instead of 60) then had every frame rendered as a catch-up, each one right at the update, before the game's CPU Aux worker refreshed its return ring, which therefore played its old block again (67 of 73 lag-two repeats were catch-up frames).
+- **Fix:** such an update first waits, at most 15 ms, for the render thread's own next frame (`h_ars_Update`, signalled through `cq_cv` after each render); a catch-up is rendered only when the render thread is not rendering (output not started, catch-ups already queued, or the wait timed out). `DM_AUDREN_CATCHUP=now` restores the immediate catch-up for comparison.
+- **Check:** `t_audren_layout`, `t_audren_work`; the movie capture to repeat with `AUDIO_CAPTURE=1` (open).
+- **Found on:** [Metroid Prime 4: Beyond](../../dm/games/010019A01E2F2000/README.md).
+
 ### PCM provenance when a filled output queue still crackles
 
 - **Symptom:** the user hears residual crackling despite a filled AudioOut queue and zero underruns, and a pre-device PCM recording contains repeated older blocks.

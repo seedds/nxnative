@@ -12,6 +12,7 @@ DM_AUDIO_DUMP	diagnostic	`=<file>` writes every PCM block the game appends as is
 DM_AUDIO_LIMITER	player	On unless `0`: lowers the CPU audio renderer's stereo downmix briefly where it would pass full scale (instant per 5 ms frame, about 150 ms release) instead of clipping it at the 16-bit clamp; `0` plays the clamped mix (settings: Peak limiter)
 DM_AUDIO_MUTE	switch	`=1` runs the real Core Audio output path (callback pacing, background take-over) with the output silenced, for lifecycle tests on the Mac without noise
 DM_AUDREN_AUX_TRACE	diagnostic	`0` leaves out the auxiliary trace that `DM_AUDREN_PCM_TRACE` otherwise writes beside its file (`<file>.aux.tsv`: every Aux buffer read and write the game makes, with hashes)
+DM_AUDREN_CATCHUP	diagnostic	`now`: two renderer updates with no render between them render a catch-up frame at once on the game's thread, as before 2026-11-13; by default the update first waits up to 15 ms for the render thread's own next frame
 DM_AUDREN_PCM_TRACE	diagnostic	`=<file>` writes one row per CPU audio renderer frame (normal and catch-up, sequence, hash, update and render counts, queue state) before device output; dm/tools/audio_trace.py reads it
 DM_AUDREN_TRACE	diagnostic	When set, the CPU audio renderer logs every update with the number of frames rendered since the previous one
 DM_AV1_DAV1D	switch	`=1` decodes AV1 movies with dav1d even where VideoToolbox decodes AV1 (Apple M3 and A17 Pro on), to compare the two or to check the path older chips take (`hle_movie_av1.c`)

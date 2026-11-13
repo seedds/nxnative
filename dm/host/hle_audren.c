@@ -104,6 +104,7 @@ typedef struct {
     pthread_mutex_t cq_mu; pthread_cond_t cq_cv;   // the render thread signals each frame it takes off the queue (catch-up pacing)
     _Atomic uint64_t frame_seq, cq_seq[CQ];   // generation order: merge a normal frame with catch-up frames produced before it
     int sink_logged;
+    _Atomic int rt_live;                     // the render thread renders on its own (its output started): an update waits for its next render before a catch-up
     int32_t up_buf[2 * (15 + FRAME_MAX)]; uint32_t up_pos;   // up_3_2's last samples and position
     float lim_gain;                          // DM_AUDIO_LIMITER's gain carried between frames (0 before the first: gain 1)
     int16_t pcm[NBUF][FRAME_MAX * 2]; gbuf bufs[NBUF];   // the blocks its output plays from: AudioOut queues only the pointer and copies the samples when the sound card asks (issue #1336)
@@ -250,7 +251,7 @@ static void render_main(void *arg) {
     void *out = dm_pcmout_open(2);
     gbuf *free_list[NBUF]; int nfree = NBUF;
     for (int i = 0; i < NBUF; i++) { a->bufs[i] = (gbuf){a->pcm[i], sizeof a->pcm[i], 0}; free_list[i] = &a->bufs[i]; }
-    dm_pcmout_start(out);
+    dm_pcmout_start(out); atomic_store(&a->rt_live, 1);
     LOG("audren: render thread %d started (%d buffers in flight, paced by the output)", ar_index(a), NBUF);
     int16_t *pending = a->pending; int pending_n = 0, have_pending = 0; uint64_t pending_seq = 0;
     while (atomic_load(&a->open)) {
@@ -271,6 +272,7 @@ static void render_main(void *arg) {
             pending_seq = atomic_load(&a->frame_seq);
             if (a->frame_n) memcpy(pending, a->frame, (size_t)pending_n * 4); else memset(pending, 0, (size_t)pending_n * 4);
             have_pending = 1;
+            cq_popped(a);   // an update waiting for this thread's next render (h_ars_Update) sees it
         }
         h = atomic_load(&a->cq_head);
         int queued = h != atomic_load(&a->cq_tail) && (!have_pending || atomic_load(&a->cq_seq[h % CQ]) < pending_seq);
@@ -287,6 +289,7 @@ static void render_main(void *arg) {
         if (ar_trace_on()) ar_trace_line(queued ? "submit-catchup" : "submit-render", a, seq, n, b->ptr, -1, -1, 0, -1, -1, 0, accepted, NULL);
         if (!accepted) free_list[nfree++] = b;
     }
+    atomic_store(&a->rt_live, 0);
     dm_pcmout_close(out);   // the output would otherwise keep its sound card callback or silent sink running and hold one of the AudioOut slots after the renderer closes
     cq_popped(a);   // an update waiting for queue space (catch-up pacing) sees open cleared
 }
@@ -779,6 +782,23 @@ HLE_FORCE("_ZN2nn5audio6server17AudioRenderSystem6UpdateEPvmS3_mPKvm", "renderer
     ar_t *a = ar_of_sys(sys);
     if (!a) return orig(sys, o, on, p, pn, in, inn);   // two renderers just opened, neither has rendered: at most one catch-up frame less
     uint64_t u = atomic_fetch_add(&a->updates, 1) + 1, r = atomic_load(&a->renders);
+    // Two updates with no render between them: first wait for the render thread's own next render (every 5 ms, in bursts of the device's I/O buffer), at most
+    // 15 ms. A catch-up rendered at once on the game's thread runs before the game's CPU Aux worker has refreshed its return ring, so it plays the ring's old
+    // block again (Metroid Prime 4: 67 of 73 lag-two repeats were catch-up frames); and while queued catch-ups play, the render thread renders nothing, so
+    // every later update found no render and made another catch-up: a game that switched to updating every 5 ms (its movies) went on rendering only
+    // catch-ups, heard as crackle and echo. A catch-up stays for a render thread that is not rendering (its output not started yet, a queue already
+    // holding catch-ups, or one that stalled). DM_AUDREN_CATCHUP=now renders it at once as before.
+    static int now_mode = -1; if (now_mode < 0) { const char *e = getenv("DM_AUDREN_CATCHUP"); now_mode = e && !strcmp(e, "now"); }
+    if (a->updated && r == a->last_r && !now_mode && atomic_load(&a->rt_live) && atomic_load(&a->cq_head) == atomic_load(&a->cq_tail)) {
+        struct timespec dl; clock_gettime(CLOCK_REALTIME, &dl); dl.tv_nsec += 15000000; if (dl.tv_nsec >= 1000000000) { dl.tv_sec++; dl.tv_nsec -= 1000000000; }
+        pthread_mutex_lock(&a->cq_mu);
+        while (atomic_load(&a->open) && atomic_load(&a->renders) == r && !pthread_cond_timedwait(&a->cq_cv, &a->cq_mu, &dl)) {}
+        pthread_mutex_unlock(&a->cq_mu);
+        r = atomic_load(&a->renders);
+        static _Atomic uint64_t waited; uint64_t w = atomic_fetch_add(&waited, 1) + 1;
+        if (w <= 3 || w % 12000 == 0) LOG("audren: renderer %d: update %llu waited for the render thread's frame (%llu waits so far%s)", ar_index(a), (unsigned long long)u,
+                                         (unsigned long long)w, r == a->last_r ? ", this one timed out: catch-up" : "");
+    }
     if (a->updated && r == a->last_r) {
         uint64_t c = atomic_fetch_add(&a->catchups, 1) + 1;
         if (c <= 3) LOG("audren: renderer %d: no frame rendered before update %llu, rendering a catch-up frame first (%llu so far)", ar_index(a), (unsigned long long)u, (unsigned long long)c);

@@ -11656,9 +11656,13 @@ static void cbs_fly_report(uint64_t fence) {
 // cached by address and span (g_span_c, under g_span_mu, taken inside g_vp_mu). A mapping request over a span buffer's pages, the pool going, or an eviction retires it as a run's
 // buffer is retired (pool_gone_release): out of the cache at once, then released with the fence of the submission open now, or of the last one when none is open, so it stays in
 // no residency set past the work that may use it, and an unmap's pages (released at the fence after it, vunmap_defer) are never under it. DM_NVN_SPARSE_SPAN=0 resolves the
-// address as before
-void *nvn_sparse_span_bind(uint64_t a, uint64_t cap);
-enum { SPAN_C = 32 };
+// address as before.
+// The span also runs DM_NVN_SPARSE_SPAN_TAIL_MB (default 4) past its last mapped run, at most to the end of the reservation, over zero pages where nothing is mapped: the shader
+// indexes from the address as far as it likes, and on the Switch the GPU reads 0 past the last mapped page, where the run's buffer ended and the read got whatever followed it in
+// the Mac GPU's address space (PRAGMATA's GI voxeliser ef4ad011: one 0xc0000-byte run, read 0x150000 bytes and more, the R53 hangar's colour wash). So a lone run takes a span
+// buffer too, and the cache holds 64 (32 before the tail). DM_NVN_SPARSE_SPAN_TAIL_MB=0 ends the span at its last run, as before
+void *nvn_sparse_span_bind(uint64_t a, uint64_t cap, uint64_t tail);
+enum { SPAN_C = 64 };
 static struct { uint64_t addr, span; uintptr_t lo, hi; __strong id<MTLBuffer> buf; } g_span_c[SPAN_C]; static unsigned g_span_next; static pthread_mutex_t g_span_mu = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic uint64_t g_span_made, g_span_retired;   // changed under g_span_mu
 static void span_gone(NSMutableArray<id<MTLBuffer>> *gone) { if (!gone.count) return; pthread_mutex_lock(&g_mu); pool_gone_release(gone); pthread_mutex_unlock(&g_mu); }
@@ -11690,8 +11694,8 @@ void mtl_span_retire(uintptr_t lo, uintptr_t hi) { @autoreleasepool {
     span_gone(gone);
 } }
 static int sbuf_span(uint64_t addr, void **mb, uint64_t *mo, uint64_t *gpu) {   // → 0 when the address needs no span buffer or none could be made
-    static int on = -1; if (on < 0) { const char *e = getenv("DM_NVN_SPARSE_SPAN"); on = !e || atoi(e); }
-    void *nb = on ? nvn_sparse_span_bind(addr, 64u << 20) : NULL;
+    static int on = -1; static uint64_t tail; if (on < 0) { const char *e = getenv("DM_NVN_SPARSE_SPAN"), *t = getenv("DM_NVN_SPARSE_SPAN_TAIL_MB"); tail = (uint64_t)(t && atoi(t) >= 0 ? atoi(t) : 4) << 20; on = !e || atoi(e); }
+    void *nb = on ? nvn_sparse_span_bind(addr, 64u << 20, tail) : NULL;
     if (!nb) return 0;
     id<MTLBuffer> b = (__bridge id<MTLBuffer>)nb;
     *mb = nb; *mo = addr - (uint64_t)(uintptr_t)b.contents; *gpu = b.gpuAddress + *mo;

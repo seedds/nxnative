@@ -1,7 +1,8 @@
 // A storage buffer bound by its address alone (NVN_RB_SBUFU / NVN_RB_SBUFQ: nvn_mtl.m sbuf_addr) in a sparse pool whose mapping has a hole after its first run: the binding covers
 // the whole span, and the GPU reads the pages before the hole, zeros in it and the pages after it, through the real NVN entry points. Remapping the hole gives a buffer that sees the
 // new pages; an unmap retires the span buffers over its pages at once; a hole whose unmap is still queued gets no span until it is released, then reads 0; a hole whose host pages
-// are inaccessible is backed by zero pages; an address in a run with nothing after it resolves as before; the pool's Finalize takes its span buffers out of the residency set.
+// are inaccessible is backed by zero pages; an address in a run with nothing after it gets the zero tail (DM_NVN_SPARSE_SPAN_TAIL_MB=0: resolves as before); the pool's Finalize
+// takes its span buffers out of the residency set.
 // Before, the binding was the buffer of the first run alone, which ends at the hole
 #define nvn_game_fps nvn_game_fps_mtl_default
 #include "../nvn/nvn_mtl.m"
@@ -104,12 +105,14 @@ int main(void) { @autoreleasepool {
     map_at(vb + 2 * P, P, 4u << 20, 1);
     { void *mb6 = NULL; uint64_t mo6, g6; CHECK("binding after mapping into the hole", sbuf_addr(b, &mb6, &mo6, &g6) && mb6 != mb5 && blen(mb6, mo6) >= 5 * P);
       NSData *d = gpu_read(mb6, mo6, 5 * P); CHECK("GPU reads the page mapped into the hole", d && !memcmp((const uint8_t *)d.bytes + 2 * P, phys + (4u << 20), P)); }
-    // 5. a run with nothing mapped after it: resolved as before, to the run's own buffer
+    // 5. a run with nothing mapped after it: with DM_NVN_SPARSE_SPAN_TAIL_MB=0, resolved as before, to the run's own buffer; by default a span buffer over the run and a zero
+    //    tail (t_sparse_span_tail)
     uint64_t vc = 768ull << 20, c = (uint64_t)(uintptr_t)v->base + vc;
     map_at(vc, 2 * P, 5u << 20, 1);
-    { void *m1 = NULL, *m2 = NULL; uint64_t o1 = 0, o2 = 0, g1, g2;
+    { void *m1 = NULL, *m2 = NULL; uint64_t o1 = 0, o2 = 0, g1, g2; const char *te = getenv("DM_NVN_SPARSE_SPAN_TAIL_MB");
       CHECK("a lone run resolves", sbuf_addr(c, &m1, &o1, &g1) && mtl_gpu_addr(c, 1, &m2, &o2, &g2));
-      CHECK("to the same buffer as the plain lookup", m1 == m2 && o1 == o2 && blen(m1, o1) >= 2 * P); }
+      if (te && !atoi(te)) CHECK("to the same buffer as the plain lookup", m1 == m2 && o1 == o2 && blen(m1, o1) >= 2 * P);
+      else { NSData *d = gpu_read(m1, o1, 3 * P); CHECK("to a span buffer: the run, then zeros", d && !memcmp(d.bytes, phys + (5u << 20), 2 * P) && is_zero((const uint8_t *)d.bytes + 2 * P, P)); } }
     // 6. the pool goes: its span buffers with it, out of the residency set before its pages go (no submission is open, so nothing can still reach them); before, they were
     //    released behind the next submission's fence, which a game that stops submitting never reaches
     id<MTLBuffer> held6 = nil; { void *m = NULL; uint64_t mo_, g_; if (sbuf_addr(b, &m, &mo_, &g_)) held6 = (__bridge id<MTLBuffer>)m; }

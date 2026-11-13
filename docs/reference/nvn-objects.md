@@ -128,6 +128,21 @@ A game may tell NVN objects apart by their bytes, without an NVN call. A host re
   With `DM_NVN_SPARSE_SPAN=0`, the binding is the first 64 KB run's buffer and 13 of the 45 checks that run fail. With the unmap retirement, the `Finalize` fence or the queued-unmap check taken out, 4, 2 and 2 checks fail.
 - **Found on:** [PRAGMATA](../../dm/games/0400C76024710000/README.md): on its first-area route, 0 bindings cut short of 3.67 million and no flare in two runs with the fix; without it, the flare in 2 of 4 runs (up to 4.2% of the picture green).
 
+### A storage buffer bound by address in a sparse pool ended at its last mapped run
+
+- **Symptom:** a compute or fragment shader that takes a storage buffer's address from a uniform buffer or the push constants (`NVN_RB_SBUFU`, `NVN_RB_SBUFQ`) and indexes past the pages the game has mapped there reads foreign values, now and then; no red line. PRAGMATA: a rainbow colour wash over the lighting in the R53 hangar (st20_100), on entering and on the stairs, that spreads through the SDF GI and fades when the camera stays still.
+- **Cause:** such a binding does not say its size, so the shader reads as far as it indexes. On the Switch the GPU reads 0 past the last mapped page of [a sparse pool](#sparse-virtual-pools-built-from-separate-physical-pools) (the page table has nothing there), or the next mapped page. The binding was the [span](#a-storage-buffer-bound-by-address-in-a-sparse-pool-ended-at-the-first-hole) up to its last mapped run, or the run's own buffer when no run followed it, so a read past that run ran past the Metal buffer into whatever lies after it in the GPU's address space. PRAGMATA's GI voxeliser `ef4ad01151918469` reads its surfel colours (`cp_s3`, SBUFQ) at the base of a 1 GB sparse pool that has one 0xc0000-byte run mapped when the hangar is entered, and indexes 0x150000 bytes and more. The bytes past the run became hot surfel colours, the GI bounce (`bfc2118307977103`) fed them back into its volume, and the lighting washed out.
+- **Fix:** `nvn_sparse_span_bind` (`hle_nvn.c`) runs the span `DM_NVN_SPARSE_SPAN_TAIL_MB` (4) past its last mapped run, at most to the end of the reservation (or the pool's size), and a lone run now takes a span buffer too. The tail's pages that are not readable get zero pages, as a hole's do, and pages mapped there are read as mapped. A tail page whose unmap is still queued holds the old physical page, so the tail stops before it until the unmap has released it. Mapping requests retire span buffers over their pages, the tail's included, so a page mapped into a tail later is read by the next binding. A span cut at its 64 MB cap gets no tail. The span cache holds 64 buffers (32 before). `DM_NVN_SPARSE_SPAN_TAIL_MB=0` ends the span at its last run, as before. Open, as for holes: a shader's write into a tail page lands in its zero page, where the Switch drops it, and later spans read it back until the game maps the page. A read more than 4 MB past the last run is still unprotected.
+- **Check:** `make -C dm/gfx/tests GAME=<id> check_t_sparse_span_tail` (Metal validation, 46 checks). A compute kernel reads through SBUFU bindings past their last run:
+  - PRAGMATA's layout (an unmapped head, 64 KB runs with a hole), 2 MB past the last run, from an aligned and an unaligned address;
+  - a page mapped into the tail later;
+  - a run 0x40000 before the end of the reservation (the tail stops there);
+  - one 0xc0000-byte run with no hole, read 0x150000 bytes (the hangar binding);
+  - a tail page whose unmap is still queued, before and after the unmap's fence.
+
+  It reads the mapped pages and 0 elsewhere. With `DM_NVN_SPARSE_SPAN_TAIL_MB=0`, 13 of the 46 checks fail. `check_t_sparse_span` covers the lone run both ways.
+- **Found on:** [PRAGMATA](../../dm/games/0400C76024710000/README.md): on its R53 hangar route, the worst shot's washed share of the picture was 0.218 and 0.177 in two runs without the tail, and 0.087 in one run with it. What is left of the wash is open.
+
 ### Virtual pools of one texture each, mapped before and after the texture
 
 - **Symptom:** `[RED] MapVirtual: non-contiguous mapping (true sparse) not implemented`, on small virtual pools; streamed textures black or missing (OCTOPATH TRAVELER's village ground and plants).

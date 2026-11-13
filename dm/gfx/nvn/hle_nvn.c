@@ -3489,14 +3489,30 @@ int nvn_sparse_alias(uint64_t lo, uint64_t hi) {
 }
 // A storage buffer bound by its address alone (NVN_RB_SBUFU / NVN_RB_SBUFQ, size unknown) in a sparse pool: the address resolves to the mapped run holding its first byte, whose
 // buffer ends at the next unmapped page, while the GPU's page table reads 0 in a hole and the mapped pages after it. Such a binding gets one buffer over its span: from a to the end
-// of the last run that follows with less than 1 MB unmapped before it, at most cap. → that buffer (unretained: it stays alive for the submission being encoded, see mtl_span_retire),
-// or NULL when a is in no run of a sparse pool, no run follows close enough (the run's own buffer holds all of it then), or a hole cannot be backed yet.
-// A zero-copy buffer cannot wrap inaccessible pages, so a host page of a hole that is not readable (never mapped, released by its unmap, or kept in the page table only) gets a
-// fresh zero page first. A hole page whose unmap is still queued (vunmap_defer: a page entry live and not mapped) still holds the old physical page, which the game may have mapped
-// elsewhere: no span is made over it until the unmap has released it, and the binding takes the first run alone as before. The span's buffers are cached by address and span
-// (nvn_mtl.m), and every mapping request retires the ones over its pages (vpt_set), as vrun_set retires the runs' buffers: so no span buffer outlives a page it was made over, and a
-// hit costs the binary search for the run and a step over the runs that follow, no page-table walk. Caller: the replay; takes g_vp_mu
-void *nvn_sparse_span_bind(uint64_t a, uint64_t cap) {
+// of the last run that follows with less than 1 MB unmapped before it, at most cap, and then tail bytes more, at most to the end of the reservation. → that buffer (unretained: it
+// stays alive for the submission being encoded, see mtl_span_retire), or NULL when a is in no run of a sparse pool, the run's own buffer holds the whole span (no run follows close
+// enough and tail is 0), or a hole cannot be backed yet.
+// The tail: the shader indexes from the address as far as it likes, and on the Switch it reads 0 past the last mapped page (the page table has nothing there) or the next mapped
+// page. The run's buffer ended at its last page, and a read past it got whatever lies after the buffer in the Mac GPU's address space: PRAGMATA's GI voxeliser ef4ad011 reads its
+// surfel colours at the base of a 1 GB sparse pool with one 0xc0000-byte run mapped, 0x150000 bytes and more, and the bytes past the run went into the GI volume as hot colours
+// (the R53 hangar's colour wash). So the span runs on tail bytes past its last run, over zero pages where nothing is mapped, as a hole is backed.
+// A zero-copy buffer cannot wrap inaccessible pages, so a host page of a hole or of the tail that is not readable (never mapped, released by its unmap, or kept in the page table only)
+// gets a fresh zero page first. A page whose unmap is still queued (vunmap_defer: a page entry live and not mapped) still holds the old physical page, which the game may have mapped
+// elsewhere: no span is made over a hole page in that state until the unmap has released it, and the binding takes the first run alone as before; the tail stops before such a page.
+// The span's buffers are cached by address and span (nvn_mtl.m), and every mapping request retires the ones over its pages (vpt_set), the tail's included, as vrun_set retires the
+// runs' buffers: so no span buffer outlives a page it was made over, a page mapped into a tail later is seen by the next binding, and a hit costs the binary search for the run and a
+// step over the runs that follow, no page-table walk. Caller: the replay; takes g_vp_mu
+static int span_back(const struct vpool *v, uint64_t from, uint64_t to, uint64_t pg, uint64_t *stop) {   // caller holds g_vp_mu: zero pages under [from, to) where not readable; → 0 if refused,
+    for (uint64_t hp = from; hp < to; hp += pg) {                                                         // -1 at a page whose unmap is queued (*stop: that page)
+        int pending = 0; for (uint64_t e = 0; e < pg; e += 0x1000) { const vpte *t = vpt_get(v, hp + e); if (t && t->live && !t->phys) pending = 1; }
+        if (pending) { *stop = hp; return -1; }
+        vm_address_t ra = (vm_address_t)(v->base + hp); vm_size_t rs = 0; vm_region_basic_info_data_64_t vi; mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64; mach_port_t obj = MACH_PORT_NULL;
+        int none = vm_region_64(mach_task_self(), &ra, &rs, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&vi, &cnt, &obj) != KERN_SUCCESS || ra > (vm_address_t)(v->base + hp) || !(vi.protection & VM_PROT_READ);
+        if (none && mmap(v->base + hp, pg, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE | MAP_FIXED, -1, 0) == MAP_FAILED) return 0;
+    }
+    return 1;
+}
+void *nvn_sparse_span_bind(uint64_t a, uint64_t cap, uint64_t tail) {
     if (!cap || !__atomic_load_n(&g_nvp, __ATOMIC_ACQUIRE)) return NULL;
     uint64_t pg = (uint64_t)getpagesize(); void *buf = NULL;
     pthread_mutex_lock(&g_vp_mu);
@@ -3507,21 +3523,26 @@ void *nvn_sparse_span_bind(uint64_t a, uint64_t cap) {
         if (r == v->nrun || v->run[r].lo > o) break;
         int r0 = r; uint64_t end = v->run[r].hi, gap = 0;
         for (r++; r < v->nrun && v->run[r].lo < o + cap && v->run[r].lo - end < (1u << 20); r++) { gap += v->run[r].lo - end; end = v->run[r].hi; }
-        if (!gap) break;
         if (end > o + cap) end = o + cap;
-        uint64_t lo = o & ~(pg - 1), hi_ = (end + pg - 1) & ~(pg - 1);
-        if ((buf = mtl_span_find(a, end - o))) break;
+        uint64_t lim = ((v->size < v->len ? v->size : v->len) + pg - 1) & ~(pg - 1); if (lim > v->len) lim = v->len;   // the reservation's end (the pool's size, if smaller)
+        uint64_t zend = tail && end == v->run[r - 1].hi && end < lim ? (end + tail < lim ? end + tail : lim) : end;   // the span's end with its tail (none for a span cut at cap)
+        if (!gap && zend <= end) break;
+        uint64_t lo = o & ~(pg - 1), hi_ = (zend + pg - 1) & ~(pg - 1);
+        if ((buf = mtl_span_find(a, zend - o))) break;
         if (g_nvun) vunmap_run(0);   // unmaps whose work has completed release their pages first
-        int ok = 1;
-        for (int q = r0; q + 1 < r && ok; q++)   // the holes between the runs: host-page aligned, as every run is (vpool_map)
-            for (uint64_t hp = v->run[q].hi; hp < v->run[q + 1].lo && hp < hi_ && ok; hp += pg) {
-                int pending = 0; for (uint64_t e = 0; e < pg; e += 0x1000) { const vpte *t = vpt_get(v, hp + e); if (t && t->live && !t->phys) pending = 1; }
-                if (pending) { ok = 0; atomic_fetch_add(&g_span_pending, 1); break; }
-                vm_address_t ra = (vm_address_t)(v->base + hp); vm_size_t rs = 0; vm_region_basic_info_data_64_t vi; mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64; mach_port_t obj = MACH_PORT_NULL;
-                int none = vm_region_64(mach_task_self(), &ra, &rs, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&vi, &cnt, &obj) != KERN_SUCCESS || ra > (vm_address_t)(v->base + hp) || !(vi.protection & VM_PROT_READ);
-                if (none && mmap(v->base + hp, pg, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE | MAP_FIXED, -1, 0) == MAP_FAILED) ok = 0;
-            }
-        if (ok) buf = mtl_span_put(a, end - o, (uintptr_t)(base + lo), (uintptr_t)(base + hi_));
+        int ok = 1; uint64_t stop = 0;
+        for (int q = r0; q + 1 < r && ok == 1; q++) {   // the holes between the runs: host-page aligned, as every run is (vpool_map)
+            uint64_t h1 = v->run[q + 1].lo < hi_ ? v->run[q + 1].lo : hi_;
+            ok = span_back(v, v->run[q].hi, h1, pg, &stop);
+        }
+        if (ok < 0) { atomic_fetch_add(&g_span_pending, 1); break; }
+        if (ok == 1 && zend > end) {   // the tail, from the last run's end (host-page aligned)
+            ok = span_back(v, end, hi_, pg, &stop);
+            if (ok < 0) { hi_ = zend = stop; ok = 1; atomic_fetch_add(&g_span_pending, 1);   // it stops before a page whose unmap is queued
+                if (!gap && zend <= end) break;
+                if ((buf = mtl_span_find(a, zend - o))) break; }
+        }
+        if (ok == 1) buf = mtl_span_put(a, zend - o, (uintptr_t)(base + lo), (uintptr_t)(base + hi_));
         break; }
     pthread_mutex_unlock(&g_vp_mu);
     return buf;

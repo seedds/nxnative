@@ -1876,6 +1876,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Open:** a read past the handle's size returns what lies there; the hardware returns 0.
 - **Found on:** PRAGMATA (`0400C76024710000`).
 
+### A uniform word << 4 taken for a bindless handle where it is the offset
+
+- **Symptom:** skinned meshes lose parts or explode: players without heads in the lineup cutscene, and with the uniform test rewrite on, giant triangles over the pitch at pauses and in cutscenes. No red line; the shaders build. In a shader's Metal source, a storage buffer read's word index is `c[x][y] >> 2` where the previous chain had `(c[x][y] << 4) >> 2`.
+- **Cause:** `GlobalToStorage.FindUniqueBaseAddressCb`, for an address that adds two sources, replaced each source that `TryUnwrapHandle` matched (a constant buffer word << 4, [the address of a bindless handle](#bindless-constant-buffer-handles-in-the-hardwares-layout)) by the word itself, before choosing which source is the base. When the other source was a buffer's address (c[0], or a pushed entry in c[24]), the shifted word was the offset, and the access went to the unshifted word: element y / 16 of a 16-byte array instead of element y. The match also ran on Maxwell code, which has no bindless constant buffers, so on NVN1 it was always wrong. Ampere code meets the same offset through `LEA` (index << 4 plus an address).
+- **Fix:** general, in the chain (`GlobalToStorage.cs`). `TryUnwrapHandle` matches only in Ampere code (`TranslationFlags.Ampere`, through `TransformContext.Ampere`), and there the handle's words stand for a source only as the base; the source chosen as the offset keeps its shifted value.
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_storage_offset.py`: a Maxwell compute shader (c[0] + 0x110 plus c[3][4] << 4) and an Ampere one (a pushed entry plus c[3][0x10] << 4 by `LEA`); both fail on chain ff7c2e3ba2b4. On the PR author's build (PR #1129), 23 vertex and 8 compute shaders of EA SPORTS FC 27's 7,875 had lost the shift, and all 31 matched chain 2afd39090b76 (before the handle pass) again with the base-only rule.
+- **Found on:** EA SPORTS FC 27 (`0100C49025D3E000`): its skinning vertex shaders (`0a82d49f3c969ed1` among them) and compute shaders.
+
 ### Raw global memory lookups that start from their last entry
 
 - **Symptom:** a pass whose shaders read memory through loaded addresses takes several milliseconds on the GPU for little work. `[gpuprof]` names the pass, and its shaders' build notes say `Global memory operation "Load" traced to no storage buffer`. Ocarina of Time's foliage mesh shader `73dc0b90c4082e43` (`Foliage.Product.110`, 135 such reads) took 10.9 ms of a 683x384 frame; 2,241 of the game's shaders (vertex, compute, fragment and mesh) have such a lookup, some hundreds of them.

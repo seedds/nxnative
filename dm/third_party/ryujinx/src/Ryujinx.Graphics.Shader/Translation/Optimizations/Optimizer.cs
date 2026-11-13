@@ -30,7 +30,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
 
             // TODO: Some of those are not optimizations and shouldn't be here.
 
-            GlobalToStorage.RunPass(context.Hfm, context.Blocks, context.ResourceManager, context.GpuAccessor, context.TargetLanguage);
+            GlobalToStorage.RunPass(context.Hfm, context.Blocks, context.ResourceManager, context.GpuAccessor, context.TargetLanguage, context.Ampere);
 
             bool hostSupportsShaderFloat64 = context.GpuAccessor.QueryHostSupportsShaderFloat64();
 

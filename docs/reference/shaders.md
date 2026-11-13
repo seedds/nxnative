@@ -1160,6 +1160,19 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md#rendering): 4,558 of its 27,155 shaders change. On an M1 in the opening dialogue scene, the lit pass's median GPU time went from 70.2 to 15.6 ms and the frame's from 91.5 to 30.1 ms (`DM_NVN_GPUPROF=every:60`, 15 and 35 profiled frames in the scene); the 40 shaders that did not build before are the only ones that fail.
 - **Check:** `python3 dm/gfx/tests/test_dmsh_wide.py`.
 
+### A goto flag read before it is set (uninitialized locals in the MSL)
+
+- **Symptom:** the Metal compiler warns `variable '_N' is used uninitialized whenever 'if' condition is false [-Wsometimes-uninitialized]` on translated shaders: 1,907 times in Ocarina of Time's full build (chain ecd9cb97f72c), every one of the same shape. No wrong picture has been traced to it. But the source has undefined behaviour that the optimizer may act on, in a way that can change from one compiler or flag to the next.
+- **Cause:** a switch on a small index (Ocarina of Time's foliage compute picks a byte of a packed word on `x & 3`) is structured with goto flags. One flag's value is computed only on the path where an earlier flag is false and read after the join, in `(!x) || flag`:
+
+      bool _1266;
+      if (!_1256) { bool _1264 = _1218 != 1; _1266 = !_1264; }
+      if ((!_1266) || _1256) { ... }
+
+  In SPIR-V that value is a phi whose incoming value on the other path is OpUndef. That is defined, and `(!x) || true` is true whatever x is. SPIRV-Cross writes such a phi as a local without an initializer, assigned in one predecessor. MSL is C++: reading it is undefined, clang lowers `||` to a branch on it, and in LLVM a branch on undef is undefined.
+- **Fix (proposed, open):** SPIRV-Cross's `--force-zero-initialized-variables` in dmsh_build.py's `XC` (and dmsh_dryrun.py's). It declares such locals with a zero value, which the compiler folds where every path assigns. Measured on two of the shaders (d731a68214175cbc, 58f47abfa0a84773): warnings 2 → 0, the bare declarations zero-initialized (1 → 0 and 3 → 0), the same line count, and both compile. It is a chain change, so every game's shaders rebuild once. Not yet run: regress.py on other games, and an fsbench exactness and timing check on the affected kernels.
+- **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md): foliage compute kernels such as d731a682 and 58f47abf, 1,907 sites in all.
+
 ## Bindings and handles
 
 - **Note:** the layout of NVN's driver segments `c0` and `c2` (the handle tables, the storage and uniform buffer tables, the words the host fills) and the binding kinds of the reflection JSON have one definition, `dm/gfx/nvn/dmsh_abi.h`. The host includes it (`nvn_mtl.m`, `nvn_refl.m`, `nvn_obj.h`); `dmsh_build.py` reads it through `dm/gfx/tools/dmsh_abi.py`, which stops on any line it cannot read. Both files are part of the chain version. `dm/tools/tests/test_dmsh_abi.py` checks that the tables fit together, that the host converts every kind the build may write, that the translator's own copy of the `c2` layout (`Program.cs`) agrees, and that the values do not come back as literals in the host or the build. The entries below cite the offsets.

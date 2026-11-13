@@ -71,6 +71,14 @@ Guest threads, their synchronization and how the host schedules them. Each entry
 - **Check:** `t_pause` pauses a thread again after a resume from inside an SVC (entered from guest code and from host code), and resumes and pauses again while the handler is parked; `t_pause_stress` stops four threads that alternate real `SleepThread` SVCs with guest code about 3,700 times a second, marks a word and checks that none ran. Before, the two SVC cases failed in every run and the stress test found a running thread within the first few dozen stops; after, all pass. With the clearing alone, the parked-handler case hangs.
 - **Found on:** Aokana - Four Rhythms Across the Blue (`0100990011866000`, Unity 2018.4.22f1 IL2CPP with FMOD): three of five automated play sessions crashed at `BufferedReadStream.Seek`, each time on FMOD's stream thread, which sleeps in `SleepThread` between buffers and so was mostly paused inside an SVC.
 
+### A pause holds its target until it returns
+
+- **Symptom:** ASan reports a heap-use-after-free in `svc_thread_impl` (`SetThreadActivity`) reading `paused` or waiting on `pcv` of a thread that exited during the pause.
+- **Cause:** a pause of a thread in host code loops: it lets go of `G` to send SIGUSR2 and to wait 100 µs. The target could exit and its handle be closed meanwhile; `thread_exit` then freed the object (closed, exited, no wait reference), and the loop read it again.
+- **Fix:** the pause takes a reference (`thr_t.refs`, the count synchronization waits already take) before the loop and drops it with `thr_put` after; the last holder of a closed, exited thread frees it.
+- **Check:** `t_pause` exit_and_close_during_pause: a pause waits on a thread in host code, its handle is closed and it exits. Before, ASan found the use-after-free; after, the pause returns and the object is freed.
+- **Found on:** a code audit, with host unit tests; no game failure is known.
+
 ### SVCs leave the stack below sp untouched
 
 - **Symptom:** in a garbage-collected title whose collector stops threads cooperatively, live objects freed while their thread sleeps, and their memory reused: a crash in the collected runtime's code on a pointer made of another object's bytes (Streets of Rage 4: `CRASH sig=11` at `main+0x46a4`, BRUTE's `SyncBlock::GetSyncBlock`, on `0x5b005b00000002`, a string's length 2 and "[["), in about two boots of three, during the first seconds of loading.

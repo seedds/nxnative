@@ -71,7 +71,7 @@ typedef struct thr {
     struct thr *next;          // Wait chain
     struct thr *all;           // All-threads chain (for the state dump)
     int last_svc; uint64_t last_lr;
-    int closed, sync_refs;      // Reclaim only after handle close, thread exit and the final synchronization wait reference
+    int closed, refs;           // Reclaim only after handle close, thread exit and the last reference: synchronization waits and a pause in progress (thr_put)
     uint64_t nsvc;             // SVC count (for the state dump)
     uint64_t nyield, nyield_seen, nbackoff, nbackoff_seen;   // Yields (SleepThread 0/-1/-2) and those the back-off turned into short sleeps, with both counts at the last power report (dm_yield_top)
     uint64_t nclkyield, nclkyield_seen;       // Yields of clock waits (thr_yield), and their count at the last power report
@@ -372,6 +372,9 @@ static void thr_free(thr_t *t) {   // Holding G; unlink from the all-threads cha
     }
     pthread_cond_destroy(&t->cv); pthread_cond_destroy(&t->pcv); free(t);
 }
+static void thr_put(thr_t *t) {   // Holding G; drop a reference taken with t->refs++ (a wait, a pause): the last holder of a closed, exited thread frees it
+    if (!--t->refs && t->closed && t->exited) thr_free(t);
+}
 static void wake_sync_waiters(const void *obj);
 static void thread_exit(thr_t *t) {
     t->exit_ns = now_ns(); t->exit_tick = dm_thread_tick_fn ? dm_thread_tick_fn() : 0;
@@ -380,7 +383,7 @@ static void thread_exit(thr_t *t) {
     t->exited = 1;
     wake_sync_waiters(t);   // Complete synchronization waits on this thread
     pthread_setspecific(g_keythr, NULL);
-    if (t->closed && !t->sync_refs) thr_free(t);
+    if (t->closed && !t->refs) thr_free(t);
     pthread_mutex_unlock(&G);
     pthread_exit(NULL);
 }
@@ -579,17 +582,15 @@ uint32_t dm_guest_work_qos(unsigned *count) {
 static int sync_open(uint32_t h, sync_ref_t *ref) {   // holding G; no pseudo-handles
     unsigned i = h - 0x1000;
     if (i == 0 || i >= MAX_H) return 0;
-    if (g_h[i].type == O_THREAD) ((thr_t *)g_h[i].obj)->sync_refs++;
+    if (g_h[i].type == O_THREAD) ((thr_t *)g_h[i].obj)->refs++;
     else if (g_h[i].type == O_EVENT_R) ((event_t *)g_h[i].obj)->refs++;
     else return 0;
     *ref = (sync_ref_t){g_h[i].obj, g_h[i].type};
     return 1;
 }
 static void sync_close(sync_ref_t ref) {   // holding G
-    if (ref.type == O_THREAD) {
-        thr_t *t = ref.obj;
-        if (!--t->sync_refs && t->closed && t->exited) thr_free(t);
-    } else {
+    if (ref.type == O_THREAD) thr_put(ref.obj);
+    else {
         event_t *e = ref.obj;
         if (!--e->refs) free(e);
     }
@@ -1120,6 +1121,8 @@ static int svc_thread_impl(int num, uint64_t *regs) {
             int st = atomic_fetch_or(&t->svc_state, 2);
             if (!t->started || t->exited || (st & 1)) t->paused = 1;
             uint64_t t0 = now_ns(); int warned = 0;
+            // The loop lets go of G (the signal, the timed wait): hold a reference so that an exit and a CloseHandle meanwhile cannot free t under it
+            t->refs++;
             while (!t->paused && !t->exited) {
                 pthread_mutex_unlock(&G); pthread_kill(t->pt, SIGUSR2); pthread_mutex_lock(&G);
                 if (t->paused || t->exited) break;
@@ -1127,6 +1130,7 @@ static int svc_thread_impl(int num, uint64_t *regs) {
                 pthread_cond_timedwait(&t->pcv, &G, &dl);
                 if (!warned && now_ns() - t0 > 1000000000ull) { warned = 1; LOG("[RED] thread %#x still not suspended after more than 1 second (stuck in host code?)", t->handle); }
             }
+            thr_put(t);
         } else { atomic_store(&t->pause_req, 0); atomic_fetch_and(&t->svc_state, ~2); t->paused = 0; pthread_cond_broadcast(&t->pcv); }
         pthread_mutex_unlock(&G);
         { static int n; if (n++ < 4) LOG("SetThreadActivity %#x → %s (%s)", (uint32_t)regs[0], act ? "pause" : "resume", r ? "failed" : "ok"); }
@@ -1292,7 +1296,7 @@ static int svc_thread_impl(int num, uint64_t *regs) {
             thr_t *t = g_h[i].obj;
             g_h[i].type = O_FREE; g_h[i].obj = NULL;
             t->closed = 1;
-            if (t->exited && !t->sync_refs) thr_free(t);
+            if (t->exited && !t->refs) thr_free(t);
         }
         pthread_mutex_unlock(&G);
         regs[0] = 0; return 1;

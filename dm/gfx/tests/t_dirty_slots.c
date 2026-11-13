@@ -44,6 +44,26 @@ int main(void) {
     nvn_dirty_remove_range(reused);
     munmap(reused, 4096);
 
+    // A pool destroyed and another registered over the same memory (the same slot): the new pool's data was written while the memory was in no pool, so no page fault and no
+    // generation saw it, and the generations start again at 0. A stamp from the old pool's time must count as written (born): a kept index range of the vertex conversion
+    // (nvn_mtl.m ix_range) is keyed by address and outlives its pool
+    void *again = page_map();
+    nvn_dirty_add_range(again, 4096);
+    nvn_dirty_protect(again, 4096);
+    stamp = nvn_dirty_now();
+    const void *kept = nvn_dirty_span(again, 4096);
+    EXPECT("a protected pool not written: clean", 0, nvn_dirty_since_span(kept, again, 4096, stamp));
+    nvn_dirty_remove_range(again);
+    ((volatile uint8_t *)again)[0] = 3;   // the next pool's data, written with no pool registered: no fault
+    nvn_dirty_add_range(again, 4096);
+    EXPECT("same memory, a new pool: an older stamp is dirty", 1, nvn_dirty_since(again, 4096, stamp));
+    EXPECT("the same, through the handle kept from the old pool", 1, nvn_dirty_since_span(kept, again, 4096, stamp));
+    EXPECT("the same, counted by nvn_dirty_since_except", 1, (long long)nvn_dirty_since_except(kept, again, 4096, stamp, NULL, 0, NULL));
+    uint64_t stamp2 = nvn_dirty_now();
+    EXPECT("a stamp taken after the new pool's registration: clean", 0, nvn_dirty_since(again, 4096, stamp2));
+    nvn_dirty_remove_range(again);
+    munmap(again, 4096);
+
     void *live[300];
     for (int i = 0; i < 300; i++) {
         live[i] = page_map();

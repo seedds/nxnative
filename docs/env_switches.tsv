@@ -233,6 +233,8 @@ DM_NVN_TREG_ID	diagnostic	`=<n>` logs every registration of texture ID n: what i
 DM_NVN_TSV	diagnostic	`=<path>` writes the per-frame NVN call table and timing rows (frame, metric, value) to a TSV, read by `scripts/bench.py`
 DM_NVN_TSV_CALLS	diagnostic	`0` makes `DM_NVN_TSV` write only the timing rows, without the call counts (about two thirds of the file)
 DM_NVN_UB	diagnostic	`="name=item,…;…"`: alternating measurement in one run; odd phases of `DM_NVN_UB_N` frames (default 180) take one category in turn (`@set:<global>=<value>` or dropped shader keys) and log present times
+DM_NVN_UBDC	switch	`0` turns off the remembered uniform conflict answers: ubd_conflict_sh walks every binding at every draw, as before (for an A/B in one build)
+DM_NVN_UBDC_CHECK	diagnostic	`=1` walks every uniform conflict check that a remembered clear answer would skip and logs a red line when the remembered answer was wrong
 DM_NVN_UBD_MEMO	diagnostic	`0` scans the deferred uniform update list for every lookup instead of remembering answers per range until the list changes (for timing)
 DM_NVN_UBP_CHECK	diagnostic	`=1` checks every uniform shadow made from memory: the pass ends, the updates land, the replay waits for the GPU and compares (a difference is a red line; slow)
 DM_NVN_UBP_RUNNING	switch	`0` refuses a uniform shadow partly covered by inline updates of a running submission, as before; by default those updates are remembered by byte, each with its fence, and laid over memory in the shadow

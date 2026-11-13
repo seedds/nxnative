@@ -297,6 +297,8 @@ t_sbw: t_sbw.m $(MTL_T_DEP)
 .PHONY: check_t_sbw
 check_t_sbw: t_sbw
 	./t_sbw
+t_ubdc: t_ubdc.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_ubdc.m $(MTL_T_SRC) $(FW)
 t_ubp_running: t_ubp_running.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_ubp_running.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_ubp_running

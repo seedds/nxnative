@@ -425,6 +425,10 @@ DM_TEST_SWKBD_LAG_MS	diagnostic	`=<ms>` sleeps that long between the keyboard ha
 DM_TEST_TESS	test	Path to the native t_tess executable that test_dmsh_tess.py runs the tessellation layout and expansion kernel through on the GPU (`make check_t_tess` sets it)
 DM_TEST_TRANSFORM_FEEDBACK	test	Path to the native t_transform_feedback executable used by the Python feedback tests
 DM_TEST_UP_LOST	diagnostic	`=<batch index>` treats that batch of uploads as dropped, to exercise the re-upload path
+DM_TEX_REPLACE	path	Folder of texture replacements: a texture uploaded with the storage hash and description a file `<W>x<H>_<NVN format>_<levels>_<hash>.bin` names gets that file's content (`nvn_mtl.m` `tex_rep_find`); the Mac launcher sets it to the app's `dm/textures/pad_label` (`DM_PAD_MAP=label`) or `pad_position`
+DM_TEX_REPLACE_DUMP	diagnostic	`=<folder>`: with `DM_TEX_REPLACE_LOG`, writes each logged upload's own content there (`<name>.raw`, the input of `dm/tools/button_icons.py`)
+DM_TEX_REPLACE_KBD	path	A second set of texture replacements, used while the keyboard is the input last used: the host copies one set or the other into the textures both replace when the input changes (`tex_rep_swap`); the Mac launcher sets it to the app's `dm/textures/keyboard`
+DM_TEX_REPLACE_LOG	diagnostic	`=<W>x<H>` (or `all:<bytes>`, every upload of at most that storage) logs every texture upload of that size with its storage hash and the replacement file name it would take
 DM_THERMAL_CAP	switch	`0` turns off the thermal cap, which holds the frame step at 30 fps while iOS reports a serious or critical thermal state (on by default)
 DM_THR	diagnostic	`=1` logs each SVC (except `SleepThread`) with its first four arguments, and each `CreateThread` with entry, stack, priority and core
 DM_THRCPU	diagnostic	`=<tsv path>[,<seconds>]` writes each thread's CPU time (100% = one core) and the total every interval (default 10 s); on iOS a relative path is under `Documents`, and `Documents/env.txt` can set it

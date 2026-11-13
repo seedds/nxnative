@@ -180,7 +180,7 @@ static void on_key(NSEvent *e, int down) {
     int b = key_bit(c);
     uint64_t m = b >= 0 ? 1ull << b : c == 49 ? DM_BTN_SHAKE : 0;   // Space: shaken while held
     g_btn = down ? (g_btn | m) : (g_btn & ~m);
-    if (down && (m || c == 13 || c == 0 || c == 1 || c == 2)) cursor_hide_for_input();   // a key the game takes (WASD: the left stick)
+    if (down && (m || c == 13 || c == 0 || c == 1 || c == 2)) { cursor_hide_for_input(); dm_input_source(1); }   // a key the game takes (WASD: the left stick); prompts follow it
     push();
 }
 
@@ -196,7 +196,7 @@ static int32_t pad_axis(float v) { return (int32_t)(fmaxf(-1.f, fminf(1.f, v)) *
 // A controller's state for player p, GameController or raw HID: a pressed button or a stick past 15% hides the pointer (cursor_hide_for_input), a resting stick's drift does not
 static void pad_set(int p, uint64_t m, int32_t lx, int32_t ly, int32_t rx, int32_t ry) {
     const int32_t dead = DM_STICK_MAX * 15 / 100;
-    if (m || abs(lx) > dead || abs(ly) > dead || abs(rx) > dead || abs(ry) > dead) cursor_hide_for_input();
+    if (m || abs(lx) > dead || abs(ly) > dead || abs(rx) > dead || abs(ry) > dead) { cursor_hide_for_input(); dm_input_source(0); }   // prompts follow the input last used
     dm_pad_set_player(p, m, lx, ly, rx, ry);
 }
 static void hq_poll(void);
@@ -673,6 +673,7 @@ static void pads_start(void) {
     if (g_press_to_join) LOG("front end: a controller becomes a player at its first button press, the lowest player free (DM_PAD_PRESS_TO_JOIN)");
     LOG("front end: face buttons of Xbox and PlayStation pads by %s", dm_pad_by_label() ? "label (DM_PAD_MAP=label: Xbox A, the bottom button, is A)" : "position (the right button is A)");
     hq_start();
+    dm_input_source(!merge_pads_left(nil));   // the keyboard until a controller is used, when none is connected yet
     pads_changed(nil);
     hq_log_setting();
     dm_motion_pro_start(pro_devices_changed);

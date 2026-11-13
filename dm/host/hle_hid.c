@@ -219,7 +219,7 @@ void hid_keys_init(void) {
 }
 
 // DM_CTL=<file> (Mac, for driving a game step by step from a shell): the host reads the lines appended to the file (polled every 100 ms) and acts on each at once:
-//   "key[+key][~hold]" presses as a DM_KEYS step does (hold 0.15 s by default), "shot <path>" saves the next presented frame as a PNG (dm_gfx_shot_at), "passdump <n>" dumps the
+//   "key[+key][~hold]" presses as a DM_KEYS step does (hold 0.15 s by default), "shot <path>" saves the next presented frame as a PNG (dm_gfx_shot_at), "source keyboard|pad" sets the input last used (button prompts that follow it), "passdump <n>" dumps the
 //   render passes of the next n frames as DM_NVN_PASSDUMP does (to stderr, the run's log), "texdump <path with %d>" saves the colour targets of the next frame as DM_NVN_TEXDUMP does,
 //   "env KEY=VALUE" sets a switch read at the time of use (DM_NVN_SNAPRAW for the next texdump), "cvarf <main offset> <value>" sets an Unreal float console variable
 //   (hle_fpslock.c dm_ctl_cvar_f32; "cvari" an int one), "peek <address> <count>" logs that many floats of guest memory, "memdump <address> <bytes> <path>" saves guest memory
@@ -247,6 +247,7 @@ static void *ctl_main(void *arg) {
                 if (!strncmp(line, "program ", 8)) { void dm_oe_execute(int index, const void *param, size_t n); LOG("DM_CTL: oe::ExecuteProgram(%d)", atoi(line + 8)); dm_oe_execute(atoi(line + 8), NULL, 0); continue; }
                 if (!strncmp(line, "webshot ", 8)) { void front_web_shot(const char *path); front_web_shot(line + 8); continue; }
                 if (!strncmp(line, "shot ", 5)) { dm_gfx_shot_at(1, line + 5); LOG("DM_CTL: screenshot of the next frame → %s", line + 5); continue; }
+                if (!strncmp(line, "source ", 7)) { dm_input_source(!strcmp(line + 7, "keyboard")); LOG("DM_CTL: input last used: %s", line + 7); continue; }   // keyboard | pad: as the front end on a key or a controller
                 if (!strncmp(line, "texlist ", 8)) { void dm_gfx_texlist(int target); dm_gfx_texlist(atoi(line + 8)); continue; }
                 if (!strcmp(line, "restop")) { void dm_gfx_restop(void); dm_gfx_restop(); continue; }   // what the residency set holds (nvn_mtl.m res_top)
                 if (!strncmp(line, "addr ", 5)) { void dm_gfx_addr_note(uint64_t a, char *note, size_t n); char note[600]; uint64_t a = strtoull(line + 5, NULL, 16);   // what the host knows of a guest address
@@ -446,6 +447,9 @@ void dm_pad_script_player(int p) {
     LOG("DM_CTL: player %d's scripted controller connected", p + 1);
     void dm_pad_players(uint32_t mask); dm_pad_players(atomic_load(&g_front_players));
 }
+static _Atomic int g_input_kbd;
+void dm_input_source(int kbd) { atomic_store(&g_input_kbd, kbd != 0); }
+int dm_input_source_kbd(void) { return atomic_load(&g_input_kbd); }
 void dm_pad_players(uint32_t mask) {
     atomic_store(&g_front_players, mask);
     mask = (mask | 1u | atomic_load(&g_script_players)) & ((1u << DM_PLAYERS) - 1);

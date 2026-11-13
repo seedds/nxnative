@@ -2905,7 +2905,7 @@ void mtl_drain(void) { present_drop_for_suspend(); mtl_present_flush(); snap_dra
 
 // ================= Render replay =================
 #include "../../host/front.h"
-static int g_red_once[175];   // one past the highest key: a new key raises this, and the macro refuses to compile otherwise
+static int g_red_once[176];   // one past the highest key: a new key raises this, and the macro refuses to compile otherwise
 #define RED_ONCE(k, ...) do { _Static_assert((k) < sizeof g_red_once / sizeof *g_red_once, "a RED_ONCE key past g_red_once: raise its size"); if (!g_red_once[k]++) MLOG("[RED] " __VA_ARGS__); } while (0)
 // NVN vertex streams 0–15 → Metal vertex buffer slots: 0–13 go to 16–29 (30 is the constant fallback buffer), 14 and 15 to 14 and 15. Metal has only the 31 slots 0–30; translated shaders use only buffer(0) (the argument buffer),
 // and the host's own vertex functions read no vertex buffers. 13 Sentinels uses stream 15, and the old 16 + stream went out of range (Metal assertion: buffer index (31) must be < 31)
@@ -3733,6 +3733,117 @@ static id<MTLBuffer> up_big_src(uint64_t addr, uint64_t len, uint64_t *off) {
     res_add(buf); [g_up_keep addObject:buf]; *off = (uint64_t)addr - a;
     return buf;
 }
+// Texture replacement (DM_TEX_REPLACE=<folder>): a texture the game uploads is given other content when the folder holds a file named <width>x<height>_<NVN format>_<levels>_<hash>.bin,
+// the hash being full_hash of the texture's guest storage (its swizzled bytes, every level) as the game wrote it. The file holds every level and layer as the upload copies them into the Metal
+// texture (rows of blocks, levels one after another: the size the upload computes, or the file is refused with a red line), so it replaces the deswizzled content as is, in the same
+// pixel format; the game's own bytes stay in its memory, and a re-upload of other content (a texture that changes) is not replaced. Only the descriptions the folders name are hashed.
+// DM_TEX_REPLACE_KBD=<folder> is a second set, used while the keyboard is the input last used (dm_input_source_kbd, set by the Mac front end): a texture both sets replace is kept in a list,
+// and when the input changes, the other set's content is copied into it at the next submission (tex_rep_swap), as a PC game changes its button prompts. Pokémon Pokopia's button icons
+// (its 1024x1024 BC7 UI sheet) are drawn this way with an Xbox controller's labels or the keyboard's keys (dm/tools/button_icons.py; the Mac launcher points the two at the app's
+// dm/textures/pad_label or pad_position and dm/textures/keyboard).
+// DM_TEX_REPLACE_LOG=<width>x<height> logs the hash of every upload of that size, to name a new file, and DM_TEX_REPLACE_DUMP=<folder> also writes each such upload's own content there in that
+// layout (<name>.raw, deswizzled on the CPU), the input of a tool that edits it.
+// buf is a retained MTLBuffer held as a plain pointer: the table is realloc'd memory, where an ARC strong field would be released from garbage when an entry is copied in (a crash in tex_rep_init)
+typedef struct { uint32_t w, h, fmt, levels; uint64_t hash; char path[1024]; void *buf; int bad, set; } tex_rep;
+static tex_rep *g_trep; static int g_ntrep = -1, g_trep_sets; static uint32_t g_trep_logw, g_trep_logh; static uint64_t g_trep_logall;
+__attribute__((weak)) int dm_input_source_kbd(void) { return 0; }   // hle_hid.c: whether the keyboard is the input last used; a graphics test without the host has none
+static void tex_rep_init(void) {
+    g_ntrep = 0;
+    const char *lg = getenv("DM_TEX_REPLACE_LOG"); if (lg && !strncmp(lg, "all:", 4)) g_trep_logall = strtoull(lg + 4, NULL, 0); else if (lg) sscanf(lg, "%ux%u", &g_trep_logw, &g_trep_logh);
+    const char *dirs[2] = {getenv("DM_TEX_REPLACE"), getenv("DM_TEX_REPLACE_KBD")};
+    for (int set = 0; set < 2; set++) {
+        const char *dir = dirs[set]; if (!dir || !*dir) continue;
+        int n0 = g_ntrep;
+        for (NSString *n in [[NSFileManager defaultManager] contentsOfDirectoryAtPath:@(dir) error:nil]) {
+            tex_rep r = {0}; unsigned long long hs;
+            if (sscanf(n.UTF8String, "%ux%u_%u_%u_%16llx.bin", &r.w, &r.h, &r.fmt, &r.levels, &hs) != 5) continue;
+            r.hash = hs; r.set = set; snprintf(r.path, sizeof r.path, "%s/%s", dir, n.UTF8String);
+            g_trep = realloc_or_die(g_trep, (size_t)(g_ntrep + 1) * sizeof *g_trep, "the texture replacements"); g_trep[g_ntrep++] = r;
+        }
+        if (g_ntrep > n0) g_trep_sets |= 1 << set;
+        MLOG("texture replacement: %d file(s) in %s%s", g_ntrep - n0, dir, set ? " (while the keyboard is used)" : "");
+    }
+}
+static id<MTLBuffer> tex_rep_buf(tex_rep *r, size_t total) {   // the file's content as a buffer, loaded once
+    if (r->bad) return nil;
+    if (!r->buf) {
+        NSData *data = [NSData dataWithContentsOfFile:@(r->path)];
+        if (data.length != total) { RED_ONCE(175, "texture replacement %s: %lu bytes, the upload copies %zu: not used", r->path, (unsigned long)data.length, total); r->bad = 1; return nil; }
+        id<MTLBuffer> b = [g_dev newBufferWithBytes:data.bytes length:data.length options:MTLResourceStorageModeShared];
+        if (!b) { r->bad = 1; return nil; }
+        res_add(b); r->buf = (void *)CFBridgingRetain(b);   // kept for the process's life
+    }
+    return (__bridge id<MTLBuffer>)r->buf;
+}
+// The textures both sets replace, for tex_rep_swap: the Metal texture (weak: a re-upload makes another), each set's entry and the copy layout
+typedef struct { int rep[2]; unsigned levels, layers, target; uint32_t w, h, depth; int bw, bh, bpb; size_t total; } tex_rep_live;
+static NSPointerArray *g_trep_tex; static tex_rep_live *g_trep_live; static int g_ntrep_live, g_trep_shown = -1;
+static void tex_rep_blits(id<MTLBuffer> src, id<MTLTexture> mt, const tex_rep_live *L) {   // the copies of one set's content into mt, in the upload's layout
+    size_t off = 0;
+    for (unsigned l = 0; l < L->levels; l++) {
+        uint32_t w = MAX(L->w >> l, 1u), h = MAX(L->h >> l, 1u), z = L->target == 2 ? MAX(L->depth >> l, 1u) : 1;
+        size_t pitch = (size_t)((w + L->bw - 1) / L->bw) * L->bpb, rows = (h + L->bh - 1) / L->bh;
+        for (unsigned y = 0; y < L->layers; y++) { up_blit_add(src, off, pitch, pitch * rows, MTLSizeMake(w, h, z), mt, y, l); off += pitch * rows * z; }
+    }
+}
+// At a submission: when the input last used changed, each live texture both sets replace takes the other set's content (an upload batch of copies, before the submission's work)
+static void tex_rep_swap(void) {
+    if (g_trep_sets != 3 || !g_ntrep_live) return;
+    int k = dm_input_source_kbd() != 0;
+    if (k == g_trep_shown) return;
+    g_trep_shown = k; int n = 0;
+    up_begin();
+    for (int i = 0; i < g_ntrep_live; i++) {
+        id<MTLTexture> mt = (__bridge id<MTLTexture>)[g_trep_tex pointerAtIndex:(NSUInteger)i];
+        if (!mt) continue;
+        id<MTLBuffer> src = tex_rep_buf(&g_trep[g_trep_live[i].rep[k]], g_trep_live[i].total);
+        if (src) { tex_rep_blits(src, mt, &g_trep_live[i]); n++; }
+    }
+    if (!g_cb) up_flush();   // in a submission the batch goes before its work, as an upload's (pkg_upload_)
+    MLOG("[texrep] input: %s, %d texture(s) take that set", k ? "the keyboard" : "a controller", n);
+}
+// The replacement buffer for t (content of total bytes in upload order), or nil; mt: the texture it goes into, listed when both sets replace it
+static id<MTLBuffer> tex_rep_find(const tex_t *t, unsigned levels, size_t total, int bw, int bh, int bpb, unsigned layers, id<MTLTexture> mt) {
+    if (g_ntrep < 0) tex_rep_init();
+    int logit = (g_trep_logw && t->d.width == g_trep_logw && t->d.height == g_trep_logh) || (g_trep_logall && t->L.size <= g_trep_logall), want = 0;   // all:<bytes>: every upload of at most that storage
+    for (int i = 0; i < g_ntrep && !want; i++) want = g_trep[i].w == t->d.width && g_trep[i].h == t->d.height && g_trep[i].fmt == (uint32_t)t->d.format && g_trep[i].levels == levels && !g_trep[i].bad;
+    if (!want && !logit) return nil;
+    uint64_t h = full_hash(t->mem, t->L.size);
+    if (logit) {
+        MLOG("[texrep] ser=%llu upload %ux%u format %u levels %u storage %#llx bytes: %ux%u_%u_%u_%016llx.bin", (unsigned long long)t->serial, t->d.width, t->d.height, t->d.format, levels,
+             (unsigned long long)t->L.size, t->d.width, t->d.height, t->d.format, levels, (unsigned long long)h);
+        const char *dd = getenv("DM_TEX_REPLACE_DUMP"); uint8_t *o = dd ? malloc(total ? total : 1) : NULL; size_t off = 0; int ok = o != NULL;
+        for (unsigned l = 0; ok && l < levels; l++) {
+            uint32_t w = MAX(t->d.width >> l, 1u), hh = MAX(t->d.height >> l, 1u), z = t->d.target == 2 ? MAX(t->d.depth >> l, 1u) : 1;
+            size_t pitch = (size_t)((w + bw - 1) / bw) * bpb, rows = (hh + bh - 1) / bh;
+            for (unsigned y = 0; ok && y < layers; y++) { ok = !nvn_deswizzle(&t->d, l, y, t->mem, o + off, pitch); off += pitch * rows * z; }
+        }
+        char fp[1024]; FILE *f;
+        if (ok) { snprintf(fp, sizeof fp, "%s/%ux%u_%u_%u_%016llx.raw", dd, t->d.width, t->d.height, t->d.format, levels, (unsigned long long)h);
+                  if ((f = fopen(fp, "wb"))) { fwrite(o, 1, total, f); fclose(f); MLOG("[texrep] ser=%llu content written to %s", (unsigned long long)t->serial, fp); } }
+        free(o);
+    }
+    int rep[2] = {-1, -1};
+    for (int i = 0; i < g_ntrep; i++) {
+        tex_rep *r = &g_trep[i];
+        if (r->bad || r->hash != h || r->w != t->d.width || r->h != t->d.height || r->fmt != (uint32_t)t->d.format || r->levels != levels) continue;
+        if (rep[r->set] < 0) rep[r->set] = i;
+    }
+    if (rep[0] < 0 && rep[1] < 0) return nil;
+    int k = dm_input_source_kbd() != 0 && rep[1] >= 0 ? 1 : rep[0] >= 0 ? 0 : 1;
+    id<MTLBuffer> b = tex_rep_buf(&g_trep[rep[k]], total);
+    if (!b) return nil;
+    if (rep[0] >= 0 && rep[1] >= 0) {   // both sets: listed for tex_rep_swap
+        if (!g_trep_tex) g_trep_tex = [NSPointerArray weakObjectsPointerArray];
+        int i = 0; while (i < g_ntrep_live && [g_trep_tex pointerAtIndex:(NSUInteger)i]) i++;   // a slot whose texture is gone is taken again
+        if (i == g_ntrep_live) { g_trep_live = realloc_or_die(g_trep_live, (size_t)(g_ntrep_live + 1) * sizeof *g_trep_live, "the replaced textures"); [g_trep_tex addPointer:NULL]; g_ntrep_live++; }
+        [g_trep_tex replacePointerAtIndex:(NSUInteger)i withPointer:(__bridge void *)mt];
+        g_trep_live[i] = (tex_rep_live){{rep[0], rep[1]}, levels, layers, (unsigned)t->d.target, t->d.width, t->d.height, t->d.depth, bw, bh, bpb, total};
+        if (g_trep_shown < 0) g_trep_shown = k;
+    }
+    MLOG("[texrep] ser=%llu %ux%u: replaced from %s", (unsigned long long)t->serial, t->d.width, t->d.height, g_trep[rep[k]].path);
+    return b;
+}
 // A re-upload read every layer and level of a texture from guest memory when one page of it was written. Ocarina of Time fills a 1800x1380x8 RGBA8 array (38.5 MB) layer by layer
 // from its CPU while it draws with it: 13 whole uploads in 6 frames, six of them in one frame, for 3 to 936 of its 2,466 pages each (docs/reference/frame-rate.md). A layer's level
 // (a 3D texture's level) lies in a byte range of its own (nvn_tex.c), so the images to read are those with a page written since the stamp; pages are 16 KB, so an image that shares
@@ -3803,6 +3914,14 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
         total += (size_t)((w + bw - 1) / bw) * bpb * ((h + bh - 1) / bh) * z * n;
     }
     g_bp_up_bytes += total;
+    if (!sparse && !linear && !rb_shift && !need) {   // DM_TEX_REPLACE: other content for this texture (a whole upload), copied in place of its own
+        id<MTLBuffer> rep = tex_rep_find(t, (unsigned)d.mipmapLevelCount, total, bw, bh, bpb, layers, mt);
+        if (rep) {
+            tex_rep_live L = {{0, 0}, (unsigned)d.mipmapLevelCount, layers, (unsigned)t->d.target, t->d.width, t->d.height, t->d.depth, bw, bh, bpb, total};
+            up_begin(); tex_rep_blits(rep, mt, &L); up_flush();
+            return mt;
+        }
+    }
     void *mb; uint64_t mo;
     // A texture in a large pool (BIG_MIN) or one that holds only textures is read through a buffer of its own, held by the upload batch: a one-time read must not leave that memory wired for good
     id<MTLBuffer> upsrc = nil; unsigned src_batch = 0;   // the upload batch that holds upsrc (g_up_seq)
@@ -16973,6 +17092,7 @@ static void b2b_flush(int cut) {
 }
 void mtl_exec(const uint8_t *p) {
     if (!g_state_inited) state_reset();
+    tex_rep_swap();   // DM_TEX_REPLACE_KBD: the input last used changed
     static int dump_all = -1; if (dump_all < 0) dump_all = getenv("DM_NVN_PASSDUMP_ALL") != NULL;
     int trace = dump_all && passdump();   // Normal mode does not check the frame range per operation; the full command position is only used for the designated diagnostic frames
     for (;;) {

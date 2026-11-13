@@ -38,6 +38,21 @@ class LauncherSettingsTests(unittest.TestCase):
         s = rows_with_languages([])['DM_LANG']   # no control data: a dump, a NUP without a NACP
         self.assertEqual(s['options'], [list(l) for l in settings.nacp.LANGUAGES])
         self.assertEqual((s['default'], s['note']), ('en-US', settings.UNKNOWN_LANGUAGES))
+    def test_localization_keys_preserve_setting_values(self):
+        ios, mac = build(BOTW, 'nvn'), build(BOTW, 'nvn', 'mac')
+        for rows in (ios, mac):
+            s = rows['DM_PRESENT_UPSCALE']
+            self.assertIn('label_key', s)
+            self.assertEqual(s['label_key'], 'setting.DM_PRESENT_UPSCALE.label')
+            self.assertEqual(s['note_key'], 'setting.DM_PRESENT_UPSCALE.note')
+            self.assertEqual(s['section_key'], 'section.Game')
+            self.assertEqual(s['option_keys'], {'off': 'setting.DM_PRESENT_UPSCALE.option.off',
+                                               'metalfx': 'setting.DM_PRESENT_UPSCALE.option.metalfx'})
+            self.assertEqual(s['options'], [['off', 'Standard'], ['metalfx', 'MetalFX']])
+            self.assertEqual(s['default'], 'off')
+            self.assertNotIn('note_key', rows['DM_RUMBLE'])  # empty notes stay empty
+            self.assertNotIn('option_keys', rows['DM_RUMBLE'])
+        self.assertEqual(mac['DM_FULLSCREEN']['option_keys']['0'], 'setting.DM_FULLSCREEN.option.0')
 
     def test_upscaling_is_opt_in_for_every_graphics_api(self):
         for api, gid in [('nvn', BOTW), ('vulkan', '0100535012974000'), ('gl', '010014E00DB56000')]:
@@ -140,6 +155,21 @@ class LauncherSettingsTests(unittest.TestCase):
                     patch.object(settings.nacp, 'languages', return_value=['en-US']), patch.dict(os.environ, {'GFXAPI': api, **({'SETTINGS_PLATFORM': platform} if platform else {})}):
                 self.assertEqual(conforms(settings.build(gid, tmp, Path(tmp) / 'control.nacp'), schema, schema), [])
 
+    def test_localization_keys_follow_conditional_options(self):
+        for gid, platform, offered in [('04007EF01F8AE000', 'mac', True), ('04007EF01F8AE000', 'ios', False), ('010056B015FE8000', 'mac', False)]:
+            row = build(gid, 'nvn', platform)['DM_FPS_TARGET']
+            self.assertEqual(row['option_keys'], {v: f'setting.DM_FPS_TARGET.option.{v}' for v, _ in row['options']})
+            self.assertEqual('120' in row['option_keys'], offered)
+
+    def test_localization_fields_are_optional_and_keep_schema_1(self):
+        schema = json.loads((ROOT / 'docs/launcher.schema.json').read_text(encoding='utf-8'))
+        row = build(BOTW, 'nvn')['DM_OPMODE']
+        legacy = {k: v for k, v in row.items() if k not in ('label_key', 'note_key', 'section_key', 'option_keys')}
+        for setting in (row, legacy):
+            self.assertEqual(conforms({'schema': 1, 'game': BOTW, 'settings': [setting]}, schema, schema), [])
+        for bad in ({'label_key': 1}, {'option_keys': {'0': 1}}):
+            self.assertNotEqual(conforms({'settings': [{**row, **bad}], 'game': BOTW}, schema, schema), [])
+
     def test_schema_1_takes_new_sections_but_not_new_kinds(self):
         """A section is a heading a reader draws by its name, so a new one stays schema 1; a new kind would not"""
         schema = json.loads((ROOT / 'docs/launcher.schema.json').read_text(encoding='utf-8'))
@@ -186,7 +216,7 @@ class LauncherSettingsTests(unittest.TestCase):
 
 
 def conforms(value, node, root, at='$'):
-    """The JSON Schema keywords launcher.schema.json uses (type, required, properties, items, enum, const, pattern, $ref, allOf with
+    """The JSON Schema keywords launcher.schema.json uses (type, required, properties, items, enum, const, pattern, additionalProperties, $ref, allOf with
     if / then), as a list of problems: enough to hold the written lists to the contract without a jsonschema package"""
     if '$ref' in node: return conforms(value, root['$defs'][node['$ref'].rsplit('/', 1)[1]], root, at)
     problems = []
@@ -199,6 +229,7 @@ def conforms(value, node, root, at='$'):
         problems += [f'{at}: no {k}' for k in node.get('required', []) if k not in value]
         for k, v in value.items():
             if k in node.get('properties', {}): problems += conforms(v, node['properties'][k], root, f'{at}.{k}')
+            elif isinstance(node.get('additionalProperties'), dict): problems += conforms(v, node['additionalProperties'], root, f'{at}.{k}')
         for rule in node.get('allOf', []):
             if not conforms(value, rule['if'], root, at): problems += conforms(value, rule['then'], root, at)
     if isinstance(value, list) and 'items' in node:

@@ -593,8 +593,11 @@ The bundle holds what the IPA holds, with the Mac's shader libraries:
   Resources/aoc/<index>/     the DLC, when the folder has some
   Resources/pso/             an NVN game's pipeline archive made offline for this Mac's GPU (<arch>.mtl4a, prebuilt.tsv; --gpu none leaves it out)
   Resources/dm/              the rewritten modules and their rewriter tables, nro.tsv, the profile's shader_map.tsv, pso_manifest.tsv, c1_full.tsv, cb_extent.tsv, shader_pairs.tsv and pso_pairs.tsv, font/, env.txt (--env-file)
+  Resources/<locale>.lproj/Launcher.strings   shared launcher translations
   Resources/AppIcon.icns
 ```
+
+The built-in Mac and iOS launchers share `dm/ios/Sources/Resources/<locale>.lproj/Launcher.strings`. Prepared Xcode projects and unsigned iOS builds include these tables; the Mac packer copies them into `Contents/Resources`. Adding, changing or removing a string table invalidates Mac bundle reuse. The launcher follows the app's preferred system language, independently of the game language (`DM_LANG`), with English fallbacks. See [Translating the built-in launchers](frontends.md#translating-the-built-in-launchers) for the resource layout and stable setting-key contract.
 
 The shader pairs are what the pipeline prebuild and the hybrid pipelines read ([Hybrid pipelines](#hybrid-pipelines)), as in the IPA; a profile without `pso_pairs.tsv` gets the shader split's copy (`--pso-pairs`). An app without them builds no base: [Shader-pair tables in a Mac app](reference/shaders.md#shader-pair-tables-in-a-mac-app).
 

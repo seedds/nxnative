@@ -126,6 +126,15 @@
 - **Fix:** general, in the package format. `shader_split.py` writes each record's key (its 8 bytes) at record +0x08, in header bytes that were zero; `dmsh_build.py` `record_index` indexes a package by those keys and `rec_of` finds a row's record by its key, so a row's index no longer matters and a package that does not hold a row's shader stops the build before the first job. The control section is searched from +0x38, after the header. The map keeps its index column, so the profiles' tables did not change. A package from before the change carries no keys: the NSP script splits again by itself (its key covers `shader_split.py`), while a tool that hands `dmsh_build.py` an older package, such as `regress.py`'s use of a game's `<id>_build/shader/pkg`, needs that build run again first. `test_shader_package_keys` covers both sides.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) ([issue #1841](https://github.com/seedds/nxnative/issues/1841), diagnosed by its reporter). A build through NX2Apple 1.3.0 kept `ps_lib.bin` from an older split (4,711 records) beside a map from a split after 04df08d4 (4,707 rows), so the present pass's pixel shader `29e3c9dd92b8a571` was translated from a terrain shader's record and drew black.
 
+## Launcher text
+
+### Launcher buttons and settings cannot be translated
+
+- **Symptom:** the iOS and Mac launchers show English settings and buttons regardless of the app's language, and contributors must edit source code to translate them.
+- **Cause:** UI literals have no bundled string table; dynamic labels from `launcher.json` are rendered verbatim and have no translation keys.
+- **Fix:** both launchers look up a shared `Launcher.strings` table. The settings generator adds optional stable keys while retaining English fallbacks and the original values. Both app packers include the locale resources. The translation and compatibility contract is in [Translating the built-in launchers](../frontends.md#translating-the-built-in-launchers).
+- **Found on:** [issue #775](https://github.com/seedds/nxnative/issues/775), covering both launchers.
+
 ## IPA archives
 
 ### AltServer cannot install a file of 2 GiB or more

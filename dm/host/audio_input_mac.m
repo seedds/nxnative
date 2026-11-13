@@ -1,4 +1,5 @@
 #include "audio_input.h"
+#include "audio_input_dualsense.h"
 #include "hle.h"
 #include <AVFAudio/AVFAudio.h>
 #include <AudioToolbox/AudioToolbox.h>
@@ -160,6 +161,7 @@ static int input_prepare_locked(void) {
     int uses_default = 0, fell_back = 0;
     AudioDeviceID device = selected_input_device(&uses_default, &fell_back);
     if (device == kAudioObjectUnknown || AVAudioApplication.sharedInstance.recordPermission != AVAudioApplicationRecordPermissionGranted) return 0;
+    dm_ds_usb_mic_enable(device);   // a DualSense over USB: its built-in mic selected and unmuted first
     if (fell_back) fprintf(stderr, "[dm] audio input: selected UID is unavailable; falling back to the system default input\n");
     AudioComponentDescription desc = { kAudioUnitType_Output, kAudioUnitSubType_HALOutput, kAudioUnitManufacturer_Apple, 0, 0 };
     AudioComponent component = AudioComponentFindNext(NULL, &desc);

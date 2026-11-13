@@ -144,6 +144,8 @@ dm/host/hle_fs.c	hle:*fs*	filesystem mounts, paths and file operations
 dm/host/hle_audio.c:(notify_release|event_notify)	hle:*AudioOutE*	guest AudioOut buffer-release notifications; the host renderer uses rel_sem
 dm/host/audio_input.*	hle:*InputStream*	SDK polling microphone queues, format conversion and device lifecycle
 dm/host/audio_input_mac.m	hle:*InputStream*	Mac microphone capture and hot-plug recovery
+dm/host/audio_input_dualsense.*	hle:*InputStream*	A DualSense on USB: its built-in mic selected and unmuted when the capture opens it
+dm/host/dualsense_mic.*	hle:*InputStream*	The DualSense SetState report that selects and unmutes its mic
 dm/host/save_sync.*	hle:*fs*	cloud saves: the first save mount and every Commit (hle_fs.c)
 dm/host/Makefile	*:*	the shared host build
 dm/host/hle_thread.c	svc:*	threads and synchronization

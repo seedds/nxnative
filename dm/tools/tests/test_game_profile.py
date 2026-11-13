@@ -49,11 +49,11 @@ MAP = ('# kind: evidence  Test shaders\n# column 5 records where each key first 
        'cs_other.bin\t5\tcompute\t0123456789abcdef\t/Lib/agl/agl_resource.Nin_Ounce_NVN2.release.sarc.zs/agl_common.sharcb#BAHS@0x40\n')
 
 
-def macros(shader_map):
+def macros(shader_map, extra=''):
     """The upscaler macros of a synthetic profile's header, with this shader map (None: none)"""
     with tempfile.TemporaryDirectory() as d:
         Path(d, ID).mkdir()
-        (Path(d, ID) / 'game.tsv').write_text(TSV)
+        (Path(d, ID) / 'game.tsv').write_text(TSV + extra)
         if shader_map is not None: (Path(d, ID) / 'shader_map.tsv').write_text(shader_map)
         subprocess.run([sys.executable, str(GAME), 'header', ID, str(Path(d, ID) / 'game.h')], env={**os.environ, 'DM_GAMES_DIR': d}, check=True, capture_output=True)
         return [l for l in (Path(d, ID) / 'game.h').read_text().splitlines() if 'UPSCALER' in l]
@@ -61,10 +61,13 @@ def macros(shader_map):
 
 class UpscalerKeys(unittest.TestCase):
     def test_from_shader_map(self):
-        none = ['#define DM_GAME_UPSCALER_KEYS ""', '#define DM_GAME_UPSCALER_N 0']   # the launcher hides the setting
+        sq, sh = '#define DM_GAME_UPSCALER_SQRT_KEYS ""', '#define DM_GAME_UPSCALER_SHARPNESS 1.0'
+        none = ['#define DM_GAME_UPSCALER_KEYS ""', '#define DM_GAME_UPSCALER_N 0', sq, sh]   # the launcher hides the setting
         self.assertEqual(macros(None), none)
         self.assertEqual(macros(MAP.split('cs_other.bin')[0]), none)
-        self.assertEqual(macros(MAP), ['#define DM_GAME_UPSCALER_KEYS "7629d857a0a93833,c56db3d5a0f1b5af"', '#define DM_GAME_UPSCALER_N 2'])
+        self.assertEqual(macros(MAP), ['#define DM_GAME_UPSCALER_KEYS "7629d857a0a93833,c56db3d5a0f1b5af"', '#define DM_GAME_UPSCALER_N 2', sq, sh])
+        self.assertEqual(macros(None, 'upscaler_sqrt\tfa3033d05c0a41d6\nupscaler_sharpness\t0.7\n'),   # a shader the profile names for its square-root colour is an upscaler too
+                         ['#define DM_GAME_UPSCALER_KEYS "fa3033d05c0a41d6"', '#define DM_GAME_UPSCALER_N 1', '#define DM_GAME_UPSCALER_SQRT_KEYS "fa3033d05c0a41d6"', '#define DM_GAME_UPSCALER_SHARPNESS 0.7'])
 
 
 if __name__ == '__main__':

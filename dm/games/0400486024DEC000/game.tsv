@@ -46,3 +46,10 @@ draw_barriers	game
 # As Tears of the Kingdom: the terrain's height, blend and hole maps are written by the CPU into textures after they are created. Without these keys they stay zero: holes in the ground and the wrong materials
 tex_flush_upload	on
 tex_dirty_upload	on
+# The upscale step of agl_ndsr_vr_light.pck, the last of the four dispatches the game anti-aliases and upscales with in play: it samples colour the dispatch before it stored as square
+# roots (RGB9E5) and writes v * |v|, linear, so its code has none of the sRGB constants the host reads a colour shape from. Named here, DM_UPSCALER=metalfx draws it with MetalFX
+# (fa3033d05c0a41d6 in Kakariko Village: 1.12 ms of GPU a frame on an Apple M4 Pro, 2026-11-11). The eight variants of the pack whose translated code ends that way; its seven others
+# encode their result (x 12.92 after the square) and keep their shader, as do agl_ndsr_vr.pck's fifteen, which take linear colour and have not been seen in play
+upscaler_sqrt	04135bb812a0d66e,7c511cc23ff85d14,8df148d58b7cbe8e,aad7ea7e5c02f41d,b106afba1a18faa9,c8b20adc9d4978e0,d99fbeeb53d38847,fa3033d05c0a41d6
+# The player compared MetalFX's picture with the network's in 2x crops and found it too crisp; with 30 % of a bilinear picture blended in it came closest (2026-11-11)
+upscaler_sharpness	0.7

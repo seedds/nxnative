@@ -50,7 +50,7 @@ _Static_assert(sizeof(DirectoryEntry) == 0x310, "DirectoryEntry layout");
 // left by 4, 16-byte aligned as AArch64 heap blocks are (the image flag then lands on bit 62, as before): FH_OUT where a handle goes to the guest, FH_IN in each call that takes one
 #define FH_OUT(h) ((uint64_t)(h) << 4)
 #define FH_IN(h) ((uint64_t)(h) >> 4)
-enum save_backing { NO_SAVE, SYNCED_SAVE, LOCAL_SAVE };
+enum save_backing { NO_SAVE, SYNCED_SAVE, LOCAL_SAVE, READ_ONLY_SAVE };
 typedef struct {
     char name[32]; char dir[1024]; char overlay[4096]; char commit[1024];
     romfs_img *img;                  // non-NULL: dir is a RomFS image file
@@ -215,6 +215,7 @@ static Result mount_ex(const char *name, const char *dir, int ro, enum save_back
         return RES_FAIL;
     pthread_once(&g_txn_lock_once, txn_locks_init);
     PATH_LOCK(); pthread_mutex_lock(&g_lock);
+    int transactional = backing == SYNCED_SAVE || backing == LOCAL_SAVE;
     int slot = g_nmnt, root = -1;
     for (int i = 0; i < g_nmnt; i++) {
         mount_t *m = &g_mnt[i];
@@ -225,7 +226,7 @@ static Result mount_ex(const char *name, const char *dir, int ro, enum save_back
             pthread_mutex_unlock(&g_lock);
             return same ? RES_OK : RES_PATH_EXISTS;
         }
-        if (backing && m->txn_root == i && !strcmp(m->commit, dir)) root = i;
+        if (transactional && m->txn_root == i && !strcmp(m->commit, dir)) root = i;
         if (!m->name[0] && !m->aoc && m->txn_root != i && slot == g_nmnt) slot = i;
     }
     if (root >= 0 && !g_mnt[root].name[0]) {
@@ -259,7 +260,7 @@ static Result mount_ex(const char *name, const char *dir, int ro, enum save_back
         strlcpy(m->commit, g_mnt[root].commit, sizeof m->commit);
         strlcpy(m->dir, g_mnt[root].dir, sizeof m->dir);
         m->txn_root = root;
-    } else if (backing) {
+    } else if (transactional) {
         char work[1100], neu[1100]; snprintf(work, sizeof work, "%s.work", dir); snprintf(neu, sizeof neu, "%s.new", dir);
         save_old_names(dir, dir);   // after the cloud's save came in (it may hold such names too), and under the locks the cloud sender's clone takes (dm_fs_clone_committed)
         const char *why = NULL;
@@ -882,7 +883,7 @@ static Result mount_own_save_ro(const char *name, const void *uid) {
     if (!resolve_save(user, &location)) return RES_FAIL;
     if (location.backing == SYNCED_SAVE) save_sync_or_stop(location.base);
     if (!ensure_save_directory(location.dir)) { LOG("[RED] fs read-only mount of this game's save data %s: cannot create the save folder %s (errno=%d), answered as no save data", name, location.dir, errno); return RES_TARGET_NOT_FOUND; }
-    return mount_ex(name, location.dir, 1, NO_SAVE);
+    return mount_ex(name, location.dir, 1, READ_ONLY_SAVE);
 }
 HLE_FORCE("_ZN2nn2fs21MountSaveDataReadOnlyEPKcNS_13ApplicationIdERKNS_7account3UidE", "fsp-srv; this game's own requested account save read-only; another program's: none", Result, h_fs_MountSaveRO, const char *name, uint64_t app, const void *uid) { dm_thread_service_request();
     if (app == DM_GAME_PROGRAM_ID) return mount_own_save_ro(name, uid);

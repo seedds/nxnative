@@ -95,6 +95,8 @@ The query writes one JSON object to stdout containing `version`, `users` (as abo
 
 For account saves the engine uses the UID the **game passes to the mount**, even if it differs from the launcher selection. The legacy account uses `DM_SAVE`. Every other account uses its sibling `<DM_SAVE>.user-<lowercase ID>`. Device data is shared across users of the title: a title that mounts both kinds keeps its device data in `<DM_SAVE>_device`; a device-save-only title keeps its existing `DM_SAVE` (for example, the Animal Crossing island). The existing cloud archive covers the legacy and shared device trees. Additional users' individual save directories are local and must be backed up separately. A frontend that transfers saves can identify them from the roster and these paths. Run one game process at a time against a title's save root, since its device save and transaction directories are shared.
 
+Read-only mounts of this application's account save use the same requested UID and read its committed directory without a transaction. With a configured roster, unmount releases that name for another account; an active name cannot be rebound to a different account, and already-open handles remain valid.
+
 ### Selecting a save folder
 
 A built Mac or iOS launcher accepts `DM_SAVE_ROOT` set to an absolute, accessible top-level directory (a launch override or an `env.txt` entry). The effective order is an explicit exact directory in `DM_SAVE`, then `DM_SAVE_ROOT`, then the folder the player picked, then the app’s usual per-game directory. On iOS use the Files picker for paths that need sandbox access. The app remembers its permission for subsequent launches.

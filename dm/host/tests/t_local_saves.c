@@ -157,6 +157,17 @@ static int simultaneous(void) {
 static int account_read_only(void) {
     CHECK(h_fs_MountSaveRO("alice-ro", DM_GAME_PROGRAM_ID, alice) == RES_OK);
     CHECK(h_fs_MountSaveRO("bob-ro", DM_GAME_PROGRAM_ID, bob) == RES_OK);
+    CHECK(h_fs_MountSaveRO("alice-ro", DM_GAME_PROGRAM_ID, bob) == RES_PATH_EXISTS);
+    uint64_t old;
+    CHECK(h_fs_OpenFile(&old, "alice-ro:/slot", MODE_READ) == RES_OK);
+    h_fs_Unmount("alice-ro");
+    CHECK(!h_fs_IsMounted("alice-ro"));
+    CHECK(h_fs_MountSaveRO("alice-ro", DM_GAME_PROGRAM_ID, bob) == RES_OK && guest_has("alice-ro:/slot", "bob2"));
+    char value[6] = {0}; size_t read = 0;
+    CHECK(h_fs_ReadFile(&read, old, 0, value, 5) == RES_OK && read == 5 && !strcmp(value, "alice"));
+    h_fs_CloseFile(old);
+    h_fs_Unmount("alice-ro");
+    CHECK(h_fs_MountSaveRO("alice-ro", DM_GAME_PROGRAM_ID, alice) == RES_OK);
     CHECK(guest_has("alice-ro:/slot", "alice") && guest_has("bob-ro:/slot", "bob2"));
     CHECK(!write_guest("alice-ro:/slot", "damage") && !write_guest("bob-ro:/slot", "damage"));
     CHECK(h_fs_MountSaveRO("other-app", DM_GAME_PROGRAM_ID + 1, alice) == RES_TARGET_NOT_FOUND);

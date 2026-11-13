@@ -82,6 +82,8 @@ t_cover: t_cover.c ../nvn/nvn_cover.h
 	clang -O1 -Wall -o $@ t_cover.c
 t_pace: t_pace.c ../nvn/nvn_pace.h
 	clang -O1 -Wall -o $@ t_pace.c
+t_gpu_idle: t_gpu_idle.c ../nvn/nvn_gpuidle.h
+	clang -O1 -Wall -o $@ t_gpu_idle.c
 t_timestamp: t_timestamp.c ../nvn/nvn_timestamp.h
 	$(CC) -std=c11 -O2 -g -Wall -Wextra -Werror -o $@ $<
 t_counter_clock: t_counter_clock.m ../../host/hle_os.c ../../host/dm.h $(MTL_T_DEP)
@@ -232,6 +234,12 @@ check_t_reorder_chain: RUN_ENV = MTL_DEBUG_LAYER=1
 t_defer_chain: t_defer_chain.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_defer_chain.m $(MTL_T_SRC) $(FW)
 check_t_defer_chain: RUN_ENV = MTL_DEBUG_LAYER=1
+t_cut_first: t_cut_first.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_cut_first.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_cut_first
+check_t_cut_first: t_cut_first
+	MTL_DEBUG_LAYER=1 ./t_cut_first
+	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_cut_first
 t_zskip: t_zskip.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_zskip.m $(MTL_T_SRC) $(FW)
 t_xv: t_xv.m $(MTL_T_DEP)

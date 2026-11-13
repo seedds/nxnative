@@ -142,6 +142,10 @@ DM_NVN_CSH_PRESCAN	diagnostic	`0` runs the compute-hoist scan at every pass's fi
 DM_NVN_CS_HOIST	switch	`0` makes a compute dispatch between the draws of a pass end it (on by default: the dispatch runs ahead of the pass when that changes nothing the draws before it read)
 DM_NVN_CUT	switch	`=<draws>`: the replay commits its command buffer every that many draws, between passes (default 64; `0` one command buffer per submission, except the cut after a buffer-to-texture copy)
 DM_NVN_CUT_BUSY	switch	`=0`: a segment boundary commits whatever the GPU is doing (the default commits only when earlier work has reported back, keeping the boundary's GPU timestamp otherwise)
+DM_NVN_CUT_FIRST	switch	`1` (the default; or `ab` with `DM_AB`): at the start of a submission, while the GPU has nothing of ours to run, a segment is committed inside a pass every `DM_NVN_CUT_FIRST_DRAWS` draws (the pass ends storing its targets and reopens loading them); on by default, `0` turns it off (docs/reference/frame-rate.md)
+DM_NVN_CUT_FIRST_DRAWS	switch	`=<draws>`: draws between two cuts of `DM_NVN_CUT_FIRST` (default 48)
+DM_NVN_CUT_FIRST_MAX	switch	`=<n>`: at most that many `DM_NVN_CUT_FIRST` cuts a submission (default 8)
+DM_NVN_CUT_FIRST_MB	switch	`=<MB>`: a pass whose attachments hold more is not cut by `DM_NVN_CUT_FIRST` (default 8)
 DM_NVN_DEFER	switch	`0` turns off the deferred pass merging of the TBDR optimizations (which run only with `DM_NVN_TBDR=1`)
 DM_NVN_DEFER_AB	diagnostic	`=1` keeps the deferred pass merging (with `DM_NVN_TBDR=1`) off until the second screenshot has been written, then turns it on, to compare the pictures with and without it
 DM_NVN_DEPTHOVR	diagnostic	`=<fragment shader key prefix>,…`: those draws compare depth with `ALWAYS`; with `DM_NVN_HILITE`, tells "the depth test rejects every fragment" from "nothing rasterizes"
@@ -365,6 +369,7 @@ DM_SLOWFRAME	diagnostic	`=1` writes the per-frame timing breakdown to the log on
 DM_SPIN	switch	`0` makes the rewriter's spin gate return at once, so guest poll loops spin with no sleep; the gate stays (on by default)
 DM_SPIN_LIST	diagnostic	`=1` makes `patch_nso.py` print every guest poll loop it found and sends through a spin gate
 DM_SPIN_POLL	switch	`=<µs>`: how long a spin-gate wait polls before it sleeps with the yield back-off (default 2000; `0` yields on every pass)
+DM_STATS_FRAMES	diagnostic	`=<60..300>`: the periodic summary lines (timing with the GPU idle fields, power, on-screen, translation, residency, threads) every that many frames instead of 300; counts a line gives per window then cover that many frames
 DM_SVC	diagnostic	`=1` logs memory SVCs (`SetHeapSize`, `MapMemory`, `Map`/`UnmapPhysicalMemory`) with their addresses and sizes
 DM_SW2	player	`=1` turns on Switch 2 controllers over Bluetooth LE (Joy-Con 2, Pro Controller 2): the settings window's Switch 2 controllers. Off, no Bluetooth client is created and macOS asks nothing. The host also stays off when the app's Info.plist has no NSBluetoothAlwaysUsageDescription, without which macOS ends the process at the first Bluetooth scan
 DM_SW2_GYRO_DPS	diagnostic	`=<degrees per second per count>` is the Switch 2 controllers' gyro scale (default 0.0607, measured on a left and a right Joy-Con 2; the Switch family's nominal 0.070 turned a 90 degree tilt into 104)

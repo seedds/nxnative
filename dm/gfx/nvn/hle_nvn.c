@@ -17,6 +17,7 @@
 #include "nvn_pace.h"
 #include "nvn_fstep.h"
 #include "nvn_timestamp.h"
+#include "nvn_gpuidle.h"
 #include "../../host/front.h"
 #include "nvn_dirty.h"
 #include <mach/mach_time.h>
@@ -1945,7 +1946,7 @@ counts_done:
 }
 // ---------- Timing instrumentation (per-frame rows written to DM_NVN_TSV: frame / @metric / value; every 300 frames a summary of p50 / p95 / max) ----------
 #define TWIN 300
-static double g_tw[6][TWIN]; static unsigned g_tn[6];
+static double g_tw[8][TWIN]; static unsigned g_tn[8];
 static double g_pres_iv[TWIN]; static unsigned g_presn;   // Present interval (ms; -1 = dropped by the system, 0 = no reading)
 static double g_pres_exp[TWIN], g_pres_exp_last;   // how long that frame should have stayed on screen (ms, pres_expect_ms); the last one for slow_emit
 // The hold (60 Hz vsyncs) each present was given, by present number. On-screen intervals are read 8 presents late, so each is judged against the holds of its own presents:
@@ -1968,8 +1969,17 @@ typedef struct { uint64_t f; double fr, nv, t_s, make_ms, up_mb, up_ms; unsigned
 static lf_rec g_lf[LFN];
 __attribute__((weak)) void dm_longframe_note(const char *what) { LOG("[longframe] %s", what); }   // Default (graphics unit tests); the strong definition in the host's diag.c adds scene context and writes perf.txt
 extern void mtl_create_ns(uint64_t *lib_ns, uint64_t *pso_ns); extern void mtl_hybrid_stats(uint64_t *draws, uint64_t *made, uint64_t *none); extern uint64_t mtl_upload_bytes(void); extern void mtl_pkg_stats(uint64_t *uploads, uint64_t *reuploads);
-static const char *const g_tname[6] = {"frame time", "frame work", "NVN submit+present", "GPU", "translation layer recording", "translation layer submit"};
+static const char *const g_tname[8] = {"frame time", "frame work", "NVN submit+present", "GPU", "GPU idle between frames", "GPU idle inside frames", "translation layer recording", "translation layer submit"};
 static void tpush(int k, double v) { g_tw[k][g_tn[k]++ % TWIN] = v; }
+// DM_STATS_FRAMES=<60..300>: the summary lines (timing, power, on-screen, translation, residency, threads, the GPU idle fields) every that many frames instead of TWIN (300, 5 s at 60 fps).
+// The rings keep TWIN entries and are emptied at each summary, so a shorter period only shortens the window; counts that the lines give per window (split submits, barriers) cover that many frames
+static unsigned stats_frames(void) {
+    static unsigned v; if (!v) { const char *e = getenv("DM_STATS_FRAMES"); int n = e ? atoi(e) : TWIN; v = n < 60 ? 60 : n > TWIN ? TWIN : (unsigned)n;
+        if (v != TWIN) LOG("[nvn] DM_STATS_FRAMES=%u: summary lines every %u frames (default %d)", v, v, TWIN); }
+    return v;
+}
+// GPU idle of the tagged work (nvn_gpuidle.h), filled 8 frames late at the same place as the GPU time below; the busy share is reset with the rings in tsummary
+static gpuidle_tracker g_gpu_gap; static gpuidle_window g_gpu_win;
 // Thermal attribution (iOS DM_HEAT): per-frame GPU milliseconds are kept in a separate ring, taking the mean / p95 "since the last read" (at most the last HRN frames), without interfering with the timing summary's 300-frame window
 #define HRN 1024
 static double g_hr[HRN]; static uint64_t g_hn, g_hn_read;
@@ -2045,10 +2055,12 @@ static void power_line(uint64_t frame) {
 }
 static void tsummary(uint64_t frame) {
     char line[1024]; size_t o = 0;
-    for (int k = 0; k < 6; k++) {
+    for (int k = 0; k < 8; k++) {
         unsigned n = g_tn[k] < TWIN ? g_tn[k] : TWIN; if (!n) continue;
         double v[TWIN]; memcpy(v, g_tw[k], n * sizeof *v); qsort(v, n, sizeof *v, dcmp);
         o += snprintf(line + o, sizeof line - o, " %s p50 %.2f / p95 %.2f / max %.2f ms (%u frames);", g_tname[k], v[n / 2], v[(n * 95) / 100 < n ? (n * 95) / 100 : n - 1], v[n - 1], n);
+        if (k == 5) { double busy = gpuidle_window_busy(&g_gpu_win);   // the GPU's busy share over the same frames (filled with the idle rings below), between the idle fields and the translation layer ones
+            if (busy >= 0) o += snprintf(line + o, sizeof line - o, " GPU busy %.0f%%;", busy); }
     }
     LOG("[nvn] timing up to frame %llu:%s", frame, line);
     { void mtl_pso_line(char *, size_t); char pl[1024]; mtl_pso_line(pl, sizeof pl); LOG("[nvn] pipelines up to frame %llu: %s", frame, pl); }
@@ -2086,6 +2098,7 @@ static void tsummary(uint64_t frame) {
     uint64_t up, re, es = mtl_pkg_edge_skips(), fa, pr, op, oc; mtl_pkg_stats(&up, &re); nvn_dirty_stats(&fa, &pr); nvn_dirty_open_stats(&op, &oc);
     LOG("[nvn] packaged textures: first uploads %llu, re-uploads on pool content change %llu, writes beside a texture only (not re-uploaded) %llu; write-protection faults %llu, pages unprotected before host writes %llu, opened for pool buffers %llu (changed while open %llu); missed %llu (cumulative); CPU-written textures alive %u", up, re, es, fa, pr, op, oc, mtl_pkg_miss(), mtl_cpu_tex_count());
     memset(g_tn, 0, sizeof g_tn);
+    g_gpu_win = (gpuidle_window){0};
 }
 // DM_SLOWFRAME=1 (test switch, read over the log port on a real device): per-frame timings are first stored in a ring of the last 16 frames; dropped frames are judged 8 frames late (GPU / on-screen present times are back by then),
 // and only for dropped frames is one line "[slowframe]\t<frame number>\t@<name>=<value>..." written to the log, plus one denominator line every 300 frames. No per-frame file is written: the log tee fsyncs every line, and writing line by line would disturb the readings
@@ -2505,7 +2518,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
             LOG("[nvn] translation layer top 5 by time (sum over the last 300 frames):%s", line); memset(acc, 0, sizeof acc);
         }
         trow(g_frame, "@rec_ms", rec * tb.numer / tb.denom / 1e6); trow(g_frame, "@submit_ms", sub * tb.numer / tb.denom / 1e6);
-        tpush(4, rec * tb.numer / tb.denom / 1e6); tpush(5, sub * tb.numer / tb.denom / 1e6);
+        tpush(6, rec * tb.numer / tb.denom / 1e6); tpush(7, sub * tb.numer / tb.denom / 1e6);
     }
     if (prev_in) {
         double fr = (t0 - prev_in) / 1e6, wk = (t0 - prev_out) / 1e6, nv = atomic_exchange(&g_nvn_ns, 0) / 1e6;
@@ -2565,11 +2578,18 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
                        (unsigned long long)r->f, r->t_s, r->fr, r->nv, g, r->pso, r->lib, r->make_ms, r->up, r->rup, r->up_mb, r->up_ms, r->hy);
               // Visibility: during the time a long frame "comes out late", what stays on screen is the previous frame; if the previous frame was a loading screen (or this frame itself is one), all the player sees is the loading screen staying a bit longer, with no motion interrupted
               dm_longframe_note(b); } }
-        uint64_t g0, g1; if (frame_rec() && mtl_gpu_span(f - 8, &g0, &g1)) { trow(f - 8, "@gpu_beg_ms", (g0 - g_t0_ns) / 1e6); trow(f - 8, "@gpu_end_ms", (g1 - g_t0_ns) / 1e6); } }
+        uint64_t g0, g1; int gsp = mtl_gpu_span(f - 8, &g0, &g1);   // the frame's GPU span, always read now: the idle fields are always on (a few atomic loads, no GPU work)
+        if (gsp && g >= 0) {   // the same tagged command buffers the GPU time above sums (span known implies sum known: both need the frame reported back)
+            uint64_t sum_ns = (uint64_t)(g * 1e6);
+            int64_t gap = gpuidle_gap_ns(&g_gpu_gap, f - 8, 1, g0, g1);   // idle of the tagged work between this and the previous sampled frame (nvn_gpuidle.h): the present command buffer, snapshot copies, upload batches and old-queue command buffers are not tagged, so a gap where only they run reads as idle
+            if (gap >= 0) tpush(4, (double)gap / 1e6);
+            tpush(5, gpuidle_inside_ns(g1 - g0, sum_ns) / 1e6);   // span minus sum, clamped at 0: overlapping command buffers make the sum exceed the span
+            gpuidle_window_add(&g_gpu_win, sum_ns, g0, g1); }
+        if (frame_rec() && gsp) { trow(f - 8, "@gpu_beg_ms", (g0 - g_t0_ns) / 1e6); trow(f - 8, "@gpu_end_ms", (g1 - g_t0_ns) / 1e6); } }
     prev_in = t0; prev_pass = ps; prev_draw = dr;
     dump_frame();
     { void dm_vi_frame_queued(uint64_t); dm_vi_frame_queued(g_frame); }   // the layer's frame history (hle_vi.c), numbered as GetLatestFrameNumber
-    if (g_frame % TWIN == 0) tsummary(g_frame);
+    if (g_frame % stats_frames() == 0) tsummary(g_frame);
     // GPU replay carries the submitted frame, even when a later CPU frame is already queued.
     // Real-device semantics: present only enqueues and returns immediately; this frame's display time is scheduled by the pacer, and the texture can be acquired again only at "display time + one period" (blocking in AcquireTexture)
     uint64_t period = present_period(o), now = dm_detclock_enabled() ? guest_ns() : now_ns();

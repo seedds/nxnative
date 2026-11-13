@@ -1479,6 +1479,8 @@ void mtl_prepare(void) {
     if (!g_warm_started && prepare_on()) { mtl_init(); shmap_load(); }
 }
 static void sub_cut_begin(void); static void ts_sub_begin(void), ts_boundary(void); static int ts_on(void);
+static void cut_first_check(void);   // DM_NVN_CUT_FIRST: the first segment of a submission on an idle GPU, cut inside a long first pass (see cut_first_check)
+static int g_cut_reopen;   // the pass about to open goes on with a pass cut_first_check ended: the reorders tried when it first opened are not tried again (see cut_first_check)
 static void gmem_commit_patch(void);   // the raw pool table words of the arguments encoded so far follow the pools (gmem_slot_note)
 static void treg_sparse_notes(void);
 void mtl_sub_begin(void) {
@@ -5488,7 +5490,7 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex(int clear_only);
 static NSUInteger g_rp_aw; static int g_rp_whole;
 static id<MTL4RenderCommandEncoder> rp_begin(void) { if (g_enc && g_rp_aw) rp_end(); g_rp_whole = 1; id<MTL4RenderCommandEncoder> e = rp_begin_ex(0); g_rp_whole = 0; return e; }   // the callers draw anywhere in the target (see g_rp_aw)
 static id<MTL4RenderCommandEncoder> rp_begin_ex_(int clear_only);
-static id<MTL4RenderCommandEncoder> rp_begin_ex(int clear_only) { AP_B; id<MTL4RenderCommandEncoder> e = rp_begin_ex_(clear_only); AP_E(1); return e; }
+static id<MTL4RenderCommandEncoder> rp_begin_ex(int clear_only) { AP_B; g_cut_reopen = 0; id<MTL4RenderCommandEncoder> e = rp_begin_ex_(clear_only); AP_E(1); return e; }
 static void bare_dims(NSUInteger *w, NSUInteger *h);
 static id<MTL4RenderCommandEncoder> rp_begin_ex_(int clear_only) {
     if (g_enc) return g_enc;
@@ -14339,6 +14341,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     }
     if (!g_geo_mesh.on) geo_mesh_flush_draw();   // another draw (a geometry draw decides in geo_mesh_draw): a waiting run of mesh draws goes first
     if (g_enc && g_enc_geo_nocolor != g_geo_omit_colors) rp_end();
+    if (g_enc) cut_first_check();   // may end the pass and commit the segment: this draw then reopens the pass, loading its targets
     int mdx_on = (dw && dw->mdi_cnt) || (di && di->mdi_cnt) ? mdx_wanted(dw, di) : 0;   // an indirect-count multi-draw's record masked on the GPU (mdx_run), else read after a wait
     if (!mdx_on && ((di && di->mdi_cnt && !mdi_live(di->mdi_cnt, di->mdi_i)) || (dw && dw->mdi_cnt && !mdi_live(dw->mdi_cnt, dw->mdi_i)))) return;   // past the multi-draw's count
     if (mdx_on && mdx_next(dw, di)) return;   // the next draw of a masked multi-draw: only the draw is encoded
@@ -14409,7 +14412,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     // The deferral decision comes after hoist_try: hoisted pure-clear render passes are skipped in the lookahead, and only then can P's same-target continuation segment be recognized
     if (!g_enc && tbdr_on() && !g_geo_program && !defer_has_in_p() && !g_defer_replaying && !g_fz.active && !g_fz_checking && g_exec_next) { defer_try(dw, di); if (g_defer_cur->active && g_defer_cur->in_p) return; }
     if (!g_enc && tbdr_on() && !g_fz_checking && !g_geo_program) fuse_try();   // Readable tile render pass merge is on by default; when the structure / same-pixel proof does not hold it still falls back to a normal render pass, and it is not re-entered during the CHECK redraw
-    if (!g_enc && !tbdr_on() && !g_geo_program && cshoist_on()) cs_hoist_try(pr, dw, di);   // see DM_NVN_CS_HOIST
+    if (!g_enc && !tbdr_on() && !g_geo_program && !g_cut_reopen && cshoist_on()) cs_hoist_try(pr, dw, di);   // see DM_NVN_CS_HOIST; not again where a cut reopens the pass (g_cut_reopen)
     int need = g_enc || !tbdr_on() ? 3 : pass_ds_need(), mode = defer_q_draw ? 0 : need == 0 ? 2 : need == 2 ? 3 : need == 1 ? 4 : 0;   // 2 attach neither, 3 attach stencil only, 4 attach depth only
     int skip_d = mode != 0;
     if (!g_enc) { g_fd_dw = dw; g_fd_di = di; }
@@ -15618,18 +15621,21 @@ static int cut_draws(void) { static int v = -1; if (v < 0) { const char *e = get
 static uint64_t g_cut_draw0, g_cuts, g_copy_cuts;
 // The count starts with the submission (mtl_sub_begin). It used to start at the submission's first sub_cut, which only a render target change reaches (OP_SET_RT): the draws a
 // submission makes into the target it inherited, before its first target change, were never counted, and the first segment came that many draws late
-static void sub_cut_begin(void) { g_cut_draw0 = g_stat_draw; }
+static int g_cut_first_seg, g_cut_first_k;   // cut_first_check is done with this submission (sub_cut committed at a pass boundary, it gave up, or it made its last cut); its cuts so far
+static void sub_cut_begin(void) { g_cut_draw0 = g_stat_draw; g_cut_first_seg = 0; g_cut_first_k = 0; g_cut_reopen = 0; }
 // DM_FSTEP_PROBE_RAMP=1 (default) / 0 / ab: a frame-step probe's grace is renewed while its frames keep getting cheaper (nvn_fstep.h FSTEP_RAMP), the time macOS's GPU clock takes to rise for the shorter deadline
 static int probe_ramp_mode(void) { static int m = -1; if (m < 0) m = sw_mode("DM_FSTEP_PROBE_RAMP", 1); return m; }
 int mtl_probe_ramp_on(void) { return sw_on(probe_ramp_mode()); }
-static void sub_cut(void) {
+static void sub_cut_ex(int first);
+static void sub_cut(void) { sub_cut_ex(0); }
+static void sub_cut_ex(int first) {   // first: cut_first_check's commit, which has checked that the GPU is idle and needs no draw count
     int n = cut_draws();
     if (!g_cb || g_enc) return;
-    if ((!g_cut_copy && (n <= 0 || g_stat_draw - g_cut_draw0 < (uint64_t)n)) || g_hoist_n || g_defer_nact || g_defer_pend || g_fz.active || g_rt_merged) return;
+    if ((!first && !g_cut_copy && (n <= 0 || g_stat_draw - g_cut_draw0 < (uint64_t)n)) || g_hoist_n || g_defer_nact || g_defer_pend || g_fz.active || g_rt_merged) return;
     // The cut is there so that the GPU does not sit idle while the host encodes. With earlier work still running a commit gains nothing and queues one more command buffer: each is a call into the kernel on Metal's one submission queue, and with buffers queued behind running work
     // the GPU waited 5-40 ms with the next one already committed (docs/reference/frame-rate.md). So it stays a boundary for the game's timestamps (ts_boundary), with the commit left for when the GPU has run out. A copy still commits, as its data must land. DM_NVN_CUT_BUSY=0: every cut commits
     static int busy = -1; if (busy < 0) { const char *e = getenv("DM_NVN_CUT_BUSY"); busy = !e || atoi(e) != 0; }
-    if (busy && !g_cut_copy && (!seg_ts() || ts_on()) && atomic_load_explicit(&g_seg_inflight, memory_order_relaxed) > 0) {
+    if (!first && busy && !g_cut_copy && (!seg_ts() || ts_on()) && atomic_load_explicit(&g_seg_inflight, memory_order_relaxed) > 0) {
         if (ts_on()) { ts_boundary(); g_seg++; }
         g_cut_draw0 = g_stat_draw; return; }
     if (ts_on()) ts_boundary();
@@ -15658,9 +15664,45 @@ static void sub_cut(void) {
     if (rec_on()) rec_publish();   // the segment reaches the encode thread now, not when its block of records fills
     g_cb = rec_cb_new();
     [g_cb beginCommandBufferWithAllocator:g_alloc4[g_alloc_cur]];   // one allocator encodes several command buffers in sequence; it is reset only once its fence (the last segment) has passed, when a later submission starts
-    g_cut_draw0 = g_stat_draw;
+    g_cut_draw0 = g_stat_draw; if (!first) g_cut_first_seg = 1;   // a cut at a pass boundary: mid-pass cuts are no longer needed in this submission
     if (!g_cuts++) MLOG("segmented submission: first segment submitted at frame %llu pass %llu", (unsigned long long)f, (unsigned long long)g_stat_pass);
 }
+// DM_NVN_CUT_FIRST=1 (default) / 0 / ab: segments cut inside a pass while the GPU is idle at the start of a submission. A game that waits for its previous frame's GPU work before it submits
+// the next (Animal Crossing: New Horizons: the acquire sync and its own fence, both on the newest submission, then one submit of the whole frame) leaves the GPU with nothing until the host
+// has replayed the first segment, and segments are cut only between passes (sub_cut): ACNH's first pass is its 386x386 shadow map with 1,454 draws, so the GPU waited for all of them to be
+// translated, about 1.3 ms a frame on an iPhone 17 Pro Max, plus the wake. iOS reads that idle time as room and lowers the GPU clock (docs/reference/frame-rate.md). On the Switch a submit hands
+// a finished command buffer to the GPU, so there is no such wait. Here, before a draw, once DM_NVN_CUT_FIRST_DRAWS (48) draws are encoded since the last cut and the GPU has nothing of ours to
+// run: the pass ends, storing its targets (sd_finish sees the rest of the pass as their next use), the segment is committed, and the draw reopens the pass, loading them, as any pass split does.
+// One cut would feed the GPU 48 draws and leave it idle again for the rest of the pass, so cuts go on while the GPU keeps running out, up to DM_NVN_CUT_FIRST_MAX (8) a submission; once it has
+// work queued, sub_cut's rule (no commit while earlier work runs) holds again. Idle: before the submission's first commit, g_done has reached the last fence (a game's SyncWait raises it when it
+// wakes on the GPU's signal, post_early; the segments' own count, g_seg_inflight, drops only in their feedback handlers, about 0.5 ms later on an M3 Max, so right after the game's wait it still
+// read busy); after it, no segment of ours is running. The cost is one more store and load of the pass's attachments a cut, so a pass whose attachments hold more than DM_NVN_CUT_FIRST_MB (8)
+// is not cut, and one more command buffer. On by default since the iPhone A/B (Animal Crossing by the waterfall: 40 fps without, 60 with; docs/reference/frame-rate.md)
+static int cut_first_mode(void) { static int m = -2; if (m == -2) { m = sw_mode("DM_NVN_CUT_FIRST", 1); MLOG("DM_NVN_CUT_FIRST=%s: segments are cut inside a pass while the GPU is idle at the start of a submission%s", m == 1 ? "1" : m ? "ab" : "0", m ? "" : " (off)"); } return m; }
+static uint64_t g_cut_first_n, g_cut_first_big, g_cut_first_busy;
+static void cut_first_check(void) {
+    if (g_cut_first_seg || !g_cb || !g_enc) return;
+    int m = cut_first_mode(); if (!m || !sw_on(m)) return;
+    static int nd = -1, kmax; static double mb;
+    if (nd < 0) { const char *e = getenv("DM_NVN_CUT_FIRST_DRAWS"); nd = e ? atoi(e) : 48; if (nd < 1) nd = 1; e = getenv("DM_NVN_CUT_FIRST_MB"); mb = e ? atof(e) : 8;
+                  e = getenv("DM_NVN_CUT_FIRST_MAX"); kmax = e ? atoi(e) : 8; if (kmax < 1) kmax = 1; }
+    if (g_stat_draw - g_cut_draw0 < (uint64_t)nd) return;
+    if (g_hoist_n || g_defer_nact || g_defer_pend || g_fz.active || g_defer_replaying || g_defer.active || g_sm_pass || g_rt_range_active || g_geo_program || g_vis_counting) return;
+    int idle = g_cut_first_k ? atomic_load_explicit(&g_seg_inflight, memory_order_relaxed) == 0 : atomic_load(&g_done) >= g_fence;
+    if (!idle) { if (!g_cut_first_k) { g_cut_first_busy++; g_cut_first_seg = 1; } return; }   // at the start: earlier work still running, so the GPU is not waiting for this submission
+    uint64_t bytes = 0; for (int i = 0; i < g_nsd; i++) bytes += g_sd[i].bytes;
+    if ((double)bytes > mb * 1048576.0) { static uint64_t pb; if (pb != g_stat_pass) { pb = g_stat_pass; g_cut_first_big++; } return; }   // a store and a load of these targets would cost more than the GPU's wait; a later, smaller pass may still be cut
+    uint64_t drawn = g_stat_draw - g_cut_draw0, pass = g_stat_pass;
+    rp_end(); sub_cut_ex(1);
+    if (g_cut_draw0 != g_stat_draw) return;   // sub_cut_ex refused (a hoist or a deferred pass): nothing committed
+    // The pass the next draw reopens is the one just ended, not a new pass of the game: the reorder that looks ahead from a pass's first draw (cs_hoist_try) decided for it
+    // when it first opened. Tried again here, it would scan the rest of the pass on every cut for no move; on a tree with two more such reorders the rescans of Animal Crossing's
+    // 1,454-draw shadow pass cost 6-7.5 M instructions of the submit thread a cut (0.6-0.8 ms on an iPhone 17 Pro Max). Skipped, the pass gets the moves it gets with the cut off
+    g_cut_reopen = 1;
+    if (!g_cut_first_n++) MLOG("DM_NVN_CUT_FIRST: first cut at frame %llu, pass %llu after %llu draws (%.2f MB of attachments)", (unsigned long long)atomic_load(&g_cur_frame), (unsigned long long)pass, (unsigned long long)drawn, bytes / 1048576.0);
+    if (++g_cut_first_k >= kmax) g_cut_first_seg = 1;
+}
+void mtl_cut_first_stats(uint64_t *cut, uint64_t *big, uint64_t *busy) { *cut = g_cut_first_n; *big = g_cut_first_big; *busy = g_cut_first_busy; }
 uint64_t mtl_cut_count(void) { return g_cuts; }
 uint64_t mtl_copy_cut_count(void) { return g_copy_cuts; }
 

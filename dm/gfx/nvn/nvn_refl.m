@@ -128,8 +128,19 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
             if (bb) { int bit = [bb intValue]; if (bit < 0 || bit >= DMSH_BORDER_SAMPLERS || (r->kind != NVN_RB_SAMP && r->kind != NVN_RB_SAMPT && r->kind != NVN_RB_SAMPU && r->kind != NVN_RB_SAMPI) || r->n)
                     FAIL("B binding %s: border colour twin %d of a binding that is not one sampler", nm.UTF8String, bit);
                 r->bw = (uint8_t)(bit + 1); }
-            if ((r->kind == NVN_RB_CBUF || r->kind == NVN_RB_SAMP || r->kind == NVN_RB_SAMPT || r->kind == NVN_RB_TEX || r->kind == NVN_RB_IMG || r->kind == NVN_RB_TBUF || r->kind == NVN_RB_SBUFP || r->kind == NVN_RB_UBOP || r->kind == NVN_RB_SBUFU || r->kind == NVN_RB_TEXU || r->kind == NVN_RB_SAMPU || r->kind == NVN_RB_SAMPI || r->kind == NVN_RB_IMGU || r->kind == NVN_RB_TBUFU || r->kind == NVN_RB_TEXH || r->kind == NVN_RB_SAMPH) && reg < 0)
+            if ((r->kind == NVN_RB_CBUF || r->kind == NVN_RB_SAMP || r->kind == NVN_RB_SAMPT || r->kind == NVN_RB_TEX || r->kind == NVN_RB_IMG || r->kind == NVN_RB_TBUF || r->kind == NVN_RB_SBUFP || r->kind == NVN_RB_UBOP || r->kind == NVN_RB_SBUFU || r->kind == NVN_RB_TEXU || r->kind == NVN_RB_SAMPU || r->kind == NVN_RB_SAMPI || r->kind == NVN_RB_IMGU || r->kind == NVN_RB_TBUFU || r->kind == NVN_RB_TEXH || r->kind == NVN_RB_SAMPH) && reg < 0) {
+                // An image Ryujinx could not trace to one slot (its fallback name <stage>_i<dim>_cb0_40000000: SULD / SUST through a register BindlessElimination cannot follow, The Duskbloods'
+                // compute passes), or a sampler left without its slot: bound unbound instead (slot 255: images get the write sink and read 0, samplers the default one), so the access is lost, as the
+                // translator's dropped bindless accesses are, and not the whole shader with every other pass it draws
+                if ((r->kind == NVN_RB_IMG && [nm isKindOfClass:[NSString class]] && [nm containsString:@"_cb0_40000000"]) || r->kind == NVN_RB_SAMP) {
+                    static int told; if (told++ < 16) fprintf(stderr, "[dm] [nvn-mtl] [RED] B binding %s has no slot: bound to the dummy %s, its accesses are lost\n", [nm UTF8String], r->kind == NVN_RB_IMG ? "image (a write sink)" : "sampler");
+                    reg = 255; r->reg = 255;
+                    // Ryujinx declares it array<image, n>, indexed by the handle's texture ID: the handle came from c2's image table (BindlessElimination only makes these arrays then), so with
+                    // tex_dyn_slots the replay writes slot indices there and binds image slot k at element k (nvn_mtl.m), as for textures (TEXD). The Duskbloods' fog volume (GXFogVolume_*)
+                    if (r->kind == NVN_RB_IMG) { NSString *ae; int an = arr_len(ty, &ae); if (an > 1) { if (an > 32) FAIL("B binding %s: array of %d", nm.UTF8String, an); r->n = (uint8_t)an; o->dyn = 1; } }
+                } else
                 FAIL("B binding %s has no resolved slot number", [b[@"msl_name"] UTF8String]);
+            }
             o->nb++;
         }
         for (int i = 0; i < o->nb; i++) {   // every offset table entry a binding takes lies in the table the shader declares

@@ -11081,15 +11081,19 @@ static void image_prepare(NvProg *pr, unsigned stages) {
     if (!pr) return;
     if (!pr->c_img) { int any = 0;   // no written or atomic image slot in any stage: nothing to resolve, every draw
         for (int st = 0; st < 6 && !any; st++) { __unsafe_unretained NvShader *sh = pr->sh[st]; if (!sh) continue;
-            for (int i = 0; i < sh->rf.nb; i++) { const nvn_rbind *b = &sh->rf.b[i]; if (((b->kind == NVN_RB_IMG && b->reg < 32) || b->kind == NVN_RB_IMGU) && (b->rw || b->atom)) { any = 1; break; } } }
+            for (int i = 0; i < sh->rf.nb; i++) { const nvn_rbind *b = &sh->rf.b[i]; if (((b->kind == NVN_RB_IMG && (b->reg < 32 || b->n)) || b->kind == NVN_RB_IMGU) && (b->rw || b->atom)) { any = 1; break; } } }
         pr->c_img = (int8_t)(any + 1); }
     if (pr->c_img == 1) return;
     for (int st = 0; st < 6; st++) {
         if (!(stages & (1u << st))) continue;
         NvShader *sh = pr->sh[st]; if (!sh) continue;
-        for (int i = 0; i < sh->rf.nb; i++) {
-            const nvn_rbind *b = &sh->rf.b[i]; if ((b->kind != NVN_RB_IMGU && (b->kind != NVN_RB_IMG || b->reg >= 32)) || (!b->rw && !b->atom)) continue;
-            int tid = b->kind == NVN_RB_IMGU ? ubo_tex_id(ubo_handle(st, b->reg, b->off)) : (int)(S.img[st][b->reg] & 0xfffff); if (tid <= 0) continue;
+        for (int i = 0, k = 0; i < sh->rf.nb; k = 0, i++) {
+          for (;;) {   // a dynamic image array (NVN_RB_IMG with n, nvn_refl.m): each of its bound slots in turn
+            const nvn_rbind *b = &sh->rf.b[i]; int dynarr = b->kind == NVN_RB_IMG && b->n;
+            if (dynarr ? k >= b->n : k++) break;   // a plain binding runs once (its continues come back here)
+            if ((b->kind != NVN_RB_IMGU && (b->kind != NVN_RB_IMG || (b->reg >= 32 && !dynarr))) || (!b->rw && !b->atom)) break;
+            int slot = dynarr ? k++ : b->reg;
+            int tid = b->kind == NVN_RB_IMGU ? ubo_tex_id(ubo_handle(st, b->reg, b->off)) : slot < 32 ? (int)(S.img[st][slot] & 0xfffff) : 0; if (tid <= 0) { if (dynarr) continue; break; }
             os_unfair_lock_lock(&g_rmu);
             if (tid >= g_ntreg || !g_treg[tid].ok || g_treg[tid].gone) { os_unfair_lock_unlock(&g_rmu); continue; }
             // The actual image binding is image intent too: some engines write a descriptor with RegisterTexture and use its handle in an image slot.
@@ -11113,6 +11117,7 @@ static void image_prepare(NvProg *pr, unsigned stages) {
                 }
             }
             os_unfair_lock_unlock(&g_rmu);
+          }
         }
     }
 }
@@ -11778,6 +11783,10 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
             else if (b->dtt == (uint8_t)MTLTextureTypeTextureBuffer) t = tbuf_shadow(tid, t, &trid);   // see tbuf_shadow
             slots[aid] = trid;
             USE(t, MTLResourceUsageRead);
+        } else if (b->kind == NVN_RB_IMG && b->n) {   // a dynamic image array (nvn_refl.m, tex_dyn_slots): element k = the image in slot k, the write sink where none is bound; c2 holds slot indices
+            for (int k = 0; k < b->n; k++) { uint64_t trid; int real; int tid = k < 32 ? (int)(S.img[nvn_stage][k] & 0xfffff) : 0;
+                id<MTLTexture> t = img_binding(tid, b, &trid, &real); slots[aid + k] = trid; USE(t, MTLResourceUsageRead | MTLResourceUsageWrite);
+                if (bl && tid) PD("W %llu st%d imgd [%d] tid=%d %s", g_stat_pass, nvn_stage, k, tid, real ? "real" : "dummy"); }
         } else if (b->kind == NVN_RB_IMG || b->kind == NVN_RB_IMGU) {   // Storage image: NVN image slot r (BindImages) ↔ D3D u_r, or its handle in a uniform buffer (IMGU)
             int tid = b->kind == NVN_RB_IMGU ? ubo_tex_id(ubo_handle(nvn_stage, reg, b->off)) : reg < 32 ? (int)(S.img[nvn_stage][reg] & 0xfffff) : 0;
             uint64_t trid; int real;
@@ -11969,7 +11978,7 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
                     // tables therefore hold the handles as the game bound them, without the base bind_handles added (hle_nvn.c), so a handle taken from c2 lands on the same entry
                     const uint64_t *tx = S.tex[nvn_stage], *im = S.img[nvn_stage]; int dyn = sh->rf.dyn, tb = sh->rf.pool ? S.tex_base : 0, sb = sh->rf.pool ? S.samp_base : 0;
                     #define C2_LOCAL(h) ((uint32_t)((((h) & 0xfffff) ? ((h) & 0xfffff) - (uint64_t)tb : 0) | ((((h) >> 20) & 0xfff) ? ((((h) >> 20) & 0xfff) - (uint64_t)sb) << 20 : 0)))
-                    for (int r = 0; r < DMSH_C2_IMG_SLOTS; r++) { uint32_t ih = (uint32_t)im[r]; memcpy(d + DMSH_C2_IMG + DMSH_C2_ROW * r, &ih, 4); }
+                    for (int r = 0; r < DMSH_C2_IMG_SLOTS; r++) { uint32_t ih = !dyn ? (uint32_t)im[r] : im[r] ? (uint32_t)r : 0; memcpy(d + DMSH_C2_IMG + DMSH_C2_ROW * r, &ih, 4); }   // dynamic image arrays: slot r → r
                     for (int r = 0; r < DMSH_C2_TEX_SLOTS; r++) {   // a combined slot past 31 is written when it is bound and the image slot it shares is not (Hades II binds texture slot 34, no image)
                         if (r >= 32 && (!tx[r] || (r - 32 < DMSH_C2_IMG_SLOTS && im[r - 32]))) continue;
                         uint32_t v = !dyn ? C2_LOCAL(tx[r]) : !tx[r] ? 0 : (uint32_t)r | (tx[r] >> 20 ? (uint32_t)r << 20 : 0); memcpy(d + DMSH_C2_TEX + DMSH_C2_ROW * r, &v, 4); }

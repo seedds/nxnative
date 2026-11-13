@@ -301,11 +301,12 @@ typedef struct {
     level_t pend[6][MAXLV]; int defined;   // defined: bit per level whose face(s) were given
     __strong id<MTLTexture> tex; __strong id<MTLSamplerState> smp;
     GLint minf, magf, ws, wt, wr, maxlv, cmp, swz[4]; float aniso, border[4]; int smp_dirty;
+    uint8_t clean;
 } tex_t;
 NAMES(tex_t, g_texs, g_ntexs, g_captexs)
 static tex_t *tex_of(GLuint n) { return n && n < g_ntexs ? g_texs[n] : NULL; }
 
-typedef struct { int fmt; uint32_t w, h; __strong id<MTLTexture> tex; uint64_t gen; } rb_t;
+typedef struct { int fmt; uint32_t w, h; __strong id<MTLTexture> tex; uint64_t gen; uint8_t clean; } rb_t;
 NAMES(rb_t, g_rbs, g_nrbs, g_caprbs)
 static rb_t *rb_of(GLuint n) { return n && n < g_nrbs ? g_rbs[n] : NULL; }
 
@@ -393,16 +394,33 @@ static tex_t *bound_tex(GLenum target) { GLuint *s = unit_slot(S.unit, target); 
 
 // ---------- The window surface ----------
 #define NWIN 3
-static struct { int made; uint32_t w, h; __strong id<MTLTexture> col[NWIN], ds; uint64_t serial[NWIN], ticket[NWIN]; int cur; } g_win;
+static struct { int made; uint32_t w, h; __strong id<MTLTexture> col[NWIN], ds; uint64_t serial[NWIN], ticket[NWIN]; int cur; uint8_t clean[NWIN]; } g_win;
 static void win_make(uint32_t w, uint32_t h) {
     @autoreleasepool {
         for (int i = 0; i < NWIN; i++) if (g_win.ticket[i]) mtl_present_wait(g_win.ticket[i]);
         MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:w height:h mipmapped:NO];
         td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead; td.storageMode = MTLStorageModePrivate;
-        for (int i = 0; i < NWIN; i++) { g_win.col[i] = [g_dev newTextureWithDescriptor:td]; g_win.serial[i] = mtl_ext_tex((__bridge void *)g_win.col[i]); g_win.ticket[i] = 0; }
+        for (int i = 0; i < NWIN; i++) { g_win.col[i] = [g_dev newTextureWithDescriptor:td]; g_win.serial[i] = mtl_ext_tex((__bridge void *)g_win.col[i]); g_win.ticket[i] = 0; g_win.clean[i] = 1; }
         td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float_Stencil8 width:w height:h mipmapped:NO];
         td.usage = MTLTextureUsageRenderTarget; td.storageMode = MTLStorageModePrivate;
         g_win.ds = [g_dev newTextureWithDescriptor:td];
+        dm_gfx_enter();
+        id<MTLCommandBuffer> cb = [g_q commandBuffer]; cb.label = @"gl win clear";
+        for (int i = 0; i < NWIN; i++) {
+            MTLRenderPassDescriptor *rpd = [MTLRenderPassDescriptor renderPassDescriptor];
+            rpd.colorAttachments[0].texture = g_win.col[i];
+            rpd.colorAttachments[0].loadAction = MTLLoadActionClear;
+            rpd.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+            rpd.colorAttachments[0].storeAction = MTLStoreActionStore;
+            if (i == 0 && g_win.ds) {
+                rpd.depthAttachment.texture = g_win.ds; rpd.depthAttachment.loadAction = MTLLoadActionClear; rpd.depthAttachment.clearDepth = 1.0; rpd.depthAttachment.storeAction = MTLStoreActionStore;
+                rpd.stencilAttachment.texture = g_win.ds; rpd.stencilAttachment.loadAction = MTLLoadActionClear; rpd.stencilAttachment.clearStencil = 0; rpd.stencilAttachment.storeAction = MTLStoreActionStore;
+            }
+            id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rpd];
+            [enc endEncoding];
+        }
+        cb_commit_one(cb);
+        dm_gfx_leave();
         g_win.w = w; g_win.h = h; g_win.cur = 0; g_win.made = 1;
     }
     GLOG("window surface %ux%u (RGBA8, depth 32F + stencil 8, %d images)", w, h, NWIN);
@@ -584,7 +602,7 @@ static id<MTLSamplerState> tex_sampler(tex_t *t) {
     t->smp = s; t->smp_dirty = 0; return s;
 }
 static void lv_free(level_t *l) { free(l->data); memset(l, 0, sizeof *l); }
-static void tex_drop(tex_t *t) { for (int f = 0; f < 6; f++) for (int l = 0; l < MAXLV; l++) lv_free(&t->pend[f][l]); t->tex = nil; t->made = 0; t->defined = 0; t->levels = 0; t->gen++; }
+static void tex_drop(tex_t *t) { for (int f = 0; f < 6; f++) for (int l = 0; l < MAXLV; l++) lv_free(&t->pend[f][l]); t->tex = nil; t->made = 0; t->defined = 0; t->levels = 0; t->clean = 0; t->gen++; }
 static void tex_write(tex_t *t, int face, int lv, uint32_t x, uint32_t y, uint32_t z, uint32_t w, uint32_t h, const void *data, size_t pitch);
 // Make the Metal texture from the levels given so far: as many levels as are given in a row from level 0 (and fit the size), or as glTexStorage said. rt: made for a framebuffer attachment
 static int tex_make(tex_t *t, int rt) {
@@ -612,6 +630,7 @@ static int tex_make(tex_t *t, int rt) {
         if (swz && rt) RED1("texture %ux%u %s with a swizzle is a framebuffer attachment (Metal renders into no swizzled texture)", t->w, t->h, m->name);
         t->tex = [g_dev newTextureWithDescriptor:td];
         if (!t->tex) { GLOG("[RED] texture %ux%u %s (%d levels) could not be made", t->w, t->h, m->name, lv); t->made = 1; return 0; }
+        t->clean = (td.storageMode == MTLStorageModePrivate && !data);
         // The levels given so far go in through tex_write: a CPU write into a shared texture, a blit into a private one. Depth textures are always private, and a
         // glTexImage2D(GL_DEPTH_COMPONENT, ..., pixels) level was once freed here unwritten (only shared textures were filled). No command buffer has the new texture yet
         t->use = 0;
@@ -629,7 +648,7 @@ static int tex_make(tex_t *t, int rt) {
 // else a blit from transient memory (in this frame's command buffer, after ending its render pass, when this frame used it; in a command buffer of its own otherwise).
 // face: the cube face or array layer; z: the slice of a 3D texture
 static void tex_write(tex_t *t, int face, int lv, uint32_t x, uint32_t y, uint32_t z, uint32_t w, uint32_t h, const void *data, size_t pitch) {
-    g_n_up++;
+    g_n_up++; t->clean = 0;
     size_t rows = fmt_rows(t->fmt, h);
     if (t->use <= atomic_load(&g_done) && t->tex.storageMode == MTLStorageModeShared) {
         [t->tex replaceRegion:MTLRegionMake3D(x, y, z, w, h, 1) mipmapLevel:lv slice:face withBytes:data bytesPerRow:pitch bytesPerImage:t->target == GL_TEXTURE_3D ? pitch * rows : 0];
@@ -676,6 +695,11 @@ static id<MTLTexture> att_tex(const att_t *a, uint64_t *gen) {
     if (a->kind == 2) { rb_t *r = rb_of(a->name); if (!r) return nil; *gen += r->gen; return r->tex; }
     return nil;
 }
+static int att_clean(const att_t *a) {
+    if (a->kind == 1) { tex_t *t = tex_of(a->name); if (t && t->clean) { t->clean = 0; return 1; } }
+    else if (a->kind == 2) { rb_t *r = rb_of(a->name); if (r && r->clean) { r->clean = 0; return 1; } }
+    return 0;
+}
 static uint64_t fb_gen(GLuint fb) { fb_t *f = fb_of(fb); if (!f) return 0; uint64_t g = f->gen; att_tex(&f->col, &g); att_tex(&f->depth, &g); att_tex(&f->stencil, &g); return g; }
 // The size of a framebuffer (its first attachment's level), 0 when it has none
 static void fb_size(GLuint fb, uint32_t *w, uint32_t *h) {
@@ -696,37 +720,45 @@ static void pass_begin(void) {
         MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
         id<MTLTexture> c = nil, d = nil, s = nil; int cl = 0, cs = 0, dl = 0, sl = 0;
         uint64_t gen = 0;
+        int c_clean = 0, d_clean = 0, s_clean = 0;
         if (!S.fb) {
             if (!g_win.made) { int w, h; dm_vi_layer_size(&w, &h); win_make(w > 0 ? w : 1280, h > 0 ? h : 720); }
             c = g_win.col[g_win.cur]; d = s = g_win.ds;
+            c_clean = g_win.clean[g_win.cur];
         } else {
             fb_t *f = fb_of(S.fb);
             if (f) {
                 c = att_tex(&f->col, &gen); d = att_tex(&f->depth, &gen); s = att_tex(&f->stencil, &gen);
                 cl = f->col.level; cs = f->col.face; dl = f->depth.level; sl = f->stencil.level;
                 gen += f->gen;
+                c_clean = att_clean(&f->col);
+                d_clean = att_clean(&f->depth);
+                s_clean = (f->stencil.kind && f->stencil.kind == f->depth.kind && f->stencil.name == f->depth.name) ? d_clean : att_clean(&f->stencil);
             }
             if (d && d.pixelFormat != MTLPixelFormatDepth32Float && d.pixelFormat != MTLPixelFormatDepth16Unorm && d.pixelFormat != MTLPixelFormatDepth32Float_Stencil8) d = nil;
             if (s && s.pixelFormat != MTLPixelFormatDepth32Float_Stencil8 && s.pixelFormat != MTLPixelFormatStencil8) s = nil;
             // a depth / stencil texture attached as GL's depth attachment alone (or stencil alone) is both of Metal's: its pixel format has both, and the pipelines say so
-            if (d && !s && d.pixelFormat == MTLPixelFormatDepth32Float_Stencil8) { s = d; sl = dl; }
-            else if (s && !d && s.pixelFormat == MTLPixelFormatDepth32Float_Stencil8) { d = s; dl = sl; }
+            if (d && !s && d.pixelFormat == MTLPixelFormatDepth32Float_Stencil8) { s = d; sl = dl; s_clean |= d_clean; }
+            else if (s && !d && s.pixelFormat == MTLPixelFormatDepth32Float_Stencil8) { d = s; dl = sl; d_clean |= s_clean; }
         }
         int pc = g_pend_clear.fb == S.fb ? g_pend_clear.bits : 0;
         if (c) {
             MTLRenderPassColorAttachmentDescriptor *a = rp.colorAttachments[0]; a.texture = c; a.level = cl; a.storeAction = MTLStoreActionStore;
             if (c.textureType == MTLTextureType3D) a.depthPlane = cs; else a.slice = cs;
-            if (pc & GL_COLOR_BUFFER_BIT) { a.loadAction = MTLLoadActionClear; a.clearColor = MTLClearColorMake(g_pend_clear.c[0], g_pend_clear.c[1], g_pend_clear.c[2], g_pend_clear.c[3]); }
+            if (pc & GL_COLOR_BUFFER_BIT) { a.loadAction = MTLLoadActionClear; a.clearColor = MTLClearColorMake(g_pend_clear.c[0], g_pend_clear.c[1], g_pend_clear.c[2], g_pend_clear.c[3]); if (!S.fb) g_win.clean[g_win.cur] = 0; }
+            else if (c_clean) { a.loadAction = MTLLoadActionClear; a.clearColor = MTLClearColorMake(0, 0, 0, !S.fb ? 1 : 0); if (!S.fb) g_win.clean[g_win.cur] = 0; }
             else a.loadAction = MTLLoadActionLoad;
         }
         if (d) {
             rp.depthAttachment.texture = d; rp.depthAttachment.level = dl; rp.depthAttachment.storeAction = MTLStoreActionStore;
             if (pc & GL_DEPTH_BUFFER_BIT) { rp.depthAttachment.loadAction = MTLLoadActionClear; rp.depthAttachment.clearDepth = g_pend_clear.d; }
+            else if (d_clean) { rp.depthAttachment.loadAction = MTLLoadActionClear; rp.depthAttachment.clearDepth = 1.0; }
             else rp.depthAttachment.loadAction = MTLLoadActionLoad;
         }
         if (s) {
             rp.stencilAttachment.texture = s; rp.stencilAttachment.level = sl; rp.stencilAttachment.storeAction = MTLStoreActionStore;
             if (pc & GL_STENCIL_BUFFER_BIT) { rp.stencilAttachment.loadAction = MTLLoadActionClear; rp.stencilAttachment.clearStencil = g_pend_clear.s; }
+            else if (s_clean) { rp.stencilAttachment.loadAction = MTLLoadActionClear; rp.stencilAttachment.clearStencil = 0; }
             else rp.stencilAttachment.loadAction = MTLLoadActionLoad;
         }
         if (g_pend_clear.fb == S.fb) g_pend_clear.bits = 0;
@@ -1600,7 +1632,7 @@ GLB(glRenderbufferStorage, void, GLenum target, GLenum ifmt, GLsizei w, GLsizei 
     @autoreleasepool {
         MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:g_fmt[f].pf width:w height:h mipmapped:NO];
         td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead; td.storageMode = MTLStorageModePrivate;
-        r->tex = [g_dev newTextureWithDescriptor:td]; r->fmt = f; r->w = w; r->h = h; r->gen++;
+        r->tex = [g_dev newTextureWithDescriptor:td]; r->fmt = f; r->w = w; r->h = h; r->clean = 1; r->gen++;
     }
     OLOG("renderbuffer %u: %dx%d %s", S.rb, w, h, g_fmt[f].name);
 }

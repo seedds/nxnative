@@ -108,14 +108,6 @@ static void *mp4_scan_source_v1(NVNcommandBuffer *commands, const void *view) {
     return s->prefix;
 }
 
-// Full output: the game sizes its window crop and the rectangle it composites the scene and draws the HUD into from oe::GetDefaultDisplayResolution
-// (1920x1080 docked: WindowCrop 0,0 1920x1080 in a 3200x2000 window texture, manual-test/1610_full-1113-172816). A full-output choice reports its own size.
-int dm_profile_display_resolution(int *w, int *h) {
-    if (strcmp(dm_main_build(),"8275fbe1ec5191c279f3a943ad8524f4")) return 0;
-    pthread_once(&mp4_quality_once,mp4_quality_init);
-    if (!mp4_quality_max_width) return 0;
-    *w = (int)mp4_quality_max_width; *h = (int)mp4_quality_max_height; return 1;
-}
 // A 16:10 output (1610_full): the HUD, menus and movies keep 16:9. Every pass the game begins on the window texture (RGBA8_SRGB at the output size)
 // through its pass-begin helper (main+0x13003c, binding at main+0x1300b8; DM_NVN_RT_TRACE: the HUD at main+0x12e0e8, the radar at main+0x60860, the
 // front end and its movie at main+0x6c98c / 0x6cba0, the menus at main+0x58f520) is laid out in 16:9 and drawn into the middle band: viewports and
@@ -135,12 +127,13 @@ static void nvn_profile_set_rt(const NVNcommandBuffer *c, int n, const NVNtextur
     int band = base && mp4_band_k() > 0 && !strcmp(dm_main_build(),"8275fbe1ec5191c279f3a943ad8524f4") && caller == base + 0x1300b8
         && t && t->magic == MAGIC('T','E','X',0) && t->d.format == NVN_FORMAT_RGBA8_SRGB && t->d.width == mp4_quality_max_width && t->d.height == mp4_quality_max_height;
     mp4_band_has = 0;
-    if (band) { mp4_band_cb = c; mp4_band_h = (float)t->d.height;
+    if (band) { mp4_band_cb = c; mp4_band_h = 0;   // the band's frame: the pass's first viewport (the window rectangle: 1920x1080, the window crop)
         static int once; if (!once++) LOG("MP4 16:10: HUD and menu passes drawn into the middle 16:9 band (y and height x %.3f)", mp4_band_k()); }
     else if (mp4_band_cb == c) mp4_band_cb = NULL;
 }
 static void nvn_profile_viewports(const NVNcommandBuffer *c, int n, float *v) {
     if (mp4_band_cb != c || mp4_band_bypass) return;
+    if (!mp4_band_h) mp4_band_h = v[1] + v[3];
     float k = mp4_band_k(), H = mp4_band_h;
     memcpy(mp4_full_vp, v, sizeof mp4_full_vp);
     for (int i = 0; i < n; i++) { v[4 * i + 1] = H * (1 - k) / 2 + v[4 * i + 1] * k; v[4 * i + 3] *= k; }
@@ -165,7 +158,7 @@ static int nvn_profile_draw_begin(NVNcommandBuffer *c) {
 static void nvn_profile_draw_end(NVNcommandBuffer *c) { mp4_band_bypass = 1; h_nvnCommandBufferSetViewports(c, 0, 1, mp4_band_vp); mp4_band_bypass = 0; }
 static void nvn_profile_scissor(const NVNcommandBuffer *c, int *x, int *y, int *w, int *h) {
     (void)x; (void)w;
-    if (mp4_band_cb != c || *h >= 16384) return;   // the game's "no scissor" (16384x16384) stays
+    if (mp4_band_cb != c || *h >= 16384 || !mp4_band_h) return;   // the game's "no scissor" (16384x16384) stays
     float k = mp4_band_k(), H = mp4_band_h;
     int y0 = (int)floorf(H * (1 - k) / 2 + (float)*y * k), y1 = (int)ceilf(H * (1 - k) / 2 + (float)(*y + *h) * k);
     *y = y0; *h = y1 - y0;

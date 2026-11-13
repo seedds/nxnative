@@ -307,16 +307,8 @@ HLE_FORCE("_ZN2nn2gs3sdk26SetGraphicsFrameLengthModeENS1_23GraphicsFrameLengthMo
           void, h_gs_FrameLength, int mode) {
     static int last = -1; if (mode != last) { LOG("gs: graphics frame length mode %d (0 auto, 1 30 fps, 2 60 fps, 3 120 fps)", mode); last = mode; }
 }
-// A game profile whose patches make the game render a larger output (Metroid Prime 4's full-output choices, its nvn_runtime.inc) reports that size
-// instead of 1920x1080 when docked: the game sizes its window crop and the rectangle it composites and draws its HUD into from this
-__attribute__((weak)) int dm_profile_display_resolution(int *w, int *h) { (void)w; (void)h; return 0; }
 HLE_FORCE("_ZN2nn2oe27GetDefaultDisplayResolutionEPiS1_", "default display resolution: 1920x1080 docked, 1280x720 handheld", void, h_oe_DefRes, int *w, int *h) {
-    int con = opmode() == 1, pw, ph;
-    if (con && dm_profile_display_resolution(&pw, &ph)) {
-        static int once; if (!once++) LOG("oe: default display resolution %dx%d, the game profile's output", pw, ph);
-        if (w) *w = pw; if (h) *h = ph; return;
-    }
-    if (w) *w = con ? 1920 : 1280; if (h) *h = con ? 1080 : 720;
+    int con = opmode() == 1; if (w) *w = con ? 1920 : 1280; if (h) *h = con ? 1080 : 720;
 }
 HLE_FORCE("_ZN2nn2oe38GetDefaultDisplayResolutionChangeEventEPNS_2os11SystemEventE", "default display resolution change event: bound, never signaled (the operation mode notification carries the change)",
           void, h_oe_DefResEv, void *ev) { hle_bind_system_event(ev, 0); }

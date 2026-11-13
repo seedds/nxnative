@@ -31,6 +31,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | `build` → `game` | interval controller: the lower bound and the GPU-time path | frame rate | gap | judgement | 1 | [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) | sead::GameFrameworkNx's interval controller in this build; Tears of the Kingdom shares sead but not this code |
 | `build` → `game` | job pool wake-up | race | gap | judgement | 1 | [FINAL FANTASY TACTICS - The Ivalice Chronicles](../../dm/games/010038B015560000/README.md) | a lost wake-up in the game's own job pool, not a host or SDK difference |
 | `build` → `game` | malloc region 60 GB → 4 GB and its first arena | address space | gap | judgement | 1 | [Xenoblade Chronicles 3](../../dm/games/010074F013262000/README.md) | Monolith's own allocator; its constants span two functions (a multi-function rule). The cause, an iPhone's address space, is a platform limit |
+| `build` → `game` | online layer's RedpointEOS subsystem lookups → OnlineSubsystemNull | runtime | gap | checked: main 1.0.0: 32 adrp/add pairs to main+0x56aed92 in main+0x9e0000..0xac8000; main 2.0.2: 34 pairs to main+0x5abf044 in main+0xb60000..0xc58000; both boot past the old crash on the Mac, 2.0.2 plays on the iPhone | 1 | [Tetris Effect: Connected](../../dm/games/0100DE501433A000/README.md) | the subsystem name is a string literal the game layer loads at each site; a function-matched rule could carry the sites over updates, but each build has its own count (32 in 1.0.0, 34 in 2.0.2) |
 | `build` → `game` | PhysX completion task release | race | gap | judgement | 1 | [The Legend of Zelda: Link's Awakening](../../dm/games/01006BB00C6F0000/README.md) | a lifetime race in the game's own completion task (its release slot serves this one vtable) |
 | `build` → `game` | render intervals, the forced-interval flag and the render-wait timeout | frame rate | gap | judgement | 1 | [Fire Emblem: Three Houses](../../dm/games/010055D009F78000/README.md) | the game's own tables, flag and timeout |
 | `build` → `game` | task ring push and pop barriers | race | gap | judgement | 1 | [Batman: Arkham Knight](../../dm/games/0100ACD0163D0000/README.md) | a data race in the game's own task ring |
@@ -78,6 +79,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [Super Mario 3D All-Stars: Super Mario Sunshine](#super-mario-3d-all-stars-super-mario-sunshine) | 2 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Super Smash Bros. Ultimate](#super-smash-bros-ultimate) | 11 | 0 | 0 | 1 | 0 | `game` |
 | [Taiko Risshiden V DX](#taiko-risshiden-v-dx) | 1 | 0 | 0 | 2 | 0 | `game` |
+| [Tetris Effect: Connected](#tetris-effect-connected) | 67 | 0 | 0 | 0 | 0 | `build` → `game`, `build` |
 | [The Legend of Zelda: Breath of the Wild](#the-legend-of-zelda-breath-of-the-wild) | 7 | 0 | 43 | 0 | 0 | `build` → `game` ×2 |
 | [The Legend of Zelda: Link's Awakening](#the-legend-of-zelda-links-awakening) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [The Legend of Zelda: Ocarina of Time](#the-legend-of-zelda-ocarina-of-time) | 0 | 0 | 2 | 0 | 0 | `game` ×2 |
@@ -499,6 +501,83 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - cut `+0x443fac`: frame limiter threshold: N × tick frequency / 60 (umulh by 1/60 → udiv by 60), then 0 when N = 1 (cmp w20, #1; csel x20, xzr, x8, eq): one vsync a frame is the present pacing's; N = 2 keeps the 2 ms rounds
 - **function-matched** (`main` of builds without CUTS): frame limiter threshold: 0 when N = 1: 1 function, 1 cut
 - **function-matched** (`main` of builds without CUTS): frame limiter threshold: 0 when N = 1: 1 function, 1 cut
+
+### Tetris Effect: Connected
+
+[Tetris Effect: Connected](../../dm/games/0100DE501433A000/README.md), `0100DE501433A000`, [patches.py](../../dm/games/0100DE501433A000/patches.py).
+
+- **`build` → `game`**, runtime, gap, checked: main 1.0.0: 32 adrp/add pairs to main+0x56aed92 in main+0x9e0000..0xac8000; main 2.0.2: 34 pairs to main+0x5abf044 in main+0xb60000..0xc58000; both boot past the old crash on the Mac, 2.0.2 plays on the iPhone: online layer's RedpointEOS subsystem lookups → OnlineSubsystemNull. The subsystem name is a string literal the game layer loads at each site; a function-matched rule could carry the sites over updates, but each build has its own count (32 in 1.0.0, 34 in 2.0.2)
+- **`build`**, runtime, at goal, checked: main 2.0.2: MULTIPLAYER → PLAY → RANKED / FRIEND / LOCAL opens on the Mac (2026-11-06): game-layer "EOS logged in" check → true. One function of the game layer (2.0.2 only; 1.0.0 opens MULTIPLAYER without it) asks the NULL subsystem for a login nothing makes; it exists because of the cut above
+
+- **1.0.0 `main`** `02e64f62…` ([patches.py:19](../../dm/games/0100DE501433A000/patches.py#L19))
+  - cut `+0x9e4418`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0x9e4728`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0x9e4894`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0x9e4b80`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0x9e83d4`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0x9e8b08`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0x9ec108`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0x9ec7e8`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0x9f0be0`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0x9f1118`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0x9f2348`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0x9f29a8`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0x9f7728`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0x9f7d98`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0x9fc778`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0xa00b68`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0xa01b04`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0xa05f88`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0xa07424`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0xa0d868`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0xa16438`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0xa171a8`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0xa1b43c`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0xa1b888`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0xa1c274`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0xa21f24`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0xa278b0`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0xa7bf54`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0xabfb34`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0xac0100`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0xac64b8`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0xac6978`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+- **2.0.2.2 `main`** `8838095f…` ([patches.py:55](../../dm/games/0100DE501433A000/patches.py#L55))
+  - cut `+0xb64e18`: game-layer "EOS logged in" check (2.0.2): always true, so MULTIPLAYER opens offline instead of waiting for a login that never comes
+  - cut `+0xb64b40`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0xb64e30`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0xb64f94`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0xb65290`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0xb68aac`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0xb69198`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0xb6cbc8`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0xb6d2ac`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0xb71464`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0xb7198c`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0xb72b18`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0xb73180`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0xb77ef0`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0xb78564`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0xb7d2d8`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0xb81674`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0xb825c8`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0xb86968`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0xb87df4`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0xb8e540`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0xb97380`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0xb980e8`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0xb9c424`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0xb9c834`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0xb9cfcc`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0xba3898`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0xba9618`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0xbfcb58`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0xbfd33c`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0xc05664`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0xc4e550`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0xc4eb18`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0xc55370`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
+  - cut `+0xc55824`: online layer asks for the RedpointEOS subsystem, which never exists without the EOS SDK: L"RedpointEOS" → L"NULL" (OnlineSubsystemNull)
 
 ### The Legend of Zelda: Breath of the Wild
 

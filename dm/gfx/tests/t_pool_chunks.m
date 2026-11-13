@@ -1,5 +1,5 @@
 // A large memory pool in chunks (nvn_mtl.m BIG_MIN): a lookup gets a zero-copy buffer that holds what it asked and starts at its stride, so only what lookups reach is wired. The buffers must
-// say the same memory as the guest address, a read of unknown extent must have BIG_UNKNOWN past it, a chunk asked for more is lengthened, a texture's upload wires no chunk (up_big_src),
+// say the same memory as the guest address, a read of unknown extent must reach the pool end through one shared view, a chunk asked for more is lengthened, a texture's upload wires no chunk (up_big_src),
 // raw global memory's pool table covers the whole pool (big_full), the pool's removal takes every entry, a smaller pool stays one buffer, and each kind of pool buffer made over a
 // write-protected page still takes the GPU's writes without counting the page as written (pool_buf).
 #include "../nvn/nvn_mtl.m"
@@ -54,14 +54,7 @@ int main(void) { @autoreleasepool {
     CHECK("another stride: another buffer", far != a && g_npool == pools0 + 2);
     id<MTLBuffer> cross = look(base + 48 * MB - 8, 64);   // across a stride's end: one buffer holds it
     CHECK("across strides: its stride's chunk", cross && cross != a);
-    // Length 1: the read's extent is not known
-    void *mb = NULL; uint64_t mo = 0, gpu = 0;   // CHECK goes on after a failed lookup, which writes none of them
-    uint64_t un = base + 100 * MB + 3;
-    CHECK("unknown extent: found", mtl_gpu_addr(un, 1, &mb, &mo, &gpu));
-    CHECK("unknown extent: BIG_UNKNOWN past the address", ((__bridge id<MTLBuffer>)mb).length - mo >= BIG_UNKNOWN);
-    (void)look(base + 200 * MB + 3, 100);   // a short chunk first
-    CHECK("then unknown in its stride: found", mtl_gpu_addr(base + 200 * MB + 9, 1, &mb, &mo, &gpu));
-    CHECK("then unknown in its stride: lengthened", ((__bridge id<MTLBuffer>)mb).length - mo >= BIG_UNKNOWN);
+    void *mb = NULL; uint64_t mo = 0, gpu = 0;
     int n1 = g_npool;
     id<MTLBuffer> big = look(base + 300 * MB, 100 * MB);
     CHECK("a long range in one buffer", big.length >= 100 * MB && g_npool == n1 + 1);
@@ -173,6 +166,36 @@ int main(void) { @autoreleasepool {
     CHECK("the small pool still answers, its entry moved", look((uint64_t)(uintptr_t)small + 20, 16).length == 64 * MB);
     CHECK("the large pool's addresses do not", !mtl_gpu_addr(base + 100, 4, &mb, &mo, &gpu));
     mtl_pool_del(small); mtl_drain();
+    // Unknown indirect index / storage extent: a short cached view must not answer
+    // it, and distinct starting addresses must share one whole-pool view. The GPU
+    // can read beyond the former 64 MB guess even on the first draw.
+    {
+        uint8_t *um = mmap(NULL, GB, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0); if (um == MAP_FAILED) abort();
+        uint64_t ub = (uint64_t)(uintptr_t)um, at = ub + 100 * MB + 16;
+        mtl_pool_add(um, GB);
+        id<MTLBuffer> short_view = look(at, 64);
+        CHECK("unknown lookup bypasses a short cached view", mtl_gpu_addr(at, 1, &mb, &mo, &gpu) && (__bridge id<MTLBuffer>)mb != short_view);
+        id<MTLBuffer> whole = (__bridge id<MTLBuffer>)mb;
+        CHECK("unknown extent covers the rest of the pool", (uint64_t)(uintptr_t)whole.contents + whole.length == ub + GB && whole.length - mo > 96 * MB);
+        int views = g_npool;
+        for (unsigned k = 1; k < 20; k++) {
+            CHECK("other indirect starts share the same view", mtl_gpu_addr(ub + k * 32 * MB, 1, &mb, &mo, &gpu) && (__bridge id<MTLBuffer>)mb == whole);
+        }
+        CHECK("unknown starts do not make overlapping chunks", g_npool == views);
+        NSError *err = nil;
+        id<MTLLibrary> lib = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal; kernel void beyond(device uchar *p [[buffer(0)]]) { p[96u * 1024u * 1024u] = 0x7b; }" options:nil error:&err];
+        id<MTLComputePipelineState> ps = lib ? [g_dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"beyond"] error:&err] : nil;
+        CHECK("unbounded-address fixture compiles", ps != nil);
+        uint64_t index_offset = at - (uint64_t)(uintptr_t)whole.contents;
+        if (ps && index_offset < whole.length && whole.length - index_offset > 96 * MB) {
+            id<MTLCommandBuffer> cb = q_cb(); id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+            [enc setComputePipelineState:ps]; [enc setBuffer:whole offset:index_offset atIndex:0];
+            [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)]; [enc endEncoding];
+            [cb commit]; [cb waitUntilCompleted];
+            CHECK("GPU reaches beyond 64 MB from the unbounded address", cb.status == MTLCommandBufferStatusCompleted && um[at - ub + 96 * MB] == 0x7b);
+        }
+        mtl_pool_del(um); mtl_drain();
+    }
     // A buffer made while any of its pages is write-protected (nvn_dirty_protect: a packaged texture's upload, an index range) drops every GPU write through it, with no error, even to pages
     // never protected (issue #1591). Each kind of zero-copy buffer over pool memory, made over a protected page, must still take the GPU's writes
     {

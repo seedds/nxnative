@@ -117,6 +117,8 @@ static void *nvn_profile_runtime_lookup(const char *);
 static void nvn_profile_set_rt(const NVNcommandBuffer *c, int n, const NVNtexture *const *ct, uint64_t caller);
 static void nvn_profile_viewports(const NVNcommandBuffer *c, int n, float *v);
 static void nvn_profile_scissor(const NVNcommandBuffer *c, int *x, int *y, int *w, int *h);
+static int nvn_profile_draw_begin(NVNcommandBuffer *c);   // nonzero: the profile changed state for this draw, and nvn_profile_draw_end restores it
+static void nvn_profile_draw_end(NVNcommandBuffer *c);
 #endif
 
 static void *nvn_lookup(const char *name) {
@@ -1265,7 +1267,7 @@ static uint8_t *crec(NVNcommandBuffer *c, uint32_t opc, uint32_t args, size_t pa
 static void put32(uint8_t **q, uint32_t v) { memcpy(*q, &v, 4); *q += 4; }
 static void put64(uint8_t **q, uint64_t v) { memcpy(*q, &v, 8); *q += 8; }
 // Draws carry the indirect / multi-draw fields (ind onwards) only when they use them: a plain indexed draw record is 0x28 bytes instead of 0x40 (nvn_obj.h draw_rec)
-static void rec_draw(NVNcommandBuffer *c, p_draw d) {
+static void rec_draw_(NVNcommandBuffer *c, p_draw d) {
     if (g_rec_compact && !d.mdi_cnt && (uint32_t)d.prim < 0x100) {
         uint8_t *q;
         if (d.ind) { q = crec(c, OPC_DRAW_IND, (uint32_t)d.prim, 8); put64(&q, d.ind); return; }
@@ -1274,7 +1276,9 @@ static void rec_draw(NVNcommandBuffer *c, p_draw d) {
     }
     size_t n = d.ind || d.mdi_cnt ? sizeof d : offsetof(p_draw, ind); memcpy(rec(c, OP_DRAW, n), &d, n);
 }
-static void rec_draw_idx(NVNcommandBuffer *c, p_draw_idx d) {
+static void rec_draw(NVNcommandBuffer *c, p_draw d);
+static void rec_draw_idx(NVNcommandBuffer *c, p_draw_idx d);
+static void rec_draw_idx_(NVNcommandBuffer *c, p_draw_idx d) {
     if (g_rec_compact && !d.mdi_cnt && (uint32_t)d.prim < 0x100 && (uint32_t)d.itype < 0x100) {
         uint32_t a = (uint32_t)d.prim | (uint32_t)d.itype << 8; uint8_t *q;
         if (d.ind) { if (d.count || d.base_vertex || d.base_instance || d.instances != 1) goto full; q = crec(c, OPC_DRAW_IDX_IND, a, 16); put64(&q, d.ibuf); put64(&q, d.ind); return; }
@@ -1283,6 +1287,21 @@ static void rec_draw_idx(NVNcommandBuffer *c, p_draw_idx d) {
     }
 full:;
     size_t n = d.ind || d.mdi_cnt ? sizeof d : offsetof(p_draw_idx, ind); memcpy(rec(c, OP_DRAW_IDX, n), &d, n);
+}
+// Every draw passes the profile's hooks (nvn_runtime.inc), which may set state for that draw alone
+static void rec_draw(NVNcommandBuffer *c, p_draw d) {
+#ifdef NVN_PROFILE_RUNTIME
+    int f = nvn_profile_draw_begin(c); rec_draw_(c, d); if (f) nvn_profile_draw_end(c);
+#else
+    rec_draw_(c, d);
+#endif
+}
+static void rec_draw_idx(NVNcommandBuffer *c, p_draw_idx d) {
+#ifdef NVN_PROFILE_RUNTIME
+    int f = nvn_profile_draw_begin(c); rec_draw_idx_(c, d); if (f) nvn_profile_draw_end(c);
+#else
+    rec_draw_idx_(c, d);
+#endif
 }
 // A compact record's canonical records, written to out (at least REC_EXPAND_MAX bytes); returns their bytes
 static uint8_t *xrec(uint8_t *out, size_t *n, uint32_t op, size_t payload) {

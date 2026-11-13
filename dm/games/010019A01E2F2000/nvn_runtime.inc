@@ -121,26 +121,48 @@ int dm_profile_display_resolution(int *w, int *h) {
 // front end and its movie at main+0x6c98c / 0x6cba0, the menus at main+0x58f520) is laid out in 16:9 and drawn into the middle band: viewports and
 // scissors keep their x and width, their y and height are scaled by k = (output ratio) / (16:9) about the centre. The scene's composite into the window
 // binds it elsewhere (main+0x145c8) and keeps the whole 16:10 picture.
-static _Thread_local const NVNcommandBuffer *mp4_band_cb; static _Thread_local float mp4_band_h;
+// One draw in the HUD's pass is the finished scene: 0x131d64 draws layer 0x14 with the brightness (s, s, s, 1) right after the pass begins (called at
+// main+0x12e158). Draws under that call keep the viewport the game set, so the scene fills the 16:10 window; everything else in the pass is banded.
+static _Thread_local const NVNcommandBuffer *mp4_band_cb; static _Thread_local float mp4_band_h, mp4_band_vp[4], mp4_full_vp[4]; static _Thread_local int mp4_band_has, mp4_band_bypass;
+static uintptr_t mp4_main_base(void) { for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) return (uintptr_t)g_mod[i].base; return 0; }
 static float mp4_band_k(void) {
     pthread_once(&mp4_quality_once,mp4_quality_init);
     if (!mp4_quality_max_width || mp4_quality_max_width * 9 >= mp4_quality_max_height * 16) return 0;   // 16:9 or wider: nothing to do
     return (float)mp4_quality_max_width / (float)mp4_quality_max_height / (16.0f / 9.0f);
 }
 static void nvn_profile_set_rt(const NVNcommandBuffer *c, int n, const NVNtexture *const *ct, uint64_t caller) {
-    const tex_t *t = n > 0 && ct ? (const tex_t *)ct[0] : NULL; uintptr_t base = 0;
-    for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) base = (uintptr_t)g_mod[i].base;
+    const tex_t *t = n > 0 && ct ? (const tex_t *)ct[0] : NULL; uintptr_t base = mp4_main_base();
     int band = base && mp4_band_k() > 0 && !strcmp(dm_main_build(),"8275fbe1ec5191c279f3a943ad8524f4") && caller == base + 0x1300b8
         && t && t->magic == MAGIC('T','E','X',0) && t->d.format == NVN_FORMAT_RGBA8_SRGB && t->d.width == mp4_quality_max_width && t->d.height == mp4_quality_max_height;
+    mp4_band_has = 0;
     if (band) { mp4_band_cb = c; mp4_band_h = (float)t->d.height;
         static int once; if (!once++) LOG("MP4 16:10: HUD and menu passes drawn into the middle 16:9 band (y and height x %.3f)", mp4_band_k()); }
     else if (mp4_band_cb == c) mp4_band_cb = NULL;
 }
 static void nvn_profile_viewports(const NVNcommandBuffer *c, int n, float *v) {
-    if (mp4_band_cb != c) return;
+    if (mp4_band_cb != c || mp4_band_bypass) return;
     float k = mp4_band_k(), H = mp4_band_h;
+    memcpy(mp4_full_vp, v, sizeof mp4_full_vp);
     for (int i = 0; i < n; i++) { v[4 * i + 1] = H * (1 - k) / 2 + v[4 * i + 1] * k; v[4 * i + 3] *= k; }
+    memcpy(mp4_band_vp, v, sizeof mp4_band_vp); mp4_band_has = 1;
 }
+static int mp4_under(uintptr_t ra) {   // whether the guest call chain of this draw passes return address ra (frame records: [fp] the caller's fp, [fp+8] its return address)
+    uintptr_t fp = (uintptr_t)__builtin_frame_address(0), top = fp + (8u << 20);
+    for (int i = 0; i < 24 && fp && !(fp & 7) && fp < top; i++) {
+        const uintptr_t *f = (const uintptr_t *)fp;
+        if (f[1] == ra) return 1;
+        if (f[0] <= fp) break;
+        fp = f[0];
+    }
+    return 0;
+}
+static int nvn_profile_draw_begin(NVNcommandBuffer *c) {
+    if (mp4_band_cb != c || !mp4_band_has || !mp4_under(mp4_main_base() + 0x12e15c)) return 0;
+    mp4_band_bypass = 1; h_nvnCommandBufferSetViewports(c, 0, 1, mp4_full_vp); mp4_band_bypass = 0;
+    static int once; if (!once++) LOG("MP4 16:10: the scene's draw into the window (under main+0x12e158) keeps the whole 16:10 window");
+    return 1;
+}
+static void nvn_profile_draw_end(NVNcommandBuffer *c) { mp4_band_bypass = 1; h_nvnCommandBufferSetViewports(c, 0, 1, mp4_band_vp); mp4_band_bypass = 0; }
 static void nvn_profile_scissor(const NVNcommandBuffer *c, int *x, int *y, int *w, int *h) {
     (void)x; (void)w;
     if (mp4_band_cb != c || *h >= 16384) return;   // the game's "no scissor" (16384x16384) stays
